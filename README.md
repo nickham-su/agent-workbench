@@ -44,6 +44,14 @@ docker compose up -d --build
 | `http://127.0.0.1:4310/api/health` | Health check |
 | `http://127.0.0.1:4310/api/docs` | API docs |
 
+**Workspace Dev Ports**
+
+To avoid reconfiguring `docker-compose.yml` for every new project, the default Compose setup also publishes a reserved local port range for services started inside workspaces (HTTP servers, RPC, etc.):
+
+- Host ports: `30000-30100`
+- Container ports: `30000-30100`
+- If the container fails to start due to a port conflict, change the range in `docker-compose.yml`.
+
 **Data Persistence**
 
 Two named volumes are used by default:
@@ -57,7 +65,7 @@ Two named volumes are used by default:
 
 **Security**
 
-By default, the service binds to `127.0.0.1:4310` only. For external access, configure a reverse proxy with authentication before changing the port binding.
+By default, for convenience, ports 4310 and 30000-30100 are exposed externally. For a more secure deployment, it is recommended to add 127.0.0.1: before the ports mapping in docker-compose.yml to allow only localhost access.
 
 **Environment Variables**
 
@@ -120,5 +128,3 @@ npm run dev
 | `npm run typecheck` | Type checking |
 
 ---
-
-

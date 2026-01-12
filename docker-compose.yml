@@ -5,7 +5,17 @@ services:
       dockerfile: Dockerfile
     image: agent-workbench:local
     ports:
+      # Agent Workbench (Web UI + API)
       - "4310:4310"
+      # Reserved port range for services started inside workspaces (dev servers, RPC, etc.)
+      # If any port in this range is already in use on the host, the container may fail to start.
+      - "30000-30100:30000-30100"
+      #
+      # Security note:
+      # - The mappings above publish ports on all interfaces by default for convenience.
+      # - To bind to localhost only, prefix with 127.0.0.1, e.g.:
+      #   - "127.0.0.1:4310:4310"
+      #   - "127.0.0.1:30000-30100:30000-30100"
     environment:
       HOST: 0.0.0.0
       PORT: 4310
