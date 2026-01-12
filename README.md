@@ -1,2 +1,116 @@
-# agent-workbench
-A local workbench for running multiple AI/CLI coding agents in parallel, with isolated workspaces, reconnectable terminals, and built-in Git change review.
+# Agent Workbench
+
+A local development workbench for AI/CLI coding agents. Manage multiple workspaces and reconnectable terminals in a Web UI, supporting the full workflow: Agent execution → Change review → Commit & push.
+
+## The Problem
+
+As AI models become more capable, agents can handle increasingly complex tasks that take longer to complete. Developers need to run multiple agents in parallel and offload long-running tasks to remote machines. The traditional single local working directory no longer fits this workflow:
+
+- **Parallelism bottleneck**: A single working directory cannot support multiple agents running in parallel
+- **Session loss**: Agent processes are lost when the local terminal closes
+- **Scattered changes**: Git changes across multiple workspaces are hard to review in one place
+
+Agent Workbench provides: isolated workspaces, persistent terminal sessions, centralized Git change review, with one-click local or remote deployment.
+
+---
+
+## Documentation
+
+- [中文说明](docs/README.zh-CN.md)
+
+---
+
+## Quick Start (Docker Compose)
+
+**Prerequisites**: Docker Desktop (or Linux Docker Engine) + Compose v2
+
+```bash
+docker compose up -d --build
+```
+
+**Access**
+
+| URL | Description |
+|-----|-------------|
+| `http://127.0.0.1:4310/` | Web UI |
+| `http://127.0.0.1:4310/api/health` | Health check |
+| `http://127.0.0.1:4310/api/docs` | API docs |
+
+**Data Persistence**
+
+Two named volumes are used by default:
+
+| Volume | Container Path | Contents |
+|--------|----------------|----------|
+| `agent-workbench-data` | `/data` | SQLite, repo mirrors, worktrees, keys, etc. |
+| `agent-workbench-home` | `/home/dev` | User config, SSH, toolchains, etc. |
+
+> Note: `docker compose down -v` will delete volumes and all data.
+
+**Security**
+
+By default, the service binds to `127.0.0.1:4310` only. For external access, configure a reverse proxy with authentication before changing the port binding.
+
+**Environment Variables**
+
+| Variable | Description |
+|----------|-------------|
+| `CREDENTIAL_MASTER_KEY` | Encryption key for credentials (32-byte hex/base64/base64url). Auto-generated and saved to `/data/keys/credential-master-key.json` if not set. Recommended to set explicitly for migration scenarios. |
+
+---
+
+## Usage
+
+- Add repositories in **Repos** (HTTPS/SSH supported). Configure credentials in **Settings** if authentication is required.
+- Create a workspace from a repository and branch in **Workspaces**, then enter it.
+- Run agents or execute build/test tasks in the terminal.
+- Review staged/unstaged changes with side-by-side diff in the code review panel, then commit and push.
+
+---
+
+## Terminal Tips
+
+**Selecting Text**
+
+Text selection in the terminal requires a modifier key:
+
+| Platform | Action |
+|----------|--------|
+| macOS | Hold `Option(⌥)` and drag to select |
+| Windows / Linux | Hold `Shift` and drag to select |
+
+Copy with `⌘C` (macOS) or `Ctrl+Shift+C` (Windows/Linux).
+
+**Scrolling**
+
+Use the mouse wheel to scroll through history. In fullscreen programs like `vim` or `top`, use the program's native scrolling.
+
+---
+
+## Local Development
+
+**Prerequisites**
+
+- Node.js LTS (20.x or 22.x)
+- `git`, `tmux`
+- Build toolchain (macOS requires Xcode Command Line Tools for compiling `better-sqlite3` and `node-pty`)
+
+**Start**
+
+```bash
+npm install
+npm run dev
+```
+
+**Scripts**
+
+| Command | Description |
+|---------|-------------|
+| `npm run dev:api` | Start backend only |
+| `npm run dev:web` | Start frontend only |
+| `npm run build` | Production build |
+| `npm run typecheck` | Type checking |
+
+---
+
+

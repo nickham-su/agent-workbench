@@ -1,0 +1,29 @@
+services:
+  agent-workbench:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: agent-workbench:local
+    ports:
+      - "127.0.0.1:4310:4310"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 4310
+      DATA_DIR: /data
+      SERVE_WEB: "1"
+      WEB_DIST_DIR: /app/apps/web/dist
+      # 建议在试用交付时显式设置（32 字节 hex/base64/base64url）
+      # CREDENTIAL_MASTER_KEY: "..."
+    volumes:
+      - agent-workbench-data:/data
+      - agent-workbench-home:/home/dev
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:4310/api/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  agent-workbench-data:
+  agent-workbench-home:

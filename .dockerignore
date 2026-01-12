@@ -1,0 +1,15 @@
+.git
+.idea
+.DS_Store
+.data
+node_modules
+apps/*/node_modules
+packages/*/node_modules
+apps/web/dist
+apps/api/dist
+packages/shared/dist
+npm-debug.log*
+yarn.lock
+pnpm-lock.yaml
+*.local
+docs/*.png

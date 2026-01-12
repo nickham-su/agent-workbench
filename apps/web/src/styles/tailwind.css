@@ -1,0 +1,26 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 关闭 Tailwind preflight 后的最小补丁：让 border-* 工具类生效且不引入默认边框 */
+*,
+::before,
+::after {
+    border-width: 0;
+    border-style: solid;
+    border-color: currentColor;
+}
+
+html,
+body,
+#app {
+    height: 100%;
+    background: var(--app-bg);
+    color: var(--text-color);
+}
+
+.ant-btn,
+.ant-btn:focus,
+.ant-btn:focus-visible {
+    box-shadow: none !important;
+}

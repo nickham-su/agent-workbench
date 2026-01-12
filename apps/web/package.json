@@ -1,0 +1,32 @@
+{
+  "name": "@agent-workbench/web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc -p tsconfig.json --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@agent-workbench/shared": "*",
+    "@ant-design/icons-vue": "^7.0.1",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
+    "ant-design-vue": "^4.2.6",
+    "axios": "^1.7.9",
+    "monaco-editor": "^0.52.2",
+    "vue": "^3.5.13",
+    "vue-i18n": "^11.2.8",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "autoprefixer": "^10.4.23",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.19",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.6",
+    "vue-tsc": "^2.1.10"
+  }
+}

@@ -1,0 +1,408 @@
+<template>
+  <div class="flex flex-col min-h-0">
+    <div class="flex items-center gap-2 px-5 py-2">
+      <div class="text-[13px] font-semibold">{{ t("settings.title") }}</div>
+    </div>
+
+    <div class="px-5 pb-5 min-h-0 overflow-auto">
+      <a-tabs v-model:activeKey="innerKey" size="small" :animated="false">
+        <a-tab-pane key="general" :tab="t('settings.tabs.general')">
+          <a-form layout="vertical">
+            <a-form-item :label="t('settings.general.language.label')">
+              <a-select v-model:value="uiLocale" :options="languageOptions" style="max-width: 260px" />
+              <div class="pt-2 text-xs text-[color:var(--text-tertiary)]">{{ t("settings.general.language.help") }}</div>
+            </a-form-item>
+          </a-form>
+        </a-tab-pane>
+
+        <a-tab-pane key="credentials" :tab="t('settings.tabs.credentials')">
+          <div class="flex items-center justify-between pb-2">
+            <div class="text-xs text-[color:var(--text-tertiary)]">
+              {{ t("settings.credentials.description") }}
+            </div>
+            <a-button size="small" @click="openCreateCredential">{{ t("settings.credentials.actions.add") }}</a-button>
+          </div>
+
+          <div v-if="!credLoading && credentials.length === 0" class="text-xs text-[color:var(--text-tertiary)]">
+            {{ t("settings.credentials.empty") }}
+          </div>
+          <div v-else class="divide-y divide-[var(--border-color-secondary)]">
+            <div
+              v-for="c in credentials"
+              :key="c.id"
+              class="group flex items-center justify-between gap-3 py-2 px-2 rounded hover:bg-[var(--panel-bg-elevated)]"
+            >
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-2 min-w-0">
+                  <div class="font-mono text-xs truncate" :title="c.host">{{ c.host }}</div>
+                  <a-tag v-if="c.isDefault" color="blue" class="!text-[10px] !leading-[16px] !px-1 !py-0">{{ t("settings.credentials.tags.default") }}</a-tag>
+                  <a-tag color="default" class="!text-[10px] !leading-[16px] !px-1 !py-0">{{ credentialKindLabel(c.kind) }}</a-tag>
+                </div>
+                <div class="text-[11px] text-[color:var(--text-tertiary)] pt-1">
+                  <span v-if="c.label">{{ c.label }}</span>
+                  <span v-if="c.label && c.username"> · </span>
+                  <span v-if="c.username">{{ c.username }}</span>
+                </div>
+              </div>
+              <div class="shrink-0 flex items-center gap-1 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity">
+                <a-button size="small" type="text" @click="openEditCredential(c)">{{ t("settings.credentials.actions.edit") }}</a-button>
+                <a-button size="small" type="text" danger @click="confirmDeleteCredential(c)">{{ t("settings.credentials.actions.delete") }}</a-button>
+              </div>
+            </div>
+          </div>
+
+          <a-modal
+            v-model:open="credentialModalOpen"
+            :title="credentialModalTitle"
+            :confirm-loading="credentialSaving"
+            :maskClosable="false"
+            :okText="t('settings.credentials.modal.ok')"
+            :cancelText="t('settings.credentials.modal.cancel')"
+            @ok="submitCredential"
+          >
+            <a-form layout="vertical">
+              <a-form-item v-if="credentialModalMode === 'create'" :label="t('settings.credentials.form.hostLabel')" required>
+                <a-input v-model:value="formHost" :placeholder="t('settings.credentials.form.hostPlaceholder')" />
+              </a-form-item>
+
+              <a-form-item v-if="credentialModalMode === 'create'" :label="t('settings.credentials.form.kindLabel')" required>
+                <a-radio-group v-model:value="formKind" button-style="solid">
+                  <a-radio-button value="https">{{ t("settings.credentials.form.kindHttps") }}</a-radio-button>
+                  <a-radio-button value="ssh">{{ t("settings.credentials.form.kindSsh") }}</a-radio-button>
+                </a-radio-group>
+              </a-form-item>
+
+              <a-form-item :label="t('settings.credentials.form.labelLabel')">
+                <a-input v-model:value="formLabel" :placeholder="t('settings.credentials.form.labelPlaceholder')" />
+              </a-form-item>
+
+              <a-form-item :label="t('settings.credentials.form.usernameLabel')">
+                <a-input v-model:value="formUsername" :placeholder="credentialUsernamePlaceholder" />
+              </a-form-item>
+
+              <a-form-item :label="credentialSecretLabel" :required="credentialModalMode === 'create'">
+                <a-textarea v-model:value="formSecret" :rows="6" :placeholder="t('settings.credentials.form.secretPlaceholder')" />
+              </a-form-item>
+
+              <a-form-item>
+                <a-checkbox v-model:checked="formIsDefault">{{ t("settings.credentials.form.isDefault") }}</a-checkbox>
+              </a-form-item>
+            </a-form>
+            <div class="text-xs text-[color:var(--text-tertiary)]">
+              {{ t("settings.credentials.tip") }}
+            </div>
+          </a-modal>
+        </a-tab-pane>
+        <a-tab-pane key="network" :tab="t('settings.tabs.network')">
+          <div class="text-xs text-[color:var(--text-tertiary)] pb-2">
+            {{ t("settings.network.description") }}
+          </div>
+          <a-form layout="vertical">
+            <a-form-item :label="t('settings.network.form.httpProxyLabel')">
+              <a-input v-model:value="networkHttpProxy" :placeholder="t('settings.network.form.httpProxyPlaceholder')" />
+            </a-form-item>
+            <a-form-item :label="t('settings.network.form.httpsProxyLabel')">
+              <a-input v-model:value="networkHttpsProxy" :placeholder="t('settings.network.form.httpsProxyPlaceholder')" />
+            </a-form-item>
+            <a-form-item :label="t('settings.network.form.noProxyLabel')">
+              <a-input v-model:value="networkNoProxy" :placeholder="t('settings.network.form.noProxyPlaceholder')" />
+            </a-form-item>
+            <a-form-item :label="t('settings.network.form.caCertLabel')">
+              <a-textarea v-model:value="networkCaPem" :rows="8" :placeholder="t('settings.network.form.caCertPlaceholder')" />
+            </a-form-item>
+            <div class="flex items-center gap-2">
+              <a-button size="small" :loading="networkSaving" @click="saveNetwork">{{ t("settings.network.actions.save") }}</a-button>
+              <a-button size="small" type="text" :loading="networkLoading" @click="refreshNetwork">{{ t("settings.network.actions.refresh") }}</a-button>
+            </div>
+          </a-form>
+        </a-tab-pane>
+        <a-tab-pane key="security" :tab="t('settings.tabs.security')">
+          <div class="text-xs text-[color:var(--text-tertiary)] pb-2">
+            {{ t("settings.security.description") }}
+          </div>
+
+          <div v-if="security" class="space-y-3">
+            <div class="bg-[var(--panel-bg-elevated)] border border-[var(--border-color-secondary)] rounded p-3">
+              <div class="text-xs font-semibold pb-1">{{ t("settings.security.masterKeyTitle") }}</div>
+              <div class="text-xs text-[color:var(--text-tertiary)]">
+                <div>{{ t("settings.security.fields.source") }}: <span class="font-mono">{{ security.credentialMasterKey.source }}</span></div>
+                <div>{{ t("settings.security.fields.keyId") }}: <span class="font-mono">{{ security.credentialMasterKey.keyId }}</span></div>
+                <div v-if="security.credentialMasterKey.createdAt">
+                  {{ t("settings.security.fields.createdAt") }}: <span class="font-mono">{{ security.credentialMasterKey.createdAt }}</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="bg-[var(--panel-bg-elevated)] border border-[var(--border-color-secondary)] rounded p-3">
+              <div class="text-xs font-semibold pb-1">{{ t("settings.security.knownHostsTitle") }}</div>
+              <div class="text-xs text-[color:var(--text-tertiary)]">
+                <div>{{ t("settings.security.fields.path") }}: <span class="font-mono break-all">{{ security.sshKnownHostsPath }}</span></div>
+              </div>
+
+              <div class="pt-3 flex items-center gap-2">
+                <a-input v-model:value="resetHost" size="small" :placeholder="t('settings.security.resetHostPlaceholder')" />
+                <a-button size="small" danger :loading="resettingHost" @click="resetKnownHostWithUi">{{ t("settings.security.resetTrust") }}</a-button>
+              </div>
+              <div class="text-xs text-[color:var(--text-tertiary)] pt-2">
+                {{ t("settings.security.resetHelp") }}
+              </div>
+            </div>
+          </div>
+          <div v-else class="text-xs text-[color:var(--text-tertiary)]">
+            {{ t("common.loading") }}
+          </div>
+        </a-tab-pane>
+      </a-tabs>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { Modal, message } from "ant-design-vue";
+import type { CredentialKind, CredentialRecord, SecurityStatus } from "@agent-workbench/shared";
+import { computed, ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
+import {
+  createCredential,
+  deleteCredential,
+  getNetworkSettings,
+  getSecurityStatus,
+  listCredentials,
+  resetKnownHost,
+  updateCredential,
+  updateNetworkSettings
+} from "../services/api";
+import { getInitialLocale, setStoredLocale, type AppLocale } from "../i18n/locale";
+
+const { t, locale } = useI18n();
+
+const innerKey = ref<"general" | "credentials" | "network" | "security">("general");
+
+const uiLocale = ref<AppLocale>(getInitialLocale());
+const languageOptions = computed(() => [
+  { value: "zh-CN", label: t("settings.general.language.options.zh-CN") },
+  { value: "en-US", label: t("settings.general.language.options.en-US") }
+]);
+
+watch(
+  () => uiLocale.value,
+  (next) => {
+    if (next === locale.value) return;
+    locale.value = next;
+    setStoredLocale(next);
+    message.success(t("settings.general.language.changed"));
+  }
+);
+
+const credLoading = ref(false);
+const credentials = ref<CredentialRecord[]>([]);
+async function refreshCredentials() {
+  credLoading.value = true;
+  try {
+    credentials.value = await listCredentials();
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
+  } finally {
+    credLoading.value = false;
+  }
+}
+
+const credentialModalOpen = ref(false);
+const credentialSaving = ref(false);
+const credentialModalMode = ref<"create" | "edit">("create");
+const editingCredentialId = ref<string | null>(null);
+
+const formHost = ref("");
+const formKind = ref<CredentialKind>("https");
+const formLabel = ref("");
+const formUsername = ref("");
+const formSecret = ref("");
+const formIsDefault = ref(false);
+
+const credentialModalTitle = computed(() =>
+  credentialModalMode.value === "create" ? t("settings.credentials.modal.createTitle") : t("settings.credentials.modal.editTitle")
+);
+
+const credentialUsernamePlaceholder = computed(() =>
+  formKind.value === "ssh" ? t("settings.credentials.form.usernamePlaceholderSsh") : t("settings.credentials.form.usernamePlaceholderHttps")
+);
+
+function credentialKindLabel(kind: CredentialKind) {
+  return kind === "ssh" ? t("settings.credentials.form.kindSsh") : t("settings.credentials.form.kindHttps");
+}
+
+const credentialSecretLabel = computed(() => {
+  if (formKind.value === "https") {
+    return credentialModalMode.value === "create"
+      ? t("settings.credentials.form.secretLabel.httpsCreate")
+      : t("settings.credentials.form.secretLabel.httpsEdit");
+  }
+  return credentialModalMode.value === "create"
+    ? t("settings.credentials.form.secretLabel.sshCreate")
+    : t("settings.credentials.form.secretLabel.sshEdit");
+});
+
+function openCreateCredential() {
+  credentialModalMode.value = "create";
+  editingCredentialId.value = null;
+  formHost.value = "";
+  formKind.value = "https";
+  formLabel.value = "";
+  formUsername.value = "";
+  formSecret.value = "";
+  formIsDefault.value = false;
+  credentialModalOpen.value = true;
+}
+
+function openEditCredential(c: CredentialRecord) {
+  credentialModalMode.value = "edit";
+  editingCredentialId.value = c.id;
+  formHost.value = c.host;
+  formKind.value = c.kind;
+  formLabel.value = c.label || "";
+  formUsername.value = c.username || "";
+  formSecret.value = "";
+  formIsDefault.value = c.isDefault;
+  credentialModalOpen.value = true;
+}
+
+const canSubmitCredential = computed(() => {
+  if (credentialModalMode.value === "create") {
+    if (!formHost.value.trim()) return false;
+    if (!formSecret.value.trim()) return false;
+  }
+  return true;
+});
+
+async function submitCredential() {
+  if (!canSubmitCredential.value) return;
+  credentialSaving.value = true;
+  try {
+    if (credentialModalMode.value === "create") {
+      await createCredential({
+        host: formHost.value.trim(),
+        kind: formKind.value,
+        label: formLabel.value.trim() || undefined,
+        username: formUsername.value.trim() || undefined,
+        secret: formSecret.value,
+        isDefault: formIsDefault.value
+      });
+    } else {
+      const id = editingCredentialId.value;
+      if (!id) return;
+      await updateCredential(id, {
+        label: formLabel.value.trim() || undefined,
+        username: formUsername.value.trim() || undefined,
+        isDefault: formIsDefault.value,
+        secret: formSecret.value.trim() ? formSecret.value : undefined
+      });
+    }
+    credentialModalOpen.value = false;
+    await refreshCredentials();
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
+  } finally {
+    credentialSaving.value = false;
+  }
+}
+
+function confirmDeleteCredential(c: CredentialRecord) {
+  Modal.confirm({
+    title: t("settings.credentials.deleteConfirm.title"),
+    content: t("settings.credentials.deleteConfirm.content"),
+    okText: t("settings.credentials.deleteConfirm.ok"),
+    okType: "danger",
+    cancelText: t("settings.credentials.deleteConfirm.cancel"),
+    onOk: async () => {
+      await deleteCredential(c.id);
+      await refreshCredentials();
+    }
+  });
+}
+
+const networkLoading = ref(false);
+const networkSaving = ref(false);
+const networkHttpProxy = ref("");
+const networkHttpsProxy = ref("");
+const networkNoProxy = ref("");
+const networkCaPem = ref("");
+
+async function refreshNetwork() {
+  networkLoading.value = true;
+  try {
+    const res = await getNetworkSettings();
+    networkHttpProxy.value = res.httpProxy || "";
+    networkHttpsProxy.value = res.httpsProxy || "";
+    networkNoProxy.value = res.noProxy || "";
+    networkCaPem.value = res.caCertPem || "";
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
+  } finally {
+    networkLoading.value = false;
+  }
+}
+
+async function saveNetwork() {
+  if (networkSaving.value) return;
+  networkSaving.value = true;
+  try {
+    await updateNetworkSettings({
+      httpProxy: networkHttpProxy.value.trim() ? networkHttpProxy.value.trim() : null,
+      httpsProxy: networkHttpsProxy.value.trim() ? networkHttpsProxy.value.trim() : null,
+      noProxy: networkNoProxy.value.trim() ? networkNoProxy.value.trim() : null,
+      caCertPem: networkCaPem.value ? networkCaPem.value : null
+    });
+    message.success(t("settings.network.saved"));
+    await refreshNetwork();
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
+  } finally {
+    networkSaving.value = false;
+  }
+}
+
+const security = ref<SecurityStatus | null>(null);
+const resetHost = ref("");
+const resettingHost = ref(false);
+
+async function refreshSecurity() {
+  try {
+    security.value = await getSecurityStatus();
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
+  }
+}
+
+async function resetKnownHostWithUi() {
+  const host = resetHost.value.trim();
+  if (!host) return;
+  Modal.confirm({
+    title: t("settings.security.resetConfirm.title"),
+    content: t("settings.security.resetConfirm.content"),
+    okText: t("settings.security.resetConfirm.ok"),
+    okType: "danger",
+    cancelText: t("settings.security.resetConfirm.cancel"),
+    onOk: async () => {
+      resettingHost.value = true;
+      try {
+        await resetKnownHost({ host });
+        message.success(t("settings.security.resetSuccess"));
+        resetHost.value = "";
+      } catch (err) {
+        message.error(err instanceof Error ? err.message : String(err));
+      } finally {
+        resettingHost.value = false;
+      }
+    }
+  });
+}
+
+watch(
+  () => innerKey.value,
+  async (k) => {
+    if (k === "credentials") await refreshCredentials();
+    else if (k === "network") await refreshNetwork();
+    else if (k === "security") await refreshSecurity();
+  }
+);
+</script>

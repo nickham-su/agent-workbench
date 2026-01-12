@@ -1,0 +1,9 @@
+.idea/
+node_modules/
+dist/
+.vite/
+.env.local
+.env.*.local
+.data/
+*.log
+.DS_Store
