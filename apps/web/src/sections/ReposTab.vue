@@ -36,7 +36,7 @@
     <a-modal v-model:open="createOpen" :title="t('repos.create.modalTitle')" :confirm-loading="creating" @ok="submitCreate">
       <a-form layout="vertical">
         <a-form-item :label="t('repos.create.gitUrlLabel')" required>
-          <a-input v-model:value="createUrl" :placeholder="t('repos.create.gitUrlPlaceholder')" />
+          <a-input v-model:value="createUrl" :placeholder="t('repos.create.gitUrlPlaceholder', { at: '@' })" />
         </a-form-item>
         <a-form-item :label="t('repos.create.credentialLabel')">
           <a-select

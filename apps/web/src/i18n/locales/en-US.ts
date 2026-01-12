@@ -34,7 +34,7 @@ export default {
     create: {
       modalTitle: "Add repo",
       gitUrlLabel: "Git URL",
-      gitUrlPlaceholder: "https://github.com/org/repo.git or git@github.com:org/repo.git",
+      gitUrlPlaceholder: "https://github.com/org/repo.git or git{at}github.com:org/repo.git",
       credentialLabel: "Credential (optional)",
       credentialPlaceholder: "Select credential (recommended for private repos)",
       credentialHelp: "If not selected, it will try to pick the default credential by URL host; otherwise configure it in Settings/Credentials."
@@ -69,7 +69,7 @@ export default {
       modeExisting: "Pick existing repo",
       modeUrl: "Enter repo URL",
       repoUrlLabel: "Repo URL",
-      repoUrlPlaceholder: "https://github.com/org/repo.git or git@github.com:org/repo.git",
+      repoUrlPlaceholder: "https://github.com/org/repo.git or git{at}github.com:org/repo.git",
       credentialLabel: "Credential (optional)",
       credentialPlaceholder: "Select credential (recommended for private repos)",
       credentialHelp: "If not selected, it will try to pick the default credential by URL host.",

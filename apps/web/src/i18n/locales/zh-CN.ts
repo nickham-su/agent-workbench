@@ -34,7 +34,7 @@ export default {
     create: {
       modalTitle: "添加仓库",
       gitUrlLabel: "Git URL",
-      gitUrlPlaceholder: "https://github.com/org/repo.git 或 git@github.com:org/repo.git",
+      gitUrlPlaceholder: "https://github.com/org/repo.git 或 git{at}github.com:org/repo.git",
       credentialLabel: "凭证（可选）",
       credentialPlaceholder: "选择凭证（私有仓库推荐选择）",
       credentialHelp: "若未选择，将尝试按 URL host 自动匹配默认凭证；仍失败时可到 设置/凭证 配置。"
@@ -69,7 +69,7 @@ export default {
       modeExisting: "选择已有仓库",
       modeUrl: "填写仓库 URL",
       repoUrlLabel: "仓库 URL",
-      repoUrlPlaceholder: "https://github.com/org/repo.git 或 git@github.com:org/repo.git",
+      repoUrlPlaceholder: "https://github.com/org/repo.git 或 git{at}github.com:org/repo.git",
       credentialLabel: "凭证（可选）",
       credentialPlaceholder: "选择凭证（私有仓库推荐选择）",
       credentialHelp: "若未选择，将尝试按 URL host 自动匹配默认凭证。",

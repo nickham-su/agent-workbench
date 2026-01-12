@@ -70,7 +70,7 @@
 
         <a-form-item v-if="createMode === 'url'" :label="t('workspaces.create.repoUrlLabel')" required>
           <a-input v-model:value="repoUrl"
-                   :placeholder="t('workspaces.create.repoUrlPlaceholder')"/>
+                   :placeholder="t('workspaces.create.repoUrlPlaceholder', { at: '@' })"/>
         </a-form-item>
 
         <a-form-item v-if="createMode === 'url'" :label="t('workspaces.create.credentialLabel')">
