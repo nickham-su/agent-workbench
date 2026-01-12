@@ -24,6 +24,14 @@ Agent Workbench provides: isolated workspaces, persistent terminal sessions, cen
 
 **Prerequisites**: Docker Desktop (or Linux Docker Engine) + Compose v2
 
+- Clone the repository
+
+```bash
+git clone https://github.com/nickham-su/agent-workbench.git
+```
+
+- Start the service
+
 ```bash
 docker compose up -d --build
 ```

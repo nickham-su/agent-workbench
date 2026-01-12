@@ -20,6 +20,14 @@ Agent Workbench 提供：多工作区隔离、终端会话持久化、Git 变更
 
 **前置条件**：Docker Desktop（或 Linux Docker Engine）+ Compose v2
 
+- 克隆仓库
+
+```bash
+git clone https://github.com/nickham-su/agent-workbench.git
+```
+
+- 启动服务
+
 ```bash
 docker compose up -d --build
 ```
