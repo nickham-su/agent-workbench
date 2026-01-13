@@ -8,7 +8,9 @@ const TERMINAL_FONT_SIZE_KEY = "agent-workbench.ui.fontSize.terminal";
 const DIFF_FONT_SIZE_KEY = "agent-workbench.ui.fontSize.diff";
 
 function clampFontSize(input: unknown) {
-  const n = typeof input === "number" ? input : Number(String(input ?? "").trim());
+  if (input === null || input === undefined) return DEFAULT_FONT_SIZE;
+  if (typeof input === "string" && input.trim() === "") return DEFAULT_FONT_SIZE;
+  const n = typeof input === "number" ? input : Number(String(input).trim());
   if (!Number.isFinite(n)) return DEFAULT_FONT_SIZE;
   return Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, Math.round(n)));
 }
@@ -57,4 +59,3 @@ if (typeof window !== "undefined") {
     if (evt.key === DIFF_FONT_SIZE_KEY) diffFontSize.value = loadFontSize(DIFF_FONT_SIZE_KEY);
   });
 }
-
