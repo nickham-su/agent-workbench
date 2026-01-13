@@ -47,6 +47,19 @@ let didResizeNudge = false;
 let removeElListeners: (() => void) | null = null;
 let stopWatchFontSize: (() => void) | null = null;
 
+function focusIfActive() {
+  if (!term) return;
+  if (!isActive.value) return;
+  term.focus();
+}
+
+function focusIfActiveSoon() {
+  void nextTick().then(() => {
+    focusIfActive();
+    requestAnimationFrame(() => focusIfActive());
+  });
+}
+
 async function copyTextToClipboard(text: string) {
   const content = String(text ?? "");
   if (!content) return;
@@ -224,7 +237,7 @@ function connect(force: boolean) {
     // 某些场景首次创建终端会出现“黑屏但可交互”，轻微窗口 resize 会恢复；
     // 这里用一次性 resize-nudge 触发 xterm 完整重绘，模拟该恢复路径
     window.setTimeout(() => nudgeResizeToForceRedraw(), 60);
-    term?.focus();
+    focusIfActiveSoon();
   };
   ws.onerror = () => {
     if (!opened) scheduleReconnect();
@@ -311,7 +324,7 @@ onMounted(() => {
   fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
   term.open(el);
-  term.focus();
+  focusIfActiveSoon();
 
   // 初始渲染时容器尺寸/字体度量可能还不稳定，先提前做一次 fit（不依赖 ws）
   void nextTick().then(() => {
@@ -404,6 +417,8 @@ watch(
     lastSize = null;
     void nextTick().then(() => {
       runFitBurst();
+      focusIfActive();
+      requestAnimationFrame(() => focusIfActive());
     });
   },
   { immediate: true }
