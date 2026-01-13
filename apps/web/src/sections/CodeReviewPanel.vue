@@ -3,7 +3,7 @@
     <div class="min-h-0 min-w-0 flex flex-col border-r border-[var(--border-color-secondary)]">
       <div class="flex-1 min-h-0 flex flex-col">
         <div
-            class="flex items-center justify-between pl-3 pr-1 py-1 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
+            class="flex items-center justify-between pl-3 pr-1 py-1.5 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
           <div class="text-xs font-semibold">{{ t("codeReview.unstaged") }}</div>
           <div class="flex items-center gap-1">
             <a-tooltip :title="t('codeReview.actions.stageAll')" :mouseEnterDelay="0" :mouseLeaveDelay="0"
@@ -106,7 +106,7 @@
 
       <div class="flex-1 min-h-0 flex flex-col border-t border-[var(--border-color-secondary)]">
         <div
-            class="flex items-center justify-between pl-3 pr-1 py-1 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
+            class="flex items-center justify-between pl-3 pr-1 py-1.5 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
           <div class="text-xs font-semibold">{{ t("codeReview.staged") }}</div>
           <div class="flex items-center gap-1">
             <a-button
@@ -193,7 +193,7 @@
       <div class="h-full overflow-hidden flex flex-col">
         <div class="diff-header grid border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]"
              :style="diffHeaderVars">
-          <div class="px-3 py-2 text-xs font-semibold min-w-0 whitespace-nowrap overflow-hidden">
+          <div class="px-3 py-2.5 text-xs font-semibold min-w-0 whitespace-nowrap overflow-hidden">
             <div class="flex items-center gap-2 min-w-0">
               <span class="shrink-0">{{ t("codeReview.diff.base") }}</span>
               <span v-if="compare" class="min-w-0 truncate text-[11px] font-normal text-[color:var(--text-tertiary)]">{{

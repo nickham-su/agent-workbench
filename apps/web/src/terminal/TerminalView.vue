@@ -10,7 +10,7 @@
 
     <div
       ref="containerEl"
-      class="flex-1 min-h-0 rounded-none overflow-hidden bg-[#0b0f14] text-[#e5e7eb]"
+      class="flex-1 px-1 min-h-0 rounded-none overflow-hidden bg-[#0b0f14] text-[#e5e7eb]"
     />
   </div>
 </template>
