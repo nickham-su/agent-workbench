@@ -6,6 +6,7 @@ import type {
   CreateWorkspaceRequest,
   ChangesResponse,
   CredentialRecord,
+  GenerateSshKeypairResponse,
   FileCompareResponse,
   GitCommitRequest,
   GitCommitResponse,
@@ -150,6 +151,15 @@ export async function updateCredential(credentialId: string, body: UpdateCredent
 export async function deleteCredential(credentialId: string) {
   try {
     await client.delete(`/credentials/${credentialId}`);
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function generateSshKeypair() {
+  try {
+    const res = await client.post<GenerateSshKeypairResponse>("/credentials/ssh/keypair/generate");
+    return res.data;
   } catch (err) {
     throw toApiError(err);
   }

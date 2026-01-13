@@ -70,6 +70,91 @@ export function getCredentialWithSecret(db: Db, credentialId: string): { record:
   return { record: mapRow(row), secretEnc: row.secretEnc };
 }
 
+export function getDefaultCredentialWithSecret(db: Db, host: string): { record: CredentialRecord; secretEnc: string } | null {
+  const row = db
+    .prepare(
+      `
+        select
+          id,
+          host,
+          kind,
+          label,
+          username,
+          is_default as isDefault,
+          created_at as createdAt,
+          updated_at as updatedAt,
+          secret_enc as secretEnc
+        from credentials
+        where host = ? and is_default = 1
+        limit 1
+      `
+    )
+    .get(host) as CredentialRow | undefined;
+  if (!row) return null;
+  return { record: mapRow(row), secretEnc: row.secretEnc };
+}
+
+export function pickCredentialWithSecretForHost(
+  db: Db,
+  params: { host: string; preferredKind?: CredentialKind | null }
+): { record: CredentialRecord; secretEnc: string } | null {
+  const host = params.host;
+  const preferredKind = params.preferredKind ?? null;
+
+  if (preferredKind) {
+    const byKindDefault = db
+      .prepare(
+        `
+          select
+            id,
+            host,
+            kind,
+            label,
+            username,
+            is_default as isDefault,
+            created_at as createdAt,
+            updated_at as updatedAt,
+            secret_enc as secretEnc
+          from credentials
+          where host = ? and kind = ? and is_default = 1
+          limit 1
+        `
+      )
+      .get(host, preferredKind) as CredentialRow | undefined;
+    if (byKindDefault) return { record: mapRow(byKindDefault), secretEnc: byKindDefault.secretEnc };
+
+    const byKindLatest = db
+      .prepare(
+        `
+          select
+            id,
+            host,
+            kind,
+            label,
+            username,
+            is_default as isDefault,
+            created_at as createdAt,
+            updated_at as updatedAt,
+            secret_enc as secretEnc
+          from credentials
+          where host = ? and kind = ?
+          order by updated_at desc
+          limit 1
+        `
+      )
+      .get(host, preferredKind) as CredentialRow | undefined;
+    if (byKindLatest) return { record: mapRow(byKindLatest), secretEnc: byKindLatest.secretEnc };
+
+    // URL 明确指向某种协议时，不回退到其他 kind 的 default，避免错误注入（尤其是写出不必要的 token/key 文件）
+    return null;
+  }
+
+  const anyDefault = getDefaultCredentialWithSecret(db, host);
+  if (anyDefault) return anyDefault;
+
+  return null;
+}
+
 export function clearDefaultForHost(db: Db, host: string) {
   db.prepare(`update credentials set is_default = 0 where host = ? and is_default = 1`).run(host);
 }

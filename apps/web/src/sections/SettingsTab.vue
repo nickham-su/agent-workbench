@@ -108,6 +108,24 @@
 
               <a-form-item :label="credentialSecretLabel" :required="credentialModalMode === 'create'">
                 <a-textarea v-model:value="formSecret" :rows="6" :placeholder="t('settings.credentials.form.secretPlaceholder')" />
+                <div v-if="formKind === 'ssh'" class="pt-2 flex items-center gap-2">
+                  <a-button size="small" :loading="sshKeypairGenerating" @click="generateSshKeypairWithUi">
+                    {{ t("settings.credentials.actions.generateSshKey") }}
+                  </a-button>
+                  <div class="text-xs text-[color:var(--text-tertiary)]">
+                    {{ t("settings.credentials.form.generateSshHelp") }}
+                  </div>
+                </div>
+              </a-form-item>
+
+              <a-form-item v-if="formKind === 'ssh' && generatedPublicKey" :label="t('settings.credentials.form.publicKeyLabel')">
+                <a-textarea :value="generatedPublicKey" :rows="2" readonly class="font-mono" />
+                <div class="pt-2 flex items-center gap-2">
+                  <a-button size="small" @click="copyGeneratedPublicKey">{{ t("settings.credentials.actions.copyPublicKey") }}</a-button>
+                  <div class="text-xs text-[color:var(--text-tertiary)]">
+                    {{ t("settings.credentials.form.publicKeyHelp") }}
+                  </div>
+                </div>
               </a-form-item>
 
               <a-form-item>
@@ -192,6 +210,7 @@ import { diffFontSize, setDiffFontSize, setTerminalFontSize, terminalFontSize, u
 import {
   createCredential,
   deleteCredential,
+  generateSshKeypair,
   getNetworkSettings,
   getSecurityStatus,
   listCredentials,
@@ -261,6 +280,8 @@ const formLabel = ref("");
 const formUsername = ref("");
 const formSecret = ref("");
 const formIsDefault = ref(false);
+const sshKeypairGenerating = ref(false);
+const generatedPublicKey = ref("");
 
 const credentialModalTitle = computed(() =>
   credentialModalMode.value === "create" ? t("settings.credentials.modal.createTitle") : t("settings.credentials.modal.editTitle")
@@ -294,6 +315,7 @@ function openCreateCredential() {
   formUsername.value = "";
   formSecret.value = "";
   formIsDefault.value = false;
+  generatedPublicKey.value = "";
   credentialModalOpen.value = true;
 }
 
@@ -306,8 +328,16 @@ function openEditCredential(c: CredentialRecord) {
   formUsername.value = c.username || "";
   formSecret.value = "";
   formIsDefault.value = c.isDefault;
+  generatedPublicKey.value = "";
   credentialModalOpen.value = true;
 }
+
+watch(
+  () => formKind.value,
+  (k) => {
+    if (k !== "ssh") generatedPublicKey.value = "";
+  }
+);
 
 const canSubmitCredential = computed(() => {
   if (credentialModalMode.value === "create") {
@@ -316,6 +346,31 @@ const canSubmitCredential = computed(() => {
   }
   return true;
 });
+
+async function generateSshKeypairWithUi() {
+  if (sshKeypairGenerating.value) return;
+  sshKeypairGenerating.value = true;
+  try {
+    const res = await generateSshKeypair();
+    formSecret.value = res.privateKey;
+    generatedPublicKey.value = res.publicKey;
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
+  } finally {
+    sshKeypairGenerating.value = false;
+  }
+}
+
+async function copyGeneratedPublicKey() {
+  const key = generatedPublicKey.value.trim();
+  if (!key) return;
+  try {
+    await navigator.clipboard.writeText(key);
+    message.success(t("settings.credentials.copied"));
+  } catch {
+    message.error(t("settings.credentials.copyFailed"));
+  }
+}
 
 async function submitCredential() {
   if (!canSubmitCredential.value) return;
@@ -341,6 +396,7 @@ async function submitCredential() {
       });
     }
     credentialModalOpen.value = false;
+    generatedPublicKey.value = "";
     await refreshCredentials();
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));

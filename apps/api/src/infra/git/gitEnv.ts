@@ -4,7 +4,10 @@ import type { AppContext } from "../../app/context.js";
 import { decryptToUtf8 } from "../crypto/secretBox.js";
 import { ensureDir, rmrf } from "../fs/fs.js";
 import { caCertPath, certsRoot, sshKnownHostsPath, sshRoot, tmpRoot } from "../fs/paths.js";
-import { getCredentialWithSecret } from "../../modules/credentials/credentials.store.js";
+import { gitAskpassScriptV1 } from "./askpass.js";
+import { extractGitHost, inferGitCredentialKindFromUrl } from "./gitHost.js";
+import { shQuote } from "./shQuote.js";
+import { getCredentialWithSecret, pickCredentialWithSecretForHost } from "../../modules/credentials/credentials.store.js";
 import { getSettingJson } from "../../modules/settings/settings.store.js";
 
 type NetworkSettingsV1 = {
@@ -76,17 +79,19 @@ export async function buildGitEnv(params: {
     env.SSL_CERT_FILE = caPath;
   }
 
-  const credentialId = params.credentialId ? params.credentialId.trim() : "";
-  if (!credentialId) {
-    return {
-      env,
-      cleanup: async () => {
-        // no-op
-      }
-    };
+  const credentialIdRaw = params.credentialId ? params.credentialId.trim() : "";
+  let cred: ReturnType<typeof getCredentialWithSecret> | null = null;
+  if (credentialIdRaw) {
+    // repo 已绑定 credentialId：若不存在则不回退默认凭证，避免意外使用其他身份
+    cred = getCredentialWithSecret(ctx.db, credentialIdRaw);
+  } else {
+    // 未绑定 credentialId：允许按 host + url kind 兜底默认凭证
+    const host = extractGitHost(params.repoUrl);
+    const preferredKind = inferGitCredentialKindFromUrl(params.repoUrl);
+    if (host) {
+      cred = pickCredentialWithSecretForHost(ctx.db, { host, preferredKind });
+    }
   }
-
-  const cred = getCredentialWithSecret(ctx.db, credentialId);
   if (!cred) {
     return {
       env,
@@ -100,26 +105,21 @@ export async function buildGitEnv(params: {
 
   await ensureDir(tmpRoot(ctx.dataDir));
   if (cred.record.kind === "https") {
-    const askpassPath = path.join(tmpRoot(ctx.dataDir), `git-askpass-${credentialId}.sh`);
+    const id = cred.record.id;
+    const askpassPath = path.join(tmpRoot(ctx.dataDir), `git-askpass-${id}.sh`);
+    const tokenPath = path.join(tmpRoot(ctx.dataDir), `git-askpass-token-${id}`);
     const username = sanitizeForAskpass(cred.record.username || "oauth2");
-    const token = sanitizeForAskpass(secret);
-
-    const script = `#!/bin/sh
-prompt="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-case "$prompt" in
-  *username*) printf '%s' "$GIT_ASKPASS_USERNAME" ;;
-  *) printf '%s' "$GIT_ASKPASS_TOKEN" ;;
-esac
-`;
-    await fs.writeFile(askpassPath, script, { encoding: "utf-8", mode: 0o700 });
+    await fs.writeFile(tokenPath, secret, { encoding: "utf-8", mode: 0o600 });
+    await fs.writeFile(askpassPath, gitAskpassScriptV1(), { encoding: "utf-8", mode: 0o700 });
     cleanupPaths.push(askpassPath);
+    cleanupPaths.push(tokenPath);
 
     return {
       env: {
         ...env,
         GIT_ASKPASS: askpassPath,
         GIT_ASKPASS_USERNAME: username,
-        GIT_ASKPASS_TOKEN: token
+        GIT_ASKPASS_TOKEN_FILE: tokenPath
       },
       cleanup: async () => {
         await Promise.all(cleanupPaths.map((p) => rmrf(p)));
@@ -129,7 +129,7 @@ esac
 
   // ssh
   await ensureDir(sshRoot(ctx.dataDir));
-  const keyPath = path.join(tmpRoot(ctx.dataDir), `ssh-key-${credentialId}`);
+  const keyPath = path.join(tmpRoot(ctx.dataDir), `ssh-key-${cred.record.id}`);
   await fs.writeFile(keyPath, secret, { encoding: "utf-8", mode: 0o600 });
   cleanupPaths.push(keyPath);
 
@@ -137,13 +137,13 @@ esac
   const sshCmd = [
     "ssh",
     "-i",
-    keyPath,
+    shQuote(keyPath),
     "-o",
     "IdentitiesOnly=yes",
     "-o",
     "BatchMode=yes",
     "-o",
-    `UserKnownHostsFile=${knownHosts}`,
+    shQuote(`UserKnownHostsFile=${knownHosts}`),
     "-o",
     "StrictHostKeyChecking=accept-new"
   ].join(" ");
@@ -158,4 +158,3 @@ esac
     }
   };
 }
-

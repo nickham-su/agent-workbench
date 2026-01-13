@@ -287,13 +287,17 @@ export default {
     credentials: {
       description: "Manage Git credentials (HTTPS token / SSH key). Credentials can be reused per host and a default can be set.",
       empty: "No credentials",
+      copied: "Copied",
+      copyFailed: "Copy failed, please select and copy manually",
       tags: {
         default: "Default"
       },
       actions: {
         add: "Add",
         edit: "Edit",
-        delete: "Delete"
+        delete: "Delete",
+        generateSshKey: "Generate key",
+        copyPublicKey: "Copy public key"
       },
       modal: {
         createTitle: "Create credential",
@@ -313,6 +317,9 @@ export default {
         usernamePlaceholderHttps: "May be required for self-hosted Git services",
         usernamePlaceholderSsh: "Usually git",
         secretPlaceholder: "Saved secret will not be shown",
+        generateSshHelp: "Generates a keypair, fills the private key, and shows the public key for copying to your Git provider.",
+        publicKeyLabel: "SSH public key",
+        publicKeyHelp: "Add the public key to your account SSH keys or repo deploy keys.",
         isDefault: "Set as default credential for this host",
         secretLabel: {
           httpsCreate: "Token",

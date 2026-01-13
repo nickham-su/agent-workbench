@@ -3,12 +3,14 @@ import type { AppContext } from "../../app/context.js";
 import {
   CreateCredentialRequestSchema,
   CredentialRecordSchema,
+  GenerateSshKeypairResponseSchema,
   ErrorResponseSchema,
   UpdateCredentialRequestSchema
 } from "@agent-workbench/shared";
 import {
   createCredential,
   deleteCredential,
+  generateSshKeypair,
   listCredentials,
   updateCredential
 } from "./credentials.service.js";
@@ -23,6 +25,21 @@ export async function registerCredentialsRoutes(app: FastifyInstance, ctx: AppCo
       }
     },
     async () => listCredentials(ctx)
+  );
+
+  app.post(
+    "/api/credentials/ssh/keypair/generate",
+    {
+      schema: {
+        tags: ["credentials"],
+        response: { 200: GenerateSshKeypairResponseSchema, 500: ErrorResponseSchema }
+      }
+    },
+    async (_req, reply) => {
+      const res = await generateSshKeypair(ctx, app.log);
+      reply.header("Cache-Control", "no-store");
+      return res;
+    }
   );
 
   app.post(
