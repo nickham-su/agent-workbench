@@ -272,6 +272,16 @@ export default {
           "en-US": "English"
         },
         changed: "Language updated"
+      },
+      fontSize: {
+        terminal: {
+          label: "Terminal font size",
+          help: "Adjust terminal font size (global, saved locally). Default: {default}"
+        },
+        diff: {
+          label: "Diff font size",
+          help: "Adjust diff viewer font size (global, saved locally). Default: {default}"
+        }
       }
     },
     credentials: {

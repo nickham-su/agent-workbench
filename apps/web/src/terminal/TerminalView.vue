@@ -23,6 +23,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { useI18n } from "vue-i18n";
 import type { TerminalRecord } from "@agent-workbench/shared";
 import { parseWsMessage, sendWs, terminalWsUrl, type TerminalWsState } from "./ws";
+import { terminalFontSize } from "../settings/uiFontSizes";
 
 const props = defineProps<{ terminal: TerminalRecord; active?: boolean }>();
 const { t } = useI18n();
@@ -44,6 +45,7 @@ let closingByUs = false;
 let fitBurstTimers: number[] = [];
 let didResizeNudge = false;
 let removeElListeners: (() => void) | null = null;
+let stopWatchFontSize: (() => void) | null = null;
 
 async function copyTextToClipboard(text: string) {
   const content = String(text ?? "");
@@ -295,7 +297,7 @@ onMounted(() => {
   term = new Terminal({
     cursorBlink: true,
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-    fontSize: 12,
+    fontSize: terminalFontSize.value,
     theme: {
       background: "#0b0f14",
       foreground: "#e5e7eb",
@@ -382,6 +384,16 @@ onMounted(() => {
   resizeObserver.observe(el);
 
   connect(false);
+
+  stopWatchFontSize = watch(
+    () => terminalFontSize.value,
+    (next) => {
+      if (!term) return;
+      term.options.fontSize = next;
+      lastSize = null;
+      void nextTick().then(() => runFitBurst());
+    }
+  );
 });
 
 watch(
@@ -403,6 +415,8 @@ onBeforeUnmount(async () => {
   resizeObserver = null;
   removeElListeners?.();
   removeElListeners = null;
+  stopWatchFontSize?.();
+  stopWatchFontSize = null;
   clearReconnectTimer();
   clearFitBurst();
   cleanupWs();

@@ -7,6 +7,7 @@ import {onBeforeUnmount, onMounted, ref, watch} from "vue";
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api";
 import "monaco-editor/min/vs/editor/editor.main.css";
 import {ensureMonacoEnvironment} from "../monaco/monacoEnv";
+import { diffFontSize } from "../settings/uiFontSizes";
 
 const props = defineProps<{
   original: string;
@@ -32,6 +33,7 @@ let originalModel: monaco.editor.ITextModel | null = null;
 let modifiedModel: monaco.editor.ITextModel | null = null;
 let disposables: monaco.IDisposable[] = [];
 let layoutRaf = 0;
+let stopWatchFontSize: (() => void) | null = null;
 
 function normalizeLanguage(lang?: string) {
   if (!lang) return undefined;
@@ -98,6 +100,7 @@ onMounted(() => {
     automaticLayout: true,
     renderSideBySide: true,
     readOnly: true,
+    fontSize: diffFontSize.value,
     minimap: {enabled: false},
     scrollBeyondLastLine: false,
     wordWrap: "off",
@@ -129,6 +132,17 @@ onMounted(() => {
 
   ensureModels();
   scheduleEmitLayout();
+
+  stopWatchFontSize = watch(
+    () => diffFontSize.value,
+    (next) => {
+      if (!editor) return;
+      editor.updateOptions({ fontSize: next });
+      editor.getOriginalEditor().updateOptions({ fontSize: next });
+      editor.getModifiedEditor().updateOptions({ fontSize: next });
+      scheduleEmitLayout();
+    }
+  );
 });
 
 watch(
@@ -140,6 +154,8 @@ onBeforeUnmount(() => {
   if (layoutRaf) cancelAnimationFrame(layoutRaf);
   layoutRaf = 0;
   window.removeEventListener("resize", scheduleEmitLayout);
+  stopWatchFontSize?.();
+  stopWatchFontSize = null;
   disposables.forEach((d) => d.dispose());
   disposables = [];
   if (editor) {

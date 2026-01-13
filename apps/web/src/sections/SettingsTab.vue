@@ -12,6 +12,32 @@
               <a-select v-model:value="uiLocale" :options="languageOptions" style="max-width: 260px" />
               <div class="pt-2 text-xs text-[color:var(--text-tertiary)]">{{ t("settings.general.language.help") }}</div>
             </a-form-item>
+
+            <a-form-item :label="t('settings.general.fontSize.terminal.label')">
+              <a-input-number
+                v-model:value="terminalFontSizeModel"
+                :min="uiFontSizeDefaults.min"
+                :max="uiFontSizeDefaults.max"
+                :step="1"
+                style="max-width: 260px"
+              />
+              <div class="pt-2 text-xs text-[color:var(--text-tertiary)]">
+                {{ t("settings.general.fontSize.terminal.help", { default: uiFontSizeDefaults.default }) }}
+              </div>
+            </a-form-item>
+
+            <a-form-item :label="t('settings.general.fontSize.diff.label')">
+              <a-input-number
+                v-model:value="diffFontSizeModel"
+                :min="uiFontSizeDefaults.min"
+                :max="uiFontSizeDefaults.max"
+                :step="1"
+                style="max-width: 260px"
+              />
+              <div class="pt-2 text-xs text-[color:var(--text-tertiary)]">
+                {{ t("settings.general.fontSize.diff.help", { default: uiFontSizeDefaults.default }) }}
+              </div>
+            </a-form-item>
           </a-form>
         </a-tab-pane>
 
@@ -162,6 +188,7 @@ import { Modal, message } from "ant-design-vue";
 import type { CredentialKind, CredentialRecord, SecurityStatus } from "@agent-workbench/shared";
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import { diffFontSize, setDiffFontSize, setTerminalFontSize, terminalFontSize, uiFontSizeDefaults } from "../settings/uiFontSizes";
 import {
   createCredential,
   deleteCredential,
@@ -183,6 +210,22 @@ const languageOptions = computed(() => [
   { value: "zh-CN", label: t("settings.general.language.options.zh-CN") },
   { value: "en-US", label: t("settings.general.language.options.en-US") }
 ]);
+
+const terminalFontSizeModel = computed<number | null>({
+  get: () => terminalFontSize.value,
+  set: (v) => {
+    if (v === null || v === undefined) return;
+    setTerminalFontSize(v);
+  }
+});
+
+const diffFontSizeModel = computed<number | null>({
+  get: () => diffFontSize.value,
+  set: (v) => {
+    if (v === null || v === undefined) return;
+    setDiffFontSize(v);
+  }
+});
 
 watch(
   () => uiLocale.value,
