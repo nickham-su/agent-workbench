@@ -314,6 +314,22 @@ function formatRepoDisplayName(rawUrl: string) {
 
 const repoDisplayName = computed(() => (workspace.value ? formatRepoDisplayName(workspace.value.repo.url) : ""));
 
+function buildPageTitle(ws: WorkspaceDetail | null) {
+  const base = t("app.title");
+  if (!ws) return `${t("workspace.title")} - ${base}`;
+
+  const repoName = formatRepoDisplayName(ws.repo.url);
+  const branch = String(ws.checkout.branch || "").trim();
+  if (repoName && branch) return `${repoName}@${branch} - ${base}`;
+  if (repoName) return `${repoName} - ${base}`;
+  if (branch) return `${branch} - ${base}`;
+  return `${t("workspace.title")} - ${base}`;
+}
+
+function applyPageTitle() {
+  document.title = buildPageTitle(workspace.value);
+}
+
 const pushLoading = ref(false);
 const pullLoading = ref(false);
 
@@ -443,6 +459,7 @@ function onSplitterPointerDown(evt: PointerEvent) {
 
 async function refreshWorkspace() {
   workspace.value = await getWorkspace(props.workspaceId);
+  applyPageTitle();
 }
 
 async function refreshTerminals() {
@@ -642,9 +659,13 @@ watch(
   }
 );
 
-onMounted(refresh);
+onMounted(() => {
+  applyPageTitle();
+  void refresh();
+});
 
 onBeforeUnmount(() => {
+  document.title = t("app.title");
   draggingCleanup?.();
 });
 </script>
