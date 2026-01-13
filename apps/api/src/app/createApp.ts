@@ -5,7 +5,9 @@ import swaggerUi from "@fastify/swagger-ui";
 import { isHttpError } from "./errors.js";
 import type { AppContext } from "./context.js";
 import { registerWebUi } from "./webUi.js";
+import { registerAuthGuards } from "./auth.js";
 import { registerHealthModule } from "../modules/health/health.module.js";
+import { registerAuthModule } from "../modules/auth/auth.module.js";
 import { registerReposModule } from "../modules/repos/repos.module.js";
 import { registerWorkspacesModule } from "../modules/workspaces/workspaces.module.js";
 import { registerTerminalsModule } from "../modules/terminals/terminals.module.js";
@@ -35,6 +37,8 @@ export async function createApp(ctx: AppContext) {
     routePrefix: "/api/docs"
   });
 
+  await registerAuthGuards(app, ctx);
+
   app.get("/api/openapi.json", async () => {
     return app.swagger();
   });
@@ -52,6 +56,7 @@ export async function createApp(ctx: AppContext) {
   });
 
   await registerHealthModule(app, ctx);
+  await registerAuthModule(app, ctx);
   await registerReposModule(app, ctx);
   await registerCredentialsModule(app, ctx);
   await registerSettingsModule(app, ctx);

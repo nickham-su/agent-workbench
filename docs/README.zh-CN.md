@@ -26,6 +26,10 @@ Agent Workbench 提供：多工作区隔离、终端会话持久化、Git 变更
 git clone https://github.com/nickham-su/agent-workbench.git
 ```
 
+- 可选配置（推荐）
+  - 复制 `.env.docker.example` 为 `.env`，按需修改变量
+  - 若不创建 `.env`，Docker Compose 会使用 `docker-compose.yml` 中的默认值
+
 - 启动服务
 
 ```bash
@@ -64,11 +68,18 @@ docker compose up -d --build
 
 默认为了方便会对外发布端口 `4310` 与 `30000-30100`。如需更安全的部署，建议在 `docker-compose.yml` 的 `ports` 映射前加 `127.0.0.1:` 仅允许本机访问
 
+当前 compose 已改为 `.env` 驱动，可通过设置以下变量仅允许本机访问：
+
+- `PUBLISH_HOST=127.0.0.1`
+
 **环境变量**
 
 | 变量 | 说明 |
 |------|------|
 | `CREDENTIAL_MASTER_KEY` | 凭证加密密钥（32 字节 hex/base64/base64url）。未设置时自动生成并保存至 `/data/keys/credential-master-key.json`。迁移场景建议显式设置。 |
+| `AUTH_TOKEN` | 访问 token 保护（可选）。设置后需要在首页输入 token 登录（会话 Cookie）才能访问 Web UI/API。 |
+| `AUTH_COOKIE_SECURE` | HTTPS 场景建议设为 `1`（为会话 Cookie 添加 `Secure`）；本地 HTTP 开发保持 `0`。 |
+| `PUBLISH_HOST` | 端口发布的宿主机绑定地址（Docker Compose）。设为 `127.0.0.1` 可仅允许本机访问。 |
 
 ---
 
@@ -114,6 +125,10 @@ docker compose up -d --build
 npm install
 npm run dev
 ```
+
+**本地环境变量**
+
+- 复制 `.env.example` 为 `.env.local`，按需修改变量
 
 **其他脚本**
 

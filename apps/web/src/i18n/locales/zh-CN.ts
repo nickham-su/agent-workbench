@@ -18,6 +18,16 @@ export default {
       parensSuffix: "（{text}）"
     }
   },
+  auth: {
+    login: {
+      title: "访问登录",
+      tokenLabel: "Token",
+      tokenPlaceholder: "请输入访问 token",
+      remember30d: "记住 30 天",
+      submit: "登录",
+      hint: "提示：未勾选时仅本次浏览器会话有效。"
+    }
+  },
   workbench: {
     tabs: {
       workspaces: "工作区",
@@ -248,6 +258,8 @@ export default {
       blockedLine0: "[连接被占用] 该终端已在其他页面/设备连接。",
       blockedLine1: "详情：code={code} reason={reason} wasClean={wasClean}",
       blockedLine2: "可点击“接管连接”尝试强制接管（会踢掉旧连接）。",
+      unauthorizedLine0: "[未授权] 当前会话已失效，请重新登录。",
+      unauthorizedLine1: "详情：code={code} reason={reason} wasClean={wasClean}",
       disconnectedLine0: "[连接已断开] 连接已断开，将自动尝试重连。",
       disconnectedLine1: "详情：code={code} reason={reason} wasClean={wasClean}",
       disconnectedLine2: "若提示被占用，可点击“接管连接”。",
@@ -287,13 +299,17 @@ export default {
     credentials: {
       description: "管理 Git 凭证（HTTPS Token / SSH Key），可按 host 复用并设置默认凭证。",
       empty: "暂无凭证",
+      copied: "已复制",
+      copyFailed: "复制失败，请手动选择并复制",
       tags: {
         default: "默认"
       },
       actions: {
         add: "新增",
         edit: "编辑",
-        delete: "删除"
+        delete: "删除",
+        generateSshKey: "生成密钥",
+        copyPublicKey: "复制公钥"
       },
       modal: {
         createTitle: "新增凭证",
@@ -313,6 +329,9 @@ export default {
         usernamePlaceholderHttps: "部分自建 Git 服务可能需要",
         usernamePlaceholderSsh: "通常为 git",
         secretPlaceholder: "不会回显已保存的 secret",
+        generateSshHelp: "生成后将自动填入私钥，并展示公钥供复制到 Git 平台。",
+        publicKeyLabel: "SSH 公钥",
+        publicKeyHelp: "将公钥添加到账号 SSH key 或仓库 Deploy key。",
         isDefault: "设为该 host 默认凭证",
         secretLabel: {
           httpsCreate: "Token",

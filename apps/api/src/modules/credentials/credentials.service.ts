@@ -2,7 +2,10 @@ import type { FastifyBaseLogger } from "fastify";
 import type { CreateCredentialRequest, CredentialKind, CredentialRecord, UpdateCredentialRequest } from "@agent-workbench/shared";
 import type { AppContext } from "../../app/context.js";
 import { HttpError } from "../../app/errors.js";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { encryptUtf8 } from "../../infra/crypto/secretBox.js";
+import { runSshKeygen } from "../../infra/ssh/sshKeygen.js";
 import { newId } from "../../utils/ids.js";
 import { nowMs } from "../../utils/time.js";
 import { countReposReferencingCredential } from "../repos/repo.store.js";
@@ -14,6 +17,8 @@ import {
   listCredentials as listCredentialRecords,
   updateCredentialRecord
 } from "./credentials.store.js";
+import { ensureDir, rmrf } from "../../infra/fs/fs.js";
+import { tmpRoot } from "../../infra/fs/paths.js";
 
 function normalizeHost(raw: unknown) {
   const s = String(raw || "").trim().toLowerCase();
@@ -151,4 +156,29 @@ export async function deleteCredential(ctx: AppContext, logger: FastifyBaseLogge
 
   deleteCredentialRecord(ctx.db, id);
   logger.info({ credentialId: id }, "credential deleted");
+}
+
+export async function generateSshKeypair(ctx: AppContext, logger: FastifyBaseLogger): Promise<{ privateKey: string; publicKey: string }> {
+  await ensureDir(tmpRoot(ctx.dataDir));
+  const base = path.join(tmpRoot(ctx.dataDir), `ssh-keypair-${newId("tmp")}`);
+  const keyPath = base;
+  const pubPath = `${base}.pub`;
+
+  try {
+    const res = await runSshKeygen(["-t", "ed25519", "-N", "", "-f", keyPath, "-q"], { cwd: ctx.dataDir });
+    if (!res.ok) {
+      const msg = (res.stderr || res.stdout || "ssh-keygen failed").trim().replace(/\s+/g, " ");
+      throw new HttpError(500, msg);
+    }
+
+    const [privateKey, publicKey] = await Promise.all([
+      fs.readFile(keyPath, "utf-8"),
+      fs.readFile(pubPath, "utf-8")
+    ]);
+
+    logger.info({ kind: "ssh", type: "ed25519" }, "ssh keypair generated");
+    return { privateKey, publicKey: publicKey.trimEnd() + "\n" };
+  } finally {
+    await Promise.all([rmrf(keyPath), rmrf(pubPath)]);
+  }
 }

@@ -1,10 +1,12 @@
 import type { FastifyInstance } from "fastify";
 import type { AppContext } from "../../app/context.js";
 import { HttpError } from "../../app/errors.js";
+import { AUTH_COOKIE_NAME, parseCookieHeader, verifySessionCookieValue } from "../../infra/auth/sessionCookie.js";
 import { tmuxCountClients, tmuxHasSession } from "../../infra/tmux/session.js";
 import { nowMs } from "../../utils/time.js";
 import { getTerminal, updateTerminalStatus } from "./terminal.store.js";
 import { getWorkspace } from "../workspaces/workspace.store.js";
+import { cleanupTerminalGitAuthArtifacts } from "./terminal.gitAuth.js";
 import * as pty from "node-pty";
 
 type WsClientMessage =
@@ -88,6 +90,13 @@ export async function registerTerminalWsRoute(app: FastifyInstance, ctx: AppCont
 
       let termId: string | null = null;
       try {
+        if (ctx.authToken) {
+          const cookies = parseCookieHeader(req.headers.cookie);
+          const v = cookies[AUTH_COOKIE_NAME];
+          const ok = v ? verifySessionCookieValue({ authToken: ctx.authToken, value: v, nowMs: nowMs() }) : false;
+          if (!ok) throw new HttpError(401, "Unauthorized");
+        }
+
         const term = getTerminal(ctx.db, params.terminalId);
         if (!term) throw new HttpError(404, "Terminal not found");
         termId = term.id;
@@ -98,6 +107,7 @@ export async function registerTerminalWsRoute(app: FastifyInstance, ctx: AppCont
         const exists = await tmuxHasSession({ sessionName: term.sessionName, cwd: ctx.dataDir });
         if (!exists) {
           updateTerminalStatus(ctx.db, term.id, "closed", nowMs());
+          await cleanupTerminalGitAuthArtifacts(ctx.dataDir, term.id);
           throw new HttpError(410, "tmux session not found (may have exited)");
         }
 

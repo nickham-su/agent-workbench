@@ -34,3 +34,8 @@ export const UpdateCredentialRequestSchema = Type.Object({
 });
 export type UpdateCredentialRequest = Static<typeof UpdateCredentialRequestSchema>;
 
+export const GenerateSshKeypairResponseSchema = Type.Object({
+  privateKey: Type.String({ minLength: 1 }),
+  publicKey: Type.String({ minLength: 1 })
+});
+export type GenerateSshKeypairResponse = Static<typeof GenerateSshKeypairResponseSchema>;

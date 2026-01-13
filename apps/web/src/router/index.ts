@@ -1,14 +1,39 @@
 import { createRouter, createWebHistory } from "vue-router";
 import WorkbenchPage from "../pages/WorkbenchPage.vue";
 import WorkspacePage from "../pages/WorkspacePage.vue";
+import LoginPage from "../pages/LoginPage.vue";
+import { loadAuthStatus } from "../auth/session";
 
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: "/", redirect: "/workspaces" },
+    { path: "/", name: "login", component: LoginPage },
     { path: "/workspaces", name: "workbench-workspaces", component: WorkbenchPage },
     { path: "/repos", name: "workbench-repos", component: WorkbenchPage },
     { path: "/settings", name: "workbench-settings", component: WorkbenchPage },
     { path: "/workspaces/:workspaceId", name: "workspace", component: WorkspacePage, props: true }
   ]
+});
+
+router.beforeEach(async (to) => {
+  let status;
+  try {
+    status = await loadAuthStatus();
+  } catch {
+    return true;
+  }
+  if (!status.authEnabled) {
+    if (to.path === "/") return "/workspaces";
+    return true;
+  }
+
+  if (to.path === "/") {
+    if (status.authed) return "/workspaces";
+    return true;
+  }
+
+  if (!status.authed) {
+    return { path: "/", query: { next: to.fullPath } };
+  }
+  return true;
 });

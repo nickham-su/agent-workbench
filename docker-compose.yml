@@ -6,28 +6,28 @@ services:
     image: agent-workbench:local
     ports:
       # Agent Workbench (Web UI + API)
-      - "4310:4310"
+      - "${PUBLISH_HOST:-0.0.0.0}:${PORT:-4310}:${PORT:-4310}"
       # Reserved port range for services started inside workspaces (dev servers, RPC, etc.)
       # If any port in this range is already in use on the host, the container may fail to start.
-      - "30000-30100:30000-30100"
+      - "${PUBLISH_HOST:-0.0.0.0}:${WORKSPACE_PORT_RANGE:-30000-30100}:${WORKSPACE_PORT_RANGE:-30000-30100}"
       #
       # Security note:
       # - The mappings above publish ports on all interfaces by default for convenience.
-      # - To bind to localhost only, prefix with 127.0.0.1, e.g.:
-      #   - "127.0.0.1:4310:4310"
-      #   - "127.0.0.1:30000-30100:30000-30100"
+      # - To bind to localhost only, set PUBLISH_HOST=127.0.0.1 in .env.
     environment:
-      HOST: 0.0.0.0
-      PORT: 4310
-      DATA_DIR: /data
-      SERVE_WEB: "1"
-      WEB_DIST_DIR: /app/apps/web/dist
-      # CREDENTIAL_MASTER_KEY: "..."
+      HOST: ${HOST:-0.0.0.0}
+      PORT: ${PORT:-4310}
+      DATA_DIR: ${DATA_DIR:-/data}
+      SERVE_WEB: ${SERVE_WEB:-1}
+      WEB_DIST_DIR: ${WEB_DIST_DIR:-/app/apps/web/dist}
+      CREDENTIAL_MASTER_KEY: ${CREDENTIAL_MASTER_KEY:-}
+      AUTH_TOKEN: ${AUTH_TOKEN:-}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-0}
     volumes:
       - agent-workbench-data:/data
       - agent-workbench-home:/home/dev
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:4310/api/health >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:${PORT:-4310}/api/health >/dev/null || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 10

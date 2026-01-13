@@ -30,6 +30,10 @@ Agent Workbench provides: isolated workspaces, persistent terminal sessions, cen
 git clone https://github.com/nickham-su/agent-workbench.git
 ```
 
+- Optional config (recommended)
+  - Copy `.env.docker.example` to `.env` and edit variables as needed
+  - If you skip this step, Docker Compose will use defaults from `docker-compose.yml`
+
 - Start the service
 
 ```bash
@@ -67,11 +71,18 @@ Two named volumes are used by default:
 
 By default, for convenience, ports 4310 and 30000-30100 are exposed externally. For a more secure deployment, it is recommended to add 127.0.0.1: before the ports mapping in docker-compose.yml to allow only localhost access.
 
+With the `.env`-driven compose file, you can bind ports to localhost by setting:
+
+- `PUBLISH_HOST=127.0.0.1`
+
 **Environment Variables**
 
 | Variable | Description |
 |----------|-------------|
 | `CREDENTIAL_MASTER_KEY` | Encryption key for credentials (32-byte hex/base64/base64url). Auto-generated and saved to `/data/keys/credential-master-key.json` if not set. Recommended to set explicitly for migration scenarios. |
+| `AUTH_TOKEN` | Optional access token protection. If set, Web UI/API requires signing in with this token (session cookie). |
+| `AUTH_COOKIE_SECURE` | Set to `1` when serving over HTTPS (adds `Secure` to the session cookie). Keep `0` for local HTTP dev. |
+| `PUBLISH_HOST` | Host IP to publish ports on (Docker Compose). Set `127.0.0.1` to allow localhost access only. |
 
 ---
 
@@ -117,6 +128,10 @@ Use the mouse wheel to scroll through history. In fullscreen programs like `vim`
 npm install
 npm run dev
 ```
+
+**Local env**
+
+- Copy `.env.example` to `.env.local` and adjust variables as needed
 
 **Scripts**
 
