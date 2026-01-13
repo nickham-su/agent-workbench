@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { getHealth } from "./health.service.js";
-import { HealthResponseSchema } from "./health.model.js";
+import { HealthResponseSchema } from "@agent-workbench/shared";
 import type { AppContext } from "../../app/context.js";
 
 export async function registerHealthRoutes(app: FastifyInstance, ctx: AppContext) {
@@ -9,5 +9,5 @@ export async function registerHealthRoutes(app: FastifyInstance, ctx: AppContext
       tags: ["health"],
       response: { 200: HealthResponseSchema }
     }
-  }, async () => getHealth(ctx));
+  }, async (req) => getHealth(ctx, req as any));
 }

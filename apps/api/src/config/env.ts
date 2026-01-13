@@ -7,6 +7,8 @@ export type Env = {
   fileMaxBytes: number;
   serveWeb: boolean;
   webDistDir: string | null;
+  authToken: string | null;
+  authCookieSecure: boolean;
 };
 
 export function loadEnv(processEnv: NodeJS.ProcessEnv): Env {
@@ -16,6 +18,8 @@ export function loadEnv(processEnv: NodeJS.ProcessEnv): Env {
   const fileMaxBytesRaw = processEnv.FILE_MAX_BYTES?.trim() || "1048576";
   const serveWebRaw = processEnv.SERVE_WEB?.trim() || "";
   const webDistDirRaw = processEnv.WEB_DIST_DIR?.trim() || "";
+  const authTokenRaw = processEnv.AUTH_TOKEN?.trim() || "";
+  const authCookieSecureRaw = processEnv.AUTH_COOKIE_SECURE?.trim() || "";
 
   const port = Number.parseInt(portRaw, 10);
   if (!Number.isFinite(port) || port <= 0) {
@@ -29,6 +33,8 @@ export function loadEnv(processEnv: NodeJS.ProcessEnv): Env {
 
   const serveWeb = ["1", "true", "yes", "on"].includes(serveWebRaw.toLowerCase());
   const webDistDir = webDistDirRaw ? path.resolve(webDistDirRaw) : null;
+  const authToken = authTokenRaw ? authTokenRaw : null;
+  const authCookieSecure = ["1", "true", "yes", "on"].includes(authCookieSecureRaw.toLowerCase());
 
   return {
     dataDir: path.resolve(dataDir),
@@ -36,6 +42,8 @@ export function loadEnv(processEnv: NodeJS.ProcessEnv): Env {
     port,
     fileMaxBytes,
     serveWeb,
-    webDistDir
+    webDistDir,
+    authToken,
+    authCookieSecure
   };
 }

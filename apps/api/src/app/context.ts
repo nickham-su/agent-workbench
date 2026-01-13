@@ -12,4 +12,6 @@ export type AppContext = {
   credentialMasterKeySource: CredentialMasterKeySource;
   credentialMasterKeyId: string;
   credentialMasterKeyCreatedAt: number | null;
+  authToken: string | null;
+  authCookieSecure: boolean;
 };

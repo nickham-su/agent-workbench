@@ -10,7 +10,7 @@ case "$prompt" in
       IFS= read -r token < "$GIT_ASKPASS_TOKEN_FILE" || token=""
       # strip a trailing CR (e.g. token file saved as CRLF) without calling external commands
       cr=$(printf '\r')
-      token=${token%$cr}
+      token=\${token%$cr}
       printf '%s' "$token"
     else
       printf '%s' "$GIT_ASKPASS_TOKEN"
