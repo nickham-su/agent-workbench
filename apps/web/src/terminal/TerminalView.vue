@@ -10,7 +10,7 @@
 
     <div
       ref="containerEl"
-      class="flex-1 min-h-0 rounded-none overflow-hidden bg-[#0b0f14] text-[#e5e7eb]"
+      class="flex-1 px-1 min-h-0 rounded-none overflow-hidden bg-[#0b0f14] text-[#e5e7eb]"
     />
   </div>
 </template>
@@ -24,6 +24,7 @@ import { useI18n } from "vue-i18n";
 import type { TerminalRecord } from "@agent-workbench/shared";
 import { parseWsMessage, sendWs, terminalWsUrl, type TerminalWsState } from "./ws";
 import { terminalFontSize } from "../settings/uiFontSizes";
+import { emitUnauthorized } from "../auth/unauthorized";
 
 const props = defineProps<{ terminal: TerminalRecord; active?: boolean }>();
 const { t } = useI18n();
@@ -244,6 +245,16 @@ function connect(force: boolean) {
   };
   ws.onclose = (evt) => {
     clearFitBurst();
+    if (evt.code === 4401) {
+      wsState.value = "errored";
+      clearReconnectTimer();
+      writeHint([
+        t("terminal.hint.unauthorizedLine0"),
+        t("terminal.hint.unauthorizedLine1", { code: evt.code, reason: evt.reason || "-", wasClean: String(evt.wasClean) })
+      ]);
+      emitUnauthorized();
+      return;
+    }
     if (evt.code === 4409) {
       wsState.value = "blocked";
       occupied.value = true;

@@ -30,7 +30,9 @@ const app = await createApp({
   credentialMasterKey: credentialMasterKey.key,
   credentialMasterKeySource: credentialMasterKey.source,
   credentialMasterKeyId: credentialMasterKey.keyId,
-  credentialMasterKeyCreatedAt: credentialMasterKey.createdAt
+  credentialMasterKeyCreatedAt: credentialMasterKey.createdAt,
+  authToken: env.authToken,
+  authCookieSecure: env.authCookieSecure
 });
 
 await app.listen({ host: env.host, port: env.port });

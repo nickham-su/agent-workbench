@@ -1,5 +1,7 @@
 import axios from "axios";
 import type {
+  AuthLoginRequest,
+  AuthLoginResponse,
   CreateRepoRequest,
   CreateCredentialRequest,
   CreateTerminalRequest,
@@ -23,6 +25,7 @@ import type {
   RepoSyncResponse,
   ResetKnownHostRequest,
   SecurityStatus,
+  HealthResponse,
   SwitchWorkspaceBranchRequest,
   TerminalRecord,
   UpdateCredentialRequest,
@@ -30,8 +33,29 @@ import type {
   UpdateRepoRequest,
   WorkspaceDetail,
 } from "@agent-workbench/shared";
+import { emitUnauthorized } from "../auth/unauthorized";
+import { resetAuthStatus, setAuthed } from "../auth/session";
 
 const client = axios.create({ baseURL: "/api" });
+
+let lastUnauthorizedAt = 0;
+client.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    if (axios.isAxiosError(err)) {
+      const status = err.response?.status;
+      if (status === 401) {
+        const now = Date.now();
+        if (now - lastUnauthorizedAt > 500) {
+          lastUnauthorizedAt = now;
+          resetAuthStatus();
+          emitUnauthorized();
+        }
+      }
+    }
+    return Promise.reject(err);
+  }
+);
 
 export class ApiError extends Error {
   code?: string;
@@ -62,6 +86,25 @@ function toApiError(err: unknown) {
 export async function listRepos() {
   try {
     const res = await client.get<RepoRecord[]>("/repos");
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getHealth() {
+  try {
+    const res = await client.get<HealthResponse>("/health");
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function login(body: AuthLoginRequest) {
+  try {
+    const res = await client.post<AuthLoginResponse>("/auth/login", body);
+    setAuthed(true);
     return res.data;
   } catch (err) {
     throw toApiError(err);
