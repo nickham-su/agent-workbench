@@ -18,6 +18,25 @@ export default {
       parensSuffix: "（{text}）"
     }
   },
+  gitIdentity: {
+    modalTitle: "设置 Git 身份",
+    form: {
+      nameLabel: "姓名",
+      namePlaceholder: "例如 Your Name",
+      emailLabel: "邮箱",
+      emailPlaceholder: "例如 name{at}example.com",
+      scopeLabel: "作用范围"
+    },
+    scope: {
+      session: "仅本次提交",
+      repo: "仅当前仓库",
+      global: "全局"
+    },
+    actions: {
+      saveAndContinue: "保存并继续",
+      cancel: "取消"
+    }
+  },
   auth: {
     login: {
       title: "访问登录",
@@ -39,6 +58,8 @@ export default {
     empty: "暂无仓库",
     actions: {
       add: "添加仓库",
+      sync: "同步",
+      edit: "修改",
       delete: "删除"
     },
     create: {
@@ -47,7 +68,18 @@ export default {
       gitUrlPlaceholder: "https://github.com/org/repo.git 或 git{at}github.com:org/repo.git",
       credentialLabel: "凭证（可选）",
       credentialPlaceholder: "选择凭证（私有仓库推荐选择）",
-      credentialHelp: "若未选择，将尝试按 URL host 自动匹配默认凭证；仍失败时可到 设置/凭证 配置。"
+      credentialHelp: "若未选择，将尝试按 URL host 自动匹配默认凭证；仍失败时可到 设置/凭证 配置。",
+      credentialHostMismatch: "URL host 为 {urlHost}，所选凭证 host 为 {credHost}，请改选匹配 host 的凭证。",
+      credentialKindMismatch: "URL 协议为 {urlKind}，所选凭证类型为 {credKind}，请切换 URL 或选择匹配的凭证。"
+    },
+    edit: {
+      modalTitle: "修改仓库",
+      credentialLabel: "凭证（可选）",
+      credentialPlaceholder: "选择凭证（私有仓库推荐选择）",
+      credentialHelp: "修改后可重新同步以验证。",
+      credentialHostMismatch: "URL host 为 {urlHost}，所选凭证 host 为 {credHost}，请改选匹配 host 的凭证。",
+      credentialKindMismatch: "URL 协议为 {urlKind}，所选凭证类型为 {credKind}，请切换 URL 或选择匹配的凭证。",
+      updated: "仓库已更新"
     },
     deleteConfirm: {
       title: "确认删除仓库？",
@@ -56,6 +88,9 @@ export default {
       cancel: "取消"
     },
     sync: {
+      started: "已开始同步",
+      alreadySyncing: "同步进行中",
+      success: "同步完成",
       failed: "仓库同步失败",
       timeout: "仓库同步超时，请稍后重试"
     },
@@ -83,6 +118,8 @@ export default {
       credentialLabel: "凭证（可选）",
       credentialPlaceholder: "选择凭证（私有仓库推荐选择）",
       credentialHelp: "若未选择，将尝试按 URL host 自动匹配默认凭证。",
+      credentialHostMismatch: "URL host 为 {urlHost}，所选凭证 host 为 {credHost}，请改选匹配 host 的凭证。",
+      credentialKindMismatch: "URL 协议为 {urlKind}，所选凭证类型为 {credKind}，请切换 URL 或选择匹配的凭证。",
       repoLabel: "仓库",
       repoPlaceholder: "选择仓库",
       branchLabel: "分支",
@@ -209,6 +246,8 @@ export default {
       resizeFileList: "调整文件列表宽度",
       base: "旧",
       current: "新",
+      prevChange: "上一处差异",
+      nextChange: "下一处差异",
       selectToCompare: "选择左侧文件以查看对比",
       notPreviewableTitle: "该文件暂不支持预览",
       baseReason: "旧文件：{reason}",
@@ -288,6 +327,7 @@ export default {
     title: "设置",
     tabs: {
       general: "常规",
+      gitIdentity: "Git 身份",
       credentials: "凭证",
       network: "网络",
       security: "安全"
@@ -311,6 +351,29 @@ export default {
           label: "对比字号",
           help: "调整代码对比（Diff）字体大小（全局生效，自动保存到本地）。默认：{default}"
         }
+      }
+    },
+    gitIdentity: {
+      description: "配置全局 Git 提交身份（user.name / user.email）。",
+      form: {
+        nameLabel: "全局 user.name",
+        namePlaceholder: "例如 Your Name",
+        emailLabel: "全局 user.email",
+        emailPlaceholder: "例如 name{at}example.com"
+      },
+      actions: {
+        save: "保存",
+        refresh: "刷新",
+        clearAll: "清除全部身份"
+      },
+      saved: "已保存",
+      cleared: "已清除",
+      clearedWithErrors: "已清除（{count} 个工作区清理失败）",
+      clearAllConfirm: {
+        title: "确认清除全部身份？",
+        content: "将清除全局配置，并遍历所有工作区仓库清除本地 user.name/user.email。",
+        ok: "清除",
+        cancel: "取消"
       }
     },
     credentials: {
@@ -375,7 +438,10 @@ export default {
         httpsProxyPlaceholder: "例如 http://127.0.0.1:7890",
         noProxyPlaceholder: "例如 localhost,127.0.0.1,.company.com",
         caCertLabel: "企业 CA 证书（PEM，可选）",
-        caCertPlaceholder: "粘贴 PEM 内容，支持多个 PEM 块"
+        caCertPlaceholder: "粘贴 PEM 内容，支持多个 PEM 块",
+        applyToTerminalLabel: "应用到终端",
+        applyToTerminalEffect: "作用：将代理/证书注入新建终端环境；仅配置凭证，终端里可能仍无法访问内网 Git（还需代理或 CA 证书）。",
+        applyToTerminalRisk: "风险：若代理地址包含账号密码，可能在终端环境变量/进程信息中泄露。"
       },
       actions: {
         save: "保存",

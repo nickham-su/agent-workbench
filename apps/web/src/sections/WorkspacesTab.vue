@@ -73,7 +73,12 @@
                    :placeholder="t('workspaces.create.repoUrlPlaceholder', { at: '@' })"/>
         </a-form-item>
 
-        <a-form-item v-if="createMode === 'url'" :label="t('workspaces.create.credentialLabel')">
+        <a-form-item
+          v-if="createMode === 'url'"
+          :label="t('workspaces.create.credentialLabel')"
+          :validate-status="credentialError ? 'error' : undefined"
+          :help="credentialError ?? undefined"
+        >
           <a-select
             v-model:value="selectedCredentialId"
             allow-clear
@@ -149,7 +154,7 @@ import { useI18n } from "vue-i18n";
 import type {CredentialRecord, RepoBranchesResponse, RepoRecord, WorkspaceDetail} from "@agent-workbench/shared";
 import { waitRepoReadyOrThrow } from "../services/repoSync";
 import { normalizeRepoUrl } from "../utils/repoUrl";
-import { extractGitHost } from "../utils/gitHost";
+import { extractGitHost, inferGitCredentialKindFromUrl } from "../utils/gitHost";
 import {
   createRepo,
   createWorkspace,
@@ -199,12 +204,41 @@ function credentialKindLabel(kind: CredentialRecord["kind"]) {
   return kind === "ssh" ? t("settings.credentials.form.kindSsh") : t("settings.credentials.form.kindHttps");
 }
 
+const urlHost = computed(() => extractGitHost(repoUrl.value));
+const urlKind = computed(() => inferGitCredentialKindFromUrl(repoUrl.value));
+const selectedCredential = computed(() => {
+  const id = selectedCredentialId.value;
+  if (!id) return null;
+  return credentials.value.find((c) => c.id === id) ?? null;
+});
+const credentialError = computed(() => {
+  if (createMode.value !== "url") return null;
+  const cred = selectedCredential.value;
+  if (!cred) return null;
+
+  const host = urlHost.value;
+  if (host && cred.host !== host) {
+    return t("workspaces.create.credentialHostMismatch", { urlHost: host, credHost: cred.host });
+  }
+
+  const kind = urlKind.value;
+  if (kind && cred.kind !== kind) {
+    return t("workspaces.create.credentialKindMismatch", {
+      urlKind: credentialKindLabel(kind),
+      credKind: credentialKindLabel(cred.kind)
+    });
+  }
+
+  return null;
+});
+
 const credentialOptions = computed(() => {
-  const host = extractGitHost(repoUrl.value);
+  const host = urlHost.value;
+  const kind = urlKind.value;
   const list = credentials.value.slice();
   list.sort((a, b) => {
-    const aScore = (host && a.host === host ? 100 : 0) + (a.isDefault ? 10 : 0);
-    const bScore = (host && b.host === host ? 100 : 0) + (b.isDefault ? 10 : 0);
+    const aScore = (host && a.host === host ? 100 : 0) + (kind && a.kind === kind ? 20 : 0) + (a.isDefault ? 10 : 0);
+    const bScore = (host && b.host === host ? 100 : 0) + (kind && b.kind === kind ? 20 : 0) + (b.isDefault ? 10 : 0);
     return bScore - aScore;
   });
   return list;
@@ -295,11 +329,16 @@ async function submitCreate() {
     } else {
       const url = repoUrl.value.trim();
       if (!url) return;
+      if (credentialError.value) {
+        message.error(credentialError.value);
+        return;
+      }
 
       let credentialId = selectedCredentialId.value ?? null;
       if (!credentialId) {
         const host = extractGitHost(url);
-        const pick = host ? credentials.value.find((c) => c.host === host && c.isDefault) : undefined;
+        const kind = inferGitCredentialKindFromUrl(url);
+        const pick = host ? credentials.value.find((c) => c.host === host && c.isDefault && (!kind || c.kind === kind)) : undefined;
         credentialId = pick?.id ?? null;
       }
 
@@ -376,7 +415,8 @@ watch(
     if (createMode.value !== "url") return;
     if (selectedCredentialId.value) return;
     const host = extractGitHost(repoUrl.value);
-    const pick = host ? credentials.value.find((c) => c.host === host && c.isDefault) : undefined;
+    const kind = inferGitCredentialKindFromUrl(repoUrl.value);
+    const pick = host ? credentials.value.find((c) => c.host === host && c.isDefault && (!kind || c.kind === kind)) : undefined;
     selectedCredentialId.value = pick?.id ?? undefined;
   }
 );

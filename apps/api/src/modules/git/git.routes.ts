@@ -7,6 +7,8 @@ import {
   GitCommitRequestSchema,
   GitCommitResponseSchema,
   GitDiscardRequestSchema,
+  GitIdentitySetRequestSchema,
+  GitIdentityStatusSchema,
   GitPullRequestSchema,
   GitPullResponseSchema,
   GitPushRequestSchema,
@@ -18,6 +20,8 @@ import {
   commitWorkspace,
   discardWorkspace,
   fileCompare,
+  getWorkspaceGitIdentity,
+  setWorkspaceGitIdentity,
   listChanges,
   pullWorkspace,
   pushWorkspace,
@@ -110,6 +114,37 @@ export async function registerGitRoutes(app: FastifyInstance, ctx: AppContext) {
       const params = req.params as { workspaceId: string };
       const body = (req.body ?? {}) as any;
       return commitWorkspace(ctx, params.workspaceId, body);
+    }
+  );
+
+  app.get(
+    "/api/workspaces/:workspaceId/git/identity",
+    {
+      schema: {
+        tags: ["git"],
+        response: { 200: GitIdentityStatusSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      const params = req.params as { workspaceId: string };
+      return getWorkspaceGitIdentity(ctx, params.workspaceId);
+    }
+  );
+
+  app.put(
+    "/api/workspaces/:workspaceId/git/identity",
+    {
+      schema: {
+        tags: ["git"],
+        body: GitIdentitySetRequestSchema,
+        response: { 204: { type: "null" }, 400: ErrorResponseSchema, 404: ErrorResponseSchema, 409: ErrorResponseSchema }
+      }
+    },
+    async (req, reply) => {
+      const params = req.params as { workspaceId: string };
+      const body = (req.body ?? {}) as any;
+      await setWorkspaceGitIdentity(ctx, params.workspaceId, body);
+      return reply.code(204).send();
     }
   );
 

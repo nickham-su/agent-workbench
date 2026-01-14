@@ -41,6 +41,28 @@
           </a-form>
         </a-tab-pane>
 
+        <a-tab-pane key="gitIdentity" :tab="t('settings.tabs.gitIdentity')">
+          <div class="text-xs text-[color:var(--text-tertiary)] pb-2">
+            {{ t("settings.gitIdentity.description") }}
+          </div>
+
+          <a-form layout="vertical">
+            <a-form-item :label="t('settings.gitIdentity.form.nameLabel')">
+              <a-input v-model:value="gitGlobalName" :placeholder="t('settings.gitIdentity.form.namePlaceholder')" style="max-width: 420px" />
+            </a-form-item>
+            <a-form-item :label="t('settings.gitIdentity.form.emailLabel')">
+              <a-input v-model:value="gitGlobalEmail" :placeholder="t('settings.gitIdentity.form.emailPlaceholder', { at: '@' })" style="max-width: 420px" />
+            </a-form-item>
+            <div class="flex items-center gap-2">
+              <a-button size="small" :loading="gitIdentitySaving" @click="saveGitIdentity">{{ t("settings.gitIdentity.actions.save") }}</a-button>
+              <a-button size="small" type="text" :loading="gitIdentityLoading" @click="refreshGitIdentity">{{ t("settings.gitIdentity.actions.refresh") }}</a-button>
+              <a-button size="small" danger :loading="gitIdentityClearing" @click="clearAllIdentityWithUi">
+                {{ t("settings.gitIdentity.actions.clearAll") }}
+              </a-button>
+            </div>
+          </a-form>
+        </a-tab-pane>
+
         <a-tab-pane key="credentials" :tab="t('settings.tabs.credentials')">
           <div class="flex items-center justify-between pb-2">
             <div class="text-xs text-[color:var(--text-tertiary)]">
@@ -154,6 +176,15 @@
             <a-form-item :label="t('settings.network.form.caCertLabel')">
               <a-textarea v-model:value="networkCaPem" :rows="8" :placeholder="t('settings.network.form.caCertPlaceholder')" />
             </a-form-item>
+            <a-form-item>
+              <div class="flex items-start gap-2">
+                <a-checkbox v-model:checked="networkApplyToTerminal">{{ t("settings.network.form.applyToTerminalLabel") }}</a-checkbox>
+                <div class="text-[11px] text-[color:var(--text-tertiary)] leading-4 pt-[2px]">
+                  <div>{{ t("settings.network.form.applyToTerminalEffect") }}</div>
+                  <div>{{ t("settings.network.form.applyToTerminalRisk") }}</div>
+                </div>
+              </div>
+            </a-form-item>
             <div class="flex items-center gap-2">
               <a-button size="small" :loading="networkSaving" @click="saveNetwork">{{ t("settings.network.actions.save") }}</a-button>
               <a-button size="small" type="text" :loading="networkLoading" @click="refreshNetwork">{{ t("settings.network.actions.refresh") }}</a-button>
@@ -208,21 +239,24 @@ import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { diffFontSize, setDiffFontSize, setTerminalFontSize, terminalFontSize, uiFontSizeDefaults } from "../settings/uiFontSizes";
 import {
+  clearAllGitIdentity,
   createCredential,
   deleteCredential,
   generateSshKeypair,
+  getGitGlobalIdentity,
   getNetworkSettings,
   getSecurityStatus,
   listCredentials,
   resetKnownHost,
   updateCredential,
+  updateGitGlobalIdentity,
   updateNetworkSettings
 } from "../services/api";
 import { getInitialLocale, setStoredLocale, type AppLocale } from "../i18n/locale";
 
 const { t, locale } = useI18n();
 
-const innerKey = ref<"general" | "credentials" | "network" | "security">("general");
+const innerKey = ref<"general" | "gitIdentity" | "credentials" | "network" | "security">("general");
 
 const uiLocale = ref<AppLocale>(getInitialLocale());
 const languageOptions = computed(() => [
@@ -245,6 +279,69 @@ const diffFontSizeModel = computed<number | null>({
     setDiffFontSize(v);
   }
 });
+
+const gitIdentityLoading = ref(false);
+const gitIdentitySaving = ref(false);
+const gitIdentityClearing = ref(false);
+const gitGlobalName = ref("");
+const gitGlobalEmail = ref("");
+
+async function refreshGitIdentity() {
+  if (gitIdentityLoading.value) return;
+  gitIdentityLoading.value = true;
+  try {
+    const res = await getGitGlobalIdentity();
+    gitGlobalName.value = res.name || "";
+    gitGlobalEmail.value = res.email || "";
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
+  } finally {
+    gitIdentityLoading.value = false;
+  }
+}
+
+async function saveGitIdentity() {
+  if (gitIdentitySaving.value) return;
+  const name = gitGlobalName.value.trim();
+  const email = gitGlobalEmail.value.trim();
+  if (!name || !email) return;
+  gitIdentitySaving.value = true;
+  try {
+    await updateGitGlobalIdentity({ name, email });
+    message.success(t("settings.gitIdentity.saved"));
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
+  } finally {
+    gitIdentitySaving.value = false;
+  }
+}
+
+function clearAllIdentityWithUi() {
+  if (gitIdentityClearing.value) return;
+  Modal.confirm({
+    title: t("settings.gitIdentity.clearAllConfirm.title"),
+    content: t("settings.gitIdentity.clearAllConfirm.content"),
+    okText: t("settings.gitIdentity.clearAllConfirm.ok"),
+    okType: "danger",
+    cancelText: t("settings.gitIdentity.clearAllConfirm.cancel"),
+    onOk: async () => {
+      gitIdentityClearing.value = true;
+      try {
+        const res = await clearAllGitIdentity();
+        if (!res.ok && res.errors.length > 0) {
+          message.warning(t("settings.gitIdentity.clearedWithErrors", { count: res.errors.length }));
+        } else {
+          message.success(t("settings.gitIdentity.cleared"));
+        }
+        await refreshGitIdentity();
+      } catch (err) {
+        message.error(err instanceof Error ? err.message : String(err));
+      } finally {
+        gitIdentityClearing.value = false;
+      }
+    }
+  });
+}
 
 watch(
   () => uiLocale.value,
@@ -425,6 +522,7 @@ const networkHttpProxy = ref("");
 const networkHttpsProxy = ref("");
 const networkNoProxy = ref("");
 const networkCaPem = ref("");
+const networkApplyToTerminal = ref(false);
 
 async function refreshNetwork() {
   networkLoading.value = true;
@@ -434,6 +532,7 @@ async function refreshNetwork() {
     networkHttpsProxy.value = res.httpsProxy || "";
     networkNoProxy.value = res.noProxy || "";
     networkCaPem.value = res.caCertPem || "";
+    networkApplyToTerminal.value = Boolean(res.applyToTerminal);
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
@@ -449,7 +548,8 @@ async function saveNetwork() {
       httpProxy: networkHttpProxy.value.trim() ? networkHttpProxy.value.trim() : null,
       httpsProxy: networkHttpsProxy.value.trim() ? networkHttpsProxy.value.trim() : null,
       noProxy: networkNoProxy.value.trim() ? networkNoProxy.value.trim() : null,
-      caCertPem: networkCaPem.value ? networkCaPem.value : null
+      caCertPem: networkCaPem.value ? networkCaPem.value : null,
+      applyToTerminal: networkApplyToTerminal.value
     });
     message.success(t("settings.network.saved"));
     await refreshNetwork();
@@ -499,7 +599,8 @@ async function resetKnownHostWithUi() {
 watch(
   () => innerKey.value,
   async (k) => {
-    if (k === "credentials") await refreshCredentials();
+    if (k === "gitIdentity") await refreshGitIdentity();
+    else if (k === "credentials") await refreshCredentials();
     else if (k === "network") await refreshNetwork();
     else if (k === "security") await refreshSecurity();
   }

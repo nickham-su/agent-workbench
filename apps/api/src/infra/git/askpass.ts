@@ -7,7 +7,9 @@ case "$prompt" in
   *)
     if [ -n "$GIT_ASKPASS_TOKEN_FILE" ] && [ -r "$GIT_ASKPASS_TOKEN_FILE" ]; then
       # read first line (POSIX), avoid putting secrets into argv
-      IFS= read -r token < "$GIT_ASKPASS_TOKEN_FILE" || token=""
+      # NOTE: if the file does not end with a trailing newline, read may return non-zero on EOF
+      # but still set $token; do NOT overwrite it via || token="".
+      IFS= read -r token < "$GIT_ASKPASS_TOKEN_FILE"
       # strip a trailing CR (e.g. token file saved as CRLF) without calling external commands
       cr=$(printf '\r')
       token=\${token%$cr}

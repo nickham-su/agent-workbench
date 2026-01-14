@@ -96,9 +96,45 @@ export const GitDiscardRequestSchema = Type.Object(
 );
 export type GitDiscardRequest = Static<typeof GitDiscardRequestSchema>;
 
+export const GitIdentityScopeSchema = Type.Union([Type.Literal("session"), Type.Literal("repo"), Type.Literal("global")]);
+export type GitIdentityScope = Static<typeof GitIdentityScopeSchema>;
+
+export const GitIdentityInputSchema = Type.Object({
+  scope: GitIdentityScopeSchema,
+  name: Type.String({ minLength: 1 }),
+  email: Type.String({ minLength: 1 })
+});
+export type GitIdentityInput = Static<typeof GitIdentityInputSchema>;
+
+export const GitIdentitySetRequestSchema = Type.Object({
+  name: Type.String({ minLength: 1 }),
+  email: Type.String({ minLength: 1 })
+});
+export type GitIdentitySetRequest = Static<typeof GitIdentitySetRequestSchema>;
+
+export const GitIdentitySourceSchema = Type.Union([Type.Literal("repo"), Type.Literal("global"), Type.Literal("none")]);
+export type GitIdentitySource = Static<typeof GitIdentitySourceSchema>;
+
+export const GitIdentityStateSchema = Type.Object({
+  name: Type.Union([Type.String(), Type.Null()]),
+  email: Type.Union([Type.String(), Type.Null()])
+});
+export type GitIdentityState = Static<typeof GitIdentityStateSchema>;
+
+export const GitIdentityStatusSchema = Type.Object({
+  effective: Type.Intersect([
+    GitIdentityStateSchema,
+    Type.Object({ source: GitIdentitySourceSchema })
+  ]),
+  repo: GitIdentityStateSchema,
+  global: GitIdentityStateSchema
+});
+export type GitIdentityStatus = Static<typeof GitIdentityStatusSchema>;
+
 export const GitCommitRequestSchema = Type.Object(
   {
     message: Type.String({ minLength: 1 }),
+    identity: Type.Optional(GitIdentityInputSchema),
     amend: Type.Optional(Type.Boolean()),
     signoff: Type.Optional(Type.Boolean()),
     noVerify: Type.Optional(Type.Boolean()),

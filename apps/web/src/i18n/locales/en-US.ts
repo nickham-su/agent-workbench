@@ -18,6 +18,25 @@ export default {
       parensSuffix: " ({text})"
     }
   },
+  gitIdentity: {
+    modalTitle: "Set Git identity",
+    form: {
+      nameLabel: "Name",
+      namePlaceholder: "e.g. Your Name",
+      emailLabel: "Email",
+      emailPlaceholder: "e.g. name{at}example.com",
+      scopeLabel: "Scope"
+    },
+    scope: {
+      session: "This commit only",
+      repo: "This repo",
+      global: "Global"
+    },
+    actions: {
+      saveAndContinue: "Save & continue",
+      cancel: "Cancel"
+    }
+  },
   auth: {
     login: {
       title: "Sign in",
@@ -39,6 +58,8 @@ export default {
     empty: "No repos",
     actions: {
       add: "Add repo",
+      sync: "Sync",
+      edit: "Edit",
       delete: "Delete"
     },
     create: {
@@ -47,7 +68,18 @@ export default {
       gitUrlPlaceholder: "https://github.com/org/repo.git or git{at}github.com:org/repo.git",
       credentialLabel: "Credential (optional)",
       credentialPlaceholder: "Select credential (recommended for private repos)",
-      credentialHelp: "If not selected, it will try to pick the default credential by URL host; otherwise configure it in Settings/Credentials."
+      credentialHelp: "If not selected, it will try to pick the default credential by URL host; otherwise configure it in Settings/Credentials.",
+      credentialHostMismatch: "URL host is {urlHost}, but the selected credential host is {credHost}. Please pick a credential for the same host.",
+      credentialKindMismatch: "URL protocol is {urlKind}, but the selected credential type is {credKind}. Switch the URL or pick a matching credential."
+    },
+    edit: {
+      modalTitle: "Edit repo",
+      credentialLabel: "Credential (optional)",
+      credentialPlaceholder: "Select credential (recommended for private repos)",
+      credentialHelp: "Sync again to validate after update.",
+      credentialHostMismatch: "URL host is {urlHost}, but the selected credential host is {credHost}. Please pick a credential for the same host.",
+      credentialKindMismatch: "URL protocol is {urlKind}, but the selected credential type is {credKind}. Switch the URL or pick a matching credential.",
+      updated: "Repo updated"
     },
     deleteConfirm: {
       title: "Delete repo?",
@@ -56,6 +88,9 @@ export default {
       cancel: "Cancel"
     },
     sync: {
+      started: "Sync started",
+      alreadySyncing: "Already syncing",
+      success: "Sync completed",
       failed: "Repo sync failed",
       timeout: "Repo sync timed out. Please try again later."
     },
@@ -83,6 +118,8 @@ export default {
       credentialLabel: "Credential (optional)",
       credentialPlaceholder: "Select credential (recommended for private repos)",
       credentialHelp: "If not selected, it will try to pick the default credential by URL host.",
+      credentialHostMismatch: "URL host is {urlHost}, but the selected credential host is {credHost}. Please pick a credential for the same host.",
+      credentialKindMismatch: "URL protocol is {urlKind}, but the selected credential type is {credKind}. Switch the URL or pick a matching credential.",
       repoLabel: "Repo",
       repoPlaceholder: "Select repo",
       branchLabel: "Branch",
@@ -209,6 +246,8 @@ export default {
       resizeFileList: "Resize file list",
       base: "Old",
       current: "New",
+      prevChange: "Previous change",
+      nextChange: "Next change",
       selectToCompare: "Select a file on the left to view diff",
       notPreviewableTitle: "Preview not available for this file",
       baseReason: "Old: {reason}",
@@ -288,6 +327,7 @@ export default {
     title: "Settings",
     tabs: {
       general: "General",
+      gitIdentity: "Git Identity",
       credentials: "Credentials",
       network: "Network",
       security: "Security"
@@ -311,6 +351,29 @@ export default {
           label: "Diff font size",
           help: "Adjust diff viewer font size (global, saved locally). Default: {default}"
         }
+      }
+    },
+    gitIdentity: {
+      description: "Configure global Git identity (user.name / user.email).",
+      form: {
+        nameLabel: "Global user.name",
+        namePlaceholder: "e.g. Your Name",
+        emailLabel: "Global user.email",
+        emailPlaceholder: "e.g. name{at}example.com"
+      },
+      actions: {
+        save: "Save",
+        refresh: "Refresh",
+        clearAll: "Clear all identity"
+      },
+      saved: "Saved",
+      cleared: "Cleared",
+      clearedWithErrors: "Cleared (failed in {count} workspaces)",
+      clearAllConfirm: {
+        title: "Clear all identity?",
+        content: "This clears global config and removes local user.name/user.email from all workspace repos.",
+        ok: "Clear",
+        cancel: "Cancel"
       }
     },
     credentials: {
@@ -375,7 +438,10 @@ export default {
         httpsProxyPlaceholder: "e.g. http://127.0.0.1:7890",
         noProxyPlaceholder: "e.g. localhost,127.0.0.1,.company.com",
         caCertLabel: "Enterprise CA certificate (PEM, optional)",
-        caCertPlaceholder: "Paste PEM content (multiple blocks supported)"
+        caCertPlaceholder: "Paste PEM content (multiple blocks supported)",
+        applyToTerminalLabel: "Apply to terminals",
+        applyToTerminalEffect: "Effect: inject proxy/cert into new terminal sessions; with credentials only, the terminal may still be unable to access internal Git (proxy or CA cert may be required).",
+        applyToTerminalRisk: "Risk: if proxy URLs include username/password, they may leak via terminal environment variables or process info."
       },
       actions: {
         save: "Save",

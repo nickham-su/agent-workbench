@@ -28,3 +28,14 @@ export function extractGitHost(rawUrl: string): string | null {
   return null;
 }
 
+export function inferGitCredentialKindFromUrl(rawUrl: string): "https" | "ssh" | null {
+  const s = String(rawUrl || "").trim();
+  if (!s) return null;
+
+  const lower = s.toLowerCase();
+  if (lower.startsWith("http://") || lower.startsWith("https://")) return "https";
+  if (lower.startsWith("ssh://")) return "ssh";
+  // scp-like: git@github.com:org/repo
+  if (/^[^@]+@[^:]+:/.test(s)) return "ssh";
+  return null;
+}

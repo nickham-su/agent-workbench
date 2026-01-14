@@ -6,6 +6,15 @@
             class="flex items-center justify-between pl-3 pr-1 py-1.5 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
           <div class="text-xs font-semibold">{{ t("codeReview.unstaged") }}</div>
           <div class="flex items-center gap-1">
+            <a-tooltip :title="t('codeReview.actions.refresh')" :mouseEnterDelay="0" :mouseLeaveDelay="0"
+                       placement="top">
+              <span class="inline-flex">
+                <a-button size="small" type="text" :disabled="gitBusy" @click="refreshAll"
+                          :aria-label="t('codeReview.actions.refresh')">
+                  <template #icon><ReloadOutlined/></template>
+                </a-button>
+              </span>
+            </a-tooltip>
             <a-tooltip :title="t('codeReview.actions.stageAll')" :mouseEnterDelay="0" :mouseLeaveDelay="0"
                        placement="top">
               <span class="inline-flex">
@@ -34,15 +43,6 @@
                 </a-button>
               </span>
             </a-tooltip>
-            <a-tooltip :title="t('codeReview.actions.refresh')" :mouseEnterDelay="0" :mouseLeaveDelay="0"
-                       placement="top">
-              <span class="inline-flex">
-                <a-button size="small" type="text" :disabled="gitBusy" @click="refreshAll"
-                          :aria-label="t('codeReview.actions.refresh')">
-                  <template #icon><ReloadOutlined/></template>
-                </a-button>
-              </span>
-            </a-tooltip>
           </div>
         </div>
         <div class="flex-1 min-h-0 overflow-auto">
@@ -68,7 +68,9 @@
               </a-tooltip>
               <div class="min-w-0 flex-1">
                 <div class="text-xs font-mono min-w-0 flex items-center">
-                  <span class="text-[color:var(--text-secondary)] min-w-0 flex-initial truncate block">{{ fileDir(f.path) }}</span>
+                  <span class="text-[color:var(--text-secondary)] min-w-0 flex-initial truncate block">{{
+                      fileDir(f.path)
+                    }}</span>
                   <span class="text-[color:var(--text-color)] shrink-0 whitespace-nowrap">{{ fileBase(f.path) }}</span>
                 </div>
                 <div v-if="f.oldPath" class="mt-0.5 text-[11px] font-mono truncate text-[color:var(--text-tertiary)]">
@@ -76,6 +78,15 @@
                 </div>
               </div>
               <div class="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100">
+                <a-tooltip :title="t('codeReview.actions.stage')" :mouseEnterDelay="0" :mouseLeaveDelay="0"
+                           placement="top">
+                  <span class="inline-flex">
+                    <a-button size="small" type="text" :disabled="gitBusy" @click.stop="stageOne(f)"
+                              :aria-label="t('codeReview.actions.stage')">
+                      <template #icon><PlusOutlined/></template>
+                    </a-button>
+                  </span>
+                </a-tooltip>
                 <a-tooltip :title="discardOneLabel(f)" :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="top">
                   <span class="inline-flex">
                     <a-button
@@ -86,15 +97,6 @@
                         :aria-label="discardOneLabel(f)"
                     >
                       <template #icon><RollbackOutlined/></template>
-                    </a-button>
-                  </span>
-                </a-tooltip>
-                <a-tooltip :title="t('codeReview.actions.stage')" :mouseEnterDelay="0" :mouseLeaveDelay="0"
-                           placement="top">
-                  <span class="inline-flex">
-                    <a-button size="small" type="text" :disabled="gitBusy" @click.stop="stageOne(f)"
-                              :aria-label="t('codeReview.actions.stage')">
-                      <template #icon><PlusOutlined/></template>
                     </a-button>
                   </span>
                 </a-tooltip>
@@ -157,7 +159,9 @@
               </a-tooltip>
               <div class="min-w-0 flex-1">
                 <div class="text-xs font-mono min-w-0 flex items-center">
-                  <span class="text-[color:var(--text-secondary)] min-w-0 flex-initial truncate block">{{ fileDir(f.path) }}</span>
+                  <span class="text-[color:var(--text-secondary)] min-w-0 flex-initial truncate block">{{
+                      fileDir(f.path)
+                    }}</span>
                   <span class="text-[color:var(--text-color)] shrink-0 whitespace-nowrap">{{ fileBase(f.path) }}</span>
                 </div>
                 <div v-if="f.oldPath" class="mt-0.5 text-[11px] font-mono truncate text-[color:var(--text-tertiary)]">
@@ -203,12 +207,42 @@
           </div>
           <div aria-hidden="true"></div>
           <div
-              class="px-3 py-2 text-xs font-semibold border-l border-[var(--border-color-secondary)] min-w-0 whitespace-nowrap overflow-hidden">
+              class="pl-3 py-2 text-xs font-semibold border-l border-[var(--border-color-secondary)] min-w-0 whitespace-nowrap overflow-hidden">
             <div class="flex items-center gap-2 min-w-0">
               <span class="shrink-0">{{ t("codeReview.diff.current") }}</span>
               <span v-if="compare" class="min-w-0 truncate text-[11px] font-normal text-[color:var(--text-tertiary)]">{{
                   compare.current.label
                 }}</span>
+              <div class="h-5 ml-auto flex items-center gap-0.5">
+                <a-tooltip :title="t('codeReview.diff.prevChange')" :mouseEnterDelay="0" :mouseLeaveDelay="0"
+                           placement="top">
+                  <span class="inline-flex">
+                    <a-button
+                        size="small"
+                        type="text"
+                        :disabled="diffNavDisabled"
+                        @click="goToPreviousDiff"
+                        :aria-label="t('codeReview.diff.prevChange')"
+                    >
+                      <template #icon><UpOutlined/></template>
+                    </a-button>
+                  </span>
+                </a-tooltip>
+                <a-tooltip :title="t('codeReview.diff.nextChange')" :mouseEnterDelay="0" :mouseLeaveDelay="0"
+                           placement="top">
+                  <span class="inline-flex">
+                    <a-button
+                        size="small"
+                        type="text"
+                        :disabled="diffNavDisabled"
+                        @click="goToNextDiff"
+                        :aria-label="t('codeReview.diff.nextChange')"
+                    >
+                      <template #icon><DownOutlined/></template>
+                    </a-button>
+                  </span>
+                </a-tooltip>
+              </div>
             </div>
           </div>
         </div>
@@ -237,6 +271,7 @@
         <div v-else class="flex-1 min-h-0 relative">
           <MonacoDiffViewer
               class="h-full"
+              ref="diffViewerRef"
               :original="compare?.base.content || ''"
               :modified="compare?.current.content || ''"
               :language="compare?.language"
@@ -282,6 +317,14 @@
       </a-space>
     </template>
   </a-modal>
+
+  <GitIdentityModal
+      v-model:open="identityOpen"
+      :workspaceId="workspaceId"
+      :defaultScope="'repo'"
+      :loading="identitySubmitting"
+      @submit="onIdentitySubmit"
+  />
 </template>
 
 <script setup lang="ts">
@@ -289,6 +332,7 @@ import {computed, onMounted, onUnmounted, ref, watch} from "vue";
 import {Modal, message} from "ant-design-vue";
 import {
   CopyOutlined,
+  DownOutlined,
   DeleteOutlined,
   ExclamationCircleOutlined,
   EyeInvisibleOutlined,
@@ -299,11 +343,13 @@ import {
   PlusOutlined,
   ReloadOutlined,
   RetweetOutlined,
-  RollbackOutlined
+  RollbackOutlined,
+  UpOutlined
 } from "@ant-design/icons-vue";
 import {useI18n} from "vue-i18n";
 import type {ChangeItem, ChangeMode, FileCompareResponse, GitPushRequest} from "@agent-workbench/shared";
 import {
+  ApiError,
   commitWorkspace,
   discardWorkspace,
   fileCompare,
@@ -312,6 +358,7 @@ import {
   unstageWorkspace
 } from "../services/api";
 import MonacoDiffViewer from "../components/MonacoDiffViewer.vue";
+import GitIdentityModal from "../components/GitIdentityModal.vue";
 
 type Selected = { mode: ChangeMode; path: string; oldPath?: string } | null;
 
@@ -465,6 +512,7 @@ const compareLoading = ref(false);
 const compareError = ref<string | null>(null);
 const compare = ref<FileCompareResponse | null>(null);
 const diffHeaderVars = ref<Record<string, string>>({});
+const diffViewerRef = ref<{ goToPreviousDiff: () => void; goToNextDiff: () => void } | null>(null);
 let compareReqSeq = 0;
 
 const unstagedFiles = computed(() => unstaged.value);
@@ -475,12 +523,32 @@ const commitMessage = ref("");
 const commitLoading = ref<"commit" | "commitAndPush" | null>(null);
 const canCommit = computed(() => stagedFiles.value.length > 0 && commitMessage.value.trim().length > 0 && !props.gitBusy);
 
+const identityOpen = ref(false);
+const pendingCommitMode = ref<"commit" | "commitAndPush" | null>(null);
+const identitySubmitting = ref(false);
+
 function onDiffLayout(layout: { originalWidth: number; modifiedWidth: number; splitterWidth: number }) {
   diffHeaderVars.value = {
     "--diff-original-width": `${layout.originalWidth}px`,
     "--diff-splitter-width": `${layout.splitterWidth}px`,
     "--diff-modified-width": `${layout.modifiedWidth}px`
   };
+}
+
+const diffNavDisabled = computed(() => {
+  const c = compare.value;
+  if (!c) return true;
+  if (compareLoading.value) return true;
+  if (!c.base.previewable || !c.current.previewable) return true;
+  return false;
+});
+
+function goToPreviousDiff() {
+  diffViewerRef.value?.goToPreviousDiff();
+}
+
+function goToNextDiff() {
+  diffViewerRef.value?.goToNextDiff();
 }
 
 function isSelected(mode: ChangeMode, path: string) {
@@ -756,11 +824,53 @@ async function submitCommit(mode: "commit" | "commitAndPush") {
     commitMessage.value = "";
     await refreshAll();
   } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err));
+    const e = err instanceof ApiError ? err : new ApiError({message: err instanceof Error ? err.message : String(err)});
+    if (e.code === "GIT_IDENTITY_REQUIRED") {
+      pendingCommitMode.value = mode;
+      identityOpen.value = true;
+      return;
+    }
+    message.error(e.message);
     return;
   } finally {
     release();
     commitLoading.value = null;
+  }
+
+  if (mode === "commitAndPush") {
+    try {
+      await props.push?.();
+    } catch {
+      // push 内部自行 toast/弹窗；这里不重复提示
+    }
+  }
+}
+
+async function onIdentitySubmit(identity: any) {
+  if (!props.workspaceId) return;
+  const mode = pendingCommitMode.value ?? "commit";
+  const msg = commitMessage.value.trim();
+  if (!msg) return;
+
+  commitLoading.value = mode;
+  const release = props.beginGitOp();
+  identitySubmitting.value = true;
+  try {
+    const res = await commitWorkspace(props.workspaceId, {message: msg, identity});
+    message.success(t("codeReview.commit.committed", {sha: res.sha.slice(0, 8)}));
+    commitOpen.value = false;
+    commitMessage.value = "";
+    identityOpen.value = false;
+    pendingCommitMode.value = null;
+    await refreshAll();
+  } catch (err) {
+    const e = err instanceof ApiError ? err : new ApiError({message: err instanceof Error ? err.message : String(err)});
+    message.error(e.message);
+    return;
+  } finally {
+    release();
+    commitLoading.value = null;
+    identitySubmitting.value = false;
   }
 
   if (mode === "commitAndPush") {
