@@ -111,6 +111,7 @@ export default {
     },
     dock: {
       moveTo: "移动到 {area}",
+      pinnedAt: "已固定在 {area}",
       areas: {
         leftTop: "左上",
         leftBottom: "下方",

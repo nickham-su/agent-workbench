@@ -36,7 +36,7 @@
                 :aria-label="collapseLabel"
             >
               <template #icon>
-                <EyeInvisibleOutlined/>
+                <MinusOutlined/>
               </template>
             </a-button>
           </a-tooltip>
@@ -57,7 +57,7 @@
           </template>
           <div class="h-full flex flex-col min-h-0">
             <div class="flex-1 min-h-0">
-              <TerminalView :terminal="term" :active="effectiveActiveKey === term.id"/>
+              <TerminalView :terminal="term" :active="effectiveActiveKey === term.id" @exited="onTerminalExited"/>
             </div>
           </div>
         </a-tab-pane>
@@ -78,7 +78,7 @@
 
 <script setup lang="ts">
 import {Modal, message} from "ant-design-vue";
-import {CloseOutlined, PlusOutlined, CodeOutlined, EyeInvisibleOutlined} from "@ant-design/icons-vue";
+import {CloseOutlined, PlusOutlined, CodeOutlined, MinusOutlined} from "@ant-design/icons-vue";
 import {computed, ref, watch} from "vue";
 import { useI18n } from "vue-i18n";
 import type {TerminalRecord} from "@agent-workbench/shared";
@@ -96,6 +96,7 @@ const emit = defineEmits<{
   created: [];
   deleted: [];
   minimize: [];
+  terminalExited: [terminalId: string];
 }>();
 
 const { t } = useI18n();
@@ -158,6 +159,10 @@ function confirmDelete(terminalId: string) {
       emit("deleted");
     }
   });
+}
+
+function onTerminalExited(payload: { terminalId: string; exitCode: number }) {
+  emit("terminalExited", payload.terminalId);
 }
 </script>
 

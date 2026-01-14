@@ -1,6 +1,6 @@
 <template>
   <a-layout class="min-h-screen !bg-[var(--app-bg)]">
-    <a-layout-header class="flex items-center justify-between !h-12 !px-3 !bg-[var(--panel-bg-elevated)]">
+    <a-layout-header class="flex items-center gap-3 !h-12 !px-3 !bg-[var(--panel-bg-elevated)]">
       <div class="flex items-center gap-3 min-w-0">
         <div class="text-[color:var(--text-color)] font-semibold text-sm shrink-0">{{ t("workspace.title") }}</div>
         <div v-if="workspace" class="flex items-center gap-2 min-w-0">
@@ -37,11 +37,13 @@
           </div>
         </template>
       </div>
+
+      <div class="flex-1 min-w-0"></div>
     </a-layout-header>
 
     <a-layout-content class="p-0 h-[calc(100vh-64px)] border-t border-[var(--border-color-secondary)]">
       <div class="h-full flex min-h-0">
-        <div class="w-12 h-full flex flex-col border-r border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
+        <div class="w-10 h-full flex flex-col border-r border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
           <div class="flex flex-col items-center gap-1 py-1">
             <template v-for="toolId in leftTopToolbarToolIds" :key="toolId">
               <WorkspaceToolButton
@@ -50,12 +52,13 @@
                 :active="activeToolIdByArea.leftTop === toolId"
                 :minimized="toolMinimized[toolId] ?? false"
                 :moveTargets="moveTargets(toolId)"
+                :contextMenuHint="contextMenuHint(toolId)"
+                tooltipPlacement="right"
                 @click="onToolIconClick(toolId)"
                 @moveTo="(area) => moveTool(toolId, area)"
               />
             </template>
           </div>
-          <div class="h-px bg-[var(--border-color-secondary)] my-1"></div>
           <div class="mt-auto flex flex-col items-center gap-1 py-1">
             <template v-for="toolId in leftBottomToolbarToolIds" :key="toolId">
               <WorkspaceToolButton
@@ -64,6 +67,8 @@
                 :active="activeToolIdByArea.leftBottom === toolId"
                 :minimized="toolMinimized[toolId] ?? false"
                 :moveTargets="moveTargets(toolId)"
+                :contextMenuHint="contextMenuHint(toolId)"
+                tooltipPlacement="right"
                 @click="onToolIconClick(toolId)"
                 @moveTo="(area) => moveTool(toolId, area)"
               />
@@ -170,7 +175,10 @@
           </div>
         </div>
 
-        <div class="w-12 h-full flex flex-col items-center gap-1 py-1 border-l border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
+        <div
+          v-if="rightToolbarToolIds.length > 0"
+          class="w-10 h-full flex flex-col items-center gap-1 py-1 border-l border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]"
+        >
           <template v-for="toolId in rightToolbarToolIds" :key="toolId">
             <WorkspaceToolButton
               :title="toolTitle(toolId)"
@@ -178,6 +186,8 @@
               :active="activeToolIdByArea.rightTop === toolId"
               :minimized="toolMinimized[toolId] ?? false"
               :moveTargets="moveTargets(toolId)"
+              :contextMenuHint="contextMenuHint(toolId)"
+              tooltipPlacement="left"
               @click="onToolIconClick(toolId)"
               @moveTo="(area) => moveTool(toolId, area)"
             />
@@ -229,9 +239,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from "vue";
 import { Modal, message } from "ant-design-vue";
-import { CodeOutlined, FormOutlined } from "@ant-design/icons-vue";
+import { CodeOutlined } from "@ant-design/icons-vue";
 import { useI18n } from "vue-i18n";
 import type { RepoBranchesResponse, GitPushRequest, WorkspaceDetail } from "@agent-workbench/shared";
 import {
@@ -247,6 +257,7 @@ import {
 import { waitRepoReadyOrThrow } from "../services/repoSync";
 import { workspaceHostKey, type DockArea, type WorkspaceHostApi, type WorkspaceToolCommandMap, type WorkspaceToolEvent } from "../workspace/host";
 import WorkspaceToolButton from "../workspace/WorkspaceToolButton.vue";
+import CodeReviewIcon from "../workspace/icons/CodeReviewIcon.vue";
 import CodeReviewToolView from "../workspace/tools/CodeReviewToolView.vue";
 import TerminalToolView from "../workspace/tools/TerminalToolView.vue";
 
@@ -254,6 +265,9 @@ const props = defineProps<{ workspaceId: string }>();
 const { t } = useI18n();
 
 type ToolId = "codeReview" | "terminal";
+const TOOL_IDS: ToolId[] = ["codeReview", "terminal"];
+const DOCK_AREAS: DockArea[] = ["leftTop", "leftBottom", "rightTop"];
+
 type HeaderAction = {
   id: string;
   label: string;
@@ -279,7 +293,7 @@ const tools = computed<ToolDefinition[]>(() => [
   {
     toolId: "codeReview",
     title: () => t("workspace.tools.codeReview"),
-    icon: FormOutlined,
+    icon: CodeReviewIcon,
     view: CodeReviewToolView,
     defaultArea: "leftTop",
     allowedAreas: ["leftTop"],
@@ -333,6 +347,203 @@ const toolMinimized = reactive<Record<ToolId, boolean>>({
   codeReview: false,
   terminal: true
 });
+
+const DOCK_LAYOUT_STORAGE_KEY_PREFIX = "agent-workbench.workspace.dockLayout";
+
+type DockLayoutV1 = {
+  version: 1;
+  updatedAt: number;
+  ratios: { topBottom: number; topLeft: number };
+  toolArea: Record<ToolId, DockArea>;
+  toolMinimized: Record<ToolId, boolean>;
+  activeToolIdByArea: Record<DockArea, ToolId | null>;
+};
+
+function dockLayoutStorageKey(workspaceId: string) {
+  const id = String(workspaceId || "").trim();
+  if (!id) return `${DOCK_LAYOUT_STORAGE_KEY_PREFIX}.v1`;
+  return `${DOCK_LAYOUT_STORAGE_KEY_PREFIX}.v1.${id}`;
+}
+
+function isDockArea(v: unknown): v is DockArea {
+  return typeof v === "string" && (DOCK_AREAS as string[]).includes(v);
+}
+
+function isToolId(v: unknown): v is ToolId {
+  return typeof v === "string" && (TOOL_IDS as string[]).includes(v);
+}
+
+function clampRatio(n: number) {
+  if (!Number.isFinite(n)) return 2 / 3;
+  return clamp(n, 0.1, 0.9);
+}
+
+function loadDockLayout(workspaceId: string): DockLayoutV1 | null {
+  try {
+    const raw = localStorage.getItem(dockLayoutStorageKey(workspaceId));
+    if (!raw) return null;
+    const json = JSON.parse(raw) as Partial<DockLayoutV1> | null;
+    if (!json || json.version !== 1) return null;
+
+    const ratios = (json.ratios ?? {}) as Partial<{ topBottom: unknown; topLeft: unknown }>;
+    const toolAreaRaw = json.toolArea ?? ({} as any);
+    const toolMinimizedRaw = json.toolMinimized ?? ({} as any);
+    const activeRaw = json.activeToolIdByArea ?? ({} as any);
+
+    const toolAreaOut: Record<ToolId, DockArea> = { codeReview: "leftTop", terminal: "leftBottom" };
+    for (const toolId of TOOL_IDS) {
+      const v = (toolAreaRaw as any)[toolId];
+      if (isDockArea(v)) toolAreaOut[toolId] = v;
+    }
+
+    const toolMinimizedOut: Record<ToolId, boolean> = { codeReview: false, terminal: true };
+    for (const toolId of TOOL_IDS) {
+      const v = (toolMinimizedRaw as any)[toolId];
+      if (typeof v === "boolean") toolMinimizedOut[toolId] = v;
+    }
+
+    const activeOut: Record<DockArea, ToolId | null> = { leftTop: "codeReview", leftBottom: "terminal", rightTop: null };
+    for (const area of DOCK_AREAS) {
+      const v = (activeRaw as any)[area];
+      if (v === null) {
+        activeOut[area] = null;
+      } else if (isToolId(v)) {
+        activeOut[area] = v;
+      }
+    }
+
+    return {
+      version: 1,
+      updatedAt: typeof json.updatedAt === "number" ? json.updatedAt : Date.now(),
+      ratios: {
+        topBottom: clampRatio(typeof ratios.topBottom === "number" ? ratios.topBottom : 2 / 3),
+        topLeft: clampRatio(typeof ratios.topLeft === "number" ? ratios.topLeft : 2 / 3)
+      },
+      toolArea: toolAreaOut,
+      toolMinimized: toolMinimizedOut,
+      activeToolIdByArea: activeOut
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveDockLayout(workspaceId: string) {
+  const id = String(workspaceId || "").trim();
+  if (!id) return;
+  try {
+    const data: DockLayoutV1 = {
+      version: 1,
+      updatedAt: Date.now(),
+      ratios: { topBottom: topBottomRatio.value, topLeft: topLeftRatio.value },
+      toolArea: { codeReview: toolArea.codeReview, terminal: toolArea.terminal },
+      toolMinimized: { codeReview: toolMinimized.codeReview, terminal: toolMinimized.terminal },
+      activeToolIdByArea: {
+        leftTop: activeToolIdByArea.leftTop,
+        leftBottom: activeToolIdByArea.leftBottom,
+        rightTop: activeToolIdByArea.rightTop
+      }
+    };
+    localStorage.setItem(dockLayoutStorageKey(workspaceId), JSON.stringify(data));
+  } catch {
+    // ignore
+  }
+}
+
+const restoringDockLayout = ref(false);
+let saveDockLayoutTimer: number | null = null;
+
+function scheduleSaveDockLayout() {
+  if (restoringDockLayout.value) return;
+  if (!props.workspaceId) return;
+  if (saveDockLayoutTimer !== null) window.clearTimeout(saveDockLayoutTimer);
+  saveDockLayoutTimer = window.setTimeout(() => {
+    saveDockLayoutTimer = null;
+    saveDockLayout(props.workspaceId);
+  }, 120);
+}
+
+function resetDockLayoutDefaults() {
+  toolArea.codeReview = "leftTop";
+  toolArea.terminal = "leftBottom";
+  activeToolIdByArea.leftTop = "codeReview";
+  activeToolIdByArea.leftBottom = "terminal";
+  activeToolIdByArea.rightTop = null;
+  toolMinimized.codeReview = false;
+  toolMinimized.terminal = true;
+  topBottomRatio.value = 2 / 3;
+  topLeftRatio.value = 2 / 3;
+}
+
+function applyDockLayout(layout: DockLayoutV1) {
+  topBottomRatio.value = clampRatio(layout.ratios.topBottom);
+  topLeftRatio.value = clampRatio(layout.ratios.topLeft);
+
+  for (const toolId of TOOL_IDS) {
+    const def = toolById.value.get(toolId);
+    const nextArea = layout.toolArea[toolId];
+    if (def && def.allowedAreas.includes(nextArea)) {
+      toolArea[toolId] = nextArea;
+    } else if (def) {
+      toolArea[toolId] = def.defaultArea;
+    }
+    toolMinimized[toolId] = Boolean(layout.toolMinimized[toolId]);
+  }
+
+  for (const area of DOCK_AREAS) {
+    const next = layout.activeToolIdByArea[area];
+    if (!next) {
+      activeToolIdByArea[area] = null;
+      continue;
+    }
+    if (!toolById.value.has(next)) {
+      activeToolIdByArea[area] = null;
+      continue;
+    }
+    if (toolCurrentArea(next) !== area) {
+      activeToolIdByArea[area] = null;
+      continue;
+    }
+    activeToolIdByArea[area] = next;
+  }
+
+  if (!activeToolIdByArea.leftTop) activeToolIdByArea.leftTop = "codeReview";
+}
+
+async function clampDockRatiosToContainer() {
+  const center = centerEl.value;
+  if (center) {
+    const h = center.getBoundingClientRect().height;
+    if (Number.isFinite(h) && h > 0) {
+      topBottomRatio.value = clampRatioByContainer({ ratio: topBottomRatio.value, containerSize: h, minStartPx: MIN_TOP_PX, minEndPx: MIN_BOTTOM_PX });
+    }
+  }
+  const top = topEl.value;
+  if (top) {
+    const w = top.getBoundingClientRect().width;
+    if (Number.isFinite(w) && w > 0) {
+      topLeftRatio.value = clampRatioByContainer({ ratio: topLeftRatio.value, containerSize: w, minStartPx: MIN_TOP_LEFT_PX, minEndPx: MIN_TOP_RIGHT_PX });
+    }
+  }
+}
+
+async function restoreDockLayout(workspaceId: string) {
+  let hasSaved = false;
+  restoringDockLayout.value = true;
+  try {
+    resetDockLayoutDefaults();
+    const saved = loadDockLayout(workspaceId);
+    if (saved) {
+      hasSaved = true;
+      applyDockLayout(saved);
+    }
+  } finally {
+    restoringDockLayout.value = false;
+  }
+  await nextTick();
+  await clampDockRatiosToContainer();
+  if (hasSaved) saveDockLayout(workspaceId);
+}
 
 function toolCurrentArea(toolId: ToolId): DockArea {
   return toolArea[toolId] ?? toolById.value.get(toolId)?.defaultArea ?? "leftTop";
@@ -473,6 +684,10 @@ function moveTargets(toolId: ToolId) {
   return def.allowedAreas
     .filter((a) => a !== cur)
     .map((area) => ({ area, label: t("workspace.dock.moveTo", { area: areaLabel(area) }) }));
+}
+
+function contextMenuHint(toolId: ToolId) {
+  return t("workspace.dock.pinnedAt", { area: areaLabel(toolCurrentArea(toolId)) });
 }
 
 function toolView(toolId: ToolId) {
@@ -623,6 +838,19 @@ const topEl = ref<HTMLElement | null>(null);
 const topBottomRatio = ref(2 / 3);
 const topLeftRatio = ref(2 / 3);
 
+watch(
+  () => props.workspaceId,
+  (workspaceId) => {
+    if (!workspaceId) return;
+    void restoreDockLayout(workspaceId);
+  },
+  { immediate: true }
+);
+
+watch(toolArea, scheduleSaveDockLayout, { deep: true });
+watch(toolMinimized, scheduleSaveDockLayout, { deep: true });
+watch(activeToolIdByArea, scheduleSaveDockLayout, { deep: true });
+
 const showLeftTop = computed(() => Boolean(visibleToolIdByArea.value.leftTop));
 const showRightTop = computed(() => Boolean(visibleToolIdByArea.value.rightTop));
 const showBottom = computed(() => Boolean(visibleToolIdByArea.value.leftBottom));
@@ -722,6 +950,7 @@ function onTopBottomSplitterPointerDown(evt: PointerEvent) {
     window.removeEventListener("pointerup", handleUp);
     document.body.style.userSelect = prevUserSelect;
     draggingCleanup = null;
+    saveDockLayout(props.workspaceId);
   };
 
   window.addEventListener("pointermove", handleMove);
@@ -755,6 +984,7 @@ function onTopColsSplitterPointerDown(evt: PointerEvent) {
     window.removeEventListener("pointerup", handleUp);
     document.body.style.userSelect = prevUserSelect;
     draggingCleanup = null;
+    saveDockLayout(props.workspaceId);
   };
 
   window.addEventListener("pointermove", handleMove);
@@ -983,5 +1213,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   document.title = t("app.title");
   draggingCleanup?.();
+  if (saveDockLayoutTimer !== null) window.clearTimeout(saveDockLayoutTimer);
+  saveDockLayoutTimer = null;
 });
 </script>
