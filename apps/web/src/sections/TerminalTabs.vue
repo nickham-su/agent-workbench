@@ -32,26 +32,11 @@
                 size="small"
                 type="text"
                 class="mr-1"
-                @click.stop="collapsePanel"
+                @click.stop="emit('minimize')"
                 :aria-label="collapseLabel"
             >
               <template #icon>
                 <EyeInvisibleOutlined/>
-              </template>
-            </a-button>
-          </a-tooltip>
-
-          <a-tooltip :title="layoutToggleLabel" placement="topRight">
-            <a-button
-                size="small"
-                type="text"
-                class="mr-1"
-                @click.stop="toggleLayoutMode"
-                :aria-label="layoutToggleLabel"
-            >
-              <template #icon>
-                <RightOutlined v-if="isVerticalLayout"/>
-                <DownOutlined v-else/>
               </template>
             </a-button>
           </a-tooltip>
@@ -93,7 +78,7 @@
 
 <script setup lang="ts">
 import {Modal, message} from "ant-design-vue";
-import {CloseOutlined, DownOutlined, PlusOutlined, RightOutlined, CodeOutlined, EyeInvisibleOutlined} from "@ant-design/icons-vue";
+import {CloseOutlined, PlusOutlined, CodeOutlined, EyeInvisibleOutlined} from "@ant-design/icons-vue";
 import {computed, ref, watch} from "vue";
 import { useI18n } from "vue-i18n";
 import type {TerminalRecord} from "@agent-workbench/shared";
@@ -101,20 +86,16 @@ import {createTerminal, deleteTerminal} from "../services/api";
 import TerminalView from "../terminal/TerminalView.vue";
 
 const ADD_TAB_KEY = "__terminal_add__";
-type LayoutMode = "vertical" | "horizontal";
 
 const props = defineProps<{
   workspaceId: string;
   terminals: TerminalRecord[];
-  layoutMode: LayoutMode;
-  collapsed?: boolean;
 }>();
 
 const emit = defineEmits<{
   created: [];
   deleted: [];
-  "update:layoutMode": [mode: LayoutMode];
-  "update:collapsed": [collapsed: boolean];
+  minimize: [];
 }>();
 
 const { t } = useI18n();
@@ -124,18 +105,7 @@ const effectiveActiveKey = computed(() => activeKey.value ?? props.terminals[0]?
 const creating = ref(false);
 const pendingActivateKey = ref<string | null>(null);
 
-const isVerticalLayout = computed(() => props.layoutMode === "vertical");
-const layoutToggleLabel = computed(() => (isVerticalLayout.value ? t("terminal.layout.moveRight") : t("terminal.layout.moveBottom")));
 const collapseLabel = computed(() => t("terminal.panel.collapse"));
-
-function toggleLayoutMode() {
-  const nextMode: LayoutMode = props.layoutMode === "vertical" ? "horizontal" : "vertical";
-  emit("update:layoutMode", nextMode);
-}
-
-function collapsePanel() {
-  emit("update:collapsed", true);
-}
 
 function handleActiveKeyUpdate(k: string | number) {
   const key = String(k);
