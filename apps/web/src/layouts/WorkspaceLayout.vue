@@ -379,12 +379,21 @@ function emitToolEvent(toolId: string, event: WorkspaceToolEvent) {
   toolEventQueue.set(id, list);
 }
 
+function drainToolEvents(toolId: string) {
+  if (!toolById.value.has(toolId as ToolId)) return [];
+  const id = toolId as ToolId;
+  const list = toolEventQueue.get(id) ?? [];
+  toolEventQueue.delete(id);
+  return list;
+}
+
 const hostApi: WorkspaceHostApi = {
   openTool,
   minimizeTool,
   toggleMinimize,
   registerToolCommands,
-  emitToolEvent
+  emitToolEvent,
+  drainToolEvents
 };
 
 provide(workspaceHostKey, hostApi);
