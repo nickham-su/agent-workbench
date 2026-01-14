@@ -105,6 +105,23 @@ export default {
       pull: "Pull",
       push: "Push"
     },
+    tools: {
+      codeReview: "Code review",
+      terminal: "Terminal"
+    },
+    dock: {
+      moveTo: "Move to {area}",
+      pinnedAt: "Pinned at {area}",
+      areas: {
+        leftTop: "Top-left",
+        leftBottom: "Bottom",
+        rightTop: "Top-right"
+      },
+      splitter: {
+        resizeTopLeftRight: "Resize top split",
+        resizeTopBottom: "Resize vertical split"
+      }
+    },
     splitter: {
       resizeTerminalPanel: "Resize terminal panel"
     },

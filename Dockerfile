@@ -34,6 +34,7 @@ WORKDIR /app
 # 运行时依赖：git/ssh/证书/tmux（终端会话与导入仓库需要）
 RUN apt-get update \
   && apt-get install -y --no-install-recommends bash git openssh-client ca-certificates tmux tini curl locales vim nano less wget tree sudo \
+  && apt-get install -y --no-install-recommends ripgrep jq yq diffutils patch file zip unzip openssl python3 python-is-python3 build-essential pkg-config \
   && echo "en_US.UTF-8 UTF-8" > /etc/locale.gen \
   && locale-gen \
   # 基础镜像里通常已存在 uid=1000 的用户（例如 node），因此不固定 uid，避免冲突

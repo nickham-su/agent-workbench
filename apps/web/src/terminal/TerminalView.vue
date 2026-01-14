@@ -27,6 +27,9 @@ import { terminalFontSize } from "../settings/uiFontSizes";
 import { emitUnauthorized } from "../auth/unauthorized";
 
 const props = defineProps<{ terminal: TerminalRecord; active?: boolean }>();
+const emit = defineEmits<{
+  exited: [{ terminalId: string; exitCode: number }];
+}>();
 const { t } = useI18n();
 
 const wsState = ref<TerminalWsState>("idle");
@@ -294,6 +297,7 @@ function connect(force: boolean) {
       wsState.value = "disconnected";
       closeWsKeepState();
       clearReconnectTimer();
+      emit("exited", { terminalId: props.terminal.id, exitCode: msg.exitCode });
       return;
     }
     if (msg.type === "error") {

@@ -105,6 +105,23 @@ export default {
       pull: "拉取",
       push: "推送"
     },
+    tools: {
+      codeReview: "代码审查",
+      terminal: "终端"
+    },
+    dock: {
+      moveTo: "移动到 {area}",
+      pinnedAt: "已固定在 {area}",
+      areas: {
+        leftTop: "左上",
+        leftBottom: "下方",
+        rightTop: "右上"
+      },
+      splitter: {
+        resizeTopLeftRight: "调整上方左右视图大小",
+        resizeTopBottom: "调整上下视图大小"
+      }
+    },
     splitter: {
       resizeTerminalPanel: "调整终端面板大小"
     },
