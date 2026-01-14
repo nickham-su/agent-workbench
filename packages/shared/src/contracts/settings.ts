@@ -36,3 +36,28 @@ export const ResetKnownHostRequestSchema = Type.Object({
 });
 export type ResetKnownHostRequest = Static<typeof ResetKnownHostRequestSchema>;
 
+export const GitGlobalIdentitySchema = Type.Object({
+  name: Type.Union([Type.String(), Type.Null()]),
+  email: Type.Union([Type.String(), Type.Null()])
+});
+export type GitGlobalIdentity = Static<typeof GitGlobalIdentitySchema>;
+
+export const UpdateGitGlobalIdentityRequestSchema = Type.Object({
+  name: Type.String({ minLength: 1 }),
+  email: Type.String({ minLength: 1 })
+});
+export type UpdateGitGlobalIdentityRequest = Static<typeof UpdateGitGlobalIdentityRequestSchema>;
+
+export const ClearAllGitIdentityResponseSchema = Type.Object({
+  ok: Type.Boolean(),
+  clearedGlobal: Type.Boolean(),
+  clearedRepos: Type.Number(),
+  errors: Type.Array(
+    Type.Object({
+      workspaceId: Type.String(),
+      path: Type.String(),
+      error: Type.String()
+    })
+  )
+});
+export type ClearAllGitIdentityResponse = Static<typeof ClearAllGitIdentityResponseSchema>;

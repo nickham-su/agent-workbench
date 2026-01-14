@@ -2,6 +2,7 @@ import axios from "axios";
 import type {
   AuthLoginRequest,
   AuthLoginResponse,
+  ClearAllGitIdentityResponse,
   CreateRepoRequest,
   CreateCredentialRequest,
   CreateTerminalRequest,
@@ -13,6 +14,9 @@ import type {
   GitCommitRequest,
   GitCommitResponse,
   GitDiscardRequest,
+  GitGlobalIdentity,
+  GitIdentitySetRequest,
+  GitIdentityStatus,
   GitPullRequest,
   GitPullResponse,
   GitPushRequest,
@@ -29,6 +33,7 @@ import type {
   SwitchWorkspaceBranchRequest,
   TerminalRecord,
   UpdateCredentialRequest,
+  UpdateGitGlobalIdentityRequest,
   UpdateNetworkSettingsRequest,
   UpdateRepoRequest,
   WorkspaceDetail,
@@ -387,6 +392,50 @@ export async function pushWorkspace(workspaceId: string, body: GitPushRequest = 
 export async function pullWorkspace(workspaceId: string, body: GitPullRequest = {}) {
   try {
     const res = await client.post<GitPullResponse>(`/workspaces/${workspaceId}/git/pull`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getWorkspaceGitIdentity(workspaceId: string) {
+  try {
+    const res = await client.get<GitIdentityStatus>(`/workspaces/${workspaceId}/git/identity`);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function setWorkspaceGitIdentity(workspaceId: string, body: GitIdentitySetRequest) {
+  try {
+    await client.put(`/workspaces/${workspaceId}/git/identity`, body);
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getGitGlobalIdentity() {
+  try {
+    const res = await client.get<GitGlobalIdentity>("/settings/git/identity");
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function updateGitGlobalIdentity(body: UpdateGitGlobalIdentityRequest) {
+  try {
+    const res = await client.put<GitGlobalIdentity>("/settings/git/identity", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function clearAllGitIdentity() {
+  try {
+    const res = await client.post<ClearAllGitIdentityResponse>("/settings/git/identity/clear-all");
     return res.data;
   } catch (err) {
     throw toApiError(err);

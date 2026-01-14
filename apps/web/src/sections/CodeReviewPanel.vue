@@ -282,6 +282,14 @@
       </a-space>
     </template>
   </a-modal>
+
+  <GitIdentityModal
+    v-model:open="identityOpen"
+    :workspaceId="workspaceId"
+    :defaultScope="'repo'"
+    :loading="identitySubmitting"
+    @submit="onIdentitySubmit"
+  />
 </template>
 
 <script setup lang="ts">
@@ -304,6 +312,7 @@ import {
 import {useI18n} from "vue-i18n";
 import type {ChangeItem, ChangeMode, FileCompareResponse, GitPushRequest} from "@agent-workbench/shared";
 import {
+  ApiError,
   commitWorkspace,
   discardWorkspace,
   fileCompare,
@@ -312,6 +321,7 @@ import {
   unstageWorkspace
 } from "../services/api";
 import MonacoDiffViewer from "../components/MonacoDiffViewer.vue";
+import GitIdentityModal from "../components/GitIdentityModal.vue";
 
 type Selected = { mode: ChangeMode; path: string; oldPath?: string } | null;
 
@@ -474,6 +484,10 @@ const commitOpen = ref(false);
 const commitMessage = ref("");
 const commitLoading = ref<"commit" | "commitAndPush" | null>(null);
 const canCommit = computed(() => stagedFiles.value.length > 0 && commitMessage.value.trim().length > 0 && !props.gitBusy);
+
+const identityOpen = ref(false);
+const pendingCommitMode = ref<"commit" | "commitAndPush" | null>(null);
+const identitySubmitting = ref(false);
 
 function onDiffLayout(layout: { originalWidth: number; modifiedWidth: number; splitterWidth: number }) {
   diffHeaderVars.value = {
@@ -756,11 +770,53 @@ async function submitCommit(mode: "commit" | "commitAndPush") {
     commitMessage.value = "";
     await refreshAll();
   } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err));
+    const e = err instanceof ApiError ? err : new ApiError({message: err instanceof Error ? err.message : String(err)});
+    if (e.code === "GIT_IDENTITY_REQUIRED") {
+      pendingCommitMode.value = mode;
+      identityOpen.value = true;
+      return;
+    }
+    message.error(e.message);
     return;
   } finally {
     release();
     commitLoading.value = null;
+  }
+
+  if (mode === "commitAndPush") {
+    try {
+      await props.push?.();
+    } catch {
+      // push 内部自行 toast/弹窗；这里不重复提示
+    }
+  }
+}
+
+async function onIdentitySubmit(identity: any) {
+  if (!props.workspaceId) return;
+  const mode = pendingCommitMode.value ?? "commit";
+  const msg = commitMessage.value.trim();
+  if (!msg) return;
+
+  commitLoading.value = mode;
+  const release = props.beginGitOp();
+  identitySubmitting.value = true;
+  try {
+    const res = await commitWorkspace(props.workspaceId, {message: msg, identity});
+    message.success(t("codeReview.commit.committed", {sha: res.sha.slice(0, 8)}));
+    commitOpen.value = false;
+    commitMessage.value = "";
+    identityOpen.value = false;
+    pendingCommitMode.value = null;
+    await refreshAll();
+  } catch (err) {
+    const e = err instanceof ApiError ? err : new ApiError({message: err instanceof Error ? err.message : String(err)});
+    message.error(e.message);
+    return;
+  } finally {
+    release();
+    commitLoading.value = null;
+    identitySubmitting.value = false;
   }
 
   if (mode === "commitAndPush") {

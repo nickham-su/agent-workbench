@@ -6,6 +6,9 @@ import type {
   FileCompareResponse,
   GitCommitResponse,
   GitDiscardRequest,
+  GitIdentityInput,
+  GitIdentityScope,
+  GitIdentityStatus,
   GitPullResponse,
   GitPushResponse,
   GitStageRequest,
@@ -18,6 +21,7 @@ import { getRepo } from "../repos/repo.store.js";
 import { runGit, runGitBuffer } from "../../infra/git/gitExec.js";
 import { buildGitEnv } from "../../infra/git/gitEnv.js";
 import { withRepoLock } from "../../infra/locks/repoLock.js";
+import { gitConfigGet, gitConfigSet, validateAndNormalizeGitIdentity } from "../../infra/git/gitIdentity.js";
 
 function parseMode(modeRaw: unknown): ChangeMode {
   if (modeRaw === "staged" || modeRaw === "unstaged") return modeRaw;
@@ -605,6 +609,67 @@ export async function discardWorkspace(ctx: AppContext, workspaceId: string, bod
   });
 }
 
+function parseGitIdentityScope(raw: unknown): GitIdentityScope | null {
+  if (raw === "session" || raw === "repo" || raw === "global") return raw;
+  return null;
+}
+
+function parseGitIdentityInput(raw: unknown): GitIdentityInput | null {
+  const obj = (raw ?? {}) as any;
+  const scope = parseGitIdentityScope(obj.scope);
+  if (!scope) return null;
+  const v = validateAndNormalizeGitIdentity(obj);
+  if (!v) return null;
+  return { scope, ...v };
+}
+
+async function setRepoGitIdentity(ctx: AppContext, repoPath: string, identity: { name: string; email: string }) {
+  const okName = await gitConfigSet({ cwd: ctx.dataDir, repoPath, key: "user.name", value: identity.name });
+  const okEmail = await gitConfigSet({ cwd: ctx.dataDir, repoPath, key: "user.email", value: identity.email });
+  return okName && okEmail;
+}
+
+async function setGlobalGitIdentity(ctx: AppContext, identity: { name: string; email: string }) {
+  const okName = await gitConfigSet({ cwd: ctx.dataDir, global: true, key: "user.name", value: identity.name });
+  const okEmail = await gitConfigSet({ cwd: ctx.dataDir, global: true, key: "user.email", value: identity.email });
+  return okName && okEmail;
+}
+
+export async function getWorkspaceGitIdentity(ctx: AppContext, workspaceId: string): Promise<GitIdentityStatus> {
+  const ws = getWorkspace(ctx.db, workspaceId);
+  if (!ws) throw new HttpError(404, "Workspace not found");
+
+  const [repoName, repoEmail, globalName, globalEmail] = await Promise.all([
+    gitConfigGet({ cwd: ctx.dataDir, repoPath: ws.path, key: "user.name" }),
+    gitConfigGet({ cwd: ctx.dataDir, repoPath: ws.path, key: "user.email" }),
+    gitConfigGet({ cwd: ctx.dataDir, global: true, key: "user.name" }),
+    gitConfigGet({ cwd: ctx.dataDir, global: true, key: "user.email" })
+  ]);
+
+  const repo = { name: repoName, email: repoEmail };
+  const global = { name: globalName, email: globalEmail };
+  const repoOk = Boolean(repo.name && repo.email);
+  const globalOk = Boolean(global.name && global.email);
+  const effective = repoOk
+    ? { ...repo, source: "repo" as const }
+    : globalOk
+      ? { ...global, source: "global" as const }
+      : { name: null, email: null, source: "none" as const };
+
+  return { effective, repo: { name: repo.name, email: repo.email }, global: { name: global.name, email: global.email } };
+}
+
+export async function setWorkspaceGitIdentity(ctx: AppContext, workspaceId: string, bodyRaw: unknown) {
+  const ws = getWorkspace(ctx.db, workspaceId);
+  if (!ws) throw new HttpError(404, "Workspace not found");
+
+  const v = validateAndNormalizeGitIdentity(bodyRaw);
+  if (!v) throw new HttpError(400, "Invalid identity. Expected {name,email}.", "GIT_IDENTITY_INVALID");
+
+  const ok = await setRepoGitIdentity(ctx, ws.path, v);
+  if (!ok) throw new HttpError(409, "Failed to set repo git identity.", "GIT_IDENTITY_SET_FAILED");
+}
+
 export async function commitWorkspace(ctx: AppContext, workspaceId: string, bodyRaw: unknown): Promise<GitCommitResponse> {
   const body = (bodyRaw ?? {}) as any;
   const { ws, repo } = await getWorkspaceAndRepoOrThrow(ctx, workspaceId);
@@ -613,13 +678,37 @@ export async function commitWorkspace(ctx: AppContext, workspaceId: string, body
     const message = normalizeGitMessage(body.message);
     if (!message) throw new HttpError(400, "message is required");
 
+    const identity = body.identity !== undefined ? parseGitIdentityInput(body.identity) : null;
+    if (body.identity !== undefined && !identity) {
+      throw new HttpError(400, "Invalid identity. Expected {scope,name,email}.", "GIT_IDENTITY_INVALID");
+    }
+
+    if (identity?.scope === "repo") {
+      const ok = await setRepoGitIdentity(ctx, ws.path, identity);
+      if (!ok) throw new HttpError(409, "Failed to set repo git identity.", "GIT_IDENTITY_SET_FAILED");
+    }
+    if (identity?.scope === "global") {
+      const ok = await setGlobalGitIdentity(ctx, identity);
+      if (!ok) throw new HttpError(409, "Failed to set global git identity.", "GIT_IDENTITY_SET_FAILED");
+    }
+
     const args = ["-C", ws.path, "commit", "-m", message];
     if (parseGitBool(body.amend)) args.push("--amend");
     if (parseGitBool(body.signoff)) args.push("--signoff");
     if (parseGitBool(body.noVerify)) args.push("--no-verify");
     if (parseGitBool(body.allowEmpty)) args.push("--allow-empty");
 
-    const res = await runGit(args, { cwd: ctx.dataDir });
+    const env: NodeJS.ProcessEnv | undefined =
+      identity?.scope === "session"
+        ? {
+            GIT_AUTHOR_NAME: identity.name,
+            GIT_AUTHOR_EMAIL: identity.email,
+            GIT_COMMITTER_NAME: identity.name,
+            GIT_COMMITTER_EMAIL: identity.email
+          }
+        : undefined;
+
+    const res = await runGit(args, { cwd: ctx.dataDir, env });
     if (!res.ok) {
       const out = truncateGitOutput(res.stderr || res.stdout);
       const lower = out.toLowerCase();

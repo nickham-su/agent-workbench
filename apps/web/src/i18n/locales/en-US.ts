@@ -18,6 +18,25 @@ export default {
       parensSuffix: " ({text})"
     }
   },
+  gitIdentity: {
+    modalTitle: "Set Git identity",
+    form: {
+      nameLabel: "Name",
+      namePlaceholder: "e.g. Your Name",
+      emailLabel: "Email",
+      emailPlaceholder: "e.g. name{at}example.com",
+      scopeLabel: "Scope"
+    },
+    scope: {
+      session: "This commit only",
+      repo: "This repo",
+      global: "Global"
+    },
+    actions: {
+      saveAndContinue: "Save & continue",
+      cancel: "Cancel"
+    }
+  },
   auth: {
     login: {
       title: "Sign in",
@@ -288,6 +307,7 @@ export default {
     title: "Settings",
     tabs: {
       general: "General",
+      gitIdentity: "Git Identity",
       credentials: "Credentials",
       network: "Network",
       security: "Security"
@@ -311,6 +331,29 @@ export default {
           label: "Diff font size",
           help: "Adjust diff viewer font size (global, saved locally). Default: {default}"
         }
+      }
+    },
+    gitIdentity: {
+      description: "Configure global Git identity (user.name / user.email).",
+      form: {
+        nameLabel: "Global user.name",
+        namePlaceholder: "e.g. Your Name",
+        emailLabel: "Global user.email",
+        emailPlaceholder: "e.g. name{at}example.com"
+      },
+      actions: {
+        save: "Save",
+        refresh: "Refresh",
+        clearAll: "Clear all identity"
+      },
+      saved: "Saved",
+      cleared: "Cleared",
+      clearedWithErrors: "Cleared (failed in {count} workspaces)",
+      clearAllConfirm: {
+        title: "Clear all identity?",
+        content: "This clears global config and removes local user.name/user.email from all workspace repos.",
+        ok: "Clear",
+        cancel: "Cancel"
       }
     },
     credentials: {

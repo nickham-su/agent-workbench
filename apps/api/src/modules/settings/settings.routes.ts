@@ -2,15 +2,21 @@ import type { FastifyInstance } from "fastify";
 import type { AppContext } from "../../app/context.js";
 import {
   ErrorResponseSchema,
+  ClearAllGitIdentityResponseSchema,
+  GitGlobalIdentitySchema,
   NetworkSettingsSchema,
   ResetKnownHostRequestSchema,
   SecurityStatusSchema,
+  UpdateGitGlobalIdentityRequestSchema,
   UpdateNetworkSettingsRequestSchema
 } from "@agent-workbench/shared";
 import {
+  clearAllGitIdentity,
+  getGitGlobalIdentity,
   getNetworkSettings,
   getSecurityStatus,
   resetKnownHost,
+  updateGitGlobalIdentity,
   updateNetworkSettings
 } from "./settings.service.js";
 
@@ -62,5 +68,39 @@ export async function registerSettingsRoutes(app: FastifyInstance, ctx: AppConte
       await resetKnownHost(ctx, app.log, req.body);
       return reply.code(204).send();
     }
+  );
+
+  app.get(
+    "/api/settings/git/identity",
+    {
+      schema: {
+        tags: ["settings"],
+        response: { 200: GitGlobalIdentitySchema }
+      }
+    },
+    async () => getGitGlobalIdentity(ctx)
+  );
+
+  app.put(
+    "/api/settings/git/identity",
+    {
+      schema: {
+        tags: ["settings"],
+        body: UpdateGitGlobalIdentityRequestSchema,
+        response: { 200: GitGlobalIdentitySchema, 400: ErrorResponseSchema, 409: ErrorResponseSchema }
+      }
+    },
+    async (req) => updateGitGlobalIdentity(ctx, app.log, req.body)
+  );
+
+  app.post(
+    "/api/settings/git/identity/clear-all",
+    {
+      schema: {
+        tags: ["settings"],
+        response: { 200: ClearAllGitIdentityResponseSchema }
+      }
+    },
+    async () => clearAllGitIdentity(ctx, app.log)
   );
 }

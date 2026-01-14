@@ -236,6 +236,15 @@
       </div>
     </a-form>
   </a-modal>
+
+  <GitIdentityModal
+    v-model:open="pushIdentityOpen"
+    :workspaceId="workspaceId"
+    :allowSession="false"
+    :defaultScope="'repo'"
+    :loading="pushIdentitySubmitting"
+    @submit="onPushIdentitySubmit"
+  />
 </template>
 
 <script setup lang="ts">
@@ -248,11 +257,14 @@ import {
   ApiError,
   checkoutWorkspace,
   getWorkspace,
+  getWorkspaceGitIdentity,
   listChanges,
   pullWorkspace,
   pushWorkspace,
   repoBranches,
-  syncRepo
+  setWorkspaceGitIdentity,
+  syncRepo,
+  updateGitGlobalIdentity
 } from "../services/api";
 import { waitRepoReadyOrThrow } from "../services/repoSync";
 import { workspaceHostKey, type DockArea, type WorkspaceHostApi, type WorkspaceToolCommandMap, type WorkspaceToolEvent } from "../workspace/host";
@@ -260,6 +272,7 @@ import WorkspaceToolButton from "../workspace/WorkspaceToolButton.vue";
 import CodeReviewIcon from "../workspace/icons/CodeReviewIcon.vue";
 import CodeReviewToolView from "../workspace/tools/CodeReviewToolView.vue";
 import TerminalToolView from "../workspace/tools/TerminalToolView.vue";
+import GitIdentityModal from "../components/GitIdentityModal.vue";
 
 const props = defineProps<{ workspaceId: string }>();
 const { t } = useI18n();
@@ -788,6 +801,10 @@ function applyPageTitle() {
 const pushLoading = ref(false);
 const pullLoading = ref(false);
 
+const pushIdentityOpen = ref(false);
+const pendingPushParams = ref<GitPushRequest>({});
+const pushIdentitySubmitting = ref(false);
+
 const headerActionGroups = computed(() => {
   const order: DockArea[] = ["leftTop", "leftBottom", "rightTop"];
   const res: { key: string; actions: HeaderAction[] }[] = [];
@@ -1159,6 +1176,18 @@ async function pushWithUi(params: Parameters<typeof pushWorkspace>[1] = {}) {
   if (!workspace.value) return;
   if (gitBusy.value) return;
 
+  // push 本身不依赖 user.name/email，但这里提前确保身份已配置，避免用户在“提交并推送/终端提交”时再次踩坑
+  try {
+    const st = await getWorkspaceGitIdentity(props.workspaceId);
+    if (st.effective.source === "none") {
+      pendingPushParams.value = params;
+      pushIdentityOpen.value = true;
+      return;
+    }
+  } catch {
+    // ignore
+  }
+
   const release = beginGitOp();
   pushLoading.value = true;
   try {
@@ -1195,6 +1224,37 @@ async function pushWithUi(params: Parameters<typeof pushWorkspace>[1] = {}) {
     release();
     pushLoading.value = false;
   }
+}
+
+async function onPushIdentitySubmit(identity: any) {
+  if (!workspace.value) return;
+  if (gitBusy.value) return;
+
+  const release = beginGitOp();
+  pushLoading.value = true;
+  pushIdentitySubmitting.value = true;
+  try {
+    if (identity?.scope === "repo") {
+      await setWorkspaceGitIdentity(props.workspaceId, { name: identity.name, email: identity.email });
+    } else if (identity?.scope === "global") {
+      await updateGitGlobalIdentity({ name: identity.name, email: identity.email });
+    } else {
+      return;
+    }
+    pushIdentityOpen.value = false;
+  } catch (err) {
+    const e = err instanceof ApiError ? err : new ApiError({ message: err instanceof Error ? err.message : String(err) });
+    message.error(e.message);
+    return;
+  } finally {
+    release();
+    pushLoading.value = false;
+    pushIdentitySubmitting.value = false;
+  }
+
+  const params = pendingPushParams.value ?? {};
+  pendingPushParams.value = {};
+  await pushWithUi(params);
 }
 
 watch(

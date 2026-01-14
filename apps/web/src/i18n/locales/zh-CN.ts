@@ -18,6 +18,25 @@ export default {
       parensSuffix: "（{text}）"
     }
   },
+  gitIdentity: {
+    modalTitle: "设置 Git 身份",
+    form: {
+      nameLabel: "姓名",
+      namePlaceholder: "例如 Your Name",
+      emailLabel: "邮箱",
+      emailPlaceholder: "例如 name{at}example.com",
+      scopeLabel: "作用范围"
+    },
+    scope: {
+      session: "仅本次提交",
+      repo: "仅当前仓库",
+      global: "全局"
+    },
+    actions: {
+      saveAndContinue: "保存并继续",
+      cancel: "取消"
+    }
+  },
   auth: {
     login: {
       title: "访问登录",
@@ -288,6 +307,7 @@ export default {
     title: "设置",
     tabs: {
       general: "常规",
+      gitIdentity: "Git 身份",
       credentials: "凭证",
       network: "网络",
       security: "安全"
@@ -311,6 +331,29 @@ export default {
           label: "对比字号",
           help: "调整代码对比（Diff）字体大小（全局生效，自动保存到本地）。默认：{default}"
         }
+      }
+    },
+    gitIdentity: {
+      description: "配置全局 Git 提交身份（user.name / user.email）。",
+      form: {
+        nameLabel: "全局 user.name",
+        namePlaceholder: "例如 Your Name",
+        emailLabel: "全局 user.email",
+        emailPlaceholder: "例如 name{at}example.com"
+      },
+      actions: {
+        save: "保存",
+        refresh: "刷新",
+        clearAll: "清除全部身份"
+      },
+      saved: "已保存",
+      cleared: "已清除",
+      clearedWithErrors: "已清除（{count} 个工作区清理失败）",
+      clearAllConfirm: {
+        title: "确认清除全部身份？",
+        content: "将清除全局配置，并遍历所有工作区仓库清除本地 user.name/user.email。",
+        ok: "清除",
+        cancel: "取消"
       }
     },
     credentials: {
