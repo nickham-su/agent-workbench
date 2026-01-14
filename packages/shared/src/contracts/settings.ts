@@ -6,6 +6,7 @@ export const NetworkSettingsSchema = Type.Object({
   httpsProxy: Type.Union([Type.String(), Type.Null()]),
   noProxy: Type.Union([Type.String(), Type.Null()]),
   caCertPem: Type.Union([Type.String(), Type.Null()]),
+  applyToTerminal: Type.Boolean(),
   updatedAt: Type.Number()
 });
 export type NetworkSettings = Static<typeof NetworkSettingsSchema>;
@@ -14,7 +15,8 @@ export const UpdateNetworkSettingsRequestSchema = Type.Object({
   httpProxy: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   httpsProxy: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   noProxy: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-  caCertPem: Type.Optional(Type.Union([Type.String(), Type.Null()]))
+  caCertPem: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  applyToTerminal: Type.Optional(Type.Boolean())
 });
 export type UpdateNetworkSettingsRequest = Static<typeof UpdateNetworkSettingsRequestSchema>;
 

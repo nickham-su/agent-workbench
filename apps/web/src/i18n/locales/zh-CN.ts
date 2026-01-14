@@ -58,6 +58,8 @@ export default {
     empty: "暂无仓库",
     actions: {
       add: "添加仓库",
+      sync: "同步",
+      edit: "修改",
       delete: "删除"
     },
     create: {
@@ -70,6 +72,15 @@ export default {
       credentialHostMismatch: "URL host 为 {urlHost}，所选凭证 host 为 {credHost}，请改选匹配 host 的凭证。",
       credentialKindMismatch: "URL 协议为 {urlKind}，所选凭证类型为 {credKind}，请切换 URL 或选择匹配的凭证。"
     },
+    edit: {
+      modalTitle: "修改仓库",
+      credentialLabel: "凭证（可选）",
+      credentialPlaceholder: "选择凭证（私有仓库推荐选择）",
+      credentialHelp: "修改后可重新同步以验证。",
+      credentialHostMismatch: "URL host 为 {urlHost}，所选凭证 host 为 {credHost}，请改选匹配 host 的凭证。",
+      credentialKindMismatch: "URL 协议为 {urlKind}，所选凭证类型为 {credKind}，请切换 URL 或选择匹配的凭证。",
+      updated: "仓库已更新"
+    },
     deleteConfirm: {
       title: "确认删除仓库？",
       content: "删除将同时删除镜像（mirror）目录；若存在工作区引用则会失败。",
@@ -77,6 +88,9 @@ export default {
       cancel: "取消"
     },
     sync: {
+      started: "已开始同步",
+      alreadySyncing: "同步进行中",
+      success: "同步完成",
       failed: "仓库同步失败",
       timeout: "仓库同步超时，请稍后重试"
     },
@@ -424,7 +438,10 @@ export default {
         httpsProxyPlaceholder: "例如 http://127.0.0.1:7890",
         noProxyPlaceholder: "例如 localhost,127.0.0.1,.company.com",
         caCertLabel: "企业 CA 证书（PEM，可选）",
-        caCertPlaceholder: "粘贴 PEM 内容，支持多个 PEM 块"
+        caCertPlaceholder: "粘贴 PEM 内容，支持多个 PEM 块",
+        applyToTerminalLabel: "应用到终端",
+        applyToTerminalEffect: "作用：将代理/证书注入新建终端环境；仅配置凭证，终端里可能仍无法访问内网 Git（还需代理或 CA 证书）。",
+        applyToTerminalRisk: "风险：若代理地址包含账号密码，可能在终端环境变量/进程信息中泄露。"
       },
       actions: {
         save: "保存",

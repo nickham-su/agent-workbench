@@ -16,19 +16,51 @@
           class="group flex items-center justify-between gap-3 px-2 py-2 rounded hover:bg-[var(--panel-bg-elevated)]"
         >
           <div class="min-w-0 flex-1">
-            <div class="font-mono text-xs truncate" :title="r.url">{{ r.url }}</div>
+            <div class="flex items-center gap-2 min-w-0">
+              <div class="font-mono text-xs truncate min-w-0" :title="r.url">{{ r.url }}</div>
+              <a-tooltip v-if="r.syncStatus === 'failed' && r.syncError" :title="r.syncError">
+                <a-tag color="red" class="!text-[10px] !leading-[16px] !px-1 !py-0">{{ t("repos.syncStatus.failed") }}</a-tag>
+              </a-tooltip>
+              <a-tag
+                v-else-if="r.syncStatus === 'syncing'"
+                color="blue"
+                class="!text-[10px] !leading-[16px] !px-1 !py-0"
+              >{{ t("repos.syncStatus.syncing") }}</a-tag>
+            </div>
           </div>
-          <a-button
-            size="small"
-            type="text"
-            danger
-            class="opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity"
-            @click="confirmDelete(r.id)"
-            :title="t('repos.actions.delete')"
-            :aria-label="t('repos.actions.delete')"
-          >
-            <template #icon><DeleteOutlined /></template>
-          </a-button>
+          <div class="flex items-center gap-1 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity">
+            <a-button
+              size="small"
+              type="text"
+              :loading="Boolean(syncingByRepoId[r.id])"
+              :disabled="r.syncStatus === 'syncing'"
+              @click="doSync(r.id)"
+              :title="t('repos.actions.sync')"
+              :aria-label="t('repos.actions.sync')"
+            >
+              <template #icon><SyncOutlined /></template>
+            </a-button>
+            <a-button
+              size="small"
+              type="text"
+              :disabled="r.syncStatus === 'syncing'"
+              @click="openEdit(r)"
+              :title="t('repos.actions.edit')"
+              :aria-label="t('repos.actions.edit')"
+            >
+              <template #icon><EditOutlined /></template>
+            </a-button>
+            <a-button
+              size="small"
+              type="text"
+              danger
+              @click="confirmDelete(r.id)"
+              :title="t('repos.actions.delete')"
+              :aria-label="t('repos.actions.delete')"
+            >
+              <template #icon><DeleteOutlined /></template>
+            </a-button>
+          </div>
         </div>
       </div>
     </div>
@@ -40,8 +72,8 @@
         </a-form-item>
         <a-form-item
           :label="t('repos.create.credentialLabel')"
-          :validate-status="credentialError ? 'error' : undefined"
-          :help="credentialError ?? undefined"
+          :validate-status="createCredentialError ? 'error' : undefined"
+          :help="createCredentialError ?? undefined"
         >
           <a-select
             v-model:value="selectedCredentialId"
@@ -50,7 +82,7 @@
             show-search
             :filter-option="filterCredential"
           >
-            <a-select-option v-for="c in credentialOptions" :key="c.id" :value="c.id">
+            <a-select-option v-for="c in createCredentialOptions" :key="c.id" :value="c.id">
               {{ c.host }} · {{ credentialKindLabel(c.kind) }}<span v-if="c.isDefault"> · {{ t("common.default") }}</span><span v-if="c.label"> · {{ c.label }}</span>
             </a-select-option>
           </a-select>
@@ -60,16 +92,43 @@
         </a-form-item>
       </a-form>
     </a-modal>
+
+    <a-modal v-model:open="editOpen" :title="t('repos.edit.modalTitle')" :confirm-loading="editing" @ok="submitEdit">
+      <div class="font-mono text-xs text-[color:var(--text-tertiary)] truncate pb-2" :title="editRepo?.url">{{ editRepo?.url }}</div>
+      <a-form layout="vertical">
+        <a-form-item
+          :label="t('repos.edit.credentialLabel')"
+          :validate-status="editCredentialError ? 'error' : undefined"
+          :help="editCredentialError ?? undefined"
+        >
+          <a-select
+            v-model:value="editCredentialId"
+            allow-clear
+            :placeholder="t('repos.edit.credentialPlaceholder')"
+            show-search
+            :filter-option="filterCredential"
+          >
+            <a-select-option v-for="c in editCredentialOptions" :key="c.id" :value="c.id">
+              {{ c.host }} · {{ credentialKindLabel(c.kind) }}<span v-if="c.isDefault"> · {{ t("common.default") }}</span><span v-if="c.label"> · {{ c.label }}</span>
+            </a-select-option>
+          </a-select>
+          <div class="pt-1 text-[11px] text-[color:var(--text-tertiary)]">
+            {{ t("repos.edit.credentialHelp") }}
+          </div>
+        </a-form-item>
+      </a-form>
+    </a-modal>
   </div>
 </template>
 
 <script setup lang="ts">
 import { Modal, message } from "ant-design-vue";
-import { DeleteOutlined, PlusOutlined } from "@ant-design/icons-vue";
+import { DeleteOutlined, EditOutlined, PlusOutlined, SyncOutlined } from "@ant-design/icons-vue";
 import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { CredentialRecord, RepoRecord } from "@agent-workbench/shared";
-import { createRepo, deleteRepo, listCredentials, listRepos } from "../services/api";
+import { createRepo, deleteRepo, listCredentials, listRepos, syncRepo, updateRepo } from "../services/api";
+import { waitRepoReadyOrThrow } from "../services/repoSync";
 import { extractGitHost, inferGitCredentialKindFromUrl } from "../utils/gitHost";
 
 const { t } = useI18n();
@@ -83,12 +142,30 @@ const creating = ref(false);
 const createUrl = ref("");
 const selectedCredentialId = ref<string | undefined>(undefined);
 
+const editOpen = ref(false);
+const editing = ref(false);
+const editRepo = ref<RepoRecord | null>(null);
+const editCredentialId = ref<string | undefined>(undefined);
+
+const syncingByRepoId = ref<Record<string, boolean>>({});
+
 function filterCredential(input: string, option: any) {
   return String(option?.children ?? "").toLowerCase().includes(input.toLowerCase());
 }
 
 function credentialKindLabel(kind: CredentialRecord["kind"]) {
   return kind === "ssh" ? t("settings.credentials.form.kindSsh") : t("settings.credentials.form.kindHttps");
+}
+
+function sortCredentials(params: { host: string | null; kind: "https" | "ssh" | null }) {
+  const { host, kind } = params;
+  const list = credentials.value.slice();
+  list.sort((a, b) => {
+    const aScore = (host && a.host === host ? 100 : 0) + (kind && a.kind === kind ? 20 : 0) + (a.isDefault ? 10 : 0);
+    const bScore = (host && b.host === host ? 100 : 0) + (kind && b.kind === kind ? 20 : 0) + (b.isDefault ? 10 : 0);
+    return bScore - aScore;
+  });
+  return list;
 }
 
 const urlHost = computed(() => extractGitHost(createUrl.value));
@@ -98,7 +175,7 @@ const selectedCredential = computed(() => {
   if (!id) return null;
   return credentials.value.find((c) => c.id === id) ?? null;
 });
-const credentialError = computed(() => {
+const createCredentialError = computed(() => {
   const cred = selectedCredential.value;
   if (!cred) return null;
 
@@ -118,17 +195,38 @@ const credentialError = computed(() => {
   return null;
 });
 
-const credentialOptions = computed(() => {
-  const host = urlHost.value;
-  const kind = urlKind.value;
-  const list = credentials.value.slice();
-  list.sort((a, b) => {
-    const aScore = (host && a.host === host ? 100 : 0) + (kind && a.kind === kind ? 20 : 0) + (a.isDefault ? 10 : 0);
-    const bScore = (host && b.host === host ? 100 : 0) + (kind && b.kind === kind ? 20 : 0) + (b.isDefault ? 10 : 0);
-    return bScore - aScore;
-  });
-  return list;
+const createCredentialOptions = computed(() => sortCredentials({ host: urlHost.value, kind: urlKind.value }));
+
+const editUrlHost = computed(() => extractGitHost(editRepo.value?.url || ""));
+const editUrlKind = computed(() => inferGitCredentialKindFromUrl(editRepo.value?.url || ""));
+const editSelectedCredential = computed(() => {
+  const id = editCredentialId.value;
+  if (!id) return null;
+  return credentials.value.find((c) => c.id === id) ?? null;
 });
+const editCredentialError = computed(() => {
+  const repo = editRepo.value;
+  if (!repo) return null;
+
+  const cred = editSelectedCredential.value;
+  if (!cred) return null;
+
+  const host = editUrlHost.value;
+  if (host && cred.host !== host) {
+    return t("repos.edit.credentialHostMismatch", { urlHost: host, credHost: cred.host });
+  }
+
+  const kind = editUrlKind.value;
+  if (kind && cred.kind !== kind) {
+    return t("repos.edit.credentialKindMismatch", {
+      urlKind: credentialKindLabel(kind),
+      credKind: credentialKindLabel(cred.kind)
+    });
+  }
+
+  return null;
+});
+const editCredentialOptions = computed(() => sortCredentials({ host: editUrlHost.value, kind: editUrlKind.value }));
 
 async function refresh() {
   loading.value = true;
@@ -148,11 +246,63 @@ function openCreate() {
   createOpen.value = true;
 }
 
+function openEdit(repo: RepoRecord) {
+  editRepo.value = repo;
+  editCredentialId.value = repo.credentialId ?? undefined;
+  editOpen.value = true;
+}
+
+async function submitEdit() {
+  const repo = editRepo.value;
+  if (!repo) return;
+  if (editCredentialError.value) {
+    message.error(editCredentialError.value);
+    return;
+  }
+
+  editing.value = true;
+  try {
+    await updateRepo(repo.id, { credentialId: editCredentialId.value ?? null });
+    message.success(t("repos.edit.updated"));
+    editOpen.value = false;
+    editRepo.value = null;
+    await refresh();
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
+  } finally {
+    editing.value = false;
+  }
+}
+
+async function doSync(repoId: string) {
+  if (syncingByRepoId.value[repoId]) return;
+  syncingByRepoId.value = { ...syncingByRepoId.value, [repoId]: true };
+  try {
+    const res = await syncRepo(repoId);
+    if (!res.started) {
+      message.info(t("repos.sync.alreadySyncing"));
+      await refresh();
+      return;
+    }
+    message.success(t("repos.sync.started"));
+    await refresh();
+    await waitRepoReadyOrThrow(repoId, { t });
+    message.success(t("repos.sync.success"));
+    await refresh();
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
+    await refresh();
+  } finally {
+    const { [repoId]: _, ...rest } = syncingByRepoId.value;
+    syncingByRepoId.value = rest;
+  }
+}
+
 async function submitCreate() {
   const url = createUrl.value.trim();
   if (!url) return;
-  if (credentialError.value) {
-    message.error(credentialError.value);
+  if (createCredentialError.value) {
+    message.error(createCredentialError.value);
     return;
   }
   creating.value = true;

@@ -7,14 +7,15 @@ import { newId } from "../../utils/ids.js";
 import { nowMs } from "../../utils/time.js";
 import { getWorkspace } from "../workspaces/workspace.store.js";
 import { tmuxHasSession, tmuxKillSession, tmuxNewSession } from "../../infra/tmux/session.js";
-import { ensureDir } from "../../infra/fs/fs.js";
-import { sshKnownHostsPath, sshRoot, tmpRoot } from "../../infra/fs/paths.js";
+import { ensureDir, pathExists } from "../../infra/fs/fs.js";
+import { caCertPath, certsRoot, sshKnownHostsPath, sshRoot, tmpRoot } from "../../infra/fs/paths.js";
 import { decryptToUtf8 } from "../../infra/crypto/secretBox.js";
 import { getRepo } from "../repos/repo.store.js";
 import { extractGitHost, inferGitCredentialKindFromUrl } from "../../infra/git/gitHost.js";
 import { gitAskpassScriptV1 } from "../../infra/git/askpass.js";
 import { shQuote } from "../../infra/git/shQuote.js";
 import { getCredentialWithSecret, pickCredentialWithSecretForHost } from "../credentials/credentials.store.js";
+import { getSettingJson } from "../settings/settings.store.js";
 import {
   insertTerminal,
   getTerminal,
@@ -35,16 +36,72 @@ function sanitizeEnvValue(raw: string) {
   return s;
 }
 
+type NetworkSettingsForTerminalV1 = {
+  httpProxy: string | null;
+  httpsProxy: string | null;
+  noProxy: string | null;
+  caCertPem: string | null;
+  applyToTerminal: boolean;
+};
+
+function readNetworkSettingsForTerminal(ctx: AppContext): NetworkSettingsForTerminalV1 {
+  const row = getSettingJson(ctx.db, "network");
+  const v = (row?.value ?? {}) as Partial<NetworkSettingsForTerminalV1>;
+  return {
+    httpProxy: typeof v.httpProxy === "string" && v.httpProxy.trim() ? v.httpProxy.trim() : null,
+    httpsProxy: typeof v.httpsProxy === "string" && v.httpsProxy.trim() ? v.httpsProxy.trim() : null,
+    noProxy: typeof v.noProxy === "string" && v.noProxy.trim() ? v.noProxy.trim() : null,
+    caCertPem: typeof v.caCertPem === "string" && v.caCertPem ? v.caCertPem : null,
+    applyToTerminal: Boolean(v.applyToTerminal)
+  };
+}
+
+async function buildTerminalNetworkEnvPairs(ctx: AppContext): Promise<string[]> {
+  const network = readNetworkSettingsForTerminal(ctx);
+  if (!network.applyToTerminal) return [];
+
+  const pairs: string[] = [];
+  const httpProxy = network.httpProxy ? sanitizeEnvValue(network.httpProxy) : "";
+  const httpsProxy = network.httpsProxy ? sanitizeEnvValue(network.httpsProxy) : "";
+  const noProxy = network.noProxy ? sanitizeEnvValue(network.noProxy) : "";
+
+  if (httpProxy) {
+    pairs.push(`HTTP_PROXY=${httpProxy}`, `http_proxy=${httpProxy}`);
+  }
+  if (httpsProxy) {
+    pairs.push(`HTTPS_PROXY=${httpsProxy}`, `https_proxy=${httpsProxy}`);
+  }
+  if (noProxy) {
+    pairs.push(`NO_PROXY=${noProxy}`, `no_proxy=${noProxy}`);
+  }
+
+  const caPem = network.caCertPem;
+  if (caPem) {
+    await ensureDir(certsRoot(ctx.dataDir));
+    const p = caCertPath(ctx.dataDir);
+    await fs.writeFile(p, caPem, { encoding: "utf-8" });
+    pairs.push(`GIT_SSL_CAINFO=${p}`, `SSL_CERT_FILE=${p}`);
+  } else {
+    const p = caCertPath(ctx.dataDir);
+    if (await pathExists(p)) {
+      pairs.push(`GIT_SSL_CAINFO=${p}`, `SSL_CERT_FILE=${p}`);
+    }
+  }
+
+  return pairs;
+}
+
 async function buildTerminalGitEnv(params: {
   ctx: AppContext;
   terminalId: string;
   workspaceId: string;
 }): Promise<{ envPairs: string[] }> {
+  const networkPairs = await buildTerminalNetworkEnvPairs(params.ctx);
   const ws = getWorkspace(params.ctx.db, params.workspaceId);
   if (!ws) throw new HttpError(404, "Workspace not found");
 
   const repo = getRepo(params.ctx.db, ws.repoId);
-  if (!repo) return { envPairs: [] };
+  if (!repo) return { envPairs: networkPairs };
 
   const repoCredentialId = repo.credentialId ? String(repo.credentialId || "").trim() : "";
   let cred: ReturnType<typeof getCredentialWithSecret> | null = null;
@@ -59,7 +116,7 @@ async function buildTerminalGitEnv(params: {
     }
   }
 
-  if (!cred) return { envPairs: [] };
+  if (!cred) return { envPairs: networkPairs };
 
   const secret = decryptToUtf8({ key: params.ctx.credentialMasterKey, ciphertext: cred.secretEnc });
   await ensureDir(tmpRoot(params.ctx.dataDir));
@@ -84,7 +141,7 @@ async function buildTerminalGitEnv(params: {
     ].join(" ");
 
     return {
-      envPairs: ["GIT_TERMINAL_PROMPT=0", `GIT_SSH_COMMAND=${sshCmd}`]
+      envPairs: [...networkPairs, "GIT_TERMINAL_PROMPT=0", `GIT_SSH_COMMAND=${sshCmd}`]
     };
   }
 
@@ -95,6 +152,7 @@ async function buildTerminalGitEnv(params: {
   const username = sanitizeEnvValue(cred.record.username || "oauth2");
   return {
     envPairs: [
+      ...networkPairs,
       "GIT_TERMINAL_PROMPT=0",
       `GIT_ASKPASS=${askpassPath}`,
       `GIT_ASKPASS_USERNAME=${username}`,

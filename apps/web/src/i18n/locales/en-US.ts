@@ -58,6 +58,8 @@ export default {
     empty: "No repos",
     actions: {
       add: "Add repo",
+      sync: "Sync",
+      edit: "Edit",
       delete: "Delete"
     },
     create: {
@@ -70,6 +72,15 @@ export default {
       credentialHostMismatch: "URL host is {urlHost}, but the selected credential host is {credHost}. Please pick a credential for the same host.",
       credentialKindMismatch: "URL protocol is {urlKind}, but the selected credential type is {credKind}. Switch the URL or pick a matching credential."
     },
+    edit: {
+      modalTitle: "Edit repo",
+      credentialLabel: "Credential (optional)",
+      credentialPlaceholder: "Select credential (recommended for private repos)",
+      credentialHelp: "Sync again to validate after update.",
+      credentialHostMismatch: "URL host is {urlHost}, but the selected credential host is {credHost}. Please pick a credential for the same host.",
+      credentialKindMismatch: "URL protocol is {urlKind}, but the selected credential type is {credKind}. Switch the URL or pick a matching credential.",
+      updated: "Repo updated"
+    },
     deleteConfirm: {
       title: "Delete repo?",
       content: "Deleting will also remove the mirror directory; it will fail if referenced by any workspace.",
@@ -77,6 +88,9 @@ export default {
       cancel: "Cancel"
     },
     sync: {
+      started: "Sync started",
+      alreadySyncing: "Already syncing",
+      success: "Sync completed",
       failed: "Repo sync failed",
       timeout: "Repo sync timed out. Please try again later."
     },
@@ -424,7 +438,10 @@ export default {
         httpsProxyPlaceholder: "e.g. http://127.0.0.1:7890",
         noProxyPlaceholder: "e.g. localhost,127.0.0.1,.company.com",
         caCertLabel: "Enterprise CA certificate (PEM, optional)",
-        caCertPlaceholder: "Paste PEM content (multiple blocks supported)"
+        caCertPlaceholder: "Paste PEM content (multiple blocks supported)",
+        applyToTerminalLabel: "Apply to terminals",
+        applyToTerminalEffect: "Effect: inject proxy/cert into new terminal sessions; with credentials only, the terminal may still be unable to access internal Git (proxy or CA cert may be required).",
+        applyToTerminalRisk: "Risk: if proxy URLs include username/password, they may leak via terminal environment variables or process info."
       },
       actions: {
         save: "Save",

@@ -23,7 +23,7 @@ type NetworkSettingsV1 = Omit<NetworkSettings, "updatedAt">;
 const NETWORK_SETTINGS_KEY = "network";
 
 function defaultNetworkSettings(): NetworkSettingsV1 {
-  return { httpProxy: null, httpsProxy: null, noProxy: null, caCertPem: null };
+  return { httpProxy: null, httpsProxy: null, noProxy: null, caCertPem: null, applyToTerminal: false };
 }
 
 export function getNetworkSettings(ctx: AppContext): NetworkSettings {
@@ -35,6 +35,7 @@ export function getNetworkSettings(ctx: AppContext): NetworkSettings {
     httpsProxy: typeof value?.httpsProxy === "string" ? value.httpsProxy : null,
     noProxy: typeof value?.noProxy === "string" ? value.noProxy : null,
     caCertPem: typeof value?.caCertPem === "string" ? value.caCertPem : null,
+    applyToTerminal: typeof value?.applyToTerminal === "boolean" ? value.applyToTerminal : base.applyToTerminal,
     updatedAt: row?.updatedAt ?? 0
   };
 }
@@ -50,7 +51,8 @@ export async function updateNetworkSettings(
     httpProxy: body.httpProxy !== undefined ? (body.httpProxy ? String(body.httpProxy).trim() : null) : current.httpProxy,
     httpsProxy: body.httpsProxy !== undefined ? (body.httpsProxy ? String(body.httpsProxy).trim() : null) : current.httpsProxy,
     noProxy: body.noProxy !== undefined ? (body.noProxy ? String(body.noProxy).trim() : null) : current.noProxy,
-    caCertPem: body.caCertPem !== undefined ? (body.caCertPem ? String(body.caCertPem) : null) : current.caCertPem
+    caCertPem: body.caCertPem !== undefined ? (body.caCertPem ? String(body.caCertPem) : null) : current.caCertPem,
+    applyToTerminal: body.applyToTerminal !== undefined ? Boolean(body.applyToTerminal) : current.applyToTerminal
   };
 
   const updatedAt = nowMs();

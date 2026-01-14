@@ -176,6 +176,15 @@
             <a-form-item :label="t('settings.network.form.caCertLabel')">
               <a-textarea v-model:value="networkCaPem" :rows="8" :placeholder="t('settings.network.form.caCertPlaceholder')" />
             </a-form-item>
+            <a-form-item>
+              <div class="flex items-start gap-2">
+                <a-checkbox v-model:checked="networkApplyToTerminal">{{ t("settings.network.form.applyToTerminalLabel") }}</a-checkbox>
+                <div class="text-[11px] text-[color:var(--text-tertiary)] leading-4 pt-[2px]">
+                  <div>{{ t("settings.network.form.applyToTerminalEffect") }}</div>
+                  <div>{{ t("settings.network.form.applyToTerminalRisk") }}</div>
+                </div>
+              </div>
+            </a-form-item>
             <div class="flex items-center gap-2">
               <a-button size="small" :loading="networkSaving" @click="saveNetwork">{{ t("settings.network.actions.save") }}</a-button>
               <a-button size="small" type="text" :loading="networkLoading" @click="refreshNetwork">{{ t("settings.network.actions.refresh") }}</a-button>
@@ -513,6 +522,7 @@ const networkHttpProxy = ref("");
 const networkHttpsProxy = ref("");
 const networkNoProxy = ref("");
 const networkCaPem = ref("");
+const networkApplyToTerminal = ref(false);
 
 async function refreshNetwork() {
   networkLoading.value = true;
@@ -522,6 +532,7 @@ async function refreshNetwork() {
     networkHttpsProxy.value = res.httpsProxy || "";
     networkNoProxy.value = res.noProxy || "";
     networkCaPem.value = res.caCertPem || "";
+    networkApplyToTerminal.value = Boolean(res.applyToTerminal);
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
@@ -537,7 +548,8 @@ async function saveNetwork() {
       httpProxy: networkHttpProxy.value.trim() ? networkHttpProxy.value.trim() : null,
       httpsProxy: networkHttpsProxy.value.trim() ? networkHttpsProxy.value.trim() : null,
       noProxy: networkNoProxy.value.trim() ? networkNoProxy.value.trim() : null,
-      caCertPem: networkCaPem.value ? networkCaPem.value : null
+      caCertPem: networkCaPem.value ? networkCaPem.value : null,
+      applyToTerminal: networkApplyToTerminal.value
     });
     message.success(t("settings.network.saved"));
     await refreshNetwork();
