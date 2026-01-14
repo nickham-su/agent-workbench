@@ -10,6 +10,7 @@ import { HttpError } from "../../app/errors.js";
 import type { AppContext } from "../../app/context.js";
 import { newId } from "../../utils/ids.js";
 import { nowMs } from "../../utils/time.js";
+import { extractGitHost, inferGitCredentialKindFromUrl } from "../../infra/git/gitHost.js";
 import {
   countWorkspacesReferencingRepo,
   deleteRepoRecord,
@@ -20,6 +21,27 @@ import {
   updateRepoCredentialId
 } from "./repo.store.js";
 import { getCredentialWithSecret } from "../credentials/credentials.store.js";
+
+function validateRepoCredentialCompatibility(params: {
+  repoUrl: string;
+  cred: { host: string; kind: "https" | "ssh" };
+}) {
+  const urlHost = extractGitHost(params.repoUrl);
+  if (urlHost && params.cred.host !== urlHost) {
+    throw new HttpError(
+      400,
+      `Credential host mismatch. URL host is ${urlHost}, but the credential is for ${params.cred.host}.`
+    );
+  }
+
+  const urlKind = inferGitCredentialKindFromUrl(params.repoUrl);
+  if (urlKind && params.cred.kind !== urlKind) {
+    throw new HttpError(
+      400,
+      `Credential kind mismatch. URL protocol is ${urlKind}, but the credential type is ${params.cred.kind}.`
+    );
+  }
+}
 
 export async function createRepo(
   ctx: AppContext,
@@ -37,6 +59,10 @@ export async function createRepo(
   if (normalizedCredentialId) {
     const cred = getCredentialWithSecret(ctx.db, normalizedCredentialId);
     if (!cred) throw new HttpError(404, "Credential not found");
+    validateRepoCredentialCompatibility({
+      repoUrl: url,
+      cred: { host: cred.record.host, kind: cred.record.kind }
+    });
   }
 
   const id = newId("repo");
@@ -85,6 +111,10 @@ export async function updateRepo(ctx: AppContext, logger: FastifyBaseLogger, rep
   if (normalizedCredentialId) {
     const cred = getCredentialWithSecret(ctx.db, normalizedCredentialId);
     if (!cred) throw new HttpError(404, "Credential not found");
+    validateRepoCredentialCompatibility({
+      repoUrl: repo.url,
+      cred: { host: cred.record.host, kind: cred.record.kind }
+    });
   }
 
   updateRepoCredentialId(ctx.db, repo.id, normalizedCredentialId, nowMs());

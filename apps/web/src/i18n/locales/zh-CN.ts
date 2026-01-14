@@ -66,7 +66,9 @@ export default {
       gitUrlPlaceholder: "https://github.com/org/repo.git 或 git{at}github.com:org/repo.git",
       credentialLabel: "凭证（可选）",
       credentialPlaceholder: "选择凭证（私有仓库推荐选择）",
-      credentialHelp: "若未选择，将尝试按 URL host 自动匹配默认凭证；仍失败时可到 设置/凭证 配置。"
+      credentialHelp: "若未选择，将尝试按 URL host 自动匹配默认凭证；仍失败时可到 设置/凭证 配置。",
+      credentialHostMismatch: "URL host 为 {urlHost}，所选凭证 host 为 {credHost}，请改选匹配 host 的凭证。",
+      credentialKindMismatch: "URL 协议为 {urlKind}，所选凭证类型为 {credKind}，请切换 URL 或选择匹配的凭证。"
     },
     deleteConfirm: {
       title: "确认删除仓库？",
@@ -102,6 +104,8 @@ export default {
       credentialLabel: "凭证（可选）",
       credentialPlaceholder: "选择凭证（私有仓库推荐选择）",
       credentialHelp: "若未选择，将尝试按 URL host 自动匹配默认凭证。",
+      credentialHostMismatch: "URL host 为 {urlHost}，所选凭证 host 为 {credHost}，请改选匹配 host 的凭证。",
+      credentialKindMismatch: "URL 协议为 {urlKind}，所选凭证类型为 {credKind}，请切换 URL 或选择匹配的凭证。",
       repoLabel: "仓库",
       repoPlaceholder: "选择仓库",
       branchLabel: "分支",

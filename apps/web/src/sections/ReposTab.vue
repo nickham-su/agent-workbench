@@ -38,7 +38,11 @@
         <a-form-item :label="t('repos.create.gitUrlLabel')" required>
           <a-input v-model:value="createUrl" :placeholder="t('repos.create.gitUrlPlaceholder', { at: '@' })" />
         </a-form-item>
-        <a-form-item :label="t('repos.create.credentialLabel')">
+        <a-form-item
+          :label="t('repos.create.credentialLabel')"
+          :validate-status="credentialError ? 'error' : undefined"
+          :help="credentialError ?? undefined"
+        >
           <a-select
             v-model:value="selectedCredentialId"
             allow-clear
@@ -66,7 +70,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { CredentialRecord, RepoRecord } from "@agent-workbench/shared";
 import { createRepo, deleteRepo, listCredentials, listRepos } from "../services/api";
-import { extractGitHost } from "../utils/gitHost";
+import { extractGitHost, inferGitCredentialKindFromUrl } from "../utils/gitHost";
 
 const { t } = useI18n();
 
@@ -87,12 +91,40 @@ function credentialKindLabel(kind: CredentialRecord["kind"]) {
   return kind === "ssh" ? t("settings.credentials.form.kindSsh") : t("settings.credentials.form.kindHttps");
 }
 
+const urlHost = computed(() => extractGitHost(createUrl.value));
+const urlKind = computed(() => inferGitCredentialKindFromUrl(createUrl.value));
+const selectedCredential = computed(() => {
+  const id = selectedCredentialId.value;
+  if (!id) return null;
+  return credentials.value.find((c) => c.id === id) ?? null;
+});
+const credentialError = computed(() => {
+  const cred = selectedCredential.value;
+  if (!cred) return null;
+
+  const host = urlHost.value;
+  if (host && cred.host !== host) {
+    return t("repos.create.credentialHostMismatch", { urlHost: host, credHost: cred.host });
+  }
+
+  const kind = urlKind.value;
+  if (kind && cred.kind !== kind) {
+    return t("repos.create.credentialKindMismatch", {
+      urlKind: credentialKindLabel(kind),
+      credKind: credentialKindLabel(cred.kind)
+    });
+  }
+
+  return null;
+});
+
 const credentialOptions = computed(() => {
-  const host = extractGitHost(createUrl.value);
+  const host = urlHost.value;
+  const kind = urlKind.value;
   const list = credentials.value.slice();
   list.sort((a, b) => {
-    const aScore = (host && a.host === host ? 100 : 0) + (a.isDefault ? 10 : 0);
-    const bScore = (host && b.host === host ? 100 : 0) + (b.isDefault ? 10 : 0);
+    const aScore = (host && a.host === host ? 100 : 0) + (kind && a.kind === kind ? 20 : 0) + (a.isDefault ? 10 : 0);
+    const bScore = (host && b.host === host ? 100 : 0) + (kind && b.kind === kind ? 20 : 0) + (b.isDefault ? 10 : 0);
     return bScore - aScore;
   });
   return list;
@@ -119,12 +151,17 @@ function openCreate() {
 async function submitCreate() {
   const url = createUrl.value.trim();
   if (!url) return;
+  if (credentialError.value) {
+    message.error(credentialError.value);
+    return;
+  }
   creating.value = true;
   try {
     let credentialId = selectedCredentialId.value ?? null;
     if (!credentialId) {
       const host = extractGitHost(url);
-      const pick = host ? credentials.value.find((c) => c.host === host && c.isDefault) : undefined;
+      const kind = inferGitCredentialKindFromUrl(url);
+      const pick = host ? credentials.value.find((c) => c.host === host && c.isDefault && (!kind || c.kind === kind)) : undefined;
       credentialId = pick?.id ?? null;
     }
     await createRepo({ url, credentialId });
@@ -158,7 +195,8 @@ watch(
   () => {
     if (selectedCredentialId.value) return;
     const host = extractGitHost(createUrl.value);
-    const pick = host ? credentials.value.find((c) => c.host === host && c.isDefault) : undefined;
+    const kind = inferGitCredentialKindFromUrl(createUrl.value);
+    const pick = host ? credentials.value.find((c) => c.host === host && c.isDefault && (!kind || c.kind === kind)) : undefined;
     selectedCredentialId.value = pick?.id ?? undefined;
   }
 );
