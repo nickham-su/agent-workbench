@@ -22,6 +22,11 @@ export type DiffViewerLayout = {
   splitterWidth: number;
 };
 
+export type MonacoDiffViewerExposed = {
+  goToPreviousDiff: () => void;
+  goToNextDiff: () => void;
+};
+
 const emit = defineEmits<{
   (e: "layout", layout: DiffViewerLayout): void;
 }>();
@@ -91,6 +96,104 @@ function ensureModels() {
   scheduleEmitLayout();
 }
 
+function goToPreviousDiff() {
+  if (!editor) return;
+  const changes = editor.getLineChanges() || [];
+  if (changes.length === 0) return;
+
+  const current = getCurrentLineHint();
+  const anchors = changes
+    .map(toAnchor)
+    .filter((a): a is DiffAnchor => !!a)
+    .sort((a, b) => a.line - b.line);
+  if (anchors.length === 0) return;
+
+  const idx = lastIndexWhere(anchors, (a) => a.line < current.line);
+  const next = idx >= 0 ? anchors[idx]! : anchors[anchors.length - 1]!;
+  revealAnchor(next);
+}
+
+function goToNextDiff() {
+  if (!editor) return;
+  const changes = editor.getLineChanges() || [];
+  if (changes.length === 0) return;
+
+  const current = getCurrentLineHint();
+  const anchors = changes
+    .map(toAnchor)
+    .filter((a): a is DiffAnchor => !!a)
+    .sort((a, b) => a.line - b.line);
+  if (anchors.length === 0) return;
+
+  const idx = anchors.findIndex((a) => a.line > current.line);
+  const next = idx >= 0 ? anchors[idx]! : anchors[0]!;
+  revealAnchor(next);
+}
+
+defineExpose<MonacoDiffViewerExposed>({
+  goToPreviousDiff,
+  goToNextDiff
+});
+
+type DiffAnchor = { side: "original" | "modified"; line: number };
+
+function toAnchor(change: monaco.editor.ILineChange): DiffAnchor | null {
+  if (change.modifiedStartLineNumber > 0) return { side: "modified", line: change.modifiedStartLineNumber };
+  if (change.modifiedEndLineNumber > 0) return { side: "modified", line: change.modifiedEndLineNumber };
+  if (change.originalStartLineNumber > 0) return { side: "original", line: change.originalStartLineNumber };
+  if (change.originalEndLineNumber > 0) return { side: "original", line: change.originalEndLineNumber };
+  return null;
+}
+
+function lastIndexWhere<T>(arr: T[], pred: (v: T) => boolean) {
+  for (let i = arr.length - 1; i >= 0; i -= 1) {
+    if (pred(arr[i]!)) return i;
+  }
+  return -1;
+}
+
+function getCurrentLineHint(): DiffAnchor {
+  if (!editor) return { side: "modified", line: 1 };
+  const modifiedEditor = editor.getModifiedEditor();
+  const originalEditor = editor.getOriginalEditor();
+
+  const modifiedFocused = modifiedEditor.hasTextFocus?.() || false;
+  const originalFocused = originalEditor.hasTextFocus?.() || false;
+
+  if (modifiedFocused) {
+    const mp = modifiedEditor.getPosition();
+    if (mp) return { side: "modified", line: mp.lineNumber };
+  }
+  if (originalFocused) {
+    const op = originalEditor.getPosition();
+    if (op) return { side: "original", line: op.lineNumber };
+  }
+
+  const mp = modifiedEditor.getPosition();
+  if (mp) return { side: "modified", line: mp.lineNumber };
+
+  const op = originalEditor.getPosition();
+  if (op) return { side: "original", line: op.lineNumber };
+
+  const mr = modifiedEditor.getVisibleRanges?.() || [];
+  if (mr.length > 0) return { side: "modified", line: mr[0]!.startLineNumber };
+
+  const or = originalEditor.getVisibleRanges?.() || [];
+  if (or.length > 0) return { side: "original", line: or[0]!.startLineNumber };
+
+  return { side: "modified", line: 1 };
+}
+
+function revealAnchor(anchor: DiffAnchor) {
+  if (!editor) return;
+  const target = anchor.side === "modified" ? editor.getModifiedEditor() : editor.getOriginalEditor();
+  const line = Math.max(1, anchor.line);
+
+  target.revealLineInCenter(line);
+  target.setPosition({ lineNumber: line, column: 1 });
+  target.focus();
+}
+
 onMounted(() => {
   ensureMonacoEnvironment();
   if (!containerEl.value) return;
@@ -104,7 +207,7 @@ onMounted(() => {
     minimap: {enabled: false},
     scrollBeyondLastLine: false,
     wordWrap: "off",
-    renderOverviewRuler: false,
+    renderOverviewRuler: true,
     renderWhitespace: "selection",
     overviewRulerBorder: false,
     hideCursorInOverviewRuler: true
@@ -118,7 +221,7 @@ onMounted(() => {
     hideCursorInOverviewRuler: true
   });
   modifiedEditor.updateOptions({
-    scrollbar: {vertical: "auto", horizontal: "auto"},
+    scrollbar: {vertical: "hidden", horizontal: "auto"},
     overviewRulerBorder: false,
     hideCursorInOverviewRuler: true
   });

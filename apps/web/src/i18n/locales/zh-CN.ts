@@ -232,6 +232,8 @@ export default {
       resizeFileList: "调整文件列表宽度",
       base: "旧",
       current: "新",
+      prevChange: "上一处差异",
+      nextChange: "下一处差异",
       selectToCompare: "选择左侧文件以查看对比",
       notPreviewableTitle: "该文件暂不支持预览",
       baseReason: "旧文件：{reason}",
