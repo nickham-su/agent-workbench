@@ -127,14 +127,13 @@ import { DeleteOutlined, EditOutlined, PlusOutlined, SyncOutlined } from "@ant-d
 import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { CredentialRecord, RepoRecord } from "@agent-workbench/shared";
-import { createRepo, deleteRepo, listCredentials, listRepos, syncRepo, updateRepo } from "../services/api";
-import { waitRepoReadyOrThrow } from "../services/repoSync";
+import { createRepo, deleteRepo, listCredentials, syncRepo, updateRepo } from "../services/api";
+import { useReposState, waitRepoSettledOrThrow } from "../state/repos";
 import { extractGitHost, inferGitCredentialKindFromUrl } from "../utils/gitHost";
 
 const { t } = useI18n();
 
-const repos = ref<RepoRecord[]>([]);
-const loading = ref(false);
+const { repos, loading, refreshRepos } = useReposState();
 const credentials = ref<CredentialRecord[]>([]);
 
 const createOpen = ref(false);
@@ -229,14 +228,11 @@ const editCredentialError = computed(() => {
 const editCredentialOptions = computed(() => sortCredentials({ host: editUrlHost.value, kind: editUrlKind.value }));
 
 async function refresh() {
-  loading.value = true;
   try {
-    repos.value = await listRepos();
-    credentials.value = await listCredentials();
+    const [, creds] = await Promise.all([refreshRepos(), listCredentials()]);
+    credentials.value = creds;
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
-  } finally {
-    loading.value = false;
   }
 }
 
@@ -281,17 +277,16 @@ async function doSync(repoId: string) {
     const res = await syncRepo(repoId);
     if (!res.started) {
       message.info(t("repos.sync.alreadySyncing"));
-      await refresh();
+      await refreshRepos({ silent: true, showLoading: false });
       return;
     }
     message.success(t("repos.sync.started"));
-    await refresh();
-    await waitRepoReadyOrThrow(repoId, { t });
+    await refreshRepos({ silent: true, showLoading: false });
+    await waitRepoSettledOrThrow(repoId, { t });
     message.success(t("repos.sync.success"));
-    await refresh();
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
-    await refresh();
+    await refreshRepos({ silent: true, showLoading: false });
   } finally {
     const { [repoId]: _, ...rest } = syncingByRepoId.value;
     syncingByRepoId.value = rest;

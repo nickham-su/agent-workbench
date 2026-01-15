@@ -283,7 +283,7 @@ import {
   syncRepo,
   updateGitGlobalIdentity
 } from "../services/api";
-import { waitRepoReadyOrThrow } from "../services/repoSync";
+import { waitRepoSettledOrThrow } from "../state/repos";
 import { workspaceHostKey, type DockArea, type WorkspaceHostApi, type WorkspaceToolCommandMap, type WorkspaceToolEvent } from "../workspace/host";
 import { workspaceContextKey } from "../workspace/context";
 import WorkspaceToolButton from "../workspace/WorkspaceToolButton.vue";
@@ -1197,7 +1197,7 @@ async function refreshBranchesWithSync() {
   refreshBranchesLoading.value = true;
   try {
     await syncRepo(repo.repo.id);
-    await waitRepoReadyOrThrow(repo.repo.id, { t });
+    await waitRepoSettledOrThrow(repo.repo.id, { t });
     const res = await repoBranches(repo.repo.id);
     branches.value = res.branches;
     repoDefaultBranch.value = res.defaultBranch ?? null;

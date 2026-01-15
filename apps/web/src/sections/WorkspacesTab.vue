@@ -138,12 +138,13 @@ import { computed, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 import type { RepoRecord, WorkspaceDetail } from "@agent-workbench/shared";
-import { createWorkspace, deleteWorkspace, listRepos, listWorkspaces, updateWorkspace } from "../services/api";
+import { createWorkspace, deleteWorkspace, listWorkspaces, updateWorkspace } from "../services/api";
+import { useReposState } from "../state/repos";
 
 const { t } = useI18n();
 
+const { repos, refreshRepos } = useReposState();
 const loading = ref(false);
-const repos = ref<RepoRecord[]>([]);
 const workspaces = ref<WorkspaceDetail[]>([]);
 
 const createOpen = ref(false);
@@ -233,8 +234,7 @@ function onTitleInput() {
 async function refresh() {
   loading.value = true;
   try {
-    const [reposRes, wsRes] = await Promise.all([listRepos(), listWorkspaces()]);
-    repos.value = reposRes;
+    const [wsRes] = await Promise.all([listWorkspaces(), refreshRepos()]);
     workspaces.value = wsRes;
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
