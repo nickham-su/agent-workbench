@@ -120,9 +120,15 @@ export async function createWorkspace(
   });
 
   for (const { repo, branch } of repos) {
-    const branches = await listHeadsBranches({ mirrorPath: repo.mirrorPath, cwd: ctx.dataDir });
-    if (!branches.some((b) => b.name === branch)) {
-      throw new HttpError(409, `Branch not found: ${branch}`);
+    try {
+      const branches = await listHeadsBranches({ mirrorPath: repo.mirrorPath, cwd: ctx.dataDir });
+      if (!branches.some((b) => b.name === branch)) {
+        throw new HttpError(409, `Branch not found: ${branch}`);
+      }
+    } catch (err) {
+      if (err instanceof HttpError) throw err;
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new HttpError(409, `Failed to read branches from mirror: ${repo.url}. ${msg}`, "REPO_MIRROR_INVALID");
     }
   }
 
@@ -153,13 +159,19 @@ export async function createWorkspace(
   try {
     for (const item of workItems) {
       await withRepoLock(item.repo.id, async () => {
-        await cloneFromMirror({
-          mirrorPath: item.repo.mirrorPath,
-          repoUrl: item.repo.url,
-          worktreePath: item.path,
-          branch: item.branch,
-          dataDir: ctx.dataDir
-        });
+        try {
+          await cloneFromMirror({
+            mirrorPath: item.repo.mirrorPath,
+            repoUrl: item.repo.url,
+            worktreePath: item.path,
+            branch: item.branch,
+            dataDir: ctx.dataDir
+          });
+        } catch (err) {
+          if (err instanceof HttpError) throw err;
+          const msg = err instanceof Error ? err.message : String(err);
+          throw new HttpError(409, `Failed to clone repo into workspace: ${item.repo.url}. ${msg}`, "WORKSPACE_CLONE_FAILED");
+        }
       });
       createdPaths.push(item.path);
     }

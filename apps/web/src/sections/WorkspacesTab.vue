@@ -110,12 +110,12 @@
           />
         </a-form-item>
 
-        <a-form-item v-if="canUseTerminalCredential" :label="t('workspaces.create.terminalCredentialLabel')">
+        <a-form-item v-if="terminalCredentialState === 'available'" :label="t('workspaces.create.terminalCredentialLabel')">
           <a-checkbox v-model:checked="useTerminalCredential">
             {{ t("workspaces.create.terminalCredentialHelp") }}
           </a-checkbox>
         </a-form-item>
-        <div v-else-if="selectedRepoIds.length > 0" class="text-[11px] text-[color:var(--text-tertiary)] pb-2">
+        <div v-else-if="terminalCredentialState === 'unavailable'" class="text-[11px] text-[color:var(--text-tertiary)] pb-2">
           {{ t("workspaces.create.terminalCredentialUnavailable") }}
         </div>
       </a-form>
@@ -207,19 +207,21 @@ function repoSyncStatusLabel(status: RepoRecord["syncStatus"]) {
 
 const selectedRepos = computed(() => repos.value.filter((r) => selectedRepoIds.value.includes(r.id)));
 const defaultTitle = computed(() => selectedRepos.value.map((r) => formatRepoDisplayName(r.url)).filter(Boolean).join(" + "));
-const canUseTerminalCredential = computed(() => {
-  if (selectedRepos.value.length === 0) return false;
-  const uniq = new Set(selectedRepos.value.map((r) => r.credentialId ?? ""));
-  if (uniq.size !== 1) return false;
-  const id = Array.from(uniq)[0];
-  return Boolean(id);
+const terminalCredentialState = computed<"none" | "available" | "unavailable">(() => {
+  if (selectedRepos.value.length === 0) return "none";
+  const ids = selectedRepos.value.map((r) => r.credentialId ?? "").filter(Boolean);
+  // 选中的仓库都未绑定凭证：终端无需提供凭证开关与提示
+  if (ids.length === 0) return "none";
+  const uniq = new Set(ids);
+  if (uniq.size !== 1) return "unavailable";
+  return "available";
 });
 
 watch(
   () => selectedRepoIds.value,
   () => {
     if (!titleTouched.value) titleInput.value = defaultTitle.value;
-    if (!canUseTerminalCredential.value) useTerminalCredential.value = false;
+    if (terminalCredentialState.value !== "available") useTerminalCredential.value = false;
   },
   { deep: true }
 );
