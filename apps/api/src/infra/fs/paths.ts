@@ -24,8 +24,8 @@ export function workspaceRoot(dataDir: string, workspaceId: string) {
   return path.join(workspacesRoot(dataDir), workspaceId);
 }
 
-export function workspaceRepoPath(dataDir: string, workspaceId: string) {
-  return path.join(workspaceRoot(dataDir, workspaceId), "repo");
+export function workspaceRepoDirPath(dataDir: string, workspaceId: string, dirName: string) {
+  return path.join(workspaceRoot(dataDir, workspaceId), dirName);
 }
 
 export function tmpRoot(dataDir: string) {

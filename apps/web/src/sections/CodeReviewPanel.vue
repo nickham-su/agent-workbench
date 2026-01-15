@@ -320,7 +320,7 @@
 
   <GitIdentityModal
       v-model:open="identityOpen"
-      :workspaceId="workspaceId"
+      :target="target"
       :defaultScope="'repo'"
       :loading="identitySubmitting"
       @submit="onIdentitySubmit"
@@ -347,7 +347,7 @@ import {
   UpOutlined
 } from "@ant-design/icons-vue";
 import {useI18n} from "vue-i18n";
-import type {ChangeItem, ChangeMode, FileCompareResponse, GitPushRequest} from "@agent-workbench/shared";
+import type {ChangeItem, ChangeMode, FileCompareResponse, GitPushRequest, GitTarget} from "@agent-workbench/shared";
 import {
   ApiError,
   commitWorkspace,
@@ -362,11 +362,14 @@ import GitIdentityModal from "../components/GitIdentityModal.vue";
 
 type Selected = { mode: ChangeMode; path: string; oldPath?: string } | null;
 
+type PushParams = Omit<GitPushRequest, "target">;
+
 const props = defineProps<{
   workspaceId: string;
+  target: GitTarget | null;
   gitBusy: boolean;
   beginGitOp: () => () => void;
-  push?: (params?: GitPushRequest) => Promise<void>;
+  push?: (params?: PushParams) => Promise<void>;
 }>();
 
 const {t} = useI18n();
@@ -381,10 +384,12 @@ const MAX_LIST_RATIO = 0.55;
 const MIN_LIST_PX = 220;
 const MIN_DIFF_PX = 360;
 
-function fileListSplitRatioStorageKey(workspaceId: string) {
+function fileListSplitRatioStorageKey(workspaceId: string, targetKey?: string) {
   const id = String(workspaceId || "").trim();
   if (!id) return FILE_LIST_SPLIT_RATIO_KEY_PREFIX;
-  return `${FILE_LIST_SPLIT_RATIO_KEY_PREFIX}.${id}`;
+  const suffix = String(targetKey || "").trim();
+  if (!suffix) return `${FILE_LIST_SPLIT_RATIO_KEY_PREFIX}.${id}`;
+  return `${FILE_LIST_SPLIT_RATIO_KEY_PREFIX}.${id}.${suffix}`;
 }
 
 function clamp(n: number, min: number, max: number) {
@@ -404,9 +409,9 @@ function clampSplitRatioByContainer(params: { ratio: number; containerSize: numb
   return clamp(params.ratio, min, max);
 }
 
-function loadFileListSplitRatio(workspaceId: string) {
+function loadFileListSplitRatio(workspaceId: string, targetKey?: string) {
   try {
-    const raw = localStorage.getItem(fileListSplitRatioStorageKey(workspaceId));
+    const raw = localStorage.getItem(fileListSplitRatioStorageKey(workspaceId, targetKey));
     if (!raw) return DEFAULT_FILE_LIST_SPLIT_RATIO;
     const n = Number(raw);
     if (!Number.isFinite(n)) return DEFAULT_FILE_LIST_SPLIT_RATIO;
@@ -416,12 +421,13 @@ function loadFileListSplitRatio(workspaceId: string) {
   }
 }
 
-const fileListSplitRatio = ref<number>(loadFileListSplitRatio(props.workspaceId));
+const targetKey = computed(() => props.target?.kind === "workspaceRepo" ? props.target.dirName : "");
+const fileListSplitRatio = ref<number>(loadFileListSplitRatio(props.workspaceId, targetKey.value));
 
 watch(
-    () => props.workspaceId,
-    (workspaceId) => {
-      fileListSplitRatio.value = loadFileListSplitRatio(workspaceId);
+    () => [props.workspaceId, targetKey.value],
+    ([workspaceId, key]) => {
+      fileListSplitRatio.value = loadFileListSplitRatio(workspaceId, key);
     }
 );
 
@@ -429,7 +435,7 @@ watch(
     () => fileListSplitRatio.value,
     () => {
       try {
-        localStorage.setItem(fileListSplitRatioStorageKey(props.workspaceId), String(fileListSplitRatio.value));
+        localStorage.setItem(fileListSplitRatioStorageKey(props.workspaceId, targetKey.value), String(fileListSplitRatio.value));
       } catch {
         // ignore
       }
@@ -668,12 +674,12 @@ async function reconcileSelectedAfterRefresh() {
 }
 
 async function refreshChanges(mode: ChangeMode) {
-  if (!props.workspaceId) return;
+  if (!props.target) return;
   const loadingRef = mode === "unstaged" ? unstagedLoading : stagedLoading;
   const loadedRef = mode === "unstaged" ? unstagedLoaded : stagedLoaded;
   loadingRef.value = true;
   try {
-    const res = await listChanges(props.workspaceId, {mode});
+    const res = await listChanges(props.target, {mode});
     if (mode === "unstaged") unstaged.value = res.files;
     else staged.value = res.files;
     loadedRef.value = true;
@@ -683,6 +689,19 @@ async function refreshChanges(mode: ChangeMode) {
 }
 
 async function refreshAll() {
+  if (!props.target) {
+    unstaged.value = [];
+    staged.value = [];
+    unstagedLoaded.value = true;
+    stagedLoaded.value = true;
+    selected.value = null;
+    selectedFingerprint.value = null;
+    compare.value = null;
+    compareError.value = null;
+    compareLoading.value = false;
+    emit("changesSummary", {unstaged: 0, staged: 0});
+    return;
+  }
   await Promise.all([refreshChanges("unstaged"), refreshChanges("staged")]);
   emit("changesSummary", {unstaged: unstaged.value.length, staged: staged.value.length});
   await reconcileSelectedAfterRefresh();
@@ -695,11 +714,11 @@ function openCommit() {
 }
 
 async function stageAll() {
-  if (!props.workspaceId) return;
+  if (!props.target) return;
   if (props.gitBusy) return;
   const release = props.beginGitOp();
   try {
-    await stageWorkspace(props.workspaceId, {all: true});
+    await stageWorkspace({target: props.target, all: true});
     await refreshAll();
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
@@ -709,11 +728,11 @@ async function stageAll() {
 }
 
 async function stageOne(f: ChangeItem) {
-  if (!props.workspaceId) return;
+  if (!props.target) return;
   if (props.gitBusy) return;
   const release = props.beginGitOp();
   try {
-    await stageWorkspace(props.workspaceId, {items: [{path: f.path, oldPath: f.oldPath}]});
+    await stageWorkspace({target: props.target, items: [{path: f.path, oldPath: f.oldPath}]});
     await refreshAll();
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
@@ -733,7 +752,8 @@ function discardOneLabel(f: ChangeItem) {
 }
 
 async function discardOne(f: ChangeItem) {
-  if (!props.workspaceId) return;
+  const target = props.target;
+  if (!target) return;
   if (props.gitBusy) return;
 
   Modal.confirm({
@@ -745,7 +765,7 @@ async function discardOne(f: ChangeItem) {
     onOk: async () => {
       const release = props.beginGitOp();
       try {
-        await discardWorkspace(props.workspaceId, {items: [{path: f.path, oldPath: f.oldPath}]});
+        await discardWorkspace({target, items: [{path: f.path, oldPath: f.oldPath}]});
         await refreshAll();
         message.success(f.status === "??" ? t("codeReview.discard.deleted") : t("codeReview.discard.discarded"));
       } catch (err) {
@@ -758,7 +778,8 @@ async function discardOne(f: ChangeItem) {
 }
 
 async function discardAll() {
-  if (!props.workspaceId) return;
+  const target = props.target;
+  if (!target) return;
   if (props.gitBusy) return;
   if (unstagedFiles.value.length === 0) return;
 
@@ -771,7 +792,7 @@ async function discardAll() {
     onOk: async () => {
       const release = props.beginGitOp();
       try {
-        await discardWorkspace(props.workspaceId, {all: true, includeUntracked: true});
+        await discardWorkspace({target, all: true, includeUntracked: true});
         await refreshAll();
         message.success(t("codeReview.discard.discardedAll"));
       } catch (err) {
@@ -784,11 +805,11 @@ async function discardAll() {
 }
 
 async function unstageAll() {
-  if (!props.workspaceId) return;
+  if (!props.target) return;
   if (props.gitBusy) return;
   const release = props.beginGitOp();
   try {
-    await unstageWorkspace(props.workspaceId, {all: true});
+    await unstageWorkspace({target: props.target, all: true});
     await refreshAll();
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
@@ -798,11 +819,11 @@ async function unstageAll() {
 }
 
 async function unstageOne(f: ChangeItem) {
-  if (!props.workspaceId) return;
+  if (!props.target) return;
   if (props.gitBusy) return;
   const release = props.beginGitOp();
   try {
-    await unstageWorkspace(props.workspaceId, {items: [{path: f.path, oldPath: f.oldPath}]});
+    await unstageWorkspace({target: props.target, items: [{path: f.path, oldPath: f.oldPath}]});
     await refreshAll();
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
@@ -812,13 +833,13 @@ async function unstageOne(f: ChangeItem) {
 }
 
 async function submitCommit(mode: "commit" | "commitAndPush") {
-  if (!props.workspaceId) return;
+  if (!props.target) return;
   if (!canCommit.value) return;
   const msg = commitMessage.value.trim();
   commitLoading.value = mode;
   const release = props.beginGitOp();
   try {
-    const res = await commitWorkspace(props.workspaceId, {message: msg});
+    const res = await commitWorkspace({target: props.target, message: msg});
     message.success(t("codeReview.commit.committed", {sha: res.sha.slice(0, 8)}));
     commitOpen.value = false;
     commitMessage.value = "";
@@ -847,7 +868,7 @@ async function submitCommit(mode: "commit" | "commitAndPush") {
 }
 
 async function onIdentitySubmit(identity: any) {
-  if (!props.workspaceId) return;
+  if (!props.target) return;
   const mode = pendingCommitMode.value ?? "commit";
   const msg = commitMessage.value.trim();
   if (!msg) return;
@@ -856,7 +877,7 @@ async function onIdentitySubmit(identity: any) {
   const release = props.beginGitOp();
   identitySubmitting.value = true;
   try {
-    const res = await commitWorkspace(props.workspaceId, {message: msg, identity});
+    const res = await commitWorkspace({target: props.target, message: msg, identity});
     message.success(t("codeReview.commit.committed", {sha: res.sha.slice(0, 8)}));
     commitOpen.value = false;
     commitMessage.value = "";
@@ -888,7 +909,7 @@ async function refreshCompare() {
 
   compareError.value = null;
   compare.value = null;
-  if (!props.workspaceId) {
+  if (!props.target) {
     compareLoading.value = false;
     return;
   }
@@ -899,7 +920,7 @@ async function refreshCompare() {
 
   compareLoading.value = true;
   try {
-    const next = await fileCompare(props.workspaceId, {
+    const next = await fileCompare(props.target, {
       mode: selected.value.mode,
       path: selected.value.path,
       oldPath: selected.value.oldPath
@@ -931,7 +952,7 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 const pollInFlight = ref(false);
 
 async function pollTick() {
-  if (!props.workspaceId) return;
+  if (!props.target) return;
   if (props.gitBusy) return;
   if (pollInFlight.value) return;
   pollInFlight.value = true;
@@ -966,7 +987,7 @@ function handleVisibilityChange() {
 }
 
 watch(
-    () => props.workspaceId,
+    () => props.target?.kind === "workspaceRepo" ? props.target.dirName : "",
     async () => {
       selectedFingerprint.value = null;
       selected.value = null;

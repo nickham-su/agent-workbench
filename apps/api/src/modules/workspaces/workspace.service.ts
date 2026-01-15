@@ -1,3 +1,5 @@
+import crypto from "node:crypto";
+import path from "node:path";
 import type { FastifyBaseLogger } from "fastify";
 import type { WorkspaceDetail, WorkspaceRecord } from "@agent-workbench/shared";
 import { HttpError } from "../../app/errors.js";
@@ -7,9 +9,19 @@ import { nowMs } from "../../utils/time.js";
 import { getRepo } from "../repos/repo.store.js";
 import { listHeadsBranches } from "../../infra/git/refs.js";
 import { withRepoLock } from "../../infra/locks/repoLock.js";
-import { createWorktree, removeWorktree, switchWorktreeBranch } from "../../infra/git/worktree.js";
-import { workspaceRepoPath } from "../../infra/fs/paths.js";
-import { insertWorkspace, getWorkspace, listWorkspaces, updateWorkspaceBranch, deleteWorkspaceRecord } from "./workspace.store.js";
+import { cloneFromMirror } from "../../infra/git/clone.js";
+import { ensureDir, rmrf } from "../../infra/fs/fs.js";
+import { workspaceRepoDirPath, workspaceRoot } from "../../infra/fs/paths.js";
+import {
+  deleteWorkspaceRecord,
+  deleteWorkspaceReposByWorkspace,
+  getWorkspace,
+  insertWorkspace,
+  insertWorkspaceRepo,
+  listWorkspaceRepos,
+  listWorkspaces,
+  updateWorkspaceTitle
+} from "./workspace.store.js";
 import {
   countActiveTerminalsByWorkspace,
   countActiveTerminalsByWorkspaceIds,
@@ -18,44 +30,181 @@ import {
 } from "../terminals/terminal.store.js";
 import { tmuxHasSession, tmuxKillSession } from "../../infra/tmux/session.js";
 
+function formatRepoDisplayName(rawUrl: string) {
+  let s = String(rawUrl || "").trim();
+  while (s.endsWith("/")) s = s.slice(0, -1);
+  if (s.toLowerCase().endsWith(".git")) s = s.slice(0, -4);
+
+  let pathPart = "";
+  try {
+    if (s.includes("://")) {
+      const u = new URL(s);
+      pathPart = u.pathname || "";
+    }
+  } catch {
+    // ignore
+  }
+
+  if (!pathPart) {
+    const colonIdx = s.lastIndexOf(":");
+    if (colonIdx > 0 && s.includes("@") && !s.includes("://")) {
+      pathPart = s.slice(colonIdx + 1);
+    } else {
+      pathPart = s;
+    }
+  }
+
+  pathPart = pathPart.replace(/\\/g, "/").replace(/^\/+/, "");
+  const segs = pathPart.split("/").filter(Boolean);
+  if (segs.length >= 1) return segs[segs.length - 1]!;
+  return s;
+}
+
+function sanitizeDirName(raw: string) {
+  const base = String(raw || "").replace(/[^A-Za-z0-9._-]/g, "_");
+  let name = base || "repo";
+  if (name === "." || name === "..") name = "repo";
+  if (name.startsWith(".")) name = `repo_${name.slice(1)}`;
+  return name;
+}
+
+function hash8(input: string) {
+  return crypto.createHash("sha256").update(String(input || "")).digest("hex").slice(0, 8);
+}
+
+function pickDirName(params: { repoUrl: string; existing: Set<string> }) {
+  const base = sanitizeDirName(formatRepoDisplayName(params.repoUrl));
+  if (!params.existing.has(base)) return base;
+
+  const suffix = hash8(params.repoUrl);
+  let name = `${base}_${suffix}`;
+  let seq = 0;
+  while (params.existing.has(name)) {
+    seq += 1;
+    name = `${base}_${suffix}_${seq}`;
+  }
+  return name;
+}
+
+function buildDefaultWorkspaceTitle(repoUrls: string[]) {
+  const title = repoUrls.map((url) => formatRepoDisplayName(url)).filter(Boolean).join(" + ");
+  return title || "workspace";
+}
+
+function resolveTerminalCredentialId(params: { repoCredentialIds: Array<string | null>; useTerminalCredential?: boolean }) {
+  if (!params.useTerminalCredential) return null;
+  const uniq = new Set(params.repoCredentialIds.map((id) => id ?? ""));
+  if (uniq.size !== 1) return null;
+  const id = Array.from(uniq)[0];
+  return id || null;
+}
+
 export async function createWorkspace(
   ctx: AppContext,
   logger: FastifyBaseLogger,
-  params: { repoId: string; branch: string }
+  params: { repoIds: string[]; title?: string; useTerminalCredential?: boolean }
 ): Promise<WorkspaceRecord> {
-  const repoId = params.repoId.trim();
-  const branch = params.branch.trim();
-  if (!repoId) throw new HttpError(400, "repoId is required");
-  if (!branch) throw new HttpError(400, "branch is required");
+  const repoIds = params.repoIds.map((id) => String(id || "").trim()).filter(Boolean);
+  if (repoIds.length === 0) throw new HttpError(400, "repoIds is required");
+  const unique = new Set(repoIds);
+  if (unique.size !== repoIds.length) throw new HttpError(400, "repoIds contains duplicates");
 
-  const repo = getRepo(ctx.db, repoId);
-  if (!repo) throw new HttpError(404, "Repo not found");
-  if (repo.syncStatus === "syncing") throw new HttpError(409, "Repo is syncing");
-  if (repo.syncStatus === "failed") throw new HttpError(409, "Repo sync failed. Retry sync first.");
-
-  const branches = await listHeadsBranches({ mirrorPath: repo.mirrorPath, cwd: ctx.dataDir });
-  if (!branches.some((b) => b.name === branch)) {
-    throw new HttpError(409, `Branch not found: ${branch}`);
-  }
-
-  const workspaceId = newId("ws");
-  const worktreePath = workspaceRepoPath(ctx.dataDir, workspaceId);
-
-  await withRepoLock(repo.id, async () => {
-    await createWorktree({ mirrorPath: repo.mirrorPath, worktreePath, branch, dataDir: ctx.dataDir });
+  const repos = repoIds.map((repoId) => {
+    const repo = getRepo(ctx.db, repoId);
+    if (!repo) throw new HttpError(404, `Repo not found: ${repoId}`);
+    if (repo.syncStatus === "syncing") throw new HttpError(409, `Repo is syncing: ${repo.url}`);
+    if (repo.syncStatus === "failed") throw new HttpError(409, `Repo sync failed: ${repo.url}. Retry sync first.`);
+    const branch = String(repo.defaultBranch || "").trim();
+    if (!branch) throw new HttpError(409, `Repo default branch is unknown: ${repo.url}`);
+    return { repo, branch };
   });
 
+  for (const { repo, branch } of repos) {
+    const branches = await listHeadsBranches({ mirrorPath: repo.mirrorPath, cwd: ctx.dataDir });
+    if (!branches.some((b) => b.name === branch)) {
+      throw new HttpError(409, `Branch not found: ${branch}`);
+    }
+  }
+
+  const dirNames = new Set<string>();
+  const workspaceId = newId("ws");
+  const workspacePath = workspaceRoot(ctx.dataDir, workspaceId);
+  const workItems = repos.map(({ repo, branch }) => {
+    const dirName = pickDirName({ repoUrl: repo.url, existing: dirNames });
+    dirNames.add(dirName);
+    return {
+      repo,
+      branch,
+      dirName,
+      path: workspaceRepoDirPath(ctx.dataDir, workspaceId, dirName)
+    };
+  });
+
+  const terminalCredentialId = resolveTerminalCredentialId({
+    repoCredentialIds: workItems.map((item) => item.repo.credentialId ?? null),
+    useTerminalCredential: params.useTerminalCredential
+  });
+  if (params.useTerminalCredential && !terminalCredentialId) {
+    throw new HttpError(409, "No shared credential available for terminal");
+  }
+
+  await ensureDir(workspacePath);
+  const createdPaths: string[] = [];
+  try {
+    for (const item of workItems) {
+      await withRepoLock(item.repo.id, async () => {
+        await cloneFromMirror({
+          mirrorPath: item.repo.mirrorPath,
+          repoUrl: item.repo.url,
+          worktreePath: item.path,
+          branch: item.branch,
+          dataDir: ctx.dataDir
+        });
+      });
+      createdPaths.push(item.path);
+    }
+  } catch (err) {
+    for (const p of createdPaths) {
+      await rmrf(p);
+    }
+    await rmrf(workspacePath);
+    throw err;
+  }
+
+  const title = String(params.title || "").trim() || buildDefaultWorkspaceTitle(workItems.map((item) => item.repo.url));
   const ts = nowMs();
   const ws: WorkspaceRecord = {
     id: workspaceId,
-    repoId: repo.id,
-    branch,
-    path: worktreePath,
+    title,
+    path: workspacePath,
+    terminalCredentialId,
     createdAt: ts,
     updatedAt: ts
   };
-  insertWorkspace(ctx.db, ws);
-  logger.info({ workspaceId, repoId: repo.id, branch }, "workspace created");
+
+  try {
+    ctx.db.transaction(() => {
+      insertWorkspace(ctx.db, ws);
+      for (const item of workItems) {
+        insertWorkspaceRepo(ctx.db, {
+          workspaceId,
+          repoId: item.repo.id,
+          dirName: item.dirName,
+          path: item.path,
+          createdAt: ts,
+          updatedAt: ts
+        });
+      }
+    })();
+  } catch (err) {
+    for (const p of createdPaths) {
+      await rmrf(p);
+    }
+    await rmrf(workspacePath);
+    throw err;
+  }
+
+  logger.info({ workspaceId, repoCount: workItems.length }, "workspace created");
   return ws;
 }
 
@@ -65,19 +214,31 @@ export async function getWorkspaceById(ctx: AppContext, workspaceId: string) {
   return ws;
 }
 
-export async function getWorkspaceDetailById(ctx: AppContext, workspaceId: string): Promise<WorkspaceDetail> {
-  const ws = await getWorkspaceById(ctx, workspaceId);
-  const repo = getRepo(ctx.db, ws.repoId);
-  if (!repo) throw new HttpError(404, "Repo not found");
-  const terminalCount = countActiveTerminalsByWorkspace(ctx.db, ws.id);
+function buildWorkspaceDetail(
+  ctx: AppContext,
+  ws: WorkspaceRecord,
+  terminalCount: number
+): WorkspaceDetail {
+  const items = listWorkspaceRepos(ctx.db, ws.id);
+  const repos = items.map((item) => {
+    const repo = getRepo(ctx.db, item.repoId);
+    if (!repo) throw new HttpError(500, "Workspace references a missing repo");
+    return { repo: { id: repo.id, url: repo.url }, dirName: item.dirName };
+  });
   return {
     id: ws.id,
-    repo: { id: repo.id, url: repo.url },
-    checkout: { branch: ws.branch },
+    title: ws.title,
+    repos,
     terminalCount,
     createdAt: ws.createdAt,
     updatedAt: ws.updatedAt
   };
+}
+
+export async function getWorkspaceDetailById(ctx: AppContext, workspaceId: string): Promise<WorkspaceDetail> {
+  const ws = await getWorkspaceById(ctx, workspaceId);
+  const terminalCount = countActiveTerminalsByWorkspace(ctx.db, ws.id);
+  return buildWorkspaceDetail(ctx, ws, terminalCount);
 }
 
 export function listWorkspaceDetails(ctx: AppContext): WorkspaceDetail[] {
@@ -86,50 +247,25 @@ export function listWorkspaceDetails(ctx: AppContext): WorkspaceDetail[] {
     ctx.db,
     workspaces.map((w) => w.id)
   );
-  return workspaces.map((ws) => {
-    const repo = getRepo(ctx.db, ws.repoId);
-    if (!repo) throw new HttpError(500, "Workspace references a missing repo");
-    return {
-      id: ws.id,
-      repo: { id: repo.id, url: repo.url },
-      checkout: { branch: ws.branch },
-      terminalCount: terminalCounts[ws.id] ?? 0,
-      createdAt: ws.createdAt,
-      updatedAt: ws.updatedAt
-    };
-  });
+  return workspaces.map((ws) => buildWorkspaceDetail(ctx, ws, terminalCounts[ws.id] ?? 0));
 }
 
-export async function switchWorkspaceBranch(
+export async function updateWorkspaceTitleById(
   ctx: AppContext,
   logger: FastifyBaseLogger,
   workspaceId: string,
-  branch: string
+  titleRaw: string
 ) {
   const ws = await getWorkspaceById(ctx, workspaceId);
-  const repo = getRepo(ctx.db, ws.repoId);
-  if (!repo) throw new HttpError(404, "Repo not found");
-  if (repo.syncStatus === "syncing") throw new HttpError(409, "Repo is syncing");
-  if (repo.syncStatus === "failed") throw new HttpError(409, "Repo sync failed. Retry sync first.");
-
-  const branches = await listHeadsBranches({ mirrorPath: repo.mirrorPath, cwd: ctx.dataDir });
-  if (!branches.some((b) => b.name === branch)) {
-    throw new HttpError(409, `Branch not found: ${branch}`);
-  }
-
-  await withRepoLock(repo.id, async () => {
-    await switchWorktreeBranch({ worktreePath: ws.path, branch, dataDir: ctx.dataDir });
-  });
-
-  updateWorkspaceBranch(ctx.db, ws.id, branch, nowMs());
-  logger.info({ workspaceId: ws.id, branch }, "workspace branch switched");
-  return { branch };
+  const title = String(titleRaw || "").trim();
+  if (!title) throw new HttpError(400, "title is required");
+  updateWorkspaceTitle(ctx.db, ws.id, title, nowMs());
+  logger.info({ workspaceId: ws.id }, "workspace title updated");
+  return getWorkspaceDetailById(ctx, ws.id);
 }
 
 export async function deleteWorkspace(ctx: AppContext, logger: FastifyBaseLogger, workspaceId: string) {
   const ws = await getWorkspaceById(ctx, workspaceId);
-  const repo = getRepo(ctx.db, ws.repoId);
-  if (!repo) throw new HttpError(404, "Repo not found");
 
   const terminals = listTerminalsByWorkspace(ctx.db, ws.id);
   for (const term of terminals) {
@@ -145,10 +281,22 @@ export async function deleteWorkspace(ctx: AppContext, logger: FastifyBaseLogger
     }
   }
 
-  await withRepoLock(repo.id, async () => {
-    await removeWorktree({ mirrorPath: repo.mirrorPath, worktreePath: ws.path, dataDir: ctx.dataDir });
-  });
+  const expectedPath = workspaceRoot(ctx.dataDir, ws.id);
+  // 删除前做强校验：即使 DB/path 字段出现脏数据，也不允许越界递归删除。
+  if (path.resolve(ws.path) !== path.resolve(expectedPath)) {
+    logger.error({ workspaceId: ws.id, wsPath: ws.path, expectedPath }, "workspace path mismatch; abort delete");
+    throw new HttpError(409, "Workspace path is invalid; aborting delete.", "WORKSPACE_PATH_INVALID");
+  }
 
+  try {
+    await rmrf(expectedPath);
+  } catch (err) {
+    // 删除失败时保留 DB 记录，便于后续重试/排障；避免变成“数据库已删但目录残留”的不可回收状态
+    logger.warn({ workspaceId: ws.id, path: expectedPath, err }, "remove workspace path failed");
+    throw new HttpError(409, "Failed to delete workspace directory");
+  }
+
+  deleteWorkspaceReposByWorkspace(ctx.db, ws.id);
   deleteWorkspaceRecord(ctx.db, ws.id);
   logger.info({ workspaceId: ws.id }, "workspace deleted");
 }

@@ -16,7 +16,7 @@ import { caCertPath, certsRoot, sshKnownHostsPath, sshRoot } from "../../infra/f
 import { nowMs } from "../../utils/time.js";
 import { getSettingJson, setSettingJson } from "./settings.store.js";
 import { gitConfigGet, gitConfigSet, gitConfigUnsetAll, validateAndNormalizeGitIdentity } from "../../infra/git/gitIdentity.js";
-import { listWorkspaces } from "../workspaces/workspace.store.js";
+import { listWorkspaceRepos, listWorkspaces } from "../workspaces/workspace.store.js";
 
 type NetworkSettingsV1 = Omit<NetworkSettings, "updatedAt">;
 
@@ -147,11 +147,17 @@ export async function clearAllGitIdentity(ctx: AppContext, logger: FastifyBaseLo
   const results = await Promise.all(
     workspaces.map(async (ws) => {
       try {
-        if (!ws.path) return;
-        if (!(await pathExists(ws.path))) return;
-        const okName = await gitConfigUnsetAll({ cwd: ctx.dataDir, repoPath: ws.path, key: "user.name" });
-        const okEmail = await gitConfigUnsetAll({ cwd: ctx.dataDir, repoPath: ws.path, key: "user.email" });
-        return okName && okEmail ? 1 : 0;
+        const repos = listWorkspaceRepos(ctx.db, ws.id);
+        const okList = await Promise.all(
+          repos.map(async (repo) => {
+            if (!repo.path) return 0;
+            if (!(await pathExists(repo.path))) return 0;
+            const okName = await gitConfigUnsetAll({ cwd: ctx.dataDir, repoPath: repo.path, key: "user.name" });
+            const okEmail = await gitConfigUnsetAll({ cwd: ctx.dataDir, repoPath: repo.path, key: "user.email" });
+            return okName && okEmail ? 1 : 0;
+          })
+        );
+        return okList.reduce<number>((sum, v) => sum + v, 0);
       } catch (err) {
         errors.push({ workspaceId: ws.id, path: ws.path, error: err instanceof Error ? err.message : String(err) });
         return 0;

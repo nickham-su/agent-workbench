@@ -103,6 +103,7 @@ export default {
     empty: "暂无工作区",
     actions: {
       create: "创建工作区",
+      rename: "重命名",
       delete: "删除"
     },
     tooltip: {
@@ -110,27 +111,23 @@ export default {
     },
     create: {
       modalTitle: "创建工作区",
-      modeLabel: "创建方式",
-      modeExisting: "选择已有仓库",
-      modeUrl: "填写仓库 URL",
-      repoUrlLabel: "仓库 URL",
-      repoUrlPlaceholder: "https://github.com/org/repo.git 或 git{at}github.com:org/repo.git",
-      credentialLabel: "凭证（可选）",
-      credentialPlaceholder: "选择凭证（私有仓库推荐选择）",
-      credentialHelp: "若未选择，将尝试按 URL host 自动匹配默认凭证。",
-      credentialHostMismatch: "URL host 为 {urlHost}，所选凭证 host 为 {credHost}，请改选匹配 host 的凭证。",
-      credentialKindMismatch: "URL 协议为 {urlKind}，所选凭证类型为 {credKind}，请切换 URL 或选择匹配的凭证。",
       repoLabel: "仓库",
       repoPlaceholder: "选择仓库",
-      branchLabel: "分支",
-      branchPlaceholder: "选择分支",
-      refreshBranches: "刷新分支列表",
-      urlTip: "提示：填写 URL 创建时需要先同步仓库；同步完成后会默认使用主分支创建工作区。",
-      defaultBranchUnknown: "无法确定默认分支，请先同步仓库或手动选择分支"
+      titleLabel: "标题",
+      titlePlaceholder: "可选：默认使用仓库名拼接",
+      terminalCredentialLabel: "终端凭证",
+      terminalCredentialHelp: "将该凭证应用于本工作区的终端会话",
+      terminalCredentialUnavailable: "所选仓库未共享同一凭证，无法提供终端凭证选项",
+      defaultBranchUnknown: "无法确定默认分支，请先同步仓库"
+    },
+    rename: {
+      modalTitle: "重命名工作区",
+      titleLabel: "标题",
+      titlePlaceholder: "输入新的工作区标题"
     },
     deleteConfirm: {
       title: "确认删除工作区？",
-      content: "会关闭该工作区下所有终端，并删除工作树（worktree）目录。",
+      content: "会关闭该工作区下所有终端，并删除工作区目录。",
       ok: "删除",
       cancel: "取消"
     }
@@ -141,6 +138,10 @@ export default {
       checkout: "切换分支",
       pull: "拉取",
       push: "推送"
+    },
+    repoSelector: {
+      placeholder: "选择仓库",
+      detached: "Detached HEAD"
     },
     tools: {
       codeReview: "代码审查",
@@ -196,11 +197,8 @@ export default {
   codeReview: {
     placeholder: {
       title: "代码审查（占位）",
-      desc: "这里先用占位内容，后续接入 staged/unstaged 文件列表与 diff 视图。",
-      repo: "仓库",
-      branch: "分支",
-      repoLine: "仓库：{url}",
-      branchLine: "分支：{branch}"
+      desc: "在这里查看当前仓库的变更、暂存与差异。",
+      selectRepo: "请先选择一个仓库"
     },
     unstaged: "未暂存",
     staged: "已暂存",

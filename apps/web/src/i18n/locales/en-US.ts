@@ -103,6 +103,7 @@ export default {
     empty: "No workspaces",
     actions: {
       create: "Create workspace",
+      rename: "Rename",
       delete: "Delete"
     },
     tooltip: {
@@ -110,27 +111,23 @@ export default {
     },
     create: {
       modalTitle: "Create workspace",
-      modeLabel: "Create mode",
-      modeExisting: "Pick existing repo",
-      modeUrl: "Enter repo URL",
-      repoUrlLabel: "Repo URL",
-      repoUrlPlaceholder: "https://github.com/org/repo.git or git{at}github.com:org/repo.git",
-      credentialLabel: "Credential (optional)",
-      credentialPlaceholder: "Select credential (recommended for private repos)",
-      credentialHelp: "If not selected, it will try to pick the default credential by URL host.",
-      credentialHostMismatch: "URL host is {urlHost}, but the selected credential host is {credHost}. Please pick a credential for the same host.",
-      credentialKindMismatch: "URL protocol is {urlKind}, but the selected credential type is {credKind}. Switch the URL or pick a matching credential.",
       repoLabel: "Repo",
       repoPlaceholder: "Select repo",
-      branchLabel: "Branch",
-      branchPlaceholder: "Select branch",
-      refreshBranches: "Refresh branches",
-      urlTip: "Note: creating from URL requires syncing the repo first; after sync, it will create using the default branch.",
-      defaultBranchUnknown: "Unable to determine the default branch. Sync the repo or choose a branch manually."
+      titleLabel: "Title",
+      titlePlaceholder: "Optional: defaults to concatenated repo names",
+      terminalCredentialLabel: "Terminal credential",
+      terminalCredentialHelp: "Apply this credential to terminals in this workspace",
+      terminalCredentialUnavailable: "Selected repos do not share a credential; terminal credential is unavailable",
+      defaultBranchUnknown: "Unable to determine the default branch. Sync the repo first."
+    },
+    rename: {
+      modalTitle: "Rename workspace",
+      titleLabel: "Title",
+      titlePlaceholder: "Enter a new workspace title"
     },
     deleteConfirm: {
       title: "Delete workspace?",
-      content: "This will close all terminals in the workspace and remove the worktree directory.",
+      content: "This will close all terminals in the workspace and remove the workspace directory.",
       ok: "Delete",
       cancel: "Cancel"
     }
@@ -141,6 +138,10 @@ export default {
       checkout: "Switch branch",
       pull: "Pull",
       push: "Push"
+    },
+    repoSelector: {
+      placeholder: "Select repo",
+      detached: "Detached HEAD"
     },
     tools: {
       codeReview: "Code review",
@@ -196,11 +197,8 @@ export default {
   codeReview: {
     placeholder: {
       title: "Code review (placeholder)",
-      desc: "Placeholder content for now. Later it will integrate staged/unstaged file list and diff view.",
-      repo: "Repo",
-      branch: "Branch",
-      repoLine: "Repo: {url}",
-      branchLine: "Branch: {branch}"
+      desc: "Review changes, staging, and diffs for the current repo here.",
+      selectRepo: "Select a repo to continue."
     },
     unstaged: "Unstaged",
     staged: "Staged",

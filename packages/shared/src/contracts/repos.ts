@@ -11,6 +11,7 @@ export const RepoRecordSchema = Type.Object(
     id: Type.String(),
     url: Type.String(),
     credentialId: Type.Union([Type.String(), Type.Null()]),
+    defaultBranch: Type.Union([Type.String(), Type.Null()]),
     mirrorPath: Type.String(),
     syncStatus: RepoSyncStatusSchema,
     syncError: Type.Union([Type.String(), Type.Null()]),

@@ -4,20 +4,28 @@ import type { Static } from "@sinclair/typebox";
 export const WorkspaceRecordSchema = Type.Object(
   {
     id: Type.String(),
-    repoId: Type.String(),
-    branch: Type.String(),
+    title: Type.String(),
     path: Type.String(),
+    terminalCredentialId: Type.Union([Type.String(), Type.Null()]),
     createdAt: Type.Number(),
     updatedAt: Type.Number()
   }
 );
 export type WorkspaceRecord = Static<typeof WorkspaceRecordSchema>;
 
+export const WorkspaceRepoSchema = Type.Object(
+  {
+    repo: Type.Object({ id: Type.String(), url: Type.String() }),
+    dirName: Type.String()
+  }
+);
+export type WorkspaceRepo = Static<typeof WorkspaceRepoSchema>;
+
 export const WorkspaceDetailSchema = Type.Object(
   {
     id: Type.String(),
-    repo: Type.Object({ id: Type.String(), url: Type.String() }),
-    checkout: Type.Object({ branch: Type.String() }),
+    title: Type.String(),
+    repos: Type.Array(WorkspaceRepoSchema),
     terminalCount: Type.Number(),
     createdAt: Type.Number(),
     updatedAt: Type.Number()
@@ -27,13 +35,16 @@ export type WorkspaceDetail = Static<typeof WorkspaceDetailSchema>;
 
 export const CreateWorkspaceRequestSchema = Type.Object(
   {
-    repoId: Type.String({ minLength: 1 }),
-    branch: Type.String({ minLength: 1 })
+    repoIds: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
+    title: Type.Optional(Type.String({ minLength: 1 })),
+    useTerminalCredential: Type.Optional(Type.Boolean())
   }
 );
 export type CreateWorkspaceRequest = Static<typeof CreateWorkspaceRequestSchema>;
 
-export const SwitchWorkspaceBranchRequestSchema = Type.Object(
-  { branch: Type.String({ minLength: 1 }) }
+export const UpdateWorkspaceRequestSchema = Type.Object(
+  {
+    title: Type.String({ minLength: 1 })
+  }
 );
-export type SwitchWorkspaceBranchRequest = Static<typeof SwitchWorkspaceBranchRequestSchema>;
+export type UpdateWorkspaceRequest = Static<typeof UpdateWorkspaceRequestSchema>;

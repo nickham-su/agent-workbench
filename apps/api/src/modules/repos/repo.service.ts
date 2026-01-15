@@ -18,6 +18,7 @@ import {
   getRepo,
   insertRepo,
   setRepoSyncStatus,
+  updateRepoDefaultBranch,
   updateRepoCredentialId
 } from "./repo.store.js";
 import { getCredentialWithSecret } from "../credentials/credentials.store.js";
@@ -72,6 +73,7 @@ export async function createRepo(
     id,
     url,
     credentialId: normalizedCredentialId,
+    defaultBranch: null,
     mirrorPath,
     syncStatus: "syncing",
     syncError: null,
@@ -128,7 +130,7 @@ export async function listRepoBranches(ctx: AppContext, repoId: string): Promise
   if (repo.syncStatus === "failed") throw new HttpError(409, "Repo sync failed. Retry sync first.");
 
   const branches = await listHeadsBranches({ mirrorPath: repo.mirrorPath, cwd: ctx.dataDir });
-  const defaultBranch = await getOriginDefaultBranch({ mirrorPath: repo.mirrorPath, cwd: ctx.dataDir });
+  const defaultBranch = repo.defaultBranch ?? (await getOriginDefaultBranch({ mirrorPath: repo.mirrorPath, cwd: ctx.dataDir }));
   return { defaultBranch, branches };
 }
 
@@ -153,6 +155,8 @@ async function startRepoSync(ctx: AppContext, logger: FastifyBaseLogger, repo: R
         mirrorPath: repoMirrorPath(ctx.dataDir, repo.id),
         env: gitEnv.env
       });
+      const defaultBranch = await getOriginDefaultBranch({ mirrorPath: repoMirrorPath(ctx.dataDir, repo.id), cwd: ctx.dataDir });
+      updateRepoDefaultBranch(ctx.db, repo.id, defaultBranch, nowMs());
       setRepoSyncStatus(ctx.db, repo.id, "idle", { error: null, lastSyncAt: nowMs() });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
