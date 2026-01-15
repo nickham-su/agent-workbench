@@ -11,12 +11,20 @@ function ensureColumn(db: Db, params: { table: string; column: string; ddl: stri
 }
 
 export function initSchema(db: Db) {
+  if (hasColumn(db, "workspaces", "repo_id")) {
+    db.exec(`
+      drop table if exists terminals;
+      drop table if exists workspaces;
+    `);
+  }
+
   db.exec(`
     create table if not exists repos (
       id text primary key,
       url text not null unique,
       created_at integer not null,
       updated_at integer not null,
+      default_branch text,
       mirror_path text not null,
       sync_status text not null default 'idle',
       sync_error text,
@@ -41,15 +49,27 @@ export function initSchema(db: Db) {
 
     create table if not exists workspaces (
       id text primary key,
+      title text not null,
+      path text not null,
+      terminal_credential_id text,
+      created_at integer not null,
+      updated_at integer not null
+    );
+
+    create table if not exists workspace_repos (
+      workspace_id text not null,
       repo_id text not null,
-      branch text not null,
+      dir_name text not null,
       path text not null,
       created_at integer not null,
       updated_at integer not null,
+      primary key (workspace_id, repo_id),
+      foreign key (workspace_id) references workspaces(id) on delete restrict,
       foreign key (repo_id) references repos(id) on delete restrict
     );
 
-    create index if not exists idx_workspaces_repo_id on workspaces(repo_id);
+    create unique index if not exists idx_workspace_repos_workspace_dir on workspace_repos(workspace_id, dir_name);
+    create index if not exists idx_workspace_repos_repo_id on workspace_repos(repo_id);
 
     create table if not exists terminals (
       id text primary key,
@@ -71,6 +91,8 @@ export function initSchema(db: Db) {
   `);
 
   ensureColumn(db, { table: "repos", column: "credential_id", ddl: "credential_id text" });
+  ensureColumn(db, { table: "repos", column: "default_branch", ddl: "default_branch text" });
+  ensureColumn(db, { table: "workspaces", column: "terminal_credential_id", ddl: "terminal_credential_id text" });
   createIndexIfNotExists(db, { index: "idx_repos_credential_id", sql: "create index idx_repos_credential_id on repos(credential_id)" });
 }
 

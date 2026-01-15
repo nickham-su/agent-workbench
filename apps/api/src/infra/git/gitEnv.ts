@@ -103,16 +103,18 @@ export async function buildGitEnv(params: {
 
   const secret = decryptToUtf8({ key: ctx.credentialMasterKey, ciphertext: cred.secretEnc });
 
+  // 每次 git 操作都生成独立的临时目录，避免同一 credential 在并发操作时互相覆盖/互删临时文件。
   await ensureDir(tmpRoot(ctx.dataDir));
+  const tmpDirPrefix = path.join(tmpRoot(ctx.dataDir), `git-env-${cred.record.id}-`);
+  const opTmpDir = await fs.mkdtemp(tmpDirPrefix);
+  cleanupPaths.push(opTmpDir);
+
   if (cred.record.kind === "https") {
-    const id = cred.record.id;
-    const askpassPath = path.join(tmpRoot(ctx.dataDir), `git-askpass-${id}.sh`);
-    const tokenPath = path.join(tmpRoot(ctx.dataDir), `git-askpass-token-${id}`);
+    const askpassPath = path.join(opTmpDir, "git-askpass.sh");
+    const tokenPath = path.join(opTmpDir, "git-askpass-token");
     const username = sanitizeForAskpass(cred.record.username || "oauth2");
     await fs.writeFile(tokenPath, secret, { encoding: "utf-8", mode: 0o600 });
     await fs.writeFile(askpassPath, gitAskpassScriptV1(), { encoding: "utf-8", mode: 0o700 });
-    cleanupPaths.push(askpassPath);
-    cleanupPaths.push(tokenPath);
 
     return {
       env: {
@@ -129,9 +131,8 @@ export async function buildGitEnv(params: {
 
   // ssh
   await ensureDir(sshRoot(ctx.dataDir));
-  const keyPath = path.join(tmpRoot(ctx.dataDir), `ssh-key-${cred.record.id}`);
+  const keyPath = path.join(opTmpDir, "ssh-key");
   await fs.writeFile(keyPath, secret, { encoding: "utf-8", mode: 0o600 });
-  cleanupPaths.push(keyPath);
 
   const knownHosts = sshKnownHostsPath(ctx.dataDir);
   const sshCmd = [

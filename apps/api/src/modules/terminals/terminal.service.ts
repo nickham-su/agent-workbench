@@ -10,11 +10,9 @@ import { tmuxHasSession, tmuxKillSession, tmuxNewSession } from "../../infra/tmu
 import { ensureDir, pathExists } from "../../infra/fs/fs.js";
 import { caCertPath, certsRoot, sshKnownHostsPath, sshRoot, tmpRoot } from "../../infra/fs/paths.js";
 import { decryptToUtf8 } from "../../infra/crypto/secretBox.js";
-import { getRepo } from "../repos/repo.store.js";
-import { extractGitHost, inferGitCredentialKindFromUrl } from "../../infra/git/gitHost.js";
 import { gitAskpassScriptV1 } from "../../infra/git/askpass.js";
 import { shQuote } from "../../infra/git/shQuote.js";
-import { getCredentialWithSecret, pickCredentialWithSecretForHost } from "../credentials/credentials.store.js";
+import { getCredentialWithSecret } from "../credentials/credentials.store.js";
 import { getSettingJson } from "../settings/settings.store.js";
 import {
   insertTerminal,
@@ -100,21 +98,8 @@ async function buildTerminalGitEnv(params: {
   const ws = getWorkspace(params.ctx.db, params.workspaceId);
   if (!ws) throw new HttpError(404, "Workspace not found");
 
-  const repo = getRepo(params.ctx.db, ws.repoId);
-  if (!repo) return { envPairs: networkPairs };
-
-  const repoCredentialId = repo.credentialId ? String(repo.credentialId || "").trim() : "";
-  let cred: ReturnType<typeof getCredentialWithSecret> | null = null;
-
-  if (repoCredentialId) {
-    cred = getCredentialWithSecret(params.ctx.db, repoCredentialId);
-  } else {
-    const host = extractGitHost(repo.url);
-    if (host) {
-      const preferredKind = inferGitCredentialKindFromUrl(repo.url);
-      cred = pickCredentialWithSecretForHost(params.ctx.db, { host, preferredKind });
-    }
-  }
+  const repoCredentialId = ws.terminalCredentialId ? String(ws.terminalCredentialId || "").trim() : "";
+  const cred = repoCredentialId ? getCredentialWithSecret(params.ctx.db, repoCredentialId) : null;
 
   if (!cred) return { envPairs: networkPairs };
 

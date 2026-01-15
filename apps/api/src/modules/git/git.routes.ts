@@ -2,18 +2,25 @@ import type { FastifyInstance } from "fastify";
 import type { AppContext } from "../../app/context.js";
 import { ErrorResponseSchema } from "@agent-workbench/shared";
 import {
+  GitChangesRequestSchema,
   ChangesResponseSchema,
+  GitFileCompareRequestSchema,
   FileCompareResponseSchema,
+  GitCheckoutRequestSchema,
+  GitCheckoutResponseSchema,
   GitCommitRequestSchema,
   GitCommitResponseSchema,
   GitDiscardRequestSchema,
   GitIdentitySetRequestSchema,
+  GitIdentityStatusRequestSchema,
   GitIdentityStatusSchema,
   GitPullRequestSchema,
   GitPullResponseSchema,
   GitPushRequestSchema,
   GitPushResponseSchema,
   GitStageRequestSchema,
+  GitStatusRequestSchema,
+  GitStatusResponseSchema,
   GitUnstageRequestSchema
 } from "@agent-workbench/shared";
 import {
@@ -21,37 +28,33 @@ import {
   discardWorkspace,
   fileCompare,
   getWorkspaceGitIdentity,
-  setWorkspaceGitIdentity,
+  gitCheckout,
+  gitStatus,
   listChanges,
   pullWorkspace,
   pushWorkspace,
+  setWorkspaceGitIdentity,
   stageWorkspace,
   unstageWorkspace
 } from "./git.service.js";
 
 export async function registerGitRoutes(app: FastifyInstance, ctx: AppContext) {
-  app.get(
-    "/api/workspaces/:workspaceId/changes",
+  app.post(
+    "/api/git/changes",
     {
       schema: {
         tags: ["git"],
-        querystring: {
-          type: "object",
-          properties: { mode: { type: "string" } },
-          required: ["mode"]
-        },
+        body: GitChangesRequestSchema,
         response: { 200: ChangesResponseSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema }
       }
     },
     async (req) => {
-      const params = req.params as { workspaceId: string };
-      const query = req.query as { mode?: string };
-      return listChanges(ctx, params.workspaceId, query.mode);
+      return listChanges(ctx, req.body);
     }
   );
 
   app.post(
-    "/api/workspaces/:workspaceId/git/stage",
+    "/api/git/stage",
     {
       schema: {
         tags: ["git"],
@@ -60,15 +63,13 @@ export async function registerGitRoutes(app: FastifyInstance, ctx: AppContext) {
       }
     },
     async (req, reply) => {
-      const params = req.params as { workspaceId: string };
-      const body = (req.body ?? {}) as any;
-      await stageWorkspace(ctx, params.workspaceId, body);
+      await stageWorkspace(ctx, req.body);
       return reply.code(204).send();
     }
   );
 
   app.post(
-    "/api/workspaces/:workspaceId/git/unstage",
+    "/api/git/unstage",
     {
       schema: {
         tags: ["git"],
@@ -77,15 +78,13 @@ export async function registerGitRoutes(app: FastifyInstance, ctx: AppContext) {
       }
     },
     async (req, reply) => {
-      const params = req.params as { workspaceId: string };
-      const body = (req.body ?? {}) as any;
-      await unstageWorkspace(ctx, params.workspaceId, body);
+      await unstageWorkspace(ctx, req.body);
       return reply.code(204).send();
     }
   );
 
   app.post(
-    "/api/workspaces/:workspaceId/git/discard",
+    "/api/git/discard",
     {
       schema: {
         tags: ["git"],
@@ -94,15 +93,13 @@ export async function registerGitRoutes(app: FastifyInstance, ctx: AppContext) {
       }
     },
     async (req, reply) => {
-      const params = req.params as { workspaceId: string };
-      const body = (req.body ?? {}) as any;
-      await discardWorkspace(ctx, params.workspaceId, body);
+      await discardWorkspace(ctx, req.body);
       return reply.code(204).send();
     }
   );
 
   app.post(
-    "/api/workspaces/:workspaceId/git/commit",
+    "/api/git/commit",
     {
       schema: {
         tags: ["git"],
@@ -111,28 +108,26 @@ export async function registerGitRoutes(app: FastifyInstance, ctx: AppContext) {
       }
     },
     async (req) => {
-      const params = req.params as { workspaceId: string };
-      const body = (req.body ?? {}) as any;
-      return commitWorkspace(ctx, params.workspaceId, body);
+      return commitWorkspace(ctx, req.body);
     }
   );
 
-  app.get(
-    "/api/workspaces/:workspaceId/git/identity",
+  app.post(
+    "/api/git/identity/status",
     {
       schema: {
         tags: ["git"],
+        body: GitIdentityStatusRequestSchema,
         response: { 200: GitIdentityStatusSchema, 404: ErrorResponseSchema }
       }
     },
     async (req) => {
-      const params = req.params as { workspaceId: string };
-      return getWorkspaceGitIdentity(ctx, params.workspaceId);
+      return getWorkspaceGitIdentity(ctx, req.body);
     }
   );
 
   app.put(
-    "/api/workspaces/:workspaceId/git/identity",
+    "/api/git/identity",
     {
       schema: {
         tags: ["git"],
@@ -141,15 +136,13 @@ export async function registerGitRoutes(app: FastifyInstance, ctx: AppContext) {
       }
     },
     async (req, reply) => {
-      const params = req.params as { workspaceId: string };
-      const body = (req.body ?? {}) as any;
-      await setWorkspaceGitIdentity(ctx, params.workspaceId, body);
+      await setWorkspaceGitIdentity(ctx, req.body);
       return reply.code(204).send();
     }
   );
 
   app.post(
-    "/api/workspaces/:workspaceId/git/push",
+    "/api/git/push",
     {
       schema: {
         tags: ["git"],
@@ -158,14 +151,12 @@ export async function registerGitRoutes(app: FastifyInstance, ctx: AppContext) {
       }
     },
     async (req) => {
-      const params = req.params as { workspaceId: string };
-      const body = (req.body ?? {}) as any;
-      return pushWorkspace(ctx, params.workspaceId, body);
+      return pushWorkspace(ctx, req.body);
     }
   );
 
   app.post(
-    "/api/workspaces/:workspaceId/git/pull",
+    "/api/git/pull",
     {
       schema: {
         tags: ["git"],
@@ -174,29 +165,49 @@ export async function registerGitRoutes(app: FastifyInstance, ctx: AppContext) {
       }
     },
     async (req) => {
-      const params = req.params as { workspaceId: string };
-      const body = (req.body ?? {}) as any;
-      return pullWorkspace(ctx, params.workspaceId, body);
+      return pullWorkspace(ctx, req.body);
     }
   );
 
-  app.get(
-    "/api/workspaces/:workspaceId/file-compare",
+  app.post(
+    "/api/git/file-compare",
     {
       schema: {
         tags: ["git"],
-        querystring: {
-          type: "object",
-          properties: { mode: { type: "string" }, path: { type: "string" }, oldPath: { type: "string" } },
-          required: ["mode", "path"]
-        },
+        body: GitFileCompareRequestSchema,
         response: { 200: FileCompareResponseSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema }
       }
     },
     async (req) => {
-      const params = req.params as { workspaceId: string };
-      const query = req.query as { mode?: string; path?: string; oldPath?: string };
-      return fileCompare(ctx, params.workspaceId, query.mode, query.path, query.oldPath);
+      return fileCompare(ctx, req.body);
+    }
+  );
+
+  app.post(
+    "/api/git/checkout",
+    {
+      schema: {
+        tags: ["git"],
+        body: GitCheckoutRequestSchema,
+        response: { 200: GitCheckoutResponseSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema, 409: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      return gitCheckout(ctx, req.body);
+    }
+  );
+
+  app.post(
+    "/api/git/status",
+    {
+      schema: {
+        tags: ["git"],
+        body: GitStatusRequestSchema,
+        response: { 200: GitStatusResponseSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      return gitStatus(ctx, req.body);
     }
   );
 }

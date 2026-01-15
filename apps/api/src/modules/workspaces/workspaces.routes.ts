@@ -3,16 +3,10 @@ import type { AppContext } from "../../app/context.js";
 import { ErrorResponseSchema } from "@agent-workbench/shared";
 import {
   CreateWorkspaceRequestSchema,
-  SwitchWorkspaceBranchRequestSchema,
+  UpdateWorkspaceRequestSchema,
   WorkspaceDetailSchema
 } from "@agent-workbench/shared";
-import {
-  createWorkspace,
-  deleteWorkspace,
-  getWorkspaceDetailById,
-  listWorkspaceDetails,
-  switchWorkspaceBranch
-} from "./workspace.service.js";
+import { createWorkspace, deleteWorkspace, getWorkspaceDetailById, listWorkspaceDetails, updateWorkspaceTitleById } from "./workspace.service.js";
 
 export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppContext) {
   app.get(
@@ -33,8 +27,12 @@ export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppCon
       }
     },
     async (req, reply) => {
-      const body = req.body as { repoId: string; branch: string };
-      const ws = await createWorkspace(ctx, app.log, { repoId: body.repoId, branch: body.branch });
+      const body = req.body as { repoIds: string[]; title?: string; useTerminalCredential?: boolean };
+      const ws = await createWorkspace(ctx, app.log, {
+        repoIds: body.repoIds,
+        title: body.title,
+        useTerminalCredential: body.useTerminalCredential
+      });
       const detail = await getWorkspaceDetailById(ctx, ws.id);
       return reply.code(201).send(detail);
     }
@@ -51,26 +49,26 @@ export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppCon
     }
   );
 
-  app.post(
-    "/api/workspaces/:workspaceId/git/checkout",
+  app.patch(
+    "/api/workspaces/:workspaceId",
     {
       schema: {
-        tags: ["git"],
-        body: SwitchWorkspaceBranchRequestSchema,
-        response: { 200: { type: "object", properties: { branch: { type: "string" } }, required: ["branch"] }, 404: ErrorResponseSchema, 409: ErrorResponseSchema }
+        tags: ["workspaces"],
+        body: UpdateWorkspaceRequestSchema,
+        response: { 200: WorkspaceDetailSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema }
       }
     },
     async (req) => {
       const params = req.params as { workspaceId: string };
-      const body = req.body as { branch: string };
-      return switchWorkspaceBranch(ctx, app.log, params.workspaceId, body.branch);
+      const body = req.body as { title: string };
+      return updateWorkspaceTitleById(ctx, app.log, params.workspaceId, body.title);
     }
   );
 
   app.delete(
     "/api/workspaces/:workspaceId",
     {
-      schema: { tags: ["workspaces"], response: { 204: { type: "null" }, 404: ErrorResponseSchema } }
+      schema: { tags: ["workspaces"], response: { 204: { type: "null" }, 404: ErrorResponseSchema, 409: ErrorResponseSchema } }
     },
     async (req, reply) => {
       const params = req.params as { workspaceId: string };

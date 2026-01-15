@@ -2,23 +2,39 @@
   <a-layout class="min-h-screen !bg-[var(--app-bg)]">
     <a-layout-header class="flex items-center gap-3 !h-12 !px-3 !bg-[var(--panel-bg-elevated)]">
       <div class="flex items-center gap-3 min-w-0">
-        <div class="text-[color:var(--text-color)] font-semibold text-sm shrink-0">{{ t("workspace.title") }}</div>
+        <div class="text-[color:var(--text-color)] font-semibold text-sm shrink-0">{{ workspace?.title || t("workspace.title") }}</div>
         <div v-if="workspace" class="flex items-center gap-2 min-w-0">
-          <div class="text-[color:var(--text-secondary)] text-xs min-w-0 truncate flex items-center">
-            <a-tooltip :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="top">
-              <template #title>
-                <span class="font-mono break-all">{{ workspace.repo.url }}</span>
-              </template>
-              <span class="font-mono">{{ repoDisplayName }}</span>
-            </a-tooltip>
-            <span class="shrink-0"> · </span>
-            <span class="font-mono shrink-0">{{ workspace.checkout.branch }}</span>
+          <a-select
+            v-model:value="currentRepoDirName"
+            size="small"
+            class="min-w-[200px]"
+            show-search
+            :filter-option="filterRepoOption"
+            :placeholder="t('workspace.repoSelector.placeholder')"
+          >
+            <a-select-option
+              v-for="r in workspace.repos"
+              :key="r.dirName"
+              :value="r.dirName"
+              :label="`${formatRepoDisplayName(r.repo.url)} ${r.repo.url}`"
+            >
+              <a-tooltip :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="top">
+                <template #title>
+                  <span class="font-mono break-all">{{ r.repo.url }}</span>
+                </template>
+                <span class="font-mono">{{ formatRepoDisplayName(r.repo.url) }}</span>
+              </a-tooltip>
+            </a-select-option>
+          </a-select>
+          <div v-if="currentRepoStatus" class="text-[color:var(--text-secondary)] text-xs font-mono shrink-0">
+            <span v-if="currentRepoStatus.head.detached">{{ t("workspace.repoSelector.detached") }}</span>
+            <span v-else>{{ currentRepoStatus.head.branch }}</span>
           </div>
         </div>
       </div>
 
       <div class="flex items-center gap-2 shrink-0">
-        <a-button v-if="workspace" size="small" :disabled="gitBusy" @click="openCheckout()">
+        <a-button v-if="workspace && currentTarget" size="small" :disabled="gitBusy" @click="openCheckout()">
           {{ t("workspace.actions.checkout") }}
         </a-button>
 
@@ -239,7 +255,7 @@
 
   <GitIdentityModal
     v-model:open="pushIdentityOpen"
-    :workspaceId="workspaceId"
+    :target="currentTarget"
     :allowSession="false"
     :defaultScope="'repo'"
     :loading="pushIdentitySubmitting"
@@ -252,10 +268,11 @@ import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref,
 import { Modal, message } from "ant-design-vue";
 import { CodeOutlined } from "@ant-design/icons-vue";
 import { useI18n } from "vue-i18n";
-import type { RepoBranchesResponse, GitPushRequest, WorkspaceDetail } from "@agent-workbench/shared";
+import type { GitPushRequest, GitStatusResponse, RepoBranchesResponse, WorkspaceDetail } from "@agent-workbench/shared";
 import {
   ApiError,
-  checkoutWorkspace,
+  gitCheckout,
+  getGitStatus,
   getWorkspace,
   getWorkspaceGitIdentity,
   listChanges,
@@ -268,6 +285,7 @@ import {
 } from "../services/api";
 import { waitRepoReadyOrThrow } from "../services/repoSync";
 import { workspaceHostKey, type DockArea, type WorkspaceHostApi, type WorkspaceToolCommandMap, type WorkspaceToolEvent } from "../workspace/host";
+import { workspaceContextKey } from "../workspace/context";
 import WorkspaceToolButton from "../workspace/WorkspaceToolButton.vue";
 import CodeReviewIcon from "../workspace/icons/CodeReviewIcon.vue";
 import CodeReviewToolView from "../workspace/tools/CodeReviewToolView.vue";
@@ -276,6 +294,7 @@ import GitIdentityModal from "../components/GitIdentityModal.vue";
 
 const props = defineProps<{ workspaceId: string }>();
 const { t } = useI18n();
+type PushParams = Omit<GitPushRequest, "target">;
 
 type ToolId = "codeReview" | "terminal";
 const TOOL_IDS: ToolId[] = ["codeReview", "terminal"];
@@ -301,6 +320,21 @@ type ToolDefinition = {
 
 const loading = ref(false);
 const workspace = ref<WorkspaceDetail | null>(null);
+const currentRepoDirName = ref<string>("");
+const repoStatusByDirName = reactive<Record<string, GitStatusResponse | null>>({});
+const repoDefaultBranch = ref<string | null>(null);
+
+const workspaceRepos = computed(() => workspace.value?.repos ?? []);
+const currentRepo = computed(() => workspaceRepos.value.find((r) => r.dirName === currentRepoDirName.value) ?? null);
+const currentTarget = computed(() => {
+  if (!currentRepo.value) return null;
+  return { kind: "workspaceRepo", workspaceId: props.workspaceId, dirName: currentRepo.value.dirName } as const;
+});
+const currentRepoStatus = computed(() => {
+  const repo = currentRepo.value;
+  if (!repo) return null;
+  return repoStatusByDirName[repo.dirName] ?? null;
+});
 
 const tools = computed<ToolDefinition[]>(() => [
   {
@@ -316,14 +350,14 @@ const tools = computed<ToolDefinition[]>(() => [
         id: "pull",
         label: t("workspace.actions.pull"),
         loading: pullLoading.value,
-        disabled: gitBusy.value || !workspace.value,
+        disabled: gitBusy.value || !currentTarget.value,
         onClick: () => void pullWithUi()
       },
       {
         id: "push",
         label: t("workspace.actions.push"),
         loading: pushLoading.value,
-        disabled: gitBusy.value || !workspace.value,
+        disabled: gitBusy.value || !currentTarget.value,
         onClick: () => void pushWithUi()
       }
     ]
@@ -362,6 +396,7 @@ const toolMinimized = reactive<Record<ToolId, boolean>>({
 });
 
 const DOCK_LAYOUT_STORAGE_KEY_PREFIX = "agent-workbench.workspace.dockLayout";
+const CURRENT_REPO_STORAGE_KEY_PREFIX = "agent-workbench.workspace.currentRepo.v1";
 
 type DockLayoutV1 = {
   version: 1;
@@ -376,6 +411,12 @@ function dockLayoutStorageKey(workspaceId: string) {
   const id = String(workspaceId || "").trim();
   if (!id) return `${DOCK_LAYOUT_STORAGE_KEY_PREFIX}.v1`;
   return `${DOCK_LAYOUT_STORAGE_KEY_PREFIX}.v1.${id}`;
+}
+
+function currentRepoStorageKey(workspaceId: string) {
+  const id = String(workspaceId || "").trim();
+  if (!id) return `${CURRENT_REPO_STORAGE_KEY_PREFIX}`;
+  return `${CURRENT_REPO_STORAGE_KEY_PREFIX}.${id}`;
 }
 
 function isDockArea(v: unknown): v is DockArea {
@@ -439,6 +480,29 @@ function loadDockLayout(workspaceId: string): DockLayoutV1 | null {
   } catch {
     return null;
   }
+}
+
+function restoreCurrentRepo(ws: WorkspaceDetail | null) {
+  const list = ws?.repos ?? [];
+  if (list.length === 0) {
+    currentRepoDirName.value = "";
+    return;
+  }
+
+  let preferred = "";
+  try {
+    preferred = localStorage.getItem(currentRepoStorageKey(ws?.id ?? props.workspaceId)) || "";
+  } catch {
+    preferred = "";
+  }
+
+  const next = list.find((r) => r.dirName === preferred)?.dirName ?? list[0]!.dirName;
+  currentRepoDirName.value = next;
+}
+
+function setCurrentRepo(dirName: string) {
+  if (!dirName) return;
+  currentRepoDirName.value = dirName;
 }
 
 function saveDockLayout(workspaceId: string) {
@@ -621,6 +685,13 @@ const hostApi: WorkspaceHostApi = {
 };
 
 provide(workspaceHostKey, hostApi);
+provide(workspaceContextKey, {
+  repos: workspaceRepos,
+  currentRepo,
+  currentTarget,
+  setCurrentRepo,
+  statusByDirName: repoStatusByDirName
+});
 
 function onToolIconClick(toolId: ToolId) {
   const area = toolCurrentArea(toolId);
@@ -715,10 +786,11 @@ function toolViewProps(toolId: ToolId) {
   if (toolId === "codeReview") {
     return {
       workspaceId: props.workspaceId,
+      target: currentTarget.value,
       toolId,
       gitBusy: gitBusy.value,
       beginGitOp,
-      push: (params?: GitPushRequest) => pushWithUi(params)
+      push: (params?: PushParams) => pushWithUi(params)
     };
   }
   return { workspaceId: props.workspaceId, toolId };
@@ -780,18 +852,25 @@ function formatRepoDisplayName(rawUrl: string) {
   return s;
 }
 
-const repoDisplayName = computed(() => (workspace.value ? formatRepoDisplayName(workspace.value.repo.url) : ""));
+const repoDisplayName = computed(() => (currentRepo.value ? formatRepoDisplayName(currentRepo.value.repo.url) : ""));
+
+function filterRepoOption(input: string, option: any) {
+  const hay = String(option?.label ?? option?.children ?? "").toLowerCase();
+  return hay.includes(input.toLowerCase());
+}
 
 function buildPageTitle(ws: WorkspaceDetail | null) {
   const base = t("app.title");
   if (!ws) return `${t("workspace.title")} - ${base}`;
 
-  const repoName = formatRepoDisplayName(ws.repo.url);
-  const branch = String(ws.checkout.branch || "").trim();
-  if (repoName && branch) return `${repoName}@${branch} - ${base}`;
-  if (repoName) return `${repoName} - ${base}`;
-  if (branch) return `${branch} - ${base}`;
-  return `${t("workspace.title")} - ${base}`;
+  const title = ws.title || t("workspace.title");
+  const repoName = currentRepo.value ? formatRepoDisplayName(currentRepo.value.repo.url) : "";
+  const status = currentRepoStatus.value;
+  const branch = status?.head?.detached ? t("workspace.repoSelector.detached") : (status?.head?.branch ?? "");
+
+  if (repoName && branch) return `${title} · ${repoName}@${branch} - ${base}`;
+  if (repoName) return `${title} · ${repoName} - ${base}`;
+  return `${title} - ${base}`;
 }
 
 function applyPageTitle() {
@@ -802,7 +881,7 @@ const pushLoading = ref(false);
 const pullLoading = ref(false);
 
 const pushIdentityOpen = ref(false);
-const pendingPushParams = ref<GitPushRequest>({});
+const pendingPushParams = ref<PushParams>({});
 const pushIdentitySubmitting = ref(false);
 
 const headerActionGroups = computed(() => {
@@ -823,11 +902,12 @@ const checkoutOpen = ref(false);
 const checkoutLoading = ref(false);
 const checkoutBranch = ref<string>("");
 const canCheckout = computed(() => {
-  if (!workspace.value) return false;
+  if (!currentTarget.value) return false;
   if (gitBusy.value) return false;
   const next = checkoutBranch.value.trim();
   if (!next) return false;
-  return next !== workspace.value.checkout.branch;
+  const currentBranch = currentRepoStatus.value?.head?.branch ?? "";
+  return next !== currentBranch;
 });
 
 const SPLITTER_PX = 6;
@@ -867,6 +947,40 @@ watch(
 watch(toolArea, scheduleSaveDockLayout, { deep: true });
 watch(toolMinimized, scheduleSaveDockLayout, { deep: true });
 watch(activeToolIdByArea, scheduleSaveDockLayout, { deep: true });
+watch(
+  () => currentRepoDirName.value,
+  (dirName) => {
+    if (!dirName) return;
+    try {
+      localStorage.setItem(currentRepoStorageKey(props.workspaceId), dirName);
+    } catch {
+      // ignore
+    }
+  }
+);
+watch(
+  () => currentTarget.value?.dirName,
+  async () => {
+    checkoutBranch.value = "";
+    await refreshCurrentRepoStatus();
+    await refreshBranches();
+    applyPageTitle();
+    await toolCommands.get("codeReview")?.refresh?.();
+  }
+);
+watch(
+  () => workspaceRepos.value.map((r) => r.dirName).join(","),
+  () => {
+    const list = workspaceRepos.value;
+    if (list.length === 0) {
+      currentRepoDirName.value = "";
+      return;
+    }
+    if (!list.some((r) => r.dirName === currentRepoDirName.value)) {
+      restoreCurrentRepo(workspace.value);
+    }
+  }
+);
 
 const showLeftTop = computed(() => Boolean(visibleToolIdByArea.value.leftTop));
 const showRightTop = computed(() => Boolean(visibleToolIdByArea.value.rightTop));
@@ -1012,13 +1126,30 @@ function onTopColsSplitterPointerDown(evt: PointerEvent) {
 async function refreshWorkspace() {
   workspace.value = await getWorkspace(props.workspaceId);
   applyPageTitle();
+  restoreCurrentRepo(workspace.value);
+}
+
+async function refreshCurrentRepoStatus() {
+  const target = currentTarget.value;
+  if (!target) return;
+  try {
+    const res = await getGitStatus({ target });
+    repoStatusByDirName[target.dirName] = res;
+  } catch {
+    repoStatusByDirName[target.dirName] = null;
+  }
 }
 
 async function refreshChangesSummary() {
   try {
+    const target = currentTarget.value;
+    if (!target) {
+      changesSummary.value = { unstaged: 0, staged: 0 };
+      return changesSummary.value;
+    }
     const [unstagedRes, stagedRes] = await Promise.all([
-      listChanges(props.workspaceId, { mode: "unstaged" }),
-      listChanges(props.workspaceId, { mode: "staged" })
+      listChanges(target, { mode: "unstaged" }),
+      listChanges(target, { mode: "staged" })
     ]);
     changesSummary.value = { unstaged: unstagedRes.files.length, staged: stagedRes.files.length };
   } catch {
@@ -1028,12 +1159,17 @@ async function refreshChangesSummary() {
 }
 
 async function refreshBranches() {
-  const ws = workspace.value;
-  if (!ws) return;
+  const repo = currentRepo.value;
+  if (!repo) {
+    branches.value = [];
+    repoDefaultBranch.value = null;
+    return;
+  }
   branchesLoading.value = true;
   try {
-    const res = await repoBranches(ws.repo.id);
+    const res = await repoBranches(repo.repo.id);
     branches.value = res.branches;
+    repoDefaultBranch.value = res.defaultBranch ?? null;
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
@@ -1045,7 +1181,7 @@ function pickCheckoutBranch(params: { branches: RepoBranchesResponse["branches"]
   const existing = checkoutBranch.value.trim();
   if (existing && params.branches.some((b) => b.name === existing)) return existing;
 
-  const currentBranch = workspace.value?.checkout.branch;
+  const currentBranch = currentRepoStatus.value?.head?.branch ?? "";
   if (currentBranch && params.branches.some((b) => b.name === currentBranch)) return currentBranch;
 
   if (params.defaultBranch && params.branches.some((b) => b.name === params.defaultBranch)) return params.defaultBranch;
@@ -1053,18 +1189,19 @@ function pickCheckoutBranch(params: { branches: RepoBranchesResponse["branches"]
 }
 
 async function refreshBranchesWithSync() {
-  const ws = workspace.value;
-  if (!ws) return;
+  const repo = currentRepo.value;
+  if (!repo) return;
   if (gitBusy.value) return;
   if (refreshBranchesLoading.value) return;
 
   refreshBranchesLoading.value = true;
   try {
-    await syncRepo(ws.repo.id);
-    await waitRepoReadyOrThrow(ws.repo.id, { t });
-    const res = await repoBranches(ws.repo.id);
+    await syncRepo(repo.repo.id);
+    await waitRepoReadyOrThrow(repo.repo.id, { t });
+    const res = await repoBranches(repo.repo.id);
     branches.value = res.branches;
-    checkoutBranch.value = pickCheckoutBranch({ branches: res.branches, defaultBranch: res.defaultBranch });
+    repoDefaultBranch.value = res.defaultBranch ?? null;
+    checkoutBranch.value = pickCheckoutBranch({ branches: res.branches, defaultBranch: repoDefaultBranch.value });
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
@@ -1078,6 +1215,7 @@ async function refresh() {
   try {
     await refreshWorkspace();
     await refreshBranches();
+    await refreshCurrentRepoStatus();
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
@@ -1086,15 +1224,15 @@ async function refresh() {
 }
 
 async function openCheckout() {
-  if (!workspace.value) return;
+  if (!currentTarget.value) return;
   if (gitBusy.value) return;
-  checkoutBranch.value = workspace.value.checkout.branch;
-  checkoutOpen.value = true;
   await refreshBranches();
+  checkoutBranch.value = pickCheckoutBranch({ branches: branches.value, defaultBranch: repoDefaultBranch.value });
+  checkoutOpen.value = true;
 }
 
 async function submitCheckout() {
-  if (!workspace.value) return;
+  if (!currentTarget.value) return;
   if (!canCheckout.value) return;
   const nextBranch = checkoutBranch.value.trim();
 
@@ -1116,12 +1254,13 @@ async function submitCheckout() {
 }
 
 async function doCheckout(nextBranch: string) {
-  if (!workspace.value) return;
+  const target = currentTarget.value;
+  if (!target) return;
   const release = beginGitOp();
   checkoutLoading.value = true;
   try {
-    await checkoutWorkspace(props.workspaceId, { branch: nextBranch });
-    await refreshWorkspace();
+    await gitCheckout({ target, branch: nextBranch });
+    await refreshCurrentRepoStatus();
     await refreshBranches();
     await toolCommands.get("codeReview")?.refresh?.();
     message.success(t("workspace.checkout.switchedTo", { branch: nextBranch }));
@@ -1135,7 +1274,8 @@ async function doCheckout(nextBranch: string) {
 }
 
 async function pullWithUi() {
-  if (!workspace.value) return;
+  const target = currentTarget.value;
+  if (!target) return;
   if (gitBusy.value) return;
 
   const summary = await refreshChangesSummary();
@@ -1156,13 +1296,16 @@ async function pullWithUi() {
 }
 
 async function doPull() {
+  const target = currentTarget.value;
+  if (!target) return;
   const release = beginGitOp();
   pullLoading.value = true;
   try {
-    const res = await pullWorkspace(props.workspaceId, {});
+    const res = await pullWorkspace({ target });
     if (res.updated) message.success(t("workspace.pull.updated"));
     else message.success(t("workspace.pull.upToDate"));
     await toolCommands.get("codeReview")?.refresh?.();
+    await refreshCurrentRepoStatus();
   } catch (err) {
     const e = err instanceof ApiError ? err : new ApiError({ message: err instanceof Error ? err.message : String(err) });
     message.error(e.message);
@@ -1172,13 +1315,14 @@ async function doPull() {
   }
 }
 
-async function pushWithUi(params: Parameters<typeof pushWorkspace>[1] = {}) {
-  if (!workspace.value) return;
+async function pushWithUi(params: PushParams = {}) {
+  const target = currentTarget.value;
+  if (!target) return;
   if (gitBusy.value) return;
 
   // push 本身不依赖 user.name/email，但这里提前确保身份已配置，避免用户在“提交并推送/终端提交”时再次踩坑
   try {
-    const st = await getWorkspaceGitIdentity(props.workspaceId);
+    const st = await getWorkspaceGitIdentity({ target });
     if (st.effective.source === "none") {
       pendingPushParams.value = params;
       pushIdentityOpen.value = true;
@@ -1191,7 +1335,7 @@ async function pushWithUi(params: Parameters<typeof pushWorkspace>[1] = {}) {
   const release = beginGitOp();
   pushLoading.value = true;
   try {
-    const res = await pushWorkspace(props.workspaceId, params);
+    const res = await pushWorkspace({ target, ...params });
     message.success(t("workspace.push.pushedTo", { remote: res.remote, branch: res.branch }));
   } catch (err) {
     const e = err instanceof ApiError ? err : new ApiError({ message: err instanceof Error ? err.message : String(err) });
@@ -1227,7 +1371,8 @@ async function pushWithUi(params: Parameters<typeof pushWorkspace>[1] = {}) {
 }
 
 async function onPushIdentitySubmit(identity: any) {
-  if (!workspace.value) return;
+  const target = currentTarget.value;
+  if (!target) return;
   if (gitBusy.value) return;
 
   const release = beginGitOp();
@@ -1235,7 +1380,7 @@ async function onPushIdentitySubmit(identity: any) {
   pushIdentitySubmitting.value = true;
   try {
     if (identity?.scope === "repo") {
-      await setWorkspaceGitIdentity(props.workspaceId, { name: identity.name, email: identity.email });
+      await setWorkspaceGitIdentity({ target, name: identity.name, email: identity.email });
     } else if (identity?.scope === "global") {
       await updateGitGlobalIdentity({ name: identity.name, email: identity.email });
     } else {
@@ -1258,10 +1403,11 @@ async function onPushIdentitySubmit(identity: any) {
 }
 
 watch(
-  () => workspace.value?.repo.id,
+  () => currentRepo.value?.repo.id ?? "",
   async () => {
     branches.value = [];
-    if (workspace.value) await refreshBranches();
+    repoDefaultBranch.value = null;
+    if (currentRepo.value) await refreshBranches();
   }
 );
 

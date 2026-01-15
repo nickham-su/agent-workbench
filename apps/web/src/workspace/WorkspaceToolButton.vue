@@ -42,8 +42,11 @@ const emit = defineEmits<{
 
 const buttonClass = computed(
   () =>
-    "w-8 h-8 flex items-center justify-center rounded hover:bg-[var(--hover-bg)] transition-colors " +
-    (props.active ? "bg-[var(--fill-secondary)] text-[color:var(--text-color)]" : "text-[color:var(--text-secondary)]") +
+    // Tailwind 关闭 preflight 后，原生 button 会保留 UA 默认背景/边框；这里做局部 reset，避免未选中态出现“白底按钮”。
+    "w-8 h-8 flex items-center justify-center rounded transition-colors border-0 appearance-none " +
+    (props.active
+      ? "bg-[var(--fill-secondary)] text-[color:var(--text-color)]"
+      : "bg-transparent text-[color:var(--text-secondary)] hover:bg-[var(--hover-bg)]") +
     (props.active && props.minimized ? " opacity-70" : "")
 );
 

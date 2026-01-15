@@ -38,14 +38,14 @@
 </template>
 
 <script setup lang="ts">
-import type { GitIdentityInput, GitIdentityScope, GitIdentityStatus } from "@agent-workbench/shared";
+import type { GitIdentityInput, GitIdentityScope, GitIdentityStatus, GitTarget } from "@agent-workbench/shared";
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { getWorkspaceGitIdentity } from "../services/api";
 
 const props = defineProps<{
   open: boolean;
-  workspaceId: string;
+  target: GitTarget | null;
   allowSession?: boolean;
   defaultScope?: GitIdentityScope;
   loading?: boolean;
@@ -75,10 +75,13 @@ const email = ref("");
 const scope = ref<GitIdentityScope>(props.defaultScope ?? "repo");
 
 async function refreshStatus() {
-  if (!props.workspaceId) return;
+  if (!props.target) {
+    status.value = null;
+    return;
+  }
   statusLoading.value = true;
   try {
-    status.value = await getWorkspaceGitIdentity(props.workspaceId);
+    status.value = await getWorkspaceGitIdentity({ target: props.target });
     // 预填：优先 repo，其次 global
     const pick = (status.value.repo.name && status.value.repo.email ? status.value.repo : status.value.global) as any;
     if (pick?.name && pick?.email) {

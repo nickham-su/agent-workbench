@@ -11,17 +11,23 @@ import type {
   CredentialRecord,
   GenerateSshKeypairResponse,
   FileCompareResponse,
+  GitCheckoutRequest,
+  GitCheckoutResponse,
   GitCommitRequest,
   GitCommitResponse,
   GitDiscardRequest,
   GitGlobalIdentity,
   GitIdentitySetRequest,
+  GitIdentityStatusRequest,
   GitIdentityStatus,
   GitPullRequest,
   GitPullResponse,
   GitPushRequest,
   GitPushResponse,
   GitStageRequest,
+  GitStatusRequest,
+  GitStatusResponse,
+  GitTarget,
   GitUnstageRequest,
   NetworkSettings,
   RepoBranchesResponse,
@@ -30,12 +36,12 @@ import type {
   ResetKnownHostRequest,
   SecurityStatus,
   HealthResponse,
-  SwitchWorkspaceBranchRequest,
   TerminalRecord,
   UpdateCredentialRequest,
   UpdateGitGlobalIdentityRequest,
   UpdateNetworkSettingsRequest,
   UpdateRepoRequest,
+  UpdateWorkspaceRequest,
   WorkspaceDetail,
 } from "@agent-workbench/shared";
 import { emitUnauthorized } from "../auth/unauthorized";
@@ -275,18 +281,18 @@ export async function createWorkspace(body: CreateWorkspaceRequest) {
   }
 }
 
-export async function deleteWorkspace(workspaceId: string) {
+export async function updateWorkspace(workspaceId: string, body: UpdateWorkspaceRequest) {
   try {
-    await client.delete(`/workspaces/${workspaceId}`);
+    const res = await client.patch<WorkspaceDetail>(`/workspaces/${workspaceId}`, body);
+    return res.data;
   } catch (err) {
     throw toApiError(err);
   }
 }
 
-export async function checkoutWorkspace(workspaceId: string, body: SwitchWorkspaceBranchRequest) {
+export async function deleteWorkspace(workspaceId: string) {
   try {
-    const res = await client.post<{ branch: string }>(`/workspaces/${workspaceId}/git/checkout`, body);
-    return res.data;
+    await client.delete(`/workspaces/${workspaceId}`);
   } catch (err) {
     throw toApiError(err);
   }
@@ -318,10 +324,22 @@ export async function deleteTerminal(terminalId: string) {
   }
 }
 
-export async function listChanges(workspaceId: string, params: { mode: "unstaged" | "staged" }) {
+export async function listChanges(target: GitTarget, params: { mode: "unstaged" | "staged" }) {
   try {
-    const res = await client.get<ChangesResponse>(`/workspaces/${workspaceId}/changes`, {
-      params: { mode: params.mode }
+    const res = await client.post<ChangesResponse>("/git/changes", { target, mode: params.mode });
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function fileCompare(target: GitTarget, params: { mode: "unstaged" | "staged"; path: string; oldPath?: string }) {
+  try {
+    const res = await client.post<FileCompareResponse>("/git/file-compare", {
+      target,
+      mode: params.mode,
+      path: params.path,
+      oldPath: params.oldPath
     });
     return res.data;
   } catch (err) {
@@ -329,87 +347,87 @@ export async function listChanges(workspaceId: string, params: { mode: "unstaged
   }
 }
 
-export async function fileCompare(
-  workspaceId: string,
-  params: { mode: "unstaged" | "staged"; path: string; oldPath?: string }
-) {
+export async function stageWorkspace(body: GitStageRequest) {
   try {
-    const res = await client.get<FileCompareResponse>(`/workspaces/${workspaceId}/file-compare`, {
-      params: {
-        mode: params.mode,
-        path: params.path,
-        oldPath: params.oldPath
-      }
-    });
+    await client.post("/git/stage", body);
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function unstageWorkspace(body: GitUnstageRequest) {
+  try {
+    await client.post("/git/unstage", body);
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function discardWorkspace(body: GitDiscardRequest) {
+  try {
+    await client.post("/git/discard", body);
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function commitWorkspace(body: GitCommitRequest) {
+  try {
+    const res = await client.post<GitCommitResponse>("/git/commit", body);
     return res.data;
   } catch (err) {
     throw toApiError(err);
   }
 }
 
-export async function stageWorkspace(workspaceId: string, body: GitStageRequest) {
+export async function pushWorkspace(body: GitPushRequest) {
   try {
-    await client.post(`/workspaces/${workspaceId}/git/stage`, body);
-  } catch (err) {
-    throw toApiError(err);
-  }
-}
-
-export async function unstageWorkspace(workspaceId: string, body: GitUnstageRequest) {
-  try {
-    await client.post(`/workspaces/${workspaceId}/git/unstage`, body);
-  } catch (err) {
-    throw toApiError(err);
-  }
-}
-
-export async function discardWorkspace(workspaceId: string, body: GitDiscardRequest) {
-  try {
-    await client.post(`/workspaces/${workspaceId}/git/discard`, body);
-  } catch (err) {
-    throw toApiError(err);
-  }
-}
-
-export async function commitWorkspace(workspaceId: string, body: GitCommitRequest) {
-  try {
-    const res = await client.post<GitCommitResponse>(`/workspaces/${workspaceId}/git/commit`, body);
+    const res = await client.post<GitPushResponse>("/git/push", body);
     return res.data;
   } catch (err) {
     throw toApiError(err);
   }
 }
 
-export async function pushWorkspace(workspaceId: string, body: GitPushRequest = {}) {
+export async function pullWorkspace(body: GitPullRequest) {
   try {
-    const res = await client.post<GitPushResponse>(`/workspaces/${workspaceId}/git/push`, body);
+    const res = await client.post<GitPullResponse>("/git/pull", body);
     return res.data;
   } catch (err) {
     throw toApiError(err);
   }
 }
 
-export async function pullWorkspace(workspaceId: string, body: GitPullRequest = {}) {
+export async function gitCheckout(body: GitCheckoutRequest) {
   try {
-    const res = await client.post<GitPullResponse>(`/workspaces/${workspaceId}/git/pull`, body);
+    const res = await client.post<GitCheckoutResponse>("/git/checkout", body);
     return res.data;
   } catch (err) {
     throw toApiError(err);
   }
 }
 
-export async function getWorkspaceGitIdentity(workspaceId: string) {
+export async function getGitStatus(body: GitStatusRequest) {
   try {
-    const res = await client.get<GitIdentityStatus>(`/workspaces/${workspaceId}/git/identity`);
+    const res = await client.post<GitStatusResponse>("/git/status", body);
     return res.data;
   } catch (err) {
     throw toApiError(err);
   }
 }
 
-export async function setWorkspaceGitIdentity(workspaceId: string, body: GitIdentitySetRequest) {
+export async function getWorkspaceGitIdentity(body: GitIdentityStatusRequest) {
   try {
-    await client.put(`/workspaces/${workspaceId}/git/identity`, body);
+    const res = await client.post<GitIdentityStatus>("/git/identity/status", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function setWorkspaceGitIdentity(body: GitIdentitySetRequest) {
+  try {
+    await client.put("/git/identity", body);
   } catch (err) {
     throw toApiError(err);
   }
