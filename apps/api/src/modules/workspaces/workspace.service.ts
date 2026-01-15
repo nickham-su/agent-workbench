@@ -7,11 +7,13 @@ import type { AppContext } from "../../app/context.js";
 import { newId } from "../../utils/ids.js";
 import { nowMs } from "../../utils/time.js";
 import { getRepo } from "../repos/repo.store.js";
-import { listHeadsBranches } from "../../infra/git/refs.js";
+import { getOriginDefaultBranch, listHeadsBranches } from "../../infra/git/refs.js";
 import { withRepoLock } from "../../infra/locks/repoLock.js";
 import { cloneFromMirror } from "../../infra/git/clone.js";
 import { ensureDir, rmrf } from "../../infra/fs/fs.js";
 import { workspaceRepoDirPath, workspaceRoot } from "../../infra/fs/paths.js";
+import { ensureRepoMirror } from "../../infra/git/mirror.js";
+import { buildGitEnv } from "../../infra/git/gitEnv.js";
 import {
   deleteWorkspaceRecord,
   deleteWorkspaceReposByWorkspace,
@@ -93,10 +95,12 @@ function buildDefaultWorkspaceTitle(repoUrls: string[]) {
 
 function resolveTerminalCredentialId(params: { repoCredentialIds: Array<string | null>; useTerminalCredential?: boolean }) {
   if (!params.useTerminalCredential) return null;
-  const uniq = new Set(params.repoCredentialIds.map((id) => id ?? ""));
+  // 允许“有凭证 repo + 无凭证 repo”的组合：只要所有非空 credentialId 相同即可。
+  const ids = params.repoCredentialIds.map((id) => String(id ?? "").trim()).filter(Boolean);
+  if (ids.length === 0) return null;
+  const uniq = new Set(ids);
   if (uniq.size !== 1) return null;
-  const id = Array.from(uniq)[0];
-  return id || null;
+  return ids[0]!;
 }
 
 export async function createWorkspace(
@@ -112,35 +116,20 @@ export async function createWorkspace(
   const repos = repoIds.map((repoId) => {
     const repo = getRepo(ctx.db, repoId);
     if (!repo) throw new HttpError(404, `Repo not found: ${repoId}`);
-    if (repo.syncStatus === "syncing") throw new HttpError(409, `Repo is syncing: ${repo.url}`);
-    if (repo.syncStatus === "failed") throw new HttpError(409, `Repo sync failed: ${repo.url}. Retry sync first.`);
-    const branch = String(repo.defaultBranch || "").trim();
-    if (!branch) throw new HttpError(409, `Repo default branch is unknown: ${repo.url}`);
-    return { repo, branch };
+    // 强一致：创建 workspace 时会强制更新 mirror，因此这里不再依赖历史的 syncStatus/defaultBranch。
+    const branchHint = String(repo.defaultBranch || "").trim();
+    return { repo, branchHint };
   });
-
-  for (const { repo, branch } of repos) {
-    try {
-      const branches = await listHeadsBranches({ mirrorPath: repo.mirrorPath, cwd: ctx.dataDir });
-      if (!branches.some((b) => b.name === branch)) {
-        throw new HttpError(409, `Branch not found: ${branch}`);
-      }
-    } catch (err) {
-      if (err instanceof HttpError) throw err;
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new HttpError(409, `Failed to read branches from mirror: ${repo.url}. ${msg}`, "REPO_MIRROR_INVALID");
-    }
-  }
 
   const dirNames = new Set<string>();
   const workspaceId = newId("ws");
   const workspacePath = workspaceRoot(ctx.dataDir, workspaceId);
-  const workItems = repos.map(({ repo, branch }) => {
+  const workItems = repos.map(({ repo, branchHint }) => {
     const dirName = pickDirName({ repoUrl: repo.url, existing: dirNames });
     dirNames.add(dirName);
     return {
       repo,
-      branch,
+      branchHint,
       dirName,
       path: workspaceRepoDirPath(ctx.dataDir, workspaceId, dirName)
     };
@@ -159,18 +148,42 @@ export async function createWorkspace(
   try {
     for (const item of workItems) {
       await withRepoLock(item.repo.id, async () => {
+        // 强一致：clone 前先把 mirror 更新到最新（需要凭证时使用 repo 绑定/默认凭证）。
+        const gitEnv = await buildGitEnv({ ctx, repoUrl: item.repo.url, credentialId: item.repo.credentialId });
         try {
+          await ensureRepoMirror({
+            repoId: item.repo.id,
+            url: item.repo.url,
+            dataDir: ctx.dataDir,
+            mirrorPath: item.repo.mirrorPath,
+            env: gitEnv.env
+          });
+
+          // 分支“真相”来自最新 mirror：优先 defaultBranch，否则从 origin/HEAD 推断。
+          let branch = item.branchHint;
+          if (!branch) {
+            branch = String((await getOriginDefaultBranch({ mirrorPath: item.repo.mirrorPath, cwd: ctx.dataDir })) || "").trim();
+          }
+          if (!branch) throw new HttpError(409, `Repo default branch is unknown: ${item.repo.url}`, "REPO_DEFAULT_BRANCH_UNKNOWN");
+
+          const branches = await listHeadsBranches({ mirrorPath: item.repo.mirrorPath, cwd: ctx.dataDir });
+          if (!branches.some((b) => b.name === branch)) {
+            throw new HttpError(409, `Branch not found: ${branch}`, "REPO_BRANCH_NOT_FOUND");
+          }
+
           await cloneFromMirror({
             mirrorPath: item.repo.mirrorPath,
             repoUrl: item.repo.url,
             worktreePath: item.path,
-            branch: item.branch,
+            branch,
             dataDir: ctx.dataDir
           });
         } catch (err) {
           if (err instanceof HttpError) throw err;
           const msg = err instanceof Error ? err.message : String(err);
-          throw new HttpError(409, `Failed to clone repo into workspace: ${item.repo.url}. ${msg}`, "WORKSPACE_CLONE_FAILED");
+          throw new HttpError(409, `Failed to prepare workspace repo: ${item.repo.url}. ${msg}`, "WORKSPACE_PREPARE_REPO_FAILED");
+        } finally {
+          await gitEnv.cleanup();
         }
       });
       createdPaths.push(item.path);
