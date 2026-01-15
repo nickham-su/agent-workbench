@@ -6,7 +6,7 @@ import {
   UpdateWorkspaceRequestSchema,
   WorkspaceDetailSchema
 } from "@agent-workbench/shared";
-import { createWorkspace, deleteWorkspace, getWorkspaceDetailById, listWorkspaceDetails, updateWorkspaceTitleById } from "./workspace.service.js";
+import { createWorkspace, deleteWorkspace, getWorkspaceDetailById, listWorkspaceDetails, updateWorkspaceById } from "./workspace.service.js";
 
 export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppContext) {
   app.get(
@@ -55,13 +55,16 @@ export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppCon
       schema: {
         tags: ["workspaces"],
         body: UpdateWorkspaceRequestSchema,
-        response: { 200: WorkspaceDetailSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema }
+        response: { 200: WorkspaceDetailSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema, 409: ErrorResponseSchema }
       }
     },
     async (req) => {
       const params = req.params as { workspaceId: string };
-      const body = req.body as { title: string };
-      return updateWorkspaceTitleById(ctx, app.log, params.workspaceId, body.title);
+      const body = req.body as { title?: string; useTerminalCredential?: boolean };
+      return updateWorkspaceById(ctx, app.log, params.workspaceId, {
+        title: body.title,
+        useTerminalCredential: body.useTerminalCredential
+      });
     }
   );
 

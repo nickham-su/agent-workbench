@@ -22,6 +22,7 @@ import {
   insertWorkspaceRepo,
   listWorkspaceRepos,
   listWorkspaces,
+  updateWorkspaceTerminalCredentialId,
   updateWorkspaceTitle
 } from "./workspace.store.js";
 import {
@@ -254,6 +255,7 @@ function buildWorkspaceDetail(
     id: ws.id,
     title: ws.title,
     repos,
+    useTerminalCredential: Boolean(ws.terminalCredentialId),
     terminalCount,
     createdAt: ws.createdAt,
     updatedAt: ws.updatedAt
@@ -275,17 +277,43 @@ export function listWorkspaceDetails(ctx: AppContext): WorkspaceDetail[] {
   return workspaces.map((ws) => buildWorkspaceDetail(ctx, ws, terminalCounts[ws.id] ?? 0));
 }
 
-export async function updateWorkspaceTitleById(
+export async function updateWorkspaceById(
   ctx: AppContext,
   logger: FastifyBaseLogger,
   workspaceId: string,
-  titleRaw: string
+  params: { title?: string; useTerminalCredential?: boolean }
 ) {
   const ws = await getWorkspaceById(ctx, workspaceId);
-  const title = String(titleRaw || "").trim();
-  if (!title) throw new HttpError(400, "title is required");
-  updateWorkspaceTitle(ctx.db, ws.id, title, nowMs());
-  logger.info({ workspaceId: ws.id }, "workspace title updated");
+  const wantsTitleUpdate = params.title !== undefined;
+  const wantsTerminalCredentialUpdate = params.useTerminalCredential !== undefined;
+  if (!wantsTitleUpdate && !wantsTerminalCredentialUpdate) throw new HttpError(400, "No fields to update");
+
+  const title = wantsTitleUpdate ? String(params.title || "").trim() : null;
+  if (wantsTitleUpdate && !title) throw new HttpError(400, "title is required");
+
+  // 仅影响之后新创建的终端会话：已存在的 tmux session 环境变量不会被 retroactive 修改。
+  const terminalCredentialId = wantsTerminalCredentialUpdate
+    ? resolveTerminalCredentialId({
+        repoCredentialIds: listWorkspaceRepos(ctx.db, ws.id).map((r) => getRepo(ctx.db, r.repoId)?.credentialId ?? null),
+        useTerminalCredential: Boolean(params.useTerminalCredential)
+      })
+    : null;
+  if (params.useTerminalCredential && wantsTerminalCredentialUpdate && !terminalCredentialId) {
+    throw new HttpError(409, "No shared credential available for terminal");
+  }
+
+  const ts = nowMs();
+  ctx.db.transaction(() => {
+    if (wantsTitleUpdate && title) updateWorkspaceTitle(ctx.db, ws.id, title, ts);
+    if (wantsTerminalCredentialUpdate) {
+      updateWorkspaceTerminalCredentialId(ctx.db, ws.id, params.useTerminalCredential ? terminalCredentialId : null, ts);
+    }
+  })();
+
+  logger.info(
+    { workspaceId: ws.id, updatedTitle: wantsTitleUpdate, updatedTerminalCredential: wantsTerminalCredentialUpdate },
+    "workspace updated"
+  );
   return getWorkspaceDetailById(ctx, ws.id);
 }
 

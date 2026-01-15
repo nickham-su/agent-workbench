@@ -26,6 +26,7 @@ export const WorkspaceDetailSchema = Type.Object(
     id: Type.String(),
     title: Type.String(),
     repos: Type.Array(WorkspaceRepoSchema),
+    useTerminalCredential: Type.Boolean(),
     terminalCount: Type.Number(),
     createdAt: Type.Number(),
     updatedAt: Type.Number()
@@ -44,7 +45,9 @@ export type CreateWorkspaceRequest = Static<typeof CreateWorkspaceRequestSchema>
 
 export const UpdateWorkspaceRequestSchema = Type.Object(
   {
-    title: Type.String({ minLength: 1 })
-  }
+    title: Type.Optional(Type.String({ minLength: 1 })),
+    useTerminalCredential: Type.Optional(Type.Boolean())
+  },
+  { minProperties: 1 }
 );
 export type UpdateWorkspaceRequest = Static<typeof UpdateWorkspaceRequestSchema>;

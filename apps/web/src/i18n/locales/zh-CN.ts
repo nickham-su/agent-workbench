@@ -68,7 +68,8 @@ export default {
       gitUrlPlaceholder: "https://github.com/org/repo.git 或 git{at}github.com:org/repo.git",
       credentialLabel: "凭证（可选）",
       credentialPlaceholder: "选择凭证（私有仓库推荐选择）",
-      credentialHelp: "若未选择，将尝试按 URL host 自动匹配默认凭证；仍失败时可到 设置/凭证 配置。",
+      credentialHelpPrefix: "私有仓库访问失败？去设置配置：",
+      credentialHelpSuffix: "",
       credentialHostMismatch: "URL host 为 {urlHost}，所选凭证 host 为 {credHost}，请改选匹配 host 的凭证。",
       credentialKindMismatch: "URL 协议为 {urlKind}，所选凭证类型为 {credKind}，请切换 URL 或选择匹配的凭证。"
     },
@@ -103,7 +104,7 @@ export default {
     empty: "暂无工作区",
     actions: {
       create: "创建工作区",
-      rename: "重命名",
+      rename: "编辑",
       delete: "删除"
     },
     tooltip: {
@@ -121,9 +122,10 @@ export default {
       defaultBranchUnknown: "无法确定默认分支，请先同步仓库"
     },
     rename: {
-      modalTitle: "重命名工作区",
+      modalTitle: "编辑工作区",
       titleLabel: "标题",
-      titlePlaceholder: "输入新的工作区标题"
+      titlePlaceholder: "输入新的工作区标题",
+      terminalCredentialAffectsNewOnly: "仅影响之后新创建的终端；已存在终端需关闭后重新打开才会生效"
     },
     deleteConfirm: {
       title: "确认删除工作区？",

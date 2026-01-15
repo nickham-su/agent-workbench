@@ -53,7 +53,7 @@
               :aria-label="t('workspaces.actions.rename')"
             >
               <template #icon>
-                <FormOutlined />
+                <EditOutlined />
               </template>
             </a-button>
             <a-button
@@ -126,6 +126,18 @@
         <a-form-item :label="t('workspaces.rename.titleLabel')" required>
           <a-input v-model:value="editTitle" :placeholder="t('workspaces.rename.titlePlaceholder')" />
         </a-form-item>
+
+        <a-form-item v-if="editTerminalCredentialState === 'available'" :label="t('workspaces.create.terminalCredentialLabel')">
+          <a-checkbox v-model:checked="editUseTerminalCredential">
+            {{ t("workspaces.create.terminalCredentialHelp") }}
+          </a-checkbox>
+          <div class="text-[11px] text-[color:var(--text-tertiary)] pt-1">
+            {{ t("workspaces.rename.terminalCredentialAffectsNewOnly") }}
+          </div>
+        </a-form-item>
+        <div v-else-if="editTerminalCredentialState === 'unavailable'" class="text-[11px] text-[color:var(--text-tertiary)] pb-2">
+          {{ t("workspaces.create.terminalCredentialUnavailable") }}
+        </div>
       </a-form>
     </a-modal>
   </div>
@@ -133,11 +145,11 @@
 
 <script setup lang="ts">
 import { Modal, message } from "ant-design-vue";
-import { DeleteOutlined, FormOutlined, PlusOutlined } from "@ant-design/icons-vue";
+import { DeleteOutlined, EditOutlined, PlusOutlined } from "@ant-design/icons-vue";
 import { computed, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
-import type { RepoRecord, WorkspaceDetail } from "@agent-workbench/shared";
+import type { RepoRecord, UpdateWorkspaceRequest, WorkspaceDetail } from "@agent-workbench/shared";
 import { createWorkspace, deleteWorkspace, listWorkspaces, updateWorkspace } from "../services/api";
 import { useReposState } from "../state/repos";
 
@@ -158,6 +170,7 @@ const editOpen = ref(false);
 const renaming = ref(false);
 const editTitle = ref("");
 const editingWorkspace = ref<WorkspaceDetail | null>(null);
+const editUseTerminalCredential = ref(false);
 
 const router = useRouter();
 
@@ -212,6 +225,22 @@ const terminalCredentialState = computed<"none" | "available" | "unavailable">((
   if (selectedRepos.value.length === 0) return "none";
   const ids = selectedRepos.value.map((r) => r.credentialId ?? "").filter(Boolean);
   // 选中的仓库都未绑定凭证：终端无需提供凭证开关与提示
+  if (ids.length === 0) return "none";
+  const uniq = new Set(ids);
+  if (uniq.size !== 1) return "unavailable";
+  return "available";
+});
+
+const editingRepos = computed(() => {
+  const ws = editingWorkspace.value;
+  if (!ws) return [] as RepoRecord[];
+  return ws.repos
+    .map((r) => repos.value.find((x) => x.id === r.repo.id))
+    .filter((x): x is RepoRecord => Boolean(x));
+});
+
+const editTerminalCredentialState = computed<"none" | "available" | "unavailable">(() => {
+  const ids = editingRepos.value.map((r) => r.credentialId ?? "").filter(Boolean);
   if (ids.length === 0) return "none";
   const uniq = new Set(ids);
   if (uniq.size !== 1) return "unavailable";
@@ -285,6 +314,7 @@ function openWorkspace(workspaceId: string) {
 function openEdit(ws: WorkspaceDetail) {
   editingWorkspace.value = ws;
   editTitle.value = ws.title || "";
+  editUseTerminalCredential.value = Boolean(ws.useTerminalCredential);
   editOpen.value = true;
 }
 
@@ -294,7 +324,11 @@ async function submitRename() {
   if (!title) return;
   renaming.value = true;
   try {
-    await updateWorkspace(editingWorkspace.value.id, { title });
+    const body: UpdateWorkspaceRequest = { title };
+    if (editTerminalCredentialState.value === "available") {
+      body.useTerminalCredential = editUseTerminalCredential.value;
+    }
+    await updateWorkspace(editingWorkspace.value.id, body);
     editOpen.value = false;
     editingWorkspace.value = null;
     await refresh();

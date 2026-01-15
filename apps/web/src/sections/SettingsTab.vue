@@ -93,8 +93,25 @@
                 </div>
               </div>
               <div class="shrink-0 flex items-center gap-1 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity">
-                <a-button size="small" type="text" @click="openEditCredential(c)">{{ t("settings.credentials.actions.edit") }}</a-button>
-                <a-button size="small" type="text" danger @click="confirmDeleteCredential(c)">{{ t("settings.credentials.actions.delete") }}</a-button>
+                <a-button
+                  size="small"
+                  type="text"
+                  @click="openEditCredential(c)"
+                  :title="t('settings.credentials.actions.edit')"
+                  :aria-label="t('settings.credentials.actions.edit')"
+                >
+                  <template #icon><EditOutlined /></template>
+                </a-button>
+                <a-button
+                  size="small"
+                  type="text"
+                  danger
+                  @click="confirmDeleteCredential(c)"
+                  :title="t('settings.credentials.actions.delete')"
+                  :aria-label="t('settings.credentials.actions.delete')"
+                >
+                  <template #icon><DeleteOutlined /></template>
+                </a-button>
               </div>
             </div>
           </div>
@@ -234,8 +251,10 @@
 
 <script setup lang="ts">
 import { Modal, message } from "ant-design-vue";
+import { DeleteOutlined, EditOutlined } from "@ant-design/icons-vue";
 import type { CredentialKind, CredentialRecord, SecurityStatus } from "@agent-workbench/shared";
 import { computed, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 import { diffFontSize, setDiffFontSize, setTerminalFontSize, terminalFontSize, uiFontSizeDefaults } from "../settings/uiFontSizes";
 import {
@@ -256,7 +275,26 @@ import { getInitialLocale, setStoredLocale, type AppLocale } from "../i18n/local
 
 const { t, locale } = useI18n();
 
-const innerKey = ref<"general" | "gitIdentity" | "credentials" | "network" | "security">("general");
+const route = useRoute();
+const router = useRouter();
+
+const settingsTabKeys = ["general", "gitIdentity", "credentials", "network", "security"] as const;
+type SettingsTabKey = (typeof settingsTabKeys)[number];
+
+function normalizeSettingsTabKey(v: unknown): SettingsTabKey {
+  const raw = Array.isArray(v) ? v[0] : v;
+  const k = String(raw ?? "");
+  if ((settingsTabKeys as readonly string[]).includes(k)) return k as SettingsTabKey;
+  return "general";
+}
+
+// 二级 tabs 与 URL 同步：/settings/<tab>
+const innerKey = computed<SettingsTabKey>({
+  get: () => normalizeSettingsTabKey(route.params.tab),
+  set: (k) => {
+    void router.push(`/settings/${k}`);
+  }
+});
 
 const uiLocale = ref<AppLocale>(getInitialLocale());
 const languageOptions = computed(() => [
@@ -603,6 +641,7 @@ watch(
     else if (k === "credentials") await refreshCredentials();
     else if (k === "network") await refreshNetwork();
     else if (k === "security") await refreshSecurity();
-  }
+  },
+  { immediate: true }
 );
 </script>

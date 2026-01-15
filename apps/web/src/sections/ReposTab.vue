@@ -87,7 +87,15 @@
             </a-select-option>
           </a-select>
           <div class="pt-1 text-[11px] text-[color:var(--text-tertiary)]">
-            {{ t("repos.create.credentialHelp") }}
+            {{ t("repos.create.credentialHelpPrefix") }}
+            <a-button size="small" type="link" class="!text-[11px] !p-0" @click="openSettingsFromCreate('credentials')">
+              {{ t("settings.tabs.credentials") }}
+            </a-button>
+            <span class="text-[color:var(--text-tertiary)]">/</span>
+            <a-button size="small" type="link" class="!text-[11px] !p-0" @click="openSettingsFromCreate('network')">
+              {{ t("settings.tabs.network") }}
+            </a-button>
+            {{ t("repos.create.credentialHelpSuffix") }}
           </div>
         </a-form-item>
       </a-form>
@@ -126,12 +134,14 @@ import { Modal, message } from "ant-design-vue";
 import { DeleteOutlined, EditOutlined, PlusOutlined, SyncOutlined } from "@ant-design/icons-vue";
 import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import { useRouter } from "vue-router";
 import type { CredentialRecord, RepoRecord } from "@agent-workbench/shared";
 import { createRepo, deleteRepo, listCredentials, syncRepo, updateRepo } from "../services/api";
 import { useReposState, waitRepoSettledOrThrow } from "../state/repos";
 import { extractGitHost, inferGitCredentialKindFromUrl } from "../utils/gitHost";
 
 const { t } = useI18n();
+const router = useRouter();
 
 const { repos, loading, refreshRepos } = useReposState();
 const credentials = ref<CredentialRecord[]>([]);
@@ -240,6 +250,11 @@ function openCreate() {
   createUrl.value = "";
   selectedCredentialId.value = undefined;
   createOpen.value = true;
+}
+
+function openSettingsFromCreate(tab: "credentials" | "network") {
+  createOpen.value = false;
+  void router.push(`/settings/${tab}`);
 }
 
 function openEdit(repo: RepoRecord) {

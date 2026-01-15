@@ -68,7 +68,8 @@ export default {
       gitUrlPlaceholder: "https://github.com/org/repo.git or git{at}github.com:org/repo.git",
       credentialLabel: "Credential (optional)",
       credentialPlaceholder: "Select credential (recommended for private repos)",
-      credentialHelp: "If not selected, it will try to pick the default credential by URL host; otherwise configure it in Settings/Credentials.",
+      credentialHelpPrefix: "Access failed? Configure in Settings: ",
+      credentialHelpSuffix: "",
       credentialHostMismatch: "URL host is {urlHost}, but the selected credential host is {credHost}. Please pick a credential for the same host.",
       credentialKindMismatch: "URL protocol is {urlKind}, but the selected credential type is {credKind}. Switch the URL or pick a matching credential."
     },

@@ -43,14 +43,14 @@ const router = useRouter();
 
 const activeKey = computed<"workspaces" | "repos" | "settings">(() => {
   const path = String(route.path || "");
-  if (path === "/repos") return "repos";
-  if (path === "/settings") return "settings";
+  if (path === "/repos" || path.startsWith("/repos/")) return "repos";
+  if (path === "/settings" || path.startsWith("/settings/")) return "settings";
   return "workspaces";
 });
 
 function onTabChange(key: string) {
   if (key === "repos") void router.push("/repos");
-  else if (key === "settings") void router.push("/settings");
+  else if (key === "settings") void router.push("/settings/general");
   else void router.push("/workspaces");
 }
 </script>
