@@ -335,7 +335,7 @@ const tools = computed<ToolDefinition[]>(() => [
     view: TerminalToolView,
     defaultArea: "leftBottom",
     allowedAreas: ["leftBottom", "leftTop", "rightTop"],
-    keepAlive: false
+    keepAlive: true
   }
 ]);
 
