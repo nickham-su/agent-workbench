@@ -26,6 +26,8 @@ export default defineConfig(({ mode }) => {
       __DEV_API_TARGET__: JSON.stringify(devApiOrigin)
     },
     server: {
+      // 允许局域网/外部设备访问（等价于监听 0.0.0.0）
+      host: true,
       port: devWebPort,
       proxy: {
         "/api": {
