@@ -129,6 +129,9 @@ npm run dev
 **本地环境变量**
 
 - 复制 `.env.example` 为 `.env.local`，按需修改变量
+  - `PORT`：后端监听端口（默认 `4310`）
+  - `DEV_WEB_PORT`：仅前端开发期（Vite dev server）使用：前端 dev server 端口（可选）
+  - `DEV_API_ORIGIN`：仅前端开发期使用：前端 dev proxy 的后端目标地址（可选；默认 `http://127.0.0.1:${PORT}`）
 
 **其他脚本**
 

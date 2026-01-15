@@ -23,6 +23,7 @@ export type DiffViewerLayout = {
 };
 
 export type MonacoDiffViewerExposed = {
+  goToFirstDiff: () => void;
   goToPreviousDiff: () => void;
   goToNextDiff: () => void;
 };
@@ -39,6 +40,7 @@ let modifiedModel: monaco.editor.ITextModel | null = null;
 let disposables: monaco.IDisposable[] = [];
 let layoutRaf = 0;
 let stopWatchFontSize: (() => void) | null = null;
+let pendingRevealFirstDiff = false;
 
 function normalizeLanguage(lang?: string) {
   if (!lang) return undefined;
@@ -113,6 +115,28 @@ function goToPreviousDiff() {
   revealAnchor(next);
 }
 
+function revealFirstDiff() {
+  if (!editor) return "notReady" as const;
+  const changes = editor.getLineChanges();
+  if (!changes) return "notReady" as const;
+  if (changes.length === 0) return "noChanges" as const;
+
+  const anchors = changes
+    .map(toAnchor)
+    .filter((a): a is DiffAnchor => !!a)
+    .sort((a, b) => a.line - b.line);
+  if (anchors.length === 0) return "noChanges" as const;
+
+  revealAnchor(anchors[0]!);
+  return "done" as const;
+}
+
+function goToFirstDiff() {
+  pendingRevealFirstDiff = true;
+  const result = revealFirstDiff();
+  if (result !== "notReady") pendingRevealFirstDiff = false;
+}
+
 function goToNextDiff() {
   if (!editor) return;
   const changes = editor.getLineChanges() || [];
@@ -131,6 +155,7 @@ function goToNextDiff() {
 }
 
 defineExpose<MonacoDiffViewerExposed>({
+  goToFirstDiff,
   goToPreviousDiff,
   goToNextDiff
 });
@@ -226,10 +251,17 @@ onMounted(() => {
     hideCursorInOverviewRuler: true
   });
 
+  const handleDiffUpdated = () => {
+    scheduleEmitLayout();
+    if (!pendingRevealFirstDiff) return;
+    pendingRevealFirstDiff = false;
+    revealFirstDiff();
+  };
+
   disposables = [
     originalEditor.onDidLayoutChange(scheduleEmitLayout),
     modifiedEditor.onDidLayoutChange(scheduleEmitLayout),
-    editor.onDidUpdateDiff(scheduleEmitLayout)
+    editor.onDidUpdateDiff(handleDiffUpdated)
   ];
   window.addEventListener("resize", scheduleEmitLayout, {passive: true});
 
@@ -256,6 +288,7 @@ watch(
 onBeforeUnmount(() => {
   if (layoutRaf) cancelAnimationFrame(layoutRaf);
   layoutRaf = 0;
+  pendingRevealFirstDiff = false;
   window.removeEventListener("resize", scheduleEmitLayout);
   stopWatchFontSize?.();
   stopWatchFontSize = null;

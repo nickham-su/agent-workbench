@@ -328,7 +328,7 @@
 </template>
 
 <script setup lang="ts">
-import {computed, onMounted, onUnmounted, ref, watch} from "vue";
+import {computed, nextTick, onMounted, onUnmounted, ref, watch} from "vue";
 import {Modal, message} from "ant-design-vue";
 import {
   CopyOutlined,
@@ -512,7 +512,7 @@ const compareLoading = ref(false);
 const compareError = ref<string | null>(null);
 const compare = ref<FileCompareResponse | null>(null);
 const diffHeaderVars = ref<Record<string, string>>({});
-const diffViewerRef = ref<{ goToPreviousDiff: () => void; goToNextDiff: () => void } | null>(null);
+const diffViewerRef = ref<{ goToFirstDiff: () => void; goToPreviousDiff: () => void; goToNextDiff: () => void } | null>(null);
 let compareReqSeq = 0;
 
 const unstagedFiles = computed(() => unstaged.value);
@@ -915,7 +915,15 @@ async function refreshCompare() {
 }
 
 watch(selected, async () => {
+  const selectionKey = selected.value ? `${selected.value.mode}|${selected.value.path}|${selected.value.oldPath || ""}` : null;
   await refreshCompare();
+  if (!selectionKey) return;
+  const latestKey = selected.value ? `${selected.value.mode}|${selected.value.path}|${selected.value.oldPath || ""}` : null;
+  if (latestKey !== selectionKey) return;
+  const c = compare.value;
+  if (!c || !c.base.previewable || !c.current.previewable) return;
+  await nextTick();
+  diffViewerRef.value?.goToFirstDiff();
 });
 
 const pollIntervalMs = 5000;

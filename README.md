@@ -132,6 +132,9 @@ npm run dev
 **Local env**
 
 - Copy `.env.example` to `.env.local` and adjust variables as needed
+  - `PORT`: backend listen port (default: `4310`)
+  - `DEV_WEB_PORT`: Vite dev server port (optional)
+  - `DEV_API_ORIGIN`: dev proxy target (optional, default: `http://127.0.0.1:${PORT}`)
 
 **Scripts**
 
