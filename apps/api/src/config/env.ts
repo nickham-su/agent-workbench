@@ -14,7 +14,7 @@ export type Env = {
 export function loadEnv(processEnv: NodeJS.ProcessEnv): Env {
   const dataDir = processEnv.DATA_DIR?.trim() || ".data";
   const host = processEnv.HOST?.trim() || "127.0.0.1";
-  const portRaw = processEnv.PORT?.trim() || processEnv.API_PORT?.trim() || "4310";
+  const portRaw = processEnv.PORT?.trim() || "4310";
   const fileMaxBytesRaw = processEnv.FILE_MAX_BYTES?.trim() || "1048576";
   const serveWebRaw = processEnv.SERVE_WEB?.trim() || "";
   const webDistDirRaw = processEnv.WEB_DIST_DIR?.trim() || "";
@@ -23,7 +23,7 @@ export function loadEnv(processEnv: NodeJS.ProcessEnv): Env {
 
   const port = Number.parseInt(portRaw, 10);
   if (!Number.isFinite(port) || port <= 0) {
-    throw new Error(`Invalid PORT/API_PORT: ${portRaw}`);
+    throw new Error(`Invalid PORT: ${portRaw}`);
   }
 
   const fileMaxBytes = Number.parseInt(fileMaxBytesRaw, 10);

@@ -67,10 +67,12 @@
 - `DATA_DIR`
   - 默认 `.data`，后端会 `path.resolve` 成绝对路径
   - 数据目录结构由 `apps/api/src/infra/fs/paths.ts` 统一拼接（例如 `db.sqlite`、`repos/`、`workspaces/`）
-- `HOST`、`PORT`/`API_PORT`
+- `HOST`、`PORT`
   - 后端监听地址与端口
-- `VITE_API_TARGET`
-  - 开发态覆盖后端目标地址（默认会回退到 `http://127.0.0.1:<API_PORT|PORT|4310>`）
+- `DEV_WEB_PORT`
+  - 仅前端开发期（Vite dev server）使用：前端 dev server 监听端口
+- `DEV_API_ORIGIN`
+  - 仅前端开发期使用：前端 dev proxy 的后端目标地址（不设则回退到 `http://127.0.0.1:<PORT|4310>`）
 - `FILE_MAX_BYTES`
   - 后端用于文件内容读取/对比的大小阈值
 - `MAX_TERMINALS`
