@@ -7,11 +7,13 @@ import type { AppContext } from "../../app/context.js";
 import { newId } from "../../utils/ids.js";
 import { nowMs } from "../../utils/time.js";
 import { getRepo } from "../repos/repo.store.js";
-import { listHeadsBranches } from "../../infra/git/refs.js";
+import { getOriginDefaultBranch, listHeadsBranches } from "../../infra/git/refs.js";
 import { withRepoLock } from "../../infra/locks/repoLock.js";
 import { cloneFromMirror } from "../../infra/git/clone.js";
 import { ensureDir, rmrf } from "../../infra/fs/fs.js";
 import { workspaceRepoDirPath, workspaceRoot } from "../../infra/fs/paths.js";
+import { ensureRepoMirror } from "../../infra/git/mirror.js";
+import { buildGitEnv } from "../../infra/git/gitEnv.js";
 import {
   deleteWorkspaceRecord,
   deleteWorkspaceReposByWorkspace,
@@ -20,6 +22,7 @@ import {
   insertWorkspaceRepo,
   listWorkspaceRepos,
   listWorkspaces,
+  updateWorkspaceTerminalCredentialId,
   updateWorkspaceTitle
 } from "./workspace.store.js";
 import {
@@ -93,10 +96,12 @@ function buildDefaultWorkspaceTitle(repoUrls: string[]) {
 
 function resolveTerminalCredentialId(params: { repoCredentialIds: Array<string | null>; useTerminalCredential?: boolean }) {
   if (!params.useTerminalCredential) return null;
-  const uniq = new Set(params.repoCredentialIds.map((id) => id ?? ""));
+  // 允许“有凭证 repo + 无凭证 repo”的组合：只要所有非空 credentialId 相同即可。
+  const ids = params.repoCredentialIds.map((id) => String(id ?? "").trim()).filter(Boolean);
+  if (ids.length === 0) return null;
+  const uniq = new Set(ids);
   if (uniq.size !== 1) return null;
-  const id = Array.from(uniq)[0];
-  return id || null;
+  return ids[0]!;
 }
 
 export async function createWorkspace(
@@ -112,29 +117,20 @@ export async function createWorkspace(
   const repos = repoIds.map((repoId) => {
     const repo = getRepo(ctx.db, repoId);
     if (!repo) throw new HttpError(404, `Repo not found: ${repoId}`);
-    if (repo.syncStatus === "syncing") throw new HttpError(409, `Repo is syncing: ${repo.url}`);
-    if (repo.syncStatus === "failed") throw new HttpError(409, `Repo sync failed: ${repo.url}. Retry sync first.`);
-    const branch = String(repo.defaultBranch || "").trim();
-    if (!branch) throw new HttpError(409, `Repo default branch is unknown: ${repo.url}`);
-    return { repo, branch };
+    // 强一致：创建 workspace 时会强制更新 mirror，因此这里不再依赖历史的 syncStatus/defaultBranch。
+    const branchHint = String(repo.defaultBranch || "").trim();
+    return { repo, branchHint };
   });
-
-  for (const { repo, branch } of repos) {
-    const branches = await listHeadsBranches({ mirrorPath: repo.mirrorPath, cwd: ctx.dataDir });
-    if (!branches.some((b) => b.name === branch)) {
-      throw new HttpError(409, `Branch not found: ${branch}`);
-    }
-  }
 
   const dirNames = new Set<string>();
   const workspaceId = newId("ws");
   const workspacePath = workspaceRoot(ctx.dataDir, workspaceId);
-  const workItems = repos.map(({ repo, branch }) => {
+  const workItems = repos.map(({ repo, branchHint }) => {
     const dirName = pickDirName({ repoUrl: repo.url, existing: dirNames });
     dirNames.add(dirName);
     return {
       repo,
-      branch,
+      branchHint,
       dirName,
       path: workspaceRepoDirPath(ctx.dataDir, workspaceId, dirName)
     };
@@ -153,13 +149,43 @@ export async function createWorkspace(
   try {
     for (const item of workItems) {
       await withRepoLock(item.repo.id, async () => {
-        await cloneFromMirror({
-          mirrorPath: item.repo.mirrorPath,
-          repoUrl: item.repo.url,
-          worktreePath: item.path,
-          branch: item.branch,
-          dataDir: ctx.dataDir
-        });
+        // 强一致：clone 前先把 mirror 更新到最新（需要凭证时使用 repo 绑定/默认凭证）。
+        const gitEnv = await buildGitEnv({ ctx, repoUrl: item.repo.url, credentialId: item.repo.credentialId });
+        try {
+          await ensureRepoMirror({
+            repoId: item.repo.id,
+            url: item.repo.url,
+            dataDir: ctx.dataDir,
+            mirrorPath: item.repo.mirrorPath,
+            env: gitEnv.env
+          });
+
+          // 分支“真相”来自最新 mirror：优先 defaultBranch，否则从 origin/HEAD 推断。
+          let branch = item.branchHint;
+          if (!branch) {
+            branch = String((await getOriginDefaultBranch({ mirrorPath: item.repo.mirrorPath, cwd: ctx.dataDir })) || "").trim();
+          }
+          if (!branch) throw new HttpError(409, `Repo default branch is unknown: ${item.repo.url}`, "REPO_DEFAULT_BRANCH_UNKNOWN");
+
+          const branches = await listHeadsBranches({ mirrorPath: item.repo.mirrorPath, cwd: ctx.dataDir });
+          if (!branches.some((b) => b.name === branch)) {
+            throw new HttpError(409, `Branch not found: ${branch}`, "REPO_BRANCH_NOT_FOUND");
+          }
+
+          await cloneFromMirror({
+            mirrorPath: item.repo.mirrorPath,
+            repoUrl: item.repo.url,
+            worktreePath: item.path,
+            branch,
+            dataDir: ctx.dataDir
+          });
+        } catch (err) {
+          if (err instanceof HttpError) throw err;
+          const msg = err instanceof Error ? err.message : String(err);
+          throw new HttpError(409, `Failed to prepare workspace repo: ${item.repo.url}. ${msg}`, "WORKSPACE_PREPARE_REPO_FAILED");
+        } finally {
+          await gitEnv.cleanup();
+        }
       });
       createdPaths.push(item.path);
     }
@@ -229,6 +255,7 @@ function buildWorkspaceDetail(
     id: ws.id,
     title: ws.title,
     repos,
+    useTerminalCredential: Boolean(ws.terminalCredentialId),
     terminalCount,
     createdAt: ws.createdAt,
     updatedAt: ws.updatedAt
@@ -250,17 +277,43 @@ export function listWorkspaceDetails(ctx: AppContext): WorkspaceDetail[] {
   return workspaces.map((ws) => buildWorkspaceDetail(ctx, ws, terminalCounts[ws.id] ?? 0));
 }
 
-export async function updateWorkspaceTitleById(
+export async function updateWorkspaceById(
   ctx: AppContext,
   logger: FastifyBaseLogger,
   workspaceId: string,
-  titleRaw: string
+  params: { title?: string; useTerminalCredential?: boolean }
 ) {
   const ws = await getWorkspaceById(ctx, workspaceId);
-  const title = String(titleRaw || "").trim();
-  if (!title) throw new HttpError(400, "title is required");
-  updateWorkspaceTitle(ctx.db, ws.id, title, nowMs());
-  logger.info({ workspaceId: ws.id }, "workspace title updated");
+  const wantsTitleUpdate = params.title !== undefined;
+  const wantsTerminalCredentialUpdate = params.useTerminalCredential !== undefined;
+  if (!wantsTitleUpdate && !wantsTerminalCredentialUpdate) throw new HttpError(400, "No fields to update");
+
+  const title = wantsTitleUpdate ? String(params.title || "").trim() : null;
+  if (wantsTitleUpdate && !title) throw new HttpError(400, "title is required");
+
+  // 仅影响之后新创建的终端会话：已存在的 tmux session 环境变量不会被 retroactive 修改。
+  const terminalCredentialId = wantsTerminalCredentialUpdate
+    ? resolveTerminalCredentialId({
+        repoCredentialIds: listWorkspaceRepos(ctx.db, ws.id).map((r) => getRepo(ctx.db, r.repoId)?.credentialId ?? null),
+        useTerminalCredential: Boolean(params.useTerminalCredential)
+      })
+    : null;
+  if (params.useTerminalCredential && wantsTerminalCredentialUpdate && !terminalCredentialId) {
+    throw new HttpError(409, "No shared credential available for terminal");
+  }
+
+  const ts = nowMs();
+  ctx.db.transaction(() => {
+    if (wantsTitleUpdate && title) updateWorkspaceTitle(ctx.db, ws.id, title, ts);
+    if (wantsTerminalCredentialUpdate) {
+      updateWorkspaceTerminalCredentialId(ctx.db, ws.id, params.useTerminalCredential ? terminalCredentialId : null, ts);
+    }
+  })();
+
+  logger.info(
+    { workspaceId: ws.id, updatedTitle: wantsTitleUpdate, updatedTerminalCredential: wantsTerminalCredentialUpdate },
+    "workspace updated"
+  );
   return getWorkspaceDetailById(ctx, ws.id);
 }
 
