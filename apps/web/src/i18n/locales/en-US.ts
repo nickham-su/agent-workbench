@@ -184,7 +184,8 @@ export default {
     },
     tools: {
       codeReview: "Code review",
-      terminal: "Terminal"
+      terminal: "Terminal",
+      files: "Files"
     },
     dock: {
       moveTo: "Move to {area}",
@@ -358,6 +359,68 @@ export default {
       disconnectedLine2: "If occupied, click “Take over”.",
       closed: "[Connection closed, exitCode={exitCode}]",
       error: "[Error] {message}"
+    }
+  },
+  files: {
+    title: "Files",
+    actions: {
+      newFile: "New file",
+      newFolder: "New folder",
+      rename: "Rename",
+      delete: "Delete",
+      refresh: "Refresh",
+      close: "Close"
+    },
+    status: {
+      saving: "Saving…"
+    },
+    placeholder: {
+      selectRepo: "Select a repo",
+      openFile: "Select a file on the left to open",
+      empty: "No files"
+    },
+    form: {
+      nameLabel: "Name",
+      namePlaceholder: "Enter name",
+      renamePlaceholder: "Enter new name",
+      nameRequired: "Name is required",
+      nameInvalid: "Name must not include / or \\"
+    },
+    createFile: {
+      title: "New file"
+    },
+    createFolder: {
+      title: "New folder"
+    },
+    rename: {
+      title: "Rename"
+    },
+    deleteConfirm: {
+      title: "Delete?",
+      content: "This will delete the selected file or folder.",
+      loadedHint: "Loaded items: {count}",
+      ok: "Delete",
+      cancel: "Cancel"
+    },
+    closeConfirm: {
+      title: "Close unsaved file?",
+      content: "This file has unsaved changes. Close anyway?",
+      ok: "Close",
+      cancel: "Cancel"
+    },
+    conflict: {
+      title: "Save conflict",
+      content: "The file was modified externally. Choose an action.",
+      reload: "Reload",
+      force: "Force overwrite"
+    },
+    preview: {
+      tooLarge: "File too large to preview",
+      binary: "Binary file, cannot preview",
+      decodeFailed: "Cannot decode file",
+      unsafePath: "Unsafe path",
+      missing: "File not found",
+      unavailable: "Preview unavailable"
     }
   },
   settings: {

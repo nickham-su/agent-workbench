@@ -182,7 +182,8 @@ export default {
     },
     tools: {
       codeReview: "代码审查",
-      terminal: "终端"
+      terminal: "终端",
+      files: "文件"
     },
     dock: {
       moveTo: "移动到 {area}",
@@ -356,6 +357,68 @@ export default {
       disconnectedLine2: "若提示被占用，可点击“接管连接”。",
       closed: "[连接已关闭，exitCode={exitCode}]",
       error: "[错误] {message}"
+    }
+  },
+  files: {
+    title: "文件",
+    actions: {
+      newFile: "新建文件",
+      newFolder: "新建文件夹",
+      rename: "重命名",
+      delete: "删除",
+      refresh: "刷新",
+      close: "关闭"
+    },
+    status: {
+      saving: "正在保存…"
+    },
+    placeholder: {
+      selectRepo: "请选择仓库",
+      openFile: "从左侧选择文件打开",
+      empty: "暂无文件"
+    },
+    form: {
+      nameLabel: "名称",
+      namePlaceholder: "输入名称",
+      renamePlaceholder: "输入新名称",
+      nameRequired: "请输入名称",
+      nameInvalid: "名称不能包含 / 或 \\"
+    },
+    createFile: {
+      title: "新建文件"
+    },
+    createFolder: {
+      title: "新建文件夹"
+    },
+    rename: {
+      title: "重命名"
+    },
+    deleteConfirm: {
+      title: "确认删除？",
+      content: "将删除所选文件或文件夹",
+      loadedHint: "已加载子项: {count}",
+      ok: "删除",
+      cancel: "取消"
+    },
+    closeConfirm: {
+      title: "关闭未保存的文件？",
+      content: "该文件有未保存修改，确认关闭？",
+      ok: "关闭",
+      cancel: "取消"
+    },
+    conflict: {
+      title: "保存冲突",
+      content: "文件已被外部修改，请选择操作",
+      reload: "重新加载",
+      force: "强制覆盖"
+    },
+    preview: {
+      tooLarge: "文件过大，暂不支持预览",
+      binary: "二进制文件，暂不支持预览",
+      decodeFailed: "文件无法解码，暂不支持预览",
+      unsafePath: "路径不安全，无法预览",
+      missing: "文件不存在",
+      unavailable: "无法预览"
     }
   },
   settings: {

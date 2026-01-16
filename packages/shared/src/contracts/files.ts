@@ -1,0 +1,151 @@
+import { Type } from "@sinclair/typebox";
+import type { Static } from "@sinclair/typebox";
+import { GitTargetSchema } from "./git.js";
+
+export const FileEntryKindSchema = Type.Union([Type.Literal("file"), Type.Literal("dir")]);
+export type FileEntryKind = Static<typeof FileEntryKindSchema>;
+
+export const FileEntrySchema = Type.Object(
+  {
+    name: Type.String(),
+    path: Type.String(),
+    kind: FileEntryKindSchema,
+    size: Type.Optional(Type.Number()),
+    mtimeMs: Type.Optional(Type.Number())
+  }
+);
+export type FileEntry = Static<typeof FileEntrySchema>;
+
+export const FileListRequestSchema = Type.Object(
+  {
+    target: GitTargetSchema,
+    dir: Type.String()
+  }
+);
+export type FileListRequest = Static<typeof FileListRequestSchema>;
+
+export const FileListResponseSchema = Type.Object(
+  {
+    dir: Type.String(),
+    entries: Type.Array(FileEntrySchema)
+  }
+);
+export type FileListResponse = Static<typeof FileListResponseSchema>;
+
+export const FileVersionSchema = Type.Object(
+  {
+    mtimeMs: Type.Number(),
+    size: Type.Number(),
+    hash: Type.Optional(Type.String())
+  }
+);
+export type FileVersion = Static<typeof FileVersionSchema>;
+
+export const FileReadRequestSchema = Type.Object(
+  {
+    target: GitTargetSchema,
+    path: Type.String({ minLength: 1 })
+  }
+);
+export type FileReadRequest = Static<typeof FileReadRequestSchema>;
+
+const FileReadReasonSchema = Type.Union([
+  Type.Literal("too_large"),
+  Type.Literal("binary"),
+  Type.Literal("decode_failed"),
+  Type.Literal("unsafe_path"),
+  Type.Literal("missing")
+]);
+
+export const FileReadResponseSchema = Type.Object(
+  {
+    path: Type.String(),
+    previewable: Type.Boolean(),
+    reason: Type.Optional(FileReadReasonSchema),
+    bytes: Type.Optional(Type.Number()),
+    content: Type.Optional(Type.String()),
+    language: Type.Optional(Type.String()),
+    version: Type.Optional(FileVersionSchema)
+  }
+);
+export type FileReadResponse = Static<typeof FileReadResponseSchema>;
+
+export const FileWriteRequestSchema = Type.Object(
+  {
+    target: GitTargetSchema,
+    path: Type.String({ minLength: 1 }),
+    content: Type.String(),
+    expected: Type.Optional(FileVersionSchema),
+    force: Type.Optional(Type.Boolean())
+  }
+);
+export type FileWriteRequest = Static<typeof FileWriteRequestSchema>;
+
+export const FileWriteResponseSchema = Type.Object(
+  {
+    path: Type.String(),
+    version: FileVersionSchema
+  }
+);
+export type FileWriteResponse = Static<typeof FileWriteResponseSchema>;
+
+export const FileCreateRequestSchema = Type.Object(
+  {
+    target: GitTargetSchema,
+    path: Type.String({ minLength: 1 }),
+    content: Type.Optional(Type.String())
+  }
+);
+export type FileCreateRequest = Static<typeof FileCreateRequestSchema>;
+
+export const FileCreateResponseSchema = FileWriteResponseSchema;
+export type FileCreateResponse = Static<typeof FileCreateResponseSchema>;
+
+export const FileMkdirRequestSchema = Type.Object(
+  {
+    target: GitTargetSchema,
+    path: Type.String({ minLength: 1 })
+  }
+);
+export type FileMkdirRequest = Static<typeof FileMkdirRequestSchema>;
+
+export const FileMkdirResponseSchema = Type.Object(
+  {
+    path: Type.String()
+  }
+);
+export type FileMkdirResponse = Static<typeof FileMkdirResponseSchema>;
+
+export const FileRenameRequestSchema = Type.Object(
+  {
+    target: GitTargetSchema,
+    from: Type.String({ minLength: 1 }),
+    to: Type.String({ minLength: 1 })
+  }
+);
+export type FileRenameRequest = Static<typeof FileRenameRequestSchema>;
+
+export const FileRenameResponseSchema = Type.Object(
+  {
+    from: Type.String(),
+    to: Type.String()
+  }
+);
+export type FileRenameResponse = Static<typeof FileRenameResponseSchema>;
+
+export const FileDeleteRequestSchema = Type.Object(
+  {
+    target: GitTargetSchema,
+    path: Type.String({ minLength: 1 }),
+    recursive: Type.Optional(Type.Boolean())
+  }
+);
+export type FileDeleteRequest = Static<typeof FileDeleteRequestSchema>;
+
+export const FileDeleteResponseSchema = Type.Object(
+  {
+    path: Type.String()
+  }
+);
+export type FileDeleteResponse = Static<typeof FileDeleteResponseSchema>;
+
