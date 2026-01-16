@@ -1,6 +1,6 @@
 # Agent Workbench
 
-A local development workbench for AI/CLI coding agents. Manage multiple workspaces and reconnectable terminals in a Web UI, supporting the full workflow: Agent execution → Change review → Commit & push.
+A remote development workbench for AI/CLI coding agents. Manage multiple workspaces and reconnectable terminals in a Web UI, supporting the full workflow: Agent execution → Change review → Commit & push.
 
 ## The Problem
 
