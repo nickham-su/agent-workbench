@@ -5,15 +5,15 @@
     </a-layout-header>
 
     <a-layout-content class="p-0">
-      <div class="h-[calc(100vh-64px)] bg-[var(--panel-bg)]">
+      <div class="h-[calc(100vh-48px)] bg-[var(--panel-bg)]">
         <a-tabs
           :activeKey="activeKey"
           size="small"
           :animated="false"
-          class="workbench-tabs"
+          class="workbench-tabs h-full"
           @update:activeKey="onTabChange"
         >
-          <a-tab-pane key="workspaces" :tab="t('workbench.tabs.workspaces')">
+          <a-tab-pane key="workspaces" :tab="t('workbench.tabs.workspaces')" class="h-full">
             <WorkspacesTab v-if="activeKey === 'workspaces'" />
           </a-tab-pane>
           <a-tab-pane key="repos" :tab="t('workbench.tabs.repos')">
@@ -62,5 +62,9 @@ function onTabChange(key: string) {
 
 .workbench-tabs :deep(.ant-tabs-content-holder) {
   padding: 0;
+}
+
+.workbench-tabs :deep(.ant-tabs-content) {
+  height: 100%;
 }
 </style>

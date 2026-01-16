@@ -55,7 +55,15 @@ export default {
     }
   },
   repos: {
-    empty: "No repos",
+    emptyGuide: {
+      title: "Add your first repo",
+      lead: "After you add a Git URL, Workbench maintains a local mirror for faster workspace creation and branch discovery",
+      autoSync: "You usually don't need to sync manually. Creating a workspace will sync to the latest automatically",
+      incremental: "Sync is incremental and is typically much faster than a full fetch from the remote each time",
+      supportPrefix: "Supports configuring ",
+      supportAnd: " and ",
+      supportSuffix: " in Settings"
+    },
     search: {
       placeholder: "Search repos (URL)",
       empty: "No matching repos"
@@ -105,7 +113,17 @@ export default {
     }
   },
   workspaces: {
-    empty: "No workspaces",
+    emptyGuide: {
+      title: "Create your first workspace",
+      lead: "A workspace is an isolated dev directory for running multiple tasks/agents in parallel, with reconnectable terminals",
+      flowPrefix: "Typical flow:",
+      flowCredNetPrefix: "Configure ",
+      flowRepoCredential: "Repo credentials",
+      flowCredNetAnd: " and ",
+      flowCredNetSuffix: " in Settings (CA/proxy)",
+      flowAddPrefix: "Add ",
+      flowCreate: "Create and enter a workspace, open a terminal, install an AI agent CLI, and start using it"
+    },
     search: {
       placeholder: "Search workspaces (title/repos)",
       empty: "No matching workspaces"

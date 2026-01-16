@@ -55,7 +55,15 @@ export default {
     }
   },
   repos: {
-    empty: "暂无仓库",
+    emptyGuide: {
+      title: "添加第一个仓库",
+      lead: "添加 Git URL 后, 工作台会为仓库维护本地镜像(mirror), 用于更快地创建工作区和获取分支信息",
+      autoSync: "通常不需要手动同步, 创建工作区时会自动同步到最新",
+      incremental: "同步是增量的, 一般明显快于每次从远端全量拉取",
+      supportPrefix: "支持在设置中配置",
+      supportAnd: "和",
+      supportSuffix: ""
+    },
     search: {
       placeholder: "搜索仓库（URL）",
       empty: "无匹配仓库"
@@ -105,7 +113,17 @@ export default {
     }
   },
   workspaces: {
-    empty: "暂无工作区",
+    emptyGuide: {
+      title: "创建第一个工作区",
+      lead: "工作区是由单一/多个仓库组成的开发目录, 并为AI Agent提供远程运行环境。",
+      flowPrefix: "典型使用流程:",
+      flowCredNetPrefix: "在设置配置",
+      flowRepoCredential: "仓库凭证",
+      flowCredNetAnd: "和",
+      flowCredNetSuffix: "(CA证书/代理)",
+      flowAddPrefix: "添加",
+      flowCreate: "创建工作区并进入, 打开终端, 安装AI Agent CLI工具并使用"
+    },
     search: {
       placeholder: "搜索工作区（标题/仓库）",
       empty: "无匹配工作区"

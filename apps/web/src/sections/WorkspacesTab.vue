@@ -1,6 +1,6 @@
 <template>
-  <div class="flex flex-col min-h-0">
-    <div class="flex items-center gap-2 px-5 py-2">
+  <div class="flex flex-col min-h-0 h-full">
+    <div v-if="!showEmptyGuide" class="flex items-center gap-2 px-5 py-2">
       <a-input
           v-model:value="workspacesQuery"
           size="small"
@@ -27,10 +27,46 @@
       </a-tooltip>
     </div>
 
-    <div class="px-3">
-      <div v-if="!loading && workspaces.length === 0" class="text-xs text-[color:var(--text-tertiary)]">
-        {{ t("workspaces.empty") }}
-      </div>
+    <div class="px-3 flex-1 min-h-0 overflow-auto">
+      <EmptyGuideText v-if="showEmptyGuide" :title="t('workspaces.emptyGuide.title')">
+        <template #action>
+          <a-button type="primary" size="large" @click="openCreateFromGuide" :aria-label="t('workspaces.actions.create')">
+            <template #icon><PlusOutlined/></template>
+            {{ t("workspaces.actions.create") }}
+          </a-button>
+        </template>
+
+        <div>{{ t("workspaces.emptyGuide.lead") }}</div>
+        <div class="mt-2">{{ t("workspaces.emptyGuide.flowPrefix") }}</div>
+        <ul class="mt-1 list-disc list-inside space-y-1">
+          <li>
+            {{ t("workspaces.emptyGuide.flowCredNetPrefix") }}<!--
+            --><a-button
+              size="small"
+              type="link"
+              class="!p-0 !h-auto align-baseline"
+              @click="goToSettings('credentials')"
+            >{{ t("workspaces.emptyGuide.flowRepoCredential") }}</a-button><!--
+            -->{{ t("workspaces.emptyGuide.flowCredNetAnd") }}<!--
+            --><a-button
+              size="small"
+              type="link"
+              class="!p-0 !h-auto align-baseline"
+              @click="goToSettings('network')"
+            >{{ t("settings.tabs.network") }}</a-button><!--
+            -->{{ t("workspaces.emptyGuide.flowCredNetSuffix") }}
+          </li>
+          <li>
+            {{ t("workspaces.emptyGuide.flowAddPrefix") }}<!--
+            --><a-button size="small" type="link" class="!p-0 !h-auto align-baseline" @click="goToRepos"
+              >{{ t("workbench.tabs.repos") }}</a-button>
+          </li>
+          <li>
+            {{ t("workspaces.emptyGuide.flowCreate") }}
+          </li>
+        </ul>
+      </EmptyGuideText>
+
       <div v-else-if="!loading && hasWorkspaceQuery && filteredWorkspaces.length === 0" class="text-xs text-[color:var(--text-tertiary)]">
         {{ t("workspaces.search.empty") }}
       </div>
@@ -171,6 +207,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 import type { RepoRecord, UpdateWorkspaceRequest, WorkspaceDetail } from "@agent-workbench/shared";
+import EmptyGuideText from "../components/EmptyGuideText.vue";
 import { createWorkspace, deleteTerminal, deleteWorkspace, listTerminals, listWorkspaces, updateWorkspace } from "../services/api";
 import { useReposState } from "../state/repos";
 import { useWorkbenchSearchState } from "../state/workbenchSearch";
@@ -210,6 +247,7 @@ function tokenizeQuery(raw: string) {
 
 const workspaceTokens = computed(() => tokenizeQuery(workspacesQuery.value));
 const hasWorkspaceQuery = computed(() => workspaceTokens.value.length > 0);
+const showEmptyGuide = computed(() => !loading.value && workspaces.value.length === 0 && !hasWorkspaceQuery.value);
 
 function formatRepoDisplayName(rawUrl: string) {
   let s = String(rawUrl || "").trim();
@@ -248,6 +286,22 @@ function workspaceRepoSummary(ws: WorkspaceDetail) {
 function workspaceSearchText(ws: WorkspaceDetail) {
   const repoUrls = ws.repos.map((r) => r.repo.url).join(" ");
   return `${ws.title} ${ws.id} ${repoUrls} ${workspaceRepoSummary(ws)}`.toLowerCase();
+}
+
+function goToRepos() {
+  void router.push("/repos");
+}
+
+function goToSettings(tab: "credentials" | "network") {
+  void router.push(`/settings/${tab}`);
+}
+
+function openCreateFromGuide() {
+  if (repos.value.length === 0) {
+    goToRepos();
+    return;
+  }
+  openCreate();
 }
 
 const filteredWorkspaces = computed(() => {
@@ -473,5 +527,8 @@ onMounted(refresh);
   bottom: -4px;
   left: -6px;
   background: rgba(0, 0, 0, 0);
+}
+ul {
+  padding-inline-start: unset;
 }
 </style>
