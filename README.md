@@ -8,9 +8,9 @@ As AI models become more capable, agents can handle increasingly complex tasks t
 
 - **Parallelism bottleneck**: A single working directory cannot support multiple agents running in parallel
 - **Session loss**: Agent processes are lost when the local terminal closes
-- **Scattered changes**: Git changes across multiple workspaces are hard to review in one place
+- **Information fragmentation**: Architectures such as frontend-backend separation or microservices often correspond to multiple repositories, leading to scattered information
 
-Agent Workbench provides: isolated workspaces, persistent terminal sessions, centralized Git change review, with one-click local or remote deployment.
+Agent Workbench provides: isolated workspaces, persistent terminal sessions, centralized Git change review, with one-click local startup and an easy path to running on a remote host.
 
 ---
 
@@ -42,6 +42,8 @@ docker compose up -d --build
 
 **Access**
 
+Default port is 4310. If you change `PORT` in `.env`, replace the port in the URLs below accordingly.
+
 | URL | Description |
 |-----|-------------|
 | `http://127.0.0.1:4310/` | Web UI |
@@ -52,9 +54,9 @@ docker compose up -d --build
 
 To avoid reconfiguring `docker-compose.yml` for every new project, the default Compose setup also publishes a reserved local port range for services started inside workspaces (HTTP servers, RPC, etc.):
 
-- Host ports: `30000-30100`
-- Container ports: `30000-30100`
-- If the container fails to start due to a port conflict, change the range in `docker-compose.yml`.
+- Host port range: controlled by `WORKSPACE_PORT_RANGE` in `.env`, default `30000-30100`
+- Container port range: same as above
+- If the container fails to start due to a port conflict, change `WORKSPACE_PORT_RANGE` in `.env` and restart the container.
 
 **Data Persistence**
 
@@ -69,20 +71,27 @@ Two named volumes are used by default:
 
 **Security**
 
-By default, for convenience, ports 4310 and 30000-30100 are exposed externally. For a more secure deployment, it is recommended to add 127.0.0.1: before the ports mapping in docker-compose.yml to allow only localhost access.
+By default, for convenience, `PORT` and `WORKSPACE_PORT_RANGE` are published on all interfaces. If you deploy this on a remote host, prefer a safer exposure model:
 
-With the `.env`-driven compose file, you can bind ports to localhost by setting:
+- Bind to localhost via `.env`: `PUBLISH_HOST=127.0.0.1`
+- Put Nginx/Caddy in front as an HTTPS reverse proxy
+- Enable `AUTH_TOKEN` as a minimal auth guard, and set `AUTH_COOKIE_SECURE=1` when served over HTTPS
+- Be cautious exposing `WORKSPACE_PORT_RANGE`, since it publishes ports for services started inside workspaces (shrink the range, or remove the mapping in your own compose setup if you don't need it)
 
-- `PUBLISH_HOST=127.0.0.1`
+If you need to publish ports to LAN/public directly, use `PUBLISH_HOST=0.0.0.0` and apply firewall rules + auth accordingly.
 
 **Environment Variables**
 
 | Variable | Description |
 |----------|-------------|
+| `PORT` | Published port for Web UI + API (default `4310`). |
+| `WORKSPACE_PORT_RANGE` | Reserved workspace port range (default `30000-30100`) for publishing services started inside workspaces. |
 | `CREDENTIAL_MASTER_KEY` | Encryption key for credentials (32-byte hex/base64/base64url). Auto-generated and saved to `/data/keys/credential-master-key.json` if not set. Recommended to set explicitly for migration scenarios. |
 | `AUTH_TOKEN` | Optional access token protection. If set, Web UI/API requires signing in with this token (session cookie). |
 | `AUTH_COOKIE_SECURE` | Set to `1` when serving over HTTPS (adds `Secure` to the session cookie). Keep `0` for local HTTP dev. |
 | `PUBLISH_HOST` | Host IP to publish ports on (Docker Compose). Set `127.0.0.1` to allow localhost access only. |
+
+Other Compose-related variables (e.g. `HOST`, `DATA_DIR`, `SERVE_WEB`, `WEB_DIST_DIR`) are documented in `.env.docker.example`.
 
 ---
 
