@@ -1,17 +1,32 @@
 <template>
   <div class="flex flex-col min-h-0">
     <div class="flex items-center gap-2 px-5 py-2">
-      <div class="text-[13px] font-semibold">{{ t("workbench.tabs.repos") }}</div>
+      <a-input
+          v-model:value="reposQuery"
+          size="small"
+          allow-clear
+          class="w-[250px] max-w-[45vw] !text-xs"
+          :placeholder="t('repos.search.placeholder')"
+          :aria-label="t('repos.search.placeholder')"
+      >
+        <template #prefix>
+          <SearchOutlined/>
+        </template>
+      </a-input>
       <a-button size="small" type="text" @click="openCreate" :title="t('repos.actions.add')" :aria-label="t('repos.actions.add')">
         <template #icon><PlusOutlined /></template>
       </a-button>
+      <div class="flex-1"></div>
     </div>
 
     <div class="px-3">
       <div v-if="!loading && repos.length === 0" class="text-xs text-[color:var(--text-tertiary)]">{{ t("repos.empty") }}</div>
+      <div v-else-if="!loading && hasReposQuery && filteredRepos.length === 0" class="text-xs text-[color:var(--text-tertiary)]">
+        {{ t("repos.search.empty") }}
+      </div>
       <div v-else class="divide-y divide-[var(--border-color-secondary)]">
         <div
-          v-for="r in repos"
+          v-for="r in filteredRepos"
           :key="r.id"
           class="group flex items-center justify-between gap-3 px-2 py-2 rounded hover:bg-[var(--panel-bg-elevated)]"
         >
@@ -131,19 +146,21 @@
 
 <script setup lang="ts">
 import { Modal, message } from "ant-design-vue";
-import { DeleteOutlined, EditOutlined, PlusOutlined, SyncOutlined } from "@ant-design/icons-vue";
+import {DeleteOutlined, EditOutlined, PlusOutlined, SearchOutlined, SyncOutlined} from "@ant-design/icons-vue";
 import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import type { CredentialRecord, RepoRecord } from "@agent-workbench/shared";
 import { createRepo, deleteRepo, listCredentials, syncRepo, updateRepo } from "../services/api";
 import { useReposState, waitRepoSettledOrThrow } from "../state/repos";
+import { useWorkbenchSearchState } from "../state/workbenchSearch";
 import { extractGitHost, inferGitCredentialKindFromUrl } from "../utils/gitHost";
 
 const { t } = useI18n();
 const router = useRouter();
 
 const { repos, loading, refreshRepos } = useReposState();
+const { reposQuery } = useWorkbenchSearchState();
 const credentials = ref<CredentialRecord[]>([]);
 
 const createOpen = ref(false);
@@ -157,6 +174,26 @@ const editRepo = ref<RepoRecord | null>(null);
 const editCredentialId = ref<string | undefined>(undefined);
 
 const syncingByRepoId = ref<Record<string, boolean>>({});
+
+function tokenizeQuery(raw: string) {
+  return String(raw || "")
+    .trim()
+    .toLowerCase()
+    .split(/\s+/g)
+    .filter(Boolean);
+}
+
+const repoTokens = computed(() => tokenizeQuery(reposQuery.value));
+const hasReposQuery = computed(() => repoTokens.value.length > 0);
+
+const filteredRepos = computed(() => {
+  const tokens = repoTokens.value;
+  if (tokens.length === 0) return repos.value;
+  return repos.value.filter((r) => {
+    const hay = String(r.url || "").toLowerCase();
+    return tokens.every((t) => hay.includes(t));
+  });
+});
 
 function filterCredential(input: string, option: any) {
   return String(option?.children ?? "").toLowerCase().includes(input.toLowerCase());

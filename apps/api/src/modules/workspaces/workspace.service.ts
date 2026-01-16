@@ -10,7 +10,7 @@ import { getRepo } from "../repos/repo.store.js";
 import { getOriginDefaultBranch, listHeadsBranches } from "../../infra/git/refs.js";
 import { withRepoLock } from "../../infra/locks/repoLock.js";
 import { cloneFromMirror } from "../../infra/git/clone.js";
-import { ensureDir, rmrf } from "../../infra/fs/fs.js";
+import { ensureDir, pathExists, rmrf } from "../../infra/fs/fs.js";
 import { workspaceRepoDirPath, workspaceRoot } from "../../infra/fs/paths.js";
 import { ensureRepoMirror } from "../../infra/git/mirror.js";
 import { buildGitEnv } from "../../infra/git/gitEnv.js";
@@ -75,6 +75,11 @@ function hash8(input: string) {
   return crypto.createHash("sha256").update(String(input || "")).digest("hex").slice(0, 8);
 }
 
+function randomDirToken(bytes: number) {
+  // base64url: 仅包含 [A-Za-z0-9_-]，适合做目录名；长度也比 hex 更短。
+  return crypto.randomBytes(bytes).toString("base64url").replace(/=+$/g, "");
+}
+
 function pickDirName(params: { repoUrl: string; existing: Set<string> }) {
   const base = sanitizeDirName(formatRepoDisplayName(params.repoUrl));
   if (!params.existing.has(base)) return base;
@@ -92,6 +97,17 @@ function pickDirName(params: { repoUrl: string; existing: Set<string> }) {
 function buildDefaultWorkspaceTitle(repoUrls: string[]) {
   const title = repoUrls.map((url) => formatRepoDisplayName(url)).filter(Boolean).join(" + ");
   return title || "workspace";
+}
+
+async function pickWorkspaceDirName(params: { dataDir: string }) {
+  // 不拼 title，避免目录过长；可读性由 UI 的 title 提供。
+  for (let i = 0; i < 50; i += 1) {
+    const candidate = `w_${randomDirToken(6)}`; // 6 bytes ~= 48 bits, 输出通常为 8 字符
+    const p = workspaceRoot(params.dataDir, candidate);
+    if (!(await pathExists(p))) return candidate;
+  }
+  // 极端情况下兜底，避免死循环（仍然是短名）。
+  return `w_${hash8(`${Date.now()}:${randomDirToken(8)}`)}`;
 }
 
 function resolveTerminalCredentialId(params: { repoCredentialIds: Array<string | null>; useTerminalCredential?: boolean }) {
@@ -122,9 +138,12 @@ export async function createWorkspace(
     return { repo, branchHint };
   });
 
+  const title = String(params.title || "").trim() || buildDefaultWorkspaceTitle(repos.map((r) => r.repo.url));
+
   const dirNames = new Set<string>();
   const workspaceId = newId("ws");
-  const workspacePath = workspaceRoot(ctx.dataDir, workspaceId);
+  const workspaceDirName = await pickWorkspaceDirName({ dataDir: ctx.dataDir });
+  const workspacePath = workspaceRoot(ctx.dataDir, workspaceDirName);
   const workItems = repos.map(({ repo, branchHint }) => {
     const dirName = pickDirName({ repoUrl: repo.url, existing: dirNames });
     dirNames.add(dirName);
@@ -132,7 +151,7 @@ export async function createWorkspace(
       repo,
       branchHint,
       dirName,
-      path: workspaceRepoDirPath(ctx.dataDir, workspaceId, dirName)
+      path: workspaceRepoDirPath(ctx.dataDir, workspaceDirName, dirName)
     };
   });
 
@@ -197,10 +216,10 @@ export async function createWorkspace(
     throw err;
   }
 
-  const title = String(params.title || "").trim() || buildDefaultWorkspaceTitle(workItems.map((item) => item.repo.url));
   const ts = nowMs();
   const ws: WorkspaceRecord = {
     id: workspaceId,
+    dirName: workspaceDirName,
     title,
     path: workspacePath,
     terminalCredentialId,
@@ -334,7 +353,7 @@ export async function deleteWorkspace(ctx: AppContext, logger: FastifyBaseLogger
     }
   }
 
-  const expectedPath = workspaceRoot(ctx.dataDir, ws.id);
+  const expectedPath = workspaceRoot(ctx.dataDir, ws.dirName);
   // 删除前做强校验：即使 DB/path 字段出现脏数据，也不允许越界递归删除。
   if (path.resolve(ws.path) !== path.resolve(expectedPath)) {
     logger.error({ workspaceId: ws.id, wsPath: ws.path, expectedPath }, "workspace path mismatch; abort delete");

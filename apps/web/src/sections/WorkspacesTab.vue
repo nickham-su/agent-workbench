@@ -1,7 +1,18 @@
 <template>
   <div class="flex flex-col min-h-0">
     <div class="flex items-center gap-2 px-5 py-2">
-      <div class="text-[13px] font-semibold">{{ t("workbench.tabs.workspaces") }}</div>
+      <a-input
+          v-model:value="workspacesQuery"
+          size="small"
+          allow-clear
+          class="w-[250px] max-w-[45vw] !text-xs"
+          :placeholder="t('workspaces.search.placeholder')"
+          :aria-label="t('workspaces.search.placeholder')"
+      >
+        <template #prefix>
+          <SearchOutlined />
+        </template>
+      </a-input>
       <a-button
         size="small"
         type="text"
@@ -19,29 +30,35 @@
       <div v-if="!loading && workspaces.length === 0" class="text-xs text-[color:var(--text-tertiary)]">
         {{ t("workspaces.empty") }}
       </div>
+      <div v-else-if="!loading && hasWorkspaceQuery && filteredWorkspaces.length === 0" class="text-xs text-[color:var(--text-tertiary)]">
+        {{ t("workspaces.search.empty") }}
+      </div>
       <div v-else class="divide-y divide-[var(--border-color-secondary)]">
         <div
-            v-for="ws in workspaces"
+            v-for="ws in filteredWorkspaces"
             :key="ws.id"
             class="group flex items-center justify-between gap-3 px-2 py-2 rounded hover:bg-[var(--panel-bg-elevated)] cursor-pointer"
             @click="openWorkspace(ws.id)"
         >
           <div class="min-w-0 flex-1 flex items-center gap-2">
             <div class="min-w-0 flex-1">
-              <div class="min-w-0 text-xs font-semibold truncate" :title="ws.title">{{ ws.title }}</div>
+              <div class="min-w-0 flex items-center gap-2">
+                <div class="min-w-0 text-xs font-semibold truncate" :title="ws.title">{{ ws.title }}</div>
+                <a-tooltip
+                  v-if="ws.terminalCount"
+                  :title="t('workspaces.tooltip.activeTerminals', { n: ws.terminalCount })"
+                >
+                  <span class="ws-terminal-count-hit shrink-0" @click.stop="confirmCloseAllTerminals(ws)">
+                    <a-tag class="!mr-0 !text-[10px] !leading-[16px] !px-1 !py-0" color="blue">
+                      <span>{{ ws.terminalCount }}</span>
+                    </a-tag>
+                  </span>
+                </a-tooltip>
+              </div>
               <div class="min-w-0 text-[11px] text-[color:var(--text-tertiary)] truncate" :title="workspaceRepoSummary(ws)">
                 {{ workspaceRepoSummary(ws) }}
               </div>
             </div>
-            <a-tag
-              v-if="ws.terminalCount"
-              class="!mr-0 !text-[10px] !leading-[16px] !px-1 !py-0"
-              color="blue"
-            >
-              <a-tooltip :title="t('workspaces.tooltip.activeTerminals')">
-                <span>{{ ws.terminalCount }}</span>
-              </a-tooltip>
-            </a-tag>
           </div>
           <div class="flex items-center gap-1">
             <a-button
@@ -111,11 +128,14 @@
         </a-form-item>
 
         <a-form-item v-if="terminalCredentialState === 'available'" :label="t('workspaces.create.terminalCredentialLabel')">
-          <a-checkbox v-model:checked="useTerminalCredential">
+          <a-checkbox v-model:checked="useTerminalCredential" @change="onTerminalCredentialChange">
             {{ t("workspaces.create.terminalCredentialHelp") }}
           </a-checkbox>
+          <div v-if="useTerminalCredentialTouched && !useTerminalCredential" class="text-[11px] text-[color:var(--warning-color)] pt-1">
+            {{ t("workspaces.create.terminalCredentialDisabledWarning") }}
+          </div>
         </a-form-item>
-        <div v-else-if="terminalCredentialState === 'unavailable'" class="text-[11px] text-[color:var(--text-tertiary)] pb-2">
+        <div v-else-if="terminalCredentialState === 'unavailable'" class="text-[11px] text-[color:var(--warning-color)] pb-2">
           {{ t("workspaces.create.terminalCredentialUnavailable") }}
         </div>
       </a-form>
@@ -135,7 +155,7 @@
             {{ t("workspaces.rename.terminalCredentialAffectsNewOnly") }}
           </div>
         </a-form-item>
-        <div v-else-if="editTerminalCredentialState === 'unavailable'" class="text-[11px] text-[color:var(--text-tertiary)] pb-2">
+        <div v-else-if="editTerminalCredentialState === 'unavailable'" class="text-[11px] text-[color:var(--warning-color)] pb-2">
           {{ t("workspaces.create.terminalCredentialUnavailable") }}
         </div>
       </a-form>
@@ -145,19 +165,21 @@
 
 <script setup lang="ts">
 import { Modal, message } from "ant-design-vue";
-import { DeleteOutlined, EditOutlined, PlusOutlined } from "@ant-design/icons-vue";
+import { DeleteOutlined, EditOutlined, PlusOutlined, SearchOutlined } from "@ant-design/icons-vue";
 import { computed, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 import type { RepoRecord, UpdateWorkspaceRequest, WorkspaceDetail } from "@agent-workbench/shared";
-import { createWorkspace, deleteWorkspace, listWorkspaces, updateWorkspace } from "../services/api";
+import { createWorkspace, deleteTerminal, deleteWorkspace, listTerminals, listWorkspaces, updateWorkspace } from "../services/api";
 import { useReposState } from "../state/repos";
+import { useWorkbenchSearchState } from "../state/workbenchSearch";
 
 const { t } = useI18n();
 
 const { repos, refreshRepos } = useReposState();
 const loading = ref(false);
 const workspaces = ref<WorkspaceDetail[]>([]);
+const { workspacesQuery } = useWorkbenchSearchState();
 
 const createOpen = ref(false);
 const creating = ref(false);
@@ -165,6 +187,7 @@ const selectedRepoIds = ref<string[]>([]);
 const titleInput = ref("");
 const titleTouched = ref(false);
 const useTerminalCredential = ref(false);
+const useTerminalCredentialTouched = ref(false);
 
 const editOpen = ref(false);
 const renaming = ref(false);
@@ -172,7 +195,20 @@ const editTitle = ref("");
 const editingWorkspace = ref<WorkspaceDetail | null>(null);
 const editUseTerminalCredential = ref(false);
 
+const closingTerminals = ref<Record<string, boolean>>({});
+
 const router = useRouter();
+
+function tokenizeQuery(raw: string) {
+  return String(raw || "")
+    .trim()
+    .toLowerCase()
+    .split(/\s+/g)
+    .filter(Boolean);
+}
+
+const workspaceTokens = computed(() => tokenizeQuery(workspacesQuery.value));
+const hasWorkspaceQuery = computed(() => workspaceTokens.value.length > 0);
 
 function formatRepoDisplayName(rawUrl: string) {
   let s = String(rawUrl || "").trim();
@@ -207,6 +243,20 @@ function workspaceRepoSummary(ws: WorkspaceDetail) {
   const names = ws.repos.map((r) => formatRepoDisplayName(r.repo.url)).filter(Boolean);
   return names.join(" · ");
 }
+
+function workspaceSearchText(ws: WorkspaceDetail) {
+  const repoUrls = ws.repos.map((r) => r.repo.url).join(" ");
+  return `${ws.title} ${ws.id} ${repoUrls} ${workspaceRepoSummary(ws)}`.toLowerCase();
+}
+
+const filteredWorkspaces = computed(() => {
+  const tokens = workspaceTokens.value;
+  if (tokens.length === 0) return workspaces.value;
+  return workspaces.value.filter((ws) => {
+    const hay = workspaceSearchText(ws);
+    return tokens.every((t) => hay.includes(t));
+  });
+});
 
 function filterRepo(input: string, option: any) {
   const hay = String(option?.label ?? option?.children ?? "").toLowerCase();
@@ -251,13 +301,30 @@ watch(
   () => selectedRepoIds.value,
   () => {
     if (!titleTouched.value) titleInput.value = defaultTitle.value;
-    if (terminalCredentialState.value !== "available") useTerminalCredential.value = false;
   },
   { deep: true }
 );
 
+watch(
+  () => terminalCredentialState.value,
+  (state) => {
+    if (state === "available") {
+      // 默认选中；若用户手动改过则尊重用户选择
+      if (!useTerminalCredentialTouched.value) useTerminalCredential.value = true;
+      return;
+    }
+    // 不可用/无需提供时，强制关闭并清理 touched，避免后续默认逻辑失效
+    useTerminalCredential.value = false;
+    useTerminalCredentialTouched.value = false;
+  }
+);
+
 function onTitleInput() {
   titleTouched.value = true;
+}
+
+function onTerminalCredentialChange(_e: any) {
+  useTerminalCredentialTouched.value = true;
 }
 
 async function refresh() {
@@ -277,6 +344,7 @@ function openCreate() {
   titleInput.value = "";
   titleTouched.value = false;
   useTerminalCredential.value = false;
+  useTerminalCredentialTouched.value = false;
   createOpen.value = true;
 }
 
@@ -353,5 +421,56 @@ function confirmDelete(workspaceId: string) {
   });
 }
 
+function confirmCloseAllTerminals(ws: WorkspaceDetail) {
+  if (closingTerminals.value[ws.id]) return;
+  Modal.confirm({
+    title: t("workspaces.closeTerminalsConfirm.title"),
+    content: t("workspaces.closeTerminalsConfirm.content"),
+    okText: t("workspaces.closeTerminalsConfirm.ok"),
+    okType: "danger",
+    cancelText: t("workspaces.closeTerminalsConfirm.cancel"),
+    onOk: async () => {
+      if (closingTerminals.value[ws.id]) return;
+      closingTerminals.value = { ...closingTerminals.value, [ws.id]: true };
+      try {
+        const terms = await listTerminals(ws.id);
+        const active = terms.filter((t) => t.status === "active");
+        if (active.length === 0) return;
+
+        const results = await Promise.allSettled(active.map((t) => deleteTerminal(t.id)));
+        const failed = results.filter((r) => r.status === "rejected").length;
+        if (failed > 0) {
+          message.warning(t("workspaces.closeTerminalsConfirm.partialFailed", { failed }));
+        }
+        await refresh();
+      } catch (err) {
+        message.error(err instanceof Error ? err.message : String(err));
+      } finally {
+        const next = { ...closingTerminals.value };
+        delete next[ws.id];
+        closingTerminals.value = next;
+      }
+    }
+  });
+}
+
 onMounted(refresh);
 </script>
+
+<style scoped>
+/* 扩大“活跃终端数”标签的可点击区域，不改变现有视觉样式与布局 */
+.ws-terminal-count-hit {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.ws-terminal-count-hit::before {
+  content: "";
+  position: absolute;
+  top: -4px;
+  right: -6px;
+  bottom: -4px;
+  left: -6px;
+  background: rgba(0, 0, 0, 0);
+}
+</style>

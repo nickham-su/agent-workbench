@@ -56,6 +56,10 @@ export default {
   },
   repos: {
     empty: "No repos",
+    search: {
+      placeholder: "Search repos (URL)",
+      empty: "No matching repos"
+    },
     actions: {
       add: "Add repo",
       sync: "Sync",
@@ -102,13 +106,17 @@ export default {
   },
   workspaces: {
     empty: "No workspaces",
+    search: {
+      placeholder: "Search workspaces (title/repos)",
+      empty: "No matching workspaces"
+    },
     actions: {
       create: "Create workspace",
       rename: "Rename",
       delete: "Delete"
     },
     tooltip: {
-      activeTerminals: "Active terminals"
+      activeTerminals: "{n} active terminals. Click to close"
     },
     create: {
       modalTitle: "Create workspace",
@@ -118,19 +126,31 @@ export default {
       titlePlaceholder: "Optional: defaults to concatenated repo names",
       terminalCredentialLabel: "Terminal credential",
       terminalCredentialHelp: "Apply this credential to terminals in this workspace",
-      terminalCredentialUnavailable: "Selected repos do not share a credential; terminal credential is unavailable",
+      terminalCredentialDisabledWarning:
+        "Using git in the terminal to connect to remotes may fail, or you may need to configure it manually.",
+      terminalCredentialUnavailable:
+        "Selected repos use different credentials; terminals can't apply them automatically. Configure git in the terminal to connect to remotes.",
       defaultBranchUnknown: "Unable to determine the default branch. Sync the repo first."
     },
     rename: {
       modalTitle: "Rename workspace",
       titleLabel: "Title",
-      titlePlaceholder: "Enter a new workspace title"
+      titlePlaceholder: "Enter a new workspace title",
+      terminalCredentialAffectsNewOnly:
+        "Only affects newly created terminals. Existing terminals must be closed and reopened to take effect."
     },
     deleteConfirm: {
       title: "Delete workspace?",
       content: "This will close all terminals in the workspace and remove the workspace directory.",
       ok: "Delete",
       cancel: "Cancel"
+    },
+    closeTerminalsConfirm: {
+      title: "Close all terminals?",
+      content: "This will close all active terminals in the workspace.",
+      ok: "Close",
+      cancel: "Cancel",
+      partialFailed: "Some terminals failed to close: {failed}"
     }
   },
   workspace: {

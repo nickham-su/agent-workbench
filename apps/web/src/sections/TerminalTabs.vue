@@ -79,13 +79,14 @@
 <script setup lang="ts">
 import {Modal, message} from "ant-design-vue";
 import {CloseOutlined, PlusOutlined, CodeOutlined, MinusOutlined} from "@ant-design/icons-vue";
-import {computed, ref, watch} from "vue";
+import {computed, nextTick, ref, watch} from "vue";
 import { useI18n } from "vue-i18n";
 import type {TerminalRecord} from "@agent-workbench/shared";
 import {createTerminal, deleteTerminal} from "../services/api";
 import TerminalView from "../terminal/TerminalView.vue";
 
 const ADD_TAB_KEY = "__terminal_add__";
+const TERMINAL_ACTIVE_TAB_STORAGE_KEY_PREFIX = "agent-workbench.workspace.terminal.activeTab";
 
 const props = defineProps<{
   workspaceId: string;
@@ -102,11 +103,48 @@ const emit = defineEmits<{
 const { t } = useI18n();
 
 const activeKey = ref<string | undefined>(undefined);
-const effectiveActiveKey = computed(() => activeKey.value ?? props.terminals[0]?.id);
+const effectiveActiveKey = computed(() => {
+  const key = activeKey.value;
+  if (key && props.terminals.some((t) => t.id === key)) return key;
+  return props.terminals[0]?.id;
+});
 const creating = ref(false);
 const pendingActivateKey = ref<string | null>(null);
+const suppressActiveKeyPersist = ref(false);
 
 const collapseLabel = computed(() => t("terminal.panel.collapse"));
+
+function terminalActiveTabStorageKey(workspaceId: string) {
+  const id = String(workspaceId || "").trim();
+  if (!id) return `${TERMINAL_ACTIVE_TAB_STORAGE_KEY_PREFIX}.v1`;
+  return `${TERMINAL_ACTIVE_TAB_STORAGE_KEY_PREFIX}.v1.${id}`;
+}
+
+// 用 localStorage 记住当前选中的终端 Tab，刷新页面后可以恢复。
+function restoreActiveKeyFromStorage(workspaceId: string) {
+  const id = String(workspaceId || "").trim();
+  if (!id) return;
+  try {
+    const raw = localStorage.getItem(terminalActiveTabStorageKey(id));
+    if (raw) activeKey.value = raw;
+  } catch {
+    // ignore
+  }
+}
+
+function persistActiveKeyToStorage(workspaceId: string, key: string | undefined) {
+  const id = String(workspaceId || "").trim();
+  if (!id) return;
+  try {
+    if (!key) {
+      localStorage.removeItem(terminalActiveTabStorageKey(id));
+      return;
+    }
+    localStorage.setItem(terminalActiveTabStorageKey(id), key);
+  } catch {
+    // ignore
+  }
+}
 
 function handleActiveKeyUpdate(k: string | number) {
   const key = String(k);
@@ -116,6 +154,20 @@ function handleActiveKeyUpdate(k: string | number) {
   }
   activeKey.value = key;
 }
+
+watch(
+  () => props.workspaceId,
+  async (workspaceId) => {
+    // workspace 切换时重新读取存储的激活 tab
+    suppressActiveKeyPersist.value = true;
+    activeKey.value = undefined;
+    pendingActivateKey.value = null;
+    restoreActiveKeyFromStorage(workspaceId);
+    await nextTick();
+    suppressActiveKeyPersist.value = false;
+  },
+  { immediate: true }
+);
 
 watch(
     () => props.terminals,
@@ -133,6 +185,13 @@ watch(
     {immediate: true}
 );
 
+watch(
+  activeKey,
+  (key) => {
+    if (suppressActiveKeyPersist.value) return;
+    persistActiveKeyToStorage(props.workspaceId, key);
+  }
+);
 
 async function createOne() {
   creating.value = true;

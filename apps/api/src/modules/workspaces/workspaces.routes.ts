@@ -6,7 +6,9 @@ import {
   UpdateWorkspaceRequestSchema,
   WorkspaceDetailSchema
 } from "@agent-workbench/shared";
+import { nowMs } from "../../utils/time.js";
 import { createWorkspace, deleteWorkspace, getWorkspaceDetailById, listWorkspaceDetails, updateWorkspaceById } from "./workspace.service.js";
+import { touchWorkspaceLastUsedAt } from "./workspace.store.js";
 
 export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppContext) {
   app.get(
@@ -45,7 +47,14 @@ export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppCon
     },
     async (req) => {
       const params = req.params as { workspaceId: string };
-      return getWorkspaceDetailById(ctx, params.workspaceId);
+      const detail = await getWorkspaceDetailById(ctx, params.workspaceId);
+      // “最近使用”以用户进入 workspace 页并拉取详情为准（不要求强一致）。
+      try {
+        touchWorkspaceLastUsedAt(ctx.db, params.workspaceId, nowMs());
+      } catch {
+        // ignore
+      }
+      return detail;
     }
   );
 
