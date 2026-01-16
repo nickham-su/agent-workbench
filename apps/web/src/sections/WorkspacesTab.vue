@@ -1,7 +1,18 @@
 <template>
   <div class="flex flex-col min-h-0">
     <div class="flex items-center gap-2 px-5 py-2">
-      <div class="text-[13px] font-semibold">{{ t("workbench.tabs.workspaces") }}</div>
+      <a-input
+          v-model:value="workspacesQuery"
+          size="small"
+          allow-clear
+          class="w-[250px] max-w-[45vw] !text-xs"
+          :placeholder="t('workspaces.search.placeholder')"
+          :aria-label="t('workspaces.search.placeholder')"
+      >
+        <template #prefix>
+          <SearchOutlined />
+        </template>
+      </a-input>
       <a-button
         size="small"
         type="text"
@@ -13,15 +24,6 @@
           <PlusOutlined/>
         </template>
       </a-button>
-      <div class="flex-1"></div>
-      <a-input
-        v-model:value="workspacesQuery"
-        size="small"
-        allow-clear
-        class="w-[260px] max-w-[45vw]"
-        :placeholder="t('workspaces.search.placeholder')"
-        :aria-label="t('workspaces.search.placeholder')"
-      />
     </div>
 
     <div class="px-3">
@@ -163,7 +165,7 @@
 
 <script setup lang="ts">
 import { Modal, message } from "ant-design-vue";
-import { DeleteOutlined, EditOutlined, PlusOutlined } from "@ant-design/icons-vue";
+import { DeleteOutlined, EditOutlined, PlusOutlined, SearchOutlined } from "@ant-design/icons-vue";
 import { computed, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";

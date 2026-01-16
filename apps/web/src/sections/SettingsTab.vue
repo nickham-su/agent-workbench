@@ -1,8 +1,6 @@
 <template>
   <div class="flex flex-col min-h-0">
-    <div class="flex items-center gap-2 px-5 py-2">
-      <div class="text-[13px] font-semibold">{{ t("settings.title") }}</div>
-    </div>
+
 
     <div class="px-5 pb-5 min-h-0 overflow-auto">
       <a-tabs v-model:activeKey="innerKey" size="small" :animated="false">

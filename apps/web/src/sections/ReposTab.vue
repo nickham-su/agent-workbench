@@ -1,19 +1,22 @@
 <template>
   <div class="flex flex-col min-h-0">
     <div class="flex items-center gap-2 px-5 py-2">
-      <div class="text-[13px] font-semibold">{{ t("workbench.tabs.repos") }}</div>
+      <a-input
+          v-model:value="reposQuery"
+          size="small"
+          allow-clear
+          class="w-[250px] max-w-[45vw] !text-xs"
+          :placeholder="t('repos.search.placeholder')"
+          :aria-label="t('repos.search.placeholder')"
+      >
+        <template #prefix>
+          <SearchOutlined/>
+        </template>
+      </a-input>
       <a-button size="small" type="text" @click="openCreate" :title="t('repos.actions.add')" :aria-label="t('repos.actions.add')">
         <template #icon><PlusOutlined /></template>
       </a-button>
       <div class="flex-1"></div>
-      <a-input
-        v-model:value="reposQuery"
-        size="small"
-        allow-clear
-        class="w-[320px] max-w-[45vw]"
-        :placeholder="t('repos.search.placeholder')"
-        :aria-label="t('repos.search.placeholder')"
-      />
     </div>
 
     <div class="px-3">
@@ -143,7 +146,7 @@
 
 <script setup lang="ts">
 import { Modal, message } from "ant-design-vue";
-import { DeleteOutlined, EditOutlined, PlusOutlined, SyncOutlined } from "@ant-design/icons-vue";
+import {DeleteOutlined, EditOutlined, PlusOutlined, SearchOutlined, SyncOutlined} from "@ant-design/icons-vue";
 import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
