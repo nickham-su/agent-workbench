@@ -1,6 +1,6 @@
 <template>
-  <div class="flex flex-col min-h-0">
-    <div class="flex items-center gap-2 px-5 py-2">
+  <div class="flex flex-col min-h-0 h-full">
+    <div v-if="!showEmptyGuide" class="flex items-center gap-2 px-5 py-2">
       <a-input
           v-model:value="reposQuery"
           size="small"
@@ -13,14 +13,47 @@
           <SearchOutlined/>
         </template>
       </a-input>
-      <a-button size="small" type="text" @click="openCreate" :title="t('repos.actions.add')" :aria-label="t('repos.actions.add')">
-        <template #icon><PlusOutlined /></template>
-      </a-button>
+      <a-tooltip :title="t('repos.actions.add')" :mouse-enter-delay="0">
+        <a-button size="small" type="text" @click="openCreate" :aria-label="t('repos.actions.add')">
+          <template #icon><PlusOutlined /></template>
+        </a-button>
+      </a-tooltip>
       <div class="flex-1"></div>
     </div>
 
-    <div class="px-3">
-      <div v-if="!loading && repos.length === 0" class="text-xs text-[color:var(--text-tertiary)]">{{ t("repos.empty") }}</div>
+    <div class="px-3 flex-1 min-h-0 overflow-auto">
+      <EmptyGuideText v-if="showEmptyGuide" :title="t('repos.emptyGuide.title')">
+        <template #action>
+          <a-button type="primary" size="large" @click="openCreate" :aria-label="t('repos.actions.add')">
+            <template #icon><PlusOutlined /></template>
+            {{ t("repos.actions.add") }}
+          </a-button>
+        </template>
+
+        <div>{{ t("repos.emptyGuide.lead") }}</div>
+        <ul class="mt-2 list-disc list-inside space-y-1">
+          <li>{{ t("repos.emptyGuide.autoSync") }}</li>
+          <li>{{ t("repos.emptyGuide.incremental") }}</li>
+          <li>
+            {{ t("repos.emptyGuide.supportPrefix") }}<!--
+            --><a-button
+              size="small"
+              type="link"
+              class="!p-0 !h-auto align-baseline"
+              @click="goToSettings('credentials')"
+            >{{ t("settings.tabs.credentials") }}</a-button><!--
+            -->{{ t("repos.emptyGuide.supportAnd") }}<!--
+            --><a-button
+              size="small"
+              type="link"
+              class="!p-0 !h-auto align-baseline"
+              @click="goToSettings('network')"
+            >{{ t("settings.tabs.network") }}</a-button><!--
+            -->{{ t("repos.emptyGuide.supportSuffix") }}
+          </li>
+        </ul>
+      </EmptyGuideText>
+
       <div v-else-if="!loading && hasReposQuery && filteredRepos.length === 0" class="text-xs text-[color:var(--text-tertiary)]">
         {{ t("repos.search.empty") }}
       </div>
@@ -151,6 +184,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import type { CredentialRecord, RepoRecord } from "@agent-workbench/shared";
+import EmptyGuideText from "../components/EmptyGuideText.vue";
 import { createRepo, deleteRepo, listCredentials, syncRepo, updateRepo } from "../services/api";
 import { useReposState, waitRepoSettledOrThrow } from "../state/repos";
 import { useWorkbenchSearchState } from "../state/workbenchSearch";
@@ -185,6 +219,7 @@ function tokenizeQuery(raw: string) {
 
 const repoTokens = computed(() => tokenizeQuery(reposQuery.value));
 const hasReposQuery = computed(() => repoTokens.value.length > 0);
+const showEmptyGuide = computed(() => !loading.value && repos.value.length === 0 && !hasReposQuery.value);
 
 const filteredRepos = computed(() => {
   const tokens = repoTokens.value;
@@ -201,6 +236,10 @@ function filterCredential(input: string, option: any) {
 
 function credentialKindLabel(kind: CredentialRecord["kind"]) {
   return kind === "ssh" ? t("settings.credentials.form.kindSsh") : t("settings.credentials.form.kindHttps");
+}
+
+function goToSettings(tab: "credentials" | "network") {
+  void router.push(`/settings/${tab}`);
 }
 
 function sortCredentials(params: { host: string | null; kind: "https" | "ssh" | null }) {
@@ -398,3 +437,9 @@ watch(
   }
 );
 </script>
+
+<style scoped>
+ul {
+  padding-inline-start: unset;
+}
+</style>
