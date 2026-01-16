@@ -20,12 +20,12 @@ export function workspacesRoot(dataDir: string) {
   return path.join(dataDir, "workspaces");
 }
 
-export function workspaceRoot(dataDir: string, workspaceId: string) {
-  return path.join(workspacesRoot(dataDir), workspaceId);
+export function workspaceRoot(dataDir: string, workspaceDirName: string) {
+  return path.join(workspacesRoot(dataDir), workspaceDirName);
 }
 
-export function workspaceRepoDirPath(dataDir: string, workspaceId: string, dirName: string) {
-  return path.join(workspaceRoot(dataDir, workspaceId), dirName);
+export function workspaceRepoDirPath(dataDir: string, workspaceDirName: string, dirName: string) {
+  return path.join(workspaceRoot(dataDir, workspaceDirName), dirName);
 }
 
 export function tmpRoot(dataDir: string) {

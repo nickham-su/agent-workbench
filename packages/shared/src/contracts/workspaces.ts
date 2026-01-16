@@ -4,6 +4,7 @@ import type { Static } from "@sinclair/typebox";
 export const WorkspaceRecordSchema = Type.Object(
   {
     id: Type.String(),
+    dirName: Type.String(),
     title: Type.String(),
     path: Type.String(),
     terminalCredentialId: Type.Union([Type.String(), Type.Null()]),

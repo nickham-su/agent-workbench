@@ -52,11 +52,28 @@
 ### Workspace 根目录目录结构：平铺 repo 目录
 
 - 选择
-  - `${DATA_DIR}/workspaces/<workspaceId>/<dirName>`
+  - `${DATA_DIR}/workspaces/<workspaceDirName>/<dirName>`
   - 不引入额外 `repos/` 目录层级
 - 取舍逻辑
   - Workspace 根目录更直观，可直接看到 repo 目录
   - 当前 Workspace 根目录没有其他功能目录，增加一层意义不大
+
+### Workspace 根目录名（workspaceDirName）：短且稳定，ID 与目录解耦
+
+- 目标
+  - 磁盘目录尽量短，便于在 Terminal/文件管理器中输入
+  - workspace 的逻辑 ID（`workspaceId`）继续保持全局唯一与稳定（用于 API/DB/日志）
+- 选择
+  - 新增 `workspaces.dir_name`（`workspaceDirName`），作为 workspace 根目录名
+  - `workspace.path` 固化为 `${DATA_DIR}/workspaces/${workspaceDirName}`，后端一律以 DB 中的 `workspace.path` 为准
+  - 目录名生成策略（创建时生成一次，后续不随 title 变更）
+    - 不拼 title，直接使用 `w_<rand>`（极短且避免暴露语义）
+    - `rand`：短随机串（建议 base64url/base32/base58 等安全字符集），用于冲突消解
+  - 约束
+    - `unique(dir_name)`
+- 取舍逻辑
+  - 避免把完整 `workspaceId` 拼进目录导致路径过长
+  - ID 与目录解耦后，未来即使更换 ID 规则/展示规则，也不影响落盘结构
 
 ### 目录名（dirName）：可读优先，冲突加 hash，不要求可逆
 
@@ -111,15 +128,16 @@
 - repo mirror
   - `${DATA_DIR}/repos/<repoId>/mirror.git`
 - workspace 根目录
-  - `${DATA_DIR}/workspaces/<workspaceId>/`
+  - `${DATA_DIR}/workspaces/<workspaceDirName>/`
 - workspace repo 目录
-  - `${DATA_DIR}/workspaces/<workspaceId>/<dirName>/`
+  - `${DATA_DIR}/workspaces/<workspaceDirName>/<dirName>/`
 
 ## 数据模型（建议）
 
 ### workspaces
 
 - `id`
+- `dir_name`（workspace 根目录名，唯一）
 - `path`（workspace 根目录）
 - `title`（用户可编辑，列表页展示标题）
 - `created_at`、`updated_at`

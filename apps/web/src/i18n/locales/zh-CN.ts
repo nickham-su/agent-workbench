@@ -56,6 +56,10 @@ export default {
   },
   repos: {
     empty: "暂无仓库",
+    search: {
+      placeholder: "搜索仓库（URL）",
+      empty: "无匹配仓库"
+    },
     actions: {
       add: "添加仓库",
       sync: "同步",
@@ -102,13 +106,17 @@ export default {
   },
   workspaces: {
     empty: "暂无工作区",
+    search: {
+      placeholder: "搜索工作区（标题/仓库）",
+      empty: "无匹配工作区"
+    },
     actions: {
       create: "创建工作区",
       rename: "编辑",
       delete: "删除"
     },
     tooltip: {
-      activeTerminals: "活跃终端数"
+      activeTerminals: "有 {n} 个活跃终端，点击关闭"
     },
     create: {
       modalTitle: "创建工作区",
@@ -117,8 +125,10 @@ export default {
       titleLabel: "标题",
       titlePlaceholder: "可选：默认使用仓库名拼接",
       terminalCredentialLabel: "终端凭证",
-      terminalCredentialHelp: "将该凭证应用于本工作区的终端会话",
-      terminalCredentialUnavailable: "所选仓库未共享同一凭证，无法提供终端凭证选项",
+      terminalCredentialHelp: "将凭证应用到终端",
+      terminalCredentialDisabledWarning: "在终端里使用git命令连接 remote 可能失败，或需手动配置",
+      terminalCredentialUnavailable:
+        "所选仓库凭证不一致，终端无法自动应用；需在终端自行配置git连接remote。",
       defaultBranchUnknown: "无法确定默认分支，请先同步仓库"
     },
     rename: {
@@ -132,6 +142,13 @@ export default {
       content: "会关闭该工作区下所有终端，并删除工作区目录。",
       ok: "删除",
       cancel: "取消"
+    },
+    closeTerminalsConfirm: {
+      title: "关闭所有终端？",
+      content: "将关闭该工作区下所有活跃终端。",
+      ok: "关闭",
+      cancel: "取消",
+      partialFailed: "部分终端关闭失败：{failed} 个"
     }
   },
   workspace: {

@@ -49,9 +49,11 @@ export function initSchema(db: Db) {
 
     create table if not exists workspaces (
       id text primary key,
+      dir_name text not null,
       title text not null,
       path text not null,
       terminal_credential_id text,
+      last_used_at integer,
       created_at integer not null,
       updated_at integer not null
     );
@@ -92,8 +94,12 @@ export function initSchema(db: Db) {
 
   ensureColumn(db, { table: "repos", column: "credential_id", ddl: "credential_id text" });
   ensureColumn(db, { table: "repos", column: "default_branch", ddl: "default_branch text" });
+  ensureColumn(db, { table: "workspaces", column: "dir_name", ddl: "dir_name text" });
   ensureColumn(db, { table: "workspaces", column: "terminal_credential_id", ddl: "terminal_credential_id text" });
+  ensureColumn(db, { table: "workspaces", column: "last_used_at", ddl: "last_used_at integer" });
   createIndexIfNotExists(db, { index: "idx_repos_credential_id", sql: "create index idx_repos_credential_id on repos(credential_id)" });
+  createIndexIfNotExists(db, { index: "idx_workspaces_dir_name", sql: "create unique index idx_workspaces_dir_name on workspaces(dir_name)" });
+  createIndexIfNotExists(db, { index: "idx_workspaces_last_used_at", sql: "create index idx_workspaces_last_used_at on workspaces(last_used_at)" });
 }
 
 function createIndexIfNotExists(db: Db, params: { index: string; sql: string }) {

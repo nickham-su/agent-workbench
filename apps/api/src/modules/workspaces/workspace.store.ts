@@ -1,8 +1,10 @@
+import path from "node:path";
 import type { Db } from "../../infra/db/db.js";
 import type { WorkspaceRecord } from "@agent-workbench/shared";
 
 type WorkspaceRow = {
   id: string;
+  dirName: string | null;
   title: string;
   path: string;
   terminalCredentialId: string | null;
@@ -11,8 +13,13 @@ type WorkspaceRow = {
 };
 
 function mapRow(row: any): WorkspaceRecord {
+  const dirName =
+    (typeof row.dirName === "string" && row.dirName.trim()) ||
+    (typeof row.path === "string" && row.path ? path.basename(row.path) : "") ||
+    String(row.id || "");
   return {
     id: row.id,
+    dirName,
     title: row.title,
     path: row.path,
     terminalCredentialId: row.terminalCredentialId ?? null,
@@ -24,8 +31,8 @@ function mapRow(row: any): WorkspaceRecord {
 export function insertWorkspace(db: Db, ws: WorkspaceRecord) {
   db.prepare(
     `
-      insert into workspaces (id, title, path, terminal_credential_id, created_at, updated_at)
-      values (@id, @title, @path, @terminalCredentialId, @createdAt, @updatedAt)
+      insert into workspaces (id, dir_name, title, path, terminal_credential_id, created_at, updated_at)
+      values (@id, @dirName, @title, @path, @terminalCredentialId, @createdAt, @updatedAt)
     `
   ).run(ws);
 }
@@ -36,17 +43,28 @@ export function listWorkspaces(db: Db): WorkspaceRecord[] {
       `
         select
           id,
+          dir_name as dirName,
           title,
           path,
           terminal_credential_id as terminalCredentialId,
           created_at as createdAt,
           updated_at as updatedAt
         from workspaces
-        order by updated_at desc
+        order by coalesce(last_used_at, updated_at) desc, updated_at desc
       `
     )
     .all() as WorkspaceRow[];
   return rows.map(mapRow);
+}
+
+export function touchWorkspaceLastUsedAt(db: Db, workspaceId: string, lastUsedAt: number) {
+  db.prepare(
+    `
+      update workspaces
+      set last_used_at = @lastUsedAt
+      where id = @workspaceId
+    `
+  ).run({ workspaceId, lastUsedAt });
 }
 
 export function getWorkspace(db: Db, workspaceId: string): WorkspaceRecord | null {
@@ -55,6 +73,7 @@ export function getWorkspace(db: Db, workspaceId: string): WorkspaceRecord | nul
       `
         select
           id,
+          dir_name as dirName,
           title,
           path,
           terminal_credential_id as terminalCredentialId,

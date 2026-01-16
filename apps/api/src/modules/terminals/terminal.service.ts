@@ -3,9 +3,10 @@ import type { TerminalRecord } from "@agent-workbench/shared";
 import type { AppContext } from "../../app/context.js";
 import { HttpError } from "../../app/errors.js";
 import fs from "node:fs/promises";
+import path from "node:path";
 import { newId } from "../../utils/ids.js";
 import { nowMs } from "../../utils/time.js";
-import { getWorkspace } from "../workspaces/workspace.store.js";
+import { getWorkspace, listWorkspaceRepos } from "../workspaces/workspace.store.js";
 import { tmuxHasSession, tmuxKillSession, tmuxNewSession } from "../../infra/tmux/session.js";
 import { ensureDir, pathExists } from "../../infra/fs/fs.js";
 import { caCertPath, certsRoot, sshKnownHostsPath, sshRoot, tmpRoot } from "../../infra/fs/paths.js";
@@ -32,6 +33,26 @@ function sanitizeEnvValue(raw: string) {
   const s = String(raw || "");
   if (s.includes("\0") || s.includes("\n") || s.includes("\r")) return "";
   return s;
+}
+
+function safeResolveUnderRoot(params: { root: string; rel: string }) {
+  const rootAbs = path.resolve(params.root);
+  const abs = path.resolve(params.root, params.rel);
+  if (!abs.startsWith(rootAbs + path.sep)) return null;
+  return abs;
+}
+
+async function resolveTerminalCwd(ctx: AppContext, ws: { id: string; path: string }) {
+  const repos = listWorkspaceRepos(ctx.db, ws.id);
+  if (repos.length !== 1) return ws.path;
+
+  const only = repos[0]!;
+  // 单 repo workspace 时，默认把 terminal 直接落到 repo 目录；仍做强校验与兜底。
+  const safeAbs = safeResolveUnderRoot({ root: ws.path, rel: only.dirName });
+  const repoAbs = path.resolve(only.path);
+  if (!safeAbs || safeAbs !== repoAbs) return ws.path;
+  if (!(await pathExists(repoAbs))) return ws.path;
+  return repoAbs;
 }
 
 type NetworkSettingsForTerminalV1 = {
@@ -172,13 +193,14 @@ export async function createTerminal(
   try {
     const { envPairs } = await buildTerminalGitEnv({ ctx, terminalId, workspaceId: ws.id });
     const command = envPairs.length > 0 ? ["env", ...envPairs, shell] : [shell];
+    const cwd = await resolveTerminalCwd(ctx, ws);
     try {
-      await tmuxNewSession({ sessionName, cwd: ws.path, command });
+      await tmuxNewSession({ sessionName, cwd, command });
     } catch (err) {
       if (!params.shell) {
         // 默认 shell 失败时降级到 sh
         const fallback = envPairs.length > 0 ? ["env", ...envPairs, "sh"] : ["sh"];
-        await tmuxNewSession({ sessionName, cwd: ws.path, command: fallback });
+        await tmuxNewSession({ sessionName, cwd, command: fallback });
       } else {
         throw err;
       }
