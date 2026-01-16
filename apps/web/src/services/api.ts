@@ -5,6 +5,20 @@ import type {
   ClearAllGitIdentityResponse,
   CreateRepoRequest,
   CreateCredentialRequest,
+  FileCreateRequest,
+  FileCreateResponse,
+  FileDeleteRequest,
+  FileDeleteResponse,
+  FileListRequest,
+  FileListResponse,
+  FileMkdirRequest,
+  FileMkdirResponse,
+  FileReadRequest,
+  FileReadResponse,
+  FileRenameRequest,
+  FileRenameResponse,
+  FileWriteRequest,
+  FileWriteResponse,
   CreateTerminalRequest,
   CreateWorkspaceRequest,
   ChangesResponse,
@@ -428,6 +442,69 @@ export async function getWorkspaceGitIdentity(body: GitIdentityStatusRequest) {
 export async function setWorkspaceGitIdentity(body: GitIdentitySetRequest) {
   try {
     await client.put("/git/identity", body);
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function listFiles(body: FileListRequest) {
+  try {
+    const res = await client.post<FileListResponse>("/files/list", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function readFileText(body: FileReadRequest) {
+  try {
+    const res = await client.post<FileReadResponse>("/files/read-text", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function writeFileText(body: FileWriteRequest) {
+  try {
+    const res = await client.post<FileWriteResponse>("/files/write-text", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function createFile(body: FileCreateRequest) {
+  try {
+    const res = await client.post<FileCreateResponse>("/files/create", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function mkdirPath(body: FileMkdirRequest) {
+  try {
+    const res = await client.post<FileMkdirResponse>("/files/mkdir", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function renamePath(body: FileRenameRequest) {
+  try {
+    const res = await client.post<FileRenameResponse>("/files/rename", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function deletePath(body: FileDeleteRequest) {
+  try {
+    const res = await client.post<FileDeleteResponse>("/files/delete", body);
+    return res.data;
   } catch (err) {
     throw toApiError(err);
   }

@@ -12,6 +12,7 @@ import { registerReposModule } from "../modules/repos/repos.module.js";
 import { registerWorkspacesModule } from "../modules/workspaces/workspaces.module.js";
 import { registerTerminalsModule } from "../modules/terminals/terminals.module.js";
 import { registerGitModule } from "../modules/git/git.module.js";
+import { registerFilesModule } from "../modules/files/files.module.js";
 import { registerCredentialsModule } from "../modules/credentials/credentials.module.js";
 import { registerSettingsModule } from "../modules/settings/settings.module.js";
 
@@ -63,6 +64,7 @@ export async function createApp(ctx: AppContext) {
   await registerWorkspacesModule(app, ctx);
   await registerTerminalsModule(app, ctx);
   await registerGitModule(app, ctx);
+  await registerFilesModule(app, ctx);
   await registerWebUi(app, ctx);
 
   return app;
