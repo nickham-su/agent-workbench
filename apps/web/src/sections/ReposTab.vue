@@ -13,9 +13,11 @@
           <SearchOutlined/>
         </template>
       </a-input>
-      <a-button size="small" type="text" @click="openCreate" :title="t('repos.actions.add')" :aria-label="t('repos.actions.add')">
-        <template #icon><PlusOutlined /></template>
-      </a-button>
+      <a-tooltip :title="t('repos.actions.add')" :mouse-enter-delay="0">
+        <a-button size="small" type="text" @click="openCreate" :aria-label="t('repos.actions.add')">
+          <template #icon><PlusOutlined /></template>
+        </a-button>
+      </a-tooltip>
       <div class="flex-1"></div>
     </div>
 

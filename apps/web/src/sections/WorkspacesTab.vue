@@ -13,17 +13,18 @@
           <SearchOutlined />
         </template>
       </a-input>
-      <a-button
-        size="small"
-        type="text"
-        @click="openCreate"
-        :title="t('workspaces.actions.create')"
-        :aria-label="t('workspaces.actions.create')"
-      >
-        <template #icon>
-          <PlusOutlined/>
-        </template>
-      </a-button>
+      <a-tooltip :title="t('workspaces.actions.create')" :mouse-enter-delay="0">
+        <a-button
+          size="small"
+          type="text"
+          @click="openCreate"
+          :aria-label="t('workspaces.actions.create')"
+        >
+          <template #icon>
+            <PlusOutlined/>
+          </template>
+        </a-button>
+      </a-tooltip>
     </div>
 
     <div class="px-3">
