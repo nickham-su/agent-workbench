@@ -189,6 +189,8 @@ export default {
     },
     dock: {
       moveTo: "Move to {area}",
+      moveUp: "Move Up",
+      moveDown: "Move Down",
       pinnedAt: "Pinned at {area}",
       areas: {
         leftTop: "Top-left",

@@ -1,20 +1,25 @@
 <template>
   <a-dropdown :trigger="['contextmenu']">
     <template #overlay>
-      <a-menu v-if="moveTargets.length > 0" @click="onMenuClick">
-        <a-menu-item v-for="item in moveTargets" :key="item.area">
+      <a-menu @click="onMenuClick">
+        <a-menu-item key="moveUp" :disabled="!canMoveUp">
+          {{ t("workspace.dock.moveUp") }}
+        </a-menu-item>
+        <a-menu-item key="moveDown" :disabled="!canMoveDown">
+          {{ t("workspace.dock.moveDown") }}
+        </a-menu-item>
+        <a-menu-divider v-if="moveTargets.length > 0" />
+        <a-menu-item v-for="item in moveTargets" :key="`moveTo:${item.area}`">
           {{ item.label }}
         </a-menu-item>
-      </a-menu>
-      <a-menu v-else>
-        <a-menu-item disabled>
+        <a-menu-item v-if="moveTargets.length === 0" disabled>
           {{ contextMenuHint || title }}
         </a-menu-item>
       </a-menu>
     </template>
 
     <a-tooltip :title="title" :mouseEnterDelay="0" :mouseLeaveDelay="0" :placement="tooltipPlacement">
-      <button :class="buttonClass" type="button" @click="emit('click')">
+      <button :class="buttonClass" type="button" tabindex="-1" @click="onButtonClick" @keydown="onButtonKeyDown">
         <component :is="icon" class="text-lg" />
       </button>
     </a-tooltip>
@@ -24,12 +29,15 @@
 <script setup lang="ts">
 import type { DockArea } from "./host";
 import { computed } from "vue";
+import { useI18n } from "vue-i18n";
 
 const props = defineProps<{
   title: string;
   icon: any;
   active: boolean;
   minimized: boolean;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
   moveTargets: { area: DockArea; label: string }[];
   contextMenuHint?: string;
   tooltipPlacement?: string;
@@ -37,6 +45,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   click: [];
+  moveUp: [];
+  moveDown: [];
   moveTo: [area: DockArea];
 }>();
 
@@ -52,10 +62,31 @@ const buttonClass = computed(
 
 const contextMenuHint = computed(() => props.contextMenuHint);
 const tooltipPlacement = computed(() => props.tooltipPlacement || "top");
+const { t } = useI18n();
 
 function onMenuClick(info: any) {
-  const area = String(info?.key || "") as DockArea;
+  const key = String(info?.key || "");
+  if (key === "moveUp") {
+    emit("moveUp");
+    return;
+  }
+  if (key === "moveDown") {
+    emit("moveDown");
+    return;
+  }
+  if (!key.startsWith("moveTo:")) return;
+  const area = key.slice("moveTo:".length) as DockArea;
   if (!area) return;
   emit("moveTo", area);
+}
+
+function onButtonClick(event: MouseEvent) {
+  emit("click");
+  (event.currentTarget as HTMLButtonElement | null)?.blur();
+}
+
+function onButtonKeyDown(event: KeyboardEvent) {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
 }
 </script>

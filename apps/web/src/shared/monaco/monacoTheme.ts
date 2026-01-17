@@ -1,4 +1,4 @@
-import * as monaco from "monaco-editor/esm/vs/editor/editor.api";
+import * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
 
 const PANEL_THEME_NAME = "panel-bg";
 const DEFAULT_PANEL_BG = "#1e1e1e";

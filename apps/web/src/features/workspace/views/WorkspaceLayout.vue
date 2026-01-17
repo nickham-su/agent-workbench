@@ -23,9 +23,13 @@
         :visible-tool-id-by-area="visibleToolIdByArea"
         :tool-title="toolTitle"
         :tool-icon="toolIcon"
+        :can-move-up="canMoveToolUp"
+        :can-move-down="canMoveToolDown"
         :move-targets="moveTargets"
         :context-menu-hint="contextMenuHint"
         :on-tool-icon-click="onToolIconClick"
+        :move-tool-up="moveToolUp"
+        :move-tool-down="moveToolDown"
         :move-tool="moveTool"
         :is-keep-alive="isKeepAlive"
         :tool-view="toolView"
@@ -137,7 +141,7 @@ const props = defineProps<{ workspaceId: string }>();
 const { t } = useI18n();
 type PushParams = Omit<GitPushRequest, "target">;
 
-const TOOL_IDS: ToolId[] = ["codeReview", "terminal", "files"];
+const TOOL_IDS: ToolId[] = ["files", "codeReview", "terminal"];
 const DOCK_AREAS: DockArea[] = ["leftTop", "leftBottom", "rightTop"];
 type ToolDefinition = {
   toolId: ToolId;
@@ -170,12 +174,21 @@ const currentRepoStatus = computed(() => {
 
 const tools = computed<ToolDefinition[]>(() => [
   {
+    toolId: "files",
+    title: () => t("workspace.tools.files"),
+    icon: FolderOpenOutlined,
+    view: FileExplorerToolView,
+    defaultArea: "leftTop",
+    allowedAreas: ["leftTop", "rightTop", "leftBottom"],
+    keepAlive: true
+  },
+  {
     toolId: "codeReview",
     title: () => t("workspace.tools.codeReview"),
     icon: CodeReviewIcon,
     view: CodeReviewToolView,
     defaultArea: "leftTop",
-    allowedAreas: ["leftTop"],
+    allowedAreas: ["leftTop", "rightTop", "leftBottom"],
     keepAlive: true,
     headerActions: () => [
       {
@@ -199,17 +212,8 @@ const tools = computed<ToolDefinition[]>(() => [
     title: () => t("workspace.tools.terminal"),
     icon: CodeOutlined,
     view: TerminalToolView,
-    defaultArea: "leftBottom",
-    allowedAreas: ["leftBottom", "leftTop", "rightTop"],
-    keepAlive: true
-  },
-  {
-    toolId: "files",
-    title: () => t("workspace.tools.files"),
-    icon: FolderOpenOutlined,
-    view: FileExplorerToolView,
-    defaultArea: "rightTop",
-    allowedAreas: ["rightTop", "leftTop"],
+    defaultArea: "leftTop",
+    allowedAreas: ["leftTop", "rightTop", "leftBottom"],
     keepAlive: true
   }
 ]);
@@ -222,13 +226,13 @@ const toolById = computed(() => {
 
 const toolArea = reactive<Record<ToolId, DockArea>>({
   codeReview: "leftTop",
-  terminal: "leftBottom",
-  files: "rightTop"
+  terminal: "leftTop",
+  files: "leftTop"
 });
 
 const activeToolIdByArea = reactive<Record<DockArea, ToolId | null>>({
-  leftTop: "codeReview",
-  leftBottom: "terminal",
+  leftTop: "files",
+  leftBottom: null,
   rightTop: null
 });
 
@@ -238,22 +242,25 @@ const toolMinimized = reactive<Record<ToolId, boolean>>({
   files: false
 });
 
-const DOCK_LAYOUT_STORAGE_KEY_PREFIX = "agent-workbench.workspace.dockLayout";
+const toolOrderByArea = reactive<Record<DockArea, ToolId[]>>(defaultToolOrderByArea());
+
+const DOCK_LAYOUT_STORAGE_KEY_PREFIX = "agent-workbench.workspace.dockLayout.v2";
 const CURRENT_REPO_STORAGE_KEY_PREFIX = "agent-workbench.workspace.currentRepo.v1";
 
-type DockLayoutV1 = {
-  version: 1;
+type DockLayoutV2 = {
+  version: 2;
   updatedAt: number;
   ratios: { topBottom: number; topLeft: number };
   toolArea: Record<ToolId, DockArea>;
   toolMinimized: Record<ToolId, boolean>;
   activeToolIdByArea: Record<DockArea, ToolId | null>;
+  toolOrderByArea: Record<DockArea, ToolId[]>;
 };
 
 function dockLayoutStorageKey(workspaceId: string) {
   const id = String(workspaceId || "").trim();
-  if (!id) return `${DOCK_LAYOUT_STORAGE_KEY_PREFIX}.v1`;
-  return `${DOCK_LAYOUT_STORAGE_KEY_PREFIX}.v1.${id}`;
+  if (!id) return DOCK_LAYOUT_STORAGE_KEY_PREFIX;
+  return `${DOCK_LAYOUT_STORAGE_KEY_PREFIX}.${id}`;
 }
 
 function currentRepoStorageKey(workspaceId: string) {
@@ -275,19 +282,57 @@ function clampRatio(n: number) {
   return clamp(n, 0.1, 0.9);
 }
 
-function loadDockLayout(workspaceId: string): DockLayoutV1 | null {
+function defaultToolOrderByArea(): Record<DockArea, ToolId[]> {
+  const res: Record<DockArea, ToolId[]> = { leftTop: [], leftBottom: [], rightTop: [] };
+  for (const tool of tools.value) {
+    res[tool.defaultArea].push(tool.toolId);
+  }
+  return res;
+}
+
+function normalizeToolOrderByArea(
+  toolAreaMap: Record<ToolId, DockArea>,
+  raw: Partial<Record<DockArea, unknown>> | null | undefined
+) {
+  const res: Record<DockArea, ToolId[]> = { leftTop: [], leftBottom: [], rightTop: [] };
+  if (raw) {
+    for (const area of DOCK_AREAS) {
+      const list = (raw as any)[area];
+      if (!Array.isArray(list)) continue;
+      for (const item of list) {
+        if (!isToolId(item)) continue;
+        if (toolAreaMap[item] !== area) continue;
+        if (!res[area].includes(item)) res[area].push(item);
+      }
+    }
+  }
+  for (const tool of tools.value) {
+    const area = toolAreaMap[tool.toolId] ?? tool.defaultArea;
+    if (!res[area].includes(tool.toolId)) res[area].push(tool.toolId);
+  }
+  return res;
+}
+
+function setToolOrderByArea(next: Record<DockArea, ToolId[]>) {
+  for (const area of DOCK_AREAS) {
+    toolOrderByArea[area] = [...next[area]];
+  }
+}
+
+function loadDockLayout(workspaceId: string): DockLayoutV2 | null {
   try {
     const raw = localStorage.getItem(dockLayoutStorageKey(workspaceId));
     if (!raw) return null;
-    const json = JSON.parse(raw) as Partial<DockLayoutV1> | null;
-    if (!json || json.version !== 1) return null;
+    const json = JSON.parse(raw) as Partial<DockLayoutV2> | null;
+    if (!json || json.version !== 2) return null;
 
     const ratios = (json.ratios ?? {}) as Partial<{ topBottom: unknown; topLeft: unknown }>;
     const toolAreaRaw = json.toolArea ?? ({} as any);
     const toolMinimizedRaw = json.toolMinimized ?? ({} as any);
     const activeRaw = json.activeToolIdByArea ?? ({} as any);
+    const toolOrderRaw = json.toolOrderByArea ?? ({} as any);
 
-    const toolAreaOut: Record<ToolId, DockArea> = { codeReview: "leftTop", terminal: "leftBottom", files: "rightTop" };
+    const toolAreaOut: Record<ToolId, DockArea> = { codeReview: "leftTop", terminal: "leftTop", files: "leftTop" };
     for (const toolId of TOOL_IDS) {
       const v = (toolAreaRaw as any)[toolId];
       if (isDockArea(v)) toolAreaOut[toolId] = v;
@@ -299,7 +344,7 @@ function loadDockLayout(workspaceId: string): DockLayoutV1 | null {
       if (typeof v === "boolean") toolMinimizedOut[toolId] = v;
     }
 
-    const activeOut: Record<DockArea, ToolId | null> = { leftTop: "codeReview", leftBottom: "terminal", rightTop: null };
+    const activeOut: Record<DockArea, ToolId | null> = { leftTop: "files", leftBottom: null, rightTop: null };
     for (const area of DOCK_AREAS) {
       const v = (activeRaw as any)[area];
       if (v === null) {
@@ -310,7 +355,7 @@ function loadDockLayout(workspaceId: string): DockLayoutV1 | null {
     }
 
     return {
-      version: 1,
+      version: 2,
       updatedAt: typeof json.updatedAt === "number" ? json.updatedAt : Date.now(),
       ratios: {
         topBottom: clampRatio(typeof ratios.topBottom === "number" ? ratios.topBottom : 2 / 3),
@@ -318,7 +363,8 @@ function loadDockLayout(workspaceId: string): DockLayoutV1 | null {
       },
       toolArea: toolAreaOut,
       toolMinimized: toolMinimizedOut,
-      activeToolIdByArea: activeOut
+      activeToolIdByArea: activeOut,
+      toolOrderByArea: normalizeToolOrderByArea(toolAreaOut, toolOrderRaw)
     };
   } catch {
     return null;
@@ -352,8 +398,8 @@ function saveDockLayout(workspaceId: string) {
   const id = String(workspaceId || "").trim();
   if (!id) return;
   try {
-    const data: DockLayoutV1 = {
-      version: 1,
+    const data: DockLayoutV2 = {
+      version: 2,
       updatedAt: Date.now(),
       ratios: { topBottom: topBottomRatio.value, topLeft: topLeftRatio.value },
       toolArea: { codeReview: toolArea.codeReview, terminal: toolArea.terminal, files: toolArea.files },
@@ -362,6 +408,11 @@ function saveDockLayout(workspaceId: string) {
         leftTop: activeToolIdByArea.leftTop,
         leftBottom: activeToolIdByArea.leftBottom,
         rightTop: activeToolIdByArea.rightTop
+      },
+      toolOrderByArea: {
+        leftTop: [...toolOrderByArea.leftTop],
+        leftBottom: [...toolOrderByArea.leftBottom],
+        rightTop: [...toolOrderByArea.rightTop]
       }
     };
     localStorage.setItem(dockLayoutStorageKey(workspaceId), JSON.stringify(data));
@@ -385,21 +436,22 @@ function scheduleSaveDockLayout() {
 
 function resetDockLayoutDefaults() {
   toolArea.codeReview = "leftTop";
-  toolArea.terminal = "leftBottom";
-  toolArea.files = "rightTop";
-  activeToolIdByArea.leftTop = "codeReview";
-  activeToolIdByArea.leftBottom = "terminal";
+  toolArea.terminal = "leftTop";
+  toolArea.files = "leftTop";
+  activeToolIdByArea.leftTop = "files";
+  activeToolIdByArea.leftBottom = null;
   activeToolIdByArea.rightTop = null;
   toolMinimized.codeReview = false;
   toolMinimized.terminal = true;
   toolMinimized.files = false;
   toolMinimized.codeReview = false;
   toolMinimized.terminal = true;
+  setToolOrderByArea(defaultToolOrderByArea());
   topBottomRatio.value = 2 / 3;
   topLeftRatio.value = 2 / 3;
 }
 
-function applyDockLayout(layout: DockLayoutV1) {
+function applyDockLayout(layout: DockLayoutV2) {
   topBottomRatio.value = clampRatio(layout.ratios.topBottom);
   topLeftRatio.value = clampRatio(layout.ratios.topLeft);
 
@@ -413,6 +465,8 @@ function applyDockLayout(layout: DockLayoutV1) {
     }
     toolMinimized[toolId] = Boolean(layout.toolMinimized[toolId]);
   }
+
+  setToolOrderByArea(normalizeToolOrderByArea(toolArea, layout.toolOrderByArea));
 
   for (const area of DOCK_AREAS) {
     const next = layout.activeToolIdByArea[area];
@@ -431,7 +485,7 @@ function applyDockLayout(layout: DockLayoutV1) {
     activeToolIdByArea[area] = next;
   }
 
-  if (!activeToolIdByArea.leftTop) activeToolIdByArea.leftTop = "codeReview";
+  if (!activeToolIdByArea.leftTop) activeToolIdByArea.leftTop = "files";
 }
 
 async function clampDockRatiosToContainer() {
@@ -562,11 +616,64 @@ const visibleToolIdByArea = computed(() => {
   return res;
 });
 
-const leftTopToolbarToolIds = computed<ToolId[]>(() => tools.value.filter((t) => toolCurrentArea(t.toolId) === "leftTop").map((t) => t.toolId));
-const leftBottomToolbarToolIds = computed<ToolId[]>(() =>
-  tools.value.filter((t) => toolCurrentArea(t.toolId) === "leftBottom").map((t) => t.toolId)
-);
-const rightToolbarToolIds = computed<ToolId[]>(() => tools.value.filter((t) => toolCurrentArea(t.toolId) === "rightTop").map((t) => t.toolId));
+const leftTopToolbarToolIds = computed<ToolId[]>(() => toolOrderByArea.leftTop.filter((id) => toolCurrentArea(id) === "leftTop"));
+const leftBottomToolbarToolIds = computed<ToolId[]>(() => toolOrderByArea.leftBottom.filter((id) => toolCurrentArea(id) === "leftBottom"));
+const rightToolbarToolIds = computed<ToolId[]>(() => toolOrderByArea.rightTop.filter((id) => toolCurrentArea(id) === "rightTop"));
+
+function removeToolFromOrder(toolId: ToolId) {
+  for (const area of DOCK_AREAS) {
+    const list = toolOrderByArea[area];
+    const index = list.indexOf(toolId);
+    if (index >= 0) list.splice(index, 1);
+  }
+}
+
+function moveToolToOrderEnd(toolId: ToolId, targetArea: DockArea) {
+  removeToolFromOrder(toolId);
+  toolOrderByArea[targetArea].push(toolId);
+}
+
+function moveToolOrderByStep(toolId: ToolId, step: number) {
+  const area = toolCurrentArea(toolId);
+  const list = toolOrderByArea[area];
+  const index = list.indexOf(toolId);
+  if (index < 0) return;
+  const next = index + step;
+  if (next < 0 || next >= list.length) return;
+  list.splice(index, 1);
+  list.splice(next, 0, toolId);
+}
+
+function firstToolIdInArea(area: DockArea) {
+  const list = toolOrderByArea[area];
+  for (const id of list) {
+    if (toolCurrentArea(id) === area) return id;
+  }
+  return null;
+}
+
+function canMoveToolUp(toolId: ToolId) {
+  const area = toolCurrentArea(toolId);
+  const list = toolOrderByArea[area];
+  return list.indexOf(toolId) > 0;
+}
+
+function canMoveToolDown(toolId: ToolId) {
+  const area = toolCurrentArea(toolId);
+  const list = toolOrderByArea[area];
+  const index = list.indexOf(toolId);
+  return index >= 0 && index < list.length - 1;
+}
+
+function moveToolUp(toolId: ToolId) {
+  if (!canMoveToolUp(toolId)) return;
+  moveToolOrderByStep(toolId, -1);
+}
+
+function moveToolDown(toolId: ToolId) {
+  if (!canMoveToolDown(toolId)) return;
+  moveToolOrderByStep(toolId, 1);
+}
 
 function moveTool(toolId: ToolId, targetArea: DockArea) {
   const def = toolById.value.get(toolId);
@@ -581,7 +688,18 @@ function moveTool(toolId: ToolId, targetArea: DockArea) {
   const targetHasVisible = Boolean(visibleToolIdByArea.value[targetArea]);
 
   toolArea[toolId] = targetArea;
-  if (wasActive) activeToolIdByArea[fromArea] = null;
+  moveToolToOrderEnd(toolId, targetArea);
+  if (wasVisible) {
+    const nextId = firstToolIdInArea(fromArea);
+    if (nextId) {
+      activeToolIdByArea[fromArea] = nextId;
+      toolMinimized[nextId] = false;
+    } else if (wasActive) {
+      activeToolIdByArea[fromArea] = null;
+    }
+  } else if (wasActive) {
+    activeToolIdByArea[fromArea] = null;
+  }
 
   if (wasVisible && !targetHasVisible) {
     activeToolIdByArea[targetArea] = toolId;
@@ -809,6 +927,7 @@ watch(
 watch(toolArea, scheduleSaveDockLayout, { deep: true });
 watch(toolMinimized, scheduleSaveDockLayout, { deep: true });
 watch(activeToolIdByArea, scheduleSaveDockLayout, { deep: true });
+watch(toolOrderByArea, scheduleSaveDockLayout, { deep: true });
 watch(
   () => currentRepoDirName.value,
   (dirName) => {

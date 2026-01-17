@@ -110,8 +110,9 @@
 import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { Modal, message } from "ant-design-vue";
 import { useI18n } from "vue-i18n";
-import * as monaco from "monaco-editor/esm/vs/editor/editor.api";
+import * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
 import "monaco-editor/min/vs/editor/editor.main.css";
+import "monaco-editor/esm/vs/editor/contrib/find/browser/findController.js";
 import type { FileEntry, FileReadResponse, GitTarget } from "@agent-workbench/shared";
 import FileExplorerTree from "./components/FileExplorerTree.vue";
 import FileExplorerTabs from "./components/FileExplorerTabs.vue";
@@ -303,6 +304,36 @@ function onSplitterPointerDown(evt: PointerEvent) {
   window.addEventListener("pointermove", handleMove);
   window.addEventListener("pointerup", handleUp);
   draggingCleanup = handleUp;
+}
+
+function isFindShortcut(evt: KeyboardEvent) {
+  if (!evt.metaKey && !evt.ctrlKey) return false;
+  if (evt.altKey) return false;
+  const key = evt.key.toLowerCase();
+  return key === "f" || key === "h";
+}
+
+function isEditorFocused(evt: KeyboardEvent) {
+  if (editor?.hasTextFocus?.()) return true;
+  const dom = editor?.getDomNode();
+  if (!dom) return false;
+  const target = evt.target instanceof Node ? evt.target : null;
+  if (target && dom.contains(target)) return true;
+  const active = document.activeElement;
+  return active instanceof Node && dom.contains(active);
+}
+
+function handleEditorKeydown(evt: KeyboardEvent) {
+  if (!editor) return;
+  if (!isFindShortcut(evt)) return;
+  if (!isEditorFocused(evt)) return;
+
+  evt.preventDefault();
+  evt.stopPropagation();
+
+  const actionId = evt.key.toLowerCase() === "h" ? "editor.action.startFindReplaceAction" : "actions.find";
+  const action = editor.getAction(actionId);
+  if (action) void action.run();
 }
 
 function normalizeLanguage(lang?: string) {
@@ -1171,9 +1202,15 @@ watch(
 
 onMounted(() => {
   scheduleApplyEditor();
+  if (typeof window !== "undefined") {
+    window.addEventListener("keydown", handleEditorKeydown, true);
+  }
 });
 
 onBeforeUnmount(() => {
+  if (typeof window !== "undefined") {
+    window.removeEventListener("keydown", handleEditorKeydown, true);
+  }
   draggingCleanup?.();
   editorBlurDisposable?.dispose();
   editorSaveCommandId = null;

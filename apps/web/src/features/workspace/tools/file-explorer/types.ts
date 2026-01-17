@@ -1,4 +1,4 @@
-import type * as monaco from "monaco-editor/esm/vs/editor/editor.api";
+import type * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
 import type { FileEntry, FileReadResponse, FileVersion } from "@agent-workbench/shared";
 
 export type TreeNode = {

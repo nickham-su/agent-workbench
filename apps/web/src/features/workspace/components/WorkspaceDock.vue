@@ -8,10 +8,14 @@
             :icon="toolIcon(toolId)"
             :active="activeToolIdByArea.leftTop === toolId"
             :minimized="toolMinimized[toolId] ?? false"
+            :can-move-up="canMoveUp(toolId)"
+            :can-move-down="canMoveDown(toolId)"
             :moveTargets="moveTargets(toolId)"
             :contextMenuHint="contextMenuHint(toolId)"
             tooltipPlacement="right"
             @click="onToolIconClick(toolId)"
+            @moveUp="() => moveToolUp(toolId)"
+            @moveDown="() => moveToolDown(toolId)"
             @moveTo="(area) => moveTool(toolId, area)"
           />
         </template>
@@ -23,10 +27,14 @@
             :icon="toolIcon(toolId)"
             :active="activeToolIdByArea.leftBottom === toolId"
             :minimized="toolMinimized[toolId] ?? false"
+            :can-move-up="canMoveUp(toolId)"
+            :can-move-down="canMoveDown(toolId)"
             :moveTargets="moveTargets(toolId)"
             :contextMenuHint="contextMenuHint(toolId)"
             tooltipPlacement="right"
             @click="onToolIconClick(toolId)"
+            @moveUp="() => moveToolUp(toolId)"
+            @moveDown="() => moveToolDown(toolId)"
             @moveTo="(area) => moveTool(toolId, area)"
           />
         </template>
@@ -142,10 +150,14 @@
           :icon="toolIcon(toolId)"
           :active="activeToolIdByArea.rightTop === toolId"
           :minimized="toolMinimized[toolId] ?? false"
+          :can-move-up="canMoveUp(toolId)"
+          :can-move-down="canMoveDown(toolId)"
           :moveTargets="moveTargets(toolId)"
           :contextMenuHint="contextMenuHint(toolId)"
           tooltipPlacement="left"
           @click="onToolIconClick(toolId)"
+          @moveUp="() => moveToolUp(toolId)"
+          @moveDown="() => moveToolDown(toolId)"
           @moveTo="(area) => moveTool(toolId, area)"
         />
       </template>
@@ -169,9 +181,13 @@ const props = defineProps<{
   visibleToolIdByArea: Record<DockArea, ToolId | null>;
   toolTitle: (toolId: ToolId) => string;
   toolIcon: (toolId: ToolId) => any;
+  canMoveUp: (toolId: ToolId) => boolean;
+  canMoveDown: (toolId: ToolId) => boolean;
   moveTargets: (toolId: ToolId) => { area: DockArea; label: string }[];
   contextMenuHint: (toolId: ToolId) => string;
   onToolIconClick: (toolId: ToolId) => void;
+  moveToolUp: (toolId: ToolId) => void;
+  moveToolDown: (toolId: ToolId) => void;
   moveTool: (toolId: ToolId, area: DockArea) => void;
   isKeepAlive: (toolId: ToolId) => boolean;
   toolView: (toolId: ToolId) => any;
