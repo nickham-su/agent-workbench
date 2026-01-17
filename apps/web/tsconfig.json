@@ -7,6 +7,12 @@
     "strict": true,
     "jsx": "preserve",
     "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": [
+        "src/*"
+      ]
+    },
     "types": [
       "vite/client"
     ]

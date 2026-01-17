@@ -3,7 +3,9 @@ import { fileURLToPath } from "node:url";
 import { defineConfig, loadEnv } from "vite";
 import vue from "@vitejs/plugin-vue";
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const webRoot = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(webRoot, "../..");
+const srcRoot = path.resolve(webRoot, "src");
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, repoRoot, "");
@@ -22,6 +24,11 @@ export default defineConfig(({ mode }) => {
   return {
     envDir: repoRoot,
     plugins: [vue()],
+    resolve: {
+      alias: {
+        "@": srcRoot
+      }
+    },
     define: {
       __DEV_API_TARGET__: JSON.stringify(devApiOrigin)
     },
