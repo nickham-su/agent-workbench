@@ -374,6 +374,7 @@ export default {
     status: {
       saving: "Saving…"
     },
+    resizeFileList: "Resize file list",
     placeholder: {
       selectRepo: "Select a repo",
       openFile: "Select a file on the left to open",

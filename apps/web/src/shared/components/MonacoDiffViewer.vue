@@ -7,6 +7,7 @@ import {onBeforeUnmount, onMounted, ref, watch} from "vue";
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api";
 import "monaco-editor/min/vs/editor/editor.main.css";
 import { ensureMonacoEnvironment } from "@/shared/monaco/monacoEnv";
+import { applyMonacoPanelTheme } from "@/shared/monaco/monacoTheme";
 import { diffFontSize } from "@/shared/settings/uiFontSizes";
 
 const props = defineProps<{
@@ -223,7 +224,7 @@ onMounted(() => {
   ensureMonacoEnvironment();
   if (!containerEl.value) return;
 
-  monaco.editor.setTheme("vs-dark");
+  applyMonacoPanelTheme();
   editor = monaco.editor.createDiffEditor(containerEl.value, {
     automaticLayout: true,
     renderSideBySide: true,

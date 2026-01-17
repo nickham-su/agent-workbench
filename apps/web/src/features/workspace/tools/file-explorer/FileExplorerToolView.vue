@@ -6,119 +6,73 @@
       {{ t("files.placeholder.selectRepo") }}
     </div>
 
-    <div v-else class="flex-1 min-h-0 flex">
-      <div class="w-64 min-w-[240px] max-w-[360px] flex flex-col border-r border-[var(--border-color-secondary)]">
-        <div class="flex items-center justify-between px-2 py-1.5 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
-          <div class="text-xs font-semibold">{{ t("files.title") }}</div>
-          <div class="flex items-center gap-1">
-            <a-tooltip :title="t('files.actions.refresh')" :mouseEnterDelay="0" :mouseLeaveDelay="0">
-              <span class="inline-flex">
-                <a-button size="small" type="text" :disabled="!target" @click="refreshRoot">
-                  <template #icon><ReloadOutlined /></template>
-                </a-button>
-              </span>
-            </a-tooltip>
-          </div>
-        </div>
-        <div class="flex-1 min-h-0 overflow-auto">
-          <a-tree
-            :key="treeKey"
-            :tree-data="treeData"
-            :load-data="onLoadData"
-            :expandedKeys="expandedKeys"
-            :selectedKeys="selectedKeys"
-            blockNode
-            showLine
-            @update:expandedKeys="onExpandedKeysUpdate"
-            @update:selectedKeys="onSelectedKeysUpdate"
-            @select="onTreeSelect"
-          >
-            <template #title="{ title, dataRef }">
-              <a-dropdown :trigger="['contextmenu']" class="block">
-                <span
-                  class="block w-full select-none pr-2"
-                  @contextmenu.prevent="onNodeContextMenu(dataRef as TreeNode)"
-                  @dblclick.stop.prevent="onNodeDblClick(dataRef as TreeNode)"
-                >
-                  {{ title }}
-                </span>
-                <template #overlay>
-                  <a-menu @click="onContextMenuClick">
-                    <a-menu-item v-if="selectedNode?.data.kind === 'dir'" key="newFile">
-                      {{ t("files.actions.newFile") }}
-                    </a-menu-item>
-                    <a-menu-item v-if="selectedNode?.data.kind === 'dir'" key="newFolder">
-                      {{ t("files.actions.newFolder") }}
-                    </a-menu-item>
-                    <a-menu-divider v-if="selectedNode?.data.kind === 'dir' && canRenameDelete" />
-                    <a-menu-item v-if="canRenameDelete" key="rename">{{ t("files.actions.rename") }}</a-menu-item>
-                    <a-menu-item v-if="canRenameDelete" key="delete" danger>{{ t("files.actions.delete") }}</a-menu-item>
-                  </a-menu>
-                </template>
-              </a-dropdown>
-            </template>
-          </a-tree>
-          <div v-if="treeLoading" class="p-2 text-xs text-[color:var(--text-tertiary)]">
-            {{ t("common.loading") }}
-          </div>
-          <div v-else-if="isTreeEmpty" class="p-2 text-xs text-[color:var(--text-tertiary)]">
-            {{ t("files.placeholder.empty") }}
-          </div>
-        </div>
+    <div v-else ref="containerEl" class="flex-1 min-h-0 grid gap-0" :style="containerStyle">
+      <div class="min-h-0 min-w-0 flex flex-col border-r border-[var(--border-color-secondary)]">
+        <FileExplorerTree
+          :target="target"
+          :tree-key="treeKey"
+          :tree-data="treeData"
+          :expanded-keys="expandedKeys"
+          :selected-keys="selectedKeys"
+          :tree-loading="treeLoading"
+          :is-tree-empty="isTreeEmpty"
+          :selected-node="selectedNode"
+          :can-rename-delete="canRenameDelete"
+          :refresh-root="refreshRoot"
+          :on-load-data="onLoadData"
+          :on-expanded-keys-update="onExpandedKeysUpdate"
+          :on-selected-keys-update="onSelectedKeysUpdate"
+          :on-tree-select="onTreeSelect"
+          :on-node-context-menu="onNodeContextMenu"
+          :on-node-dbl-click="onNodeDblClick"
+          :on-context-menu-click="onContextMenuClick"
+        />
       </div>
 
-      <div class="flex-1 min-w-0 min-h-0 flex flex-col">
-        <a-tabs
-          v-if="tabs.length > 0"
-          :activeKey="activeTabKey"
-          size="small"
-          :animated="false"
-          class="files-tabs bg-[var(--panel-bg-elevated)]"
-          @update:activeKey="onActiveTabUpdate"
-        >
-          <a-tab-pane v-for="tab in tabs" :key="tab.path">
-            <template #tab>
-                <span class="files-tab-label px-1.5">
-                  <span class="truncate max-w-[180px]">{{ tab.title }}</span>
-                  <span v-if="tab.dirty && !tab.saving" class="ml-1 text-[10px] text-[color:var(--warning-color)]">●</span>
-                  <a-tooltip :title="t('files.actions.close')" :mouseEnterDelay="0" :mouseLeaveDelay="0">
-                    <CloseOutlined
-                      class="cursor-pointer text-[color:var(--text-tertiary)] hover:text-[color:var(--text-secondary)] !ml-1 !mr-0 text-xs"
-                      @mousedown.stop.prevent
-                    @click.stop.prevent="requestCloseTab(tab.path)"
-                  />
-                </a-tooltip>
-              </span>
-            </template>
-          </a-tab-pane>
-        </a-tabs>
+      <div class="min-h-0 min-w-0 overflow-visible flex flex-col relative">
+        <div
+          :class="splitterClass"
+          :style="splitterStyle"
+          role="separator"
+          aria-orientation="vertical"
+          :aria-label="t('files.resizeFileList')"
+          @pointerdown="onSplitterPointerDown"
+        />
+        <div class="flex-1 min-w-0 min-h-0 flex flex-col">
+          <FileExplorerTabs
+            :tabs="tabs"
+            :active-tab-key="activeTabKey"
+            :on-active-tab-update="onActiveTabUpdate"
+            :request-close-tab="requestCloseTab"
+          />
 
-        <div class="flex-1 min-h-0 relative">
-          <div v-if="!activeTab" class="h-full flex items-center justify-center text-xs text-[color:var(--text-tertiary)]">
-            {{ t("files.placeholder.openFile") }}
-          </div>
-          <div
-            v-else-if="activeTab.previewable === false"
-            class="h-full flex items-center justify-center text-xs text-[color:var(--text-tertiary)]"
-          >
-            {{ notPreviewableLabel(activeTab) }}
-          </div>
-          <div
-            ref="editorEl"
-            class="absolute inset-0"
-            v-show="activeTab && activeTab.previewable !== false"
-          ></div>
-          <div
-            v-if="activeTab?.saving"
-            class="absolute right-2 top-2 text-[11px] text-[color:var(--text-tertiary)]"
-          >
-            {{ t("files.status.saving") }}
-          </div>
-          <div
-            v-else-if="activeTab?.error"
-            class="absolute right-2 top-2 text-[11px] text-[color:var(--danger-color)]"
-          >
-            {{ activeTab.error }}
+          <div class="flex-1 min-h-0 relative">
+            <div v-if="!activeTab" class="h-full flex items-center justify-center text-xs text-[color:var(--text-tertiary)]">
+              {{ t("files.placeholder.openFile") }}
+            </div>
+            <div
+              v-else-if="activeTab.previewable === false"
+              class="h-full flex items-center justify-center text-xs text-[color:var(--text-tertiary)]"
+            >
+              {{ notPreviewableLabel(activeTab) }}
+            </div>
+            <div
+              ref="editorEl"
+              class="absolute inset-0"
+              v-show="activeTab && activeTab.previewable !== false"
+            ></div>
+            <div
+              v-if="activeTab?.saving"
+              class="absolute right-2 top-2 text-[11px] text-[color:var(--text-tertiary)]"
+            >
+              {{ t("files.status.saving") }}
+            </div>
+            <div
+              v-else-if="activeTab?.error"
+              class="absolute right-2 top-2 text-[11px] text-[color:var(--danger-color)]"
+            >
+              {{ activeTab.error }}
+            </div>
           </div>
         </div>
       </div>
@@ -158,8 +112,10 @@ import { Modal, message } from "ant-design-vue";
 import { useI18n } from "vue-i18n";
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api";
 import "monaco-editor/min/vs/editor/editor.main.css";
-import { CloseOutlined, ReloadOutlined } from "@ant-design/icons-vue";
-import type { FileEntry, FileReadResponse, FileVersion, GitTarget } from "@agent-workbench/shared";
+import type { FileEntry, FileReadResponse, GitTarget } from "@agent-workbench/shared";
+import FileExplorerTree from "./components/FileExplorerTree.vue";
+import FileExplorerTabs from "./components/FileExplorerTabs.vue";
+import type { FileTab, TreeNode } from "./types";
 import {
   ApiError,
   createFile,
@@ -171,40 +127,24 @@ import {
   writeFileText
 } from "@/shared/api";
 import { ensureMonacoEnvironment } from "@/shared/monaco/monacoEnv";
+import { applyMonacoPanelTheme } from "@/shared/monaco/monacoTheme";
 import { ensureMonacoLanguage } from "@/shared/monaco/languageLoader";
 import { diffFontSize } from "@/shared/settings/uiFontSizes";
 
-type TreeNode = {
-  key: string;
-  title: string;
-  isLeaf: boolean;
-  children?: TreeNode[];
-  selectable?: boolean;
-  data: FileEntry;
-};
-
-type FileTab = {
-  path: string;
-  title: string;
-  previewable: boolean;
-  reason?: FileReadResponse["reason"];
-  version?: FileVersion;
-  model?: monaco.editor.ITextModel;
-  savedContent: string;
-  dirty: boolean;
-  saving: boolean;
-  pendingSave: boolean;
-  conflictOpen?: boolean;
-  error?: string;
-  language?: string;
-  disposable?: monaco.IDisposable;
-};
 
 const props = defineProps<{ workspaceId: string; target: GitTarget | null; toolId: string }>();
 const { t } = useI18n();
 
 const ROOT_KEY = "__files_root__";
+const FILE_TREE_SPLIT_RATIO_KEY_PREFIX = "agent-workbench.workspace.fileTreeSplitRatio";
+const DEFAULT_FILE_TREE_SPLIT_RATIO = 0.22;
+const SPLITTER_PX = 6;
+const MIN_TREE_RATIO = 0.15;
+const MAX_TREE_RATIO = 0.55;
+const MIN_TREE_PX = 220;
+const MIN_EDITOR_PX = 360;
 
+const containerEl = ref<HTMLElement | null>(null);
 const treeKey = ref(0);
 const treeData = ref<TreeNode[]>([]);
 const expandedKeys = ref<string[]>([]);
@@ -251,6 +191,119 @@ const isTreeEmpty = computed(() => {
 });
 
 const activeTab = ref<FileTab | null>(null);
+const fileTreeSplitRatio = ref<number>(loadFileTreeSplitRatio(props.workspaceId));
+
+watch(
+  () => props.workspaceId,
+  (workspaceId) => {
+    fileTreeSplitRatio.value = loadFileTreeSplitRatio(workspaceId);
+  }
+);
+
+watch(
+  () => fileTreeSplitRatio.value,
+  () => {
+    try {
+      localStorage.setItem(fileTreeSplitRatioStorageKey(props.workspaceId), String(fileTreeSplitRatio.value));
+    } catch {
+      // 忽略
+    }
+  }
+);
+
+const containerStyle = computed(() => {
+  return {
+    gridTemplateColumns: `${fileTreeSplitRatio.value}fr ${(1 - fileTreeSplitRatio.value).toFixed(6)}fr`,
+    minHeight: 0,
+    height: "100%"
+  } as const;
+});
+
+const splitterStyle = computed(() => {
+  const offset = `${-(SPLITTER_PX / 2)}px`;
+  return {
+    position: "absolute",
+    left: offset,
+    top: "0",
+    width: `${SPLITTER_PX}px`,
+    height: "100%",
+    zIndex: 10,
+    touchAction: "none"
+  } as const;
+});
+
+const splitterClass = computed(() => {
+  return "bg-transparent hover:bg-[var(--border-color-secondary)] active:bg-[var(--border-color)] transition-colors duration-100 select-none cursor-col-resize";
+});
+
+let draggingCleanup: (() => void) | null = null;
+
+function fileTreeSplitRatioStorageKey(workspaceId: string) {
+  const id = String(workspaceId || "").trim();
+  if (!id) return FILE_TREE_SPLIT_RATIO_KEY_PREFIX;
+  return `${FILE_TREE_SPLIT_RATIO_KEY_PREFIX}.${id}`;
+}
+
+function clamp(n: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, n));
+}
+
+function clampSplitRatioByContainer(params: { ratio: number; containerSize: number }) {
+  const { containerSize } = params;
+  if (!Number.isFinite(containerSize) || containerSize <= 0) return clamp(params.ratio, MIN_TREE_RATIO, MAX_TREE_RATIO);
+
+  const minByPx = MIN_TREE_PX / containerSize;
+  const maxByPx = 1 - MIN_EDITOR_PX / containerSize;
+
+  const min = Math.max(MIN_TREE_RATIO, minByPx);
+  const max = Math.min(MAX_TREE_RATIO, maxByPx);
+  if (min >= max) return clamp(params.ratio, MIN_TREE_RATIO, MAX_TREE_RATIO);
+  return clamp(params.ratio, min, max);
+}
+
+function loadFileTreeSplitRatio(workspaceId: string) {
+  try {
+    const raw = localStorage.getItem(fileTreeSplitRatioStorageKey(workspaceId));
+    if (!raw) return DEFAULT_FILE_TREE_SPLIT_RATIO;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return DEFAULT_FILE_TREE_SPLIT_RATIO;
+    return clamp(n, MIN_TREE_RATIO, MAX_TREE_RATIO);
+  } catch {
+    return DEFAULT_FILE_TREE_SPLIT_RATIO;
+  }
+}
+
+function onSplitterPointerDown(evt: PointerEvent) {
+  const el = containerEl.value;
+  if (!el) return;
+
+  evt.preventDefault();
+  evt.stopPropagation();
+
+  const rect = el.getBoundingClientRect();
+  const containerSize = rect.width;
+  if (!Number.isFinite(containerSize) || containerSize <= 0) return;
+
+  const prevUserSelect = document.body.style.userSelect;
+  document.body.style.userSelect = "none";
+
+  const handleMove = (e: PointerEvent) => {
+    const nextRaw = (e.clientX - rect.left) / rect.width;
+    const next = clampSplitRatioByContainer({ ratio: nextRaw, containerSize });
+    fileTreeSplitRatio.value = next;
+  };
+
+  const handleUp = () => {
+    window.removeEventListener("pointermove", handleMove);
+    window.removeEventListener("pointerup", handleUp);
+    document.body.style.userSelect = prevUserSelect;
+    draggingCleanup = null;
+  };
+
+  window.addEventListener("pointermove", handleMove);
+  window.addEventListener("pointerup", handleUp);
+  draggingCleanup = handleUp;
+}
 
 function normalizeLanguage(lang?: string) {
   if (!lang) return undefined;
@@ -1075,7 +1128,7 @@ function initEditor() {
   if (editor) return;
   if (!editorEl.value) return;
   ensureMonacoEnvironment();
-  monaco.editor.setTheme("vs-dark");
+  applyMonacoPanelTheme();
   editor = monaco.editor.create(editorEl.value, {
     automaticLayout: true,
     readOnly: false,
@@ -1121,6 +1174,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  draggingCleanup?.();
   editorBlurDisposable?.dispose();
   editorSaveCommandId = null;
   editor?.dispose();

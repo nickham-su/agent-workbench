@@ -372,6 +372,7 @@ export default {
     status: {
       saving: "正在保存…"
     },
+    resizeFileList: "调整文件列表宽度",
     placeholder: {
       selectRepo: "请选择仓库",
       openFile: "从左侧选择文件打开",

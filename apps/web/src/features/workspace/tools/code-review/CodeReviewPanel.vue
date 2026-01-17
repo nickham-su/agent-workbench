@@ -384,12 +384,10 @@ const MAX_LIST_RATIO = 0.55;
 const MIN_LIST_PX = 220;
 const MIN_DIFF_PX = 360;
 
-function fileListSplitRatioStorageKey(workspaceId: string, targetKey?: string) {
+function fileListSplitRatioStorageKey(workspaceId: string) {
   const id = String(workspaceId || "").trim();
   if (!id) return FILE_LIST_SPLIT_RATIO_KEY_PREFIX;
-  const suffix = String(targetKey || "").trim();
-  if (!suffix) return `${FILE_LIST_SPLIT_RATIO_KEY_PREFIX}.${id}`;
-  return `${FILE_LIST_SPLIT_RATIO_KEY_PREFIX}.${id}.${suffix}`;
+  return `${FILE_LIST_SPLIT_RATIO_KEY_PREFIX}.${id}`;
 }
 
 function clamp(n: number, min: number, max: number) {
@@ -409,9 +407,9 @@ function clampSplitRatioByContainer(params: { ratio: number; containerSize: numb
   return clamp(params.ratio, min, max);
 }
 
-function loadFileListSplitRatio(workspaceId: string, targetKey?: string) {
+function loadFileListSplitRatio(workspaceId: string) {
   try {
-    const raw = localStorage.getItem(fileListSplitRatioStorageKey(workspaceId, targetKey));
+    const raw = localStorage.getItem(fileListSplitRatioStorageKey(workspaceId));
     if (!raw) return DEFAULT_FILE_LIST_SPLIT_RATIO;
     const n = Number(raw);
     if (!Number.isFinite(n)) return DEFAULT_FILE_LIST_SPLIT_RATIO;
@@ -421,13 +419,12 @@ function loadFileListSplitRatio(workspaceId: string, targetKey?: string) {
   }
 }
 
-const targetKey = computed(() => props.target?.kind === "workspaceRepo" ? props.target.dirName : "");
-const fileListSplitRatio = ref<number>(loadFileListSplitRatio(props.workspaceId, targetKey.value));
+const fileListSplitRatio = ref<number>(loadFileListSplitRatio(props.workspaceId));
 
 watch(
-    () => [props.workspaceId, targetKey.value],
-    ([workspaceId, key]) => {
-      fileListSplitRatio.value = loadFileListSplitRatio(workspaceId, key);
+    () => props.workspaceId,
+    (workspaceId) => {
+      fileListSplitRatio.value = loadFileListSplitRatio(workspaceId);
     }
 );
 
@@ -435,7 +432,7 @@ watch(
     () => fileListSplitRatio.value,
     () => {
       try {
-        localStorage.setItem(fileListSplitRatioStorageKey(props.workspaceId, targetKey.value), String(fileListSplitRatio.value));
+        localStorage.setItem(fileListSplitRatioStorageKey(props.workspaceId), String(fileListSplitRatio.value));
       } catch {
         // ignore
       }

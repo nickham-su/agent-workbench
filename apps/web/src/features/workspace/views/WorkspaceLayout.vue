@@ -1,215 +1,53 @@
 <template>
   <a-layout class="min-h-screen !bg-[var(--app-bg)]">
-    <a-layout-header class="flex items-center gap-3 !h-12 !px-3 !bg-[var(--panel-bg-elevated)]">
-      <div class="flex items-center gap-3 min-w-0">
-        <div class="text-[color:var(--text-color)] font-semibold text-sm shrink-0">{{ workspace?.title || t("workspace.title") }}</div>
-        <div v-if="workspace" class="flex items-center gap-2 min-w-0">
-          <a-select
-            v-model:value="currentRepoDirName"
-            size="small"
-            class="min-w-[200px]"
-            show-search
-            :filter-option="filterRepoOption"
-            :placeholder="t('workspace.repoSelector.placeholder')"
-          >
-            <a-select-option
-              v-for="r in workspace.repos"
-              :key="r.dirName"
-              :value="r.dirName"
-              :label="`${formatRepoDisplayName(r.repo.url)} ${r.repo.url}`"
-            >
-              <a-tooltip :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="top">
-                <template #title>
-                  <span class="font-mono break-all">{{ r.repo.url }}</span>
-                </template>
-                <span class="font-mono">{{ formatRepoDisplayName(r.repo.url) }}</span>
-              </a-tooltip>
-            </a-select-option>
-          </a-select>
-          <div v-if="currentRepoStatus" class="text-[color:var(--text-secondary)] text-xs font-mono shrink-0">
-            <span v-if="currentRepoStatus.head.detached">{{ t("workspace.repoSelector.detached") }}</span>
-            <span v-else>{{ currentRepoStatus.head.branch }}</span>
-          </div>
-        </div>
-      </div>
-
-      <div class="flex items-center gap-2 shrink-0">
-        <a-button v-if="workspace && currentTarget" size="small" :disabled="gitBusy" @click="openCheckout()">
-          {{ t("workspace.actions.checkout") }}
-        </a-button>
-
-        <template v-for="group in headerActionGroups" :key="group.key">
-          <div class="flex items-center gap-2">
-            <a-button
-              v-for="action in group.actions"
-              :key="action.id"
-              size="small"
-              :disabled="action.disabled"
-              :loading="action.loading"
-              @click="action.onClick"
-            >
-              {{ action.label }}
-            </a-button>
-          </div>
-        </template>
-      </div>
-
-      <div class="flex-1 min-w-0"></div>
-    </a-layout-header>
+    <WorkspaceHeader
+      :workspace="workspace"
+      :current-repo-dir-name="currentRepoDirName"
+      :current-repo-status="currentRepoStatus"
+      :git-busy="gitBusy"
+      :current-target="currentTarget"
+      :header-action-groups="headerActionGroups"
+      :filter-repo-option="filterRepoOption"
+      :format-repo-display-name="formatRepoDisplayName"
+      @update:current-repo-dir-name="(value) => (currentRepoDirName = value)"
+      @checkout="openCheckout"
+    />
 
     <a-layout-content class="p-0 h-[calc(100vh-64px)] border-t border-[var(--border-color-secondary)]">
-      <div class="h-full flex min-h-0">
-        <div class="w-10 h-full flex flex-col border-r border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
-          <div class="flex flex-col items-center gap-1 py-1">
-            <template v-for="toolId in leftTopToolbarToolIds" :key="toolId">
-              <WorkspaceToolButton
-                :title="toolTitle(toolId)"
-                :icon="toolIcon(toolId)"
-                :active="activeToolIdByArea.leftTop === toolId"
-                :minimized="toolMinimized[toolId] ?? false"
-                :moveTargets="moveTargets(toolId)"
-                :contextMenuHint="contextMenuHint(toolId)"
-                tooltipPlacement="right"
-                @click="onToolIconClick(toolId)"
-                @moveTo="(area) => moveTool(toolId, area)"
-              />
-            </template>
-          </div>
-          <div class="mt-auto flex flex-col items-center gap-1 py-1">
-            <template v-for="toolId in leftBottomToolbarToolIds" :key="toolId">
-              <WorkspaceToolButton
-                :title="toolTitle(toolId)"
-                :icon="toolIcon(toolId)"
-                :active="activeToolIdByArea.leftBottom === toolId"
-                :minimized="toolMinimized[toolId] ?? false"
-                :moveTargets="moveTargets(toolId)"
-                :contextMenuHint="contextMenuHint(toolId)"
-                tooltipPlacement="right"
-                @click="onToolIconClick(toolId)"
-                @moveTo="(area) => moveTool(toolId, area)"
-              />
-            </template>
-          </div>
-        </div>
-
-        <div ref="centerEl" class="flex-1 min-w-0 min-h-0 relative bg-[var(--panel-bg)]">
-          <div class="h-full min-h-0 min-w-0 grid relative" :style="centerStyle">
-            <div
-              v-if="showTop"
-              ref="topEl"
-              class="min-h-0 min-w-0 grid relative"
-              :class="showBottom ? 'border-b border-[var(--border-color-secondary)]' : ''"
-              :style="topStyle"
-            >
-              <div v-if="showLeftTop" class="min-h-0 min-w-0 overflow-hidden" :class="showRightTop ? 'border-r border-[var(--border-color-secondary)]' : ''">
-                <template v-if="visibleToolIdByArea.leftTop">
-                  <KeepAlive v-if="isKeepAlive(visibleToolIdByArea.leftTop)">
-                    <component
-                      :is="toolView(visibleToolIdByArea.leftTop)"
-                      :key="visibleToolIdByArea.leftTop"
-                      v-bind="toolViewProps(visibleToolIdByArea.leftTop)"
-                      v-on="toolViewListeners(visibleToolIdByArea.leftTop)"
-                      class="h-full min-h-0 min-w-0"
-                    />
-                  </KeepAlive>
-                  <component
-                    v-else
-                    :is="toolView(visibleToolIdByArea.leftTop)"
-                    :key="visibleToolIdByArea.leftTop"
-                    v-bind="toolViewProps(visibleToolIdByArea.leftTop)"
-                    v-on="toolViewListeners(visibleToolIdByArea.leftTop)"
-                    class="h-full min-h-0 min-w-0"
-                  />
-                </template>
-              </div>
-              <div v-if="showRightTop" class="min-h-0 min-w-0 overflow-hidden">
-                <template v-if="visibleToolIdByArea.rightTop">
-                  <KeepAlive v-if="isKeepAlive(visibleToolIdByArea.rightTop)">
-                    <component
-                      :is="toolView(visibleToolIdByArea.rightTop)"
-                      :key="visibleToolIdByArea.rightTop"
-                      v-bind="toolViewProps(visibleToolIdByArea.rightTop)"
-                      v-on="toolViewListeners(visibleToolIdByArea.rightTop)"
-                      class="h-full min-h-0 min-w-0"
-                    />
-                  </KeepAlive>
-                  <component
-                    v-else
-                    :is="toolView(visibleToolIdByArea.rightTop)"
-                    :key="visibleToolIdByArea.rightTop"
-                    v-bind="toolViewProps(visibleToolIdByArea.rightTop)"
-                    v-on="toolViewListeners(visibleToolIdByArea.rightTop)"
-                    class="h-full min-h-0 min-w-0"
-                  />
-                </template>
-              </div>
-
-              <div
-                v-if="showTopColsSplitter"
-                class="absolute top-0 bottom-0"
-                :class="splitterClassCol"
-                :style="topColsSplitterStyle"
-                role="separator"
-                aria-orientation="vertical"
-                :aria-label="t('workspace.dock.splitter.resizeTopLeftRight')"
-                @pointerdown="onTopColsSplitterPointerDown"
-              />
-            </div>
-
-            <div v-if="showBottom" class="min-h-0 min-w-0 overflow-hidden">
-              <template v-if="visibleToolIdByArea.leftBottom">
-                <KeepAlive v-if="isKeepAlive(visibleToolIdByArea.leftBottom)">
-                  <component
-                    :is="toolView(visibleToolIdByArea.leftBottom)"
-                    :key="visibleToolIdByArea.leftBottom"
-                    v-bind="toolViewProps(visibleToolIdByArea.leftBottom)"
-                    v-on="toolViewListeners(visibleToolIdByArea.leftBottom)"
-                    class="h-full min-h-0 min-w-0"
-                  />
-                </KeepAlive>
-                <component
-                  v-else
-                  :is="toolView(visibleToolIdByArea.leftBottom)"
-                  :key="visibleToolIdByArea.leftBottom"
-                  v-bind="toolViewProps(visibleToolIdByArea.leftBottom)"
-                  v-on="toolViewListeners(visibleToolIdByArea.leftBottom)"
-                  class="h-full min-h-0 min-w-0"
-                />
-              </template>
-            </div>
-
-            <div
-              v-if="showTopBottomSplitter"
-              class="absolute left-0 right-0"
-              :class="splitterClassRow"
-              :style="topBottomSplitterStyle"
-              role="separator"
-              aria-orientation="horizontal"
-              :aria-label="t('workspace.dock.splitter.resizeTopBottom')"
-              @pointerdown="onTopBottomSplitterPointerDown"
-            />
-          </div>
-        </div>
-
-        <div
-          v-if="rightToolbarToolIds.length > 0"
-          class="w-10 h-full flex flex-col items-center gap-1 py-1 border-l border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]"
-        >
-          <template v-for="toolId in rightToolbarToolIds" :key="toolId">
-            <WorkspaceToolButton
-              :title="toolTitle(toolId)"
-              :icon="toolIcon(toolId)"
-              :active="activeToolIdByArea.rightTop === toolId"
-              :minimized="toolMinimized[toolId] ?? false"
-              :moveTargets="moveTargets(toolId)"
-              :contextMenuHint="contextMenuHint(toolId)"
-              tooltipPlacement="left"
-              @click="onToolIconClick(toolId)"
-              @moveTo="(area) => moveTool(toolId, area)"
-            />
-          </template>
-        </div>
-      </div>
+      <WorkspaceDock
+        :left-top-toolbar-tool-ids="leftTopToolbarToolIds"
+        :left-bottom-toolbar-tool-ids="leftBottomToolbarToolIds"
+        :right-toolbar-tool-ids="rightToolbarToolIds"
+        :active-tool-id-by-area="activeToolIdByArea"
+        :tool-minimized="toolMinimized"
+        :visible-tool-id-by-area="visibleToolIdByArea"
+        :tool-title="toolTitle"
+        :tool-icon="toolIcon"
+        :move-targets="moveTargets"
+        :context-menu-hint="contextMenuHint"
+        :on-tool-icon-click="onToolIconClick"
+        :move-tool="moveTool"
+        :is-keep-alive="isKeepAlive"
+        :tool-view="toolView"
+        :tool-view-props="toolViewProps"
+        :tool-view-listeners="toolViewListeners"
+        :show-top="showTop"
+        :show-bottom="showBottom"
+        :show-left-top="showLeftTop"
+        :show-right-top="showRightTop"
+        :center-style="centerStyle"
+        :top-style="topStyle"
+        :show-top-cols-splitter="showTopColsSplitter"
+        :show-top-bottom-splitter="showTopBottomSplitter"
+        :splitter-class-col="splitterClassCol"
+        :splitter-class-row="splitterClassRow"
+        :top-cols-splitter-style="topColsSplitterStyle"
+        :top-bottom-splitter-style="topBottomSplitterStyle"
+        :on-top-cols-splitter-pointer-down="onTopColsSplitterPointerDown"
+        :on-top-bottom-splitter-pointer-down="onTopBottomSplitterPointerDown"
+        :on-center-el="setCenterEl"
+        :on-top-el="setTopEl"
+      />
     </a-layout-content>
   </a-layout>
 
@@ -264,7 +102,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch, type ComponentPublicInstance } from "vue";
 import { Modal, message } from "ant-design-vue";
 import { CodeOutlined, FolderOpenOutlined } from "@ant-design/icons-vue";
 import { useI18n } from "vue-i18n";
@@ -286,7 +124,9 @@ import {
 import { waitRepoSettledOrThrow } from "@/features/repos/stores/repos";
 import { workspaceHostKey, type DockArea, type WorkspaceHostApi, type WorkspaceToolCommandMap, type WorkspaceToolEvent } from "@/features/workspace/host";
 import { workspaceContextKey } from "@/features/workspace/context";
-import WorkspaceToolButton from "../WorkspaceToolButton.vue";
+import WorkspaceHeader from "@/features/workspace/components/WorkspaceHeader.vue";
+import WorkspaceDock from "@/features/workspace/components/WorkspaceDock.vue";
+import type { HeaderAction, ToolId } from "@/features/workspace/types";
 import CodeReviewIcon from "../icons/CodeReviewIcon.vue";
 import CodeReviewToolView from "../tools/code-review/CodeReviewToolView.vue";
 import FileExplorerToolView from "../tools/file-explorer/FileExplorerToolView.vue";
@@ -297,17 +137,8 @@ const props = defineProps<{ workspaceId: string }>();
 const { t } = useI18n();
 type PushParams = Omit<GitPushRequest, "target">;
 
-type ToolId = "codeReview" | "terminal" | "files";
 const TOOL_IDS: ToolId[] = ["codeReview", "terminal", "files"];
 const DOCK_AREAS: DockArea[] = ["leftTop", "leftBottom", "rightTop"];
-
-type HeaderAction = {
-  id: string;
-  label: string;
-  loading?: boolean;
-  disabled?: boolean;
-  onClick: () => void;
-};
 type ToolDefinition = {
   toolId: ToolId;
   title: () => string;
@@ -954,6 +785,14 @@ function clampRatioByContainer(params: { ratio: number; containerSize: number; m
 
 const centerEl = ref<HTMLElement | null>(null);
 const topEl = ref<HTMLElement | null>(null);
+
+function setCenterEl(el: Element | ComponentPublicInstance | null) {
+  centerEl.value = el as HTMLElement | null;
+}
+
+function setTopEl(el: Element | ComponentPublicInstance | null) {
+  topEl.value = el as HTMLElement | null;
+}
 
 const topBottomRatio = ref(2 / 3);
 const topLeftRatio = ref(2 / 3);
