@@ -5,7 +5,7 @@
       <div class="flex items-center gap-1">
         <a-tooltip :title="t('files.actions.refresh')" :mouseEnterDelay="0" :mouseLeaveDelay="0">
           <span class="inline-flex">
-            <a-button size="small" type="text" :disabled="!target" @click="refreshRoot">
+            <a-button size="small" type="text" :disabled="!target" :loading="treeLoading" @click="refreshRoot">
               <template #icon><ReloadOutlined /></template>
             </a-button>
           </span>
@@ -50,10 +50,7 @@
           </a-dropdown>
         </template>
       </a-tree>
-      <div v-if="treeLoading" class="p-2 text-xs text-[color:var(--text-tertiary)]">
-        {{ t("common.loading") }}
-      </div>
-      <div v-else-if="isTreeEmpty" class="p-2 text-xs text-[color:var(--text-tertiary)]">
+      <div v-if="!treeLoading && isTreeEmpty" class="p-2 text-xs text-[color:var(--text-tertiary)]">
         {{ t("files.placeholder.empty") }}
       </div>
     </div>

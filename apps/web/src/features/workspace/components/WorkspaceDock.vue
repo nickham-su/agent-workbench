@@ -8,6 +8,7 @@
             :icon="toolIcon(toolId)"
             :active="activeToolIdByArea.leftTop === toolId"
             :minimized="toolMinimized[toolId] ?? false"
+            :dot="toolDots[toolId] ?? false"
             :can-move-up="canMoveUp(toolId)"
             :can-move-down="canMoveDown(toolId)"
             :moveTargets="moveTargets(toolId)"
@@ -27,6 +28,7 @@
             :icon="toolIcon(toolId)"
             :active="activeToolIdByArea.leftBottom === toolId"
             :minimized="toolMinimized[toolId] ?? false"
+            :dot="toolDots[toolId] ?? false"
             :can-move-up="canMoveUp(toolId)"
             :can-move-down="canMoveDown(toolId)"
             :moveTargets="moveTargets(toolId)"
@@ -150,6 +152,7 @@
           :icon="toolIcon(toolId)"
           :active="activeToolIdByArea.rightTop === toolId"
           :minimized="toolMinimized[toolId] ?? false"
+          :dot="toolDots[toolId] ?? false"
           :can-move-up="canMoveUp(toolId)"
           :can-move-down="canMoveDown(toolId)"
           :moveTargets="moveTargets(toolId)"
@@ -181,6 +184,7 @@ const props = defineProps<{
   visibleToolIdByArea: Record<DockArea, ToolId | null>;
   toolTitle: (toolId: ToolId) => string;
   toolIcon: (toolId: ToolId) => any;
+  toolDots: Record<ToolId, boolean | undefined>;
   canMoveUp: (toolId: ToolId) => boolean;
   canMoveDown: (toolId: ToolId) => boolean;
   moveTargets: (toolId: ToolId) => { area: DockArea; label: string }[];

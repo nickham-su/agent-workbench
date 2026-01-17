@@ -238,9 +238,6 @@
               </div>
             </div>
           </div>
-          <div v-else class="text-xs text-[color:var(--text-tertiary)]">
-            {{ t("common.loading") }}
-          </div>
         </a-tab-pane>
       </a-tabs>
     </div>

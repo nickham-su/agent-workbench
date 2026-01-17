@@ -34,7 +34,7 @@ const emit = defineEmits<{
   changesSummary: [summary: { unstaged: number; staged: number }];
 }>();
 
-const host = useWorkspaceHost();
+const host = useWorkspaceHost(props.toolId);
 const { t } = useI18n();
 const panelRef = ref<any>(null);
 let unregister: (() => void) | null = null;

@@ -12,7 +12,6 @@ export default {
     refresh: "Refresh",
     reset: "Reset",
     default: "Default",
-    loading: "Loading…",
     format: {
       parens: "({text})",
       parensSuffix: " ({text})"

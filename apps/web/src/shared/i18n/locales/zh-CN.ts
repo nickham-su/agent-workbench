@@ -12,7 +12,6 @@ export default {
     refresh: "刷新",
     reset: "重置",
     default: "默认",
-    loading: "正在加载…",
     format: {
       parens: "（{text}）",
       parensSuffix: "（{text}）"

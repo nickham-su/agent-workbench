@@ -20,6 +20,7 @@
         :right-toolbar-tool-ids="rightToolbarToolIds"
         :active-tool-id-by-area="activeToolIdByArea"
         :tool-minimized="toolMinimized"
+        :tool-dots="toolDots"
         :visible-tool-id-by-area="visibleToolIdByArea"
         :tool-title="toolTitle"
         :tool-icon="toolIcon"
@@ -126,8 +127,9 @@ import {
   updateGitGlobalIdentity
 } from "@/shared/api";
 import { waitRepoSettledOrThrow } from "@/features/repos/stores/repos";
-import { workspaceHostKey, type DockArea, type WorkspaceHostApi, type WorkspaceToolCommandMap, type WorkspaceToolEvent } from "@/features/workspace/host";
+import { workspaceHostKey, type DockArea, type ToolCall, type ToolCallEnvelope, type WorkspaceHostApi, type WorkspaceToolCommandMap, type WorkspaceToolEvent } from "@/features/workspace/host";
 import { workspaceContextKey } from "@/features/workspace/context";
+import type { ToolRuntime, ToolRuntimeContext } from "@/features/workspace/runtime";
 import WorkspaceHeader from "@/features/workspace/components/WorkspaceHeader.vue";
 import WorkspaceDock from "@/features/workspace/components/WorkspaceDock.vue";
 import type { HeaderAction, ToolId } from "@/features/workspace/types";
@@ -136,6 +138,8 @@ import CodeReviewToolView from "../tools/code-review/CodeReviewToolView.vue";
 import FileExplorerToolView from "../tools/file-explorer/FileExplorerToolView.vue";
 import TerminalToolView from "../tools/terminal/TerminalToolView.vue";
 import GitIdentityModal from "@/shared/components/GitIdentityModal.vue";
+import { createCodeReviewRuntime } from "@/features/workspace/tools/code-review/runtime";
+import { createFileExplorerRuntime } from "@/features/workspace/tools/file-explorer/runtime";
 
 const props = defineProps<{ workspaceId: string }>();
 const { t } = useI18n();
@@ -152,6 +156,7 @@ type ToolDefinition = {
   allowedAreas: DockArea[];
   keepAlive?: boolean;
   headerActions?: () => HeaderAction[];
+  createRuntime?: (ctx: ToolRuntimeContext) => ToolRuntime;
 };
 
 const loading = ref(false);
@@ -180,7 +185,8 @@ const tools = computed<ToolDefinition[]>(() => [
     view: FileExplorerToolView,
     defaultArea: "leftTop",
     allowedAreas: ["leftTop", "rightTop", "leftBottom"],
-    keepAlive: true
+    keepAlive: true,
+    createRuntime: (ctx) => createFileExplorerRuntime(ctx)
   },
   {
     toolId: "codeReview",
@@ -190,6 +196,7 @@ const tools = computed<ToolDefinition[]>(() => [
     defaultArea: "leftTop",
     allowedAreas: ["leftTop", "rightTop", "leftBottom"],
     keepAlive: true,
+    createRuntime: (ctx) => createCodeReviewRuntime(ctx),
     headerActions: () => [
       {
         id: "pull",
@@ -241,6 +248,45 @@ const toolMinimized = reactive<Record<ToolId, boolean>>({
   terminal: true,
   files: false
 });
+const toolDots = reactive<Record<ToolId, boolean>>({
+  codeReview: false,
+  terminal: false,
+  files: false
+});
+const toolRuntimes = new Map<ToolId, ToolRuntime>();
+
+function setToolDot(toolId: ToolId, dot: boolean) {
+  toolDots[toolId] = dot;
+}
+
+function resetToolDots() {
+  for (const id of TOOL_IDS) toolDots[id] = false;
+}
+
+function disposeToolRuntimes() {
+  for (const runtime of toolRuntimes.values()) runtime.dispose();
+  toolRuntimes.clear();
+}
+
+function createToolRuntimes() {
+  disposeToolRuntimes();
+  resetToolDots();
+  if (!props.workspaceId) return;
+  for (const def of tools.value) {
+    if (!def.createRuntime) continue;
+    const runtime = def.createRuntime({
+      workspaceId: props.workspaceId,
+      toolId: def.toolId,
+      host: { call: (toToolId, call) => callToolFrom(def.toolId, toToolId, call), setToolDot },
+  getCurrentTarget: () => currentTarget.value,
+  getVisible: () => isToolVisible(def.toolId),
+  refreshView: () => toolCommands.get(def.toolId)?.refresh?.(),
+  api: { getGitStatus }
+});
+    toolRuntimes.set(def.toolId, runtime);
+    runtime.start();
+  }
+}
 
 const toolOrderByArea = reactive<Record<DockArea, ToolId[]>>(defaultToolOrderByArea());
 
@@ -527,6 +573,37 @@ function toolCurrentArea(toolId: ToolId): DockArea {
   return toolArea[toolId] ?? toolById.value.get(toolId)?.defaultArea ?? "leftTop";
 }
 
+function isToolVisible(toolId: ToolId) {
+  const area = toolCurrentArea(toolId);
+  return activeToolIdByArea[area] === toolId && !toolMinimized[toolId];
+}
+
+function callToolFrom(fromToolId: string, toToolId: string, call: ToolCall) {
+  const toId = toToolId as ToolId;
+  if (!toolById.value.has(toId)) return;
+  const toArea = toolCurrentArea(toId);
+  const fromId = toolById.value.has(fromToolId as ToolId) ? (fromToolId as ToolId) : null;
+  const fromArea = fromId ? toolCurrentArea(fromId) : null;
+  const targetVisible = isToolVisible(toId);
+  if (fromArea && fromArea === toArea) {
+    activeToolIdByArea[toArea] = toId;
+    toolMinimized[toId] = false;
+  } else if (!targetVisible) {
+    activeToolIdByArea[toArea] = toId;
+    toolMinimized[toId] = false;
+  }
+  const envelope: ToolCallEnvelope = {
+    type: call.type,
+    payload: call.payload,
+    fromToolId,
+    toToolId,
+    workspaceId: props.workspaceId,
+    targetAtCall: currentTarget.value ?? null,
+    ts: Date.now()
+  };
+  toolRuntimes.get(toId)?.onCall(envelope);
+}
+
 function openTool(toolId: string) {
   if (!toolById.value.has(toolId as ToolId)) return;
   const id = toolId as ToolId;
@@ -580,6 +657,8 @@ const hostApi: WorkspaceHostApi = {
   openTool,
   minimizeTool,
   toggleMinimize,
+  callFrom: callToolFrom,
+  setToolDot,
   registerToolCommands,
   emitToolEvent,
   drainToolEvents
@@ -614,6 +693,12 @@ const visibleToolIdByArea = computed(() => {
     res[area] = id;
   });
   return res;
+});
+
+const toolVisibleById = computed(() => {
+  const out: Record<ToolId, boolean> = { codeReview: false, terminal: false, files: false };
+  for (const id of TOOL_IDS) out[id] = isToolVisible(id);
+  return out;
 });
 
 const leftTopToolbarToolIds = computed<ToolId[]>(() => toolOrderByArea.leftTop.filter((id) => toolCurrentArea(id) === "leftTop"));
@@ -924,10 +1009,30 @@ watch(
   { immediate: true }
 );
 
+watch(
+  () => props.workspaceId,
+  () => {
+    createToolRuntimes();
+  },
+  { immediate: true }
+);
+
 watch(toolArea, scheduleSaveDockLayout, { deep: true });
 watch(toolMinimized, scheduleSaveDockLayout, { deep: true });
 watch(activeToolIdByArea, scheduleSaveDockLayout, { deep: true });
 watch(toolOrderByArea, scheduleSaveDockLayout, { deep: true });
+watch(
+  toolVisibleById,
+  (next, prev) => {
+    for (const id of TOOL_IDS) {
+      const wasVisible = prev?.[id] ?? false;
+      const isVisible = next[id];
+      if (wasVisible === isVisible) continue;
+      toolRuntimes.get(id)?.onVisibilityChange(isVisible);
+    }
+  },
+  { deep: true, immediate: true }
+);
 watch(
   () => currentRepoDirName.value,
   (dirName) => {
@@ -942,11 +1047,12 @@ watch(
 watch(
   () => currentTarget.value?.dirName,
   async () => {
+    const nextTarget = currentTarget.value ?? null;
+    for (const id of TOOL_IDS) toolRuntimes.get(id)?.onRepoChange(nextTarget);
     checkoutBranch.value = "";
     await refreshCurrentRepoStatus();
     await refreshBranches();
     applyPageTitle();
-    await toolCommands.get("codeReview")?.refresh?.();
   }
 );
 watch(
@@ -1402,5 +1508,6 @@ onBeforeUnmount(() => {
   draggingCleanup?.();
   if (saveDockLayoutTimer !== null) window.clearTimeout(saveDockLayoutTimer);
   saveDockLayoutTimer = null;
+  disposeToolRuntimes();
 });
 </script>

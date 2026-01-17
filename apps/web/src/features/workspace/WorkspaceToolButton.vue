@@ -21,6 +21,7 @@
     <a-tooltip :title="title" :mouseEnterDelay="0" :mouseLeaveDelay="0" :placement="tooltipPlacement">
       <button :class="buttonClass" type="button" tabindex="-1" @click="onButtonClick" @keydown="onButtonKeyDown">
         <component :is="icon" class="text-lg" />
+        <span v-if="dot" class="absolute right-1 top-1 h-2 w-2 rounded-full bg-[var(--danger-color)]"></span>
       </button>
     </a-tooltip>
   </a-dropdown>
@@ -36,6 +37,7 @@ const props = defineProps<{
   icon: any;
   active: boolean;
   minimized: boolean;
+  dot?: boolean;
   canMoveUp: boolean;
   canMoveDown: boolean;
   moveTargets: { area: DockArea; label: string }[];
@@ -53,7 +55,7 @@ const emit = defineEmits<{
 const buttonClass = computed(
   () =>
     // Tailwind 关闭 preflight 后，原生 button 会保留 UA 默认背景/边框；这里做局部 reset，避免未选中态出现“白底按钮”。
-    "w-8 h-8 flex items-center justify-center rounded transition-colors border-0 appearance-none " +
+    "w-8 h-8 flex items-center justify-center rounded transition-colors border-0 appearance-none relative " +
     (props.active
       ? "bg-[var(--fill-secondary)] text-[color:var(--text-color)]"
       : "bg-transparent text-[color:var(--text-secondary)] hover:bg-[var(--hover-bg)]") +

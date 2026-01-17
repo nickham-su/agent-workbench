@@ -117,6 +117,7 @@ import type { FileEntry, FileReadResponse, GitTarget } from "@agent-workbench/sh
 import FileExplorerTree from "./components/FileExplorerTree.vue";
 import FileExplorerTabs from "./components/FileExplorerTabs.vue";
 import type { FileTab, TreeNode } from "./types";
+import { getFileExplorerStore } from "./store";
 import {
   ApiError,
   createFile,
@@ -157,8 +158,9 @@ const dirRequestSeqByDir = new Map<string, number>();
 const fileRequestSeqByPath = new Map<string, number>();
 let targetSeq = 0;
 
-const tabs = reactive<FileTab[]>([]);
-const activeTabKey = ref<string>("");
+const store = getFileExplorerStore(props.workspaceId);
+const tabs = store.tabs;
+const activeTabKey = store.activeTabKey;
 
 const editorEl = ref<HTMLDivElement | null>(null);
 let editor: monaco.editor.IStandaloneCodeEditor | null = null;
@@ -191,7 +193,7 @@ const isTreeEmpty = computed(() => {
   return root.children.length === 0;
 });
 
-const activeTab = ref<FileTab | null>(null);
+const activeTab = store.activeTab;
 const fileTreeSplitRatio = ref<number>(loadFileTreeSplitRatio(props.workspaceId));
 
 watch(
@@ -535,18 +537,34 @@ function markLoaded(dir: string) {
 async function loadDir(dir: string) {
   if (!props.target) return;
   const targetSnapshot = targetSeq;
+  const entries = await fetchDirEntries(dir, targetSnapshot);
+  if (!entries) return;
+  updateChildren(dir, entries);
+  markLoaded(dir);
+}
+
+async function fetchDirEntries(dir: string, targetSnapshot: number) {
+  if (!props.target) return null;
   const requestId = nextDirRequestId(dir);
   try {
     const res = await listFiles({ target: props.target, dir });
-    if (targetSnapshot !== targetSeq) return;
-    if (dirRequestSeqByDir.get(dir) !== requestId) return;
-    updateChildren(dir, res.entries);
-    markLoaded(dir);
+    if (targetSnapshot !== targetSeq) return null;
+    if (dirRequestSeqByDir.get(dir) !== requestId) return null;
+    return res.entries;
   } catch (err) {
-    if (targetSnapshot !== targetSeq) return;
-    if (dirRequestSeqByDir.get(dir) !== requestId) return;
+    if (targetSnapshot !== targetSeq) return null;
+    if (dirRequestSeqByDir.get(dir) !== requestId) return null;
     throw err;
   }
+}
+
+function getRefreshDirs() {
+  const unique = new Set<string>();
+  unique.add("");
+  for (const key of expandedKeys.value) {
+    unique.add(toDirPath(key));
+  }
+  return Array.from(unique).sort((a, b) => splitPath(a).length - splitPath(b).length);
 }
 
 async function refreshRoot() {
@@ -554,10 +572,25 @@ async function refreshRoot() {
   const targetSnapshot = targetSeq;
   treeLoading.value = true;
   try {
-    await loadDir("");
-  } catch (err) {
-    if (targetSnapshot === targetSeq) {
-      message.error(err instanceof Error ? err.message : String(err));
+    const dirs = getRefreshDirs();
+    const results: Array<{ dir: string; entries: FileEntry[] }> = [];
+    for (const dir of dirs) {
+      if (targetSnapshot !== targetSeq) return;
+      if (dir && !nodeByPath.has(dir)) continue;
+      try {
+        const entries = await fetchDirEntries(dir, targetSnapshot);
+        if (!entries) continue;
+        results.push({ dir, entries });
+      } catch (err) {
+        if (targetSnapshot !== targetSeq) return;
+        message.error(err instanceof Error ? err.message : String(err));
+        if (!dir) break;
+      }
+    }
+    if (targetSnapshot !== targetSeq) return;
+    for (const { dir, entries } of results) {
+      updateChildren(dir, entries);
+      markLoaded(dir);
     }
   } finally {
     if (targetSnapshot === targetSeq) treeLoading.value = false;
@@ -682,10 +715,7 @@ function disposeTab(tab: FileTab) {
 }
 
 function resetTabs() {
-  for (const tab of tabs) disposeTab(tab);
-  tabs.splice(0, tabs.length);
-  activeTabKey.value = "";
-  activeTab.value = null;
+  store.resetTabs();
 }
 
 function getTab(path: string) {
@@ -694,8 +724,6 @@ function getTab(path: string) {
 
 function setActiveTabByPath(path: string) {
   activeTabKey.value = path;
-  const tab = getTab(path);
-  activeTab.value = tab;
   scheduleApplyEditor();
 }
 
@@ -799,7 +827,6 @@ function closeTab(path: string) {
     if (next) setActiveTabByPath(next.path);
     else {
       activeTabKey.value = "";
-      activeTab.value = null;
       if (editor) editor.setModel(null);
     }
   }
@@ -1174,23 +1201,20 @@ function initEditor() {
 
 watch(
   () => activeTabKey.value,
-  (key) => {
-    if (!key) {
-      activeTab.value = null;
-      scheduleApplyEditor();
-      return;
-    }
-    setActiveTabByPath(key);
+  () => {
+    scheduleApplyEditor();
   }
 );
 
 watch(
   () => (props.target ? `${props.target.workspaceId}:${props.target.dirName}` : ""),
   async () => {
+    const targetKey = props.target ? `${props.target.workspaceId}:${props.target.dirName}` : "";
+    const targetChanged = store.setTargetKey(targetKey);
     targetSeq += 1;
     dirRequestSeqByDir.clear();
     fileRequestSeqByPath.clear();
-    resetTabs();
+    if (targetChanged) resetTabs();
     resetTree();
     if (props.target) {
       initRootTree();
@@ -1216,7 +1240,6 @@ onBeforeUnmount(() => {
   editorSaveCommandId = null;
   editor?.dispose();
   editor = null;
-  resetTabs();
 });
 </script>
 
