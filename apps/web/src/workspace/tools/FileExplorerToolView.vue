@@ -1,17 +1,6 @@
 <template>
   <div class="h-full min-h-0 flex flex-col">
-    <div class="flex items-center justify-between px-2 py-1 border-b border-[var(--border-color-secondary)]">
-      <div class="text-xs font-semibold">{{ t("files.title") }}</div>
-      <div class="flex items-center gap-1">
-        <a-tooltip :title="t('files.actions.refresh')" :mouseEnterDelay="0" :mouseLeaveDelay="0">
-          <span class="inline-flex">
-            <a-button size="small" type="text" :disabled="!target" @click="refreshRoot">
-              <template #icon><ReloadOutlined /></template>
-            </a-button>
-          </span>
-        </a-tooltip>
-      </div>
-    </div>
+
 
     <div v-if="!target" class="flex-1 min-h-0 flex items-center justify-center text-xs text-[color:var(--text-tertiary)]">
       {{ t("files.placeholder.selectRepo") }}
@@ -19,6 +8,18 @@
 
     <div v-else class="flex-1 min-h-0 flex">
       <div class="w-64 min-w-[240px] max-w-[360px] flex flex-col border-r border-[var(--border-color-secondary)]">
+        <div class="flex items-center justify-between px-2 py-1.5 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
+          <div class="text-xs font-semibold">{{ t("files.title") }}</div>
+          <div class="flex items-center gap-1">
+            <a-tooltip :title="t('files.actions.refresh')" :mouseEnterDelay="0" :mouseLeaveDelay="0">
+              <span class="inline-flex">
+                <a-button size="small" type="text" :disabled="!target" @click="refreshRoot">
+                  <template #icon><ReloadOutlined /></template>
+                </a-button>
+              </span>
+            </a-tooltip>
+          </div>
+        </div>
         <div class="flex-1 min-h-0 overflow-auto">
           <a-tree
             :key="treeKey"
@@ -72,17 +73,17 @@
           :activeKey="activeTabKey"
           size="small"
           :animated="false"
-          class="files-tabs"
+          class="files-tabs bg-[var(--panel-bg-elevated)]"
           @update:activeKey="onActiveTabUpdate"
         >
           <a-tab-pane v-for="tab in tabs" :key="tab.path">
             <template #tab>
-                <span class="files-tab-label">
+                <span class="files-tab-label px-1.5">
                   <span class="truncate max-w-[180px]">{{ tab.title }}</span>
                   <span v-if="tab.dirty && !tab.saving" class="ml-1 text-[10px] text-[color:var(--warning-color)]">●</span>
                   <a-tooltip :title="t('files.actions.close')" :mouseEnterDelay="0" :mouseLeaveDelay="0">
                     <CloseOutlined
-                      class="cursor-pointer text-[color:var(--text-tertiary)] hover:text-[color:var(--text-secondary)] !ml-2 text-xs"
+                      class="cursor-pointer text-[color:var(--text-tertiary)] hover:text-[color:var(--text-secondary)] !ml-1 !mr-0 text-xs"
                       @mousedown.stop.prevent
                     @click.stop.prevent="requestCloseTab(tab.path)"
                   />
@@ -1131,5 +1132,14 @@ onBeforeUnmount(() => {
 <style scoped>
 .files-tabs :deep(.ant-tabs-content-holder) {
   display: none;
+}
+
+.files-tabs :deep(.ant-tabs-nav) {
+  margin-bottom: 0 !important;
+  background: var(--panel-bg-elevated);
+}
+
+.files-tabs :deep(.ant-tabs-tab) {
+  margin-left: 0 !important;
 }
 </style>
