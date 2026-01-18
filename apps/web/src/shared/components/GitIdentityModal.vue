@@ -8,10 +8,7 @@
     :cancelText="t('gitIdentity.actions.cancel')"
     @ok="onOk"
   >
-    <div v-if="statusLoading" class="text-xs text-[color:var(--text-tertiary)] pb-2">
-      {{ t("common.loading") }}
-    </div>
-    <div v-else-if="status" class="text-xs text-[color:var(--text-tertiary)] pb-2">
+    <div v-if="status" class="text-xs text-[color:var(--text-tertiary)] pb-2">
       <span class="font-mono">{{ status.effective.source }}</span>
       <span v-if="status.effective.name && status.effective.email">
         · {{ status.effective.name }} &lt;{{ status.effective.email }}&gt;

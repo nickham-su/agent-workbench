@@ -27,7 +27,7 @@ ensure_writable_dir() {
 }
 
 ensure_writable_dir "${HOME:-}"
-ensure_writable_dir "${DATA_DIR:-}"
+ensure_writable_dir "${AWB_DATA_DIR:-}"
 
 mkdir -p "${NPM_CONFIG_PREFIX:-${HOME}/.npm-global}" "${NPM_CONFIG_CACHE:-${HOME}/.npm-cache}"
 

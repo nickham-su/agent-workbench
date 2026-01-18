@@ -21,18 +21,28 @@
 import { Modal, message } from "ant-design-vue";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { TerminalRecord } from "@agent-workbench/shared";
 import { parseWsMessage, sendWs, terminalWsUrl, type TerminalWsState } from "./ws";
+import { getTerminalLinkStatStore } from "./terminalLinkStatStore";
 import { terminalFontSize } from "@/shared/settings/uiFontSizes";
 import { emitUnauthorized } from "@/features/auth/unauthorized";
+import { useWorkspaceHost } from "@/features/workspace/host";
+import { useWorkspaceContext } from "@/features/workspace/context";
 
 const props = defineProps<{ terminal: TerminalRecord; active?: boolean }>();
 const emit = defineEmits<{
   exited: [{ terminalId: string; exitCode: number }];
 }>();
 const { t } = useI18n();
+const host = useWorkspaceHost();
+const workspaceCtx = useWorkspaceContext();
+
+type BufferLine = {
+  length: number;
+  getCell: (x: number) => { getChars: () => string; getWidth: () => number } | undefined;
+};
 
 const wsState = ref<TerminalWsState>("idle");
 const connecting = computed(() => wsState.value === "connecting");
@@ -52,6 +62,7 @@ let fitBurstTimers: number[] = [];
 let didResizeNudge = false;
 let removeElListeners: (() => void) | null = null;
 let stopWatchFontSize: (() => void) | null = null;
+let linkProviderDisposable: { dispose: () => void } | null = null;
 
 function focusIfActive() {
   if (!term) return;
@@ -121,6 +132,8 @@ function cleanupTerm() {
   if (term) {
     term.dispose();
   }
+  linkProviderDisposable?.dispose();
+  linkProviderDisposable = null;
   term = null;
   fitAddon = null;
   lastSize = null;
@@ -309,6 +322,127 @@ function connect(force: boolean) {
   };
 }
 
+function buildColumnInfoMap(line: BufferLine, lineText: string) {
+  const map: Array<{ col: number; width: number }> = [];
+  if (!lineText) return map;
+  const maxCols = Math.min(line.length, term?.cols ?? line.length);
+  let charIndex = 0;
+  for (let col = 0; col < maxCols && charIndex < lineText.length; col += 1) {
+    const cell = line.getCell(col);
+    if (!cell) continue;
+    const chars = cell.getChars();
+    if (!chars) continue;
+    const width = Math.max(1, cell.getWidth());
+    for (let i = 0; i < chars.length && charIndex < lineText.length; i += 1) {
+      map[charIndex] = { col: col + 1, width };
+      charIndex += 1;
+    }
+  }
+  return map;
+}
+
+function canonicalizeTerminalLinkPath(params: { rawPath: string; currentDirName: string }) {
+  let p = String(params.rawPath || "").trim();
+  if (!p) return "";
+
+  // 去掉前导 ./，避免输出为 ./repo/xxx 时无法正确归一化
+  while (p.startsWith("./")) p = p.slice(2);
+
+  // 兼容部分工具输出反斜杠分隔符
+  p = p.replace(/\\/g, "/");
+  // 合并重复的 /
+  p = p.replace(/\/{2,}/g, "/");
+  // 去掉尾部 /
+  while (p.endsWith("/")) p = p.slice(0, -1);
+
+  const dir = String(params.currentDirName || "").trim();
+  if (dir) {
+    if (p === dir) return "";
+    if (p.startsWith(dir + "/")) p = p.slice(dir.length + 1);
+  }
+
+  return p;
+}
+
+function firstPathSegment(p: string) {
+  const s = String(p || "").trim();
+  if (!s) return "";
+  // canonicalizeTerminalLinkPath 已保证分隔符为 / 且无前导 ./
+  return s.split("/")[0] ?? "";
+}
+
+function createPathLineLinks(lineText: string, bufferLineNumber: number, line: BufferLine | null) {
+  const links: Array<{
+    text: string;
+    range: { start: { x: number; y: number }; end: { x: number; y: number } };
+    activate: (event: MouseEvent, text: string) => void;
+  }> = [];
+  if (!lineText || !line) return links;
+
+  const target = workspaceCtx.currentTarget.value;
+  if (!target) return links;
+  const otherRepoDirNames = new Set(
+    workspaceCtx.repos.value
+      .map((r) => r.dirName)
+      .filter((dirName) => dirName && dirName !== target.dirName)
+  );
+  const statStore = getTerminalLinkStatStore(target.workspaceId);
+  const columnInfo = buildColumnInfoMap(line, lineText);
+  const re = /(^|[^A-Za-z0-9_./-])([A-Za-z0-9_./-]+):([1-9][0-9]*)/g;
+  let match: RegExpExecArray | null = null;
+  let count = 0;
+  while ((match = re.exec(lineText))) {
+    if (count >= 20) break;
+    const prefix = match[1] ?? "";
+    const path = match[2] ?? "";
+    const line = Number(match[3] ?? 0);
+    if (!path || !Number.isFinite(line) || line <= 0) continue;
+    if (path.startsWith("/")) continue;
+    const parts = path.split("/");
+    if (parts.some((p) => p === "..")) continue;
+
+    const linkPath = canonicalizeTerminalLinkPath({ rawPath: path, currentDirName: target.dirName });
+    if (!linkPath) continue;
+    // 若路径第一级命中“其他 repo 的 dirName”，大概率是 AI/CLI 输出带了别的 repo 前缀；
+    // 由于 files.openAt 只会在当前 repo 下解析，这里直接不生成链接，避免误触与无效校验请求。
+    const firstSeg = firstPathSegment(linkPath);
+    if (firstSeg && otherRepoDirNames.has(firstSeg)) continue;
+
+    const startIndex = match.index + prefix.length;
+    const text = `${path}:${line}`;
+    const endIndex = startIndex + text.length - 1;
+    const startInfo = columnInfo[startIndex];
+    const endInfo = columnInfo[endIndex];
+    const startCol = startInfo?.col ?? startIndex + 1;
+    const endBase = endInfo?.col ?? endIndex + 1;
+    const endCol = endBase + Math.max(1, endInfo?.width ?? 1) - 1;
+    const linkLine = line;
+
+    links.push({
+      text,
+      range: { start: { x: startCol, y: bufferLineNumber }, end: { x: endCol, y: bufferLineNumber } },
+      activate: (event) => {
+        // 仅响应鼠标左键点击；按住 Alt/Option 时保留为“强制选择文本”手势
+        if (event.button !== 0) return;
+        if (event.altKey) return;
+        void (async () => {
+          const res = await statStore.ensureStat({ target, path: linkPath });
+          if (!res || !res.ok) return;
+          const finalPath = res.normalizedPath || res.path;
+          host.openTool("files");
+          host.callFrom("terminal", "files", {
+            type: "files.openAt",
+            payload: { path: finalPath, line: linkLine, highlight: { kind: "line" } }
+          });
+        })();
+      }
+    });
+    count += 1;
+  }
+
+  return links;
+}
+
 function confirmTakeover() {
   Modal.confirm({
     title: t("terminal.takeover.title"),
@@ -342,6 +476,19 @@ onMounted(() => {
   term.loadAddon(fitAddon);
   term.open(el);
   focusIfActiveSoon();
+
+  linkProviderDisposable = term.registerLinkProvider({
+    provideLinks: (bufferLineNumber, callback) => {
+      const line = term?.buffer.active.getLine(bufferLineNumber - 1);
+      if (!line) {
+        callback(undefined);
+        return;
+      }
+      const lineText = line.translateToString(true);
+      const links = createPathLineLinks(lineText, bufferLineNumber, line as BufferLine);
+      callback(links.length > 0 ? links : undefined);
+    }
+  });
 
   // 初始渲染时容器尺寸/字体度量可能还不稳定，先提前做一次 fit（不依赖 ws）
   void nextTick().then(() => {
@@ -440,6 +587,21 @@ watch(
   },
   { immediate: true }
 );
+
+onDeactivated(() => {
+  // 组件被 KeepAlive 缓存时不会卸载; 终端这种独占资源必须在 deactivated 时主动断开连接,
+  // 否则工具被移动到其他区域后,新实例会因为旧连接未断开而触发 occupied(4409).
+  clearReconnectTimer();
+  clearFitBurst();
+  cleanupWs();
+});
+
+onActivated(() => {
+  // 从 KeepAlive 缓存恢复后重新建立连接(断线不影响 tmux session).
+  if (!term) return;
+  if (ws) return;
+  connect(false);
+});
 
 onBeforeUnmount(async () => {
   window.removeEventListener("resize", tryFitAndResize);

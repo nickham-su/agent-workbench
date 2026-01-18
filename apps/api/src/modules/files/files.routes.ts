@@ -12,8 +12,12 @@ import {
   FileMkdirResponseSchema,
   FileReadRequestSchema,
   FileReadResponseSchema,
+  FileStatRequestSchema,
+  FileStatResponseSchema,
   FileRenameRequestSchema,
   FileRenameResponseSchema,
+  FileSearchRequestSchema,
+  FileSearchResponseSchema,
   FileWriteRequestSchema,
   FileWriteResponseSchema
 } from "@agent-workbench/shared";
@@ -24,7 +28,9 @@ import {
   listFiles,
   mkdirPath,
   readFileText,
+  statFile,
   renamePath,
+  searchFiles,
   writeFileText
 } from "./files.service.js";
 
@@ -40,6 +46,20 @@ export async function registerFilesRoutes(app: FastifyInstance, ctx: AppContext)
     },
     async (req) => {
       return listFiles(ctx, req.body);
+    }
+  );
+
+  app.post(
+    "/api/files/stat",
+    {
+      schema: {
+        tags: ["files"],
+        body: FileStatRequestSchema,
+        response: { 200: FileStatResponseSchema, 400: ErrorResponseSchema, 403: ErrorResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      return statFile(ctx, req.body);
     }
   );
 
@@ -131,6 +151,20 @@ export async function registerFilesRoutes(app: FastifyInstance, ctx: AppContext)
     },
     async (req) => {
       return deletePath(ctx, req.body);
+    }
+  );
+
+  app.post(
+    "/api/files/search",
+    {
+      schema: {
+        tags: ["files"],
+        body: FileSearchRequestSchema,
+        response: { 200: FileSearchResponseSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      return searchFiles(ctx, req.body);
     }
   );
 }

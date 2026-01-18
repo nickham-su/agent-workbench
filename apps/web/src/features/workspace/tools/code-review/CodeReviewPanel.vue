@@ -370,6 +370,7 @@ const props = defineProps<{
   gitBusy: boolean;
   beginGitOp: () => () => void;
   push?: (params?: PushParams) => Promise<void>;
+  pollingEnabled?: boolean;
 }>();
 
 const {t} = useI18n();
@@ -963,6 +964,7 @@ async function pollTick() {
 }
 
 function startPolling() {
+  if (!props.pollingEnabled) return;
   if (pollTimer) return;
   pollTimer = setInterval(pollTick, pollIntervalMs);
 }
@@ -974,6 +976,7 @@ function stopPolling() {
 }
 
 function handleVisibilityChange() {
+  if (!props.pollingEnabled) return;
   if (typeof document === "undefined") return;
   if (document.visibilityState === "hidden") {
     stopPolling();
@@ -994,16 +997,20 @@ watch(
 
 onMounted(async () => {
   await refreshAll();
-  startPolling();
-  if (typeof document !== "undefined") {
-    document.addEventListener("visibilitychange", handleVisibilityChange, {passive: true});
+  if (props.pollingEnabled) {
+    startPolling();
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", handleVisibilityChange, {passive: true});
+    }
   }
 });
 
 onUnmounted(() => {
-  stopPolling();
-  if (typeof document !== "undefined") {
-    document.removeEventListener("visibilitychange", handleVisibilityChange);
+  if (props.pollingEnabled) {
+    stopPolling();
+    if (typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    }
   }
   draggingCleanup?.();
 });

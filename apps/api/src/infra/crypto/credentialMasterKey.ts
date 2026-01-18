@@ -16,7 +16,7 @@ function shaKeyId(key: Buffer) {
 
 function parseKeyFromEnv(raw: string): Buffer {
   const s = raw.trim();
-  if (!s) throw new Error("CREDENTIAL_MASTER_KEY is empty");
+  if (!s) throw new Error("AWB_CREDENTIAL_MASTER_KEY is empty");
 
   const hexRe = /^[0-9a-fA-F]+$/;
   if (hexRe.test(s) && s.length === 64) {
@@ -37,14 +37,14 @@ function parseKeyFromEnv(raw: string): Buffer {
     // ignore
   }
 
-  throw new Error("Invalid CREDENTIAL_MASTER_KEY format (expected 32-byte hex/base64/base64url)");
+  throw new Error("Invalid AWB_CREDENTIAL_MASTER_KEY format (expected 32-byte hex/base64/base64url)");
 }
 
 export async function loadCredentialMasterKey(params: {
   dataDir: string;
   processEnv: NodeJS.ProcessEnv;
 }): Promise<{ key: Buffer; source: CredentialMasterKeySource; keyId: string; createdAt: number | null }> {
-  const envRaw = params.processEnv.CREDENTIAL_MASTER_KEY?.trim() || "";
+  const envRaw = params.processEnv.AWB_CREDENTIAL_MASTER_KEY?.trim() || "";
   if (envRaw) {
     const key = parseKeyFromEnv(envRaw);
     return { key, source: "env", keyId: shaKeyId(key), createdAt: null };

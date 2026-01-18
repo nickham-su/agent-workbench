@@ -3,7 +3,7 @@ import path from "node:path";
 import { detectRepoRoot } from "./repoRoot.js";
 
 export async function detectAppVersion(): Promise<string> {
-  const fromEnv = process.env.APP_VERSION?.trim() || process.env.npm_package_version?.trim();
+  const fromEnv = process.env.AWB_APP_VERSION?.trim() || process.env.npm_package_version?.trim();
   if (fromEnv) return fromEnv;
 
   const cwdPkgPath = path.join(process.cwd(), "package.json");

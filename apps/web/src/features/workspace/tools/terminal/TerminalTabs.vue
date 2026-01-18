@@ -45,7 +45,7 @@
         <a-tab-pane v-for="(term, idx) in terminals" :key="term.id" :forceRender="true">
           <template #tab>
             <span class="terminal-tab-label">
-              <span>{{ t("terminal.tab.name", { index: idx + 1 }) }}</span>
+              <span>{{ t("terminal.tab.name", { index: terminalDisplayIndex(term.id, idx + 1) }) }}</span>
               <a-tooltip :title="t('terminal.tab.close')">
                 <CloseOutlined
                     class="cursor-pointer text-[color:var(--text-tertiary)] hover:text-[color:var(--text-secondary)] !mr-0 text-xs"
@@ -87,6 +87,7 @@ import TerminalView from "./TerminalView.vue";
 
 const ADD_TAB_KEY = "__terminal_add__";
 const TERMINAL_ACTIVE_TAB_STORAGE_KEY_PREFIX = "agent-workbench.workspace.terminal.activeTab";
+const TERMINAL_TAB_NO_STORAGE_KEY_PREFIX = "agent-workbench.workspace.terminal.tabNoMap";
 
 const props = defineProps<{
   workspaceId: string;
@@ -111,6 +112,8 @@ const effectiveActiveKey = computed(() => {
 const creating = ref(false);
 const pendingActivateKey = ref<string | null>(null);
 const suppressActiveKeyPersist = ref(false);
+const suppressTabNoPersist = ref(false);
+const tabNoMap = ref<Record<string, number>>({});
 
 const collapseLabel = computed(() => t("terminal.panel.collapse"));
 
@@ -120,6 +123,12 @@ function terminalActiveTabStorageKey(workspaceId: string) {
   return `${TERMINAL_ACTIVE_TAB_STORAGE_KEY_PREFIX}.v1.${id}`;
 }
 
+function terminalTabNoStorageKey(workspaceId: string) {
+  const id = String(workspaceId || "").trim();
+  if (!id) return `${TERMINAL_TAB_NO_STORAGE_KEY_PREFIX}.v1`;
+  return `${TERMINAL_TAB_NO_STORAGE_KEY_PREFIX}.v1.${id}`;
+}
+
 // 用 localStorage 记住当前选中的终端 Tab，刷新页面后可以恢复。
 function restoreActiveKeyFromStorage(workspaceId: string) {
   const id = String(workspaceId || "").trim();
@@ -127,6 +136,40 @@ function restoreActiveKeyFromStorage(workspaceId: string) {
   try {
     const raw = localStorage.getItem(terminalActiveTabStorageKey(id));
     if (raw) activeKey.value = raw;
+  } catch {
+    // ignore
+  }
+}
+
+// 用 localStorage 记住每个 terminalId 的展示编号:
+// - 同一 workspace 内编号稳定绑定到 tab(terminalId)
+// - 分配规则: 对当前仍存在的 tabs 取 max+1; 当最大编号对应 tab 被关闭后,下一次新建会复用该编号
+function restoreTabNoMapFromStorage(workspaceId: string) {
+  const id = String(workspaceId || "").trim();
+  if (!id) return;
+  try {
+    const raw = localStorage.getItem(terminalTabNoStorageKey(id));
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return;
+    const map: Record<string, number> = {};
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof k !== "string" || !k.trim()) continue;
+      const n = typeof v === "number" ? v : Number.NaN;
+      if (!Number.isFinite(n) || n <= 0) continue;
+      map[k] = Math.floor(n);
+    }
+    tabNoMap.value = map;
+  } catch {
+    // ignore
+  }
+}
+
+function persistTabNoMapToStorage(workspaceId: string, map: Record<string, number>) {
+  const id = String(workspaceId || "").trim();
+  if (!id) return;
+  try {
+    localStorage.setItem(terminalTabNoStorageKey(id), JSON.stringify(map));
   } catch {
     // ignore
   }
@@ -160,18 +203,59 @@ watch(
   async (workspaceId) => {
     // workspace 切换时重新读取存储的激活 tab
     suppressActiveKeyPersist.value = true;
+    suppressTabNoPersist.value = true;
     activeKey.value = undefined;
     pendingActivateKey.value = null;
+    tabNoMap.value = {};
     restoreActiveKeyFromStorage(workspaceId);
+    restoreTabNoMapFromStorage(workspaceId);
     await nextTick();
     suppressActiveKeyPersist.value = false;
+    suppressTabNoPersist.value = false;
   },
   { immediate: true }
 );
 
+function reconcileTabNoMap(params: { workspaceId: string; terminals: TerminalRecord[] }) {
+  const id = String(params.workspaceId || "").trim();
+  if (!id) return;
+
+  // 只对当前 workspace 的 terminals 分配编号,避免 workspace 切换时短暂拿到旧列表导致污染映射。
+  const terminals = params.terminals.filter((t) => String(t.workspaceId || "").trim() === id);
+  const present = new Set(terminals.map((t) => t.id));
+  const nextMap: Record<string, number> = { ...tabNoMap.value };
+
+  // prune: 删除已关闭/不存在的 terminals,让 max 可以回退从而复用最大编号
+  for (const k of Object.keys(nextMap)) {
+    if (!present.has(k)) delete nextMap[k];
+  }
+
+  let max = 0;
+  for (const n of Object.values(nextMap)) {
+    if (Number.isFinite(n) && n > max) max = n;
+  }
+
+  for (const term of terminals) {
+    const existing = nextMap[term.id];
+    if (typeof existing === "number" && Number.isFinite(existing) && existing > 0) continue;
+    max += 1;
+    nextMap[term.id] = max;
+  }
+
+  tabNoMap.value = nextMap;
+  if (suppressTabNoPersist.value) return;
+  persistTabNoMapToStorage(id, nextMap);
+}
+
+function terminalDisplayIndex(terminalId: string, fallback: number) {
+  const n = tabNoMap.value[terminalId];
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 watch(
     () => props.terminals,
     (list) => {
+      reconcileTabNoMap({ workspaceId: props.workspaceId, terminals: list });
       if (pendingActivateKey.value && list.some((t) => t.id === pendingActivateKey.value)) {
         activeKey.value = pendingActivateKey.value;
         pendingActivateKey.value = null;

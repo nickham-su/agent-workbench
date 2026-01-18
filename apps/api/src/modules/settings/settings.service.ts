@@ -5,9 +5,11 @@ import type {
   GitGlobalIdentity,
   NetworkSettings,
   ResetKnownHostRequest,
+  SearchSettings,
   SecurityStatus,
   UpdateGitGlobalIdentityRequest,
-  UpdateNetworkSettingsRequest
+  UpdateNetworkSettingsRequest,
+  UpdateSearchSettingsRequest
 } from "@agent-workbench/shared";
 import type { AppContext } from "../../app/context.js";
 import { HttpError } from "../../app/errors.js";
@@ -21,9 +23,49 @@ import { listWorkspaceRepos, listWorkspaces } from "../workspaces/workspace.stor
 type NetworkSettingsV1 = Omit<NetworkSettings, "updatedAt">;
 
 const NETWORK_SETTINGS_KEY = "network";
+const SEARCH_SETTINGS_KEY = "search";
+
+const SEARCH_EXCLUDE_MAX_COUNT = 200;
+const SEARCH_EXCLUDE_MAX_LENGTH = 200;
 
 function defaultNetworkSettings(): NetworkSettingsV1 {
   return { httpProxy: null, httpsProxy: null, noProxy: null, caCertPem: null, applyToTerminal: false };
+}
+
+function defaultSearchExcludeGlobs() {
+  return [
+    "node_modules/**",
+    "dist/**",
+    "build/**",
+    "out/**",
+    "coverage/**",
+    ".next/**",
+    ".nuxt/**",
+    ".turbo/**",
+    ".venv/**",
+    "venv/**",
+    "__pycache__/**",
+    ".pytest_cache/**",
+    "target/**"
+  ];
+}
+
+function normalizeSearchExcludeGlobs(raw: unknown, fallbackToDefault = true) {
+  if (!Array.isArray(raw)) return fallbackToDefault ? defaultSearchExcludeGlobs() : [];
+  const seen = new Set<string>();
+  const next: string[] = [];
+  for (const item of raw) {
+    if (next.length >= SEARCH_EXCLUDE_MAX_COUNT) break;
+    const value = typeof item === "string" ? item.trim() : "";
+    if (!value) continue;
+    if (value.length > SEARCH_EXCLUDE_MAX_LENGTH) continue;
+    if (value.includes("\0") || value.includes("\n") || value.includes("\r")) continue;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    next.push(value);
+  }
+  if (next.length > 0) return next;
+  return fallbackToDefault ? defaultSearchExcludeGlobs() : [];
 }
 
 export function getNetworkSettings(ctx: AppContext): NetworkSettings {
@@ -36,6 +78,17 @@ export function getNetworkSettings(ctx: AppContext): NetworkSettings {
     noProxy: typeof value?.noProxy === "string" ? value.noProxy : null,
     caCertPem: typeof value?.caCertPem === "string" ? value.caCertPem : null,
     applyToTerminal: typeof value?.applyToTerminal === "boolean" ? value.applyToTerminal : base.applyToTerminal,
+    updatedAt: row?.updatedAt ?? 0
+  };
+}
+
+export function getSearchSettings(ctx: AppContext): SearchSettings {
+  const row = getSettingJson(ctx.db, SEARCH_SETTINGS_KEY);
+  const value = row?.value as Partial<SearchSettings> | undefined;
+  const hasStored = Array.isArray(value?.excludeGlobs);
+  const excludeGlobs = normalizeSearchExcludeGlobs(value?.excludeGlobs, !hasStored);
+  return {
+    excludeGlobs,
     updatedAt: row?.updatedAt ?? 0
   };
 }
@@ -68,6 +121,17 @@ export async function updateNetworkSettings(
 
   logger.info({ updatedAt }, "network settings updated");
   return { ...next, updatedAt };
+}
+
+export async function updateSearchSettings(ctx: AppContext, logger: FastifyBaseLogger, bodyRaw: unknown): Promise<SearchSettings> {
+  const body = (bodyRaw ?? {}) as UpdateSearchSettingsRequest;
+  const current = getSearchSettings(ctx);
+  const excludeGlobs =
+    body.excludeGlobs !== undefined ? normalizeSearchExcludeGlobs(body.excludeGlobs, false) : current.excludeGlobs;
+  const updatedAt = nowMs();
+  setSettingJson(ctx.db, SEARCH_SETTINGS_KEY, { excludeGlobs }, updatedAt);
+  logger.info({ updatedAt, excludeGlobs: excludeGlobs.length }, "search settings updated");
+  return { excludeGlobs, updatedAt };
 }
 
 export function getSecurityStatus(ctx: AppContext): SecurityStatus {

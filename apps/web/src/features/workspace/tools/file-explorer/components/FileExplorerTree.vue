@@ -5,7 +5,7 @@
       <div class="flex items-center gap-1">
         <a-tooltip :title="t('files.actions.refresh')" :mouseEnterDelay="0" :mouseLeaveDelay="0">
           <span class="inline-flex">
-            <a-button size="small" type="text" :disabled="!target" @click="refreshRoot">
+            <a-button size="small" type="text" :disabled="!target" :loading="treeLoading" @click="refreshRoot">
               <template #icon><ReloadOutlined /></template>
             </a-button>
           </span>
@@ -42,7 +42,14 @@
                 <a-menu-item v-if="selectedNode?.data.kind === 'dir'" key="newFolder">
                   {{ t("files.actions.newFolder") }}
                 </a-menu-item>
-                <a-menu-divider v-if="selectedNode?.data.kind === 'dir' && canRenameDelete" />
+                <a-menu-divider v-if="selectedNode?.data.kind === 'dir'" />
+                <a-menu-item v-if="selectedNode" key="copyName">
+                  {{ t("files.actions.copyName") }}
+                </a-menu-item>
+                <a-menu-item v-if="selectedNode" key="copyPath">
+                  {{ t("files.actions.copyPath") }}
+                </a-menu-item>
+                <a-menu-divider v-if="canRenameDelete" />
                 <a-menu-item v-if="canRenameDelete" key="rename">{{ t("files.actions.rename") }}</a-menu-item>
                 <a-menu-item v-if="canRenameDelete" key="delete" danger>{{ t("files.actions.delete") }}</a-menu-item>
               </a-menu>
@@ -50,10 +57,7 @@
           </a-dropdown>
         </template>
       </a-tree>
-      <div v-if="treeLoading" class="p-2 text-xs text-[color:var(--text-tertiary)]">
-        {{ t("common.loading") }}
-      </div>
-      <div v-else-if="isTreeEmpty" class="p-2 text-xs text-[color:var(--text-tertiary)]">
+      <div v-if="!treeLoading && isTreeEmpty" class="p-2 text-xs text-[color:var(--text-tertiary)]">
         {{ t("files.placeholder.empty") }}
       </div>
     </div>

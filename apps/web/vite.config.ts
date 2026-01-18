@@ -9,14 +9,14 @@ const srcRoot = path.resolve(webRoot, "src");
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, repoRoot, "");
-  const devApiOrigin = env.DEV_API_ORIGIN || `http://127.0.0.1:${env.PORT || 4310}`;
+  const devApiOrigin = env.AWB_DEV_API_ORIGIN || `http://127.0.0.1:${env.AWB_PORT || 4310}`;
 
-  const devWebPortRaw = env.DEV_WEB_PORT?.trim() || "";
+  const devWebPortRaw = env.AWB_DEV_WEB_PORT?.trim() || "";
   let devWebPort: number | undefined;
   if (devWebPortRaw) {
     const parsed = Number.parseInt(devWebPortRaw, 10);
     if (!Number.isFinite(parsed) || parsed <= 0) {
-      throw new Error(`Invalid DEV_WEB_PORT: ${devWebPortRaw}`);
+      throw new Error(`Invalid AWB_DEV_WEB_PORT: ${devWebPortRaw}`);
     }
     devWebPort = parsed;
   }

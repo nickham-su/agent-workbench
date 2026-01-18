@@ -70,6 +70,33 @@ export const FileReadResponseSchema = Type.Object(
 );
 export type FileReadResponse = Static<typeof FileReadResponseSchema>;
 
+export const FileStatReasonSchema = Type.Union([
+  Type.Literal("missing"),
+  Type.Literal("unsafe_path"),
+  Type.Literal("not_file"),
+  Type.Literal("permission_denied")
+]);
+export type FileStatReason = Static<typeof FileStatReasonSchema>;
+
+export const FileStatRequestSchema = Type.Object(
+  {
+    target: GitTargetSchema,
+    path: Type.String({ minLength: 1 })
+  }
+);
+export type FileStatRequest = Static<typeof FileStatRequestSchema>;
+
+export const FileStatResponseSchema = Type.Object(
+  {
+    path: Type.String(),
+    ok: Type.Boolean(),
+    kind: Type.Optional(Type.Union([Type.Literal("file"), Type.Literal("dir")])),
+    reason: Type.Optional(FileStatReasonSchema),
+    normalizedPath: Type.Optional(Type.String())
+  }
+);
+export type FileStatResponse = Static<typeof FileStatResponseSchema>;
+
 export const FileWriteRequestSchema = Type.Object(
   {
     target: GitTargetSchema,
@@ -149,3 +176,64 @@ export const FileDeleteResponseSchema = Type.Object(
 );
 export type FileDeleteResponse = Static<typeof FileDeleteResponseSchema>;
 
+const FileSearchHighlightRangeSchema = Type.Object({
+  kind: Type.Literal("range"),
+  startCol: Type.Number(),
+  endCol: Type.Number()
+});
+
+const FileSearchHighlightLineSchema = Type.Object({
+  kind: Type.Literal("line")
+});
+
+export const FileSearchHighlightSchema = Type.Union([FileSearchHighlightRangeSchema, FileSearchHighlightLineSchema]);
+export type FileSearchHighlight = Static<typeof FileSearchHighlightSchema>;
+
+export const FileSearchMatchSchema = Type.Object({
+  path: Type.String(),
+  line: Type.Number(),
+  lineText: Type.String(),
+  highlight: FileSearchHighlightSchema
+});
+export type FileSearchMatch = Static<typeof FileSearchMatchSchema>;
+
+export const FileSearchBlockLineSchema = Type.Object({
+  line: Type.Number(),
+  text: Type.String(),
+  hits: Type.Optional(Type.Array(FileSearchHighlightRangeSchema))
+});
+export type FileSearchBlockLine = Static<typeof FileSearchBlockLineSchema>;
+
+export const FileSearchBlockSchema = Type.Object({
+  path: Type.String(),
+  fromLine: Type.Number(),
+  toLine: Type.Number(),
+  lines: Type.Array(FileSearchBlockLineSchema),
+  hitLines: Type.Array(Type.Number())
+});
+export type FileSearchBlock = Static<typeof FileSearchBlockSchema>;
+
+export const FileSearchRequestSchema = Type.Object({
+  target: GitTargetSchema,
+  query: Type.String({ minLength: 1 }),
+  useRegex: Type.Boolean(),
+  caseSensitive: Type.Boolean(),
+  wholeWord: Type.Optional(Type.Boolean())
+});
+export type FileSearchRequest = Static<typeof FileSearchRequestSchema>;
+
+export const FileSearchResponseSchema = Type.Object({
+  query: Type.String(),
+  useRegex: Type.Boolean(),
+  caseSensitive: Type.Boolean(),
+  wholeWord: Type.Optional(Type.Boolean()),
+  limit: Type.Number(),
+  matches: Type.Array(FileSearchMatchSchema),
+  blocks: Type.Array(FileSearchBlockSchema),
+  truncated: Type.Boolean(),
+  timedOut: Type.Boolean(),
+  tookMs: Type.Number(),
+  ignoredByVcs: Type.Boolean(),
+  ignoredByDotIgnore: Type.Boolean()
+});
+export type FileSearchResponse = Static<typeof FileSearchResponseSchema>;

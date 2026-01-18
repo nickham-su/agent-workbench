@@ -12,7 +12,6 @@ export default {
     refresh: "Refresh",
     reset: "Reset",
     default: "Default",
-    loading: "Loading…",
     format: {
       parens: "({text})",
       parensSuffix: " ({text})"
@@ -185,7 +184,8 @@ export default {
     tools: {
       codeReview: "Code review",
       terminal: "Terminal",
-      files: "Files"
+      files: "Files",
+      search: "Search"
     },
     dock: {
       moveTo: "Move to {area}",
@@ -368,10 +368,17 @@ export default {
     actions: {
       newFile: "New file",
       newFolder: "New folder",
+      copyName: "Copy name",
+      copyPath: "Copy path",
       rename: "Rename",
       delete: "Delete",
       refresh: "Refresh",
       close: "Close"
+    },
+    copy: {
+      nameCopied: "Name copied",
+      pathCopied: "Path copied",
+      failed: "Copy failed"
     },
     status: {
       saving: "Saving…"
@@ -426,10 +433,43 @@ export default {
       unavailable: "Preview unavailable"
     }
   },
+  search: {
+    placeholder: {
+      selectRepo: "Select a repo",
+      query: "Enter search text",
+      queryEmpty: "Enter search text"
+    },
+    options: {
+      regex: "Regex",
+      caseSensitive: "Case",
+      wholeWord: "Whole word"
+    },
+    actions: {
+      search: "Search",
+      viewFile: "View file"
+    },
+    status: {
+      idle: "Enter search text to search",
+      searching: "Searching…",
+      error: "Search failed",
+      empty: "No results",
+      results: "{count} results · {tookMs}ms",
+      truncated: "Truncated",
+      timedOut: "Timed out"
+    },
+    hint: {
+      ignore: "Respects .gitignore/.ignore",
+      hidden: "Includes hidden files"
+    },
+    preview: {
+      empty: "No preview"
+    }
+  },
   settings: {
     title: "Settings",
     tabs: {
       general: "General",
+      search: "Search",
       gitIdentity: "Git Identity",
       credentials: "Credentials",
       network: "Network",
@@ -455,6 +495,19 @@ export default {
           help: "Adjust diff viewer font size (global, saved locally). Default: {default}"
         }
       }
+    },
+    search: {
+      description: "Configure default ignore globs for search (one glob per line).",
+      excludeGlobs: {
+        label: "Ignore globs",
+        help: "Example: node_modules/**, dist/**, .venv/**",
+        ignoreHint: "Search respects .gitignore/.ignore and always ignores .git/**"
+      },
+      actions: {
+        save: "Save",
+        refresh: "Refresh"
+      },
+      saved: "Saved"
     },
     gitIdentity: {
       description: "Configure global Git identity (user.name / user.email).",

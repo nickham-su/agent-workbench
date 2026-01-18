@@ -37,34 +37,12 @@
               </div>
             </a-form-item>
           </a-form>
-        </a-tab-pane>
+	        </a-tab-pane>
 
-        <a-tab-pane key="gitIdentity" :tab="t('settings.tabs.gitIdentity')">
-          <div class="text-xs text-[color:var(--text-tertiary)] pb-2">
-            {{ t("settings.gitIdentity.description") }}
-          </div>
-
-          <a-form layout="vertical">
-            <a-form-item :label="t('settings.gitIdentity.form.nameLabel')">
-              <a-input v-model:value="gitGlobalName" :placeholder="t('settings.gitIdentity.form.namePlaceholder')" style="max-width: 420px" />
-            </a-form-item>
-            <a-form-item :label="t('settings.gitIdentity.form.emailLabel')">
-              <a-input v-model:value="gitGlobalEmail" :placeholder="t('settings.gitIdentity.form.emailPlaceholder', { at: '@' })" style="max-width: 420px" />
-            </a-form-item>
-            <div class="flex items-center gap-2">
-              <a-button size="small" :loading="gitIdentitySaving" @click="saveGitIdentity">{{ t("settings.gitIdentity.actions.save") }}</a-button>
-              <a-button size="small" type="text" :loading="gitIdentityLoading" @click="refreshGitIdentity">{{ t("settings.gitIdentity.actions.refresh") }}</a-button>
-              <a-button size="small" danger :loading="gitIdentityClearing" @click="clearAllIdentityWithUi">
-                {{ t("settings.gitIdentity.actions.clearAll") }}
-              </a-button>
-            </div>
-          </a-form>
-        </a-tab-pane>
-
-        <a-tab-pane key="credentials" :tab="t('settings.tabs.credentials')">
-          <div class="flex items-center justify-between pb-2">
-            <div class="text-xs text-[color:var(--text-tertiary)]">
-              {{ t("settings.credentials.description") }}
+	        <a-tab-pane key="credentials" :tab="t('settings.tabs.credentials')">
+	          <div class="flex items-center justify-between pb-2">
+	            <div class="text-xs text-[color:var(--text-tertiary)]">
+	              {{ t("settings.credentials.description") }}
             </div>
             <a-button size="small" @click="openCreateCredential">{{ t("settings.credentials.actions.add") }}</a-button>
           </div>
@@ -171,13 +149,36 @@
             </a-form>
             <div class="text-xs text-[color:var(--text-tertiary)]">
               {{ t("settings.credentials.tip") }}
-            </div>
-          </a-modal>
-        </a-tab-pane>
-        <a-tab-pane key="network" :tab="t('settings.tabs.network')">
-          <div class="text-xs text-[color:var(--text-tertiary)] pb-2">
-            {{ t("settings.network.description") }}
-          </div>
+	            </div>
+	          </a-modal>
+	        </a-tab-pane>
+
+	        <a-tab-pane key="gitIdentity" :tab="t('settings.tabs.gitIdentity')">
+	          <div class="text-xs text-[color:var(--text-tertiary)] pb-2">
+	            {{ t("settings.gitIdentity.description") }}
+	          </div>
+
+	          <a-form layout="vertical">
+	            <a-form-item :label="t('settings.gitIdentity.form.nameLabel')">
+	              <a-input v-model:value="gitGlobalName" :placeholder="t('settings.gitIdentity.form.namePlaceholder')" style="max-width: 420px" />
+	            </a-form-item>
+	            <a-form-item :label="t('settings.gitIdentity.form.emailLabel')">
+	              <a-input v-model:value="gitGlobalEmail" :placeholder="t('settings.gitIdentity.form.emailPlaceholder', { at: '@' })" style="max-width: 420px" />
+	            </a-form-item>
+	            <div class="flex items-center gap-2">
+	              <a-button size="small" :loading="gitIdentitySaving" @click="saveGitIdentity">{{ t("settings.gitIdentity.actions.save") }}</a-button>
+	              <a-button size="small" type="text" :loading="gitIdentityLoading" @click="refreshGitIdentity">{{ t("settings.gitIdentity.actions.refresh") }}</a-button>
+	              <a-button size="small" danger :loading="gitIdentityClearing" @click="clearAllIdentityWithUi">
+	                {{ t("settings.gitIdentity.actions.clearAll") }}
+	              </a-button>
+	            </div>
+	          </a-form>
+	        </a-tab-pane>
+
+	        <a-tab-pane key="network" :tab="t('settings.tabs.network')">
+	          <div class="text-xs text-[color:var(--text-tertiary)] pb-2">
+	            {{ t("settings.network.description") }}
+	          </div>
           <a-form layout="vertical">
             <a-form-item :label="t('settings.network.form.httpProxyLabel')">
               <a-input v-model:value="networkHttpProxy" :placeholder="t('settings.network.form.httpProxyPlaceholder')" />
@@ -203,13 +204,40 @@
             <div class="flex items-center gap-2">
               <a-button size="small" :loading="networkSaving" @click="saveNetwork">{{ t("settings.network.actions.save") }}</a-button>
               <a-button size="small" type="text" :loading="networkLoading" @click="refreshNetwork">{{ t("settings.network.actions.refresh") }}</a-button>
-            </div>
-          </a-form>
-        </a-tab-pane>
-        <a-tab-pane key="security" :tab="t('settings.tabs.security')">
-          <div class="text-xs text-[color:var(--text-tertiary)] pb-2">
-            {{ t("settings.security.description") }}
-          </div>
+	            </div>
+	          </a-form>
+	        </a-tab-pane>
+
+	        <a-tab-pane key="search" :tab="t('settings.tabs.search')">
+	          <div class="text-xs text-[color:var(--text-tertiary)] pb-2">
+	            {{ t("settings.search.description") }}
+	          </div>
+
+	          <a-form layout="vertical">
+	            <a-form-item :label="t('settings.search.excludeGlobs.label')">
+	              <a-textarea v-model:value="searchExcludeText" :auto-size="{ minRows: 6, maxRows: 12 }" />
+	              <div class="pt-2 text-xs text-[color:var(--text-tertiary)]">
+	                {{ t("settings.search.excludeGlobs.help") }}
+	              </div>
+	              <div class="pt-1 text-xs text-[color:var(--text-tertiary)]">
+	                {{ t("settings.search.excludeGlobs.ignoreHint") }}
+	              </div>
+	            </a-form-item>
+	            <div class="flex items-center gap-2">
+	              <a-button size="small" :loading="searchSaving" @click="saveSearchSettings">
+	                {{ t("settings.search.actions.save") }}
+	              </a-button>
+	              <a-button size="small" type="text" :loading="searchLoading" @click="refreshSearchSettings">
+	                {{ t("settings.search.actions.refresh") }}
+	              </a-button>
+	            </div>
+	          </a-form>
+	        </a-tab-pane>
+
+	        <a-tab-pane key="security" :tab="t('settings.tabs.security')">
+	          <div class="text-xs text-[color:var(--text-tertiary)] pb-2">
+	            {{ t("settings.security.description") }}
+	          </div>
 
           <div v-if="security" class="space-y-3">
             <div class="bg-[var(--panel-bg-elevated)] border border-[var(--border-color-secondary)] rounded p-3">
@@ -238,9 +266,6 @@
               </div>
             </div>
           </div>
-          <div v-else class="text-xs text-[color:var(--text-tertiary)]">
-            {{ t("common.loading") }}
-          </div>
         </a-tab-pane>
       </a-tabs>
     </div>
@@ -262,12 +287,14 @@ import {
   generateSshKeypair,
   getGitGlobalIdentity,
   getNetworkSettings,
+  getSearchSettings,
   getSecurityStatus,
   listCredentials,
   resetKnownHost,
   updateCredential,
   updateGitGlobalIdentity,
-  updateNetworkSettings
+  updateNetworkSettings,
+  updateSearchSettings
 } from "@/shared/api";
 import { getInitialLocale, setStoredLocale, type AppLocale } from "@/shared/i18n/locale";
 
@@ -276,7 +303,7 @@ const { t, locale } = useI18n();
 const route = useRoute();
 const router = useRouter();
 
-const settingsTabKeys = ["general", "gitIdentity", "credentials", "network", "security"] as const;
+const settingsTabKeys = ["general", "credentials", "gitIdentity", "network", "search", "security"] as const;
 type SettingsTabKey = (typeof settingsTabKeys)[number];
 
 function normalizeSettingsTabKey(v: unknown): SettingsTabKey {
@@ -560,6 +587,10 @@ const networkNoProxy = ref("");
 const networkCaPem = ref("");
 const networkApplyToTerminal = ref(false);
 
+const searchLoading = ref(false);
+const searchSaving = ref(false);
+const searchExcludeText = ref("");
+
 async function refreshNetwork() {
   networkLoading.value = true;
   try {
@@ -593,6 +624,40 @@ async function saveNetwork() {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
     networkSaving.value = false;
+  }
+}
+
+function parseExcludeText(raw: string) {
+  return raw
+    .split(/\r?\n/g)
+    .map((line) => line.trim())
+    .filter((line) => Boolean(line));
+}
+
+async function refreshSearchSettings() {
+  if (searchLoading.value) return;
+  searchLoading.value = true;
+  try {
+    const res = await getSearchSettings();
+    searchExcludeText.value = res.excludeGlobs.join("\n");
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
+  } finally {
+    searchLoading.value = false;
+  }
+}
+
+async function saveSearchSettings() {
+  if (searchSaving.value) return;
+  searchSaving.value = true;
+  try {
+    await updateSearchSettings({ excludeGlobs: parseExcludeText(searchExcludeText.value) });
+    message.success(t("settings.search.saved"));
+    await refreshSearchSettings();
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
+  } finally {
+    searchSaving.value = false;
   }
 }
 
@@ -638,6 +703,7 @@ watch(
     if (k === "gitIdentity") await refreshGitIdentity();
     else if (k === "credentials") await refreshCredentials();
     else if (k === "network") await refreshNetwork();
+    else if (k === "search") await refreshSearchSettings();
     else if (k === "security") await refreshSecurity();
   },
   { immediate: true }

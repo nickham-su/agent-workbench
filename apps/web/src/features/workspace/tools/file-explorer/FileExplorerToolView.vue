@@ -106,6 +106,12 @@
   </a-modal>
 </template>
 
+<script lang="ts">
+export default {
+  name: "files"
+};
+</script>
+
 <script setup lang="ts">
 import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { Modal, message } from "ant-design-vue";
@@ -117,6 +123,7 @@ import type { FileEntry, FileReadResponse, GitTarget } from "@agent-workbench/sh
 import FileExplorerTree from "./components/FileExplorerTree.vue";
 import FileExplorerTabs from "./components/FileExplorerTabs.vue";
 import type { FileTab, TreeNode } from "./types";
+import { getFileExplorerStore, type FileOpenAtRequest } from "./store";
 import {
   ApiError,
   createFile,
@@ -157,14 +164,17 @@ const dirRequestSeqByDir = new Map<string, number>();
 const fileRequestSeqByPath = new Map<string, number>();
 let targetSeq = 0;
 
-const tabs = reactive<FileTab[]>([]);
-const activeTabKey = ref<string>("");
+const store = getFileExplorerStore(props.workspaceId);
+const tabs = store.tabs;
+const activeTabKey = store.activeTabKey;
+const pendingOpenAt = store.pendingOpenAt;
 
 const editorEl = ref<HTMLDivElement | null>(null);
 let editor: monaco.editor.IStandaloneCodeEditor | null = null;
 let editorBlurDisposable: monaco.IDisposable | null = null;
 let editorSaveCommandId: string | null = null;
 let editorApplyScheduled = false;
+let highlightDecorations: string[] = [];
 
 const createModal = reactive({
   open: false,
@@ -191,7 +201,7 @@ const isTreeEmpty = computed(() => {
   return root.children.length === 0;
 });
 
-const activeTab = ref<FileTab | null>(null);
+const activeTab = store.activeTab;
 const fileTreeSplitRatio = ref<number>(loadFileTreeSplitRatio(props.workspaceId));
 
 watch(
@@ -535,18 +545,34 @@ function markLoaded(dir: string) {
 async function loadDir(dir: string) {
   if (!props.target) return;
   const targetSnapshot = targetSeq;
+  const entries = await fetchDirEntries(dir, targetSnapshot);
+  if (!entries) return;
+  updateChildren(dir, entries);
+  markLoaded(dir);
+}
+
+async function fetchDirEntries(dir: string, targetSnapshot: number) {
+  if (!props.target) return null;
   const requestId = nextDirRequestId(dir);
   try {
     const res = await listFiles({ target: props.target, dir });
-    if (targetSnapshot !== targetSeq) return;
-    if (dirRequestSeqByDir.get(dir) !== requestId) return;
-    updateChildren(dir, res.entries);
-    markLoaded(dir);
+    if (targetSnapshot !== targetSeq) return null;
+    if (dirRequestSeqByDir.get(dir) !== requestId) return null;
+    return res.entries;
   } catch (err) {
-    if (targetSnapshot !== targetSeq) return;
-    if (dirRequestSeqByDir.get(dir) !== requestId) return;
+    if (targetSnapshot !== targetSeq) return null;
+    if (dirRequestSeqByDir.get(dir) !== requestId) return null;
     throw err;
   }
+}
+
+function getRefreshDirs() {
+  const unique = new Set<string>();
+  unique.add("");
+  for (const key of expandedKeys.value) {
+    unique.add(toDirPath(key));
+  }
+  return Array.from(unique).sort((a, b) => splitPath(a).length - splitPath(b).length);
 }
 
 async function refreshRoot() {
@@ -554,10 +580,25 @@ async function refreshRoot() {
   const targetSnapshot = targetSeq;
   treeLoading.value = true;
   try {
-    await loadDir("");
-  } catch (err) {
-    if (targetSnapshot === targetSeq) {
-      message.error(err instanceof Error ? err.message : String(err));
+    const dirs = getRefreshDirs();
+    const results: Array<{ dir: string; entries: FileEntry[] }> = [];
+    for (const dir of dirs) {
+      if (targetSnapshot !== targetSeq) return;
+      if (dir && !nodeByPath.has(dir)) continue;
+      try {
+        const entries = await fetchDirEntries(dir, targetSnapshot);
+        if (!entries) continue;
+        results.push({ dir, entries });
+      } catch (err) {
+        if (targetSnapshot !== targetSeq) return;
+        message.error(err instanceof Error ? err.message : String(err));
+        if (!dir) break;
+      }
+    }
+    if (targetSnapshot !== targetSeq) return;
+    for (const { dir, entries } of results) {
+      updateChildren(dir, entries);
+      markLoaded(dir);
     }
   } finally {
     if (targetSnapshot === targetSeq) treeLoading.value = false;
@@ -632,9 +673,65 @@ function onNodeDblClick(node: TreeNode) {
   });
 }
 
+async function copyTextWithFeedback(text: string, kind: "name" | "path") {
+  const content = String(text ?? "");
+  if (!content) return;
+  const successMessage = kind === "name" ? t("files.copy.nameCopied") : t("files.copy.pathCopied");
+  try {
+    await navigator.clipboard.writeText(content);
+    message.success(successMessage);
+    return;
+  } catch {
+    // 回退使用旧式复制 API
+  }
+
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = content;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    ta.style.top = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    if (ok) {
+      message.success(successMessage);
+      return;
+    }
+  } catch {
+    // 忽略
+  }
+  message.error(t("files.copy.failed"));
+}
+
+function selectedNodePath() {
+  const path = selectedNode.value?.data.path ?? "";
+  return path || ".";
+}
+
+function copySelectedName() {
+  const name = selectedNode.value?.data.name ?? "";
+  return copyTextWithFeedback(name, "name");
+}
+
+function copySelectedPath() {
+  const path = selectedNodePath();
+  return copyTextWithFeedback(path, "path");
+}
+
 function onContextMenuClick(info: { key: string }) {
   const key = String((info as any)?.key ?? "");
   if (!key) return;
+  if (key === "copyName") {
+    void copySelectedName();
+    return;
+  }
+  if (key === "copyPath") {
+    void copySelectedPath();
+    return;
+  }
   if (key === "newFile") {
     openCreateModal("file");
     return;
@@ -682,10 +779,7 @@ function disposeTab(tab: FileTab) {
 }
 
 function resetTabs() {
-  for (const tab of tabs) disposeTab(tab);
-  tabs.splice(0, tabs.length);
-  activeTabKey.value = "";
-  activeTab.value = null;
+  store.resetTabs();
 }
 
 function getTab(path: string) {
@@ -694,8 +788,6 @@ function getTab(path: string) {
 
 function setActiveTabByPath(path: string) {
   activeTabKey.value = path;
-  const tab = getTab(path);
-  activeTab.value = tab;
   scheduleApplyEditor();
 }
 
@@ -767,6 +859,42 @@ async function openFile(path: string) {
   }
 }
 
+function clearHighlightDecorations() {
+  if (!editor) return;
+  highlightDecorations = editor.deltaDecorations(highlightDecorations, []);
+}
+
+function applyOpenAtHighlight(req: FileOpenAtRequest) {
+  if (!editor) return;
+  const model = editor.getModel();
+  if (!model) return;
+  const maxLine = model.getLineCount();
+  const line = Math.min(Math.max(req.line, 1), maxLine);
+  clearHighlightDecorations();
+  if (req.highlight.kind === "line") {
+    const range = new monaco.Range(line, 1, line, model.getLineMaxColumn(line));
+    highlightDecorations = editor.deltaDecorations(highlightDecorations, [
+      { range, options: { isWholeLine: true, className: "files-search-line" } }
+    ]);
+  } else {
+    const startCol = Math.max(req.highlight.startCol, 1);
+    const endCol = Math.max(req.highlight.endCol, startCol);
+    const range = new monaco.Range(line, startCol, line, endCol);
+    highlightDecorations = editor.deltaDecorations(highlightDecorations, [
+      { range, options: { inlineClassName: "files-search-hit" } }
+    ]);
+  }
+  editor.revealLineInCenter(line);
+}
+
+async function openFileAt(req: FileOpenAtRequest) {
+  await openFile(req.path);
+  await nextTick();
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+  if (!editor) return;
+  applyOpenAtHighlight(req);
+}
+
 function onActiveTabUpdate(key: string | number) {
   const k = String(key);
   setActiveTabByPath(k);
@@ -799,7 +927,6 @@ function closeTab(path: string) {
     if (next) setActiveTabByPath(next.path);
     else {
       activeTabKey.value = "";
-      activeTab.value = null;
       if (editor) editor.setModel(null);
     }
   }
@@ -1173,24 +1300,31 @@ function initEditor() {
 }
 
 watch(
+  () => pendingOpenAt.value,
+  (req) => {
+    if (!req) return;
+    store.setPendingOpenAt(null);
+    void openFileAt(req);
+  },
+  { immediate: true }
+);
+
+watch(
   () => activeTabKey.value,
-  (key) => {
-    if (!key) {
-      activeTab.value = null;
-      scheduleApplyEditor();
-      return;
-    }
-    setActiveTabByPath(key);
+  () => {
+    scheduleApplyEditor();
   }
 );
 
 watch(
   () => (props.target ? `${props.target.workspaceId}:${props.target.dirName}` : ""),
   async () => {
+    const targetKey = props.target ? `${props.target.workspaceId}:${props.target.dirName}` : "";
+    const targetChanged = store.setTargetKey(targetKey);
     targetSeq += 1;
     dirRequestSeqByDir.clear();
     fileRequestSeqByPath.clear();
-    resetTabs();
+    if (targetChanged) resetTabs();
     resetTree();
     if (props.target) {
       initRootTree();
@@ -1216,7 +1350,6 @@ onBeforeUnmount(() => {
   editorSaveCommandId = null;
   editor?.dispose();
   editor = null;
-  resetTabs();
 });
 </script>
 
@@ -1232,5 +1365,13 @@ onBeforeUnmount(() => {
 
 .files-tabs :deep(.ant-tabs-tab) {
   margin-left: 0 !important;
+}
+
+:deep(.files-search-hit) {
+  background: rgba(255, 214, 102, 0.45);
+}
+
+:deep(.files-search-line) {
+  background: rgba(255, 214, 102, 0.2);
 }
 </style>

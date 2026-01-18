@@ -26,7 +26,7 @@ export async function registerWebUi(app: FastifyInstance, ctx: AppContext) {
     path.resolve(process.cwd(), "apps/web/dist");
 
   if (!(await dirExists(distDir))) {
-    app.log.warn({ distDir }, "serveWeb 已启用，但 WEB_DIST_DIR 不存在或不是目录");
+    app.log.warn({ distDir }, "serveWeb 已启用，但 AWB_WEB_DIST_DIR 不存在或不是目录");
     return;
   }
 

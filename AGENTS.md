@@ -56,26 +56,26 @@
 ## 环境变量与本地数据
 
 - 环境变量文件使用仓库根目录的 `.env.local`（从 `.env.example` 复制）
-- 后端会在启动时读取根目录 `.env.local`，并且不会覆盖已存在的 `process.env`
+- 后端会在启动时读取根目录 `.env.local` 中的 `AWB_*` 变量，并且不会覆盖已存在的 `process.env`
   - 根目录定位规则：从 `process.cwd()` 开始向上查找，遇到包含 `workspaces` 字段的 `package.json` 即视为仓库根目录
 - `GET /api/health` 的 `version` 为运行时探测值
-  - 优先读 `APP_VERSION`，其次从启动目录或仓库内的 `apps/api/package.json` 探测，最终回退 `"0.0.0"`
+  - 优先读 `AWB_APP_VERSION`，其次从启动目录或仓库内的 `apps/api/package.json` 探测，最终回退 `"0.0.0"`
 - 前端 Vite 的 `envDir` 指向仓库根目录，开发期通过 proxy 把 `/api` 与 WebSocket 代理到后端
 
 关键变量（示例见 `.env.example`）
 
-- `DATA_DIR`
+- `AWB_DATA_DIR`
   - 默认 `.data`，后端会 `path.resolve` 成绝对路径
   - 数据目录结构由 `apps/api/src/infra/fs/paths.ts` 统一拼接（例如 `db.sqlite`、`repos/`、`workspaces/`）
-- `HOST`、`PORT`
+- `AWB_HOST`、`AWB_PORT`
   - 后端监听地址与端口
-- `DEV_WEB_PORT`
+- `AWB_DEV_WEB_PORT`
   - 仅前端开发期（Vite dev server）使用：前端 dev server 监听端口
-- `DEV_API_ORIGIN`
-  - 仅前端开发期使用：前端 dev proxy 的后端目标地址（不设则回退到 `http://127.0.0.1:<PORT|4310>`）
-- `FILE_MAX_BYTES`
+- `AWB_DEV_API_ORIGIN`
+  - 仅前端开发期使用：前端 dev proxy 的后端目标地址（不设则回退到 `http://127.0.0.1:<AWB_PORT|4310>`）
+- `AWB_FILE_MAX_BYTES`
   - 后端用于文件内容读取/对比的大小阈值
-- `MAX_TERMINALS`
+- `AWB_MAX_TERMINALS`
   - 当前后端未实现终端会话全局上限控制（预留）
 
 本地重置数据
@@ -102,7 +102,7 @@
 ## 安全边界与约束（对本仓库的改动要求）
 
 - 文件操作严格限定在仓库目录内
-- 后端涉及路径/文件系统的逻辑，默认只允许落在 `DATA_DIR` 派生目录下，避免写死 `/data`
+- 后端涉及路径/文件系统的逻辑，默认只允许落在 `AWB_DATA_DIR` 派生目录下，避免写死 `/data`
 - 原则上不修改 `node_modules/` 里的内容
   - 仅用于本地排障时允许最小化操作（例如修复 `node-pty` 的可执行权限问题）
 - 不执行会改动 git 历史或工作区状态的命令（例如 `git add/commit/push/reset/rebase/checkout`）

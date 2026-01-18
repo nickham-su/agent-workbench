@@ -15,6 +15,8 @@ import type {
   FileMkdirResponse,
   FileReadRequest,
   FileReadResponse,
+  FileStatRequest,
+  FileStatResponse,
   FileRenameRequest,
   FileRenameResponse,
   FileWriteRequest,
@@ -54,9 +56,13 @@ import type {
   UpdateCredentialRequest,
   UpdateGitGlobalIdentityRequest,
   UpdateNetworkSettingsRequest,
+  UpdateSearchSettingsRequest,
   UpdateRepoRequest,
   UpdateWorkspaceRequest,
   WorkspaceDetail,
+  SearchSettings,
+  FileSearchRequest,
+  FileSearchResponse
 } from "@agent-workbench/shared";
 import { emitUnauthorized } from "@/features/auth/unauthorized";
 import { resetAuthStatus, setAuthed } from "@/features/auth/session";
@@ -242,9 +248,27 @@ export async function getNetworkSettings() {
   }
 }
 
+export async function getSearchSettings() {
+  try {
+    const res = await client.get<SearchSettings>("/settings/search");
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
 export async function updateNetworkSettings(body: UpdateNetworkSettingsRequest) {
   try {
     const res = await client.put<NetworkSettings>("/settings/network", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function updateSearchSettings(body: UpdateSearchSettingsRequest) {
+  try {
+    const res = await client.put<SearchSettings>("/settings/search", body);
     return res.data;
   } catch (err) {
     throw toApiError(err);
@@ -450,6 +474,24 @@ export async function setWorkspaceGitIdentity(body: GitIdentitySetRequest) {
 export async function listFiles(body: FileListRequest) {
   try {
     const res = await client.post<FileListResponse>("/files/list", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function searchFiles(body: FileSearchRequest) {
+  try {
+    const res = await client.post<FileSearchResponse>("/files/search", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function statFile(body: FileStatRequest) {
+  try {
+    const res = await client.post<FileStatResponse>("/files/stat", body);
     return res.data;
   } catch (err) {
     throw toApiError(err);

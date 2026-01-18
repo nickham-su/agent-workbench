@@ -8,6 +8,7 @@
             :icon="toolIcon(toolId)"
             :active="activeToolIdByArea.leftTop === toolId"
             :minimized="toolMinimized[toolId] ?? false"
+            :dot="toolDots[toolId] ?? false"
             :can-move-up="canMoveUp(toolId)"
             :can-move-down="canMoveDown(toolId)"
             :moveTargets="moveTargets(toolId)"
@@ -27,6 +28,7 @@
             :icon="toolIcon(toolId)"
             :active="activeToolIdByArea.leftBottom === toolId"
             :minimized="toolMinimized[toolId] ?? false"
+            :dot="toolDots[toolId] ?? false"
             :can-move-up="canMoveUp(toolId)"
             :can-move-down="canMoveDown(toolId)"
             :moveTargets="moveTargets(toolId)"
@@ -52,7 +54,7 @@
         >
           <div v-if="showLeftTop" class="min-h-0 min-w-0 overflow-hidden" :class="showRightTop ? 'border-r border-[var(--border-color-secondary)]' : ''">
             <template v-if="visibleToolIdByArea.leftTop">
-              <KeepAlive v-if="isKeepAlive(visibleToolIdByArea.leftTop)">
+              <KeepAlive v-if="isKeepAlive(visibleToolIdByArea.leftTop)" :include="keepAliveIncludeByArea.leftTop">
                 <component
                   :is="toolView(visibleToolIdByArea.leftTop)"
                   :key="visibleToolIdByArea.leftTop"
@@ -73,7 +75,7 @@
           </div>
           <div v-if="showRightTop" class="min-h-0 min-w-0 overflow-hidden">
             <template v-if="visibleToolIdByArea.rightTop">
-              <KeepAlive v-if="isKeepAlive(visibleToolIdByArea.rightTop)">
+              <KeepAlive v-if="isKeepAlive(visibleToolIdByArea.rightTop)" :include="keepAliveIncludeByArea.rightTop">
                 <component
                   :is="toolView(visibleToolIdByArea.rightTop)"
                   :key="visibleToolIdByArea.rightTop"
@@ -107,7 +109,7 @@
 
         <div v-if="showBottom" class="min-h-0 min-w-0 overflow-hidden">
           <template v-if="visibleToolIdByArea.leftBottom">
-            <KeepAlive v-if="isKeepAlive(visibleToolIdByArea.leftBottom)">
+            <KeepAlive v-if="isKeepAlive(visibleToolIdByArea.leftBottom)" :include="keepAliveIncludeByArea.leftBottom">
               <component
                 :is="toolView(visibleToolIdByArea.leftBottom)"
                 :key="visibleToolIdByArea.leftBottom"
@@ -150,6 +152,7 @@
           :icon="toolIcon(toolId)"
           :active="activeToolIdByArea.rightTop === toolId"
           :minimized="toolMinimized[toolId] ?? false"
+          :dot="toolDots[toolId] ?? false"
           :can-move-up="canMoveUp(toolId)"
           :can-move-down="canMoveDown(toolId)"
           :moveTargets="moveTargets(toolId)"
@@ -179,8 +182,10 @@ const props = defineProps<{
   activeToolIdByArea: Record<DockArea, ToolId | null>;
   toolMinimized: Record<ToolId, boolean | undefined>;
   visibleToolIdByArea: Record<DockArea, ToolId | null>;
+  keepAliveIncludeByArea: Record<DockArea, string[]>;
   toolTitle: (toolId: ToolId) => string;
   toolIcon: (toolId: ToolId) => any;
+  toolDots: Record<ToolId, boolean | undefined>;
   canMoveUp: (toolId: ToolId) => boolean;
   canMoveDown: (toolId: ToolId) => boolean;
   moveTargets: (toolId: ToolId) => { area: DockArea; label: string }[];

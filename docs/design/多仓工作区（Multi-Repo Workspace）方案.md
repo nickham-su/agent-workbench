@@ -14,7 +14,7 @@
 - 让用户在 Workspace 根目录下直接看到各 repo 目录，便于理解与操作
 - 保持操作边界清晰
   - 前端不直接传入任意路径
-  - 后端只允许在 `DATA_DIR` 派生目录内执行文件/Git 操作
+  - 后端只允许在 `AWB_DATA_DIR` 派生目录内执行文件/Git 操作
 - API 设计更通用，便于未来产品形态继续演进
 
 ## 非目标（当前版本不做，但设计需要兼容）
@@ -52,7 +52,7 @@
 ### Workspace 根目录目录结构：平铺 repo 目录
 
 - 选择
-  - `${DATA_DIR}/workspaces/<workspaceDirName>/<dirName>`
+  - `${AWB_DATA_DIR}/workspaces/<workspaceDirName>/<dirName>`
   - 不引入额外 `repos/` 目录层级
 - 取舍逻辑
   - Workspace 根目录更直观，可直接看到 repo 目录
@@ -65,7 +65,7 @@
   - workspace 的逻辑 ID（`workspaceId`）继续保持全局唯一与稳定（用于 API/DB/日志）
 - 选择
   - 新增 `workspaces.dir_name`（`workspaceDirName`），作为 workspace 根目录名
-  - `workspace.path` 固化为 `${DATA_DIR}/workspaces/${workspaceDirName}`，后端一律以 DB 中的 `workspace.path` 为准
+  - `workspace.path` 固化为 `${AWB_DATA_DIR}/workspaces/${workspaceDirName}`，后端一律以 DB 中的 `workspace.path` 为准
   - 目录名生成策略（创建时生成一次，后续不随 title 变更）
     - 不拼 title，直接使用 `w_<rand>`（极短且避免暴露语义）
     - `rand`：短随机串（建议 base64url/base32/base58 等安全字符集），用于冲突消解
@@ -124,13 +124,13 @@
 
 ## 数据落盘与路径
 
-- 数据根目录：`DATA_DIR`（后端对其 `path.resolve` 成绝对路径）
+- 数据根目录：`AWB_DATA_DIR`（后端对其 `path.resolve` 成绝对路径）
 - repo mirror
-  - `${DATA_DIR}/repos/<repoId>/mirror.git`
+  - `${AWB_DATA_DIR}/repos/<repoId>/mirror.git`
 - workspace 根目录
-  - `${DATA_DIR}/workspaces/<workspaceDirName>/`
+  - `${AWB_DATA_DIR}/workspaces/<workspaceDirName>/`
 - workspace repo 目录
-  - `${DATA_DIR}/workspaces/<workspaceDirName>/<dirName>/`
+  - `${AWB_DATA_DIR}/workspaces/<workspaceDirName>/<dirName>/`
 
 ## 数据模型（建议）
 

@@ -42,7 +42,7 @@ docker compose up -d --build
 
 **Access**
 
-Default port is 4310. If you change `PORT` in `.env`, replace the port in the URLs below accordingly.
+Default port is 4310. If you change `AWB_PORT` in `.env`, replace the port in the URLs below accordingly.
 
 | URL | Description |
 |-----|-------------|
@@ -54,9 +54,9 @@ Default port is 4310. If you change `PORT` in `.env`, replace the port in the UR
 
 To avoid reconfiguring `docker-compose.yml` for every new project, the default Compose setup also publishes a reserved local port range for services started inside workspaces (HTTP servers, RPC, etc.):
 
-- Host port range: controlled by `WORKSPACE_PORT_RANGE` in `.env`, default `30000-30100`
+- Host port range: controlled by `AWB_WORKSPACE_PORT_RANGE` in `.env`, default `30000-30100`
 - Container port range: same as above
-- If the container fails to start due to a port conflict, change `WORKSPACE_PORT_RANGE` in `.env` and restart the container.
+- If the container fails to start due to a port conflict, change `AWB_WORKSPACE_PORT_RANGE` in `.env` and restart the container.
 
 **Data Persistence**
 
@@ -71,27 +71,29 @@ Two named volumes are used by default:
 
 **Security**
 
-By default, for convenience, `PORT` and `WORKSPACE_PORT_RANGE` are published on all interfaces. If you deploy this on a remote host, prefer a safer exposure model:
+By default, for convenience, `AWB_PORT` and `AWB_WORKSPACE_PORT_RANGE` are published on all interfaces. If you deploy this on a remote host, prefer a safer exposure model:
 
-- Bind to localhost via `.env`: `PUBLISH_HOST=127.0.0.1`
+- Bind to localhost via `.env`: `AWB_PUBLISH_HOST=127.0.0.1`
 - Put Nginx/Caddy in front as an HTTPS reverse proxy
-- Enable `AUTH_TOKEN` as a minimal auth guard, and set `AUTH_COOKIE_SECURE=1` when served over HTTPS
-- Be cautious exposing `WORKSPACE_PORT_RANGE`, since it publishes ports for services started inside workspaces (shrink the range, or remove the mapping in your own compose setup if you don't need it)
+- Enable `AWB_AUTH_TOKEN` as a minimal auth guard, and set `AWB_AUTH_COOKIE_SECURE=1` when served over HTTPS
+- Be cautious exposing `AWB_WORKSPACE_PORT_RANGE`, since it publishes ports for services started inside workspaces (shrink the range, or remove the mapping in your own compose setup if you don't need it)
 
-If you need to publish ports to LAN/public directly, use `PUBLISH_HOST=0.0.0.0` and apply firewall rules + auth accordingly.
+If you need to publish ports to LAN/public directly, use `AWB_PUBLISH_HOST=0.0.0.0` and apply firewall rules + auth accordingly.
 
 **Environment Variables**
 
 | Variable | Description |
 |----------|-------------|
-| `PORT` | Published port for Web UI + API (default `4310`). |
-| `WORKSPACE_PORT_RANGE` | Reserved workspace port range (default `30000-30100`) for publishing services started inside workspaces. |
-| `CREDENTIAL_MASTER_KEY` | Encryption key for credentials (32-byte hex/base64/base64url). Auto-generated and saved to `/data/keys/credential-master-key.json` if not set. Recommended to set explicitly for migration scenarios. |
-| `AUTH_TOKEN` | Optional access token protection. If set, Web UI/API requires signing in with this token (session cookie). |
-| `AUTH_COOKIE_SECURE` | Set to `1` when serving over HTTPS (adds `Secure` to the session cookie). Keep `0` for local HTTP dev. |
-| `PUBLISH_HOST` | Host IP to publish ports on (Docker Compose). Set `127.0.0.1` to allow localhost access only. |
+| `AWB_PORT` | Published port for Web UI + API (default `4310`). |
+| `AWB_WORKSPACE_PORT_RANGE` | Reserved workspace port range (default `30000-30100`) for publishing services started inside workspaces. |
+| `AWB_FILE_MAX_BYTES` | Max bytes for file preview/compare (default `1048576`). |
+| `AWB_APP_VERSION` | Optional override for `/api/health` version. |
+| `AWB_CREDENTIAL_MASTER_KEY` | Encryption key for credentials (32-byte hex/base64/base64url). Auto-generated and saved to `/data/keys/credential-master-key.json` if not set. Recommended to set explicitly for migration scenarios. |
+| `AWB_AUTH_TOKEN` | Optional access token protection. If set, Web UI/API requires signing in with this token (session cookie). |
+| `AWB_AUTH_COOKIE_SECURE` | Set to `1` when serving over HTTPS (adds `Secure` to the session cookie). Keep `0` for local HTTP dev. |
+| `AWB_PUBLISH_HOST` | Host IP to publish ports on (Docker Compose). Set `127.0.0.1` to allow localhost access only. |
 
-Other Compose-related variables (e.g. `HOST`, `DATA_DIR`, `SERVE_WEB`, `WEB_DIST_DIR`) are documented in `.env.docker.example`.
+Other Compose-related variables (e.g. `AWB_HOST`, `AWB_DATA_DIR`, `AWB_SERVE_WEB`, `AWB_WEB_DIST_DIR`) are documented in `.env.docker.example`.
 
 ---
 
@@ -141,9 +143,9 @@ npm run dev
 **Local env**
 
 - Copy `.env.example` to `.env.local` and adjust variables as needed
-  - `PORT`: backend listen port (default: `4310`)
-  - `DEV_WEB_PORT`: Vite dev server port (optional)
-  - `DEV_API_ORIGIN`: dev proxy target (optional, default: `http://127.0.0.1:${PORT}`)
+  - `AWB_PORT`: backend listen port (default: `4310`)
+  - `AWB_DEV_WEB_PORT`: Vite dev server port (optional)
+  - `AWB_DEV_API_ORIGIN`: dev proxy target (optional, default: `http://127.0.0.1:${AWB_PORT}`)
 
 **Scripts**
 

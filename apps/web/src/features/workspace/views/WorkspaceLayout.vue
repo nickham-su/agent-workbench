@@ -20,7 +20,9 @@
         :right-toolbar-tool-ids="rightToolbarToolIds"
         :active-tool-id-by-area="activeToolIdByArea"
         :tool-minimized="toolMinimized"
+        :tool-dots="toolDots"
         :visible-tool-id-by-area="visibleToolIdByArea"
+        :keep-alive-include-by-area="keepAliveIncludeByArea"
         :tool-title="toolTitle"
         :tool-icon="toolIcon"
         :can-move-up="canMoveToolUp"
@@ -108,7 +110,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch, type ComponentPublicInstance } from "vue";
 import { Modal, message } from "ant-design-vue";
-import { CodeOutlined, FolderOpenOutlined } from "@ant-design/icons-vue";
+import { CodeOutlined, FolderOpenOutlined, SearchOutlined } from "@ant-design/icons-vue";
 import { useI18n } from "vue-i18n";
 import type { GitPushRequest, GitStatusResponse, RepoBranchesResponse, WorkspaceDetail } from "@agent-workbench/shared";
 import {
@@ -126,22 +128,27 @@ import {
   updateGitGlobalIdentity
 } from "@/shared/api";
 import { waitRepoSettledOrThrow } from "@/features/repos/stores/repos";
-import { workspaceHostKey, type DockArea, type WorkspaceHostApi, type WorkspaceToolCommandMap, type WorkspaceToolEvent } from "@/features/workspace/host";
+import { workspaceHostKey, type DockArea, type ToolCall, type ToolCallEnvelope, type WorkspaceHostApi, type WorkspaceToolCommandMap, type WorkspaceToolEvent } from "@/features/workspace/host";
 import { workspaceContextKey } from "@/features/workspace/context";
+import type { ToolRuntime, ToolRuntimeContext } from "@/features/workspace/runtime";
 import WorkspaceHeader from "@/features/workspace/components/WorkspaceHeader.vue";
 import WorkspaceDock from "@/features/workspace/components/WorkspaceDock.vue";
 import type { HeaderAction, ToolId } from "@/features/workspace/types";
 import CodeReviewIcon from "../icons/CodeReviewIcon.vue";
 import CodeReviewToolView from "../tools/code-review/CodeReviewToolView.vue";
+import { createSearchRuntime } from "../tools/search/runtime";
 import FileExplorerToolView from "../tools/file-explorer/FileExplorerToolView.vue";
+import SearchToolView from "../tools/search/SearchToolView.vue";
 import TerminalToolView from "../tools/terminal/TerminalToolView.vue";
 import GitIdentityModal from "@/shared/components/GitIdentityModal.vue";
+import { createCodeReviewRuntime } from "@/features/workspace/tools/code-review/runtime";
+import { createFileExplorerRuntime } from "@/features/workspace/tools/file-explorer/runtime";
 
 const props = defineProps<{ workspaceId: string }>();
 const { t } = useI18n();
 type PushParams = Omit<GitPushRequest, "target">;
 
-const TOOL_IDS: ToolId[] = ["files", "codeReview", "terminal"];
+const TOOL_IDS: ToolId[] = ["files", "search", "codeReview", "terminal"];
 const DOCK_AREAS: DockArea[] = ["leftTop", "leftBottom", "rightTop"];
 type ToolDefinition = {
   toolId: ToolId;
@@ -152,6 +159,7 @@ type ToolDefinition = {
   allowedAreas: DockArea[];
   keepAlive?: boolean;
   headerActions?: () => HeaderAction[];
+  createRuntime?: (ctx: ToolRuntimeContext) => ToolRuntime;
 };
 
 const loading = ref(false);
@@ -180,7 +188,18 @@ const tools = computed<ToolDefinition[]>(() => [
     view: FileExplorerToolView,
     defaultArea: "leftTop",
     allowedAreas: ["leftTop", "rightTop", "leftBottom"],
-    keepAlive: true
+    keepAlive: true,
+    createRuntime: (ctx) => createFileExplorerRuntime(ctx)
+  },
+  {
+    toolId: "search",
+    title: () => t("workspace.tools.search"),
+    icon: SearchOutlined,
+    view: SearchToolView,
+    defaultArea: "leftTop",
+    allowedAreas: ["leftTop", "rightTop", "leftBottom"],
+    keepAlive: true,
+    createRuntime: (ctx) => createSearchRuntime(ctx)
   },
   {
     toolId: "codeReview",
@@ -190,6 +209,7 @@ const tools = computed<ToolDefinition[]>(() => [
     defaultArea: "leftTop",
     allowedAreas: ["leftTop", "rightTop", "leftBottom"],
     keepAlive: true,
+    createRuntime: (ctx) => createCodeReviewRuntime(ctx),
     headerActions: () => [
       {
         id: "pull",
@@ -227,7 +247,8 @@ const toolById = computed(() => {
 const toolArea = reactive<Record<ToolId, DockArea>>({
   codeReview: "leftTop",
   terminal: "leftTop",
-  files: "leftTop"
+  files: "leftTop",
+  search: "leftTop"
 });
 
 const activeToolIdByArea = reactive<Record<DockArea, ToolId | null>>({
@@ -239,8 +260,51 @@ const activeToolIdByArea = reactive<Record<DockArea, ToolId | null>>({
 const toolMinimized = reactive<Record<ToolId, boolean>>({
   codeReview: false,
   terminal: true,
-  files: false
+  files: false,
+  search: false
 });
+const toolDots = reactive<Record<ToolId, boolean>>({
+  codeReview: false,
+  terminal: false,
+  files: false,
+  search: false
+});
+const toolRuntimes = new Map<ToolId, ToolRuntime>();
+
+function setToolDot(toolId: string, dot: boolean) {
+  if (!toolById.value.has(toolId as ToolId)) return;
+  const id = toolId as ToolId;
+  toolDots[id] = dot;
+}
+
+function resetToolDots() {
+  for (const id of TOOL_IDS) toolDots[id] = false;
+}
+
+function disposeToolRuntimes() {
+  for (const runtime of toolRuntimes.values()) runtime.dispose();
+  toolRuntimes.clear();
+}
+
+function createToolRuntimes() {
+  disposeToolRuntimes();
+  resetToolDots();
+  if (!props.workspaceId) return;
+  for (const def of tools.value) {
+    if (!def.createRuntime) continue;
+    const runtime = def.createRuntime({
+      workspaceId: props.workspaceId,
+      toolId: def.toolId,
+      host: { call: (toToolId, call) => callToolFrom(def.toolId, toToolId, call), setToolDot },
+  getCurrentTarget: () => currentTarget.value,
+  getVisible: () => isToolVisible(def.toolId),
+  refreshView: () => toolCommands.get(def.toolId)?.refresh?.(),
+  api: { getGitStatus }
+});
+    toolRuntimes.set(def.toolId, runtime);
+    runtime.start();
+  }
+}
 
 const toolOrderByArea = reactive<Record<DockArea, ToolId[]>>(defaultToolOrderByArea());
 
@@ -332,13 +396,13 @@ function loadDockLayout(workspaceId: string): DockLayoutV2 | null {
     const activeRaw = json.activeToolIdByArea ?? ({} as any);
     const toolOrderRaw = json.toolOrderByArea ?? ({} as any);
 
-    const toolAreaOut: Record<ToolId, DockArea> = { codeReview: "leftTop", terminal: "leftTop", files: "leftTop" };
+    const toolAreaOut: Record<ToolId, DockArea> = { codeReview: "leftTop", terminal: "leftTop", files: "leftTop", search: "leftTop" };
     for (const toolId of TOOL_IDS) {
       const v = (toolAreaRaw as any)[toolId];
       if (isDockArea(v)) toolAreaOut[toolId] = v;
     }
 
-    const toolMinimizedOut: Record<ToolId, boolean> = { codeReview: false, terminal: true, files: false };
+    const toolMinimizedOut: Record<ToolId, boolean> = { codeReview: false, terminal: true, files: false, search: false };
     for (const toolId of TOOL_IDS) {
       const v = (toolMinimizedRaw as any)[toolId];
       if (typeof v === "boolean") toolMinimizedOut[toolId] = v;
@@ -402,8 +466,13 @@ function saveDockLayout(workspaceId: string) {
       version: 2,
       updatedAt: Date.now(),
       ratios: { topBottom: topBottomRatio.value, topLeft: topLeftRatio.value },
-      toolArea: { codeReview: toolArea.codeReview, terminal: toolArea.terminal, files: toolArea.files },
-      toolMinimized: { codeReview: toolMinimized.codeReview, terminal: toolMinimized.terminal, files: toolMinimized.files },
+      toolArea: { codeReview: toolArea.codeReview, terminal: toolArea.terminal, files: toolArea.files, search: toolArea.search },
+      toolMinimized: {
+        codeReview: toolMinimized.codeReview,
+        terminal: toolMinimized.terminal,
+        files: toolMinimized.files,
+        search: toolMinimized.search
+      },
       activeToolIdByArea: {
         leftTop: activeToolIdByArea.leftTop,
         leftBottom: activeToolIdByArea.leftBottom,
@@ -438,14 +507,14 @@ function resetDockLayoutDefaults() {
   toolArea.codeReview = "leftTop";
   toolArea.terminal = "leftTop";
   toolArea.files = "leftTop";
+  toolArea.search = "leftTop";
   activeToolIdByArea.leftTop = "files";
   activeToolIdByArea.leftBottom = null;
   activeToolIdByArea.rightTop = null;
   toolMinimized.codeReview = false;
   toolMinimized.terminal = true;
   toolMinimized.files = false;
-  toolMinimized.codeReview = false;
-  toolMinimized.terminal = true;
+  toolMinimized.search = false;
   setToolOrderByArea(defaultToolOrderByArea());
   topBottomRatio.value = 2 / 3;
   topLeftRatio.value = 2 / 3;
@@ -527,6 +596,42 @@ function toolCurrentArea(toolId: ToolId): DockArea {
   return toolArea[toolId] ?? toolById.value.get(toolId)?.defaultArea ?? "leftTop";
 }
 
+function isToolVisible(toolId: ToolId) {
+  const area = toolCurrentArea(toolId);
+  return activeToolIdByArea[area] === toolId && !toolMinimized[toolId];
+}
+
+function callToolFrom(fromToolId: string, toToolId: string, call: ToolCall) {
+  const toId = toToolId as ToolId;
+  if (!toolById.value.has(toId)) return;
+  const toArea = toolCurrentArea(toId);
+  const fromId = toolById.value.has(fromToolId as ToolId) ? (fromToolId as ToolId) : null;
+  const fromArea = fromId ? toolCurrentArea(fromId) : null;
+  const targetVisible = isToolVisible(toId);
+  if (fromArea && fromArea === toArea) {
+    activeToolIdByArea[toArea] = toId;
+    toolMinimized[toId] = false;
+  } else if (!targetVisible) {
+    activeToolIdByArea[toArea] = toId;
+    toolMinimized[toId] = false;
+  }
+  const envelope: ToolCallEnvelope = {
+    type: call.type,
+    payload: call.payload,
+    fromToolId,
+    toToolId,
+    workspaceId: props.workspaceId,
+    targetAtCall: currentTarget.value ?? null,
+    ts: Date.now()
+  };
+  // 无条件延后到下一个 tick 再派发 call:
+  // - 避免“首次展示”工具时 ToolView 尚未挂载完成，导致丢失调用(例如 files.openAt)
+  // - 也能覆盖某些 UI/KeepAlive 的时序差异(先稳定再派发)
+  void nextTick().then(() => {
+    toolRuntimes.get(toId)?.onCall(envelope);
+  });
+}
+
 function openTool(toolId: string) {
   if (!toolById.value.has(toolId as ToolId)) return;
   const id = toolId as ToolId;
@@ -580,6 +685,8 @@ const hostApi: WorkspaceHostApi = {
   openTool,
   minimizeTool,
   toggleMinimize,
+  callFrom: callToolFrom,
+  setToolDot,
   registerToolCommands,
   emitToolEvent,
   drainToolEvents
@@ -614,6 +721,25 @@ const visibleToolIdByArea = computed(() => {
     res[area] = id;
   });
   return res;
+});
+
+// KeepAlive 默认会长期缓存同一位置曾经渲染过的工具实例。
+// 当工具从某个区域移动到另一个区域时,旧区域的 KeepAlive 必须及时剔除该工具缓存,
+// 否则像终端这种"独占连接"的资源会出现两个实例同时连接并触发 occupied.
+const keepAliveIncludeByArea = computed(() => {
+  const res: Record<DockArea, string[]> = { leftTop: [], leftBottom: [], rightTop: [] };
+  for (const id of TOOL_IDS) {
+    if (!isKeepAlive(id)) continue;
+    const area = toolCurrentArea(id);
+    res[area].push(id);
+  }
+  return res;
+});
+
+const toolVisibleById = computed(() => {
+  const out: Record<ToolId, boolean> = { codeReview: false, terminal: false, files: false, search: false };
+  for (const id of TOOL_IDS) out[id] = isToolVisible(id);
+  return out;
 });
 
 const leftTopToolbarToolIds = computed<ToolId[]>(() => toolOrderByArea.leftTop.filter((id) => toolCurrentArea(id) === "leftTop"));
@@ -759,6 +885,13 @@ function toolViewProps(toolId: ToolId) {
     };
   }
   if (toolId === "files") {
+    return {
+      workspaceId: props.workspaceId,
+      target: currentTarget.value,
+      toolId
+    };
+  }
+  if (toolId === "search") {
     return {
       workspaceId: props.workspaceId,
       target: currentTarget.value,
@@ -924,10 +1057,30 @@ watch(
   { immediate: true }
 );
 
+watch(
+  () => props.workspaceId,
+  () => {
+    createToolRuntimes();
+  },
+  { immediate: true }
+);
+
 watch(toolArea, scheduleSaveDockLayout, { deep: true });
 watch(toolMinimized, scheduleSaveDockLayout, { deep: true });
 watch(activeToolIdByArea, scheduleSaveDockLayout, { deep: true });
 watch(toolOrderByArea, scheduleSaveDockLayout, { deep: true });
+watch(
+  toolVisibleById,
+  (next, prev) => {
+    for (const id of TOOL_IDS) {
+      const wasVisible = prev?.[id] ?? false;
+      const isVisible = next[id];
+      if (wasVisible === isVisible) continue;
+      toolRuntimes.get(id)?.onVisibilityChange(isVisible);
+    }
+  },
+  { deep: true, immediate: true }
+);
 watch(
   () => currentRepoDirName.value,
   (dirName) => {
@@ -942,11 +1095,12 @@ watch(
 watch(
   () => currentTarget.value?.dirName,
   async () => {
+    const nextTarget = currentTarget.value ?? null;
+    for (const id of TOOL_IDS) toolRuntimes.get(id)?.onRepoChange(nextTarget);
     checkoutBranch.value = "";
     await refreshCurrentRepoStatus();
     await refreshBranches();
     applyPageTitle();
-    await toolCommands.get("codeReview")?.refresh?.();
   }
 );
 watch(
@@ -1402,5 +1556,6 @@ onBeforeUnmount(() => {
   draggingCleanup?.();
   if (saveDockLayoutTimer !== null) window.clearTimeout(saveDockLayoutTimer);
   saveDockLayoutTimer = null;
+  disposeToolRuntimes();
 });
 </script>

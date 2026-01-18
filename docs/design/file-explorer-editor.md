@@ -170,7 +170,7 @@
     - `language?: string`(用于 Monaco)
     - `version?: { mtimeMs: number, size: number, hash?: string }`
   - 行为:
-    - 复用 `FILE_MAX_BYTES` 限制与二进制/解码失败降级
+    - 复用 `AWB_FILE_MAX_BYTES` 限制与二进制/解码失败降级
     - 命中 denylist 或路径不安全则返回 `previewable: false`
 
 - `POST /api/files/write-text`
@@ -280,4 +280,3 @@
   - `Ctrl/Cmd+S` 保存
   - Monaco blur 自动保存
   - 409 冲突弹窗 `重新加载`,`强制覆盖`
-

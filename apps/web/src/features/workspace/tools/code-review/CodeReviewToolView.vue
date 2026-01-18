@@ -14,6 +14,12 @@
   </div>
 </template>
 
+<script lang="ts">
+export default {
+  name: "codeReview"
+};
+</script>
+
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
@@ -34,7 +40,7 @@ const emit = defineEmits<{
   changesSummary: [summary: { unstaged: number; staged: number }];
 }>();
 
-const host = useWorkspaceHost();
+const host = useWorkspaceHost(props.toolId);
 const { t } = useI18n();
 const panelRef = ref<any>(null);
 let unregister: (() => void) | null = null;

@@ -9,6 +9,12 @@
   />
 </template>
 
+<script lang="ts">
+export default {
+  name: "terminal"
+};
+</script>
+
 <script setup lang="ts">
 import { onMounted, ref, watch } from "vue";
 import { message } from "ant-design-vue";
@@ -18,7 +24,7 @@ import TerminalTabs from "./TerminalTabs.vue";
 import { useWorkspaceHost } from "@/features/workspace/host";
 
 const props = defineProps<{ workspaceId: string; toolId: string }>();
-const host = useWorkspaceHost();
+const host = useWorkspaceHost(props.toolId);
 
 const terminals = ref<TerminalRecord[]>([]);
 const autoCreating = ref(false);
