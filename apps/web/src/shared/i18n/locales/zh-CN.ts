@@ -434,18 +434,20 @@ export default {
   search: {
     placeholder: {
       selectRepo: "请选择仓库",
-      query: "输入搜索内容",
+      query: "输入搜索内容(按回车键搜索)",
       queryEmpty: "请输入搜索内容"
     },
     options: {
-      regex: "正则",
-      caseSensitive: "大小写",
+      regex: "正则表达式",
+      caseSensitive: "区分大小写",
       wholeWord: "整词"
     },
     actions: {
-      search: "搜索"
+      search: "搜索",
+      viewFile: "查看文件"
     },
     status: {
+      idle: "请输入搜索内容后搜索",
       searching: "搜索中…",
       error: "搜索失败",
       empty: "暂无结果",
@@ -454,7 +456,7 @@ export default {
       timedOut: "搜索超时"
     },
     hint: {
-      ignore: "遵循 .gitignore/.ignore",
+      ignore: "遵循.gitignore/.ignore",
       hidden: "已包含隐藏文件"
     },
     preview: {

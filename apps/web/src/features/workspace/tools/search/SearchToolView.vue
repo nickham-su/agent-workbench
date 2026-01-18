@@ -17,34 +17,44 @@
       </div>
 
       <div class="flex items-center gap-4 text-xs text-[color:var(--text-tertiary)]">
-        <a-checkbox v-model:checked="useRegex">{{ t("search.options.regex") }}</a-checkbox>
         <a-checkbox v-model:checked="caseSensitive">{{ t("search.options.caseSensitive") }}</a-checkbox>
         <a-checkbox v-model:checked="wholeWord">{{ t("search.options.wholeWord") }}</a-checkbox>
-        <span>{{ t("search.hint.ignore") }} · {{ t("search.hint.hidden") }}</span>
+        <a-checkbox v-model:checked="useRegex">{{ t("search.options.regex") }}</a-checkbox>
+        <span>{{ t("search.hint.ignore") }}</span>
       </div>
 
-      <div class="flex-1 min-h-0 flex flex-col border border-[var(--border-color-secondary)] rounded overflow-hidden">
-        <div class="px-3 py-2 text-xs text-[color:var(--text-tertiary)] border-b border-[var(--border-color-secondary)]">
-          {{ summaryLabel }}
-          <span v-if="truncated" class="ml-2 text-[color:var(--warning-color)]">{{ t("search.status.truncated") }}</span>
-          <span v-if="timedOut" class="ml-2 text-[color:var(--warning-color)]">{{ t("search.status.timedOut") }}</span>
+      <div class="flex-1 min-h-0 flex flex-col">
+        <div
+          class="py-2 text-xs text-[color:var(--text-tertiary)] border-b border-[var(--border-color-secondary)] flex items-center gap-2"
+        >
+          <span class="min-w-0 truncate">{{ summaryLabel }}</span>
+          <span v-if="truncated" class="shrink-0 text-[color:var(--warning-color)]">{{ t("search.status.truncated") }}</span>
+          <span v-if="timedOut" class="shrink-0 text-[color:var(--warning-color)]">{{ t("search.status.timedOut") }}</span>
         </div>
-        <div class="flex-1 min-h-0 overflow-auto px-3 py-2">
+        <div class="flex-1 min-h-0 overflow-auto py-2">
           <div v-if="error" class="text-xs text-[color:var(--danger-color)]">
             {{ error }}
           </div>
-          <div v-else-if="!loading && matches.length === 0" class="text-xs text-[color:var(--text-tertiary)]">
-            {{ t("search.status.empty") }}
-          </div>
-          <div v-else class="space-y-4">
+          <div v-else-if="blockGroups.length > 0" class="space-y-4">
             <div v-for="group in blockGroups" :key="group.path" class="space-y-3">
               <div class="text-xs font-mono text-[color:var(--text-secondary)]">{{ group.path }}</div>
-              <div v-for="block in group.blocks" :key="blockKey(block)" class="rounded border border-[var(--border-color-secondary)]">
+              <div
+                v-for="block in group.blocks"
+                :key="blockKey(block)"
+                class="search-block rounded border border-[var(--border-color-secondary)]"
+              >
                 <div
                   class="px-2 py-1 text-[11px] text-[color:var(--text-tertiary)] border-b border-[var(--border-color-secondary)] flex items-center gap-2"
                 >
                   <span>{{ block.fromLine }} - {{ block.toLine }}</span>
-                  <a-button type="link" size="small" class="h-auto p-0 !text-xs" @click="openBlock(block)">打开</a-button>
+                  <a-button
+                    type="link"
+                    size="small"
+                    class="search-open-btn h-auto p-0 !text-xs"
+                    @click="openBlock(block)"
+                  >
+                    {{ t("search.actions.viewFile") }}
+                  </a-button>
                 </div>
                 <div class="font-mono text-[12px] leading-5">
                   <div
@@ -76,8 +86,14 @@
   </div>
 </template>
 
+<script lang="ts">
+export default {
+  name: "search"
+};
+</script>
+
 <script setup lang="ts">
-import { computed, nextTick } from "vue";
+import { computed, watch } from "vue";
 import { message } from "ant-design-vue";
 import { useI18n } from "vue-i18n";
 import type { FileSearchBlock, GitTarget } from "@agent-workbench/shared";
@@ -106,7 +122,8 @@ const canSearch = computed(() => Boolean(props.target) && Boolean(query.value.tr
 const summaryLabel = computed(() => {
   if (loading.value) return t("search.status.searching");
   if (error.value) return t("search.status.error");
-  if (matches.value.length === 0) return t("search.status.empty");
+  if (!query.value.trim()) return t("search.status.idle");
+  if (tookMs.value == null) return t("search.status.idle");
   return t("search.status.results", { count: matches.value.length, tookMs: tookMs.value ?? 0 });
 });
 
@@ -151,6 +168,17 @@ function splitLineByHits(
 function isHitLine(block: FileSearchBlock, line: FileSearchBlock["lines"][number]) {
   return block.hitLines.includes(line.line);
 }
+
+watch(
+  () => query.value,
+  (val) => {
+    if (val.trim()) return;
+    // 清空查询时,同时清空结果并让 in-flight 请求失效,避免旧结果回填导致 UI 反直觉。
+    store.nextRequestSeq();
+    store.resetResults();
+    loading.value = false;
+  }
+);
 
 async function openBlock(block: FileSearchBlock) {
   const hitLine = block.hitLines.length > 0 ? Math.min(...block.hitLines) : block.fromLine;
@@ -208,5 +236,21 @@ async function runSearch() {
 <style scoped>
 .search-hit {
   background: rgba(255, 214, 102, 0.45);
+}
+
+/* 仅在支持 hover 的设备上,把"打开"按钮改为 hover 时出现,避免触屏设备不可用 */
+@media (hover: hover) and (pointer: fine) {
+  .search-open-btn {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 120ms ease;
+  }
+
+  .search-block:hover .search-open-btn,
+  .search-block:focus-within .search-open-btn,
+  .search-open-btn:focus-visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 </style>

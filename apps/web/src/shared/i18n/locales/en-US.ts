@@ -445,9 +445,11 @@ export default {
       wholeWord: "Whole word"
     },
     actions: {
-      search: "Search"
+      search: "Search",
+      viewFile: "View file"
     },
     status: {
+      idle: "Enter search text to search",
       searching: "Searching…",
       error: "Search failed",
       empty: "No results",

@@ -21,7 +21,7 @@
 import { Modal, message } from "ant-design-vue";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { TerminalRecord } from "@agent-workbench/shared";
 import { parseWsMessage, sendWs, terminalWsUrl, type TerminalWsState } from "./ws";
@@ -587,6 +587,21 @@ watch(
   },
   { immediate: true }
 );
+
+onDeactivated(() => {
+  // 组件被 KeepAlive 缓存时不会卸载; 终端这种独占资源必须在 deactivated 时主动断开连接,
+  // 否则工具被移动到其他区域后,新实例会因为旧连接未断开而触发 occupied(4409).
+  clearReconnectTimer();
+  clearFitBurst();
+  cleanupWs();
+});
+
+onActivated(() => {
+  // 从 KeepAlive 缓存恢复后重新建立连接(断线不影响 tmux session).
+  if (!term) return;
+  if (ws) return;
+  connect(false);
+});
 
 onBeforeUnmount(async () => {
   window.removeEventListener("resize", tryFitAndResize);

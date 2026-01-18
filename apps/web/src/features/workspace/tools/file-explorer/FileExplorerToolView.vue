@@ -106,6 +106,12 @@
   </a-modal>
 </template>
 
+<script lang="ts">
+export default {
+  name: "files"
+};
+</script>
+
 <script setup lang="ts">
 import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { Modal, message } from "ant-design-vue";

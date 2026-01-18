@@ -9,6 +9,12 @@
   />
 </template>
 
+<script lang="ts">
+export default {
+  name: "terminal"
+};
+</script>
+
 <script setup lang="ts">
 import { onMounted, ref, watch } from "vue";
 import { message } from "ant-design-vue";

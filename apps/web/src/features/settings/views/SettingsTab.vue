@@ -37,60 +37,12 @@
               </div>
             </a-form-item>
           </a-form>
-        </a-tab-pane>
+	        </a-tab-pane>
 
-        <a-tab-pane key="search" :tab="t('settings.tabs.search')">
-          <div class="text-xs text-[color:var(--text-tertiary)] pb-2">
-            {{ t("settings.search.description") }}
-          </div>
-
-          <a-form layout="vertical">
-            <a-form-item :label="t('settings.search.excludeGlobs.label')">
-              <a-textarea v-model:value="searchExcludeText" :auto-size="{ minRows: 6, maxRows: 12 }" />
-              <div class="pt-2 text-xs text-[color:var(--text-tertiary)]">
-                {{ t("settings.search.excludeGlobs.help") }}
-              </div>
-              <div class="pt-1 text-xs text-[color:var(--text-tertiary)]">
-                {{ t("settings.search.excludeGlobs.ignoreHint") }}
-              </div>
-            </a-form-item>
-            <div class="flex items-center gap-2">
-              <a-button size="small" :loading="searchSaving" @click="saveSearchSettings">
-                {{ t("settings.search.actions.save") }}
-              </a-button>
-              <a-button size="small" type="text" :loading="searchLoading" @click="refreshSearchSettings">
-                {{ t("settings.search.actions.refresh") }}
-              </a-button>
-            </div>
-          </a-form>
-        </a-tab-pane>
-
-        <a-tab-pane key="gitIdentity" :tab="t('settings.tabs.gitIdentity')">
-          <div class="text-xs text-[color:var(--text-tertiary)] pb-2">
-            {{ t("settings.gitIdentity.description") }}
-          </div>
-
-          <a-form layout="vertical">
-            <a-form-item :label="t('settings.gitIdentity.form.nameLabel')">
-              <a-input v-model:value="gitGlobalName" :placeholder="t('settings.gitIdentity.form.namePlaceholder')" style="max-width: 420px" />
-            </a-form-item>
-            <a-form-item :label="t('settings.gitIdentity.form.emailLabel')">
-              <a-input v-model:value="gitGlobalEmail" :placeholder="t('settings.gitIdentity.form.emailPlaceholder', { at: '@' })" style="max-width: 420px" />
-            </a-form-item>
-            <div class="flex items-center gap-2">
-              <a-button size="small" :loading="gitIdentitySaving" @click="saveGitIdentity">{{ t("settings.gitIdentity.actions.save") }}</a-button>
-              <a-button size="small" type="text" :loading="gitIdentityLoading" @click="refreshGitIdentity">{{ t("settings.gitIdentity.actions.refresh") }}</a-button>
-              <a-button size="small" danger :loading="gitIdentityClearing" @click="clearAllIdentityWithUi">
-                {{ t("settings.gitIdentity.actions.clearAll") }}
-              </a-button>
-            </div>
-          </a-form>
-        </a-tab-pane>
-
-        <a-tab-pane key="credentials" :tab="t('settings.tabs.credentials')">
-          <div class="flex items-center justify-between pb-2">
-            <div class="text-xs text-[color:var(--text-tertiary)]">
-              {{ t("settings.credentials.description") }}
+	        <a-tab-pane key="credentials" :tab="t('settings.tabs.credentials')">
+	          <div class="flex items-center justify-between pb-2">
+	            <div class="text-xs text-[color:var(--text-tertiary)]">
+	              {{ t("settings.credentials.description") }}
             </div>
             <a-button size="small" @click="openCreateCredential">{{ t("settings.credentials.actions.add") }}</a-button>
           </div>
@@ -197,13 +149,36 @@
             </a-form>
             <div class="text-xs text-[color:var(--text-tertiary)]">
               {{ t("settings.credentials.tip") }}
-            </div>
-          </a-modal>
-        </a-tab-pane>
-        <a-tab-pane key="network" :tab="t('settings.tabs.network')">
-          <div class="text-xs text-[color:var(--text-tertiary)] pb-2">
-            {{ t("settings.network.description") }}
-          </div>
+	            </div>
+	          </a-modal>
+	        </a-tab-pane>
+
+	        <a-tab-pane key="gitIdentity" :tab="t('settings.tabs.gitIdentity')">
+	          <div class="text-xs text-[color:var(--text-tertiary)] pb-2">
+	            {{ t("settings.gitIdentity.description") }}
+	          </div>
+
+	          <a-form layout="vertical">
+	            <a-form-item :label="t('settings.gitIdentity.form.nameLabel')">
+	              <a-input v-model:value="gitGlobalName" :placeholder="t('settings.gitIdentity.form.namePlaceholder')" style="max-width: 420px" />
+	            </a-form-item>
+	            <a-form-item :label="t('settings.gitIdentity.form.emailLabel')">
+	              <a-input v-model:value="gitGlobalEmail" :placeholder="t('settings.gitIdentity.form.emailPlaceholder', { at: '@' })" style="max-width: 420px" />
+	            </a-form-item>
+	            <div class="flex items-center gap-2">
+	              <a-button size="small" :loading="gitIdentitySaving" @click="saveGitIdentity">{{ t("settings.gitIdentity.actions.save") }}</a-button>
+	              <a-button size="small" type="text" :loading="gitIdentityLoading" @click="refreshGitIdentity">{{ t("settings.gitIdentity.actions.refresh") }}</a-button>
+	              <a-button size="small" danger :loading="gitIdentityClearing" @click="clearAllIdentityWithUi">
+	                {{ t("settings.gitIdentity.actions.clearAll") }}
+	              </a-button>
+	            </div>
+	          </a-form>
+	        </a-tab-pane>
+
+	        <a-tab-pane key="network" :tab="t('settings.tabs.network')">
+	          <div class="text-xs text-[color:var(--text-tertiary)] pb-2">
+	            {{ t("settings.network.description") }}
+	          </div>
           <a-form layout="vertical">
             <a-form-item :label="t('settings.network.form.httpProxyLabel')">
               <a-input v-model:value="networkHttpProxy" :placeholder="t('settings.network.form.httpProxyPlaceholder')" />
@@ -229,13 +204,40 @@
             <div class="flex items-center gap-2">
               <a-button size="small" :loading="networkSaving" @click="saveNetwork">{{ t("settings.network.actions.save") }}</a-button>
               <a-button size="small" type="text" :loading="networkLoading" @click="refreshNetwork">{{ t("settings.network.actions.refresh") }}</a-button>
-            </div>
-          </a-form>
-        </a-tab-pane>
-        <a-tab-pane key="security" :tab="t('settings.tabs.security')">
-          <div class="text-xs text-[color:var(--text-tertiary)] pb-2">
-            {{ t("settings.security.description") }}
-          </div>
+	            </div>
+	          </a-form>
+	        </a-tab-pane>
+
+	        <a-tab-pane key="search" :tab="t('settings.tabs.search')">
+	          <div class="text-xs text-[color:var(--text-tertiary)] pb-2">
+	            {{ t("settings.search.description") }}
+	          </div>
+
+	          <a-form layout="vertical">
+	            <a-form-item :label="t('settings.search.excludeGlobs.label')">
+	              <a-textarea v-model:value="searchExcludeText" :auto-size="{ minRows: 6, maxRows: 12 }" />
+	              <div class="pt-2 text-xs text-[color:var(--text-tertiary)]">
+	                {{ t("settings.search.excludeGlobs.help") }}
+	              </div>
+	              <div class="pt-1 text-xs text-[color:var(--text-tertiary)]">
+	                {{ t("settings.search.excludeGlobs.ignoreHint") }}
+	              </div>
+	            </a-form-item>
+	            <div class="flex items-center gap-2">
+	              <a-button size="small" :loading="searchSaving" @click="saveSearchSettings">
+	                {{ t("settings.search.actions.save") }}
+	              </a-button>
+	              <a-button size="small" type="text" :loading="searchLoading" @click="refreshSearchSettings">
+	                {{ t("settings.search.actions.refresh") }}
+	              </a-button>
+	            </div>
+	          </a-form>
+	        </a-tab-pane>
+
+	        <a-tab-pane key="security" :tab="t('settings.tabs.security')">
+	          <div class="text-xs text-[color:var(--text-tertiary)] pb-2">
+	            {{ t("settings.security.description") }}
+	          </div>
 
           <div v-if="security" class="space-y-3">
             <div class="bg-[var(--panel-bg-elevated)] border border-[var(--border-color-secondary)] rounded p-3">
@@ -301,7 +303,7 @@ const { t, locale } = useI18n();
 const route = useRoute();
 const router = useRouter();
 
-const settingsTabKeys = ["general", "search", "gitIdentity", "credentials", "network", "security"] as const;
+const settingsTabKeys = ["general", "credentials", "gitIdentity", "network", "search", "security"] as const;
 type SettingsTabKey = (typeof settingsTabKeys)[number];
 
 function normalizeSettingsTabKey(v: unknown): SettingsTabKey {

@@ -22,6 +22,7 @@
         :tool-minimized="toolMinimized"
         :tool-dots="toolDots"
         :visible-tool-id-by-area="visibleToolIdByArea"
+        :keep-alive-include-by-area="keepAliveIncludeByArea"
         :tool-title="toolTitle"
         :tool-icon="toolIcon"
         :can-move-up="canMoveToolUp"
@@ -719,6 +720,19 @@ const visibleToolIdByArea = computed(() => {
     if (toolMinimized[id]) return;
     res[area] = id;
   });
+  return res;
+});
+
+// KeepAlive 默认会长期缓存同一位置曾经渲染过的工具实例。
+// 当工具从某个区域移动到另一个区域时,旧区域的 KeepAlive 必须及时剔除该工具缓存,
+// 否则像终端这种"独占连接"的资源会出现两个实例同时连接并触发 occupied.
+const keepAliveIncludeByArea = computed(() => {
+  const res: Record<DockArea, string[]> = { leftTop: [], leftBottom: [], rightTop: [] };
+  for (const id of TOOL_IDS) {
+    if (!isKeepAlive(id)) continue;
+    const area = toolCurrentArea(id);
+    res[area].push(id);
+  }
   return res;
 });
 
