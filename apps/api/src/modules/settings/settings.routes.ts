@@ -6,18 +6,22 @@ import {
   GitGlobalIdentitySchema,
   NetworkSettingsSchema,
   ResetKnownHostRequestSchema,
+  SearchSettingsSchema,
   SecurityStatusSchema,
   UpdateGitGlobalIdentityRequestSchema,
-  UpdateNetworkSettingsRequestSchema
+  UpdateNetworkSettingsRequestSchema,
+  UpdateSearchSettingsRequestSchema
 } from "@agent-workbench/shared";
 import {
   clearAllGitIdentity,
   getGitGlobalIdentity,
   getNetworkSettings,
+  getSearchSettings,
   getSecurityStatus,
   resetKnownHost,
   updateGitGlobalIdentity,
-  updateNetworkSettings
+  updateNetworkSettings,
+  updateSearchSettings
 } from "./settings.service.js";
 
 export async function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext) {
@@ -42,6 +46,29 @@ export async function registerSettingsRoutes(app: FastifyInstance, ctx: AppConte
       }
     },
     async (req) => updateNetworkSettings(ctx, app.log, req.body)
+  );
+
+  app.get(
+    "/api/settings/search",
+    {
+      schema: {
+        tags: ["settings"],
+        response: { 200: SearchSettingsSchema }
+      }
+    },
+    async () => getSearchSettings(ctx)
+  );
+
+  app.put(
+    "/api/settings/search",
+    {
+      schema: {
+        tags: ["settings"],
+        body: UpdateSearchSettingsRequestSchema,
+        response: { 200: SearchSettingsSchema, 400: ErrorResponseSchema }
+      }
+    },
+    async (req) => updateSearchSettings(ctx, app.log, req.body)
   );
 
   app.get(

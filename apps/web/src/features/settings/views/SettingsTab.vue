@@ -39,6 +39,32 @@
           </a-form>
         </a-tab-pane>
 
+        <a-tab-pane key="search" :tab="t('settings.tabs.search')">
+          <div class="text-xs text-[color:var(--text-tertiary)] pb-2">
+            {{ t("settings.search.description") }}
+          </div>
+
+          <a-form layout="vertical">
+            <a-form-item :label="t('settings.search.excludeGlobs.label')">
+              <a-textarea v-model:value="searchExcludeText" :auto-size="{ minRows: 6, maxRows: 12 }" />
+              <div class="pt-2 text-xs text-[color:var(--text-tertiary)]">
+                {{ t("settings.search.excludeGlobs.help") }}
+              </div>
+              <div class="pt-1 text-xs text-[color:var(--text-tertiary)]">
+                {{ t("settings.search.excludeGlobs.ignoreHint") }}
+              </div>
+            </a-form-item>
+            <div class="flex items-center gap-2">
+              <a-button size="small" :loading="searchSaving" @click="saveSearchSettings">
+                {{ t("settings.search.actions.save") }}
+              </a-button>
+              <a-button size="small" type="text" :loading="searchLoading" @click="refreshSearchSettings">
+                {{ t("settings.search.actions.refresh") }}
+              </a-button>
+            </div>
+          </a-form>
+        </a-tab-pane>
+
         <a-tab-pane key="gitIdentity" :tab="t('settings.tabs.gitIdentity')">
           <div class="text-xs text-[color:var(--text-tertiary)] pb-2">
             {{ t("settings.gitIdentity.description") }}
@@ -259,12 +285,14 @@ import {
   generateSshKeypair,
   getGitGlobalIdentity,
   getNetworkSettings,
+  getSearchSettings,
   getSecurityStatus,
   listCredentials,
   resetKnownHost,
   updateCredential,
   updateGitGlobalIdentity,
-  updateNetworkSettings
+  updateNetworkSettings,
+  updateSearchSettings
 } from "@/shared/api";
 import { getInitialLocale, setStoredLocale, type AppLocale } from "@/shared/i18n/locale";
 
@@ -273,7 +301,7 @@ const { t, locale } = useI18n();
 const route = useRoute();
 const router = useRouter();
 
-const settingsTabKeys = ["general", "gitIdentity", "credentials", "network", "security"] as const;
+const settingsTabKeys = ["general", "search", "gitIdentity", "credentials", "network", "security"] as const;
 type SettingsTabKey = (typeof settingsTabKeys)[number];
 
 function normalizeSettingsTabKey(v: unknown): SettingsTabKey {
@@ -557,6 +585,10 @@ const networkNoProxy = ref("");
 const networkCaPem = ref("");
 const networkApplyToTerminal = ref(false);
 
+const searchLoading = ref(false);
+const searchSaving = ref(false);
+const searchExcludeText = ref("");
+
 async function refreshNetwork() {
   networkLoading.value = true;
   try {
@@ -590,6 +622,40 @@ async function saveNetwork() {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
     networkSaving.value = false;
+  }
+}
+
+function parseExcludeText(raw: string) {
+  return raw
+    .split(/\r?\n/g)
+    .map((line) => line.trim())
+    .filter((line) => Boolean(line));
+}
+
+async function refreshSearchSettings() {
+  if (searchLoading.value) return;
+  searchLoading.value = true;
+  try {
+    const res = await getSearchSettings();
+    searchExcludeText.value = res.excludeGlobs.join("\n");
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
+  } finally {
+    searchLoading.value = false;
+  }
+}
+
+async function saveSearchSettings() {
+  if (searchSaving.value) return;
+  searchSaving.value = true;
+  try {
+    await updateSearchSettings({ excludeGlobs: parseExcludeText(searchExcludeText.value) });
+    message.success(t("settings.search.saved"));
+    await refreshSearchSettings();
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
+  } finally {
+    searchSaving.value = false;
   }
 }
 
@@ -635,6 +701,7 @@ watch(
     if (k === "gitIdentity") await refreshGitIdentity();
     else if (k === "credentials") await refreshCredentials();
     else if (k === "network") await refreshNetwork();
+    else if (k === "search") await refreshSearchSettings();
     else if (k === "security") await refreshSecurity();
   },
   { immediate: true }

@@ -182,7 +182,8 @@ export default {
     tools: {
       codeReview: "代码审查",
       terminal: "终端",
-      files: "文件"
+      files: "文件",
+      search: "搜索"
     },
     dock: {
       moveTo: "移动到 {area}",
@@ -365,10 +366,17 @@ export default {
     actions: {
       newFile: "新建文件",
       newFolder: "新建文件夹",
+      copyName: "复制名称",
+      copyPath: "复制路径",
       rename: "重命名",
       delete: "删除",
       refresh: "刷新",
       close: "关闭"
+    },
+    copy: {
+      nameCopied: "已复制名称",
+      pathCopied: "已复制路径",
+      failed: "复制失败"
     },
     status: {
       saving: "正在保存…"
@@ -423,10 +431,41 @@ export default {
       unavailable: "无法预览"
     }
   },
+  search: {
+    placeholder: {
+      selectRepo: "请选择仓库",
+      query: "输入搜索内容",
+      queryEmpty: "请输入搜索内容"
+    },
+    options: {
+      regex: "正则",
+      caseSensitive: "大小写",
+      wholeWord: "整词"
+    },
+    actions: {
+      search: "搜索"
+    },
+    status: {
+      searching: "搜索中…",
+      error: "搜索失败",
+      empty: "暂无结果",
+      results: "共 {count} 条结果 · {tookMs}ms",
+      truncated: "结果已截断",
+      timedOut: "搜索超时"
+    },
+    hint: {
+      ignore: "遵循 .gitignore/.ignore",
+      hidden: "已包含隐藏文件"
+    },
+    preview: {
+      empty: "暂无预览"
+    }
+  },
   settings: {
     title: "设置",
     tabs: {
       general: "常规",
+      search: "搜索",
       gitIdentity: "Git 身份",
       credentials: "凭证",
       network: "网络",
@@ -452,6 +491,19 @@ export default {
           help: "调整代码对比（Diff）字体大小（全局生效，自动保存到本地）。默认：{default}"
         }
       }
+    },
+    search: {
+      description: "配置搜索时默认忽略的文件或目录（每行一个 glob）。",
+      excludeGlobs: {
+        label: "忽略规则",
+        help: "示例: node_modules/**, dist/**, .venv/**",
+        ignoreHint: "搜索默认遵循 .gitignore/.ignore,且始终忽略 .git/**"
+      },
+      actions: {
+        save: "保存",
+        refresh: "刷新"
+      },
+      saved: "已保存"
     },
     gitIdentity: {
       description: "配置全局 Git 提交身份（user.name / user.email）。",

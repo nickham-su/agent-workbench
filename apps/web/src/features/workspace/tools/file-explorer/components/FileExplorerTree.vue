@@ -42,7 +42,14 @@
                 <a-menu-item v-if="selectedNode?.data.kind === 'dir'" key="newFolder">
                   {{ t("files.actions.newFolder") }}
                 </a-menu-item>
-                <a-menu-divider v-if="selectedNode?.data.kind === 'dir' && canRenameDelete" />
+                <a-menu-divider v-if="selectedNode?.data.kind === 'dir'" />
+                <a-menu-item v-if="selectedNode" key="copyName">
+                  {{ t("files.actions.copyName") }}
+                </a-menu-item>
+                <a-menu-item v-if="selectedNode" key="copyPath">
+                  {{ t("files.actions.copyPath") }}
+                </a-menu-item>
+                <a-menu-divider v-if="canRenameDelete" />
                 <a-menu-item v-if="canRenameDelete" key="rename">{{ t("files.actions.rename") }}</a-menu-item>
                 <a-menu-item v-if="canRenameDelete" key="delete" danger>{{ t("files.actions.delete") }}</a-menu-item>
               </a-menu>

@@ -54,7 +54,7 @@ export const workspaceHostKey: InjectionKey<WorkspaceHostApi> = Symbol("agent-wo
 
 export function useWorkspaceHost(): WorkspaceHostApi;
 export function useWorkspaceHost(toolId: string): WorkspaceToolHostApi;
-export function useWorkspaceHost(toolId?: string) {
+export function useWorkspaceHost(toolId?: string): WorkspaceHostApi | WorkspaceToolHostApi {
   const api = inject(workspaceHostKey, null);
   if (!api) throw new Error("WorkspaceHostApi 未提供：请确认组件处于 WorkspaceLayout 作用域内");
   if (!toolId) return api;

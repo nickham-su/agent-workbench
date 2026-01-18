@@ -20,6 +20,17 @@ export const UpdateNetworkSettingsRequestSchema = Type.Object({
 });
 export type UpdateNetworkSettingsRequest = Static<typeof UpdateNetworkSettingsRequestSchema>;
 
+export const SearchSettingsSchema = Type.Object({
+  excludeGlobs: Type.Array(Type.String()),
+  updatedAt: Type.Number()
+});
+export type SearchSettings = Static<typeof SearchSettingsSchema>;
+
+export const UpdateSearchSettingsRequestSchema = Type.Object({
+  excludeGlobs: Type.Optional(Type.Array(Type.String()))
+});
+export type UpdateSearchSettingsRequest = Static<typeof UpdateSearchSettingsRequestSchema>;
+
 export const MasterKeySourceSchema = Type.Union([Type.Literal("env"), Type.Literal("file"), Type.Literal("generated")]);
 export type MasterKeySource = Static<typeof MasterKeySourceSchema>;
 

@@ -109,7 +109,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch, type ComponentPublicInstance } from "vue";
 import { Modal, message } from "ant-design-vue";
-import { CodeOutlined, FolderOpenOutlined } from "@ant-design/icons-vue";
+import { CodeOutlined, FolderOpenOutlined, SearchOutlined } from "@ant-design/icons-vue";
 import { useI18n } from "vue-i18n";
 import type { GitPushRequest, GitStatusResponse, RepoBranchesResponse, WorkspaceDetail } from "@agent-workbench/shared";
 import {
@@ -135,7 +135,9 @@ import WorkspaceDock from "@/features/workspace/components/WorkspaceDock.vue";
 import type { HeaderAction, ToolId } from "@/features/workspace/types";
 import CodeReviewIcon from "../icons/CodeReviewIcon.vue";
 import CodeReviewToolView from "../tools/code-review/CodeReviewToolView.vue";
+import { createSearchRuntime } from "../tools/search/runtime";
 import FileExplorerToolView from "../tools/file-explorer/FileExplorerToolView.vue";
+import SearchToolView from "../tools/search/SearchToolView.vue";
 import TerminalToolView from "../tools/terminal/TerminalToolView.vue";
 import GitIdentityModal from "@/shared/components/GitIdentityModal.vue";
 import { createCodeReviewRuntime } from "@/features/workspace/tools/code-review/runtime";
@@ -145,7 +147,7 @@ const props = defineProps<{ workspaceId: string }>();
 const { t } = useI18n();
 type PushParams = Omit<GitPushRequest, "target">;
 
-const TOOL_IDS: ToolId[] = ["files", "codeReview", "terminal"];
+const TOOL_IDS: ToolId[] = ["files", "search", "codeReview", "terminal"];
 const DOCK_AREAS: DockArea[] = ["leftTop", "leftBottom", "rightTop"];
 type ToolDefinition = {
   toolId: ToolId;
@@ -187,6 +189,16 @@ const tools = computed<ToolDefinition[]>(() => [
     allowedAreas: ["leftTop", "rightTop", "leftBottom"],
     keepAlive: true,
     createRuntime: (ctx) => createFileExplorerRuntime(ctx)
+  },
+  {
+    toolId: "search",
+    title: () => t("workspace.tools.search"),
+    icon: SearchOutlined,
+    view: SearchToolView,
+    defaultArea: "leftTop",
+    allowedAreas: ["leftTop", "rightTop", "leftBottom"],
+    keepAlive: true,
+    createRuntime: (ctx) => createSearchRuntime(ctx)
   },
   {
     toolId: "codeReview",
@@ -234,7 +246,8 @@ const toolById = computed(() => {
 const toolArea = reactive<Record<ToolId, DockArea>>({
   codeReview: "leftTop",
   terminal: "leftTop",
-  files: "leftTop"
+  files: "leftTop",
+  search: "leftTop"
 });
 
 const activeToolIdByArea = reactive<Record<DockArea, ToolId | null>>({
@@ -246,17 +259,21 @@ const activeToolIdByArea = reactive<Record<DockArea, ToolId | null>>({
 const toolMinimized = reactive<Record<ToolId, boolean>>({
   codeReview: false,
   terminal: true,
-  files: false
+  files: false,
+  search: false
 });
 const toolDots = reactive<Record<ToolId, boolean>>({
   codeReview: false,
   terminal: false,
-  files: false
+  files: false,
+  search: false
 });
 const toolRuntimes = new Map<ToolId, ToolRuntime>();
 
-function setToolDot(toolId: ToolId, dot: boolean) {
-  toolDots[toolId] = dot;
+function setToolDot(toolId: string, dot: boolean) {
+  if (!toolById.value.has(toolId as ToolId)) return;
+  const id = toolId as ToolId;
+  toolDots[id] = dot;
 }
 
 function resetToolDots() {
@@ -378,13 +395,13 @@ function loadDockLayout(workspaceId: string): DockLayoutV2 | null {
     const activeRaw = json.activeToolIdByArea ?? ({} as any);
     const toolOrderRaw = json.toolOrderByArea ?? ({} as any);
 
-    const toolAreaOut: Record<ToolId, DockArea> = { codeReview: "leftTop", terminal: "leftTop", files: "leftTop" };
+    const toolAreaOut: Record<ToolId, DockArea> = { codeReview: "leftTop", terminal: "leftTop", files: "leftTop", search: "leftTop" };
     for (const toolId of TOOL_IDS) {
       const v = (toolAreaRaw as any)[toolId];
       if (isDockArea(v)) toolAreaOut[toolId] = v;
     }
 
-    const toolMinimizedOut: Record<ToolId, boolean> = { codeReview: false, terminal: true, files: false };
+    const toolMinimizedOut: Record<ToolId, boolean> = { codeReview: false, terminal: true, files: false, search: false };
     for (const toolId of TOOL_IDS) {
       const v = (toolMinimizedRaw as any)[toolId];
       if (typeof v === "boolean") toolMinimizedOut[toolId] = v;
@@ -448,8 +465,13 @@ function saveDockLayout(workspaceId: string) {
       version: 2,
       updatedAt: Date.now(),
       ratios: { topBottom: topBottomRatio.value, topLeft: topLeftRatio.value },
-      toolArea: { codeReview: toolArea.codeReview, terminal: toolArea.terminal, files: toolArea.files },
-      toolMinimized: { codeReview: toolMinimized.codeReview, terminal: toolMinimized.terminal, files: toolMinimized.files },
+      toolArea: { codeReview: toolArea.codeReview, terminal: toolArea.terminal, files: toolArea.files, search: toolArea.search },
+      toolMinimized: {
+        codeReview: toolMinimized.codeReview,
+        terminal: toolMinimized.terminal,
+        files: toolMinimized.files,
+        search: toolMinimized.search
+      },
       activeToolIdByArea: {
         leftTop: activeToolIdByArea.leftTop,
         leftBottom: activeToolIdByArea.leftBottom,
@@ -484,14 +506,14 @@ function resetDockLayoutDefaults() {
   toolArea.codeReview = "leftTop";
   toolArea.terminal = "leftTop";
   toolArea.files = "leftTop";
+  toolArea.search = "leftTop";
   activeToolIdByArea.leftTop = "files";
   activeToolIdByArea.leftBottom = null;
   activeToolIdByArea.rightTop = null;
   toolMinimized.codeReview = false;
   toolMinimized.terminal = true;
   toolMinimized.files = false;
-  toolMinimized.codeReview = false;
-  toolMinimized.terminal = true;
+  toolMinimized.search = false;
   setToolOrderByArea(defaultToolOrderByArea());
   topBottomRatio.value = 2 / 3;
   topLeftRatio.value = 2 / 3;
@@ -696,7 +718,7 @@ const visibleToolIdByArea = computed(() => {
 });
 
 const toolVisibleById = computed(() => {
-  const out: Record<ToolId, boolean> = { codeReview: false, terminal: false, files: false };
+  const out: Record<ToolId, boolean> = { codeReview: false, terminal: false, files: false, search: false };
   for (const id of TOOL_IDS) out[id] = isToolVisible(id);
   return out;
 });
@@ -844,6 +866,13 @@ function toolViewProps(toolId: ToolId) {
     };
   }
   if (toolId === "files") {
+    return {
+      workspaceId: props.workspaceId,
+      target: currentTarget.value,
+      toolId
+    };
+  }
+  if (toolId === "search") {
     return {
       workspaceId: props.workspaceId,
       target: currentTarget.value,

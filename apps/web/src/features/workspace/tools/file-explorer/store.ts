@@ -1,17 +1,31 @@
 import { computed, reactive, ref, type ComputedRef, type Ref } from "vue";
 import type { FileTab } from "./types";
 
+export type FileOpenAtRequest =
+  | {
+      path: string;
+      line: number;
+      highlight: { kind: "range"; startCol: number; endCol: number };
+    }
+  | {
+      path: string;
+      line: number;
+      highlight: { kind: "line" };
+    };
+
 export type FileExplorerStore = {
   tabs: FileTab[];
   activeTabKey: Ref<string>;
   activeTab: ComputedRef<FileTab | null>;
   hasDirtyNotSaving: ComputedRef<boolean>;
+  pendingOpenAt: Ref<FileOpenAtRequest | null>;
   getTargetKey: () => string;
   setTargetKey: (key: string) => boolean;
   setActiveTabKey: (key: string) => void;
   getTab: (path: string) => FileTab | null;
   addTab: (tab: FileTab) => void;
   removeTab: (path: string) => FileTab | null;
+  setPendingOpenAt: (req: FileOpenAtRequest | null) => void;
   resetTabs: () => void;
 };
 
@@ -38,12 +52,14 @@ export function getFileExplorerStore(workspaceId: string): FileExplorerStore {
     return tabs.find((t) => t.path === current) ?? null;
   });
   const hasDirtyNotSaving = computed(() => tabs.some((tab) => tab.dirty && !tab.saving));
+  const pendingOpenAt = ref<FileOpenAtRequest | null>(null);
 
   const store: FileExplorerStore = {
     tabs,
     activeTabKey,
     activeTab,
     hasDirtyNotSaving,
+    pendingOpenAt,
     getTargetKey: () => targetKey.value,
     setTargetKey: (next) => {
       if (targetKey.value === next) return false;
@@ -66,10 +82,14 @@ export function getFileExplorerStore(workspaceId: string): FileExplorerStore {
       if (activeTabKey.value === path) activeTabKey.value = "";
       return removed;
     },
+    setPendingOpenAt: (req) => {
+      pendingOpenAt.value = req;
+    },
     resetTabs: () => {
       for (const tab of tabs) disposeTab(tab);
       tabs.splice(0, tabs.length);
       activeTabKey.value = "";
+      pendingOpenAt.value = null;
     }
   };
 

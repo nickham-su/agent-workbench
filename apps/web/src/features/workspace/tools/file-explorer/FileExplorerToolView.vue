@@ -117,7 +117,7 @@ import type { FileEntry, FileReadResponse, GitTarget } from "@agent-workbench/sh
 import FileExplorerTree from "./components/FileExplorerTree.vue";
 import FileExplorerTabs from "./components/FileExplorerTabs.vue";
 import type { FileTab, TreeNode } from "./types";
-import { getFileExplorerStore } from "./store";
+import { getFileExplorerStore, type FileOpenAtRequest } from "./store";
 import {
   ApiError,
   createFile,
@@ -161,12 +161,14 @@ let targetSeq = 0;
 const store = getFileExplorerStore(props.workspaceId);
 const tabs = store.tabs;
 const activeTabKey = store.activeTabKey;
+const pendingOpenAt = store.pendingOpenAt;
 
 const editorEl = ref<HTMLDivElement | null>(null);
 let editor: monaco.editor.IStandaloneCodeEditor | null = null;
 let editorBlurDisposable: monaco.IDisposable | null = null;
 let editorSaveCommandId: string | null = null;
 let editorApplyScheduled = false;
+let highlightDecorations: string[] = [];
 
 const createModal = reactive({
   open: false,
@@ -665,9 +667,65 @@ function onNodeDblClick(node: TreeNode) {
   });
 }
 
+async function copyTextWithFeedback(text: string, kind: "name" | "path") {
+  const content = String(text ?? "");
+  if (!content) return;
+  const successMessage = kind === "name" ? t("files.copy.nameCopied") : t("files.copy.pathCopied");
+  try {
+    await navigator.clipboard.writeText(content);
+    message.success(successMessage);
+    return;
+  } catch {
+    // 回退使用旧式复制 API
+  }
+
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = content;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    ta.style.top = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    if (ok) {
+      message.success(successMessage);
+      return;
+    }
+  } catch {
+    // 忽略
+  }
+  message.error(t("files.copy.failed"));
+}
+
+function selectedNodePath() {
+  const path = selectedNode.value?.data.path ?? "";
+  return path || ".";
+}
+
+function copySelectedName() {
+  const name = selectedNode.value?.data.name ?? "";
+  return copyTextWithFeedback(name, "name");
+}
+
+function copySelectedPath() {
+  const path = selectedNodePath();
+  return copyTextWithFeedback(path, "path");
+}
+
 function onContextMenuClick(info: { key: string }) {
   const key = String((info as any)?.key ?? "");
   if (!key) return;
+  if (key === "copyName") {
+    void copySelectedName();
+    return;
+  }
+  if (key === "copyPath") {
+    void copySelectedPath();
+    return;
+  }
   if (key === "newFile") {
     openCreateModal("file");
     return;
@@ -793,6 +851,42 @@ async function openFile(path: string) {
     if (fileRequestSeqByPath.get(path) !== requestId) return;
     message.error(err instanceof Error ? err.message : String(err));
   }
+}
+
+function clearHighlightDecorations() {
+  if (!editor) return;
+  highlightDecorations = editor.deltaDecorations(highlightDecorations, []);
+}
+
+function applyOpenAtHighlight(req: FileOpenAtRequest) {
+  if (!editor) return;
+  const model = editor.getModel();
+  if (!model) return;
+  const maxLine = model.getLineCount();
+  const line = Math.min(Math.max(req.line, 1), maxLine);
+  clearHighlightDecorations();
+  if (req.highlight.kind === "line") {
+    const range = new monaco.Range(line, 1, line, model.getLineMaxColumn(line));
+    highlightDecorations = editor.deltaDecorations(highlightDecorations, [
+      { range, options: { isWholeLine: true, className: "files-search-line" } }
+    ]);
+  } else {
+    const startCol = Math.max(req.highlight.startCol, 1);
+    const endCol = Math.max(req.highlight.endCol, startCol);
+    const range = new monaco.Range(line, startCol, line, endCol);
+    highlightDecorations = editor.deltaDecorations(highlightDecorations, [
+      { range, options: { inlineClassName: "files-search-hit" } }
+    ]);
+  }
+  editor.revealLineInCenter(line);
+}
+
+async function openFileAt(req: FileOpenAtRequest) {
+  await openFile(req.path);
+  await nextTick();
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+  if (!editor) return;
+  applyOpenAtHighlight(req);
 }
 
 function onActiveTabUpdate(key: string | number) {
@@ -1200,6 +1294,16 @@ function initEditor() {
 }
 
 watch(
+  () => pendingOpenAt.value,
+  (req) => {
+    if (!req) return;
+    store.setPendingOpenAt(null);
+    void openFileAt(req);
+  },
+  { immediate: true }
+);
+
+watch(
   () => activeTabKey.value,
   () => {
     scheduleApplyEditor();
@@ -1255,5 +1359,13 @@ onBeforeUnmount(() => {
 
 .files-tabs :deep(.ant-tabs-tab) {
   margin-left: 0 !important;
+}
+
+:deep(.files-search-hit) {
+  background: rgba(255, 214, 102, 0.45);
+}
+
+:deep(.files-search-line) {
+  background: rgba(255, 214, 102, 0.2);
 }
 </style>
