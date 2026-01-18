@@ -14,6 +14,8 @@ import type {
   FileMkdirResponse,
   FileReadRequest,
   FileReadResponse,
+  FileStatRequest,
+  FileStatResponse,
   FileRenameRequest,
   FileRenameResponse,
   FileSearchRequest,
@@ -89,6 +91,12 @@ function parseBool(raw: unknown, fallback = false) {
   if (raw === undefined || raw === null) return fallback;
   if (typeof raw === "boolean") return raw;
   return raw === "1" || raw === "true" || raw === "yes";
+}
+
+function normalizeRelPath(params: { rootAbs: string; absPath: string; fallback: string }) {
+  const rel = path.relative(params.rootAbs, params.absPath);
+  const normalized = rel && rel !== "." ? rel.replace(/\\/g, "/") : "";
+  return normalized || params.fallback;
 }
 
 function trimLineText(raw: string) {
@@ -337,6 +345,55 @@ export async function listFiles(ctx: AppContext, bodyRaw: unknown): Promise<File
     });
 
     return { dir, entries };
+  });
+}
+
+export async function statFile(ctx: AppContext, bodyRaw: unknown): Promise<FileStatResponse> {
+  const body = (bodyRaw ?? {}) as FileStatRequest;
+  const target = parseTarget((body as any).target);
+  return withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
+    const { wsRepo } = getTargetInfoOrThrow(ctx, target);
+    const rel = typeof (body as any).path === "string" ? (body as any).path.trim() : "";
+    if (!rel || !isValidRelativePath(rel)) throw new HttpError(400, "Invalid path");
+    if (hasDeniedSegment(rel)) return { path: rel, ok: false, reason: "unsafe_path" };
+    if (isRootRelPath(rel)) throw new HttpError(400, "Invalid path");
+
+    const rootAbs = path.resolve(wsRepo.path);
+    const absPath = safeResolveUnderRoot({ root: wsRepo.path, rel });
+    if (!absPath) throw new HttpError(400, "Invalid path");
+    if (absPath === rootAbs) throw new HttpError(400, "Invalid path");
+    const normalizedPath = normalizeRelPath({ rootAbs, absPath, fallback: rel });
+
+    const fs = await import("node:fs/promises");
+    let st: { isSymbolicLink: () => boolean; isDirectory: () => boolean; isFile: () => boolean };
+    try {
+      st = await fs.lstat(absPath);
+    } catch (err: any) {
+      if (err && (err.code === "ENOENT" || err.code === "ENOTDIR")) {
+        return { path: rel, ok: false, reason: "missing", normalizedPath };
+      }
+      if (err && (err.code === "EACCES" || err.code === "EPERM")) {
+        throw new HttpError(403, "Permission denied");
+      }
+      throw err;
+    }
+
+    if (st.isSymbolicLink()) return { path: rel, ok: false, reason: "unsafe_path", normalizedPath };
+    if (st.isDirectory()) return { path: rel, ok: false, reason: "not_file", kind: "dir", normalizedPath };
+    if (!st.isFile()) return { path: rel, ok: false, reason: "not_file", normalizedPath };
+
+    try {
+      await ensureRealPathUnderRoot(rootAbs, absPath);
+    } catch (err: any) {
+      if (err instanceof HttpError && err.statusCode === 400) {
+        return { path: rel, ok: false, reason: "unsafe_path", normalizedPath };
+      }
+      if (err && (err.code === "EACCES" || err.code === "EPERM")) {
+        throw new HttpError(403, "Permission denied");
+      }
+      throw err;
+    }
+    return { path: rel, ok: true, kind: "file", normalizedPath };
   });
 }
 

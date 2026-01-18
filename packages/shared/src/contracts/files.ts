@@ -70,6 +70,33 @@ export const FileReadResponseSchema = Type.Object(
 );
 export type FileReadResponse = Static<typeof FileReadResponseSchema>;
 
+export const FileStatReasonSchema = Type.Union([
+  Type.Literal("missing"),
+  Type.Literal("unsafe_path"),
+  Type.Literal("not_file"),
+  Type.Literal("permission_denied")
+]);
+export type FileStatReason = Static<typeof FileStatReasonSchema>;
+
+export const FileStatRequestSchema = Type.Object(
+  {
+    target: GitTargetSchema,
+    path: Type.String({ minLength: 1 })
+  }
+);
+export type FileStatRequest = Static<typeof FileStatRequestSchema>;
+
+export const FileStatResponseSchema = Type.Object(
+  {
+    path: Type.String(),
+    ok: Type.Boolean(),
+    kind: Type.Optional(Type.Union([Type.Literal("file"), Type.Literal("dir")])),
+    reason: Type.Optional(FileStatReasonSchema),
+    normalizedPath: Type.Optional(Type.String())
+  }
+);
+export type FileStatResponse = Static<typeof FileStatResponseSchema>;
+
 export const FileWriteRequestSchema = Type.Object(
   {
     target: GitTargetSchema,

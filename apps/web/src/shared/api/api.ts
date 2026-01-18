@@ -15,6 +15,8 @@ import type {
   FileMkdirResponse,
   FileReadRequest,
   FileReadResponse,
+  FileStatRequest,
+  FileStatResponse,
   FileRenameRequest,
   FileRenameResponse,
   FileWriteRequest,
@@ -481,6 +483,15 @@ export async function listFiles(body: FileListRequest) {
 export async function searchFiles(body: FileSearchRequest) {
   try {
     const res = await client.post<FileSearchResponse>("/files/search", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function statFile(body: FileStatRequest) {
+  try {
+    const res = await client.post<FileStatResponse>("/files/stat", body);
     return res.data;
   } catch (err) {
     throw toApiError(err);

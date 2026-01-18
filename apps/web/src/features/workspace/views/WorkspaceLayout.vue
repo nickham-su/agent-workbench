@@ -623,7 +623,12 @@ function callToolFrom(fromToolId: string, toToolId: string, call: ToolCall) {
     targetAtCall: currentTarget.value ?? null,
     ts: Date.now()
   };
-  toolRuntimes.get(toId)?.onCall(envelope);
+  // 无条件延后到下一个 tick 再派发 call:
+  // - 避免“首次展示”工具时 ToolView 尚未挂载完成，导致丢失调用(例如 files.openAt)
+  // - 也能覆盖某些 UI/KeepAlive 的时序差异(先稳定再派发)
+  void nextTick().then(() => {
+    toolRuntimes.get(toId)?.onCall(envelope);
+  });
 }
 
 function openTool(toolId: string) {

@@ -159,8 +159,6 @@ async function openBlock(block: FileSearchBlock) {
     line?.hits && line.hits.length > 0
       ? { kind: "range" as const, startCol: line.hits[0].startCol, endCol: line.hits[0].endCol }
       : { kind: "line" as const };
-  host.openTool("files");
-  await nextTick();
   host.call("files", {
     type: "files.openAt",
     payload: {

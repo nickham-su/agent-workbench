@@ -12,6 +12,8 @@ import {
   FileMkdirResponseSchema,
   FileReadRequestSchema,
   FileReadResponseSchema,
+  FileStatRequestSchema,
+  FileStatResponseSchema,
   FileRenameRequestSchema,
   FileRenameResponseSchema,
   FileSearchRequestSchema,
@@ -26,6 +28,7 @@ import {
   listFiles,
   mkdirPath,
   readFileText,
+  statFile,
   renamePath,
   searchFiles,
   writeFileText
@@ -43,6 +46,20 @@ export async function registerFilesRoutes(app: FastifyInstance, ctx: AppContext)
     },
     async (req) => {
       return listFiles(ctx, req.body);
+    }
+  );
+
+  app.post(
+    "/api/files/stat",
+    {
+      schema: {
+        tags: ["files"],
+        body: FileStatRequestSchema,
+        response: { 200: FileStatResponseSchema, 400: ErrorResponseSchema, 403: ErrorResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      return statFile(ctx, req.body);
     }
   );
 
