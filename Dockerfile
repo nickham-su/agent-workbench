@@ -45,18 +45,17 @@ RUN apt-get update \
   && chmod 0440 /etc/sudoers.d/dev \
   && rm -rf /var/lib/apt/lists/*
 
-ENV NODE_ENV=production
 ENV LANG=en_US.UTF-8
 ENV LC_ALL=en_US.UTF-8
 ENV LANGUAGE=en_US:en
 ENV HOME=/home/dev
 ENV NPM_CONFIG_PREFIX=/home/dev/.npm-global
 ENV NPM_CONFIG_CACHE=/home/dev/.npm-cache
-ENV HOST=0.0.0.0
-ENV PORT=4310
-ENV DATA_DIR=/data
-ENV SERVE_WEB=1
-ENV WEB_DIST_DIR=/app/apps/web/dist
+ENV AWB_HOST=0.0.0.0
+ENV AWB_PORT=4310
+ENV AWB_DATA_DIR=/data
+ENV AWB_SERVE_WEB=1
+ENV AWB_WEB_DIST_DIR=/app/apps/web/dist
 ENV PATH=/home/dev/.npm-global/bin:$PATH
 
 VOLUME ["/data", "/home/dev"]

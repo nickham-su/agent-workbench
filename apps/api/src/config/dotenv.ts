@@ -41,7 +41,11 @@ export async function loadRootEnvLocalIntoProcessEnv() {
   const parsed = await readDotEnvIfExists(envPath);
   if (!parsed) return;
 
-  // 开发期更符合直觉的行为：允许 .env.local 覆盖宿主环境里“意外继承”的变量（例如容器里默认带的 PORT=4310）。
+  // 只将 AWB_* 注入到后端进程环境变量中:
+  // - 避免把 DEV_* 等前端/其他用途的变量也注入到后端,再通过 tmux 继承进入用户终端
+  // - 与“AWB_* 为保留前缀”的约定保持一致
+  //
+  // 开发期更符合直觉的行为:允许 .env.local 覆盖宿主环境里“意外继承”的变量(例如容器里默认带的 AWB_PORT=4310)。
   // 非开发期仍保持“进程环境变量优先”的原则，避免误覆盖部署环境注入的配置。
   const isDev =
     process.env.AWB_DOTENV_OVERRIDE === "1" ||
@@ -49,6 +53,7 @@ export async function loadRootEnvLocalIntoProcessEnv() {
     process.env.npm_lifecycle_event === "dev";
 
   for (const [k, v] of Object.entries(parsed)) {
+    if (!k.startsWith("AWB_")) continue;
     if (isDev || process.env[k] == null) {
       process.env[k] = v;
     }

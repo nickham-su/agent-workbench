@@ -38,7 +38,7 @@ docker compose up -d --build
 
 **访问入口**
 
-默认端口是 4310. 如果你在 `.env` 里修改了 `PORT`, 请把下面地址中的端口替换为你的值.
+默认端口是 4310. 如果你在 `.env` 里修改了 `AWB_PORT`, 请把下面地址中的端口替换为你的值.
 
 | 地址 | 说明 |
 |------|------|
@@ -51,9 +51,9 @@ docker compose up -d --build
 
 为避免每新增/开发一个项目就需要修改 `docker-compose.yml` 并重启容器，默认 Compose 配置会额外发布一段端口给工作区内启动的服务（HTTP 服务、RPC 服务等）：
 
-- 宿主机端口段: 由 `.env` 的 `WORKSPACE_PORT_RANGE` 控制, 默认 `30000-30100`
+- 宿主机端口段: 由 `.env` 的 `AWB_WORKSPACE_PORT_RANGE` 控制, 默认 `30000-30100`
 - 容器端口段: 同上
-- 若端口冲突导致容器启动失败, 修改 `.env` 的 `WORKSPACE_PORT_RANGE` 后重启容器即可
+- 若端口冲突导致容器启动失败, 修改 `.env` 的 `AWB_WORKSPACE_PORT_RANGE` 后重启容器即可
 
 **数据持久化**
 
@@ -68,27 +68,29 @@ docker compose up -d --build
 
 **安全提示**
 
-默认为了方便会对外发布端口 `4310` 与 `WORKSPACE_PORT_RANGE`. 如果你把服务部署在远程主机上, 建议优先按更安全的方式暴露服务:
+默认为了方便会对外发布端口 `4310` 与 `AWB_WORKSPACE_PORT_RANGE`. 如果你把服务部署在远程主机上, 建议优先按更安全的方式暴露服务:
 
-- 通过 `.env` 设置 `PUBLISH_HOST=127.0.0.1`, 仅允许本机访问
+- 通过 `.env` 设置 `AWB_PUBLISH_HOST=127.0.0.1`, 仅允许本机访问
 - 在宿主机上使用 Nginx/Caddy 等做 HTTPS 反代对外提供访问
-- 启用 `AUTH_TOKEN` 作为最小鉴权手段, 并在 HTTPS 场景设置 `AUTH_COOKIE_SECURE=1`
-- 谨慎对外暴露 `WORKSPACE_PORT_RANGE`, 因为它会把工作区内启动的服务端口也一起发布出去(必要时缩小端口段, 或在自定义的 compose 配置中移除该段端口映射)
+- 启用 `AWB_AUTH_TOKEN` 作为最小鉴权手段, 并在 HTTPS 场景设置 `AWB_AUTH_COOKIE_SECURE=1`
+- 谨慎对外暴露 `AWB_WORKSPACE_PORT_RANGE`, 因为它会把工作区内启动的服务端口也一起发布出去(必要时缩小端口段, 或在自定义的 compose 配置中移除该段端口映射)
 
-如果你需要在局域网/公网直接暴露端口, 可以使用 `PUBLISH_HOST=0.0.0.0`, 并配合防火墙规则与鉴权设置.
+如果你需要在局域网/公网直接暴露端口, 可以使用 `AWB_PUBLISH_HOST=0.0.0.0`, 并配合防火墙规则与鉴权设置.
 
 **环境变量**
 
 | 变量 | 说明 |
 |------|------|
-| `PORT` | Web UI + API 对外发布端口(默认 `4310`). |
-| `WORKSPACE_PORT_RANGE` | 工作区端口段(默认 `30000-30100`), 用于发布工作区内启动的服务. |
-| `CREDENTIAL_MASTER_KEY` | 凭证加密密钥（32 字节 hex/base64/base64url）。未设置时自动生成并保存至 `/data/keys/credential-master-key.json`。迁移场景建议显式设置。 |
-| `AUTH_TOKEN` | 访问 token 保护（可选）。设置后需要在首页输入 token 登录（会话 Cookie）才能访问 Web UI/API。 |
-| `AUTH_COOKIE_SECURE` | HTTPS 场景建议设为 `1`(为会话 Cookie 添加 `Secure`), 本地 HTTP 开发保持 `0`. |
-| `PUBLISH_HOST` | 端口发布的宿主机绑定地址(Docker Compose). 设为 `127.0.0.1` 可仅允许本机访问. |
+| `AWB_PORT` | Web UI + API 对外发布端口(默认 `4310`). |
+| `AWB_WORKSPACE_PORT_RANGE` | 工作区端口段(默认 `30000-30100`), 用于发布工作区内启动的服务. |
+| `AWB_FILE_MAX_BYTES` | 文件预览/对比最大字节数(默认 `1048576`). |
+| `AWB_APP_VERSION` | 可选:显式指定 `/api/health` 的 version. |
+| `AWB_CREDENTIAL_MASTER_KEY` | 凭证加密密钥（32 字节 hex/base64/base64url）。未设置时自动生成并保存至 `/data/keys/credential-master-key.json`。迁移场景建议显式设置。 |
+| `AWB_AUTH_TOKEN` | 访问 token 保护（可选）。设置后需要在首页输入 token 登录（会话 Cookie）才能访问 Web UI/API。 |
+| `AWB_AUTH_COOKIE_SECURE` | HTTPS 场景建议设为 `1`(为会话 Cookie 添加 `Secure`), 本地 HTTP 开发保持 `0`. |
+| `AWB_PUBLISH_HOST` | 端口发布的宿主机绑定地址(Docker Compose). 设为 `127.0.0.1` 可仅允许本机访问. |
 
-其他 Compose 相关变量(如 `HOST`, `DATA_DIR`, `SERVE_WEB`, `WEB_DIST_DIR`)请以 `.env.docker.example` 为准.
+其他 Compose 相关变量(如 `AWB_HOST`, `AWB_DATA_DIR`, `AWB_SERVE_WEB`, `AWB_WEB_DIST_DIR`)请以 `.env.docker.example` 为准.
 
 ---
 
@@ -138,9 +140,9 @@ npm run dev
 **本地环境变量**
 
 - 复制 `.env.example` 为 `.env.local`，按需修改变量
-  - `PORT`：后端监听端口（默认 `4310`）
-  - `DEV_WEB_PORT`：仅前端开发期（Vite dev server）使用：前端 dev server 端口（可选）
-  - `DEV_API_ORIGIN`：仅前端开发期使用：前端 dev proxy 的后端目标地址（可选；默认 `http://127.0.0.1:${PORT}`）
+  - `AWB_PORT`：后端监听端口（默认 `4310`）
+  - `AWB_DEV_WEB_PORT`：仅前端开发期（Vite dev server）使用：前端 dev server 端口（可选）
+  - `AWB_DEV_API_ORIGIN`：仅前端开发期使用：前端 dev proxy 的后端目标地址（可选；默认 `http://127.0.0.1:${AWB_PORT}`）
 
 **其他脚本**
 

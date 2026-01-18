@@ -14,6 +14,10 @@ export async function runTmux(
   const timeoutMs = opts.timeoutMs ?? 30_000;
   return new Promise<ExecResult>((resolve) => {
     const env = { ...process.env };
+    // 避免把 AWB_* 泄漏到 tmux server/session,进而进入用户工作区终端环境变量。
+    for (const k of Object.keys(env)) {
+      if (k.startsWith("AWB_")) delete (env as any)[k];
+    }
     // 避免在用户本机 tmux 内运行时发生“嵌套 tmux”相关行为
     delete (env as any).TMUX;
     const child = spawn("tmux", args, {

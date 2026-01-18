@@ -120,6 +120,10 @@ export async function registerTerminalWsRoute(app: FastifyInstance, ctx: AppCont
 
         const attachArgs = force ? ["attach", "-d", "-t", term.sessionName] : ["attach", "-t", term.sessionName];
         const env = { ...process.env, TERM: "xterm-256color", LANG: process.env.LANG || "C.UTF-8" };
+        // 避免把 AWB_* 泄漏到用户侧终端进程(这里主要是 tmux client,但保持一致更安全)。
+        for (const k of Object.keys(env)) {
+          if (k.startsWith("AWB_")) delete (env as any)[k];
+        }
         delete (env as any).TMUX;
 
         p = pty.spawn("tmux", attachArgs, {
