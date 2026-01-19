@@ -181,6 +181,13 @@ watch(
 );
 
 async function openBlock(block: FileSearchBlock) {
+  const rawPath = String(block.path || "").trim();
+  if (!rawPath) return;
+  const targetDirName = String(props.target?.dirName || "").trim();
+  const resolvedPath =
+    targetDirName && rawPath !== targetDirName && !rawPath.startsWith(targetDirName + "/")
+      ? `${targetDirName}/${rawPath}`
+      : rawPath;
   const hitLine = block.hitLines.length > 0 ? Math.min(...block.hitLines) : block.fromLine;
   const line = block.lines.find((item) => item.line === hitLine);
   const highlight =
@@ -190,7 +197,7 @@ async function openBlock(block: FileSearchBlock) {
   host.call("files", {
     type: "files.openAt",
     payload: {
-      path: block.path,
+      path: resolvedPath,
       line: hitLine,
       highlight
     }

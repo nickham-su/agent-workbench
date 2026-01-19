@@ -944,11 +944,8 @@ function resolveOpenAtPath(req: FileOpenAtRequest) {
   const parts = splitPath(raw);
   if (parts.some((part) => part === "..")) return "";
   const head = parts[0] ?? "";
-  const targetDirName = String(req.targetDirName || "").trim();
-  if (targetDirName && (raw === targetDirName || raw.startsWith(targetDirName + "/"))) return raw;
   if (head && repoDirNameSet.value.has(head)) return raw;
-  if (targetDirName) return joinRel(targetDirName, raw);
-  return "";
+  return raw;
 }
 
 async function openFileAt(req: FileOpenAtRequest) {
