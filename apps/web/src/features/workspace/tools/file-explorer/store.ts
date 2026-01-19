@@ -6,11 +6,13 @@ export type FileOpenAtRequest =
       path: string;
       line: number;
       highlight: { kind: "range"; startCol: number; endCol: number };
+      targetDirName?: string;
     }
   | {
       path: string;
       line: number;
       highlight: { kind: "line" };
+      targetDirName?: string;
     };
 
 export type FileExplorerStore = {
@@ -19,8 +21,6 @@ export type FileExplorerStore = {
   activeTab: ComputedRef<FileTab | null>;
   hasDirtyNotSaving: ComputedRef<boolean>;
   pendingOpenAt: Ref<FileOpenAtRequest | null>;
-  getTargetKey: () => string;
-  setTargetKey: (key: string) => boolean;
   setActiveTabKey: (key: string) => void;
   getTab: (path: string) => FileTab | null;
   addTab: (tab: FileTab) => void;
@@ -45,7 +45,6 @@ export function getFileExplorerStore(workspaceId: string): FileExplorerStore {
 
   const tabs = reactive<FileTab[]>([]);
   const activeTabKey = ref<string>("");
-  const targetKey = ref<string>("");
   const activeTab = computed<FileTab | null>(() => {
     const current = activeTabKey.value;
     if (!current) return null;
@@ -60,12 +59,6 @@ export function getFileExplorerStore(workspaceId: string): FileExplorerStore {
     activeTab,
     hasDirtyNotSaving,
     pendingOpenAt,
-    getTargetKey: () => targetKey.value,
-    setTargetKey: (next) => {
-      if (targetKey.value === next) return false;
-      targetKey.value = next;
-      return true;
-    },
     setActiveTabKey: (next) => {
       activeTabKey.value = next;
     },

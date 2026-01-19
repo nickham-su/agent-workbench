@@ -29,21 +29,13 @@ export function createFileExplorerRuntime(ctx: ToolRuntimeContext): ToolRuntime 
       scope = effectScope();
     },
     onRepoChange(nextTarget) {
-      const nextKey = nextTarget ? `${nextTarget.workspaceId}:${nextTarget.dirName}` : "";
-      if (store.setTargetKey(nextKey)) {
-        store.resetTabs();
-        ctx.host.setToolDot(ctx.toolId, false);
-      }
+      void nextTarget;
     },
     onVisibilityChange() {
       // 文件浏览器红点与 tab 状态一致,可见性不影响计算
     },
     onCall(envelope) {
       if (envelope.type !== "files.openAt") return;
-      if (envelope.targetAtCall) {
-        const targetKey = `${envelope.targetAtCall.workspaceId}:${envelope.targetAtCall.dirName}`;
-        if (store.getTargetKey() && store.getTargetKey() !== targetKey) return;
-      }
       const payload = (envelope.payload ?? {}) as Partial<FileOpenAtRequest>;
       const path = typeof payload.path === "string" ? payload.path.trim() : "";
       const line = typeof payload.line === "number" ? payload.line : 0;
@@ -53,7 +45,8 @@ export function createFileExplorerRuntime(ctx: ToolRuntimeContext): ToolRuntime 
       if (highlight.kind === "range") {
         if (typeof highlight.startCol !== "number" || typeof highlight.endCol !== "number") return;
       }
-      store.setPendingOpenAt({ path, line, highlight } as FileOpenAtRequest);
+      const targetDirName = envelope.targetAtCall?.dirName;
+      store.setPendingOpenAt({ path, line, highlight, targetDirName } as FileOpenAtRequest);
     }
   };
 }

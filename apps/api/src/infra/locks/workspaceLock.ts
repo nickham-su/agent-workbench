@@ -1,23 +1,32 @@
-type AsyncFn<T> = () => Promise<T>;
+type Unlock = () => void;
 
-const workspaceLocks = new Map<string, Promise<unknown>>();
+const tails = new Map<string, Promise<void>>();
 
-export async function withWorkspaceLock<T>(workspaceId: string, fn: AsyncFn<T>): Promise<T> {
-  const previous = workspaceLocks.get(workspaceId) ?? Promise.resolve();
-  let release: () => void;
-  const next = new Promise<void>((resolve) => {
-    release = resolve;
+function lockKey(params: { workspaceId: string }) {
+  return params.workspaceId;
+}
+
+async function acquire(key: string): Promise<Unlock> {
+  const prev = tails.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
   });
-  const chain = previous.then(() => next);
-  workspaceLocks.set(workspaceId, chain);
+  const tail = prev.then(() => gate);
+  tails.set(key, tail);
 
+  await prev;
+  return () => {
+    release();
+    if (tails.get(key) === tail) tails.delete(key);
+  };
+}
+
+export async function withWorkspaceLock<T>(params: { workspaceId: string }, fn: () => Promise<T>): Promise<T> {
+  const unlock = await acquire(lockKey(params));
   try {
-    await previous;
     return await fn();
   } finally {
-    release!();
-    if (workspaceLocks.get(workspaceId) === chain) {
-      workspaceLocks.delete(workspaceId);
-    }
+    unlock();
   }
 }

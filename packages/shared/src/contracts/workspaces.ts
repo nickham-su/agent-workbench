@@ -25,6 +25,7 @@ export type WorkspaceRepo = Static<typeof WorkspaceRepoSchema>;
 export const WorkspaceDetailSchema = Type.Object(
   {
     id: Type.String(),
+    dirName: Type.String(),
     title: Type.String(),
     repos: Type.Array(WorkspaceRepoSchema),
     useTerminalCredential: Type.Boolean(),

@@ -287,6 +287,7 @@ function buildWorkspaceDetail(
   });
   return {
     id: ws.id,
+    dirName: ws.dirName,
     title: ws.title,
     repos,
     useTerminalCredential: Boolean(ws.terminalCredentialId),
@@ -359,7 +360,7 @@ export async function attachRepoToWorkspace(
 ) {
   const ws = await getWorkspaceById(ctx, workspaceId);
 
-  return withWorkspaceLock(ws.id, async () => {
+  return withWorkspaceLock({ workspaceId: ws.id }, async () => {
     const repoId = String(params.repoId || "").trim();
     if (!repoId) throw new HttpError(400, "repoId is required");
     const repo = getRepo(ctx.db, repoId);

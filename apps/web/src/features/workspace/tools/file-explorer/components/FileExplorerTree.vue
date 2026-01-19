@@ -5,7 +5,7 @@
       <div class="flex items-center gap-1">
         <a-tooltip :title="t('files.actions.refresh')" :mouseEnterDelay="0" :mouseLeaveDelay="0">
           <span class="inline-flex">
-            <a-button size="small" type="text" :disabled="!target" :loading="treeLoading" @click="refreshRoot">
+            <a-button size="small" type="text" :loading="treeLoading" @click="refreshRoot">
               <template #icon><ReloadOutlined /></template>
             </a-button>
           </span>
@@ -46,10 +46,10 @@
                 <a-menu-item v-if="selectedNode" key="copyName">
                   {{ t("files.actions.copyName") }}
                 </a-menu-item>
-                <a-menu-item v-if="selectedNode" key="copyRepoPath">
+                <a-menu-item v-if="showRepoPathAction" key="copyRepoPath">
                   {{ t("files.actions.copyRepoPath") }}
                 </a-menu-item>
-                <a-menu-item v-if="selectedNode" key="copyWorkspacePath">
+                <a-menu-item v-if="showWorkspacePathAction" key="copyWorkspacePath">
                   {{ t("files.actions.copyWorkspacePath") }}
                 </a-menu-item>
                 <a-menu-divider v-if="canRenameDelete" />
@@ -70,11 +70,9 @@
 <script setup lang="ts">
 import { useI18n } from "vue-i18n";
 import { ReloadOutlined } from "@ant-design/icons-vue";
-import type { GitTarget } from "@agent-workbench/shared";
 import type { TreeNode } from "../types";
 
 const props = defineProps<{
-  target: GitTarget | null;
   treeKey: number;
   treeData: TreeNode[];
   expandedKeys: string[];
@@ -83,6 +81,8 @@ const props = defineProps<{
   isTreeEmpty: boolean;
   selectedNode: TreeNode | null;
   canRenameDelete: boolean;
+  showRepoPathAction: boolean;
+  showWorkspacePathAction: boolean;
   refreshRoot: () => void;
   onLoadData: (node: any) => Promise<void> | void;
   onExpandedKeysUpdate: (keys: string[]) => void;
