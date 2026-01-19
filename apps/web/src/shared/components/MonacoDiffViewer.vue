@@ -8,7 +8,7 @@ import * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
 import "monaco-editor/min/vs/editor/editor.main.css";
 import { ensureMonacoEnvironment } from "@/shared/monaco/monacoEnv";
 import { applyMonacoPanelTheme } from "@/shared/monaco/monacoTheme";
-import { diffFontSize } from "@/shared/settings/uiFontSizes";
+import { editorFontSize } from "@/shared/settings/uiFontSizes";
 
 const props = defineProps<{
   original: string;
@@ -229,7 +229,7 @@ onMounted(() => {
     automaticLayout: true,
     renderSideBySide: true,
     readOnly: true,
-    fontSize: diffFontSize.value,
+    fontSize: editorFontSize.value,
     minimap: {enabled: false},
     scrollBeyondLastLine: false,
     wordWrap: "off",
@@ -270,7 +270,7 @@ onMounted(() => {
   scheduleEmitLayout();
 
   stopWatchFontSize = watch(
-    () => diffFontSize.value,
+    () => editorFontSize.value,
     (next) => {
       if (!editor) return;
       editor.updateOptions({ fontSize: next });

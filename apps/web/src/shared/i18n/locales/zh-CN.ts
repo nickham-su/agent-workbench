@@ -488,9 +488,9 @@ export default {
           label: "终端字号",
           help: "调整终端字体大小（全局生效，自动保存到本地）。默认：{default}"
         },
-        diff: {
-          label: "对比字号",
-          help: "调整代码对比（Diff）字体大小（全局生效，自动保存到本地）。默认：{default}"
+        editor: {
+          label: "编辑器字号",
+          help: "调整编辑器字号（包含 Diff 视图，全局生效，自动保存到本地）。默认：{default}"
         }
       }
     },

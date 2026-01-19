@@ -5,7 +5,7 @@
           v-model:value="workspacesQuery"
           size="small"
           allow-clear
-          class="w-[250px] max-w-[45vw] !text-xs"
+          class="w-[250px] max-w-[45vw]"
           :placeholder="t('workspaces.search.placeholder')"
           :aria-label="t('workspaces.search.placeholder')"
       >

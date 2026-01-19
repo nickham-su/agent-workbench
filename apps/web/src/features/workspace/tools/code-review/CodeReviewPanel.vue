@@ -511,6 +511,8 @@ const unstaged = ref<ChangeItem[]>([]);
 const staged = ref<ChangeItem[]>([]);
 const selected = ref<Selected>(null);
 const selectedFingerprint = ref<string | null>(null);
+// 记录每个 mode 下,用户上次选中的(排序后)索引,用于刷新后回退到“原位置上的文件”
+const lastSelectedIndexByMode = ref<Record<ChangeMode, number>>({unstaged: 0, staged: 0});
 
 const compareLoading = ref(false);
 const compareError = ref<string | null>(null);
@@ -519,8 +521,31 @@ const diffHeaderVars = ref<Record<string, string>>({});
 const diffViewerRef = ref<{ goToFirstDiff: () => void; goToPreviousDiff: () => void; goToNextDiff: () => void } | null>(null);
 let compareReqSeq = 0;
 
-const unstagedFiles = computed(() => unstaged.value);
-const stagedFiles = computed(() => staged.value);
+function comparePathText(a: string, b: string) {
+  // 使用纯字符串比较,避免受 locale 影响导致不同环境下排序不一致
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
+}
+
+function stableSort<T>(arr: readonly T[], cmp: (a: T, b: T) => number): T[] {
+  return arr
+    .map((v, i) => ({v, i}))
+    .sort((a, b) => {
+      const r = cmp(a.v, b.v);
+      return r !== 0 ? r : a.i - b.i;
+    })
+    .map((x) => x.v);
+}
+
+function compareChangeItemForList(a: ChangeItem, b: ChangeItem) {
+  const r = comparePathText(a.path, b.path);
+  if (r !== 0) return r;
+  return comparePathText(a.oldPath || "", b.oldPath || "");
+}
+
+// UI 层按 path 做稳定排序,避免轮询时列表顺序抖动影响“按索引回退选中”
+const unstagedFiles = computed(() => stableSort(unstaged.value, compareChangeItemForList));
+const stagedFiles = computed(() => stableSort(staged.value, compareChangeItemForList));
 
 const commitOpen = ref(false);
 const commitMessage = ref("");
@@ -561,12 +586,16 @@ function isSelected(mode: ChangeMode, path: string) {
 
 function selectFile(mode: ChangeMode, path: string, oldPath?: string) {
   selected.value = {mode, path, oldPath};
-  const list = mode === "unstaged" ? unstaged.value : staged.value;
+  const list = mode === "unstaged" ? unstagedFiles.value : stagedFiles.value;
   const match =
       list.find((f) => f.path === path && (f.oldPath || "") === (oldPath || "")) ||
       list.find((f) => f.path === path) ||
       null;
   selectedFingerprint.value = match ? fingerprintFor(mode, match) : null;
+  if (match) {
+    const idx = list.indexOf(match);
+    if (idx >= 0) lastSelectedIndexByMode.value[mode] = idx;
+  }
 }
 
 function fileBase(p: string) {
@@ -640,17 +669,24 @@ async function reconcileSelectedAfterRefresh() {
     return;
   }
 
-  const primaryList = sel.mode === "unstaged" ? unstaged.value : staged.value;
-  const otherMode: ChangeMode = sel.mode === "unstaged" ? "staged" : "unstaged";
-  const otherList = sel.mode === "unstaged" ? staged.value : unstaged.value;
+  const primaryMode = sel.mode;
+  const primaryList = primaryMode === "unstaged" ? unstagedFiles.value : stagedFiles.value;
+  const otherMode: ChangeMode = primaryMode === "unstaged" ? "staged" : "unstaged";
+  const otherList = primaryMode === "unstaged" ? stagedFiles.value : unstagedFiles.value;
 
   const primaryMatch = findBestMatch(primaryList, sel);
   if (primaryMatch) {
-    const fp = fingerprintFor(sel.mode, primaryMatch);
-    const selectionChanged = primaryMatch.path !== sel.path || (primaryMatch.oldPath || "") !== (sel.oldPath || "");
+    const fp = fingerprintFor(primaryMode, primaryMatch);
+    const idx = primaryList.indexOf(primaryMatch);
+    if (idx >= 0) lastSelectedIndexByMode.value[primaryMode] = idx;
+
+    const selectionChanged =
+        primaryMatch.path !== sel.path ||
+        (primaryMatch.oldPath || "") !== (sel.oldPath || "");
     if (selectionChanged) {
       selectedFingerprint.value = fp;
-      selected.value = {mode: sel.mode, path: primaryMatch.path, oldPath: primaryMatch.oldPath};
+      // rename 也视为“仍存在”,因此需要把选中项迁移到新 path
+      selected.value = {mode: primaryMode, path: primaryMatch.path, oldPath: primaryMatch.oldPath};
       return;
     }
     if (selectedFingerprint.value !== fp) {
@@ -660,8 +696,22 @@ async function reconcileSelectedAfterRefresh() {
     return;
   }
 
+  // “留在当前 mode 优先”: 当前 mode 中不存在原选中项时,优先选中原位置上的文件
+  if (primaryList.length > 0) {
+    const rawIdx = lastSelectedIndexByMode.value[primaryMode] ?? 0;
+    const idx = Math.max(0, Math.min(primaryList.length - 1, rawIdx));
+    const next = primaryList[idx]!;
+    selectedFingerprint.value = fingerprintFor(primaryMode, next);
+    selected.value = {mode: primaryMode, path: next.path, oldPath: next.oldPath};
+    lastSelectedIndexByMode.value[primaryMode] = idx;
+    return;
+  }
+
+  // 当前 mode 为空时,才允许切到另一个 mode 继续选中原文件
   const otherMatch = findBestMatch(otherList, sel);
   if (otherMatch) {
+    const idx = otherList.indexOf(otherMatch);
+    if (idx >= 0) lastSelectedIndexByMode.value[otherMode] = idx;
     selectedFingerprint.value = fingerprintFor(otherMode, otherMatch);
     selected.value = {mode: otherMode, path: otherMatch.path, oldPath: otherMatch.oldPath};
     return;

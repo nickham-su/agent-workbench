@@ -490,9 +490,9 @@ export default {
           label: "Terminal font size",
           help: "Adjust terminal font size (global, saved locally). Default: {default}"
         },
-        diff: {
-          label: "Diff font size",
-          help: "Adjust diff viewer font size (global, saved locally). Default: {default}"
+        editor: {
+          label: "Editor font size",
+          help: "Adjust editor font size (includes Diff view, global, saved locally). Default: {default}"
         }
       }
     },

@@ -5,7 +5,7 @@
           v-model:value="reposQuery"
           size="small"
           allow-clear
-          class="w-[250px] max-w-[45vw] !text-xs"
+          class="w-[250px] max-w-[45vw]"
           :placeholder="t('repos.search.placeholder')"
           :aria-label="t('repos.search.placeholder')"
       >
