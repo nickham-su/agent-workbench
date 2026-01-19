@@ -25,6 +25,7 @@ export type WorkspaceRepo = Static<typeof WorkspaceRepoSchema>;
 export const WorkspaceDetailSchema = Type.Object(
   {
     id: Type.String(),
+    dirName: Type.String(),
     title: Type.String(),
     repos: Type.Array(WorkspaceRepoSchema),
     useTerminalCredential: Type.Boolean(),
@@ -52,3 +53,9 @@ export const UpdateWorkspaceRequestSchema = Type.Object(
   { minProperties: 1 }
 );
 export type UpdateWorkspaceRequest = Static<typeof UpdateWorkspaceRequestSchema>;
+
+export const AttachWorkspaceRepoRequestSchema = Type.Object({
+  repoId: Type.String({ minLength: 1 }),
+  branch: Type.Optional(Type.String({ minLength: 1 }))
+});
+export type AttachWorkspaceRepoRequest = Static<typeof AttachWorkspaceRepoRequestSchema>;

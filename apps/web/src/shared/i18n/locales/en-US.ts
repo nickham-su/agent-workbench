@@ -130,7 +130,9 @@ export default {
     actions: {
       create: "Create workspace",
       rename: "Rename",
-      delete: "Delete"
+      delete: "Delete",
+      attachRepo: "Add repo",
+      detachRepo: "Remove repo"
     },
     tooltip: {
       activeTerminals: "{n} active terminals. Click to close"
@@ -175,11 +177,46 @@ export default {
     actions: {
       checkout: "Switch branch",
       pull: "Pull",
-      push: "Push"
+      push: "Push",
+      attachRepo: "Add repo",
+      detachRepo: "Remove repo"
     },
     repoSelector: {
       placeholder: "Select repo",
       detached: "Detached HEAD"
+    },
+    attachRepo: {
+      modalTitle: "Add repo",
+      ok: "Add",
+      cancel: "Cancel",
+      repoLabel: "Repo",
+      repoPlaceholder: "Select repo",
+      empty: "No repos available to add",
+      success: "Repo added",
+      downgraded: "Terminal credential disabled due to credential mismatch",
+      errors: {
+        alreadyExists: "Repo is already attached to this workspace",
+        dirConflict: "Workspace repo directory conflict. Try again",
+        prepareFailed: "Failed to prepare repo. Check credentials or network",
+        defaultBranchUnknown: "Default branch is unknown. Sync the repo first",
+        branchNotFound: "Target branch not found"
+      }
+    },
+    detachRepo: {
+      confirmTitle: "Remove repo?",
+      confirmContent: "This will remove the repo directory from the workspace. Global repo list is not affected.",
+      ok: "Remove",
+      cancel: "Cancel",
+      success: "Repo removed",
+      disabledNoRepo: "No repo selected",
+      disabledActiveTerminals: "There are {n} active terminals. Close them first",
+      disabledLastRepo: "Workspace must keep at least one repo",
+      disabledBusy: "Another operation is in progress. Try again later",
+      errors: {
+        activeTerminals: "Active terminals detected. Cannot remove repo",
+        lastRepo: "Workspace must keep at least one repo",
+        notFound: "Repo is no longer attached"
+      }
     },
     tools: {
       codeReview: "Code review",
@@ -369,7 +406,9 @@ export default {
       newFile: "New file",
       newFolder: "New folder",
       copyName: "Copy name",
-      copyPath: "Copy path",
+      copyPath: "Copy repo path",
+      copyRepoPath: "Copy repo path",
+      copyWorkspacePath: "Copy workspace path",
       rename: "Rename",
       delete: "Delete",
       refresh: "Refresh",
@@ -378,6 +417,8 @@ export default {
     copy: {
       nameCopied: "Name copied",
       pathCopied: "Path copied",
+      repoPathCopied: "Repo path copied",
+      workspacePathCopied: "Workspace path copied",
       failed: "Copy failed"
     },
     status: {
@@ -438,6 +479,11 @@ export default {
       selectRepo: "Select a repo",
       query: "Enter search text",
       queryEmpty: "Enter search text"
+    },
+    scope: {
+      global: "Global",
+      repos: "Specific repos",
+      reposPlaceholder: "Select repos"
     },
     options: {
       regex: "Regex",

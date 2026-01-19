@@ -12,9 +12,7 @@ export function createSearchRuntime(ctx: ToolRuntimeContext): ToolRuntime {
       store.resetAll();
     },
     onRepoChange() {
-      store.nextRequestSeq();
-      store.resetResults();
-      store.loading.value = false;
+      // 搜索范围由 scope 与 repo 选择控制,不跟随当前 repo 自动重置
     },
     onVisibilityChange() {
       // 无需处理可见性

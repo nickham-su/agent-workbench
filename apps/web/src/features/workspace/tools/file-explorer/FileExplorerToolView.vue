@@ -2,14 +2,9 @@
   <div class="h-full min-h-0 flex flex-col">
 
 
-    <div v-if="!target" class="flex-1 min-h-0 flex items-center justify-center text-xs text-[color:var(--text-tertiary)]">
-      {{ t("files.placeholder.selectRepo") }}
-    </div>
-
-    <div v-else ref="containerEl" class="flex-1 min-h-0 grid gap-0" :style="containerStyle">
+    <div ref="containerEl" class="flex-1 min-h-0 grid gap-0" :style="containerStyle">
       <div class="min-h-0 min-w-0 flex flex-col border-r border-[var(--border-color-secondary)]">
         <FileExplorerTree
-          :target="target"
           :tree-key="treeKey"
           :tree-data="treeData"
           :expanded-keys="expandedKeys"
@@ -18,6 +13,8 @@
           :is-tree-empty="isTreeEmpty"
           :selected-node="selectedNode"
           :can-rename-delete="canRenameDelete"
+          :show-repo-path-action="showRepoPathAction"
+          :show-workspace-path-action="showWorkspacePathAction"
           :refresh-root="refreshRoot"
           :on-load-data="onLoadData"
           :on-expanded-keys-update="onExpandedKeysUpdate"
@@ -119,20 +116,20 @@ import { useI18n } from "vue-i18n";
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
 import "monaco-editor/min/vs/editor/editor.main.css";
 import "monaco-editor/esm/vs/editor/contrib/find/browser/findController.js";
-import type { FileEntry, FileReadResponse, GitTarget } from "@agent-workbench/shared";
+import type { FileEntry, FileReadResponse } from "@agent-workbench/shared";
 import FileExplorerTree from "./components/FileExplorerTree.vue";
 import FileExplorerTabs from "./components/FileExplorerTabs.vue";
 import type { FileTab, TreeNode } from "./types";
 import { getFileExplorerStore, type FileOpenAtRequest } from "./store";
 import {
   ApiError,
-  createFile,
-  deletePath,
-  listFiles,
-  mkdirPath,
-  readFileText,
-  renamePath,
-  writeFileText
+  createWorkspaceFile,
+  deleteWorkspacePath,
+  listWorkspaceFiles,
+  mkdirWorkspacePath,
+  readWorkspaceFileText,
+  renameWorkspacePath,
+  writeWorkspaceFileText
 } from "@/shared/api";
 import { ensureMonacoEnvironment } from "@/shared/monaco/monacoEnv";
 import { applyMonacoPanelTheme } from "@/shared/monaco/monacoTheme";
@@ -140,7 +137,12 @@ import { ensureMonacoLanguage } from "@/shared/monaco/languageLoader";
 import { editorFontSize } from "@/shared/settings/uiFontSizes";
 
 
-const props = defineProps<{ workspaceId: string; target: GitTarget | null; toolId: string }>();
+const props = defineProps<{
+  workspaceId: string;
+  toolId: string;
+  workspaceDirName?: string;
+  workspaceRepos?: Array<{ dirName: string }>;
+}>();
 const { t } = useI18n();
 
 const ROOT_KEY = "__files_root__";
@@ -152,6 +154,17 @@ const MAX_TREE_RATIO = 0.55;
 const MIN_TREE_PX = 220;
 const MIN_EDITOR_PX = 360;
 
+const workspaceRootName = computed(() => {
+  const name = String(props.workspaceDirName || "").trim();
+  if (name) return name;
+  const fallback = String(props.workspaceId || "").trim();
+  return fallback || "workspace";
+});
+const repoDirNameSet = computed(() => {
+  const names = (props.workspaceRepos ?? []).map((item) => String(item.dirName || "").trim()).filter(Boolean);
+  return new Set(names);
+});
+
 const containerEl = ref<HTMLElement | null>(null);
 const treeKey = ref(0);
 const treeData = ref<TreeNode[]>([]);
@@ -162,7 +175,7 @@ const loadedDirs = new Set<string>();
 const nodeByPath = new Map<string, TreeNode>();
 const dirRequestSeqByDir = new Map<string, number>();
 const fileRequestSeqByPath = new Map<string, number>();
-let targetSeq = 0;
+let scopeSeq = 0;
 
 const store = getFileExplorerStore(props.workspaceId);
 const tabs = store.tabs;
@@ -192,7 +205,16 @@ const renameModal = reactive({
 });
 
 const selectedNode = ref<TreeNode | null>(null);
-const canRenameDelete = computed(() => !!selectedNode.value && selectedNode.value.data.path !== "");
+const canRenameDelete = computed(() => {
+  const rel = selectedNode.value?.data.path ?? "";
+  if (!rel) return false;
+  return !isProtectedRootPath(rel);
+});
+const showRepoPathAction = computed(() => {
+  const rel = selectedNode.value?.data.path ?? "";
+  return Boolean(resolveRepoRelPath(rel));
+});
+const showWorkspacePathAction = computed(() => !!selectedNode.value);
 const rootNode = computed(() => treeData.value.find((node) => node.key === ROOT_KEY) ?? null);
 const isTreeEmpty = computed(() => {
   const root = rootNode.value;
@@ -458,31 +480,45 @@ function joinRel(parent: string, name: string) {
   return parent ? `${parent}/${name}` : name;
 }
 
-function createRootNode(target: GitTarget): TreeNode {
+function resolveRepoRelPath(rel: string) {
+  const parts = splitPath(rel);
+  if (parts.length <= 1) return "";
+  const head = parts[0] ?? "";
+  if (!head || !repoDirNameSet.value.has(head)) return "";
+  return parts.slice(1).join("/");
+}
+
+function isProtectedRootPath(rel: string) {
+  const parts = splitPath(rel);
+  if (parts.length !== 1) return false;
+  const head = parts[0] ?? "";
+  return head ? repoDirNameSet.value.has(head) : false;
+}
+
+function createRootNode(name: string): TreeNode {
   return {
     key: ROOT_KEY,
-    title: target.dirName,
+    title: name,
     isLeaf: false,
-    data: { name: target.dirName, path: "", kind: "dir", mtimeMs: 0 }
+    data: { name, path: "", kind: "dir", mtimeMs: 0 }
   };
 }
 
 function ensureRootNode() {
-  if (!props.target) return null;
+  const name = workspaceRootName.value;
   let root = treeData.value.find((node) => node.key === ROOT_KEY) ?? null;
   if (!root) {
-    root = createRootNode(props.target);
+    root = createRootNode(name);
     treeData.value = [root];
   } else {
-    root.title = props.target.dirName;
-    root.data.name = props.target.dirName;
+    root.title = name;
+    root.data.name = name;
   }
   return root;
 }
 
 function initRootTree() {
-  if (!props.target) return;
-  treeData.value = [createRootNode(props.target)];
+  treeData.value = [createRootNode(workspaceRootName.value)];
   expandedKeys.value = [ROOT_KEY];
   selectedKeys.value = [];
   loadedDirs.clear();
@@ -543,24 +579,22 @@ function markLoaded(dir: string) {
 }
 
 async function loadDir(dir: string) {
-  if (!props.target) return;
-  const targetSnapshot = targetSeq;
-  const entries = await fetchDirEntries(dir, targetSnapshot);
+  const scopeSnapshot = scopeSeq;
+  const entries = await fetchDirEntries(dir, scopeSnapshot);
   if (!entries) return;
   updateChildren(dir, entries);
   markLoaded(dir);
 }
 
-async function fetchDirEntries(dir: string, targetSnapshot: number) {
-  if (!props.target) return null;
+async function fetchDirEntries(dir: string, scopeSnapshot: number) {
   const requestId = nextDirRequestId(dir);
   try {
-    const res = await listFiles({ target: props.target, dir });
-    if (targetSnapshot !== targetSeq) return null;
+    const res = await listWorkspaceFiles({ workspaceId: props.workspaceId, dir });
+    if (scopeSnapshot !== scopeSeq) return null;
     if (dirRequestSeqByDir.get(dir) !== requestId) return null;
     return res.entries;
   } catch (err) {
-    if (targetSnapshot !== targetSeq) return null;
+    if (scopeSnapshot !== scopeSeq) return null;
     if (dirRequestSeqByDir.get(dir) !== requestId) return null;
     throw err;
   }
@@ -576,37 +610,35 @@ function getRefreshDirs() {
 }
 
 async function refreshRoot() {
-  if (!props.target) return;
-  const targetSnapshot = targetSeq;
+  const scopeSnapshot = scopeSeq;
   treeLoading.value = true;
   try {
     const dirs = getRefreshDirs();
     const results: Array<{ dir: string; entries: FileEntry[] }> = [];
     for (const dir of dirs) {
-      if (targetSnapshot !== targetSeq) return;
+      if (scopeSnapshot !== scopeSeq) return;
       if (dir && !nodeByPath.has(dir)) continue;
       try {
-        const entries = await fetchDirEntries(dir, targetSnapshot);
+        const entries = await fetchDirEntries(dir, scopeSnapshot);
         if (!entries) continue;
         results.push({ dir, entries });
       } catch (err) {
-        if (targetSnapshot !== targetSeq) return;
+        if (scopeSnapshot !== scopeSeq) return;
         message.error(err instanceof Error ? err.message : String(err));
         if (!dir) break;
       }
     }
-    if (targetSnapshot !== targetSeq) return;
+    if (scopeSnapshot !== scopeSeq) return;
     for (const { dir, entries } of results) {
       updateChildren(dir, entries);
       markLoaded(dir);
     }
   } finally {
-    if (targetSnapshot === targetSeq) treeLoading.value = false;
+    if (scopeSnapshot === scopeSeq) treeLoading.value = false;
   }
 }
 
 async function refreshDir(dir: string) {
-  if (!props.target) return;
   try {
     await loadDir(dir);
   } catch (err) {
@@ -673,10 +705,15 @@ function onNodeDblClick(node: TreeNode) {
   });
 }
 
-async function copyTextWithFeedback(text: string, kind: "name" | "path") {
+async function copyTextWithFeedback(text: string, kind: "name" | "repoPath" | "workspacePath") {
   const content = String(text ?? "");
   if (!content) return;
-  const successMessage = kind === "name" ? t("files.copy.nameCopied") : t("files.copy.pathCopied");
+  const successMessage =
+    kind === "name"
+      ? t("files.copy.nameCopied")
+      : kind === "workspacePath"
+        ? t("files.copy.workspacePathCopied")
+        : t("files.copy.repoPathCopied");
   try {
     await navigator.clipboard.writeText(content);
     message.success(successMessage);
@@ -706,19 +743,25 @@ async function copyTextWithFeedback(text: string, kind: "name" | "path") {
   message.error(t("files.copy.failed"));
 }
 
-function selectedNodePath() {
-  const path = selectedNode.value?.data.path ?? "";
-  return path || ".";
-}
-
 function copySelectedName() {
   const name = selectedNode.value?.data.name ?? "";
   return copyTextWithFeedback(name, "name");
 }
 
-function copySelectedPath() {
-  const path = selectedNodePath();
-  return copyTextWithFeedback(path, "path");
+function copySelectedRepoPath() {
+  const rel = selectedNode.value?.data.path ?? "";
+  const repoRel = resolveRepoRelPath(rel);
+  return copyTextWithFeedback(repoRel, "repoPath");
+}
+
+function selectedNodeWorkspacePath() {
+  const rel = selectedNode.value?.data.path ?? "";
+  return rel || ".";
+}
+
+function copySelectedWorkspacePath() {
+  const path = selectedNodeWorkspacePath();
+  return copyTextWithFeedback(path, "workspacePath");
 }
 
 function onContextMenuClick(info: { key: string }) {
@@ -728,8 +771,12 @@ function onContextMenuClick(info: { key: string }) {
     void copySelectedName();
     return;
   }
-  if (key === "copyPath") {
-    void copySelectedPath();
+  if (key === "copyRepoPath" || key === "copyPath") {
+    void copySelectedRepoPath();
+    return;
+  }
+  if (key === "copyWorkspacePath") {
+    void copySelectedWorkspacePath();
     return;
   }
   if (key === "newFile") {
@@ -838,12 +885,11 @@ async function openFile(path: string) {
     setActiveTabByPath(path);
     return;
   }
-  if (!props.target) return;
-  const targetSnapshot = targetSeq;
+  const scopeSnapshot = scopeSeq;
   const requestId = nextFileRequestId(path);
   try {
-    const res = await readFileText({ target: props.target, path });
-    if (targetSnapshot !== targetSeq) return;
+    const res = await readWorkspaceFileText({ workspaceId: props.workspaceId, path });
+    if (scopeSnapshot !== scopeSeq) return;
     if (fileRequestSeqByPath.get(path) !== requestId) return;
     const existingAfter = getTab(path);
     if (existingAfter) {
@@ -853,7 +899,7 @@ async function openFile(path: string) {
     const tab = createTabFromRead(path, res);
     setActiveTabByPath(tab.path);
   } catch (err) {
-    if (targetSnapshot !== targetSeq) return;
+    if (scopeSnapshot !== scopeSeq) return;
     if (fileRequestSeqByPath.get(path) !== requestId) return;
     message.error(err instanceof Error ? err.message : String(err));
   }
@@ -887,8 +933,25 @@ function applyOpenAtHighlight(req: FileOpenAtRequest) {
   editor.revealLineInCenter(line);
 }
 
+function resolveOpenAtPath(req: FileOpenAtRequest) {
+  let raw = String(req.path || "").trim();
+  if (!raw) return "";
+  while (raw.startsWith("./")) raw = raw.slice(2);
+  raw = raw.replace(/\\/g, "/");
+  raw = raw.replace(/\/{2,}/g, "/");
+  while (raw.endsWith("/")) raw = raw.slice(0, -1);
+  if (!raw || raw.startsWith("/")) return "";
+  const parts = splitPath(raw);
+  if (parts.some((part) => part === "..")) return "";
+  const head = parts[0] ?? "";
+  if (head && repoDirNameSet.value.has(head)) return raw;
+  return raw;
+}
+
 async function openFileAt(req: FileOpenAtRequest) {
-  await openFile(req.path);
+  const resolved = resolveOpenAtPath(req);
+  if (!resolved) return;
+  await openFile(resolved);
   await nextTick();
   await new Promise((resolve) => requestAnimationFrame(resolve));
   if (!editor) return;
@@ -938,7 +1001,7 @@ function isConflictError(err: unknown) {
 
 async function saveTab(tab: FileTab, opts?: { force?: boolean }) {
   if (tab.conflictOpen && !opts?.force) return;
-  if (!props.target || !tab.model || tab.saving) {
+  if (!tab.model || tab.saving) {
     if (tab.saving && !tab.conflictOpen) tab.pendingSave = true;
     return;
   }
@@ -948,8 +1011,8 @@ async function saveTab(tab: FileTab, opts?: { force?: boolean }) {
   tab.pendingSave = false;
   const content = tab.model.getValue();
   try {
-    const res = await writeFileText({
-      target: props.target,
+    const res = await writeWorkspaceFileText({
+      workspaceId: props.workspaceId,
       path: tab.path,
       content,
       expected: tab.version,
@@ -1000,11 +1063,10 @@ async function saveTabFromEditor(opts?: { force?: boolean }) {
 }
 
 async function reloadTab(path: string) {
-  if (!props.target) return;
   const tab = getTab(path);
   if (!tab) return;
   try {
-    const res = await readFileText({ target: props.target, path });
+    const res = await readWorkspaceFileText({ workspaceId: props.workspaceId, path });
     tab.previewable = res.previewable;
     tab.reason = res.reason;
     tab.version = res.version;
@@ -1066,13 +1128,12 @@ async function submitCreate() {
     message.error(t("files.form.nameInvalid"));
     return;
   }
-  if (!props.target) return;
   createModal.submitting = true;
   const parent = createModal.parentDir;
   const path = joinRel(parent, name);
   try {
     if (createModal.kind === "file") {
-      const res = await createFile({ target: props.target, path, content: "" });
+      const res = await createWorkspaceFile({ workspaceId: props.workspaceId, path, content: "" });
       await refreshDir(parent);
       const tab = createTabFromRead(path, {
         path,
@@ -1085,7 +1146,7 @@ async function submitCreate() {
       tab.dirty = false;
       setActiveTabByPath(tab.path);
     } else {
-      await mkdirPath({ target: props.target, path });
+      await mkdirWorkspacePath({ workspaceId: props.workspaceId, path });
       await refreshDir(parent);
     }
     createModal.open = false;
@@ -1174,10 +1235,9 @@ async function submitRename() {
   }
   const from = renameModal.path;
   const to = joinRel(parentDir(from), name);
-  if (!props.target) return;
   renameModal.submitting = true;
   try {
-    await renamePath({ target: props.target, from, to });
+    await renameWorkspacePath({ workspaceId: props.workspaceId, from, to });
     renameModal.open = false;
     const parent = parentDir(from);
     await refreshDir(parent);
@@ -1235,9 +1295,8 @@ function confirmDeleteSelected() {
     okType: "danger",
     cancelText: t("files.deleteConfirm.cancel"),
     onOk: async () => {
-      if (!props.target) return;
       try {
-        await deletePath({ target: props.target, path: node.data.path, recursive: true });
+        await deleteWorkspacePath({ workspaceId: props.workspaceId, path: node.data.path, recursive: true });
         closeTabsUnder(node.data.path, isDir);
         removeLoadedDirsUnder(node.data.path, isDir);
         await refreshDir(parentDir(node.data.path));
@@ -1327,21 +1386,32 @@ watch(
 );
 
 watch(
-  () => (props.target ? `${props.target.workspaceId}:${props.target.dirName}` : ""),
+  () => props.workspaceId,
   async () => {
-    const targetKey = props.target ? `${props.target.workspaceId}:${props.target.dirName}` : "";
-    const targetChanged = store.setTargetKey(targetKey);
-    targetSeq += 1;
+    scopeSeq += 1;
     dirRequestSeqByDir.clear();
     fileRequestSeqByPath.clear();
-    if (targetChanged) resetTabs();
+    resetTabs();
     resetTree();
-    if (props.target) {
-      initRootTree();
-      await refreshRoot();
-    }
+    initRootTree();
+    await refreshRoot();
   },
   { immediate: true }
+);
+
+watch(
+  () => workspaceRootName.value,
+  () => {
+    ensureRootNode();
+  }
+);
+
+watch(
+  () => (props.workspaceRepos ?? []).map((item) => item.dirName).join("|"),
+  async () => {
+    if (!treeData.value.length) return;
+    await refreshRoot();
+  }
 );
 
 onMounted(() => {

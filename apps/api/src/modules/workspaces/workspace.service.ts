@@ -17,11 +17,14 @@ import { buildGitEnv } from "../../infra/git/gitEnv.js";
 import {
   deleteWorkspaceRecord,
   deleteWorkspaceReposByWorkspace,
+  deleteWorkspaceRepoByRepoId,
   getWorkspace,
+  getWorkspaceRepoByRepoId,
   insertWorkspace,
   insertWorkspaceRepo,
   listWorkspaceRepos,
   listWorkspaces,
+  touchWorkspaceUpdatedAt,
   updateWorkspaceTerminalCredentialId,
   updateWorkspaceTitle
 } from "./workspace.store.js";
@@ -32,6 +35,8 @@ import {
   listTerminalsByWorkspace
 } from "../terminals/terminal.store.js";
 import { tmuxHasSession, tmuxKillSession } from "../../infra/tmux/session.js";
+import { withWorkspaceRepoLock } from "../../infra/locks/workspaceRepoLock.js";
+import { withWorkspaceLock } from "../../infra/locks/workspaceLock.js";
 
 function formatRepoDisplayName(rawUrl: string) {
   let s = String(rawUrl || "").trim();
@@ -118,6 +123,16 @@ function resolveTerminalCredentialId(params: { repoCredentialIds: Array<string |
   const uniq = new Set(ids);
   if (uniq.size !== 1) return null;
   return ids[0]!;
+}
+
+function mapWorkspaceRepoConstraintError(err: unknown) {
+  const anyErr = err as { code?: string; message?: string };
+  if (!anyErr || anyErr.code !== "SQLITE_CONSTRAINT") return null;
+  const message = String(anyErr.message || "");
+  if (message.includes("idx_workspace_repos_workspace_dir")) {
+    return new HttpError(409, "Workspace repo dir conflict", "WORKSPACE_REPO_DIR_CONFLICT");
+  }
+  return new HttpError(409, "Repo already attached to workspace", "WORKSPACE_REPO_ALREADY_EXISTS");
 }
 
 export async function createWorkspace(
@@ -272,6 +287,7 @@ function buildWorkspaceDetail(
   });
   return {
     id: ws.id,
+    dirName: ws.dirName,
     title: ws.title,
     repos,
     useTerminalCredential: Boolean(ws.terminalCredentialId),
@@ -333,6 +349,189 @@ export async function updateWorkspaceById(
     { workspaceId: ws.id, updatedTitle: wantsTitleUpdate, updatedTerminalCredential: wantsTerminalCredentialUpdate },
     "workspace updated"
   );
+  return getWorkspaceDetailById(ctx, ws.id);
+}
+
+export async function attachRepoToWorkspace(
+  ctx: AppContext,
+  logger: FastifyBaseLogger,
+  workspaceId: string,
+  params: { repoId: string; branch?: string }
+) {
+  const ws = await getWorkspaceById(ctx, workspaceId);
+
+  return withWorkspaceLock({ workspaceId: ws.id }, async () => {
+    const repoId = String(params.repoId || "").trim();
+    if (!repoId) throw new HttpError(400, "repoId is required");
+    const repo = getRepo(ctx.db, repoId);
+    if (!repo) throw new HttpError(404, "Repo not found");
+
+    const existing = listWorkspaceRepos(ctx.db, ws.id);
+    if (existing.some((item) => item.repoId === repo.id)) {
+      throw new HttpError(409, "Repo already attached to workspace", "WORKSPACE_REPO_ALREADY_EXISTS");
+    }
+
+    const expectedRoot = workspaceRoot(ctx.dataDir, ws.dirName);
+    if (path.resolve(ws.path) !== path.resolve(expectedRoot)) {
+      throw new HttpError(409, "Workspace path is invalid; aborting attach.", "WORKSPACE_PATH_INVALID");
+    }
+
+    await ensureDir(expectedRoot);
+
+    const dirNames = new Set(existing.map((item) => item.dirName));
+    let dirName = pickDirName({ repoUrl: repo.url, existing: dirNames });
+    let worktreePath = workspaceRepoDirPath(ctx.dataDir, ws.dirName, dirName);
+    for (let i = 0; i < 50; i += 1) {
+      if (!(await pathExists(worktreePath))) break;
+      dirNames.add(dirName);
+      dirName = pickDirName({ repoUrl: repo.url, existing: dirNames });
+      worktreePath = workspaceRepoDirPath(ctx.dataDir, ws.dirName, dirName);
+    }
+    if (await pathExists(worktreePath)) {
+      throw new HttpError(409, "Failed to allocate workspace repo dir", "WORKSPACE_REPO_DIR_CONFLICT");
+    }
+
+    const rawBranch = typeof params.branch === "string" ? params.branch.trim() : "";
+    if (params.branch !== undefined && !rawBranch) throw new HttpError(400, "branch is required");
+    const branchHint = rawBranch || String(repo.defaultBranch || "").trim();
+
+    const ts = nowMs();
+    try {
+      await withRepoLock(repo.id, async () => {
+        const gitEnv = await buildGitEnv({ ctx, repoUrl: repo.url, credentialId: repo.credentialId });
+        try {
+          await ensureRepoMirror({
+            repoId: repo.id,
+            url: repo.url,
+            dataDir: ctx.dataDir,
+            mirrorPath: repo.mirrorPath,
+            env: gitEnv.env
+          });
+
+          let branch = branchHint;
+          if (!branch) {
+            branch = String((await getOriginDefaultBranch({ mirrorPath: repo.mirrorPath, cwd: ctx.dataDir })) || "").trim();
+          }
+          if (!branch) throw new HttpError(409, `Repo default branch is unknown: ${repo.url}`, "REPO_DEFAULT_BRANCH_UNKNOWN");
+
+          const branches = await listHeadsBranches({ mirrorPath: repo.mirrorPath, cwd: ctx.dataDir });
+          if (!branches.some((b) => b.name === branch)) {
+            throw new HttpError(409, `Branch not found: ${branch}`, "REPO_BRANCH_NOT_FOUND");
+          }
+
+          await cloneFromMirror({
+            mirrorPath: repo.mirrorPath,
+            repoUrl: repo.url,
+            worktreePath,
+            branch,
+            dataDir: ctx.dataDir
+          });
+        } catch (err) {
+          if (err instanceof HttpError) throw err;
+          const msg = err instanceof Error ? err.message : String(err);
+          throw new HttpError(409, `Failed to prepare workspace repo: ${repo.url}. ${msg}`, "WORKSPACE_PREPARE_REPO_FAILED");
+        } finally {
+          await gitEnv.cleanup();
+        }
+      });
+    } catch (err) {
+      await rmrf(worktreePath);
+      throw err;
+    }
+
+    const record = {
+      workspaceId: ws.id,
+      repoId: repo.id,
+      dirName,
+      path: worktreePath,
+      createdAt: ts,
+      updatedAt: ts
+    };
+
+    let nextTerminalCredentialId: string | null | undefined = undefined;
+    if (ws.terminalCredentialId) {
+      const repoCredentialIds = [
+        ...existing.map((item) => getRepo(ctx.db, item.repoId)?.credentialId ?? null),
+        repo.credentialId ?? null
+      ];
+      const resolved = resolveTerminalCredentialId({ repoCredentialIds, useTerminalCredential: true });
+      if (!resolved) nextTerminalCredentialId = null;
+    }
+
+    try {
+      ctx.db.transaction(() => {
+        insertWorkspaceRepo(ctx.db, record);
+        if (nextTerminalCredentialId !== undefined) {
+          updateWorkspaceTerminalCredentialId(ctx.db, ws.id, nextTerminalCredentialId, ts);
+        }
+        touchWorkspaceUpdatedAt(ctx.db, ws.id, ts);
+      })();
+    } catch (err) {
+      await rmrf(worktreePath);
+      const mapped = mapWorkspaceRepoConstraintError(err);
+      if (mapped) throw mapped;
+      throw err;
+    }
+
+    logger.info({ workspaceId: ws.id, repoId: repo.id, dirName }, "workspace repo attached");
+    return getWorkspaceDetailById(ctx, ws.id);
+  });
+}
+
+export async function detachRepoFromWorkspace(
+  ctx: AppContext,
+  logger: FastifyBaseLogger,
+  workspaceId: string,
+  repoIdRaw: string
+) {
+  const ws = await getWorkspaceById(ctx, workspaceId);
+  const repoId = String(repoIdRaw || "").trim();
+  if (!repoId) throw new HttpError(400, "repoId is required");
+
+  const existing = listWorkspaceRepos(ctx.db, ws.id);
+  const record = getWorkspaceRepoByRepoId(ctx.db, ws.id, repoId);
+  if (!record) throw new HttpError(404, "Workspace repo not found", "WORKSPACE_REPO_NOT_FOUND");
+  if (existing.length <= 1) {
+    throw new HttpError(409, "Workspace must contain at least one repo", "WORKSPACE_LAST_REPO");
+  }
+
+  const activeCount = countActiveTerminalsByWorkspace(ctx.db, ws.id);
+  if (activeCount > 0) {
+    throw new HttpError(409, "Workspace has active terminals", "WORKSPACE_HAS_ACTIVE_TERMINALS");
+  }
+
+  const ts = nowMs();
+  let nextTerminalCredentialId: string | null | undefined = undefined;
+  if (ws.terminalCredentialId) {
+    const remaining = existing.filter((item) => item.repoId !== repoId);
+    const repoCredentialIds = remaining.map((item) => getRepo(ctx.db, item.repoId)?.credentialId ?? null);
+    const resolved = resolveTerminalCredentialId({ repoCredentialIds, useTerminalCredential: true });
+    if (resolved !== ws.terminalCredentialId) nextTerminalCredentialId = null;
+  }
+
+  await withWorkspaceRepoLock({ workspaceId: ws.id, dirName: record.dirName }, async () => {
+    const expectedPath = workspaceRepoDirPath(ctx.dataDir, ws.dirName, record.dirName);
+    if (path.resolve(record.path) !== path.resolve(expectedPath)) {
+      throw new HttpError(409, "Workspace repo path is invalid; aborting delete.", "WORKSPACE_REPO_PATH_INVALID");
+    }
+
+    try {
+      await rmrf(expectedPath);
+    } catch (err) {
+      logger.warn({ workspaceId: ws.id, repoId, path: expectedPath, err }, "remove workspace repo path failed");
+      throw new HttpError(409, "Failed to delete workspace repo directory");
+    }
+
+    ctx.db.transaction(() => {
+      deleteWorkspaceRepoByRepoId(ctx.db, ws.id, repoId);
+      if (nextTerminalCredentialId !== undefined) {
+        updateWorkspaceTerminalCredentialId(ctx.db, ws.id, nextTerminalCredentialId, ts);
+      }
+      touchWorkspaceUpdatedAt(ctx.db, ws.id, ts);
+    })();
+  });
+
+  logger.info({ workspaceId: ws.id, repoId }, "workspace repo detached");
   return getWorkspaceDetailById(ctx, ws.id);
 }
 

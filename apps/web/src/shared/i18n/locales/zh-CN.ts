@@ -130,7 +130,9 @@ export default {
     actions: {
       create: "创建工作区",
       rename: "编辑",
-      delete: "删除"
+      delete: "删除",
+      attachRepo: "添加仓库",
+      detachRepo: "移除仓库"
     },
     tooltip: {
       activeTerminals: "有 {n} 个活跃终端，点击关闭"
@@ -173,11 +175,46 @@ export default {
     actions: {
       checkout: "切换分支",
       pull: "拉取",
-      push: "推送"
+      push: "推送",
+      attachRepo: "添加仓库",
+      detachRepo: "移除仓库"
     },
     repoSelector: {
       placeholder: "选择仓库",
       detached: "Detached HEAD"
+    },
+    attachRepo: {
+      modalTitle: "添加仓库",
+      ok: "添加",
+      cancel: "取消",
+      repoLabel: "仓库",
+      repoPlaceholder: "选择仓库",
+      empty: "暂无可添加的仓库",
+      success: "仓库已添加",
+      downgraded: "因凭证不兼容,已自动关闭终端凭证",
+      errors: {
+        alreadyExists: "仓库已在当前工作区中",
+        dirConflict: "仓库目录冲突,请重试",
+        prepareFailed: "仓库准备失败,请检查凭证或网络",
+        defaultBranchUnknown: "无法确定默认分支,请先同步仓库",
+        branchNotFound: "目标分支不存在"
+      }
+    },
+    detachRepo: {
+      confirmTitle: "移除仓库？",
+      confirmContent: "将从当前工作区移除该仓库目录,不会影响全局仓库列表。",
+      ok: "移除",
+      cancel: "取消",
+      success: "仓库已移除",
+      disabledNoRepo: "当前未选择仓库",
+      disabledActiveTerminals: "存在 {n} 个活跃终端,请先关闭",
+      disabledLastRepo: "工作区至少需要保留 1 个仓库",
+      disabledBusy: "当前有操作进行中,请稍后再试",
+      errors: {
+        activeTerminals: "存在活跃终端,无法移除",
+        lastRepo: "工作区至少需要保留 1 个仓库",
+        notFound: "该仓库已不存在"
+      }
     },
     tools: {
       codeReview: "代码审查",
@@ -367,7 +404,9 @@ export default {
       newFile: "新建文件",
       newFolder: "新建文件夹",
       copyName: "复制名称",
-      copyPath: "复制路径",
+      copyPath: "复制仓库内路径",
+      copyRepoPath: "复制仓库内路径",
+      copyWorkspacePath: "复制工作区路径",
       rename: "重命名",
       delete: "删除",
       refresh: "刷新",
@@ -376,6 +415,8 @@ export default {
     copy: {
       nameCopied: "已复制名称",
       pathCopied: "已复制路径",
+      repoPathCopied: "已复制仓库内路径",
+      workspacePathCopied: "已复制工作区路径",
       failed: "复制失败"
     },
     status: {
@@ -436,6 +477,11 @@ export default {
       selectRepo: "请选择仓库",
       query: "输入搜索内容(按回车键搜索)",
       queryEmpty: "请输入搜索内容"
+    },
+    scope: {
+      global: "全局",
+      repos: "指定仓库",
+      reposPlaceholder: "选择仓库(可多选)"
     },
     options: {
       regex: "正则表达式",

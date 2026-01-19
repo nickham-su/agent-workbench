@@ -5,6 +5,7 @@ export * from "./contracts/workspaces.js";
 export * from "./contracts/terminals.js";
 export * from "./contracts/git.js";
 export * from "./contracts/files.js";
+export * from "./contracts/workspace-files.js";
 export * from "./contracts/credentials.js";
 export * from "./contracts/settings.js";
 export * from "./contracts/auth.js";

@@ -23,9 +23,9 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import type { TerminalRecord } from "@agent-workbench/shared";
+import type { GitTarget, TerminalRecord } from "@agent-workbench/shared";
 import { parseWsMessage, sendWs, terminalWsUrl, type TerminalWsState } from "./ws";
-import { getTerminalLinkStatStore } from "./terminalLinkStatStore";
+import { getTerminalLinkStatStore, type TerminalLinkStatStore } from "./terminalLinkStatStore";
 import { terminalFontSize } from "@/shared/settings/uiFontSizes";
 import { emitUnauthorized } from "@/features/auth/unauthorized";
 import { useWorkspaceHost } from "@/features/workspace/host";
@@ -342,11 +342,11 @@ function buildColumnInfoMap(line: BufferLine, lineText: string) {
   return map;
 }
 
-function canonicalizeTerminalLinkPath(params: { rawPath: string; currentDirName: string }) {
-  let p = String(params.rawPath || "").trim();
+function canonicalizeTerminalLinkPath(rawPath: string) {
+  let p = String(rawPath || "").trim();
   if (!p) return "";
 
-  // 去掉前导 ./，避免输出为 ./repo/xxx 时无法正确归一化
+  // 去掉前导 ./，避免输出为 ./xxx 时无法正确归一化
   while (p.startsWith("./")) p = p.slice(2);
 
   // 兼容部分工具输出反斜杠分隔符
@@ -356,20 +356,7 @@ function canonicalizeTerminalLinkPath(params: { rawPath: string; currentDirName:
   // 去掉尾部 /
   while (p.endsWith("/")) p = p.slice(0, -1);
 
-  const dir = String(params.currentDirName || "").trim();
-  if (dir) {
-    if (p === dir) return "";
-    if (p.startsWith(dir + "/")) p = p.slice(dir.length + 1);
-  }
-
   return p;
-}
-
-function firstPathSegment(p: string) {
-  const s = String(p || "").trim();
-  if (!s) return "";
-  // canonicalizeTerminalLinkPath 已保证分隔符为 / 且无前导 ./
-  return s.split("/")[0] ?? "";
 }
 
 function rangesOverlap(a: { start: { x: number; y: number }; end: { x: number; y: number } }, b: { start: { x: number; y: number }; end: { x: number; y: number } }) {
@@ -422,6 +409,57 @@ function tryParseHardWrapTwoLineTarget(params: { firstLineText: string; secondLi
   };
 }
 
+function buildFallbackPath(path: string, currentTarget: GitTarget | null) {
+  if (!currentTarget) return "";
+  const dirName = String(currentTarget.dirName || "").trim();
+  if (!dirName) return "";
+  if (path === dirName || path.startsWith(dirName + "/")) return "";
+  return `${dirName}/${path}`;
+}
+
+function hasRepoPrefix(path: string, repoDirNames: Set<string>) {
+  const head = String(path || "").split("/")[0] ?? "";
+  if (!head) return false;
+  return repoDirNames.has(head);
+}
+
+async function ensureStatWithFallback(params: {
+  path: string;
+  currentTarget: GitTarget | null;
+  repoDirNames: Set<string>;
+  statStore: TerminalLinkStatStore;
+}) {
+  const res = await params.statStore.ensureStat(params.path);
+  if (res?.ok) return res;
+  if (hasRepoPrefix(params.path, params.repoDirNames)) return res;
+  const fallbackPath = buildFallbackPath(params.path, params.currentTarget);
+  if (!fallbackPath) return res;
+  const fallbackRes = await params.statStore.ensureStat(fallbackPath);
+  if (fallbackRes?.ok) return fallbackRes;
+  return fallbackRes ?? res;
+}
+
+async function openPathAt(params: { path: string; line: number; statStore: TerminalLinkStatStore }) {
+  const repoDirNames = new Set(
+    workspaceCtx.repos.value
+      .map((r) => r.dirName)
+      .filter((dirName) => dirName && typeof dirName === "string")
+  );
+  const res = await ensureStatWithFallback({
+    path: params.path,
+    currentTarget: workspaceCtx.currentTarget.value,
+    repoDirNames,
+    statStore: params.statStore
+  });
+  if (!res || !res.ok) return;
+  const finalPath = res.normalizedPath || res.path;
+  host.openTool("files");
+  host.callFrom("terminal", "files", {
+    type: "files.openAt",
+    payload: { path: finalPath, line: params.line, highlight: { kind: "line" } }
+  });
+}
+
 function createHardWrapTwoLineLinks(params: {
   bufferLineNumber: number;
   currentLineText: string;
@@ -434,14 +472,9 @@ function createHardWrapTwoLineLinks(params: {
   }> = [];
   if (!term) return links;
 
-  const target = workspaceCtx.currentTarget.value;
-  if (!target) return links;
-  const otherRepoDirNames = new Set(
-    workspaceCtx.repos.value
-      .map((r) => r.dirName)
-      .filter((dirName) => dirName && dirName !== target.dirName)
-  );
-  const statStore = getTerminalLinkStatStore(target.workspaceId);
+  const workspaceId = props.terminal.workspaceId;
+  if (!workspaceId) return links;
+  const statStore = getTerminalLinkStatStore(workspaceId);
 
   const buffer = term.buffer.active;
   const currentIndex0 = params.bufferLineNumber - 1;
@@ -451,10 +484,8 @@ function createHardWrapTwoLineLinks(params: {
   const emitLink = (parsed: ReturnType<typeof tryParseHardWrapTwoLineTarget>, which: "first" | "second", lineText: string, line: BufferLine) => {
     if (!parsed) return;
     const seg = which === "first" ? parsed.firstSeg : parsed.secondSeg;
-    const linkPath = canonicalizeTerminalLinkPath({ rawPath: parsed.combinedRawPath, currentDirName: target.dirName });
+    const linkPath = canonicalizeTerminalLinkPath(parsed.combinedRawPath);
     if (!linkPath) return;
-    const firstSeg = firstPathSegment(linkPath);
-    if (firstSeg && otherRepoDirNames.has(firstSeg)) return;
 
     const columnInfo = buildColumnInfoMap(line, lineText);
     const startInfo = columnInfo[seg.startIndex];
@@ -472,14 +503,7 @@ function createHardWrapTwoLineLinks(params: {
         if (event.button !== 0) return;
         if (event.altKey) return;
         void (async () => {
-          const res = await statStore.ensureStat({ target, path: linkPath });
-          if (!res || !res.ok) return;
-          const finalPath = res.normalizedPath || res.path;
-          host.openTool("files");
-          host.callFrom("terminal", "files", {
-            type: "files.openAt",
-            payload: { path: finalPath, line: linkLine, highlight: { kind: "line" } }
-          });
+          await openPathAt({ path: linkPath, line: linkLine, statStore });
         })();
       }
     });
@@ -512,14 +536,9 @@ function createPathLineLinks(lineText: string, bufferLineNumber: number, line: B
   }> = [];
   if (!lineText || !line) return links;
 
-  const target = workspaceCtx.currentTarget.value;
-  if (!target) return links;
-  const otherRepoDirNames = new Set(
-    workspaceCtx.repos.value
-      .map((r) => r.dirName)
-      .filter((dirName) => dirName && dirName !== target.dirName)
-  );
-  const statStore = getTerminalLinkStatStore(target.workspaceId);
+  const workspaceId = props.terminal.workspaceId;
+  if (!workspaceId) return links;
+  const statStore = getTerminalLinkStatStore(workspaceId);
   const columnInfo = buildColumnInfoMap(line, lineText);
   const re = /(^|[^A-Za-z0-9_./-])([A-Za-z0-9_./-]+):([1-9][0-9]*)/g;
   let match: RegExpExecArray | null = null;
@@ -534,12 +553,8 @@ function createPathLineLinks(lineText: string, bufferLineNumber: number, line: B
     const parts = path.split("/");
     if (parts.some((p) => p === "..")) continue;
 
-    const linkPath = canonicalizeTerminalLinkPath({ rawPath: path, currentDirName: target.dirName });
+    const linkPath = canonicalizeTerminalLinkPath(path);
     if (!linkPath) continue;
-    // 若路径第一级命中“其他 repo 的 dirName”，大概率是 AI/CLI 输出带了别的 repo 前缀；
-    // 由于 files.openAt 只会在当前 repo 下解析，这里直接不生成链接，避免误触与无效校验请求。
-    const firstSeg = firstPathSegment(linkPath);
-    if (firstSeg && otherRepoDirNames.has(firstSeg)) continue;
 
     const startIndex = match.index + prefix.length;
     const text = `${path}:${line}`;
@@ -559,14 +574,7 @@ function createPathLineLinks(lineText: string, bufferLineNumber: number, line: B
         if (event.button !== 0) return;
         if (event.altKey) return;
         void (async () => {
-          const res = await statStore.ensureStat({ target, path: linkPath });
-          if (!res || !res.ok) return;
-          const finalPath = res.normalizedPath || res.path;
-          host.openTool("files");
-          host.callFrom("terminal", "files", {
-            type: "files.openAt",
-            payload: { path: finalPath, line: linkLine, highlight: { kind: "line" } }
-          });
+          await openPathAt({ path: linkPath, line: linkLine, statStore });
         })();
       }
     });

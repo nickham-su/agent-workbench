@@ -21,8 +21,18 @@ import type {
   FileRenameResponse,
   FileWriteRequest,
   FileWriteResponse,
+  WorkspaceFileCreateRequest,
+  WorkspaceFileDeleteRequest,
+  WorkspaceFileListRequest,
+  WorkspaceFileMkdirRequest,
+  WorkspaceFileReadRequest,
+  WorkspaceFileRenameRequest,
+  WorkspaceFileSearchRequest,
+  WorkspaceFileStatRequest,
+  WorkspaceFileWriteRequest,
   CreateTerminalRequest,
   CreateWorkspaceRequest,
+  AttachWorkspaceRepoRequest,
   ChangesResponse,
   CredentialRecord,
   GenerateSshKeypairResponse,
@@ -336,6 +346,24 @@ export async function deleteWorkspace(workspaceId: string) {
   }
 }
 
+export async function attachWorkspaceRepo(workspaceId: string, body: AttachWorkspaceRepoRequest) {
+  try {
+    const res = await client.post<WorkspaceDetail>(`/workspaces/${workspaceId}/repos`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function detachWorkspaceRepo(workspaceId: string, repoId: string) {
+  try {
+    const res = await client.delete<WorkspaceDetail>(`/workspaces/${workspaceId}/repos/${repoId}`);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
 export async function listTerminals(workspaceId: string) {
   try {
     const res = await client.get<TerminalRecord[]>(`/workspaces/${workspaceId}/terminals`);
@@ -546,6 +574,96 @@ export async function renamePath(body: FileRenameRequest) {
 export async function deletePath(body: FileDeleteRequest) {
   try {
     const res = await client.post<FileDeleteResponse>("/files/delete", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function listWorkspaceFiles(params: { workspaceId: string } & WorkspaceFileListRequest) {
+  try {
+    const { workspaceId, ...body } = params;
+    const res = await client.post<FileListResponse>(`/workspaces/${workspaceId}/files/list`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function searchWorkspaceFiles(params: { workspaceId: string } & WorkspaceFileSearchRequest) {
+  try {
+    const { workspaceId, ...body } = params;
+    const res = await client.post<FileSearchResponse>(`/workspaces/${workspaceId}/files/search`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function statWorkspaceFile(params: { workspaceId: string } & WorkspaceFileStatRequest) {
+  try {
+    const { workspaceId, ...body } = params;
+    const res = await client.post<FileStatResponse>(`/workspaces/${workspaceId}/files/stat`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function readWorkspaceFileText(params: { workspaceId: string } & WorkspaceFileReadRequest) {
+  try {
+    const { workspaceId, ...body } = params;
+    const res = await client.post<FileReadResponse>(`/workspaces/${workspaceId}/files/read-text`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function writeWorkspaceFileText(params: { workspaceId: string } & WorkspaceFileWriteRequest) {
+  try {
+    const { workspaceId, ...body } = params;
+    const res = await client.post<FileWriteResponse>(`/workspaces/${workspaceId}/files/write-text`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function createWorkspaceFile(params: { workspaceId: string } & WorkspaceFileCreateRequest) {
+  try {
+    const { workspaceId, ...body } = params;
+    const res = await client.post<FileCreateResponse>(`/workspaces/${workspaceId}/files/create`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function mkdirWorkspacePath(params: { workspaceId: string } & WorkspaceFileMkdirRequest) {
+  try {
+    const { workspaceId, ...body } = params;
+    const res = await client.post<FileMkdirResponse>(`/workspaces/${workspaceId}/files/mkdir`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function renameWorkspacePath(params: { workspaceId: string } & WorkspaceFileRenameRequest) {
+  try {
+    const { workspaceId, ...body } = params;
+    const res = await client.post<FileRenameResponse>(`/workspaces/${workspaceId}/files/rename`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function deleteWorkspacePath(params: { workspaceId: string } & WorkspaceFileDeleteRequest) {
+  try {
+    const { workspaceId, ...body } = params;
+    const res = await client.post<FileDeleteResponse>(`/workspaces/${workspaceId}/files/delete`, body);
     return res.data;
   } catch (err) {
     throw toApiError(err);

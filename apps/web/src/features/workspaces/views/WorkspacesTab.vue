@@ -113,6 +113,31 @@
             <a-button
               size="small"
               type="text"
+              class="opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity"
+              @click.stop="openAttach(ws)"
+              :title="t('workspaces.actions.attachRepo')"
+              :aria-label="t('workspaces.actions.attachRepo')"
+            >
+              <template #icon>
+                <PlusOutlined />
+              </template>
+            </a-button>
+            <a-button
+              size="small"
+              type="text"
+              danger
+              class="opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity"
+              @click.stop="openDetach(ws)"
+              :title="t('workspaces.actions.detachRepo')"
+              :aria-label="t('workspaces.actions.detachRepo')"
+            >
+              <template #icon>
+                <MinusOutlined />
+              </template>
+            </a-button>
+            <a-button
+              size="small"
+              type="text"
               danger
               class="opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity"
               @click.stop="confirmDelete(ws.id)"
@@ -197,18 +222,81 @@
         </div>
       </a-form>
     </a-modal>
+
+    <a-modal
+      v-model:open="attachOpen"
+      :title="t('workspace.attachRepo.modalTitle')"
+      :confirm-loading="attaching"
+      :ok-button-props="{ disabled: !canAttach }"
+      :okText="t('workspace.attachRepo.ok')"
+      :cancelText="t('workspace.attachRepo.cancel')"
+      @ok="submitAttach"
+    >
+      <a-form layout="vertical">
+        <a-form-item :label="t('workspace.attachRepo.repoLabel')" required>
+          <a-select
+            v-model:value="attachRepoId"
+            show-search
+            :options="attachRepoOptions"
+            :filter-option="filterRepo"
+            :placeholder="t('workspace.attachRepo.repoPlaceholder')"
+          />
+        </a-form-item>
+        <div v-if="attachRepoOptions.length === 0" class="text-xs text-[color:var(--text-tertiary)]">
+          {{ t("workspace.attachRepo.empty") }}
+        </div>
+      </a-form>
+    </a-modal>
+
+    <a-modal
+      v-model:open="detachOpen"
+      :title="t('workspace.detachRepo.confirmTitle')"
+      :confirm-loading="detaching"
+      :ok-button-props="{ disabled: !canDetach }"
+      :okText="t('workspace.detachRepo.ok')"
+      :cancelText="t('workspace.detachRepo.cancel')"
+      @ok="submitDetach"
+    >
+      <a-form layout="vertical">
+        <a-form-item :label="t('workspace.attachRepo.repoLabel')" required>
+          <a-select
+            v-model:value="detachRepoId"
+            show-search
+            :options="detachRepoOptions"
+            :filter-option="filterRepo"
+            :placeholder="t('workspace.attachRepo.repoPlaceholder')"
+          />
+        </a-form-item>
+        <div class="text-xs text-[color:var(--text-tertiary)]">
+          {{ t("workspace.detachRepo.confirmContent") }}
+        </div>
+        <div v-if="detachBlockedReason" class="text-xs text-[color:var(--warning-color)]">
+          {{ detachBlockedReason }}
+        </div>
+      </a-form>
+    </a-modal>
   </div>
 </template>
 
 <script setup lang="ts">
 import { Modal, message } from "ant-design-vue";
-import { DeleteOutlined, EditOutlined, PlusOutlined, SearchOutlined } from "@ant-design/icons-vue";
+import { DeleteOutlined, EditOutlined, MinusOutlined, PlusOutlined, SearchOutlined } from "@ant-design/icons-vue";
 import { computed, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 import type { RepoRecord, UpdateWorkspaceRequest, WorkspaceDetail } from "@agent-workbench/shared";
 import EmptyGuideText from "@/shared/components/EmptyGuideText.vue";
-import { createWorkspace, deleteTerminal, deleteWorkspace, listTerminals, listWorkspaces, updateWorkspace } from "@/shared/api";
+import {
+  ApiError,
+  attachWorkspaceRepo,
+  createWorkspace,
+  deleteTerminal,
+  deleteWorkspace,
+  detachWorkspaceRepo,
+  listTerminals,
+  listWorkspaces,
+  updateWorkspace
+} from "@/shared/api";
 import { useReposState } from "@/features/repos/stores/repos";
 import { useWorkbenchSearchState } from "@/features/workbench/stores/workbenchSearch";
 
@@ -234,6 +322,16 @@ const editingWorkspace = ref<WorkspaceDetail | null>(null);
 const editUseTerminalCredential = ref(false);
 
 const closingTerminals = ref<Record<string, boolean>>({});
+
+const attachOpen = ref(false);
+const attaching = ref(false);
+const attachRepoId = ref<string>("");
+const attachWorkspace = ref<WorkspaceDetail | null>(null);
+
+const detachOpen = ref(false);
+const detaching = ref(false);
+const detachRepoId = ref<string>("");
+const detachWorkspace = ref<WorkspaceDetail | null>(null);
 
 const router = useRouter();
 
@@ -352,6 +450,51 @@ const editTerminalCredentialState = computed<"none" | "available" | "unavailable
   return "available";
 });
 
+const attachRepoOptions = computed(() => {
+  const ws = attachWorkspace.value;
+  if (!ws) return [] as Array<{ value: string; label: string; disabled?: boolean }>;
+  const used = new Set(ws.repos.map((r) => r.repo.id));
+  return repos.value
+    .filter((r) => !used.has(r.id))
+    .map((r) => {
+      const disabled = r.syncStatus !== "idle" || !r.defaultBranch;
+      let label = r.url;
+      if (r.syncStatus !== "idle") {
+        label = `${label} (${repoSyncStatusLabel(r.syncStatus)})`;
+      } else if (!r.defaultBranch) {
+        label = `${label} (${t("workspaces.create.defaultBranchUnknown")})`;
+      }
+      return { value: r.id, label, disabled };
+    });
+});
+
+const detachRepoOptions = computed(() => {
+  const ws = detachWorkspace.value;
+  if (!ws) return [] as Array<{ value: string; label: string }>;
+  return ws.repos.map((r) => ({
+    value: r.repo.id,
+    label: `${formatRepoDisplayName(r.repo.url)} ${r.repo.url}`
+  }));
+});
+
+const canAttach = computed(() => {
+  const option = attachRepoOptions.value.find((o) => o.value === attachRepoId.value);
+  return Boolean(option && !option.disabled);
+});
+
+const detachBlockedReason = computed(() => {
+  const ws = detachWorkspace.value;
+  if (!ws) return "";
+  if (ws.terminalCount > 0) return t("workspace.detachRepo.disabledActiveTerminals", { n: ws.terminalCount });
+  if (ws.repos.length <= 1) return t("workspace.detachRepo.disabledLastRepo");
+  return "";
+});
+
+const canDetach = computed(() => {
+  if (detachBlockedReason.value) return false;
+  return Boolean(detachRepoOptions.value.find((o) => o.value === detachRepoId.value));
+});
+
 watch(
   () => selectedRepoIds.value,
   () => {
@@ -380,6 +523,14 @@ function onTitleInput() {
 
 function onTerminalCredentialChange(_e: any) {
   useTerminalCredentialTouched.value = true;
+}
+
+function showApiError(err: unknown, map: Record<string, string>) {
+  if (err instanceof ApiError && err.code && map[err.code]) {
+    message.error(map[err.code]);
+    return;
+  }
+  message.error(err instanceof Error ? err.message : String(err));
 }
 
 async function refresh() {
@@ -439,6 +590,77 @@ function openEdit(ws: WorkspaceDetail) {
   editTitle.value = ws.title || "";
   editUseTerminalCredential.value = Boolean(ws.useTerminalCredential);
   editOpen.value = true;
+}
+
+function openAttach(ws: WorkspaceDetail) {
+  attachWorkspace.value = ws;
+  attachRepoId.value = "";
+  attachOpen.value = true;
+  void refreshRepos({ silent: true, showLoading: false });
+}
+
+async function submitAttach() {
+  const ws = attachWorkspace.value;
+  if (!ws) return;
+  const repoId = attachRepoId.value.trim();
+  if (!repoId) return;
+  attaching.value = true;
+  const wasUsingTerminalCredential = ws.useTerminalCredential;
+  try {
+    const detail = await attachWorkspaceRepo(ws.id, { repoId });
+    attachOpen.value = false;
+    attachWorkspace.value = null;
+    attachRepoId.value = "";
+    await refresh();
+    message.success(t("workspace.attachRepo.success"));
+    if (wasUsingTerminalCredential && !detail.useTerminalCredential) {
+      message.warning(t("workspace.attachRepo.downgraded"));
+    }
+  } catch (err) {
+    showApiError(err, {
+      WORKSPACE_REPO_ALREADY_EXISTS: t("workspace.attachRepo.errors.alreadyExists"),
+      WORKSPACE_REPO_DIR_CONFLICT: t("workspace.attachRepo.errors.dirConflict"),
+      WORKSPACE_PREPARE_REPO_FAILED: t("workspace.attachRepo.errors.prepareFailed"),
+      REPO_DEFAULT_BRANCH_UNKNOWN: t("workspace.attachRepo.errors.defaultBranchUnknown"),
+      REPO_BRANCH_NOT_FOUND: t("workspace.attachRepo.errors.branchNotFound")
+    });
+  } finally {
+    attaching.value = false;
+  }
+}
+
+function openDetach(ws: WorkspaceDetail) {
+  detachWorkspace.value = ws;
+  detachRepoId.value = ws.repos[0]?.repo.id ?? "";
+  detachOpen.value = true;
+}
+
+async function submitDetach() {
+  const ws = detachWorkspace.value;
+  if (!ws) return;
+  const repoId = detachRepoId.value.trim();
+  if (!repoId) return;
+  if (detachBlockedReason.value) {
+    message.warning(detachBlockedReason.value);
+    return;
+  }
+  detaching.value = true;
+  try {
+    await detachWorkspaceRepo(ws.id, repoId);
+    detachOpen.value = false;
+    detachWorkspace.value = null;
+    detachRepoId.value = "";
+    await refresh();
+    message.success(t("workspace.detachRepo.success"));
+  } catch (err) {
+    showApiError(err, {
+      WORKSPACE_HAS_ACTIVE_TERMINALS: t("workspace.detachRepo.errors.activeTerminals"),
+      WORKSPACE_LAST_REPO: t("workspace.detachRepo.errors.lastRepo"),
+      WORKSPACE_REPO_NOT_FOUND: t("workspace.detachRepo.errors.notFound")
+    });
+  } finally {
+    detaching.value = false;
+  }
 }
 
 async function submitRename() {

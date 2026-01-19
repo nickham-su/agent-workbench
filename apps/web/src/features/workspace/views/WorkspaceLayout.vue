@@ -887,15 +887,17 @@ function toolViewProps(toolId: ToolId) {
   if (toolId === "files") {
     return {
       workspaceId: props.workspaceId,
-      target: currentTarget.value,
-      toolId
+      toolId,
+      workspaceDirName: workspace.value?.dirName ?? "",
+      workspaceRepos: workspace.value?.repos ?? []
     };
   }
   if (toolId === "search") {
     return {
       workspaceId: props.workspaceId,
-      target: currentTarget.value,
-      toolId
+      toolId,
+      workspaceRepos: workspace.value?.repos ?? [],
+      currentRepoDirName: currentRepoDirName.value
     };
   }
   return { workspaceId: props.workspaceId, toolId };
