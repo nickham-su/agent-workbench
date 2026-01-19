@@ -24,16 +24,16 @@
               </div>
             </a-form-item>
 
-            <a-form-item :label="t('settings.general.fontSize.diff.label')">
+            <a-form-item :label="t('settings.general.fontSize.editor.label')">
               <a-input-number
-                v-model:value="diffFontSizeModel"
+                v-model:value="editorFontSizeModel"
                 :min="uiFontSizeDefaults.min"
                 :max="uiFontSizeDefaults.max"
                 :step="1"
                 style="max-width: 260px"
               />
               <div class="pt-2 text-xs text-[color:var(--text-tertiary)]">
-                {{ t("settings.general.fontSize.diff.help", { default: uiFontSizeDefaults.default }) }}
+                {{ t("settings.general.fontSize.editor.help", { default: uiFontSizeDefaults.default }) }}
               </div>
             </a-form-item>
           </a-form>
@@ -279,7 +279,7 @@ import type { CredentialKind, CredentialRecord, SecurityStatus } from "@agent-wo
 import { computed, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
-import { diffFontSize, setDiffFontSize, setTerminalFontSize, terminalFontSize, uiFontSizeDefaults } from "@/shared/settings/uiFontSizes";
+import { editorFontSize, setEditorFontSize, setTerminalFontSize, terminalFontSize, uiFontSizeDefaults } from "@/shared/settings/uiFontSizes";
 import {
   clearAllGitIdentity,
   createCredential,
@@ -335,11 +335,11 @@ const terminalFontSizeModel = computed<number | null>({
   }
 });
 
-const diffFontSizeModel = computed<number | null>({
-  get: () => diffFontSize.value,
+const editorFontSizeModel = computed<number | null>({
+  get: () => editorFontSize.value,
   set: (v) => {
     if (v === null || v === undefined) return;
-    setDiffFontSize(v);
+    setEditorFontSize(v);
   }
 });
 

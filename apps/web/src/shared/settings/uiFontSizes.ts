@@ -5,7 +5,9 @@ const MIN_FONT_SIZE = 10;
 const MAX_FONT_SIZE = 24;
 
 const TERMINAL_FONT_SIZE_KEY = "agent-workbench.ui.fontSize.terminal";
-const DIFF_FONT_SIZE_KEY = "agent-workbench.ui.fontSize.diff";
+// 旧版本使用 diff 作为 key,但实际含义已调整为通用编辑器字号.
+const LEGACY_DIFF_FONT_SIZE_KEY = "agent-workbench.ui.fontSize.diff";
+const EDITOR_FONT_SIZE_KEY = "agent-workbench.ui.fontSize.editor";
 
 function clampFontSize(input: unknown) {
   if (input === null || input === undefined) return DEFAULT_FONT_SIZE;
@@ -23,6 +25,24 @@ function loadFontSize(key: string) {
   }
 }
 
+function loadEditorFontSize() {
+  try {
+    const v = localStorage.getItem(EDITOR_FONT_SIZE_KEY);
+    if (v !== null) return clampFontSize(v);
+
+    // 兼容旧 key: 首次读取时做一次迁移,避免用户升级后丢失配置.
+    const legacy = localStorage.getItem(LEGACY_DIFF_FONT_SIZE_KEY);
+    if (legacy !== null) {
+      const next = clampFontSize(legacy);
+      localStorage.setItem(EDITOR_FONT_SIZE_KEY, String(next));
+      return next;
+    }
+  } catch {
+    // ignore
+  }
+  return DEFAULT_FONT_SIZE;
+}
+
 function saveFontSize(key: string, size: number) {
   try {
     localStorage.setItem(key, String(size));
@@ -38,7 +58,7 @@ export const uiFontSizeDefaults = {
 } as const;
 
 export const terminalFontSize = ref<number>(loadFontSize(TERMINAL_FONT_SIZE_KEY));
-export const diffFontSize = ref<number>(loadFontSize(DIFF_FONT_SIZE_KEY));
+export const editorFontSize = ref<number>(loadEditorFontSize());
 
 export function setTerminalFontSize(next: unknown) {
   const v = clampFontSize(next);
@@ -46,16 +66,19 @@ export function setTerminalFontSize(next: unknown) {
   saveFontSize(TERMINAL_FONT_SIZE_KEY, v);
 }
 
-export function setDiffFontSize(next: unknown) {
+export function setEditorFontSize(next: unknown) {
   const v = clampFontSize(next);
-  diffFontSize.value = v;
-  saveFontSize(DIFF_FONT_SIZE_KEY, v);
+  editorFontSize.value = v;
+  saveFontSize(EDITOR_FONT_SIZE_KEY, v);
+
+  // 同步写入旧 key,保证多标签页/旧代码仍能读取到最新值.
+  saveFontSize(LEGACY_DIFF_FONT_SIZE_KEY, v);
 }
 
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (evt) => {
     if (!evt) return;
     if (evt.key === TERMINAL_FONT_SIZE_KEY) terminalFontSize.value = loadFontSize(TERMINAL_FONT_SIZE_KEY);
-    if (evt.key === DIFF_FONT_SIZE_KEY) diffFontSize.value = loadFontSize(DIFF_FONT_SIZE_KEY);
+    if (evt.key === EDITOR_FONT_SIZE_KEY || evt.key === LEGACY_DIFF_FONT_SIZE_KEY) editorFontSize.value = loadEditorFontSize();
   });
 }

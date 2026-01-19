@@ -137,7 +137,7 @@ import {
 import { ensureMonacoEnvironment } from "@/shared/monaco/monacoEnv";
 import { applyMonacoPanelTheme } from "@/shared/monaco/monacoTheme";
 import { ensureMonacoLanguage } from "@/shared/monaco/languageLoader";
-import { diffFontSize } from "@/shared/settings/uiFontSizes";
+import { editorFontSize } from "@/shared/settings/uiFontSizes";
 
 
 const props = defineProps<{ workspaceId: string; target: GitTarget | null; toolId: string }>();
@@ -1290,7 +1290,7 @@ function initEditor() {
   editor = monaco.editor.create(editorEl.value, {
     automaticLayout: true,
     readOnly: false,
-    fontSize: diffFontSize.value,
+    fontSize: editorFontSize.value,
     minimap: { enabled: false },
     scrollBeyondLastLine: false,
     wordWrap: "off",
@@ -1298,6 +1298,16 @@ function initEditor() {
   });
   attachEditorEvents();
 }
+
+// 设置-常规里的"编辑器字号"需要对已打开的编辑器实时生效
+watch(
+  () => editorFontSize.value,
+  (next) => {
+    if (!editor) return;
+    editor.updateOptions({ fontSize: next });
+    requestAnimationFrame(() => editor?.layout());
+  }
+);
 
 watch(
   () => pendingOpenAt.value,
