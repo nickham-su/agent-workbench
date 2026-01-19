@@ -41,6 +41,7 @@ const workspaceCtx = useWorkspaceContext();
 
 type BufferLine = {
   length: number;
+  translateToString: (trimRight?: boolean, startColumn?: number, endColumn?: number) => string;
   getCell: (x: number) => { getChars: () => string; getWidth: () => number } | undefined;
 };
 
@@ -371,6 +372,138 @@ function firstPathSegment(p: string) {
   return s.split("/")[0] ?? "";
 }
 
+function rangesOverlap(a: { start: { x: number; y: number }; end: { x: number; y: number } }, b: { start: { x: number; y: number }; end: { x: number; y: number } }) {
+  if (a.start.y !== b.start.y) return false;
+  const aStart = Math.min(a.start.x, a.end.x);
+  const aEnd = Math.max(a.start.x, a.end.x);
+  const bStart = Math.min(b.start.x, b.end.x);
+  const bEnd = Math.max(b.start.x, b.end.x);
+  return aStart <= bEnd && bStart <= aEnd;
+}
+
+function tryParseHardWrapTwoLineTarget(params: { firstLineText: string; secondLineText: string }) {
+  // 第一行: 取行尾连续 token，且必须包含 /，才认为“看起来像路径”
+  const firstTrimmed = String(params.firstLineText || "").replace(/[ \t]+$/g, "");
+  const tailMatch = firstTrimmed.match(/([A-Za-z0-9_./-]+)$/);
+  const tail = tailMatch?.[1] ?? "";
+  if (!tail || !tail.includes("/")) return null;
+  const tailStartIndex = firstTrimmed.length - tail.length;
+  const tailEndIndex = tailStartIndex + tail.length - 1;
+
+  // 第二行: 允许行首空格/Tab 缩进，但必须从一个路径 token 开始，并且同一行内包含 :line；
+  // 不支持断在 : 的情况(即第二行以 : 或纯数字开头)。
+  const secondText = String(params.secondLineText || "");
+  const indentLen = secondText.match(/^[ \t]*/)?.[0]?.length ?? 0;
+  const rest = secondText.slice(indentLen);
+  if (!rest) return null;
+  if (rest.startsWith(":")) return null;
+  const headMatch = rest.match(/^([A-Za-z0-9_./-]+):([1-9][0-9]*)/);
+  if (!headMatch) return null;
+  const headPathPart = headMatch[1] ?? "";
+  const lineStr = headMatch[2] ?? "";
+  if (!headPathPart || !lineStr) return null;
+
+  const combinedRawPath = `${tail}${headPathPart}`;
+  const line = Number(lineStr || 0);
+  if (!Number.isFinite(line) || line <= 0) return null;
+  if (combinedRawPath.startsWith("/")) return null;
+  const parts = combinedRawPath.split("/");
+  if (parts.some((p) => p === "..")) return null;
+
+  const secondStartIndex = indentLen;
+  const secondEndIndex = indentLen + (headMatch[0]?.length ?? 0) - 1;
+  if (secondEndIndex < secondStartIndex) return null;
+
+  return {
+    combinedRawPath,
+    line,
+    firstSeg: { startIndex: tailStartIndex, endIndex: tailEndIndex },
+    secondSeg: { startIndex: secondStartIndex, endIndex: secondEndIndex }
+  };
+}
+
+function createHardWrapTwoLineLinks(params: {
+  bufferLineNumber: number;
+  currentLineText: string;
+  currentLine: BufferLine;
+}) {
+  const links: Array<{
+    text: string;
+    range: { start: { x: number; y: number }; end: { x: number; y: number } };
+    activate: (event: MouseEvent, text: string) => void;
+  }> = [];
+  if (!term) return links;
+
+  const target = workspaceCtx.currentTarget.value;
+  if (!target) return links;
+  const otherRepoDirNames = new Set(
+    workspaceCtx.repos.value
+      .map((r) => r.dirName)
+      .filter((dirName) => dirName && dirName !== target.dirName)
+  );
+  const statStore = getTerminalLinkStatStore(target.workspaceId);
+
+  const buffer = term.buffer.active;
+  const currentIndex0 = params.bufferLineNumber - 1;
+  const prev = currentIndex0 > 0 ? (buffer.getLine(currentIndex0 - 1) as BufferLine | undefined) : undefined;
+  const next = buffer.getLine(currentIndex0 + 1) as BufferLine | undefined;
+
+  const emitLink = (parsed: ReturnType<typeof tryParseHardWrapTwoLineTarget>, which: "first" | "second", lineText: string, line: BufferLine) => {
+    if (!parsed) return;
+    const seg = which === "first" ? parsed.firstSeg : parsed.secondSeg;
+    const linkPath = canonicalizeTerminalLinkPath({ rawPath: parsed.combinedRawPath, currentDirName: target.dirName });
+    if (!linkPath) return;
+    const firstSeg = firstPathSegment(linkPath);
+    if (firstSeg && otherRepoDirNames.has(firstSeg)) return;
+
+    const columnInfo = buildColumnInfoMap(line, lineText);
+    const startInfo = columnInfo[seg.startIndex];
+    const endInfo = columnInfo[seg.endIndex];
+    const startCol = startInfo?.col ?? seg.startIndex + 1;
+    const endBase = endInfo?.col ?? seg.endIndex + 1;
+    const endCol = endBase + Math.max(1, endInfo?.width ?? 1) - 1;
+    const linkLine = parsed.line;
+
+    links.push({
+      text: `${parsed.combinedRawPath}:${linkLine}`,
+      range: { start: { x: startCol, y: params.bufferLineNumber }, end: { x: endCol, y: params.bufferLineNumber } },
+      activate: (event) => {
+        // 仅响应鼠标左键点击；按住 Alt/Option 时保留为“强制选择文本”手势
+        if (event.button !== 0) return;
+        if (event.altKey) return;
+        void (async () => {
+          const res = await statStore.ensureStat({ target, path: linkPath });
+          if (!res || !res.ok) return;
+          const finalPath = res.normalizedPath || res.path;
+          host.openTool("files");
+          host.callFrom("terminal", "files", {
+            type: "files.openAt",
+            payload: { path: finalPath, line: linkLine, highlight: { kind: "line" } }
+          });
+        })();
+      }
+    });
+  };
+
+  // 情况 A: 当前行作为“第一行”，尝试与下一行拼接；返回当前行的尾部片段 link
+  if (next) {
+    const parsed = tryParseHardWrapTwoLineTarget({
+      firstLineText: params.currentLineText,
+      secondLineText: next.translateToString(true)
+    });
+    emitLink(parsed, "first", params.currentLineText, params.currentLine);
+  }
+
+  // 情况 B: 当前行作为“第二行”，尝试与上一行拼接；返回当前行的头部片段 link
+  if (prev) {
+    const prevText = prev.translateToString(true);
+    const parsed = tryParseHardWrapTwoLineTarget({ firstLineText: prevText, secondLineText: params.currentLineText });
+    emitLink(parsed, "second", params.currentLineText, params.currentLine);
+  }
+
+  return links;
+}
+
 function createPathLineLinks(lineText: string, bufferLineNumber: number, line: BufferLine | null) {
   const links: Array<{
     text: string;
@@ -486,7 +619,16 @@ onMounted(() => {
       }
       const lineText = line.translateToString(true);
       const links = createPathLineLinks(lineText, bufferLineNumber, line as BufferLine);
-      callback(links.length > 0 ? links : undefined);
+      const hardWrapLinks = createHardWrapTwoLineLinks({
+        bufferLineNumber,
+        currentLineText: lineText,
+        currentLine: line as BufferLine
+      });
+
+      // 两行硬换行启发式的第二行，往往会被单行解析误识别成“截断后的相对路径”，这里让硬换行链接优先。
+      const filtered = hardWrapLinks.length > 0 ? links.filter((l) => !hardWrapLinks.some((h) => rangesOverlap(l.range, h.range))) : links;
+      const combined = filtered.concat(hardWrapLinks);
+      callback(combined.length > 0 ? combined : undefined);
     }
   });
 
