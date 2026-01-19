@@ -369,7 +369,9 @@ export default {
       newFile: "New file",
       newFolder: "New folder",
       copyName: "Copy name",
-      copyPath: "Copy path",
+      copyPath: "Copy repo path",
+      copyRepoPath: "Copy repo path",
+      copyWorkspacePath: "Copy workspace path",
       rename: "Rename",
       delete: "Delete",
       refresh: "Refresh",
@@ -378,6 +380,8 @@ export default {
     copy: {
       nameCopied: "Name copied",
       pathCopied: "Path copied",
+      repoPathCopied: "Repo path copied",
+      workspacePathCopied: "Workspace path copied",
       failed: "Copy failed"
     },
     status: {

@@ -673,10 +673,15 @@ function onNodeDblClick(node: TreeNode) {
   });
 }
 
-async function copyTextWithFeedback(text: string, kind: "name" | "path") {
+async function copyTextWithFeedback(text: string, kind: "name" | "repoPath" | "workspacePath") {
   const content = String(text ?? "");
   if (!content) return;
-  const successMessage = kind === "name" ? t("files.copy.nameCopied") : t("files.copy.pathCopied");
+  const successMessage =
+    kind === "name"
+      ? t("files.copy.nameCopied")
+      : kind === "workspacePath"
+        ? t("files.copy.workspacePathCopied")
+        : t("files.copy.repoPathCopied");
   try {
     await navigator.clipboard.writeText(content);
     message.success(successMessage);
@@ -716,9 +721,22 @@ function copySelectedName() {
   return copyTextWithFeedback(name, "name");
 }
 
-function copySelectedPath() {
+function copySelectedRepoPath() {
   const path = selectedNodePath();
-  return copyTextWithFeedback(path, "path");
+  return copyTextWithFeedback(path, "repoPath");
+}
+
+function selectedNodeWorkspacePath() {
+  const dirName = props.target?.dirName ?? "";
+  if (!dirName) return "";
+  const rel = selectedNode.value?.data.path ?? "";
+  if (!rel) return dirName;
+  return `${dirName}/${rel}`;
+}
+
+function copySelectedWorkspacePath() {
+  const path = selectedNodeWorkspacePath();
+  return copyTextWithFeedback(path, "workspacePath");
 }
 
 function onContextMenuClick(info: { key: string }) {
@@ -728,8 +746,12 @@ function onContextMenuClick(info: { key: string }) {
     void copySelectedName();
     return;
   }
-  if (key === "copyPath") {
-    void copySelectedPath();
+  if (key === "copyRepoPath" || key === "copyPath") {
+    void copySelectedRepoPath();
+    return;
+  }
+  if (key === "copyWorkspacePath") {
+    void copySelectedWorkspacePath();
     return;
   }
   if (key === "newFile") {

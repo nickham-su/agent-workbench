@@ -46,8 +46,11 @@
                 <a-menu-item v-if="selectedNode" key="copyName">
                   {{ t("files.actions.copyName") }}
                 </a-menu-item>
-                <a-menu-item v-if="selectedNode" key="copyPath">
-                  {{ t("files.actions.copyPath") }}
+                <a-menu-item v-if="selectedNode" key="copyRepoPath">
+                  {{ t("files.actions.copyRepoPath") }}
+                </a-menu-item>
+                <a-menu-item v-if="selectedNode" key="copyWorkspacePath">
+                  {{ t("files.actions.copyWorkspacePath") }}
                 </a-menu-item>
                 <a-menu-divider v-if="canRenameDelete" />
                 <a-menu-item v-if="canRenameDelete" key="rename">{{ t("files.actions.rename") }}</a-menu-item>

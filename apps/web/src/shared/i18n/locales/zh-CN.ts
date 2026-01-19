@@ -367,7 +367,9 @@ export default {
       newFile: "新建文件",
       newFolder: "新建文件夹",
       copyName: "复制名称",
-      copyPath: "复制路径",
+      copyPath: "复制仓库内路径",
+      copyRepoPath: "复制仓库内路径",
+      copyWorkspacePath: "复制工作区路径",
       rename: "重命名",
       delete: "删除",
       refresh: "刷新",
@@ -376,6 +378,8 @@ export default {
     copy: {
       nameCopied: "已复制名称",
       pathCopied: "已复制路径",
+      repoPathCopied: "已复制仓库内路径",
+      workspacePathCopied: "已复制工作区路径",
       failed: "复制失败"
     },
     status: {
