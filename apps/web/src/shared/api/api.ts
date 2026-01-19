@@ -23,6 +23,7 @@ import type {
   FileWriteResponse,
   CreateTerminalRequest,
   CreateWorkspaceRequest,
+  AttachWorkspaceRepoRequest,
   ChangesResponse,
   CredentialRecord,
   GenerateSshKeypairResponse,
@@ -331,6 +332,24 @@ export async function updateWorkspace(workspaceId: string, body: UpdateWorkspace
 export async function deleteWorkspace(workspaceId: string) {
   try {
     await client.delete(`/workspaces/${workspaceId}`);
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function attachWorkspaceRepo(workspaceId: string, body: AttachWorkspaceRepoRequest) {
+  try {
+    const res = await client.post<WorkspaceDetail>(`/workspaces/${workspaceId}/repos`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function detachWorkspaceRepo(workspaceId: string, repoId: string) {
+  try {
+    const res = await client.delete<WorkspaceDetail>(`/workspaces/${workspaceId}/repos/${repoId}`);
+    return res.data;
   } catch (err) {
     throw toApiError(err);
   }

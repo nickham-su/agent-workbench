@@ -189,6 +189,39 @@ export function getWorkspaceRepoByDirName(db: Db, workspaceId: string, dirName: 
   return row ? mapRepoRow(row) : null;
 }
 
+export function getWorkspaceRepoByRepoId(db: Db, workspaceId: string, repoId: string): WorkspaceRepoRecord | null {
+  const row = db
+    .prepare(
+      `
+        select
+          workspace_id as workspaceId,
+          repo_id as repoId,
+          dir_name as dirName,
+          path,
+          created_at as createdAt,
+          updated_at as updatedAt
+        from workspace_repos
+        where workspace_id = ? and repo_id = ?
+      `
+    )
+    .get(workspaceId, repoId);
+  return row ? mapRepoRow(row) : null;
+}
+
 export function deleteWorkspaceReposByWorkspace(db: Db, workspaceId: string) {
   db.prepare(`delete from workspace_repos where workspace_id = ?`).run(workspaceId);
+}
+
+export function deleteWorkspaceRepoByRepoId(db: Db, workspaceId: string, repoId: string) {
+  db.prepare(`delete from workspace_repos where workspace_id = ? and repo_id = ?`).run(workspaceId, repoId);
+}
+
+export function touchWorkspaceUpdatedAt(db: Db, workspaceId: string, updatedAt: number) {
+  db.prepare(
+    `
+      update workspaces
+      set updated_at = @updatedAt
+      where id = @workspaceId
+    `
+  ).run({ workspaceId, updatedAt });
 }

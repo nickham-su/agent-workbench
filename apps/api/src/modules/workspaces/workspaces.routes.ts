@@ -2,12 +2,21 @@ import type { FastifyInstance } from "fastify";
 import type { AppContext } from "../../app/context.js";
 import { ErrorResponseSchema } from "@agent-workbench/shared";
 import {
+  AttachWorkspaceRepoRequestSchema,
   CreateWorkspaceRequestSchema,
   UpdateWorkspaceRequestSchema,
   WorkspaceDetailSchema
 } from "@agent-workbench/shared";
 import { nowMs } from "../../utils/time.js";
-import { createWorkspace, deleteWorkspace, getWorkspaceDetailById, listWorkspaceDetails, updateWorkspaceById } from "./workspace.service.js";
+import {
+  attachRepoToWorkspace,
+  createWorkspace,
+  deleteWorkspace,
+  detachRepoFromWorkspace,
+  getWorkspaceDetailById,
+  listWorkspaceDetails,
+  updateWorkspaceById
+} from "./workspace.service.js";
 import { touchWorkspaceLastUsedAt } from "./workspace.store.js";
 
 export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppContext) {
@@ -86,6 +95,36 @@ export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppCon
       const params = req.params as { workspaceId: string };
       await deleteWorkspace(ctx, app.log, params.workspaceId);
       return reply.code(204).send();
+    }
+  );
+
+  app.post(
+    "/api/workspaces/:workspaceId/repos",
+    {
+      schema: {
+        tags: ["workspaces"],
+        body: AttachWorkspaceRepoRequestSchema,
+        response: { 200: WorkspaceDetailSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema, 409: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      const params = req.params as { workspaceId: string };
+      const body = req.body as { repoId: string; branch?: string };
+      return attachRepoToWorkspace(ctx, app.log, params.workspaceId, { repoId: body.repoId, branch: body.branch });
+    }
+  );
+
+  app.delete(
+    "/api/workspaces/:workspaceId/repos/:repoId",
+    {
+      schema: {
+        tags: ["workspaces"],
+        response: { 200: WorkspaceDetailSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema, 409: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      const params = req.params as { workspaceId: string; repoId: string };
+      return detachRepoFromWorkspace(ctx, app.log, params.workspaceId, params.repoId);
     }
   );
 }
