@@ -1,10 +1,6 @@
 <template>
   <div class="h-full min-h-0 flex flex-col">
-    <div v-if="!target" class="flex-1 min-h-0 flex items-center justify-center text-xs text-[color:var(--text-tertiary)]">
-      {{ t("search.placeholder.selectRepo") }}
-    </div>
-
-    <div v-else class="flex-1 min-h-0 flex flex-col gap-2 px-3 py-3">
+    <div class="flex-1 min-h-0 flex flex-col gap-2 px-3 py-3">
       <div class="flex items-center gap-2">
         <a-input
           v-model:value="query"
@@ -16,6 +12,27 @@
         </a-button>
       </div>
 
+      <div class="flex items-center gap-2 text-xs text-[color:var(--text-tertiary)]">
+        <a-radio-group v-model:value="scope" size="small">
+          <a-radio value="global">{{ t("search.scope.global") }}</a-radio>
+          <a-radio value="repos">{{ t("search.scope.repos") }}</a-radio>
+        </a-radio-group>
+        <span
+          v-if="scope === 'repos'"
+          class="h-full w-px bg-[var(--border-color-secondary)]"
+          aria-hidden="true"
+        ></span>
+        <a-checkbox-group
+          v-if="scope === 'repos'"
+          v-model:value="repoDirNames"
+          class="flex flex-wrap gap-2 flex-1 min-w-0 pl-[10px]"
+        >
+          <a-checkbox v-for="option in repoOptions" :key="option.value" :value="option.value">
+            {{ option.label }}
+          </a-checkbox>
+        </a-checkbox-group>
+      </div>
+
       <div class="flex items-center gap-4 text-xs text-[color:var(--text-tertiary)]">
         <a-checkbox v-model:checked="caseSensitive">{{ t("search.options.caseSensitive") }}</a-checkbox>
         <a-checkbox v-model:checked="wholeWord">{{ t("search.options.wholeWord") }}</a-checkbox>
@@ -25,6 +42,7 @@
 
       <div class="flex-1 min-h-0 flex flex-col">
         <div
+          v-if="showSummary"
           class="py-2 text-xs text-[color:var(--text-tertiary)] border-b border-[var(--border-color-secondary)] flex items-center gap-2"
         >
           <span class="min-w-0 truncate">{{ summaryLabel }}</span>
@@ -96,12 +114,17 @@ export default {
 import { computed, watch } from "vue";
 import { message } from "ant-design-vue";
 import { useI18n } from "vue-i18n";
-import type { FileSearchBlock, GitTarget } from "@agent-workbench/shared";
-import { searchFiles } from "@/shared/api";
+import type { FileSearchBlock, WorkspaceDetail } from "@agent-workbench/shared";
+import { searchWorkspaceFiles } from "@/shared/api";
 import { useWorkspaceHost } from "@/features/workspace/host";
 import { getSearchStore } from "./store";
 
-const props = defineProps<{ workspaceId: string; target: GitTarget | null; toolId: string }>();
+const props = defineProps<{
+  workspaceId: string;
+  toolId: string;
+  workspaceRepos?: WorkspaceDetail["repos"];
+  currentRepoDirName?: string;
+}>();
 const { t } = useI18n();
 const host = useWorkspaceHost(props.toolId);
 const store = getSearchStore(props.workspaceId);
@@ -110,6 +133,8 @@ const query = store.query;
 const useRegex = store.useRegex;
 const caseSensitive = store.caseSensitive;
 const wholeWord = store.wholeWord;
+const scope = store.scope;
+const repoDirNames = store.repoDirNames;
 const matches = store.matches;
 const blocks = store.blocks;
 const loading = store.loading;
@@ -117,7 +142,17 @@ const error = store.error;
 const truncated = store.truncated;
 const timedOut = store.timedOut;
 const tookMs = store.tookMs;
-const canSearch = computed(() => Boolean(props.target) && Boolean(query.value.trim()));
+const repoOptions = computed(() => {
+  return (props.workspaceRepos ?? []).map((item) => ({
+    label: item.dirName,
+    value: item.dirName
+  }));
+});
+const canSearch = computed(() => {
+  if (!query.value.trim()) return false;
+  if (scope.value === "global") return true;
+  return repoDirNames.value.length > 0;
+});
 
 const summaryLabel = computed(() => {
   if (loading.value) return t("search.status.searching");
@@ -125,6 +160,9 @@ const summaryLabel = computed(() => {
   if (!query.value.trim()) return t("search.status.idle");
   if (tookMs.value == null) return t("search.status.idle");
   return t("search.status.results", { count: matches.value.length, tookMs: tookMs.value ?? 0 });
+});
+const showSummary = computed(() => {
+  return loading.value || Boolean(error.value) || tookMs.value != null;
 });
 
 const blockGroups = computed(() => {
@@ -180,14 +218,38 @@ watch(
   }
 );
 
+watch(
+  () => scope.value,
+  () => {
+    store.nextRequestSeq();
+    store.resetResults();
+    loading.value = false;
+  }
+);
+
+watch(
+  () => repoDirNames.value.join("|"),
+  () => {
+    if (scope.value !== "repos") return;
+    store.nextRequestSeq();
+    store.resetResults();
+    loading.value = false;
+  }
+);
+
+watch(
+  () => props.workspaceRepos,
+  (repos) => {
+    const available = new Set((repos ?? []).map((item) => item.dirName));
+    const filtered = repoDirNames.value.filter((name) => available.has(name));
+    if (filtered.length !== repoDirNames.value.length) repoDirNames.value = filtered;
+  },
+  { immediate: true }
+);
+
 async function openBlock(block: FileSearchBlock) {
-  const rawPath = String(block.path || "").trim();
-  if (!rawPath) return;
-  const targetDirName = String(props.target?.dirName || "").trim();
-  const resolvedPath =
-    targetDirName && rawPath !== targetDirName && !rawPath.startsWith(targetDirName + "/")
-      ? `${targetDirName}/${rawPath}`
-      : rawPath;
+  const path = String(block.path || "").trim();
+  if (!path) return;
   const hitLine = block.hitLines.length > 0 ? Math.min(...block.hitLines) : block.fromLine;
   const line = block.lines.find((item) => item.line === hitLine);
   const highlight =
@@ -197,30 +259,36 @@ async function openBlock(block: FileSearchBlock) {
   host.call("files", {
     type: "files.openAt",
     payload: {
-      path: resolvedPath,
+      path,
       line: hitLine,
-      highlight
+      highlight,
+      targetDirName: ""
     }
   });
 }
 
 async function runSearch() {
-  if (!props.target) return;
   const q = query.value.trim();
   if (!q) {
     message.warning(t("search.placeholder.queryEmpty"));
+    return;
+  }
+  if (scope.value === "repos" && repoDirNames.value.length === 0) {
+    message.warning(t("search.placeholder.selectRepo"));
     return;
   }
   const seq = store.nextRequestSeq();
   store.resetResults();
   loading.value = true;
   try {
-    const res = await searchFiles({
-      target: props.target,
+    const res = await searchWorkspaceFiles({
+      workspaceId: props.workspaceId,
       query: q,
       useRegex: useRegex.value,
       caseSensitive: caseSensitive.value,
-      wholeWord: wholeWord.value || undefined
+      wholeWord: wholeWord.value || undefined,
+      scope: scope.value,
+      repoDirNames: scope.value === "repos" ? repoDirNames.value : undefined
     });
     if (seq !== store.requestSeq.value) return;
     matches.value = res.matches;

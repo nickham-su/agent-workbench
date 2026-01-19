@@ -478,6 +478,11 @@ export default {
       query: "输入搜索内容(按回车键搜索)",
       queryEmpty: "请输入搜索内容"
     },
+    scope: {
+      global: "全局",
+      repos: "指定仓库",
+      reposPlaceholder: "选择仓库(可多选)"
+    },
     options: {
       regex: "正则表达式",
       caseSensitive: "区分大小写",

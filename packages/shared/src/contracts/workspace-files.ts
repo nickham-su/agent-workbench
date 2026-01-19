@@ -47,3 +47,16 @@ export const WorkspaceFileDeleteRequestSchema = Type.Object({
   recursive: Type.Optional(Type.Boolean())
 });
 export type WorkspaceFileDeleteRequest = Static<typeof WorkspaceFileDeleteRequestSchema>;
+
+export const WorkspaceFileSearchScopeSchema = Type.Union([Type.Literal("global"), Type.Literal("repos")]);
+export type WorkspaceFileSearchScope = Static<typeof WorkspaceFileSearchScopeSchema>;
+
+export const WorkspaceFileSearchRequestSchema = Type.Object({
+  query: Type.String({ minLength: 1 }),
+  useRegex: Type.Boolean(),
+  caseSensitive: Type.Boolean(),
+  wholeWord: Type.Optional(Type.Boolean()),
+  scope: WorkspaceFileSearchScopeSchema,
+  repoDirNames: Type.Optional(Type.Array(Type.String({ minLength: 1 })))
+});
+export type WorkspaceFileSearchRequest = Static<typeof WorkspaceFileSearchRequestSchema>;

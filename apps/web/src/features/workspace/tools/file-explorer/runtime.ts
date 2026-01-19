@@ -45,7 +45,7 @@ export function createFileExplorerRuntime(ctx: ToolRuntimeContext): ToolRuntime 
       if (highlight.kind === "range") {
         if (typeof highlight.startCol !== "number" || typeof highlight.endCol !== "number") return;
       }
-      const targetDirName = envelope.targetAtCall?.dirName;
+      const targetDirName = typeof payload.targetDirName === "string" ? payload.targetDirName : envelope.targetAtCall?.dirName;
       store.setPendingOpenAt({ path, line, highlight, targetDirName } as FileOpenAtRequest);
     }
   };

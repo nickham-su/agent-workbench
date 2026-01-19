@@ -8,6 +8,7 @@ import {
   FileMkdirResponseSchema,
   FileReadResponseSchema,
   FileRenameResponseSchema,
+  FileSearchResponseSchema,
   FileStatResponseSchema,
   FileWriteResponseSchema,
   WorkspaceFileCreateRequestSchema,
@@ -16,6 +17,7 @@ import {
   WorkspaceFileMkdirRequestSchema,
   WorkspaceFileReadRequestSchema,
   WorkspaceFileRenameRequestSchema,
+  WorkspaceFileSearchRequestSchema,
   WorkspaceFileStatRequestSchema,
   WorkspaceFileWriteRequestSchema
 } from "@agent-workbench/shared";
@@ -27,6 +29,7 @@ import {
   mkdirWorkspacePath,
   readWorkspaceFileText,
   renameWorkspacePath,
+  searchWorkspaceFiles,
   statWorkspaceFile,
   writeWorkspaceFileText
 } from "./workspace-files.service.js";
@@ -44,6 +47,21 @@ export async function registerWorkspaceFilesRoutes(app: FastifyInstance, ctx: Ap
     async (req) => {
       const params = req.params as { workspaceId: string };
       return listWorkspaceFiles(ctx, params.workspaceId, req.body);
+    }
+  );
+
+  app.post(
+    "/api/workspaces/:workspaceId/files/search",
+    {
+      schema: {
+        tags: ["workspaces"],
+        body: WorkspaceFileSearchRequestSchema,
+        response: { 200: FileSearchResponseSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      const params = req.params as { workspaceId: string };
+      return searchWorkspaceFiles(ctx, params.workspaceId, req.body);
     }
   );
 

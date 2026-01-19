@@ -9,6 +9,7 @@ import type {
   FileMkdirResponse,
   FileReadResponse,
   FileRenameResponse,
+  FileSearchResponse,
   FileStatResponse,
   FileVersion,
   FileWriteResponse,
@@ -18,6 +19,7 @@ import type {
   WorkspaceFileMkdirRequest,
   WorkspaceFileReadRequest,
   WorkspaceFileRenameRequest,
+  WorkspaceFileSearchRequest,
   WorkspaceFileStatRequest,
   WorkspaceFileWriteRequest
 } from "@agent-workbench/shared";
@@ -26,6 +28,8 @@ import { HttpError } from "../../app/errors.js";
 import { workspaceRoot } from "../../infra/fs/paths.js";
 import { withWorkspaceLock } from "../../infra/locks/workspaceLock.js";
 import { getWorkspace, listWorkspaceRepos } from "./workspace.store.js";
+import { getSearchSettings } from "../settings/settings.service.js";
+import { runFileSearch, SEARCH_FORCED_EXCLUDES } from "../files/file-search.js";
 import {
   createFile as createRepoFile,
   deletePath as deleteRepoPath,
@@ -107,6 +111,27 @@ function hasDeniedSegment(rel: string) {
   if (!rel) return false;
   const parts = rel.split(/[\\/]+/g).filter(Boolean);
   return parts.some((p) => DENYLIST_SEGMENTS.includes(p));
+}
+
+function expandWorkspaceExcludeGlobs(globs: string[]) {
+  if (globs.length === 0) return globs;
+  const expanded = [...globs];
+  const seen = new Set<string>(globs);
+  for (const raw of globs) {
+    const value = typeof raw === "string" ? raw.trim() : "";
+    if (!value) continue;
+    if (value.startsWith("**/") || value.startsWith("*/")) continue;
+    if (value.startsWith("/")) continue;
+    const normalized = value.startsWith("./") ? value.slice(2) : value;
+    if (!normalized) continue;
+    const anyDepth = `**/${normalized}`;
+    if (seen.has(anyDepth)) continue;
+    const extra = `*/${normalized}`;
+    if (seen.has(extra)) continue;
+    expanded.push(extra);
+    seen.add(extra);
+  }
+  return expanded;
 }
 
 function joinRelPath(parent: string, name: string) {
@@ -566,6 +591,57 @@ export async function listWorkspaceFiles(ctx: AppContext, workspaceIdRaw: string
     };
   }
   return listUnderRoot(scope.rootAbs, dir);
+}
+
+export async function searchWorkspaceFiles(
+  ctx: AppContext,
+  workspaceIdRaw: string,
+  bodyRaw: unknown
+): Promise<FileSearchResponse> {
+  const body = (bodyRaw ?? {}) as WorkspaceFileSearchRequest;
+  const scope = buildWorkspaceScope(ctx, workspaceIdRaw);
+  const query = typeof (body as any).query === "string" ? (body as any).query.trim() : "";
+  if (!query) throw new HttpError(400, "Invalid query");
+
+  const useRegex = Boolean((body as any).useRegex);
+  const caseSensitive = Boolean((body as any).caseSensitive);
+  const wholeWord = parseBool((body as any).wholeWord, false);
+  const scopeMode = typeof (body as any).scope === "string" ? (body as any).scope.trim() : "";
+  if (scopeMode !== "global" && scopeMode !== "repos") throw new HttpError(400, "Invalid scope");
+
+  const settings = getSearchSettings(ctx);
+  const baseExcludeGlobs = [...settings.excludeGlobs, ...SEARCH_FORCED_EXCLUDES];
+
+  let searchPaths: string[] = [];
+  if (scopeMode === "global") {
+    searchPaths = ["."];
+  } else {
+    const rawList = Array.isArray((body as any).repoDirNames) ? (body as any).repoDirNames : [];
+    const selected: string[] = [];
+    const seen = new Set<string>();
+    for (const item of rawList) {
+      const name = typeof item === "string" ? item.trim() : "";
+      if (!name) continue;
+      if (!scope.repoDirNames.has(name)) throw new HttpError(400, "Invalid repo selection");
+      if (seen.has(name)) continue;
+      seen.add(name);
+      selected.push(name);
+    }
+    if (selected.length === 0) throw new HttpError(400, "Repo required");
+    searchPaths = selected;
+  }
+
+  const excludeGlobs = scopeMode === "global" ? expandWorkspaceExcludeGlobs(baseExcludeGlobs) : baseExcludeGlobs;
+
+  return runFileSearch({
+    cwd: scope.rootAbs,
+    query,
+    useRegex,
+    caseSensitive,
+    wholeWord,
+    excludeGlobs,
+    searchPaths
+  });
 }
 
 export async function statWorkspaceFile(ctx: AppContext, workspaceIdRaw: string, bodyRaw: unknown): Promise<FileStatResponse> {

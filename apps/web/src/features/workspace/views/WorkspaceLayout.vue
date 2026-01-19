@@ -895,8 +895,9 @@ function toolViewProps(toolId: ToolId) {
   if (toolId === "search") {
     return {
       workspaceId: props.workspaceId,
-      target: currentTarget.value,
-      toolId
+      toolId,
+      workspaceRepos: workspace.value?.repos ?? [],
+      currentRepoDirName: currentRepoDirName.value
     };
   }
   return { workspaceId: props.workspaceId, toolId };

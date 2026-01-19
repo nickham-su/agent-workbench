@@ -27,6 +27,7 @@ import type {
   WorkspaceFileMkdirRequest,
   WorkspaceFileReadRequest,
   WorkspaceFileRenameRequest,
+  WorkspaceFileSearchRequest,
   WorkspaceFileStatRequest,
   WorkspaceFileWriteRequest,
   CreateTerminalRequest,
@@ -583,6 +584,16 @@ export async function listWorkspaceFiles(params: { workspaceId: string } & Works
   try {
     const { workspaceId, ...body } = params;
     const res = await client.post<FileListResponse>(`/workspaces/${workspaceId}/files/list`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function searchWorkspaceFiles(params: { workspaceId: string } & WorkspaceFileSearchRequest) {
+  try {
+    const { workspaceId, ...body } = params;
+    const res = await client.post<FileSearchResponse>(`/workspaces/${workspaceId}/files/search`, body);
     return res.data;
   } catch (err) {
     throw toApiError(err);

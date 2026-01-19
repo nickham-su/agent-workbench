@@ -480,6 +480,11 @@ export default {
       query: "Enter search text",
       queryEmpty: "Enter search text"
     },
+    scope: {
+      global: "Global",
+      repos: "Specific repos",
+      reposPlaceholder: "Select repos"
+    },
     options: {
       regex: "Regex",
       caseSensitive: "Case",
