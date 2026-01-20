@@ -28,7 +28,14 @@ export async function createApp(ctx: AppContext) {
   });
 
   await app.register(websocket);
-  await app.register(multipart);
+  const TWO_GIB = 2 * 1024 * 1024 * 1024;
+  await app.register(multipart, {
+    limits: {
+      // 由 nginx 负责控制单次请求总量,这里主要放开单文件大小与 part 数量的默认限制
+      fileSize: TWO_GIB,
+      parts: 1_000_000
+    }
+  });
 
 	  await app.register(swagger, {
 	    openapi: {
