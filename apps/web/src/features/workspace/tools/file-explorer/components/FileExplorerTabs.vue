@@ -22,7 +22,7 @@
             />
           </span>
           <template #overlay>
-            <a-menu @click="(info) => onContextMenuClick(info, tab.path)">
+            <a-menu @click="onContextMenuClick($event, tab.path)">
               <a-menu-item key="closeOthers" :disabled="!hasClosableOthers(tab.path)">
                 {{ t("files.actions.closeOthers") }}
               </a-menu-item>

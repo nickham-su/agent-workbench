@@ -43,7 +43,7 @@ function buildVueLanguage(): monaco.languages.IMonarchLanguage {
   const script = insertLangRule(tokenizer.script ?? [], "@scriptAfterLang");
   const style = insertLangRule(tokenizer.style ?? [], "@styleAfterLang");
 
-  const vueTokenizer = {
+  const vueTokenizer: any = {
     ...tokenizer,
     root,
     script,

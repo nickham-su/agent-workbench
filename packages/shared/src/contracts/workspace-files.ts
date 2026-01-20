@@ -48,6 +48,30 @@ export const WorkspaceFileDeleteRequestSchema = Type.Object({
 });
 export type WorkspaceFileDeleteRequest = Static<typeof WorkspaceFileDeleteRequestSchema>;
 
+export const WorkspaceFileUploadRequestSchema = Type.Object({
+  dir: Type.Optional(Type.String())
+});
+export type WorkspaceFileUploadRequest = Static<typeof WorkspaceFileUploadRequestSchema>;
+
+export const WorkspaceFileUploadResultSchema = Type.Object({
+  name: Type.String(),
+  path: Type.String(),
+  ok: Type.Boolean(),
+  reason: Type.Optional(Type.String())
+});
+export type WorkspaceFileUploadResult = Static<typeof WorkspaceFileUploadResultSchema>;
+
+export const WorkspaceFileUploadResponseSchema = Type.Object({
+  dir: Type.String(),
+  results: Type.Array(WorkspaceFileUploadResultSchema)
+});
+export type WorkspaceFileUploadResponse = Static<typeof WorkspaceFileUploadResponseSchema>;
+
+export const WorkspaceFileDownloadRequestSchema = Type.Object({
+  path: Type.Optional(Type.String())
+});
+export type WorkspaceFileDownloadRequest = Static<typeof WorkspaceFileDownloadRequestSchema>;
+
 export const WorkspaceFileSearchScopeSchema = Type.Union([Type.Literal("global"), Type.Literal("repos")]);
 export type WorkspaceFileSearchScope = Static<typeof WorkspaceFileSearchScopeSchema>;
 

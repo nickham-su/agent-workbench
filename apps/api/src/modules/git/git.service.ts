@@ -4,6 +4,8 @@ import type {
   ChangesResponse,
   ChangeMode,
   FileCompareResponse,
+  GitBranchesRequest,
+  GitBranchesResponse,
   GitCheckoutRequest,
   GitCheckoutResponse,
   GitChangesRequest,
@@ -26,6 +28,7 @@ import { getRepo } from "../repos/repo.store.js";
 import { runGit, runGitBuffer } from "../../infra/git/gitExec.js";
 import { buildGitEnv } from "../../infra/git/gitEnv.js";
 import { gitConfigGet, gitConfigSet, validateAndNormalizeGitIdentity } from "../../infra/git/gitIdentity.js";
+import { getOriginDefaultBranchFromRepo, listOriginBranchesFromRepo } from "../../infra/git/refs.js";
 import { withWorkspaceRepoLock } from "../../infra/locks/workspaceRepoLock.js";
 
 function parseMode(modeRaw: unknown): ChangeMode {
@@ -451,7 +454,7 @@ export async function gitCheckout(ctx: AppContext, bodyRaw: unknown): Promise<Gi
   const branch = normalizeGitRefLike((body as any).branch);
   if (!branch) throw new HttpError(400, "branch is required");
   return withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
-    const { wsRepo } = getTargetInfoOrThrow(ctx, target);
+    const { wsRepo, repo } = getTargetInfoOrThrow(ctx, target);
 
     const res = await runGit(["-C", wsRepo.path, "switch", branch], { cwd: ctx.dataDir });
     if (res.ok) return { branch };
@@ -461,12 +464,72 @@ export async function gitCheckout(ctx: AppContext, bodyRaw: unknown): Promise<Gi
       throw new HttpError(409, out, "GIT_OVERWRITE_REQUIRED");
     }
 
+    // 兜底：本地可能还没有 origin/<branch> 远端跟踪分支引用，先 fetch 再尝试创建跟踪分支。
+    const gitEnv = await buildGitEnv({ ctx, repoUrl: repo.url, credentialId: repo.credentialId });
+    try {
+      const fetchRes = await runGit(["-C", wsRepo.path, "fetch", "--prune", "origin"], { cwd: ctx.dataDir, env: gitEnv.env });
+      if (!fetchRes.ok) {
+        const fetchOut = truncateGitOutput(fetchRes.stderr || fetchRes.stdout);
+        if (isAuthOrInteractionError(fetchOut)) {
+          throw new HttpError(
+            409,
+            "Fetch auth failed. Configure credentials in Settings/Credentials and bind to the repo, then retry. If SSH host fingerprint changed, reset trust in Settings/Security.",
+            "GIT_AUTH_REQUIRED"
+          );
+        }
+        throw new HttpError(409, `Fetch failed: ${fetchOut}`);
+      }
+    } finally {
+      await gitEnv.cleanup();
+    }
+
     const remoteRef = `origin/${branch}`;
     const create = await runGit(["-C", wsRepo.path, "switch", "-c", branch, "--track", remoteRef], { cwd: ctx.dataDir });
     if (!create.ok) {
       throw new HttpError(409, `Checkout failed: ${(create.stderr || create.stdout || out).trim().replace(/\\s+/g, " ")}`);
     }
     return { branch };
+  });
+}
+
+export async function gitBranches(ctx: AppContext, bodyRaw: unknown): Promise<GitBranchesResponse> {
+  const body = (bodyRaw ?? {}) as GitBranchesRequest;
+  const target = parseTarget((body as any).target);
+  const fetch = Boolean((body as any).fetch);
+  return withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
+    const { wsRepo, repo } = getTargetInfoOrThrow(ctx, target);
+
+    if (fetch) {
+      const gitEnv = await buildGitEnv({ ctx, repoUrl: repo.url, credentialId: repo.credentialId });
+      try {
+        const fetchRes = await runGit(["-C", wsRepo.path, "fetch", "--prune", "origin"], { cwd: ctx.dataDir, env: gitEnv.env });
+        if (!fetchRes.ok) {
+          const fetchOut = truncateGitOutput(fetchRes.stderr || fetchRes.stdout);
+          if (isAuthOrInteractionError(fetchOut)) {
+            throw new HttpError(
+              409,
+              "Fetch auth failed. Configure credentials in Settings/Credentials and bind to the repo, then retry. If SSH host fingerprint changed, reset trust in Settings/Security.",
+              "GIT_AUTH_REQUIRED"
+            );
+          }
+          throw new HttpError(409, `Fetch failed: ${fetchOut}`);
+        }
+
+        // 尽量设置 origin/HEAD 以便解析默认分支；失败则降级为 null。
+        await runGit(["-C", wsRepo.path, "remote", "set-head", "origin", "-a"], { cwd: ctx.dataDir, env: gitEnv.env });
+      } finally {
+        await gitEnv.cleanup();
+      }
+    }
+
+    try {
+      const branches = await listOriginBranchesFromRepo({ repoPath: wsRepo.path, cwd: ctx.dataDir });
+      const defaultBranch = await getOriginDefaultBranchFromRepo({ repoPath: wsRepo.path, cwd: ctx.dataDir });
+      return { defaultBranch, branches };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new HttpError(409, msg);
+    }
   });
 }
 

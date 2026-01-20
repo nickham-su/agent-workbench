@@ -7,3 +7,8 @@ declare module "*.vue" {
   const component: DefineComponent<{}, {}, any>;
   export default component;
 }
+
+declare module "monaco-editor/esm/vs/basic-languages/css/css.js";
+declare module "monaco-editor/esm/vs/basic-languages/html/html.js";
+declare module "monaco-editor/esm/vs/basic-languages/javascript/javascript.js";
+declare module "monaco-editor/esm/vs/basic-languages/typescript/typescript.js";

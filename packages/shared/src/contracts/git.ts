@@ -240,6 +240,28 @@ export const GitCheckoutResponseSchema = Type.Object(
 );
 export type GitCheckoutResponse = Static<typeof GitCheckoutResponseSchema>;
 
+export const GitBranchesRequestSchema = Type.Object(
+  {
+    target: GitTargetSchema,
+    // fetch=true 时会执行一次 `git fetch --prune origin` 刷新本地远端跟踪分支
+    fetch: Type.Optional(Type.Boolean())
+  }
+);
+export type GitBranchesRequest = Static<typeof GitBranchesRequestSchema>;
+
+export const GitBranchesResponseSchema = Type.Object(
+  {
+    defaultBranch: Type.Union([Type.String(), Type.Null()]),
+    branches: Type.Array(
+      Type.Object({
+        name: Type.String(),
+        sha: Type.String()
+      })
+    )
+  }
+);
+export type GitBranchesResponse = Static<typeof GitBranchesResponseSchema>;
+
 export const GitStatusRequestSchema = Type.Object(
   {
     target: GitTargetSchema

@@ -6,6 +6,8 @@ import {
   ChangesResponseSchema,
   GitFileCompareRequestSchema,
   FileCompareResponseSchema,
+  GitBranchesRequestSchema,
+  GitBranchesResponseSchema,
   GitCheckoutRequestSchema,
   GitCheckoutResponseSchema,
   GitCommitRequestSchema,
@@ -28,6 +30,7 @@ import {
   discardWorkspace,
   fileCompare,
   getWorkspaceGitIdentity,
+  gitBranches,
   gitCheckout,
   gitStatus,
   listChanges,
@@ -180,6 +183,20 @@ export async function registerGitRoutes(app: FastifyInstance, ctx: AppContext) {
     },
     async (req) => {
       return fileCompare(ctx, req.body);
+    }
+  );
+
+  app.post(
+    "/api/git/branches",
+    {
+      schema: {
+        tags: ["git"],
+        body: GitBranchesRequestSchema,
+        response: { 200: GitBranchesResponseSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema, 409: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      return gitBranches(ctx, req.body);
     }
   );
 

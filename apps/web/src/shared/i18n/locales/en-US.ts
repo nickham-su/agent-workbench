@@ -405,10 +405,12 @@ export default {
     actions: {
       newFile: "New file",
       newFolder: "New folder",
+      upload: "Upload",
       copyName: "Copy name",
       copyPath: "Copy repo path",
       copyRepoPath: "Copy repo path",
       copyWorkspacePath: "Copy workspace path",
+      download: "Download",
       rename: "Rename",
       delete: "Delete",
       refresh: "Refresh",
@@ -422,6 +424,11 @@ export default {
       repoPathCopied: "Repo path copied",
       workspacePathCopied: "Workspace path copied",
       failed: "Copy failed"
+    },
+    upload: {
+      uploading: "Uploading…",
+      success: "Upload complete",
+      partialFailed: "Upload failed: {names}"
     },
     status: {
       saving: "Saving…"

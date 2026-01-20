@@ -115,7 +115,6 @@ export default {
 <script setup lang="ts">
 import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { Modal, message } from "ant-design-vue";
-import type { InputRef } from "ant-design-vue";
 import { useI18n } from "vue-i18n";
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
 import "monaco-editor/min/vs/editor/editor.main.css";
@@ -129,10 +128,12 @@ import {
   ApiError,
   createWorkspaceFile,
   deleteWorkspacePath,
+  downloadWorkspacePath,
   listWorkspaceFiles,
   mkdirWorkspacePath,
   readWorkspaceFileText,
   renameWorkspacePath,
+  uploadWorkspaceFiles,
   writeWorkspaceFileText
 } from "@/shared/api";
 import { ensureMonacoEnvironment } from "@/shared/monaco/monacoEnv";
@@ -209,8 +210,10 @@ const renameModal = reactive({
   submitting: false
 });
 
-const createNameInputRef = ref<InputRef | null>(null);
-const renameNameInputRef = ref<InputRef | null>(null);
+type SimpleInputRef = { focus?: () => void; select?: () => void };
+
+const createNameInputRef = ref<SimpleInputRef | null>(null);
+const renameNameInputRef = ref<SimpleInputRef | null>(null);
 
 const selectedNode = ref<TreeNode | null>(null);
 const canRenameDelete = computed(() => {
@@ -716,6 +719,81 @@ function copySelectedWorkspacePath() {
   return copyTextWithFeedback(path, "workspacePath");
 }
 
+function downloadFallbackName(node: TreeNode) {
+  if (node.data.kind === "dir") {
+    if (!node.data.path) return `${workspaceRootName.value || "workspace"}.zip`;
+    return `${baseName(node.data.path)}.zip`;
+  }
+  return baseName(node.data.path);
+}
+
+function triggerDownload(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename || "download";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 500);
+}
+
+async function pickUploadFiles(): Promise<File[]> {
+  return await new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.multiple = true;
+    input.style.position = "fixed";
+    input.style.left = "-9999px";
+    const cleanup = () => {
+      input.remove();
+    };
+    input.addEventListener("change", () => {
+      const files = Array.from(input.files ?? []);
+      cleanup();
+      resolve(files);
+    });
+    document.body.appendChild(input);
+    input.click();
+  });
+}
+
+async function uploadSelectedFiles() {
+  const node = selectedNode.value;
+  if (!node || node.data.kind !== "dir") return;
+  const files = await pickUploadFiles();
+  if (files.length === 0) return;
+  const dir = node.data.path ?? "";
+  const msgKey = `files-upload-${Date.now()}`;
+  message.loading({ content: t("files.upload.uploading"), key: msgKey, duration: 0 });
+  try {
+    const res = await uploadWorkspaceFiles({ workspaceId: props.workspaceId, dir, files });
+    await refreshDir(dir);
+    const failed = res.results.filter((item) => !item.ok);
+    if (failed.length > 0) {
+      const names = failed.map((item) => item.name || item.path).filter(Boolean).join(", ");
+      message.error({ content: t("files.upload.partialFailed", { names }), key: msgKey });
+      return;
+    }
+    message.success({ content: t("files.upload.success"), key: msgKey });
+  } catch (err) {
+    message.error({ content: err instanceof Error ? err.message : String(err), key: msgKey });
+  }
+}
+
+async function downloadSelected() {
+  const node = selectedNode.value;
+  if (!node) return;
+  const path = node.data.path ?? "";
+  try {
+    const res = await downloadWorkspacePath({ workspaceId: props.workspaceId, path });
+    const filename = res.filename || downloadFallbackName(node);
+    triggerDownload(res.blob, filename);
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
+  }
+}
+
 function onContextMenuClick(info: { key: string }) {
   const key = String((info as any)?.key ?? "");
   if (!key) return;
@@ -729,6 +807,14 @@ function onContextMenuClick(info: { key: string }) {
   }
   if (key === "copyWorkspacePath") {
     void copySelectedWorkspacePath();
+    return;
+  }
+  if (key === "upload") {
+    void uploadSelectedFiles();
+    return;
+  }
+  if (key === "download") {
+    void downloadSelected();
     return;
   }
   if (key === "newFile") {

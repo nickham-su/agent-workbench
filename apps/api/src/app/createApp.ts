@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import websocket from "@fastify/websocket";
+import multipart from "@fastify/multipart";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 import { isHttpError } from "./errors.js";
@@ -27,6 +28,7 @@ export async function createApp(ctx: AppContext) {
   });
 
   await app.register(websocket);
+  await app.register(multipart);
 
 	  await app.register(swagger, {
 	    openapi: {

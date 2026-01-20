@@ -279,7 +279,6 @@
 
 <script setup lang="ts">
 import { Modal, message } from "ant-design-vue";
-import type { InputRef } from "ant-design-vue";
 import { DeleteOutlined, EditOutlined, MinusOutlined, PlusOutlined, SearchOutlined } from "@ant-design/icons-vue";
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
@@ -318,7 +317,9 @@ const useTerminalCredentialTouched = ref(false);
 const editOpen = ref(false);
 const renaming = ref(false);
 const editTitle = ref("");
-const editTitleInputRef = ref<InputRef | null>(null);
+type SimpleInputRef = { focus?: () => void; select?: () => void };
+
+const editTitleInputRef = ref<SimpleInputRef | null>(null);
 const editingWorkspace = ref<WorkspaceDetail | null>(null);
 const editUseTerminalCredential = ref(false);
 

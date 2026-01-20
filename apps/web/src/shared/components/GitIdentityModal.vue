@@ -36,7 +36,6 @@
 
 <script setup lang="ts">
 import type { GitIdentityInput, GitIdentityScope, GitIdentityStatus, GitTarget } from "@agent-workbench/shared";
-import type { InputRef } from "ant-design-vue";
 import { computed, nextTick, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { getWorkspaceGitIdentity } from "@/shared/api";
@@ -68,7 +67,9 @@ const confirmLoading = computed(() => Boolean(props.loading) || submitting.value
 const statusLoading = ref(false);
 const status = ref<GitIdentityStatus | null>(null);
 
-const nameInputRef = ref<InputRef | null>(null);
+type SimpleInputRef = { focus?: () => void; select?: () => void };
+
+const nameInputRef = ref<SimpleInputRef | null>(null);
 const name = ref("");
 const email = ref("");
 const scope = ref<GitIdentityScope>(props.defaultScope ?? "repo");
