@@ -8,6 +8,8 @@ import * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
 import "monaco-editor/min/vs/editor/editor.main.css";
 import { ensureMonacoEnvironment } from "@/shared/monaco/monacoEnv";
 import { applyMonacoPanelTheme } from "@/shared/monaco/monacoTheme";
+import { ensureMonacoLanguage } from "@/shared/monaco/languageLoader";
+import { normalizeMonacoLanguage } from "@/shared/monaco/languageUtils";
 import { editorFontSize } from "@/shared/settings/uiFontSizes";
 
 const props = defineProps<{
@@ -42,12 +44,7 @@ let disposables: monaco.IDisposable[] = [];
 let layoutRaf = 0;
 let stopWatchFontSize: (() => void) | null = null;
 let pendingRevealFirstDiff = false;
-
-function normalizeLanguage(lang?: string) {
-  if (!lang) return undefined;
-  if (lang === "vue") return "html";
-  return lang;
-}
+let modelSeq = 0;
 
 function measureAndEmitLayout() {
   if (!editor) return;
@@ -76,9 +73,23 @@ function scheduleEmitLayout() {
   });
 }
 
+async function applyLanguageToModels(language: string | undefined, seq: number) {
+  if (!language) return;
+  try {
+    await ensureMonacoLanguage(language);
+  } catch {
+    return;
+  }
+  if (seq !== modelSeq) return;
+  if (originalModel) monaco.editor.setModelLanguage(originalModel, language);
+  if (modifiedModel) monaco.editor.setModelLanguage(modifiedModel, language);
+}
+
 function ensureModels() {
   if (!editor) return;
-  const language = normalizeLanguage(props.language);
+  const language = normalizeMonacoLanguage(props.language);
+  modelSeq += 1;
+  const seq = modelSeq;
 
   const prevOriginalModel = originalModel;
   const prevModifiedModel = modifiedModel;
@@ -96,6 +107,7 @@ function ensureModels() {
   editor.updateOptions({ignoreTrimWhitespace: !!props.ignoreTrimWhitespace});
   editor.getOriginalEditor().updateOptions({readOnly: true});
   editor.getModifiedEditor().updateOptions({readOnly: true});
+  void applyLanguageToModels(language, seq);
   scheduleEmitLayout();
 }
 

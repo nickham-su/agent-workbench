@@ -1,6 +1,7 @@
 import path from "node:path";
 import { TextDecoder } from "node:util";
 import { createHash } from "node:crypto";
+import type { Readable } from "node:stream";
 import type {
   FileCreateResponse,
   FileDeleteResponse,
@@ -15,6 +16,7 @@ import type {
   FileWriteResponse,
   WorkspaceFileCreateRequest,
   WorkspaceFileDeleteRequest,
+  WorkspaceFileUploadResult,
   WorkspaceFileListRequest,
   WorkspaceFileMkdirRequest,
   WorkspaceFileReadRequest,
@@ -26,8 +28,9 @@ import type {
 import type { AppContext } from "../../app/context.js";
 import { HttpError } from "../../app/errors.js";
 import { workspaceRoot } from "../../infra/fs/paths.js";
+import { withWorkspaceRepoLock } from "../../infra/locks/workspaceRepoLock.js";
 import { withWorkspaceLock } from "../../infra/locks/workspaceLock.js";
-import { getWorkspace, listWorkspaceRepos } from "./workspace.store.js";
+import { getWorkspace, getWorkspaceRepoByDirName, listWorkspaceRepos } from "./workspace.store.js";
 import { getSearchSettings } from "../settings/settings.service.js";
 import { runFileSearch, SEARCH_FORCED_EXCLUDES } from "../files/file-search.js";
 import {
@@ -43,6 +46,7 @@ import {
 } from "../files/files.service.js";
 
 const DENYLIST_SEGMENTS = [".git"];
+const MAX_DOWNLOAD_DIR_BYTES = 100 * 1024 * 1024;
 
 type WorkspaceScope = {
   workspaceId: string;
@@ -53,6 +57,20 @@ type WorkspaceScope = {
 type WorkspaceDomain =
   | { kind: "workspaceRoot"; rel: string }
   | { kind: "repo"; dirName: string; rel: string };
+
+type WorkspaceUploadTarget =
+  | { kind: "workspaceRoot"; workspaceId: string; rootAbs: string; dirRel: string; dirAbs: string }
+  | { kind: "repo"; workspaceId: string; dirName: string; rootAbs: string; dirRel: string; dirAbs: string };
+
+type WorkspaceDownloadEntry = {
+  absPath: string;
+  relPath: string;
+  size: number;
+};
+
+type WorkspaceDownloadTarget =
+  | { kind: "file"; absPath: string; fileName: string; size: number }
+  | { kind: "dir"; absPath: string; zipRootName: string; entries: WorkspaceDownloadEntry[]; totalBytes: number };
 
 type PreviewFailReason = "too_large" | "binary" | "decode_failed" | "unsafe_path" | "missing";
 
@@ -315,6 +333,42 @@ function assertValidPath(rel: string) {
   if (!rel || !isValidRelativePath(rel)) throw new HttpError(400, "Invalid path");
   if (hasDeniedSegment(rel)) throw new HttpError(400, "Invalid path");
   if (isRootRelPath(rel)) throw new HttpError(400, "Invalid path");
+}
+
+function assertValidDownloadPath(rel: string) {
+  if (rel && !isValidRelativePath(rel)) throw new HttpError(400, "Invalid path");
+  if (hasDeniedSegment(rel)) throw new HttpError(400, "Invalid path");
+}
+
+function isValidUploadFileName(name: string) {
+  if (!name) return false;
+  if (name.includes("/") || name.includes("\\")) return false;
+  return true;
+}
+
+function workspaceDirPath(target: WorkspaceUploadTarget) {
+  if (target.kind === "repo") {
+    return prefixWorkspacePath(target.dirName, target.dirRel);
+  }
+  return target.dirRel;
+}
+
+function resolveWorkspaceRepoRootAbs(ctx: AppContext, scope: WorkspaceScope, dirName: string) {
+  const wsRepo = getWorkspaceRepoByDirName(ctx.db, scope.workspaceId, dirName);
+  if (!wsRepo) throw new HttpError(404, "Workspace repo not found");
+  const safePath = safeResolveUnderRoot({ root: scope.rootAbs, rel: dirName });
+  if (!safePath) throw new HttpError(400, "Invalid path");
+  const repoAbs = path.resolve(wsRepo.path);
+  if (safePath !== repoAbs) throw new HttpError(400, "Invalid path");
+  return repoAbs;
+}
+
+async function drainStream(stream: Readable) {
+  return await new Promise<void>((resolve, reject) => {
+    stream.on("error", reject);
+    stream.on("end", resolve);
+    stream.resume();
+  });
 }
 
 async function listUnderRoot(rootAbs: string, dir: string): Promise<FileListResponse> {
@@ -836,4 +890,227 @@ export async function deleteWorkspacePath(ctx: AppContext, workspaceIdRaw: strin
   return withWorkspaceLock({ workspaceId: scope.workspaceId }, async () => {
     return deleteUnderRoot(scope.rootAbs, rel, parseBool((body as any).recursive, true));
   });
+}
+
+export async function resolveWorkspaceUploadTarget(
+  ctx: AppContext,
+  workspaceIdRaw: string,
+  dirRaw: unknown
+): Promise<{ dir: string; target: WorkspaceUploadTarget }> {
+  const scope = buildWorkspaceScope(ctx, workspaceIdRaw);
+  const dir = normalizeDir(dirRaw);
+  assertValidDir(dir);
+
+  const domain = resolveWorkspaceDomain(dir, scope.repoDirNames);
+  if (domain.kind === "repo") {
+    const rootAbs = resolveWorkspaceRepoRootAbs(ctx, scope, domain.dirName);
+    const dirRel = domain.rel;
+    const dirAbs = safeResolveUnderRoot({ root: rootAbs, rel: dirRel || "." });
+    if (!dirAbs) throw new HttpError(400, "Invalid dir");
+    await ensureDirSafe(dirAbs);
+    await ensureRealPathUnderRoot(rootAbs, dirAbs);
+    return {
+      dir,
+      target: { kind: "repo", workspaceId: scope.workspaceId, dirName: domain.dirName, rootAbs, dirRel, dirAbs }
+    };
+  }
+
+  const rootAbs = scope.rootAbs;
+  const dirRel = dir;
+  const dirAbs = safeResolveUnderRoot({ root: rootAbs, rel: dirRel || "." });
+  if (!dirAbs) throw new HttpError(400, "Invalid dir");
+  await ensureDirSafe(dirAbs);
+  await ensureRealPathUnderRoot(rootAbs, dirAbs);
+  return { dir, target: { kind: "workspaceRoot", workspaceId: scope.workspaceId, rootAbs, dirRel, dirAbs } };
+}
+
+export async function withWorkspaceUploadLock<T>(target: WorkspaceUploadTarget, fn: () => Promise<T>): Promise<T> {
+  if (target.kind === "repo") {
+    return withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, fn);
+  }
+  return withWorkspaceLock({ workspaceId: target.workspaceId }, fn);
+}
+
+export async function saveWorkspaceUploadFile(
+  target: WorkspaceUploadTarget,
+  params: { filename: string; stream: Readable }
+): Promise<WorkspaceFileUploadResult> {
+  const name = typeof params.filename === "string" ? params.filename.trim() : "";
+  const basePath = workspaceDirPath(target);
+  const pathInWorkspace = name ? joinRelPath(basePath, name) : basePath || "";
+
+  if (!isValidUploadFileName(name)) {
+    await drainStream(params.stream);
+    return { name, path: pathInWorkspace, ok: false, reason: "Invalid file name" };
+  }
+
+  const relPath = joinRelPath(target.dirRel, name);
+  try {
+    assertValidPath(relPath);
+  } catch (err) {
+    await drainStream(params.stream);
+    return {
+      name,
+      path: pathInWorkspace,
+      ok: false,
+      reason: err instanceof Error ? err.message : String(err)
+    };
+  }
+
+  const absPath = safeResolveUnderRoot({ root: target.rootAbs, rel: relPath });
+  if (!absPath || absPath === target.rootAbs) {
+    await drainStream(params.stream);
+    return { name, path: pathInWorkspace, ok: false, reason: "Invalid path" };
+  }
+
+  try {
+    await ensureParentDirSafe(target.rootAbs, absPath);
+  } catch (err) {
+    await drainStream(params.stream);
+    return {
+      name,
+      path: pathInWorkspace,
+      ok: false,
+      reason: err instanceof Error ? err.message : String(err)
+    };
+  }
+
+  const fs = await import("node:fs/promises");
+  const { pipeline } = await import("node:stream/promises");
+  let handle: import("node:fs/promises").FileHandle | null = null;
+  try {
+    handle = await fs.open(absPath, "wx");
+  } catch (err: any) {
+    await drainStream(params.stream);
+    const reason = err && err.code === "EEXIST" ? "File already exists" : err instanceof Error ? err.message : "Upload failed";
+    return { name, path: pathInWorkspace, ok: false, reason };
+  }
+
+  try {
+    const writeStream = handle.createWriteStream();
+    await pipeline(params.stream, writeStream);
+  } catch (err) {
+    try {
+      await fs.unlink(absPath);
+    } catch {
+      // 忽略
+    }
+    return { name, path: pathInWorkspace, ok: false, reason: err instanceof Error ? err.message : "Upload failed" };
+  } finally {
+    try {
+      await handle.close();
+    } catch {
+      // 忽略
+    }
+  }
+
+  return { name, path: pathInWorkspace, ok: true };
+}
+
+async function collectWorkspaceDownloadEntries(params: {
+  rootAbs: string;
+  dirAbs: string;
+}): Promise<{ entries: WorkspaceDownloadEntry[]; totalBytes: number }> {
+  const fs = await import("node:fs/promises");
+  const entries: WorkspaceDownloadEntry[] = [];
+  let totalBytes = 0;
+
+  const walk = async (currentAbs: string, currentRel: string) => {
+    let dirents: import("node:fs").Dirent[];
+    try {
+      dirents = await fs.readdir(currentAbs, { withFileTypes: true });
+    } catch (err: any) {
+      if (err && (err.code === "EACCES" || err.code === "EPERM")) throw new HttpError(403, "Permission denied");
+      throw err;
+    }
+
+    for (const dirent of dirents) {
+      const name = dirent.name;
+      if (!name) continue;
+      if (DENYLIST_SEGMENTS.includes(name)) {
+        throw new HttpError(400, "Directory contains .git");
+      }
+      const childAbs = path.join(currentAbs, name);
+      const childRel = currentRel ? `${currentRel}/${name}` : name;
+
+      let st: import("node:fs").Stats;
+      try {
+        st = await fs.lstat(childAbs);
+      } catch (err: any) {
+        if (err && (err.code === "EACCES" || err.code === "EPERM")) throw new HttpError(403, "Permission denied");
+        throw err;
+      }
+
+      if (st.isSymbolicLink()) throw new HttpError(400, "Invalid path");
+
+      if (st.isDirectory()) {
+        await ensureRealPathUnderRoot(params.rootAbs, childAbs);
+        await walk(childAbs, childRel);
+        continue;
+      }
+
+      if (st.isFile()) {
+        await ensureRealPathUnderRoot(params.rootAbs, childAbs);
+        totalBytes += st.size;
+        if (totalBytes > MAX_DOWNLOAD_DIR_BYTES) throw new HttpError(413, "Directory too large");
+        entries.push({ absPath: childAbs, relPath: childRel, size: st.size });
+        continue;
+      }
+
+      throw new HttpError(400, "Invalid path");
+    }
+  };
+
+  await walk(params.dirAbs, "");
+  return { entries, totalBytes };
+}
+
+export async function resolveWorkspaceDownloadTarget(
+  ctx: AppContext,
+  workspaceIdRaw: string,
+  pathRaw: unknown
+): Promise<WorkspaceDownloadTarget> {
+  const scope = buildWorkspaceScope(ctx, workspaceIdRaw);
+  const rel = normalizeDir(pathRaw);
+  assertValidDownloadPath(rel);
+
+  const domain = resolveWorkspaceDomain(rel, scope.repoDirNames);
+  const rootAbs = domain.kind === "repo" ? resolveWorkspaceRepoRootAbs(ctx, scope, domain.dirName) : scope.rootAbs;
+  const targetRel = domain.kind === "repo" ? domain.rel : rel;
+  const absPath = safeResolveUnderRoot({ root: rootAbs, rel: targetRel || "." });
+  if (!absPath) throw new HttpError(400, "Invalid path");
+
+  const fs = await import("node:fs/promises");
+  let st: import("node:fs").Stats;
+  try {
+    st = await fs.lstat(absPath);
+  } catch (err: any) {
+    if (err && (err.code === "ENOENT" || err.code === "ENOTDIR")) throw new HttpError(404, "Path not found");
+    if (err && (err.code === "EACCES" || err.code === "EPERM")) throw new HttpError(403, "Permission denied");
+    throw err;
+  }
+
+  if (st.isSymbolicLink()) throw new HttpError(400, "Invalid path");
+  await ensureRealPathUnderRoot(rootAbs, absPath);
+
+  if (st.isFile()) {
+    return { kind: "file", absPath, fileName: path.basename(absPath), size: st.size };
+  }
+
+  if (!st.isDirectory()) throw new HttpError(409, "Not a directory");
+
+  const ws = getWorkspace(ctx.db, scope.workspaceId);
+  if (!ws) throw new HttpError(404, "Workspace not found");
+
+  let zipRootName = "";
+  if (!rel) {
+    zipRootName = ws.dirName || "workspace";
+  } else if (domain.kind === "repo" && !domain.rel) {
+    zipRootName = domain.dirName;
+  } else {
+    zipRootName = path.basename(rel);
+  }
+
+  const { entries, totalBytes } = await collectWorkspaceDownloadEntries({ rootAbs, dirAbs: absPath });
+  return { kind: "dir", absPath, zipRootName, entries, totalBytes };
 }

@@ -41,6 +41,9 @@
             :active-tab-key="activeTabKey"
             :on-active-tab-update="onActiveTabUpdate"
             :request-close-tab="requestCloseTab"
+            :request-close-other-tabs="requestCloseOtherTabs"
+            :request-close-all-tabs="requestCloseAllTabs"
+            :on-tab-context-menu="onTabContextMenu"
           />
 
           <div class="flex-1 min-h-0 relative">
@@ -84,7 +87,7 @@
   >
     <a-form layout="vertical">
       <a-form-item :label="t('files.form.nameLabel')" required>
-        <a-input v-model:value="createModal.name" :placeholder="t('files.form.namePlaceholder')" />
+        <a-input ref="createNameInputRef" v-model:value="createModal.name" :placeholder="t('files.form.namePlaceholder')" />
       </a-form-item>
     </a-form>
   </a-modal>
@@ -97,7 +100,7 @@
   >
     <a-form layout="vertical">
       <a-form-item :label="t('files.form.nameLabel')" required>
-        <a-input v-model:value="renameModal.name" :placeholder="t('files.form.renamePlaceholder')" />
+        <a-input ref="renameNameInputRef" v-model:value="renameModal.name" :placeholder="t('files.form.renamePlaceholder')" />
       </a-form-item>
     </a-form>
   </a-modal>
@@ -125,15 +128,18 @@ import {
   ApiError,
   createWorkspaceFile,
   deleteWorkspacePath,
+  downloadWorkspacePath,
   listWorkspaceFiles,
   mkdirWorkspacePath,
   readWorkspaceFileText,
   renameWorkspacePath,
+  uploadWorkspaceFiles,
   writeWorkspaceFileText
 } from "@/shared/api";
 import { ensureMonacoEnvironment } from "@/shared/monaco/monacoEnv";
 import { applyMonacoPanelTheme } from "@/shared/monaco/monacoTheme";
 import { ensureMonacoLanguage } from "@/shared/monaco/languageLoader";
+import { inferLanguageFromPath, normalizeMonacoLanguage } from "@/shared/monaco/languageUtils";
 import { editorFontSize } from "@/shared/settings/uiFontSizes";
 
 
@@ -204,6 +210,11 @@ const renameModal = reactive({
   submitting: false
 });
 
+type SimpleInputRef = { focus?: () => void; select?: () => void };
+
+const createNameInputRef = ref<SimpleInputRef | null>(null);
+const renameNameInputRef = ref<SimpleInputRef | null>(null);
+
 const selectedNode = ref<TreeNode | null>(null);
 const canRenameDelete = computed(() => {
   const rel = selectedNode.value?.data.path ?? "";
@@ -225,6 +236,31 @@ const isTreeEmpty = computed(() => {
 
 const activeTab = store.activeTab;
 const fileTreeSplitRatio = ref<number>(loadFileTreeSplitRatio(props.workspaceId));
+
+watch(
+  () => createModal.open,
+  (open) => {
+    if (!open) return;
+    nextTick(() => {
+      createNameInputRef.value?.focus?.();
+    });
+  }
+);
+
+watch(
+  () => renameModal.open,
+  (open) => {
+    if (!open) return;
+    nextTick(() => {
+      const input = renameNameInputRef.value;
+      if (input?.select) {
+        input.select();
+        return;
+      }
+      input?.focus?.();
+    });
+  }
+);
 
 watch(
   () => props.workspaceId,
@@ -368,89 +404,8 @@ function handleEditorKeydown(evt: KeyboardEvent) {
   if (action) void action.run();
 }
 
-function normalizeLanguage(lang?: string) {
-  if (!lang) return undefined;
-  if (lang === "vue") return "html";
-  if (lang === "c") return "cpp";
-  return lang;
-}
-
-function inferLanguageFromPath(filePath: string) {
-  const base = baseName(filePath);
-  if (base === "Dockerfile") return "dockerfile";
-  if (base.startsWith("Dockerfile.")) return "dockerfile";
-
-  const dotIdx = filePath.lastIndexOf(".");
-  const ext = dotIdx >= 0 ? filePath.slice(dotIdx).toLowerCase() : "";
-  switch (ext) {
-    case ".ts":
-    case ".tsx":
-      return "typescript";
-    case ".js":
-    case ".jsx":
-      return "javascript";
-    case ".vue":
-      return "vue";
-    case ".py":
-      return "python";
-    case ".java":
-      return "java";
-    case ".go":
-      return "go";
-    case ".rs":
-      return "rust";
-    case ".php":
-      return "php";
-    case ".rb":
-      return "ruby";
-    case ".kt":
-    case ".kts":
-      return "kotlin";
-    case ".cs":
-      return "csharp";
-    case ".c":
-    case ".h":
-      return "cpp";
-    case ".cc":
-    case ".cpp":
-    case ".cxx":
-    case ".hh":
-    case ".hpp":
-    case ".hxx":
-      return "cpp";
-    case ".json":
-    case ".jsonc":
-      return "json";
-    case ".md":
-      return "markdown";
-    case ".css":
-    case ".scss":
-    case ".less":
-      return "css";
-    case ".html":
-    case ".htm":
-      return "html";
-    case ".yml":
-    case ".yaml":
-      return "yaml";
-    case ".sql":
-      return "sql";
-    case ".sh":
-    case ".bash":
-      return "shell";
-    case ".ps1":
-      return "powershell";
-    case ".xml":
-      return "xml";
-    case ".swift":
-      return "swift";
-    default:
-      return undefined;
-  }
-}
-
 async function ensureAndApplyLanguage(model: monaco.editor.ITextModel, languageId?: string) {
-  const normalized = normalizeLanguage(languageId);
+  const normalized = normalizeMonacoLanguage(languageId);
   if (!normalized || normalized === "plaintext") return;
   try {
     await ensureMonacoLanguage(normalized);
@@ -764,6 +719,81 @@ function copySelectedWorkspacePath() {
   return copyTextWithFeedback(path, "workspacePath");
 }
 
+function downloadFallbackName(node: TreeNode) {
+  if (node.data.kind === "dir") {
+    if (!node.data.path) return `${workspaceRootName.value || "workspace"}.zip`;
+    return `${baseName(node.data.path)}.zip`;
+  }
+  return baseName(node.data.path);
+}
+
+function triggerDownload(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename || "download";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 500);
+}
+
+async function pickUploadFiles(): Promise<File[]> {
+  return await new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.multiple = true;
+    input.style.position = "fixed";
+    input.style.left = "-9999px";
+    const cleanup = () => {
+      input.remove();
+    };
+    input.addEventListener("change", () => {
+      const files = Array.from(input.files ?? []);
+      cleanup();
+      resolve(files);
+    });
+    document.body.appendChild(input);
+    input.click();
+  });
+}
+
+async function uploadSelectedFiles() {
+  const node = selectedNode.value;
+  if (!node || node.data.kind !== "dir") return;
+  const files = await pickUploadFiles();
+  if (files.length === 0) return;
+  const dir = node.data.path ?? "";
+  const msgKey = `files-upload-${Date.now()}`;
+  message.loading({ content: t("files.upload.uploading"), key: msgKey, duration: 0 });
+  try {
+    const res = await uploadWorkspaceFiles({ workspaceId: props.workspaceId, dir, files });
+    await refreshDir(dir);
+    const failed = res.results.filter((item) => !item.ok);
+    if (failed.length > 0) {
+      const names = failed.map((item) => item.name || item.path).filter(Boolean).join(", ");
+      message.error({ content: t("files.upload.partialFailed", { names }), key: msgKey });
+      return;
+    }
+    message.success({ content: t("files.upload.success"), key: msgKey });
+  } catch (err) {
+    message.error({ content: err instanceof Error ? err.message : String(err), key: msgKey });
+  }
+}
+
+async function downloadSelected() {
+  const node = selectedNode.value;
+  if (!node) return;
+  const path = node.data.path ?? "";
+  try {
+    const res = await downloadWorkspacePath({ workspaceId: props.workspaceId, path });
+    const filename = res.filename || downloadFallbackName(node);
+    triggerDownload(res.blob, filename);
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
+  }
+}
+
 function onContextMenuClick(info: { key: string }) {
   const key = String((info as any)?.key ?? "");
   if (!key) return;
@@ -777,6 +807,14 @@ function onContextMenuClick(info: { key: string }) {
   }
   if (key === "copyWorkspacePath") {
     void copySelectedWorkspacePath();
+    return;
+  }
+  if (key === "upload") {
+    void uploadSelectedFiles();
+    return;
+  }
+  if (key === "download") {
+    void downloadSelected();
     return;
   }
   if (key === "newFile") {
@@ -963,6 +1001,11 @@ function onActiveTabUpdate(key: string | number) {
   setActiveTabByPath(k);
 }
 
+function onTabContextMenu(path: string) {
+  if (!path) return;
+  if (activeTabKey.value !== path) setActiveTabByPath(path);
+}
+
 function requestCloseTab(path: string) {
   const tab = getTab(path);
   if (!tab) return;
@@ -977,6 +1020,17 @@ function requestCloseTab(path: string) {
     return;
   }
   closeTab(path);
+}
+
+function requestCloseOtherTabs(path: string) {
+  if (!getTab(path)) return;
+  const toClose = tabs.filter((tab) => tab.path !== path && !tab.dirty).map((tab) => tab.path);
+  for (const target of toClose) closeTab(target);
+}
+
+function requestCloseAllTabs() {
+  const toClose = tabs.filter((tab) => !tab.dirty).map((tab) => tab.path);
+  for (const target of toClose) closeTab(target);
 }
 
 function closeTab(path: string) {

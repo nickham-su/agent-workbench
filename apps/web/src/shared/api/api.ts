@@ -29,6 +29,7 @@ import type {
   WorkspaceFileRenameRequest,
   WorkspaceFileSearchRequest,
   WorkspaceFileStatRequest,
+  WorkspaceFileUploadResponse,
   WorkspaceFileWriteRequest,
   CreateTerminalRequest,
   CreateWorkspaceRequest,
@@ -37,6 +38,8 @@ import type {
   CredentialRecord,
   GenerateSshKeypairResponse,
   FileCompareResponse,
+  GitBranchesRequest,
+  GitBranchesResponse,
   GitCheckoutRequest,
   GitCheckoutResponse,
   GitCommitRequest,
@@ -122,6 +125,26 @@ function toApiError(err: unknown) {
   return new ApiError({
     message: err instanceof Error ? err.message : String(err)
   });
+}
+
+function parseContentDispositionFilename(value: string | undefined) {
+  if (!value) return null;
+  const parts = value.split(";").map((part) => part.trim());
+  const star = parts.find((part) => part.toLowerCase().startsWith("filename*="));
+  if (star) {
+    const raw = star.slice("filename*=".length).replace(/^\"|\"$/g, "");
+    const encoded = raw.includes("''") ? raw.split("''")[1] ?? "" : raw;
+    try {
+      return decodeURIComponent(encoded);
+    } catch {
+      return encoded || null;
+    }
+  }
+  const plain = parts.find((part) => part.toLowerCase().startsWith("filename="));
+  if (plain) {
+    return plain.slice("filename=".length).replace(/^\"|\"$/g, "") || null;
+  }
+  return null;
 }
 
 export async function listRepos() {
@@ -473,6 +496,15 @@ export async function gitCheckout(body: GitCheckoutRequest) {
   }
 }
 
+export async function gitBranches(body: GitBranchesRequest) {
+  try {
+    const res = await client.post<GitBranchesResponse>("/git/branches", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
 export async function getGitStatus(body: GitStatusRequest) {
   try {
     const res = await client.post<GitStatusResponse>("/git/status", body);
@@ -666,6 +698,53 @@ export async function deleteWorkspacePath(params: { workspaceId: string } & Work
     const res = await client.post<FileDeleteResponse>(`/workspaces/${workspaceId}/files/delete`, body);
     return res.data;
   } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function uploadWorkspaceFiles(params: { workspaceId: string; dir: string; files: File[] }) {
+  try {
+    const { workspaceId, dir, files } = params;
+    const form = new FormData();
+    for (const file of files) {
+      form.append("files", file, file.name);
+    }
+    const res = await client.post<WorkspaceFileUploadResponse>(`/workspaces/${workspaceId}/files/upload`, form, {
+      params: { dir }
+    });
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function downloadWorkspacePath(params: { workspaceId: string; path: string }) {
+  const { workspaceId, path } = params;
+  try {
+    const res = await client.get<Blob>(`/workspaces/${workspaceId}/files/download`, {
+      params: { path },
+      responseType: "blob"
+    });
+    const header = res.headers?.["content-disposition"] as string | undefined;
+    const filename = parseContentDispositionFilename(header);
+    return { blob: res.data, filename };
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      const data = err.response?.data;
+      if (data instanceof Blob) {
+        let message = err.message;
+        let code: string | undefined;
+        try {
+          const text = await data.text();
+          const json = JSON.parse(text);
+          if (typeof json?.message === "string") message = json.message;
+          if (typeof json?.code === "string") code = json.code;
+        } catch {
+          // 忽略解析失败
+        }
+        throw new ApiError({ message, code, status: err.response?.status });
+      }
+    }
     throw toApiError(err);
   }
 }

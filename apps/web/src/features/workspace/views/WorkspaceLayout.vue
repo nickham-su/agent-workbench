@@ -112,9 +112,10 @@ import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref,
 import { Modal, message } from "ant-design-vue";
 import { CodeOutlined, FolderOpenOutlined, SearchOutlined } from "@ant-design/icons-vue";
 import { useI18n } from "vue-i18n";
-import type { GitPushRequest, GitStatusResponse, RepoBranchesResponse, WorkspaceDetail } from "@agent-workbench/shared";
+import type { GitBranchesResponse, GitPushRequest, GitStatusResponse, WorkspaceDetail } from "@agent-workbench/shared";
 import {
   ApiError,
+  gitBranches,
   gitCheckout,
   getGitStatus,
   getWorkspace,
@@ -122,12 +123,9 @@ import {
   listChanges,
   pullWorkspace,
   pushWorkspace,
-  repoBranches,
   setWorkspaceGitIdentity,
-  syncRepo,
   updateGitGlobalIdentity
 } from "@/shared/api";
-import { waitRepoSettledOrThrow } from "@/features/repos/stores/repos";
 import { workspaceHostKey, type DockArea, type ToolCall, type ToolCallEnvelope, type WorkspaceHostApi, type WorkspaceToolCommandMap, type WorkspaceToolEvent } from "@/features/workspace/host";
 import { workspaceContextKey } from "@/features/workspace/context";
 import type { ToolRuntime, ToolRuntimeContext } from "@/features/workspace/runtime";
@@ -927,7 +925,7 @@ function onChangesSummary(summary: { unstaged: number; staged: number }) {
 
 const branchesLoading = ref(false);
 const refreshBranchesLoading = ref(false);
-const branches = ref<RepoBranchesResponse["branches"]>([]);
+const branches = ref<GitBranchesResponse["branches"]>([]);
 const branchOptions = computed(() => branches.value.map((b) => ({ label: b.name, value: b.name })));
 
 function formatRepoDisplayName(rawUrl: string) {
@@ -1296,15 +1294,15 @@ async function refreshChangesSummary() {
 }
 
 async function refreshBranches() {
-  const repo = currentRepo.value;
-  if (!repo) {
+  const target = currentTarget.value;
+  if (!target) {
     branches.value = [];
     repoDefaultBranch.value = null;
     return;
   }
   branchesLoading.value = true;
   try {
-    const res = await repoBranches(repo.repo.id);
+    const res = await gitBranches({ target, fetch: false });
     branches.value = res.branches;
     repoDefaultBranch.value = res.defaultBranch ?? null;
   } catch (err) {
@@ -1314,7 +1312,7 @@ async function refreshBranches() {
   }
 }
 
-function pickCheckoutBranch(params: { branches: RepoBranchesResponse["branches"]; defaultBranch: string | null }) {
+function pickCheckoutBranch(params: { branches: GitBranchesResponse["branches"]; defaultBranch: string | null }) {
   const existing = checkoutBranch.value.trim();
   if (existing && params.branches.some((b) => b.name === existing)) return existing;
 
@@ -1326,16 +1324,14 @@ function pickCheckoutBranch(params: { branches: RepoBranchesResponse["branches"]
 }
 
 async function refreshBranchesWithSync() {
-  const repo = currentRepo.value;
-  if (!repo) return;
+  const target = currentTarget.value;
+  if (!target) return;
   if (gitBusy.value) return;
   if (refreshBranchesLoading.value) return;
 
   refreshBranchesLoading.value = true;
   try {
-    await syncRepo(repo.repo.id);
-    await waitRepoSettledOrThrow(repo.repo.id, { t });
-    const res = await repoBranches(repo.repo.id);
+    const res = await gitBranches({ target, fetch: true });
     branches.value = res.branches;
     repoDefaultBranch.value = res.defaultBranch ?? null;
     checkoutBranch.value = pickCheckoutBranch({ branches: res.branches, defaultBranch: repoDefaultBranch.value });

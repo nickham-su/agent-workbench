@@ -125,7 +125,6 @@
             <a-button
               size="small"
               type="text"
-              danger
               class="opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity"
               @click.stop="openDetach(ws)"
               :title="t('workspaces.actions.detachRepo')"
@@ -206,7 +205,7 @@
     <a-modal v-model:open="editOpen" :title="t('workspaces.rename.modalTitle')" :confirm-loading="renaming" @ok="submitRename">
       <a-form layout="vertical">
         <a-form-item :label="t('workspaces.rename.titleLabel')" required>
-          <a-input v-model:value="editTitle" :placeholder="t('workspaces.rename.titlePlaceholder')" />
+          <a-input ref="editTitleInputRef" v-model:value="editTitle" :placeholder="t('workspaces.rename.titlePlaceholder')" />
         </a-form-item>
 
         <a-form-item v-if="editTerminalCredentialState === 'available'" :label="t('workspaces.create.terminalCredentialLabel')">
@@ -281,7 +280,7 @@
 <script setup lang="ts">
 import { Modal, message } from "ant-design-vue";
 import { DeleteOutlined, EditOutlined, MinusOutlined, PlusOutlined, SearchOutlined } from "@ant-design/icons-vue";
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 import type { RepoRecord, UpdateWorkspaceRequest, WorkspaceDetail } from "@agent-workbench/shared";
@@ -318,6 +317,9 @@ const useTerminalCredentialTouched = ref(false);
 const editOpen = ref(false);
 const renaming = ref(false);
 const editTitle = ref("");
+type SimpleInputRef = { focus?: () => void; select?: () => void };
+
+const editTitleInputRef = ref<SimpleInputRef | null>(null);
 const editingWorkspace = ref<WorkspaceDetail | null>(null);
 const editUseTerminalCredential = ref(false);
 
@@ -494,6 +496,21 @@ const canDetach = computed(() => {
   if (detachBlockedReason.value) return false;
   return Boolean(detachRepoOptions.value.find((o) => o.value === detachRepoId.value));
 });
+
+watch(
+  () => editOpen.value,
+  (open) => {
+    if (!open) return;
+    nextTick(() => {
+      const input = editTitleInputRef.value;
+      if (input?.select) {
+        input.select();
+        return;
+      }
+      input?.focus?.();
+    });
+  }
+);
 
 watch(
   () => selectedRepoIds.value,

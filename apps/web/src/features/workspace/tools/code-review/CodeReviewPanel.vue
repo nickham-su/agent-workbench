@@ -274,7 +274,7 @@
               ref="diffViewerRef"
               :original="compare?.base.content || ''"
               :modified="compare?.current.content || ''"
-              :language="compare?.language"
+              :language="compareLanguage"
               @layout="onDiffLayout"
           />
           <div v-if="compareLoading"
@@ -294,6 +294,7 @@
     <a-form layout="vertical">
       <a-form-item :label="t('codeReview.commit.messageLabel')" required>
         <a-textarea
+            ref="commitMessageInputRef"
             v-model:value="commitMessage"
             :auto-size="{ minRows: 4, maxRows: 10 }"
             :placeholder="t('codeReview.commit.messagePlaceholder')"
@@ -357,6 +358,7 @@ import {
   stageWorkspace,
   unstageWorkspace
 } from "@/shared/api";
+import { inferLanguageFromPath } from "@/shared/monaco/languageUtils";
 import MonacoDiffViewer from "@/shared/components/MonacoDiffViewer.vue";
 import GitIdentityModal from "@/shared/components/GitIdentityModal.vue";
 
@@ -517,6 +519,11 @@ const lastSelectedIndexByMode = ref<Record<ChangeMode, number>>({unstaged: 0, st
 const compareLoading = ref(false);
 const compareError = ref<string | null>(null);
 const compare = ref<FileCompareResponse | null>(null);
+const compareLanguage = computed(() => {
+  const current = compare.value;
+  if (!current) return undefined;
+  return current.language ?? inferLanguageFromPath(current.path);
+});
 const diffHeaderVars = ref<Record<string, string>>({});
 const diffViewerRef = ref<{ goToFirstDiff: () => void; goToPreviousDiff: () => void; goToNextDiff: () => void } | null>(null);
 let compareReqSeq = 0;
@@ -549,12 +556,23 @@ const stagedFiles = computed(() => stableSort(staged.value, compareChangeItemFor
 
 const commitOpen = ref(false);
 const commitMessage = ref("");
+const commitMessageInputRef = ref<{ focus?: () => void } | null>(null);
 const commitLoading = ref<"commit" | "commitAndPush" | null>(null);
 const canCommit = computed(() => stagedFiles.value.length > 0 && commitMessage.value.trim().length > 0 && !props.gitBusy);
 
 const identityOpen = ref(false);
 const pendingCommitMode = ref<"commit" | "commitAndPush" | null>(null);
 const identitySubmitting = ref(false);
+
+watch(
+  () => commitOpen.value,
+  (open) => {
+    if (!open) return;
+    nextTick(() => {
+      commitMessageInputRef.value?.focus?.();
+    });
+  }
+);
 
 function onDiffLayout(layout: { originalWidth: number; modifiedWidth: number; splitterWidth: number }) {
   diffHeaderVars.value = {

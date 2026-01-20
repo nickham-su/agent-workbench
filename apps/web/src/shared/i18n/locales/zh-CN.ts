@@ -403,14 +403,18 @@ export default {
     actions: {
       newFile: "新建文件",
       newFolder: "新建文件夹",
+      upload: "上传",
       copyName: "复制名称",
       copyPath: "复制仓库内路径",
       copyRepoPath: "复制仓库内路径",
       copyWorkspacePath: "复制工作区路径",
+      download: "下载",
       rename: "重命名",
       delete: "删除",
       refresh: "刷新",
-      close: "关闭"
+      close: "关闭",
+      closeOthers: "关闭其他",
+      closeAll: "关闭所有"
     },
     copy: {
       nameCopied: "已复制名称",
@@ -418,6 +422,11 @@ export default {
       repoPathCopied: "已复制仓库内路径",
       workspacePathCopied: "已复制工作区路径",
       failed: "复制失败"
+    },
+    upload: {
+      uploading: "正在上传…",
+      success: "上传完成",
+      partialFailed: "以下文件上传失败: {names}"
     },
     status: {
       saving: "正在保存…"

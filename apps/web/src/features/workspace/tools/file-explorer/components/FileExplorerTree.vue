@@ -43,6 +43,13 @@
                   {{ t("files.actions.newFolder") }}
                 </a-menu-item>
                 <a-menu-divider v-if="selectedNode?.data.kind === 'dir'" />
+                <a-menu-item v-if="selectedNode?.data.kind === 'dir'" key="upload">
+                  {{ t("files.actions.upload") }}
+                </a-menu-item>
+                <a-menu-item v-if="selectedNode" key="download">
+                  {{ t("files.actions.download") }}
+                </a-menu-item>
+                <a-menu-divider v-if="selectedNode" />
                 <a-menu-item v-if="selectedNode" key="copyName">
                   {{ t("files.actions.copyName") }}
                 </a-menu-item>
