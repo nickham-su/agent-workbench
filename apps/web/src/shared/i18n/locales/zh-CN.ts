@@ -410,7 +410,9 @@ export default {
       rename: "重命名",
       delete: "删除",
       refresh: "刷新",
-      close: "关闭"
+      close: "关闭",
+      closeOthers: "关闭其他",
+      closeAll: "关闭所有"
     },
     copy: {
       nameCopied: "已复制名称",

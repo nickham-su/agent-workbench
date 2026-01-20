@@ -41,6 +41,9 @@
             :active-tab-key="activeTabKey"
             :on-active-tab-update="onActiveTabUpdate"
             :request-close-tab="requestCloseTab"
+            :request-close-other-tabs="requestCloseOtherTabs"
+            :request-close-all-tabs="requestCloseAllTabs"
+            :on-tab-context-menu="onTabContextMenu"
           />
 
           <div class="flex-1 min-h-0 relative">
@@ -84,7 +87,7 @@
   >
     <a-form layout="vertical">
       <a-form-item :label="t('files.form.nameLabel')" required>
-        <a-input v-model:value="createModal.name" :placeholder="t('files.form.namePlaceholder')" />
+        <a-input ref="createNameInputRef" v-model:value="createModal.name" :placeholder="t('files.form.namePlaceholder')" />
       </a-form-item>
     </a-form>
   </a-modal>
@@ -97,7 +100,7 @@
   >
     <a-form layout="vertical">
       <a-form-item :label="t('files.form.nameLabel')" required>
-        <a-input v-model:value="renameModal.name" :placeholder="t('files.form.renamePlaceholder')" />
+        <a-input ref="renameNameInputRef" v-model:value="renameModal.name" :placeholder="t('files.form.renamePlaceholder')" />
       </a-form-item>
     </a-form>
   </a-modal>
@@ -112,6 +115,7 @@ export default {
 <script setup lang="ts">
 import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { Modal, message } from "ant-design-vue";
+import type { InputRef } from "ant-design-vue";
 import { useI18n } from "vue-i18n";
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
 import "monaco-editor/min/vs/editor/editor.main.css";
@@ -134,6 +138,7 @@ import {
 import { ensureMonacoEnvironment } from "@/shared/monaco/monacoEnv";
 import { applyMonacoPanelTheme } from "@/shared/monaco/monacoTheme";
 import { ensureMonacoLanguage } from "@/shared/monaco/languageLoader";
+import { inferLanguageFromPath, normalizeMonacoLanguage } from "@/shared/monaco/languageUtils";
 import { editorFontSize } from "@/shared/settings/uiFontSizes";
 
 
@@ -204,6 +209,9 @@ const renameModal = reactive({
   submitting: false
 });
 
+const createNameInputRef = ref<InputRef | null>(null);
+const renameNameInputRef = ref<InputRef | null>(null);
+
 const selectedNode = ref<TreeNode | null>(null);
 const canRenameDelete = computed(() => {
   const rel = selectedNode.value?.data.path ?? "";
@@ -225,6 +233,31 @@ const isTreeEmpty = computed(() => {
 
 const activeTab = store.activeTab;
 const fileTreeSplitRatio = ref<number>(loadFileTreeSplitRatio(props.workspaceId));
+
+watch(
+  () => createModal.open,
+  (open) => {
+    if (!open) return;
+    nextTick(() => {
+      createNameInputRef.value?.focus?.();
+    });
+  }
+);
+
+watch(
+  () => renameModal.open,
+  (open) => {
+    if (!open) return;
+    nextTick(() => {
+      const input = renameNameInputRef.value;
+      if (input?.select) {
+        input.select();
+        return;
+      }
+      input?.focus?.();
+    });
+  }
+);
 
 watch(
   () => props.workspaceId,
@@ -368,89 +401,8 @@ function handleEditorKeydown(evt: KeyboardEvent) {
   if (action) void action.run();
 }
 
-function normalizeLanguage(lang?: string) {
-  if (!lang) return undefined;
-  if (lang === "vue") return "html";
-  if (lang === "c") return "cpp";
-  return lang;
-}
-
-function inferLanguageFromPath(filePath: string) {
-  const base = baseName(filePath);
-  if (base === "Dockerfile") return "dockerfile";
-  if (base.startsWith("Dockerfile.")) return "dockerfile";
-
-  const dotIdx = filePath.lastIndexOf(".");
-  const ext = dotIdx >= 0 ? filePath.slice(dotIdx).toLowerCase() : "";
-  switch (ext) {
-    case ".ts":
-    case ".tsx":
-      return "typescript";
-    case ".js":
-    case ".jsx":
-      return "javascript";
-    case ".vue":
-      return "vue";
-    case ".py":
-      return "python";
-    case ".java":
-      return "java";
-    case ".go":
-      return "go";
-    case ".rs":
-      return "rust";
-    case ".php":
-      return "php";
-    case ".rb":
-      return "ruby";
-    case ".kt":
-    case ".kts":
-      return "kotlin";
-    case ".cs":
-      return "csharp";
-    case ".c":
-    case ".h":
-      return "cpp";
-    case ".cc":
-    case ".cpp":
-    case ".cxx":
-    case ".hh":
-    case ".hpp":
-    case ".hxx":
-      return "cpp";
-    case ".json":
-    case ".jsonc":
-      return "json";
-    case ".md":
-      return "markdown";
-    case ".css":
-    case ".scss":
-    case ".less":
-      return "css";
-    case ".html":
-    case ".htm":
-      return "html";
-    case ".yml":
-    case ".yaml":
-      return "yaml";
-    case ".sql":
-      return "sql";
-    case ".sh":
-    case ".bash":
-      return "shell";
-    case ".ps1":
-      return "powershell";
-    case ".xml":
-      return "xml";
-    case ".swift":
-      return "swift";
-    default:
-      return undefined;
-  }
-}
-
 async function ensureAndApplyLanguage(model: monaco.editor.ITextModel, languageId?: string) {
-  const normalized = normalizeLanguage(languageId);
+  const normalized = normalizeMonacoLanguage(languageId);
   if (!normalized || normalized === "plaintext") return;
   try {
     await ensureMonacoLanguage(normalized);
@@ -963,6 +915,11 @@ function onActiveTabUpdate(key: string | number) {
   setActiveTabByPath(k);
 }
 
+function onTabContextMenu(path: string) {
+  if (!path) return;
+  if (activeTabKey.value !== path) setActiveTabByPath(path);
+}
+
 function requestCloseTab(path: string) {
   const tab = getTab(path);
   if (!tab) return;
@@ -977,6 +934,17 @@ function requestCloseTab(path: string) {
     return;
   }
   closeTab(path);
+}
+
+function requestCloseOtherTabs(path: string) {
+  if (!getTab(path)) return;
+  const toClose = tabs.filter((tab) => tab.path !== path && !tab.dirty).map((tab) => tab.path);
+  for (const target of toClose) closeTab(target);
+}
+
+function requestCloseAllTabs() {
+  const toClose = tabs.filter((tab) => !tab.dirty).map((tab) => tab.path);
+  for (const target of toClose) closeTab(target);
 }
 
 function closeTab(path: string) {

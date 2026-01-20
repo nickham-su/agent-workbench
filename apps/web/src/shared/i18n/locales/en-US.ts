@@ -412,7 +412,9 @@ export default {
       rename: "Rename",
       delete: "Delete",
       refresh: "Refresh",
-      close: "Close"
+      close: "Close",
+      closeOthers: "Close others",
+      closeAll: "Close all"
     },
     copy: {
       nameCopied: "Name copied",

@@ -17,7 +17,7 @@
 
     <a-form layout="vertical">
       <a-form-item :label="t('gitIdentity.form.nameLabel')" required>
-        <a-input v-model:value="name" :placeholder="t('gitIdentity.form.namePlaceholder')" />
+        <a-input ref="nameInputRef" v-model:value="name" :placeholder="t('gitIdentity.form.namePlaceholder')" />
       </a-form-item>
       <a-form-item :label="t('gitIdentity.form.emailLabel')" required>
         <a-input v-model:value="email" :placeholder="t('gitIdentity.form.emailPlaceholder', { at: '@' })" />
@@ -36,7 +36,8 @@
 
 <script setup lang="ts">
 import type { GitIdentityInput, GitIdentityScope, GitIdentityStatus, GitTarget } from "@agent-workbench/shared";
-import { computed, ref, watch } from "vue";
+import type { InputRef } from "ant-design-vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { getWorkspaceGitIdentity } from "@/shared/api";
 
@@ -67,6 +68,7 @@ const confirmLoading = computed(() => Boolean(props.loading) || submitting.value
 const statusLoading = ref(false);
 const status = ref<GitIdentityStatus | null>(null);
 
+const nameInputRef = ref<InputRef | null>(null);
 const name = ref("");
 const email = ref("");
 const scope = ref<GitIdentityScope>(props.defaultScope ?? "repo");
@@ -99,6 +101,8 @@ watch(
     submitting.value = false;
     scope.value = props.defaultScope ?? "repo";
     await refreshStatus();
+    await nextTick();
+    nameInputRef.value?.focus?.();
   }
 );
 

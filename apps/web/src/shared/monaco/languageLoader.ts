@@ -12,6 +12,7 @@ const loaders: Record<string, () => Promise<unknown>> = {
   json: () => import("monaco-editor/esm/vs/language/json/monaco.contribution.js"),
   css: () => import("monaco-editor/esm/vs/language/css/monaco.contribution.js"),
   html: () => import("monaco-editor/esm/vs/language/html/monaco.contribution.js"),
+  vue: () => import("./languages/vue.js").then((mod) => mod.registerVueLanguage()),
 
   // basic-languages
   markdown: () => import("monaco-editor/esm/vs/basic-languages/markdown/markdown.contribution.js"),

@@ -12,7 +12,7 @@
         </a-button>
       </div>
 
-      <div class="flex items-center gap-2 text-xs text-[color:var(--text-tertiary)]">
+      <div v-if="!isRepoSelectionHidden" class="flex items-center gap-2 text-xs text-[color:var(--text-tertiary)]">
         <a-radio-group v-model:value="scope" size="small">
           <a-radio value="global">{{ t("search.scope.global") }}</a-radio>
           <a-radio value="repos">{{ t("search.scope.repos") }}</a-radio>
@@ -148,6 +148,7 @@ const repoOptions = computed(() => {
     value: item.dirName
   }));
 });
+const isRepoSelectionHidden = computed(() => (props.workspaceRepos ?? []).length <= 1);
 const canSearch = computed(() => {
   if (!query.value.trim()) return false;
   if (scope.value === "global") return true;
@@ -240,9 +241,14 @@ watch(
 watch(
   () => props.workspaceRepos,
   (repos) => {
+    const repoCount = repos?.length ?? 0;
     const available = new Set((repos ?? []).map((item) => item.dirName));
     const filtered = repoDirNames.value.filter((name) => available.has(name));
     if (filtered.length !== repoDirNames.value.length) repoDirNames.value = filtered;
+    if (repoCount <= 1) {
+      scope.value = "global";
+      repoDirNames.value = [];
+    }
   },
   { immediate: true }
 );
