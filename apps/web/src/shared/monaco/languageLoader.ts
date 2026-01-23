@@ -6,12 +6,12 @@ const inflight = new Map<string, Promise<void>>();
 
 // Vite 需要静态可分析的 import 路径,用映射表方便分 chunk
 const loaders: Record<string, () => Promise<unknown>> = {
-  // Monaco 自带语言包
-  javascript: () => import("monaco-editor/esm/vs/language/typescript/monaco.contribution.js"),
-  typescript: () => import("monaco-editor/esm/vs/language/typescript/monaco.contribution.js"),
+  // 这里只需要语法高亮(tokenization),不要引入语言服务(诊断/补全/跳转等)
+  javascript: () => import("monaco-editor/esm/vs/basic-languages/javascript/javascript.contribution.js"),
+  typescript: () => import("monaco-editor/esm/vs/basic-languages/typescript/typescript.contribution.js"),
   json: () => import("monaco-editor/esm/vs/language/json/monaco.contribution.js"),
-  css: () => import("monaco-editor/esm/vs/language/css/monaco.contribution.js"),
-  html: () => import("monaco-editor/esm/vs/language/html/monaco.contribution.js"),
+  css: () => import("monaco-editor/esm/vs/basic-languages/css/css.contribution.js"),
+  html: () => import("monaco-editor/esm/vs/basic-languages/html/html.contribution.js"),
   vue: () => import("./languages/vue.js").then((mod) => mod.registerVueLanguage()),
 
   // basic-languages
