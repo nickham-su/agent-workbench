@@ -208,11 +208,9 @@ export default {
       success: "仓库已移除",
       disabledNoRepo: "当前未选择仓库",
       disabledActiveTerminals: "存在 {n} 个活跃终端,请先关闭",
-      disabledLastRepo: "工作区至少需要保留 1 个仓库",
       disabledBusy: "当前有操作进行中,请稍后再试",
       errors: {
         activeTerminals: "存在活跃终端,无法移除",
-        lastRepo: "工作区至少需要保留 1 个仓库",
         notFound: "该仓库已不存在"
       }
     },

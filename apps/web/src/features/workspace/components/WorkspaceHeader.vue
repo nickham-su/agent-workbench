@@ -4,7 +4,7 @@
       <div class="text-[color:var(--text-color)] font-semibold text-sm shrink-0">
         {{ workspace?.title || t("workspace.title") }}
       </div>
-      <div v-if="workspace" class="flex items-center gap-2 min-w-0">
+      <div v-if="workspace && workspace.repos.length > 0" class="flex items-center gap-2 min-w-0">
         <a-select
           v-model:value="repoDirName"
           size="small"
@@ -19,7 +19,7 @@
             :value="r.dirName"
             :label="`${formatRepoDisplayName(r.repo.url)} ${r.repo.url}`"
           >
-            <a-tooltip :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="top">
+            <a-tooltip :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="rightTop">
               <template #title>
                 <span class="font-mono break-all">{{ r.repo.url }}</span>
               </template>

@@ -38,7 +38,8 @@ export type WorkspaceDetail = Static<typeof WorkspaceDetailSchema>;
 
 export const CreateWorkspaceRequestSchema = Type.Object(
   {
-    repoIds: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
+    // 允许创建“空工作区”(不绑定 repo)
+    repoIds: Type.Array(Type.String({ minLength: 1 })),
     title: Type.Optional(Type.String({ minLength: 1 })),
     useTerminalCredential: Type.Optional(Type.Boolean())
   }

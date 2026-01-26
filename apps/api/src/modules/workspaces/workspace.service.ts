@@ -140,8 +140,11 @@ export async function createWorkspace(
   logger: FastifyBaseLogger,
   params: { repoIds: string[]; title?: string; useTerminalCredential?: boolean }
 ): Promise<WorkspaceRecord> {
-  const repoIds = params.repoIds.map((id) => String(id || "").trim()).filter(Boolean);
-  if (repoIds.length === 0) throw new HttpError(400, "repoIds is required");
+  const rawRepoIds = Array.isArray(params.repoIds) ? params.repoIds : [];
+  const repoIds = rawRepoIds.map((id) => String(id || "").trim()).filter(Boolean);
+  if (rawRepoIds.length > 0 && repoIds.length === 0) {
+    throw new HttpError(400, "repoIds is required");
+  }
   const unique = new Set(repoIds);
   if (unique.size !== repoIds.length) throw new HttpError(400, "repoIds contains duplicates");
 
@@ -491,9 +494,6 @@ export async function detachRepoFromWorkspace(
   const existing = listWorkspaceRepos(ctx.db, ws.id);
   const record = getWorkspaceRepoByRepoId(ctx.db, ws.id, repoId);
   if (!record) throw new HttpError(404, "Workspace repo not found", "WORKSPACE_REPO_NOT_FOUND");
-  if (existing.length <= 1) {
-    throw new HttpError(409, "Workspace must contain at least one repo", "WORKSPACE_LAST_REPO");
-  }
 
   const activeCount = countActiveTerminalsByWorkspace(ctx.db, ws.id);
   if (activeCount > 0) {

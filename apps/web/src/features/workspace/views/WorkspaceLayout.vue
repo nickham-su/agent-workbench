@@ -167,6 +167,7 @@ const repoStatusByDirName = reactive<Record<string, GitStatusResponse | null>>({
 const repoDefaultBranch = ref<string | null>(null);
 
 const workspaceRepos = computed(() => workspace.value?.repos ?? []);
+const hasRepos = computed(() => workspaceRepos.value.length > 0);
 const currentRepo = computed(() => workspaceRepos.value.find((r) => r.dirName === currentRepoDirName.value) ?? null);
 const currentTarget = computed(() => {
   if (!currentRepo.value) return null;
@@ -236,6 +237,31 @@ const tools = computed<ToolDefinition[]>(() => [
   }
 ]);
 
+function isToolEnabled(toolId: ToolId) {
+  // 无 repo 时隐藏 code review 以及其关联的 git header actions.
+  if (toolId === "codeReview") return hasRepos.value;
+  return true;
+}
+
+function pickFirstEnabledToolInArea(area: DockArea): ToolId | null {
+  const list = toolOrderByArea[area] ?? [];
+  for (const id of list) {
+    if (!isToolEnabled(id)) continue;
+    if (!toolById.value.has(id)) continue;
+    if (toolCurrentArea(id) !== area) continue;
+    return id;
+  }
+  return null;
+}
+
+function ensureActiveToolInArea(area: DockArea) {
+  const cur = activeToolIdByArea[area];
+  if (cur && isToolEnabled(cur) && toolById.value.has(cur) && toolCurrentArea(cur) === area) return;
+  const next = pickFirstEnabledToolInArea(area);
+  activeToolIdByArea[area] = next;
+  if (next) toolMinimized[next] = false;
+}
+
 const toolById = computed(() => {
   const m = new Map<ToolId, ToolDefinition>();
   for (const tool of tools.value) m.set(tool.toolId, tool);
@@ -289,6 +315,7 @@ function createToolRuntimes() {
   resetToolDots();
   if (!props.workspaceId) return;
   for (const def of tools.value) {
+    if (!isToolEnabled(def.toolId)) continue;
     if (!def.createRuntime) continue;
     const runtime = def.createRuntime({
       workspaceId: props.workspaceId,
@@ -545,6 +572,10 @@ function applyDockLayout(layout: DockLayoutV2) {
       activeToolIdByArea[area] = null;
       continue;
     }
+    if (!isToolEnabled(next)) {
+      activeToolIdByArea[area] = null;
+      continue;
+    }
     if (toolCurrentArea(next) !== area) {
       activeToolIdByArea[area] = null;
       continue;
@@ -552,7 +583,7 @@ function applyDockLayout(layout: DockLayoutV2) {
     activeToolIdByArea[area] = next;
   }
 
-  if (!activeToolIdByArea.leftTop) activeToolIdByArea.leftTop = "files";
+  for (const area of DOCK_AREAS) ensureActiveToolInArea(area);
 }
 
 async function clampDockRatiosToContainer() {
@@ -700,6 +731,7 @@ provide(workspaceContextKey, {
 });
 
 function onToolIconClick(toolId: ToolId) {
+  if (!isToolEnabled(toolId)) return;
   const area = toolCurrentArea(toolId);
   if (activeToolIdByArea[area] === toolId) {
     toolMinimized[toolId] = !toolMinimized[toolId];
@@ -709,11 +741,21 @@ function onToolIconClick(toolId: ToolId) {
   toolMinimized[toolId] = false;
 }
 
+watch(
+  () => hasRepos.value,
+  () => {
+    // repo 变更时,若当前激活工具不可用(例如 codeReview),回退到该区域的第一个可用工具.
+    for (const area of DOCK_AREAS) ensureActiveToolInArea(area);
+  },
+  { immediate: true }
+);
+
 const visibleToolIdByArea = computed(() => {
   const res: Record<DockArea, ToolId | null> = { leftTop: null, leftBottom: null, rightTop: null };
   (Object.keys(res) as DockArea[]).forEach((area) => {
     const id = activeToolIdByArea[area];
     if (!id) return;
+    if (!isToolEnabled(id)) return;
     if (toolCurrentArea(id) !== area) return;
     if (toolMinimized[id]) return;
     res[area] = id;
@@ -727,6 +769,7 @@ const visibleToolIdByArea = computed(() => {
 const keepAliveIncludeByArea = computed(() => {
   const res: Record<DockArea, string[]> = { leftTop: [], leftBottom: [], rightTop: [] };
   for (const id of TOOL_IDS) {
+    if (!isToolEnabled(id)) continue;
     if (!isKeepAlive(id)) continue;
     const area = toolCurrentArea(id);
     res[area].push(id);
@@ -736,13 +779,13 @@ const keepAliveIncludeByArea = computed(() => {
 
 const toolVisibleById = computed(() => {
   const out: Record<ToolId, boolean> = { codeReview: false, terminal: false, files: false, search: false };
-  for (const id of TOOL_IDS) out[id] = isToolVisible(id);
+  for (const id of TOOL_IDS) out[id] = isToolEnabled(id) && isToolVisible(id);
   return out;
 });
 
-const leftTopToolbarToolIds = computed<ToolId[]>(() => toolOrderByArea.leftTop.filter((id) => toolCurrentArea(id) === "leftTop"));
-const leftBottomToolbarToolIds = computed<ToolId[]>(() => toolOrderByArea.leftBottom.filter((id) => toolCurrentArea(id) === "leftBottom"));
-const rightToolbarToolIds = computed<ToolId[]>(() => toolOrderByArea.rightTop.filter((id) => toolCurrentArea(id) === "rightTop"));
+const leftTopToolbarToolIds = computed<ToolId[]>(() => toolOrderByArea.leftTop.filter((id) => isToolEnabled(id) && toolCurrentArea(id) === "leftTop"));
+const leftBottomToolbarToolIds = computed<ToolId[]>(() => toolOrderByArea.leftBottom.filter((id) => isToolEnabled(id) && toolCurrentArea(id) === "leftBottom"));
+const rightToolbarToolIds = computed<ToolId[]>(() => toolOrderByArea.rightTop.filter((id) => isToolEnabled(id) && toolCurrentArea(id) === "rightTop"));
 
 function removeToolFromOrder(toolId: ToolId) {
   for (const area of DOCK_AREAS) {
@@ -766,14 +809,6 @@ function moveToolOrderByStep(toolId: ToolId, step: number) {
   if (next < 0 || next >= list.length) return;
   list.splice(index, 1);
   list.splice(next, 0, toolId);
-}
-
-function firstToolIdInArea(area: DockArea) {
-  const list = toolOrderByArea[area];
-  for (const id of list) {
-    if (toolCurrentArea(id) === area) return id;
-  }
-  return null;
 }
 
 function canMoveToolUp(toolId: ToolId) {
@@ -813,17 +848,7 @@ function moveTool(toolId: ToolId, targetArea: DockArea) {
 
   toolArea[toolId] = targetArea;
   moveToolToOrderEnd(toolId, targetArea);
-  if (wasVisible) {
-    const nextId = firstToolIdInArea(fromArea);
-    if (nextId) {
-      activeToolIdByArea[fromArea] = nextId;
-      toolMinimized[nextId] = false;
-    } else if (wasActive) {
-      activeToolIdByArea[fromArea] = null;
-    }
-  } else if (wasActive) {
-    activeToolIdByArea[fromArea] = null;
-  }
+  if (wasVisible || wasActive) ensureActiveToolInArea(fromArea);
 
   if (wasVisible && !targetHasVisible) {
     activeToolIdByArea[targetArea] = toolId;
@@ -1063,6 +1088,14 @@ watch(
     createToolRuntimes();
   },
   { immediate: true }
+);
+
+watch(
+  () => hasRepos.value,
+  () => {
+    // repo 从有到无(或从无到有)时,重建 runtimes,避免 codeReview runtime 残留或缺失.
+    createToolRuntimes();
+  }
 );
 
 watch(toolArea, scheduleSaveDockLayout, { deep: true });
