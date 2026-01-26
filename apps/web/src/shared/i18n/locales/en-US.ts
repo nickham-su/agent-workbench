@@ -210,11 +210,9 @@ export default {
       success: "Repo removed",
       disabledNoRepo: "No repo selected",
       disabledActiveTerminals: "There are {n} active terminals. Close them first",
-      disabledLastRepo: "Workspace must keep at least one repo",
       disabledBusy: "Another operation is in progress. Try again later",
       errors: {
         activeTerminals: "Active terminals detected. Cannot remove repo",
-        lastRepo: "Workspace must keep at least one repo",
         notFound: "Repo is no longer attached"
       }
     },

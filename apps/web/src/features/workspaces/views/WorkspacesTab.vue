@@ -127,6 +127,7 @@
               type="text"
               class="opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity"
               @click.stop="openDetach(ws)"
+              :disabled="ws.repos.length === 0"
               :title="t('workspaces.actions.detachRepo')"
               :aria-label="t('workspaces.actions.detachRepo')"
             >
@@ -154,7 +155,7 @@
 
     <a-modal v-model:open="createOpen" :title="t('workspaces.create.modalTitle')" :confirm-loading="creating" @ok="submitCreate">
       <a-form layout="vertical">
-        <a-form-item :label="t('workspaces.create.repoLabel')" required>
+        <a-form-item :label="t('workspaces.create.repoLabel')">
           <a-select
             v-model:value="selectedRepoIds"
             mode="multiple"
@@ -380,6 +381,7 @@ function formatRepoDisplayName(rawUrl: string) {
 
 function workspaceRepoSummary(ws: WorkspaceDetail) {
   const names = ws.repos.map((r) => formatRepoDisplayName(r.repo.url)).filter(Boolean);
+  if (names.length === 0) return "-";
   return names.join(" · ");
 }
 
@@ -397,10 +399,6 @@ function goToSettings(tab: "credentials" | "network") {
 }
 
 function openCreateFromGuide() {
-  if (repos.value.length === 0) {
-    goToRepos();
-    return;
-  }
   openCreate();
 }
 
@@ -487,8 +485,8 @@ const canAttach = computed(() => {
 const detachBlockedReason = computed(() => {
   const ws = detachWorkspace.value;
   if (!ws) return "";
+  if (ws.repos.length === 0) return t("workspace.detachRepo.disabledNoRepo");
   if (ws.terminalCount > 0) return t("workspace.detachRepo.disabledActiveTerminals", { n: ws.terminalCount });
-  if (ws.repos.length <= 1) return t("workspace.detachRepo.disabledLastRepo");
   return "";
 });
 
@@ -574,11 +572,12 @@ function openCreate() {
 async function submitCreate() {
   creating.value = true;
   try {
-    if (selectedRepoIds.value.length === 0) return;
-    const invalid = selectedRepos.value.find((r) => r.syncStatus !== "idle" || !r.defaultBranch);
-    if (invalid) {
-      message.error(t("workspaces.create.defaultBranchUnknown"));
-      return;
+    if (selectedRepoIds.value.length > 0) {
+      const invalid = selectedRepos.value.find((r) => r.syncStatus !== "idle" || !r.defaultBranch);
+      if (invalid) {
+        message.error(t("workspaces.create.defaultBranchUnknown"));
+        return;
+      }
     }
 
     const title = titleInput.value.trim();
@@ -672,7 +671,6 @@ async function submitDetach() {
   } catch (err) {
     showApiError(err, {
       WORKSPACE_HAS_ACTIVE_TERMINALS: t("workspace.detachRepo.errors.activeTerminals"),
-      WORKSPACE_LAST_REPO: t("workspace.detachRepo.errors.lastRepo"),
       WORKSPACE_REPO_NOT_FOUND: t("workspace.detachRepo.errors.notFound")
     });
   } finally {
