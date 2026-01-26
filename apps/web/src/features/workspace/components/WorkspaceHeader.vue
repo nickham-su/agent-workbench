@@ -19,7 +19,7 @@
             :value="r.dirName"
             :label="`${formatRepoDisplayName(r.repo.url)} ${r.repo.url}`"
           >
-            <a-tooltip :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="top">
+            <a-tooltip :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="rightTop">
               <template #title>
                 <span class="font-mono break-all">{{ r.repo.url }}</span>
               </template>
