@@ -31,8 +31,9 @@ export function createFileExplorerRuntime(ctx: ToolRuntimeContext): ToolRuntime 
     onRepoChange(nextTarget) {
       void nextTarget;
     },
-    onVisibilityChange() {
-      // 文件浏览器红点与 tab 状态一致,可见性不影响计算
+    onVisibilityChange(visible) {
+      if (!visible) return;
+      void ctx.refreshView?.();
     },
     onCall(envelope) {
       if (envelope.type !== "files.openAt") return;
@@ -41,12 +42,13 @@ export function createFileExplorerRuntime(ctx: ToolRuntimeContext): ToolRuntime 
       const line = typeof payload.line === "number" ? payload.line : 0;
       if (!path || line <= 0) return;
       const highlight = payload.highlight;
-      if (!highlight || (highlight.kind !== "line" && highlight.kind !== "range")) return;
+      if (!highlight || (highlight.kind !== "line" && highlight.kind !== "range" && highlight.kind !== "none")) return;
       if (highlight.kind === "range") {
         if (typeof highlight.startCol !== "number" || typeof highlight.endCol !== "number") return;
       }
+      const reveal = payload.reveal === "top" || payload.reveal === "center" ? payload.reveal : undefined;
       const targetDirName = typeof payload.targetDirName === "string" ? payload.targetDirName : envelope.targetAtCall?.dirName;
-      store.setPendingOpenAt({ path, line, highlight, targetDirName } as FileOpenAtRequest);
+      store.setPendingOpenAt({ path, line, highlight, reveal, targetDirName } as FileOpenAtRequest);
     }
   };
 }

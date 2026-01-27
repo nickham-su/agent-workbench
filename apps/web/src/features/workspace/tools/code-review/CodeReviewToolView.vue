@@ -3,6 +3,7 @@
     v-if="target"
     ref="panelRef"
     :workspaceId="workspaceId"
+    :toolId="toolId"
     :target="target"
     :gitBusy="gitBusy"
     :beginGitOp="beginGitOp"
