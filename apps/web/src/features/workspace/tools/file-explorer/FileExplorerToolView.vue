@@ -15,7 +15,7 @@
           :can-rename-delete="canRenameDelete"
           :show-repo-path-action="showRepoPathAction"
           :show-workspace-path-action="showWorkspacePathAction"
-          :refresh-root="refreshRoot"
+          :refresh-root="refreshAll"
           :on-load-data="onLoadData"
           :on-expanded-keys-update="onExpandedKeysUpdate"
           :on-selected-keys-update="onSelectedKeysUpdate"
@@ -119,7 +119,7 @@ import { useI18n } from "vue-i18n";
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
 import "monaco-editor/min/vs/editor/editor.main.css";
 import "monaco-editor/esm/vs/editor/contrib/find/browser/findController.js";
-import type { FileEntry, FileReadResponse } from "@agent-workbench/shared";
+import type { FileEntry, FileReadResponse, FileVersion } from "@agent-workbench/shared";
 import FileExplorerTree from "./components/FileExplorerTree.vue";
 import FileExplorerTabs from "./components/FileExplorerTabs.vue";
 import type { FileTab, TreeNode } from "./types";
@@ -131,11 +131,13 @@ import {
   downloadWorkspacePath,
   listWorkspaceFiles,
   mkdirWorkspacePath,
+  statWorkspaceFile,
   readWorkspaceFileText,
   renameWorkspacePath,
   uploadWorkspaceFiles,
   writeWorkspaceFileText
 } from "@/shared/api";
+import { useWorkspaceHost } from "@/features/workspace/host";
 import { ensureMonacoEnvironment } from "@/shared/monaco/monacoEnv";
 import { applyMonacoPanelTheme } from "@/shared/monaco/monacoTheme";
 import { ensureMonacoLanguage } from "@/shared/monaco/languageLoader";
@@ -150,6 +152,7 @@ const props = defineProps<{
   workspaceRepos?: Array<{ dirName: string }>;
 }>();
 const { t } = useI18n();
+const host = useWorkspaceHost(props.toolId);
 
 const ROOT_KEY = "__files_root__";
 const FILE_TREE_SPLIT_RATIO_KEY_PREFIX = "agent-workbench.workspace.fileTreeSplitRatio";
@@ -181,6 +184,7 @@ const loadedDirs = new Set<string>();
 const nodeByPath = new Map<string, TreeNode>();
 const dirRequestSeqByDir = new Map<string, number>();
 const fileRequestSeqByPath = new Map<string, number>();
+const tabStatSeqByPath = new Map<string, number>();
 let scopeSeq = 0;
 
 const store = getFileExplorerStore(props.workspaceId);
@@ -194,6 +198,7 @@ let editorBlurDisposable: monaco.IDisposable | null = null;
 let editorSaveCommandId: string | null = null;
 let editorApplyScheduled = false;
 let highlightDecorations: string[] = [];
+let unregisterRefresh: (() => void) | null = null;
 
 const createModal = reactive({
   open: false,
@@ -498,6 +503,17 @@ function nextFileRequestId(filePath: string) {
   return next;
 }
 
+function nextTabStatRequestId(filePath: string) {
+  const next = (tabStatSeqByPath.get(filePath) ?? 0) + 1;
+  tabStatSeqByPath.set(filePath, next);
+  return next;
+}
+
+function isSameVersion(a?: FileVersion, b?: FileVersion) {
+  if (!a || !b) return false;
+  return a.mtimeMs === b.mtimeMs && a.size === b.size;
+}
+
 function rebuildNodeMap() {
   nodeByPath.clear();
   const walk = (nodes: TreeNode[]) => {
@@ -591,6 +607,33 @@ async function refreshRoot() {
   } finally {
     if (scopeSnapshot === scopeSeq) treeLoading.value = false;
   }
+}
+
+async function refreshCurrentTab() {
+  const tab = activeTab.value;
+  if (!tab) return;
+  if (tab.dirty || tab.saving || tab.conflictOpen) return;
+  const path = tab.path;
+  const scopeSnapshot = scopeSeq;
+  const requestId = nextTabStatRequestId(path);
+  try {
+    const res = await statWorkspaceFile({ workspaceId: props.workspaceId, path });
+    if (scopeSnapshot !== scopeSeq) return;
+    if (tabStatSeqByPath.get(path) !== requestId) return;
+    const current = getTab(path);
+    if (!current) return;
+    if (current.dirty || current.saving || current.conflictOpen) return;
+    if (!res.ok || !res.version || !isSameVersion(res.version, current.version)) {
+      await reloadTab(path);
+    }
+  } catch (err) {
+    if (scopeSnapshot !== scopeSeq) return;
+    message.error(err instanceof Error ? err.message : String(err));
+  }
+}
+
+async function refreshAll() {
+  await Promise.all([refreshRoot(), refreshCurrentTab()]);
 }
 
 async function refreshDir(dir: string) {
@@ -955,18 +998,34 @@ function applyOpenAtHighlight(req: FileOpenAtRequest) {
   const maxLine = model.getLineCount();
   const line = Math.min(Math.max(req.line, 1), maxLine);
   clearHighlightDecorations();
+  if (req.highlight.kind === "none") return;
   if (req.highlight.kind === "line") {
     const range = new monaco.Range(line, 1, line, model.getLineMaxColumn(line));
     highlightDecorations = editor.deltaDecorations(highlightDecorations, [
       { range, options: { isWholeLine: true, className: "files-search-line" } }
     ]);
-  } else {
-    const startCol = Math.max(req.highlight.startCol, 1);
-    const endCol = Math.max(req.highlight.endCol, startCol);
-    const range = new monaco.Range(line, startCol, line, endCol);
-    highlightDecorations = editor.deltaDecorations(highlightDecorations, [
-      { range, options: { inlineClassName: "files-search-hit" } }
-    ]);
+    return;
+  }
+  const startCol = Math.max(req.highlight.startCol, 1);
+  const endCol = Math.max(req.highlight.endCol, startCol);
+  const range = new monaco.Range(line, startCol, line, endCol);
+  highlightDecorations = editor.deltaDecorations(highlightDecorations, [
+    { range, options: { inlineClassName: "files-search-hit" } }
+  ]);
+}
+
+function revealOpenAtLine(req: FileOpenAtRequest) {
+  if (!editor) return;
+  const model = editor.getModel();
+  if (!model) return;
+  const maxLine = model.getLineCount();
+  const line = Math.min(Math.max(req.line, 1), maxLine);
+  if (req.reveal === "top") {
+    const layout = editor.getLayoutInfo();
+    const maxScrollTop = Math.max(0, editor.getScrollHeight() - layout.height);
+    const targetScrollTop = Math.min(Math.max(editor.getTopForLineNumber(line), 0), maxScrollTop);
+    editor.setScrollTop(targetScrollTop);
+    return;
   }
   editor.revealLineInCenter(line);
 }
@@ -994,6 +1053,7 @@ async function openFileAt(req: FileOpenAtRequest) {
   await new Promise((resolve) => requestAnimationFrame(resolve));
   if (!editor) return;
   applyOpenAtHighlight(req);
+  revealOpenAtLine(req);
 }
 
 function onActiveTabUpdate(key: string | number) {
@@ -1436,6 +1496,7 @@ watch(
   () => activeTabKey.value,
   () => {
     scheduleApplyEditor();
+    void refreshCurrentTab();
   }
 );
 
@@ -1445,6 +1506,7 @@ watch(
     scopeSeq += 1;
     dirRequestSeqByDir.clear();
     fileRequestSeqByPath.clear();
+    tabStatSeqByPath.clear();
     resetTabs();
     resetTree();
     initRootTree();
@@ -1470,6 +1532,7 @@ watch(
 
 onMounted(() => {
   scheduleApplyEditor();
+  unregisterRefresh = host.registerToolCommands(props.toolId, { refresh: refreshAll });
   if (typeof window !== "undefined") {
     window.addEventListener("keydown", handleEditorKeydown, true);
   }
@@ -1479,6 +1542,8 @@ onBeforeUnmount(() => {
   if (typeof window !== "undefined") {
     window.removeEventListener("keydown", handleEditorKeydown, true);
   }
+  unregisterRefresh?.();
+  unregisterRefresh = null;
   draggingCleanup?.();
   editorBlurDisposable?.dispose();
   editorSaveCommandId = null;

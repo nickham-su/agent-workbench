@@ -92,6 +92,7 @@ export const FileStatResponseSchema = Type.Object(
     ok: Type.Boolean(),
     kind: Type.Optional(Type.Union([Type.Literal("file"), Type.Literal("dir")])),
     reason: Type.Optional(FileStatReasonSchema),
+    version: Type.Optional(FileVersionSchema),
     normalizedPath: Type.Optional(Type.String())
   }
 );

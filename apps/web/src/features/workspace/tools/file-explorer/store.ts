@@ -1,19 +1,18 @@
 import { computed, reactive, ref, type ComputedRef, type Ref } from "vue";
 import type { FileTab } from "./types";
 
-export type FileOpenAtRequest =
-  | {
-      path: string;
-      line: number;
-      highlight: { kind: "range"; startCol: number; endCol: number };
-      targetDirName?: string;
-    }
-  | {
-      path: string;
-      line: number;
-      highlight: { kind: "line" };
-      targetDirName?: string;
-    };
+export type FileOpenAtHighlight =
+  | { kind: "none" }
+  | { kind: "line" }
+  | { kind: "range"; startCol: number; endCol: number };
+
+export type FileOpenAtRequest = {
+  path: string;
+  line: number;
+  highlight: FileOpenAtHighlight;
+  reveal?: "center" | "top";
+  targetDirName?: string;
+};
 
 export type FileExplorerStore = {
   tabs: FileTab[];

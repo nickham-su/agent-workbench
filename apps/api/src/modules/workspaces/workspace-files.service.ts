@@ -424,7 +424,7 @@ async function statUnderRoot(rootAbs: string, rel: string): Promise<FileStatResp
   const normalizedPath = normalizeRelPath({ rootAbs, absPath, fallback: rel });
 
   const fs = await import("node:fs/promises");
-  let st: { isSymbolicLink: () => boolean; isDirectory: () => boolean; isFile: () => boolean };
+  let st: { isSymbolicLink: () => boolean; isDirectory: () => boolean; isFile: () => boolean; mtimeMs: number; size: number };
   try {
     st = await fs.lstat(absPath);
   } catch (err: any) {
@@ -452,7 +452,7 @@ async function statUnderRoot(rootAbs: string, rel: string): Promise<FileStatResp
     }
     throw err;
   }
-  return { path: rel, ok: true, kind: "file", normalizedPath };
+  return { path: rel, ok: true, kind: "file", normalizedPath, version: { mtimeMs: st.mtimeMs, size: st.size } };
 }
 
 async function readUnderRoot(ctx: AppContext, rootAbs: string, rel: string): Promise<FileReadResponse> {

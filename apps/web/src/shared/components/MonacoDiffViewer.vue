@@ -3,7 +3,7 @@
 </template>
 
 <script setup lang="ts">
-import {onBeforeUnmount, onMounted, ref, watch} from "vue";
+import {computed, onBeforeUnmount, onMounted, ref, watch} from "vue";
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
 import "monaco-editor/min/vs/editor/editor.main.css";
 import { ensureMonacoEnvironment } from "@/shared/monaco/monacoEnv";
@@ -17,61 +17,26 @@ const props = defineProps<{
   modified: string;
   language?: string;
   ignoreTrimWhitespace?: boolean;
+  sideBySide?: boolean;
 }>();
-
-export type DiffViewerLayout = {
-  originalWidth: number;
-  modifiedWidth: number;
-  splitterWidth: number;
-};
 
 export type MonacoDiffViewerExposed = {
   goToFirstDiff: () => void;
   goToPreviousDiff: () => void;
   goToNextDiff: () => void;
+  getActiveLine: () => number | null;
 };
 
-const emit = defineEmits<{
-  (e: "layout", layout: DiffViewerLayout): void;
-}>();
-
 const containerEl = ref<HTMLDivElement | null>(null);
+const isSideBySide = computed(() => props.sideBySide !== false);
 
 let editor: monaco.editor.IStandaloneDiffEditor | null = null;
 let originalModel: monaco.editor.ITextModel | null = null;
 let modifiedModel: monaco.editor.ITextModel | null = null;
 let disposables: monaco.IDisposable[] = [];
-let layoutRaf = 0;
 let stopWatchFontSize: (() => void) | null = null;
 let pendingRevealFirstDiff = false;
 let modelSeq = 0;
-
-function measureAndEmitLayout() {
-  if (!editor) return;
-  if (!containerEl.value) return;
-
-  const originalDom = editor.getOriginalEditor().getDomNode();
-  const modifiedDom = editor.getModifiedEditor().getDomNode();
-  if (!originalDom || !modifiedDom) return;
-
-  const originalRect = originalDom.getBoundingClientRect();
-  const modifiedRect = modifiedDom.getBoundingClientRect();
-
-  const originalWidth = Math.max(0, Math.round(originalRect.width));
-  const modifiedWidth = Math.max(0, Math.round(modifiedRect.width));
-  const splitterWidth = Math.max(0, Math.round(modifiedRect.left - originalRect.right));
-
-  if (originalWidth === 0 && modifiedWidth === 0) return;
-  emit("layout", {originalWidth, modifiedWidth, splitterWidth});
-}
-
-function scheduleEmitLayout() {
-  if (layoutRaf) cancelAnimationFrame(layoutRaf);
-  layoutRaf = requestAnimationFrame(() => {
-    layoutRaf = 0;
-    measureAndEmitLayout();
-  });
-}
 
 async function applyLanguageToModels(language: string | undefined, seq: number) {
   if (!language) return;
@@ -108,7 +73,6 @@ function ensureModels() {
   editor.getOriginalEditor().updateOptions({readOnly: true});
   editor.getModifiedEditor().updateOptions({readOnly: true});
   void applyLanguageToModels(language, seq);
-  scheduleEmitLayout();
 }
 
 function goToPreviousDiff() {
@@ -167,10 +131,21 @@ function goToNextDiff() {
   revealAnchor(next);
 }
 
+function getActiveLine() {
+  if (!editor) return null;
+  const modifiedEditor = editor.getModifiedEditor();
+  const ranges = modifiedEditor.getVisibleRanges?.() || [];
+  if (ranges.length > 0) return Math.max(1, ranges[0]!.startLineNumber);
+  const pos = modifiedEditor.getPosition();
+  if (pos) return Math.max(1, pos.lineNumber);
+  return 1;
+}
+
 defineExpose<MonacoDiffViewerExposed>({
   goToFirstDiff,
   goToPreviousDiff,
-  goToNextDiff
+  goToNextDiff,
+  getActiveLine
 });
 
 type DiffAnchor = { side: "original" | "modified"; line: number };
@@ -224,7 +199,9 @@ function getCurrentLineHint(): DiffAnchor {
 
 function revealAnchor(anchor: DiffAnchor) {
   if (!editor) return;
-  const target = anchor.side === "modified" ? editor.getModifiedEditor() : editor.getOriginalEditor();
+  const target = isSideBySide.value
+    ? (anchor.side === "modified" ? editor.getModifiedEditor() : editor.getOriginalEditor())
+    : editor.getModifiedEditor();
   const line = Math.max(1, anchor.line);
 
   target.revealLineInCenter(line);
@@ -237,9 +214,10 @@ onMounted(() => {
   if (!containerEl.value) return;
 
   applyMonacoPanelTheme();
+  const renderSideBySide = isSideBySide.value;
   editor = monaco.editor.createDiffEditor(containerEl.value, {
     automaticLayout: true,
-    renderSideBySide: true,
+    renderSideBySide,
     readOnly: true,
     fontSize: editorFontSize.value,
     minimap: {enabled: false},
@@ -265,21 +243,16 @@ onMounted(() => {
   });
 
   const handleDiffUpdated = () => {
-    scheduleEmitLayout();
     if (!pendingRevealFirstDiff) return;
     pendingRevealFirstDiff = false;
     revealFirstDiff();
   };
 
   disposables = [
-    originalEditor.onDidLayoutChange(scheduleEmitLayout),
-    modifiedEditor.onDidLayoutChange(scheduleEmitLayout),
     editor.onDidUpdateDiff(handleDiffUpdated)
   ];
-  window.addEventListener("resize", scheduleEmitLayout, {passive: true});
 
   ensureModels();
-  scheduleEmitLayout();
 
   stopWatchFontSize = watch(
     () => editorFontSize.value,
@@ -288,7 +261,6 @@ onMounted(() => {
       editor.updateOptions({ fontSize: next });
       editor.getOriginalEditor().updateOptions({ fontSize: next });
       editor.getModifiedEditor().updateOptions({ fontSize: next });
-      scheduleEmitLayout();
     }
   );
 });
@@ -298,11 +270,16 @@ watch(
     () => ensureModels()
 );
 
+watch(
+    () => props.sideBySide,
+    (next) => {
+      if (!editor) return;
+      editor.updateOptions({ renderSideBySide: next !== false });
+    }
+);
+
 onBeforeUnmount(() => {
-  if (layoutRaf) cancelAnimationFrame(layoutRaf);
-  layoutRaf = 0;
   pendingRevealFirstDiff = false;
-  window.removeEventListener("resize", scheduleEmitLayout);
   stopWatchFontSize?.();
   stopWatchFontSize = null;
   disposables.forEach((d) => d.dispose());

@@ -318,7 +318,7 @@ export async function statFile(ctx: AppContext, bodyRaw: unknown): Promise<FileS
     const normalizedPath = normalizeRelPath({ rootAbs, absPath, fallback: rel });
 
     const fs = await import("node:fs/promises");
-    let st: { isSymbolicLink: () => boolean; isDirectory: () => boolean; isFile: () => boolean };
+    let st: { isSymbolicLink: () => boolean; isDirectory: () => boolean; isFile: () => boolean; mtimeMs: number; size: number };
     try {
       st = await fs.lstat(absPath);
     } catch (err: any) {
@@ -346,7 +346,7 @@ export async function statFile(ctx: AppContext, bodyRaw: unknown): Promise<FileS
       }
       throw err;
     }
-    return { path: rel, ok: true, kind: "file", normalizedPath };
+    return { path: rel, ok: true, kind: "file", normalizedPath, version: { mtimeMs: st.mtimeMs, size: st.size } };
   });
 }
 

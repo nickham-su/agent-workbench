@@ -319,10 +319,11 @@ export default {
     },
     diff: {
       resizeFileList: "Resize file list",
-      base: "Old",
-      current: "New",
       prevChange: "Previous change",
       nextChange: "Next change",
+      viewFile: "View file",
+      inline: "Inline",
+      sideBySide: "Side-by-side",
       selectToCompare: "Select a file on the left to view diff",
       notPreviewableTitle: "Preview not available for this file",
       baseReason: "Old: {reason}",
