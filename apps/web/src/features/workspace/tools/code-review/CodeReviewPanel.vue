@@ -555,7 +555,7 @@ const compare = ref<FileCompareResponse | null>(null);
 const compareLanguage = computed(() => {
   const current = compare.value;
   if (!current) return undefined;
-  return current.language ?? inferLanguageFromPath(current.path);
+  return inferLanguageFromPath(current.path);
 });
 const diffViewerRef = ref<{
   goToFirstDiff: () => void;

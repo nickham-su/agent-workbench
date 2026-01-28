@@ -932,7 +932,7 @@ function attachModelListener(tab: FileTab) {
 
 function createTabFromRead(path: string, res: FileReadResponse) {
   const title = baseName(path);
-  const language = res.language ?? inferLanguageFromPath(path);
+  const language = inferLanguageFromPath(path);
   const tab: FileTab = {
     path,
     title,
@@ -1184,7 +1184,7 @@ async function reloadTab(path: string) {
     tab.previewable = res.previewable;
     tab.reason = res.reason;
     tab.version = res.version;
-    tab.language = res.language ?? inferLanguageFromPath(path);
+    tab.language = inferLanguageFromPath(path);
     tab.error = undefined;
     if (res.previewable) {
       const current = tab.model?.getValue() ?? "";
