@@ -48,6 +48,10 @@ export function caCertPath(dataDir: string) {
   return path.join(certsRoot(dataDir), "ca.pem");
 }
 
+export function caBundlePath(dataDir: string) {
+  return path.join(certsRoot(dataDir), "ca-bundle.pem");
+}
+
 export function keysRoot(dataDir: string) {
   return path.join(dataDir, "keys");
 }

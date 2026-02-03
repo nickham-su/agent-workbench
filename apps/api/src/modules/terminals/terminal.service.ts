@@ -9,7 +9,8 @@ import { nowMs } from "../../utils/time.js";
 import { getWorkspace, listWorkspaceRepos } from "../workspaces/workspace.store.js";
 import { tmuxHasSession, tmuxKillSession, tmuxNewSession } from "../../infra/tmux/session.js";
 import { ensureDir, pathExists } from "../../infra/fs/fs.js";
-import { caCertPath, certsRoot, sshKnownHostsPath, sshRoot, tmpRoot } from "../../infra/fs/paths.js";
+import { caCertPath, sshKnownHostsPath, sshRoot, tmpRoot } from "../../infra/fs/paths.js";
+import { ensureCaBundleFile } from "../../infra/certs/caBundle.js";
 import { decryptToUtf8 } from "../../infra/crypto/secretBox.js";
 import { gitAskpassScriptV1 } from "../../infra/git/askpass.js";
 import { shQuote } from "../../infra/git/shQuote.js";
@@ -95,16 +96,14 @@ async function buildTerminalNetworkEnvPairs(ctx: AppContext): Promise<string[]> 
   }
 
   const caPem = network.caCertPem;
-  if (caPem) {
-    await ensureDir(certsRoot(ctx.dataDir));
-    const p = caCertPath(ctx.dataDir);
-    await fs.writeFile(p, caPem, { encoding: "utf-8" });
-    pairs.push(`GIT_SSL_CAINFO=${p}`, `SSL_CERT_FILE=${p}`);
-  } else {
-    const p = caCertPath(ctx.dataDir);
-    if (await pathExists(p)) {
-      pairs.push(`GIT_SSL_CAINFO=${p}`, `SSL_CERT_FILE=${p}`);
-    }
+  const caBundle = await ensureCaBundleFile({
+    dataDir: ctx.dataDir,
+    customCaPem: caPem,
+    fallbackCaPath: caCertPath(ctx.dataDir),
+    writeCustomCa: Boolean(caPem)
+  });
+  if (caBundle) {
+    pairs.push(`GIT_SSL_CAINFO=${caBundle}`, `SSL_CERT_FILE=${caBundle}`);
   }
 
   return pairs;

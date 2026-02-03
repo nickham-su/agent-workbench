@@ -14,7 +14,8 @@ import type {
 import type { AppContext } from "../../app/context.js";
 import { HttpError } from "../../app/errors.js";
 import { ensureDir, pathExists } from "../../infra/fs/fs.js";
-import { caCertPath, certsRoot, sshKnownHostsPath, sshRoot } from "../../infra/fs/paths.js";
+import { caBundlePath, caCertPath, certsRoot, sshKnownHostsPath, sshRoot } from "../../infra/fs/paths.js";
+import { ensureCaBundleFile } from "../../infra/certs/caBundle.js";
 import { nowMs } from "../../utils/time.js";
 import { getSettingJson, setSettingJson } from "./settings.store.js";
 import { gitConfigGet, gitConfigSet, gitConfigUnsetAll, validateAndNormalizeGitIdentity } from "../../infra/git/gitIdentity.js";
@@ -115,8 +116,20 @@ export async function updateNetworkSettings(
   const caPath = caCertPath(ctx.dataDir);
   if (next.caCertPem) {
     await fs.writeFile(caPath, next.caCertPem, { encoding: "utf-8" });
+    await ensureCaBundleFile({
+      dataDir: ctx.dataDir,
+      customCaPem: next.caCertPem,
+      fallbackCaPath: caPath,
+      writeCustomCa: false
+    });
   } else if (await pathExists(caPath)) {
     await fs.rm(caPath, { force: true });
+  }
+  if (!next.caCertPem) {
+    const bundlePath = caBundlePath(ctx.dataDir);
+    if (await pathExists(bundlePath)) {
+      await fs.rm(bundlePath, { force: true });
+    }
   }
 
   logger.info({ updatedAt }, "network settings updated");

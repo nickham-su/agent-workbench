@@ -3,7 +3,8 @@ import path from "node:path";
 import type { AppContext } from "../../app/context.js";
 import { decryptToUtf8 } from "../crypto/secretBox.js";
 import { ensureDir, rmrf } from "../fs/fs.js";
-import { caCertPath, certsRoot, sshKnownHostsPath, sshRoot, tmpRoot } from "../fs/paths.js";
+import { caCertPath, sshKnownHostsPath, sshRoot, tmpRoot } from "../fs/paths.js";
+import { ensureCaBundleFile } from "../certs/caBundle.js";
 import { gitAskpassScriptV1 } from "./askpass.js";
 import { extractGitHost, inferGitCredentialKindFromUrl } from "./gitHost.js";
 import { shQuote } from "./shQuote.js";
@@ -28,14 +29,6 @@ function readNetworkSettings(ctx: AppContext): NetworkSettingsV1 {
   };
 }
 
-async function ensureCaCertFile(ctx: AppContext, caPem: string | null) {
-  if (!caPem) return null;
-  await ensureDir(certsRoot(ctx.dataDir));
-  const p = caCertPath(ctx.dataDir);
-  await fs.writeFile(p, caPem, { encoding: "utf-8" });
-  return p;
-}
-
 function sanitizeForAskpass(raw: string) {
   const s = String(raw || "");
   if (s.includes("\0") || s.includes("\n") || s.includes("\r")) return "";
@@ -55,7 +48,12 @@ export async function buildGitEnv(params: {
   const { ctx } = params;
 
   const network = readNetworkSettings(ctx);
-  const caPath = await ensureCaCertFile(ctx, network.caCertPem);
+  const caPath = await ensureCaBundleFile({
+    dataDir: ctx.dataDir,
+    customCaPem: network.caCertPem,
+    fallbackCaPath: caCertPath(ctx.dataDir),
+    writeCustomCa: false
+  });
 
   const cleanupPaths: string[] = [];
   const env: NodeJS.ProcessEnv = {
