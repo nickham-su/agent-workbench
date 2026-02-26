@@ -21,6 +21,7 @@ export async function registerAuthGuards(app: FastifyInstance, ctx: AppContext) 
     if (!url.startsWith("/api/")) return;
     if (path === "/api/health") return;
     if (path === "/api/auth/login") return;
+    if (path.startsWith("/api/internal/agent/")) return;
 
     // WebSocket 鉴权放在 handler 内，确保能返回自定义 close code（4401），避免浏览器表现为“连接失败/1006”。
     if (path.startsWith("/api/terminals/") && path.endsWith("/ws")) return;

@@ -16,6 +16,7 @@ import { registerGitModule } from "../modules/git/git.module.js";
 import { registerFilesModule } from "../modules/files/files.module.js";
 import { registerCredentialsModule } from "../modules/credentials/credentials.module.js";
 import { registerSettingsModule } from "../modules/settings/settings.module.js";
+import { registerAgentModule } from "../modules/agent/agent.module.js";
 
 export async function createApp(ctx: AppContext) {
   const app = Fastify({
@@ -74,6 +75,7 @@ export async function createApp(ctx: AppContext) {
   await registerTerminalsModule(app, ctx);
   await registerGitModule(app, ctx);
   await registerFilesModule(app, ctx);
+  await registerAgentModule(app, ctx);
   await registerWebUi(app, ctx);
 
   return app;

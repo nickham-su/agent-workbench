@@ -59,3 +59,23 @@ export function keysRoot(dataDir: string) {
 export function credentialMasterKeyJsonPath(dataDir: string) {
   return path.join(keysRoot(dataDir), "credential-master-key.json");
 }
+
+export function workspaceAgentRoot(workspacePath: string) {
+  return path.join(workspacePath, ".agent-workbench");
+}
+
+export function workspaceAgentInternalRoot(workspacePath: string) {
+  return path.join(workspaceAgentRoot(workspacePath), "internal");
+}
+
+export function workspaceAgentArtifactsRoot(workspacePath: string) {
+  return path.join(workspaceAgentInternalRoot(workspacePath), "artifacts");
+}
+
+export function agentWorkerPidPath(dataDir: string) {
+  return path.join(dataDir, "agent-worker.pid");
+}
+
+export function agentWorkerSocketPath(dataDir: string) {
+  return path.join(dataDir, "agent-worker.sock");
+}
