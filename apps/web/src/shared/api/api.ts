@@ -81,11 +81,13 @@ import type {
   AgentRevertSessionRequest,
   AgentSendMessageRequest,
   AgentSendMessageResponse,
-  AgentSessionConversationResponse,
+  AgentContextItemsResponse,
+  AgentContextItemRecord,
   AgentSessionRecord,
   AgentSessionRunState,
   AgentControlResult,
   AgentCancelSessionRequest,
+  AgentToolPermissionRequest,
   AgentProvidersSettingsView,
   UpdateAgentProvidersSettingsRequest,
   AgentSettings,
@@ -846,9 +848,20 @@ export async function createAgentSession(body: AgentCreateSessionRequest) {
   }
 }
 
-export async function getAgentConversation(sessionId: string) {
+export async function getAgentContextItems(sessionId: string, afterId?: number) {
   try {
-    const res = await client.get<AgentSessionConversationResponse>(`/agent/sessions/${sessionId}/conversation`);
+    const res = await client.get<AgentContextItemsResponse>(`/agent/sessions/${sessionId}/context-items`, {
+      params: typeof afterId === "number" ? { afterId } : undefined
+    });
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getAgentContextItem(sessionId: string, itemId: number) {
+  try {
+    const res = await client.get<AgentContextItemRecord>(`/agent/sessions/${sessionId}/context-items/${itemId}`);
     return res.data;
   } catch (err) {
     throw toApiError(err);
@@ -867,6 +880,18 @@ export async function getAgentRunState(sessionId: string) {
 export async function sendAgentMessage(sessionId: string, body: AgentSendMessageRequest) {
   try {
     const res = await client.post<AgentSendMessageResponse>(`/agent/sessions/${sessionId}/messages`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function decideAgentToolPermission(sessionId: string, body: AgentToolPermissionRequest) {
+  try {
+    const res = await client.post<{ runId: string; decision: "approve" | "deny" }>(
+      `/agent/sessions/${sessionId}/tool-permission`,
+      body
+    );
     return res.data;
   } catch (err) {
     throw toApiError(err);

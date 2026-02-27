@@ -1,13 +1,19 @@
 import type { FastifyBaseLogger } from "fastify";
 import type {
   AgentCancelSessionRequest,
+  AgentContextItemRecord,
+  AgentContextItemStatus,
+  AgentContextItemsResponse,
   AgentControlResult,
   AgentForkSessionRequest,
+  AgentPermissionDecision,
   AgentRevertSessionRequest,
+  AgentRunStatus,
   AgentSendMessageRequest,
   AgentSendMessageResponse,
-  AgentSessionConversationResponse,
-  AgentSessionRunState
+  AgentSessionRunState,
+  AgentContextToolName,
+  AgentToolPermissionRequest
 } from "@agent-workbench/shared";
 import { HttpError } from "../../app/errors.js";
 import type { AppContext } from "../../app/context.js";
@@ -16,35 +22,120 @@ import { newSortableId } from "../../utils/ids.js";
 import { getWorkspace } from "../workspaces/workspace.store.js";
 import {
   AgentConflictError,
-  appendControlEvent,
-  appendTimelineEvent,
+  appendContextItem,
   createAgentSession,
-  findRunCreatedEvent,
+  createRunRecord,
   findClientRequestDedup,
   getAgentSession,
-  getEventById,
-  getLatestSessionEventId,
+  getContextItemById,
+  getLatestSessionItemId,
+  getRunRecord,
   getRunState,
   getSessionHead,
-  getSessionTimelineEvents,
+  getSessionVisibleItems,
+  getSessionVisibleItemsAfter,
+  getVisibleItemById,
   insertClientRequestDedup,
   listAgentSessions,
+  listNonTerminalVisibleItemIds,
   moveSessionHead,
-  setRunStateIdle
+  setRunStateIdle,
+  updateContextItem,
+  updateRunRecordStatus,
+  updateRunState
 } from "./agent.store.js";
-import { buildTextPayload } from "./agent.text.js";
 import { resolveExecutionProfile } from "../settings/settings.service.js";
 
 export type AgentQueuedRun = {
   workspaceId: string;
   sessionId: string;
   runId: string;
-  triggerMessageId: string;
 };
 
 function conflictToHttpError(err: AgentConflictError): HttpError {
-  return new HttpError(409, "session head conflict", `conflict_head:${err.currentHeadEventId ?? "null"}`);
+  return new HttpError(409, "session head conflict", `conflict_head:${String(err.currentHeadItemId ?? "null")}`);
 }
+
+function toolArgsSchema(toolName: AgentContextToolName) {
+  if (toolName === "bash") {
+    return {
+      type: "object",
+      required: ["command"],
+      properties: {
+        command: { type: "string", minLength: 1 }
+      }
+    };
+  }
+  if (toolName === "read") {
+    return {
+      type: "object",
+      required: ["filePath"],
+      properties: {
+        filePath: { type: "string", minLength: 1 },
+        offset: { type: "number", minimum: 1 },
+        limit: { type: "number", minimum: 1 }
+      }
+    };
+  }
+  return {
+    type: "object",
+    required: ["filePath", "content"],
+    properties: {
+      filePath: { type: "string", minLength: 1 },
+      content: { type: "string" }
+    }
+  };
+}
+
+function toolDescription(toolName: AgentContextToolName) {
+  if (toolName === "bash") return "执行一个 bash 命令并返回 stdout/stderr。";
+  if (toolName === "read") return "读取工作区内的文件内容。";
+  return "写入工作区内的文件内容。";
+}
+
+function stringifyToolResult(raw: unknown) {
+  if (typeof raw === "string") return raw;
+  try {
+    return JSON.stringify(raw, null, 2);
+  } catch {
+    return String(raw);
+  }
+}
+
+const NON_TERMINAL_ITEM_STATUS = new Set<AgentContextItemStatus>([
+  "streaming",
+  "queued",
+  "running",
+  "awaiting_permission"
+]);
+
+const TERMINAL_TOOL_ITEM_STATUS = new Set<AgentContextItemStatus>([
+  "completed",
+  "failed",
+  "denied",
+  "cancelled"
+]);
+
+type PromptTextPart = { type: "text"; text: string };
+type PromptToolCallPart = {
+  type: "tool-call";
+  toolCallId: string;
+  toolName: AgentContextToolName;
+  input: Record<string, unknown>;
+};
+type PromptToolResultPart = {
+  type: "tool-result";
+  toolCallId: string;
+  toolName: AgentContextToolName;
+  output:
+    | { type: "json"; value: unknown }
+    | { type: "error-text"; value: string };
+};
+type PromptMessage =
+  | { role: "system"; content: string }
+  | { role: "user"; content: string | PromptTextPart[] }
+  | { role: "assistant"; content: string | Array<PromptTextPart | PromptToolCallPart> }
+  | { role: "tool"; content: PromptToolResultPart[] };
 
 export class AgentService {
   constructor(private readonly ctx: AppContext, private readonly logger: FastifyBaseLogger) {}
@@ -73,37 +164,13 @@ export class AgentService {
     const title = (params.title || "新会话").trim() || "新会话";
     const kind = params.kind === "subtask" ? "subtask" : "primary";
 
-    try {
-      const tx = this.ctx.db.transaction(() => {
-        createAgentSession(this.ctx.db, {
-          id: sessionId,
-          workspaceId: params.workspaceId,
-          title,
-          kind,
-          createdAt
-        });
-
-        appendTimelineEvent(this.ctx.db, {
-          id: newSortableId("evt"),
-          workspaceId: params.workspaceId,
-          sessionId,
-          lane: "timeline",
-          prevId: null,
-          type: "session.created",
-          schemaVersion: 1,
-          createdAt,
-          payload: {
-            title,
-            kind,
-            createdBy: "client"
-          }
-        });
-      });
-      tx();
-    } catch (err) {
-      if (err instanceof AgentConflictError) throw conflictToHttpError(err);
-      throw err;
-    }
+    createAgentSession(this.ctx.db, {
+      id: sessionId,
+      workspaceId: params.workspaceId,
+      title,
+      kind,
+      createdAt
+    });
 
     const session = getAgentSession(this.ctx.db, sessionId);
     if (!session) throw new HttpError(500, "failed to create session");
@@ -113,113 +180,47 @@ export class AgentService {
   forkSession(params: AgentForkSessionRequest) {
     const fromSession = getAgentSession(this.ctx.db, params.fromSessionId);
     if (!fromSession) throw new HttpError(404, "source session not found");
-    const fromEvent = getEventById(this.ctx.db, params.fromEventId);
-    if (!fromEvent || fromEvent.sessionId !== params.fromSessionId || fromEvent.lane !== "timeline") {
-      throw new HttpError(400, "invalid fromEventId");
-    }
 
-    // fork 的期望交互: 新 session 内应能看到来源会话在锚点之前的可见内容。
-    // v1 采用“克隆锚点之前的 timeline 事件到新 session”的方式实现:
-    // - UI 直接渲染新 session 的 conversation 即可看到历史
-    // - fork_base 仍保留来源引用(审计/可追溯)
-    // - 只克隆非 session.* 事件,避免新会话里出现多余的 session.created/fork_base
-    const timelineChain: Array<{ type: string; schemaVersion: number; payload: any }> = [];
-    {
-      const seen = new Set<string>();
-      let cursor: string | null = fromEvent.id;
-      while (cursor) {
-        if (seen.has(cursor)) {
-          throw new HttpError(400, "invalid fromEventId");
-        }
-        seen.add(cursor);
-        const ev = getEventById(this.ctx.db, cursor);
-        if (!ev || ev.sessionId !== fromSession.id || ev.lane !== "timeline") {
-          throw new HttpError(400, "invalid fromEventId");
-        }
-        timelineChain.push({ type: ev.type, schemaVersion: ev.schemaVersion, payload: ev.payload });
-        cursor = ev.prevId;
-      }
-      timelineChain.reverse();
-    }
-
-    const eventsToClone = timelineChain.filter((ev) => !String(ev.type || "").startsWith("session."));
+    const visible = getSessionVisibleItems(this.ctx.db, fromSession.workspaceId, fromSession.id);
+    const index = visible.findIndex((item) => item.id === params.fromItemId);
+    if (index < 0) throw new HttpError(400, "invalid fromItemId");
 
     const createdAt = nowMs();
     const newSessionId = newSortableId("sess");
     const title = (params.title || `${fromSession.title} (fork)`).trim() || `${fromSession.title} (fork)`;
     const kind = params.kind === "subtask" ? "subtask" : "primary";
-    const correlationId = newSortableId("corr");
 
-    try {
-      const tx = this.ctx.db.transaction(() => {
-        appendControlEvent(this.ctx.db, {
-          id: newSortableId("evt"),
-          workspaceId: fromSession.workspaceId,
-          sessionId: fromSession.id,
-          lane: "control",
-          type: "control.session.fork.requested",
-          schemaVersion: 1,
-          correlationId,
-          createdAt,
-          payload: {
-            fromSessionId: fromSession.id,
-            fromEventId: fromEvent.id,
-            newSessionKind: kind
-          }
-        });
+    const cloned = visible.slice(0, index + 1);
+    const tx = this.ctx.db.transaction(() => {
+      createAgentSession(this.ctx.db, {
+        id: newSessionId,
+        workspaceId: fromSession.workspaceId,
+        title,
+        kind,
+        createdAt,
+        forkedFromSessionId: fromSession.id,
+        forkedFromItemId: params.fromItemId
+      });
 
-        createAgentSession(this.ctx.db, {
-          id: newSessionId,
-          workspaceId: fromSession.workspaceId,
-          title,
-          kind,
-          createdAt,
-          forkedFromSessionId: fromSession.id,
-          forkedFromEventId: fromEvent.id
-        });
-
-        const forkBase = appendTimelineEvent(this.ctx.db, {
-          id: newSortableId("evt"),
+      let prevId: number | null = null;
+      for (const item of cloned) {
+        const safeStatus = item.status === "streaming" || item.status === "queued" || item.status === "running" || item.status === "awaiting_permission" ? "completed" : item.status;
+        const next = appendContextItem(this.ctx.db, {
           workspaceId: fromSession.workspaceId,
           sessionId: newSessionId,
-          lane: "timeline",
-          prevId: null,
-          type: "session.fork_base",
-          schemaVersion: 1,
-          correlationId,
-          createdAt,
-          payload: {
-            fromSessionId: fromSession.id,
-            fromEventId: fromEvent.id,
-            kind
-          }
+          runId: null,
+          turnId: null,
+          step: null,
+          prevId,
+          kind: item.kind,
+          status: safeStatus,
+          output: item.output,
+          createdAt: Math.max(createdAt, item.createdAt)
         });
-
-        let prevId: string | null = forkBase.id;
-        let ts = createdAt;
-        for (const ev of eventsToClone) {
-          ts += 1;
-          const nextId = newSortableId("evt");
-          appendTimelineEvent(this.ctx.db, {
-            id: nextId,
-            workspaceId: fromSession.workspaceId,
-            sessionId: newSessionId,
-            lane: "timeline",
-            prevId,
-            type: ev.type,
-            schemaVersion: ev.schemaVersion,
-            correlationId,
-            createdAt: ts,
-            payload: ev.payload
-          });
-          prevId = nextId;
-        }
-      });
-      tx();
-    } catch (err) {
-      if (err instanceof AgentConflictError) throw conflictToHttpError(err);
-      throw err;
-    }
+        prevId = next.id;
+      }
+    });
+    tx();
 
     const session = getAgentSession(this.ctx.db, newSessionId);
     if (!session) throw new HttpError(500, "failed to create fork session");
@@ -232,6 +233,7 @@ export class AgentService {
     if (session.workspaceId !== params.body.workspaceId) {
       throw new HttpError(400, "workspaceId mismatch");
     }
+
     const text = params.body.text.trim();
     if (!text) throw new HttpError(400, "text is required");
 
@@ -241,15 +243,11 @@ export class AgentService {
       clientRequestId: params.body.clientRequestId
     });
     if (dedup) {
-      const event = getEventById(this.ctx.db, dedup.messageEventId);
-      const payload = (event?.payload ?? null) as any;
-      const triggerMessageId = typeof payload?.messageId === "string" ? payload.messageId : undefined;
       return {
         sessionId: session.id,
-        messageEventId: dedup.messageEventId,
+        messageItemId: dedup.messageItemId,
         runId: dedup.runId,
-        deduplicated: true,
-        triggerMessageId
+        deduplicated: true
       };
     }
 
@@ -262,305 +260,311 @@ export class AgentService {
       requestedAgentId: params.body.agentId
     });
 
-    const workspace = this.ensureWorkspace(session.workspaceId);
-    const correlationId = newSortableId("corr");
-    const messageId = newSortableId("msg");
-    const messageEventId = newSortableId("evt");
-    const runId = newSortableId("run");
-    const runCreatedEventId = newSortableId("evt");
     const createdAt = nowMs();
+    const runId = newSortableId("run");
+    let messageItemId = 0;
 
-    const textPayload = await buildTextPayload({
-      workspacePath: workspace.path,
-      text
-    });
-
-    let userEventId = messageEventId;
-    let createdRunId = runId;
-    let deduplicated = false;
     try {
       const tx = this.ctx.db.transaction(() => {
-        const prevHead = getSessionHead(this.ctx.db, session.workspaceId, session.id);
-        appendTimelineEvent(this.ctx.db, {
-          id: messageEventId,
+        const head = getSessionHead(this.ctx.db, session.workspaceId, session.id);
+        const item = appendContextItem(this.ctx.db, {
           workspaceId: session.workspaceId,
           sessionId: session.id,
-          lane: "timeline",
-          prevId: prevHead,
-          type: "user.message.created",
-          schemaVersion: 1,
-          correlationId,
-          createdAt,
-          payload: {
-            messageId,
-            clientRequestId: params.body.clientRequestId,
-            text: textPayload,
-            agentId: profile.agent.id
-          }
+          runId,
+          turnId: null,
+          step: null,
+          prevId: head,
+          kind: "user",
+          status: "completed",
+          output: {
+            type: "user_text",
+            text
+          },
+          createdAt
         });
 
-        appendTimelineEvent(this.ctx.db, {
-          id: runCreatedEventId,
-          workspaceId: session.workspaceId,
-          sessionId: session.id,
-          lane: "timeline",
-          prevId: messageEventId,
-          type: "run.created",
-          schemaVersion: 1,
-          correlationId,
-          causationId: messageEventId,
-          createdAt: createdAt + 1,
-          payload: {
-            runId,
-            triggerMessageId: messageId,
-            agentId: profile.agent.id,
-            providerId: profile.provider.id,
-            modelId: profile.model.id
-          }
-        });
-
+        messageItemId = item.id;
         insertClientRequestDedup(this.ctx.db, {
           workspaceId: session.workspaceId,
           sessionId: session.id,
           clientRequestId: params.body.clientRequestId,
-          messageEventId,
+          messageItemId: item.id,
           runId,
           createdAt
+        });
+
+        createRunRecord(this.ctx.db, {
+          runId,
+          workspaceId: session.workspaceId,
+          sessionId: session.id,
+          triggerItemId: item.id,
+          agentId: profile.agent.id,
+          providerId: profile.provider.id,
+          modelId: profile.model.id,
+          status: "running",
+          createdAt
+        });
+
+        updateRunState(this.ctx.db, {
+          workspaceId: session.workspaceId,
+          sessionId: session.id,
+          status: "running",
+          activeRunId: runId,
+          activeAssistantItemId: null,
+          waitingToolItemId: null,
+          updatedAt: createdAt,
+          appliedItemId: item.id
         });
       });
       tx();
     } catch (err) {
       if (err instanceof AgentConflictError) throw conflictToHttpError(err);
-      const fresh = findClientRequestDedup(this.ctx.db, {
-        workspaceId: session.workspaceId,
-        sessionId: session.id,
-        clientRequestId: params.body.clientRequestId
-      });
-      if (fresh) {
-        userEventId = fresh.messageEventId;
-        createdRunId = fresh.runId;
-        deduplicated = true;
-      } else {
-        throw err;
-      }
+      throw err;
     }
 
     return {
       sessionId: session.id,
-      messageEventId: userEventId,
-      runId: createdRunId,
-      deduplicated,
-      triggerMessageId: deduplicated ? undefined : messageId
+      messageItemId,
+      runId,
+      deduplicated: false
     };
   }
 
-  getConversation(sessionId: string): AgentSessionConversationResponse {
+  getContextItems(sessionId: string, afterId?: number): AgentContextItemsResponse {
     const session = getAgentSession(this.ctx.db, sessionId);
     if (!session) throw new HttpError(404, "session not found");
-    const events = getSessionTimelineEvents(this.ctx.db, session.workspaceId, session.id);
-    const appliedEventId = events.length > 0 ? events[events.length - 1]!.eventId : 0;
+    const items = afterId && afterId > 0 ? getSessionVisibleItemsAfter(this.ctx.db, session.workspaceId, session.id, afterId) : getSessionVisibleItems(this.ctx.db, session.workspaceId, session.id);
+    const runState = getRunState(this.ctx.db, session.workspaceId, session.id);
     return {
       sessionId: session.id,
-      headEventId: session.headEventId,
-      appliedEventId,
-      events
+      headItemId: session.headItemId,
+      appliedItemId: runState.appliedItemId,
+      items
     };
+  }
+
+  getContextItem(sessionId: string, itemId: number) {
+    const session = getAgentSession(this.ctx.db, sessionId);
+    if (!session) throw new HttpError(404, "session not found");
+    const item = getVisibleItemById(this.ctx.db, session.workspaceId, session.id, itemId);
+    if (!item) throw new HttpError(404, "context item not found");
+    return item;
   }
 
   getRunState(sessionId: string): AgentSessionRunState {
     const session = getAgentSession(this.ctx.db, sessionId);
     if (!session) throw new HttpError(404, "session not found");
     const state = getRunState(this.ctx.db, session.workspaceId, session.id);
+    const nonTerminalItemIds = listNonTerminalVisibleItemIds(this.ctx.db, session.workspaceId, session.id);
     return {
       sessionId: session.id,
       status: state.status,
       activeRunId: state.activeRunId,
+      activeAssistantItemId: state.activeAssistantItemId,
+      waitingToolItemId: state.waitingToolItemId,
+      nonTerminalItemIds,
       updatedAt: state.updatedAt,
-      appliedEventId: state.appliedEventId
+      appliedItemId: state.appliedItemId
     };
   }
 
-  getEventById(eventId: string) {
-    return getEventById(this.ctx.db, eventId);
+  getContextItemById(itemId: number) {
+    return getContextItemById(this.ctx.db, itemId);
   }
 
   revertSession(sessionId: string, body: AgentRevertSessionRequest): AgentControlResult {
     const session = getAgentSession(this.ctx.db, sessionId);
     if (!session) throw new HttpError(404, "session not found");
     if (session.workspaceId !== body.workspaceId) throw new HttpError(400, "workspaceId mismatch");
-    const targetEvent = getEventById(this.ctx.db, body.toEventId);
-    if (!targetEvent || targetEvent.sessionId !== session.id || targetEvent.lane !== "timeline") {
-      throw new HttpError(400, "toEventId is invalid");
-    }
+    const target = getVisibleItemById(this.ctx.db, session.workspaceId, session.id, body.toItemId);
+    if (!target) throw new HttpError(400, "toItemId is invalid");
 
+    const state = getRunState(this.ctx.db, session.workspaceId, session.id);
     const createdAt = nowMs();
-    const correlationId = newSortableId("corr");
-    appendControlEvent(this.ctx.db, {
-      id: newSortableId("evt"),
-      workspaceId: session.workspaceId,
-      sessionId: session.id,
-      lane: "control",
-      type: "control.session.revert.requested",
-      schemaVersion: 1,
-      correlationId,
-      createdAt,
-      payload: {
-        toEventId: body.toEventId,
-        reason: body.reason ?? "manual"
-      }
-    });
-
     try {
       moveSessionHead(this.ctx.db, {
         workspaceId: session.workspaceId,
         sessionId: session.id,
-        expectedHeadEventId: session.headEventId,
-        nextHeadEventId: body.toEventId,
-        reason: "revert",
-        movedEvent: {
-          id: newSortableId("evt"),
-          workspaceId: session.workspaceId,
-          sessionId: session.id,
-          schemaVersion: 1,
-          correlationId,
-          createdAt: createdAt + 1,
-          payload: null
-        }
+        expectedHeadItemId: session.headItemId,
+        nextHeadItemId: body.toItemId,
+        updatedAt: createdAt
       });
       setRunStateIdle(this.ctx.db, {
         workspaceId: session.workspaceId,
         sessionId: session.id,
-        updatedAt: createdAt + 1,
-        appliedEventId: getLatestSessionEventId(this.ctx.db, session.workspaceId, session.id)
+        updatedAt: createdAt,
+        appliedItemId: getLatestSessionItemId(this.ctx.db, session.workspaceId, session.id)
       });
+      if (state.activeRunId) {
+        updateRunRecordStatus(this.ctx.db, {
+          runId: state.activeRunId,
+          status: "cancelled",
+          updatedAt: createdAt
+        });
+      }
     } catch (err) {
       if (err instanceof AgentConflictError) throw conflictToHttpError(err);
-      if (err instanceof Error && err.message === "invalid target head event") {
-        throw new HttpError(400, "toEventId is invalid");
+      if (err instanceof Error && err.message === "invalid target head item") {
+        throw new HttpError(400, "toItemId is invalid");
       }
       throw err;
     }
 
-    const headEventId = getSessionHead(this.ctx.db, session.workspaceId, session.id);
-    return { sessionId: session.id, headEventId };
+    const headItemId = getSessionHead(this.ctx.db, session.workspaceId, session.id);
+    return { sessionId: session.id, headItemId };
   }
 
   cancelSession(sessionId: string, body: AgentCancelSessionRequest): AgentControlResult {
     const session = getAgentSession(this.ctx.db, sessionId);
     if (!session) throw new HttpError(404, "session not found");
     if (session.workspaceId !== body.workspaceId) throw new HttpError(400, "workspaceId mismatch");
-    const anchor = getEventById(this.ctx.db, body.anchorEventId);
-    if (!anchor || anchor.sessionId !== session.id || anchor.lane !== "timeline") {
-      throw new HttpError(400, "anchorEventId is invalid");
-    }
 
+    const state = getRunState(this.ctx.db, session.workspaceId, session.id);
     const createdAt = nowMs();
-    const correlationId = newSortableId("corr");
-    appendControlEvent(this.ctx.db, {
-      id: newSortableId("evt"),
-      workspaceId: session.workspaceId,
-      sessionId: session.id,
-      lane: "control",
-      type: "control.session.cancel.requested",
-      schemaVersion: 1,
-      correlationId,
-      createdAt,
-      payload: {
-        scope: "session",
-        cancelMode: "discard_to_anchor",
-        anchorEventId: body.anchorEventId
-      }
-    });
 
-    try {
-      let expectedHeadEventId = getSessionHead(this.ctx.db, session.workspaceId, session.id);
-      const runState = getRunState(this.ctx.db, session.workspaceId, session.id);
-      if (runState.activeRunId && expectedHeadEventId) {
-        const cancelledEvent = appendTimelineEvent(this.ctx.db, {
-          id: newSortableId("evt"),
-          workspaceId: session.workspaceId,
-          sessionId: session.id,
-          lane: "timeline",
-          prevId: expectedHeadEventId,
-          type: "run.cancelled",
-          schemaVersion: 1,
-          correlationId,
-          createdAt: createdAt + 1,
-          payload: {
-            runId: runState.activeRunId,
-            reason: "cancel_requested"
-          }
+    const tx = this.ctx.db.transaction(() => {
+      const visible = getSessionVisibleItems(this.ctx.db, session.workspaceId, session.id);
+      for (const item of visible) {
+        if (!NON_TERMINAL_ITEM_STATUS.has(item.status)) continue;
+        updateContextItem(this.ctx.db, {
+          itemId: item.id,
+          status: "cancelled",
+          output: item.output,
+          updatedAt: createdAt
         });
-        expectedHeadEventId = cancelledEvent.id;
       }
 
-      moveSessionHead(this.ctx.db, {
-        workspaceId: session.workspaceId,
-        sessionId: session.id,
-        expectedHeadEventId,
-        nextHeadEventId: body.anchorEventId,
-        reason: "cancel",
-        movedEvent: {
-          id: newSortableId("evt"),
-          workspaceId: session.workspaceId,
-          sessionId: session.id,
-          schemaVersion: 1,
-          correlationId,
-          createdAt: createdAt + 2,
-          payload: null
-        }
-      });
       setRunStateIdle(this.ctx.db, {
         workspaceId: session.workspaceId,
         sessionId: session.id,
-        updatedAt: createdAt + 2,
-        appliedEventId: getLatestSessionEventId(this.ctx.db, session.workspaceId, session.id)
+        updatedAt: createdAt,
+        appliedItemId: getLatestSessionItemId(this.ctx.db, session.workspaceId, session.id)
       });
-    } catch (err) {
-      if (err instanceof AgentConflictError) throw conflictToHttpError(err);
-      if (err instanceof Error && err.message === "invalid target head event") {
-        throw new HttpError(400, "anchorEventId is invalid");
+      if (state.activeRunId) {
+        updateRunRecordStatus(this.ctx.db, {
+          runId: state.activeRunId,
+          status: "cancelled",
+          updatedAt: createdAt
+        });
       }
-      throw err;
-    }
+    });
 
-    const headEventId = getSessionHead(this.ctx.db, session.workspaceId, session.id);
-    return { sessionId: session.id, headEventId };
+    tx();
+
+    const headItemId = getSessionHead(this.ctx.db, session.workspaceId, session.id);
+    return { sessionId: session.id, headItemId };
   }
 
-  appendTimelineFromWorker(params: {
+  applyToolPermission(sessionId: string, body: AgentToolPermissionRequest) {
+    const session = getAgentSession(this.ctx.db, sessionId);
+    if (!session) throw new HttpError(404, "session not found");
+    if (session.workspaceId !== body.workspaceId) throw new HttpError(400, "workspaceId mismatch");
+    const state = getRunState(this.ctx.db, session.workspaceId, session.id);
+    if (!state.activeRunId) throw new HttpError(409, "no active run");
+    if (state.waitingToolItemId !== body.toolItemId) throw new HttpError(409, "tool is not waiting for permission");
+
+    const item = getContextItemById(this.ctx.db, body.toolItemId);
+    if (!item || item.sessionId !== session.id || item.kind !== "tool") {
+      throw new HttpError(404, "tool item not found");
+    }
+    if (item.status !== "awaiting_permission") {
+      throw new HttpError(409, "tool is not waiting for permission");
+    }
+
+    if (item.output.type !== "tool") {
+      throw new HttpError(400, "invalid tool item output");
+    }
+    const output = item.output;
+    const updatedAt = nowMs();
+    if (body.decision === "approve") {
+      updateContextItem(this.ctx.db, {
+        itemId: item.id,
+        status: "queued",
+        output: {
+          ...output,
+          approved: true
+        },
+        updatedAt
+      });
+      updateRunRecordStatus(this.ctx.db, {
+        runId: state.activeRunId,
+        status: "running",
+        updatedAt
+      });
+      updateRunState(this.ctx.db, {
+        workspaceId: session.workspaceId,
+        sessionId: session.id,
+        status: "running",
+        activeRunId: state.activeRunId,
+        activeAssistantItemId: state.activeAssistantItemId,
+        waitingToolItemId: null,
+        updatedAt,
+        appliedItemId: getLatestSessionItemId(this.ctx.db, session.workspaceId, session.id)
+      });
+      return { runId: state.activeRunId, decision: body.decision };
+    }
+
+    updateContextItem(this.ctx.db, {
+      itemId: item.id,
+      status: "denied",
+      output: {
+        ...output,
+        error: "permission denied"
+      },
+      updatedAt
+    });
+    updateRunRecordStatus(this.ctx.db, {
+      runId: state.activeRunId,
+      status: "running",
+      updatedAt
+    });
+    updateRunState(this.ctx.db, {
+      workspaceId: session.workspaceId,
+      sessionId: session.id,
+      status: "running",
+      activeRunId: state.activeRunId,
+      activeAssistantItemId: state.activeAssistantItemId,
+      waitingToolItemId: null,
+      updatedAt,
+      appliedItemId: getLatestSessionItemId(this.ctx.db, session.workspaceId, session.id)
+    });
+    return { runId: state.activeRunId, decision: body.decision };
+  }
+
+  appendContextItemFromWorker(params: {
     workspaceId: string;
     sessionId: string;
-    type: string;
-    payload: unknown;
-    correlationId?: string | null;
-    causationId?: string | null;
+    runId: string | null;
+    turnId: string | null;
+    step: number | null;
+    prevId: number | null;
+    kind: AgentContextItemRecord["kind"];
+    status: AgentContextItemStatus;
+    output: AgentContextItemRecord["output"];
     createdAt?: number;
   }) {
-    const head = getSessionHead(this.ctx.db, params.workspaceId, params.sessionId);
     try {
-      return appendTimelineEvent(this.ctx.db, {
-        id: newSortableId("evt"),
+      return appendContextItem(this.ctx.db, {
         workspaceId: params.workspaceId,
         sessionId: params.sessionId,
-        lane: "timeline",
-        prevId: head,
-        type: params.type,
-        schemaVersion: 1,
-        correlationId: params.correlationId,
-        causationId: params.causationId,
-        createdAt: params.createdAt ?? nowMs(),
-        payload: params.payload
+        runId: params.runId,
+        turnId: params.turnId,
+        step: params.step,
+        prevId: params.prevId,
+        kind: params.kind,
+        status: params.status,
+        output: params.output,
+        createdAt: params.createdAt ?? nowMs()
       });
     } catch (err) {
       if (err instanceof AgentConflictError) {
         this.logger.warn(
           {
             sessionId: params.sessionId,
-            type: params.type,
-            currentHeadEventId: err.currentHeadEventId
+            kind: params.kind,
+            currentHeadItemId: err.currentHeadItemId
           },
-          "agent append timeline conflict"
+          "agent append context item conflict"
         );
         throw conflictToHttpError(err);
       }
@@ -568,10 +572,75 @@ export class AgentService {
     }
   }
 
-  private ensureWorkspace(workspaceId: string) {
-    const workspace = getWorkspace(this.ctx.db, workspaceId);
-    if (!workspace) throw new HttpError(404, "workspace not found");
-    return workspace;
+  updateContextItemFromWorker(params: {
+    itemId: number;
+    status?: AgentContextItemStatus;
+    output?: AgentContextItemRecord["output"];
+    updatedAt?: number;
+  }) {
+    const item = updateContextItem(this.ctx.db, {
+      itemId: params.itemId,
+      status: params.status,
+      output: params.output,
+      updatedAt: params.updatedAt ?? nowMs()
+    });
+    if (!item) throw new HttpError(404, "context item not found");
+    return item;
+  }
+
+  updateRunStateFromWorker(params: {
+    workspaceId: string;
+    sessionId: string;
+    status: AgentRunStatus;
+    activeRunId: string | null;
+    activeAssistantItemId: number | null;
+    waitingToolItemId: number | null;
+    updatedAt?: number;
+  }) {
+    const ts = params.updatedAt ?? nowMs();
+    const appliedItemId = getLatestSessionItemId(this.ctx.db, params.workspaceId, params.sessionId);
+    updateRunState(this.ctx.db, {
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+      status: params.status,
+      activeRunId: params.activeRunId,
+      activeAssistantItemId: params.activeAssistantItemId,
+      waitingToolItemId: params.waitingToolItemId,
+      updatedAt: ts,
+      appliedItemId
+    });
+    if (params.activeRunId) {
+      updateRunRecordStatus(this.ctx.db, {
+        runId: params.activeRunId,
+        status: params.status === "waiting_permission" ? "waiting_permission" : "running",
+        updatedAt: ts
+      });
+    }
+  }
+
+  completeRunFromWorker(params: {
+    workspaceId: string;
+    sessionId: string;
+    runId: string;
+    status: "completed" | "failed" | "cancelled";
+    updatedAt?: number;
+  }) {
+    const ts = params.updatedAt ?? nowMs();
+    updateRunRecordStatus(this.ctx.db, {
+      runId: params.runId,
+      status: params.status,
+      updatedAt: ts
+    });
+    const state = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
+    if (state.activeRunId !== params.runId) {
+      return;
+    }
+    setRunStateIdle(this.ctx.db, {
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+      updatedAt: ts,
+      appliedItemId: getLatestSessionItemId(this.ctx.db, params.workspaceId, params.sessionId)
+    });
   }
 
   getExecutionProfileForRun(params: { workspaceId: string; sessionId: string; runId: string }) {
@@ -579,18 +648,15 @@ export class AgentService {
     if (!session) throw new HttpError(404, "session not found");
     if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
 
-    const runCreated = findRunCreatedEvent(this.ctx.db, {
-      workspaceId: params.workspaceId,
-      sessionId: params.sessionId,
-      runId: params.runId
-    });
-    if (!runCreated) throw new HttpError(404, "run not found");
-    const payload = runCreated.payload as Record<string, unknown>;
+    const run = getRunRecord(this.ctx.db, params.runId);
+    if (!run || run.sessionId !== params.sessionId || run.workspaceId !== params.workspaceId) {
+      throw new HttpError(404, "run not found");
+    }
 
     const profile = resolveExecutionProfile(this.ctx, {
-      agentIdFromRun: typeof payload.agentId === "string" ? payload.agentId : null,
-      providerIdFromRun: typeof payload.providerId === "string" ? payload.providerId : null,
-      modelIdFromRun: typeof payload.modelId === "string" ? payload.modelId : null
+      agentIdFromRun: run.agentId,
+      providerIdFromRun: run.providerId,
+      modelIdFromRun: run.modelId
     });
 
     return {
@@ -606,5 +672,147 @@ export class AgentService {
       provider: profile.provider,
       model: profile.model
     };
+  }
+
+  getPromptContextForRun(params: { workspaceId: string; sessionId: string; runId: string }) {
+    const session = getAgentSession(this.ctx.db, params.sessionId);
+    if (!session) throw new HttpError(404, "session not found");
+    if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
+
+    const run = getRunRecord(this.ctx.db, params.runId);
+    if (!run || run.sessionId !== params.sessionId || run.workspaceId !== params.workspaceId) {
+      throw new HttpError(404, "run not found");
+    }
+
+    const profile = resolveExecutionProfile(this.ctx, {
+      agentIdFromRun: run.agentId,
+      providerIdFromRun: run.providerId,
+      modelIdFromRun: run.modelId
+    });
+
+    const visible = getSessionVisibleItems(this.ctx.db, params.workspaceId, params.sessionId);
+    const messages: PromptMessage[] = [];
+    for (let i = 0; i < visible.length; i += 1) {
+      const item = visible[i];
+      if (!item) continue;
+
+      if (item.kind === "user" && item.output.type === "user_text") {
+        if (!item.output.text) continue;
+        messages.push({ role: "user", content: item.output.text });
+        continue;
+      }
+
+      if (item.kind !== "assistant" || item.output.type !== "assistant_text" || item.status !== "completed") {
+        continue;
+      }
+
+      const assistantParts: Array<PromptTextPart | PromptToolCallPart> = [];
+      if (item.output.text) {
+        assistantParts.push({ type: "text", text: item.output.text });
+      }
+
+      const toolResultParts: PromptToolResultPart[] = [];
+      let cursor = i + 1;
+      while (cursor < visible.length) {
+        const toolItem = visible[cursor];
+        if (!toolItem || toolItem.kind !== "tool") break;
+        if (toolItem.runId !== item.runId || toolItem.turnId !== item.turnId || toolItem.step !== item.step) break;
+        if (toolItem.output.type !== "tool" || !TERMINAL_TOOL_ITEM_STATUS.has(toolItem.status)) {
+          cursor += 1;
+          continue;
+        }
+
+        const toolCallId = typeof toolItem.output.toolCallId === "string" ? toolItem.output.toolCallId.trim() : "";
+        if (!toolCallId) {
+          cursor += 1;
+          continue;
+        }
+        const toolInput = toolItem.output.args && typeof toolItem.output.args === "object" && !Array.isArray(toolItem.output.args)
+          ? (toolItem.output.args as Record<string, unknown>)
+          : {};
+        assistantParts.push({
+          type: "tool-call",
+          toolCallId,
+          toolName: toolItem.output.toolName,
+          input: toolInput
+        });
+
+        const toolOutput = toolItem.output.error
+          ? { type: "error-text" as const, value: toolItem.output.error }
+          : {
+              type: "json" as const,
+              value: toolItem.output.result !== undefined ? toolItem.output.result : { status: toolItem.status }
+            };
+        toolResultParts.push({
+          type: "tool-result",
+          toolCallId,
+          toolName: toolItem.output.toolName,
+          output: toolOutput
+        });
+        cursor += 1;
+      }
+
+      if (assistantParts.length === 1 && assistantParts[0].type === "text") {
+        messages.push({ role: "assistant", content: assistantParts[0].text });
+      } else if (assistantParts.length > 0) {
+        messages.push({ role: "assistant", content: assistantParts });
+      }
+
+      if (toolResultParts.length > 0) {
+        messages.push({ role: "tool", content: toolResultParts });
+      }
+
+      i = cursor - 1;
+    }
+
+    const tools = profile.agent.tools.map((name) => {
+      const requiresApproval =
+        (name === "read" && !profile.agent.permissions.allowRead) ||
+        (name === "write" && !profile.agent.permissions.allowWrite) ||
+        (name === "bash" && !profile.agent.permissions.allowBash);
+      return {
+        name,
+        description: toolDescription(name),
+        inputSchema: toolArgsSchema(name),
+        requiresApproval
+      };
+    });
+
+    const pendingTools = visible
+      .filter((item) => item.runId === params.runId && item.kind === "tool")
+      .filter((item) => item.status === "queued" || item.status === "running" || item.status === "awaiting_permission")
+      .map((item) => {
+        if (item.output.type !== "tool") return null;
+        return {
+          itemId: item.id,
+          status: item.status,
+          toolName: item.output.toolName,
+          toolCallId: item.output.toolCallId,
+          args: item.output.args ?? {},
+          approved: item.output.approved === true
+        };
+      })
+      .filter((item): item is {
+        itemId: number;
+        status: AgentContextItemStatus;
+        toolName: AgentContextToolName;
+        toolCallId: string | undefined;
+        args: Record<string, unknown>;
+        approved: boolean;
+      } => item !== null);
+
+    return {
+      headItemId: session.headItemId,
+      system: profile.agent.prompt || "",
+      messages,
+      tools,
+      pendingTools
+    };
+  }
+
+  private ensureWorkspace(workspaceId: string) {
+    const workspace = getWorkspace(this.ctx.db, workspaceId);
+    if (!workspace) throw new HttpError(404, "workspace not found");
+    return workspace;
   }
 }

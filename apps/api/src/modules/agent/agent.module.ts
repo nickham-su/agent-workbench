@@ -6,45 +6,27 @@ import type { AgentRuntimePort } from "./agent.runtime-port.js";
 import { AgentService } from "./agent.service.js";
 import { AgentWorkerClient } from "./agent.worker-client.js";
 import { AgentWorkerProcessManager } from "./agent.worker-manager.js";
-import { findRunCreatedEvent, getSessionTimelineEvents, listRunningSessions } from "./agent.store.js";
+import { listRecoverableRuns } from "./agent.store.js";
 import { agentWorkerPidPath } from "../../infra/fs/paths.js";
 
 async function enqueueRecoveringRuns(service: AgentService, runtime: AgentRuntimePort) {
-  const ctx = service.getContext();
-  const running = listRunningSessions(ctx.db);
-
-  for (const row of running) {
-    if (!row.activeRunId) continue;
-    const runCreated = findRunCreatedEvent(ctx.db, {
-      workspaceId: row.workspaceId,
-      sessionId: row.sessionId,
-      runId: row.activeRunId
-    });
-    if (!runCreated) continue;
-    const payload = runCreated.payload as any;
-    const messageId = typeof payload?.triggerMessageId === "string" ? payload.triggerMessageId : "";
-    if (!messageId) continue;
-
+  const rows = listRecoverableRuns(service.getContext().db);
+  for (const row of rows) {
     const session = service.getSession(row.sessionId);
     if (!session) continue;
     const workspace = service.getWorkspace(session.workspaceId);
     if (!workspace) continue;
-
-    const timeline = getSessionTimelineEvents(ctx.db, session.workspaceId, session.id);
-    const trigger = timeline.find((event) => {
-      if (event.type !== "user.message.created") return false;
-      const eventPayload = event.payload as any;
-      return eventPayload.messageId === messageId;
-    });
-    if (!trigger) continue;
-    const triggerPayload = trigger.payload as any;
-    const inputText = typeof triggerPayload?.text?.preview === "string" ? triggerPayload.text.preview : "";
-
+    let inputText = "";
+    if (row.triggerItemId) {
+      const trigger = service.getContextItemById(row.triggerItemId);
+      if (trigger?.output.type === "user_text") {
+        inputText = trigger.output.text;
+      }
+    }
     await runtime.enqueueRun({
       workspaceId: row.workspaceId,
       sessionId: row.sessionId,
-      runId: row.activeRunId,
-      triggerMessageId: messageId,
+      runId: row.runId,
       inputText,
       workspacePath: workspace.path
     });

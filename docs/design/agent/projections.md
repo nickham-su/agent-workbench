@@ -1,107 +1,95 @@
-# 投影(Projections)
+# 投影与读模型
 
-投影是从 EventStore 重建的读模型,用于:
+## 总览
 
-- Web UI 查询与渲染
-- Scheduler 构建 prompt
-- history transcript 重建
+当前 Agent 链路以 `context_item` 作为主读模型来源,不再依赖 event timeline 重建 conversation。
 
-投影不是权威数据,可随时从 EventStore 重建。
+读侧核心目标:
 
-约束:
+- 支持前端增量轮询与流式显示
+- 支持 worker step-loop 的 prompt 构建
+- 保证 head 可回退、可分支、可恢复
 
-- projection 默认只消费 timeline 事件
-- realtime 事件用于低延迟 UI,默认不进入 projection/transcript
+## 核心表与语义
 
-## 投影更新方式
+### agent_context_item
 
-- 增量更新
-  - v1 由 API 在 timeline append 事务内更新最小投影
-  - ConversationView/PromptContextView 可按需重建
-- 全量重建
-  - 提供 rebuild 操作,从 headEventId 回溯该 session 分支的可见事件
+- 存储 user/assistant/tool/system 上下文项
+- 关键字段:
+  - `id` 自增 item id
+  - `session_id` 会话归属
+  - `run_id`/`turn_id`/`step` 运行期定位
+  - `prev_id` 链式可见关系
+  - `kind`/`status`/`output_json`
+- 语义:
+  - `prev_id` 与 head 共同定义当前可见分支
+  - assistant/tool 非终态记录允许更新,终态冻结
 
-版本一致性建议:
+### agent_session_head
 
-- 每个投影记录 `appliedEventId`
-- API 返回投影时附带该值
-- UI 若发现 `appliedEventId < 最新已接收 eventId`,显示“同步中”并短轮询刷新
+- 记录每个 session 当前 `head_item_id`
+- 用于 append CAS 与可见链裁剪
+- revert/cancel 会移动 head
 
-## 推荐投影集合
+### agent_session_run_state
 
-## workspace_sessions_index
+- 记录会话运行状态
+- 关键字段:
+  - `status` (`idle|running|waiting_permission`)
+  - `active_run_id`
+  - `active_assistant_item_id`
+  - `waiting_tool_item_id`
+  - `applied_item_id`
 
-- 用途
-  - 列出 workspace 下的 session
-  - 显示 title、更新时间、kind(primary/subtask)
-- 来源
-  - session.created
-  - session.fork_base
-  - user.message.created
-  - model.turn.committed
+### agent_run
 
-## session_head
+- 记录 run 生命周期与模型解析结果
+- 关键字段:
+  - `run_id`、`session_id`、`trigger_item_id`
+  - `agent_id`、`provider_id`、`model_id`
+  - `status` (`queued|running|waiting_permission|completed|failed|cancelled`)
 
-- 用途
-  - 存储 session 的当前 headEventId
-  - 作为 append 并发控制的依据
-- 来源
-  - 每次 append 新事件时更新
-  - revert/fork 会将 head 移动到历史事件
+## 查询视图
 
-## session_conversation_view
+### session items
 
-- 用途
-  - UI 以“消息视图”渲染对话
-- 形式
-  - 将事件组装为 MessageView 列表
-  - 模型 turn、工具调用、权限请求都映射为 UI 卡片
+- `GET /context-items`
+- 首次全量拉取可见链,后续使用 `afterId` 增量
+- 返回:
+  - `headItemId` 用于前端链路一致性校验
+  - `appliedItemId` 用于同步进度展示
 
-说明:
+### single item
 
-- 本方案不强制复刻 opencode 的 message/part 表结构
-- 但建议保持 tool 状态机字段与 opencode 接近,便于复用经验
+- `GET /context-items/:itemId`
+- 用于刷新流式 assistant item 与非终态 tool item
 
-## session_run_state
+### run state
 
-- 用途
-  - UI 展示 busy/idle/waiting_approval
-  - cancel/retry 状态判断
-- 来源
-  - run.*
-  - permission.*
+- `GET /run-state`
+- 返回活跃 run 与非终态 item 索引
+- 前端轮询该接口驱动刷新节奏
 
-## session_prompt_context_view
+## prompt 视图
 
-- 用途
-  - Scheduler 构建 LLM 输入
-- 形式
-  - 将可见事件编码为模型消息列表
-  - 包含:
-    - user 输入
-    - assistant 文本
-    - tool request/result
-    - subtask 结果
-  - 控制:
-    - 仅使用 preview 或按需 read artifact
-    - 遵循 compaction anchor
+`POST /api/internal/agent/prompt-context` 返回 worker 可消费的运行上下文:
 
-## compaction_anchor
+- `messages`: 当前可见 user/assistant/tool 归一化消息
+- `tools`: 当前 agent 的工具清单与 input schema
+- `pendingTools`: 本 run 下待处理 tool items
+- `headItemId`: 当前会话 head
 
-- 用途
-  - 控制上下文窗口
-- 来源
-  - session.compaction.applied
+该视图由 context items 直接构建,不依赖独立 conversation projection。
 
-## 事件补拉与投影一致性
+## 一致性策略
 
-- SSE 以 eventId 作为 cursor
-- 投影以事件 id(ULID)与 eventId 都可关联
-- UI 收到事件后可以:
-  - 直接应用事件到本地 UI 状态
-  - 或触发一次拉取投影(简单实现)
+- append 时用 `prev_id == head_item_id` 做 CAS
+- append 成功后事务内更新 head 与 run-state
+- run 完成仅在 `activeRunId` 匹配时回收为 idle,避免迟到回调覆盖新 run
+- 前端增量合并时若检测到 head 回退或链路不连续,强制全量重拉
 
-建议策略:
+## v1 非目标
 
-- v1 以“拉投影”为主,事件只作为刷新触发
-- 后续再做客户端增量应用,减少 API 查询压力
+- 不做 event store 回放重建
+- 不做旧 event/conversation 模型兼容迁移
+- 不做客户端事件流回放,以 API 轮询为主

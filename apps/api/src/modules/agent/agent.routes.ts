@@ -1,23 +1,35 @@
 import { Type } from "@sinclair/typebox";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   AgentCancelSessionRequestSchema,
+  AgentContextItemRecordSchema,
+  AgentContextItemStatusSchema,
+  AgentContextItemsQuerySchema,
+  AgentContextItemsResponseSchema,
   AgentControlResultSchema,
   AgentCreateSessionRequestSchema,
-  AgentEventRecordSchema,
   AgentForkSessionRequestSchema,
+  AgentPermissionDecisionSchema,
   AgentRevertSessionRequestSchema,
   AgentSendMessageRequestSchema,
   AgentSendMessageResponseSchema,
-  AgentSessionConversationResponseSchema,
   AgentSessionRecordSchema,
   AgentSessionRunStateSchema,
+  AgentToolPermissionRequestSchema,
   AgentProviderNpmSchema,
   ErrorResponseSchema
 } from "@agent-workbench/shared";
+import type { AgentToolPermissionRequest } from "@agent-workbench/shared";
 import type { AgentRuntimePort } from "./agent.runtime-port.js";
 import type { AgentService } from "./agent.service.js";
 import { HttpError } from "../../app/errors.js";
+
+function assertInternalToken(req: FastifyRequest, service: AgentService) {
+  const token = String(req.headers["x-awb-agent-internal-token"] || "");
+  if (token !== service.getContext().agentInternalToken) {
+    throw new HttpError(401, "Unauthorized");
+  }
+}
 
 export async function registerAgentRoutes(app: FastifyInstance, params: { service: AgentService; runtime: AgentRuntimePort }) {
   app.get(
@@ -63,7 +75,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
     async (req, reply) => {
       const body = req.body as {
         fromSessionId: string;
-        fromEventId: string;
+        fromItemId: number;
         title?: string;
         kind?: "primary" | "subtask";
       };
@@ -73,17 +85,37 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
   );
 
   app.get(
-    "/api/agent/sessions/:sessionId/conversation",
+    "/api/agent/sessions/:sessionId/context-items",
     {
       schema: {
         tags: ["agent"],
         params: Type.Object({ sessionId: Type.String({ minLength: 1 }) }),
-        response: { 200: AgentSessionConversationResponseSchema, 404: ErrorResponseSchema }
+        querystring: AgentContextItemsQuerySchema,
+        response: { 200: AgentContextItemsResponseSchema, 404: ErrorResponseSchema }
       }
     },
     async (req) => {
       const p = req.params as { sessionId: string };
-      return params.service.getConversation(p.sessionId);
+      const query = req.query as { afterId?: number };
+      return params.service.getContextItems(p.sessionId, query.afterId);
+    }
+  );
+
+  app.get(
+    "/api/agent/sessions/:sessionId/context-items/:itemId",
+    {
+      schema: {
+        tags: ["agent"],
+        params: Type.Object({
+          sessionId: Type.String({ minLength: 1 }),
+          itemId: Type.Number({ minimum: 1 })
+        }),
+        response: { 200: AgentContextItemRecordSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      const p = req.params as { sessionId: string; itemId: number };
+      return params.service.getContextItem(p.sessionId, p.itemId);
     }
   );
 
@@ -121,16 +153,15 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
       const p = req.params as { sessionId: string };
       const body = req.body as { workspaceId: string; text: string; clientRequestId: string; agentId?: string };
       const result = await params.service.sendMessage({ sessionId: p.sessionId, body });
-      if (result.triggerMessageId) {
+      if (!result.deduplicated) {
         const workspace = params.service.getWorkspace(body.workspaceId);
         if (!workspace) throw new HttpError(404, "workspace not found");
         await params.runtime.enqueueRun({
           workspaceId: body.workspaceId,
           sessionId: p.sessionId,
           runId: result.runId,
-          triggerMessageId: result.triggerMessageId,
-          inputText: body.text,
-          workspacePath: workspace.path
+          workspacePath: workspace.path,
+          inputText: body.text
         });
       }
       return reply.code(201).send(result);
@@ -149,7 +180,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
     },
     async (req) => {
       const p = req.params as { sessionId: string };
-      const body = req.body as { workspaceId: string; toEventId: string; reason?: string };
+      const body = req.body as { workspaceId: string; toItemId: number; reason?: string };
       const result = params.service.revertSession(p.sessionId, body);
       await params.runtime.cancelSession(p.sessionId);
       return result;
@@ -168,7 +199,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
     },
     async (req) => {
       const p = req.params as { sessionId: string };
-      const body = req.body as { workspaceId: string; anchorEventId: string };
+      const body = req.body as { workspaceId: string };
       const result = params.service.cancelSession(p.sessionId, body);
       await params.runtime.cancelSession(p.sessionId);
       return result;
@@ -176,21 +207,57 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
   );
 
   app.post(
-    "/api/internal/agent/append-timeline",
+    "/api/agent/sessions/:sessionId/tool-permission",
+    {
+      schema: {
+        tags: ["agent"],
+        params: Type.Object({ sessionId: Type.String({ minLength: 1 }) }),
+        body: AgentToolPermissionRequestSchema,
+        response: {
+          200: Type.Object({ runId: Type.String({ minLength: 1 }), decision: AgentPermissionDecisionSchema }),
+          400: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      const p = req.params as { sessionId: string };
+      const body = req.body as AgentToolPermissionRequest;
+      const result = params.service.applyToolPermission(p.sessionId, body);
+      const workspace = params.service.getWorkspace(body.workspaceId);
+      if (workspace) {
+        await params.runtime.enqueueRun({
+          workspaceId: body.workspaceId,
+          sessionId: p.sessionId,
+          runId: result.runId,
+          workspacePath: workspace.path,
+          inputText: ""
+        });
+      }
+      return result;
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/context-items",
     {
       schema: {
         tags: ["agent"],
         body: Type.Object({
           workspaceId: Type.String({ minLength: 1 }),
           sessionId: Type.String({ minLength: 1 }),
-          type: Type.String({ minLength: 1 }),
-          payload: Type.Any(),
-          correlationId: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-          causationId: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+          runId: Type.Union([Type.String(), Type.Null()]),
+          turnId: Type.Union([Type.String(), Type.Null()]),
+          step: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
+          prevId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
+          kind: Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool"), Type.Literal("system")]),
+          status: AgentContextItemStatusSchema,
+          output: Type.Any(),
           createdAt: Type.Optional(Type.Number())
         }),
         response: {
-          200: Type.Object({ ok: Type.Boolean(), eventId: Type.String({ minLength: 1 }) }),
+          200: Type.Object({ ok: Type.Boolean(), item: AgentContextItemRecordSchema }),
           400: ErrorResponseSchema,
           401: ErrorResponseSchema,
           404: ErrorResponseSchema,
@@ -199,21 +266,181 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
       }
     },
     async (req) => {
-      const token = String(req.headers["x-awb-agent-internal-token"] || "");
-      if (token !== params.service.getContext().agentInternalToken) {
-        throw new HttpError(401, "Unauthorized");
-      }
+      assertInternalToken(req, params.service);
       const body = req.body as {
         workspaceId: string;
         sessionId: string;
-        type: string;
-        payload: unknown;
-        correlationId?: string | null;
-        causationId?: string | null;
+        runId: string | null;
+        turnId: string | null;
+        step: number | null;
+        prevId: number | null;
+        kind: "user" | "assistant" | "tool" | "system";
+        status: "streaming" | "queued" | "running" | "awaiting_permission" | "completed" | "failed" | "denied" | "cancelled";
+        output: unknown;
         createdAt?: number;
       };
-      const event = params.service.appendTimelineFromWorker(body);
-      return { ok: true, eventId: event.id };
+      const item = params.service.appendContextItemFromWorker({
+        workspaceId: body.workspaceId,
+        sessionId: body.sessionId,
+        runId: body.runId,
+        turnId: body.turnId,
+        step: body.step,
+        prevId: body.prevId,
+        kind: body.kind,
+        status: body.status,
+        output: body.output as any,
+        createdAt: body.createdAt
+      });
+      return { ok: true, item };
+    }
+  );
+
+  app.patch(
+    "/api/internal/agent/context-items/:itemId",
+    {
+      schema: {
+        tags: ["agent"],
+        params: Type.Object({ itemId: Type.Number({ minimum: 1 }) }),
+        body: Type.Object({
+          status: Type.Optional(AgentContextItemStatusSchema),
+          output: Type.Optional(Type.Any()),
+          updatedAt: Type.Optional(Type.Number())
+        }),
+        response: {
+          200: Type.Object({ ok: Type.Boolean(), item: AgentContextItemRecordSchema }),
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const p = req.params as { itemId: number };
+      const body = req.body as {
+        status?: "streaming" | "queued" | "running" | "awaiting_permission" | "completed" | "failed" | "denied" | "cancelled";
+        output?: unknown;
+        updatedAt?: number;
+      };
+      const item = params.service.updateContextItemFromWorker({
+        itemId: p.itemId,
+        status: body.status,
+        output: body.output as any,
+        updatedAt: body.updatedAt
+      });
+      return { ok: true, item };
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/run-state",
+    {
+      schema: {
+        tags: ["agent"],
+        body: Type.Object({
+          workspaceId: Type.String({ minLength: 1 }),
+          sessionId: Type.String({ minLength: 1 }),
+          status: Type.Union([Type.Literal("idle"), Type.Literal("running"), Type.Literal("waiting_permission")]),
+          activeRunId: Type.Union([Type.String(), Type.Null()]),
+          activeAssistantItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
+          waitingToolItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
+          updatedAt: Type.Optional(Type.Number())
+        }),
+        response: { 200: Type.Object({ ok: Type.Boolean() }), 401: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as {
+        workspaceId: string;
+        sessionId: string;
+        status: "idle" | "running" | "waiting_permission";
+        activeRunId: string | null;
+        activeAssistantItemId: number | null;
+        waitingToolItemId: number | null;
+        updatedAt?: number;
+      };
+      params.service.updateRunStateFromWorker(body);
+      return { ok: true };
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/run-complete",
+    {
+      schema: {
+        tags: ["agent"],
+        body: Type.Object({
+          workspaceId: Type.String({ minLength: 1 }),
+          sessionId: Type.String({ minLength: 1 }),
+          runId: Type.String({ minLength: 1 }),
+          status: Type.Union([Type.Literal("completed"), Type.Literal("failed"), Type.Literal("cancelled")]),
+          updatedAt: Type.Optional(Type.Number())
+        }),
+        response: { 200: Type.Object({ ok: Type.Boolean() }), 401: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as {
+        workspaceId: string;
+        sessionId: string;
+        runId: string;
+        status: "completed" | "failed" | "cancelled";
+        updatedAt?: number;
+      };
+      params.service.completeRunFromWorker(body);
+      return { ok: true };
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/prompt-context",
+    {
+      schema: {
+        tags: ["agent"],
+        body: Type.Object({
+          workspaceId: Type.String({ minLength: 1 }),
+          sessionId: Type.String({ minLength: 1 }),
+          runId: Type.String({ minLength: 1 })
+        }),
+        response: {
+          200: Type.Object({
+            headItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
+            system: Type.String(),
+            messages: Type.Array(
+              Type.Object({
+                role: Type.Union([Type.Literal("system"), Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool")]),
+                content: Type.Any()
+              })
+            ),
+            tools: Type.Array(
+              Type.Object({
+                name: Type.Union([Type.Literal("bash"), Type.Literal("read"), Type.Literal("write")]),
+                description: Type.String(),
+                inputSchema: Type.Any(),
+                requiresApproval: Type.Boolean()
+              })
+            ),
+            pendingTools: Type.Array(
+              Type.Object({
+                itemId: Type.Number({ minimum: 1 }),
+                status: AgentContextItemStatusSchema,
+                toolName: Type.Union([Type.Literal("bash"), Type.Literal("read"), Type.Literal("write")]),
+                toolCallId: Type.Optional(Type.String({ minLength: 1 })),
+                args: Type.Any(),
+                approved: Type.Optional(Type.Boolean())
+              })
+            )
+          }),
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as { workspaceId: string; sessionId: string; runId: string };
+      return params.service.getPromptContextForRun(body);
     }
   );
 
@@ -259,57 +486,28 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
               options: Type.Object({
                 baseURL: Type.String({ minLength: 1 }),
                 apiKey: Type.String({ minLength: 1 })
-              }),
-              models: Type.Array(
-                Type.Object({
-                  id: Type.String({ minLength: 1 }),
-                  providerModelId: Type.String({ minLength: 1 }),
-                  name: Type.String({ minLength: 1 }),
-                  options: Type.Any()
-                })
-              )
+              })
             }),
             model: Type.Object({
               id: Type.String({ minLength: 1 }),
-              providerModelId: Type.String({ minLength: 1 }),
+              providerModelId: Type.Optional(Type.String({ minLength: 1 })),
               name: Type.String({ minLength: 1 }),
-              options: Type.Any()
+              options: Type.Optional(Type.Any())
             })
           }),
-          400: ErrorResponseSchema,
           401: ErrorResponseSchema,
           404: ErrorResponseSchema
         }
       }
     },
     async (req) => {
-      const token = String(req.headers["x-awb-agent-internal-token"] || "");
-      if (token !== params.service.getContext().agentInternalToken) {
-        throw new HttpError(401, "Unauthorized");
-      }
-      const body = req.body as { workspaceId: string; sessionId: string; runId: string };
+      assertInternalToken(req, params.service);
+      const body = req.body as {
+        workspaceId: string;
+        sessionId: string;
+        runId: string;
+      };
       return params.service.getExecutionProfileForRun(body);
-    }
-  );
-
-  // 调试接口: 直接查看某个事件
-  app.get(
-    "/api/agent/events/:eventId",
-    {
-      schema: {
-        tags: ["agent"],
-        params: Type.Object({ eventId: Type.String({ minLength: 1 }) }),
-        querystring: Type.Object({ workspaceId: Type.String({ minLength: 1 }) }),
-        response: { 200: AgentEventRecordSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema }
-      }
-    },
-    async (req) => {
-      const p = req.params as { eventId: string };
-      const query = req.query as { workspaceId: string };
-      const view = params.service.getEventById(p.eventId);
-      if (!view) throw new HttpError(404, "event not found");
-      if (view.workspaceId !== query.workspaceId) throw new HttpError(400, "workspaceId mismatch");
-      return view;
     }
   );
 }

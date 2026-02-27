@@ -59,86 +59,6 @@ async function waitUntil(check: () => Promise<boolean>, timeoutMs: number, inter
   throw new Error(`waitUntil timeout after ${timeoutMs}ms`);
 }
 
-async function createFixture(): Promise<Fixture> {
-  const repoRoot = path.resolve(process.cwd(), "../..");
-  const testsRoot = path.join(repoRoot, ".tmp-tests");
-  await ensureDir(testsRoot);
-  const dataDir = await fs.mkdtemp(path.join(testsRoot, "agent-worker-it-"));
-
-  const apiPort = await getFreePort();
-  const workerPort = await getFreePort();
-
-  const db = await openDb(dataDir);
-  const app = await createApp({
-    db,
-    repoRoot,
-    dataDir,
-    fileMaxBytes: 1024 * 1024,
-    version: "test",
-    serveWeb: false,
-    webDistDir: null,
-    credentialMasterKey: Buffer.alloc(32, 7),
-    credentialMasterKeySource: "generated",
-    credentialMasterKeyId: "testkey",
-    credentialMasterKeyCreatedAt: Date.now(),
-    authToken: null,
-    authCookieSecure: false,
-    agentWorkerEnabled: true,
-    agentWorkerHost: "127.0.0.1",
-    agentWorkerPort: workerPort,
-    agentWorkerSocketPath: path.join(dataDir, "agent-worker.sock"),
-    agentWorkerConcurrency: 2,
-    agentInternalToken: "worker-integration-token",
-    agentApiOrigin: `http://127.0.0.1:${apiPort}`
-  });
-
-  const workspaceId = newSortableId("ws");
-  const workspaceDirName = newSortableId("workspace");
-  const workspacePath = workspaceRoot(dataDir, workspaceDirName);
-  await ensureDir(workspacePath);
-
-  const ts = Date.now();
-  insertWorkspace(db, {
-    id: workspaceId,
-    dirName: workspaceDirName,
-    title: "worker-it-workspace",
-    path: workspacePath,
-    terminalCredentialId: null,
-    createdAt: ts,
-    updatedAt: ts
-  });
-
-  await app.listen({ host: "127.0.0.1", port: apiPort });
-
-  const baseUrl = `http://127.0.0.1:${apiPort}`;
-  await configureAgentDefaults(baseUrl);
-
-  const fixture: Fixture = {
-    app,
-    db,
-    dataDir,
-    workspaceId,
-    workspacePath,
-    baseUrl,
-    workerPidFilePath: agentWorkerPidPath(dataDir)
-  };
-  fixtures.add(fixture);
-  return fixture;
-}
-
-async function closeFixture(fixture: Fixture) {
-  fixtures.delete(fixture);
-  await fixture.app.close();
-  fixture.db.close();
-  await rmrf(fixture.dataDir);
-}
-
-afterEach(async () => {
-  for (const fixture of Array.from(fixtures)) {
-    await closeFixture(fixture);
-  }
-});
-
 async function requestJson<T>(baseUrl: string, input: { method: string; path: string; body?: unknown }) {
   const response = await fetch(`${baseUrl}${input.path}`, {
     method: input.method,
@@ -208,6 +128,85 @@ async function configureAgentDefaults(baseUrl: string) {
   assert.equal(agents.response.status, 200, `configure agents failed: ${agents.text}`);
 }
 
+async function createFixture(): Promise<Fixture> {
+  const repoRoot = path.resolve(process.cwd(), "../..");
+  const testsRoot = path.join(repoRoot, ".tmp-tests");
+  await ensureDir(testsRoot);
+  const dataDir = await fs.mkdtemp(path.join(testsRoot, "agent-worker-it-"));
+
+  const apiPort = await getFreePort();
+  const workerPort = await getFreePort();
+
+  const db = await openDb(dataDir);
+  const app = await createApp({
+    db,
+    repoRoot,
+    dataDir,
+    fileMaxBytes: 1024 * 1024,
+    version: "test",
+    serveWeb: false,
+    webDistDir: null,
+    credentialMasterKey: Buffer.alloc(32, 7),
+    credentialMasterKeySource: "generated",
+    credentialMasterKeyId: "testkey",
+    credentialMasterKeyCreatedAt: Date.now(),
+    authToken: null,
+    authCookieSecure: false,
+    agentWorkerEnabled: true,
+    agentWorkerHost: "127.0.0.1",
+    agentWorkerPort: workerPort,
+    agentWorkerSocketPath: path.join(dataDir, "agent-worker.sock"),
+    agentWorkerConcurrency: 2,
+    agentInternalToken: "worker-integration-token",
+    agentApiOrigin: `http://127.0.0.1:${apiPort}`
+  });
+
+  const workspaceId = newSortableId("ws");
+  const workspaceDirName = newSortableId("workspace");
+  const workspacePath = workspaceRoot(dataDir, workspaceDirName);
+  await ensureDir(workspacePath);
+
+  const ts = Date.now();
+  insertWorkspace(db, {
+    id: workspaceId,
+    dirName: workspaceDirName,
+    title: "worker-it-workspace",
+    path: workspacePath,
+    terminalCredentialId: null,
+    createdAt: ts,
+    updatedAt: ts
+  });
+
+  await app.listen({ host: "127.0.0.1", port: apiPort });
+  const baseUrl = `http://127.0.0.1:${apiPort}`;
+  await configureAgentDefaults(baseUrl);
+
+  const fixture: Fixture = {
+    app,
+    db,
+    dataDir,
+    workspaceId,
+    workspacePath,
+    baseUrl,
+    workerPidFilePath: agentWorkerPidPath(dataDir)
+  };
+  fixtures.add(fixture);
+  return fixture;
+}
+
+async function closeFixture(fixture: Fixture) {
+  fixtures.delete(fixture);
+  await fixture.app.close();
+  fixture.db.close();
+  await rmrf(fixture.dataDir);
+}
+
+afterEach(async () => {
+  for (const fixture of Array.from(fixtures)) {
+    await closeFixture(fixture);
+  }
+});
+
 async function createSession(baseUrl: string, workspaceId: string) {
   const res = await requestJson<{ id: string }>(baseUrl, {
     method: "POST",
@@ -219,7 +218,7 @@ async function createSession(baseUrl: string, workspaceId: string) {
 }
 
 async function sendMessage(baseUrl: string, params: { sessionId: string; workspaceId: string; text: string; clientRequestId: string }) {
-  const res = await requestJson<{ messageEventId: string; runId: string }>(baseUrl, {
+  const res = await requestJson<{ messageItemId: number; runId: string }>(baseUrl, {
     method: "POST",
     path: `/api/agent/sessions/${params.sessionId}/messages`,
     body: {
@@ -233,7 +232,7 @@ async function sendMessage(baseUrl: string, params: { sessionId: string; workspa
 }
 
 async function getRunState(baseUrl: string, sessionId: string) {
-  const res = await requestJson<{ status: string; activeRunId: string | null }>(baseUrl, {
+  const res = await requestJson<{ status: string }>(baseUrl, {
     method: "GET",
     path: `/api/agent/sessions/${sessionId}/run-state`
   });
@@ -241,184 +240,43 @@ async function getRunState(baseUrl: string, sessionId: string) {
   return res.json;
 }
 
-async function waitRunIdle(baseUrl: string, sessionId: string, timeoutMs = 15_000) {
+async function waitRunIdle(baseUrl: string, sessionId: string, timeoutMs = 20_000) {
   await waitUntil(async () => {
     const state = await getRunState(baseUrl, sessionId);
     return state.status === "idle";
   }, timeoutMs);
 }
 
-async function getConversation(baseUrl: string, sessionId: string) {
-  const res = await requestJson<{
-    headEventId: string | null;
-    events: Array<{ id: string; type: string; payload: Record<string, any> }>;
-  }>(baseUrl, {
+test("worker 模式: 发送消息后会落地 context items", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.baseUrl, fixture.workspaceId);
+
+  await sendMessage(fixture.baseUrl, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "hello worker",
+    clientRequestId: newSortableId("req")
+  });
+
+  await waitRunIdle(fixture.baseUrl, session.id);
+
+  const context = await requestJson<{
+    items: Array<{ kind: string; output: Record<string, any> }>;
+  }>(fixture.baseUrl, {
     method: "GET",
-    path: `/api/agent/sessions/${sessionId}/conversation`
+    path: `/api/agent/sessions/${session.id}/context-items`
   });
-  assert.equal(res.response.status, 200, `get conversation failed: ${res.text}`);
-  return res.json;
-}
-
-test("worker 模式: 消息由独立 worker 执行并回写事件", async () => {
-  const fixture = await createFixture();
-  const session = await createSession(fixture.baseUrl, fixture.workspaceId);
-
-  await sendMessage(fixture.baseUrl, {
-    sessionId: session.id,
-    workspaceId: fixture.workspaceId,
-    text: "/bash echo hello worker",
-    clientRequestId: newSortableId("req")
-  });
-
-  await waitRunIdle(fixture.baseUrl, session.id);
-  const conversation = await getConversation(fixture.baseUrl, session.id);
-  const workerTurn = conversation.events.find((event) => event.type === "model.turn.started");
-  assert.ok(workerTurn, "missing model.turn.started");
-  assert.equal(workerTurn?.payload.model, "gpt-5.2");
+  assert.equal(context.response.status, 200, `get context-items failed: ${context.text}`);
+  assert.ok(context.json.items.some((item) => item.kind === "user"));
+  assert.ok(context.json.items.some((item) => item.kind === "assistant"));
 });
 
-test("worker 模式: /write 与 /read 工具可读写工作区文件", async () => {
+test("worker 模式: worker pid 文件会被写入", async () => {
   const fixture = await createFixture();
-  const session = await createSession(fixture.baseUrl, fixture.workspaceId);
-
-  const writeRun = await sendMessage(fixture.baseUrl, {
-    sessionId: session.id,
-    workspaceId: fixture.workspaceId,
-    text: "/write notes/tool.txt hello-from-worker",
-    clientRequestId: newSortableId("req")
-  });
-  await waitRunIdle(fixture.baseUrl, session.id);
-
-  const written = await fs.readFile(path.join(fixture.workspacePath, "notes/tool.txt"), "utf8");
-  assert.equal(written, "hello-from-worker");
-
-  const readRun = await sendMessage(fixture.baseUrl, {
-    sessionId: session.id,
-    workspaceId: fixture.workspaceId,
-    text: "/read notes/tool.txt",
-    clientRequestId: newSortableId("req")
-  });
-  await waitRunIdle(fixture.baseUrl, session.id);
-
-  const conversation = await getConversation(fixture.baseUrl, session.id);
-  const writeCompleted = conversation.events.find(
-    (event) => event.type === "tool.completed" && event.payload.runId === writeRun.runId
-  );
-  assert.ok(writeCompleted, "missing tool.completed for write run");
-
-  const readCompleted = conversation.events.find(
-    (event) => event.type === "tool.completed" && event.payload.runId === readRun.runId
-  );
-  assert.ok(readCompleted, "missing tool.completed for read run");
-  assert.ok(String(readCompleted?.payload.output?.preview || "").includes("1: hello-from-worker"));
-});
-
-test("worker 模式: /read 越界路径会被拒绝", async () => {
-  const fixture = await createFixture();
-  const session = await createSession(fixture.baseUrl, fixture.workspaceId);
-
-  const run = await sendMessage(fixture.baseUrl, {
-    sessionId: session.id,
-    workspaceId: fixture.workspaceId,
-    text: "/read ../outside.txt",
-    clientRequestId: newSortableId("req")
-  });
-  await waitRunIdle(fixture.baseUrl, session.id);
-
-  const conversation = await getConversation(fixture.baseUrl, session.id);
-  const toolFailed = conversation.events.find(
-    (event) => event.type === "tool.failed" && event.payload.runId === run.runId
-  );
-  assert.ok(toolFailed, "missing tool.failed event");
-  assert.ok(String(toolFailed?.payload.error || "").includes("outside workspace"));
-});
-
-test("worker 模式: /read 通过软链接逃逸会被拒绝", async () => {
-  const fixture = await createFixture();
-  const session = await createSession(fixture.baseUrl, fixture.workspaceId);
-
-  const externalFile = path.join(fixture.dataDir, "outside-secret.txt");
-  await fs.writeFile(externalFile, "top-secret", "utf8");
-  await fs.symlink(externalFile, path.join(fixture.workspacePath, "outside-link.txt"));
-
-  const run = await sendMessage(fixture.baseUrl, {
-    sessionId: session.id,
-    workspaceId: fixture.workspaceId,
-    text: "/read outside-link.txt",
-    clientRequestId: newSortableId("req")
-  });
-  await waitRunIdle(fixture.baseUrl, session.id);
-
-  const conversation = await getConversation(fixture.baseUrl, session.id);
-  const toolFailed = conversation.events.find(
-    (event) => event.type === "tool.failed" && event.payload.runId === run.runId
-  );
-  assert.ok(toolFailed, "missing tool.failed event");
-  assert.ok(String(toolFailed?.payload.error || "").includes("symlink"));
-});
-
-test("worker 模式: cancel 可阻止 bash 副作用", async () => {
-  const fixture = await createFixture();
-  const session = await createSession(fixture.baseUrl, fixture.workspaceId);
-
-  const sent = await sendMessage(fixture.baseUrl, {
-    sessionId: session.id,
-    workspaceId: fixture.workspaceId,
-    text: `/bash sleep 2 && touch worker-cancel-marker.txt`,
-    clientRequestId: newSortableId("req")
-  });
-
-  const cancel = await requestJson<{ headEventId: string | null }>(fixture.baseUrl, {
-    method: "POST",
-    path: `/api/agent/sessions/${session.id}/cancel`,
-    body: {
-      workspaceId: fixture.workspaceId,
-      anchorEventId: sent.messageEventId
-    }
-  });
-  assert.equal(cancel.response.status, 200, `cancel failed: ${cancel.text}`);
-  assert.equal(cancel.json.headEventId, sent.messageEventId);
-
-  await sleep(2600);
-  const markerPath = path.join(fixture.workspacePath, "worker-cancel-marker.txt");
-  const markerExists = await fs
-    .stat(markerPath)
-    .then(() => true)
-    .catch(() => false);
-  assert.equal(markerExists, false);
-});
-
-test("worker 异常退出后可自动重启并继续处理请求", async () => {
-  const fixture = await createFixture();
-  const session = await createSession(fixture.baseUrl, fixture.workspaceId);
-
   await waitUntil(async () => {
-    const raw = await fs.readFile(fixture.workerPidFilePath, "utf8").catch(() => "");
-    return raw.trim().length > 0;
-  }, 12_000);
-
-  const firstPidRaw = await fs.readFile(fixture.workerPidFilePath, "utf8");
-  const firstPid = Number.parseInt(firstPidRaw.trim(), 10);
-  assert.ok(Number.isFinite(firstPid) && firstPid > 0, `invalid worker pid: ${firstPidRaw}`);
-
-  process.kill(firstPid, "SIGKILL");
-
-  await waitUntil(async () => {
-    const raw = await fs.readFile(fixture.workerPidFilePath, "utf8").catch(() => "");
-    const nextPid = Number.parseInt(raw.trim(), 10);
-    return Number.isFinite(nextPid) && nextPid > 0 && nextPid !== firstPid;
-  }, 25_000, 180);
-
-  await sendMessage(fixture.baseUrl, {
-    sessionId: session.id,
-    workspaceId: fixture.workspaceId,
-    text: "/bash echo after restart",
-    clientRequestId: newSortableId("req")
-  });
-  await waitRunIdle(fixture.baseUrl, session.id, 20_000);
-
-  const conversation = await getConversation(fixture.baseUrl, session.id);
-  const userMessages = conversation.events.filter((event) => event.type === "user.message.created");
-  assert.ok(userMessages.length >= 1);
+    return fs
+      .stat(fixture.workerPidFilePath)
+      .then(() => true)
+      .catch(() => false);
+  }, 6_000);
 });

@@ -1,14 +1,29 @@
 export class ApiConflictError extends Error {}
 
-type AppendEventParams = {
-  workspaceId: string;
-  sessionId: string;
-  type: string;
-  payload: unknown;
-  correlationId?: string | null;
-  causationId?: string | null;
-  createdAt?: number;
+type PromptTextPart = {
+  type: "text";
+  text: string;
 };
+
+type PromptToolCallPart = {
+  type: "tool-call";
+  toolCallId: string;
+  toolName: "bash" | "read" | "write";
+  input: Record<string, unknown>;
+};
+
+type PromptToolResultPart = {
+  type: "tool-result";
+  toolCallId: string;
+  toolName: "bash" | "read" | "write";
+  output: unknown;
+};
+
+type PromptMessage =
+  | { role: "system"; content: string }
+  | { role: "user"; content: string | PromptTextPart[] }
+  | { role: "assistant"; content: string | Array<PromptTextPart | PromptToolCallPart> }
+  | { role: "tool"; content: PromptToolResultPart[] };
 
 export type ExecutionProfile = {
   resolved: {
@@ -48,6 +63,26 @@ export type ExecutionProfile = {
   };
 };
 
+export type PromptContext = {
+  headItemId: number | null;
+  system: string;
+  messages: PromptMessage[];
+  tools: Array<{
+    name: "bash" | "read" | "write";
+    description: string;
+    inputSchema: Record<string, unknown>;
+    requiresApproval: boolean;
+  }>;
+  pendingTools: Array<{
+    itemId: number;
+    status: "queued" | "running" | "awaiting_permission" | "streaming" | "completed" | "failed" | "denied" | "cancelled";
+    toolName: "bash" | "read" | "write";
+    toolCallId?: string;
+    args: Record<string, unknown>;
+    approved?: boolean;
+  }>;
+};
+
 export class AgentApiClient {
   constructor(
     private readonly params: {
@@ -56,23 +91,89 @@ export class AgentApiClient {
     }
   ) {}
 
-  async appendTimelineEvent(input: AppendEventParams) {
-    const response = await fetch(`${this.params.apiOrigin}/api/internal/agent/append-timeline`, {
-      method: "POST",
+  private async request<T>(path: string, options: { method: "POST" | "PATCH"; body: unknown; conflictAsError?: boolean }) {
+    const response = await fetch(`${this.params.apiOrigin}${path}`, {
+      method: options.method,
       headers: {
         "content-type": "application/json",
         "x-awb-agent-internal-token": this.params.internalToken
       },
-      body: JSON.stringify(input)
+      body: JSON.stringify(options.body)
     });
 
-    if (response.status === 409) {
-      throw new ApiConflictError("append timeline conflict");
+    if (options.conflictAsError && response.status === 409) {
+      throw new ApiConflictError("context conflict");
     }
     if (!response.ok) {
       const txt = await response.text();
-      throw new Error(`append timeline failed: ${response.status} ${txt}`);
+      throw new Error(`request failed: ${response.status} ${txt}`);
     }
+    return (await response.json()) as T;
+  }
+
+  async createContextItem(input: {
+    workspaceId: string;
+    sessionId: string;
+    runId: string | null;
+    turnId: string | null;
+    step: number | null;
+    prevId: number | null;
+    kind: "user" | "assistant" | "tool" | "system";
+    status: "streaming" | "queued" | "running" | "awaiting_permission" | "completed" | "failed" | "denied" | "cancelled";
+    output: unknown;
+    createdAt?: number;
+  }) {
+    const res = await this.request<{ ok: true; item: { id: number } }>("/api/internal/agent/context-items", {
+      method: "POST",
+      body: input,
+      conflictAsError: true
+    });
+    return res.item;
+  }
+
+  async updateContextItem(input: {
+    itemId: number;
+    status?: "streaming" | "queued" | "running" | "awaiting_permission" | "completed" | "failed" | "denied" | "cancelled";
+    output?: unknown;
+    updatedAt?: number;
+  }) {
+    const res = await this.request<{ ok: true; item: { id: number } }>(`/api/internal/agent/context-items/${input.itemId}`, {
+      method: "PATCH",
+      body: {
+        status: input.status,
+        output: input.output,
+        updatedAt: input.updatedAt
+      }
+    });
+    return res.item;
+  }
+
+  async updateRunState(input: {
+    workspaceId: string;
+    sessionId: string;
+    status: "idle" | "running" | "waiting_permission";
+    activeRunId: string | null;
+    activeAssistantItemId: number | null;
+    waitingToolItemId: number | null;
+    updatedAt?: number;
+  }) {
+    await this.request<{ ok: true }>("/api/internal/agent/run-state", {
+      method: "POST",
+      body: input
+    });
+  }
+
+  async completeRun(input: {
+    workspaceId: string;
+    sessionId: string;
+    runId: string;
+    status: "completed" | "failed" | "cancelled";
+    updatedAt?: number;
+  }) {
+    await this.request<{ ok: true }>("/api/internal/agent/run-complete", {
+      method: "POST",
+      body: input
+    });
   }
 
   async getExecutionProfile(input: { workspaceId: string; sessionId: string; runId: string }) {
@@ -90,5 +191,21 @@ export class AgentApiClient {
       throw new Error(`get execution profile failed: ${response.status} ${txt}`);
     }
     return (await response.json()) as ExecutionProfile;
+  }
+
+  async getPromptContext(input: { workspaceId: string; sessionId: string; runId: string }) {
+    const response = await fetch(`${this.params.apiOrigin}/api/internal/agent/prompt-context`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-awb-agent-internal-token": this.params.internalToken
+      },
+      body: JSON.stringify(input)
+    });
+    if (!response.ok) {
+      const txt = await response.text();
+      throw new Error(`get prompt context failed: ${response.status} ${txt}`);
+    }
+    return (await response.json()) as PromptContext;
   }
 }

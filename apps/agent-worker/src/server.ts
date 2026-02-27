@@ -50,7 +50,7 @@ export function createWorkerServer(params: {
           typeof body.workspaceId !== "string" ||
           typeof body.sessionId !== "string" ||
           typeof body.runId !== "string" ||
-          typeof body.inputText !== "string" ||
+          (body.inputText != null && typeof body.inputText !== "string") ||
           typeof body.workspacePath !== "string"
         ) {
           sendJson(res, 400, { message: "invalid enqueue payload" });

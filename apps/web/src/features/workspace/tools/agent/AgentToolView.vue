@@ -85,6 +85,7 @@ import AgentClientPane from "./AgentClientPane.vue";
 type AgentOption = {
   value: string;
   label: string;
+  isDefault?: boolean;
 };
 
 const ADD_TAB_KEY = "__agent_add__";
@@ -302,9 +303,11 @@ function setSessionAgent(sessionId: string, value: string | null) {
 async function refreshAgents() {
   try {
     const res = await getAgentSettings();
+    const defaultAgentId = res.default?.agentId ?? "";
     agentOptions.value = res.agents.map((agent) => ({
       value: agent.id,
-      label: `${agent.name} (${agent.id})`
+      label: agent.name,
+      isDefault: defaultAgentId === agent.id
     }));
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));

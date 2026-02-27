@@ -1,130 +1,184 @@
+import type {
+  AgentContextItemOutput,
+  AgentContextItemRecord,
+  AgentContextItemStatus,
+  AgentRunStatus,
+  AgentSessionRecord
+} from "@agent-workbench/shared";
 import type { Db } from "../../infra/db/db.js";
-import type { AgentEventLane, AgentEventRecord, AgentRunStatus, AgentSessionRecord } from "@agent-workbench/shared";
+
+const TERMINAL_ITEM_STATUS = new Set<AgentContextItemStatus>(["completed", "failed", "denied", "cancelled"]);
 
 export class AgentConflictError extends Error {
-  readonly currentHeadEventId: string | null;
+  readonly currentHeadItemId: number | null;
 
-  constructor(currentHeadEventId: string | null) {
-    super("agent timeline conflict");
-    this.currentHeadEventId = currentHeadEventId;
+  constructor(currentHeadItemId: number | null) {
+    super("agent context conflict");
+    this.currentHeadItemId = currentHeadItemId;
   }
 }
 
-export type AgentSessionRow = {
+type AgentSessionRow = {
   id: string;
   workspaceId: string;
   title: string;
   kind: "primary" | "subtask";
   createdAt: number;
   updatedAt: number;
-  headEventId: string | null;
+  headItemId: number | null;
 };
 
-type AgentEventRow = {
-  eventId: number;
-  id: string;
+type AgentContextItemRow = {
+  id: number;
   workspaceId: string;
   sessionId: string;
-  lane: AgentEventLane;
-  prevId: string | null;
-  type: string;
-  schemaVersion: number;
-  correlationId: string | null;
-  causationId: string | null;
+  runId: string | null;
+  turnId: string | null;
+  step: number | null;
+  prevId: number | null;
+  kind: AgentContextItemRecord["kind"];
+  status: AgentContextItemStatus;
+  outputJson: string;
   createdAt: number;
-  payloadJson: string;
+  updatedAt: number;
 };
 
 export type AgentRunStateRow = {
   sessionId: string;
   status: AgentRunStatus;
   activeRunId: string | null;
+  activeAssistantItemId: number | null;
+  waitingToolItemId: number | null;
   updatedAt: number;
-  appliedEventId: number;
+  appliedItemId: number;
 };
 
-export type NewAgentEventInput = {
-  id: string;
+export type AgentRunRecord = {
+  runId: string;
   workspaceId: string;
   sessionId: string;
-  lane: AgentEventLane;
-  prevId: string | null;
-  type: string;
-  schemaVersion: number;
-  correlationId?: string | null;
-  causationId?: string | null;
+  triggerItemId: number;
+  agentId: string;
+  providerId: string;
+  modelId: string;
+  status: "running" | "waiting_permission" | "completed" | "failed" | "cancelled";
   createdAt: number;
-  payload: unknown;
+  updatedAt: number;
 };
 
-type RunState = {
-  status: AgentRunStatus;
-  activeRunId: string | null;
-};
+function toHeadItemId(row: { headItemId: number | null } | undefined) {
+  if (!row) return null;
+  if (typeof row.headItemId !== "number") return null;
+  if (!Number.isFinite(row.headItemId) || row.headItemId <= 0) return null;
+  return row.headItemId;
+}
 
-function mapSession(row: any): AgentSessionRecord {
+function mapSession(row: AgentSessionRow): AgentSessionRecord {
   return {
     id: String(row.id),
     workspaceId: String(row.workspaceId),
     title: String(row.title),
     kind: row.kind === "subtask" ? "subtask" : "primary",
-    headEventId: row.headEventId ? String(row.headEventId) : null,
+    headItemId: toHeadItemId(row),
     createdAt: Number(row.createdAt),
     updatedAt: Number(row.updatedAt)
   };
 }
 
-function mapEvent(row: AgentEventRow): AgentEventRecord {
+function mapContextItem(row: AgentContextItemRow): AgentContextItemRecord {
+  const runId = typeof row.runId === "string" && row.runId.trim() ? row.runId : null;
+  const turnId = typeof row.turnId === "string" && row.turnId.trim() ? row.turnId : null;
+  const step = typeof row.step === "number" && Number.isFinite(row.step) && row.step >= 1 ? row.step : null;
+  const prevId = typeof row.prevId === "number" && Number.isFinite(row.prevId) && row.prevId >= 1 ? row.prevId : null;
   return {
-    eventId: row.eventId,
     id: row.id,
     workspaceId: row.workspaceId,
     sessionId: row.sessionId,
-    lane: row.lane,
-    prevId: row.prevId,
-    type: row.type,
-    schemaVersion: row.schemaVersion,
-    correlationId: row.correlationId,
-    causationId: row.causationId,
+    runId,
+    turnId,
+    step,
+    prevId,
+    kind: row.kind,
+    status: row.status,
+    output: JSON.parse(row.outputJson) as AgentContextItemOutput,
     createdAt: row.createdAt,
-    payload: JSON.parse(row.payloadJson)
+    updatedAt: row.updatedAt
   };
 }
 
-function readRunState(db: Db, workspaceId: string, sessionId: string): RunState {
+function getHead(db: Db, workspaceId: string, sessionId: string) {
   const row = db
     .prepare(
       `
-        select status, active_run_id as activeRunId
-        from agent_session_run_state
+        select
+          head_item_id as headItemId
+        from agent_session_head
         where workspace_id = ? and session_id = ?
       `
     )
-    .get(workspaceId, sessionId) as { status: AgentRunStatus; activeRunId: string | null } | undefined;
-  if (!row) return { status: "idle", activeRunId: null };
-  return { status: row.status, activeRunId: row.activeRunId ?? null };
+    .get(workspaceId, sessionId) as { headItemId: number | null } | undefined;
+  return toHeadItemId(row);
 }
 
-function reduceRunState(current: RunState, eventType: string, payload: any): RunState {
-  if (eventType === "run.created") {
-    return { status: "running", activeRunId: typeof payload?.runId === "string" ? payload.runId : current.activeRunId };
+function setHead(db: Db, params: { workspaceId: string; sessionId: string; headItemId: number | null; updatedAt: number }) {
+  db.prepare(
+    `
+      insert into agent_session_head (workspace_id, session_id, head_item_id, updated_at)
+      values (@workspaceId, @sessionId, @headItemId, @updatedAt)
+      on conflict(workspace_id, session_id) do update set
+        head_item_id = excluded.head_item_id,
+        updated_at = excluded.updated_at
+    `
+  ).run({
+    workspaceId: params.workspaceId,
+    sessionId: params.sessionId,
+    headItemId: params.headItemId,
+    updatedAt: params.updatedAt
+  });
+}
+
+function touchSession(db: Db, sessionId: string, updatedAt: number) {
+  db.prepare(`update agent_session set updated_at = @updatedAt where id = @sessionId`).run({ sessionId, updatedAt });
+}
+
+function isReachable(db: Db, params: { sessionId: string; fromHead: number | null; target: number }) {
+  let cursor = params.fromHead;
+  const seen = new Set<number>();
+  while (cursor) {
+    if (seen.has(cursor)) return false;
+    seen.add(cursor);
+    if (cursor === params.target) return true;
+    const row = db
+      .prepare(`select prev_id as prevId, session_id as sessionId from agent_context_item where id = ?`)
+      .get(cursor) as { prevId: number | null; sessionId: string } | undefined;
+    if (!row || row.sessionId !== params.sessionId) return false;
+    cursor = row.prevId;
   }
-  if (eventType === "run.started") {
-    return { status: "running", activeRunId: typeof payload?.runId === "string" ? payload.runId : current.activeRunId };
-  }
-  if (eventType === "run.waiting_approval") {
-    return {
-      status: "waiting_approval",
-      activeRunId: typeof payload?.runId === "string" ? payload.runId : current.activeRunId
-    };
-  }
-  if (eventType === "run.completed" || eventType === "run.failed" || eventType === "run.cancelled") {
-    const runId = typeof payload?.runId === "string" ? payload.runId : null;
-    if (!runId || runId === current.activeRunId) {
-      return { status: "idle", activeRunId: null };
-    }
-  }
-  return current;
+  return false;
+}
+
+function readContextItemRowById(db: Db, itemId: number) {
+  return db
+    .prepare(
+      `
+        select
+          id,
+          workspace_id as workspaceId,
+          session_id as sessionId,
+          run_id as runId,
+          turn_id as turnId,
+          step,
+          prev_id as prevId,
+          kind,
+          status,
+          output_json as outputJson,
+          created_at as createdAt,
+          updated_at as updatedAt
+        from agent_context_item
+        where id = ?
+      `
+    )
+    .get(itemId) as AgentContextItemRow | undefined;
 }
 
 function upsertRunState(db: Db, params: {
@@ -132,8 +186,10 @@ function upsertRunState(db: Db, params: {
   sessionId: string;
   status: AgentRunStatus;
   activeRunId: string | null;
+  activeAssistantItemId: number | null;
+  waitingToolItemId: number | null;
   updatedAt: number;
-  appliedEventId: number;
+  appliedItemId: number;
 }) {
   db.prepare(
     `
@@ -142,124 +198,29 @@ function upsertRunState(db: Db, params: {
         session_id,
         status,
         active_run_id,
+        active_assistant_item_id,
+        waiting_tool_item_id,
         updated_at,
-        applied_event_id
+        applied_item_id
       ) values (
         @workspaceId,
         @sessionId,
         @status,
         @activeRunId,
+        @activeAssistantItemId,
+        @waitingToolItemId,
         @updatedAt,
-        @appliedEventId
+        @appliedItemId
       )
       on conflict(workspace_id, session_id) do update set
         status = excluded.status,
         active_run_id = excluded.active_run_id,
+        active_assistant_item_id = excluded.active_assistant_item_id,
+        waiting_tool_item_id = excluded.waiting_tool_item_id,
         updated_at = excluded.updated_at,
-        applied_event_id = excluded.applied_event_id
+        applied_item_id = excluded.applied_item_id
     `
   ).run(params);
-}
-
-function getHead(db: Db, workspaceId: string, sessionId: string) {
-  const row = db
-    .prepare(
-      `
-        select head_event_id as headEventId
-        from agent_session_head
-        where workspace_id = ? and session_id = ?
-      `
-    )
-    .get(workspaceId, sessionId) as { headEventId: string | null } | undefined;
-  return row ? row.headEventId ?? null : null;
-}
-
-function setHead(db: Db, params: { workspaceId: string; sessionId: string; headEventId: string | null; updatedAt: number }) {
-  db.prepare(
-    `
-      insert into agent_session_head (workspace_id, session_id, head_event_id, updated_at)
-      values (@workspaceId, @sessionId, @headEventId, @updatedAt)
-      on conflict(workspace_id, session_id) do update set
-        head_event_id = excluded.head_event_id,
-        updated_at = excluded.updated_at
-    `
-  ).run(params);
-}
-
-function touchSession(db: Db, sessionId: string, updatedAt: number) {
-  db.prepare(`update agent_session set updated_at = @updatedAt where id = @sessionId`).run({ sessionId, updatedAt });
-}
-
-function insertEvent(db: Db, event: NewAgentEventInput) {
-  const result = db
-    .prepare(
-      `
-        insert into agent_event (
-          id,
-          workspace_id,
-          session_id,
-          lane,
-          prev_id,
-          type,
-          schema_version,
-          correlation_id,
-          causation_id,
-          created_at,
-          payload_json
-        ) values (
-          @id,
-          @workspaceId,
-          @sessionId,
-          @lane,
-          @prevId,
-          @type,
-          @schemaVersion,
-          @correlationId,
-          @causationId,
-          @createdAt,
-          @payloadJson
-        )
-      `
-    )
-    .run({
-      id: event.id,
-      workspaceId: event.workspaceId,
-      sessionId: event.sessionId,
-      lane: event.lane,
-      prevId: event.prevId,
-      type: event.type,
-      schemaVersion: event.schemaVersion,
-      correlationId: event.correlationId ?? null,
-      causationId: event.causationId ?? null,
-      createdAt: event.createdAt,
-      payloadJson: JSON.stringify(event.payload)
-    });
-  return Number(result.lastInsertRowid);
-}
-
-function readEventByStableId(db: Db, eventId: string): AgentEventRecord | null {
-  const row = db
-    .prepare(
-      `
-        select
-          event_id as eventId,
-          id,
-          workspace_id as workspaceId,
-          session_id as sessionId,
-          lane,
-          prev_id as prevId,
-          type,
-          schema_version as schemaVersion,
-          correlation_id as correlationId,
-          causation_id as causationId,
-          created_at as createdAt,
-          payload_json as payloadJson
-        from agent_event
-        where id = ?
-      `
-    )
-    .get(eventId) as AgentEventRow | undefined;
-  return row ? mapEvent(row) : null;
 }
 
 export function listAgentSessions(db: Db, workspaceId: string): AgentSessionRecord[] {
@@ -273,7 +234,7 @@ export function listAgentSessions(db: Db, workspaceId: string): AgentSessionReco
           s.kind,
           s.created_at as createdAt,
           s.updated_at as updatedAt,
-          h.head_event_id as headEventId
+          h.head_item_id as headItemId
         from agent_session s
         left join agent_session_head h
           on h.workspace_id = s.workspace_id and h.session_id = s.id
@@ -281,7 +242,7 @@ export function listAgentSessions(db: Db, workspaceId: string): AgentSessionReco
         order by s.updated_at desc
       `
     )
-    .all(workspaceId);
+    .all(workspaceId) as AgentSessionRow[];
   return rows.map(mapSession);
 }
 
@@ -296,14 +257,14 @@ export function getAgentSession(db: Db, sessionId: string): AgentSessionRecord |
           s.kind,
           s.created_at as createdAt,
           s.updated_at as updatedAt,
-          h.head_event_id as headEventId
+          h.head_item_id as headItemId
         from agent_session s
         left join agent_session_head h
           on h.workspace_id = s.workspace_id and h.session_id = s.id
         where s.id = ?
       `
     )
-    .get(sessionId);
+    .get(sessionId) as AgentSessionRow | undefined;
   return row ? mapSession(row) : null;
 }
 
@@ -314,7 +275,7 @@ export function createAgentSession(db: Db, params: {
   kind: "primary" | "subtask";
   createdAt: number;
   forkedFromSessionId?: string | null;
-  forkedFromEventId?: string | null;
+  forkedFromItemId?: number | null;
 }) {
   const tx = db.transaction(() => {
     db.prepare(
@@ -327,7 +288,7 @@ export function createAgentSession(db: Db, params: {
           created_at,
           updated_at,
           forked_from_session_id,
-          forked_from_event_id
+          forked_from_item_id
         ) values (
           @id,
           @workspaceId,
@@ -336,20 +297,20 @@ export function createAgentSession(db: Db, params: {
           @createdAt,
           @updatedAt,
           @forkedFromSessionId,
-          @forkedFromEventId
+          @forkedFromItemId
         )
       `
     ).run({
       ...params,
       updatedAt: params.createdAt,
       forkedFromSessionId: params.forkedFromSessionId ?? null,
-      forkedFromEventId: params.forkedFromEventId ?? null
+      forkedFromItemId: params.forkedFromItemId ?? null
     });
 
     setHead(db, {
       workspaceId: params.workspaceId,
       sessionId: params.id,
-      headEventId: null,
+      headItemId: null,
       updatedAt: params.createdAt
     });
 
@@ -358,156 +319,199 @@ export function createAgentSession(db: Db, params: {
       sessionId: params.id,
       status: "idle",
       activeRunId: null,
+      activeAssistantItemId: null,
+      waitingToolItemId: null,
       updatedAt: params.createdAt,
-      appliedEventId: 0
+      appliedItemId: 0
     });
   });
   tx();
 }
 
-export function appendTimelineEvent(db: Db, input: NewAgentEventInput): AgentEventRecord {
+export function getSessionHead(db: Db, workspaceId: string, sessionId: string) {
+  return getHead(db, workspaceId, sessionId);
+}
+
+export function appendContextItem(db: Db, params: {
+  workspaceId: string;
+  sessionId: string;
+  runId: string | null;
+  turnId: string | null;
+  step: number | null;
+  prevId: number | null;
+  kind: AgentContextItemRecord["kind"];
+  status: AgentContextItemStatus;
+  output: AgentContextItemOutput;
+  createdAt: number;
+}) {
   const tx = db.transaction(() => {
-    const currentHead = getHead(db, input.workspaceId, input.sessionId);
-    if (currentHead !== input.prevId) {
+    const currentHead = getHead(db, params.workspaceId, params.sessionId);
+    if (currentHead !== params.prevId) {
       throw new AgentConflictError(currentHead);
     }
 
-    const eventId = insertEvent(db, input);
+    const result = db
+      .prepare(
+        `
+          insert into agent_context_item (
+            workspace_id,
+            session_id,
+            run_id,
+            turn_id,
+            step,
+            prev_id,
+            kind,
+            status,
+            output_json,
+            created_at,
+            updated_at
+          ) values (
+            @workspaceId,
+            @sessionId,
+            @runId,
+            @turnId,
+            @step,
+            @prevId,
+            @kind,
+            @status,
+            @outputJson,
+            @createdAt,
+            @updatedAt
+          )
+        `
+      )
+      .run({
+        workspaceId: params.workspaceId,
+        sessionId: params.sessionId,
+        runId: params.runId,
+        turnId: params.turnId,
+        step: params.step,
+        prevId: params.prevId,
+        kind: params.kind,
+        status: params.status,
+        outputJson: JSON.stringify(params.output),
+        createdAt: params.createdAt,
+        updatedAt: params.createdAt
+      });
+
+    const itemId = Number(result.lastInsertRowid);
     setHead(db, {
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      headEventId: input.id,
-      updatedAt: input.createdAt
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+      headItemId: itemId,
+      updatedAt: params.createdAt
     });
-    touchSession(db, input.sessionId, input.createdAt);
-
-    const previousState = readRunState(db, input.workspaceId, input.sessionId);
-    const nextState = reduceRunState(previousState, input.type, input.payload);
-    upsertRunState(db, {
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      status: nextState.status,
-      activeRunId: nextState.activeRunId,
-      updatedAt: input.createdAt,
-      appliedEventId: eventId
-    });
-
-    return {
-      eventId,
-      ...input,
-      correlationId: input.correlationId ?? null,
-      causationId: input.causationId ?? null
-    };
+    touchSession(db, params.sessionId, params.createdAt);
+    return itemId;
   });
 
-  return tx();
+  const itemId = tx();
+  const row = readContextItemRowById(db, itemId);
+  if (!row) {
+    throw new Error("failed to append context item");
+  }
+  return mapContextItem(row);
 }
 
-export function appendControlEvent(db: Db, input: Omit<NewAgentEventInput, "prevId">): AgentEventRecord {
-  const tx = db.transaction(() => {
-    const eventId = insertEvent(db, { ...input, prevId: null });
-    touchSession(db, input.sessionId, input.createdAt);
-    return {
-      eventId,
-      ...input,
-      prevId: null,
-      correlationId: input.correlationId ?? null,
-      causationId: input.causationId ?? null
-    };
+export function updateContextItem(db: Db, params: {
+  itemId: number;
+  status?: AgentContextItemStatus;
+  output?: AgentContextItemOutput;
+  updatedAt: number;
+}) {
+  const row = readContextItemRowById(db, params.itemId);
+  if (!row) return null;
+  if (TERMINAL_ITEM_STATUS.has(row.status)) {
+    return mapContextItem(row);
+  }
+
+  const nextStatus = params.status ?? row.status;
+  const nextOutput = params.output ?? (JSON.parse(row.outputJson) as AgentContextItemOutput);
+  db.prepare(
+    `
+      update agent_context_item
+      set status = @status,
+          output_json = @outputJson,
+          updated_at = @updatedAt
+      where id = @itemId
+    `
+  ).run({
+    itemId: params.itemId,
+    status: nextStatus,
+    outputJson: JSON.stringify(nextOutput),
+    updatedAt: params.updatedAt
   });
-  return tx();
+
+  const next = readContextItemRowById(db, params.itemId);
+  return next ? mapContextItem(next) : null;
+}
+
+export function getContextItemById(db: Db, itemId: number) {
+  const row = readContextItemRowById(db, itemId);
+  return row ? mapContextItem(row) : null;
+}
+
+export function getSessionVisibleItems(db: Db, workspaceId: string, sessionId: string): AgentContextItemRecord[] {
+  const headItemId = getHead(db, workspaceId, sessionId);
+  if (!headItemId) return [];
+
+  const rows: AgentContextItemRecord[] = [];
+  const seen = new Set<number>();
+  let cursor: number | null = headItemId;
+  while (cursor) {
+    if (seen.has(cursor)) break;
+    seen.add(cursor);
+    const row = readContextItemRowById(db, cursor);
+    if (!row) break;
+    if (row.workspaceId !== workspaceId || row.sessionId !== sessionId) break;
+    rows.push(mapContextItem(row));
+    cursor = row.prevId;
+  }
+  return rows.reverse();
+}
+
+export function getSessionVisibleItemsAfter(db: Db, workspaceId: string, sessionId: string, afterId: number) {
+  return getSessionVisibleItems(db, workspaceId, sessionId).filter((item) => item.id > afterId);
+}
+
+export function getVisibleItemById(db: Db, workspaceId: string, sessionId: string, itemId: number) {
+  const visible = getSessionVisibleItems(db, workspaceId, sessionId);
+  return visible.find((item) => item.id === itemId) ?? null;
 }
 
 export function moveSessionHead(db: Db, params: {
   workspaceId: string;
   sessionId: string;
-  expectedHeadEventId: string | null;
-  nextHeadEventId: string | null;
-  movedEvent: Omit<NewAgentEventInput, "lane" | "prevId" | "type">;
-  reason: "revert" | "cancel" | "fork_init" | "admin";
+  expectedHeadItemId: number | null;
+  nextHeadItemId: number | null;
+  updatedAt: number;
 }) {
   const tx = db.transaction(() => {
     const currentHead = getHead(db, params.workspaceId, params.sessionId);
-    if (currentHead !== params.expectedHeadEventId) {
+    if (currentHead !== params.expectedHeadItemId) {
       throw new AgentConflictError(currentHead);
     }
 
-    if (params.nextHeadEventId) {
-      const target = readEventByStableId(db, params.nextHeadEventId);
-      if (!target || target.sessionId !== params.sessionId || target.lane !== "timeline") {
-        throw new Error("invalid target head event");
+    if (params.nextHeadItemId != null) {
+      const target = readContextItemRowById(db, params.nextHeadItemId);
+      if (!target || target.workspaceId !== params.workspaceId || target.sessionId !== params.sessionId) {
+        throw new Error("invalid target head item");
       }
-
-      if (!currentHead) {
-        throw new Error("invalid target head event");
-      }
-
-      let cursor: string | null = currentHead;
-      const seen = new Set<string>();
-      let reachable = false;
-      while (cursor) {
-        if (seen.has(cursor)) break;
-        seen.add(cursor);
-        if (cursor === params.nextHeadEventId) {
-          reachable = true;
-          break;
-        }
-        const event = readEventByStableId(db, cursor);
-        if (!event || event.sessionId !== params.sessionId || event.lane !== "timeline") break;
-        cursor = event.prevId;
-      }
-      if (!reachable) {
-        throw new Error("invalid target head event");
+      if (!isReachable(db, { sessionId: params.sessionId, fromHead: currentHead, target: params.nextHeadItemId })) {
+        throw new Error("invalid target head item");
       }
     }
-
-    const eventId = insertEvent(db, {
-      id: params.movedEvent.id,
-      workspaceId: params.workspaceId,
-      sessionId: params.sessionId,
-      lane: "control",
-      prevId: null,
-      type: "session.head.moved",
-      schemaVersion: params.movedEvent.schemaVersion,
-      correlationId: params.movedEvent.correlationId,
-      causationId: params.movedEvent.causationId,
-      createdAt: params.movedEvent.createdAt,
-      payload: {
-        fromHeadEventId: currentHead,
-        toHeadEventId: params.nextHeadEventId,
-        reason: params.reason
-      }
-    });
 
     setHead(db, {
       workspaceId: params.workspaceId,
       sessionId: params.sessionId,
-      headEventId: params.nextHeadEventId,
-      updatedAt: params.movedEvent.createdAt
+      headItemId: params.nextHeadItemId,
+      updatedAt: params.updatedAt
     });
-    touchSession(db, params.sessionId, params.movedEvent.createdAt);
-
-    return {
-      eventId,
-      id: params.movedEvent.id,
-      workspaceId: params.workspaceId,
-      sessionId: params.sessionId,
-      lane: "control" as const,
-      prevId: null,
-      type: "session.head.moved",
-      schemaVersion: params.movedEvent.schemaVersion,
-      correlationId: params.movedEvent.correlationId ?? null,
-      causationId: params.movedEvent.causationId ?? null,
-      createdAt: params.movedEvent.createdAt,
-      payload: {
-        fromHeadEventId: currentHead,
-        toHeadEventId: params.nextHeadEventId,
-        reason: params.reason
-      }
-    };
+    touchSession(db, params.sessionId, params.updatedAt);
   });
 
-  return tx();
+  tx();
 }
 
 export function getRunState(db: Db, workspaceId: string, sessionId: string): AgentRunStateRow {
@@ -518,8 +522,10 @@ export function getRunState(db: Db, workspaceId: string, sessionId: string): Age
           session_id as sessionId,
           status,
           active_run_id as activeRunId,
+          active_assistant_item_id as activeAssistantItemId,
+          waiting_tool_item_id as waitingToolItemId,
           updated_at as updatedAt,
-          applied_event_id as appliedEventId
+          applied_item_id as appliedItemId
         from agent_session_run_state
         where workspace_id = ? and session_id = ?
       `
@@ -530,59 +536,60 @@ export function getRunState(db: Db, workspaceId: string, sessionId: string): Age
     sessionId,
     status: "idle",
     activeRunId: null,
+    activeAssistantItemId: null,
+    waitingToolItemId: null,
     updatedAt: 0,
-    appliedEventId: 0
+    appliedItemId: 0
   };
 }
 
-export function getEventById(db: Db, eventId: string): AgentEventRecord | null {
-  return readEventByStableId(db, eventId);
+export function updateRunState(db: Db, params: {
+  workspaceId: string;
+  sessionId: string;
+  status: AgentRunStatus;
+  activeRunId: string | null;
+  activeAssistantItemId: number | null;
+  waitingToolItemId: number | null;
+  updatedAt: number;
+  appliedItemId: number;
+}) {
+  upsertRunState(db, params);
 }
 
-export function getSessionTimelineEvents(db: Db, workspaceId: string, sessionId: string): AgentEventRecord[] {
-  const headEventId = getHead(db, workspaceId, sessionId);
-  if (!headEventId) return [];
-
-  const events: AgentEventRecord[] = [];
-  const seen = new Set<string>();
-  let cursor: string | null = headEventId;
-
-  while (cursor) {
-    if (seen.has(cursor)) break;
-    seen.add(cursor);
-    const event = readEventByStableId(db, cursor);
-    if (!event) break;
-    if (event.workspaceId !== workspaceId || event.sessionId !== sessionId) break;
-    if (event.lane !== "timeline") break;
-    events.push(event);
-    cursor = event.prevId;
-  }
-
-  return events.reverse();
-}
-
-export function getSessionHead(db: Db, workspaceId: string, sessionId: string) {
-  return getHead(db, workspaceId, sessionId);
+export function setRunStateIdle(db: Db, params: { workspaceId: string; sessionId: string; updatedAt: number; appliedItemId: number }) {
+  upsertRunState(db, {
+    workspaceId: params.workspaceId,
+    sessionId: params.sessionId,
+    status: "idle",
+    activeRunId: null,
+    activeAssistantItemId: null,
+    waitingToolItemId: null,
+    updatedAt: params.updatedAt,
+    appliedItemId: params.appliedItemId
+  });
 }
 
 export function findClientRequestDedup(db: Db, params: { workspaceId: string; sessionId: string; clientRequestId: string }) {
   const row = db
     .prepare(
       `
-        select message_event_id as messageEventId, run_id as runId
+        select message_item_id as messageItemId, run_id as runId
         from agent_client_request
         where workspace_id = ? and session_id = ? and client_request_id = ?
       `
     )
-    .get(params.workspaceId, params.sessionId, params.clientRequestId) as { messageEventId: string; runId: string } | undefined;
-  return row ?? null;
+    .get(params.workspaceId, params.sessionId, params.clientRequestId) as { messageItemId: number; runId: string } | undefined;
+  if (!row) return null;
+  const itemId = Number(row.messageItemId);
+  if (!Number.isFinite(itemId) || itemId <= 0) return null;
+  return { messageItemId: itemId, runId: row.runId };
 }
 
 export function insertClientRequestDedup(db: Db, params: {
   workspaceId: string;
   sessionId: string;
   clientRequestId: string;
-  messageEventId: string;
+  messageItemId: number;
   runId: string;
   createdAt: number;
 }) {
@@ -592,17 +599,128 @@ export function insertClientRequestDedup(db: Db, params: {
         workspace_id,
         session_id,
         client_request_id,
-        message_event_id,
+        message_item_id,
         run_id,
         created_at
       ) values (
         @workspaceId,
         @sessionId,
         @clientRequestId,
-        @messageEventId,
+        @messageItemId,
         @runId,
         @createdAt
       )
+    `
+  ).run({
+    workspaceId: params.workspaceId,
+    sessionId: params.sessionId,
+    clientRequestId: params.clientRequestId,
+    messageItemId: params.messageItemId,
+    runId: params.runId,
+    createdAt: params.createdAt
+  });
+}
+
+export function getLatestSessionItemId(db: Db, workspaceId: string, sessionId: string) {
+  const row = db
+    .prepare(
+      `
+        select max(id) as itemId
+        from agent_context_item
+        where workspace_id = ? and session_id = ?
+      `
+    )
+    .get(workspaceId, sessionId) as { itemId: number | null };
+  return row.itemId ?? 0;
+}
+
+export function listNonTerminalVisibleItemIds(db: Db, workspaceId: string, sessionId: string) {
+  return getSessionVisibleItems(db, workspaceId, sessionId)
+    .filter((item) => !TERMINAL_ITEM_STATUS.has(item.status))
+    .map((item) => item.id);
+}
+
+export function createRunRecord(db: Db, params: {
+  runId: string;
+  workspaceId: string;
+  sessionId: string;
+  triggerItemId: number;
+  agentId: string;
+  providerId: string;
+  modelId: string;
+  status: AgentRunRecord["status"];
+  createdAt: number;
+}) {
+  db.prepare(
+    `
+      insert into agent_run (
+        run_id,
+        workspace_id,
+        session_id,
+        trigger_item_id,
+        agent_id,
+        provider_id,
+        model_id,
+        status,
+        created_at,
+        updated_at
+      ) values (
+        @runId,
+        @workspaceId,
+        @sessionId,
+        @triggerItemId,
+        @agentId,
+        @providerId,
+        @modelId,
+        @status,
+        @createdAt,
+        @updatedAt
+      )
+    `
+  ).run({
+    runId: params.runId,
+    workspaceId: params.workspaceId,
+    sessionId: params.sessionId,
+    triggerItemId: params.triggerItemId,
+    agentId: params.agentId,
+    providerId: params.providerId,
+    modelId: params.modelId,
+    status: params.status,
+    createdAt: params.createdAt,
+    updatedAt: params.createdAt
+  });
+}
+
+export function getRunRecord(db: Db, runId: string) {
+  const row = db
+    .prepare(
+      `
+        select
+          run_id as runId,
+          workspace_id as workspaceId,
+          session_id as sessionId,
+          trigger_item_id as triggerItemId,
+          agent_id as agentId,
+          provider_id as providerId,
+          model_id as modelId,
+          status,
+          created_at as createdAt,
+          updated_at as updatedAt
+        from agent_run
+        where run_id = ?
+      `
+    )
+    .get(runId) as AgentRunRecord | undefined;
+  return row ?? null;
+}
+
+export function updateRunRecordStatus(db: Db, params: { runId: string; status: AgentRunRecord["status"]; updatedAt: number }) {
+  db.prepare(
+    `
+      update agent_run
+      set status = @status,
+          updated_at = @updatedAt
+      where run_id = @runId
     `
   ).run(params);
 }
@@ -613,66 +731,33 @@ export function listRunningSessions(db: Db): Array<{ workspaceId: string; sessio
       `
         select workspace_id as workspaceId, session_id as sessionId, active_run_id as activeRunId
         from agent_session_run_state
-        where status = 'running'
+        where status in ('running', 'waiting_permission')
       `
     )
     .all() as Array<{ workspaceId: string; sessionId: string; activeRunId: string | null }>;
   return rows;
 }
 
-export function findRunCreatedEvent(db: Db, params: { workspaceId: string; sessionId: string; runId: string }) {
-  // run.created 需要在全量 timeline 中查找，不能依赖当前 head 可见分支。
-  const rows = db
+export function listRecoverableRuns(db: Db) {
+  return db
     .prepare(
       `
         select
-          event_id as eventId,
-          id,
-          workspace_id as workspaceId,
-          session_id as sessionId,
-          lane,
-          prev_id as prevId,
-          type,
-          schema_version as schemaVersion,
-          correlation_id as correlationId,
-          causation_id as causationId,
-          created_at as createdAt,
-          payload_json as payloadJson
-        from agent_event
-        where workspace_id = ? and session_id = ? and lane = 'timeline' and type = 'run.created'
-        order by event_id desc
+          rs.workspace_id as workspaceId,
+          rs.session_id as sessionId,
+          rs.active_run_id as runId,
+          rs.status as runStateStatus,
+          r.trigger_item_id as triggerItemId
+        from agent_session_run_state rs
+        left join agent_run r on r.run_id = rs.active_run_id
+        where rs.status in ('running', 'waiting_permission') and rs.active_run_id is not null
       `
     )
-    .all(params.workspaceId, params.sessionId) as AgentEventRow[];
-
-  for (const row of rows) {
-    const item = mapEvent(row);
-    const payload = item.payload as any;
-    if (payload?.runId === params.runId) return item;
-  }
-  return null;
-}
-
-export function setRunStateIdle(db: Db, params: { workspaceId: string; sessionId: string; updatedAt: number; appliedEventId: number }) {
-  upsertRunState(db, {
-    workspaceId: params.workspaceId,
-    sessionId: params.sessionId,
-    status: "idle",
-    activeRunId: null,
-    updatedAt: params.updatedAt,
-    appliedEventId: params.appliedEventId
-  });
-}
-
-export function getLatestSessionEventId(db: Db, workspaceId: string, sessionId: string) {
-  const row = db
-    .prepare(
-      `
-        select max(event_id) as eventId
-        from agent_event
-        where workspace_id = ? and session_id = ?
-      `
-    )
-    .get(workspaceId, sessionId) as { eventId: number | null };
-  return row.eventId ?? 0;
+    .all() as Array<{
+      workspaceId: string;
+      sessionId: string;
+      runId: string;
+      runStateStatus: AgentRunStatus;
+      triggerItemId: number | null;
+    }>;
 }

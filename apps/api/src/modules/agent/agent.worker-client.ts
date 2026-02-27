@@ -5,7 +5,7 @@ import type { AgentRuntimePort } from "./agent.runtime-port.js";
 import type { AgentQueuedRun } from "./agent.service.js";
 
 type WorkerQueuedRun = AgentQueuedRun & {
-  inputText: string;
+  inputText?: string;
   workspacePath: string;
 };
 
