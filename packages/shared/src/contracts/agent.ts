@@ -89,7 +89,8 @@ export type AgentForkSessionRequest = Static<typeof AgentForkSessionRequestSchem
 export const AgentSendMessageRequestSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
   text: Type.String({ minLength: 1 }),
-  clientRequestId: Type.String({ minLength: 1 })
+  clientRequestId: Type.String({ minLength: 1 }),
+  agentId: Type.Optional(Type.String({ minLength: 1 }))
 });
 export type AgentSendMessageRequest = Static<typeof AgentSendMessageRequestSchema>;
 

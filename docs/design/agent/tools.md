@@ -1,6 +1,6 @@
 # 工具系统(Tools)
 
-本方案将内置工具与 MCP tools 统一为 Tool 协议,并将工具调用作为事件序列运行。
+本方案将内置工具统一为 Tool 协议,并将工具调用作为事件序列运行。
 
 目标:
 
@@ -8,9 +8,8 @@
   - tool 名称与参数字段尽量一致
   - tool 状态机字段尽量一致
   - 错误语义尽量一致
-- subtask 命名例外
-  - opencode: task
-  - 本方案: subtask
+- 本次迭代仅实现 read/write/bash
+- subtask 与 MCP tools 在后续迭代接入
 
 ## Tool 协议
 
@@ -112,14 +111,6 @@ tool part 建议字段:
   - 新文件
   - 明确全量覆盖
 
-## apply_patch
-
-- 目的
-  - 基于 patchText 对多个文件执行 add/update/delete/move
-- 适用
-  - 现有文件的局部修改
-  - 需要最小 diff
-
 ## bash
 
 - 目的
@@ -129,6 +120,16 @@ tool part 建议字段:
   - 强制超时
   - 输出截断并写 artifact
   - 协作取消
+
+## 后续工具(非本次迭代)
+
+## apply_patch
+
+- 目的
+  - 基于 patchText 对多个文件执行 add/update/delete/move
+- 适用
+  - 现有文件的局部修改
+  - 需要最小 diff
 
 ## subtask
 
@@ -146,11 +147,16 @@ tool part 建议字段:
   - subtaskSessionId
   - subtaskRunId
 
+补充语义:
+
+- subtask 显式传入 `agentId` 时,子任务使用该 agent
+- 未显式传入时继承父 run 的 `agentId`
+
 ## 工具注册与快照
 
 - Worker 维护 ToolRegistry
   - 内置工具静态注册
-  - MCP tools 动态注册
+  - MCP tools 动态注册(后续)
 - 每个 run/turn 开始时获取 toolset snapshot
   - 避免执行中工具列表变化导致不一致
 

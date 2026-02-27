@@ -110,7 +110,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch, type ComponentPublicInstance } from "vue";
 import { Modal, message } from "ant-design-vue";
-import { CodeOutlined, FolderOpenOutlined, SearchOutlined } from "@ant-design/icons-vue";
+import { CodeOutlined, FolderOpenOutlined, RobotOutlined, SearchOutlined } from "@ant-design/icons-vue";
 import { useI18n } from "vue-i18n";
 import type { GitBranchesResponse, GitPushRequest, GitStatusResponse, WorkspaceDetail } from "@agent-workbench/shared";
 import {
@@ -138,6 +138,7 @@ import { createSearchRuntime } from "../tools/search/runtime";
 import FileExplorerToolView from "../tools/file-explorer/FileExplorerToolView.vue";
 import SearchToolView from "../tools/search/SearchToolView.vue";
 import TerminalToolView from "../tools/terminal/TerminalToolView.vue";
+import AgentToolView from "../tools/agent/AgentToolView.vue";
 import GitIdentityModal from "@/shared/components/GitIdentityModal.vue";
 import { createCodeReviewRuntime } from "@/features/workspace/tools/code-review/runtime";
 import { createFileExplorerRuntime } from "@/features/workspace/tools/file-explorer/runtime";
@@ -146,7 +147,7 @@ const props = defineProps<{ workspaceId: string }>();
 const { t } = useI18n();
 type PushParams = Omit<GitPushRequest, "target">;
 
-const TOOL_IDS: ToolId[] = ["files", "search", "codeReview", "terminal"];
+const TOOL_IDS: ToolId[] = ["files", "search", "codeReview", "terminal", "agent"];
 const DOCK_AREAS: DockArea[] = ["leftTop", "leftBottom", "rightTop"];
 type ToolDefinition = {
   toolId: ToolId;
@@ -234,6 +235,15 @@ const tools = computed<ToolDefinition[]>(() => [
     defaultArea: "leftTop",
     allowedAreas: ["leftTop", "rightTop", "leftBottom"],
     keepAlive: true
+  },
+  {
+    toolId: "agent",
+    title: () => t("workspace.tools.agent"),
+    icon: RobotOutlined,
+    view: AgentToolView,
+    defaultArea: "leftTop",
+    allowedAreas: ["leftTop", "rightTop", "leftBottom"],
+    keepAlive: true
   }
 ]);
 
@@ -272,7 +282,8 @@ const toolArea = reactive<Record<ToolId, DockArea>>({
   codeReview: "leftTop",
   terminal: "leftTop",
   files: "leftTop",
-  search: "leftTop"
+  search: "leftTop",
+  agent: "leftTop"
 });
 
 const activeToolIdByArea = reactive<Record<DockArea, ToolId | null>>({
@@ -285,13 +296,15 @@ const toolMinimized = reactive<Record<ToolId, boolean>>({
   codeReview: false,
   terminal: true,
   files: false,
-  search: false
+  search: false,
+  agent: false
 });
 const toolDots = reactive<Record<ToolId, boolean>>({
   codeReview: false,
   terminal: false,
   files: false,
-  search: false
+  search: false,
+  agent: false
 });
 const toolRuntimes = new Map<ToolId, ToolRuntime>();
 
@@ -421,13 +434,25 @@ function loadDockLayout(workspaceId: string): DockLayoutV2 | null {
     const activeRaw = json.activeToolIdByArea ?? ({} as any);
     const toolOrderRaw = json.toolOrderByArea ?? ({} as any);
 
-    const toolAreaOut: Record<ToolId, DockArea> = { codeReview: "leftTop", terminal: "leftTop", files: "leftTop", search: "leftTop" };
+    const toolAreaOut: Record<ToolId, DockArea> = {
+      codeReview: "leftTop",
+      terminal: "leftTop",
+      files: "leftTop",
+      search: "leftTop",
+      agent: "leftTop"
+    };
     for (const toolId of TOOL_IDS) {
       const v = (toolAreaRaw as any)[toolId];
       if (isDockArea(v)) toolAreaOut[toolId] = v;
     }
 
-    const toolMinimizedOut: Record<ToolId, boolean> = { codeReview: false, terminal: true, files: false, search: false };
+    const toolMinimizedOut: Record<ToolId, boolean> = {
+      codeReview: false,
+      terminal: true,
+      files: false,
+      search: false,
+      agent: false
+    };
     for (const toolId of TOOL_IDS) {
       const v = (toolMinimizedRaw as any)[toolId];
       if (typeof v === "boolean") toolMinimizedOut[toolId] = v;
@@ -491,12 +516,19 @@ function saveDockLayout(workspaceId: string) {
       version: 2,
       updatedAt: Date.now(),
       ratios: { topBottom: topBottomRatio.value, topLeft: topLeftRatio.value },
-      toolArea: { codeReview: toolArea.codeReview, terminal: toolArea.terminal, files: toolArea.files, search: toolArea.search },
+      toolArea: {
+        codeReview: toolArea.codeReview,
+        terminal: toolArea.terminal,
+        files: toolArea.files,
+        search: toolArea.search,
+        agent: toolArea.agent
+      },
       toolMinimized: {
         codeReview: toolMinimized.codeReview,
         terminal: toolMinimized.terminal,
         files: toolMinimized.files,
-        search: toolMinimized.search
+        search: toolMinimized.search,
+        agent: toolMinimized.agent
       },
       activeToolIdByArea: {
         leftTop: activeToolIdByArea.leftTop,
@@ -533,6 +565,7 @@ function resetDockLayoutDefaults() {
   toolArea.terminal = "leftTop";
   toolArea.files = "leftTop";
   toolArea.search = "leftTop";
+  toolArea.agent = "leftTop";
   activeToolIdByArea.leftTop = "files";
   activeToolIdByArea.leftBottom = null;
   activeToolIdByArea.rightTop = null;
@@ -540,6 +573,7 @@ function resetDockLayoutDefaults() {
   toolMinimized.terminal = true;
   toolMinimized.files = false;
   toolMinimized.search = false;
+  toolMinimized.agent = false;
   setToolOrderByArea(defaultToolOrderByArea());
   topBottomRatio.value = 2 / 3;
   topLeftRatio.value = 2 / 3;
@@ -778,7 +812,7 @@ const keepAliveIncludeByArea = computed(() => {
 });
 
 const toolVisibleById = computed(() => {
-  const out: Record<ToolId, boolean> = { codeReview: false, terminal: false, files: false, search: false };
+  const out: Record<ToolId, boolean> = { codeReview: false, terminal: false, files: false, search: false, agent: false };
   for (const id of TOOL_IDS) out[id] = isToolEnabled(id) && isToolVisible(id);
   return out;
 });

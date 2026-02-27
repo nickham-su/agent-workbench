@@ -32,6 +32,9 @@
   - sessionId
   - status: idle|running|waiting_approval
   - activeRunId 可选
+  - activeAgentId 可选
+  - activeProviderId 可选
+  - activeModelId 可选
   - activeTurnId 可选
   - pendingUserMessageIds: array
   - pendingToolCallIds: array
@@ -72,6 +75,8 @@
   - appliedEventId
   - messages: 模型消息列表(可直接喂给 provider)
   - toolDefinitions: 当前 toolset snapshot
+  - executionProfile 可选
+    - agent/provider/model 的解析快照
 
 构建规则(高层):
 

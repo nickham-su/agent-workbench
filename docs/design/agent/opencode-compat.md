@@ -5,6 +5,12 @@
 - 内置工具与 MCP tools 的协议尽量对齐 opencode
 - 便于参考 opencode 的提示词与工具迭代
 
+本次迭代范围:
+
+- Provider 仅 `@ai-sdk/openai`
+- 工具仅 `read/write/bash`
+- MCP tools 延后
+
 本项目的主要差异:
 
 - subtask 命名
@@ -17,8 +23,13 @@
 
 - read
 - write
-- apply_patch
 - bash
+
+延后:
+
+- apply_patch
+- subtask
+- MCP tools
 
 subtask:
 
@@ -78,3 +89,7 @@ subtask:
 - 模型循环
   - opencode 基于 session loop
   - 本项目基于事件循环,但 turn 的行为与 tool calling 语义保持一致
+
+- openai provider 行为
+  - 对 `@ai-sdk/openai` 使用 `responses(modelId)`
+  - 请求路径目标与 opencode 一致(`/v1/responses`)

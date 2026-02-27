@@ -1,12 +1,20 @@
 import type { FastifyBaseLogger } from "fastify";
 import fs from "node:fs/promises";
 import type {
+  AgentItem,
+  AgentProviderNpm,
+  AgentProvidersSettings,
+  AgentProvidersSettingsView,
+  AgentSettings,
+  AgentToolName,
   ClearAllGitIdentityResponse,
   GitGlobalIdentity,
   NetworkSettings,
   ResetKnownHostRequest,
   SearchSettings,
   SecurityStatus,
+  UpdateAgentProvidersSettingsRequest,
+  UpdateAgentSettingsRequest,
   UpdateGitGlobalIdentityRequest,
   UpdateNetworkSettingsRequest,
   UpdateSearchSettingsRequest
@@ -25,9 +33,22 @@ type NetworkSettingsV1 = Omit<NetworkSettings, "updatedAt">;
 
 const NETWORK_SETTINGS_KEY = "network";
 const SEARCH_SETTINGS_KEY = "search";
+const AGENT_PROVIDERS_SETTINGS_KEY = "agent_providers_v1";
+const AGENT_SETTINGS_KEY = "agent_agents_v1";
 
 const SEARCH_EXCLUDE_MAX_COUNT = 200;
 const SEARCH_EXCLUDE_MAX_LENGTH = 200;
+
+type AgentProvidersSettingsStored = Omit<AgentProvidersSettings, "updatedAt">;
+type AgentSettingsStored = Omit<AgentSettings, "updatedAt">;
+
+type AgentProviderStored = AgentProvidersSettingsStored["providers"][number];
+
+type ExecutionProfileResolved = {
+  agent: AgentItem;
+  provider: AgentProviderStored;
+  model: AgentProviderStored["models"][number];
+};
 
 function defaultNetworkSettings(): NetworkSettingsV1 {
   return { httpProxy: null, httpsProxy: null, noProxy: null, caCertPem: null, applyToTerminal: false };
@@ -69,6 +90,294 @@ function normalizeSearchExcludeGlobs(raw: unknown, fallbackToDefault = true) {
   return fallbackToDefault ? defaultSearchExcludeGlobs() : [];
 }
 
+function maskApiKey(raw: string | null) {
+  if (!raw) return null;
+  const value = raw.trim();
+  if (!value) return null;
+  if (value.length <= 4) return "*".repeat(value.length);
+  return `${"*".repeat(value.length - 4)}${value.slice(-4)}`;
+}
+
+function normalizeBaseURL(raw: unknown) {
+  const value = typeof raw === "string" ? raw.trim() : "";
+  if (!value) throw new HttpError(400, "Provider baseURL is required", "AGENT_PROVIDER_BASE_URL_REQUIRED");
+  if (value.includes("\0") || value.includes("\n") || value.includes("\r")) {
+    throw new HttpError(400, "Invalid provider baseURL", "AGENT_PROVIDER_BASE_URL_INVALID");
+  }
+  return value.endsWith("/") ? value.slice(0, -1) : value;
+}
+
+function normalizeApiKeyInput(raw: unknown) {
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+  const value = String(raw).trim();
+  if (!value) return null;
+  if (value.includes("\0") || value.includes("\n") || value.includes("\r")) {
+    throw new HttpError(400, "Invalid provider apiKey", "AGENT_PROVIDER_API_KEY_INVALID");
+  }
+  return value;
+}
+
+const DEFAULT_PROVIDER_NPM: AgentProviderNpm = "@ai-sdk/openai";
+
+const RESERVED_MODEL_OPTION_KEYS = new Set([
+  "model",
+  "system",
+  "prompt",
+  "messages",
+  "input",
+  "abortSignal",
+  "providerOptions",
+  "tools",
+  "toolChoice"
+]);
+
+function isSafeObjectKey(raw: string) {
+  if (!raw) return false;
+  return raw !== "__proto__" && raw !== "prototype" && raw !== "constructor";
+}
+
+function toRecordObject(raw: unknown) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  return raw as Record<string, unknown>;
+}
+
+function normalizeProviderNpmStored(raw: unknown): AgentProviderNpm {
+  if (raw === "@ai-sdk/anthropic") return raw;
+  return DEFAULT_PROVIDER_NPM;
+}
+
+function normalizeProviderNpmInput(raw: unknown): AgentProviderNpm {
+  if (raw === "@ai-sdk/openai" || raw === "@ai-sdk/anthropic") return raw;
+  throw new HttpError(400, `Unsupported provider npm: ${String(raw)}`, "AGENT_PROVIDER_NPM_UNSUPPORTED");
+}
+
+function providerOptionsKeyByNpm(npm: AgentProviderNpm) {
+  return npm === "@ai-sdk/anthropic" ? "anthropic" : "openai";
+}
+
+function normalizeAiSdkOptions(raw: unknown) {
+  const source = toRecordObject(raw);
+  if (!source) return {};
+  const out: Record<string, unknown> = {};
+  for (const [rawKey, value] of Object.entries(source)) {
+    const key = rawKey.trim();
+    if (!isSafeObjectKey(key)) continue;
+    if (RESERVED_MODEL_OPTION_KEYS.has(key)) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+function normalizeProviderOptionsByKey(raw: unknown) {
+  const source = toRecordObject(raw);
+  if (!source) return {};
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const [rawKey, rawValue] of Object.entries(source)) {
+    const key = rawKey.trim();
+    if (!isSafeObjectKey(key)) continue;
+    const payload = toRecordObject(rawValue);
+    if (!payload) continue;
+    const value: Record<string, unknown> = {};
+    for (const [payloadRawKey, payloadRawValue] of Object.entries(payload)) {
+      const payloadKey = payloadRawKey.trim();
+      if (!isSafeObjectKey(payloadKey)) continue;
+      value[payloadKey] = payloadRawValue;
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+function normalizeProviderModelOptions(raw: unknown, providerNpm: AgentProviderNpm) {
+  const source = toRecordObject(raw);
+  if (!source) return {};
+
+  const aiSdk = normalizeAiSdkOptions(source.aiSdk);
+  const providerOptionsByKey = normalizeProviderOptionsByKey(source.providerOptionsByKey);
+  const providerKey = providerOptionsKeyByNpm(providerNpm);
+
+  const legacyProviderOptions: Record<string, unknown> = {};
+  for (const [rawKey, value] of Object.entries(source)) {
+    const key = rawKey.trim();
+    if (!isSafeObjectKey(key)) continue;
+    if (key === "aiSdk" || key === "providerOptionsByKey") continue;
+    if (key === "maxOutputTokens") {
+      if (aiSdk.maxOutputTokens === undefined) {
+        aiSdk.maxOutputTokens = value;
+      }
+      continue;
+    }
+    legacyProviderOptions[key] = value;
+  }
+
+  if (Object.keys(legacyProviderOptions).length > 0) {
+    providerOptionsByKey[providerKey] = {
+      ...legacyProviderOptions,
+      ...(providerOptionsByKey[providerKey] ?? {})
+    };
+  }
+
+  const out: Record<string, unknown> = {};
+  if (Object.keys(aiSdk).length > 0) out.aiSdk = aiSdk;
+  if (Object.keys(providerOptionsByKey).length > 0) out.providerOptionsByKey = providerOptionsByKey;
+  return out;
+}
+
+function defaultAgentPermissions() {
+  return {
+    allowRead: true,
+    allowWrite: true,
+    allowBash: true
+  };
+}
+
+function getAgentProvidersSettingsStored(ctx: AppContext) {
+  const row = getSettingJson(ctx.db, AGENT_PROVIDERS_SETTINGS_KEY);
+  const value = row?.value as Partial<AgentProvidersSettingsStored> | undefined;
+  const providersRaw = Array.isArray(value?.providers) ? value.providers : [];
+  const ids = new Set<string>();
+  const providers = providersRaw
+    .map((providerRaw) => {
+      const provider = providerRaw as Record<string, unknown>;
+      const id = typeof provider.id === "string" ? provider.id.trim() : "";
+      if (!id || ids.has(id)) return null;
+      ids.add(id);
+      const npm = normalizeProviderNpmStored(provider.npm);
+      const modelsRaw = Array.isArray(provider.models) ? provider.models : [];
+      const modelIds = new Set<string>();
+      const models = modelsRaw
+        .map((modelRaw) => {
+          const model = modelRaw as Record<string, unknown>;
+          const modelId = typeof model.id === "string" ? model.id.trim() : "";
+          const providerModelIdRaw = typeof model.providerModelId === "string" ? model.providerModelId.trim() : "";
+          const providerModelId = providerModelIdRaw || modelId;
+          const name = typeof model.name === "string" ? model.name.trim() : modelId;
+          if (!modelId || !providerModelId || !name || modelIds.has(modelId)) return null;
+          modelIds.add(modelId);
+          return {
+            id: modelId,
+            providerModelId,
+            name,
+            options: normalizeProviderModelOptions(model.options, npm)
+          };
+        })
+        .filter((x): x is NonNullable<typeof x> => Boolean(x));
+      const optionsRaw = (provider.options ?? {}) as Record<string, unknown>;
+      try {
+        return {
+          id,
+          name: typeof provider.name === "string" && provider.name.trim() ? provider.name.trim() : id,
+          npm,
+          options: {
+            baseURL: normalizeBaseURL(optionsRaw.baseURL),
+            apiKey: normalizeApiKeyInput(optionsRaw.apiKey) ?? null
+          },
+          models
+        };
+      } catch {
+        return null;
+      }
+    })
+    .filter((x): x is NonNullable<typeof x> => Boolean(x));
+
+  const defaultValue = value?.default as { providerId?: unknown; modelId?: unknown } | null | undefined;
+  const providerId = typeof defaultValue?.providerId === "string" ? defaultValue.providerId.trim() : "";
+  const modelId = typeof defaultValue?.modelId === "string" ? defaultValue.modelId.trim() : "";
+  const defaultRef = providerId && modelId ? { providerId, modelId } : null;
+
+  return {
+    settings: {
+      default: defaultRef,
+      providers
+    },
+    updatedAt: row?.updatedAt ?? 0
+  };
+}
+
+function toAgentProvidersSettingsView(settings: AgentProvidersSettingsStored, updatedAt: number): AgentProvidersSettingsView {
+  return {
+    default: settings.default,
+    providers: settings.providers.map((provider) => ({
+      id: provider.id,
+      name: provider.name,
+      npm: provider.npm,
+      options: {
+        baseURL: provider.options.baseURL,
+        hasApiKey: Boolean(provider.options.apiKey),
+        apiKeyMasked: maskApiKey(provider.options.apiKey ?? null)
+      },
+      models: provider.models
+    })),
+    updatedAt
+  };
+}
+
+function normalizeAgentTools(raw: unknown): AgentToolName[] {
+  if (!Array.isArray(raw)) return ["bash", "read", "write"];
+  const out: AgentToolName[] = [];
+  const seen = new Set<AgentToolName>();
+  for (const item of raw) {
+    if (item !== "bash" && item !== "read" && item !== "write") continue;
+    if (seen.has(item)) continue;
+    seen.add(item);
+    out.push(item);
+  }
+  return out.length > 0 ? out : ["bash", "read", "write"];
+}
+
+function getAgentSettingsStored(ctx: AppContext) {
+  const row = getSettingJson(ctx.db, AGENT_SETTINGS_KEY);
+  const value = row?.value as Partial<AgentSettingsStored> | undefined;
+  const agentsRaw = Array.isArray(value?.agents) ? value.agents : [];
+  const ids = new Set<string>();
+  const agents = agentsRaw
+    .map((agentRaw) => {
+      const agent = agentRaw as Record<string, unknown>;
+      const id = typeof agent.id === "string" ? agent.id.trim() : "";
+      if (!id || ids.has(id)) return null;
+      ids.add(id);
+      const name = typeof agent.name === "string" && agent.name.trim() ? agent.name.trim() : id;
+      const prompt = typeof agent.prompt === "string" ? agent.prompt : "";
+      const permissionsRaw = (agent.permissions ?? {}) as Record<string, unknown>;
+      const permissions = {
+        allowRead: typeof permissionsRaw.allowRead === "boolean" ? permissionsRaw.allowRead : true,
+        allowWrite: typeof permissionsRaw.allowWrite === "boolean" ? permissionsRaw.allowWrite : true,
+        allowBash: typeof permissionsRaw.allowBash === "boolean" ? permissionsRaw.allowBash : true
+      };
+      const modelRefRaw = (agent.defaultModel ?? null) as { providerId?: unknown; modelId?: unknown } | null;
+      const modelProviderId = typeof modelRefRaw?.providerId === "string" ? modelRefRaw.providerId.trim() : "";
+      const modelId = typeof modelRefRaw?.modelId === "string" ? modelRefRaw.modelId.trim() : "";
+      return {
+        id,
+        name,
+        prompt,
+        tools: normalizeAgentTools(agent.tools),
+        permissions,
+        defaultModel: modelProviderId && modelId ? { providerId: modelProviderId, modelId } : null
+      };
+    })
+    .filter((x): x is NonNullable<typeof x> => Boolean(x));
+
+  const defaultValue = value?.default as { agentId?: unknown } | null | undefined;
+  const defaultAgentId = typeof defaultValue?.agentId === "string" ? defaultValue.agentId.trim() : "";
+  return {
+    settings: {
+      default: defaultAgentId ? { agentId: defaultAgentId } : null,
+      agents
+    },
+    updatedAt: row?.updatedAt ?? 0
+  };
+}
+
+function assertUniqueIdsOrThrow(items: string[], errorCode: string, message: string) {
+  const seen = new Set<string>();
+  for (const item of items) {
+    if (seen.has(item)) throw new HttpError(400, message, errorCode);
+    seen.add(item);
+  }
+}
+
 export function getNetworkSettings(ctx: AppContext): NetworkSettings {
   const row = getSettingJson(ctx.db, NETWORK_SETTINGS_KEY);
   const base = defaultNetworkSettings();
@@ -92,6 +401,238 @@ export function getSearchSettings(ctx: AppContext): SearchSettings {
     excludeGlobs,
     updatedAt: row?.updatedAt ?? 0
   };
+}
+
+export function getAgentProvidersSettings(ctx: AppContext): AgentProvidersSettingsView {
+  const loaded = getAgentProvidersSettingsStored(ctx);
+  return toAgentProvidersSettingsView(loaded.settings, loaded.updatedAt);
+}
+
+export function getAgentProvidersSettingsInternal(ctx: AppContext): AgentProvidersSettings {
+  const loaded = getAgentProvidersSettingsStored(ctx);
+  return {
+    default: loaded.settings.default,
+    providers: loaded.settings.providers,
+    updatedAt: loaded.updatedAt
+  };
+}
+
+export function updateAgentProvidersSettings(
+  ctx: AppContext,
+  logger: FastifyBaseLogger,
+  bodyRaw: unknown
+): AgentProvidersSettingsView {
+  const body = (bodyRaw ?? {}) as UpdateAgentProvidersSettingsRequest;
+  const incomingProviders = Array.isArray(body.providers) ? body.providers : [];
+  const current = getAgentProvidersSettingsInternal(ctx);
+  const currentById = new Map(current.providers.map((provider) => [provider.id, provider]));
+
+  const providers = incomingProviders.map((providerRaw) => {
+    const provider = providerRaw as Record<string, unknown>;
+    const id = typeof provider.id === "string" ? provider.id.trim() : "";
+    const name = typeof provider.name === "string" ? provider.name.trim() : "";
+    if (!id || !name) {
+      throw new HttpError(400, "Provider id/name is required", "AGENT_PROVIDER_ID_NAME_REQUIRED");
+    }
+    const npm = normalizeProviderNpmInput(provider.npm);
+    const optionsRaw = (provider.options ?? {}) as Record<string, unknown>;
+    const apiKeyInput = normalizeApiKeyInput(optionsRaw.apiKey);
+    const previous = currentById.get(id);
+    const apiKey = apiKeyInput === undefined ? previous?.options.apiKey ?? null : apiKeyInput;
+
+    const modelsRaw = Array.isArray(provider.models) ? provider.models : [];
+    const models = modelsRaw.map((modelRaw) => {
+      const model = modelRaw as Record<string, unknown>;
+      const modelId = typeof model.id === "string" ? model.id.trim() : "";
+      const providerModelIdRaw = typeof model.providerModelId === "string" ? model.providerModelId.trim() : "";
+      const providerModelId = providerModelIdRaw || modelId;
+      const modelName = typeof model.name === "string" ? model.name.trim() : "";
+      if (!modelId || !providerModelId || !modelName) {
+        throw new HttpError(400, "Provider model id/providerModelId/name is required", "AGENT_PROVIDER_MODEL_ID_NAME_REQUIRED");
+      }
+      return {
+        id: modelId,
+        providerModelId,
+        name: modelName,
+        options: normalizeProviderModelOptions(model.options, npm)
+      };
+    });
+
+    assertUniqueIdsOrThrow(
+      models.map((model) => model.id),
+      "AGENT_PROVIDER_MODEL_DUPLICATE",
+      `Duplicate model id in provider '${id}'`
+    );
+
+    return {
+      id,
+      name,
+      npm,
+      options: {
+        baseURL: normalizeBaseURL(optionsRaw.baseURL),
+        apiKey
+      },
+      models
+    };
+  });
+
+  assertUniqueIdsOrThrow(
+    providers.map((provider) => provider.id),
+    "AGENT_PROVIDER_DUPLICATE",
+    "Duplicate provider id"
+  );
+
+  const defaultValue = (body.default ?? null) as { providerId?: unknown; modelId?: unknown } | null;
+  const providerId = typeof defaultValue?.providerId === "string" ? defaultValue.providerId.trim() : "";
+  const modelId = typeof defaultValue?.modelId === "string" ? defaultValue.modelId.trim() : "";
+  const defaultRef = providerId && modelId ? { providerId, modelId } : null;
+
+  if (defaultRef) {
+    const provider = providers.find((item) => item.id === defaultRef.providerId);
+    if (!provider) {
+      throw new HttpError(400, "Default providerId not found", "AGENT_PROVIDER_DEFAULT_PROVIDER_NOT_FOUND");
+    }
+    if (!provider.models.some((item) => item.id === defaultRef.modelId)) {
+      throw new HttpError(400, "Default modelId not found", "AGENT_PROVIDER_DEFAULT_MODEL_NOT_FOUND");
+    }
+  }
+
+  const updatedAt = nowMs();
+  setSettingJson(
+    ctx.db,
+    AGENT_PROVIDERS_SETTINGS_KEY,
+    {
+      default: defaultRef,
+      providers
+    },
+    updatedAt
+  );
+
+  logger.info({ providers: providers.length, updatedAt }, "agent providers settings updated");
+  return toAgentProvidersSettingsView({ default: defaultRef, providers }, updatedAt);
+}
+
+export function getAgentSettings(ctx: AppContext): AgentSettings {
+  const loaded = getAgentSettingsStored(ctx);
+  return {
+    default: loaded.settings.default,
+    agents: loaded.settings.agents,
+    updatedAt: loaded.updatedAt
+  };
+}
+
+export function updateAgentSettings(ctx: AppContext, logger: FastifyBaseLogger, bodyRaw: unknown): AgentSettings {
+  const body = (bodyRaw ?? {}) as UpdateAgentSettingsRequest;
+  const incomingAgents = Array.isArray(body.agents) ? body.agents : [];
+  const agents = incomingAgents.map((agentRaw) => {
+    const agent = agentRaw as Record<string, unknown>;
+    const id = typeof agent.id === "string" ? agent.id.trim() : "";
+    const name = typeof agent.name === "string" ? agent.name.trim() : "";
+    if (!id || !name) {
+      throw new HttpError(400, "Agent id/name is required", "AGENT_ID_NAME_REQUIRED");
+    }
+    const prompt = typeof agent.prompt === "string" ? agent.prompt : "";
+    const tools = normalizeAgentTools(agent.tools);
+    const permissionsRaw = (agent.permissions ?? {}) as Record<string, unknown>;
+    const fallbackPermissions = defaultAgentPermissions();
+    const permissions = {
+      allowRead: typeof permissionsRaw.allowRead === "boolean" ? permissionsRaw.allowRead : fallbackPermissions.allowRead,
+      allowWrite: typeof permissionsRaw.allowWrite === "boolean" ? permissionsRaw.allowWrite : fallbackPermissions.allowWrite,
+      allowBash: typeof permissionsRaw.allowBash === "boolean" ? permissionsRaw.allowBash : fallbackPermissions.allowBash
+    };
+    const modelRaw = (agent.defaultModel ?? null) as { providerId?: unknown; modelId?: unknown } | null;
+    const providerId = typeof modelRaw?.providerId === "string" ? modelRaw.providerId.trim() : "";
+    const modelId = typeof modelRaw?.modelId === "string" ? modelRaw.modelId.trim() : "";
+    const defaultModel = providerId && modelId ? { providerId, modelId } : null;
+    return {
+      id,
+      name,
+      prompt,
+      tools,
+      permissions,
+      defaultModel
+    };
+  });
+
+  assertUniqueIdsOrThrow(agents.map((agent) => agent.id), "AGENT_DUPLICATE", "Duplicate agent id");
+
+  const defaultValue = (body.default ?? null) as { agentId?: unknown } | null;
+  const defaultAgentId = typeof defaultValue?.agentId === "string" ? defaultValue.agentId.trim() : "";
+  const defaultRef = defaultAgentId ? { agentId: defaultAgentId } : null;
+
+  if (defaultRef && !agents.some((agent) => agent.id === defaultRef.agentId)) {
+    throw new HttpError(400, "Default agentId not found", "AGENT_DEFAULT_NOT_FOUND");
+  }
+
+  const updatedAt = nowMs();
+  setSettingJson(
+    ctx.db,
+    AGENT_SETTINGS_KEY,
+    {
+      default: defaultRef,
+      agents
+    },
+    updatedAt
+  );
+  logger.info({ agents: agents.length, updatedAt }, "agent settings updated");
+
+  return {
+    default: defaultRef,
+    agents,
+    updatedAt
+  };
+}
+
+export function resolveExecutionProfile(ctx: AppContext, input: {
+  requestedAgentId?: string | null;
+  agentIdFromRun?: string | null;
+  providerIdFromRun?: string | null;
+  modelIdFromRun?: string | null;
+}) {
+  const providersSettings = getAgentProvidersSettingsInternal(ctx);
+  const agentSettings = getAgentSettings(ctx);
+
+  const resolvedAgentId = [input.agentIdFromRun, input.requestedAgentId, agentSettings.default?.agentId]
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .find((item) => item.length > 0);
+  if (!resolvedAgentId) {
+    throw new HttpError(400, "Agent is not configured", "AGENT_NOT_CONFIGURED");
+  }
+
+  const agent = agentSettings.agents.find((item) => item.id === resolvedAgentId);
+  if (!agent) {
+    throw new HttpError(400, "Agent not found", "AGENT_NOT_FOUND");
+  }
+
+  const fallbackModel = agent.defaultModel ?? providersSettings.default;
+  const resolvedProviderId = [input.providerIdFromRun, fallbackModel?.providerId]
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .find((item) => item.length > 0);
+  const resolvedModelId = [input.modelIdFromRun, fallbackModel?.modelId]
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .find((item) => item.length > 0);
+
+  if (!resolvedProviderId || !resolvedModelId) {
+    throw new HttpError(400, "Default provider/model is not configured", "AGENT_PROVIDER_MODEL_NOT_CONFIGURED");
+  }
+
+  const provider = providersSettings.providers.find((item) => item.id === resolvedProviderId);
+  if (!provider) {
+    throw new HttpError(400, "Provider not found", "AGENT_PROVIDER_NOT_FOUND");
+  }
+  const model = provider.models.find((item) => item.id === resolvedModelId);
+  if (!model) {
+    throw new HttpError(400, "Model not found", "AGENT_MODEL_NOT_FOUND");
+  }
+  if (!provider.options.apiKey) {
+    throw new HttpError(400, `Provider '${provider.id}' apiKey is missing`, "AGENT_PROVIDER_API_KEY_MISSING");
+  }
+
+  return {
+    agent,
+    provider,
+    model
+  } satisfies ExecutionProfileResolved;
 }
 
 export async function updateNetworkSettings(

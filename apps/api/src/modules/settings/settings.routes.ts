@@ -1,6 +1,8 @@
 import type { FastifyInstance } from "fastify";
 import type { AppContext } from "../../app/context.js";
 import {
+  AgentProvidersSettingsViewSchema,
+  AgentSettingsSchema,
   ErrorResponseSchema,
   ClearAllGitIdentityResponseSchema,
   GitGlobalIdentitySchema,
@@ -8,17 +10,23 @@ import {
   ResetKnownHostRequestSchema,
   SearchSettingsSchema,
   SecurityStatusSchema,
+  UpdateAgentProvidersSettingsRequestSchema,
+  UpdateAgentSettingsRequestSchema,
   UpdateGitGlobalIdentityRequestSchema,
   UpdateNetworkSettingsRequestSchema,
   UpdateSearchSettingsRequestSchema
 } from "@agent-workbench/shared";
 import {
+  getAgentProvidersSettings,
+  getAgentSettings,
   clearAllGitIdentity,
   getGitGlobalIdentity,
   getNetworkSettings,
   getSearchSettings,
   getSecurityStatus,
   resetKnownHost,
+  updateAgentProvidersSettings,
+  updateAgentSettings,
   updateGitGlobalIdentity,
   updateNetworkSettings,
   updateSearchSettings
@@ -129,5 +137,51 @@ export async function registerSettingsRoutes(app: FastifyInstance, ctx: AppConte
       }
     },
     async () => clearAllGitIdentity(ctx, app.log)
+  );
+
+  app.get(
+    "/api/settings/agent/providers",
+    {
+      schema: {
+        tags: ["settings"],
+        response: { 200: AgentProvidersSettingsViewSchema }
+      }
+    },
+    async () => getAgentProvidersSettings(ctx)
+  );
+
+  app.put(
+    "/api/settings/agent/providers",
+    {
+      schema: {
+        tags: ["settings"],
+        body: UpdateAgentProvidersSettingsRequestSchema,
+        response: { 200: AgentProvidersSettingsViewSchema, 400: ErrorResponseSchema }
+      }
+    },
+    async (req) => updateAgentProvidersSettings(ctx, app.log, req.body)
+  );
+
+  app.get(
+    "/api/settings/agent/agents",
+    {
+      schema: {
+        tags: ["settings"],
+        response: { 200: AgentSettingsSchema }
+      }
+    },
+    async () => getAgentSettings(ctx)
+  );
+
+  app.put(
+    "/api/settings/agent/agents",
+    {
+      schema: {
+        tags: ["settings"],
+        body: UpdateAgentSettingsRequestSchema,
+        response: { 200: AgentSettingsSchema, 400: ErrorResponseSchema }
+      }
+    },
+    async (req) => updateAgentSettings(ctx, app.log, req.body)
   );
 }

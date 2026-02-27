@@ -621,14 +621,34 @@ export function listRunningSessions(db: Db): Array<{ workspaceId: string; sessio
 }
 
 export function findRunCreatedEvent(db: Db, params: { workspaceId: string; sessionId: string; runId: string }) {
-  const rows = getSessionTimelineEvents(db, params.workspaceId, params.sessionId);
-  for (let i = rows.length - 1; i >= 0; i -= 1) {
-    const item = rows[i]!;
-    if (item.type !== "run.created") continue;
+  // run.created 需要在全量 timeline 中查找，不能依赖当前 head 可见分支。
+  const rows = db
+    .prepare(
+      `
+        select
+          event_id as eventId,
+          id,
+          workspace_id as workspaceId,
+          session_id as sessionId,
+          lane,
+          prev_id as prevId,
+          type,
+          schema_version as schemaVersion,
+          correlation_id as correlationId,
+          causation_id as causationId,
+          created_at as createdAt,
+          payload_json as payloadJson
+        from agent_event
+        where workspace_id = ? and session_id = ? and lane = 'timeline' and type = 'run.created'
+        order by event_id desc
+      `
+    )
+    .all(params.workspaceId, params.sessionId) as AgentEventRow[];
+
+  for (const row of rows) {
+    const item = mapEvent(row);
     const payload = item.payload as any;
-    if (payload?.runId === params.runId) {
-      return item;
-    }
+    if (payload?.runId === params.runId) return item;
   }
   return null;
 }

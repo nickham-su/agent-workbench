@@ -2,6 +2,16 @@
 
 本文档描述 Worker 如何调用 LLM,以及如何将模型输出转换为事件。
 
+## 本次迭代范围
+
+- Provider
+  - 仅 `@ai-sdk/openai`
+  - 模型通过 `responses` 路径调用
+- 工具
+  - 仅 `bash` `read` `write`
+- 配置来源
+  - Worker 每次 run 开始前通过 internal ExecutionProfile 拉取
+
 ## 输入: 从投影构建模型消息
 
 - 使用 SessionPromptContextView
@@ -31,6 +41,10 @@
   - description
   - JSON Schema
 
+本次迭代:
+
+- ToolRegistry 只包含 `bash` `read` `write`
+
 兼容目标:
 
 - tool schema 形状尽量对齐 opencode
@@ -47,6 +61,12 @@
 
 - model.turn.started
 - model.turn.committed
+
+`model.turn.started` 建议附加:
+
+- agentId
+- providerId
+- modelId
 
 说明:
 
@@ -78,6 +98,35 @@
 
 - toolName 大小写修复
 - 未知工具路由到 invalid
+
+## Provider Adapter(openai)
+
+ExecutionProfile 提供 `provider.npm=@ai-sdk/openai` 时:
+
+- SDK 初始化
+  - `createOpenAI({ apiKey, baseURL })`
+- 模型获取
+  - `sdk.responses(modelId)`
+
+说明:
+
+- `/v1` 由用户在 `baseURL` 中自行负责
+- 不做模型名前缀校验
+
+## 模型参数映射
+
+模型 options 建议白名单透传:
+
+- `reasoningEffort`
+- `textVerbosity`
+- `reasoningSummary`
+- `include`
+- `maxOutputTokens`
+
+规则:
+
+- `maxOutputTokens` 未配置时,必须忽略该参数
+- 不设置默认 `maxOutputTokens`
 
 ## 上下文溢出
 

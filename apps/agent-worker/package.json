@@ -8,6 +8,11 @@
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^2.0.67",
+    "@ai-sdk/openai": "^2.0.23",
+    "ai": "^5.0.22"
+  },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "tsx": "^4.19.2",

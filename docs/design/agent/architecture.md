@@ -26,6 +26,9 @@
   - 建立 IPC 双向通道
   - 将 Worker 的实时事件 fan-out 到 SSE 订阅者
   - 将关键控制(例如 cancel)通过 IPC 低延迟推送给 Worker
+- 解析执行配置(ExecutionProfile)
+  - 基于 Provider/Agent settings 与 run 上下文解析最终模型配置
+  - 通过 internal 接口返回给 Worker
 
 ## Worker(子进程)
 
@@ -34,8 +37,8 @@
   - 决定下一步 effect(调用 LLM、执行工具、等待审批)
   - 通过 IPC 向 API 发起 append.timeline 请求
 - 工具执行器(ToolExecutor)
-  - 内置工具
-  - MCP tools
+  - 内置工具(read/write/bash)
+  - MCP tools(后续)
 - 投影更新器(Projector)
   - 将新事件增量应用到 projection 表
 
@@ -72,6 +75,8 @@
 - API -> Worker
   - IPC 发送 worker.wakeup,提示有新事件
 - Worker
+  - run 启动前调用 internal ExecutionProfile 接口
+  - 解析得到: prompt、tools、permissions、provider/model
   - 通过 Scheduler 发现需要运行
   - 调用 LLM,生成 ModelTurnCommitted 事件
   - 若包含 ToolRequested,执行工具产生 ToolCompleted/ToolFailed

@@ -19,6 +19,7 @@ import {
   appendControlEvent,
   appendTimelineEvent,
   createAgentSession,
+  findRunCreatedEvent,
   findClientRequestDedup,
   getAgentSession,
   getEventById,
@@ -32,6 +33,7 @@ import {
   setRunStateIdle
 } from "./agent.store.js";
 import { buildTextPayload } from "./agent.text.js";
+import { resolveExecutionProfile } from "../settings/settings.service.js";
 
 export type AgentQueuedRun = {
   workspaceId: string;
@@ -210,6 +212,10 @@ export class AgentService {
       throw new HttpError(409, "session is running");
     }
 
+    const profile = resolveExecutionProfile(this.ctx, {
+      requestedAgentId: params.body.agentId
+    });
+
     const workspace = this.ensureWorkspace(session.workspaceId);
     const correlationId = newSortableId("corr");
     const messageId = newSortableId("msg");
@@ -242,7 +248,8 @@ export class AgentService {
           payload: {
             messageId,
             clientRequestId: params.body.clientRequestId,
-            text: textPayload
+            text: textPayload,
+            agentId: profile.agent.id
           }
         });
 
@@ -259,7 +266,10 @@ export class AgentService {
           createdAt: createdAt + 1,
           payload: {
             runId,
-            triggerMessageId: messageId
+            triggerMessageId: messageId,
+            agentId: profile.agent.id,
+            providerId: profile.provider.id,
+            modelId: profile.model.id
           }
         });
 
@@ -516,5 +526,39 @@ export class AgentService {
     const workspace = getWorkspace(this.ctx.db, workspaceId);
     if (!workspace) throw new HttpError(404, "workspace not found");
     return workspace;
+  }
+
+  getExecutionProfileForRun(params: { workspaceId: string; sessionId: string; runId: string }) {
+    const session = getAgentSession(this.ctx.db, params.sessionId);
+    if (!session) throw new HttpError(404, "session not found");
+    if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
+
+    const runCreated = findRunCreatedEvent(this.ctx.db, {
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+      runId: params.runId
+    });
+    if (!runCreated) throw new HttpError(404, "run not found");
+    const payload = runCreated.payload as Record<string, unknown>;
+
+    const profile = resolveExecutionProfile(this.ctx, {
+      agentIdFromRun: typeof payload.agentId === "string" ? payload.agentId : null,
+      providerIdFromRun: typeof payload.providerId === "string" ? payload.providerId : null,
+      modelIdFromRun: typeof payload.modelId === "string" ? payload.modelId : null
+    });
+
+    return {
+      resolved: {
+        runId: params.runId,
+        sessionId: params.sessionId,
+        workspaceId: params.workspaceId,
+        agentId: profile.agent.id,
+        providerId: profile.provider.id,
+        modelId: profile.model.id
+      },
+      agent: profile.agent,
+      provider: profile.provider,
+      model: profile.model
+    };
   }
 }

@@ -17,9 +17,13 @@
 - 所有高风险操作必须 ask
 - v1 权限粒度建议:
   - read
-  - edit(write/apply_patch)
+  - edit(write)
   - bash
-  - mcp_tool
+
+后续可扩展:
+
+- apply_patch
+- mcp_tool
 
 permission 决策作为事件进入 EventStore:
 
@@ -51,3 +55,15 @@ permission 决策作为事件进入 EventStore:
 - append 事件必须带 prevId
 - 并发写冲突必须通过重试解决
 - 防止不同 client 在同一 session 上写出分叉,headEventId 必须唯一
+
+## Provider 凭据策略(本次迭代)
+
+- 本次迭代允许在 settings 中明文保存 provider `apiKey`(个人项目阶段)
+- 对外 settings 接口必须脱敏返回
+  - 返回 `hasApiKey` 与 `apiKeyMasked`
+  - 不返回明文 `apiKey`
+- internal 接口可返回明文 `apiKey`,仅允许 Worker 通过内部 token 调用
+
+后续演进:
+
+- 多用户场景切换到统一密钥托管与加密存储

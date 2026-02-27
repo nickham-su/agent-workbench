@@ -10,6 +10,7 @@ export default {
     save: "保存",
     cancel: "取消",
     refresh: "刷新",
+    loading: "加载中...",
     reset: "重置",
     default: "默认",
     format: {
@@ -218,7 +219,8 @@ export default {
       codeReview: "代码审查",
       terminal: "终端",
       files: "文件",
-      search: "搜索"
+      search: "搜索",
+      agent: "AI Agent"
     },
     dock: {
       moveTo: "移动到 {area}",
@@ -267,6 +269,33 @@ export default {
       nonFastForwardTitle: "推送被拒绝（非快进）",
       nonFastForwardContent: "是否使用 force-with-lease（更安全的强推）重试推送？",
       okForceWithLease: "强制推送重试"
+    }
+  },
+  agent: {
+    empty: "暂无会话,请新建一个 AI client",
+    actions: {
+      newClient: "新建 client",
+      creating: "创建中...",
+      refresh: "刷新",
+      minimize: "最小化"
+    },
+    client: {
+      tabLabel: "Client {index}",
+      newTitle: "AI Client {time}",
+      agentLabel: "Agent",
+      defaultAgent: "使用默认 Agent",
+      running: "运行中",
+      empty: "暂无历史消息",
+      streamingHint: "AI 正在生成中,消息将自动更新...",
+      inputPlaceholder: "输入消息,回车发送",
+      sendHint: "Enter 发送",
+      refresh: "刷新",
+      send: "发送",
+      roles: {
+        user: "我",
+        assistant: "AI",
+        system: "系统"
+      }
     }
   },
   codeReview: {
@@ -525,6 +554,8 @@ export default {
       gitIdentity: "Git 身份",
       credentials: "凭证",
       network: "网络",
+      agentProviders: "AI Provider",
+      agentProfiles: "AI Agent",
       security: "安全"
     },
     general: {
@@ -654,6 +685,153 @@ export default {
       actions: {
         save: "保存",
         refresh: "刷新"
+      },
+      saved: "已保存"
+    },
+    agentProviders: {
+      description: "管理 AI Provider 与模型。可新增/编辑 Provider，并在 Provider 下管理模型与默认模型。",
+      saving: "正在保存...",
+      empty: "暂无 Provider，请先新增",
+      actions: {
+        save: "保存",
+        refresh: "刷新",
+        addProvider: "新增 Provider",
+        manageModels: "管理模型",
+        addModel: "添加模型",
+        edit: "编辑",
+        delete: "删除",
+        setDefault: "设为默认"
+      },
+      fields: {
+        baseURL: "Base URL",
+        providerOptionsKey: "Provider Options Key",
+        apiKey: "API Key",
+        apiKeyNotSet: "未设置",
+        apiKeySet: "已更新",
+        apiKeyKeep: "保持不变",
+        models: "模型",
+        noModels: "暂无模型"
+      },
+      modal: {
+        ok: "确定",
+        cancel: "取消"
+      },
+      providerModal: {
+        createTitle: "新增 Provider",
+        editTitle: "编辑 Provider"
+      },
+      providerForm: {
+        idLabel: "Provider ID(自动生成)",
+        nameLabel: "名称",
+        npmLabel: "Provider 类型",
+        baseUrlLabel: "Base URL",
+        apiKeyLabel: "API Key",
+        apiKeyPlaceholder: "输入 API Key（可留空）",
+        apiKeyEditPlaceholder: "输入新 API Key（留空保持不变）",
+        apiKeyCreateHelp: "创建时可先留空，后续再补充。",
+        apiKeyEditHelp: "编辑时留空表示保持已有值不变。",
+        clearApiKey: "清空当前 API Key"
+      },
+      modelModal: {
+        createTitle: "添加模型",
+        editTitle: "编辑模型",
+        delete: "删除模型"
+      },
+      modelManager: {
+        title: "管理模型 - {name}",
+        empty: "暂无模型"
+      },
+      modelForm: {
+        idLabel: "Model 内部ID(自动生成)",
+        providerModelIdLabel: "Provider 模型ID",
+        nameLabel: "显示名称",
+        aiSdkLabel: "AI SDK 通用参数 JSON",
+        aiSdkHelp: "写入 generateText 顶层参数, 例如 maxOutputTokens, temperature, topP。会屏蔽 model/system/prompt 等关键键。",
+        aiSdkDocsLink: "AI SDK 文档",
+        providerOptionsLabel: "Provider 参数 JSON (自动包装为 {key})",
+        providerOptionsHelp: "仅填写当前 Provider 的子对象, 系统会自动包装到 providerOptions.{key}。",
+        providerDocsLink: "Provider 文档",
+        setAsDefault: "设为默认模型"
+      },
+      deleteProvider: {
+        title: "删除 Provider？",
+        content: "将删除 {name} 及其所有模型。",
+        ok: "删除",
+        cancel: "取消"
+      },
+      deleteModel: {
+        title: "删除模型？",
+        content: "将删除模型 {name}。",
+        ok: "删除",
+        cancel: "取消"
+      },
+      errors: {
+        invalidProviderForm: "请完整填写 Provider 必填项",
+        invalidModelForm: "请完整填写模型必填项",
+        invalidAiSdkJson: "AI SDK 通用参数 JSON 格式错误, 需要是对象",
+        invalidProviderOptionsJson: "Provider 参数 JSON 格式错误, 需要是对象",
+        duplicateProviderId: "Provider ID 已存在",
+        duplicateModelId: "Model ID 已存在"
+      },
+      saved: "已保存"
+    },
+    agentProfiles: {
+      description: "配置 AI Agent 列表、默认 Agent、工具权限与默认模型。",
+      saving: "正在保存...",
+      empty: "暂无 Agent，请先新增",
+      actions: {
+        addAgent: "新增 Agent",
+        edit: "编辑",
+        delete: "删除",
+        setDefault: "设为默认"
+      },
+      fields: {
+        tools: "工具",
+        permissions: "权限",
+        defaultModel: "默认模型",
+        useGlobalDefault: "跟随全局默认模型",
+        customDefaultModel: "使用自定义默认模型"
+      },
+      tools: {
+        bash: "Bash",
+        read: "Read",
+        write: "Write"
+      },
+      permissions: {
+        allowRead: "允许 Read",
+        allowWrite: "允许 Write",
+        allowBash: "允许 Bash"
+      },
+      modal: {
+        ok: "确定",
+        cancel: "取消"
+      },
+      agentModal: {
+        createTitle: "新增 Agent",
+        editTitle: "编辑 Agent"
+      },
+      agentForm: {
+        idLabel: "Agent ID(自动生成)",
+        nameLabel: "名称",
+        promptLabel: "系统提示词",
+        promptPlaceholder: "可选, 留空使用简洁默认提示",
+        defaultModelModeLabel: "默认模型策略",
+        defaultProviderLabel: "Provider",
+        defaultProviderPlaceholder: "请选择 Provider",
+        defaultModelLabel: "模型",
+        defaultModelPlaceholder: "请选择模型",
+        setAsDefault: "设为默认 Agent"
+      },
+      deleteAgent: {
+        title: "删除 Agent？",
+        content: "将删除 Agent {name}。",
+        ok: "删除",
+        cancel: "取消"
+      },
+      errors: {
+        invalidAgentForm: "请完整填写 Agent 必填项",
+        duplicateAgentId: "Agent ID 已存在",
+        defaultModelInvalid: "默认模型不存在, 请重新选择"
       },
       saved: "已保存"
     },

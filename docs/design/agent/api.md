@@ -6,6 +6,7 @@ API 的职责是:
 - 读取 Projections
 - 提供 SSE 订阅与断线补拉
 - 管理 Worker 子进程与 IPC
+- 管理 Provider/Agent 全局 settings
 
 关键硬约束:
 
@@ -24,6 +25,14 @@ API 的职责是:
   - revert
   - cancel
   - 权限决策
+
+补充:
+
+- 消息请求可携带 `agentId`
+- API 在 `run.created` 中固化本次解析结果:
+  - `agentId`
+  - `providerId`
+  - `modelId`
 
 并发控制(CAS):
 
@@ -83,6 +92,58 @@ append 事务边界(推荐):
 
 - SSE 推送既包含 timeline 事件,也可包含 realtime 事件
 - UI 可仅将 timeline 事件作为“状态刷新触发器”,realtime 事件用于流式效果
+
+## Provider/Agent Settings 接口
+
+对外接口:
+
+- `GET /api/settings/agent/providers`
+- `PUT /api/settings/agent/providers`
+- `GET /api/settings/agent/agents`
+- `PUT /api/settings/agent/agents`
+
+约束:
+
+- provider/models 使用列表结构
+- default 必须显式配置
+- `baseURL` 必填,是否包含 `/v1` 由用户自行负责
+
+apiKey 返回策略:
+
+- 对外 `GET` 不返回明文
+- 返回 `hasApiKey` 与 `apiKeyMasked`
+
+apiKey 更新语义:
+
+- 未传: 保持原值
+- 传空字符串或 null: 清空
+- 传非空字符串: 覆盖
+
+## Internal ExecutionProfile 接口
+
+Worker 每次 run 开始前调用 internal 接口:
+
+- `POST /api/internal/agent/execution-profile`
+- 鉴权: `x-awb-agent-internal-token`
+
+请求:
+
+- `workspaceId`
+- `sessionId`
+- `runId`
+
+返回:
+
+- `agent`
+  - `id` `name` `prompt` `tools` `permissions`
+- `provider`
+  - `id` `npm` `options.baseURL` `options.apiKey`
+- `model`
+  - `id` `options`
+
+说明:
+
+- internal 返回明文 `apiKey`,仅供 Worker 使用
 
 ## v1 投影策略(推荐)
 

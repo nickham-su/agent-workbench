@@ -75,7 +75,18 @@ import type {
   WorkspaceDetail,
   SearchSettings,
   FileSearchRequest,
-  FileSearchResponse
+  FileSearchResponse,
+  AgentCreateSessionRequest,
+  AgentSendMessageRequest,
+  AgentSendMessageResponse,
+  AgentSessionConversationResponse,
+  AgentSessionRecord,
+  AgentSessionRunState,
+  AgentCancelSessionRequest,
+  AgentProvidersSettingsView,
+  UpdateAgentProvidersSettingsRequest,
+  AgentSettings,
+  UpdateAgentSettingsRequest
 } from "@agent-workbench/shared";
 import { emitUnauthorized } from "@/features/auth/unauthorized";
 import { resetAuthStatus, setAuthed } from "@/features/auth/session";
@@ -770,6 +781,98 @@ export async function updateGitGlobalIdentity(body: UpdateGitGlobalIdentityReque
 export async function clearAllGitIdentity() {
   try {
     const res = await client.post<ClearAllGitIdentityResponse>("/settings/git/identity/clear-all");
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getAgentProvidersSettings() {
+  try {
+    const res = await client.get<AgentProvidersSettingsView>("/settings/agent/providers");
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function updateAgentProvidersSettings(body: UpdateAgentProvidersSettingsRequest) {
+  try {
+    const res = await client.put<AgentProvidersSettingsView>("/settings/agent/providers", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getAgentSettings() {
+  try {
+    const res = await client.get<AgentSettings>("/settings/agent/agents");
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function updateAgentSettings(body: UpdateAgentSettingsRequest) {
+  try {
+    const res = await client.put<AgentSettings>("/settings/agent/agents", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function listAgentSessions(workspaceId: string) {
+  try {
+    const res = await client.get<AgentSessionRecord[]>("/agent/sessions", {
+      params: { workspaceId }
+    });
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function createAgentSession(body: AgentCreateSessionRequest) {
+  try {
+    const res = await client.post<AgentSessionRecord>("/agent/sessions", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getAgentConversation(sessionId: string) {
+  try {
+    const res = await client.get<AgentSessionConversationResponse>(`/agent/sessions/${sessionId}/conversation`);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getAgentRunState(sessionId: string) {
+  try {
+    const res = await client.get<AgentSessionRunState>(`/agent/sessions/${sessionId}/run-state`);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function sendAgentMessage(sessionId: string, body: AgentSendMessageRequest) {
+  try {
+    const res = await client.post<AgentSendMessageResponse>(`/agent/sessions/${sessionId}/messages`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function cancelAgentSession(sessionId: string, body: AgentCancelSessionRequest) {
+  try {
+    const res = await client.post<{ sessionId: string; headEventId: string | null }>(`/agent/sessions/${sessionId}/cancel`, body);
     return res.data;
   } catch (err) {
     throw toApiError(err);

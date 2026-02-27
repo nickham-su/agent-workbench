@@ -29,8 +29,13 @@
   - 事件存储(EventStore)与投影(Projections)
   - 事件循环调度(Scheduler)
 - 工具
-  - 内置: read, write, apply_patch, bash, subtask
-  - MCP: 仅 tools(listTools/callTool),不做 resources/prompts
+  - 内置: read, write, bash
+  - subtask/MCP tools 在后续迭代接入
+- Provider 与 Agent
+  - 全局 Provider 列表 + 模型列表
+  - 全局 Agent 列表
+  - 消息级别指定 agent,run 固化解析结果
+  - Worker 按 run 拉取 ExecutionProfile
 - 输出控制
   - 截断适用于所有非 assistant 的大文本(user 超长输入、tool 输出、MCP tool 输出)
   - 截断后的完整内容保存到 workspace 内部 artifact 文件,事件里仅存 preview + 文件路径
@@ -42,6 +47,7 @@
 - 不做跨 session 冲突仲裁
 - 不做 step-start/step-finish
 - 不做累计成本统计
+- 本次不接入 MCP tools/resources/prompts
 
 ## 名词定稿
 
@@ -85,6 +91,7 @@
 - `projection-contracts.md`: 投影数据结构约定(供 Web UI 与 Scheduler 消费)
 - `scheduler.md`: 事件循环、turn 模型、结束条件与重试边界
 - `llm.md`: LLM 集成(消息编码、tool calling、流式 delta、修复与容错)
+- `provider-agent.md`: Provider/Agent 配置结构、解析规则、ExecutionProfile
 - `tools.md`: 工具协议、内置工具、tool 状态机、artifact 截断
 - `mcp-tools.md`: MCP tools 接入与命名、权限、刷新
 - `api.md`: API 设计(写事件、读投影、SSE)

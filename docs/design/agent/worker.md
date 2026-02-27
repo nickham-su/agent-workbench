@@ -8,6 +8,11 @@ Worker 是同机子进程,负责:
 - 追加事件并更新投影
 - 通过 IPC 向 API 发送 append.timeline / append.realtime
 
+本次迭代范围:
+
+- 内置工具仅 `bash` `read` `write`
+- Provider 仅 `@ai-sdk/openai`
+
 ## IPC 通道
 
 - v1 默认使用 unix socket 作为 API <-> Worker 内部通道
@@ -27,7 +32,7 @@ Worker 是同机子进程,负责:
 
 - 初始化 ToolRegistry
   - 注册内置工具
-  - 初始化 McpManager 并注册 MCP tools
+  - 初始化 MCP 在后续迭代接入
 - 初始化 Scheduler
   - 扫描需要继续推进的 session/run
 
@@ -54,6 +59,8 @@ Worker 是同机子进程,负责:
   - 或存在待处理 toolRequests
   - 或存在 waiting_approval
 - 对每个 session 执行:
+  - run 启动前调用 internal ExecutionProfile 接口
+  - 获得 agent/provider/model 与工具权限快照
   - 若收到 cancel,abort 并写 run.cancelled
   - 若有 pending tool,执行工具
   - 否则调用 LLM 产生新的 model.turn.committed
@@ -75,6 +82,7 @@ Worker 是同机子进程,负责:
 ## LLM 执行
 
 - 输入来自 session_prompt_context_view
+- provider/model 来自 ExecutionProfile
 - 输出写入:
   - model.turn.started
   - assistant 文本(可流式写入事件或缓存合并后写入)
@@ -84,6 +92,12 @@ Worker 是同机子进程,负责:
 
 - timeline 必须写入最终 assistantText
 - realtime 可选写入 delta 事件,用于 UI 流式
+
+openai 约束:
+
+- Worker 必须通过 `sdk.responses(modelId)` 获取模型
+- `baseURL`/`apiKey` 来自 internal ExecutionProfile
+- `maxOutputTokens` 未配置时必须忽略(不传默认值)
 
 ## 工具执行
 

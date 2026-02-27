@@ -234,6 +234,14 @@
 	          </a-form>
 	        </a-tab-pane>
 
+	        <a-tab-pane key="agentProviders" :tab="t('settings.tabs.agentProviders')">
+	          <AgentProvidersSettingsPanel ref="agentProvidersPanelRef" />
+	        </a-tab-pane>
+
+ 	        <a-tab-pane key="agentProfiles" :tab="t('settings.tabs.agentProfiles')">
+	          <AgentProfilesSettingsPanel ref="agentProfilesPanelRef" />
+	        </a-tab-pane>
+
 	        <a-tab-pane key="security" :tab="t('settings.tabs.security')">
 	          <div class="text-xs text-[color:var(--text-tertiary)] pb-2">
 	            {{ t("settings.security.description") }}
@@ -280,6 +288,8 @@ import { computed, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 import { editorFontSize, setEditorFontSize, setTerminalFontSize, terminalFontSize, uiFontSizeDefaults } from "@/shared/settings/uiFontSizes";
+import AgentProfilesSettingsPanel from "@/features/settings/components/AgentProfilesSettingsPanel.vue";
+import AgentProvidersSettingsPanel from "@/features/settings/components/AgentProvidersSettingsPanel.vue";
 import {
   clearAllGitIdentity,
   createCredential,
@@ -303,7 +313,10 @@ const { t, locale } = useI18n();
 const route = useRoute();
 const router = useRouter();
 
-const settingsTabKeys = ["general", "credentials", "gitIdentity", "network", "search", "security"] as const;
+const agentProvidersPanelRef = ref<{ refresh?: () => Promise<void> } | null>(null);
+const agentProfilesPanelRef = ref<{ refresh?: () => Promise<void> } | null>(null);
+
+const settingsTabKeys = ["general", "credentials", "gitIdentity", "network", "search", "agentProviders", "agentProfiles", "security"] as const;
 type SettingsTabKey = (typeof settingsTabKeys)[number];
 
 function normalizeSettingsTabKey(v: unknown): SettingsTabKey {
@@ -704,6 +717,8 @@ watch(
     else if (k === "credentials") await refreshCredentials();
     else if (k === "network") await refreshNetwork();
     else if (k === "search") await refreshSearchSettings();
+    else if (k === "agentProviders") await agentProvidersPanelRef.value?.refresh?.();
+    else if (k === "agentProfiles") await agentProfilesPanelRef.value?.refresh?.();
     else if (k === "security") await refreshSecurity();
   },
   { immediate: true }

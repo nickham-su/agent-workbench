@@ -72,9 +72,66 @@ async function createFixture(): Promise<Fixture> {
   });
 
   await app.ready();
+  await configureAgentDefaults(app);
   const fixture: Fixture = { app, db, dataDir, workspaceId, workspacePath };
   fixtures.add(fixture);
   return fixture;
+}
+
+async function configureAgentDefaults(app: FastifyInstance) {
+  const providersRes = await app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: {
+      default: {
+        providerId: "ppchat",
+        modelId: "gpt-5.2"
+      },
+      providers: [
+        {
+          id: "ppchat",
+          name: "ppchat",
+          npm: "@ai-sdk/openai",
+          options: {
+            baseURL: "https://code.ppchat.vip/v1",
+            apiKey: "sk-test"
+          },
+          models: [
+            {
+              id: "gpt-5.2",
+              name: "gpt-5.2"
+            }
+          ]
+        }
+      ]
+    }
+  });
+  assert.equal(providersRes.statusCode, 200, `configure providers failed: ${providersRes.body}`);
+
+  const agentsRes = await app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      default: {
+        agentId: "default"
+      },
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          prompt: "You are a helpful coding assistant.",
+          tools: ["bash", "read", "write"],
+          permissions: {
+            allowRead: true,
+            allowWrite: true,
+            allowBash: true
+          },
+          defaultModel: null
+        }
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `configure agents failed: ${agentsRes.body}`);
 }
 
 async function closeFixture(fixture: Fixture) {
@@ -219,6 +276,27 @@ test("agent cancel 会回退 head 并阻止 bash 副作用", async () => {
   const cancelBody = cancelRes.json() as { headEventId: string | null };
   assert.equal(cancelBody.headEventId, message.messageEventId);
 
+  const profileRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/execution-profile",
+    headers: {
+      "x-awb-agent-internal-token": "test-internal-token"
+    },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      runId: message.runId
+    }
+  });
+  assert.equal(profileRes.statusCode, 200, `get execution profile failed: ${profileRes.body}`);
+  const profileBody = profileRes.json() as {
+    resolved: { runId: string; agentId: string; providerId: string; modelId: string };
+  };
+  assert.equal(profileBody.resolved.runId, message.runId);
+  assert.equal(profileBody.resolved.agentId, "default");
+  assert.equal(profileBody.resolved.providerId, "ppchat");
+  assert.equal(profileBody.resolved.modelId, "gpt-5.2");
+
   await sleep(2600);
   const runState = await getRunState(fixture.app, session.id);
   assert.equal(runState.status, "idle");
@@ -305,4 +383,213 @@ test("agent fork 会创建新 session 并包含 fork_base 事件", async () => {
   assert.equal(forkConversation.events[0]?.type, "session.fork_base");
   assert.equal(forkConversation.events[0]?.payload.fromSessionId, session.id);
   assert.equal(forkConversation.events[0]?.payload.fromEventId, first.messageEventId);
+});
+
+test("agent provider 设置 GET 脱敏且 PUT 省略 apiKey 时保留旧值", async () => {
+  const fixture = await createFixture();
+
+  const secretKey = "sk-live-123456";
+  const updateWithKey = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: {
+      default: {
+        providerId: "ppchat",
+        modelId: "gpt-5.2"
+      },
+      providers: [
+        {
+          id: "ppchat",
+          name: "ppchat",
+          npm: "@ai-sdk/openai",
+          options: {
+            baseURL: "https://code.ppchat.vip/v1",
+            apiKey: secretKey
+          },
+          models: [
+            {
+              id: "gpt-5.2",
+              name: "gpt-5.2"
+            }
+          ]
+        }
+      ]
+    }
+  });
+  assert.equal(updateWithKey.statusCode, 200, `update providers with key failed: ${updateWithKey.body}`);
+
+  const firstGet = await fixture.app.inject({
+    method: "GET",
+    url: "/api/settings/agent/providers"
+  });
+  assert.equal(firstGet.statusCode, 200, `get providers failed: ${firstGet.body}`);
+  const firstBody = firstGet.json() as {
+    providers: Array<{
+      id: string;
+      options: { hasApiKey: boolean; apiKeyMasked: string | null; baseURL: string };
+    }>;
+  };
+  const firstProvider = firstBody.providers.find((item) => item.id === "ppchat");
+  assert.ok(firstProvider, "missing provider 'ppchat'");
+  assert.equal(firstProvider?.options.hasApiKey, true);
+  assert.ok(firstProvider?.options.apiKeyMasked?.endsWith("3456"));
+  assert.notEqual(firstProvider?.options.apiKeyMasked, secretKey);
+
+  const updateWithoutKey = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: {
+      default: {
+        providerId: "ppchat",
+        modelId: "gpt-5.2"
+      },
+      providers: [
+        {
+          id: "ppchat",
+          name: "ppchat",
+          npm: "@ai-sdk/openai",
+          options: {
+            baseURL: "https://code.ppchat.vip/v1"
+          },
+          models: [
+            {
+              id: "gpt-5.2",
+              name: "gpt-5.2"
+            }
+          ]
+        }
+      ]
+    }
+  });
+  assert.equal(updateWithoutKey.statusCode, 200, `update providers without key failed: ${updateWithoutKey.body}`);
+
+  const secondGet = await fixture.app.inject({
+    method: "GET",
+    url: "/api/settings/agent/providers"
+  });
+  assert.equal(secondGet.statusCode, 200, `get providers failed: ${secondGet.body}`);
+  const secondBody = secondGet.json() as {
+    providers: Array<{
+      id: string;
+      options: { hasApiKey: boolean; apiKeyMasked: string | null };
+    }>;
+  };
+  const secondProvider = secondBody.providers.find((item) => item.id === "ppchat");
+  assert.ok(secondProvider, "missing provider 'ppchat' after update");
+  assert.equal(secondProvider?.options.hasApiKey, true);
+  assert.ok(secondProvider?.options.apiKeyMasked?.endsWith("3456"));
+
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const message = await sendMessage(fixture.app, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "hello settings",
+    clientRequestId: newSortableId("req")
+  });
+
+  const profileRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/execution-profile",
+    headers: {
+      "x-awb-agent-internal-token": "test-internal-token"
+    },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      runId: message.runId
+    }
+  });
+  assert.equal(profileRes.statusCode, 200, `get execution profile failed: ${profileRes.body}`);
+  const profileBody = profileRes.json() as {
+    provider: {
+      options: {
+        apiKey: string;
+      };
+    };
+  };
+  assert.equal(profileBody.provider.options.apiKey, secretKey);
+});
+
+test("agent provider 支持 anthropic 并可解析 execution profile", async () => {
+  const fixture = await createFixture();
+
+  const setRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: {
+      default: {
+        providerId: "anthropic-main",
+        modelId: "claude-3-7-sonnet-20250219"
+      },
+      providers: [
+        {
+          id: "anthropic-main",
+          name: "Anthropic",
+          npm: "@ai-sdk/anthropic",
+          options: {
+            baseURL: "https://api.anthropic.com/v1",
+            apiKey: "sk-ant-test"
+          },
+          models: [
+            {
+              id: "claude-3-7-sonnet-20250219",
+              name: "Claude 3.7 Sonnet",
+              options: {
+                aiSdk: {
+                  maxOutputTokens: 1024
+                },
+                providerOptionsByKey: {
+                  anthropic: {
+                    thinking: {
+                      type: "enabled",
+                      budgetTokens: 256
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  });
+  assert.equal(setRes.statusCode, 200, `set anthropic provider failed: ${setRes.body}`);
+
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const sent = await sendMessage(fixture.app, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "/bash echo provider profile",
+    clientRequestId: newSortableId("req")
+  });
+
+  const profileRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/execution-profile",
+    headers: {
+      "x-awb-agent-internal-token": "test-internal-token"
+    },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      runId: sent.runId
+    }
+  });
+  assert.equal(profileRes.statusCode, 200, `get anthropic profile failed: ${profileRes.body}`);
+  const profile = profileRes.json() as {
+    provider: {
+      id: string;
+      npm: string;
+      options: { baseURL: string; apiKey: string };
+    };
+    model: {
+      options?: Record<string, unknown>;
+    };
+  };
+
+  assert.equal(profile.provider.id, "anthropic-main");
+  assert.equal(profile.provider.npm, "@ai-sdk/anthropic");
+  assert.equal(profile.provider.options.baseURL, "https://api.anthropic.com/v1");
+  assert.equal(profile.provider.options.apiKey, "sk-ant-test");
+  assert.equal((profile.model.options?.aiSdk as Record<string, unknown>)?.maxOutputTokens, 1024);
 });

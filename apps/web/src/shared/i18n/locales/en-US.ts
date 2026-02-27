@@ -10,6 +10,7 @@ export default {
     save: "Save",
     cancel: "Cancel",
     refresh: "Refresh",
+    loading: "Loading...",
     reset: "Reset",
     default: "Default",
     format: {
@@ -220,7 +221,8 @@ export default {
       codeReview: "Code review",
       terminal: "Terminal",
       files: "Files",
-      search: "Search"
+      search: "Search",
+      agent: "AI Agent"
     },
     dock: {
       moveTo: "Move to {area}",
@@ -269,6 +271,33 @@ export default {
       nonFastForwardTitle: "Push rejected (non-fast-forward)",
       nonFastForwardContent: "Retry with force-with-lease?",
       okForceWithLease: "Retry with force-with-lease"
+    }
+  },
+  agent: {
+    empty: "No sessions yet. Create an AI client to start.",
+    actions: {
+      newClient: "New client",
+      creating: "Creating...",
+      refresh: "Refresh",
+      minimize: "Minimize"
+    },
+    client: {
+      tabLabel: "Client {index}",
+      newTitle: "AI Client {time}",
+      agentLabel: "Agent",
+      defaultAgent: "Use default agent",
+      running: "Running",
+      empty: "No messages yet",
+      streamingHint: "AI is generating, messages will update automatically...",
+      inputPlaceholder: "Type a message and press Enter",
+      sendHint: "Press Enter to send",
+      refresh: "Refresh",
+      send: "Send",
+      roles: {
+        user: "You",
+        assistant: "Assistant",
+        system: "System"
+      }
     }
   },
   codeReview: {
@@ -527,6 +556,8 @@ export default {
       gitIdentity: "Git Identity",
       credentials: "Credentials",
       network: "Network",
+      agentProviders: "AI Providers",
+      agentProfiles: "AI Agents",
       security: "Security"
     },
     general: {
@@ -656,6 +687,153 @@ export default {
       actions: {
         save: "Save",
         refresh: "Refresh"
+      },
+      saved: "Saved"
+    },
+    agentProviders: {
+      description: "Manage AI providers and models. Add or edit providers, then manage models under each provider.",
+      saving: "Saving...",
+      empty: "No providers yet. Add one to start.",
+      actions: {
+        save: "Save",
+        refresh: "Refresh",
+        addProvider: "Add provider",
+        manageModels: "Manage models",
+        addModel: "Add model",
+        edit: "Edit",
+        delete: "Delete",
+        setDefault: "Set default"
+      },
+      fields: {
+        baseURL: "Base URL",
+        providerOptionsKey: "Provider Options Key",
+        apiKey: "API Key",
+        apiKeyNotSet: "Not set",
+        apiKeySet: "Updated",
+        apiKeyKeep: "Keep unchanged",
+        models: "Models",
+        noModels: "No models"
+      },
+      modal: {
+        ok: "OK",
+        cancel: "Cancel"
+      },
+      providerModal: {
+        createTitle: "Add provider",
+        editTitle: "Edit provider"
+      },
+      providerForm: {
+        idLabel: "Provider ID (auto)",
+        nameLabel: "Name",
+        npmLabel: "Provider Type",
+        baseUrlLabel: "Base URL",
+        apiKeyLabel: "API Key",
+        apiKeyPlaceholder: "Enter API key (optional)",
+        apiKeyEditPlaceholder: "Enter new API key (leave blank to keep)",
+        apiKeyCreateHelp: "You can leave it blank for now and fill it later.",
+        apiKeyEditHelp: "Leave blank to keep the existing key.",
+        clearApiKey: "Clear existing API key"
+      },
+      modelModal: {
+        createTitle: "Add model",
+        editTitle: "Edit model",
+        delete: "Delete model"
+      },
+      modelManager: {
+        title: "Manage models - {name}",
+        empty: "No models"
+      },
+      modelForm: {
+        idLabel: "Model Internal ID (auto)",
+        providerModelIdLabel: "Provider Model ID",
+        nameLabel: "Display name",
+        aiSdkLabel: "AI SDK Shared Params JSON",
+        aiSdkHelp: "Mapped to generateText top-level options, e.g. maxOutputTokens, temperature, topP. Reserved keys like model/system/prompt are blocked.",
+        aiSdkDocsLink: "AI SDK docs",
+        providerOptionsLabel: "Provider Params JSON (auto wrapped as {key})",
+        providerOptionsHelp: "Only provide the current provider sub-object. The system wraps it into providerOptions.{key} automatically.",
+        providerDocsLink: "Provider docs",
+        setAsDefault: "Set as default model"
+      },
+      deleteProvider: {
+        title: "Delete provider?",
+        content: "This will delete {name} and all its models.",
+        ok: "Delete",
+        cancel: "Cancel"
+      },
+      deleteModel: {
+        title: "Delete model?",
+        content: "This will delete model {name}.",
+        ok: "Delete",
+        cancel: "Cancel"
+      },
+      errors: {
+        invalidProviderForm: "Please complete required provider fields",
+        invalidModelForm: "Please complete required model fields",
+        invalidAiSdkJson: "Invalid AI SDK params JSON, object expected",
+        invalidProviderOptionsJson: "Invalid provider params JSON, object expected",
+        duplicateProviderId: "Provider ID already exists",
+        duplicateModelId: "Model ID already exists"
+      },
+      saved: "Saved"
+    },
+    agentProfiles: {
+      description: "Configure AI agents, default agent, tool permissions, and default model.",
+      saving: "Saving...",
+      empty: "No agents yet. Add one to start.",
+      actions: {
+        addAgent: "Add agent",
+        edit: "Edit",
+        delete: "Delete",
+        setDefault: "Set default"
+      },
+      fields: {
+        tools: "Tools",
+        permissions: "Permissions",
+        defaultModel: "Default model",
+        useGlobalDefault: "Use global default model",
+        customDefaultModel: "Use custom default model"
+      },
+      tools: {
+        bash: "Bash",
+        read: "Read",
+        write: "Write"
+      },
+      permissions: {
+        allowRead: "Allow Read",
+        allowWrite: "Allow Write",
+        allowBash: "Allow Bash"
+      },
+      modal: {
+        ok: "OK",
+        cancel: "Cancel"
+      },
+      agentModal: {
+        createTitle: "Add agent",
+        editTitle: "Edit agent"
+      },
+      agentForm: {
+        idLabel: "Agent ID (auto)",
+        nameLabel: "Name",
+        promptLabel: "System prompt",
+        promptPlaceholder: "Optional. Leave empty to use concise default prompt",
+        defaultModelModeLabel: "Default model strategy",
+        defaultProviderLabel: "Provider",
+        defaultProviderPlaceholder: "Select a provider",
+        defaultModelLabel: "Model",
+        defaultModelPlaceholder: "Select a model",
+        setAsDefault: "Set as default agent"
+      },
+      deleteAgent: {
+        title: "Delete agent?",
+        content: "This will delete agent {name}.",
+        ok: "Delete",
+        cancel: "Cancel"
+      },
+      errors: {
+        invalidAgentForm: "Please complete required agent fields",
+        duplicateAgentId: "Agent ID already exists",
+        defaultModelInvalid: "Default model does not exist, please reselect"
       },
       saved: "Saved"
     },

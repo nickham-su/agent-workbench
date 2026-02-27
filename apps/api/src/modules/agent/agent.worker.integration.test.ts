@@ -110,13 +110,16 @@ async function createFixture(): Promise<Fixture> {
 
   await app.listen({ host: "127.0.0.1", port: apiPort });
 
+  const baseUrl = `http://127.0.0.1:${apiPort}`;
+  await configureAgentDefaults(baseUrl);
+
   const fixture: Fixture = {
     app,
     db,
     dataDir,
     workspaceId,
     workspacePath,
-    baseUrl: `http://127.0.0.1:${apiPort}`,
+    baseUrl,
     workerPidFilePath: agentWorkerPidPath(dataDir)
   };
   fixtures.add(fixture);
@@ -147,6 +150,62 @@ async function requestJson<T>(baseUrl: string, input: { method: string; path: st
   const text = await response.text();
   const json = text ? (JSON.parse(text) as T) : (null as T);
   return { response, json, text };
+}
+
+async function configureAgentDefaults(baseUrl: string) {
+  const providers = await requestJson(baseUrl, {
+    method: "PUT",
+    path: "/api/settings/agent/providers",
+    body: {
+      default: {
+        providerId: "ppchat",
+        modelId: "gpt-5.2"
+      },
+      providers: [
+        {
+          id: "ppchat",
+          name: "ppchat",
+          npm: "@ai-sdk/openai",
+          options: {
+            baseURL: "https://code.ppchat.vip/v1",
+            apiKey: "sk-test"
+          },
+          models: [
+            {
+              id: "gpt-5.2",
+              name: "gpt-5.2"
+            }
+          ]
+        }
+      ]
+    }
+  });
+  assert.equal(providers.response.status, 200, `configure providers failed: ${providers.text}`);
+
+  const agents = await requestJson(baseUrl, {
+    method: "PUT",
+    path: "/api/settings/agent/agents",
+    body: {
+      default: {
+        agentId: "default"
+      },
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          prompt: "You are a helpful coding assistant.",
+          tools: ["bash", "read", "write"],
+          permissions: {
+            allowRead: true,
+            allowWrite: true,
+            allowBash: true
+          },
+          defaultModel: null
+        }
+      ]
+    }
+  });
+  assert.equal(agents.response.status, 200, `configure agents failed: ${agents.text}`);
 }
 
 async function createSession(baseUrl: string, workspaceId: string) {
@@ -208,7 +267,7 @@ test("worker 模式: 消息由独立 worker 执行并回写事件", async () => 
   await sendMessage(fixture.baseUrl, {
     sessionId: session.id,
     workspaceId: fixture.workspaceId,
-    text: "hello worker",
+    text: "/bash echo hello worker",
     clientRequestId: newSortableId("req")
   });
 
@@ -216,7 +275,87 @@ test("worker 模式: 消息由独立 worker 执行并回写事件", async () => 
   const conversation = await getConversation(fixture.baseUrl, session.id);
   const workerTurn = conversation.events.find((event) => event.type === "model.turn.started");
   assert.ok(workerTurn, "missing model.turn.started");
-  assert.equal(workerTurn?.payload.model, "worker/bash-v1");
+  assert.equal(workerTurn?.payload.model, "gpt-5.2");
+});
+
+test("worker 模式: /write 与 /read 工具可读写工作区文件", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.baseUrl, fixture.workspaceId);
+
+  const writeRun = await sendMessage(fixture.baseUrl, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "/write notes/tool.txt hello-from-worker",
+    clientRequestId: newSortableId("req")
+  });
+  await waitRunIdle(fixture.baseUrl, session.id);
+
+  const written = await fs.readFile(path.join(fixture.workspacePath, "notes/tool.txt"), "utf8");
+  assert.equal(written, "hello-from-worker");
+
+  const readRun = await sendMessage(fixture.baseUrl, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "/read notes/tool.txt",
+    clientRequestId: newSortableId("req")
+  });
+  await waitRunIdle(fixture.baseUrl, session.id);
+
+  const conversation = await getConversation(fixture.baseUrl, session.id);
+  const writeCompleted = conversation.events.find(
+    (event) => event.type === "tool.completed" && event.payload.runId === writeRun.runId
+  );
+  assert.ok(writeCompleted, "missing tool.completed for write run");
+
+  const readCompleted = conversation.events.find(
+    (event) => event.type === "tool.completed" && event.payload.runId === readRun.runId
+  );
+  assert.ok(readCompleted, "missing tool.completed for read run");
+  assert.ok(String(readCompleted?.payload.output?.preview || "").includes("1: hello-from-worker"));
+});
+
+test("worker 模式: /read 越界路径会被拒绝", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.baseUrl, fixture.workspaceId);
+
+  const run = await sendMessage(fixture.baseUrl, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "/read ../outside.txt",
+    clientRequestId: newSortableId("req")
+  });
+  await waitRunIdle(fixture.baseUrl, session.id);
+
+  const conversation = await getConversation(fixture.baseUrl, session.id);
+  const toolFailed = conversation.events.find(
+    (event) => event.type === "tool.failed" && event.payload.runId === run.runId
+  );
+  assert.ok(toolFailed, "missing tool.failed event");
+  assert.ok(String(toolFailed?.payload.error || "").includes("outside workspace"));
+});
+
+test("worker 模式: /read 通过软链接逃逸会被拒绝", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.baseUrl, fixture.workspaceId);
+
+  const externalFile = path.join(fixture.dataDir, "outside-secret.txt");
+  await fs.writeFile(externalFile, "top-secret", "utf8");
+  await fs.symlink(externalFile, path.join(fixture.workspacePath, "outside-link.txt"));
+
+  const run = await sendMessage(fixture.baseUrl, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "/read outside-link.txt",
+    clientRequestId: newSortableId("req")
+  });
+  await waitRunIdle(fixture.baseUrl, session.id);
+
+  const conversation = await getConversation(fixture.baseUrl, session.id);
+  const toolFailed = conversation.events.find(
+    (event) => event.type === "tool.failed" && event.payload.runId === run.runId
+  );
+  assert.ok(toolFailed, "missing tool.failed event");
+  assert.ok(String(toolFailed?.payload.error || "").includes("symlink"));
 });
 
 test("worker 模式: cancel 可阻止 bash 副作用", async () => {
@@ -274,7 +413,7 @@ test("worker 异常退出后可自动重启并继续处理请求", async () => {
   await sendMessage(fixture.baseUrl, {
     sessionId: session.id,
     workspaceId: fixture.workspaceId,
-    text: "after restart",
+    text: "/bash echo after restart",
     clientRequestId: newSortableId("req")
   });
   await waitRunIdle(fixture.baseUrl, session.id, 20_000);

@@ -12,6 +12,7 @@ import {
   AgentSessionConversationResponseSchema,
   AgentSessionRecordSchema,
   AgentSessionRunStateSchema,
+  AgentProviderNpmSchema,
   ErrorResponseSchema
 } from "@agent-workbench/shared";
 import type { AgentRuntimePort } from "./agent.runtime-port.js";
@@ -118,7 +119,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
     },
     async (req, reply) => {
       const p = req.params as { sessionId: string };
-      const body = req.body as { workspaceId: string; text: string; clientRequestId: string };
+      const body = req.body as { workspaceId: string; text: string; clientRequestId: string; agentId?: string };
       const result = await params.service.sendMessage({ sessionId: p.sessionId, body });
       if (result.triggerMessageId) {
         const workspace = params.service.getWorkspace(body.workspaceId);
@@ -213,6 +214,81 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
       };
       const event = params.service.appendTimelineFromWorker(body);
       return { ok: true, eventId: event.id };
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/execution-profile",
+    {
+      schema: {
+        tags: ["agent"],
+        body: Type.Object({
+          workspaceId: Type.String({ minLength: 1 }),
+          sessionId: Type.String({ minLength: 1 }),
+          runId: Type.String({ minLength: 1 })
+        }),
+        response: {
+          200: Type.Object({
+            resolved: Type.Object({
+              runId: Type.String({ minLength: 1 }),
+              sessionId: Type.String({ minLength: 1 }),
+              workspaceId: Type.String({ minLength: 1 }),
+              agentId: Type.String({ minLength: 1 }),
+              providerId: Type.String({ minLength: 1 }),
+              modelId: Type.String({ minLength: 1 })
+            }),
+            agent: Type.Object({
+              id: Type.String({ minLength: 1 }),
+              name: Type.String({ minLength: 1 }),
+              prompt: Type.String(),
+              tools: Type.Array(Type.Union([Type.Literal("bash"), Type.Literal("read"), Type.Literal("write")])),
+              permissions: Type.Object({
+                allowRead: Type.Boolean(),
+                allowWrite: Type.Boolean(),
+                allowBash: Type.Boolean()
+              }),
+              defaultModel: Type.Union([
+                Type.Object({ providerId: Type.String({ minLength: 1 }), modelId: Type.String({ minLength: 1 }) }),
+                Type.Null()
+              ])
+            }),
+            provider: Type.Object({
+              id: Type.String({ minLength: 1 }),
+              name: Type.String({ minLength: 1 }),
+              npm: AgentProviderNpmSchema,
+              options: Type.Object({
+                baseURL: Type.String({ minLength: 1 }),
+                apiKey: Type.String({ minLength: 1 })
+              }),
+              models: Type.Array(
+                Type.Object({
+                  id: Type.String({ minLength: 1 }),
+                  providerModelId: Type.String({ minLength: 1 }),
+                  name: Type.String({ minLength: 1 }),
+                  options: Type.Any()
+                })
+              )
+            }),
+            model: Type.Object({
+              id: Type.String({ minLength: 1 }),
+              providerModelId: Type.String({ minLength: 1 }),
+              name: Type.String({ minLength: 1 }),
+              options: Type.Any()
+            })
+          }),
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      const token = String(req.headers["x-awb-agent-internal-token"] || "");
+      if (token !== params.service.getContext().agentInternalToken) {
+        throw new HttpError(401, "Unauthorized");
+      }
+      const body = req.body as { workspaceId: string; sessionId: string; runId: string };
+      return params.service.getExecutionProfileForRun(body);
     }
   );
 

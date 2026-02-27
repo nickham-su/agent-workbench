@@ -56,8 +56,7 @@ payload 内常用结构:
   - clientRequestId
   - text: TextPayload
   - parts: 可选(文件引用等)
-  - agent: 可选
-  - model: 可选
+  - agentId: 可选(消息级显式选择)
 
 语义:
 
@@ -73,6 +72,9 @@ run 事件用于明确执行区间与 UI 状态。runId 用于 correlation。
 - payload
   - runId
   - triggerMessageId
+  - agentId
+  - providerId
+  - modelId
 
 ## run.started
 
@@ -123,6 +125,9 @@ run 事件用于明确执行区间与 UI 状态。runId 用于 correlation。
   - runId
   - turnId
   - model
+  - agentId
+  - providerId
+  - modelId
 
 ## model.turn.committed
 
