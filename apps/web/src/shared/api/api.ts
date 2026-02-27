@@ -77,11 +77,14 @@ import type {
   FileSearchRequest,
   FileSearchResponse,
   AgentCreateSessionRequest,
+  AgentForkSessionRequest,
+  AgentRevertSessionRequest,
   AgentSendMessageRequest,
   AgentSendMessageResponse,
   AgentSessionConversationResponse,
   AgentSessionRecord,
   AgentSessionRunState,
+  AgentControlResult,
   AgentCancelSessionRequest,
   AgentProvidersSettingsView,
   UpdateAgentProvidersSettingsRequest,
@@ -872,7 +875,25 @@ export async function sendAgentMessage(sessionId: string, body: AgentSendMessage
 
 export async function cancelAgentSession(sessionId: string, body: AgentCancelSessionRequest) {
   try {
-    const res = await client.post<{ sessionId: string; headEventId: string | null }>(`/agent/sessions/${sessionId}/cancel`, body);
+    const res = await client.post<AgentControlResult>(`/agent/sessions/${sessionId}/cancel`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function forkAgentSession(body: AgentForkSessionRequest) {
+  try {
+    const res = await client.post<AgentSessionRecord>("/agent/sessions/fork", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function revertAgentSession(sessionId: string, body: AgentRevertSessionRequest) {
+  try {
+    const res = await client.post<AgentControlResult>(`/agent/sessions/${sessionId}/revert`, body);
     return res.data;
   } catch (err) {
     throw toApiError(err);

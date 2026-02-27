@@ -379,10 +379,14 @@ test("agent fork 会创建新 session 并包含 fork_base 事件", async () => {
   const forkSession = forkRes.json() as { id: string };
 
   const forkConversation = await getConversation(fixture.app, forkSession.id);
-  assert.equal(forkConversation.events.length, 1);
+  assert.ok(forkConversation.events.length >= 2);
   assert.equal(forkConversation.events[0]?.type, "session.fork_base");
   assert.equal(forkConversation.events[0]?.payload.fromSessionId, session.id);
   assert.equal(forkConversation.events[0]?.payload.fromEventId, first.messageEventId);
+
+  const firstUser = forkConversation.events.find((event) => event.type === "user.message.created");
+  assert.ok(firstUser, "missing cloned user.message.created");
+  assert.ok(String(firstUser?.payload?.text?.preview || "").includes("seed"));
 });
 
 test("agent provider 设置 GET 脱敏且 PUT 省略 apiKey 时保留旧值", async () => {

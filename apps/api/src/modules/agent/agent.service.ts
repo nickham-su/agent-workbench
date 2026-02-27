@@ -118,6 +118,32 @@ export class AgentService {
       throw new HttpError(400, "invalid fromEventId");
     }
 
+    // fork 的期望交互: 新 session 内应能看到来源会话在锚点之前的可见内容。
+    // v1 采用“克隆锚点之前的 timeline 事件到新 session”的方式实现:
+    // - UI 直接渲染新 session 的 conversation 即可看到历史
+    // - fork_base 仍保留来源引用(审计/可追溯)
+    // - 只克隆非 session.* 事件,避免新会话里出现多余的 session.created/fork_base
+    const timelineChain: Array<{ type: string; schemaVersion: number; payload: any }> = [];
+    {
+      const seen = new Set<string>();
+      let cursor: string | null = fromEvent.id;
+      while (cursor) {
+        if (seen.has(cursor)) {
+          throw new HttpError(400, "invalid fromEventId");
+        }
+        seen.add(cursor);
+        const ev = getEventById(this.ctx.db, cursor);
+        if (!ev || ev.sessionId !== fromSession.id || ev.lane !== "timeline") {
+          throw new HttpError(400, "invalid fromEventId");
+        }
+        timelineChain.push({ type: ev.type, schemaVersion: ev.schemaVersion, payload: ev.payload });
+        cursor = ev.prevId;
+      }
+      timelineChain.reverse();
+    }
+
+    const eventsToClone = timelineChain.filter((ev) => !String(ev.type || "").startsWith("session."));
+
     const createdAt = nowMs();
     const newSessionId = newSortableId("sess");
     const title = (params.title || `${fromSession.title} (fork)`).trim() || `${fromSession.title} (fork)`;
@@ -152,7 +178,7 @@ export class AgentService {
           forkedFromEventId: fromEvent.id
         });
 
-        appendTimelineEvent(this.ctx.db, {
+        const forkBase = appendTimelineEvent(this.ctx.db, {
           id: newSortableId("evt"),
           workspaceId: fromSession.workspaceId,
           sessionId: newSessionId,
@@ -168,6 +194,26 @@ export class AgentService {
             kind
           }
         });
+
+        let prevId: string | null = forkBase.id;
+        let ts = createdAt;
+        for (const ev of eventsToClone) {
+          ts += 1;
+          const nextId = newSortableId("evt");
+          appendTimelineEvent(this.ctx.db, {
+            id: nextId,
+            workspaceId: fromSession.workspaceId,
+            sessionId: newSessionId,
+            lane: "timeline",
+            prevId,
+            type: ev.type,
+            schemaVersion: ev.schemaVersion,
+            correlationId,
+            createdAt: ts,
+            payload: ev.payload
+          });
+          prevId = nextId;
+        }
       });
       tx();
     } catch (err) {

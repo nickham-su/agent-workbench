@@ -1,4 +1,6 @@
 import { randomBytes } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { generateText } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
@@ -10,6 +12,9 @@ import { runReadTool, runWriteTool } from "./fileTools.js";
 function nowMs() {
   return Date.now();
 }
+
+const DEBUG_DUMP_ENABLED = process.env.AWB_AGENT_DEBUG_DUMP === "1";
+const DEBUG_DUMP_RELATIVE_DIR = path.join(".debug", "ai-calls");
 
 function newSortableId(prefix: string) {
   const ts = Date.now().toString(36).padStart(10, "0");
@@ -82,6 +87,98 @@ function toTokenUsage(raw: unknown) {
   const output = Number(usage.outputTokens ?? usage.completionTokens ?? 0) || 0;
   const total = Number(usage.totalTokens ?? input + output) || input + output;
   return { input, output, total };
+}
+
+function isSensitiveKey(rawKey: string) {
+  const key = rawKey.toLowerCase();
+  return (
+    key === "authorization" ||
+    key === "api_key" ||
+    key === "apikey" ||
+    key.includes("token") ||
+    key.includes("secret") ||
+    key.includes("password")
+  );
+}
+
+function sanitizeForDebugDump(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeForDebugDump(item));
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  const source = value as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(source)) {
+    if (isSensitiveKey(key)) {
+      result[key] = "***";
+      continue;
+    }
+    result[key] = sanitizeForDebugDump(item);
+  }
+  return result;
+}
+
+async function dumpModelRequestToFile(params: {
+  logger: Pick<Console, "warn">;
+  workspacePath: string;
+  workspaceId: string;
+  sessionId: string;
+  runId: string;
+  turnId: string;
+  providerNpm: ExecutionProfile["provider"]["npm"];
+  providerId: string;
+  modelId: string;
+  providerModelId: string;
+  request: {
+    system?: string;
+    prompt: string;
+    aiSdk: Record<string, unknown>;
+    providerKey: string;
+    providerOptions: Record<string, unknown>;
+  };
+}) {
+  if (!DEBUG_DUMP_ENABLED) return;
+
+  const ts = new Date().toISOString();
+  const safeTs = ts.replace(/[:.]/g, "-");
+  const fileName = `${safeTs}-${params.runId}-${params.turnId}.json`;
+  const dirPath = path.join(params.workspacePath, DEBUG_DUMP_RELATIVE_DIR);
+  const filePath = path.join(dirPath, fileName);
+
+  const payload = {
+    ts,
+    meta: {
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+      runId: params.runId,
+      turnId: params.turnId
+    },
+    resolved: {
+      providerNpm: params.providerNpm,
+      providerId: params.providerId,
+      modelId: params.modelId,
+      providerModelId: params.providerModelId
+    },
+    request: {
+      system: params.request.system,
+      prompt: params.request.prompt,
+      aiSdk: params.request.aiSdk,
+      providerOptions: {
+        [params.request.providerKey]: params.request.providerOptions
+      }
+    }
+  };
+
+  try {
+    await fs.mkdir(dirPath, { recursive: true });
+    await fs.writeFile(filePath, JSON.stringify(sanitizeForDebugDump(payload), null, 2), "utf8");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    params.logger.warn(`[agent-worker] ai request dump failed: ${message}`);
+  }
 }
 
 const RESERVED_MODEL_OPTION_KEYS = new Set([
@@ -552,6 +649,26 @@ export class AgentRunner {
         [runtimeOptions.providerKey]: runtimeOptions.providerOptions
       };
     }
+
+    await dumpModelRequestToFile({
+      logger: this.logger,
+      workspacePath: run.workspacePath,
+      workspaceId: run.workspaceId,
+      sessionId: run.sessionId,
+      runId: run.runId,
+      turnId,
+      providerNpm: profile.provider.npm,
+      providerId: profile.resolved.providerId,
+      modelId: profile.resolved.modelId,
+      providerModelId: profile.model.providerModelId || profile.model.id,
+      request: {
+        system: profile.agent.prompt || undefined,
+        prompt: run.inputText,
+        aiSdk: runtimeOptions.aiSdk,
+        providerKey: runtimeOptions.providerKey,
+        providerOptions: runtimeOptions.providerOptions
+      }
+    });
 
     const result = await generateText(request as any);
 
