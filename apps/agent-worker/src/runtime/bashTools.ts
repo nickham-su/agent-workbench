@@ -1,3 +1,5 @@
+import fs from "node:fs/promises";
+import os from "node:os";
 import { runBashCommand } from "./bash.js";
 
 type ProbeItem = {
@@ -32,6 +34,7 @@ const PROBE_MAX_OUTPUT_BYTES = 8 * 1024;
 
 type ProbeCache = {
   tools: string[];
+  environment: string | null;
   updatedAt: number;
   inFlight: Promise<void> | null;
   timer: NodeJS.Timeout | null;
@@ -39,6 +42,7 @@ type ProbeCache = {
 
 const cache: ProbeCache = {
   tools: [],
+  environment: null,
   updatedAt: 0,
   inFlight: null,
   timer: null
@@ -54,6 +58,10 @@ function pickFirstLine(output: string) {
 function formatEntry(name: string, line: string) {
   const normalized = line.toLowerCase();
   const normalizedName = name.toLowerCase();
+  if (normalizedName === "pip") {
+    const match = line.match(/\b\d+(?:\.\d+){1,3}\b/);
+    if (match) return `pip ${match[0]}`;
+  }
   if (normalized.includes(normalizedName)) return line;
   if (normalizedName === "docker-compose" && normalized.includes("docker compose")) return line;
   return `${name} ${line}`;
@@ -88,6 +96,7 @@ async function refresh(logger: Pick<Console, "warn">, reason: string) {
       if (line) tools.push(line);
     }
     cache.tools = tools;
+    cache.environment = await readEnvironmentInfo(logger);
     cache.updatedAt = Date.now();
   })();
   cache.inFlight = run;
@@ -110,6 +119,34 @@ export function startBashToolProbe(logger: Pick<Console, "warn">) {
 }
 
 export function getBashToolAppendix() {
-  if (cache.tools.length === 0) return "";
-  return `已知可用工具: ${cache.tools.join(", ")}`;
+  const lines: string[] = [];
+  if (cache.environment) lines.push(cache.environment);
+  if (cache.tools.length > 0) lines.push(`已知可用工具: ${cache.tools.join(", ")}`);
+  return lines.join("\n");
+}
+
+async function readEnvironmentInfo(logger: Pick<Console, "warn">) {
+  const platform = os.platform();
+  const arch = os.arch();
+  const kernel = os.release();
+  const distro = await readOsRelease(logger);
+  const parts = [`${platform} ${arch}`, `kernel ${kernel}`];
+  if (distro) parts.push(distro);
+  return `运行环境: ${parts.join(", ")}`;
+}
+
+async function readOsRelease(logger: Pick<Console, "warn">) {
+  try {
+    const content = await fs.readFile("/etc/os-release", "utf8");
+    const line = content
+      .split("\n")
+      .find((item) => item.startsWith("PRETTY_NAME="));
+    if (!line) return null;
+    const value = line.split("=").slice(1).join("=").trim();
+    return value.replace(/^"|"$/g, "");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.warn(`[agent-worker] read os-release failed: ${message}`);
+    return null;
+  }
 }
