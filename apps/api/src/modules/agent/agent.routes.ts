@@ -28,6 +28,7 @@ const AgentBuiltinToolNameSchema = Type.Union([
   Type.Literal("bash"),
   Type.Literal("read"),
   Type.Literal("write"),
+  Type.Literal("apply_patch"),
   Type.Literal("subtask")
 ]);
 const AgentDynamicToolNameSchema = Type.Union([

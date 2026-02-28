@@ -156,6 +156,7 @@ export const AgentToolNameSchema = Type.Union([
   Type.Literal("bash"),
   Type.Literal("read"),
   Type.Literal("write"),
+  Type.Literal("apply_patch"),
   Type.Literal("subtask")
 ]);
 export type AgentToolName = Static<typeof AgentToolNameSchema>;

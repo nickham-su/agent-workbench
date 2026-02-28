@@ -8,6 +8,7 @@ import { runBashCommand } from "./bash.js";
 import { AgentApiClient, ApiConflictError, type ExecutionProfile, type PromptContext } from "./apiClient.js";
 import { runReadTool, runWriteTool } from "./fileTools.js";
 import { McpManager } from "./mcpManager.js";
+import { applyPreparedPatch, prepareApplyPatchTool, type ApplyPatchPrepared } from "./applyPatch.js";
 
 function nowMs() {
   return Date.now();
@@ -215,7 +216,7 @@ function toolSignature(toolName: string, args: Record<string, unknown>) {
 }
 
 function isBuiltinTool(toolName: string) {
-  return toolName === "bash" || toolName === "read" || toolName === "write";
+  return toolName === "bash" || toolName === "read" || toolName === "write" || toolName === "apply_patch";
 }
 
 function isSubtaskTool(toolName: string) {
@@ -228,7 +229,7 @@ function isMcpTool(toolName: string) {
 
 function isToolEnabledForAgent(profile: ExecutionProfile, toolName: string) {
   if (isBuiltinTool(toolName) || isSubtaskTool(toolName)) {
-    return profile.agent.tools.includes(toolName as "bash" | "read" | "write" | "subtask");
+    return profile.agent.tools.includes(toolName as "bash" | "read" | "write" | "apply_patch" | "subtask");
   }
   if (isMcpTool(toolName)) {
     return true;
@@ -370,6 +371,14 @@ function parseSubtaskArgs(raw: Record<string, unknown>): ParsedSubtaskArgs {
   };
 }
 
+function toApplyPatchResult(prepared: ApplyPatchPrepared) {
+  return {
+    text: prepared.text,
+    summary: prepared.summary,
+    files: prepared.files
+  };
+}
+
 export class AgentRunner {
   private readonly queue: QueuedRun[] = [];
   private readonly queuedRunIds = new Set<string>();
@@ -460,17 +469,71 @@ export class AgentRunner {
       return { paused: false as const };
     }
 
+    let applyPatchPrepared: ApplyPatchPrepared | null = null;
+    if (tool.toolName === "apply_patch") {
+      const patchText = requireNonEmptyStringArg(tool.args.patchText, "apply_patch.patchText");
+      try {
+        applyPatchPrepared = await prepareApplyPatchTool({
+          workspacePath: run.workspacePath,
+          patchText,
+          signal
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const error = message.startsWith("apply_patch verification failed:")
+          ? message
+          : `apply_patch verification failed: ${message}`;
+        await this.apiClient.updateContextItem({
+          itemId: tool.itemId,
+          status: "failed",
+          output: {
+            ...outputBase,
+            error
+          },
+          updatedAt: nowMs()
+        });
+        await writeItemLog({
+          logger: this.logger,
+          workspacePath: run.workspacePath,
+          kind: "tool",
+          itemId: tool.itemId,
+          payload: {
+            meta: {
+              workspaceId: run.workspaceId,
+              sessionId: run.sessionId,
+              runId: run.runId,
+              toolItemId: tool.itemId
+            },
+            request: {
+              toolName: tool.toolName,
+              toolCallId: tool.toolCallId,
+              args: tool.args
+            },
+            status: "failed",
+            error
+          }
+        });
+        return { paused: false as const };
+      }
+    }
+
     const needsApproval =
       (tool.toolName === "read" && !profile.agent.permissions.allowRead) ||
       (tool.toolName === "write" && !profile.agent.permissions.allowWrite) ||
+      (tool.toolName === "apply_patch" && !profile.agent.permissions.allowWrite) ||
       (tool.toolName === "bash" && !profile.agent.permissions.allowBash);
+
+    const approvalPreview = applyPatchPrepared ? toApplyPatchResult(applyPatchPrepared) : undefined;
 
     if (tool.status === "awaiting_permission") {
       if (!needsApproval) {
         await this.apiClient.updateContextItem({
           itemId: tool.itemId,
           status: "queued",
-          output: outputBase,
+          output: {
+            ...outputBase,
+            ...(approvalPreview ? { result: approvalPreview } : {})
+          },
           updatedAt: nowMs()
         });
         await this.apiClient.updateRunState({
@@ -500,7 +563,10 @@ export class AgentRunner {
       await this.apiClient.updateContextItem({
         itemId: tool.itemId,
         status: "awaiting_permission",
-        output: outputBase,
+        output: {
+          ...outputBase,
+          ...(approvalPreview ? { result: approvalPreview } : {})
+        },
         updatedAt: nowMs()
       });
       await writeItemLog({
@@ -538,7 +604,10 @@ export class AgentRunner {
     await this.apiClient.updateContextItem({
       itemId: tool.itemId,
       status: "running",
-      output: outputBase,
+      output: {
+        ...outputBase,
+        ...(approvalPreview ? { result: approvalPreview } : {})
+      },
       updatedAt: nowMs()
     });
 
@@ -548,10 +617,22 @@ export class AgentRunner {
       let result: unknown;
       if (tool.toolName === "bash") {
         const command = requireNonEmptyStringArg(tool.args.command, "bash.command");
+        const timeout = parseOptionalPositiveIntegerArg(tool.args.timeout, "bash.timeout");
+        let cwd = run.workspacePath;
+        if (tool.args.workdir !== undefined && tool.args.workdir !== null) {
+          if (typeof tool.args.workdir !== "string") {
+            throw new Error("bash.workdir must be a non-empty string");
+          }
+          const workdir = tool.args.workdir.trim();
+          if (!workdir) {
+            throw new Error("bash.workdir must be a non-empty string");
+          }
+          cwd = path.isAbsolute(workdir) ? workdir : path.resolve(run.workspacePath, workdir);
+        }
         const bash = await runBashCommand({
           command,
-          cwd: run.workspacePath,
-          timeoutMs: 120_000,
+          cwd,
+          timeoutMs: timeout ?? 120_000,
           maxOutputBytes: 512 * 1024,
           signal
         });
@@ -586,6 +667,16 @@ export class AgentRunner {
           content,
           signal
         });
+      } else if (tool.toolName === "apply_patch") {
+        if (!applyPatchPrepared) {
+          throw new Error("apply_patch verification failed: prepared patch is missing");
+        }
+        await applyPreparedPatch({
+          workspacePath: run.workspacePath,
+          prepared: applyPatchPrepared,
+          signal
+        });
+        result = toApplyPatchResult(applyPatchPrepared);
       } else if (tool.toolName === "subtask") {
         const parsed = parseSubtaskArgs(tool.args);
         const started = await this.apiClient.startSubtaskRun({

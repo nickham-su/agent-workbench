@@ -309,6 +309,14 @@ export default {
       subtaskModeExisting: "续用会话",
       subtaskAgent: "Agent",
       subtaskSessionId: "Session ID",
+      applyPatchCardTitle: "补丁变更",
+      applyPatchPreview: "待审批预览",
+      applyPatchApplied: "已应用",
+      applyPatchFileCount: "文件",
+      applyPatchLineStats: "行变更",
+      applyPatchFrom: "来源",
+      applyPatchNoFiles: "无可展示的文件差异",
+      applyPatchOmittedFiles: "还有 {count} 个文件未展示",
       fork: "从此处分叉",
       forked: "已从该消息创建新 client",
       revert: "回退到此处",
@@ -829,6 +837,7 @@ export default {
         bash: "Bash",
         read: "Read",
         write: "Write",
+        applyPatch: "Apply Patch",
         subtask: "Subtask"
       },
       permissions: {

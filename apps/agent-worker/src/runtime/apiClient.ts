@@ -39,7 +39,7 @@ export type ExecutionProfile = {
     name: string;
     summary: string;
     prompt: string;
-    tools: Array<"bash" | "read" | "write" | "subtask">;
+    tools: Array<"bash" | "read" | "write" | "apply_patch" | "subtask">;
     mcpServers: string[];
     permissions: {
       allowRead: boolean;

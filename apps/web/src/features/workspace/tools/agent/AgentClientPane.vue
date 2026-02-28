@@ -31,7 +31,7 @@
         class="agent-message-item relative rounded p-2"
         :class="[
           msg.role === 'tool'
-            ? isSubtaskCard(msg)
+            ? isRichToolCard(msg)
               ? 'is-tool-message border-0 bg-transparent px-0 py-0.5'
               : 'is-tool-message border-0 bg-transparent pl-2 pr-0 py-0.5'
             : '',
@@ -101,6 +101,15 @@
             Error: {{ msg.toolError }}
           </div>
         </div>
+        <AgentApplyPatchCard
+          v-else-if="isApplyPatchCard(msg) && msg.applyPatch"
+          :status="msg.status"
+          :text="msg.applyPatch.text"
+          :error-text="msg.toolError"
+          :summary="msg.applyPatch.summary"
+          :files="msg.applyPatch.files"
+          :omitted-files="msg.applyPatch.omittedFiles"
+        />
         <div
           v-else
           class="whitespace-pre-wrap break-words"
@@ -188,6 +197,7 @@ import { Modal, message } from "ant-design-vue";
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
+import AgentApplyPatchCard from "./AgentApplyPatchCard.vue";
 import {
   cancelAgentSession,
   decideAgentToolPermission,
@@ -205,6 +215,27 @@ type AgentOption = {
   isDefault?: boolean;
 };
 
+type ApplyPatchDisplayFile = {
+  type: "add" | "update" | "delete" | "move";
+  path: string;
+  fromPath?: string;
+  before: string;
+  after: string;
+  additions: number;
+  deletions: number;
+};
+
+type ApplyPatchDisplay = {
+  text: string;
+  summary: {
+    fileCount: number;
+    additions: number;
+    deletions: number;
+  };
+  files: ApplyPatchDisplayFile[];
+  omittedFiles: number;
+};
+
 type DisplayItem = {
   id: number;
   prevId: number | null;
@@ -218,6 +249,7 @@ type DisplayItem = {
   subtaskMode?: "new" | "existing" | "fork" | string;
   subtaskAgentId?: string;
   subtaskAgentName?: string;
+  applyPatch?: ApplyPatchDisplay;
   tone?: "normal" | "error";
 };
 
@@ -274,6 +306,60 @@ const isSubtaskSession = computed(() => props.sessionKind === "subtask");
 function toRecord(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   return value as Record<string, unknown>;
+}
+
+function toNonNegativeInt(value: unknown) {
+  const raw = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(raw) || raw < 0) return 0;
+  return Math.floor(raw);
+}
+
+function toFileType(value: unknown): ApplyPatchDisplayFile["type"] {
+  if (value === "add" || value === "update" || value === "delete" || value === "move") {
+    return value;
+  }
+  return "update";
+}
+
+function parseApplyPatchDisplay(value: unknown): ApplyPatchDisplay | null {
+  const source = toRecord(value);
+  if (!source) return null;
+  const filesRaw = Array.isArray(source.files) ? source.files : [];
+  const files: ApplyPatchDisplayFile[] = [];
+
+  for (const item of filesRaw) {
+    const file = toRecord(item);
+    if (!file) continue;
+    const path = String(file.path || file.relativePath || file.filePath || "").trim();
+    if (!path) continue;
+    const fromPath = String(file.fromPath || file.moveFromPath || "").trim();
+    files.push({
+      type: toFileType(file.type),
+      path,
+      ...(fromPath ? { fromPath } : {}),
+      before: typeof file.before === "string" ? file.before : "",
+      after: typeof file.after === "string" ? file.after : "",
+      additions: toNonNegativeInt(file.additions),
+      deletions: toNonNegativeInt(file.deletions)
+    });
+  }
+
+  const summaryRaw = toRecord(source.summary);
+  const fileCount = toNonNegativeInt(summaryRaw?.fileCount ?? files.length);
+  const additions = toNonNegativeInt(summaryRaw?.additions ?? files.reduce((sum, file) => sum + file.additions, 0));
+  const deletions = toNonNegativeInt(summaryRaw?.deletions ?? files.reduce((sum, file) => sum + file.deletions, 0));
+  const omittedFiles = Math.max(0, fileCount - files.length);
+
+  return {
+    text: typeof source.text === "string" ? source.text : "",
+    summary: {
+      fileCount,
+      additions,
+      deletions
+    },
+    files,
+    omittedFiles
+  };
 }
 
 function resolveAgentName(agentId: string) {
@@ -338,6 +424,35 @@ const displayItems = computed<DisplayItem[]>(() => {
           ? resultObj.subtaskSessionId.trim()
           : undefined;
       const errorText = item.output.error ? truncateText(item.output.error, 220) : undefined;
+      if (item.output.toolName === "apply_patch") {
+        const applyPatch = parseApplyPatchDisplay(item.output.result);
+        if (!applyPatch) {
+          let line = `${callText} ${statusText}`;
+          if (errorText) {
+            line += `\nerror: ${errorText}`;
+          }
+          return {
+            id: item.id,
+            prevId: item.prevId,
+            role: "tool",
+            text: line,
+            status: item.status,
+            toolName: item.output.toolName,
+            tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
+          };
+        }
+        return {
+          id: item.id,
+          prevId: item.prevId,
+          role: "tool",
+          text: `${callText} ${statusText}`,
+          status: item.status,
+          toolName: item.output.toolName,
+          ...(errorText ? { toolError: errorText } : {}),
+          ...(applyPatch ? { applyPatch } : {}),
+          tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
+        };
+      }
       if (item.output.toolName === "subtask") {
         const argsObj = toRecord(item.output.args);
         const description = typeof argsObj?.description === "string" ? argsObj.description.trim() : "";
@@ -400,6 +515,14 @@ function roleLabel(role: DisplayItem["role"]) {
 
 function isSubtaskCard(item: DisplayItem) {
   return item.role === "tool" && item.toolName === "subtask";
+}
+
+function isApplyPatchCard(item: DisplayItem) {
+  return item.role === "tool" && item.toolName === "apply_patch" && !!item.applyPatch;
+}
+
+function isRichToolCard(item: DisplayItem) {
+  return isSubtaskCard(item) || isApplyPatchCard(item);
 }
 
 function formatSubtaskMode(mode?: string) {

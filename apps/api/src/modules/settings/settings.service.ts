@@ -319,16 +319,16 @@ function toAgentProvidersSettingsView(settings: AgentProvidersSettingsStored, up
 }
 
 function normalizeAgentTools(raw: unknown): AgentToolName[] {
-  if (!Array.isArray(raw)) return ["bash", "read", "write"];
+  if (!Array.isArray(raw)) return ["bash", "read", "write", "apply_patch", "subtask"];
   const out: AgentToolName[] = [];
   const seen = new Set<AgentToolName>();
   for (const item of raw) {
-    if (item !== "bash" && item !== "read" && item !== "write" && item !== "subtask") continue;
+    if (item !== "bash" && item !== "read" && item !== "write" && item !== "apply_patch" && item !== "subtask") continue;
     if (seen.has(item)) continue;
     seen.add(item);
     out.push(item);
   }
-  return out.length > 0 ? out : ["bash", "read", "write"];
+  return out.length > 0 ? out : ["bash", "read", "write", "apply_patch", "subtask"];
 }
 
 function normalizeServerId(raw: unknown) {

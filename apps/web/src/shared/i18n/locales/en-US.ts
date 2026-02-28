@@ -311,6 +311,14 @@ export default {
       subtaskModeExisting: "Reuse session",
       subtaskAgent: "Agent",
       subtaskSessionId: "Session ID",
+      applyPatchCardTitle: "Patch changes",
+      applyPatchPreview: "Pending approval preview",
+      applyPatchApplied: "Applied",
+      applyPatchFileCount: "Files",
+      applyPatchLineStats: "Line changes",
+      applyPatchFrom: "From",
+      applyPatchNoFiles: "No file diffs available",
+      applyPatchOmittedFiles: "{count} more files are not shown",
       fork: "Fork from here",
       forked: "Created a new client from this message",
       revert: "Revert to here",
@@ -831,6 +839,7 @@ export default {
         bash: "Bash",
         read: "Read",
         write: "Write",
+        applyPatch: "Apply Patch",
         subtask: "Subtask"
       },
       permissions: {

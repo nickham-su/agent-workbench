@@ -700,3 +700,163 @@ test("agent prompt-context 使用结构化 tool-call/tool-result 消息", async 
     "tool-result output should be ai-sdk structured output"
   );
 });
+
+test("agent prompt-context 对 apply_patch 保留 patchText 输入,并摘要化结果", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "请应用补丁"
+    }
+  });
+
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_apply_patch",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: {
+      type: "assistant_text",
+      text: "开始应用补丁"
+    }
+  });
+
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_apply_patch",
+    step: 1,
+    prevId: assistantItem.item.id,
+    kind: "tool",
+    status: "completed",
+    output: {
+      type: "tool",
+      toolName: "apply_patch",
+      toolCallId: "call_apply_patch_1",
+      args: {
+        patchText: "*** Begin Patch\n*** Update File: foo.ts\n@@\n-console.log('a')\n+console.log('b')\n*** End Patch"
+      },
+      result: {
+        text: "Success. Updated the following files:\nM foo.ts",
+        summary: {
+          fileCount: 1,
+          additions: 1,
+          deletions: 1
+        },
+        files: [
+          {
+            type: "update",
+            path: "foo.ts",
+            before: "console.log('a')\n",
+            after: "console.log('b')\n",
+            additions: 1,
+            deletions: 1
+          }
+        ]
+      }
+    }
+  });
+
+  const context = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+
+  const assistantWithToolCall = context.messages.find((message) => {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) return false;
+    return message.content.some((part) => {
+      if (!part || typeof part !== "object") return false;
+      return (part as { type?: string }).type === "tool-call";
+    });
+  });
+  assert.ok(assistantWithToolCall, "assistant message should include tool-call part");
+
+  const toolCallPart = Array.isArray(assistantWithToolCall?.content)
+    ? assistantWithToolCall.content.find((part) => {
+        if (!part || typeof part !== "object") return false;
+        return (part as { type?: string; toolName?: string }).type === "tool-call" &&
+          (part as { toolName?: string }).toolName === "apply_patch";
+      })
+    : null;
+  assert.ok(toolCallPart && typeof toolCallPart === "object", "apply_patch tool-call should exist");
+  assert.equal(
+    typeof (toolCallPart as { input?: { patchText?: unknown } }).input?.patchText,
+    "string",
+    "apply_patch tool-call input should keep patchText"
+  );
+
+  const toolResultMessage = context.messages.find((message) => {
+    if (message.role !== "tool" || !Array.isArray(message.content)) return false;
+    return message.content.some((part) => {
+      if (!part || typeof part !== "object") return false;
+      return (part as { type?: string; toolName?: string }).type === "tool-result" &&
+        (part as { toolName?: string }).toolName === "apply_patch";
+    });
+  });
+  assert.ok(toolResultMessage, "tool message should include apply_patch tool-result part");
+
+  const toolResultPart = Array.isArray(toolResultMessage?.content)
+    ? toolResultMessage.content.find((part) => {
+        if (!part || typeof part !== "object") return false;
+        return (part as { type?: string; toolName?: string }).type === "tool-result" &&
+          (part as { toolName?: string }).toolName === "apply_patch";
+      })
+    : null;
+  assert.ok(toolResultPart && typeof toolResultPart === "object", "apply_patch tool-result part should exist");
+
+  const output = (toolResultPart as { output?: { type?: string; value?: Record<string, unknown> } }).output;
+  assert.equal(String(output?.type || ""), "json");
+  const value = (output?.value ?? {}) as Record<string, unknown>;
+  assert.equal(typeof value.fileCount, "number", "apply_patch prompt result should include fileCount");
+  assert.equal(Array.isArray(value.files), true, "apply_patch prompt result should include files summary");
+  const files = (value.files ?? []) as Array<Record<string, unknown>>;
+  const firstFile = files[0] ?? {};
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(firstFile, "before"),
+    false,
+    "apply_patch prompt result should not include full before content"
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(firstFile, "after"),
+    false,
+    "apply_patch prompt result should not include full after content"
+  );
+});

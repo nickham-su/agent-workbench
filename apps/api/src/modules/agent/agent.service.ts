@@ -47,6 +47,7 @@ import {
   updateRunState
 } from "./agent.store.js";
 import { getAgentMcpSettings, getAgentSettings, resolveExecutionProfile } from "../settings/settings.service.js";
+import { projectToolCallInputForPrompt, projectToolResultForPrompt } from "./prompt/tool-projectors/index.js";
 
 export type AgentQueuedRun = {
   workspaceId: string;
@@ -65,7 +66,9 @@ function toolArgsSchema(toolName: AgentContextToolName) {
       required: ["command"],
       additionalProperties: false,
       properties: {
-        command: { type: "string", minLength: 1 }
+        command: { type: "string", minLength: 1 },
+        workdir: { type: "string", minLength: 1 },
+        timeout: { type: "number", minimum: 1 }
       }
     };
   }
@@ -78,6 +81,16 @@ function toolArgsSchema(toolName: AgentContextToolName) {
         filePath: { type: "string", minLength: 1 },
         offset: { type: "number", minimum: 1 },
         limit: { type: "number", minimum: 1 }
+      }
+    };
+  }
+  if (toolName === "apply_patch") {
+    return {
+      type: "object",
+      required: ["patchText"],
+      additionalProperties: false,
+      properties: {
+        patchText: { type: "string", minLength: 1 }
       }
     };
   }
@@ -186,11 +199,18 @@ function buildSubtaskToolDescription(agentItems: Array<{ id: string; name: strin
 }
 
 function toolDescription(toolName: AgentContextToolName, options?: { subtaskDescription?: string }) {
-  if (toolName === "bash") return "执行一个 bash 命令并返回 stdout/stderr。";
-  if (toolName === "read") return "读取工作区内的文件内容。";
+  if (toolName === "bash") {
+    return "执行一个 bash 命令并返回 stdout/stderr,支持 workdir/timeout 参数,默认 workdir 为工作区根目录,timeout 为 120000ms。";
+  }
+  if (toolName === "read") {
+    return "读取工作区内目录或UTF-8文本文件,支持offset/limit,超长行截断,输出上限50KB,不支持非文本或特殊文件类型。";
+  }
+  if (toolName === "apply_patch") {
+    return "按 apply_patch 协议批量修改文件,优先用于最小改动与多文件联动,输入 patchText 需使用 *** Begin Patch 与 *** End Patch 包裹,支持 Add/Update/Delete/Move。";
+  }
   if (toolName === "subtask") return options?.subtaskDescription || "在子会话中执行任务。";
   if (toolName.startsWith("mcp_")) return `调用 MCP 工具 ${toolName}`;
-  return "写入工作区内的文件内容。";
+  return "写入工作区内文件并全量覆盖,作为确定性兜底工具,当需要直接重写完整内容或 patch 匹配不稳定时使用。";
 }
 
 function stringifyToolResult(raw: unknown) {
@@ -1066,18 +1086,29 @@ export class AgentService {
         const toolInput = toolItem.output.args && typeof toolItem.output.args === "object" && !Array.isArray(toolItem.output.args)
           ? (toolItem.output.args as Record<string, unknown>)
           : {};
+        const promptInput = projectToolCallInputForPrompt({
+          toolName: toolItem.output.toolName,
+          status: toolItem.status,
+          args: toolInput
+        });
         assistantParts.push({
           type: "tool-call",
           toolCallId,
           toolName: toolItem.output.toolName,
-          input: toolInput
+          input: promptInput
         });
 
+        const rawToolResult = toolItem.output.result !== undefined ? toolItem.output.result : { status: toolItem.status };
+        const promptToolResult = projectToolResultForPrompt({
+          toolName: toolItem.output.toolName,
+          status: toolItem.status,
+          result: rawToolResult
+        });
         const toolOutput = toolItem.output.error
           ? { type: "error-text" as const, value: toolItem.output.error }
           : {
               type: "json" as const,
-              value: toolItem.output.result !== undefined ? toolItem.output.result : { status: toolItem.status }
+              value: promptToolResult
             };
         toolResultParts.push({
           type: "tool-result",
@@ -1115,6 +1146,7 @@ export class AgentService {
       const requiresApproval =
         (name === "read" && !profile.agent.permissions.allowRead) ||
         (name === "write" && !profile.agent.permissions.allowWrite) ||
+        (name === "apply_patch" && !profile.agent.permissions.allowWrite) ||
         (name === "bash" && !profile.agent.permissions.allowBash);
       return {
         name,
