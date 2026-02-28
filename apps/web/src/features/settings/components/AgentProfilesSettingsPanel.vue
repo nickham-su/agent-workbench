@@ -30,6 +30,10 @@
             <a-tag v-if="isDefaultAgent(agent.id)" color="blue" class="!text-[10px] !leading-[16px] !px-1 !py-0">{{ t("common.default") }}</a-tag>
           </div>
 
+          <div class="text-[11px] text-[color:var(--text-tertiary)] truncate">
+            {{ t("settings.agentProfiles.fields.summary") }}: {{ agent.summary || "-" }}
+          </div>
+
           <div class="flex flex-wrap gap-1">
             <a-tag
               v-for="tool in agent.tools"
@@ -106,8 +110,29 @@
           />
         </a-form-item>
 
+        <a-form-item :label="t('settings.agentProfiles.agentForm.summaryLabel')">
+          <a-textarea
+            v-model:value="agentFormSummary"
+            :auto-size="{ minRows: 2, maxRows: 4 }"
+            :maxlength="160"
+            :placeholder="t('settings.agentProfiles.agentForm.summaryPlaceholder')"
+          />
+          <div class="pt-1 text-xs text-[color:var(--text-tertiary)]">
+            {{ t("settings.agentProfiles.agentForm.summaryHelp") }}
+          </div>
+        </a-form-item>
+
         <a-form-item :label="t('settings.agentProfiles.fields.tools')">
           <a-checkbox-group v-model:value="agentFormTools" :options="toolOptions" />
+        </a-form-item>
+
+        <a-form-item :label="t('settings.agentProfiles.fields.mcpServers')">
+          <a-select
+            v-model:value="agentFormMcpServers"
+            mode="multiple"
+            :options="mcpServerOptions"
+            :placeholder="t('settings.agentProfiles.agentForm.mcpServersPlaceholder')"
+          />
         </a-form-item>
 
         <a-form-item :label="t('settings.agentProfiles.fields.permissions')">
@@ -118,31 +143,15 @@
           </a-space>
         </a-form-item>
 
-        <a-form-item :label="t('settings.agentProfiles.agentForm.defaultModelModeLabel')">
-          <a-radio-group v-model:value="agentFormDefaultModelMode">
-            <a-radio value="global">{{ t("settings.agentProfiles.fields.useGlobalDefault") }}</a-radio>
-            <a-radio value="custom">{{ t("settings.agentProfiles.fields.customDefaultModel") }}</a-radio>
-          </a-radio-group>
+        <a-form-item :label="t('settings.agentProfiles.fields.defaultModel')">
+          <a-cascader
+            v-model:value="agentFormDefaultModelPath"
+            :options="defaultModelCascaderOptions"
+            :placeholder="t('settings.agentProfiles.agentForm.defaultModelCascaderPlaceholder')"
+            :show-search="true"
+            expand-trigger="hover"
+          />
         </a-form-item>
-
-        <template v-if="agentFormDefaultModelMode === 'custom'">
-          <a-form-item :label="t('settings.agentProfiles.agentForm.defaultProviderLabel')" :required="true">
-            <a-select
-              v-model:value="agentFormDefaultProviderId"
-              :options="providerSelectOptions"
-              :placeholder="t('settings.agentProfiles.agentForm.defaultProviderPlaceholder')"
-              @change="onAgentDefaultProviderChange"
-            />
-          </a-form-item>
-
-          <a-form-item :label="t('settings.agentProfiles.agentForm.defaultModelLabel')" :required="true">
-            <a-select
-              v-model:value="agentFormDefaultModelId"
-              :options="currentProviderModelOptions"
-              :placeholder="t('settings.agentProfiles.agentForm.defaultModelPlaceholder')"
-            />
-          </a-form-item>
-        </template>
 
         <a-form-item>
           <a-checkbox v-model:checked="agentFormSetAsDefault">{{ t("settings.agentProfiles.agentForm.setAsDefault") }}</a-checkbox>
@@ -155,6 +164,7 @@
 <script setup lang="ts">
 import type {
   AgentDefaultModel,
+  AgentMcpSettings,
   AgentProvidersSettingsView,
   AgentSettings,
   AgentToolName,
@@ -164,15 +174,17 @@ import { Modal, message } from "ant-design-vue";
 import { computed, onMounted, ref } from "vue";
 import { DeleteOutlined, EditOutlined } from "@ant-design/icons-vue";
 import { useI18n } from "vue-i18n";
-import { getAgentProvidersSettings, getAgentSettings, updateAgentSettings } from "@/shared/api";
+import { getAgentMcpSettings, getAgentProvidersSettings, getAgentSettings, updateAgentSettings } from "@/shared/api";
 
 const { t } = useI18n();
 
 type EditingAgent = {
   id: string;
   name: string;
+  summary: string;
   prompt: string;
   tools: AgentToolName[];
+  mcpServers: string[];
   permissions: {
     allowRead: boolean;
     allowWrite: boolean;
@@ -181,14 +193,15 @@ type EditingAgent = {
   defaultModel: AgentDefaultModel;
 };
 
-type DefaultModelMode = "global" | "custom";
+const GLOBAL_DEFAULT_MODEL_PATH = "__global__";
 
-const DEFAULT_TOOLS: AgentToolName[] = ["bash", "read", "write"];
+const DEFAULT_TOOLS: AgentToolName[] = ["bash", "read", "write", "subtask"];
 
 const toolOptions = computed(() => [
   { label: t("settings.agentProfiles.tools.bash"), value: "bash" },
   { label: t("settings.agentProfiles.tools.read"), value: "read" },
-  { label: t("settings.agentProfiles.tools.write"), value: "write" }
+  { label: t("settings.agentProfiles.tools.write"), value: "write" },
+  { label: t("settings.agentProfiles.tools.subtask"), value: "subtask" }
 ]);
 
 const loading = ref(false);
@@ -196,6 +209,7 @@ const saving = ref(false);
 const pendingSave = ref(false);
 
 const providersSettings = ref<AgentProvidersSettingsView | null>(null);
+const mcpSettings = ref<AgentMcpSettings | null>(null);
 const agents = ref<EditingAgent[]>([]);
 const selectedDefaultAgentId = ref<string | null>(null);
 
@@ -203,32 +217,41 @@ const agentModalOpen = ref(false);
 const agentModalMode = ref<"create" | "edit">("create");
 const agentFormId = ref("");
 const agentFormName = ref("");
+const agentFormSummary = ref("");
 const agentFormPrompt = ref("");
 const agentFormTools = ref<AgentToolName[]>([...DEFAULT_TOOLS]);
+const agentFormMcpServers = ref<string[]>([]);
 const agentFormAllowRead = ref(true);
 const agentFormAllowWrite = ref(true);
 const agentFormAllowBash = ref(true);
-const agentFormDefaultModelMode = ref<DefaultModelMode>("global");
-const agentFormDefaultProviderId = ref("");
-const agentFormDefaultModelId = ref("");
+const agentFormDefaultModelPath = ref<string[]>([GLOBAL_DEFAULT_MODEL_PATH]);
 const agentFormSetAsDefault = ref(false);
 
-const providerSelectOptions = computed(() => {
+const defaultModelCascaderOptions = computed(() => {
   const providers = providersSettings.value?.providers ?? [];
-  return providers
-    .filter((provider) => provider.models.length > 0)
-    .map((provider) => ({
-      label: provider.name,
-      value: provider.id
-    }));
+  return [
+    {
+      label: t("settings.agentProfiles.fields.useGlobalDefault"),
+      value: GLOBAL_DEFAULT_MODEL_PATH
+    },
+    ...providers
+      .filter((provider) => provider.models.length > 0)
+      .map((provider) => ({
+        label: provider.name,
+        value: provider.id,
+        children: provider.models.map((model) => ({
+          label: model.name,
+          value: model.id
+        }))
+      }))
+  ];
 });
 
-const currentProviderModelOptions = computed(() => {
-  const provider = getProviderById(agentFormDefaultProviderId.value);
-  if (!provider) return [];
-  return provider.models.map((model) => ({
-    label: model.name,
-    value: model.id
+const mcpServerOptions = computed(() => {
+  const servers = mcpSettings.value?.servers ?? [];
+  return servers.map((server) => ({
+    label: server.id,
+    value: server.id
   }));
 });
 
@@ -236,10 +259,7 @@ const canSubmitAgent = computed(() => {
   if (!agentFormId.value.trim()) return false;
   if (!agentFormName.value.trim()) return false;
   if (agentFormTools.value.length === 0) return false;
-  if (agentFormDefaultModelMode.value === "custom") {
-    if (!agentFormDefaultProviderId.value.trim()) return false;
-    if (!agentFormDefaultModelId.value.trim()) return false;
-  }
+  if (toDefaultModelFromPath(agentFormDefaultModelPath.value) === undefined) return false;
   return true;
 });
 
@@ -253,7 +273,7 @@ function normalizeTools(raw: AgentToolName[]) {
   const out: AgentToolName[] = [];
   const seen = new Set<AgentToolName>();
   for (const item of raw) {
-    if (item !== "bash" && item !== "read" && item !== "write") continue;
+    if (item !== "bash" && item !== "read" && item !== "write" && item !== "subtask") continue;
     if (seen.has(item)) continue;
     seen.add(item);
     out.push(item);
@@ -261,13 +281,30 @@ function normalizeTools(raw: AgentToolName[]) {
   return out.length > 0 ? out : [...DEFAULT_TOOLS];
 }
 
-function mapFromSettings(settings: AgentSettings, providers: AgentProvidersSettingsView) {
+function normalizeMcpServers(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const available = new Set((mcpSettings.value?.servers ?? []).map((item) => item.id));
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    const value = typeof item === "string" ? item.trim() : "";
+    if (!value || seen.has(value) || !available.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
+}
+
+function mapFromSettings(settings: AgentSettings, providers: AgentProvidersSettingsView, mcp: AgentMcpSettings) {
   providersSettings.value = providers;
+  mcpSettings.value = mcp;
   agents.value = settings.agents.map((agent) => ({
     id: agent.id,
     name: agent.name,
+    summary: agent.summary,
     prompt: agent.prompt,
     tools: normalizeTools(agent.tools),
+    mcpServers: normalizeMcpServers(agent.mcpServers),
     permissions: {
       allowRead: agent.permissions.allowRead,
       allowWrite: agent.permissions.allowWrite,
@@ -292,6 +329,19 @@ function findModel(providerId: string, modelId: string) {
   return { provider, model };
 }
 
+function toDefaultModelFromPath(pathRaw: unknown): AgentDefaultModel | undefined {
+  const path = Array.isArray(pathRaw)
+    ? pathRaw.map((item) => String(item || "").trim()).filter((item) => item.length > 0)
+    : [];
+  if (path.length === 1 && path[0] === GLOBAL_DEFAULT_MODEL_PATH) return null;
+  if (path.length !== 2) return undefined;
+  const [providerId, modelId] = path;
+  if (!providerId || !modelId) return undefined;
+  const found = findModel(providerId, modelId);
+  if (!found) return undefined;
+  return { providerId, modelId };
+}
+
 function defaultModelLabel(defaultModel: AgentDefaultModel) {
   if (!defaultModel) return t("settings.agentProfiles.fields.useGlobalDefault");
   const found = findModel(defaultModel.providerId, defaultModel.modelId);
@@ -304,7 +354,8 @@ function defaultModelLabel(defaultModel: AgentDefaultModel) {
 function toolLabel(tool: AgentToolName) {
   if (tool === "bash") return t("settings.agentProfiles.tools.bash");
   if (tool === "read") return t("settings.agentProfiles.tools.read");
-  return t("settings.agentProfiles.tools.write");
+  if (tool === "write") return t("settings.agentProfiles.tools.write");
+  return t("settings.agentProfiles.tools.subtask");
 }
 
 function isDefaultAgent(agentId: string) {
@@ -325,8 +376,10 @@ function toRequestBody() {
     agents: agents.value.map((agent) => ({
       id: agent.id,
       name: agent.name.trim() || agent.id,
+      summary: agent.summary.trim(),
       prompt: agent.prompt,
       tools: normalizeTools(agent.tools),
+      mcpServers: normalizeMcpServers(agent.mcpServers),
       permissions: {
         allowRead: agent.permissions.allowRead,
         allowWrite: agent.permissions.allowWrite,
@@ -341,14 +394,14 @@ function openCreateAgent() {
   agentModalMode.value = "create";
   agentFormId.value = newLocalId("agent");
   agentFormName.value = "";
+  agentFormSummary.value = "";
   agentFormPrompt.value = "";
   agentFormTools.value = [...DEFAULT_TOOLS];
+  agentFormMcpServers.value = [];
   agentFormAllowRead.value = true;
   agentFormAllowWrite.value = true;
   agentFormAllowBash.value = true;
-  agentFormDefaultModelMode.value = "global";
-  agentFormDefaultProviderId.value = "";
-  agentFormDefaultModelId.value = "";
+  agentFormDefaultModelPath.value = [GLOBAL_DEFAULT_MODEL_PATH];
   agentFormSetAsDefault.value = false;
   agentModalOpen.value = true;
 }
@@ -359,21 +412,16 @@ function openEditAgent(agentId: string) {
   agentModalMode.value = "edit";
   agentFormId.value = target.id;
   agentFormName.value = target.name;
+  agentFormSummary.value = target.summary;
   agentFormPrompt.value = target.prompt;
   agentFormTools.value = normalizeTools(target.tools);
+  agentFormMcpServers.value = normalizeMcpServers(target.mcpServers);
   agentFormAllowRead.value = target.permissions.allowRead;
   agentFormAllowWrite.value = target.permissions.allowWrite;
   agentFormAllowBash.value = target.permissions.allowBash;
-
-  if (target.defaultModel) {
-    agentFormDefaultModelMode.value = "custom";
-    agentFormDefaultProviderId.value = target.defaultModel.providerId;
-    agentFormDefaultModelId.value = target.defaultModel.modelId;
-  } else {
-    agentFormDefaultModelMode.value = "global";
-    agentFormDefaultProviderId.value = "";
-    agentFormDefaultModelId.value = "";
-  }
+  agentFormDefaultModelPath.value = target.defaultModel
+    ? [target.defaultModel.providerId, target.defaultModel.modelId]
+    : [GLOBAL_DEFAULT_MODEL_PATH];
 
   agentFormSetAsDefault.value = isDefaultAgent(target.id);
   agentModalOpen.value = true;
@@ -384,25 +432,15 @@ function closeAgentModal() {
   agentModalMode.value = "create";
   agentFormId.value = "";
   agentFormName.value = "";
+  agentFormSummary.value = "";
   agentFormPrompt.value = "";
   agentFormTools.value = [...DEFAULT_TOOLS];
+  agentFormMcpServers.value = [];
   agentFormAllowRead.value = true;
   agentFormAllowWrite.value = true;
   agentFormAllowBash.value = true;
-  agentFormDefaultModelMode.value = "global";
-  agentFormDefaultProviderId.value = "";
-  agentFormDefaultModelId.value = "";
+  agentFormDefaultModelPath.value = [GLOBAL_DEFAULT_MODEL_PATH];
   agentFormSetAsDefault.value = false;
-}
-
-function onAgentDefaultProviderChange(nextProviderId: string) {
-  const provider = getProviderById(nextProviderId);
-  if (!provider || provider.models.length === 0) {
-    agentFormDefaultModelId.value = "";
-    return;
-  }
-  if (provider.models.some((item) => item.id === agentFormDefaultModelId.value)) return;
-  agentFormDefaultModelId.value = provider.models[0]!.id;
 }
 
 function submitAgent() {
@@ -418,27 +456,19 @@ function submitAgent() {
     return;
   }
 
-  const defaultModel =
-    agentFormDefaultModelMode.value === "custom"
-      ? {
-          providerId: agentFormDefaultProviderId.value.trim(),
-          modelId: agentFormDefaultModelId.value.trim()
-        }
-      : null;
-
-  if (agentFormDefaultModelMode.value === "custom") {
-    const found = findModel(defaultModel!.providerId, defaultModel!.modelId);
-    if (!found) {
-      message.error(t("settings.agentProfiles.errors.defaultModelInvalid"));
-      return;
-    }
+  const defaultModel = toDefaultModelFromPath(agentFormDefaultModelPath.value);
+  if (defaultModel === undefined) {
+    message.error(t("settings.agentProfiles.errors.defaultModelInvalid"));
+    return;
   }
 
   const payload: EditingAgent = {
     id,
     name,
+    summary: agentFormSummary.value.trim(),
     prompt: agentFormPrompt.value,
     tools: normalizeTools(agentFormTools.value),
+    mcpServers: normalizeMcpServers(agentFormMcpServers.value),
     permissions: {
       allowRead: agentFormAllowRead.value,
       allowWrite: agentFormAllowWrite.value,
@@ -497,8 +527,12 @@ async function refreshDraft() {
   if (loading.value) return;
   loading.value = true;
   try {
-    const [agentSettings, providerSettings] = await Promise.all([getAgentSettings(), getAgentProvidersSettings()]);
-    mapFromSettings(agentSettings, providerSettings);
+    const [agentSettings, providerSettings, mcp] = await Promise.all([
+      getAgentSettings(),
+      getAgentProvidersSettings(),
+      getAgentMcpSettings()
+    ]);
+    mapFromSettings(agentSettings, providerSettings, mcp);
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
@@ -515,7 +549,11 @@ async function persist(params: { toast: boolean }) {
   try {
     const body = toRequestBody();
     const res = await updateAgentSettings(body);
-    mapFromSettings(res, providersSettings.value ?? { default: null, providers: [], updatedAt: 0 });
+    mapFromSettings(
+      res,
+      providersSettings.value ?? { default: null, providers: [], updatedAt: 0 },
+      mcpSettings.value ?? { servers: [], updatedAt: 0 }
+    );
     if (params.toast) message.success(t("settings.agentProfiles.saved"));
   } catch (err) {
     // 自动保存失败时保留本地改动, 后续操作会再次触发 persist

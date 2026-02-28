@@ -23,6 +23,8 @@ type AgentSessionRow = {
   workspaceId: string;
   title: string;
   kind: "primary" | "subtask";
+  forkedFromSessionId: string | null;
+  forkedFromItemId: number | null;
   createdAt: number;
   updatedAt: number;
   headItemId: number | null;
@@ -49,6 +51,7 @@ export type AgentRunStateRow = {
   activeRunId: string | null;
   activeAssistantItemId: number | null;
   waitingToolItemId: number | null;
+  lastResponseTotalTokens: number | null;
   updatedAt: number;
   appliedItemId: number;
 };
@@ -74,11 +77,19 @@ function toHeadItemId(row: { headItemId: number | null } | undefined) {
 }
 
 function mapSession(row: AgentSessionRow): AgentSessionRecord {
+  const forkedFromSessionId = typeof row.forkedFromSessionId === "string" && row.forkedFromSessionId.trim()
+    ? row.forkedFromSessionId
+    : null;
+  const forkedFromItemId = typeof row.forkedFromItemId === "number" && Number.isFinite(row.forkedFromItemId) && row.forkedFromItemId >= 1
+    ? row.forkedFromItemId
+    : null;
   return {
     id: String(row.id),
     workspaceId: String(row.workspaceId),
     title: String(row.title),
     kind: row.kind === "subtask" ? "subtask" : "primary",
+    forkedFromSessionId,
+    forkedFromItemId,
     headItemId: toHeadItemId(row),
     createdAt: Number(row.createdAt),
     updatedAt: Number(row.updatedAt)
@@ -141,6 +152,17 @@ function touchSession(db: Db, sessionId: string, updatedAt: number) {
   db.prepare(`update agent_session set updated_at = @updatedAt where id = @sessionId`).run({ sessionId, updatedAt });
 }
 
+export function updateAgentSessionTitle(db: Db, params: { sessionId: string; title: string; updatedAt: number }) {
+  db.prepare(
+    `
+      update agent_session
+      set title = @title,
+          updated_at = @updatedAt
+      where id = @sessionId
+    `
+  ).run(params);
+}
+
 function isReachable(db: Db, params: { sessionId: string; fromHead: number | null; target: number }) {
   let cursor = params.fromHead;
   const seen = new Set<number>();
@@ -188,6 +210,8 @@ function upsertRunState(db: Db, params: {
   activeRunId: string | null;
   activeAssistantItemId: number | null;
   waitingToolItemId: number | null;
+  lastResponseTotalTokens?: number | null;
+  setLastResponseTotalTokens?: boolean;
   updatedAt: number;
   appliedItemId: number;
 }) {
@@ -200,6 +224,7 @@ function upsertRunState(db: Db, params: {
         active_run_id,
         active_assistant_item_id,
         waiting_tool_item_id,
+        last_response_total_tokens,
         updated_at,
         applied_item_id
       ) values (
@@ -209,6 +234,7 @@ function upsertRunState(db: Db, params: {
         @activeRunId,
         @activeAssistantItemId,
         @waitingToolItemId,
+        @lastResponseTotalTokens,
         @updatedAt,
         @appliedItemId
       )
@@ -217,10 +243,18 @@ function upsertRunState(db: Db, params: {
         active_run_id = excluded.active_run_id,
         active_assistant_item_id = excluded.active_assistant_item_id,
         waiting_tool_item_id = excluded.waiting_tool_item_id,
+        last_response_total_tokens = case
+          when @setLastResponseTotalTokens = 1 then @lastResponseTotalTokens
+          else agent_session_run_state.last_response_total_tokens
+        end,
         updated_at = excluded.updated_at,
         applied_item_id = excluded.applied_item_id
     `
-  ).run(params);
+  ).run({
+    ...params,
+    lastResponseTotalTokens: params.lastResponseTotalTokens ?? null,
+    setLastResponseTotalTokens: params.setLastResponseTotalTokens ? 1 : 0
+  });
 }
 
 export function listAgentSessions(db: Db, workspaceId: string): AgentSessionRecord[] {
@@ -232,6 +266,8 @@ export function listAgentSessions(db: Db, workspaceId: string): AgentSessionReco
           s.workspace_id as workspaceId,
           s.title,
           s.kind,
+          s.forked_from_session_id as forkedFromSessionId,
+          s.forked_from_item_id as forkedFromItemId,
           s.created_at as createdAt,
           s.updated_at as updatedAt,
           h.head_item_id as headItemId
@@ -255,6 +291,8 @@ export function getAgentSession(db: Db, sessionId: string): AgentSessionRecord |
           s.workspace_id as workspaceId,
           s.title,
           s.kind,
+          s.forked_from_session_id as forkedFromSessionId,
+          s.forked_from_item_id as forkedFromItemId,
           s.created_at as createdAt,
           s.updated_at as updatedAt,
           h.head_item_id as headItemId
@@ -524,6 +562,7 @@ export function getRunState(db: Db, workspaceId: string, sessionId: string): Age
           active_run_id as activeRunId,
           active_assistant_item_id as activeAssistantItemId,
           waiting_tool_item_id as waitingToolItemId,
+          last_response_total_tokens as lastResponseTotalTokens,
           updated_at as updatedAt,
           applied_item_id as appliedItemId
         from agent_session_run_state
@@ -538,6 +577,7 @@ export function getRunState(db: Db, workspaceId: string, sessionId: string): Age
     activeRunId: null,
     activeAssistantItemId: null,
     waitingToolItemId: null,
+    lastResponseTotalTokens: null,
     updatedAt: 0,
     appliedItemId: 0
   };
@@ -550,10 +590,14 @@ export function updateRunState(db: Db, params: {
   activeRunId: string | null;
   activeAssistantItemId: number | null;
   waitingToolItemId: number | null;
+  lastResponseTotalTokens?: number | null;
   updatedAt: number;
   appliedItemId: number;
 }) {
-  upsertRunState(db, params);
+  upsertRunState(db, {
+    ...params,
+    setLastResponseTotalTokens: Object.prototype.hasOwnProperty.call(params, "lastResponseTotalTokens")
+  });
 }
 
 export function setRunStateIdle(db: Db, params: { workspaceId: string; sessionId: string; updatedAt: number; appliedItemId: number }) {
@@ -564,6 +608,7 @@ export function setRunStateIdle(db: Db, params: { workspaceId: string; sessionId
     activeRunId: null,
     activeAssistantItemId: null,
     waitingToolItemId: null,
+    setLastResponseTotalTokens: false,
     updatedAt: params.updatedAt,
     appliedItemId: params.appliedItemId
   });

@@ -107,7 +107,57 @@ export const AgentProvidersSettingsViewSchema = Type.Object({
 });
 export type AgentProvidersSettingsView = Static<typeof AgentProvidersSettingsViewSchema>;
 
-export const AgentToolNameSchema = Type.Union([Type.Literal("bash"), Type.Literal("read"), Type.Literal("write")]);
+export const AgentMcpServerLocalConfigSchema = Type.Object({
+  type: Type.Literal("local"),
+  command: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
+  environment: Type.Optional(Type.Record(Type.String({ minLength: 1 }), Type.String())),
+  timeout: Type.Optional(Type.Number({ minimum: 1 }))
+});
+export type AgentMcpServerLocalConfig = Static<typeof AgentMcpServerLocalConfigSchema>;
+
+export const AgentMcpServerOAuthConfigSchema = Type.Object({
+  clientId: Type.Optional(Type.String({ minLength: 1 })),
+  clientSecret: Type.Optional(Type.String({ minLength: 1 })),
+  scope: Type.Optional(Type.String({ minLength: 1 }))
+});
+export type AgentMcpServerOAuthConfig = Static<typeof AgentMcpServerOAuthConfigSchema>;
+
+export const AgentMcpServerRemoteConfigSchema = Type.Object({
+  type: Type.Literal("remote"),
+  url: Type.String({ minLength: 1 }),
+  headers: Type.Optional(Type.Record(Type.String({ minLength: 1 }), Type.String())),
+  oauth: Type.Optional(Type.Union([AgentMcpServerOAuthConfigSchema, Type.Literal(false)])),
+  timeout: Type.Optional(Type.Number({ minimum: 1 }))
+});
+export type AgentMcpServerRemoteConfig = Static<typeof AgentMcpServerRemoteConfigSchema>;
+
+export const AgentMcpServerConfigSchema = Type.Union([AgentMcpServerLocalConfigSchema, AgentMcpServerRemoteConfigSchema]);
+export type AgentMcpServerConfig = Static<typeof AgentMcpServerConfigSchema>;
+
+export const AgentMcpServerSchema = Type.Object({
+  id: Type.String({ minLength: 1 }),
+  enabled: Type.Boolean(),
+  config: AgentMcpServerConfigSchema
+});
+export type AgentMcpServer = Static<typeof AgentMcpServerSchema>;
+
+export const AgentMcpSettingsSchema = Type.Object({
+  servers: Type.Array(AgentMcpServerSchema),
+  updatedAt: Type.Number()
+});
+export type AgentMcpSettings = Static<typeof AgentMcpSettingsSchema>;
+
+export const UpdateAgentMcpSettingsRequestSchema = Type.Object({
+  servers: Type.Array(AgentMcpServerSchema)
+});
+export type UpdateAgentMcpSettingsRequest = Static<typeof UpdateAgentMcpSettingsRequestSchema>;
+
+export const AgentToolNameSchema = Type.Union([
+  Type.Literal("bash"),
+  Type.Literal("read"),
+  Type.Literal("write"),
+  Type.Literal("subtask")
+]);
 export type AgentToolName = Static<typeof AgentToolNameSchema>;
 
 export const AgentPermissionsSchema = Type.Object({
@@ -123,8 +173,10 @@ export type AgentDefaultModel = Static<typeof AgentDefaultModelSchema>;
 export const AgentItemSchema = Type.Object({
   id: Type.String({ minLength: 1 }),
   name: Type.String({ minLength: 1 }),
+  summary: Type.String({ maxLength: 160 }),
   prompt: Type.String(),
   tools: Type.Array(AgentToolNameSchema),
+  mcpServers: Type.Array(Type.String({ minLength: 1 })),
   permissions: AgentPermissionsSchema,
   defaultModel: AgentDefaultModelSchema
 });

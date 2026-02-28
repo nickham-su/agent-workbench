@@ -2,6 +2,8 @@ import type { FastifyBaseLogger } from "fastify";
 import fs from "node:fs/promises";
 import type {
   AgentItem,
+  AgentMcpServerConfig,
+  AgentMcpSettings,
   AgentProviderNpm,
   AgentProvidersSettings,
   AgentProvidersSettingsView,
@@ -14,6 +16,7 @@ import type {
   SearchSettings,
   SecurityStatus,
   UpdateAgentProvidersSettingsRequest,
+  UpdateAgentMcpSettingsRequest,
   UpdateAgentSettingsRequest,
   UpdateGitGlobalIdentityRequest,
   UpdateNetworkSettingsRequest,
@@ -35,12 +38,14 @@ const NETWORK_SETTINGS_KEY = "network";
 const SEARCH_SETTINGS_KEY = "search";
 const AGENT_PROVIDERS_SETTINGS_KEY = "agent_providers_v1";
 const AGENT_SETTINGS_KEY = "agent_agents_v1";
+const AGENT_MCP_SETTINGS_KEY = "agent_mcp_v1";
 
 const SEARCH_EXCLUDE_MAX_COUNT = 200;
 const SEARCH_EXCLUDE_MAX_LENGTH = 200;
 
 type AgentProvidersSettingsStored = Omit<AgentProvidersSettings, "updatedAt">;
 type AgentSettingsStored = Omit<AgentSettings, "updatedAt">;
+type AgentMcpSettingsStored = Omit<AgentMcpSettings, "updatedAt">;
 
 type AgentProviderStored = AgentProvidersSettingsStored["providers"][number];
 
@@ -318,7 +323,7 @@ function normalizeAgentTools(raw: unknown): AgentToolName[] {
   const out: AgentToolName[] = [];
   const seen = new Set<AgentToolName>();
   for (const item of raw) {
-    if (item !== "bash" && item !== "read" && item !== "write") continue;
+    if (item !== "bash" && item !== "read" && item !== "write" && item !== "subtask") continue;
     if (seen.has(item)) continue;
     seen.add(item);
     out.push(item);
@@ -326,7 +331,156 @@ function normalizeAgentTools(raw: unknown): AgentToolName[] {
   return out.length > 0 ? out : ["bash", "read", "write"];
 }
 
+function normalizeServerId(raw: unknown) {
+  const value = typeof raw === "string" ? raw.trim() : "";
+  if (!value) return "";
+  if (value.includes("\0") || value.includes("\n") || value.includes("\r")) return "";
+  return value;
+}
+
+function toStringRecord(raw: unknown) {
+  const source = toRecordObject(raw);
+  if (!source) return {};
+  const out: Record<string, string> = {};
+  for (const [rawKey, rawValue] of Object.entries(source)) {
+    const key = rawKey.trim();
+    if (!isSafeObjectKey(key) || !key) continue;
+    const value = typeof rawValue === "string" ? rawValue : String(rawValue ?? "");
+    if (value.includes("\0") || value.includes("\n") || value.includes("\r")) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+function normalizeMcpConfig(raw: unknown): AgentMcpServerConfig {
+  const input = toRecordObject(raw);
+  if (!input) {
+    throw new HttpError(400, "MCP config must be an object", "AGENT_MCP_CONFIG_INVALID");
+  }
+  const type = typeof input.type === "string" ? input.type.trim() : "";
+  const timeout = Number.isFinite(Number(input.timeout)) ? Math.max(1, Math.floor(Number(input.timeout))) : undefined;
+
+  if (type === "local") {
+    const commandRaw = Array.isArray(input.command) ? input.command : [];
+    const command = commandRaw
+      .map((item) => (typeof item === "string" ? item.trim() : ""))
+      .filter((item) => item.length > 0);
+    if (command.length === 0) {
+      throw new HttpError(400, "Local MCP command is required", "AGENT_MCP_LOCAL_COMMAND_REQUIRED");
+    }
+    const config: AgentMcpServerConfig = {
+      type: "local",
+      command,
+      environment: toStringRecord(input.environment)
+    };
+    if (timeout) config.timeout = timeout;
+    return config;
+  }
+
+  if (type === "remote") {
+    const url = typeof input.url === "string" ? input.url.trim() : "";
+    if (!url) {
+      throw new HttpError(400, "Remote MCP url is required", "AGENT_MCP_REMOTE_URL_REQUIRED");
+    }
+    const oauthRaw = input.oauth;
+    let oauth: false | { clientId?: string; clientSecret?: string; scope?: string } | undefined;
+    if (oauthRaw === false) {
+      oauth = false;
+    } else if (oauthRaw && typeof oauthRaw === "object" && !Array.isArray(oauthRaw)) {
+      const oauthObj = oauthRaw as Record<string, unknown>;
+      const clientId = typeof oauthObj.clientId === "string" ? oauthObj.clientId.trim() : "";
+      const clientSecret = typeof oauthObj.clientSecret === "string" ? oauthObj.clientSecret.trim() : "";
+      const scope = typeof oauthObj.scope === "string" ? oauthObj.scope.trim() : "";
+      oauth = {
+        ...(clientId ? { clientId } : {}),
+        ...(clientSecret ? { clientSecret } : {}),
+        ...(scope ? { scope } : {})
+      };
+    }
+    const config: AgentMcpServerConfig = {
+      type: "remote",
+      url,
+      headers: toStringRecord(input.headers)
+    };
+    if (oauth !== undefined) config.oauth = oauth;
+    if (timeout) config.timeout = timeout;
+    return config;
+  }
+
+  throw new HttpError(400, "MCP config type must be local or remote", "AGENT_MCP_TYPE_INVALID");
+}
+
+function getAgentMcpSettingsStored(ctx: AppContext) {
+  const row = getSettingJson(ctx.db, AGENT_MCP_SETTINGS_KEY);
+  const value = row?.value as Partial<AgentMcpSettingsStored> | undefined;
+  const serversRaw = Array.isArray(value?.servers) ? value.servers : [];
+  const ids = new Set<string>();
+  const servers = serversRaw
+    .map((itemRaw) => {
+      const item = itemRaw as Record<string, unknown>;
+      const id = normalizeServerId(item.id);
+      if (!id || ids.has(id)) return null;
+      ids.add(id);
+      const enabled = typeof item.enabled === "boolean" ? item.enabled : true;
+      try {
+        const config = normalizeMcpConfig(item.config);
+        return { id, enabled, config };
+      } catch {
+        return null;
+      }
+    })
+    .filter((item): item is NonNullable<typeof item> => item !== null);
+
+  return {
+    settings: {
+      servers
+    },
+    updatedAt: row?.updatedAt ?? 0
+  };
+}
+
+function normalizeAgentMcpServers(raw: unknown, availableIds: Set<string>) {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    const id = normalizeServerId(item);
+    if (!id || seen.has(id)) continue;
+    if (!availableIds.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+function normalizeAgentSummaryFromStored(raw: unknown) {
+  const value = typeof raw === "string" ? raw : "";
+  if (value.includes("\0")) return "";
+  return value
+    .replace(/\r\n/g, " ")
+    .replace(/[\r\n]/g, " ")
+    .trim()
+    .slice(0, 160);
+}
+
+function normalizeAgentSummaryForUpdate(raw: unknown) {
+  const value = typeof raw === "string" ? raw : "";
+  if (value.includes("\0")) {
+    throw new HttpError(400, "Agent summary contains invalid character", "AGENT_SUMMARY_INVALID");
+  }
+  const normalized = value
+    .replace(/\r\n/g, " ")
+    .replace(/[\r\n]/g, " ")
+    .trim();
+  if (normalized.length > 160) {
+    throw new HttpError(400, "Agent summary is too long", "AGENT_SUMMARY_TOO_LONG");
+  }
+  return normalized;
+}
+
 function getAgentSettingsStored(ctx: AppContext) {
+  const mcpLoaded = getAgentMcpSettingsStored(ctx);
+  const mcpServerIds = new Set(mcpLoaded.settings.servers.map((item) => item.id));
   const row = getSettingJson(ctx.db, AGENT_SETTINGS_KEY);
   const value = row?.value as Partial<AgentSettingsStored> | undefined;
   const agentsRaw = Array.isArray(value?.agents) ? value.agents : [];
@@ -351,8 +505,10 @@ function getAgentSettingsStored(ctx: AppContext) {
       return {
         id,
         name,
+        summary: normalizeAgentSummaryFromStored(agent.summary),
         prompt,
         tools: normalizeAgentTools(agent.tools),
+        mcpServers: normalizeAgentMcpServers(agent.mcpServers, mcpServerIds),
         permissions,
         defaultModel: modelProviderId && modelId ? { providerId: modelProviderId, modelId } : null
       };
@@ -414,6 +570,51 @@ export function getAgentProvidersSettingsInternal(ctx: AppContext): AgentProvide
     default: loaded.settings.default,
     providers: loaded.settings.providers,
     updatedAt: loaded.updatedAt
+  };
+}
+
+export function getAgentMcpSettings(ctx: AppContext): AgentMcpSettings {
+  const loaded = getAgentMcpSettingsStored(ctx);
+  return {
+    servers: loaded.settings.servers,
+    updatedAt: loaded.updatedAt
+  };
+}
+
+export function updateAgentMcpSettings(ctx: AppContext, logger: FastifyBaseLogger, bodyRaw: unknown): AgentMcpSettings {
+  const body = (bodyRaw ?? {}) as UpdateAgentMcpSettingsRequest;
+  const incoming = Array.isArray(body.servers) ? body.servers : [];
+  const servers = incoming.map((itemRaw) => {
+    const item = itemRaw as Record<string, unknown>;
+    const id = normalizeServerId(item.id);
+    if (!id) {
+      throw new HttpError(400, "MCP server id is required", "AGENT_MCP_SERVER_ID_REQUIRED");
+    }
+    const enabled = typeof item.enabled === "boolean" ? item.enabled : true;
+    const config = normalizeMcpConfig(item.config);
+    return { id, enabled, config };
+  });
+
+  assertUniqueIdsOrThrow(
+    servers.map((item) => item.id),
+    "AGENT_MCP_SERVER_DUPLICATE",
+    "Duplicate MCP server id"
+  );
+
+  const updatedAt = nowMs();
+  setSettingJson(
+    ctx.db,
+    AGENT_MCP_SETTINGS_KEY,
+    {
+      servers
+    },
+    updatedAt
+  );
+
+  logger.info({ servers: servers.length, updatedAt }, "agent mcp settings updated");
+  return {
+    servers,
+    updatedAt
   };
 }
 
@@ -524,6 +725,8 @@ export function getAgentSettings(ctx: AppContext): AgentSettings {
 export function updateAgentSettings(ctx: AppContext, logger: FastifyBaseLogger, bodyRaw: unknown): AgentSettings {
   const body = (bodyRaw ?? {}) as UpdateAgentSettingsRequest;
   const incomingAgents = Array.isArray(body.agents) ? body.agents : [];
+  const mcpLoaded = getAgentMcpSettingsStored(ctx);
+  const availableMcpIds = new Set(mcpLoaded.settings.servers.map((item) => item.id));
   const agents = incomingAgents.map((agentRaw) => {
     const agent = agentRaw as Record<string, unknown>;
     const id = typeof agent.id === "string" ? agent.id.trim() : "";
@@ -532,7 +735,9 @@ export function updateAgentSettings(ctx: AppContext, logger: FastifyBaseLogger, 
       throw new HttpError(400, "Agent id/name is required", "AGENT_ID_NAME_REQUIRED");
     }
     const prompt = typeof agent.prompt === "string" ? agent.prompt : "";
+    const summary = normalizeAgentSummaryForUpdate(agent.summary);
     const tools = normalizeAgentTools(agent.tools);
+    const mcpServers = normalizeAgentMcpServers(agent.mcpServers, availableMcpIds);
     const permissionsRaw = (agent.permissions ?? {}) as Record<string, unknown>;
     const fallbackPermissions = defaultAgentPermissions();
     const permissions = {
@@ -547,8 +752,10 @@ export function updateAgentSettings(ctx: AppContext, logger: FastifyBaseLogger, 
     return {
       id,
       name,
+      summary,
       prompt,
       tools,
+      mcpServers,
       permissions,
       defaultModel
     };

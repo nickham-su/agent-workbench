@@ -8,14 +8,14 @@ type PromptTextPart = {
 type PromptToolCallPart = {
   type: "tool-call";
   toolCallId: string;
-  toolName: "bash" | "read" | "write";
+  toolName: string;
   input: Record<string, unknown>;
 };
 
 type PromptToolResultPart = {
   type: "tool-result";
   toolCallId: string;
-  toolName: "bash" | "read" | "write";
+  toolName: string;
   output: unknown;
 };
 
@@ -37,8 +37,10 @@ export type ExecutionProfile = {
   agent: {
     id: string;
     name: string;
+    summary: string;
     prompt: string;
-    tools: Array<"bash" | "read" | "write">;
+    tools: Array<"bash" | "read" | "write" | "subtask">;
+    mcpServers: string[];
     permissions: {
       allowRead: boolean;
       allowWrite: boolean;
@@ -68,7 +70,7 @@ export type PromptContext = {
   system: string;
   messages: PromptMessage[];
   tools: Array<{
-    name: "bash" | "read" | "write";
+    name: string;
     description: string;
     inputSchema: Record<string, unknown>;
     requiresApproval: boolean;
@@ -76,11 +78,20 @@ export type PromptContext = {
   pendingTools: Array<{
     itemId: number;
     status: "queued" | "running" | "awaiting_permission" | "streaming" | "completed" | "failed" | "denied" | "cancelled";
-    toolName: "bash" | "read" | "write";
+    toolName: string;
     toolCallId?: string;
     args: Record<string, unknown>;
     approved?: boolean;
   }>;
+};
+
+export type AgentMcpSettingsPayload = {
+  servers: Array<{
+    id: string;
+    enabled: boolean;
+    config: Record<string, unknown>;
+  }>;
+  updatedAt: number;
 };
 
 export class AgentApiClient {
@@ -155,6 +166,7 @@ export class AgentApiClient {
     activeRunId: string | null;
     activeAssistantItemId: number | null;
     waitingToolItemId: number | null;
+    lastResponseTotalTokens?: number | null;
     updatedAt?: number;
   }) {
     await this.request<{ ok: true }>("/api/internal/agent/run-state", {
@@ -207,5 +219,45 @@ export class AgentApiClient {
       throw new Error(`get prompt context failed: ${response.status} ${txt}`);
     }
     return (await response.json()) as PromptContext;
+  }
+
+  async startSubtaskRun(input: {
+    workspaceId: string;
+    parentSessionId: string;
+    parentRunId: string;
+    parentToolItemId: number;
+    description: string;
+    prompt: string;
+    agentId: string;
+    session: { mode: "new" | "existing" | "fork"; sessionId?: string };
+  }) {
+    return this.request<{ sessionId: string; runId: string; workspacePath: string }>("/api/internal/agent/subtask/start", {
+      method: "POST",
+      body: input
+    });
+  }
+
+  async getSubtaskResult(input: { workspaceId: string; sessionId: string; runId: string }) {
+    return this.request<{ resultText: string }>("/api/internal/agent/subtask/result", {
+      method: "POST",
+      body: input
+    });
+  }
+
+  async getSubtaskStatus(input: { workspaceId: string; sessionId: string; runId: string }) {
+    return this.request<{ status: "running" | "waiting_permission" | "completed" | "failed" | "cancelled" }>(
+      "/api/internal/agent/subtask/status",
+      {
+        method: "POST",
+        body: input
+      }
+    );
+  }
+
+  async getAgentMcpSettings() {
+    return this.request<AgentMcpSettingsPayload>("/api/internal/agent/mcp-settings", {
+      method: "POST",
+      body: {}
+    });
   }
 }

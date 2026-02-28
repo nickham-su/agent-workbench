@@ -1,9 +1,9 @@
 <template>
   <div class="h-full min-h-0 flex flex-col bg-[var(--panel-bg)]">
     <div v-if="visibleSessions.length === 0" class="h-full min-h-0 flex flex-col items-center justify-center gap-3">
-      <div class="text-xs text-[color:var(--text-tertiary)]">{{ sessions.length === 0 ? t("agent.empty") : t("agent.closedEmpty") }}</div>
+      <div class="text-xs text-[color:var(--text-tertiary)]">{{ allSessions.length === 0 ? t("agent.empty") : t("agent.closedEmpty") }}</div>
       <a-button
-        v-if="sessions.length > 0"
+        v-if="allSessions.length > 0"
         size="small"
         :disabled="creating"
         @click="reopenAllSessions"
@@ -16,11 +16,6 @@
     <a-tabs v-else class="agent-tabs h-full" size="small" :animated="false" :activeKey="effectiveActiveKey" @update:activeKey="onChangeTab">
       <template #rightExtra>
         <div class="flex items-center gap-1 pr-1">
-          <a-tooltip :title="t('agent.actions.refresh')">
-            <a-button size="small" type="text" :loading="loadingSessions" @click="refreshAll">
-              <template #icon><ReloadOutlined /></template>
-            </a-button>
-          </a-tooltip>
           <a-tooltip :title="t('agent.actions.minimize')">
             <a-button size="small" type="text" @click="minimizeSelf">
               <template #icon><MinusOutlined /></template>
@@ -46,11 +41,19 @@
           <AgentClientPane
             :workspace-id="workspaceId"
             :session-id="session.id"
+            :session-kind="session.kind"
+            :parent-session-id="!isDraftSession(session) ? session.forkedFromSessionId : null"
+            :session-ready="!isDraftSession(session)"
+            :ensure-session="ensureSessionCreated"
+            :can-choose-session="canChooseSessionFrom(session.id)"
             :active="effectiveActiveKey === session.id"
             :model-value="selectedAgentBySession[session.id] ?? null"
             :agent-options="agentOptions"
             @update:model-value="(value) => setSessionAgent(session.id, value)"
             @forked="onSessionForked"
+            @open-subtask="onOpenSubtask"
+            @open-parent="onOpenParent"
+            @choose-session="openChooseSessionModal(session.id)"
           />
         </div>
       </a-tab-pane>
@@ -63,6 +66,31 @@
         </template>
       </a-tab-pane>
     </a-tabs>
+
+    <a-modal
+      v-model:open="chooseSessionModalOpen"
+      :title="t('agent.client.chooseSessionTitle')"
+      :footer="null"
+      :maskClosable="true"
+      @cancel="closeChooseSessionModal"
+    >
+      <div v-if="chooseSessionLoading" class="text-xs text-[color:var(--text-tertiary)]">
+        {{ t("common.loading") }}
+      </div>
+      <div v-else-if="chooseSessionItems.length === 0" class="text-xs text-[color:var(--text-tertiary)]">
+        {{ t("agent.client.noSessionToChoose") }}
+      </div>
+      <a-list v-else size="small" bordered :data-source="chooseSessionItems" class="choose-session-list max-h-[360px] overflow-auto">
+        <template #renderItem="{ item }">
+          <a-list-item class="choose-session-item !px-3 !py-2 cursor-pointer transition-colors" @click="chooseSession(item.id)">
+            <div class="w-full min-w-0">
+              <div class="text-xs text-[color:var(--text-tertiary)] truncate">{{ item.id }}</div>
+              <div class="text-sm truncate">{{ item.preview }}</div>
+            </div>
+          </a-list-item>
+        </template>
+      </a-list>
+    </a-modal>
   </div>
 </template>
 
@@ -74,9 +102,9 @@ export default {
 
 <script setup lang="ts">
 import type { AgentSessionRecord } from "@agent-workbench/shared";
-import { CloseOutlined, MinusOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons-vue";
+import { CloseOutlined, MinusOutlined, PlusOutlined } from "@ant-design/icons-vue";
 import { message } from "ant-design-vue";
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onActivated, onMounted, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { createAgentSession, getAgentSettings, listAgentSessions } from "@/shared/api";
 import { useWorkspaceHost } from "@/features/workspace/host";
@@ -86,6 +114,24 @@ type AgentOption = {
   value: string;
   label: string;
   isDefault?: boolean;
+};
+
+type DraftAgentSession = {
+  id: string;
+  workspaceId: string;
+  title: string;
+  kind: "primary";
+  createdAt: number;
+  updatedAt: number;
+  isDraft: true;
+};
+
+type AgentSessionTab = AgentSessionRecord | DraftAgentSession;
+
+type ChooseSessionItem = {
+  id: string;
+  preview: string;
+  updatedAt: number;
 };
 
 const ADD_TAB_KEY = "__agent_add__";
@@ -100,14 +146,23 @@ const { t } = useI18n();
 
 const loadingSessions = ref(false);
 const creating = ref(false);
-const sessions = ref<AgentSessionRecord[]>([]);
+const serverSessions = ref<AgentSessionRecord[]>([]);
+const draftSessions = ref<DraftAgentSession[]>([]);
 const activeKey = ref<string>("");
 const selectedAgentBySession = reactive<Record<string, string | null>>({});
 const agentOptions = ref<AgentOption[]>([]);
 const closedSessionIds = reactive<Record<string, true>>({});
 const tabNoMap = ref<Record<string, number>>({});
+const chooseSessionModalOpen = ref(false);
+const chooseSessionLoading = ref(false);
+const chooseSessionItems = ref<ChooseSessionItem[]>([]);
+const chooseSessionSourceId = ref("");
+const sessionsInitialized = ref(false);
 
 const suppressTabNoPersist = ref(false);
+const draftCreatePromises = new Map<string, Promise<string>>();
+
+const allSessions = computed<AgentSessionTab[]>(() => [...serverSessions.value, ...draftSessions.value]);
 
 const effectiveActiveKey = computed(() => {
   if (activeKey.value && visibleSessions.value.some((item) => item.id === activeKey.value)) return activeKey.value;
@@ -116,7 +171,7 @@ const effectiveActiveKey = computed(() => {
 
 const visibleSessions = computed(() => {
   // tabs 的展示顺序按编号从小到大,确保新建 client 出现在最右侧。
-  const list = sessions.value.filter((item) => !closedSessionIds[item.id]);
+  const list = allSessions.value.filter((item) => !closedSessionIds[item.id]);
   return [...list].sort((a, b) => {
     const na = tabNoMap.value[a.id];
     const nb = tabNoMap.value[b.id];
@@ -183,7 +238,7 @@ function persistTabNoMapToStorage(workspaceId: string, map: Record<string, numbe
   }
 }
 
-function reconcileTabNoMap(params: { workspaceId: string; sessions: AgentSessionRecord[] }) {
+function reconcileTabNoMap(params: { workspaceId: string; sessions: AgentSessionTab[] }) {
   const id = String(params.workspaceId || "").trim();
   if (!id) return;
 
@@ -290,9 +345,35 @@ function persistAgentPick() {
   }
 }
 
-function tabLabel(session: AgentSessionRecord, index: number) {
+function tabLabel(session: AgentSessionTab, index: number) {
   const displayIndex = agentDisplayIndex(session.id, index + 1);
   return t("agent.client.tabLabel", { index: displayIndex });
+}
+
+function isDraftSession(session: AgentSessionTab): session is DraftAgentSession {
+  return (session as DraftAgentSession).isDraft === true;
+}
+
+function newDraftSessionId() {
+  return `draft_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 8)}`;
+}
+
+function canChooseSessionFrom(sessionId: string) {
+  const fromDraft = draftSessions.value.some((item) => item.id === sessionId);
+  if (!fromDraft) return false;
+  return serverSessions.value.some((item) => item.kind === "primary" && item.id !== sessionId);
+}
+
+function closeChooseSessionModal() {
+  chooseSessionModalOpen.value = false;
+  chooseSessionSourceId.value = "";
+  chooseSessionItems.value = [];
+}
+
+function truncatePreview(text: string, maxLen = 50) {
+  const value = text.trim();
+  if (value.length <= maxLen) return value;
+  return `${value.slice(0, Math.max(0, maxLen - 1))}…`;
 }
 
 function setSessionAgent(sessionId: string, value: string | null) {
@@ -319,10 +400,10 @@ async function refreshSessions() {
   loadingSessions.value = true;
   try {
     const list = await listAgentSessions(props.workspaceId);
-    sessions.value = [...list].sort((a, b) => b.updatedAt - a.updatedAt);
+    serverSessions.value = [...list].sort((a, b) => b.updatedAt - a.updatedAt);
     // 先根据可见 tabs 做 prune/分配,避免隐藏 tab 让编号一路增长。
-    reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: sessions.value });
-    const presentIds = new Set(sessions.value.map((item) => item.id));
+    reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
+    const presentIds = new Set(allSessions.value.map((item) => item.id));
     let closedChanged = false;
     for (const id of Object.keys(closedSessionIds)) {
       if (!presentIds.has(id)) {
@@ -350,20 +431,83 @@ async function createOneSession() {
   if (creating.value) return;
   creating.value = true;
   try {
-    const created = await createAgentSession({
+    const now = Date.now();
+    const draftId = newDraftSessionId();
+    const draft: DraftAgentSession = {
+      id: draftId,
       workspaceId: props.workspaceId,
-      title: t("agent.client.newTitle", { time: new Date().toLocaleTimeString() })
-    });
-    delete closedSessionIds[created.id];
+      title: t("agent.client.newTitle", { time: new Date(now).toLocaleTimeString() }),
+      kind: "primary",
+      createdAt: now,
+      updatedAt: now,
+      isDraft: true
+    };
+    draftSessions.value = [...draftSessions.value, draft];
+    delete closedSessionIds[draft.id];
     persistClosedSessions();
-    await refreshSessions();
-    activeKey.value = created.id;
-    persistActiveKey(created.id);
+    reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
+    activeKey.value = draft.id;
+    persistActiveKey(draft.id);
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
     creating.value = false;
   }
+}
+
+async function ensureSessionCreated(sessionId: string) {
+  const draft = draftSessions.value.find((item) => item.id === sessionId);
+  if (!draft) return sessionId;
+
+  const pending = draftCreatePromises.get(sessionId);
+  if (pending) return pending;
+
+  const job = (async () => {
+    const created = await createAgentSession({
+      workspaceId: props.workspaceId,
+      title: draft.title
+    });
+
+    draftSessions.value = draftSessions.value.filter((item) => item.id !== sessionId);
+    serverSessions.value = [created, ...serverSessions.value.filter((item) => item.id !== created.id)].sort(
+      (a, b) => b.updatedAt - a.updatedAt
+    );
+
+    const picked = selectedAgentBySession[sessionId] ?? null;
+    selectedAgentBySession[created.id] = picked;
+    delete selectedAgentBySession[sessionId];
+    persistAgentPick();
+
+    if (closedSessionIds[sessionId]) {
+      closedSessionIds[created.id] = true;
+      delete closedSessionIds[sessionId];
+      persistClosedSessions();
+    }
+
+    if (tabNoMap.value[sessionId]) {
+      const nextMap = { ...tabNoMap.value };
+      nextMap[created.id] = nextMap[sessionId]!;
+      delete nextMap[sessionId];
+      tabNoMap.value = nextMap;
+      if (!suppressTabNoPersist.value) {
+        persistTabNoMapToStorage(props.workspaceId, nextMap);
+      }
+    }
+
+    if (activeKey.value === sessionId) {
+      activeKey.value = created.id;
+      persistActiveKey(created.id);
+    }
+
+    reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
+    return created.id;
+  })()
+    .finally(() => {
+      draftCreatePromises.delete(sessionId);
+    });
+
+  draftCreatePromises.set(sessionId, job);
+  return job;
 }
 
 function closeSessionTab(sessionId: string) {
@@ -386,7 +530,11 @@ function closeSessionTab(sessionId: string) {
   activeKey.value = next;
   if (next) {
     persistActiveKey(next);
+    return;
   }
+
+  // 若关闭后无可见 tab,立即补一个新的草稿会话,避免出现“已全部关闭”空态。
+  void createOneSession();
 }
 
 function reopenAllSessions() {
@@ -396,7 +544,7 @@ function reopenAllSessions() {
   persistClosedSessions();
 
   // reopen 后对当前可见 tabs 重新分配/对齐编号
-  reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: sessions.value });
+  reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
   const next = visibleSessions.value[0]?.id ?? "";
   activeKey.value = next;
   if (next) {
@@ -411,6 +559,108 @@ async function onSessionForked(sessionId: string) {
   persistClosedSessions();
   activeKey.value = sessionId;
   persistActiveKey(sessionId);
+}
+
+async function onOpenSubtask(sessionId: string) {
+  if (!sessionId) return;
+  await refreshSessions();
+  delete closedSessionIds[sessionId];
+  persistClosedSessions();
+  activeKey.value = sessionId;
+  persistActiveKey(sessionId);
+}
+
+async function onOpenParent(sessionId: string) {
+  if (!sessionId) return;
+  await refreshSessions();
+  const target = serverSessions.value.find((item) => item.id === sessionId);
+  if (!target) {
+    message.warning(t("agent.client.parentSessionMissing"));
+    return;
+  }
+  delete closedSessionIds[sessionId];
+  persistClosedSessions();
+  activeKey.value = sessionId;
+  persistActiveKey(sessionId);
+}
+
+function replaceDraftWithSession(params: { fromSessionId: string; targetSessionId: string }) {
+  const fromSessionId = params.fromSessionId;
+  const targetSessionId = params.targetSessionId;
+  const fromDraft = draftSessions.value.find((item) => item.id === fromSessionId);
+  if (!fromDraft) return;
+  const target = serverSessions.value.find((item) => item.id === targetSessionId && item.kind === "primary");
+  if (!target) {
+    message.warning(t("agent.client.noSessionToChoose"));
+    return;
+  }
+
+  draftSessions.value = draftSessions.value.filter((item) => item.id !== fromSessionId);
+  delete closedSessionIds[fromSessionId];
+  delete closedSessionIds[target.id];
+  persistClosedSessions();
+
+  const fromNo = tabNoMap.value[fromSessionId];
+  const nextMap = { ...tabNoMap.value };
+  if (typeof fromNo === "number" && Number.isFinite(fromNo) && fromNo > 0) {
+    nextMap[target.id] = fromNo;
+  }
+  delete nextMap[fromSessionId];
+  tabNoMap.value = nextMap;
+  if (!suppressTabNoPersist.value) {
+    persistTabNoMapToStorage(props.workspaceId, nextMap);
+  }
+
+  delete selectedAgentBySession[fromSessionId];
+  persistAgentPick();
+
+  activeKey.value = target.id;
+  persistActiveKey(target.id);
+
+  reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
+}
+
+async function openChooseSessionModal(fromSessionId: string) {
+  const fromDraft = draftSessions.value.find((item) => item.id === fromSessionId);
+  if (!fromDraft) return;
+
+  chooseSessionSourceId.value = fromSessionId;
+  chooseSessionModalOpen.value = true;
+  chooseSessionLoading.value = true;
+
+  const candidates = [...serverSessions.value]
+    .filter(
+      (item) =>
+        item.kind === "primary" &&
+        item.id !== fromSessionId &&
+        item.headItemId !== null &&
+        String(item.title || "").trim().length > 0 &&
+        String(item.title || "").trim() !== "新会话"
+    )
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+
+  if (candidates.length === 0) {
+    chooseSessionItems.value = [];
+    chooseSessionLoading.value = false;
+    return;
+  }
+
+  chooseSessionItems.value = candidates.map((session) => ({
+    id: session.id,
+    preview: truncatePreview(session.title, 50) || t("agent.client.sessionEmptyPreview"),
+    updatedAt: session.updatedAt
+  }));
+  chooseSessionLoading.value = false;
+}
+
+function chooseSession(targetSessionId: string) {
+  const fromSessionId = chooseSessionSourceId.value;
+  if (!fromSessionId) {
+    closeChooseSessionModal();
+    return;
+  }
+  replaceDraftWithSession({ fromSessionId, targetSessionId });
+  closeChooseSessionModal();
 }
 
 function onChangeTab(key: string | number) {
@@ -430,8 +680,10 @@ function minimizeSelf() {
 watch(
   () => props.workspaceId,
   async () => {
+    sessionsInitialized.value = false;
     activeKey.value = "";
-    sessions.value = [];
+    serverSessions.value = [];
+    draftSessions.value = [];
     for (const key of Object.keys(closedSessionIds)) {
       delete closedSessionIds[key];
     }
@@ -443,12 +695,20 @@ watch(
     restorePersistedState();
     await refreshAll();
     suppressTabNoPersist.value = false;
-    if (sessions.value.length === 0) {
+    if (visibleSessions.value.length === 0) {
       await createOneSession();
     }
+    sessionsInitialized.value = true;
   },
   { immediate: true }
 );
+
+onActivated(() => {
+  if (!sessionsInitialized.value) return;
+  if (loadingSessions.value || creating.value) return;
+  if (visibleSessions.value.length > 0) return;
+  void createOneSession();
+});
 
 onMounted(() => {
   restorePersistedState();
@@ -503,4 +763,9 @@ onMounted(() => {
 .agent-tab-add.is-loading {
   opacity: 0.6;
 }
+
+:deep(.choose-session-item:hover) {
+  background: rgba(59, 130, 246, 0.12) !important;
+}
+
 </style>

@@ -1,32 +1,48 @@
 <template>
   <div class="h-full min-h-0 flex flex-col">
-    <div v-if="runState.status !== 'idle'" class="px-3 py-2 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
-      <div class="flex items-center justify-end gap-2">
-        <a-tag color="processing">{{ t("agent.client.running") }}</a-tag>
-        <a-button size="small" danger :loading="actionLoading === 'cancel'" @click="onCancelRun">
-          {{ t("agent.client.cancel") }}
+    <div
+      v-if="isSubtaskSession"
+      class="px-3 py-2 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] text-xs text-[color:var(--text-tertiary)]"
+    >
+      <div class="flex items-center gap-2">
+        <a-button
+          v-if="props.parentSessionId"
+          type="link"
+          size="small"
+          class="!px-0"
+          @click="onOpenParent"
+        >
+          {{ t("agent.client.backToParent") }}
         </a-button>
+        <span>{{ t("agent.client.readonlySubtaskHint") }}</span>
       </div>
     </div>
 
     <div ref="scrollEl" class="agent-message-list flex-1 min-h-0 overflow-auto p-3 bg-[var(--panel-bg)]">
-      <div v-if="displayItems.length === 0" class="text-xs text-[color:var(--text-tertiary)]">
-        {{ t("agent.client.empty") }}
+      <div v-if="displayItems.length === 0" class="h-full flex flex-col items-center justify-center gap-3 text-base text-[color:var(--text-tertiary)]">
+        <div>{{ t("agent.client.welcome") }}</div>
+        <a-button v-if="props.canChooseSession" type="link" size="small" class="!px-0" @click="onChooseSession">
+          {{ t("agent.client.chooseSession") }}
+        </a-button>
       </div>
       <div
         v-for="msg in displayItems"
         :key="msg.id"
         class="agent-message-item relative rounded p-2"
         :class="[
-          msg.role === 'tool' ? 'is-tool-message border-0 bg-transparent pl-2 pr-0 py-0.5' : '',
-          msg.role === 'user' ? 'is-user-message border border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]' : 'border-0',
+          msg.role === 'tool'
+            ? isSubtaskCard(msg)
+              ? 'is-tool-message border-0 bg-transparent px-0 py-0.5'
+              : 'is-tool-message border-0 bg-transparent pl-2 pr-0 py-0.5'
+            : '',
+          msg.role === 'user' ? 'is-user-message border border-blue-500/30 bg-blue-500/10' : 'border-0',
           msg.role === 'assistant' ? 'is-assistant-message bg-[var(--panel-bg)]' : '',
           msg.role === 'system' ? 'bg-[var(--panel-bg)]' : '',
           msg.role === 'user' && msg.tone === 'error' ? 'border-red-500/40 bg-red-500/5' : '',
           msg.role !== 'user' && msg.role !== 'tool' && msg.tone === 'error' ? 'bg-red-500/5' : ''
         ]"
       >
-        <div v-if="msg.role !== 'tool'" class="message-controls absolute right-2 top-1 z-10 flex items-center gap-1">
+        <div v-if="msg.role !== 'tool' && !isSubtaskSession" class="message-controls absolute right-2 top-1.5 z-10 flex items-center gap-1">
           <span class="message-id">#{{ msg.id }}</span>
           <template v-if="msg.role === 'user' || msg.role === 'assistant'">
             <a-tooltip :title="t('agent.client.fork')" placement="top">
@@ -58,6 +74,35 @@
           {{ roleLabel(msg.role) }}
         </div>
         <div
+          v-if="isSubtaskCard(msg)"
+          class="subtask-card rounded border border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] p-2"
+          :class="[
+            msg.subtaskSessionId ? 'is-clickable' : 'is-disabled',
+            msg.tone === 'error' ? 'border-red-500/40 bg-red-500/5' : ''
+          ]"
+          @click="onOpenSubtask(msg.subtaskSessionId)"
+        >
+          <div class="flex items-center gap-2">
+            <div class="text-[12px] font-semibold">
+              <DoubleRightOutlined class="subtask-title-icon mr-0.5 text-blue-500" />
+              {{ t("agent.client.subtaskCardTitle") }}: {{ msg.subtaskDescription || "-" }}
+            </div>
+            <a-tag color="default" class="!m-0 !text-[10px] !leading-[16px] !px-1 !py-0">{{ msg.status }}</a-tag>
+          </div>
+          <div class="pt-0.5 text-[12px] text-[color:var(--text-secondary)]">
+            {{ t("agent.client.subtaskAgent") }}: {{ msg.subtaskAgentName || msg.subtaskAgentId || "-" }}
+            <span class="inline-block w-3" />
+            {{ t("agent.client.subtaskMode") }}: {{ formatSubtaskMode(msg.subtaskMode) }}
+          </div>
+          <div class="pt-0.5 text-[12px] text-[color:var(--text-secondary)]">
+            {{ t("agent.client.subtaskSessionId") }}: {{ msg.subtaskSessionId || "-" }}
+          </div>
+          <div v-if="msg.toolError" class="pt-1 text-[12px] text-red-500">
+            Error: {{ msg.toolError }}
+          </div>
+        </div>
+        <div
+          v-else
           class="whitespace-pre-wrap break-words"
           :class="[
             msg.role === 'tool' ? 'text-[11px] font-mono text-[color:var(--text-secondary)]' : 'text-[13px]',
@@ -85,35 +130,51 @@
           </a-button>
         </div>
       </div>
-      <div v-if="runState.status !== 'idle'" class="text-xs text-[color:var(--text-tertiary)]">
-        {{ t("agent.client.streamingHint") }}
-      </div>
     </div>
 
-    <div class="p-3 border-t border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
-      <a-textarea
-        v-model:value="draft"
-        :disabled="!hasAvailableAgents"
-        :auto-size="{ minRows: 2, maxRows: 6 }"
-        :placeholder="hasAvailableAgents ? t('agent.client.inputPlaceholder') : t('agent.client.inputPlaceholderNoAgent')"
-        @keydown.enter.exact.prevent="onSend"
-      />
-      <div class="pt-2">
-        <div v-if="hasAvailableAgents" class="flex items-center gap-2 min-w-0">
-          <span class="text-xs text-[color:var(--text-tertiary)]">{{ t("agent.client.agentLabel") }}</span>
-          <a-select
-            :value="effectiveAgentId"
-            :options="props.agentOptions"
-            size="small"
-            style="min-width: 180px; max-width: 320px"
-            @update:value="onAgentChange"
-          />
-        </div>
-        <div v-else class="flex items-center gap-2 text-xs text-[color:var(--text-tertiary)]">
-          <span>{{ t("agent.client.noAgentHint") }}</span>
-          <a-button type="link" size="small" class="!px-0" @click="goAgentProfiles">
-            {{ t("agent.client.goCreateAgent") }}
+    <div v-if="!isSubtaskSession" class="p-3 border-t border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
+      <div class="flex items-end gap-2">
+        <a-textarea
+          ref="inputEl"
+          v-model:value="draft"
+          class="agent-input-textarea"
+          :disabled="!hasAvailableAgents"
+          :auto-size="{ minRows: 2, maxRows: 6 }"
+          :placeholder="hasAvailableAgents ? t('agent.client.inputPlaceholder') : t('agent.client.inputPlaceholderNoAgent')"
+          @keydown.enter.exact.prevent="onSend"
+          @keydown.tab.prevent="onCycleAgent(1)"
+          @keydown.shift.tab.prevent="onCycleAgent(-1)"
+        />
+        <a-tooltip v-if="runState.status !== 'idle'" :title="t('agent.client.cancel')" placement="top">
+          <a-button
+            class="cancel-icon-btn"
+            :loading="actionLoading === 'cancel'"
+            @click="onCancelRun"
+          >
+            <template #icon><CloseOutlined /></template>
           </a-button>
+        </a-tooltip>
+      </div>
+      <div class="pt-2">
+        <div class="flex items-center justify-between gap-2">
+          <div v-if="hasAvailableAgents" class="flex items-center gap-2 min-w-0">
+            <a-select
+              :value="effectiveAgentId"
+              :options="props.agentOptions"
+              size="small"
+              style="min-width: 180px; max-width: 320px"
+              @update:value="onAgentChange"
+            />
+          </div>
+          <div v-else class="flex items-center gap-2 text-xs text-[color:var(--text-tertiary)]">
+            <span>{{ t("agent.client.noAgentHint") }}</span>
+            <a-button type="link" size="small" class="!px-0" @click="goAgentProfiles">
+              {{ t("agent.client.goCreateAgent") }}
+            </a-button>
+          </div>
+          <div class="text-xs text-[color:var(--text-tertiary)] whitespace-nowrap">
+            {{ t("agent.client.lastTotalTokens") }}: {{ formattedLastTotalTokens }}
+          </div>
         </div>
       </div>
     </div>
@@ -122,7 +183,7 @@
 
 <script setup lang="ts">
 import type { AgentContextItemRecord, AgentSessionRunState } from "@agent-workbench/shared";
-import { ForkOutlined, RollbackOutlined } from "@ant-design/icons-vue";
+import { CloseOutlined, DoubleRightOutlined, ForkOutlined, RollbackOutlined } from "@ant-design/icons-vue";
 import { Modal, message } from "ant-design-vue";
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
@@ -150,12 +211,24 @@ type DisplayItem = {
   role: "user" | "assistant" | "system" | "tool";
   text: string;
   status: AgentContextItemRecord["status"];
+  toolName?: string;
+  toolError?: string;
+  subtaskSessionId?: string;
+  subtaskDescription?: string;
+  subtaskMode?: "new" | "existing" | "fork" | string;
+  subtaskAgentId?: string;
+  subtaskAgentName?: string;
   tone?: "normal" | "error";
 };
 
 const props = defineProps<{
   workspaceId: string;
   sessionId: string;
+  sessionKind: "primary" | "subtask";
+  parentSessionId?: string | null;
+  sessionReady: boolean;
+  ensureSession?: (sessionId: string) => Promise<string>;
+  canChooseSession?: boolean;
   active: boolean;
   modelValue?: string | null;
   agentOptions: AgentOption[];
@@ -164,6 +237,9 @@ const props = defineProps<{
 const emit = defineEmits<{
   "update:modelValue": [value: string | null];
   forked: [sessionId: string];
+  "open-subtask": [sessionId: string];
+  "open-parent": [sessionId: string];
+  "choose-session": [];
 }>();
 
 const { t } = useI18n();
@@ -178,12 +254,14 @@ const runState = ref<AgentSessionRunState>({
   activeRunId: null,
   activeAssistantItemId: null,
   waitingToolItemId: null,
+  lastResponseTotalTokens: null,
   nonTerminalItemIds: [],
   updatedAt: 0,
   appliedItemId: 0
 });
 const items = ref<AgentContextItemRecord[]>([]);
 const scrollEl = ref<HTMLElement | null>(null);
+const inputEl = ref<{ focus?: () => void } | null>(null);
 
 const actionLoading = ref<"cancel" | "fork" | "revert" | "approve" | "deny" | null>(null);
 const actionTargetId = ref<number | null>(null);
@@ -191,6 +269,17 @@ const actionTargetId = ref<number | null>(null);
 let pollTimer: number | null = null;
 let settlePollRemaining = 0;
 const terminalStatuses = new Set<AgentContextItemRecord["status"]>(["completed", "failed", "denied", "cancelled"]);
+const isSubtaskSession = computed(() => props.sessionKind === "subtask");
+
+function toRecord(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function resolveAgentName(agentId: string) {
+  const target = props.agentOptions.find((item) => item.value === agentId);
+  return target?.label || "";
+}
 
 const hasAvailableAgents = computed(() => props.agentOptions.length > 0);
 
@@ -206,6 +295,12 @@ const effectiveAgentId = computed(() => {
     return raw;
   }
   return fallbackAgentId.value;
+});
+
+const formattedLastTotalTokens = computed(() => {
+  const value = runState.value.lastResponseTotalTokens;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "-";
+  return new Intl.NumberFormat().format(Math.floor(value));
 });
 
 const displayItems = computed<DisplayItem[]>(() => {
@@ -237,9 +332,39 @@ const displayItems = computed<DisplayItem[]>(() => {
       const argsText = formatToolArgs(item.output.args);
       const callText = `${item.output.toolName}(${argsText})`;
       const statusText = `[${item.status}]`;
+      const resultObj = toRecord(item.output.result);
+      const subtaskSessionId =
+        typeof resultObj?.subtaskSessionId === "string" && resultObj.subtaskSessionId.trim()
+          ? resultObj.subtaskSessionId.trim()
+          : undefined;
+      const errorText = item.output.error ? truncateText(item.output.error, 220) : undefined;
+      if (item.output.toolName === "subtask") {
+        const argsObj = toRecord(item.output.args);
+        const description = typeof argsObj?.description === "string" ? argsObj.description.trim() : "";
+        const session = toRecord(argsObj?.session);
+        const modeRaw = typeof session?.mode === "string" ? session.mode.trim() : "";
+        const mode = modeRaw === "new" || modeRaw === "existing" || modeRaw === "fork" ? modeRaw : "";
+        const agentId = typeof argsObj?.agentId === "string" ? argsObj.agentId.trim() : "";
+        const agentName = agentId ? resolveAgentName(agentId) : "";
+        return {
+          id: item.id,
+          prevId: item.prevId,
+          role: "tool",
+          text: `${callText} ${statusText}`,
+          status: item.status,
+          toolName: item.output.toolName,
+          ...(subtaskSessionId ? { subtaskSessionId } : {}),
+          ...(errorText ? { toolError: errorText } : {}),
+          ...(description ? { subtaskDescription: description } : {}),
+          ...(mode ? { subtaskMode: mode } : {}),
+          ...(agentId ? { subtaskAgentId: agentId } : {}),
+          ...(agentName ? { subtaskAgentName: agentName } : {}),
+          tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
+        };
+      }
       let line = `${callText} ${statusText}`;
-      if (item.output.error) {
-        line += `\nerror: ${truncateText(item.output.error, 220)}`;
+      if (errorText) {
+        line += `\nerror: ${errorText}`;
       }
       return {
         id: item.id,
@@ -247,6 +372,8 @@ const displayItems = computed<DisplayItem[]>(() => {
         role: "tool",
         text: line,
         status: item.status,
+        toolName: item.output.toolName,
+        ...(subtaskSessionId ? { subtaskSessionId } : {}),
         tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
       };
     }
@@ -269,6 +396,17 @@ function roleLabel(role: DisplayItem["role"]) {
   if (role === "assistant") return t("agent.client.roles.assistant");
   if (role === "tool") return t("agent.client.roles.tool");
   return t("agent.client.roles.system");
+}
+
+function isSubtaskCard(item: DisplayItem) {
+  return item.role === "tool" && item.toolName === "subtask";
+}
+
+function formatSubtaskMode(mode?: string) {
+  if (mode === "new") return t("agent.client.subtaskModeNew");
+  if (mode === "fork") return t("agent.client.subtaskModeFork");
+  if (mode === "existing") return t("agent.client.subtaskModeExisting");
+  return mode || "-";
 }
 
 function truncateText(input: string, maxLen: number) {
@@ -313,6 +451,13 @@ async function scrollToBottom() {
   el.scrollTop = el.scrollHeight;
 }
 
+async function focusInputIfNeeded() {
+  if (!props.active) return;
+  if (isSubtaskSession.value) return;
+  await nextTick();
+  inputEl.value?.focus?.();
+}
+
 function upsertItem(next: AgentContextItemRecord) {
   const idx = items.value.findIndex((item) => item.id === next.id);
   if (idx < 0) {
@@ -340,6 +485,22 @@ function isTerminalStatus(status: AgentContextItemRecord["status"]) {
 }
 
 async function refreshAll(forceFull: boolean) {
+  if (!props.sessionReady) {
+    runState.value = {
+      sessionId: props.sessionId,
+      status: "idle",
+      activeRunId: null,
+      activeAssistantItemId: null,
+      waitingToolItemId: null,
+      lastResponseTotalTokens: null,
+      nonTerminalItemIds: [],
+      updatedAt: 0,
+      appliedItemId: 0
+    };
+    items.value = [];
+    clearPoll();
+    return;
+  }
   if (loading.value) return;
   loading.value = true;
   try {
@@ -438,8 +599,37 @@ function onAgentChange(value: string) {
   emit("update:modelValue", next);
 }
 
+function onCycleAgent(step: 1 | -1) {
+  if (!hasAvailableAgents.value) return;
+  const options = props.agentOptions;
+  if (options.length === 0) return;
+  const current = effectiveAgentId.value;
+  let index = options.findIndex((item) => item.value === current);
+  if (index < 0) index = 0;
+  const nextIndex = (index + step + options.length) % options.length;
+  const nextId = options[nextIndex]?.value;
+  if (!nextId || nextId === current) return;
+  emit("update:modelValue", nextId);
+}
+
 function goAgentProfiles() {
   void router.push("/settings/agentProfiles");
+}
+
+function onOpenSubtask(sessionId?: string) {
+  const id = String(sessionId || "").trim();
+  if (!id) return;
+  emit("open-subtask", id);
+}
+
+function onChooseSession() {
+  emit("choose-session");
+}
+
+function onOpenParent() {
+  const sessionId = String(props.parentSessionId || "").trim();
+  if (!sessionId) return;
+  emit("open-parent", sessionId);
 }
 
 function newClientRequestId() {
@@ -562,6 +752,7 @@ async function onToolPermission(itemId: number, decision: "approve" | "deny") {
 }
 
 async function onSend() {
+  if (isSubtaskSession.value) return;
   if (!hasAvailableAgents.value) {
     message.warning(t("agent.client.noAgentHint"));
     return;
@@ -575,15 +766,26 @@ async function onSend() {
   }
   sending.value = true;
   try {
-    await sendAgentMessage(props.sessionId, {
+    const targetSessionId = props.sessionReady
+      ? props.sessionId
+      : props.ensureSession
+        ? await props.ensureSession(props.sessionId)
+        : "";
+    if (!targetSessionId) {
+      throw new Error("failed to create agent session");
+    }
+
+    await sendAgentMessage(targetSessionId, {
       workspaceId: props.workspaceId,
       text,
       clientRequestId: newClientRequestId(),
       agentId
     });
     draft.value = "";
-    await refreshAll(false);
-    schedulePoll(300);
+    if (targetSessionId === props.sessionId) {
+      await refreshAll(false);
+      schedulePoll(300);
+    }
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
@@ -620,12 +822,14 @@ watch(
       activeRunId: null,
       activeAssistantItemId: null,
       waitingToolItemId: null,
+      lastResponseTotalTokens: null,
       nonTerminalItemIds: [],
       updatedAt: 0,
       appliedItemId: 0
     };
     if (props.sessionId) {
       void refreshAll(true);
+      void focusInputIfNeeded();
     }
   },
   { immediate: true }
@@ -639,6 +843,7 @@ watch(
       return;
     }
     void refreshAll(false);
+    void focusInputIfNeeded();
   },
   { immediate: true }
 );
@@ -670,13 +875,11 @@ onBeforeUnmount(() => {
   margin-top: 2px;
 }
 
-.agent-message-item.is-user-message,
 .agent-message-item.is-assistant-message {
   transition: box-shadow 0.15s ease;
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .agent-message-item.is-user-message:hover,
   .agent-message-item.is-assistant-message:hover {
     box-shadow: inset 0 0 0 999px rgba(255, 255, 255, 0.04);
   }
@@ -698,5 +901,49 @@ onBeforeUnmount(() => {
 .agent-message-item:hover .message-controls {
   opacity: 1;
   pointer-events: auto;
+}
+
+.subtask-card.is-clickable {
+  cursor: pointer;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .subtask-card.is-clickable:hover {
+    box-shadow: inset 0 0 0 999px rgba(255, 255, 255, 0.04);
+  }
+}
+
+.subtask-card.is-disabled {
+  opacity: 0.8;
+}
+
+.subtask-title-icon {
+  display: inline-block;
+  font-size: 14px;
+}
+
+.cancel-icon-btn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.08);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .cancel-icon-btn:hover {
+    border-color: rgba(239, 68, 68, 0.55);
+    color: #ef4444;
+    background: rgba(239, 68, 68, 0.14);
+  }
+}
+
+:deep(.agent-input-textarea) {
+  border-radius: 4px;
 }
 </style>

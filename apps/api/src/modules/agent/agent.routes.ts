@@ -24,6 +24,17 @@ import type { AgentRuntimePort } from "./agent.runtime-port.js";
 import type { AgentService } from "./agent.service.js";
 import { HttpError } from "../../app/errors.js";
 
+const AgentBuiltinToolNameSchema = Type.Union([
+  Type.Literal("bash"),
+  Type.Literal("read"),
+  Type.Literal("write"),
+  Type.Literal("subtask")
+]);
+const AgentDynamicToolNameSchema = Type.Union([
+  AgentBuiltinToolNameSchema,
+  Type.String({ pattern: "^mcp_[A-Za-z0-9_-]+_[A-Za-z0-9_-]+$" })
+]);
+
 function assertInternalToken(req: FastifyRequest, service: AgentService) {
   const token = String(req.headers["x-awb-agent-internal-token"] || "");
   if (token !== service.getContext().agentInternalToken) {
@@ -240,6 +251,141 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
   );
 
   app.post(
+    "/api/internal/agent/mcp-settings",
+    {
+      schema: {
+        tags: ["agent"],
+        body: Type.Object({}),
+        response: {
+          200: Type.Object({
+            servers: Type.Array(
+              Type.Object({
+                id: Type.String({ minLength: 1 }),
+                enabled: Type.Boolean(),
+                config: Type.Any()
+              })
+            ),
+            updatedAt: Type.Number()
+          }),
+          401: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      return params.service.getAgentMcpSettingsFromWorker();
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/subtask/start",
+    {
+      schema: {
+        tags: ["agent"],
+        body: Type.Object({
+          workspaceId: Type.String({ minLength: 1 }),
+          parentSessionId: Type.String({ minLength: 1 }),
+          parentRunId: Type.String({ minLength: 1 }),
+          parentToolItemId: Type.Number({ minimum: 1 }),
+          description: Type.String({ minLength: 1, maxLength: 20 }),
+          prompt: Type.String({ minLength: 1 }),
+          agentId: Type.String({ minLength: 1 }),
+          session: Type.Union([
+            Type.Object({ mode: Type.Literal("new") }),
+            Type.Object({ mode: Type.Literal("existing"), sessionId: Type.String({ minLength: 1 }) }),
+            Type.Object({ mode: Type.Literal("fork") })
+          ])
+        }),
+        response: {
+          200: Type.Object({
+            sessionId: Type.String({ minLength: 1 }),
+            runId: Type.String({ minLength: 1 }),
+            workspacePath: Type.String({ minLength: 1 })
+          }),
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as {
+        workspaceId: string;
+        parentSessionId: string;
+        parentRunId: string;
+        parentToolItemId: number;
+        description: string;
+        prompt: string;
+        agentId: string;
+        session: { mode: "new" | "existing" | "fork"; sessionId?: string };
+      };
+      return params.service.startSubtaskRunFromWorker(body);
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/subtask/result",
+    {
+      schema: {
+        tags: ["agent"],
+        body: Type.Object({
+          workspaceId: Type.String({ minLength: 1 }),
+          sessionId: Type.String({ minLength: 1 }),
+          runId: Type.String({ minLength: 1 })
+        }),
+        response: {
+          200: Type.Object({
+            resultText: Type.String()
+          }),
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as { workspaceId: string; sessionId: string; runId: string };
+      return params.service.getSubtaskRunResultFromWorker(body);
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/subtask/status",
+    {
+      schema: {
+        tags: ["agent"],
+        body: Type.Object({
+          workspaceId: Type.String({ minLength: 1 }),
+          sessionId: Type.String({ minLength: 1 }),
+          runId: Type.String({ minLength: 1 })
+        }),
+        response: {
+          200: Type.Object({
+            status: Type.Union([
+              Type.Literal("running"),
+              Type.Literal("waiting_permission"),
+              Type.Literal("completed"),
+              Type.Literal("failed"),
+              Type.Literal("cancelled")
+            ])
+          }),
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as { workspaceId: string; sessionId: string; runId: string };
+      return params.service.getSubtaskRunStatusFromWorker(body);
+    }
+  );
+
+  app.post(
     "/api/internal/agent/context-items",
     {
       schema: {
@@ -343,6 +489,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
           activeRunId: Type.Union([Type.String(), Type.Null()]),
           activeAssistantItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
           waitingToolItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
+          lastResponseTotalTokens: Type.Optional(Type.Union([Type.Number({ minimum: 0 }), Type.Null()])),
           updatedAt: Type.Optional(Type.Number())
         }),
         response: { 200: Type.Object({ ok: Type.Boolean() }), 401: ErrorResponseSchema }
@@ -357,6 +504,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
         activeRunId: string | null;
         activeAssistantItemId: number | null;
         waitingToolItemId: number | null;
+        lastResponseTotalTokens?: number | null;
         updatedAt?: number;
       };
       params.service.updateRunStateFromWorker(body);
@@ -415,7 +563,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
             ),
             tools: Type.Array(
               Type.Object({
-                name: Type.Union([Type.Literal("bash"), Type.Literal("read"), Type.Literal("write")]),
+                name: AgentDynamicToolNameSchema,
                 description: Type.String(),
                 inputSchema: Type.Any(),
                 requiresApproval: Type.Boolean()
@@ -425,7 +573,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
               Type.Object({
                 itemId: Type.Number({ minimum: 1 }),
                 status: AgentContextItemStatusSchema,
-                toolName: Type.Union([Type.Literal("bash"), Type.Literal("read"), Type.Literal("write")]),
+                toolName: AgentDynamicToolNameSchema,
                 toolCallId: Type.Optional(Type.String({ minLength: 1 })),
                 args: Type.Any(),
                 approved: Type.Optional(Type.Boolean())
@@ -467,8 +615,10 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
             agent: Type.Object({
               id: Type.String({ minLength: 1 }),
               name: Type.String({ minLength: 1 }),
+              summary: Type.String({ maxLength: 160 }),
               prompt: Type.String(),
-              tools: Type.Array(Type.Union([Type.Literal("bash"), Type.Literal("read"), Type.Literal("write")])),
+              tools: Type.Array(AgentBuiltinToolNameSchema),
+              mcpServers: Type.Array(Type.String({ minLength: 1 })),
               permissions: Type.Object({
                 allowRead: Type.Boolean(),
                 allowWrite: Type.Boolean(),

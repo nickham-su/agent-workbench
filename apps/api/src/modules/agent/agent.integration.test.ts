@@ -122,8 +122,10 @@ async function configureAgentDefaults(app: FastifyInstance) {
         {
           id: "default",
           name: "default",
+          summary: "",
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write"],
+          mcpServers: [],
           permissions: {
             allowRead: true,
             allowWrite: true,

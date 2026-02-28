@@ -285,25 +285,32 @@ export default {
       reopenClosed: "Reopen closed clients"
     },
     client: {
-      tabLabel: "Agent {index}",
+      tabLabel: "Session {index}",
       newTitle: "AI Client {time}",
-      agentLabel: "Agent",
-      defaultAgent: "Use default agent",
-      running: "Running",
       cancel: "Cancel run",
-      cancelAnchorMissing: "No valid user anchor found for cancellation",
       cancelConfirmTitle: "Cancel current run?",
       cancelConfirmContent: "This stops the current execution and keeps all messages. The currently running AI/tool item will be marked as cancelled.",
       cancelled: "Current run cancelled",
-      empty: "No messages yet",
-      streamingHint: "AI is generating, messages will update automatically...",
-      inputPlaceholder: "Type a message and press Enter",
+      welcome: "Hi, I can help you get tasks done.",
+      inputPlaceholder: "Type a message, Enter to send, Tab to switch agent",
       inputPlaceholderNoAgent: "Create an agent before sending messages",
       noAgentHint: "No available agent, please create one first",
       goCreateAgent: "Create agent",
-      sendHint: "Press Enter to send",
-      refresh: "Refresh",
-      send: "Send",
+      chooseSession: "Choose session",
+      chooseSessionTitle: "Choose a session to continue",
+      noSessionToChoose: "No previous session available",
+      sessionEmptyPreview: "(No user messages in this session)",
+      lastTotalTokens: "Total Tokens",
+      backToParent: "Back to parent session",
+      parentSessionMissing: "Parent session not found",
+      readonlySubtaskHint: "This subtask session is read-only",
+      subtaskCardTitle: "Subtask",
+      subtaskMode: "Mode",
+      subtaskModeNew: "New session",
+      subtaskModeFork: "Inherit context",
+      subtaskModeExisting: "Reuse session",
+      subtaskAgent: "Agent",
+      subtaskSessionId: "Session ID",
       fork: "Fork from here",
       forked: "Created a new client from this message",
       revert: "Revert to here",
@@ -580,6 +587,7 @@ export default {
       credentials: "Credentials",
       network: "Network",
       agentProviders: "AI Providers",
+      agentMcp: "MCP",
       agentProfiles: "AI Agents",
       security: "Security"
     },
@@ -812,6 +820,8 @@ export default {
       },
       fields: {
         tools: "Tools",
+        mcpServers: "MCP Servers",
+        summary: "Summary",
         permissions: "Permissions",
         defaultModel: "Default model",
         useGlobalDefault: "Use global default model",
@@ -820,7 +830,8 @@ export default {
       tools: {
         bash: "Bash",
         read: "Read",
-        write: "Write"
+        write: "Write",
+        subtask: "Subtask"
       },
       permissions: {
         allowRead: "Allow Read",
@@ -838,8 +849,13 @@ export default {
       agentForm: {
         idLabel: "Agent ID (auto)",
         nameLabel: "Name",
+        summaryLabel: "Summary",
+        summaryPlaceholder: "e.g. Focused on web information gathering and research, with structured synthesis",
+        summaryHelp: "Use one sentence to describe when this agent should be used and its boundaries.",
         promptLabel: "System prompt",
         promptPlaceholder: "Optional. Leave empty to use concise default prompt",
+        mcpServersPlaceholder: "Select allowed MCP servers",
+        defaultModelCascaderPlaceholder: "Select default model strategy",
         defaultModelModeLabel: "Default model strategy",
         defaultProviderLabel: "Provider",
         defaultProviderPlaceholder: "Select a provider",
@@ -857,6 +873,47 @@ export default {
         invalidAgentForm: "Please complete required agent fields",
         duplicateAgentId: "Agent ID already exists",
         defaultModelInvalid: "Default model does not exist, please reselect"
+      },
+      saved: "Saved"
+    },
+    agentMcp: {
+      description: "Manage global MCP server configuration. Use JSON input when adding or editing.",
+      saving: "Saving...",
+      empty: "No MCP servers yet. Add one to start.",
+      actions: {
+        addServer: "Add MCP server",
+        edit: "Edit",
+        delete: "Delete"
+      },
+      fields: {
+        enabled: "Enabled",
+        disabled: "Disabled"
+      },
+      modal: {
+        ok: "OK",
+        cancel: "Cancel"
+      },
+      serverModal: {
+        createTitle: "Add MCP server",
+        editTitle: "Edit MCP server"
+      },
+      serverForm: {
+        idLabel: "Server ID",
+        jsonLabel: "Config JSON",
+        jsonHelp: "Must be an object and include type=local or type=remote.",
+        enabled: "Enable this server"
+      },
+      deleteServer: {
+        title: "Delete MCP server?",
+        content: "This will delete MCP server {id}.",
+        ok: "Delete",
+        cancel: "Cancel"
+      },
+      errors: {
+        invalidForm: "Please complete required MCP fields",
+        invalidJson: "Invalid MCP config JSON, object expected",
+        invalidType: "Config JSON must include type=local or type=remote",
+        duplicateServerId: "Server ID already exists"
       },
       saved: "Saved"
     },

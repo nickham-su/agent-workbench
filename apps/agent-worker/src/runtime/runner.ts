@@ -7,6 +7,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { runBashCommand } from "./bash.js";
 import { AgentApiClient, ApiConflictError, type ExecutionProfile, type PromptContext } from "./apiClient.js";
 import { runReadTool, runWriteTool } from "./fileTools.js";
+import { McpManager } from "./mcpManager.js";
 
 function nowMs() {
   return Date.now();
@@ -40,14 +41,14 @@ type QueuedRun = {
 type PendingTool = {
   itemId: number;
   status: "queued" | "running" | "awaiting_permission" | "streaming" | "completed" | "failed" | "denied" | "cancelled";
-  toolName: "bash" | "read" | "write";
+  toolName: string;
   toolCallId: string;
   args: Record<string, unknown>;
   approved?: boolean;
 };
 
 type ToolCall = {
-  toolName: "bash" | "read" | "write";
+  toolName: string;
   toolCallId: string;
   args: Record<string, unknown>;
 };
@@ -197,10 +198,11 @@ async function writeItemLog(params: {
   }
 }
 
-function normalizeToolName(raw: unknown): "bash" | "read" | "write" | null {
-  const value = String(raw || "").trim().toLowerCase();
-  if (value === "bash" || value === "read" || value === "write") return value;
-  return null;
+function normalizeToolName(raw: unknown, available: Set<string>): string | null {
+  const value = String(raw || "").trim();
+  if (!value) return null;
+  if (!available.has(value)) return null;
+  return value;
 }
 
 function normalizeToolArgs(raw: unknown) {
@@ -212,6 +214,162 @@ function toolSignature(toolName: string, args: Record<string, unknown>) {
   return `${toolName}:${JSON.stringify(args)}`;
 }
 
+function isBuiltinTool(toolName: string) {
+  return toolName === "bash" || toolName === "read" || toolName === "write";
+}
+
+function isSubtaskTool(toolName: string) {
+  return toolName === "subtask";
+}
+
+function isMcpTool(toolName: string) {
+  return toolName.startsWith("mcp_");
+}
+
+function isToolEnabledForAgent(profile: ExecutionProfile, toolName: string) {
+  if (isBuiltinTool(toolName) || isSubtaskTool(toolName)) {
+    return profile.agent.tools.includes(toolName as "bash" | "read" | "write" | "subtask");
+  }
+  if (isMcpTool(toolName)) {
+    return true;
+  }
+  return false;
+}
+
+function toRecord(raw: unknown) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  return raw as Record<string, unknown>;
+}
+
+function toNonNegativeInt(raw: unknown) {
+  const value = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(value) || value < 0) return null;
+  return Math.floor(value);
+}
+
+function extractTotalTokens(raw: unknown): number | null {
+  if (raw == null) return null;
+  if (typeof raw === "number") return toNonNegativeInt(raw);
+  if (typeof raw !== "object" || Array.isArray(raw)) return null;
+  const usage = raw as Record<string, unknown>;
+
+  const direct =
+    toNonNegativeInt(usage.totalTokens) ??
+    toNonNegativeInt(usage.total_tokens) ??
+    toNonNegativeInt(usage.total);
+  if (direct != null) return direct;
+
+  const input =
+    toNonNegativeInt(usage.inputTokens) ??
+    toNonNegativeInt(usage.promptTokens) ??
+    toNonNegativeInt(usage.input_tokens) ??
+    toNonNegativeInt(usage.prompt_tokens);
+  const output =
+    toNonNegativeInt(usage.outputTokens) ??
+    toNonNegativeInt(usage.completionTokens) ??
+    toNonNegativeInt(usage.output_tokens) ??
+    toNonNegativeInt(usage.completion_tokens);
+  if (input != null && output != null) {
+    return input + output;
+  }
+
+  return null;
+}
+
+async function readStreamTotalTokens(stream: unknown): Promise<number | null> {
+  const streamObj = stream as Record<string, unknown>;
+  const candidates: unknown[] = [];
+  if (streamObj.usage !== undefined) candidates.push(streamObj.usage);
+  if (streamObj.totalUsage !== undefined) candidates.push(streamObj.totalUsage);
+  if (streamObj.response !== undefined) candidates.push(streamObj.response);
+
+  for (const candidate of candidates) {
+    try {
+      const resolved = candidate && typeof (candidate as Promise<unknown>).then === "function"
+        ? await (candidate as Promise<unknown>)
+        : candidate;
+      const total = extractTotalTokens(resolved);
+      if (total != null) return total;
+
+      if (resolved && typeof resolved === "object" && !Array.isArray(resolved)) {
+        const nested = resolved as Record<string, unknown>;
+        const usage = nested.usage ?? nested.totalUsage;
+        const nestedTotal = extractTotalTokens(usage);
+        if (nestedTotal != null) return nestedTotal;
+      }
+    } catch {
+      // ignore usage parse failures
+    }
+  }
+
+  return null;
+}
+
+function requireNonEmptyStringArg(raw: unknown, fieldName: string) {
+  if (typeof raw !== "string") {
+    throw new Error(`${fieldName} must be a non-empty string`);
+  }
+  const value = raw.trim();
+  if (!value) {
+    throw new Error(`${fieldName} must be a non-empty string`);
+  }
+  return value;
+}
+
+function parseOptionalPositiveIntegerArg(raw: unknown, fieldName: string) {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw === "string" && raw.trim() === "") return undefined;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`${fieldName} must be an integer >= 1`);
+  }
+  return parsed;
+}
+
+type ParsedSubtaskArgs = {
+  description: string;
+  prompt: string;
+  agentId: string;
+  session: {
+    mode: "new" | "existing" | "fork";
+    sessionId?: string;
+  };
+};
+
+function parseSubtaskArgs(raw: Record<string, unknown>): ParsedSubtaskArgs {
+  const description = requireNonEmptyStringArg(raw.description, "subtask.description");
+  if (description.length > 20) {
+    throw new Error("subtask.description must be <= 20 characters");
+  }
+  const prompt = requireNonEmptyStringArg(raw.prompt, "subtask.prompt");
+  const agentId = requireNonEmptyStringArg(raw.agentId, "subtask.agentId");
+  const sessionRaw = toRecord(raw.session);
+  const modeRaw = requireNonEmptyStringArg(sessionRaw.mode, "subtask.session.mode");
+  let mode: "new" | "existing" | "fork";
+  if (modeRaw === "new" || modeRaw === "existing" || modeRaw === "fork") {
+    mode = modeRaw;
+  } else {
+    throw new Error(`subtask.session.mode must be one of: new, existing, fork`);
+  }
+  const sessionId = String(sessionRaw.sessionId || "").trim();
+  if (mode === "existing" && !sessionId) {
+    throw new Error("subtask.session.sessionId is required when mode=existing");
+  }
+  if ((mode === "new" || mode === "fork") && sessionId) {
+    throw new Error(`subtask.session.sessionId is not allowed when mode=${mode}`);
+  }
+
+  return {
+    description,
+    prompt,
+    agentId,
+    session: {
+      mode,
+      ...(sessionId ? { sessionId } : {})
+    }
+  };
+}
+
 export class AgentRunner {
   private readonly queue: QueuedRun[] = [];
   private readonly queuedRunIds = new Set<string>();
@@ -221,6 +379,7 @@ export class AgentRunner {
 
   constructor(
     private readonly apiClient: AgentApiClient,
+    private readonly mcpManager: McpManager,
     private readonly logger: Pick<Console, "info" | "warn" | "error">,
     private readonly concurrency: number
   ) {}
@@ -288,25 +447,56 @@ export class AgentRunner {
       args: tool.args
     };
 
-    if (tool.status === "awaiting_permission") {
-      await this.apiClient.updateRunState({
-        workspaceId: run.workspaceId,
-        sessionId: run.sessionId,
-        status: "waiting_permission",
-        activeRunId: run.runId,
-        activeAssistantItemId: null,
-        waitingToolItemId: tool.itemId,
+    if (!isToolEnabledForAgent(profile, tool.toolName)) {
+      await this.apiClient.updateContextItem({
+        itemId: tool.itemId,
+        status: "failed",
+        output: {
+          ...outputBase,
+          error: `tool is disabled for current agent: ${tool.toolName}`
+        },
         updatedAt: nowMs()
       });
-      return { paused: true as const };
+      return { paused: false as const };
     }
 
-    const allowedByPermissions =
-      (tool.toolName === "read" && profile.agent.permissions.allowRead) ||
-      (tool.toolName === "write" && profile.agent.permissions.allowWrite) ||
-      (tool.toolName === "bash" && profile.agent.permissions.allowBash);
+    const needsApproval =
+      (tool.toolName === "read" && !profile.agent.permissions.allowRead) ||
+      (tool.toolName === "write" && !profile.agent.permissions.allowWrite) ||
+      (tool.toolName === "bash" && !profile.agent.permissions.allowBash);
 
-    if (!allowedByPermissions && tool.approved !== true) {
+    if (tool.status === "awaiting_permission") {
+      if (!needsApproval) {
+        await this.apiClient.updateContextItem({
+          itemId: tool.itemId,
+          status: "queued",
+          output: outputBase,
+          updatedAt: nowMs()
+        });
+        await this.apiClient.updateRunState({
+          workspaceId: run.workspaceId,
+          sessionId: run.sessionId,
+          status: "running",
+          activeRunId: run.runId,
+          activeAssistantItemId: null,
+          waitingToolItemId: null,
+          updatedAt: nowMs()
+        });
+      } else {
+        await this.apiClient.updateRunState({
+          workspaceId: run.workspaceId,
+          sessionId: run.sessionId,
+          status: "waiting_permission",
+          activeRunId: run.runId,
+          activeAssistantItemId: null,
+          waitingToolItemId: tool.itemId,
+          updatedAt: nowMs()
+        });
+        return { paused: true as const };
+      }
+    }
+
+    if (needsApproval && tool.approved !== true) {
       await this.apiClient.updateContextItem({
         itemId: tool.itemId,
         status: "awaiting_permission",
@@ -352,10 +542,12 @@ export class AgentRunner {
       updatedAt: nowMs()
     });
 
+    let subtaskSessionId: string | undefined;
+
     try {
       let result: unknown;
       if (tool.toolName === "bash") {
-        const command = String(tool.args.command || "").trim();
+        const command = requireNonEmptyStringArg(tool.args.command, "bash.command");
         const bash = await runBashCommand({
           command,
           cwd: run.workspacePath,
@@ -372,11 +564,9 @@ export class AgentRunner {
           stderr: bash.stderr
         };
       } else if (tool.toolName === "read") {
-        const filePath = String(tool.args.filePath || "");
-        const offsetRaw = tool.args.offset;
-        const limitRaw = tool.args.limit;
-        const offset = Number.isFinite(Number(offsetRaw)) ? Number(offsetRaw) : undefined;
-        const limit = Number.isFinite(Number(limitRaw)) ? Number(limitRaw) : undefined;
+        const filePath = requireNonEmptyStringArg(tool.args.filePath, "read.filePath");
+        const offset = parseOptionalPositiveIntegerArg(tool.args.offset, "read.offset");
+        const limit = parseOptionalPositiveIntegerArg(tool.args.limit, "read.limit");
         result = await runReadTool({
           workspacePath: run.workspacePath,
           filePath,
@@ -384,15 +574,92 @@ export class AgentRunner {
           limit,
           signal
         });
-      } else {
-        const filePath = String(tool.args.filePath || "");
-        const content = String(tool.args.content ?? "");
+      } else if (tool.toolName === "write") {
+        const filePath = requireNonEmptyStringArg(tool.args.filePath, "write.filePath");
+        if (typeof tool.args.content !== "string") {
+          throw new Error("write.content must be a string");
+        }
+        const content = tool.args.content;
         result = await runWriteTool({
           workspacePath: run.workspacePath,
           filePath,
           content,
           signal
         });
+      } else if (tool.toolName === "subtask") {
+        const parsed = parseSubtaskArgs(tool.args);
+        const started = await this.apiClient.startSubtaskRun({
+          workspaceId: run.workspaceId,
+          parentSessionId: run.sessionId,
+          parentRunId: run.runId,
+          parentToolItemId: tool.itemId,
+          description: parsed.description,
+          prompt: parsed.prompt,
+          agentId: parsed.agentId,
+          session: parsed.session
+        });
+        subtaskSessionId = started.sessionId;
+
+        await this.apiClient.updateContextItem({
+          itemId: tool.itemId,
+          status: "running",
+          output: {
+            ...outputBase,
+            result: {
+              subtaskSessionId
+            }
+          },
+          updatedAt: nowMs()
+        });
+
+        await this.processRun(
+          {
+            workspaceId: run.workspaceId,
+            sessionId: started.sessionId,
+            runId: started.runId,
+            inputText: parsed.prompt,
+            workspacePath: started.workspacePath
+          },
+          signal
+        );
+
+        const subtaskStatus = await this.apiClient.getSubtaskStatus({
+          workspaceId: run.workspaceId,
+          sessionId: started.sessionId,
+          runId: started.runId
+        });
+
+        if (signal.aborted) {
+          await this.apiClient.completeRun({
+            workspaceId: run.workspaceId,
+            sessionId: started.sessionId,
+            runId: started.runId,
+            status: "cancelled",
+            updatedAt: nowMs()
+          });
+        } else if (subtaskStatus.status === "running" || subtaskStatus.status === "waiting_permission") {
+          throw new Error(`subtask did not reach terminal status: ${subtaskStatus.status}`);
+        }
+
+        const subtaskResult = await this.apiClient.getSubtaskResult({
+          workspaceId: run.workspaceId,
+          sessionId: started.sessionId,
+          runId: started.runId
+        });
+        result = {
+          subtaskSessionId: started.sessionId,
+          resultText: subtaskResult.resultText
+        };
+      } else if (isMcpTool(tool.toolName)) {
+        const mcpResult = await this.mcpManager.callTool(tool.toolName, tool.args);
+        result = {
+          serverId: mcpResult.serverId,
+          toolName: mcpResult.toolName,
+          text: mcpResult.text,
+          raw: mcpResult.raw
+        };
+      } else {
+        throw new Error(`unsupported tool: ${tool.toolName}`);
       }
 
       if (signal.aborted) return { paused: false as const };
@@ -437,6 +704,13 @@ export class AgentRunner {
         status: "failed",
         output: {
           ...outputBase,
+          ...(subtaskSessionId
+            ? {
+                result: {
+                  subtaskSessionId
+                }
+              }
+            : {}),
           error
         },
         updatedAt: nowMs()
@@ -474,7 +748,21 @@ export class AgentRunner {
   }) {
     const pending: PendingTool[] = [];
     for (const item of params.context.pendingTools) {
-      if (!(item.toolName === "bash" || item.toolName === "read" || item.toolName === "write")) continue;
+      if (!isToolEnabledForAgent(params.profile, item.toolName)) {
+        await this.apiClient.updateContextItem({
+          itemId: item.itemId,
+          status: "failed",
+          output: {
+            type: "tool",
+            toolName: item.toolName,
+            toolCallId: item.toolCallId,
+            args: item.args,
+            error: `tool is disabled for current agent: ${item.toolName}`
+          },
+          updatedAt: nowMs()
+        });
+        continue;
+      }
       if (item.status === "running") {
         const outputBase = {
           type: "tool" as const,
@@ -602,6 +890,15 @@ export class AgentRunner {
       });
     }
 
+    const mcpTools = await this.mcpManager.listTools(profile.agent.mcpServers);
+    for (const item of mcpTools) {
+      toolSet[item.name] = tool({
+        description: item.description,
+        inputSchema: jsonSchema(item.inputSchema)
+      });
+    }
+    const availableToolNames = new Set<string>(Object.keys(toolSet));
+
     const request: Record<string, unknown> = {
       model,
       system: context.system || undefined,
@@ -622,6 +919,7 @@ export class AgentRunner {
     let text = "";
     const toolCalls: ToolCall[] = [];
     const startedAt = nowMs();
+    let responseTotalTokens: number | null = null;
 
     await writeItemLog({
       logger: this.logger,
@@ -664,12 +962,19 @@ export class AgentRunner {
           continue;
         }
         if (chunk.type === "tool-call") {
-          const toolName = normalizeToolName(chunk.toolName);
+          const toolName = normalizeToolName(chunk.toolName, availableToolNames);
           if (!toolName) continue;
           const rawToolCallId = String(chunk.toolCallId || "").trim();
           const toolCallId = rawToolCallId || `${turnId}_call_${toolCalls.length + 1}`;
           const args = normalizeToolArgs(chunk.input);
           toolCalls.push({ toolName, toolCallId, args });
+          continue;
+        }
+        if (chunk.type === "finish") {
+          responseTotalTokens =
+            extractTotalTokens((chunk as Record<string, unknown>).usage) ??
+            extractTotalTokens((chunk as Record<string, unknown>).totalUsage) ??
+            responseTotalTokens;
           continue;
         }
         if (chunk.type === "error") {
@@ -682,7 +987,11 @@ export class AgentRunner {
         return { aborted: true as const, assistantItemId: assistant.id };
       }
 
-      const recognizedCalls = toolCalls.filter((item) => item.toolName === "bash" || item.toolName === "read" || item.toolName === "write");
+      if (responseTotalTokens == null) {
+        responseTotalTokens = await readStreamTotalTokens(stream);
+      }
+
+      const recognizedCalls = toolCalls;
       let prevId = assistant.id;
       for (const call of recognizedCalls) {
         const signature = toolSignature(call.toolName, call.args);
@@ -764,7 +1073,8 @@ export class AgentRunner {
           request,
           response: {
             text,
-            toolCalls: recognizedCalls
+            toolCalls: recognizedCalls,
+            usage: responseTotalTokens == null ? null : { totalTokens: responseTotalTokens }
           }
         }
       });
@@ -776,6 +1086,7 @@ export class AgentRunner {
         activeRunId: run.runId,
         activeAssistantItemId: null,
         waitingToolItemId: null,
+        lastResponseTotalTokens: responseTotalTokens,
         updatedAt: nowMs()
       });
 

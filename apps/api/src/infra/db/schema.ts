@@ -129,6 +129,7 @@ export function initSchema(db: Db) {
       active_run_id text,
       active_assistant_item_id integer,
       waiting_tool_item_id integer,
+      last_response_total_tokens integer,
       applied_item_id integer not null default 0,
       updated_at integer not null,
       primary key (workspace_id, session_id),
@@ -172,10 +173,12 @@ export function initSchema(db: Db) {
   ensureColumn(db, { table: "workspaces", column: "terminal_credential_id", ddl: "terminal_credential_id text" });
   ensureColumn(db, { table: "workspaces", column: "last_used_at", ddl: "last_used_at integer" });
   ensureColumn(db, { table: "agent_session", column: "forked_from_item_id", ddl: "forked_from_item_id integer" });
+  ensureColumn(db, { table: "agent_session", column: "forked_from_session_id", ddl: "forked_from_session_id text" });
   ensureColumn(db, { table: "agent_session_head", column: "head_item_id", ddl: "head_item_id integer" });
   ensureColumn(db, { table: "agent_client_request", column: "message_item_id", ddl: "message_item_id integer" });
   ensureColumn(db, { table: "agent_session_run_state", column: "active_assistant_item_id", ddl: "active_assistant_item_id integer" });
   ensureColumn(db, { table: "agent_session_run_state", column: "waiting_tool_item_id", ddl: "waiting_tool_item_id integer" });
+  ensureColumn(db, { table: "agent_session_run_state", column: "last_response_total_tokens", ddl: "last_response_total_tokens integer" });
   ensureColumn(db, { table: "agent_session_run_state", column: "applied_item_id", ddl: "applied_item_id integer not null default 0" });
   ensureColumn(db, { table: "agent_run", column: "agent_id", ddl: "agent_id text" });
   ensureColumn(db, { table: "agent_run", column: "provider_id", ddl: "provider_id text" });

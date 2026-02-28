@@ -13,7 +13,7 @@ export const router = createRouter({
     // 设置页二级 tabs 绑定到 URL：/settings/<tab>
     { path: "/settings", redirect: "/settings/general" },
     {
-      path: "/settings/:tab(general|search|gitIdentity|credentials|network|agentProviders|agentProfiles|security)",
+      path: "/settings/:tab(general|search|gitIdentity|credentials|network|agentProviders|agentMcp|agentProfiles|security)",
       name: "workbench-settings",
       component: WorkbenchPage
     },

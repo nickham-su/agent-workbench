@@ -89,6 +89,8 @@ import type {
   AgentCancelSessionRequest,
   AgentToolPermissionRequest,
   AgentProvidersSettingsView,
+  AgentMcpSettings,
+  UpdateAgentMcpSettingsRequest,
   UpdateAgentProvidersSettingsRequest,
   AgentSettings,
   UpdateAgentSettingsRequest
@@ -813,6 +815,24 @@ export async function updateAgentProvidersSettings(body: UpdateAgentProvidersSet
 export async function getAgentSettings() {
   try {
     const res = await client.get<AgentSettings>("/settings/agent/agents");
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getAgentMcpSettings() {
+  try {
+    const res = await client.get<AgentMcpSettings>("/settings/agent/mcp");
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function updateAgentMcpSettings(body: UpdateAgentMcpSettingsRequest) {
+  try {
+    const res = await client.put<AgentMcpSettings>("/settings/agent/mcp", body);
     return res.data;
   } catch (err) {
     throw toApiError(err);

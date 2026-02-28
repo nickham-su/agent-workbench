@@ -238,7 +238,11 @@
 	          <AgentProvidersSettingsPanel ref="agentProvidersPanelRef" />
 	        </a-tab-pane>
 
- 	        <a-tab-pane key="agentProfiles" :tab="t('settings.tabs.agentProfiles')">
+	        <a-tab-pane key="agentMcp" :tab="t('settings.tabs.agentMcp')">
+	          <AgentMcpSettingsPanel ref="agentMcpPanelRef" />
+	        </a-tab-pane>
+
+  	        <a-tab-pane key="agentProfiles" :tab="t('settings.tabs.agentProfiles')">
 	          <AgentProfilesSettingsPanel ref="agentProfilesPanelRef" />
 	        </a-tab-pane>
 
@@ -289,6 +293,7 @@ import { useRoute, useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 import { editorFontSize, setEditorFontSize, setTerminalFontSize, terminalFontSize, uiFontSizeDefaults } from "@/shared/settings/uiFontSizes";
 import AgentProfilesSettingsPanel from "@/features/settings/components/AgentProfilesSettingsPanel.vue";
+import AgentMcpSettingsPanel from "@/features/settings/components/AgentMcpSettingsPanel.vue";
 import AgentProvidersSettingsPanel from "@/features/settings/components/AgentProvidersSettingsPanel.vue";
 import {
   clearAllGitIdentity,
@@ -314,9 +319,20 @@ const route = useRoute();
 const router = useRouter();
 
 const agentProvidersPanelRef = ref<{ refresh?: () => Promise<void> } | null>(null);
+const agentMcpPanelRef = ref<{ refresh?: () => Promise<void> } | null>(null);
 const agentProfilesPanelRef = ref<{ refresh?: () => Promise<void> } | null>(null);
 
-const settingsTabKeys = ["general", "credentials", "gitIdentity", "network", "search", "agentProviders", "agentProfiles", "security"] as const;
+const settingsTabKeys = [
+  "general",
+  "credentials",
+  "gitIdentity",
+  "network",
+  "search",
+  "agentProviders",
+  "agentMcp",
+  "agentProfiles",
+  "security"
+] as const;
 type SettingsTabKey = (typeof settingsTabKeys)[number];
 
 function normalizeSettingsTabKey(v: unknown): SettingsTabKey {
@@ -718,6 +734,7 @@ watch(
     else if (k === "network") await refreshNetwork();
     else if (k === "search") await refreshSearchSettings();
     else if (k === "agentProviders") await agentProvidersPanelRef.value?.refresh?.();
+    else if (k === "agentMcp") await agentMcpPanelRef.value?.refresh?.();
     else if (k === "agentProfiles") await agentProfilesPanelRef.value?.refresh?.();
     else if (k === "security") await refreshSecurity();
   },

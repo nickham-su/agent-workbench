@@ -1,5 +1,6 @@
 import { loadWorkerEnv } from "./config/env.js";
 import { AgentApiClient } from "./runtime/apiClient.js";
+import { McpManager } from "./runtime/mcpManager.js";
 import { AgentRunner } from "./runtime/runner.js";
 import { createWorkerServer } from "./server.js";
 import fs from "node:fs/promises";
@@ -12,7 +13,8 @@ const apiClient = new AgentApiClient({
   internalToken: env.internalToken
 });
 
-const runner = new AgentRunner(apiClient, console, env.concurrency);
+const mcpManager = new McpManager(apiClient, console);
+const runner = new AgentRunner(apiClient, mcpManager, console, env.concurrency);
 const server = createWorkerServer({
   host: env.host,
   port: env.port,

@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { AppContext } from "../../app/context.js";
 import {
   AgentProvidersSettingsViewSchema,
+  AgentMcpSettingsSchema,
   AgentSettingsSchema,
   ErrorResponseSchema,
   ClearAllGitIdentityResponseSchema,
@@ -11,6 +12,7 @@ import {
   SearchSettingsSchema,
   SecurityStatusSchema,
   UpdateAgentProvidersSettingsRequestSchema,
+  UpdateAgentMcpSettingsRequestSchema,
   UpdateAgentSettingsRequestSchema,
   UpdateGitGlobalIdentityRequestSchema,
   UpdateNetworkSettingsRequestSchema,
@@ -18,6 +20,7 @@ import {
 } from "@agent-workbench/shared";
 import {
   getAgentProvidersSettings,
+  getAgentMcpSettings,
   getAgentSettings,
   clearAllGitIdentity,
   getGitGlobalIdentity,
@@ -26,6 +29,7 @@ import {
   getSecurityStatus,
   resetKnownHost,
   updateAgentProvidersSettings,
+  updateAgentMcpSettings,
   updateAgentSettings,
   updateGitGlobalIdentity,
   updateNetworkSettings,
@@ -160,6 +164,29 @@ export async function registerSettingsRoutes(app: FastifyInstance, ctx: AppConte
       }
     },
     async (req) => updateAgentProvidersSettings(ctx, app.log, req.body)
+  );
+
+  app.get(
+    "/api/settings/agent/mcp",
+    {
+      schema: {
+        tags: ["settings"],
+        response: { 200: AgentMcpSettingsSchema }
+      }
+    },
+    async () => getAgentMcpSettings(ctx)
+  );
+
+  app.put(
+    "/api/settings/agent/mcp",
+    {
+      schema: {
+        tags: ["settings"],
+        body: UpdateAgentMcpSettingsRequestSchema,
+        response: { 200: AgentMcpSettingsSchema, 400: ErrorResponseSchema }
+      }
+    },
+    async (req) => updateAgentMcpSettings(ctx, app.log, req.body)
   );
 
   app.get(

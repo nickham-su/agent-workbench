@@ -4,7 +4,14 @@ import type { Static } from "@sinclair/typebox";
 export const AgentSessionKindSchema = Type.Union([Type.Literal("primary"), Type.Literal("subtask")]);
 export type AgentSessionKind = Static<typeof AgentSessionKindSchema>;
 
-export const AgentContextToolNameSchema = Type.Union([Type.Literal("bash"), Type.Literal("read"), Type.Literal("write")]);
+export const AgentMcpToolNameSchema = Type.String({ pattern: "^mcp_[A-Za-z0-9_-]+_[A-Za-z0-9_-]+$" });
+export const AgentContextToolNameSchema = Type.Union([
+  Type.Literal("bash"),
+  Type.Literal("read"),
+  Type.Literal("write"),
+  Type.Literal("subtask"),
+  AgentMcpToolNameSchema
+]);
 export type AgentContextToolName = Static<typeof AgentContextToolNameSchema>;
 
 export const AgentRunStatusSchema = Type.Union([
@@ -72,6 +79,8 @@ export const AgentSessionRecordSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
   title: Type.String({ minLength: 1 }),
   kind: AgentSessionKindSchema,
+  forkedFromSessionId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+  forkedFromItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
   headItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
   createdAt: Type.Number(),
   updatedAt: Type.Number()
@@ -108,6 +117,7 @@ export const AgentSessionRunStateSchema = Type.Object({
   activeRunId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
   activeAssistantItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
   waitingToolItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
+  lastResponseTotalTokens: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
   nonTerminalItemIds: Type.Array(Type.Number({ minimum: 1 })),
   updatedAt: Type.Number(),
   appliedItemId: Type.Number({ minimum: 0 })

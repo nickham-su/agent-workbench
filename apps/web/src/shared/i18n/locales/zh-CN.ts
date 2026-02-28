@@ -283,25 +283,32 @@ export default {
       reopenClosed: "恢复已关闭 client"
     },
     client: {
-      tabLabel: "Agent {index}",
+      tabLabel: "会话 {index}",
       newTitle: "AI Client {time}",
-      agentLabel: "Agent",
-      defaultAgent: "使用默认 Agent",
-      running: "运行中",
       cancel: "取消运行",
-      cancelAnchorMissing: "未找到可取消的锚点消息",
       cancelConfirmTitle: "确认取消当前运行？",
       cancelConfirmContent: "将中断当前执行,并保留当前会话消息。当前正在执行的 AI 或工具会标记为已取消。",
       cancelled: "已取消当前运行",
-      empty: "暂无历史消息",
-      streamingHint: "AI 正在生成中,消息将自动更新...",
-      inputPlaceholder: "输入消息,回车发送",
+      welcome: "你好, 我可以协助你完成任务。",
+      inputPlaceholder: "输入消息,Enter 发送,Tab 切换 Agent",
       inputPlaceholderNoAgent: "请先创建 Agent 后再发送消息",
       noAgentHint: "当前没有可用 Agent,请先创建 Agent",
       goCreateAgent: "前往创建",
-      sendHint: "Enter 发送",
-      refresh: "刷新",
-      send: "发送",
+      chooseSession: "选择会话",
+      chooseSessionTitle: "选择要继续的会话",
+      noSessionToChoose: "没有可选择的历史会话",
+      sessionEmptyPreview: "(该会话暂无用户消息)",
+      lastTotalTokens: "总Token",
+      backToParent: "返回父会话",
+      parentSessionMissing: "未找到父会话",
+      readonlySubtaskHint: "子任务会话为只读模式",
+      subtaskCardTitle: "子任务",
+      subtaskMode: "模式",
+      subtaskModeNew: "新会话",
+      subtaskModeFork: "继承上下文",
+      subtaskModeExisting: "续用会话",
+      subtaskAgent: "Agent",
+      subtaskSessionId: "Session ID",
       fork: "从此处分叉",
       forked: "已从该消息创建新 client",
       revert: "回退到此处",
@@ -578,6 +585,7 @@ export default {
       credentials: "凭证",
       network: "网络",
       agentProviders: "AI Provider",
+      agentMcp: "MCP",
       agentProfiles: "AI Agent",
       security: "安全"
     },
@@ -810,15 +818,18 @@ export default {
       },
       fields: {
         tools: "工具",
+        mcpServers: "MCP Server",
+        summary: "简介",
         permissions: "权限",
         defaultModel: "默认模型",
-        useGlobalDefault: "跟随全局默认模型",
+        useGlobalDefault: "默认模型",
         customDefaultModel: "使用自定义默认模型"
       },
       tools: {
         bash: "Bash",
         read: "Read",
-        write: "Write"
+        write: "Write",
+        subtask: "Subtask"
       },
       permissions: {
         allowRead: "允许 Read",
@@ -836,8 +847,13 @@ export default {
       agentForm: {
         idLabel: "Agent ID(自动生成)",
         nameLabel: "名称",
+        summaryLabel: "简介",
+        summaryPlaceholder: "例如: 专注网络信息搜集与调研,并进行信息汇总整理",
+        summaryHelp: "用一句话说明这个 Agent 的擅长场景和边界,重点写“何时使用”。",
         promptLabel: "系统提示词",
         promptPlaceholder: "可选, 留空使用简洁默认提示",
+        mcpServersPlaceholder: "选择可用的 MCP Server",
+        defaultModelCascaderPlaceholder: "选择默认模型策略",
         defaultModelModeLabel: "默认模型策略",
         defaultProviderLabel: "Provider",
         defaultProviderPlaceholder: "请选择 Provider",
@@ -855,6 +871,47 @@ export default {
         invalidAgentForm: "请完整填写 Agent 必填项",
         duplicateAgentId: "Agent ID 已存在",
         defaultModelInvalid: "默认模型不存在, 请重新选择"
+      },
+      saved: "已保存"
+    },
+    agentMcp: {
+      description: "管理全局 MCP Server 配置。新增/编辑时使用 JSON 输入。",
+      saving: "正在保存...",
+      empty: "暂无 MCP Server,请先新增",
+      actions: {
+        addServer: "新增 MCP Server",
+        edit: "编辑",
+        delete: "删除"
+      },
+      fields: {
+        enabled: "启用",
+        disabled: "禁用"
+      },
+      modal: {
+        ok: "确定",
+        cancel: "取消"
+      },
+      serverModal: {
+        createTitle: "新增 MCP Server",
+        editTitle: "编辑 MCP Server"
+      },
+      serverForm: {
+        idLabel: "Server ID",
+        jsonLabel: "配置 JSON",
+        jsonHelp: "必须是对象,并包含 type=local 或 type=remote。",
+        enabled: "启用该 Server"
+      },
+      deleteServer: {
+        title: "删除 MCP Server？",
+        content: "将删除 MCP Server {id}。",
+        ok: "删除",
+        cancel: "取消"
+      },
+      errors: {
+        invalidForm: "请完整填写 MCP 表单",
+        invalidJson: "配置 JSON 格式错误, 需要是对象",
+        invalidType: "配置 JSON 必须包含 type=local 或 type=remote",
+        duplicateServerId: "Server ID 已存在"
       },
       saved: "已保存"
     },
