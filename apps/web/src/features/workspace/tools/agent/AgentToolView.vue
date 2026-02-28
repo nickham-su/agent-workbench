@@ -45,6 +45,7 @@
             :parent-session-id="!isDraftSession(session) ? session.forkedFromSessionId : null"
             :session-ready="!isDraftSession(session)"
             :ensure-session="ensureSessionCreated"
+            :poll-hint="sessionPollHints[session.id] ?? 0"
             :can-choose-session="canChooseSessionFrom(session.id)"
             :active="effectiveActiveKey === session.id"
             :model-value="selectedAgentBySession[session.id] ?? null"
@@ -54,6 +55,7 @@
             @open-subtask="onOpenSubtask"
             @open-parent="onOpenParent"
             @choose-session="openChooseSessionModal(session.id)"
+            @request-poll-session="onRequestPollSession"
           />
         </div>
       </a-tab-pane>
@@ -150,6 +152,7 @@ const serverSessions = ref<AgentSessionRecord[]>([]);
 const draftSessions = ref<DraftAgentSession[]>([]);
 const activeKey = ref<string>("");
 const selectedAgentBySession = reactive<Record<string, string | null>>({});
+const sessionPollHints = reactive<Record<string, number>>({});
 const agentOptions = ref<AgentOption[]>([]);
 const closedSessionIds = reactive<Record<string, true>>({});
 const tabNoMap = ref<Record<string, number>>({});
@@ -381,6 +384,16 @@ function setSessionAgent(sessionId: string, value: string | null) {
   persistAgentPick();
 }
 
+function bumpSessionPollHint(sessionId: string) {
+  const id = String(sessionId || "").trim();
+  if (!id) return;
+  sessionPollHints[id] = (sessionPollHints[id] ?? 0) + 1;
+}
+
+function onRequestPollSession(sessionId: string) {
+  bumpSessionPollHint(sessionId);
+}
+
 async function refreshAgents() {
   try {
     const res = await getAgentSettings();
@@ -409,6 +422,11 @@ async function refreshSessions() {
       if (!presentIds.has(id)) {
         delete closedSessionIds[id];
         closedChanged = true;
+      }
+    }
+    for (const id of Object.keys(sessionPollHints)) {
+      if (!presentIds.has(id)) {
+        delete sessionPollHints[id];
       }
     }
     if (closedChanged) persistClosedSessions();
@@ -691,6 +709,9 @@ watch(
     tabNoMap.value = {};
     for (const key of Object.keys(selectedAgentBySession)) {
       delete selectedAgentBySession[key];
+    }
+    for (const key of Object.keys(sessionPollHints)) {
+      delete sessionPollHints[key];
     }
     restorePersistedState();
     await refreshAll();

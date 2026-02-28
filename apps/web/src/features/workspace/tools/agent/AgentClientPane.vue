@@ -103,19 +103,12 @@
         </div>
         <AgentTodoListCard
           v-else-if="isTodolistCard(msg) && msg.todoList"
-          :status="msg.status"
           :todos="msg.todoList.todos"
-          :summary="msg.todoList.summary"
           :error-text="msg.toolError"
         />
         <AgentApplyPatchCard
           v-else-if="isApplyPatchCard(msg) && msg.applyPatch"
-          :status="msg.status"
-          :text="msg.applyPatch.text"
-          :error-text="msg.toolError"
-          :summary="msg.applyPatch.summary"
           :files="msg.applyPatch.files"
-          :omitted-files="msg.applyPatch.omittedFiles"
         />
         <div
           v-else
@@ -283,6 +276,7 @@ const props = defineProps<{
   parentSessionId?: string | null;
   sessionReady: boolean;
   ensureSession?: (sessionId: string) => Promise<string>;
+  pollHint?: number;
   canChooseSession?: boolean;
   active: boolean;
   modelValue?: string | null;
@@ -295,6 +289,7 @@ const emit = defineEmits<{
   "open-subtask": [sessionId: string];
   "open-parent": [sessionId: string];
   "choose-session": [];
+  "request-poll-session": [sessionId: string];
 }>();
 
 const { t } = useI18n();
@@ -322,6 +317,7 @@ const actionLoading = ref<"cancel" | "fork" | "revert" | "approve" | "deny" | nu
 const actionTargetId = ref<number | null>(null);
 
 let pollTimer: number | null = null;
+let pollHintRefreshSeq = 0;
 let settlePollRemaining = 0;
 const terminalStatuses = new Set<AgentContextItemRecord["status"]>(["completed", "failed", "denied", "cancelled"]);
 const isSubtaskSession = computed(() => props.sessionKind === "subtask");
@@ -1001,6 +997,8 @@ async function onSend() {
     if (targetSessionId === props.sessionId) {
       await refreshAll(false);
       schedulePoll(300);
+    } else {
+      emit("request-poll-session", targetSessionId);
     }
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
@@ -1008,6 +1006,30 @@ async function onSend() {
     sending.value = false;
   }
 }
+
+watch(
+  () => [props.pollHint ?? 0, props.sessionId, props.active] as const,
+  (next, prev) => {
+    const [hint, sessionId, active] = next;
+    const prevHint = prev?.[0] ?? 0;
+    const prevSessionId = prev?.[1];
+    if (!active) return;
+    if (!sessionId) return;
+    const hintChanged = hint !== prevHint;
+    // 兼容跨组件时序: 当目标 pane 挂载时 hint 可能已经>0,需要立即触发一次补轮询。
+    const mountedWithPendingHint = sessionId !== prevSessionId && hint > 0;
+    if (hintChanged || mountedWithPendingHint) {
+      const seq = ++pollHintRefreshSeq;
+      void (async () => {
+        await refreshAll(false);
+        if (seq !== pollHintRefreshSeq) return;
+        if (!props.active || !props.sessionId) return;
+        schedulePoll(300);
+      })();
+    }
+  },
+  { immediate: true }
+);
 
 watch(
   () => [String(props.modelValue || ""), props.agentOptions.map((item) => `${item.value}:${item.isDefault ? "1" : "0"}`).join("|")],
