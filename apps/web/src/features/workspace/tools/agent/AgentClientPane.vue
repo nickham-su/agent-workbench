@@ -101,6 +101,13 @@
             Error: {{ msg.toolError }}
           </div>
         </div>
+        <AgentTodoListCard
+          v-else-if="isTodolistCard(msg) && msg.todoList"
+          :status="msg.status"
+          :todos="msg.todoList.todos"
+          :summary="msg.todoList.summary"
+          :error-text="msg.toolError"
+        />
         <AgentApplyPatchCard
           v-else-if="isApplyPatchCard(msg) && msg.applyPatch"
           :status="msg.status"
@@ -198,6 +205,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import AgentApplyPatchCard from "./AgentApplyPatchCard.vue";
+import AgentTodoListCard from "./AgentTodoListCard.vue";
 import {
   cancelAgentSession,
   decideAgentToolPermission,
@@ -236,6 +244,20 @@ type ApplyPatchDisplay = {
   omittedFiles: number;
 };
 
+type TodoListDisplay = {
+  summary: {
+    total: number;
+    pending: number;
+    inProgress: number;
+    completed: number;
+    cancelled: number;
+  };
+  todos: Array<{
+    content: string;
+    status: "pending" | "in_progress" | "completed" | "cancelled";
+  }>;
+};
+
 type DisplayItem = {
   id: number;
   prevId: number | null;
@@ -249,6 +271,7 @@ type DisplayItem = {
   subtaskMode?: "new" | "existing" | "fork" | string;
   subtaskAgentId?: string;
   subtaskAgentName?: string;
+  todoList?: TodoListDisplay;
   applyPatch?: ApplyPatchDisplay;
   tone?: "normal" | "error";
 };
@@ -362,6 +385,43 @@ function parseApplyPatchDisplay(value: unknown): ApplyPatchDisplay | null {
   };
 }
 
+function toTodoStatus(value: unknown): "pending" | "in_progress" | "completed" | "cancelled" | null {
+  if (value === "pending" || value === "in_progress" || value === "completed" || value === "cancelled") {
+    return value;
+  }
+  return null;
+}
+
+function parseTodoListDisplay(value: unknown): TodoListDisplay | null {
+  const source = toRecord(value);
+  if (!source) return null;
+  const todosRaw = Array.isArray(source.todos) ? source.todos : [];
+  const todos: TodoListDisplay["todos"] = [];
+  for (const item of todosRaw) {
+    const row = toRecord(item);
+    if (!row) continue;
+    const content = typeof row.content === "string" ? row.content.trim() : "";
+    if (!content) continue;
+    const status = toTodoStatus(row.status);
+    if (!status) continue;
+    todos.push({ content, status });
+  }
+
+  const summaryRaw = toRecord(source.summary);
+  return {
+    summary: {
+      total: toNonNegativeInt(summaryRaw?.total ?? todos.length),
+      pending: toNonNegativeInt(summaryRaw?.pending ?? todos.filter((item) => item.status === "pending").length),
+      inProgress: toNonNegativeInt(
+        summaryRaw?.inProgress ?? summaryRaw?.in_progress ?? todos.filter((item) => item.status === "in_progress").length
+      ),
+      completed: toNonNegativeInt(summaryRaw?.completed ?? todos.filter((item) => item.status === "completed").length),
+      cancelled: toNonNegativeInt(summaryRaw?.cancelled ?? todos.filter((item) => item.status === "cancelled").length)
+    },
+    todos
+  };
+}
+
 function resolveAgentName(agentId: string) {
   const target = props.agentOptions.find((item) => item.value === agentId);
   return target?.label || "";
@@ -453,6 +513,35 @@ const displayItems = computed<DisplayItem[]>(() => {
           tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
         };
       }
+      if (item.output.toolName === "todolist") {
+        const todoList = parseTodoListDisplay(item.output.result) || parseTodoListDisplay(item.output.args);
+        if (!todoList) {
+          let line = `${callText} ${statusText}`;
+          if (errorText) {
+            line += `\nerror: ${errorText}`;
+          }
+          return {
+            id: item.id,
+            prevId: item.prevId,
+            role: "tool",
+            text: line,
+            status: item.status,
+            toolName: item.output.toolName,
+            tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
+          };
+        }
+        return {
+          id: item.id,
+          prevId: item.prevId,
+          role: "tool",
+          text: `${callText} ${statusText}`,
+          status: item.status,
+          toolName: item.output.toolName,
+          ...(errorText ? { toolError: errorText } : {}),
+          todoList,
+          tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
+        };
+      }
       if (item.output.toolName === "subtask") {
         const argsObj = toRecord(item.output.args);
         const description = typeof argsObj?.description === "string" ? argsObj.description.trim() : "";
@@ -521,8 +610,12 @@ function isApplyPatchCard(item: DisplayItem) {
   return item.role === "tool" && item.toolName === "apply_patch" && !!item.applyPatch;
 }
 
+function isTodolistCard(item: DisplayItem) {
+  return item.role === "tool" && item.toolName === "todolist" && !!item.todoList;
+}
+
 function isRichToolCard(item: DisplayItem) {
-  return isSubtaskCard(item) || isApplyPatchCard(item);
+  return isSubtaskCard(item) || isTodolistCard(item) || isApplyPatchCard(item);
 }
 
 function formatSubtaskMode(mode?: string) {

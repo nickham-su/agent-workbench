@@ -309,6 +309,9 @@ export default {
       subtaskModeExisting: "续用会话",
       subtaskAgent: "Agent",
       subtaskSessionId: "Session ID",
+      todoListCardTitle: "任务清单",
+      todoListSummary: "总计 {total}, 进行中 {inProgress}, 待办 {pending}, 已完成 {completed}, 已取消 {cancelled}",
+      todoListEmpty: "当前清单为空",
       applyPatchCardTitle: "补丁变更",
       applyPatchPreview: "待审批预览",
       applyPatchApplied: "已应用",
@@ -838,6 +841,7 @@ export default {
         read: "Read",
         write: "Write",
         applyPatch: "Apply Patch",
+        todolist: "Todo List",
         subtask: "Subtask"
       },
       permissions: {

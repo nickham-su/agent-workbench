@@ -10,6 +10,7 @@ import { AgentApiClient, ApiConflictError, type ExecutionProfile, type PromptCon
 import { runReadTool, runWriteTool } from "./fileTools.js";
 import { McpManager } from "./mcpManager.js";
 import { applyPreparedPatch, prepareApplyPatchTool, type ApplyPatchPrepared } from "./applyPatch.js";
+import { parseTodolistArgs, toTodolistResult } from "./todolist.js";
 
 function nowMs() {
   return Date.now();
@@ -217,7 +218,13 @@ function toolSignature(toolName: string, args: Record<string, unknown>) {
 }
 
 function isBuiltinTool(toolName: string) {
-  return toolName === "bash" || toolName === "read" || toolName === "write" || toolName === "apply_patch";
+  return (
+    toolName === "bash" ||
+    toolName === "read" ||
+    toolName === "write" ||
+    toolName === "apply_patch" ||
+    toolName === "todolist"
+  );
 }
 
 function isSubtaskTool(toolName: string) {
@@ -230,7 +237,7 @@ function isMcpTool(toolName: string) {
 
 function isToolEnabledForAgent(profile: ExecutionProfile, toolName: string) {
   if (isBuiltinTool(toolName) || isSubtaskTool(toolName)) {
-    return profile.agent.tools.includes(toolName as "bash" | "read" | "write" | "apply_patch" | "subtask");
+    return profile.agent.tools.includes(toolName as "bash" | "read" | "write" | "apply_patch" | "todolist" | "subtask");
   }
   if (isMcpTool(toolName)) {
     return true;
@@ -678,6 +685,9 @@ export class AgentRunner {
           signal
         });
         result = toApplyPatchResult(applyPatchPrepared);
+      } else if (tool.toolName === "todolist") {
+        const parsed = parseTodolistArgs(tool.args);
+        result = toTodolistResult(parsed);
       } else if (tool.toolName === "subtask") {
         const parsed = parseSubtaskArgs(tool.args);
         const started = await this.apiClient.startSubtaskRun({

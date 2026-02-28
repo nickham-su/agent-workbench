@@ -29,6 +29,7 @@ const AgentBuiltinToolNameSchema = Type.Union([
   Type.Literal("read"),
   Type.Literal("write"),
   Type.Literal("apply_patch"),
+  Type.Literal("todolist"),
   Type.Literal("subtask")
 ]);
 const AgentDynamicToolNameSchema = Type.Union([

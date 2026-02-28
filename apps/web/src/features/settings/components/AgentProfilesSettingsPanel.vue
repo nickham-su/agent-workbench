@@ -195,13 +195,14 @@ type EditingAgent = {
 
 const GLOBAL_DEFAULT_MODEL_PATH = "__global__";
 
-const DEFAULT_TOOLS: AgentToolName[] = ["bash", "read", "write", "apply_patch", "subtask"];
+const DEFAULT_TOOLS: AgentToolName[] = ["bash", "read", "write", "apply_patch", "todolist", "subtask"];
 
 const toolOptions = computed(() => [
   { label: t("settings.agentProfiles.tools.bash"), value: "bash" },
   { label: t("settings.agentProfiles.tools.read"), value: "read" },
   { label: t("settings.agentProfiles.tools.write"), value: "write" },
   { label: t("settings.agentProfiles.tools.applyPatch"), value: "apply_patch" },
+  { label: t("settings.agentProfiles.tools.todolist"), value: "todolist" },
   { label: t("settings.agentProfiles.tools.subtask"), value: "subtask" }
 ]);
 
@@ -274,7 +275,14 @@ function normalizeTools(raw: AgentToolName[]) {
   const out: AgentToolName[] = [];
   const seen = new Set<AgentToolName>();
   for (const item of raw) {
-    if (item !== "bash" && item !== "read" && item !== "write" && item !== "apply_patch" && item !== "subtask") continue;
+    if (
+      item !== "bash" &&
+      item !== "read" &&
+      item !== "write" &&
+      item !== "apply_patch" &&
+      item !== "todolist" &&
+      item !== "subtask"
+    ) continue;
     if (seen.has(item)) continue;
     seen.add(item);
     out.push(item);
@@ -357,6 +365,7 @@ function toolLabel(tool: AgentToolName) {
   if (tool === "read") return t("settings.agentProfiles.tools.read");
   if (tool === "write") return t("settings.agentProfiles.tools.write");
   if (tool === "apply_patch") return t("settings.agentProfiles.tools.applyPatch");
+  if (tool === "todolist") return t("settings.agentProfiles.tools.todolist");
   return t("settings.agentProfiles.tools.subtask");
 }
 

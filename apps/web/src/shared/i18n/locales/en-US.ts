@@ -311,6 +311,9 @@ export default {
       subtaskModeExisting: "Reuse session",
       subtaskAgent: "Agent",
       subtaskSessionId: "Session ID",
+      todoListCardTitle: "Todo list",
+      todoListSummary: "Total {total}, in progress {inProgress}, pending {pending}, completed {completed}, cancelled {cancelled}",
+      todoListEmpty: "Todo list is empty",
       applyPatchCardTitle: "Patch changes",
       applyPatchPreview: "Pending approval preview",
       applyPatchApplied: "Applied",
@@ -840,6 +843,7 @@ export default {
         read: "Read",
         write: "Write",
         applyPatch: "Apply Patch",
+        todolist: "Todo List",
         subtask: "Subtask"
       },
       permissions: {

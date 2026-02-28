@@ -94,6 +94,30 @@ function toolArgsSchema(toolName: AgentContextToolName) {
       }
     };
   }
+  if (toolName === "todolist") {
+    return {
+      type: "object",
+      required: ["todos"],
+      additionalProperties: false,
+      properties: {
+        todos: {
+          type: "array",
+          items: {
+            type: "object",
+            required: ["content", "status"],
+            additionalProperties: false,
+            properties: {
+              content: { type: "string", minLength: 1, pattern: "\\S" },
+              status: {
+                type: "string",
+                enum: ["pending", "in_progress", "completed", "cancelled"]
+              }
+            }
+          }
+        }
+      }
+    };
+  }
   if (toolName === "subtask") {
     return {
       type: "object",
@@ -207,6 +231,9 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
   }
   if (toolName === "apply_patch") {
     return "按 apply_patch 协议批量修改文件,优先用于最小改动与多文件联动,输入 patchText 需使用 *** Begin Patch 与 *** End Patch 包裹,支持 Add/Update/Delete/Move。";
+  }
+  if (toolName === "todolist") {
+    return "这是管理任务进度的强制工具,不是可选项。除极其简单且可一步完成的请求外,必须先用此工具给出任务清单,再开始执行。每次调用都提交完整 todos 数组,语义为全量替换,不是增量 patch。todos 从上到下即优先级,先规划再执行。在任务状态发生变化时必须立即更新清单,包括开始(in_progress),完成(completed),取消(cancelled),回退或新增任务。每项必须包含 content 和 status。content trim 后不能为空。status 仅允许 pending | in_progress | completed | cancelled。允许同时存在多个 in_progress。目标是让用户持续看到清晰、可信、实时的进度窗口,并约束执行过程可追踪,避免无计划推进。";
   }
   if (toolName === "subtask") return options?.subtaskDescription || "在子会话中执行任务。";
   if (toolName.startsWith("mcp_")) return `调用 MCP 工具 ${toolName}`;

@@ -860,3 +860,146 @@ test("agent prompt-context 对 apply_patch 保留 patchText 输入,并摘要化�
     "apply_patch prompt result should not include full after content"
   );
 });
+
+test("agent prompt-context 支持 todolist 工具输入输出", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "请维护任务清单"
+    }
+  });
+
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_todolist",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: {
+      type: "assistant_text",
+      text: "更新任务清单"
+    }
+  });
+
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_todolist",
+    step: 1,
+    prevId: assistantItem.item.id,
+    kind: "tool",
+    status: "completed",
+    output: {
+      type: "tool",
+      toolName: "todolist",
+      toolCallId: "call_todolist_1",
+      args: {
+        todos: [
+          { content: "梳理需求", status: "completed" },
+          { content: "实现功能", status: "in_progress" }
+        ]
+      },
+      result: {
+        summary: {
+          total: 2,
+          pending: 0,
+          inProgress: 1,
+          completed: 1,
+          cancelled: 0
+        },
+        todos: [
+          { content: "梳理需求", status: "completed" },
+          { content: "实现功能", status: "in_progress" }
+        ]
+      }
+    }
+  });
+
+  const context = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+
+  const assistantWithToolCall = context.messages.find((message) => {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) return false;
+    return message.content.some((part) => {
+      if (!part || typeof part !== "object") return false;
+      return (part as { type?: string; toolName?: string }).type === "tool-call" &&
+        (part as { toolName?: string }).toolName === "todolist";
+    });
+  });
+  assert.ok(assistantWithToolCall, "assistant message should include todolist tool-call part");
+
+  const toolCallPart = Array.isArray(assistantWithToolCall?.content)
+    ? assistantWithToolCall.content.find((part) => {
+        if (!part || typeof part !== "object") return false;
+        return (part as { type?: string; toolName?: string }).type === "tool-call" &&
+          (part as { toolName?: string }).toolName === "todolist";
+      })
+    : null;
+  const input = (toolCallPart as { input?: Record<string, unknown> } | null)?.input ?? {};
+  assert.equal(Array.isArray(input.todos), true, "todolist tool-call input should include todos");
+
+  const toolResultMessage = context.messages.find((message) => {
+    if (message.role !== "tool" || !Array.isArray(message.content)) return false;
+    return message.content.some((part) => {
+      if (!part || typeof part !== "object") return false;
+      return (part as { type?: string; toolName?: string }).type === "tool-result" &&
+        (part as { toolName?: string }).toolName === "todolist";
+    });
+  });
+  assert.ok(toolResultMessage, "tool message should include todolist tool-result part");
+
+  const toolResultPart = Array.isArray(toolResultMessage?.content)
+    ? toolResultMessage.content.find((part) => {
+        if (!part || typeof part !== "object") return false;
+        return (part as { type?: string; toolName?: string }).type === "tool-result" &&
+          (part as { toolName?: string }).toolName === "todolist";
+      })
+    : null;
+  const output = (toolResultPart as { output?: { type?: string; value?: Record<string, unknown> } } | null)?.output;
+  assert.equal(String(output?.type || ""), "json", "todolist tool-result output should be json");
+  assert.equal(
+    Array.isArray((output?.value as { todos?: unknown[] } | undefined)?.todos),
+    true,
+    "todolist tool-result should include todos"
+  );
+});
