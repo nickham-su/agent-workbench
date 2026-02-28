@@ -3,6 +3,7 @@ import { AgentApiClient } from "./runtime/apiClient.js";
 import { McpManager } from "./runtime/mcpManager.js";
 import { AgentRunner } from "./runtime/runner.js";
 import { createWorkerServer } from "./server.js";
+import { startBashToolProbe } from "./runtime/bashTools.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -15,6 +16,7 @@ const apiClient = new AgentApiClient({
 
 const mcpManager = new McpManager(apiClient, console);
 const runner = new AgentRunner(apiClient, mcpManager, console, env.concurrency);
+startBashToolProbe(console);
 const server = createWorkerServer({
   host: env.host,
   port: env.port,

@@ -5,6 +5,7 @@ import { jsonSchema, streamText, tool } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { runBashCommand } from "./bash.js";
+import { getBashToolAppendix } from "./bashTools.js";
 import { AgentApiClient, ApiConflictError, type ExecutionProfile, type PromptContext } from "./apiClient.js";
 import { runReadTool, runWriteTool } from "./fileTools.js";
 import { McpManager } from "./mcpManager.js";
@@ -975,8 +976,15 @@ export class AgentRunner {
 
     const toolSet: Record<string, any> = {};
     for (const item of context.tools) {
+      let description = item.description;
+      if (item.name === "bash") {
+        const appendix = getBashToolAppendix();
+        if (appendix) {
+          description = `${description}\n\n${appendix}`;
+        }
+      }
       toolSet[item.name] = tool({
-        description: item.description,
+        description,
         inputSchema: jsonSchema(item.inputSchema)
       });
     }
