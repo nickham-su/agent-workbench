@@ -595,10 +595,17 @@ export default {
       gitIdentity: "Git 身份",
       credentials: "凭证",
       network: "网络",
-      agentProviders: "AI Provider",
+      agentProviders: "模型提供方",
+      agentGlobalPrompts: "提示词库",
       agentMcp: "MCP",
-      agentProfiles: "AI Agent",
+      agentProfiles: "角色配置",
       security: "安全"
+    },
+    groups: {
+      basic: "基础",
+      identity: "身份与凭证",
+      networkSecurity: "网络与安全",
+      agent: "Agent"
     },
     general: {
       language: {
@@ -666,7 +673,7 @@ export default {
         default: "默认"
       },
       actions: {
-        add: "新增",
+        add: "新增凭证",
         edit: "编辑",
         delete: "删除",
         generateSshKey: "生成密钥",
@@ -817,6 +824,42 @@ export default {
       },
       saved: "已保存"
     },
+    agentGlobalPrompts: {
+      description: "管理提示词库条目,仅在 Agent 中选中后生效。",
+      saving: "正在保存...",
+      empty: "暂无提示词库条目，请先新增",
+      actions: {
+        add: "新增条目",
+        edit: "编辑",
+        delete: "删除"
+      },
+      modal: {
+        createTitle: "新增提示词库条目",
+        editTitle: "编辑提示词库条目",
+        ok: "确定",
+        cancel: "取消"
+      },
+      form: {
+        idLabel: "条目 ID(自动生成)",
+        titleLabel: "标题",
+        promptLabel: "提示词",
+        promptPlaceholder: "输入该条目的提示词内容",
+        promptHelp: "最多 {maxKb}KB，当前 {bytes} bytes"
+      },
+      deleteConfirm: {
+        title: "删除提示词库条目？",
+        content: "将删除条目 {title}。",
+        ok: "删除",
+        cancel: "取消"
+      },
+      errors: {
+        invalidForm: "请完整填写必填项",
+        duplicateId: "条目 ID 已存在",
+        titleTooLong: "标题过长，最多 {max} 个字符",
+        promptTooLong: "提示词过长，最多 {maxKb}KB"
+      },
+      saved: "已保存"
+    },
     agentProfiles: {
       description: "配置 AI Agent 列表、默认 Agent、工具权限与默认模型。",
       saving: "正在保存...",
@@ -830,6 +873,7 @@ export default {
       fields: {
         tools: "工具",
         mcpServers: "MCP Server",
+        globalPrompts: "提示词库",
         summary: "简介",
         permissions: "权限",
         defaultModel: "默认模型",
@@ -863,8 +907,11 @@ export default {
         summaryLabel: "简介",
         summaryPlaceholder: "例如: 专注网络信息搜集与调研,并进行信息汇总整理",
         summaryHelp: "用一句话说明这个 Agent 的擅长场景和边界,重点写“何时使用”。",
-        promptLabel: "系统提示词",
-        promptPlaceholder: "可选, 留空使用简洁默认提示",
+        promptLabel: "角色设定",
+        promptPlaceholder: "可选, 留空使用默认设定",
+        promptBytesHelp: "最多 {maxKb}KB，当前 {bytes} bytes",
+        globalPromptsPlaceholder: "选择提示词库条目",
+        globalPromptsHelp: "支持多选，注入顺序按提示词库列表顺序。",
         mcpServersPlaceholder: "选择可用的 MCP Server",
         defaultModelCascaderPlaceholder: "选择默认模型策略",
         defaultModelModeLabel: "默认模型策略",
@@ -883,7 +930,8 @@ export default {
       errors: {
         invalidAgentForm: "请完整填写 Agent 必填项",
         duplicateAgentId: "Agent ID 已存在",
-        defaultModelInvalid: "默认模型不存在, 请重新选择"
+        defaultModelInvalid: "默认模型不存在, 请重新选择",
+        promptTooLong: "角色设定过长，最多 {maxKb}KB"
       },
       saved: "已保存"
     },

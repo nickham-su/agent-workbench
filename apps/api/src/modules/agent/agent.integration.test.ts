@@ -292,6 +292,7 @@ async function getPromptContextInternal(params: {
   });
   assert.equal(res.statusCode, 200, `get prompt-context failed: ${res.body}`);
   return res.json() as {
+    system: string;
     messages: Array<{ role: string; content: unknown }>;
   };
 }
@@ -1002,4 +1003,176 @@ test("agent prompt-context 支持 todolist 工具输入输出", async () => {
     true,
     "todolist tool-result should include todos"
   );
+});
+
+test("agent settings 兼容缺省 globalPromptIds", async () => {
+  const fixture = await createFixture();
+  const res = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      default: { agentId: "default" },
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          summary: "",
+          prompt: "You are a helpful coding assistant.",
+          tools: ["bash", "read", "write"],
+          mcpServers: [],
+          permissions: {
+            allowRead: true,
+            allowWrite: true,
+            allowBash: true
+          },
+          defaultModel: null
+        }
+      ]
+    }
+  });
+  assert.equal(res.statusCode, 200, `update agent settings failed: ${res.body}`);
+  const body = res.json() as { agents: Array<{ globalPromptIds?: string[] }> };
+  assert.deepEqual(body.agents[0]?.globalPromptIds ?? [], []);
+});
+
+test("agent prompt-context 全局提示词按列表顺序注入(方案A)", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  const globalPromptsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/global-prompts",
+    payload: {
+      items: [
+        { id: "gp_a", title: "A", prompt: "PROMPT_A" },
+        { id: "gp_b", title: "B", prompt: "PROMPT_B" }
+      ]
+    }
+  });
+  assert.equal(globalPromptsRes.statusCode, 200, `update global prompts failed: ${globalPromptsRes.body}`);
+
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      default: { agentId: "default" },
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          summary: "",
+          prompt: "AGENT_PROMPT",
+          globalPromptIds: ["gp_b", "gp_a"],
+          tools: ["bash", "read", "write"],
+          mcpServers: [],
+          permissions: {
+            allowRead: true,
+            allowWrite: true,
+            allowBash: true
+          },
+          defaultModel: null
+        }
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `update agents failed: ${agentsRes.body}`);
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const context = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+
+  const idxA = context.system.indexOf("PROMPT_A");
+  const idxB = context.system.indexOf("PROMPT_B");
+  const idxAgent = context.system.indexOf("AGENT_PROMPT");
+  assert.ok(idxA >= 0, "system should include PROMPT_A");
+  assert.ok(idxB >= 0, "system should include PROMPT_B");
+  assert.ok(idxAgent >= 0, "system should include AGENT_PROMPT");
+  assert.ok(idxA < idxB, "global prompts should follow global list order, not selected id order");
+  assert.ok(idxB < idxAgent, "agent prompt should be appended after global prompts");
+});
+
+test("agent prompt-context 在 workspace 根 AGENTS.md 缺失时忽略", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const context = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+
+  assert.equal(context.system, "You are a helpful coding assistant.");
+});
+
+test("agent prompt-context 对 workspace AGENTS.md 做 32KB 截断并追加标记", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+  const agentsPath = path.join(fixture.workspacePath, "AGENTS.md");
+  await fs.writeFile(agentsPath, `RULE\n${"A".repeat(40 * 1024)}`, "utf-8");
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const context = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+
+  assert.ok(
+    context.system.includes("## Workspace Instructions: AGENTS.md"),
+    "system should include workspace section with relative path"
+  );
+  assert.ok(
+    context.system.includes("[workspace AGENTS.md truncated: first 32KB]"),
+    "system should include truncation marker"
+  );
+  assert.ok(context.system.includes("## Agent Prompt: default"), "system should include agent section when workspace section exists");
 });

@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { AppContext } from "../../app/context.js";
 import {
   AgentProvidersSettingsViewSchema,
+  AgentGlobalPromptSettingsSchema,
   AgentMcpSettingsSchema,
   AgentSettingsSchema,
   ErrorResponseSchema,
@@ -12,6 +13,7 @@ import {
   SearchSettingsSchema,
   SecurityStatusSchema,
   UpdateAgentProvidersSettingsRequestSchema,
+  UpdateAgentGlobalPromptSettingsRequestSchema,
   UpdateAgentMcpSettingsRequestSchema,
   UpdateAgentSettingsRequestSchema,
   UpdateGitGlobalIdentityRequestSchema,
@@ -20,6 +22,7 @@ import {
 } from "@agent-workbench/shared";
 import {
   getAgentProvidersSettings,
+  getAgentGlobalPromptSettings,
   getAgentMcpSettings,
   getAgentSettings,
   clearAllGitIdentity,
@@ -29,6 +32,7 @@ import {
   getSecurityStatus,
   resetKnownHost,
   updateAgentProvidersSettings,
+  updateAgentGlobalPromptSettings,
   updateAgentMcpSettings,
   updateAgentSettings,
   updateGitGlobalIdentity,
@@ -164,6 +168,29 @@ export async function registerSettingsRoutes(app: FastifyInstance, ctx: AppConte
       }
     },
     async (req) => updateAgentProvidersSettings(ctx, app.log, req.body)
+  );
+
+  app.get(
+    "/api/settings/agent/global-prompts",
+    {
+      schema: {
+        tags: ["settings"],
+        response: { 200: AgentGlobalPromptSettingsSchema }
+      }
+    },
+    async () => getAgentGlobalPromptSettings(ctx)
+  );
+
+  app.put(
+    "/api/settings/agent/global-prompts",
+    {
+      schema: {
+        tags: ["settings"],
+        body: UpdateAgentGlobalPromptSettingsRequestSchema,
+        response: { 200: AgentGlobalPromptSettingsSchema, 400: ErrorResponseSchema }
+      }
+    },
+    async (req) => updateAgentGlobalPromptSettings(ctx, app.log, req.body)
   );
 
   app.get(

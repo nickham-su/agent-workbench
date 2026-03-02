@@ -1,14 +1,15 @@
 <template>
   <div class="space-y-3">
-    <div class="text-xs text-[color:var(--text-tertiary)]">
-      {{ t("settings.agentMcp.description") }}
-    </div>
-
-    <div class="flex items-center justify-end gap-2">
-      <div v-if="saving" class="text-xs text-[color:var(--text-tertiary)]">{{ t("settings.agentMcp.saving") }}</div>
-      <a-button size="small" type="primary" :disabled="loading" @click="openCreateServer">
-        {{ t("settings.agentMcp.actions.addServer") }}
-      </a-button>
+    <div class="flex flex-wrap items-start justify-between gap-2">
+      <div class="min-w-0 flex-1 text-xs text-[color:var(--text-tertiary)]">
+        {{ t("settings.agentMcp.description") }}
+      </div>
+      <div class="flex items-center gap-2">
+        <div v-if="saving" class="text-xs text-[color:var(--text-tertiary)]">{{ t("settings.agentMcp.saving") }}</div>
+        <a-button size="small" type="primary" :disabled="loading" @click="openCreateServer">
+          {{ t("settings.agentMcp.actions.addServer") }}
+        </a-button>
+      </div>
     </div>
 
     <div v-if="loading" class="text-xs text-[color:var(--text-tertiary)]">{{ t("common.loading") }}</div>

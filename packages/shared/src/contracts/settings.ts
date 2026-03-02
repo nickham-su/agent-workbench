@@ -152,6 +152,24 @@ export const UpdateAgentMcpSettingsRequestSchema = Type.Object({
 });
 export type UpdateAgentMcpSettingsRequest = Static<typeof UpdateAgentMcpSettingsRequestSchema>;
 
+export const AgentGlobalPromptItemSchema = Type.Object({
+  id: Type.String({ minLength: 1 }),
+  title: Type.String({ minLength: 1, maxLength: 20 }),
+  prompt: Type.String()
+});
+export type AgentGlobalPromptItem = Static<typeof AgentGlobalPromptItemSchema>;
+
+export const AgentGlobalPromptSettingsSchema = Type.Object({
+  items: Type.Array(AgentGlobalPromptItemSchema),
+  updatedAt: Type.Number()
+});
+export type AgentGlobalPromptSettings = Static<typeof AgentGlobalPromptSettingsSchema>;
+
+export const UpdateAgentGlobalPromptSettingsRequestSchema = Type.Object({
+  items: Type.Array(AgentGlobalPromptItemSchema)
+});
+export type UpdateAgentGlobalPromptSettingsRequest = Static<typeof UpdateAgentGlobalPromptSettingsRequestSchema>;
+
 export const AgentToolNameSchema = Type.Union([
   Type.Literal("bash"),
   Type.Literal("read"),
@@ -177,6 +195,7 @@ export const AgentItemSchema = Type.Object({
   name: Type.String({ minLength: 1 }),
   summary: Type.String({ maxLength: 160 }),
   prompt: Type.String(),
+  globalPromptIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
   tools: Type.Array(AgentToolNameSchema),
   mcpServers: Type.Array(Type.String({ minLength: 1 })),
   permissions: AgentPermissionsSchema,

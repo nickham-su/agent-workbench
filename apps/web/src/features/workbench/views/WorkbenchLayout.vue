@@ -50,7 +50,7 @@ const activeKey = computed<"workspaces" | "repos" | "settings">(() => {
 
 function onTabChange(key: string) {
   if (key === "repos") void router.push("/repos");
-  else if (key === "settings") void router.push("/settings/general");
+  else if (key === "settings") void router.push("/settings/basic/general");
   else void router.push("/workspaces");
 }
 </script>

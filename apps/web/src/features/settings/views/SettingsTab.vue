@@ -1,9 +1,35 @@
 <template>
-  <div class="flex flex-col min-h-0">
-
-
-    <div class="px-5 pb-5 min-h-0 overflow-auto">
-      <a-tabs v-model:activeKey="innerKey" size="small" :animated="false">
+  <div class="flex min-h-0 h-full">
+    <div class="shrink-0 w-56 border-r border-[var(--border-color-secondary)] bg-[var(--panel-bg)]">
+      <a-menu
+        :selectedKeys="menuSelectedKeys"
+        :openKeys="menuOpenKeys"
+        mode="inline"
+        @click="onMenuClick"
+        @openChange="onMenuOpenChange"
+      >
+        <a-sub-menu key="basic" :title="t('settings.groups.basic')">
+          <a-menu-item key="basic/general">{{ t('settings.tabs.general') }}</a-menu-item>
+          <a-menu-item key="basic/search">{{ t('settings.tabs.search') }}</a-menu-item>
+        </a-sub-menu>
+        <a-sub-menu key="agent" :title="t('settings.groups.agent')">
+          <a-menu-item key="agent/providers">{{ t('settings.tabs.agentProviders') }}</a-menu-item>
+          <a-menu-item key="agent/profiles">{{ t('settings.tabs.agentProfiles') }}</a-menu-item>
+          <a-menu-item key="agent/prompt-library">{{ t('settings.tabs.agentGlobalPrompts') }}</a-menu-item>
+          <a-menu-item key="agent/mcp">{{ t('settings.tabs.agentMcp') }}</a-menu-item>
+        </a-sub-menu>
+        <a-sub-menu key="identity" :title="t('settings.groups.identity')">
+          <a-menu-item key="identity/git-identity">{{ t('settings.tabs.gitIdentity') }}</a-menu-item>
+          <a-menu-item key="identity/credentials">{{ t('settings.tabs.credentials') }}</a-menu-item>
+        </a-sub-menu>
+        <a-sub-menu key="network-security" :title="t('settings.groups.networkSecurity')">
+          <a-menu-item key="network-security/network">{{ t('settings.tabs.network') }}</a-menu-item>
+          <a-menu-item key="network-security/security">{{ t('settings.tabs.security') }}</a-menu-item>
+        </a-sub-menu>
+      </a-menu>
+    </div>
+    <div class="flex-1 min-h-0 overflow-auto px-5 pb-5">
+      <a-tabs :activeKey="innerKey" size="small" :animated="false" class="settings-content-tabs">
         <a-tab-pane key="general" :tab="t('settings.tabs.general')">
           <a-form layout="vertical">
             <a-form-item :label="t('settings.general.language.label')">
@@ -40,11 +66,11 @@
 	        </a-tab-pane>
 
 	        <a-tab-pane key="credentials" :tab="t('settings.tabs.credentials')">
-	          <div class="flex items-center justify-between pb-2">
-	            <div class="text-xs text-[color:var(--text-tertiary)]">
-	              {{ t("settings.credentials.description") }}
+          <div class="flex items-center justify-between pb-2">
+            <div class="text-xs text-[color:var(--text-tertiary)]">
+              {{ t("settings.credentials.description") }}
             </div>
-            <a-button size="small" @click="openCreateCredential">{{ t("settings.credentials.actions.add") }}</a-button>
+            <a-button size="small" type="primary" @click="openCreateCredential">{{ t("settings.credentials.actions.add") }}</a-button>
           </div>
 
           <div v-if="!credLoading && credentials.length === 0" class="text-xs text-[color:var(--text-tertiary)]">
@@ -238,6 +264,10 @@
 	          <AgentProvidersSettingsPanel ref="agentProvidersPanelRef" />
 	        </a-tab-pane>
 
+	        <a-tab-pane key="agentGlobalPrompts" :tab="t('settings.tabs.agentGlobalPrompts')">
+	          <AgentGlobalPromptsSettingsPanel ref="agentGlobalPromptsPanelRef" />
+	        </a-tab-pane>
+
 	        <a-tab-pane key="agentMcp" :tab="t('settings.tabs.agentMcp')">
 	          <AgentMcpSettingsPanel ref="agentMcpPanelRef" />
 	        </a-tab-pane>
@@ -295,6 +325,7 @@ import { editorFontSize, setEditorFontSize, setTerminalFontSize, terminalFontSiz
 import AgentProfilesSettingsPanel from "@/features/settings/components/AgentProfilesSettingsPanel.vue";
 import AgentMcpSettingsPanel from "@/features/settings/components/AgentMcpSettingsPanel.vue";
 import AgentProvidersSettingsPanel from "@/features/settings/components/AgentProvidersSettingsPanel.vue";
+import AgentGlobalPromptsSettingsPanel from "@/features/settings/components/AgentGlobalPromptsSettingsPanel.vue";
 import {
   clearAllGitIdentity,
   createCredential,
@@ -319,6 +350,7 @@ const route = useRoute();
 const router = useRouter();
 
 const agentProvidersPanelRef = ref<{ refresh?: () => Promise<void> } | null>(null);
+const agentGlobalPromptsPanelRef = ref<{ refresh?: () => Promise<void> } | null>(null);
 const agentMcpPanelRef = ref<{ refresh?: () => Promise<void> } | null>(null);
 const agentProfilesPanelRef = ref<{ refresh?: () => Promise<void> } | null>(null);
 
@@ -329,26 +361,102 @@ const settingsTabKeys = [
   "network",
   "search",
   "agentProviders",
+  "agentGlobalPrompts",
   "agentMcp",
   "agentProfiles",
   "security"
 ] as const;
 type SettingsTabKey = (typeof settingsTabKeys)[number];
 
-function normalizeSettingsTabKey(v: unknown): SettingsTabKey {
-  const raw = Array.isArray(v) ? v[0] : v;
-  const k = String(raw ?? "");
-  if ((settingsTabKeys as readonly string[]).includes(k)) return k as SettingsTabKey;
-  return "general";
+const settingsGroupKeys = ["basic", "identity", "network-security", "agent"] as const;
+type SettingsGroupKey = (typeof settingsGroupKeys)[number];
+
+const settingsRouteMap: Record<SettingsGroupKey, Record<string, SettingsTabKey>> = {
+  basic: {
+    general: "general",
+    search: "search"
+  },
+  identity: {
+    "git-identity": "gitIdentity",
+    credentials: "credentials"
+  },
+  "network-security": {
+    network: "network",
+    security: "security"
+  },
+  agent: {
+    "prompt-library": "agentGlobalPrompts",
+    profiles: "agentProfiles",
+    providers: "agentProviders",
+    mcp: "agentMcp"
+  }
+};
+
+const tabKeyToRoute = new Map<SettingsTabKey, { group: SettingsGroupKey; tab: string }>();
+for (const [group, tabs] of Object.entries(settingsRouteMap) as Array<
+  [SettingsGroupKey, Record<string, SettingsTabKey>]
+>) {
+  for (const [tab, key] of Object.entries(tabs)) {
+    tabKeyToRoute.set(key, { group, tab });
+  }
 }
 
-// 二级 tabs 与 URL 同步：/settings/<tab>
-const innerKey = computed<SettingsTabKey>({
-  get: () => normalizeSettingsTabKey(route.params.tab),
-  set: (k) => {
-    void router.push(`/settings/${k}`);
+function normalizeSettingsRoute(groupRaw: unknown, tabRaw: unknown) {
+  const group = typeof groupRaw === "string" ? groupRaw : "";
+  const tab = typeof tabRaw === "string" ? tabRaw : "";
+  const groupMap = settingsRouteMap[group as SettingsGroupKey];
+  const tabKey = groupMap?.[tab];
+  if (tabKey) {
+    return {
+      group: group as SettingsGroupKey,
+      tab,
+      menuKey: `${group}/${tab}`,
+      tabKey
+    };
   }
-});
+
+  const fallback = tabKeyToRoute.get("general") ?? { group: "basic", tab: "general" };
+  return {
+    group: fallback.group,
+    tab: fallback.tab,
+    menuKey: `${fallback.group}/${fallback.tab}`,
+    tabKey: "general" as SettingsTabKey
+  };
+}
+
+const activeRoute = computed(() => normalizeSettingsRoute(route.params.group, route.params.tab));
+
+// 二级菜单与 URL 同步：/settings/<group>/<tab>
+const innerKey = computed<SettingsTabKey>(() => activeRoute.value.tabKey);
+const menuSelectedKeys = computed(() => [activeRoute.value.menuKey]);
+const menuOpenKeys = ref<string[]>([activeRoute.value.group]);
+
+function onMenuClick(info: { key: string }) {
+  const next = String(info.key || "");
+  if (!next) return;
+  void router.push(`/settings/${next}`);
+}
+
+function onMenuOpenChange(keys: string[]) {
+  menuOpenKeys.value = keys.map((key) => String(key));
+}
+
+watch(
+  () => [route.params.group, route.params.tab],
+  ([groupRaw, tabRaw]) => {
+    const normalized = normalizeSettingsRoute(groupRaw, tabRaw);
+    const rawGroup = typeof groupRaw === "string" ? groupRaw : "";
+    const rawTab = typeof tabRaw === "string" ? tabRaw : "";
+    if (normalized.group !== rawGroup || normalized.tab !== rawTab) {
+      void router.replace(`/settings/${normalized.menuKey}`);
+      return;
+    }
+    if (!menuOpenKeys.value.includes(normalized.group)) {
+      menuOpenKeys.value = [normalized.group];
+    }
+  },
+  { immediate: true }
+);
 
 const uiLocale = ref<AppLocale>(getInitialLocale());
 const languageOptions = computed(() => [
@@ -734,6 +842,7 @@ watch(
     else if (k === "network") await refreshNetwork();
     else if (k === "search") await refreshSearchSettings();
     else if (k === "agentProviders") await agentProvidersPanelRef.value?.refresh?.();
+    else if (k === "agentGlobalPrompts") await agentGlobalPromptsPanelRef.value?.refresh?.();
     else if (k === "agentMcp") await agentMcpPanelRef.value?.refresh?.();
     else if (k === "agentProfiles") await agentProfilesPanelRef.value?.refresh?.();
     else if (k === "security") await refreshSecurity();
@@ -741,3 +850,13 @@ watch(
   { immediate: true }
 );
 </script>
+
+<style scoped>
+.settings-content-tabs :deep(.ant-tabs-nav) {
+  display: none;
+}
+
+.settings-content-tabs :deep(.ant-tabs-content-holder) {
+  padding-top: 0;
+}
+</style>

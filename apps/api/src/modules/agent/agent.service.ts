@@ -1,4 +1,7 @@
 import type { FastifyBaseLogger } from "fastify";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { TextDecoder } from "node:util";
 import type {
   AgentCancelSessionRequest,
   AgentContextItemRecord,
@@ -46,7 +49,12 @@ import {
   updateAgentSessionTitle,
   updateRunState
 } from "./agent.store.js";
-import { getAgentMcpSettings, getAgentSettings, resolveExecutionProfile } from "../settings/settings.service.js";
+import {
+  getAgentGlobalPromptSettings,
+  getAgentMcpSettings,
+  getAgentSettings,
+  resolveExecutionProfile
+} from "../settings/settings.service.js";
 import { projectToolCallInputForPrompt, projectToolResultForPrompt } from "./prompt/tool-projectors/index.js";
 
 export type AgentQueuedRun = {
@@ -270,6 +278,9 @@ const TERMINAL_TOOL_ITEM_STATUS = new Set<AgentContextItemStatus>([
   "cancelled"
 ]);
 
+const WORKSPACE_AGENTS_FILENAME = "AGENTS.md";
+const WORKSPACE_AGENTS_MAX_BYTES = 32 * 1024;
+
 type PromptTextPart = { type: "text"; text: string };
 type PromptToolCallPart = {
   type: "tool-call";
@@ -290,6 +301,104 @@ type PromptMessage =
   | { role: "user"; content: string | PromptTextPart[] }
   | { role: "assistant"; content: string | Array<PromptTextPart | PromptToolCallPart> }
   | { role: "tool"; content: PromptToolResultPart[] };
+
+function decodeUtf8Prefix(bytes: Buffer, maxBytes: number) {
+  const truncated = bytes.length > maxBytes;
+  const prefix = truncated ? bytes.subarray(0, maxBytes) : bytes;
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let end = prefix.length;
+  while (end > 0) {
+    try {
+      const text = decoder.decode(prefix.subarray(0, end));
+      return { text, truncated };
+    } catch {
+      end -= 1;
+    }
+  }
+  return { text: "", truncated };
+}
+
+async function readWorkspaceAgentsInstructions(workspacePath: string, logger: FastifyBaseLogger) {
+  const filePath = path.join(workspacePath, WORKSPACE_AGENTS_FILENAME);
+  const relativePath = path.relative(workspacePath, filePath);
+  const displayPath = relativePath && !relativePath.startsWith("..") ? relativePath : filePath;
+  let stat: Awaited<ReturnType<typeof fs.lstat>>;
+  try {
+    stat = await fs.lstat(filePath);
+  } catch (err: any) {
+    if (err && err.code === "ENOENT") return null;
+    logger.warn({ err, filePath }, "read workspace AGENTS.md failed");
+    return null;
+  }
+
+  if (!stat.isFile() || stat.isSymbolicLink()) return null;
+
+  let fd: Awaited<ReturnType<typeof fs.open>> | null = null;
+  try {
+    fd = await fs.open(filePath, "r");
+    const buf = Buffer.alloc(WORKSPACE_AGENTS_MAX_BYTES + 1);
+    let totalRead = 0;
+    while (totalRead < buf.length) {
+      const { bytesRead } = await fd.read(buf, totalRead, buf.length - totalRead, totalRead);
+      if (!bytesRead) break;
+      totalRead += bytesRead;
+    }
+    const chunk = buf.subarray(0, totalRead);
+    if (chunk.includes(0x00)) {
+      logger.warn({ filePath }, "workspace AGENTS.md appears binary, ignored");
+      return null;
+    }
+
+    const decoded = decodeUtf8Prefix(chunk, WORKSPACE_AGENTS_MAX_BYTES);
+    if (!decoded.text.trim()) return null;
+
+    const extra = decoded.truncated ? "\n\n[workspace AGENTS.md truncated: first 32KB]" : "";
+    return {
+      filePath,
+      displayPath,
+      content: `${decoded.text}${extra}`
+    };
+  } catch (err) {
+    logger.warn({ err, filePath }, "read workspace AGENTS.md failed");
+    return null;
+  } finally {
+    await fd?.close().catch(() => undefined);
+  }
+}
+
+function buildSystemPrompt(input: {
+  agentName: string;
+  agentPrompt: string;
+  agentGlobalPromptIds: string[];
+  globalPrompts: Array<{ id: string; title: string; prompt: string }>;
+  workspaceInstructions: { filePath: string; displayPath: string; content: string } | null;
+}) {
+  const agentPrompt = input.agentPrompt || "";
+  const hasWorkspace = Boolean(input.workspaceInstructions?.content?.trim());
+  const selectedGlobalIds = new Set(input.agentGlobalPromptIds);
+  const hasGlobal = input.globalPrompts.some((item) => selectedGlobalIds.has(item.id) && item.prompt.trim());
+  if (!hasWorkspace && !hasGlobal) {
+    return agentPrompt;
+  }
+
+  const sections: string[] = [];
+
+  for (const item of input.globalPrompts) {
+    if (!selectedGlobalIds.has(item.id)) continue;
+    if (!item.prompt.trim()) continue;
+    sections.push(`## Global Prompt: ${item.title}\n${item.prompt}`);
+  }
+
+  if (input.workspaceInstructions?.content?.trim()) {
+    sections.push(`## Workspace Instructions: ${input.workspaceInstructions.displayPath}\n${input.workspaceInstructions.content}`);
+  }
+
+  if (agentPrompt.trim()) {
+    sections.push(`## Agent Prompt: ${input.agentName}\n${agentPrompt}`);
+  }
+
+  return sections.join("\n\n");
+}
 
 export class AgentService {
   constructor(private readonly ctx: AppContext, private readonly logger: FastifyBaseLogger) {}
@@ -1057,10 +1166,11 @@ export class AgentService {
     return getAgentMcpSettings(this.ctx);
   }
 
-  getPromptContextForRun(params: { workspaceId: string; sessionId: string; runId: string }) {
+  async getPromptContextForRun(params: { workspaceId: string; sessionId: string; runId: string }) {
     const session = getAgentSession(this.ctx.db, params.sessionId);
     if (!session) throw new HttpError(404, "session not found");
     if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
+    const workspace = this.ensureWorkspace(params.workspaceId);
 
     const run = getRunRecord(this.ctx.db, params.runId);
     if (!run || run.sessionId !== params.sessionId || run.workspaceId !== params.workspaceId) {
@@ -1071,6 +1181,15 @@ export class AgentService {
       agentIdFromRun: run.agentId,
       providerIdFromRun: run.providerId,
       modelIdFromRun: run.modelId
+    });
+    const globalPrompts = getAgentGlobalPromptSettings(this.ctx);
+    const workspaceInstructions = await readWorkspaceAgentsInstructions(workspace.path, this.logger);
+    const system = buildSystemPrompt({
+      agentName: profile.agent.name,
+      agentPrompt: profile.agent.prompt || "",
+      agentGlobalPromptIds: Array.isArray(profile.agent.globalPromptIds) ? profile.agent.globalPromptIds : [],
+      globalPrompts: globalPrompts.items,
+      workspaceInstructions
     });
 
     const visible = getSessionVisibleItems(this.ctx.db, params.workspaceId, params.sessionId);
@@ -1208,7 +1327,7 @@ export class AgentService {
 
     return {
       headItemId: session.headItemId,
-      system: profile.agent.prompt || "",
+      system,
       messages,
       tools,
       pendingTools

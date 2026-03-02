@@ -89,9 +89,11 @@ import type {
   AgentCancelSessionRequest,
   AgentToolPermissionRequest,
   AgentProvidersSettingsView,
+  AgentGlobalPromptSettings,
   AgentMcpSettings,
   UpdateAgentMcpSettingsRequest,
   UpdateAgentProvidersSettingsRequest,
+  UpdateAgentGlobalPromptSettingsRequest,
   AgentSettings,
   UpdateAgentSettingsRequest
 } from "@agent-workbench/shared";
@@ -815,6 +817,24 @@ export async function updateAgentProvidersSettings(body: UpdateAgentProvidersSet
 export async function getAgentSettings() {
   try {
     const res = await client.get<AgentSettings>("/settings/agent/agents");
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getAgentGlobalPromptSettings() {
+  try {
+    const res = await client.get<AgentGlobalPromptSettings>("/settings/agent/global-prompts");
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function updateAgentGlobalPromptSettings(body: UpdateAgentGlobalPromptSettingsRequest) {
+  try {
+    const res = await client.put<AgentGlobalPromptSettings>("/settings/agent/global-prompts", body);
     return res.data;
   } catch (err) {
     throw toApiError(err);

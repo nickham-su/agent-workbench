@@ -2,6 +2,8 @@ import type { FastifyBaseLogger } from "fastify";
 import fs from "node:fs/promises";
 import type {
   AgentItem,
+  AgentGlobalPromptItem,
+  AgentGlobalPromptSettings,
   AgentMcpServerConfig,
   AgentMcpSettings,
   AgentProviderNpm,
@@ -16,6 +18,7 @@ import type {
   SearchSettings,
   SecurityStatus,
   UpdateAgentProvidersSettingsRequest,
+  UpdateAgentGlobalPromptSettingsRequest,
   UpdateAgentMcpSettingsRequest,
   UpdateAgentSettingsRequest,
   UpdateGitGlobalIdentityRequest,
@@ -39,13 +42,18 @@ const SEARCH_SETTINGS_KEY = "search";
 const AGENT_PROVIDERS_SETTINGS_KEY = "agent_providers_v1";
 const AGENT_SETTINGS_KEY = "agent_agents_v1";
 const AGENT_MCP_SETTINGS_KEY = "agent_mcp_v1";
+const AGENT_GLOBAL_PROMPTS_SETTINGS_KEY = "agent_global_prompts_v1";
 
 const SEARCH_EXCLUDE_MAX_COUNT = 200;
 const SEARCH_EXCLUDE_MAX_LENGTH = 200;
+const AGENT_PROMPT_MAX_BYTES = 32 * 1024;
+const AGENT_GLOBAL_PROMPT_TITLE_MAX_LENGTH = 20;
+const AGENT_GLOBAL_PROMPT_MAX_BYTES = 32 * 1024;
 
 type AgentProvidersSettingsStored = Omit<AgentProvidersSettings, "updatedAt">;
 type AgentSettingsStored = Omit<AgentSettings, "updatedAt">;
 type AgentMcpSettingsStored = Omit<AgentMcpSettings, "updatedAt">;
+type AgentGlobalPromptSettingsStored = Omit<AgentGlobalPromptSettings, "updatedAt">;
 
 type AgentProviderStored = AgentProvidersSettingsStored["providers"][number];
 
@@ -478,9 +486,101 @@ function normalizeAgentSummaryForUpdate(raw: unknown) {
   return normalized;
 }
 
+function normalizeAgentPromptForUpdate(raw: unknown) {
+  const value = typeof raw === "string" ? raw : "";
+  if (value.includes("\0")) {
+    throw new HttpError(400, "Agent prompt contains invalid character", "AGENT_PROMPT_INVALID");
+  }
+  if (Buffer.byteLength(value, "utf-8") > AGENT_PROMPT_MAX_BYTES) {
+    throw new HttpError(400, "Agent prompt is too long", "AGENT_PROMPT_TOO_LONG");
+  }
+  return value;
+}
+
+function normalizeGlobalPromptId(raw: unknown) {
+  const value = typeof raw === "string" ? raw.trim() : "";
+  if (!value) return "";
+  if (value.includes("\0") || value.includes("\n") || value.includes("\r")) return "";
+  return value;
+}
+
+function normalizeAgentGlobalPromptIds(raw: unknown, availableIds: Set<string>) {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    const id = normalizeGlobalPromptId(item);
+    if (!id || seen.has(id)) continue;
+    if (!availableIds.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+function normalizeAgentGlobalPromptTitleForUpdate(raw: unknown) {
+  const value = typeof raw === "string" ? raw.trim() : "";
+  if (!value) {
+    throw new HttpError(400, "Global prompt title is required", "AGENT_GLOBAL_PROMPT_TITLE_REQUIRED");
+  }
+  if (value.includes("\0") || value.includes("\n") || value.includes("\r")) {
+    throw new HttpError(400, "Global prompt title is invalid", "AGENT_GLOBAL_PROMPT_TITLE_INVALID");
+  }
+  if (value.length > AGENT_GLOBAL_PROMPT_TITLE_MAX_LENGTH) {
+    throw new HttpError(400, "Global prompt title is too long", "AGENT_GLOBAL_PROMPT_TITLE_TOO_LONG");
+  }
+  return value;
+}
+
+function normalizeAgentGlobalPromptPromptForUpdate(raw: unknown) {
+  const value = typeof raw === "string" ? raw : "";
+  if (value.includes("\0")) {
+    throw new HttpError(400, "Global prompt contains invalid character", "AGENT_GLOBAL_PROMPT_INVALID");
+  }
+  if (Buffer.byteLength(value, "utf-8") > AGENT_GLOBAL_PROMPT_MAX_BYTES) {
+    throw new HttpError(400, "Global prompt is too long", "AGENT_GLOBAL_PROMPT_TOO_LONG");
+  }
+  return value;
+}
+
+function getAgentGlobalPromptSettingsStored(ctx: AppContext) {
+  const row = getSettingJson(ctx.db, AGENT_GLOBAL_PROMPTS_SETTINGS_KEY);
+  const value = row?.value as Partial<AgentGlobalPromptSettingsStored> | undefined;
+  const itemsRaw = Array.isArray(value?.items) ? value.items : [];
+  const ids = new Set<string>();
+  const items = itemsRaw
+    .map((itemRaw) => {
+      const item = itemRaw as Record<string, unknown>;
+      const id = normalizeGlobalPromptId(item.id);
+      if (!id || ids.has(id)) return null;
+      ids.add(id);
+      const titleRaw = typeof item.title === "string" ? item.title.trim() : "";
+      const prompt = typeof item.prompt === "string" ? item.prompt : "";
+      if (!titleRaw || titleRaw.length > AGENT_GLOBAL_PROMPT_TITLE_MAX_LENGTH) return null;
+      if (titleRaw.includes("\0") || titleRaw.includes("\n") || titleRaw.includes("\r")) return null;
+      if (prompt.includes("\0")) return null;
+      if (Buffer.byteLength(prompt, "utf-8") > AGENT_GLOBAL_PROMPT_MAX_BYTES) return null;
+      return {
+        id,
+        title: titleRaw,
+        prompt
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => item !== null);
+
+  return {
+    settings: {
+      items
+    },
+    updatedAt: row?.updatedAt ?? 0
+  };
+}
+
 function getAgentSettingsStored(ctx: AppContext) {
   const mcpLoaded = getAgentMcpSettingsStored(ctx);
   const mcpServerIds = new Set(mcpLoaded.settings.servers.map((item) => item.id));
+  const globalPromptLoaded = getAgentGlobalPromptSettingsStored(ctx);
+  const globalPromptIds = new Set(globalPromptLoaded.settings.items.map((item) => item.id));
   const row = getSettingJson(ctx.db, AGENT_SETTINGS_KEY);
   const value = row?.value as Partial<AgentSettingsStored> | undefined;
   const agentsRaw = Array.isArray(value?.agents) ? value.agents : [];
@@ -507,6 +607,7 @@ function getAgentSettingsStored(ctx: AppContext) {
         name,
         summary: normalizeAgentSummaryFromStored(agent.summary),
         prompt,
+        globalPromptIds: normalizeAgentGlobalPromptIds(agent.globalPromptIds, globalPromptIds),
         tools: normalizeAgentTools(agent.tools),
         mcpServers: normalizeAgentMcpServers(agent.mcpServers, mcpServerIds),
         permissions,
@@ -578,6 +679,57 @@ export function getAgentMcpSettings(ctx: AppContext): AgentMcpSettings {
   return {
     servers: loaded.settings.servers,
     updatedAt: loaded.updatedAt
+  };
+}
+
+export function getAgentGlobalPromptSettings(ctx: AppContext): AgentGlobalPromptSettings {
+  const loaded = getAgentGlobalPromptSettingsStored(ctx);
+  return {
+    items: loaded.settings.items,
+    updatedAt: loaded.updatedAt
+  };
+}
+
+export function updateAgentGlobalPromptSettings(
+  ctx: AppContext,
+  logger: FastifyBaseLogger,
+  bodyRaw: unknown
+): AgentGlobalPromptSettings {
+  const body = (bodyRaw ?? {}) as UpdateAgentGlobalPromptSettingsRequest;
+  const incoming = Array.isArray(body.items) ? body.items : [];
+  const items: AgentGlobalPromptItem[] = incoming.map((itemRaw) => {
+    const item = itemRaw as Record<string, unknown>;
+    const id = normalizeGlobalPromptId(item.id);
+    if (!id) {
+      throw new HttpError(400, "Global prompt id is required", "AGENT_GLOBAL_PROMPT_ID_REQUIRED");
+    }
+    return {
+      id,
+      title: normalizeAgentGlobalPromptTitleForUpdate(item.title),
+      prompt: normalizeAgentGlobalPromptPromptForUpdate(item.prompt)
+    };
+  });
+
+  assertUniqueIdsOrThrow(
+    items.map((item) => item.id),
+    "AGENT_GLOBAL_PROMPT_DUPLICATE",
+    "Duplicate global prompt id"
+  );
+
+  const updatedAt = nowMs();
+  setSettingJson(
+    ctx.db,
+    AGENT_GLOBAL_PROMPTS_SETTINGS_KEY,
+    {
+      items
+    },
+    updatedAt
+  );
+
+  logger.info({ items: items.length, updatedAt }, "agent global prompt settings updated");
+  return {
+    items,
+    updatedAt
   };
 }
 
@@ -727,6 +879,8 @@ export function updateAgentSettings(ctx: AppContext, logger: FastifyBaseLogger, 
   const incomingAgents = Array.isArray(body.agents) ? body.agents : [];
   const mcpLoaded = getAgentMcpSettingsStored(ctx);
   const availableMcpIds = new Set(mcpLoaded.settings.servers.map((item) => item.id));
+  const globalPromptLoaded = getAgentGlobalPromptSettingsStored(ctx);
+  const availableGlobalPromptIds = new Set(globalPromptLoaded.settings.items.map((item) => item.id));
   const agents = incomingAgents.map((agentRaw) => {
     const agent = agentRaw as Record<string, unknown>;
     const id = typeof agent.id === "string" ? agent.id.trim() : "";
@@ -734,9 +888,10 @@ export function updateAgentSettings(ctx: AppContext, logger: FastifyBaseLogger, 
     if (!id || !name) {
       throw new HttpError(400, "Agent id/name is required", "AGENT_ID_NAME_REQUIRED");
     }
-    const prompt = typeof agent.prompt === "string" ? agent.prompt : "";
+    const prompt = normalizeAgentPromptForUpdate(agent.prompt);
     const summary = normalizeAgentSummaryForUpdate(agent.summary);
     const tools = normalizeAgentTools(agent.tools);
+    const globalPromptIds = normalizeAgentGlobalPromptIds(agent.globalPromptIds, availableGlobalPromptIds);
     const mcpServers = normalizeAgentMcpServers(agent.mcpServers, availableMcpIds);
     const permissionsRaw = (agent.permissions ?? {}) as Record<string, unknown>;
     const fallbackPermissions = defaultAgentPermissions();
@@ -754,6 +909,7 @@ export function updateAgentSettings(ctx: AppContext, logger: FastifyBaseLogger, 
       name,
       summary,
       prompt,
+      globalPromptIds,
       tools,
       mcpServers,
       permissions,

@@ -1,14 +1,15 @@
 <template>
   <div class="space-y-3">
-    <div class="text-xs text-[color:var(--text-tertiary)]">
-      {{ t("settings.agentProfiles.description") }}
-    </div>
-
-    <div class="flex items-center justify-end gap-2">
-      <div v-if="saving" class="text-xs text-[color:var(--text-tertiary)]">{{ t("settings.agentProfiles.saving") }}</div>
-      <a-button size="small" type="primary" :disabled="loading" @click="openCreateAgent">
-        {{ t("settings.agentProfiles.actions.addAgent") }}
-      </a-button>
+    <div class="flex flex-wrap items-start justify-between gap-2">
+      <div class="min-w-0 flex-1 text-xs text-[color:var(--text-tertiary)]">
+        {{ t("settings.agentProfiles.description") }}
+      </div>
+      <div class="flex items-center gap-2">
+        <div v-if="saving" class="text-xs text-[color:var(--text-tertiary)]">{{ t("settings.agentProfiles.saving") }}</div>
+        <a-button size="small" type="primary" :disabled="loading" @click="openCreateAgent">
+          {{ t("settings.agentProfiles.actions.addAgent") }}
+        </a-button>
+      </div>
     </div>
 
     <div v-if="loading" class="text-xs text-[color:var(--text-tertiary)]">{{ t("common.loading") }}</div>
@@ -32,6 +33,10 @@
 
           <div class="text-[11px] text-[color:var(--text-tertiary)] truncate">
             {{ t("settings.agentProfiles.fields.summary") }}: {{ agent.summary || "-" }}
+          </div>
+
+          <div class="text-[11px] text-[color:var(--text-tertiary)] truncate">
+            {{ t("settings.agentProfiles.fields.globalPrompts") }}: {{ globalPromptSummary(agent.globalPromptIds) }}
           </div>
 
           <div class="flex flex-wrap gap-1">
@@ -102,14 +107,6 @@
           <a-input v-model:value="agentFormName" />
         </a-form-item>
 
-        <a-form-item :label="t('settings.agentProfiles.agentForm.promptLabel')">
-          <a-textarea
-            v-model:value="agentFormPrompt"
-            :auto-size="{ minRows: 4, maxRows: 12 }"
-            :placeholder="t('settings.agentProfiles.agentForm.promptPlaceholder')"
-          />
-        </a-form-item>
-
         <a-form-item :label="t('settings.agentProfiles.agentForm.summaryLabel')">
           <a-textarea
             v-model:value="agentFormSummary"
@@ -122,8 +119,31 @@
           </div>
         </a-form-item>
 
+        <a-form-item :label="t('settings.agentProfiles.agentForm.promptLabel')">
+          <a-textarea
+            v-model:value="agentFormPrompt"
+            :auto-size="{ minRows: 4, maxRows: 12 }"
+            :placeholder="t('settings.agentProfiles.agentForm.promptPlaceholder')"
+          />
+          <div class="pt-1 text-xs text-[color:var(--text-tertiary)]">
+            {{ t("settings.agentProfiles.agentForm.promptBytesHelp", { maxKb: AGENT_PROMPT_MAX_BYTES / 1024, bytes: agentPromptBytes }) }}
+          </div>
+        </a-form-item>
+
+        <a-form-item :label="t('settings.agentProfiles.fields.globalPrompts')">
+          <a-select
+            v-model:value="agentFormGlobalPromptIds"
+            mode="multiple"
+            :options="globalPromptOptions"
+            :placeholder="t('settings.agentProfiles.agentForm.globalPromptsPlaceholder')"
+          />
+          <div class="pt-1 text-xs text-[color:var(--text-tertiary)]">
+            {{ t("settings.agentProfiles.agentForm.globalPromptsHelp") }}
+          </div>
+        </a-form-item>
+
         <a-form-item :label="t('settings.agentProfiles.fields.tools')">
-          <a-checkbox-group v-model:value="agentFormTools" :options="toolOptions" />
+          <a-select v-model:value="agentFormTools" mode="multiple" :options="toolOptions" />
         </a-form-item>
 
         <a-form-item :label="t('settings.agentProfiles.fields.mcpServers')">
@@ -164,6 +184,7 @@
 <script setup lang="ts">
 import type {
   AgentDefaultModel,
+  AgentGlobalPromptSettings,
   AgentMcpSettings,
   AgentProvidersSettingsView,
   AgentSettings,
@@ -174,7 +195,13 @@ import { Modal, message } from "ant-design-vue";
 import { computed, onMounted, ref } from "vue";
 import { DeleteOutlined, EditOutlined } from "@ant-design/icons-vue";
 import { useI18n } from "vue-i18n";
-import { getAgentMcpSettings, getAgentProvidersSettings, getAgentSettings, updateAgentSettings } from "@/shared/api";
+import {
+  getAgentGlobalPromptSettings,
+  getAgentMcpSettings,
+  getAgentProvidersSettings,
+  getAgentSettings,
+  updateAgentSettings
+} from "@/shared/api";
 
 const { t } = useI18n();
 
@@ -183,6 +210,7 @@ type EditingAgent = {
   name: string;
   summary: string;
   prompt: string;
+  globalPromptIds: string[];
   tools: AgentToolName[];
   mcpServers: string[];
   permissions: {
@@ -194,6 +222,7 @@ type EditingAgent = {
 };
 
 const GLOBAL_DEFAULT_MODEL_PATH = "__global__";
+const AGENT_PROMPT_MAX_BYTES = 32 * 1024;
 
 const DEFAULT_TOOLS: AgentToolName[] = ["bash", "read", "write", "apply_patch", "todolist", "subtask"];
 
@@ -212,6 +241,7 @@ const pendingSave = ref(false);
 
 const providersSettings = ref<AgentProvidersSettingsView | null>(null);
 const mcpSettings = ref<AgentMcpSettings | null>(null);
+const globalPromptSettings = ref<AgentGlobalPromptSettings | null>(null);
 const agents = ref<EditingAgent[]>([]);
 const selectedDefaultAgentId = ref<string | null>(null);
 
@@ -221,6 +251,7 @@ const agentFormId = ref("");
 const agentFormName = ref("");
 const agentFormSummary = ref("");
 const agentFormPrompt = ref("");
+const agentFormGlobalPromptIds = ref<string[]>([]);
 const agentFormTools = ref<AgentToolName[]>([...DEFAULT_TOOLS]);
 const agentFormMcpServers = ref<string[]>([]);
 const agentFormAllowRead = ref(true);
@@ -256,6 +287,16 @@ const mcpServerOptions = computed(() => {
     value: server.id
   }));
 });
+
+const globalPromptOptions = computed(() => {
+  const items = globalPromptSettings.value?.items ?? [];
+  return items.map((item) => ({
+    label: item.title,
+    value: item.id
+  }));
+});
+
+const agentPromptBytes = computed(() => new TextEncoder().encode(agentFormPrompt.value).length);
 
 const canSubmitAgent = computed(() => {
   if (!agentFormId.value.trim()) return false;
@@ -304,14 +345,35 @@ function normalizeMcpServers(raw: unknown): string[] {
   return out;
 }
 
-function mapFromSettings(settings: AgentSettings, providers: AgentProvidersSettingsView, mcp: AgentMcpSettings) {
+function normalizeGlobalPromptIds(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const available = new Set((globalPromptSettings.value?.items ?? []).map((item) => item.id));
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    const value = typeof item === "string" ? item.trim() : "";
+    if (!value || seen.has(value) || !available.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
+}
+
+function mapFromSettings(
+  settings: AgentSettings,
+  providers: AgentProvidersSettingsView,
+  mcp: AgentMcpSettings,
+  globalPrompts: AgentGlobalPromptSettings
+) {
   providersSettings.value = providers;
   mcpSettings.value = mcp;
+  globalPromptSettings.value = globalPrompts;
   agents.value = settings.agents.map((agent) => ({
     id: agent.id,
     name: agent.name,
     summary: agent.summary,
     prompt: agent.prompt,
+    globalPromptIds: normalizeGlobalPromptIds(agent.globalPromptIds),
     tools: normalizeTools(agent.tools),
     mcpServers: normalizeMcpServers(agent.mcpServers),
     permissions: {
@@ -369,6 +431,16 @@ function toolLabel(tool: AgentToolName) {
   return t("settings.agentProfiles.tools.subtask");
 }
 
+function globalPromptLabel(id: string) {
+  const item = globalPromptSettings.value?.items.find((entry) => entry.id === id);
+  return item?.title || id;
+}
+
+function globalPromptSummary(ids: string[]) {
+  if (!Array.isArray(ids) || ids.length === 0) return "-";
+  return ids.map((id) => globalPromptLabel(id)).join(", ");
+}
+
 function isDefaultAgent(agentId: string) {
   return selectedDefaultAgentId.value === agentId;
 }
@@ -389,6 +461,7 @@ function toRequestBody() {
       name: agent.name.trim() || agent.id,
       summary: agent.summary.trim(),
       prompt: agent.prompt,
+      globalPromptIds: normalizeGlobalPromptIds(agent.globalPromptIds),
       tools: normalizeTools(agent.tools),
       mcpServers: normalizeMcpServers(agent.mcpServers),
       permissions: {
@@ -407,6 +480,7 @@ function openCreateAgent() {
   agentFormName.value = "";
   agentFormSummary.value = "";
   agentFormPrompt.value = "";
+  agentFormGlobalPromptIds.value = [];
   agentFormTools.value = [...DEFAULT_TOOLS];
   agentFormMcpServers.value = [];
   agentFormAllowRead.value = true;
@@ -425,6 +499,7 @@ function openEditAgent(agentId: string) {
   agentFormName.value = target.name;
   agentFormSummary.value = target.summary;
   agentFormPrompt.value = target.prompt;
+  agentFormGlobalPromptIds.value = normalizeGlobalPromptIds(target.globalPromptIds);
   agentFormTools.value = normalizeTools(target.tools);
   agentFormMcpServers.value = normalizeMcpServers(target.mcpServers);
   agentFormAllowRead.value = target.permissions.allowRead;
@@ -445,6 +520,7 @@ function closeAgentModal() {
   agentFormName.value = "";
   agentFormSummary.value = "";
   agentFormPrompt.value = "";
+  agentFormGlobalPromptIds.value = [];
   agentFormTools.value = [...DEFAULT_TOOLS];
   agentFormMcpServers.value = [];
   agentFormAllowRead.value = true;
@@ -472,12 +548,17 @@ function submitAgent() {
     message.error(t("settings.agentProfiles.errors.defaultModelInvalid"));
     return;
   }
+  if (agentPromptBytes.value > AGENT_PROMPT_MAX_BYTES) {
+    message.error(t("settings.agentProfiles.errors.promptTooLong", { maxKb: AGENT_PROMPT_MAX_BYTES / 1024 }));
+    return;
+  }
 
   const payload: EditingAgent = {
     id,
     name,
     summary: agentFormSummary.value.trim(),
     prompt: agentFormPrompt.value,
+    globalPromptIds: normalizeGlobalPromptIds(agentFormGlobalPromptIds.value),
     tools: normalizeTools(agentFormTools.value),
     mcpServers: normalizeMcpServers(agentFormMcpServers.value),
     permissions: {
@@ -538,12 +619,13 @@ async function refreshDraft() {
   if (loading.value) return;
   loading.value = true;
   try {
-    const [agentSettings, providerSettings, mcp] = await Promise.all([
+    const [agentSettings, providerSettings, mcp, globalPrompts] = await Promise.all([
       getAgentSettings(),
       getAgentProvidersSettings(),
-      getAgentMcpSettings()
+      getAgentMcpSettings(),
+      getAgentGlobalPromptSettings()
     ]);
-    mapFromSettings(agentSettings, providerSettings, mcp);
+    mapFromSettings(agentSettings, providerSettings, mcp, globalPrompts);
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
@@ -563,7 +645,8 @@ async function persist(params: { toast: boolean }) {
     mapFromSettings(
       res,
       providersSettings.value ?? { default: null, providers: [], updatedAt: 0 },
-      mcpSettings.value ?? { servers: [], updatedAt: 0 }
+      mcpSettings.value ?? { servers: [], updatedAt: 0 },
+      globalPromptSettings.value ?? { items: [], updatedAt: 0 }
     );
     if (params.toast) message.success(t("settings.agentProfiles.saved"));
   } catch (err) {

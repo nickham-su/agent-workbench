@@ -825,7 +825,7 @@ function onCycleAgent(step: 1 | -1) {
 }
 
 function goAgentProfiles() {
-  void router.push("/settings/agentProfiles");
+  void router.push("/settings/agent/profiles");
 }
 
 function onOpenSubtask(sessionId?: string) {

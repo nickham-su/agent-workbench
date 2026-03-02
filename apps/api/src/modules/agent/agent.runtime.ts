@@ -72,7 +72,7 @@ export class AgentRuntime implements AgentRuntimePort {
   private async processRun(run: RuntimeQueuedRun) {
     const ts = nowMs();
     try {
-      const ctx = this.service.getPromptContextForRun({
+      const ctx = await this.service.getPromptContextForRun({
         workspaceId: run.workspaceId,
         sessionId: run.sessionId,
         runId: run.runId

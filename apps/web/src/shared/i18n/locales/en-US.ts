@@ -597,10 +597,17 @@ export default {
       gitIdentity: "Git Identity",
       credentials: "Credentials",
       network: "Network",
-      agentProviders: "AI Providers",
+      agentProviders: "Model Providers",
+      agentGlobalPrompts: "Prompt Library",
       agentMcp: "MCP",
-      agentProfiles: "AI Agents",
+      agentProfiles: "Role Profiles",
       security: "Security"
+    },
+    groups: {
+      basic: "Basics",
+      identity: "Identity & Credentials",
+      networkSecurity: "Network & Security",
+      agent: "Agent"
     },
     general: {
       language: {
@@ -819,6 +826,42 @@ export default {
       },
       saved: "Saved"
     },
+    agentGlobalPrompts: {
+      description: "Manage prompt library entries. Entries take effect only when selected by an agent profile.",
+      saving: "Saving...",
+      empty: "No prompt library entries yet. Add one to start.",
+      actions: {
+        add: "Add entry",
+        edit: "Edit",
+        delete: "Delete"
+      },
+      modal: {
+        createTitle: "Add prompt library entry",
+        editTitle: "Edit prompt library entry",
+        ok: "OK",
+        cancel: "Cancel"
+      },
+      form: {
+        idLabel: "Entry ID (auto)",
+        titleLabel: "Title",
+        promptLabel: "Prompt",
+        promptPlaceholder: "Enter prompt text for this entry",
+        promptHelp: "Up to {maxKb}KB, current {bytes} bytes"
+      },
+      deleteConfirm: {
+        title: "Delete prompt library entry?",
+        content: "This will delete entry {title}.",
+        ok: "Delete",
+        cancel: "Cancel"
+      },
+      errors: {
+        invalidForm: "Please complete required fields",
+        duplicateId: "Entry ID already exists",
+        titleTooLong: "Title is too long. Maximum {max} characters",
+        promptTooLong: "Prompt is too long. Maximum {maxKb}KB"
+      },
+      saved: "Saved"
+    },
     agentProfiles: {
       description: "Configure AI agents, default agent, tool permissions, and default model.",
       saving: "Saving...",
@@ -832,6 +875,7 @@ export default {
       fields: {
         tools: "Tools",
         mcpServers: "MCP Servers",
+        globalPrompts: "Prompt library",
         summary: "Summary",
         permissions: "Permissions",
         defaultModel: "Default model",
@@ -865,8 +909,11 @@ export default {
         summaryLabel: "Summary",
         summaryPlaceholder: "e.g. Focused on web information gathering and research, with structured synthesis",
         summaryHelp: "Use one sentence to describe when this agent should be used and its boundaries.",
-        promptLabel: "System prompt",
-        promptPlaceholder: "Optional. Leave empty to use concise default prompt",
+        promptLabel: "Role setup",
+        promptPlaceholder: "Optional. Leave empty to use default setup",
+        promptBytesHelp: "Up to {maxKb}KB, current {bytes} bytes",
+        globalPromptsPlaceholder: "Select prompt library entries",
+        globalPromptsHelp: "Multi-select supported. Injection order follows the prompt library list order.",
         mcpServersPlaceholder: "Select allowed MCP servers",
         defaultModelCascaderPlaceholder: "Select default model strategy",
         defaultModelModeLabel: "Default model strategy",
@@ -885,7 +932,8 @@ export default {
       errors: {
         invalidAgentForm: "Please complete required agent fields",
         duplicateAgentId: "Agent ID already exists",
-        defaultModelInvalid: "Default model does not exist, please reselect"
+        defaultModelInvalid: "Default model does not exist, please reselect",
+        promptTooLong: "Role setup is too long. Maximum {maxKb}KB"
       },
       saved: "Saved"
     },
