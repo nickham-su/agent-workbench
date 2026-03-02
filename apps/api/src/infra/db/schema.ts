@@ -146,7 +146,14 @@ export function initSchema(db: Db) {
       prev_id integer,
       kind text not null,
       status text not null,
-      output_json text not null,
+      output_text text not null default '',
+      output_text_truncated integer not null default 0,
+      output_text_artifact_path text,
+      tool_name text,
+      tool_call_id text,
+      tool_call_json text,
+      tool_result_json text,
+      output_json text not null default '{}',
       created_at integer not null,
       updated_at integer not null,
       foreign key (session_id) references agent_session(id) on delete cascade
@@ -183,6 +190,17 @@ export function initSchema(db: Db) {
   ensureColumn(db, { table: "agent_run", column: "agent_id", ddl: "agent_id text" });
   ensureColumn(db, { table: "agent_run", column: "provider_id", ddl: "provider_id text" });
   ensureColumn(db, { table: "agent_run", column: "model_id", ddl: "model_id text" });
+  ensureColumn(db, { table: "agent_context_item", column: "output_text", ddl: "output_text text not null default ''" });
+  ensureColumn(db, {
+    table: "agent_context_item",
+    column: "output_text_truncated",
+    ddl: "output_text_truncated integer not null default 0"
+  });
+  ensureColumn(db, { table: "agent_context_item", column: "output_text_artifact_path", ddl: "output_text_artifact_path text" });
+  ensureColumn(db, { table: "agent_context_item", column: "tool_name", ddl: "tool_name text" });
+  ensureColumn(db, { table: "agent_context_item", column: "tool_call_id", ddl: "tool_call_id text" });
+  ensureColumn(db, { table: "agent_context_item", column: "tool_call_json", ddl: "tool_call_json text" });
+  ensureColumn(db, { table: "agent_context_item", column: "tool_result_json", ddl: "tool_result_json text" });
   createIndexIfNotExists(db, { index: "idx_repos_credential_id", sql: "create index idx_repos_credential_id on repos(credential_id)" });
   createIndexIfNotExists(db, { index: "idx_workspaces_dir_name", sql: "create unique index idx_workspaces_dir_name on workspaces(dir_name)" });
   createIndexIfNotExists(db, { index: "idx_workspaces_last_used_at", sql: "create index idx_workspaces_last_used_at on workspaces(last_used_at)" });
@@ -209,6 +227,10 @@ export function initSchema(db: Db) {
   createIndexIfNotExists(db, {
     index: "idx_agent_context_item_session_status",
     sql: "create index idx_agent_context_item_session_status on agent_context_item(session_id, status, id)"
+  });
+  createIndexIfNotExists(db, {
+    index: "idx_agent_context_item_session_tool_name",
+    sql: "create index idx_agent_context_item_session_tool_name on agent_context_item(session_id, tool_name, id)"
   });
   createIndexIfNotExists(db, {
     index: "idx_agent_run_session_status",

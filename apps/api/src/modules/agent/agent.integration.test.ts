@@ -294,6 +294,7 @@ async function getPromptContextInternal(params: {
   return res.json() as {
     system: string;
     messages: Array<{ role: string; content: unknown }>;
+    pendingTools: Array<{ itemId: number; approved?: boolean; status: string; toolName: string }>;
   };
 }
 
@@ -1002,6 +1003,305 @@ test("agent prompt-context 支持 todolist 工具输入输出", async () => {
     Array.isArray((output?.value as { todos?: unknown[] } | undefined)?.todos),
     true,
     "todolist tool-result should include todos"
+  );
+});
+
+test("agent tool 字符串结果保持原始字符串语义", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "测试字符串结果"
+    }
+  });
+
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_string_result",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: {
+      type: "assistant_text",
+      text: "调用工具获取字符串"
+    }
+  });
+
+  const rawString = '{"ok":true}';
+  const toolItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_string_result",
+    step: 1,
+    prevId: assistantItem.item.id,
+    kind: "tool",
+    status: "completed",
+    output: {
+      type: "tool",
+      toolName: "bash",
+      toolCallId: "call_string_result",
+      args: {
+        command: "echo test"
+      },
+      result: rawString
+    }
+  });
+
+  const detail = await getContextItem(fixture.app, session.id, toolItem.item.id);
+  assert.equal(detail.output.type, "tool");
+  assert.equal(typeof detail.output.result, "string");
+  assert.equal(String(detail.output.result || ""), rawString);
+});
+
+test("agent 兼容部分迁移数据: tool_call_json 缺失时回退 legacy output", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "请读取文件"
+    }
+  });
+
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_legacy_fallback",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: {
+      type: "assistant_text",
+      text: "准备调用 read"
+    }
+  });
+
+  const legacyToolOutput = {
+    type: "tool",
+    toolName: "read",
+    toolCallId: "call_legacy_read",
+    args: {
+      filePath: "README.md"
+    },
+    approved: true
+  };
+
+  const toolItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_legacy_fallback",
+    step: 1,
+    prevId: assistantItem.item.id,
+    kind: "tool",
+    status: "awaiting_permission",
+    output: legacyToolOutput
+  });
+
+  fixture.db
+    .prepare(
+      `
+        update agent_context_item
+        set tool_name = @toolName,
+            tool_call_id = null,
+            tool_call_json = null,
+            tool_result_json = null,
+            output_text = '',
+            output_json = @outputJson
+        where id = @id
+      `
+    )
+    .run({
+      id: toolItem.item.id,
+      toolName: "read",
+      outputJson: JSON.stringify(legacyToolOutput)
+    });
+
+  const detail = await getContextItem(fixture.app, session.id, toolItem.item.id);
+  assert.equal(detail.output.type, "tool");
+  assert.equal(String(detail.output.toolName || ""), "read");
+  assert.equal(String(detail.output.toolCallId || ""), "call_legacy_read");
+  assert.equal(String((detail.output.args as { filePath?: string } | undefined)?.filePath || ""), "README.md");
+  assert.equal(detail.output.approved, true);
+
+  const promptContext = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+  assert.equal(promptContext.pendingTools.length, 1);
+  assert.equal(promptContext.pendingTools[0]?.approved, true);
+});
+
+test("agent 兼容早期拆分数据: 缺少 resultFormat 时保留结构化工具结果", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "测试结构化兼容"
+    }
+  });
+
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_compat_result",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: {
+      type: "assistant_text",
+      text: "调用 todolist"
+    }
+  });
+
+  const structuredResult = {
+    summary: { total: 1, pending: 0, inProgress: 0, completed: 1, cancelled: 0 },
+    todos: [{ content: "完成兼容", status: "completed" }]
+  };
+
+  const toolItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_compat_result",
+    step: 1,
+    prevId: assistantItem.item.id,
+    kind: "tool",
+    status: "completed",
+    output: {
+      type: "tool",
+      toolName: "todolist",
+      toolCallId: "call_compat_todolist",
+      args: {
+        todos: [{ content: "完成兼容", status: "completed" }]
+      },
+      result: structuredResult
+    }
+  });
+
+  fixture.db
+    .prepare(
+      `
+        update agent_context_item
+        set output_text = @outputText,
+            tool_result_json = @toolResultJson,
+            output_json = '{}'
+        where id = @id
+      `
+    )
+    .run({
+      id: toolItem.item.id,
+      outputText: JSON.stringify(structuredResult),
+      toolResultJson: JSON.stringify({ status: "completed" })
+    });
+
+  const detail = await getContextItem(fixture.app, session.id, toolItem.item.id);
+  assert.equal(detail.output.type, "tool");
+  assert.equal(typeof detail.output.result, "object");
+  assert.equal(
+    Array.isArray((detail.output.result as { todos?: unknown[] } | undefined)?.todos),
+    true,
+    "result should remain structured object"
   );
 });
 

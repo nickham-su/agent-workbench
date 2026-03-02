@@ -40,10 +40,224 @@ type AgentContextItemRow = {
   prevId: number | null;
   kind: AgentContextItemRecord["kind"];
   status: AgentContextItemStatus;
+  outputText: string;
+  outputTextTruncated: number;
+  outputTextArtifactPath: string | null;
+  toolName: string | null;
+  toolCallId: string | null;
+  toolCallJson: string | null;
+  toolResultJson: string | null;
   outputJson: string;
   createdAt: number;
   updatedAt: number;
 };
+
+type StoredToolCall = {
+  toolName?: unknown;
+  toolCallId?: unknown;
+  args?: unknown;
+  approval?: {
+    approved?: unknown;
+  };
+};
+
+type StoredToolResult = {
+  status?: unknown;
+  error?: unknown;
+  meta?: unknown;
+};
+
+function parseJson(raw: string | null) {
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function parseLegacyOutput(raw: string): AgentContextItemOutput | null {
+  const parsed = parseJson(raw);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const type = String((parsed as { type?: unknown }).type || "").trim();
+  if (type !== "user_text" && type !== "assistant_text" && type !== "tool" && type !== "system_text") {
+    return null;
+  }
+  return parsed as AgentContextItemOutput;
+}
+
+function toResultText(raw: unknown) {
+  if (typeof raw === "undefined") return "";
+  if (typeof raw === "string") return raw;
+  try {
+    return JSON.stringify(raw);
+  } catch {
+    return String(raw);
+  }
+}
+
+function normalizeTextOutput(kind: AgentContextItemRecord["kind"], output: AgentContextItemOutput) {
+  if (kind === "user" && output.type === "user_text") return output.text;
+  if (kind === "assistant" && output.type === "assistant_text") return output.text;
+  if (kind === "system" && output.type === "system_text") return output.text;
+  if (kind === "tool" && output.type === "tool") return toResultText(output.result);
+  if ((output as { text?: unknown }).text && typeof (output as { text?: unknown }).text === "string") {
+    return String((output as { text?: unknown }).text);
+  }
+  return "";
+}
+
+function encodeStoredColumns(params: {
+  kind: AgentContextItemRecord["kind"];
+  status: AgentContextItemStatus;
+  output: AgentContextItemOutput;
+}) {
+  const outputText = normalizeTextOutput(params.kind, params.output);
+  const base = {
+    outputText,
+    outputTextTruncated: 0,
+    outputTextArtifactPath: null as string | null,
+    toolName: null as string | null,
+    toolCallId: null as string | null,
+    toolCallJson: null as string | null,
+    toolResultJson: null as string | null,
+    // 兼容历史列: 避免重复存储完整 output
+    outputJson: "{}"
+  };
+
+  if (params.kind !== "tool" || params.output.type !== "tool") {
+    return base;
+  }
+
+  const toolName = String(params.output.toolName || "").trim();
+  const toolCallId = typeof params.output.toolCallId === "string" && params.output.toolCallId.trim()
+    ? params.output.toolCallId.trim()
+    : null;
+  const toolCallPayload: StoredToolCall = {
+    toolName,
+    ...(toolCallId ? { toolCallId } : {}),
+    ...(typeof params.output.args !== "undefined" ? { args: params.output.args } : {}),
+    ...(params.output.approved === true ? { approval: { approved: true } } : {})
+  };
+  const toolResultPayload: StoredToolResult = {
+    status: params.status,
+    ...(Object.prototype.hasOwnProperty.call(params.output, "result")
+      ? {
+          meta: {
+            resultFormat: typeof params.output.result === "string" ? "text" : "json"
+          }
+        }
+      : {}),
+    ...(typeof params.output.error === "string" && params.output.error.trim()
+      ? { error: params.output.error }
+      : {})
+  };
+
+  return {
+    ...base,
+    outputText,
+    toolName: toolName || null,
+    toolCallId,
+    toolCallJson: JSON.stringify(toolCallPayload),
+    toolResultJson: JSON.stringify(toolResultPayload)
+  };
+}
+
+function mapFromStoredColumns(row: AgentContextItemRow): AgentContextItemOutput {
+  const legacy = parseLegacyOutput(row.outputJson);
+  const legacyTool = legacy && legacy.type === "tool" ? legacy : null;
+  const hasSplitPayload =
+    row.outputText.length > 0 ||
+    row.outputTextTruncated !== 0 ||
+    row.outputTextArtifactPath != null ||
+    row.toolName != null ||
+    row.toolCallId != null ||
+    row.toolCallJson != null ||
+    row.toolResultJson != null;
+
+  if (!hasSplitPayload && legacy) {
+    return legacy;
+  }
+
+  if (row.kind === "user") {
+    return {
+      type: "user_text",
+      text: row.outputText
+    };
+  }
+  if (row.kind === "assistant") {
+    return {
+      type: "assistant_text",
+      text: row.outputText
+    };
+  }
+  if (row.kind === "system") {
+    return {
+      type: "system_text",
+      text: row.outputText
+    };
+  }
+
+  const call = parseJson(row.toolCallJson) as StoredToolCall | null;
+  const result = parseJson(row.toolResultJson) as StoredToolResult | null;
+  const toolName = String(row.toolName || call?.toolName || legacyTool?.toolName || "").trim();
+  if (!toolName && legacyTool) {
+    return legacyTool;
+  }
+
+  const toolCallId = String(row.toolCallId || call?.toolCallId || legacyTool?.toolCallId || "").trim();
+  const args =
+    call && Object.prototype.hasOwnProperty.call(call, "args")
+      ? call.args
+      : legacyTool && Object.prototype.hasOwnProperty.call(legacyTool, "args")
+        ? legacyTool.args
+        : undefined;
+  const approved = call?.approval?.approved === true || legacyTool?.approved === true;
+
+  const resultFormat = typeof result?.meta === "object" && result.meta && !Array.isArray(result.meta)
+    ? String(((result.meta as Record<string, unknown>).resultFormat as string) || "").trim()
+    : "";
+
+  let parsedResult: unknown = undefined;
+  if (row.outputText.trim()) {
+    if (resultFormat === "json") {
+      try {
+        parsedResult = JSON.parse(row.outputText);
+      } catch {
+        parsedResult = row.outputText;
+      }
+    } else if (!resultFormat && (toolName === "apply_patch" || toolName === "todolist" || toolName === "subtask")) {
+      // 兼容早期拆分数据: 这些工具历史上通常为结构化结果。
+      try {
+        parsedResult = JSON.parse(row.outputText);
+      } catch {
+        parsedResult = row.outputText;
+      }
+    } else {
+      // 默认保持文本语义，避免将 JSON-like 字符串误解为结构化对象。
+      parsedResult = row.outputText;
+    }
+  } else if (legacyTool && Object.prototype.hasOwnProperty.call(legacyTool, "result")) {
+    parsedResult = legacyTool.result;
+  }
+
+  const error =
+    typeof result?.error === "string" && result.error.trim()
+      ? result.error
+      : legacyTool && typeof legacyTool.error === "string" && legacyTool.error.trim()
+        ? legacyTool.error
+        : undefined;
+
+  return {
+    type: "tool",
+    toolName: toolName as any,
+    ...(toolCallId ? { toolCallId } : {}),
+    ...(typeof args !== "undefined" ? { args } : {}),
+    ...(approved ? { approved: true } : {}),
+    ...(typeof parsedResult !== "undefined" ? { result: parsedResult } : {}),
+    ...(error ? { error } : {})
+  } as AgentContextItemOutput;
+}
 
 export type AgentRunStateRow = {
   sessionId: string;
@@ -111,7 +325,7 @@ function mapContextItem(row: AgentContextItemRow): AgentContextItemRecord {
     prevId,
     kind: row.kind,
     status: row.status,
-    output: JSON.parse(row.outputJson) as AgentContextItemOutput,
+    output: mapFromStoredColumns(row),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt
   };
@@ -193,6 +407,13 @@ function readContextItemRowById(db: Db, itemId: number) {
           prev_id as prevId,
           kind,
           status,
+          output_text as outputText,
+          output_text_truncated as outputTextTruncated,
+          output_text_artifact_path as outputTextArtifactPath,
+          tool_name as toolName,
+          tool_call_id as toolCallId,
+          tool_call_json as toolCallJson,
+          tool_result_json as toolResultJson,
           output_json as outputJson,
           created_at as createdAt,
           updated_at as updatedAt
@@ -382,6 +603,12 @@ export function appendContextItem(db: Db, params: {
   output: AgentContextItemOutput;
   createdAt: number;
 }) {
+  const stored = encodeStoredColumns({
+    kind: params.kind,
+    status: params.status,
+    output: params.output
+  });
+
   const tx = db.transaction(() => {
     const currentHead = getHead(db, params.workspaceId, params.sessionId);
     if (currentHead !== params.prevId) {
@@ -400,6 +627,13 @@ export function appendContextItem(db: Db, params: {
             prev_id,
             kind,
             status,
+            output_text,
+            output_text_truncated,
+            output_text_artifact_path,
+            tool_name,
+            tool_call_id,
+            tool_call_json,
+            tool_result_json,
             output_json,
             created_at,
             updated_at
@@ -412,6 +646,13 @@ export function appendContextItem(db: Db, params: {
             @prevId,
             @kind,
             @status,
+            @outputText,
+            @outputTextTruncated,
+            @outputTextArtifactPath,
+            @toolName,
+            @toolCallId,
+            @toolCallJson,
+            @toolResultJson,
             @outputJson,
             @createdAt,
             @updatedAt
@@ -427,7 +668,14 @@ export function appendContextItem(db: Db, params: {
         prevId: params.prevId,
         kind: params.kind,
         status: params.status,
-        outputJson: JSON.stringify(params.output),
+        outputText: stored.outputText,
+        outputTextTruncated: stored.outputTextTruncated,
+        outputTextArtifactPath: stored.outputTextArtifactPath,
+        toolName: stored.toolName,
+        toolCallId: stored.toolCallId,
+        toolCallJson: stored.toolCallJson,
+        toolResultJson: stored.toolResultJson,
+        outputJson: stored.outputJson,
         createdAt: params.createdAt,
         updatedAt: params.createdAt
       });
@@ -464,11 +712,23 @@ export function updateContextItem(db: Db, params: {
   }
 
   const nextStatus = params.status ?? row.status;
-  const nextOutput = params.output ?? (JSON.parse(row.outputJson) as AgentContextItemOutput);
+  const nextOutput = params.output ?? mapFromStoredColumns(row);
+  const stored = encodeStoredColumns({
+    kind: row.kind,
+    status: nextStatus,
+    output: nextOutput
+  });
   db.prepare(
     `
       update agent_context_item
       set status = @status,
+          output_text = @outputText,
+          output_text_truncated = @outputTextTruncated,
+          output_text_artifact_path = @outputTextArtifactPath,
+          tool_name = @toolName,
+          tool_call_id = @toolCallId,
+          tool_call_json = @toolCallJson,
+          tool_result_json = @toolResultJson,
           output_json = @outputJson,
           updated_at = @updatedAt
       where id = @itemId
@@ -476,7 +736,14 @@ export function updateContextItem(db: Db, params: {
   ).run({
     itemId: params.itemId,
     status: nextStatus,
-    outputJson: JSON.stringify(nextOutput),
+    outputText: stored.outputText,
+    outputTextTruncated: stored.outputTextTruncated,
+    outputTextArtifactPath: stored.outputTextArtifactPath,
+    toolName: stored.toolName,
+    toolCallId: stored.toolCallId,
+    toolCallJson: stored.toolCallJson,
+    toolResultJson: stored.toolResultJson,
+    outputJson: stored.outputJson,
     updatedAt: params.updatedAt
   });
 
