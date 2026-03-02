@@ -26,6 +26,17 @@ const DEBUG_DUMP_ENABLED = process.env.AWB_AGENT_DEBUG_DUMP === "1";
 const DEBUG_DUMP_RELATIVE_DIR = path.join(".debug", "agent_context_item_logs");
 const LOOP_MAX_STEPS = parseIntOrDefault(process.env.AWB_AGENT_LOOP_MAX_STEPS, 128);
 const LOOP_REPEAT_TOOL_CALL_THRESHOLD = parseIntOrDefault(process.env.AWB_AGENT_LOOP_REPEAT_TOOL_CALL_THRESHOLD, 20);
+// 运行参数优先从后端 Settings 下发;这里的 env 仅作为全局覆盖开关,方便临时排障。
+// 0 表示关闭。
+const ENV_TIMEOUT_MS_MAX = 2_147_483_647;
+const ENV_MODEL_IDLE_TIMEOUT_MS = Math.min(
+  ENV_TIMEOUT_MS_MAX,
+  Math.max(0, parseIntOrDefault(process.env.AWB_AGENT_MODEL_IDLE_TIMEOUT_MS, 0))
+);
+const ENV_MODEL_TOTAL_TIMEOUT_MS = Math.min(
+  ENV_TIMEOUT_MS_MAX,
+  Math.max(0, parseIntOrDefault(process.env.AWB_AGENT_MODEL_TOTAL_TIMEOUT_MS, 0))
+);
 
 function newSortableId(prefix: string) {
   const ts = Date.now().toString(36).padStart(10, "0");
@@ -958,6 +969,15 @@ export class AgentRunner {
     const runtimeOptions = buildModelRuntimeOptions(profile);
     const turnId = newSortableId("turn");
 
+    const modelIdleTimeoutMs =
+      ENV_MODEL_IDLE_TIMEOUT_MS > 0
+        ? ENV_MODEL_IDLE_TIMEOUT_MS
+        : Math.max(0, Math.floor((profile as any).runtime?.modelIdleTimeoutMs ?? 0));
+    const modelTotalTimeoutMs =
+      ENV_MODEL_TOTAL_TIMEOUT_MS > 0
+        ? ENV_MODEL_TOTAL_TIMEOUT_MS
+        : Math.max(0, Math.floor((profile as any).runtime?.modelTotalTimeoutMs ?? 0));
+
     const assistant = await this.apiClient.createContextItem({
       workspaceId: run.workspaceId,
       sessionId: run.sessionId,
@@ -1008,12 +1028,49 @@ export class AgentRunner {
     }
     const availableToolNames = new Set<string>(Object.keys(toolSet));
 
+    // 用独立 controller 承载“用户取消”和“空闲超时”两类中止。
+    // 注意: 仅将“用户取消”(signal.aborted)视为 run cancelled;空闲超时会作为错误进入失败流程。
+    const requestController = new AbortController();
+    let idleTimedOut = false;
+    let totalTimedOut = false;
+    let lastChunkAt = nowMs();
+    const onOuterAbort = () => {
+      // 透传用户取消到模型请求。
+      requestController.abort();
+    };
+    if (signal.aborted) {
+      requestController.abort();
+    } else {
+      signal.addEventListener("abort", onOuterAbort, { once: true });
+    }
+
+    let idleTimer: NodeJS.Timeout | null = null;
+    if (modelIdleTimeoutMs > 0) {
+      const checkIntervalMs = Math.max(50, Math.min(1000, Math.floor(modelIdleTimeoutMs / 4)));
+      idleTimer = setInterval(() => {
+        if (requestController.signal.aborted) return;
+        const elapsed = nowMs() - lastChunkAt;
+        if (elapsed < modelIdleTimeoutMs) return;
+        idleTimedOut = true;
+        requestController.abort();
+      }, checkIntervalMs);
+    }
+
+    let totalTimer: NodeJS.Timeout | null = null;
+    if (modelTotalTimeoutMs > 0) {
+      totalTimer = setTimeout(() => {
+        if (requestController.signal.aborted) return;
+        totalTimedOut = true;
+        requestController.abort();
+      }, modelTotalTimeoutMs);
+    }
+
     const request: Record<string, unknown> = {
       model,
       system: context.system || undefined,
       messages: context.messages,
       tools: toolSet,
-      abortSignal: signal
+      abortSignal: requestController.signal
     };
 
     if (Object.keys(runtimeOptions.aiSdk).length > 0) {
@@ -1053,7 +1110,8 @@ export class AgentRunner {
     try {
       const stream = streamText(request as any);
       for await (const chunk of stream.fullStream as AsyncIterable<any>) {
-        if (signal.aborted) break;
+        if (requestController.signal.aborted) break;
+        lastChunkAt = nowMs();
         if (!chunk || typeof chunk !== "object") continue;
         if (chunk.type === "text-delta") {
           const delta = String(chunk.text || "");
@@ -1094,6 +1152,12 @@ export class AgentRunner {
 
       if (signal.aborted) {
         return { aborted: true as const, assistantItemId: assistant.id };
+      }
+      if (totalTimedOut) {
+        throw new Error(`model total timeout after ${modelTotalTimeoutMs}ms`);
+      }
+      if (idleTimedOut) {
+        throw new Error(`model idle timeout after ${modelIdleTimeoutMs}ms`);
       }
 
       if (responseTotalTokens == null) {
@@ -1204,6 +1268,11 @@ export class AgentRunner {
       if (signal.aborted) {
         return { aborted: true as const, assistantItemId: assistant.id };
       }
+      if (totalTimedOut) {
+        err = new Error(`model total timeout after ${modelTotalTimeoutMs}ms`);
+      } else if (idleTimedOut) {
+        err = new Error(`model idle timeout after ${modelIdleTimeoutMs}ms`);
+      }
       const message = err instanceof Error ? err.message : String(err);
       const failedText = text.trim().length > 0 ? `${text}\n\n[run] ${message}` : `[run] ${message}`;
       try {
@@ -1245,6 +1314,15 @@ export class AgentRunner {
         }
       });
       throw err;
+    } finally {
+      if (idleTimer) clearInterval(idleTimer);
+      if (totalTimer) clearTimeout(totalTimer);
+      // 避免 event listener 泄漏。
+      try {
+        signal.removeEventListener("abort", onOuterAbort);
+      } catch {
+        // ignore
+      }
     }
   }
 

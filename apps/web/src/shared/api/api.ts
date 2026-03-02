@@ -91,9 +91,11 @@ import type {
   AgentProvidersSettingsView,
   AgentGlobalPromptSettings,
   AgentMcpSettings,
+  AgentRuntimeSettings,
   UpdateAgentMcpSettingsRequest,
   UpdateAgentProvidersSettingsRequest,
   UpdateAgentGlobalPromptSettingsRequest,
+  UpdateAgentRuntimeSettingsRequest,
   AgentSettings,
   UpdateAgentSettingsRequest
 } from "@agent-workbench/shared";
@@ -808,6 +810,24 @@ export async function getAgentProvidersSettings() {
 export async function updateAgentProvidersSettings(body: UpdateAgentProvidersSettingsRequest) {
   try {
     const res = await client.put<AgentProvidersSettingsView>("/settings/agent/providers", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getAgentRuntimeSettings() {
+  try {
+    const res = await client.get<AgentRuntimeSettings>("/settings/agent/runtime");
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function updateAgentRuntimeSettings(body: UpdateAgentRuntimeSettingsRequest) {
+  try {
+    const res = await client.put<AgentRuntimeSettings>("/settings/agent/runtime", body);
     return res.data;
   } catch (err) {
     throw toApiError(err);

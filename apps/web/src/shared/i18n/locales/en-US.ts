@@ -601,6 +601,7 @@ export default {
       agentGlobalPrompts: "Prompt Library",
       agentMcp: "MCP",
       agentProfiles: "Role Profiles",
+      agentRuntime: "Runtime",
       security: "Security"
     },
     groups: {
@@ -936,6 +937,21 @@ export default {
         promptTooLong: "Role setup is too long. Maximum {maxKb}KB"
       },
       saved: "Saved"
+    },
+    agentRuntime: {
+      description: "Configure global runtime options (applies to all sessions).",
+      saving: "Saving...",
+      saved: "Saved",
+      fields: {
+        modelTotalTimeoutMs: {
+          label: "Model total timeout (seconds)",
+          help: "Total timeout for a single model request. When reached, the request is aborted and the run fails. Decimal seconds are supported; 0 disables."
+        },
+        modelIdleTimeoutMs: {
+          label: "Model idle timeout (seconds)",
+          help: "Abort when no streaming chunk arrives for a period (including reasoning/tool-call/finish). Decimal seconds are supported; 0 disables."
+        }
+      }
     },
     agentMcp: {
       description: "Manage global MCP server configuration. Use JSON input when adding or editing.",

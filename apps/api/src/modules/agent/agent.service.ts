@@ -52,6 +52,7 @@ import {
 import {
   getAgentGlobalPromptSettings,
   getAgentMcpSettings,
+  getAgentRuntimeSettings,
   getAgentSettings,
   resolveExecutionProfile
 } from "../settings/settings.service.js";
@@ -277,6 +278,7 @@ const TERMINAL_TOOL_ITEM_STATUS = new Set<AgentContextItemStatus>([
   "denied",
   "cancelled"
 ]);
+const TERMINAL_RUN_RECORD_STATUS = new Set(["completed", "failed", "cancelled"] as const);
 
 const WORKSPACE_AGENTS_FILENAME = "AGENTS.md";
 const WORKSPACE_AGENTS_MAX_BYTES = 32 * 1024;
@@ -883,6 +885,24 @@ export class AgentService {
     lastResponseTotalTokens?: number | null;
     updatedAt?: number;
   }) {
+    const currentState = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
+    const activeRunId = typeof params.activeRunId === "string" && params.activeRunId.trim() ? params.activeRunId : null;
+    const activeRun = activeRunId ? getRunRecord(this.ctx.db, activeRunId) : null;
+
+    // 避免晚到 worker 状态覆盖已切换到其他 run 的会话状态。
+    if (activeRunId && currentState.activeRunId && currentState.activeRunId !== activeRunId) {
+      return;
+    }
+    if (activeRunId) {
+      if (activeRun) {
+        if (activeRun.workspaceId !== params.workspaceId || activeRun.sessionId !== params.sessionId) return;
+        // 终态 run 不再接受 worker 的 running/waiting 状态回写。
+        if (TERMINAL_RUN_RECORD_STATUS.has(activeRun.status as "completed" | "failed" | "cancelled")) {
+          return;
+        }
+      }
+    }
+
     const ts = params.updatedAt ?? nowMs();
     const appliedItemId = getLatestSessionItemId(this.ctx.db, params.workspaceId, params.sessionId);
     const hasLastResponseTotalTokens = Object.prototype.hasOwnProperty.call(params, "lastResponseTotalTokens");
@@ -897,9 +917,9 @@ export class AgentService {
       updatedAt: ts,
       appliedItemId
     });
-    if (params.activeRunId) {
+    if (activeRunId) {
       updateRunRecordStatus(this.ctx.db, {
-        runId: params.activeRunId,
+        runId: activeRunId,
         status: params.status === "waiting_permission" ? "waiting_permission" : "running",
         updatedAt: ts
       });
@@ -914,6 +934,13 @@ export class AgentService {
     updatedAt?: number;
   }) {
     const ts = params.updatedAt ?? nowMs();
+    const run = getRunRecord(this.ctx.db, params.runId);
+    if (!run) return;
+    if (run.workspaceId !== params.workspaceId || run.sessionId !== params.sessionId) return;
+    if (TERMINAL_RUN_RECORD_STATUS.has(run.status as "completed" | "failed" | "cancelled")) {
+      return;
+    }
+
     updateRunRecordStatus(this.ctx.db, {
       runId: params.runId,
       status: params.status,
@@ -1147,6 +1174,8 @@ export class AgentService {
       modelIdFromRun: run.modelId
     });
 
+    const runtime = getAgentRuntimeSettings(this.ctx);
+
     return {
       resolved: {
         runId: params.runId,
@@ -1158,7 +1187,8 @@ export class AgentService {
       },
       agent: profile.agent,
       provider: profile.provider,
-      model: profile.model
+      model: profile.model,
+      runtime
     };
   }
 

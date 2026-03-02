@@ -599,6 +599,7 @@ export default {
       agentGlobalPrompts: "提示词库",
       agentMcp: "MCP",
       agentProfiles: "角色配置",
+      agentRuntime: "运行参数",
       security: "安全"
     },
     groups: {
@@ -934,6 +935,21 @@ export default {
         promptTooLong: "角色设定过长，最多 {maxKb}KB"
       },
       saved: "已保存"
+    },
+    agentRuntime: {
+      description: "配置 agent 运行时的全局参数（对所有会话生效）。",
+      saving: "正在保存...",
+      saved: "已保存",
+      fields: {
+        modelTotalTimeoutMs: {
+          label: "模型总超时（秒）",
+          help: "单次模型请求的总超时时间。达到后将中止该次请求并标记为失败。支持小数秒,0 表示关闭。"
+        },
+        modelIdleTimeoutMs: {
+          label: "模型空闲超时（秒）",
+          help: "单次模型请求在连续一段时间未收到任何流式 chunk（包括 reasoning/tool-call/finish）时中止。支持小数秒,0 表示关闭。"
+        }
+      }
     },
     agentMcp: {
       description: "管理全局 MCP Server 配置。新增/编辑时使用 JSON 输入。",

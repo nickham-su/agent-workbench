@@ -582,6 +582,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
               })
             )
           }),
+          400: ErrorResponseSchema,
           401: ErrorResponseSchema,
           404: ErrorResponseSchema
         }
@@ -645,8 +646,14 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
               providerModelId: Type.Optional(Type.String({ minLength: 1 })),
               name: Type.String({ minLength: 1 }),
               options: Type.Optional(Type.Any())
+            }),
+            runtime: Type.Object({
+              modelIdleTimeoutMs: Type.Integer({ minimum: 0 }),
+              modelTotalTimeoutMs: Type.Integer({ minimum: 0 }),
+              updatedAt: Type.Number()
             })
           }),
+          400: ErrorResponseSchema,
           401: ErrorResponseSchema,
           404: ErrorResponseSchema
         }

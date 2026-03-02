@@ -568,6 +568,45 @@ test("agent cancel 仅终止执行并保留消息,活跃项标记为 cancelled",
   assert.equal(latestTool?.status, "cancelled");
 });
 
+test("agent runtime settings 可通过 execution-profile 下发", async () => {
+  const fixture = await createFixture();
+
+  const runtimeRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/runtime",
+    payload: {
+      modelIdleTimeoutMs: 1234,
+      modelTotalTimeoutMs: 5678
+    }
+  });
+  assert.equal(runtimeRes.statusCode, 200, `update agent runtime settings failed: ${runtimeRes.body}`);
+
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const msg = await sendMessage(fixture.app, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "hi",
+    clientRequestId: "req_runtime_settings"
+  });
+
+  const profileRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/execution-profile",
+    headers: {
+      "x-awb-agent-internal-token": fixture.internalToken
+    },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      runId: msg.runId
+    }
+  });
+  assert.equal(profileRes.statusCode, 200, `get execution profile failed: ${profileRes.body}`);
+  const profile = profileRes.json() as any;
+  assert.equal(profile.runtime?.modelIdleTimeoutMs, 1234);
+  assert.equal(profile.runtime?.modelTotalTimeoutMs, 5678);
+});
+
 test("agent prompt-context 使用结构化 tool-call/tool-result 消息", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);

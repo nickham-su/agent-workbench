@@ -34,6 +34,11 @@ export type ExecutionProfile = {
     providerId: string;
     modelId: string;
   };
+  runtime: {
+    modelIdleTimeoutMs: number;
+    modelTotalTimeoutMs: number;
+    updatedAt: number;
+  };
   agent: {
     id: string;
     name: string;

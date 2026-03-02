@@ -152,6 +152,20 @@ export const UpdateAgentMcpSettingsRequestSchema = Type.Object({
 });
 export type UpdateAgentMcpSettingsRequest = Static<typeof UpdateAgentMcpSettingsRequestSchema>;
 
+export const AgentRuntimeSettingsSchema = Type.Object({
+  // 0 表示关闭;单位毫秒。
+  modelIdleTimeoutMs: Type.Integer({ minimum: 0 }),
+  modelTotalTimeoutMs: Type.Integer({ minimum: 0 }),
+  updatedAt: Type.Number()
+});
+export type AgentRuntimeSettings = Static<typeof AgentRuntimeSettingsSchema>;
+
+export const UpdateAgentRuntimeSettingsRequestSchema = Type.Object({
+  modelIdleTimeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
+  modelTotalTimeoutMs: Type.Optional(Type.Integer({ minimum: 0 }))
+});
+export type UpdateAgentRuntimeSettingsRequest = Static<typeof UpdateAgentRuntimeSettingsRequestSchema>;
+
 export const AgentGlobalPromptItemSchema = Type.Object({
   id: Type.String({ minLength: 1 }),
   title: Type.String({ minLength: 1, maxLength: 20 }),

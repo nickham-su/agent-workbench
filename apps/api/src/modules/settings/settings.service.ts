@@ -6,6 +6,7 @@ import type {
   AgentGlobalPromptSettings,
   AgentMcpServerConfig,
   AgentMcpSettings,
+  AgentRuntimeSettings,
   AgentProviderNpm,
   AgentProvidersSettings,
   AgentProvidersSettingsView,
@@ -20,6 +21,7 @@ import type {
   UpdateAgentProvidersSettingsRequest,
   UpdateAgentGlobalPromptSettingsRequest,
   UpdateAgentMcpSettingsRequest,
+  UpdateAgentRuntimeSettingsRequest,
   UpdateAgentSettingsRequest,
   UpdateGitGlobalIdentityRequest,
   UpdateNetworkSettingsRequest,
@@ -43,6 +45,7 @@ const AGENT_PROVIDERS_SETTINGS_KEY = "agent_providers_v1";
 const AGENT_SETTINGS_KEY = "agent_agents_v1";
 const AGENT_MCP_SETTINGS_KEY = "agent_mcp_v1";
 const AGENT_GLOBAL_PROMPTS_SETTINGS_KEY = "agent_global_prompts_v1";
+const AGENT_RUNTIME_SETTINGS_KEY = "agent_runtime_v1";
 
 const SEARCH_EXCLUDE_MAX_COUNT = 200;
 const SEARCH_EXCLUDE_MAX_LENGTH = 200;
@@ -50,10 +53,14 @@ const AGENT_PROMPT_MAX_BYTES = 32 * 1024;
 const AGENT_GLOBAL_PROMPT_TITLE_MAX_LENGTH = 20;
 const AGENT_GLOBAL_PROMPT_MAX_BYTES = 32 * 1024;
 
+// Node.js setTimeout 上限接近 2^31-1,超过后会出现不符合预期的行为。
+const RUNTIME_TIMEOUT_MS_MAX = 2_147_483_647;
+
 type AgentProvidersSettingsStored = Omit<AgentProvidersSettings, "updatedAt">;
 type AgentSettingsStored = Omit<AgentSettings, "updatedAt">;
 type AgentMcpSettingsStored = Omit<AgentMcpSettings, "updatedAt">;
 type AgentGlobalPromptSettingsStored = Omit<AgentGlobalPromptSettings, "updatedAt">;
+type AgentRuntimeSettingsStored = Omit<AgentRuntimeSettings, "updatedAt">;
 
 type AgentProviderStored = AgentProvidersSettingsStored["providers"][number];
 
@@ -243,6 +250,33 @@ function defaultAgentPermissions() {
     allowWrite: true,
     allowBash: true
   };
+}
+
+function normalizeRuntimeTimeoutMsFromStored(raw: unknown) {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n)) return 0;
+  const v = Math.floor(n);
+  if (v < 0) return 0;
+  if (v > RUNTIME_TIMEOUT_MS_MAX) return 0;
+  return v;
+}
+
+function normalizeRuntimeTimeoutMsForUpdate(raw: unknown, field: string) {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n)) {
+    throw new HttpError(400, `${field} must be a finite number`, "AGENT_RUNTIME_TIMEOUT_INVALID");
+  }
+  const v = Math.floor(n);
+  if (v !== n) {
+    throw new HttpError(400, `${field} must be an integer`, "AGENT_RUNTIME_TIMEOUT_INVALID");
+  }
+  if (v < 0) {
+    throw new HttpError(400, `${field} must be >= 0`, "AGENT_RUNTIME_TIMEOUT_INVALID");
+  }
+  if (v > RUNTIME_TIMEOUT_MS_MAX) {
+    throw new HttpError(400, `${field} is too large`, "AGENT_RUNTIME_TIMEOUT_TOO_LARGE");
+  }
+  return v;
 }
 
 function getAgentProvidersSettingsStored(ctx: AppContext) {
@@ -576,6 +610,20 @@ function getAgentGlobalPromptSettingsStored(ctx: AppContext) {
   };
 }
 
+function getAgentRuntimeSettingsStored(ctx: AppContext) {
+  const row = getSettingJson(ctx.db, AGENT_RUNTIME_SETTINGS_KEY);
+  const value = row?.value as Partial<AgentRuntimeSettingsStored> | undefined;
+  const modelIdleTimeoutMs = normalizeRuntimeTimeoutMsFromStored(value?.modelIdleTimeoutMs);
+  const modelTotalTimeoutMs = normalizeRuntimeTimeoutMsFromStored(value?.modelTotalTimeoutMs);
+  return {
+    settings: {
+      modelIdleTimeoutMs,
+      modelTotalTimeoutMs
+    },
+    updatedAt: row?.updatedAt ?? 0
+  };
+}
+
 function getAgentSettingsStored(ctx: AppContext) {
   const mcpLoaded = getAgentMcpSettingsStored(ctx);
   const mcpServerIds = new Set(mcpLoaded.settings.servers.map((item) => item.id));
@@ -687,6 +735,51 @@ export function getAgentGlobalPromptSettings(ctx: AppContext): AgentGlobalPrompt
   return {
     items: loaded.settings.items,
     updatedAt: loaded.updatedAt
+  };
+}
+
+export function getAgentRuntimeSettings(ctx: AppContext): AgentRuntimeSettings {
+  const loaded = getAgentRuntimeSettingsStored(ctx);
+  return {
+    modelIdleTimeoutMs: loaded.settings.modelIdleTimeoutMs,
+    modelTotalTimeoutMs: loaded.settings.modelTotalTimeoutMs,
+    updatedAt: loaded.updatedAt
+  };
+}
+
+export function updateAgentRuntimeSettings(
+  ctx: AppContext,
+  logger: FastifyBaseLogger,
+  bodyRaw: unknown
+): AgentRuntimeSettings {
+  const body = (bodyRaw ?? {}) as UpdateAgentRuntimeSettingsRequest;
+  const current = getAgentRuntimeSettings(ctx);
+
+  const modelIdleTimeoutMs =
+    (body as any).modelIdleTimeoutMs !== undefined
+      ? normalizeRuntimeTimeoutMsForUpdate((body as any).modelIdleTimeoutMs, "modelIdleTimeoutMs")
+      : current.modelIdleTimeoutMs;
+  const modelTotalTimeoutMs =
+    (body as any).modelTotalTimeoutMs !== undefined
+      ? normalizeRuntimeTimeoutMsForUpdate((body as any).modelTotalTimeoutMs, "modelTotalTimeoutMs")
+      : current.modelTotalTimeoutMs;
+
+  const updatedAt = nowMs();
+  setSettingJson(
+    ctx.db,
+    AGENT_RUNTIME_SETTINGS_KEY,
+    {
+      modelIdleTimeoutMs,
+      modelTotalTimeoutMs
+    },
+    updatedAt
+  );
+
+  logger.info({ modelIdleTimeoutMs, modelTotalTimeoutMs, updatedAt }, "agent runtime settings updated");
+  return {
+    modelIdleTimeoutMs,
+    modelTotalTimeoutMs,
+    updatedAt
   };
 }
 

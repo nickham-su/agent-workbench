@@ -4,6 +4,7 @@ import {
   AgentProvidersSettingsViewSchema,
   AgentGlobalPromptSettingsSchema,
   AgentMcpSettingsSchema,
+  AgentRuntimeSettingsSchema,
   AgentSettingsSchema,
   ErrorResponseSchema,
   ClearAllGitIdentityResponseSchema,
@@ -15,6 +16,7 @@ import {
   UpdateAgentProvidersSettingsRequestSchema,
   UpdateAgentGlobalPromptSettingsRequestSchema,
   UpdateAgentMcpSettingsRequestSchema,
+  UpdateAgentRuntimeSettingsRequestSchema,
   UpdateAgentSettingsRequestSchema,
   UpdateGitGlobalIdentityRequestSchema,
   UpdateNetworkSettingsRequestSchema,
@@ -24,6 +26,7 @@ import {
   getAgentProvidersSettings,
   getAgentGlobalPromptSettings,
   getAgentMcpSettings,
+  getAgentRuntimeSettings,
   getAgentSettings,
   clearAllGitIdentity,
   getGitGlobalIdentity,
@@ -34,6 +37,7 @@ import {
   updateAgentProvidersSettings,
   updateAgentGlobalPromptSettings,
   updateAgentMcpSettings,
+  updateAgentRuntimeSettings,
   updateAgentSettings,
   updateGitGlobalIdentity,
   updateNetworkSettings,
@@ -214,6 +218,29 @@ export async function registerSettingsRoutes(app: FastifyInstance, ctx: AppConte
       }
     },
     async (req) => updateAgentMcpSettings(ctx, app.log, req.body)
+  );
+
+  app.get(
+    "/api/settings/agent/runtime",
+    {
+      schema: {
+        tags: ["settings"],
+        response: { 200: AgentRuntimeSettingsSchema }
+      }
+    },
+    async () => getAgentRuntimeSettings(ctx)
+  );
+
+  app.put(
+    "/api/settings/agent/runtime",
+    {
+      schema: {
+        tags: ["settings"],
+        body: UpdateAgentRuntimeSettingsRequestSchema,
+        response: { 200: AgentRuntimeSettingsSchema, 400: ErrorResponseSchema }
+      }
+    },
+    async (req) => updateAgentRuntimeSettings(ctx, app.log, req.body)
   );
 
   app.get(
