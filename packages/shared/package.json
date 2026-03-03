@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./llm-single-call": {
+      "types": "./dist/llm/single-call.d.ts",
+      "default": "./dist/llm/single-call.js"
     }
   },
   "scripts": {
@@ -16,6 +20,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@sinclair/typebox": "^0.34.47"
+    "@ai-sdk/anthropic": "^2.0.67",
+    "@ai-sdk/openai": "^2.0.23",
+    "@sinclair/typebox": "^0.34.47",
+    "ai": "^5.0.22"
   }
 }

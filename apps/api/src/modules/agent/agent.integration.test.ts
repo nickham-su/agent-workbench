@@ -738,6 +738,110 @@ test("agent runtime settings 可通过 execution-profile 下发", async () => {
   assert.equal(typeof profile.runtime?.autoCompactThresholdPct, "number");
 });
 
+test("single-call model profile 始终使用全局默认模型", async () => {
+  const fixture = await createFixture();
+
+  const providersRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: {
+      default: {
+        providerId: "global_provider",
+        modelId: "global_model"
+      },
+      providers: [
+        {
+          id: "global_provider",
+          name: "global_provider",
+          npm: "@ai-sdk/openai",
+          options: {
+            baseURL: "https://code.ppchat.vip/v1",
+            apiKey: "sk-global"
+          },
+          models: [
+            {
+              id: "global_model",
+              name: "global_model"
+            }
+          ]
+        },
+        {
+          id: "agent_provider",
+          name: "agent_provider",
+          npm: "@ai-sdk/openai",
+          options: {
+            baseURL: "https://code.ppchat.vip/v1",
+            apiKey: "sk-agent"
+          },
+          models: [
+            {
+              id: "agent_model",
+              name: "agent_model"
+            }
+          ]
+        }
+      ]
+    }
+  });
+  assert.equal(providersRes.statusCode, 200, `configure providers failed: ${providersRes.body}`);
+
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      default: {
+        agentId: "default"
+      },
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          summary: "",
+          prompt: "You are a helpful coding assistant.",
+          tools: ["bash", "read", "write"],
+          mcpServers: [],
+          permissions: {
+            allowRead: true,
+            allowWrite: true,
+            allowBash: true
+          },
+          defaultModel: {
+            providerId: "agent_provider",
+            modelId: "agent_model"
+          }
+        }
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `configure agents failed: ${agentsRes.body}`);
+
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const sent = await sendMessage(fixture.app, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "hi",
+    clientRequestId: "req_single_call_model_profile"
+  });
+
+  const profileRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/single-call-model-profile",
+    headers: {
+      "x-awb-agent-internal-token": fixture.internalToken
+    },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      runId: sent.runId
+    }
+  });
+  assert.equal(profileRes.statusCode, 200, `get single-call model profile failed: ${profileRes.body}`);
+  const profile = profileRes.json() as any;
+  assert.equal(profile.resolved?.source, "global_default");
+  assert.equal(profile.provider?.id, "global_provider");
+  assert.equal(profile.model?.id, "global_model");
+});
+
 test("agent context 压缩后会归档并支持 archive_search/read/tail", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);

@@ -75,6 +75,11 @@ type ExecutionProfileResolved = {
   model: AgentProviderStored["models"][number];
 };
 
+type GlobalDefaultModelResolved = {
+  provider: AgentProviderStored;
+  model: AgentProviderStored["models"][number];
+};
+
 function defaultNetworkSettings(): NetworkSettingsV1 {
   return { httpProxy: null, httpsProxy: null, noProxy: null, caCertPem: null, applyToTerminal: false };
 }
@@ -1177,6 +1182,33 @@ export function resolveExecutionProfile(ctx: AppContext, input: {
     provider,
     model
   } satisfies ExecutionProfileResolved;
+}
+
+export function resolveGlobalDefaultModelProfile(ctx: AppContext) {
+  const providersSettings = getAgentProvidersSettingsInternal(ctx);
+  const defaultRef = providersSettings.default;
+  const resolvedProviderId = typeof defaultRef?.providerId === "string" ? defaultRef.providerId.trim() : "";
+  const resolvedModelId = typeof defaultRef?.modelId === "string" ? defaultRef.modelId.trim() : "";
+  if (!resolvedProviderId || !resolvedModelId) {
+    throw new HttpError(400, "Default provider/model is not configured", "AGENT_PROVIDER_MODEL_NOT_CONFIGURED");
+  }
+
+  const provider = providersSettings.providers.find((item) => item.id === resolvedProviderId);
+  if (!provider) {
+    throw new HttpError(400, "Provider not found", "AGENT_PROVIDER_NOT_FOUND");
+  }
+  const model = provider.models.find((item) => item.id === resolvedModelId);
+  if (!model) {
+    throw new HttpError(400, "Model not found", "AGENT_MODEL_NOT_FOUND");
+  }
+  if (!provider.options.apiKey) {
+    throw new HttpError(400, `Provider '${provider.id}' apiKey is missing`, "AGENT_PROVIDER_API_KEY_MISSING");
+  }
+
+  return {
+    provider,
+    model
+  } satisfies GlobalDefaultModelResolved;
 }
 
 export async function updateNetworkSettings(

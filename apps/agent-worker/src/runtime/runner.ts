@@ -1,9 +1,10 @@
 import { randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { generateText, jsonSchema, streamText, tool } from "ai";
+import { jsonSchema, streamText, tool } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
+import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call";
 import { runBashCommand } from "./bash.js";
 import { getBashToolAppendix } from "./bashTools.js";
 import { AgentApiClient, ApiConflictError, type ExecutionProfile, type PromptContext } from "./apiClient.js";
@@ -38,7 +39,7 @@ const ENV_MODEL_TOTAL_TIMEOUT_MS = Math.min(
   Math.max(0, parseIntOrDefault(process.env.AWB_AGENT_MODEL_TOTAL_TIMEOUT_MS, 0))
 );
 const COMPACTION_USER_PROMPT = [
-  "请基于当前会话内容输出一份中文总结,用于继续当前任务。",
+  "请基于当前会话内容输出一份总结,用于继续当前任务。",
   "重点覆盖:",
   "- 已完成了什么",
   "- 当前正在做什么",
@@ -1041,33 +1042,30 @@ export class AgentRunner {
   }
 
   private async compactContext(params: {
-    profile: ExecutionProfile;
     run: QueuedRun;
     context: PromptContext;
     signal: AbortSignal;
   }) {
-    const { profile, run, context, signal } = params;
+    const { run, context, signal } = params;
     const expectedHeadItemId = context.headItemId;
     if (expectedHeadItemId == null) return false;
 
-    const model = createLanguageModel(profile);
-    const runtimeOptions = buildModelRuntimeOptions(profile);
-    const request: Record<string, unknown> = {
-      model,
-      system: context.system || undefined,
-      messages: [...context.messages, { role: "user", content: COMPACTION_USER_PROMPT }],
-      abortSignal: signal
-    };
-    if (Object.keys(runtimeOptions.aiSdk).length > 0) {
-      Object.assign(request, runtimeOptions.aiSdk);
-    }
-    if (Object.keys(runtimeOptions.providerOptions).length > 0) {
-      request.providerOptions = {
-        [runtimeOptions.providerKey]: runtimeOptions.providerOptions
-      };
-    }
-
-    const response = await generateText(request as any);
+    const singleCallProfile = await this.apiClient.getSingleCallModelProfile({
+      workspaceId: run.workspaceId,
+      sessionId: run.sessionId,
+      runId: run.runId
+    });
+    const response = await generateSingleCallText(
+      {
+        provider: singleCallProfile.provider,
+        model: singleCallProfile.model
+      },
+      {
+        system: context.system || undefined,
+        messages: [...context.messages, { role: "user", content: COMPACTION_USER_PROMPT }],
+        abortSignal: signal
+      }
+    );
     const summaryText = String(response.text || "").trim();
     if (!summaryText) return false;
 
@@ -1509,7 +1507,6 @@ export class AgentRunner {
 
         if (this.shouldAutoCompact({ context, runtime: profile.runtime })) {
           const compacted = await this.compactContext({
-            profile,
             run,
             context,
             signal

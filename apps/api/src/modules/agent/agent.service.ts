@@ -56,6 +56,7 @@ import {
   getAgentMcpSettings,
   getAgentRuntimeSettings,
   getAgentSettings,
+  resolveGlobalDefaultModelProfile,
   resolveExecutionProfile
 } from "../settings/settings.service.js";
 import { projectToolCallInputForPrompt, projectToolResultForPrompt } from "./prompt/tool-projectors/index.js";
@@ -1534,6 +1535,32 @@ export class AgentService {
       provider: profile.provider,
       model: profile.model,
       runtime
+    };
+  }
+
+  getSingleCallModelProfileForRun(params: { workspaceId: string; sessionId: string; runId: string }) {
+    const session = getAgentSession(this.ctx.db, params.sessionId);
+    if (!session) throw new HttpError(404, "session not found");
+    if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
+
+    const run = getRunRecord(this.ctx.db, params.runId);
+    if (!run || run.sessionId !== params.sessionId || run.workspaceId !== params.workspaceId) {
+      throw new HttpError(404, "run not found");
+    }
+
+    const profile = resolveGlobalDefaultModelProfile(this.ctx);
+
+    return {
+      resolved: {
+        runId: params.runId,
+        sessionId: params.sessionId,
+        workspaceId: params.workspaceId,
+        providerId: profile.provider.id,
+        modelId: profile.model.id,
+        source: "global_default" as const
+      },
+      provider: profile.provider,
+      model: profile.model
     };
   }
 

@@ -851,4 +851,57 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
       return params.service.getExecutionProfileForRun(body);
     }
   );
+
+  app.post(
+    "/api/internal/agent/single-call-model-profile",
+    {
+      schema: {
+        tags: ["agent"],
+        body: Type.Object({
+          workspaceId: Type.String({ minLength: 1 }),
+          sessionId: Type.String({ minLength: 1 }),
+          runId: Type.String({ minLength: 1 })
+        }),
+        response: {
+          200: Type.Object({
+            resolved: Type.Object({
+              runId: Type.String({ minLength: 1 }),
+              sessionId: Type.String({ minLength: 1 }),
+              workspaceId: Type.String({ minLength: 1 }),
+              providerId: Type.String({ minLength: 1 }),
+              modelId: Type.String({ minLength: 1 }),
+              source: Type.Literal("global_default")
+            }),
+            provider: Type.Object({
+              id: Type.String({ minLength: 1 }),
+              name: Type.String({ minLength: 1 }),
+              npm: AgentProviderNpmSchema,
+              options: Type.Object({
+                baseURL: Type.String({ minLength: 1 }),
+                apiKey: Type.String({ minLength: 1 })
+              })
+            }),
+            model: Type.Object({
+              id: Type.String({ minLength: 1 }),
+              providerModelId: Type.Optional(Type.String({ minLength: 1 })),
+              name: Type.String({ minLength: 1 }),
+              options: Type.Optional(Type.Any())
+            })
+          }),
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as {
+        workspaceId: string;
+        sessionId: string;
+        runId: string;
+      };
+      return params.service.getSingleCallModelProfileForRun(body);
+    }
+  );
 }
