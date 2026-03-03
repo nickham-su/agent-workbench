@@ -75,32 +75,6 @@ export type ExecutionProfile = {
   };
 };
 
-export type SingleCallModelProfile = {
-  resolved: {
-    runId: string;
-    sessionId: string;
-    workspaceId: string;
-    providerId: string;
-    modelId: string;
-    source: "global_default";
-  };
-  provider: {
-    id: string;
-    name: string;
-    npm: "@ai-sdk/openai" | "@ai-sdk/anthropic";
-    options: {
-      baseURL: string;
-      apiKey: string;
-    };
-  };
-  model: {
-    id: string;
-    providerModelId?: string;
-    name: string;
-    options?: Record<string, unknown>;
-  };
-};
-
 export type PromptContext = {
   headItemId: number | null;
   system: string;
@@ -241,22 +215,6 @@ export class AgentApiClient {
       throw new Error(`get execution profile failed: ${response.status} ${txt}`);
     }
     return (await response.json()) as ExecutionProfile;
-  }
-
-  async getSingleCallModelProfile(input: { workspaceId: string; sessionId: string; runId: string }) {
-    const response = await fetch(`${this.params.apiOrigin}/api/internal/agent/single-call-model-profile`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-awb-agent-internal-token": this.params.internalToken
-      },
-      body: JSON.stringify(input)
-    });
-    if (!response.ok) {
-      const txt = await response.text();
-      throw new Error(`request failed: ${response.status} ${txt}`);
-    }
-    return (await response.json()) as SingleCallModelProfile;
   }
 
   async getPromptContext(input: { workspaceId: string; sessionId: string; runId: string }) {

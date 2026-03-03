@@ -1070,23 +1070,19 @@ export class AgentRunner {
   }
 
   private async compactContext(params: {
+    profile: ExecutionProfile;
     run: QueuedRun;
     context: PromptContext;
     signal: AbortSignal;
   }) {
-    const { run, context, signal } = params;
+    const { profile, run, context, signal } = params;
     const expectedHeadItemId = context.headItemId;
     if (expectedHeadItemId == null) return false;
 
-    const singleCallProfile = await this.apiClient.getSingleCallModelProfile({
-      workspaceId: run.workspaceId,
-      sessionId: run.sessionId,
-      runId: run.runId
-    });
     const response = await generateSingleCallText(
       {
-        provider: singleCallProfile.provider,
-        model: singleCallProfile.model
+        provider: profile.provider,
+        model: profile.model
       },
       {
         system: context.system || undefined,
@@ -1648,6 +1644,7 @@ export class AgentRunner {
 
         if (this.shouldAutoCompact({ context, runtime: profile.runtime })) {
           const compacted = await this.compactContext({
+            profile,
             run,
             context,
             signal
