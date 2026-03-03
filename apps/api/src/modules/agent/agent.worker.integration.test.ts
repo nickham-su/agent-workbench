@@ -93,7 +93,8 @@ async function configureAgentDefaults(baseUrl: string) {
           models: [
             {
               id: "gpt-5.2",
-              name: "gpt-5.2"
+              name: "gpt-5.2",
+              contextWindowTokens: 128000
             }
           ]
         }

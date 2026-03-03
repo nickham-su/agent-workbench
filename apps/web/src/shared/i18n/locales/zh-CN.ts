@@ -797,6 +797,8 @@ export default {
         idLabel: "Model 内部ID(自动生成)",
         providerModelIdLabel: "Provider 模型ID",
         nameLabel: "显示名称",
+        contextWindowTokensLabel: "上下文窗口 Token 上限",
+        contextWindowTokensHelp: "该模型的上下文窗口上限,用于自动压缩阈值计算基数。必须为正整数。",
         aiSdkLabel: "AI SDK 通用参数 JSON",
         aiSdkHelp: "写入 generateText 顶层参数, 例如 maxOutputTokens, temperature, topP。会屏蔽 model/system/prompt 等关键键。",
         aiSdkDocsLink: "AI SDK 文档",
@@ -946,21 +948,17 @@ export default {
       saving: "正在保存...",
       saved: "已保存",
       fields: {
-        maxContextTokens: {
-          label: "上下文最大 Token",
-          help: "用于自动压缩阈值计算的上下文上限。必须为正整数。"
-        },
         autoCompactThresholdPct: {
           label: "自动压缩阈值(%)",
-          help: "当最近一次模型响应总 token 达到 maxContextTokens * 阈值/100 时触发自动压缩。范围 50-90。"
+          help: "当最近一次模型响应总 token 达到当前模型 context window * 阈值/100 时触发自动压缩。范围 50-90。"
         },
         modelTotalTimeoutMs: {
           label: "模型总超时（秒）",
-          help: "单次模型请求的总超时时间。达到后将中止该次请求并标记为失败。支持小数秒,0 表示关闭。"
+          help: "单次模型请求的总超时时间。达到后将中止该次请求并标记为失败。仅支持整数秒,0 表示关闭。"
         },
         modelIdleTimeoutMs: {
           label: "模型空闲超时（秒）",
-          help: "单次模型请求在连续一段时间未收到任何流式 chunk（包括 reasoning/tool-call/finish）时中止。支持小数秒,0 表示关闭。"
+          help: "单次模型请求在连续一段时间未收到任何流式 chunk（包括 reasoning/tool-call/finish）时中止。仅支持整数秒,0 表示关闭。"
         },
         modelRequestMaxRetries: {
           label: "模型重试最大次数",

@@ -159,6 +159,9 @@
                 {{ model.name }}
               </div>
               <div class="text-[11px] text-[color:var(--text-tertiary)] truncate">{{ model.providerModelId }}</div>
+              <div class="text-[11px] text-[color:var(--text-tertiary)] truncate">
+                {{ t('settings.agentProviders.modelForm.contextWindowTokensLabel') }}: {{ model.contextWindowTokens }}
+              </div>
             </div>
             <div class="shrink-0 flex items-center gap-1">
               <a-tag v-if="isDefaultModel(modelManagerProviderId, model.id)" color="blue" class="!text-[10px] !leading-[16px] !px-1 !py-0">
@@ -208,6 +211,19 @@
         </a-form-item>
         <a-form-item :label="t('settings.agentProviders.modelForm.nameLabel')" :required="true">
           <a-input v-model:value="modelFormName" />
+        </a-form-item>
+        <a-form-item :label="t('settings.agentProviders.modelForm.contextWindowTokensLabel')" :required="true">
+          <a-input-number
+            v-model:value="modelFormContextWindowTokens"
+            :min="1"
+            :max="10000000"
+            :step="1000"
+            :precision="0"
+            style="width: 100%"
+          />
+          <div class="pt-1 text-xs text-[color:var(--text-tertiary)]">
+            {{ t('settings.agentProviders.modelForm.contextWindowTokensHelp') }}
+          </div>
         </a-form-item>
         <a-form-item :label="t('settings.agentProviders.modelForm.aiSdkLabel')">
           <a-textarea v-model:value="modelFormAiSdkJson" :auto-size="{ minRows: 5, maxRows: 12 }" class="font-mono text-xs" />
@@ -269,6 +285,7 @@ type EditingModel = {
   id: string;
   providerModelId: string;
   name: string;
+  contextWindowTokens: number;
   options: JsonMap;
 };
 
@@ -321,6 +338,7 @@ const modelFormOriginalId = ref("");
 const modelFormId = ref("");
 const modelFormProviderModelId = ref("");
 const modelFormName = ref("");
+const modelFormContextWindowTokens = ref<number>(128000);
 const modelFormAiSdkJson = ref("{}");
 const modelFormProviderOptionsJson = ref("{}");
 const modelFormDefault = ref(false);
@@ -348,6 +366,8 @@ const canSubmitModel = computed(() => {
   if (!modelFormId.value.trim()) return false;
   if (!modelFormProviderModelId.value.trim()) return false;
   if (!modelFormName.value.trim()) return false;
+  const contextWindowTokens = Number(modelFormContextWindowTokens.value || 0);
+  if (!Number.isFinite(contextWindowTokens) || Math.floor(contextWindowTokens) < 1) return false;
   const provider = getProvider(modelFormProviderId.value);
   if (!provider) return false;
   if (modelModalMode.value === "edit") return true;
@@ -384,6 +404,7 @@ function mapFromSettings(view: AgentProvidersSettingsView) {
       providerModelId:
         typeof model.providerModelId === "string" && model.providerModelId.trim() ? model.providerModelId.trim() : model.id,
       name: model.name,
+      contextWindowTokens: Math.max(1, Math.floor(Number(model.contextWindowTokens || 1))),
       options: toJsonRecord(model.options)
     }))
   }));
@@ -612,6 +633,7 @@ function openAddModel(providerId: string) {
   modelFormId.value = newLocalId(`${provider.id}-model`);
   modelFormProviderModelId.value = "";
   modelFormName.value = "";
+  modelFormContextWindowTokens.value = 128000;
   modelFormAiSdkJson.value = "{}";
   modelFormProviderOptionsJson.value = "{}";
   modelFormDefault.value = false;
@@ -630,6 +652,7 @@ function openEditModel(providerId: string, modelId: string) {
   modelFormId.value = model.id;
   modelFormProviderModelId.value = model.providerModelId;
   modelFormName.value = model.name;
+  modelFormContextWindowTokens.value = Math.max(1, Math.floor(Number(model.contextWindowTokens || 1)));
   const options = toJsonRecord(model.options);
   const aiSdk = toJsonRecord(options.aiSdk);
   const providerOptionsByKey = toJsonRecord(options.providerOptionsByKey);
@@ -649,6 +672,7 @@ function closeModelModal() {
   modelFormId.value = "";
   modelFormProviderModelId.value = "";
   modelFormName.value = "";
+  modelFormContextWindowTokens.value = 128000;
   modelFormAiSdkJson.value = "{}";
   modelFormProviderOptionsJson.value = "{}";
   modelFormDefault.value = false;
@@ -666,6 +690,7 @@ function submitModel() {
   const nextId = modelFormId.value.trim();
   const nextProviderModelId = modelFormProviderModelId.value.trim();
   const nextName = modelFormName.value.trim();
+  const nextContextWindowTokens = Math.max(1, Math.floor(Number(modelFormContextWindowTokens.value || 1)));
   let aiSdk: JsonMap;
   let providerOptions: JsonMap;
   try {
@@ -684,6 +709,7 @@ function submitModel() {
     id: nextId,
     providerModelId: nextProviderModelId,
     name: nextName,
+    contextWindowTokens: nextContextWindowTokens,
     options: {
       aiSdk,
       providerOptionsByKey: {
@@ -768,6 +794,7 @@ function toDraft() {
           id: modelId,
           providerModelId,
           name: modelName,
+          contextWindowTokens: Math.max(1, Math.floor(Number(model.contextWindowTokens || 1))),
           options: modelOptions
         };
       });

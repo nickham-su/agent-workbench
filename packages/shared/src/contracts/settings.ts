@@ -43,6 +43,8 @@ export const AgentProviderModelSchema = Type.Object({
   id: Type.String({ minLength: 1 }),
   providerModelId: Type.Optional(Type.String({ minLength: 1 })),
   name: Type.String({ minLength: 1 }),
+  // 模型上下文窗口上限,用于自动压缩阈值计算基数。
+  contextWindowTokens: Type.Integer({ minimum: 1 }),
   options: Type.Optional(AgentProviderModelOptionsSchema)
 });
 export type AgentProviderModel = Static<typeof AgentProviderModelSchema>;
@@ -158,9 +160,7 @@ export const AgentRuntimeSettingsSchema = Type.Object({
   modelTotalTimeoutMs: Type.Integer({ minimum: 0 }),
   // 模型请求首包前失败时的最大重试次数(0 表示不重试)。
   modelRequestMaxRetries: Type.Integer({ minimum: 0, maximum: 100 }),
-  // 模型上下文窗口上限,用于自动压缩触发判定。
-  maxContextTokens: Type.Integer({ minimum: 1 }),
-  // 自动压缩阈值百分比,达到 maxContextTokens * pct/100 触发压缩。
+  // 自动压缩阈值百分比,达到 model.contextWindowTokens * pct/100 触发压缩。
   autoCompactThresholdPct: Type.Integer({ minimum: 50, maximum: 90 }),
   updatedAt: Type.Number()
 });
@@ -170,7 +170,6 @@ export const UpdateAgentRuntimeSettingsRequestSchema = Type.Object({
   modelIdleTimeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
   modelTotalTimeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
   modelRequestMaxRetries: Type.Optional(Type.Integer({ minimum: 0, maximum: 100 })),
-  maxContextTokens: Type.Optional(Type.Integer({ minimum: 1 })),
   autoCompactThresholdPct: Type.Optional(Type.Integer({ minimum: 50, maximum: 90 }))
 });
 export type UpdateAgentRuntimeSettingsRequest = Static<typeof UpdateAgentRuntimeSettingsRequestSchema>;

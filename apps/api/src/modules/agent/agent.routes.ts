@@ -760,13 +760,13 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
               id: Type.String({ minLength: 1 }),
               providerModelId: Type.Optional(Type.String({ minLength: 1 })),
               name: Type.String({ minLength: 1 }),
+              contextWindowTokens: Type.Integer({ minimum: 1 }),
               options: Type.Optional(Type.Any())
             }),
             runtime: Type.Object({
               modelIdleTimeoutMs: Type.Integer({ minimum: 0 }),
               modelTotalTimeoutMs: Type.Integer({ minimum: 0 }),
               modelRequestMaxRetries: Type.Integer({ minimum: 0, maximum: 100 }),
-              maxContextTokens: Type.Integer({ minimum: 1 }),
               autoCompactThresholdPct: Type.Integer({ minimum: 50, maximum: 90 }),
               updatedAt: Type.Number()
             })
@@ -821,6 +821,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
               id: Type.String({ minLength: 1 }),
               providerModelId: Type.Optional(Type.String({ minLength: 1 })),
               name: Type.String({ minLength: 1 }),
+              contextWindowTokens: Type.Integer({ minimum: 1 }),
               options: Type.Optional(Type.Any())
             })
           }),

@@ -799,6 +799,8 @@ export default {
         idLabel: "Model Internal ID (auto)",
         providerModelIdLabel: "Provider Model ID",
         nameLabel: "Display name",
+        contextWindowTokensLabel: "Context Window Tokens",
+        contextWindowTokensHelp: "Context window limit for this model, used as the base of auto-compaction threshold calculation. Must be a positive integer.",
         aiSdkLabel: "AI SDK Shared Params JSON",
         aiSdkHelp: "Mapped to generateText top-level options, e.g. maxOutputTokens, temperature, topP. Reserved keys like model/system/prompt are blocked.",
         aiSdkDocsLink: "AI SDK docs",
@@ -948,21 +950,17 @@ export default {
       saving: "Saving...",
       saved: "Saved",
       fields: {
-        maxContextTokens: {
-          label: "Max context tokens",
-          help: "Context ceiling used for auto-compaction threshold calculation. Must be a positive integer."
-        },
         autoCompactThresholdPct: {
           label: "Auto-compaction threshold (%)",
-          help: "Auto-compaction triggers when last response total tokens reach maxContextTokens * threshold/100. Range: 50-90."
+          help: "Auto-compaction triggers when last response total tokens reach current model context window * threshold/100. Range: 50-90."
         },
         modelTotalTimeoutMs: {
           label: "Model total timeout (seconds)",
-          help: "Total timeout for a single model request. When reached, the request is aborted and the run fails. Decimal seconds are supported; 0 disables."
+          help: "Total timeout for a single model request. When reached, the request is aborted and the run fails. Integer seconds only; 0 disables."
         },
         modelIdleTimeoutMs: {
           label: "Model idle timeout (seconds)",
-          help: "Abort when no streaming chunk arrives for a period (including reasoning/tool-call/finish). Decimal seconds are supported; 0 disables."
+          help: "Abort when no streaming chunk arrives for a period (including reasoning/tool-call/finish). Integer seconds only; 0 disables."
         },
         modelRequestMaxRetries: {
           label: "Model max retries",

@@ -38,7 +38,6 @@ export type ExecutionProfile = {
     modelIdleTimeoutMs: number;
     modelTotalTimeoutMs: number;
     modelRequestMaxRetries: number;
-    maxContextTokens: number;
     autoCompactThresholdPct: number;
     updatedAt: number;
   };
@@ -71,6 +70,7 @@ export type ExecutionProfile = {
     id: string;
     providerModelId?: string;
     name: string;
+    contextWindowTokens: number;
     options?: Record<string, unknown>;
   };
 };

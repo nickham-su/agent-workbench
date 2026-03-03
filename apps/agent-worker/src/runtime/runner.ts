@@ -1057,9 +1057,10 @@ export class AgentRunner {
 
   private shouldAutoCompact(params: {
     context: PromptContext;
+    model: ExecutionProfile["model"];
     runtime: ExecutionProfile["runtime"];
   }) {
-    const maxContextTokens = Math.max(1, Math.floor(Number(params.runtime.maxContextTokens || 0)));
+    const maxContextTokens = Math.max(1, Math.floor(Number(params.model.contextWindowTokens || 0)));
     const thresholdPct = Math.max(50, Math.min(90, Math.floor(Number(params.runtime.autoCompactThresholdPct || 80))));
     const lastTotalTokens = typeof params.context.lastResponseTotalTokens === "number"
       ? Math.max(0, Math.floor(params.context.lastResponseTotalTokens))
@@ -1642,7 +1643,7 @@ export class AgentRunner {
           continue;
         }
 
-        if (this.shouldAutoCompact({ context, runtime: profile.runtime })) {
+        if (this.shouldAutoCompact({ context, model: profile.model, runtime: profile.runtime })) {
           const compacted = await this.compactContext({
             profile,
             run,

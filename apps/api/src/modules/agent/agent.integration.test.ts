@@ -102,7 +102,8 @@ async function configureAgentDefaults(app: FastifyInstance) {
           models: [
             {
               id: "gpt-5.2",
-              name: "gpt-5.2"
+              name: "gpt-5.2",
+              contextWindowTokens: 128000
             }
           ]
         }
@@ -700,8 +701,71 @@ test("agent runtime settings 可通过 execution-profile 下发", async () => {
   assert.equal(profile.runtime?.modelIdleTimeoutMs, 1234);
   assert.equal(profile.runtime?.modelTotalTimeoutMs, 5678);
   assert.equal(profile.runtime?.modelRequestMaxRetries, 4);
-  assert.equal(typeof profile.runtime?.maxContextTokens, "number");
   assert.equal(typeof profile.runtime?.autoCompactThresholdPct, "number");
+  assert.equal(typeof profile.model?.contextWindowTokens, "number");
+});
+
+test("agent providers settings 要求 contextWindowTokens 必填且合法", async () => {
+  const fixture = await createFixture();
+
+  const missingFieldRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: {
+      default: {
+        providerId: "ppchat",
+        modelId: "gpt-5.2"
+      },
+      providers: [
+        {
+          id: "ppchat",
+          name: "ppchat",
+          npm: "@ai-sdk/openai",
+          options: {
+            baseURL: "https://code.ppchat.vip/v1",
+            apiKey: "sk-test"
+          },
+          models: [
+            {
+              id: "gpt-5.2",
+              name: "gpt-5.2"
+            }
+          ]
+        }
+      ]
+    }
+  });
+  assert.equal(missingFieldRes.statusCode, 400);
+
+  const tooLargeRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: {
+      default: {
+        providerId: "ppchat",
+        modelId: "gpt-5.2"
+      },
+      providers: [
+        {
+          id: "ppchat",
+          name: "ppchat",
+          npm: "@ai-sdk/openai",
+          options: {
+            baseURL: "https://code.ppchat.vip/v1",
+            apiKey: "sk-test"
+          },
+          models: [
+            {
+              id: "gpt-5.2",
+              name: "gpt-5.2",
+              contextWindowTokens: 10000001
+            }
+          ]
+        }
+      ]
+    }
+  });
+  assert.equal(tooLargeRes.statusCode, 400);
 });
 
 test("run-state 支持 runNoticeText 更新与 idle 自动清空", async () => {
@@ -764,7 +828,8 @@ test("single-call model profile 始终使用全局默认模型", async () => {
           models: [
             {
               id: "global_model",
-              name: "global_model"
+              name: "global_model",
+              contextWindowTokens: 128000
             }
           ]
         },
@@ -779,7 +844,8 @@ test("single-call model profile 始终使用全局默认模型", async () => {
           models: [
             {
               id: "agent_model",
-              name: "agent_model"
+              name: "agent_model",
+              contextWindowTokens: 128000
             }
           ]
         }

@@ -55,10 +55,9 @@ const AGENT_GLOBAL_PROMPT_MAX_BYTES = 32 * 1024;
 
 // Node.js setTimeout 上限接近 2^31-1,超过后会出现不符合预期的行为。
 const RUNTIME_TIMEOUT_MS_MAX = 2_147_483_647;
-const RUNTIME_MODEL_REQUEST_MAX_RETRIES_DEFAULT = 0;
+const RUNTIME_MODEL_REQUEST_MAX_RETRIES_DEFAULT = 5;
 const RUNTIME_MODEL_REQUEST_MAX_RETRIES_MAX = 100;
-const RUNTIME_MAX_CONTEXT_TOKENS_DEFAULT = 128_000;
-const RUNTIME_MAX_CONTEXT_TOKENS_MAX = 10_000_000;
+const MODEL_CONTEXT_WINDOW_TOKENS_MAX = 10_000_000;
 const RUNTIME_AUTO_COMPACT_THRESHOLD_DEFAULT = 80;
 const RUNTIME_AUTO_COMPACT_THRESHOLD_MIN = 50;
 const RUNTIME_AUTO_COMPACT_THRESHOLD_MAX = 90;
@@ -320,28 +319,38 @@ function normalizeModelRequestMaxRetriesForUpdate(raw: unknown, field: string) {
   return v;
 }
 
-function normalizeMaxContextTokensFromStored(raw: unknown) {
-  const n = typeof raw === "number" ? raw : Number(raw);
-  if (!Number.isFinite(n)) return RUNTIME_MAX_CONTEXT_TOKENS_DEFAULT;
-  const v = Math.floor(n);
-  if (v < 1 || v > RUNTIME_MAX_CONTEXT_TOKENS_MAX) return RUNTIME_MAX_CONTEXT_TOKENS_DEFAULT;
-  return v;
-}
-
-function normalizeMaxContextTokensForUpdate(raw: unknown, field: string) {
+function normalizeContextWindowTokensFromStored(raw: unknown) {
   const n = typeof raw === "number" ? raw : Number(raw);
   if (!Number.isFinite(n)) {
-    throw new HttpError(400, `${field} must be a finite number`, "AGENT_RUNTIME_MAX_CONTEXT_TOKENS_INVALID");
+    throw new HttpError(400, "contextWindowTokens is required", "AGENT_PROVIDER_MODEL_CONTEXT_WINDOW_REQUIRED");
   }
   const v = Math.floor(n);
   if (v !== n) {
-    throw new HttpError(400, `${field} must be an integer`, "AGENT_RUNTIME_MAX_CONTEXT_TOKENS_INVALID");
+    throw new HttpError(400, "contextWindowTokens must be an integer", "AGENT_PROVIDER_MODEL_CONTEXT_WINDOW_INVALID");
   }
   if (v < 1) {
-    throw new HttpError(400, `${field} must be >= 1`, "AGENT_RUNTIME_MAX_CONTEXT_TOKENS_INVALID");
+    throw new HttpError(400, "contextWindowTokens must be >= 1", "AGENT_PROVIDER_MODEL_CONTEXT_WINDOW_INVALID");
   }
-  if (v > RUNTIME_MAX_CONTEXT_TOKENS_MAX) {
-    throw new HttpError(400, `${field} is too large`, "AGENT_RUNTIME_MAX_CONTEXT_TOKENS_TOO_LARGE");
+  if (v > MODEL_CONTEXT_WINDOW_TOKENS_MAX) {
+    throw new HttpError(400, "contextWindowTokens is too large", "AGENT_PROVIDER_MODEL_CONTEXT_WINDOW_TOO_LARGE");
+  }
+  return v;
+}
+
+function normalizeContextWindowTokensForUpdate(raw: unknown, field: string) {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n)) {
+    throw new HttpError(400, `${field} must be a finite number`, "AGENT_PROVIDER_MODEL_CONTEXT_WINDOW_INVALID");
+  }
+  const v = Math.floor(n);
+  if (v !== n) {
+    throw new HttpError(400, `${field} must be an integer`, "AGENT_PROVIDER_MODEL_CONTEXT_WINDOW_INVALID");
+  }
+  if (v < 1) {
+    throw new HttpError(400, `${field} must be >= 1`, "AGENT_PROVIDER_MODEL_CONTEXT_WINDOW_INVALID");
+  }
+  if (v > MODEL_CONTEXT_WINDOW_TOKENS_MAX) {
+    throw new HttpError(400, `${field} is too large`, "AGENT_PROVIDER_MODEL_CONTEXT_WINDOW_TOO_LARGE");
   }
   return v;
 }
@@ -402,6 +411,7 @@ function getAgentProvidersSettingsStored(ctx: AppContext) {
             id: modelId,
             providerModelId,
             name,
+            contextWindowTokens: normalizeContextWindowTokensFromStored(model.contextWindowTokens),
             options: normalizeProviderModelOptions(model.options, npm)
           };
         })
@@ -721,14 +731,12 @@ function getAgentRuntimeSettingsStored(ctx: AppContext) {
   const modelIdleTimeoutMs = normalizeRuntimeTimeoutMsFromStored(value?.modelIdleTimeoutMs);
   const modelTotalTimeoutMs = normalizeRuntimeTimeoutMsFromStored(value?.modelTotalTimeoutMs);
   const modelRequestMaxRetries = normalizeModelRequestMaxRetriesFromStored(value?.modelRequestMaxRetries);
-  const maxContextTokens = normalizeMaxContextTokensFromStored(value?.maxContextTokens);
   const autoCompactThresholdPct = normalizeAutoCompactThresholdPctFromStored(value?.autoCompactThresholdPct);
   return {
     settings: {
       modelIdleTimeoutMs,
       modelTotalTimeoutMs,
       modelRequestMaxRetries,
-      maxContextTokens,
       autoCompactThresholdPct
     },
     updatedAt: row?.updatedAt ?? 0
@@ -855,7 +863,6 @@ export function getAgentRuntimeSettings(ctx: AppContext): AgentRuntimeSettings {
     modelIdleTimeoutMs: loaded.settings.modelIdleTimeoutMs,
     modelTotalTimeoutMs: loaded.settings.modelTotalTimeoutMs,
     modelRequestMaxRetries: loaded.settings.modelRequestMaxRetries,
-    maxContextTokens: loaded.settings.maxContextTokens,
     autoCompactThresholdPct: loaded.settings.autoCompactThresholdPct,
     updatedAt: loaded.updatedAt
   };
@@ -881,10 +888,6 @@ export function updateAgentRuntimeSettings(
     (body as any).modelRequestMaxRetries !== undefined
       ? normalizeModelRequestMaxRetriesForUpdate((body as any).modelRequestMaxRetries, "modelRequestMaxRetries")
       : current.modelRequestMaxRetries;
-  const maxContextTokens =
-    (body as any).maxContextTokens !== undefined
-      ? normalizeMaxContextTokensForUpdate((body as any).maxContextTokens, "maxContextTokens")
-      : current.maxContextTokens;
   const autoCompactThresholdPct =
     (body as any).autoCompactThresholdPct !== undefined
       ? normalizeAutoCompactThresholdPctForUpdate((body as any).autoCompactThresholdPct, "autoCompactThresholdPct")
@@ -898,21 +901,19 @@ export function updateAgentRuntimeSettings(
       modelIdleTimeoutMs,
       modelTotalTimeoutMs,
       modelRequestMaxRetries,
-      maxContextTokens,
       autoCompactThresholdPct
     },
     updatedAt
   );
 
   logger.info(
-    { modelIdleTimeoutMs, modelTotalTimeoutMs, modelRequestMaxRetries, maxContextTokens, autoCompactThresholdPct, updatedAt },
+    { modelIdleTimeoutMs, modelTotalTimeoutMs, modelRequestMaxRetries, autoCompactThresholdPct, updatedAt },
     "agent runtime settings updated"
   );
   return {
     modelIdleTimeoutMs,
     modelTotalTimeoutMs,
     modelRequestMaxRetries,
-    maxContextTokens,
     autoCompactThresholdPct,
     updatedAt
   };
@@ -1022,22 +1023,24 @@ export function updateAgentProvidersSettings(
     const apiKey = apiKeyInput === undefined ? previous?.options.apiKey ?? null : apiKeyInput;
 
     const modelsRaw = Array.isArray(provider.models) ? provider.models : [];
-    const models = modelsRaw.map((modelRaw) => {
-      const model = modelRaw as Record<string, unknown>;
-      const modelId = typeof model.id === "string" ? model.id.trim() : "";
-      const providerModelIdRaw = typeof model.providerModelId === "string" ? model.providerModelId.trim() : "";
-      const providerModelId = providerModelIdRaw || modelId;
-      const modelName = typeof model.name === "string" ? model.name.trim() : "";
-      if (!modelId || !providerModelId || !modelName) {
-        throw new HttpError(400, "Provider model id/providerModelId/name is required", "AGENT_PROVIDER_MODEL_ID_NAME_REQUIRED");
-      }
-      return {
-        id: modelId,
-        providerModelId,
-        name: modelName,
-        options: normalizeProviderModelOptions(model.options, npm)
-      };
-    });
+      const models = modelsRaw.map((modelRaw) => {
+        const model = modelRaw as Record<string, unknown>;
+        const modelId = typeof model.id === "string" ? model.id.trim() : "";
+        const providerModelIdRaw = typeof model.providerModelId === "string" ? model.providerModelId.trim() : "";
+        const providerModelId = providerModelIdRaw || modelId;
+        const modelName = typeof model.name === "string" ? model.name.trim() : "";
+        const contextWindowTokens = normalizeContextWindowTokensForUpdate(model.contextWindowTokens, "contextWindowTokens");
+        if (!modelId || !providerModelId || !modelName) {
+          throw new HttpError(400, "Provider model id/providerModelId/name is required", "AGENT_PROVIDER_MODEL_ID_NAME_REQUIRED");
+        }
+        return {
+          id: modelId,
+          providerModelId,
+          name: modelName,
+          contextWindowTokens,
+          options: normalizeProviderModelOptions(model.options, npm)
+        };
+      });
 
     assertUniqueIdsOrThrow(
       models.map((model) => model.id),
