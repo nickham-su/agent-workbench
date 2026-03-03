@@ -156,13 +156,19 @@ export const AgentRuntimeSettingsSchema = Type.Object({
   // 0 表示关闭;单位毫秒。
   modelIdleTimeoutMs: Type.Integer({ minimum: 0 }),
   modelTotalTimeoutMs: Type.Integer({ minimum: 0 }),
+  // 模型上下文窗口上限,用于自动压缩触发判定。
+  maxContextTokens: Type.Integer({ minimum: 1 }),
+  // 自动压缩阈值百分比,达到 maxContextTokens * pct/100 触发压缩。
+  autoCompactThresholdPct: Type.Integer({ minimum: 50, maximum: 90 }),
   updatedAt: Type.Number()
 });
 export type AgentRuntimeSettings = Static<typeof AgentRuntimeSettingsSchema>;
 
 export const UpdateAgentRuntimeSettingsRequestSchema = Type.Object({
   modelIdleTimeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
-  modelTotalTimeoutMs: Type.Optional(Type.Integer({ minimum: 0 }))
+  modelTotalTimeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
+  maxContextTokens: Type.Optional(Type.Integer({ minimum: 1 })),
+  autoCompactThresholdPct: Type.Optional(Type.Integer({ minimum: 50, maximum: 90 }))
 });
 export type UpdateAgentRuntimeSettingsRequest = Static<typeof UpdateAgentRuntimeSettingsRequestSchema>;
 
@@ -190,7 +196,10 @@ export const AgentToolNameSchema = Type.Union([
   Type.Literal("write"),
   Type.Literal("apply_patch"),
   Type.Literal("todolist"),
-  Type.Literal("subtask")
+  Type.Literal("subtask"),
+  Type.Literal("archive_search"),
+  Type.Literal("archive_read"),
+  Type.Literal("archive_tail")
 ]);
 export type AgentToolName = Static<typeof AgentToolNameSchema>;
 

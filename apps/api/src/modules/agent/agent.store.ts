@@ -47,6 +47,7 @@ type AgentContextItemRow = {
   toolCallId: string | null;
   toolCallJson: string | null;
   toolResultJson: string | null;
+  archiveAt: number | null;
   outputJson: string;
   createdAt: number;
   updatedAt: number;
@@ -414,6 +415,7 @@ function readContextItemRowById(db: Db, itemId: number) {
           tool_call_id as toolCallId,
           tool_call_json as toolCallJson,
           tool_result_json as toolResultJson,
+          archive_at as archiveAt,
           output_json as outputJson,
           created_at as createdAt,
           updated_at as updatedAt
@@ -769,10 +771,182 @@ export function getSessionVisibleItems(db: Db, workspaceId: string, sessionId: s
     const row = readContextItemRowById(db, cursor);
     if (!row) break;
     if (row.workspaceId !== workspaceId || row.sessionId !== sessionId) break;
-    rows.push(mapContextItem(row));
+    if (row.archiveAt == null) {
+      rows.push(mapContextItem(row));
+    }
     cursor = row.prevId;
   }
   return rows.reverse();
+}
+
+export function setContextItemsArchiveAt(
+  db: Db,
+  params: {
+    workspaceId: string;
+    sessionId: string;
+    itemIds: number[];
+    archiveAt: number;
+    updatedAt: number;
+  }
+) {
+  if (params.itemIds.length === 0) return 0;
+  const tx = db.transaction(() => {
+    let changed = 0;
+    const stmt = db.prepare(
+      `
+        update agent_context_item
+        set archive_at = @archiveAt,
+            updated_at = @updatedAt
+        where id = @id
+          and workspace_id = @workspaceId
+          and session_id = @sessionId
+          and archive_at is null
+      `
+    );
+    for (const itemId of params.itemIds) {
+      const result = stmt.run({
+        id: itemId,
+        workspaceId: params.workspaceId,
+        sessionId: params.sessionId,
+        archiveAt: params.archiveAt,
+        updatedAt: params.updatedAt
+      });
+      changed += result.changes;
+    }
+    return changed;
+  });
+  return tx();
+}
+
+export function appendSystemSummaryAndArchiveItems(
+  db: Db,
+  params: {
+    workspaceId: string;
+    sessionId: string;
+    runId: string | null;
+    expectedHeadItemId: number | null;
+    summaryText: string;
+    summaryCreatedAt: number;
+    archiveItemIds: number[];
+    archiveAt: number;
+  }
+) {
+  const stored = encodeStoredColumns({
+    kind: "system",
+    status: "completed",
+    output: {
+      type: "system_text",
+      text: params.summaryText
+    }
+  });
+
+  const tx = db.transaction(() => {
+    const currentHead = getHead(db, params.workspaceId, params.sessionId);
+    if (currentHead !== params.expectedHeadItemId) {
+      throw new AgentConflictError(currentHead);
+    }
+
+    const result = db
+      .prepare(
+        `
+          insert into agent_context_item (
+            workspace_id,
+            session_id,
+            run_id,
+            turn_id,
+            step,
+            prev_id,
+            kind,
+            status,
+            output_text,
+            output_text_truncated,
+            output_text_artifact_path,
+            tool_name,
+            tool_call_id,
+            tool_call_json,
+            tool_result_json,
+            output_json,
+            created_at,
+            updated_at
+          ) values (
+            @workspaceId,
+            @sessionId,
+            @runId,
+            null,
+            null,
+            @prevId,
+            'system',
+            'completed',
+            @outputText,
+            @outputTextTruncated,
+            @outputTextArtifactPath,
+            @toolName,
+            @toolCallId,
+            @toolCallJson,
+            @toolResultJson,
+            @outputJson,
+            @createdAt,
+            @updatedAt
+          )
+        `
+      )
+      .run({
+        workspaceId: params.workspaceId,
+        sessionId: params.sessionId,
+        runId: params.runId,
+        prevId: params.expectedHeadItemId,
+        outputText: stored.outputText,
+        outputTextTruncated: stored.outputTextTruncated,
+        outputTextArtifactPath: stored.outputTextArtifactPath,
+        toolName: stored.toolName,
+        toolCallId: stored.toolCallId,
+        toolCallJson: stored.toolCallJson,
+        toolResultJson: stored.toolResultJson,
+        outputJson: stored.outputJson,
+        createdAt: params.summaryCreatedAt,
+        updatedAt: params.summaryCreatedAt
+      });
+    const summaryItemId = Number(result.lastInsertRowid);
+
+    let archivedCount = 0;
+    if (params.archiveItemIds.length > 0) {
+      const archiveStmt = db.prepare(
+        `
+          update agent_context_item
+          set archive_at = @archiveAt,
+              updated_at = @archiveAt
+          where id = @id
+            and workspace_id = @workspaceId
+            and session_id = @sessionId
+            and archive_at is null
+        `
+      );
+      for (const itemId of params.archiveItemIds) {
+        const archiveResult = archiveStmt.run({
+          id: itemId,
+          workspaceId: params.workspaceId,
+          sessionId: params.sessionId,
+          archiveAt: params.archiveAt
+        });
+        archivedCount += archiveResult.changes;
+      }
+    }
+
+    setHead(db, {
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+      headItemId: summaryItemId,
+      updatedAt: params.summaryCreatedAt
+    });
+    touchSession(db, params.sessionId, params.summaryCreatedAt);
+
+    return {
+      summaryItemId,
+      archivedCount
+    };
+  });
+
+  return tx();
 }
 
 export function getSessionVisibleItemsAfter(db: Db, workspaceId: string, sessionId: string, afterId: number) {

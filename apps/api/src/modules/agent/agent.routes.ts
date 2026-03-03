@@ -30,7 +30,10 @@ const AgentBuiltinToolNameSchema = Type.Union([
   Type.Literal("write"),
   Type.Literal("apply_patch"),
   Type.Literal("todolist"),
-  Type.Literal("subtask")
+  Type.Literal("subtask"),
+  Type.Literal("archive_search"),
+  Type.Literal("archive_read"),
+  Type.Literal("archive_tail")
 ]);
 const AgentDynamicToolNameSchema = Type.Union([
   AgentBuiltinToolNameSchema,
@@ -544,6 +547,182 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
   );
 
   app.post(
+    "/api/internal/agent/context/compact",
+    {
+      schema: {
+        tags: ["agent"],
+        body: Type.Object({
+          workspaceId: Type.String({ minLength: 1 }),
+          sessionId: Type.String({ minLength: 1 }),
+          runId: Type.String({ minLength: 1 }),
+          expectedHeadItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
+          summaryText: Type.String({ minLength: 1 })
+        }),
+        response: {
+          200: Type.Object({
+            compacted: Type.Boolean(),
+            summaryItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
+            archivedCount: Type.Number({ minimum: 0 })
+          }),
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as {
+        workspaceId: string;
+        sessionId: string;
+        runId: string;
+        expectedHeadItemId: number | null;
+        summaryText: string;
+      };
+      return params.service.compactContextFromWorker(body);
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/archive/search",
+    {
+      schema: {
+        tags: ["agent"],
+        body: Type.Object({
+          workspaceId: Type.String({ minLength: 1 }),
+          sessionId: Type.String({ minLength: 1 }),
+          query: Type.String({ minLength: 1 }),
+          cursor: Type.Optional(Type.String({ minLength: 1 })),
+          maxHits: Type.Optional(Type.Number({ minimum: 1 })),
+          maxChars: Type.Optional(Type.Number({ minimum: 1 })),
+          regex: Type.Optional(Type.Boolean())
+        }),
+        response: {
+          200: Type.Object({
+            hits: Type.Array(
+              Type.Object({
+                file: Type.String({ minLength: 1 }),
+                line: Type.Number({ minimum: 1 }),
+                preview: Type.String()
+              })
+            ),
+            nextCursor: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+            hasMore: Type.Boolean(),
+            truncated: Type.Boolean()
+          }),
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as {
+        workspaceId: string;
+        sessionId: string;
+        query: string;
+        cursor?: string;
+        maxHits?: number;
+        maxChars?: number;
+        regex?: boolean;
+      };
+      return params.service.archiveSearchFromWorker(body);
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/archive/read",
+    {
+      schema: {
+        tags: ["agent"],
+        body: Type.Object({
+          workspaceId: Type.String({ minLength: 1 }),
+          sessionId: Type.String({ minLength: 1 }),
+          file: Type.String({ minLength: 1 }),
+          startLine: Type.Number({ minimum: 1 }),
+          lineCount: Type.Optional(Type.Number({ minimum: 1 })),
+          maxChars: Type.Optional(Type.Number({ minimum: 1 }))
+        }),
+        response: {
+          200: Type.Object({
+            lines: Type.Array(
+              Type.Object({
+                line: Type.Number({ minimum: 1 }),
+                text: Type.String(),
+                truncated: Type.Boolean()
+              })
+            ),
+            nextStartLine: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
+            hasMore: Type.Boolean(),
+            truncated: Type.Boolean()
+          }),
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as {
+        workspaceId: string;
+        sessionId: string;
+        file: string;
+        startLine: number;
+        lineCount?: number;
+        maxChars?: number;
+      };
+      return params.service.archiveReadFromWorker(body);
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/archive/tail",
+    {
+      schema: {
+        tags: ["agent"],
+        body: Type.Object({
+          workspaceId: Type.String({ minLength: 1 }),
+          sessionId: Type.String({ minLength: 1 }),
+          n: Type.Number({ minimum: 1 }),
+          cursor: Type.Optional(Type.String({ minLength: 1 })),
+          maxChars: Type.Optional(Type.Number({ minimum: 1 }))
+        }),
+        response: {
+          200: Type.Object({
+            lines: Type.Array(
+              Type.Object({
+                file: Type.String({ minLength: 1 }),
+                line: Type.Number({ minimum: 1 }),
+                text: Type.String()
+              })
+            ),
+            nextCursor: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+            hasMore: Type.Boolean(),
+            truncated: Type.Boolean()
+          }),
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as {
+        workspaceId: string;
+        sessionId: string;
+        n: number;
+        cursor?: string;
+        maxChars?: number;
+      };
+      return params.service.archiveTailFromWorker(body);
+    }
+  );
+
+  app.post(
     "/api/internal/agent/prompt-context",
     {
       schema: {
@@ -580,7 +759,8 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
                 args: Type.Any(),
                 approved: Type.Optional(Type.Boolean())
               })
-            )
+            ),
+            lastResponseTotalTokens: Type.Union([Type.Number({ minimum: 0 }), Type.Null()])
           }),
           400: ErrorResponseSchema,
           401: ErrorResponseSchema,
@@ -650,6 +830,8 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
             runtime: Type.Object({
               modelIdleTimeoutMs: Type.Integer({ minimum: 0 }),
               modelTotalTimeoutMs: Type.Integer({ minimum: 0 }),
+              maxContextTokens: Type.Integer({ minimum: 1 }),
+              autoCompactThresholdPct: Type.Integer({ minimum: 50, maximum: 90 }),
               updatedAt: Type.Number()
             })
           }),

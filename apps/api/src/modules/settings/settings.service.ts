@@ -55,6 +55,11 @@ const AGENT_GLOBAL_PROMPT_MAX_BYTES = 32 * 1024;
 
 // Node.js setTimeout 上限接近 2^31-1,超过后会出现不符合预期的行为。
 const RUNTIME_TIMEOUT_MS_MAX = 2_147_483_647;
+const RUNTIME_MAX_CONTEXT_TOKENS_DEFAULT = 128_000;
+const RUNTIME_MAX_CONTEXT_TOKENS_MAX = 10_000_000;
+const RUNTIME_AUTO_COMPACT_THRESHOLD_DEFAULT = 80;
+const RUNTIME_AUTO_COMPACT_THRESHOLD_MIN = 50;
+const RUNTIME_AUTO_COMPACT_THRESHOLD_MAX = 90;
 
 type AgentProvidersSettingsStored = Omit<AgentProvidersSettings, "updatedAt">;
 type AgentSettingsStored = Omit<AgentSettings, "updatedAt">;
@@ -279,6 +284,61 @@ function normalizeRuntimeTimeoutMsForUpdate(raw: unknown, field: string) {
   return v;
 }
 
+function normalizeMaxContextTokensFromStored(raw: unknown) {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n)) return RUNTIME_MAX_CONTEXT_TOKENS_DEFAULT;
+  const v = Math.floor(n);
+  if (v < 1 || v > RUNTIME_MAX_CONTEXT_TOKENS_MAX) return RUNTIME_MAX_CONTEXT_TOKENS_DEFAULT;
+  return v;
+}
+
+function normalizeMaxContextTokensForUpdate(raw: unknown, field: string) {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n)) {
+    throw new HttpError(400, `${field} must be a finite number`, "AGENT_RUNTIME_MAX_CONTEXT_TOKENS_INVALID");
+  }
+  const v = Math.floor(n);
+  if (v !== n) {
+    throw new HttpError(400, `${field} must be an integer`, "AGENT_RUNTIME_MAX_CONTEXT_TOKENS_INVALID");
+  }
+  if (v < 1) {
+    throw new HttpError(400, `${field} must be >= 1`, "AGENT_RUNTIME_MAX_CONTEXT_TOKENS_INVALID");
+  }
+  if (v > RUNTIME_MAX_CONTEXT_TOKENS_MAX) {
+    throw new HttpError(400, `${field} is too large`, "AGENT_RUNTIME_MAX_CONTEXT_TOKENS_TOO_LARGE");
+  }
+  return v;
+}
+
+function normalizeAutoCompactThresholdPctFromStored(raw: unknown) {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n)) return RUNTIME_AUTO_COMPACT_THRESHOLD_DEFAULT;
+  const v = Math.floor(n);
+  if (v < RUNTIME_AUTO_COMPACT_THRESHOLD_MIN || v > RUNTIME_AUTO_COMPACT_THRESHOLD_MAX) {
+    return RUNTIME_AUTO_COMPACT_THRESHOLD_DEFAULT;
+  }
+  return v;
+}
+
+function normalizeAutoCompactThresholdPctForUpdate(raw: unknown, field: string) {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n)) {
+    throw new HttpError(400, `${field} must be a finite number`, "AGENT_RUNTIME_AUTO_COMPACT_THRESHOLD_INVALID");
+  }
+  const v = Math.floor(n);
+  if (v !== n) {
+    throw new HttpError(400, `${field} must be an integer`, "AGENT_RUNTIME_AUTO_COMPACT_THRESHOLD_INVALID");
+  }
+  if (v < RUNTIME_AUTO_COMPACT_THRESHOLD_MIN || v > RUNTIME_AUTO_COMPACT_THRESHOLD_MAX) {
+    throw new HttpError(
+      400,
+      `${field} must be between ${RUNTIME_AUTO_COMPACT_THRESHOLD_MIN} and ${RUNTIME_AUTO_COMPACT_THRESHOLD_MAX}`,
+      "AGENT_RUNTIME_AUTO_COMPACT_THRESHOLD_INVALID"
+    );
+  }
+  return v;
+}
+
 function getAgentProvidersSettingsStored(ctx: AppContext) {
   const row = getSettingJson(ctx.db, AGENT_PROVIDERS_SETTINGS_KEY);
   const value = row?.value as Partial<AgentProvidersSettingsStored> | undefined;
@@ -361,16 +421,26 @@ function toAgentProvidersSettingsView(settings: AgentProvidersSettingsStored, up
 }
 
 function normalizeAgentTools(raw: unknown): AgentToolName[] {
-  if (!Array.isArray(raw)) return ["bash", "read", "write", "apply_patch", "todolist", "subtask"];
+  if (!Array.isArray(raw)) return ["bash", "read", "write", "apply_patch", "todolist", "subtask", "archive_search", "archive_read", "archive_tail"];
   const out: AgentToolName[] = [];
   const seen = new Set<AgentToolName>();
   for (const item of raw) {
-    if (item !== "bash" && item !== "read" && item !== "write" && item !== "apply_patch" && item !== "todolist" && item !== "subtask") continue;
+    if (
+      item !== "bash" &&
+      item !== "read" &&
+      item !== "write" &&
+      item !== "apply_patch" &&
+      item !== "todolist" &&
+      item !== "subtask" &&
+      item !== "archive_search" &&
+      item !== "archive_read" &&
+      item !== "archive_tail"
+    ) continue;
     if (seen.has(item)) continue;
     seen.add(item);
     out.push(item);
   }
-  return out.length > 0 ? out : ["bash", "read", "write", "apply_patch", "todolist", "subtask"];
+  return out.length > 0 ? out : ["bash", "read", "write", "apply_patch", "todolist", "subtask", "archive_search", "archive_read", "archive_tail"];
 }
 
 function normalizeServerId(raw: unknown) {
@@ -615,10 +685,14 @@ function getAgentRuntimeSettingsStored(ctx: AppContext) {
   const value = row?.value as Partial<AgentRuntimeSettingsStored> | undefined;
   const modelIdleTimeoutMs = normalizeRuntimeTimeoutMsFromStored(value?.modelIdleTimeoutMs);
   const modelTotalTimeoutMs = normalizeRuntimeTimeoutMsFromStored(value?.modelTotalTimeoutMs);
+  const maxContextTokens = normalizeMaxContextTokensFromStored(value?.maxContextTokens);
+  const autoCompactThresholdPct = normalizeAutoCompactThresholdPctFromStored(value?.autoCompactThresholdPct);
   return {
     settings: {
       modelIdleTimeoutMs,
-      modelTotalTimeoutMs
+      modelTotalTimeoutMs,
+      maxContextTokens,
+      autoCompactThresholdPct
     },
     updatedAt: row?.updatedAt ?? 0
   };
@@ -743,6 +817,8 @@ export function getAgentRuntimeSettings(ctx: AppContext): AgentRuntimeSettings {
   return {
     modelIdleTimeoutMs: loaded.settings.modelIdleTimeoutMs,
     modelTotalTimeoutMs: loaded.settings.modelTotalTimeoutMs,
+    maxContextTokens: loaded.settings.maxContextTokens,
+    autoCompactThresholdPct: loaded.settings.autoCompactThresholdPct,
     updatedAt: loaded.updatedAt
   };
 }
@@ -763,6 +839,14 @@ export function updateAgentRuntimeSettings(
     (body as any).modelTotalTimeoutMs !== undefined
       ? normalizeRuntimeTimeoutMsForUpdate((body as any).modelTotalTimeoutMs, "modelTotalTimeoutMs")
       : current.modelTotalTimeoutMs;
+  const maxContextTokens =
+    (body as any).maxContextTokens !== undefined
+      ? normalizeMaxContextTokensForUpdate((body as any).maxContextTokens, "maxContextTokens")
+      : current.maxContextTokens;
+  const autoCompactThresholdPct =
+    (body as any).autoCompactThresholdPct !== undefined
+      ? normalizeAutoCompactThresholdPctForUpdate((body as any).autoCompactThresholdPct, "autoCompactThresholdPct")
+      : current.autoCompactThresholdPct;
 
   const updatedAt = nowMs();
   setSettingJson(
@@ -770,15 +854,19 @@ export function updateAgentRuntimeSettings(
     AGENT_RUNTIME_SETTINGS_KEY,
     {
       modelIdleTimeoutMs,
-      modelTotalTimeoutMs
+      modelTotalTimeoutMs,
+      maxContextTokens,
+      autoCompactThresholdPct
     },
     updatedAt
   );
 
-  logger.info({ modelIdleTimeoutMs, modelTotalTimeoutMs, updatedAt }, "agent runtime settings updated");
+  logger.info({ modelIdleTimeoutMs, modelTotalTimeoutMs, maxContextTokens, autoCompactThresholdPct, updatedAt }, "agent runtime settings updated");
   return {
     modelIdleTimeoutMs,
     modelTotalTimeoutMs,
+    maxContextTokens,
+    autoCompactThresholdPct,
     updatedAt
   };
 }

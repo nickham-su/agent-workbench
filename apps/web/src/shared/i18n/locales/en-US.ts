@@ -889,7 +889,10 @@ export default {
         write: "Write",
         applyPatch: "Apply Patch",
         todolist: "Todo List",
-        subtask: "Subtask"
+        subtask: "Subtask",
+        archiveSearch: "Archive Search",
+        archiveRead: "Archive Read",
+        archiveTail: "Archive Tail"
       },
       permissions: {
         allowRead: "Allow Read",
@@ -943,6 +946,14 @@ export default {
       saving: "Saving...",
       saved: "Saved",
       fields: {
+        maxContextTokens: {
+          label: "Max context tokens",
+          help: "Context ceiling used for auto-compaction threshold calculation. Must be a positive integer."
+        },
+        autoCompactThresholdPct: {
+          label: "Auto-compaction threshold (%)",
+          help: "Auto-compaction triggers when last response total tokens reach maxContextTokens * threshold/100. Range: 50-90."
+        },
         modelTotalTimeoutMs: {
           label: "Model total timeout (seconds)",
           help: "Total timeout for a single model request. When reached, the request is aborted and the run fails. Decimal seconds are supported; 0 disables."

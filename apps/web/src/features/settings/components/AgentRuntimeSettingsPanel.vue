@@ -18,6 +18,27 @@
     <div v-if="loading" class="text-xs text-[color:var(--text-tertiary)]">{{ t("common.loading") }}</div>
 
     <a-form v-else layout="vertical">
+      <a-form-item :label="t('settings.agentRuntime.fields.maxContextTokens.label')">
+        <a-input-number v-model:value="maxContextTokens" :min="1" :step="1000" :precision="0" style="max-width: 260px" />
+        <div class="pt-2 text-xs text-[color:var(--text-tertiary)]">
+          {{ t("settings.agentRuntime.fields.maxContextTokens.help") }}
+        </div>
+      </a-form-item>
+
+      <a-form-item :label="t('settings.agentRuntime.fields.autoCompactThresholdPct.label')">
+        <a-input-number
+          v-model:value="autoCompactThresholdPct"
+          :min="50"
+          :max="90"
+          :step="1"
+          :precision="0"
+          style="max-width: 260px"
+        />
+        <div class="pt-2 text-xs text-[color:var(--text-tertiary)]">
+          {{ t("settings.agentRuntime.fields.autoCompactThresholdPct.help") }}
+        </div>
+      </a-form-item>
+
       <a-form-item :label="t('settings.agentRuntime.fields.modelTotalTimeoutMs.label')">
         <a-input-number v-model:value="modelTotalTimeoutSeconds" :min="0" :step="0.1" :precision="3" style="max-width: 260px" />
         <div class="pt-2 text-xs text-[color:var(--text-tertiary)]">
@@ -49,6 +70,8 @@ const saving = ref(false);
 
 const modelIdleTimeoutSeconds = ref<number>(0);
 const modelTotalTimeoutSeconds = ref<number>(0);
+const maxContextTokens = ref<number>(128000);
+const autoCompactThresholdPct = ref<number>(80);
 
 function toSeconds(rawMs: number) {
   const ms = Math.max(0, Number(rawMs || 0));
@@ -65,6 +88,8 @@ function toMs(rawSeconds: number) {
 function mapFromSettings(settings: AgentRuntimeSettings) {
   modelIdleTimeoutSeconds.value = toSeconds(settings.modelIdleTimeoutMs ?? 0);
   modelTotalTimeoutSeconds.value = toSeconds(settings.modelTotalTimeoutMs ?? 0);
+  maxContextTokens.value = Math.max(1, Number(settings.maxContextTokens || 1));
+  autoCompactThresholdPct.value = Math.min(90, Math.max(50, Math.floor(Number(settings.autoCompactThresholdPct || 80))));
 }
 
 async function refresh() {
@@ -86,7 +111,9 @@ async function save() {
   try {
     const res = await updateAgentRuntimeSettings({
       modelIdleTimeoutMs: toMs(modelIdleTimeoutSeconds.value ?? 0),
-      modelTotalTimeoutMs: toMs(modelTotalTimeoutSeconds.value ?? 0)
+      modelTotalTimeoutMs: toMs(modelTotalTimeoutSeconds.value ?? 0),
+      maxContextTokens: Math.max(1, Math.floor(Number(maxContextTokens.value || 1))),
+      autoCompactThresholdPct: Math.min(90, Math.max(50, Math.floor(Number(autoCompactThresholdPct.value || 80))))
     });
     mapFromSettings(res);
     message.success(t("settings.agentRuntime.saved"));

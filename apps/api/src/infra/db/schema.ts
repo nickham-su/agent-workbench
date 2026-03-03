@@ -153,6 +153,7 @@ export function initSchema(db: Db) {
       tool_call_id text,
       tool_call_json text,
       tool_result_json text,
+      archive_at integer,
       output_json text not null default '{}',
       created_at integer not null,
       updated_at integer not null,
@@ -201,6 +202,7 @@ export function initSchema(db: Db) {
   ensureColumn(db, { table: "agent_context_item", column: "tool_call_id", ddl: "tool_call_id text" });
   ensureColumn(db, { table: "agent_context_item", column: "tool_call_json", ddl: "tool_call_json text" });
   ensureColumn(db, { table: "agent_context_item", column: "tool_result_json", ddl: "tool_result_json text" });
+  ensureColumn(db, { table: "agent_context_item", column: "archive_at", ddl: "archive_at integer" });
   createIndexIfNotExists(db, { index: "idx_repos_credential_id", sql: "create index idx_repos_credential_id on repos(credential_id)" });
   createIndexIfNotExists(db, { index: "idx_workspaces_dir_name", sql: "create unique index idx_workspaces_dir_name on workspaces(dir_name)" });
   createIndexIfNotExists(db, { index: "idx_workspaces_last_used_at", sql: "create index idx_workspaces_last_used_at on workspaces(last_used_at)" });
@@ -231,6 +233,10 @@ export function initSchema(db: Db) {
   createIndexIfNotExists(db, {
     index: "idx_agent_context_item_session_tool_name",
     sql: "create index idx_agent_context_item_session_tool_name on agent_context_item(session_id, tool_name, id)"
+  });
+  createIndexIfNotExists(db, {
+    index: "idx_agent_context_item_session_archive_id",
+    sql: "create index idx_agent_context_item_session_archive_id on agent_context_item(session_id, archive_at, id)"
   });
   createIndexIfNotExists(db, {
     index: "idx_agent_run_session_status",

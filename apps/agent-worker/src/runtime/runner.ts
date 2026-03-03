@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { jsonSchema, streamText, tool } from "ai";
+import { generateText, jsonSchema, streamText, tool } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { runBashCommand } from "./bash.js";
@@ -37,6 +37,17 @@ const ENV_MODEL_TOTAL_TIMEOUT_MS = Math.min(
   ENV_TIMEOUT_MS_MAX,
   Math.max(0, parseIntOrDefault(process.env.AWB_AGENT_MODEL_TOTAL_TIMEOUT_MS, 0))
 );
+const COMPACTION_USER_PROMPT = [
+  "请基于当前会话内容输出一份中文总结,用于继续当前任务。",
+  "重点覆盖:",
+  "- 已完成了什么",
+  "- 当前正在做什么",
+  "- 涉及哪些文件或模块",
+  "- 下一步待办",
+  "- 需要持续遵守的用户约束与偏好",
+  "- 关键技术决策及原因",
+  "要求: 只输出总结,不要回答会话中的问题,不要编造未出现的信息。"
+].join("\n");
 
 function newSortableId(prefix: string) {
   const ts = Date.now().toString(36).padStart(10, "0");
@@ -234,7 +245,10 @@ function isBuiltinTool(toolName: string) {
     toolName === "read" ||
     toolName === "write" ||
     toolName === "apply_patch" ||
-    toolName === "todolist"
+    toolName === "todolist" ||
+    toolName === "archive_search" ||
+    toolName === "archive_read" ||
+    toolName === "archive_tail"
   );
 }
 
@@ -248,7 +262,18 @@ function isMcpTool(toolName: string) {
 
 function isToolEnabledForAgent(profile: ExecutionProfile, toolName: string) {
   if (isBuiltinTool(toolName) || isSubtaskTool(toolName)) {
-    return profile.agent.tools.includes(toolName as "bash" | "read" | "write" | "apply_patch" | "todolist" | "subtask");
+    return profile.agent.tools.includes(
+      toolName as
+        | "bash"
+        | "read"
+        | "write"
+        | "apply_patch"
+        | "todolist"
+        | "subtask"
+        | "archive_search"
+        | "archive_read"
+        | "archive_tail"
+    );
   }
   if (isMcpTool(toolName)) {
     return true;
@@ -699,6 +724,51 @@ export class AgentRunner {
       } else if (tool.toolName === "todolist") {
         const parsed = parseTodolistArgs(tool.args);
         result = toTodolistResult(parsed);
+      } else if (tool.toolName === "archive_search") {
+        const query = requireNonEmptyStringArg(tool.args.query, "archive_search.query");
+        const cursor = typeof tool.args.cursor === "string" && tool.args.cursor.trim() ? tool.args.cursor.trim() : undefined;
+        const maxHits = parseOptionalPositiveIntegerArg(tool.args.maxHits, "archive_search.maxHits");
+        const maxChars = parseOptionalPositiveIntegerArg(tool.args.maxChars, "archive_search.maxChars");
+        const regex = tool.args.regex === true;
+        result = await this.apiClient.archiveSearch({
+          workspaceId: run.workspaceId,
+          sessionId: run.sessionId,
+          query,
+          cursor,
+          maxHits,
+          maxChars,
+          regex
+        });
+      } else if (tool.toolName === "archive_read") {
+        const file = requireNonEmptyStringArg(tool.args.file, "archive_read.file");
+        const startLine = parseOptionalPositiveIntegerArg(tool.args.startLine, "archive_read.startLine");
+        if (startLine == null) {
+          throw new Error("archive_read.startLine must be an integer >= 1");
+        }
+        const lineCount = parseOptionalPositiveIntegerArg(tool.args.lineCount, "archive_read.lineCount");
+        const maxChars = parseOptionalPositiveIntegerArg(tool.args.maxChars, "archive_read.maxChars");
+        result = await this.apiClient.archiveRead({
+          workspaceId: run.workspaceId,
+          sessionId: run.sessionId,
+          file,
+          startLine,
+          lineCount,
+          maxChars
+        });
+      } else if (tool.toolName === "archive_tail") {
+        const n = parseOptionalPositiveIntegerArg(tool.args.n, "archive_tail.n");
+        if (n == null) {
+          throw new Error("archive_tail.n must be an integer >= 1");
+        }
+        const cursor = typeof tool.args.cursor === "string" && tool.args.cursor.trim() ? tool.args.cursor.trim() : undefined;
+        const maxChars = parseOptionalPositiveIntegerArg(tool.args.maxChars, "archive_tail.maxChars");
+        result = await this.apiClient.archiveTail({
+          workspaceId: run.workspaceId,
+          sessionId: run.sessionId,
+          n,
+          cursor,
+          maxChars
+        });
       } else if (tool.toolName === "subtask") {
         const parsed = parseSubtaskArgs(tool.args);
         const started = await this.apiClient.startSubtaskRun({
@@ -954,6 +1024,76 @@ export class AgentRunner {
       updatedAt: nowMs()
     });
     return { paused: false as const };
+  }
+
+  private shouldAutoCompact(params: {
+    context: PromptContext;
+    runtime: ExecutionProfile["runtime"];
+  }) {
+    const maxContextTokens = Math.max(1, Math.floor(Number(params.runtime.maxContextTokens || 0)));
+    const thresholdPct = Math.max(50, Math.min(90, Math.floor(Number(params.runtime.autoCompactThresholdPct || 80))));
+    const lastTotalTokens = typeof params.context.lastResponseTotalTokens === "number"
+      ? Math.max(0, Math.floor(params.context.lastResponseTotalTokens))
+      : null;
+    if (lastTotalTokens == null) return false;
+    const threshold = Math.floor(maxContextTokens * (thresholdPct / 100));
+    return lastTotalTokens >= threshold;
+  }
+
+  private async compactContext(params: {
+    profile: ExecutionProfile;
+    run: QueuedRun;
+    context: PromptContext;
+    signal: AbortSignal;
+  }) {
+    const { profile, run, context, signal } = params;
+    const expectedHeadItemId = context.headItemId;
+    if (expectedHeadItemId == null) return false;
+
+    const model = createLanguageModel(profile);
+    const runtimeOptions = buildModelRuntimeOptions(profile);
+    const request: Record<string, unknown> = {
+      model,
+      system: context.system || undefined,
+      messages: [...context.messages, { role: "user", content: COMPACTION_USER_PROMPT }],
+      abortSignal: signal
+    };
+    if (Object.keys(runtimeOptions.aiSdk).length > 0) {
+      Object.assign(request, runtimeOptions.aiSdk);
+    }
+    if (Object.keys(runtimeOptions.providerOptions).length > 0) {
+      request.providerOptions = {
+        [runtimeOptions.providerKey]: runtimeOptions.providerOptions
+      };
+    }
+
+    const response = await generateText(request as any);
+    const summaryText = String(response.text || "").trim();
+    if (!summaryText) return false;
+
+    const compacted = await this.apiClient.compactContext({
+      workspaceId: run.workspaceId,
+      sessionId: run.sessionId,
+      runId: run.runId,
+      expectedHeadItemId,
+      summaryText
+    });
+
+    if (!compacted.compacted) {
+      return false;
+    }
+
+    await this.apiClient.updateRunState({
+      workspaceId: run.workspaceId,
+      sessionId: run.sessionId,
+      status: "running",
+      activeRunId: run.runId,
+      activeAssistantItemId: null,
+      waitingToolItemId: null,
+      lastResponseTotalTokens: null,
+      updatedAt: nowMs()
+    });
+    return true;
   }
 
   private async runModelStep(params: {
@@ -1365,6 +1505,18 @@ export class AgentRunner {
             return;
           }
           continue;
+        }
+
+        if (this.shouldAutoCompact({ context, runtime: profile.runtime })) {
+          const compacted = await this.compactContext({
+            profile,
+            run,
+            context,
+            signal
+          });
+          if (compacted || signal.aborted) {
+            continue;
+          }
         }
 
         if (LOOP_MAX_STEPS > 0 && step >= LOOP_MAX_STEPS) {

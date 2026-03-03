@@ -37,6 +37,8 @@ export type ExecutionProfile = {
   runtime: {
     modelIdleTimeoutMs: number;
     modelTotalTimeoutMs: number;
+    maxContextTokens: number;
+    autoCompactThresholdPct: number;
     updatedAt: number;
   };
   agent: {
@@ -44,7 +46,9 @@ export type ExecutionProfile = {
     name: string;
     summary: string;
     prompt: string;
-    tools: Array<"bash" | "read" | "write" | "apply_patch" | "todolist" | "subtask">;
+    tools: Array<
+      "bash" | "read" | "write" | "apply_patch" | "todolist" | "subtask" | "archive_search" | "archive_read" | "archive_tail"
+    >;
     mcpServers: string[];
     permissions: {
       allowRead: boolean;
@@ -88,6 +92,7 @@ export type PromptContext = {
     args: Record<string, unknown>;
     approved?: boolean;
   }>;
+  lastResponseTotalTokens: number | null;
 };
 
 export type AgentMcpSettingsPayload = {
@@ -224,6 +229,80 @@ export class AgentApiClient {
       throw new Error(`get prompt context failed: ${response.status} ${txt}`);
     }
     return (await response.json()) as PromptContext;
+  }
+
+  async compactContext(input: {
+    workspaceId: string;
+    sessionId: string;
+    runId: string;
+    expectedHeadItemId: number | null;
+    summaryText: string;
+  }) {
+    return this.request<{ compacted: boolean; summaryItemId: number | null; archivedCount: number }>(
+      "/api/internal/agent/context/compact",
+      {
+        method: "POST",
+        body: input,
+        conflictAsError: true
+      }
+    );
+  }
+
+  async archiveSearch(input: {
+    workspaceId: string;
+    sessionId: string;
+    query: string;
+    cursor?: string;
+    maxHits?: number;
+    maxChars?: number;
+    regex?: boolean;
+  }) {
+    return this.request<{
+      hits: Array<{ file: string; line: number; preview: string }>;
+      nextCursor: string | null;
+      hasMore: boolean;
+      truncated: boolean;
+    }>("/api/internal/agent/archive/search", {
+      method: "POST",
+      body: input
+    });
+  }
+
+  async archiveRead(input: {
+    workspaceId: string;
+    sessionId: string;
+    file: string;
+    startLine: number;
+    lineCount?: number;
+    maxChars?: number;
+  }) {
+    return this.request<{
+      lines: Array<{ line: number; text: string; truncated: boolean }>;
+      nextStartLine: number | null;
+      hasMore: boolean;
+      truncated: boolean;
+    }>("/api/internal/agent/archive/read", {
+      method: "POST",
+      body: input
+    });
+  }
+
+  async archiveTail(input: {
+    workspaceId: string;
+    sessionId: string;
+    n: number;
+    cursor?: string;
+    maxChars?: number;
+  }) {
+    return this.request<{
+      lines: Array<{ file: string; line: number; text: string }>;
+      nextCursor: string | null;
+      hasMore: boolean;
+      truncated: boolean;
+    }>("/api/internal/agent/archive/tail", {
+      method: "POST",
+      body: input
+    });
   }
 
   async startSubtaskRun(input: {

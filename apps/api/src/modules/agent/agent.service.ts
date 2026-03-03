@@ -1,6 +1,7 @@
 import type { FastifyBaseLogger } from "fastify";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { TextDecoder } from "node:util";
 import type {
   AgentCancelSessionRequest,
@@ -47,7 +48,8 @@ import {
   updateContextItem,
   updateRunRecordStatus,
   updateAgentSessionTitle,
-  updateRunState
+  updateRunState,
+  appendSystemSummaryAndArchiveItems
 } from "./agent.store.js";
 import {
   getAgentGlobalPromptSettings,
@@ -124,6 +126,45 @@ function toolArgsSchema(toolName: AgentContextToolName) {
             }
           }
         }
+      }
+    };
+  }
+  if (toolName === "archive_search") {
+    return {
+      type: "object",
+      required: ["query"],
+      additionalProperties: false,
+      properties: {
+        query: { type: "string", minLength: 1 },
+        cursor: { type: "string", minLength: 1 },
+        maxHits: { type: "number", minimum: 1 },
+        maxChars: { type: "number", minimum: 1 },
+        regex: { type: "boolean" }
+      }
+    };
+  }
+  if (toolName === "archive_read") {
+    return {
+      type: "object",
+      required: ["file", "startLine"],
+      additionalProperties: false,
+      properties: {
+        file: { type: "string", minLength: 1 },
+        startLine: { type: "number", minimum: 1 },
+        lineCount: { type: "number", minimum: 1 },
+        maxChars: { type: "number", minimum: 1 }
+      }
+    };
+  }
+  if (toolName === "archive_tail") {
+    return {
+      type: "object",
+      required: ["n"],
+      additionalProperties: false,
+      properties: {
+        n: { type: "number", minimum: 1 },
+        maxChars: { type: "number", minimum: 1 },
+        cursor: { type: "string", minLength: 1 }
       }
     };
   }
@@ -244,6 +285,15 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
   if (toolName === "todolist") {
     return "这是管理任务进度的强制工具,不是可选项。除极其简单且可一步完成的请求外,必须先用此工具给出任务清单,再开始执行。每次调用都提交完整 todos 数组,语义为全量替换,不是增量 patch。todos 从上到下即优先级,先规划再执行。在任务状态发生变化时必须立即更新清单,包括开始(in_progress),完成(completed),取消(cancelled),回退或新增任务。每项必须包含 content 和 status。content trim 后不能为空。status 仅允许 pending | in_progress | completed | cancelled。允许同时存在多个 in_progress。目标是让用户持续看到清晰、可信、实时的进度窗口,并约束执行过程可追踪,避免无计划推进。";
   }
+  if (toolName === "archive_search") {
+    return "在当前会话归档日志中检索关键词。支持 cursor 继续向更早内容检索。";
+  }
+  if (toolName === "archive_read") {
+    return "读取指定归档日志文件的行窗口,用于查看命中附近上下文。";
+  }
+  if (toolName === "archive_tail") {
+    return "读取归档日志最新 n 行,支持 cursor 继续向更早内容读取。返回顺序为旧到新。";
+  }
   if (toolName === "subtask") return options?.subtaskDescription || "在子会话中执行任务。";
   if (toolName.startsWith("mcp_")) return `调用 MCP 工具 ${toolName}`;
   return "写入工作区内文件并全量覆盖,作为确定性兜底工具,当需要直接重写完整内容或 patch 匹配不稳定时使用。";
@@ -282,6 +332,301 @@ const TERMINAL_RUN_RECORD_STATUS = new Set(["completed", "failed", "cancelled"] 
 
 const WORKSPACE_AGENTS_FILENAME = "AGENTS.md";
 const WORKSPACE_AGENTS_MAX_BYTES = 32 * 1024;
+const ARCHIVE_ROOT_RELATIVE_PATH = path.join(".awb", "agent", "archive");
+const ARCHIVE_FILE_NAME_WIDTH = 8;
+const ARCHIVE_FILE_LINE_LIMIT = 100;
+const ARCHIVE_SEARCH_MAX_HITS_DEFAULT = 30;
+const ARCHIVE_SEARCH_MAX_HITS_MAX = 100;
+const ARCHIVE_SEARCH_MAX_CHARS_DEFAULT = 12_000;
+const ARCHIVE_SEARCH_MAX_CHARS_MAX = 200_000;
+const ARCHIVE_READ_LINE_COUNT_DEFAULT = 80;
+const ARCHIVE_READ_LINE_COUNT_MAX = 300;
+const ARCHIVE_READ_MAX_CHARS_DEFAULT = 20_000;
+const ARCHIVE_READ_MAX_CHARS_MAX = 200_000;
+const ARCHIVE_TAIL_N_DEFAULT = 80;
+const ARCHIVE_TAIL_N_MAX = 500;
+const ARCHIVE_TAIL_MAX_CHARS_DEFAULT = 20_000;
+const ARCHIVE_TAIL_MAX_CHARS_MAX = 200_000;
+const ARCHIVE_FILE_NAME_RE = /^\d{8}\.log$/;
+const ARCHIVABLE_ITEM_STATUS = new Set<AgentContextItemStatus>(["completed", "failed", "denied", "cancelled"]);
+const RUN_STATUS_SYSTEM_TEXT_PREFIX = "[run] ";
+
+type ArchiveCursorPayload = {
+  v: 1;
+  mode: "search" | "tail";
+  fileIndex: number;
+  line: number;
+};
+
+type ArchiveWriteSnapshot = {
+  filePath: string;
+  beforeSize: number;
+  expectedSize: number;
+};
+
+function normalizePositiveInt(raw: unknown, options: { fallback: number; min: number; max: number }) {
+  if (raw === undefined || raw === null || raw === "") return options.fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return options.fallback;
+  const value = Math.floor(n);
+  if (value < options.min) return options.min;
+  if (value > options.max) return options.max;
+  return value;
+}
+
+function sanitizeArchiveText(raw: string) {
+  return String(raw || "").replace(/\r/g, "\\r").replace(/\n/g, "\\n");
+}
+
+function archiveSessionDir(workspacePath: string, sessionId: string) {
+  return path.join(workspacePath, ARCHIVE_ROOT_RELATIVE_PATH, sessionId);
+}
+
+function formatArchiveFileName(seq: number) {
+  return `${String(seq).padStart(ARCHIVE_FILE_NAME_WIDTH, "0")}.log`;
+}
+
+function parseArchiveFileName(name: string) {
+  if (!ARCHIVE_FILE_NAME_RE.test(name)) return null;
+  const n = Number(name.slice(0, ARCHIVE_FILE_NAME_WIDTH));
+  if (!Number.isFinite(n) || n < 1) return null;
+  return n;
+}
+
+function encodeArchiveCursor(payload: ArchiveCursorPayload) {
+  return Buffer.from(JSON.stringify(payload), "utf-8").toString("base64url");
+}
+
+function decodeArchiveCursor(raw: unknown, mode: ArchiveCursorPayload["mode"]): ArchiveCursorPayload | null {
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf-8")) as Partial<ArchiveCursorPayload>;
+    if (parsed.v !== 1) return null;
+    if (parsed.mode !== mode) return null;
+    const fileIndex = Number(parsed.fileIndex);
+    const line = Number(parsed.line);
+    if (!Number.isFinite(fileIndex) || !Number.isInteger(fileIndex) || fileIndex < 0) return null;
+    if (!Number.isFinite(line) || !Number.isInteger(line) || line < 0) return null;
+    return {
+      v: 1,
+      mode,
+      fileIndex,
+      line
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function listArchiveFilesAsc(dirPath: string) {
+  let entries: string[] = [];
+  try {
+    entries = await fs.readdir(dirPath);
+  } catch (err: any) {
+    if (err && err.code === "ENOENT") return [];
+    throw err;
+  }
+  return entries
+    .map((name) => ({ name, seq: parseArchiveFileName(name) }))
+    .filter((item): item is { name: string; seq: number } => item.seq != null)
+    .sort((a, b) => a.seq - b.seq)
+    .map((item) => item.name);
+}
+
+function splitArchiveFileLines(text: string) {
+  if (!text) return [];
+  const lines = text.split(/\r?\n/);
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
+async function appendArchiveLines(params: { workspacePath: string; sessionId: string; lines: string[] }) {
+  if (params.lines.length === 0) return [] as ArchiveWriteSnapshot[];
+  const dirPath = archiveSessionDir(params.workspacePath, params.sessionId);
+  await fs.mkdir(dirPath, { recursive: true });
+  const snapshots = new Map<string, ArchiveWriteSnapshot>();
+
+  const files = await listArchiveFilesAsc(dirPath);
+  let currentSeq = files.length > 0 ? parseArchiveFileName(files[files.length - 1] || "") ?? 1 : 1;
+  let currentName = formatArchiveFileName(currentSeq);
+  let currentPath = path.join(dirPath, currentName);
+  let currentCount = 0;
+
+  try {
+    const content = await fs.readFile(currentPath, "utf-8");
+    currentCount = splitArchiveFileLines(content).length;
+  } catch (err: any) {
+    if (!(err && err.code === "ENOENT")) throw err;
+  }
+
+  let cursor = 0;
+  while (cursor < params.lines.length) {
+    if (currentCount >= ARCHIVE_FILE_LINE_LIMIT) {
+      currentSeq += 1;
+      currentName = formatArchiveFileName(currentSeq);
+      currentPath = path.join(dirPath, currentName);
+      currentCount = 0;
+    }
+    const writable = Math.min(ARCHIVE_FILE_LINE_LIMIT - currentCount, params.lines.length - cursor);
+    const chunk = params.lines.slice(cursor, cursor + writable);
+    if (chunk.length > 0) {
+      let snapshot = snapshots.get(currentPath);
+      if (!snapshot) {
+        let beforeSize = 0;
+        try {
+          const stat = await fs.stat(currentPath);
+          beforeSize = stat.size;
+        } catch (err: any) {
+          if (!(err && err.code === "ENOENT")) throw err;
+        }
+        snapshot = {
+          filePath: currentPath,
+          beforeSize,
+          expectedSize: beforeSize
+        };
+        snapshots.set(currentPath, snapshot);
+      }
+      const payload = `${chunk.join("\n")}\n`;
+      await fs.appendFile(currentPath, payload, "utf-8");
+      snapshot.expectedSize += Buffer.byteLength(payload, "utf-8");
+      currentCount += chunk.length;
+      cursor += chunk.length;
+    }
+  }
+
+  return Array.from(snapshots.values());
+}
+
+async function rollbackArchiveLinesBestEffort(snapshots: ArchiveWriteSnapshot[]) {
+  let reverted = 0;
+  let skipped = 0;
+  for (let i = snapshots.length - 1; i >= 0; i -= 1) {
+    const snapshot = snapshots[i];
+    if (!snapshot) continue;
+    try {
+      const stat = await fs.stat(snapshot.filePath);
+      if (stat.size !== snapshot.expectedSize) {
+        skipped += 1;
+        continue;
+      }
+      await fs.truncate(snapshot.filePath, snapshot.beforeSize);
+      reverted += 1;
+    } catch (err: any) {
+      if (err && err.code === "ENOENT") continue;
+      skipped += 1;
+    }
+  }
+
+  return { reverted, skipped };
+}
+
+async function hasMoreArchiveSearchHits(params: {
+  dirPath: string;
+  files: string[];
+  query: string;
+  regex: boolean;
+  cursor: ArchiveCursorPayload;
+}) {
+  let fileIndex = params.cursor.fileIndex;
+  let lineCursor = params.cursor.line;
+  if (fileIndex >= params.files.length) {
+    fileIndex = params.files.length - 1;
+    lineCursor = Number.MAX_SAFE_INTEGER;
+  }
+
+  for (let i = fileIndex; i >= 0; i -= 1) {
+    const fileName = params.files[i] || "";
+    if (!fileName) continue;
+    const filePath = path.join(params.dirPath, fileName);
+    const matches = await rgSearchInFile({
+      filePath,
+      query: params.query,
+      regex: params.regex
+    });
+    const upperExclusive = i === fileIndex ? Math.max(0, lineCursor) : Number.MAX_SAFE_INTEGER;
+    for (const match of matches) {
+      if (match.line >= upperExclusive) continue;
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function shouldIncludeSystemTextInPrompt(text: string) {
+  const normalized = String(text || "").trim();
+  if (!normalized) return false;
+  return !normalized.startsWith(RUN_STATUS_SYSTEM_TEXT_PREFIX);
+}
+
+async function rgSearchInFile(params: {
+  filePath: string;
+  query: string;
+  regex: boolean;
+}) {
+  return await new Promise<Array<{ line: number; preview: string }>>((resolve, reject) => {
+    const args = [
+      "-n",
+      "--no-heading",
+      "--color",
+      "never",
+      "--max-columns",
+      "20000",
+      "--max-columns-preview",
+      "-i"
+    ];
+    if (!params.regex) args.push("-F");
+    args.push("--", params.query, params.filePath);
+
+    const child = spawn("rg", args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk || "");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk || "");
+    });
+    child.on("error", (err) => reject(err));
+    child.on("close", (code) => {
+      if (code !== 0 && code !== 1) {
+        const message = String(stderr || "").trim() || `rg exit code ${String(code)}`;
+        reject(new Error(message));
+        return;
+      }
+      if (code === 1 || !stdout.trim()) {
+        resolve([]);
+        return;
+      }
+      const out: Array<{ line: number; preview: string }> = [];
+      for (const raw of stdout.split(/\r?\n/)) {
+        if (!raw) continue;
+        const idx = raw.indexOf(":");
+        if (idx <= 0) continue;
+        const line = Number(raw.slice(0, idx));
+        if (!Number.isFinite(line) || line < 1) continue;
+        out.push({ line, preview: raw.slice(idx + 1) });
+      }
+      resolve(out);
+    });
+  });
+}
+
+function buildArchiveLine(item: AgentContextItemRecord) {
+  let text = "";
+  if (item.kind === "user" && item.output.type === "user_text") text = item.output.text || "";
+  else if (item.kind === "assistant" && item.output.type === "assistant_text") text = item.output.text || "";
+  else if (item.kind === "system" && item.output.type === "system_text") text = item.output.text || "";
+  else if (item.kind === "tool" && item.output.type === "tool") {
+    if (typeof item.output.error === "string" && item.output.error.trim()) {
+      text = `[error] ${item.output.error}`;
+    } else {
+      text = stringifyToolResult(item.output.result);
+    }
+  }
+  const toolName = item.kind === "tool" && item.output.type === "tool" ? String(item.output.toolName || "-") : "-";
+  return `item=${item.id} ts=${item.createdAt} kind=${item.kind} status=${item.status} tool=${toolName} | ${sanitizeArchiveText(text)}`;
+}
 
 type PromptTextPart = { type: "text"; text: string };
 type PromptToolCallPart = {
@@ -1196,6 +1541,404 @@ export class AgentService {
     return getAgentMcpSettings(this.ctx);
   }
 
+  async compactContextFromWorker(params: {
+    workspaceId: string;
+    sessionId: string;
+    runId: string;
+    expectedHeadItemId: number | null;
+    summaryText: string;
+  }) {
+    const session = getAgentSession(this.ctx.db, params.sessionId);
+    if (!session) throw new HttpError(404, "session not found");
+    if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
+    const run = getRunRecord(this.ctx.db, params.runId);
+    if (!run || run.workspaceId !== params.workspaceId || run.sessionId !== params.sessionId) {
+      throw new HttpError(404, "run not found");
+    }
+    if (session.headItemId !== params.expectedHeadItemId) {
+      throw new HttpError(409, "session head conflict");
+    }
+
+    const summaryText = String(params.summaryText || "").trim();
+    if (!summaryText) {
+      throw new HttpError(400, "summaryText is required", "AGENT_COMPACTION_SUMMARY_REQUIRED");
+    }
+
+    const visible = getSessionVisibleItems(this.ctx.db, params.workspaceId, params.sessionId);
+    if (visible.length === 0) {
+      return {
+        compacted: false,
+        summaryItemId: null,
+        archivedCount: 0
+      };
+    }
+    const nonTerminal = visible.filter((item) => !ARCHIVABLE_ITEM_STATUS.has(item.status));
+    if (nonTerminal.length > 0) {
+      return {
+        compacted: false,
+        summaryItemId: null,
+        archivedCount: 0
+      };
+    }
+
+    const workspace = this.ensureWorkspace(params.workspaceId);
+    const createdAt = nowMs();
+    const archiveLines = visible.map((item) => buildArchiveLine(item));
+    const archiveSnapshots = await appendArchiveLines({
+      workspacePath: workspace.path,
+      sessionId: session.id,
+      lines: archiveLines
+    });
+
+    const archiveAt = nowMs();
+    let summaryItemId: number | null = null;
+    let archivedCount = 0;
+    try {
+      const applied = appendSystemSummaryAndArchiveItems(this.ctx.db, {
+        workspaceId: params.workspaceId,
+        sessionId: params.sessionId,
+        runId: params.runId,
+        expectedHeadItemId: params.expectedHeadItemId,
+        summaryText,
+        summaryCreatedAt: createdAt,
+        archiveItemIds: visible.map((item) => item.id),
+        archiveAt
+      });
+      summaryItemId = applied.summaryItemId;
+      archivedCount = applied.archivedCount;
+    } catch (err) {
+      const rollback = await rollbackArchiveLinesBestEffort(archiveSnapshots);
+      if (rollback.skipped > 0) {
+        this.logger.warn(
+          {
+            sessionId: session.id,
+            runId: params.runId,
+            revertedFiles: rollback.reverted,
+            skippedFiles: rollback.skipped
+          },
+          "archive rollback had skipped files after compaction db failure"
+        );
+      }
+      if (err instanceof AgentConflictError) throw conflictToHttpError(err);
+      throw err;
+    }
+
+    const state = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
+    if (state.activeRunId === params.runId) {
+      updateRunState(this.ctx.db, {
+        workspaceId: params.workspaceId,
+        sessionId: params.sessionId,
+        status: state.status,
+        activeRunId: state.activeRunId,
+        activeAssistantItemId: state.activeAssistantItemId,
+        waitingToolItemId: state.waitingToolItemId,
+        lastResponseTotalTokens: null,
+        updatedAt: archiveAt,
+        appliedItemId: getLatestSessionItemId(this.ctx.db, params.workspaceId, params.sessionId)
+      });
+    }
+
+    return {
+      compacted: true,
+      summaryItemId,
+      archivedCount
+    };
+  }
+
+  async archiveSearchFromWorker(params: {
+    workspaceId: string;
+    sessionId: string;
+    query: string;
+    cursor?: string;
+    maxHits?: number;
+    maxChars?: number;
+    regex?: boolean;
+  }) {
+    const session = getAgentSession(this.ctx.db, params.sessionId);
+    if (!session) throw new HttpError(404, "session not found");
+    if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
+    const workspace = this.ensureWorkspace(params.workspaceId);
+    const query = String(params.query || "").trim();
+    if (!query) {
+      throw new HttpError(400, "query is required", "AGENT_ARCHIVE_QUERY_REQUIRED");
+    }
+
+    const maxHits = normalizePositiveInt(params.maxHits, {
+      fallback: ARCHIVE_SEARCH_MAX_HITS_DEFAULT,
+      min: 1,
+      max: ARCHIVE_SEARCH_MAX_HITS_MAX
+    });
+    const maxChars = normalizePositiveInt(params.maxChars, {
+      fallback: ARCHIVE_SEARCH_MAX_CHARS_DEFAULT,
+      min: 1,
+      max: ARCHIVE_SEARCH_MAX_CHARS_MAX
+    });
+
+    const dirPath = archiveSessionDir(workspace.path, session.id);
+    const files = await listArchiveFilesAsc(dirPath);
+    if (files.length === 0) {
+      return {
+        hits: [] as Array<{ file: string; line: number; preview: string }>,
+        nextCursor: null as string | null,
+        hasMore: false,
+        truncated: false
+      };
+    }
+
+    const cursor = decodeArchiveCursor(params.cursor, "search");
+    let fileIndex = files.length - 1;
+    let lineCursor = Number.MAX_SAFE_INTEGER;
+    if (cursor && cursor.fileIndex < files.length) {
+      fileIndex = cursor.fileIndex;
+      lineCursor = Math.max(0, cursor.line);
+    }
+
+    const hits: Array<{ file: string; line: number; preview: string }> = [];
+    let chars = 0;
+    let nextCursorPayload: ArchiveCursorPayload | null = null;
+
+    outer: for (let i = fileIndex; i >= 0; i -= 1) {
+      const fileName = files[i] || "";
+      if (!fileName) continue;
+      const filePath = path.join(dirPath, fileName);
+      let matches: Array<{ line: number; preview: string }> = [];
+      try {
+        matches = await rgSearchInFile({
+          filePath,
+          query,
+          regex: params.regex === true
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new HttpError(400, `archive search failed: ${message}`, "AGENT_ARCHIVE_SEARCH_FAILED");
+      }
+
+      matches.sort((a, b) => b.line - a.line);
+
+      let upperExclusive = i === fileIndex ? lineCursor : Number.MAX_SAFE_INTEGER;
+      let lastReturnedLine = upperExclusive;
+      for (const match of matches) {
+        if (match.line >= upperExclusive) continue;
+        if (hits.length >= maxHits) {
+          nextCursorPayload = { v: 1, mode: "search", fileIndex: i, line: lastReturnedLine };
+          break outer;
+        }
+
+        let preview = String(match.preview || "");
+        const remain = maxChars - chars;
+        if (remain <= 0) {
+          nextCursorPayload = { v: 1, mode: "search", fileIndex: i, line: lastReturnedLine };
+          break outer;
+        }
+        if (preview.length > remain) {
+          preview = preview.slice(0, remain);
+        }
+
+        hits.push({ file: fileName, line: match.line, preview });
+        chars += preview.length;
+        lastReturnedLine = match.line;
+        upperExclusive = match.line;
+
+        if (hits.length >= maxHits || chars >= maxChars) {
+          nextCursorPayload = { v: 1, mode: "search", fileIndex: i, line: lastReturnedLine };
+          break outer;
+        }
+      }
+    }
+
+    if (nextCursorPayload) {
+      let hasMore = false;
+      try {
+        hasMore = await hasMoreArchiveSearchHits({
+          dirPath,
+          files,
+          query,
+          regex: params.regex === true,
+          cursor: nextCursorPayload
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new HttpError(400, `archive search failed: ${message}`, "AGENT_ARCHIVE_SEARCH_FAILED");
+      }
+      if (!hasMore) {
+        nextCursorPayload = null;
+      }
+    }
+
+    const nextCursor = nextCursorPayload ? encodeArchiveCursor(nextCursorPayload) : null;
+
+    return {
+      hits,
+      nextCursor,
+      hasMore: nextCursor != null,
+      truncated: nextCursor != null
+    };
+  }
+
+  async archiveReadFromWorker(params: {
+    workspaceId: string;
+    sessionId: string;
+    file: string;
+    startLine: number;
+    lineCount?: number;
+    maxChars?: number;
+  }) {
+    const session = getAgentSession(this.ctx.db, params.sessionId);
+    if (!session) throw new HttpError(404, "session not found");
+    if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
+    const workspace = this.ensureWorkspace(params.workspaceId);
+
+    const fileName = String(params.file || "").trim();
+    if (!ARCHIVE_FILE_NAME_RE.test(fileName)) {
+      throw new HttpError(400, "invalid archive file", "AGENT_ARCHIVE_FILE_INVALID");
+    }
+
+    const startLine = normalizePositiveInt(params.startLine, { fallback: 1, min: 1, max: Number.MAX_SAFE_INTEGER });
+    const lineCount = normalizePositiveInt(params.lineCount, {
+      fallback: ARCHIVE_READ_LINE_COUNT_DEFAULT,
+      min: 1,
+      max: ARCHIVE_READ_LINE_COUNT_MAX
+    });
+    const maxChars = normalizePositiveInt(params.maxChars, {
+      fallback: ARCHIVE_READ_MAX_CHARS_DEFAULT,
+      min: 1,
+      max: ARCHIVE_READ_MAX_CHARS_MAX
+    });
+
+    const filePath = path.join(archiveSessionDir(workspace.path, session.id), fileName);
+    let content = "";
+    try {
+      content = await fs.readFile(filePath, "utf-8");
+    } catch (err: any) {
+      if (err && err.code === "ENOENT") {
+        throw new HttpError(404, "archive file not found", "AGENT_ARCHIVE_FILE_NOT_FOUND");
+      }
+      throw err;
+    }
+
+    const allLines = splitArchiveFileLines(content);
+    const lines: Array<{ line: number; text: string; truncated: boolean }> = [];
+    let chars = 0;
+    let truncated = false;
+    for (let line = startLine; line <= allLines.length && lines.length < lineCount; line += 1) {
+      const raw = String(allLines[line - 1] || "");
+      const remain = maxChars - chars;
+      if (remain <= 0) {
+        truncated = true;
+        break;
+      }
+      let text = raw;
+      let lineTruncated = false;
+      if (text.length > remain) {
+        text = text.slice(0, remain);
+        lineTruncated = true;
+      }
+      lines.push({ line, text, truncated: lineTruncated });
+      chars += text.length;
+      if (lineTruncated) {
+        truncated = true;
+        break;
+      }
+    }
+
+    const consumedTo = lines.length > 0 ? (lines[lines.length - 1]?.line ?? startLine - 1) : startLine - 1;
+    const hasMore = truncated || consumedTo < allLines.length;
+    return {
+      lines,
+      nextStartLine: hasMore ? consumedTo + 1 : null,
+      hasMore,
+      truncated
+    };
+  }
+
+  async archiveTailFromWorker(params: {
+    workspaceId: string;
+    sessionId: string;
+    n: number;
+    cursor?: string;
+    maxChars?: number;
+  }) {
+    const session = getAgentSession(this.ctx.db, params.sessionId);
+    if (!session) throw new HttpError(404, "session not found");
+    if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
+    const workspace = this.ensureWorkspace(params.workspaceId);
+
+    const n = normalizePositiveInt(params.n, {
+      fallback: ARCHIVE_TAIL_N_DEFAULT,
+      min: 1,
+      max: ARCHIVE_TAIL_N_MAX
+    });
+    const maxChars = normalizePositiveInt(params.maxChars, {
+      fallback: ARCHIVE_TAIL_MAX_CHARS_DEFAULT,
+      min: 1,
+      max: ARCHIVE_TAIL_MAX_CHARS_MAX
+    });
+
+    const dirPath = archiveSessionDir(workspace.path, session.id);
+    const files = await listArchiveFilesAsc(dirPath);
+    if (files.length === 0) {
+      return {
+        lines: [] as Array<{ file: string; line: number; text: string }>,
+        nextCursor: null as string | null,
+        hasMore: false,
+        truncated: false
+      };
+    }
+
+    const cursor = decodeArchiveCursor(params.cursor, "tail");
+    let fileIndex = files.length - 1;
+    let lineLimitExclusive = Number.MAX_SAFE_INTEGER;
+    if (cursor && cursor.fileIndex < files.length) {
+      fileIndex = cursor.fileIndex;
+      lineLimitExclusive = cursor.line;
+    }
+
+    const newestFirst: Array<{ file: string; line: number; text: string }> = [];
+    let chars = 0;
+    let nextCursor: string | null = null;
+
+    outer: for (let i = fileIndex; i >= 0; i -= 1) {
+      const fileName = files[i] || "";
+      if (!fileName) continue;
+      const filePath = path.join(dirPath, fileName);
+      const content = await fs.readFile(filePath, "utf-8").catch((err: any) => {
+        if (err && err.code === "ENOENT") return "";
+        throw err;
+      });
+      const lines = splitArchiveFileLines(content);
+      const upper = i === fileIndex ? Math.min(lines.length, Math.max(0, lineLimitExclusive - 1)) : lines.length;
+      for (let lineNo = upper; lineNo >= 1; lineNo -= 1) {
+        if (newestFirst.length >= n) {
+          nextCursor = encodeArchiveCursor({ v: 1, mode: "tail", fileIndex: i, line: lineNo + 1 });
+          break outer;
+        }
+        const raw = String(lines[lineNo - 1] || "");
+        const remain = maxChars - chars;
+        if (remain <= 0) {
+          nextCursor = encodeArchiveCursor({ v: 1, mode: "tail", fileIndex: i, line: lineNo + 1 });
+          break outer;
+        }
+        let text = raw;
+        if (text.length > remain) {
+          text = text.slice(0, remain);
+          newestFirst.push({ file: fileName, line: lineNo, text });
+          chars += text.length;
+          nextCursor = encodeArchiveCursor({ v: 1, mode: "tail", fileIndex: i, line: lineNo });
+          break outer;
+        }
+        newestFirst.push({ file: fileName, line: lineNo, text });
+        chars += text.length;
+      }
+    }
+
+    return {
+      lines: newestFirst.reverse(),
+      nextCursor,
+      hasMore: nextCursor != null,
+      truncated: nextCursor != null
+    };
+  }
+
   async getPromptContextForRun(params: { workspaceId: string; sessionId: string; runId: string }) {
     const session = getAgentSession(this.ctx.db, params.sessionId);
     if (!session) throw new HttpError(404, "session not found");
@@ -1231,6 +1974,12 @@ export class AgentService {
       if (item.kind === "user" && item.output.type === "user_text") {
         if (!item.output.text) continue;
         messages.push({ role: "user", content: item.output.text });
+        continue;
+      }
+
+      if (item.kind === "system" && item.output.type === "system_text" && item.status === "completed") {
+        if (!shouldIncludeSystemTextInPrompt(item.output.text)) continue;
+        messages.push({ role: "system", content: item.output.text });
         continue;
       }
 
@@ -1355,12 +2104,14 @@ export class AgentService {
         approved: boolean;
       } => item !== null);
 
+    const runState = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
     return {
       headItemId: session.headItemId,
       system,
       messages,
       tools,
-      pendingTools
+      pendingTools,
+      lastResponseTotalTokens: runState.lastResponseTotalTokens
     };
   }
 

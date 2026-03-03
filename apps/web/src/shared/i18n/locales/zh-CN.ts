@@ -887,7 +887,10 @@ export default {
         write: "Write",
         applyPatch: "Apply Patch",
         todolist: "Todo List",
-        subtask: "Subtask"
+        subtask: "Subtask",
+        archiveSearch: "Archive Search",
+        archiveRead: "Archive Read",
+        archiveTail: "Archive Tail"
       },
       permissions: {
         allowRead: "允许 Read",
@@ -941,6 +944,14 @@ export default {
       saving: "正在保存...",
       saved: "已保存",
       fields: {
+        maxContextTokens: {
+          label: "上下文最大 Token",
+          help: "用于自动压缩阈值计算的上下文上限。必须为正整数。"
+        },
+        autoCompactThresholdPct: {
+          label: "自动压缩阈值(%)",
+          help: "当最近一次模型响应总 token 达到 maxContextTokens * 阈值/100 时触发自动压缩。范围 50-90。"
+        },
         modelTotalTimeoutMs: {
           label: "模型总超时（秒）",
           help: "单次模型请求的总超时时间。达到后将中止该次请求并标记为失败。支持小数秒,0 表示关闭。"

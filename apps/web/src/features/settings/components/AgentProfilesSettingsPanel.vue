@@ -224,7 +224,17 @@ type EditingAgent = {
 const GLOBAL_DEFAULT_MODEL_PATH = "__global__";
 const AGENT_PROMPT_MAX_BYTES = 32 * 1024;
 
-const DEFAULT_TOOLS: AgentToolName[] = ["bash", "read", "write", "apply_patch", "todolist", "subtask"];
+const DEFAULT_TOOLS: AgentToolName[] = [
+  "bash",
+  "read",
+  "write",
+  "apply_patch",
+  "todolist",
+  "subtask",
+  "archive_search",
+  "archive_read",
+  "archive_tail"
+];
 
 const toolOptions = computed(() => [
   { label: t("settings.agentProfiles.tools.bash"), value: "bash" },
@@ -232,7 +242,10 @@ const toolOptions = computed(() => [
   { label: t("settings.agentProfiles.tools.write"), value: "write" },
   { label: t("settings.agentProfiles.tools.applyPatch"), value: "apply_patch" },
   { label: t("settings.agentProfiles.tools.todolist"), value: "todolist" },
-  { label: t("settings.agentProfiles.tools.subtask"), value: "subtask" }
+  { label: t("settings.agentProfiles.tools.subtask"), value: "subtask" },
+  { label: t("settings.agentProfiles.tools.archiveSearch"), value: "archive_search" },
+  { label: t("settings.agentProfiles.tools.archiveRead"), value: "archive_read" },
+  { label: t("settings.agentProfiles.tools.archiveTail"), value: "archive_tail" }
 ]);
 
 const loading = ref(false);
@@ -322,7 +335,10 @@ function normalizeTools(raw: AgentToolName[]) {
       item !== "write" &&
       item !== "apply_patch" &&
       item !== "todolist" &&
-      item !== "subtask"
+      item !== "subtask" &&
+      item !== "archive_search" &&
+      item !== "archive_read" &&
+      item !== "archive_tail"
     ) continue;
     if (seen.has(item)) continue;
     seen.add(item);
@@ -428,7 +444,10 @@ function toolLabel(tool: AgentToolName) {
   if (tool === "write") return t("settings.agentProfiles.tools.write");
   if (tool === "apply_patch") return t("settings.agentProfiles.tools.applyPatch");
   if (tool === "todolist") return t("settings.agentProfiles.tools.todolist");
-  return t("settings.agentProfiles.tools.subtask");
+  if (tool === "subtask") return t("settings.agentProfiles.tools.subtask");
+  if (tool === "archive_search") return t("settings.agentProfiles.tools.archiveSearch");
+  if (tool === "archive_read") return t("settings.agentProfiles.tools.archiveRead");
+  return t("settings.agentProfiles.tools.archiveTail");
 }
 
 function globalPromptLabel(id: string) {

@@ -298,6 +298,135 @@ async function getPromptContextInternal(params: {
   };
 }
 
+async function compactContextInternal(params: {
+  app: FastifyInstance;
+  internalToken: string;
+  workspaceId: string;
+  sessionId: string;
+  runId: string;
+  expectedHeadItemId: number | null;
+  summaryText: string;
+}) {
+  const res = await params.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/context/compact",
+    headers: {
+      "x-awb-agent-internal-token": params.internalToken
+    },
+    payload: {
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+      runId: params.runId,
+      expectedHeadItemId: params.expectedHeadItemId,
+      summaryText: params.summaryText
+    }
+  });
+  assert.equal(res.statusCode, 200, `compact context failed: ${res.body}`);
+  return res.json() as { compacted: boolean; summaryItemId: number | null; archivedCount: number };
+}
+
+async function archiveSearchInternal(params: {
+  app: FastifyInstance;
+  internalToken: string;
+  workspaceId: string;
+  sessionId: string;
+  query: string;
+  cursor?: string;
+  maxHits?: number;
+  maxChars?: number;
+  regex?: boolean;
+}) {
+  const res = await params.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/archive/search",
+    headers: {
+      "x-awb-agent-internal-token": params.internalToken
+    },
+    payload: {
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+      query: params.query,
+      ...(params.cursor ? { cursor: params.cursor } : {}),
+      ...(params.maxHits ? { maxHits: params.maxHits } : {}),
+      ...(params.maxChars ? { maxChars: params.maxChars } : {}),
+      ...(params.regex === true ? { regex: true } : {})
+    }
+  });
+  assert.equal(res.statusCode, 200, `archive search failed: ${res.body}`);
+  return res.json() as {
+    hits: Array<{ file: string; line: number; preview: string }>;
+    nextCursor: string | null;
+    hasMore: boolean;
+    truncated: boolean;
+  };
+}
+
+async function archiveReadInternal(params: {
+  app: FastifyInstance;
+  internalToken: string;
+  workspaceId: string;
+  sessionId: string;
+  file: string;
+  startLine: number;
+  lineCount?: number;
+  maxChars?: number;
+}) {
+  const res = await params.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/archive/read",
+    headers: {
+      "x-awb-agent-internal-token": params.internalToken
+    },
+    payload: {
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+      file: params.file,
+      startLine: params.startLine,
+      ...(params.lineCount ? { lineCount: params.lineCount } : {}),
+      ...(params.maxChars ? { maxChars: params.maxChars } : {})
+    }
+  });
+  assert.equal(res.statusCode, 200, `archive read failed: ${res.body}`);
+  return res.json() as {
+    lines: Array<{ line: number; text: string; truncated: boolean }>;
+    nextStartLine: number | null;
+    hasMore: boolean;
+    truncated: boolean;
+  };
+}
+
+async function archiveTailInternal(params: {
+  app: FastifyInstance;
+  internalToken: string;
+  workspaceId: string;
+  sessionId: string;
+  n: number;
+  cursor?: string;
+  maxChars?: number;
+}) {
+  const res = await params.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/archive/tail",
+    headers: {
+      "x-awb-agent-internal-token": params.internalToken
+    },
+    payload: {
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+      n: params.n,
+      ...(params.cursor ? { cursor: params.cursor } : {}),
+      ...(params.maxChars ? { maxChars: params.maxChars } : {})
+    }
+  });
+  assert.equal(res.statusCode, 200, `archive tail failed: ${res.body}`);
+  return res.json() as {
+    lines: Array<{ file: string; line: number; text: string }>;
+    nextCursor: string | null;
+    hasMore: boolean;
+    truncated: boolean;
+  };
+}
+
 test("agent 消息去重与上下文项追加", async () => {
   const fixture = await createFixture();
   const session = await createSession(fixture.app, fixture.workspaceId);
@@ -605,6 +734,211 @@ test("agent runtime settings 可通过 execution-profile 下发", async () => {
   const profile = profileRes.json() as any;
   assert.equal(profile.runtime?.modelIdleTimeoutMs, 1234);
   assert.equal(profile.runtime?.modelTotalTimeoutMs, 5678);
+  assert.equal(typeof profile.runtime?.maxContextTokens, "number");
+  assert.equal(typeof profile.runtime?.autoCompactThresholdPct, "number");
+});
+
+test("agent context 压缩后会归档并支持 archive_search/read/tail", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_archive_1",
+    step: 1,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "历史问题: 请整理最近的变更"
+    }
+  });
+
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_archive_1",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: {
+      type: "assistant_text",
+      text: "已完成: 新增归档与压缩方案草稿"
+    }
+  });
+
+  const compact = await compactContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    expectedHeadItemId: assistantItem.item.id,
+    summaryText: "压缩摘要: 已归档旧上下文,后续从本摘要继续。"
+  });
+  assert.equal(compact.compacted, true);
+  assert.equal(compact.archivedCount, 2);
+  assert.ok((compact.summaryItemId ?? 0) > 0);
+
+  const context = await getContextItems(fixture.app, session.id);
+  assert.equal(context.items.length, 1, "archived items should be hidden from visible context");
+  assert.equal(context.items[0]?.kind, "system");
+  assert.ok(String(context.items[0]?.output?.text || "").includes("压缩摘要"));
+
+  const promptContext = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+  const compactSummaryMessage = promptContext.messages.find(
+    (item) => item.role === "system" && String(item.content || "").includes("压缩摘要")
+  );
+  assert.ok(compactSummaryMessage, "compaction summary should participate in prompt messages");
+
+  const archiveFilePath = path.join(fixture.workspacePath, ".awb", "agent", "archive", session.id, "00000001.log");
+  const archiveContent = await fs.readFile(archiveFilePath, "utf-8");
+  assert.ok(archiveContent.includes("历史问题"));
+  assert.ok(archiveContent.includes("新增归档与压缩方案草稿"));
+
+  const search = await archiveSearchInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    query: "归档"
+  });
+  assert.ok(search.hits.length >= 1);
+  assert.equal(search.hits[0]?.file, "00000001.log");
+
+  const searchPage1 = await archiveSearchInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    query: "item=",
+    maxHits: 1
+  });
+  assert.equal(searchPage1.hits.length, 1);
+  assert.equal(searchPage1.hasMore, true);
+  const searchPage2 = await archiveSearchInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    query: "item=",
+    maxHits: 1,
+    cursor: String(searchPage1.nextCursor)
+  });
+  assert.equal(searchPage2.hits.length, 1);
+  assert.ok((searchPage2.hits[0]?.line ?? 0) < (searchPage1.hits[0]?.line ?? 0), "search cursor should continue to older lines");
+  assert.equal(searchPage2.hasMore, false, "last search page should not claim more data");
+  assert.equal(searchPage2.nextCursor, null);
+
+  const optionLikeQuery = await archiveSearchInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    query: "--glob"
+  });
+  assert.equal(Array.isArray(optionLikeQuery.hits), true);
+
+  const read = await archiveReadInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    file: "00000001.log",
+    startLine: 1,
+    lineCount: 5
+  });
+  assert.ok(read.lines.length >= 2);
+
+  const tailFirst = await archiveTailInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    n: 1
+  });
+  assert.equal(tailFirst.lines.length, 1);
+  assert.equal(tailFirst.hasMore, true);
+  assert.ok(typeof tailFirst.nextCursor === "string" && tailFirst.nextCursor.length > 0);
+
+  const tailSecond = await archiveTailInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    n: 1,
+    cursor: String(tailFirst.nextCursor)
+  });
+  assert.equal(tailSecond.lines.length, 1);
+
+  const tailTwo = await archiveTailInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    n: 2
+  });
+  assert.equal(tailTwo.lines.length, 2);
+  assert.ok((tailTwo.lines[0]?.line ?? 0) < (tailTwo.lines[1]?.line ?? 0), "tail should return old->new order");
+  assert.equal(tailTwo.hasMore, false);
+
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: compact.summaryItemId,
+    kind: "system",
+    status: "completed",
+    output: {
+      type: "system_text",
+      text: "[run] max steps exceeded"
+    }
+  });
+
+  const promptContextAfterRunSystem = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+  const leakedRunSystemMessage = promptContextAfterRunSystem.messages.find(
+    (item) => item.role === "system" && String(item.content || "").includes("[run] max steps exceeded")
+  );
+  assert.equal(leakedRunSystemMessage, undefined, "runtime run-status system text should not leak into model prompt");
 });
 
 test("agent prompt-context 使用结构化 tool-call/tool-result 消息", async () => {
