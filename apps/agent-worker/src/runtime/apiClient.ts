@@ -299,6 +299,7 @@ export class AgentApiClient {
     beforePos?: number;
     maxHits?: number;
     maxChars?: number;
+    snippet?: boolean;
     regex?: boolean;
   }) {
     const res = await this.request<{ text: string }>("/api/internal/agent/archive/search", {

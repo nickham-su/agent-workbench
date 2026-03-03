@@ -140,6 +140,7 @@ function toolArgsSchema(toolName: AgentContextToolName) {
         beforePos: { type: "integer", minimum: 2 },
         maxHits: { type: "integer", minimum: 1, maximum: 100 },
         maxChars: { type: "integer", minimum: 1000, maximum: 10000 },
+        snippet: { type: "boolean" },
         regex: { type: "boolean" }
       }
     };
@@ -274,7 +275,14 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
     return "这是管理任务进度的强制工具,不是可选项。除极其简单且可一步完成的请求外,必须先用此工具给出任务清单,再开始执行。每次调用都提交完整 todos 数组,语义为全量替换,不是增量 patch。todos 从上到下即优先级,先规划再执行。在任务状态发生变化时必须立即更新清单,包括开始(in_progress),完成(completed),取消(cancelled),回退或新增任务。每项必须包含 content 和 status。content trim 后不能为空。status 仅允许 pending | in_progress | completed | cancelled。允许同时存在多个 in_progress。目标是让用户持续看到清晰、可信、实时的进度窗口,并约束执行过程可追踪,避免无计划推进。";
   }
   if (toolName === "archive_search") {
-    return "在当前会话归档日志中检索关键词,输出按旧到新排序的纯文本行,每行包含 pos 前缀。可通过 beforePos 继续读取更旧命中。";
+    return (
+      "在当前会话归档日志中检索关键词,输出按旧到新排序的纯文本行,每行包含 pos 前缀。" +
+      "默认返回整行;传 snippet=true 时返回命中窗口片段。" +
+      "可通过 beforePos 继续读取更旧命中。" +
+      "提示: 你也可以直接搜索归档元数据字段来过滤,例如 kind/status/tool/item/ts。" +
+      "示例(整行,找最近5条用户或assistant消息): {\"query\":\"kind=(user|assistant)\",\"regex\":true,\"maxHits\":5}" +
+      "示例(关键词命中多时先限制并可翻页): {\"query\":\"timeout\",\"snippet\":true,\"maxHits\":10,\"maxChars\":3000} 然后用 beforePos=<pos> 翻页。"
+    );
   }
   if (toolName === "archive_read") {
     return "读取归档日志中的最近若干行,输出按旧到新排序的纯文本行,每行包含 pos 前缀。可通过 beforePos 限定只读更旧内容。";
@@ -325,6 +333,10 @@ const ARCHIVE_SEARCH_MAX_HITS_MAX = 100;
 const ARCHIVE_MAX_CHARS_DEFAULT = 8_000;
 const ARCHIVE_MAX_CHARS_MIN = 1_000;
 const ARCHIVE_MAX_CHARS_MAX = 10_000;
+const ARCHIVE_SEARCH_SNIPPET_CTX_CHARS = 40;
+const ARCHIVE_SEARCH_SNIPPET_MERGE_GAP_CHARS = 12;
+const ARCHIVE_SEARCH_SNIPPET_MAX_WINDOWS_PER_LINE = 5;
+const ARCHIVE_SEARCH_SNIPPET_FALLBACK_CHARS = 100;
 const ARCHIVE_READ_LINE_COUNT_DEFAULT = 40;
 const ARCHIVE_READ_LINE_COUNT_MAX = 200;
 const ARCHIVE_FILE_NAME_RE = /^\d{8}\.log$/;
@@ -542,12 +554,131 @@ function shouldIncludeSystemTextInPrompt(text: string) {
   return !normalized.startsWith(RUN_STATUS_SYSTEM_TEXT_PREFIX);
 }
 
+type ArchiveSearchLineMatch = {
+  line: number;
+  text: string;
+};
+
+type ArchiveSearchLineMatchWithOffsets = ArchiveSearchLineMatch & {
+  submatches: Array<{ start: number; end: number }>;
+};
+
+function trimTrailingLineEnding(text: string) {
+  if (text.endsWith("\r\n")) return text.slice(0, -2);
+  if (text.endsWith("\n")) return text.slice(0, -1);
+  return text;
+}
+
+function textFromRgJsonField(raw: unknown) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return "";
+  const field = raw as Record<string, unknown>;
+  if (typeof field.text === "string") return field.text;
+  if (typeof field.bytes === "string") {
+    try {
+      return Buffer.from(field.bytes, "base64").toString("utf-8");
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
+function utf8ByteOffsetToCodeUnitIndex(text: string, byteOffset: number) {
+  const target = Math.max(0, Math.min(Buffer.byteLength(text, "utf8"), Math.floor(byteOffset)));
+  let usedBytes = 0;
+  let usedUnits = 0;
+  for (const ch of text) {
+    const size = Buffer.byteLength(ch, "utf8");
+    if (usedBytes + size > target) break;
+    usedBytes += size;
+    usedUnits += ch.length;
+  }
+  return usedUnits;
+}
+
+function mergeSnippetWindows(windows: Array<{ start: number; end: number }>) {
+  if (windows.length === 0) return [] as Array<{ start: number; end: number }>;
+  const sorted = windows.slice().sort((a, b) => a.start - b.start || a.end - b.end);
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const item of sorted) {
+    const prev = merged[merged.length - 1];
+    if (!prev) {
+      merged.push({ start: item.start, end: item.end });
+      continue;
+    }
+    if (item.start <= prev.end + ARCHIVE_SEARCH_SNIPPET_MERGE_GAP_CHARS) {
+      prev.end = Math.max(prev.end, item.end);
+      continue;
+    }
+    if (merged.length >= ARCHIVE_SEARCH_SNIPPET_MAX_WINDOWS_PER_LINE) break;
+    merged.push({ start: item.start, end: item.end });
+  }
+  return merged;
+}
+
+function buildArchiveSearchSnippetLine(match: ArchiveSearchLineMatchWithOffsets) {
+  const sep = match.text.indexOf(" | ");
+  const meta = sep >= 0 ? match.text.slice(0, sep) : "";
+  const text = sep >= 0 ? match.text.slice(sep + 3) : match.text;
+  const textStartByte = sep >= 0 ? Buffer.byteLength(match.text.slice(0, sep + 3), "utf8") : 0;
+
+  if (!text) return meta;
+  const textBytes = Buffer.byteLength(text, "utf8");
+  const windows: Array<{ start: number; end: number }> = [];
+  for (const hit of match.submatches) {
+    const localStart = Math.max(0, hit.start - textStartByte);
+    const localEnd = Math.min(textBytes, hit.end - textStartByte);
+    if (!Number.isFinite(localStart) || !Number.isFinite(localEnd) || localEnd < localStart) continue;
+    let start = utf8ByteOffsetToCodeUnitIndex(text, localStart);
+    let end = utf8ByteOffsetToCodeUnitIndex(text, localEnd);
+    if (end <= start) {
+      if (text.length <= 0) continue;
+      if (start >= text.length) {
+        start = Math.max(0, text.length - 1);
+        end = text.length;
+      } else {
+        end = Math.min(text.length, start + 1);
+      }
+    }
+    if (end <= start) continue;
+    windows.push({
+      start: Math.max(0, start - ARCHIVE_SEARCH_SNIPPET_CTX_CHARS),
+      end: Math.min(text.length, end + ARCHIVE_SEARCH_SNIPPET_CTX_CHARS)
+    });
+  }
+
+  if (windows.length === 0) {
+    const fallback =
+      text.length <= ARCHIVE_SEARCH_SNIPPET_FALLBACK_CHARS
+        ? text
+        : `${text.slice(0, ARCHIVE_SEARCH_SNIPPET_FALLBACK_CHARS)}...`;
+    return meta ? `${meta} | ${fallback}` : fallback;
+  }
+
+  const merged = mergeSnippetWindows(windows);
+  const parts = merged
+    .map((window) => {
+      const center = text.slice(window.start, window.end).trim();
+      if (!center) return "";
+      const lead = window.start > 0 ? "..." : "";
+      const tail = window.end < text.length ? "..." : "";
+      return `${lead}${center}${tail}`;
+    })
+    .filter((part) => part.length > 0);
+
+  const snippet = parts.join(" ... ");
+  if (!snippet) {
+    return meta ? `${meta} | ${text.slice(0, ARCHIVE_SEARCH_SNIPPET_FALLBACK_CHARS)}` : text;
+  }
+  return meta ? `${meta} | ${snippet}` : snippet;
+}
+
 async function rgSearchInFile(params: {
   filePath: string;
   query: string;
   regex: boolean;
 }) {
-  return await new Promise<Array<{ line: number; preview: string }>>((resolve, reject) => {
+  return await new Promise<ArchiveSearchLineMatch[]>((resolve, reject) => {
     const args = [
       "-n",
       "--no-heading",
@@ -581,14 +712,92 @@ async function rgSearchInFile(params: {
         resolve([]);
         return;
       }
-      const out: Array<{ line: number; preview: string }> = [];
+      const out: ArchiveSearchLineMatch[] = [];
       for (const raw of stdout.split(/\r?\n/)) {
         if (!raw) continue;
         const idx = raw.indexOf(":");
         if (idx <= 0) continue;
         const line = Number(raw.slice(0, idx));
-        if (!Number.isFinite(line) || line < 1) continue;
-        out.push({ line, preview: raw.slice(idx + 1) });
+        if (!Number.isFinite(line) || !Number.isInteger(line) || line < 1) continue;
+        const text = trimTrailingLineEnding(raw.slice(idx + 1));
+        if (!text) continue;
+        out.push({ line, text });
+      }
+      resolve(out);
+    });
+  });
+}
+
+async function rgSearchInFileWithOffsets(params: {
+  filePath: string;
+  query: string;
+  regex: boolean;
+}) {
+  return await new Promise<ArchiveSearchLineMatchWithOffsets[]>((resolve, reject) => {
+    const args = [
+      "--json",
+      "-n",
+      "--color",
+      "never",
+      "--max-columns",
+      "20000",
+      "--max-columns-preview",
+      "-i"
+    ];
+    if (!params.regex) args.push("-F");
+    args.push("--", params.query, params.filePath);
+
+    const child = spawn("rg", args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk || "");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk || "");
+    });
+    child.on("error", (err) => reject(err));
+    child.on("close", (code) => {
+      if (code !== 0 && code !== 1) {
+        const message = String(stderr || "").trim() || `rg exit code ${String(code)}`;
+        reject(new Error(message));
+        return;
+      }
+      if (code === 1 || !stdout.trim()) {
+        resolve([]);
+        return;
+      }
+      const out: ArchiveSearchLineMatchWithOffsets[] = [];
+      for (const raw of stdout.split(/\r?\n/)) {
+        if (!raw) continue;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          continue;
+        }
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+        const event = parsed as Record<string, unknown>;
+        if (event.type !== "match") continue;
+        const data = event.data;
+        if (!data || typeof data !== "object" || Array.isArray(data)) continue;
+        const payload = data as Record<string, unknown>;
+        const line = Number(payload.line_number);
+        if (!Number.isFinite(line) || !Number.isInteger(line) || line < 1) continue;
+        const text = trimTrailingLineEnding(textFromRgJsonField(payload.lines));
+        if (!text) continue;
+        const rawSubmatches = Array.isArray(payload.submatches) ? payload.submatches : [];
+        const submatches = rawSubmatches
+          .map((item) => {
+            if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+            const obj = item as Record<string, unknown>;
+            const start = Number(obj.start);
+            const end = Number(obj.end);
+            if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start) return null;
+            return { start: Math.floor(start), end: Math.floor(end) };
+          })
+          .filter((item): item is { start: number; end: number } => item != null);
+        out.push({ line, text, submatches });
       }
       resolve(out);
     });
@@ -1672,6 +1881,7 @@ export class AgentService {
     beforePos?: number;
     maxHits?: number;
     maxChars?: number;
+    snippet?: boolean;
     regex?: boolean;
   }) {
     const session = getAgentSession(this.ctx.db, params.sessionId);
@@ -1694,6 +1904,7 @@ export class AgentService {
       min: ARCHIVE_MAX_CHARS_MIN,
       max: ARCHIVE_MAX_CHARS_MAX
     });
+    const snippet = params.snippet === true;
 
     const dirPath = archiveSessionDir(workspace.path, session.id);
     const files = await listArchiveFilesAsc(dirPath);
@@ -1709,13 +1920,24 @@ export class AgentService {
       const fileSeq = parseArchiveFileName(fileName);
       if (fileSeq == null) continue;
       const filePath = path.join(dirPath, fileName);
-      let matches: Array<{ line: number; preview: string }> = [];
+      let matches: ArchiveSearchLineMatch[] = [];
+      let offsetMatches: ArchiveSearchLineMatchWithOffsets[] = [];
       try {
-        matches = await rgSearchInFile({
-          filePath,
-          query,
-          regex: params.regex === true
-        });
+        if (snippet) {
+          offsetMatches = await rgSearchInFileWithOffsets({
+            filePath,
+            query,
+            regex: params.regex === true
+          });
+          matches = offsetMatches.map((item) => ({ line: item.line, text: item.text }));
+        } else {
+          matches = await rgSearchInFile({
+            filePath,
+            query,
+            regex: params.regex === true
+          });
+        }
+
         if (matches.length > 0) {
           const content = await fs.readFile(filePath, "utf-8").catch((err: any) => {
             if (err && err.code === "ENOENT") return "";
@@ -1723,6 +1945,10 @@ export class AgentService {
           });
           const stableLineCount = splitArchiveFileLines(content).length;
           matches = matches.filter((item) => item.line <= stableLineCount);
+          if (snippet) {
+            const keep = new Set(matches.map((item) => item.line));
+            offsetMatches = offsetMatches.filter((item) => keep.has(item.line));
+          }
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -1730,11 +1956,22 @@ export class AgentService {
       }
 
       matches.sort((a, b) => b.line - a.line);
+      const offsetsByLine = new Map<number, ArchiveSearchLineMatchWithOffsets>();
+      if (snippet) {
+        for (const item of offsetMatches) {
+          if (!offsetsByLine.has(item.line)) {
+            offsetsByLine.set(item.line, item);
+          }
+        }
+      }
       for (const match of matches) {
         if (newestFirstLines.length >= maxHits) break outer;
         const pos = toArchivePos(fileSeq, match.line);
         if (beforePos != null && pos >= beforePos) continue;
-        newestFirstLines.push(`pos=${pos} | ${String(match.preview || "")}`);
+        const outputLine = snippet
+          ? buildArchiveSearchSnippetLine(offsetsByLine.get(match.line) || { ...match, submatches: [] })
+          : match.text;
+        newestFirstLines.push(`pos=${pos} | ${String(outputLine || "")}`);
       }
     }
 

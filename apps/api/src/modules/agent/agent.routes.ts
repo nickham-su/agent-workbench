@@ -597,6 +597,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
           beforePos: Type.Optional(Type.Integer({ minimum: 2 })),
           maxHits: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
           maxChars: Type.Optional(Type.Integer({ minimum: 1000, maximum: 10000 })),
+          snippet: Type.Optional(Type.Boolean()),
           regex: Type.Optional(Type.Boolean())
         }),
         response: {
@@ -616,6 +617,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
         beforePos?: number;
         maxHits?: number;
         maxChars?: number;
+        snippet?: boolean;
         regex?: boolean;
       };
       return params.service.archiveSearchFromWorker(body);

@@ -763,6 +763,10 @@ export class AgentRunner {
         if (maxChars != null && (maxChars < 1000 || maxChars > 10000)) {
           throw new Error("archive_search.maxChars must be an integer between 1000 and 10000");
         }
+        if (tool.args.snippet != null && typeof tool.args.snippet !== "boolean") {
+          throw new Error("archive_search.snippet must be a boolean");
+        }
+        const snippet = tool.args.snippet === true;
         const regex = tool.args.regex === true;
         result = await this.apiClient.archiveSearch({
           workspaceId: run.workspaceId,
@@ -771,6 +775,7 @@ export class AgentRunner {
           beforePos,
           maxHits,
           maxChars,
+          snippet,
           regex
         });
       } else if (tool.toolName === "archive_read") {

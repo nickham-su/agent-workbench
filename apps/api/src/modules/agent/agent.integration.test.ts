@@ -340,6 +340,7 @@ async function archiveSearchInternal(params: {
   beforePos?: number;
   maxHits?: number;
   maxChars?: number;
+  snippet?: boolean;
   regex?: boolean;
 }) {
   const res = await params.app.inject({
@@ -355,6 +356,7 @@ async function archiveSearchInternal(params: {
       ...(params.beforePos != null ? { beforePos: params.beforePos } : {}),
       ...(params.maxHits ? { maxHits: params.maxHits } : {}),
       ...(params.maxChars ? { maxChars: params.maxChars } : {}),
+      ...(params.snippet === true ? { snippet: true } : {}),
       ...(params.regex === true ? { regex: true } : {})
     }
   });
@@ -1120,6 +1122,68 @@ test("archive v2 边界行为: 校验/大小写/跨文件pos/截断/半行过滤
     truncatedRead.text.includes("[超过最大字符数限制,从此处截断内容]"),
     "truncated output should include truncation marker"
   );
+});
+
+test("archive_search snippet 模式返回命中窗口并限制单行窗口数量", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const archiveDir = path.join(fixture.workspacePath, ".awb", "agent", "archive", session.id);
+  await fs.mkdir(archiveDir, { recursive: true });
+
+  const repeatedText = `${Array.from({ length: 7 }, (_, idx) => `seg${idx + 1}-${"x".repeat(140)} KEYWORD`).join(" ")} TAILMARK`;
+  const line = `item=1 ts=1 kind=user status=completed tool=- | ${repeatedText}`;
+  await fs.writeFile(path.join(archiveDir, "00000001.log"), `${line}\n`, "utf-8");
+
+  const fullLineSearch = await archiveSearchInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    query: "keyword",
+    maxHits: 1
+  });
+  const fullLineOutput = fullLineSearch.text.trim();
+  assert.ok(fullLineOutput.startsWith("pos=1 | item=1 ts=1 kind=user status=completed tool=- |"));
+  assert.equal((fullLineOutput.match(/KEYWORD/g) || []).length, 7, "default search should keep full line by default");
+
+  const regexZeroWidth = await archiveSearchInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    query: "\\b",
+    regex: true,
+    maxHits: 1
+  });
+  assert.ok(regexZeroWidth.text.startsWith("pos=1 | item=1 ts=1 kind=user status=completed tool=- |"));
+
+  const regexZeroWidthSnippet = await archiveSearchInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    query: "$",
+    regex: true,
+    maxHits: 1,
+    snippet: true
+  });
+  assert.ok(regexZeroWidthSnippet.text.includes("TAILMARK"), "snippet+regex zero-width should include tail window");
+
+  const snippetSearch = await archiveSearchInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    query: "keyword",
+    maxHits: 1,
+    snippet: true
+  });
+  const snippetOutput = snippetSearch.text.trim();
+  assert.ok(snippetOutput.startsWith("pos=1 | item=1 ts=1 kind=user status=completed tool=- |"));
+  const keywordCount = (snippetOutput.match(/KEYWORD/g) || []).length;
+  assert.ok(keywordCount > 0, "snippet search should include keyword windows");
+  assert.ok(keywordCount <= 5, "snippet mode should cap windows per line to 5");
+  assert.ok(snippetOutput.includes("..."), "snippet mode should include omission marker between windows");
 });
 
 test("agent prompt-context 使用结构化 tool-call/tool-result 消息", async () => {
