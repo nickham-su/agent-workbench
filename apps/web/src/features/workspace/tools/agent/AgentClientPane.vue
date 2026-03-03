@@ -18,125 +18,139 @@
       </div>
     </div>
 
-    <div ref="scrollEl" class="agent-message-list flex-1 min-h-0 overflow-auto p-3 bg-[var(--panel-bg)]">
+    <div ref="scrollEl" class="agent-message-list flex-1 min-h-0 overflow-auto p-3 bg-[var(--panel-bg)]" @scroll.passive="onMessageListScroll">
       <div v-if="displayItems.length === 0" class="h-full flex flex-col items-center justify-center gap-3 text-base text-[color:var(--text-tertiary)]">
         <div>{{ t("agent.client.welcome") }}</div>
         <a-button v-if="props.canChooseSession" type="link" size="small" class="!px-0" @click="onChooseSession">
           {{ t("agent.client.chooseSession") }}
         </a-button>
       </div>
-      <div
-        v-for="msg in displayItems"
-        :key="msg.id"
-        class="agent-message-item relative rounded p-2"
-        :class="[
-          msg.role === 'tool'
-            ? isRichToolCard(msg)
-              ? 'is-tool-message border-0 bg-transparent px-0 py-0.5'
-              : 'is-tool-message border-0 bg-transparent pl-2 pr-0 py-0.5'
-            : '',
-          msg.role === 'user' ? 'is-user-message border border-blue-500/30 bg-blue-500/10' : 'border-0',
-          msg.role === 'assistant' ? 'is-assistant-message bg-[var(--panel-bg)]' : '',
-          msg.role === 'system' ? 'bg-[var(--panel-bg)]' : '',
-          msg.role === 'user' && msg.tone === 'error' ? 'border-red-500/40 bg-red-500/5' : '',
-          msg.role !== 'user' && msg.role !== 'tool' && msg.tone === 'error' ? 'bg-red-500/5' : ''
-        ]"
-      >
-        <div v-if="msg.role !== 'tool' && !isSubtaskSession" class="message-controls absolute right-2 top-1.5 z-10 flex items-center gap-1">
-          <span class="message-id">#{{ msg.id }}</span>
-          <template v-if="msg.role === 'user' || msg.role === 'assistant'">
-            <a-tooltip :title="t('agent.client.fork')" placement="top">
-              <a-button
-                size="small"
-                type="text"
-                :loading="actionLoading === 'fork' && actionTargetId === msg.id"
-                :aria-label="t('agent.client.fork')"
-                @click="onForkFromMessage(msg.id)"
-              >
-                <template #icon><ForkOutlined /></template>
-              </a-button>
-            </a-tooltip>
-            <a-tooltip :title="t('agent.client.revert')" placement="top">
-              <a-button
-                size="small"
-                type="text"
-                :disabled="msg.role === 'user' ? msg.prevId == null : false"
-                :loading="actionLoading === 'revert' && actionTargetId === msg.id"
-                :aria-label="t('agent.client.revert')"
-                @click="onRevertToMessage(msg.id)"
-              >
-                <template #icon><RollbackOutlined /></template>
-              </a-button>
-            </a-tooltip>
-          </template>
-        </div>
-        <div v-if="msg.role === 'system'" class="text-[11px] text-[color:var(--text-tertiary)] pb-1 pr-24">
-          {{ roleLabel(msg.role) }}
-        </div>
+      <div v-else class="agent-virtual-list" :style="{ height: `${virtualTotalSize}px` }">
         <div
-          v-if="isSubtaskCard(msg)"
-          class="subtask-card rounded border border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] p-2"
-          :class="[
-            msg.subtaskSessionId ? 'is-clickable' : 'is-disabled',
-            msg.tone === 'error' ? 'border-red-500/40 bg-red-500/5' : ''
-          ]"
-          @click="onOpenSubtask(msg.subtaskSessionId)"
+          v-for="row in virtualRows"
+          :key="row.key"
+          class="agent-virtual-row"
+          :style="{ transform: `translateY(${row.start}px)` }"
         >
-          <div class="flex items-center gap-2">
-            <div class="text-[12px] font-semibold">
-              <DoubleRightOutlined class="subtask-title-icon mr-0.5 text-blue-500" />
-              {{ t("agent.client.subtaskCardTitle") }}: {{ msg.subtaskDescription || "-" }}
+          <div
+            :data-index="row.index"
+            class="agent-virtual-row-inner"
+            :style="{ paddingTop: `${row.gapTop}px` }"
+            :ref="onVirtualRowMounted"
+          >
+            <div
+              class="agent-message-item relative rounded p-2"
+              :class="[
+                row.msg.role === 'tool'
+                  ? isRichToolCard(row.msg)
+                    ? 'is-tool-message border-0 bg-transparent px-0 py-0.5'
+                    : 'is-tool-message border-0 bg-transparent pl-2 pr-0 py-0.5'
+                  : '',
+                row.msg.role === 'user' ? 'is-user-message border border-blue-500/30 bg-blue-500/10' : 'border-0',
+                row.msg.role === 'assistant' ? 'is-assistant-message bg-[var(--panel-bg)]' : '',
+                row.msg.role === 'system' ? 'bg-[var(--panel-bg)]' : '',
+                row.msg.role === 'user' && row.msg.tone === 'error' ? 'border-red-500/40 bg-red-500/5' : '',
+                row.msg.role !== 'user' && row.msg.role !== 'tool' && row.msg.tone === 'error' ? 'bg-red-500/5' : ''
+              ]"
+            >
+              <div v-if="row.msg.role !== 'tool' && !isSubtaskSession" class="message-controls absolute right-2 top-1.5 z-10 flex items-center gap-1">
+                <span class="message-id">#{{ row.msg.id }}</span>
+                <template v-if="row.msg.role === 'user' || row.msg.role === 'assistant'">
+                  <a-tooltip :title="t('agent.client.fork')" placement="top">
+                    <a-button
+                      size="small"
+                      type="text"
+                      :loading="actionLoading === 'fork' && actionTargetId === row.msg.id"
+                      :aria-label="t('agent.client.fork')"
+                      @click="onForkFromMessage(row.msg.id)"
+                    >
+                      <template #icon><ForkOutlined /></template>
+                    </a-button>
+                  </a-tooltip>
+                  <a-tooltip :title="t('agent.client.revert')" placement="top">
+                    <a-button
+                      size="small"
+                      type="text"
+                      :disabled="row.msg.role === 'user' ? row.msg.prevId == null : false"
+                      :loading="actionLoading === 'revert' && actionTargetId === row.msg.id"
+                      :aria-label="t('agent.client.revert')"
+                      @click="onRevertToMessage(row.msg.id)"
+                    >
+                      <template #icon><RollbackOutlined /></template>
+                    </a-button>
+                  </a-tooltip>
+                </template>
+              </div>
+              <div v-if="row.msg.role === 'system'" class="text-[11px] text-[color:var(--text-tertiary)] pb-1 pr-24">
+                {{ roleLabel(row.msg.role) }}
+              </div>
+              <div
+                v-if="isSubtaskCard(row.msg)"
+                class="subtask-card rounded border border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] p-2"
+                :class="[
+                  row.msg.subtaskSessionId ? 'is-clickable' : 'is-disabled',
+                  row.msg.tone === 'error' ? 'border-red-500/40 bg-red-500/5' : ''
+                ]"
+                @click="onOpenSubtask(row.msg.subtaskSessionId)"
+              >
+                <div class="flex items-center gap-2">
+                  <div class="text-[12px] font-semibold">
+                    <DoubleRightOutlined class="subtask-title-icon mr-0.5 text-blue-500" />
+                    {{ t("agent.client.subtaskCardTitle") }}: {{ row.msg.subtaskDescription || "-" }}
+                  </div>
+                  <a-tag color="default" class="!m-0 !text-[10px] !leading-[16px] !px-1 !py-0">{{ row.msg.status }}</a-tag>
+                </div>
+                <div class="pt-0.5 text-[12px] text-[color:var(--text-secondary)]">
+                  {{ t("agent.client.subtaskAgent") }}: {{ row.msg.subtaskAgentName || row.msg.subtaskAgentId || "-" }}
+                  <span class="inline-block w-3" />
+                  {{ t("agent.client.subtaskMode") }}: {{ formatSubtaskMode(row.msg.subtaskMode) }}
+                </div>
+                <div class="pt-0.5 text-[12px] text-[color:var(--text-secondary)]">
+                  {{ t("agent.client.subtaskSessionId") }}: {{ row.msg.subtaskSessionId || "-" }}
+                </div>
+                <div v-if="row.msg.toolError" class="pt-1 text-[12px] text-red-500">
+                  Error: {{ row.msg.toolError }}
+                </div>
+              </div>
+              <AgentTodoListCard
+                v-else-if="isTodolistCard(row.msg) && row.msg.todoList"
+                :todos="row.msg.todoList.todos"
+                :error-text="row.msg.toolError"
+              />
+              <AgentApplyPatchCard
+                v-else-if="isApplyPatchCard(row.msg) && row.msg.applyPatch"
+                :files="row.msg.applyPatch.files"
+              />
+              <div
+                v-else
+                class="whitespace-pre-wrap break-words"
+                :class="[
+                  row.msg.role === 'tool' ? 'text-[11px] font-mono text-[color:var(--text-secondary)]' : 'text-[13px]',
+                  row.msg.role !== 'tool' ? 'pr-24' : '',
+                  row.msg.tone === 'error' ? 'text-red-500' : ''
+                ]"
+              >
+                {{ row.msg.text }}
+              </div>
+              <div v-if="row.msg.role === 'tool' && row.msg.status === 'awaiting_permission'" class="pt-2 flex items-center gap-1">
+                <a-button
+                  size="small"
+                  :loading="actionLoading === 'approve' && actionTargetId === row.msg.id"
+                  @click="onToolPermission(row.msg.id, 'approve')"
+                >
+                  {{ t("agent.client.approve") }}
+                </a-button>
+                <a-button
+                  size="small"
+                  danger
+                  :loading="actionLoading === 'deny' && actionTargetId === row.msg.id"
+                  @click="onToolPermission(row.msg.id, 'deny')"
+                >
+                  {{ t("agent.client.deny") }}
+                </a-button>
+              </div>
             </div>
-            <a-tag color="default" class="!m-0 !text-[10px] !leading-[16px] !px-1 !py-0">{{ msg.status }}</a-tag>
           </div>
-          <div class="pt-0.5 text-[12px] text-[color:var(--text-secondary)]">
-            {{ t("agent.client.subtaskAgent") }}: {{ msg.subtaskAgentName || msg.subtaskAgentId || "-" }}
-            <span class="inline-block w-3" />
-            {{ t("agent.client.subtaskMode") }}: {{ formatSubtaskMode(msg.subtaskMode) }}
-          </div>
-          <div class="pt-0.5 text-[12px] text-[color:var(--text-secondary)]">
-            {{ t("agent.client.subtaskSessionId") }}: {{ msg.subtaskSessionId || "-" }}
-          </div>
-          <div v-if="msg.toolError" class="pt-1 text-[12px] text-red-500">
-            Error: {{ msg.toolError }}
-          </div>
-        </div>
-        <AgentTodoListCard
-          v-else-if="isTodolistCard(msg) && msg.todoList"
-          :todos="msg.todoList.todos"
-          :error-text="msg.toolError"
-        />
-        <AgentApplyPatchCard
-          v-else-if="isApplyPatchCard(msg) && msg.applyPatch"
-          :files="msg.applyPatch.files"
-        />
-        <div
-          v-else
-          class="whitespace-pre-wrap break-words"
-          :class="[
-            msg.role === 'tool' ? 'text-[11px] font-mono text-[color:var(--text-secondary)]' : 'text-[13px]',
-            msg.role !== 'tool' ? 'pr-24' : '',
-            msg.tone === 'error' ? 'text-red-500' : ''
-          ]"
-        >
-          {{ msg.text }}
-        </div>
-        <div v-if="msg.role === 'tool' && msg.status === 'awaiting_permission'" class="pt-2 flex items-center gap-1">
-          <a-button
-            size="small"
-            :loading="actionLoading === 'approve' && actionTargetId === msg.id"
-            @click="onToolPermission(msg.id, 'approve')"
-          >
-            {{ t("agent.client.approve") }}
-          </a-button>
-          <a-button
-            size="small"
-            danger
-            :loading="actionLoading === 'deny' && actionTargetId === msg.id"
-            @click="onToolPermission(msg.id, 'deny')"
-          >
-            {{ t("agent.client.deny") }}
-          </a-button>
         </div>
       </div>
     </div>
@@ -201,6 +215,7 @@
 
 <script setup lang="ts">
 import type { AgentContextItemRecord, AgentSessionRunState } from "@agent-workbench/shared";
+import { useVirtualizer } from "@tanstack/vue-virtual";
 import { CloseOutlined, DoubleRightOutlined, ForkOutlined, RollbackOutlined } from "@ant-design/icons-vue";
 import { Modal, message } from "ant-design-vue";
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
@@ -278,6 +293,20 @@ type DisplayItem = {
   tone?: "normal" | "error";
 };
 
+type VirtualDisplayRow = {
+  key: string | number;
+  index: number;
+  start: number;
+  gapTop: number;
+  msg: DisplayItem;
+};
+
+const MESSAGE_GAP_DEFAULT = 12;
+const MESSAGE_GAP_PREV_TOOL = 8;
+const MESSAGE_GAP_CUR_TOOL = 6;
+const MESSAGE_GAP_TOOL_TOOL = 2;
+const BOTTOM_FOLLOW_THRESHOLD_PX = 120;
+
 const props = defineProps<{
   workspaceId: string;
   sessionId: string;
@@ -323,6 +352,9 @@ const runNoticeText = computed(() => String(runState.value.runNoticeText || "").
 const items = ref<AgentContextItemRecord[]>([]);
 const scrollEl = ref<HTMLElement | null>(null);
 const inputEl = ref<{ focus?: () => void } | null>(null);
+const stickToBottom = ref(true);
+const forcedBottomOnFirstActive = ref(false);
+let scrollToBottomSeq = 0;
 
 const actionLoading = ref<"cancel" | "fork" | "revert" | "approve" | "deny" | null>(null);
 const actionTargetId = ref<number | null>(null);
@@ -457,12 +489,18 @@ const formattedLastTotalTokens = computed(() => {
 });
 
 const displayItems = computed<DisplayItem[]>(() => {
+  const hasToolChildByPrevId = new Set<number>();
+  for (const item of items.value) {
+    if (item.kind !== "tool") continue;
+    if (typeof item.prevId !== "number") continue;
+    hasToolChildByPrevId.add(item.prevId);
+  }
+
   const hiddenAssistantIds = new Set<number>();
   for (const item of items.value) {
     if (item.kind !== "assistant" || item.output.type !== "assistant_text") continue;
     if (item.output.text.trim().length > 0) continue;
-    const hasToolChild = items.value.some((next) => next.kind === "tool" && next.prevId === item.id);
-    if (hasToolChild) {
+    if (hasToolChildByPrevId.has(item.id)) {
       hiddenAssistantIds.add(item.id);
     }
   }
@@ -602,6 +640,82 @@ const displayItems = computed<DisplayItem[]>(() => {
   return mapped.filter((item) => !(item.role === "assistant" && hiddenAssistantIds.has(item.id)));
 });
 
+function messageGapTopAt(index: number) {
+  if (index <= 0) return 0;
+  const prev = displayItems.value[index - 1];
+  const current = displayItems.value[index];
+  if (!prev || !current) return MESSAGE_GAP_DEFAULT;
+
+  const prevIsTool = prev.role === "tool";
+  const currentIsTool = current.role === "tool";
+
+  if (prevIsTool && currentIsTool) return MESSAGE_GAP_TOOL_TOOL;
+  if (prevIsTool) return MESSAGE_GAP_PREV_TOOL;
+  if (currentIsTool) return MESSAGE_GAP_CUR_TOOL;
+  return MESSAGE_GAP_DEFAULT;
+}
+
+function estimateRowHeight(index: number) {
+  const item = displayItems.value[index];
+  if (!item) return 88;
+  const gap = messageGapTopAt(index);
+  if (item.role === "user") return 84 + gap;
+  if (item.role === "assistant") return 104 + gap;
+  if (item.role === "system") return 64 + gap;
+
+  if (item.applyPatch) {
+    const fileCount = item.applyPatch.files.length;
+    const filePreview = Math.min(fileCount, 2);
+    return 120 + filePreview * 180 + gap;
+  }
+  if (item.todoList) {
+    const rows = Math.min(item.todoList.todos.length, 4);
+    return 96 + rows * 28 + gap;
+  }
+  if (item.toolName === "subtask") return 136 + gap;
+  return 72 + gap;
+}
+
+const rowVirtualizer = useVirtualizer<HTMLElement, HTMLDivElement>(
+  computed(() => ({
+    count: displayItems.value.length,
+    getScrollElement: () => scrollEl.value,
+    getItemKey: (index: number) => displayItems.value[index]?.id ?? index,
+    estimateSize: (index: number) => estimateRowHeight(index),
+    overscan: 12
+  }))
+);
+
+const virtualTotalSize = computed(() => rowVirtualizer.value.getTotalSize());
+
+const virtualRows = computed<VirtualDisplayRow[]>(() => {
+  const list = displayItems.value;
+  const rows: VirtualDisplayRow[] = [];
+  for (const virtualItem of rowVirtualizer.value.getVirtualItems()) {
+    const msg = list[virtualItem.index];
+    if (!msg) continue;
+    rows.push({
+      key: typeof virtualItem.key === "number" || typeof virtualItem.key === "string" ? virtualItem.key : String(virtualItem.key),
+      index: virtualItem.index,
+      start: virtualItem.start,
+      gapTop: messageGapTopAt(virtualItem.index),
+      msg
+    });
+  }
+  return rows;
+});
+
+function onVirtualRowMounted(refValue: Element | { $el?: unknown } | null) {
+  if (!refValue) return;
+  const element = refValue instanceof Element
+    ? refValue
+    : refValue.$el instanceof Element
+      ? refValue.$el
+      : null;
+  if (!element) return;
+  rowVirtualizer.value.measureElement(element as HTMLDivElement);
+}
+
 function roleLabel(role: DisplayItem["role"]) {
   if (role === "user") return t("agent.client.roles.user");
   if (role === "assistant") return t("agent.client.roles.assistant");
@@ -667,11 +781,40 @@ function schedulePoll(delayMs = 800) {
   }, delayMs);
 }
 
-async function scrollToBottom() {
-  await nextTick();
+function distanceToBottom() {
   const el = scrollEl.value;
-  if (!el) return;
-  el.scrollTop = el.scrollHeight;
+  if (!el) return Number.POSITIVE_INFINITY;
+  return Math.max(0, el.scrollHeight - (el.scrollTop + el.clientHeight));
+}
+
+function updateStickToBottomState() {
+  if (displayItems.value.length === 0) {
+    stickToBottom.value = true;
+    return;
+  }
+  stickToBottom.value = distanceToBottom() <= BOTTOM_FOLLOW_THRESHOLD_PX;
+}
+
+function onMessageListScroll() {
+  updateStickToBottomState();
+}
+
+async function scrollToBottom(options?: { force?: boolean }) {
+  const force = options?.force === true;
+  if (!force && !stickToBottom.value) return;
+  if (displayItems.value.length === 0) return;
+
+  const seq = ++scrollToBottomSeq;
+  await nextTick();
+  if (seq !== scrollToBottomSeq) return;
+
+  const index = displayItems.value.length - 1;
+  if (index < 0) return;
+
+  rowVirtualizer.value.scrollToIndex(index, { align: "end" });
+  await nextTick();
+  if (seq !== scrollToBottomSeq) return;
+  updateStickToBottomState();
 }
 
 async function focusInputIfNeeded() {
@@ -707,7 +850,7 @@ function isTerminalStatus(status: AgentContextItemRecord["status"]) {
   return terminalStatuses.has(status);
 }
 
-async function refreshAll(forceFull: boolean) {
+async function refreshAll(forceFull: boolean, forceFollowBottom = false) {
   if (!props.sessionReady) {
     runState.value = {
       sessionId: props.sessionId,
@@ -742,7 +885,7 @@ async function refreshAll(forceFull: boolean) {
     if (forceFull || items.value.length === 0) {
       const full = await getAgentContextItems(props.sessionId);
       items.value = [...full.items].sort((a, b) => a.id - b.id);
-      await scrollToBottom();
+      await scrollToBottom({ force: forceFollowBottom });
     } else {
       const lastId = items.value.length > 0 ? items.value[items.value.length - 1]!.id : 0;
       const delta = await getAgentContextItems(props.sessionId, lastId);
@@ -752,12 +895,12 @@ async function refreshAll(forceFull: boolean) {
       if (headMovedBackward || chainBroken) {
         const full = await getAgentContextItems(props.sessionId);
         items.value = [...full.items].sort((a, b) => a.id - b.id);
-        await scrollToBottom();
+        await scrollToBottom({ force: forceFollowBottom });
       } else if (delta.items.length > 0) {
         for (const item of delta.items) {
           upsertItem(item);
         }
-        await scrollToBottom();
+        await scrollToBottom({ force: forceFollowBottom });
       }
     }
 
@@ -797,7 +940,7 @@ async function refreshAll(forceFull: boolean) {
     }
 
     if (nonTerminalChanged) {
-      await scrollToBottom();
+      await scrollToBottom({ force: forceFollowBottom });
     }
 
     const hasLocalNonTerminal = items.value.some((item) => !isTerminalStatus(item.status));
@@ -1065,7 +1208,10 @@ watch(
   () => [props.sessionId, props.workspaceId],
   () => {
     clearPoll();
+    scrollToBottomSeq += 1;
     items.value = [];
+    stickToBottom.value = true;
+    forcedBottomOnFirstActive.value = false;
     runState.value = {
       sessionId: props.sessionId,
       status: "idle",
@@ -1078,8 +1224,10 @@ watch(
       updatedAt: 0,
       appliedItemId: 0
     };
-    if (props.sessionId) {
-      void refreshAll(true);
+    rowVirtualizer.value.measure();
+    if (props.sessionId && props.active) {
+      forcedBottomOnFirstActive.value = true;
+      void refreshAll(true, true);
       void focusInputIfNeeded();
     }
   },
@@ -1093,14 +1241,33 @@ watch(
       clearPoll();
       return;
     }
-    void refreshAll(false);
+
+    const forceFollowBottom = !forcedBottomOnFirstActive.value;
+    if (forceFollowBottom) {
+      forcedBottomOnFirstActive.value = true;
+      stickToBottom.value = true;
+    }
+
+    rowVirtualizer.value.measure();
+    const forceFull = items.value.length === 0;
+    void refreshAll(forceFull, forceFollowBottom);
     void focusInputIfNeeded();
-  },
-  { immediate: true }
+  }
+);
+
+watch(
+  () => virtualTotalSize.value,
+  (next, prev) => {
+    if (!props.active) return;
+    if (displayItems.value.length === 0) return;
+    if (typeof prev === "number" && next === prev) return;
+    void scrollToBottom();
+  }
 );
 
 onBeforeUnmount(() => {
   clearPoll();
+  scrollToBottomSeq += 1;
 });
 </script>
 
@@ -1110,20 +1277,21 @@ onBeforeUnmount(() => {
   flex-direction: column;
 }
 
-.agent-message-item + .agent-message-item {
-  margin-top: 12px;
+.agent-virtual-list {
+  position: relative;
+  width: 100%;
 }
 
-.agent-message-item + .agent-message-item.is-tool-message {
-  margin-top: 6px;
+.agent-virtual-row {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
 }
 
-.agent-message-item.is-tool-message + .agent-message-item {
-  margin-top: 8px;
-}
-
-.agent-message-item.is-tool-message + .agent-message-item.is-tool-message {
-  margin-top: 2px;
+.agent-virtual-row-inner {
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .agent-message-item.is-assistant-message {

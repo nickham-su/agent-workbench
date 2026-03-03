@@ -24,7 +24,7 @@
         </div>
       </template>
 
-      <a-tab-pane v-for="(session, index) in visibleSessions" :key="session.id" :forceRender="true">
+      <a-tab-pane v-for="(session, index) in visibleSessions" :key="session.id">
         <template #tab>
           <span class="agent-tab-label">
             <span>{{ tabLabel(session, index) }}</span>
