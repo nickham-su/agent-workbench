@@ -752,6 +752,7 @@ export default {
         addProvider: "Add provider",
         manageModels: "Manage models",
         addModel: "Add model",
+        copy: "Copy",
         edit: "Edit",
         delete: "Delete",
         setDefault: "Set default"

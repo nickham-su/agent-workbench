@@ -750,6 +750,7 @@ export default {
         addProvider: "新增 Provider",
         manageModels: "管理模型",
         addModel: "添加模型",
+        copy: "复制",
         edit: "编辑",
         delete: "删除",
         setDefault: "设为默认"

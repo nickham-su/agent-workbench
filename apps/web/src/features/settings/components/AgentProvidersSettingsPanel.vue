@@ -155,8 +155,13 @@
             class="flex items-center justify-between gap-2 px-2 py-2"
           >
             <div class="min-w-0 flex-1">
-              <div class="text-left text-xs font-semibold truncate">
-                {{ model.name }}
+              <div class="flex items-center gap-1">
+                <div class="text-left text-xs font-semibold truncate">
+                  {{ model.name }}
+                </div>
+                <a-tag v-if="isDefaultModel(modelManagerProviderId, model.id)" color="blue" class="!text-[10px] !leading-[16px] !px-1 !py-0">
+                  {{ t("common.default") }}
+                </a-tag>
               </div>
               <div class="text-[11px] text-[color:var(--text-tertiary)] truncate">{{ model.providerModelId }}</div>
               <div class="text-[11px] text-[color:var(--text-tertiary)] truncate">
@@ -164,12 +169,6 @@
               </div>
             </div>
             <div class="shrink-0 flex items-center gap-1">
-              <a-tag v-if="isDefaultModel(modelManagerProviderId, model.id)" color="blue" class="!text-[10px] !leading-[16px] !px-1 !py-0">
-                {{ t("common.default") }}
-              </a-tag>
-              <a-button size="small" type="text" @click="openEditModel(modelManagerProviderId, model.id)">
-                {{ t('settings.agentProviders.actions.edit') }}
-              </a-button>
               <a-button
                 v-if="!isDefaultModel(modelManagerProviderId, model.id)"
                 size="small"
@@ -177,6 +176,12 @@
                 @click="setDefaultModel(modelManagerProviderId, model.id, true)"
               >
                 {{ t('settings.agentProviders.actions.setDefault') }}
+              </a-button>
+              <a-button size="small" type="text" @click="openEditModel(modelManagerProviderId, model.id)">
+                {{ t('settings.agentProviders.actions.edit') }}
+              </a-button>
+              <a-button size="small" type="text" @click="copyModel(modelManagerProviderId, model.id)">
+                {{ t('settings.agentProviders.actions.copy') }}
               </a-button>
               <a-button size="small" type="text" danger @click="confirmDeleteModel(modelManagerProviderId, model.id)">
                 {{ t('settings.agentProviders.actions.delete') }}
@@ -662,6 +667,23 @@ function openEditModel(providerId: string, modelId: string) {
   modelFormProviderOptionsJson.value = stringifyPretty(providerOptions);
   modelFormDefault.value = isDefaultModel(provider.id, model.id);
   modelModalOpen.value = true;
+}
+
+function copyModel(providerId: string, modelId: string) {
+  const provider = getProvider(providerId);
+  if (!provider) return;
+  const source = provider.models.find((item) => item.id === modelId);
+  if (!source) return;
+
+  const clone = {
+    id: newLocalId(`${provider.id}-model`),
+    providerModelId: source.providerModelId,
+    name: `${source.name} copy`,
+    contextWindowTokens: Math.max(1, Math.floor(Number(source.contextWindowTokens || 1))),
+    options: toJsonRecord(JSON.parse(JSON.stringify(source.options ?? {})))
+  };
+  provider.models.push(clone);
+  void persist({ toast: true });
 }
 
 function closeModelModal() {
