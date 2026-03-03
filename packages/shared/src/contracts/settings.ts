@@ -156,6 +156,8 @@ export const AgentRuntimeSettingsSchema = Type.Object({
   // 0 表示关闭;单位毫秒。
   modelIdleTimeoutMs: Type.Integer({ minimum: 0 }),
   modelTotalTimeoutMs: Type.Integer({ minimum: 0 }),
+  // 模型请求首包前失败时的最大重试次数(0 表示不重试)。
+  modelRequestMaxRetries: Type.Integer({ minimum: 0, maximum: 100 }),
   // 模型上下文窗口上限,用于自动压缩触发判定。
   maxContextTokens: Type.Integer({ minimum: 1 }),
   // 自动压缩阈值百分比,达到 maxContextTokens * pct/100 触发压缩。
@@ -167,6 +169,7 @@ export type AgentRuntimeSettings = Static<typeof AgentRuntimeSettingsSchema>;
 export const UpdateAgentRuntimeSettingsRequestSchema = Type.Object({
   modelIdleTimeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
   modelTotalTimeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
+  modelRequestMaxRetries: Type.Optional(Type.Integer({ minimum: 0, maximum: 100 })),
   maxContextTokens: Type.Optional(Type.Integer({ minimum: 1 })),
   autoCompactThresholdPct: Type.Optional(Type.Integer({ minimum: 50, maximum: 90 }))
 });

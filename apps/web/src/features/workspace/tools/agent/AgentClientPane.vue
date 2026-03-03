@@ -141,6 +141,15 @@
       </div>
     </div>
 
+    <div v-if="runNoticeText" class="px-3 py-2 border-t border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
+      <div
+        class="text-xs text-amber-600 whitespace-nowrap overflow-hidden text-ellipsis"
+        :title="runNoticeText"
+      >
+        {{ runNoticeText }}
+      </div>
+    </div>
+
     <div v-if="!isSubtaskSession" class="p-3 border-t border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
       <div class="flex items-end gap-2">
         <a-textarea
@@ -305,10 +314,12 @@ const runState = ref<AgentSessionRunState>({
   activeAssistantItemId: null,
   waitingToolItemId: null,
   lastResponseTotalTokens: null,
+  runNoticeText: "",
   nonTerminalItemIds: [],
   updatedAt: 0,
   appliedItemId: 0
 });
+const runNoticeText = computed(() => String(runState.value.runNoticeText || "").trim());
 const items = ref<AgentContextItemRecord[]>([]);
 const scrollEl = ref<HTMLElement | null>(null);
 const inputEl = ref<{ focus?: () => void } | null>(null);
@@ -705,6 +716,7 @@ async function refreshAll(forceFull: boolean) {
       activeAssistantItemId: null,
       waitingToolItemId: null,
       lastResponseTotalTokens: null,
+      runNoticeText: "",
       nonTerminalItemIds: [],
       updatedAt: 0,
       appliedItemId: 0
@@ -1061,6 +1073,7 @@ watch(
       activeAssistantItemId: null,
       waitingToolItemId: null,
       lastResponseTotalTokens: null,
+      runNoticeText: "",
       nonTerminalItemIds: [],
       updatedAt: 0,
       appliedItemId: 0

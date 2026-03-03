@@ -298,6 +298,8 @@ export default {
       chooseSessionTitle: "选择要继续的会话",
       noSessionToChoose: "没有可选择的历史会话",
       sessionEmptyPreview: "(该会话暂无用户消息)",
+      runNoticeLabel: "运行通知",
+      runNoticeEmpty: "当前没有运行时通知",
       lastTotalTokens: "总Token",
       backToParent: "返回父会话",
       parentSessionMissing: "未找到父会话",
@@ -959,6 +961,10 @@ export default {
         modelIdleTimeoutMs: {
           label: "模型空闲超时（秒）",
           help: "单次模型请求在连续一段时间未收到任何流式 chunk（包括 reasoning/tool-call/finish）时中止。支持小数秒,0 表示关闭。"
+        },
+        modelRequestMaxRetries: {
+          label: "模型重试最大次数",
+          help: "仅在首包前失败时自动重试。0 表示不重试。"
         }
       }
     },

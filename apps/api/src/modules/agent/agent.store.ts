@@ -267,6 +267,7 @@ export type AgentRunStateRow = {
   activeAssistantItemId: number | null;
   waitingToolItemId: number | null;
   lastResponseTotalTokens: number | null;
+  runNoticeText: string;
   updatedAt: number;
   appliedItemId: number;
 };
@@ -435,6 +436,8 @@ function upsertRunState(db: Db, params: {
   waitingToolItemId: number | null;
   lastResponseTotalTokens?: number | null;
   setLastResponseTotalTokens?: boolean;
+  runNoticeText?: string;
+  setRunNoticeText?: boolean;
   updatedAt: number;
   appliedItemId: number;
 }) {
@@ -448,6 +451,7 @@ function upsertRunState(db: Db, params: {
         active_assistant_item_id,
         waiting_tool_item_id,
         last_response_total_tokens,
+        run_notice_text,
         updated_at,
         applied_item_id
       ) values (
@@ -458,6 +462,7 @@ function upsertRunState(db: Db, params: {
         @activeAssistantItemId,
         @waitingToolItemId,
         @lastResponseTotalTokens,
+        @runNoticeText,
         @updatedAt,
         @appliedItemId
       )
@@ -470,13 +475,19 @@ function upsertRunState(db: Db, params: {
           when @setLastResponseTotalTokens = 1 then @lastResponseTotalTokens
           else agent_session_run_state.last_response_total_tokens
         end,
+        run_notice_text = case
+          when @setRunNoticeText = 1 then @runNoticeText
+          else agent_session_run_state.run_notice_text
+        end,
         updated_at = excluded.updated_at,
         applied_item_id = excluded.applied_item_id
     `
   ).run({
     ...params,
     lastResponseTotalTokens: params.lastResponseTotalTokens ?? null,
-    setLastResponseTotalTokens: params.setLastResponseTotalTokens ? 1 : 0
+    setLastResponseTotalTokens: params.setLastResponseTotalTokens ? 1 : 0,
+    runNoticeText: params.runNoticeText ?? "",
+    setRunNoticeText: params.setRunNoticeText ? 1 : 0
   });
 }
 
@@ -583,6 +594,8 @@ export function createAgentSession(db: Db, params: {
       activeAssistantItemId: null,
       waitingToolItemId: null,
       updatedAt: params.createdAt,
+      runNoticeText: "",
+      setRunNoticeText: true,
       appliedItemId: 0
     });
   });
@@ -1004,6 +1017,7 @@ export function getRunState(db: Db, workspaceId: string, sessionId: string): Age
           active_assistant_item_id as activeAssistantItemId,
           waiting_tool_item_id as waitingToolItemId,
           last_response_total_tokens as lastResponseTotalTokens,
+          run_notice_text as runNoticeText,
           updated_at as updatedAt,
           applied_item_id as appliedItemId
         from agent_session_run_state
@@ -1019,6 +1033,7 @@ export function getRunState(db: Db, workspaceId: string, sessionId: string): Age
     activeAssistantItemId: null,
     waitingToolItemId: null,
     lastResponseTotalTokens: null,
+    runNoticeText: "",
     updatedAt: 0,
     appliedItemId: 0
   };
@@ -1032,12 +1047,14 @@ export function updateRunState(db: Db, params: {
   activeAssistantItemId: number | null;
   waitingToolItemId: number | null;
   lastResponseTotalTokens?: number | null;
+  runNoticeText?: string;
   updatedAt: number;
   appliedItemId: number;
 }) {
   upsertRunState(db, {
     ...params,
-    setLastResponseTotalTokens: Object.prototype.hasOwnProperty.call(params, "lastResponseTotalTokens")
+    setLastResponseTotalTokens: Object.prototype.hasOwnProperty.call(params, "lastResponseTotalTokens"),
+    setRunNoticeText: Object.prototype.hasOwnProperty.call(params, "runNoticeText")
   });
 }
 
@@ -1050,6 +1067,8 @@ export function setRunStateIdle(db: Db, params: { workspaceId: string; sessionId
     activeAssistantItemId: null,
     waitingToolItemId: null,
     setLastResponseTotalTokens: false,
+    runNoticeText: "",
+    setRunNoticeText: true,
     updatedAt: params.updatedAt,
     appliedItemId: params.appliedItemId
   });

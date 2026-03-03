@@ -130,6 +130,7 @@ export function initSchema(db: Db) {
       active_assistant_item_id integer,
       waiting_tool_item_id integer,
       last_response_total_tokens integer,
+      run_notice_text text not null default '',
       applied_item_id integer not null default 0,
       updated_at integer not null,
       primary key (workspace_id, session_id),
@@ -187,6 +188,7 @@ export function initSchema(db: Db) {
   ensureColumn(db, { table: "agent_session_run_state", column: "active_assistant_item_id", ddl: "active_assistant_item_id integer" });
   ensureColumn(db, { table: "agent_session_run_state", column: "waiting_tool_item_id", ddl: "waiting_tool_item_id integer" });
   ensureColumn(db, { table: "agent_session_run_state", column: "last_response_total_tokens", ddl: "last_response_total_tokens integer" });
+  ensureColumn(db, { table: "agent_session_run_state", column: "run_notice_text", ddl: "run_notice_text text not null default ''" });
   ensureColumn(db, { table: "agent_session_run_state", column: "applied_item_id", ddl: "applied_item_id integer not null default 0" });
   ensureColumn(db, { table: "agent_run", column: "agent_id", ddl: "agent_id text" });
   ensureColumn(db, { table: "agent_run", column: "provider_id", ddl: "provider_id text" });

@@ -52,6 +52,13 @@
           {{ t("settings.agentRuntime.fields.modelIdleTimeoutMs.help") }}
         </div>
       </a-form-item>
+
+      <a-form-item :label="t('settings.agentRuntime.fields.modelRequestMaxRetries.label')">
+        <a-input-number v-model:value="modelRequestMaxRetries" :min="0" :max="100" :step="1" :precision="0" style="max-width: 260px" />
+        <div class="pt-2 text-xs text-[color:var(--text-tertiary)]">
+          {{ t("settings.agentRuntime.fields.modelRequestMaxRetries.help") }}
+        </div>
+      </a-form-item>
     </a-form>
   </div>
 </template>
@@ -70,6 +77,7 @@ const saving = ref(false);
 
 const modelIdleTimeoutSeconds = ref<number>(0);
 const modelTotalTimeoutSeconds = ref<number>(0);
+const modelRequestMaxRetries = ref<number>(0);
 const maxContextTokens = ref<number>(128000);
 const autoCompactThresholdPct = ref<number>(80);
 
@@ -88,6 +96,7 @@ function toMs(rawSeconds: number) {
 function mapFromSettings(settings: AgentRuntimeSettings) {
   modelIdleTimeoutSeconds.value = toSeconds(settings.modelIdleTimeoutMs ?? 0);
   modelTotalTimeoutSeconds.value = toSeconds(settings.modelTotalTimeoutMs ?? 0);
+  modelRequestMaxRetries.value = Math.min(100, Math.max(0, Math.floor(Number(settings.modelRequestMaxRetries || 0))));
   maxContextTokens.value = Math.max(1, Number(settings.maxContextTokens || 1));
   autoCompactThresholdPct.value = Math.min(90, Math.max(50, Math.floor(Number(settings.autoCompactThresholdPct || 80))));
 }
@@ -112,6 +121,7 @@ async function save() {
     const res = await updateAgentRuntimeSettings({
       modelIdleTimeoutMs: toMs(modelIdleTimeoutSeconds.value ?? 0),
       modelTotalTimeoutMs: toMs(modelTotalTimeoutSeconds.value ?? 0),
+      modelRequestMaxRetries: Math.min(100, Math.max(0, Math.floor(Number(modelRequestMaxRetries.value || 0)))),
       maxContextTokens: Math.max(1, Math.floor(Number(maxContextTokens.value || 1))),
       autoCompactThresholdPct: Math.min(90, Math.max(50, Math.floor(Number(autoCompactThresholdPct.value || 80))))
     });

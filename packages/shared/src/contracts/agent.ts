@@ -123,6 +123,8 @@ export const AgentSessionRunStateSchema = Type.Object({
   activeAssistantItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
   waitingToolItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
   lastResponseTotalTokens: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
+  // 通用运行态提示文本;空字符串表示无提示。
+  runNoticeText: Type.String(),
   nonTerminalItemIds: Type.Array(Type.Number({ minimum: 1 })),
   updatedAt: Type.Number(),
   appliedItemId: Type.Number({ minimum: 0 })

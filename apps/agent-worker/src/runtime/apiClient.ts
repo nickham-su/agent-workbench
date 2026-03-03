@@ -37,6 +37,7 @@ export type ExecutionProfile = {
   runtime: {
     modelIdleTimeoutMs: number;
     modelTotalTimeoutMs: number;
+    modelRequestMaxRetries: number;
     maxContextTokens: number;
     autoCompactThresholdPct: number;
     updatedAt: number;
@@ -203,6 +204,7 @@ export class AgentApiClient {
     activeAssistantItemId: number | null;
     waitingToolItemId: number | null;
     lastResponseTotalTokens?: number | null;
+    runNoticeText?: string | null;
     updatedAt?: number;
   }) {
     await this.request<{ ok: true }>("/api/internal/agent/run-state", {

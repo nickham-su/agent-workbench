@@ -38,6 +38,8 @@ const ENV_MODEL_TOTAL_TIMEOUT_MS = Math.min(
   ENV_TIMEOUT_MS_MAX,
   Math.max(0, parseIntOrDefault(process.env.AWB_AGENT_MODEL_TOTAL_TIMEOUT_MS, 0))
 );
+const MODEL_RETRY_BACKOFF_BASE_MS = 2_000;
+const MODEL_RETRY_BACKOFF_MAX_MS = 60_000;
 const COMPACTION_USER_PROMPT = [
   "请基于当前会话内容输出一份总结,用于继续当前任务。",
   "重点覆盖:",
@@ -54,6 +56,30 @@ function newSortableId(prefix: string) {
   const ts = Date.now().toString(36).padStart(10, "0");
   const random = randomBytes(6).toString("hex");
   return `${prefix}_${ts}${random}`;
+}
+
+function computeRetryBackoffMs(attemptIndex: number) {
+  if (!Number.isFinite(attemptIndex) || attemptIndex < 0) return MODEL_RETRY_BACKOFF_BASE_MS;
+  const factor = 2 ** Math.floor(attemptIndex);
+  const delay = MODEL_RETRY_BACKOFF_BASE_MS * factor;
+  return Math.min(MODEL_RETRY_BACKOFF_MAX_MS, Math.max(MODEL_RETRY_BACKOFF_BASE_MS, delay));
+}
+
+async function sleepMsWithAbort(ms: number, signal: AbortSignal) {
+  if (ms <= 0) return !signal.aborted;
+  if (signal.aborted) return false;
+  return await new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      resolve(false);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 type QueuedRun = {
@@ -1115,6 +1141,7 @@ export class AgentRunner {
       ENV_MODEL_TOTAL_TIMEOUT_MS > 0
         ? ENV_MODEL_TOTAL_TIMEOUT_MS
         : Math.max(0, Math.floor((profile as any).runtime?.modelTotalTimeoutMs ?? 0));
+    const modelRequestMaxRetries = Math.max(0, Math.floor((profile as any).runtime?.modelRequestMaxRetries ?? 0));
 
     const assistant = await this.apiClient.createContextItem({
       workspaceId: run.workspaceId,
@@ -1139,6 +1166,7 @@ export class AgentRunner {
       activeRunId: run.runId,
       activeAssistantItemId: assistant.id,
       waitingToolItemId: null,
+      runNoticeText: "",
       updatedAt: nowMs()
     });
 
@@ -1166,59 +1194,23 @@ export class AgentRunner {
     }
     const availableToolNames = new Set<string>(Object.keys(toolSet));
 
-    // 用独立 controller 承载“用户取消”和“空闲超时”两类中止。
-    // 注意: 仅将“用户取消”(signal.aborted)视为 run cancelled;空闲超时会作为错误进入失败流程。
-    const requestController = new AbortController();
-    let idleTimedOut = false;
-    let totalTimedOut = false;
-    let lastChunkAt = nowMs();
-    const onOuterAbort = () => {
-      // 透传用户取消到模型请求。
-      requestController.abort();
-    };
-    if (signal.aborted) {
-      requestController.abort();
-    } else {
-      signal.addEventListener("abort", onOuterAbort, { once: true });
-    }
-
-    let idleTimer: NodeJS.Timeout | null = null;
-    if (modelIdleTimeoutMs > 0) {
-      const checkIntervalMs = Math.max(50, Math.min(1000, Math.floor(modelIdleTimeoutMs / 4)));
-      idleTimer = setInterval(() => {
-        if (requestController.signal.aborted) return;
-        const elapsed = nowMs() - lastChunkAt;
-        if (elapsed < modelIdleTimeoutMs) return;
-        idleTimedOut = true;
-        requestController.abort();
-      }, checkIntervalMs);
-    }
-
-    let totalTimer: NodeJS.Timeout | null = null;
-    if (modelTotalTimeoutMs > 0) {
-      totalTimer = setTimeout(() => {
-        if (requestController.signal.aborted) return;
-        totalTimedOut = true;
-        requestController.abort();
-      }, modelTotalTimeoutMs);
-    }
-
-    const request: Record<string, unknown> = {
+    const requestBase: Record<string, unknown> = {
       model,
       system: context.system || undefined,
       messages: context.messages,
-      tools: toolSet,
-      abortSignal: requestController.signal
+      tools: toolSet
     };
 
     if (Object.keys(runtimeOptions.aiSdk).length > 0) {
-      Object.assign(request, runtimeOptions.aiSdk);
+      Object.assign(requestBase, runtimeOptions.aiSdk);
     }
     if (Object.keys(runtimeOptions.providerOptions).length > 0) {
-      request.providerOptions = {
+      requestBase.providerOptions = {
         [runtimeOptions.providerKey]: runtimeOptions.providerOptions
       };
     }
+    // 自定义重试策略由本文件控制,禁用 AI SDK 内建重试避免双重重试。
+    requestBase.maxRetries = 0;
 
     let text = "";
     const toolCalls: ToolCall[] = [];
@@ -1241,68 +1233,273 @@ export class AgentRunner {
           step,
           itemId: assistant.id
         },
-        request
+        request: requestBase,
+        retryPolicy: {
+          firstBackoffMs: MODEL_RETRY_BACKOFF_BASE_MS,
+          maxBackoffMs: MODEL_RETRY_BACKOFF_MAX_MS,
+          maxRetries: modelRequestMaxRetries
+        }
       }
     });
 
-    try {
-      const stream = streamText(request as any);
-      for await (const chunk of stream.fullStream as AsyncIterable<any>) {
-        if (requestController.signal.aborted) break;
-        lastChunkAt = nowMs();
-        if (!chunk || typeof chunk !== "object") continue;
-        if (chunk.type === "text-delta") {
-          const delta = String(chunk.text || "");
-          if (!delta) continue;
-          text += delta;
-          await this.apiClient.updateContextItem({
-            itemId: assistant.id,
-            status: "streaming",
-            output: {
-              type: "assistant_text",
-              text
-            },
-            updatedAt: nowMs()
-          });
-          continue;
-        }
-        if (chunk.type === "tool-call") {
-          const toolName = normalizeToolName(chunk.toolName, availableToolNames);
-          if (!toolName) continue;
-          const rawToolCallId = String(chunk.toolCallId || "").trim();
-          const toolCallId = rawToolCallId || `${turnId}_call_${toolCalls.length + 1}`;
-          const args = normalizeToolArgs(chunk.input);
-          toolCalls.push({ toolName, toolCallId, args });
-          continue;
-        }
-        if (chunk.type === "finish") {
-          responseTotalTokens =
-            extractTotalTokens((chunk as Record<string, unknown>).usage) ??
-            extractTotalTokens((chunk as Record<string, unknown>).totalUsage) ??
-            responseTotalTokens;
-          continue;
-        }
-        if (chunk.type === "error") {
-          const message = chunk.error instanceof Error ? chunk.error.message : String(chunk.error || "stream error");
-          throw new Error(message);
-        }
-      }
-
+    let retryCount = 0;
+    let successfulStream: any = null;
+    while (true) {
       if (signal.aborted) {
         return { aborted: true as const, assistantItemId: assistant.id };
       }
-      if (totalTimedOut) {
-        throw new Error(`model total timeout after ${modelTotalTimeoutMs}ms`);
-      }
-      if (idleTimedOut) {
-        throw new Error(`model idle timeout after ${modelIdleTimeoutMs}ms`);
+
+      if (retryCount > 0) {
+        try {
+          await this.apiClient.updateRunState({
+            workspaceId: run.workspaceId,
+            sessionId: run.sessionId,
+            status: "running",
+            activeRunId: run.runId,
+            activeAssistantItemId: assistant.id,
+            waitingToolItemId: null,
+            runNoticeText: "",
+            updatedAt: nowMs()
+          });
+        } catch {
+          // ignore notice clear failure
+        }
       }
 
-      if (responseTotalTokens == null) {
-        responseTotalTokens = await readStreamTotalTokens(stream);
+      // 用独立 controller 承载“用户取消”和“空闲/总超时”中止。
+      // 仅将“用户取消”(signal.aborted)视为 run cancelled。
+      const requestController = new AbortController();
+      let idleTimedOut = false;
+      let totalTimedOut = false;
+      let lastChunkAt = nowMs();
+      let attemptReceivedAnyChunk = false;
+
+      const onOuterAbort = () => {
+        requestController.abort();
+      };
+      if (signal.aborted) {
+        requestController.abort();
+      } else {
+        signal.addEventListener("abort", onOuterAbort, { once: true });
       }
 
-      const recognizedCalls = toolCalls;
+      let idleTimer: NodeJS.Timeout | null = null;
+      if (modelIdleTimeoutMs > 0) {
+        const checkIntervalMs = Math.max(50, Math.min(1000, Math.floor(modelIdleTimeoutMs / 4)));
+        idleTimer = setInterval(() => {
+          if (requestController.signal.aborted) return;
+          const elapsed = nowMs() - lastChunkAt;
+          if (elapsed < modelIdleTimeoutMs) return;
+          idleTimedOut = true;
+          requestController.abort();
+        }, checkIntervalMs);
+      }
+
+      let totalTimer: NodeJS.Timeout | null = null;
+      if (modelTotalTimeoutMs > 0) {
+        totalTimer = setTimeout(() => {
+          if (requestController.signal.aborted) return;
+          totalTimedOut = true;
+          requestController.abort();
+        }, modelTotalTimeoutMs);
+      }
+
+      const request: Record<string, unknown> = {
+        ...requestBase,
+        abortSignal: requestController.signal
+      };
+
+      try {
+        const stream = streamText(request as any);
+        successfulStream = stream;
+        for await (const chunk of stream.fullStream as AsyncIterable<any>) {
+          if (requestController.signal.aborted) break;
+          attemptReceivedAnyChunk = true;
+          lastChunkAt = nowMs();
+          if (!chunk || typeof chunk !== "object") continue;
+          if (chunk.type === "text-delta") {
+            const delta = String(chunk.text || "");
+            if (!delta) continue;
+            text += delta;
+            await this.apiClient.updateContextItem({
+              itemId: assistant.id,
+              status: "streaming",
+              output: {
+                type: "assistant_text",
+                text
+              },
+              updatedAt: nowMs()
+            });
+            continue;
+          }
+          if (chunk.type === "tool-call") {
+            const toolName = normalizeToolName(chunk.toolName, availableToolNames);
+            if (!toolName) continue;
+            const rawToolCallId = String(chunk.toolCallId || "").trim();
+            const toolCallId = rawToolCallId || `${turnId}_call_${toolCalls.length + 1}`;
+            const args = normalizeToolArgs(chunk.input);
+            toolCalls.push({ toolName, toolCallId, args });
+            continue;
+          }
+          if (chunk.type === "finish") {
+            responseTotalTokens =
+              extractTotalTokens((chunk as Record<string, unknown>).usage) ??
+              extractTotalTokens((chunk as Record<string, unknown>).totalUsage) ??
+              responseTotalTokens;
+            continue;
+          }
+          if (chunk.type === "error") {
+            const message = chunk.error instanceof Error ? chunk.error.message : String(chunk.error || "stream error");
+            throw new Error(message);
+          }
+        }
+
+        if (signal.aborted) {
+          return { aborted: true as const, assistantItemId: assistant.id };
+        }
+        if (totalTimedOut) {
+          throw new Error(`model total timeout after ${modelTotalTimeoutMs}ms`);
+        }
+        if (idleTimedOut) {
+          throw new Error(`model idle timeout after ${modelIdleTimeoutMs}ms`);
+        }
+
+        break;
+      } catch (err) {
+        if (signal.aborted) {
+          return { aborted: true as const, assistantItemId: assistant.id };
+        }
+        if (totalTimedOut) {
+          err = new Error(`model total timeout after ${modelTotalTimeoutMs}ms`);
+        } else if (idleTimedOut) {
+          err = new Error(`model idle timeout after ${modelIdleTimeoutMs}ms`);
+        }
+        const message = err instanceof Error ? err.message : String(err);
+
+        const canRetry = !attemptReceivedAnyChunk && retryCount < modelRequestMaxRetries;
+        if (canRetry) {
+          const delayMs = computeRetryBackoffMs(retryCount);
+          const retryAttempt = retryCount + 1;
+          const noticeText = `Request failed, retrying in ${Math.floor(delayMs / 1000)}s (${retryAttempt}/${modelRequestMaxRetries}): ${message}`;
+          try {
+            await this.apiClient.updateRunState({
+              workspaceId: run.workspaceId,
+              sessionId: run.sessionId,
+              status: "running",
+              activeRunId: run.runId,
+              activeAssistantItemId: assistant.id,
+              waitingToolItemId: null,
+              runNoticeText: noticeText,
+              updatedAt: nowMs()
+            });
+          } catch {
+            // ignore notice update failure
+          }
+
+          await writeItemLog({
+            logger: this.logger,
+            workspacePath: run.workspacePath,
+            kind: "assistant",
+            itemId: assistant.id,
+            payload: {
+              status: "retrying",
+              meta: {
+                workspaceId: run.workspaceId,
+                sessionId: run.sessionId,
+                runId: run.runId,
+                turnId,
+                step,
+                itemId: assistant.id,
+                retryAttempt,
+                maxRetries: modelRequestMaxRetries,
+                nextRetryInMs: delayMs
+              },
+              response: {
+                error: message
+              }
+            }
+          });
+
+          retryCount = retryAttempt;
+          const continueRunning = await sleepMsWithAbort(delayMs, signal);
+          if (!continueRunning) {
+            return { aborted: true as const, assistantItemId: assistant.id };
+          }
+          continue;
+        }
+
+        const finalMessage = retryCount > 0 ? `failed after ${retryCount} retries: ${message}` : message;
+        const failedText = text.trim().length > 0 ? `${text}\n\n[run] ${finalMessage}` : `[run] ${finalMessage}`;
+        try {
+          await this.apiClient.updateRunState({
+            workspaceId: run.workspaceId,
+            sessionId: run.sessionId,
+            status: "running",
+            activeRunId: run.runId,
+            activeAssistantItemId: assistant.id,
+            waitingToolItemId: null,
+            runNoticeText: "",
+            updatedAt: nowMs()
+          });
+        } catch {
+          // ignore notice clear failure
+        }
+        try {
+          await this.apiClient.updateContextItem({
+            itemId: assistant.id,
+            status: "failed",
+            output: {
+              type: "assistant_text",
+              text: failedText
+            },
+            updatedAt: nowMs()
+          });
+        } catch {
+          // 忽略更新失败，保持原始异常抛出
+        }
+        await writeItemLog({
+          logger: this.logger,
+          workspacePath: run.workspacePath,
+          kind: "assistant",
+          itemId: assistant.id,
+          payload: {
+            status: "failed",
+            startedAt,
+            finishedAt: nowMs(),
+            meta: {
+              workspaceId: run.workspaceId,
+              sessionId: run.sessionId,
+              runId: run.runId,
+              turnId,
+              step,
+              itemId: assistant.id,
+              retries: retryCount
+            },
+            request,
+            response: {
+              text,
+              toolCalls,
+              error: finalMessage
+            }
+          }
+        });
+        throw new Error(finalMessage);
+      } finally {
+        if (idleTimer) clearInterval(idleTimer);
+        if (totalTimer) clearTimeout(totalTimer);
+        try {
+          signal.removeEventListener("abort", onOuterAbort);
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    if (responseTotalTokens == null && successfulStream) {
+      responseTotalTokens = await readStreamTotalTokens(successfulStream);
+    }
+
+    const recognizedCalls = toolCalls;
       let prevId = assistant.id;
       for (const call of recognizedCalls) {
         const signature = toolSignature(call.toolName, call.args);
@@ -1381,7 +1578,7 @@ export class AgentRunner {
             step,
             itemId: assistant.id
           },
-          request,
+          request: requestBase,
           response: {
             text,
             toolCalls: recognizedCalls,
@@ -1398,70 +1595,11 @@ export class AgentRunner {
         activeAssistantItemId: null,
         waitingToolItemId: null,
         lastResponseTotalTokens: responseTotalTokens,
+        runNoticeText: "",
         updatedAt: nowMs()
       });
 
       return { aborted: false as const, toolCallCount: recognizedCalls.length, assistantItemId: assistant.id };
-    } catch (err) {
-      if (signal.aborted) {
-        return { aborted: true as const, assistantItemId: assistant.id };
-      }
-      if (totalTimedOut) {
-        err = new Error(`model total timeout after ${modelTotalTimeoutMs}ms`);
-      } else if (idleTimedOut) {
-        err = new Error(`model idle timeout after ${modelIdleTimeoutMs}ms`);
-      }
-      const message = err instanceof Error ? err.message : String(err);
-      const failedText = text.trim().length > 0 ? `${text}\n\n[run] ${message}` : `[run] ${message}`;
-      try {
-        await this.apiClient.updateContextItem({
-          itemId: assistant.id,
-          status: "failed",
-          output: {
-            type: "assistant_text",
-            text: failedText
-          },
-          updatedAt: nowMs()
-        });
-      } catch {
-        // 忽略更新失败，保持原始异常抛出
-      }
-      await writeItemLog({
-        logger: this.logger,
-        workspacePath: run.workspacePath,
-        kind: "assistant",
-        itemId: assistant.id,
-        payload: {
-          status: "failed",
-          startedAt,
-          finishedAt: nowMs(),
-          meta: {
-            workspaceId: run.workspaceId,
-            sessionId: run.sessionId,
-            runId: run.runId,
-            turnId,
-            step,
-            itemId: assistant.id
-          },
-          request,
-          response: {
-            text,
-            toolCalls,
-            error: message
-          }
-        }
-      });
-      throw err;
-    } finally {
-      if (idleTimer) clearInterval(idleTimer);
-      if (totalTimer) clearTimeout(totalTimer);
-      // 避免 event listener 泄漏。
-      try {
-        signal.removeEventListener("abort", onOuterAbort);
-      } catch {
-        // ignore
-      }
-    }
   }
 
   private async processRun(run: QueuedRun, signal: AbortSignal) {
@@ -1479,6 +1617,7 @@ export class AgentRunner {
         activeRunId: run.runId,
         activeAssistantItemId: null,
         waitingToolItemId: null,
+        runNoticeText: "",
         updatedAt: nowMs()
       });
 

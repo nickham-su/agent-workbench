@@ -55,6 +55,8 @@ const AGENT_GLOBAL_PROMPT_MAX_BYTES = 32 * 1024;
 
 // Node.js setTimeout 上限接近 2^31-1,超过后会出现不符合预期的行为。
 const RUNTIME_TIMEOUT_MS_MAX = 2_147_483_647;
+const RUNTIME_MODEL_REQUEST_MAX_RETRIES_DEFAULT = 0;
+const RUNTIME_MODEL_REQUEST_MAX_RETRIES_MAX = 100;
 const RUNTIME_MAX_CONTEXT_TOKENS_DEFAULT = 128_000;
 const RUNTIME_MAX_CONTEXT_TOKENS_MAX = 10_000_000;
 const RUNTIME_AUTO_COMPACT_THRESHOLD_DEFAULT = 80;
@@ -285,6 +287,35 @@ function normalizeRuntimeTimeoutMsForUpdate(raw: unknown, field: string) {
   }
   if (v > RUNTIME_TIMEOUT_MS_MAX) {
     throw new HttpError(400, `${field} is too large`, "AGENT_RUNTIME_TIMEOUT_TOO_LARGE");
+  }
+  return v;
+}
+
+function normalizeModelRequestMaxRetriesFromStored(raw: unknown) {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n)) return RUNTIME_MODEL_REQUEST_MAX_RETRIES_DEFAULT;
+  const v = Math.floor(n);
+  if (v < 0 || v > RUNTIME_MODEL_REQUEST_MAX_RETRIES_MAX) {
+    return RUNTIME_MODEL_REQUEST_MAX_RETRIES_DEFAULT;
+  }
+  return v;
+}
+
+function normalizeModelRequestMaxRetriesForUpdate(raw: unknown, field: string) {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n)) {
+    throw new HttpError(400, `${field} must be a finite number`, "AGENT_RUNTIME_MAX_RETRIES_INVALID");
+  }
+  const v = Math.floor(n);
+  if (v !== n) {
+    throw new HttpError(400, `${field} must be an integer`, "AGENT_RUNTIME_MAX_RETRIES_INVALID");
+  }
+  if (v < 0 || v > RUNTIME_MODEL_REQUEST_MAX_RETRIES_MAX) {
+    throw new HttpError(
+      400,
+      `${field} must be between 0 and ${RUNTIME_MODEL_REQUEST_MAX_RETRIES_MAX}`,
+      "AGENT_RUNTIME_MAX_RETRIES_INVALID"
+    );
   }
   return v;
 }
@@ -690,12 +721,14 @@ function getAgentRuntimeSettingsStored(ctx: AppContext) {
   const value = row?.value as Partial<AgentRuntimeSettingsStored> | undefined;
   const modelIdleTimeoutMs = normalizeRuntimeTimeoutMsFromStored(value?.modelIdleTimeoutMs);
   const modelTotalTimeoutMs = normalizeRuntimeTimeoutMsFromStored(value?.modelTotalTimeoutMs);
+  const modelRequestMaxRetries = normalizeModelRequestMaxRetriesFromStored(value?.modelRequestMaxRetries);
   const maxContextTokens = normalizeMaxContextTokensFromStored(value?.maxContextTokens);
   const autoCompactThresholdPct = normalizeAutoCompactThresholdPctFromStored(value?.autoCompactThresholdPct);
   return {
     settings: {
       modelIdleTimeoutMs,
       modelTotalTimeoutMs,
+      modelRequestMaxRetries,
       maxContextTokens,
       autoCompactThresholdPct
     },
@@ -822,6 +855,7 @@ export function getAgentRuntimeSettings(ctx: AppContext): AgentRuntimeSettings {
   return {
     modelIdleTimeoutMs: loaded.settings.modelIdleTimeoutMs,
     modelTotalTimeoutMs: loaded.settings.modelTotalTimeoutMs,
+    modelRequestMaxRetries: loaded.settings.modelRequestMaxRetries,
     maxContextTokens: loaded.settings.maxContextTokens,
     autoCompactThresholdPct: loaded.settings.autoCompactThresholdPct,
     updatedAt: loaded.updatedAt
@@ -844,6 +878,10 @@ export function updateAgentRuntimeSettings(
     (body as any).modelTotalTimeoutMs !== undefined
       ? normalizeRuntimeTimeoutMsForUpdate((body as any).modelTotalTimeoutMs, "modelTotalTimeoutMs")
       : current.modelTotalTimeoutMs;
+  const modelRequestMaxRetries =
+    (body as any).modelRequestMaxRetries !== undefined
+      ? normalizeModelRequestMaxRetriesForUpdate((body as any).modelRequestMaxRetries, "modelRequestMaxRetries")
+      : current.modelRequestMaxRetries;
   const maxContextTokens =
     (body as any).maxContextTokens !== undefined
       ? normalizeMaxContextTokensForUpdate((body as any).maxContextTokens, "maxContextTokens")
@@ -860,16 +898,21 @@ export function updateAgentRuntimeSettings(
     {
       modelIdleTimeoutMs,
       modelTotalTimeoutMs,
+      modelRequestMaxRetries,
       maxContextTokens,
       autoCompactThresholdPct
     },
     updatedAt
   );
 
-  logger.info({ modelIdleTimeoutMs, modelTotalTimeoutMs, maxContextTokens, autoCompactThresholdPct, updatedAt }, "agent runtime settings updated");
+  logger.info(
+    { modelIdleTimeoutMs, modelTotalTimeoutMs, modelRequestMaxRetries, maxContextTokens, autoCompactThresholdPct, updatedAt },
+    "agent runtime settings updated"
+  );
   return {
     modelIdleTimeoutMs,
     modelTotalTimeoutMs,
+    modelRequestMaxRetries,
     maxContextTokens,
     autoCompactThresholdPct,
     updatedAt

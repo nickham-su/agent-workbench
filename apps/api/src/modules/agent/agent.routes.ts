@@ -495,6 +495,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
           activeAssistantItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
           waitingToolItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
           lastResponseTotalTokens: Type.Optional(Type.Union([Type.Number({ minimum: 0 }), Type.Null()])),
+          runNoticeText: Type.Optional(Type.Union([Type.String(), Type.Null()])),
           updatedAt: Type.Optional(Type.Number())
         }),
         response: { 200: Type.Object({ ok: Type.Boolean() }), 401: ErrorResponseSchema }
@@ -510,6 +511,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
         activeAssistantItemId: number | null;
         waitingToolItemId: number | null;
         lastResponseTotalTokens?: number | null;
+        runNoticeText?: string | null;
         updatedAt?: number;
       };
       params.service.updateRunStateFromWorker(body);
@@ -830,6 +832,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
             runtime: Type.Object({
               modelIdleTimeoutMs: Type.Integer({ minimum: 0 }),
               modelTotalTimeoutMs: Type.Integer({ minimum: 0 }),
+              modelRequestMaxRetries: Type.Integer({ minimum: 0, maximum: 100 }),
               maxContextTokens: Type.Integer({ minimum: 1 }),
               autoCompactThresholdPct: Type.Integer({ minimum: 50, maximum: 90 }),
               updatedAt: Type.Number()

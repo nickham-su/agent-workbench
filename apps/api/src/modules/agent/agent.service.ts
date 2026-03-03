@@ -352,6 +352,17 @@ const ARCHIVE_FILE_NAME_RE = /^\d{8}\.log$/;
 const ARCHIVABLE_ITEM_STATUS = new Set<AgentContextItemStatus>(["completed", "failed", "denied", "cancelled"]);
 const RUN_STATUS_SYSTEM_TEXT_PREFIX = "[run] ";
 
+function normalizeRunNoticeText(raw: unknown) {
+  if (raw == null) return "";
+  const value = String(raw)
+    .replace(/\r\n/g, "\n")
+    .replace(/\0/g, "")
+    .trim();
+  if (!value) return "";
+  if (value.length <= 1000) return value;
+  return `${value.slice(0, 1000)}...`;
+}
+
 type ArchiveCursorPayload = {
   v: 1;
   mode: "search" | "tail";
@@ -944,6 +955,7 @@ export class AgentService {
           activeRunId: runId,
           activeAssistantItemId: null,
           waitingToolItemId: null,
+          runNoticeText: "",
           updatedAt: createdAt,
           appliedItemId: item.id
         });
@@ -995,6 +1007,7 @@ export class AgentService {
       activeAssistantItemId: state.activeAssistantItemId,
       waitingToolItemId: state.waitingToolItemId,
       lastResponseTotalTokens: state.lastResponseTotalTokens,
+      runNoticeText: state.runNoticeText,
       nonTerminalItemIds,
       updatedAt: state.updatedAt,
       appliedItemId: state.appliedItemId
@@ -1229,6 +1242,7 @@ export class AgentService {
     activeAssistantItemId: number | null;
     waitingToolItemId: number | null;
     lastResponseTotalTokens?: number | null;
+    runNoticeText?: string | null;
     updatedAt?: number;
   }) {
     const currentState = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
@@ -1252,14 +1266,21 @@ export class AgentService {
     const ts = params.updatedAt ?? nowMs();
     const appliedItemId = getLatestSessionItemId(this.ctx.db, params.workspaceId, params.sessionId);
     const hasLastResponseTotalTokens = Object.prototype.hasOwnProperty.call(params, "lastResponseTotalTokens");
+    const hasRunNoticeText = Object.prototype.hasOwnProperty.call(params, "runNoticeText");
+    const shouldClearNoticeWhenIdle = params.status === "idle" && !hasRunNoticeText;
     updateRunState(this.ctx.db, {
       workspaceId: params.workspaceId,
       sessionId: params.sessionId,
       status: params.status,
-      activeRunId: params.activeRunId,
+      activeRunId,
       activeAssistantItemId: params.activeAssistantItemId,
       waitingToolItemId: params.waitingToolItemId,
       ...(hasLastResponseTotalTokens ? { lastResponseTotalTokens: params.lastResponseTotalTokens ?? null } : {}),
+      ...(hasRunNoticeText
+        ? { runNoticeText: normalizeRunNoticeText(params.runNoticeText) }
+        : shouldClearNoticeWhenIdle
+          ? { runNoticeText: "" }
+          : {}),
       updatedAt: ts,
       appliedItemId
     });
@@ -1451,6 +1472,7 @@ export class AgentService {
         activeRunId: runId,
         activeAssistantItemId: null,
         waitingToolItemId: null,
+        runNoticeText: "",
         updatedAt: createdAt,
         appliedItemId: item.id
       });

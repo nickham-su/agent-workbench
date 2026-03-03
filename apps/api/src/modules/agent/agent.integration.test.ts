@@ -179,7 +179,11 @@ async function sendMessage(app: FastifyInstance, params: { sessionId: string; wo
 async function getRunState(app: FastifyInstance, sessionId: string) {
   const res = await app.inject({ method: "GET", url: `/api/agent/sessions/${sessionId}/run-state` });
   assert.equal(res.statusCode, 200, `get run-state failed: ${res.body}`);
-  return res.json() as { status: "idle" | "running" | "waiting_permission"; activeRunId: string | null };
+  return res.json() as {
+    status: "idle" | "running" | "waiting_permission";
+    activeRunId: string | null;
+    runNoticeText: string;
+  };
 }
 
 async function waitRunIdle(app: FastifyInstance, sessionId: string, timeoutMs = 6_000) {
@@ -252,6 +256,7 @@ async function updateRunStateInternal(params: {
   activeRunId: string | null;
   activeAssistantItemId: number | null;
   waitingToolItemId: number | null;
+  runNoticeText?: string | null;
 }) {
   const res = await params.app.inject({
     method: "POST",
@@ -265,7 +270,8 @@ async function updateRunStateInternal(params: {
       status: params.status,
       activeRunId: params.activeRunId,
       activeAssistantItemId: params.activeAssistantItemId,
-      waitingToolItemId: params.waitingToolItemId
+      waitingToolItemId: params.waitingToolItemId,
+      ...(Object.prototype.hasOwnProperty.call(params, "runNoticeText") ? { runNoticeText: params.runNoticeText } : {})
     }
   });
   assert.equal(res.statusCode, 200, `update internal run-state failed: ${res.body}`);
@@ -705,7 +711,8 @@ test("agent runtime settings 可通过 execution-profile 下发", async () => {
     url: "/api/settings/agent/runtime",
     payload: {
       modelIdleTimeoutMs: 1234,
-      modelTotalTimeoutMs: 5678
+      modelTotalTimeoutMs: 5678,
+      modelRequestMaxRetries: 4
     }
   });
   assert.equal(runtimeRes.statusCode, 200, `update agent runtime settings failed: ${runtimeRes.body}`);
@@ -734,8 +741,46 @@ test("agent runtime settings 可通过 execution-profile 下发", async () => {
   const profile = profileRes.json() as any;
   assert.equal(profile.runtime?.modelIdleTimeoutMs, 1234);
   assert.equal(profile.runtime?.modelTotalTimeoutMs, 5678);
+  assert.equal(profile.runtime?.modelRequestMaxRetries, 4);
   assert.equal(typeof profile.runtime?.maxContextTokens, "number");
   assert.equal(typeof profile.runtime?.autoCompactThresholdPct, "number");
+});
+
+test("run-state 支持 runNoticeText 更新与 idle 自动清空", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+
+  await updateRunStateInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "running",
+    activeRunId: runId,
+    activeAssistantItemId: null,
+    waitingToolItemId: null,
+    runNoticeText: "Request failed, retrying in 2s (1/3): timeout"
+  });
+
+  const runningState = await getRunState(fixture.app, session.id);
+  assert.equal(runningState.status, "running");
+  assert.equal(runningState.runNoticeText, "Request failed, retrying in 2s (1/3): timeout");
+
+  await updateRunStateInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "idle",
+    activeRunId: null,
+    activeAssistantItemId: null,
+    waitingToolItemId: null
+  });
+
+  const idleState = await getRunState(fixture.app, session.id);
+  assert.equal(idleState.status, "idle");
+  assert.equal(idleState.runNoticeText, "");
 });
 
 test("single-call model profile 始终使用全局默认模型", async () => {

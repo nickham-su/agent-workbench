@@ -300,6 +300,8 @@ export default {
       chooseSessionTitle: "Choose a session to continue",
       noSessionToChoose: "No previous session available",
       sessionEmptyPreview: "(No user messages in this session)",
+      runNoticeLabel: "Run notice",
+      runNoticeEmpty: "No runtime notice",
       lastTotalTokens: "Total Tokens",
       backToParent: "Back to parent session",
       parentSessionMissing: "Parent session not found",
@@ -961,6 +963,10 @@ export default {
         modelIdleTimeoutMs: {
           label: "Model idle timeout (seconds)",
           help: "Abort when no streaming chunk arrives for a period (including reasoning/tool-call/finish). Decimal seconds are supported; 0 disables."
+        },
+        modelRequestMaxRetries: {
+          label: "Model max retries",
+          help: "Automatically retries only when a request fails before receiving the first chunk. 0 disables retries."
         }
       }
     },
