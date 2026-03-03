@@ -28,6 +28,7 @@ const app = await createApp({
   dataDir: env.dataDir,
   fileMaxBytes: env.fileMaxBytes,
   version,
+  logLevel: process.env.AWB_LOG_LEVEL?.trim() || "info",
   serveWeb: env.serveWeb,
   webDistDir: env.webDistDir,
   credentialMasterKey: credentialMasterKey.key,

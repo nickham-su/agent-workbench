@@ -21,6 +21,7 @@ import { registerAgentModule } from "../modules/agent/agent.module.js";
 export async function createApp(ctx: AppContext) {
   const app = Fastify({
     logger: {
+      level: ctx.logLevel || "info",
       transport: {
         target: "pino-pretty",
         options: { colorize: true }

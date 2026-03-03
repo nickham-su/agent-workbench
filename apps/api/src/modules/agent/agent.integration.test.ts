@@ -41,6 +41,7 @@ async function createFixture(options?: { agentWorkerConcurrency?: number }): Pro
     dataDir,
     fileMaxBytes: 1024 * 1024,
     version: "test",
+    logLevel: "error",
     serveWeb: false,
     webDistDir: null,
     credentialMasterKey: Buffer.alloc(32, 7),
@@ -57,7 +58,6 @@ async function createFixture(options?: { agentWorkerConcurrency?: number }): Pro
     agentInternalToken: internalToken,
     agentApiOrigin: "http://127.0.0.1:0"
   });
-
   const workspaceId = newSortableId("ws");
   const workspaceDirName = newSortableId("workspace");
   const workspacePath = workspaceRoot(dataDir, workspaceDirName);

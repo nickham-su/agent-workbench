@@ -146,6 +146,7 @@ async function createFixture(): Promise<Fixture> {
     dataDir,
     fileMaxBytes: 1024 * 1024,
     version: "test",
+    logLevel: "error",
     serveWeb: false,
     webDistDir: null,
     credentialMasterKey: Buffer.alloc(32, 7),
@@ -162,7 +163,6 @@ async function createFixture(): Promise<Fixture> {
     agentInternalToken: "worker-integration-token",
     agentApiOrigin: `http://127.0.0.1:${apiPort}`
   });
-
   const workspaceId = newSortableId("ws");
   const workspaceDirName = newSortableId("workspace");
   const workspacePath = workspaceRoot(dataDir, workspaceDirName);

@@ -7,6 +7,7 @@ export type AppContext = {
   dataDir: string;
   fileMaxBytes: number;
   version: string;
+  logLevel?: string;
   serveWeb: boolean;
   webDistDir: string | null;
   credentialMasterKey: Buffer;
