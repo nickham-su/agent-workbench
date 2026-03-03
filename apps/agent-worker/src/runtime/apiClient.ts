@@ -48,7 +48,7 @@ export type ExecutionProfile = {
     summary: string;
     prompt: string;
     tools: Array<
-      "bash" | "read" | "write" | "apply_patch" | "todolist" | "subtask" | "archive_search" | "archive_read" | "archive_tail"
+      "bash" | "read" | "write" | "apply_patch" | "todolist" | "subtask" | "archive_search" | "archive_read"
     >;
     mcpServers: string[];
     permissions: {
@@ -296,57 +296,30 @@ export class AgentApiClient {
     workspaceId: string;
     sessionId: string;
     query: string;
-    cursor?: string;
+    beforePos?: number;
     maxHits?: number;
     maxChars?: number;
     regex?: boolean;
   }) {
-    return this.request<{
-      hits: Array<{ file: string; line: number; preview: string }>;
-      nextCursor: string | null;
-      hasMore: boolean;
-      truncated: boolean;
-    }>("/api/internal/agent/archive/search", {
+    const res = await this.request<{ text: string }>("/api/internal/agent/archive/search", {
       method: "POST",
       body: input
     });
+    return res.text;
   }
 
   async archiveRead(input: {
     workspaceId: string;
     sessionId: string;
-    file: string;
-    startLine: number;
+    beforePos?: number;
     lineCount?: number;
     maxChars?: number;
   }) {
-    return this.request<{
-      lines: Array<{ line: number; text: string; truncated: boolean }>;
-      nextStartLine: number | null;
-      hasMore: boolean;
-      truncated: boolean;
-    }>("/api/internal/agent/archive/read", {
+    const res = await this.request<{ text: string }>("/api/internal/agent/archive/read", {
       method: "POST",
       body: input
     });
-  }
-
-  async archiveTail(input: {
-    workspaceId: string;
-    sessionId: string;
-    n: number;
-    cursor?: string;
-    maxChars?: number;
-  }) {
-    return this.request<{
-      lines: Array<{ file: string; line: number; text: string }>;
-      nextCursor: string | null;
-      hasMore: boolean;
-      truncated: boolean;
-    }>("/api/internal/agent/archive/tail", {
-      method: "POST",
-      body: input
-    });
+    return res.text;
   }
 
   async startSubtaskRun(input: {

@@ -457,7 +457,7 @@ function toAgentProvidersSettingsView(settings: AgentProvidersSettingsStored, up
 }
 
 function normalizeAgentTools(raw: unknown): AgentToolName[] {
-  if (!Array.isArray(raw)) return ["bash", "read", "write", "apply_patch", "todolist", "subtask", "archive_search", "archive_read", "archive_tail"];
+  if (!Array.isArray(raw)) return ["bash", "read", "write", "apply_patch", "todolist", "subtask", "archive_search", "archive_read"];
   const out: AgentToolName[] = [];
   const seen = new Set<AgentToolName>();
   for (const item of raw) {
@@ -469,14 +469,13 @@ function normalizeAgentTools(raw: unknown): AgentToolName[] {
       item !== "todolist" &&
       item !== "subtask" &&
       item !== "archive_search" &&
-      item !== "archive_read" &&
-      item !== "archive_tail"
+      item !== "archive_read"
     ) continue;
     if (seen.has(item)) continue;
     seen.add(item);
     out.push(item);
   }
-  return out.length > 0 ? out : ["bash", "read", "write", "apply_patch", "todolist", "subtask", "archive_search", "archive_read", "archive_tail"];
+  return out.length > 0 ? out : ["bash", "read", "write", "apply_patch", "todolist", "subtask", "archive_search", "archive_read"];
 }
 
 function normalizeServerId(raw: unknown) {

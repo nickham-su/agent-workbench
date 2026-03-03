@@ -232,8 +232,7 @@ const DEFAULT_TOOLS: AgentToolName[] = [
   "todolist",
   "subtask",
   "archive_search",
-  "archive_read",
-  "archive_tail"
+  "archive_read"
 ];
 
 const toolOptions = computed(() => [
@@ -244,8 +243,7 @@ const toolOptions = computed(() => [
   { label: t("settings.agentProfiles.tools.todolist"), value: "todolist" },
   { label: t("settings.agentProfiles.tools.subtask"), value: "subtask" },
   { label: t("settings.agentProfiles.tools.archiveSearch"), value: "archive_search" },
-  { label: t("settings.agentProfiles.tools.archiveRead"), value: "archive_read" },
-  { label: t("settings.agentProfiles.tools.archiveTail"), value: "archive_tail" }
+  { label: t("settings.agentProfiles.tools.archiveRead"), value: "archive_read" }
 ]);
 
 const loading = ref(false);
@@ -337,8 +335,7 @@ function normalizeTools(raw: AgentToolName[]) {
       item !== "todolist" &&
       item !== "subtask" &&
       item !== "archive_search" &&
-      item !== "archive_read" &&
-      item !== "archive_tail"
+      item !== "archive_read"
     ) continue;
     if (seen.has(item)) continue;
     seen.add(item);
@@ -447,7 +444,7 @@ function toolLabel(tool: AgentToolName) {
   if (tool === "subtask") return t("settings.agentProfiles.tools.subtask");
   if (tool === "archive_search") return t("settings.agentProfiles.tools.archiveSearch");
   if (tool === "archive_read") return t("settings.agentProfiles.tools.archiveRead");
-  return t("settings.agentProfiles.tools.archiveTail");
+  return tool;
 }
 
 function globalPromptLabel(id: string) {

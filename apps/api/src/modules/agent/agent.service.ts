@@ -137,9 +137,9 @@ function toolArgsSchema(toolName: AgentContextToolName) {
       additionalProperties: false,
       properties: {
         query: { type: "string", minLength: 1 },
-        cursor: { type: "string", minLength: 1 },
-        maxHits: { type: "number", minimum: 1 },
-        maxChars: { type: "number", minimum: 1 },
+        beforePos: { type: "integer", minimum: 2 },
+        maxHits: { type: "integer", minimum: 1, maximum: 100 },
+        maxChars: { type: "integer", minimum: 1000, maximum: 10000 },
         regex: { type: "boolean" }
       }
     };
@@ -147,25 +147,12 @@ function toolArgsSchema(toolName: AgentContextToolName) {
   if (toolName === "archive_read") {
     return {
       type: "object",
-      required: ["file", "startLine"],
+      required: [],
       additionalProperties: false,
       properties: {
-        file: { type: "string", minLength: 1 },
-        startLine: { type: "number", minimum: 1 },
-        lineCount: { type: "number", minimum: 1 },
-        maxChars: { type: "number", minimum: 1 }
-      }
-    };
-  }
-  if (toolName === "archive_tail") {
-    return {
-      type: "object",
-      required: ["n"],
-      additionalProperties: false,
-      properties: {
-        n: { type: "number", minimum: 1 },
-        maxChars: { type: "number", minimum: 1 },
-        cursor: { type: "string", minLength: 1 }
+        beforePos: { type: "integer", minimum: 2 },
+        lineCount: { type: "integer", minimum: 1, maximum: 200 },
+        maxChars: { type: "integer", minimum: 1000, maximum: 10000 }
       }
     };
   }
@@ -287,13 +274,10 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
     return "这是管理任务进度的强制工具,不是可选项。除极其简单且可一步完成的请求外,必须先用此工具给出任务清单,再开始执行。每次调用都提交完整 todos 数组,语义为全量替换,不是增量 patch。todos 从上到下即优先级,先规划再执行。在任务状态发生变化时必须立即更新清单,包括开始(in_progress),完成(completed),取消(cancelled),回退或新增任务。每项必须包含 content 和 status。content trim 后不能为空。status 仅允许 pending | in_progress | completed | cancelled。允许同时存在多个 in_progress。目标是让用户持续看到清晰、可信、实时的进度窗口,并约束执行过程可追踪,避免无计划推进。";
   }
   if (toolName === "archive_search") {
-    return "在当前会话归档日志中检索关键词。支持 cursor 继续向更早内容检索。";
+    return "在当前会话归档日志中检索关键词,输出按旧到新排序的纯文本行,每行包含 pos 前缀。可通过 beforePos 继续读取更旧命中。";
   }
   if (toolName === "archive_read") {
-    return "读取指定归档日志文件的行窗口,用于查看命中附近上下文。";
-  }
-  if (toolName === "archive_tail") {
-    return "读取归档日志最新 n 行,支持 cursor 继续向更早内容读取。返回顺序为旧到新。";
+    return "读取归档日志中的最近若干行,输出按旧到新排序的纯文本行,每行包含 pos 前缀。可通过 beforePos 限定只读更旧内容。";
   }
   if (toolName === "subtask") return options?.subtaskDescription || "在子会话中执行任务。";
   if (toolName.startsWith("mcp_")) return `调用 MCP 工具 ${toolName}`;
@@ -336,19 +320,15 @@ const WORKSPACE_AGENTS_MAX_BYTES = 32 * 1024;
 const ARCHIVE_ROOT_RELATIVE_PATH = path.join(".awb", "agent", "archive");
 const ARCHIVE_FILE_NAME_WIDTH = 8;
 const ARCHIVE_FILE_LINE_LIMIT = 100;
-const ARCHIVE_SEARCH_MAX_HITS_DEFAULT = 30;
+const ARCHIVE_SEARCH_MAX_HITS_DEFAULT = 10;
 const ARCHIVE_SEARCH_MAX_HITS_MAX = 100;
-const ARCHIVE_SEARCH_MAX_CHARS_DEFAULT = 12_000;
-const ARCHIVE_SEARCH_MAX_CHARS_MAX = 200_000;
-const ARCHIVE_READ_LINE_COUNT_DEFAULT = 80;
-const ARCHIVE_READ_LINE_COUNT_MAX = 300;
-const ARCHIVE_READ_MAX_CHARS_DEFAULT = 20_000;
-const ARCHIVE_READ_MAX_CHARS_MAX = 200_000;
-const ARCHIVE_TAIL_N_DEFAULT = 80;
-const ARCHIVE_TAIL_N_MAX = 500;
-const ARCHIVE_TAIL_MAX_CHARS_DEFAULT = 20_000;
-const ARCHIVE_TAIL_MAX_CHARS_MAX = 200_000;
+const ARCHIVE_MAX_CHARS_DEFAULT = 8_000;
+const ARCHIVE_MAX_CHARS_MIN = 1_000;
+const ARCHIVE_MAX_CHARS_MAX = 10_000;
+const ARCHIVE_READ_LINE_COUNT_DEFAULT = 40;
+const ARCHIVE_READ_LINE_COUNT_MAX = 200;
 const ARCHIVE_FILE_NAME_RE = /^\d{8}\.log$/;
+const ARCHIVE_RESULT_TRUNCATED_MARKER = "[超过最大字符数限制,从此处截断内容]";
 const ARCHIVABLE_ITEM_STATUS = new Set<AgentContextItemStatus>(["completed", "failed", "denied", "cancelled"]);
 const RUN_STATUS_SYSTEM_TEXT_PREFIX = "[run] ";
 
@@ -362,13 +342,6 @@ function normalizeRunNoticeText(raw: unknown) {
   if (value.length <= 1000) return value;
   return `${value.slice(0, 1000)}...`;
 }
-
-type ArchiveCursorPayload = {
-  v: 1;
-  mode: "search" | "tail";
-  fileIndex: number;
-  line: number;
-};
 
 type ArchiveWriteSnapshot = {
   filePath: string;
@@ -405,31 +378,6 @@ function parseArchiveFileName(name: string) {
   return n;
 }
 
-function encodeArchiveCursor(payload: ArchiveCursorPayload) {
-  return Buffer.from(JSON.stringify(payload), "utf-8").toString("base64url");
-}
-
-function decodeArchiveCursor(raw: unknown, mode: ArchiveCursorPayload["mode"]): ArchiveCursorPayload | null {
-  if (typeof raw !== "string" || !raw.trim()) return null;
-  try {
-    const parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf-8")) as Partial<ArchiveCursorPayload>;
-    if (parsed.v !== 1) return null;
-    if (parsed.mode !== mode) return null;
-    const fileIndex = Number(parsed.fileIndex);
-    const line = Number(parsed.line);
-    if (!Number.isFinite(fileIndex) || !Number.isInteger(fileIndex) || fileIndex < 0) return null;
-    if (!Number.isFinite(line) || !Number.isInteger(line) || line < 0) return null;
-    return {
-      v: 1,
-      mode,
-      fileIndex,
-      line
-    };
-  } catch {
-    return null;
-  }
-}
-
 async function listArchiveFilesAsc(dirPath: string) {
   let entries: string[] = [];
   try {
@@ -448,7 +396,12 @@ async function listArchiveFilesAsc(dirPath: string) {
 function splitArchiveFileLines(text: string) {
   if (!text) return [];
   const lines = text.split(/\r?\n/);
-  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  if (/\r?\n$/.test(text)) {
+    if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+    return lines;
+  }
+  // 末行没有换行符时视为潜在半行,读取时忽略以避免并发写入噪声。
+  lines.pop();
   return lines;
 }
 
@@ -532,37 +485,55 @@ async function rollbackArchiveLinesBestEffort(snapshots: ArchiveWriteSnapshot[])
   return { reverted, skipped };
 }
 
-async function hasMoreArchiveSearchHits(params: {
-  dirPath: string;
-  files: string[];
-  query: string;
-  regex: boolean;
-  cursor: ArchiveCursorPayload;
-}) {
-  let fileIndex = params.cursor.fileIndex;
-  let lineCursor = params.cursor.line;
-  if (fileIndex >= params.files.length) {
-    fileIndex = params.files.length - 1;
-    lineCursor = Number.MAX_SAFE_INTEGER;
+function toArchivePos(fileSeq: number, lineNo: number) {
+  return (fileSeq - 1) * ARCHIVE_FILE_LINE_LIMIT + lineNo;
+}
+
+function normalizeBeforePos(raw: unknown) {
+  if (raw === undefined || raw === null || raw === "") return undefined;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 2) {
+    throw new HttpError(400, "beforePos must be an integer >= 2", "AGENT_ARCHIVE_BEFORE_POS_INVALID");
+  }
+  return parsed;
+}
+
+function fitArchiveLineWithinBudget(line: string, remainChars: number) {
+  if (remainChars <= 0) return null;
+  const lineBudget = remainChars - 1;
+  if (lineBudget <= 0) return null;
+  if (line.length <= lineBudget) return line;
+
+  const sepIndex = line.indexOf(" | ");
+  if (sepIndex >= 0) {
+    const prefix = line.slice(0, sepIndex + 3);
+    const minBudget = prefix.length + ARCHIVE_RESULT_TRUNCATED_MARKER.length;
+    if (lineBudget < minBudget) return null;
+    const body = line.slice(prefix.length);
+    const keepBody = lineBudget - minBudget;
+    return `${prefix}${body.slice(0, keepBody)}${ARCHIVE_RESULT_TRUNCATED_MARKER}`;
   }
 
-  for (let i = fileIndex; i >= 0; i -= 1) {
-    const fileName = params.files[i] || "";
-    if (!fileName) continue;
-    const filePath = path.join(params.dirPath, fileName);
-    const matches = await rgSearchInFile({
-      filePath,
-      query: params.query,
-      regex: params.regex
-    });
-    const upperExclusive = i === fileIndex ? Math.max(0, lineCursor) : Number.MAX_SAFE_INTEGER;
-    for (const match of matches) {
-      if (match.line >= upperExclusive) continue;
-      return true;
-    }
+  if (lineBudget < ARCHIVE_RESULT_TRUNCATED_MARKER.length) return null;
+  const keepPrefix = lineBudget - ARCHIVE_RESULT_TRUNCATED_MARKER.length;
+  return `${line.slice(0, keepPrefix)}${ARCHIVE_RESULT_TRUNCATED_MARKER}`;
+}
+
+function formatArchiveToolResultText(newestFirstLines: string[], maxChars: number) {
+  if (newestFirstLines.length === 0) return "";
+  const keptNewestFirst: string[] = [];
+  let chars = 0;
+
+  for (const line of newestFirstLines) {
+    const remain = maxChars - chars;
+    const fitted = fitArchiveLineWithinBudget(line, remain);
+    if (fitted == null) break;
+    keptNewestFirst.push(fitted);
+    chars += fitted.length + 1;
+    if (fitted !== line) break;
   }
 
-  return false;
+  return keptNewestFirst.reverse().join("\n");
 }
 
 function shouldIncludeSystemTextInPrompt(text: string) {
@@ -1698,7 +1669,7 @@ export class AgentService {
     workspaceId: string;
     sessionId: string;
     query: string;
-    cursor?: string;
+    beforePos?: number;
     maxHits?: number;
     maxChars?: number;
     regex?: boolean;
@@ -1711,6 +1682,7 @@ export class AgentService {
     if (!query) {
       throw new HttpError(400, "query is required", "AGENT_ARCHIVE_QUERY_REQUIRED");
     }
+    const beforePos = normalizeBeforePos(params.beforePos);
 
     const maxHits = normalizePositiveInt(params.maxHits, {
       fallback: ARCHIVE_SEARCH_MAX_HITS_DEFAULT,
@@ -1718,37 +1690,24 @@ export class AgentService {
       max: ARCHIVE_SEARCH_MAX_HITS_MAX
     });
     const maxChars = normalizePositiveInt(params.maxChars, {
-      fallback: ARCHIVE_SEARCH_MAX_CHARS_DEFAULT,
-      min: 1,
-      max: ARCHIVE_SEARCH_MAX_CHARS_MAX
+      fallback: ARCHIVE_MAX_CHARS_DEFAULT,
+      min: ARCHIVE_MAX_CHARS_MIN,
+      max: ARCHIVE_MAX_CHARS_MAX
     });
 
     const dirPath = archiveSessionDir(workspace.path, session.id);
     const files = await listArchiveFilesAsc(dirPath);
     if (files.length === 0) {
-      return {
-        hits: [] as Array<{ file: string; line: number; preview: string }>,
-        nextCursor: null as string | null,
-        hasMore: false,
-        truncated: false
-      };
+      return { text: "" };
     }
 
-    const cursor = decodeArchiveCursor(params.cursor, "search");
-    let fileIndex = files.length - 1;
-    let lineCursor = Number.MAX_SAFE_INTEGER;
-    if (cursor && cursor.fileIndex < files.length) {
-      fileIndex = cursor.fileIndex;
-      lineCursor = Math.max(0, cursor.line);
-    }
+    const newestFirstLines: string[] = [];
 
-    const hits: Array<{ file: string; line: number; preview: string }> = [];
-    let chars = 0;
-    let nextCursorPayload: ArchiveCursorPayload | null = null;
-
-    outer: for (let i = fileIndex; i >= 0; i -= 1) {
+    outer: for (let i = files.length - 1; i >= 0; i -= 1) {
       const fileName = files[i] || "";
       if (!fileName) continue;
+      const fileSeq = parseArchiveFileName(fileName);
+      if (fileSeq == null) continue;
       const filePath = path.join(dirPath, fileName);
       let matches: Array<{ line: number; preview: string }> = [];
       try {
@@ -1757,78 +1716,35 @@ export class AgentService {
           query,
           regex: params.regex === true
         });
+        if (matches.length > 0) {
+          const content = await fs.readFile(filePath, "utf-8").catch((err: any) => {
+            if (err && err.code === "ENOENT") return "";
+            throw err;
+          });
+          const stableLineCount = splitArchiveFileLines(content).length;
+          matches = matches.filter((item) => item.line <= stableLineCount);
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         throw new HttpError(400, `archive search failed: ${message}`, "AGENT_ARCHIVE_SEARCH_FAILED");
       }
 
       matches.sort((a, b) => b.line - a.line);
-
-      let upperExclusive = i === fileIndex ? lineCursor : Number.MAX_SAFE_INTEGER;
-      let lastReturnedLine = upperExclusive;
       for (const match of matches) {
-        if (match.line >= upperExclusive) continue;
-        if (hits.length >= maxHits) {
-          nextCursorPayload = { v: 1, mode: "search", fileIndex: i, line: lastReturnedLine };
-          break outer;
-        }
-
-        let preview = String(match.preview || "");
-        const remain = maxChars - chars;
-        if (remain <= 0) {
-          nextCursorPayload = { v: 1, mode: "search", fileIndex: i, line: lastReturnedLine };
-          break outer;
-        }
-        if (preview.length > remain) {
-          preview = preview.slice(0, remain);
-        }
-
-        hits.push({ file: fileName, line: match.line, preview });
-        chars += preview.length;
-        lastReturnedLine = match.line;
-        upperExclusive = match.line;
-
-        if (hits.length >= maxHits || chars >= maxChars) {
-          nextCursorPayload = { v: 1, mode: "search", fileIndex: i, line: lastReturnedLine };
-          break outer;
-        }
+        if (newestFirstLines.length >= maxHits) break outer;
+        const pos = toArchivePos(fileSeq, match.line);
+        if (beforePos != null && pos >= beforePos) continue;
+        newestFirstLines.push(`pos=${pos} | ${String(match.preview || "")}`);
       }
     }
 
-    if (nextCursorPayload) {
-      let hasMore = false;
-      try {
-        hasMore = await hasMoreArchiveSearchHits({
-          dirPath,
-          files,
-          query,
-          regex: params.regex === true,
-          cursor: nextCursorPayload
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        throw new HttpError(400, `archive search failed: ${message}`, "AGENT_ARCHIVE_SEARCH_FAILED");
-      }
-      if (!hasMore) {
-        nextCursorPayload = null;
-      }
-    }
-
-    const nextCursor = nextCursorPayload ? encodeArchiveCursor(nextCursorPayload) : null;
-
-    return {
-      hits,
-      nextCursor,
-      hasMore: nextCursor != null,
-      truncated: nextCursor != null
-    };
+    return { text: formatArchiveToolResultText(newestFirstLines, maxChars) };
   }
 
   async archiveReadFromWorker(params: {
     workspaceId: string;
     sessionId: string;
-    file: string;
-    startLine: number;
+    beforePos?: number;
     lineCount?: number;
     maxChars?: number;
   }) {
@@ -1836,156 +1752,52 @@ export class AgentService {
     if (!session) throw new HttpError(404, "session not found");
     if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
     const workspace = this.ensureWorkspace(params.workspaceId);
+    const beforePos = normalizeBeforePos(params.beforePos);
 
-    const fileName = String(params.file || "").trim();
-    if (!ARCHIVE_FILE_NAME_RE.test(fileName)) {
-      throw new HttpError(400, "invalid archive file", "AGENT_ARCHIVE_FILE_INVALID");
-    }
-
-    const startLine = normalizePositiveInt(params.startLine, { fallback: 1, min: 1, max: Number.MAX_SAFE_INTEGER });
     const lineCount = normalizePositiveInt(params.lineCount, {
       fallback: ARCHIVE_READ_LINE_COUNT_DEFAULT,
       min: 1,
       max: ARCHIVE_READ_LINE_COUNT_MAX
     });
     const maxChars = normalizePositiveInt(params.maxChars, {
-      fallback: ARCHIVE_READ_MAX_CHARS_DEFAULT,
-      min: 1,
-      max: ARCHIVE_READ_MAX_CHARS_MAX
-    });
-
-    const filePath = path.join(archiveSessionDir(workspace.path, session.id), fileName);
-    let content = "";
-    try {
-      content = await fs.readFile(filePath, "utf-8");
-    } catch (err: any) {
-      if (err && err.code === "ENOENT") {
-        throw new HttpError(404, "archive file not found", "AGENT_ARCHIVE_FILE_NOT_FOUND");
-      }
-      throw err;
-    }
-
-    const allLines = splitArchiveFileLines(content);
-    const lines: Array<{ line: number; text: string; truncated: boolean }> = [];
-    let chars = 0;
-    let truncated = false;
-    for (let line = startLine; line <= allLines.length && lines.length < lineCount; line += 1) {
-      const raw = String(allLines[line - 1] || "");
-      const remain = maxChars - chars;
-      if (remain <= 0) {
-        truncated = true;
-        break;
-      }
-      let text = raw;
-      let lineTruncated = false;
-      if (text.length > remain) {
-        text = text.slice(0, remain);
-        lineTruncated = true;
-      }
-      lines.push({ line, text, truncated: lineTruncated });
-      chars += text.length;
-      if (lineTruncated) {
-        truncated = true;
-        break;
-      }
-    }
-
-    const consumedTo = lines.length > 0 ? (lines[lines.length - 1]?.line ?? startLine - 1) : startLine - 1;
-    const hasMore = truncated || consumedTo < allLines.length;
-    return {
-      lines,
-      nextStartLine: hasMore ? consumedTo + 1 : null,
-      hasMore,
-      truncated
-    };
-  }
-
-  async archiveTailFromWorker(params: {
-    workspaceId: string;
-    sessionId: string;
-    n: number;
-    cursor?: string;
-    maxChars?: number;
-  }) {
-    const session = getAgentSession(this.ctx.db, params.sessionId);
-    if (!session) throw new HttpError(404, "session not found");
-    if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
-    const workspace = this.ensureWorkspace(params.workspaceId);
-
-    const n = normalizePositiveInt(params.n, {
-      fallback: ARCHIVE_TAIL_N_DEFAULT,
-      min: 1,
-      max: ARCHIVE_TAIL_N_MAX
-    });
-    const maxChars = normalizePositiveInt(params.maxChars, {
-      fallback: ARCHIVE_TAIL_MAX_CHARS_DEFAULT,
-      min: 1,
-      max: ARCHIVE_TAIL_MAX_CHARS_MAX
+      fallback: ARCHIVE_MAX_CHARS_DEFAULT,
+      min: ARCHIVE_MAX_CHARS_MIN,
+      max: ARCHIVE_MAX_CHARS_MAX
     });
 
     const dirPath = archiveSessionDir(workspace.path, session.id);
     const files = await listArchiveFilesAsc(dirPath);
     if (files.length === 0) {
-      return {
-        lines: [] as Array<{ file: string; line: number; text: string }>,
-        nextCursor: null as string | null,
-        hasMore: false,
-        truncated: false
-      };
+      return { text: "" };
     }
 
-    const cursor = decodeArchiveCursor(params.cursor, "tail");
-    let fileIndex = files.length - 1;
-    let lineLimitExclusive = Number.MAX_SAFE_INTEGER;
-    if (cursor && cursor.fileIndex < files.length) {
-      fileIndex = cursor.fileIndex;
-      lineLimitExclusive = cursor.line;
-    }
+    const newestFirstLines: string[] = [];
 
-    const newestFirst: Array<{ file: string; line: number; text: string }> = [];
-    let chars = 0;
-    let nextCursor: string | null = null;
-
-    outer: for (let i = fileIndex; i >= 0; i -= 1) {
+    outer: for (let i = files.length - 1; i >= 0; i -= 1) {
       const fileName = files[i] || "";
       if (!fileName) continue;
+      const fileSeq = parseArchiveFileName(fileName);
+      if (fileSeq == null) continue;
       const filePath = path.join(dirPath, fileName);
       const content = await fs.readFile(filePath, "utf-8").catch((err: any) => {
         if (err && err.code === "ENOENT") return "";
         throw err;
       });
       const lines = splitArchiveFileLines(content);
-      const upper = i === fileIndex ? Math.min(lines.length, Math.max(0, lineLimitExclusive - 1)) : lines.length;
+      let upper = lines.length;
+      if (beforePos != null) {
+        const maxLineExclusive = beforePos - (fileSeq - 1) * ARCHIVE_FILE_LINE_LIMIT;
+        upper = Math.min(upper, Math.max(0, maxLineExclusive - 1));
+      }
       for (let lineNo = upper; lineNo >= 1; lineNo -= 1) {
-        if (newestFirst.length >= n) {
-          nextCursor = encodeArchiveCursor({ v: 1, mode: "tail", fileIndex: i, line: lineNo + 1 });
-          break outer;
-        }
-        const raw = String(lines[lineNo - 1] || "");
-        const remain = maxChars - chars;
-        if (remain <= 0) {
-          nextCursor = encodeArchiveCursor({ v: 1, mode: "tail", fileIndex: i, line: lineNo + 1 });
-          break outer;
-        }
-        let text = raw;
-        if (text.length > remain) {
-          text = text.slice(0, remain);
-          newestFirst.push({ file: fileName, line: lineNo, text });
-          chars += text.length;
-          nextCursor = encodeArchiveCursor({ v: 1, mode: "tail", fileIndex: i, line: lineNo });
-          break outer;
-        }
-        newestFirst.push({ file: fileName, line: lineNo, text });
-        chars += text.length;
+        if (newestFirstLines.length >= lineCount) break outer;
+        const pos = toArchivePos(fileSeq, lineNo);
+        if (beforePos != null && pos >= beforePos) continue;
+        newestFirstLines.push(`pos=${pos} | ${String(lines[lineNo - 1] || "")}`);
       }
     }
 
-    return {
-      lines: newestFirst.reverse(),
-      nextCursor,
-      hasMore: nextCursor != null,
-      truncated: nextCursor != null
-    };
+    return { text: formatArchiveToolResultText(newestFirstLines, maxChars) };
   }
 
   async getPromptContextForRun(params: { workspaceId: string; sessionId: string; runId: string }) {

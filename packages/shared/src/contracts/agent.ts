@@ -14,7 +14,6 @@ export const AgentContextToolNameSchema = Type.Union([
   Type.Literal("subtask"),
   Type.Literal("archive_search"),
   Type.Literal("archive_read"),
-  Type.Literal("archive_tail"),
   AgentMcpToolNameSchema
 ]);
 export type AgentContextToolName = Static<typeof AgentContextToolNameSchema>;

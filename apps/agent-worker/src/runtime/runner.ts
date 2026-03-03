@@ -274,8 +274,7 @@ function isBuiltinTool(toolName: string) {
     toolName === "apply_patch" ||
     toolName === "todolist" ||
     toolName === "archive_search" ||
-    toolName === "archive_read" ||
-    toolName === "archive_tail"
+    toolName === "archive_read"
   );
 }
 
@@ -299,7 +298,6 @@ function isToolEnabledForAgent(profile: ExecutionProfile, toolName: string) {
         | "subtask"
         | "archive_search"
         | "archive_read"
-        | "archive_tail"
     );
   }
   if (isMcpTool(toolName)) {
@@ -753,47 +751,46 @@ export class AgentRunner {
         result = toTodolistResult(parsed);
       } else if (tool.toolName === "archive_search") {
         const query = requireNonEmptyStringArg(tool.args.query, "archive_search.query");
-        const cursor = typeof tool.args.cursor === "string" && tool.args.cursor.trim() ? tool.args.cursor.trim() : undefined;
+        const beforePos = parseOptionalPositiveIntegerArg(tool.args.beforePos, "archive_search.beforePos");
+        if (beforePos != null && beforePos < 2) {
+          throw new Error("archive_search.beforePos must be an integer >= 2");
+        }
         const maxHits = parseOptionalPositiveIntegerArg(tool.args.maxHits, "archive_search.maxHits");
+        if (maxHits != null && maxHits > 100) {
+          throw new Error("archive_search.maxHits must be an integer between 1 and 100");
+        }
         const maxChars = parseOptionalPositiveIntegerArg(tool.args.maxChars, "archive_search.maxChars");
+        if (maxChars != null && (maxChars < 1000 || maxChars > 10000)) {
+          throw new Error("archive_search.maxChars must be an integer between 1000 and 10000");
+        }
         const regex = tool.args.regex === true;
         result = await this.apiClient.archiveSearch({
           workspaceId: run.workspaceId,
           sessionId: run.sessionId,
           query,
-          cursor,
+          beforePos,
           maxHits,
           maxChars,
           regex
         });
       } else if (tool.toolName === "archive_read") {
-        const file = requireNonEmptyStringArg(tool.args.file, "archive_read.file");
-        const startLine = parseOptionalPositiveIntegerArg(tool.args.startLine, "archive_read.startLine");
-        if (startLine == null) {
-          throw new Error("archive_read.startLine must be an integer >= 1");
+        const beforePos = parseOptionalPositiveIntegerArg(tool.args.beforePos, "archive_read.beforePos");
+        if (beforePos != null && beforePos < 2) {
+          throw new Error("archive_read.beforePos must be an integer >= 2");
         }
         const lineCount = parseOptionalPositiveIntegerArg(tool.args.lineCount, "archive_read.lineCount");
+        if (lineCount != null && lineCount > 200) {
+          throw new Error("archive_read.lineCount must be an integer between 1 and 200");
+        }
         const maxChars = parseOptionalPositiveIntegerArg(tool.args.maxChars, "archive_read.maxChars");
+        if (maxChars != null && (maxChars < 1000 || maxChars > 10000)) {
+          throw new Error("archive_read.maxChars must be an integer between 1000 and 10000");
+        }
         result = await this.apiClient.archiveRead({
           workspaceId: run.workspaceId,
           sessionId: run.sessionId,
-          file,
-          startLine,
+          beforePos,
           lineCount,
-          maxChars
-        });
-      } else if (tool.toolName === "archive_tail") {
-        const n = parseOptionalPositiveIntegerArg(tool.args.n, "archive_tail.n");
-        if (n == null) {
-          throw new Error("archive_tail.n must be an integer >= 1");
-        }
-        const cursor = typeof tool.args.cursor === "string" && tool.args.cursor.trim() ? tool.args.cursor.trim() : undefined;
-        const maxChars = parseOptionalPositiveIntegerArg(tool.args.maxChars, "archive_tail.maxChars");
-        result = await this.apiClient.archiveTail({
-          workspaceId: run.workspaceId,
-          sessionId: run.sessionId,
-          n,
-          cursor,
           maxChars
         });
       } else if (tool.toolName === "subtask") {

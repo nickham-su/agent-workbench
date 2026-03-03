@@ -337,7 +337,7 @@ async function archiveSearchInternal(params: {
   workspaceId: string;
   sessionId: string;
   query: string;
-  cursor?: string;
+  beforePos?: number;
   maxHits?: number;
   maxChars?: number;
   regex?: boolean;
@@ -352,19 +352,14 @@ async function archiveSearchInternal(params: {
       workspaceId: params.workspaceId,
       sessionId: params.sessionId,
       query: params.query,
-      ...(params.cursor ? { cursor: params.cursor } : {}),
+      ...(params.beforePos != null ? { beforePos: params.beforePos } : {}),
       ...(params.maxHits ? { maxHits: params.maxHits } : {}),
       ...(params.maxChars ? { maxChars: params.maxChars } : {}),
       ...(params.regex === true ? { regex: true } : {})
     }
   });
   assert.equal(res.statusCode, 200, `archive search failed: ${res.body}`);
-  return res.json() as {
-    hits: Array<{ file: string; line: number; preview: string }>;
-    nextCursor: string | null;
-    hasMore: boolean;
-    truncated: boolean;
-  };
+  return res.json() as { text: string };
 }
 
 async function archiveReadInternal(params: {
@@ -372,8 +367,7 @@ async function archiveReadInternal(params: {
   internalToken: string;
   workspaceId: string;
   sessionId: string;
-  file: string;
-  startLine: number;
+  beforePos?: number;
   lineCount?: number;
   maxChars?: number;
 }) {
@@ -386,51 +380,13 @@ async function archiveReadInternal(params: {
     payload: {
       workspaceId: params.workspaceId,
       sessionId: params.sessionId,
-      file: params.file,
-      startLine: params.startLine,
+      ...(params.beforePos != null ? { beforePos: params.beforePos } : {}),
       ...(params.lineCount ? { lineCount: params.lineCount } : {}),
       ...(params.maxChars ? { maxChars: params.maxChars } : {})
     }
   });
   assert.equal(res.statusCode, 200, `archive read failed: ${res.body}`);
-  return res.json() as {
-    lines: Array<{ line: number; text: string; truncated: boolean }>;
-    nextStartLine: number | null;
-    hasMore: boolean;
-    truncated: boolean;
-  };
-}
-
-async function archiveTailInternal(params: {
-  app: FastifyInstance;
-  internalToken: string;
-  workspaceId: string;
-  sessionId: string;
-  n: number;
-  cursor?: string;
-  maxChars?: number;
-}) {
-  const res = await params.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/archive/tail",
-    headers: {
-      "x-awb-agent-internal-token": params.internalToken
-    },
-    payload: {
-      workspaceId: params.workspaceId,
-      sessionId: params.sessionId,
-      n: params.n,
-      ...(params.cursor ? { cursor: params.cursor } : {}),
-      ...(params.maxChars ? { maxChars: params.maxChars } : {})
-    }
-  });
-  assert.equal(res.statusCode, 200, `archive tail failed: ${res.body}`);
-  return res.json() as {
-    lines: Array<{ file: string; line: number; text: string }>;
-    nextCursor: string | null;
-    hasMore: boolean;
-    truncated: boolean;
-  };
+  return res.json() as { text: string };
 }
 
 test("agent 消息去重与上下文项追加", async () => {
@@ -887,7 +843,7 @@ test("single-call model profile 始终使用全局默认模型", async () => {
   assert.equal(profile.model?.id, "global_model");
 });
 
-test("agent context 压缩后会归档并支持 archive_search/read/tail", async () => {
+test("agent context 压缩后会归档并支持 archive_search/read", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
   const runId = newSortableId("run");
@@ -981,8 +937,9 @@ test("agent context 压缩后会归档并支持 archive_search/read/tail", async
     sessionId: session.id,
     query: "归档"
   });
-  assert.ok(search.hits.length >= 1);
-  assert.equal(search.hits[0]?.file, "00000001.log");
+  const searchLines = search.text.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  assert.ok(searchLines.length >= 1);
+  assert.ok(/^pos=\d+ \| /.test(searchLines[0] || ""), "search output should include pos prefix");
 
   const searchPage1 = await archiveSearchInternal({
     app: fixture.app,
@@ -992,8 +949,13 @@ test("agent context 压缩后会归档并支持 archive_search/read/tail", async
     query: "item=",
     maxHits: 1
   });
-  assert.equal(searchPage1.hits.length, 1);
-  assert.equal(searchPage1.hasMore, true);
+  const searchPage1Line = searchPage1.text.trim();
+  assert.ok(searchPage1Line.length > 0);
+  const searchPage1PosMatch = /^pos=(\d+) \| /.exec(searchPage1Line);
+  assert.ok(searchPage1PosMatch, "search page 1 should include pos prefix");
+  const searchPage1Pos = Number(searchPage1PosMatch?.[1] || "0");
+  assert.ok(searchPage1Pos > 0);
+
   const searchPage2 = await archiveSearchInternal({
     app: fixture.app,
     internalToken: fixture.internalToken,
@@ -1001,12 +963,13 @@ test("agent context 压缩后会归档并支持 archive_search/read/tail", async
     sessionId: session.id,
     query: "item=",
     maxHits: 1,
-    cursor: String(searchPage1.nextCursor)
+    beforePos: searchPage1Pos
   });
-  assert.equal(searchPage2.hits.length, 1);
-  assert.ok((searchPage2.hits[0]?.line ?? 0) < (searchPage1.hits[0]?.line ?? 0), "search cursor should continue to older lines");
-  assert.equal(searchPage2.hasMore, false, "last search page should not claim more data");
-  assert.equal(searchPage2.nextCursor, null);
+  const searchPage2Line = searchPage2.text.trim();
+  const searchPage2PosMatch = /^pos=(\d+) \| /.exec(searchPage2Line);
+  assert.ok(searchPage2PosMatch, "search page 2 should include pos prefix");
+  const searchPage2Pos = Number(searchPage2PosMatch?.[1] || "0");
+  assert.ok(searchPage2Pos > 0 && searchPage2Pos < searchPage1Pos, "beforePos should continue to older hits");
 
   const optionLikeQuery = await archiveSearchInternal({
     app: fixture.app,
@@ -1015,50 +978,32 @@ test("agent context 压缩后会归档并支持 archive_search/read/tail", async
     sessionId: session.id,
     query: "--glob"
   });
-  assert.equal(Array.isArray(optionLikeQuery.hits), true);
+  assert.equal(typeof optionLikeQuery.text, "string");
 
-  const read = await archiveReadInternal({
+  const readLatest = await archiveReadInternal({
     app: fixture.app,
     internalToken: fixture.internalToken,
     workspaceId: fixture.workspaceId,
     sessionId: session.id,
-    file: "00000001.log",
-    startLine: 1,
     lineCount: 5
   });
-  assert.ok(read.lines.length >= 2);
+  const readLatestLines = readLatest.text.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  assert.ok(readLatestLines.length >= 2);
+  const latestFirstPos = Number(/^pos=(\d+) \| /.exec(readLatestLines[0] || "")?.[1] || "0");
+  const latestSecondPos = Number(/^pos=(\d+) \| /.exec(readLatestLines[1] || "")?.[1] || "0");
+  assert.ok(latestFirstPos > 0 && latestSecondPos > latestFirstPos, "read should be old->new order");
 
-  const tailFirst = await archiveTailInternal({
+  const readOlder = await archiveReadInternal({
     app: fixture.app,
     internalToken: fixture.internalToken,
     workspaceId: fixture.workspaceId,
     sessionId: session.id,
-    n: 1
+    beforePos: latestSecondPos,
+    lineCount: 5
   });
-  assert.equal(tailFirst.lines.length, 1);
-  assert.equal(tailFirst.hasMore, true);
-  assert.ok(typeof tailFirst.nextCursor === "string" && tailFirst.nextCursor.length > 0);
-
-  const tailSecond = await archiveTailInternal({
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    n: 1,
-    cursor: String(tailFirst.nextCursor)
-  });
-  assert.equal(tailSecond.lines.length, 1);
-
-  const tailTwo = await archiveTailInternal({
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    n: 2
-  });
-  assert.equal(tailTwo.lines.length, 2);
-  assert.ok((tailTwo.lines[0]?.line ?? 0) < (tailTwo.lines[1]?.line ?? 0), "tail should return old->new order");
-  assert.equal(tailTwo.hasMore, false);
+  const readOlderLine = readOlder.text.trim();
+  const readOlderPos = Number(/^pos=(\d+) \| /.exec(readOlderLine)?.[1] || "0");
+  assert.ok(readOlderPos > 0 && readOlderPos < latestSecondPos, "archive_read.beforePos should only return older lines");
 
   await createContextItemInternal({
     app: fixture.app,
@@ -1088,6 +1033,93 @@ test("agent context 压缩后会归档并支持 archive_search/read/tail", async
     (item) => item.role === "system" && String(item.content || "").includes("[run] max steps exceeded")
   );
   assert.equal(leakedRunSystemMessage, undefined, "runtime run-status system text should not leak into model prompt");
+});
+
+test("archive v2 边界行为: 校验/大小写/跨文件pos/截断/半行过滤", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const archiveDir = path.join(fixture.workspacePath, ".awb", "agent", "archive", session.id);
+  await fs.mkdir(archiveDir, { recursive: true });
+
+  const file1Lines = Array.from({ length: 100 }, (_, idx) => {
+    const n = idx + 1;
+    const tail = n === 100 ? "BoundaryToken" : `line-${n}`;
+    return `item=${n} ts=${n} kind=user status=completed tool=- | ${tail}`;
+  });
+  const longText = `LONG-${"x".repeat(1300)}`;
+  const file2Line1 = `item=101 ts=101 kind=assistant status=completed tool=- | ${longText}`;
+  const file2PartialLine = "item=102 ts=102 kind=assistant status=completed tool=- | PartialOnlyToken";
+
+  await fs.writeFile(path.join(archiveDir, "00000001.log"), `${file1Lines.join("\n")}\n`, "utf-8");
+  await fs.writeFile(path.join(archiveDir, "00000002.log"), `${file2Line1}\n${file2PartialLine}`, "utf-8");
+
+  const invalidBeforePosRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/archive/search",
+    headers: {
+      "x-awb-agent-internal-token": fixture.internalToken
+    },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      query: "token",
+      beforePos: 1
+    }
+  });
+  assert.equal(invalidBeforePosRes.statusCode, 400, "beforePos<2 should be rejected");
+
+  const caseInsensitiveSearch = await archiveSearchInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    query: "boundarytoken",
+    maxHits: 1
+  });
+  assert.ok(caseInsensitiveSearch.text.startsWith("pos=100 |"), "search should be case-insensitive and return pos=100");
+
+  const readLatest = await archiveReadInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    lineCount: 1
+  });
+  assert.ok(readLatest.text.startsWith("pos=101 |"), "latest line should come from file2 line1 with pos=101");
+
+  const readOlder = await archiveReadInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    beforePos: 101,
+    lineCount: 1
+  });
+  assert.ok(readOlder.text.startsWith("pos=100 |"), "beforePos should read strictly older line across file boundary");
+
+  const halfLineSearch = await archiveSearchInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    query: "PartialOnlyToken"
+  });
+  assert.equal(halfLineSearch.text.trim(), "", "search should ignore unfinished last line without trailing newline");
+
+  const truncatedRead = await archiveReadInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    lineCount: 1,
+    maxChars: 1000
+  });
+  assert.ok(truncatedRead.text.startsWith("pos=101 |"), "truncated output should keep pos prefix");
+  assert.ok(
+    truncatedRead.text.includes("[超过最大字符数限制,从此处截断内容]"),
+    "truncated output should include truncation marker"
+  );
 });
 
 test("agent prompt-context 使用结构化 tool-call/tool-result 消息", async () => {
