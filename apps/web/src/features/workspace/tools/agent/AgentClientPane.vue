@@ -415,6 +415,9 @@ const stickToBottom = ref(true);
 const forcedBottomOnFirstActive = ref(false);
 let scrollToBottomSeq = 0;
 
+// 仅用于判断用户是否在主动向上滚动(一旦向上滚,立刻取消吸底,避免被自动 scrollToBottom 抢回去)。
+let lastKnownScrollTop = 0;
+
 const actionLoading = ref<"cancel" | "fork" | "revert" | "approve" | "deny" | null>(null);
 const actionTargetId = ref<number | null>(null);
 
@@ -1000,6 +1003,18 @@ function updateStickToBottomState() {
 }
 
 function onMessageListScroll() {
+  const el = scrollEl.value;
+  if (!el) return;
+  const nextTop = el.scrollTop;
+  const delta = nextTop - lastKnownScrollTop;
+  lastKnownScrollTop = nextTop;
+
+  // 用户主动向上滚动时,即使仍在“离底部阈值”内也不应继续吸附.
+  if (delta < 0) {
+    stickToBottom.value = false;
+    return;
+  }
+
   updateStickToBottomState();
 }
 
@@ -1020,6 +1035,10 @@ async function scrollToBottom(options?: { force?: boolean }) {
   await nextTick();
   if (seq !== scrollToBottomSeq) return;
   updateStickToBottomState();
+
+  // 同步滚动基线,避免后续 scroll 事件把程序滚动误判为“用户向上滚动”。
+  const el = scrollEl.value;
+  if (el) lastKnownScrollTop = el.scrollTop;
 }
 
 async function focusInputIfNeeded() {
@@ -1569,6 +1588,8 @@ watch(
       appliedItemId: 0
     };
     rowVirtualizer.value.measure();
+    // 重置滚动方向判断基线,避免切换会话后首次 scroll 误判为“用户向上滚动”。
+    lastKnownScrollTop = 0;
     if (props.sessionId && props.active) {
       forcedBottomOnFirstActive.value = true;
       void refreshAll(true, true);
