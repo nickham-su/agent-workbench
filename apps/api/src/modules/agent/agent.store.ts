@@ -47,6 +47,7 @@ type AgentContextItemRow = {
   toolCallId: string | null;
   toolCallJson: string | null;
   toolResultJson: string | null;
+  purpose: string | null;
   archiveAt: number | null;
   outputJson: string;
   createdAt: number;
@@ -317,6 +318,8 @@ function mapContextItem(row: AgentContextItemRow): AgentContextItemRecord {
   const turnId = typeof row.turnId === "string" && row.turnId.trim() ? row.turnId : null;
   const step = typeof row.step === "number" && Number.isFinite(row.step) && row.step >= 1 ? row.step : null;
   const prevId = typeof row.prevId === "number" && Number.isFinite(row.prevId) && row.prevId >= 1 ? row.prevId : null;
+  const archiveAt = typeof row.archiveAt === "number" && Number.isFinite(row.archiveAt) && row.archiveAt >= 1 ? row.archiveAt : null;
+  const purpose = typeof row.purpose === "string" && row.purpose.trim() ? row.purpose.trim() : null;
   return {
     id: row.id,
     workspaceId: row.workspaceId,
@@ -327,6 +330,8 @@ function mapContextItem(row: AgentContextItemRow): AgentContextItemRecord {
     prevId,
     kind: row.kind,
     status: row.status,
+    archiveAt,
+    purpose,
     output: mapFromStoredColumns(row),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt
@@ -416,6 +421,7 @@ function readContextItemRowById(db: Db, itemId: number) {
           tool_call_id as toolCallId,
           tool_call_json as toolCallJson,
           tool_result_json as toolResultJson,
+          purpose,
           archive_at as archiveAt,
           output_json as outputJson,
           created_at as createdAt,
@@ -615,6 +621,7 @@ export function appendContextItem(db: Db, params: {
   prevId: number | null;
   kind: AgentContextItemRecord["kind"];
   status: AgentContextItemStatus;
+  purpose?: string | null;
   output: AgentContextItemOutput;
   createdAt: number;
 }) {
@@ -649,6 +656,7 @@ export function appendContextItem(db: Db, params: {
             tool_call_id,
             tool_call_json,
             tool_result_json,
+            purpose,
             output_json,
             created_at,
             updated_at
@@ -668,6 +676,7 @@ export function appendContextItem(db: Db, params: {
             @toolCallId,
             @toolCallJson,
             @toolResultJson,
+            @purpose,
             @outputJson,
             @createdAt,
             @updatedAt
@@ -690,6 +699,7 @@ export function appendContextItem(db: Db, params: {
         toolCallId: stored.toolCallId,
         toolCallJson: stored.toolCallJson,
         toolResultJson: stored.toolResultJson,
+        purpose: typeof params.purpose === "string" && params.purpose.trim() ? params.purpose.trim() : null,
         outputJson: stored.outputJson,
         createdAt: params.createdAt,
         updatedAt: params.createdAt
@@ -771,7 +781,12 @@ export function getContextItemById(db: Db, itemId: number) {
   return row ? mapContextItem(row) : null;
 }
 
-export function getSessionVisibleItems(db: Db, workspaceId: string, sessionId: string): AgentContextItemRecord[] {
+function listSessionItems(
+  db: Db,
+  workspaceId: string,
+  sessionId: string,
+  params: { includeArchived: boolean }
+): AgentContextItemRecord[] {
   const headItemId = getHead(db, workspaceId, sessionId);
   if (!headItemId) return [];
 
@@ -784,12 +799,20 @@ export function getSessionVisibleItems(db: Db, workspaceId: string, sessionId: s
     const row = readContextItemRowById(db, cursor);
     if (!row) break;
     if (row.workspaceId !== workspaceId || row.sessionId !== sessionId) break;
-    if (row.archiveAt == null) {
+    if (params.includeArchived || row.archiveAt == null) {
       rows.push(mapContextItem(row));
     }
     cursor = row.prevId;
   }
   return rows.reverse();
+}
+
+export function getSessionVisibleItems(db: Db, workspaceId: string, sessionId: string): AgentContextItemRecord[] {
+  return listSessionItems(db, workspaceId, sessionId, { includeArchived: false });
+}
+
+export function getSessionTranscriptItems(db: Db, workspaceId: string, sessionId: string): AgentContextItemRecord[] {
+  return listSessionItems(db, workspaceId, sessionId, { includeArchived: true });
 }
 
 export function setContextItemsArchiveAt(
@@ -878,6 +901,7 @@ export function appendSystemSummaryAndArchiveItems(
             tool_call_id,
             tool_call_json,
             tool_result_json,
+            purpose,
             output_json,
             created_at,
             updated_at
@@ -897,6 +921,7 @@ export function appendSystemSummaryAndArchiveItems(
             @toolCallId,
             @toolCallJson,
             @toolResultJson,
+            @purpose,
             @outputJson,
             @createdAt,
             @updatedAt
@@ -915,6 +940,7 @@ export function appendSystemSummaryAndArchiveItems(
         toolCallId: stored.toolCallId,
         toolCallJson: stored.toolCallJson,
         toolResultJson: stored.toolResultJson,
+        purpose: "compaction_summary",
         outputJson: stored.outputJson,
         createdAt: params.summaryCreatedAt,
         updatedAt: params.summaryCreatedAt
@@ -966,8 +992,17 @@ export function getSessionVisibleItemsAfter(db: Db, workspaceId: string, session
   return getSessionVisibleItems(db, workspaceId, sessionId).filter((item) => item.id > afterId);
 }
 
+export function getSessionTranscriptItemsAfter(db: Db, workspaceId: string, sessionId: string, afterId: number) {
+  return getSessionTranscriptItems(db, workspaceId, sessionId).filter((item) => item.id > afterId);
+}
+
 export function getVisibleItemById(db: Db, workspaceId: string, sessionId: string, itemId: number) {
   const visible = getSessionVisibleItems(db, workspaceId, sessionId);
+  return visible.find((item) => item.id === itemId) ?? null;
+}
+
+export function getTranscriptItemById(db: Db, workspaceId: string, sessionId: string, itemId: number) {
+  const visible = getSessionTranscriptItems(db, workspaceId, sessionId);
   return visible.find((item) => item.id === itemId) ?? null;
 }
 

@@ -101,6 +101,8 @@ export const AgentContextItemRecordSchema = Type.Object({
   prevId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
   kind: AgentContextItemKindSchema,
   status: AgentContextItemStatusSchema,
+  archiveAt: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
+  purpose: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
   output: AgentContextItemOutputSchema,
   createdAt: Type.Number(),
   updatedAt: Type.Number()
@@ -160,6 +162,20 @@ export const AgentSendMessageResponseSchema = Type.Object({
   deduplicated: Type.Boolean()
 });
 export type AgentSendMessageResponse = Static<typeof AgentSendMessageResponseSchema>;
+
+export const AgentCompactSessionRequestSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
+  clientRequestId: Type.String({ minLength: 1 }),
+  agentId: Type.Optional(Type.String({ minLength: 1 }))
+});
+export type AgentCompactSessionRequest = Static<typeof AgentCompactSessionRequestSchema>;
+
+export const AgentCompactSessionResponseSchema = Type.Object({
+  sessionId: Type.String({ minLength: 1 }),
+  runId: Type.String({ minLength: 1 }),
+  deduplicated: Type.Boolean()
+});
+export type AgentCompactSessionResponse = Static<typeof AgentCompactSessionResponseSchema>;
 
 export const AgentRevertSessionRequestSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),

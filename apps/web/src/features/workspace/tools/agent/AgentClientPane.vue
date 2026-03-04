@@ -31,18 +31,26 @@
           :key="row.key"
           class="agent-virtual-row"
           :style="{ transform: `translateY(${row.start}px)` }"
-        >
-          <div
-            :data-index="row.index"
-            class="agent-virtual-row-inner"
-            :style="{ paddingTop: `${row.gapTop}px` }"
-            :ref="onVirtualRowMounted"
           >
             <div
-              class="agent-message-item relative rounded p-2"
-              :class="[
-                row.msg.role === 'tool'
-                  ? isRichToolCard(row.msg)
+              :data-index="row.index"
+              class="agent-virtual-row-inner"
+              :style="{ paddingTop: `${row.gapTop}px` }"
+              :ref="onVirtualRowMounted"
+            >
+              <div
+                v-if="row.msg.role === 'system' && row.msg.purpose === 'compaction_summary'"
+                class="pb-2 pt-1 flex items-center gap-2"
+              >
+                <div class="h-px flex-1 bg-blue-500/40" />
+                <div class="text-[11px] text-blue-600 whitespace-nowrap">{{ t("agent.client.compactionArchivedHint") }}</div>
+                <div class="h-px flex-1 bg-blue-500/40" />
+              </div>
+              <div
+                class="agent-message-item relative rounded p-2"
+                :class="[
+                  row.msg.role === 'tool'
+                    ? isRichToolCard(row.msg)
                     ? 'is-tool-message border-0 bg-transparent px-0 py-0.5'
                     : 'is-tool-message border-0 bg-transparent pl-2 pr-0 py-0.5'
                   : '',
@@ -55,7 +63,7 @@
             >
               <div v-if="row.msg.role !== 'tool' && !isSubtaskSession" class="message-controls absolute right-2 top-1.5 z-10 flex items-center gap-1">
                 <span class="message-id">#{{ row.msg.id }}</span>
-                <template v-if="row.msg.role === 'user' || row.msg.role === 'assistant'">
+                <template v-if="(row.msg.role === 'user' || row.msg.role === 'assistant') && row.msg.archiveAt == null">
                   <a-tooltip :title="t('agent.client.fork')" placement="top">
                     <a-button
                       size="small"
@@ -165,6 +173,31 @@
     </div>
 
     <div v-if="!isSubtaskSession" class="p-3 border-t border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
+      <div
+        v-if="slashCommandHint.visible"
+        class="mb-2"
+      >
+        <div class="flex flex-col gap-1">
+          <button
+            v-for="cmd in slashCommandHint.commands"
+            :key="cmd.name"
+            type="button"
+            class="slash-command-item w-full rounded border border-transparent px-2 py-1 text-left"
+            :class="cmd.name === slashCommandHint.activeCommand ? 'is-active border-blue-500/40 bg-blue-500/10' : ''"
+            @click="onPickSlashCommand(cmd.name)"
+          >
+            <div class="flex items-center gap-2 min-w-0">
+              <span class="font-mono text-[11px] whitespace-nowrap">{{ cmd.usage }}</span>
+              <span class="text-[11px] text-[color:var(--text-secondary)] min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{{ t(cmd.summaryKey) }}</span>
+              <span v-if="cmd.strictOnly" class="text-[10px] text-[color:var(--text-tertiary)] whitespace-nowrap">{{ t("agent.client.slashCommandHintStrictOnly") }}</span>
+            </div>
+          </button>
+          <div v-if="slashCommandHint.commands.length === 0" class="px-2 py-1 text-[11px] text-[color:var(--text-tertiary)]">
+            {{ t("agent.client.slashCommandHintNoMatch", { query: slashCommandHint.query }) }}
+          </div>
+        </div>
+      </div>
+
       <div class="flex items-end gap-2">
         <a-textarea
           ref="inputEl"
@@ -173,9 +206,7 @@
           :disabled="!hasAvailableAgents"
           :auto-size="{ minRows: 2, maxRows: 6 }"
           :placeholder="hasAvailableAgents ? t('agent.client.inputPlaceholder') : t('agent.client.inputPlaceholderNoAgent')"
-          @keydown.enter.exact.prevent="onSend"
-          @keydown.tab.prevent="onCycleAgent(1)"
-          @keydown.shift.tab.prevent="onCycleAgent(-1)"
+          @keydown="onInputKeydown"
         />
         <a-tooltip v-if="runState.status !== 'idle'" :title="t('agent.client.cancel')" placement="top">
           <a-button
@@ -225,6 +256,7 @@ import AgentApplyPatchCard from "./AgentApplyPatchCard.vue";
 import AgentTodoListCard from "./AgentTodoListCard.vue";
 import {
   cancelAgentSession,
+  compactAgentSession,
   decideAgentToolPermission,
   forkAgentSession,
   getAgentContextItem,
@@ -278,6 +310,8 @@ type TodoListDisplay = {
 type DisplayItem = {
   id: number;
   prevId: number | null;
+  archiveAt: number | null;
+  purpose: string | null;
   role: "user" | "assistant" | "system" | "tool";
   text: string;
   status: AgentContextItemRecord["status"];
@@ -364,6 +398,74 @@ let pollHintRefreshSeq = 0;
 let settlePollRemaining = 0;
 const terminalStatuses = new Set<AgentContextItemRecord["status"]>(["completed", "failed", "denied", "cancelled"]);
 const isSubtaskSession = computed(() => props.sessionKind === "subtask");
+
+// 兼容中文输入法习惯: 用户输入首字符为“、”时,自动替换为“/”。
+watch(
+  draft,
+  (next) => {
+    if (typeof next !== "string" || next.length === 0) return;
+    if (next[0] !== "、") return;
+    draft.value = `/${next.slice(1)}`;
+  },
+  { flush: "sync" }
+);
+
+type SlashCommandAction = "compact";
+
+type SlashCommandDefinition = {
+  name: string;
+  usage: string;
+  summaryKey: string;
+  strictOnly: boolean;
+  action: SlashCommandAction;
+};
+
+const slashCommands: SlashCommandDefinition[] = [
+  {
+    name: "compact",
+    usage: "/compact",
+    summaryKey: "agent.client.slashCommands.compact.summary",
+    strictOnly: true,
+    action: "compact"
+  }
+];
+
+const slashCommandMap = new Map(slashCommands.map((item) => [item.name, item] as const));
+const slashCommandSelection = ref("");
+
+const slashCommandHint = computed(() => {
+  const text = draft.value.trimStart();
+  if (!text.startsWith("/")) {
+    return {
+      visible: false,
+      query: "",
+      commands: [] as SlashCommandDefinition[],
+      activeCommand: ""
+    };
+  }
+  const normalized = text.trim().toLowerCase();
+  for (const item of slashCommands) {
+    if (normalized === item.usage) {
+      return {
+        visible: false,
+        query: "",
+        commands: [] as SlashCommandDefinition[],
+        activeCommand: ""
+      };
+    }
+  }
+  const query = text.slice(1).split(/\s+/, 1)[0]?.toLowerCase() || "";
+  const commands = slashCommands.filter((item) => !query || item.name.startsWith(query));
+  const active = commands.some((item) => item.name === slashCommandSelection.value)
+    ? slashCommandSelection.value
+    : (commands[0]?.name || "");
+  return {
+    visible: true,
+    query,
+    commands,
+    activeCommand: active
+  };
+});
 
 function toRecord(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -506,13 +608,17 @@ const displayItems = computed<DisplayItem[]>(() => {
   }
 
   const mapped = items.value.map<DisplayItem>((item) => {
+    const archiveAt = typeof item.archiveAt === "number" && Number.isFinite(item.archiveAt) ? item.archiveAt : null;
+    const purpose = typeof item.purpose === "string" && item.purpose.trim() ? item.purpose.trim() : null;
     if (item.kind === "user" && item.output.type === "user_text") {
-      return { id: item.id, prevId: item.prevId, role: "user", text: item.output.text, status: item.status };
+      return { id: item.id, prevId: item.prevId, archiveAt, purpose, role: "user", text: item.output.text, status: item.status };
     }
     if (item.kind === "assistant" && item.output.type === "assistant_text") {
       return {
         id: item.id,
         prevId: item.prevId,
+        archiveAt,
+        purpose,
         role: "assistant",
         text: item.output.text,
         status: item.status,
@@ -539,6 +645,8 @@ const displayItems = computed<DisplayItem[]>(() => {
           return {
             id: item.id,
             prevId: item.prevId,
+            archiveAt,
+            purpose,
             role: "tool",
             text: line,
             status: item.status,
@@ -549,6 +657,8 @@ const displayItems = computed<DisplayItem[]>(() => {
         return {
           id: item.id,
           prevId: item.prevId,
+          archiveAt,
+          purpose,
           role: "tool",
           text: `${callText} ${statusText}`,
           status: item.status,
@@ -568,6 +678,8 @@ const displayItems = computed<DisplayItem[]>(() => {
           return {
             id: item.id,
             prevId: item.prevId,
+            archiveAt,
+            purpose,
             role: "tool",
             text: line,
             status: item.status,
@@ -578,6 +690,8 @@ const displayItems = computed<DisplayItem[]>(() => {
         return {
           id: item.id,
           prevId: item.prevId,
+          archiveAt,
+          purpose,
           role: "tool",
           text: `${callText} ${statusText}`,
           status: item.status,
@@ -598,6 +712,8 @@ const displayItems = computed<DisplayItem[]>(() => {
         return {
           id: item.id,
           prevId: item.prevId,
+          archiveAt,
+          purpose,
           role: "tool",
           text: `${callText} ${statusText}`,
           status: item.status,
@@ -618,6 +734,8 @@ const displayItems = computed<DisplayItem[]>(() => {
       return {
         id: item.id,
         prevId: item.prevId,
+        archiveAt,
+        purpose,
         role: "tool",
         text: line,
         status: item.status,
@@ -627,11 +745,13 @@ const displayItems = computed<DisplayItem[]>(() => {
       };
     }
     if (item.kind === "system" && item.output.type === "system_text") {
-      return { id: item.id, prevId: item.prevId, role: "system", text: item.output.text, status: item.status };
+      return { id: item.id, prevId: item.prevId, archiveAt, purpose, role: "system", text: item.output.text, status: item.status };
     }
     return {
       id: item.id,
       prevId: item.prevId,
+      archiveAt,
+      purpose,
       role: "system",
       text: JSON.stringify(item.output),
       status: item.status
@@ -843,11 +963,43 @@ function hasItemChanged(current: AgentContextItemRecord | null, latest: AgentCon
   if (!current) return true;
   if (current.updatedAt !== latest.updatedAt) return true;
   if (current.status !== latest.status) return true;
+  const currentArchiveAt = typeof current.archiveAt === "number" ? current.archiveAt : null;
+  const latestArchiveAt = typeof latest.archiveAt === "number" ? latest.archiveAt : null;
+  if (currentArchiveAt !== latestArchiveAt) return true;
+  if (String(current.purpose || "") !== String(latest.purpose || "")) return true;
   return JSON.stringify(current.output) !== JSON.stringify(latest.output);
 }
 
 function isTerminalStatus(status: AgentContextItemRecord["status"]) {
   return terminalStatuses.has(status);
+}
+
+const COMPACTION_SUMMARY_PURPOSE = "compaction_summary";
+const handledCompactionSummaryId = ref(0);
+
+function isCompactionSummaryItem(item: AgentContextItemRecord) {
+  return String(item.purpose || "") === COMPACTION_SUMMARY_PURPOSE;
+}
+
+function maxCompactionSummaryId(list: AgentContextItemRecord[]) {
+  let maxId = 0;
+  for (const item of list) {
+    if (!isCompactionSummaryItem(item)) continue;
+    maxId = Math.max(maxId, item.id);
+  }
+  return maxId;
+}
+
+function syncCompactionSummaryCursor(list: AgentContextItemRecord[]) {
+  handledCompactionSummaryId.value = Math.max(handledCompactionSummaryId.value, maxCompactionSummaryId(list));
+}
+
+function shouldForceFullRefreshForCompaction(list: AgentContextItemRecord[]) {
+  for (const item of list) {
+    if (!isCompactionSummaryItem(item)) continue;
+    if (item.id > handledCompactionSummaryId.value) return true;
+  }
+  return false;
 }
 
 async function refreshAll(forceFull: boolean, forceFollowBottom = false) {
@@ -864,6 +1016,7 @@ async function refreshAll(forceFull: boolean, forceFollowBottom = false) {
       updatedAt: 0,
       appliedItemId: 0
     };
+    handledCompactionSummaryId.value = 0;
     items.value = [];
     clearPoll();
     return;
@@ -885,6 +1038,7 @@ async function refreshAll(forceFull: boolean, forceFollowBottom = false) {
     if (forceFull || items.value.length === 0) {
       const full = await getAgentContextItems(props.sessionId);
       items.value = [...full.items].sort((a, b) => a.id - b.id);
+      syncCompactionSummaryCursor(items.value);
       await scrollToBottom({ force: forceFollowBottom });
     } else {
       const lastId = items.value.length > 0 ? items.value[items.value.length - 1]!.id : 0;
@@ -892,14 +1046,17 @@ async function refreshAll(forceFull: boolean, forceFollowBottom = false) {
       const headMovedBackward = delta.headItemId == null ? lastId > 0 : delta.headItemId < lastId;
       const firstDelta = delta.items[0];
       const chainBroken = !!firstDelta && firstDelta.prevId !== lastId;
-      if (headMovedBackward || chainBroken) {
+      const hasCompactionSummary = shouldForceFullRefreshForCompaction(delta.items);
+      if (headMovedBackward || chainBroken || hasCompactionSummary) {
         const full = await getAgentContextItems(props.sessionId);
         items.value = [...full.items].sort((a, b) => a.id - b.id);
+        syncCompactionSummaryCursor(items.value);
         await scrollToBottom({ force: forceFollowBottom });
       } else if (delta.items.length > 0) {
         for (const item of delta.items) {
           upsertItem(item);
         }
+        syncCompactionSummaryCursor(delta.items);
         await scrollToBottom({ force: forceFollowBottom });
       }
     }
@@ -1001,6 +1158,89 @@ function onOpenParent() {
 
 function newClientRequestId() {
   return `req_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function onPickSlashCommand(name: string) {
+  const cmd = slashCommandMap.get(name);
+  if (!cmd) return;
+  slashCommandSelection.value = cmd.name;
+  draft.value = cmd.usage;
+  void focusInputIfNeeded();
+}
+
+function moveSlashCommandSelection(step: 1 | -1) {
+  const hint = slashCommandHint.value;
+  if (!hint.visible || hint.commands.length === 0) return;
+  const currentIdx = Math.max(0, hint.commands.findIndex((item) => item.name === hint.activeCommand));
+  const nextIdx = (currentIdx + step + hint.commands.length) % hint.commands.length;
+  slashCommandSelection.value = hint.commands[nextIdx]?.name || "";
+}
+
+function pickActiveSlashCommand() {
+  const hint = slashCommandHint.value;
+  if (!hint.visible || hint.commands.length === 0) return false;
+  const targetName = hint.activeCommand || hint.commands[0]?.name;
+  if (!targetName) return false;
+  onPickSlashCommand(targetName);
+  return true;
+}
+
+function onInputKeydown(event: KeyboardEvent) {
+  if (event.isComposing) return;
+
+  if (event.key === "Tab") {
+    event.preventDefault();
+    onCycleAgent(event.shiftKey ? -1 : 1);
+    return;
+  }
+
+  if (slashCommandHint.value.visible && event.key === "ArrowDown") {
+    event.preventDefault();
+    moveSlashCommandSelection(1);
+    return;
+  }
+
+  if (slashCommandHint.value.visible && event.key === "ArrowUp") {
+    event.preventDefault();
+    moveSlashCommandSelection(-1);
+    return;
+  }
+
+  if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+    event.preventDefault();
+    if (pickActiveSlashCommand()) {
+      return;
+    }
+    void onSend();
+  }
+}
+
+function resolveSlashCommand(text: string) {
+  const normalized = text.trim().toLowerCase();
+  if (!normalized.startsWith("/")) return null;
+  const commandName = normalized.slice(1);
+  const command = slashCommandMap.get(commandName);
+  if (!command) return null;
+  if (command.strictOnly && normalized !== command.usage) return null;
+  return command;
+}
+
+async function executeSlashCommand(params: {
+  command: SlashCommandDefinition;
+  sessionId: string;
+  workspaceId: string;
+  clientRequestId: string;
+  agentId: string;
+}) {
+  if (params.command.action === "compact") {
+    await compactAgentSession(params.sessionId, {
+      workspaceId: params.workspaceId,
+      clientRequestId: params.clientRequestId,
+      agentId: params.agentId
+    });
+    return;
+  }
+  throw new Error(`unsupported slash command: ${params.command.name}`);
 }
 
 async function onCancelRun() {
@@ -1142,12 +1382,24 @@ async function onSend() {
       throw new Error("failed to create agent session");
     }
 
-    await sendAgentMessage(targetSessionId, {
-      workspaceId: props.workspaceId,
-      text,
-      clientRequestId: newClientRequestId(),
-      agentId
-    });
+    const clientRequestId = newClientRequestId();
+    const slashCommand = resolveSlashCommand(text);
+    if (slashCommand) {
+      await executeSlashCommand({
+        command: slashCommand,
+        sessionId: targetSessionId,
+        workspaceId: props.workspaceId,
+        clientRequestId,
+        agentId
+      });
+    } else {
+      await sendAgentMessage(targetSessionId, {
+        workspaceId: props.workspaceId,
+        text,
+        clientRequestId,
+        agentId
+      });
+    }
     draft.value = "";
     if (targetSessionId === props.sessionId) {
       await refreshAll(false);
@@ -1208,6 +1460,7 @@ watch(
   () => [props.sessionId, props.workspaceId],
   () => {
     clearPoll();
+    handledCompactionSummaryId.value = 0;
     scrollToBottomSeq += 1;
     items.value = [];
     stickToBottom.value = true;
@@ -1359,6 +1612,17 @@ onBeforeUnmount(() => {
     border-color: rgba(239, 68, 68, 0.55);
     color: #ef4444;
     background: rgba(239, 68, 68, 0.14);
+  }
+}
+
+.slash-command-item {
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .slash-command-item:hover {
+    border-color: rgba(59, 130, 246, 0.28);
+    background: rgba(59, 130, 246, 0.08);
   }
 }
 

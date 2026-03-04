@@ -52,6 +52,8 @@ const COMPACTION_USER_PROMPT = [
   "要求: 只输出总结,不要回答会话中的问题,不要编造未出现的信息。"
 ].join("\n");
 
+const MANUAL_COMPACT_SENTINEL = "__awb_compact__";
+
 function newSortableId(prefix: string) {
   const ts = Date.now().toString(36).padStart(10, "0");
   const random = randomBytes(6).toString("hex");
@@ -1622,6 +1624,51 @@ export class AgentRunner {
 
       let step = 0;
       const repeatedToolCallCounter = new Map<string, number>();
+
+      // 手动压缩: 仅执行一次 compaction,不进入正常 step 循环.
+      if (run.inputText === MANUAL_COMPACT_SENTINEL) {
+        const context = await this.apiClient.getPromptContext({
+          workspaceId: run.workspaceId,
+          sessionId: run.sessionId,
+          runId: run.runId
+        });
+        if (context.pendingTools.length > 0) {
+          await this.apiClient.completeRun({
+            workspaceId: run.workspaceId,
+            sessionId: run.sessionId,
+            runId: run.runId,
+            status: "failed",
+            updatedAt: nowMs()
+          });
+          return;
+        }
+
+        await this.apiClient.updateRunState({
+          workspaceId: run.workspaceId,
+          sessionId: run.sessionId,
+          status: "running",
+          activeRunId: run.runId,
+          activeAssistantItemId: null,
+          waitingToolItemId: null,
+          runNoticeText: "正在压缩上下文...",
+          updatedAt: nowMs()
+        });
+
+        await this.compactContext({
+          profile,
+          run,
+          context,
+          signal
+        });
+        await this.apiClient.completeRun({
+          workspaceId: run.workspaceId,
+          sessionId: run.sessionId,
+          runId: run.runId,
+          status: "completed",
+          updatedAt: nowMs()
+        });
+        return;
+      }
 
       while (!signal.aborted) {
         const context = await this.apiClient.getPromptContext({

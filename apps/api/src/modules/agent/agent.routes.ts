@@ -13,6 +13,8 @@ import {
   AgentRevertSessionRequestSchema,
   AgentSendMessageRequestSchema,
   AgentSendMessageResponseSchema,
+  AgentCompactSessionRequestSchema,
+  AgentCompactSessionResponseSchema,
   AgentSessionRecordSchema,
   AgentSessionRunStateSchema,
   AgentToolPermissionRequestSchema,
@@ -178,6 +180,51 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
           workspacePath: workspace.path,
           inputText: body.text
         });
+      }
+      return reply.code(201).send(result);
+    }
+  );
+
+  app.post(
+    "/api/agent/sessions/:sessionId/compact",
+    {
+      schema: {
+        tags: ["agent"],
+        params: Type.Object({ sessionId: Type.String({ minLength: 1 }) }),
+        body: AgentCompactSessionRequestSchema,
+        response: {
+          201: AgentCompactSessionResponseSchema,
+          400: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+          503: ErrorResponseSchema
+        }
+      }
+    },
+    async (req, reply) => {
+      const p = req.params as { sessionId: string };
+      const body = req.body as { workspaceId: string; clientRequestId: string; agentId?: string };
+      const result = await params.service.compactSession({ sessionId: p.sessionId, body });
+      if (!result.deduplicated) {
+        const workspace = params.service.getWorkspace(body.workspaceId);
+        if (!workspace) throw new HttpError(404, "workspace not found");
+        try {
+          await params.runtime.enqueueRun({
+            workspaceId: body.workspaceId,
+            sessionId: p.sessionId,
+            runId: result.runId,
+            workspacePath: workspace.path,
+            inputText: "__awb_compact__"
+          });
+        } catch (err) {
+          params.service.failRunOnEnqueueFailure({
+            workspaceId: body.workspaceId,
+            sessionId: p.sessionId,
+            runId: result.runId,
+            updatedAt: Date.now()
+          });
+          throw err;
+        }
       }
       return reply.code(201).send(result);
     }

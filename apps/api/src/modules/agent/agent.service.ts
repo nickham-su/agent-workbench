@@ -11,6 +11,8 @@ import type {
   AgentControlResult,
   AgentForkSessionRequest,
   AgentPermissionDecision,
+  AgentCompactSessionRequest,
+  AgentCompactSessionResponse,
   AgentRevertSessionRequest,
   AgentRunStatus,
   AgentSendMessageRequest,
@@ -37,9 +39,10 @@ import {
   getRunRecord,
   getRunState,
   getSessionHead,
+  getSessionTranscriptItems,
+  getSessionTranscriptItemsAfter,
+  getTranscriptItemById,
   getSessionVisibleItems,
-  getSessionVisibleItemsAfter,
-  getVisibleItemById,
   insertClientRequestDedup,
   listAgentSessions,
   listNonTerminalVisibleItemIds,
@@ -991,6 +994,13 @@ export class AgentService {
     const fromSession = getAgentSession(this.ctx.db, params.fromSessionId);
     if (!fromSession) throw new HttpError(404, "source session not found");
 
+    const transcript = getSessionTranscriptItems(this.ctx.db, fromSession.workspaceId, fromSession.id);
+    const target = transcript.find((item) => item.id === params.fromItemId);
+    if (!target) throw new HttpError(400, "invalid fromItemId");
+    if (target.archiveAt != null) {
+      throw new HttpError(400, "fromItemId is archived", "AGENT_ARCHIVED_ITEM_IMMUTABLE");
+    }
+
     const visible = getSessionVisibleItems(this.ctx.db, fromSession.workspaceId, fromSession.id);
     const index = visible.findIndex((item) => item.id === params.fromItemId);
     if (index < 0) throw new HttpError(400, "invalid fromItemId");
@@ -1157,7 +1167,9 @@ export class AgentService {
   getContextItems(sessionId: string, afterId?: number): AgentContextItemsResponse {
     const session = getAgentSession(this.ctx.db, sessionId);
     if (!session) throw new HttpError(404, "session not found");
-    const items = afterId && afterId > 0 ? getSessionVisibleItemsAfter(this.ctx.db, session.workspaceId, session.id, afterId) : getSessionVisibleItems(this.ctx.db, session.workspaceId, session.id);
+    const items = afterId && afterId > 0
+      ? getSessionTranscriptItemsAfter(this.ctx.db, session.workspaceId, session.id, afterId)
+      : getSessionTranscriptItems(this.ctx.db, session.workspaceId, session.id);
     const runState = getRunState(this.ctx.db, session.workspaceId, session.id);
     return {
       sessionId: session.id,
@@ -1167,10 +1179,132 @@ export class AgentService {
     };
   }
 
+  async compactSession(params: { sessionId: string; body: AgentCompactSessionRequest }): Promise<AgentCompactSessionResponse> {
+    const session = getAgentSession(this.ctx.db, params.sessionId);
+    if (!session) throw new HttpError(404, "session not found");
+    if (session.kind === "subtask") {
+      throw new HttpError(400, "subtask session is read-only", "AGENT_SUBTASK_READONLY");
+    }
+    if (session.workspaceId !== params.body.workspaceId) {
+      throw new HttpError(400, "workspaceId mismatch");
+    }
+    if (!this.ctx.agentWorkerEnabled) {
+      throw new HttpError(503, "agent worker unavailable", "AGENT_WORKER_UNAVAILABLE");
+    }
+
+    const clientRequestId = String(params.body.clientRequestId || "").trim();
+    if (!clientRequestId) throw new HttpError(400, "clientRequestId is required");
+
+    const dedup = findClientRequestDedup(this.ctx.db, {
+      workspaceId: session.workspaceId,
+      sessionId: session.id,
+      clientRequestId
+    });
+    if (dedup) {
+      return {
+        sessionId: session.id,
+        runId: dedup.runId,
+        deduplicated: true
+      };
+    }
+
+    const runState = getRunState(this.ctx.db, session.workspaceId, session.id);
+    if (runState.status !== "idle") {
+      throw new HttpError(409, "session is running");
+    }
+
+    const triggerItemId = session.headItemId;
+    if (triggerItemId == null) {
+      throw new HttpError(400, "no context to compact", "AGENT_COMPACTION_EMPTY");
+    }
+
+    const visible = getSessionVisibleItems(this.ctx.db, session.workspaceId, session.id);
+    if (
+      visible.length === 1 &&
+      visible[0]?.kind === "system" &&
+      visible[0]?.purpose === "compaction_summary"
+    ) {
+      throw new HttpError(400, "compaction not needed", "AGENT_COMPACTION_NOT_NEEDED");
+    }
+
+    const profile = resolveExecutionProfile(this.ctx, {
+      requestedAgentId: params.body.agentId
+    });
+
+    const createdAt = nowMs();
+    const runId = newSortableId("run");
+
+    const tx = this.ctx.db.transaction(() => {
+      createRunRecord(this.ctx.db, {
+        runId,
+        workspaceId: session.workspaceId,
+        sessionId: session.id,
+        triggerItemId: triggerItemId,
+        agentId: profile.agent.id,
+        providerId: profile.provider.id,
+        modelId: profile.model.id,
+        status: "running",
+        createdAt
+      });
+
+      insertClientRequestDedup(this.ctx.db, {
+        workspaceId: session.workspaceId,
+        sessionId: session.id,
+        clientRequestId,
+        messageItemId: triggerItemId,
+        runId,
+        createdAt
+      });
+
+      updateRunState(this.ctx.db, {
+        workspaceId: session.workspaceId,
+        sessionId: session.id,
+        status: "running",
+        activeRunId: runId,
+        activeAssistantItemId: null,
+        waitingToolItemId: null,
+        // 立即给 UI 一个反馈,避免等待 worker 拉取状态.
+        runNoticeText: "正在压缩上下文...",
+        updatedAt: createdAt,
+        appliedItemId: getLatestSessionItemId(this.ctx.db, session.workspaceId, session.id)
+      });
+    });
+    tx();
+
+    return {
+      sessionId: session.id,
+      runId,
+      deduplicated: false
+    };
+  }
+
+  // enqueue 失败时做最小回滚,避免会话卡在 running.
+  failRunOnEnqueueFailure(params: { workspaceId: string; sessionId: string; runId: string; updatedAt?: number }) {
+    const ts = params.updatedAt ?? nowMs();
+    const run = getRunRecord(this.ctx.db, params.runId);
+    if (!run) return;
+    if (run.workspaceId !== params.workspaceId || run.sessionId !== params.sessionId) return;
+    if (run.status === "completed" || run.status === "failed" || run.status === "cancelled") return;
+
+    updateRunRecordStatus(this.ctx.db, {
+      runId: params.runId,
+      status: "failed",
+      updatedAt: ts
+    });
+    const state = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
+    if (state.activeRunId !== params.runId) return;
+    setRunStateIdle(this.ctx.db, {
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+      updatedAt: ts,
+      appliedItemId: getLatestSessionItemId(this.ctx.db, params.workspaceId, params.sessionId)
+    });
+  }
+
   getContextItem(sessionId: string, itemId: number) {
     const session = getAgentSession(this.ctx.db, sessionId);
     if (!session) throw new HttpError(404, "session not found");
-    const item = getVisibleItemById(this.ctx.db, session.workspaceId, session.id, itemId);
+    const item = getTranscriptItemById(this.ctx.db, session.workspaceId, session.id, itemId);
     if (!item) throw new HttpError(404, "context item not found");
     return item;
   }
@@ -1202,8 +1336,11 @@ export class AgentService {
     const session = getAgentSession(this.ctx.db, sessionId);
     if (!session) throw new HttpError(404, "session not found");
     if (session.workspaceId !== body.workspaceId) throw new HttpError(400, "workspaceId mismatch");
-    const target = getVisibleItemById(this.ctx.db, session.workspaceId, session.id, body.toItemId);
+    const target = getTranscriptItemById(this.ctx.db, session.workspaceId, session.id, body.toItemId);
     if (!target) throw new HttpError(400, "toItemId is invalid");
+    if (target.archiveAt != null) {
+      throw new HttpError(400, "toItemId is archived", "AGENT_ARCHIVED_ITEM_IMMUTABLE");
+    }
 
     const state = getRunState(this.ctx.db, session.workspaceId, session.id);
     const createdAt = nowMs();

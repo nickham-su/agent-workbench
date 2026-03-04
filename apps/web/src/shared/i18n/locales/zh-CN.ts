@@ -338,6 +338,15 @@ export default {
         assistant: "AI",
         tool: "工具",
         system: "系统"
+      },
+      compactionArchivedHint: "更早的内容已归档",
+      slashCommandHintTitle: "特殊指令",
+      slashCommandHintStrictOnly: "精确匹配",
+      slashCommandHintNoMatch: "未找到匹配的指令: /{query}",
+      slashCommands: {
+        compact: {
+          summary: "手动压缩当前会话上下文"
+        }
       }
     }
   },

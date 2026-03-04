@@ -203,7 +203,15 @@ async function getContextItems(app: FastifyInstance, sessionId: string, afterId?
   assert.equal(res.statusCode, 200, `get context-items failed: ${res.body}`);
   return res.json() as {
     headItemId: number | null;
-    items: Array<{ id: number; kind: string; status: string; output: Record<string, any>; prevId: number | null }>;
+    items: Array<{
+      id: number;
+      kind: string;
+      status: string;
+      output: Record<string, any>;
+      prevId: number | null;
+      archiveAt: number | null;
+      purpose: string | null;
+    }>;
   };
 }
 
@@ -705,6 +713,22 @@ test("agent runtime settings 可通过 execution-profile 下发", async () => {
   assert.equal(typeof profile.model?.contextWindowTokens, "number");
 });
 
+test("agent compact 在 worker 不可用时返回 503", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/compact`,
+    payload: {
+      workspaceId: fixture.workspaceId,
+      clientRequestId: newSortableId("req")
+    }
+  });
+  assert.equal(res.statusCode, 503, `compact should fail when worker disabled: ${res.body}`);
+  assert.equal(res.json().code, "AGENT_WORKER_UNAVAILABLE");
+});
+
 test("agent providers settings 要求 contextWindowTokens 必填且合法", async () => {
   const fixture = await createFixture();
 
@@ -977,9 +1001,12 @@ test("agent context 压缩后会归档并支持 archive_search/read", async () =
   assert.ok((compact.summaryItemId ?? 0) > 0);
 
   const context = await getContextItems(fixture.app, session.id);
-  assert.equal(context.items.length, 1, "archived items should be hidden from visible context");
-  assert.equal(context.items[0]?.kind, "system");
-  assert.ok(String(context.items[0]?.output?.text || "").includes("压缩摘要"));
+  assert.equal(context.items.length, 3, "transcript should keep archived items visible in UI");
+  assert.equal(context.items[0]?.archiveAt == null, false);
+  assert.equal(context.items[1]?.archiveAt == null, false);
+  assert.equal(context.items[2]?.kind, "system");
+  assert.equal(context.items[2]?.purpose, "compaction_summary");
+  assert.ok(String(context.items[2]?.output?.text || "").includes("压缩摘要"));
 
   const promptContext = await getPromptContextInternal({
     app: fixture.app,
@@ -992,6 +1019,33 @@ test("agent context 压缩后会归档并支持 archive_search/read", async () =
     (item) => item.role === "system" && String(item.content || "").includes("压缩摘要")
   );
   assert.ok(compactSummaryMessage, "compaction summary should participate in prompt messages");
+  const archivedUserLeak = promptContext.messages.find(
+    (item) => item.role === "user" && String(item.content || "").includes("历史问题")
+  );
+  assert.equal(archivedUserLeak, undefined, "archived transcript items should not be included in model prompt");
+
+  const forkArchivedRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions/fork",
+    payload: {
+      fromSessionId: session.id,
+      fromItemId: userItem.item.id
+    }
+  });
+  assert.equal(forkArchivedRes.statusCode, 400, `fork archived item should fail: ${forkArchivedRes.body}`);
+  assert.equal(forkArchivedRes.json().code, "AGENT_ARCHIVED_ITEM_IMMUTABLE");
+
+  const revertArchivedRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/revert`,
+    payload: {
+      workspaceId: fixture.workspaceId,
+      toItemId: userItem.item.id,
+      reason: "manual_revert"
+    }
+  });
+  assert.equal(revertArchivedRes.statusCode, 400, `revert archived item should fail: ${revertArchivedRes.body}`);
+  assert.equal(revertArchivedRes.json().code, "AGENT_ARCHIVED_ITEM_IMMUTABLE");
 
   const archiveFilePath = path.join(fixture.workspacePath, ".awb", "agent", "archive", session.id, "00000001.log");
   const archiveContent = await fs.readFile(archiveFilePath, "utf-8");

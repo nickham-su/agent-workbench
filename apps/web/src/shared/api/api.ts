@@ -79,6 +79,8 @@ import type {
   AgentCreateSessionRequest,
   AgentForkSessionRequest,
   AgentRevertSessionRequest,
+  AgentCompactSessionRequest,
+  AgentCompactSessionResponse,
   AgentSendMessageRequest,
   AgentSendMessageResponse,
   AgentContextItemsResponse,
@@ -940,6 +942,15 @@ export async function getAgentRunState(sessionId: string) {
 export async function sendAgentMessage(sessionId: string, body: AgentSendMessageRequest) {
   try {
     const res = await client.post<AgentSendMessageResponse>(`/agent/sessions/${sessionId}/messages`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function compactAgentSession(sessionId: string, body: AgentCompactSessionRequest) {
+  try {
+    const res = await client.post<AgentCompactSessionResponse>(`/agent/sessions/${sessionId}/compact`, body);
     return res.data;
   } catch (err) {
     throw toApiError(err);

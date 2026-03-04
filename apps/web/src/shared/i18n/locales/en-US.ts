@@ -340,6 +340,15 @@ export default {
         assistant: "Assistant",
         tool: "Tool",
         system: "System"
+      },
+      compactionArchivedHint: "Earlier messages have been archived",
+      slashCommandHintTitle: "Commands",
+      slashCommandHintStrictOnly: "Exact match",
+      slashCommandHintNoMatch: "No matching command: /{query}",
+      slashCommands: {
+        compact: {
+          summary: "Compact the current session context"
+        }
       }
     }
   },
