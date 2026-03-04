@@ -1803,12 +1803,12 @@ test("agent prompt-context 使用结构化 tool-call/tool-result 消息", async 
   assert.ok(toolResultPart && typeof toolResultPart === "object", "tool-result part should exist");
   assert.equal(
     String((toolResultPart as { output?: { type?: string } }).output?.type || ""),
-    "json",
+    "text",
     "tool-result output should be ai-sdk structured output"
   );
 });
 
-test("agent prompt-context 对 apply_patch 保留 patchText 输入,并摘要化结果", async () => {
+test("agent prompt-context 对 apply_patch 保留 patchText 输入,并使用文本结果", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
   const runId = newSortableId("run");
@@ -1895,7 +1895,8 @@ test("agent prompt-context 对 apply_patch 保留 patchText 输入,并摘要化�
             deletions: 1
           }
         ]
-      }
+      },
+      text: "Success. Updated the following files:\nM foo.ts"
     }
   });
 
@@ -1949,23 +1950,9 @@ test("agent prompt-context 对 apply_patch 保留 patchText 输入,并摘要化�
     : null;
   assert.ok(toolResultPart && typeof toolResultPart === "object", "apply_patch tool-result part should exist");
 
-  const output = (toolResultPart as { output?: { type?: string; value?: Record<string, unknown> } }).output;
-  assert.equal(String(output?.type || ""), "json");
-  const value = (output?.value ?? {}) as Record<string, unknown>;
-  assert.equal(typeof value.fileCount, "number", "apply_patch prompt result should include fileCount");
-  assert.equal(Array.isArray(value.files), true, "apply_patch prompt result should include files summary");
-  const files = (value.files ?? []) as Array<Record<string, unknown>>;
-  const firstFile = files[0] ?? {};
-  assert.equal(
-    Object.prototype.hasOwnProperty.call(firstFile, "before"),
-    false,
-    "apply_patch prompt result should not include full before content"
-  );
-  assert.equal(
-    Object.prototype.hasOwnProperty.call(firstFile, "after"),
-    false,
-    "apply_patch prompt result should not include full after content"
-  );
+  const output = (toolResultPart as { output?: { type?: string; value?: string } }).output;
+  assert.equal(String(output?.type || ""), "text");
+  assert.equal(String(output?.value || "").includes("Success. Updated the following files"), true);
 });
 
 test("agent prompt-context 支持 todolist 工具输入输出", async () => {
@@ -2053,7 +2040,8 @@ test("agent prompt-context 支持 todolist 工具输入输出", async () => {
           { content: "梳理需求", status: "completed" },
           { content: "实现功能", status: "in_progress" }
         ]
-      }
+      },
+      text: "Todo list updated: total=2"
     }
   });
 
@@ -2102,13 +2090,9 @@ test("agent prompt-context 支持 todolist 工具输入输出", async () => {
           (part as { toolName?: string }).toolName === "todolist";
       })
     : null;
-  const output = (toolResultPart as { output?: { type?: string; value?: Record<string, unknown> } } | null)?.output;
-  assert.equal(String(output?.type || ""), "json", "todolist tool-result output should be json");
-  assert.equal(
-    Array.isArray((output?.value as { todos?: unknown[] } | undefined)?.todos),
-    true,
-    "todolist tool-result should include todos"
-  );
+  const output = (toolResultPart as { output?: { type?: string; value?: string } } | null)?.output;
+  assert.equal(String(output?.type || ""), "text", "todolist tool-result output should be text");
+  assert.equal(String(output?.value || "").includes("Todo list updated"), true, "todolist tool-result should be summary text");
 });
 
 test("agent tool 字符串结果保持原始字符串语义", async () => {

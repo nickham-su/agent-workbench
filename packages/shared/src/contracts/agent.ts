@@ -61,6 +61,9 @@ export const AgentToolOutputSchema = Type.Object({
   toolCallId: Type.Optional(Type.String({ minLength: 1 })),
   args: Type.Optional(Type.Any()),
   approved: Type.Optional(Type.Boolean()),
+  text: Type.Optional(Type.String()),
+  textTruncated: Type.Optional(Type.Boolean()),
+  textArtifactPath: Type.Optional(Type.String({ minLength: 1 })),
   result: Type.Optional(Type.Any()),
   error: Type.Optional(Type.String())
 });

@@ -40,6 +40,15 @@ const ENV_MODEL_TOTAL_TIMEOUT_MS = Math.min(
 );
 const MODEL_RETRY_BACKOFF_BASE_MS = 2_000;
 const MODEL_RETRY_BACKOFF_MAX_MS = 60_000;
+const TOOL_OUTPUT_TEXT_MAX_CHARS = Math.max(1_000, parseIntOrDefault(process.env.AWB_TOOL_OUTPUT_TEXT_MAX_CHARS, 8_000));
+const TOOL_OUTPUT_TEXT_PREVIEW_CHARS = Math.max(
+  500,
+  Math.min(TOOL_OUTPUT_TEXT_MAX_CHARS, parseIntOrDefault(process.env.AWB_TOOL_OUTPUT_TEXT_PREVIEW_CHARS, 3_000))
+);
+const TOOL_ARTIFACT_MAX_CHARS = Math.max(
+  TOOL_OUTPUT_TEXT_MAX_CHARS,
+  parseIntOrDefault(process.env.AWB_TOOL_ARTIFACT_MAX_CHARS, 200_000)
+);
 const COMPACTION_USER_PROMPT = [
   "请基于当前会话内容输出一份总结,用于继续当前任务。",
   "重点覆盖:",
@@ -82,6 +91,286 @@ async function sleepMsWithAbort(ms: number, signal: AbortSignal) {
     };
     signal.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+function normalizeToolText(raw: string) {
+  return String(raw || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\0/g, "");
+}
+
+function oneLine(raw: string, maxLen = 240) {
+  const compact = String(raw || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!compact) return "";
+  if (compact.length <= maxLen) return compact;
+  return `${compact.slice(0, Math.max(0, maxLen - 3))}...`;
+}
+
+function stringifyResult(raw: unknown) {
+  if (typeof raw === "string") return raw;
+  try {
+    return JSON.stringify(raw, null, 2);
+  } catch {
+    return String(raw);
+  }
+}
+
+function buildToolText(params: {
+  toolName: string;
+  status: string;
+  headers?: Array<[string, string | undefined]>;
+  body?: string;
+}) {
+  const lines = [`tool: ${params.toolName}`, `status: ${params.status}`];
+  for (const [key, value] of params.headers || []) {
+    const normalized = oneLine(String(value || ""), 500);
+    if (!normalized) continue;
+    lines.push(`${key}: ${normalized}`);
+  }
+  const body = normalizeToolText(String(params.body || "")).trimEnd();
+  if (!body) return lines.join("\n");
+  return `${lines.join("\n")}\n\n${body}`;
+}
+
+function toIntOrNull(raw: unknown) {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return null;
+  return Math.floor(raw);
+}
+
+function buildToolSuccessText(params: {
+  toolName: string;
+  status: "completed";
+  args: Record<string, unknown>;
+  result: unknown;
+}) {
+  const resultObj = toRecordObject(params.result);
+
+  if (params.toolName === "apply_patch") {
+    const summary = toRecordObject(resultObj?.summary);
+    const body = typeof resultObj?.text === "string" ? resultObj.text : "apply_patch completed";
+    return buildToolText({
+      toolName: params.toolName,
+      status: params.status,
+      headers: [
+        ["files", summary && typeof summary.fileCount === "number" ? String(summary.fileCount) : undefined],
+        ["additions", summary && typeof summary.additions === "number" ? String(summary.additions) : undefined],
+        ["deletions", summary && typeof summary.deletions === "number" ? String(summary.deletions) : undefined]
+      ],
+      body
+    });
+  }
+
+  if (params.toolName === "todolist") {
+    const summary = toRecordObject(resultObj?.summary);
+    return buildToolText({
+      toolName: params.toolName,
+      status: params.status,
+      headers: [
+        ["total", summary && typeof summary.total === "number" ? String(summary.total) : undefined],
+        ["pending", summary && typeof summary.pending === "number" ? String(summary.pending) : undefined],
+        ["in_progress", summary && typeof summary.inProgress === "number" ? String(summary.inProgress) : undefined],
+        ["completed", summary && typeof summary.completed === "number" ? String(summary.completed) : undefined],
+        ["cancelled", summary && typeof summary.cancelled === "number" ? String(summary.cancelled) : undefined]
+      ],
+      body: "Todo list updated."
+    });
+  }
+
+  if (params.toolName === "subtask") {
+    const subtaskSessionId = typeof resultObj?.subtaskSessionId === "string" ? resultObj.subtaskSessionId.trim() : "";
+    const resultText = typeof resultObj?.resultText === "string" ? resultObj.resultText : "Subtask finished successfully.";
+    return buildToolText({
+      toolName: params.toolName,
+      status: params.status,
+      headers: [["subtask_session_id", subtaskSessionId || undefined]],
+      body: resultText
+    });
+  }
+
+  if (params.toolName === "read") {
+    const source = typeof params.args.filePath === "string" ? params.args.filePath : undefined;
+    const offset = toIntOrNull(params.args.offset);
+    const limit = toIntOrNull(params.args.limit);
+    const range =
+      offset != null && limit != null && limit > 0
+        ? `${offset}-${offset + Math.max(0, limit - 1)}`
+        : offset != null
+          ? String(offset)
+          : undefined;
+    const body = typeof resultObj?.content === "string"
+      ? resultObj.content
+      : typeof resultObj?.summary === "string"
+        ? resultObj.summary
+        : stringifyResult(params.result);
+    return buildToolText({
+      toolName: params.toolName,
+      status: params.status,
+      headers: [["source", source], ["range", range]],
+      body
+    });
+  }
+
+  if (params.toolName === "bash") {
+    const command = typeof resultObj?.command === "string" ? resultObj.command : "";
+    const exitCode = toIntOrNull(resultObj?.exitCode);
+    const timedOut = resultObj?.timedOut === true;
+    const outputLimitExceeded = resultObj?.outputLimitExceeded === true;
+    const stdout = typeof resultObj?.stdout === "string" ? resultObj.stdout.trimEnd() : "";
+    const stderr = typeof resultObj?.stderr === "string" ? resultObj.stderr.trimEnd() : "";
+    const blocks: string[] = [];
+    if (stdout) blocks.push(`stdout:\n${stdout}`);
+    if (stderr) blocks.push(`stderr:\n${stderr}`);
+    const body = blocks.length > 0 ? blocks.join("\n\n") : "(no output)";
+    return buildToolText({
+      toolName: params.toolName,
+      status: params.status,
+      headers: [
+        ["command", command || undefined],
+        ["exit_code", exitCode == null ? "null" : String(exitCode)],
+        ["timed_out", timedOut ? "true" : undefined],
+        ["output_limit_exceeded", outputLimitExceeded ? "true" : undefined]
+      ],
+      body
+    });
+  }
+
+  if (params.toolName === "archive_search" || params.toolName === "archive_read") {
+    const body = typeof resultObj?.text === "string" ? resultObj.text : stringifyResult(params.result);
+    return buildToolText({
+      toolName: params.toolName,
+      status: params.status,
+      body
+    });
+  }
+
+  if (params.toolName === "write") {
+    const target = typeof params.args.filePath === "string" ? params.args.filePath : undefined;
+    const body = typeof resultObj?.content === "string"
+      ? resultObj.content
+      : typeof resultObj?.summary === "string"
+        ? resultObj.summary
+        : stringifyResult(params.result);
+    return buildToolText({
+      toolName: params.toolName,
+      status: params.status,
+      headers: [["target", target]],
+      body
+    });
+  }
+
+  if (isMcpTool(params.toolName)) {
+    const body = typeof resultObj?.text === "string"
+      ? resultObj.text
+      : stringifyResult(resultObj?.raw ?? params.result);
+    return buildToolText({
+      toolName: params.toolName,
+      status: params.status,
+      body
+    });
+  }
+
+  return buildToolText({
+    toolName: params.toolName,
+    status: params.status,
+    body: stringifyResult(params.result)
+  });
+}
+
+function buildToolErrorText(params: { toolName: string; status: "failed" | "denied" | "cancelled"; error: string }) {
+  return buildToolText({
+    toolName: params.toolName,
+    status: params.status,
+    body: params.error
+  });
+}
+
+function isPathInside(rootPath: string, targetPath: string) {
+  const normalizedRoot = path.resolve(rootPath);
+  const normalizedTarget = path.resolve(targetPath);
+  const withSep = normalizedRoot.endsWith(path.sep) ? normalizedRoot : `${normalizedRoot}${path.sep}`;
+  return normalizedTarget === normalizedRoot || normalizedTarget.startsWith(withSep);
+}
+
+function safePathSegment(input: string) {
+  const value = String(input || "")
+    .trim()
+    .replace(/[^A-Za-z0-9._-]/g, "_");
+  return value || "unknown";
+}
+
+async function finalizeToolText(params: {
+  workspacePath: string;
+  sessionId: string;
+  itemId: number;
+  toolName: string;
+  text: string;
+}) {
+  const normalized = normalizeToolText(params.text).trimEnd();
+  if (normalized.length <= TOOL_OUTPUT_TEXT_MAX_CHARS) {
+    return {
+      text: normalized,
+      textTruncated: false as const,
+      textArtifactPath: undefined as string | undefined
+    };
+  }
+
+  const sessionSegment = safePathSegment(params.sessionId);
+  const toolSegment = safePathSegment(params.toolName);
+  const itemIdSegment = String(Math.max(1, Math.floor(params.itemId))).padStart(8, "0");
+  const relativePath = path.join(".awb", "agent", "artifacts", sessionSegment, `${itemIdSegment}.${toolSegment}.txt`);
+  const workspaceResolvedPath = path.resolve(params.workspacePath);
+  const fullPath = path.resolve(workspaceResolvedPath, relativePath);
+  if (!isPathInside(workspaceResolvedPath, fullPath)) {
+    throw new Error("artifact path is outside workspace");
+  }
+
+  const workspaceRealPath = await fs.realpath(workspaceResolvedPath);
+  let parentDirPath = workspaceResolvedPath;
+  for (const segment of [".awb", "agent", "artifacts", sessionSegment]) {
+    parentDirPath = path.join(parentDirPath, segment);
+    const stat = await fs.lstat(parentDirPath).catch(() => null);
+    if (!stat) {
+      try {
+        await fs.mkdir(parentDirPath);
+      } catch (err: any) {
+        if (!err || err.code !== "EEXIST") {
+          throw err;
+        }
+      }
+    } else {
+      if (stat.isSymbolicLink()) {
+        throw new Error("artifact parent directory symlink is not allowed");
+      }
+      if (!stat.isDirectory()) {
+        throw new Error("artifact parent path must be a directory");
+      }
+    }
+    const parentRealPath = await fs.realpath(parentDirPath);
+    if (!isPathInside(workspaceRealPath, parentRealPath)) {
+      throw new Error("artifact parent directory is outside workspace");
+    }
+  }
+
+  const existing = await fs.lstat(fullPath).catch(() => null);
+  if (existing?.isSymbolicLink()) {
+    throw new Error("artifact target symlink is not allowed");
+  }
+
+  const artifactBody =
+    normalized.length <= TOOL_ARTIFACT_MAX_CHARS
+      ? normalized
+      : `${normalized.slice(0, TOOL_ARTIFACT_MAX_CHARS)}\n\n[truncated]`;
+  await fs.writeFile(fullPath, artifactBody, { encoding: "utf8" });
+
+  const preview = normalized.slice(0, TOOL_OUTPUT_TEXT_PREVIEW_CHARS).trimEnd();
+  const text = `${preview}\n\n[truncated]\nartifact: ${relativePath}`.trim();
+  return {
+    text,
+    textTruncated: true as const,
+    textArtifactPath: relativePath
+  };
 }
 
 type QueuedRun = {
@@ -528,12 +817,14 @@ export class AgentRunner {
     };
 
     if (!isToolEnabledForAgent(profile, tool.toolName)) {
+      const error = `tool is disabled for current agent: ${tool.toolName}`;
       await this.apiClient.updateContextItem({
         itemId: tool.itemId,
         status: "failed",
         output: {
           ...outputBase,
-          error: `tool is disabled for current agent: ${tool.toolName}`
+          text: buildToolErrorText({ toolName: tool.toolName, status: "failed", error }),
+          error
         },
         updatedAt: nowMs()
       });
@@ -559,6 +850,7 @@ export class AgentRunner {
           status: "failed",
           output: {
             ...outputBase,
+            text: buildToolErrorText({ toolName: tool.toolName, status: "failed", error }),
             error
           },
           updatedAt: nowMs()
@@ -603,6 +895,15 @@ export class AgentRunner {
           status: "queued",
           output: {
             ...outputBase,
+            ...(approvalPreview
+              ? {
+                  text: buildToolText({
+                    toolName: tool.toolName,
+                    status: "queued",
+                    body: typeof approvalPreview.text === "string" ? approvalPreview.text : "apply_patch prepared"
+                  })
+                }
+              : {}),
             ...(approvalPreview ? { result: approvalPreview } : {})
           },
           updatedAt: nowMs()
@@ -636,6 +937,15 @@ export class AgentRunner {
         status: "awaiting_permission",
         output: {
           ...outputBase,
+          ...(approvalPreview
+            ? {
+                text: buildToolText({
+                  toolName: tool.toolName,
+                  status: "awaiting_permission",
+                  body: typeof approvalPreview.text === "string" ? approvalPreview.text : "apply_patch prepared"
+                })
+              }
+            : {}),
           ...(approvalPreview ? { result: approvalPreview } : {})
         },
         updatedAt: nowMs()
@@ -677,6 +987,15 @@ export class AgentRunner {
       status: "running",
       output: {
         ...outputBase,
+        ...(approvalPreview
+          ? {
+              text: buildToolText({
+                toolName: tool.toolName,
+                status: "running",
+                body: typeof approvalPreview.text === "string" ? approvalPreview.text : "apply_patch prepared"
+              })
+            }
+          : {}),
         ...(approvalPreview ? { result: approvalPreview } : {})
       },
       updatedAt: nowMs()
@@ -819,6 +1138,12 @@ export class AgentRunner {
           status: "running",
           output: {
             ...outputBase,
+            text: buildToolText({
+              toolName: tool.toolName,
+              status: "running",
+              headers: [["subtask_session_id", subtaskSessionId]],
+              body: "Subtask started."
+            }),
             result: {
               subtaskSessionId
             }
@@ -878,8 +1203,43 @@ export class AgentRunner {
 
       if (signal.aborted) return { paused: false as const };
 
+      const rawSuccessText = buildToolSuccessText({
+        toolName: tool.toolName,
+        status: "completed",
+        args: tool.args,
+        result
+      });
+      let finalizedText: {
+        text: string;
+        textTruncated: boolean;
+        textArtifactPath?: string;
+      };
+      try {
+        finalizedText = await finalizeToolText({
+          workspacePath: run.workspacePath,
+          sessionId: run.sessionId,
+          itemId: tool.itemId,
+          toolName: tool.toolName,
+          text: rawSuccessText
+        });
+      } catch (artifactErr) {
+        const message = artifactErr instanceof Error ? artifactErr.message : String(artifactErr);
+        this.logger.warn(`[agent-worker] persist tool artifact failed(item=${tool.itemId}, tool=${tool.toolName}): ${message}`);
+        const needsTruncate = rawSuccessText.length > TOOL_OUTPUT_TEXT_MAX_CHARS;
+        const preview = rawSuccessText.slice(0, TOOL_OUTPUT_TEXT_PREVIEW_CHARS).trimEnd();
+        finalizedText = {
+          text: needsTruncate
+            ? `${preview}\n\n[truncated]\nartifact: unavailable`
+            : rawSuccessText,
+          textTruncated: needsTruncate
+        };
+      }
+
       const output = {
         ...outputBase,
+        text: finalizedText.text,
+        ...(finalizedText.textTruncated ? { textTruncated: true } : {}),
+        ...(finalizedText.textArtifactPath ? { textArtifactPath: finalizedText.textArtifactPath } : {}),
         result
       };
       await this.apiClient.updateContextItem({
@@ -918,6 +1278,7 @@ export class AgentRunner {
         status: "failed",
         output: {
           ...outputBase,
+          text: buildToolErrorText({ toolName: tool.toolName, status: "failed", error }),
           ...(subtaskSessionId
             ? {
                 result: {
@@ -963,6 +1324,7 @@ export class AgentRunner {
     const pending: PendingTool[] = [];
     for (const item of params.context.pendingTools) {
       if (!isToolEnabledForAgent(params.profile, item.toolName)) {
+        const error = `tool is disabled for current agent: ${item.toolName}`;
         await this.apiClient.updateContextItem({
           itemId: item.itemId,
           status: "failed",
@@ -971,7 +1333,8 @@ export class AgentRunner {
             toolName: item.toolName,
             toolCallId: item.toolCallId,
             args: item.args,
-            error: `tool is disabled for current agent: ${item.toolName}`
+            text: buildToolErrorText({ toolName: item.toolName, status: "failed", error }),
+            error
           },
           updatedAt: nowMs()
         });
@@ -990,6 +1353,7 @@ export class AgentRunner {
           status: "failed",
           output: {
             ...outputBase,
+            text: buildToolErrorText({ toolName: item.toolName, status: "failed", error }),
             error
           },
           updatedAt: nowMs()

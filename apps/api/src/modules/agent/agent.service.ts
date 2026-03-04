@@ -64,7 +64,7 @@ import {
   resolveGlobalDefaultModelProfile,
   resolveExecutionProfile
 } from "../settings/settings.service.js";
-import { projectToolCallInputForPrompt, projectToolResultForPrompt } from "./prompt/tool-projectors/index.js";
+import { projectToolCallInputForPrompt } from "./prompt/tool-projectors/index.js";
 
 export type AgentQueuedRun = {
   workspaceId: string;
@@ -300,10 +300,17 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
 function stringifyToolResult(raw: unknown) {
   if (typeof raw === "string") return raw;
   try {
-    return JSON.stringify(raw, null, 2);
+    const serialized = JSON.stringify(raw, null, 2);
+    if (typeof serialized === "string") return serialized;
+    return "";
   } catch {
-    return String(raw);
+    return raw == null ? "" : String(raw);
   }
+}
+
+function resolveToolOutputText(output: { text?: unknown; result?: unknown }) {
+  if (typeof output.text === "string") return output.text;
+  return stringifyToolResult(output.result);
 }
 
 function toSessionTitleFromFirstMessage(text: string) {
@@ -824,10 +831,12 @@ function buildArchiveLine(item: AgentContextItemRecord) {
   else if (item.kind === "assistant" && item.output.type === "assistant_text") text = item.output.text || "";
   else if (item.kind === "system" && item.output.type === "system_text") text = item.output.text || "";
   else if (item.kind === "tool" && item.output.type === "tool") {
-    if (typeof item.output.error === "string" && item.output.error.trim()) {
+    if (typeof item.output.text === "string" && item.output.text.trim()) {
+      text = item.output.text;
+    } else if (typeof item.output.error === "string" && item.output.error.trim()) {
       text = `[error] ${item.output.error}`;
     } else {
-      text = stringifyToolResult(item.output.result);
+      text = resolveToolOutputText(item.output);
     }
   }
   const toolName = item.kind === "tool" && item.output.type === "tool" ? String(item.output.toolName || "-") : "-";
@@ -850,7 +859,7 @@ type PromptToolResultPart = {
   toolCallId: string;
   toolName: AgentContextToolName;
   output:
-    | { type: "json"; value: unknown }
+    | { type: "text"; value: string }
     | { type: "error-text"; value: string };
 };
 type PromptMessage =
@@ -1594,6 +1603,7 @@ export class AgentService {
       status: "denied",
       output: {
         ...output,
+        text: `tool: ${output.toolName}\nstatus: denied\n\npermission denied`,
         error: "permission denied"
       },
       updatedAt
@@ -2462,17 +2472,16 @@ export class AgentService {
           input: promptInput
         });
 
-        const rawToolResult = toolItem.output.result !== undefined ? toolItem.output.result : { status: toolItem.status };
-        const promptToolResult = projectToolResultForPrompt({
-          toolName: toolItem.output.toolName,
-          status: toolItem.status,
-          result: rawToolResult
-        });
+        const promptToolText = resolveToolOutputText(toolItem.output).trim() || `status=${toolItem.status}`;
+        const toolErrorText =
+          typeof toolItem.output.error === "string" && toolItem.output.error.trim()
+            ? toolItem.output.error
+            : resolveToolOutputText(toolItem.output).trim() || `status=${toolItem.status}`;
         const toolOutput = toolItem.output.error
-          ? { type: "error-text" as const, value: toolItem.output.error }
+          ? { type: "error-text" as const, value: toolErrorText }
           : {
-              type: "json" as const,
-              value: promptToolResult
+              type: "text" as const,
+              value: promptToolText
             };
         toolResultParts.push({
           type: "tool-result",

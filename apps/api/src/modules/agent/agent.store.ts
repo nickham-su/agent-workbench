@@ -66,7 +66,10 @@ type StoredToolCall = {
 type StoredToolResult = {
   status?: unknown;
   error?: unknown;
-  meta?: unknown;
+  meta?: {
+    resultFormat?: unknown;
+    result?: unknown;
+  } | unknown;
 };
 
 function parseJson(raw: string | null) {
@@ -102,7 +105,10 @@ function normalizeTextOutput(kind: AgentContextItemRecord["kind"], output: Agent
   if (kind === "user" && output.type === "user_text") return output.text;
   if (kind === "assistant" && output.type === "assistant_text") return output.text;
   if (kind === "system" && output.type === "system_text") return output.text;
-  if (kind === "tool" && output.type === "tool") return toResultText(output.result);
+  if (kind === "tool" && output.type === "tool") {
+    if (typeof output.text === "string") return output.text;
+    return toResultText(output.result);
+  }
   if ((output as { text?: unknown }).text && typeof (output as { text?: unknown }).text === "string") {
     return String((output as { text?: unknown }).text);
   }
@@ -141,12 +147,15 @@ function encodeStoredColumns(params: {
     ...(typeof params.output.args !== "undefined" ? { args: params.output.args } : {}),
     ...(params.output.approved === true ? { approval: { approved: true } } : {})
   };
+  const shouldPersistStructuredResult =
+    toolName === "apply_patch" || toolName === "todolist" || toolName === "subtask";
   const toolResultPayload: StoredToolResult = {
     status: params.status,
-    ...(Object.prototype.hasOwnProperty.call(params.output, "result")
+    ...(shouldPersistStructuredResult && Object.prototype.hasOwnProperty.call(params.output, "result")
       ? {
           meta: {
-            resultFormat: typeof params.output.result === "string" ? "text" : "json"
+            resultFormat: typeof params.output.result === "string" ? "text" : "json",
+            result: params.output.result
           }
         }
       : {}),
@@ -158,6 +167,11 @@ function encodeStoredColumns(params: {
   return {
     ...base,
     outputText,
+    outputTextTruncated: params.output.textTruncated === true ? 1 : 0,
+    outputTextArtifactPath:
+      typeof params.output.textArtifactPath === "string" && params.output.textArtifactPath.trim()
+        ? params.output.textArtifactPath.trim()
+        : null,
     toolName: toolName || null,
     toolCallId,
     toolCallJson: JSON.stringify(toolCallPayload),
@@ -216,12 +230,17 @@ function mapFromStoredColumns(row: AgentContextItemRow): AgentContextItemOutput 
         : undefined;
   const approved = call?.approval?.approved === true || legacyTool?.approved === true;
 
-  const resultFormat = typeof result?.meta === "object" && result.meta && !Array.isArray(result.meta)
-    ? String(((result.meta as Record<string, unknown>).resultFormat as string) || "").trim()
+  const resultMeta = typeof result?.meta === "object" && result.meta && !Array.isArray(result.meta)
+    ? (result.meta as Record<string, unknown>)
+    : null;
+  const resultFormat = resultMeta
+    ? String((resultMeta.resultFormat as string) || "").trim()
     : "";
 
   let parsedResult: unknown = undefined;
-  if (row.outputText.trim()) {
+  if (resultMeta && Object.prototype.hasOwnProperty.call(resultMeta, "result")) {
+    parsedResult = resultMeta.result;
+  } else if (row.outputText.trim()) {
     if (resultFormat === "json") {
       try {
         parsedResult = JSON.parse(row.outputText);
@@ -256,6 +275,9 @@ function mapFromStoredColumns(row: AgentContextItemRow): AgentContextItemOutput 
     ...(toolCallId ? { toolCallId } : {}),
     ...(typeof args !== "undefined" ? { args } : {}),
     ...(approved ? { approved: true } : {}),
+    text: row.outputText,
+    ...(row.outputTextTruncated !== 0 ? { textTruncated: true } : {}),
+    ...(row.outputTextArtifactPath ? { textArtifactPath: row.outputTextArtifactPath } : {}),
     ...(typeof parsedResult !== "undefined" ? { result: parsedResult } : {}),
     ...(error ? { error } : {})
   } as AgentContextItemOutput;
