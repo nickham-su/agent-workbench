@@ -346,6 +346,9 @@ export default {
       slashCommands: {
         compact: {
           summary: "手动压缩当前会话上下文"
+        },
+        clear: {
+          summary: "开始新任务并归档当前可见上下文"
         }
       }
     }

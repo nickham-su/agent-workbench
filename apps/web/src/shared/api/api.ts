@@ -79,6 +79,7 @@ import type {
   AgentCreateSessionRequest,
   AgentForkSessionRequest,
   AgentRevertSessionRequest,
+  AgentClearSessionRequest,
   AgentCompactSessionRequest,
   AgentCompactSessionResponse,
   AgentSendMessageRequest,
@@ -951,6 +952,15 @@ export async function sendAgentMessage(sessionId: string, body: AgentSendMessage
 export async function compactAgentSession(sessionId: string, body: AgentCompactSessionRequest) {
   try {
     const res = await client.post<AgentCompactSessionResponse>(`/agent/sessions/${sessionId}/compact`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function clearAgentSession(sessionId: string, body: AgentClearSessionRequest) {
+  try {
+    const res = await client.post<AgentControlResult>(`/agent/sessions/${sessionId}/clear`, body);
     return res.data;
   } catch (err) {
     throw toApiError(err);

@@ -13,6 +13,7 @@ import {
   AgentRevertSessionRequestSchema,
   AgentSendMessageRequestSchema,
   AgentSendMessageResponseSchema,
+  AgentClearSessionRequestSchema,
   AgentCompactSessionRequestSchema,
   AgentCompactSessionResponseSchema,
   AgentSessionRecordSchema,
@@ -233,6 +234,29 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
         }
       }
       return reply.code(201).send(result);
+    }
+  );
+
+  app.post(
+    "/api/agent/sessions/:sessionId/clear",
+    {
+      schema: {
+        tags: ["agent"],
+        params: Type.Object({ sessionId: Type.String({ minLength: 1 }) }),
+        body: AgentClearSessionRequestSchema,
+        response: {
+          200: AgentControlResultSchema,
+          400: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+          500: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      const p = req.params as { sessionId: string };
+      const body = req.body as { workspaceId: string; reason?: string };
+      return params.service.clearSession(p.sessionId, body);
     }
   );
 

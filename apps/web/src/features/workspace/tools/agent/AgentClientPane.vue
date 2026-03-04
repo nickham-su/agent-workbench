@@ -250,13 +250,14 @@ import type { AgentContextItemRecord, AgentSessionRunState } from "@agent-workbe
 import { useVirtualizer } from "@tanstack/vue-virtual";
 import { CloseOutlined, DoubleRightOutlined, ForkOutlined, RollbackOutlined } from "@ant-design/icons-vue";
 import { Modal, message } from "ant-design-vue";
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import AgentApplyPatchCard from "./AgentApplyPatchCard.vue";
 import AgentTodoListCard from "./AgentTodoListCard.vue";
 import {
   cancelAgentSession,
+  clearAgentSession,
   compactAgentSession,
   decideAgentToolPermission,
   forkAgentSession,
@@ -411,7 +412,7 @@ watch(
   { flush: "sync" }
 );
 
-type SlashCommandAction = "compact";
+type SlashCommandAction = "compact" | "clear";
 
 type SlashCommandDefinition = {
   name: string;
@@ -428,6 +429,13 @@ const slashCommands: SlashCommandDefinition[] = [
     summaryKey: "agent.client.slashCommands.compact.summary",
     strictOnly: true,
     action: "compact"
+  },
+  {
+    name: "clear",
+    usage: "/clear",
+    summaryKey: "agent.client.slashCommands.clear.summary",
+    strictOnly: true,
+    action: "clear"
   }
 ];
 
@@ -1281,6 +1289,12 @@ async function executeSlashCommand(params: {
     });
     return;
   }
+  if (params.command.action === "clear") {
+    await clearAgentSession(params.sessionId, {
+      workspaceId: params.workspaceId
+    });
+    return;
+  }
   throw new Error(`unsupported slash command: ${params.command.name}`);
 }
 
@@ -1550,6 +1564,19 @@ watch(
   }
 );
 
+// Workspace 内切换工具时,AgentToolView 被 KeepAlive 缓存,组件不会重新挂载。
+// activated 时主动 refresh,避免回到 Agent 后列表为空且不触发拉取。
+onActivated(() => {
+  if (!props.active) return;
+  if (!props.sessionId) return;
+  if (!props.sessionReady) return;
+  // KeepAlive 恢复时先重新测量虚拟列表尺寸,再刷新一次状态.
+  void nextTick().then(() => {
+    rowVirtualizer.value.measure();
+    void refreshAll(false, true);
+  });
+});
+
 watch(
   () => virtualTotalSize.value,
   (next, prev) => {
@@ -1658,7 +1685,15 @@ onBeforeUnmount(() => {
 }
 
 .slash-command-item {
+  appearance: none;
+  background: transparent;
+  color: inherit;
   transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.slash-command-item.is-active {
+  border-color: rgba(59, 130, 246, 0.4);
+  background: rgba(59, 130, 246, 0.12);
 }
 
 @media (hover: hover) and (pointer: fine) {

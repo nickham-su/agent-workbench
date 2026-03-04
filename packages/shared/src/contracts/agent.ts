@@ -178,6 +178,12 @@ export const AgentCompactSessionResponseSchema = Type.Object({
 });
 export type AgentCompactSessionResponse = Static<typeof AgentCompactSessionResponseSchema>;
 
+export const AgentClearSessionRequestSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
+  reason: Type.Optional(Type.String({ minLength: 1 }))
+});
+export type AgentClearSessionRequest = Static<typeof AgentClearSessionRequestSchema>;
+
 export const AgentRevertSessionRequestSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
   toItemId: Type.Number({ minimum: 1 }),

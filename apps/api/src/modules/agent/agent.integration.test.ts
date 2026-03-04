@@ -757,6 +757,252 @@ test("agent compact 在 worker 不可用时返回 503", async () => {
   assert.equal(res.json().code, "AGENT_WORKER_UNAVAILABLE");
 });
 
+test("agent clear 会归档当前可见上下文并插入 clear 边界 marker", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "旧任务: 先完成接口改造"
+    }
+  });
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: {
+      type: "assistant_text",
+      text: "旧任务答复: 可以先做字段迁移。"
+    }
+  });
+
+  const clearRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/clear`,
+    payload: {
+      workspaceId: fixture.workspaceId,
+      reason: "切换新任务"
+    }
+  });
+  assert.equal(clearRes.statusCode, 200, `clear session failed: ${clearRes.body}`);
+  const clearBody = clearRes.json() as { sessionId: string; headItemId: number | null };
+  assert.equal(clearBody.sessionId, session.id);
+  assert.ok((clearBody.headItemId ?? 0) > assistantItem.item.id);
+
+  const context = await getContextItems(fixture.app, session.id);
+  assert.equal(context.items.length, 3);
+  assert.equal(context.items[0]?.archiveAt == null, false);
+  assert.equal(context.items[1]?.archiveAt == null, false);
+  assert.equal(context.items[2]?.kind, "system");
+  assert.equal(context.items[2]?.boundaryReason, "clear");
+  assert.equal(context.items[2]?.archiveAt, null);
+  assert.ok(String(context.items[2]?.output?.text || "").includes("archive_search"));
+
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: clearBody.headItemId || context.items[2]!.id,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+  const promptContext = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+  const oldUserLeak = promptContext.messages.find((item) => String(item.content || "").includes("旧任务: 先完成接口改造"));
+  assert.equal(oldUserLeak, undefined);
+  const clearSummary = promptContext.messages.find((item) => item.role === "system" && String(item.content || "").includes("已开始新任务"));
+  assert.ok(clearSummary);
+
+  const archiveFilePath = path.join(fixture.workspacePath, ".awb", "agent", "archive", session.id, "00000001.log");
+  const archiveContent = await fs.readFile(archiveFilePath, "utf-8");
+  assert.ok(archiveContent.includes("旧任务: 先完成接口改造"));
+  assert.ok(archiveContent.includes("旧任务答复: 可以先做字段迁移。"));
+
+  const clearAgainRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/clear`,
+    payload: {
+      workspaceId: fixture.workspaceId
+    }
+  });
+  assert.equal(clearAgainRes.statusCode, 400, `clear should be no-op when only marker visible: ${clearAgainRes.body}`);
+  assert.equal(clearAgainRes.json().code, "AGENT_CLEAR_NOT_NEEDED");
+});
+
+test("agent clear 对 subtask 会话返回只读错误", async () => {
+  const fixture = await createFixture();
+  const createSubtaskRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions",
+    payload: {
+      workspaceId: fixture.workspaceId,
+      title: "it-subtask-session",
+      kind: "subtask"
+    }
+  });
+  assert.equal(createSubtaskRes.statusCode, 201, `create subtask session failed: ${createSubtaskRes.body}`);
+  const subtaskSession = createSubtaskRes.json() as { id: string };
+
+  const clearRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${subtaskSession.id}/clear`,
+    payload: {
+      workspaceId: fixture.workspaceId
+    }
+  });
+  assert.equal(clearRes.statusCode, 400, `clear subtask should fail: ${clearRes.body}`);
+  assert.equal(clearRes.json().code, "AGENT_SUBTASK_READONLY");
+});
+
+test("agent clear 在空会话返回 AGENT_CLEAR_EMPTY", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const clearRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/clear`,
+    payload: {
+      workspaceId: fixture.workspaceId
+    }
+  });
+  assert.equal(clearRes.statusCode, 400, `clear empty session should fail: ${clearRes.body}`);
+  assert.equal(clearRes.json().code, "AGENT_CLEAR_EMPTY");
+});
+
+test("agent clear 在会话运行中返回 AGENT_CLEAR_NOT_IDLE", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "测试 clear 运行中校验"
+    }
+  });
+
+  await updateRunStateInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "running",
+    activeRunId: newSortableId("run"),
+    activeAssistantItemId: null,
+    waitingToolItemId: null
+  });
+
+  const clearRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/clear`,
+    payload: {
+      workspaceId: fixture.workspaceId
+    }
+  });
+  assert.equal(clearRes.statusCode, 409, `clear running session should fail: ${clearRes.body}`);
+  assert.equal(clearRes.json().code, "AGENT_CLEAR_NOT_IDLE");
+});
+
+test("agent clear 并发请求会串行执行且不会重复归档", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const userText = "并发清空测试-用户消息";
+  const assistantText = "并发清空测试-助手消息";
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: userText
+    }
+  });
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: {
+      type: "assistant_text",
+      text: assistantText
+    }
+  });
+
+  const [r1, r2] = await Promise.all([
+    fixture.app.inject({
+      method: "POST",
+      url: `/api/agent/sessions/${session.id}/clear`,
+      payload: { workspaceId: fixture.workspaceId }
+    }),
+    fixture.app.inject({
+      method: "POST",
+      url: `/api/agent/sessions/${session.id}/clear`,
+      payload: { workspaceId: fixture.workspaceId }
+    })
+  ]);
+
+  const statuses = [r1.statusCode, r2.statusCode].sort((a, b) => a - b);
+  assert.deepEqual(statuses, [200, 400]);
+  const failed = r1.statusCode === 400 ? r1 : r2;
+  assert.equal(failed.json().code, "AGENT_CLEAR_NOT_NEEDED");
+
+  const archiveFilePath = path.join(fixture.workspacePath, ".awb", "agent", "archive", session.id, "00000001.log");
+  const archiveContent = await fs.readFile(archiveFilePath, "utf-8");
+  const userHits = archiveContent.split(userText).length - 1;
+  const assistantHits = archiveContent.split(assistantText).length - 1;
+  assert.equal(userHits, 1);
+  assert.equal(assistantHits, 1);
+});
+
 test("agent providers settings 要求 contextWindowTokens 必填且合法", async () => {
   const fixture = await createFixture();
 

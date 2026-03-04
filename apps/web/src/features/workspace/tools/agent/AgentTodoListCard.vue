@@ -26,7 +26,7 @@
 </template>
 
 <script setup lang="ts">
-import { CheckCircleOutlined, ClockCircleOutlined, CloseCircleOutlined, SyncOutlined } from "@ant-design/icons-vue";
+import { CheckCircleOutlined, ClockCircleOutlined, CloseCircleOutlined, PlayCircleOutlined } from "@ant-design/icons-vue";
 import { useI18n } from "vue-i18n";
 
 type TodoStatus = "pending" | "in_progress" | "completed" | "cancelled";
@@ -44,7 +44,7 @@ const { t } = useI18n();
 function statusIcon(status: TodoStatus) {
   if (status === "completed") return CheckCircleOutlined;
   if (status === "cancelled") return CloseCircleOutlined;
-  if (status === "in_progress") return SyncOutlined;
+  if (status === "in_progress") return PlayCircleOutlined;
   return ClockCircleOutlined;
 }
 

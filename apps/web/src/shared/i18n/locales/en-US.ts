@@ -348,6 +348,9 @@ export default {
       slashCommands: {
         compact: {
           summary: "Compact the current session context"
+        },
+        clear: {
+          summary: "Start a new task and archive current visible context"
         }
       }
     }

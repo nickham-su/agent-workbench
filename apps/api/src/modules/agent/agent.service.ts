@@ -11,6 +11,7 @@ import type {
   AgentControlResult,
   AgentForkSessionRequest,
   AgentPermissionDecision,
+  AgentClearSessionRequest,
   AgentCompactSessionRequest,
   AgentCompactSessionResponse,
   AgentRevertSessionRequest,
@@ -310,6 +311,15 @@ function toSessionTitleFromFirstMessage(text: string) {
   if (!compact) return "新会话";
   if (compact.length <= 50) return compact;
   return `${compact.slice(0, 49)}…`;
+}
+
+function buildClearSummaryText(reason?: string) {
+  const rawReason = typeof reason === "string" ? reason.trim() : "";
+  const normalizedReason = rawReason.length > 200 ? `${rawReason.slice(0, 200)}...` : rawReason;
+  if (!normalizedReason) {
+    return "已开始新任务。之前的上下文已归档,如需回忆历史决策请使用 archive_search 或 archive_read。";
+  }
+  return `已开始新任务(${normalizedReason})。之前的上下文已归档,如需回忆历史决策请使用 archive_search 或 archive_read。`;
 }
 
 const NON_TERMINAL_ITEM_STATUS = new Set<AgentContextItemStatus>([
@@ -948,7 +958,28 @@ function buildSystemPrompt(input: {
 }
 
 export class AgentService {
+  private readonly sessionOpLocks = new Map<string, Promise<void>>();
+
   constructor(private readonly ctx: AppContext, private readonly logger: FastifyBaseLogger) {}
+
+  private async runSessionOperationExclusive<T>(sessionId: string, action: () => Promise<T>): Promise<T> {
+    const previous = this.sessionOpLocks.get(sessionId) ?? Promise.resolve();
+    let releaseCurrent!: () => void;
+    const current = new Promise<void>((resolve) => {
+      releaseCurrent = () => resolve();
+    });
+    const queued = previous.then(() => current);
+    this.sessionOpLocks.set(sessionId, queued);
+    await previous;
+    try {
+      return await action();
+    } finally {
+      releaseCurrent();
+      if (this.sessionOpLocks.get(sessionId) === queued) {
+        this.sessionOpLocks.delete(sessionId);
+      }
+    }
+  }
 
   getContext() {
     return this.ctx;
@@ -1268,103 +1299,105 @@ export class AgentService {
   }
 
   async compactSession(params: { sessionId: string; body: AgentCompactSessionRequest }): Promise<AgentCompactSessionResponse> {
-    const session = getAgentSession(this.ctx.db, params.sessionId);
-    if (!session) throw new HttpError(404, "session not found");
-    if (session.kind === "subtask") {
-      throw new HttpError(400, "subtask session is read-only", "AGENT_SUBTASK_READONLY");
-    }
-    if (session.workspaceId !== params.body.workspaceId) {
-      throw new HttpError(400, "workspaceId mismatch");
-    }
-    if (!this.ctx.agentWorkerEnabled) {
-      throw new HttpError(503, "agent worker unavailable", "AGENT_WORKER_UNAVAILABLE");
-    }
+    return this.runSessionOperationExclusive(params.sessionId, async () => {
+      const session = getAgentSession(this.ctx.db, params.sessionId);
+      if (!session) throw new HttpError(404, "session not found");
+      if (session.kind === "subtask") {
+        throw new HttpError(400, "subtask session is read-only", "AGENT_SUBTASK_READONLY");
+      }
+      if (session.workspaceId !== params.body.workspaceId) {
+        throw new HttpError(400, "workspaceId mismatch");
+      }
+      if (!this.ctx.agentWorkerEnabled) {
+        throw new HttpError(503, "agent worker unavailable", "AGENT_WORKER_UNAVAILABLE");
+      }
 
-    const clientRequestId = String(params.body.clientRequestId || "").trim();
-    if (!clientRequestId) throw new HttpError(400, "clientRequestId is required");
+      const clientRequestId = String(params.body.clientRequestId || "").trim();
+      if (!clientRequestId) throw new HttpError(400, "clientRequestId is required");
 
-    const dedup = findClientRequestDedup(this.ctx.db, {
-      workspaceId: session.workspaceId,
-      sessionId: session.id,
-      clientRequestId
-    });
-    if (dedup) {
+      const dedup = findClientRequestDedup(this.ctx.db, {
+        workspaceId: session.workspaceId,
+        sessionId: session.id,
+        clientRequestId
+      });
+      if (dedup) {
+        return {
+          sessionId: session.id,
+          runId: dedup.runId,
+          deduplicated: true
+        };
+      }
+
+      const runState = getRunState(this.ctx.db, session.workspaceId, session.id);
+      if (runState.status !== "idle") {
+        throw new HttpError(409, "session is running");
+      }
+
+      const triggerItemId = session.headItemId;
+      if (triggerItemId == null) {
+        throw new HttpError(400, "no context to compact", "AGENT_COMPACTION_EMPTY");
+      }
+
+      const visible = getSessionVisibleItems(this.ctx.db, session.workspaceId, session.id);
+      if (
+        visible.length === 1 &&
+        visible[0]?.kind === "system" &&
+        typeof visible[0]?.boundaryReason === "string" &&
+        visible[0].boundaryReason.trim().length > 0
+      ) {
+        throw new HttpError(400, "compaction not needed", "AGENT_COMPACTION_NOT_NEEDED");
+      }
+
+      const profile = resolveExecutionProfile(this.ctx, {
+        requestedAgentId: params.body.agentId
+      });
+
+      const createdAt = nowMs();
+      const runId = newSortableId("run");
+
+      const tx = this.ctx.db.transaction(() => {
+        createRunRecord(this.ctx.db, {
+          runId,
+          workspaceId: session.workspaceId,
+          sessionId: session.id,
+          triggerItemId: triggerItemId,
+          agentId: profile.agent.id,
+          providerId: profile.provider.id,
+          modelId: profile.model.id,
+          status: "running",
+          createdAt
+        });
+
+        insertClientRequestDedup(this.ctx.db, {
+          workspaceId: session.workspaceId,
+          sessionId: session.id,
+          clientRequestId,
+          messageItemId: triggerItemId,
+          runId,
+          createdAt
+        });
+
+        updateRunState(this.ctx.db, {
+          workspaceId: session.workspaceId,
+          sessionId: session.id,
+          status: "running",
+          activeRunId: runId,
+          activeAssistantItemId: null,
+          waitingToolItemId: null,
+          // 立即给 UI 一个反馈,避免等待 worker 拉取状态.
+          runNoticeText: "正在压缩上下文...",
+          updatedAt: createdAt,
+          appliedItemId: getLatestSessionItemId(this.ctx.db, session.workspaceId, session.id)
+        });
+      });
+      tx();
+
       return {
         sessionId: session.id,
-        runId: dedup.runId,
-        deduplicated: true
+        runId,
+        deduplicated: false
       };
-    }
-
-    const runState = getRunState(this.ctx.db, session.workspaceId, session.id);
-    if (runState.status !== "idle") {
-      throw new HttpError(409, "session is running");
-    }
-
-    const triggerItemId = session.headItemId;
-    if (triggerItemId == null) {
-      throw new HttpError(400, "no context to compact", "AGENT_COMPACTION_EMPTY");
-    }
-
-    const visible = getSessionVisibleItems(this.ctx.db, session.workspaceId, session.id);
-    if (
-      visible.length === 1 &&
-      visible[0]?.kind === "system" &&
-      typeof visible[0]?.boundaryReason === "string" &&
-      visible[0].boundaryReason.trim().length > 0
-    ) {
-      throw new HttpError(400, "compaction not needed", "AGENT_COMPACTION_NOT_NEEDED");
-    }
-
-    const profile = resolveExecutionProfile(this.ctx, {
-      requestedAgentId: params.body.agentId
     });
-
-    const createdAt = nowMs();
-    const runId = newSortableId("run");
-
-    const tx = this.ctx.db.transaction(() => {
-      createRunRecord(this.ctx.db, {
-        runId,
-        workspaceId: session.workspaceId,
-        sessionId: session.id,
-        triggerItemId: triggerItemId,
-        agentId: profile.agent.id,
-        providerId: profile.provider.id,
-        modelId: profile.model.id,
-        status: "running",
-        createdAt
-      });
-
-      insertClientRequestDedup(this.ctx.db, {
-        workspaceId: session.workspaceId,
-        sessionId: session.id,
-        clientRequestId,
-        messageItemId: triggerItemId,
-        runId,
-        createdAt
-      });
-
-      updateRunState(this.ctx.db, {
-        workspaceId: session.workspaceId,
-        sessionId: session.id,
-        status: "running",
-        activeRunId: runId,
-        activeAssistantItemId: null,
-        waitingToolItemId: null,
-        // 立即给 UI 一个反馈,避免等待 worker 拉取状态.
-        runNoticeText: "正在压缩上下文...",
-        updatedAt: createdAt,
-        appliedItemId: getLatestSessionItemId(this.ctx.db, session.workspaceId, session.id)
-      });
-    });
-    tx();
-
-    return {
-      sessionId: session.id,
-      runId,
-      deduplicated: false
-    };
   }
 
   // enqueue 失败时做最小回滚,避免会话卡在 running.
@@ -2004,101 +2037,182 @@ export class AgentService {
     expectedHeadItemId: number | null;
     summaryText: string;
   }) {
-    const session = getAgentSession(this.ctx.db, params.sessionId);
-    if (!session) throw new HttpError(404, "session not found");
-    if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
-    const run = getRunRecord(this.ctx.db, params.runId);
-    if (!run || run.workspaceId !== params.workspaceId || run.sessionId !== params.sessionId) {
-      throw new HttpError(404, "run not found");
-    }
-    if (session.headItemId !== params.expectedHeadItemId) {
-      throw new HttpError(409, "session head conflict");
-    }
-
-    const summaryText = String(params.summaryText || "").trim();
-    if (!summaryText) {
-      throw new HttpError(400, "summaryText is required", "AGENT_COMPACTION_SUMMARY_REQUIRED");
-    }
-
-    const visible = getSessionVisibleItems(this.ctx.db, params.workspaceId, params.sessionId);
-    if (visible.length === 0) {
-      return {
-        compacted: false,
-        summaryItemId: null,
-        archivedCount: 0
-      };
-    }
-    const nonTerminal = visible.filter((item) => !ARCHIVABLE_ITEM_STATUS.has(item.status));
-    if (nonTerminal.length > 0) {
-      return {
-        compacted: false,
-        summaryItemId: null,
-        archivedCount: 0
-      };
-    }
-
-    const workspace = this.ensureWorkspace(params.workspaceId);
-    const createdAt = nowMs();
-    const archiveLines = visible.map((item) => buildArchiveLine(item));
-    const archiveSnapshots = await appendArchiveLines({
-      workspacePath: workspace.path,
-      sessionId: session.id,
-      lines: archiveLines
-    });
-
-    const archiveAt = nowMs();
-    let summaryItemId: number | null = null;
-    let archivedCount = 0;
-    try {
-      const applied = appendSystemSummaryAndArchiveItems(this.ctx.db, {
-        workspaceId: params.workspaceId,
-        sessionId: params.sessionId,
-        runId: params.runId,
-        expectedHeadItemId: params.expectedHeadItemId,
-        summaryText,
-        summaryCreatedAt: createdAt,
-        archiveItemIds: visible.map((item) => item.id),
-        archiveAt
-      });
-      summaryItemId = applied.summaryItemId;
-      archivedCount = applied.archivedCount;
-    } catch (err) {
-      const rollback = await rollbackArchiveLinesBestEffort(archiveSnapshots);
-      if (rollback.skipped > 0) {
-        this.logger.warn(
-          {
-            sessionId: session.id,
-            runId: params.runId,
-            revertedFiles: rollback.reverted,
-            skippedFiles: rollback.skipped
-          },
-          "archive rollback had skipped files after compaction db failure"
-        );
+    return this.runSessionOperationExclusive(params.sessionId, async () => {
+      const session = getAgentSession(this.ctx.db, params.sessionId);
+      if (!session) throw new HttpError(404, "session not found");
+      if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
+      const run = getRunRecord(this.ctx.db, params.runId);
+      if (!run || run.workspaceId !== params.workspaceId || run.sessionId !== params.sessionId) {
+        throw new HttpError(404, "run not found");
       }
-      if (err instanceof AgentConflictError) throw conflictToHttpError(err);
-      throw err;
-    }
+      if (session.headItemId !== params.expectedHeadItemId) {
+        throw new HttpError(409, "session head conflict");
+      }
 
-    const state = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
-    if (state.activeRunId === params.runId) {
-      updateRunState(this.ctx.db, {
-        workspaceId: params.workspaceId,
-        sessionId: params.sessionId,
-        status: state.status,
-        activeRunId: state.activeRunId,
-        activeAssistantItemId: state.activeAssistantItemId,
-        waitingToolItemId: state.waitingToolItemId,
-        lastResponseTotalTokens: null,
-        updatedAt: archiveAt,
-        appliedItemId: getLatestSessionItemId(this.ctx.db, params.workspaceId, params.sessionId)
+      const summaryText = String(params.summaryText || "").trim();
+      if (!summaryText) {
+        throw new HttpError(400, "summaryText is required", "AGENT_COMPACTION_SUMMARY_REQUIRED");
+      }
+
+      const visible = getSessionVisibleItems(this.ctx.db, params.workspaceId, params.sessionId);
+      if (visible.length === 0) {
+        return {
+          compacted: false,
+          summaryItemId: null,
+          archivedCount: 0
+        };
+      }
+      const nonTerminal = visible.filter((item) => !ARCHIVABLE_ITEM_STATUS.has(item.status));
+      if (nonTerminal.length > 0) {
+        return {
+          compacted: false,
+          summaryItemId: null,
+          archivedCount: 0
+        };
+      }
+
+      const workspace = this.ensureWorkspace(params.workspaceId);
+      const createdAt = nowMs();
+      const archiveLines = visible.map((item) => buildArchiveLine(item));
+      const archiveSnapshots = await appendArchiveLines({
+        workspacePath: workspace.path,
+        sessionId: session.id,
+        lines: archiveLines
       });
-    }
 
-    return {
-      compacted: true,
-      summaryItemId,
-      archivedCount
-    };
+      const archiveAt = nowMs();
+      let summaryItemId: number | null = null;
+      let archivedCount = 0;
+      try {
+        const applied = appendSystemSummaryAndArchiveItems(this.ctx.db, {
+          workspaceId: params.workspaceId,
+          sessionId: params.sessionId,
+          runId: params.runId,
+          expectedHeadItemId: params.expectedHeadItemId,
+          summaryText,
+          boundaryReason: "compaction",
+          summaryCreatedAt: createdAt,
+          archiveItemIds: visible.map((item) => item.id),
+          archiveAt
+        });
+        summaryItemId = applied.summaryItemId;
+        archivedCount = applied.archivedCount;
+      } catch (err) {
+        const rollback = await rollbackArchiveLinesBestEffort(archiveSnapshots);
+        if (rollback.skipped > 0) {
+          this.logger.warn(
+            {
+              sessionId: session.id,
+              runId: params.runId,
+              revertedFiles: rollback.reverted,
+              skippedFiles: rollback.skipped
+            },
+            "archive rollback had skipped files after compaction db failure"
+          );
+        }
+        if (err instanceof AgentConflictError) throw conflictToHttpError(err);
+        throw err;
+      }
+
+      const state = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
+      if (state.activeRunId === params.runId) {
+        updateRunState(this.ctx.db, {
+          workspaceId: params.workspaceId,
+          sessionId: params.sessionId,
+          status: state.status,
+          activeRunId: state.activeRunId,
+          activeAssistantItemId: state.activeAssistantItemId,
+          waitingToolItemId: state.waitingToolItemId,
+          lastResponseTotalTokens: null,
+          updatedAt: archiveAt,
+          appliedItemId: getLatestSessionItemId(this.ctx.db, params.workspaceId, params.sessionId)
+        });
+      }
+
+      return {
+        compacted: true,
+        summaryItemId,
+        archivedCount
+      };
+    });
+  }
+
+  async clearSession(sessionId: string, body: AgentClearSessionRequest): Promise<AgentControlResult> {
+    return this.runSessionOperationExclusive(sessionId, async () => {
+      const session = getAgentSession(this.ctx.db, sessionId);
+      if (!session) throw new HttpError(404, "session not found");
+      if (session.kind === "subtask") {
+        throw new HttpError(400, "subtask session is read-only", "AGENT_SUBTASK_READONLY");
+      }
+      if (session.workspaceId !== body.workspaceId) {
+        throw new HttpError(400, "workspaceId mismatch");
+      }
+
+      const runState = getRunState(this.ctx.db, session.workspaceId, session.id);
+      if (runState.status !== "idle") {
+        throw new HttpError(409, "session is running", "AGENT_CLEAR_NOT_IDLE");
+      }
+
+      const visible = getSessionVisibleItems(this.ctx.db, session.workspaceId, session.id);
+      if (visible.length === 0) {
+        throw new HttpError(400, "no context to clear", "AGENT_CLEAR_EMPTY");
+      }
+      if (visible.length === 1 && isBoundaryMarkerItem(visible[0]!)) {
+        throw new HttpError(400, "clear not needed", "AGENT_CLEAR_NOT_NEEDED");
+      }
+
+      const nonTerminal = visible.filter((item) => !ARCHIVABLE_ITEM_STATUS.has(item.status));
+      if (nonTerminal.length > 0) {
+        throw new HttpError(409, "session has non-terminal items", "AGENT_CLEAR_NOT_IDLE");
+      }
+
+      const workspace = this.ensureWorkspace(body.workspaceId);
+      const createdAt = nowMs();
+      const archiveLines = visible.map((item) => buildArchiveLine(item));
+      const archiveSnapshots = await appendArchiveLines({
+        workspacePath: workspace.path,
+        sessionId: session.id,
+        lines: archiveLines
+      });
+
+      const archiveAt = nowMs();
+      try {
+        appendSystemSummaryAndArchiveItems(this.ctx.db, {
+          workspaceId: session.workspaceId,
+          sessionId: session.id,
+          runId: null,
+          expectedHeadItemId: session.headItemId,
+          summaryText: buildClearSummaryText(body.reason),
+          boundaryReason: "clear",
+          summaryCreatedAt: createdAt,
+          archiveItemIds: visible.map((item) => item.id),
+          archiveAt
+        });
+        setRunStateIdle(this.ctx.db, {
+          workspaceId: session.workspaceId,
+          sessionId: session.id,
+          updatedAt: archiveAt,
+          appliedItemId: getLatestSessionItemId(this.ctx.db, session.workspaceId, session.id)
+        });
+      } catch (err) {
+        const rollback = await rollbackArchiveLinesBestEffort(archiveSnapshots);
+        if (rollback.skipped > 0) {
+          this.logger.warn(
+            {
+              sessionId: session.id,
+              revertedFiles: rollback.reverted,
+              skippedFiles: rollback.skipped
+            },
+            "archive rollback had skipped files after clear db failure"
+          );
+        }
+        if (err instanceof AgentConflictError) throw conflictToHttpError(err);
+        throw err;
+      }
+
+      const headItemId = getSessionHead(this.ctx.db, session.workspaceId, session.id);
+      return { sessionId: session.id, headItemId };
+    });
   }
 
   async archiveSearchFromWorker(params: {

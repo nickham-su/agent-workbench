@@ -867,6 +867,7 @@ export function appendSystemSummaryAndArchiveItems(
     runId: string | null;
     expectedHeadItemId: number | null;
     summaryText: string;
+    boundaryReason: string;
     summaryCreatedAt: number;
     archiveItemIds: number[];
     archiveAt: number;
@@ -945,7 +946,7 @@ export function appendSystemSummaryAndArchiveItems(
         toolCallId: stored.toolCallId,
         toolCallJson: stored.toolCallJson,
         toolResultJson: stored.toolResultJson,
-        boundaryReason: "compaction",
+        boundaryReason: params.boundaryReason,
         outputJson: stored.outputJson,
         createdAt: params.summaryCreatedAt,
         updatedAt: params.summaryCreatedAt
