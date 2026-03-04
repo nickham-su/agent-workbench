@@ -434,6 +434,9 @@ const actionTargetId = ref<number | null>(null);
 let pollTimer: number | null = null;
 let pollHintRefreshSeq = 0;
 let settlePollRemaining = 0;
+let warmupPollRemaining = 0;
+// pollHint 可能在 pane 尚未 active 时到达(新会话首条消息的典型竞态),需要暂存到激活后再补一次刷新+短轮询。
+const pendingPollHint = ref(false);
 const terminalStatuses = new Set<AgentContextItemRecord["status"]>(["completed", "failed", "denied", "cancelled"]);
 const isSubtaskSession = computed(() => props.sessionKind === "subtask");
 
@@ -1088,6 +1091,20 @@ function schedulePoll(delayMs = 800) {
   }, delayMs);
 }
 
+function kickPollAfterRefresh(params: { forceFull: boolean; forceFollowBottom: boolean }) {
+  // warmup: 即使服务端 runState 暂时还是 idle,也短暂补轮询几次,覆盖“写入稍晚/调度稍晚”的窗口。
+  warmupPollRemaining = Math.max(warmupPollRemaining, 3);
+  const seq = ++pollHintRefreshSeq;
+  void (async () => {
+    await refreshAll(params.forceFull, params.forceFollowBottom);
+    if (seq !== pollHintRefreshSeq) return;
+    if (!props.active || !props.sessionId) return;
+    // 无论 refreshAll 内部是否决定继续轮询,这里都补一枪短延迟 poll,
+    // 避免服务端 runState/item 写入稍晚导致 UI 停在 idle/空列表。
+    schedulePoll(POLL_IMMEDIATE_REFRESH_MS);
+  })();
+}
+
 function distanceToBottom() {
   const el = scrollEl.value;
   if (!el) return Number.POSITIVE_INFINITY;
@@ -1327,12 +1344,19 @@ async function refreshAll(forceFull: boolean, forceFollowBottom = false) {
 
     const hasLocalNonTerminal = items.value.some((item) => !isTerminalStatus(item.status));
     if (state.status !== "idle") {
+      warmupPollRemaining = 0;
       schedulePoll(POLL_RUNNING_MS);
     } else if (hasLocalNonTerminal) {
+      warmupPollRemaining = 0;
       schedulePoll(POLL_LOCAL_NON_TERMINAL_MS);
     } else if (settlePollRemaining > 0) {
+      warmupPollRemaining = 0;
       settlePollRemaining -= 1;
       schedulePoll(POLL_SETTLE_MS);
+    } else if (warmupPollRemaining > 0) {
+      // 仅在 idle 且无非终态项时启用 warmup,避免干扰正常运行轮询节奏。
+      warmupPollRemaining -= 1;
+      schedulePoll(POLL_IMMEDIATE_REFRESH_MS);
     }
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
@@ -1652,19 +1676,17 @@ watch(
     const [hint, sessionId, active] = next;
     const prevHint = prev?.[0] ?? 0;
     const prevSessionId = prev?.[1];
-    if (!active) return;
     if (!sessionId) return;
     const hintChanged = hint !== prevHint;
     // 兼容跨组件时序: 当目标 pane 挂载时 hint 可能已经>0,需要立即触发一次补轮询。
     const mountedWithPendingHint = sessionId !== prevSessionId && hint > 0;
     if (hintChanged || mountedWithPendingHint) {
-      const seq = ++pollHintRefreshSeq;
-      void (async () => {
-        await refreshAll(false);
-        if (seq !== pollHintRefreshSeq) return;
-        if (!props.active || !props.sessionId) return;
-        schedulePoll(POLL_IMMEDIATE_REFRESH_MS);
-      })();
+      if (!active) {
+        pendingPollHint.value = true;
+        return;
+      }
+      pendingPollHint.value = false;
+      kickPollAfterRefresh({ forceFull: false, forceFollowBottom: false });
     }
   },
   { immediate: true }
@@ -1694,6 +1716,8 @@ watch(
     clearPoll();
     handledBoundaryMarkerId.value = 0;
     scrollToBottomSeq += 1;
+    pendingPollHint.value = false;
+    warmupPollRemaining = 0;
     items.value = [];
     stickToBottom.value = true;
     userUnfollowed.value = false;
@@ -1727,6 +1751,8 @@ watch(
   (active) => {
     if (!active) {
       clearPoll();
+      pendingPollHint.value = false;
+      warmupPollRemaining = 0;
       return;
     }
 
@@ -1739,7 +1765,12 @@ watch(
 
     rowVirtualizer.value.measure();
     const forceFull = items.value.length === 0;
-    void refreshAll(forceFull, forceFollowBottom);
+    if (pendingPollHint.value) {
+      pendingPollHint.value = false;
+      kickPollAfterRefresh({ forceFull, forceFollowBottom });
+    } else {
+      void refreshAll(forceFull, forceFollowBottom);
+    }
     void focusInputIfNeeded();
   }
 );

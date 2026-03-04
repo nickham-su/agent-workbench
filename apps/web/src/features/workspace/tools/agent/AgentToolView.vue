@@ -518,6 +518,10 @@ async function ensureSessionCreated(sessionId: string) {
     }
 
     reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
+
+    // 新会话首条消息: draft pane 可能在发送期间被卸载,导致其 emit 的 poll hint 丢失。
+    // 这里在创建成功后主动 bump 一次,确保新 pane 至少会做一次刷新+短轮询兜底。
+    bumpSessionPollHint(created.id);
     return created.id;
   })()
     .finally(() => {
