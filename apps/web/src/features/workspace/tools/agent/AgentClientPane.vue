@@ -22,6 +22,7 @@
       ref="scrollEl"
       class="agent-message-list flex-1 min-h-0 overflow-auto p-3 bg-[var(--panel-bg)]"
       @scroll.passive="onMessageListScroll"
+      @wheel.passive="onMessageListWheel"
     >
       <div v-if="displayItems.length === 0" class="h-full flex flex-col items-center justify-center gap-3 text-base text-[color:var(--text-tertiary)]">
         <div>{{ t("agent.client.welcome") }}</div>
@@ -36,12 +37,13 @@
           class="agent-virtual-row"
           :style="{ transform: `translateY(${row.start}px)` }"
           >
-            <div
-              :data-index="row.index"
-              class="agent-virtual-row-inner"
-              :style="{ paddingTop: `${row.gapTop}px` }"
-              :ref="onVirtualRowMounted"
-            >
+             <div
+               :data-index="row.index"
+               :data-msg-id="row.kind === 'message' ? row.msg.id : ''"
+               class="agent-virtual-row-inner"
+               :style="{ paddingTop: `${row.gapTop}px` }"
+               :ref="onVirtualRowMounted"
+             >
               <div v-if="row.kind === 'spacer'" :style="{ height: `${row.spacerHeight}px` }" />
               <div
                 v-else
@@ -123,10 +125,18 @@
                 :todos="row.msg.todoList.todos"
                 :error-text="row.msg.toolError"
               />
-              <AgentApplyPatchCard
-                v-else-if="isApplyPatchCard(row.msg) && row.msg.applyPatch"
-                :files="row.msg.applyPatch.files"
-              />
+               <AgentApplyPatchCard
+                 v-else-if="isApplyPatchCard(row.msg) && row.msg.applyPatch"
+                 :workspace-id="props.workspaceId"
+                 :session-id="props.sessionId"
+                 :item-id="row.msg.id"
+                 :tool-call-id="row.msg.toolCallId"
+                 :summary="row.msg.applyPatch.summary"
+                 :files="row.msg.applyPatch.files"
+                 :omitted-files="row.msg.applyPatch.omittedFiles"
+                 :error-text="row.msg.toolError"
+                 @request-measure="onRequestVirtualMeasure(row.msg.id)"
+               />
               <AssistantMarkdownMessage
                 v-else-if="row.msg.role === 'assistant'"
                 class="pr-24"
@@ -293,8 +303,6 @@ type ApplyPatchDisplayFile = {
   type: "add" | "update" | "delete" | "move";
   path: string;
   fromPath?: string;
-  before: string;
-  after: string;
   additions: number;
   deletions: number;
 };
@@ -333,6 +341,7 @@ type DisplayItem = {
   text: string;
   status: AgentContextItemRecord["status"];
   toolName?: string;
+  toolCallId?: string;
   toolError?: string;
   subtaskSessionId?: string;
   subtaskDescription?: string;
@@ -412,6 +421,7 @@ const items = ref<AgentContextItemRecord[]>([]);
 const scrollEl = ref<HTMLElement | null>(null);
 const inputEl = ref<{ focus?: () => void } | null>(null);
 const stickToBottom = ref(true);
+const userUnfollowed = ref(false);
 const forcedBottomOnFirstActive = ref(false);
 let scrollToBottomSeq = 0;
 
@@ -536,8 +546,6 @@ function parseApplyPatchDisplay(value: unknown): ApplyPatchDisplay | null {
       type: toFileType(file.type),
       path,
       ...(fromPath ? { fromPath } : {}),
-      before: typeof file.before === "string" ? file.before : "",
-      after: typeof file.after === "string" ? file.after : "",
       additions: toNonNegativeInt(file.additions),
       deletions: toNonNegativeInt(file.deletions)
     });
@@ -673,6 +681,9 @@ const displayItems = computed<DisplayItem[]>(() => {
       const argsText = formatToolArgs(item.output.args);
       const callText = `${item.output.toolName}(${argsText})`;
       const statusText = `[${item.status}]`;
+      const toolCallId = typeof item.output.toolCallId === "string" && item.output.toolCallId.trim()
+        ? item.output.toolCallId.trim()
+        : undefined;
       const resultObj = toRecord(item.output.result);
       const subtaskSessionId =
         typeof resultObj?.subtaskSessionId === "string" && resultObj.subtaskSessionId.trim()
@@ -695,6 +706,7 @@ const displayItems = computed<DisplayItem[]>(() => {
             text: line,
             status: item.status,
             toolName: item.output.toolName,
+            ...(toolCallId ? { toolCallId } : {}),
             tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
           };
         }
@@ -707,6 +719,7 @@ const displayItems = computed<DisplayItem[]>(() => {
           text: `${callText} ${statusText}`,
           status: item.status,
           toolName: item.output.toolName,
+          ...(toolCallId ? { toolCallId } : {}),
           ...(errorText ? { toolError: errorText } : {}),
           ...(applyPatch ? { applyPatch } : {}),
           tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
@@ -728,6 +741,7 @@ const displayItems = computed<DisplayItem[]>(() => {
             text: line,
             status: item.status,
             toolName: item.output.toolName,
+            ...(toolCallId ? { toolCallId } : {}),
             tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
           };
         }
@@ -740,6 +754,7 @@ const displayItems = computed<DisplayItem[]>(() => {
           text: `${callText} ${statusText}`,
           status: item.status,
           toolName: item.output.toolName,
+          ...(toolCallId ? { toolCallId } : {}),
           ...(errorText ? { toolError: errorText } : {}),
           todoList,
           tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
@@ -762,6 +777,7 @@ const displayItems = computed<DisplayItem[]>(() => {
           text: `${callText} ${statusText}`,
           status: item.status,
           toolName: item.output.toolName,
+          ...(toolCallId ? { toolCallId } : {}),
           ...(subtaskSessionId ? { subtaskSessionId } : {}),
           ...(errorText ? { toolError: errorText } : {}),
           ...(description ? { subtaskDescription: description } : {}),
@@ -784,6 +800,7 @@ const displayItems = computed<DisplayItem[]>(() => {
         text: line,
         status: item.status,
         toolName: item.output.toolName,
+        ...(toolCallId ? { toolCallId } : {}),
         ...(subtaskSessionId ? { subtaskSessionId } : {}),
         tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
       };
@@ -851,25 +868,49 @@ function messageGapTopAt(index: number) {
   return MESSAGE_GAP_DEFAULT;
 }
 
+function estimateTextBlockHeight(text: string, options?: {
+  charsPerLine?: number;
+  lineHeight?: number;
+  minLines?: number;
+  maxLines?: number;
+}) {
+  const raw = String(text || "");
+  const charsPerLine = Math.max(16, Math.floor(options?.charsPerLine ?? 52));
+  const lineHeight = Math.max(12, Math.floor(options?.lineHeight ?? 20));
+  const minLines = Math.max(1, Math.floor(options?.minLines ?? 1));
+  const maxLines = Math.max(minLines, Math.floor(options?.maxLines ?? 80));
+
+  const explicitLines = raw.length > 0 ? raw.split("\n").length : 1;
+  const wrappedLines = Math.max(1, Math.ceil(raw.length / charsPerLine));
+  const lines = Math.min(maxLines, Math.max(minLines, explicitLines, wrappedLines));
+  return lines * lineHeight;
+}
+
 function estimateRowHeight(index: number) {
   const item = displayItems.value[index];
   if (!item) return 88;
   const gap = messageGapTopAt(index);
-  if (item.role === "user") return 84 + gap;
-  if (item.role === "assistant") return 104 + gap;
-  if (item.role === "system") return 64 + gap;
+  if (item.role === "user") {
+    return 44 + estimateTextBlockHeight(item.text, { charsPerLine: 56, lineHeight: 20, minLines: 2, maxLines: 24 }) + gap;
+  }
+  if (item.role === "assistant") {
+    return 52 + estimateTextBlockHeight(item.text, { charsPerLine: 50, lineHeight: 20, minLines: 2, maxLines: 80 }) + gap;
+  }
+  if (item.role === "system") {
+    return 34 + estimateTextBlockHeight(item.text, { charsPerLine: 70, lineHeight: 18, minLines: 1, maxLines: 16 }) + gap;
+  }
 
   if (item.applyPatch) {
     const fileCount = item.applyPatch.files.length;
-    const filePreview = Math.min(fileCount, 2);
-    return 120 + filePreview * 180 + gap;
+    const rows = Math.min(fileCount, 6);
+    return 140 + rows * 28 + gap;
   }
   if (item.todoList) {
     const rows = Math.min(item.todoList.todos.length, 4);
     return 96 + rows * 28 + gap;
   }
   if (item.toolName === "subtask") return 136 + gap;
-  return 72 + gap;
+  return 32 + estimateTextBlockHeight(item.text, { charsPerLine: 72, lineHeight: 18, minLines: 1, maxLines: 20 }) + gap;
 }
 
 const rowVirtualizer = useVirtualizer<HTMLElement, HTMLDivElement>(
@@ -921,6 +962,65 @@ function onVirtualRowMounted(refValue: Element | { $el?: unknown } | null) {
       : null;
   if (!element) return;
   rowVirtualizer.value.measureElement(element as HTMLDivElement);
+}
+
+let measureReqSeq = 0;
+
+function onRequestVirtualMeasure(targetMsgId?: number) {
+  const el = scrollEl.value;
+  if (!el) return;
+
+  // 用户在历史消息里展开/收起(例如 apply_patch diff)时,不应触发自动吸底。
+  const dist = distanceToBottom();
+  const followBottom = stickToBottom.value && dist <= 4;
+
+  const containerRect = el.getBoundingClientRect();
+  const nodes = Array.from(el.querySelectorAll<HTMLElement>(".agent-virtual-row-inner[data-msg-id]"));
+  const firstVisible = nodes
+    .map((node) => ({
+      node,
+      rect: node.getBoundingClientRect(),
+      msgId: Number(node.dataset.msgId || 0)
+    }))
+    .filter((item) => item.msgId > 0 && item.rect.bottom > containerRect.top)
+    .sort((a, b) => a.rect.top - b.rect.top)[0];
+
+  const anchorMsgId = firstVisible?.msgId ?? 0;
+  const anchorOffsetPx = firstVisible ? firstVisible.rect.top - containerRect.top : 0;
+
+  if (!followBottom) {
+    stickToBottom.value = false;
+    userUnfollowed.value = true;
+  }
+
+  const seq = ++measureReqSeq;
+  void nextTick().then(async () => {
+    if (seq !== measureReqSeq) return;
+    if (typeof targetMsgId === "number" && targetMsgId > 0) {
+      const targetEl = el.querySelector<HTMLElement>(`.agent-virtual-row-inner[data-msg-id='${targetMsgId}']`);
+      if (targetEl) {
+        rowVirtualizer.value.measureElement(targetEl as HTMLDivElement);
+      }
+    }
+    await nextTick();
+    if (seq !== measureReqSeq) return;
+
+    if (followBottom) {
+      await scrollToBottom();
+      return;
+    }
+
+    if (!anchorMsgId) return;
+    const anchorEl = el.querySelector<HTMLElement>(`.agent-virtual-row-inner[data-msg-id='${anchorMsgId}']`);
+    if (!anchorEl) return;
+    const nextRect = anchorEl.getBoundingClientRect();
+    const nextOffset = nextRect.top - containerRect.top;
+    const delta = nextOffset - anchorOffsetPx;
+    if (!Number.isFinite(delta) || Math.abs(delta) < 0.5) return;
+
+    el.scrollTop = Math.max(0, Math.floor(el.scrollTop + delta));
+    lastKnownScrollTop = el.scrollTop;
+  });
 }
 
 function roleLabel(role: DisplayItem["role"]) {
@@ -997,9 +1097,18 @@ function distanceToBottom() {
 function updateStickToBottomState() {
   if (displayItems.value.length === 0) {
     stickToBottom.value = true;
+    userUnfollowed.value = false;
     return;
   }
-  stickToBottom.value = distanceToBottom() <= BOTTOM_FOLLOW_THRESHOLD_PX;
+  const dist = distanceToBottom();
+  if (userUnfollowed.value) {
+    stickToBottom.value = dist <= 4;
+    if (stickToBottom.value) {
+      userUnfollowed.value = false;
+    }
+    return;
+  }
+  stickToBottom.value = dist <= BOTTOM_FOLLOW_THRESHOLD_PX;
 }
 
 function onMessageListScroll() {
@@ -1012,10 +1121,20 @@ function onMessageListScroll() {
   // 用户主动向上滚动时,即使仍在“离底部阈值”内也不应继续吸附.
   if (delta < 0) {
     stickToBottom.value = false;
+    userUnfollowed.value = true;
     return;
   }
 
   updateStickToBottomState();
+}
+
+function onMessageListWheel(event: WheelEvent) {
+  // wheel 事件触发早于 scroll,用于提前取消吸底。
+  // 否则在“贴底状态微微向上滚动”时,可能被 totalSize 变化触发的 scrollToBottom 抢回并产生跳动。
+  if (event.deltaY < 0) {
+    stickToBottom.value = false;
+    userUnfollowed.value = true;
+  }
 }
 
 async function scrollToBottom(options?: { force?: boolean }) {
@@ -1035,6 +1154,9 @@ async function scrollToBottom(options?: { force?: boolean }) {
   await nextTick();
   if (seq !== scrollToBottomSeq) return;
   updateStickToBottomState();
+  if (force || stickToBottom.value) {
+    userUnfollowed.value = false;
+  }
 
   // 同步滚动基线,避免后续 scroll 事件把程序滚动误判为“用户向上滚动”。
   const el = scrollEl.value;
@@ -1574,6 +1696,7 @@ watch(
     scrollToBottomSeq += 1;
     items.value = [];
     stickToBottom.value = true;
+    userUnfollowed.value = false;
     forcedBottomOnFirstActive.value = false;
     runState.value = {
       sessionId: props.sessionId,
@@ -1611,6 +1734,7 @@ watch(
     if (forceFollowBottom) {
       forcedBottomOnFirstActive.value = true;
       stickToBottom.value = true;
+      userUnfollowed.value = false;
     }
 
     rowVirtualizer.value.measure();
@@ -1639,6 +1763,9 @@ watch(
     if (!props.active) return;
     if (displayItems.value.length === 0) return;
     if (typeof prev === "number" && next === prev) return;
+    if (!stickToBottom.value) return;
+    if (userUnfollowed.value) return;
+    if (distanceToBottom() > 4) return;
     void scrollToBottom();
   }
 );
@@ -1653,6 +1780,11 @@ onBeforeUnmount(() => {
 .agent-message-list {
   display: flex;
   flex-direction: column;
+  /*
+   * 虚拟列表会频繁修正行高并导致 scrollHeight 变化.
+   * 浏览器 scroll anchoring 在这种场景下可能产生“固定位置的大跳动”.
+   */
+  overflow-anchor: none;
 }
 
 .agent-virtual-list {
@@ -1670,6 +1802,7 @@ onBeforeUnmount(() => {
 .agent-virtual-row-inner {
   width: 100%;
   box-sizing: border-box;
+  overflow-anchor: none;
 }
 
 .agent-message-item.is-assistant-message {

@@ -297,14 +297,17 @@ function safePathSegment(input: string) {
   const value = String(input || "")
     .trim()
     .replace(/[^A-Za-z0-9._-]/g, "_");
-  return value || "unknown";
+  if (!value) return "unknown";
+  const maxLen = 120;
+  if (value.length <= maxLen) return value;
+  return value.slice(0, maxLen);
 }
 
 async function finalizeToolText(params: {
   workspacePath: string;
-  sessionId: string;
   itemId: number;
   toolName: string;
+  toolCallId?: string;
   text: string;
 }) {
   const normalized = normalizeToolText(params.text).trimEnd();
@@ -316,10 +319,28 @@ async function finalizeToolText(params: {
     };
   }
 
-  const sessionSegment = safePathSegment(params.sessionId);
   const toolSegment = safePathSegment(params.toolName);
-  const itemIdSegment = String(Math.max(1, Math.floor(params.itemId))).padStart(8, "0");
-  const relativePath = path.join(".awb", "agent", "artifacts", sessionSegment, `${itemIdSegment}.${toolSegment}.txt`);
+  const callSegment = typeof params.toolCallId === "string" && params.toolCallId.trim()
+    ? safePathSegment(params.toolCallId)
+    : "";
+  if (!callSegment) {
+    const preview = normalized.slice(0, TOOL_OUTPUT_TEXT_PREVIEW_CHARS).trimEnd();
+    const text = `${preview}\n\n[truncated]\nartifact: unavailable`.trim();
+    return {
+      text,
+      textTruncated: true as const,
+      textArtifactPath: undefined as string | undefined
+    };
+  }
+
+  const relativePath = path.join(
+    ".awb",
+    "agent",
+    "artifacts",
+    "by_tool_call",
+    toolSegment,
+    `${callSegment}.txt`
+  );
   const workspaceResolvedPath = path.resolve(params.workspacePath);
   const fullPath = path.resolve(workspaceResolvedPath, relativePath);
   if (!isPathInside(workspaceResolvedPath, fullPath)) {
@@ -328,7 +349,7 @@ async function finalizeToolText(params: {
 
   const workspaceRealPath = await fs.realpath(workspaceResolvedPath);
   let parentDirPath = workspaceResolvedPath;
-  for (const segment of [".awb", "agent", "artifacts", sessionSegment]) {
+  for (const segment of [".awb", "agent", "artifacts", "by_tool_call", toolSegment]) {
     parentDirPath = path.join(parentDirPath, segment);
     const stat = await fs.lstat(parentDirPath).catch(() => null);
     if (!stat) {
@@ -886,8 +907,6 @@ export class AgentRunner {
       (tool.toolName === "apply_patch" && !profile.agent.permissions.allowWrite) ||
       (tool.toolName === "bash" && !profile.agent.permissions.allowBash);
 
-    const approvalPreview = applyPatchPrepared ? toApplyPatchResult(applyPatchPrepared) : undefined;
-
     if (tool.status === "awaiting_permission") {
       if (!needsApproval) {
         await this.apiClient.updateContextItem({
@@ -895,16 +914,7 @@ export class AgentRunner {
           status: "queued",
           output: {
             ...outputBase,
-            ...(approvalPreview
-              ? {
-                  text: buildToolText({
-                    toolName: tool.toolName,
-                    status: "queued",
-                    body: typeof approvalPreview.text === "string" ? approvalPreview.text : "apply_patch prepared"
-                  })
-                }
-              : {}),
-            ...(approvalPreview ? { result: approvalPreview } : {})
+            ...(tool.toolName === "apply_patch" ? { text: buildToolText({ toolName: tool.toolName, status: "queued", body: "apply_patch prepared" }) } : {})
           },
           updatedAt: nowMs()
         });
@@ -937,16 +947,9 @@ export class AgentRunner {
         status: "awaiting_permission",
         output: {
           ...outputBase,
-          ...(approvalPreview
-            ? {
-                text: buildToolText({
-                  toolName: tool.toolName,
-                  status: "awaiting_permission",
-                  body: typeof approvalPreview.text === "string" ? approvalPreview.text : "apply_patch prepared"
-                })
-              }
-            : {}),
-          ...(approvalPreview ? { result: approvalPreview } : {})
+          ...(tool.toolName === "apply_patch"
+            ? { text: buildToolText({ toolName: tool.toolName, status: "awaiting_permission", body: "apply_patch awaiting permission" }) }
+            : {})
         },
         updatedAt: nowMs()
       });
@@ -987,16 +990,7 @@ export class AgentRunner {
       status: "running",
       output: {
         ...outputBase,
-        ...(approvalPreview
-          ? {
-              text: buildToolText({
-                toolName: tool.toolName,
-                status: "running",
-                body: typeof approvalPreview.text === "string" ? approvalPreview.text : "apply_patch prepared"
-              })
-            }
-          : {}),
-        ...(approvalPreview ? { result: approvalPreview } : {})
+        ...(tool.toolName === "apply_patch" ? { text: buildToolText({ toolName: tool.toolName, status: "running", body: "apply_patch running" }) } : {})
       },
       updatedAt: nowMs()
     });
@@ -1217,9 +1211,9 @@ export class AgentRunner {
       try {
         finalizedText = await finalizeToolText({
           workspacePath: run.workspacePath,
-          sessionId: run.sessionId,
           itemId: tool.itemId,
           toolName: tool.toolName,
+          toolCallId: tool.toolCallId,
           text: rawSuccessText
         });
       } catch (artifactErr) {

@@ -1,4 +1,5 @@
 import type { FastifyBaseLogger } from "fastify";
+import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -28,6 +29,7 @@ import type { AppContext } from "../../app/context.js";
 import { nowMs } from "../../utils/time.js";
 import { newSortableId } from "../../utils/ids.js";
 import { getWorkspace } from "../workspaces/workspace.store.js";
+import { applyPatchUiArtifactPath, tmpRoot } from "../../infra/fs/paths.js";
 import {
   AgentConflictError,
   appendContextItem,
@@ -305,6 +307,160 @@ function stringifyToolResult(raw: unknown) {
     return "";
   } catch {
     return raw == null ? "" : String(raw);
+  }
+}
+
+function toRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function toNonNegativeInt(value: unknown) {
+  const raw = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(raw) || raw < 0) return 0;
+  return Math.floor(raw);
+}
+
+type ApplyPatchSlimFile = {
+  type: "add" | "update" | "delete" | "move";
+  path: string;
+  fromPath?: string;
+  additions: number;
+  deletions: number;
+};
+
+type ApplyPatchSlimResult = {
+  text: string;
+  summary: { fileCount: number; additions: number; deletions: number };
+  files: ApplyPatchSlimFile[];
+};
+
+type ApplyPatchUiArtifactV1 = {
+  schemaVersion: 1;
+  toolName: "apply_patch";
+  workspaceId: string;
+  toolCallId: string;
+  createdAt: number;
+  summary: { fileCount: number; additions: number; deletions: number };
+  files: Array<ApplyPatchSlimFile & { before: string; after: string }>;
+};
+
+function splitApplyPatchResult(raw: unknown): {
+  slim: ApplyPatchSlimResult;
+  artifact: Omit<ApplyPatchUiArtifactV1, "workspaceId" | "toolCallId" | "createdAt">;
+} {
+  const src = toRecord(raw) || {};
+  const text = typeof src.text === "string" ? src.text : "";
+  const summaryRaw = toRecord(src.summary) || {};
+  const filesRaw = Array.isArray(src.files) ? src.files : [];
+
+  const filesSlim: ApplyPatchSlimFile[] = [];
+  const filesArtifact: Array<ApplyPatchSlimFile & { before: string; after: string }> = [];
+
+  for (const row of filesRaw) {
+    const file = toRecord(row);
+    if (!file) continue;
+    const typeRaw = String(file.type || "update").trim();
+    const type = (typeRaw === "add" || typeRaw === "update" || typeRaw === "delete" || typeRaw === "move")
+      ? (typeRaw as ApplyPatchSlimFile["type"])
+      : "update";
+    const p = String(file.path || file.relativePath || file.filePath || "").trim();
+    if (!p) continue;
+    const fromPath = String(file.fromPath || file.moveFromPath || "").trim();
+    const additions = toNonNegativeInt(file.additions);
+    const deletions = toNonNegativeInt(file.deletions);
+    const before = typeof file.before === "string" ? file.before : "";
+    const after = typeof file.after === "string" ? file.after : "";
+
+    const slim: ApplyPatchSlimFile = {
+      type,
+      path: p,
+      ...(fromPath ? { fromPath } : {}),
+      additions,
+      deletions
+    };
+    filesSlim.push(slim);
+    filesArtifact.push({ ...slim, before, after });
+  }
+
+  const summary = {
+    fileCount: toNonNegativeInt(summaryRaw.fileCount ?? filesSlim.length),
+    additions: toNonNegativeInt(summaryRaw.additions ?? filesSlim.reduce((sum, f) => sum + f.additions, 0)),
+    deletions: toNonNegativeInt(summaryRaw.deletions ?? filesSlim.reduce((sum, f) => sum + f.deletions, 0))
+  };
+
+  return {
+    slim: {
+      text,
+      summary,
+      files: filesSlim
+    },
+    artifact: {
+      schemaVersion: 1,
+      toolName: "apply_patch",
+      summary,
+      files: filesArtifact
+    }
+  };
+}
+
+async function ensureRealPathUnderRoot(rootAbs: string, targetAbs: string) {
+  const rootReal = await fs.realpath(rootAbs);
+  const targetReal = await fs.realpath(targetAbs);
+  const withSep = rootReal.endsWith(path.sep) ? rootReal : `${rootReal}${path.sep}`;
+  if (targetReal !== rootReal && !targetReal.startsWith(withSep)) {
+    throw new HttpError(400, "Invalid path");
+  }
+}
+
+async function ensureDirSafeUnderRoot(rootAbs: string, dirAbs: string) {
+  const rootResolved = path.resolve(rootAbs);
+  const dirResolved = path.resolve(dirAbs);
+  const rel = path.relative(rootResolved, dirResolved);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new HttpError(400, "Invalid path");
+  }
+
+  let current = rootResolved;
+  await fs.mkdir(current, { recursive: true });
+  await ensureRealPathUnderRoot(rootResolved, current);
+
+  for (const segment of rel.split(path.sep)) {
+    current = path.join(current, segment);
+    const st = await fs.lstat(current).catch(() => null);
+    if (!st) {
+      try {
+        await fs.mkdir(current);
+      } catch (err: any) {
+        if (!err || err.code !== "EEXIST") throw err;
+      }
+    } else {
+      if (st.isSymbolicLink()) throw new HttpError(400, "Invalid path");
+      if (!st.isDirectory()) throw new HttpError(409, "Parent is not a directory");
+    }
+    await ensureRealPathUnderRoot(rootResolved, current);
+  }
+}
+
+async function writeFileNoFollow(fileAbs: string, content: string) {
+  const handle = await fs.open(
+    fileAbs,
+    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | (fsConstants.O_NOFOLLOW ?? 0),
+    0o644
+  );
+  try {
+    await handle.writeFile(content, { encoding: "utf8" });
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readFileNoFollow(fileAbs: string) {
+  const handle = await fs.open(fileAbs, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  try {
+    return await handle.readFile({ encoding: "utf8" });
+  } finally {
+    await handle.close();
   }
 }
 
@@ -1440,6 +1596,39 @@ export class AgentService {
     return item;
   }
 
+  async getApplyPatchUiArtifact(params: { sessionId: string; itemId: number }) {
+    const item = this.getContextItem(params.sessionId, params.itemId);
+    if (item.kind !== "tool" || item.output.type !== "tool" || item.output.toolName !== "apply_patch") {
+      throw new HttpError(404, "apply_patch artifact not found");
+    }
+    const toolCallId = typeof item.output.toolCallId === "string" ? item.output.toolCallId.trim() : "";
+    if (!toolCallId) {
+      throw new HttpError(404, "apply_patch artifact not found");
+    }
+    const filePath = applyPatchUiArtifactPath(this.ctx.dataDir, item.workspaceId, toolCallId);
+    const tmpAbs = path.resolve(tmpRoot(this.ctx.dataDir));
+    const fileAbs = path.resolve(filePath);
+    if (!fileAbs.startsWith(tmpAbs + path.sep) && fileAbs !== tmpAbs) {
+      throw new HttpError(404, "apply_patch artifact not found");
+    }
+    const st = await fs.lstat(fileAbs).catch(() => null);
+    if (!st || !st.isFile()) {
+      throw new HttpError(404, "apply_patch artifact not found");
+    }
+    await ensureRealPathUnderRoot(tmpAbs, fileAbs);
+    let text = "";
+    try {
+      text = await readFileNoFollow(fileAbs);
+    } catch {
+      throw new HttpError(404, "apply_patch artifact not found");
+    }
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      throw new HttpError(404, "apply_patch artifact not found");
+    }
+  }
+
   getRunState(sessionId: string): AgentSessionRunState {
     const session = getAgentSession(this.ctx.db, sessionId);
     if (!session) throw new HttpError(404, "session not found");
@@ -1638,6 +1827,17 @@ export class AgentService {
     output: AgentContextItemRecord["output"];
     createdAt?: number;
   }) {
+    if (
+      params.kind === "tool" &&
+      params.status === "completed" &&
+      params.output &&
+      (params.output as any).type === "tool" &&
+      (params.output as any).toolName === "apply_patch" &&
+      Object.prototype.hasOwnProperty.call(params.output as any, "result")
+    ) {
+      // 本项目不保留 apply_patch 的 before/after 在 DB 中,必须走 update 路径写入 service artifact 后再瘦身入库。
+      throw new HttpError(400, "apply_patch completed tool item must be updated, not appended");
+    }
     try {
       return appendContextItem(this.ctx.db, {
         workspaceId: params.workspaceId,
@@ -1667,16 +1867,71 @@ export class AgentService {
     }
   }
 
-  updateContextItemFromWorker(params: {
+  async updateContextItemFromWorker(params: {
     itemId: number;
     status?: AgentContextItemStatus;
     output?: AgentContextItemRecord["output"];
     updatedAt?: number;
   }) {
+    const current = getContextItemById(this.ctx.db, params.itemId);
+    const nextStatus = params.status ?? current?.status;
+    let nextOutput = params.output;
+
+    // apply_patch: 将 before/after 从 DB 中剥离,改为写入 service UI artifact.
+    if (
+      nextStatus === "completed" &&
+      nextOutput &&
+      (nextOutput as any).type === "tool" &&
+      (nextOutput as any).toolName === "apply_patch" &&
+      Object.prototype.hasOwnProperty.call(nextOutput as any, "result")
+    ) {
+      const tool = nextOutput as any as { toolCallId?: unknown; result?: unknown };
+      const toolCallId = typeof tool.toolCallId === "string" ? tool.toolCallId.trim() : "";
+      const workspaceId = current?.workspaceId;
+      const { slim, artifact } = splitApplyPatchResult(tool.result);
+
+      if (toolCallId && workspaceId) {
+        const filePath = applyPatchUiArtifactPath(this.ctx.dataDir, workspaceId, toolCallId);
+        const dirPath = path.dirname(filePath);
+        const tmpAbs = path.resolve(tmpRoot(this.ctx.dataDir));
+        const dirAbs = path.resolve(dirPath);
+        if (!dirAbs.startsWith(tmpAbs + path.sep) && dirAbs !== tmpAbs) {
+          this.logger.error(
+            { itemId: params.itemId, filePath },
+            "apply_patch ui artifact path is outside tmpRoot"
+          );
+        } else {
+          try {
+            await ensureDirSafeUnderRoot(tmpAbs, dirAbs);
+            await ensureRealPathUnderRoot(tmpAbs, dirAbs);
+            const payload: ApplyPatchUiArtifactV1 = {
+              ...artifact,
+              workspaceId,
+              toolCallId,
+              createdAt: params.updatedAt ?? nowMs()
+            };
+            await writeFileNoFollow(filePath, JSON.stringify(payload));
+          } catch (err) {
+            this.logger.error({ err, itemId: params.itemId }, "failed to write apply_patch ui artifact");
+          }
+        }
+      } else {
+        this.logger.warn(
+          { itemId: params.itemId, hasToolCallId: !!toolCallId, hasWorkspaceId: !!workspaceId },
+          "apply_patch completed but missing toolCallId/workspaceId; ui artifact skipped"
+        );
+      }
+
+      nextOutput = {
+        ...(nextOutput as any),
+        result: slim
+      } as any;
+    }
+
     const item = updateContextItem(this.ctx.db, {
       itemId: params.itemId,
       status: params.status,
-      output: params.output,
+      output: nextOutput,
       updatedAt: params.updatedAt ?? nowMs()
     });
     if (!item) throw new HttpError(404, "context item not found");

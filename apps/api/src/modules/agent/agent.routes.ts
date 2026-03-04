@@ -144,6 +144,24 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
   );
 
   app.get(
+    "/api/agent/sessions/:sessionId/context-items/:itemId/apply-patch-artifact",
+    {
+      schema: {
+        tags: ["agent"],
+        params: Type.Object({
+          sessionId: Type.String({ minLength: 1 }),
+          itemId: Type.Number({ minimum: 1 })
+        }),
+        response: { 200: Type.Any(), 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      const p = req.params as { sessionId: string; itemId: number };
+      return await params.service.getApplyPatchUiArtifact({ sessionId: p.sessionId, itemId: p.itemId });
+    }
+  );
+
+  app.get(
     "/api/agent/sessions/:sessionId/run-state",
     {
       schema: {
@@ -548,7 +566,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
         output?: unknown;
         updatedAt?: number;
       };
-      const item = params.service.updateContextItemFromWorker({
+      const item = await params.service.updateContextItemFromWorker({
         itemId: p.itemId,
         status: body.status,
         output: body.output as any,

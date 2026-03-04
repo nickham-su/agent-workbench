@@ -66,6 +66,14 @@ function toPositiveInt(value: unknown, fallback: number) {
 
 function resolveAutoHeightBounds() {
   const min = toPositiveInt(props.minHeight, 112);
+  // autoHeight 下,若未显式传入 maxHeight,则不做高度上限 clamp。
+  // 这样可以让外层容器(例如会话列表)承担唯一的纵向滚动条。
+  if (typeof props.maxHeight !== "number") {
+    return {
+      min,
+      max: Number.POSITIVE_INFINITY
+    };
+  }
   const maxRaw = toPositiveInt(props.maxHeight, 420);
   return {
     min,

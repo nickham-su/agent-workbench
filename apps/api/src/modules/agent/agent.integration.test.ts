@@ -256,6 +256,28 @@ async function createContextItemInternal(params: {
   return res.json() as { item: { id: number } };
 }
 
+async function updateContextItemInternal(params: {
+  app: FastifyInstance;
+  internalToken: string;
+  itemId: number;
+  status?: "streaming" | "queued" | "running" | "awaiting_permission" | "completed" | "failed" | "denied" | "cancelled";
+  output?: Record<string, unknown>;
+}) {
+  const res = await params.app.inject({
+    method: "PATCH",
+    url: `/api/internal/agent/context-items/${params.itemId}`,
+    headers: {
+      "x-awb-agent-internal-token": params.internalToken
+    },
+    payload: {
+      ...(Object.prototype.hasOwnProperty.call(params, "status") ? { status: params.status } : {}),
+      ...(Object.prototype.hasOwnProperty.call(params, "output") ? { output: params.output } : {})
+    }
+  });
+  assert.equal(res.statusCode, 200, `update internal context-item failed: ${res.body}`);
+  return res.json() as { item: { id: number } };
+}
+
 async function updateRunStateInternal(params: {
   app: FastifyInstance;
   internalToken: string;
@@ -1860,7 +1882,7 @@ test("agent prompt-context 对 apply_patch 保留 patchText 输入,并使用文�
     }
   });
 
-  await createContextItemInternal({
+  const toolItem = await createContextItemInternal({
     app: fixture.app,
     internalToken: fixture.internalToken,
     workspaceId: fixture.workspaceId,
@@ -1870,6 +1892,22 @@ test("agent prompt-context 对 apply_patch 保留 patchText 输入,并使用文�
     step: 1,
     prevId: assistantItem.item.id,
     kind: "tool",
+    status: "queued",
+    output: {
+      type: "tool",
+      toolName: "apply_patch",
+      toolCallId: "call_apply_patch_1",
+      args: {
+        patchText: "*** Begin Patch\n*** Update File: foo.ts\n@@\n-console.log('a')\n+console.log('b')\n*** End Patch"
+      },
+      text: "apply_patch queued"
+    }
+  });
+
+  await updateContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    itemId: toolItem.item.id,
     status: "completed",
     output: {
       type: "tool",
@@ -1899,6 +1937,24 @@ test("agent prompt-context 对 apply_patch 保留 patchText 输入,并使用文�
       text: "Success. Updated the following files:\nM foo.ts"
     }
   });
+
+  const storedTool = await getContextItem(fixture.app, session.id, toolItem.item.id);
+  const storedResult = (storedTool.output?.result ?? {}) as Record<string, unknown>;
+  const storedFiles = Array.isArray(storedResult.files) ? storedResult.files : [];
+  const first = (storedFiles[0] ?? {}) as Record<string, unknown>;
+  assert.equal(Object.prototype.hasOwnProperty.call(first, "before"), false, "DB apply_patch result should strip before");
+  assert.equal(Object.prototype.hasOwnProperty.call(first, "after"), false, "DB apply_patch result should strip after");
+
+  const artifactRes = await fixture.app.inject({
+    method: "GET",
+    url: `/api/agent/sessions/${session.id}/context-items/${toolItem.item.id}/apply-patch-artifact`
+  });
+  assert.equal(artifactRes.statusCode, 200, `apply_patch artifact fetch failed: ${artifactRes.body}`);
+  const artifact = artifactRes.json() as { files?: Array<Record<string, unknown>> };
+  const artifactFiles = Array.isArray(artifact.files) ? artifact.files : [];
+  const artifactFirst = artifactFiles[0] ?? {};
+  assert.equal(typeof artifactFirst.before, "string");
+  assert.equal(typeof artifactFirst.after, "string");
 
   const context = await getPromptContextInternal({
     app: fixture.app,
@@ -2093,6 +2149,122 @@ test("agent prompt-context 支持 todolist 工具输入输出", async () => {
   const output = (toolResultPart as { output?: { type?: string; value?: string } } | null)?.output;
   assert.equal(String(output?.type || ""), "text", "todolist tool-result output should be text");
   assert.equal(String(output?.value || "").includes("Todo list updated"), true, "todolist tool-result should be summary text");
+});
+
+test("agent internal: 禁止 append completed apply_patch(必须走 update 写 artifact)", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/context-items",
+    headers: {
+      "x-awb-agent-internal-token": fixture.internalToken
+    },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      runId: null,
+      turnId: null,
+      step: null,
+      prevId: null,
+      kind: "tool",
+      status: "completed",
+      output: {
+        type: "tool",
+        toolName: "apply_patch",
+        toolCallId: "call_apply_patch_1",
+        args: { patchText: "*** Begin Patch\n*** End Patch" },
+        result: { text: "ok", summary: { fileCount: 0, additions: 0, deletions: 0 }, files: [] },
+        text: "ok"
+      }
+    }
+  });
+  assert.equal(res.statusCode, 400);
+});
+
+test("apply_patch artifact 文件缺失时返回 404", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const toolItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_apply_patch",
+    step: 1,
+    prevId: null,
+    kind: "tool",
+    status: "queued",
+    output: {
+      type: "tool",
+      toolName: "apply_patch",
+      toolCallId: "call_apply_patch_1",
+      args: { patchText: "*** Begin Patch\n*** End Patch" },
+      text: "queued"
+    }
+  });
+
+  await updateContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    itemId: toolItem.item.id,
+    status: "completed",
+    output: {
+      type: "tool",
+      toolName: "apply_patch",
+      toolCallId: "call_apply_patch_1",
+      args: { patchText: "*** Begin Patch\n*** End Patch" },
+      result: {
+        text: "ok",
+        summary: { fileCount: 1, additions: 1, deletions: 0 },
+        files: [
+          {
+            type: "add",
+            path: "foo.ts",
+            before: "",
+            after: "console.log(1)\n",
+            additions: 1,
+            deletions: 0
+          }
+        ]
+      },
+      text: "ok"
+    }
+  });
+
+  const artifactPath = path.join(
+    fixture.dataDir,
+    "tmp",
+    "agent",
+    "ui-artifacts",
+    "apply_patch",
+    fixture.workspaceId,
+    "call_apply_patch_1.json"
+  );
+  await fs.rm(artifactPath, { force: true });
+
+  const artifactRes = await fixture.app.inject({
+    method: "GET",
+    url: `/api/agent/sessions/${session.id}/context-items/${toolItem.item.id}/apply-patch-artifact`
+  });
+  assert.equal(artifactRes.statusCode, 404);
 });
 
 test("agent tool 字符串结果保持原始字符串语义", async () => {

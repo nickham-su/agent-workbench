@@ -32,6 +32,21 @@ export function tmpRoot(dataDir: string) {
   return path.join(dataDir, "tmp");
 }
 
+function safePathSegment(raw: string) {
+  const value = String(raw || "")
+    .trim()
+    .replace(/[^A-Za-z0-9._-]/g, "_");
+  if (!value) return "unknown";
+  const maxLen = 120;
+  return value.length <= maxLen ? value : value.slice(0, maxLen);
+}
+
+export function applyPatchUiArtifactPath(dataDir: string, workspaceId: string, toolCallId: string) {
+  const ws = safePathSegment(workspaceId);
+  const call = safePathSegment(toolCallId);
+  return path.join(tmpRoot(dataDir), "agent", "ui-artifacts", "apply_patch", ws, `${call}.json`);
+}
+
 export function sshRoot(dataDir: string) {
   return path.join(dataDir, "ssh");
 }

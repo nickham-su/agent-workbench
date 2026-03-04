@@ -213,6 +213,11 @@ function clearMermaidTimer() {
 function scheduleMarkdownRender() {
   clearMarkdownTimer();
   const delay = props.streaming ? MARKDOWN_DEBOUNCE_MS : 0;
+  if (delay <= 0) {
+    // 历史消息(非流式)在挂载时同步渲染,避免先空白后回填造成虚拟列表行高突变。
+    void renderMarkdown();
+    return;
+  }
   markdownTimer = window.setTimeout(() => {
     markdownTimer = null;
     void renderMarkdown();

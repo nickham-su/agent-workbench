@@ -107,7 +107,7 @@ export class AgentRuntime implements AgentRuntimePort {
 
       const latestUser = [...ctx.messages].reverse().find((item) => item.role === "user")?.content ?? "";
       const text = latestUser ? `本地回退模式已收到: ${latestUser}` : "本地回退模式已执行。";
-      this.service.updateContextItemFromWorker({
+      await this.service.updateContextItemFromWorker({
         itemId: assistant.id,
         status: "completed",
         output: {
