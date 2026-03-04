@@ -9,7 +9,7 @@ import type { Db } from "../../infra/db/db.js";
 import { ensureDir, rmrf } from "../../infra/fs/fs.js";
 import { workspaceRoot } from "../../infra/fs/paths.js";
 import { insertWorkspace } from "../workspaces/workspace.store.js";
-import { createRunRecord } from "./agent.store.js";
+import { appendContextItem, createRunRecord } from "./agent.store.js";
 import { newSortableId } from "../../utils/ids.js";
 
 type Fixture = {
@@ -210,7 +210,7 @@ async function getContextItems(app: FastifyInstance, sessionId: string, afterId?
       output: Record<string, any>;
       prevId: number | null;
       archiveAt: number | null;
-      purpose: string | null;
+      boundaryReason: string | null;
     }>;
   };
 }
@@ -456,6 +456,34 @@ test("agent context-items 支持 afterId 增量查询", async () => {
   const delta = await getContextItems(fixture.app, session.id, lastId);
   assert.ok(delta.items.length > 0);
   assert.ok(delta.items.every((item) => item.id > lastId));
+});
+
+test("非 system item 写入 boundaryReason 会被忽略", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const appended = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    boundaryReason: "should-not-be-stored",
+    output: {
+      type: "user_text",
+      text: "hello"
+    },
+    createdAt: Date.now()
+  });
+
+  assert.equal(appended.boundaryReason, null);
+
+  const context = await getContextItems(fixture.app, session.id);
+  assert.equal(context.items[0]?.kind, "user");
+  assert.equal(context.items[0]?.boundaryReason, null);
 });
 
 test("agent tool-permission 支持 approve/deny 并更新状态", async () => {
@@ -1005,7 +1033,7 @@ test("agent context 压缩后会归档并支持 archive_search/read", async () =
   assert.equal(context.items[0]?.archiveAt == null, false);
   assert.equal(context.items[1]?.archiveAt == null, false);
   assert.equal(context.items[2]?.kind, "system");
-  assert.equal(context.items[2]?.purpose, "compaction_summary");
+  assert.equal(context.items[2]?.boundaryReason, "compaction");
   assert.ok(String(context.items[2]?.output?.text || "").includes("压缩摘要"));
 
   const promptContext = await getPromptContextInternal({

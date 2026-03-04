@@ -47,7 +47,7 @@ type AgentContextItemRow = {
   toolCallId: string | null;
   toolCallJson: string | null;
   toolResultJson: string | null;
-  purpose: string | null;
+  boundaryReason: string | null;
   archiveAt: number | null;
   outputJson: string;
   createdAt: number;
@@ -319,7 +319,9 @@ function mapContextItem(row: AgentContextItemRow): AgentContextItemRecord {
   const step = typeof row.step === "number" && Number.isFinite(row.step) && row.step >= 1 ? row.step : null;
   const prevId = typeof row.prevId === "number" && Number.isFinite(row.prevId) && row.prevId >= 1 ? row.prevId : null;
   const archiveAt = typeof row.archiveAt === "number" && Number.isFinite(row.archiveAt) && row.archiveAt >= 1 ? row.archiveAt : null;
-  const purpose = typeof row.purpose === "string" && row.purpose.trim() ? row.purpose.trim() : null;
+  const boundaryReason = typeof row.boundaryReason === "string" && row.boundaryReason.trim()
+    ? row.boundaryReason.trim()
+    : null;
   return {
     id: row.id,
     workspaceId: row.workspaceId,
@@ -331,7 +333,7 @@ function mapContextItem(row: AgentContextItemRow): AgentContextItemRecord {
     kind: row.kind,
     status: row.status,
     archiveAt,
-    purpose,
+    boundaryReason,
     output: mapFromStoredColumns(row),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt
@@ -421,7 +423,7 @@ function readContextItemRowById(db: Db, itemId: number) {
           tool_call_id as toolCallId,
           tool_call_json as toolCallJson,
           tool_result_json as toolResultJson,
-          purpose,
+          boundary_reason as boundaryReason,
           archive_at as archiveAt,
           output_json as outputJson,
           created_at as createdAt,
@@ -621,7 +623,7 @@ export function appendContextItem(db: Db, params: {
   prevId: number | null;
   kind: AgentContextItemRecord["kind"];
   status: AgentContextItemStatus;
-  purpose?: string | null;
+  boundaryReason?: string | null;
   output: AgentContextItemOutput;
   createdAt: number;
 }) {
@@ -656,7 +658,7 @@ export function appendContextItem(db: Db, params: {
             tool_call_id,
             tool_call_json,
             tool_result_json,
-            purpose,
+            boundary_reason,
             output_json,
             created_at,
             updated_at
@@ -676,7 +678,7 @@ export function appendContextItem(db: Db, params: {
             @toolCallId,
             @toolCallJson,
             @toolResultJson,
-            @purpose,
+            @boundaryReason,
             @outputJson,
             @createdAt,
             @updatedAt
@@ -699,7 +701,10 @@ export function appendContextItem(db: Db, params: {
         toolCallId: stored.toolCallId,
         toolCallJson: stored.toolCallJson,
         toolResultJson: stored.toolResultJson,
-        purpose: typeof params.purpose === "string" && params.purpose.trim() ? params.purpose.trim() : null,
+        boundaryReason:
+          params.kind === "system" && typeof params.boundaryReason === "string" && params.boundaryReason.trim()
+            ? params.boundaryReason.trim()
+            : null,
         outputJson: stored.outputJson,
         createdAt: params.createdAt,
         updatedAt: params.createdAt
@@ -901,7 +906,7 @@ export function appendSystemSummaryAndArchiveItems(
             tool_call_id,
             tool_call_json,
             tool_result_json,
-            purpose,
+            boundary_reason,
             output_json,
             created_at,
             updated_at
@@ -921,7 +926,7 @@ export function appendSystemSummaryAndArchiveItems(
             @toolCallId,
             @toolCallJson,
             @toolResultJson,
-            @purpose,
+            @boundaryReason,
             @outputJson,
             @createdAt,
             @updatedAt
@@ -940,7 +945,7 @@ export function appendSystemSummaryAndArchiveItems(
         toolCallId: stored.toolCallId,
         toolCallJson: stored.toolCallJson,
         toolResultJson: stored.toolResultJson,
-        purpose: "compaction_summary",
+        boundaryReason: "compaction",
         outputJson: stored.outputJson,
         createdAt: params.summaryCreatedAt,
         updatedAt: params.summaryCreatedAt

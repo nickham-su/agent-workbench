@@ -102,7 +102,7 @@ export const AgentContextItemRecordSchema = Type.Object({
   kind: AgentContextItemKindSchema,
   status: AgentContextItemStatusSchema,
   archiveAt: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
-  purpose: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+  boundaryReason: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
   output: AgentContextItemOutputSchema,
   createdAt: Type.Number(),
   updatedAt: Type.Number()

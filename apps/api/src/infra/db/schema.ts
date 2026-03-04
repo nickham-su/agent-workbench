@@ -154,7 +154,7 @@ export function initSchema(db: Db) {
       tool_call_id text,
       tool_call_json text,
       tool_result_json text,
-      purpose text,
+      boundary_reason text,
       archive_at integer,
       output_json text not null default '{}',
       created_at integer not null,
@@ -205,7 +205,7 @@ export function initSchema(db: Db) {
   ensureColumn(db, { table: "agent_context_item", column: "tool_call_id", ddl: "tool_call_id text" });
   ensureColumn(db, { table: "agent_context_item", column: "tool_call_json", ddl: "tool_call_json text" });
   ensureColumn(db, { table: "agent_context_item", column: "tool_result_json", ddl: "tool_result_json text" });
-  ensureColumn(db, { table: "agent_context_item", column: "purpose", ddl: "purpose text" });
+  ensureColumn(db, { table: "agent_context_item", column: "boundary_reason", ddl: "boundary_reason text" });
   ensureColumn(db, { table: "agent_context_item", column: "archive_at", ddl: "archive_at integer" });
   createIndexIfNotExists(db, { index: "idx_repos_credential_id", sql: "create index idx_repos_credential_id on repos(credential_id)" });
   createIndexIfNotExists(db, { index: "idx_workspaces_dir_name", sql: "create unique index idx_workspaces_dir_name on workspaces(dir_name)" });

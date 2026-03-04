@@ -1222,7 +1222,8 @@ export class AgentService {
     if (
       visible.length === 1 &&
       visible[0]?.kind === "system" &&
-      visible[0]?.purpose === "compaction_summary"
+      typeof visible[0]?.boundaryReason === "string" &&
+      visible[0].boundaryReason.trim().length > 0
     ) {
       throw new HttpError(400, "compaction not needed", "AGENT_COMPACTION_NOT_NEEDED");
     }

@@ -312,7 +312,7 @@ type DisplayItem = {
   id: number;
   prevId: number | null;
   archiveAt: number | null;
-  purpose: string | null;
+  boundaryReason: string | null;
   role: "user" | "assistant" | "system" | "tool";
   text: string;
   status: AgentContextItemRecord["status"];
@@ -610,16 +610,25 @@ const displayItems = computed<DisplayItem[]>(() => {
 
   const mapped = items.value.map<DisplayItem>((item) => {
     const archiveAt = typeof item.archiveAt === "number" && Number.isFinite(item.archiveAt) ? item.archiveAt : null;
-    const purpose = typeof item.purpose === "string" && item.purpose.trim() ? item.purpose.trim() : null;
+    const boundaryReason =
+      typeof item.boundaryReason === "string" && item.boundaryReason.trim() ? item.boundaryReason.trim() : null;
     if (item.kind === "user" && item.output.type === "user_text") {
-      return { id: item.id, prevId: item.prevId, archiveAt, purpose, role: "user", text: item.output.text, status: item.status };
+      return {
+        id: item.id,
+        prevId: item.prevId,
+        archiveAt,
+        boundaryReason,
+        role: "user",
+        text: item.output.text,
+        status: item.status
+      };
     }
     if (item.kind === "assistant" && item.output.type === "assistant_text") {
       return {
         id: item.id,
         prevId: item.prevId,
         archiveAt,
-        purpose,
+        boundaryReason,
         role: "assistant",
         text: item.output.text,
         status: item.status,
@@ -647,7 +656,7 @@ const displayItems = computed<DisplayItem[]>(() => {
             id: item.id,
             prevId: item.prevId,
             archiveAt,
-            purpose,
+            boundaryReason,
             role: "tool",
             text: line,
             status: item.status,
@@ -659,7 +668,7 @@ const displayItems = computed<DisplayItem[]>(() => {
           id: item.id,
           prevId: item.prevId,
           archiveAt,
-          purpose,
+          boundaryReason,
           role: "tool",
           text: `${callText} ${statusText}`,
           status: item.status,
@@ -680,7 +689,7 @@ const displayItems = computed<DisplayItem[]>(() => {
             id: item.id,
             prevId: item.prevId,
             archiveAt,
-            purpose,
+            boundaryReason,
             role: "tool",
             text: line,
             status: item.status,
@@ -692,7 +701,7 @@ const displayItems = computed<DisplayItem[]>(() => {
           id: item.id,
           prevId: item.prevId,
           archiveAt,
-          purpose,
+          boundaryReason,
           role: "tool",
           text: `${callText} ${statusText}`,
           status: item.status,
@@ -714,7 +723,7 @@ const displayItems = computed<DisplayItem[]>(() => {
           id: item.id,
           prevId: item.prevId,
           archiveAt,
-          purpose,
+          boundaryReason,
           role: "tool",
           text: `${callText} ${statusText}`,
           status: item.status,
@@ -736,7 +745,7 @@ const displayItems = computed<DisplayItem[]>(() => {
         id: item.id,
         prevId: item.prevId,
         archiveAt,
-        purpose,
+        boundaryReason,
         role: "tool",
         text: line,
         status: item.status,
@@ -746,13 +755,21 @@ const displayItems = computed<DisplayItem[]>(() => {
       };
     }
     if (item.kind === "system" && item.output.type === "system_text") {
-      return { id: item.id, prevId: item.prevId, archiveAt, purpose, role: "system", text: item.output.text, status: item.status };
+      return {
+        id: item.id,
+        prevId: item.prevId,
+        archiveAt,
+        boundaryReason,
+        role: "system",
+        text: item.output.text,
+        status: item.status
+      };
     }
     return {
       id: item.id,
       prevId: item.prevId,
       archiveAt,
-      purpose,
+      boundaryReason,
       role: "system",
       text: JSON.stringify(item.output),
       status: item.status
@@ -762,7 +779,7 @@ const displayItems = computed<DisplayItem[]>(() => {
 });
 
 // 分割线放在“最后一条已归档消息”的底部.
-// 这样不依赖 compaction summary 的 purpose,对未来 purpose 扩展更稳.
+// 这样不依赖边界 marker 的具体原因文本,对后续扩展更稳.
 const archiveDividerAfterId = computed<number | null>(() => {
   const list = displayItems.value;
   if (list.length === 0) return null;
@@ -991,7 +1008,7 @@ function hasItemChanged(current: AgentContextItemRecord | null, latest: AgentCon
   const currentArchiveAt = typeof current.archiveAt === "number" ? current.archiveAt : null;
   const latestArchiveAt = typeof latest.archiveAt === "number" ? latest.archiveAt : null;
   if (currentArchiveAt !== latestArchiveAt) return true;
-  if (String(current.purpose || "") !== String(latest.purpose || "")) return true;
+  if (String(current.boundaryReason || "") !== String(latest.boundaryReason || "")) return true;
   return JSON.stringify(current.output) !== JSON.stringify(latest.output);
 }
 
@@ -999,30 +1016,29 @@ function isTerminalStatus(status: AgentContextItemRecord["status"]) {
   return terminalStatuses.has(status);
 }
 
-const COMPACTION_SUMMARY_PURPOSE = "compaction_summary";
-const handledCompactionSummaryId = ref(0);
+const handledBoundaryMarkerId = ref(0);
 
-function isCompactionSummaryItem(item: AgentContextItemRecord) {
-  return String(item.purpose || "") === COMPACTION_SUMMARY_PURPOSE;
+function isBoundaryMarkerItem(item: AgentContextItemRecord) {
+  return item.kind === "system" && String(item.boundaryReason || "").trim().length > 0;
 }
 
-function maxCompactionSummaryId(list: AgentContextItemRecord[]) {
+function maxBoundaryMarkerId(list: AgentContextItemRecord[]) {
   let maxId = 0;
   for (const item of list) {
-    if (!isCompactionSummaryItem(item)) continue;
+    if (!isBoundaryMarkerItem(item)) continue;
     maxId = Math.max(maxId, item.id);
   }
   return maxId;
 }
 
-function syncCompactionSummaryCursor(list: AgentContextItemRecord[]) {
-  handledCompactionSummaryId.value = Math.max(handledCompactionSummaryId.value, maxCompactionSummaryId(list));
+function syncBoundaryMarkerCursor(list: AgentContextItemRecord[]) {
+  handledBoundaryMarkerId.value = Math.max(handledBoundaryMarkerId.value, maxBoundaryMarkerId(list));
 }
 
-function shouldForceFullRefreshForCompaction(list: AgentContextItemRecord[]) {
+function shouldForceFullRefreshForBoundaryMarker(list: AgentContextItemRecord[]) {
   for (const item of list) {
-    if (!isCompactionSummaryItem(item)) continue;
-    if (item.id > handledCompactionSummaryId.value) return true;
+    if (!isBoundaryMarkerItem(item)) continue;
+    if (item.id > handledBoundaryMarkerId.value) return true;
   }
   return false;
 }
@@ -1041,7 +1057,7 @@ async function refreshAll(forceFull: boolean, forceFollowBottom = false) {
       updatedAt: 0,
       appliedItemId: 0
     };
-    handledCompactionSummaryId.value = 0;
+    handledBoundaryMarkerId.value = 0;
     items.value = [];
     clearPoll();
     return;
@@ -1063,7 +1079,7 @@ async function refreshAll(forceFull: boolean, forceFollowBottom = false) {
     if (forceFull || items.value.length === 0) {
       const full = await getAgentContextItems(props.sessionId);
       items.value = [...full.items].sort((a, b) => a.id - b.id);
-      syncCompactionSummaryCursor(items.value);
+      syncBoundaryMarkerCursor(items.value);
       await scrollToBottom({ force: forceFollowBottom });
     } else {
       const lastId = items.value.length > 0 ? items.value[items.value.length - 1]!.id : 0;
@@ -1071,17 +1087,17 @@ async function refreshAll(forceFull: boolean, forceFollowBottom = false) {
       const headMovedBackward = delta.headItemId == null ? lastId > 0 : delta.headItemId < lastId;
       const firstDelta = delta.items[0];
       const chainBroken = !!firstDelta && firstDelta.prevId !== lastId;
-      const hasCompactionSummary = shouldForceFullRefreshForCompaction(delta.items);
-      if (headMovedBackward || chainBroken || hasCompactionSummary) {
+      const hasBoundaryMarker = shouldForceFullRefreshForBoundaryMarker(delta.items);
+      if (headMovedBackward || chainBroken || hasBoundaryMarker) {
         const full = await getAgentContextItems(props.sessionId);
         items.value = [...full.items].sort((a, b) => a.id - b.id);
-        syncCompactionSummaryCursor(items.value);
+        syncBoundaryMarkerCursor(items.value);
         await scrollToBottom({ force: forceFollowBottom });
       } else if (delta.items.length > 0) {
         for (const item of delta.items) {
           upsertItem(item);
         }
-        syncCompactionSummaryCursor(delta.items);
+        syncBoundaryMarkerCursor(delta.items);
         await scrollToBottom({ force: forceFollowBottom });
       }
     }
@@ -1485,7 +1501,7 @@ watch(
   () => [props.sessionId, props.workspaceId],
   () => {
     clearPoll();
-    handledCompactionSummaryId.value = 0;
+    handledBoundaryMarkerId.value = 0;
     scrollToBottomSeq += 1;
     items.value = [];
     stickToBottom.value = true;
