@@ -1052,16 +1052,109 @@ test("agent context 压缩后会归档并支持 archive_search/read", async () =
   );
   assert.equal(archivedUserLeak, undefined, "archived transcript items should not be included in model prompt");
 
-  const forkArchivedRes = await fixture.app.inject({
+  const forkArchivedVisibleOnlyRes = await fixture.app.inject({
     method: "POST",
     url: "/api/agent/sessions/fork",
     payload: {
       fromSessionId: session.id,
-      fromItemId: userItem.item.id
+      fromItemId: userItem.item.id,
+      mode: "visible_only"
     }
   });
-  assert.equal(forkArchivedRes.statusCode, 400, `fork archived item should fail: ${forkArchivedRes.body}`);
-  assert.equal(forkArchivedRes.json().code, "AGENT_ARCHIVED_ITEM_IMMUTABLE");
+  assert.equal(
+    forkArchivedVisibleOnlyRes.statusCode,
+    400,
+    `fork archived item in visible_only mode should fail: ${forkArchivedVisibleOnlyRes.body}`
+  );
+  assert.equal(forkArchivedVisibleOnlyRes.json().code, "AGENT_ARCHIVED_ITEM_IMMUTABLE");
+
+  const summaryItemId = context.items[2]?.id ?? 0;
+  assert.ok(summaryItemId > 0);
+
+  const forkSystemRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions/fork",
+    payload: {
+      fromSessionId: session.id,
+      fromItemId: summaryItemId,
+      mode: "with_archive"
+    }
+  });
+  assert.equal(forkSystemRes.statusCode, 400, `fork from system should fail: ${forkSystemRes.body}`);
+  assert.equal(forkSystemRes.json().code, "AGENT_FORK_ITEM_KIND_INVALID");
+
+  const afterSummaryUser = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_archive_2",
+    step: 1,
+    prevId: summaryItemId,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "后续问题: 这个方案需要怎么落地?"
+    }
+  });
+
+  const afterSummaryAssistant = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_archive_2",
+    step: 1,
+    prevId: afterSummaryUser.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: {
+      type: "assistant_text",
+      text: "后续答复: 先做字段与路由改造,再补充测试。"
+    }
+  });
+
+  const forkArchivedWithArchiveRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions/fork",
+    payload: {
+      fromSessionId: session.id,
+      fromItemId: userItem.item.id,
+      mode: "with_archive"
+    }
+  });
+  assert.equal(forkArchivedWithArchiveRes.statusCode, 201, `fork archived item in with_archive mode should succeed: ${forkArchivedWithArchiveRes.body}`);
+  const forkArchivedWithArchiveSession = forkArchivedWithArchiveRes.json() as { id: string };
+  const forkArchivedWithArchiveContext = await getContextItems(fixture.app, forkArchivedWithArchiveSession.id);
+  assert.equal(forkArchivedWithArchiveContext.items.length, 1);
+  assert.equal(forkArchivedWithArchiveContext.items[0]?.archiveAt, null);
+
+  const forkWithArchiveRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions/fork",
+    payload: {
+      fromSessionId: session.id,
+      fromItemId: afterSummaryAssistant.item.id,
+      mode: "with_archive"
+    }
+  });
+  assert.equal(forkWithArchiveRes.statusCode, 201, `fork with archive should succeed: ${forkWithArchiveRes.body}`);
+  const forkWithArchiveSession = forkWithArchiveRes.json() as { id: string };
+  const forkWithArchiveContext = await getContextItems(fixture.app, forkWithArchiveSession.id);
+  assert.equal(forkWithArchiveContext.items.length, 5);
+  assert.equal(forkWithArchiveContext.items[0]?.archiveAt == null, false);
+  assert.equal(forkWithArchiveContext.items[1]?.archiveAt == null, false);
+  assert.equal(forkWithArchiveContext.items[2]?.kind, "system");
+  assert.equal(forkWithArchiveContext.items[3]?.kind, "user");
+  assert.equal(forkWithArchiveContext.items[4]?.kind, "assistant");
+
+  const forkArchiveFilePath = path.join(fixture.workspacePath, ".awb", "agent", "archive", forkWithArchiveSession.id, "00000001.log");
+  const forkArchiveContent = await fs.readFile(forkArchiveFilePath, "utf-8");
+  assert.ok(forkArchiveContent.includes("历史问题"));
+  assert.ok(forkArchiveContent.includes("新增归档与压缩方案草稿"));
 
   const revertArchivedRes = await fixture.app.inject({
     method: "POST",
@@ -1163,7 +1256,7 @@ test("agent context 压缩后会归档并支持 archive_search/read", async () =
     runId,
     turnId: null,
     step: null,
-    prevId: compact.summaryItemId,
+    prevId: afterSummaryAssistant.item.id,
     kind: "system",
     status: "completed",
     output: {

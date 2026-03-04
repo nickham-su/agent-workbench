@@ -86,17 +86,23 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
       schema: {
         tags: ["agent"],
         body: AgentForkSessionRequestSchema,
-        response: { 201: AgentSessionRecordSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema }
+        response: {
+          201: AgentSessionRecordSchema,
+          400: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          500: ErrorResponseSchema
+        }
       }
     },
     async (req, reply) => {
       const body = req.body as {
         fromSessionId: string;
         fromItemId: number;
+        mode: "with_archive" | "visible_only";
         title?: string;
         kind?: "primary" | "subtask";
       };
-      const session = params.service.forkSession(body);
+      const session = await params.service.forkSession(body);
       return reply.code(201).send(session);
     }
   );

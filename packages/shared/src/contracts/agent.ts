@@ -142,6 +142,7 @@ export type AgentCreateSessionRequest = Static<typeof AgentCreateSessionRequestS
 export const AgentForkSessionRequestSchema = Type.Object({
   fromSessionId: Type.String({ minLength: 1 }),
   fromItemId: Type.Number({ minimum: 1 }),
+  mode: Type.Union([Type.Literal("with_archive"), Type.Literal("visible_only")]),
   title: Type.Optional(Type.String({ minLength: 1 })),
   kind: Type.Optional(AgentSessionKindSchema)
 });

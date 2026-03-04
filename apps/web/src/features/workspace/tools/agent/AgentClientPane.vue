@@ -55,7 +55,7 @@
             >
               <div v-if="row.msg.role !== 'tool' && !isSubtaskSession" class="message-controls absolute right-2 top-1.5 z-10 flex items-center gap-1">
                 <span class="message-id">#{{ row.msg.id }}</span>
-                <template v-if="(row.msg.role === 'user' || row.msg.role === 'assistant') && row.msg.archiveAt == null">
+                <template v-if="row.msg.role === 'user' || row.msg.role === 'assistant'">
                   <a-tooltip :title="t('agent.client.fork')" placement="top">
                     <a-button
                       size="small"
@@ -67,7 +67,7 @@
                       <template #icon><ForkOutlined /></template>
                     </a-button>
                   </a-tooltip>
-                  <a-tooltip :title="t('agent.client.revert')" placement="top">
+                  <a-tooltip v-if="row.msg.archiveAt == null" :title="t('agent.client.revert')" placement="top">
                     <a-button
                       size="small"
                       type="text"
@@ -1316,7 +1316,8 @@ async function onForkFromMessage(itemId: number) {
   try {
     const session = await forkAgentSession({
       fromSessionId: props.sessionId,
-      fromItemId: itemId
+      fromItemId: itemId,
+      mode: "with_archive"
     });
     message.success(t("agent.client.forked"));
     emit("forked", session.id);

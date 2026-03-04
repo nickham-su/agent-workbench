@@ -47,6 +47,7 @@ import {
   listAgentSessions,
   listNonTerminalVisibleItemIds,
   moveSessionHead,
+  setContextItemsArchiveAt,
   setRunStateIdle,
   updateContextItem,
   updateRunRecordStatus,
@@ -823,6 +824,10 @@ function buildArchiveLine(item: AgentContextItemRecord) {
   return `item=${item.id} ts=${item.createdAt} kind=${item.kind} status=${item.status} tool=${toolName} | ${sanitizeArchiveText(text)}`;
 }
 
+function isBoundaryMarkerItem(item: AgentContextItemRecord) {
+  return item.kind === "system" && typeof item.boundaryReason === "string" && item.boundaryReason.trim().length > 0;
+}
+
 type PromptTextPart = { type: "text"; text: string };
 type PromptToolCallPart = {
   type: "tool-call";
@@ -990,27 +995,64 @@ export class AgentService {
     return session;
   }
 
-  forkSession(params: AgentForkSessionRequest) {
+  async forkSession(params: AgentForkSessionRequest) {
     const fromSession = getAgentSession(this.ctx.db, params.fromSessionId);
     if (!fromSession) throw new HttpError(404, "source session not found");
 
     const transcript = getSessionTranscriptItems(this.ctx.db, fromSession.workspaceId, fromSession.id);
-    const target = transcript.find((item) => item.id === params.fromItemId);
+    const targetIndex = transcript.findIndex((item) => item.id === params.fromItemId);
+    if (targetIndex < 0) throw new HttpError(400, "invalid fromItemId");
+    const target = transcript[targetIndex];
     if (!target) throw new HttpError(400, "invalid fromItemId");
-    if (target.archiveAt != null) {
-      throw new HttpError(400, "fromItemId is archived", "AGENT_ARCHIVED_ITEM_IMMUTABLE");
+    if (target.kind !== "user" && target.kind !== "assistant") {
+      throw new HttpError(400, "fromItemId must be user or assistant", "AGENT_FORK_ITEM_KIND_INVALID");
     }
 
-    const visible = getSessionVisibleItems(this.ctx.db, fromSession.workspaceId, fromSession.id);
-    const index = visible.findIndex((item) => item.id === params.fromItemId);
-    if (index < 0) throw new HttpError(400, "invalid fromItemId");
+    let cloned: AgentContextItemRecord[] = [];
+    const archivedSourceItemIds = new Set<number>();
+
+    if (params.mode === "visible_only") {
+      if (target.archiveAt != null) {
+        throw new HttpError(400, "fromItemId is archived", "AGENT_ARCHIVED_ITEM_IMMUTABLE");
+      }
+      const visible = getSessionVisibleItems(this.ctx.db, fromSession.workspaceId, fromSession.id);
+      const visibleIndex = visible.findIndex((item) => item.id === params.fromItemId);
+      if (visibleIndex < 0) throw new HttpError(400, "invalid fromItemId");
+      cloned = visible.slice(0, visibleIndex + 1);
+    } else {
+      cloned = transcript.slice(0, targetIndex + 1);
+      if (target.archiveAt == null) {
+        for (const item of cloned) {
+          if (item.archiveAt != null) {
+            archivedSourceItemIds.add(item.id);
+          }
+        }
+      } else {
+        let boundaryIndex = -1;
+        for (let i = targetIndex; i >= 0; i -= 1) {
+          const item = transcript[i];
+          if (!item) continue;
+          if (!isBoundaryMarkerItem(item)) continue;
+          boundaryIndex = i;
+          break;
+        }
+        if (boundaryIndex > 0) {
+          for (let i = 0; i < boundaryIndex; i += 1) {
+            const item = transcript[i];
+            if (!item) continue;
+            archivedSourceItemIds.add(item.id);
+          }
+        }
+      }
+    }
 
     const createdAt = nowMs();
     const newSessionId = newSortableId("sess");
     const title = (params.title || `${fromSession.title} (fork)`).trim() || `${fromSession.title} (fork)`;
     const kind = params.kind === "subtask" ? "subtask" : "primary";
+    const archiveAt = nowMs();
 
-    const cloned = visible.slice(0, index + 1);
+    const clonedIdMap = new Map<number, number>();
     const tx = this.ctx.db.transaction(() => {
       createAgentSession(this.ctx.db, {
         id: newSessionId,
@@ -1024,7 +1066,10 @@ export class AgentService {
 
       let prevId: number | null = null;
       for (const item of cloned) {
-        const safeStatus = item.status === "streaming" || item.status === "queued" || item.status === "running" || item.status === "awaiting_permission" ? "completed" : item.status;
+        const safeStatus =
+          item.status === "streaming" || item.status === "queued" || item.status === "running" || item.status === "awaiting_permission"
+            ? "completed"
+            : item.status;
         const next = appendContextItem(this.ctx.db, {
           workspaceId: fromSession.workspaceId,
           sessionId: newSessionId,
@@ -1034,13 +1079,56 @@ export class AgentService {
           prevId,
           kind: item.kind,
           status: safeStatus,
+          boundaryReason: item.boundaryReason,
           output: item.output,
           createdAt: Math.max(createdAt, item.createdAt)
         });
         prevId = next.id;
+        clonedIdMap.set(item.id, next.id);
+      }
+
+      if (params.mode === "with_archive" && archivedSourceItemIds.size > 0) {
+        const archiveItemIds: number[] = [];
+        for (const item of cloned) {
+          if (!archivedSourceItemIds.has(item.id)) continue;
+          const newId = clonedIdMap.get(item.id);
+          if (!newId) continue;
+          archiveItemIds.push(newId);
+        }
+        if (archiveItemIds.length > 0) {
+          setContextItemsArchiveAt(this.ctx.db, {
+            workspaceId: fromSession.workspaceId,
+            sessionId: newSessionId,
+            itemIds: archiveItemIds,
+            archiveAt,
+            updatedAt: archiveAt
+          });
+        }
       }
     });
     tx();
+
+    if (params.mode === "with_archive" && archivedSourceItemIds.size > 0) {
+      const workspace = this.ensureWorkspace(fromSession.workspaceId);
+      const nextTranscript = getSessionTranscriptItems(this.ctx.db, fromSession.workspaceId, newSessionId);
+      const archiveLines = nextTranscript.filter((item) => item.archiveAt != null).map((item) => buildArchiveLine(item));
+      if (archiveLines.length > 0) {
+        try {
+          await appendArchiveLines({
+            workspacePath: workspace.path,
+            sessionId: newSessionId,
+            lines: archiveLines
+          });
+        } catch (err) {
+          this.ctx.db.prepare(`delete from agent_session where id = @sessionId and workspace_id = @workspaceId`).run({
+            sessionId: newSessionId,
+            workspaceId: fromSession.workspaceId
+          });
+          await fs.rm(archiveSessionDir(workspace.path, newSessionId), { recursive: true, force: true }).catch(() => undefined);
+          throw new HttpError(500, "failed to write fork archive", "AGENT_FORK_ARCHIVE_FAILED");
+        }
+      }
+    }
 
     const session = getAgentSession(this.ctx.db, newSessionId);
     if (!session) throw new HttpError(500, "failed to create fork session");
@@ -1643,7 +1731,7 @@ export class AgentService {
     });
   }
 
-  startSubtaskRunFromWorker(params: {
+  async startSubtaskRunFromWorker(params: {
     workspaceId: string;
     parentSessionId: string;
     parentRunId: string;
@@ -1712,9 +1800,10 @@ export class AgentService {
           kind: "subtask"
         });
       } else {
-        session = this.forkSession({
+        session = await this.forkSession({
           fromSessionId: params.parentSessionId,
           fromItemId: anchor.prevId,
+          mode: "visible_only",
           title: `${subtaskTitleBase} (fork)`,
           kind: "subtask"
         });
@@ -2303,7 +2392,16 @@ export class AgentService {
         )
       : undefined;
 
-    const tools = profile.agent.tools.map((name) => {
+    const hasArchivedItems = getSessionTranscriptItems(this.ctx.db, params.workspaceId, params.sessionId).some(
+      (item) => item.archiveAt != null
+    );
+    const hasArchiveFiles = (await listArchiveFilesAsc(archiveSessionDir(workspace.path, session.id))).length > 0;
+    const hasArchive = hasArchivedItems && hasArchiveFiles;
+    const enabledToolNames = hasArchive
+      ? profile.agent.tools
+      : profile.agent.tools.filter((name) => name !== "archive_search" && name !== "archive_read");
+
+    const tools = enabledToolNames.map((name) => {
       const requiresApproval =
         (name === "read" && !profile.agent.permissions.allowRead) ||
         (name === "write" && !profile.agent.permissions.allowWrite) ||
