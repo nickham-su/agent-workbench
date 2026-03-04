@@ -39,14 +39,6 @@
               :ref="onVirtualRowMounted"
             >
               <div
-                v-if="row.msg.role === 'system' && row.msg.purpose === 'compaction_summary'"
-                class="pb-2 pt-1 flex items-center gap-2"
-              >
-                <div class="h-px flex-1 bg-blue-500/40" />
-                <div class="text-[11px] text-blue-600 whitespace-nowrap">{{ t("agent.client.compactionArchivedHint") }}</div>
-                <div class="h-px flex-1 bg-blue-500/40" />
-              </div>
-              <div
                 class="agent-message-item relative rounded p-2"
                 :class="[
                   row.msg.role === 'tool'
@@ -157,6 +149,15 @@
                   {{ t("agent.client.deny") }}
                 </a-button>
               </div>
+            </div>
+
+            <div
+              v-if="archiveDividerAfterId != null && row.msg.id === archiveDividerAfterId"
+              class="pt-2 pb-1 flex items-center gap-2"
+            >
+              <div class="h-px flex-1 bg-blue-500/40" />
+              <div class="text-[11px] text-blue-600 whitespace-nowrap">{{ t("agent.client.compactionArchivedHint") }}</div>
+              <div class="h-px flex-1 bg-blue-500/40" />
             </div>
           </div>
         </div>
@@ -758,6 +759,30 @@ const displayItems = computed<DisplayItem[]>(() => {
     };
   });
   return mapped.filter((item) => !(item.role === "assistant" && hiddenAssistantIds.has(item.id)));
+});
+
+// 分割线放在“最后一条已归档消息”的底部.
+// 这样不依赖 compaction summary 的 purpose,对未来 purpose 扩展更稳.
+const archiveDividerAfterId = computed<number | null>(() => {
+  const list = displayItems.value;
+  if (list.length === 0) return null;
+
+  let idx = -1;
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    if (list[i]?.archiveAt != null) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx < 0) return null;
+  if (idx >= list.length - 1) return null;
+
+  for (let j = idx + 1; j < list.length; j += 1) {
+    if (list[j]?.archiveAt == null) {
+      return list[idx]?.id ?? null;
+    }
+  }
+  return null;
 });
 
 function messageGapTopAt(index: number) {
