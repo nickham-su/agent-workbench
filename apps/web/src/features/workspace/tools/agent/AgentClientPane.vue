@@ -18,7 +18,11 @@
       </div>
     </div>
 
-    <div ref="scrollEl" class="agent-message-list flex-1 min-h-0 overflow-auto p-3 bg-[var(--panel-bg)]" @scroll.passive="onMessageListScroll">
+    <div
+      ref="scrollEl"
+      class="agent-message-list flex-1 min-h-0 overflow-auto p-3 bg-[var(--panel-bg)]"
+      @scroll.passive="onMessageListScroll"
+    >
       <div v-if="displayItems.length === 0" class="h-full flex flex-col items-center justify-center gap-3 text-base text-[color:var(--text-tertiary)]">
         <div>{{ t("agent.client.welcome") }}</div>
         <a-button v-if="props.canChooseSession" type="link" size="small" class="!px-0" @click="onChooseSession">
@@ -38,7 +42,9 @@
               :style="{ paddingTop: `${row.gapTop}px` }"
               :ref="onVirtualRowMounted"
             >
+              <div v-if="row.kind === 'spacer'" :style="{ height: `${row.spacerHeight}px` }" />
               <div
+                v-else
                 class="agent-message-item relative rounded p-2"
                 :class="[
                   row.msg.role === 'tool'
@@ -121,6 +127,14 @@
                 v-else-if="isApplyPatchCard(row.msg) && row.msg.applyPatch"
                 :files="row.msg.applyPatch.files"
               />
+              <AssistantMarkdownMessage
+                v-else-if="row.msg.role === 'assistant'"
+                class="pr-24"
+                :text="row.msg.text"
+                :message-id="row.msg.id"
+                :streaming="!isTerminalStatus(row.msg.status)"
+                :tone="row.msg.tone"
+              />
               <div
                 v-else
                 class="whitespace-pre-wrap break-words"
@@ -152,7 +166,7 @@
             </div>
 
             <div
-              v-if="archiveDividerAfterId != null && row.msg.id === archiveDividerAfterId"
+              v-if="row.kind !== 'spacer' && archiveDividerAfterId != null && row.msg.id === archiveDividerAfterId"
               class="pt-2 pb-1 flex items-center gap-2"
             >
               <div class="h-px flex-1 bg-blue-500/40" />
@@ -254,6 +268,7 @@ import { computed, nextTick, onActivated, onBeforeUnmount, ref, watch } from "vu
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import AgentApplyPatchCard from "./AgentApplyPatchCard.vue";
+import AssistantMarkdownMessage from "./AssistantMarkdownMessage.vue";
 import AgentTodoListCard from "./AgentTodoListCard.vue";
 import {
   cancelAgentSession,
@@ -334,7 +349,9 @@ type VirtualDisplayRow = {
   index: number;
   start: number;
   gapTop: number;
+  kind: "message" | "spacer";
   msg: DisplayItem;
+  spacerHeight: number;
 };
 
 const MESSAGE_GAP_DEFAULT = 12;
@@ -342,6 +359,12 @@ const MESSAGE_GAP_PREV_TOOL = 8;
 const MESSAGE_GAP_CUR_TOOL = 6;
 const MESSAGE_GAP_TOOL_TOOL = 2;
 const BOTTOM_FOLLOW_THRESHOLD_PX = 120;
+const MESSAGE_LIST_BOTTOM_SPACER_PX = 16;
+const POLL_RUNNING_MS = 850;
+const POLL_LOCAL_NON_TERMINAL_MS = 700;
+const POLL_SETTLE_MS = 520;
+const POLL_ERROR_RETRY_MS = 1400;
+const POLL_IMMEDIATE_REFRESH_MS = 420;
 
 const props = defineProps<{
   workspaceId: string;
@@ -848,10 +871,18 @@ function estimateRowHeight(index: number) {
 
 const rowVirtualizer = useVirtualizer<HTMLElement, HTMLDivElement>(
   computed(() => ({
-    count: displayItems.value.length,
+    count: displayItems.value.length > 0 ? displayItems.value.length + 1 : 0,
     getScrollElement: () => scrollEl.value,
-    getItemKey: (index: number) => displayItems.value[index]?.id ?? index,
-    estimateSize: (index: number) => estimateRowHeight(index),
+    getItemKey: (index: number) => {
+      const list = displayItems.value;
+      if (index === list.length) return "__bottom_spacer__";
+      return list[index]?.id ?? index;
+    },
+    estimateSize: (index: number) => {
+      const list = displayItems.value;
+      if (index === list.length) return MESSAGE_LIST_BOTTOM_SPACER_PX;
+      return estimateRowHeight(index);
+    },
     overscan: 12
   }))
 );
@@ -862,14 +893,17 @@ const virtualRows = computed<VirtualDisplayRow[]>(() => {
   const list = displayItems.value;
   const rows: VirtualDisplayRow[] = [];
   for (const virtualItem of rowVirtualizer.value.getVirtualItems()) {
-    const msg = list[virtualItem.index];
+    const isSpacer = virtualItem.index === list.length;
+    const msg = isSpacer ? list[list.length - 1] : list[virtualItem.index];
     if (!msg) continue;
     rows.push({
       key: typeof virtualItem.key === "number" || typeof virtualItem.key === "string" ? virtualItem.key : String(virtualItem.key),
       index: virtualItem.index,
       start: virtualItem.start,
-      gapTop: messageGapTopAt(virtualItem.index),
-      msg
+      gapTop: isSpacer ? 0 : messageGapTopAt(virtualItem.index),
+      kind: isSpacer ? "spacer" : "message",
+      msg,
+      spacerHeight: MESSAGE_LIST_BOTTOM_SPACER_PX
     });
   }
   return rows;
@@ -978,7 +1012,8 @@ async function scrollToBottom(options?: { force?: boolean }) {
   await nextTick();
   if (seq !== scrollToBottomSeq) return;
 
-  const index = displayItems.value.length - 1;
+  // 最后一行是“底部 spacer”,用于给输入框留出空气.
+  const index = displayItems.value.length;
   if (index < 0) return;
 
   rowVirtualizer.value.scrollToIndex(index, { align: "end" });
@@ -1151,16 +1186,16 @@ async function refreshAll(forceFull: boolean, forceFollowBottom = false) {
 
     const hasLocalNonTerminal = items.value.some((item) => !isTerminalStatus(item.status));
     if (state.status !== "idle") {
-      schedulePoll(600);
+      schedulePoll(POLL_RUNNING_MS);
     } else if (hasLocalNonTerminal) {
-      schedulePoll(400);
+      schedulePoll(POLL_LOCAL_NON_TERMINAL_MS);
     } else if (settlePollRemaining > 0) {
       settlePollRemaining -= 1;
-      schedulePoll(300);
+      schedulePoll(POLL_SETTLE_MS);
     }
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
-    schedulePoll(1200);
+    schedulePoll(POLL_ERROR_RETRY_MS);
   } finally {
     loading.value = false;
   }
@@ -1459,7 +1494,7 @@ async function onSend() {
     draft.value = "";
     if (targetSessionId === props.sessionId) {
       await refreshAll(false);
-      schedulePoll(300);
+      schedulePoll(POLL_IMMEDIATE_REFRESH_MS);
     } else {
       emit("request-poll-session", targetSessionId);
     }
@@ -1487,7 +1522,7 @@ watch(
         await refreshAll(false);
         if (seq !== pollHintRefreshSeq) return;
         if (!props.active || !props.sessionId) return;
-        schedulePoll(300);
+        schedulePoll(POLL_IMMEDIATE_REFRESH_MS);
       })();
     }
   },
