@@ -842,6 +842,124 @@ export function getSessionTranscriptItems(db: Db, workspaceId: string, sessionId
   return listSessionItems(db, workspaceId, sessionId, { includeArchived: true });
 }
 
+function normalizeListLimit(raw: unknown, fallback: number) {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.max(1, Math.min(1000, Math.floor(n)));
+}
+
+function readContextItemRowByIdStmt(db: Db) {
+  return db.prepare(
+    `
+      select
+        id,
+        workspace_id as workspaceId,
+        session_id as sessionId,
+        run_id as runId,
+        turn_id as turnId,
+        step,
+        prev_id as prevId,
+        kind,
+        status,
+        output_text as outputText,
+        output_text_truncated as outputTextTruncated,
+        output_text_artifact_path as outputTextArtifactPath,
+        tool_name as toolName,
+        tool_call_id as toolCallId,
+        tool_call_json as toolCallJson,
+        tool_result_json as toolResultJson,
+        boundary_reason as boundaryReason,
+        archive_at as archiveAt,
+        output_json as outputJson,
+        created_at as createdAt,
+        updated_at as updatedAt
+      from agent_context_item
+      where id = ?
+    `
+  );
+}
+
+function listTranscriptWindowFromCursor(db: Db, params: {
+  workspaceId: string;
+  sessionId: string;
+  startId: number | null;
+  limit: number;
+}) {
+  const stmt = readContextItemRowByIdStmt(db);
+  const rows: AgentContextItemRecord[] = [];
+  const seen = new Set<number>();
+  let cursor: number | null = params.startId;
+  while (cursor && rows.length < params.limit) {
+    if (seen.has(cursor)) break;
+    seen.add(cursor);
+    const row = stmt.get(cursor) as AgentContextItemRow | undefined;
+    if (!row) break;
+    if (row.workspaceId !== params.workspaceId || row.sessionId !== params.sessionId) break;
+    rows.push(mapContextItem(row));
+    cursor = row.prevId;
+  }
+  return {
+    // 返回按时间从旧到新排序,与前端既有处理一致.
+    items: rows.reverse(),
+    hasMoreBefore: cursor != null
+  };
+}
+
+export function getSessionTranscriptTailWindow(db: Db, workspaceId: string, sessionId: string, tailLimit: number) {
+  const headItemId = getHead(db, workspaceId, sessionId);
+  if (!headItemId) {
+    return { items: [] as AgentContextItemRecord[], hasMoreBefore: false };
+  }
+  const limit = normalizeListLimit(tailLimit, 100);
+  return listTranscriptWindowFromCursor(db, { workspaceId, sessionId, startId: headItemId, limit });
+}
+
+export function getSessionTranscriptBeforeWindow(db: Db, params: {
+  workspaceId: string;
+  sessionId: string;
+  beforeId: number;
+  limit: number;
+}) {
+  const stmt = readContextItemRowByIdStmt(db);
+  const beforeRow = stmt.get(params.beforeId) as AgentContextItemRow | undefined;
+  if (!beforeRow) return { items: [] as AgentContextItemRecord[], hasMoreBefore: false };
+  if (beforeRow.workspaceId !== params.workspaceId || beforeRow.sessionId !== params.sessionId) {
+    return { items: [] as AgentContextItemRecord[], hasMoreBefore: false };
+  }
+  const limit = normalizeListLimit(params.limit, 100);
+  return listTranscriptWindowFromCursor(db, {
+    workspaceId: params.workspaceId,
+    sessionId: params.sessionId,
+    startId: beforeRow.prevId,
+    limit
+  });
+}
+
+export function getSessionTranscriptItemsAfterIdWindow(db: Db, params: {
+  workspaceId: string;
+  sessionId: string;
+  afterId: number;
+}) {
+  const headItemId = getHead(db, params.workspaceId, params.sessionId);
+  if (!headItemId) return [] as AgentContextItemRecord[];
+
+  const stmt = readContextItemRowByIdStmt(db);
+  const rows: AgentContextItemRecord[] = [];
+  const seen = new Set<number>();
+  let cursor: number | null = headItemId;
+  const stopId = Math.max(0, Math.floor(params.afterId));
+  while (cursor && cursor > stopId) {
+    if (seen.has(cursor)) break;
+    seen.add(cursor);
+    const row = stmt.get(cursor) as AgentContextItemRow | undefined;
+    if (!row) break;
+    if (row.workspaceId !== params.workspaceId || row.sessionId !== params.sessionId) break;
+    rows.push(mapContextItem(row));
+    cursor = row.prevId;
+  }
+  return rows.reverse();
+}
+
 export function setContextItemsArchiveAt(
   db: Db,
   params: {

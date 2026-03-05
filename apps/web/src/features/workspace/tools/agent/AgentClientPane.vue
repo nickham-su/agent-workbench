@@ -20,10 +20,17 @@
 
     <div
       ref="scrollEl"
-      class="agent-message-list flex-1 min-h-0 overflow-auto p-3 bg-[var(--panel-bg)]"
+      class="agent-message-list relative flex-1 min-h-0 overflow-auto p-3 bg-[var(--panel-bg)]"
       @scroll.passive="onMessageListScroll"
       @wheel.passive="onMessageListWheel"
     >
+      <div v-if="displayItems.length > 0 && (loadingEarlier || reachedTop)" class="pt-1 pb-1 flex items-center gap-2">
+        <div class="h-px flex-1 bg-blue-500/40" />
+        <div class="text-[11px] text-blue-600 whitespace-nowrap">
+          {{ loadingEarlier ? t("common.loading") : t("agent.client.reachedTop") }}
+        </div>
+        <div class="h-px flex-1 bg-blue-500/40" />
+      </div>
       <div v-if="displayItems.length === 0" class="h-full flex flex-col items-center justify-center gap-3 text-base text-[color:var(--text-tertiary)]">
         <div>{{ t("agent.client.welcome") }}</div>
         <a-button v-if="props.canChooseSession" type="link" size="small" class="!px-0" @click="onChooseSession">
@@ -44,63 +51,71 @@
                :style="{ paddingTop: `${row.gapTop}px` }"
                :ref="onVirtualRowMounted"
              >
-              <div v-if="row.kind === 'spacer'" :style="{ height: `${row.spacerHeight}px` }" />
-              <div
-                v-else
-                class="agent-message-item relative rounded p-2"
-                :class="[
-                 row.msg.role === 'tool'
-                   ? isRichToolCard(row.msg)
-                    ? 'is-tool-message border-0 bg-transparent px-0 py-0'
-                    : 'is-tool-message border-0 bg-transparent pl-2 pr-0 py-0.5'
-                   : '',
-                row.msg.role === 'user' ? 'is-user-message border border-blue-500/30 bg-blue-500/10' : 'border-0',
-                row.msg.role === 'assistant' ? 'is-assistant-message bg-[var(--panel-bg)]' : '',
-                row.msg.role === 'system' ? 'bg-[var(--panel-bg)]' : '',
-                row.msg.role === 'user' && row.msg.tone === 'error' ? 'border-red-500/40 bg-red-500/5' : '',
-                row.msg.role !== 'user' && row.msg.role !== 'tool' && row.msg.tone === 'error' ? 'bg-red-500/5' : ''
-              ]"
-            >
-              <div v-if="row.msg.role !== 'tool' && !isSubtaskSession" class="message-controls absolute right-2 top-1.5 z-10 flex items-center gap-1">
-                <span class="message-id">#{{ row.msg.id }}</span>
-                <template v-if="row.msg.role === 'user' || row.msg.role === 'assistant'">
-                  <a-tooltip :title="t('agent.client.fork')" placement="top">
-                    <a-button
-                      size="small"
-                      type="text"
-                      :loading="actionLoading === 'fork' && actionTargetId === row.msg.id"
-                      :aria-label="t('agent.client.fork')"
-                      @click="onForkFromMessage(row.msg.id)"
+                <div v-if="row.kind === 'spacer'" :style="{ height: `${row.spacerHeight}px` }" />
+                <div v-else>
+                  <div v-if="row.msg.boundaryReason" class="pb-1 flex items-center gap-2">
+                    <div class="h-px flex-1 bg-blue-500/40" />
+                    <div class="text-[11px] text-blue-600 whitespace-nowrap">{{ t("agent.client.contextBoundary") }}</div>
+                    <div class="h-px flex-1 bg-blue-500/40" />
+                  </div>
+
+                  <div
+                    class="agent-message-item relative rounded p-2"
+                    :class="[
+                      row.msg.role === 'tool'
+                        ? isRichToolCard(row.msg)
+                          ? 'is-tool-message border-0 bg-transparent px-0 py-0'
+                          : 'is-tool-message border-0 bg-transparent pl-2 pr-0 py-0.5'
+                        : '',
+                      row.msg.role === 'user' ? 'is-user-message border border-blue-500/30 bg-blue-500/10' : 'border-0',
+                      row.msg.role === 'assistant' ? 'is-assistant-message bg-[var(--panel-bg)]' : '',
+                      row.msg.role === 'system' ? 'bg-[var(--panel-bg)]' : '',
+                      row.msg.role === 'user' && row.msg.tone === 'error' ? 'border-red-500/40 bg-red-500/5' : '',
+                      row.msg.role !== 'user' && row.msg.role !== 'tool' && row.msg.tone === 'error' ? 'bg-red-500/5' : '',
+                      isTextMessageClamped(row.msg.id)
+                        ? 'is-text-clamped border border-[var(--border-color-secondary)] bg-transparent'
+                        : ''
+                    ]"
+                  >
+                    <div
+                      v-if="(row.msg.role === 'user' || row.msg.role === 'assistant') && !isSubtaskSession"
+                      class="message-controls absolute right-2 top-1.5 z-10 flex items-center gap-1"
                     >
-                      <template #icon><ForkOutlined /></template>
-                    </a-button>
-                  </a-tooltip>
-                  <a-tooltip v-if="row.msg.archiveAt == null" :title="t('agent.client.revert')" placement="top">
-                    <a-button
-                      size="small"
-                      type="text"
-                      :disabled="row.msg.role === 'user' ? row.msg.prevId == null : false"
-                      :loading="actionLoading === 'revert' && actionTargetId === row.msg.id"
-                      :aria-label="t('agent.client.revert')"
-                      @click="onRevertToMessage(row.msg.id)"
-                    >
-                      <template #icon><RollbackOutlined /></template>
-                    </a-button>
-                  </a-tooltip>
-                </template>
-              </div>
-              <div v-if="row.msg.role === 'system'" class="text-[11px] text-[color:var(--text-tertiary)] pb-1 pr-24">
-                {{ roleLabel(row.msg.role) }}
-              </div>
-              <div
-                v-if="isSubtaskCard(row.msg)"
-                class="subtask-card rounded border border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] p-2"
-                :class="[
-                  row.msg.subtaskSessionId ? 'is-clickable' : 'is-disabled',
-                  row.msg.tone === 'error' ? 'border-red-500/40 bg-red-500/5' : ''
-                ]"
-                @click="onOpenSubtask(row.msg.subtaskSessionId)"
-              >
+                      <span class="message-id">#{{ row.msg.id }}</span>
+                      <a-tooltip :title="t('agent.client.fork')" placement="top">
+                        <a-button
+                          size="small"
+                          type="text"
+                          :loading="actionLoading === 'fork' && actionTargetId === row.msg.id"
+                          :aria-label="t('agent.client.fork')"
+                          @click="onForkFromMessage(row.msg.id)"
+                        >
+                          <template #icon><ForkOutlined /></template>
+                        </a-button>
+                      </a-tooltip>
+                      <a-tooltip v-if="row.msg.archiveAt == null" :title="t('agent.client.revert')" placement="top">
+                        <a-button
+                          size="small"
+                          type="text"
+                          :disabled="row.msg.role === 'user' ? row.msg.prevId == null : false"
+                          :loading="actionLoading === 'revert' && actionTargetId === row.msg.id"
+                          :aria-label="t('agent.client.revert')"
+                          @click="onRevertToMessage(row.msg.id)"
+                        >
+                          <template #icon><RollbackOutlined /></template>
+                        </a-button>
+                      </a-tooltip>
+                    </div>
+
+                    <div
+                      v-if="isSubtaskCard(row.msg)"
+                 class="subtask-card rounded border border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] p-2"
+                 :class="[
+                   row.msg.subtaskSessionId ? 'is-clickable' : 'is-disabled',
+                   row.msg.tone === 'error' ? 'border-red-500/40 bg-red-500/5' : ''
+                 ]"
+                 @click="onOpenSubtask(row.msg.subtaskSessionId)"
+               >
                 <div class="flex items-center gap-2">
                   <div class="text-[12px] font-semibold">
                     <DoubleRightOutlined class="subtask-title-icon mr-0.5 text-blue-500" />
@@ -150,54 +165,66 @@
                 :error-text="row.msg.toolError"
                 @request-measure="onRequestVirtualMeasure(row.msg.id)"
               />
-              <AssistantMarkdownMessage
-                v-else-if="row.msg.role === 'assistant'"
-                class="pr-24"
-                :text="row.msg.text"
-                :message-id="row.msg.id"
-                :streaming="!isTerminalStatus(row.msg.status)"
-                :tone="row.msg.tone"
-              />
-              <div
-                v-else
-                class="whitespace-pre-wrap break-words"
-                :class="[
-                  row.msg.role === 'tool' ? 'text-[11px] font-mono text-[color:var(--text-secondary)]' : 'text-[13px]',
-                  row.msg.role !== 'tool' ? 'pr-24' : '',
-                  row.msg.tone === 'error' ? 'text-red-500' : ''
-                ]"
-              >
-                {{ row.msg.text }}
-              </div>
-              <div v-if="row.msg.role === 'tool' && row.msg.status === 'awaiting_permission'" class="pt-2 flex items-center gap-1">
-                <a-button
-                  size="small"
-                  :loading="actionLoading === 'approve' && actionTargetId === row.msg.id"
-                  @click="onToolPermission(row.msg.id, 'approve')"
-                >
-                  {{ t("agent.client.approve") }}
-                </a-button>
-                <a-button
-                  size="small"
-                  danger
-                  :loading="actionLoading === 'deny' && actionTargetId === row.msg.id"
-                  @click="onToolPermission(row.msg.id, 'deny')"
-                >
-                  {{ t("agent.client.deny") }}
-                </a-button>
-              </div>
-            </div>
+                    <AssistantMarkdownMessage
+                      v-else-if="row.msg.role === 'assistant'"
+                      class="pr-24"
+                      :text="row.msg.text"
+                      :message-id="row.msg.id"
+                      :streaming="!isTerminalStatus(row.msg.status)"
+                      :tone="row.msg.tone"
+                    />
+                    <AgentUserMessage
+                      v-else-if="row.msg.role === 'user'"
+                      :text="row.msg.text"
+                      :tone="row.msg.tone"
+                    />
+                    <AgentTextMessage
+                      v-else-if="row.msg.role === 'tool' || row.msg.role === 'system'"
+                      :text="row.msg.text"
+                      :message-id="row.msg.id"
+                      :expanded="isTextMessageExpanded(row.msg.id)"
+                      :max-height-px="100"
+                      :tone="row.msg.tone"
+                      @toggle="(expanded) => onToggleTextMessageExpanded(row.msg.id, expanded)"
+                      @request-measure="(messageId) => onRequestVirtualMeasure(messageId)"
+                      @clamp-change="(clamped) => onTextMessageClampChange(row.msg.id, clamped)"
+                    />
+                    <div
+                      v-else
+                      class="whitespace-pre-wrap break-words"
+                      :class="[
+                        'text-[13px]',
+                        'pr-24',
+                        row.msg.tone === 'error' ? 'text-red-500' : ''
+                      ]"
+                    >
+                      {{ row.msg.text }}
+                    </div>
 
-            <div
-              v-if="row.kind !== 'spacer' && archiveDividerAfterId != null && row.msg.id === archiveDividerAfterId"
-              class="pt-2 pb-1 flex items-center gap-2"
-            >
-              <div class="h-px flex-1 bg-blue-500/40" />
-              <div class="text-[11px] text-blue-600 whitespace-nowrap">{{ t("agent.client.compactionArchivedHint") }}</div>
-              <div class="h-px flex-1 bg-blue-500/40" />
+                    <div
+                      v-if="row.msg.role === 'tool' && row.msg.status === 'awaiting_permission'"
+                      class="pt-2 flex items-center gap-1"
+                    >
+                      <a-button
+                        size="small"
+                        :loading="actionLoading === 'approve' && actionTargetId === row.msg.id"
+                        @click="onToolPermission(row.msg.id, 'approve')"
+                      >
+                        {{ t("agent.client.approve") }}
+                      </a-button>
+                      <a-button
+                        size="small"
+                        danger
+                        :loading="actionLoading === 'deny' && actionTargetId === row.msg.id"
+                        @click="onToolPermission(row.msg.id, 'deny')"
+                      >
+                        {{ t("agent.client.deny") }}
+                      </a-button>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
-          </div>
-        </div>
       </div>
     </div>
 
@@ -291,10 +318,13 @@ import { computed, nextTick, onActivated, onBeforeUnmount, ref, watch } from "vu
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import AgentApplyPatchCard from "./AgentApplyPatchCard.vue";
+import AgentTextMessage from "./AgentTextMessage.vue";
+import AgentUserMessage from "./AgentUserMessage.vue";
 import AssistantMarkdownMessage from "./AssistantMarkdownMessage.vue";
 import AgentTodoListCard from "./AgentTodoListCard.vue";
 import AgentWriteCard from "./AgentWriteCard.vue";
 import {
+  ApiError,
   cancelAgentSession,
   clearAgentSession,
   compactAgentSession,
@@ -391,6 +421,9 @@ const MESSAGE_GAP_CUR_TOOL = 6;
 const MESSAGE_GAP_TOOL_TOOL = 2;
 const BOTTOM_FOLLOW_THRESHOLD_PX = 120;
 const MESSAGE_LIST_BOTTOM_SPACER_PX = 16;
+const INITIAL_TAIL_LIMIT = 100;
+const HISTORY_PAGE_LIMIT = 100;
+const TOP_LOAD_THRESHOLD_PX = 80;
 const POLL_RUNNING_MS = 850;
 const POLL_LOCAL_NON_TERMINAL_MS = 700;
 const POLL_SETTLE_MS = 520;
@@ -424,6 +457,9 @@ const { t } = useI18n();
 const router = useRouter();
 
 const loading = ref(false);
+const loadingEarlier = ref(false);
+const reachedTop = ref(false);
+const atTop = ref(false);
 const sending = ref(false);
 const draft = ref("");
 const runState = ref<AgentSessionRunState>({
@@ -439,7 +475,10 @@ const runState = ref<AgentSessionRunState>({
   appliedItemId: 0
 });
 const runNoticeText = computed(() => String(runState.value.runNoticeText || "").trim());
+const lastKnownHeadItemId = ref<number | null>(null);
 const items = ref<AgentContextItemRecord[]>([]);
+const expandedTextMessageIds = ref<Set<number>>(new Set());
+const clampedTextMessageIds = ref<Set<number>>(new Set());
 const collapsedTodoItemIds = ref<Set<number>>(new Set());
 const scrollEl = ref<HTMLElement | null>(null);
 const inputEl = ref<{ focus?: () => void } | null>(null);
@@ -447,6 +486,7 @@ const stickToBottom = ref(true);
 const userUnfollowed = ref(false);
 const forcedBottomOnFirstActive = ref(false);
 let scrollToBottomSeq = 0;
+let loadEarlierSeq = 0;
 
 // 吸底稳定锁: 用于处理“单次大段输出”导致的虚拟列表高度延迟测量。
 // 典型场景: 压缩(compaction)结果一次性写入一大段文本,首次 scrollToBottom 基于估高执行,
@@ -935,6 +975,29 @@ function isTodoCollapsed(itemId: number) {
   return collapsedTodoItemIds.value.has(itemId);
 }
 
+function isTextMessageExpanded(itemId: number) {
+  return expandedTextMessageIds.value.has(itemId);
+}
+
+function isTextMessageClamped(itemId: number) {
+  return clampedTextMessageIds.value.has(itemId);
+}
+
+function onToggleTextMessageExpanded(itemId: number, expanded: boolean) {
+  const next = new Set(expandedTextMessageIds.value);
+  if (expanded) next.add(itemId);
+  else next.delete(itemId);
+  expandedTextMessageIds.value = next;
+  onRequestVirtualMeasure(itemId);
+}
+
+function onTextMessageClampChange(itemId: number, clamped: boolean) {
+  const next = new Set(clampedTextMessageIds.value);
+  if (clamped) next.add(itemId);
+  else next.delete(itemId);
+  clampedTextMessageIds.value = next;
+}
+
 function onToggleTodoCollapse(itemId: number) {
   const next = new Set(collapsedTodoItemIds.value);
   if (next.has(itemId)) {
@@ -967,30 +1030,6 @@ watch(
   },
   { immediate: true }
 );
-
-// 分割线放在“最后一条已归档消息”的底部.
-// 这样不依赖边界 marker 的具体原因文本,对后续扩展更稳.
-const archiveDividerAfterId = computed<number | null>(() => {
-  const list = displayItems.value;
-  if (list.length === 0) return null;
-
-  let idx = -1;
-  for (let i = list.length - 1; i >= 0; i -= 1) {
-    if (list[i]?.archiveAt != null) {
-      idx = i;
-      break;
-    }
-  }
-  if (idx < 0) return null;
-  if (idx >= list.length - 1) return null;
-
-  for (let j = idx + 1; j < list.length; j += 1) {
-    if (list[j]?.archiveAt == null) {
-      return list[idx]?.id ?? null;
-    }
-  }
-  return null;
-});
 
 function messageGapTopAt(index: number) {
   if (index <= 0) return 0;
@@ -1275,19 +1314,105 @@ function updateStickToBottomState() {
   stickToBottom.value = dist <= BOTTOM_FOLLOW_THRESHOLD_PX;
 }
 
+async function loadEarlierHistoryPage() {
+  if (!props.active) return;
+  if (!props.sessionReady) return;
+  if (loadingEarlier.value) return;
+  if (reachedTop.value) return;
+  const el = scrollEl.value;
+  if (!el) return;
+  if (items.value.length === 0) return;
+  if (el.scrollTop > TOP_LOAD_THRESHOLD_PX) return;
+
+  const beforeId = items.value[0]?.id;
+  if (typeof beforeId !== "number" || !Number.isFinite(beforeId) || beforeId <= 0) return;
+
+  const seq = ++loadEarlierSeq;
+  const sessionId = props.sessionId;
+  loadingEarlier.value = true;
+  try {
+    const prevScrollHeight = el.scrollHeight;
+    const prevScrollTop = el.scrollTop;
+
+    const expectedHeadItemId = typeof lastKnownHeadItemId.value === "number" ? lastKnownHeadItemId.value : undefined;
+    const page = await getAgentContextItems(sessionId, {
+      beforeId,
+      limit: HISTORY_PAGE_LIMIT,
+      ...(expectedHeadItemId ? { expectedHeadItemId } : {})
+    });
+
+    if (seq !== loadEarlierSeq) return;
+    if (props.sessionId !== sessionId) return;
+
+    lastKnownHeadItemId.value = page.headItemId;
+
+    if (page.items.length === 0) {
+      reachedTop.value = true;
+      return;
+    }
+
+    const existing = new Set(items.value.map((item) => item.id));
+    const prepend = page.items.filter((item) => !existing.has(item.id));
+    if (prepend.length === 0) {
+      // 理论上不应发生;为避免滚动到顶重复触发,将其视为已到最早.
+      reachedTop.value = true;
+      return;
+    }
+
+    items.value = [...prepend, ...items.value];
+    syncBoundaryMarkerCursor(prepend);
+    // 若后端明确告知已无更多历史,避免再触发一次无效请求.
+    if (page.hasMoreBefore === false) {
+      reachedTop.value = true;
+    }
+
+    await nextTick();
+    rowVirtualizer.value.measure();
+    await nextTick();
+
+    const nextScrollHeight = el.scrollHeight;
+    const delta = nextScrollHeight - prevScrollHeight;
+    if (Number.isFinite(delta) && delta > 0) {
+      el.scrollTop = prevScrollTop + delta;
+    }
+    // 同步滚动基线,避免后续 scroll 事件把程序滚动误判为用户滚动。
+    lastKnownScrollTop = el.scrollTop;
+    atTop.value = el.scrollTop <= TOP_LOAD_THRESHOLD_PX;
+  } catch (err) {
+    if (err instanceof ApiError && err.code === "AGENT_CONTEXT_ITEMS_HEAD_MOVED") {
+      // head 回退时,继续沿旧 beforeId 翻页会混入不再可见的分支;给出提示即可。
+      message.info(err.message || "session head moved");
+      // 重新拉取 tail window,让 UI 回到当前 head 对应的时间线。
+      await refreshAll(true);
+      return;
+    }
+    message.error(err instanceof Error ? err.message : String(err));
+  } finally {
+    if (seq === loadEarlierSeq) {
+      loadingEarlier.value = false;
+    }
+  }
+}
+
 function onMessageListScroll() {
   const el = scrollEl.value;
   if (!el) return;
   const nextTop = el.scrollTop;
   const delta = nextTop - lastKnownScrollTop;
   lastKnownScrollTop = nextTop;
+  atTop.value = nextTop <= TOP_LOAD_THRESHOLD_PX;
 
   // 用户主动向上滚动时,即使仍在“离底部阈值”内也不应继续吸附.
   if (delta < 0) {
     stickToBottom.value = false;
     userUnfollowed.value = true;
     clearFollowBottomLock();
+    void loadEarlierHistoryPage();
     return;
+  }
+
+  if (atTop.value) {
+    void loadEarlierHistoryPage();
   }
 
   updateStickToBottomState();
@@ -1476,8 +1601,15 @@ async function refreshAll(forceFull: boolean, forceFollowBottom = false) {
       updatedAt: 0,
       appliedItemId: 0
     };
+    loadEarlierSeq += 1;
     handledBoundaryMarkerId.value = 0;
     items.value = [];
+    expandedTextMessageIds.value = new Set();
+    clampedTextMessageIds.value = new Set();
+    lastKnownHeadItemId.value = null;
+    loadingEarlier.value = false;
+    reachedTop.value = false;
+    atTop.value = false;
     clearPoll();
     return;
   }
@@ -1496,21 +1628,31 @@ async function refreshAll(forceFull: boolean, forceFollowBottom = false) {
     }
 
     if (forceFull || items.value.length === 0) {
-      const full = await getAgentContextItems(props.sessionId);
+      // full reload 会替换 items,需取消可能 in-flight 的向上分页请求。
+      loadEarlierSeq += 1;
+      loadingEarlier.value = false;
+      const full = await getAgentContextItems(props.sessionId, { tailLimit: INITIAL_TAIL_LIMIT });
       items.value = [...full.items].sort((a, b) => a.id - b.id);
       syncBoundaryMarkerCursor(items.value);
+      lastKnownHeadItemId.value = full.headItemId;
+      reachedTop.value = full.hasMoreBefore === false;
       await scrollToBottomStable({ force: forceFollowBottom });
     } else {
       const lastId = items.value.length > 0 ? items.value[items.value.length - 1]!.id : 0;
-      const delta = await getAgentContextItems(props.sessionId, lastId);
+      const delta = await getAgentContextItems(props.sessionId, { afterId: lastId });
+      lastKnownHeadItemId.value = delta.headItemId;
       const headMovedBackward = delta.headItemId == null ? lastId > 0 : delta.headItemId < lastId;
       const firstDelta = delta.items[0];
       const chainBroken = !!firstDelta && firstDelta.prevId !== lastId;
       const hasBoundaryMarker = shouldForceFullRefreshForBoundaryMarker(delta.items);
       if (headMovedBackward || chainBroken || hasBoundaryMarker) {
-        const full = await getAgentContextItems(props.sessionId);
+        loadEarlierSeq += 1;
+        loadingEarlier.value = false;
+        const full = await getAgentContextItems(props.sessionId, { tailLimit: INITIAL_TAIL_LIMIT });
         items.value = [...full.items].sort((a, b) => a.id - b.id);
         syncBoundaryMarkerCursor(items.value);
+        lastKnownHeadItemId.value = full.headItemId;
+        reachedTop.value = full.hasMoreBefore === false;
         await scrollToBottomStable({ force: forceFollowBottom });
       } else if (delta.items.length > 0) {
         for (const item of delta.items) {
@@ -1933,11 +2075,18 @@ watch(
   () => {
     clearPoll();
     clearFollowBottomLock();
+    loadEarlierSeq += 1;
     handledBoundaryMarkerId.value = 0;
     scrollToBottomSeq += 1;
     pendingPollHint.value = false;
     warmupPollRemaining = 0;
     items.value = [];
+    expandedTextMessageIds.value = new Set();
+    clampedTextMessageIds.value = new Set();
+    lastKnownHeadItemId.value = null;
+    loadingEarlier.value = false;
+    reachedTop.value = false;
+    atTop.value = false;
     stickToBottom.value = true;
     userUnfollowed.value = false;
     forcedBottomOnFirstActive.value = false;
@@ -2064,13 +2213,10 @@ onBeforeUnmount(() => {
   overflow-anchor: none;
 }
 
-.agent-message-item.is-assistant-message {
-  transition: box-shadow 0.15s ease;
-}
-
 @media (hover: hover) and (pointer: fine) {
-  .agent-message-item.is-assistant-message:hover {
-    box-shadow: inset 0 0 0 999px rgba(255, 255, 255, 0.04);
+  .agent-message-item.is-text-clamped:hover {
+    border-color: rgba(148, 163, 184, 0.55);
+    background: rgba(148, 163, 184, 0.06);
   }
 }
 

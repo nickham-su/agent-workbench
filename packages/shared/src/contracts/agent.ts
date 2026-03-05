@@ -116,6 +116,8 @@ export const AgentContextItemsResponseSchema = Type.Object({
   sessionId: Type.String({ minLength: 1 }),
   headItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
   appliedItemId: Type.Number({ minimum: 0 }),
+  // 可选: 用于分页场景,指示是否还有更早历史.
+  hasMoreBefore: Type.Optional(Type.Boolean()),
   items: Type.Array(AgentContextItemRecordSchema)
 });
 export type AgentContextItemsResponse = Static<typeof AgentContextItemsResponseSchema>;
@@ -205,9 +207,22 @@ export const AgentControlResultSchema = Type.Object({
 });
 export type AgentControlResult = Static<typeof AgentControlResultSchema>;
 
-export const AgentContextItemsQuerySchema = Type.Object({
-  afterId: Type.Optional(Type.Number({ minimum: 0 }))
-});
+// 注意: 这里不使用 Union(oneOf/anyOf)来表达互斥,避免在 removeAdditional 场景下
+// query 被错误地“净化”成空对象,导致 afterId/tailLimit/beforeId 丢失。
+// 互斥语义由服务端做运行时校验并返回 400。
+export const AgentContextItemsQuerySchema = Type.Object(
+  {
+    afterId: Type.Optional(Type.Number({ minimum: 0 })),
+    // 从 head 向前取最近 N 条(包含 archived)
+    tailLimit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })),
+    // 从 beforeId 的前驱开始向更早方向分页
+    beforeId: Type.Optional(Type.Integer({ minimum: 1 })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })),
+    // 可选: head 最小值约束,避免 head 回退(分支切换/回退)后继续沿旧链向前翻页。
+    expectedHeadItemId: Type.Optional(Type.Integer({ minimum: 1 }))
+  },
+  { additionalProperties: false }
+);
 export type AgentContextItemsQuery = Static<typeof AgentContextItemsQuerySchema>;
 
 export const AgentPermissionDecisionSchema = Type.Union([Type.Literal("approve"), Type.Literal("deny")]);

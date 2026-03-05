@@ -290,6 +290,8 @@ export default {
       cancelConfirmContent: "将中断当前执行,并保留当前会话消息。当前正在执行的 AI 或工具会标记为已取消。",
       cancelled: "已取消当前运行",
       welcome: "你好, 我可以协助你完成任务。",
+      reachedTop: "已到最早",
+      contextBoundary: "上下文边界",
       inputPlaceholder: "输入消息,Enter 发送,Tab 切换 Agent",
       inputPlaceholderNoAgent: "请先创建 Agent 后再发送消息",
       noAgentHint: "当前没有可用 Agent,请先创建 Agent",

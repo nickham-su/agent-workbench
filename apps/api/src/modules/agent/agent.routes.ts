@@ -115,13 +115,30 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
         tags: ["agent"],
         params: Type.Object({ sessionId: Type.String({ minLength: 1 }) }),
         querystring: AgentContextItemsQuerySchema,
-        response: { 200: AgentContextItemsResponseSchema, 404: ErrorResponseSchema }
+        response: {
+          200: AgentContextItemsResponseSchema,
+          400: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema
+        }
       }
     },
     async (req) => {
       const p = req.params as { sessionId: string };
-      const query = req.query as { afterId?: number };
-      return params.service.getContextItems(p.sessionId, query.afterId);
+      const query = req.query as {
+        afterId?: number;
+        tailLimit?: number;
+        beforeId?: number;
+        limit?: number;
+        expectedHeadItemId?: number;
+      };
+      return params.service.getContextItems(p.sessionId, {
+        afterId: query.afterId,
+        tailLimit: query.tailLimit,
+        beforeId: query.beforeId,
+        limit: query.limit,
+        expectedHeadItemId: query.expectedHeadItemId
+      });
     }
   );
 

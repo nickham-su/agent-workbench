@@ -42,8 +42,10 @@ import {
   getRunRecord,
   getRunState,
   getSessionHead,
+  getSessionTranscriptBeforeWindow,
   getSessionTranscriptItems,
-  getSessionTranscriptItemsAfter,
+  getSessionTranscriptItemsAfterIdWindow,
+  getSessionTranscriptTailWindow,
   getTranscriptItemById,
   getSessionVisibleItems,
   insertClientRequestDedup,
@@ -1665,17 +1667,75 @@ export class AgentService {
     };
   }
 
-  getContextItems(sessionId: string, afterId?: number): AgentContextItemsResponse {
+  getContextItems(
+    sessionId: string,
+    query?: { afterId?: number; tailLimit?: number; beforeId?: number; limit?: number; expectedHeadItemId?: number }
+  ): AgentContextItemsResponse {
     const session = getAgentSession(this.ctx.db, sessionId);
     if (!session) throw new HttpError(404, "session not found");
-    const items = afterId && afterId > 0
-      ? getSessionTranscriptItemsAfter(this.ctx.db, session.workspaceId, session.id, afterId)
-      : getSessionTranscriptItems(this.ctx.db, session.workspaceId, session.id);
+
+    const toFiniteNumber = (value: unknown) => {
+      const n = typeof value === "number" ? value : Number(value);
+      if (!Number.isFinite(n)) return null;
+      return n;
+    };
+
+    const afterId = toFiniteNumber((query as any)?.afterId);
+    const tailLimit = toFiniteNumber((query as any)?.tailLimit);
+    const beforeId = toFiniteNumber((query as any)?.beforeId);
+    const limit = toFiniteNumber((query as any)?.limit);
+    const expectedHeadItemId = toFiniteNumber((query as any)?.expectedHeadItemId);
+
+    const hasAfter = afterId != null && afterId > 0;
+    const hasTail = tailLimit != null && tailLimit > 0;
+    const hasBefore = beforeId != null && beforeId > 0;
+
+    // 约束: 一次请求只允许一种分页语义.
+    const modeCount = Number(hasAfter) + Number(hasTail) + Number(hasBefore);
+    if (modeCount > 1) {
+      throw new HttpError(400, "invalid context-items query", "AGENT_CONTEXT_ITEMS_QUERY_INVALID");
+    }
+
+    let hasMoreBefore: boolean | undefined;
+    const items = hasTail
+      ? (() => {
+          const window = getSessionTranscriptTailWindow(this.ctx.db, session.workspaceId, session.id, tailLimit!);
+          hasMoreBefore = window.hasMoreBefore;
+          return window.items;
+        })()
+      : hasBefore
+        ? (() => {
+            if (expectedHeadItemId != null && expectedHeadItemId > 0) {
+              const expected = Math.floor(expectedHeadItemId);
+              const head = session.headItemId;
+              // 允许 head 向前推进(新消息追加),但不允许 head 回退(分支切换/回退)后继续沿旧链分页。
+              if (head == null || head < expected) {
+                throw new HttpError(409, "session head conflict", "AGENT_CONTEXT_ITEMS_HEAD_MOVED");
+              }
+            }
+            const window = getSessionTranscriptBeforeWindow(this.ctx.db, {
+              workspaceId: session.workspaceId,
+              sessionId: session.id,
+              beforeId: Math.floor(beforeId!),
+              limit: limit != null ? limit : 100
+            });
+            hasMoreBefore = window.hasMoreBefore;
+            return window.items;
+          })()
+        : hasAfter
+          ? getSessionTranscriptItemsAfterIdWindow(this.ctx.db, {
+              workspaceId: session.workspaceId,
+              sessionId: session.id,
+              afterId: Math.floor(afterId!)
+            })
+          : getSessionTranscriptItems(this.ctx.db, session.workspaceId, session.id);
+
     const runState = getRunState(this.ctx.db, session.workspaceId, session.id);
     return {
       sessionId: session.id,
       headItemId: session.headItemId,
       appliedItemId: runState.appliedItemId,
+      ...(typeof hasMoreBefore === "boolean" ? { hasMoreBefore } : {}),
       items
     };
   }

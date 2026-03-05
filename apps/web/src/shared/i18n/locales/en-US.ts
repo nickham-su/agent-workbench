@@ -292,6 +292,8 @@ export default {
       cancelConfirmContent: "This stops the current execution and keeps all messages. The currently running AI/tool item will be marked as cancelled.",
       cancelled: "Current run cancelled",
       welcome: "Hi, I can help you get tasks done.",
+      reachedTop: "Reached the beginning",
+      contextBoundary: "Context boundary",
       inputPlaceholder: "Type a message, Enter to send, Tab to switch agent",
       inputPlaceholderNoAgent: "Create an agent before sending messages",
       noAgentHint: "No available agent, please create one first",

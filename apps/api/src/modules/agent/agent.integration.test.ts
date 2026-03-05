@@ -477,7 +477,10 @@ test("agent context-items 支持 afterId 增量查询", async () => {
 
   const delta = await getContextItems(fixture.app, session.id, lastId);
   assert.ok(delta.items.length > 0);
-  assert.ok(delta.items.every((item) => item.id > lastId));
+  assert.ok(
+    delta.items.every((item) => item.id > lastId),
+    `unexpected delta items; lastId=${String(lastId)} ids=${delta.items.map((i) => i.id).join(",")}`
+  );
 });
 
 test("非 system item 写入 boundaryReason 会被忽略", async () => {

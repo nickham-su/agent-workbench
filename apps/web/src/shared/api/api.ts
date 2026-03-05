@@ -911,10 +911,27 @@ export async function createAgentSession(body: AgentCreateSessionRequest) {
   }
 }
 
-export async function getAgentContextItems(sessionId: string, afterId?: number) {
+export async function getAgentContextItems(
+  sessionId: string,
+  query?:
+    | number
+    | {
+        afterId?: number;
+        tailLimit?: number;
+        beforeId?: number;
+        limit?: number;
+        expectedHeadItemId?: number;
+      }
+) {
   try {
+    const params =
+      typeof query === "number"
+        ? { afterId: query }
+        : query && typeof query === "object"
+          ? query
+          : undefined;
     const res = await client.get<AgentContextItemsResponse>(`/agent/sessions/${sessionId}/context-items`, {
-      params: typeof afterId === "number" ? { afterId } : undefined
+      params
     });
     return res.data;
   } catch (err) {
