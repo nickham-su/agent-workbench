@@ -87,7 +87,12 @@ function toolArgsSchema(toolName: AgentContextToolName) {
       properties: {
         command: { type: "string", minLength: 1 },
         workdir: { type: "string", minLength: 1 },
-        timeout: { type: "integer", minimum: 1 }
+        timeout: {
+          type: "integer",
+          minimum: 1,
+          default: 120,
+          description: "超时秒数(整数),默认 120 秒。注意: 单位是秒,不是毫秒。"
+        }
       }
     };
   }
@@ -277,7 +282,8 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
       "参数:",
       "- command: 必填,字符串。直接写要执行的命令,不要传数组,也不要在 command 里再写 bash -lc。",
       "- workdir: 可选,工作目录。强烈建议不填(默认就是工作区根目录)。如需指定,尽量使用相对路径(相对工作区),避免写 /workspace 之类的绝对路径。",
-      "- timeout: 可选,超时毫秒数(整数),默认 120000。",
+      "- timeout: 可选,超时秒数(整数),默认 120。",
+      "  注意: timeout 的单位是秒(不是毫秒),不要传 120000 这类毫秒值。",
       "",
       "建议:",
       "- 尽量在工作区内行动,路径优先使用相对路径。",

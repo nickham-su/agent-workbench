@@ -1002,7 +1002,8 @@ export class AgentRunner {
       let result: unknown;
       if (tool.toolName === "bash") {
         const command = requireNonEmptyStringArg(tool.args.command, "bash.command");
-        const timeout = parseOptionalPositiveIntegerArg(tool.args.timeout, "bash.timeout");
+        // timeout 参数单位为秒。
+        const timeoutSeconds = parseOptionalPositiveIntegerArg(tool.args.timeout, "bash.timeout");
         let cwd = run.workspacePath;
         let workdirLabelForError: string | null = null;
         if (tool.args.workdir !== undefined && tool.args.workdir !== null) {
@@ -1040,7 +1041,7 @@ export class AgentRunner {
         const bash = await runBashCommand({
           command,
           cwd,
-          timeoutMs: timeout ?? 120_000,
+          timeoutMs: Math.min(ENV_TIMEOUT_MS_MAX, (timeoutSeconds ?? 120) * 1000),
           maxOutputBytes: 512 * 1024,
           signal
         });
