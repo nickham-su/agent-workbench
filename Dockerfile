@@ -12,6 +12,7 @@ RUN apt-get update \
 # 先复制依赖清单，利用 Docker layer cache
 COPY package.json package-lock.json ./
 COPY apps/api/package.json apps/api/package.json
+COPY apps/agent-worker/package.json apps/agent-worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY packages/shared/package.json packages/shared/package.json
 
@@ -69,6 +70,7 @@ COPY --from=builder /app/package-lock.json /app/package-lock.json
 
 # workspace 目录需要存在（node_modules 里是 workspace link）
 COPY --from=builder /app/apps/api /app/apps/api
+COPY --from=builder /app/apps/agent-worker /app/apps/agent-worker
 COPY --from=builder /app/apps/web /app/apps/web
 COPY --from=builder /app/packages/shared /app/packages/shared
 
