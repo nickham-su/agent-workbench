@@ -1,8 +1,9 @@
 <template>
   <div
     ref="rootEl"
-    class="assistant-markdown-message break-words text-[13px]"
+    class="assistant-markdown-message break-words"
     :class="toneClass"
+    :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
     v-html="safeHtml"
   />
 </template>

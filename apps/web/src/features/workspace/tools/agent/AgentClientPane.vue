@@ -193,10 +193,10 @@
                       v-else
                       class="whitespace-pre-wrap break-words"
                       :class="[
-                        'text-[13px]',
                         'pr-24',
                         row.msg.tone === 'error' ? 'text-red-500' : ''
                       ]"
+                      :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
                     >
                       {{ row.msg.text }}
                     </div>
@@ -268,6 +268,7 @@
           ref="inputEl"
           v-model:value="draft"
           class="agent-input-textarea"
+          :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
           :disabled="!hasAvailableAgents"
           :auto-size="{ minRows: 2, maxRows: 6 }"
           :placeholder="hasAvailableAgents ? t('agent.client.inputPlaceholder') : t('agent.client.inputPlaceholderNoAgent')"
@@ -287,15 +288,6 @@
            <a-tooltip v-if="showRunIndicator" :title="t('common.loading')" placement="top">
              <LoadingOutlined spin class="text-blue-600 text-xs" />
            </a-tooltip>
-           <a-button
-             v-if="runState.status !== 'idle'"
-             size="small"
-             danger
-             :loading="actionLoading === 'cancel'"
-             @click="onCancelRun"
-           >
-             取消
-           </a-button>
           </div>
           <div v-else class="flex items-center gap-2 text-xs text-[color:var(--text-tertiary)]">
             <span>{{ t("agent.client.noAgentHint") }}</span>
@@ -1802,6 +1794,12 @@ function pickActiveSlashCommand() {
 function onInputKeydown(event: KeyboardEvent) {
   if (event.isComposing) return;
 
+  if (event.key === "Escape") {
+    event.preventDefault();
+    void onCancelRun();
+    return;
+  }
+
   if (event.key === "Tab") {
     event.preventDefault();
     onCycleAgent(event.shiftKey ? -1 : 1);
@@ -1864,29 +1862,25 @@ async function executeSlashCommand(params: {
 }
 
 async function onCancelRun() {
-  Modal.confirm({
-    title: t("agent.client.cancelConfirmTitle"),
-    content: t("agent.client.cancelConfirmContent"),
-    okText: t("agent.client.cancel"),
-    cancelText: t("common.cancel"),
-    okButtonProps: { danger: true },
-    async onOk() {
-      actionLoading.value = "cancel";
-      actionTargetId.value = null;
-      try {
-        await cancelAgentSession(props.sessionId, {
-          workspaceId: props.workspaceId
-        });
-        message.success(t("agent.client.cancelled"));
-        await refreshAll(true);
-      } catch (err) {
-        message.error(err instanceof Error ? err.message : String(err));
-      } finally {
-        actionLoading.value = null;
-        actionTargetId.value = null;
-      }
-    }
-  });
+  if (!props.sessionId) return;
+  if (actionLoading.value === "cancel") return;
+  if (runState.value.status === "idle") return;
+
+  actionLoading.value = "cancel";
+  actionTargetId.value = null;
+  try {
+    await cancelAgentSession(props.sessionId, {
+      workspaceId: props.workspaceId
+    });
+    // No confirmation for cancel; keep it snappy and predictable.
+    message.success(t("agent.client.cancelled"));
+    await refreshAll(true);
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
+  } finally {
+    actionLoading.value = null;
+    actionTargetId.value = null;
+  }
 }
 
 async function onForkFromMessage(itemId: number) {

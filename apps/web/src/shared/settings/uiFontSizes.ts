@@ -8,6 +8,7 @@ const TERMINAL_FONT_SIZE_KEY = "agent-workbench.ui.fontSize.terminal";
 // 旧版本使用 diff 作为 key,但实际含义已调整为通用编辑器字号.
 const LEGACY_DIFF_FONT_SIZE_KEY = "agent-workbench.ui.fontSize.diff";
 const EDITOR_FONT_SIZE_KEY = "agent-workbench.ui.fontSize.editor";
+const AGENT_FONT_SIZE_KEY = "agent-workbench.ui.fontSize.agent";
 
 function clampFontSize(input: unknown) {
   if (input === null || input === undefined) return DEFAULT_FONT_SIZE;
@@ -59,6 +60,7 @@ export const uiFontSizeDefaults = {
 
 export const terminalFontSize = ref<number>(loadFontSize(TERMINAL_FONT_SIZE_KEY));
 export const editorFontSize = ref<number>(loadEditorFontSize());
+export const agentFontSize = ref<number>(loadFontSize(AGENT_FONT_SIZE_KEY));
 
 export function setTerminalFontSize(next: unknown) {
   const v = clampFontSize(next);
@@ -75,10 +77,17 @@ export function setEditorFontSize(next: unknown) {
   saveFontSize(LEGACY_DIFF_FONT_SIZE_KEY, v);
 }
 
+export function setAgentFontSize(next: unknown) {
+  const v = clampFontSize(next);
+  agentFontSize.value = v;
+  saveFontSize(AGENT_FONT_SIZE_KEY, v);
+}
+
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (evt) => {
     if (!evt) return;
     if (evt.key === TERMINAL_FONT_SIZE_KEY) terminalFontSize.value = loadFontSize(TERMINAL_FONT_SIZE_KEY);
     if (evt.key === EDITOR_FONT_SIZE_KEY || evt.key === LEGACY_DIFF_FONT_SIZE_KEY) editorFontSize.value = loadEditorFontSize();
+    if (evt.key === AGENT_FONT_SIZE_KEY) agentFontSize.value = loadFontSize(AGENT_FONT_SIZE_KEY);
   });
 }

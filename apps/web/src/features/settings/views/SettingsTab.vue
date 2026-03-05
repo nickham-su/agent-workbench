@@ -63,6 +63,19 @@
                 {{ t("settings.general.fontSize.editor.help", { default: uiFontSizeDefaults.default }) }}
               </div>
             </a-form-item>
+
+            <a-form-item :label="t('settings.general.fontSize.agent.label')">
+              <a-input-number
+                v-model:value="agentFontSizeModel"
+                :min="uiFontSizeDefaults.min"
+                :max="uiFontSizeDefaults.max"
+                :step="1"
+                style="max-width: 260px"
+              />
+              <div class="pt-2 text-xs text-[color:var(--text-tertiary)]">
+                {{ t("settings.general.fontSize.agent.help", { default: uiFontSizeDefaults.default }) }}
+              </div>
+            </a-form-item>
           </a-form>
 	        </a-tab-pane>
 
@@ -326,7 +339,15 @@ import type { CredentialKind, CredentialRecord, SecurityStatus } from "@agent-wo
 import { computed, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
-import { editorFontSize, setEditorFontSize, setTerminalFontSize, terminalFontSize, uiFontSizeDefaults } from "@/shared/settings/uiFontSizes";
+import {
+  agentFontSize,
+  editorFontSize,
+  setAgentFontSize,
+  setEditorFontSize,
+  setTerminalFontSize,
+  terminalFontSize,
+  uiFontSizeDefaults
+} from "@/shared/settings/uiFontSizes";
 import AgentProfilesSettingsPanel from "@/features/settings/components/AgentProfilesSettingsPanel.vue";
 import AgentMcpSettingsPanel from "@/features/settings/components/AgentMcpSettingsPanel.vue";
 import AgentProvidersSettingsPanel from "@/features/settings/components/AgentProvidersSettingsPanel.vue";
@@ -486,6 +507,14 @@ const editorFontSizeModel = computed<number | null>({
   set: (v) => {
     if (v === null || v === undefined) return;
     setEditorFontSize(v);
+  }
+});
+
+const agentFontSizeModel = computed<number | null>({
+  get: () => agentFontSize.value,
+  set: (v) => {
+    if (v === null || v === undefined) return;
+    setAgentFontSize(v);
   }
 });
 
