@@ -1,6 +1,7 @@
 import { loadEnv } from "./config/env.js";
 import { loadRootEnvLocalIntoProcessEnv } from "./config/dotenv.js";
 import { detectAppVersion } from "./config/version.js";
+import { detectRepoRoot } from "./config/repoRoot.js";
 import { ensureDir } from "./infra/fs/fs.js";
 import { reposRoot, workspacesRoot } from "./infra/fs/paths.js";
 import { openDb } from "./infra/db/db.js";
@@ -11,6 +12,7 @@ import { loadCredentialMasterKey } from "./infra/crypto/credentialMasterKey.js";
 await loadRootEnvLocalIntoProcessEnv();
 const env = loadEnv(process.env);
 const version = await detectAppVersion();
+const repoRoot = await detectRepoRoot();
 
 await ensureDir(env.dataDir);
 await ensureDir(reposRoot(env.dataDir));
@@ -22,9 +24,11 @@ const credentialMasterKey = await loadCredentialMasterKey({ dataDir: env.dataDir
 const db = await openDb(env.dataDir);
 const app = await createApp({
   db,
+  repoRoot,
   dataDir: env.dataDir,
   fileMaxBytes: env.fileMaxBytes,
   version,
+  logLevel: process.env.AWB_LOG_LEVEL?.trim() || "info",
   serveWeb: env.serveWeb,
   webDistDir: env.webDistDir,
   credentialMasterKey: credentialMasterKey.key,
@@ -32,7 +36,14 @@ const app = await createApp({
   credentialMasterKeyId: credentialMasterKey.keyId,
   credentialMasterKeyCreatedAt: credentialMasterKey.createdAt,
   authToken: env.authToken,
-  authCookieSecure: env.authCookieSecure
+  authCookieSecure: env.authCookieSecure,
+  agentWorkerEnabled: env.agentWorkerEnabled,
+  agentWorkerHost: env.agentWorkerHost,
+  agentWorkerPort: env.agentWorkerPort,
+  agentWorkerSocketPath: env.agentWorkerSocketPath,
+  agentWorkerConcurrency: env.agentWorkerConcurrency,
+  agentInternalToken: env.agentInternalToken,
+  agentApiOrigin: env.agentApiOrigin
 });
 
 await app.listen({ host: env.host, port: env.port });

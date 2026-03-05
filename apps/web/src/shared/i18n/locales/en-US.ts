@@ -10,6 +10,7 @@ export default {
     save: "Save",
     cancel: "Cancel",
     refresh: "Refresh",
+    loading: "Loading...",
     reset: "Reset",
     default: "Default",
     format: {
@@ -220,7 +221,8 @@ export default {
       codeReview: "Code review",
       terminal: "Terminal",
       files: "Files",
-      search: "Search"
+      search: "Search",
+      agent: "AI Agent"
     },
     dock: {
       moveTo: "Move to {area}",
@@ -269,6 +271,90 @@ export default {
       nonFastForwardTitle: "Push rejected (non-fast-forward)",
       nonFastForwardContent: "Retry with force-with-lease?",
       okForceWithLease: "Retry with force-with-lease"
+    }
+  },
+  agent: {
+    empty: "No sessions yet. Create an AI client to start.",
+    closedEmpty: "All client tabs are closed",
+    actions: {
+      newClient: "New client",
+      creating: "Creating...",
+      refresh: "Refresh",
+      minimize: "Minimize",
+      closeClient: "Close client",
+      reopenClosed: "Reopen closed clients"
+    },
+    client: {
+      tabLabel: "Session {index}",
+      newTitle: "AI Client {time}",
+      cancel: "Cancel run",
+      cancelConfirmTitle: "Cancel current run?",
+      cancelConfirmContent: "This stops the current execution and keeps all messages. The currently running AI/tool item will be marked as cancelled.",
+      cancelled: "Current run cancelled",
+      welcome: "Hi, I can help you get tasks done.",
+      reachedTop: "Reached the beginning",
+      contextBoundary: "Context boundary",
+      inputPlaceholder: "Type a message, Enter to send, Tab to switch agent",
+      inputPlaceholderNoAgent: "Create an agent before sending messages",
+      noAgentHint: "No available agent, please create one first",
+      goCreateAgent: "Create agent",
+      chooseSession: "Choose session",
+      chooseSessionTitle: "Choose a session to continue",
+      noSessionToChoose: "No previous session available",
+      sessionEmptyPreview: "(No user messages in this session)",
+      runNoticeLabel: "Run notice",
+      runNoticeEmpty: "No runtime notice",
+      lastTotalTokens: "Total Tokens",
+      backToParent: "Back to parent session",
+      parentSessionMissing: "Parent session not found",
+      readonlySubtaskHint: "This subtask session is read-only",
+      subtaskCardTitle: "Subtask",
+      subtaskMode: "Mode",
+      subtaskModeNew: "New session",
+      subtaskModeFork: "Inherit context",
+      subtaskModeExisting: "Reuse session",
+      subtaskAgent: "Agent",
+      subtaskSessionId: "Session ID",
+      todoListCardTitle: "Todo list",
+      todoListSummary: "Total {total}, in progress {inProgress}, pending {pending}, completed {completed}, cancelled {cancelled}",
+      todoListEmpty: "Todo list is empty",
+      applyPatchCardTitle: "Patch changes",
+      applyPatchPreview: "Pending approval preview",
+      applyPatchApplied: "Applied",
+      applyPatchFileCount: "Files",
+      applyPatchLineStats: "Line changes",
+      applyPatchFrom: "From",
+      applyPatchNoFiles: "No file diffs available",
+      applyPatchOmittedFiles: "{count} more files are not shown",
+      fork: "Fork from here",
+      forked: "Created a new client from this message",
+      revert: "Revert to here",
+      revertTargetMissing: "No previous message found to revert to",
+      revertConfirmTitle: "Revert to this message?",
+      revertConfirmContent: "This will revert to before this message and put it back into the input box. Messages after this point will become hidden from current timeline.",
+      revertConfirmTitleAssistant: "Revert to this assistant message?",
+      revertConfirmContentAssistant: "This will revert to this assistant message and keep it in the timeline. Messages after this point will become hidden from current timeline.",
+      reverted: "Reverted to selected message",
+      approve: "Approve",
+      deny: "Deny",
+      roles: {
+        user: "You",
+        assistant: "Assistant",
+        tool: "Tool",
+        system: "System"
+      },
+      compactionArchivedHint: "Earlier messages have been archived",
+      slashCommandHintTitle: "Commands",
+      slashCommandHintStrictOnly: "Exact match",
+      slashCommandHintNoMatch: "No matching command: /{query}",
+      slashCommands: {
+        compact: {
+          summary: "Compact the current session context"
+        },
+        clear: {
+          summary: "Start a new task and archive current visible context"
+        }
+      }
     }
   },
   codeReview: {
@@ -527,7 +613,18 @@ export default {
       gitIdentity: "Git Identity",
       credentials: "Credentials",
       network: "Network",
+      agentProviders: "Model Providers",
+      agentGlobalPrompts: "Prompt Library",
+      agentMcp: "MCP",
+      agentProfiles: "Role Profiles",
+      agentRuntime: "Runtime",
       security: "Security"
+    },
+    groups: {
+      basic: "Basics",
+      identity: "Identity & Credentials",
+      networkSecurity: "Network & Security",
+      agent: "Agent"
     },
     general: {
       language: {
@@ -656,6 +753,274 @@ export default {
       actions: {
         save: "Save",
         refresh: "Refresh"
+      },
+      saved: "Saved"
+    },
+    agentProviders: {
+      description: "Manage AI providers and models. Add or edit providers, then manage models under each provider.",
+      saving: "Saving...",
+      empty: "No providers yet. Add one to start.",
+      actions: {
+        save: "Save",
+        refresh: "Refresh",
+        addProvider: "Add provider",
+        manageModels: "Manage models",
+        addModel: "Add model",
+        copy: "Copy",
+        edit: "Edit",
+        delete: "Delete",
+        setDefault: "Set default"
+      },
+      fields: {
+        baseURL: "Base URL",
+        providerOptionsKey: "Provider Options Key",
+        apiKey: "API Key",
+        apiKeyNotSet: "Not set",
+        apiKeySet: "Updated",
+        apiKeyKeep: "Keep unchanged",
+        models: "Models",
+        noModels: "No models"
+      },
+      modal: {
+        ok: "OK",
+        cancel: "Cancel"
+      },
+      providerModal: {
+        createTitle: "Add provider",
+        editTitle: "Edit provider"
+      },
+      providerForm: {
+        idLabel: "Provider ID (auto)",
+        nameLabel: "Name",
+        npmLabel: "Provider Type",
+        baseUrlLabel: "Base URL",
+        apiKeyLabel: "API Key",
+        apiKeyPlaceholder: "Enter API key (optional)",
+        apiKeyEditPlaceholder: "Enter new API key (leave blank to keep)",
+        apiKeyCreateHelp: "You can leave it blank for now and fill it later.",
+        apiKeyEditHelp: "Leave blank to keep the existing key.",
+        clearApiKey: "Clear existing API key"
+      },
+      modelModal: {
+        createTitle: "Add model",
+        editTitle: "Edit model",
+        delete: "Delete model"
+      },
+      modelManager: {
+        title: "Manage models - {name}",
+        empty: "No models"
+      },
+      modelForm: {
+        idLabel: "Model Internal ID (auto)",
+        providerModelIdLabel: "Provider Model ID",
+        nameLabel: "Display name",
+        contextWindowTokensLabel: "Context Window Tokens",
+        contextWindowTokensHelp: "Context window limit for this model, used as the base of auto-compaction threshold calculation. Must be a positive integer.",
+        aiSdkLabel: "AI SDK Shared Params JSON",
+        aiSdkHelp: "Mapped to generateText top-level options, e.g. maxOutputTokens, temperature, topP. Reserved keys like model/system/prompt are blocked.",
+        aiSdkDocsLink: "AI SDK docs",
+        providerOptionsLabel: "Provider Params JSON (auto wrapped as {key})",
+        providerOptionsHelp: "Only provide the current provider sub-object. The system wraps it into providerOptions.{key} automatically.",
+        providerDocsLink: "Provider docs",
+        setAsDefault: "Set as default model"
+      },
+      deleteProvider: {
+        title: "Delete provider?",
+        content: "This will delete {name} and all its models.",
+        ok: "Delete",
+        cancel: "Cancel"
+      },
+      deleteModel: {
+        title: "Delete model?",
+        content: "This will delete model {name}.",
+        ok: "Delete",
+        cancel: "Cancel"
+      },
+      errors: {
+        invalidProviderForm: "Please complete required provider fields",
+        invalidModelForm: "Please complete required model fields",
+        invalidAiSdkJson: "Invalid AI SDK params JSON, object expected",
+        invalidProviderOptionsJson: "Invalid provider params JSON, object expected",
+        duplicateProviderId: "Provider ID already exists",
+        duplicateModelId: "Model ID already exists"
+      },
+      saved: "Saved"
+    },
+    agentGlobalPrompts: {
+      description: "Manage prompt library entries. Entries take effect only when selected by an agent profile.",
+      saving: "Saving...",
+      empty: "No prompt library entries yet. Add one to start.",
+      actions: {
+        add: "Add entry",
+        edit: "Edit",
+        delete: "Delete"
+      },
+      modal: {
+        createTitle: "Add prompt library entry",
+        editTitle: "Edit prompt library entry",
+        ok: "OK",
+        cancel: "Cancel"
+      },
+      form: {
+        idLabel: "Entry ID (auto)",
+        titleLabel: "Title",
+        promptLabel: "Prompt",
+        promptPlaceholder: "Enter prompt text for this entry",
+        promptHelp: "Up to {maxKb}KB, current {bytes} bytes"
+      },
+      deleteConfirm: {
+        title: "Delete prompt library entry?",
+        content: "This will delete entry {title}.",
+        ok: "Delete",
+        cancel: "Cancel"
+      },
+      errors: {
+        invalidForm: "Please complete required fields",
+        duplicateId: "Entry ID already exists",
+        titleTooLong: "Title is too long. Maximum {max} characters",
+        promptTooLong: "Prompt is too long. Maximum {maxKb}KB"
+      },
+      saved: "Saved"
+    },
+    agentProfiles: {
+      description: "Configure AI agents, default agent, tool permissions, and default model.",
+      saving: "Saving...",
+      empty: "No agents yet. Add one to start.",
+      actions: {
+        addAgent: "Add agent",
+        edit: "Edit",
+        delete: "Delete",
+        setDefault: "Set default"
+      },
+      fields: {
+        tools: "Tools",
+        mcpServers: "MCP Servers",
+        globalPrompts: "Prompt library",
+        summary: "Summary",
+        permissions: "Permissions",
+        defaultModel: "Default model",
+        useGlobalDefault: "Use global default model",
+        customDefaultModel: "Use custom default model"
+      },
+      tools: {
+        bash: "Bash",
+        read: "Read",
+        write: "Write",
+        applyPatch: "Apply Patch",
+        todolist: "Todo List",
+        subtask: "Subtask",
+        archiveSearch: "Archive Search",
+        archiveRead: "Archive Read",
+        archiveTail: "Archive Tail"
+      },
+      permissions: {
+        allowRead: "Allow Read",
+        allowWrite: "Allow Write",
+        allowBash: "Allow Bash"
+      },
+      modal: {
+        ok: "OK",
+        cancel: "Cancel"
+      },
+      agentModal: {
+        createTitle: "Add agent",
+        editTitle: "Edit agent"
+      },
+      agentForm: {
+        idLabel: "Agent ID (auto)",
+        nameLabel: "Name",
+        summaryLabel: "Summary",
+        summaryPlaceholder: "e.g. Focused on web information gathering and research, with structured synthesis",
+        summaryHelp: "Use one sentence to describe when this agent should be used and its boundaries.",
+        promptLabel: "Role setup",
+        promptPlaceholder: "Optional. Leave empty to use default setup",
+        promptBytesHelp: "Up to {maxKb}KB, current {bytes} bytes",
+        globalPromptsPlaceholder: "Select prompt library entries",
+        globalPromptsHelp: "Multi-select supported. Injection order follows the prompt library list order.",
+        mcpServersPlaceholder: "Select allowed MCP servers",
+        defaultModelCascaderPlaceholder: "Select default model strategy",
+        defaultModelModeLabel: "Default model strategy",
+        defaultProviderLabel: "Provider",
+        defaultProviderPlaceholder: "Select a provider",
+        defaultModelLabel: "Model",
+        defaultModelPlaceholder: "Select a model",
+        setAsDefault: "Set as default agent"
+      },
+      deleteAgent: {
+        title: "Delete agent?",
+        content: "This will delete agent {name}.",
+        ok: "Delete",
+        cancel: "Cancel"
+      },
+      errors: {
+        invalidAgentForm: "Please complete required agent fields",
+        duplicateAgentId: "Agent ID already exists",
+        defaultModelInvalid: "Default model does not exist, please reselect",
+        promptTooLong: "Role setup is too long. Maximum {maxKb}KB"
+      },
+      saved: "Saved"
+    },
+    agentRuntime: {
+      description: "Configure global runtime options (applies to all sessions).",
+      saving: "Saving...",
+      saved: "Saved",
+      fields: {
+        autoCompactThresholdPct: {
+          label: "Auto-compaction threshold (%)",
+          help: "Auto-compaction triggers when last response total tokens reach current model context window * threshold/100. Range: 50-90."
+        },
+        modelTotalTimeoutMs: {
+          label: "Model total timeout (seconds)",
+          help: "Total timeout for a single model request. When reached, the request is aborted and the run fails. Integer seconds only; 0 disables."
+        },
+        modelIdleTimeoutMs: {
+          label: "Model idle timeout (seconds)",
+          help: "Abort when no streaming chunk arrives for a period (including reasoning/tool-call/finish). Integer seconds only; 0 disables."
+        },
+        modelRequestMaxRetries: {
+          label: "Model max retries",
+          help: "Automatically retries only when a request fails before receiving the first chunk. 0 disables retries."
+        }
+      }
+    },
+    agentMcp: {
+      description: "Manage global MCP server configuration. Use JSON input when adding or editing.",
+      saving: "Saving...",
+      empty: "No MCP servers yet. Add one to start.",
+      actions: {
+        addServer: "Add MCP server",
+        edit: "Edit",
+        delete: "Delete"
+      },
+      fields: {
+        enabled: "Enabled",
+        disabled: "Disabled"
+      },
+      modal: {
+        ok: "OK",
+        cancel: "Cancel"
+      },
+      serverModal: {
+        createTitle: "Add MCP server",
+        editTitle: "Edit MCP server"
+      },
+      serverForm: {
+        idLabel: "Server ID",
+        jsonLabel: "Config JSON",
+        jsonHelp: "Must be an object and include type=local or type=remote.",
+        enabled: "Enable this server"
+      },
+      deleteServer: {
+        title: "Delete MCP server?",
+        content: "This will delete MCP server {id}.",
+        ok: "Delete",
+        cancel: "Cancel"
+      },
+      errors: {
+        invalidForm: "Please complete required MCP fields",
+        invalidJson: "Invalid MCP config JSON, object expected",
+        invalidType: "Config JSON must include type=local or type=remote",
+        duplicateServerId: "Server ID already exists"
       },
       saved: "Saved"
     },

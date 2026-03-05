@@ -10,6 +10,7 @@ export default {
     save: "保存",
     cancel: "取消",
     refresh: "刷新",
+    loading: "加载中...",
     reset: "重置",
     default: "默认",
     format: {
@@ -218,7 +219,8 @@ export default {
       codeReview: "代码审查",
       terminal: "终端",
       files: "文件",
-      search: "搜索"
+      search: "搜索",
+      agent: "AI Agent"
     },
     dock: {
       moveTo: "移动到 {area}",
@@ -267,6 +269,90 @@ export default {
       nonFastForwardTitle: "推送被拒绝（非快进）",
       nonFastForwardContent: "是否使用 force-with-lease（更安全的强推）重试推送？",
       okForceWithLease: "强制推送重试"
+    }
+  },
+  agent: {
+    empty: "暂无会话,请新建一个 AI client",
+    closedEmpty: "当前 client 已全部关闭",
+    actions: {
+      newClient: "新建 client",
+      creating: "创建中...",
+      refresh: "刷新",
+      minimize: "最小化",
+      closeClient: "关闭 client",
+      reopenClosed: "恢复已关闭 client"
+    },
+    client: {
+      tabLabel: "会话 {index}",
+      newTitle: "AI Client {time}",
+      cancel: "取消运行",
+      cancelConfirmTitle: "确认取消当前运行？",
+      cancelConfirmContent: "将中断当前执行,并保留当前会话消息。当前正在执行的 AI 或工具会标记为已取消。",
+      cancelled: "已取消当前运行",
+      welcome: "你好, 我可以协助你完成任务。",
+      reachedTop: "已到最早",
+      contextBoundary: "上下文边界",
+      inputPlaceholder: "输入消息,Enter 发送,Tab 切换 Agent",
+      inputPlaceholderNoAgent: "请先创建 Agent 后再发送消息",
+      noAgentHint: "当前没有可用 Agent,请先创建 Agent",
+      goCreateAgent: "前往创建",
+      chooseSession: "选择会话",
+      chooseSessionTitle: "选择要继续的会话",
+      noSessionToChoose: "没有可选择的历史会话",
+      sessionEmptyPreview: "(该会话暂无用户消息)",
+      runNoticeLabel: "运行通知",
+      runNoticeEmpty: "当前没有运行时通知",
+      lastTotalTokens: "总Token",
+      backToParent: "返回父会话",
+      parentSessionMissing: "未找到父会话",
+      readonlySubtaskHint: "子任务会话为只读模式",
+      subtaskCardTitle: "子任务",
+      subtaskMode: "模式",
+      subtaskModeNew: "新会话",
+      subtaskModeFork: "继承上下文",
+      subtaskModeExisting: "续用会话",
+      subtaskAgent: "Agent",
+      subtaskSessionId: "Session ID",
+      todoListCardTitle: "任务清单",
+      todoListSummary: "总计 {total}, 进行中 {inProgress}, 待办 {pending}, 已完成 {completed}, 已取消 {cancelled}",
+      todoListEmpty: "当前清单为空",
+      applyPatchCardTitle: "补丁变更",
+      applyPatchPreview: "待审批预览",
+      applyPatchApplied: "已应用",
+      applyPatchFileCount: "文件",
+      applyPatchLineStats: "行变更",
+      applyPatchFrom: "来源",
+      applyPatchNoFiles: "无可展示的文件差异",
+      applyPatchOmittedFiles: "还有 {count} 个文件未展示",
+      fork: "从此处分叉",
+      forked: "已从该消息创建新 client",
+      revert: "回退到此处",
+      revertTargetMissing: "未找到可回退的上一条事件",
+      revertConfirmTitle: "确认回退到这条消息？",
+      revertConfirmContent: "将回退到该消息之前,并把该条消息填入输入框。回退后,后续对话分支将暂时不可见。",
+      revertConfirmTitleAssistant: "确认回退到这条 AI 消息？",
+      revertConfirmContentAssistant: "将回退到该条 AI 消息并保留该消息。回退后,后续对话分支将暂时不可见。",
+      reverted: "已回退到选中消息",
+      approve: "允许",
+      deny: "拒绝",
+      roles: {
+        user: "我",
+        assistant: "AI",
+        tool: "工具",
+        system: "系统"
+      },
+      compactionArchivedHint: "更早的内容已归档",
+      slashCommandHintTitle: "特殊指令",
+      slashCommandHintStrictOnly: "精确匹配",
+      slashCommandHintNoMatch: "未找到匹配的指令: /{query}",
+      slashCommands: {
+        compact: {
+          summary: "手动压缩当前会话上下文"
+        },
+        clear: {
+          summary: "开始新任务并归档当前可见上下文"
+        }
+      }
     }
   },
   codeReview: {
@@ -525,7 +611,18 @@ export default {
       gitIdentity: "Git 身份",
       credentials: "凭证",
       network: "网络",
+      agentProviders: "模型提供方",
+      agentGlobalPrompts: "提示词库",
+      agentMcp: "MCP",
+      agentProfiles: "角色配置",
+      agentRuntime: "运行参数",
       security: "安全"
+    },
+    groups: {
+      basic: "基础",
+      identity: "身份与凭证",
+      networkSecurity: "网络与安全",
+      agent: "Agent"
     },
     general: {
       language: {
@@ -593,7 +690,7 @@ export default {
         default: "默认"
       },
       actions: {
-        add: "新增",
+        add: "新增凭证",
         edit: "编辑",
         delete: "删除",
         generateSshKey: "生成密钥",
@@ -654,6 +751,274 @@ export default {
       actions: {
         save: "保存",
         refresh: "刷新"
+      },
+      saved: "已保存"
+    },
+    agentProviders: {
+      description: "管理 AI Provider 与模型。可新增/编辑 Provider，并在 Provider 下管理模型与默认模型。",
+      saving: "正在保存...",
+      empty: "暂无 Provider，请先新增",
+      actions: {
+        save: "保存",
+        refresh: "刷新",
+        addProvider: "新增 Provider",
+        manageModels: "管理模型",
+        addModel: "添加模型",
+        copy: "复制",
+        edit: "编辑",
+        delete: "删除",
+        setDefault: "设为默认"
+      },
+      fields: {
+        baseURL: "Base URL",
+        providerOptionsKey: "Provider Options Key",
+        apiKey: "API Key",
+        apiKeyNotSet: "未设置",
+        apiKeySet: "已更新",
+        apiKeyKeep: "保持不变",
+        models: "模型",
+        noModels: "暂无模型"
+      },
+      modal: {
+        ok: "确定",
+        cancel: "取消"
+      },
+      providerModal: {
+        createTitle: "新增 Provider",
+        editTitle: "编辑 Provider"
+      },
+      providerForm: {
+        idLabel: "Provider ID(自动生成)",
+        nameLabel: "名称",
+        npmLabel: "Provider 类型",
+        baseUrlLabel: "Base URL",
+        apiKeyLabel: "API Key",
+        apiKeyPlaceholder: "输入 API Key（可留空）",
+        apiKeyEditPlaceholder: "输入新 API Key（留空保持不变）",
+        apiKeyCreateHelp: "创建时可先留空，后续再补充。",
+        apiKeyEditHelp: "编辑时留空表示保持已有值不变。",
+        clearApiKey: "清空当前 API Key"
+      },
+      modelModal: {
+        createTitle: "添加模型",
+        editTitle: "编辑模型",
+        delete: "删除模型"
+      },
+      modelManager: {
+        title: "管理模型 - {name}",
+        empty: "暂无模型"
+      },
+      modelForm: {
+        idLabel: "Model 内部ID(自动生成)",
+        providerModelIdLabel: "Provider 模型ID",
+        nameLabel: "显示名称",
+        contextWindowTokensLabel: "上下文窗口 Token 上限",
+        contextWindowTokensHelp: "该模型的上下文窗口上限,用于自动压缩阈值计算基数。必须为正整数。",
+        aiSdkLabel: "AI SDK 通用参数 JSON",
+        aiSdkHelp: "写入 generateText 顶层参数, 例如 maxOutputTokens, temperature, topP。会屏蔽 model/system/prompt 等关键键。",
+        aiSdkDocsLink: "AI SDK 文档",
+        providerOptionsLabel: "Provider 参数 JSON (自动包装为 {key})",
+        providerOptionsHelp: "仅填写当前 Provider 的子对象, 系统会自动包装到 providerOptions.{key}。",
+        providerDocsLink: "Provider 文档",
+        setAsDefault: "设为默认模型"
+      },
+      deleteProvider: {
+        title: "删除 Provider？",
+        content: "将删除 {name} 及其所有模型。",
+        ok: "删除",
+        cancel: "取消"
+      },
+      deleteModel: {
+        title: "删除模型？",
+        content: "将删除模型 {name}。",
+        ok: "删除",
+        cancel: "取消"
+      },
+      errors: {
+        invalidProviderForm: "请完整填写 Provider 必填项",
+        invalidModelForm: "请完整填写模型必填项",
+        invalidAiSdkJson: "AI SDK 通用参数 JSON 格式错误, 需要是对象",
+        invalidProviderOptionsJson: "Provider 参数 JSON 格式错误, 需要是对象",
+        duplicateProviderId: "Provider ID 已存在",
+        duplicateModelId: "Model ID 已存在"
+      },
+      saved: "已保存"
+    },
+    agentGlobalPrompts: {
+      description: "管理提示词库条目,仅在 Agent 中选中后生效。",
+      saving: "正在保存...",
+      empty: "暂无提示词库条目，请先新增",
+      actions: {
+        add: "新增条目",
+        edit: "编辑",
+        delete: "删除"
+      },
+      modal: {
+        createTitle: "新增提示词库条目",
+        editTitle: "编辑提示词库条目",
+        ok: "确定",
+        cancel: "取消"
+      },
+      form: {
+        idLabel: "条目 ID(自动生成)",
+        titleLabel: "标题",
+        promptLabel: "提示词",
+        promptPlaceholder: "输入该条目的提示词内容",
+        promptHelp: "最多 {maxKb}KB，当前 {bytes} bytes"
+      },
+      deleteConfirm: {
+        title: "删除提示词库条目？",
+        content: "将删除条目 {title}。",
+        ok: "删除",
+        cancel: "取消"
+      },
+      errors: {
+        invalidForm: "请完整填写必填项",
+        duplicateId: "条目 ID 已存在",
+        titleTooLong: "标题过长，最多 {max} 个字符",
+        promptTooLong: "提示词过长，最多 {maxKb}KB"
+      },
+      saved: "已保存"
+    },
+    agentProfiles: {
+      description: "配置 AI Agent 列表、默认 Agent、工具权限与默认模型。",
+      saving: "正在保存...",
+      empty: "暂无 Agent，请先新增",
+      actions: {
+        addAgent: "新增 Agent",
+        edit: "编辑",
+        delete: "删除",
+        setDefault: "设为默认"
+      },
+      fields: {
+        tools: "工具",
+        mcpServers: "MCP Server",
+        globalPrompts: "提示词库",
+        summary: "简介",
+        permissions: "权限",
+        defaultModel: "默认模型",
+        useGlobalDefault: "默认模型",
+        customDefaultModel: "使用自定义默认模型"
+      },
+      tools: {
+        bash: "Bash",
+        read: "Read",
+        write: "Write",
+        applyPatch: "Apply Patch",
+        todolist: "Todo List",
+        subtask: "Subtask",
+        archiveSearch: "Archive Search",
+        archiveRead: "Archive Read",
+        archiveTail: "Archive Tail"
+      },
+      permissions: {
+        allowRead: "允许 Read",
+        allowWrite: "允许 Write",
+        allowBash: "允许 Bash"
+      },
+      modal: {
+        ok: "确定",
+        cancel: "取消"
+      },
+      agentModal: {
+        createTitle: "新增 Agent",
+        editTitle: "编辑 Agent"
+      },
+      agentForm: {
+        idLabel: "Agent ID(自动生成)",
+        nameLabel: "名称",
+        summaryLabel: "简介",
+        summaryPlaceholder: "例如: 专注网络信息搜集与调研,并进行信息汇总整理",
+        summaryHelp: "用一句话说明这个 Agent 的擅长场景和边界,重点写“何时使用”。",
+        promptLabel: "角色设定",
+        promptPlaceholder: "可选, 留空使用默认设定",
+        promptBytesHelp: "最多 {maxKb}KB，当前 {bytes} bytes",
+        globalPromptsPlaceholder: "选择提示词库条目",
+        globalPromptsHelp: "支持多选，注入顺序按提示词库列表顺序。",
+        mcpServersPlaceholder: "选择可用的 MCP Server",
+        defaultModelCascaderPlaceholder: "选择默认模型策略",
+        defaultModelModeLabel: "默认模型策略",
+        defaultProviderLabel: "Provider",
+        defaultProviderPlaceholder: "请选择 Provider",
+        defaultModelLabel: "模型",
+        defaultModelPlaceholder: "请选择模型",
+        setAsDefault: "设为默认 Agent"
+      },
+      deleteAgent: {
+        title: "删除 Agent？",
+        content: "将删除 Agent {name}。",
+        ok: "删除",
+        cancel: "取消"
+      },
+      errors: {
+        invalidAgentForm: "请完整填写 Agent 必填项",
+        duplicateAgentId: "Agent ID 已存在",
+        defaultModelInvalid: "默认模型不存在, 请重新选择",
+        promptTooLong: "角色设定过长，最多 {maxKb}KB"
+      },
+      saved: "已保存"
+    },
+    agentRuntime: {
+      description: "配置 agent 运行时的全局参数（对所有会话生效）。",
+      saving: "正在保存...",
+      saved: "已保存",
+      fields: {
+        autoCompactThresholdPct: {
+          label: "自动压缩阈值(%)",
+          help: "当最近一次模型响应总 token 达到当前模型 context window * 阈值/100 时触发自动压缩。范围 50-90。"
+        },
+        modelTotalTimeoutMs: {
+          label: "模型总超时（秒）",
+          help: "单次模型请求的总超时时间。达到后将中止该次请求并标记为失败。仅支持整数秒,0 表示关闭。"
+        },
+        modelIdleTimeoutMs: {
+          label: "模型空闲超时（秒）",
+          help: "单次模型请求在连续一段时间未收到任何流式 chunk（包括 reasoning/tool-call/finish）时中止。仅支持整数秒,0 表示关闭。"
+        },
+        modelRequestMaxRetries: {
+          label: "模型重试最大次数",
+          help: "仅在首包前失败时自动重试。0 表示不重试。"
+        }
+      }
+    },
+    agentMcp: {
+      description: "管理全局 MCP Server 配置。新增/编辑时使用 JSON 输入。",
+      saving: "正在保存...",
+      empty: "暂无 MCP Server,请先新增",
+      actions: {
+        addServer: "新增 MCP Server",
+        edit: "编辑",
+        delete: "删除"
+      },
+      fields: {
+        enabled: "启用",
+        disabled: "禁用"
+      },
+      modal: {
+        ok: "确定",
+        cancel: "取消"
+      },
+      serverModal: {
+        createTitle: "新增 MCP Server",
+        editTitle: "编辑 MCP Server"
+      },
+      serverForm: {
+        idLabel: "Server ID",
+        jsonLabel: "配置 JSON",
+        jsonHelp: "必须是对象,并包含 type=local 或 type=remote。",
+        enabled: "启用该 Server"
+      },
+      deleteServer: {
+        title: "删除 MCP Server？",
+        content: "将删除 MCP Server {id}。",
+        ok: "删除",
+        cancel: "取消"
+      },
+      errors: {
+        invalidForm: "请完整填写 MCP 表单",
+        invalidJson: "配置 JSON 格式错误, 需要是对象",
+        invalidType: "配置 JSON 必须包含 type=local 或 type=remote",
+        duplicateServerId: "Server ID 已存在"
       },
       saved: "已保存"
     },

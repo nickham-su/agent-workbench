@@ -1,0 +1,23 @@
+{
+  "name": "@agent-workbench/agent-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@agent-workbench/shared": "*",
+    "@ai-sdk/anthropic": "^2.0.67",
+    "@ai-sdk/openai": "^2.0.23",
+    "@modelcontextprotocol/sdk": "^1.18.2",
+    "ai": "^5.0.22"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

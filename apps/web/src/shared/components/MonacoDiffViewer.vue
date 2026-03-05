@@ -1,5 +1,5 @@
 <template>
-  <div ref="containerEl" class="h-full w-full"></div>
+  <div ref="containerEl" :class="containerClass" :style="containerStyle"></div>
 </template>
 
 <script setup lang="ts">
@@ -18,6 +18,19 @@ const props = defineProps<{
   language?: string;
   ignoreTrimWhitespace?: boolean;
   sideBySide?: boolean;
+  showOverviewRuler?: boolean;
+  compactMode?: boolean;
+  hideUnchangedRegions?:
+    | boolean
+    | {
+        enabled?: boolean;
+        contextLineCount?: number;
+        minimumLineCount?: number;
+        revealLineCount?: number;
+      };
+  autoHeight?: boolean;
+  minHeight?: number;
+  maxHeight?: number;
 }>();
 
 export type MonacoDiffViewerExposed = {
@@ -29,6 +42,13 @@ export type MonacoDiffViewerExposed = {
 
 const containerEl = ref<HTMLDivElement | null>(null);
 const isSideBySide = computed(() => props.sideBySide !== false);
+const autoHeightPx = ref(0);
+const containerClass = computed(() => (props.autoHeight ? "w-full" : "h-full w-full"));
+const containerStyle = computed(() => {
+  if (!props.autoHeight) return undefined;
+  const fallback = resolveAutoHeightBounds().min;
+  return { height: `${Math.max(autoHeightPx.value || 0, fallback)}px` };
+});
 
 let editor: monaco.editor.IStandaloneDiffEditor | null = null;
 let originalModel: monaco.editor.ITextModel | null = null;
@@ -37,6 +57,59 @@ let disposables: monaco.IDisposable[] = [];
 let stopWatchFontSize: (() => void) | null = null;
 let pendingRevealFirstDiff = false;
 let modelSeq = 0;
+
+function toPositiveInt(value: unknown, fallback: number) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  const rounded = Math.floor(value);
+  return rounded > 0 ? rounded : fallback;
+}
+
+function resolveAutoHeightBounds() {
+  const min = toPositiveInt(props.minHeight, 112);
+  // autoHeight 下,若未显式传入 maxHeight,则不做高度上限 clamp。
+  // 这样可以让外层容器(例如会话列表)承担唯一的纵向滚动条。
+  if (typeof props.maxHeight !== "number") {
+    return {
+      min,
+      max: Number.POSITIVE_INFINITY
+    };
+  }
+  const maxRaw = toPositiveInt(props.maxHeight, 420);
+  return {
+    min,
+    max: Math.max(min, maxRaw)
+  };
+}
+
+function updateAutoHeight() {
+  if (!editor || !props.autoHeight) return;
+  const modifiedHeight = editor.getModifiedEditor().getContentHeight();
+  const originalHeight = isSideBySide.value ? editor.getOriginalEditor().getContentHeight() : 0;
+  const raw = Math.max(modifiedHeight, originalHeight);
+  const bounds = resolveAutoHeightBounds();
+  autoHeightPx.value = Math.min(bounds.max, Math.max(bounds.min, Math.ceil(raw)));
+}
+
+function resolveHideUnchangedRegionsOption(value: typeof props.hideUnchangedRegions): monaco.editor.IDiffEditorOptions["hideUnchangedRegions"] {
+  if (!value) return { enabled: false };
+  if (value === true) {
+    return {
+      enabled: true,
+      contextLineCount: 3,
+      minimumLineCount: 1,
+      revealLineCount: 3
+    };
+  }
+  if (value.enabled === false) {
+    return { enabled: false };
+  }
+  return {
+    enabled: true,
+    contextLineCount: toPositiveInt(value.contextLineCount, 3),
+    minimumLineCount: toPositiveInt(value.minimumLineCount, 1),
+    revealLineCount: toPositiveInt(value.revealLineCount, 3)
+  };
+}
 
 async function applyLanguageToModels(language: string | undefined, seq: number) {
   if (!language) return;
@@ -73,6 +146,7 @@ function ensureModels() {
   editor.getOriginalEditor().updateOptions({readOnly: true});
   editor.getModifiedEditor().updateOptions({readOnly: true});
   void applyLanguageToModels(language, seq);
+  updateAutoHeight();
 }
 
 function goToPreviousDiff() {
@@ -223,10 +297,12 @@ onMounted(() => {
     minimap: {enabled: false},
     scrollBeyondLastLine: false,
     wordWrap: "off",
-    renderOverviewRuler: true,
+    renderOverviewRuler: props.showOverviewRuler !== false,
     renderWhitespace: "selection",
+    compactMode: props.compactMode === true,
     overviewRulerBorder: false,
-    hideCursorInOverviewRuler: true
+    hideCursorInOverviewRuler: true,
+    hideUnchangedRegions: resolveHideUnchangedRegionsOption(props.hideUnchangedRegions)
   });
 
   const originalEditor = editor.getOriginalEditor();
@@ -243,16 +319,20 @@ onMounted(() => {
   });
 
   const handleDiffUpdated = () => {
+    updateAutoHeight();
     if (!pendingRevealFirstDiff) return;
     pendingRevealFirstDiff = false;
     revealFirstDiff();
   };
 
   disposables = [
-    editor.onDidUpdateDiff(handleDiffUpdated)
+    editor.onDidUpdateDiff(handleDiffUpdated),
+    originalEditor.onDidContentSizeChange(() => updateAutoHeight()),
+    modifiedEditor.onDidContentSizeChange(() => updateAutoHeight())
   ];
 
   ensureModels();
+  updateAutoHeight();
 
   stopWatchFontSize = watch(
     () => editorFontSize.value,
@@ -275,6 +355,41 @@ watch(
     (next) => {
       if (!editor) return;
       editor.updateOptions({ renderSideBySide: next !== false });
+      updateAutoHeight();
+    }
+);
+
+watch(
+    () => props.showOverviewRuler,
+    (next) => {
+      if (!editor) return;
+      editor.updateOptions({ renderOverviewRuler: next !== false });
+    }
+);
+
+watch(
+    () => props.compactMode,
+    (next) => {
+      if (!editor) return;
+      editor.updateOptions({ compactMode: next === true });
+      updateAutoHeight();
+    }
+);
+
+watch(
+    () => props.hideUnchangedRegions,
+    (next) => {
+      if (!editor) return;
+      editor.updateOptions({ hideUnchangedRegions: resolveHideUnchangedRegionsOption(next) });
+      updateAutoHeight();
+    }
+);
+
+watch(
+    () => [props.autoHeight, props.minHeight, props.maxHeight],
+    () => {
+      if (!props.autoHeight) return;
+      updateAutoHeight();
     }
 );
 

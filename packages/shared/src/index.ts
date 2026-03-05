@@ -9,3 +9,4 @@ export * from "./contracts/workspace-files.js";
 export * from "./contracts/credentials.js";
 export * from "./contracts/settings.js";
 export * from "./contracts/auth.js";
+export * from "./contracts/agent.js";

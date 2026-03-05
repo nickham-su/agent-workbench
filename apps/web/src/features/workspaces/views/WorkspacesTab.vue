@@ -395,7 +395,12 @@ function goToRepos() {
 }
 
 function goToSettings(tab: "credentials" | "network") {
-  void router.push(`/settings/${tab}`);
+  void router.push(toSettingsPath(tab));
+}
+
+function toSettingsPath(tab: "credentials" | "network") {
+  if (tab === "credentials") return "/settings/identity/credentials";
+  return "/settings/network-security/network";
 }
 
 function openCreateFromGuide() {

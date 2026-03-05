@@ -10,10 +10,10 @@ export const router = createRouter({
     { path: "/", name: "login", component: LoginPage },
     { path: "/workspaces", name: "workbench-workspaces", component: WorkbenchPage },
     { path: "/repos", name: "workbench-repos", component: WorkbenchPage },
-    // 设置页二级 tabs 绑定到 URL：/settings/<tab>
-    { path: "/settings", redirect: "/settings/general" },
+    // 设置页二级菜单绑定到 URL：/settings/<group>/<tab>
+    { path: "/settings", redirect: "/settings/basic/general" },
     {
-      path: "/settings/:tab(general|search|gitIdentity|credentials|network|security)",
+      path: "/settings/:group/:tab",
       name: "workbench-settings",
       component: WorkbenchPage
     },

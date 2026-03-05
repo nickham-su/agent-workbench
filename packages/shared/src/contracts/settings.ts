@@ -31,6 +31,220 @@ export const UpdateSearchSettingsRequestSchema = Type.Object({
 });
 export type UpdateSearchSettingsRequest = Static<typeof UpdateSearchSettingsRequestSchema>;
 
+export const AgentProviderModelOptionsSchema = Type.Object({
+  aiSdk: Type.Optional(Type.Record(Type.String({ minLength: 1 }), Type.Any())),
+  providerOptionsByKey: Type.Optional(
+    Type.Record(Type.String({ minLength: 1 }), Type.Record(Type.String({ minLength: 1 }), Type.Any()))
+  )
+});
+export type AgentProviderModelOptions = Static<typeof AgentProviderModelOptionsSchema>;
+
+export const AgentProviderModelSchema = Type.Object({
+  id: Type.String({ minLength: 1 }),
+  providerModelId: Type.Optional(Type.String({ minLength: 1 })),
+  name: Type.String({ minLength: 1 }),
+  // 模型上下文窗口上限,用于自动压缩阈值计算基数。
+  contextWindowTokens: Type.Integer({ minimum: 1 }),
+  options: Type.Optional(AgentProviderModelOptionsSchema)
+});
+export type AgentProviderModel = Static<typeof AgentProviderModelSchema>;
+
+export const AgentProviderNpmSchema = Type.Union([Type.Literal("@ai-sdk/openai"), Type.Literal("@ai-sdk/anthropic")]);
+export type AgentProviderNpm = Static<typeof AgentProviderNpmSchema>;
+
+export const AgentProviderOptionsInputSchema = Type.Object({
+  baseURL: Type.String({ minLength: 1 }),
+  apiKey: Type.Optional(Type.Union([Type.String(), Type.Null()]))
+});
+export type AgentProviderOptionsInput = Static<typeof AgentProviderOptionsInputSchema>;
+
+export const AgentProviderItemInputSchema = Type.Object({
+  id: Type.String({ minLength: 1 }),
+  name: Type.String({ minLength: 1 }),
+  npm: AgentProviderNpmSchema,
+  options: AgentProviderOptionsInputSchema,
+  models: Type.Array(AgentProviderModelSchema)
+});
+export type AgentProviderItemInput = Static<typeof AgentProviderItemInputSchema>;
+
+export const AgentProvidersDefaultSchema = Type.Object({
+  providerId: Type.String({ minLength: 1 }),
+  modelId: Type.String({ minLength: 1 })
+});
+export type AgentProvidersDefault = Static<typeof AgentProvidersDefaultSchema>;
+
+export const AgentProvidersSettingsSchema = Type.Object({
+  default: Type.Union([AgentProvidersDefaultSchema, Type.Null()]),
+  providers: Type.Array(AgentProviderItemInputSchema),
+  updatedAt: Type.Number()
+});
+export type AgentProvidersSettings = Static<typeof AgentProvidersSettingsSchema>;
+
+export const UpdateAgentProvidersSettingsRequestSchema = Type.Object({
+  default: Type.Union([AgentProvidersDefaultSchema, Type.Null()]),
+  providers: Type.Array(AgentProviderItemInputSchema)
+});
+export type UpdateAgentProvidersSettingsRequest = Static<typeof UpdateAgentProvidersSettingsRequestSchema>;
+
+export const AgentProviderOptionsViewSchema = Type.Object({
+  baseURL: Type.String({ minLength: 1 }),
+  hasApiKey: Type.Boolean(),
+  apiKeyMasked: Type.Union([Type.String(), Type.Null()])
+});
+export type AgentProviderOptionsView = Static<typeof AgentProviderOptionsViewSchema>;
+
+export const AgentProviderItemViewSchema = Type.Object({
+  id: Type.String({ minLength: 1 }),
+  name: Type.String({ minLength: 1 }),
+  npm: AgentProviderNpmSchema,
+  options: AgentProviderOptionsViewSchema,
+  models: Type.Array(AgentProviderModelSchema)
+});
+export type AgentProviderItemView = Static<typeof AgentProviderItemViewSchema>;
+
+export const AgentProvidersSettingsViewSchema = Type.Object({
+  default: Type.Union([AgentProvidersDefaultSchema, Type.Null()]),
+  providers: Type.Array(AgentProviderItemViewSchema),
+  updatedAt: Type.Number()
+});
+export type AgentProvidersSettingsView = Static<typeof AgentProvidersSettingsViewSchema>;
+
+export const AgentMcpServerLocalConfigSchema = Type.Object({
+  type: Type.Literal("local"),
+  command: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
+  environment: Type.Optional(Type.Record(Type.String({ minLength: 1 }), Type.String())),
+  timeout: Type.Optional(Type.Number({ minimum: 1 }))
+});
+export type AgentMcpServerLocalConfig = Static<typeof AgentMcpServerLocalConfigSchema>;
+
+export const AgentMcpServerOAuthConfigSchema = Type.Object({
+  clientId: Type.Optional(Type.String({ minLength: 1 })),
+  clientSecret: Type.Optional(Type.String({ minLength: 1 })),
+  scope: Type.Optional(Type.String({ minLength: 1 }))
+});
+export type AgentMcpServerOAuthConfig = Static<typeof AgentMcpServerOAuthConfigSchema>;
+
+export const AgentMcpServerRemoteConfigSchema = Type.Object({
+  type: Type.Literal("remote"),
+  url: Type.String({ minLength: 1 }),
+  headers: Type.Optional(Type.Record(Type.String({ minLength: 1 }), Type.String())),
+  oauth: Type.Optional(Type.Union([AgentMcpServerOAuthConfigSchema, Type.Literal(false)])),
+  timeout: Type.Optional(Type.Number({ minimum: 1 }))
+});
+export type AgentMcpServerRemoteConfig = Static<typeof AgentMcpServerRemoteConfigSchema>;
+
+export const AgentMcpServerConfigSchema = Type.Union([AgentMcpServerLocalConfigSchema, AgentMcpServerRemoteConfigSchema]);
+export type AgentMcpServerConfig = Static<typeof AgentMcpServerConfigSchema>;
+
+export const AgentMcpServerSchema = Type.Object({
+  id: Type.String({ minLength: 1 }),
+  enabled: Type.Boolean(),
+  config: AgentMcpServerConfigSchema
+});
+export type AgentMcpServer = Static<typeof AgentMcpServerSchema>;
+
+export const AgentMcpSettingsSchema = Type.Object({
+  servers: Type.Array(AgentMcpServerSchema),
+  updatedAt: Type.Number()
+});
+export type AgentMcpSettings = Static<typeof AgentMcpSettingsSchema>;
+
+export const UpdateAgentMcpSettingsRequestSchema = Type.Object({
+  servers: Type.Array(AgentMcpServerSchema)
+});
+export type UpdateAgentMcpSettingsRequest = Static<typeof UpdateAgentMcpSettingsRequestSchema>;
+
+export const AgentRuntimeSettingsSchema = Type.Object({
+  // 0 表示关闭;单位毫秒。
+  modelIdleTimeoutMs: Type.Integer({ minimum: 0 }),
+  modelTotalTimeoutMs: Type.Integer({ minimum: 0 }),
+  // 模型请求首包前失败时的最大重试次数(0 表示不重试)。
+  modelRequestMaxRetries: Type.Integer({ minimum: 0, maximum: 100 }),
+  // 自动压缩阈值百分比,达到 model.contextWindowTokens * pct/100 触发压缩。
+  autoCompactThresholdPct: Type.Integer({ minimum: 50, maximum: 90 }),
+  updatedAt: Type.Number()
+});
+export type AgentRuntimeSettings = Static<typeof AgentRuntimeSettingsSchema>;
+
+export const UpdateAgentRuntimeSettingsRequestSchema = Type.Object({
+  modelIdleTimeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
+  modelTotalTimeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
+  modelRequestMaxRetries: Type.Optional(Type.Integer({ minimum: 0, maximum: 100 })),
+  autoCompactThresholdPct: Type.Optional(Type.Integer({ minimum: 50, maximum: 90 }))
+});
+export type UpdateAgentRuntimeSettingsRequest = Static<typeof UpdateAgentRuntimeSettingsRequestSchema>;
+
+export const AgentGlobalPromptItemSchema = Type.Object({
+  id: Type.String({ minLength: 1 }),
+  title: Type.String({ minLength: 1, maxLength: 20 }),
+  prompt: Type.String()
+});
+export type AgentGlobalPromptItem = Static<typeof AgentGlobalPromptItemSchema>;
+
+export const AgentGlobalPromptSettingsSchema = Type.Object({
+  items: Type.Array(AgentGlobalPromptItemSchema),
+  updatedAt: Type.Number()
+});
+export type AgentGlobalPromptSettings = Static<typeof AgentGlobalPromptSettingsSchema>;
+
+export const UpdateAgentGlobalPromptSettingsRequestSchema = Type.Object({
+  items: Type.Array(AgentGlobalPromptItemSchema)
+});
+export type UpdateAgentGlobalPromptSettingsRequest = Static<typeof UpdateAgentGlobalPromptSettingsRequestSchema>;
+
+export const AgentToolNameSchema = Type.Union([
+  Type.Literal("bash"),
+  Type.Literal("read"),
+  Type.Literal("write"),
+  Type.Literal("apply_patch"),
+  Type.Literal("todolist"),
+  Type.Literal("subtask"),
+  Type.Literal("archive_search"),
+  Type.Literal("archive_read")
+]);
+export type AgentToolName = Static<typeof AgentToolNameSchema>;
+
+export const AgentPermissionsSchema = Type.Object({
+  allowRead: Type.Boolean(),
+  allowWrite: Type.Boolean(),
+  allowBash: Type.Boolean()
+});
+export type AgentPermissions = Static<typeof AgentPermissionsSchema>;
+
+export const AgentDefaultModelSchema = Type.Union([AgentProvidersDefaultSchema, Type.Null()]);
+export type AgentDefaultModel = Static<typeof AgentDefaultModelSchema>;
+
+export const AgentItemSchema = Type.Object({
+  id: Type.String({ minLength: 1 }),
+  name: Type.String({ minLength: 1 }),
+  summary: Type.String({ maxLength: 160 }),
+  prompt: Type.String(),
+  globalPromptIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+  tools: Type.Array(AgentToolNameSchema),
+  mcpServers: Type.Array(Type.String({ minLength: 1 })),
+  permissions: AgentPermissionsSchema,
+  defaultModel: AgentDefaultModelSchema
+});
+export type AgentItem = Static<typeof AgentItemSchema>;
+
+export const AgentSettingsDefaultSchema = Type.Object({
+  agentId: Type.String({ minLength: 1 })
+});
+export type AgentSettingsDefault = Static<typeof AgentSettingsDefaultSchema>;
+
+export const AgentSettingsSchema = Type.Object({
+  default: Type.Union([AgentSettingsDefaultSchema, Type.Null()]),
+  agents: Type.Array(AgentItemSchema),
+  updatedAt: Type.Number()
+});
+export type AgentSettings = Static<typeof AgentSettingsSchema>;
+
+export const UpdateAgentSettingsRequestSchema = Type.Object({
+  default: Type.Union([AgentSettingsDefaultSchema, Type.Null()]),
+  agents: Type.Array(AgentItemSchema)
+});
+export type UpdateAgentSettingsRequest = Static<typeof UpdateAgentSettingsRequestSchema>;
+
 export const MasterKeySourceSchema = Type.Union([Type.Literal("env"), Type.Literal("file"), Type.Literal("generated")]);
 export type MasterKeySource = Static<typeof MasterKeySourceSchema>;
 

@@ -3,9 +3,11 @@ import type { CredentialMasterKeySource } from "../infra/crypto/credentialMaster
 
 export type AppContext = {
   db: Db;
+  repoRoot: string;
   dataDir: string;
   fileMaxBytes: number;
   version: string;
+  logLevel?: string;
   serveWeb: boolean;
   webDistDir: string | null;
   credentialMasterKey: Buffer;
@@ -14,4 +16,11 @@ export type AppContext = {
   credentialMasterKeyCreatedAt: number | null;
   authToken: string | null;
   authCookieSecure: boolean;
+  agentWorkerEnabled: boolean;
+  agentWorkerHost: string;
+  agentWorkerPort: number;
+  agentWorkerSocketPath: string;
+  agentWorkerConcurrency: number;
+  agentInternalToken: string;
+  agentApiOrigin: string;
 };

@@ -239,7 +239,12 @@ function credentialKindLabel(kind: CredentialRecord["kind"]) {
 }
 
 function goToSettings(tab: "credentials" | "network") {
-  void router.push(`/settings/${tab}`);
+  void router.push(toSettingsPath(tab));
+}
+
+function toSettingsPath(tab: "credentials" | "network") {
+  if (tab === "credentials") return "/settings/identity/credentials";
+  return "/settings/network-security/network";
 }
 
 function sortCredentials(params: { host: string | null; kind: "https" | "ssh" | null }) {
@@ -330,7 +335,7 @@ function openCreate() {
 
 function openSettingsFromCreate(tab: "credentials" | "network") {
   createOpen.value = false;
-  void router.push(`/settings/${tab}`);
+  void router.push(toSettingsPath(tab));
 }
 
 function openEdit(repo: RepoRecord) {
