@@ -7,7 +7,7 @@ import { createApp } from "../../app/createApp.js";
 import { openDb } from "../../infra/db/db.js";
 import type { Db } from "../../infra/db/db.js";
 import { ensureDir, rmrf } from "../../infra/fs/fs.js";
-import { agentArchiveSessionDir, workspaceRoot } from "../../infra/fs/paths.js";
+import { agentArchiveSessionDir, compactionSnippetPath, workspaceRoot } from "../../infra/fs/paths.js";
 import { insertWorkspace } from "../workspaces/workspace.store.js";
 import { appendContextItem, createRunRecord } from "./agent.store.js";
 import { newSortableId } from "../../utils/ids.js";
@@ -1344,6 +1344,19 @@ test("agent context 压缩后会归档并支持 archive_search/read", async () =
     (item) => item.role === "system" && String(item.content || "").includes("压缩摘要")
   );
   assert.ok(compactSummaryMessage, "compaction summary should participate in prompt messages");
+
+  const summaryIndex = promptContext.messages.findIndex(
+    (item) => item.role === "system" && String(item.content || "").includes("压缩摘要")
+  );
+  const snippetIndex = promptContext.messages.findIndex(
+    (item) => item.role === "system" && String(item.content || "").includes("压缩前尾部摘录")
+  );
+  assert.ok(snippetIndex >= 0, "compaction snippet should be injected after summary");
+  assert.ok(summaryIndex >= 0 && snippetIndex === summaryIndex + 1, "snippet should appear right after compaction summary");
+
+  const snippetMessage = promptContext.messages[snippetIndex] as any;
+  assert.ok(String(snippetMessage?.content || "").includes("pos="), "snippet should include pos lines");
+  assert.ok(String(snippetMessage?.content || "").includes("archive_read"), "snippet should remind archive_read");
   const archivedUserLeak = promptContext.messages.find(
     (item) => item.role === "user" && String(item.content || "").includes("历史问题")
   );
@@ -1579,6 +1592,143 @@ test("agent context 压缩后会归档并支持 archive_search/read", async () =
     (item) => item.role === "system" && String(item.content || "").includes("[run] max steps exceeded")
   );
   assert.equal(leakedRunSystemMessage, undefined, "runtime run-status system text should not leak into model prompt");
+});
+
+test("agent prompt-context 未发生 compaction 时不应注入 compaction snippet", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_nocompact_1",
+    step: 1,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "hi"
+    }
+  });
+  assert.ok(userItem.item.id > 0);
+
+  const context = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+  assert.equal(
+    context.messages.some((m) => m.role === "system" && String(m.content || "").includes("压缩前尾部摘录")),
+    false
+  );
+});
+
+test("agent prompt-context compaction snippet 缓存缺失时应即时重建", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_compact_cache_1",
+    step: 1,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "历史问题: cache miss"
+    }
+  });
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_compact_cache_1",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: {
+      type: "assistant_text",
+      text: "ok"
+    }
+  });
+
+  const compact = await compactContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    expectedHeadItemId: assistantItem.item.id,
+    summaryText: "压缩摘要: cache test"
+  });
+  assert.equal(compact.compacted, true);
+  assert.ok((compact.summaryItemId ?? 0) > 0);
+  const summaryItemId = compact.summaryItemId as number;
+
+  // 首次调用触发生成并写入缓存.
+  const ctx1 = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+  assert.ok(ctx1.messages.some((m) => m.role === "system" && String(m.content || "").includes("压缩前尾部摘录")));
+
+  const cachePath = compactionSnippetPath(fixture.dataDir, fixture.workspaceId, session.id, summaryItemId);
+  await fs.rm(cachePath, { force: true });
+
+  // 删除缓存后再次调用,应即时重建并注入.
+  const ctx2 = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+  assert.ok(ctx2.messages.some((m) => m.role === "system" && String(m.content || "").includes("压缩前尾部摘录")));
 });
 
 test("archive v2 边界行为: 校验/大小写/跨文件pos/截断/半行过滤", async () => {

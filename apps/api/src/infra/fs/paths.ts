@@ -53,6 +53,13 @@ export function writeUiArtifactPath(dataDir: string, workspaceId: string, toolCa
   return path.join(tmpRoot(dataDir), "agent", "ui-artifacts", "write", ws, `${call}.json`);
 }
 
+export function compactionSnippetPath(dataDir: string, workspaceId: string, sessionId: string, summaryItemId: number) {
+  const ws = safePathSegment(workspaceId);
+  const session = safePathSegment(sessionId);
+  const id = safePathSegment(String(summaryItemId));
+  return path.join(tmpRoot(dataDir), "agent", "compaction-snippets", ws, session, `${id}.txt`);
+}
+
 export function agentArchiveRoot(dataDir: string) {
   return path.join(dataDir, "agent", "archive");
 }

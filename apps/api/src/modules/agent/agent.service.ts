@@ -29,7 +29,13 @@ import type { AppContext } from "../../app/context.js";
 import { nowMs } from "../../utils/time.js";
 import { newSortableId } from "../../utils/ids.js";
 import { getWorkspace } from "../workspaces/workspace.store.js";
-import { agentArchiveSessionDir, applyPatchUiArtifactPath, tmpRoot, writeUiArtifactPath } from "../../infra/fs/paths.js";
+import {
+  agentArchiveSessionDir,
+  applyPatchUiArtifactPath,
+  compactionSnippetPath,
+  tmpRoot,
+  writeUiArtifactPath
+} from "../../infra/fs/paths.js";
 import {
   AgentConflictError,
   appendContextItem,
@@ -681,6 +687,7 @@ const ARCHIVE_FILE_NAME_RE = /^\d{8}\.log$/;
 const ARCHIVE_RESULT_TRUNCATED_MARKER = "[超过最大字符数限制,从此处截断内容]";
 const ARCHIVABLE_ITEM_STATUS = new Set<AgentContextItemStatus>(["completed", "failed", "denied", "cancelled"]);
 const RUN_STATUS_SYSTEM_TEXT_PREFIX = "[run] ";
+const COMPACTION_SNIPPET_CACHE_MAX_BYTES = 256 * 1024;
 
 function normalizeRunNoticeText(raw: unknown) {
   if (raw == null) return "";
@@ -713,6 +720,35 @@ function sanitizeArchiveText(raw: string) {
   return String(raw || "").replace(/\r/g, "\\r").replace(/\n/g, "\\n");
 }
 
+function parseArchivedItemIdFromArchiveLine(line: string) {
+  const m = /^item=(\d+)\s/.exec(String(line || ""));
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) return null;
+  return n;
+}
+
+function buildCompactionSnippetMessageText(params: {
+  excerptLines: string[];
+  minPos: number;
+}) {
+  const body = params.excerptLines.join("\n");
+  return [
+    "## 压缩前尾部摘录(归档原文; pos 可用于 archive_read 的 beforePos)",
+    "",
+    body,
+    "",
+    "## 归档工具提示(需要更多上下文时)",
+    "",
+    "- 你可以使用 archive_read 继续向前读取更早的归档行:",
+    `  - 从更早的位置开始: 使用 beforePos=${params.minPos}`,
+    "  - 读取更多行: 增大 lineCount",
+    "- 你可以使用 archive_search 在全部归档中按关键词检索:",
+    "  - query 建议使用具体名词(文件名/函数名/错误码/工具名/关键短语)",
+    "  - 如果命中太多,配合 beforePos 向前翻页"
+  ].join("\n");
+}
+
 function formatArchiveFileName(seq: number) {
   return `${String(seq).padStart(ARCHIVE_FILE_NAME_WIDTH, "0")}.log`;
 }
@@ -737,6 +773,106 @@ async function listArchiveFilesAsc(dirPath: string) {
     .filter((item): item is { name: string; seq: number } => item.seq != null)
     .sort((a, b) => a.seq - b.seq)
     .map((item) => item.name);
+}
+
+async function readCompactionSnippetCacheBestEffort(params: {
+  dataDir: string;
+  workspaceId: string;
+  sessionId: string;
+  summaryItemId: number;
+}) {
+  const filePath = compactionSnippetPath(params.dataDir, params.workspaceId, params.sessionId, params.summaryItemId);
+  const tmpAbs = path.resolve(tmpRoot(params.dataDir));
+  const fileAbs = path.resolve(filePath);
+  if (!fileAbs.startsWith(tmpAbs + path.sep) && fileAbs !== tmpAbs) {
+    return "";
+  }
+  const st = await fs.lstat(fileAbs).catch(() => null);
+  if (!st || !st.isFile() || st.isSymbolicLink()) {
+    return "";
+  }
+  if (st.size > COMPACTION_SNIPPET_CACHE_MAX_BYTES) {
+    return "";
+  }
+  await ensureRealPathUnderRoot(tmpAbs, fileAbs);
+  try {
+    return await readFileNoFollow(fileAbs);
+  } catch {
+    return "";
+  }
+}
+
+async function writeCompactionSnippetCacheBestEffort(params: {
+  dataDir: string;
+  workspaceId: string;
+  sessionId: string;
+  summaryItemId: number;
+  text: string;
+  logger: FastifyBaseLogger;
+}) {
+  const filePath = compactionSnippetPath(params.dataDir, params.workspaceId, params.sessionId, params.summaryItemId);
+  const tmpAbs = path.resolve(tmpRoot(params.dataDir));
+  const fileAbs = path.resolve(filePath);
+  if (!fileAbs.startsWith(tmpAbs + path.sep) && fileAbs !== tmpAbs) {
+    params.logger.warn({ filePath }, "compaction snippet cache path is outside tmpRoot");
+    return;
+  }
+  const dirAbs = path.dirname(fileAbs);
+  try {
+    await ensureDirSafeUnderRoot(tmpAbs, dirAbs);
+    await ensureRealPathUnderRoot(tmpAbs, dirAbs);
+    await writeFileNoFollow(fileAbs, params.text);
+  } catch (err) {
+    params.logger.warn({ err, filePath }, "failed to write compaction snippet cache");
+  }
+}
+
+async function buildCompactionSnippetExcerptLines(params: {
+  dataDir: string;
+  workspaceId: string;
+  sessionId: string;
+  itemIds: number[];
+}) {
+  const need = new Set<number>(params.itemIds);
+  const resolved = new Map<number, { pos: number; line: string }>();
+  if (need.size === 0) {
+    return [] as Array<{ pos: number; line: string }>;
+  }
+
+  const dirPath = agentArchiveSessionDir(params.dataDir, params.workspaceId, params.sessionId);
+  const files = await listArchiveFilesAsc(dirPath);
+  if (files.length === 0) {
+    return [] as Array<{ pos: number; line: string }>;
+  }
+
+  outer: for (let i = files.length - 1; i >= 0; i -= 1) {
+    const fileName = files[i] || "";
+    if (!fileName) continue;
+    const fileSeq = parseArchiveFileName(fileName);
+    if (fileSeq == null) continue;
+    const filePath = path.join(dirPath, fileName);
+    const content = await fs.readFile(filePath, "utf-8").catch((err: any) => {
+      if (err && err.code === "ENOENT") return "";
+      throw err;
+    });
+    const lines = splitArchiveFileLines(content);
+    for (let lineNo = lines.length; lineNo >= 1; lineNo -= 1) {
+      if (resolved.size >= need.size) break outer;
+      const line = String(lines[lineNo - 1] || "");
+      if (!line) continue;
+      const itemId = parseArchivedItemIdFromArchiveLine(line);
+      if (itemId == null) continue;
+      if (!need.has(itemId)) continue;
+      if (resolved.has(itemId)) continue;
+      const pos = toArchivePos(fileSeq, lineNo);
+      resolved.set(itemId, { pos, line });
+    }
+  }
+
+  return params.itemIds
+    .map((id) => resolved.get(id) || null)
+    .filter((row): row is { pos: number; line: string } => row != null)
+    .sort((a, b) => a.pos - b.pos);
 }
 
 function splitArchiveFileLines(text: string) {
@@ -3034,6 +3170,23 @@ export class AgentService {
     });
 
     const visible = getSessionVisibleItems(this.ctx.db, params.workspaceId, params.sessionId);
+    const hasCompactionBoundaryMarker = visible.some((item) => {
+      if (!item) return false;
+      if (item.kind !== "system" || item.status !== "completed") return false;
+      if (item.output.type !== "system_text") return false;
+      const boundary = typeof item.boundaryReason === "string" ? item.boundaryReason.trim() : "";
+      if (boundary !== "compaction") return false;
+      return shouldIncludeSystemTextInPrompt(item.output.text);
+    });
+    const transcript = hasCompactionBoundaryMarker
+      ? getSessionTranscriptItems(this.ctx.db, params.workspaceId, params.sessionId)
+      : ([] as AgentContextItemRecord[]);
+    const latestArchiveAt = hasCompactionBoundaryMarker
+      ? transcript.reduce((max, item) => {
+          if (typeof item.archiveAt !== "number" || !Number.isFinite(item.archiveAt)) return max;
+          return Math.max(max, item.archiveAt);
+        }, 0)
+      : 0;
     const messages: PromptMessage[] = [];
     for (let i = 0; i < visible.length; i += 1) {
       const item = visible[i];
@@ -3048,6 +3201,88 @@ export class AgentService {
       if (item.kind === "system" && item.output.type === "system_text" && item.status === "completed") {
         if (!shouldIncludeSystemTextInPrompt(item.output.text)) continue;
         messages.push({ role: "system", content: item.output.text });
+
+        // compaction: 在摘要后注入“压缩前尾部摘录”(归档原文 + archive 工具提示).
+        const boundary = typeof item.boundaryReason === "string" ? item.boundaryReason.trim() : "";
+        if (boundary === "compaction") {
+          const summaryItemId = item.id;
+          let snippetText = "";
+          try {
+            snippetText = await readCompactionSnippetCacheBestEffort({
+              dataDir: this.ctx.dataDir,
+              workspaceId: params.workspaceId,
+              sessionId: params.sessionId,
+              summaryItemId
+            });
+          } catch {
+            snippetText = "";
+          }
+
+          if (!snippetText.trim()) {
+            try {
+              if (latestArchiveAt <= 0) {
+                throw new Error("archive batch not found");
+              }
+              const batch = transcript.filter((t) => t.archiveAt === latestArchiveAt);
+              // 归档会过滤“空 assistant(仅 tool-call)”,若直接按 item 取 tail 会导致最终 pos 行数偏少。
+              // 这里先按“可归档行”过滤,确保 tail 的 10 条能映射到归档文件中的实际行。
+              const batchArchivable = batch.filter((t) => buildArchiveLine(t) != null);
+              const last10 = batchArchivable.slice(-10);
+              const last4UserAssistant = batchArchivable
+                .filter((t) => {
+                  if (t.kind === "user" && t.output.type === "user_text") return String(t.output.text || "").trim().length > 0;
+                  if (t.kind === "assistant" && t.output.type === "assistant_text") return String(t.output.text || "").trim().length > 0;
+                  return false;
+                })
+                .slice(-4);
+
+              const mergedIds: number[] = [];
+              const seen = new Set<number>();
+              for (const row of [...last4UserAssistant, ...last10]) {
+                if (!row) continue;
+                if (seen.has(row.id)) continue;
+                seen.add(row.id);
+                mergedIds.push(row.id);
+              }
+
+              const posLines = await buildCompactionSnippetExcerptLines({
+                dataDir: this.ctx.dataDir,
+                workspaceId: params.workspaceId,
+                sessionId: params.sessionId,
+                itemIds: mergedIds
+              });
+
+              if (posLines.length > 0) {
+                const excerptLines: string[] = [];
+                let prevPos = 0;
+                for (const row of posLines) {
+                  if (prevPos > 0 && row.pos !== prevPos + 1) {
+                    excerptLines.push("...");
+                  }
+                  excerptLines.push(`pos=${row.pos} | ${row.line}`);
+                  prevPos = row.pos;
+                }
+                const minPos = Math.min(...posLines.map((r) => r.pos));
+                snippetText = buildCompactionSnippetMessageText({ excerptLines, minPos });
+                await writeCompactionSnippetCacheBestEffort({
+                  dataDir: this.ctx.dataDir,
+                  workspaceId: params.workspaceId,
+                  sessionId: params.sessionId,
+                  summaryItemId,
+                  text: snippetText,
+                  logger: this.logger
+                });
+              }
+            } catch (err) {
+              this.logger.warn({ err, sessionId: params.sessionId }, "failed to build compaction snippet");
+              snippetText = "";
+            }
+          }
+
+          if (snippetText.trim()) {
+            messages.push({ role: "system", content: snippetText });
+          }
+        }
         continue;
       }
 
