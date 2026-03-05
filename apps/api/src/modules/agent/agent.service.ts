@@ -122,7 +122,16 @@ function toolArgsSchema(toolName: AgentContextToolName) {
       required: ["patchText"],
       additionalProperties: false,
       properties: {
-        patchText: { type: "string", minLength: 1 }
+        patchText: {
+          type: "string",
+          minLength: 1,
+          description: [
+            "按 apply_patch 协议提交补丁文本(不是 git diff).",
+            "必须以 '*** Begin Patch' 开头,以 '*** End Patch' 结尾。",
+            "支持: Add File / Update File / Delete File / Move to。",
+            "提示: 同一文件多段修改时,重复多个 '*** Update File: <path>' 段(不要使用 git 风格 @@ -a,b +c,d @@)。"
+          ].join("\n")
+        }
       }
     };
   }
@@ -306,7 +315,29 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
     return "读取工作区内目录或UTF-8文本文件,支持offset/limit,超长行截断,输出上限50KB,不支持非文本或特殊文件类型。";
   }
   if (toolName === "apply_patch") {
-    return "按 apply_patch 协议批量修改文件,优先用于最小改动与多文件联动,输入 patchText 需使用 *** Begin Patch 与 *** End Patch 包裹,支持 Add/Update/Delete/Move。";
+    return [
+      "按 apply_patch 协议批量修改文件(不是 git diff),用于最小改动与多文件联动。",
+      "",
+      "格式:",
+      "- patchText 第一行必须是 '*** Begin Patch',最后一行必须是 '*** End Patch'。",
+      "- 支持头:",
+      "  - '*** Add File: <path>'",
+      "  - '*** Update File: <path>'",
+      "  - '*** Delete File: <path>'",
+      "  - '*** Move to: <path>' (写在 Update File 段内,用于移动/重命名)",
+      "",
+      "注意:",
+      "- patchText 不是 git diff;不要包含 'diff --git' 或 '---/+++'.",
+      "- 同一文件多段修改请重复多个 '*** Update File: <path>' 段(不要在同一段里写多个 git 风格 @@ hunk)。",
+      "",
+      "示例(最小更新):",
+      "*** Begin Patch",
+      "*** Update File: src/foo.txt",
+      "@@",
+      "-old",
+      "+new",
+      "*** End Patch"
+    ].join("\n");
   }
   if (toolName === "todolist") {
     return "这是管理任务进度的强制工具,不是可选项。除极其简单且可一步完成的请求外,必须先用此工具给出任务清单,再开始执行。每次调用都提交完整 todos 数组,语义为全量替换,不是增量 patch。todos 从上到下即优先级,先规划再执行。在任务状态发生变化时必须立即更新清单,包括开始(in_progress),完成(completed),取消(cancelled),回退或新增任务。每项必须包含 content 和 status。content trim 后不能为空。status 仅允许 pending | in_progress | completed | cancelled。允许同时存在多个 in_progress。目标是让用户持续看到清晰、可信、实时的进度窗口,并约束执行过程可追踪,避免无计划推进。";

@@ -273,26 +273,29 @@
           :placeholder="hasAvailableAgents ? t('agent.client.inputPlaceholder') : t('agent.client.inputPlaceholderNoAgent')"
           @keydown="onInputKeydown"
         />
-        <a-tooltip v-if="runState.status !== 'idle'" :title="t('agent.client.cancel')" placement="top">
-          <a-button
-            class="cancel-icon-btn"
-            :loading="actionLoading === 'cancel'"
-            @click="onCancelRun"
-          >
-            <template #icon><CloseOutlined /></template>
-          </a-button>
-        </a-tooltip>
       </div>
       <div class="pt-2">
         <div class="flex items-center justify-between gap-2">
           <div v-if="hasAvailableAgents" class="flex items-center gap-2 min-w-0">
-            <a-select
-              :value="effectiveAgentId"
-              :options="props.agentOptions"
-              size="small"
-              style="min-width: 180px; max-width: 320px"
-              @update:value="onAgentChange"
-            />
+           <a-select
+             :value="effectiveAgentId"
+             :options="props.agentOptions"
+             size="small"
+             style="min-width: 180px; max-width: 320px"
+             @update:value="onAgentChange"
+           />
+           <a-tooltip v-if="showRunIndicator" :title="t('common.loading')" placement="top">
+             <LoadingOutlined spin class="text-blue-600 text-xs" />
+           </a-tooltip>
+           <a-button
+             v-if="runState.status !== 'idle'"
+             size="small"
+             danger
+             :loading="actionLoading === 'cancel'"
+             @click="onCancelRun"
+           >
+             取消
+           </a-button>
           </div>
           <div v-else class="flex items-center gap-2 text-xs text-[color:var(--text-tertiary)]">
             <span>{{ t("agent.client.noAgentHint") }}</span>
@@ -312,7 +315,7 @@
 <script setup lang="ts">
 import type { AgentContextItemRecord, AgentSessionRunState } from "@agent-workbench/shared";
 import { useVirtualizer } from "@tanstack/vue-virtual";
-import { CloseOutlined, DoubleRightOutlined, ForkOutlined, RollbackOutlined } from "@ant-design/icons-vue";
+import { DoubleRightOutlined, ForkOutlined, LoadingOutlined, RollbackOutlined } from "@ant-design/icons-vue";
 import { Modal, message } from "ant-design-vue";
 import { computed, nextTick, onActivated, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
@@ -728,6 +731,8 @@ const formattedLastTotalTokens = computed(() => {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "-";
   return new Intl.NumberFormat().format(Math.floor(value));
 });
+
+const showRunIndicator = computed(() => sending.value || runState.value.status !== "idle");
 
 const displayItems = computed<DisplayItem[]>(() => {
   const hasToolChildByPrevId = new Set<number>();
@@ -2255,27 +2260,6 @@ onBeforeUnmount(() => {
 .subtask-title-icon {
   display: inline-block;
   font-size: 14px;
-}
-
-.cancel-icon-btn {
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  border-radius: 4px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-color: rgba(239, 68, 68, 0.35);
-  color: #ef4444;
-  background: rgba(239, 68, 68, 0.08);
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .cancel-icon-btn:hover {
-    border-color: rgba(239, 68, 68, 0.55);
-    color: #ef4444;
-    background: rgba(239, 68, 68, 0.14);
-  }
 }
 
 .slash-command-item {
