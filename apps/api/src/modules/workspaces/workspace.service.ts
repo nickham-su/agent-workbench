@@ -11,7 +11,7 @@ import { getOriginDefaultBranch, listHeadsBranches } from "../../infra/git/refs.
 import { withRepoLock } from "../../infra/locks/repoLock.js";
 import { cloneFromMirror } from "../../infra/git/clone.js";
 import { ensureDir, pathExists, rmrf } from "../../infra/fs/fs.js";
-import { workspaceRepoDirPath, workspaceRoot } from "../../infra/fs/paths.js";
+import { agentArchiveWorkspaceDir, workspaceRepoDirPath, workspaceRoot } from "../../infra/fs/paths.js";
 import { ensureRepoMirror } from "../../infra/git/mirror.js";
 import { buildGitEnv } from "../../infra/git/gitEnv.js";
 import {
@@ -565,6 +565,22 @@ export async function deleteWorkspace(ctx: AppContext, logger: FastifyBaseLogger
     // 删除失败时保留 DB 记录，便于后续重试/排障；避免变成“数据库已删但目录残留”的不可回收状态
     logger.warn({ workspaceId: ws.id, path: expectedPath, err }, "remove workspace path failed");
     throw new HttpError(409, "Failed to delete workspace directory");
+  }
+
+  const archivePath = agentArchiveWorkspaceDir(ctx.dataDir, ws.id);
+  const dataDirAbs = path.resolve(ctx.dataDir);
+  const archiveAbs = path.resolve(archivePath);
+  const archiveRel = path.relative(dataDirAbs, archiveAbs);
+  const isArchiveInsideDataDir = archiveRel.length > 0 && !archiveRel.startsWith("..") && !path.isAbsolute(archiveRel);
+  if (!isArchiveInsideDataDir) {
+    logger.error({ workspaceId: ws.id, archivePath }, "agent archive path is invalid; skip archive cleanup");
+  } else {
+    try {
+      await rmrf(archivePath);
+    } catch (err) {
+      // 归档属于附属数据,清理失败不阻塞 workspace 删除主流程。
+      logger.warn({ workspaceId: ws.id, archivePath, err }, "remove workspace archive path failed");
+    }
   }
 
   deleteWorkspaceReposByWorkspace(ctx.db, ws.id);

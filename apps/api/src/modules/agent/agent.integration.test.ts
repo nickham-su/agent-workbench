@@ -7,7 +7,7 @@ import { createApp } from "../../app/createApp.js";
 import { openDb } from "../../infra/db/db.js";
 import type { Db } from "../../infra/db/db.js";
 import { ensureDir, rmrf } from "../../infra/fs/fs.js";
-import { workspaceRoot } from "../../infra/fs/paths.js";
+import { agentArchiveSessionDir, workspaceRoot } from "../../infra/fs/paths.js";
 import { insertWorkspace } from "../workspaces/workspace.store.js";
 import { appendContextItem, createRunRecord } from "./agent.store.js";
 import { newSortableId } from "../../utils/ids.js";
@@ -862,7 +862,10 @@ test("agent clear 会归档当前可见上下文并插入 clear 边界 marker", 
   const clearSummary = promptContext.messages.find((item) => item.role === "system" && String(item.content || "").includes("已开始新任务"));
   assert.ok(clearSummary);
 
-  const archiveFilePath = path.join(fixture.workspacePath, ".awb", "agent", "archive", session.id, "00000001.log");
+  const archiveFilePath = path.join(
+    agentArchiveSessionDir(fixture.dataDir, fixture.workspaceId, session.id),
+    "00000001.log"
+  );
   const archiveContent = await fs.readFile(archiveFilePath, "utf-8");
   assert.ok(archiveContent.includes("旧任务: 先完成接口改造"));
   assert.ok(archiveContent.includes("旧任务答复: 可以先做字段迁移。"));
@@ -901,6 +904,26 @@ test("agent clear 对 subtask 会话返回只读错误", async () => {
   });
   assert.equal(clearRes.statusCode, 400, `clear subtask should fail: ${clearRes.body}`);
   assert.equal(clearRes.json().code, "AGENT_SUBTASK_READONLY");
+});
+
+test("delete workspace 会清理 dataDir 下的 agent 归档目录", async () => {
+  const fixture = await createFixture();
+  const archiveSessionPath = agentArchiveSessionDir(fixture.dataDir, fixture.workspaceId, "sess_cleanup");
+  const archiveWorkspacePath = path.dirname(archiveSessionPath);
+  await fs.mkdir(archiveSessionPath, { recursive: true });
+  await fs.writeFile(path.join(archiveSessionPath, "00000001.log"), "line\n", "utf-8");
+
+  const deleteRes = await fixture.app.inject({
+    method: "DELETE",
+    url: `/api/workspaces/${fixture.workspaceId}`
+  });
+  assert.equal(deleteRes.statusCode, 204, `delete workspace failed: ${deleteRes.body}`);
+
+  const archiveWorkspaceExists = await fs
+    .stat(archiveWorkspacePath)
+    .then(() => true)
+    .catch(() => false);
+  assert.equal(archiveWorkspaceExists, false, "workspace archive directory should be removed");
 });
 
 test("agent clear 在空会话返回 AGENT_CLEAR_EMPTY", async () => {
@@ -1017,7 +1040,10 @@ test("agent clear 并发请求会串行执行且不会重复归档", async () =>
   const failed = r1.statusCode === 400 ? r1 : r2;
   assert.equal(failed.json().code, "AGENT_CLEAR_NOT_NEEDED");
 
-  const archiveFilePath = path.join(fixture.workspacePath, ".awb", "agent", "archive", session.id, "00000001.log");
+  const archiveFilePath = path.join(
+    agentArchiveSessionDir(fixture.dataDir, fixture.workspaceId, session.id),
+    "00000001.log"
+  );
   const archiveContent = await fs.readFile(archiveFilePath, "utf-8");
   const userHits = archiveContent.split(userText).length - 1;
   const assistantHits = archiveContent.split(assistantText).length - 1;
@@ -1419,7 +1445,10 @@ test("agent context 压缩后会归档并支持 archive_search/read", async () =
   assert.equal(forkWithArchiveContext.items[3]?.kind, "user");
   assert.equal(forkWithArchiveContext.items[4]?.kind, "assistant");
 
-  const forkArchiveFilePath = path.join(fixture.workspacePath, ".awb", "agent", "archive", forkWithArchiveSession.id, "00000001.log");
+  const forkArchiveFilePath = path.join(
+    agentArchiveSessionDir(fixture.dataDir, fixture.workspaceId, forkWithArchiveSession.id),
+    "00000001.log"
+  );
   const forkArchiveContent = await fs.readFile(forkArchiveFilePath, "utf-8");
   assert.ok(forkArchiveContent.includes("历史问题"));
   assert.ok(forkArchiveContent.includes("新增归档与压缩方案草稿"));
@@ -1436,7 +1465,10 @@ test("agent context 压缩后会归档并支持 archive_search/read", async () =
   assert.equal(revertArchivedRes.statusCode, 400, `revert archived item should fail: ${revertArchivedRes.body}`);
   assert.equal(revertArchivedRes.json().code, "AGENT_ARCHIVED_ITEM_IMMUTABLE");
 
-  const archiveFilePath = path.join(fixture.workspacePath, ".awb", "agent", "archive", session.id, "00000001.log");
+  const archiveFilePath = path.join(
+    agentArchiveSessionDir(fixture.dataDir, fixture.workspaceId, session.id),
+    "00000001.log"
+  );
   const archiveContent = await fs.readFile(archiveFilePath, "utf-8");
   assert.ok(archiveContent.includes("历史问题"));
   assert.ok(archiveContent.includes("新增归档与压缩方案草稿"));
@@ -1550,7 +1582,7 @@ test("archive v2 边界行为: 校验/大小写/跨文件pos/截断/半行过滤
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
 
-  const archiveDir = path.join(fixture.workspacePath, ".awb", "agent", "archive", session.id);
+  const archiveDir = agentArchiveSessionDir(fixture.dataDir, fixture.workspaceId, session.id);
   await fs.mkdir(archiveDir, { recursive: true });
 
   const file1Lines = Array.from({ length: 100 }, (_, idx) => {
@@ -1636,7 +1668,7 @@ test("archive v2 边界行为: 校验/大小写/跨文件pos/截断/半行过滤
 test("archive_search snippet 模式返回命中窗口并限制单行窗口数量", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
-  const archiveDir = path.join(fixture.workspacePath, ".awb", "agent", "archive", session.id);
+  const archiveDir = agentArchiveSessionDir(fixture.dataDir, fixture.workspaceId, session.id);
   await fs.mkdir(archiveDir, { recursive: true });
 
   const repeatedText = `${Array.from({ length: 7 }, (_, idx) => `seg${idx + 1}-${"x".repeat(140)} KEYWORD`).join(" ")} TAILMARK`;

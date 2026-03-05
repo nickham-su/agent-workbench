@@ -29,7 +29,7 @@ import type { AppContext } from "../../app/context.js";
 import { nowMs } from "../../utils/time.js";
 import { newSortableId } from "../../utils/ids.js";
 import { getWorkspace } from "../workspaces/workspace.store.js";
-import { applyPatchUiArtifactPath, tmpRoot, writeUiArtifactPath } from "../../infra/fs/paths.js";
+import { agentArchiveSessionDir, applyPatchUiArtifactPath, tmpRoot, writeUiArtifactPath } from "../../infra/fs/paths.js";
 import {
   AgentConflictError,
   appendContextItem,
@@ -640,7 +640,6 @@ const TERMINAL_RUN_RECORD_STATUS = new Set(["completed", "failed", "cancelled"] 
 
 const WORKSPACE_AGENTS_FILENAME = "AGENTS.md";
 const WORKSPACE_AGENTS_MAX_BYTES = 32 * 1024;
-const ARCHIVE_ROOT_RELATIVE_PATH = path.join(".awb", "agent", "archive");
 const ARCHIVE_FILE_NAME_WIDTH = 8;
 const ARCHIVE_FILE_LINE_LIMIT = 100;
 const ARCHIVE_SEARCH_MAX_HITS_DEFAULT = 10;
@@ -690,10 +689,6 @@ function sanitizeArchiveText(raw: string) {
   return String(raw || "").replace(/\r/g, "\\r").replace(/\n/g, "\\n");
 }
 
-function archiveSessionDir(workspacePath: string, sessionId: string) {
-  return path.join(workspacePath, ARCHIVE_ROOT_RELATIVE_PATH, sessionId);
-}
-
 function formatArchiveFileName(seq: number) {
   return `${String(seq).padStart(ARCHIVE_FILE_NAME_WIDTH, "0")}.log`;
 }
@@ -732,9 +727,9 @@ function splitArchiveFileLines(text: string) {
   return lines;
 }
 
-async function appendArchiveLines(params: { workspacePath: string; sessionId: string; lines: string[] }) {
+async function appendArchiveLines(params: { dataDir: string; workspaceId: string; sessionId: string; lines: string[] }) {
   if (params.lines.length === 0) return [] as ArchiveWriteSnapshot[];
-  const dirPath = archiveSessionDir(params.workspacePath, params.sessionId);
+  const dirPath = agentArchiveSessionDir(params.dataDir, params.workspaceId, params.sessionId);
   await fs.mkdir(dirPath, { recursive: true });
   const snapshots = new Map<string, ArchiveWriteSnapshot>();
 
@@ -1443,13 +1438,13 @@ export class AgentService {
     tx();
 
     if (params.mode === "with_archive" && archivedSourceItemIds.size > 0) {
-      const workspace = this.ensureWorkspace(fromSession.workspaceId);
       const nextTranscript = getSessionTranscriptItems(this.ctx.db, fromSession.workspaceId, newSessionId);
       const archiveLines = nextTranscript.filter((item) => item.archiveAt != null).map((item) => buildArchiveLine(item));
       if (archiveLines.length > 0) {
         try {
           await appendArchiveLines({
-            workspacePath: workspace.path,
+            dataDir: this.ctx.dataDir,
+            workspaceId: fromSession.workspaceId,
             sessionId: newSessionId,
             lines: archiveLines
           });
@@ -1458,7 +1453,12 @@ export class AgentService {
             sessionId: newSessionId,
             workspaceId: fromSession.workspaceId
           });
-          await fs.rm(archiveSessionDir(workspace.path, newSessionId), { recursive: true, force: true }).catch(() => undefined);
+          await fs
+            .rm(agentArchiveSessionDir(this.ctx.dataDir, fromSession.workspaceId, newSessionId), {
+              recursive: true,
+              force: true
+            })
+            .catch(() => undefined);
           throw new HttpError(500, "failed to write fork archive", "AGENT_FORK_ARCHIVE_FAILED");
         }
       }
@@ -2563,11 +2563,11 @@ export class AgentService {
         };
       }
 
-      const workspace = this.ensureWorkspace(params.workspaceId);
       const createdAt = nowMs();
       const archiveLines = visible.map((item) => buildArchiveLine(item));
       const archiveSnapshots = await appendArchiveLines({
-        workspacePath: workspace.path,
+        dataDir: this.ctx.dataDir,
+        workspaceId: params.workspaceId,
         sessionId: session.id,
         lines: archiveLines
       });
@@ -2658,11 +2658,11 @@ export class AgentService {
         throw new HttpError(409, "session has non-terminal items", "AGENT_CLEAR_NOT_IDLE");
       }
 
-      const workspace = this.ensureWorkspace(body.workspaceId);
       const createdAt = nowMs();
       const archiveLines = visible.map((item) => buildArchiveLine(item));
       const archiveSnapshots = await appendArchiveLines({
-        workspacePath: workspace.path,
+        dataDir: this.ctx.dataDir,
+        workspaceId: session.workspaceId,
         sessionId: session.id,
         lines: archiveLines
       });
@@ -2720,7 +2720,6 @@ export class AgentService {
     const session = getAgentSession(this.ctx.db, params.sessionId);
     if (!session) throw new HttpError(404, "session not found");
     if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
-    const workspace = this.ensureWorkspace(params.workspaceId);
     const query = String(params.query || "").trim();
     if (!query) {
       throw new HttpError(400, "query is required", "AGENT_ARCHIVE_QUERY_REQUIRED");
@@ -2739,7 +2738,7 @@ export class AgentService {
     });
     const snippet = params.snippet === true;
 
-    const dirPath = archiveSessionDir(workspace.path, session.id);
+    const dirPath = agentArchiveSessionDir(this.ctx.dataDir, params.workspaceId, session.id);
     const files = await listArchiveFilesAsc(dirPath);
     if (files.length === 0) {
       return { text: "" };
@@ -2821,7 +2820,6 @@ export class AgentService {
     const session = getAgentSession(this.ctx.db, params.sessionId);
     if (!session) throw new HttpError(404, "session not found");
     if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
-    const workspace = this.ensureWorkspace(params.workspaceId);
     const beforePos = normalizeBeforePos(params.beforePos);
 
     const lineCount = normalizePositiveInt(params.lineCount, {
@@ -2835,7 +2833,7 @@ export class AgentService {
       max: ARCHIVE_MAX_CHARS_MAX
     });
 
-    const dirPath = archiveSessionDir(workspace.path, session.id);
+    const dirPath = agentArchiveSessionDir(this.ctx.dataDir, params.workspaceId, session.id);
     const files = await listArchiveFilesAsc(dirPath);
     if (files.length === 0) {
       return { text: "" };
@@ -3000,7 +2998,8 @@ export class AgentService {
     const hasArchivedItems = getSessionTranscriptItems(this.ctx.db, params.workspaceId, params.sessionId).some(
       (item) => item.archiveAt != null
     );
-    const hasArchiveFiles = (await listArchiveFilesAsc(archiveSessionDir(workspace.path, session.id))).length > 0;
+    const hasArchiveFiles =
+      (await listArchiveFilesAsc(agentArchiveSessionDir(this.ctx.dataDir, params.workspaceId, session.id))).length > 0;
     const hasArchive = hasArchivedItems && hasArchiveFiles;
     const enabledToolNames = hasArchive
       ? profile.agent.tools

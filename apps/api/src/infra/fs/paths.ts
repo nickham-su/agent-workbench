@@ -53,6 +53,20 @@ export function writeUiArtifactPath(dataDir: string, workspaceId: string, toolCa
   return path.join(tmpRoot(dataDir), "agent", "ui-artifacts", "write", ws, `${call}.json`);
 }
 
+export function agentArchiveRoot(dataDir: string) {
+  return path.join(dataDir, "agent", "archive");
+}
+
+export function agentArchiveWorkspaceDir(dataDir: string, workspaceId: string) {
+  const ws = safePathSegment(workspaceId);
+  return path.join(agentArchiveRoot(dataDir), ws);
+}
+
+export function agentArchiveSessionDir(dataDir: string, workspaceId: string, sessionId: string) {
+  const session = safePathSegment(sessionId);
+  return path.join(agentArchiveWorkspaceDir(dataDir, workspaceId), session);
+}
+
 export function sshRoot(dataDir: string) {
   return path.join(dataDir, "ssh");
 }
