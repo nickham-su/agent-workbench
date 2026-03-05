@@ -3047,11 +3047,98 @@ test("agent prompt-context 全局提示词按列表顺序注入(方案A)", async
   const idxA = context.system.indexOf("PROMPT_A");
   const idxB = context.system.indexOf("PROMPT_B");
   const idxAgent = context.system.indexOf("AGENT_PROMPT");
+  const idxCore = context.system.indexOf("# 工作方式与流程(全局)");
   assert.ok(idxA >= 0, "system should include PROMPT_A");
   assert.ok(idxB >= 0, "system should include PROMPT_B");
   assert.ok(idxAgent >= 0, "system should include AGENT_PROMPT");
+  assert.ok(idxCore >= 0, "system should include global workflow prompt");
+  assert.ok(idxCore < idxA, "global workflow prompt should be prepended before global prompts");
   assert.ok(idxA < idxB, "global prompts should follow global list order, not selected id order");
   assert.ok(idxB < idxAgent, "agent prompt should be appended after global prompts");
+});
+
+test("agent prompt-context 同时存在 global/workspace/agent 时按既定顺序拼接", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  await fs.writeFile(path.join(fixture.workspacePath, "AGENTS.md"), "WORKSPACE_RULE", "utf-8");
+
+  const globalPromptsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/global-prompts",
+    payload: {
+      items: [
+        { id: "gp_a", title: "A", prompt: "PROMPT_A" },
+        { id: "gp_b", title: "B", prompt: "PROMPT_B" }
+      ]
+    }
+  });
+  assert.equal(globalPromptsRes.statusCode, 200, `update global prompts failed: ${globalPromptsRes.body}`);
+
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      default: { agentId: "default" },
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          summary: "",
+          prompt: "AGENT_PROMPT",
+          globalPromptIds: ["gp_b", "gp_a"],
+          tools: ["bash", "read", "write"],
+          mcpServers: [],
+          permissions: {
+            allowRead: true,
+            allowWrite: true,
+            allowBash: true
+          },
+          defaultModel: null
+        }
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `update agents failed: ${agentsRes.body}`);
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const context = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+
+  const idxCore = context.system.indexOf("# 工作方式与流程(全局)");
+  const idxA = context.system.indexOf("PROMPT_A");
+  const idxB = context.system.indexOf("PROMPT_B");
+  const idxWorkspace = context.system.indexOf("## Workspace Instructions: AGENTS.md");
+  const idxAgent = context.system.indexOf("AGENT_PROMPT");
+
+  assert.ok(idxCore >= 0, "system should include global workflow prompt");
+  assert.ok(idxA >= 0, "system should include PROMPT_A");
+  assert.ok(idxB >= 0, "system should include PROMPT_B");
+  assert.ok(idxWorkspace >= 0, "system should include workspace instructions section");
+  assert.ok(idxAgent >= 0, "system should include AGENT_PROMPT");
+
+  assert.ok(idxCore < idxA, "order: core before global prompts");
+  assert.ok(idxA < idxB, "order: global prompts follow global list order");
+  assert.ok(idxB < idxWorkspace, "order: global prompts before workspace instructions");
+  assert.ok(idxWorkspace < idxAgent, "order: workspace instructions before agent prompt");
 });
 
 test("agent prompt-context 在 workspace 根 AGENTS.md 缺失时忽略", async () => {
@@ -3080,7 +3167,78 @@ test("agent prompt-context 在 workspace 根 AGENTS.md 缺失时忽略", async (
     runId
   });
 
-  assert.equal(context.system, "You are a helpful coding assistant.");
+  assert.ok(context.system.includes("# 工作方式与流程(全局)"), "system should include global workflow prompt");
+  assert.ok(context.system.includes("## Agent Prompt: default"), "system should include agent section");
+  assert.ok(
+    context.system.includes("You are a helpful coding assistant."),
+    "system should include agent prompt content"
+  );
+  assert.equal(
+    context.system.includes("## Workspace Instructions: AGENTS.md"),
+    false,
+    "system should ignore missing workspace AGENTS.md"
+  );
+});
+
+test("agent prompt-context 在 agent prompt 为空且无 workspace/global 时仅注入全局系统提示词", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      default: { agentId: "default" },
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          summary: "",
+          prompt: "",
+          tools: ["bash", "read", "write"],
+          mcpServers: [],
+          permissions: {
+            allowRead: true,
+            allowWrite: true,
+            allowBash: true
+          },
+          defaultModel: null
+        }
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `update agents failed: ${agentsRes.body}`);
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const context = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+
+  assert.ok(context.system.includes("# 工作方式与流程(全局)"), "system should include global workflow prompt");
+  assert.equal(context.system.includes("## Global Prompt:"), false, "system should not include global prompt sections");
+  assert.equal(
+    context.system.includes("## Workspace Instructions:"),
+    false,
+    "system should not include workspace instructions when missing"
+  );
+  assert.equal(context.system.includes("## Agent Prompt:"), false, "system should not include agent prompt section when empty");
 });
 
 test("agent prompt-context 对 workspace AGENTS.md 做 32KB 截断并追加标记", async () => {
