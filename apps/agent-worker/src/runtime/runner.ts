@@ -1004,6 +1004,7 @@ export class AgentRunner {
         const command = requireNonEmptyStringArg(tool.args.command, "bash.command");
         const timeout = parseOptionalPositiveIntegerArg(tool.args.timeout, "bash.timeout");
         let cwd = run.workspacePath;
+        let workdirLabelForError: string | null = null;
         if (tool.args.workdir !== undefined && tool.args.workdir !== null) {
           if (typeof tool.args.workdir !== "string") {
             throw new Error("bash.workdir must be a non-empty string");
@@ -1012,7 +1013,29 @@ export class AgentRunner {
           if (!workdir) {
             throw new Error("bash.workdir must be a non-empty string");
           }
+          workdirLabelForError = workdir;
           cwd = path.isAbsolute(workdir) ? workdir : path.resolve(run.workspacePath, workdir);
+        }
+
+        // 预检查 cwd,避免把 cwd 不存在误报为 spawn ENOENT。
+        // - 未传 workdir 时,默认 cwd 为 workspace 根目录。
+        // - 仅使用用户给出的 workdir 文本作为错误提示,避免泄露 workspace 绝对路径。
+        const isUserWorkdir = typeof workdirLabelForError === "string" && workdirLabelForError.length > 0;
+        const label = isUserWorkdir ? workdirLabelForError : "workspace root";
+        try {
+          const stat = await fs.stat(cwd);
+          if (!stat.isDirectory()) {
+            throw new Error(isUserWorkdir ? `bash.workdir must be a directory: ${label}` : `bash.cwd must be a directory: ${label}`);
+          }
+        } catch (err: any) {
+          const code = err && typeof err === "object" ? String(err.code || "") : "";
+          if (code === "ENOENT") {
+            throw new Error(isUserWorkdir ? `bash.workdir not found: ${label}` : `bash.cwd not found: ${label}`);
+          }
+          if (code === "ENOTDIR") {
+            throw new Error(isUserWorkdir ? `bash.workdir must be a directory: ${label}` : `bash.cwd must be a directory: ${label}`);
+          }
+          throw err;
         }
         const bash = await runBashCommand({
           command,

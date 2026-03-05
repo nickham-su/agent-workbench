@@ -87,7 +87,7 @@ function toolArgsSchema(toolName: AgentContextToolName) {
       properties: {
         command: { type: "string", minLength: 1 },
         workdir: { type: "string", minLength: 1 },
-        timeout: { type: "number", minimum: 1 }
+        timeout: { type: "integer", minimum: 1 }
       }
     };
   }
@@ -270,7 +270,23 @@ function buildSubtaskToolDescription(agentItems: Array<{ id: string; name: strin
 
 function toolDescription(toolName: AgentContextToolName, options?: { subtaskDescription?: string }) {
   if (toolName === "bash") {
-    return "执行一个 bash 命令并返回 stdout/stderr,支持 workdir/timeout 参数,默认 workdir 为工作区根目录,timeout 为 120000ms。";
+    return [
+      "执行一个 bash 命令并返回 stdout/stderr。",
+      "内部等价于: bash -lc <command>",
+      "",
+      "参数:",
+      "- command: 必填,字符串。直接写要执行的命令,不要传数组,也不要在 command 里再写 bash -lc。",
+      "- workdir: 可选,工作目录。强烈建议不填(默认就是工作区根目录)。如需指定,尽量使用相对路径(相对工作区),避免写 /workspace 之类的绝对路径。",
+      "- timeout: 可选,超时毫秒数(整数),默认 120000。",
+      "",
+      "建议:",
+      "- 尽量在工作区内行动,路径优先使用相对路径。",
+      "",
+      "示例:",
+      "- {\"command\":\"pwd\"}",
+      "- {\"command\":\"pwd && ls -la\"}",
+      "- {\"command\":\"rg -n \\\"TODO\\\" .\",\"workdir\":\"apps/api\"}"
+    ].join("\n");
   }
   if (toolName === "read") {
     return "读取工作区内目录或UTF-8文本文件,支持offset/limit,超长行截断,输出上限50KB,不支持非文本或特殊文件类型。";
