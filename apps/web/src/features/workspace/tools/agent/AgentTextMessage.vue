@@ -1,12 +1,12 @@
 <template>
   <div
     ref="rootEl"
-    class="awb-text-message whitespace-pre-wrap break-words select-text text-[11px] font-mono text-[color:var(--text-secondary)]"
+    class="awb-text-message whitespace-pre-wrap break-words select-text font-mono text-[color:var(--text-secondary)]"
+    :style="[{ fontSize: 'var(--agent-font-size, 13px)' }, collapsedStyle]"
     :class="[
       expandable ? 'cursor-pointer' : '',
       tone === 'error' ? 'text-red-500' : ''
     ]"
-    :style="collapsedStyle"
     @click="onToggle"
   >
     {{ props.text }}

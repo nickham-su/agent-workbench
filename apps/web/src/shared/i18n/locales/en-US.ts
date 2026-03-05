@@ -281,7 +281,7 @@ export default {
       creating: "Creating...",
       refresh: "Refresh",
       minimize: "Minimize",
-      closeClient: "Close client",
+      closeClient: "Close session",
       reopenClosed: "Reopen closed clients"
     },
     client: {
@@ -644,6 +644,10 @@ export default {
         editor: {
           label: "Editor font size",
           help: "Adjust editor font size (includes Diff view, global, saved locally). Default: {default}"
+        },
+        agent: {
+          label: "AI Agent font size",
+          help: "Adjust AI Agent session font size (messages and input, global, saved locally). Default: {default}"
         }
       }
     },

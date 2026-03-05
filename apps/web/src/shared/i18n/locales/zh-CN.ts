@@ -279,7 +279,7 @@ export default {
       creating: "创建中...",
       refresh: "刷新",
       minimize: "最小化",
-      closeClient: "关闭 client",
+      closeClient: "关闭会话",
       reopenClosed: "恢复已关闭 client"
     },
     client: {
@@ -642,6 +642,10 @@ export default {
         editor: {
           label: "编辑器字号",
           help: "调整编辑器字号（包含 Diff 视图，全局生效，自动保存到本地）。默认：{default}"
+        },
+        agent: {
+          label: "AI Agent字号",
+          help: "调整 AI Agent 会话字号（消息与输入框，全局生效，自动保存到本地）。默认：{default}"
         }
       }
     },

@@ -13,6 +13,7 @@ import { computed, watchEffect } from "vue";
 import { useI18n } from "vue-i18n";
 import zhCN from "ant-design-vue/es/locale/zh_CN";
 import enUS from "ant-design-vue/es/locale/en_US";
+import { agentFontSize } from "@/shared/settings/uiFontSizes";
 
 const antdTheme = {
   algorithm: theme.darkAlgorithm,
@@ -58,5 +59,7 @@ watchEffect(() => {
   root.style.setProperty("--success-color", (token.value as any).colorSuccess ?? token.value.colorPrimary);
   root.style.setProperty("--warning-color", (token.value as any).colorWarning ?? token.value.colorPrimary);
   root.style.setProperty("--info-color", (token.value as any).colorInfo ?? token.value.colorPrimary);
+
+  root.style.setProperty("--agent-font-size", `${agentFontSize.value}px`);
 });
 </script>
