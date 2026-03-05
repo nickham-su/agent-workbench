@@ -1,16 +1,21 @@
 <template>
-  <div class="py-0.5 pl-2">
-    <div class="flex items-center gap-2 min-w-0 text-[12px] leading-5 flex-wrap">
-      <span class="font-semibold shrink-0">write</span>
-      <span class="font-mono text-[11px] text-[color:var(--text-secondary)] min-w-0 max-w-[60%] truncate">{{ summary.filePath }}</span>
-      <span class="shrink-0 text-[11px] text-[color:var(--text-tertiary)]">{{ summary.bytesWritten }} bytes</span>
-      <span v-if="errorText" class="min-w-0 max-w-[30%] truncate text-[11px] text-red-500">error: {{ errorText }}</span>
-      <a-button size="small" type="text" class="shrink-0 !px-1" @click="onToggleExpand">
-        {{ expanded ? "收起" : "查看" }}
-      </a-button>
+  <div>
+    <div
+      class="flex items-center gap-2 min-w-0 flex-wrap w-full pl-2 pr-0 py-0.5 rounded cursor-pointer hover:bg-[var(--hover-bg)] transition-colors duration-100 text-[11px] font-mono text-[color:var(--text-secondary)]"
+      role="button"
+      tabindex="0"
+      @click="onToggleExpand"
+      @keydown.enter.prevent="onToggleExpand"
+      @keydown.space.prevent="onToggleExpand"
+    >
+      <span class="min-w-0 flex-1 inline-flex items-baseline gap-0"><span class="shrink-0">write(</span><span class="min-w-0 truncate" :title="summary.filePath">{{ summary.filePath }}</span><span class="shrink-0">)</span></span>
+      <span class="shrink-0">[{{ summary.bytesWritten }} bytes]</span>
+      <span v-if="errorText" class="min-w-0 max-w-[30%] truncate text-red-500">
+        error: {{ errorText }}
+      </span>
     </div>
 
-    <div v-if="expanded" class="pt-2">
+    <div v-if="expanded">
       <div v-if="loading" class="text-[12px] text-[color:var(--text-tertiary)]">Loading diff...</div>
       <div v-else-if="loadError" class="text-[12px] text-red-500">diff unavailable: {{ loadError }}</div>
       <template v-else-if="artifact">

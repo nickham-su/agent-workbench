@@ -49,11 +49,11 @@
                 v-else
                 class="agent-message-item relative rounded p-2"
                 :class="[
-                  row.msg.role === 'tool'
-                    ? isRichToolCard(row.msg)
-                    ? 'is-tool-message border-0 bg-transparent px-0 py-0.5'
+                 row.msg.role === 'tool'
+                   ? isRichToolCard(row.msg)
+                    ? 'is-tool-message border-0 bg-transparent px-0 py-0'
                     : 'is-tool-message border-0 bg-transparent pl-2 pr-0 py-0.5'
-                  : '',
+                   : '',
                 row.msg.role === 'user' ? 'is-user-message border border-blue-500/30 bg-blue-500/10' : 'border-0',
                 row.msg.role === 'assistant' ? 'is-assistant-message bg-[var(--panel-bg)]' : '',
                 row.msg.role === 'system' ? 'bg-[var(--panel-bg)]' : '',
@@ -736,7 +736,10 @@ const displayItems = computed<DisplayItem[]>(() => {
     if (item.kind === "tool" && item.output.type === "tool") {
       const argsText = formatToolArgs(item.output.args);
       const callText = `${item.output.toolName}(${argsText})`;
-      const statusText = `[${item.status}]`;
+      // 文本型工具消息默认不展示 [completed],仅在失败/拒绝/取消等异常状态时展示状态。
+      const showStatus = item.status === "failed" || item.status === "denied" || item.status === "cancelled";
+      const statusText = showStatus ? `[${item.status}]` : "";
+      const headText = statusText ? `${callText} ${statusText}` : callText;
       const toolCallId = typeof item.output.toolCallId === "string" && item.output.toolCallId.trim()
         ? item.output.toolCallId.trim()
         : undefined;
@@ -749,7 +752,7 @@ const displayItems = computed<DisplayItem[]>(() => {
       if (item.output.toolName === "apply_patch") {
         const applyPatch = parseApplyPatchDisplay(item.output.result);
         if (!applyPatch) {
-          let line = `${callText} ${statusText}`;
+          let line = headText;
           if (errorText) {
             line += `\nerror: ${errorText}`;
           }
@@ -772,7 +775,7 @@ const displayItems = computed<DisplayItem[]>(() => {
           archiveAt,
           boundaryReason,
           role: "tool",
-          text: `${callText} ${statusText}`,
+          text: headText,
           status: item.status,
           toolName: item.output.toolName,
           ...(toolCallId ? { toolCallId } : {}),
@@ -784,7 +787,7 @@ const displayItems = computed<DisplayItem[]>(() => {
       if (item.output.toolName === "todolist") {
         const todoList = parseTodoListDisplay(item.output.result) || parseTodoListDisplay(item.output.args);
         if (!todoList) {
-          let line = `${callText} ${statusText}`;
+          let line = headText;
           if (errorText) {
             line += `\nerror: ${errorText}`;
           }
@@ -807,7 +810,7 @@ const displayItems = computed<DisplayItem[]>(() => {
           archiveAt,
           boundaryReason,
           role: "tool",
-          text: `${callText} ${statusText}`,
+          text: headText,
           status: item.status,
           toolName: item.output.toolName,
           ...(toolCallId ? { toolCallId } : {}),
@@ -819,7 +822,7 @@ const displayItems = computed<DisplayItem[]>(() => {
       if (item.output.toolName === "write") {
         const writeResult = parseWriteDisplay(item.output.result);
         if (!writeResult) {
-          let line = `${callText} ${statusText}`;
+          let line = headText;
           if (errorText) {
             line += `\nerror: ${errorText}`;
           }
@@ -842,7 +845,7 @@ const displayItems = computed<DisplayItem[]>(() => {
           archiveAt,
           boundaryReason,
           role: "tool",
-          text: `${callText} ${statusText}`,
+          text: headText,
           status: item.status,
           toolName: item.output.toolName,
           ...(toolCallId ? { toolCallId } : {}),
@@ -865,7 +868,7 @@ const displayItems = computed<DisplayItem[]>(() => {
           archiveAt,
           boundaryReason,
           role: "tool",
-          text: `${callText} ${statusText}`,
+          text: headText,
           status: item.status,
           toolName: item.output.toolName,
           ...(toolCallId ? { toolCallId } : {}),
@@ -878,7 +881,7 @@ const displayItems = computed<DisplayItem[]>(() => {
           tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
         };
       }
-      let line = `${callText} ${statusText}`;
+      let line = headText;
       if (errorText) {
         line += `\nerror: ${errorText}`;
       }
@@ -1039,7 +1042,8 @@ function estimateRowHeight(index: number) {
   if (item.applyPatch) {
     const fileCount = item.applyPatch.files.length;
     const rows = Math.min(fileCount, 6);
-    return 140 + rows * 28 + gap;
+    // apply_patch 收起态: 近似按“每个文件一行 tool 文本”的高度估算,并用 tool-tool 间距作为行间距。
+    return 18 + rows * 20 + Math.max(0, rows - 1) * MESSAGE_GAP_TOOL_TOOL + gap;
   }
   if (item.todoList) {
     if (isTodoCollapsed(item.id)) {

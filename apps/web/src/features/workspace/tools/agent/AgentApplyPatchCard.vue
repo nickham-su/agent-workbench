@@ -1,46 +1,48 @@
 <template>
-  <div class="py-0.5 pl-2">
-    <div
-      v-for="(file, idx) in files"
-      :key="`${file.path}-${idx}`"
-      class="py-0.5"
-    >
-      <div class="flex items-center gap-2 min-w-0 text-[12px] leading-5 flex-wrap">
-        <span class="font-semibold shrink-0">applypatch</span>
-        <span class="font-mono text-[11px] text-[color:var(--text-secondary)] min-w-0 max-w-[60%] truncate" :title="file.path">
-          {{ file.path }}
-        </span>
-        <span class="shrink-0 text-[11px] text-[color:var(--text-tertiary)]">+{{ file.additions }} -{{ file.deletions }}</span>
-        <a-button size="small" type="text" class="shrink-0 !px-1" @click="onPickFile(file.path)">
-          {{ isExpanded(file.path) ? "收起" : "查看" }}
-        </a-button>
-      </div>
+  <div>
+    <div class="flex flex-col gap-0.5">
+      <div
+        v-for="(file, idx) in files"
+        :key="`${file.path}-${idx}`"
+      >
+        <div
+          class="flex items-center gap-2 min-w-0 flex-wrap w-full pl-2 pr-0 py-0.5 rounded cursor-pointer hover:bg-[var(--hover-bg)] transition-colors duration-100 text-[11px] font-mono text-[color:var(--text-secondary)]"
+          role="button"
+          tabindex="0"
+          @click="onPickFile(file.path)"
+          @keydown.enter.prevent="onPickFile(file.path)"
+          @keydown.space.prevent="onPickFile(file.path)"
+        >
+          <span class="min-w-0 flex-1 inline-flex items-baseline gap-0"><span class="shrink-0">applypatch(</span><span class="min-w-0 truncate" :title="file.path">{{ file.path }}</span><span class="shrink-0">)</span></span>
+          <span class="shrink-0">[+{{ file.additions }} -{{ file.deletions }}]</span>
+        </div>
 
-      <div v-if="isExpanded(file.path)" class="pt-1 pl-4">
-        <div v-if="loading" class="text-[12px] text-[color:var(--text-tertiary)]">
-          Loading diff...
-        </div>
-        <div v-else-if="loadError" class="text-[12px] text-red-500">
-          diff unavailable: {{ loadError }}
-        </div>
-        <div v-else-if="diffByPath.get(file.path)" class="rounded border border-[var(--border-color-secondary)] overflow-hidden">
-          <MonacoDiffViewer
-            :original="diffByPath.get(file.path)?.before || ''"
-            :modified="diffByPath.get(file.path)?.after || ''"
-            :language="inferLanguageFromPath(file.path)"
-            :sideBySide="false"
-            :showOverviewRuler="false"
-            :compactMode="true"
-            :hideUnchangedRegions="{ enabled: true, contextLineCount: 1, minimumLineCount: 1, revealLineCount: 1 }"
-            :autoHeight="true"
-            :minHeight="72"
-            :ignoreTrimWhitespace="true"
-          />
+        <div v-if="isExpanded(file.path)">
+          <div v-if="loading" class="text-[12px] text-[color:var(--text-tertiary)]">
+            Loading diff...
+          </div>
+          <div v-else-if="loadError" class="text-[12px] text-red-500">
+            diff unavailable: {{ loadError }}
+          </div>
+          <div v-else-if="diffByPath.get(file.path)" class="rounded border border-[var(--border-color-secondary)] overflow-hidden">
+            <MonacoDiffViewer
+              :original="diffByPath.get(file.path)?.before || ''"
+              :modified="diffByPath.get(file.path)?.after || ''"
+              :language="inferLanguageFromPath(file.path)"
+              :sideBySide="false"
+              :showOverviewRuler="false"
+              :compactMode="true"
+              :hideUnchangedRegions="{ enabled: true, contextLineCount: 1, minimumLineCount: 1, revealLineCount: 1 }"
+              :autoHeight="true"
+              :minHeight="72"
+              :ignoreTrimWhitespace="true"
+            />
+          </div>
         </div>
       </div>
     </div>
 
-    <div v-if="errorText" class="text-[12px] text-red-500 py-0.5">error: {{ errorText }}</div>
+    <div v-if="errorText" class="pl-2 pr-0 text-[12px] text-red-500 py-0.5">error: {{ errorText }}</div>
   </div>
 </template>
 
