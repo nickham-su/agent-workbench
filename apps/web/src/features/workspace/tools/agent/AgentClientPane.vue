@@ -122,8 +122,11 @@
               </div>
               <AgentTodoListCard
                 v-else-if="isTodolistCard(row.msg) && row.msg.todoList"
+                :collapsed="isTodoCollapsed(row.msg.id)"
+                :summary="row.msg.todoList.summary"
                 :todos="row.msg.todoList.todos"
                 :error-text="row.msg.toolError"
+                @toggle-collapse="onToggleTodoCollapse(row.msg.id)"
               />
                <AgentApplyPatchCard
                  v-else-if="isApplyPatchCard(row.msg) && row.msg.applyPatch"
@@ -137,6 +140,16 @@
                  :error-text="row.msg.toolError"
                  @request-measure="onRequestVirtualMeasure(row.msg.id)"
                />
+              <AgentWriteCard
+                v-else-if="isWriteCard(row.msg) && row.msg.writeResult"
+                :workspace-id="props.workspaceId"
+                :session-id="props.sessionId"
+                :item-id="row.msg.id"
+                :tool-call-id="row.msg.toolCallId"
+                :summary="row.msg.writeResult"
+                :error-text="row.msg.toolError"
+                @request-measure="onRequestVirtualMeasure(row.msg.id)"
+              />
               <AssistantMarkdownMessage
                 v-else-if="row.msg.role === 'assistant'"
                 class="pr-24"
@@ -280,6 +293,7 @@ import { useRouter } from "vue-router";
 import AgentApplyPatchCard from "./AgentApplyPatchCard.vue";
 import AssistantMarkdownMessage from "./AssistantMarkdownMessage.vue";
 import AgentTodoListCard from "./AgentTodoListCard.vue";
+import AgentWriteCard from "./AgentWriteCard.vue";
 import {
   cancelAgentSession,
   clearAgentSession,
@@ -332,6 +346,13 @@ type TodoListDisplay = {
   }>;
 };
 
+type WriteDisplay = {
+  summary: string;
+  filePath: string;
+  bytesWritten: number;
+  existedBefore: boolean;
+};
+
 type DisplayItem = {
   id: number;
   prevId: number | null;
@@ -350,6 +371,7 @@ type DisplayItem = {
   subtaskAgentName?: string;
   todoList?: TodoListDisplay;
   applyPatch?: ApplyPatchDisplay;
+  writeResult?: WriteDisplay;
   tone?: "normal" | "error";
 };
 
@@ -418,12 +440,23 @@ const runState = ref<AgentSessionRunState>({
 });
 const runNoticeText = computed(() => String(runState.value.runNoticeText || "").trim());
 const items = ref<AgentContextItemRecord[]>([]);
+const collapsedTodoItemIds = ref<Set<number>>(new Set());
 const scrollEl = ref<HTMLElement | null>(null);
 const inputEl = ref<{ focus?: () => void } | null>(null);
 const stickToBottom = ref(true);
 const userUnfollowed = ref(false);
 const forcedBottomOnFirstActive = ref(false);
 let scrollToBottomSeq = 0;
+
+// 吸底稳定锁: 用于处理“单次大段输出”导致的虚拟列表高度延迟测量。
+// 典型场景: 压缩(compaction)结果一次性写入一大段文本,首次 scrollToBottom 基于估高执行,
+// 随后真实高度测量完成后 scrollHeight 突增,若不补滚动会表现为吸底失效。
+const followBottomLockRemaining = ref(0);
+let followBottomLockSeq = 0;
+let followBottomLockInFlight = false;
+let followBottomLockTimer: number | null = null;
+const FOLLOW_BOTTOM_LOCK_MAX_ATTEMPTS = 6;
+const FOLLOW_BOTTOM_LOCK_TIMEOUT_MS = 1400;
 
 // 仅用于判断用户是否在主动向上滚动(一旦向上滚,立刻取消吸底,避免被自动 scrollToBottom 抢回去)。
 let lastKnownScrollTop = 0;
@@ -609,6 +642,26 @@ function parseTodoListDisplay(value: unknown): TodoListDisplay | null {
   };
 }
 
+function parseWriteDisplay(value: unknown): WriteDisplay | null {
+  const source = toRecord(value);
+  if (!source) return null;
+  const filePath = typeof source.filePath === "string"
+    ? source.filePath.trim()
+    : typeof source.path === "string"
+      ? source.path.trim()
+      : "";
+  if (!filePath) return null;
+  const summary = typeof source.summary === "string" && source.summary.trim()
+    ? source.summary
+    : `写入文件 ${filePath}`;
+  return {
+    summary,
+    filePath,
+    bytesWritten: toNonNegativeInt(source.bytesWritten ?? source.bytes),
+    existedBefore: source.existedBefore === true
+  };
+}
+
 function resolveAgentName(agentId: string) {
   const target = props.agentOptions.find((item) => item.value === agentId);
   return target?.label || "";
@@ -763,6 +816,41 @@ const displayItems = computed<DisplayItem[]>(() => {
           tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
         };
       }
+      if (item.output.toolName === "write") {
+        const writeResult = parseWriteDisplay(item.output.result);
+        if (!writeResult) {
+          let line = `${callText} ${statusText}`;
+          if (errorText) {
+            line += `\nerror: ${errorText}`;
+          }
+          return {
+            id: item.id,
+            prevId: item.prevId,
+            archiveAt,
+            boundaryReason,
+            role: "tool",
+            text: line,
+            status: item.status,
+            toolName: item.output.toolName,
+            ...(toolCallId ? { toolCallId } : {}),
+            tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
+          };
+        }
+        return {
+          id: item.id,
+          prevId: item.prevId,
+          archiveAt,
+          boundaryReason,
+          role: "tool",
+          text: `${callText} ${statusText}`,
+          status: item.status,
+          toolName: item.output.toolName,
+          ...(toolCallId ? { toolCallId } : {}),
+          ...(errorText ? { toolError: errorText } : {}),
+          writeResult,
+          tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
+        };
+      }
       if (item.output.toolName === "subtask") {
         const argsObj = toRecord(item.output.args);
         const description = typeof argsObj?.description === "string" ? argsObj.description.trim() : "";
@@ -831,6 +919,51 @@ const displayItems = computed<DisplayItem[]>(() => {
   });
   return mapped.filter((item) => !(item.role === "assistant" && hiddenAssistantIds.has(item.id)));
 });
+
+const latestTodoListItemId = computed<number | null>(() => {
+  for (let i = displayItems.value.length - 1; i >= 0; i -= 1) {
+    const item = displayItems.value[i];
+    if (item?.todoList) return item.id;
+  }
+  return null;
+});
+
+function isTodoCollapsed(itemId: number) {
+  return collapsedTodoItemIds.value.has(itemId);
+}
+
+function onToggleTodoCollapse(itemId: number) {
+  const next = new Set(collapsedTodoItemIds.value);
+  if (next.has(itemId)) {
+    next.delete(itemId);
+  } else {
+    next.add(itemId);
+  }
+  collapsedTodoItemIds.value = next;
+  onRequestVirtualMeasure(itemId);
+}
+
+watch(
+  latestTodoListItemId,
+  (latestId, prevLatestId) => {
+    if (latestId == null) {
+      if (collapsedTodoItemIds.value.size > 0) {
+        collapsedTodoItemIds.value = new Set();
+      }
+      return;
+    }
+    if (latestId === prevLatestId) return;
+    const next = new Set<number>();
+    for (const item of displayItems.value) {
+      if (!item.todoList) continue;
+      if (item.id === latestId) continue;
+      next.add(item.id);
+    }
+    collapsedTodoItemIds.value = next;
+    onRequestVirtualMeasure(latestId);
+  },
+  { immediate: true }
+);
 
 // 分割线放在“最后一条已归档消息”的底部.
 // 这样不依赖边界 marker 的具体原因文本,对后续扩展更稳.
@@ -909,8 +1042,14 @@ function estimateRowHeight(index: number) {
     return 140 + rows * 28 + gap;
   }
   if (item.todoList) {
+    if (isTodoCollapsed(item.id)) {
+      return 52 + gap;
+    }
     const rows = Math.min(item.todoList.todos.length, 4);
     return 96 + rows * 28 + gap;
+  }
+  if (item.writeResult) {
+    return 116 + gap;
   }
   if (item.toolName === "subtask") return 136 + gap;
   return 32 + estimateTextBlockHeight(item.text, { charsPerLine: 72, lineHeight: 18, minLines: 1, maxLines: 20 }) + gap;
@@ -1045,8 +1184,12 @@ function isTodolistCard(item: DisplayItem) {
   return item.role === "tool" && item.toolName === "todolist" && !!item.todoList;
 }
 
+function isWriteCard(item: DisplayItem) {
+  return item.role === "tool" && item.toolName === "write" && !!item.writeResult;
+}
+
 function isRichToolCard(item: DisplayItem) {
-  return isSubtaskCard(item) || isTodolistCard(item) || isApplyPatchCard(item);
+  return isSubtaskCard(item) || isTodolistCard(item) || isApplyPatchCard(item) || isWriteCard(item);
 }
 
 function formatSubtaskMode(mode?: string) {
@@ -1139,6 +1282,7 @@ function onMessageListScroll() {
   if (delta < 0) {
     stickToBottom.value = false;
     userUnfollowed.value = true;
+    clearFollowBottomLock();
     return;
   }
 
@@ -1151,6 +1295,63 @@ function onMessageListWheel(event: WheelEvent) {
   if (event.deltaY < 0) {
     stickToBottom.value = false;
     userUnfollowed.value = true;
+    clearFollowBottomLock();
+  }
+}
+
+function clearFollowBottomLock() {
+  followBottomLockSeq += 1;
+  followBottomLockRemaining.value = 0;
+  followBottomLockInFlight = false;
+  if (followBottomLockTimer != null) {
+    window.clearTimeout(followBottomLockTimer);
+    followBottomLockTimer = null;
+  }
+}
+
+function startFollowBottomLock(options?: { force?: boolean }) {
+  const force = options?.force === true;
+  if (!props.active) return;
+  if (userUnfollowed.value) return;
+  if (!force && !stickToBottom.value) return;
+  followBottomLockSeq += 1;
+  const seq = followBottomLockSeq;
+  followBottomLockRemaining.value = Math.max(followBottomLockRemaining.value, FOLLOW_BOTTOM_LOCK_MAX_ATTEMPTS);
+  if (followBottomLockTimer != null) {
+    window.clearTimeout(followBottomLockTimer);
+  }
+  followBottomLockTimer = window.setTimeout(() => {
+    if (seq !== followBottomLockSeq) return;
+    followBottomLockRemaining.value = 0;
+    followBottomLockTimer = null;
+  }, FOLLOW_BOTTOM_LOCK_TIMEOUT_MS);
+  void runFollowBottomLock(seq);
+}
+
+async function runFollowBottomLock(seq: number) {
+  if (followBottomLockInFlight) return;
+  followBottomLockInFlight = true;
+  try {
+    while (seq === followBottomLockSeq && followBottomLockRemaining.value > 0) {
+      if (!props.active) break;
+      if (!stickToBottom.value) break;
+      if (userUnfollowed.value) break;
+      if (distanceToBottom() <= 4) break;
+
+      followBottomLockRemaining.value = Math.max(0, followBottomLockRemaining.value - 1);
+      await scrollToBottom({ force: true });
+
+      // 让 DOM 渲染/测量有机会推进,再判断是否仍需要补滚动。
+      await nextTick();
+      await new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() => resolve());
+      });
+    }
+  } finally {
+    followBottomLockInFlight = false;
+    if (seq === followBottomLockSeq && distanceToBottom() <= 4) {
+      followBottomLockRemaining.value = 0;
+    }
   }
 }
 
@@ -1178,6 +1379,19 @@ async function scrollToBottom(options?: { force?: boolean }) {
   // 同步滚动基线,避免后续 scroll 事件把程序滚动误判为“用户向上滚动”。
   const el = scrollEl.value;
   if (el) lastKnownScrollTop = el.scrollTop;
+}
+
+async function scrollToBottomStable(options?: { force?: boolean }) {
+  await scrollToBottom(options);
+  const force = options?.force === true;
+  if (force) {
+    // forceFollowBottom 场景下,即使高度估算导致 dist>阈值,也应继续视为“吸底模式”。
+    stickToBottom.value = true;
+    userUnfollowed.value = false;
+  }
+  if (force || (stickToBottom.value && !userUnfollowed.value)) {
+    startFollowBottomLock({ force });
+  }
 }
 
 async function focusInputIfNeeded() {
@@ -1281,7 +1495,7 @@ async function refreshAll(forceFull: boolean, forceFollowBottom = false) {
       const full = await getAgentContextItems(props.sessionId);
       items.value = [...full.items].sort((a, b) => a.id - b.id);
       syncBoundaryMarkerCursor(items.value);
-      await scrollToBottom({ force: forceFollowBottom });
+      await scrollToBottomStable({ force: forceFollowBottom });
     } else {
       const lastId = items.value.length > 0 ? items.value[items.value.length - 1]!.id : 0;
       const delta = await getAgentContextItems(props.sessionId, lastId);
@@ -1293,13 +1507,13 @@ async function refreshAll(forceFull: boolean, forceFollowBottom = false) {
         const full = await getAgentContextItems(props.sessionId);
         items.value = [...full.items].sort((a, b) => a.id - b.id);
         syncBoundaryMarkerCursor(items.value);
-        await scrollToBottom({ force: forceFollowBottom });
+        await scrollToBottomStable({ force: forceFollowBottom });
       } else if (delta.items.length > 0) {
         for (const item of delta.items) {
           upsertItem(item);
         }
         syncBoundaryMarkerCursor(delta.items);
-        await scrollToBottom({ force: forceFollowBottom });
+        await scrollToBottomStable({ force: forceFollowBottom });
       }
     }
 
@@ -1339,7 +1553,7 @@ async function refreshAll(forceFull: boolean, forceFollowBottom = false) {
     }
 
     if (nonTerminalChanged) {
-      await scrollToBottom({ force: forceFollowBottom });
+      await scrollToBottomStable({ force: forceFollowBottom });
     }
 
     const hasLocalNonTerminal = items.value.some((item) => !isTerminalStatus(item.status));
@@ -1714,6 +1928,7 @@ watch(
   () => [props.sessionId, props.workspaceId],
   () => {
     clearPoll();
+    clearFollowBottomLock();
     handledBoundaryMarkerId.value = 0;
     scrollToBottomSeq += 1;
     pendingPollHint.value = false;
@@ -1751,6 +1966,7 @@ watch(
   (active) => {
     if (!active) {
       clearPoll();
+      clearFollowBottomLock();
       pendingPollHint.value = false;
       warmupPollRemaining = 0;
       return;
@@ -1794,6 +2010,13 @@ watch(
     if (!props.active) return;
     if (displayItems.value.length === 0) return;
     if (typeof prev === "number" && next === prev) return;
+
+    // 吸底稳定锁生效期间,忽略距离门禁,持续补滚动直到高度稳定。
+    if (followBottomLockRemaining.value > 0) {
+      void runFollowBottomLock(followBottomLockSeq);
+      return;
+    }
+
     if (!stickToBottom.value) return;
     if (userUnfollowed.value) return;
     if (distanceToBottom() > 4) return;
@@ -1803,6 +2026,7 @@ watch(
 
 onBeforeUnmount(() => {
   clearPoll();
+  clearFollowBottomLock();
   scrollToBottomSeq += 1;
 });
 </script>

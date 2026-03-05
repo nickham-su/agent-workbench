@@ -29,7 +29,7 @@ import type { AppContext } from "../../app/context.js";
 import { nowMs } from "../../utils/time.js";
 import { newSortableId } from "../../utils/ids.js";
 import { getWorkspace } from "../workspaces/workspace.store.js";
-import { applyPatchUiArtifactPath, tmpRoot } from "../../infra/fs/paths.js";
+import { applyPatchUiArtifactPath, tmpRoot, writeUiArtifactPath } from "../../infra/fs/paths.js";
 import {
   AgentConflictError,
   appendContextItem,
@@ -345,6 +345,38 @@ type ApplyPatchUiArtifactV1 = {
   files: Array<ApplyPatchSlimFile & { before: string; after: string }>;
 };
 
+type WriteSlimResult = {
+  summary: string;
+  filePath: string;
+  bytesWritten: number;
+  existedBefore: boolean;
+};
+
+type WriteUiArtifactSide = {
+  available: boolean;
+  text?: string;
+  truncated: boolean;
+  bytes: number;
+  reason?: string;
+};
+
+type WriteUiArtifactV1 = {
+  schemaVersion: 1;
+  toolName: "write";
+  workspaceId: string;
+  toolCallId: string;
+  createdAt: number;
+  filePath: string;
+  summary: {
+    bytesWritten: number;
+    existedBefore: boolean;
+  };
+  before: WriteUiArtifactSide;
+  after: WriteUiArtifactSide;
+};
+
+const WRITE_ARGS_PREVIEW_MAX_CHARS = 280;
+
 function splitApplyPatchResult(raw: unknown): {
   slim: ApplyPatchSlimResult;
   artifact: Omit<ApplyPatchUiArtifactV1, "workspaceId" | "toolCallId" | "createdAt">;
@@ -401,6 +433,112 @@ function splitApplyPatchResult(raw: unknown): {
       summary,
       files: filesArtifact
     }
+  };
+}
+
+function normalizeWriteUiSide(raw: unknown, fallbackReason: string): WriteUiArtifactSide {
+  const side = toRecord(raw);
+  if (!side) {
+    return {
+      available: false,
+      truncated: false,
+      bytes: 0,
+      reason: fallbackReason
+    };
+  }
+  const available = side.available === true;
+  const text = typeof side.text === "string" ? side.text : "";
+  const bytes = toNonNegativeInt(side.bytes ?? Buffer.byteLength(text, "utf8"));
+  const truncated = side.truncated === true;
+  const reason = typeof side.reason === "string" && side.reason.trim() ? side.reason.trim() : fallbackReason;
+
+  if (!available) {
+    return {
+      available: false,
+      truncated: false,
+      bytes,
+      reason
+    };
+  }
+
+  return {
+    available: true,
+    text,
+    truncated,
+    bytes
+  };
+}
+
+function splitWriteResult(raw: unknown): {
+  slim: WriteSlimResult;
+  artifact: Omit<WriteUiArtifactV1, "workspaceId" | "toolCallId" | "createdAt">;
+} {
+  const src = toRecord(raw) || {};
+  const filePath = String(src.filePath || src.path || "").trim();
+  const bytesWritten = toNonNegativeInt(src.bytesWritten ?? src.bytes);
+  const existedBefore = src.existedBefore === true;
+  const summary = typeof src.summary === "string" && src.summary.trim()
+    ? src.summary
+    : filePath
+      ? `写入文件 ${filePath}`
+      : "write completed";
+  const before = normalizeWriteUiSide(src.before, "missing_file");
+  const after = normalizeWriteUiSide(src.after, "missing_content");
+
+  return {
+    slim: {
+      summary,
+      filePath,
+      bytesWritten,
+      existedBefore
+    },
+    artifact: {
+      schemaVersion: 1,
+      toolName: "write",
+      filePath,
+      summary: {
+        bytesWritten,
+        existedBefore
+      },
+      before,
+      after
+    }
+  };
+}
+
+function toWriteSlimArgs(raw: unknown) {
+  const src = toRecord(raw) || {};
+  const filePath = typeof src.filePath === "string" ? src.filePath : "";
+  const content = typeof src.content === "string" ? src.content : "";
+  if (!content && !Object.prototype.hasOwnProperty.call(src, "content")) {
+    const contentBytes = toNonNegativeInt(src.contentBytes ?? 0);
+    const contentPreview = typeof src.contentPreview === "string" ? src.contentPreview : "";
+    const contentTruncated = src.contentTruncated === true;
+    return {
+      ...(filePath ? { filePath } : {}),
+      contentBytes,
+      ...(contentPreview ? { contentPreview } : {}),
+      ...(contentTruncated ? { contentTruncated: true } : {})
+    };
+  }
+
+  const contentBytes = Buffer.byteLength(content, "utf8");
+  const contentPreview = content.slice(0, WRITE_ARGS_PREVIEW_MAX_CHARS);
+  const contentTruncated = contentPreview.length < content.length;
+
+  return {
+    ...(filePath ? { filePath } : {}),
+    contentBytes,
+    ...(contentPreview ? { contentPreview } : {}),
+    ...(contentTruncated ? { contentTruncated: true } : {})
+  };
+}
+
+function toTerminalWriteOutput(output: AgentContextItemRecord["output"]) {
+  if (!output || output.type !== "tool" || output.toolName !== "write") return output;
+  return {
+    ...output,
+    args: toWriteSlimArgs(output.args)
   };
 }
 
@@ -1629,6 +1767,39 @@ export class AgentService {
     }
   }
 
+  async getWriteUiArtifact(params: { sessionId: string; itemId: number }) {
+    const item = this.getContextItem(params.sessionId, params.itemId);
+    if (item.kind !== "tool" || item.output.type !== "tool" || item.output.toolName !== "write") {
+      throw new HttpError(404, "write artifact not found");
+    }
+    const toolCallId = typeof item.output.toolCallId === "string" ? item.output.toolCallId.trim() : "";
+    if (!toolCallId) {
+      throw new HttpError(404, "write artifact not found");
+    }
+    const filePath = writeUiArtifactPath(this.ctx.dataDir, item.workspaceId, toolCallId);
+    const tmpAbs = path.resolve(tmpRoot(this.ctx.dataDir));
+    const fileAbs = path.resolve(filePath);
+    if (!fileAbs.startsWith(tmpAbs + path.sep) && fileAbs !== tmpAbs) {
+      throw new HttpError(404, "write artifact not found");
+    }
+    const st = await fs.lstat(fileAbs).catch(() => null);
+    if (!st || !st.isFile()) {
+      throw new HttpError(404, "write artifact not found");
+    }
+    await ensureRealPathUnderRoot(tmpAbs, fileAbs);
+    let text = "";
+    try {
+      text = await readFileNoFollow(fileAbs);
+    } catch {
+      throw new HttpError(404, "write artifact not found");
+    }
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      throw new HttpError(404, "write artifact not found");
+    }
+  }
+
   getRunState(sessionId: string): AgentSessionRunState {
     const session = getAgentSession(this.ctx.db, sessionId);
     if (!session) throw new HttpError(404, "session not found");
@@ -1712,7 +1883,7 @@ export class AgentService {
         updateContextItem(this.ctx.db, {
           itemId: item.id,
           status: "cancelled",
-          output: item.output,
+          output: toTerminalWriteOutput(item.output),
           updatedAt: createdAt
         });
       }
@@ -1790,11 +1961,11 @@ export class AgentService {
     updateContextItem(this.ctx.db, {
       itemId: item.id,
       status: "denied",
-      output: {
+      output: toTerminalWriteOutput({
         ...output,
         text: `tool: ${output.toolName}\nstatus: denied\n\npermission denied`,
         error: "permission denied"
-      },
+      }),
       updatedAt
     });
     updateRunRecordStatus(this.ctx.db, {
@@ -1925,6 +2096,62 @@ export class AgentService {
       nextOutput = {
         ...(nextOutput as any),
         result: slim
+      } as any;
+    }
+
+    const isWriteTool = nextOutput &&
+      (nextOutput as any).type === "tool" &&
+      (nextOutput as any).toolName === "write";
+    const isWriteTerminalStatus = nextStatus === "completed" || nextStatus === "failed" || nextStatus === "denied" || nextStatus === "cancelled";
+
+    if (isWriteTool && isWriteTerminalStatus) {
+      const tool = nextOutput as any as { toolCallId?: unknown; result?: unknown; args?: unknown };
+      const toolCallId = typeof tool.toolCallId === "string" ? tool.toolCallId.trim() : "";
+      const workspaceId = current?.workspaceId;
+
+      if (nextStatus === "completed") {
+        const { slim, artifact } = splitWriteResult(tool.result);
+        if (toolCallId && workspaceId) {
+          const filePath = writeUiArtifactPath(this.ctx.dataDir, workspaceId, toolCallId);
+          const dirPath = path.dirname(filePath);
+          const tmpAbs = path.resolve(tmpRoot(this.ctx.dataDir));
+          const dirAbs = path.resolve(dirPath);
+          if (!dirAbs.startsWith(tmpAbs + path.sep) && dirAbs !== tmpAbs) {
+            this.logger.error(
+              { itemId: params.itemId, filePath },
+              "write ui artifact path is outside tmpRoot"
+            );
+          } else {
+            try {
+              await ensureDirSafeUnderRoot(tmpAbs, dirAbs);
+              await ensureRealPathUnderRoot(tmpAbs, dirAbs);
+              const payload: WriteUiArtifactV1 = {
+                ...artifact,
+                workspaceId,
+                toolCallId,
+                createdAt: params.updatedAt ?? nowMs()
+              };
+              await writeFileNoFollow(filePath, JSON.stringify(payload));
+            } catch (err) {
+              this.logger.error({ err, itemId: params.itemId }, "failed to write write ui artifact");
+            }
+          }
+        } else {
+          this.logger.warn(
+            { itemId: params.itemId, hasToolCallId: !!toolCallId, hasWorkspaceId: !!workspaceId },
+            "write completed but missing toolCallId/workspaceId; ui artifact skipped"
+          );
+        }
+
+        nextOutput = {
+          ...(nextOutput as any),
+          result: slim
+        } as any;
+      }
+
+      nextOutput = {
+        ...(nextOutput as any),
+        args: toWriteSlimArgs(tool.args)
       } as any;
     }
 

@@ -10,6 +10,21 @@ const MAX_BYTES_LABEL = `${MAX_BYTES / 1024}KB`;
 const MAX_LINE_LENGTH = 2000;
 const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`;
 const TEXT_SAMPLE_BYTES = 32 * 1024;
+const WRITE_UI_ARTIFACT_MAX_BYTES_PER_SIDE = readPositiveIntEnv("AWB_WRITE_UI_ARTIFACT_MAX_BYTES_PER_SIDE", 200 * 1024);
+
+type WriteArtifactSide = {
+  available: boolean;
+  text?: string;
+  truncated: boolean;
+  bytes: number;
+  reason?: string;
+};
+
+function readPositiveIntEnv(name: string, fallback: number) {
+  const raw = Number(process.env[name]);
+  if (!Number.isFinite(raw) || raw <= 0) return fallback;
+  return Math.floor(raw);
+}
 
 function ensureSafeRelativePath(input: string) {
   const value = String(input || "").trim();
@@ -69,6 +84,102 @@ async function isUtf8TextFile(filePath: string, size: number) {
       return false;
     }
     return true;
+  } finally {
+    await handle.close();
+  }
+}
+
+function decodeUtf8Prefix(bytes: Buffer, maxBytes: number) {
+  const truncated = bytes.length > maxBytes;
+  const prefix = truncated ? bytes.subarray(0, maxBytes) : bytes;
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let end = prefix.length;
+  while (end > 0) {
+    try {
+      const text = decoder.decode(prefix.subarray(0, end));
+      return { text, truncated };
+    } catch {
+      end -= 1;
+    }
+  }
+  return { text: "", truncated };
+}
+
+function writeSideFromText(text: string, maxBytes: number): WriteArtifactSide {
+  const bytes = Buffer.from(String(text || ""), "utf8");
+  const decoded = decodeUtf8Prefix(bytes, maxBytes);
+  return {
+    available: true,
+    text: decoded.text,
+    truncated: decoded.truncated,
+    bytes: bytes.length
+  };
+}
+
+async function readWriteBeforeSide(filePath: string, maxBytes: number): Promise<WriteArtifactSide> {
+  const stat = await fs.lstat(filePath).catch((err: any) => {
+    if (err && err.code === "ENOENT") return null;
+    throw err;
+  });
+  if (!stat) {
+    return {
+      available: false,
+      truncated: false,
+      bytes: 0,
+      reason: "missing_file"
+    };
+  }
+  if (stat.isSymbolicLink()) {
+    return {
+      available: false,
+      truncated: false,
+      bytes: 0,
+      reason: "symlink"
+    };
+  }
+  if (!stat.isFile()) {
+    return {
+      available: false,
+      truncated: false,
+      bytes: 0,
+      reason: "non_file"
+    };
+  }
+  const size = Number(stat.size);
+  const isText = await isUtf8TextFile(filePath, size);
+  if (!isText) {
+    return {
+      available: false,
+      truncated: false,
+      bytes: Number.isFinite(size) && size > 0 ? Math.floor(size) : 0,
+      reason: "non_text"
+    };
+  }
+
+  const readLen = Math.max(0, Math.min(maxBytes, Number.isFinite(size) ? Math.floor(size) : maxBytes));
+  if (readLen === 0) {
+    return {
+      available: true,
+      text: "",
+      truncated: false,
+      bytes: 0
+    };
+  }
+
+  const handle = await fs.open(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(readLen);
+    const { bytesRead } = await handle.read(buffer, 0, readLen, 0);
+    const source = buffer.subarray(0, bytesRead);
+    const decoded = decodeUtf8Prefix(source, maxBytes);
+    const originalBytes = Number.isFinite(size) && size >= 0 ? Math.floor(size) : bytesRead;
+    const truncated = decoded.truncated || originalBytes > source.length;
+    return {
+      available: true,
+      text: decoded.text,
+      truncated,
+      bytes: originalBytes
+    };
   } finally {
     await handle.close();
   }
@@ -217,11 +328,20 @@ export async function runWriteTool(params: {
     throw new Error("symlink path is not allowed");
   }
 
+  const before = await readWriteBeforeSide(fullPath, WRITE_UI_ARTIFACT_MAX_BYTES_PER_SIDE);
+  const existedBefore = before.reason !== "missing_file";
+  const after = writeSideFromText(params.content, WRITE_UI_ARTIFACT_MAX_BYTES_PER_SIDE);
+
   throwIfAborted(params.signal);
   await fs.writeFile(fullPath, params.content, { encoding: "utf8" });
   const bytes = Buffer.byteLength(params.content, "utf8");
   return {
     summary: `写入文件 ${safePath}`,
-    content: `ok: wrote ${bytes} bytes to ${safePath}`
+    content: `ok: wrote ${bytes} bytes to ${safePath}`,
+    filePath: safePath,
+    bytesWritten: bytes,
+    existedBefore,
+    before,
+    after
   };
 }

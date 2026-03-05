@@ -1,79 +1,46 @@
 <template>
-  <div class="rounded border border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] p-2">
-    <div class="flex items-center justify-between gap-2">
-      <div class="text-[12px] font-semibold">
-        apply_patch
-      </div>
-      <div class="text-[11px] text-[color:var(--text-tertiary)]">
-        files: {{ summary.fileCount }}
-        <span class="inline-block w-2" />
-        +{{ summary.additions }}
-        <span class="inline-block w-1" />
-        -{{ summary.deletions }}
-        <span v-if="omittedFiles > 0" class="inline-block w-2" />
-        <span v-if="omittedFiles > 0">(+{{ omittedFiles }} omitted)</span>
-      </div>
-    </div>
-
-    <div v-if="errorText" class="pt-1 text-[12px] text-red-500">
-      Error: {{ errorText }}
-    </div>
-
-    <div class="pt-2">
-      <div class="text-[11px] text-[color:var(--text-tertiary)] pb-1">Files</div>
-      <!--
-        用 antd 按钮替代原生 button:
-        - Tailwind 关闭 preflight 时,原生 button 会保留 UA 默认背景(暗色主题下尤其明显)
-        - 这里改成小号按钮,从左到右排列,不足自动换行
-      -->
-      <div class="flex flex-wrap gap-1">
-        <a-button
-          v-for="(file, idx) in files"
-          :key="`${file.path}-${idx}`"
-          size="small"
-          :type="selectedPath === file.path ? 'primary' : 'default'"
-          class="!max-w-full !inline-flex !items-center !gap-2 !px-2"
-          :title="file.path"
-          @click="onPickFile(file.path)"
-        >
-          <span class="font-mono text-[10px] opacity-70">{{ file.type }}</span>
-          <span class="min-w-0 max-w-[42ch] truncate text-[12px] font-medium">{{ file.path }}</span>
-          <span class="text-[11px] opacity-70 whitespace-nowrap">+{{ file.additions }} -{{ file.deletions }}</span>
+  <div class="py-0.5 pl-2">
+    <div
+      v-for="(file, idx) in files"
+      :key="`${file.path}-${idx}`"
+      class="py-0.5"
+    >
+      <div class="flex items-center gap-2 min-w-0 text-[12px] leading-5 flex-wrap">
+        <span class="font-semibold shrink-0">applypatch</span>
+        <span class="font-mono text-[11px] text-[color:var(--text-secondary)] min-w-0 max-w-[60%] truncate" :title="file.path">
+          {{ file.path }}
+        </span>
+        <span class="shrink-0 text-[11px] text-[color:var(--text-tertiary)]">+{{ file.additions }} -{{ file.deletions }}</span>
+        <a-button size="small" type="text" class="shrink-0 !px-1" @click="onPickFile(file.path)">
+          {{ isExpanded(file.path) ? "收起" : "查看" }}
         </a-button>
       </div>
-    </div>
 
-    <div v-if="selectedPath" class="pt-2">
-      <div class="flex items-center justify-between gap-2">
-        <div class="text-[11px] text-[color:var(--text-tertiary)] break-all">
-          Diff: {{ selectedPath }}
+      <div v-if="isExpanded(file.path)" class="pt-1 pl-4">
+        <div v-if="loading" class="text-[12px] text-[color:var(--text-tertiary)]">
+          Loading diff...
         </div>
-        <a-button size="small" type="text" class="!px-2" @click="onClose">
-          Close
-        </a-button>
-      </div>
-
-      <div v-if="loading" class="pt-2 text-[12px] text-[color:var(--text-tertiary)]">
-        Loading diff...
-      </div>
-      <div v-else-if="loadError" class="pt-2 text-[12px] text-red-500">
-        diff unavailable: {{ loadError }}
-      </div>
-      <div v-else-if="selectedDiff" class="pt-2 rounded border border-[var(--border-color-secondary)] overflow-hidden">
-        <MonacoDiffViewer
-          :original="selectedDiff.before"
-          :modified="selectedDiff.after"
-          :language="inferLanguageFromPath(selectedDiff.path)"
-          :sideBySide="false"
-          :showOverviewRuler="false"
-          :compactMode="true"
-          :hideUnchangedRegions="{ enabled: true, contextLineCount: 1, minimumLineCount: 1, revealLineCount: 1 }"
-          :autoHeight="true"
-          :minHeight="72"
-          :ignoreTrimWhitespace="true"
-        />
+        <div v-else-if="loadError" class="text-[12px] text-red-500">
+          diff unavailable: {{ loadError }}
+        </div>
+        <div v-else-if="diffByPath.get(file.path)" class="rounded border border-[var(--border-color-secondary)] overflow-hidden">
+          <MonacoDiffViewer
+            :original="diffByPath.get(file.path)?.before || ''"
+            :modified="diffByPath.get(file.path)?.after || ''"
+            :language="inferLanguageFromPath(file.path)"
+            :sideBySide="false"
+            :showOverviewRuler="false"
+            :compactMode="true"
+            :hideUnchangedRegions="{ enabled: true, contextLineCount: 1, minimumLineCount: 1, revealLineCount: 1 }"
+            :autoHeight="true"
+            :minHeight="72"
+            :ignoreTrimWhitespace="true"
+          />
+        </div>
       </div>
     </div>
+
+    <div v-if="errorText" class="text-[12px] text-red-500 py-0.5">error: {{ errorText }}</div>
   </div>
 </template>
 
@@ -127,7 +94,7 @@ const emit = defineEmits<{
 }>();
 
 type CacheEntry = {
-  selectedPath: string;
+  expandedPaths: string[];
   artifact: ApplyPatchUiArtifact | null;
   loading: boolean;
   error: string;
@@ -157,21 +124,28 @@ function touchLru(key: string, value: CacheEntry) {
 function ensureEntry(key: string): CacheEntry {
   const existing = cache.get(key);
   if (existing) return existing;
-  const next: CacheEntry = { selectedPath: "", artifact: null, loading: false, error: "", promise: null };
+  const next: CacheEntry = { expandedPaths: [], artifact: null, loading: false, error: "", promise: null };
   cache.set(key, next);
   return next;
 }
 
-const selectedPath = ref("");
+const expandedPaths = ref<string[]>([]);
 const loading = ref(false);
 const loadError = ref("");
 const artifact = ref<ApplyPatchUiArtifact | null>(null);
 
-const selectedDiff = computed(() => {
+function isExpanded(pathValue: string) {
+  return expandedPaths.value.includes(pathValue);
+}
+
+const diffByPath = computed(() => {
+  const map = new Map<string, ApplyPatchUiArtifactFile>();
   const art = artifact.value;
-  const p = selectedPath.value;
-  if (!art || !p) return null;
-  return art.files.find((f) => f.path === p) ?? null;
+  if (!art) return map;
+  for (const file of art.files) {
+    map.set(file.path, file);
+  }
+  return map;
 });
 
 async function loadArtifact(key: string, toolCallId: string) {
@@ -233,22 +207,26 @@ async function onPickFile(pathValue: string) {
   const p = String(pathValue || "").trim();
   if (!p) return;
 
-  // toggle
-  if (selectedPath.value === p) {
-    onClose();
-    return;
+  const next = new Set(expandedPaths.value);
+  const isOpen = next.has(p);
+  if (isOpen) {
+    next.delete(p);
+  } else {
+    next.add(p);
   }
+  expandedPaths.value = Array.from(next);
 
-  selectedPath.value = p;
   if (props.toolCallId) {
     const key = cacheKey(props.workspaceId, props.toolCallId);
     const entry = ensureEntry(key);
     touchLru(key, entry);
-    entry.selectedPath = p;
+    entry.expandedPaths = expandedPaths.value;
   }
 
   await nextTick();
   emit("request-measure");
+
+  if (isOpen) return;
 
   if (props.toolCallId) {
     const key = cacheKey(props.workspaceId, props.toolCallId);
@@ -261,25 +239,12 @@ async function onPickFile(pathValue: string) {
   emit("request-measure");
 }
 
-async function onClose() {
-  selectedPath.value = "";
-  loadError.value = "";
-  if (props.toolCallId) {
-    const key = cacheKey(props.workspaceId, props.toolCallId);
-    const entry = ensureEntry(key);
-    touchLru(key, entry);
-    entry.selectedPath = "";
-  }
-  await nextTick();
-  emit("request-measure");
-}
-
 onMounted(() => {
   if (!props.toolCallId) return;
   const key = cacheKey(props.workspaceId, props.toolCallId);
   const entry = ensureEntry(key);
   touchLru(key, entry);
-  selectedPath.value = entry.selectedPath;
+  expandedPaths.value = Array.isArray(entry.expandedPaths) ? entry.expandedPaths : [];
   artifact.value = entry.artifact;
   loadError.value = entry.error;
 });
@@ -291,7 +256,7 @@ watch(
     const key = cacheKey(props.workspaceId, next);
     const entry = ensureEntry(key);
     touchLru(key, entry);
-    selectedPath.value = entry.selectedPath;
+    expandedPaths.value = Array.isArray(entry.expandedPaths) ? entry.expandedPaths : [];
     artifact.value = entry.artifact;
     loadError.value = entry.error;
   }

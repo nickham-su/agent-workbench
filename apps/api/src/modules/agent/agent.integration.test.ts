@@ -2267,6 +2267,358 @@ test("apply_patch artifact 文件缺失时返回 404", async () => {
   assert.equal(artifactRes.statusCode, 404);
 });
 
+test("write completed 后瘦身 args/result 并支持 artifact 拉取", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "请写入文件"
+    }
+  });
+
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_write",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: {
+      type: "assistant_text",
+      text: "开始写文件"
+    }
+  });
+
+  const writeContent = "hello\nworld\n";
+  const writeBytes = Buffer.byteLength(writeContent, "utf8");
+
+  const toolItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_write",
+    step: 1,
+    prevId: assistantItem.item.id,
+    kind: "tool",
+    status: "queued",
+    output: {
+      type: "tool",
+      toolName: "write",
+      toolCallId: "call_write_1",
+      args: {
+        filePath: "foo.txt",
+        content: writeContent
+      },
+      text: "write queued"
+    }
+  });
+
+  await updateContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    itemId: toolItem.item.id,
+    status: "completed",
+    output: {
+      type: "tool",
+      toolName: "write",
+      toolCallId: "call_write_1",
+      args: {
+        filePath: "foo.txt",
+        content: writeContent
+      },
+      result: {
+        summary: "写入文件 foo.txt",
+        filePath: "foo.txt",
+        bytesWritten: writeBytes,
+        existedBefore: false,
+        before: {
+          available: false,
+          truncated: false,
+          bytes: 0,
+          reason: "missing_file"
+        },
+        after: {
+          available: true,
+          text: writeContent,
+          truncated: false,
+          bytes: writeBytes
+        }
+      },
+      text: "ok: wrote file"
+    }
+  });
+
+  const storedTool = await getContextItem(fixture.app, session.id, toolItem.item.id);
+  const storedOutput = storedTool.output as { args?: Record<string, unknown>; result?: Record<string, unknown> };
+  const storedArgs = storedOutput.args || {};
+  assert.equal(Object.prototype.hasOwnProperty.call(storedArgs, "content"), false, "write args should strip content");
+  assert.equal(Number(storedArgs.contentBytes), writeBytes);
+
+  const storedResult = storedOutput.result || {};
+  assert.equal(Object.prototype.hasOwnProperty.call(storedResult, "before"), false, "write result should strip before");
+  assert.equal(Object.prototype.hasOwnProperty.call(storedResult, "after"), false, "write result should strip after");
+
+  const artifactRes = await fixture.app.inject({
+    method: "GET",
+    url: `/api/agent/sessions/${session.id}/context-items/${toolItem.item.id}/write-artifact`
+  });
+  assert.equal(artifactRes.statusCode, 200, `write artifact fetch failed: ${artifactRes.body}`);
+  const artifact = artifactRes.json() as { before?: Record<string, unknown>; after?: Record<string, unknown> };
+  assert.equal(artifact.before?.available, false);
+  assert.equal(artifact.after?.available, true);
+  assert.equal(typeof artifact.after?.text, "string");
+
+  const context = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+
+  const assistantWithToolCall = context.messages.find((message) => {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) return false;
+    return message.content.some((part) => {
+      if (!part || typeof part !== "object") return false;
+      return (part as { type?: string; toolName?: string }).type === "tool-call" &&
+        (part as { toolName?: string }).toolName === "write";
+    });
+  });
+  assert.ok(assistantWithToolCall, "assistant message should include write tool-call part");
+
+  const toolCallPart = Array.isArray(assistantWithToolCall?.content)
+    ? assistantWithToolCall.content.find((part) => {
+        if (!part || typeof part !== "object") return false;
+        return (part as { type?: string; toolName?: string }).type === "tool-call" &&
+          (part as { toolName?: string }).toolName === "write";
+      })
+    : null;
+  const input = (toolCallPart as { input?: Record<string, unknown> } | null)?.input ?? {};
+  assert.equal(typeof input.filePath, "string");
+  assert.equal(typeof input.contentBytes, "number");
+  assert.equal(Object.prototype.hasOwnProperty.call(input, "content"), false, "write tool-call input should strip content");
+});
+
+test("write artifact 文件缺失时返回 404", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const toolItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_write",
+    step: 1,
+    prevId: null,
+    kind: "tool",
+    status: "queued",
+    output: {
+      type: "tool",
+      toolName: "write",
+      toolCallId: "call_write_1",
+      args: { filePath: "foo.txt", content: "hello" },
+      text: "queued"
+    }
+  });
+
+  await updateContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    itemId: toolItem.item.id,
+    status: "completed",
+    output: {
+      type: "tool",
+      toolName: "write",
+      toolCallId: "call_write_1",
+      args: { filePath: "foo.txt", content: "hello" },
+      result: {
+        summary: "写入文件 foo.txt",
+        filePath: "foo.txt",
+        bytesWritten: 5,
+        existedBefore: false,
+        before: { available: false, truncated: false, bytes: 0, reason: "missing_file" },
+        after: { available: true, text: "hello", truncated: false, bytes: 5 }
+      },
+      text: "ok"
+    }
+  });
+
+  const artifactPath = path.join(
+    fixture.dataDir,
+    "tmp",
+    "agent",
+    "ui-artifacts",
+    "write",
+    fixture.workspaceId,
+    "call_write_1.json"
+  );
+  await fs.rm(artifactPath, { force: true });
+
+  const artifactRes = await fixture.app.inject({
+    method: "GET",
+    url: `/api/agent/sessions/${session.id}/context-items/${toolItem.item.id}/write-artifact`
+  });
+  assert.equal(artifactRes.statusCode, 404);
+});
+
+test("write 在 deny 终态会瘦身 args.content", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+
+  const toolItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_write",
+    step: 1,
+    prevId: null,
+    kind: "tool",
+    status: "awaiting_permission",
+    output: {
+      type: "tool",
+      toolName: "write",
+      toolCallId: "call_write_deny",
+      args: {
+        filePath: "deny.txt",
+        content: "secret deny payload"
+      }
+    }
+  });
+
+  await updateRunStateInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "waiting_permission",
+    activeRunId: runId,
+    activeAssistantItemId: null,
+    waitingToolItemId: toolItem.item.id
+  });
+
+  const denyRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/tool-permission`,
+    payload: {
+      workspaceId: fixture.workspaceId,
+      toolItemId: toolItem.item.id,
+      decision: "deny"
+    }
+  });
+  assert.equal(denyRes.statusCode, 200, `deny write permission failed: ${denyRes.body}`);
+
+  const deniedItem = await getContextItem(fixture.app, session.id, toolItem.item.id);
+  assert.equal(deniedItem.status, "denied");
+  const args = (deniedItem.output as { args?: Record<string, unknown> }).args || {};
+  assert.equal(Object.prototype.hasOwnProperty.call(args, "content"), false);
+  assert.equal(typeof args.contentBytes, "number");
+});
+
+test("write 在 cancel 终态会瘦身 args.content", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+
+  const toolItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_write_cancel",
+    step: 1,
+    prevId: null,
+    kind: "tool",
+    status: "running",
+    output: {
+      type: "tool",
+      toolName: "write",
+      toolCallId: "call_write_cancel",
+      args: {
+        filePath: "cancel.txt",
+        content: "secret cancel payload"
+      }
+    }
+  });
+
+  await updateRunStateInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "running",
+    activeRunId: runId,
+    activeAssistantItemId: null,
+    waitingToolItemId: null
+  });
+
+  const cancelRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/cancel`,
+    payload: {
+      workspaceId: fixture.workspaceId
+    }
+  });
+  assert.equal(cancelRes.statusCode, 200, `cancel write run failed: ${cancelRes.body}`);
+
+  const cancelledItem = await getContextItem(fixture.app, session.id, toolItem.item.id);
+  assert.equal(cancelledItem.status, "cancelled");
+  const args = (cancelledItem.output as { args?: Record<string, unknown> }).args || {};
+  assert.equal(Object.prototype.hasOwnProperty.call(args, "content"), false);
+  assert.equal(typeof args.contentBytes, "number");
+});
+
 test("agent tool 字符串结果保持原始字符串语义", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);

@@ -148,7 +148,7 @@ function encodeStoredColumns(params: {
     ...(params.output.approved === true ? { approval: { approved: true } } : {})
   };
   const shouldPersistStructuredResult =
-    toolName === "apply_patch" || toolName === "todolist" || toolName === "subtask";
+    toolName === "apply_patch" || toolName === "todolist" || toolName === "subtask" || toolName === "write";
   const toolResultPayload: StoredToolResult = {
     status: params.status,
     ...(shouldPersistStructuredResult && Object.prototype.hasOwnProperty.call(params.output, "result")
@@ -247,7 +247,7 @@ function mapFromStoredColumns(row: AgentContextItemRow): AgentContextItemOutput 
       } catch {
         parsedResult = row.outputText;
       }
-    } else if (!resultFormat && (toolName === "apply_patch" || toolName === "todolist" || toolName === "subtask")) {
+    } else if (!resultFormat && (toolName === "apply_patch" || toolName === "todolist" || toolName === "subtask" || toolName === "write")) {
       // 兼容早期拆分数据: 这些工具历史上通常为结构化结果。
       try {
         parsedResult = JSON.parse(row.outputText);

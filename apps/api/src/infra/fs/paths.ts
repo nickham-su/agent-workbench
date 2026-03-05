@@ -47,6 +47,12 @@ export function applyPatchUiArtifactPath(dataDir: string, workspaceId: string, t
   return path.join(tmpRoot(dataDir), "agent", "ui-artifacts", "apply_patch", ws, `${call}.json`);
 }
 
+export function writeUiArtifactPath(dataDir: string, workspaceId: string, toolCallId: string) {
+  const ws = safePathSegment(workspaceId);
+  const call = safePathSegment(toolCallId);
+  return path.join(tmpRoot(dataDir), "agent", "ui-artifacts", "write", ws, `${call}.json`);
+}
+
 export function sshRoot(dataDir: string) {
   return path.join(dataDir, "ssh");
 }

@@ -1,9 +1,11 @@
 import type { AgentContextItemStatus, AgentContextToolName } from "@agent-workbench/shared";
 import { defaultToolPromptProjector } from "./default.js";
 import { applyPatchToolPromptProjector } from "./apply-patch.js";
+import { writeToolPromptProjector } from "./write.js";
 
 const toolPromptProjectorRegistry = new Map<string, typeof defaultToolPromptProjector>([
-  ["apply_patch", applyPatchToolPromptProjector]
+  ["apply_patch", applyPatchToolPromptProjector],
+  ["write", writeToolPromptProjector]
 ]);
 
 function resolveToolPromptProjector(toolName: AgentContextToolName) {

@@ -12,6 +12,7 @@ import { runReadTool, runWriteTool } from "./fileTools.js";
 import { McpManager } from "./mcpManager.js";
 import { applyPreparedPatch, prepareApplyPatchTool, type ApplyPatchPrepared } from "./applyPatch.js";
 import { parseTodolistArgs, toTodolistResult } from "./todolist.js";
+import { chunkStartsVisibleOutput } from "./modelRetry.js";
 
 function nowMs() {
   return Date.now();
@@ -1631,7 +1632,9 @@ export class AgentRunner {
       let idleTimedOut = false;
       let totalTimedOut = false;
       let lastChunkAt = nowMs();
-      let attemptReceivedAnyChunk = false;
+      // 只要本次请求已经开始产生可见输出(文本/tool-call),就不再自动重试。
+      // 这样可以避免重试导致的重复内容,以及工具重复执行带来的副作用。
+      let attemptStartedVisibleOutput = false;
 
       const onOuterAbort = () => {
         requestController.abort();
@@ -1673,7 +1676,9 @@ export class AgentRunner {
         successfulStream = stream;
         for await (const chunk of stream.fullStream as AsyncIterable<any>) {
           if (requestController.signal.aborted) break;
-          attemptReceivedAnyChunk = true;
+          if (!attemptStartedVisibleOutput && chunkStartsVisibleOutput(chunk, availableToolNames)) {
+            attemptStartedVisibleOutput = true;
+          }
           lastChunkAt = nowMs();
           if (!chunk || typeof chunk !== "object") continue;
           if (chunk.type === "text-delta") {
@@ -1735,7 +1740,7 @@ export class AgentRunner {
         }
         const message = err instanceof Error ? err.message : String(err);
 
-        const canRetry = !attemptReceivedAnyChunk && retryCount < modelRequestMaxRetries;
+        const canRetry = !attemptStartedVisibleOutput && retryCount < modelRequestMaxRetries;
         if (canRetry) {
           const delayMs = computeRetryBackoffMs(retryCount);
           const retryAttempt = retryCount + 1;
