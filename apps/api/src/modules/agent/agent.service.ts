@@ -1136,10 +1136,15 @@ async function rgSearchInFileWithOffsets(params: {
   });
 }
 
-function buildArchiveLine(item: AgentContextItemRecord) {
+function buildArchiveLine(item: AgentContextItemRecord): string | null {
   let text = "";
   if (item.kind === "user" && item.output.type === "user_text") text = item.output.text || "";
-  else if (item.kind === "assistant" && item.output.type === "assistant_text") text = item.output.text || "";
+  else if (item.kind === "assistant" && item.output.type === "assistant_text") {
+    const raw = item.output.text || "";
+    // assistant 仅发起 tool-call 时可能没有自然语言文本,归档空行没有价值,直接过滤。
+    if (!String(raw).trim()) return null;
+    text = raw;
+  }
   else if (item.kind === "system" && item.output.type === "system_text") text = item.output.text || "";
   else if (item.kind === "tool" && item.output.type === "tool") {
     if (typeof item.output.text === "string" && item.output.text.trim()) {
@@ -1510,7 +1515,10 @@ export class AgentService {
 
     if (params.mode === "with_archive" && archivedSourceItemIds.size > 0) {
       const nextTranscript = getSessionTranscriptItems(this.ctx.db, fromSession.workspaceId, newSessionId);
-      const archiveLines = nextTranscript.filter((item) => item.archiveAt != null).map((item) => buildArchiveLine(item));
+      const archiveLines = nextTranscript
+        .filter((item) => item.archiveAt != null)
+        .map((item) => buildArchiveLine(item))
+        .filter((line): line is string => line != null);
       if (archiveLines.length > 0) {
         try {
           await appendArchiveLines({
@@ -2635,7 +2643,7 @@ export class AgentService {
       }
 
       const createdAt = nowMs();
-      const archiveLines = visible.map((item) => buildArchiveLine(item));
+      const archiveLines = visible.map((item) => buildArchiveLine(item)).filter((line): line is string => line != null);
       const archiveSnapshots = await appendArchiveLines({
         dataDir: this.ctx.dataDir,
         workspaceId: params.workspaceId,
@@ -2730,7 +2738,7 @@ export class AgentService {
       }
 
       const createdAt = nowMs();
-      const archiveLines = visible.map((item) => buildArchiveLine(item));
+      const archiveLines = visible.map((item) => buildArchiveLine(item)).filter((line): line is string => line != null);
       const archiveSnapshots = await appendArchiveLines({
         dataDir: this.ctx.dataDir,
         workspaceId: session.workspaceId,
