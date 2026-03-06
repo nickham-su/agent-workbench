@@ -11,7 +11,6 @@
   "dependencies": {
     "@agent-workbench/shared": "*",
     "@ant-design/icons-vue": "^7.0.1",
-    "@tanstack/vue-virtual": "^3.13.19",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
     "ant-design-vue": "^4.2.6",
