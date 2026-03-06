@@ -14,7 +14,7 @@ async function withTempWorkspace(fn: (workspacePath: string) => Promise<void>) {
   }
 }
 
-test("apply_patch 支持同一文件多段 update 连续生效", async () => {
+test("apply_patch legacy patch 会被明确提示改用 unified diff", async () => {
   await withTempWorkspace(async (workspacePath) => {
     const target = path.join(workspacePath, "multi.txt");
     await fs.writeFile(target, "foo\nbar\n", { encoding: "utf8" });
@@ -25,44 +25,29 @@ test("apply_patch 支持同一文件多段 update 连续生效", async () => {
       "@@",
       "-foo",
       "+foo-1",
-      "*** Update File: multi.txt",
-      "@@",
-      "-bar",
-      "+bar-2",
       "*** End Patch"
     ].join("\n");
 
-    const prepared = await prepareApplyPatchTool({ workspacePath, patchText });
-    await applyPreparedPatch({ workspacePath, prepared });
-
-    const content = await fs.readFile(target, "utf8");
-    assert.equal(content, "foo-1\nbar-2\n");
+    await assert.rejects(
+      () => prepareApplyPatchTool({ workspacePath, patchText }),
+      /only supports git unified diff[\s\S]*Detected legacy patch format[\s\S]*diff --git a\/<path> b\/<path>[\s\S]*@@ -1,1 \+1,1 @@/
+    );
   });
 });
 
-test("apply_patch 同一路径别名会命中同一虚拟文件状态", async () => {
+test("apply_patch legacy patch 首行不是 Begin Patch 时也会被明确提示", async () => {
   await withTempWorkspace(async (workspacePath) => {
-    const target = path.join(workspacePath, "alias.txt");
-    await fs.writeFile(target, "old-1\nold-2\n", { encoding: "utf8" });
-
     const patchText = [
-      "*** Begin Patch",
-      "*** Update File: alias.txt",
+      "*** Update File: foo.txt",
       "@@",
-      "-old-1",
-      "+new-1",
-      "*** Update File: ./alias.txt",
-      "@@",
-      "-old-2",
-      "+new-2",
-      "*** End Patch"
+      "-old",
+      "+new"
     ].join("\n");
 
-    const prepared = await prepareApplyPatchTool({ workspacePath, patchText });
-    await applyPreparedPatch({ workspacePath, prepared });
-
-    const content = await fs.readFile(target, "utf8");
-    assert.equal(content, "new-1\nnew-2\n");
+    await assert.rejects(
+      () => prepareApplyPatchTool({ workspacePath, patchText }),
+      /only supports git unified diff[\s\S]*\*\*\* Update File:[\s\S]*@@ -1,1 \+1,1 @@/
+    );
   });
 });
 
@@ -74,84 +59,20 @@ test("apply_patch move 目标已存在时拒绝覆盖", async () => {
     await fs.writeFile(target, "target\n", { encoding: "utf8" });
 
     const patchText = [
-      "*** Begin Patch",
-      "*** Update File: source.txt",
-      "*** Move to: target.txt",
-      "@@",
+      "diff --git a/source.txt b/target.txt",
+      "similarity index 50%",
+      "rename from source.txt",
+      "rename to target.txt",
+      "--- a/source.txt",
+      "+++ b/target.txt",
+      "@@ -1,1 +1,1 @@",
       "-source",
-      "+moved",
-      "*** End Patch"
+      "+moved"
     ].join("\n");
 
-    await assert.rejects(
-      () => prepareApplyPatchTool({ workspacePath, patchText }),
-      /move target already exists/
-    );
-
-    const sourceContent = await fs.readFile(source, "utf8");
-    const targetContent = await fs.readFile(target, "utf8");
-    assert.equal(sourceContent, "source\n");
-    assert.equal(targetContent, "target\n");
-  });
-});
-
-test("apply_patch move 在 apply 阶段也拒绝覆盖新出现的目标文件", async () => {
-  await withTempWorkspace(async (workspacePath) => {
-    const source = path.join(workspacePath, "source.txt");
-    const target = path.join(workspacePath, "target.txt");
-    await fs.writeFile(source, "source\n", { encoding: "utf8" });
-
-    const patchText = [
-      "*** Begin Patch",
-      "*** Update File: source.txt",
-      "*** Move to: target.txt",
-      "@@",
-      "-source",
-      "+moved",
-      "*** End Patch"
-    ].join("\n");
-
-    const prepared = await prepareApplyPatchTool({ workspacePath, patchText });
-    await fs.writeFile(target, "created-later\n", { encoding: "utf8" });
-
-    await assert.rejects(
-      () => applyPreparedPatch({ workspacePath, prepared }),
-      /move target already exists/
-    );
-
-    const sourceContent = await fs.readFile(source, "utf8");
-    const targetContent = await fs.readFile(target, "utf8");
-    assert.equal(sourceContent, "source\n");
-    assert.equal(targetContent, "created-later\n");
-  });
-});
-
-test("apply_patch 支持在 update hunk 后声明 move 目标", async () => {
-  await withTempWorkspace(async (workspacePath) => {
-    const source = path.join(workspacePath, "source.txt");
-    const target = path.join(workspacePath, "target.txt");
-    await fs.writeFile(source, "source\n", { encoding: "utf8" });
-
-    const patchText = [
-      "*** Begin Patch",
-      "*** Update File: source.txt",
-      "@@",
-      "-source",
-      "+moved",
-      "*** Move to: target.txt",
-      "*** End Patch"
-    ].join("\n");
-
-    const prepared = await prepareApplyPatchTool({ workspacePath, patchText });
-    assert.equal(prepared.files[0]?.type, "move");
-    assert.equal(prepared.files[0]?.path, "target.txt");
-    assert.equal(prepared.files[0]?.fromPath, "source.txt");
-
-    await applyPreparedPatch({ workspacePath, prepared });
-
-    await assert.rejects(() => fs.readFile(source, "utf8"));
-    const targetContent = await fs.readFile(target, "utf8");
-    assert.equal(targetContent, "moved\n");
+    await assert.rejects(() => prepareApplyPatchTool({ workspacePath, patchText }), /move target already exists/);
+    assert.equal(await fs.readFile(source, "utf8"), "source\n");
+    assert.equal(await fs.readFile(target, "utf8"), "target\n");
   });
 });
 
@@ -161,27 +82,28 @@ test("apply_patch verify 失败时不写入任何变更", async () => {
     await fs.writeFile(target, "line-a\n", { encoding: "utf8" });
 
     const patchText = [
-      "*** Begin Patch",
-      "*** Update File: verify.txt",
-      "@@",
+      "diff --git a/verify.txt b/verify.txt",
+      "--- a/verify.txt",
+      "+++ b/verify.txt",
+      "@@ -1,1 +1,1 @@",
       "-line-b",
-      "+line-c",
-      "*** End Patch"
+      "+line-c"
     ].join("\n");
 
     await assert.rejects(() => prepareApplyPatchTool({ workspacePath, patchText }));
-    const content = await fs.readFile(target, "utf8");
-    assert.equal(content, "line-a\n");
+    assert.equal(await fs.readFile(target, "utf8"), "line-a\n");
   });
 });
 
 test("apply_patch 拒绝越界路径", async () => {
   await withTempWorkspace(async (workspacePath) => {
     const patchText = [
-      "*** Begin Patch",
-      "*** Add File: ../escape.txt",
-      "+oops",
-      "*** End Patch"
+      "diff --git a/../escape.txt b/../escape.txt",
+      "new file mode 100644",
+      "--- /dev/null",
+      "+++ b/../escape.txt",
+      "@@ -0,0 +1,1 @@",
+      "+oops"
     ].join("\n");
 
     await assert.rejects(() => prepareApplyPatchTool({ workspacePath, patchText }), /outside workspace/);
@@ -195,10 +117,12 @@ test("apply_patch 在 verify 阶段拒绝 symlink 父目录并且无外部副作
     await fs.symlink(outsideDir, linkDir);
 
     const patchText = [
-      "*** Begin Patch",
-      "*** Add File: linkdir/escape.txt",
-      "+blocked",
-      "*** End Patch"
+      "diff --git a/linkdir/escape.txt b/linkdir/escape.txt",
+      "new file mode 100644",
+      "--- /dev/null",
+      "+++ b/linkdir/escape.txt",
+      "@@ -0,0 +1,1 @@",
+      "+blocked"
     ].join("\n");
 
     try {
@@ -232,6 +156,28 @@ test("apply_patch git unified diff: 兼容尾部多余的 *** End Patch", async 
 
     const content = await fs.readFile(target, "utf8");
     assert.equal(content, "b\n");
+  });
+});
+
+test("apply_patch 上下文不匹配时返回 nearby actual lines 与搜索起始行", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const target = path.join(workspacePath, "verify.txt");
+    await fs.writeFile(target, "line-a\nline-b\nline-c\n", { encoding: "utf8" });
+
+    const patchText = [
+      "diff --git a/verify.txt b/verify.txt",
+      "--- a/verify.txt",
+      "+++ b/verify.txt",
+      "@@ -1,1 +1,1 @@",
+      "-line-x",
+      "+line-z"
+    ].join("\n");
+
+    await assert.rejects(
+      () => prepareApplyPatchTool({ workspacePath, patchText }),
+      /Failed to find expected lines in[\s\S]*Search started from line 1\.[\s\S]*Expected block:[\s\S]*line-x[\s\S]*Nearby actual lines:[\s\S]*1\| line-a[\s\S]*re-read the target file[\s\S]*git diff -U5/
+    );
+    assert.equal(await fs.readFile(target, "utf8"), "line-a\nline-b\nline-c\n");
   });
 });
 
