@@ -514,6 +514,7 @@ async function getPromptContextInternal(params: {
   assert.equal(res.statusCode, 200, `get prompt-context failed: ${res.body}`);
   return res.json() as {
     system: string;
+    tools: Array<{ name: string }>;
     messages: Array<{ role: string; content: unknown }>;
     pendingTools: Array<{ itemId: number; approved?: boolean; status: string; toolName: string }>;
   };
@@ -1091,6 +1092,297 @@ test("agent clear 对 subtask 会话返回只读错误", async () => {
   });
   assert.equal(clearRes.statusCode, 400, `clear subtask should fail: ${clearRes.body}`);
   assert.equal(clearRes.json().code, "AGENT_SUBTASK_READONLY");
+});
+
+test("agent prompt-context 对 subtask 会话隐藏 subtask 工具", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      default: { agentId: "default" },
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          summary: "",
+          prompt: "You are a helpful coding assistant.",
+          tools: ["bash", "read", "write", "subtask"],
+          mcpServers: [],
+          permissions: {
+            allowRead: true,
+            allowWrite: true,
+            allowBash: true
+          },
+          defaultModel: null
+        }
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `configure agents with subtask failed: ${agentsRes.body}`);
+
+  const sessionRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions",
+    payload: {
+      workspaceId: fixture.workspaceId,
+      title: "it-subtask-session",
+      kind: "subtask"
+    }
+  });
+  assert.equal(sessionRes.statusCode, 201, `create subtask session failed: ${sessionRes.body}`);
+  const session = sessionRes.json() as { id: string };
+
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const promptContext = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+
+  const toolNames = promptContext.tools.map((item) => item.name);
+  assert.equal(toolNames.includes("subtask"), false, "subtask tool should be hidden for subtask sessions");
+  assert.equal(toolNames.includes("bash"), true, "other enabled tools should remain visible");
+});
+
+test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 提示", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      default: { agentId: "default" },
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          summary: "",
+          prompt: "You are a helpful coding assistant.",
+          tools: ["bash", "read", "write", "subtask"],
+          mcpServers: [],
+          permissions: {
+            allowRead: true,
+            allowWrite: true,
+            allowBash: true
+          },
+          defaultModel: null
+        }
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `configure agents with subtask failed: ${agentsRes.body}`);
+
+  const parentSession = await createSession(fixture.app, fixture.workspaceId);
+  const parentRunId = newSortableId("run");
+  const createdAt = Date.now();
+  createRunRecord(fixture.db, {
+    runId: parentRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "请调用 subtask 把任务交给另一个 agent。"
+    }
+  });
+
+  const toolItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_subtask_fork",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "tool",
+    status: "queued",
+    output: {
+      type: "tool",
+      toolName: "subtask",
+      toolCallId: "call_subtask_fork",
+      args: {
+        description: "研究问题",
+        prompt: "请直接完成这个子任务",
+        agentId: "default",
+        session: { mode: "fork" }
+      }
+    }
+  });
+
+  const startRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/start",
+    headers: {
+      "x-awb-agent-internal-token": fixture.internalToken
+    },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      parentSessionId: parentSession.id,
+      parentRunId: parentRunId,
+      parentToolItemId: toolItem.item.id,
+      description: "研究问题",
+      prompt: "请直接完成这个子任务",
+      agentId: "default",
+      session: { mode: "fork" }
+    }
+  });
+  assert.equal(startRes.statusCode, 200, `start subtask failed: ${startRes.body}`);
+  const started = startRes.json() as { sessionId: string; runId: string };
+
+  const items = getSessionTranscriptItems(fixture.db, fixture.workspaceId, started.sessionId);
+  assert.equal(items.length >= 3, true, "forked subtask session should contain copied user, system guard and prompt user");
+
+  const copiedUser = items[0];
+  const systemItem = items[1];
+  const promptUser = items[2];
+  assert.equal(copiedUser?.kind, "user");
+  assert.equal(copiedUser?.output.type, "user_text");
+  assert.equal((copiedUser?.output as { text?: string }).text, "请调用 subtask 把任务交给另一个 agent。");
+  assert.equal(systemItem?.kind, "system");
+  assert.equal(systemItem?.output.type, "system_text");
+  assert.equal(
+    String((systemItem?.output as { text?: string }).text || "").includes("在本条系统消息之前的全部历史内容，均来自父会话复制"),
+    true
+  );
+  assert.equal(promptUser?.kind, "user");
+  assert.equal(promptUser?.output.type, "user_text");
+  assert.equal((promptUser?.output as { text?: string }).text, "请直接完成这个子任务");
+
+  const promptContext = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: started.sessionId,
+    runId: started.runId
+  });
+  assert.equal(
+    promptContext.messages.some((message) =>
+      message.role === "system" &&
+      typeof message.content === "string" &&
+      message.content.includes("在本条系统消息之前的全部历史内容，均来自父会话复制")
+    ),
+    true,
+    "prompt-context should include fork guard system message"
+  );
+  assert.equal(
+    promptContext.tools.some((tool) => tool.name === "subtask"),
+    false,
+    "forked subtask session should not expose subtask tool"
+  );
+});
+
+test("agent prompt-context 对 primary 会话保留 subtask 工具", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      default: { agentId: "default" },
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          summary: "",
+          prompt: "You are a helpful coding assistant.",
+          tools: ["bash", "read", "write", "subtask"],
+          mcpServers: [],
+          permissions: {
+            allowRead: true,
+            allowWrite: true,
+            allowBash: true
+          },
+          defaultModel: null
+        }
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `configure agents with subtask failed: ${agentsRes.body}`);
+
+  const primarySession = await createSession(fixture.app, fixture.workspaceId);
+  const seedRunId = newSortableId("run");
+  const seedUser = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: primarySession.id,
+    runId: seedRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "primary 会话内容" }
+  });
+  const forkRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions/fork",
+    payload: {
+      fromSessionId: primarySession.id,
+      fromItemId: seedUser.item.id,
+      mode: "with_archive"
+    }
+  });
+  assert.equal(forkRes.statusCode, 201, `fork primary session failed: ${forkRes.body}`);
+  const forkedPrimary = forkRes.json() as { id: string };
+
+  for (const sessionId of [primarySession.id, forkedPrimary.id]) {
+    const runId = newSortableId("run");
+    createRunRecord(fixture.db, {
+      runId,
+      workspaceId: fixture.workspaceId,
+      sessionId,
+      triggerItemId: 1,
+      agentId: "default",
+      providerId: "ppchat",
+      modelId: "gpt-5.2",
+      status: "running",
+      createdAt: Date.now()
+    });
+    const promptContext = await getPromptContextInternal({
+      app: fixture.app,
+      internalToken: fixture.internalToken,
+      workspaceId: fixture.workspaceId,
+      sessionId,
+      runId
+    });
+    assert.equal(promptContext.tools.some((tool) => tool.name === "subtask"), true, "primary session should keep subtask tool");
+  }
 });
 
 test("delete workspace 会清理 dataDir 下的 agent 归档目录", async () => {
