@@ -3,7 +3,6 @@
     ref="rootEl"
     class="assistant-markdown-message break-words"
     :class="toneClass"
-    :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
     v-html="safeHtml"
   />
 </template>
@@ -325,7 +324,8 @@ onBeforeUnmount(() => {
 <style scoped>
 .assistant-markdown-message {
   line-height: 1.65;
-  color: var(--text-primary);
+  /* font-size 由上层消息列表容器提供,统一由 --agent-font-size 控制。 */
+  color: var(--text-color);
   overflow-wrap: anywhere;
 }
 
@@ -352,16 +352,16 @@ onBeforeUnmount(() => {
 }
 
 .assistant-markdown-message :deep(h1) {
-  font-size: 1.05rem;
+  font-size: 1.05em;
 }
 
 .assistant-markdown-message :deep(h2) {
-  font-size: 1rem;
+  font-size: 1em;
 }
 
 .assistant-markdown-message :deep(h3),
 .assistant-markdown-message :deep(h4) {
-  font-size: 0.95rem;
+  font-size: 0.95em;
 }
 
 .assistant-markdown-message :deep(ul),

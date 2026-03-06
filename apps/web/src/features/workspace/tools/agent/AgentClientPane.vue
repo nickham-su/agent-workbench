@@ -2,19 +2,21 @@
   <div class="h-full min-h-0 flex flex-col">
     <div
       v-if="isSubtaskSession"
-      class="px-3 py-2 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] text-xs text-[color:var(--text-tertiary)]"
+      class="px-3 py-2 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] text-[0.9em] text-[color:var(--text-tertiary)]"
     >
-      <div class="flex items-center gap-2">
-        <a-button
-          v-if="props.parentSessionId"
-          type="link"
-          size="small"
-          class="!px-0"
-          @click="onOpenParent"
-        >
-          {{ t("agent.client.backToParent") }}
-        </a-button>
-        <span>{{ t("agent.client.readonlySubtaskHint") }}</span>
+      <div :style="{ fontSize: 'var(--agent-font-size, 13px)' }">
+        <div class="flex items-center gap-2">
+          <a-button
+            v-if="props.parentSessionId"
+            type="link"
+            size="small"
+            class="!px-0"
+            @click="onOpenParent"
+          >
+            {{ t("agent.client.backToParent") }}
+          </a-button>
+          <span>{{ t("agent.client.readonlySubtaskHint") }}</span>
+        </div>
       </div>
     </div>
 
@@ -25,14 +27,20 @@
       @scroll.passive="onMessageListScroll"
       @wheel.passive="onMessageListWheel"
     >
-      <div v-if="displayItems.length > 0 && (loadingEarlier || reachedTop)" class="pt-1 pb-1 flex items-center gap-2">
-        <div class="h-px flex-1 bg-blue-500/40" />
-        <div class="text-[11px] text-blue-600 whitespace-nowrap">
-          {{ loadingEarlier ? t("common.loading") : t("agent.client.reachedTop") }}
-        </div>
-        <div class="h-px flex-1 bg-blue-500/40" />
+      <!--
+        顶部提示条固定占位高度,避免 loadingEarlier/reachedTop 在插入/移除时改变滚动内容高度,
+        导致 prepend 历史消息时出现额外的 scrollTop 跳动.
+      -->
+      <div v-if="displayItems.length > 0" class="pt-1 pb-1 flex items-center gap-2" style="height: 1.7em;">
+        <template v-if="loadingEarlier || showReachedTopNotice">
+          <div class="h-px flex-1 bg-blue-500/40" />
+          <div class="text-[0.9em] text-blue-600 whitespace-nowrap">
+            {{ loadingEarlier ? t("common.loading") : t("agent.client.reachedTop") }}
+          </div>
+          <div class="h-px flex-1 bg-blue-500/40" />
+        </template>
       </div>
-      <div v-if="displayItems.length === 0" class="h-full flex flex-col items-center justify-center gap-3 text-base text-[color:var(--text-tertiary)]">
+      <div v-if="displayItems.length === 0" class="h-full flex flex-col items-center justify-center gap-3 text-[color:var(--text-tertiary)]">
         <div>{{ t("agent.client.welcome") }}</div>
         <a-button v-if="props.canChooseSession" type="link" size="small" class="!px-0" @click="onChooseSession">
           {{ t("agent.client.chooseSession") }}
@@ -56,7 +64,7 @@
                 <div v-else>
                   <div v-if="row.msg.boundaryReason" class="pb-1 flex items-center gap-2">
                     <div class="h-px flex-1 bg-blue-500/40" />
-                    <div class="text-[11px] text-blue-600 whitespace-nowrap">{{ t("agent.client.contextBoundary") }}</div>
+                    <div class="text-[0.9em] text-blue-600 whitespace-nowrap">{{ t("agent.client.contextBoundary") }}</div>
                     <div class="h-px flex-1 bg-blue-500/40" />
                   </div>
 
@@ -68,10 +76,10 @@
                           ? 'is-tool-message border-0 bg-transparent px-0 py-0'
                           : 'is-tool-message border-0 bg-transparent pl-2 pr-0 py-0.5'
                         : '',
-                      row.msg.role === 'user' ? 'is-user-message border border-blue-500/30 bg-blue-500/10' : 'border-0',
+                      row.msg.role === 'user' ? 'is-user-message border border-blue-500/60 bg-blue-500/20' : 'border-0',
                       row.msg.role === 'assistant' ? 'is-assistant-message bg-[var(--panel-bg)]' : '',
-                      row.msg.role === 'system' ? 'bg-[var(--panel-bg)]' : '',
-                      row.msg.role === 'user' && row.msg.tone === 'error' ? 'border-red-500/40 bg-red-500/5' : '',
+                      row.msg.role === 'system' ? 'is-system-message bg-[var(--panel-bg)]' : '',
+                      row.msg.role === 'user' && row.msg.tone === 'error' ? '!border-red-500/70 !bg-red-500/10' : '',
                       row.msg.role !== 'user' && row.msg.role !== 'tool' && row.msg.tone === 'error' ? 'bg-red-500/5' : '',
                       isTextMessageClamped(row.msg.id)
                         ? 'is-text-clamped border border-[var(--border-color-secondary)] bg-transparent'
@@ -118,21 +126,21 @@
                  @click="onOpenSubtask(row.msg.subtaskSessionId)"
                >
                 <div class="flex items-center gap-2">
-                  <div class="text-[12px] font-semibold">
+                  <div class="font-semibold">
                     <DoubleRightOutlined class="subtask-title-icon mr-0.5 text-blue-500" />
                     {{ t("agent.client.subtaskCardTitle") }}: {{ row.msg.subtaskDescription || "-" }}
                   </div>
-                  <a-tag color="default" class="!m-0 !text-[10px] !leading-[16px] !px-1 !py-0">{{ row.msg.status }}</a-tag>
+                  <a-tag color="default" class="!m-0 !text-[1em] !leading-[1.4] !px-1 !py-0">{{ row.msg.status }}</a-tag>
                 </div>
-                <div class="pt-0.5 text-[12px] text-[color:var(--text-secondary)]">
+                <div class="pt-0.5 text-[color:var(--text-secondary)]">
                   {{ t("agent.client.subtaskAgent") }}: {{ row.msg.subtaskAgentName || row.msg.subtaskAgentId || "-" }}
                   <span class="inline-block w-3" />
                   {{ t("agent.client.subtaskMode") }}: {{ formatSubtaskMode(row.msg.subtaskMode) }}
                 </div>
-                <div class="pt-0.5 text-[12px] text-[color:var(--text-secondary)]">
+                <div class="pt-0.5 text-[color:var(--text-secondary)]">
                   {{ t("agent.client.subtaskSessionId") }}: {{ row.msg.subtaskSessionId || "-" }}
                 </div>
-                <div v-if="row.msg.toolError" class="pt-1 text-[12px] text-red-500">
+                <div v-if="row.msg.toolError" class="pt-1 text-red-500">
                   Error: {{ row.msg.toolError }}
                 </div>
               </div>
@@ -197,7 +205,6 @@
                         'pr-24',
                         row.msg.tone === 'error' ? 'text-red-500' : ''
                       ]"
-                      :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
                     >
                       {{ row.msg.text }}
                     </div>
@@ -230,15 +237,21 @@
     </div>
 
     <div v-if="runNoticeText" class="px-3 py-2 border-t border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
-      <div
-        class="text-xs text-amber-600 whitespace-nowrap overflow-hidden text-ellipsis"
-        :title="runNoticeText"
-      >
-        {{ runNoticeText }}
+      <div :style="{ fontSize: 'var(--agent-font-size, 13px)' }">
+        <div
+          class="text-[0.9em] text-amber-600 whitespace-nowrap overflow-hidden text-ellipsis"
+          :title="runNoticeText"
+        >
+          {{ runNoticeText }}
+        </div>
       </div>
     </div>
 
-    <div v-if="!isSubtaskSession" class="p-3 border-t border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
+    <div
+      v-if="!isSubtaskSession"
+      class="p-3 border-t border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]"
+      :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
+    >
       <div
         v-if="slashCommandHint.visible"
         class="mb-2"
@@ -253,12 +266,12 @@
             @click="onPickSlashCommand(cmd.name)"
           >
             <div class="flex items-center gap-2 min-w-0">
-              <span class="font-mono text-[11px] whitespace-nowrap">{{ cmd.usage }}</span>
-              <span class="text-[11px] text-[color:var(--text-secondary)] min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{{ t(cmd.summaryKey) }}</span>
-              <span v-if="cmd.strictOnly" class="text-[10px] text-[color:var(--text-tertiary)] whitespace-nowrap">{{ t("agent.client.slashCommandHintStrictOnly") }}</span>
+              <span class="font-mono text-[0.9em] whitespace-nowrap">{{ cmd.usage }}</span>
+              <span class="text-[0.9em] text-[color:var(--text-secondary)] min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{{ t(cmd.summaryKey) }}</span>
+              <span v-if="cmd.strictOnly" class="text-[0.85em] text-[color:var(--text-tertiary)] whitespace-nowrap">{{ t("agent.client.slashCommandHintStrictOnly") }}</span>
             </div>
           </button>
-          <div v-if="slashCommandHint.commands.length === 0" class="px-2 py-1 text-[11px] text-[color:var(--text-tertiary)]">
+          <div v-if="slashCommandHint.commands.length === 0" class="px-2 py-1 text-[0.9em] text-[color:var(--text-tertiary)]">
             {{ t("agent.client.slashCommandHintNoMatch", { query: slashCommandHint.query }) }}
           </div>
         </div>
@@ -287,16 +300,16 @@
              @update:value="onAgentChange"
            />
            <a-tooltip v-if="showRunIndicator" :title="t('common.loading')" placement="top">
-             <LoadingOutlined spin class="text-blue-600 text-xs" />
+             <LoadingOutlined spin class="text-blue-600 text-[0.9em]" />
            </a-tooltip>
           </div>
-          <div v-else class="flex items-center gap-2 text-xs text-[color:var(--text-tertiary)]">
+          <div v-else class="flex items-center gap-2 text-[0.9em] text-[color:var(--text-tertiary)]">
             <span>{{ t("agent.client.noAgentHint") }}</span>
             <a-button type="link" size="small" class="!px-0" @click="goAgentProfiles">
               {{ t("agent.client.goCreateAgent") }}
             </a-button>
           </div>
-          <div class="text-xs text-[color:var(--text-tertiary)] whitespace-nowrap">
+          <div class="text-[0.9em] text-[color:var(--text-tertiary)] whitespace-nowrap">
             {{ t("agent.client.lastTotalTokens") }}: {{ formattedLastTotalTokens }}
           </div>
         </div>
@@ -418,6 +431,7 @@ const MESSAGE_GAP_TOOL_TOOL = 2;
 const BOTTOM_FOLLOW_THRESHOLD_PX = 120;
 const MESSAGE_LIST_BOTTOM_SPACER_PX = 16;
 const INITIAL_TAIL_LIMIT = 100;
+const REACHED_TOP_NOTICE_MIN_ITEMS = 50;
 const HISTORY_PAGE_LIMIT = 100;
 const TOP_LOAD_THRESHOLD_PX = 80;
 const POLL_RUNNING_MS = 850;
@@ -726,6 +740,10 @@ const formattedLastTotalTokens = computed(() => {
 });
 
 const showRunIndicator = computed(() => sending.value || runState.value.status !== "idle");
+
+const showReachedTopNotice = computed(() => {
+  return reachedTop.value && displayItems.value.length >= REACHED_TOP_NOTICE_MIN_ITEMS;
+});
 
 const displayItems = computed<DisplayItem[]>(() => {
   const hasToolChildByPrevId = new Set<number>();
@@ -1096,6 +1114,23 @@ function estimateRowHeight(index: number) {
   return 32 + estimateTextBlockHeight(item.text, { charsPerLine: 72, lineHeight: 18, minLines: 1, maxLines: 20 }) + gap;
 }
 
+// 持久化测量结果: 避免虚拟列表在某些 re-measure 场景下回退到粗略 estimate,
+// 导致大幅 scrollAdjustments 校正与可见的跳动。
+const measuredRowSizeByItemId = new Map<number, number>();
+
+function measureVirtualRowElement(element: HTMLDivElement) {
+  const indexAttr = element.getAttribute("data-index");
+  const index = indexAttr ? Number(indexAttr) : NaN;
+  const list = displayItems.value;
+  const msg = Number.isFinite(index) && index >= 0 && index < list.length ? list[index] : null;
+  const itemId = msg?.id ?? 0;
+  const size = Math.max(0, Math.ceil(element.getBoundingClientRect().height));
+  if (itemId > 0 && size > 0) {
+    measuredRowSizeByItemId.set(itemId, size);
+  }
+  return size;
+}
+
 const rowVirtualizer = useVirtualizer<HTMLElement, HTMLDivElement>(
   computed(() => ({
     count: displayItems.value.length > 0 ? displayItems.value.length + 1 : 0,
@@ -1108,10 +1143,20 @@ const rowVirtualizer = useVirtualizer<HTMLElement, HTMLDivElement>(
     estimateSize: (index: number) => {
       const list = displayItems.value;
       if (index === list.length) return MESSAGE_LIST_BOTTOM_SPACER_PX;
+      const msg = list[index];
+      if (msg?.id) {
+        const cached = measuredRowSizeByItemId.get(msg.id);
+        if (typeof cached === "number" && Number.isFinite(cached) && cached > 0) {
+          return cached;
+        }
+      }
       return estimateRowHeight(index);
     },
-    overscan: 12
-  }))
+    measureElement: (element) => measureVirtualRowElement(element as unknown as HTMLDivElement),
+    overscan: 12,
+    // 将 ResizeObserver 的测量回调合并到 rAF,减少连续同步测量引起的抖动。
+    useAnimationFrameWithResizeObserver: true
+   }))
 );
 
 const virtualTotalSize = computed(() => rowVirtualizer.value.getTotalSize());
@@ -1289,6 +1334,41 @@ function kickPollAfterRefresh(params: { forceFull: boolean; forceFollowBottom: b
   })();
 }
 
+type ScrollAnchor = {
+  msgId: number;
+  offsetPx: number;
+};
+
+function captureScrollAnchor(el: HTMLElement): ScrollAnchor | null {
+  const containerRect = el.getBoundingClientRect();
+  const nodes = Array.from(el.querySelectorAll<HTMLElement>(".agent-virtual-row-inner[data-msg-id]"));
+  const firstVisible = nodes
+    .map((node) => ({
+      node,
+      rect: node.getBoundingClientRect(),
+      msgId: Number(node.dataset.msgId || 0)
+    }))
+    .filter((item) => item.msgId > 0 && item.rect.bottom > containerRect.top)
+    .sort((a, b) => a.rect.top - b.rect.top)[0];
+
+  const msgId = firstVisible?.msgId ?? 0;
+  if (!msgId) return null;
+  return {
+    msgId,
+    offsetPx: firstVisible ? firstVisible.rect.top - containerRect.top : 0
+  };
+}
+
+function restoreScrollAnchor(el: HTMLElement, anchor: ScrollAnchor) {
+  const containerRect = el.getBoundingClientRect();
+  const anchorEl = el.querySelector<HTMLElement>(`.agent-virtual-row-inner[data-msg-id='${anchor.msgId}']`);
+  if (!anchorEl) return;
+  const nextOffset = anchorEl.getBoundingClientRect().top - containerRect.top;
+  const delta = nextOffset - anchor.offsetPx;
+  if (!Number.isFinite(delta) || Math.abs(delta) < 0.5) return;
+  el.scrollTop = Math.max(0, el.scrollTop + delta);
+}
+
 function distanceToBottom() {
   const el = scrollEl.value;
   if (!el) return Number.POSITIVE_INFINITY;
@@ -1329,9 +1409,6 @@ async function loadEarlierHistoryPage() {
   const sessionId = props.sessionId;
   loadingEarlier.value = true;
   try {
-    const prevScrollHeight = el.scrollHeight;
-    const prevScrollTop = el.scrollTop;
-
     const expectedHeadItemId = typeof lastKnownHeadItemId.value === "number" ? lastKnownHeadItemId.value : undefined;
     const page = await getAgentContextItems(sessionId, {
       beforeId,
@@ -1357,7 +1434,29 @@ async function loadEarlierHistoryPage() {
       return;
     }
 
+    // prepend 前记录首屏锚点,用于在虚拟列表高度/测量变化时稳定视口位置。
+    const anchor = captureScrollAnchor(el);
+
     items.value = [...prepend, ...items.value];
+
+    // 索引锚点补偿(不依赖 DOM): prepend 后同一条消息的 index 会整体后移 prepend.length。
+    // 我们用 virtualizer 的 offset 计算来做滚动补偿,避免 scrollToIndex 的多次重试与可见滚动。
+    // 这一步只依赖 measurementsCache(estimate + 已缓存的真实测量),比 scrollHeight 差值更稳。
+    await nextTick();
+    if (anchor) {
+      const list = displayItems.value;
+      const prevIndex = list.findIndex((item) => item.id === anchor.msgId);
+      if (prevIndex >= 0) {
+        const nextIndex = prevIndex + prepend.length;
+        const before = rowVirtualizer.value.getOffsetForIndex(prevIndex, "start")?.[0] ?? 0;
+        const after = rowVirtualizer.value.getOffsetForIndex(nextIndex, "start")?.[0] ?? 0;
+        const delta = after - before;
+        if (Number.isFinite(delta) && Math.abs(delta) > 0.5) {
+          el.scrollTop = Math.max(0, el.scrollTop + delta);
+        }
+      }
+    }
+
     syncBoundaryMarkerCursor(prepend);
     // 若后端明确告知已无更多历史,避免再触发一次无效请求.
     if (page.hasMoreBefore === false) {
@@ -1368,11 +1467,10 @@ async function loadEarlierHistoryPage() {
     rowVirtualizer.value.measure();
     await nextTick();
 
-    const nextScrollHeight = el.scrollHeight;
-    const delta = nextScrollHeight - prevScrollHeight;
-    if (Number.isFinite(delta) && delta > 0) {
-      el.scrollTop = prevScrollTop + delta;
-    }
+    // 二次校正(可选): 若锚点刚好在渲染窗口内,用像素级 DOM offset 做最后的微调。
+    // 不再使用 scrollToIndex,避免其多次重试带来的可见滚动。
+    if (anchor) restoreScrollAnchor(el, anchor);
+
     // 同步滚动基线,避免后续 scroll 事件把程序滚动误判为用户滚动。
     lastKnownScrollTop = el.scrollTop;
     atTop.value = el.scrollTop <= TOP_LOAD_THRESHOLD_PX;
@@ -2193,6 +2291,16 @@ onBeforeUnmount(() => {
    * 浏览器 scroll anchoring 在这种场景下可能产生“固定位置的大跳动”.
    */
   overflow-anchor: none;
+}
+
+/*
+ * Agent 字号策略:
+ * - user/assistant: 使用消息列表容器 font-size (var(--agent-font-size))
+ * - tool/system: 略小一档
+ */
+.agent-message-item.is-tool-message,
+.agent-message-item.is-system-message {
+  font-size: 0.85em;
 }
 
 .agent-virtual-list {

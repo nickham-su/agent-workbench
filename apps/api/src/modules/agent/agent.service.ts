@@ -345,7 +345,33 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
     ].join("\n");
   }
   if (toolName === "todolist") {
-    return "这是管理任务进度的强制工具,不是可选项。除极其简单且可一步完成的请求外,必须先用此工具给出任务清单,再开始执行。每次调用都提交完整 todos 数组,语义为全量替换,不是增量 patch。todos 从上到下即优先级,先规划再执行。在任务状态发生变化时必须立即更新清单,包括开始(in_progress),完成(completed),取消(cancelled),回退或新增任务。每项必须包含 content 和 status。content trim 后不能为空。status 仅允许 pending | in_progress | completed | cancelled。允许同时存在多个 in_progress。目标是让用户持续看到清晰、可信、实时的进度窗口,并约束执行过程可追踪,避免无计划推进。";
+    return [
+      "这是用于维护任务清单与执行进度的管理工具（面向用户展示进度，也用于约束你按计划推进）。",
+      "",
+      "快速自检（满足任一条即可跳过 todolist）：",
+      "- 如果你规划的任务步骤数 <= 3 步；或",
+      "- 如果你预计完成该请求所需调用工具的总次数 <= 10 次；",
+      "则可以不使用 todolist，直接执行并在回复中用简短列表说明你在做什么即可。",
+      "否则（更复杂/更长流程/不确定会做多少步或多少次工具调用），必须使用 todolist：先给出任务清单，再开始执行。",
+      "",
+      "使用规则：",
+      "- 每次调用都提交完整的 todos 数组；语义是“全量替换”，不是增量 patch。",
+      "- todos 从上到下代表优先级：先规划再执行，优先做靠前项。",
+      "- 任务状态仅允许：pending | in_progress | completed | cancelled。",
+      "- 允许同时存在多个 in_progress，但应尽量保持进行中的任务数量可控、符合实际。",
+      "- 每条 todo 必须包含：",
+      "  - content：非空字符串（trim 后不能为空）",
+      "  - status：上述枚举之一",
+      "- 当任务状态发生变化时必须立即更新清单，包括但不限于：",
+      "  - 开始执行某项（pending -> in_progress）",
+      "  - 完成（-> completed）",
+      "  - 取消/不再需要（-> cancelled）",
+      "  - 发现遗漏、拆分、合并、回退或新增任务（结构变化也要更新）",
+      "- 目标：让用户持续看到清晰、可信、实时的进度窗口，并促使你以可追踪、按优先级的方式推进，避免无计划地展开。",
+      "",
+      "输入示例：",
+      "{\"todos\":[{\"content\":\"梳理需求与约束\",\"status\":\"completed\"},{\"content\":\"实现核心逻辑\",\"status\":\"in_progress\"},{\"content\":\"补充测试与验证\",\"status\":\"pending\"}]}"
+    ].join("\n");
   }
   if (toolName === "archive_search") {
     return (

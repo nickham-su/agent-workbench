@@ -1,7 +1,7 @@
 <template>
   <div class="h-full min-h-0 flex flex-col bg-[var(--panel-bg)]">
     <div v-if="visibleSessions.length === 0" class="h-full min-h-0 flex flex-col items-center justify-center gap-3">
-      <div class="text-xs text-[color:var(--text-tertiary)]">{{ allSessions.length === 0 ? t("agent.empty") : t("agent.closedEmpty") }}</div>
+      <div class="text-[0.9em] text-[color:var(--text-tertiary)]">{{ allSessions.length === 0 ? t("agent.empty") : t("agent.closedEmpty") }}</div>
       <a-button
         v-if="allSessions.length > 0"
         size="small"
@@ -30,7 +30,7 @@
             <span>{{ tabLabel(session, index) }}</span>
             <a-tooltip :title="t('agent.actions.closeClient')">
               <CloseOutlined
-                class="cursor-pointer text-[color:var(--text-tertiary)] hover:text-[color:var(--text-secondary)] !mr-0 text-xs"
+                class="cursor-pointer text-[color:var(--text-tertiary)] hover:text-[color:var(--text-secondary)] !mr-0 text-[0.9em]"
                 @mousedown.stop.prevent
                 @click.stop.prevent="closeSessionTab(session.id)"
               />
@@ -76,22 +76,24 @@
       :maskClosable="true"
       @cancel="closeChooseSessionModal"
     >
-      <div v-if="chooseSessionLoading" class="text-xs text-[color:var(--text-tertiary)]">
-        {{ t("common.loading") }}
+      <div class="agent-choose-session-modal" :style="{ fontSize: 'var(--agent-font-size, 13px)' }">
+        <div v-if="chooseSessionLoading" class="text-[0.9em] text-[color:var(--text-tertiary)]">
+          {{ t("common.loading") }}
+        </div>
+        <div v-else-if="chooseSessionItems.length === 0" class="text-[0.9em] text-[color:var(--text-tertiary)]">
+          {{ t("agent.client.noSessionToChoose") }}
+        </div>
+        <a-list v-else size="small" bordered :data-source="chooseSessionItems" class="choose-session-list max-h-[360px] overflow-auto">
+          <template #renderItem="{ item }">
+            <a-list-item class="choose-session-item !px-3 !py-2 cursor-pointer transition-colors" @click="chooseSession(item.id)">
+              <div class="w-full min-w-0">
+                <div class="text-[0.85em] text-[color:var(--text-tertiary)] truncate">{{ item.id }}</div>
+                <div class="text-[0.95em] truncate">{{ item.preview }}</div>
+              </div>
+            </a-list-item>
+          </template>
+        </a-list>
       </div>
-      <div v-else-if="chooseSessionItems.length === 0" class="text-xs text-[color:var(--text-tertiary)]">
-        {{ t("agent.client.noSessionToChoose") }}
-      </div>
-      <a-list v-else size="small" bordered :data-source="chooseSessionItems" class="choose-session-list max-h-[360px] overflow-auto">
-        <template #renderItem="{ item }">
-          <a-list-item class="choose-session-item !px-3 !py-2 cursor-pointer transition-colors" @click="chooseSession(item.id)">
-            <div class="w-full min-w-0">
-              <div class="text-xs text-[color:var(--text-tertiary)] truncate">{{ item.id }}</div>
-              <div class="text-sm truncate">{{ item.preview }}</div>
-            </div>
-          </a-list-item>
-        </template>
-      </a-list>
     </a-modal>
   </div>
 </template>
