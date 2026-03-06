@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createServer } from "node:net";
+import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { afterEach, test } from "node:test";
 import type { FastifyInstance } from "fastify";
 import { createApp } from "../../app/createApp.js";
@@ -20,6 +21,7 @@ type Fixture = {
   workspacePath: string;
   baseUrl: string;
   workerPidFilePath: string;
+  llmStub?: HttpServer;
 };
 
 const fixtures = new Set<Fixture>();
@@ -72,7 +74,31 @@ async function requestJson<T>(baseUrl: string, input: { method: string; path: st
   return { response, json, text };
 }
 
-async function configureAgentDefaults(baseUrl: string) {
+async function startLlmStubServer() {
+  const server = createHttpServer((_req, res) => {
+    // Return a deterministic JSON error so the worker fails fast without external network.
+    const payload = JSON.stringify({ error: { message: "llm stub", type: "stub_error" } });
+    res.statusCode = 500;
+    res.setHeader("content-type", "application/json; charset=utf-8");
+    res.setHeader("connection", "close");
+    res.end(payload);
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+  const addr = server.address();
+  if (!addr || typeof addr === "string") {
+    server.close();
+    throw new Error("failed to start llm stub server");
+  }
+  return {
+    server,
+    baseURL: `http://127.0.0.1:${addr.port}/v1`
+  };
+}
+
+async function configureAgentDefaults(baseUrl: string, llmBaseURL: string) {
   const providers = await requestJson(baseUrl, {
     method: "PUT",
     path: "/api/settings/agent/providers",
@@ -83,14 +109,14 @@ async function configureAgentDefaults(baseUrl: string) {
       },
       providers: [
         {
-          id: "ppchat",
-          name: "ppchat",
-          npm: "@ai-sdk/openai",
-          options: {
-            baseURL: "https://code.ppchat.vip/v1",
-            apiKey: "sk-test"
-          },
-          models: [
+           id: "ppchat",
+           name: "ppchat",
+           npm: "@ai-sdk/openai",
+           options: {
+             baseURL: llmBaseURL,
+             apiKey: "sk-test"
+           },
+           models: [
             {
               id: "gpt-5.2",
               name: "gpt-5.2",
@@ -129,6 +155,20 @@ async function configureAgentDefaults(baseUrl: string) {
     }
   });
   assert.equal(agents.response.status, 200, `configure agents failed: ${agents.text}`);
+
+  const runtime = await requestJson(baseUrl, {
+    method: "PUT",
+    path: "/api/settings/agent/runtime",
+    body: {
+      // worker integration test should not depend on real LLM connectivity.
+      modelRequestMaxRetries: 0,
+      // keep a small timeout to avoid hanging on network/dns.
+      modelIdleTimeoutMs: 1500,
+      modelTotalTimeoutMs: 1500,
+      autoCompactThresholdPct: 80
+    }
+  });
+  assert.equal(runtime.response.status, 200, `configure agent runtime failed: ${runtime.text}`);
 }
 
 async function createFixture(): Promise<Fixture> {
@@ -137,6 +177,9 @@ async function createFixture(): Promise<Fixture> {
   await ensureDir(testsRoot);
   const dataDir = await fs.mkdtemp(path.join(testsRoot, "agent-worker-it-"));
 
+  let llmStub: Awaited<ReturnType<typeof startLlmStubServer>> | null = null;
+  try {
+    llmStub = await startLlmStubServer();
   const apiPort = await getFreePort();
   const workerPort = await getFreePort();
 
@@ -162,7 +205,8 @@ async function createFixture(): Promise<Fixture> {
     agentWorkerSocketPath: path.join(dataDir, "agent-worker.sock"),
     agentWorkerConcurrency: 2,
     agentInternalToken: "worker-integration-token",
-    agentApiOrigin: `http://127.0.0.1:${apiPort}`
+    agentApiOrigin: `http://127.0.0.1:${apiPort}`,
+    agentStartupRecoveryMode: "recover"
   });
   const workspaceId = newSortableId("ws");
   const workspaceDirName = newSortableId("workspace");
@@ -182,7 +226,7 @@ async function createFixture(): Promise<Fixture> {
 
   await app.listen({ host: "127.0.0.1", port: apiPort });
   const baseUrl = `http://127.0.0.1:${apiPort}`;
-  await configureAgentDefaults(baseUrl);
+  await configureAgentDefaults(baseUrl, llmStub.baseURL);
 
   const fixture: Fixture = {
     app,
@@ -191,14 +235,22 @@ async function createFixture(): Promise<Fixture> {
     workspaceId,
     workspacePath,
     baseUrl,
-    workerPidFilePath: agentWorkerPidPath(dataDir)
+    workerPidFilePath: agentWorkerPidPath(dataDir),
+    llmStub: llmStub.server
   };
   fixtures.add(fixture);
   return fixture;
+  } catch (err) {
+    await new Promise<void>((resolve) => llmStub?.server.close(() => resolve()));
+    throw err;
+  }
 }
 
 async function closeFixture(fixture: Fixture) {
   fixtures.delete(fixture);
+  if (fixture.llmStub) {
+    await new Promise<void>((resolve) => fixture.llmStub?.close(() => resolve()));
+  }
   await fixture.app.close();
   fixture.db.close();
   await rmrf(fixture.dataDir);

@@ -17,6 +17,7 @@ export type Env = {
   agentWorkerConcurrency: number;
   agentInternalToken: string;
   agentApiOrigin: string;
+  agentStartupRecoveryMode: "fail" | "recover";
 };
 
 function parsePositiveInt(raw: string, name: string) {
@@ -56,6 +57,7 @@ export function loadEnv(processEnv: NodeJS.ProcessEnv): Env {
   const workerConcurrencyRaw = processEnv.AWB_AGENT_WORKER_CONCURRENCY?.trim() || "2";
   const internalTokenRaw = processEnv.AWB_AGENT_INTERNAL_TOKEN?.trim() || "";
   const apiOriginRaw = processEnv.AWB_AGENT_API_ORIGIN?.trim() || "";
+  const startupRecoveryModeRaw = processEnv.AWB_AGENT_STARTUP_RECOVERY_MODE?.trim() || "";
 
   const port = parsePositiveInt(portRaw, "AWB_PORT");
   const fileMaxBytes = parsePositiveInt(fileMaxBytesRaw, "AWB_FILE_MAX_BYTES");
@@ -73,6 +75,13 @@ export function loadEnv(processEnv: NodeJS.ProcessEnv): Env {
   const apiHost = normalizeApiOriginHost(host);
   const agentApiOrigin = apiOriginRaw || `http://${apiHost}:${port}`;
 
+  const agentStartupRecoveryMode = (startupRecoveryModeRaw || "fail").toLowerCase();
+  if (agentStartupRecoveryMode !== "fail" && agentStartupRecoveryMode !== "recover") {
+    throw new Error(
+      `Invalid AWB_AGENT_STARTUP_RECOVERY_MODE: ${startupRecoveryModeRaw}. Expected "fail" or "recover".`
+    );
+  }
+
   return {
     dataDir: resolvedDataDir,
     host,
@@ -88,6 +97,7 @@ export function loadEnv(processEnv: NodeJS.ProcessEnv): Env {
     agentWorkerSocketPath,
     agentWorkerConcurrency,
     agentInternalToken,
-    agentApiOrigin
+    agentApiOrigin,
+    agentStartupRecoveryMode: agentStartupRecoveryMode as "fail" | "recover"
   };
 }

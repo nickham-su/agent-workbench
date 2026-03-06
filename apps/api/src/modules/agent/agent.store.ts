@@ -1411,6 +1411,102 @@ export function updateRunRecordStatus(db: Db, params: { runId: string; status: A
   ).run(params);
 }
 
+export function failRunRecordIfInFlight(db: Db, params: { runId: string; updatedAt: number }) {
+  return db
+    .prepare(
+      `
+        update agent_run
+        set status = 'failed',
+            updated_at = @updatedAt
+        where run_id = @runId
+          and status in ('running', 'waiting_permission')
+      `
+    )
+    .run(params).changes;
+}
+
+export function failNonTerminalContextItemsByRunId(db: Db, params: { runId: string; updatedAt: number }) {
+  return db
+    .prepare(
+      `
+        update agent_context_item
+        set status = 'failed',
+            updated_at = @updatedAt
+        where run_id = @runId
+          and status in ('streaming', 'queued', 'running', 'awaiting_permission')
+      `
+    )
+    .run(params).changes;
+}
+
+export function setRunStateIdleIfActiveRunMatches(db: Db, params: {
+  workspaceId: string;
+  sessionId: string;
+  runId: string;
+  updatedAt: number;
+  appliedItemId: number;
+}) {
+  return db
+    .prepare(
+      `
+        update agent_session_run_state
+        set status = 'idle',
+            active_run_id = null,
+            active_assistant_item_id = null,
+            waiting_tool_item_id = null,
+            run_notice_text = '',
+            updated_at = @updatedAt,
+            applied_item_id = @appliedItemId
+        where workspace_id = @workspaceId
+          and session_id = @sessionId
+          and active_run_id = @runId
+          and status in ('running', 'waiting_permission')
+      `
+    )
+    .run(params).changes;
+}
+
+export function listInFlightSessionsWithoutActiveRunId(db: Db) {
+  return db
+    .prepare(
+      `
+        select
+          workspace_id as workspaceId,
+          session_id as sessionId
+        from agent_session_run_state
+        where status in ('running', 'waiting_permission')
+          and active_run_id is null
+      `
+    )
+    .all() as Array<{ workspaceId: string; sessionId: string }>;
+}
+
+export function setRunStateIdleIfNoActiveRun(db: Db, params: {
+  workspaceId: string;
+  sessionId: string;
+  updatedAt: number;
+  appliedItemId: number;
+}) {
+  return db
+    .prepare(
+      `
+        update agent_session_run_state
+        set status = 'idle',
+            active_run_id = null,
+            active_assistant_item_id = null,
+            waiting_tool_item_id = null,
+            run_notice_text = '',
+            updated_at = @updatedAt,
+            applied_item_id = @appliedItemId
+        where workspace_id = @workspaceId
+          and session_id = @sessionId
+          and active_run_id is null
+          and status in ('running', 'waiting_permission')
+      `
+    )
+    .run(params).changes;
+}
+
 export function listRunningSessions(db: Db): Array<{ workspaceId: string; sessionId: string; activeRunId: string | null }> {
   const rows = db
     .prepare(

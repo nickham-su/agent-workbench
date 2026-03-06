@@ -23,4 +23,5 @@ export type AppContext = {
   agentWorkerConcurrency: number;
   agentInternalToken: string;
   agentApiOrigin: string;
+  agentStartupRecoveryMode: "fail" | "recover";
 };

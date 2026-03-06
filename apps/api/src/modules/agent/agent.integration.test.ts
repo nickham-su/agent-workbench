@@ -9,7 +9,15 @@ import type { Db } from "../../infra/db/db.js";
 import { ensureDir, rmrf } from "../../infra/fs/fs.js";
 import { agentArchiveSessionDir, compactionSnippetPath, workspaceRoot } from "../../infra/fs/paths.js";
 import { insertWorkspace } from "../workspaces/workspace.store.js";
-import { appendContextItem, createRunRecord } from "./agent.store.js";
+import {
+  appendContextItem,
+  createAgentSession,
+  createRunRecord,
+  getRunRecord,
+  getRunState as getRunStateRow,
+  getSessionTranscriptItems,
+  updateRunState
+} from "./agent.store.js";
 import { newSortableId } from "../../utils/ids.js";
 
 type Fixture = {
@@ -56,7 +64,8 @@ async function createFixture(options?: { agentWorkerConcurrency?: number }): Pro
     agentWorkerSocketPath: path.join(dataDir, "agent-worker.sock"),
     agentWorkerConcurrency: options?.agentWorkerConcurrency ?? 2,
     agentInternalToken: internalToken,
-    agentApiOrigin: "http://127.0.0.1:0"
+    agentApiOrigin: "http://127.0.0.1:0",
+    agentStartupRecoveryMode: "recover"
   });
   const workspaceId = newSortableId("ws");
   const workspaceDirName = newSortableId("workspace");
@@ -80,6 +89,181 @@ async function createFixture(options?: { agentWorkerConcurrency?: number }): Pro
   fixtures.add(fixture);
   return fixture;
 }
+
+test("agent startup recovery mode=fail 会终止 in-flight run 并回收 run-state", async () => {
+  const repoRoot = path.resolve(process.cwd(), "../..");
+  const testsRoot = path.join(repoRoot, ".tmp-tests");
+  await ensureDir(testsRoot);
+  const dataDir = await fs.mkdtemp(path.join(testsRoot, "agent-startup-fail-it-"));
+  const internalToken = "test-internal-token";
+
+  const db = await openDb(dataDir);
+  let app: FastifyInstance | null = null;
+  try {
+    const workspaceId = newSortableId("ws");
+    const workspaceDirName = newSortableId("workspace");
+    const workspacePath = workspaceRoot(dataDir, workspaceDirName);
+    await ensureDir(workspacePath);
+
+    const ts = Date.now();
+    insertWorkspace(db, {
+      id: workspaceId,
+      dirName: workspaceDirName,
+      title: "it-workspace",
+      path: workspacePath,
+      terminalCredentialId: null,
+      createdAt: ts,
+      updatedAt: ts
+    });
+
+  // 构造一个 in-flight run: run-state=running + run record=running + context items 含 streaming/tool。
+  const sessionId = newSortableId("sess");
+  createAgentSession(db, {
+    id: sessionId,
+    workspaceId,
+    title: "startup-fail-session",
+    kind: "primary",
+    createdAt: ts,
+    forkedFromSessionId: null,
+    forkedFromItemId: null
+  });
+  const runId = newSortableId("run");
+
+  const user = appendContextItem(db, {
+    workspaceId,
+    sessionId,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "hello" },
+    createdAt: ts
+  });
+  const assistantItem = appendContextItem(db, {
+    workspaceId,
+    sessionId,
+    runId,
+    turnId: newSortableId("turn"),
+    step: 1,
+    prevId: user.id,
+    kind: "assistant",
+    status: "streaming",
+    output: { type: "assistant_text", text: "" },
+    createdAt: ts
+  });
+  const toolItem = appendContextItem(db, {
+    workspaceId,
+    sessionId,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: assistantItem.id,
+    kind: "tool",
+    status: "awaiting_permission",
+    output: { type: "tool", toolName: "bash", toolCallId: "call_1", args: { command: "echo hi" }, text: "" } as any,
+    createdAt: ts
+  });
+
+  createRunRecord(db, {
+    runId,
+    workspaceId,
+    sessionId,
+    triggerItemId: user.id,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: ts
+  });
+  updateRunState(db, {
+    workspaceId,
+    sessionId,
+    status: "waiting_permission",
+    activeRunId: runId,
+    activeAssistantItemId: assistantItem.id,
+    waitingToolItemId: toolItem.id,
+    runNoticeText: "",
+    updatedAt: ts,
+    appliedItemId: toolItem.id
+  });
+
+  // 脏数据：in-flight 但 active_run_id 为空。
+  const dirtySessionId = newSortableId("sess");
+  createAgentSession(db, {
+    id: dirtySessionId,
+    workspaceId,
+    title: "startup-fail-dirty-session",
+    kind: "primary",
+    createdAt: ts,
+    forkedFromSessionId: null,
+    forkedFromItemId: null
+  });
+  updateRunState(db, {
+    workspaceId,
+    sessionId: dirtySessionId,
+    status: "running",
+    activeRunId: null,
+    activeAssistantItemId: null,
+    waitingToolItemId: null,
+    runNoticeText: "",
+    updatedAt: ts,
+    appliedItemId: 0
+  });
+
+  // 注意：fail 模式会在模块注册阶段执行清理逻辑，因此 in-flight 数据必须在 createApp 之前写入。
+  app = await createApp({
+    db,
+    repoRoot,
+    dataDir,
+    fileMaxBytes: 1024 * 1024,
+    version: "test",
+    logLevel: "error",
+    serveWeb: false,
+    webDistDir: null,
+    credentialMasterKey: Buffer.alloc(32, 7),
+    credentialMasterKeySource: "generated",
+    credentialMasterKeyId: "testkey",
+    credentialMasterKeyCreatedAt: Date.now(),
+    authToken: null,
+    authCookieSecure: false,
+    agentWorkerEnabled: false,
+    agentWorkerHost: "127.0.0.1",
+    agentWorkerPort: 0,
+    agentWorkerSocketPath: path.join(dataDir, "agent-worker.sock"),
+    agentWorkerConcurrency: 1,
+    agentInternalToken: internalToken,
+    agentApiOrigin: "http://127.0.0.1:0",
+    agentStartupRecoveryMode: "fail"
+  });
+
+  await app.ready();
+
+  // 断言：run record 由 running -> failed
+  const run = getRunRecord(db, runId);
+  assert.ok(run, "run record should exist");
+  assert.equal(run?.status, "failed");
+
+  // 断言：run-state 回收为 idle
+  const state = getRunStateRow(db, workspaceId, sessionId);
+  assert.equal(state.status, "idle");
+  assert.equal(state.activeRunId, null);
+
+  // 断言：streaming/awaiting_permission 等未终态 items 被置为 failed
+  const items = getSessionTranscriptItems(db, workspaceId, sessionId);
+  assert.ok(items.some((it) => it.kind === "assistant" && it.status === "failed"));
+  assert.ok(items.some((it) => it.kind === "tool" && it.status === "failed"));
+
+  // 断言：脏 run-state 也会被回收
+  const dirty = getRunStateRow(db, workspaceId, dirtySessionId);
+  assert.equal(dirty.status, "idle");
+  } finally {
+    await app?.close();
+    db.close();
+    await rmrf(dataDir);
+  }
+});
 
 async function configureAgentDefaults(app: FastifyInstance) {
   const providersRes = await app.inject({

@@ -7,5 +7,6 @@ dist/
 .env
 .npm-cache/
 .data/
+.tmp-tests/
 *.log
 .DS_Store
