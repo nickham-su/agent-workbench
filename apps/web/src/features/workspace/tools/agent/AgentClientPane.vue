@@ -87,7 +87,11 @@
                     ]"
                   >
                     <div
-                      v-if="(row.msg.role === 'user' || row.msg.role === 'assistant') && !isSubtaskSession"
+                      v-if="
+                        (row.msg.role === 'user'
+                          || (row.msg.role === 'assistant' && isTerminalStatus(row.msg.status) && row.msg.text.trim().length > 0))
+                        && !isSubtaskSession
+                      "
                       class="message-controls absolute right-2 top-1.5 z-10 flex items-center gap-1"
                     >
                       <span class="message-id">#{{ row.msg.id }}</span>
@@ -130,7 +134,12 @@
                     <DoubleRightOutlined class="subtask-title-icon mr-0.5 text-blue-500" />
                     {{ t("agent.client.subtaskCardTitle") }}: {{ row.msg.subtaskDescription || "-" }}
                   </div>
-                  <a-tag color="default" class="!m-0 !text-[1em] !leading-[1.4] !px-1 !py-0">{{ row.msg.status }}</a-tag>
+                  <component
+                    :is="subtaskStatusIcon(row.msg.status)"
+                    class="shrink-0"
+                    :class="subtaskStatusIconClass(row.msg.status)"
+                    :spin="subtaskStatusSpin(row.msg.status)"
+                  />
                 </div>
                 <div class="pt-0.5 text-[color:var(--text-secondary)]">
                   {{ t("agent.client.subtaskAgent") }}: {{ row.msg.subtaskAgentName || row.msg.subtaskAgentId || "-" }}
@@ -172,16 +181,21 @@
                 :tool-call-id="row.msg.toolCallId"
                 :summary="row.msg.writeResult"
                 :error-text="row.msg.toolError"
-                @request-measure="onRequestVirtualMeasure(row.msg.id)"
-              />
-                    <AssistantMarkdownMessage
-                      v-else-if="row.msg.role === 'assistant'"
-                      class="pr-24"
-                      :text="row.msg.text"
-                      :message-id="row.msg.id"
-                      :streaming="!isTerminalStatus(row.msg.status)"
-                      :tone="row.msg.tone"
-                    />
+                  @request-measure="onRequestVirtualMeasure(row.msg.id)"
+                />
+                    <div v-else-if="row.msg.role === 'assistant'" class="flex flex-col gap-1">
+                      <AssistantMarkdownMessage
+                        v-if="row.msg.text.trim().length > 0"
+                        :class="isTerminalStatus(row.msg.status) ? 'pr-24' : ''"
+                        :text="row.msg.text"
+                        :message-id="row.msg.id"
+                        :streaming="!isTerminalStatus(row.msg.status)"
+                        :tone="row.msg.tone"
+                      />
+                      <div v-if="!isTerminalStatus(row.msg.status)" class="flex items-center gap-2 text-[0.9em] text-[color:var(--text-tertiary)]">
+                        <LoadingOutlined spin />
+                      </div>
+                    </div>
                     <AgentUserMessage
                       v-else-if="row.msg.role === 'user'"
                       :text="row.msg.text"
@@ -299,9 +313,6 @@
              style="min-width: 180px; max-width: 320px"
              @update:value="onAgentChange"
            />
-           <a-tooltip v-if="showRunIndicator" :title="t('common.loading')" placement="top">
-             <LoadingOutlined spin class="text-blue-600 text-[0.9em]" />
-           </a-tooltip>
           </div>
           <div v-else class="flex items-center gap-2 text-[0.9em] text-[color:var(--text-tertiary)]">
             <span>{{ t("agent.client.noAgentHint") }}</span>
@@ -321,7 +332,18 @@
 <script setup lang="ts">
 import type { AgentContextItemRecord, AgentSessionRunState } from "@agent-workbench/shared";
 import { useVirtualizer } from "@tanstack/vue-virtual";
-import { DoubleRightOutlined, ForkOutlined, LoadingOutlined, RollbackOutlined } from "@ant-design/icons-vue";
+import {
+  CheckCircleOutlined,
+  ClockCircleOutlined,
+  CloseCircleOutlined,
+  DoubleRightOutlined,
+  ExclamationCircleOutlined,
+  ForkOutlined,
+  LoadingOutlined,
+  MinusCircleOutlined,
+  QuestionCircleOutlined,
+  RollbackOutlined
+} from "@ant-design/icons-vue";
 import { Modal, message } from "ant-design-vue";
 import { computed, nextTick, onActivated, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
@@ -739,29 +761,11 @@ const formattedLastTotalTokens = computed(() => {
   return new Intl.NumberFormat().format(Math.floor(value));
 });
 
-const showRunIndicator = computed(() => sending.value || runState.value.status !== "idle");
-
 const showReachedTopNotice = computed(() => {
   return reachedTop.value && displayItems.value.length >= REACHED_TOP_NOTICE_MIN_ITEMS;
 });
 
 const displayItems = computed<DisplayItem[]>(() => {
-  const hasToolChildByPrevId = new Set<number>();
-  for (const item of items.value) {
-    if (item.kind !== "tool") continue;
-    if (typeof item.prevId !== "number") continue;
-    hasToolChildByPrevId.add(item.prevId);
-  }
-
-  const hiddenAssistantIds = new Set<number>();
-  for (const item of items.value) {
-    if (item.kind !== "assistant" || item.output.type !== "assistant_text") continue;
-    if (item.output.text.trim().length > 0) continue;
-    if (hasToolChildByPrevId.has(item.id)) {
-      hiddenAssistantIds.add(item.id);
-    }
-  }
-
   const mapped = items.value.map<DisplayItem>((item) => {
     const archiveAt = typeof item.archiveAt === "number" && Number.isFinite(item.archiveAt) ? item.archiveAt : null;
     const boundaryReason =
@@ -976,7 +980,15 @@ const displayItems = computed<DisplayItem[]>(() => {
       status: item.status
     };
   });
-  return mapped.filter((item) => !(item.role === "assistant" && hiddenAssistantIds.has(item.id)));
+
+  // assistant 消息展示规则:
+  // - 非终态: 即使 text 为空也保留(用于展示 loading 行)
+  // - 终态: text 为空则隐藏
+  return mapped.filter((item) => {
+    if (item.role !== "assistant") return true;
+    if (!isTerminalStatus(item.status)) return true;
+    return item.text.trim().length > 0;
+  });
 });
 
 const latestTodoListItemId = computed<number | null>(() => {
@@ -1088,7 +1100,12 @@ function estimateRowHeight(index: number) {
     return 44 + estimateTextBlockHeight(item.text, { charsPerLine: 56, lineHeight: 20, minLines: 2, maxLines: 24 }) + gap;
   }
   if (item.role === "assistant") {
-    return 52 + estimateTextBlockHeight(item.text, { charsPerLine: 50, lineHeight: 20, minLines: 2, maxLines: 80 }) + gap;
+    const terminal = isTerminalStatus(item.status);
+    // 非终态 assistant 底部会额外渲染一行 loading 提示。
+    const loadingRow = terminal ? 0 : 24;
+    const base = terminal ? 52 : 44;
+    const minLines = terminal ? 2 : 1;
+    return base + estimateTextBlockHeight(item.text, { charsPerLine: 50, lineHeight: 20, minLines, maxLines: 80 }) + loadingRow + gap;
   }
   if (item.role === "system") {
     return 34 + estimateTextBlockHeight(item.text, { charsPerLine: 70, lineHeight: 18, minLines: 1, maxLines: 16 }) + gap;
@@ -1283,6 +1300,32 @@ function formatSubtaskMode(mode?: string) {
   if (mode === "fork") return t("agent.client.subtaskModeFork");
   if (mode === "existing") return t("agent.client.subtaskModeExisting");
   return mode || "-";
+}
+
+function subtaskStatusIcon(status: AgentContextItemRecord["status"]) {
+  if (status === "completed") return CheckCircleOutlined;
+  if (status === "failed") return ExclamationCircleOutlined;
+  if (status === "cancelled") return CloseCircleOutlined;
+  if (status === "denied") return MinusCircleOutlined;
+  if (status === "awaiting_permission") return QuestionCircleOutlined;
+  if (status === "queued") return ClockCircleOutlined;
+  if (status === "running" || status === "streaming") return LoadingOutlined;
+  return QuestionCircleOutlined;
+}
+
+function subtaskStatusSpin(status: AgentContextItemRecord["status"]) {
+  return status === "running" || status === "streaming";
+}
+
+function subtaskStatusIconClass(status: AgentContextItemRecord["status"]) {
+  if (status === "completed") return "text-emerald-500";
+  if (status === "failed") return "text-red-500";
+  if (status === "cancelled") return "text-[color:var(--text-tertiary)]";
+  if (status === "denied") return "text-red-500";
+  if (status === "awaiting_permission") return "text-amber-500";
+  if (status === "queued") return "text-[color:var(--text-tertiary)]";
+  if (status === "running" || status === "streaming") return "text-blue-500";
+  return "text-[color:var(--text-tertiary)]";
 }
 
 function truncateText(input: string, maxLen: number) {
