@@ -764,6 +764,7 @@ export default {
       description: "Manage AI providers and models. Add or edit providers, then manage models under each provider.",
       saving: "Saving...",
       empty: "No providers yet. Add one to start.",
+      selectProviderHint: "Select a provider from the left to view its models.",
       actions: {
         save: "Save",
         refresh: "Refresh",

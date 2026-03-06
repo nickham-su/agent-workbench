@@ -762,6 +762,7 @@ export default {
       description: "管理 AI Provider 与模型。可新增/编辑 Provider，并在 Provider 下管理模型与默认模型。",
       saving: "正在保存...",
       empty: "暂无 Provider，请先新增",
+      selectProviderHint: "请从左侧选择一个 Provider 查看模型",
       actions: {
         save: "保存",
         refresh: "刷新",

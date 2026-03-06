@@ -1,86 +1,157 @@
 <template>
   <div class="space-y-3">
-    <div class="flex flex-wrap items-start justify-between gap-2">
-      <div class="min-w-0 flex-1 text-xs text-[color:var(--text-tertiary)]">
-        {{ t("settings.agentProviders.description") }}
+      <div class="flex flex-wrap items-start justify-between gap-2">
+        <div class="min-w-0 flex-1 text-xs text-[color:var(--text-tertiary)]">
+          {{ t("settings.agentProviders.description") }}
+        </div>
+        <div class="flex items-center gap-2">
+          <div v-if="saving" class="text-xs text-[color:var(--text-tertiary)]">{{ t("settings.agentProviders.saving") }}</div>
+        </div>
       </div>
-      <div class="flex items-center gap-2">
-        <div v-if="saving" class="text-xs text-[color:var(--text-tertiary)]">{{ t("settings.agentProviders.saving") }}</div>
-        <a-button size="small" type="primary" :disabled="loading" @click="openCreateProvider">
-          {{ t("settings.agentProviders.actions.addProvider") }}
-        </a-button>
-      </div>
-    </div>
 
     <div v-if="loading" class="text-xs text-[color:var(--text-tertiary)]">{{ t("common.loading") }}</div>
 
-    <div v-else-if="providers.length === 0" class="text-xs text-[color:var(--text-tertiary)]">
-      {{ t("settings.agentProviders.empty") }}
-    </div>
-
-    <div v-else class="divide-y divide-[var(--border-color-secondary)] border border-[var(--border-color-secondary)] rounded">
-      <div
-        v-for="provider in providers"
-        :key="provider.id"
-        class="group flex items-start justify-between gap-3 px-2 py-2 hover:bg-[var(--panel-bg-elevated)]"
-      >
-        <div class="min-w-0 flex-1">
-          <div class="flex items-center gap-2">
-            <div class="font-semibold text-xs truncate" :title="provider.name">{{ provider.name }}</div>
-            <div class="text-xs text-[color:var(--text-tertiary)] truncate">{{ provider.id }}</div>
-            <a-tag v-if="isDefaultProvider(provider.id)" color="blue" class="!text-[10px] !leading-[16px] !px-1 !py-0">{{ t("common.default") }}</a-tag>
-            <a-tag v-if="provider.npm" color="default" class="!text-[10px] !leading-[16px] !px-1 !py-0">{{ provider.npm }}</a-tag>
+    <div v-else class="flex gap-3">
+      <!-- Left: Provider list -->
+      <div class="shrink-0 w-80">
+        <div class="border border-[var(--border-color-secondary)] rounded overflow-hidden">
+          <div v-if="providers.length === 0" class="px-3 py-3 text-xs text-[color:var(--text-tertiary)]">
+            {{ t("settings.agentProviders.empty") }}
           </div>
 
-          <div class="mt-2">
-            <div class="flex flex-wrap gap-1">
-              <template v-if="provider.models.length === 0">
-                <span class="text-xs text-[color:var(--text-tertiary)]">{{ t("settings.agentProviders.fields.noModels") }}</span>
-              </template>
-
-              <template v-else>
-                <div v-for="model in provider.models" :key="model.id" class="inline-flex items-center gap-1">
-                  <a-tag
-                    class="!m-0 !text-[10px] !leading-[16px] !px-1 !py-0"
-                    :color="isDefaultModel(provider.id, model.id) ? 'blue' : undefined"
-                  >
-                    {{ model.name }}
-                  </a-tag>
+          <div v-else class="divide-y divide-[var(--border-color-secondary)]">
+            <div
+              v-for="provider in providers"
+              :key="provider.id"
+              class="group flex items-start justify-between gap-3 px-3 py-2 cursor-pointer"
+              :class="provider.id === activeProviderId ? 'bg-[var(--panel-bg-elevated)]' : 'hover:bg-[var(--panel-bg-elevated)]'"
+              @click="setActiveProvider(provider.id)"
+              >
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center gap-2">
+                    <div class="font-semibold text-xs truncate" :title="provider.name">{{ provider.name }}</div>
+                    <a-tag
+                      v-if="isDefaultProvider(provider.id)"
+                      color="blue"
+                      class="!text-[10px] !leading-[16px] !px-1 !py-0"
+                    >
+                      {{ t("common.default") }}
+                    </a-tag>
+                    <a-tag v-if="provider.npm" color="default" class="!text-[10px] !leading-[16px] !px-1 !py-0">{{ provider.npm }}</a-tag>
+                  </div>
+                  <div class="mt-0.5 text-[11px] text-[color:var(--text-tertiary)] truncate" :title="provider.id">{{ provider.id }}</div>
                 </div>
-              </template>
+
+              <div
+                class="shrink-0 self-center flex items-center gap-1 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto transition-opacity"
+              >
+                <a-button
+                  size="small"
+                  type="text"
+                  @click.stop="openEditProvider(provider.id)"
+                  :title="t('settings.agentProviders.actions.edit')"
+                  :aria-label="t('settings.agentProviders.actions.edit')"
+                >
+                  <template #icon><EditOutlined /></template>
+                </a-button>
+                <a-button
+                  size="small"
+                  type="text"
+                  danger
+                  @click.stop="confirmDeleteProvider(provider.id)"
+                  :title="t('settings.agentProviders.actions.delete')"
+                  :aria-label="t('settings.agentProviders.actions.delete')"
+                >
+                  <template #icon><DeleteOutlined /></template>
+                </a-button>
+              </div>
             </div>
           </div>
         </div>
+      </div>
 
-        <div class="shrink-0 flex items-center gap-1 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity">
-          <a-button
-            size="small"
-            type="text"
-            @click="openManageModels(provider.id)"
-            :title="t('settings.agentProviders.actions.manageModels')"
-            :aria-label="t('settings.agentProviders.actions.manageModels')"
-          >
-            <template #icon><UnorderedListOutlined /></template>
-          </a-button>
-          <a-button
-            size="small"
-            type="text"
-            @click="openEditProvider(provider.id)"
-            :title="t('settings.agentProviders.actions.edit')"
-            :aria-label="t('settings.agentProviders.actions.edit')"
-          >
-            <template #icon><EditOutlined /></template>
-          </a-button>
-          <a-button
-            size="small"
-            type="text"
-            danger
-            @click="confirmDeleteProvider(provider.id)"
-            :title="t('settings.agentProviders.actions.delete')"
-            :aria-label="t('settings.agentProviders.actions.delete')"
-          >
-            <template #icon><DeleteOutlined /></template>
-          </a-button>
+      <!-- Right: Model list -->
+      <div class="min-w-0 flex-1">
+        <div class="border border-[var(--border-color-secondary)] rounded overflow-hidden">
+          <div class="flex items-start justify-between gap-3 px-3 py-3 border-b border-[var(--border-color-secondary)]">
+            <div class="min-w-0">
+              <div class="text-xs font-semibold">
+                {{ t('settings.agentProviders.fields.models') }}
+                <template v-if="activeProvider">
+                  <span class="font-normal text-[color:var(--text-tertiary)]"> — {{ activeProvider.name }}</span>
+                </template>
+              </div>
+              <div v-if="activeProvider" class="text-[11px] text-[color:var(--text-tertiary)] truncate">
+                {{ activeProvider.id }}<span v-if="activeProvider.npm"> · {{ activeProvider.npm }}</span>
+              </div>
+            </div>
+            <div class="shrink-0 flex items-center gap-2">
+              <a-button
+                size="small"
+                type="primary"
+                :disabled="!activeProvider"
+                @click="activeProvider && openAddModel(activeProvider.id)"
+              >
+                {{ t('settings.agentProviders.actions.addModel') }}
+              </a-button>
+            </div>
+          </div>
+
+          <div v-if="providers.length === 0" class="px-3 py-3 text-xs text-[color:var(--text-tertiary)]">
+            {{ t("settings.agentProviders.empty") }}
+          </div>
+          <div v-else-if="!activeProvider" class="px-3 py-3 text-xs text-[color:var(--text-tertiary)]">
+            {{ t("settings.agentProviders.selectProviderHint") }}
+          </div>
+          <div v-else-if="sortedActiveModels.length === 0" class="px-3 py-3 text-xs text-[color:var(--text-tertiary)]">
+            {{ t('settings.agentProviders.modelManager.empty') }}
+          </div>
+          <div v-else class="divide-y divide-[var(--border-color-secondary)]">
+            <div v-for="model in sortedActiveModels" :key="model.id" class="flex items-center justify-between gap-2 px-3 py-2">
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-2">
+                  <div class="text-left text-xs font-semibold truncate">
+                    {{ model.name }}
+                  </div>
+                  <a-tag
+                    v-if="isDefaultModel(activeProviderId, model.id)"
+                    color="blue"
+                    class="!text-[10px] !leading-[16px] !px-1 !py-0"
+                  >
+                    {{ t("common.default") }}
+                  </a-tag>
+                </div>
+                <div class="text-[11px] text-[color:var(--text-tertiary)] truncate">
+                  {{ t('settings.agentProviders.modelForm.idLabel') }}: {{ model.id }}
+                </div>
+                <div class="text-[11px] text-[color:var(--text-tertiary)] truncate">
+                  {{ t('settings.agentProviders.modelForm.providerModelIdLabel') }}: {{ model.providerModelId }}
+                </div>
+                <div class="text-[11px] text-[color:var(--text-tertiary)] truncate">
+                  {{ t('settings.agentProviders.modelForm.contextWindowTokensLabel') }}: {{ model.contextWindowTokens }}
+                </div>
+              </div>
+              <div class="shrink-0 flex items-center gap-1">
+                <a-button
+                  v-if="activeProvider && !isDefaultModel(activeProviderId, model.id)"
+                  size="small"
+                  type="text"
+                  @click="setDefaultModel(activeProviderId, model.id, true)"
+                >
+                  {{ t('settings.agentProviders.actions.setDefault') }}
+                </a-button>
+                <a-button size="small" type="text" @click="openEditModel(activeProviderId, model.id)">
+                  {{ t('settings.agentProviders.actions.edit') }}
+                </a-button>
+                <a-button size="small" type="text" @click="copyModel(activeProviderId, model.id)">
+                  {{ t('settings.agentProviders.actions.copy') }}
+                </a-button>
+                <a-button size="small" type="text" danger @click="confirmDeleteModel(activeProviderId, model.id)">
+                  {{ t('settings.agentProviders.actions.delete') }}
+                </a-button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -127,69 +198,6 @@
           </a-checkbox>
         </a-form-item>
       </a-form>
-    </a-modal>
-
-    <a-modal
-      v-model:open="modelManagerOpen"
-      :title="t('settings.agentProviders.modelManager.title', { name: modelManagerProviderName })"
-      :maskClosable="false"
-      :zIndex="MODEL_MANAGER_Z_INDEX"
-      :footer="null"
-      @cancel="closeModelManager"
-    >
-      <div class="space-y-2">
-        <div class="flex items-center justify-end">
-          <a-button size="small" type="primary" @click="openAddModel(modelManagerProviderId)">
-            {{ t('settings.agentProviders.actions.addModel') }}
-          </a-button>
-        </div>
-
-        <div v-if="modelManagerModels.length === 0" class="text-xs text-[color:var(--text-tertiary)]">
-          {{ t('settings.agentProviders.modelManager.empty') }}
-        </div>
-
-        <div v-else class="divide-y divide-[var(--border-color-secondary)] border border-[var(--border-color-secondary)] rounded">
-          <div
-            v-for="model in modelManagerModels"
-            :key="model.id"
-            class="flex items-center justify-between gap-2 px-2 py-2"
-          >
-            <div class="min-w-0 flex-1">
-              <div class="flex items-center gap-1">
-                <div class="text-left text-xs font-semibold truncate">
-                  {{ model.name }}
-                </div>
-                <a-tag v-if="isDefaultModel(modelManagerProviderId, model.id)" color="blue" class="!text-[10px] !leading-[16px] !px-1 !py-0">
-                  {{ t("common.default") }}
-                </a-tag>
-              </div>
-              <div class="text-[11px] text-[color:var(--text-tertiary)] truncate">{{ model.providerModelId }}</div>
-              <div class="text-[11px] text-[color:var(--text-tertiary)] truncate">
-                {{ t('settings.agentProviders.modelForm.contextWindowTokensLabel') }}: {{ model.contextWindowTokens }}
-              </div>
-            </div>
-            <div class="shrink-0 flex items-center gap-1">
-              <a-button
-                v-if="!isDefaultModel(modelManagerProviderId, model.id)"
-                size="small"
-                type="text"
-                @click="setDefaultModel(modelManagerProviderId, model.id, true)"
-              >
-                {{ t('settings.agentProviders.actions.setDefault') }}
-              </a-button>
-              <a-button size="small" type="text" @click="openEditModel(modelManagerProviderId, model.id)">
-                {{ t('settings.agentProviders.actions.edit') }}
-              </a-button>
-              <a-button size="small" type="text" @click="copyModel(modelManagerProviderId, model.id)">
-                {{ t('settings.agentProviders.actions.copy') }}
-              </a-button>
-              <a-button size="small" type="text" danger @click="confirmDeleteModel(modelManagerProviderId, model.id)">
-                {{ t('settings.agentProviders.actions.delete') }}
-              </a-button>
-            </div>
-          </div>
-        </div>
-      </div>
     </a-modal>
 
     <a-modal
@@ -276,7 +284,7 @@ import type {
 } from "@agent-workbench/shared";
 import { Modal, message } from "ant-design-vue";
 import { computed, onMounted, ref } from "vue";
-import { DeleteOutlined, EditOutlined, UnorderedListOutlined } from "@ant-design/icons-vue";
+import { DeleteOutlined, EditOutlined } from "@ant-design/icons-vue";
 import { useI18n } from "vue-i18n";
 import { getAgentProvidersSettings, updateAgentProvidersSettings } from "@/shared/api";
 
@@ -311,7 +319,6 @@ type ProviderDefaultRef = {
 };
 
 const DEFAULT_PROVIDER_NPM: AgentProviderNpm = "@ai-sdk/openai";
-const MODEL_MANAGER_Z_INDEX = 1000;
 const MODEL_EDITOR_Z_INDEX = 1100;
 
 const AI_SDK_SETTINGS_DOC_URL = "https://ai-sdk.dev/docs/ai-sdk-core/settings";
@@ -325,6 +332,8 @@ const loading = ref(false);
 const saving = ref(false);
 const providers = ref<EditingProvider[]>([]);
 const selectedDefault = ref<ProviderDefaultRef | null>(null);
+
+const activeProviderId = ref("");
 
 const providerModalOpen = ref(false);
 const providerModalMode = ref<"create" | "edit">("create");
@@ -348,12 +357,26 @@ const modelFormAiSdkJson = ref("{}");
 const modelFormProviderOptionsJson = ref("{}");
 const modelFormDefault = ref(false);
 
-const modelManagerOpen = ref(false);
-const modelManagerProviderId = ref("");
+const activeProvider = computed(() => getProvider(activeProviderId.value));
 
-const modelManagerProvider = computed(() => getProvider(modelManagerProviderId.value));
-const modelManagerProviderName = computed(() => modelManagerProvider.value?.name ?? "");
-const modelManagerModels = computed(() => modelManagerProvider.value?.models ?? []);
+const sortedActiveModels = computed(() => {
+  const provider = activeProvider.value;
+  if (!provider) return [];
+
+  const defaultModelId = selectedDefault.value?.providerId === provider.id ? selectedDefault.value?.modelId ?? null : null;
+  const models = [...provider.models];
+  models.sort((a, b) => {
+    const aIsDefault = defaultModelId ? a.id === defaultModelId : false;
+    const bIsDefault = defaultModelId ? b.id === defaultModelId : false;
+    if (aIsDefault && !bIsDefault) return -1;
+    if (!aIsDefault && bIsDefault) return 1;
+
+    const aName = a.name?.trim() || a.id;
+    const bName = b.name?.trim() || b.id;
+    return aName.localeCompare(bName, undefined, { sensitivity: "base" });
+  });
+  return models;
+});
 const modelFormProviderOptionsKey = computed(() => {
   const provider = getProvider(modelFormProviderId.value);
   return provider ? providerOptionsKeyForNpm(provider.npm) : providerOptionsKeyForNpm(DEFAULT_PROVIDER_NPM);
@@ -395,6 +418,22 @@ function syncDefaultWithProviders() {
   selectedDefault.value = sanitizeDefault(selectedDefault.value, providers.value);
 }
 
+function sanitizeActiveProviderId(nextProviders: EditingProvider[]) {
+  if (nextProviders.length === 0) return "";
+
+  const current = activeProviderId.value;
+  if (current && nextProviders.some((p) => p.id === current)) return current;
+
+  const defaultProviderId = selectedDefault.value?.providerId;
+  if (defaultProviderId && nextProviders.some((p) => p.id === defaultProviderId)) return defaultProviderId;
+
+  return nextProviders[0]?.id ?? "";
+}
+
+function setActiveProvider(providerId: string) {
+  activeProviderId.value = providerId;
+}
+
 function mapFromSettings(view: AgentProvidersSettingsView) {
   const nextProviders = view.providers.map((provider) => ({
     id: provider.id,
@@ -416,6 +455,7 @@ function mapFromSettings(view: AgentProvidersSettingsView) {
 
   providers.value = nextProviders;
   selectedDefault.value = sanitizeDefault(view.default, nextProviders);
+  activeProviderId.value = sanitizeActiveProviderId(nextProviders);
 }
 
 const isDefaultProvider = (providerId: string) => selectedDefault.value?.providerId === providerId;
@@ -534,17 +574,7 @@ function closeProviderModal() {
   providerFormHasApiKey.value = false;
 }
 
-function openManageModels(providerId: string) {
-  const provider = getProvider(providerId);
-  if (!provider) return;
-  modelManagerProviderId.value = provider.id;
-  modelManagerOpen.value = true;
-}
-
-function closeModelManager() {
-  modelManagerOpen.value = false;
-  modelManagerProviderId.value = "";
-}
+// NOTE: model list is now shown in the right panel (no longer in a dedicated modal).
 
 function submitProvider() {
   if (!canSubmitProvider.value) {
@@ -573,6 +603,8 @@ function submitProvider() {
       apiKeyMasked: maskApiKey(nextApiKey),
       models: []
     });
+
+    activeProviderId.value = nextId;
   } else {
     const provider = getProvider(nextId);
     if (!provider) return;
@@ -620,9 +652,13 @@ function confirmDeleteProvider(providerId: string) {
     cancelText: t("settings.agentProviders.deleteProvider.cancel"),
     okType: "danger",
     onOk: () => {
-      providers.value = providers.value.filter((item) => item.id !== providerId);
+      const nextProviders = providers.value.filter((item) => item.id !== providerId);
+      providers.value = nextProviders;
       if (selectedDefault.value?.providerId === providerId) selectedDefault.value = null;
-      if (modelManagerProviderId.value === providerId) closeModelManager();
+      if (activeProviderId.value === providerId) {
+        // keep selection stable: if deleting active provider, switch to next available
+        activeProviderId.value = sanitizeActiveProviderId(nextProviders);
+      }
       syncDefaultWithProviders();
       void persist({ toast: true });
     }
