@@ -20,24 +20,25 @@
       </div>
     </div>
 
-    <div
-      ref="scrollEl"
-      class="agent-message-list relative flex-1 min-h-0 overflow-auto p-3 bg-[var(--panel-bg)]"
-      :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
-      @scroll.passive="onMessageListScroll"
-      @wheel.passive="onMessageListWheel"
-    >
+    <div class="agent-message-region relative flex-1 min-h-0">
+      <div
+        ref="scrollEl"
+        class="agent-message-list h-full min-h-0 overflow-auto p-3 bg-[var(--panel-bg)]"
+        :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
+        @scroll.passive="onMessageListScroll"
+        @wheel.passive="onMessageListWheel"
+      >
       <!--
         顶部提示条固定占位高度,避免 loadingEarlier/reachedTop 在插入/移除时改变滚动内容高度,
         导致 prepend 历史消息时出现额外的 scrollTop 跳动.
       -->
       <div v-if="displayItems.length > 0" class="pt-1 pb-1 flex items-center gap-2" style="height: 1.7em;">
         <template v-if="loadingEarlier || showReachedTopNotice">
-          <div class="h-px flex-1 bg-blue-500/40" />
-          <div class="text-[0.9em] text-blue-600 whitespace-nowrap">
+          <div class="h-px flex-1 bg-[color:var(--border-color-secondary)]" />
+          <div class="text-[0.9em] text-[color:var(--text-tertiary)] whitespace-nowrap">
             {{ loadingEarlier ? t("common.loading") : t("agent.client.reachedTop") }}
           </div>
-          <div class="h-px flex-1 bg-blue-500/40" />
+          <div class="h-px flex-1 bg-[color:var(--border-color-secondary)]" />
         </template>
       </div>
       <div v-if="displayItems.length === 0" class="h-full flex flex-col items-center justify-center gap-3 text-[color:var(--text-tertiary)]">
@@ -190,9 +191,30 @@
             </div>
             <AgentUserMessage
               v-else-if="item.role === 'user'"
-              :text="item.text"
-              :tone="item.tone"
-            />
+                :text="item.text"
+                :tone="item.tone"
+              />
+            <div v-else-if="isBashTextMessage(item)" class="flex items-start gap-2 min-w-0">
+              <div class="min-w-0 flex-1">
+                <AgentTextMessage
+                  :text="item.text"
+                  :message-id="item.id"
+                  :expanded="isTextMessageExpanded(item.id)"
+                  :max-height-px="100"
+                  :tone="item.tone"
+                  @toggle="(expanded) => onToggleTextMessageExpanded(item.id, expanded)"
+                  @request-measure="(messageId) => onRequestVirtualMeasure(messageId)"
+                  @clamp-change="(clamped) => onTextMessageClampChange(item.id, clamped)"
+                />
+              </div>
+              <component
+                v-if="bashStatusIcon(item.status)"
+                :is="bashStatusIcon(item.status)"
+                class="shrink-0 mt-0.5"
+                :class="bashStatusIconClass(item.status)"
+                :spin="bashStatusSpin(item.status)"
+              />
+            </div>
             <AgentTextMessage
               v-else-if="item.role === 'tool' || item.role === 'system'"
               :text="item.text"
@@ -240,6 +262,16 @@
         <div class="agent-message-bottom-spacer" :style="{ height: `${MESSAGE_LIST_BOTTOM_SPACER_PX}px` }" />
       </div>
 
+      </div>
+      <button
+        v-if="showScrollToBottomButton"
+        type="button"
+        class="agent-scroll-to-bottom-button"
+        :aria-label="t('agent.client.scrollToBottom')"
+        @click="onScrollToBottomClick"
+      >
+        ↓
+      </button>
     </div>
 
     <div v-if="runNoticeText" class="px-3 py-2 border-t border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
@@ -439,6 +471,7 @@ const HISTORY_PAGE_LIMIT = 100;
 const TOP_LOAD_THRESHOLD_PX = 80;
 const POLL_RUNNING_MS = 850;
 const POLL_LOCAL_NON_TERMINAL_MS = 700;
+const SCROLL_TO_BOTTOM_BUTTON_THRESHOLD_PX = 240;
 const POLL_SETTLE_MS = 520;
 const POLL_ERROR_RETRY_MS = 1400;
 const POLL_IMMEDIATE_REFRESH_MS = 420;
@@ -473,6 +506,7 @@ const loading = ref(false);
 const loadingEarlier = ref(false);
 const reachedTop = ref(false);
 const atTop = ref(false);
+const distanceToBottomPx = ref(Number.POSITIVE_INFINITY);
 const sending = ref(false);
 const draft = ref("");
 const runState = ref<AgentSessionRunState>({
@@ -755,6 +789,13 @@ const showReachedTopNotice = computed(() => {
   return reachedTop.value && displayItems.value.length >= REACHED_TOP_NOTICE_MIN_ITEMS;
 });
 
+const showScrollToBottomButton = computed(() => {
+  return (
+    displayItems.value.length > 0
+    && Number.isFinite(distanceToBottomPx.value)
+    && distanceToBottomPx.value > SCROLL_TO_BOTTOM_BUTTON_THRESHOLD_PX
+  );
+});
 const displayItems = computed<DisplayItem[]>(() => {
   const mapped = items.value.map<DisplayItem>((item) => {
     const archiveAt = typeof item.archiveAt === "number" && Number.isFinite(item.archiveAt) ? item.archiveAt : null;
@@ -1176,6 +1217,10 @@ function isWriteCard(item: DisplayItem) {
   return item.role === "tool" && item.toolName === "write" && !!item.writeResult;
 }
 
+function isBashTextMessage(item: DisplayItem) {
+  return item.role === "tool" && item.toolName === "bash";
+}
+
 function isRichToolCard(item: DisplayItem) {
   return isSubtaskCard(item) || isTodolistCard(item) || isApplyPatchCard(item) || isWriteCard(item);
 }
@@ -1209,6 +1254,22 @@ function subtaskStatusIconClass(status: AgentContextItemRecord["status"]) {
   if (status === "denied") return "text-red-500";
   if (status === "awaiting_permission") return "text-amber-500";
   if (status === "queued") return "text-[color:var(--text-tertiary)]";
+  if (status === "running" || status === "streaming") return "text-blue-500";
+  return "text-[color:var(--text-tertiary)]";
+}
+
+function bashStatusIcon(status: AgentContextItemRecord["status"]) {
+  if (status === "failed") return ExclamationCircleOutlined;
+  if (status === "running" || status === "streaming") return LoadingOutlined;
+  return null;
+}
+
+function bashStatusSpin(status: AgentContextItemRecord["status"]) {
+  return status === "running" || status === "streaming";
+}
+
+function bashStatusIconClass(status: AgentContextItemRecord["status"]) {
+  if (status === "failed") return "text-red-500";
   if (status === "running" || status === "streaming") return "text-blue-500";
   return "text-[color:var(--text-tertiary)]";
 }
@@ -1387,13 +1448,19 @@ function distanceToBottom() {
   return Math.max(0, el.scrollHeight - (el.scrollTop + el.clientHeight));
 }
 
+function syncDistanceToBottom() {
+  distanceToBottomPx.value = distanceToBottom();
+}
+
 function updateStickToBottomState() {
   if (displayItems.value.length === 0) {
+    distanceToBottomPx.value = 0;
     stickToBottom.value = true;
     userUnfollowed.value = false;
     return;
   }
   const dist = distanceToBottom();
+  distanceToBottomPx.value = dist;
   if (userUnfollowed.value) {
     stickToBottom.value = dist <= 4;
     if (stickToBottom.value) {
@@ -1461,6 +1528,7 @@ async function loadEarlierHistoryPage() {
 
     // 同步滚动基线,避免后续 scroll 事件把程序滚动误判为用户滚动。
     lastKnownScrollTop = el.scrollTop;
+    syncDistanceToBottom();
     atTop.value = el.scrollTop <= TOP_LOAD_THRESHOLD_PX;
   } catch (err) {
     if (err instanceof ApiError && err.code === "AGENT_CONTEXT_ITEMS_HEAD_MOVED") {
@@ -1484,6 +1552,7 @@ function onMessageListScroll() {
   const nextTop = el.scrollTop;
   const delta = nextTop - lastKnownScrollTop;
   lastKnownScrollTop = nextTop;
+  syncDistanceToBottom();
   saveCurrentScrollPosition();
   atTop.value = nextTop <= TOP_LOAD_THRESHOLD_PX;
 
@@ -1588,6 +1657,7 @@ async function scrollToBottom(options?: { force?: boolean }) {
 
   // 同步滚动基线,避免后续 scroll 事件把程序滚动误判为“用户向上滚动”。
   lastKnownScrollTop = el.scrollTop;
+  syncDistanceToBottom();
   saveCurrentScrollPosition();
 }
 
@@ -1602,6 +1672,13 @@ async function scrollToBottomStable(options?: { force?: boolean }) {
   if (force || (stickToBottom.value && !userUnfollowed.value)) {
     startFollowBottomLock({ force });
   }
+}
+
+function onScrollToBottomClick() {
+  stickToBottom.value = true;
+  userUnfollowed.value = false;
+  clearFollowBottomLock();
+  void scrollToBottomStable({ force: true });
 }
 
 async function focusInputIfNeeded() {
@@ -2195,6 +2272,7 @@ watch(
     };
     // 重置滚动方向判断基线,避免切换会话后首次 scroll 误判为“用户向上滚动”。
     lastKnownScrollTop = 0;
+    distanceToBottomPx.value = Number.POSITIVE_INFINITY;
     if (props.sessionId && props.active) {
       const hasSaved = hasSavedScrollPosition(props.sessionId);
       forcedBottomOnFirstActive.value = !hasSaved;
@@ -2269,6 +2347,11 @@ onBeforeUnmount(() => {
   overflow-anchor: none;
 }
 
+.agent-message-region {
+  position: relative;
+  min-height: 0;
+}
+
 /*
  * Agent 字号策略:
  * - user/assistant: 使用消息列表容器 font-size (var(--agent-font-size))
@@ -2293,7 +2376,36 @@ onBeforeUnmount(() => {
   width: 100%;
 }
 
+.agent-scroll-to-bottom-button {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  z-index: 40;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--border-color-secondary);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel-bg-elevated) 92%, white 8%);
+  color: var(--text-secondary);
+  font-size: 18px;
+  line-height: 1;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.18);
+  cursor: pointer !important;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+
 @media (hover: hover) and (pointer: fine) {
+  .agent-scroll-to-bottom-button:hover {
+    border-color: rgb(59 130 246);
+    background: rgb(30 58 138);
+    color: rgba(255, 255, 255, 0.96);
+    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.22);
+    cursor: pointer !important;
+  }
+
   .agent-message-item.is-text-clamped:hover {
     border-color: rgba(148, 163, 184, 0.55);
     background: rgba(148, 163, 184, 0.06);
@@ -2354,6 +2466,15 @@ onBeforeUnmount(() => {
     border-color: rgba(59, 130, 246, 0.28);
     background: rgba(59, 130, 246, 0.08);
   }
+}
+
+.agent-scroll-to-bottom-button:focus-visible {
+  outline: 2px solid rgba(59, 130, 246, 0.42);
+  outline-offset: 2px;
+}
+
+.agent-scroll-to-bottom-button:active {
+  transform: translateY(1px);
 }
 
 :deep(.agent-input-textarea) {
