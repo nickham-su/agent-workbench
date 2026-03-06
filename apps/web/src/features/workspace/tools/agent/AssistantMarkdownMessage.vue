@@ -393,7 +393,7 @@ onBeforeUnmount(() => {
 }
 
 .assistant-markdown-message :deep(pre code) {
-  font-size: 12px;
+  font-size: 0.9em;
   line-height: 1.5;
   white-space: pre;
 }

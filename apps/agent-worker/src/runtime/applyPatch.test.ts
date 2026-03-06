@@ -210,3 +210,283 @@ test("apply_patch 在 verify 阶段拒绝 symlink 父目录并且无外部副作
     }
   });
 });
+
+test("apply_patch 支持 git unified diff 单文件单 hunk", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const target = path.join(workspacePath, "foo.txt");
+    await fs.writeFile(target, "old\n", { encoding: "utf8" });
+
+    const patchText = [
+      "diff --git a/foo.txt b/foo.txt",
+      "index 1111111..2222222 100644",
+      "--- a/foo.txt",
+      "+++ b/foo.txt",
+      "@@ -1,1 +1,1 @@",
+      "-old",
+      "+new"
+    ].join("\n");
+
+    const prepared = await prepareApplyPatchTool({ workspacePath, patchText });
+    await applyPreparedPatch({ workspacePath, prepared });
+
+    const content = await fs.readFile(target, "utf8");
+    assert.equal(content, "new\n");
+  });
+});
+
+test("apply_patch 支持 git unified diff 单文件多个 @@ hunk", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const target = path.join(workspacePath, "multi-hunk.txt");
+    await fs.writeFile(target, "a\nb\nc\nd\n", { encoding: "utf8" });
+
+    const patchText = [
+      "diff --git a/multi-hunk.txt b/multi-hunk.txt",
+      "--- a/multi-hunk.txt",
+      "+++ b/multi-hunk.txt",
+      "@@ -1,2 +1,2 @@",
+      " a",
+      "-b",
+      "+b-1",
+      "@@ -3,2 +3,2 @@",
+      " c",
+      "-d",
+      "+d-2"
+    ].join("\n");
+
+    const prepared = await prepareApplyPatchTool({ workspacePath, patchText });
+    await applyPreparedPatch({ workspacePath, prepared });
+
+    const content = await fs.readFile(target, "utf8");
+    assert.equal(content, "a\nb-1\nc\nd-2\n");
+  });
+});
+
+test("apply_patch 支持 git unified diff 多文件修改", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const a = path.join(workspacePath, "a.txt");
+    const b = path.join(workspacePath, "b.txt");
+    await fs.writeFile(a, "x\n", { encoding: "utf8" });
+    await fs.writeFile(b, "y\n", { encoding: "utf8" });
+
+    const patchText = [
+      "diff --git a/a.txt b/a.txt",
+      "--- a/a.txt",
+      "+++ b/a.txt",
+      "@@ -1,1 +1,1 @@",
+      "-x",
+      "+x1",
+      "diff --git a/b.txt b/b.txt",
+      "--- a/b.txt",
+      "+++ b/b.txt",
+      "@@ -1,1 +1,1 @@",
+      "-y",
+      "+y1"
+    ].join("\n");
+
+    const prepared = await prepareApplyPatchTool({ workspacePath, patchText });
+    await applyPreparedPatch({ workspacePath, prepared });
+
+    assert.equal(await fs.readFile(a, "utf8"), "x1\n");
+    assert.equal(await fs.readFile(b, "utf8"), "y1\n");
+  });
+});
+
+test("apply_patch 支持 git unified diff 新增文件,并拒绝覆盖已存在路径", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const target = path.join(workspacePath, "new.txt");
+
+    const patchText = [
+      "diff --git a/new.txt b/new.txt",
+      "new file mode 100644",
+      "--- /dev/null",
+      "+++ b/new.txt",
+      "@@ -0,0 +1,2 @@",
+      "+line-1",
+      "+line-2"
+    ].join("\n");
+
+    const prepared = await prepareApplyPatchTool({ workspacePath, patchText });
+    await applyPreparedPatch({ workspacePath, prepared });
+    assert.equal(await fs.readFile(target, "utf8"), "line-1\nline-2\n");
+
+    const overwritePatch = [
+      "diff --git a/new.txt b/new.txt",
+      "new file mode 100644",
+      "--- /dev/null",
+      "+++ b/new.txt",
+      "@@ -0,0 +1,1 @@",
+      "+oops"
+    ].join("\n");
+
+    await assert.rejects(
+      () => prepareApplyPatchTool({ workspacePath, patchText: overwritePatch }),
+      /add target already exists/
+    );
+    assert.equal(await fs.readFile(target, "utf8"), "line-1\nline-2\n");
+  });
+});
+
+test("apply_patch 支持 git unified diff 删除文件(有 hunks)", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const target = path.join(workspacePath, "del.txt");
+    await fs.writeFile(target, "a\nb\n", { encoding: "utf8" });
+
+    const patchText = [
+      "diff --git a/del.txt b/del.txt",
+      "deleted file mode 100644",
+      "--- a/del.txt",
+      "+++ /dev/null",
+      "@@ -1,2 +0,0 @@",
+      "-a",
+      "-b"
+    ].join("\n");
+
+    const prepared = await prepareApplyPatchTool({ workspacePath, patchText });
+    await applyPreparedPatch({ workspacePath, prepared });
+
+    await assert.rejects(() => fs.readFile(target, "utf8"));
+  });
+});
+
+test("apply_patch git unified diff 删除文件(无 hunks)仅允许空文件", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const empty = path.join(workspacePath, "empty.txt");
+    const nonEmpty = path.join(workspacePath, "non-empty.txt");
+    await fs.writeFile(empty, "", { encoding: "utf8" });
+    await fs.writeFile(nonEmpty, "x\n", { encoding: "utf8" });
+
+    const emptyDeletePatch = [
+      "diff --git a/empty.txt b/empty.txt",
+      "deleted file mode 100644",
+      "--- a/empty.txt",
+      "+++ /dev/null"
+    ].join("\n");
+
+    const prepared = await prepareApplyPatchTool({ workspacePath, patchText: emptyDeletePatch });
+    await applyPreparedPatch({ workspacePath, prepared });
+    await assert.rejects(() => fs.readFile(empty, "utf8"));
+
+    const nonEmptyDeletePatch = [
+      "diff --git a/non-empty.txt b/non-empty.txt",
+      "deleted file mode 100644",
+      "--- a/non-empty.txt",
+      "+++ /dev/null"
+    ].join("\n");
+
+    await assert.rejects(
+      () => prepareApplyPatchTool({ workspacePath, patchText: nonEmptyDeletePatch }),
+      /must include hunks/
+    );
+    assert.equal(await fs.readFile(nonEmpty, "utf8"), "x\n");
+  });
+});
+
+test("apply_patch 支持 git unified diff rename-only", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const source = path.join(workspacePath, "old.txt");
+    const target = path.join(workspacePath, "new.txt");
+    await fs.writeFile(source, "keep\n", { encoding: "utf8" });
+
+    const patchText = [
+      "diff --git a/old.txt b/new.txt",
+      "similarity index 100%",
+      "rename from old.txt",
+      "rename to new.txt"
+    ].join("\n");
+
+    const prepared = await prepareApplyPatchTool({ workspacePath, patchText });
+    await applyPreparedPatch({ workspacePath, prepared });
+
+    await assert.rejects(() => fs.readFile(source, "utf8"));
+    assert.equal(await fs.readFile(target, "utf8"), "keep\n");
+  });
+});
+
+test("apply_patch 支持 git unified diff rename + modify", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const source = path.join(workspacePath, "from.txt");
+    const target = path.join(workspacePath, "to.txt");
+    await fs.writeFile(source, "a\nb\n", { encoding: "utf8" });
+
+    const patchText = [
+      "diff --git a/from.txt b/to.txt",
+      "similarity index 50%",
+      "rename from from.txt",
+      "rename to to.txt",
+      "--- a/from.txt",
+      "+++ b/to.txt",
+      "@@ -1,2 +1,2 @@",
+      " a",
+      "-b",
+      "+b2"
+    ].join("\n");
+
+    const prepared = await prepareApplyPatchTool({ workspacePath, patchText });
+    await applyPreparedPatch({ workspacePath, prepared });
+
+    await assert.rejects(() => fs.readFile(source, "utf8"));
+    assert.equal(await fs.readFile(target, "utf8"), "a\nb2\n");
+  });
+});
+
+test("apply_patch 拒绝 git binary patch", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const patchText = [
+      "diff --git a/a.bin b/a.bin",
+      "GIT binary patch",
+      "literal 0"
+    ].join("\n");
+
+    await assert.rejects(
+      () => prepareApplyPatchTool({ workspacePath, patchText }),
+      /binary patch is not supported/
+    );
+  });
+});
+
+test("apply_patch old-style unified diff(无 diff --git) 支持多文件", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const a = path.join(workspacePath, "a.txt");
+    const b = path.join(workspacePath, "b.txt");
+    await fs.writeFile(a, "x\n", { encoding: "utf8" });
+    await fs.writeFile(b, "y\n", { encoding: "utf8" });
+
+    const patchText = [
+      "--- a/a.txt",
+      "+++ b/a.txt",
+      "@@ -1,1 +1,1 @@",
+      "-x",
+      "+x1",
+      "--- a/b.txt",
+      "+++ b/b.txt",
+      "@@ -1,1 +1,1 @@",
+      "-y",
+      "+y1"
+    ].join("\n");
+
+    const prepared = await prepareApplyPatchTool({ workspacePath, patchText });
+    await applyPreparedPatch({ workspacePath, prepared });
+
+    assert.equal(await fs.readFile(a, "utf8"), "x1\n");
+    assert.equal(await fs.readFile(b, "utf8"), "y1\n");
+  });
+});
+
+test("apply_patch 新增文件 diff 若包含 context 或 delete 行则拒绝", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const patchText = [
+      "diff --git a/new.txt b/new.txt",
+      "new file mode 100644",
+      "--- /dev/null",
+      "+++ b/new.txt",
+      "@@ -0,0 +1,2 @@",
+      "+line-1",
+      " line-2"
+    ].join("\n");
+
+    await assert.rejects(
+      () => prepareApplyPatchTool({ workspacePath, patchText }),
+      /Unsupported add-file hunk/
+    );
+  });
+});

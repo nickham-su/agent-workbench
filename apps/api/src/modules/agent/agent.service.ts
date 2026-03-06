@@ -126,10 +126,11 @@ function toolArgsSchema(toolName: AgentContextToolName) {
           type: "string",
           minLength: 1,
           description: [
-            "按 apply_patch 协议提交补丁文本(不是 git diff).",
-            "必须以 '*** Begin Patch' 开头,以 '*** End Patch' 结尾。",
-            "支持: Add File / Update File / Delete File / Move to。",
-            "提示: 同一文件多段修改时,重复多个 '*** Update File: <path>' 段(不要使用 git 风格 @@ -a,b +c,d @@)。"
+            "patchText 是 git unified diff(文本)字符串。",
+            "支持: 修改/新增/删除文本文件;多文件 diff;单文件多个 @@ hunk;rename/move(含 rename-only)。",
+            "不支持: 二进制补丁(GIT binary patch)、submodule、copy from/to 等高级元数据。",
+            "限制: 仅文本;路径必须在当前目录内且拒绝 symlink/越界路径;新增文件不允许覆盖已存在路径。",
+            "失败提示: 若应用失败(上下文不匹配),请基于当前目录重新生成 diff,或增加上下文行数(例如 git diff -U5)。"
           ].join("\n")
         }
       }
@@ -298,12 +299,12 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
       "",
       "参数:",
       "- command: 必填,字符串。直接写要执行的命令,不要传数组,也不要在 command 里再写 bash -lc。",
-      "- workdir: 可选,工作目录。强烈建议不填(默认就是工作区根目录)。如需指定,尽量使用相对路径(相对工作区),避免写 /workspace 之类的绝对路径。",
+      "- workdir: 可选,工作目录。强烈建议不填(默认就是当前目录)。如需指定,尽量使用相对路径(相对当前目录),避免写 /workspace 之类的绝对路径。",
       "- timeout: 可选,超时秒数(整数),默认 120。",
       "  注意: timeout 的单位是秒(不是毫秒),不要传 120000 这类毫秒值。",
       "",
       "建议:",
-      "- 尽量在工作区内行动,路径优先使用相对路径。",
+      "- 尽量在当前目录内行动,路径优先使用相对路径。",
       "",
       "示例:",
       "- {\"command\":\"pwd\"}",
@@ -312,31 +313,35 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
     ].join("\n");
   }
   if (toolName === "read") {
-    return "读取工作区内目录或UTF-8文本文件,支持offset/limit,超长行截断,输出上限50KB,不支持非文本或特殊文件类型。";
+    return "读取当前目录内目录或UTF-8文本文件,支持offset/limit,超长行截断,输出上限50KB,不支持非文本或特殊文件类型。";
   }
   if (toolName === "apply_patch") {
     return [
-      "按 apply_patch 协议批量修改文件(不是 git diff),用于最小改动与多文件联动。",
+      "用 git unified diff(文本)批量修改当前目录内文件,用于最小改动与多文件联动。",
       "",
       "格式:",
-      "- patchText 第一行必须是 '*** Begin Patch',最后一行必须是 '*** End Patch'。",
-      "- 支持头:",
-      "  - '*** Add File: <path>'",
-      "  - '*** Update File: <path>'",
-      "  - '*** Delete File: <path>'",
-      "  - '*** Move to: <path>' (写在 Update File 段内,用于移动/重命名)",
+      "- patchText 必须是 git diff/unified diff 常见文本格式,包含 diff --git/---/+++/@@ 等行。",
       "",
-      "注意:",
-      "- patchText 不是 git diff;不要包含 'diff --git' 或 '---/+++'.",
-      "- 同一文件多段修改请重复多个 '*** Update File: <path>' 段(不要在同一段里写多个 git 风格 @@ hunk)。",
+      "支持:",
+      "- 多文件 diff",
+      "- 单文件多个 @@ hunk",
+      "- 新增文件: --- /dev/null +++ b/<path>",
+      "- 删除文件: --- a/<path> +++ /dev/null",
+      "- rename/move: rename from/rename to(支持 rename-only 与 rename+修改)",
+      "",
+      "限制:",
+      "- 仅文本;不支持二进制补丁(GIT binary patch)、submodule。",
+      "- 路径必须在当前目录内,拒绝 symlink/越界路径。",
+      "- 新增文件不允许覆盖已存在路径。",
       "",
       "示例(最小更新):",
-      "*** Begin Patch",
-      "*** Update File: src/foo.txt",
-      "@@",
+      "diff --git a/src/foo.txt b/src/foo.txt",
+      "index 1111111..2222222 100644",
+      "--- a/src/foo.txt",
+      "+++ b/src/foo.txt",
+      "@@ -1,1 +1,1 @@",
       "-old",
-      "+new",
-      "*** End Patch"
+      "+new"
     ].join("\n");
   }
   if (toolName === "todolist") {
@@ -357,7 +362,7 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
   }
   if (toolName === "subtask") return options?.subtaskDescription || "在子会话中执行任务。";
   if (toolName.startsWith("mcp_")) return `调用 MCP 工具 ${toolName}`;
-  return "写入工作区内文件并全量覆盖,作为确定性兜底工具,当需要直接重写完整内容或 patch 匹配不稳定时使用。";
+  return "写入当前目录内文件并全量覆盖,作为确定性兜底工具,当需要直接重写完整内容或 patch 匹配不稳定时使用。";
 }
 
 function stringifyToolResult(raw: unknown) {

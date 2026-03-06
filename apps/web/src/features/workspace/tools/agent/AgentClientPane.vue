@@ -21,6 +21,7 @@
     <div
       ref="scrollEl"
       class="agent-message-list relative flex-1 min-h-0 overflow-auto p-3 bg-[var(--panel-bg)]"
+      :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
       @scroll.passive="onMessageListScroll"
       @wheel.passive="onMessageListWheel"
     >
@@ -2227,7 +2228,7 @@ onBeforeUnmount(() => {
 }
 
 .message-id {
-  font-size: 12px;
+  font-size: 0.92em;
   line-height: 1;
   color: inherit;
 }
@@ -2253,7 +2254,7 @@ onBeforeUnmount(() => {
 
 .subtask-title-icon {
   display: inline-block;
-  font-size: 14px;
+  font-size: 1.05em;
 }
 
 .slash-command-item {

@@ -1,7 +1,7 @@
 <template>
   <div>
     <div
-      class="flex items-center gap-2 min-w-0 flex-wrap w-full pl-2 pr-0 py-0.5 rounded cursor-pointer hover:bg-[var(--hover-bg)] transition-colors duration-100 text-[11px] font-mono text-[color:var(--text-secondary)]"
+      class="flex items-center gap-2 min-w-0 flex-wrap w-full pl-2 pr-0 py-0.5 rounded cursor-pointer hover:bg-[var(--hover-bg)] transition-colors duration-100 text-[0.85em] font-mono text-[color:var(--text-secondary)]"
       role="button"
       tabindex="0"
       @click="onToggleExpand"
@@ -16,11 +16,11 @@
     </div>
 
     <div v-if="expanded">
-      <div v-if="loading" class="text-[12px] text-[color:var(--text-tertiary)]">Loading diff...</div>
-      <div v-else-if="loadError" class="text-[12px] text-red-500">diff unavailable: {{ loadError }}</div>
+      <div v-if="loading" class="text-[0.92em] text-[color:var(--text-tertiary)]">Loading diff...</div>
+      <div v-else-if="loadError" class="text-[0.92em] text-red-500">diff unavailable: {{ loadError }}</div>
       <template v-else-if="artifact">
         <div v-if="showCreateFileContent" class="rounded border border-[var(--border-color-secondary)] overflow-hidden">
-          <div class="px-2 py-1 text-[11px] text-[color:var(--text-tertiary)] border-b border-[var(--border-color-secondary)]">
+          <div class="px-2 py-1 text-[0.85em] text-[color:var(--text-tertiary)] border-b border-[var(--border-color-secondary)]">
             New file content
           </div>
           <MonacoCodeViewer
@@ -31,7 +31,7 @@
             :min-height="72"
           />
         </div>
-        <div v-else-if="!canRenderDiff" class="text-[12px] text-[color:var(--text-tertiary)]">diff unavailable</div>
+        <div v-else-if="!canRenderDiff" class="text-[0.92em] text-[color:var(--text-tertiary)]">diff unavailable</div>
         <div v-else class="rounded border border-[var(--border-color-secondary)] overflow-hidden">
           <MonacoDiffViewer
             :original="artifact.before.text || ''"
@@ -46,7 +46,7 @@
             :ignoreTrimWhitespace="true"
           />
         </div>
-        <div v-if="truncatedHint" class="pt-1 text-[11px] text-[color:var(--text-tertiary)]">{{ truncatedHint }}</div>
+        <div v-if="truncatedHint" class="pt-1 text-[0.85em] text-[color:var(--text-tertiary)]">{{ truncatedHint }}</div>
       </template>
     </div>
   </div>
