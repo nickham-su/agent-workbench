@@ -698,6 +698,26 @@ function parseUnifiedDiffPatchText(input: string): { hunks: Hunk[] } {
   return { hunks };
 }
 
+function stripTrailingEndPatchMarkerForUnifiedDiff(input: string) {
+  const text = String(input ?? "");
+  const lines = text.split(/\r?\n/);
+
+  // Strip trailing empty lines first.
+  let end = lines.length;
+  while (end > 0 && String(lines[end - 1] ?? "").trim() === "") {
+    end -= 1;
+  }
+  if (end <= 0) return text;
+
+  const lastLine = String(lines[end - 1] ?? "");
+  // Only tolerate a *bare* legacy marker at the very end of a unified diff.
+  // NOTE: a leading space like " *** End Patch" may be a valid unified diff context line and must not be stripped.
+  if (/^[\t ]/.test(lastLine)) return text;
+  if (lastLine.trimEnd() !== END_PATCH_MARKER) return text;
+
+  return lines.slice(0, end - 1).join("\n");
+}
+
 function parseAnyPatchText(input: string): { hunks: Hunk[] } {
   const text = String(input ?? "");
   if (!text.trim()) {
@@ -707,7 +727,8 @@ function parseAnyPatchText(input: string): { hunks: Hunk[] } {
   if (firstLine.trim() === BEGIN_PATCH_MARKER) {
     return parsePatchText(text);
   }
-  return parseUnifiedDiffPatchText(text);
+  const normalized = stripTrailingEndPatchMarkerForUnifiedDiff(text);
+  return parseUnifiedDiffPatchText(normalized);
 }
 
 function parseUpdateFileChunk(lines: string[], lineNumber: number, allowMissingContext: boolean) {

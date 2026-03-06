@@ -1,0 +1,213 @@
+# 全局系统提示词纳入“提示词库”管理方案(v1)
+
+本文档在既有“系统提示词(Global + Workspace)方案(v1)”基础上，进一步将当前硬编码的全局系统提示词(`GLOBAL_WORKFLOW_SYSTEM_PROMPT`)纳入 Settings 的“提示词库”(global prompts)中管理。
+
+目标是让用户/开发者无需改代码即可调优系统提示词，同时确保系统始终存在一个有效的“底座 system prompt”，避免误删/置空导致 agent 不可用。
+
+相关背景文档：
+- `docs/design/agent/system-prompts-v1.md`
+
+---
+
+## 背景与现状
+
+- agent 的模型调用只接收单个 `system: string`。
+- 当前 `system` 在 API 侧构建(参见 `AgentService.getPromptContextForRun()`)，worker 侧仅透传。
+- 当前实现中存在硬编码常量：`GLOBAL_WORKFLOW_SYSTEM_PROMPT`，其内容会被无条件 prepend 到最终 `system`。
+- “提示词库”(Settings: `agent_global_prompts_v1`)已支持维护多条 global prompt，并由 agent profile 的 `globalPromptIds` 选择性注入。
+
+问题：
+- 硬编码全局系统提示词不利于调优；每次修改需要改代码并发布。
+- global prompt 允许为空/可删除，若将系统底座迁入提示词库，需要额外约束以保证可用性。
+
+---
+
+## 目标
+
+- 将全局系统提示词作为提示词库中的一个“保留条目”(reserved item)管理。
+- 系统启动时自动初始化/修复该保留条目，确保始终存在且非空。
+- 在生成最终 `system` 时，优先使用该保留条目内容作为“system 底座”。
+- 防止该保留条目被删除，防止其 `prompt` 被更新为空。
+- 不改变既有的拼接大顺序：底座 -> global prompts -> workspace AGENTS.md -> agent prompt。
+
+---
+
+## 非目标
+
+- 不引入 session 级别覆盖或 per-run 的 system prompt 覆盖。
+- 不改变 workspace `AGENTS.md` 的读取策略(仍仅支持 workspace 根目录，32KB 截断)。
+- 不对所有 global prompt 条目强制 `prompt` 非空；仅对“保留条目”施加非空约束。
+
+---
+
+## 设计概览
+
+### 1) 保留条目定义
+
+在 settings key `agent_global_prompts_v1` 的 `items` 中，约定一个保留 id：
+
+- `id = "global_system_prompt"`
+
+该条目规则：
+- **必须存在**：无论用户如何配置，系统应保证该条目存在。
+- **不可删除**：通过 API 更新 settings 时，不允许用户删除该条目。
+- **prompt 必须非空**：该条目的 `prompt.trim().length > 0`，否则拒绝更新或自动修复。
+- **建议 title**：`"Global System Prompt"` 或 `"全局系统提示词"`(需满足 title <= 20 字符的既有限制)。
+
+### 2) 启动时初始化/修复(Seeding)
+
+在 API 启动阶段(对外 listen 之前)执行一次初始化动作：
+
+- 读取 settings `agent_global_prompts_v1`。
+- 若不存在：创建 settings，并写入 `items`，至少包含 `global_system_prompt`。
+- 若存在但 `items` 缺少 `global_system_prompt`：补写该条目。
+- 若存在且该条目 `prompt` 为空/全空白：将其 `prompt` 恢复为内置默认值，并记录 warn 日志。
+
+内置默认值来源：
+- 保留现有常量 `GLOBAL_WORKFLOW_SYSTEM_PROMPT` 作为“seed/restore 的 source of truth”。
+
+> 备注：当前内置默认值字节数约 4.2KB，小于 global prompt 既有 32KB 限制。
+
+### 3) 运行时 system prompt 的拼接
+
+最终 `system: string` 的拼接顺序调整为：
+
+1. **系统底座**：优先使用 settings 中 `global_system_prompt` 条目的 `prompt` 作为第一段；若因异常读取不到，则 fallback 到 `GLOBAL_WORKFLOW_SYSTEM_PROMPT`。
+2. **Global prompts(可选)**：按 global prompts 列表顺序遍历，注入 agent profile 选中的条目(跳过 `global_system_prompt`，避免重复注入)。
+3. **Workspace `AGENTS.md`(可选)**
+4. **Agent profile `prompt`(可选)**
+
+### 4) 更新校验与“不可删除”策略
+
+Settings 更新接口为 PUT 覆盖：`PUT /api/settings/agent/global-prompts`。
+
+为实现“不可删除”，采用下述策略：
+
+- 对于 incoming items **缺少** `global_system_prompt`：
+  - 服务端在保存前**自动补回**该条目(优先补回当前已存储版本；若存储也缺失，则用默认常量生成)。
+  - 即：删除操作无效，最终保存结果仍包含该条目。
+- 对于 incoming items **包含** `global_system_prompt` 但其 `prompt` 为空/全空白：
+  - 服务端返回 `400` 拒绝，并给出明确 error code。
+
+此策略的取舍：
+- 优点：兼容旧客户端/测试用例(即便没传保留条目也不至于硬失败)，且能强制“不可删除”。
+- 缺点：PUT 的语义从“完全覆盖”变为“覆盖 + 修复约束”。但这与系统可用性目标一致。
+
+---
+
+## 数据模型与协议
+
+### Settings Key
+
+- key: `agent_global_prompts_v1`
+
+### Schema(保持不变)
+
+保持现有 schema：
+
+```ts
+type AgentGlobalPromptItem = {
+  id: string;
+  title: string; // <= 20
+  prompt: string;
+};
+
+type AgentGlobalPromptSettings = {
+  items: AgentGlobalPromptItem[];
+  updatedAt: number;
+};
+```
+
+约束增强(仅对保留条目)：
+- `id === "global_system_prompt"` 时：`prompt.trim().length > 0`。
+
+---
+
+## API 行为
+
+### GET /api/settings/agent/global-prompts
+
+- 返回的 `items` 必须包含 `global_system_prompt`。
+
+### PUT /api/settings/agent/global-prompts
+
+- incoming items 允许不包含 `global_system_prompt`，但服务端会补回。
+- incoming 若包含 `global_system_prompt` 且 prompt 为空/全空白：400。
+
+建议新增/使用的错误码(示例)：
+- `AGENT_GLOBAL_SYSTEM_PROMPT_REQUIRED`
+- `AGENT_GLOBAL_SYSTEM_PROMPT_EMPTY`
+
+---
+
+## 前端 UI 方案
+
+在“提示词库”页面(AgentGlobalPromptsSettingsPanel)中对保留条目做特殊处理：
+
+- 对 `id === global_system_prompt`：隐藏/禁用删除按钮。
+- prompt 文本框仍可编辑，用于调优。
+- 可选：提供“恢复默认值”按钮，将其 prompt 重置为内置默认常量(通过 PUT 更新完成)。
+
+说明文案建议：
+- 该条目会作为 system prompt 的第一段注入，影响所有 agent 的行为。
+
+---
+
+## 兼容性
+
+- 对于新安装/空 DB：启动 seed 会写入 `global_system_prompt`，使系统具备可运行的默认 system prompt。
+- 对于旧数据：
+  - 若原有 `agent_global_prompts_v1` 不存在或不包含保留条目，启动 seed 会补齐。
+  - 若用户/脚本误将保留条目 prompt 置空，启动 seed 会修复(并记录 warn)。
+- 对于运行时行为：
+  - 默认情况下，注入内容与原 `GLOBAL_WORKFLOW_SYSTEM_PROMPT` 保持一致，因此用户无感。
+
+---
+
+## 风险与对策
+
+1) **多实例并发写入(竞态)**
+- seed 属于启动期动作，建议在对外 listen 之前执行，并尽量做到“仅在缺失/损坏时写回”。
+
+2) **系统 prompt 过大导致上下文占用**
+- global prompts 已有 32KB 上限；保留条目同样受此限制。
+- UI/文档中提示：修改全局系统提示词可能显著占用上下文窗口。
+
+3) **重复注入**
+- 若 agent profile 的 `globalPromptIds` 包含 `global_system_prompt`，运行时应在“可选 global prompts 注入”阶段跳过该 id，避免重复注入。
+
+---
+
+## 落地改动点(代码级)
+
+> 仅列出关键文件与职责，具体实现以最小改动为原则。
+
+- API
+  - `apps/api/src/app/createApp.ts`：增加启动期 seed 调用(在 listen 前)。
+  - `apps/api/src/modules/settings/settings.service.ts`：
+    - 扩展 `updateAgentGlobalPromptSettings`：对 `global_system_prompt` 做不可删除/非空校验与自动补回。
+    - 提供一个 `ensureAgentGlobalSystemPromptSeeded`(或同名)方法，供启动时调用。
+  - `apps/api/src/modules/agent/agent.service.ts`：
+    - `buildSystemPrompt`：系统底座从 settings 的 `global_system_prompt` 获取；fallback 常量；并跳过重复注入。
+
+- Web
+  - `apps/web/src/features/settings/components/AgentGlobalPromptsSettingsPanel.vue`：
+    - 对保留条目禁用删除。
+    - 可选：增加“恢复默认值”。
+
+---
+
+## 测试计划
+
+- 集成测试(建议新增/调整)：
+  1. 启动/初始化后，GET global-prompts 返回包含 `global_system_prompt` 且 prompt 非空。
+  2. PUT global-prompts 即使不传 `global_system_prompt`，服务端仍会补回。
+  3. PUT global-prompts 传入 `global_system_prompt` 但 prompt 为空：400。
+  4. prompt-context 的 system 拼接：
+     - `global_system_prompt` 内容位于最前。
+     - 可选 global prompts 在其后，且顺序遵循列表顺序。
+     - 若 agent 选中了 `global_system_prompt`，最终 system 中仅出现一次(去重)。
+
+- 手工验证：
+  - 在提示词库中修改 `global_system_prompt`，新发起 run 后 system 立即生效。
+  - 尝试删除该条目：UI 不提供删除入口；即便通过 API 发起删除，服务端仍会保留。

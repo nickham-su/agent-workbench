@@ -211,6 +211,53 @@ test("apply_patch 在 verify 阶段拒绝 symlink 父目录并且无外部副作
   });
 });
 
+test("apply_patch git unified diff: 兼容尾部多余的 *** End Patch", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const target = path.join(workspacePath, "foo.txt");
+    await fs.writeFile(target, "a\n", { encoding: "utf8" });
+
+    const patchText = [
+      "diff --git a/foo.txt b/foo.txt",
+      "--- a/foo.txt",
+      "+++ b/foo.txt",
+      "@@ -1,1 +1,1 @@",
+      "-a",
+      "+b",
+      "*** End Patch",
+      ""
+    ].join("\n");
+
+    const prepared = await prepareApplyPatchTool({ workspacePath, patchText });
+    await applyPreparedPatch({ workspacePath, prepared });
+
+    const content = await fs.readFile(target, "utf8");
+    assert.equal(content, "b\n");
+  });
+});
+
+test("apply_patch git unified diff: 不应剥离 hunk context 行中的 ' *** End Patch'", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const target = path.join(workspacePath, "ctx.txt");
+    await fs.writeFile(target, "keep\n*** End Patch\n", { encoding: "utf8" });
+
+    const patchText = [
+      "diff --git a/ctx.txt b/ctx.txt",
+      "--- a/ctx.txt",
+      "+++ b/ctx.txt",
+      "@@ -1,2 +1,2 @@",
+      "-keep",
+      "+kept",
+      " *** End Patch"
+    ].join("\n");
+
+    const prepared = await prepareApplyPatchTool({ workspacePath, patchText });
+    await applyPreparedPatch({ workspacePath, prepared });
+
+    const content = await fs.readFile(target, "utf8");
+    assert.equal(content, "kept\n*** End Patch\n");
+  });
+});
+
 test("apply_patch 支持 git unified diff 单文件单 hunk", async () => {
   await withTempWorkspace(async (workspacePath) => {
     const target = path.join(workspacePath, "foo.txt");
