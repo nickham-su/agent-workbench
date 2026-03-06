@@ -498,6 +498,9 @@ const inputEl = ref<{ focus?: () => void } | null>(null);
 const stickToBottom = ref(true);
 const userUnfollowed = ref(false);
 const forcedBottomOnFirstActive = ref(false);
+// KeepAlive/工具切换时按 session 记忆滚动位置,恢复用户离开前的阅读上下文。
+const savedScrollTopBySessionId = new Map<string, number>();
+
 let scrollToBottomSeq = 0;
 let loadEarlierSeq = 0;
 
@@ -1278,6 +1281,67 @@ function captureScrollAnchor(el: HTMLElement): ScrollAnchor | null {
   };
 }
 
+function sessionScrollKey(sessionId?: string | null) {
+  const value = String(sessionId ?? props.sessionId ?? "").trim();
+  return value || "";
+}
+
+function saveCurrentScrollPosition(sessionId?: string | null) {
+  const key = sessionScrollKey(sessionId);
+  const el = scrollEl.value;
+  if (!key || !el) return;
+  savedScrollTopBySessionId.set(key, Math.max(0, el.scrollTop));
+}
+
+function hasSavedScrollPosition(sessionId?: string | null) {
+  const key = sessionScrollKey(sessionId);
+  return !!key && savedScrollTopBySessionId.has(key);
+}
+
+async function restoreSavedScrollPosition(sessionId?: string | null) {
+  const key = sessionScrollKey(sessionId);
+  if (!key) return false;
+  const saved = savedScrollTopBySessionId.get(key);
+  if (typeof saved !== "number" || !Number.isFinite(saved)) return false;
+
+  await nextTick();
+  const el = scrollEl.value;
+  if (!el) return false;
+
+  const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+  el.scrollTop = Math.max(0, Math.min(maxScrollTop, saved));
+  lastKnownScrollTop = el.scrollTop;
+  atTop.value = el.scrollTop <= TOP_LOAD_THRESHOLD_PX;
+
+  const dist = distanceToBottom();
+  if (dist <= BOTTOM_FOLLOW_THRESHOLD_PX) {
+    stickToBottom.value = true;
+    userUnfollowed.value = false;
+  } else {
+    stickToBottom.value = false;
+    userUnfollowed.value = true;
+  }
+  return true;
+}
+
+async function refreshVisibleSession(options: { forceFull: boolean; forceFollowBottom: boolean }) {
+  const sessionId = props.sessionId;
+  if (!sessionId) return;
+
+  const shouldRestoreSavedScroll = hasSavedScrollPosition(sessionId);
+  if (shouldRestoreSavedScroll) {
+    stickToBottom.value = false;
+    userUnfollowed.value = true;
+  }
+
+  await refreshAll(options.forceFull, shouldRestoreSavedScroll ? false : options.forceFollowBottom);
+  if (props.sessionId !== sessionId || !props.active) return;
+
+  if (shouldRestoreSavedScroll) {
+    await restoreSavedScrollPosition(sessionId);
+  }
+}
+
 function restoreScrollAnchor(el: HTMLElement, anchor: ScrollAnchor) {
   const containerRect = el.getBoundingClientRect();
   const anchorEl = el.querySelector<HTMLElement>(`.agent-message-row[data-msg-id='${anchor.msgId}']`);
@@ -1391,6 +1455,7 @@ function onMessageListScroll() {
   const nextTop = el.scrollTop;
   const delta = nextTop - lastKnownScrollTop;
   lastKnownScrollTop = nextTop;
+  saveCurrentScrollPosition();
   atTop.value = nextTop <= TOP_LOAD_THRESHOLD_PX;
 
   // 用户主动向上滚动时,即使仍在“离底部阈值”内也不应继续吸附.
@@ -1494,6 +1559,7 @@ async function scrollToBottom(options?: { force?: boolean }) {
 
   // 同步滚动基线,避免后续 scroll 事件把程序滚动误判为“用户向上滚动”。
   lastKnownScrollTop = el.scrollTop;
+  saveCurrentScrollPosition();
 }
 
 async function scrollToBottomStable(options?: { force?: boolean }) {
@@ -2062,6 +2128,7 @@ watch(
   () => [props.sessionId, props.workspaceId],
   () => {
     clearPoll();
+    saveCurrentScrollPosition();
     clearFollowBottomLock();
     loadEarlierSeq += 1;
     handledBoundaryMarkerId.value = 0;
@@ -2093,8 +2160,12 @@ watch(
     // 重置滚动方向判断基线,避免切换会话后首次 scroll 误判为“用户向上滚动”。
     lastKnownScrollTop = 0;
     if (props.sessionId && props.active) {
-      forcedBottomOnFirstActive.value = true;
-      void refreshAll(true, true);
+      const hasSaved = hasSavedScrollPosition(props.sessionId);
+      forcedBottomOnFirstActive.value = !hasSaved;
+      void refreshVisibleSession({
+        forceFull: true,
+        forceFollowBottom: true
+      });
       void focusInputIfNeeded();
     }
   },
@@ -2105,6 +2176,7 @@ watch(
   () => props.active,
   (active) => {
     if (!active) {
+      saveCurrentScrollPosition();
       clearPoll();
       clearFollowBottomLock();
       pendingPollHint.value = false;
@@ -2113,19 +2185,14 @@ watch(
     }
 
     const forceFollowBottom = !forcedBottomOnFirstActive.value;
-    if (forceFollowBottom) {
+    if (forceFollowBottom && !hasSavedScrollPosition(props.sessionId)) {
       forcedBottomOnFirstActive.value = true;
       stickToBottom.value = true;
       userUnfollowed.value = false;
     }
 
     const forceFull = items.value.length === 0;
-    if (pendingPollHint.value) {
-      pendingPollHint.value = false;
-      kickPollAfterRefresh({ forceFull, forceFollowBottom });
-    } else {
-      void refreshAll(forceFull, forceFollowBottom);
-    }
+    void refreshVisibleSession({ forceFull, forceFollowBottom });
     void focusInputIfNeeded();
   }
 );
@@ -2136,14 +2203,19 @@ onActivated(() => {
   if (!props.active) return;
   if (!props.sessionId) return;
   if (!props.sessionReady) return;
-  // KeepAlive 恢复时刷新一次状态.
+  // KeepAlive 恢复时优先恢复上次离开的位置;仅在列表为空时再兜底刷新。
   void nextTick().then(() => {
-    void refreshAll(false, true);
+    if (items.value.length === 0) {
+      void refreshVisibleSession({ forceFull: true, forceFollowBottom: true });
+    } else {
+      void restoreSavedScrollPosition(props.sessionId);
+    }
   });
 });
 
 
 onBeforeUnmount(() => {
+  saveCurrentScrollPosition();
   clearPoll();
   clearFollowBottomLock();
   scrollToBottomSeq += 1;
