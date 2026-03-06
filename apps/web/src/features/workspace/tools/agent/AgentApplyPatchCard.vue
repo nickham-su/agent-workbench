@@ -6,7 +6,7 @@
         :key="`${file.path}-${idx}`"
       >
         <div
-          class="flex items-center gap-2 min-w-0 flex-wrap w-full pl-2 pr-0 py-0.5 rounded cursor-pointer hover:bg-[var(--hover-bg)] transition-colors duration-100 text-[11px] font-mono text-[color:var(--text-secondary)]"
+          class="flex items-center gap-2 min-w-0 flex-wrap w-full pl-2 pr-0 py-0.5 rounded cursor-pointer hover:bg-[var(--hover-bg)] transition-colors duration-100 text-[0.85em] font-mono text-[color:var(--text-secondary)]"
           role="button"
           tabindex="0"
           @click="onPickFile(file.path)"
@@ -18,10 +18,10 @@
         </div>
 
         <div v-if="isExpanded(file.path)">
-          <div v-if="loading" class="text-[12px] text-[color:var(--text-tertiary)]">
+          <div v-if="loading" class="text-[0.92em] text-[color:var(--text-tertiary)]">
             Loading diff...
           </div>
-          <div v-else-if="loadError" class="text-[12px] text-red-500">
+          <div v-else-if="loadError" class="text-[0.92em] text-red-500">
             diff unavailable: {{ loadError }}
           </div>
           <div v-else-if="diffByPath.get(file.path)" class="rounded border border-[var(--border-color-secondary)] overflow-hidden">
@@ -42,7 +42,7 @@
       </div>
     </div>
 
-    <div v-if="errorText" class="pl-2 pr-0 text-[12px] text-red-500 py-0.5">error: {{ errorText }}</div>
+    <div v-if="errorText" class="pl-2 pr-0 text-[0.92em] text-red-500 py-0.5">error: {{ errorText }}</div>
   </div>
 </template>
 

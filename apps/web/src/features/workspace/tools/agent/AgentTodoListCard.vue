@@ -2,7 +2,7 @@
   <div
     :class="
       collapsed
-        ? 'w-full pl-2 pr-0 py-0.5 rounded cursor-pointer hover:bg-[var(--hover-bg)] transition-colors duration-100 text-[11px] font-mono text-[color:var(--text-secondary)]'
+        ? 'w-full pl-2 pr-0 py-0.5 rounded cursor-pointer hover:bg-[var(--hover-bg)] transition-colors duration-100 text-[0.85em] font-mono text-[color:var(--text-secondary)]'
         : 'w-full todo-card rounded border border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] p-2 cursor-pointer hover:bg-[var(--hover-bg)] hover:border-[var(--border-color)] transition-colors duration-100'
     "
     @click="emit('toggle-collapse')"
@@ -25,12 +25,12 @@
     </div>
 
     <div v-else class="flex items-center gap-2 min-w-0">
-      <div class="text-[12px] font-semibold shrink-0">todolist</div>
+      <div class="text-[0.92em] font-semibold shrink-0">todolist</div>
     </div>
 
-    <div v-if="errorText" class="pt-0.5 text-[12px] text-red-500 whitespace-pre-wrap break-words">error: {{ errorText }}</div>
+    <div v-if="errorText" class="pt-0.5 text-[0.92em] text-red-500 whitespace-pre-wrap break-words">error: {{ errorText }}</div>
 
-    <div v-if="!collapsed && todos.length === 0" class="pt-2 text-[12px] text-[color:var(--text-tertiary)]">
+    <div v-if="!collapsed && todos.length === 0" class="pt-2 text-[0.92em] text-[color:var(--text-tertiary)]">
       {{ t("agent.client.todoListEmpty") }}
     </div>
 
@@ -38,7 +38,7 @@
       <div
         v-for="(todo, index) in todos"
         :key="`${todo.status}-${todo.content}-${index}`"
-        class="px-2 py-0.5 leading-4 text-[12px]"
+        class="px-2 py-0.5 leading-4 text-[0.92em]"
       >
         <component :is="statusIcon(todo.status)" class="mr-1 align-[-1px]" :class="statusIconClass(todo.status)" />
         <span class="break-words" :class="todo.status === 'completed' || todo.status === 'cancelled' ? 'line-through opacity-70' : ''">
