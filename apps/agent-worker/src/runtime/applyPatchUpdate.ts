@@ -1,5 +1,6 @@
 export type UpdateFileChunk = {
   changeContext?: string;
+  sourceHunkHeader?: string;
   oldLines: string[];
   newLines: string[];
   isEndOfFile: boolean;
@@ -30,10 +31,11 @@ function computeReplacements(originalLines: string[], filePath: string, chunks: 
   let lineIndex = 0;
 
   for (const chunk of chunks) {
+    const hunkHint = chunk.sourceHunkHeader ? `\nHunk: ${chunk.sourceHunkHeader}` : "";
     if (chunk.changeContext) {
       const contextIndex = seekSequence(originalLines, [chunk.changeContext], lineIndex, false);
       if (contextIndex == null) {
-        throw new Error(`Failed to find context '${chunk.changeContext}' in ${filePath}`);
+        throw new Error(`Failed to find context '${chunk.changeContext}' in ${filePath}${hunkHint}`);
       }
       lineIndex = contextIndex + 1;
     }
@@ -60,7 +62,7 @@ function computeReplacements(originalLines: string[], filePath: string, chunks: 
     }
 
     if (found == null) {
-      throw new Error(`Failed to find expected lines in ${filePath}:\n${chunk.oldLines.join("\n")}`);
+      throw new Error(`Failed to find expected lines in ${filePath}${hunkHint}:\n${chunk.oldLines.join("\n")}`);
     }
 
     replacements.push([found, pattern.length, newSlice]);

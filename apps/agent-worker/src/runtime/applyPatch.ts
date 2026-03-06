@@ -21,6 +21,8 @@ type AddFileHunk = {
 type DeleteFileHunk = {
   kind: "delete";
   path: string;
+  chunks: UpdateFileChunk[];
+  allowDeleteWithoutHunks?: boolean;
 };
 
 type UpdateFileHunk = {
@@ -30,7 +32,13 @@ type UpdateFileHunk = {
   chunks: UpdateFileChunk[];
 };
 
-type Hunk = AddFileHunk | DeleteFileHunk | UpdateFileHunk;
+type MoveOnlyHunk = {
+  kind: "move_only";
+  fromPath: string;
+  toPath: string;
+};
+
+type Hunk = AddFileHunk | DeleteFileHunk | UpdateFileHunk | MoveOnlyHunk;
 
 type ResolvedOperation =
   | {
@@ -226,7 +234,9 @@ function parseOneHunk(lines: string[], lineNumber: number): { hunk: Hunk; consum
     return {
       hunk: {
         kind: "delete",
-        path: targetPath
+        path: targetPath,
+        chunks: [],
+        allowDeleteWithoutHunks: true
       },
       consumed: 1
     };
@@ -285,6 +295,419 @@ function parseOneHunk(lines: string[], lineNumber: number): { hunk: Hunk; consum
   throw new Error(
     `Invalid patch hunk at line ${lineNumber}: '${lines[0]}' is not a valid hunk header. Valid hunk headers: '*** Add File: {path}', '*** Delete File: {path}', '*** Update File: {path}'`
   );
+}
+
+function splitGitPatchTokens(input: string) {
+  const tokens: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  let escaped = false;
+
+  for (const char of input) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "\"") {
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (!inQuotes && (char === " " || char === "\t")) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += char;
+  }
+
+  if (current) tokens.push(current);
+  return tokens;
+}
+
+function parseUnifiedDiffPathToken(raw: string) {
+  const value = String(raw || "").trim();
+  if (!value) return "";
+  return value;
+}
+
+function stripGitPathPrefix(raw: string) {
+  if (raw === "/dev/null") return raw;
+  if (raw.startsWith("a/")) return raw.slice(2);
+  if (raw.startsWith("b/")) return raw.slice(2);
+  return raw;
+}
+
+function parseUnifiedDiffHunkHeader(raw: string) {
+  const line = String(raw || "").trim();
+  const match = /^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@/.exec(line);
+  if (!match) return null;
+  const oldStart = Number(match[1]);
+  const oldLen = match[2] == null ? 1 : Number(match[2]);
+  const newStart = Number(match[3]);
+  const newLen = match[4] == null ? 1 : Number(match[4]);
+  if (![oldStart, oldLen, newStart, newLen].every((n) => Number.isFinite(n) && n >= 0)) return null;
+  return {
+    oldStart: Math.floor(oldStart),
+    oldLen: Math.floor(oldLen),
+    newStart: Math.floor(newStart),
+    newLen: Math.floor(newLen)
+  };
+}
+
+function buildNewFileContentsFromUnifiedDiffChunks(chunks: UpdateFileChunk[]) {
+  if (chunks.length === 0) return "";
+
+  type Segment = { start: number; len: number; lines: string[]; header: string };
+  const segments: Segment[] = [];
+
+  for (const chunk of chunks) {
+    if (chunk.removedLines > 0 || chunk.oldLines.length > 0) {
+      throw new Error(
+        `Unsupported add-file hunk: add-file hunks must not contain deletions or context lines.\nHunk: ${chunk.sourceHunkHeader || "@@ ... @@"}`
+      );
+    }
+    const header = chunk.sourceHunkHeader || "@@ ... @@";
+    const parsed = parseUnifiedDiffHunkHeader(header);
+    if (!parsed) {
+      throw new Error(`Unsupported add-file hunk header: ${header}`);
+    }
+    if (parsed.newLen !== chunk.newLines.length) {
+      throw new Error(
+        `Unsupported add-file hunk: expected ${parsed.newLen} added lines, got ${chunk.newLines.length}.\nHunk: ${header}`
+      );
+    }
+    if (parsed.newLen === 0) continue;
+    segments.push({
+      start: parsed.newStart,
+      len: parsed.newLen,
+      lines: chunk.newLines,
+      header
+    });
+  }
+
+  if (segments.length === 0) return "";
+  segments.sort((a, b) => a.start - b.start);
+
+  let maxLine = 0;
+  for (const seg of segments) {
+    maxLine = Math.max(maxLine, seg.start - 1 + seg.len);
+  }
+  if (maxLine <= 0) return "";
+
+  const out = new Array<string | undefined>(maxLine);
+  for (const seg of segments) {
+    const startIndex = Math.max(0, seg.start - 1);
+    for (let i = 0; i < seg.lines.length; i += 1) {
+      const index = startIndex + i;
+      if (index >= out.length) {
+        throw new Error(`Unsupported add-file hunk: out-of-range insertion.\nHunk: ${seg.header}`);
+      }
+      if (out[index] != null) {
+        throw new Error(`Unsupported add-file hunk: overlapping hunks.\nHunk: ${seg.header}`);
+      }
+      out[index] = seg.lines[i] ?? "";
+    }
+  }
+
+  for (let i = 0; i < out.length; i += 1) {
+    if (out[i] == null) {
+      throw new Error("Unsupported add-file diff: add-file hunks must fully specify file contents");
+    }
+  }
+
+  const joined = (out as string[]).join("\n");
+  return joined.length > 0 ? `${joined}\n` : "";
+}
+
+function parseUnifiedDiffPatchText(input: string): { hunks: Hunk[] } {
+  const normalized = input.replace(/\r\n/g, "\n");
+  if (!normalized.trim()) {
+    throw new Error("Invalid patch: input is empty.");
+  }
+
+  const lines = normalized.split("\n");
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? "";
+    if (line === "GIT binary patch" || line.startsWith("GIT binary patch")) {
+      throw new Error("binary patch is not supported");
+    }
+    if (line.startsWith("Binary files ")) {
+      throw new Error("binary patch is not supported");
+    }
+    if (line.startsWith("Submodule ")) {
+      throw new Error("submodule diff is not supported");
+    }
+    if (line.startsWith("copy from ") || line.startsWith("copy to ")) {
+      throw new Error("copy from/to is not supported");
+    }
+  }
+
+  type UnifiedFilePatch = {
+    aPath?: string;
+    bPath?: string;
+    oldPath?: string;
+    newPath?: string;
+    renameFrom?: string;
+    renameTo?: string;
+    chunks: UpdateFileChunk[];
+    hasDiffHeader: boolean;
+  };
+
+  const filePatches: UnifiedFilePatch[] = [];
+  let current: UnifiedFilePatch | null = null;
+
+  function ensureCurrent() {
+    if (current) return current;
+    current = { chunks: [], hasDiffHeader: false };
+    return current;
+  }
+
+  function pushCurrent() {
+    if (!current) return;
+    const hasAnyMetadata =
+      Boolean(current.aPath || current.bPath || current.oldPath || current.newPath || current.renameFrom || current.renameTo);
+    const hasAnyChunks = current.chunks.length > 0;
+    if (hasAnyMetadata || hasAnyChunks) {
+      filePatches.push(current);
+    }
+    current = null;
+  }
+
+  const hunkHeaderRegex = /^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@/;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? "";
+
+    if (line.startsWith("diff --git ")) {
+      pushCurrent();
+      const rest = line.slice("diff --git ".length);
+      const tokens = splitGitPatchTokens(rest);
+      if (tokens.length < 2) {
+        throw new Error(`Invalid unified diff at line ${i + 1}: expected 'diff --git a/<path> b/<path>'`);
+      }
+      current = {
+        aPath: parseUnifiedDiffPathToken(tokens[0] ?? ""),
+        bPath: parseUnifiedDiffPathToken(tokens[1] ?? ""),
+        chunks: [],
+        hasDiffHeader: true
+      };
+      continue;
+    }
+
+    if (!current && line.trim() === "") continue;
+    let patch = ensureCurrent();
+
+    if (line.startsWith("rename from ")) {
+      const rest = line.slice("rename from ".length);
+      const tokens = splitGitPatchTokens(rest);
+      const p = parseUnifiedDiffPathToken(tokens[0] ?? "");
+      if (!p) throw new Error(`Invalid unified diff at line ${i + 1}: rename from path is missing`);
+      patch.renameFrom = p;
+      continue;
+    }
+    if (line.startsWith("rename to ")) {
+      const rest = line.slice("rename to ".length);
+      const tokens = splitGitPatchTokens(rest);
+      const p = parseUnifiedDiffPathToken(tokens[0] ?? "");
+      if (!p) throw new Error(`Invalid unified diff at line ${i + 1}: rename to path is missing`);
+      patch.renameTo = p;
+      continue;
+    }
+
+    if (line.startsWith("--- ")) {
+      if (
+        patch.hasDiffHeader === false &&
+        (patch.oldPath || patch.newPath || patch.renameFrom || patch.renameTo || patch.chunks.length > 0)
+      ) {
+        // old-style unified diff may omit "diff --git", use "---/+++" pairs to delimit file blocks.
+        pushCurrent();
+        patch = ensureCurrent();
+      }
+      const rest = line.slice("--- ".length);
+      const tokens = splitGitPatchTokens(rest);
+      const p = parseUnifiedDiffPathToken(tokens[0] ?? "");
+      if (!p) throw new Error(`Invalid unified diff at line ${i + 1}: missing '---' path`);
+      patch.oldPath = p;
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      const rest = line.slice("+++ ".length);
+      const tokens = splitGitPatchTokens(rest);
+      const p = parseUnifiedDiffPathToken(tokens[0] ?? "");
+      if (!p) throw new Error(`Invalid unified diff at line ${i + 1}: missing '+++' path`);
+      patch.newPath = p;
+      continue;
+    }
+
+    if (line.startsWith("@@")) {
+      if (!hunkHeaderRegex.test(line)) {
+        throw new Error(`Invalid unified diff at line ${i + 1}: invalid hunk header '${line}'`);
+      }
+      const chunk: UpdateFileChunk = {
+        sourceHunkHeader: line,
+        oldLines: [],
+        newLines: [],
+        isEndOfFile: false,
+        addedLines: 0,
+        removedLines: 0
+      };
+      let parsedAny = false;
+
+      for (i = i + 1; i < lines.length; i += 1) {
+        const bodyLine = lines[i] ?? "";
+        if (bodyLine.startsWith("diff --git ")) {
+          i -= 1;
+          break;
+        }
+        if (bodyLine.startsWith("@@") && hunkHeaderRegex.test(bodyLine)) {
+          i -= 1;
+          break;
+        }
+        if (bodyLine.startsWith("--- ") && patch.hasDiffHeader === false && patch.oldPath && patch.newPath) {
+          i -= 1;
+          break;
+        }
+        if (bodyLine.startsWith("\\ No newline at end of file")) {
+          continue;
+        }
+
+        parsedAny = true;
+        if (bodyLine === "") {
+          chunk.oldLines.push("");
+          chunk.newLines.push("");
+          continue;
+        }
+
+        const marker = bodyLine[0];
+        if (marker === " ") {
+          const content = bodyLine.slice(1);
+          chunk.oldLines.push(content);
+          chunk.newLines.push(content);
+          continue;
+        }
+        if (marker === "+") {
+          chunk.newLines.push(bodyLine.slice(1));
+          chunk.addedLines += 1;
+          continue;
+        }
+        if (marker === "-") {
+          chunk.oldLines.push(bodyLine.slice(1));
+          chunk.removedLines += 1;
+          continue;
+        }
+        if (marker === "\\") {
+          continue;
+        }
+        throw new Error(`Invalid unified diff at line ${i + 1}: invalid hunk line '${bodyLine}'`);
+      }
+
+      if (!parsedAny) {
+        throw new Error(`Invalid unified diff at line ${i + 1}: hunk body is empty`);
+      }
+
+      patch.chunks.push(chunk);
+      continue;
+    }
+
+    if (
+      line.startsWith("index ") ||
+      line.startsWith("new file mode ") ||
+      line.startsWith("deleted file mode ") ||
+      line.startsWith("old mode ") ||
+      line.startsWith("new mode ") ||
+      line.startsWith("similarity index ") ||
+      line.startsWith("dissimilarity index ")
+    ) {
+      continue;
+    }
+
+    if (line.trim() === "") continue;
+    // 其他未知元信息行忽略,避免对使用者产生额外心智负担。
+  }
+
+  pushCurrent();
+
+  const hunks: Hunk[] = [];
+
+  for (const patch of filePatches) {
+    const oldToken = patch.oldPath || patch.renameFrom || patch.aPath || "";
+    const newToken = patch.newPath || patch.renameTo || patch.bPath || "";
+    const oldPath = stripGitPathPrefix(oldToken);
+    const newPath = stripGitPathPrefix(newToken);
+
+    const oldIsDevNull = stripGitPathPrefix(patch.oldPath || "") === "/dev/null";
+    const newIsDevNull = stripGitPathPrefix(patch.newPath || "") === "/dev/null";
+
+    if (oldIsDevNull) {
+      if (!newPath || newPath === "/dev/null") {
+        throw new Error("Invalid unified diff: new file path is missing");
+      }
+      const contents = buildNewFileContentsFromUnifiedDiffChunks(patch.chunks);
+      hunks.push({
+        kind: "add",
+        path: newPath,
+        contents
+      });
+      continue;
+    }
+
+    if (newIsDevNull) {
+      if (!oldPath || oldPath === "/dev/null") {
+        throw new Error("Invalid unified diff: deleted file path is missing");
+      }
+      hunks.push({
+        kind: "delete",
+        path: oldPath,
+        chunks: patch.chunks
+      });
+      continue;
+    }
+
+    if (!oldPath || !newPath) {
+      throw new Error("Invalid unified diff: file path is missing");
+    }
+
+    if (patch.chunks.length === 0 && oldPath !== newPath) {
+      hunks.push({
+        kind: "move_only",
+        fromPath: oldPath,
+        toPath: newPath
+      });
+      continue;
+    }
+
+    if (patch.chunks.length === 0) {
+      throw new Error(`Invalid unified diff: no hunks found for path '${oldPath}'`);
+    }
+
+    hunks.push({
+      kind: "update",
+      path: oldPath,
+      movePath: oldPath === newPath ? undefined : newPath,
+      chunks: patch.chunks
+    });
+  }
+
+  return { hunks };
+}
+
+function parseAnyPatchText(input: string): { hunks: Hunk[] } {
+  const text = String(input ?? "");
+  if (!text.trim()) {
+    throw new Error("Invalid patch: input is empty.");
+  }
+  const firstLine = text.trimStart().split(/\r?\n/, 1)[0] ?? "";
+  if (firstLine.trim() === BEGIN_PATCH_MARKER) {
+    return parsePatchText(text);
+  }
+  return parseUnifiedDiffPatchText(text);
 }
 
 function parseUpdateFileChunk(lines: string[], lineNumber: number, allowMissingContext: boolean) {
@@ -517,7 +940,7 @@ export async function prepareApplyPatchTool(params: {
 }): Promise<ApplyPatchPrepared> {
   throwIfAborted(params.signal);
 
-  const parsed = parsePatchText(params.patchText);
+  const parsed = parseAnyPatchText(params.patchText);
   if (parsed.hunks.length === 0) {
     throw new Error("no hunks found");
   }
@@ -556,6 +979,9 @@ export async function prepareApplyPatchTool(params: {
         fullPath,
         workspaceRealPath
       });
+      if (current.exists) {
+        throw new Error(`add target already exists: ${fullPath}`);
+      }
       const before = current.exists ? current.content : "";
       const after = ensureTrailingNewline(hunk.contents);
       const additions = countLines(after);
@@ -603,6 +1029,17 @@ export async function prepareApplyPatchTool(params: {
         throw new Error(`Failed to read file to delete: ${fullPath}`);
       }
       const before = current.content;
+      if (hunk.chunks.length === 0 && before !== "" && hunk.allowDeleteWithoutHunks !== true) {
+        throw new Error(`delete patch for non-empty file must include hunks: ${fullPath}`);
+      }
+      if (hunk.chunks.length > 0) {
+        // 仅用于内容校验,不影响最终删除语义。
+        deriveNewContentFromChunks({
+          filePath: fullPath,
+          originalContent: before,
+          chunks: hunk.chunks
+        });
+      }
       const deletions = countLines(before);
 
       operations.push({
@@ -627,6 +1064,112 @@ export async function prepareApplyPatchTool(params: {
         state: {
           exists: false,
           content: ""
+        }
+      });
+      continue;
+    }
+
+    if (hunk.kind === "move_only") {
+      const fromPath = ensureSafeRelativePath(hunk.fromPath);
+      const toPath = ensureSafeRelativePath(hunk.toPath);
+      const fromFullPath = resolveWithinWorkspace(params.workspacePath, fromPath);
+      const toFullPath = resolveWithinWorkspace(params.workspacePath, toPath);
+
+      const current = await readVirtualFileState({
+        virtualFiles,
+        relativePath: fromPath,
+        fullPath: fromFullPath,
+        workspaceRealPath
+      });
+      if (!current.exists) {
+        throw new Error(`Failed to read file to move: ${fromFullPath}`);
+      }
+      const before = current.content;
+
+      await ensureParentDirectorySafe({
+        workspacePath: params.workspacePath,
+        workspaceRealPath,
+        fullPath: toFullPath,
+        createMissing: false
+      });
+
+      if (toFullPath === fromFullPath) {
+        operations.push({
+          kind: "update",
+          path: fromPath,
+          fullPath: fromFullPath,
+          content: before
+        });
+        files.push({
+          type: "update",
+          path: fromPath,
+          before,
+          after: before,
+          additions: 0,
+          deletions: 0
+        });
+        recordUnique(modified, seenModified, fromPath);
+        writeVirtualFileState({
+          virtualFiles,
+          relativePath: fromPath,
+          fullPath: fromFullPath,
+          state: {
+            exists: true,
+            content: before
+          }
+        });
+        continue;
+      }
+
+      const target = await readVirtualFileState({
+        virtualFiles,
+        relativePath: toPath,
+        fullPath: toFullPath,
+        workspaceRealPath
+      });
+      if (target.exists) {
+        throw new Error(`move target already exists: ${toFullPath}`);
+      }
+
+      operations.push({
+        kind: "move",
+        path: toPath,
+        fromPath,
+        fullPath: toFullPath,
+        fromFullPath,
+        content: before
+      });
+      files.push({
+        type: "move",
+        path: toPath,
+        fromPath,
+        before,
+        after: before,
+        additions: 0,
+        deletions: 0
+      });
+      recordUnique(modified, seenModified, toPath);
+      const movedKey = `${fromPath}->${toPath}`;
+      if (!seenMoved.has(movedKey)) {
+        seenMoved.add(movedKey);
+        moved.push({ fromPath, toPath });
+      }
+      writeVirtualFileState({
+        virtualFiles,
+        relativePath: fromPath,
+        fullPath: fromFullPath,
+        state: {
+          exists: false,
+          content: ""
+        }
+      });
+      writeVirtualFileState({
+        virtualFiles,
+        relativePath: toPath,
+        fullPath: toFullPath,
+        state: {
+          exists: true,
+          content: before
         }
       });
       continue;
@@ -826,7 +1369,21 @@ export async function applyPreparedPatch(params: {
   for (const operation of params.prepared.operations) {
     throwIfAborted(params.signal);
 
-    if (operation.kind === "add" || operation.kind === "update") {
+    if (operation.kind === "add") {
+      await ensureWritableParent(params.workspacePath, workspaceRealPath, operation.fullPath);
+      try {
+        await fs.writeFile(operation.fullPath, operation.content, { encoding: "utf8", flag: "wx" });
+      } catch (err) {
+        const code = (err as { code?: string }).code;
+        if (code === "EEXIST") {
+          throw new Error(`add target already exists: ${operation.fullPath}`);
+        }
+        throw err;
+      }
+      continue;
+    }
+
+    if (operation.kind === "update") {
       await ensureWritableParent(params.workspacePath, workspaceRealPath, operation.fullPath);
       await fs.writeFile(operation.fullPath, operation.content, { encoding: "utf8" });
       continue;
