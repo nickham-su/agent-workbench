@@ -69,7 +69,9 @@ import {
 import {
   getAgentGlobalPromptSettings,
   getAgentMcpSettings,
+  AGENT_GLOBAL_SYSTEM_PROMPT_ID,
   getAgentRuntimeSettings,
+  registerGlobalSystemPromptTextProvider,
   getAgentSettings,
   resolveGlobalDefaultModelProfile,
   resolveExecutionProfile
@@ -1519,6 +1521,8 @@ const GLOBAL_WORKFLOW_SYSTEM_PROMPT = `# 工作方式与流程(全局)
 - 失败优雅: 遇到错误时先定位根因并给出下一步排查路径,不要靠猜测反复试错.
 `;
 
+registerGlobalSystemPromptTextProvider(() => GLOBAL_WORKFLOW_SYSTEM_PROMPT);
+
 function buildSystemPrompt(input: {
   agentName: string;
   agentPrompt: string;
@@ -1530,11 +1534,13 @@ function buildSystemPrompt(input: {
   const selectedGlobalIds = new Set(input.agentGlobalPromptIds);
 
   const sections: string[] = [];
-  sections.push(GLOBAL_WORKFLOW_SYSTEM_PROMPT.trim());
+  const systemBase = input.globalPrompts.find((item) => item.id === AGENT_GLOBAL_SYSTEM_PROMPT_ID)?.prompt?.trim() || GLOBAL_WORKFLOW_SYSTEM_PROMPT.trim();
+  sections.push(systemBase);
 
   for (const item of input.globalPrompts) {
     if (!selectedGlobalIds.has(item.id)) continue;
     if (!item.prompt.trim()) continue;
+    if (item.id === AGENT_GLOBAL_SYSTEM_PROMPT_ID) continue;
     sections.push(`## Global Prompt: ${item.title}\n${item.prompt}`);
   }
 

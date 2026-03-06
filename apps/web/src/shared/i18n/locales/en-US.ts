@@ -852,7 +852,7 @@ export default {
       saved: "Saved"
     },
     agentGlobalPrompts: {
-      description: "Manage prompt library entries. Entries take effect only when selected by an agent profile.",
+      description: "Manage prompt library entries. Regular entries take effect only when selected by an agent profile, while Global System Prompt always applies globally.",
       saving: "Saving...",
       empty: "No prompt library entries yet. Add one to start.",
       actions: {
@@ -871,7 +871,8 @@ export default {
         titleLabel: "Title",
         promptLabel: "Prompt",
         promptPlaceholder: "Enter prompt text for this entry",
-        promptHelp: "Up to {maxKb}KB, current {bytes} bytes"
+        promptHelp: "Up to {maxKb}KB, current {bytes} bytes",
+        systemPromptHint: "This entry is injected as the system prompt base and affects all agents."
       },
       deleteConfirm: {
         title: "Delete prompt library entry?",
@@ -883,7 +884,8 @@ export default {
         invalidForm: "Please complete required fields",
         duplicateId: "Entry ID already exists",
         titleTooLong: "Title is too long. Maximum {max} characters",
-        promptTooLong: "Prompt is too long. Maximum {maxKb}KB"
+        promptTooLong: "Prompt is too long. Maximum {maxKb}KB",
+        reservedDelete: "The system prompt entry cannot be deleted"
       },
       saved: "Saved"
     },

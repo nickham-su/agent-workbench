@@ -8,6 +8,7 @@ import { openDb } from "../../infra/db/db.js";
 import type { Db } from "../../infra/db/db.js";
 import { ensureDir, rmrf } from "../../infra/fs/fs.js";
 import { agentArchiveSessionDir, compactionSnippetPath, workspaceRoot } from "../../infra/fs/paths.js";
+import { setSettingJson } from "../settings/settings.store.js";
 import { insertWorkspace } from "../workspaces/workspace.store.js";
 import {
   appendContextItem,
@@ -3615,7 +3616,33 @@ test("agent prompt-context 全局提示词按列表顺序注入(方案A)", async
   const runId = newSortableId("run");
   const createdAt = Date.now();
 
+  const initialGlobalPrompts = await fixture.app.inject({
+    method: "GET",
+    url: "/api/settings/agent/global-prompts"
+  });
+  assert.equal(initialGlobalPrompts.statusCode, 200, `get global prompts failed: ${initialGlobalPrompts.body}`);
+  const seededItems = (initialGlobalPrompts.json() as { items: Array<{ id: string; title: string; prompt: string }> }).items;
+  const seededSystemPrompt = seededItems.find((item) => item.id === "global_system_prompt");
+  assert.ok(seededSystemPrompt, "seeded global system prompt should exist");
+  assert.equal(seededSystemPrompt?.title, "Global System Prompt");
+  assert.ok(String(seededSystemPrompt?.prompt || "").trim().length > 0, "seeded global system prompt should be non-empty");
+
   const globalPromptsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/global-prompts",
+    payload: {
+      items: [
+        { id: "global_system_prompt", title: "ignored", prompt: "CUSTOM_SYSTEM_BASE" },
+        { id: "gp_a", title: "A", prompt: "PROMPT_A" },
+        { id: "gp_b", title: "B", prompt: "PROMPT_B" }
+      ]
+    }
+  });
+  assert.equal(globalPromptsRes.statusCode, 200, `update global prompts failed: ${globalPromptsRes.body}`);
+  const updatedItems = (globalPromptsRes.json() as { items: Array<{ id: string; title: string; prompt: string }> }).items;
+  assert.equal(updatedItems.find((item) => item.id === "global_system_prompt")?.title, "Global System Prompt");
+
+  const omitSystemPromptRes = await fixture.app.inject({
     method: "PUT",
     url: "/api/settings/agent/global-prompts",
     payload: {
@@ -3625,7 +3652,33 @@ test("agent prompt-context 全局提示词按列表顺序注入(方案A)", async
       ]
     }
   });
-  assert.equal(globalPromptsRes.statusCode, 200, `update global prompts failed: ${globalPromptsRes.body}`);
+  assert.equal(omitSystemPromptRes.statusCode, 200, `update global prompts failed: ${omitSystemPromptRes.body}`);
+  const omitSystemPromptItems = (omitSystemPromptRes.json() as { items: Array<{ id: string; title: string; prompt: string }> }).items;
+  assert.equal(omitSystemPromptItems.filter((item) => item.id === "global_system_prompt").length, 1);
+  assert.equal(omitSystemPromptItems.find((item) => item.id === "global_system_prompt")?.prompt, "CUSTOM_SYSTEM_BASE");
+
+  const emptySystemPromptRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/global-prompts",
+    payload: {
+      items: [
+        { id: "global_system_prompt", title: "whatever", prompt: "   " }
+      ]
+    }
+  });
+  assert.equal(emptySystemPromptRes.statusCode, 400, `empty system prompt should be rejected: ${emptySystemPromptRes.body}`);
+
+  const emptyPromptRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/global-prompts",
+    payload: {
+      items: [
+        { id: "global_system_prompt", title: "whatever", prompt: "CUSTOM_SYSTEM_BASE" },
+        { id: "gp_empty", title: "Empty", prompt: "   " }
+      ]
+    }
+  });
+  assert.equal(emptyPromptRes.statusCode, 400, `empty prompt should be rejected: ${emptyPromptRes.body}`);
 
   const agentsRes = await fixture.app.inject({
     method: "PUT",
@@ -3638,7 +3691,7 @@ test("agent prompt-context 全局提示词按列表顺序注入(方案A)", async
           name: "default",
           summary: "",
           prompt: "AGENT_PROMPT",
-          globalPromptIds: ["gp_b", "gp_a"],
+          globalPromptIds: ["global_system_prompt", "gp_b", "gp_a"],
           tools: ["bash", "read", "write"],
           mcpServers: [],
           permissions: {
@@ -3676,13 +3729,14 @@ test("agent prompt-context 全局提示词按列表顺序注入(方案A)", async
   const idxA = context.system.indexOf("PROMPT_A");
   const idxB = context.system.indexOf("PROMPT_B");
   const idxAgent = context.system.indexOf("AGENT_PROMPT");
-  const idxCore = context.system.indexOf("# 工作方式与流程(全局)");
+  const idxCore = context.system.indexOf("CUSTOM_SYSTEM_BASE");
   assert.ok(idxA >= 0, "system should include PROMPT_A");
   assert.ok(idxB >= 0, "system should include PROMPT_B");
   assert.ok(idxAgent >= 0, "system should include AGENT_PROMPT");
   assert.ok(idxCore >= 0, "system should include global workflow prompt");
   assert.ok(idxCore < idxA, "global workflow prompt should be prepended before global prompts");
   assert.ok(idxA < idxB, "global prompts should follow global list order, not selected id order");
+  assert.equal((context.system.match(/CUSTOM_SYSTEM_BASE/g) || []).length, 1, "system prompt base should only appear once");
   assert.ok(idxB < idxAgent, "agent prompt should be appended after global prompts");
 });
 
@@ -3807,6 +3861,66 @@ test("agent prompt-context 在 workspace 根 AGENTS.md 缺失时忽略", async (
     false,
     "system should ignore missing workspace AGENTS.md"
   );
+});
+
+test("agent startup seed 会修复脏的 global prompts settings", async () => {
+  const repoRoot = path.resolve(process.cwd(), "../..");
+  const testsRoot = path.join(repoRoot, ".tmp-tests");
+  await ensureDir(testsRoot);
+  const dataDir = await fs.mkdtemp(path.join(testsRoot, "agent-seed-repair-it-"));
+  const internalToken = "test-internal-token";
+
+  const db = await openDb(dataDir);
+  let app: FastifyInstance | null = null;
+  try {
+    setSettingJson(db, "agent_global_prompts_v1", {
+      items: [
+        null,
+        { id: "global_system_prompt", title: "Broken", prompt: "   " },
+        { id: "global_system_prompt", title: "Dup", prompt: "dup" },
+        { id: "gp_empty", title: "Empty", prompt: "   " },
+        { id: "gp_ok", title: "OK", prompt: "PROMPT_OK" }
+      ]
+    }, Date.now());
+
+    app = await createApp({
+      db,
+      repoRoot,
+      dataDir,
+      fileMaxBytes: 1024 * 1024,
+      version: "test",
+      logLevel: "error",
+      serveWeb: false,
+      webDistDir: null,
+      credentialMasterKey: Buffer.alloc(32, 7),
+      credentialMasterKeySource: "generated",
+      credentialMasterKeyId: "testkey",
+      credentialMasterKeyCreatedAt: Date.now(),
+      authToken: null,
+      authCookieSecure: false,
+      agentWorkerEnabled: false,
+      agentWorkerHost: "127.0.0.1",
+      agentWorkerPort: 0,
+      agentWorkerSocketPath: path.join(dataDir, "agent-worker.sock"),
+      agentWorkerConcurrency: 0,
+      agentInternalToken: internalToken,
+      agentApiOrigin: "http://127.0.0.1:0",
+      agentStartupRecoveryMode: "recover"
+    });
+    await app.ready();
+    const res = await app.inject({ method: "GET", url: "/api/settings/agent/global-prompts" });
+    assert.equal(res.statusCode, 200);
+    const items = (res.json() as { items: Array<{ id: string; title: string; prompt: string }> }).items;
+    assert.equal(items.filter((item) => item.id === "global_system_prompt").length, 1);
+    assert.equal(items.find((item) => item.id === "global_system_prompt")?.title, "Global System Prompt");
+    assert.ok(String(items.find((item) => item.id === "global_system_prompt")?.prompt || "").trim().length > 0);
+    assert.equal(items.some((item) => item.id === "gp_empty"), false);
+    assert.equal(items.some((item) => item.id === "gp_ok" && item.prompt === "PROMPT_OK"), true);
+  } finally {
+    await app?.close().catch(() => undefined);
+    db.close();
+    await rmrf(dataDir);
+  }
 });
 
 test("agent prompt-context 在 agent prompt 为空且无 workspace/global 时仅注入全局系统提示词", async () => {

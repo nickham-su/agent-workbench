@@ -223,6 +223,7 @@ type EditingAgent = {
 
 const GLOBAL_DEFAULT_MODEL_PATH = "__global__";
 const AGENT_PROMPT_MAX_BYTES = 32 * 1024;
+const RESERVED_GLOBAL_SYSTEM_PROMPT_ID = "global_system_prompt";
 
 const DEFAULT_TOOLS: AgentToolName[] = [
   "bash",
@@ -301,7 +302,7 @@ const mcpServerOptions = computed(() => {
 
 const globalPromptOptions = computed(() => {
   const items = globalPromptSettings.value?.items ?? [];
-  return items.map((item) => ({
+  return items.filter((item) => item.id !== RESERVED_GLOBAL_SYSTEM_PROMPT_ID).map((item) => ({
     label: item.title,
     value: item.id
   }));
@@ -360,7 +361,9 @@ function normalizeMcpServers(raw: unknown): string[] {
 
 function normalizeGlobalPromptIds(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
-  const available = new Set((globalPromptSettings.value?.items ?? []).map((item) => item.id));
+  const available = new Set(
+    (globalPromptSettings.value?.items ?? []).filter((item) => item.id !== RESERVED_GLOBAL_SYSTEM_PROMPT_ID).map((item) => item.id)
+  );
   const out: string[] = [];
   const seen = new Set<string>();
   for (const item of raw) {
@@ -448,13 +451,16 @@ function toolLabel(tool: AgentToolName) {
 }
 
 function globalPromptLabel(id: string) {
+  if (id === RESERVED_GLOBAL_SYSTEM_PROMPT_ID) return "";
   const item = globalPromptSettings.value?.items.find((entry) => entry.id === id);
   return item?.title || id;
 }
 
 function globalPromptSummary(ids: string[]) {
   if (!Array.isArray(ids) || ids.length === 0) return "-";
-  return ids.map((id) => globalPromptLabel(id)).join(", ");
+  const labels = ids.map((id) => globalPromptLabel(id)).filter((item) => item.trim().length > 0);
+  if (labels.length === 0) return "-";
+  return labels.join(", ");
 }
 
 function isDefaultAgent(agentId: string) {

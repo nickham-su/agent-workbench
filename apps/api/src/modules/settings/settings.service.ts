@@ -46,6 +46,8 @@ const AGENT_SETTINGS_KEY = "agent_agents_v1";
 const AGENT_MCP_SETTINGS_KEY = "agent_mcp_v1";
 const AGENT_GLOBAL_PROMPTS_SETTINGS_KEY = "agent_global_prompts_v1";
 const AGENT_RUNTIME_SETTINGS_KEY = "agent_runtime_v1";
+export const AGENT_GLOBAL_SYSTEM_PROMPT_ID = "global_system_prompt";
+export const AGENT_GLOBAL_SYSTEM_PROMPT_TITLE = "Global System Prompt";
 
 const SEARCH_EXCLUDE_MAX_COUNT = 200;
 const SEARCH_EXCLUDE_MAX_LENGTH = 200;
@@ -686,36 +688,109 @@ function normalizeAgentGlobalPromptPromptForUpdate(raw: unknown) {
   if (value.includes("\0")) {
     throw new HttpError(400, "Global prompt contains invalid character", "AGENT_GLOBAL_PROMPT_INVALID");
   }
+  if (!value.trim()) {
+    throw new HttpError(400, "Global prompt is required", "AGENT_GLOBAL_PROMPT_REQUIRED");
+  }
   if (Buffer.byteLength(value, "utf-8") > AGENT_GLOBAL_PROMPT_MAX_BYTES) {
     throw new HttpError(400, "Global prompt is too long", "AGENT_GLOBAL_PROMPT_TOO_LONG");
   }
   return value;
 }
 
+function normalizeAgentGlobalPromptPromptStored(raw: unknown) {
+  const value = typeof raw === "string" ? raw : "";
+  if (!value.trim()) return "";
+  if (value.includes("\0")) return "";
+  if (Buffer.byteLength(value, "utf-8") > AGENT_GLOBAL_PROMPT_MAX_BYTES) return "";
+  return value;
+}
+
+let globalSystemPromptTextProvider: (() => string) | null = null;
+
+export function registerGlobalSystemPromptTextProvider(provider: () => string) {
+  globalSystemPromptTextProvider = provider;
+}
+
+function defaultGlobalSystemPromptText() {
+  const value = globalSystemPromptTextProvider?.() ?? "";
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text) throw new Error("global system prompt text provider is not registered");
+  return text;
+}
+
+function defaultGlobalSystemPromptItem(): AgentGlobalPromptItem {
+  return {
+    id: AGENT_GLOBAL_SYSTEM_PROMPT_ID,
+    title: AGENT_GLOBAL_SYSTEM_PROMPT_TITLE,
+    prompt: defaultGlobalSystemPromptText()
+  };
+}
+
+function sanitizeAgentGlobalPromptItemsStored(itemsRaw: unknown, logger?: FastifyBaseLogger) {
+  const list = Array.isArray(itemsRaw) ? itemsRaw : [];
+  const out: AgentGlobalPromptItem[] = [];
+  const seen = new Set<string>();
+  let changed = !Array.isArray(itemsRaw);
+  let systemSeen = false;
+
+  for (const itemRaw of list) {
+    if (!itemRaw || typeof itemRaw !== "object" || Array.isArray(itemRaw)) {
+      changed = true;
+      logger?.warn({ item: itemRaw }, "invalid global prompt ignored during settings normalize");
+      continue;
+    }
+    const item = itemRaw as Record<string, unknown>;
+    const id = normalizeGlobalPromptId(item.id);
+    if (!id || seen.has(id)) {
+      changed = true;
+      if (id) logger?.warn({ id }, "duplicate/invalid global prompt ignored during settings normalize");
+      continue;
+    }
+    seen.add(id);
+    const titleRaw = typeof item.title === "string" ? item.title.trim() : "";
+    const prompt = normalizeAgentGlobalPromptPromptStored(item.prompt);
+
+    if (id === AGENT_GLOBAL_SYSTEM_PROMPT_ID) {
+      if (systemSeen) {
+        changed = true;
+        logger?.warn({ id }, "duplicate global system prompt ignored during settings normalize");
+        continue;
+      }
+      systemSeen = true;
+      const nextPrompt = prompt || defaultGlobalSystemPromptText();
+      if (!prompt || titleRaw !== AGENT_GLOBAL_SYSTEM_PROMPT_TITLE) {
+        changed = true;
+        logger?.warn({ id }, "global system prompt repaired during settings normalize");
+      }
+      out.push({ id, title: AGENT_GLOBAL_SYSTEM_PROMPT_TITLE, prompt: nextPrompt });
+      continue;
+    }
+
+    if (!titleRaw || titleRaw.length > AGENT_GLOBAL_PROMPT_TITLE_MAX_LENGTH) {
+      changed = true;
+      logger?.warn({ id }, "invalid global prompt title ignored during settings normalize");
+      continue;
+    }
+    if (titleRaw.includes("\0") || titleRaw.includes("\n") || titleRaw.includes("\r") || !prompt) {
+      changed = true;
+      logger?.warn({ id }, "invalid global prompt ignored during settings normalize");
+      continue;
+    }
+    out.push({ id, title: titleRaw, prompt });
+  }
+
+  if (!systemSeen) {
+    changed = true;
+    out.unshift(defaultGlobalSystemPromptItem());
+    logger?.warn("global system prompt seeded into settings");
+  }
+  return { items: out, changed };
+}
+
 function getAgentGlobalPromptSettingsStored(ctx: AppContext) {
   const row = getSettingJson(ctx.db, AGENT_GLOBAL_PROMPTS_SETTINGS_KEY);
   const value = row?.value as Partial<AgentGlobalPromptSettingsStored> | undefined;
-  const itemsRaw = Array.isArray(value?.items) ? value.items : [];
-  const ids = new Set<string>();
-  const items = itemsRaw
-    .map((itemRaw) => {
-      const item = itemRaw as Record<string, unknown>;
-      const id = normalizeGlobalPromptId(item.id);
-      if (!id || ids.has(id)) return null;
-      ids.add(id);
-      const titleRaw = typeof item.title === "string" ? item.title.trim() : "";
-      const prompt = typeof item.prompt === "string" ? item.prompt : "";
-      if (!titleRaw || titleRaw.length > AGENT_GLOBAL_PROMPT_TITLE_MAX_LENGTH) return null;
-      if (titleRaw.includes("\0") || titleRaw.includes("\n") || titleRaw.includes("\r")) return null;
-      if (prompt.includes("\0")) return null;
-      if (Buffer.byteLength(prompt, "utf-8") > AGENT_GLOBAL_PROMPT_MAX_BYTES) return null;
-      return {
-        id,
-        title: titleRaw,
-        prompt
-      };
-    })
-    .filter((item): item is NonNullable<typeof item> => item !== null);
+  const { items } = sanitizeAgentGlobalPromptItemsStored(value?.items);
 
   return {
     settings: {
@@ -926,7 +1001,12 @@ export function updateAgentGlobalPromptSettings(
 ): AgentGlobalPromptSettings {
   const body = (bodyRaw ?? {}) as UpdateAgentGlobalPromptSettingsRequest;
   const incoming = Array.isArray(body.items) ? body.items : [];
+  const current = getAgentGlobalPromptSettingsStored(ctx).settings.items;
+  const currentSystemPrompt = current.find((item) => item.id === AGENT_GLOBAL_SYSTEM_PROMPT_ID) ?? defaultGlobalSystemPromptItem();
   const items: AgentGlobalPromptItem[] = incoming.map((itemRaw) => {
+    if (!itemRaw || typeof itemRaw !== "object" || Array.isArray(itemRaw)) {
+      throw new HttpError(400, "Global prompt item is invalid", "AGENT_GLOBAL_PROMPT_ITEM_INVALID");
+    }
     const item = itemRaw as Record<string, unknown>;
     const id = normalizeGlobalPromptId(item.id);
     if (!id) {
@@ -934,10 +1014,16 @@ export function updateAgentGlobalPromptSettings(
     }
     return {
       id,
-      title: normalizeAgentGlobalPromptTitleForUpdate(item.title),
+      title: id === AGENT_GLOBAL_SYSTEM_PROMPT_ID
+        ? AGENT_GLOBAL_SYSTEM_PROMPT_TITLE
+        : normalizeAgentGlobalPromptTitleForUpdate(item.title),
       prompt: normalizeAgentGlobalPromptPromptForUpdate(item.prompt)
     };
   });
+
+  if (!items.some((item) => item.id === AGENT_GLOBAL_SYSTEM_PROMPT_ID)) {
+    items.unshift(currentSystemPrompt);
+  }
 
   assertUniqueIdsOrThrow(
     items.map((item) => item.id),
@@ -959,6 +1045,28 @@ export function updateAgentGlobalPromptSettings(
   return {
     items,
     updatedAt
+  };
+}
+
+export function ensureAgentGlobalSystemPromptSeeded(ctx: AppContext, logger: FastifyBaseLogger): AgentGlobalPromptSettings {
+  const row = getSettingJson(ctx.db, AGENT_GLOBAL_PROMPTS_SETTINGS_KEY);
+  const value = row?.value as Partial<AgentGlobalPromptSettingsStored> | undefined;
+  const { items, changed } = sanitizeAgentGlobalPromptItemsStored(value?.items, logger);
+  if (!row || changed) {
+    const updatedAt = nowMs();
+    setSettingJson(
+      ctx.db,
+      AGENT_GLOBAL_PROMPTS_SETTINGS_KEY,
+      {
+        items
+      },
+      updatedAt
+    );
+    return { items, updatedAt };
+  }
+  return {
+    items,
+    updatedAt: row.updatedAt
   };
 }
 

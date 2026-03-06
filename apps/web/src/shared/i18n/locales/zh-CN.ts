@@ -850,7 +850,7 @@ export default {
       saved: "已保存"
     },
     agentGlobalPrompts: {
-      description: "管理提示词库条目,仅在 Agent 中选中后生效。",
+      description: "管理提示词库条目。普通条目仅在 Agent 中选中后生效，Global System Prompt 会全局生效。",
       saving: "正在保存...",
       empty: "暂无提示词库条目，请先新增",
       actions: {
@@ -869,7 +869,8 @@ export default {
         titleLabel: "标题",
         promptLabel: "提示词",
         promptPlaceholder: "输入该条目的提示词内容",
-        promptHelp: "最多 {maxKb}KB，当前 {bytes} bytes"
+        promptHelp: "最多 {maxKb}KB，当前 {bytes} bytes",
+        systemPromptHint: "该条目作为系统提示词底座注入，影响所有 Agent。"
       },
       deleteConfirm: {
         title: "删除提示词库条目？",
@@ -881,7 +882,8 @@ export default {
         invalidForm: "请完整填写必填项",
         duplicateId: "条目 ID 已存在",
         titleTooLong: "标题过长，最多 {max} 个字符",
-        promptTooLong: "提示词过长，最多 {maxKb}KB"
+        promptTooLong: "提示词过长，最多 {maxKb}KB",
+        reservedDelete: "系统提示词条目不允许删除"
       },
       saved: "已保存"
     },

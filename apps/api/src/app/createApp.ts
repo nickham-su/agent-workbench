@@ -16,6 +16,7 @@ import { registerGitModule } from "../modules/git/git.module.js";
 import { registerFilesModule } from "../modules/files/files.module.js";
 import { registerCredentialsModule } from "../modules/credentials/credentials.module.js";
 import { registerSettingsModule } from "../modules/settings/settings.module.js";
+import { ensureAgentGlobalSystemPromptSeeded } from "../modules/settings/settings.service.js";
 import { registerAgentModule } from "../modules/agent/agent.module.js";
 
 export async function createApp(ctx: AppContext) {
@@ -72,6 +73,7 @@ export async function createApp(ctx: AppContext) {
   await registerReposModule(app, ctx);
   await registerCredentialsModule(app, ctx);
   await registerSettingsModule(app, ctx);
+  ensureAgentGlobalSystemPromptSeeded(ctx, app.log);
   await registerWorkspacesModule(app, ctx);
   await registerTerminalsModule(app, ctx);
   await registerGitModule(app, ctx);
