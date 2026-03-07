@@ -897,7 +897,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
               modelIdleTimeoutMs: Type.Integer({ minimum: 0 }),
               modelTotalTimeoutMs: Type.Integer({ minimum: 0 }),
               modelRequestMaxRetries: Type.Integer({ minimum: 0, maximum: 100 }),
-              autoCompactThresholdPct: Type.Integer({ minimum: 50, maximum: 90 }),
+              autoCompactThresholdPct: Type.Integer({ minimum: 50, maximum: 99 }),
               updatedAt: Type.Number()
             })
           }),

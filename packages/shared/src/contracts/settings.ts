@@ -161,7 +161,8 @@ export const AgentRuntimeSettingsSchema = Type.Object({
   // 模型请求首包前失败时的最大重试次数(0 表示不重试)。
   modelRequestMaxRetries: Type.Integer({ minimum: 0, maximum: 100 }),
   // 自动压缩阈值百分比,达到 model.contextWindowTokens * pct/100 触发压缩。
-  autoCompactThresholdPct: Type.Integer({ minimum: 50, maximum: 90 }),
+  autoCompactThresholdPct: Type.Integer({ minimum: 50, maximum: 99 }),
+  sessionTerminalSoundEnabled: Type.Boolean(),
   updatedAt: Type.Number()
 });
 export type AgentRuntimeSettings = Static<typeof AgentRuntimeSettingsSchema>;
@@ -170,7 +171,8 @@ export const UpdateAgentRuntimeSettingsRequestSchema = Type.Object({
   modelIdleTimeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
   modelTotalTimeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
   modelRequestMaxRetries: Type.Optional(Type.Integer({ minimum: 0, maximum: 100 })),
-  autoCompactThresholdPct: Type.Optional(Type.Integer({ minimum: 50, maximum: 90 }))
+  autoCompactThresholdPct: Type.Optional(Type.Integer({ minimum: 50, maximum: 99 })),
+  sessionTerminalSoundEnabled: Type.Optional(Type.Boolean())
 });
 export type UpdateAgentRuntimeSettingsRequest = Static<typeof UpdateAgentRuntimeSettingsRequestSchema>;
 
@@ -223,6 +225,7 @@ export type AgentResolvedModelSource = Static<typeof AgentResolvedModelSourceSch
 export const AgentResolvedModelSchema = Type.Object({
   providerId: Type.String({ minLength: 1 }),
   providerName: Type.String({ minLength: 1 }),
+  contextWindowTokens: Type.Integer({ minimum: 1 }),
   modelId: Type.String({ minLength: 1 }),
   modelName: Type.String({ minLength: 1 }),
   source: AgentResolvedModelSourceSchema

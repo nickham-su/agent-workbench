@@ -1467,6 +1467,10 @@ function initEditor() {
     minimap: { enabled: false },
     scrollBeyondLastLine: false,
     wordWrap: "off",
+    glyphMargin: false,
+    lineNumbersMinChars: 3,
+    lineDecorationsWidth: 8,
+    padding: { top: 4, bottom: 4 },
     renderWhitespace: "selection"
   });
   attachEditorEvents();

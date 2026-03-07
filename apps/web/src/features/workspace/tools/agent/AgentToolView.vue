@@ -27,7 +27,17 @@
       <a-tab-pane v-for="(session, index) in visibleSessions" :key="session.id">
         <template #tab>
           <span class="agent-tab-label">
-            <span>{{ tabLabel(session, index) }}</span>
+            <span class="agent-tab-title-wrap">
+              <span>{{ tabLabel(session, index) }}</span>
+              <component
+                :is="statusStore.iconComponentOf(session.id)"
+                v-if="statusStore.indicatorOf(session.id).icon"
+                class="agent-tab-status-icon shrink-0"
+                :class="statusStore.indicatorOf(session.id).iconClass"
+                :spin="statusStore.indicatorOf(session.id).spin"
+              />
+              <span v-if="statusStore.indicatorOf(session.id).showDot" class="agent-tab-terminal-dot" />
+            </span>
             <a-tooltip :title="t('agent.actions.closeClient')">
               <CloseOutlined
                 class="cursor-pointer text-[color:var(--text-tertiary)] hover:text-[color:var(--text-secondary)] !mr-0 text-[0.9em]"
@@ -45,19 +55,17 @@
             :parent-session-id="!isDraftSession(session) ? session.forkedFromSessionId : null"
             :session-ready="!isDraftSession(session)"
             :ensure-session="ensureSessionCreated"
-            :poll-hint="sessionPollHints[session.id] ?? 0"
             :can-choose-session="canChooseSessionFrom(session.id)"
             :active="effectiveActiveKey === session.id"
             :model-value="selectedAgentBySession[session.id] ?? null"
             :agent-options="agentOptions"
-            @update:model-value="(value) => setSessionAgent(session.id, value)"
-            @forked="onSessionForked"
-            @open-subtask="onOpenSubtask"
-            @open-parent="onOpenParent"
-            @choose-session="openChooseSessionModal(session.id)"
-            @request-poll-session="onRequestPollSession"
-          />
-        </div>
+             @update:model-value="(value) => setSessionAgent(session.id, value)"
+             @forked="onSessionForked"
+             @open-subtask="onOpenSubtask"
+             @open-parent="(parentSessionId) => onOpenParent(session.id, parentSessionId)"
+             @choose-session="openChooseSessionModal(session.id)"
+           />
+         </div>
       </a-tab-pane>
 
       <a-tab-pane key="__agent_add__">
@@ -108,11 +116,12 @@ export default {
 import type { AgentSessionRecord } from "@agent-workbench/shared";
 import { CloseOutlined, MinusOutlined, PlusOutlined } from "@ant-design/icons-vue";
 import { message } from "ant-design-vue";
-import { computed, onActivated, onMounted, reactive, ref, watch } from "vue";
+import { computed, onActivated, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { createAgentSession, getAgentSettings, listAgentSessions } from "@/shared/api";
 import { useWorkspaceHost } from "@/features/workspace/host";
 import AgentClientPane from "./AgentClientPane.vue";
+import { agentSessionStatusStoreKey, createAgentSessionStatusStore } from "./useAgentSessionStatusStore";
 
 type AgentOption = {
   value: string;
@@ -120,6 +129,7 @@ type AgentOption = {
   isDefault?: boolean;
   resolvedModel?: {
     providerId: string;
+    contextWindowTokens: number;
     providerName: string;
     modelId: string;
     modelName: string;
@@ -160,7 +170,6 @@ const serverSessions = ref<AgentSessionRecord[]>([]);
 const draftSessions = ref<DraftAgentSession[]>([]);
 const activeKey = ref<string>("");
 const selectedAgentBySession = reactive<Record<string, string | null>>({});
-const sessionPollHints = reactive<Record<string, number>>({});
 const agentOptions = ref<AgentOption[]>([]);
 const closedSessionIds = reactive<Record<string, true>>({});
 const tabNoMap = ref<Record<string, number>>({});
@@ -169,9 +178,13 @@ const chooseSessionLoading = ref(false);
 const chooseSessionItems = ref<ChooseSessionItem[]>([]);
 const chooseSessionSourceId = ref("");
 const sessionsInitialized = ref(false);
+const serverSessionsLoaded = ref(false);
 
 const suppressTabNoPersist = ref(false);
 const draftCreatePromises = new Map<string, Promise<string>>();
+
+const statusStore = createAgentSessionStatusStore();
+provide(agentSessionStatusStoreKey, statusStore);
 
 const allSessions = computed<AgentSessionTab[]>(() => [...serverSessions.value, ...draftSessions.value]);
 
@@ -392,16 +405,6 @@ function setSessionAgent(sessionId: string, value: string | null) {
   persistAgentPick();
 }
 
-function bumpSessionPollHint(sessionId: string) {
-  const id = String(sessionId || "").trim();
-  if (!id) return;
-  sessionPollHints[id] = (sessionPollHints[id] ?? 0) + 1;
-}
-
-function onRequestPollSession(sessionId: string) {
-  bumpSessionPollHint(sessionId);
-}
-
 async function refreshAgents() {
   try {
     const res = await getAgentSettings();
@@ -424,6 +427,7 @@ async function refreshSessions() {
     const list = await listAgentSessions(props.workspaceId);
     serverSessions.value = [...list].sort((a, b) => b.updatedAt - a.updatedAt);
     // 先根据可见 tabs 做 prune/分配,避免隐藏 tab 让编号一路增长。
+    serverSessionsLoaded.value = true;
     reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
     const presentIds = new Set(allSessions.value.map((item) => item.id));
     let closedChanged = false;
@@ -431,11 +435,6 @@ async function refreshSessions() {
       if (!presentIds.has(id)) {
         delete closedSessionIds[id];
         closedChanged = true;
-      }
-    }
-    for (const id of Object.keys(sessionPollHints)) {
-      if (!presentIds.has(id)) {
-        delete sessionPollHints[id];
       }
     }
     if (closedChanged) persistClosedSessions();
@@ -530,7 +529,7 @@ async function ensureSessionCreated(sessionId: string) {
 
     // 新会话首条消息: draft pane 可能在发送期间被卸载,导致其 emit 的 poll hint 丢失。
     // 这里在创建成功后主动 bump 一次,确保新 pane 至少会做一次刷新+短轮询兜底。
-    bumpSessionPollHint(created.id);
+    statusStore.bumpPollHint(created.id, { immediate: true, warmup: true });
     return created.id;
   })()
     .finally(() => {
@@ -559,6 +558,7 @@ function closeSessionTab(sessionId: string) {
   if (activeKey.value !== sessionId) return;
   const next = visibleSessions.value.find((item) => item.id !== sessionId)?.id ?? "";
   activeKey.value = next;
+  statusStore.markSessionSeen(next);
   if (next) {
     persistActiveKey(next);
     return;
@@ -578,6 +578,7 @@ function reopenAllSessions() {
   reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
   const next = visibleSessions.value[0]?.id ?? "";
   activeKey.value = next;
+  statusStore.markSessionSeen(next);
   if (next) {
     persistActiveKey(next);
   }
@@ -589,6 +590,7 @@ async function onSessionForked(sessionId: string) {
   delete closedSessionIds[sessionId];
   persistClosedSessions();
   activeKey.value = sessionId;
+  statusStore.markSessionSeen(sessionId);
   persistActiveKey(sessionId);
 }
 
@@ -598,10 +600,11 @@ async function onOpenSubtask(sessionId: string) {
   delete closedSessionIds[sessionId];
   persistClosedSessions();
   activeKey.value = sessionId;
+  statusStore.markSessionSeen(sessionId);
   persistActiveKey(sessionId);
 }
 
-async function onOpenParent(sessionId: string) {
+async function onOpenParent(sourceSessionId: string, sessionId: string) {
   if (!sessionId) return;
   await refreshSessions();
   const target = serverSessions.value.find((item) => item.id === sessionId);
@@ -612,7 +615,11 @@ async function onOpenParent(sessionId: string) {
   delete closedSessionIds[sessionId];
   persistClosedSessions();
   activeKey.value = sessionId;
+  statusStore.markSessionSeen(sessionId);
   persistActiveKey(sessionId);
+  if (sourceSessionId && sourceSessionId !== sessionId) {
+    closeSessionTab(sourceSessionId);
+  }
 }
 
 function replaceDraftWithSession(params: { fromSessionId: string; targetSessionId: string }) {
@@ -646,6 +653,7 @@ function replaceDraftWithSession(params: { fromSessionId: string; targetSessionI
   persistAgentPick();
 
   activeKey.value = target.id;
+  statusStore.markSessionSeen(target.id);
   persistActiveKey(target.id);
 
   reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
@@ -701,6 +709,7 @@ function onChangeTab(key: string | number) {
     return;
   }
   activeKey.value = next;
+  statusStore.markSessionSeen(next);
   persistActiveKey(next);
 }
 
@@ -714,6 +723,7 @@ watch(
     sessionsInitialized.value = false;
     activeKey.value = "";
     serverSessions.value = [];
+    serverSessionsLoaded.value = false;
     draftSessions.value = [];
     for (const key of Object.keys(closedSessionIds)) {
       delete closedSessionIds[key];
@@ -723,12 +733,10 @@ watch(
     for (const key of Object.keys(selectedAgentBySession)) {
       delete selectedAgentBySession[key];
     }
-    for (const key of Object.keys(sessionPollHints)) {
-      delete sessionPollHints[key];
-    }
     restorePersistedState();
     await refreshAll();
     suppressTabNoPersist.value = false;
+    statusStore.bindWorkspace(props.workspaceId);
     if (visibleSessions.value.length === 0) {
       await createOneSession();
     }
@@ -741,11 +749,33 @@ onActivated(() => {
   if (!sessionsInitialized.value) return;
   if (loadingSessions.value || creating.value) return;
   if (visibleSessions.value.length > 0) return;
+  statusStore.syncSessions({
+    activeSessionId: effectiveActiveKey.value || null,
+    visibleSessionIds: visibleSessions.value.map((item) => item.id),
+    registeredSessionIds: serverSessions.value.map((item) => item.id)
+  });
   void createOneSession();
 });
 
 onMounted(() => {
   restorePersistedState();
+});
+
+watch(
+  () => [props.workspaceId, effectiveActiveKey.value, visibleSessions.value.map((item) => item.id).join("|"), serverSessions.value.map((item) => item.id).join("|")] as const,
+  () => {
+    statusStore.bindWorkspace(props.workspaceId);
+    statusStore.syncSessions({
+      activeSessionId: effectiveActiveKey.value || null,
+      visibleSessionIds: visibleSessions.value.map((item) => item.id),
+      ...(serverSessionsLoaded.value ? { registeredSessionIds: serverSessions.value.map((item) => item.id) } : {})
+    });
+  },
+  { immediate: true }
+);
+
+onBeforeUnmount(() => {
+  statusStore.dispose();
 });
 </script>
 
@@ -755,6 +785,25 @@ onMounted(() => {
   min-height: 0;
   height: 100%;
   background: var(--panel-bg);
+}
+
+.agent-tab-title-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.agent-tab-status-icon {
+  font-size: 0.9em;
+}
+
+.agent-tab-terminal-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--danger-color);
+  flex: 0 0 auto;
 }
 
 .agent-tab-label {
@@ -801,5 +850,4 @@ onMounted(() => {
 :deep(.choose-session-item:hover) {
   background: rgba(59, 130, 246, 0.12) !important;
 }
-
 </style>

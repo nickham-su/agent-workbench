@@ -90,6 +90,14 @@ function updateAutoHeight() {
   autoHeightPx.value = Math.min(bounds.max, Math.max(bounds.min, Math.ceil(raw)));
 }
 
+function shouldShowOverviewRuler() {
+  return props.showOverviewRuler === true;
+}
+
+function shouldUseCompactMode() {
+  return props.compactMode !== false;
+}
+
 function resolveHideUnchangedRegionsOption(value: typeof props.hideUnchangedRegions): monaco.editor.IDiffEditorOptions["hideUnchangedRegions"] {
   if (!value) return { enabled: false };
   if (value === true) {
@@ -295,11 +303,11 @@ onMounted(() => {
     readOnly: true,
     fontSize: editorFontSize.value,
     minimap: {enabled: false},
+    compactMode: shouldUseCompactMode(),
     scrollBeyondLastLine: false,
     wordWrap: "off",
-    renderOverviewRuler: props.showOverviewRuler !== false,
+    renderOverviewRuler: shouldShowOverviewRuler(),
     renderWhitespace: "selection",
-    compactMode: props.compactMode === true,
     overviewRulerBorder: false,
     hideCursorInOverviewRuler: true,
     hideUnchangedRegions: resolveHideUnchangedRegionsOption(props.hideUnchangedRegions)
@@ -307,13 +315,14 @@ onMounted(() => {
 
   const originalEditor = editor.getOriginalEditor();
   const modifiedEditor = editor.getModifiedEditor();
+  const verticalScrollbar = props.autoHeight ? "hidden" : "visible";
   originalEditor.updateOptions({
-    scrollbar: {vertical: "hidden", horizontal: "auto"},
+    scrollbar: {vertical: verticalScrollbar, horizontal: "auto"},
     overviewRulerBorder: false,
     hideCursorInOverviewRuler: true
   });
   modifiedEditor.updateOptions({
-    scrollbar: {vertical: "hidden", horizontal: "auto"},
+    scrollbar: {vertical: verticalScrollbar, horizontal: "auto"},
     overviewRulerBorder: false,
     hideCursorInOverviewRuler: true
   });
@@ -363,7 +372,7 @@ watch(
     () => props.showOverviewRuler,
     (next) => {
       if (!editor) return;
-      editor.updateOptions({ renderOverviewRuler: next !== false });
+      editor.updateOptions({ renderOverviewRuler: next === true });
     }
 );
 
@@ -371,8 +380,18 @@ watch(
     () => props.compactMode,
     (next) => {
       if (!editor) return;
-      editor.updateOptions({ compactMode: next === true });
+      editor.updateOptions({ compactMode: next !== false });
       updateAutoHeight();
+    }
+);
+
+watch(
+    () => props.autoHeight,
+    (next) => {
+      if (!editor) return;
+      const verticalScrollbar = next ? "hidden" : "visible";
+      editor.getOriginalEditor().updateOptions({ scrollbar: {vertical: verticalScrollbar, horizontal: "auto"} });
+      editor.getModifiedEditor().updateOptions({ scrollbar: {vertical: verticalScrollbar, horizontal: "auto"} });
     }
 );
 

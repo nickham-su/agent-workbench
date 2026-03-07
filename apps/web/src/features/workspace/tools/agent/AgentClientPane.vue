@@ -4,19 +4,23 @@
       v-if="isSubtaskSession"
       class="px-3 py-2 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] text-[0.9em] text-[color:var(--text-tertiary)]"
     >
-      <div :style="{ fontSize: 'var(--agent-font-size, 13px)' }">
-        <div class="flex items-center gap-2">
-          <a-button
-            v-if="props.parentSessionId"
-            type="link"
-            size="small"
-            class="!px-0"
-            @click="onOpenParent"
-          >
-            {{ t("agent.client.backToParent") }}
-          </a-button>
-          <span>{{ t("agent.client.readonlySubtaskHint") }}</span>
-        </div>
+      <div class="flex items-center gap-2">
+        <a-button
+          v-if="props.parentSessionId"
+          type="link"
+          size="small"
+          class="!px-0"
+          @click="onOpenParent"
+        >
+          {{ t("agent.client.backToParent") }}
+        </a-button>
+        <span class="text-[14px] leading-none">
+          {{
+            currentRunElapsedText
+              ? t("agent.client.subtaskRunningHint", { elapsed: currentRunElapsedText })
+              : t("agent.client.subtaskCancelInParentHint")
+          }}
+        </span>
       </div>
     </div>
 
@@ -178,9 +182,6 @@
             />
             <div v-else-if="item.role === 'assistant'" class="flex flex-col gap-1">
               <div v-if="item.reasoningText && item.reasoningText.trim().length > 0" class="assistant-reasoning-block">
-                <div class="assistant-reasoning-label">
-                  Thinking
-                </div>
                 <AssistantMarkdownMessage
                   :class="isTerminalStatus(item.status) ? 'pr-24' : ''"
                   :text="item.reasoningText"
@@ -201,6 +202,9 @@
               />
               <div v-if="!isTerminalStatus(item.status)" class="flex items-center gap-2 text-[0.9em] text-[color:var(--text-tertiary)]">
                 <LoadingOutlined spin />
+                <span v-if="currentRunElapsedText" class="whitespace-nowrap tabular-nums">
+                  {{ currentRunElapsedText }}
+                </span>
               </div>
             </div>
             <AgentUserMessage
@@ -360,12 +364,12 @@
             <a-button type="link" size="small" class="!px-0" @click="goAgentProfiles">
               {{ t("agent.client.goCreateAgent") }}
             </a-button>
-          </div>
-          <div class="text-[0.9em] text-[color:var(--text-tertiary)] whitespace-nowrap">
-            {{ t("agent.client.lastTotalTokens") }}: {{ formattedLastTotalTokens }}
-          </div>
-        </div>
-      </div>
+           </div>
+           <div class="text-[0.9em] text-[color:var(--text-tertiary)] whitespace-nowrap">
+            {{ t("agent.client.lastTotalTokens") }}: {{ formattedLastTotalTokensWithRatio }}
+           </div>
+         </div>
+       </div>
     </div>
   </div>
 </template>
@@ -394,6 +398,7 @@ import AgentUserMessage from "./AgentUserMessage.vue";
 import AssistantMarkdownMessage from "./AssistantMarkdownMessage.vue";
 import AgentTodoListCard from "./AgentTodoListCard.vue";
 import AgentWriteCard from "./AgentWriteCard.vue";
+import { useAgentSessionStatusStore } from "./useAgentSessionStatusStore";
 import {
   ApiError,
   cancelAgentSession,
@@ -403,7 +408,6 @@ import {
   forkAgentSession,
   getAgentContextItem,
   getAgentContextItems,
-  getAgentRunState,
   revertAgentSession,
   sendAgentMessage
 } from "@/shared/api";
@@ -414,6 +418,7 @@ type AgentOption = {
   isDefault?: boolean;
   resolvedModel?: {
     providerId: string;
+    contextWindowTokens: number;
     providerName: string;
     modelId: string;
     modelName: string;
@@ -489,6 +494,7 @@ const MESSAGE_GAP_CUR_TOOL = 6;
 const MESSAGE_GAP_TOOL_TOOL = 2;
 const BOTTOM_FOLLOW_THRESHOLD_PX = 120;
 const MESSAGE_LIST_BOTTOM_SPACER_PX = 16;
+const LAST_MESSAGE_VISIBLE_THRESHOLD_PX = 4;
 const INITIAL_TAIL_LIMIT = 100;
 const REACHED_TOP_NOTICE_MIN_ITEMS = 50;
 const HISTORY_PAGE_LIMIT = 100;
@@ -496,9 +502,6 @@ const TOP_LOAD_THRESHOLD_PX = 80;
 const POLL_RUNNING_MS = 850;
 const POLL_LOCAL_NON_TERMINAL_MS = 700;
 const SCROLL_TO_BOTTOM_BUTTON_THRESHOLD_PX = 240;
-const POLL_SETTLE_MS = 520;
-const POLL_ERROR_RETRY_MS = 1400;
-const POLL_IMMEDIATE_REFRESH_MS = 420;
 
 const props = defineProps<{
   workspaceId: string;
@@ -507,7 +510,6 @@ const props = defineProps<{
   parentSessionId?: string | null;
   sessionReady: boolean;
   ensureSession?: (sessionId: string) => Promise<string>;
-  pollHint?: number;
   canChooseSession?: boolean;
   active: boolean;
   modelValue?: string | null;
@@ -520,11 +522,11 @@ const emit = defineEmits<{
   "open-subtask": [sessionId: string];
   "open-parent": [sessionId: string];
   "choose-session": [];
-  "request-poll-session": [sessionId: string];
 }>();
 
 const { t } = useI18n();
 const router = useRouter();
+const statusStore = useAgentSessionStatusStore();
 
 const loading = ref(false);
 const loadingEarlier = ref(false);
@@ -533,18 +535,7 @@ const atTop = ref(false);
 const distanceToBottomPx = ref(Number.POSITIVE_INFINITY);
 const sending = ref(false);
 const draft = ref("");
-const runState = ref<AgentSessionRunState>({
-  sessionId: props.sessionId,
-  status: "idle",
-  activeRunId: null,
-  activeAssistantItemId: null,
-  waitingToolItemId: null,
-  lastResponseTotalTokens: null,
-  runNoticeText: "",
-  nonTerminalItemIds: [],
-  updatedAt: 0,
-  appliedItemId: 0
-});
+const runState = computed<AgentSessionRunState>(() => statusStore.runStateOf(props.sessionId));
 const runNoticeText = computed(() => String(runState.value.runNoticeText || "").trim());
 const lastKnownHeadItemId = ref<number | null>(null);
 const items = ref<AgentContextItemRecord[]>([]);
@@ -556,6 +547,7 @@ const inputEl = ref<{ focus?: () => void } | null>(null);
 const stickToBottom = ref(true);
 const userUnfollowed = ref(false);
 const forcedBottomOnFirstActive = ref(false);
+const nowTickMs = ref(Date.now());
 
 type SavedScrollState = {
   scrollTop: number;
@@ -583,15 +575,12 @@ let lastKnownScrollTop = 0;
 
 const actionLoading = ref<"cancel" | "fork" | "revert" | "approve" | "deny" | null>(null);
 const actionTargetId = ref<number | null>(null);
+let contextRefreshTimer: number | null = null;
 
-let pollTimer: number | null = null;
-let pollHintRefreshSeq = 0;
 let settlePollRemaining = 0;
-let warmupPollRemaining = 0;
-// pollHint 可能在 pane 尚未 active 时到达(新会话首条消息的典型竞态),需要暂存到激活后再补一次刷新+短轮询。
-const pendingPollHint = ref(false);
 const terminalStatuses = new Set<AgentContextItemRecord["status"]>(["completed", "failed", "denied", "cancelled"]);
 const isSubtaskSession = computed(() => props.sessionKind === "subtask");
+let runElapsedTimer: number | null = null;
 
 // 兼容中文输入法习惯: 用户输入首字符为“、”时,自动替换为“/”。
 watch(
@@ -811,10 +800,32 @@ const effectiveModelLabel = computed(() => {
   return `${resolved.providerName} / ${resolved.modelName}`;
 });
 
+const effectiveContextWindowTokens = computed(() => {
+  const agentId = effectiveAgentId.value;
+  const option = props.agentOptions.find((item) => item.value === agentId);
+  const value = option?.resolvedModel?.contextWindowTokens;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 1) return null;
+  return Math.floor(value);
+});
+
 const formattedLastTotalTokens = computed(() => {
   const value = runState.value.lastResponseTotalTokens;
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "-";
   return new Intl.NumberFormat().format(Math.floor(value));
+});
+
+const formattedLastTotalTokensWithRatio = computed(() => {
+  const value = runState.value.lastResponseTotalTokens;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "-";
+  const formattedTokens = new Intl.NumberFormat().format(Math.floor(value));
+  const limit = effectiveContextWindowTokens.value;
+  if (typeof limit !== "number" || !Number.isFinite(limit) || limit < 1) return formattedTokens;
+  const ratio = value / limit;
+  const formattedRatio = new Intl.NumberFormat(undefined, {
+    style: "percent",
+    maximumFractionDigits: 1
+  }).format(ratio);
+  return `${formattedTokens} (${formattedRatio})`;
 });
 const inputPlaceholder = computed(() => {
   if (!hasAvailableAgents.value) {
@@ -825,6 +836,51 @@ const inputPlaceholder = computed(() => {
   }
   return t("agent.client.inputPlaceholderIdle");
 });
+
+function formatElapsedDuration(ms: number) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}h ${minutes}min ${seconds}s`;
+  }
+  if (minutes > 0) {
+    return `${minutes}min ${seconds}s`;
+  }
+  return `${seconds}s`;
+}
+
+const latestUserMessageCreatedAt = computed(() => {
+  for (let i = items.value.length - 1; i >= 0; i -= 1) {
+    const item = items.value[i];
+    if (!item || item.kind !== "user" || item.output.type !== "user_text") continue;
+    const createdAt = typeof item.createdAt === "number" && Number.isFinite(item.createdAt) ? item.createdAt : 0;
+    if (createdAt > 0) return createdAt;
+  }
+  return 0;
+});
+
+const currentRunElapsedText = computed(() => {
+  const status = runState.value.status;
+  if (status !== "running" && status !== "waiting_permission") return "";
+  const startedAt = latestUserMessageCreatedAt.value;
+  if (!(startedAt > 0)) return "";
+  return formatElapsedDuration(nowTickMs.value - startedAt);
+});
+
+function clearRunElapsedTimer() {
+  if (runElapsedTimer === null) return;
+  window.clearInterval(runElapsedTimer);
+  runElapsedTimer = null;
+}
+
+function ensureRunElapsedTimer() {
+  if (runElapsedTimer !== null) return;
+  runElapsedTimer = window.setInterval(() => {
+    nowTickMs.value = Date.now();
+  }, 1000);
+}
 
 const showReachedTopNotice = computed(() => {
   return reachedTop.value && displayItems.value.length >= REACHED_TOP_NOTICE_MIN_ITEMS;
@@ -1337,33 +1393,19 @@ function formatToolArgs(args: unknown) {
   return truncateText(toCompactText(args), 120);
 }
 
-function clearPoll() {
-  if (pollTimer === null) return;
-  window.clearTimeout(pollTimer);
-  pollTimer = null;
+function clearContextRefreshTimer() {
+  if (contextRefreshTimer === null) return;
+  window.clearTimeout(contextRefreshTimer);
+  contextRefreshTimer = null;
 }
 
-function schedulePoll(delayMs = 800) {
-  clearPoll();
-  if (!props.active) return;
-  pollTimer = window.setTimeout(() => {
-    pollTimer = null;
+function scheduleContextRefresh(delayMs: number) {
+  clearContextRefreshTimer();
+  if (!props.active || !props.sessionId || !props.sessionReady) return;
+  contextRefreshTimer = window.setTimeout(() => {
+    contextRefreshTimer = null;
     void refreshAll(false);
-  }, delayMs);
-}
-
-function kickPollAfterRefresh(params: { forceFull: boolean; forceFollowBottom: boolean }) {
-  // warmup: 即使服务端 runState 暂时还是 idle,也短暂补轮询几次,覆盖“写入稍晚/调度稍晚”的窗口。
-  warmupPollRemaining = Math.max(warmupPollRemaining, 3);
-  const seq = ++pollHintRefreshSeq;
-  void (async () => {
-    await refreshAll(params.forceFull, params.forceFollowBottom);
-    if (seq !== pollHintRefreshSeq) return;
-    if (!props.active || !props.sessionId) return;
-    // 无论 refreshAll 内部是否决定继续轮询,这里都补一枪短延迟 poll,
-    // 避免服务端 runState/item 写入稍晚导致 UI 停在 idle/空列表。
-    schedulePoll(POLL_IMMEDIATE_REFRESH_MS);
-  })();
+  }, Math.max(0, delayMs));
 }
 
 type ScrollAnchor = {
@@ -1660,10 +1702,11 @@ async function runFollowBottomLock(seq: number) {
       if (!props.active) break;
       if (!stickToBottom.value) break;
       if (userUnfollowed.value) break;
-      if (distanceToBottom() <= 4) break;
+      if (distanceToBottom() <= LAST_MESSAGE_VISIBLE_THRESHOLD_PX && lastMessageOverflowBottomPx() <= LAST_MESSAGE_VISIBLE_THRESHOLD_PX) break;
 
       followBottomLockRemaining.value = Math.max(0, followBottomLockRemaining.value - 1);
       await scrollToBottom({ force: true });
+      await ensureLastMessageFullyVisible({ force: true });
 
       // 让 DOM 渲染/测量有机会推进,再判断是否仍需要补滚动。
       await nextTick();
@@ -1673,10 +1716,44 @@ async function runFollowBottomLock(seq: number) {
     }
   } finally {
     followBottomLockInFlight = false;
-    if (seq === followBottomLockSeq && distanceToBottom() <= 4) {
+    if (
+      seq === followBottomLockSeq
+      && distanceToBottom() <= LAST_MESSAGE_VISIBLE_THRESHOLD_PX
+      && lastMessageOverflowBottomPx() <= LAST_MESSAGE_VISIBLE_THRESHOLD_PX
+    ) {
       followBottomLockRemaining.value = 0;
     }
   }
+}
+
+function lastMessageOverflowBottomPx() {
+  const el = scrollEl.value;
+  if (!el) return Number.POSITIVE_INFINITY;
+
+  const rows = Array.from(el.querySelectorAll<HTMLElement>(".agent-message-row[data-msg-id]"));
+  const lastRow = rows[rows.length - 1];
+  if (!lastRow) return 0;
+
+  const containerRect = el.getBoundingClientRect();
+  const rowRect = lastRow.getBoundingClientRect();
+  const desiredBottom = containerRect.bottom - MESSAGE_LIST_BOTTOM_SPACER_PX;
+  const overflow = rowRect.bottom - desiredBottom;
+  if (!Number.isFinite(overflow)) return Number.POSITIVE_INFINITY;
+  return Math.max(0, overflow);
+}
+
+async function ensureLastMessageFullyVisible(options?: { force?: boolean }) {
+  const force = options?.force === true;
+  if (!force && !stickToBottom.value) return;
+  const el = scrollEl.value;
+  if (!el || displayItems.value.length === 0) return;
+
+  await nextTick();
+  const overflow = lastMessageOverflowBottomPx();
+  if (!Number.isFinite(overflow) || overflow <= 0.5) return;
+  const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+  el.scrollTop = Math.max(0, Math.min(maxScrollTop, el.scrollTop + overflow));
+  await nextTick();
 }
 
 async function scrollToBottom(options?: { force?: boolean }) {
@@ -1691,6 +1768,7 @@ async function scrollToBottom(options?: { force?: boolean }) {
   const el = scrollEl.value;
   if (!el) return;
   el.scrollTop = el.scrollHeight;
+  await ensureLastMessageFullyVisible({ force: true });
   await nextTick();
   if (seq !== scrollToBottomSeq) return;
   updateStickToBottomState();
@@ -1788,20 +1866,8 @@ function shouldForceFullRefreshForBoundaryMarker(list: AgentContextItemRecord[])
   return false;
 }
 
-async function refreshAll(forceFull: boolean, forceFollowBottom = false) {
+async function refreshAll(forceFull: boolean, forceFollowBottom = false, prevRunStatusOverride?: AgentSessionRunState["status"] | null) {
   if (!props.sessionReady) {
-    runState.value = {
-      sessionId: props.sessionId,
-      status: "idle",
-      activeRunId: null,
-      activeAssistantItemId: null,
-      waitingToolItemId: null,
-      lastResponseTotalTokens: null,
-      runNoticeText: "",
-      nonTerminalItemIds: [],
-      updatedAt: 0,
-      appliedItemId: 0
-    };
     loadEarlierSeq += 1;
     handledBoundaryMarkerId.value = 0;
     items.value = [];
@@ -1811,15 +1877,13 @@ async function refreshAll(forceFull: boolean, forceFollowBottom = false) {
     loadingEarlier.value = false;
     reachedTop.value = false;
     atTop.value = false;
-    clearPoll();
     return;
   }
   if (loading.value) return;
   loading.value = true;
   try {
-    const prevRunStatus = runState.value.status;
-    const state = await getAgentRunState(props.sessionId);
-    runState.value = state;
+    const prevRunStatus = prevRunStatusOverride ?? runState.value.status;
+    const state = runState.value;
 
     if (state.status !== "idle") {
       settlePollRemaining = 0;
@@ -1904,24 +1968,19 @@ async function refreshAll(forceFull: boolean, forceFollowBottom = false) {
     }
 
     const hasLocalNonTerminal = items.value.some((item) => !isTerminalStatus(item.status));
+    if (state.status !== "idle") settlePollRemaining = 0;
+    else if (prevRunStatus !== "idle") settlePollRemaining = 2;
+
     if (state.status !== "idle") {
-      warmupPollRemaining = 0;
-      schedulePoll(POLL_RUNNING_MS);
+      scheduleContextRefresh(POLL_RUNNING_MS);
     } else if (hasLocalNonTerminal) {
-      warmupPollRemaining = 0;
-      schedulePoll(POLL_LOCAL_NON_TERMINAL_MS);
+      scheduleContextRefresh(POLL_LOCAL_NON_TERMINAL_MS);
     } else if (settlePollRemaining > 0) {
-      warmupPollRemaining = 0;
       settlePollRemaining -= 1;
-      schedulePoll(POLL_SETTLE_MS);
-    } else if (warmupPollRemaining > 0) {
-      // 仅在 idle 且无非终态项时启用 warmup,避免干扰正常运行轮询节奏。
-      warmupPollRemaining -= 1;
-      schedulePoll(POLL_IMMEDIATE_REFRESH_MS);
+      scheduleContextRefresh(520);
     }
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
-    schedulePoll(POLL_ERROR_RETRY_MS);
   } finally {
     loading.value = false;
   }
@@ -2078,6 +2137,7 @@ async function onCancelRun() {
     });
     // No confirmation for cancel; keep it snappy and predictable.
     message.success(t("agent.client.cancelled"));
+    statusStore.bumpPollHint(props.sessionId, { immediate: true, warmup: true });
     await refreshAll(true);
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
@@ -2148,6 +2208,7 @@ function onRevertToMessage(itemId: number) {
           draft.value = revertDraft;
         }
         message.success(t("agent.client.reverted"));
+        statusStore.bumpPollHint(props.sessionId, { immediate: true, warmup: true });
         await refreshAll(true);
       } catch (err) {
         message.error(err instanceof Error ? err.message : String(err));
@@ -2168,6 +2229,7 @@ async function onToolPermission(itemId: number, decision: "approve" | "deny") {
       toolItemId: itemId,
       decision
     });
+    statusStore.bumpPollHint(props.sessionId, { immediate: true, warmup: true });
     await refreshAll(false);
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
@@ -2227,40 +2289,18 @@ async function onSend() {
 
     if (targetSessionId === props.sessionId) {
       await refreshAll(false, true);
+      await scrollToBottomStable({ force: true });
       saveCurrentScrollPosition(targetSessionId);
-      schedulePoll(POLL_IMMEDIATE_REFRESH_MS);
     } else {
       savedScrollStateBySessionId.set(targetSessionId, { scrollTop: 0, wasNearBottom: true });
-      emit("request-poll-session", targetSessionId);
     }
+    statusStore.bumpPollHint(targetSessionId, { immediate: true, warmup: true });
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
     sending.value = false;
   }
 }
-
-watch(
-  () => [props.pollHint ?? 0, props.sessionId, props.active] as const,
-  (next, prev) => {
-    const [hint, sessionId, active] = next;
-    const prevHint = prev?.[0] ?? 0;
-    const prevSessionId = prev?.[1];
-    if (!sessionId) return;
-    const hintChanged = hint !== prevHint;
-    // 兼容跨组件时序: 当目标 pane 挂载时 hint 可能已经>0,需要立即触发一次补轮询。
-    const mountedWithPendingHint = sessionId !== prevSessionId && hint > 0;
-    if (hintChanged || mountedWithPendingHint) {
-      if (!active) {
-        pendingPollHint.value = true;
-        return;
-      }
-      pendingPollHint.value = false;
-      kickPollAfterRefresh({ forceFull: false, forceFollowBottom: false });
-    }
-  },
-  { immediate: true }
-);
 
 watch(
   () => [String(props.modelValue || ""), props.agentOptions.map((item) => `${item.value}:${item.isDefault ? "1" : "0"}`).join("|")],
@@ -2283,14 +2323,12 @@ watch(
 watch(
   () => [props.sessionId, props.workspaceId],
   () => {
-    clearPoll();
+    clearContextRefreshTimer();
     saveCurrentScrollPosition();
     clearFollowBottomLock();
     loadEarlierSeq += 1;
     handledBoundaryMarkerId.value = 0;
     scrollToBottomSeq += 1;
-    pendingPollHint.value = false;
-    warmupPollRemaining = 0;
     items.value = [];
     expandedTextMessageIds.value = new Set();
     clampedTextMessageIds.value = new Set();
@@ -2301,18 +2339,6 @@ watch(
     stickToBottom.value = true;
     userUnfollowed.value = false;
     forcedBottomOnFirstActive.value = false;
-    runState.value = {
-      sessionId: props.sessionId,
-      status: "idle",
-      activeRunId: null,
-      activeAssistantItemId: null,
-      waitingToolItemId: null,
-      lastResponseTotalTokens: null,
-      runNoticeText: "",
-      nonTerminalItemIds: [],
-      updatedAt: 0,
-      appliedItemId: 0
-    };
     // 重置滚动方向判断基线,避免切换会话后首次 scroll 误判为“用户向上滚动”。
     lastKnownScrollTop = 0;
     distanceToBottomPx.value = Number.POSITIVE_INFINITY;
@@ -2330,16 +2356,51 @@ watch(
 );
 
 watch(
+  () => [props.sessionId, props.active, runState.value.status, runState.value.updatedAt] as const,
+  ([sessionId, active, status], prev) => {
+    if (!sessionId || !active || !props.sessionReady) return;
+    const prevStatus = prev?.[2];
+    const statusChanged = status !== prevStatus;
+    if (status === "running" || status === "waiting_permission") {
+      void refreshAll(false, false, prevStatus ?? null);
+      return;
+    }
+    if (statusChanged && prevStatus && prevStatus !== "idle" && status === "idle") {
+      void refreshAll(false, false, prevStatus);
+    }
+  },
+  { immediate: true }
+);
+
+watch(
+  () => [props.active, runState.value.status, latestUserMessageCreatedAt.value] as const,
+  ([active, status, startedAt]) => {
+    if (!active) {
+      clearRunElapsedTimer();
+      return;
+    }
+    if ((status === "running" || status === "waiting_permission") && startedAt > 0) {
+      nowTickMs.value = Date.now();
+      ensureRunElapsedTimer();
+      return;
+    }
+    clearRunElapsedTimer();
+  },
+  { immediate: true }
+);
+
+watch(
   () => props.active,
   (active) => {
     if (!active) {
       saveCurrentScrollPosition();
-      clearPoll();
+      clearContextRefreshTimer();
+      clearRunElapsedTimer();
       clearFollowBottomLock();
-      pendingPollHint.value = false;
-      warmupPollRemaining = 0;
       return;
     }
+
+    statusStore.markSessionSeen(props.sessionId);
 
     const forceFollowBottom = !forcedBottomOnFirstActive.value;
     if (forceFollowBottom && !hasSavedScrollPosition(props.sessionId)) {
@@ -2373,7 +2434,8 @@ onActivated(() => {
 
 onBeforeUnmount(() => {
   saveCurrentScrollPosition();
-  clearPoll();
+  clearContextRefreshTimer();
+  clearRunElapsedTimer();
   clearFollowBottomLock();
   scrollToBottomSeq += 1;
 });
@@ -2478,15 +2540,6 @@ onBeforeUnmount(() => {
   font-size: 0.85em;
   color: var(--text-secondary);
   opacity: 0.88;
-}
-
-.assistant-reasoning-label {
-  margin-bottom: 0.2rem;
-  font-size: 0.9em;
-  line-height: 1.2;
-  color: var(--text-tertiary);
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
 }
 
 .assistant-reasoning-markdown {

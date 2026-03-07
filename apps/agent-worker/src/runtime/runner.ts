@@ -1446,7 +1446,7 @@ export class AgentRunner {
     runtime: ExecutionProfile["runtime"];
   }) {
     const maxContextTokens = Math.max(1, Math.floor(Number(params.model.contextWindowTokens || 0)));
-    const thresholdPct = Math.max(50, Math.min(90, Math.floor(Number(params.runtime.autoCompactThresholdPct || 80))));
+    const thresholdPct = Math.max(50, Math.min(99, Math.floor(Number(params.runtime.autoCompactThresholdPct || 80))));
     const lastTotalTokens = typeof params.context.lastResponseTotalTokens === "number"
       ? Math.max(0, Math.floor(params.context.lastResponseTotalTokens))
       : null;

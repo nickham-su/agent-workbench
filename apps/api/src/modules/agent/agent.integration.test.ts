@@ -393,6 +393,7 @@ test("GET /api/settings/agent/agents 返回每个 agent 的 resolvedModel", asyn
   assert.deepEqual(defaultAgent?.resolvedModel, {
     providerId: "global_provider",
     providerName: "Global Provider",
+    contextWindowTokens: 128000,
     modelId: "global_model",
     modelName: "Global Model",
     source: "global_default"
@@ -400,6 +401,7 @@ test("GET /api/settings/agent/agents 返回每个 agent 的 resolvedModel", asyn
   assert.deepEqual(customAgent?.resolvedModel, {
     providerId: "agent_provider",
     providerName: "Agent Provider",
+    contextWindowTokens: 128000,
     modelId: "agent_model",
     modelName: "Agent Model",
     source: "agent_default"

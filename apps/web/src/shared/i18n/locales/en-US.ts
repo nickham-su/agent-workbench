@@ -308,7 +308,8 @@ export default {
       lastTotalTokens: "Total Tokens",
       backToParent: "Back to parent session",
       parentSessionMissing: "Parent session not found",
-      readonlySubtaskHint: "This subtask session is read-only",
+      subtaskRunningHint: "Running for {elapsed}. Cancel in the parent session.",
+      subtaskCancelInParentHint: "Cancel in the parent session if needed.",
       subtaskCardTitle: "Subtask",
       subtaskMode: "Mode",
       subtaskModeNew: "New session",
@@ -975,7 +976,7 @@ export default {
       fields: {
         autoCompactThresholdPct: {
           label: "Auto-compaction threshold (%)",
-          help: "Auto-compaction triggers when last response total tokens reach current model context window * threshold/100. Range: 50-90."
+          help: "Auto-compaction triggers when last response total tokens reach current model context window * threshold/100. Range: 50-99."
         },
         modelTotalTimeoutMs: {
           label: "Model total timeout (seconds)",
@@ -988,6 +989,10 @@ export default {
         modelRequestMaxRetries: {
           label: "Model max retries",
           help: "Automatically retries only when a request fails before receiving the first chunk. 0 disables retries."
+        },
+        sessionTerminalSoundEnabled: {
+          label: "Run completion sound",
+          help: "Play a sound when a run completes. Applies to all sessions."
         }
       }
     },

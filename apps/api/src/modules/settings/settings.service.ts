@@ -64,7 +64,8 @@ const RUNTIME_MODEL_REQUEST_MAX_RETRIES_MAX = 100;
 const MODEL_CONTEXT_WINDOW_TOKENS_MAX = 10_000_000;
 const RUNTIME_AUTO_COMPACT_THRESHOLD_DEFAULT = 80;
 const RUNTIME_AUTO_COMPACT_THRESHOLD_MIN = 50;
-const RUNTIME_AUTO_COMPACT_THRESHOLD_MAX = 90;
+const RUNTIME_AUTO_COMPACT_THRESHOLD_MAX = 99;
+const RUNTIME_SESSION_TERMINAL_SOUND_ENABLED_DEFAULT = true;
 
 type AgentProvidersSettingsStored = Omit<AgentProvidersSettings, "updatedAt">;
 type AgentSettingsStored = Omit<AgentSettings, "updatedAt">;
@@ -386,6 +387,17 @@ function normalizeAutoCompactThresholdPctForUpdate(raw: unknown, field: string) 
     );
   }
   return v;
+}
+
+function normalizeSessionTerminalSoundEnabledFromStored(raw: unknown) {
+  return typeof raw === "boolean" ? raw : RUNTIME_SESSION_TERMINAL_SOUND_ENABLED_DEFAULT;
+}
+
+function normalizeSessionTerminalSoundEnabledForUpdate(raw: unknown, field: string) {
+  if (typeof raw !== "boolean") {
+    throw new HttpError(400, `${field} must be a boolean`, "AGENT_RUNTIME_TERMINAL_SOUND_INVALID");
+  }
+  return raw;
 }
 
 function getAgentProvidersSettingsStored(ctx: AppContext) {
@@ -809,12 +821,14 @@ function getAgentRuntimeSettingsStored(ctx: AppContext) {
   const modelTotalTimeoutMs = normalizeRuntimeTimeoutMsFromStored(value?.modelTotalTimeoutMs);
   const modelRequestMaxRetries = normalizeModelRequestMaxRetriesFromStored(value?.modelRequestMaxRetries);
   const autoCompactThresholdPct = normalizeAutoCompactThresholdPctFromStored(value?.autoCompactThresholdPct);
+  const sessionTerminalSoundEnabled = normalizeSessionTerminalSoundEnabledFromStored(value?.sessionTerminalSoundEnabled);
   return {
     settings: {
       modelIdleTimeoutMs,
       modelTotalTimeoutMs,
       modelRequestMaxRetries,
-      autoCompactThresholdPct
+      autoCompactThresholdPct,
+      sessionTerminalSoundEnabled
     },
     updatedAt: row?.updatedAt ?? 0
   };
@@ -941,6 +955,7 @@ export function getAgentRuntimeSettings(ctx: AppContext): AgentRuntimeSettings {
     modelTotalTimeoutMs: loaded.settings.modelTotalTimeoutMs,
     modelRequestMaxRetries: loaded.settings.modelRequestMaxRetries,
     autoCompactThresholdPct: loaded.settings.autoCompactThresholdPct,
+    sessionTerminalSoundEnabled: loaded.settings.sessionTerminalSoundEnabled,
     updatedAt: loaded.updatedAt
   };
 }
@@ -969,6 +984,10 @@ export function updateAgentRuntimeSettings(
     (body as any).autoCompactThresholdPct !== undefined
       ? normalizeAutoCompactThresholdPctForUpdate((body as any).autoCompactThresholdPct, "autoCompactThresholdPct")
       : current.autoCompactThresholdPct;
+  const sessionTerminalSoundEnabled =
+    (body as any).sessionTerminalSoundEnabled !== undefined
+      ? normalizeSessionTerminalSoundEnabledForUpdate((body as any).sessionTerminalSoundEnabled, "sessionTerminalSoundEnabled")
+      : current.sessionTerminalSoundEnabled;
 
   const updatedAt = nowMs();
   setSettingJson(
@@ -978,13 +997,14 @@ export function updateAgentRuntimeSettings(
       modelIdleTimeoutMs,
       modelTotalTimeoutMs,
       modelRequestMaxRetries,
-      autoCompactThresholdPct
+      autoCompactThresholdPct,
+      sessionTerminalSoundEnabled
     },
     updatedAt
   );
 
   logger.info(
-    { modelIdleTimeoutMs, modelTotalTimeoutMs, modelRequestMaxRetries, autoCompactThresholdPct, updatedAt },
+    { modelIdleTimeoutMs, modelTotalTimeoutMs, modelRequestMaxRetries, autoCompactThresholdPct, sessionTerminalSoundEnabled, updatedAt },
     "agent runtime settings updated"
   );
   return {
@@ -992,6 +1012,7 @@ export function updateAgentRuntimeSettings(
     modelTotalTimeoutMs,
     modelRequestMaxRetries,
     autoCompactThresholdPct,
+    sessionTerminalSoundEnabled,
     updatedAt
   };
 }
@@ -1220,6 +1241,7 @@ function resolveAgentResolvedModel(agent: AgentItem, providersSettings: AgentPro
 
   return {
     providerId,
+    contextWindowTokens: model.contextWindowTokens,
     providerName: provider.name,
     modelId,
     modelName: model.name,

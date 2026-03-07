@@ -275,9 +275,11 @@
               :modified="compare?.current.content || ''"
               :language="compareLanguage"
               :sideBySide="diffViewMode === 'side-by-side'"
+              :compactMode="true"
+              :showOverviewRuler="true"
           />
-          <div v-if="compareLoading"
-               class="absolute inset-0 p-3 text-xs text-[color:var(--text-tertiary)] bg-[var(--panel-bg)]">
+           <div v-if="compareLoading"
+                class="absolute inset-0 p-3 text-xs text-[color:var(--text-tertiary)] bg-[var(--panel-bg)]">
             {{ t("codeReview.diff.loading") }}
           </div>
           <div v-else-if="compareError"

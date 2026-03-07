@@ -306,7 +306,8 @@ export default {
       lastTotalTokens: "总Token",
       backToParent: "返回父会话",
       parentSessionMissing: "未找到父会话",
-      readonlySubtaskHint: "子任务会话为只读模式",
+      subtaskRunningHint: "已运行 {elapsed}，如需取消请到主会话",
+      subtaskCancelInParentHint: "如需取消，请到主会话",
       subtaskCardTitle: "子任务",
       subtaskMode: "模式",
       subtaskModeNew: "新会话",
@@ -973,7 +974,7 @@ export default {
       fields: {
         autoCompactThresholdPct: {
           label: "自动压缩阈值(%)",
-          help: "当最近一次模型响应总 token 达到当前模型 context window * 阈值/100 时触发自动压缩。范围 50-90。"
+          help: "当最近一次模型响应总 token 达到当前模型 context window * 阈值/100 时触发自动压缩。范围 50-99。"
         },
         modelTotalTimeoutMs: {
           label: "模型总超时（秒）",
@@ -986,6 +987,10 @@ export default {
         modelRequestMaxRetries: {
           label: "模型重试最大次数",
           help: "仅在首包前失败时自动重试。0 表示不重试。"
+        },
+        sessionTerminalSoundEnabled: {
+          label: "运行结束提示音",
+          help: "当运行结束时播放提示音。对所有会话生效。"
         }
       }
     },
