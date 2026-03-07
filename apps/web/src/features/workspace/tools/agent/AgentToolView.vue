@@ -118,6 +118,12 @@ type AgentOption = {
   value: string;
   label: string;
   isDefault?: boolean;
+  resolvedModel?: {
+    providerId: string;
+    providerName: string;
+    modelId: string;
+    modelName: string;
+  } | null;
 };
 
 type DraftAgentSession = {
@@ -403,7 +409,8 @@ async function refreshAgents() {
     agentOptions.value = res.agents.map((agent) => ({
       value: agent.id,
       label: agent.name,
-      isDefault: defaultAgentId === agent.id
+      isDefault: defaultAgentId === agent.id,
+      resolvedModel: agent.resolvedModel ?? null
     }));
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));

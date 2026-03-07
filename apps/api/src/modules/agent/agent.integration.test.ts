@@ -325,6 +325,87 @@ async function configureAgentDefaults(app: FastifyInstance) {
   assert.equal(agentsRes.statusCode, 200, `configure agents failed: ${agentsRes.body}`);
 }
 
+test("GET /api/settings/agent/agents 返回每个 agent 的 resolvedModel", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+
+  const providersRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: {
+      default: { providerId: "global_provider", modelId: "global_model" },
+      providers: [
+        {
+          id: "global_provider",
+          name: "Global Provider",
+          npm: "@ai-sdk/openai",
+          options: { baseURL: "https://example.com/v1", apiKey: "sk-global" },
+          models: [{ id: "global_model", name: "Global Model", contextWindowTokens: 128000 }]
+        },
+        {
+          id: "agent_provider",
+          name: "Agent Provider",
+          npm: "@ai-sdk/openai",
+          options: { baseURL: "https://example.com/v1", apiKey: "sk-agent" },
+          models: [{ id: "agent_model", name: "Agent Model", contextWindowTokens: 128000 }]
+        }
+      ]
+    }
+  });
+  assert.equal(providersRes.statusCode, 200, `configure providers failed: ${providersRes.body}`);
+
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      default: { agentId: "default" },
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          summary: "",
+          prompt: "You are a helpful coding assistant.",
+          tools: ["bash", "read", "write"],
+          mcpServers: [],
+          permissions: { allowRead: true, allowWrite: true, allowBash: true },
+          defaultModel: null
+        },
+        {
+          id: "custom",
+          name: "custom",
+          summary: "",
+          prompt: "Use a custom model.",
+          tools: ["bash", "read"],
+          mcpServers: [],
+          permissions: { allowRead: true, allowWrite: false, allowBash: true },
+          defaultModel: { providerId: "agent_provider", modelId: "agent_model" }
+        }
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `configure agents failed: ${agentsRes.body}`);
+
+  const getRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/agents" });
+  assert.equal(getRes.statusCode, 200, `get agent settings failed: ${getRes.body}`);
+  const body = getRes.json() as any;
+  const defaultAgent = body.agents.find((item: any) => item.id === "default");
+  const customAgent = body.agents.find((item: any) => item.id === "custom");
+
+  assert.deepEqual(defaultAgent?.resolvedModel, {
+    providerId: "global_provider",
+    providerName: "Global Provider",
+    modelId: "global_model",
+    modelName: "Global Model",
+    source: "global_default"
+  });
+  assert.deepEqual(customAgent?.resolvedModel, {
+    providerId: "agent_provider",
+    providerName: "Agent Provider",
+    modelId: "agent_model",
+    modelName: "Agent Model",
+    source: "agent_default"
+  });
+});
+
 async function closeFixture(fixture: Fixture) {
   fixtures.delete(fixture);
   await fixture.app.close();

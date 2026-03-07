@@ -214,6 +214,21 @@ export type AgentPermissions = Static<typeof AgentPermissionsSchema>;
 export const AgentDefaultModelSchema = Type.Union([AgentProvidersDefaultSchema, Type.Null()]);
 export type AgentDefaultModel = Static<typeof AgentDefaultModelSchema>;
 
+export const AgentResolvedModelSourceSchema = Type.Union([
+  Type.Literal("agent_default"),
+  Type.Literal("global_default")
+]);
+export type AgentResolvedModelSource = Static<typeof AgentResolvedModelSourceSchema>;
+
+export const AgentResolvedModelSchema = Type.Object({
+  providerId: Type.String({ minLength: 1 }),
+  providerName: Type.String({ minLength: 1 }),
+  modelId: Type.String({ minLength: 1 }),
+  modelName: Type.String({ minLength: 1 }),
+  source: AgentResolvedModelSourceSchema
+});
+export type AgentResolvedModel = Static<typeof AgentResolvedModelSchema>;
+
 export const AgentItemSchema = Type.Object({
   id: Type.String({ minLength: 1 }),
   name: Type.String({ minLength: 1 }),
@@ -227,6 +242,20 @@ export const AgentItemSchema = Type.Object({
 });
 export type AgentItem = Static<typeof AgentItemSchema>;
 
+export const AgentItemViewSchema = Type.Object({
+  id: Type.String({ minLength: 1 }),
+  name: Type.String({ minLength: 1 }),
+  summary: Type.String({ maxLength: 160 }),
+  prompt: Type.String(),
+  globalPromptIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+  tools: Type.Array(AgentToolNameSchema),
+  mcpServers: Type.Array(Type.String({ minLength: 1 })),
+  permissions: AgentPermissionsSchema,
+  defaultModel: AgentDefaultModelSchema,
+  resolvedModel: Type.Union([AgentResolvedModelSchema, Type.Null()])
+});
+export type AgentItemView = Static<typeof AgentItemViewSchema>;
+
 export const AgentSettingsDefaultSchema = Type.Object({
   agentId: Type.String({ minLength: 1 })
 });
@@ -238,6 +267,13 @@ export const AgentSettingsSchema = Type.Object({
   updatedAt: Type.Number()
 });
 export type AgentSettings = Static<typeof AgentSettingsSchema>;
+
+export const AgentSettingsViewSchema = Type.Object({
+  default: Type.Union([AgentSettingsDefaultSchema, Type.Null()]),
+  agents: Type.Array(AgentItemViewSchema),
+  updatedAt: Type.Number()
+});
+export type AgentSettingsView = Static<typeof AgentSettingsViewSchema>;
 
 export const UpdateAgentSettingsRequestSchema = Type.Object({
   default: Type.Union([AgentSettingsDefaultSchema, Type.Null()]),

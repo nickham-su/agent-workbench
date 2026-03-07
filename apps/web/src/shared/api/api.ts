@@ -100,6 +100,7 @@ import type {
   UpdateAgentGlobalPromptSettingsRequest,
   UpdateAgentRuntimeSettingsRequest,
   AgentSettings,
+  AgentSettingsView,
   UpdateAgentSettingsRequest
 } from "@agent-workbench/shared";
 import { emitUnauthorized } from "@/features/auth/unauthorized";
@@ -839,7 +840,7 @@ export async function updateAgentRuntimeSettings(body: UpdateAgentRuntimeSetting
 
 export async function getAgentSettings() {
   try {
-    const res = await client.get<AgentSettings>("/settings/agent/agents");
+    const res = await client.get<AgentSettingsView>("/settings/agent/agents");
     return res.data;
   } catch (err) {
     throw toApiError(err);

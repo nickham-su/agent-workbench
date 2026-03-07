@@ -351,7 +351,10 @@
              style="min-width: 180px; max-width: 320px"
              @update:value="onAgentChange"
            />
-          </div>
+           <div v-if="effectiveModelLabel" class="min-w-0 max-w-[360px] text-[0.9em] text-[color:var(--text-tertiary)] truncate" :title="effectiveModelLabel">
+             {{ effectiveModelLabel }}
+           </div>
+           </div>
           <div v-else class="flex items-center gap-2 text-[0.9em] text-[color:var(--text-tertiary)]">
             <span>{{ t("agent.client.noAgentHint") }}</span>
             <a-button type="link" size="small" class="!px-0" @click="goAgentProfiles">
@@ -409,6 +412,12 @@ type AgentOption = {
   value: string;
   label: string;
   isDefault?: boolean;
+  resolvedModel?: {
+    providerId: string;
+    providerName: string;
+    modelId: string;
+    modelName: string;
+  } | null;
 };
 
 type ApplyPatchDisplayFile = {
@@ -792,6 +801,14 @@ const effectiveAgentId = computed(() => {
     return raw;
   }
   return fallbackAgentId.value;
+});
+
+const effectiveModelLabel = computed(() => {
+  const agentId = effectiveAgentId.value;
+  const option = props.agentOptions.find((item) => item.value === agentId);
+  const resolved = option?.resolvedModel;
+  if (!resolved) return "";
+  return `${resolved.providerName} / ${resolved.modelName}`;
 });
 
 const formattedLastTotalTokens = computed(() => {

@@ -9,8 +9,10 @@ import type {
   AgentRuntimeSettings,
   AgentProviderNpm,
   AgentProvidersSettings,
+  AgentResolvedModel,
   AgentProvidersSettingsView,
   AgentSettings,
+  AgentSettingsView,
   AgentToolName,
   ClearAllGitIdentityResponse,
   GitGlobalIdentity,
@@ -1204,11 +1206,36 @@ export function updateAgentProvidersSettings(
   return toAgentProvidersSettingsView({ default: defaultRef, providers }, updatedAt);
 }
 
-export function getAgentSettings(ctx: AppContext): AgentSettings {
+function resolveAgentResolvedModel(agent: AgentItem, providersSettings: AgentProvidersSettings): AgentResolvedModel | null {
+  const source = agent.defaultModel ? "agent_default" : "global_default";
+  const ref = agent.defaultModel ?? providersSettings.default;
+  const providerId = typeof ref?.providerId === "string" ? ref.providerId.trim() : "";
+  const modelId = typeof ref?.modelId === "string" ? ref.modelId.trim() : "";
+  if (!providerId || !modelId) return null;
+
+  const provider = providersSettings.providers.find((item) => item.id === providerId);
+  if (!provider) return null;
+  const model = provider.models.find((item) => item.id === modelId);
+  if (!model) return null;
+
+  return {
+    providerId,
+    providerName: provider.name,
+    modelId,
+    modelName: model.name,
+    source
+  };
+}
+
+export function getAgentSettings(ctx: AppContext): AgentSettingsView {
   const loaded = getAgentSettingsStored(ctx);
+  const providersSettings = getAgentProvidersSettingsInternal(ctx);
   return {
     default: loaded.settings.default,
-    agents: loaded.settings.agents,
+    agents: loaded.settings.agents.map((agent) => ({
+      ...agent,
+      resolvedModel: resolveAgentResolvedModel(agent, providersSettings)
+    })),
     updatedAt: loaded.updatedAt
   };
 }
