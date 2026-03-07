@@ -45,6 +45,7 @@ import {
   findClientRequestDedup,
   getAgentSession,
   getContextItemById,
+  getLatestTerminalRunRecord,
   getLatestSessionItemId,
   getRunRecord,
   getRunState,
@@ -2270,6 +2271,9 @@ export class AgentService {
     const session = getAgentSession(this.ctx.db, sessionId);
     if (!session) throw new HttpError(404, "session not found");
     const state = getRunState(this.ctx.db, session.workspaceId, session.id);
+    const latestTerminalRun = getLatestTerminalRunRecord(this.ctx.db, { workspaceId: session.workspaceId, sessionId: session.id });
+    const lastTerminalStatus =
+      latestTerminalRun && state.status === "idle" && latestTerminalRun.updatedAt === state.updatedAt ? latestTerminalRun.status : null;
     const nonTerminalItemIds = listNonTerminalVisibleItemIds(this.ctx.db, session.workspaceId, session.id);
     return {
       sessionId: session.id,
@@ -2281,6 +2285,7 @@ export class AgentService {
       runNoticeText: state.runNoticeText,
       nonTerminalItemIds,
       updatedAt: state.updatedAt,
+      lastTerminalStatus,
       appliedItemId: state.appliedItemId
     };
   }
@@ -2301,19 +2306,13 @@ export class AgentService {
 
     const state = getRunState(this.ctx.db, session.workspaceId, session.id);
     const createdAt = nowMs();
-    try {
+    const tx = this.ctx.db.transaction(() => {
       moveSessionHead(this.ctx.db, {
         workspaceId: session.workspaceId,
         sessionId: session.id,
         expectedHeadItemId: session.headItemId,
         nextHeadItemId: body.toItemId,
         updatedAt: createdAt
-      });
-      setRunStateIdle(this.ctx.db, {
-        workspaceId: session.workspaceId,
-        sessionId: session.id,
-        updatedAt: createdAt,
-        appliedItemId: getLatestSessionItemId(this.ctx.db, session.workspaceId, session.id)
       });
       if (state.activeRunId) {
         updateRunRecordStatus(this.ctx.db, {
@@ -2322,6 +2321,15 @@ export class AgentService {
           updatedAt: createdAt
         });
       }
+      setRunStateIdle(this.ctx.db, {
+        workspaceId: session.workspaceId,
+        sessionId: session.id,
+        updatedAt: createdAt,
+        appliedItemId: getLatestSessionItemId(this.ctx.db, session.workspaceId, session.id)
+      });
+    });
+    try {
+      tx();
     } catch (err) {
       if (err instanceof AgentConflictError) throw conflictToHttpError(err);
       if (err instanceof Error && err.message === "invalid target head item") {

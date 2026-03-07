@@ -453,6 +453,7 @@ async function getRunState(app: FastifyInstance, sessionId: string) {
     status: "idle" | "running" | "waiting_permission";
     activeRunId: string | null;
     runNoticeText: string;
+    lastTerminalStatus: "completed" | "failed" | "cancelled" | null;
   };
 }
 
@@ -557,6 +558,7 @@ async function updateRunStateInternal(params: {
   activeAssistantItemId: number | null;
   waitingToolItemId: number | null;
   runNoticeText?: string | null;
+  updatedAt?: number;
 }) {
   const res = await params.app.inject({
     method: "POST",
@@ -571,7 +573,8 @@ async function updateRunStateInternal(params: {
       activeRunId: params.activeRunId,
       activeAssistantItemId: params.activeAssistantItemId,
       waitingToolItemId: params.waitingToolItemId,
-      ...(Object.prototype.hasOwnProperty.call(params, "runNoticeText") ? { runNoticeText: params.runNoticeText } : {})
+      ...(Object.prototype.hasOwnProperty.call(params, "runNoticeText") ? { runNoticeText: params.runNoticeText } : {}),
+      ...(Object.prototype.hasOwnProperty.call(params, "updatedAt") ? { updatedAt: params.updatedAt } : {})
     }
   });
   assert.equal(res.statusCode, 200, `update internal run-state failed: ${res.body}`);
@@ -1085,6 +1088,17 @@ test("agent cancel 仅终止执行并保留消息,活跃项标记为 cancelled",
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
   const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "agent-default",
+    providerId: "openai",
+    modelId: "gpt-4.1",
+    status: "running",
+    createdAt: Date.now()
+  });
 
   const userItem = await createContextItemInternal({
     app: fixture.app,
@@ -1166,6 +1180,7 @@ test("agent cancel 仅终止执行并保留消息,活跃项标记为 cancelled",
   const runState = await getRunState(fixture.app, session.id);
   assert.equal(runState.status, "idle");
   assert.equal(runState.activeRunId, null);
+  assert.equal(runState.lastTerminalStatus, "cancelled");
 
   const context = await getContextItems(fixture.app, session.id);
   assert.equal(context.headItemId, toolItem.item.id);
@@ -1949,6 +1964,78 @@ test("run-state 支持 runNoticeText 更新与 idle 自动清空", async () => {
   const idleState = await getRunState(fixture.app, session.id);
   assert.equal(idleState.status, "idle");
   assert.equal(idleState.runNoticeText, "");
+  assert.equal(idleState.lastTerminalStatus, null);
+});
+
+test("run-state 返回最近一次终态 run 结果", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+
+  const created = await createSession(fixture.app, fixture.workspaceId);
+  const session = getAgentSession(fixture.db, created.id)!;
+  const createdAt = Date.now();
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "agent-default",
+    providerId: "openai",
+    modelId: "gpt-4.1",
+    status: "completed",
+    createdAt
+  });
+  await updateRunStateInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "idle",
+    activeRunId: null,
+    activeAssistantItemId: null,
+    waitingToolItemId: null,
+    updatedAt: createdAt
+  });
+
+  const runState = await getRunState(fixture.app, session.id);
+  assert.equal(runState.status, "idle");
+  assert.equal(runState.lastTerminalStatus, "completed");
+});
+
+test("run-state 不应把旧 terminal run 误认为当前这次 idle 的终态", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+
+  const created = await createSession(fixture.app, fixture.workspaceId);
+  const session = getAgentSession(fixture.db, created.id)!;
+  const createdAt = Date.now();
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "agent-default",
+    providerId: "openai",
+    modelId: "gpt-4.1",
+    status: "completed",
+    createdAt
+  });
+
+  await updateRunStateInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "idle",
+    activeRunId: null,
+    activeAssistantItemId: null,
+    waitingToolItemId: null,
+    updatedAt: createdAt + 1000
+  });
+
+  const runState = await getRunState(fixture.app, session.id);
+  assert.equal(runState.status, "idle");
+  assert.equal(runState.lastTerminalStatus, null);
 });
 
 test("single-call model profile 始终使用全局默认模型", async () => {

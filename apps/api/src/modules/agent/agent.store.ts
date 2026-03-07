@@ -1425,6 +1425,34 @@ export function getRunRecord(db: Db, runId: string) {
   return row ?? null;
 }
 
+export function getLatestTerminalRunRecord(db: Db, params: { workspaceId: string; sessionId: string }): (AgentRunRecord & {
+  status: "completed" | "failed" | "cancelled";
+}) | null {
+  const row = db
+    .prepare(
+      `
+        select
+          run_id as runId,
+          workspace_id as workspaceId,
+          session_id as sessionId,
+          trigger_item_id as triggerItemId,
+          agent_id as agentId,
+          provider_id as providerId,
+          model_id as modelId,
+          status,
+          created_at as createdAt,
+          updated_at as updatedAt
+        from agent_run
+        where workspace_id = ? and session_id = ?
+          and status in ('completed', 'failed', 'cancelled')
+        order by updated_at desc, created_at desc
+        limit 1
+      `
+    )
+    .get(params.workspaceId, params.sessionId) as (AgentRunRecord & { status: "completed" | "failed" | "cancelled" }) | undefined;
+  return row ?? null;
+}
+
 export function updateRunRecordStatus(db: Db, params: { runId: string; status: AgentRunRecord["status"]; updatedAt: number }) {
   db.prepare(
     `

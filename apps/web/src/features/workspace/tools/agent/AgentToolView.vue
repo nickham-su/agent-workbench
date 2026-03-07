@@ -752,7 +752,8 @@ onActivated(() => {
   statusStore.syncSessions({
     activeSessionId: effectiveActiveKey.value || null,
     visibleSessionIds: visibleSessions.value.map((item) => item.id),
-    registeredSessionIds: serverSessions.value.map((item) => item.id)
+    registeredSessionIds: serverSessions.value.map((item) => item.id),
+    sessionKinds: Object.fromEntries(serverSessions.value.map((item) => [item.id, item.kind]))
   });
   void createOneSession();
 });
@@ -768,6 +769,7 @@ watch(
     statusStore.syncSessions({
       activeSessionId: effectiveActiveKey.value || null,
       visibleSessionIds: visibleSessions.value.map((item) => item.id),
+      sessionKinds: Object.fromEntries(serverSessions.value.map((item) => [item.id, item.kind])),
       ...(serverSessionsLoaded.value ? { registeredSessionIds: serverSessions.value.map((item) => item.id) } : {})
     });
   },

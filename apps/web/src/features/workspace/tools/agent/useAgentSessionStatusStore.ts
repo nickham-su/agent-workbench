@@ -23,10 +23,17 @@ const DEFAULT_RUN_STATE = (sessionId = ""): AgentSessionRunState => ({
   runNoticeText: "",
   nonTerminalItemIds: [],
   updatedAt: 0,
+  lastTerminalStatus: null,
   appliedItemId: 0
 });
 
 export type SessionIndicatorIcon = "running" | "waiting_permission" | null;
+
+type SessionUiPolicy = {
+  kind: "primary" | "subtask";
+  terminalSoundEnabled: boolean;
+  terminalDotEnabled: boolean;
+};
 
 type SessionStatusEntry = {
   sessionId: string;
@@ -42,6 +49,7 @@ type SessionStatusEntry = {
   lastSoundPlayedAt: number | null;
   lastSoundPlayFailedAt: number | null;
   indicatorIcon: SessionIndicatorIcon;
+  uiPolicy: SessionUiPolicy;
 };
 
 type PersistedSessionIndicator = {
@@ -80,10 +88,31 @@ function indicatorIconOf(status: AgentSessionRunState["status"]): SessionIndicat
   return null;
 }
 
+function defaultUiPolicy(): SessionUiPolicy {
+  return {
+    kind: "primary",
+    terminalSoundEnabled: true,
+    terminalDotEnabled: true
+  };
+}
+
+function uiPolicyOf(kind: "primary" | "subtask"): SessionUiPolicy {
+  if (kind === "subtask") {
+    return {
+      kind,
+      terminalSoundEnabled: false,
+      terminalDotEnabled: false
+    };
+  }
+  return defaultUiPolicy();
+}
+
 function shouldShowDot(entry: SessionStatusEntry, activeSessionId: string | null) {
   if (entry.runState.status !== "idle") return false;
+  if (!entry.uiPolicy.terminalDotEnabled) return false;
   if (activeSessionId && activeSessionId === entry.sessionId) return false;
   if (entry.lastTerminalAt == null) return false;
+  if (entry.runState.lastTerminalStatus !== "completed" && entry.runState.lastTerminalStatus !== "failed") return false;
   return entry.lastSeenTerminalAt == null || entry.lastTerminalAt > entry.lastSeenTerminalAt;
 }
 
@@ -212,6 +241,7 @@ export function createAgentSessionStatusStore() {
         prevRunStatus: null,
         lastSoundPlayedAt: null,
         lastSoundPlayFailedAt: null,
+        uiPolicy: defaultUiPolicy(),
         indicatorIcon: null
       }) as SessionStatusEntry;
       applyPersistedIndicator(entry);
@@ -269,6 +299,7 @@ export function createAgentSessionStatusStore() {
   }
 
   function playTerminalSound(entry: SessionStatusEntry, terminalAt: number) {
+    if (!entry.uiPolicy.terminalSoundEnabled) return;
     if (!state.runtimeSettings.sessionTerminalSoundEnabled) return;
     if (entry.lastSoundPlayedAt != null && terminalAt <= entry.lastSoundPlayedAt) return;
     const audio = ensureAudio();
@@ -293,12 +324,17 @@ export function createAgentSessionStatusStore() {
     updateEntryIndicator(entry);
     if (prev !== "idle" && nextStatus === "idle") {
       const terminalAt = typeof next.updatedAt === "number" && next.updatedAt > 0 ? next.updatedAt : nowMs();
-      entry.lastTerminalAt = terminalAt;
-      if (state.activeSessionId === entry.sessionId) {
-        entry.lastSeenTerminalAt = terminalAt;
+      const isReminderTerminal = next.lastTerminalStatus === "completed" || next.lastTerminalStatus === "failed";
+      if (entry.uiPolicy.terminalDotEnabled && isReminderTerminal) {
+        entry.lastTerminalAt = terminalAt;
+        if (state.activeSessionId === entry.sessionId) {
+          entry.lastSeenTerminalAt = terminalAt;
+        }
+        persistIndicators();
       }
-      playTerminalSound(entry, terminalAt);
-      persistIndicators();
+      if (isReminderTerminal) {
+        playTerminalSound(entry, terminalAt);
+      }
     } else if (prev === "idle" && isNonIdle(nextStatus)) {
       if (entry.lastTerminalAt != null) {
         entry.lastSeenTerminalAt = entry.lastTerminalAt;
@@ -441,11 +477,22 @@ export function createAgentSessionStatusStore() {
     }
   }
 
-  function syncSessions(params: { visibleSessionIds: string[]; activeSessionId: string | null; registeredSessionIds?: string[] }) {
+  function syncSessions(params: {
+    visibleSessionIds: string[];
+    activeSessionId: string | null;
+    registeredSessionIds?: string[];
+    sessionKinds?: Record<string, "primary" | "subtask">;
+  }) {
     state.visibleSessionIds = new Set(params.visibleSessionIds.map((id) => String(id || "").trim()).filter(Boolean));
     if (Array.isArray(params.registeredSessionIds)) {
       state.registeredSessionIds = new Set(params.registeredSessionIds.map((id) => String(id || "").trim()).filter(Boolean));
       registeredSessionsReady = true;
+    }
+    const sessionKinds = params.sessionKinds ?? {};
+    for (const sessionId of new Set([...state.visibleSessionIds, ...state.registeredSessionIds])) {
+      const entry = ensureEntry(sessionId);
+      if (!entry) continue;
+      entry.uiPolicy = uiPolicyOf(sessionKinds[sessionId] === "subtask" ? "subtask" : "primary");
     }
     state.activeSessionId = String(params.activeSessionId || "").trim() || null;
     for (const sessionId of state.visibleSessionIds) {
@@ -481,7 +528,8 @@ export function createAgentSessionStatusStore() {
       prevRunStatus: null,
       lastSoundPlayedAt: null,
       lastSoundPlayFailedAt: null,
-      indicatorIcon: null
+      indicatorIcon: null,
+      uiPolicy: defaultUiPolicy()
     } as SessionStatusEntry);
   }
 

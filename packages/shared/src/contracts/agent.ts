@@ -132,6 +132,14 @@ export const AgentContextItemsResponseSchema = Type.Object({
 });
 export type AgentContextItemsResponse = Static<typeof AgentContextItemsResponseSchema>;
 
+export const AgentSessionTerminalStatusSchema = Type.Union([
+  Type.Literal("completed"),
+  Type.Literal("failed"),
+  Type.Literal("cancelled"),
+  Type.Null()
+]);
+export type AgentSessionTerminalStatus = Static<typeof AgentSessionTerminalStatusSchema>;
+
 export const AgentSessionRunStateSchema = Type.Object({
   sessionId: Type.String({ minLength: 1 }),
   status: AgentRunStatusSchema,
@@ -143,6 +151,7 @@ export const AgentSessionRunStateSchema = Type.Object({
   runNoticeText: Type.String(),
   nonTerminalItemIds: Type.Array(Type.Number({ minimum: 1 })),
   updatedAt: Type.Number(),
+  lastTerminalStatus: AgentSessionTerminalStatusSchema,
   appliedItemId: Type.Number({ minimum: 0 })
 });
 export type AgentSessionRunState = Static<typeof AgentSessionRunStateSchema>;
