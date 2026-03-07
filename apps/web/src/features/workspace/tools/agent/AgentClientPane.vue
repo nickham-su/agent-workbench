@@ -337,7 +337,7 @@
           :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
           :disabled="!hasAvailableAgents"
           :auto-size="{ minRows: 2, maxRows: 6 }"
-          :placeholder="hasAvailableAgents ? t('agent.client.inputPlaceholder') : t('agent.client.inputPlaceholderNoAgent')"
+          :placeholder="inputPlaceholder"
           @keydown="onInputKeydown"
         />
       </div>
@@ -798,6 +798,15 @@ const formattedLastTotalTokens = computed(() => {
   const value = runState.value.lastResponseTotalTokens;
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "-";
   return new Intl.NumberFormat().format(Math.floor(value));
+});
+const inputPlaceholder = computed(() => {
+  if (!hasAvailableAgents.value) {
+    return t("agent.client.inputPlaceholderNoAgent");
+  }
+  if (runState.value.status !== "idle") {
+    return t("agent.client.inputPlaceholderRunning");
+  }
+  return t("agent.client.inputPlaceholderIdle");
 });
 
 const showReachedTopNotice = computed(() => {
