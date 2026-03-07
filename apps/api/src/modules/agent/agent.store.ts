@@ -1,6 +1,7 @@
 import type {
   AgentContextItemOutput,
   AgentContextItemRecord,
+  AgentUiLocale,
   AgentContextItemStatus,
   AgentRunStatus,
   AgentSessionRecord
@@ -314,6 +315,7 @@ export type AgentRunRecord = {
   agentId: string;
   providerId: string;
   modelId: string;
+  uiLocale: AgentUiLocale | null;
   status: "running" | "waiting_permission" | "completed" | "failed" | "cancelled";
   createdAt: number;
   updatedAt: number;
@@ -1352,6 +1354,7 @@ export function createRunRecord(db: Db, params: {
   agentId: string;
   providerId: string;
   modelId: string;
+  uiLocale?: AgentUiLocale | null;
   status: AgentRunRecord["status"];
   createdAt: number;
 }) {
@@ -1364,6 +1367,7 @@ export function createRunRecord(db: Db, params: {
         trigger_item_id,
         agent_id,
         provider_id,
+        ui_locale,
         model_id,
         status,
         created_at,
@@ -1375,6 +1379,7 @@ export function createRunRecord(db: Db, params: {
         @triggerItemId,
         @agentId,
         @providerId,
+        @uiLocale,
         @modelId,
         @status,
         @createdAt,
@@ -1388,6 +1393,7 @@ export function createRunRecord(db: Db, params: {
     triggerItemId: params.triggerItemId,
     agentId: params.agentId,
     providerId: params.providerId,
+    uiLocale: params.uiLocale ?? null,
     modelId: params.modelId,
     status: params.status,
     createdAt: params.createdAt,
@@ -1406,6 +1412,7 @@ export function getRunRecord(db: Db, runId: string) {
           trigger_item_id as triggerItemId,
           agent_id as agentId,
           provider_id as providerId,
+          ui_locale as uiLocale,
           model_id as modelId,
           status,
           created_at as createdAt,

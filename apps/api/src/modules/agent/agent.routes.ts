@@ -228,7 +228,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
     },
     async (req, reply) => {
       const p = req.params as { sessionId: string };
-      const body = req.body as { workspaceId: string; text: string; clientRequestId: string; agentId?: string };
+      const body = req.body as { workspaceId: string; text: string; clientRequestId: string; agentId?: string; uiLocale?: "zh-CN" | "en-US" };
       const result = await params.service.sendMessage({ sessionId: p.sessionId, body });
       if (!result.deduplicated) {
         const workspace = params.service.getWorkspace(body.workspaceId);
@@ -263,7 +263,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
     },
     async (req, reply) => {
       const p = req.params as { sessionId: string };
-      const body = req.body as { workspaceId: string; clientRequestId: string; agentId?: string };
+      const body = req.body as { workspaceId: string; clientRequestId: string; agentId?: string; uiLocale?: "zh-CN" | "en-US" };
       const result = await params.service.compactSession({ sessionId: p.sessionId, body });
       if (!result.deduplicated) {
         const workspace = params.service.getWorkspace(body.workspaceId);

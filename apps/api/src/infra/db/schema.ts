@@ -195,6 +195,7 @@ export function initSchema(db: Db) {
   ensureColumn(db, { table: "agent_run", column: "agent_id", ddl: "agent_id text" });
   ensureColumn(db, { table: "agent_run", column: "provider_id", ddl: "provider_id text" });
   ensureColumn(db, { table: "agent_run", column: "model_id", ddl: "model_id text" });
+  ensureColumn(db, { table: "agent_run", column: "ui_locale", ddl: "ui_locale text" });
   ensureColumn(db, { table: "agent_context_item", column: "output_text", ddl: "output_text text not null default ''" });
   ensureColumn(db, { table: "agent_context_item", column: "assistant_reasoning_text", ddl: "assistant_reasoning_text text" });
   ensureColumn(db, {

@@ -1,6 +1,9 @@
 import { Type } from "@sinclair/typebox";
 import type { Static } from "@sinclair/typebox";
 
+export const AgentUiLocaleSchema = Type.Union([Type.Literal("zh-CN"), Type.Literal("en-US")]);
+export type AgentUiLocale = Static<typeof AgentUiLocaleSchema>;
+
 export const AgentSessionKindSchema = Type.Union([Type.Literal("primary"), Type.Literal("subtask")]);
 export type AgentSessionKind = Static<typeof AgentSessionKindSchema>;
 
@@ -164,7 +167,8 @@ export const AgentSendMessageRequestSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
   text: Type.String({ minLength: 1 }),
   clientRequestId: Type.String({ minLength: 1 }),
-  agentId: Type.Optional(Type.String({ minLength: 1 }))
+  agentId: Type.Optional(Type.String({ minLength: 1 })),
+  uiLocale: Type.Optional(AgentUiLocaleSchema)
 });
 export type AgentSendMessageRequest = Static<typeof AgentSendMessageRequestSchema>;
 
@@ -179,7 +183,8 @@ export type AgentSendMessageResponse = Static<typeof AgentSendMessageResponseSch
 export const AgentCompactSessionRequestSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
   clientRequestId: Type.String({ minLength: 1 }),
-  agentId: Type.Optional(Type.String({ minLength: 1 }))
+  agentId: Type.Optional(Type.String({ minLength: 1 })),
+  uiLocale: Type.Optional(AgentUiLocaleSchema)
 });
 export type AgentCompactSessionRequest = Static<typeof AgentCompactSessionRequestSchema>;
 

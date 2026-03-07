@@ -1198,6 +1198,10 @@ test("agent runtime settings 可通过 execution-profile 下发", async () => {
     clientRequestId: "req_runtime_settings"
   });
 
+  const runRecord = getRunRecord(fixture.db, msg.runId);
+  assert.ok(runRecord, "run record should exist");
+  assert.equal(runRecord?.uiLocale, null, "missing uiLocale should be stored as null");
+
   const profileRes = await fixture.app.inject({
     method: "POST",
     url: "/api/internal/agent/execution-profile",
@@ -1217,6 +1221,49 @@ test("agent runtime settings 可通过 execution-profile 下发", async () => {
   assert.equal(profile.runtime?.modelRequestMaxRetries, 4);
   assert.equal(typeof profile.runtime?.autoCompactThresholdPct, "number");
   assert.equal(typeof profile.model?.contextWindowTokens, "number");
+});
+
+test("agent prompt-context 根据 run uiLocale 注入语言与时间运行时约束", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/messages`,
+    payload: {
+      workspaceId: fixture.workspaceId,
+      text: "hello",
+      clientRequestId: "req_locale_prompt",
+      uiLocale: "en-US"
+    }
+  });
+  assert.equal(res.statusCode, 201, `send message failed: ${res.body}`);
+  const body = res.json() as { runId: string };
+
+  const runRecord = getRunRecord(fixture.db, body.runId);
+  assert.ok(runRecord, "run record should exist");
+  assert.equal(runRecord?.uiLocale, "en-US");
+
+  const prompt = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: body.runId
+  });
+  assert.ok(prompt.system.includes("## Runtime Constraints"), "system should include runtime constraints section");
+  assert.ok(prompt.system.includes("Language requirement: use English consistently for this run."));
+  assert.ok(prompt.system.includes("If you call todolist, the goal and todos[].content must also be in English."));
+  assert.ok(prompt.system.includes("Current system time:"));
+  assert.ok(prompt.system.includes("Time zone:"));
+});
+
+test("agent compact 在 worker 不可用时仍接受 uiLocale 参数", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const res = await fixture.app.inject({ method: "POST", url: `/api/agent/sessions/${session.id}/compact`, payload: { workspaceId: fixture.workspaceId, clientRequestId: "req_compact_locale", uiLocale: "zh-CN" } });
+  assert.equal(res.statusCode, 503, `compact should fail when worker disabled: ${res.body}`);
+  assert.equal(res.json().code, "AGENT_WORKER_UNAVAILABLE");
 });
 
 test("agent compact 在 worker 不可用时返回 503", async () => {
@@ -1410,6 +1457,7 @@ test("agent prompt-context 对 subtask 会话隐藏 subtask 工具", async () =>
     triggerItemId: 1,
     agentId: "default",
     providerId: "ppchat",
+    uiLocale: "en-US",
     modelId: "gpt-5.2",
     status: "running",
     createdAt: Date.now()
@@ -1466,6 +1514,7 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
     triggerItemId: 1,
     agentId: "default",
     providerId: "ppchat",
+    uiLocale: "en-US",
     modelId: "gpt-5.2",
     status: "running",
     createdAt
@@ -1572,6 +1621,10 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
     false,
     "forked subtask session should not expose subtask tool"
   );
+  assert.ok(promptContext.system.includes("## Runtime Constraints"));
+  assert.ok(promptContext.system.includes("Language requirement: use English consistently for this run."));
+  assert.ok(promptContext.system.includes("Current system time:"));
+  assert.ok(promptContext.system.includes("Time zone:"));
 });
 
 test("agent prompt-context 对 primary 会话保留 subtask 工具", async () => {

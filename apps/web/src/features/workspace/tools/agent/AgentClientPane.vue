@@ -412,6 +412,7 @@ import {
   revertAgentSession,
   sendAgentMessage
 } from "@/shared/api";
+import { getInitialLocale } from "@/shared/i18n/locale";
 
 type AgentOption = {
   value: string;
@@ -2115,7 +2116,8 @@ async function executeSlashCommand(params: {
     await compactAgentSession(params.sessionId, {
       workspaceId: params.workspaceId,
       clientRequestId: params.clientRequestId,
-      agentId: params.agentId
+      agentId: params.agentId,
+      uiLocale: getInitialLocale()
     });
     return;
   }
@@ -2282,7 +2284,8 @@ async function onSend() {
         workspaceId: props.workspaceId,
         text,
         clientRequestId,
-        agentId
+        agentId,
+        uiLocale: getInitialLocale()
       });
     }
     draft.value = "";

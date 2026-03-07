@@ -17,6 +17,7 @@ import type {
   AgentCompactSessionResponse,
   AgentRevertSessionRequest,
   AgentRunStatus,
+  AgentUiLocale,
   AgentSendMessageRequest,
   AgentSendMessageResponse,
   AgentSessionRecord,
@@ -756,6 +757,43 @@ function toSessionTitleFromFirstMessage(text: string) {
   if (!compact) return "新会话";
   if (compact.length <= 50) return compact;
   return `${compact.slice(0, 49)}…`;
+}
+
+function normalizeAgentUiLocale(value: unknown): AgentUiLocale | null {
+  const raw = String(value || "").trim();
+  if (raw === "zh-CN" || raw === "en-US") return raw;
+  return null;
+}
+
+function formatRuntimeDateTime(date: Date) {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function buildRuntimeInstruction(input: { uiLocale: AgentUiLocale | null; now: Date }) {
+  const timeText = formatRuntimeDateTime(input.now);
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const lines: string[] = [];
+  if (input.uiLocale === "zh-CN") {
+    lines.push(
+      "语言要求：本轮对话请统一使用简体中文。",
+      "对用户的回答使用简体中文。",
+      "内部思考/推理文本使用简体中文。",
+      "若调用 todolist，其中的 goal 与 todos[].content 必须使用简体中文。",
+      "代码、命令、路径、接口名、配置键名、报错原文等需要保真的内容可保持原样，不必翻译。",
+      `当前系统时间：${timeText}`,
+      `当前时区：${timeZone}`
+    );
+  } else {
+    lines.push(
+      `Current system time: ${timeText}`,
+      `Time zone: ${timeZone}`
+    );
+    if (input.uiLocale === "en-US") {
+      lines.unshift("Code, commands, paths, API names, config keys, and original error messages may remain verbatim when needed.", "If you call todolist, the goal and todos[].content must also be in English.", "Use English for internal reasoning/thought text.", "Respond to the user in English.", "Language requirement: use English consistently for this run.");
+    }
+  }
+  return `## Runtime Constraints\n${lines.join("\n")}`;
 }
 
 function normalizeTodolistGoal(value: unknown) {
@@ -1585,10 +1623,12 @@ function buildSystemPrompt(input: {
   agentPrompt: string;
   agentGlobalPromptIds: string[];
   globalPrompts: Array<{ id: string; title: string; prompt: string }>;
+  runtimeInstruction?: string;
   workspaceInstructions: { filePath: string; displayPath: string; content: string } | null;
 }) {
   const agentPrompt = input.agentPrompt || "";
   const selectedGlobalIds = new Set(input.agentGlobalPromptIds);
+  const runtimeInstruction = String(input.runtimeInstruction || "").trim();
 
   const sections: string[] = [];
   const systemBase = input.globalPrompts.find((item) => item.id === AGENT_GLOBAL_SYSTEM_PROMPT_ID)?.prompt?.trim() || GLOBAL_WORKFLOW_SYSTEM_PROMPT.trim();
@@ -1601,12 +1641,16 @@ function buildSystemPrompt(input: {
     sections.push(`## Global Prompt: ${item.title}\n${item.prompt}`);
   }
 
-  if (input.workspaceInstructions?.content?.trim()) {
+  if (input.workspaceInstructions?.content.trim()) {
     sections.push(`## Workspace Instructions: ${input.workspaceInstructions.displayPath}\n${input.workspaceInstructions.content}`);
   }
 
   if (agentPrompt.trim()) {
     sections.push(`## Agent Prompt: ${input.agentName}\n${agentPrompt}`);
+  }
+
+  if (runtimeInstruction) {
+    sections.push(runtimeInstruction);
   }
 
   return sections.join("\n\n");
@@ -1866,6 +1910,7 @@ export class AgentService {
     });
 
     const createdAt = nowMs();
+    const uiLocale = normalizeAgentUiLocale(params.body.uiLocale);
     const runId = newSortableId("run");
     let messageItemId = 0;
 
@@ -1916,6 +1961,7 @@ export class AgentService {
           agentId: profile.agent.id,
           providerId: profile.provider.id,
           modelId: profile.model.id,
+          uiLocale,
           status: "running",
           createdAt
         });
@@ -2075,6 +2121,7 @@ export class AgentService {
 
       const createdAt = nowMs();
       const runId = newSortableId("run");
+      const uiLocale = normalizeAgentUiLocale(params.body.uiLocale);
 
       const tx = this.ctx.db.transaction(() => {
         createRunRecord(this.ctx.db, {
@@ -2085,6 +2132,7 @@ export class AgentService {
           agentId: profile.agent.id,
           providerId: profile.provider.id,
           modelId: profile.model.id,
+          uiLocale,
           status: "running",
           createdAt
         });
@@ -2858,6 +2906,7 @@ export class AgentService {
         triggerItemId: item.id,
         agentId: profile.agent.id,
         providerId: profile.provider.id,
+        uiLocale: parentRun.uiLocale ?? null,
         modelId: profile.model.id,
         status: "running",
         createdAt
@@ -3357,7 +3406,8 @@ export class AgentService {
       agentPrompt: profile.agent.prompt || "",
       agentGlobalPromptIds: Array.isArray(profile.agent.globalPromptIds) ? profile.agent.globalPromptIds : [],
       globalPrompts: globalPrompts.items,
-      workspaceInstructions
+      workspaceInstructions,
+      runtimeInstruction: buildRuntimeInstruction({ uiLocale: run.uiLocale, now: new Date() })
     });
 
     const visible = getSessionVisibleItems(this.ctx.db, params.workspaceId, params.sessionId);
