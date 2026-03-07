@@ -669,6 +669,189 @@ test("agent context-items 支持 afterId 增量查询", async () => {
   );
 });
 
+test("agent context-items 支持 assistant reasoning 字段的创建与读取", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "hello"
+    }
+  });
+
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: "turn_reasoning_1",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "streaming",
+    output: {
+      type: "assistant_text",
+      text: "结论正文",
+      reasoning: {
+        text: "先分析上下文,再给结论"
+      }
+    }
+  });
+
+  const full = await getContextItems(fixture.app, session.id);
+  const assistant = full.items.find((item) => item.id === assistantItem.item.id);
+  assert.ok(assistant);
+  assert.equal(assistant?.kind, "assistant");
+  assert.equal(assistant?.output.type, "assistant_text");
+  assert.equal(assistant?.output.text, "结论正文");
+  assert.deepEqual((assistant?.output as any).reasoning, { text: "先分析上下文,再给结论" });
+
+  const single = await getContextItem(fixture.app, session.id, assistantItem.item.id);
+  assert.equal(single.output.type, "assistant_text");
+  assert.deepEqual((single.output as any).reasoning, { text: "先分析上下文,再给结论" });
+});
+
+test("agent context-items 支持 assistant reasoning 字段的更新", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: "turn_reasoning_update",
+    step: 1,
+    prevId: null,
+    kind: "assistant",
+    status: "streaming",
+    output: {
+      type: "assistant_text",
+      text: "初始正文"
+    }
+  });
+
+  await updateContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    itemId: assistantItem.item.id,
+    status: "completed",
+    output: {
+      type: "assistant_text",
+      text: "最终正文",
+      reasoning: { text: "补充后的思考内容" }
+    }
+  });
+
+  const single = await getContextItem(fixture.app, session.id, assistantItem.item.id);
+  assert.equal(single.output.type, "assistant_text");
+  assert.equal(single.output.text, "最终正文");
+  assert.deepEqual((single.output as any).reasoning, { text: "补充后的思考内容" });
+});
+
+test("assistant reasoning 不应进入 prompt-context", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 0,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "继续" }
+  });
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_reasoning_prompt",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: { type: "assistant_text", text: "正式回答", reasoning: { text: "隐藏思考" } }
+  });
+
+  const prompt = await getPromptContextInternal({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId });
+  assert.ok(JSON.stringify(prompt.messages).includes("正式回答"));
+  assert.equal(JSON.stringify(prompt.messages).includes("隐藏思考"), false);
+});
+
+test("assistant reasoning 不应进入 archive line", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "用户消息" }
+  });
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: "turn_reasoning_archive",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: { type: "assistant_text", text: "正式回答", reasoning: { text: "不应归档的思考" } }
+  });
+
+  const clearRes = await fixture.app.inject({ method: "POST", url: `/api/agent/sessions/${session.id}/clear`, payload: { workspaceId: fixture.workspaceId, reason: "切换新任务" } });
+  assert.equal(clearRes.statusCode, 200, `clear session failed: ${clearRes.body}`);
+
+  const archiveFilePath = path.join(agentArchiveSessionDir(fixture.dataDir, fixture.workspaceId, session.id), "00000001.log");
+  const archiveText = await fs.readFile(archiveFilePath, "utf-8");
+  assert.ok(archiveText.includes("正式回答"));
+  assert.equal(archiveText.includes("不应归档的思考"), false);
+});
+
 test("非 system item 写入 boundaryReason 会被忽略", async () => {
   const fixture = await createFixture();
   const session = await createSession(fixture.app, fixture.workspaceId);

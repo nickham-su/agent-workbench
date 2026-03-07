@@ -50,10 +50,17 @@ export const AgentUserTextOutputSchema = Type.Object({
   text: Type.String()
 });
 
-export const AgentAssistantTextOutputSchema = Type.Object({
-  type: Type.Literal("assistant_text"),
+export const AgentAssistantReasoningSchema = Type.Object({
   text: Type.String()
 });
+
+export const AgentAssistantTextOutputSchema = Type.Object({
+  type: Type.Literal("assistant_text"),
+  text: Type.String(),
+  reasoning: Type.Optional(AgentAssistantReasoningSchema)
+});
+
+export type AgentAssistantReasoning = Static<typeof AgentAssistantReasoningSchema>;
 
 export const AgentToolOutputSchema = Type.Object({
   type: Type.Literal("tool"),

@@ -1596,7 +1596,10 @@ export class AgentRunner {
     // 自定义重试策略由本文件控制,禁用 AI SDK 内建重试避免双重重试。
     requestBase.maxRetries = 0;
 
+    const assistantStreamFlushIntervalMs = 240;
+    const assistantStreamFlushCharsThreshold = 80;
     let text = "";
+    let reasoningText = "";
     const toolCalls: ToolCall[] = [];
     const startedAt = nowMs();
     let responseTotalTokens: number | null = null;
@@ -1628,6 +1631,50 @@ export class AgentRunner {
 
     let retryCount = 0;
     let successfulStream: any = null;
+    let lastFlushedText = "";
+    let lastFlushedReasoningText = "";
+    let lastFlushAt = nowMs();
+    let pendingFlush = false;
+
+    const flushAssistant = async (status: "streaming" | "completed" | "failed", force = false) => {
+      if (
+        !force
+        && text === lastFlushedText
+        && reasoningText === lastFlushedReasoningText
+        && status === "streaming"
+      ) {
+        return;
+      }
+      await this.apiClient.updateContextItem({
+        itemId: assistant.id,
+        status,
+        output: {
+          type: "assistant_text",
+          text,
+          ...(reasoningText ? { reasoning: { text: reasoningText } } : {})
+        },
+        updatedAt: nowMs()
+      });
+      lastFlushedText = text;
+      lastFlushedReasoningText = reasoningText;
+      lastFlushAt = nowMs();
+      pendingFlush = false;
+    };
+
+    const maybeFlushAssistantStreaming = async (force = false) => {
+      const now = nowMs();
+      const deltaChars = (text.length - lastFlushedText.length) + (reasoningText.length - lastFlushedReasoningText.length);
+      if (
+        force
+        || deltaChars >= assistantStreamFlushCharsThreshold
+        || now - lastFlushAt >= assistantStreamFlushIntervalMs
+      ) {
+        await flushAssistant("streaming", true);
+        return;
+      }
+      pendingFlush = true;
+    };
+
     while (true) {
       if (signal.aborted) {
         return { aborted: true as const, assistantItemId: assistant.id };
@@ -1709,15 +1756,14 @@ export class AgentRunner {
             const delta = String(chunk.text || "");
             if (!delta) continue;
             text += delta;
-            await this.apiClient.updateContextItem({
-              itemId: assistant.id,
-              status: "streaming",
-              output: {
-                type: "assistant_text",
-                text
-              },
-              updatedAt: nowMs()
-            });
+            await maybeFlushAssistantStreaming();
+            continue;
+          }
+          if (chunk.type === "reasoning-delta") {
+            const delta = String(chunk.text || chunk.delta || "");
+            if (!delta) continue;
+            reasoningText += delta;
+            await maybeFlushAssistantStreaming();
             continue;
           }
           if (chunk.type === "tool-call") {
@@ -1740,6 +1786,9 @@ export class AgentRunner {
             const message = chunk.error instanceof Error ? chunk.error.message : String(chunk.error || "stream error");
             throw new Error(message);
           }
+        }
+        if (pendingFlush) {
+          await flushAssistant("streaming", true);
         }
 
         if (signal.aborted) {
@@ -1819,6 +1868,9 @@ export class AgentRunner {
         const finalMessage = retryCount > 0 ? `failed after ${retryCount} retries: ${message}` : message;
         const failedText = text.trim().length > 0 ? `${text}\n\n[run] ${finalMessage}` : `[run] ${finalMessage}`;
         try {
+          if (pendingFlush) {
+            await flushAssistant("streaming", true);
+          }
           await this.apiClient.updateRunState({
             workspaceId: run.workspaceId,
             sessionId: run.sessionId,
@@ -1838,7 +1890,8 @@ export class AgentRunner {
             status: "failed",
             output: {
               type: "assistant_text",
-              text: failedText
+              text: failedText,
+              ...(reasoningText ? { reasoning: { text: reasoningText } } : {})
             },
             updatedAt: nowMs()
           });
@@ -1866,6 +1919,7 @@ export class AgentRunner {
             request,
             response: {
               text,
+              reasoningText,
               toolCalls,
               error: finalMessage
             }
@@ -1939,15 +1993,19 @@ export class AgentRunner {
         });
       }
 
-      await this.apiClient.updateContextItem({
-        itemId: assistant.id,
-        status: "completed",
-        output: {
-          type: "assistant_text",
-          text
-        },
-        updatedAt: nowMs()
-      });
+      if (successfulStream) {
+        try {
+          const finalReasoning = await successfulStream.reasoningText;
+          const finalReasoningText = typeof finalReasoning === "string"
+            ? String(finalReasoning)
+            : "";
+          reasoningText = finalReasoningText || reasoningText;
+        } catch {
+          // best-effort: 保留流式阶段已累计的 reasoningText,不要因收尾读取失败打断整轮成功结果
+        }
+      }
+
+      await flushAssistant("completed", true);
 
       await writeItemLog({
         logger: this.logger,
@@ -1969,6 +2027,7 @@ export class AgentRunner {
           request: requestBase,
           response: {
             text,
+            reasoningText,
             toolCalls: recognizedCalls,
             usage: responseTotalTokens == null ? null : { totalTokens: responseTotalTokens }
           }

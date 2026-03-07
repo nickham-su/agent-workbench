@@ -148,6 +148,7 @@ export function initSchema(db: Db) {
       kind text not null,
       status text not null,
       output_text text not null default '',
+      assistant_reasoning_text text,
       output_text_truncated integer not null default 0,
       output_text_artifact_path text,
       tool_name text,
@@ -195,6 +196,7 @@ export function initSchema(db: Db) {
   ensureColumn(db, { table: "agent_run", column: "provider_id", ddl: "provider_id text" });
   ensureColumn(db, { table: "agent_run", column: "model_id", ddl: "model_id text" });
   ensureColumn(db, { table: "agent_context_item", column: "output_text", ddl: "output_text text not null default ''" });
+  ensureColumn(db, { table: "agent_context_item", column: "assistant_reasoning_text", ddl: "assistant_reasoning_text text" });
   ensureColumn(db, {
     table: "agent_context_item",
     column: "output_text_truncated",

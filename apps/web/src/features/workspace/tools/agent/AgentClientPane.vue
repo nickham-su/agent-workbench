@@ -177,6 +177,19 @@
               @request-measure="onRequestVirtualMeasure(item.id)"
             />
             <div v-else-if="item.role === 'assistant'" class="flex flex-col gap-1">
+              <div v-if="item.reasoningText && item.reasoningText.trim().length > 0" class="assistant-reasoning-block">
+                <div class="assistant-reasoning-label">
+                  Thinking
+                </div>
+                <AssistantMarkdownMessage
+                  :class="isTerminalStatus(item.status) ? 'pr-24' : ''"
+                  :text="item.reasoningText"
+                  :message-id="item.id"
+                  :streaming="!isTerminalStatus(item.status)"
+                  class="assistant-reasoning-markdown"
+                  section-key="reasoning"
+                />
+              </div>
               <AssistantMarkdownMessage
                 v-if="item.text.trim().length > 0"
                 :class="isTerminalStatus(item.status) ? 'pr-24' : ''"
@@ -184,6 +197,7 @@
                 :message-id="item.id"
                 :streaming="!isTerminalStatus(item.status)"
                 :tone="item.tone"
+                section-key="body"
               />
               <div v-if="!isTerminalStatus(item.status)" class="flex items-center gap-2 text-[0.9em] text-[color:var(--text-tertiary)]">
                 <LoadingOutlined spin />
@@ -444,6 +458,7 @@ type DisplayItem = {
   boundaryReason: string | null;
   role: "user" | "assistant" | "system" | "tool";
   text: string;
+  reasoningText?: string;
   status: AgentContextItemRecord["status"];
   toolName?: string;
   toolCallId?: string;
@@ -821,6 +836,8 @@ const displayItems = computed<DisplayItem[]>(() => {
         role: "assistant",
         text: item.output.text,
         status: item.status,
+        ...(typeof item.output.reasoning?.text === "string" && item.output.reasoning.text
+          ? { reasoningText: item.output.reasoning.text } : {}),
         tone: item.status === "failed" ? "error" : "normal"
       };
     }
@@ -2428,6 +2445,26 @@ onBeforeUnmount(() => {
 .agent-message-item:hover .message-controls {
   opacity: 1;
   pointer-events: auto;
+}
+
+.assistant-reasoning-block {
+  margin-bottom: 0.35rem;
+  font-size: 0.85em;
+  color: var(--text-secondary);
+  opacity: 0.88;
+}
+
+.assistant-reasoning-label {
+  margin-bottom: 0.2rem;
+  font-size: 0.9em;
+  line-height: 1.2;
+  color: var(--text-tertiary);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.assistant-reasoning-markdown {
+  color: var(--text-secondary) !important;
 }
 
 .subtask-card.is-clickable {

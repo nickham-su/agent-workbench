@@ -41,6 +41,7 @@ type AgentContextItemRow = {
   kind: AgentContextItemRecord["kind"];
   status: AgentContextItemStatus;
   outputText: string;
+  assistantReasoningText: string | null;
   outputTextTruncated: number;
   outputTextArtifactPath: string | null;
   toolName: string | null;
@@ -115,6 +116,13 @@ function normalizeTextOutput(kind: AgentContextItemRecord["kind"], output: Agent
   return "";
 }
 
+function normalizeAssistantReasoningOutput(kind: AgentContextItemRecord["kind"], output: AgentContextItemOutput) {
+  if (kind !== "assistant" || output.type !== "assistant_text") return null;
+  const text = typeof output.reasoning?.text === "string" ? output.reasoning.text : "";
+  if (!text) return null;
+  return text;
+}
+
 function encodeStoredColumns(params: {
   kind: AgentContextItemRecord["kind"];
   status: AgentContextItemStatus;
@@ -122,6 +130,7 @@ function encodeStoredColumns(params: {
 }) {
   const outputText = normalizeTextOutput(params.kind, params.output);
   const base = {
+    assistantReasoningText: normalizeAssistantReasoningOutput(params.kind, params.output),
     outputText,
     outputTextTruncated: 0,
     outputTextArtifactPath: null as string | null,
@@ -185,6 +194,7 @@ function mapFromStoredColumns(row: AgentContextItemRow): AgentContextItemOutput 
   const hasSplitPayload =
     row.outputText.length > 0 ||
     row.outputTextTruncated !== 0 ||
+    row.assistantReasoningText != null ||
     row.outputTextArtifactPath != null ||
     row.toolName != null ||
     row.toolCallId != null ||
@@ -204,7 +214,8 @@ function mapFromStoredColumns(row: AgentContextItemRow): AgentContextItemOutput 
   if (row.kind === "assistant") {
     return {
       type: "assistant_text",
-      text: row.outputText
+      text: row.outputText,
+      ...(row.assistantReasoningText ? { reasoning: { text: row.assistantReasoningText } } : {})
     };
   }
   if (row.kind === "system") {
@@ -439,6 +450,7 @@ function readContextItemRowById(db: Db, itemId: number) {
           kind,
           status,
           output_text as outputText,
+          assistant_reasoning_text as assistantReasoningText,
           output_text_truncated as outputTextTruncated,
           output_text_artifact_path as outputTextArtifactPath,
           tool_name as toolName,
@@ -674,6 +686,7 @@ export function appendContextItem(db: Db, params: {
             kind,
             status,
             output_text,
+            assistant_reasoning_text,
             output_text_truncated,
             output_text_artifact_path,
             tool_name,
@@ -694,6 +707,7 @@ export function appendContextItem(db: Db, params: {
             @kind,
             @status,
             @outputText,
+            @assistantReasoningText,
             @outputTextTruncated,
             @outputTextArtifactPath,
             @toolName,
@@ -717,6 +731,7 @@ export function appendContextItem(db: Db, params: {
         kind: params.kind,
         status: params.status,
         outputText: stored.outputText,
+        assistantReasoningText: stored.assistantReasoningText,
         outputTextTruncated: stored.outputTextTruncated,
         outputTextArtifactPath: stored.outputTextArtifactPath,
         toolName: stored.toolName,
@@ -775,6 +790,7 @@ export function updateContextItem(db: Db, params: {
       update agent_context_item
       set status = @status,
           output_text = @outputText,
+          assistant_reasoning_text = @assistantReasoningText,
           output_text_truncated = @outputTextTruncated,
           output_text_artifact_path = @outputTextArtifactPath,
           tool_name = @toolName,
@@ -789,6 +805,7 @@ export function updateContextItem(db: Db, params: {
     itemId: params.itemId,
     status: nextStatus,
     outputText: stored.outputText,
+    assistantReasoningText: stored.assistantReasoningText,
     outputTextTruncated: stored.outputTextTruncated,
     outputTextArtifactPath: stored.outputTextArtifactPath,
     toolName: stored.toolName,
@@ -862,6 +879,7 @@ function readContextItemRowByIdStmt(db: Db) {
         kind,
         status,
         output_text as outputText,
+        assistant_reasoning_text as assistantReasoningText,
         output_text_truncated as outputTextTruncated,
         output_text_artifact_path as outputTextArtifactPath,
         tool_name as toolName,

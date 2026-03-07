@@ -18,6 +18,7 @@ const props = defineProps<{
   messageId: number;
   streaming?: boolean;
   tone?: "normal" | "error";
+  sectionKey?: string;
 }>();
 
 const MARKDOWN_DEBOUNCE_MS = 280;
@@ -137,8 +138,8 @@ function stableHash(input: string) {
   return (hash >>> 0).toString(16);
 }
 
-function cacheKeyOf(input: string) {
-  return `${input.length}:${stableHash(input)}:${input.slice(0, 24)}`;
+function cacheKeyOf(input: string, namespace = "") {
+  return `${namespace}:${input.length}:${stableHash(input)}:${input.slice(0, 24)}`;
 }
 
 function getCacheValue(cache: Map<string, string>, key: string) {
@@ -238,7 +239,7 @@ async function renderMarkdown() {
   const seq = ++renderSeq;
   const rawText = String(props.text || "");
   lastRawText = rawText;
-  const key = cacheKeyOf(rawText);
+  const key = cacheKeyOf(rawText, `markdown:${props.sectionKey || "body"}`);
   const cached = getCacheValue(markdownCache, key);
   if (cached != null) {
     safeHtml.value = cached;
@@ -281,11 +282,11 @@ async function renderMermaidBlocks(seq: number, rawText: string) {
     const source = String(codeEl.textContent || "").trim();
     if (!source) continue;
 
-    const cacheKey = cacheKeyOf(source);
+    const cacheKey = cacheKeyOf(source, `mermaid:${props.sectionKey || "body"}`);
     let safeSvg = getCacheValue(mermaidCache, cacheKey);
     if (safeSvg == null) {
       try {
-        const renderId = `awb_mermaid_${props.messageId}_${i}_${Date.now()}`;
+        const renderId = `awb_mermaid_${props.messageId}_${props.sectionKey || "body"}_${i}_${Date.now()}`;
         const rendered = await mermaid.render(renderId, source);
         const rawSvg = typeof rendered === "string" ? rendered : rendered.svg;
         const sanitizedSvg = DOMPurify.sanitize(rawSvg, SVG_SANITIZE_CONFIG);
