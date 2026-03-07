@@ -141,9 +141,10 @@ function toolArgsSchema(toolName: AgentContextToolName) {
   if (toolName === "todolist") {
     return {
       type: "object",
-      required: ["todos"],
+      required: ["goal", "todos"],
       additionalProperties: false,
       properties: {
+        goal: { type: "string", minLength: 1 },
         todos: {
           type: "array",
           items: {
@@ -401,12 +402,15 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
       "- 如果你预计完成该请求所需调用工具的总次数 <= 10 次；",
       "则可以不使用 todolist，直接执行并在回复中用简短列表说明你在做什么即可。",
       "否则（更复杂/更长流程/不确定会做多少步或多少次工具调用），必须使用 todolist：先给出任务清单，再开始执行。",
-      "",
-      "使用规则：",
-      "- 每次调用都提交完整的 todos 数组；语义是“全量替换”，不是增量 patch。",
-      "- todos 从上到下代表优先级：先规划再执行，优先做靠前项。",
-      "- 任务状态仅允许：pending | in_progress | completed | cancelled。",
-      "- 允许同时存在多个 in_progress，但应尽量保持进行中的任务数量可控、符合实际。",
+       "",
+       "使用规则：",
+       "- 总体目标通过 goal 表达；goal 为必填，表示这份任务清单当前服务的目标。",
+       "- goal 应保持简短，建议控制在 50 字内；若过长，运行时会自动截断。",
+       "- 每次调用都提交完整的 todos 数组；语义是“全量替换”，不是增量 patch。",
+       "- 若 goal 或任务列表发生变化，都应提交完整的 goal + todos 作为最新状态。",
+       "- todos 从上到下代表优先级：先规划再执行，优先做靠前项。",
+       "- 任务状态仅允许：pending | in_progress | completed | cancelled。",
+       "- 允许同时存在多个 in_progress，但应尽量保持进行中的任务数量可控、符合实际。",
       "- 每条 todo 必须包含：",
       "  - content：非空字符串（trim 后不能为空）",
       "  - status：上述枚举之一",
@@ -415,12 +419,12 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
       "  - 完成（-> completed）",
       "  - 取消/不再需要（-> cancelled）",
       "  - 发现遗漏、拆分、合并、回退或新增任务（结构变化也要更新）",
-      "- 目标：让用户持续看到清晰、可信、实时的进度窗口，并促使你以可追踪、按优先级的方式推进，避免无计划地展开。",
-      "",
-      "输入示例：",
-      "{\"todos\":[{\"content\":\"梳理需求与约束\",\"status\":\"completed\"},{\"content\":\"实现核心逻辑\",\"status\":\"in_progress\"},{\"content\":\"补充测试与验证\",\"status\":\"pending\"}]}"
-    ].join("\n");
-  }
+       "- 目标：让用户持续看到清晰、可信、实时的进度窗口，并促使你以可追踪、按优先级的方式推进，避免无计划地展开。",
+       "",
+       "输入示例：",
+       "{\"goal\":\"完成 todolist goal 增强\",\"todos\":[{\"content\":\"梳理需求与约束\",\"status\":\"completed\"},{\"content\":\"实现核心逻辑\",\"status\":\"in_progress\"},{\"content\":\"补充测试与验证\",\"status\":\"pending\"}]}"
+     ].join("\n");
+   }
   if (toolName === "archive_search") {
     return (
       "在当前会话归档日志中检索关键词,输出按旧到新排序的纯文本行,每行包含 pos 前缀。" +
@@ -752,6 +756,13 @@ function toSessionTitleFromFirstMessage(text: string) {
   if (!compact) return "新会话";
   if (compact.length <= 50) return compact;
   return `${compact.slice(0, 49)}…`;
+}
+
+function normalizeTodolistGoal(value: unknown) {
+  if (typeof value !== "string") return "";
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (!compact) return "";
+  return toSessionTitleFromFirstMessage(compact);
 }
 
 function buildClearSummaryText(reason?: string) {
@@ -2416,8 +2427,9 @@ export class AgentService {
       // 本项目不保留 apply_patch 的 before/after 在 DB 中,必须走 update 路径写入 service artifact 后再瘦身入库。
       throw new HttpError(400, "apply_patch completed tool item must be updated, not appended");
     }
+    const createdAt = params.createdAt ?? nowMs();
     try {
-      return appendContextItem(this.ctx.db, {
+      const item = appendContextItem(this.ctx.db, {
         workspaceId: params.workspaceId,
         sessionId: params.sessionId,
         runId: params.runId,
@@ -2427,8 +2439,18 @@ export class AgentService {
         kind: params.kind,
         status: params.status,
         output: params.output,
-        createdAt: params.createdAt ?? nowMs()
+        createdAt
       });
+      if (item.kind === "tool" && item.status === "completed" && item.output.type === "tool" && item.output.toolName === "todolist") {
+        const resultObj = item.output.result && typeof item.output.result === "object"
+          ? item.output.result as Record<string, unknown>
+          : null;
+        const goal = normalizeTodolistGoal(resultObj?.goal);
+        if (goal) {
+          updateAgentSessionTitle(this.ctx.db, { sessionId: item.sessionId, title: goal, updatedAt: createdAt });
+        }
+      }
+      return item;
     } catch (err) {
       if (err instanceof AgentConflictError) {
         this.logger.warn(
@@ -2562,13 +2584,32 @@ export class AgentService {
       } as any;
     }
 
+    const updatedAt = params.updatedAt ?? nowMs();
     const item = updateContextItem(this.ctx.db, {
       itemId: params.itemId,
       status: params.status,
       output: nextOutput,
-      updatedAt: params.updatedAt ?? nowMs()
+      updatedAt
     });
     if (!item) throw new HttpError(404, "context item not found");
+    if (
+      item.kind === "tool" &&
+      item.status === "completed" &&
+      item.output.type === "tool" &&
+      item.output.toolName === "todolist"
+    ) {
+      const resultObj = item.output.result && typeof item.output.result === "object"
+        ? item.output.result as Record<string, unknown>
+        : null;
+      const goal = normalizeTodolistGoal(resultObj?.goal);
+      if (goal) {
+        updateAgentSessionTitle(this.ctx.db, {
+          sessionId: item.sessionId,
+          title: goal,
+          updatedAt
+        });
+      }
+    }
     return item;
   }
 

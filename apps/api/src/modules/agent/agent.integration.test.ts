@@ -14,6 +14,7 @@ import {
   appendContextItem,
   createAgentSession,
   createRunRecord,
+  getAgentSession,
   getRunRecord,
   getRunState as getRunStateRow,
   getSessionTranscriptItems,
@@ -3007,12 +3008,14 @@ test("agent prompt-context 支持 todolist 工具输入输出", async () => {
       toolName: "todolist",
       toolCallId: "call_todolist_1",
       args: {
+        goal: "完成 todolist goal 增强与展示",
         todos: [
           { content: "梳理需求", status: "completed" },
           { content: "实现功能", status: "in_progress" }
         ]
       },
       result: {
+        goal: "完成 todolist goal 增强与展示",
         summary: {
           total: 2,
           pending: 0,
@@ -3055,6 +3058,7 @@ test("agent prompt-context 支持 todolist 工具输入输出", async () => {
       })
     : null;
   const input = (toolCallPart as { input?: Record<string, unknown> } | null)?.input ?? {};
+  assert.equal(String(input.goal || ""), "完成 todolist goal 增强与展示");
   assert.equal(Array.isArray(input.todos), true, "todolist tool-call input should include todos");
 
   const toolResultMessage = context.messages.find((message) => {
@@ -3077,6 +3081,118 @@ test("agent prompt-context 支持 todolist 工具输入输出", async () => {
   const output = (toolResultPart as { output?: { type?: string; value?: string } } | null)?.output;
   assert.equal(String(output?.type || ""), "text", "todolist tool-result output should be text");
   assert.equal(String(output?.value || "").includes("Todo list updated"), true, "todolist tool-result should be summary text");
+
+  const updatedSession = getAgentSession(fixture.db, session.id);
+  assert.ok(updatedSession, "updated session should exist");
+  assert.equal(updatedSession?.title, "完成 todolist goal 增强与展示");
+});
+
+test("agent prompt-context: todolist goal 超长时自动截断并更新 session title", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const longGoal = "这是一个非常长的 todolist goal，用来验证超过五十个字符后会被自动截断而不是直接报错失败，需要继续追加更多文字";
+  const normalizedGoal = "这是一个非常长的 todolist goal，用来验证超过五十个字符后会被自动截断而不是直接报错失…";
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "请维护任务清单" }
+  });
+
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_todolist_goal_truncate",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: { type: "assistant_text", text: "更新任务清单" }
+  });
+
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_todolist_goal_truncate",
+    step: 1,
+    prevId: assistantItem.item.id,
+    kind: "tool",
+    status: "completed",
+    output: {
+      type: "tool",
+      toolName: "todolist",
+      toolCallId: "call_todolist_goal_truncate",
+      args: { goal: longGoal, todos: [{ content: "实现功能", status: "in_progress" }] },
+      result: { goal: longGoal, summary: { total: 1, pending: 0, inProgress: 1, completed: 0, cancelled: 0 }, todos: [{ content: "实现功能", status: "in_progress" }] }
+    }
+  });
+
+  const updatedSession = getAgentSession(fixture.db, session.id);
+  assert.ok(updatedSession, "updated session should exist");
+  assert.equal(updatedSession?.title, normalizedGoal);
+});
+
+test("agent prompt-context: todolist goal 为空白时不更新 session title", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: 1, agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", status: "running", createdAt
+  });
+
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_todolist_goal_blank",
+    step: 1,
+    prevId: null,
+    kind: "tool",
+    status: "completed",
+    output: {
+      type: "tool",
+      toolName: "todolist",
+      toolCallId: "call_todolist_goal_blank",
+      args: { goal: "   ", todos: [{ content: "实现功能", status: "in_progress" }] },
+      result: { goal: "   ", summary: { total: 1, pending: 0, inProgress: 1, completed: 0, cancelled: 0 }, todos: [{ content: "实现功能", status: "in_progress" }] }
+    }
+  });
+
+  const updatedSession = getAgentSession(fixture.db, session.id);
+  assert.ok(updatedSession, "updated session should exist");
+  assert.equal(updatedSession?.title, "it-session");
 });
 
 test("agent internal: 禁止 append completed apply_patch(必须走 update 写 artifact)", async () => {
@@ -3844,6 +3960,10 @@ test("agent 兼容早期拆分数据: 缺少 resultFormat 时保留结构化工�
     true,
     "result should remain structured object"
   );
+
+  const sessionAfterCompat = getAgentSession(fixture.db, session.id);
+  assert.ok(sessionAfterCompat, "compat session should exist");
+  assert.equal(sessionAfterCompat?.title, "it-session", "compat todolist without goal should not change session title");
 });
 
 test("agent settings 兼容缺省 globalPromptIds", async () => {

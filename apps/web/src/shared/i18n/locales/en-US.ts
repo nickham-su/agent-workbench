@@ -319,6 +319,7 @@ export default {
       subtaskSessionId: "Session ID",
       todoListCardTitle: "Todo list",
       todoListSummary: "Total {total}, in progress {inProgress}, pending {pending}, completed {completed}, cancelled {cancelled}",
+      todoListGoal: "Goal",
       todoListEmpty: "Todo list is empty",
       applyPatchCardTitle: "Patch changes",
       applyPatchPreview: "Pending approval preview",

@@ -317,6 +317,7 @@ export default {
       subtaskSessionId: "Session ID",
       todoListCardTitle: "任务清单",
       todoListSummary: "总计 {total}, 进行中 {inProgress}, 待办 {pending}, 已完成 {completed}, 已取消 {cancelled}",
+      todoListGoal: "目标",
       todoListEmpty: "当前清单为空",
       applyPatchCardTitle: "补丁变更",
       applyPatchPreview: "待审批预览",

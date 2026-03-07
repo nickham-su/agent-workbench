@@ -24,6 +24,13 @@
 
     <div v-if="errorText" class="pt-0.5 text-red-500 whitespace-pre-wrap break-words">error: {{ errorText }}</div>
 
+    <div v-if="!collapsed && goal" class="pt-1 text-[color:var(--text-secondary)] min-w-0">
+      <div class="truncate" :title="`${t('agent.client.todoListGoal')}: ${goal}`">
+        <span class="shrink-0">{{ t("agent.client.todoListGoal") }}:</span>
+        <span class="ml-1">{{ goal }}</span>
+      </div>
+    </div>
+
     <div v-if="!collapsed && todos.length === 0" class="pt-2 text-[color:var(--text-tertiary)]">
       {{ t("agent.client.todoListEmpty") }}
     </div>
@@ -52,6 +59,7 @@ type TodoStatus = "pending" | "in_progress" | "completed" | "cancelled";
 
 const props = defineProps<{
   errorText?: string;
+  goal?: string;
   collapsed?: boolean;
   summary: {
     total: number;

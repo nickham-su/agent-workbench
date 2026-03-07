@@ -153,6 +153,7 @@
             <AgentTodoListCard
               v-else-if="isTodolistCard(item) && item.todoList"
               :collapsed="isTodoCollapsed(item.id)"
+              :goal="item.todoList.goal"
               :summary="item.todoList.summary"
               :todos="item.todoList.todos"
               :error-text="item.toolError"
@@ -445,6 +446,7 @@ type ApplyPatchDisplay = {
 };
 
 type TodoListDisplay = {
+  goal?: string;
   summary: {
     total: number;
     pending: number;
@@ -736,8 +738,10 @@ function parseTodoListDisplay(value: unknown): TodoListDisplay | null {
     todos.push({ content, status });
   }
 
+  const goal = typeof source.goal === "string" ? source.goal.trim() : "";
   const summaryRaw = toRecord(source.summary);
   return {
+    ...(goal ? { goal } : {}),
     summary: {
       total: toNonNegativeInt(summaryRaw?.total ?? todos.length),
       pending: toNonNegativeInt(summaryRaw?.pending ?? todos.filter((item) => item.status === "pending").length),

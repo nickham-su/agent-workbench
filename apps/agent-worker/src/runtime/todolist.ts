@@ -1,3 +1,5 @@
+const TODO_LIST_GOAL_MAX_CHARS = 50;
+
 export type TodoListStatus = "pending" | "in_progress" | "completed" | "cancelled";
 
 export type TodoListItem = {
@@ -6,15 +8,34 @@ export type TodoListItem = {
 };
 
 export type ParsedTodoListArgs = {
+  goal?: string;
   todos: TodoListItem[];
 };
 
+function normalizeTodoGoal(value: string) {
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (!compact) return "";
+  if (compact.length <= TODO_LIST_GOAL_MAX_CHARS) return compact;
+  return `${compact.slice(0, TODO_LIST_GOAL_MAX_CHARS - 1)}…`;
+}
+
 export function parseTodolistArgs(raw: Record<string, unknown>): ParsedTodoListArgs {
+  let goal: string | undefined;
+  if (Object.prototype.hasOwnProperty.call(raw, "goal")) {
+    if (typeof raw.goal !== "string") {
+      throw new Error("todolist.goal must be a string");
+    }
+    const normalizedGoal = normalizeTodoGoal(raw.goal);
+    if (!normalizedGoal) {
+      throw new Error("todolist.goal must be a non-empty string");
+    }
+    goal = normalizedGoal;
+  }
+
   const todosRaw = raw.todos;
   if (!Array.isArray(todosRaw)) {
     throw new Error("todolist.todos must be an array");
   }
-
   const todos: TodoListItem[] = [];
   for (let i = 0; i < todosRaw.length; i += 1) {
     const item = todosRaw[i];
@@ -39,7 +60,7 @@ export function parseTodolistArgs(raw: Record<string, unknown>): ParsedTodoListA
     });
   }
 
-  return { todos };
+  return goal ? { goal, todos } : { todos };
 }
 
 export function toTodolistResult(input: ParsedTodoListArgs) {
@@ -59,6 +80,7 @@ export function toTodolistResult(input: ParsedTodoListArgs) {
   }
 
   return {
+    ...(input.goal ? { goal: input.goal } : {}),
     summary,
     todos: input.todos
   };
