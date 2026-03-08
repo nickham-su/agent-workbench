@@ -275,7 +275,8 @@ function revealOpenAt(openAt?: EditorOpenAt) {
   const line = Math.min(Math.max(openAt.line, 1), maxLine);
   const requestedColumn = typeof openAt.column === "number" && Number.isFinite(openAt.column) ? openAt.column : 1;
   const column = Math.max(1, Math.min(requestedColumn, model.getLineMaxColumn(line)));
-  editor.setPosition({ lineNumber: line, column });
+  const position = { lineNumber: line, column };
+  editor.setPosition(position);
   editor.setSelection(new monaco.Range(line, column, line, column));
   if (openAt.reveal === "top") {
     const layout = editor.getLayoutInfo();
@@ -284,7 +285,27 @@ function revealOpenAt(openAt?: EditorOpenAt) {
     editor.setScrollTop(targetScrollTop);
     return;
   }
-  editor.revealLineInCenter(line);
+  editor.revealPositionInCenter(position);
+}
+
+function applyOpenAtWhenReady(tabKey: string, model: monaco.editor.ITextModel, openAt?: EditorOpenAt, retries = 3) {
+  if (!editor) return;
+  const current = activeTab.value;
+  if (!current || current.kind !== "file" || current.key !== tabKey || current.model !== model) return;
+
+  editor.layout();
+  const layout = editor.getLayoutInfo();
+  const ready = layout.height > 0 && layout.contentWidth > 0;
+  if (!ready && retries > 0) {
+    requestAnimationFrame(() => applyOpenAtWhenReady(tabKey, model, openAt, retries - 1));
+    return;
+  }
+
+  clearHighlightDecorations();
+  applyOpenAtHighlight(openAt);
+  revealOpenAt(openAt);
+  current.openAt = undefined;
+  editor.focus();
 }
 
 function activeFileTabFromModel(model: monaco.editor.ITextModel | null) {
@@ -485,17 +506,7 @@ function scheduleApplyEditor() {
     if (tab?.kind === "file" && model) {
       const openAt = tab.openAt;
       const tabKey = tab.key;
-      requestAnimationFrame(() => {
-        if (!editor) return;
-        const current = activeTab.value;
-        if (!current || current.kind !== "file" || current.key !== tabKey || current.model !== model) return;
-        editor.layout();
-        clearHighlightDecorations();
-        applyOpenAtHighlight(openAt);
-        revealOpenAt(openAt);
-        current.openAt = undefined;
-        editor.focus();
-      });
+      requestAnimationFrame(() => applyOpenAtWhenReady(tabKey, model, openAt));
       return;
     }
     clearHighlightDecorations();
