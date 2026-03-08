@@ -222,7 +222,8 @@ export default {
       terminal: "Terminal",
       files: "Files",
       search: "Search",
-      agent: "AI Agent"
+      agent: "AI Agent",
+      editor: "Editor"
     },
     dock: {
       moveTo: "Move to {area}",
@@ -1060,6 +1061,12 @@ export default {
         cancel: "Cancel"
       },
       resetSuccess: "Reset completed"
+    }
+  },
+  editor: {
+    placeholder: {
+      empty: "No content opened",
+      fileEditorComingSoon: "File editing will be connected in a later stage"
     }
   }
 } as const;

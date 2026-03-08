@@ -220,7 +220,8 @@ export default {
       terminal: "终端",
       files: "文件",
       search: "搜索",
-      agent: "AI Agent"
+      agent: "AI Agent",
+      editor: "编辑器"
     },
     dock: {
       moveTo: "移动到 {area}",
@@ -1058,6 +1059,12 @@ export default {
         cancel: "取消"
       },
       resetSuccess: "已重置"
+    }
+  },
+  editor: {
+    placeholder: {
+      empty: "暂无打开内容",
+      fileEditorComingSoon: "文件编辑能力将在后续阶段接入"
     }
   }
 } as const;

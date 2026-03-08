@@ -188,6 +188,7 @@
             <AgentApplyPatchCard
               v-else-if="isApplyPatchCard(item) && item.applyPatch"
               :workspace-id="props.workspaceId"
+              :tool-id="props.toolId"
               :session-id="props.sessionId"
               :item-id="item.id"
               :tool-call-id="item.toolCallId"
@@ -200,6 +201,7 @@
             <AgentWriteCard
               v-else-if="isWriteCard(item) && item.writeResult"
               :workspace-id="props.workspaceId"
+              :tool-id="props.toolId"
               :session-id="props.sessionId"
               :item-id="item.id"
               :tool-call-id="item.toolCallId"
@@ -534,6 +536,7 @@ const SCROLL_TO_BOTTOM_BUTTON_THRESHOLD_PX = 240;
 
 const props = defineProps<{
   workspaceId: string;
+  toolId: string;
   sessionId: string;
   sessionKind: "primary" | "subtask";
   sessionTitle?: string;

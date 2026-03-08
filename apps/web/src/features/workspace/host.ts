@@ -36,7 +36,6 @@ export type WorkspaceHostApi = {
 
   registerToolCommands: (toolId: string, commands: WorkspaceToolCommandMap) => () => void;
   emitToolEvent: (toolId: string, event: WorkspaceToolEvent) => void;
-  drainToolEvents: (toolId: string) => WorkspaceToolEvent[];
 };
 
 export type WorkspaceToolHostApi = {
@@ -47,7 +46,6 @@ export type WorkspaceToolHostApi = {
   setToolDot: (toolId: string, dot: boolean) => void;
   registerToolCommands: (toolId: string, commands: WorkspaceToolCommandMap) => () => void;
   emitToolEvent: (toolId: string, event: WorkspaceToolEvent) => void;
-  drainToolEvents: (toolId: string) => WorkspaceToolEvent[];
 };
 
 export const workspaceHostKey: InjectionKey<WorkspaceHostApi> = Symbol("agent-workbench.workspace.host");
@@ -61,12 +59,5 @@ export function useWorkspaceHost(toolId?: string): WorkspaceHostApi | WorkspaceT
   return {
     ...api,
     call: (toToolId: string, call: ToolCall) => api.callFrom(toolId, toToolId, call)
-  };
-}
-
-export function useWorkspaceToolEvents(toolId: string) {
-  const host = useWorkspaceHost();
-  return {
-    drain: () => host.drainToolEvents(toolId)
   };
 }

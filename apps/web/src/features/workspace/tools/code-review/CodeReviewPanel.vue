@@ -1,6 +1,6 @@
 <template>
   <div ref="containerEl" class="h-full min-h-0 grid gap-0" :style="containerStyle">
-    <div class="min-h-0 min-w-0 flex flex-col border-r border-[var(--border-color-secondary)]">
+    <div class="min-h-0 min-w-0 flex flex-col">
       <div class="flex-1 min-h-0 flex flex-col">
         <div
             class="flex items-center justify-between pl-3 pr-1 py-1.5 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
@@ -184,111 +184,6 @@
         </div>
       </div>
     </div>
-
-    <div class="min-h-0 min-w-0 overflow-visible flex flex-col relative">
-      <div
-          :class="splitterClass"
-          :style="splitterStyle"
-          role="separator"
-          aria-orientation="vertical"
-          :aria-label="t('codeReview.diff.resizeFileList')"
-          @pointerdown="onSplitterPointerDown"
-      />
-      <div class="h-full overflow-hidden flex flex-col">
-        <div
-            class="flex items-center gap-2 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] px-3 py-1.5 text-xs font-semibold">
-          <a-radio-group v-model:value="diffViewMode" size="small">
-            <a-radio-button value="inline">{{ t("codeReview.diff.inline") }}</a-radio-button>
-            <a-radio-button value="side-by-side">{{ t("codeReview.diff.sideBySide") }}</a-radio-button>
-          </a-radio-group>
-          <div class="flex items-center gap-0.5">
-            <a-tooltip :title="t('codeReview.diff.prevChange')" :mouseEnterDelay="0" :mouseLeaveDelay="0"
-                       placement="top">
-              <span class="inline-flex">
-                <a-button
-                    size="small"
-                    type="text"
-                    :disabled="diffNavDisabled"
-                    @click="goToPreviousDiff"
-                    :aria-label="t('codeReview.diff.prevChange')"
-                >
-                  <template #icon><UpOutlined/></template>
-                </a-button>
-              </span>
-            </a-tooltip>
-            <a-tooltip :title="t('codeReview.diff.nextChange')" :mouseEnterDelay="0" :mouseLeaveDelay="0"
-                       placement="top">
-              <span class="inline-flex">
-                <a-button
-                    size="small"
-                    type="text"
-                    :disabled="diffNavDisabled"
-                    @click="goToNextDiff"
-                    :aria-label="t('codeReview.diff.nextChange')"
-                >
-                  <template #icon><DownOutlined/></template>
-                </a-button>
-              </span>
-            </a-tooltip>
-            <a-tooltip :title="t('codeReview.diff.viewFile')" :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="top">
-              <span class="inline-flex">
-                <a-button
-                    size="small"
-                    type="text"
-                    :disabled="viewFileDisabled"
-                    @click="openSelectedFile"
-                    :aria-label="t('codeReview.diff.viewFile')"
-                >
-                  <template #icon><FileSearchOutlined/></template>
-                </a-button>
-              </span>
-            </a-tooltip>
-          </div>
-        </div>
-
-        <div v-if="!selected" class="p-3 text-xs text-[color:var(--text-tertiary)]">
-          {{ t("codeReview.diff.selectToCompare") }}
-        </div>
-        <div v-else-if="compare && (!compare.base.previewable || !compare.current.previewable)"
-             class="p-3 text-xs text-[color:var(--text-tertiary)]">
-          <div class="font-semibold text-[color:var(--text-secondary)]">{{
-              t("codeReview.diff.notPreviewableTitle")
-            }}
-          </div>
-          <div class="mt-1">
-            <span class="font-mono">{{ compare.path }}</span>
-          </div>
-          <div class="mt-2 text-[color:var(--text-secondary)]">
-            <div v-if="!compare.base.previewable">
-              {{ t("codeReview.diff.baseReason", {reason: explainSide(compare.base)}) }}
-            </div>
-            <div v-if="!compare.current.previewable">
-              {{ t("codeReview.diff.currentReason", {reason: explainSide(compare.current)}) }}
-            </div>
-          </div>
-        </div>
-        <div v-else class="flex-1 min-h-0 relative">
-          <MonacoDiffViewer
-              class="h-full"
-              ref="diffViewerRef"
-              :original="compare?.base.content || ''"
-              :modified="compare?.current.content || ''"
-              :language="compareLanguage"
-              :sideBySide="diffViewMode === 'side-by-side'"
-              :compactMode="true"
-              :showOverviewRuler="true"
-          />
-           <div v-if="compareLoading"
-                class="absolute inset-0 p-3 text-xs text-[color:var(--text-tertiary)] bg-[var(--panel-bg)]">
-            {{ t("codeReview.diff.loading") }}
-          </div>
-          <div v-else-if="compareError"
-               class="absolute inset-0 p-3 text-xs text-[color:var(--danger-color)] bg-[var(--panel-bg)]">
-            {{ compareError }}
-          </div>
-        </div>
-      </div>
-    </div>
   </div>
 
   <a-modal v-model:open="commitOpen" :title="t('codeReview.commit.modalTitle')" :maskClosable="false">
@@ -334,12 +229,10 @@ import {computed, nextTick, onMounted, onUnmounted, ref, watch} from "vue";
 import {Modal, message} from "ant-design-vue";
 import {
   CopyOutlined,
-  DownOutlined,
   DeleteOutlined,
   ExclamationCircleOutlined,
   EyeInvisibleOutlined,
   FileAddOutlined,
-  FileSearchOutlined,
   FileUnknownOutlined,
   FormOutlined,
   MinusOutlined,
@@ -347,7 +240,6 @@ import {
   ReloadOutlined,
   RetweetOutlined,
   RollbackOutlined,
-  UpOutlined
 } from "@ant-design/icons-vue";
 import {useI18n} from "vue-i18n";
 import type {ChangeItem, ChangeMode, FileCompareResponse, GitPushRequest, GitTarget} from "@agent-workbench/shared";
@@ -361,7 +253,6 @@ import {
   unstageWorkspace
 } from "@/shared/api";
 import { inferLanguageFromPath } from "@/shared/monaco/languageUtils";
-import MonacoDiffViewer from "@/shared/components/MonacoDiffViewer.vue";
 import GitIdentityModal from "@/shared/components/GitIdentityModal.vue";
 import { useWorkspaceHost } from "@/features/workspace/host";
 
@@ -384,157 +275,7 @@ const host = useWorkspaceHost(props.toolId);
 
 const containerEl = ref<HTMLElement | null>(null);
 
-type DiffViewMode = "side-by-side" | "inline";
-
-const DIFF_VIEW_MODE_STORAGE_KEY = "agent-workbench.codeReview.diffViewMode";
-const DEFAULT_DIFF_VIEW_MODE: DiffViewMode = "side-by-side";
-
-const FILE_LIST_SPLIT_RATIO_KEY_PREFIX = "agent-workbench.workspace.fileListSplitRatio";
-const DEFAULT_FILE_LIST_SPLIT_RATIO = 0.22;
-const SPLITTER_PX = 6;
-const MIN_LIST_RATIO = 0.15;
-const MAX_LIST_RATIO = 0.55;
-const MIN_LIST_PX = 220;
-const MIN_DIFF_PX = 360;
-
-function fileListSplitRatioStorageKey(workspaceId: string) {
-  const id = String(workspaceId || "").trim();
-  if (!id) return FILE_LIST_SPLIT_RATIO_KEY_PREFIX;
-  return `${FILE_LIST_SPLIT_RATIO_KEY_PREFIX}.${id}`;
-}
-
-function clamp(n: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, n));
-}
-
-function normalizeDiffViewMode(raw: string | null): DiffViewMode {
-  if (raw === "inline") return "inline";
-  return "side-by-side";
-}
-
-function loadDiffViewMode() {
-  try {
-    return normalizeDiffViewMode(localStorage.getItem(DIFF_VIEW_MODE_STORAGE_KEY));
-  } catch {
-    return DEFAULT_DIFF_VIEW_MODE;
-  }
-}
-
-function clampSplitRatioByContainer(params: { ratio: number; containerSize: number }) {
-  const {containerSize} = params;
-  if (!Number.isFinite(containerSize) || containerSize <= 0) return clamp(params.ratio, MIN_LIST_RATIO, MAX_LIST_RATIO);
-
-  const minByPx = MIN_LIST_PX / containerSize;
-  const maxByPx = 1 - MIN_DIFF_PX / containerSize;
-
-  const min = Math.max(MIN_LIST_RATIO, minByPx);
-  const max = Math.min(MAX_LIST_RATIO, maxByPx);
-  if (min >= max) return clamp(params.ratio, MIN_LIST_RATIO, MAX_LIST_RATIO);
-  return clamp(params.ratio, min, max);
-}
-
-function loadFileListSplitRatio(workspaceId: string) {
-  try {
-    const raw = localStorage.getItem(fileListSplitRatioStorageKey(workspaceId));
-    if (!raw) return DEFAULT_FILE_LIST_SPLIT_RATIO;
-    const n = Number(raw);
-    if (!Number.isFinite(n)) return DEFAULT_FILE_LIST_SPLIT_RATIO;
-    return clamp(n, MIN_LIST_RATIO, MAX_LIST_RATIO);
-  } catch {
-    return DEFAULT_FILE_LIST_SPLIT_RATIO;
-  }
-}
-
-const diffViewMode = ref<DiffViewMode>(loadDiffViewMode());
-const fileListSplitRatio = ref<number>(loadFileListSplitRatio(props.workspaceId));
-
-watch(
-    () => props.workspaceId,
-    (workspaceId) => {
-      fileListSplitRatio.value = loadFileListSplitRatio(workspaceId);
-    }
-);
-
-watch(
-    () => diffViewMode.value,
-    (next) => {
-      try {
-        localStorage.setItem(DIFF_VIEW_MODE_STORAGE_KEY, next);
-      } catch {
-        // ignore
-      }
-    }
-);
-
-watch(
-    () => fileListSplitRatio.value,
-    () => {
-      try {
-        localStorage.setItem(fileListSplitRatioStorageKey(props.workspaceId), String(fileListSplitRatio.value));
-      } catch {
-        // ignore
-      }
-    }
-);
-
-const containerStyle = computed(() => {
-  return {
-    gridTemplateColumns: `${fileListSplitRatio.value}fr ${(1 - fileListSplitRatio.value).toFixed(6)}fr`,
-    minHeight: 0,
-    height: "100%"
-  } as const;
-});
-
-const splitterStyle = computed(() => {
-  const offset = `${-(SPLITTER_PX / 2)}px`;
-  return {
-    position: "absolute",
-    left: offset,
-    top: "0",
-    width: `${SPLITTER_PX}px`,
-    height: "100%",
-    zIndex: 10,
-    touchAction: "none"
-  } as const;
-});
-
-const splitterClass = computed(() => {
-  return "bg-transparent hover:bg-[var(--border-color-secondary)] active:bg-[var(--border-color)] transition-colors duration-100 select-none cursor-col-resize";
-});
-
-let draggingCleanup: (() => void) | null = null;
-
-function onSplitterPointerDown(evt: PointerEvent) {
-  const el = containerEl.value;
-  if (!el) return;
-
-  evt.preventDefault();
-  evt.stopPropagation();
-
-  const rect = el.getBoundingClientRect();
-  const containerSize = rect.width;
-  if (!Number.isFinite(containerSize) || containerSize <= 0) return;
-
-  const prevUserSelect = document.body.style.userSelect;
-  document.body.style.userSelect = "none";
-
-  const handleMove = (e: PointerEvent) => {
-    const nextRaw = (e.clientX - rect.left) / rect.width;
-    const next = clampSplitRatioByContainer({ratio: nextRaw, containerSize});
-    fileListSplitRatio.value = next;
-  };
-
-  const handleUp = () => {
-    window.removeEventListener("pointermove", handleMove);
-    window.removeEventListener("pointerup", handleUp);
-    document.body.style.userSelect = prevUserSelect;
-    draggingCleanup = null;
-  };
-
-  window.addEventListener("pointermove", handleMove);
-  window.addEventListener("pointerup", handleUp);
-  draggingCleanup = handleUp;
-}
+const containerStyle = computed(() => ({ minHeight: 0, height: "100%" } as const));
 
 const emit = defineEmits<{
   changesSummary: [summary: { unstaged: number; staged: number }];
@@ -559,18 +300,7 @@ const compareLanguage = computed(() => {
   if (!current) return undefined;
   return inferLanguageFromPath(current.path);
 });
-const diffViewerRef = ref<{
-  goToFirstDiff: () => void;
-  goToPreviousDiff: () => void;
-  goToNextDiff: () => void;
-  getActiveLine: () => number | null;
-} | null>(null);
 let compareReqSeq = 0;
-
-function handleDiffViewModeStorage(evt: StorageEvent) {
-  if (evt.key !== DIFF_VIEW_MODE_STORAGE_KEY) return;
-  diffViewMode.value = normalizeDiffViewMode(evt.newValue);
-}
 
 function comparePathText(a: string, b: string) {
   // 使用纯字符串比较,避免受 locale 影响导致不同环境下排序不一致
@@ -618,63 +348,19 @@ watch(
   }
 );
 
-const diffNavDisabled = computed(() => {
-  const c = compare.value;
-  if (!c) return true;
-  if (compareLoading.value) return true;
-  if (!c.base.previewable || !c.current.previewable) return true;
-  return false;
-});
-
-const selectedItem = computed(() => {
-  const sel = selected.value;
-  if (!sel) return null;
-  const list = sel.mode === "unstaged" ? unstagedFiles.value : stagedFiles.value;
-  return findBestMatch(list, sel);
-});
-
-const viewFileDisabled = computed(() => {
-  if (!props.target) return true;
-  if (diffNavDisabled.value) return true;
-  const item = selectedItem.value;
-  if (!item) return true;
-  const status = normalizeStatusForIcon(item.status);
-  return status === "D" || status === "R";
-});
-
-function goToPreviousDiff() {
-  diffViewerRef.value?.goToPreviousDiff();
-}
-
-function goToNextDiff() {
-  diffViewerRef.value?.goToNextDiff();
-}
-
-function normalizeOpenPath(dirName: string, rawPath: string) {
-  const base = String(dirName || "").trim();
-  let rel = String(rawPath || "").trim();
-  if (!base || !rel) return "";
-  while (rel.startsWith("./")) rel = rel.slice(2);
-  rel = rel.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
-  if (rel.startsWith("/")) rel = rel.slice(1);
-  if (!rel) return "";
-  if (rel.split("/").some((part) => part === "..")) return "";
-  if (rel.startsWith(`${base}/`)) return rel;
-  return `${base}/${rel}`;
-}
-
-function openSelectedFile() {
-  if (viewFileDisabled.value) return;
-  const item = selectedItem.value;
-  const target = props.target;
-  if (!item || !target || target.kind !== "workspaceRepo") return;
-  const line = diffViewerRef.value?.getActiveLine?.();
-  if (!line || !Number.isFinite(line) || line <= 0) return;
-  const path = normalizeOpenPath(target.dirName, item.path);
-  if (!path) return;
-  host.call("files", {
-    type: "files.openAt",
-    payload: { path, line, reveal: "top", highlight: { kind: "none" } }
+async function openSelectedDiff() {
+  if (!compare.value || !props.target || !selected.value) return;
+  host.call("editor", {
+    type: "editor.openDiff",
+    payload: {
+      original: compare.value.base.content || "",
+      modified: compare.value.current.content || "",
+      path: compare.value.path,
+      language: compareLanguage.value,
+      title: compare.value.path,
+      tabKey: `codeReview:${selected.value.mode}:${selected.value.oldPath || selected.value.path}->${selected.value.path}`,
+      source: "codeReview"
+    }
   });
 }
 
@@ -1083,14 +769,23 @@ async function refreshCompare() {
 
 watch(selected, async () => {
   const selectionKey = selected.value ? `${selected.value.mode}|${selected.value.path}|${selected.value.oldPath || ""}` : null;
+  const selectedPath = selected.value?.path ?? "";
   await refreshCompare();
   if (!selectionKey) return;
   const latestKey = selected.value ? `${selected.value.mode}|${selected.value.path}|${selected.value.oldPath || ""}` : null;
   if (latestKey !== selectionKey) return;
+  if (compareError.value) {
+    message.error(`${selectedPath}: ${compareError.value}`);
+    return;
+  }
   const c = compare.value;
-  if (!c || !c.base.previewable || !c.current.previewable) return;
-  await nextTick();
-  diffViewerRef.value?.goToFirstDiff();
+  if (!c) return;
+  if (!c.base.previewable || !c.current.previewable) {
+    const reasons = [!c.base.previewable ? t("codeReview.diff.baseReason", {reason: explainSide(c.base)}) : null, !c.current.previewable ? t("codeReview.diff.currentReason", {reason: explainSide(c.current)}) : null].filter(Boolean).join("；");
+    message.warning(`${t("codeReview.diff.notPreviewableTitle")}：${c.path}${reasons ? `（${reasons}）` : ""}`);
+    return;
+  }
+  void openSelectedDiff();
 });
 
 const pollIntervalMs = 5000;
@@ -1144,9 +839,6 @@ watch(
 );
 
 onMounted(async () => {
-  if (typeof window !== "undefined") {
-    window.addEventListener("storage", handleDiffViewModeStorage);
-  }
   await refreshAll();
   if (props.pollingEnabled) {
     startPolling();
@@ -1157,16 +849,12 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-  if (typeof window !== "undefined") {
-    window.removeEventListener("storage", handleDiffViewModeStorage);
-  }
   if (props.pollingEnabled) {
     stopPolling();
     if (typeof document !== "undefined") {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     }
   }
-  draggingCleanup?.();
 });
 
 defineExpose({refreshAll});

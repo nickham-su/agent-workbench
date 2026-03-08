@@ -26,21 +26,21 @@
 ## 代码入口总览
 
 - Workspace Host API（工具侧注入使用）
-  - `apps/web/src/workspace/host.ts`
+  - `apps/web/src/features/workspace/host.ts`
 - Workspace 页面与工具注册（当前实现位置）
-  - `apps/web/src/layouts/WorkspaceLayout.vue`
+  - `apps/web/src/features/workspace/views/WorkspaceLayout.vue`
 - 工具栏按钮（icon + 右键移动）
-  - `apps/web/src/workspace/WorkspaceToolButton.vue`
+  - `apps/web/src/features/workspace/components/WorkspaceDock.vue`
 - 参考工具
-  - 代码审查工具包装：`apps/web/src/workspace/tools/CodeReviewToolView.vue`
-  - 终端工具包装：`apps/web/src/workspace/tools/TerminalToolView.vue`
+  - 代码审查工具：`apps/web/src/features/workspace/tools/code-review/CodeReviewPanel.vue`
+  - 终端工具：`apps/web/src/features/workspace/tools/terminal/TerminalView.vue`
 
 ## 工具开发流程（建议）
 
 ### 新建工具视图组件
 
 - 建议放置路径
-  - `apps/web/src/workspace/tools/<YourTool>ToolView.vue`
+  - `apps/web/src/features/workspace/tools/<your-tool>/<YourTool>View.vue`
 - 组件 props 约定
   - 至少包含 `workspaceId`
   - 建议包含 `toolId`（用于在工具内部调用最小化等 Host API）
@@ -61,7 +61,7 @@
 </template>
 
 <script setup lang="ts">
-import { useWorkspaceHost } from "../host";
+import { useWorkspaceHost } from "@/features/workspace/host";
 
 defineProps<{ workspaceId: string; toolId: string }>();
 const host = useWorkspaceHost();
@@ -70,7 +70,7 @@ const host = useWorkspaceHost();
 
 ### 在 WorkspaceLayout 注册工具
 
-- 当前工具注册表在 `apps/web/src/layouts/WorkspaceLayout.vue`
+- 当前工具注册表在 `apps/web/src/features/workspace/views/WorkspaceLayout.vue`
 - 每个工具定义包含（最小集合）
   - `toolId`
   - `icon`（工具栏 icon）
@@ -133,14 +133,13 @@ headerActions: () => [
 - 工具视图组件内部使用：
   - `useWorkspaceHost()`
 
-Host API 包含（以 `apps/web/src/workspace/host.ts` 为准）
+Host API 包含（以 `apps/web/src/features/workspace/host.ts` 为准）
 
 - `openTool(toolId)`
 - `minimizeTool(toolId)`
 - `toggleMinimize(toolId)`
 - `registerToolCommands(toolId, commands)`
 - `emitToolEvent(targetToolId, event)`
-- `drainToolEvents(toolId)`
 
 ### 注册命令（替代 ref 调用）
 
@@ -160,7 +159,7 @@ onBeforeUnmount(() => unregister());
 
 参考实现
 
-- `apps/web/src/workspace/tools/CodeReviewToolView.vue`
+- `apps/web/src/features/workspace/tools/code-review/CodeReviewPanel.vue`
 
 ### 工具间事件（激活工具 + 传参）
 
@@ -172,7 +171,7 @@ onBeforeUnmount(() => unregister());
     - `host.openTool("targetTool")`
     - `host.emitToolEvent("targetTool", { type, payload, sourceToolId })`
   - 接收方：
-    - 在视图挂载后通过 `drainToolEvents(toolId)` 一次性取出并消费
+    - 在目标工具的 runtime 中实现 `onEvent(event)` 消费；若 runtime 尚未创建，WorkspaceLayout 会先入队，待 runtime 创建后自动 flush
 
 示例（发送方）
 
@@ -188,27 +187,23 @@ host.emitToolEvent("terminal", {
 示例（接收方）
 
 ```ts
-import { onMounted } from "vue";
-import { useWorkspaceHost } from "../host";
+import type { ToolRuntime } from "../runtime";
 
-const host = useWorkspaceHost();
-
-onMounted(() => {
-  const events = host.drainToolEvents(toolId);
-  for (const evt of events) {
-    if (evt.type === "open") {
-      // 处理 payload
+export function createSomeToolRuntime(): ToolRuntime {
+  return {
+    onEvent(event) {
+      if (event.type === "open") {
+        // 处理 payload
+      }
     }
-  }
-});
+  };
+}
 ```
 
 建议
 
 - `type` 建议用字符串常量，并在工具内部集中定义
 - `payload` 目前是 `unknown`，工具侧自行做解析与容错
-- `drainToolEvents` 是“一次性消费”，适合“打开/跳转”类意图
-  - 如需“持续订阅”，后续可以扩展为事件流或回调注册
 
 ## i18n 与命名建议
 
@@ -227,4 +222,3 @@ onMounted(() => {
 
 - 本项目依赖的原生模块（例如 `node-pty`）在某些环境需要 Python/编译工具链
 - 若仅做前端 typecheck，可用 `npm ci --workspaces --include=dev --ignore-scripts` 跳过原生模块脚本安装
-
