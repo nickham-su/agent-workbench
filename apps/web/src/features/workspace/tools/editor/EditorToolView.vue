@@ -273,11 +273,10 @@ function revealOpenAt(openAt?: EditorOpenAt) {
   if (!model || !openAt?.line) return;
   const maxLine = model.getLineCount();
   const line = Math.min(Math.max(openAt.line, 1), maxLine);
-  if (typeof openAt.column === "number" && Number.isFinite(openAt.column)) {
-    const column = Math.max(1, Math.min(openAt.column, model.getLineMaxColumn(line)));
-    editor.setPosition({ lineNumber: line, column });
-    editor.setSelection(new monaco.Range(line, column, line, column));
-  }
+  const requestedColumn = typeof openAt.column === "number" && Number.isFinite(openAt.column) ? openAt.column : 1;
+  const column = Math.max(1, Math.min(requestedColumn, model.getLineMaxColumn(line)));
+  editor.setPosition({ lineNumber: line, column });
+  editor.setSelection(new monaco.Range(line, column, line, column));
   if (openAt.reveal === "top") {
     const layout = editor.getLayoutInfo();
     const maxScrollTop = Math.max(0, editor.getScrollHeight() - layout.height);
