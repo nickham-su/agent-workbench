@@ -270,12 +270,15 @@ async function openBlock(block: FileSearchBlock) {
     line?.hits && line.hits.length > 0
       ? { kind: "range" as const, startCol: line.hits[0].startCol, endCol: line.hits[0].endCol }
       : { kind: "line" as const };
+  const column = line?.hits && line.hits.length > 0 ? line.hits[0].startCol : undefined;
   host.call("editor", {
     type: "editor.openFile",
     payload: {
       path,
       mode: "edit",
       line: hitLine,
+      column,
+      reveal: "center",
       highlight,
       targetDirName: ""
     }
