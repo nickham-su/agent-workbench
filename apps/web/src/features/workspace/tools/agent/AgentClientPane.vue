@@ -1,26 +1,52 @@
 <template>
   <div class="h-full min-h-0 flex flex-col">
     <div
-      v-if="isSubtaskSession"
       class="px-3 py-2 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] text-[0.9em] text-[color:var(--text-tertiary)]"
+      :title="sessionTitleText"
     >
-      <div class="flex items-center gap-2">
-        <a-button
-          v-if="props.parentSessionId"
-          type="link"
-          size="small"
-          class="!px-0"
-          @click="onOpenParent"
+      <div class="flex items-center justify-between gap-2 min-w-0">
+        <div v-if="isSubtaskSession" class="flex items-center gap-2 min-w-0 flex-1">
+          <a-button
+            v-if="props.parentSessionId"
+            type="link"
+            size="small"
+            class="!px-0 shrink-0"
+            @click="onOpenParent"
+          >
+            {{ t("agent.client.backToParent") }}
+          </a-button>
+          <div class="min-w-0 flex items-center gap-2">
+            <span class="text-[14px] leading-none truncate text-[color:var(--text-secondary)]">{{ sessionTitleText }}</span>
+            <template v-if="currentRunElapsedText">
+              <span class="leading-none whitespace-nowrap">·</span>
+              <span class="leading-none whitespace-nowrap tabular-nums">{{ currentRunElapsedText }}</span>
+            </template>
+          </div>
+        </div>
+        <div
+          v-else
+          class="min-w-0 flex-1 flex items-center gap-2"
         >
-          {{ t("agent.client.backToParent") }}
-        </a-button>
-        <span class="text-[14px] leading-none">
-          {{
-            currentRunElapsedText
-              ? t("agent.client.subtaskRunningHint", { elapsed: currentRunElapsedText })
-              : t("agent.client.subtaskCancelInParentHint")
-          }}
-        </span>
+          <div class="text-[14px] leading-none truncate text-[color:var(--text-secondary)]">{{ sessionTitleText }}</div>
+          <template v-if="currentRunElapsedText">
+            <span class="leading-none whitespace-nowrap">·</span>
+            <span class="leading-none whitespace-nowrap tabular-nums">{{ currentRunElapsedText }}</span>
+          </template>
+        </div>
+        <div class="shrink-0 flex items-center gap-1">
+          <span class="leading-none whitespace-nowrap font-mono text-[12px] text-[color:var(--text-tertiary)]">
+            {{ props.sessionId }}
+          </span>
+          <a-button
+            size="small"
+            type="text"
+            class="!px-1 !text-[color:var(--text-tertiary)] hover:!text-[color:var(--text-tertiary)]"
+            :aria-label="t('agent.client.copySessionId')"
+            @click="onCopySessionId"
+          >
+            <template #icon><CopyOutlined class="text-[12px]" /></template>
+          </a-button>
+        </div>
       </div>
     </div>
 
@@ -380,6 +406,7 @@ import {
   CheckCircleOutlined,
   ClockCircleOutlined,
   CloseCircleOutlined,
+  CopyOutlined,
   DoubleRightOutlined,
   ExclamationCircleOutlined,
   ForkOutlined,
@@ -509,6 +536,7 @@ const props = defineProps<{
   workspaceId: string;
   sessionId: string;
   sessionKind: "primary" | "subtask";
+  sessionTitle?: string;
   parentSessionId?: string | null;
   sessionReady: boolean;
   ensureSession?: (sessionId: string) => Promise<string>;
@@ -781,6 +809,10 @@ function resolveAgentName(agentId: string) {
 }
 
 const hasAvailableAgents = computed(() => props.agentOptions.length > 0);
+
+const sessionTitleText = computed(() => {
+  return String(props.sessionTitle || "").trim() || props.sessionId;
+});
 
 const fallbackAgentId = computed(() => {
   const defaultOption = props.agentOptions.find((item) => item.isDefault);
@@ -2027,6 +2059,16 @@ function onOpenParent() {
   const sessionId = String(props.parentSessionId || "").trim();
   if (!sessionId) return;
   emit("open-parent", sessionId);
+}
+
+async function onCopySessionId() {
+  try {
+    await navigator.clipboard.writeText(props.sessionId);
+    message.success(t("agent.client.sessionIdCopied"));
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err || "unknown error");
+    message.error(t("common.copyFailed", { reason }));
+  }
 }
 
 function newClientRequestId() {

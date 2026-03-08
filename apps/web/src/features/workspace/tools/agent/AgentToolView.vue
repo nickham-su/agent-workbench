@@ -53,6 +53,7 @@
             :session-id="session.id"
             :session-kind="session.kind"
             :parent-session-id="!isDraftSession(session) ? session.forkedFromSessionId : null"
+            :session-title="session.title"
             :session-ready="!isDraftSession(session)"
             :ensure-session="ensureSessionCreated"
             :can-choose-session="canChooseSessionFrom(session.id)"
