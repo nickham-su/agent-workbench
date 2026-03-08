@@ -8,8 +8,12 @@
       @keydown.enter.prevent="onToggleExpand"
       @keydown.space.prevent="onToggleExpand"
     >
-      <span class="min-w-0 flex-1 inline-flex items-baseline gap-0"><span class="shrink-0">write(</span><span class="min-w-0 truncate" :title="summary.filePath">{{ summary.filePath }}</span><span class="shrink-0">)</span></span>
-      <span class="shrink-0">[{{ summary.bytesWritten }} bytes]</span>
+      <span class="min-w-0 inline-flex items-baseline gap-0 max-w-full">
+        <span class="shrink-0">write(</span>
+        <span class="min-w-0 truncate" :title="summary.filePath">{{ summary.filePath }}</span>
+        <span class="shrink-0">)</span>
+        <span class="shrink-0 ml-1">[{{ summary.bytesWritten }} bytes]</span>
+      </span>
       <span v-if="errorText" class="min-w-0 max-w-[30%] truncate text-red-500">
         error: {{ errorText }}
       </span>

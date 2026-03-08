@@ -13,8 +13,12 @@
           @keydown.enter.prevent="onPickFile(file.path)"
           @keydown.space.prevent="onPickFile(file.path)"
         >
-          <span class="min-w-0 flex-1 inline-flex items-baseline gap-0"><span class="shrink-0">applypatch(</span><span class="min-w-0 truncate" :title="file.path">{{ file.path }}</span><span class="shrink-0">)</span></span>
-          <span class="shrink-0">[+{{ file.additions }} -{{ file.deletions }}]</span>
+          <span class="min-w-0 inline-flex items-baseline gap-0 max-w-full">
+            <span class="shrink-0">applypatch(</span>
+            <span class="min-w-0 truncate" :title="file.path">{{ file.path }}</span>
+            <span class="shrink-0">)</span>
+            <span class="shrink-0 ml-1">[+{{ file.additions }} -{{ file.deletions }}]</span>
+          </span>
         </div>
 
         <div v-if="isExpanded(file.path)">

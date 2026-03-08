@@ -10,6 +10,7 @@
     @click="onToggle"
   >
     {{ props.text }}
+    <slot name="suffix" />
   </div>
 </template>
 

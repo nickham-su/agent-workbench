@@ -213,27 +213,26 @@
                 :text="item.text"
                 :tone="item.tone"
               />
-            <div v-else-if="isBashTextMessage(item)" class="flex items-start gap-2 min-w-0">
-              <div class="min-w-0 flex-1">
-                <AgentTextMessage
-                  :text="item.text"
-                  :message-id="item.id"
-                  :expanded="isTextMessageExpanded(item.id)"
-                  :max-height-px="100"
-                  :tone="item.tone"
-                  @toggle="(expanded) => onToggleTextMessageExpanded(item.id, expanded)"
-                  @request-measure="(messageId) => onRequestVirtualMeasure(messageId)"
-                  @clamp-change="(clamped) => onTextMessageClampChange(item.id, clamped)"
+            <AgentTextMessage
+              v-else-if="isBashTextMessage(item)"
+              :text="item.text"
+              :message-id="item.id"
+              :expanded="isTextMessageExpanded(item.id)"
+              :max-height-px="100"
+              :tone="item.tone"
+              @toggle="(expanded) => onToggleTextMessageExpanded(item.id, expanded)"
+              @request-measure="(messageId) => onRequestVirtualMeasure(messageId)"
+              @clamp-change="(clamped) => onTextMessageClampChange(item.id, clamped)"
+            >
+              <template v-if="bashStatusIcon(item.status)" #suffix>
+                <component
+                  :is="bashStatusIcon(item.status)"
+                  class="inline-block align-text-bottom ml-1"
+                  :class="bashStatusIconClass(item.status)"
+                  :spin="bashStatusSpin(item.status)"
                 />
-              </div>
-              <component
-                v-if="bashStatusIcon(item.status)"
-                :is="bashStatusIcon(item.status)"
-                class="shrink-0 mt-0.5"
-                :class="bashStatusIconClass(item.status)"
-                :spin="bashStatusSpin(item.status)"
-              />
-            </div>
+              </template>
+            </AgentTextMessage>
             <AgentTextMessage
               v-else-if="item.role === 'tool' || item.role === 'system'"
               :text="item.text"
