@@ -302,10 +302,15 @@ function applyOpenAtWhenReady(tabKey: string, model: monaco.editor.ITextModel, o
   }
 
   clearHighlightDecorations();
-  applyOpenAtHighlight(openAt);
-  revealOpenAt(openAt);
-  current.openAt = undefined;
   editor.focus();
+  requestAnimationFrame(() => {
+    const latest = activeTab.value;
+    if (!editor || !latest || latest.kind !== "file" || latest.key !== tabKey || latest.model !== model) return;
+    clearHighlightDecorations();
+    applyOpenAtHighlight(openAt);
+    revealOpenAt(openAt);
+    latest.openAt = undefined;
+  });
 }
 
 function activeFileTabFromModel(model: monaco.editor.ITextModel | null) {
