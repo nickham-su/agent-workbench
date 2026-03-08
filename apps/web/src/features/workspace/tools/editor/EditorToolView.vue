@@ -98,6 +98,7 @@ let highlightDecorations: string[] = [];
 const fileRequestSeqByPath = new Map<string, number>();
 let unregisterRefresh: (() => void) | null = null;
 let latestOpenFileSeq = 0;
+const openingFileTasks = ref(0);
 
 function splitPath(p: string) {
   return p.split("/").filter(Boolean);
@@ -197,6 +198,17 @@ function getFileTab(path: string) {
   return tab && tab.kind === "file" ? tab : null;
 }
 
+function maybeMinimizeEditorWhenEmpty() {
+  if (store.tabs.length > 0) return;
+  if (store.pendingOpenFiles.value.length > 0) return;
+  if (openingFileTasks.value > 0) return;
+  if (editor) {
+    editor.setModel(null);
+    clearHighlightDecorations();
+  }
+  host.minimizeTool(props.toolId);
+}
+
 async function openFile(entry: QueuedEditorOpenFileRequest) {
   latestOpenFileSeq = Math.max(latestOpenFileSeq, entry.seq);
   const req = entry.req;
@@ -214,6 +226,7 @@ async function openFile(entry: QueuedEditorOpenFileRequest) {
   }
 
   const requestId = nextFileRequestId(path);
+  openingFileTasks.value += 1;
   try {
     const res = await readWorkspaceFileText({ workspaceId: props.workspaceId, path });
     if (fileRequestSeqByPath.get(path) !== requestId) return;
@@ -235,6 +248,11 @@ async function openFile(entry: QueuedEditorOpenFileRequest) {
     if (entry.seq !== latestOpenFileSeq) return;
     if (entry.epoch !== store.activationEpoch.value) return;
     message.error(err instanceof Error ? err.message : String(err));
+  } finally {
+    openingFileTasks.value = Math.max(0, openingFileTasks.value - 1);
+    if (openingFileTasks.value === 0) {
+      requestAnimationFrame(() => maybeMinimizeEditorWhenEmpty());
+    }
   }
 }
 
@@ -278,14 +296,16 @@ function revealOpenAt(openAt?: EditorOpenAt) {
   const position = { lineNumber: line, column };
   editor.setPosition(position);
   editor.setSelection(new monaco.Range(line, column, line, column));
+  const layout = editor.getLayoutInfo();
+  const maxScrollTop = Math.max(0, editor.getScrollHeight() - layout.height);
   if (openAt.reveal === "top") {
-    const layout = editor.getLayoutInfo();
-    const maxScrollTop = Math.max(0, editor.getScrollHeight() - layout.height);
     const targetScrollTop = Math.min(Math.max(editor.getTopForLineNumber(line), 0), maxScrollTop);
     editor.setScrollTop(targetScrollTop);
     return;
   }
-  editor.revealPositionInCenter(position);
+  const lineHeight = editor.getOption(monaco.editor.EditorOption.lineHeight);
+  const centeredScrollTop = editor.getTopForLineNumber(line) - Math.max(0, (layout.height - lineHeight) / 2);
+  editor.setScrollTop(Math.min(Math.max(centeredScrollTop, 0), maxScrollTop));
 }
 
 function applyOpenAtWhenReady(tabKey: string, model: monaco.editor.ITextModel, openAt?: EditorOpenAt, retries = 3) {
@@ -582,19 +602,20 @@ watch(
 watch(
   () => store.tabs.length,
   (next, prev) => {
-    if (next !== 0 || store.pendingOpenFiles.value.length > 0) return;
-    if (editor) {
-      editor.setModel(null);
-      clearHighlightDecorations();
-    }
-    if (prev === undefined || prev > 0) host.minimizeTool(props.toolId);
+    if (next !== 0) return;
+    if (prev === undefined || prev > 0) maybeMinimizeEditorWhenEmpty();
   },
-  { immediate: true }
+  { immediate: false }
 );
+
+watch(() => openingFileTasks.value, (next) => {
+  if (next === 0) maybeMinimizeEditorWhenEmpty();
+});
 
 onMounted(() => {
   unregisterRefresh = host.registerToolCommands(props.toolId, { refresh: () => refreshActiveFileTab() });
   scheduleApplyEditor();
+  requestAnimationFrame(() => maybeMinimizeEditorWhenEmpty());
   if (typeof window !== "undefined") window.addEventListener("keydown", handleEditorKeydown, true);
 });
 
