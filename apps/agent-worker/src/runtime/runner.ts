@@ -12,7 +12,7 @@ import { runReadTool, runWriteTool } from "./fileTools.js";
 import { McpManager } from "./mcpManager.js";
 import { applyPreparedPatch, prepareApplyPatchTool, type ApplyPatchPrepared } from "./applyPatch.js";
 import { parseTodolistArgs, toTodolistResult } from "./todolist.js";
-import { chunkStartsVisibleOutput } from "./modelRetry.js";
+import { buildRetryMessages, chunkStartsVisibleOutput, shouldRetryAfterPartialText } from "./modelRetry.js";
 
 function nowMs() {
   return Date.now();
@@ -998,6 +998,7 @@ export class AgentRunner {
     });
 
     let subtaskSessionId: string | undefined;
+    let subtaskResultText: string | undefined;
 
     try {
       let result: unknown;
@@ -1209,6 +1210,10 @@ export class AgentRunner {
           subtaskSessionId: started.sessionId,
           resultText: subtaskResult.resultText
         };
+        subtaskResultText = typeof subtaskResult.resultText === "string" ? subtaskResult.resultText : undefined;
+        if (subtaskStatus.status === "failed" || subtaskStatus.status === "cancelled") {
+          throw new Error(`subtask ${subtaskStatus.status}`);
+        }
       } else if (isMcpTool(tool.toolName)) {
         const mcpResult = await this.mcpManager.callTool(tool.toolName, tool.args);
         result = {
@@ -1302,7 +1307,10 @@ export class AgentRunner {
           ...(subtaskSessionId
             ? {
                 result: {
-                  subtaskSessionId
+                  subtaskSessionId,
+                  ...(typeof subtaskResultText === "string"
+                    ? { resultText: subtaskResultText }
+                    : {})
                 }
               }
             : {}),
@@ -1739,9 +1747,17 @@ export class AgentRunner {
         }, modelTotalTimeoutMs);
       }
 
+      const retryMessages = buildRetryMessages({
+        baseMessages: context.messages as Array<Record<string, unknown>>,
+        text,
+        toolCalls: toolCalls.length,
+        retryCount,
+        maxRetries: modelRequestMaxRetries
+      });
       const request: Record<string, unknown> = {
         ...requestBase,
-        abortSignal: requestController.signal
+        abortSignal: requestController.signal,
+        messages: retryMessages
       };
 
       try {
@@ -1815,7 +1831,10 @@ export class AgentRunner {
         }
         const message = err instanceof Error ? err.message : String(err);
 
-        const canRetry = !attemptStartedVisibleOutput && retryCount < modelRequestMaxRetries;
+        const canRetry =
+          (!attemptStartedVisibleOutput && retryCount < modelRequestMaxRetries)
+          || shouldRetryAfterPartialText({ text, toolCalls: toolCalls.length, retryCount, maxRetries: modelRequestMaxRetries });
+
         if (canRetry) {
           const delayMs = computeRetryBackoffMs(retryCount);
           const retryAttempt = retryCount + 1;
@@ -1868,7 +1887,6 @@ export class AgentRunner {
         }
 
         const finalMessage = retryCount > 0 ? `failed after ${retryCount} retries: ${message}` : message;
-        const failedText = text.trim().length > 0 ? `${text}\n\n[run] ${finalMessage}` : `[run] ${finalMessage}`;
         try {
           if (pendingFlush) {
             await flushAssistant("streaming", true);
@@ -1892,8 +1910,9 @@ export class AgentRunner {
             status: "failed",
             output: {
               type: "assistant_text",
-              text: failedText,
-              ...(reasoningText ? { reasoning: { text: reasoningText } } : {})
+              text,
+              ...(reasoningText ? { reasoning: { text: reasoningText } } : {}),
+              error: finalMessage
             },
             updatedAt: nowMs()
           });

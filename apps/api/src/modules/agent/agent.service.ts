@@ -2957,7 +2957,8 @@ export class AgentService {
     for (let i = items.length - 1; i >= 0; i -= 1) {
       const item = items[i];
       if (!item) continue;
-      if (item.kind === "assistant" && item.output.type === "assistant_text") {
+      if (item.kind === "assistant" && item.output.type === "assistant_text" && String(item.output.text || "").trim()) {
+        // 失败 assistant 在超过重试次数后也返回其 partial text,错误由 run status 承载。
         return { resultText: item.output.text || "" };
       }
       if (item.kind === "system" && item.output.type === "system_text") {
@@ -3437,6 +3438,25 @@ export class AgentService {
         }, 0)
       : 0;
     const messages: PromptMessage[] = [];
+    let mostRecentFailedAssistantId: number | null = null;
+    const assistantHasToolItems = new Set<number>();
+    for (let i = visible.length - 1; i >= 0; i -= 1) {
+      const item = visible[i];
+      if (!item) continue;
+      if (mostRecentFailedAssistantId == null && item.kind === "assistant" && item.output.type === "assistant_text" && item.status === "failed") {
+        mostRecentFailedAssistantId = item.id;
+      }
+      if (item.kind !== "tool") continue;
+      for (let j = i - 1; j >= 0; j -= 1) {
+        const prev = visible[j];
+        if (!prev) continue;
+        if (prev.kind !== "assistant") continue;
+        if (prev.runId === item.runId && prev.turnId === item.turnId && prev.step === item.step) {
+          assistantHasToolItems.add(prev.id);
+          break;
+        }
+      }
+    }
     for (let i = 0; i < visible.length; i += 1) {
       const item = visible[i];
       if (!item) continue;
@@ -3535,7 +3555,15 @@ export class AgentService {
         continue;
       }
 
-      if (item.kind !== "assistant" || item.output.type !== "assistant_text" || item.status !== "completed") {
+      const includeFailedAssistant =
+        item.kind === "assistant"
+        && item.output.type === "assistant_text"
+        && item.status === "failed"
+        && item.id === mostRecentFailedAssistantId
+        && !assistantHasToolItems.has(item.id)
+        && String(item.output.text || "").trim().length > 0;
+
+      if (item.kind !== "assistant" || item.output.type !== "assistant_text" || (item.status !== "completed" && !includeFailedAssistant)) {
         continue;
       }
 
@@ -3601,7 +3629,7 @@ export class AgentService {
         messages.push({ role: "assistant", content: assistantParts });
       }
 
-      if (toolResultParts.length > 0) {
+      if (!includeFailedAssistant && toolResultParts.length > 0) {
         messages.push({ role: "tool", content: toolResultParts });
       }
 

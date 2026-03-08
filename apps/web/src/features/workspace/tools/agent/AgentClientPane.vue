@@ -221,6 +221,9 @@
               <div v-if="item.reasoningText && item.reasoningText.trim().length > 0" class="assistant-reasoning-block">
                 <AssistantMarkdownMessage :text="item.reasoningText" :message-id="item.id" :streaming="!isTerminalStatus(item.status)" class="assistant-reasoning-markdown" section-key="reasoning" />
               </div>
+              <div v-if="item.toolError" class="text-red-500 text-[0.92em]">
+                Error: {{ item.toolError }}
+              </div>
               <AssistantMarkdownMessage
                 v-if="item.text.trim().length > 0"
                 :text="item.text"
@@ -956,6 +959,7 @@ const displayItems = computed<DisplayItem[]>(() => {
         status: item.status,
         ...(typeof item.output.reasoning?.text === "string" && item.output.reasoning.text
           ? { reasoningText: item.output.reasoning.text } : {}),
+        ...(typeof item.output.error === "string" && item.output.error.trim() ? { toolError: truncateText(item.output.error, 220) } : {}),
         tone: item.status === "failed" ? "error" : "normal"
       };
     }

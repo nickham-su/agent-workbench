@@ -324,6 +324,14 @@ test("worker 模式: 发送消息后会落地 context items", async () => {
   assert.equal(context.response.status, 200, `get context-items failed: ${context.text}`);
   assert.ok(context.json.items.some((item) => item.kind === "user"));
   assert.ok(context.json.items.some((item) => item.kind === "assistant"));
+  const failedAssistant = context.json.items.find((item) => item.kind === "assistant" && item.output?.type === "assistant_text");
+  assert.ok(failedAssistant, "assistant item should exist");
+  assert.equal(typeof failedAssistant?.output?.text, "string");
+  assert.equal(
+    typeof failedAssistant?.output?.error,
+    "string",
+    "worker failure should be persisted as assistant output.error"
+  );
 });
 
 test("worker 模式: worker pid 文件会被写入", async () => {

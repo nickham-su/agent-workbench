@@ -49,6 +49,8 @@ type AgentContextItemRow = {
   toolCallId: string | null;
   toolCallJson: string | null;
   toolResultJson: string | null;
+  errorMessage: string | null;
+  errorCode: string | null;
   boundaryReason: string | null;
   archiveAt: number | null;
   outputJson: string;
@@ -124,12 +126,44 @@ function normalizeAssistantReasoningOutput(kind: AgentContextItemRecord["kind"],
   return text;
 }
 
+function normalizeErrorOutput(kind: AgentContextItemRecord["kind"], output: AgentContextItemOutput) {
+  if (kind === "assistant" && output.type === "assistant_text") {
+    const text = typeof output.error === "string" ? output.error.trim() : "";
+    return text || null;
+  }
+  if (kind === "tool" && output.type === "tool") {
+    const text = typeof output.error === "string" ? output.error.trim() : "";
+    return text || null;
+  }
+  return null;
+}
+
+function inferErrorCode(params: {
+  kind: AgentContextItemRecord["kind"];
+  status: AgentContextItemStatus;
+  errorMessage: string | null;
+}) {
+  const message = String(params.errorMessage || "").trim().toLowerCase();
+  if (!message) return null;
+  if (params.status === "cancelled") return "ITEM_CANCELLED";
+  if (params.kind === "tool" && params.status === "denied") return "TOOL_PERMISSION_DENIED";
+  if (params.kind === "tool") return "TOOL_FAILED";
+  if (params.kind === "assistant") {
+    if (message.includes("idle timeout")) return "MODEL_IDLE_TIMEOUT";
+    if (message.includes("total timeout")) return "MODEL_TOTAL_TIMEOUT";
+    if (message.includes("stream")) return "MODEL_STREAM_FAILED";
+    return "MODEL_REQUEST_FAILED";
+  }
+  return null;
+}
+
 function encodeStoredColumns(params: {
   kind: AgentContextItemRecord["kind"];
   status: AgentContextItemStatus;
   output: AgentContextItemOutput;
 }) {
   const outputText = normalizeTextOutput(params.kind, params.output);
+  const errorMessage = normalizeErrorOutput(params.kind, params.output);
   const base = {
     assistantReasoningText: normalizeAssistantReasoningOutput(params.kind, params.output),
     outputText,
@@ -139,6 +173,8 @@ function encodeStoredColumns(params: {
     toolCallId: null as string | null,
     toolCallJson: null as string | null,
     toolResultJson: null as string | null,
+    errorMessage,
+    errorCode: inferErrorCode({ kind: params.kind, status: params.status, errorMessage }),
     // 兼容历史列: 避免重复存储完整 output
     outputJson: "{}"
   };
@@ -168,9 +204,6 @@ function encodeStoredColumns(params: {
             result: params.output.result
           }
         }
-      : {}),
-    ...(typeof params.output.error === "string" && params.output.error.trim()
-      ? { error: params.output.error }
       : {})
   };
 
@@ -199,7 +232,9 @@ function mapFromStoredColumns(row: AgentContextItemRow): AgentContextItemOutput 
     row.outputTextArtifactPath != null ||
     row.toolName != null ||
     row.toolCallId != null ||
-    row.toolCallJson != null ||
+    row.toolCallJson != null || 
+    row.errorMessage != null ||
+    row.errorCode != null ||
     row.toolResultJson != null;
 
   if (!hasSplitPayload && legacy) {
@@ -216,7 +251,8 @@ function mapFromStoredColumns(row: AgentContextItemRow): AgentContextItemOutput 
     return {
       type: "assistant_text",
       text: row.outputText,
-      ...(row.assistantReasoningText ? { reasoning: { text: row.assistantReasoningText } } : {})
+      ...(row.assistantReasoningText ? { reasoning: { text: row.assistantReasoningText } } : {}),
+      ...(row.errorMessage ? { error: row.errorMessage } : {})
     };
   }
   if (row.kind === "system") {
@@ -275,10 +311,12 @@ function mapFromStoredColumns(row: AgentContextItemRow): AgentContextItemOutput 
   }
 
   const error =
-    typeof result?.error === "string" && result.error.trim()
-      ? result.error
+    typeof row.errorMessage === "string" && row.errorMessage.trim()
+      ? row.errorMessage
+      : typeof result?.error === "string" && result.error.trim()
+        ? result.error
       : legacyTool && typeof legacyTool.error === "string" && legacyTool.error.trim()
-        ? legacyTool.error
+          ? legacyTool.error
         : undefined;
 
   return {
@@ -459,6 +497,8 @@ function readContextItemRowById(db: Db, itemId: number) {
           tool_call_id as toolCallId,
           tool_call_json as toolCallJson,
           tool_result_json as toolResultJson,
+          error_message as errorMessage,
+          error_code as errorCode,
           boundary_reason as boundaryReason,
           archive_at as archiveAt,
           output_json as outputJson,
@@ -695,6 +735,8 @@ export function appendContextItem(db: Db, params: {
             tool_call_id,
             tool_call_json,
             tool_result_json,
+            error_message,
+            error_code,
             boundary_reason,
             output_json,
             created_at,
@@ -716,6 +758,8 @@ export function appendContextItem(db: Db, params: {
             @toolCallId,
             @toolCallJson,
             @toolResultJson,
+            @errorMessage,
+            @errorCode,
             @boundaryReason,
             @outputJson,
             @createdAt,
@@ -740,6 +784,8 @@ export function appendContextItem(db: Db, params: {
         toolCallId: stored.toolCallId,
         toolCallJson: stored.toolCallJson,
         toolResultJson: stored.toolResultJson,
+        errorMessage: stored.errorMessage,
+        errorCode: stored.errorCode,
         boundaryReason:
           params.kind === "system" && typeof params.boundaryReason === "string" && params.boundaryReason.trim()
             ? params.boundaryReason.trim()
@@ -799,6 +845,8 @@ export function updateContextItem(db: Db, params: {
           tool_call_id = @toolCallId,
           tool_call_json = @toolCallJson,
           tool_result_json = @toolResultJson,
+          error_message = @errorMessage,
+          error_code = @errorCode,
           output_json = @outputJson,
           updated_at = @updatedAt
       where id = @itemId
@@ -814,6 +862,8 @@ export function updateContextItem(db: Db, params: {
     toolCallId: stored.toolCallId,
     toolCallJson: stored.toolCallJson,
     toolResultJson: stored.toolResultJson,
+    errorMessage: stored.errorMessage,
+    errorCode: stored.errorCode,
     outputJson: stored.outputJson,
     updatedAt: params.updatedAt
   });
@@ -888,6 +938,8 @@ function readContextItemRowByIdStmt(db: Db) {
         tool_call_id as toolCallId,
         tool_call_json as toolCallJson,
         tool_result_json as toolResultJson,
+        error_message as errorMessage,
+        error_code as errorCode,
         boundary_reason as boundaryReason,
         archive_at as archiveAt,
         output_json as outputJson,
@@ -1067,6 +1119,8 @@ export function appendSystemSummaryAndArchiveItems(
             tool_call_id,
             tool_call_json,
             tool_result_json,
+            error_message,
+            error_code,
             boundary_reason,
             output_json,
             created_at,
@@ -1087,6 +1141,8 @@ export function appendSystemSummaryAndArchiveItems(
             @toolCallId,
             @toolCallJson,
             @toolResultJson,
+            @errorMessage,
+            @errorCode,
             @boundaryReason,
             @outputJson,
             @createdAt,
@@ -1106,6 +1162,8 @@ export function appendSystemSummaryAndArchiveItems(
         toolCallId: stored.toolCallId,
         toolCallJson: stored.toolCallJson,
         toolResultJson: stored.toolResultJson,
+        errorMessage: stored.errorMessage,
+        errorCode: stored.errorCode,
         boundaryReason: params.boundaryReason,
         outputJson: stored.outputJson,
         createdAt: params.summaryCreatedAt,

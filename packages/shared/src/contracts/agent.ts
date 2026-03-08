@@ -60,7 +60,8 @@ export const AgentAssistantReasoningSchema = Type.Object({
 export const AgentAssistantTextOutputSchema = Type.Object({
   type: Type.Literal("assistant_text"),
   text: Type.String(),
-  reasoning: Type.Optional(AgentAssistantReasoningSchema)
+  reasoning: Type.Optional(AgentAssistantReasoningSchema),
+  error: Type.Optional(Type.String())
 });
 
 export type AgentAssistantReasoning = Static<typeof AgentAssistantReasoningSchema>;

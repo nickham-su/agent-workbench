@@ -847,6 +847,7 @@ test("agent context-items 支持 assistant reasoning 字段的更新", async () 
   assert.equal(single.output.type, "assistant_text");
   assert.equal(single.output.text, "最终正文");
   assert.deepEqual((single.output as any).reasoning, { text: "补充后的思考内容" });
+  assert.equal((single.output as any).error, undefined);
 });
 
 test("assistant reasoning 不应进入 prompt-context", async () => {
@@ -937,6 +938,87 @@ test("assistant reasoning 不应进入 archive line", async () => {
   const archiveText = await fs.readFile(archiveFilePath, "utf-8");
   assert.ok(archiveText.includes("正式回答"));
   assert.equal(archiveText.includes("不应归档的思考"), false);
+});
+
+test("assistant failed item 会通过 output.error 返回错误且正文不混入 [run]", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: "turn_failed_assistant",
+    step: 1,
+    prevId: null,
+    kind: "assistant",
+    status: "failed",
+    output: {
+      type: "assistant_text",
+      text: "半截回答",
+      error: "model idle timeout after 30000ms"
+    }
+  });
+
+  const single = await getContextItem(fixture.app, session.id, assistantItem.item.id);
+  assert.equal(single.output.type, "assistant_text");
+  assert.equal(single.output.text, "半截回答");
+  assert.equal((single.output as any).error, "model idle timeout after 30000ms");
+  assert.equal(single.output.text.includes("[run]"), false);
+});
+
+test("prompt-context 仅注入最近一次且无 tool item 的 failed assistant", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 0,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "继续" }
+  });
+  const failedAssistant = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_failed_prompt",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "failed",
+    output: { type: "assistant_text", text: "半截输出", error: "provider error" }
+  });
+
+  const prompt = await getPromptContextInternal({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId });
+  assert.ok(prompt.messages.some((m) => m.role === "assistant" && JSON.stringify(m.content).includes("半截输出")));
+  assert.equal(prompt.messages.some((m) => JSON.stringify(m.content).includes("provider error")), false);
+  assert.equal(prompt.messages.some((m) => JSON.stringify(m.content).includes("[run]")), false);
+  assert.ok(failedAssistant.item.id > 0);
 });
 
 test("非 system item 写入 boundaryReason 会被忽略", async () => {
@@ -1640,6 +1722,107 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
   assert.ok(promptContext.system.includes("Language requirement: use English consistently for this run."));
   assert.ok(promptContext.system.includes("Current system time:"));
   assert.ok(promptContext.system.includes("Time zone:"));
+});
+
+test("subtask 失败时 getSubtaskRunResultFromWorker 仍返回 partial text", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const sessionRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions",
+    payload: {
+      workspaceId: fixture.workspaceId,
+      title: "it-subtask-result",
+      kind: "subtask"
+    }
+  });
+  assert.equal(sessionRes.statusCode, 201, `create subtask session failed: ${sessionRes.body}`);
+  const session = sessionRes.json() as { id: string };
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "failed",
+    createdAt
+  });
+
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_subtask_failed_partial",
+    step: 1,
+    prevId: null,
+    kind: "assistant",
+    status: "failed",
+    output: {
+      type: "assistant_text",
+      text: "partial result from subtask",
+      error: "failed after 3 retries: timeout"
+    }
+  });
+
+  const resultRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/result",
+    headers: {
+      "x-awb-agent-internal-token": fixture.internalToken
+    },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      runId
+    }
+  });
+  assert.equal(resultRes.statusCode, 200, `get subtask result failed: ${resultRes.body}`);
+  assert.equal((resultRes.json() as { resultText: string }).resultText, "partial result from subtask");
+});
+
+test("failed tool item 可保留 subtask partial result 且 error 不混入 partial 文本", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const toolItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: "turn_failed_subtask_tool",
+    step: 1,
+    prevId: null,
+    kind: "tool",
+    status: "failed",
+    output: {
+      type: "tool",
+      toolName: "subtask",
+      toolCallId: "call_failed_subtask_tool",
+      args: { description: "研究问题" },
+      text: "tool: subtask\nstatus: failed\n\nsubtask failed",
+      result: {
+        subtaskSessionId: "sess_subtask_failed",
+        resultText: "partial result from subtask"
+      },
+      error: "subtask failed"
+    }
+  });
+
+  const single = await getContextItem(fixture.app, session.id, toolItem.item.id);
+  assert.equal(single.output.type, "tool");
+  assert.equal(single.status, "failed");
+  assert.equal(String(single.output.error || ""), "subtask failed");
+  assert.equal(String(single.output.text || "").includes("partial result from subtask"), false);
+  assert.equal(
+    String((((single.output.result as { resultText?: string } | undefined)?.resultText) || "")),
+    "partial result from subtask"
+  );
 });
 
 test("agent prompt-context 对 primary 会话保留 subtask 工具", async () => {
