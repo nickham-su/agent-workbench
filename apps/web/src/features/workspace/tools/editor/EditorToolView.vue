@@ -35,6 +35,7 @@
       </div>
       <div v-else-if="activeTab?.kind === 'diff'" class="h-full min-h-0 overflow-hidden">
         <MonacoDiffViewer
+          ref="diffViewerRef"
           class="h-full"
           :original="activeTab.original"
           :modified="activeTab.modified"
@@ -71,6 +72,7 @@ import { editorFontSize } from "@/shared/settings/uiFontSizes";
 import { getEditorStore } from "./store";
 import type { EditorOpenAt, EditorOpenFileRequest, FileEditorTab, QueuedEditorOpenFileRequest } from "./types";
 import EditorTabs from "./EditorTabs.vue";
+import type { MonacoDiffViewerExposed } from "@/shared/components/MonacoDiffViewer.vue";
 import MonacoCodeViewer from "@/shared/components/MonacoCodeViewer.vue";
 import MonacoDiffViewer from "@/shared/components/MonacoDiffViewer.vue";
 
@@ -90,6 +92,7 @@ const tabItems = computed(() => store.tabs.map((tab) => ({
 })));
 
 const editorEl = ref<HTMLDivElement | null>(null);
+const diffViewerRef = ref<MonacoDiffViewerExposed | null>(null);
 let editor: monaco.editor.IStandaloneCodeEditor | null = null;
 let editorBlurDisposable: monaco.IDisposable | null = null;
 let editorSaveCommandId: string | null = null;
@@ -321,12 +324,10 @@ function applyOpenAtWhenReady(tabKey: string, model: monaco.editor.ITextModel, o
     return;
   }
 
-  clearHighlightDecorations();
   editor.focus();
   requestAnimationFrame(() => {
     const latest = activeTab.value;
     if (!editor || !latest || latest.kind !== "file" || latest.key !== tabKey || latest.model !== model) return;
-    clearHighlightDecorations();
     applyOpenAtHighlight(openAt);
     revealOpenAt(openAt);
     latest.openAt = undefined;
@@ -596,6 +597,16 @@ watch(
   () => store.activeTabKey.value,
   () => {
     scheduleApplyEditor();
+  }
+);
+
+watch(
+  () => (activeTab.value?.kind === "diff" ? activeTab.value.key : ""),
+  (next) => {
+    if (!next) return;
+    requestAnimationFrame(() => {
+      diffViewerRef.value?.goToFirstDiff();
+    });
   }
 );
 
