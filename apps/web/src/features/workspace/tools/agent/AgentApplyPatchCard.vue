@@ -16,7 +16,6 @@
             <span class="shrink-0">)</span>
             <span class="shrink-0 ml-1">[+{{ file.additions }} -{{ file.deletions }}]</span>
           </span>
-          <span class="text-[color:var(--text-tertiary)] text-xs">打开到编辑器</span>
         </div>
       </div>
     </div>

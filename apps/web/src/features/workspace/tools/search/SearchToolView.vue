@@ -30,14 +30,22 @@
           <a-checkbox v-for="option in repoOptions" :key="option.value" :value="option.value">
             {{ option.label }}
           </a-checkbox>
-        </a-checkbox-group>
-      </div>
+          </a-checkbox-group>
+        </div>
 
-      <div class="flex items-center gap-4 text-xs text-[color:var(--text-tertiary)]">
-        <a-checkbox v-model:checked="caseSensitive">{{ t("search.options.caseSensitive") }}</a-checkbox>
-        <a-checkbox v-model:checked="wholeWord">{{ t("search.options.wholeWord") }}</a-checkbox>
-        <a-checkbox v-model:checked="useRegex">{{ t("search.options.regex") }}</a-checkbox>
-        <span>{{ t("search.hint.ignore") }}</span>
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-[color:var(--text-tertiary)]">
+        <a-checkbox v-model:checked="caseSensitive" class="shrink-0 whitespace-nowrap">
+          {{ t("search.options.caseSensitive") }}
+        </a-checkbox>
+        <a-checkbox v-model:checked="wholeWord" class="shrink-0 whitespace-nowrap">
+          {{ t("search.options.wholeWord") }}
+        </a-checkbox>
+        <a-checkbox v-model:checked="useRegex" class="shrink-0 whitespace-nowrap">
+          {{ t("search.options.regex") }}
+        </a-checkbox>
+        <span class="shrink-0 whitespace-nowrap">
+          {{ t("search.hint.ignore") }}
+        </span>
       </div>
 
       <div class="flex-1 min-h-0 flex flex-col">

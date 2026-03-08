@@ -17,7 +17,6 @@
       <span v-if="errorText" class="min-w-0 max-w-[30%] truncate text-red-500">
         error: {{ errorText }}
       </span>
-      <span class="text-[color:var(--text-tertiary)] text-xs">打开到编辑器</span>
     </div>
   </div>
 </template>

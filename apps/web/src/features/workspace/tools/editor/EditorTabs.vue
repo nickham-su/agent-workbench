@@ -39,3 +39,18 @@ function onUpdateActiveKey(key: string | number) {
   props.onActiveTabUpdate(String(key));
 }
 </script>
+
+<style scoped>
+.editor-tabs :deep(.ant-tabs-nav) {
+  margin-bottom: 0 !important;
+  background: var(--panel-bg-elevated);
+}
+
+.editor-tabs :deep(.ant-tabs-content-holder) {
+  padding: 0 !important;
+}
+
+.editor-tabs :deep(.ant-tabs-tab) {
+  margin-left: 0 !important;
+}
+</style>

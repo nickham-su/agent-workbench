@@ -34,7 +34,14 @@
         <MonacoCodeViewer class="h-full" :value="activeTab.text" :language="activeTab.language" :read-only="true" />
       </div>
       <div v-else-if="activeTab?.kind === 'diff'" class="h-full min-h-0 overflow-hidden">
-        <MonacoDiffViewer class="h-full" :original="activeTab.original" :modified="activeTab.modified" :language="activeTab.language" />
+        <MonacoDiffViewer
+          class="h-full"
+          :original="activeTab.original"
+          :modified="activeTab.modified"
+          :language="activeTab.language"
+          :compact-mode="true"
+          :show-overview-ruler="true"
+        />
       </div>
     </div>
   </div>
