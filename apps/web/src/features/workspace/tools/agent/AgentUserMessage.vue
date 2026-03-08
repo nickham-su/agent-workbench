@@ -1,6 +1,6 @@
 <template>
   <div
-    class="agent-user-message whitespace-pre-wrap break-words pr-24"
+    class="agent-user-message whitespace-pre-wrap break-words"
     :class="tone === 'error' ? 'text-red-500' : ''"
   >
     {{ props.text }}

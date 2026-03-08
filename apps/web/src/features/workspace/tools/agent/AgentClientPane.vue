@@ -106,7 +106,10 @@
               item.role !== 'user' && item.role !== 'tool' && item.tone === 'error' ? 'bg-red-500/5' : '',
               isTextMessageClamped(item.id)
                 ? 'is-text-clamped border border-[var(--border-color-secondary)] bg-transparent'
-                : ''
+                : '',
+              ((item.role === 'user'
+                || (item.role === 'assistant' && isTerminalStatus(item.status) && item.text.trim().length > 0))
+                && !isSubtaskSession) ? 'has-message-controls pt-8' : '',
             ]"
           >
             <div
@@ -211,18 +214,10 @@
             />
             <div v-else-if="item.role === 'assistant'" class="flex flex-col gap-1">
               <div v-if="item.reasoningText && item.reasoningText.trim().length > 0" class="assistant-reasoning-block">
-                <AssistantMarkdownMessage
-                  :class="isTerminalStatus(item.status) ? 'pr-24' : ''"
-                  :text="item.reasoningText"
-                  :message-id="item.id"
-                  :streaming="!isTerminalStatus(item.status)"
-                  class="assistant-reasoning-markdown"
-                  section-key="reasoning"
-                />
+                <AssistantMarkdownMessage :text="item.reasoningText" :message-id="item.id" :streaming="!isTerminalStatus(item.status)" class="assistant-reasoning-markdown" section-key="reasoning" />
               </div>
               <AssistantMarkdownMessage
                 v-if="item.text.trim().length > 0"
-                :class="isTerminalStatus(item.status) ? 'pr-24' : ''"
                 :text="item.text"
                 :message-id="item.id"
                 :streaming="!isTerminalStatus(item.status)"
@@ -275,10 +270,7 @@
             <div
               v-else
               class="whitespace-pre-wrap break-words"
-              :class="[
-                'pr-24',
-                item.tone === 'error' ? 'text-red-500' : ''
-              ]"
+              :class="[item.tone === 'error' ? 'text-red-500' : '']"
             >
               {{ item.text }}
             </div>
@@ -2573,6 +2565,10 @@ onBeforeUnmount(() => {
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s ease;
+}
+
+.agent-message-item.has-message-controls {
+  padding-top: 2rem;
 }
 
 .message-id {

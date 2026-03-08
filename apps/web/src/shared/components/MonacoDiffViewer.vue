@@ -20,6 +20,7 @@ const props = defineProps<{
   sideBySide?: boolean;
   showOverviewRuler?: boolean;
   compactMode?: boolean;
+  hideVerticalScrollbar?: boolean;
   hideUnchangedRegions?:
     | boolean
     | {
@@ -96,6 +97,10 @@ function shouldShowOverviewRuler() {
 
 function shouldUseCompactMode() {
   return props.compactMode !== false;
+}
+
+function resolveVerticalScrollbarVisibility(autoHeight: boolean) {
+  return autoHeight || props.hideVerticalScrollbar === true ? "hidden" : "visible";
 }
 
 function resolveHideUnchangedRegionsOption(value: typeof props.hideUnchangedRegions): monaco.editor.IDiffEditorOptions["hideUnchangedRegions"] {
@@ -315,7 +320,7 @@ onMounted(() => {
 
   const originalEditor = editor.getOriginalEditor();
   const modifiedEditor = editor.getModifiedEditor();
-  const verticalScrollbar = props.autoHeight ? "hidden" : "visible";
+  const verticalScrollbar = resolveVerticalScrollbarVisibility(!!props.autoHeight);
   originalEditor.updateOptions({
     scrollbar: {vertical: verticalScrollbar, horizontal: "auto"},
     overviewRulerBorder: false,
@@ -389,11 +394,18 @@ watch(
     () => props.autoHeight,
     (next) => {
       if (!editor) return;
-      const verticalScrollbar = next ? "hidden" : "visible";
+      const verticalScrollbar = resolveVerticalScrollbarVisibility(!!next);
       editor.getOriginalEditor().updateOptions({ scrollbar: {vertical: verticalScrollbar, horizontal: "auto"} });
       editor.getModifiedEditor().updateOptions({ scrollbar: {vertical: verticalScrollbar, horizontal: "auto"} });
     }
 );
+
+watch(() => props.hideVerticalScrollbar, () => {
+  if (!editor) return;
+  const verticalScrollbar = resolveVerticalScrollbarVisibility(!!props.autoHeight);
+  editor.getOriginalEditor().updateOptions({ scrollbar: {vertical: verticalScrollbar, horizontal: "auto"} });
+  editor.getModifiedEditor().updateOptions({ scrollbar: {vertical: verticalScrollbar, horizontal: "auto"} });
+});
 
 watch(
     () => props.hideUnchangedRegions,

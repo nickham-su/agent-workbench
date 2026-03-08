@@ -41,6 +41,7 @@
           :language="activeTab.language"
           :compact-mode="true"
           :show-overview-ruler="true"
+          :hide-vertical-scrollbar="true"
         />
       </div>
     </div>
