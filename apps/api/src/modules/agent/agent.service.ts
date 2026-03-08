@@ -3474,20 +3474,20 @@ export class AgentService {
               }
               const batch = transcript.filter((t) => t.archiveAt === latestArchiveAt);
               // 归档会过滤“空 assistant(仅 tool-call)”,若直接按 item 取 tail 会导致最终 pos 行数偏少。
-              // 这里先按“可归档行”过滤,确保 tail 的 10 条能映射到归档文件中的实际行。
+              // 这里先按“可归档行”过滤,确保 tail 的 20 条能映射到归档文件中的实际行。
               const batchArchivable = batch.filter((t) => buildArchiveLine(t) != null);
-              const last10 = batchArchivable.slice(-10);
-              const last4UserAssistant = batchArchivable
+              const last20 = batchArchivable.slice(-20);
+              const last10UserAssistant = batchArchivable
                 .filter((t) => {
                   if (t.kind === "user" && t.output.type === "user_text") return String(t.output.text || "").trim().length > 0;
                   if (t.kind === "assistant" && t.output.type === "assistant_text") return String(t.output.text || "").trim().length > 0;
                   return false;
                 })
-                .slice(-4);
+                .slice(-10);
 
               const mergedIds: number[] = [];
               const seen = new Set<number>();
-              for (const row of [...last4UserAssistant, ...last10]) {
+              for (const row of [...last10UserAssistant, ...last20]) {
                 if (!row) continue;
                 if (seen.has(row.id)) continue;
                 seen.add(row.id);

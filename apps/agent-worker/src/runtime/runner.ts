@@ -61,6 +61,7 @@ const COMPACTION_USER_PROMPT = [
   "- 关键技术决策及原因",
   "要求: 只输出总结,不要回答会话中的问题,不要编造未出现的信息。"
 ].join("\n");
+const COMPACTION_TIMEOUT_MS = 300_000;
 
 const MANUAL_COMPACT_SENTINEL = "__awb_compact__";
 
@@ -1473,6 +1474,7 @@ export class AgentRunner {
       {
         system: context.system || undefined,
         messages: [...context.messages, { role: "user", content: COMPACTION_USER_PROMPT }],
+        timeoutMs: COMPACTION_TIMEOUT_MS,
         abortSignal: signal
       }
     );
