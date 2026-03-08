@@ -233,7 +233,7 @@ const tools = computed<ToolDefinition[]>(() => [
     title: () => t("workspace.tools.terminal"),
     icon: CodeOutlined,
     view: TerminalToolView,
-    defaultArea: "leftTop",
+    defaultArea: "leftBottom",
     allowedAreas: ["leftTop", "leftBottom"],
     keepAlive: true
   },
@@ -242,7 +242,7 @@ const tools = computed<ToolDefinition[]>(() => [
     title: () => t("workspace.tools.agent"),
     icon: RobotOutlined,
     view: AgentToolView,
-    defaultArea: "leftBottom",
+    defaultArea: "leftTop",
     allowedAreas: ["leftTop", "leftBottom"],
     keepAlive: true
   },
@@ -291,16 +291,16 @@ const toolById = computed(() => {
 
 const toolArea = reactive<Record<ToolId, DockArea>>({
   codeReview: "leftTop",
-  terminal: "leftTop",
+  terminal: "leftBottom",
   files: "leftTop",
   search: "leftTop",
-  agent: "leftBottom",
+  agent: "leftTop",
   editor: "rightTop"
 });
 
 const activeToolIdByArea = reactive<Record<DockArea, ToolId | null>>({
   leftTop: "files",
-  leftBottom: "agent",
+  leftBottom: "terminal",
   rightTop: null
 });
 
@@ -455,10 +455,10 @@ function loadDockLayout(workspaceId: string): DockLayoutV3 | null {
 
     const toolAreaOut: Record<ToolId, DockArea> = {
       codeReview: "leftTop",
-      terminal: "leftTop",
+      terminal: "leftBottom",
       files: "leftTop",
       search: "leftTop",
-      agent: "leftBottom",
+      agent: "leftTop",
       editor: "rightTop"
     };
     for (const toolId of TOOL_IDS) {
@@ -479,7 +479,7 @@ function loadDockLayout(workspaceId: string): DockLayoutV3 | null {
       if (typeof v === "boolean") toolMinimizedOut[toolId] = v;
     }
 
-    const activeOut: Record<DockArea, ToolId | null> = { leftTop: "files", leftBottom: "agent", rightTop: null };
+    const activeOut: Record<DockArea, ToolId | null> = { leftTop: "files", leftBottom: "terminal", rightTop: null };
     for (const area of DOCK_AREAS) {
       const v = (activeRaw as any)[area];
       if (v === null) {
@@ -585,13 +585,13 @@ function scheduleSaveDockLayout() {
 
 function resetDockLayoutDefaults() {
   toolArea.codeReview = "leftTop";
-  toolArea.terminal = "leftTop";
+  toolArea.terminal = "leftBottom";
   toolArea.files = "leftTop";
   toolArea.search = "leftTop";
-  toolArea.agent = "leftBottom";
+  toolArea.agent = "leftTop";
   toolArea.editor = "rightTop";
   activeToolIdByArea.leftTop = "files";
-  activeToolIdByArea.leftBottom = "agent";
+  activeToolIdByArea.leftBottom = "terminal";
   activeToolIdByArea.rightTop = null;
   toolMinimized.codeReview = false;
   toolMinimized.terminal = true;
