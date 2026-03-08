@@ -32,7 +32,7 @@
               <component
                 :is="statusStore.iconComponentOf(session.id)"
                 v-if="statusStore.indicatorOf(session.id).icon"
-                class="agent-tab-status-icon shrink-0"
+                class="agent-tab-status-icon shrink-0 !m-0"
                 :class="statusStore.indicatorOf(session.id).iconClass"
                 :spin="statusStore.indicatorOf(session.id).spin"
               />

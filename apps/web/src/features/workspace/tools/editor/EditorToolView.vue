@@ -483,14 +483,26 @@ function scheduleApplyEditor() {
     const model = shouldHaveEditor ? tab?.model ?? null : null;
     editor.setModel(model);
     editor.updateOptions({ readOnly: tab?.kind === "file" ? tab.readOnly : true });
-    clearHighlightDecorations();
     if (tab?.kind === "file" && model) {
-      applyOpenAtHighlight(tab.openAt);
-      revealOpenAt(tab.openAt);
-      tab.openAt = undefined;
-      editor.focus();
+      const openAt = tab.openAt;
+      const tabKey = tab.key;
+      requestAnimationFrame(() => {
+        if (!editor) return;
+        const current = activeTab.value;
+        if (!current || current.kind !== "file" || current.key !== tabKey || current.model !== model) return;
+        editor.layout();
+        clearHighlightDecorations();
+        applyOpenAtHighlight(openAt);
+        revealOpenAt(openAt);
+        current.openAt = undefined;
+        editor.focus();
+      });
+      return;
     }
-    requestAnimationFrame(() => editor?.layout());
+    clearHighlightDecorations();
+    requestAnimationFrame(() => {
+      editor?.layout();
+    });
   });
 }
 
