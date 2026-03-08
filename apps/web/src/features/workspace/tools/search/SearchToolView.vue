@@ -274,7 +274,7 @@ async function openBlock(block: FileSearchBlock) {
     type: "editor.openFile",
     payload: {
       path,
-      mode: "preview",
+      mode: "edit",
       line: hitLine,
       highlight,
       targetDirName: ""
