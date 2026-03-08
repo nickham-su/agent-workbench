@@ -555,14 +555,14 @@ watch(
 watch(
   () => store.tabs.length,
   (next, prev) => {
-    if (next !== 0) return;
+    if (next !== 0 || store.pendingOpenFiles.value.length > 0) return;
     if (editor) {
       editor.setModel(null);
       clearHighlightDecorations();
     }
-    if (prev > 0) host.minimizeTool(props.toolId);
+    if (prev === undefined || prev > 0) host.minimizeTool(props.toolId);
   },
-  { immediate: false }
+  { immediate: true }
 );
 
 onMounted(() => {

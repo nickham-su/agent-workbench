@@ -81,8 +81,11 @@
         <div
           v-for="(item, index) in displayItems"
           :key="item.id"
+          :class="[
+            'agent-message-row',
+            item.role === 'user' && !isSubtaskSession ? 'has-external-message-controls pt-4' : ''
+          ]"
           :data-msg-id="item.id"
-          class="agent-message-row"
           :style="{ marginTop: `${messageGapTopAt(index)}px` }"
         >
           <div v-if="item.boundaryReason" class="pb-1 flex items-center gap-2">
@@ -106,10 +109,7 @@
               item.role !== 'user' && item.role !== 'tool' && item.tone === 'error' ? 'bg-red-500/5' : '',
               isTextMessageClamped(item.id)
                 ? 'is-text-clamped border border-[var(--border-color-secondary)] bg-transparent'
-                : '',
-              ((item.role === 'user'
-                || (item.role === 'assistant' && isTerminalStatus(item.status) && item.text.trim().length > 0))
-                && !isSubtaskSession) ? 'has-message-controls pt-8' : '',
+                : ''
             ]"
           >
             <div
@@ -118,7 +118,12 @@
                   || (item.role === 'assistant' && isTerminalStatus(item.status) && item.text.trim().length > 0))
                 && !isSubtaskSession
               "
-              class="message-controls absolute right-2 top-1.5 z-10 flex items-center gap-1"
+              class="message-controls absolute z-10 flex items-center gap-0.5"
+              :class="
+                item.role === 'user'
+                  ? 'message-controls-outside right-2 -top-4'
+                  : 'message-controls-inside right-2 top-0.5'
+              "
             >
               <span class="message-id">#{{ item.id }}</span>
               <a-tooltip :title="t('agent.client.fork')" placement="top">
@@ -2560,24 +2565,53 @@ onBeforeUnmount(() => {
   }
 }
 
+.agent-message-row.has-external-message-controls {
+  padding-top: 0.125rem;
+}
+
 .message-controls {
   color: var(--text-secondary);
   opacity: 0;
   pointer-events: none;
+  line-height: 1;
   transition: opacity 0.15s ease;
 }
 
-.agent-message-item.has-message-controls {
-  padding-top: 2rem;
+.message-controls-inside {
+  top: 0.125rem;
+}
+
+.message-controls-outside {
+  top: -0.95rem;
 }
 
 .message-id {
-  font-size: 0.92em;
+  font-size: 11px;
   line-height: 1;
   color: inherit;
 }
 
+.message-controls :deep(.ant-btn) {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 2px !important;
+  line-height: 18px;
+}
+
+.message-controls :deep(.ant-btn .anticon) {
+  font-size: 11px;
+}
+
+.message-controls :deep(.ant-btn .ant-btn-loading-icon) {
+  margin-inline-end: 0 !important;
+}
+
 .agent-message-item:hover .message-controls {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.agent-message-item:focus-within .message-controls {
   opacity: 1;
   pointer-events: auto;
 }
