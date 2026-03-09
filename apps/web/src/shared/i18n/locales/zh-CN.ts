@@ -985,11 +985,11 @@ export default {
           help: "当最近一次模型响应总 token 达到当前模型 context window * 阈值/100 时触发自动压缩。范围 50-99。"
         },
         modelTotalTimeoutMs: {
-          label: "模型总超时（秒）",
+          label: "单次请求超时（秒）",
           help: "单次模型请求的总超时时间。达到后将中止该次请求并标记为失败。仅支持整数秒,0 表示关闭。"
         },
         modelIdleTimeoutMs: {
-          label: "模型空闲超时（秒）",
+          label: "请求空闲超时（秒）",
           help: "单次模型请求在连续一段时间未收到任何流式 chunk（包括 reasoning/tool-call/finish）时中止。仅支持整数秒,0 表示关闭。"
         },
         modelRequestMaxRetries: {

@@ -46,6 +46,8 @@
         </div>
       </a-form-item>
 
+      <a-divider class="!my-2" />
+
       <a-form-item :label="t('settings.agentRuntime.fields.sessionTerminalSoundEnabled.label')">
         <a-switch v-model:checked="sessionTerminalSoundEnabled" />
         <div class="pt-2 text-xs text-[color:var(--text-tertiary)]">
