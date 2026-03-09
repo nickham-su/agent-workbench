@@ -93,6 +93,7 @@
 - `llm.md`: LLM 集成(消息编码、tool calling、流式 delta、修复与容错)
 - `provider-agent.md`: Provider/Agent 配置结构、解析规则、ExecutionProfile
 - `tools.md`: 工具协议、内置工具、tool 状态机、artifact 截断
+- `assistant-reasoning-persistence-and-ui-v1.md`: assistant reasoning 的采集、持久化与 UI 展示方案(v1)
 - `mcp-tools.md`: MCP tools 接入与命名、权限、刷新
 - `api.md`: API 设计(写事件、读投影、SSE)
 - `ipc.md`: API <-> Worker IPC 协议(单写入点、append 请求、cancel 低延迟)

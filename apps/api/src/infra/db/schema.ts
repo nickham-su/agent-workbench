@@ -128,7 +128,6 @@ export function initSchema(db: Db) {
       status text not null,
       active_run_id text,
       active_assistant_item_id integer,
-      waiting_tool_item_id integer,
       last_response_total_tokens integer,
       run_notice_text text not null default '',
       applied_item_id integer not null default 0,
@@ -148,12 +147,15 @@ export function initSchema(db: Db) {
       kind text not null,
       status text not null,
       output_text text not null default '',
+      assistant_reasoning_text text,
       output_text_truncated integer not null default 0,
       output_text_artifact_path text,
       tool_name text,
       tool_call_id text,
       tool_call_json text,
       tool_result_json text,
+      error_message text,
+      error_code text,
       boundary_reason text,
       archive_at integer,
       output_json text not null default '{}',
@@ -187,14 +189,15 @@ export function initSchema(db: Db) {
   ensureColumn(db, { table: "agent_session_head", column: "head_item_id", ddl: "head_item_id integer" });
   ensureColumn(db, { table: "agent_client_request", column: "message_item_id", ddl: "message_item_id integer" });
   ensureColumn(db, { table: "agent_session_run_state", column: "active_assistant_item_id", ddl: "active_assistant_item_id integer" });
-  ensureColumn(db, { table: "agent_session_run_state", column: "waiting_tool_item_id", ddl: "waiting_tool_item_id integer" });
   ensureColumn(db, { table: "agent_session_run_state", column: "last_response_total_tokens", ddl: "last_response_total_tokens integer" });
   ensureColumn(db, { table: "agent_session_run_state", column: "run_notice_text", ddl: "run_notice_text text not null default ''" });
   ensureColumn(db, { table: "agent_session_run_state", column: "applied_item_id", ddl: "applied_item_id integer not null default 0" });
   ensureColumn(db, { table: "agent_run", column: "agent_id", ddl: "agent_id text" });
   ensureColumn(db, { table: "agent_run", column: "provider_id", ddl: "provider_id text" });
   ensureColumn(db, { table: "agent_run", column: "model_id", ddl: "model_id text" });
+  ensureColumn(db, { table: "agent_run", column: "ui_locale", ddl: "ui_locale text" });
   ensureColumn(db, { table: "agent_context_item", column: "output_text", ddl: "output_text text not null default ''" });
+  ensureColumn(db, { table: "agent_context_item", column: "assistant_reasoning_text", ddl: "assistant_reasoning_text text" });
   ensureColumn(db, {
     table: "agent_context_item",
     column: "output_text_truncated",
@@ -205,6 +208,8 @@ export function initSchema(db: Db) {
   ensureColumn(db, { table: "agent_context_item", column: "tool_call_id", ddl: "tool_call_id text" });
   ensureColumn(db, { table: "agent_context_item", column: "tool_call_json", ddl: "tool_call_json text" });
   ensureColumn(db, { table: "agent_context_item", column: "tool_result_json", ddl: "tool_result_json text" });
+  ensureColumn(db, { table: "agent_context_item", column: "error_message", ddl: "error_message text" });
+  ensureColumn(db, { table: "agent_context_item", column: "error_code", ddl: "error_code text" });
   ensureColumn(db, { table: "agent_context_item", column: "boundary_reason", ddl: "boundary_reason text" });
   ensureColumn(db, { table: "agent_context_item", column: "archive_at", ddl: "archive_at integer" });
   createIndexIfNotExists(db, { index: "idx_repos_credential_id", sql: "create index idx_repos_credential_id on repos(credential_id)" });

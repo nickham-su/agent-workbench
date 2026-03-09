@@ -1,7 +1,7 @@
 <template>
   <div class="h-full min-h-0 flex flex-col bg-[var(--panel-bg)]">
     <div v-if="visibleSessions.length === 0" class="h-full min-h-0 flex flex-col items-center justify-center gap-3">
-      <div class="text-xs text-[color:var(--text-tertiary)]">{{ allSessions.length === 0 ? t("agent.empty") : t("agent.closedEmpty") }}</div>
+      <div class="text-[0.9em] text-[color:var(--text-tertiary)]">{{ allSessions.length === 0 ? t("agent.empty") : t("agent.closedEmpty") }}</div>
       <a-button
         v-if="allSessions.length > 0"
         size="small"
@@ -27,10 +27,20 @@
       <a-tab-pane v-for="(session, index) in visibleSessions" :key="session.id">
         <template #tab>
           <span class="agent-tab-label">
-            <span>{{ tabLabel(session, index) }}</span>
+            <span class="agent-tab-title-wrap">
+              <span>{{ tabLabel(session, index) }}</span>
+              <component
+                :is="statusStore.iconComponentOf(session.id)"
+                v-if="statusStore.indicatorOf(session.id).icon"
+                class="agent-tab-status-icon shrink-0 !m-0"
+                :class="statusStore.indicatorOf(session.id).iconClass"
+                :spin="statusStore.indicatorOf(session.id).spin"
+              />
+              <span v-if="statusStore.indicatorOf(session.id).showDot" class="agent-tab-terminal-dot" />
+            </span>
             <a-tooltip :title="t('agent.actions.closeClient')">
               <CloseOutlined
-                class="cursor-pointer text-[color:var(--text-tertiary)] hover:text-[color:var(--text-secondary)] !mr-0 text-xs"
+                class="cursor-pointer text-[color:var(--text-tertiary)] hover:text-[color:var(--text-secondary)] !mr-0 text-[0.9em]"
                 @mousedown.stop.prevent
                 @click.stop.prevent="closeSessionTab(session.id)"
               />
@@ -43,21 +53,22 @@
             :session-id="session.id"
             :session-kind="session.kind"
             :parent-session-id="!isDraftSession(session) ? session.forkedFromSessionId : null"
+            :session-title="session.title"
             :session-ready="!isDraftSession(session)"
             :ensure-session="ensureSessionCreated"
-            :poll-hint="sessionPollHints[session.id] ?? 0"
-            :can-choose-session="canChooseSessionFrom(session.id)"
-            :active="effectiveActiveKey === session.id"
-            :model-value="selectedAgentBySession[session.id] ?? null"
-            :agent-options="agentOptions"
-            @update:model-value="(value) => setSessionAgent(session.id, value)"
-            @forked="onSessionForked"
-            @open-subtask="onOpenSubtask"
-            @open-parent="onOpenParent"
-            @choose-session="openChooseSessionModal(session.id)"
-            @request-poll-session="onRequestPollSession"
-          />
-        </div>
+             :can-choose-session="canChooseSessionFrom(session.id)"
+             :active="effectiveActiveKey === session.id"
+             :model-value="selectedAgentBySession[session.id] ?? null"
+             :tool-id="toolId"
+             :agent-options="agentOptions"
+              @update:model-value="(value) => setSessionAgent(session.id, value)"
+               @forked="onSessionForked"
+              @open-subtask="onOpenSubtask"
+              @open-parent="(parentSessionId) => onOpenParent(session.id, parentSessionId)"
+              @session-title-sync-needed="requestSessionTitleSync"
+              @choose-session="openChooseSessionModal(session.id)"
+            />
+          </div>
       </a-tab-pane>
 
       <a-tab-pane key="__agent_add__">
@@ -76,22 +87,24 @@
       :maskClosable="true"
       @cancel="closeChooseSessionModal"
     >
-      <div v-if="chooseSessionLoading" class="text-xs text-[color:var(--text-tertiary)]">
-        {{ t("common.loading") }}
+      <div class="agent-choose-session-modal" :style="{ fontSize: 'var(--agent-font-size, 13px)' }">
+        <div v-if="chooseSessionLoading" class="text-[0.9em] text-[color:var(--text-tertiary)]">
+          {{ t("common.loading") }}
+        </div>
+        <div v-else-if="chooseSessionItems.length === 0" class="text-[0.9em] text-[color:var(--text-tertiary)]">
+          {{ t("agent.client.noSessionToChoose") }}
+        </div>
+        <a-list v-else size="small" bordered :data-source="chooseSessionItems" class="choose-session-list max-h-[360px] overflow-auto">
+          <template #renderItem="{ item }">
+            <a-list-item class="choose-session-item !px-3 !py-2 cursor-pointer transition-colors" @click="chooseSession(item.id)">
+              <div class="w-full min-w-0">
+                <div class="text-[0.85em] text-[color:var(--text-tertiary)] truncate">{{ item.id }}</div>
+                <div class="text-[0.95em] truncate">{{ item.preview }}</div>
+              </div>
+            </a-list-item>
+          </template>
+        </a-list>
       </div>
-      <div v-else-if="chooseSessionItems.length === 0" class="text-xs text-[color:var(--text-tertiary)]">
-        {{ t("agent.client.noSessionToChoose") }}
-      </div>
-      <a-list v-else size="small" bordered :data-source="chooseSessionItems" class="choose-session-list max-h-[360px] overflow-auto">
-        <template #renderItem="{ item }">
-          <a-list-item class="choose-session-item !px-3 !py-2 cursor-pointer transition-colors" @click="chooseSession(item.id)">
-            <div class="w-full min-w-0">
-              <div class="text-xs text-[color:var(--text-tertiary)] truncate">{{ item.id }}</div>
-              <div class="text-sm truncate">{{ item.preview }}</div>
-            </div>
-          </a-list-item>
-        </template>
-      </a-list>
     </a-modal>
   </div>
 </template>
@@ -106,16 +119,24 @@ export default {
 import type { AgentSessionRecord } from "@agent-workbench/shared";
 import { CloseOutlined, MinusOutlined, PlusOutlined } from "@ant-design/icons-vue";
 import { message } from "ant-design-vue";
-import { computed, onActivated, onMounted, reactive, ref, watch } from "vue";
+import { computed, onActivated, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { createAgentSession, getAgentSettings, listAgentSessions } from "@/shared/api";
 import { useWorkspaceHost } from "@/features/workspace/host";
 import AgentClientPane from "./AgentClientPane.vue";
+import { agentSessionStatusStoreKey, createAgentSessionStatusStore } from "./useAgentSessionStatusStore";
 
 type AgentOption = {
   value: string;
   label: string;
   isDefault?: boolean;
+  resolvedModel?: {
+    providerId: string;
+    contextWindowTokens: number;
+    providerName: string;
+    modelId: string;
+    modelName: string;
+  } | null;
 };
 
 type DraftAgentSession = {
@@ -141,6 +162,7 @@ const ACTIVE_KEY_STORAGE_PREFIX = "agent-workbench.workspace.agent.activeClient"
 const AGENT_PICK_STORAGE_PREFIX = "agent-workbench.workspace.agent.pickBySession";
 const CLOSED_SESSION_STORAGE_PREFIX = "agent-workbench.workspace.agent.closedSessions";
 const AGENT_TAB_NO_STORAGE_KEY_PREFIX = "agent-workbench.workspace.agent.tabNoMap";
+const OPENED_SUBTASK_SESSION_STORAGE_PREFIX = "agent-workbench.workspace.agent.openedSubtaskSessions";
 
 const props = defineProps<{ workspaceId: string; toolId: string }>();
 const host = useWorkspaceHost(props.toolId);
@@ -152,18 +174,23 @@ const serverSessions = ref<AgentSessionRecord[]>([]);
 const draftSessions = ref<DraftAgentSession[]>([]);
 const activeKey = ref<string>("");
 const selectedAgentBySession = reactive<Record<string, string | null>>({});
-const sessionPollHints = reactive<Record<string, number>>({});
 const agentOptions = ref<AgentOption[]>([]);
 const closedSessionIds = reactive<Record<string, true>>({});
+const openedSubtaskSessionIds = reactive<Record<string, true>>({});
 const tabNoMap = ref<Record<string, number>>({});
 const chooseSessionModalOpen = ref(false);
 const chooseSessionLoading = ref(false);
 const chooseSessionItems = ref<ChooseSessionItem[]>([]);
 const chooseSessionSourceId = ref("");
 const sessionsInitialized = ref(false);
+const serverSessionsLoaded = ref(false);
 
 const suppressTabNoPersist = ref(false);
+const pendingSessionTitleSyncUpdatedAt = reactive<Record<string, number>>({});
 const draftCreatePromises = new Map<string, Promise<string>>();
+
+const statusStore = createAgentSessionStatusStore();
+provide(agentSessionStatusStoreKey, statusStore);
 
 const allSessions = computed<AgentSessionTab[]>(() => [...serverSessions.value, ...draftSessions.value]);
 
@@ -174,7 +201,11 @@ const effectiveActiveKey = computed(() => {
 
 const visibleSessions = computed(() => {
   // tabs 的展示顺序按编号从小到大,确保新建 client 出现在最右侧。
-  const list = allSessions.value.filter((item) => !closedSessionIds[item.id]);
+  const list = allSessions.value.filter((item) => {
+    if (closedSessionIds[item.id]) return false;
+    if (item.kind === "subtask") return !!openedSubtaskSessionIds[item.id];
+    return true;
+  });
   return [...list].sort((a, b) => {
     const na = tabNoMap.value[a.id];
     const nb = tabNoMap.value[b.id];
@@ -202,6 +233,12 @@ function closedSessionStorageKey(workspaceId: string) {
   const id = String(workspaceId || "").trim();
   if (!id) return `${CLOSED_SESSION_STORAGE_PREFIX}.v1`;
   return `${CLOSED_SESSION_STORAGE_PREFIX}.v1.${id}`;
+}
+
+function openedSubtaskSessionStorageKey(workspaceId: string) {
+  const id = String(workspaceId || "").trim();
+  if (!id) return `${OPENED_SUBTASK_SESSION_STORAGE_PREFIX}.v1`;
+  return `${OPENED_SUBTASK_SESSION_STORAGE_PREFIX}.v1.${id}`;
 }
 
 function agentTabNoStorageKey(workspaceId: string) {
@@ -251,7 +288,8 @@ function reconcileTabNoMap(params: { workspaceId: string; sessions: AgentSession
   // 只对当前 workspace 且当前可见的 session 分配编号,避免 workspace 切换时短暂拿到旧列表导致污染映射。
   const sessionsInWs = params.sessions
     .filter((s) => String(s.workspaceId || "").trim() === id)
-    .filter((s) => !closedSessionIds[s.id]);
+    .filter((s) => !closedSessionIds[s.id])
+    .filter((s) => s.kind !== "subtask" || !!openedSubtaskSessionIds[s.id]);
   const present = new Set(sessionsInWs.map((s) => s.id));
   const nextMap: Record<string, number> = { ...tabNoMap.value };
 
@@ -296,6 +334,20 @@ function persistClosedSessions() {
   }
 }
 
+function persistOpenedSubtaskSessions() {
+  const key = openedSubtaskSessionStorageKey(props.workspaceId);
+  const ids = Object.keys(openedSubtaskSessionIds).sort((a, b) => a.localeCompare(b));
+  try {
+    if (ids.length === 0) {
+      localStorage.removeItem(key);
+      return;
+    }
+    localStorage.setItem(key, JSON.stringify(ids));
+  } catch {
+    // ignore
+  }
+}
+
 function restorePersistedState() {
   try {
     const savedActive = localStorage.getItem(activeKeyStorageKey(props.workspaceId));
@@ -316,6 +368,22 @@ function restorePersistedState() {
   }
 
   try {
+    const raw = localStorage.getItem(openedSubtaskSessionStorageKey(props.workspaceId));
+    if (raw) {
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        for (const id of parsed) {
+          const sid = String(id || "").trim();
+          if (!sid) continue;
+          openedSubtaskSessionIds[sid] = true;
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  try {
     const raw = localStorage.getItem(closedSessionStorageKey(props.workspaceId));
     if (!raw) return;
     const parsed = JSON.parse(raw) as unknown;
@@ -328,7 +396,6 @@ function restorePersistedState() {
   } catch {
     // ignore
   }
-
   restoreTabNoMapFromStorage(props.workspaceId);
 }
 
@@ -384,16 +451,6 @@ function setSessionAgent(sessionId: string, value: string | null) {
   persistAgentPick();
 }
 
-function bumpSessionPollHint(sessionId: string) {
-  const id = String(sessionId || "").trim();
-  if (!id) return;
-  sessionPollHints[id] = (sessionPollHints[id] ?? 0) + 1;
-}
-
-function onRequestPollSession(sessionId: string) {
-  bumpSessionPollHint(sessionId);
-}
-
 async function refreshAgents() {
   try {
     const res = await getAgentSettings();
@@ -401,20 +458,39 @@ async function refreshAgents() {
     agentOptions.value = res.agents.map((agent) => ({
       value: agent.id,
       label: agent.name,
-      isDefault: defaultAgentId === agent.id
+      isDefault: defaultAgentId === agent.id,
+      resolvedModel: agent.resolvedModel ?? null
     }));
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   }
 }
 
+function pruneOpenedSubtaskSessions() {
+  const presentIds = new Set(
+    serverSessions.value
+      .filter((item) => item.kind === "subtask" && String(item.workspaceId || "").trim() === String(props.workspaceId || "").trim())
+      .map((item) => item.id)
+  );
+  let changed = false;
+  for (const id of Object.keys(openedSubtaskSessionIds)) {
+    if (presentIds.has(id)) continue;
+    delete openedSubtaskSessionIds[id];
+    changed = true;
+  }
+  if (changed) persistOpenedSubtaskSessions();
+}
+
 async function refreshSessions() {
-  if (loadingSessions.value) return;
+  if (loadingSessions.value) return false;
   loadingSessions.value = true;
+  let ok = false;
   try {
     const list = await listAgentSessions(props.workspaceId);
     serverSessions.value = [...list].sort((a, b) => b.updatedAt - a.updatedAt);
+    pruneOpenedSubtaskSessions();
     // 先根据可见 tabs 做 prune/分配,避免隐藏 tab 让编号一路增长。
+    serverSessionsLoaded.value = true;
     reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
     const presentIds = new Set(allSessions.value.map((item) => item.id));
     let closedChanged = false;
@@ -424,26 +500,32 @@ async function refreshSessions() {
         closedChanged = true;
       }
     }
-    for (const id of Object.keys(sessionPollHints)) {
-      if (!presentIds.has(id)) {
-        delete sessionPollHints[id];
-      }
-    }
     if (closedChanged) persistClosedSessions();
     if (effectiveActiveKey.value) {
       activeKey.value = effectiveActiveKey.value;
       persistActiveKey(effectiveActiveKey.value);
     }
+    ok = true;
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
     loadingSessions.value = false;
   }
+  return ok;
 }
 
 async function refreshAll() {
   await Promise.all([refreshAgents(), refreshSessions()]);
 }
+
+function requestSessionTitleSync(sessionId: string) {
+  const targetSessionId = String(sessionId || "").trim();
+  if (!targetSessionId) return;
+  const runState = statusStore.runStateOf(targetSessionId);
+  const updatedAt = typeof runState.updatedAt === "number" && Number.isFinite(runState.updatedAt) ? runState.updatedAt : 0;
+  pendingSessionTitleSyncUpdatedAt[targetSessionId] = updatedAt;
+}
+
 
 async function createOneSession() {
   if (creating.value) return;
@@ -521,7 +603,8 @@ async function ensureSessionCreated(sessionId: string) {
 
     // 新会话首条消息: draft pane 可能在发送期间被卸载,导致其 emit 的 poll hint 丢失。
     // 这里在创建成功后主动 bump 一次,确保新 pane 至少会做一次刷新+短轮询兜底。
-    bumpSessionPollHint(created.id);
+    requestSessionTitleSync(created.id);
+    statusStore.bumpPollHint(created.id, { immediate: true, warmup: true });
     return created.id;
   })()
     .finally(() => {
@@ -550,6 +633,7 @@ function closeSessionTab(sessionId: string) {
   if (activeKey.value !== sessionId) return;
   const next = visibleSessions.value.find((item) => item.id !== sessionId)?.id ?? "";
   activeKey.value = next;
+  statusStore.markSessionSeen(next);
   if (next) {
     persistActiveKey(next);
     return;
@@ -569,6 +653,7 @@ function reopenAllSessions() {
   reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
   const next = visibleSessions.value[0]?.id ?? "";
   activeKey.value = next;
+  statusStore.markSessionSeen(next);
   if (next) {
     persistActiveKey(next);
   }
@@ -580,19 +665,23 @@ async function onSessionForked(sessionId: string) {
   delete closedSessionIds[sessionId];
   persistClosedSessions();
   activeKey.value = sessionId;
+  statusStore.markSessionSeen(sessionId);
   persistActiveKey(sessionId);
 }
 
 async function onOpenSubtask(sessionId: string) {
   if (!sessionId) return;
+  openedSubtaskSessionIds[sessionId] = true;
+  persistOpenedSubtaskSessions();
   await refreshSessions();
   delete closedSessionIds[sessionId];
   persistClosedSessions();
   activeKey.value = sessionId;
+  statusStore.markSessionSeen(sessionId);
   persistActiveKey(sessionId);
 }
 
-async function onOpenParent(sessionId: string) {
+async function onOpenParent(sourceSessionId: string, sessionId: string) {
   if (!sessionId) return;
   await refreshSessions();
   const target = serverSessions.value.find((item) => item.id === sessionId);
@@ -603,7 +692,11 @@ async function onOpenParent(sessionId: string) {
   delete closedSessionIds[sessionId];
   persistClosedSessions();
   activeKey.value = sessionId;
+  statusStore.markSessionSeen(sessionId);
   persistActiveKey(sessionId);
+  if (sourceSessionId && sourceSessionId !== sessionId) {
+    closeSessionTab(sourceSessionId);
+  }
 }
 
 function replaceDraftWithSession(params: { fromSessionId: string; targetSessionId: string }) {
@@ -637,6 +730,7 @@ function replaceDraftWithSession(params: { fromSessionId: string; targetSessionI
   persistAgentPick();
 
   activeKey.value = target.id;
+  statusStore.markSessionSeen(target.id);
   persistActiveKey(target.id);
 
   reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
@@ -692,6 +786,7 @@ function onChangeTab(key: string | number) {
     return;
   }
   activeKey.value = next;
+  statusStore.markSessionSeen(next);
   persistActiveKey(next);
 }
 
@@ -705,21 +800,26 @@ watch(
     sessionsInitialized.value = false;
     activeKey.value = "";
     serverSessions.value = [];
+    serverSessionsLoaded.value = false;
     draftSessions.value = [];
     for (const key of Object.keys(closedSessionIds)) {
       delete closedSessionIds[key];
+    }
+    for (const key of Object.keys(openedSubtaskSessionIds)) {
+      delete openedSubtaskSessionIds[key];
     }
     suppressTabNoPersist.value = true;
     tabNoMap.value = {};
     for (const key of Object.keys(selectedAgentBySession)) {
       delete selectedAgentBySession[key];
     }
-    for (const key of Object.keys(sessionPollHints)) {
-      delete sessionPollHints[key];
+    for (const key of Object.keys(pendingSessionTitleSyncUpdatedAt)) {
+      delete pendingSessionTitleSyncUpdatedAt[key];
     }
     restorePersistedState();
     await refreshAll();
     suppressTabNoPersist.value = false;
+    statusStore.bindWorkspace(props.workspaceId);
     if (visibleSessions.value.length === 0) {
       await createOneSession();
     }
@@ -732,11 +832,57 @@ onActivated(() => {
   if (!sessionsInitialized.value) return;
   if (loadingSessions.value || creating.value) return;
   if (visibleSessions.value.length > 0) return;
+  statusStore.syncSessions({
+    activeSessionId: effectiveActiveKey.value || null,
+    visibleSessionIds: visibleSessions.value.map((item) => item.id),
+    registeredSessionIds: serverSessions.value.map((item) => item.id),
+    sessionKinds: Object.fromEntries(serverSessions.value.map((item) => [item.id, item.kind]))
+  });
   void createOneSession();
 });
 
 onMounted(() => {
   restorePersistedState();
+});
+
+watch(
+  () => [props.workspaceId, effectiveActiveKey.value, visibleSessions.value.map((item) => item.id).join("|"), serverSessions.value.map((item) => item.id).join("|")] as const,
+  () => {
+    statusStore.bindWorkspace(props.workspaceId);
+    statusStore.syncSessions({
+      activeSessionId: effectiveActiveKey.value || null,
+      visibleSessionIds: visibleSessions.value.map((item) => item.id),
+      sessionKinds: Object.fromEntries(serverSessions.value.map((item) => [item.id, item.kind])),
+      ...(serverSessionsLoaded.value ? { registeredSessionIds: serverSessions.value.map((item) => item.id) } : {})
+    });
+  },
+  { immediate: true }
+);
+
+watch(
+  () => {
+    const sessionId = effectiveActiveKey.value;
+    const baselineUpdatedAt = sessionId ? (pendingSessionTitleSyncUpdatedAt[sessionId] ?? null) : null;
+    const runState = sessionId ? statusStore.runStateOf(sessionId) : null;
+    return [sessionId, baselineUpdatedAt, runState?.status ?? "", runState?.updatedAt ?? 0, loadingSessions.value] as const;
+  },
+  ([sessionId, baselineUpdatedAt, status, updatedAt, loading]) => {
+    if (!sessionId || baselineUpdatedAt == null || loading) return;
+    if (status !== "idle") return;
+    const nextUpdatedAt = typeof updatedAt === "number" && Number.isFinite(updatedAt) ? updatedAt : 0;
+    if (nextUpdatedAt <= baselineUpdatedAt) return;
+    const retryBaseline = pendingSessionTitleSyncUpdatedAt[sessionId];
+    delete pendingSessionTitleSyncUpdatedAt[sessionId];
+    void refreshSessions().then((ok) => {
+      if (ok) return;
+      pendingSessionTitleSyncUpdatedAt[sessionId] = retryBaseline ?? baselineUpdatedAt;
+    });
+  },
+  { immediate: true }
+);
+
+onBeforeUnmount(() => {
+  statusStore.dispose();
 });
 </script>
 
@@ -746,6 +892,25 @@ onMounted(() => {
   min-height: 0;
   height: 100%;
   background: var(--panel-bg);
+}
+
+.agent-tab-title-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.agent-tab-status-icon {
+  font-size: 0.9em;
+}
+
+.agent-tab-terminal-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--danger-color);
+  flex: 0 0 auto;
 }
 
 .agent-tab-label {
@@ -792,5 +957,4 @@ onMounted(() => {
 :deep(.choose-session-item:hover) {
   background: rgba(59, 130, 246, 0.12) !important;
 }
-
 </style>

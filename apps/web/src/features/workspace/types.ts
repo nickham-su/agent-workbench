@@ -1,4 +1,4 @@
-export type ToolId = "codeReview" | "terminal" | "files" | "search" | "agent";
+export type ToolId = "codeReview" | "terminal" | "files" | "search" | "agent" | "editor";
 
 export type HeaderAction = {
   id: string;

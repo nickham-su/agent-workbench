@@ -1,6 +1,9 @@
 import { Type } from "@sinclair/typebox";
 import type { Static } from "@sinclair/typebox";
 
+export const AgentUiLocaleSchema = Type.Union([Type.Literal("zh-CN"), Type.Literal("en-US")]);
+export type AgentUiLocale = Static<typeof AgentUiLocaleSchema>;
+
 export const AgentSessionKindSchema = Type.Union([Type.Literal("primary"), Type.Literal("subtask")]);
 export type AgentSessionKind = Static<typeof AgentSessionKindSchema>;
 
@@ -20,8 +23,7 @@ export type AgentContextToolName = Static<typeof AgentContextToolNameSchema>;
 
 export const AgentRunStatusSchema = Type.Union([
   Type.Literal("idle"),
-  Type.Literal("running"),
-  Type.Literal("waiting_permission")
+  Type.Literal("running")
 ]);
 export type AgentRunStatus = Static<typeof AgentRunStatusSchema>;
 
@@ -37,10 +39,8 @@ export const AgentContextItemStatusSchema = Type.Union([
   Type.Literal("streaming"),
   Type.Literal("queued"),
   Type.Literal("running"),
-  Type.Literal("awaiting_permission"),
   Type.Literal("completed"),
   Type.Literal("failed"),
-  Type.Literal("denied"),
   Type.Literal("cancelled")
 ]);
 export type AgentContextItemStatus = Static<typeof AgentContextItemStatusSchema>;
@@ -50,17 +50,24 @@ export const AgentUserTextOutputSchema = Type.Object({
   text: Type.String()
 });
 
-export const AgentAssistantTextOutputSchema = Type.Object({
-  type: Type.Literal("assistant_text"),
+export const AgentAssistantReasoningSchema = Type.Object({
   text: Type.String()
 });
+
+export const AgentAssistantTextOutputSchema = Type.Object({
+  type: Type.Literal("assistant_text"),
+  text: Type.String(),
+  reasoning: Type.Optional(AgentAssistantReasoningSchema),
+  error: Type.Optional(Type.String())
+});
+
+export type AgentAssistantReasoning = Static<typeof AgentAssistantReasoningSchema>;
 
 export const AgentToolOutputSchema = Type.Object({
   type: Type.Literal("tool"),
   toolName: AgentContextToolNameSchema,
   toolCallId: Type.Optional(Type.String({ minLength: 1 })),
   args: Type.Optional(Type.Any()),
-  approved: Type.Optional(Type.Boolean()),
   text: Type.Optional(Type.String()),
   textTruncated: Type.Optional(Type.Boolean()),
   textArtifactPath: Type.Optional(Type.String({ minLength: 1 })),
@@ -122,17 +129,25 @@ export const AgentContextItemsResponseSchema = Type.Object({
 });
 export type AgentContextItemsResponse = Static<typeof AgentContextItemsResponseSchema>;
 
+export const AgentSessionTerminalStatusSchema = Type.Union([
+  Type.Literal("completed"),
+  Type.Literal("failed"),
+  Type.Literal("cancelled"),
+  Type.Null()
+]);
+export type AgentSessionTerminalStatus = Static<typeof AgentSessionTerminalStatusSchema>;
+
 export const AgentSessionRunStateSchema = Type.Object({
   sessionId: Type.String({ minLength: 1 }),
   status: AgentRunStatusSchema,
   activeRunId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
   activeAssistantItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
-  waitingToolItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
   lastResponseTotalTokens: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
   // 通用运行态提示文本;空字符串表示无提示。
   runNoticeText: Type.String(),
   nonTerminalItemIds: Type.Array(Type.Number({ minimum: 1 })),
   updatedAt: Type.Number(),
+  lastTerminalStatus: AgentSessionTerminalStatusSchema,
   appliedItemId: Type.Number({ minimum: 0 })
 });
 export type AgentSessionRunState = Static<typeof AgentSessionRunStateSchema>;
@@ -157,7 +172,8 @@ export const AgentSendMessageRequestSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
   text: Type.String({ minLength: 1 }),
   clientRequestId: Type.String({ minLength: 1 }),
-  agentId: Type.Optional(Type.String({ minLength: 1 }))
+  agentId: Type.Optional(Type.String({ minLength: 1 })),
+  uiLocale: Type.Optional(AgentUiLocaleSchema)
 });
 export type AgentSendMessageRequest = Static<typeof AgentSendMessageRequestSchema>;
 
@@ -172,7 +188,8 @@ export type AgentSendMessageResponse = Static<typeof AgentSendMessageResponseSch
 export const AgentCompactSessionRequestSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
   clientRequestId: Type.String({ minLength: 1 }),
-  agentId: Type.Optional(Type.String({ minLength: 1 }))
+  agentId: Type.Optional(Type.String({ minLength: 1 })),
+  uiLocale: Type.Optional(AgentUiLocaleSchema)
 });
 export type AgentCompactSessionRequest = Static<typeof AgentCompactSessionRequestSchema>;
 
@@ -225,12 +242,3 @@ export const AgentContextItemsQuerySchema = Type.Object(
 );
 export type AgentContextItemsQuery = Static<typeof AgentContextItemsQuerySchema>;
 
-export const AgentPermissionDecisionSchema = Type.Union([Type.Literal("approve"), Type.Literal("deny")]);
-export type AgentPermissionDecision = Static<typeof AgentPermissionDecisionSchema>;
-
-export const AgentToolPermissionRequestSchema = Type.Object({
-  workspaceId: Type.String({ minLength: 1 }),
-  toolItemId: Type.Number({ minimum: 1 }),
-  decision: AgentPermissionDecisionSchema
-});
-export type AgentToolPermissionRequest = Static<typeof AgentToolPermissionRequestSchema>;

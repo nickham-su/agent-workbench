@@ -106,6 +106,10 @@ onMounted(() => {
     scrollBeyondLastLine: false,
     wordWrap: "off",
     renderWhitespace: "selection",
+    glyphMargin: false,
+    lineNumbersMinChars: 3,
+    lineDecorationsWidth: 8,
+    padding: { top: 4, bottom: 4 },
     overviewRulerBorder: false,
     hideCursorInOverviewRuler: true,
     scrollbar: { vertical: "hidden", horizontal: "auto" }

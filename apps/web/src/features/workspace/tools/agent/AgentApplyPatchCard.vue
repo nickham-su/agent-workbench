@@ -1,54 +1,32 @@
 <template>
   <div>
     <div class="flex flex-col gap-0.5">
-      <div
-        v-for="(file, idx) in files"
-        :key="`${file.path}-${idx}`"
-      >
+      <div v-for="(file, idx) in files" :key="`${file.path}-${idx}`">
         <div
-          class="flex items-center gap-2 min-w-0 flex-wrap w-full pl-2 pr-0 py-0.5 rounded cursor-pointer hover:bg-[var(--hover-bg)] transition-colors duration-100 text-[0.85em] font-mono text-[color:var(--text-secondary)]"
+          class="flex items-center gap-2 min-w-0 flex-wrap w-full pl-2 pr-0 py-0.5 rounded cursor-pointer hover:bg-[var(--hover-bg)] transition-colors duration-100 font-mono text-[color:var(--text-secondary)]"
           role="button"
           tabindex="0"
-          @click="onPickFile(file.path)"
-          @keydown.enter.prevent="onPickFile(file.path)"
-          @keydown.space.prevent="onPickFile(file.path)"
+          @click="openFileDiff(file.path)"
+          @keydown.enter.prevent="openFileDiff(file.path)"
+          @keydown.space.prevent="openFileDiff(file.path)"
         >
-          <span class="min-w-0 flex-1 inline-flex items-baseline gap-0"><span class="shrink-0">applypatch(</span><span class="min-w-0 truncate" :title="file.path">{{ file.path }}</span><span class="shrink-0">)</span></span>
-          <span class="shrink-0">[+{{ file.additions }} -{{ file.deletions }}]</span>
-        </div>
-
-        <div v-if="isExpanded(file.path)">
-          <div v-if="loading" class="text-[0.92em] text-[color:var(--text-tertiary)]">
-            Loading diff...
-          </div>
-          <div v-else-if="loadError" class="text-[0.92em] text-red-500">
-            diff unavailable: {{ loadError }}
-          </div>
-          <div v-else-if="diffByPath.get(file.path)" class="rounded border border-[var(--border-color-secondary)] overflow-hidden">
-            <MonacoDiffViewer
-              :original="diffByPath.get(file.path)?.before || ''"
-              :modified="diffByPath.get(file.path)?.after || ''"
-              :language="inferLanguageFromPath(file.path)"
-              :sideBySide="false"
-              :showOverviewRuler="false"
-              :compactMode="true"
-              :hideUnchangedRegions="{ enabled: true, contextLineCount: 1, minimumLineCount: 1, revealLineCount: 1 }"
-              :autoHeight="true"
-              :minHeight="72"
-              :ignoreTrimWhitespace="true"
-            />
-          </div>
+          <span class="min-w-0 inline-flex items-baseline gap-0 max-w-full">
+            <span class="shrink-0">applypatch(</span>
+            <span class="min-w-0 truncate" :title="file.path">{{ file.path }}</span>
+            <span class="shrink-0">)</span>
+            <span class="shrink-0 ml-1">[+{{ file.additions }} -{{ file.deletions }}]</span>
+          </span>
         </div>
       </div>
     </div>
 
-    <div v-if="errorText" class="pl-2 pr-0 text-[0.92em] text-red-500 py-0.5">error: {{ errorText }}</div>
+    <div v-if="errorText" class="pl-2 pr-0 text-red-500 py-0.5">error: {{ errorText }}</div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
-import MonacoDiffViewer from "@/shared/components/MonacoDiffViewer.vue";
+import { message } from "ant-design-vue";
+import { useWorkspaceHost } from "@/features/workspace/host";
 import { inferLanguageFromPath } from "@/shared/monaco/languageUtils";
 
 type ApplyPatchFileMeta = {
@@ -82,6 +60,7 @@ type ApplyPatchUiArtifact = {
 
 const props = defineProps<{
   workspaceId: string;
+  toolId: string;
   sessionId: string;
   itemId: number;
   toolCallId?: string;
@@ -91,92 +70,18 @@ const props = defineProps<{
   errorText?: string;
 }>();
 
-const emit = defineEmits<{
-  "request-measure": [];
-}>();
+const host = useWorkspaceHost(props.toolId);
+const artifactCache = new Map<string, Promise<ApplyPatchUiArtifact>>();
 
-type CacheEntry = {
-  expandedPaths: string[];
-  artifact: ApplyPatchUiArtifact | null;
-  loading: boolean;
-  error: string;
-  promise: Promise<ApplyPatchUiArtifact> | null;
-};
-
-// 模块级缓存: 虚拟列表 unmount/remount 后保留展开状态与 diff 数据。
-// key 使用 workspaceId+toolCallId,避免不同会话/工作区的 toolCallId 冲突串数据。
-const cache = new Map<string, CacheEntry>();
-
-function cacheKey(workspaceId: string, toolCallId: string) {
-  return `${workspaceId}:${toolCallId}`;
+function cacheKey() {
+  return `${props.workspaceId}:${props.toolCallId || props.itemId}`;
 }
 
-function touchLru(key: string, value: CacheEntry) {
-  // 简易 LRU: 访问时移动到 Map 尾部。
-  cache.delete(key);
-  cache.set(key, value);
-  const MAX = 16;
-  while (cache.size > MAX) {
-    const first = cache.keys().next().value as string | undefined;
-    if (!first) break;
-    cache.delete(first);
-  }
-}
-
-function ensureEntry(key: string): CacheEntry {
-  const existing = cache.get(key);
+async function fetchArtifact() {
+  const key = cacheKey();
+  const existing = artifactCache.get(key);
   if (existing) return existing;
-  const next: CacheEntry = { expandedPaths: [], artifact: null, loading: false, error: "", promise: null };
-  cache.set(key, next);
-  return next;
-}
-
-const expandedPaths = ref<string[]>([]);
-const loading = ref(false);
-const loadError = ref("");
-const artifact = ref<ApplyPatchUiArtifact | null>(null);
-
-function isExpanded(pathValue: string) {
-  return expandedPaths.value.includes(pathValue);
-}
-
-const diffByPath = computed(() => {
-  const map = new Map<string, ApplyPatchUiArtifactFile>();
-  const art = artifact.value;
-  if (!art) return map;
-  for (const file of art.files) {
-    map.set(file.path, file);
-  }
-  return map;
-});
-
-async function loadArtifact(key: string, toolCallId: string) {
-  const entry = ensureEntry(key);
-  touchLru(key, entry);
-  if (entry.artifact) {
-    artifact.value = entry.artifact;
-    loading.value = false;
-    loadError.value = "";
-    return;
-  }
-  if (entry.promise) {
-    loading.value = true;
-    loadError.value = "";
-    try {
-      const res = await entry.promise;
-      artifact.value = res;
-      return;
-    } finally {
-      loading.value = false;
-    }
-  }
-
-  entry.loading = true;
-  entry.error = "";
-  loading.value = true;
-  loadError.value = "";
-
-  entry.promise = (async () => {
+  const promise = (async () => {
     const url = `/api/agent/sessions/${encodeURIComponent(props.sessionId)}/context-items/${props.itemId}/apply-patch-artifact`;
     const response = await fetch(url);
     if (!response.ok) {
@@ -185,82 +90,43 @@ async function loadArtifact(key: string, toolCallId: string) {
     }
     return (await response.json()) as ApplyPatchUiArtifact;
   })();
-
+  artifactCache.set(key, promise);
   try {
-    const res = await entry.promise;
-    // 保护性校验,避免缓存串数据。
-    if (res.toolCallId !== toolCallId || res.workspaceId !== props.workspaceId) {
-      throw new Error("artifact mismatch");
-    }
-    entry.artifact = res;
-    artifact.value = res;
+    return await promise;
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    entry.error = message;
-    loadError.value = message;
-  } finally {
-    entry.loading = false;
-    entry.promise = null;
-    loading.value = false;
+    artifactCache.delete(key);
+    throw err;
   }
 }
 
-async function onPickFile(pathValue: string) {
+async function openFileDiff(pathValue: string) {
   const p = String(pathValue || "").trim();
   if (!p) return;
-
-  const next = new Set(expandedPaths.value);
-  const isOpen = next.has(p);
-  if (isOpen) {
-    next.delete(p);
-  } else {
-    next.add(p);
+  if (!props.toolCallId) {
+    message.error("missing toolCallId");
+    return;
   }
-  expandedPaths.value = Array.from(next);
-
-  if (props.toolCallId) {
-    const key = cacheKey(props.workspaceId, props.toolCallId);
-    const entry = ensureEntry(key);
-    touchLru(key, entry);
-    entry.expandedPaths = expandedPaths.value;
+  try {
+    const artifact = await fetchArtifact();
+    const file = artifact.files.find((item) => item.path === p);
+    if (!file) {
+      message.error(`diff unavailable: ${p}`);
+      return;
+    }
+    host.call("editor", {
+      type: "editor.openDiff",
+      payload: {
+        original: file.before || "",
+        modified: file.after || "",
+        path: p,
+        language: inferLanguageFromPath(p),
+        title: p,
+        tabKey: `agent:applyPatch:${props.toolCallId}:${p}`,
+        source: "agent.applyPatch"
+      }
+    });
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
   }
-
-  await nextTick();
-  emit("request-measure");
-
-  if (isOpen) return;
-
-  if (props.toolCallId) {
-    const key = cacheKey(props.workspaceId, props.toolCallId);
-    await loadArtifact(key, props.toolCallId);
-  } else {
-    loadError.value = "missing toolCallId";
-  }
-
-  await nextTick();
-  emit("request-measure");
 }
-
-onMounted(() => {
-  if (!props.toolCallId) return;
-  const key = cacheKey(props.workspaceId, props.toolCallId);
-  const entry = ensureEntry(key);
-  touchLru(key, entry);
-  expandedPaths.value = Array.isArray(entry.expandedPaths) ? entry.expandedPaths : [];
-  artifact.value = entry.artifact;
-  loadError.value = entry.error;
-});
-
-watch(
-  () => props.toolCallId,
-  (next) => {
-    if (!next) return;
-    const key = cacheKey(props.workspaceId, next);
-    const entry = ensureEntry(key);
-    touchLru(key, entry);
-    expandedPaths.value = Array.isArray(entry.expandedPaths) ? entry.expandedPaths : [];
-    artifact.value = entry.artifact;
-    loadError.value = entry.error;
-  }
-);
 </script>

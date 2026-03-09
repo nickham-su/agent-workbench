@@ -2,15 +2,13 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { deriveNewContentFromChunks, type UpdateFileChunk } from "./applyPatchUpdate.js";
 
-const BEGIN_PATCH_MARKER = "*** Begin Patch";
 const END_PATCH_MARKER = "*** End Patch";
-const ADD_FILE_MARKER = "*** Add File: ";
-const DELETE_FILE_MARKER = "*** Delete File: ";
-const UPDATE_FILE_MARKER = "*** Update File: ";
-const MOVE_TO_MARKER = "*** Move to: ";
-const EOF_MARKER = "*** End of File";
-const CHANGE_CONTEXT_MARKER = "@@ ";
-const EMPTY_CHANGE_CONTEXT_MARKER = "@@";
+const LEGACY_PATCH_MARKER_LINES = [
+  "*** Begin Patch",
+  "*** Update File:",
+  "*** Add File:",
+  "*** Delete File:"
+];
 
 type AddFileHunk = {
   kind: "add";
@@ -149,152 +147,6 @@ function countLines(text: string) {
     return Math.max(0, lines.length - 1);
   }
   return lines.length;
-}
-
-function parsePatchText(input: string): { hunks: Hunk[] } {
-  const trimmed = input.trim();
-  if (!trimmed) {
-    throw new Error("Invalid patch: input is empty.");
-  }
-
-  const lines = trimmed.split(/\r?\n/);
-  const validated = checkPatchBoundariesLenient(lines);
-  const hunks: Hunk[] = [];
-  let remaining = validated.slice(1, validated.length - 1);
-  let lineNumber = 2;
-
-  while (remaining.length > 0) {
-    const { hunk, consumed } = parseOneHunk(remaining, lineNumber);
-    hunks.push(hunk);
-    lineNumber += consumed;
-    remaining = remaining.slice(consumed);
-  }
-
-  return { hunks };
-}
-
-function checkPatchBoundariesLenient(lines: string[]) {
-  const strictError = checkPatchBoundariesStrict(lines);
-  if (!strictError) return lines;
-
-  if (lines.length >= 4) {
-    const firstLine = lines[0];
-    const lastLine = lines[lines.length - 1] ?? "";
-    if ((firstLine === "<<EOF" || firstLine === "<<'EOF'" || firstLine === '<<"EOF"') && lastLine.endsWith("EOF")) {
-      const inner = lines.slice(1, lines.length - 1);
-      const innerError = checkPatchBoundariesStrict(inner);
-      if (!innerError) {
-        return inner;
-      }
-      throw new Error(innerError);
-    }
-  }
-  throw new Error(strictError);
-}
-
-function checkPatchBoundariesStrict(lines: string[]) {
-  const firstLine = lines[0]?.trim();
-  const lastLine = lines[lines.length - 1]?.trim();
-  if (firstLine === BEGIN_PATCH_MARKER && lastLine === END_PATCH_MARKER) {
-    return null;
-  }
-  if (firstLine !== BEGIN_PATCH_MARKER) {
-    return "The first line of the patch must be '*** Begin Patch'";
-  }
-  return "The last line of the patch must be '*** End Patch'";
-}
-
-function parseOneHunk(lines: string[], lineNumber: number): { hunk: Hunk; consumed: number } {
-  if (lines.length === 0) {
-    throw new Error(`Invalid patch hunk at line ${lineNumber}: empty hunk`);
-  }
-
-  const firstLine = lines[0]?.trim() ?? "";
-  if (firstLine.startsWith(ADD_FILE_MARKER)) {
-    const targetPath = firstLine.slice(ADD_FILE_MARKER.length);
-    let contents = "";
-    let consumed = 1;
-    for (const line of lines.slice(1)) {
-      if (!line.startsWith("+")) break;
-      contents += `${line.slice(1)}\n`;
-      consumed += 1;
-    }
-    return {
-      hunk: {
-        kind: "add",
-        path: targetPath,
-        contents
-      },
-      consumed
-    };
-  }
-
-  if (firstLine.startsWith(DELETE_FILE_MARKER)) {
-    const targetPath = firstLine.slice(DELETE_FILE_MARKER.length);
-    return {
-      hunk: {
-        kind: "delete",
-        path: targetPath,
-        chunks: [],
-        allowDeleteWithoutHunks: true
-      },
-      consumed: 1
-    };
-  }
-
-  if (firstLine.startsWith(UPDATE_FILE_MARKER)) {
-    const targetPath = firstLine.slice(UPDATE_FILE_MARKER.length);
-    let remaining = lines.slice(1);
-    let consumed = 1;
-    let movePath: string | undefined;
-
-    const chunks: UpdateFileChunk[] = [];
-    while (remaining.length > 0) {
-      const currentLine = remaining[0] ?? "";
-      const trimmedCurrentLine = currentLine.trim();
-      if (trimmedCurrentLine === "") {
-        remaining = remaining.slice(1);
-        consumed += 1;
-        continue;
-      }
-      if (trimmedCurrentLine.startsWith(MOVE_TO_MARKER)) {
-        if (movePath != null) {
-          throw new Error(
-            `Invalid patch hunk at line ${lineNumber + consumed}: duplicate move target for path '${targetPath}'`
-          );
-        }
-        movePath = trimmedCurrentLine.slice(MOVE_TO_MARKER.length);
-        remaining = remaining.slice(1);
-        consumed += 1;
-        continue;
-      }
-      if (currentLine.startsWith("***")) {
-        break;
-      }
-      const parsed = parseUpdateFileChunk(remaining, lineNumber + consumed, chunks.length === 0);
-      chunks.push(parsed.chunk);
-      remaining = remaining.slice(parsed.consumed);
-      consumed += parsed.consumed;
-    }
-
-    if (chunks.length === 0) {
-      throw new Error(`Invalid patch hunk at line ${lineNumber}: Update file hunk for path '${targetPath}' is empty`);
-    }
-
-    return {
-      hunk: {
-        kind: "update",
-        path: targetPath,
-        movePath,
-        chunks
-      },
-      consumed
-    };
-  }
-
-  throw new Error(
-    `Invalid patch hunk at line ${lineNumber}: '${lines[0]}' is not a valid hunk header. Valid hunk headers: '*** Add File: {path}', '*** Delete File: {path}', '*** Update File: {path}'`
-  );
 }
 
 function splitGitPatchTokens(input: string) {
@@ -698,100 +550,66 @@ function parseUnifiedDiffPatchText(input: string): { hunks: Hunk[] } {
   return { hunks };
 }
 
-function parseAnyPatchText(input: string): { hunks: Hunk[] } {
+function stripTrailingEndPatchMarkerForUnifiedDiff(input: string) {
   const text = String(input ?? "");
-  if (!text.trim()) {
-    throw new Error("Invalid patch: input is empty.");
+  const lines = text.split(/\r?\n/);
+
+  // Strip trailing empty lines first.
+  let end = lines.length;
+  while (end > 0 && String(lines[end - 1] ?? "").trim() === "") {
+    end -= 1;
   }
-  const firstLine = text.trimStart().split(/\r?\n/, 1)[0] ?? "";
-  if (firstLine.trim() === BEGIN_PATCH_MARKER) {
-    return parsePatchText(text);
-  }
-  return parseUnifiedDiffPatchText(text);
+  if (end <= 0) return text;
+
+  const lastLine = String(lines[end - 1] ?? "");
+  // Only tolerate a *bare* legacy marker at the very end of a unified diff.
+  // NOTE: a leading space like " *** End Patch" may be a valid unified diff context line and must not be stripped.
+  if (/^[\t ]/.test(lastLine)) return text;
+  if (lastLine.trimEnd() !== END_PATCH_MARKER) return text;
+
+  return lines.slice(0, end - 1).join("\n");
 }
 
-function parseUpdateFileChunk(lines: string[], lineNumber: number, allowMissingContext: boolean) {
-  if (lines.length === 0) {
-    throw new Error(`Invalid patch hunk at line ${lineNumber}: Update hunk does not contain any lines`);
+function detectPatchDialect(input: string): "legacy" | "unified" | "unknown" {
+  const firstLine = String(input ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0) ?? "";
+
+  if (LEGACY_PATCH_MARKER_LINES.some((marker) => firstLine === marker || firstLine.startsWith(marker))) {
+    return "legacy";
   }
-
-  let changeContext: string | undefined;
-  let startIndex = 0;
-  if (lines[0] === EMPTY_CHANGE_CONTEXT_MARKER) {
-    startIndex = 1;
-  } else if ((lines[0] ?? "").startsWith(CHANGE_CONTEXT_MARKER)) {
-    changeContext = (lines[0] ?? "").slice(CHANGE_CONTEXT_MARKER.length);
-    startIndex = 1;
-  } else if (!allowMissingContext) {
-    throw new Error(
-      `Invalid patch hunk at line ${lineNumber}: Expected update hunk to start with a @@ context marker, got: '${lines[0]}'`
-    );
+  if (
+    firstLine.startsWith("diff --git ") ||
+    firstLine.startsWith("--- ") ||
+    firstLine.startsWith("rename from ") ||
+    firstLine.startsWith("rename to ")
+  ) {
+    return "unified";
   }
+  return "unknown";
+}
 
-  if (startIndex >= lines.length) {
-    throw new Error(`Invalid patch hunk at line ${lineNumber + 1}: Update hunk does not contain any lines`);
+function buildLegacyPatchFormatError() {
+  return [
+    "apply_patch only supports git unified diff.",
+    "Detected legacy patch format like '*** Begin Patch' / '*** Update File:'.",
+    "Please rewrite the patch using unified diff lines such as:",
+    "diff --git a/<path> b/<path>",
+    "--- a/<path>",
+    "+++ b/<path>",
+    "@@ -1,1 +1,1 @@"
+  ].join("\n");
+}
+
+function parseAnyPatchText(input: string): { hunks: Hunk[] } {
+  const text = String(input ?? "");
+  if (!text.trim()) throw new Error("Invalid patch: input is empty.");
+  if (detectPatchDialect(text) === "legacy") {
+    throw new Error(buildLegacyPatchFormatError());
   }
-
-  const chunk: UpdateFileChunk = {
-    changeContext,
-    oldLines: [],
-    newLines: [],
-    isEndOfFile: false,
-    addedLines: 0,
-    removedLines: 0
-  };
-
-  let parsedLines = 0;
-  for (const line of lines.slice(startIndex)) {
-    if (line === EOF_MARKER) {
-      if (parsedLines === 0) {
-        throw new Error(`Invalid patch hunk at line ${lineNumber + 1}: Update hunk does not contain any lines`);
-      }
-      chunk.isEndOfFile = true;
-      parsedLines += 1;
-      break;
-    }
-
-    const marker = line[0];
-    if (!marker) {
-      chunk.oldLines.push("");
-      chunk.newLines.push("");
-      parsedLines += 1;
-      continue;
-    }
-    if (marker === " ") {
-      const content = line.slice(1);
-      chunk.oldLines.push(content);
-      chunk.newLines.push(content);
-      parsedLines += 1;
-      continue;
-    }
-    if (marker === "+") {
-      chunk.newLines.push(line.slice(1));
-      chunk.addedLines += 1;
-      parsedLines += 1;
-      continue;
-    }
-    if (marker === "-") {
-      chunk.oldLines.push(line.slice(1));
-      chunk.removedLines += 1;
-      parsedLines += 1;
-      continue;
-    }
-    if (line.startsWith("***")) {
-      break;
-    }
-    throw new Error(`Invalid line in update hunk at line ${lineNumber + startIndex + parsedLines}: '${line}'`);
-  }
-
-  if (parsedLines === 0) {
-    throw new Error(`Invalid patch hunk at line ${lineNumber + startIndex}: Update hunk does not contain any lines`);
-  }
-
-  return {
-    chunk,
-    consumed: startIndex + parsedLines
-  };
+  const normalized = stripTrailingEndPatchMarkerForUnifiedDiff(text);
+  return parseUnifiedDiffPatchText(normalized);
 }
 
 function recordUnique(target: string[], seen: Set<string>, value: string) {

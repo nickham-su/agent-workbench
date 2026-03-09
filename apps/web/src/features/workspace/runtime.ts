@@ -1,5 +1,5 @@
 import type { GitTarget } from "@agent-workbench/shared";
-import type { ToolCall, ToolCallEnvelope } from "./host";
+import type { ToolCall, ToolCallEnvelope, WorkspaceToolEvent } from "./host";
 
 export type ToolRuntimeContext = {
   workspaceId: string;
@@ -22,4 +22,5 @@ export type ToolRuntime = {
   onRepoChange: (nextTarget: GitTarget | null) => void;
   onVisibilityChange: (visible: boolean) => void;
   onCall: (envelope: ToolCallEnvelope) => void;
+  onEvent?: (event: WorkspaceToolEvent) => void;
 };

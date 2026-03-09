@@ -222,7 +222,8 @@ export default {
       terminal: "Terminal",
       files: "Files",
       search: "Search",
-      agent: "AI Agent"
+      agent: "AI Agent",
+      editor: "Editor"
     },
     dock: {
       moveTo: "Move to {area}",
@@ -294,7 +295,8 @@ export default {
       welcome: "Hi, I can help you get tasks done.",
       reachedTop: "Reached the beginning",
       contextBoundary: "Context boundary",
-      inputPlaceholder: "Type a message, Enter to send, Tab to switch agent",
+      inputPlaceholderIdle: "Type a message, Enter to send, Shift+Enter for newline, Tab to switch agent",
+      inputPlaceholderRunning: "Running, Esc to cancel current run",
       inputPlaceholderNoAgent: "Create an agent before sending messages",
       noAgentHint: "No available agent, please create one first",
       goCreateAgent: "Create agent",
@@ -305,9 +307,12 @@ export default {
       runNoticeLabel: "Run notice",
       runNoticeEmpty: "No runtime notice",
       lastTotalTokens: "Total Tokens",
-      backToParent: "Back to parent session",
+      backToParent: "Back",
+      copySessionId: "Copy session ID",
+      sessionIdCopied: "Session ID copied",
       parentSessionMissing: "Parent session not found",
-      readonlySubtaskHint: "This subtask session is read-only",
+      subtaskRunningHint: "Running for {elapsed}. Cancel in the parent session.",
+      subtaskCancelInParentHint: "Cancel in the parent session if needed.",
       subtaskCardTitle: "Subtask",
       subtaskMode: "Mode",
       subtaskModeNew: "New session",
@@ -317,9 +322,10 @@ export default {
       subtaskSessionId: "Session ID",
       todoListCardTitle: "Todo list",
       todoListSummary: "Total {total}, in progress {inProgress}, pending {pending}, completed {completed}, cancelled {cancelled}",
+      todoListGoal: "Goal",
       todoListEmpty: "Todo list is empty",
       applyPatchCardTitle: "Patch changes",
-      applyPatchPreview: "Pending approval preview",
+      applyPatchPreview: "Patch preview",
       applyPatchApplied: "Applied",
       applyPatchFileCount: "Files",
       applyPatchLineStats: "Line changes",
@@ -335,8 +341,6 @@ export default {
       revertConfirmTitleAssistant: "Revert to this assistant message?",
       revertConfirmContentAssistant: "This will revert to this assistant message and keep it in the timeline. Messages after this point will become hidden from current timeline.",
       reverted: "Reverted to selected message",
-      approve: "Approve",
-      deny: "Deny",
       roles: {
         user: "You",
         assistant: "Assistant",
@@ -551,6 +555,18 @@ export default {
       title: "Close unsaved file?",
       content: "This file has unsaved changes. Close anyway?",
       ok: "Close",
+      cancel: "Cancel"
+    },
+    closeOthersConfirm: {
+      title: "Close other tabs?",
+      content: "There are {count} unsaved files in the other tabs. Close the other tabs anyway?",
+      ok: "Close others",
+      cancel: "Cancel"
+    },
+    closeAllConfirm: {
+      title: "Close all tabs?",
+      content: "There are {count} unsaved files in the current tabs. Close all tabs anyway?",
+      ok: "Close all",
       cancel: "Cancel"
     },
     conflict: {
@@ -852,7 +868,7 @@ export default {
       saved: "Saved"
     },
     agentGlobalPrompts: {
-      description: "Manage prompt library entries. Entries take effect only when selected by an agent profile.",
+      description: "Manage prompt library entries. Regular entries take effect only when selected by an agent profile, while Global System Prompt always applies globally.",
       saving: "Saving...",
       empty: "No prompt library entries yet. Add one to start.",
       actions: {
@@ -871,7 +887,8 @@ export default {
         titleLabel: "Title",
         promptLabel: "Prompt",
         promptPlaceholder: "Enter prompt text for this entry",
-        promptHelp: "Up to {maxKb}KB, current {bytes} bytes"
+        promptHelp: "Up to {maxKb}KB, current {bytes} bytes",
+        systemPromptHint: "This entry is injected as the system prompt base and affects all agents."
       },
       deleteConfirm: {
         title: "Delete prompt library entry?",
@@ -883,12 +900,13 @@ export default {
         invalidForm: "Please complete required fields",
         duplicateId: "Entry ID already exists",
         titleTooLong: "Title is too long. Maximum {max} characters",
-        promptTooLong: "Prompt is too long. Maximum {maxKb}KB"
+        promptTooLong: "Prompt is too long. Maximum {maxKb}KB",
+        reservedDelete: "The system prompt entry cannot be deleted"
       },
       saved: "Saved"
     },
     agentProfiles: {
-      description: "Configure AI agents, default agent, tool permissions, and default model.",
+      description: "Configure AI agents, default agent, allowed tools, and default model.",
       saving: "Saving...",
       empty: "No agents yet. Add one to start.",
       actions: {
@@ -902,7 +920,6 @@ export default {
         mcpServers: "MCP Servers",
         globalPrompts: "Prompt library",
         summary: "Summary",
-        permissions: "Permissions",
         defaultModel: "Default model",
         useGlobalDefault: "Use global default model",
         customDefaultModel: "Use custom default model"
@@ -917,11 +934,6 @@ export default {
         archiveSearch: "Archive Search",
         archiveRead: "Archive Read",
         archiveTail: "Archive Tail"
-      },
-      permissions: {
-        allowRead: "Allow Read",
-        allowWrite: "Allow Write",
-        allowBash: "Allow Bash"
       },
       modal: {
         ok: "OK",
@@ -972,7 +984,7 @@ export default {
       fields: {
         autoCompactThresholdPct: {
           label: "Auto-compaction threshold (%)",
-          help: "Auto-compaction triggers when last response total tokens reach current model context window * threshold/100. Range: 50-90."
+          help: "Auto-compaction triggers when last response total tokens reach current model context window * threshold/100. Range: 50-99."
         },
         modelTotalTimeoutMs: {
           label: "Model total timeout (seconds)",
@@ -985,6 +997,10 @@ export default {
         modelRequestMaxRetries: {
           label: "Model max retries",
           help: "Automatically retries only when a request fails before receiving the first chunk. 0 disables retries."
+        },
+        sessionTerminalSoundEnabled: {
+          label: "Run completion sound",
+          help: "Play a sound when a run completes. Applies to all sessions."
         }
       }
     },
@@ -1049,6 +1065,12 @@ export default {
         cancel: "Cancel"
       },
       resetSuccess: "Reset completed"
+    }
+  },
+  editor: {
+    placeholder: {
+      empty: "No content opened",
+      fileEditorComingSoon: "File editing will be connected in a later stage"
     }
   }
 } as const;

@@ -1,5 +1,4 @@
 export type UpdateFileChunk = {
-  changeContext?: string;
   sourceHunkHeader?: string;
   oldLines: string[];
   newLines: string[];
@@ -31,15 +30,6 @@ function computeReplacements(originalLines: string[], filePath: string, chunks: 
   let lineIndex = 0;
 
   for (const chunk of chunks) {
-    const hunkHint = chunk.sourceHunkHeader ? `\nHunk: ${chunk.sourceHunkHeader}` : "";
-    if (chunk.changeContext) {
-      const contextIndex = seekSequence(originalLines, [chunk.changeContext], lineIndex, false);
-      if (contextIndex == null) {
-        throw new Error(`Failed to find context '${chunk.changeContext}' in ${filePath}${hunkHint}`);
-      }
-      lineIndex = contextIndex + 1;
-    }
-
     if (chunk.oldLines.length === 0) {
       const insertionIndex =
         originalLines.length > 0 && originalLines[originalLines.length - 1] === ""
@@ -62,7 +52,15 @@ function computeReplacements(originalLines: string[], filePath: string, chunks: 
     }
 
     if (found == null) {
-      throw new Error(`Failed to find expected lines in ${filePath}${hunkHint}:\n${chunk.oldLines.join("\n")}`);
+      throw new Error(
+        buildSequenceMismatchError({
+          filePath,
+          chunk,
+          expectedLines: pattern,
+          searchStart: lineIndex,
+          originalLines
+        })
+      );
     }
 
     replacements.push([found, pattern.length, newSlice]);
@@ -71,6 +69,50 @@ function computeReplacements(originalLines: string[], filePath: string, chunks: 
 
   replacements.sort((a, b) => a[0] - b[0]);
   return replacements;
+}
+
+function buildSequenceMismatchError(params: {
+  filePath: string;
+  chunk: UpdateFileChunk;
+  expectedLines: string[];
+  searchStart: number;
+  originalLines: string[];
+}) {
+  const lines = [`Failed to find expected lines in ${params.filePath}`];
+  if (params.chunk.sourceHunkHeader) {
+    lines.push(`Hunk: ${params.chunk.sourceHunkHeader}`);
+  }
+  lines.push(`Search started from line ${Math.max(1, Math.floor(params.searchStart) + 1)}.`);
+  lines.push("");
+  lines.push("Expected block:");
+  lines.push(params.expectedLines.length > 0 ? params.expectedLines.join("\n") : "(empty)");
+  lines.push("");
+  lines.push("Nearby actual lines:");
+  lines.push(buildNearbyContextExcerpt({ originalLines: params.originalLines, startLineIndex: params.searchStart }));
+  lines.push("");
+  lines.push(
+    "Tip: re-read the target file and regenerate the patch with more accurate context, or increase unified diff context lines (for example: git diff -U5)."
+  );
+  return lines.join("\n");
+}
+
+function buildNearbyContextExcerpt(params: { originalLines: string[]; startLineIndex: number; maxLines?: number }) {
+  const maxLines = params.maxLines ?? 10;
+  if (params.originalLines.length === 0) {
+    return "(file is empty)";
+  }
+
+  const maxIndex = Math.max(0, params.originalLines.length - 1);
+  const anchor = Math.max(0, Math.min(Math.floor(params.startLineIndex), maxIndex));
+  const from = Math.max(0, anchor - 2);
+  const to = Math.min(params.originalLines.length, from + maxLines);
+  const excerpt: string[] = [];
+
+  for (let i = from; i < to; i += 1) {
+    excerpt.push(`${i + 1}| ${params.originalLines[i] ?? ""}`);
+  }
+
+  return excerpt.join("\n");
 }
 
 function applyReplacements(lines: string[], replacements: Array<[number, number, string[]]>) {

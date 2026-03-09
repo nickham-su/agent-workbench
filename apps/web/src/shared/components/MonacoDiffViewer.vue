@@ -20,6 +20,7 @@ const props = defineProps<{
   sideBySide?: boolean;
   showOverviewRuler?: boolean;
   compactMode?: boolean;
+  hideVerticalScrollbar?: boolean;
   hideUnchangedRegions?:
     | boolean
     | {
@@ -88,6 +89,18 @@ function updateAutoHeight() {
   const raw = Math.max(modifiedHeight, originalHeight);
   const bounds = resolveAutoHeightBounds();
   autoHeightPx.value = Math.min(bounds.max, Math.max(bounds.min, Math.ceil(raw)));
+}
+
+function shouldShowOverviewRuler() {
+  return props.showOverviewRuler === true;
+}
+
+function shouldUseCompactMode() {
+  return props.compactMode !== false;
+}
+
+function resolveVerticalScrollbarVisibility(autoHeight: boolean) {
+  return autoHeight || props.hideVerticalScrollbar === true ? "hidden" : "visible";
 }
 
 function resolveHideUnchangedRegionsOption(value: typeof props.hideUnchangedRegions): monaco.editor.IDiffEditorOptions["hideUnchangedRegions"] {
@@ -295,11 +308,11 @@ onMounted(() => {
     readOnly: true,
     fontSize: editorFontSize.value,
     minimap: {enabled: false},
+    compactMode: shouldUseCompactMode(),
     scrollBeyondLastLine: false,
     wordWrap: "off",
-    renderOverviewRuler: props.showOverviewRuler !== false,
+    renderOverviewRuler: shouldShowOverviewRuler(),
     renderWhitespace: "selection",
-    compactMode: props.compactMode === true,
     overviewRulerBorder: false,
     hideCursorInOverviewRuler: true,
     hideUnchangedRegions: resolveHideUnchangedRegionsOption(props.hideUnchangedRegions)
@@ -307,13 +320,14 @@ onMounted(() => {
 
   const originalEditor = editor.getOriginalEditor();
   const modifiedEditor = editor.getModifiedEditor();
+  const verticalScrollbar = resolveVerticalScrollbarVisibility(!!props.autoHeight);
   originalEditor.updateOptions({
-    scrollbar: {vertical: "hidden", horizontal: "auto"},
+    scrollbar: {vertical: verticalScrollbar, horizontal: "auto"},
     overviewRulerBorder: false,
     hideCursorInOverviewRuler: true
   });
   modifiedEditor.updateOptions({
-    scrollbar: {vertical: "hidden", horizontal: "auto"},
+    scrollbar: {vertical: verticalScrollbar, horizontal: "auto"},
     overviewRulerBorder: false,
     hideCursorInOverviewRuler: true
   });
@@ -363,7 +377,7 @@ watch(
     () => props.showOverviewRuler,
     (next) => {
       if (!editor) return;
-      editor.updateOptions({ renderOverviewRuler: next !== false });
+      editor.updateOptions({ renderOverviewRuler: next === true });
     }
 );
 
@@ -371,10 +385,27 @@ watch(
     () => props.compactMode,
     (next) => {
       if (!editor) return;
-      editor.updateOptions({ compactMode: next === true });
+      editor.updateOptions({ compactMode: next !== false });
       updateAutoHeight();
     }
 );
+
+watch(
+    () => props.autoHeight,
+    (next) => {
+      if (!editor) return;
+      const verticalScrollbar = resolveVerticalScrollbarVisibility(!!next);
+      editor.getOriginalEditor().updateOptions({ scrollbar: {vertical: verticalScrollbar, horizontal: "auto"} });
+      editor.getModifiedEditor().updateOptions({ scrollbar: {vertical: verticalScrollbar, horizontal: "auto"} });
+    }
+);
+
+watch(() => props.hideVerticalScrollbar, () => {
+  if (!editor) return;
+  const verticalScrollbar = resolveVerticalScrollbarVisibility(!!props.autoHeight);
+  editor.getOriginalEditor().updateOptions({ scrollbar: {vertical: verticalScrollbar, horizontal: "auto"} });
+  editor.getModifiedEditor().updateOptions({ scrollbar: {vertical: verticalScrollbar, horizontal: "auto"} });
+});
 
 watch(
     () => props.hideUnchangedRegions,

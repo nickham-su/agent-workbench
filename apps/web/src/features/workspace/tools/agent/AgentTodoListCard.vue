@@ -2,22 +2,16 @@
   <div
     :class="
       collapsed
-        ? 'w-full pl-2 pr-0 py-0.5 rounded cursor-pointer hover:bg-[var(--hover-bg)] transition-colors duration-100 text-[0.85em] font-mono text-[color:var(--text-secondary)]'
+        ? 'w-full pl-2 pr-0 py-0.5 rounded cursor-pointer hover:bg-[var(--hover-bg)] transition-colors duration-100 font-mono text-[color:var(--text-secondary)]'
         : 'w-full todo-card rounded border border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] p-2 cursor-pointer hover:bg-[var(--hover-bg)] hover:border-[var(--border-color)] transition-colors duration-100'
     "
     @click="emit('toggle-collapse')"
   >
     <div v-if="collapsed" class="flex items-center gap-2 min-w-0 flex-wrap">
       <span class="font-semibold text-[color:var(--text-color)] shrink-0">todolist</span>
-      <component
-        v-if="collapsedPreview.status === 'in_progress' || collapsedPreview.status === 'completed'"
-        :is="statusIcon(collapsedPreview.status)"
-        class="shrink-0 mr-0.5 align-[-1px]"
-        :class="statusIconClass(collapsedPreview.status)"
-      />
       <span class="shrink-0 font-semibold text-[color:var(--text-color)]">[{{ collapsedProgressText }}]</span>
       <span
-        class="min-w-0 flex-1 truncate text-[color:var(--text-secondary)]"
+        class="min-w-0 flex-1 truncate text-[color:var(--text-color)]"
         :title="collapsedPreview.text"
       >
         {{ collapsedPreview.text }}
@@ -25,12 +19,19 @@
     </div>
 
     <div v-else class="flex items-center gap-2 min-w-0">
-      <div class="text-[0.92em] font-semibold shrink-0">todolist</div>
+      <div class="font-semibold shrink-0">todolist</div>
     </div>
 
-    <div v-if="errorText" class="pt-0.5 text-[0.92em] text-red-500 whitespace-pre-wrap break-words">error: {{ errorText }}</div>
+    <div v-if="errorText" class="pt-0.5 text-red-500 whitespace-pre-wrap break-words">error: {{ errorText }}</div>
 
-    <div v-if="!collapsed && todos.length === 0" class="pt-2 text-[0.92em] text-[color:var(--text-tertiary)]">
+    <div v-if="!collapsed && goal" class="pt-1 text-[color:var(--text-secondary)] min-w-0">
+      <div class="truncate" :title="`${t('agent.client.todoListGoal')}: ${goal}`">
+        <span class="shrink-0">{{ t("agent.client.todoListGoal") }}:</span>
+        <span class="ml-1">{{ goal }}</span>
+      </div>
+    </div>
+
+    <div v-if="!collapsed && todos.length === 0" class="pt-2 text-[color:var(--text-tertiary)]">
       {{ t("agent.client.todoListEmpty") }}
     </div>
 
@@ -38,7 +39,7 @@
       <div
         v-for="(todo, index) in todos"
         :key="`${todo.status}-${todo.content}-${index}`"
-        class="px-2 py-0.5 leading-4 text-[0.92em]"
+        class="px-2 py-0.5 leading-4"
       >
         <component :is="statusIcon(todo.status)" class="mr-1 align-[-1px]" :class="statusIconClass(todo.status)" />
         <span class="break-words" :class="todo.status === 'completed' || todo.status === 'cancelled' ? 'line-through opacity-70' : ''">
@@ -58,6 +59,7 @@ type TodoStatus = "pending" | "in_progress" | "completed" | "cancelled";
 
 const props = defineProps<{
   errorText?: string;
+  goal?: string;
   collapsed?: boolean;
   summary: {
     total: number;

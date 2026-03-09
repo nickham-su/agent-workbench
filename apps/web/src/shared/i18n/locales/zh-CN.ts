@@ -220,7 +220,8 @@ export default {
       terminal: "终端",
       files: "文件",
       search: "搜索",
-      agent: "AI Agent"
+      agent: "AI Agent",
+      editor: "编辑器"
     },
     dock: {
       moveTo: "移动到 {area}",
@@ -292,7 +293,8 @@ export default {
       welcome: "你好, 我可以协助你完成任务。",
       reachedTop: "已到最早",
       contextBoundary: "上下文边界",
-      inputPlaceholder: "输入消息,Enter 发送,Tab 切换 Agent",
+      inputPlaceholderIdle: "输入消息,Enter 发送,Shift+Enter 换行,Tab 切换 Agent",
+      inputPlaceholderRunning: "运行中,Esc 取消当前运行",
       inputPlaceholderNoAgent: "请先创建 Agent 后再发送消息",
       noAgentHint: "当前没有可用 Agent,请先创建 Agent",
       goCreateAgent: "前往创建",
@@ -303,9 +305,12 @@ export default {
       runNoticeLabel: "运行通知",
       runNoticeEmpty: "当前没有运行时通知",
       lastTotalTokens: "总Token",
-      backToParent: "返回父会话",
+      backToParent: "返回",
+      copySessionId: "复制 Session ID",
+      sessionIdCopied: "已复制 Session ID",
       parentSessionMissing: "未找到父会话",
-      readonlySubtaskHint: "子任务会话为只读模式",
+      subtaskRunningHint: "已运行 {elapsed}，如需取消请到主会话",
+      subtaskCancelInParentHint: "如需取消，请到主会话",
       subtaskCardTitle: "子任务",
       subtaskMode: "模式",
       subtaskModeNew: "新会话",
@@ -315,9 +320,10 @@ export default {
       subtaskSessionId: "Session ID",
       todoListCardTitle: "任务清单",
       todoListSummary: "总计 {total}, 进行中 {inProgress}, 待办 {pending}, 已完成 {completed}, 已取消 {cancelled}",
+      todoListGoal: "目标",
       todoListEmpty: "当前清单为空",
       applyPatchCardTitle: "补丁变更",
-      applyPatchPreview: "待审批预览",
+      applyPatchPreview: "补丁预览",
       applyPatchApplied: "已应用",
       applyPatchFileCount: "文件",
       applyPatchLineStats: "行变更",
@@ -333,8 +339,6 @@ export default {
       revertConfirmTitleAssistant: "确认回退到这条 AI 消息？",
       revertConfirmContentAssistant: "将回退到该条 AI 消息并保留该消息。回退后,后续对话分支将暂时不可见。",
       reverted: "已回退到选中消息",
-      approve: "允许",
-      deny: "拒绝",
       roles: {
         user: "我",
         assistant: "AI",
@@ -549,6 +553,18 @@ export default {
       title: "关闭未保存的文件？",
       content: "该文件有未保存修改，确认关闭？",
       ok: "关闭",
+      cancel: "取消"
+    },
+    closeOthersConfirm: {
+      title: "关闭其他标签页？",
+      content: "其他标签页中有 {count} 个未保存文件，确认关闭其他标签页？",
+      ok: "关闭其他",
+      cancel: "取消"
+    },
+    closeAllConfirm: {
+      title: "关闭全部标签页？",
+      content: "当前有 {count} 个未保存文件，确认关闭全部标签页？",
+      ok: "关闭全部",
       cancel: "取消"
     },
     conflict: {
@@ -850,7 +866,7 @@ export default {
       saved: "已保存"
     },
     agentGlobalPrompts: {
-      description: "管理提示词库条目,仅在 Agent 中选中后生效。",
+      description: "管理提示词库条目。普通条目仅在 Agent 中选中后生效，Global System Prompt 会全局生效。",
       saving: "正在保存...",
       empty: "暂无提示词库条目，请先新增",
       actions: {
@@ -869,7 +885,8 @@ export default {
         titleLabel: "标题",
         promptLabel: "提示词",
         promptPlaceholder: "输入该条目的提示词内容",
-        promptHelp: "最多 {maxKb}KB，当前 {bytes} bytes"
+        promptHelp: "最多 {maxKb}KB，当前 {bytes} bytes",
+        systemPromptHint: "该条目作为系统提示词底座注入，影响所有 Agent。"
       },
       deleteConfirm: {
         title: "删除提示词库条目？",
@@ -881,12 +898,13 @@ export default {
         invalidForm: "请完整填写必填项",
         duplicateId: "条目 ID 已存在",
         titleTooLong: "标题过长，最多 {max} 个字符",
-        promptTooLong: "提示词过长，最多 {maxKb}KB"
+        promptTooLong: "提示词过长，最多 {maxKb}KB",
+        reservedDelete: "系统提示词条目不允许删除"
       },
       saved: "已保存"
     },
     agentProfiles: {
-      description: "配置 AI Agent 列表、默认 Agent、工具权限与默认模型。",
+      description: "配置 AI Agent 列表、默认 Agent、可用工具与默认模型。",
       saving: "正在保存...",
       empty: "暂无 Agent，请先新增",
       actions: {
@@ -900,7 +918,6 @@ export default {
         mcpServers: "MCP Server",
         globalPrompts: "提示词库",
         summary: "简介",
-        permissions: "权限",
         defaultModel: "默认模型",
         useGlobalDefault: "默认模型",
         customDefaultModel: "使用自定义默认模型"
@@ -915,11 +932,6 @@ export default {
         archiveSearch: "Archive Search",
         archiveRead: "Archive Read",
         archiveTail: "Archive Tail"
-      },
-      permissions: {
-        allowRead: "允许 Read",
-        allowWrite: "允许 Write",
-        allowBash: "允许 Bash"
       },
       modal: {
         ok: "确定",
@@ -970,19 +982,23 @@ export default {
       fields: {
         autoCompactThresholdPct: {
           label: "自动压缩阈值(%)",
-          help: "当最近一次模型响应总 token 达到当前模型 context window * 阈值/100 时触发自动压缩。范围 50-90。"
+          help: "当最近一次模型响应总 token 达到当前模型 context window * 阈值/100 时触发自动压缩。范围 50-99。"
         },
         modelTotalTimeoutMs: {
-          label: "模型总超时（秒）",
+          label: "单次请求超时（秒）",
           help: "单次模型请求的总超时时间。达到后将中止该次请求并标记为失败。仅支持整数秒,0 表示关闭。"
         },
         modelIdleTimeoutMs: {
-          label: "模型空闲超时（秒）",
+          label: "请求空闲超时（秒）",
           help: "单次模型请求在连续一段时间未收到任何流式 chunk（包括 reasoning/tool-call/finish）时中止。仅支持整数秒,0 表示关闭。"
         },
         modelRequestMaxRetries: {
           label: "模型重试最大次数",
           help: "仅在首包前失败时自动重试。0 表示不重试。"
+        },
+        sessionTerminalSoundEnabled: {
+          label: "运行结束提示音",
+          help: "当运行结束时播放提示音。对所有会话生效。"
         }
       }
     },
@@ -1047,6 +1063,12 @@ export default {
         cancel: "取消"
       },
       resetSuccess: "已重置"
+    }
+  },
+  editor: {
+    placeholder: {
+      empty: "暂无打开内容",
+      fileEditorComingSoon: "文件编辑能力将在后续阶段接入"
     }
   }
 } as const;

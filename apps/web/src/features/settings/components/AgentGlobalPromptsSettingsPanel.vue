@@ -29,7 +29,14 @@
             <div class="font-semibold text-xs truncate" :title="item.title">{{ item.title }}</div>
             <div class="text-xs text-[color:var(--text-tertiary)] truncate" :title="item.id">{{ item.id }}</div>
           </div>
-          <div class="text-[11px] text-[color:var(--text-tertiary)] whitespace-pre-wrap break-words">
+          <div
+            class="text-[11px] text-[color:var(--text-tertiary)] whitespace-pre-wrap break-words overflow-hidden"
+            :style="{
+              display: '-webkit-box',
+              WebkitLineClamp: '3',
+              WebkitBoxOrient: 'vertical'
+            }"
+          >
             {{ item.prompt || "-" }}
           </div>
         </div>
@@ -44,16 +51,18 @@
           >
             <template #icon><EditOutlined /></template>
           </a-button>
-          <a-button
-            size="small"
-            type="text"
-            danger
-            @click="confirmDelete(item.id)"
-            :title="t('settings.agentGlobalPrompts.actions.delete')"
-            :aria-label="t('settings.agentGlobalPrompts.actions.delete')"
-          >
-            <template #icon><DeleteOutlined /></template>
-          </a-button>
+          <template v-if="!isReservedItem(item.id)">
+            <a-button
+              size="small"
+              type="text"
+              danger
+              @click="confirmDelete(item.id)"
+              :title="t('settings.agentGlobalPrompts.actions.delete')"
+              :aria-label="t('settings.agentGlobalPrompts.actions.delete')"
+            >
+              <template #icon><DeleteOutlined /></template>
+            </a-button>
+          </template>
         </div>
       </div>
     </div>
@@ -72,14 +81,17 @@
           <a-input v-model:value="formId" disabled />
         </a-form-item>
         <a-form-item :label="t('settings.agentGlobalPrompts.form.titleLabel')" :required="true">
-          <a-input v-model:value="formTitle" :maxlength="MAX_TITLE_LENGTH" />
+          <a-input v-model:value="formTitle" :maxlength="MAX_TITLE_LENGTH" :disabled="isReservedItem(formId)" />
         </a-form-item>
-        <a-form-item :label="t('settings.agentGlobalPrompts.form.promptLabel')">
+        <a-form-item :label="t('settings.agentGlobalPrompts.form.promptLabel')" :required="true">
           <a-textarea
             v-model:value="formPrompt"
             :auto-size="{ minRows: 6, maxRows: 16 }"
             :placeholder="t('settings.agentGlobalPrompts.form.promptPlaceholder')"
           />
+          <div v-if="isReservedItem(formId)" class="pt-1 text-xs text-[color:var(--text-tertiary)]">
+            {{ t("settings.agentGlobalPrompts.form.systemPromptHint") }}
+          </div>
           <div class="pt-1 text-xs text-[color:var(--text-tertiary)]">
             {{ t("settings.agentGlobalPrompts.form.promptHelp", { maxKb: MAX_PROMPT_BYTES / 1024, bytes: promptBytes }) }}
           </div>
@@ -99,6 +111,8 @@ import { getAgentGlobalPromptSettings, updateAgentGlobalPromptSettings } from "@
 
 const MAX_TITLE_LENGTH = 20;
 const MAX_PROMPT_BYTES = 32 * 1024;
+const RESERVED_GLOBAL_SYSTEM_PROMPT_ID = "global_system_prompt";
+const RESERVED_GLOBAL_SYSTEM_PROMPT_TITLE = "Global System Prompt";
 
 const { t } = useI18n();
 
@@ -138,7 +152,14 @@ function normalizeItems(raw: unknown): AgentGlobalPromptItem[] {
 }
 
 function mapFromSettings(settings: AgentGlobalPromptSettings) {
-  items.value = normalizeItems(settings.items);
+  const normalized = normalizeItems(settings.items);
+  const reserved = normalized.find((item) => isReservedItem(item.id));
+  const others = normalized.filter((item) => !isReservedItem(item.id));
+  items.value = reserved ? [reserved, ...others] : others;
+}
+
+function isReservedItem(id: string) {
+  return id.trim() === RESERVED_GLOBAL_SYSTEM_PROMPT_ID;
 }
 
 function toRequestBody() {
@@ -164,7 +185,7 @@ function openEdit(id: string) {
   if (!target) return;
   modalMode.value = "edit";
   formId.value = target.id;
-  formTitle.value = target.title;
+  formTitle.value = isReservedItem(target.id) ? RESERVED_GLOBAL_SYSTEM_PROMPT_TITLE : target.title;
   formPrompt.value = target.prompt;
   modalOpen.value = true;
 }
@@ -204,10 +225,12 @@ async function persist(params: { toast: boolean }) {
 function submit() {
   const id = formId.value.trim();
   const title = formTitle.value.trim();
-  if (!id || !title) {
+  const prompt = formPrompt.value;
+  if (!id || !title || !prompt.trim()) {
     message.error(t("settings.agentGlobalPrompts.errors.invalidForm"));
     return;
   }
+  const normalizedTitle = isReservedItem(id) ? RESERVED_GLOBAL_SYSTEM_PROMPT_TITLE : title;
   if (title.length > MAX_TITLE_LENGTH) {
     message.error(t("settings.agentGlobalPrompts.errors.titleTooLong", { max: MAX_TITLE_LENGTH }));
     return;
@@ -219,8 +242,8 @@ function submit() {
 
   const payload: AgentGlobalPromptItem = {
     id,
-    title,
-    prompt: formPrompt.value
+    title: normalizedTitle,
+    prompt
   };
 
   if (modalMode.value === "create") {
@@ -240,6 +263,10 @@ function submit() {
 }
 
 function confirmDelete(id: string) {
+  if (isReservedItem(id)) {
+    message.error(t("settings.agentGlobalPrompts.errors.reservedDelete"));
+    return;
+  }
   const target = items.value.find((item) => item.id === id);
   if (!target) return;
   Modal.confirm({

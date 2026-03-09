@@ -2,7 +2,7 @@
   <div
     ref="rootEl"
     class="awb-text-message whitespace-pre-wrap break-words select-text font-mono text-[color:var(--text-secondary)]"
-    :style="[{ fontSize: 'var(--agent-font-size, 13px)' }, collapsedStyle]"
+    :style="collapsedStyle"
     :class="[
       expandable ? 'cursor-pointer' : '',
       tone === 'error' ? 'text-red-500' : ''
@@ -10,6 +10,7 @@
     @click="onToggle"
   >
     {{ props.text }}
+    <slot name="suffix" />
   </div>
 </template>
 

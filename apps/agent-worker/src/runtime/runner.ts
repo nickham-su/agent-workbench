@@ -12,7 +12,7 @@ import { runReadTool, runWriteTool } from "./fileTools.js";
 import { McpManager } from "./mcpManager.js";
 import { applyPreparedPatch, prepareApplyPatchTool, type ApplyPatchPrepared } from "./applyPatch.js";
 import { parseTodolistArgs, toTodolistResult } from "./todolist.js";
-import { chunkStartsVisibleOutput } from "./modelRetry.js";
+import { buildRetryMessages, chunkStartsVisibleOutput, shouldRetryAfterPartialText } from "./modelRetry.js";
 
 function nowMs() {
   return Date.now();
@@ -51,16 +51,27 @@ const TOOL_ARTIFACT_MAX_CHARS = Math.max(
   parseIntOrDefault(process.env.AWB_TOOL_ARTIFACT_MAX_CHARS, 200_000)
 );
 const COMPACTION_USER_PROMPT = [
-  "请基于当前会话内容输出一份总结,用于继续当前任务。",
+  "请基于当前会话内容输出一份结构化总结,用于后续模型继续同一任务。",
+  "总结目标不是回顾,而是帮助后续模型快速接手并继续执行。",
+  "",
   "重点覆盖:",
   "- 已完成了什么",
   "- 当前正在做什么",
-  "- 涉及哪些文件或模块",
-  "- 下一步待办",
+  "- 与后续工作直接相关的关键文件、模块、接口、命令或工具",
+  "- 下一步待办(按优先级列出,尽量写成可直接执行的动作)",
   "- 需要持续遵守的用户约束与偏好",
   "- 关键技术决策及原因",
-  "要求: 只输出总结,不要回答会话中的问题,不要编造未出现的信息。"
+  "- 已排除的方案、失败尝试或需要避免重复踩坑的信息",
+  "- 如果历史消息中调用过 subtask 工具,必须输出“可复用的 subtask 会话”小节; 每项至少包含: 目的(description)、subtask_session_id、产出摘要、后续可复用价值或适用场景",
+  "",
+  "输出要求:",
+  "- 只输出总结,不要回答会话中的问题",
+  "- 不要编造未出现的信息",
+  "- 明确区分已确认事实、待确认事项、未完成事项",
+  "- 结构清晰,使用固定小节与项目符号",
+  "- 如果没有某类信息,可省略对应小节,不要硬编"
 ].join("\n");
+const COMPACTION_TIMEOUT_MS = 300_000;
 
 const MANUAL_COMPACT_SENTINEL = "__awb_compact__";
 
@@ -192,23 +203,30 @@ function buildToolSuccessText(params: {
 
   if (params.toolName === "read") {
     const source = typeof params.args.filePath === "string" ? params.args.filePath : undefined;
-    const offset = toIntOrNull(params.args.offset);
-    const limit = toIntOrNull(params.args.limit);
+    const actualStart = toIntOrNull(resultObj?.actualStart);
+    const actualEnd = toIntOrNull(resultObj?.actualEnd);
+    const offsetOutOfRange = resultObj?.offsetOutOfRange === true;
     const range =
-      offset != null && limit != null && limit > 0
-        ? `${offset}-${offset + Math.max(0, limit - 1)}`
-        : offset != null
-          ? String(offset)
-          : undefined;
+      offsetOutOfRange
+        ? undefined
+        : actualStart != null && actualEnd != null && actualEnd >= actualStart
+          ? `${actualStart}-${actualEnd}`
+          : actualStart != null
+            ? String(actualStart)
+            : undefined;
     const body = typeof resultObj?.content === "string"
       ? resultObj.content
       : typeof resultObj?.summary === "string"
         ? resultObj.summary
         : stringifyResult(params.result);
+    const headers: Array<[string, string | undefined]> = [["source", source]];
+    if (range) {
+      headers.push(["range", range]);
+    }
     return buildToolText({
       toolName: params.toolName,
       status: params.status,
-      headers: [["source", source], ["range", range]],
+      headers,
       body
     });
   }
@@ -279,7 +297,7 @@ function buildToolSuccessText(params: {
   });
 }
 
-function buildToolErrorText(params: { toolName: string; status: "failed" | "denied" | "cancelled"; error: string }) {
+function buildToolErrorText(params: { toolName: string; status: "failed" | "cancelled"; error: string }) {
   return buildToolText({
     toolName: params.toolName,
     status: params.status,
@@ -405,11 +423,10 @@ type QueuedRun = {
 
 type PendingTool = {
   itemId: number;
-  status: "queued" | "running" | "awaiting_permission" | "streaming" | "completed" | "failed" | "denied" | "cancelled";
+  status: "queued" | "running" | "streaming" | "completed" | "failed" | "cancelled";
   toolName: string;
   toolCallId: string;
   args: Record<string, unknown>;
-  approved?: boolean;
 };
 
 type ToolCall = {
@@ -902,90 +919,6 @@ export class AgentRunner {
       }
     }
 
-    const needsApproval =
-      (tool.toolName === "read" && !profile.agent.permissions.allowRead) ||
-      (tool.toolName === "write" && !profile.agent.permissions.allowWrite) ||
-      (tool.toolName === "apply_patch" && !profile.agent.permissions.allowWrite) ||
-      (tool.toolName === "bash" && !profile.agent.permissions.allowBash);
-
-    if (tool.status === "awaiting_permission") {
-      if (!needsApproval) {
-        await this.apiClient.updateContextItem({
-          itemId: tool.itemId,
-          status: "queued",
-          output: {
-            ...outputBase,
-            ...(tool.toolName === "apply_patch" ? { text: buildToolText({ toolName: tool.toolName, status: "queued", body: "apply_patch prepared" }) } : {})
-          },
-          updatedAt: nowMs()
-        });
-        await this.apiClient.updateRunState({
-          workspaceId: run.workspaceId,
-          sessionId: run.sessionId,
-          status: "running",
-          activeRunId: run.runId,
-          activeAssistantItemId: null,
-          waitingToolItemId: null,
-          updatedAt: nowMs()
-        });
-      } else {
-        await this.apiClient.updateRunState({
-          workspaceId: run.workspaceId,
-          sessionId: run.sessionId,
-          status: "waiting_permission",
-          activeRunId: run.runId,
-          activeAssistantItemId: null,
-          waitingToolItemId: tool.itemId,
-          updatedAt: nowMs()
-        });
-        return { paused: true as const };
-      }
-    }
-
-    if (needsApproval && tool.approved !== true) {
-      await this.apiClient.updateContextItem({
-        itemId: tool.itemId,
-        status: "awaiting_permission",
-        output: {
-          ...outputBase,
-          ...(tool.toolName === "apply_patch"
-            ? { text: buildToolText({ toolName: tool.toolName, status: "awaiting_permission", body: "apply_patch awaiting permission" }) }
-            : {})
-        },
-        updatedAt: nowMs()
-      });
-      await writeItemLog({
-        logger: this.logger,
-        workspacePath: run.workspacePath,
-        kind: "tool",
-        itemId: tool.itemId,
-        payload: {
-          meta: {
-            workspaceId: run.workspaceId,
-            sessionId: run.sessionId,
-            runId: run.runId,
-            toolItemId: tool.itemId
-          },
-          request: {
-            toolName: tool.toolName,
-            toolCallId: tool.toolCallId,
-            args: tool.args
-          },
-          status: "awaiting_permission"
-        }
-      });
-      await this.apiClient.updateRunState({
-        workspaceId: run.workspaceId,
-        sessionId: run.sessionId,
-        status: "waiting_permission",
-        activeRunId: run.runId,
-        activeAssistantItemId: null,
-        waitingToolItemId: tool.itemId,
-        updatedAt: nowMs()
-      });
-      return { paused: true as const };
-    }
-
     await this.apiClient.updateContextItem({
       itemId: tool.itemId,
       status: "running",
@@ -997,6 +930,7 @@ export class AgentRunner {
     });
 
     let subtaskSessionId: string | undefined;
+    let subtaskResultText: string | undefined;
 
     try {
       let result: unknown;
@@ -1195,7 +1129,7 @@ export class AgentRunner {
             status: "cancelled",
             updatedAt: nowMs()
           });
-        } else if (subtaskStatus.status === "running" || subtaskStatus.status === "waiting_permission") {
+        } else if (subtaskStatus.status === "running") {
           throw new Error(`subtask did not reach terminal status: ${subtaskStatus.status}`);
         }
 
@@ -1208,6 +1142,10 @@ export class AgentRunner {
           subtaskSessionId: started.sessionId,
           resultText: subtaskResult.resultText
         };
+        subtaskResultText = typeof subtaskResult.resultText === "string" ? subtaskResult.resultText : undefined;
+        if (subtaskStatus.status === "failed" || subtaskStatus.status === "cancelled") {
+          throw new Error(`subtask ${subtaskStatus.status}`);
+        }
       } else if (isMcpTool(tool.toolName)) {
         const mcpResult = await this.mcpManager.callTool(tool.toolName, tool.args);
         result = {
@@ -1301,7 +1239,10 @@ export class AgentRunner {
           ...(subtaskSessionId
             ? {
                 result: {
-                  subtaskSessionId
+                  subtaskSessionId,
+                  ...(typeof subtaskResultText === "string"
+                    ? { resultText: subtaskResultText }
+                    : {})
                 }
               }
             : {}),
@@ -1400,7 +1341,7 @@ export class AgentRunner {
         });
         continue;
       }
-      if (item.status !== "queued" && item.status !== "awaiting_permission") continue;
+      if (item.status !== "queued") continue;
       const toolCallId = String(item.toolCallId || "").trim();
       if (!toolCallId) continue;
       pending.push({
@@ -1408,8 +1349,7 @@ export class AgentRunner {
         status: item.status,
         toolName: item.toolName,
         toolCallId,
-        args: item.args,
-        approved: item.approved === true
+        args: item.args
       });
     }
 
@@ -1434,7 +1374,6 @@ export class AgentRunner {
       status: "running",
       activeRunId: params.run.runId,
       activeAssistantItemId: null,
-      waitingToolItemId: null,
       updatedAt: nowMs()
     });
     return { paused: false as const };
@@ -1446,7 +1385,7 @@ export class AgentRunner {
     runtime: ExecutionProfile["runtime"];
   }) {
     const maxContextTokens = Math.max(1, Math.floor(Number(params.model.contextWindowTokens || 0)));
-    const thresholdPct = Math.max(50, Math.min(90, Math.floor(Number(params.runtime.autoCompactThresholdPct || 80))));
+    const thresholdPct = Math.max(50, Math.min(99, Math.floor(Number(params.runtime.autoCompactThresholdPct || 80))));
     const lastTotalTokens = typeof params.context.lastResponseTotalTokens === "number"
       ? Math.max(0, Math.floor(params.context.lastResponseTotalTokens))
       : null;
@@ -1473,6 +1412,7 @@ export class AgentRunner {
       {
         system: context.system || undefined,
         messages: [...context.messages, { role: "user", content: COMPACTION_USER_PROMPT }],
+        timeoutMs: COMPACTION_TIMEOUT_MS,
         abortSignal: signal
       }
     );
@@ -1497,7 +1437,6 @@ export class AgentRunner {
       status: "running",
       activeRunId: run.runId,
       activeAssistantItemId: null,
-      waitingToolItemId: null,
       lastResponseTotalTokens: null,
       updatedAt: nowMs()
     });
@@ -1549,7 +1488,6 @@ export class AgentRunner {
       status: "running",
       activeRunId: run.runId,
       activeAssistantItemId: assistant.id,
-      waitingToolItemId: null,
       runNoticeText: "",
       updatedAt: nowMs()
     });
@@ -1596,7 +1534,10 @@ export class AgentRunner {
     // 自定义重试策略由本文件控制,禁用 AI SDK 内建重试避免双重重试。
     requestBase.maxRetries = 0;
 
+    const assistantStreamFlushIntervalMs = 240;
+    const assistantStreamFlushCharsThreshold = 80;
     let text = "";
+    let reasoningText = "";
     const toolCalls: ToolCall[] = [];
     const startedAt = nowMs();
     let responseTotalTokens: number | null = null;
@@ -1628,6 +1569,50 @@ export class AgentRunner {
 
     let retryCount = 0;
     let successfulStream: any = null;
+    let lastFlushedText = "";
+    let lastFlushedReasoningText = "";
+    let lastFlushAt = nowMs();
+    let pendingFlush = false;
+
+    const flushAssistant = async (status: "streaming" | "completed" | "failed", force = false) => {
+      if (
+        !force
+        && text === lastFlushedText
+        && reasoningText === lastFlushedReasoningText
+        && status === "streaming"
+      ) {
+        return;
+      }
+      await this.apiClient.updateContextItem({
+        itemId: assistant.id,
+        status,
+        output: {
+          type: "assistant_text",
+          text,
+          ...(reasoningText ? { reasoning: { text: reasoningText } } : {})
+        },
+        updatedAt: nowMs()
+      });
+      lastFlushedText = text;
+      lastFlushedReasoningText = reasoningText;
+      lastFlushAt = nowMs();
+      pendingFlush = false;
+    };
+
+    const maybeFlushAssistantStreaming = async (force = false) => {
+      const now = nowMs();
+      const deltaChars = (text.length - lastFlushedText.length) + (reasoningText.length - lastFlushedReasoningText.length);
+      if (
+        force
+        || deltaChars >= assistantStreamFlushCharsThreshold
+        || now - lastFlushAt >= assistantStreamFlushIntervalMs
+      ) {
+        await flushAssistant("streaming", true);
+        return;
+      }
+      pendingFlush = true;
+    };
+
     while (true) {
       if (signal.aborted) {
         return { aborted: true as const, assistantItemId: assistant.id };
@@ -1641,8 +1626,7 @@ export class AgentRunner {
             status: "running",
             activeRunId: run.runId,
             activeAssistantItemId: assistant.id,
-            waitingToolItemId: null,
-            runNoticeText: "",
+                  runNoticeText: "",
             updatedAt: nowMs()
           });
         } catch {
@@ -1690,9 +1674,17 @@ export class AgentRunner {
         }, modelTotalTimeoutMs);
       }
 
+      const retryMessages = buildRetryMessages({
+        baseMessages: context.messages as Array<Record<string, unknown>>,
+        text,
+        toolCalls: toolCalls.length,
+        retryCount,
+        maxRetries: modelRequestMaxRetries
+      });
       const request: Record<string, unknown> = {
         ...requestBase,
-        abortSignal: requestController.signal
+        abortSignal: requestController.signal,
+        messages: retryMessages
       };
 
       try {
@@ -1709,15 +1701,14 @@ export class AgentRunner {
             const delta = String(chunk.text || "");
             if (!delta) continue;
             text += delta;
-            await this.apiClient.updateContextItem({
-              itemId: assistant.id,
-              status: "streaming",
-              output: {
-                type: "assistant_text",
-                text
-              },
-              updatedAt: nowMs()
-            });
+            await maybeFlushAssistantStreaming();
+            continue;
+          }
+          if (chunk.type === "reasoning-delta") {
+            const delta = String(chunk.text || chunk.delta || "");
+            if (!delta) continue;
+            reasoningText += delta;
+            await maybeFlushAssistantStreaming();
             continue;
           }
           if (chunk.type === "tool-call") {
@@ -1740,6 +1731,9 @@ export class AgentRunner {
             const message = chunk.error instanceof Error ? chunk.error.message : String(chunk.error || "stream error");
             throw new Error(message);
           }
+        }
+        if (pendingFlush) {
+          await flushAssistant("streaming", true);
         }
 
         if (signal.aborted) {
@@ -1764,7 +1758,10 @@ export class AgentRunner {
         }
         const message = err instanceof Error ? err.message : String(err);
 
-        const canRetry = !attemptStartedVisibleOutput && retryCount < modelRequestMaxRetries;
+        const canRetry =
+          (!attemptStartedVisibleOutput && retryCount < modelRequestMaxRetries)
+          || shouldRetryAfterPartialText({ text, toolCalls: toolCalls.length, retryCount, maxRetries: modelRequestMaxRetries });
+
         if (canRetry) {
           const delayMs = computeRetryBackoffMs(retryCount);
           const retryAttempt = retryCount + 1;
@@ -1776,8 +1773,7 @@ export class AgentRunner {
               status: "running",
               activeRunId: run.runId,
               activeAssistantItemId: assistant.id,
-              waitingToolItemId: null,
-              runNoticeText: noticeText,
+                      runNoticeText: noticeText,
               updatedAt: nowMs()
             });
           } catch {
@@ -1817,16 +1813,17 @@ export class AgentRunner {
         }
 
         const finalMessage = retryCount > 0 ? `failed after ${retryCount} retries: ${message}` : message;
-        const failedText = text.trim().length > 0 ? `${text}\n\n[run] ${finalMessage}` : `[run] ${finalMessage}`;
         try {
+          if (pendingFlush) {
+            await flushAssistant("streaming", true);
+          }
           await this.apiClient.updateRunState({
             workspaceId: run.workspaceId,
             sessionId: run.sessionId,
             status: "running",
             activeRunId: run.runId,
             activeAssistantItemId: assistant.id,
-            waitingToolItemId: null,
-            runNoticeText: "",
+                  runNoticeText: "",
             updatedAt: nowMs()
           });
         } catch {
@@ -1838,7 +1835,9 @@ export class AgentRunner {
             status: "failed",
             output: {
               type: "assistant_text",
-              text: failedText
+              text,
+              ...(reasoningText ? { reasoning: { text: reasoningText } } : {}),
+              error: finalMessage
             },
             updatedAt: nowMs()
           });
@@ -1866,6 +1865,7 @@ export class AgentRunner {
             request,
             response: {
               text,
+              reasoningText,
               toolCalls,
               error: finalMessage
             }
@@ -1939,15 +1939,19 @@ export class AgentRunner {
         });
       }
 
-      await this.apiClient.updateContextItem({
-        itemId: assistant.id,
-        status: "completed",
-        output: {
-          type: "assistant_text",
-          text
-        },
-        updatedAt: nowMs()
-      });
+      if (successfulStream) {
+        try {
+          const finalReasoning = await successfulStream.reasoningText;
+          const finalReasoningText = typeof finalReasoning === "string"
+            ? String(finalReasoning)
+            : "";
+          reasoningText = finalReasoningText || reasoningText;
+        } catch {
+          // best-effort: 保留流式阶段已累计的 reasoningText,不要因收尾读取失败打断整轮成功结果
+        }
+      }
+
+      await flushAssistant("completed", true);
 
       await writeItemLog({
         logger: this.logger,
@@ -1969,6 +1973,7 @@ export class AgentRunner {
           request: requestBase,
           response: {
             text,
+            reasoningText,
             toolCalls: recognizedCalls,
             usage: responseTotalTokens == null ? null : { totalTokens: responseTotalTokens }
           }
@@ -1981,8 +1986,7 @@ export class AgentRunner {
         status: "running",
         activeRunId: run.runId,
         activeAssistantItemId: null,
-        waitingToolItemId: null,
-        lastResponseTotalTokens: responseTotalTokens,
+          lastResponseTotalTokens: responseTotalTokens,
         runNoticeText: "",
         updatedAt: nowMs()
       });
@@ -2004,8 +2008,7 @@ export class AgentRunner {
         status: "running",
         activeRunId: run.runId,
         activeAssistantItemId: null,
-        waitingToolItemId: null,
-        runNoticeText: "",
+          runNoticeText: "",
         updatedAt: nowMs()
       });
 
@@ -2036,8 +2039,7 @@ export class AgentRunner {
           status: "running",
           activeRunId: run.runId,
           activeAssistantItemId: null,
-          waitingToolItemId: null,
-          runNoticeText: "正在压缩上下文...",
+              runNoticeText: "正在压缩上下文...",
           updatedAt: nowMs()
         });
 

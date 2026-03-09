@@ -90,7 +90,6 @@ import type {
   AgentSessionRunState,
   AgentControlResult,
   AgentCancelSessionRequest,
-  AgentToolPermissionRequest,
   AgentProvidersSettingsView,
   AgentGlobalPromptSettings,
   AgentMcpSettings,
@@ -100,6 +99,7 @@ import type {
   UpdateAgentGlobalPromptSettingsRequest,
   UpdateAgentRuntimeSettingsRequest,
   AgentSettings,
+  AgentSettingsView,
   UpdateAgentSettingsRequest
 } from "@agent-workbench/shared";
 import { emitUnauthorized } from "@/features/auth/unauthorized";
@@ -839,7 +839,7 @@ export async function updateAgentRuntimeSettings(body: UpdateAgentRuntimeSetting
 
 export async function getAgentSettings() {
   try {
-    const res = await client.get<AgentSettings>("/settings/agent/agents");
+    const res = await client.get<AgentSettingsView>("/settings/agent/agents");
     return res.data;
   } catch (err) {
     throw toApiError(err);
@@ -978,18 +978,6 @@ export async function compactAgentSession(sessionId: string, body: AgentCompactS
 export async function clearAgentSession(sessionId: string, body: AgentClearSessionRequest) {
   try {
     const res = await client.post<AgentControlResult>(`/agent/sessions/${sessionId}/clear`, body);
-    return res.data;
-  } catch (err) {
-    throw toApiError(err);
-  }
-}
-
-export async function decideAgentToolPermission(sessionId: string, body: AgentToolPermissionRequest) {
-  try {
-    const res = await client.post<{ runId: string; decision: "approve" | "deny" }>(
-      `/agent/sessions/${sessionId}/tool-permission`,
-      body
-    );
     return res.data;
   } catch (err) {
     throw toApiError(err);

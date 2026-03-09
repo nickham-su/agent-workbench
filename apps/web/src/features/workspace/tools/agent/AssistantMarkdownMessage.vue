@@ -3,7 +3,6 @@
     ref="rootEl"
     class="assistant-markdown-message break-words"
     :class="toneClass"
-    :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
     v-html="safeHtml"
   />
 </template>
@@ -19,6 +18,7 @@ const props = defineProps<{
   messageId: number;
   streaming?: boolean;
   tone?: "normal" | "error";
+  sectionKey?: string;
 }>();
 
 const MARKDOWN_DEBOUNCE_MS = 280;
@@ -138,8 +138,8 @@ function stableHash(input: string) {
   return (hash >>> 0).toString(16);
 }
 
-function cacheKeyOf(input: string) {
-  return `${input.length}:${stableHash(input)}:${input.slice(0, 24)}`;
+function cacheKeyOf(input: string, namespace = "") {
+  return `${namespace}:${input.length}:${stableHash(input)}:${input.slice(0, 24)}`;
 }
 
 function getCacheValue(cache: Map<string, string>, key: string) {
@@ -239,7 +239,7 @@ async function renderMarkdown() {
   const seq = ++renderSeq;
   const rawText = String(props.text || "");
   lastRawText = rawText;
-  const key = cacheKeyOf(rawText);
+  const key = cacheKeyOf(rawText, `markdown:${props.sectionKey || "body"}`);
   const cached = getCacheValue(markdownCache, key);
   if (cached != null) {
     safeHtml.value = cached;
@@ -282,11 +282,11 @@ async function renderMermaidBlocks(seq: number, rawText: string) {
     const source = String(codeEl.textContent || "").trim();
     if (!source) continue;
 
-    const cacheKey = cacheKeyOf(source);
+    const cacheKey = cacheKeyOf(source, `mermaid:${props.sectionKey || "body"}`);
     let safeSvg = getCacheValue(mermaidCache, cacheKey);
     if (safeSvg == null) {
       try {
-        const renderId = `awb_mermaid_${props.messageId}_${i}_${Date.now()}`;
+        const renderId = `awb_mermaid_${props.messageId}_${props.sectionKey || "body"}_${i}_${Date.now()}`;
         const rendered = await mermaid.render(renderId, source);
         const rawSvg = typeof rendered === "string" ? rendered : rendered.svg;
         const sanitizedSvg = DOMPurify.sanitize(rawSvg, SVG_SANITIZE_CONFIG);
@@ -325,7 +325,8 @@ onBeforeUnmount(() => {
 <style scoped>
 .assistant-markdown-message {
   line-height: 1.65;
-  color: var(--text-primary);
+  /* font-size 由上层消息列表容器提供,统一由 --agent-font-size 控制。 */
+  color: var(--text-color);
   overflow-wrap: anywhere;
 }
 
@@ -352,16 +353,16 @@ onBeforeUnmount(() => {
 }
 
 .assistant-markdown-message :deep(h1) {
-  font-size: 1.05rem;
+  font-size: 1.05em;
 }
 
 .assistant-markdown-message :deep(h2) {
-  font-size: 1rem;
+  font-size: 1em;
 }
 
 .assistant-markdown-message :deep(h3),
 .assistant-markdown-message :deep(h4) {
-  font-size: 0.95rem;
+  font-size: 0.95em;
 }
 
 .assistant-markdown-message :deep(ul),

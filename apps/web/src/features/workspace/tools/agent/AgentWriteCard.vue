@@ -1,61 +1,29 @@
 <template>
   <div>
     <div
-      class="flex items-center gap-2 min-w-0 flex-wrap w-full pl-2 pr-0 py-0.5 rounded cursor-pointer hover:bg-[var(--hover-bg)] transition-colors duration-100 text-[0.85em] font-mono text-[color:var(--text-secondary)]"
+      class="flex items-center gap-2 min-w-0 flex-wrap w-full pl-2 pr-0 py-0.5 rounded cursor-pointer hover:bg-[var(--hover-bg)] transition-colors duration-100 font-mono text-[color:var(--text-secondary)]"
       role="button"
       tabindex="0"
-      @click="onToggleExpand"
-      @keydown.enter.prevent="onToggleExpand"
-      @keydown.space.prevent="onToggleExpand"
+      @click="openInEditor"
+      @keydown.enter.prevent="openInEditor"
+      @keydown.space.prevent="openInEditor"
     >
-      <span class="min-w-0 flex-1 inline-flex items-baseline gap-0"><span class="shrink-0">write(</span><span class="min-w-0 truncate" :title="summary.filePath">{{ summary.filePath }}</span><span class="shrink-0">)</span></span>
-      <span class="shrink-0">[{{ summary.bytesWritten }} bytes]</span>
+      <span class="min-w-0 inline-flex items-baseline gap-0 max-w-full">
+        <span class="shrink-0">write(</span>
+        <span class="min-w-0 truncate" :title="summary.filePath">{{ summary.filePath }}</span>
+        <span class="shrink-0">)</span>
+        <span class="shrink-0 ml-1">[{{ summary.bytesWritten }} bytes]</span>
+      </span>
       <span v-if="errorText" class="min-w-0 max-w-[30%] truncate text-red-500">
         error: {{ errorText }}
       </span>
-    </div>
-
-    <div v-if="expanded">
-      <div v-if="loading" class="text-[0.92em] text-[color:var(--text-tertiary)]">Loading diff...</div>
-      <div v-else-if="loadError" class="text-[0.92em] text-red-500">diff unavailable: {{ loadError }}</div>
-      <template v-else-if="artifact">
-        <div v-if="showCreateFileContent" class="rounded border border-[var(--border-color-secondary)] overflow-hidden">
-          <div class="px-2 py-1 text-[0.85em] text-[color:var(--text-tertiary)] border-b border-[var(--border-color-secondary)]">
-            New file content
-          </div>
-          <MonacoCodeViewer
-            :value="artifact.after.text || ''"
-            :language="inferLanguageFromPath(summary.filePath)"
-            :read-only="true"
-            :auto-height="true"
-            :min-height="72"
-          />
-        </div>
-        <div v-else-if="!canRenderDiff" class="text-[0.92em] text-[color:var(--text-tertiary)]">diff unavailable</div>
-        <div v-else class="rounded border border-[var(--border-color-secondary)] overflow-hidden">
-          <MonacoDiffViewer
-            :original="artifact.before.text || ''"
-            :modified="artifact.after.text || ''"
-            :language="inferLanguageFromPath(summary.filePath)"
-            :sideBySide="false"
-            :showOverviewRuler="false"
-            :compactMode="true"
-            :hideUnchangedRegions="{ enabled: true, contextLineCount: 1, minimumLineCount: 1, revealLineCount: 1 }"
-            :autoHeight="true"
-            :minHeight="72"
-            :ignoreTrimWhitespace="true"
-          />
-        </div>
-        <div v-if="truncatedHint" class="pt-1 text-[0.85em] text-[color:var(--text-tertiary)]">{{ truncatedHint }}</div>
-      </template>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
-import MonacoDiffViewer from "@/shared/components/MonacoDiffViewer.vue";
-import MonacoCodeViewer from "@/shared/components/MonacoCodeViewer.vue";
+import { message } from "ant-design-vue";
+import { useWorkspaceHost } from "@/features/workspace/host";
 import { inferLanguageFromPath } from "@/shared/monaco/languageUtils";
 
 type WriteDisplay = {
@@ -90,6 +58,7 @@ type WriteUiArtifact = {
 
 const props = defineProps<{
   workspaceId: string;
+  toolId: string;
   sessionId: string;
   itemId: number;
   toolCallId?: string;
@@ -97,95 +66,18 @@ const props = defineProps<{
   errorText?: string;
 }>();
 
-const emit = defineEmits<{
-  "request-measure": [];
-}>();
+const host = useWorkspaceHost(props.toolId);
+const artifactCache = new Map<string, Promise<WriteUiArtifact>>();
 
-type CacheEntry = {
-  expanded: boolean;
-  artifact: WriteUiArtifact | null;
-  loading: boolean;
-  error: string;
-  promise: Promise<WriteUiArtifact> | null;
-};
-
-const cache = new Map<string, CacheEntry>();
-
-function cacheKey(workspaceId: string, toolCallId: string) {
-  return `${workspaceId}:${toolCallId}`;
+function cacheKey() {
+  return `${props.workspaceId}:${props.toolCallId || props.itemId}`;
 }
 
-function touchLru(key: string, value: CacheEntry) {
-  cache.delete(key);
-  cache.set(key, value);
-  const MAX = 24;
-  while (cache.size > MAX) {
-    const first = cache.keys().next().value as string | undefined;
-    if (!first) break;
-    cache.delete(first);
-  }
-}
-
-function ensureEntry(key: string): CacheEntry {
-  const existing = cache.get(key);
+async function fetchArtifact() {
+  const key = cacheKey();
+  const existing = artifactCache.get(key);
   if (existing) return existing;
-  const next: CacheEntry = { expanded: false, artifact: null, loading: false, error: "", promise: null };
-  cache.set(key, next);
-  return next;
-}
-
-const expanded = ref(false);
-const loading = ref(false);
-const loadError = ref("");
-const artifact = ref<WriteUiArtifact | null>(null);
-
-const canRenderDiff = computed(() => artifact.value?.before?.available === true && artifact.value?.after?.available === true);
-
-const showCreateFileContent = computed(() => {
-  const art = artifact.value;
-  if (!art || art.after?.available !== true) return false;
-  if (art.before?.available === true) return false;
-  const reason = typeof art.before?.reason === "string" ? art.before.reason.trim() : "";
-  return props.summary.existedBefore === false || reason === "missing_file";
-});
-
-const truncatedHint = computed(() => {
-  const afterTruncated = artifact.value?.after?.truncated === true;
-  if (showCreateFileContent.value) {
-    return afterTruncated ? "文件内容已截断,仅展示前缀" : "";
-  }
-  const beforeTruncated = artifact.value?.before?.truncated === true;
-  if (!beforeTruncated && !afterTruncated) return "";
-  return "diff 内容已截断,仅展示前缀";
-});
-
-async function loadArtifact(key: string, toolCallId: string) {
-  const entry = ensureEntry(key);
-  touchLru(key, entry);
-  if (entry.artifact) {
-    artifact.value = entry.artifact;
-    loading.value = false;
-    loadError.value = "";
-    return;
-  }
-  if (entry.promise) {
-    loading.value = true;
-    loadError.value = "";
-    try {
-      const res = await entry.promise;
-      artifact.value = res;
-      return;
-    } finally {
-      loading.value = false;
-    }
-  }
-
-  entry.loading = true;
-  entry.error = "";
-  loading.value = true;
-  loadError.value = "";
-
-  entry.promise = (async () => {
+  const promise = (async () => {
     const url = `/api/agent/sessions/${encodeURIComponent(props.sessionId)}/context-items/${props.itemId}/write-artifact`;
     const response = await fetch(url);
     if (!response.ok) {
@@ -194,70 +86,68 @@ async function loadArtifact(key: string, toolCallId: string) {
     }
     return (await response.json()) as WriteUiArtifact;
   })();
-
+  artifactCache.set(key, promise);
   try {
-    const res = await entry.promise;
-    if (res.toolCallId !== toolCallId || res.workspaceId !== props.workspaceId) {
-      throw new Error("artifact mismatch");
-    }
-    entry.artifact = res;
-    artifact.value = res;
+    return await promise;
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    entry.error = message;
-    loadError.value = message;
-  } finally {
-    entry.loading = false;
-    entry.promise = null;
-    loading.value = false;
+    artifactCache.delete(key);
+    throw err;
   }
 }
 
-async function onToggleExpand() {
-  const next = !expanded.value;
-  expanded.value = next;
-  if (props.toolCallId) {
-    const key = cacheKey(props.workspaceId, props.toolCallId);
-    const entry = ensureEntry(key);
-    touchLru(key, entry);
-    entry.expanded = next;
-  }
+function explainUnavailable(side: WriteUiArtifactSide | undefined, label: string) {
+  if (!side || side.available) return "";
+  const reason = typeof side.reason === "string" && side.reason.trim() ? side.reason.trim() : "unavailable";
+  return `${label} ${reason}`;
+}
 
-  await nextTick();
-  emit("request-measure");
-
-  if (!next) return;
+async function openInEditor() {
   if (!props.toolCallId) {
-    loadError.value = "missing toolCallId";
+    message.error("missing toolCallId");
     return;
   }
-  const key = cacheKey(props.workspaceId, props.toolCallId);
-  await loadArtifact(key, props.toolCallId);
-
-  await nextTick();
-  emit("request-measure");
-}
-
-onMounted(() => {
-  if (!props.toolCallId) return;
-  const key = cacheKey(props.workspaceId, props.toolCallId);
-  const entry = ensureEntry(key);
-  touchLru(key, entry);
-  expanded.value = entry.expanded;
-  artifact.value = entry.artifact;
-  loadError.value = entry.error;
-});
-
-watch(
-  () => props.toolCallId,
-  (next) => {
-    if (!next) return;
-    const key = cacheKey(props.workspaceId, next);
-    const entry = ensureEntry(key);
-    touchLru(key, entry);
-    expanded.value = entry.expanded;
-    artifact.value = entry.artifact;
-    loadError.value = entry.error;
+  try {
+    const artifact = await fetchArtifact();
+    const language = inferLanguageFromPath(props.summary.filePath);
+    const beforeAvailable = artifact.before?.available === true;
+    const afterAvailable = artifact.after?.available === true;
+    const tabKey = `agent:write:${props.toolCallId}`;
+    if (!beforeAvailable && afterAvailable) {
+      host.call("editor", {
+        type: "editor.openPreview",
+        payload: {
+          path: props.summary.filePath,
+          text: artifact.after.text || "",
+          language,
+          title: props.summary.filePath,
+          tabKey,
+          source: "agent.write"
+        }
+      });
+      return;
+    }
+    if (beforeAvailable && afterAvailable) {
+      host.call("editor", {
+        type: "editor.openDiff",
+        payload: {
+          original: artifact.before.text || "",
+          modified: artifact.after.text || "",
+          path: props.summary.filePath,
+          language,
+          title: props.summary.filePath,
+          tabKey,
+          source: "agent.write"
+        }
+      });
+      return;
+    }
+    const reasons = [
+      explainUnavailable(artifact.before, "before"),
+      explainUnavailable(artifact.after, "after")
+    ].filter(Boolean);
+    message.error(reasons[0] || "diff unavailable");
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
   }
-);
+}
 </script>

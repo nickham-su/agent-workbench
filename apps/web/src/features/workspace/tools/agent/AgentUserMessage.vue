@@ -1,7 +1,6 @@
 <template>
   <div
-    class="agent-user-message whitespace-pre-wrap break-words pr-24"
-    :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
+    class="agent-user-message whitespace-pre-wrap break-words"
     :class="tone === 'error' ? 'text-red-500' : ''"
   >
     {{ props.text }}

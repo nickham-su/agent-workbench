@@ -50,11 +50,6 @@ export type ExecutionProfile = {
       "bash" | "read" | "write" | "apply_patch" | "todolist" | "subtask" | "archive_search" | "archive_read"
     >;
     mcpServers: string[];
-    permissions: {
-      allowRead: boolean;
-      allowWrite: boolean;
-      allowBash: boolean;
-    };
     defaultModel: { providerId: string; modelId: string } | null;
   };
   provider: {
@@ -83,15 +78,13 @@ export type PromptContext = {
     name: string;
     description: string;
     inputSchema: Record<string, unknown>;
-    requiresApproval: boolean;
   }>;
   pendingTools: Array<{
     itemId: number;
-    status: "queued" | "running" | "awaiting_permission" | "streaming" | "completed" | "failed" | "denied" | "cancelled";
+    status: "queued" | "running" | "streaming" | "completed" | "failed" | "cancelled";
     toolName: string;
     toolCallId?: string;
     args: Record<string, unknown>;
-    approved?: boolean;
   }>;
   lastResponseTotalTokens: number | null;
 };
@@ -141,7 +134,7 @@ export class AgentApiClient {
     step: number | null;
     prevId: number | null;
     kind: "user" | "assistant" | "tool" | "system";
-    status: "streaming" | "queued" | "running" | "awaiting_permission" | "completed" | "failed" | "denied" | "cancelled";
+    status: "streaming" | "queued" | "running" | "completed" | "failed" | "cancelled";
     output: unknown;
     createdAt?: number;
   }) {
@@ -155,7 +148,7 @@ export class AgentApiClient {
 
   async updateContextItem(input: {
     itemId: number;
-    status?: "streaming" | "queued" | "running" | "awaiting_permission" | "completed" | "failed" | "denied" | "cancelled";
+    status?: "streaming" | "queued" | "running" | "completed" | "failed" | "cancelled";
     output?: unknown;
     updatedAt?: number;
   }) {
@@ -173,10 +166,9 @@ export class AgentApiClient {
   async updateRunState(input: {
     workspaceId: string;
     sessionId: string;
-    status: "idle" | "running" | "waiting_permission";
+    status: "idle" | "running";
     activeRunId: string | null;
     activeAssistantItemId: number | null;
-    waitingToolItemId: number | null;
     lastResponseTotalTokens?: number | null;
     runNoticeText?: string | null;
     updatedAt?: number;
@@ -305,7 +297,7 @@ export class AgentApiClient {
   }
 
   async getSubtaskStatus(input: { workspaceId: string; sessionId: string; runId: string }) {
-    return this.request<{ status: "running" | "waiting_permission" | "completed" | "failed" | "cancelled" }>(
+    return this.request<{ status: "running" | "completed" | "failed" | "cancelled" }>(
       "/api/internal/agent/subtask/status",
       {
         method: "POST",

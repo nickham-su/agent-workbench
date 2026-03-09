@@ -9,7 +9,6 @@ import {
   AgentControlResultSchema,
   AgentCreateSessionRequestSchema,
   AgentForkSessionRequestSchema,
-  AgentPermissionDecisionSchema,
   AgentRevertSessionRequestSchema,
   AgentSendMessageRequestSchema,
   AgentSendMessageResponseSchema,
@@ -18,11 +17,9 @@ import {
   AgentCompactSessionResponseSchema,
   AgentSessionRecordSchema,
   AgentSessionRunStateSchema,
-  AgentToolPermissionRequestSchema,
   AgentProviderNpmSchema,
   ErrorResponseSchema
 } from "@agent-workbench/shared";
-import type { AgentToolPermissionRequest } from "@agent-workbench/shared";
 import type { AgentRuntimePort } from "./agent.runtime-port.js";
 import type { AgentService } from "./agent.service.js";
 import { HttpError } from "../../app/errors.js";
@@ -228,7 +225,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
     },
     async (req, reply) => {
       const p = req.params as { sessionId: string };
-      const body = req.body as { workspaceId: string; text: string; clientRequestId: string; agentId?: string };
+      const body = req.body as { workspaceId: string; text: string; clientRequestId: string; agentId?: string; uiLocale?: "zh-CN" | "en-US" };
       const result = await params.service.sendMessage({ sessionId: p.sessionId, body });
       if (!result.deduplicated) {
         const workspace = params.service.getWorkspace(body.workspaceId);
@@ -263,7 +260,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
     },
     async (req, reply) => {
       const p = req.params as { sessionId: string };
-      const body = req.body as { workspaceId: string; clientRequestId: string; agentId?: string };
+      const body = req.body as { workspaceId: string; clientRequestId: string; agentId?: string; uiLocale?: "zh-CN" | "en-US" };
       const result = await params.service.compactSession({ sessionId: p.sessionId, body });
       if (!result.deduplicated) {
         const workspace = params.service.getWorkspace(body.workspaceId);
@@ -347,39 +344,6 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
       const body = req.body as { workspaceId: string };
       const result = params.service.cancelSession(p.sessionId, body);
       await params.runtime.cancelSession(p.sessionId);
-      return result;
-    }
-  );
-
-  app.post(
-    "/api/agent/sessions/:sessionId/tool-permission",
-    {
-      schema: {
-        tags: ["agent"],
-        params: Type.Object({ sessionId: Type.String({ minLength: 1 }) }),
-        body: AgentToolPermissionRequestSchema,
-        response: {
-          200: Type.Object({ runId: Type.String({ minLength: 1 }), decision: AgentPermissionDecisionSchema }),
-          400: ErrorResponseSchema,
-          404: ErrorResponseSchema,
-          409: ErrorResponseSchema
-        }
-      }
-    },
-    async (req) => {
-      const p = req.params as { sessionId: string };
-      const body = req.body as AgentToolPermissionRequest;
-      const result = params.service.applyToolPermission(p.sessionId, body);
-      const workspace = params.service.getWorkspace(body.workspaceId);
-      if (workspace) {
-        await params.runtime.enqueueRun({
-          workspaceId: body.workspaceId,
-          sessionId: p.sessionId,
-          runId: result.runId,
-          workspacePath: workspace.path,
-          inputText: ""
-        });
-      }
       return result;
     }
   );
@@ -500,7 +464,6 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
           200: Type.Object({
             status: Type.Union([
               Type.Literal("running"),
-              Type.Literal("waiting_permission"),
               Type.Literal("completed"),
               Type.Literal("failed"),
               Type.Literal("cancelled")
@@ -551,14 +514,14 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
         workspaceId: string;
         sessionId: string;
         runId: string | null;
-        turnId: string | null;
-        step: number | null;
-        prevId: number | null;
-        kind: "user" | "assistant" | "tool" | "system";
-        status: "streaming" | "queued" | "running" | "awaiting_permission" | "completed" | "failed" | "denied" | "cancelled";
-        output: unknown;
-        createdAt?: number;
-      };
+         turnId: string | null;
+         step: number | null;
+         prevId: number | null;
+         kind: "user" | "assistant" | "tool" | "system";
+         status: "streaming" | "queued" | "running" | "completed" | "failed" | "cancelled";
+         output: unknown;
+         createdAt?: number;
+       };
       const item = params.service.appendContextItemFromWorker({
         workspaceId: body.workspaceId,
         sessionId: body.sessionId,
@@ -597,7 +560,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
       assertInternalToken(req, params.service);
       const p = req.params as { itemId: number };
       const body = req.body as {
-        status?: "streaming" | "queued" | "running" | "awaiting_permission" | "completed" | "failed" | "denied" | "cancelled";
+        status?: "streaming" | "queued" | "running" | "completed" | "failed" | "cancelled";
         output?: unknown;
         updatedAt?: number;
       };
@@ -619,10 +582,9 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
         body: Type.Object({
           workspaceId: Type.String({ minLength: 1 }),
           sessionId: Type.String({ minLength: 1 }),
-          status: Type.Union([Type.Literal("idle"), Type.Literal("running"), Type.Literal("waiting_permission")]),
+          status: Type.Union([Type.Literal("idle"), Type.Literal("running")]),
           activeRunId: Type.Union([Type.String(), Type.Null()]),
           activeAssistantItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
-          waitingToolItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
           lastResponseTotalTokens: Type.Optional(Type.Union([Type.Number({ minimum: 0 }), Type.Null()])),
           runNoticeText: Type.Optional(Type.Union([Type.String(), Type.Null()])),
           updatedAt: Type.Optional(Type.Number())
@@ -635,10 +597,9 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
       const body = req.body as {
         workspaceId: string;
         sessionId: string;
-        status: "idle" | "running" | "waiting_permission";
+        status: "idle" | "running";
         activeRunId: string | null;
         activeAssistantItemId: number | null;
-        waitingToolItemId: number | null;
         lastResponseTotalTokens?: number | null;
         runNoticeText?: string | null;
         updatedAt?: number;
@@ -811,8 +772,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
               Type.Object({
                 name: AgentDynamicToolNameSchema,
                 description: Type.String(),
-                inputSchema: Type.Any(),
-                requiresApproval: Type.Boolean()
+                inputSchema: Type.Any()
               })
             ),
             pendingTools: Type.Array(
@@ -821,8 +781,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
                 status: AgentContextItemStatusSchema,
                 toolName: AgentDynamicToolNameSchema,
                 toolCallId: Type.Optional(Type.String({ minLength: 1 })),
-                args: Type.Any(),
-                approved: Type.Optional(Type.Boolean())
+                args: Type.Any()
               })
             ),
             lastResponseTotalTokens: Type.Union([Type.Number({ minimum: 0 }), Type.Null()])
@@ -867,11 +826,6 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
               prompt: Type.String(),
               tools: Type.Array(AgentBuiltinToolNameSchema),
               mcpServers: Type.Array(Type.String({ minLength: 1 })),
-              permissions: Type.Object({
-                allowRead: Type.Boolean(),
-                allowWrite: Type.Boolean(),
-                allowBash: Type.Boolean()
-              }),
               defaultModel: Type.Union([
                 Type.Object({ providerId: Type.String({ minLength: 1 }), modelId: Type.String({ minLength: 1 }) }),
                 Type.Null()
@@ -897,7 +851,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
               modelIdleTimeoutMs: Type.Integer({ minimum: 0 }),
               modelTotalTimeoutMs: Type.Integer({ minimum: 0 }),
               modelRequestMaxRetries: Type.Integer({ minimum: 0, maximum: 100 }),
-              autoCompactThresholdPct: Type.Integer({ minimum: 50, maximum: 90 }),
+              autoCompactThresholdPct: Type.Integer({ minimum: 50, maximum: 99 }),
               updatedAt: Type.Number()
             })
           }),

@@ -92,6 +92,7 @@ If you need to publish ports to LAN/public directly, use `AWB_PUBLISH_HOST=0.0.0
 | `AWB_AUTH_TOKEN` | Optional access token protection. If set, Web UI/API requires signing in with this token (session cookie). |
 | `AWB_AUTH_COOKIE_SECURE` | Set to `1` when serving over HTTPS (adds `Secure` to the session cookie). Keep `0` for local HTTP dev. |
 | `AWB_PUBLISH_HOST` | Host IP to publish ports on (Docker Compose). Set `127.0.0.1` to allow localhost access only. |
+| `AWB_AGENT_STARTUP_RECOVERY_MODE` | Agent startup recovery mode: `fail` (default, terminate inflight runs) or `recover` (resume inflight runs). |
 
 Other Compose-related variables (e.g. `AWB_HOST`, `AWB_DATA_DIR`, `AWB_SERVE_WEB`, `AWB_WEB_DIST_DIR`) are documented in `.env.docker.example`.
 

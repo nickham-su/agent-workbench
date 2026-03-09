@@ -155,14 +155,6 @@
           />
         </a-form-item>
 
-        <a-form-item :label="t('settings.agentProfiles.fields.permissions')">
-          <a-space direction="vertical" size="small">
-            <a-checkbox v-model:checked="agentFormAllowRead">{{ t("settings.agentProfiles.permissions.allowRead") }}</a-checkbox>
-            <a-checkbox v-model:checked="agentFormAllowWrite">{{ t("settings.agentProfiles.permissions.allowWrite") }}</a-checkbox>
-            <a-checkbox v-model:checked="agentFormAllowBash">{{ t("settings.agentProfiles.permissions.allowBash") }}</a-checkbox>
-          </a-space>
-        </a-form-item>
-
         <a-form-item :label="t('settings.agentProfiles.fields.defaultModel')">
           <a-cascader
             v-model:value="agentFormDefaultModelPath"
@@ -213,16 +205,12 @@ type EditingAgent = {
   globalPromptIds: string[];
   tools: AgentToolName[];
   mcpServers: string[];
-  permissions: {
-    allowRead: boolean;
-    allowWrite: boolean;
-    allowBash: boolean;
-  };
   defaultModel: AgentDefaultModel;
 };
 
 const GLOBAL_DEFAULT_MODEL_PATH = "__global__";
 const AGENT_PROMPT_MAX_BYTES = 32 * 1024;
+const RESERVED_GLOBAL_SYSTEM_PROMPT_ID = "global_system_prompt";
 
 const DEFAULT_TOOLS: AgentToolName[] = [
   "bash",
@@ -265,9 +253,6 @@ const agentFormPrompt = ref("");
 const agentFormGlobalPromptIds = ref<string[]>([]);
 const agentFormTools = ref<AgentToolName[]>([...DEFAULT_TOOLS]);
 const agentFormMcpServers = ref<string[]>([]);
-const agentFormAllowRead = ref(true);
-const agentFormAllowWrite = ref(true);
-const agentFormAllowBash = ref(true);
 const agentFormDefaultModelPath = ref<string[]>([GLOBAL_DEFAULT_MODEL_PATH]);
 const agentFormSetAsDefault = ref(false);
 
@@ -301,7 +286,7 @@ const mcpServerOptions = computed(() => {
 
 const globalPromptOptions = computed(() => {
   const items = globalPromptSettings.value?.items ?? [];
-  return items.map((item) => ({
+  return items.filter((item) => item.id !== RESERVED_GLOBAL_SYSTEM_PROMPT_ID).map((item) => ({
     label: item.title,
     value: item.id
   }));
@@ -360,7 +345,9 @@ function normalizeMcpServers(raw: unknown): string[] {
 
 function normalizeGlobalPromptIds(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
-  const available = new Set((globalPromptSettings.value?.items ?? []).map((item) => item.id));
+  const available = new Set(
+    (globalPromptSettings.value?.items ?? []).filter((item) => item.id !== RESERVED_GLOBAL_SYSTEM_PROMPT_ID).map((item) => item.id)
+  );
   const out: string[] = [];
   const seen = new Set<string>();
   for (const item of raw) {
@@ -389,11 +376,6 @@ function mapFromSettings(
     globalPromptIds: normalizeGlobalPromptIds(agent.globalPromptIds),
     tools: normalizeTools(agent.tools),
     mcpServers: normalizeMcpServers(agent.mcpServers),
-    permissions: {
-      allowRead: agent.permissions.allowRead,
-      allowWrite: agent.permissions.allowWrite,
-      allowBash: agent.permissions.allowBash
-    },
     defaultModel: agent.defaultModel
   }));
 
@@ -448,13 +430,16 @@ function toolLabel(tool: AgentToolName) {
 }
 
 function globalPromptLabel(id: string) {
+  if (id === RESERVED_GLOBAL_SYSTEM_PROMPT_ID) return "";
   const item = globalPromptSettings.value?.items.find((entry) => entry.id === id);
   return item?.title || id;
 }
 
 function globalPromptSummary(ids: string[]) {
   if (!Array.isArray(ids) || ids.length === 0) return "-";
-  return ids.map((id) => globalPromptLabel(id)).join(", ");
+  const labels = ids.map((id) => globalPromptLabel(id)).filter((item) => item.trim().length > 0);
+  if (labels.length === 0) return "-";
+  return labels.join(", ");
 }
 
 function isDefaultAgent(agentId: string) {
@@ -480,11 +465,6 @@ function toRequestBody() {
       globalPromptIds: normalizeGlobalPromptIds(agent.globalPromptIds),
       tools: normalizeTools(agent.tools),
       mcpServers: normalizeMcpServers(agent.mcpServers),
-      permissions: {
-        allowRead: agent.permissions.allowRead,
-        allowWrite: agent.permissions.allowWrite,
-        allowBash: agent.permissions.allowBash
-      },
       defaultModel: agent.defaultModel
     }))
   } satisfies UpdateAgentSettingsRequest;
@@ -499,9 +479,6 @@ function openCreateAgent() {
   agentFormGlobalPromptIds.value = [];
   agentFormTools.value = [...DEFAULT_TOOLS];
   agentFormMcpServers.value = [];
-  agentFormAllowRead.value = true;
-  agentFormAllowWrite.value = true;
-  agentFormAllowBash.value = true;
   agentFormDefaultModelPath.value = [GLOBAL_DEFAULT_MODEL_PATH];
   agentFormSetAsDefault.value = false;
   agentModalOpen.value = true;
@@ -518,9 +495,6 @@ function openEditAgent(agentId: string) {
   agentFormGlobalPromptIds.value = normalizeGlobalPromptIds(target.globalPromptIds);
   agentFormTools.value = normalizeTools(target.tools);
   agentFormMcpServers.value = normalizeMcpServers(target.mcpServers);
-  agentFormAllowRead.value = target.permissions.allowRead;
-  agentFormAllowWrite.value = target.permissions.allowWrite;
-  agentFormAllowBash.value = target.permissions.allowBash;
   agentFormDefaultModelPath.value = target.defaultModel
     ? [target.defaultModel.providerId, target.defaultModel.modelId]
     : [GLOBAL_DEFAULT_MODEL_PATH];
@@ -539,9 +513,6 @@ function closeAgentModal() {
   agentFormGlobalPromptIds.value = [];
   agentFormTools.value = [...DEFAULT_TOOLS];
   agentFormMcpServers.value = [];
-  agentFormAllowRead.value = true;
-  agentFormAllowWrite.value = true;
-  agentFormAllowBash.value = true;
   agentFormDefaultModelPath.value = [GLOBAL_DEFAULT_MODEL_PATH];
   agentFormSetAsDefault.value = false;
 }
@@ -577,11 +548,6 @@ function submitAgent() {
     globalPromptIds: normalizeGlobalPromptIds(agentFormGlobalPromptIds.value),
     tools: normalizeTools(agentFormTools.value),
     mcpServers: normalizeMcpServers(agentFormMcpServers.value),
-    permissions: {
-      allowRead: agentFormAllowRead.value,
-      allowWrite: agentFormAllowWrite.value,
-      allowBash: agentFormAllowBash.value
-    },
     defaultModel
   };
 

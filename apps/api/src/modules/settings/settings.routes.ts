@@ -4,6 +4,7 @@ import {
   AgentProvidersSettingsViewSchema,
   AgentGlobalPromptSettingsSchema,
   AgentMcpSettingsSchema,
+  AgentSettingsViewSchema,
   AgentRuntimeSettingsSchema,
   AgentSettingsSchema,
   ErrorResponseSchema,
@@ -248,7 +249,7 @@ export async function registerSettingsRoutes(app: FastifyInstance, ctx: AppConte
     {
       schema: {
         tags: ["settings"],
-        response: { 200: AgentSettingsSchema }
+        response: { 200: AgentSettingsViewSchema }
       }
     },
     async () => getAgentSettings(ctx)

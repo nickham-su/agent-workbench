@@ -15,32 +15,32 @@
       <!-- Left: Provider list -->
       <div class="shrink-0 w-80">
         <div class="border border-[var(--border-color-secondary)] rounded overflow-hidden">
-          <div v-if="providers.length === 0" class="px-3 py-3 text-xs text-[color:var(--text-tertiary)]">
-            {{ t("settings.agentProviders.empty") }}
-          </div>
+          <div class="divide-y divide-[var(--border-color-secondary)]">
+            <div v-if="providers.length === 0" class="px-3 py-3 text-xs text-[color:var(--text-tertiary)]">
+              {{ t("settings.agentProviders.empty") }}
+            </div>
 
-          <div v-else class="divide-y divide-[var(--border-color-secondary)]">
             <div
               v-for="provider in providers"
               :key="provider.id"
               class="group flex items-start justify-between gap-3 px-3 py-2 cursor-pointer"
               :class="provider.id === activeProviderId ? 'bg-[var(--panel-bg-elevated)]' : 'hover:bg-[var(--panel-bg-elevated)]'"
               @click="setActiveProvider(provider.id)"
-              >
-                <div class="min-w-0 flex-1">
-                  <div class="flex items-center gap-2">
-                    <div class="font-semibold text-xs truncate" :title="provider.name">{{ provider.name }}</div>
-                    <a-tag
-                      v-if="isDefaultProvider(provider.id)"
-                      color="blue"
-                      class="!text-[10px] !leading-[16px] !px-1 !py-0"
-                    >
-                      {{ t("common.default") }}
-                    </a-tag>
-                    <a-tag v-if="provider.npm" color="default" class="!text-[10px] !leading-[16px] !px-1 !py-0">{{ provider.npm }}</a-tag>
-                  </div>
-                  <div class="mt-0.5 text-[11px] text-[color:var(--text-tertiary)] truncate" :title="provider.id">{{ provider.id }}</div>
+            >
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-2">
+                  <div class="font-semibold text-xs truncate" :title="provider.name">{{ provider.name }}</div>
+                  <a-tag
+                    v-if="isDefaultProvider(provider.id)"
+                    color="blue"
+                    class="!text-[10px] !leading-[16px] !px-1 !py-0"
+                  >
+                    {{ t("common.default") }}
+                  </a-tag>
+                  <a-tag v-if="provider.npm" color="default" class="!text-[10px] !leading-[16px] !px-1 !py-0">{{ provider.npm }}</a-tag>
                 </div>
+                <div class="mt-0.5 text-[11px] text-[color:var(--text-tertiary)] truncate" :title="provider.id">{{ provider.id }}</div>
+              </div>
 
               <div
                 class="shrink-0 self-center flex items-center gap-1 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto transition-opacity"
@@ -66,6 +66,12 @@
                 </a-button>
               </div>
             </div>
+
+            <div class="px-3 py-2">
+              <a-button type="dashed" size="small" style="width: 100%" @click="openCreateProvider">
+                {{ t('settings.agentProviders.actions.addProvider') }}
+              </a-button>
+            </div>
           </div>
         </div>
       </div>
@@ -73,30 +79,6 @@
       <!-- Right: Model list -->
       <div class="min-w-0 flex-1">
         <div class="border border-[var(--border-color-secondary)] rounded overflow-hidden">
-          <div class="flex items-start justify-between gap-3 px-3 py-3 border-b border-[var(--border-color-secondary)]">
-            <div class="min-w-0">
-              <div class="text-xs font-semibold">
-                {{ t('settings.agentProviders.fields.models') }}
-                <template v-if="activeProvider">
-                  <span class="font-normal text-[color:var(--text-tertiary)]"> — {{ activeProvider.name }}</span>
-                </template>
-              </div>
-              <div v-if="activeProvider" class="text-[11px] text-[color:var(--text-tertiary)] truncate">
-                {{ activeProvider.id }}<span v-if="activeProvider.npm"> · {{ activeProvider.npm }}</span>
-              </div>
-            </div>
-            <div class="shrink-0 flex items-center gap-2">
-              <a-button
-                size="small"
-                type="primary"
-                :disabled="!activeProvider"
-                @click="activeProvider && openAddModel(activeProvider.id)"
-              >
-                {{ t('settings.agentProviders.actions.addModel') }}
-              </a-button>
-            </div>
-          </div>
-
           <div v-if="providers.length === 0" class="px-3 py-3 text-xs text-[color:var(--text-tertiary)]">
             {{ t("settings.agentProviders.empty") }}
           </div>
@@ -151,6 +133,18 @@
                 </a-button>
               </div>
             </div>
+          </div>
+
+          <div class="px-3 py-2 border-t border-[var(--border-color-secondary)]">
+            <a-button
+              type="dashed"
+              size="small"
+              style="width: 100%"
+              :disabled="!activeProvider"
+              @click="activeProvider && openAddModel(activeProvider.id)"
+            >
+              {{ t('settings.agentProviders.actions.addModel') }}
+            </a-button>
           </div>
         </div>
       </div>

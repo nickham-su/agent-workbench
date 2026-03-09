@@ -8,8 +8,20 @@ import { openDb } from "../../infra/db/db.js";
 import type { Db } from "../../infra/db/db.js";
 import { ensureDir, rmrf } from "../../infra/fs/fs.js";
 import { agentArchiveSessionDir, compactionSnippetPath, workspaceRoot } from "../../infra/fs/paths.js";
+import { setSettingJson } from "../settings/settings.store.js";
 import { insertWorkspace } from "../workspaces/workspace.store.js";
-import { appendContextItem, createRunRecord } from "./agent.store.js";
+import {
+  appendContextItem,
+  createAgentSession,
+  createRunRecord,
+  getAgentSession,
+  getRunRecord,
+  getContextItemById,
+  getRunState as getRunStateRow,
+  getSessionTranscriptItems,
+  moveSessionHead,
+  updateRunState
+} from "./agent.store.js";
 import { newSortableId } from "../../utils/ids.js";
 
 type Fixture = {
@@ -27,7 +39,12 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function createFixture(options?: { agentWorkerConcurrency?: number }): Promise<Fixture> {
+async function createFixture(options?: {
+  agentWorkerConcurrency?: number;
+  agentTestFaults?: {
+    archiveWrite?: { failAfterChunks?: number } | null;
+  };
+}): Promise<Fixture> {
   const repoRoot = path.resolve(process.cwd(), "../..");
   const testsRoot = path.join(repoRoot, ".tmp-tests");
   await ensureDir(testsRoot);
@@ -56,7 +73,9 @@ async function createFixture(options?: { agentWorkerConcurrency?: number }): Pro
     agentWorkerSocketPath: path.join(dataDir, "agent-worker.sock"),
     agentWorkerConcurrency: options?.agentWorkerConcurrency ?? 2,
     agentInternalToken: internalToken,
-    agentApiOrigin: "http://127.0.0.1:0"
+    agentApiOrigin: "http://127.0.0.1:0",
+    agentStartupRecoveryMode: "recover",
+    agentTestFaults: options?.agentTestFaults
   });
   const workspaceId = newSortableId("ws");
   const workspaceDirName = newSortableId("workspace");
@@ -80,6 +99,179 @@ async function createFixture(options?: { agentWorkerConcurrency?: number }): Pro
   fixtures.add(fixture);
   return fixture;
 }
+
+test("agent startup recovery mode=fail 会终止 in-flight run 并回收 run-state", async () => {
+  const repoRoot = path.resolve(process.cwd(), "../..");
+  const testsRoot = path.join(repoRoot, ".tmp-tests");
+  await ensureDir(testsRoot);
+  const dataDir = await fs.mkdtemp(path.join(testsRoot, "agent-startup-fail-it-"));
+  const internalToken = "test-internal-token";
+
+  const db = await openDb(dataDir);
+  let app: FastifyInstance | null = null;
+  try {
+    const workspaceId = newSortableId("ws");
+    const workspaceDirName = newSortableId("workspace");
+    const workspacePath = workspaceRoot(dataDir, workspaceDirName);
+    await ensureDir(workspacePath);
+
+    const ts = Date.now();
+    insertWorkspace(db, {
+      id: workspaceId,
+      dirName: workspaceDirName,
+      title: "it-workspace",
+      path: workspacePath,
+      terminalCredentialId: null,
+      createdAt: ts,
+      updatedAt: ts
+    });
+
+  // 构造一个 in-flight run: run-state=running + run record=running + context items 含 streaming/tool。
+  const sessionId = newSortableId("sess");
+  createAgentSession(db, {
+    id: sessionId,
+    workspaceId,
+    title: "startup-fail-session",
+    kind: "primary",
+    createdAt: ts,
+    forkedFromSessionId: null,
+    forkedFromItemId: null
+  });
+  const runId = newSortableId("run");
+
+  const user = appendContextItem(db, {
+    workspaceId,
+    sessionId,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "hello" },
+    createdAt: ts
+  });
+  const assistantItem = appendContextItem(db, {
+    workspaceId,
+    sessionId,
+    runId,
+    turnId: newSortableId("turn"),
+    step: 1,
+    prevId: user.id,
+    kind: "assistant",
+    status: "streaming",
+    output: { type: "assistant_text", text: "" },
+    createdAt: ts
+  });
+  const toolItem = appendContextItem(db, {
+    workspaceId,
+    sessionId,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: assistantItem.id,
+    kind: "tool",
+    status: "queued",
+    output: { type: "tool", toolName: "bash", toolCallId: "call_1", args: { command: "echo hi" }, text: "" } as any,
+    createdAt: ts
+  });
+
+  createRunRecord(db, {
+    runId,
+    workspaceId,
+    sessionId,
+    triggerItemId: user.id,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: ts
+  });
+  updateRunState(db, {
+    workspaceId,
+    sessionId,
+    status: "running",
+    activeRunId: runId,
+    activeAssistantItemId: assistantItem.id,
+    runNoticeText: "",
+    updatedAt: ts,
+    appliedItemId: toolItem.id
+  });
+
+  // 脏数据：in-flight 但 active_run_id 为空。
+  const dirtySessionId = newSortableId("sess");
+  createAgentSession(db, {
+    id: dirtySessionId,
+    workspaceId,
+    title: "startup-fail-dirty-session",
+    kind: "primary",
+    createdAt: ts,
+    forkedFromSessionId: null,
+    forkedFromItemId: null
+  });
+  updateRunState(db, {
+    workspaceId,
+    sessionId: dirtySessionId,
+    status: "running",
+    activeRunId: null,
+    activeAssistantItemId: null,
+    runNoticeText: "",
+    updatedAt: ts,
+    appliedItemId: 0
+  });
+
+  // 注意：fail 模式会在模块注册阶段执行清理逻辑，因此 in-flight 数据必须在 createApp 之前写入。
+  app = await createApp({
+    db,
+    repoRoot,
+    dataDir,
+    fileMaxBytes: 1024 * 1024,
+    version: "test",
+    logLevel: "error",
+    serveWeb: false,
+    webDistDir: null,
+    credentialMasterKey: Buffer.alloc(32, 7),
+    credentialMasterKeySource: "generated",
+    credentialMasterKeyId: "testkey",
+    credentialMasterKeyCreatedAt: Date.now(),
+    authToken: null,
+    authCookieSecure: false,
+    agentWorkerEnabled: false,
+    agentWorkerHost: "127.0.0.1",
+    agentWorkerPort: 0,
+    agentWorkerSocketPath: path.join(dataDir, "agent-worker.sock"),
+    agentWorkerConcurrency: 1,
+    agentInternalToken: internalToken,
+    agentApiOrigin: "http://127.0.0.1:0",
+    agentStartupRecoveryMode: "fail"
+  });
+
+  await app.ready();
+
+  // 断言：run record 由 running -> failed
+  const run = getRunRecord(db, runId);
+  assert.ok(run, "run record should exist");
+  assert.equal(run?.status, "failed");
+
+  // 断言：run-state 回收为 idle
+  const state = getRunStateRow(db, workspaceId, sessionId);
+  assert.equal(state.status, "idle");
+  assert.equal(state.activeRunId, null);
+
+  // 断言：streaming/queued 等未终态 items 被置为 failed
+  const items = getSessionTranscriptItems(db, workspaceId, sessionId);
+  assert.ok(items.some((it) => it.kind === "assistant" && it.status === "failed"));
+  assert.ok(items.some((it) => it.kind === "tool" && it.status === "failed"));
+
+  // 断言：脏 run-state 也会被回收
+  const dirty = getRunStateRow(db, workspaceId, dirtySessionId);
+  assert.equal(dirty.status, "idle");
+  } finally {
+    await app?.close();
+    db.close();
+    await rmrf(dataDir);
+  }
+});
 
 async function configureAgentDefaults(app: FastifyInstance) {
   const providersRes = await app.inject({
@@ -127,11 +319,6 @@ async function configureAgentDefaults(app: FastifyInstance) {
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          permissions: {
-            allowRead: true,
-            allowWrite: true,
-            allowBash: true
-          },
           defaultModel: null
         }
       ]
@@ -139,6 +326,87 @@ async function configureAgentDefaults(app: FastifyInstance) {
   });
   assert.equal(agentsRes.statusCode, 200, `configure agents failed: ${agentsRes.body}`);
 }
+
+test("GET /api/settings/agent/agents 返回每个 agent 的 resolvedModel", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+
+  const providersRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: {
+      default: { providerId: "global_provider", modelId: "global_model" },
+      providers: [
+        {
+          id: "global_provider",
+          name: "Global Provider",
+          npm: "@ai-sdk/openai",
+          options: { baseURL: "https://example.com/v1", apiKey: "sk-global" },
+          models: [{ id: "global_model", name: "Global Model", contextWindowTokens: 128000 }]
+        },
+        {
+          id: "agent_provider",
+          name: "Agent Provider",
+          npm: "@ai-sdk/openai",
+          options: { baseURL: "https://example.com/v1", apiKey: "sk-agent" },
+          models: [{ id: "agent_model", name: "Agent Model", contextWindowTokens: 128000 }]
+        }
+      ]
+    }
+  });
+  assert.equal(providersRes.statusCode, 200, `configure providers failed: ${providersRes.body}`);
+
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      default: { agentId: "default" },
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          summary: "",
+          prompt: "You are a helpful coding assistant.",
+          tools: ["bash", "read", "write"],
+          mcpServers: [],
+          defaultModel: null
+        },
+        {
+          id: "custom",
+          name: "custom",
+          summary: "",
+          prompt: "Use a custom model.",
+          tools: ["bash", "read"],
+          mcpServers: [],
+          defaultModel: { providerId: "agent_provider", modelId: "agent_model" }
+        }
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `configure agents failed: ${agentsRes.body}`);
+
+  const getRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/agents" });
+  assert.equal(getRes.statusCode, 200, `get agent settings failed: ${getRes.body}`);
+  const body = getRes.json() as any;
+  const defaultAgent = body.agents.find((item: any) => item.id === "default");
+  const customAgent = body.agents.find((item: any) => item.id === "custom");
+
+  assert.deepEqual(defaultAgent?.resolvedModel, {
+    providerId: "global_provider",
+    providerName: "Global Provider",
+    contextWindowTokens: 128000,
+    modelId: "global_model",
+    modelName: "Global Model",
+    source: "global_default"
+  });
+  assert.deepEqual(customAgent?.resolvedModel, {
+    providerId: "agent_provider",
+    providerName: "Agent Provider",
+    contextWindowTokens: 128000,
+    modelId: "agent_model",
+    modelName: "Agent Model",
+    source: "agent_default"
+  });
+});
 
 async function closeFixture(fixture: Fixture) {
   fixtures.delete(fixture);
@@ -181,9 +449,10 @@ async function getRunState(app: FastifyInstance, sessionId: string) {
   const res = await app.inject({ method: "GET", url: `/api/agent/sessions/${sessionId}/run-state` });
   assert.equal(res.statusCode, 200, `get run-state failed: ${res.body}`);
   return res.json() as {
-    status: "idle" | "running" | "waiting_permission";
+    status: "idle" | "running";
     activeRunId: string | null;
     runNoticeText: string;
+    lastTerminalStatus: "completed" | "failed" | "cancelled" | null;
   };
 }
 
@@ -231,7 +500,7 @@ async function createContextItemInternal(params: {
   step: number | null;
   prevId: number | null;
   kind: "user" | "assistant" | "tool" | "system";
-  status: "streaming" | "queued" | "running" | "awaiting_permission" | "completed" | "failed" | "denied" | "cancelled";
+  status: "streaming" | "queued" | "running" | "completed" | "failed" | "cancelled";
   output: Record<string, unknown>;
 }) {
   const res = await params.app.inject({
@@ -260,7 +529,7 @@ async function updateContextItemInternal(params: {
   app: FastifyInstance;
   internalToken: string;
   itemId: number;
-  status?: "streaming" | "queued" | "running" | "awaiting_permission" | "completed" | "failed" | "denied" | "cancelled";
+  status?: "streaming" | "queued" | "running" | "completed" | "failed" | "cancelled";
   output?: Record<string, unknown>;
 }) {
   const res = await params.app.inject({
@@ -283,11 +552,11 @@ async function updateRunStateInternal(params: {
   internalToken: string;
   workspaceId: string;
   sessionId: string;
-  status: "idle" | "running" | "waiting_permission";
+  status: "idle" | "running";
   activeRunId: string | null;
   activeAssistantItemId: number | null;
-  waitingToolItemId: number | null;
   runNoticeText?: string | null;
+  updatedAt?: number;
 }) {
   const res = await params.app.inject({
     method: "POST",
@@ -301,8 +570,8 @@ async function updateRunStateInternal(params: {
       status: params.status,
       activeRunId: params.activeRunId,
       activeAssistantItemId: params.activeAssistantItemId,
-      waitingToolItemId: params.waitingToolItemId,
-      ...(Object.prototype.hasOwnProperty.call(params, "runNoticeText") ? { runNoticeText: params.runNoticeText } : {})
+      ...(Object.prototype.hasOwnProperty.call(params, "runNoticeText") ? { runNoticeText: params.runNoticeText } : {}),
+      ...(Object.prototype.hasOwnProperty.call(params, "updatedAt") ? { updatedAt: params.updatedAt } : {})
     }
   });
   assert.equal(res.statusCode, 200, `update internal run-state failed: ${res.body}`);
@@ -330,8 +599,9 @@ async function getPromptContextInternal(params: {
   assert.equal(res.statusCode, 200, `get prompt-context failed: ${res.body}`);
   return res.json() as {
     system: string;
+    tools: Array<{ name: string }>;
     messages: Array<{ role: string; content: unknown }>;
-    pendingTools: Array<{ itemId: number; approved?: boolean; status: string; toolName: string }>;
+    pendingTools: Array<{ itemId: number; status: string; toolName: string }>;
   };
 }
 
@@ -483,6 +753,271 @@ test("agent context-items 支持 afterId 增量查询", async () => {
   );
 });
 
+test("agent context-items 支持 assistant reasoning 字段的创建与读取", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "hello"
+    }
+  });
+
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: "turn_reasoning_1",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "streaming",
+    output: {
+      type: "assistant_text",
+      text: "结论正文",
+      reasoning: {
+        text: "先分析上下文,再给结论"
+      }
+    }
+  });
+
+  const full = await getContextItems(fixture.app, session.id);
+  const assistant = full.items.find((item) => item.id === assistantItem.item.id);
+  assert.ok(assistant);
+  assert.equal(assistant?.kind, "assistant");
+  assert.equal(assistant?.output.type, "assistant_text");
+  assert.equal(assistant?.output.text, "结论正文");
+  assert.deepEqual((assistant?.output as any).reasoning, { text: "先分析上下文,再给结论" });
+
+  const single = await getContextItem(fixture.app, session.id, assistantItem.item.id);
+  assert.equal(single.output.type, "assistant_text");
+  assert.deepEqual((single.output as any).reasoning, { text: "先分析上下文,再给结论" });
+});
+
+test("agent context-items 支持 assistant reasoning 字段的更新", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: "turn_reasoning_update",
+    step: 1,
+    prevId: null,
+    kind: "assistant",
+    status: "streaming",
+    output: {
+      type: "assistant_text",
+      text: "初始正文"
+    }
+  });
+
+  await updateContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    itemId: assistantItem.item.id,
+    status: "completed",
+    output: {
+      type: "assistant_text",
+      text: "最终正文",
+      reasoning: { text: "补充后的思考内容" }
+    }
+  });
+
+  const single = await getContextItem(fixture.app, session.id, assistantItem.item.id);
+  assert.equal(single.output.type, "assistant_text");
+  assert.equal(single.output.text, "最终正文");
+  assert.deepEqual((single.output as any).reasoning, { text: "补充后的思考内容" });
+  assert.equal((single.output as any).error, undefined);
+});
+
+test("assistant reasoning 不应进入 prompt-context", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 0,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "继续" }
+  });
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_reasoning_prompt",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: { type: "assistant_text", text: "正式回答", reasoning: { text: "隐藏思考" } }
+  });
+
+  const prompt = await getPromptContextInternal({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId });
+  assert.ok(JSON.stringify(prompt.messages).includes("正式回答"));
+  assert.equal(JSON.stringify(prompt.messages).includes("隐藏思考"), false);
+});
+
+test("assistant reasoning 不应进入 archive line", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "用户消息" }
+  });
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: "turn_reasoning_archive",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: { type: "assistant_text", text: "正式回答", reasoning: { text: "不应归档的思考" } }
+  });
+
+  const clearRes = await fixture.app.inject({ method: "POST", url: `/api/agent/sessions/${session.id}/clear`, payload: { workspaceId: fixture.workspaceId, reason: "切换新任务" } });
+  assert.equal(clearRes.statusCode, 200, `clear session failed: ${clearRes.body}`);
+
+  const archiveFilePath = path.join(agentArchiveSessionDir(fixture.dataDir, fixture.workspaceId, session.id), "00000001.log");
+  const archiveText = await fs.readFile(archiveFilePath, "utf-8");
+  assert.ok(archiveText.includes("正式回答"));
+  assert.equal(archiveText.includes("不应归档的思考"), false);
+});
+
+test("assistant failed item 会通过 output.error 返回错误且正文不混入 [run]", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: "turn_failed_assistant",
+    step: 1,
+    prevId: null,
+    kind: "assistant",
+    status: "failed",
+    output: {
+      type: "assistant_text",
+      text: "半截回答",
+      error: "model idle timeout after 30000ms"
+    }
+  });
+
+  const single = await getContextItem(fixture.app, session.id, assistantItem.item.id);
+  assert.equal(single.output.type, "assistant_text");
+  assert.equal(single.output.text, "半截回答");
+  assert.equal((single.output as any).error, "model idle timeout after 30000ms");
+  assert.equal(single.output.text.includes("[run]"), false);
+});
+
+test("prompt-context 仅注入最近一次且无 tool item 的 failed assistant", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 0,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "继续" }
+  });
+  const failedAssistant = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_failed_prompt",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "failed",
+    output: { type: "assistant_text", text: "半截输出", error: "provider error" }
+  });
+
+  const prompt = await getPromptContextInternal({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId });
+  assert.ok(prompt.messages.some((m) => m.role === "assistant" && JSON.stringify(m.content).includes("半截输出")));
+  assert.equal(prompt.messages.some((m) => JSON.stringify(m.content).includes("provider error")), false);
+  assert.equal(prompt.messages.some((m) => JSON.stringify(m.content).includes("[run]")), false);
+  assert.ok(failedAssistant.item.id > 0);
+});
+
 test("非 system item 写入 boundaryReason 会被忽略", async () => {
   const fixture = await createFixture();
   const session = await createSession(fixture.app, fixture.workspaceId);
@@ -511,127 +1046,21 @@ test("非 system item 写入 boundaryReason 会被忽略", async () => {
   assert.equal(context.items[0]?.boundaryReason, null);
 });
 
-test("agent tool-permission 支持 approve/deny 并更新状态", async () => {
-  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
-  const session = await createSession(fixture.app, fixture.workspaceId);
-  const runId = newSortableId("run");
-
-  const userItem = await createContextItemInternal({
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: null,
-    step: null,
-    prevId: null,
-    kind: "user",
-    status: "completed",
-    output: {
-      type: "user_text",
-      text: "need read permission"
-    }
-  });
-
-  const toolApprove = await createContextItemInternal({
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: "turn_a",
-    step: 1,
-    prevId: userItem.item.id,
-    kind: "tool",
-    status: "awaiting_permission",
-    output: {
-      type: "tool",
-      toolName: "read",
-      args: {
-        filePath: "README.md"
-      }
-    }
-  });
-
-  await updateRunStateInternal({
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    status: "waiting_permission",
-    activeRunId: runId,
-    activeAssistantItemId: null,
-    waitingToolItemId: toolApprove.item.id
-  });
-
-  const approveRes = await fixture.app.inject({
-    method: "POST",
-    url: `/api/agent/sessions/${session.id}/tool-permission`,
-    payload: {
-      workspaceId: fixture.workspaceId,
-      toolItemId: toolApprove.item.id,
-      decision: "approve"
-    }
-  });
-  assert.equal(approveRes.statusCode, 200, `approve tool permission failed: ${approveRes.body}`);
-
-  const approvedItem = await getContextItem(fixture.app, session.id, toolApprove.item.id);
-  assert.equal(approvedItem.status, "queued");
-
-  const runStateAfterApprove = await getRunState(fixture.app, session.id);
-  assert.equal(runStateAfterApprove.status, "running");
-
-  const toolDeny = await createContextItemInternal({
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: "turn_b",
-    step: 2,
-    prevId: toolApprove.item.id,
-    kind: "tool",
-    status: "awaiting_permission",
-    output: {
-      type: "tool",
-      toolName: "bash",
-      args: {
-        command: "pwd"
-      }
-    }
-  });
-
-  await updateRunStateInternal({
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    status: "waiting_permission",
-    activeRunId: runId,
-    activeAssistantItemId: null,
-    waitingToolItemId: toolDeny.item.id
-  });
-
-  const denyRes = await fixture.app.inject({
-    method: "POST",
-    url: `/api/agent/sessions/${session.id}/tool-permission`,
-    payload: {
-      workspaceId: fixture.workspaceId,
-      toolItemId: toolDeny.item.id,
-      decision: "deny"
-    }
-  });
-  assert.equal(denyRes.statusCode, 200, `deny tool permission failed: ${denyRes.body}`);
-
-  const deniedItem = await getContextItem(fixture.app, session.id, toolDeny.item.id);
-  assert.equal(deniedItem.status, "denied");
-  assert.equal(String(deniedItem.output.error || ""), "permission denied");
-});
-
 test("agent cancel 仅终止执行并保留消息,活跃项标记为 cancelled", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
   const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "agent-default",
+    providerId: "openai",
+    modelId: "gpt-4.1",
+    status: "running",
+    createdAt: Date.now()
+  });
 
   const userItem = await createContextItemInternal({
     app: fixture.app,
@@ -695,7 +1124,6 @@ test("agent cancel 仅终止执行并保留消息,活跃项标记为 cancelled",
     status: "running",
     activeRunId: runId,
     activeAssistantItemId: assistantItem.item.id,
-    waitingToolItemId: null
   });
 
   const cancelRes = await fixture.app.inject({
@@ -713,6 +1141,7 @@ test("agent cancel 仅终止执行并保留消息,活跃项标记为 cancelled",
   const runState = await getRunState(fixture.app, session.id);
   assert.equal(runState.status, "idle");
   assert.equal(runState.activeRunId, null);
+  assert.equal(runState.lastTerminalStatus, "cancelled");
 
   const context = await getContextItems(fixture.app, session.id);
   assert.equal(context.headItemId, toolItem.item.id);
@@ -721,6 +1150,201 @@ test("agent cancel 仅终止执行并保留消息,活跃项标记为 cancelled",
   const latestTool = context.items.find((item) => item.id === toolItem.item.id);
   assert.equal(latestAssistant?.status, "cancelled");
   assert.equal(latestTool?.status, "cancelled");
+});
+
+test("agent cancel 会收敛隐藏链上的未终态 items 与关联 run", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const createdAt = Date.now();
+
+  const baseRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: baseRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "completed",
+    createdAt
+  });
+
+  const user1 = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: baseRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "第一问" }
+  });
+  const assistant1 = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: baseRunId,
+    turnId: "turn_cancel_hidden_1",
+    step: 1,
+    prevId: user1.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: { type: "assistant_text", text: "第一答" }
+  });
+  const user2 = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: baseRunId,
+    turnId: null,
+    step: null,
+    prevId: assistant1.item.id,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "第二问" }
+  });
+
+  const hiddenRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: hiddenRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: user2.item.id,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: createdAt + 1
+  });
+
+  const hiddenAssistant = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: hiddenRunId,
+    turnId: "turn_cancel_hidden_2",
+    step: 1,
+    prevId: user2.item.id,
+    kind: "assistant",
+    status: "streaming",
+    output: { type: "assistant_text", text: "hidden working" },
+    createdAt: createdAt + 2
+  });
+  const hiddenTool = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: hiddenRunId,
+    turnId: "turn_cancel_hidden_2",
+    step: 1,
+    prevId: hiddenAssistant.id,
+    kind: "tool",
+    status: "running",
+    output: { type: "tool", toolName: "bash", args: { command: "sleep 10" } } as any,
+    createdAt: createdAt + 3
+  });
+  moveSessionHead(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    expectedHeadItemId: hiddenTool.id,
+    nextHeadItemId: user2.item.id,
+    updatedAt: createdAt + 4
+  });
+
+  const cancelRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/cancel`,
+    payload: { workspaceId: fixture.workspaceId }
+  });
+  assert.equal(cancelRes.statusCode, 200, `cancel hidden run failed: ${cancelRes.body}`);
+
+  const runState = await getRunState(fixture.app, session.id);
+  assert.equal(runState.status, "idle");
+  assert.equal(runState.activeRunId, null);
+  assert.equal(runState.lastTerminalStatus, "cancelled");
+
+  const hiddenAssistantAfter = getContextItemById(fixture.db, hiddenAssistant.id);
+  const hiddenToolAfter = getContextItemById(fixture.db, hiddenTool.id);
+  assert.equal(hiddenAssistantAfter?.status, "cancelled");
+  assert.equal(hiddenToolAfter?.status, "cancelled");
+
+  const hiddenRunAfter = getRunRecord(fixture.db, hiddenRunId);
+  assert.equal(hiddenRunAfter?.status, "cancelled");
+
+  const context = await getContextItems(fixture.app, session.id);
+  assert.equal(context.headItemId, user2.item.id);
+  assert.equal(context.items.map((item) => item.id).includes(hiddenAssistant.id), false);
+  assert.equal(context.items.map((item) => item.id).includes(hiddenTool.id), false);
+});
+
+test("agent cancel 不应把仅因脏 non-terminal item 命中的 terminal run 改写为 cancelled", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const createdAt = Date.now();
+
+  const terminalRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: terminalRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "completed",
+    createdAt
+  });
+
+  const user = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: terminalRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "可见消息" }
+  });
+
+  const dirtyAssistant = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: terminalRunId,
+    turnId: "turn_cancel_terminal_run_dirty",
+    step: 1,
+    prevId: user.item.id,
+    kind: "assistant",
+    status: "streaming",
+    output: { type: "assistant_text", text: "dirty hidden assistant" },
+    createdAt: createdAt + 1
+  });
+  moveSessionHead(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    expectedHeadItemId: dirtyAssistant.id,
+    nextHeadItemId: user.item.id,
+    updatedAt: createdAt + 2
+  });
+
+  const cancelRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/cancel`,
+    payload: { workspaceId: fixture.workspaceId }
+  });
+  assert.equal(cancelRes.statusCode, 200, `cancel terminal run dirty item failed: ${cancelRes.body}`);
+
+  const dirtyAssistantAfter = getContextItemById(fixture.db, dirtyAssistant.id);
+  assert.equal(dirtyAssistantAfter?.status, "cancelled");
+
+  const terminalRunAfter = getRunRecord(fixture.db, terminalRunId);
+  assert.equal(terminalRunAfter?.status, "completed");
 });
 
 test("agent runtime settings 可通过 execution-profile 下发", async () => {
@@ -745,6 +1369,10 @@ test("agent runtime settings 可通过 execution-profile 下发", async () => {
     clientRequestId: "req_runtime_settings"
   });
 
+  const runRecord = getRunRecord(fixture.db, msg.runId);
+  assert.ok(runRecord, "run record should exist");
+  assert.equal(runRecord?.uiLocale, null, "missing uiLocale should be stored as null");
+
   const profileRes = await fixture.app.inject({
     method: "POST",
     url: "/api/internal/agent/execution-profile",
@@ -764,6 +1392,49 @@ test("agent runtime settings 可通过 execution-profile 下发", async () => {
   assert.equal(profile.runtime?.modelRequestMaxRetries, 4);
   assert.equal(typeof profile.runtime?.autoCompactThresholdPct, "number");
   assert.equal(typeof profile.model?.contextWindowTokens, "number");
+});
+
+test("agent prompt-context 根据 run uiLocale 注入语言与时间运行时约束", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/messages`,
+    payload: {
+      workspaceId: fixture.workspaceId,
+      text: "hello",
+      clientRequestId: "req_locale_prompt",
+      uiLocale: "en-US"
+    }
+  });
+  assert.equal(res.statusCode, 201, `send message failed: ${res.body}`);
+  const body = res.json() as { runId: string };
+
+  const runRecord = getRunRecord(fixture.db, body.runId);
+  assert.ok(runRecord, "run record should exist");
+  assert.equal(runRecord?.uiLocale, "en-US");
+
+  const prompt = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: body.runId
+  });
+  assert.ok(prompt.system.includes("## Runtime Constraints"), "system should include runtime constraints section");
+  assert.ok(prompt.system.includes("Language requirement: use English consistently for this run."));
+  assert.ok(prompt.system.includes("If you call todolist, the goal and todos[].content must also be in English."));
+  assert.ok(prompt.system.includes("Current system time:"));
+  assert.ok(prompt.system.includes("Time zone:"));
+});
+
+test("agent compact 在 worker 不可用时仍接受 uiLocale 参数", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const res = await fixture.app.inject({ method: "POST", url: `/api/agent/sessions/${session.id}/compact`, payload: { workspaceId: fixture.workspaceId, clientRequestId: "req_compact_locale", uiLocale: "zh-CN" } });
+  assert.equal(res.statusCode, 503, `compact should fail when worker disabled: ${res.body}`);
+  assert.equal(res.json().code, "AGENT_WORKER_UNAVAILABLE");
 });
 
 test("agent compact 在 worker 不可用时返回 503", async () => {
@@ -909,6 +1580,428 @@ test("agent clear 对 subtask 会话返回只读错误", async () => {
   assert.equal(clearRes.json().code, "AGENT_SUBTASK_READONLY");
 });
 
+test("agent prompt-context 对 subtask 会话隐藏 subtask 工具", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      default: { agentId: "default" },
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          summary: "",
+          prompt: "You are a helpful coding assistant.",
+          tools: ["bash", "read", "write", "subtask"],
+          mcpServers: [],
+          defaultModel: null
+        }
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `configure agents with subtask failed: ${agentsRes.body}`);
+
+  const sessionRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions",
+    payload: {
+      workspaceId: fixture.workspaceId,
+      title: "it-subtask-session",
+      kind: "subtask"
+    }
+  });
+  assert.equal(sessionRes.statusCode, 201, `create subtask session failed: ${sessionRes.body}`);
+  const session = sessionRes.json() as { id: string };
+
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    uiLocale: "en-US",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const promptContext = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+
+  const toolNames = promptContext.tools.map((item) => item.name);
+  assert.equal(toolNames.includes("subtask"), false, "subtask tool should be hidden for subtask sessions");
+  assert.equal(toolNames.includes("bash"), true, "other enabled tools should remain visible");
+});
+
+test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 提示", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      default: { agentId: "default" },
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          summary: "",
+          prompt: "You are a helpful coding assistant.",
+          tools: ["bash", "read", "write", "subtask"],
+          mcpServers: [],
+          defaultModel: null
+        }
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `configure agents with subtask failed: ${agentsRes.body}`);
+
+  const parentSession = await createSession(fixture.app, fixture.workspaceId);
+  const parentRunId = newSortableId("run");
+  const createdAt = Date.now();
+  createRunRecord(fixture.db, {
+    runId: parentRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    uiLocale: "en-US",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "请调用 subtask 把任务交给另一个 agent。"
+    }
+  });
+
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_subtask_fork",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: {
+      type: "assistant_text",
+      text: "我会调用工具处理这个任务。"
+    }
+  });
+
+  const readToolItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_subtask_fork",
+    step: 1,
+    prevId: assistantItem.item.id,
+    kind: "tool",
+    status: "completed",
+    output: {
+      type: "tool",
+      toolName: "read",
+      toolCallId: "call_subtask_read",
+      args: { filePath: "README.md" },
+      text: "tool: read\nstatus: completed\n\nREADME snippet"
+    }
+  });
+
+  const toolItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_subtask_fork",
+    step: 1,
+    prevId: readToolItem.item.id,
+    kind: "tool",
+    status: "queued",
+    output: {
+      type: "tool",
+      toolName: "subtask",
+      toolCallId: "call_subtask_fork",
+      args: {
+        description: "研究问题",
+        prompt: "请直接完成这个子任务",
+        agentId: "default",
+        session: { mode: "fork" }
+      }
+    }
+  });
+
+  const startRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/start",
+    headers: {
+      "x-awb-agent-internal-token": fixture.internalToken
+    },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      parentSessionId: parentSession.id,
+      parentRunId: parentRunId,
+      parentToolItemId: toolItem.item.id,
+      description: "研究问题",
+      prompt: "请直接完成这个子任务",
+      agentId: "default",
+      session: { mode: "fork" }
+    }
+  });
+  assert.equal(startRes.statusCode, 200, `start subtask failed: ${startRes.body}`);
+  const started = startRes.json() as { sessionId: string; runId: string };
+
+  const items = getSessionTranscriptItems(fixture.db, fixture.workspaceId, started.sessionId);
+  assert.equal(items.length >= 3, true, "forked subtask session should contain copied user, system guard and prompt user");
+
+  const copiedUser = items[0];
+  const systemItem = items[1];
+  const promptUser = items[2];
+  assert.equal(items.some((item) => item.id !== copiedUser?.id && item.kind === "assistant"), false, "forked subtask session should not copy the triggering assistant turn");
+  assert.equal(items.some((item) => item.kind === "tool"), false, "forked subtask session should not copy tool items from the triggering turn");
+  assert.equal(copiedUser?.kind, "user");
+  assert.equal(copiedUser?.output.type, "user_text");
+  assert.equal((copiedUser?.output as { text?: string }).text, "请调用 subtask 把任务交给另一个 agent。");
+  assert.equal(systemItem?.kind, "system");
+  assert.equal(systemItem?.output.type, "system_text");
+  assert.equal(
+    String((systemItem?.output as { text?: string }).text || "").includes("在本条系统消息之前的全部历史内容，均来自父会话复制"),
+    true
+  );
+  assert.equal(promptUser?.kind, "user");
+  assert.equal(promptUser?.output.type, "user_text");
+  assert.equal((promptUser?.output as { text?: string }).text, "请直接完成这个子任务");
+
+  const promptContext = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: started.sessionId,
+    runId: started.runId
+  });
+  assert.equal(
+    promptContext.messages.some((message) =>
+      message.role === "system" &&
+      typeof message.content === "string" &&
+      message.content.includes("在本条系统消息之前的全部历史内容，均来自父会话复制")
+    ),
+    true,
+    "prompt-context should include fork guard system message"
+  );
+  assert.equal(
+    promptContext.tools.some((tool) => tool.name === "subtask"),
+    false,
+    "forked subtask session should not expose subtask tool"
+  );
+  assert.ok(promptContext.system.includes("## Runtime Constraints"));
+  assert.ok(promptContext.system.includes("Language requirement: use English consistently for this run."));
+  assert.ok(promptContext.system.includes("Current system time:"));
+  assert.ok(promptContext.system.includes("Time zone:"));
+});
+
+test("subtask 失败时 getSubtaskRunResultFromWorker 仍返回 partial text", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const sessionRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions",
+    payload: {
+      workspaceId: fixture.workspaceId,
+      title: "it-subtask-result",
+      kind: "subtask"
+    }
+  });
+  assert.equal(sessionRes.statusCode, 201, `create subtask session failed: ${sessionRes.body}`);
+  const session = sessionRes.json() as { id: string };
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "failed",
+    createdAt
+  });
+
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_subtask_failed_partial",
+    step: 1,
+    prevId: null,
+    kind: "assistant",
+    status: "failed",
+    output: {
+      type: "assistant_text",
+      text: "partial result from subtask",
+      error: "failed after 3 retries: timeout"
+    }
+  });
+
+  const resultRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/result",
+    headers: {
+      "x-awb-agent-internal-token": fixture.internalToken
+    },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      runId
+    }
+  });
+  assert.equal(resultRes.statusCode, 200, `get subtask result failed: ${resultRes.body}`);
+  assert.equal((resultRes.json() as { resultText: string }).resultText, "partial result from subtask");
+});
+
+test("failed tool item 可保留 subtask partial result 且 error 不混入 partial 文本", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const toolItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: "turn_failed_subtask_tool",
+    step: 1,
+    prevId: null,
+    kind: "tool",
+    status: "failed",
+    output: {
+      type: "tool",
+      toolName: "subtask",
+      toolCallId: "call_failed_subtask_tool",
+      args: { description: "研究问题" },
+      text: "tool: subtask\nstatus: failed\n\nsubtask failed",
+      result: {
+        subtaskSessionId: "sess_subtask_failed",
+        resultText: "partial result from subtask"
+      },
+      error: "subtask failed"
+    }
+  });
+
+  const single = await getContextItem(fixture.app, session.id, toolItem.item.id);
+  assert.equal(single.output.type, "tool");
+  assert.equal(single.status, "failed");
+  assert.equal(String(single.output.error || ""), "subtask failed");
+  assert.equal(String(single.output.text || "").includes("partial result from subtask"), false);
+  assert.equal(
+    String((((single.output.result as { resultText?: string } | undefined)?.resultText) || "")),
+    "partial result from subtask"
+  );
+});
+
+test("agent prompt-context 对 primary 会话保留 subtask 工具", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      default: { agentId: "default" },
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          summary: "",
+          prompt: "You are a helpful coding assistant.",
+          tools: ["bash", "read", "write", "subtask"],
+          mcpServers: [],
+          defaultModel: null
+        }
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `configure agents with subtask failed: ${agentsRes.body}`);
+
+  const primarySession = await createSession(fixture.app, fixture.workspaceId);
+  const seedRunId = newSortableId("run");
+  const seedUser = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: primarySession.id,
+    runId: seedRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "primary 会话内容" }
+  });
+  const forkRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions/fork",
+    payload: {
+      fromSessionId: primarySession.id,
+      fromItemId: seedUser.item.id,
+      mode: "with_archive"
+    }
+  });
+  assert.equal(forkRes.statusCode, 201, `fork primary session failed: ${forkRes.body}`);
+  const forkedPrimary = forkRes.json() as { id: string };
+
+  for (const sessionId of [primarySession.id, forkedPrimary.id]) {
+    const runId = newSortableId("run");
+    createRunRecord(fixture.db, {
+      runId,
+      workspaceId: fixture.workspaceId,
+      sessionId,
+      triggerItemId: 1,
+      agentId: "default",
+      providerId: "ppchat",
+      modelId: "gpt-5.2",
+      status: "running",
+      createdAt: Date.now()
+    });
+    const promptContext = await getPromptContextInternal({
+      app: fixture.app,
+      internalToken: fixture.internalToken,
+      workspaceId: fixture.workspaceId,
+      sessionId,
+      runId
+    });
+    assert.equal(promptContext.tools.some((tool) => tool.name === "subtask"), true, "primary session should keep subtask tool");
+  }
+});
+
 test("delete workspace 会清理 dataDir 下的 agent 归档目录", async () => {
   const fixture = await createFixture();
   const archiveSessionPath = agentArchiveSessionDir(fixture.dataDir, fixture.workspaceId, "sess_cleanup");
@@ -972,7 +2065,6 @@ test("agent clear 在会话运行中返回 AGENT_CLEAR_NOT_IDLE", async () => {
     status: "running",
     activeRunId: newSortableId("run"),
     activeAssistantItemId: null,
-    waitingToolItemId: null
   });
 
   const clearRes = await fixture.app.inject({
@@ -984,6 +2076,207 @@ test("agent clear 在会话运行中返回 AGENT_CLEAR_NOT_IDLE", async () => {
   });
   assert.equal(clearRes.statusCode, 409, `clear running session should fail: ${clearRes.body}`);
   assert.equal(clearRes.json().code, "AGENT_CLEAR_NOT_IDLE");
+});
+
+test("agent revert 在会话运行中返回 AGENT_REVERT_NOT_IDLE", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "agent-default",
+    providerId: "openai",
+    modelId: "gpt-4.1",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "测试运行中禁止回退"
+    }
+  });
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_revert_running",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "streaming",
+    output: {
+      type: "assistant_text",
+      text: "working..."
+    }
+  });
+
+  await updateRunStateInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "running",
+    activeRunId: runId,
+    activeAssistantItemId: assistantItem.item.id,
+  });
+
+  const revertRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/revert`,
+    payload: {
+      workspaceId: fixture.workspaceId,
+      toItemId: userItem.item.id,
+      reason: "manual_revert"
+    }
+  });
+  assert.equal(revertRes.statusCode, 409, `revert running session should fail: ${revertRes.body}`);
+  assert.equal(revertRes.json().code, "AGENT_REVERT_NOT_IDLE");
+
+  const context = await getContextItems(fixture.app, session.id);
+  assert.equal(context.headItemId, assistantItem.item.id);
+  const runState = await getRunState(fixture.app, session.id);
+  assert.equal(runState.status, "running");
+  assert.equal(runState.activeRunId, runId);
+});
+
+test("agent revert 在 idle 且存在非终态残留 item 时返回 AGENT_REVERT_HAS_NON_TERMINAL_ITEMS", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "测试 idle 下非终态残留禁止回退"
+    }
+  });
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: "turn_revert_dirty",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "streaming",
+    output: {
+      type: "assistant_text",
+      text: "残留中的输出"
+    }
+  });
+
+  const revertRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/revert`,
+    payload: {
+      workspaceId: fixture.workspaceId,
+      toItemId: userItem.item.id,
+      reason: "manual_revert"
+    }
+  });
+  assert.equal(revertRes.statusCode, 409, `revert dirty idle session should fail: ${revertRes.body}`);
+  assert.equal(revertRes.json().code, "AGENT_REVERT_HAS_NON_TERMINAL_ITEMS");
+});
+
+test("agent revert 在 idle 时可回退到可见 item 并隐藏后续分支", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "问题A"
+    }
+  });
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: "turn_revert_success",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: {
+      type: "assistant_text",
+      text: "答复A"
+    }
+  });
+  const trailingUser = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: assistantItem.item.id,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "问题B"
+    }
+  });
+
+  const revertRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/revert`,
+    payload: {
+      workspaceId: fixture.workspaceId,
+      toItemId: assistantItem.item.id,
+      reason: "manual_revert"
+    }
+  });
+  assert.equal(revertRes.statusCode, 200, `revert visible item should succeed: ${revertRes.body}`);
+  const revertBody = revertRes.json() as { headItemId: number | null; sessionId: string };
+  assert.equal(revertBody.sessionId, session.id);
+  assert.equal(revertBody.headItemId, assistantItem.item.id);
+
+  const context = await getContextItems(fixture.app, session.id);
+  assert.equal(context.headItemId, assistantItem.item.id);
+  assert.deepEqual(context.items.map((item) => item.id), [userItem.item.id, assistantItem.item.id]);
+  assert.equal(context.items.some((item) => item.id === trailingUser.item.id), false);
 });
 
 test("agent clear 并发请求会串行执行且不会重复归档", async () => {
@@ -1130,7 +2423,6 @@ test("run-state 支持 runNoticeText 更新与 idle 自动清空", async () => {
     status: "running",
     activeRunId: runId,
     activeAssistantItemId: null,
-    waitingToolItemId: null,
     runNoticeText: "Request failed, retrying in 2s (1/3): timeout"
   });
 
@@ -1146,12 +2438,81 @@ test("run-state 支持 runNoticeText 更新与 idle 自动清空", async () => {
     status: "idle",
     activeRunId: null,
     activeAssistantItemId: null,
-    waitingToolItemId: null
   });
 
   const idleState = await getRunState(fixture.app, session.id);
   assert.equal(idleState.status, "idle");
   assert.equal(idleState.runNoticeText, "");
+  assert.equal(idleState.lastTerminalStatus, null);
+});
+
+test("run-state 返回最近一次终态 run 结果", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+
+  const created = await createSession(fixture.app, fixture.workspaceId);
+  const session = getAgentSession(fixture.db, created.id)!;
+  const createdAt = Date.now();
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "agent-default",
+    providerId: "openai",
+    modelId: "gpt-4.1",
+    status: "completed",
+    createdAt
+  });
+  await updateRunStateInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "idle",
+    activeRunId: null,
+    activeAssistantItemId: null,
+    updatedAt: createdAt
+  });
+
+  const runState = await getRunState(fixture.app, session.id);
+  assert.equal(runState.status, "idle");
+  assert.equal(runState.lastTerminalStatus, "completed");
+});
+
+test("run-state 不应把旧 terminal run 误认为当前这次 idle 的终态", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+
+  const created = await createSession(fixture.app, fixture.workspaceId);
+  const session = getAgentSession(fixture.db, created.id)!;
+  const createdAt = Date.now();
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "agent-default",
+    providerId: "openai",
+    modelId: "gpt-4.1",
+    status: "completed",
+    createdAt
+  });
+
+  await updateRunStateInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "idle",
+    activeRunId: null,
+    activeAssistantItemId: null,
+    updatedAt: createdAt + 1000
+  });
+
+  const runState = await getRunState(fixture.app, session.id);
+  assert.equal(runState.status, "idle");
+  assert.equal(runState.lastTerminalStatus, null);
 });
 
 test("single-call model profile 始终使用全局默认模型", async () => {
@@ -1218,11 +2579,6 @@ test("single-call model profile 始终使用全局默认模型", async () => {
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          permissions: {
-            allowRead: true,
-            allowWrite: true,
-            allowBash: true
-          },
           defaultModel: {
             providerId: "agent_provider",
             modelId: "agent_model"
@@ -1488,6 +2844,83 @@ test("agent context 压缩后会归档并支持 archive_search/read", async () =
   const archiveContent = await fs.readFile(archiveFilePath, "utf-8");
   assert.ok(archiveContent.includes("历史问题"));
   assert.ok(archiveContent.includes("新增归档与压缩方案草稿"));
+
+  const forkRollbackFixture = await createFixture({
+    agentWorkerConcurrency: 0,
+    agentTestFaults: {
+      archiveWrite: {
+        failAfterChunks: 1
+      }
+    }
+  });
+  const forkRollbackSession = await createSession(forkRollbackFixture.app, forkRollbackFixture.workspaceId);
+  const forkRunId = newSortableId("run");
+  const archivedUser = await createContextItemInternal({
+    app: forkRollbackFixture.app,
+    internalToken: forkRollbackFixture.internalToken,
+    workspaceId: forkRollbackFixture.workspaceId,
+    sessionId: forkRollbackSession.id,
+    runId: forkRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "需要被归档复制的历史问题" }
+  });
+  await createContextItemInternal({
+    app: forkRollbackFixture.app,
+    internalToken: forkRollbackFixture.internalToken,
+    workspaceId: forkRollbackFixture.workspaceId,
+    sessionId: forkRollbackSession.id,
+    runId: forkRunId,
+    turnId: "turn_fork_archive_fail",
+    step: 1,
+    prevId: archivedUser.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: { type: "assistant_text", text: "需要被归档复制的历史回答" }
+  });
+  const clearRollbackRes = await forkRollbackFixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${forkRollbackSession.id}/clear`,
+    payload: { workspaceId: forkRollbackFixture.workspaceId, reason: "触发归档" }
+  });
+  assert.equal(clearRollbackRes.statusCode, 200, `clear rollback session failed: ${clearRollbackRes.body}`);
+
+  const liveUser = await createContextItemInternal({
+    app: forkRollbackFixture.app,
+    internalToken: forkRollbackFixture.internalToken,
+    workspaceId: forkRollbackFixture.workspaceId,
+    sessionId: forkRollbackSession.id,
+    runId: forkRunId,
+    turnId: null,
+    step: null,
+    prevId: clearRollbackRes.json().headItemId,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "新的可见问题" }
+  });
+
+  const sessionsBefore = forkRollbackFixture.db.prepare(`select count(*) as c from agent_session where workspace_id = ?`).get(forkRollbackFixture.workspaceId) as { c: number };
+  const itemsBefore = forkRollbackFixture.db.prepare(`select count(*) as c from agent_context_item where workspace_id = ?`).get(forkRollbackFixture.workspaceId) as { c: number };
+  const forkFailRes = await forkRollbackFixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions/fork",
+    payload: { fromSessionId: forkRollbackSession.id, fromItemId: liveUser.item.id, mode: "with_archive" }
+  });
+  assert.equal(forkFailRes.statusCode, 500, `fork with archive failure should bubble: ${forkFailRes.body}`);
+  assert.equal(forkFailRes.json().code, "AGENT_FORK_ARCHIVE_FAILED");
+
+  const sessionsAfter = forkRollbackFixture.db.prepare(`select count(*) as c from agent_session where workspace_id = ?`).get(forkRollbackFixture.workspaceId) as { c: number };
+  const itemsAfter = forkRollbackFixture.db.prepare(`select count(*) as c from agent_context_item where workspace_id = ?`).get(forkRollbackFixture.workspaceId) as { c: number };
+  assert.equal(sessionsAfter.c, sessionsBefore.c, "failed fork should not leave a new session row behind");
+  assert.equal(itemsAfter.c, itemsBefore.c, "failed fork should not leave cloned context items behind");
+
+  const forkChildren = forkRollbackFixture.db.prepare(`select id from agent_session where workspace_id = ? and forked_from_session_id = ?`).all(forkRollbackFixture.workspaceId, forkRollbackSession.id) as Array<{ id: string }>;
+  assert.equal(forkChildren.length, 0, "failed fork should not leave fork child sessions behind");
+  const archiveEntries = await fs.readdir(path.join(forkRollbackFixture.dataDir, "agent", "archive", forkRollbackFixture.workspaceId)).catch(() => [] as string[]);
+  assert.deepEqual(archiveEntries, [forkRollbackSession.id], "failed fork should not leave archive dir for forked session behind");
 
   const search = await archiveSearchInternal({
     app: fixture.app,
@@ -2264,12 +3697,14 @@ test("agent prompt-context 支持 todolist 工具输入输出", async () => {
       toolName: "todolist",
       toolCallId: "call_todolist_1",
       args: {
+        goal: "完成 todolist goal 增强与展示",
         todos: [
           { content: "梳理需求", status: "completed" },
           { content: "实现功能", status: "in_progress" }
         ]
       },
       result: {
+        goal: "完成 todolist goal 增强与展示",
         summary: {
           total: 2,
           pending: 0,
@@ -2312,6 +3747,7 @@ test("agent prompt-context 支持 todolist 工具输入输出", async () => {
       })
     : null;
   const input = (toolCallPart as { input?: Record<string, unknown> } | null)?.input ?? {};
+  assert.equal(String(input.goal || ""), "完成 todolist goal 增强与展示");
   assert.equal(Array.isArray(input.todos), true, "todolist tool-call input should include todos");
 
   const toolResultMessage = context.messages.find((message) => {
@@ -2334,6 +3770,118 @@ test("agent prompt-context 支持 todolist 工具输入输出", async () => {
   const output = (toolResultPart as { output?: { type?: string; value?: string } } | null)?.output;
   assert.equal(String(output?.type || ""), "text", "todolist tool-result output should be text");
   assert.equal(String(output?.value || "").includes("Todo list updated"), true, "todolist tool-result should be summary text");
+
+  const updatedSession = getAgentSession(fixture.db, session.id);
+  assert.ok(updatedSession, "updated session should exist");
+  assert.equal(updatedSession?.title, "完成 todolist goal 增强与展示");
+});
+
+test("agent prompt-context: todolist goal 超长时自动截断并更新 session title", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const longGoal = "这是一个非常长的 todolist goal，用来验证超过五十个字符后会被自动截断而不是直接报错失败，需要继续追加更多文字";
+  const normalizedGoal = "这是一个非常长的 todolist goal，用来验证超过五十个字符后会被自动截断而不是直接报错失…";
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "请维护任务清单" }
+  });
+
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_todolist_goal_truncate",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: { type: "assistant_text", text: "更新任务清单" }
+  });
+
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_todolist_goal_truncate",
+    step: 1,
+    prevId: assistantItem.item.id,
+    kind: "tool",
+    status: "completed",
+    output: {
+      type: "tool",
+      toolName: "todolist",
+      toolCallId: "call_todolist_goal_truncate",
+      args: { goal: longGoal, todos: [{ content: "实现功能", status: "in_progress" }] },
+      result: { goal: longGoal, summary: { total: 1, pending: 0, inProgress: 1, completed: 0, cancelled: 0 }, todos: [{ content: "实现功能", status: "in_progress" }] }
+    }
+  });
+
+  const updatedSession = getAgentSession(fixture.db, session.id);
+  assert.ok(updatedSession, "updated session should exist");
+  assert.equal(updatedSession?.title, normalizedGoal);
+});
+
+test("agent prompt-context: todolist goal 为空白时不更新 session title", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: 1, agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", status: "running", createdAt
+  });
+
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_todolist_goal_blank",
+    step: 1,
+    prevId: null,
+    kind: "tool",
+    status: "completed",
+    output: {
+      type: "tool",
+      toolName: "todolist",
+      toolCallId: "call_todolist_goal_blank",
+      args: { goal: "   ", todos: [{ content: "实现功能", status: "in_progress" }] },
+      result: { goal: "   ", summary: { total: 1, pending: 0, inProgress: 1, completed: 0, cancelled: 0 }, todos: [{ content: "实现功能", status: "in_progress" }] }
+    }
+  });
+
+  const updatedSession = getAgentSession(fixture.db, session.id);
+  assert.ok(updatedSession, "updated session should exist");
+  assert.equal(updatedSession?.title, "it-session");
 });
 
 test("agent internal: 禁止 append completed apply_patch(必须走 update 写 artifact)", async () => {
@@ -2694,62 +4242,6 @@ test("write artifact 文件缺失时返回 404", async () => {
   assert.equal(artifactRes.statusCode, 404);
 });
 
-test("write 在 deny 终态会瘦身 args.content", async () => {
-  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
-  const session = await createSession(fixture.app, fixture.workspaceId);
-  const runId = newSortableId("run");
-
-  const toolItem = await createContextItemInternal({
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: "turn_write",
-    step: 1,
-    prevId: null,
-    kind: "tool",
-    status: "awaiting_permission",
-    output: {
-      type: "tool",
-      toolName: "write",
-      toolCallId: "call_write_deny",
-      args: {
-        filePath: "deny.txt",
-        content: "secret deny payload"
-      }
-    }
-  });
-
-  await updateRunStateInternal({
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    status: "waiting_permission",
-    activeRunId: runId,
-    activeAssistantItemId: null,
-    waitingToolItemId: toolItem.item.id
-  });
-
-  const denyRes = await fixture.app.inject({
-    method: "POST",
-    url: `/api/agent/sessions/${session.id}/tool-permission`,
-    payload: {
-      workspaceId: fixture.workspaceId,
-      toolItemId: toolItem.item.id,
-      decision: "deny"
-    }
-  });
-  assert.equal(denyRes.statusCode, 200, `deny write permission failed: ${denyRes.body}`);
-
-  const deniedItem = await getContextItem(fixture.app, session.id, toolItem.item.id);
-  assert.equal(deniedItem.status, "denied");
-  const args = (deniedItem.output as { args?: Record<string, unknown> }).args || {};
-  assert.equal(Object.prototype.hasOwnProperty.call(args, "content"), false);
-  assert.equal(typeof args.contentBytes, "number");
-});
-
 test("write 在 cancel 终态会瘦身 args.content", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
@@ -2785,7 +4277,6 @@ test("write 在 cancel 终态会瘦身 args.content", async () => {
     status: "running",
     activeRunId: runId,
     activeAssistantItemId: null,
-    waitingToolItemId: null
   });
 
   const cancelRes = await fixture.app.inject({
@@ -2943,8 +4434,7 @@ test("agent 兼容部分迁移数据: tool_call_json 缺失时回退 legacy outp
     toolCallId: "call_legacy_read",
     args: {
       filePath: "README.md"
-    },
-    approved: true
+    }
   };
 
   const toolItem = await createContextItemInternal({
@@ -2957,7 +4447,7 @@ test("agent 兼容部分迁移数据: tool_call_json 缺失时回退 legacy outp
     step: 1,
     prevId: assistantItem.item.id,
     kind: "tool",
-    status: "awaiting_permission",
+    status: "queued",
     output: legacyToolOutput
   });
 
@@ -2985,7 +4475,6 @@ test("agent 兼容部分迁移数据: tool_call_json 缺失时回退 legacy outp
   assert.equal(String(detail.output.toolName || ""), "read");
   assert.equal(String(detail.output.toolCallId || ""), "call_legacy_read");
   assert.equal(String((detail.output.args as { filePath?: string } | undefined)?.filePath || ""), "README.md");
-  assert.equal(detail.output.approved, true);
 
   const promptContext = await getPromptContextInternal({
     app: fixture.app,
@@ -2995,7 +4484,6 @@ test("agent 兼容部分迁移数据: tool_call_json 缺失时回退 legacy outp
     runId
   });
   assert.equal(promptContext.pendingTools.length, 1);
-  assert.equal(promptContext.pendingTools[0]?.approved, true);
 });
 
 test("agent 兼容早期拆分数据: 缺少 resultFormat 时保留结构化工具结果", async () => {
@@ -3101,6 +4589,10 @@ test("agent 兼容早期拆分数据: 缺少 resultFormat 时保留结构化工�
     true,
     "result should remain structured object"
   );
+
+  const sessionAfterCompat = getAgentSession(fixture.db, session.id);
+  assert.ok(sessionAfterCompat, "compat session should exist");
+  assert.equal(sessionAfterCompat?.title, "it-session", "compat todolist without goal should not change session title");
 });
 
 test("agent settings 兼容缺省 globalPromptIds", async () => {
@@ -3118,11 +4610,6 @@ test("agent settings 兼容缺省 globalPromptIds", async () => {
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          permissions: {
-            allowRead: true,
-            allowWrite: true,
-            allowBash: true
-          },
           defaultModel: null
         }
       ]
@@ -3139,7 +4626,33 @@ test("agent prompt-context 全局提示词按列表顺序注入(方案A)", async
   const runId = newSortableId("run");
   const createdAt = Date.now();
 
+  const initialGlobalPrompts = await fixture.app.inject({
+    method: "GET",
+    url: "/api/settings/agent/global-prompts"
+  });
+  assert.equal(initialGlobalPrompts.statusCode, 200, `get global prompts failed: ${initialGlobalPrompts.body}`);
+  const seededItems = (initialGlobalPrompts.json() as { items: Array<{ id: string; title: string; prompt: string }> }).items;
+  const seededSystemPrompt = seededItems.find((item) => item.id === "global_system_prompt");
+  assert.ok(seededSystemPrompt, "seeded global system prompt should exist");
+  assert.equal(seededSystemPrompt?.title, "Global System Prompt");
+  assert.ok(String(seededSystemPrompt?.prompt || "").trim().length > 0, "seeded global system prompt should be non-empty");
+
   const globalPromptsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/global-prompts",
+    payload: {
+      items: [
+        { id: "global_system_prompt", title: "ignored", prompt: "CUSTOM_SYSTEM_BASE" },
+        { id: "gp_a", title: "A", prompt: "PROMPT_A" },
+        { id: "gp_b", title: "B", prompt: "PROMPT_B" }
+      ]
+    }
+  });
+  assert.equal(globalPromptsRes.statusCode, 200, `update global prompts failed: ${globalPromptsRes.body}`);
+  const updatedItems = (globalPromptsRes.json() as { items: Array<{ id: string; title: string; prompt: string }> }).items;
+  assert.equal(updatedItems.find((item) => item.id === "global_system_prompt")?.title, "Global System Prompt");
+
+  const omitSystemPromptRes = await fixture.app.inject({
     method: "PUT",
     url: "/api/settings/agent/global-prompts",
     payload: {
@@ -3149,7 +4662,33 @@ test("agent prompt-context 全局提示词按列表顺序注入(方案A)", async
       ]
     }
   });
-  assert.equal(globalPromptsRes.statusCode, 200, `update global prompts failed: ${globalPromptsRes.body}`);
+  assert.equal(omitSystemPromptRes.statusCode, 200, `update global prompts failed: ${omitSystemPromptRes.body}`);
+  const omitSystemPromptItems = (omitSystemPromptRes.json() as { items: Array<{ id: string; title: string; prompt: string }> }).items;
+  assert.equal(omitSystemPromptItems.filter((item) => item.id === "global_system_prompt").length, 1);
+  assert.equal(omitSystemPromptItems.find((item) => item.id === "global_system_prompt")?.prompt, "CUSTOM_SYSTEM_BASE");
+
+  const emptySystemPromptRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/global-prompts",
+    payload: {
+      items: [
+        { id: "global_system_prompt", title: "whatever", prompt: "   " }
+      ]
+    }
+  });
+  assert.equal(emptySystemPromptRes.statusCode, 400, `empty system prompt should be rejected: ${emptySystemPromptRes.body}`);
+
+  const emptyPromptRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/global-prompts",
+    payload: {
+      items: [
+        { id: "global_system_prompt", title: "whatever", prompt: "CUSTOM_SYSTEM_BASE" },
+        { id: "gp_empty", title: "Empty", prompt: "   " }
+      ]
+    }
+  });
+  assert.equal(emptyPromptRes.statusCode, 400, `empty prompt should be rejected: ${emptyPromptRes.body}`);
 
   const agentsRes = await fixture.app.inject({
     method: "PUT",
@@ -3162,14 +4701,9 @@ test("agent prompt-context 全局提示词按列表顺序注入(方案A)", async
           name: "default",
           summary: "",
           prompt: "AGENT_PROMPT",
-          globalPromptIds: ["gp_b", "gp_a"],
+          globalPromptIds: ["global_system_prompt", "gp_b", "gp_a"],
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          permissions: {
-            allowRead: true,
-            allowWrite: true,
-            allowBash: true
-          },
           defaultModel: null
         }
       ]
@@ -3200,13 +4734,14 @@ test("agent prompt-context 全局提示词按列表顺序注入(方案A)", async
   const idxA = context.system.indexOf("PROMPT_A");
   const idxB = context.system.indexOf("PROMPT_B");
   const idxAgent = context.system.indexOf("AGENT_PROMPT");
-  const idxCore = context.system.indexOf("# 工作方式与流程(全局)");
+  const idxCore = context.system.indexOf("CUSTOM_SYSTEM_BASE");
   assert.ok(idxA >= 0, "system should include PROMPT_A");
   assert.ok(idxB >= 0, "system should include PROMPT_B");
   assert.ok(idxAgent >= 0, "system should include AGENT_PROMPT");
   assert.ok(idxCore >= 0, "system should include global workflow prompt");
   assert.ok(idxCore < idxA, "global workflow prompt should be prepended before global prompts");
   assert.ok(idxA < idxB, "global prompts should follow global list order, not selected id order");
+  assert.equal((context.system.match(/CUSTOM_SYSTEM_BASE/g) || []).length, 1, "system prompt base should only appear once");
   assert.ok(idxB < idxAgent, "agent prompt should be appended after global prompts");
 });
 
@@ -3244,11 +4779,6 @@ test("agent prompt-context 同时存在 global/workspace/agent 时按既定顺�
           globalPromptIds: ["gp_b", "gp_a"],
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          permissions: {
-            allowRead: true,
-            allowWrite: true,
-            allowBash: true
-          },
           defaultModel: null
         }
       ]
@@ -3333,6 +4863,66 @@ test("agent prompt-context 在 workspace 根 AGENTS.md 缺失时忽略", async (
   );
 });
 
+test("agent startup seed 会修复脏的 global prompts settings", async () => {
+  const repoRoot = path.resolve(process.cwd(), "../..");
+  const testsRoot = path.join(repoRoot, ".tmp-tests");
+  await ensureDir(testsRoot);
+  const dataDir = await fs.mkdtemp(path.join(testsRoot, "agent-seed-repair-it-"));
+  const internalToken = "test-internal-token";
+
+  const db = await openDb(dataDir);
+  let app: FastifyInstance | null = null;
+  try {
+    setSettingJson(db, "agent_global_prompts_v1", {
+      items: [
+        null,
+        { id: "global_system_prompt", title: "Broken", prompt: "   " },
+        { id: "global_system_prompt", title: "Dup", prompt: "dup" },
+        { id: "gp_empty", title: "Empty", prompt: "   " },
+        { id: "gp_ok", title: "OK", prompt: "PROMPT_OK" }
+      ]
+    }, Date.now());
+
+    app = await createApp({
+      db,
+      repoRoot,
+      dataDir,
+      fileMaxBytes: 1024 * 1024,
+      version: "test",
+      logLevel: "error",
+      serveWeb: false,
+      webDistDir: null,
+      credentialMasterKey: Buffer.alloc(32, 7),
+      credentialMasterKeySource: "generated",
+      credentialMasterKeyId: "testkey",
+      credentialMasterKeyCreatedAt: Date.now(),
+      authToken: null,
+      authCookieSecure: false,
+      agentWorkerEnabled: false,
+      agentWorkerHost: "127.0.0.1",
+      agentWorkerPort: 0,
+      agentWorkerSocketPath: path.join(dataDir, "agent-worker.sock"),
+      agentWorkerConcurrency: 0,
+      agentInternalToken: internalToken,
+      agentApiOrigin: "http://127.0.0.1:0",
+      agentStartupRecoveryMode: "recover"
+    });
+    await app.ready();
+    const res = await app.inject({ method: "GET", url: "/api/settings/agent/global-prompts" });
+    assert.equal(res.statusCode, 200);
+    const items = (res.json() as { items: Array<{ id: string; title: string; prompt: string }> }).items;
+    assert.equal(items.filter((item) => item.id === "global_system_prompt").length, 1);
+    assert.equal(items.find((item) => item.id === "global_system_prompt")?.title, "Global System Prompt");
+    assert.ok(String(items.find((item) => item.id === "global_system_prompt")?.prompt || "").trim().length > 0);
+    assert.equal(items.some((item) => item.id === "gp_empty"), false);
+    assert.equal(items.some((item) => item.id === "gp_ok" && item.prompt === "PROMPT_OK"), true);
+  } finally {
+    await app?.close().catch(() => undefined);
+    db.close();
+    await rmrf(dataDir);
+  }
+});
+
 test("agent prompt-context 在 agent prompt 为空且无 workspace/global 时仅注入全局系统提示词", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
@@ -3352,11 +4942,6 @@ test("agent prompt-context 在 agent prompt 为空且无 workspace/global 时仅
           prompt: "",
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          permissions: {
-            allowRead: true,
-            allowWrite: true,
-            allowBash: true
-          },
           defaultModel: null
         }
       ]

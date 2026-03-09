@@ -101,7 +101,6 @@ export class AgentRuntime implements AgentRuntimePort {
         status: "running",
         activeRunId: run.runId,
         activeAssistantItemId: assistant.id,
-        waitingToolItemId: null,
         updatedAt: ts
       });
 

@@ -43,7 +43,8 @@ const app = await createApp({
   agentWorkerSocketPath: env.agentWorkerSocketPath,
   agentWorkerConcurrency: env.agentWorkerConcurrency,
   agentInternalToken: env.agentInternalToken,
-  agentApiOrigin: env.agentApiOrigin
+  agentApiOrigin: env.agentApiOrigin,
+  agentStartupRecoveryMode: env.agentStartupRecoveryMode
 });
 
 await app.listen({ host: env.host, port: env.port });

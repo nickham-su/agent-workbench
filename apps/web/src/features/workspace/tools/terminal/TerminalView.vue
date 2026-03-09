@@ -453,10 +453,9 @@ async function openPathAt(params: { path: string; line: number; statStore: Termi
   });
   if (!res || !res.ok) return;
   const finalPath = res.normalizedPath || res.path;
-  host.openTool("files");
-  host.callFrom("terminal", "files", {
-    type: "files.openAt",
-    payload: { path: finalPath, line: params.line, highlight: { kind: "line" } }
+  host.callFrom("terminal", "editor", {
+    type: "editor.openFile",
+    payload: { path: finalPath, mode: "preview", line: params.line, highlight: { kind: "line" } }
   });
 }
 

@@ -141,30 +141,6 @@
         />
       </div>
     </div>
-
-    <div
-      v-if="rightToolbarToolIds.length > 0"
-      class="w-10 h-full flex flex-col items-center gap-1 py-1 border-l border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]"
-    >
-      <template v-for="toolId in rightToolbarToolIds" :key="toolId">
-        <WorkspaceToolButton
-          :title="toolTitle(toolId)"
-          :icon="toolIcon(toolId)"
-          :active="activeToolIdByArea.rightTop === toolId"
-          :minimized="toolMinimized[toolId] ?? false"
-          :dot="toolDots[toolId] ?? false"
-          :can-move-up="canMoveUp(toolId)"
-          :can-move-down="canMoveDown(toolId)"
-          :moveTargets="moveTargets(toolId)"
-          :contextMenuHint="contextMenuHint(toolId)"
-          tooltipPlacement="left"
-          @click="onToolIconClick(toolId)"
-          @moveUp="() => moveToolUp(toolId)"
-          @moveDown="() => moveToolDown(toolId)"
-          @moveTo="(area) => moveTool(toolId, area)"
-        />
-      </template>
-    </div>
   </div>
 </template>
 
@@ -178,7 +154,6 @@ import WorkspaceToolButton from "@/features/workspace/WorkspaceToolButton.vue";
 const props = defineProps<{
   leftTopToolbarToolIds: ToolId[];
   leftBottomToolbarToolIds: ToolId[];
-  rightToolbarToolIds: ToolId[];
   activeToolIdByArea: Record<DockArea, ToolId | null>;
   toolMinimized: Record<ToolId, boolean | undefined>;
   visibleToolIdByArea: Record<DockArea, ToolId | null>;

@@ -13,7 +13,7 @@
         <a-input-number
           v-model:value="autoCompactThresholdPct"
           :min="50"
-          :max="90"
+          :max="99"
           :step="1"
           :precision="0"
           style="max-width: 260px"
@@ -46,6 +46,17 @@
         </div>
       </a-form-item>
 
+      <a-divider class="!my-2" />
+
+      <a-form-item :label="t('settings.agentRuntime.fields.sessionTerminalSoundEnabled.label')">
+        <a-switch v-model:checked="sessionTerminalSoundEnabled" />
+        <div class="pt-2 text-xs text-[color:var(--text-tertiary)]">
+          {{ t("settings.agentRuntime.fields.sessionTerminalSoundEnabled.help") }}
+        </div>
+      </a-form-item>
+
+      <a-divider class="!my-2" />
+
       <a-form-item class="!mb-0">
         <div class="flex items-center gap-2">
           <a-button type="primary" :disabled="loading || saving" @click="save">
@@ -74,6 +85,7 @@ const modelIdleTimeoutSeconds = ref<number>(0);
 const modelTotalTimeoutSeconds = ref<number>(0);
 const modelRequestMaxRetries = ref<number>(5);
 const autoCompactThresholdPct = ref<number>(80);
+const sessionTerminalSoundEnabled = ref(true);
 
 function toSeconds(rawMs: number) {
   const ms = Math.max(0, Number(rawMs || 0));
@@ -91,7 +103,8 @@ function mapFromSettings(settings: AgentRuntimeSettings) {
   modelIdleTimeoutSeconds.value = toSeconds(settings.modelIdleTimeoutMs ?? 0);
   modelTotalTimeoutSeconds.value = toSeconds(settings.modelTotalTimeoutMs ?? 0);
   modelRequestMaxRetries.value = Math.min(100, Math.max(0, Math.floor(Number(settings.modelRequestMaxRetries ?? 5))));
-  autoCompactThresholdPct.value = Math.min(90, Math.max(50, Math.floor(Number(settings.autoCompactThresholdPct || 80))));
+  autoCompactThresholdPct.value = Math.min(99, Math.max(50, Math.floor(Number(settings.autoCompactThresholdPct || 80))));
+  sessionTerminalSoundEnabled.value = settings.sessionTerminalSoundEnabled !== false;
 }
 
 async function refresh() {
@@ -115,9 +128,11 @@ async function save() {
       modelIdleTimeoutMs: toMs(modelIdleTimeoutSeconds.value ?? 0),
       modelTotalTimeoutMs: toMs(modelTotalTimeoutSeconds.value ?? 0),
       modelRequestMaxRetries: Math.min(100, Math.max(0, Math.floor(Number(modelRequestMaxRetries.value || 0)))),
-      autoCompactThresholdPct: Math.min(90, Math.max(50, Math.floor(Number(autoCompactThresholdPct.value || 80))))
+      autoCompactThresholdPct: Math.min(99, Math.max(50, Math.floor(Number(autoCompactThresholdPct.value || 80)))),
+      sessionTerminalSoundEnabled: !!sessionTerminalSoundEnabled.value
     });
     mapFromSettings(res);
+    window.dispatchEvent(new CustomEvent("awb:agent-runtime-settings-updated"));
     message.success(t("settings.agentRuntime.saved"));
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));

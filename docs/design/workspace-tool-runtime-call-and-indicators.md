@@ -14,7 +14,6 @@
 - 本期只实现 `call`(event-only) 作为 "用户意图的跨工具操作" 通道
 - 允许工具从未打开时仍能:
   - code-review 红点正常刷新(依赖轮询)
-  - file-explorer 红点正常反映 "是否存在未保存的编辑"
 - repo 切换时立即刷新(工具状态与红点都应切到新的 repo 语义)
 - `keepAlive` 可继续作为 view 级性能优化,不影响工具状态正确性
 
@@ -229,17 +228,13 @@ export type ToolDefinition = {
 
 ### file-explorer 红点与状态来源
 
-- 语义: 工具栏红点与 tab 标题右侧的小点一致
-  - 只要存在任意 tab 满足 `tab.dirty && !tab.saving`,就亮红点
-  - 现有 tab 小点逻辑参考: `apps/web/src/features/workspace/tools/file-explorer/components/FileExplorerTabs.vue`
-- 现状约束:
-  - 目前 tabs/dirty/saving 状态在 `FileExplorerToolView.vue` 内部维护,view 卸载会丢状态
+- 共享 editor 方案下，未保存编辑红点已经迁移到 `editor` 工具，不再由 `files` 承担
+- 现状约束（历史）:
+  - 旧版 files 曾在 `FileExplorerToolView.vue` 内部维护 tabs/dirty/saving，view 卸载会丢状态
 - 本方案要求:
-  - 将 tabs/dirty/saving 等状态搬到 tools 私有 store
-  - view 只绑定 store 渲染 tabs 与 editor
-  - store 在以下时机重新计算红点并上报:
-    - Monaco 内容变化导致 dirty 变化
-    - 保存开始/结束导致 saving 变化
+  - 将 tabs/dirty/saving 等编辑状态迁移到共享 `editor` 的 store/runtime
+  - `files` 仅保留文件树与文件管理动作，不再拥有 editor store
+  - `editor` 在 Monaco 内容变化与保存状态变化时重新计算红点并上报
 
 ## keepAlive 与本方案的关系
 
@@ -256,4 +251,3 @@ export type ToolDefinition = {
 - 发布订阅(领域事件)用于状态扩散,替代点对点后台通信
   - 例如 `workspace.fileChanged`,由 code-review runtime 订阅后触发轻/重刷新
 - `call` 扩展为 request/response(需要超时与错误模型),用于真正的跨工具 RPC
-
