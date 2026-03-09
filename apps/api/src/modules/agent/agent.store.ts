@@ -1534,6 +1534,43 @@ export function getLatestTerminalRunRecord(db: Db, params: { workspaceId: string
   return row ?? null;
 }
 
+export function listNonTerminalRunIdsBySession(db: Db, params: { workspaceId: string; sessionId: string }) {
+  const rows = db
+    .prepare(
+      `
+        select run_id as runId
+        from agent_run
+        where workspace_id = ?
+          and session_id = ?
+          and status in ('running', 'waiting_permission')
+        order by created_at asc, run_id asc
+      `
+    )
+    .all(params.workspaceId, params.sessionId) as Array<{ runId: string }>;
+
+  return rows
+    .map((row) => String(row.runId || "").trim())
+    .filter((runId) => runId.length > 0);
+}
+
+export function listNonTerminalRunIdsByItemIds(db: Db, params: { workspaceId: string; sessionId: string; itemIds: number[] }) {
+  if (params.itemIds.length === 0) return [] as string[];
+  const placeholders = params.itemIds.map(() => "?").join(", ");
+  const rows = db
+    .prepare(
+      `
+        select distinct i.run_id as runId
+        from agent_context_item i
+        inner join agent_run r on r.run_id = i.run_id
+        where i.workspace_id = ? and i.session_id = ? and i.id in (${placeholders}) and i.run_id is not null
+          and r.status in ('running', 'waiting_permission')
+      `
+    )
+    .all(params.workspaceId, params.sessionId, ...params.itemIds) as Array<{ runId: string | null }>;
+
+  return rows.map((row) => String(row.runId || "").trim()).filter((runId) => runId.length > 0);
+}
+
 export function updateRunRecordStatus(db: Db, params: { runId: string; status: AgentRunRecord["status"]; updatedAt: number }) {
   db.prepare(
     `

@@ -1,6 +1,12 @@
 import type { Db } from "../infra/db/db.js";
 import type { CredentialMasterKeySource } from "../infra/crypto/credentialMasterKey.js";
 
+export type AgentTestFaults = {
+  archiveWrite?: {
+    failAfterChunks?: number;
+  } | null;
+};
+
 export type AppContext = {
   db: Db;
   repoRoot: string;
@@ -24,4 +30,5 @@ export type AppContext = {
   agentInternalToken: string;
   agentApiOrigin: string;
   agentStartupRecoveryMode: "fail" | "recover";
+  agentTestFaults?: AgentTestFaults;
 };

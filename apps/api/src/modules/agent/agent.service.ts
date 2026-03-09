@@ -59,7 +59,10 @@ import {
   insertClientRequestDedup,
   listAgentSessions,
   listNonTerminalVisibleItemIds,
+  listNonTerminalSessionItemIds,
   hasNonTerminalSessionItems,
+  listNonTerminalRunIdsByItemIds,
+  listNonTerminalRunIdsBySession,
   moveSessionHead,
   setContextItemsArchiveAt,
   setRunStateIdle,
@@ -1055,7 +1058,13 @@ function splitArchiveFileLines(text: string) {
   return lines;
 }
 
-async function appendArchiveLines(params: { dataDir: string; workspaceId: string; sessionId: string; lines: string[] }) {
+async function appendArchiveLines(params: {
+  dataDir: string;
+  workspaceId: string;
+  sessionId: string;
+  lines: string[];
+  failAfterChunks?: number;
+}) {
   if (params.lines.length === 0) return [] as ArchiveWriteSnapshot[];
   const dirPath = agentArchiveSessionDir(params.dataDir, params.workspaceId, params.sessionId);
   await fs.mkdir(dirPath, { recursive: true });
@@ -1075,6 +1084,7 @@ async function appendArchiveLines(params: { dataDir: string; workspaceId: string
   }
 
   let cursor = 0;
+  let writtenChunks = 0;
   while (cursor < params.lines.length) {
     if (currentCount >= ARCHIVE_FILE_LINE_LIMIT) {
       currentSeq += 1;
@@ -1106,6 +1116,12 @@ async function appendArchiveLines(params: { dataDir: string; workspaceId: string
       snapshot.expectedSize += Buffer.byteLength(payload, "utf-8");
       currentCount += chunk.length;
       cursor += chunk.length;
+      writtenChunks += 1;
+      if (typeof params.failAfterChunks === "number" && Number.isFinite(params.failAfterChunks) && writtenChunks >= params.failAfterChunks) {
+        const err = new Error("injected archive write failure");
+        (err as Error & { code?: string }).code = "TEST_ARCHIVE_WRITE_FAIL";
+        throw err;
+      }
     }
   }
 
@@ -1852,7 +1868,8 @@ export class AgentService {
             dataDir: this.ctx.dataDir,
             workspaceId: fromSession.workspaceId,
             sessionId: newSessionId,
-            lines: archiveLines
+            lines: archiveLines,
+            failAfterChunks: this.ctx.agentTestFaults?.archiveWrite?.failAfterChunks
           });
         } catch (err) {
           this.ctx.db.prepare(`delete from agent_session where id = @sessionId and workspace_id = @workspaceId`).run({
@@ -2346,11 +2363,28 @@ export class AgentService {
     const createdAt = nowMs();
 
     const tx = this.ctx.db.transaction(() => {
-      const visible = getSessionVisibleItems(this.ctx.db, session.workspaceId, session.id);
-      for (const item of visible) {
-        if (!NON_TERMINAL_ITEM_STATUS.has(item.status)) continue;
+      const allItemIds = new Set<number>();
+      for (const itemId of listNonTerminalSessionItemIds(this.ctx.db, session.workspaceId, session.id)) {
+        allItemIds.add(itemId);
+      }
+
+      const relatedRunIds = new Set<string>(listNonTerminalRunIdsBySession(this.ctx.db, {
+        workspaceId: session.workspaceId,
+        sessionId: session.id
+      }));
+      for (const runId of listNonTerminalRunIdsByItemIds(this.ctx.db, {
+        workspaceId: session.workspaceId,
+        sessionId: session.id,
+        itemIds: Array.from(allItemIds)
+      })) {
+        relatedRunIds.add(runId);
+      }
+
+      for (const itemId of allItemIds) {
+        const item = getContextItemById(this.ctx.db, itemId);
+        if (!item || !NON_TERMINAL_ITEM_STATUS.has(item.status)) continue;
         updateContextItem(this.ctx.db, {
-          itemId: item.id,
+          itemId,
           status: "cancelled",
           output: toTerminalWriteOutput(item.output),
           updatedAt: createdAt
@@ -2363,12 +2397,15 @@ export class AgentService {
         updatedAt: createdAt,
         appliedItemId: getLatestSessionItemId(this.ctx.db, session.workspaceId, session.id)
       });
-      if (state.activeRunId) {
+      for (const runId of relatedRunIds) {
         updateRunRecordStatus(this.ctx.db, {
-          runId: state.activeRunId,
+          runId,
           status: "cancelled",
           updatedAt: createdAt
         });
+      }
+      if (state.activeRunId && !relatedRunIds.has(state.activeRunId)) {
+        updateRunRecordStatus(this.ctx.db, { runId: state.activeRunId, status: "cancelled", updatedAt: createdAt });
       }
     });
 

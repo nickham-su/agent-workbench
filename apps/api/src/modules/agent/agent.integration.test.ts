@@ -16,8 +16,10 @@ import {
   createRunRecord,
   getAgentSession,
   getRunRecord,
+  getContextItemById,
   getRunState as getRunStateRow,
   getSessionTranscriptItems,
+  moveSessionHead,
   updateRunState
 } from "./agent.store.js";
 import { newSortableId } from "../../utils/ids.js";
@@ -37,7 +39,12 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function createFixture(options?: { agentWorkerConcurrency?: number }): Promise<Fixture> {
+async function createFixture(options?: {
+  agentWorkerConcurrency?: number;
+  agentTestFaults?: {
+    archiveWrite?: { failAfterChunks?: number } | null;
+  };
+}): Promise<Fixture> {
   const repoRoot = path.resolve(process.cwd(), "../..");
   const testsRoot = path.join(repoRoot, ".tmp-tests");
   await ensureDir(testsRoot);
@@ -67,7 +74,8 @@ async function createFixture(options?: { agentWorkerConcurrency?: number }): Pro
     agentWorkerConcurrency: options?.agentWorkerConcurrency ?? 2,
     agentInternalToken: internalToken,
     agentApiOrigin: "http://127.0.0.1:0",
-    agentStartupRecoveryMode: "recover"
+    agentStartupRecoveryMode: "recover",
+    agentTestFaults: options?.agentTestFaults
   });
   const workspaceId = newSortableId("ws");
   const workspaceDirName = newSortableId("workspace");
@@ -1271,6 +1279,201 @@ test("agent cancel 仅终止执行并保留消息,活跃项标记为 cancelled",
   const latestTool = context.items.find((item) => item.id === toolItem.item.id);
   assert.equal(latestAssistant?.status, "cancelled");
   assert.equal(latestTool?.status, "cancelled");
+});
+
+test("agent cancel 会收敛隐藏链上的未终态 items 与关联 run", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const createdAt = Date.now();
+
+  const baseRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: baseRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "completed",
+    createdAt
+  });
+
+  const user1 = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: baseRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "第一问" }
+  });
+  const assistant1 = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: baseRunId,
+    turnId: "turn_cancel_hidden_1",
+    step: 1,
+    prevId: user1.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: { type: "assistant_text", text: "第一答" }
+  });
+  const user2 = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: baseRunId,
+    turnId: null,
+    step: null,
+    prevId: assistant1.item.id,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "第二问" }
+  });
+
+  const hiddenRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: hiddenRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: user2.item.id,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: createdAt + 1
+  });
+
+  const hiddenAssistant = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: hiddenRunId,
+    turnId: "turn_cancel_hidden_2",
+    step: 1,
+    prevId: user2.item.id,
+    kind: "assistant",
+    status: "streaming",
+    output: { type: "assistant_text", text: "hidden working" },
+    createdAt: createdAt + 2
+  });
+  const hiddenTool = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: hiddenRunId,
+    turnId: "turn_cancel_hidden_2",
+    step: 1,
+    prevId: hiddenAssistant.id,
+    kind: "tool",
+    status: "running",
+    output: { type: "tool", toolName: "bash", args: { command: "sleep 10" } } as any,
+    createdAt: createdAt + 3
+  });
+  moveSessionHead(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    expectedHeadItemId: hiddenTool.id,
+    nextHeadItemId: user2.item.id,
+    updatedAt: createdAt + 4
+  });
+
+  const cancelRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/cancel`,
+    payload: { workspaceId: fixture.workspaceId }
+  });
+  assert.equal(cancelRes.statusCode, 200, `cancel hidden run failed: ${cancelRes.body}`);
+
+  const runState = await getRunState(fixture.app, session.id);
+  assert.equal(runState.status, "idle");
+  assert.equal(runState.activeRunId, null);
+  assert.equal(runState.lastTerminalStatus, "cancelled");
+
+  const hiddenAssistantAfter = getContextItemById(fixture.db, hiddenAssistant.id);
+  const hiddenToolAfter = getContextItemById(fixture.db, hiddenTool.id);
+  assert.equal(hiddenAssistantAfter?.status, "cancelled");
+  assert.equal(hiddenToolAfter?.status, "cancelled");
+
+  const hiddenRunAfter = getRunRecord(fixture.db, hiddenRunId);
+  assert.equal(hiddenRunAfter?.status, "cancelled");
+
+  const context = await getContextItems(fixture.app, session.id);
+  assert.equal(context.headItemId, user2.item.id);
+  assert.equal(context.items.map((item) => item.id).includes(hiddenAssistant.id), false);
+  assert.equal(context.items.map((item) => item.id).includes(hiddenTool.id), false);
+});
+
+test("agent cancel 不应把仅因脏 non-terminal item 命中的 terminal run 改写为 cancelled", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const createdAt = Date.now();
+
+  const terminalRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: terminalRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "completed",
+    createdAt
+  });
+
+  const user = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: terminalRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "可见消息" }
+  });
+
+  const dirtyAssistant = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: terminalRunId,
+    turnId: "turn_cancel_terminal_run_dirty",
+    step: 1,
+    prevId: user.item.id,
+    kind: "assistant",
+    status: "streaming",
+    output: { type: "assistant_text", text: "dirty hidden assistant" },
+    createdAt: createdAt + 1
+  });
+  moveSessionHead(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    expectedHeadItemId: dirtyAssistant.id,
+    nextHeadItemId: user.item.id,
+    updatedAt: createdAt + 2
+  });
+
+  const cancelRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/cancel`,
+    payload: { workspaceId: fixture.workspaceId }
+  });
+  assert.equal(cancelRes.statusCode, 200, `cancel terminal run dirty item failed: ${cancelRes.body}`);
+
+  const dirtyAssistantAfter = getContextItemById(fixture.db, dirtyAssistant.id);
+  assert.equal(dirtyAssistantAfter?.status, "cancelled");
+
+  const terminalRunAfter = getRunRecord(fixture.db, terminalRunId);
+  assert.equal(terminalRunAfter?.status, "completed");
 });
 
 test("agent runtime settings 可通过 execution-profile 下发", async () => {
@@ -2796,6 +2999,83 @@ test("agent context 压缩后会归档并支持 archive_search/read", async () =
   const archiveContent = await fs.readFile(archiveFilePath, "utf-8");
   assert.ok(archiveContent.includes("历史问题"));
   assert.ok(archiveContent.includes("新增归档与压缩方案草稿"));
+
+  const forkRollbackFixture = await createFixture({
+    agentWorkerConcurrency: 0,
+    agentTestFaults: {
+      archiveWrite: {
+        failAfterChunks: 1
+      }
+    }
+  });
+  const forkRollbackSession = await createSession(forkRollbackFixture.app, forkRollbackFixture.workspaceId);
+  const forkRunId = newSortableId("run");
+  const archivedUser = await createContextItemInternal({
+    app: forkRollbackFixture.app,
+    internalToken: forkRollbackFixture.internalToken,
+    workspaceId: forkRollbackFixture.workspaceId,
+    sessionId: forkRollbackSession.id,
+    runId: forkRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "需要被归档复制的历史问题" }
+  });
+  await createContextItemInternal({
+    app: forkRollbackFixture.app,
+    internalToken: forkRollbackFixture.internalToken,
+    workspaceId: forkRollbackFixture.workspaceId,
+    sessionId: forkRollbackSession.id,
+    runId: forkRunId,
+    turnId: "turn_fork_archive_fail",
+    step: 1,
+    prevId: archivedUser.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: { type: "assistant_text", text: "需要被归档复制的历史回答" }
+  });
+  const clearRollbackRes = await forkRollbackFixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${forkRollbackSession.id}/clear`,
+    payload: { workspaceId: forkRollbackFixture.workspaceId, reason: "触发归档" }
+  });
+  assert.equal(clearRollbackRes.statusCode, 200, `clear rollback session failed: ${clearRollbackRes.body}`);
+
+  const liveUser = await createContextItemInternal({
+    app: forkRollbackFixture.app,
+    internalToken: forkRollbackFixture.internalToken,
+    workspaceId: forkRollbackFixture.workspaceId,
+    sessionId: forkRollbackSession.id,
+    runId: forkRunId,
+    turnId: null,
+    step: null,
+    prevId: clearRollbackRes.json().headItemId,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "新的可见问题" }
+  });
+
+  const sessionsBefore = forkRollbackFixture.db.prepare(`select count(*) as c from agent_session where workspace_id = ?`).get(forkRollbackFixture.workspaceId) as { c: number };
+  const itemsBefore = forkRollbackFixture.db.prepare(`select count(*) as c from agent_context_item where workspace_id = ?`).get(forkRollbackFixture.workspaceId) as { c: number };
+  const forkFailRes = await forkRollbackFixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions/fork",
+    payload: { fromSessionId: forkRollbackSession.id, fromItemId: liveUser.item.id, mode: "with_archive" }
+  });
+  assert.equal(forkFailRes.statusCode, 500, `fork with archive failure should bubble: ${forkFailRes.body}`);
+  assert.equal(forkFailRes.json().code, "AGENT_FORK_ARCHIVE_FAILED");
+
+  const sessionsAfter = forkRollbackFixture.db.prepare(`select count(*) as c from agent_session where workspace_id = ?`).get(forkRollbackFixture.workspaceId) as { c: number };
+  const itemsAfter = forkRollbackFixture.db.prepare(`select count(*) as c from agent_context_item where workspace_id = ?`).get(forkRollbackFixture.workspaceId) as { c: number };
+  assert.equal(sessionsAfter.c, sessionsBefore.c, "failed fork should not leave a new session row behind");
+  assert.equal(itemsAfter.c, itemsBefore.c, "failed fork should not leave cloned context items behind");
+
+  const forkChildren = forkRollbackFixture.db.prepare(`select id from agent_session where workspace_id = ? and forked_from_session_id = ?`).all(forkRollbackFixture.workspaceId, forkRollbackSession.id) as Array<{ id: string }>;
+  assert.equal(forkChildren.length, 0, "failed fork should not leave fork child sessions behind");
+  const archiveEntries = await fs.readdir(path.join(forkRollbackFixture.dataDir, "agent", "archive", forkRollbackFixture.workspaceId)).catch(() => [] as string[]);
+  assert.deepEqual(archiveEntries, [forkRollbackSession.id], "failed fork should not leave archive dir for forked session behind");
 
   const search = await archiveSearchInternal({
     app: fixture.app,
