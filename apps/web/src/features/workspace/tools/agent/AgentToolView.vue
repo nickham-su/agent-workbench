@@ -161,6 +161,7 @@ const ACTIVE_KEY_STORAGE_PREFIX = "agent-workbench.workspace.agent.activeClient"
 const AGENT_PICK_STORAGE_PREFIX = "agent-workbench.workspace.agent.pickBySession";
 const CLOSED_SESSION_STORAGE_PREFIX = "agent-workbench.workspace.agent.closedSessions";
 const AGENT_TAB_NO_STORAGE_KEY_PREFIX = "agent-workbench.workspace.agent.tabNoMap";
+const OPENED_SUBTASK_SESSION_STORAGE_PREFIX = "agent-workbench.workspace.agent.openedSubtaskSessions";
 
 const props = defineProps<{ workspaceId: string; toolId: string }>();
 const host = useWorkspaceHost(props.toolId);
@@ -174,6 +175,7 @@ const activeKey = ref<string>("");
 const selectedAgentBySession = reactive<Record<string, string | null>>({});
 const agentOptions = ref<AgentOption[]>([]);
 const closedSessionIds = reactive<Record<string, true>>({});
+const openedSubtaskSessionIds = reactive<Record<string, true>>({});
 const tabNoMap = ref<Record<string, number>>({});
 const chooseSessionModalOpen = ref(false);
 const chooseSessionLoading = ref(false);
@@ -197,7 +199,11 @@ const effectiveActiveKey = computed(() => {
 
 const visibleSessions = computed(() => {
   // tabs 的展示顺序按编号从小到大,确保新建 client 出现在最右侧。
-  const list = allSessions.value.filter((item) => !closedSessionIds[item.id]);
+  const list = allSessions.value.filter((item) => {
+    if (closedSessionIds[item.id]) return false;
+    if (item.kind === "subtask") return !!openedSubtaskSessionIds[item.id];
+    return true;
+  });
   return [...list].sort((a, b) => {
     const na = tabNoMap.value[a.id];
     const nb = tabNoMap.value[b.id];
@@ -225,6 +231,12 @@ function closedSessionStorageKey(workspaceId: string) {
   const id = String(workspaceId || "").trim();
   if (!id) return `${CLOSED_SESSION_STORAGE_PREFIX}.v1`;
   return `${CLOSED_SESSION_STORAGE_PREFIX}.v1.${id}`;
+}
+
+function openedSubtaskSessionStorageKey(workspaceId: string) {
+  const id = String(workspaceId || "").trim();
+  if (!id) return `${OPENED_SUBTASK_SESSION_STORAGE_PREFIX}.v1`;
+  return `${OPENED_SUBTASK_SESSION_STORAGE_PREFIX}.v1.${id}`;
 }
 
 function agentTabNoStorageKey(workspaceId: string) {
@@ -274,7 +286,8 @@ function reconcileTabNoMap(params: { workspaceId: string; sessions: AgentSession
   // 只对当前 workspace 且当前可见的 session 分配编号,避免 workspace 切换时短暂拿到旧列表导致污染映射。
   const sessionsInWs = params.sessions
     .filter((s) => String(s.workspaceId || "").trim() === id)
-    .filter((s) => !closedSessionIds[s.id]);
+    .filter((s) => !closedSessionIds[s.id])
+    .filter((s) => s.kind !== "subtask" || !!openedSubtaskSessionIds[s.id]);
   const present = new Set(sessionsInWs.map((s) => s.id));
   const nextMap: Record<string, number> = { ...tabNoMap.value };
 
@@ -319,6 +332,20 @@ function persistClosedSessions() {
   }
 }
 
+function persistOpenedSubtaskSessions() {
+  const key = openedSubtaskSessionStorageKey(props.workspaceId);
+  const ids = Object.keys(openedSubtaskSessionIds).sort((a, b) => a.localeCompare(b));
+  try {
+    if (ids.length === 0) {
+      localStorage.removeItem(key);
+      return;
+    }
+    localStorage.setItem(key, JSON.stringify(ids));
+  } catch {
+    // ignore
+  }
+}
+
 function restorePersistedState() {
   try {
     const savedActive = localStorage.getItem(activeKeyStorageKey(props.workspaceId));
@@ -339,6 +366,22 @@ function restorePersistedState() {
   }
 
   try {
+    const raw = localStorage.getItem(openedSubtaskSessionStorageKey(props.workspaceId));
+    if (raw) {
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        for (const id of parsed) {
+          const sid = String(id || "").trim();
+          if (!sid) continue;
+          openedSubtaskSessionIds[sid] = true;
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  try {
     const raw = localStorage.getItem(closedSessionStorageKey(props.workspaceId));
     if (!raw) return;
     const parsed = JSON.parse(raw) as unknown;
@@ -351,7 +394,6 @@ function restorePersistedState() {
   } catch {
     // ignore
   }
-
   restoreTabNoMapFromStorage(props.workspaceId);
 }
 
@@ -422,12 +464,28 @@ async function refreshAgents() {
   }
 }
 
+function pruneOpenedSubtaskSessions() {
+  const presentIds = new Set(
+    serverSessions.value
+      .filter((item) => item.kind === "subtask" && String(item.workspaceId || "").trim() === String(props.workspaceId || "").trim())
+      .map((item) => item.id)
+  );
+  let changed = false;
+  for (const id of Object.keys(openedSubtaskSessionIds)) {
+    if (presentIds.has(id)) continue;
+    delete openedSubtaskSessionIds[id];
+    changed = true;
+  }
+  if (changed) persistOpenedSubtaskSessions();
+}
+
 async function refreshSessions() {
   if (loadingSessions.value) return;
   loadingSessions.value = true;
   try {
     const list = await listAgentSessions(props.workspaceId);
     serverSessions.value = [...list].sort((a, b) => b.updatedAt - a.updatedAt);
+    pruneOpenedSubtaskSessions();
     // 先根据可见 tabs 做 prune/分配,避免隐藏 tab 让编号一路增长。
     serverSessionsLoaded.value = true;
     reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
@@ -598,6 +656,8 @@ async function onSessionForked(sessionId: string) {
 
 async function onOpenSubtask(sessionId: string) {
   if (!sessionId) return;
+  openedSubtaskSessionIds[sessionId] = true;
+  persistOpenedSubtaskSessions();
   await refreshSessions();
   delete closedSessionIds[sessionId];
   persistClosedSessions();
@@ -729,6 +789,9 @@ watch(
     draftSessions.value = [];
     for (const key of Object.keys(closedSessionIds)) {
       delete closedSessionIds[key];
+    }
+    for (const key of Object.keys(openedSubtaskSessionIds)) {
+      delete openedSubtaskSessionIds[key];
     }
     suppressTabNoPersist.value = true;
     tabNoMap.value = {};
