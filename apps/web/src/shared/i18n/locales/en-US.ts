@@ -287,7 +287,7 @@ export default {
     },
     client: {
       tabLabel: "Session {index}",
-      newTitle: "AI Client {time}",
+      newTitle: "new session",
       cancel: "Cancel run",
       cancelConfirmTitle: "Cancel current run?",
       cancelConfirmContent: "This stops the current execution and keeps all messages. The currently running AI/tool item will be marked as cancelled.",

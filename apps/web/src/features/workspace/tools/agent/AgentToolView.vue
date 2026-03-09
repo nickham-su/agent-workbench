@@ -536,7 +536,7 @@ async function createOneSession() {
     const draft: DraftAgentSession = {
       id: draftId,
       workspaceId: props.workspaceId,
-      title: t("agent.client.newTitle", { time: new Date(now).toLocaleTimeString() }),
+      title: t("agent.client.newTitle"),
       kind: "primary",
       createdAt: now,
       updatedAt: now,

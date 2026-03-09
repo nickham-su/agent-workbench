@@ -285,7 +285,7 @@ export default {
     },
     client: {
       tabLabel: "会话 {index}",
-      newTitle: "AI Client {time}",
+      newTitle: "new session",
       cancel: "取消运行",
       cancelConfirmTitle: "确认取消当前运行？",
       cancelConfirmContent: "将中断当前执行,并保留当前会话消息。当前正在执行的 AI 或工具会标记为已取消。",
