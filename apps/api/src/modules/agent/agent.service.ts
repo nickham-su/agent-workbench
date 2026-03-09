@@ -59,6 +59,7 @@ import {
   insertClientRequestDedup,
   listAgentSessions,
   listNonTerminalVisibleItemIds,
+  hasNonTerminalSessionItems,
   moveSessionHead,
   setContextItemsArchiveAt,
   setRunStateIdle,
@@ -1726,7 +1727,7 @@ export class AgentService {
     return session;
   }
 
-  async forkSession(params: AgentForkSessionRequest) {
+  async forkSession(params: AgentForkSessionRequest & { allowAnyKindBoundary?: boolean }) {
     const fromSession = getAgentSession(this.ctx.db, params.fromSessionId);
     if (!fromSession) throw new HttpError(404, "source session not found");
 
@@ -1735,7 +1736,7 @@ export class AgentService {
     if (targetIndex < 0) throw new HttpError(400, "invalid fromItemId");
     const target = transcript[targetIndex];
     if (!target) throw new HttpError(400, "invalid fromItemId");
-    if (target.kind !== "user" && target.kind !== "assistant") {
+    if (params.allowAnyKindBoundary !== true && target.kind !== "user" && target.kind !== "assistant") {
       throw new HttpError(400, "fromItemId must be user or assistant", "AGENT_FORK_ITEM_KIND_INVALID");
     }
 
@@ -2305,6 +2306,13 @@ export class AgentService {
     }
 
     const state = getRunState(this.ctx.db, session.workspaceId, session.id);
+    if (state.status !== "idle") {
+      throw new HttpError(409, "session is running", "AGENT_REVERT_NOT_IDLE");
+    }
+    if (hasNonTerminalSessionItems(this.ctx.db, session.workspaceId, session.id)) {
+      throw new HttpError(409, "session has non-terminal items", "AGENT_REVERT_HAS_NON_TERMINAL_ITEMS");
+    }
+
     const createdAt = nowMs();
     const tx = this.ctx.db.transaction(() => {
       moveSessionHead(this.ctx.db, {
@@ -2313,19 +2321,6 @@ export class AgentService {
         expectedHeadItemId: session.headItemId,
         nextHeadItemId: body.toItemId,
         updatedAt: createdAt
-      });
-      if (state.activeRunId) {
-        updateRunRecordStatus(this.ctx.db, {
-          runId: state.activeRunId,
-          status: "cancelled",
-          updatedAt: createdAt
-        });
-      }
-      setRunStateIdle(this.ctx.db, {
-        workspaceId: session.workspaceId,
-        sessionId: session.id,
-        updatedAt: createdAt,
-        appliedItemId: getLatestSessionItemId(this.ctx.db, session.workspaceId, session.id)
       });
     });
     try {
@@ -2789,6 +2784,9 @@ export class AgentService {
     if (anchor.runId !== params.parentRunId) {
       throw new HttpError(400, "invalid subtask anchor run", "AGENT_SUBTASK_ANCHOR_RUN_MISMATCH");
     }
+    if (anchor.output.type !== "tool" || anchor.output.toolName !== "subtask") {
+      throw new HttpError(400, "invalid subtask anchor", "AGENT_SUBTASK_ANCHOR_INVALID");
+    }
 
     const normalizedDescription = params.description.trim();
     if (!normalizedDescription) {
@@ -2803,6 +2801,13 @@ export class AgentService {
       throw new HttpError(400, "subtask agentId is required", "AGENT_SUBTASK_AGENT_REQUIRED");
     }
     const requestedSessionId = String(params.session.sessionId || "").trim();
+    const forkBoundaryItemId = params.session.mode === "fork"
+      ? this.resolveSubtaskForkBoundaryItemId({
+          workspaceId: params.workspaceId,
+          sessionId: params.parentSessionId,
+          anchor
+        })
+      : null;
 
     let session = null as AgentSessionRecord | null;
     if (params.session.mode === "existing") {
@@ -2822,7 +2827,7 @@ export class AgentService {
       if (requestedSessionId) {
         throw new HttpError(400, "sessionId is not allowed when mode=fork", "AGENT_SUBTASK_SESSION_ID_NOT_ALLOWED");
       }
-      if (anchor.prevId == null) {
+      if (forkBoundaryItemId == null) {
         session = this.createSession({
           workspaceId: params.workspaceId,
           title: `${subtaskTitleBase} (fork)`,
@@ -2831,10 +2836,11 @@ export class AgentService {
       } else {
         session = await this.forkSession({
           fromSessionId: params.parentSessionId,
-          fromItemId: anchor.prevId,
+          fromItemId: forkBoundaryItemId,
           mode: "visible_only",
           title: `${subtaskTitleBase} (fork)`,
-          kind: "subtask"
+          kind: "subtask",
+          allowAnyKindBoundary: true
         });
       }
     } else if (params.session.mode === "new") {
@@ -2939,6 +2945,30 @@ export class AgentService {
       runId,
       workspacePath: workspace.path
     };
+  }
+
+  private resolveSubtaskForkBoundaryItemId(params: {
+    workspaceId: string;
+    sessionId: string;
+    anchor: AgentContextItemRecord;
+  }) {
+    let cursorId = params.anchor.prevId;
+    while (cursorId != null) {
+      const item = getContextItemById(this.ctx.db, cursorId);
+      if (!item || item.workspaceId !== params.workspaceId || item.sessionId !== params.sessionId) {
+        throw new HttpError(400, "invalid subtask fork boundary", "AGENT_SUBTASK_FORK_BOUNDARY_INVALID");
+      }
+      if (
+        item.kind === "assistant"
+        && item.runId === params.anchor.runId
+        && item.turnId === params.anchor.turnId
+        && item.step === params.anchor.step
+      ) {
+        return item.prevId;
+      }
+      cursorId = item.prevId;
+    }
+    return null;
   }
 
   getSubtaskRunResultFromWorker(params: { workspaceId: string; sessionId: string; runId: string }) {

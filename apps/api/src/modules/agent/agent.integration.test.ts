@@ -1634,7 +1634,7 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
     }
   });
 
-  const toolItem = await createContextItemInternal({
+  const assistantItem = await createContextItemInternal({
     app: fixture.app,
     internalToken: fixture.internalToken,
     workspaceId: fixture.workspaceId,
@@ -1643,6 +1643,43 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
     turnId: "turn_subtask_fork",
     step: 1,
     prevId: userItem.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: {
+      type: "assistant_text",
+      text: "我会调用工具处理这个任务。"
+    }
+  });
+
+  const readToolItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_subtask_fork",
+    step: 1,
+    prevId: assistantItem.item.id,
+    kind: "tool",
+    status: "completed",
+    output: {
+      type: "tool",
+      toolName: "read",
+      toolCallId: "call_subtask_read",
+      args: { filePath: "README.md" },
+      text: "tool: read\nstatus: completed\n\nREADME snippet"
+    }
+  });
+
+  const toolItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_subtask_fork",
+    step: 1,
+    prevId: readToolItem.item.id,
     kind: "tool",
     status: "queued",
     output: {
@@ -1684,6 +1721,8 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
   const copiedUser = items[0];
   const systemItem = items[1];
   const promptUser = items[2];
+  assert.equal(items.some((item) => item.id !== copiedUser?.id && item.kind === "assistant"), false, "forked subtask session should not copy the triggering assistant turn");
+  assert.equal(items.some((item) => item.kind === "tool"), false, "forked subtask session should not copy tool items from the triggering turn");
   assert.equal(copiedUser?.kind, "user");
   assert.equal(copiedUser?.output.type, "user_text");
   assert.equal((copiedUser?.output as { text?: string }).text, "请调用 subtask 把任务交给另一个 agent。");
@@ -1979,6 +2018,208 @@ test("agent clear 在会话运行中返回 AGENT_CLEAR_NOT_IDLE", async () => {
   });
   assert.equal(clearRes.statusCode, 409, `clear running session should fail: ${clearRes.body}`);
   assert.equal(clearRes.json().code, "AGENT_CLEAR_NOT_IDLE");
+});
+
+test("agent revert 在会话运行中返回 AGENT_REVERT_NOT_IDLE", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "agent-default",
+    providerId: "openai",
+    modelId: "gpt-4.1",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "测试运行中禁止回退"
+    }
+  });
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_revert_running",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "streaming",
+    output: {
+      type: "assistant_text",
+      text: "working..."
+    }
+  });
+
+  await updateRunStateInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "running",
+    activeRunId: runId,
+    activeAssistantItemId: assistantItem.item.id,
+    waitingToolItemId: null
+  });
+
+  const revertRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/revert`,
+    payload: {
+      workspaceId: fixture.workspaceId,
+      toItemId: userItem.item.id,
+      reason: "manual_revert"
+    }
+  });
+  assert.equal(revertRes.statusCode, 409, `revert running session should fail: ${revertRes.body}`);
+  assert.equal(revertRes.json().code, "AGENT_REVERT_NOT_IDLE");
+
+  const context = await getContextItems(fixture.app, session.id);
+  assert.equal(context.headItemId, assistantItem.item.id);
+  const runState = await getRunState(fixture.app, session.id);
+  assert.equal(runState.status, "running");
+  assert.equal(runState.activeRunId, runId);
+});
+
+test("agent revert 在 idle 且存在非终态残留 item 时返回 AGENT_REVERT_HAS_NON_TERMINAL_ITEMS", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "测试 idle 下非终态残留禁止回退"
+    }
+  });
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: "turn_revert_dirty",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "streaming",
+    output: {
+      type: "assistant_text",
+      text: "残留中的输出"
+    }
+  });
+
+  const revertRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/revert`,
+    payload: {
+      workspaceId: fixture.workspaceId,
+      toItemId: userItem.item.id,
+      reason: "manual_revert"
+    }
+  });
+  assert.equal(revertRes.statusCode, 409, `revert dirty idle session should fail: ${revertRes.body}`);
+  assert.equal(revertRes.json().code, "AGENT_REVERT_HAS_NON_TERMINAL_ITEMS");
+});
+
+test("agent revert 在 idle 时可回退到可见 item 并隐藏后续分支", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "问题A"
+    }
+  });
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: "turn_revert_success",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: {
+      type: "assistant_text",
+      text: "答复A"
+    }
+  });
+  const trailingUser = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: assistantItem.item.id,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "问题B"
+    }
+  });
+
+  const revertRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/revert`,
+    payload: {
+      workspaceId: fixture.workspaceId,
+      toItemId: assistantItem.item.id,
+      reason: "manual_revert"
+    }
+  });
+  assert.equal(revertRes.statusCode, 200, `revert visible item should succeed: ${revertRes.body}`);
+  const revertBody = revertRes.json() as { headItemId: number | null; sessionId: string };
+  assert.equal(revertBody.sessionId, session.id);
+  assert.equal(revertBody.headItemId, assistantItem.item.id);
+
+  const context = await getContextItems(fixture.app, session.id);
+  assert.equal(context.headItemId, assistantItem.item.id);
+  assert.deepEqual(context.items.map((item) => item.id), [userItem.item.id, assistantItem.item.id]);
+  assert.equal(context.items.some((item) => item.id === trailingUser.item.id), false);
 });
 
 test("agent clear 并发请求会串行执行且不会重复归档", async () => {

@@ -1404,6 +1404,29 @@ export function listNonTerminalVisibleItemIds(db: Db, workspaceId: string, sessi
     .map((item) => item.id);
 }
 
+export function listNonTerminalSessionItemIds(db: Db, workspaceId: string, sessionId: string) {
+  const rows = db
+    .prepare(
+      `
+        select id
+        from agent_context_item
+        where workspace_id = ?
+          and session_id = ?
+          and status not in ('completed', 'failed', 'denied', 'cancelled')
+        order by id asc
+      `
+    )
+    .all(workspaceId, sessionId) as Array<{ id: number }>;
+
+  return rows
+    .map((row) => Number(row.id))
+    .filter((id) => Number.isFinite(id) && id > 0);
+}
+
+export function hasNonTerminalSessionItems(db: Db, workspaceId: string, sessionId: string) {
+  return listNonTerminalSessionItemIds(db, workspaceId, sessionId).length > 0;
+}
+
 export function createRunRecord(db: Db, params: {
   runId: string;
   workspaceId: string;

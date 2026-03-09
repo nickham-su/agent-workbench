@@ -1,0 +1,431 @@
+
+> test:integration
+> tsx --test src/modules/agent/agent.integration.test.ts
+
+TAP version 13
+# Subtest: agent startup recovery mode=fail 会终止 in-flight run 并回收 run-state
+ok 1 - agent startup recovery mode=fail 会终止 in-flight run 并回收 run-state
+  ---
+  duration_ms: 541.423617
+  type: 'test'
+  ...
+# Subtest: GET /api/settings/agent/agents 返回每个 agent 的 resolvedModel
+ok 2 - GET /api/settings/agent/agents 返回每个 agent 的 resolvedModel
+  ---
+  duration_ms: 415.578113
+  type: 'test'
+  ...
+# Subtest: agent 消息去重与上下文项追加
+ok 3 - agent 消息去重与上下文项追加
+  ---
+  duration_ms: 447.025557
+  type: 'test'
+  ...
+# Subtest: agent context-items 支持 afterId 增量查询
+ok 4 - agent context-items 支持 afterId 增量查询
+  ---
+  duration_ms: 505.843656
+  type: 'test'
+  ...
+# Subtest: agent context-items 支持 assistant reasoning 字段的创建与读取
+ok 5 - agent context-items 支持 assistant reasoning 字段的创建与读取
+  ---
+  duration_ms: 351.690661
+  type: 'test'
+  ...
+# Subtest: agent context-items 支持 assistant reasoning 字段的更新
+ok 6 - agent context-items 支持 assistant reasoning 字段的更新
+  ---
+  duration_ms: 349.448352
+  type: 'test'
+  ...
+# Subtest: assistant reasoning 不应进入 prompt-context
+ok 7 - assistant reasoning 不应进入 prompt-context
+  ---
+  duration_ms: 313.693935
+  type: 'test'
+  ...
+# Subtest: assistant reasoning 不应进入 archive line
+ok 8 - assistant reasoning 不应进入 archive line
+  ---
+  duration_ms: 289.013783
+  type: 'test'
+  ...
+# Subtest: assistant failed item 会通过 output.error 返回错误且正文不混入 [run]
+ok 9 - assistant failed item 会通过 output.error 返回错误且正文不混入 [run]
+  ---
+  duration_ms: 328.778513
+  type: 'test'
+  ...
+# Subtest: prompt-context 仅注入最近一次且无 tool item 的 failed assistant
+ok 10 - prompt-context 仅注入最近一次且无 tool item 的 failed assistant
+  ---
+  duration_ms: 313.652554
+  type: 'test'
+  ...
+# Subtest: 非 system item 写入 boundaryReason 会被忽略
+ok 11 - 非 system item 写入 boundaryReason 会被忽略
+  ---
+  duration_ms: 286.433999
+  type: 'test'
+  ...
+# Subtest: agent tool-permission 支持 approve/deny 并更新状态
+ok 12 - agent tool-permission 支持 approve/deny 并更新状态
+  ---
+  duration_ms: 318.383993
+  type: 'test'
+  ...
+# Subtest: agent cancel 仅终止执行并保留消息,活跃项标记为 cancelled
+ok 13 - agent cancel 仅终止执行并保留消息,活跃项标记为 cancelled
+  ---
+  duration_ms: 350.752704
+  type: 'test'
+  ...
+# Subtest: agent runtime settings 可通过 execution-profile 下发
+ok 14 - agent runtime settings 可通过 execution-profile 下发
+  ---
+  duration_ms: 294.906094
+  type: 'test'
+  ...
+# [02:19:22.462] [31mERROR[39m (13071): [36magent runtime run failed[39m
+#     sessionId: "sess_00mmijz35s00008aa402ab75fd"
+#     runId: "run_00mmijz35w00009140e40a6dd1"
+#     err: {
+#       "type": "TypeError",
+#       "message": "The database connection is not open",
+#       "stack":
+#           TypeError: The database connection is not open
+#               at Database.prepare (/data/workspaces/w_E5-nt_iT/agent-workbench/node_modules/better-sqlite3/lib/methods/wrappers.js:5:21)
+#               at getAgentSession (/data/workspaces/w_E5-nt_iT/agent-workbench/apps/api/src/modules/agent/agent.store.ts:605:6)
+#               at AgentService.getSession (/data/workspaces/w_E5-nt_iT/agent-workbench/apps/api/src/modules/agent/agent.service.ts:1695:12)
+#               at AgentRuntime.processRun (/data/workspaces/w_E5-nt_iT/agent-workbench/apps/api/src/modules/agent/agent.runtime.ts:134:30)
+#     }
+# Subtest: agent prompt-context 根据 run uiLocale 注入语言与时间运行时约束
+ok 15 - agent prompt-context 根据 run uiLocale 注入语言与时间运行时约束
+  ---
+  duration_ms: 301.175599
+  type: 'test'
+  ...
+# Subtest: agent compact 在 worker 不可用时仍接受 uiLocale 参数
+ok 16 - agent compact 在 worker 不可用时仍接受 uiLocale 参数
+  ---
+  duration_ms: 244.927834
+  type: 'test'
+  ...
+# Subtest: agent compact 在 worker 不可用时返回 503
+ok 17 - agent compact 在 worker 不可用时返回 503
+  ---
+  duration_ms: 259.10124
+  type: 'test'
+  ...
+# Subtest: agent clear 会归档当前可见上下文并插入 clear 边界 marker
+ok 18 - agent clear 会归档当前可见上下文并插入 clear 边界 marker
+  ---
+  duration_ms: 310.643053
+  type: 'test'
+  ...
+# Subtest: agent clear 对 subtask 会话返回只读错误
+ok 19 - agent clear 对 subtask 会话返回只读错误
+  ---
+  duration_ms: 271.900587
+  type: 'test'
+  ...
+# Subtest: agent prompt-context 对 subtask 会话隐藏 subtask 工具
+ok 20 - agent prompt-context 对 subtask 会话隐藏 subtask 工具
+  ---
+  duration_ms: 264.529549
+  type: 'test'
+  ...
+# Subtest: agent subtask fork 在复制历史与子任务 prompt 之间插入 system 提示
+ok 21 - agent subtask fork 在复制历史与子任务 prompt 之间插入 system 提示
+  ---
+  duration_ms: 302.590834
+  type: 'test'
+  ...
+# Subtest: subtask 失败时 getSubtaskRunResultFromWorker 仍返回 partial text
+ok 22 - subtask 失败时 getSubtaskRunResultFromWorker 仍返回 partial text
+  ---
+  duration_ms: 303.63117
+  type: 'test'
+  ...
+# Subtest: failed tool item 可保留 subtask partial result 且 error 不混入 partial 文本
+ok 23 - failed tool item 可保留 subtask partial result 且 error 不混入 partial 文本
+  ---
+  duration_ms: 307.611495
+  type: 'test'
+  ...
+# Subtest: agent prompt-context 对 primary 会话保留 subtask 工具
+ok 24 - agent prompt-context 对 primary 会话保留 subtask 工具
+  ---
+  duration_ms: 279.128817
+  type: 'test'
+  ...
+# Subtest: delete workspace 会清理 dataDir 下的 agent 归档目录
+ok 25 - delete workspace 会清理 dataDir 下的 agent 归档目录
+  ---
+  duration_ms: 256.769156
+  type: 'test'
+  ...
+# Subtest: agent clear 在空会话返回 AGENT_CLEAR_EMPTY
+ok 26 - agent clear 在空会话返回 AGENT_CLEAR_EMPTY
+  ---
+  duration_ms: 233.293755
+  type: 'test'
+  ...
+# Subtest: agent clear 在会话运行中返回 AGENT_CLEAR_NOT_IDLE
+ok 27 - agent clear 在会话运行中返回 AGENT_CLEAR_NOT_IDLE
+  ---
+  duration_ms: 269.282003
+  type: 'test'
+  ...
+# Subtest: agent revert 在会话运行中返回 AGENT_REVERT_NOT_IDLE
+ok 28 - agent revert 在会话运行中返回 AGENT_REVERT_NOT_IDLE
+  ---
+  duration_ms: 288.608264
+  type: 'test'
+  ...
+# Subtest: agent revert 在 idle 且存在非终态残留 item 时返回 AGENT_REVERT_HAS_NON_TERMINAL_ITEMS
+ok 29 - agent revert 在 idle 且存在非终态残留 item 时返回 AGENT_REVERT_HAS_NON_TERMINAL_ITEMS
+  ---
+  duration_ms: 252.651025
+  type: 'test'
+  ...
+# Subtest: agent clear 并发请求会串行执行且不会重复归档
+ok 30 - agent clear 并发请求会串行执行且不会重复归档
+  ---
+  duration_ms: 266.121641
+  type: 'test'
+  ...
+# Subtest: agent providers settings 要求 contextWindowTokens 必填且合法
+ok 31 - agent providers settings 要求 contextWindowTokens 必填且合法
+  ---
+  duration_ms: 215.317877
+  type: 'test'
+  ...
+# Subtest: run-state 支持 runNoticeText 更新与 idle 自动清空
+ok 32 - run-state 支持 runNoticeText 更新与 idle 自动清空
+  ---
+  duration_ms: 279.544956
+  type: 'test'
+  ...
+# Subtest: run-state 返回最近一次终态 run 结果
+ok 33 - run-state 返回最近一次终态 run 结果
+  ---
+  duration_ms: 299.105645
+  type: 'test'
+  ...
+# Subtest: run-state 不应把旧 terminal run 误认为当前这次 idle 的终态
+ok 34 - run-state 不应把旧 terminal run 误认为当前这次 idle 的终态
+  ---
+  duration_ms: 255.252646
+  type: 'test'
+  ...
+# Subtest: single-call model profile 始终使用全局默认模型
+ok 35 - single-call model profile 始终使用全局默认模型
+  ---
+  duration_ms: 268.478113
+  type: 'test'
+  ...
+# [02:19:28.204] [31mERROR[39m (13071): [36magent runtime run failed[39m
+#     sessionId: "sess_00mmijz7ll000086cb40043dfd"
+#     runId: "run_00mmijz7lo000071a4fe8c9cc5"
+#     err: {
+#       "type": "TypeError",
+#       "message": "The database connection is not open",
+#       "stack":
+#           TypeError: The database connection is not open
+#               at Database.prepare (/data/workspaces/w_E5-nt_iT/agent-workbench/node_modules/better-sqlite3/lib/methods/wrappers.js:5:21)
+#               at getAgentSession (/data/workspaces/w_E5-nt_iT/agent-workbench/apps/api/src/modules/agent/agent.store.ts:605:6)
+#               at AgentService.getSession (/data/workspaces/w_E5-nt_iT/agent-workbench/apps/api/src/modules/agent/agent.service.ts:1695:12)
+#               at AgentRuntime.processRun (/data/workspaces/w_E5-nt_iT/agent-workbench/apps/api/src/modules/agent/agent.runtime.ts:134:30)
+#     }
+# Subtest: agent context 压缩后会归档并支持 archive_search/read
+not ok 36 - agent context 压缩后会归档并支持 archive_search/read
+  ---
+  duration_ms: 374.311863
+  type: 'test'
+  location: '/data/workspaces/w_E5-nt_iT/agent-workbench/apps/api/src/modules/agent/agent.integration.test.ts:1:62852'
+  failureType: 'testCodeFailure'
+  error: |-
+    create internal context-item failed: {"message":"session head conflict","code":"conflict_head:4"}
+    
+    409 !== 200
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 200
+  actual: 409
+  operator: 'strictEqual'
+  stack: |-
+    createContextItemInternal (/data/workspaces/w_E5-nt_iT/agent-workbench/apps/api/src/modules/agent/agent.integration.test.ts:525:10)
+    process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    async TestContext.<anonymous> (/data/workspaces/w_E5-nt_iT/agent-workbench/apps/api/src/modules/agent/agent.integration.test.ts:2820:3)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: agent prompt-context 未发生 compaction 时不应注入 compaction snippet
+ok 37 - agent prompt-context 未发生 compaction 时不应注入 compaction snippet
+  ---
+  duration_ms: 281.322333
+  type: 'test'
+  ...
+# Subtest: agent prompt-context compaction snippet 缓存缺失时应即时重建
+ok 38 - agent prompt-context compaction snippet 缓存缺失时应即时重建
+  ---
+  duration_ms: 275.594224
+  type: 'test'
+  ...
+# Subtest: archive v2 边界行为: 校验/大小写/跨文件pos/截断/半行过滤
+ok 39 - archive v2 边界行为: 校验/大小写/跨文件pos/截断/半行过滤
+  ---
+  duration_ms: 287.117611
+  type: 'test'
+  ...
+# Subtest: archive_search snippet 模式返回命中窗口并限制单行窗口数量
+ok 40 - archive_search snippet 模式返回命中窗口并限制单行窗口数量
+  ---
+  duration_ms: 291.269225
+  type: 'test'
+  ...
+# Subtest: agent prompt-context 使用结构化 tool-call/tool-result 消息
+ok 41 - agent prompt-context 使用结构化 tool-call/tool-result 消息
+  ---
+  duration_ms: 278.411076
+  type: 'test'
+  ...
+# Subtest: agent prompt-context 对 apply_patch 保留 patchText 输入,并使用文本结果
+ok 42 - agent prompt-context 对 apply_patch 保留 patchText 输入,并使用文本结果
+  ---
+  duration_ms: 296.493241
+  type: 'test'
+  ...
+# Subtest: agent prompt-context 支持 todolist 工具输入输出
+ok 43 - agent prompt-context 支持 todolist 工具输入输出
+  ---
+  duration_ms: 271.346984
+  type: 'test'
+  ...
+# Subtest: agent prompt-context: todolist goal 超长时自动截断并更新 session title
+ok 44 - agent prompt-context: todolist goal 超长时自动截断并更新 session title
+  ---
+  duration_ms: 252.835908
+  type: 'test'
+  ...
+# Subtest: agent prompt-context: todolist goal 为空白时不更新 session title
+ok 45 - agent prompt-context: todolist goal 为空白时不更新 session title
+  ---
+  duration_ms: 260.966262
+  type: 'test'
+  ...
+# Subtest: agent internal: 禁止 append completed apply_patch(必须走 update 写 artifact)
+ok 46 - agent internal: 禁止 append completed apply_patch(必须走 update 写 artifact)
+  ---
+  duration_ms: 240.384163
+  type: 'test'
+  ...
+# Subtest: apply_patch artifact 文件缺失时返回 404
+ok 47 - apply_patch artifact 文件缺失时返回 404
+  ---
+  duration_ms: 276.714264
+  type: 'test'
+  ...
+# Subtest: write completed 后瘦身 args/result 并支持 artifact 拉取
+ok 48 - write completed 后瘦身 args/result 并支持 artifact 拉取
+  ---
+  duration_ms: 308.857595
+  type: 'test'
+  ...
+# Subtest: write artifact 文件缺失时返回 404
+ok 49 - write artifact 文件缺失时返回 404
+  ---
+  duration_ms: 259.31566
+  type: 'test'
+  ...
+# Subtest: write 在 deny 终态会瘦身 args.content
+ok 50 - write 在 deny 终态会瘦身 args.content
+  ---
+  duration_ms: 272.3588
+  type: 'test'
+  ...
+# Subtest: write 在 cancel 终态会瘦身 args.content
+ok 51 - write 在 cancel 终态会瘦身 args.content
+  ---
+  duration_ms: 263.44551
+  type: 'test'
+  ...
+# Subtest: agent tool 字符串结果保持原始字符串语义
+ok 52 - agent tool 字符串结果保持原始字符串语义
+  ---
+  duration_ms: 286.755263
+  type: 'test'
+  ...
+# Subtest: agent 兼容部分迁移数据: tool_call_json 缺失时回退 legacy output
+ok 53 - agent 兼容部分迁移数据: tool_call_json 缺失时回退 legacy output
+  ---
+  duration_ms: 296.986524
+  type: 'test'
+  ...
+# Subtest: agent 兼容早期拆分数据: 缺少 resultFormat 时保留结构化工具结果
+ok 54 - agent 兼容早期拆分数据: 缺少 resultFormat 时保留结构化工具结果
+  ---
+  duration_ms: 287.173397
+  type: 'test'
+  ...
+# Subtest: agent settings 兼容缺省 globalPromptIds
+ok 55 - agent settings 兼容缺省 globalPromptIds
+  ---
+  duration_ms: 302.838432
+  type: 'test'
+  ...
+# Subtest: agent prompt-context 全局提示词按列表顺序注入(方案A)
+ok 56 - agent prompt-context 全局提示词按列表顺序注入(方案A)
+  ---
+  duration_ms: 311.867119
+  type: 'test'
+  ...
+# Subtest: agent prompt-context 同时存在 global/workspace/agent 时按既定顺序拼接
+ok 57 - agent prompt-context 同时存在 global/workspace/agent 时按既定顺序拼接
+  ---
+  duration_ms: 270.288634
+  type: 'test'
+  ...
+# Subtest: agent prompt-context 在 workspace 根 AGENTS.md 缺失时忽略
+ok 58 - agent prompt-context 在 workspace 根 AGENTS.md 缺失时忽略
+  ---
+  duration_ms: 273.82372
+  type: 'test'
+  ...
+# Subtest: agent startup seed 会修复脏的 global prompts settings
+ok 59 - agent startup seed 会修复脏的 global prompts settings
+  ---
+  duration_ms: 209.855229
+  type: 'test'
+  ...
+# Subtest: agent prompt-context 在 agent prompt 为空且无 workspace/global 时仅注入全局系统提示词
+ok 60 - agent prompt-context 在 agent prompt 为空且无 workspace/global 时仅注入全局系统提示词
+  ---
+  duration_ms: 280.379067
+  type: 'test'
+  ...
+# Subtest: agent prompt-context 对 workspace AGENTS.md 做 32KB 截断并追加标记
+ok 61 - agent prompt-context 对 workspace AGENTS.md 做 32KB 截断并追加标记
+  ---
+  duration_ms: 264.767816
+  type: 'test'
+  ...
+1..61
+# tests 61
+# suites 0
+# pass 60
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 20827.856578
+npm error Lifecycle script `test:integration` failed with error:
+npm error code 1
+npm error path /data/workspaces/w_E5-nt_iT/agent-workbench/apps/api
+npm error workspace @agent-workbench/api
+npm error location /data/workspaces/w_E5-nt_iT/agent-workbench/apps/api
+npm error command failed
+npm error command sh -c tsx --test src/modules/agent/agent.integration.test.ts
