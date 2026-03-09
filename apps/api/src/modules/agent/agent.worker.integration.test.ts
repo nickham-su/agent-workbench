@@ -144,11 +144,6 @@ async function configureAgentDefaults(baseUrl: string, llmBaseURL: string) {
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          permissions: {
-            allowRead: true,
-            allowWrite: true,
-            allowBash: true
-          },
           defaultModel: null
         }
       ]

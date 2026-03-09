@@ -11,7 +11,6 @@ import type {
   AgentContextItemsResponse,
   AgentControlResult,
   AgentForkSessionRequest,
-  AgentPermissionDecision,
   AgentClearSessionRequest,
   AgentCompactSessionRequest,
   AgentCompactSessionResponse,
@@ -23,7 +22,6 @@ import type {
   AgentSessionRecord,
   AgentSessionRunState,
   AgentContextToolName,
-  AgentToolPermissionRequest
 } from "@agent-workbench/shared";
 import { HttpError } from "../../app/errors.js";
 import type { AppContext } from "../../app/context.js";
@@ -322,7 +320,13 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
     ].join("\n");
   }
   if (toolName === "read") {
-    return "读取当前目录内目录或UTF-8文本文件,支持offset/limit,超长行截断,输出上限50KB,不支持非文本或特殊文件类型。";
+    return [
+      "读取当前目录内目录或UTF-8文本文件,支持offset/limit,超长行截断,输出上限50KB,不支持非文本或特殊文件类型。",
+      "读取文件时,offset 表示从第几行开始读取;读取目录时,offset 表示从第几个条目开始读取;二者都从 1 开始计数。",
+      "继续读取同一文件或目录时,应使用上一次 read 返回结果中明确给出的 offset,不要自行猜测下一个 offset。",
+      "如果读取文件的结果显示 End of file,表示该文件已经没有更多内容可读,不要继续对同一文件分页调用 read,除非文件发生变化。",
+      "如果请求的 offset 超过文件总行数,工具会返回文件结尾说明,而不是失败。"
+    ].join(" ");
   }
   if (toolName === "apply_patch") {
     return [
@@ -821,13 +825,11 @@ const NON_TERMINAL_ITEM_STATUS = new Set<AgentContextItemStatus>([
   "streaming",
   "queued",
   "running",
-  "awaiting_permission"
 ]);
 
 const TERMINAL_TOOL_ITEM_STATUS = new Set<AgentContextItemStatus>([
   "completed",
   "failed",
-  "denied",
   "cancelled"
 ]);
 const TERMINAL_RUN_RECORD_STATUS = new Set(["completed", "failed", "cancelled"] as const);
@@ -849,7 +851,7 @@ const ARCHIVE_READ_LINE_COUNT_DEFAULT = 40;
 const ARCHIVE_READ_LINE_COUNT_MAX = 200;
 const ARCHIVE_FILE_NAME_RE = /^\d{8}\.log$/;
 const ARCHIVE_RESULT_TRUNCATED_MARKER = "[超过最大字符数限制,从此处截断内容]";
-const ARCHIVABLE_ITEM_STATUS = new Set<AgentContextItemStatus>(["completed", "failed", "denied", "cancelled"]);
+const ARCHIVABLE_ITEM_STATUS = new Set<AgentContextItemStatus>(["completed", "failed", "cancelled"]);
 const RUN_STATUS_SYSTEM_TEXT_PREFIX = "[run] ";
 const COMPACTION_SNIPPET_CACHE_MAX_BYTES = 256 * 1024;
 const SUBTASK_FORK_GUARD_SYSTEM_TEXT = [
@@ -1815,8 +1817,7 @@ export class AgentService {
       let prevId: number | null = null;
       for (const item of cloned) {
         const safeStatus =
-          item.status === "streaming" || item.status === "queued" || item.status === "running" || item.status === "awaiting_permission"
-            ? "completed"
+          item.status === "streaming" || item.status === "queued" || item.status === "running" ? "completed"
             : item.status;
         const next = appendContextItem(this.ctx.db, {
           workspaceId: fromSession.workspaceId,
@@ -1991,7 +1992,6 @@ export class AgentService {
           status: "running",
           activeRunId: runId,
           activeAssistantItemId: null,
-          waitingToolItemId: null,
           runNoticeText: "",
           updatedAt: createdAt,
           appliedItemId: item.id
@@ -2171,7 +2171,6 @@ export class AgentService {
           status: "running",
           activeRunId: runId,
           activeAssistantItemId: null,
-          waitingToolItemId: null,
           // 立即给 UI 一个反馈,避免等待 worker 拉取状态.
           runNoticeText: "正在压缩上下文...",
           updatedAt: createdAt,
@@ -2298,7 +2297,6 @@ export class AgentService {
       status: state.status,
       activeRunId: state.activeRunId,
       activeAssistantItemId: state.activeAssistantItemId,
-      waitingToolItemId: state.waitingToolItemId,
       lastResponseTotalTokens: state.lastResponseTotalTokens,
       runNoticeText: state.runNoticeText,
       nonTerminalItemIds,
@@ -2413,83 +2411,6 @@ export class AgentService {
 
     const headItemId = getSessionHead(this.ctx.db, session.workspaceId, session.id);
     return { sessionId: session.id, headItemId };
-  }
-
-  applyToolPermission(sessionId: string, body: AgentToolPermissionRequest) {
-    const session = getAgentSession(this.ctx.db, sessionId);
-    if (!session) throw new HttpError(404, "session not found");
-    if (session.workspaceId !== body.workspaceId) throw new HttpError(400, "workspaceId mismatch");
-    const state = getRunState(this.ctx.db, session.workspaceId, session.id);
-    if (!state.activeRunId) throw new HttpError(409, "no active run");
-    if (state.waitingToolItemId !== body.toolItemId) throw new HttpError(409, "tool is not waiting for permission");
-
-    const item = getContextItemById(this.ctx.db, body.toolItemId);
-    if (!item || item.sessionId !== session.id || item.kind !== "tool") {
-      throw new HttpError(404, "tool item not found");
-    }
-    if (item.status !== "awaiting_permission") {
-      throw new HttpError(409, "tool is not waiting for permission");
-    }
-
-    if (item.output.type !== "tool") {
-      throw new HttpError(400, "invalid tool item output");
-    }
-    const output = item.output;
-    const updatedAt = nowMs();
-    if (body.decision === "approve") {
-      updateContextItem(this.ctx.db, {
-        itemId: item.id,
-        status: "queued",
-        output: {
-          ...output,
-          approved: true
-        },
-        updatedAt
-      });
-      updateRunRecordStatus(this.ctx.db, {
-        runId: state.activeRunId,
-        status: "running",
-        updatedAt
-      });
-      updateRunState(this.ctx.db, {
-        workspaceId: session.workspaceId,
-        sessionId: session.id,
-        status: "running",
-        activeRunId: state.activeRunId,
-        activeAssistantItemId: state.activeAssistantItemId,
-        waitingToolItemId: null,
-        updatedAt,
-        appliedItemId: getLatestSessionItemId(this.ctx.db, session.workspaceId, session.id)
-      });
-      return { runId: state.activeRunId, decision: body.decision };
-    }
-
-    updateContextItem(this.ctx.db, {
-      itemId: item.id,
-      status: "denied",
-      output: toTerminalWriteOutput({
-        ...output,
-        text: `tool: ${output.toolName}\nstatus: denied\n\npermission denied`,
-        error: "permission denied"
-      }),
-      updatedAt
-    });
-    updateRunRecordStatus(this.ctx.db, {
-      runId: state.activeRunId,
-      status: "running",
-      updatedAt
-    });
-    updateRunState(this.ctx.db, {
-      workspaceId: session.workspaceId,
-      sessionId: session.id,
-      status: "running",
-      activeRunId: state.activeRunId,
-      activeAssistantItemId: state.activeAssistantItemId,
-      waitingToolItemId: null,
-      updatedAt,
-      appliedItemId: getLatestSessionItemId(this.ctx.db, session.workspaceId, session.id)
-    });
-    return { runId: state.activeRunId, decision: body.decision };
   }
 
   appendContextItemFromWorker(params: {
@@ -2619,7 +2540,7 @@ export class AgentService {
     const isWriteTool = nextOutput &&
       (nextOutput as any).type === "tool" &&
       (nextOutput as any).toolName === "write";
-    const isWriteTerminalStatus = nextStatus === "completed" || nextStatus === "failed" || nextStatus === "denied" || nextStatus === "cancelled";
+    const isWriteTerminalStatus = nextStatus === "completed" || nextStatus === "failed" || nextStatus === "cancelled";
 
     if (isWriteTool && isWriteTerminalStatus) {
       const tool = nextOutput as any as { toolCallId?: unknown; result?: unknown; args?: unknown };
@@ -2707,7 +2628,6 @@ export class AgentService {
     status: AgentRunStatus;
     activeRunId: string | null;
     activeAssistantItemId: number | null;
-    waitingToolItemId: number | null;
     lastResponseTotalTokens?: number | null;
     runNoticeText?: string | null;
     updatedAt?: number;
@@ -2741,7 +2661,6 @@ export class AgentService {
       status: params.status,
       activeRunId,
       activeAssistantItemId: params.activeAssistantItemId,
-      waitingToolItemId: params.waitingToolItemId,
       ...(hasLastResponseTotalTokens ? { lastResponseTotalTokens: params.lastResponseTotalTokens ?? null } : {}),
       ...(hasRunNoticeText
         ? { runNoticeText: normalizeRunNoticeText(params.runNoticeText) }
@@ -2754,7 +2673,7 @@ export class AgentService {
     if (activeRunId) {
       updateRunRecordStatus(this.ctx.db, {
         runId: activeRunId,
-        status: params.status === "waiting_permission" ? "waiting_permission" : "running",
+        status: "running",
         updatedAt: ts
       });
     }
@@ -2969,7 +2888,6 @@ export class AgentService {
         status: "running",
         activeRunId: runId,
         activeAssistantItemId: null,
-        waitingToolItemId: null,
         runNoticeText: "",
         updatedAt: createdAt,
         appliedItemId: item.id
@@ -3205,8 +3123,7 @@ export class AgentService {
           status: state.status,
           activeRunId: state.activeRunId,
           activeAssistantItemId: state.activeAssistantItemId,
-          waitingToolItemId: state.waitingToolItemId,
-          lastResponseTotalTokens: null,
+              lastResponseTotalTokens: null,
           updatedAt: archiveAt,
           appliedItemId: getLatestSessionItemId(this.ctx.db, params.workspaceId, params.sessionId)
         });
@@ -3727,22 +3644,16 @@ export class AgentService {
       : undefined;
 
     const tools = enabledToolNames.map((name) => {
-      const requiresApproval =
-        (name === "read" && !profile.agent.permissions.allowRead) ||
-        (name === "write" && !profile.agent.permissions.allowWrite) ||
-        (name === "apply_patch" && !profile.agent.permissions.allowWrite) ||
-        (name === "bash" && !profile.agent.permissions.allowBash);
       return {
         name,
         description: toolDescription(name, { subtaskDescription }),
-        inputSchema: toolArgsSchema(name),
-        requiresApproval
+        inputSchema: toolArgsSchema(name)
       };
     });
 
     const pendingTools = visible
       .filter((item) => item.runId === params.runId && item.kind === "tool")
-      .filter((item) => item.status === "queued" || item.status === "running" || item.status === "awaiting_permission")
+      .filter((item) => item.status === "queued" || item.status === "running")
       .map((item) => {
         if (item.output.type !== "tool") return null;
         return {
@@ -3750,8 +3661,7 @@ export class AgentService {
           status: item.status,
           toolName: item.output.toolName,
           toolCallId: item.output.toolCallId,
-          args: item.output.args ?? {},
-          approved: item.output.approved === true
+          args: item.output.args ?? {}
         };
       })
       .filter((item): item is {
@@ -3760,7 +3670,6 @@ export class AgentService {
         toolName: AgentContextToolName;
         toolCallId: string | undefined;
         args: Record<string, unknown>;
-        approved: boolean;
       } => item !== null);
 
     const runState = getRunState(this.ctx.db, params.workspaceId, params.sessionId);

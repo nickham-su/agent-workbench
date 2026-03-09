@@ -1,11 +1,10 @@
 import type { AgentRuntimeSettings, AgentSessionRunState } from "@agent-workbench/shared";
-import { LoadingOutlined, QuestionCircleOutlined } from "@ant-design/icons-vue";
+import { LoadingOutlined } from "@ant-design/icons-vue";
 import { computed, inject, reactive, readonly, watchEffect, type App, type ComputedRef, type InjectionKey } from "vue";
 import { getAgentRunState, getAgentRuntimeSettings } from "@/shared/api";
 import agentSessionTerminalSoundUrl from "@/shared/assets/audio/agent-session-terminal.mp3";
 
 const ACTIVE_RUNNING_POLL_MS = 850;
-const ACTIVE_WAITING_POLL_MS = 1100;
 const BACKGROUND_NON_IDLE_POLL_MS = 2400;
 const WARMUP_POLL_MS = 420;
 const WARMUP_POLL_COUNT = 4;
@@ -18,7 +17,6 @@ const DEFAULT_RUN_STATE = (sessionId = ""): AgentSessionRunState => ({
   status: "idle",
   activeRunId: null,
   activeAssistantItemId: null,
-  waitingToolItemId: null,
   lastResponseTotalTokens: null,
   runNoticeText: "",
   nonTerminalItemIds: [],
@@ -27,7 +25,7 @@ const DEFAULT_RUN_STATE = (sessionId = ""): AgentSessionRunState => ({
   appliedItemId: 0
 });
 
-export type SessionIndicatorIcon = "running" | "waiting_permission" | null;
+export type SessionIndicatorIcon = "running" | null;
 
 type SessionUiPolicy = {
   kind: "primary" | "subtask";
@@ -79,12 +77,11 @@ function nowMs() {
 }
 
 function isNonIdle(status: AgentSessionRunState["status"]) {
-  return status === "running" || status === "waiting_permission";
+  return status === "running";
 }
 
 function indicatorIconOf(status: AgentSessionRunState["status"]): SessionIndicatorIcon {
   if (status === "running") return "running";
-  if (status === "waiting_permission") return "waiting_permission";
   return null;
 }
 
@@ -124,9 +121,6 @@ function nextPollDelayOf(params: {
   const { activeSessionId, visibleSessionIds, entry } = params;
   if (entry.runState.status === "running") {
     return activeSessionId === entry.sessionId ? ACTIVE_RUNNING_POLL_MS : BACKGROUND_NON_IDLE_POLL_MS;
-  }
-  if (entry.runState.status === "waiting_permission") {
-    return activeSessionId === entry.sessionId ? ACTIVE_WAITING_POLL_MS : BACKGROUND_NON_IDLE_POLL_MS;
   }
   if (entry.warmupRemaining > 0) {
     return WARMUP_POLL_MS;
@@ -552,8 +546,8 @@ export function createAgentSessionStatusStore() {
       return {
         icon,
         showDot: shouldShowDot(entry, state.activeSessionId),
-        iconComponent: icon === "running" ? LoadingOutlined : (icon === "waiting_permission" ? QuestionCircleOutlined : null),
-        iconClass: icon === "running" ? "text-blue-500" : (icon === "waiting_permission" ? "text-amber-500" : ""),
+        iconComponent: icon === "running" ? LoadingOutlined : null,
+        iconClass: icon === "running" ? "text-blue-500" : "",
         spin: icon === "running"
       };
     });

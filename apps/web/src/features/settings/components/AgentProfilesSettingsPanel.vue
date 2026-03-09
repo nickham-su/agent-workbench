@@ -155,14 +155,6 @@
           />
         </a-form-item>
 
-        <a-form-item :label="t('settings.agentProfiles.fields.permissions')">
-          <a-space direction="vertical" size="small">
-            <a-checkbox v-model:checked="agentFormAllowRead">{{ t("settings.agentProfiles.permissions.allowRead") }}</a-checkbox>
-            <a-checkbox v-model:checked="agentFormAllowWrite">{{ t("settings.agentProfiles.permissions.allowWrite") }}</a-checkbox>
-            <a-checkbox v-model:checked="agentFormAllowBash">{{ t("settings.agentProfiles.permissions.allowBash") }}</a-checkbox>
-          </a-space>
-        </a-form-item>
-
         <a-form-item :label="t('settings.agentProfiles.fields.defaultModel')">
           <a-cascader
             v-model:value="agentFormDefaultModelPath"
@@ -213,11 +205,6 @@ type EditingAgent = {
   globalPromptIds: string[];
   tools: AgentToolName[];
   mcpServers: string[];
-  permissions: {
-    allowRead: boolean;
-    allowWrite: boolean;
-    allowBash: boolean;
-  };
   defaultModel: AgentDefaultModel;
 };
 
@@ -266,9 +253,6 @@ const agentFormPrompt = ref("");
 const agentFormGlobalPromptIds = ref<string[]>([]);
 const agentFormTools = ref<AgentToolName[]>([...DEFAULT_TOOLS]);
 const agentFormMcpServers = ref<string[]>([]);
-const agentFormAllowRead = ref(true);
-const agentFormAllowWrite = ref(true);
-const agentFormAllowBash = ref(true);
 const agentFormDefaultModelPath = ref<string[]>([GLOBAL_DEFAULT_MODEL_PATH]);
 const agentFormSetAsDefault = ref(false);
 
@@ -392,11 +376,6 @@ function mapFromSettings(
     globalPromptIds: normalizeGlobalPromptIds(agent.globalPromptIds),
     tools: normalizeTools(agent.tools),
     mcpServers: normalizeMcpServers(agent.mcpServers),
-    permissions: {
-      allowRead: agent.permissions.allowRead,
-      allowWrite: agent.permissions.allowWrite,
-      allowBash: agent.permissions.allowBash
-    },
     defaultModel: agent.defaultModel
   }));
 
@@ -486,11 +465,6 @@ function toRequestBody() {
       globalPromptIds: normalizeGlobalPromptIds(agent.globalPromptIds),
       tools: normalizeTools(agent.tools),
       mcpServers: normalizeMcpServers(agent.mcpServers),
-      permissions: {
-        allowRead: agent.permissions.allowRead,
-        allowWrite: agent.permissions.allowWrite,
-        allowBash: agent.permissions.allowBash
-      },
       defaultModel: agent.defaultModel
     }))
   } satisfies UpdateAgentSettingsRequest;
@@ -505,9 +479,6 @@ function openCreateAgent() {
   agentFormGlobalPromptIds.value = [];
   agentFormTools.value = [...DEFAULT_TOOLS];
   agentFormMcpServers.value = [];
-  agentFormAllowRead.value = true;
-  agentFormAllowWrite.value = true;
-  agentFormAllowBash.value = true;
   agentFormDefaultModelPath.value = [GLOBAL_DEFAULT_MODEL_PATH];
   agentFormSetAsDefault.value = false;
   agentModalOpen.value = true;
@@ -524,9 +495,6 @@ function openEditAgent(agentId: string) {
   agentFormGlobalPromptIds.value = normalizeGlobalPromptIds(target.globalPromptIds);
   agentFormTools.value = normalizeTools(target.tools);
   agentFormMcpServers.value = normalizeMcpServers(target.mcpServers);
-  agentFormAllowRead.value = target.permissions.allowRead;
-  agentFormAllowWrite.value = target.permissions.allowWrite;
-  agentFormAllowBash.value = target.permissions.allowBash;
   agentFormDefaultModelPath.value = target.defaultModel
     ? [target.defaultModel.providerId, target.defaultModel.modelId]
     : [GLOBAL_DEFAULT_MODEL_PATH];
@@ -545,9 +513,6 @@ function closeAgentModal() {
   agentFormGlobalPromptIds.value = [];
   agentFormTools.value = [...DEFAULT_TOOLS];
   agentFormMcpServers.value = [];
-  agentFormAllowRead.value = true;
-  agentFormAllowWrite.value = true;
-  agentFormAllowBash.value = true;
   agentFormDefaultModelPath.value = [GLOBAL_DEFAULT_MODEL_PATH];
   agentFormSetAsDefault.value = false;
 }
@@ -583,11 +548,6 @@ function submitAgent() {
     globalPromptIds: normalizeGlobalPromptIds(agentFormGlobalPromptIds.value),
     tools: normalizeTools(agentFormTools.value),
     mcpServers: normalizeMcpServers(agentFormMcpServers.value),
-    permissions: {
-      allowRead: agentFormAllowRead.value,
-      allowWrite: agentFormAllowWrite.value,
-      allowBash: agentFormAllowBash.value
-    },
     defaultModel
   };
 

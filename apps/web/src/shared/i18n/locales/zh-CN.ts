@@ -294,7 +294,7 @@ export default {
       reachedTop: "已到最早",
       contextBoundary: "上下文边界",
       inputPlaceholderIdle: "输入消息,Enter 发送,Shift+Enter 换行,Tab 切换 Agent",
-      inputPlaceholderRunning: "运行中,Shift+Enter 换行,Esc 取消当前运行",
+      inputPlaceholderRunning: "运行中,Esc 取消当前运行",
       inputPlaceholderNoAgent: "请先创建 Agent 后再发送消息",
       noAgentHint: "当前没有可用 Agent,请先创建 Agent",
       goCreateAgent: "前往创建",
@@ -323,7 +323,7 @@ export default {
       todoListGoal: "目标",
       todoListEmpty: "当前清单为空",
       applyPatchCardTitle: "补丁变更",
-      applyPatchPreview: "待审批预览",
+      applyPatchPreview: "补丁预览",
       applyPatchApplied: "已应用",
       applyPatchFileCount: "文件",
       applyPatchLineStats: "行变更",
@@ -339,8 +339,6 @@ export default {
       revertConfirmTitleAssistant: "确认回退到这条 AI 消息？",
       revertConfirmContentAssistant: "将回退到该条 AI 消息并保留该消息。回退后,后续对话分支将暂时不可见。",
       reverted: "已回退到选中消息",
-      approve: "允许",
-      deny: "拒绝",
       roles: {
         user: "我",
         assistant: "AI",
@@ -555,6 +553,18 @@ export default {
       title: "关闭未保存的文件？",
       content: "该文件有未保存修改，确认关闭？",
       ok: "关闭",
+      cancel: "取消"
+    },
+    closeOthersConfirm: {
+      title: "关闭其他标签页？",
+      content: "其他标签页中有 {count} 个未保存文件，确认关闭其他标签页？",
+      ok: "关闭其他",
+      cancel: "取消"
+    },
+    closeAllConfirm: {
+      title: "关闭全部标签页？",
+      content: "当前有 {count} 个未保存文件，确认关闭全部标签页？",
+      ok: "关闭全部",
       cancel: "取消"
     },
     conflict: {
@@ -894,7 +904,7 @@ export default {
       saved: "已保存"
     },
     agentProfiles: {
-      description: "配置 AI Agent 列表、默认 Agent、工具权限与默认模型。",
+      description: "配置 AI Agent 列表、默认 Agent、可用工具与默认模型。",
       saving: "正在保存...",
       empty: "暂无 Agent，请先新增",
       actions: {
@@ -908,7 +918,6 @@ export default {
         mcpServers: "MCP Server",
         globalPrompts: "提示词库",
         summary: "简介",
-        permissions: "权限",
         defaultModel: "默认模型",
         useGlobalDefault: "默认模型",
         customDefaultModel: "使用自定义默认模型"
@@ -923,11 +932,6 @@ export default {
         archiveSearch: "Archive Search",
         archiveRead: "Archive Read",
         archiveTail: "Archive Tail"
-      },
-      permissions: {
-        allowRead: "允许 Read",
-        allowWrite: "允许 Write",
-        allowBash: "允许 Bash"
       },
       modal: {
         ok: "确定",

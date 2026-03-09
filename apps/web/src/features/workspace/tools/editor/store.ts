@@ -14,6 +14,7 @@ export type EditorStore = {
   setActiveTabKey: (key: string) => void;
   upsertTab: (tab: EditorTab, opts?: { activate?: boolean }) => void;
   closeTab: (key: string) => void;
+  closeTabs: (keys: string[]) => void;
   closeAllTabs: () => void;
   enqueueOpenFile: (req: EditorOpenFileRequest) => void;
   drainPendingOpenFiles: () => QueuedEditorOpenFileRequest[];
@@ -129,11 +130,32 @@ export function getEditorStore(workspaceId: string): EditorStore {
         activeTabKey.value = next?.key ?? "";
       }
     },
-    closeAllTabs: () => {
+    closeTabs: (keysToClose) => {
+      if (keysToClose.length === 0) return;
+      const closeSet = new Set(keysToClose);
+      const currentTabs = [...tabs];
+      if (!currentTabs.some((tab) => closeSet.has(tab.key))) return;
+
+      const activeIndex = currentTabs.findIndex((tab) => tab.key === activeTabKey.value);
+      const activeWillClose = !!activeTabKey.value && closeSet.has(activeTabKey.value);
+      const remainingTabs = currentTabs.filter((tab) => !closeSet.has(tab.key));
+
+      for (const tab of currentTabs) {
+        if (!closeSet.has(tab.key)) continue;
+        disposeTab(tab);
+      }
+
+      tabs.splice(0, tabs.length, ...remainingTabs);
+
+      if (!activeWillClose) return;
       activationEpoch.value += 1;
-      for (const tab of tabs) disposeTab(tab);
-      tabs.splice(0, tabs.length);
-      activeTabKey.value = "";
+      const nextRight = activeIndex >= 0 ? currentTabs.slice(activeIndex + 1).find((tab) => !closeSet.has(tab.key)) ?? null : null;
+      const nextLeft = activeIndex >= 0 ? [...currentTabs.slice(0, activeIndex)].reverse().find((tab) => !closeSet.has(tab.key)) ?? null : null;
+      activeTabKey.value = nextRight?.key ?? nextLeft?.key ?? "";
+    },
+    closeAllTabs: () => {
+      if (tabs.length === 0) return;
+      store.closeTabs(tabs.map((tab) => tab.key));
     },
     enqueueOpenFile: (req) => {
       pendingOpenFiles.value = [...pendingOpenFiles.value, { seq: ++nextOpenFileSeq, epoch: activationEpoch.value, req }];
@@ -163,16 +185,14 @@ export function getEditorStore(workspaceId: string): EditorStore {
       }
     },
     closePath: (path) => {
-      tabs
-        .filter((tab) => "path" in tab && tab.path === path)
-        .map((tab) => tab.key)
-        .forEach((key) => store.closeTab(key));
+      const keys = tabs.filter((tab) => "path" in tab && tab.path === path).map((tab) => tab.key);
+      store.closeTabs(keys);
     },
     closePathTree: (path) => {
       const keys = tabs
         .filter((tab) => "path" in tab && tab.path && (tab.path === path || tab.path.startsWith(path + "/")))
         .map((tab) => tab.key);
-      keys.forEach((key) => store.closeTab(key));
+      store.closeTabs(keys);
     },
     reset: () => {
       for (const tab of tabs) disposeTab(tab);

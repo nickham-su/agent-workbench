@@ -51,15 +51,25 @@ const TOOL_ARTIFACT_MAX_CHARS = Math.max(
   parseIntOrDefault(process.env.AWB_TOOL_ARTIFACT_MAX_CHARS, 200_000)
 );
 const COMPACTION_USER_PROMPT = [
-  "请基于当前会话内容输出一份总结,用于继续当前任务。",
+  "请基于当前会话内容输出一份结构化总结,用于后续模型继续同一任务。",
+  "总结目标不是回顾,而是帮助后续模型快速接手并继续执行。",
+  "",
   "重点覆盖:",
   "- 已完成了什么",
   "- 当前正在做什么",
-  "- 涉及哪些文件或模块",
-  "- 下一步待办",
+  "- 与后续工作直接相关的关键文件、模块、接口、命令或工具",
+  "- 下一步待办(按优先级列出,尽量写成可直接执行的动作)",
   "- 需要持续遵守的用户约束与偏好",
   "- 关键技术决策及原因",
-  "要求: 只输出总结,不要回答会话中的问题,不要编造未出现的信息。"
+  "- 已排除的方案、失败尝试或需要避免重复踩坑的信息",
+  "- 如果历史消息中调用过 subtask 工具,必须输出“可复用的 subtask 会话”小节; 每项至少包含: 目的(description)、subtask_session_id、产出摘要、后续可复用价值或适用场景",
+  "",
+  "输出要求:",
+  "- 只输出总结,不要回答会话中的问题",
+  "- 不要编造未出现的信息",
+  "- 明确区分已确认事实、待确认事项、未完成事项",
+  "- 结构清晰,使用固定小节与项目符号",
+  "- 如果没有某类信息,可省略对应小节,不要硬编"
 ].join("\n");
 const COMPACTION_TIMEOUT_MS = 300_000;
 
@@ -193,23 +203,30 @@ function buildToolSuccessText(params: {
 
   if (params.toolName === "read") {
     const source = typeof params.args.filePath === "string" ? params.args.filePath : undefined;
-    const offset = toIntOrNull(params.args.offset);
-    const limit = toIntOrNull(params.args.limit);
+    const actualStart = toIntOrNull(resultObj?.actualStart);
+    const actualEnd = toIntOrNull(resultObj?.actualEnd);
+    const offsetOutOfRange = resultObj?.offsetOutOfRange === true;
     const range =
-      offset != null && limit != null && limit > 0
-        ? `${offset}-${offset + Math.max(0, limit - 1)}`
-        : offset != null
-          ? String(offset)
-          : undefined;
+      offsetOutOfRange
+        ? undefined
+        : actualStart != null && actualEnd != null && actualEnd >= actualStart
+          ? `${actualStart}-${actualEnd}`
+          : actualStart != null
+            ? String(actualStart)
+            : undefined;
     const body = typeof resultObj?.content === "string"
       ? resultObj.content
       : typeof resultObj?.summary === "string"
         ? resultObj.summary
         : stringifyResult(params.result);
+    const headers: Array<[string, string | undefined]> = [["source", source]];
+    if (range) {
+      headers.push(["range", range]);
+    }
     return buildToolText({
       toolName: params.toolName,
       status: params.status,
-      headers: [["source", source], ["range", range]],
+      headers,
       body
     });
   }
@@ -280,7 +297,7 @@ function buildToolSuccessText(params: {
   });
 }
 
-function buildToolErrorText(params: { toolName: string; status: "failed" | "denied" | "cancelled"; error: string }) {
+function buildToolErrorText(params: { toolName: string; status: "failed" | "cancelled"; error: string }) {
   return buildToolText({
     toolName: params.toolName,
     status: params.status,
@@ -406,11 +423,10 @@ type QueuedRun = {
 
 type PendingTool = {
   itemId: number;
-  status: "queued" | "running" | "awaiting_permission" | "streaming" | "completed" | "failed" | "denied" | "cancelled";
+  status: "queued" | "running" | "streaming" | "completed" | "failed" | "cancelled";
   toolName: string;
   toolCallId: string;
   args: Record<string, unknown>;
-  approved?: boolean;
 };
 
 type ToolCall = {
@@ -903,90 +919,6 @@ export class AgentRunner {
       }
     }
 
-    const needsApproval =
-      (tool.toolName === "read" && !profile.agent.permissions.allowRead) ||
-      (tool.toolName === "write" && !profile.agent.permissions.allowWrite) ||
-      (tool.toolName === "apply_patch" && !profile.agent.permissions.allowWrite) ||
-      (tool.toolName === "bash" && !profile.agent.permissions.allowBash);
-
-    if (tool.status === "awaiting_permission") {
-      if (!needsApproval) {
-        await this.apiClient.updateContextItem({
-          itemId: tool.itemId,
-          status: "queued",
-          output: {
-            ...outputBase,
-            ...(tool.toolName === "apply_patch" ? { text: buildToolText({ toolName: tool.toolName, status: "queued", body: "apply_patch prepared" }) } : {})
-          },
-          updatedAt: nowMs()
-        });
-        await this.apiClient.updateRunState({
-          workspaceId: run.workspaceId,
-          sessionId: run.sessionId,
-          status: "running",
-          activeRunId: run.runId,
-          activeAssistantItemId: null,
-          waitingToolItemId: null,
-          updatedAt: nowMs()
-        });
-      } else {
-        await this.apiClient.updateRunState({
-          workspaceId: run.workspaceId,
-          sessionId: run.sessionId,
-          status: "waiting_permission",
-          activeRunId: run.runId,
-          activeAssistantItemId: null,
-          waitingToolItemId: tool.itemId,
-          updatedAt: nowMs()
-        });
-        return { paused: true as const };
-      }
-    }
-
-    if (needsApproval && tool.approved !== true) {
-      await this.apiClient.updateContextItem({
-        itemId: tool.itemId,
-        status: "awaiting_permission",
-        output: {
-          ...outputBase,
-          ...(tool.toolName === "apply_patch"
-            ? { text: buildToolText({ toolName: tool.toolName, status: "awaiting_permission", body: "apply_patch awaiting permission" }) }
-            : {})
-        },
-        updatedAt: nowMs()
-      });
-      await writeItemLog({
-        logger: this.logger,
-        workspacePath: run.workspacePath,
-        kind: "tool",
-        itemId: tool.itemId,
-        payload: {
-          meta: {
-            workspaceId: run.workspaceId,
-            sessionId: run.sessionId,
-            runId: run.runId,
-            toolItemId: tool.itemId
-          },
-          request: {
-            toolName: tool.toolName,
-            toolCallId: tool.toolCallId,
-            args: tool.args
-          },
-          status: "awaiting_permission"
-        }
-      });
-      await this.apiClient.updateRunState({
-        workspaceId: run.workspaceId,
-        sessionId: run.sessionId,
-        status: "waiting_permission",
-        activeRunId: run.runId,
-        activeAssistantItemId: null,
-        waitingToolItemId: tool.itemId,
-        updatedAt: nowMs()
-      });
-      return { paused: true as const };
-    }
-
     await this.apiClient.updateContextItem({
       itemId: tool.itemId,
       status: "running",
@@ -1197,7 +1129,7 @@ export class AgentRunner {
             status: "cancelled",
             updatedAt: nowMs()
           });
-        } else if (subtaskStatus.status === "running" || subtaskStatus.status === "waiting_permission") {
+        } else if (subtaskStatus.status === "running") {
           throw new Error(`subtask did not reach terminal status: ${subtaskStatus.status}`);
         }
 
@@ -1409,7 +1341,7 @@ export class AgentRunner {
         });
         continue;
       }
-      if (item.status !== "queued" && item.status !== "awaiting_permission") continue;
+      if (item.status !== "queued") continue;
       const toolCallId = String(item.toolCallId || "").trim();
       if (!toolCallId) continue;
       pending.push({
@@ -1417,8 +1349,7 @@ export class AgentRunner {
         status: item.status,
         toolName: item.toolName,
         toolCallId,
-        args: item.args,
-        approved: item.approved === true
+        args: item.args
       });
     }
 
@@ -1443,7 +1374,6 @@ export class AgentRunner {
       status: "running",
       activeRunId: params.run.runId,
       activeAssistantItemId: null,
-      waitingToolItemId: null,
       updatedAt: nowMs()
     });
     return { paused: false as const };
@@ -1507,7 +1437,6 @@ export class AgentRunner {
       status: "running",
       activeRunId: run.runId,
       activeAssistantItemId: null,
-      waitingToolItemId: null,
       lastResponseTotalTokens: null,
       updatedAt: nowMs()
     });
@@ -1559,7 +1488,6 @@ export class AgentRunner {
       status: "running",
       activeRunId: run.runId,
       activeAssistantItemId: assistant.id,
-      waitingToolItemId: null,
       runNoticeText: "",
       updatedAt: nowMs()
     });
@@ -1698,8 +1626,7 @@ export class AgentRunner {
             status: "running",
             activeRunId: run.runId,
             activeAssistantItemId: assistant.id,
-            waitingToolItemId: null,
-            runNoticeText: "",
+                  runNoticeText: "",
             updatedAt: nowMs()
           });
         } catch {
@@ -1846,8 +1773,7 @@ export class AgentRunner {
               status: "running",
               activeRunId: run.runId,
               activeAssistantItemId: assistant.id,
-              waitingToolItemId: null,
-              runNoticeText: noticeText,
+                      runNoticeText: noticeText,
               updatedAt: nowMs()
             });
           } catch {
@@ -1897,8 +1823,7 @@ export class AgentRunner {
             status: "running",
             activeRunId: run.runId,
             activeAssistantItemId: assistant.id,
-            waitingToolItemId: null,
-            runNoticeText: "",
+                  runNoticeText: "",
             updatedAt: nowMs()
           });
         } catch {
@@ -2061,8 +1986,7 @@ export class AgentRunner {
         status: "running",
         activeRunId: run.runId,
         activeAssistantItemId: null,
-        waitingToolItemId: null,
-        lastResponseTotalTokens: responseTotalTokens,
+          lastResponseTotalTokens: responseTotalTokens,
         runNoticeText: "",
         updatedAt: nowMs()
       });
@@ -2084,8 +2008,7 @@ export class AgentRunner {
         status: "running",
         activeRunId: run.runId,
         activeAssistantItemId: null,
-        waitingToolItemId: null,
-        runNoticeText: "",
+          runNoticeText: "",
         updatedAt: nowMs()
       });
 
@@ -2116,8 +2039,7 @@ export class AgentRunner {
           status: "running",
           activeRunId: run.runId,
           activeAssistantItemId: null,
-          waitingToolItemId: null,
-          runNoticeText: "正在压缩上下文...",
+              runNoticeText: "正在压缩上下文...",
           updatedAt: nowMs()
         });
 

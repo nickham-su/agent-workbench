@@ -101,7 +101,7 @@ test("read 对以换行结尾的文件不额外多算空白尾行", async () => 
   assert.match(result.content, /1: alpha/);
   assert.match(result.content, /2: beta/);
   assert.doesNotMatch(result.content, /3:/);
-  assert.match(result.content, /total 2 lines/);
+  assert.match(result.content, /End of file - total 2 lines\. No more content to read\./);
 });
 
 test("read 支持对大文件使用 offset 继续读取", async () => {
@@ -119,7 +119,18 @@ test("read 支持对大文件使用 offset 继续读取", async () => {
 
   assert.match(result.content, /5500: line-5500/);
   assert.match(result.content, /5502: line-5502/);
-  assert.match(result.content, /Use offset=5503 to continue/);
+  assert.match(result.content, /To continue reading this same file, use exactly offset=5503\. Do not guess the next offset\./);
+});
+
+test("read 在 offset 超过文件总行数时返回 EOF 说明而不是失败", async () => {
+  const workspacePath = await createWorkspace();
+  const filePath = path.join(workspacePath, "small.txt");
+  await fs.writeFile(filePath, "alpha\nbeta\n", "utf8");
+
+  const result = await runReadTool({ workspacePath, filePath: "small.txt", offset: 5, limit: 20 });
+
+  assert.equal(result.summary, "读取文件 small.txt");
+  assert.equal(result.content, "(End of file - total 2 lines. Requested offset=5 exceeds file length. No more content to read. Do not call read again for this file unless the file changes.)");
 });
 
 test("read 仍拒绝明显的二进制文件", async () => {
@@ -187,4 +198,31 @@ test("read 在 CRLF 跨 chunk 边界时不应额外产生空行", async () => {
 
   assert.match(result.content, /2: NEXT/);
   assert.doesNotMatch(result.content, /3:/);
+});
+
+test("read 读取目录分页时提示使用返回的 offset", async () => {
+  const workspacePath = await createWorkspace();
+  await fs.mkdir(path.join(workspacePath, "nested"), { recursive: true });
+  await fs.writeFile(path.join(workspacePath, "nested", "a.txt"), "a", "utf8");
+  await fs.writeFile(path.join(workspacePath, "nested", "b.txt"), "b", "utf8");
+  await fs.writeFile(path.join(workspacePath, "nested", "c.txt"), "c", "utf8");
+
+  const result = await runReadTool({ workspacePath, filePath: "nested", offset: 1, limit: 2 });
+
+  assert.match(result.content, /a\.txt/);
+  assert.match(result.content, /b\.txt/);
+  assert.doesNotMatch(result.content, /c\.txt/);
+  assert.match(result.content, /To continue reading this same directory, use exactly offset=3\. Do not guess the next offset\./);
+});
+
+test("read 在目录 offset 超过条目数时返回 EOF 说明而不是失败", async () => {
+  const workspacePath = await createWorkspace();
+  await fs.mkdir(path.join(workspacePath, "nested"), { recursive: true });
+  await fs.writeFile(path.join(workspacePath, "nested", "a.txt"), "a", "utf8");
+  await fs.writeFile(path.join(workspacePath, "nested", "b.txt"), "b", "utf8");
+
+  const result = await runReadTool({ workspacePath, filePath: "nested", offset: 5, limit: 20 });
+
+  assert.equal(result.summary, "读取目录 nested");
+  assert.equal(result.content, "(End of directory - total 2 entries. Requested offset=5 exceeds directory length. No more entries to read. Do not call read again for this directory unless the directory contents change.)");
 });

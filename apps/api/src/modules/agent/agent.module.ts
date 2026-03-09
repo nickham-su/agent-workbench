@@ -133,7 +133,7 @@ async function failRecoveringRuns(service: AgentService, logger: FastifyInstance
       }
     }
 
-    // 处理脏数据：状态为 running/waiting_permission 但 active_run_id 为空的会话。
+    // 处理脏数据：状态为 running 但 active_run_id 为空的会话。
     const dirtySessions = listInFlightSessionsWithoutActiveRunId(ctx.db);
     for (const sess of dirtySessions) {
       try {

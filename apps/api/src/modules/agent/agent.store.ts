@@ -8,7 +8,7 @@ import type {
 } from "@agent-workbench/shared";
 import type { Db } from "../../infra/db/db.js";
 
-const TERMINAL_ITEM_STATUS = new Set<AgentContextItemStatus>(["completed", "failed", "denied", "cancelled"]);
+const TERMINAL_ITEM_STATUS = new Set<AgentContextItemStatus>(["completed", "failed", "cancelled"]);
 
 export class AgentConflictError extends Error {
   readonly currentHeadItemId: number | null;
@@ -62,9 +62,6 @@ type StoredToolCall = {
   toolName?: unknown;
   toolCallId?: unknown;
   args?: unknown;
-  approval?: {
-    approved?: unknown;
-  };
 };
 
 type StoredToolResult = {
@@ -146,7 +143,6 @@ function inferErrorCode(params: {
   const message = String(params.errorMessage || "").trim().toLowerCase();
   if (!message) return null;
   if (params.status === "cancelled") return "ITEM_CANCELLED";
-  if (params.kind === "tool" && params.status === "denied") return "TOOL_PERMISSION_DENIED";
   if (params.kind === "tool") return "TOOL_FAILED";
   if (params.kind === "assistant") {
     if (message.includes("idle timeout")) return "MODEL_IDLE_TIMEOUT";
@@ -190,8 +186,7 @@ function encodeStoredColumns(params: {
   const toolCallPayload: StoredToolCall = {
     toolName,
     ...(toolCallId ? { toolCallId } : {}),
-    ...(typeof params.output.args !== "undefined" ? { args: params.output.args } : {}),
-    ...(params.output.approved === true ? { approval: { approved: true } } : {})
+    ...(typeof params.output.args !== "undefined" ? { args: params.output.args } : {})
   };
   const shouldPersistStructuredResult =
     toolName === "apply_patch" || toolName === "todolist" || toolName === "subtask" || toolName === "write";
@@ -276,7 +271,6 @@ function mapFromStoredColumns(row: AgentContextItemRow): AgentContextItemOutput 
       : legacyTool && Object.prototype.hasOwnProperty.call(legacyTool, "args")
         ? legacyTool.args
         : undefined;
-  const approved = call?.approval?.approved === true || legacyTool?.approved === true;
 
   const resultMeta = typeof result?.meta === "object" && result.meta && !Array.isArray(result.meta)
     ? (result.meta as Record<string, unknown>)
@@ -324,7 +318,6 @@ function mapFromStoredColumns(row: AgentContextItemRow): AgentContextItemOutput 
     toolName: toolName as any,
     ...(toolCallId ? { toolCallId } : {}),
     ...(typeof args !== "undefined" ? { args } : {}),
-    ...(approved ? { approved: true } : {}),
     text: row.outputText,
     ...(row.outputTextTruncated !== 0 ? { textTruncated: true } : {}),
     ...(row.outputTextArtifactPath ? { textArtifactPath: row.outputTextArtifactPath } : {}),
@@ -338,7 +331,6 @@ export type AgentRunStateRow = {
   status: AgentRunStatus;
   activeRunId: string | null;
   activeAssistantItemId: number | null;
-  waitingToolItemId: number | null;
   lastResponseTotalTokens: number | null;
   runNoticeText: string;
   updatedAt: number;
@@ -354,10 +346,28 @@ export type AgentRunRecord = {
   providerId: string;
   modelId: string;
   uiLocale: AgentUiLocale | null;
-  status: "running" | "waiting_permission" | "completed" | "failed" | "cancelled";
+  status: "running" | "completed" | "failed" | "cancelled";
   createdAt: number;
   updatedAt: number;
 };
+
+function normalizeContextItemStatus(raw: unknown): AgentContextItemStatus {
+  if (raw === "streaming" || raw === "queued" || raw === "running" || raw === "completed" || raw === "failed" || raw === "cancelled") {
+    return raw;
+  }
+  return "failed";
+}
+
+function normalizeRunStatus(raw: unknown): AgentRunStatus {
+  if (raw === "running") return "running";
+  return "idle";
+}
+
+function normalizeRunRecordStatus(raw: unknown): AgentRunRecord["status"] {
+  if (raw === "running") return "running";
+  if (raw === "completed" || raw === "failed" || raw === "cancelled") return raw;
+  return "failed";
+}
 
 function toHeadItemId(row: { headItemId: number | null } | undefined) {
   if (!row) return null;
@@ -404,7 +414,7 @@ function mapContextItem(row: AgentContextItemRow): AgentContextItemRecord {
     step,
     prevId,
     kind: row.kind,
-    status: row.status,
+    status: normalizeContextItemStatus(row.status),
     archiveAt,
     boundaryReason,
     output: mapFromStoredColumns(row),
@@ -517,7 +527,6 @@ function upsertRunState(db: Db, params: {
   status: AgentRunStatus;
   activeRunId: string | null;
   activeAssistantItemId: number | null;
-  waitingToolItemId: number | null;
   lastResponseTotalTokens?: number | null;
   setLastResponseTotalTokens?: boolean;
   runNoticeText?: string;
@@ -533,7 +542,6 @@ function upsertRunState(db: Db, params: {
         status,
         active_run_id,
         active_assistant_item_id,
-        waiting_tool_item_id,
         last_response_total_tokens,
         run_notice_text,
         updated_at,
@@ -544,7 +552,6 @@ function upsertRunState(db: Db, params: {
         @status,
         @activeRunId,
         @activeAssistantItemId,
-        @waitingToolItemId,
         @lastResponseTotalTokens,
         @runNoticeText,
         @updatedAt,
@@ -554,7 +561,6 @@ function upsertRunState(db: Db, params: {
         status = excluded.status,
         active_run_id = excluded.active_run_id,
         active_assistant_item_id = excluded.active_assistant_item_id,
-        waiting_tool_item_id = excluded.waiting_tool_item_id,
         last_response_total_tokens = case
           when @setLastResponseTotalTokens = 1 then @lastResponseTotalTokens
           else agent_session_run_state.last_response_total_tokens
@@ -676,7 +682,6 @@ export function createAgentSession(db: Db, params: {
       status: "idle",
       activeRunId: null,
       activeAssistantItemId: null,
-      waitingToolItemId: null,
       updatedAt: params.createdAt,
       runNoticeText: "",
       setRunNoticeText: true,
@@ -1274,7 +1279,6 @@ export function getRunState(db: Db, workspaceId: string, sessionId: string): Age
           status,
           active_run_id as activeRunId,
           active_assistant_item_id as activeAssistantItemId,
-          waiting_tool_item_id as waitingToolItemId,
           last_response_total_tokens as lastResponseTotalTokens,
           run_notice_text as runNoticeText,
           updated_at as updatedAt,
@@ -1284,13 +1288,12 @@ export function getRunState(db: Db, workspaceId: string, sessionId: string): Age
       `
     )
     .get(workspaceId, sessionId) as AgentRunStateRow | undefined;
-  if (row) return row;
+  if (row) return { ...row, status: normalizeRunStatus(row.status) };
   return {
     sessionId,
     status: "idle",
     activeRunId: null,
     activeAssistantItemId: null,
-    waitingToolItemId: null,
     lastResponseTotalTokens: null,
     runNoticeText: "",
     updatedAt: 0,
@@ -1304,7 +1307,6 @@ export function updateRunState(db: Db, params: {
   status: AgentRunStatus;
   activeRunId: string | null;
   activeAssistantItemId: number | null;
-  waitingToolItemId: number | null;
   lastResponseTotalTokens?: number | null;
   runNoticeText?: string;
   updatedAt: number;
@@ -1324,7 +1326,6 @@ export function setRunStateIdle(db: Db, params: { workspaceId: string; sessionId
     status: "idle",
     activeRunId: null,
     activeAssistantItemId: null,
-    waitingToolItemId: null,
     setLastResponseTotalTokens: false,
     runNoticeText: "",
     setRunNoticeText: true,
@@ -1412,7 +1413,7 @@ export function listNonTerminalSessionItemIds(db: Db, workspaceId: string, sessi
         from agent_context_item
         where workspace_id = ?
           and session_id = ?
-          and status not in ('completed', 'failed', 'denied', 'cancelled')
+          and status not in ('completed', 'failed', 'cancelled')
         order by id asc
       `
     )
@@ -1503,7 +1504,7 @@ export function getRunRecord(db: Db, runId: string) {
       `
     )
     .get(runId) as AgentRunRecord | undefined;
-  return row ?? null;
+  return row ? { ...row, status: normalizeRunRecordStatus(row.status) } : null;
 }
 
 export function getLatestTerminalRunRecord(db: Db, params: { workspaceId: string; sessionId: string }): (AgentRunRecord & {
@@ -1542,7 +1543,7 @@ export function listNonTerminalRunIdsBySession(db: Db, params: { workspaceId: st
         from agent_run
         where workspace_id = ?
           and session_id = ?
-          and status in ('running', 'waiting_permission')
+          and status = 'running'
         order by created_at asc, run_id asc
       `
     )
@@ -1563,7 +1564,7 @@ export function listNonTerminalRunIdsByItemIds(db: Db, params: { workspaceId: st
         from agent_context_item i
         inner join agent_run r on r.run_id = i.run_id
         where i.workspace_id = ? and i.session_id = ? and i.id in (${placeholders}) and i.run_id is not null
-          and r.status in ('running', 'waiting_permission')
+          and r.status = 'running'
       `
     )
     .all(params.workspaceId, params.sessionId, ...params.itemIds) as Array<{ runId: string | null }>;
@@ -1590,7 +1591,7 @@ export function failRunRecordIfInFlight(db: Db, params: { runId: string; updated
         set status = 'failed',
             updated_at = @updatedAt
         where run_id = @runId
-          and status in ('running', 'waiting_permission')
+          and status = 'running'
       `
     )
     .run(params).changes;
@@ -1604,7 +1605,7 @@ export function failNonTerminalContextItemsByRunId(db: Db, params: { runId: stri
         set status = 'failed',
             updated_at = @updatedAt
         where run_id = @runId
-          and status in ('streaming', 'queued', 'running', 'awaiting_permission')
+          and status in ('streaming', 'queued', 'running')
       `
     )
     .run(params).changes;
@@ -1624,14 +1625,13 @@ export function setRunStateIdleIfActiveRunMatches(db: Db, params: {
         set status = 'idle',
             active_run_id = null,
             active_assistant_item_id = null,
-            waiting_tool_item_id = null,
             run_notice_text = '',
             updated_at = @updatedAt,
             applied_item_id = @appliedItemId
         where workspace_id = @workspaceId
           and session_id = @sessionId
           and active_run_id = @runId
-          and status in ('running', 'waiting_permission')
+          and status = 'running'
       `
     )
     .run(params).changes;
@@ -1645,7 +1645,7 @@ export function listInFlightSessionsWithoutActiveRunId(db: Db) {
           workspace_id as workspaceId,
           session_id as sessionId
         from agent_session_run_state
-        where status in ('running', 'waiting_permission')
+        where status = 'running'
           and active_run_id is null
       `
     )
@@ -1665,14 +1665,13 @@ export function setRunStateIdleIfNoActiveRun(db: Db, params: {
         set status = 'idle',
             active_run_id = null,
             active_assistant_item_id = null,
-            waiting_tool_item_id = null,
             run_notice_text = '',
             updated_at = @updatedAt,
             applied_item_id = @appliedItemId
         where workspace_id = @workspaceId
           and session_id = @sessionId
           and active_run_id is null
-          and status in ('running', 'waiting_permission')
+          and status = 'running'
       `
     )
     .run(params).changes;
@@ -1684,7 +1683,7 @@ export function listRunningSessions(db: Db): Array<{ workspaceId: string; sessio
       `
         select workspace_id as workspaceId, session_id as sessionId, active_run_id as activeRunId
         from agent_session_run_state
-        where status in ('running', 'waiting_permission')
+        where status = 'running'
       `
     )
     .all() as Array<{ workspaceId: string; sessionId: string; activeRunId: string | null }>;
@@ -1703,7 +1702,7 @@ export function listRecoverableRuns(db: Db) {
           r.trigger_item_id as triggerItemId
         from agent_session_run_state rs
         left join agent_run r on r.run_id = rs.active_run_id
-        where rs.status in ('running', 'waiting_permission') and rs.active_run_id is not null
+        where rs.status = 'running' and rs.active_run_id is not null
       `
     )
     .all() as Array<{

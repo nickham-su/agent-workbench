@@ -5,6 +5,8 @@
       :active-tab-key="store.activeTabKey.value"
       :on-active-tab-update="onActiveTabUpdate"
       :request-close-tab="requestCloseTab"
+      :request-close-other-tabs="requestCloseOtherTabs"
+      :request-close-all-tabs="requestCloseAllTabs"
     />
 
     <div class="flex-1 min-h-0 relative">
@@ -547,20 +549,48 @@ function onActiveTabUpdate(key: string) {
   store.setActiveTabKey(key);
 }
 
-function requestCloseTab(key: string) {
-  const tab = store.tabs.find((item) => item.key === key) ?? null;
-  if (!tab) return;
-  if (tab.kind === "file" && tab.dirty) {
-    Modal.confirm({
-      title: t("files.closeConfirm.title"),
-      content: t("files.closeConfirm.content"),
-      okText: t("files.closeConfirm.ok"),
-      cancelText: t("files.closeConfirm.cancel"),
-      onOk: () => store.closeTab(key)
-    });
+function requestCloseTabs(keys: string[], mode: "single" | "others" | "all") {
+  if (keys.length === 0) return;
+  const uniqueKeys = Array.from(new Set(keys));
+  const dirtyTabs = uniqueKeys
+    .map((key) => store.tabs.find((item) => item.key === key) ?? null)
+    .filter((tab): tab is Exclude<typeof tab, null> => tab !== null)
+    .filter((tab) => tab.kind === "file" && tab.dirty);
+
+  const close = () => {
+    if (mode === "single") {
+      store.closeTab(uniqueKeys[0]!);
+      return;
+    }
+    store.closeTabs(uniqueKeys);
+  };
+
+  if (dirtyTabs.length === 0) {
+    close();
     return;
   }
-  store.closeTab(key);
+
+  const confirmKey = mode === "all" ? "files.closeAllConfirm" : mode === "others" ? "files.closeOthersConfirm" : "files.closeConfirm";
+  Modal.confirm({
+    title: t(`${confirmKey}.title`),
+    content: t(`${confirmKey}.content`, { count: dirtyTabs.length }),
+    okText: t(`${confirmKey}.ok`),
+    cancelText: t(`${confirmKey}.cancel`),
+    onOk: close
+  });
+}
+
+function requestCloseTab(key: string) {
+  requestCloseTabs([key], "single");
+}
+
+function requestCloseOtherTabs(key: string) {
+  const keys = store.tabs.filter((tab) => tab.key !== key).map((tab) => tab.key);
+  requestCloseTabs(keys, "others");
+}
+
+function requestCloseAllTabs() {
+  requestCloseTabs(store.tabs.map((tab) => tab.key), "all");
 }
 
 function notPreviewableLabel(tab: FileEditorTab) {

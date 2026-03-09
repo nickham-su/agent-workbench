@@ -171,7 +171,7 @@ test("agent startup recovery mode=fail 会终止 in-flight run 并回收 run-sta
     step: null,
     prevId: assistantItem.id,
     kind: "tool",
-    status: "awaiting_permission",
+    status: "queued",
     output: { type: "tool", toolName: "bash", toolCallId: "call_1", args: { command: "echo hi" }, text: "" } as any,
     createdAt: ts
   });
@@ -190,10 +190,9 @@ test("agent startup recovery mode=fail 会终止 in-flight run 并回收 run-sta
   updateRunState(db, {
     workspaceId,
     sessionId,
-    status: "waiting_permission",
+    status: "running",
     activeRunId: runId,
     activeAssistantItemId: assistantItem.id,
-    waitingToolItemId: toolItem.id,
     runNoticeText: "",
     updatedAt: ts,
     appliedItemId: toolItem.id
@@ -216,7 +215,6 @@ test("agent startup recovery mode=fail 会终止 in-flight run 并回收 run-sta
     status: "running",
     activeRunId: null,
     activeAssistantItemId: null,
-    waitingToolItemId: null,
     runNoticeText: "",
     updatedAt: ts,
     appliedItemId: 0
@@ -260,7 +258,7 @@ test("agent startup recovery mode=fail 会终止 in-flight run 并回收 run-sta
   assert.equal(state.status, "idle");
   assert.equal(state.activeRunId, null);
 
-  // 断言：streaming/awaiting_permission 等未终态 items 被置为 failed
+  // 断言：streaming/queued 等未终态 items 被置为 failed
   const items = getSessionTranscriptItems(db, workspaceId, sessionId);
   assert.ok(items.some((it) => it.kind === "assistant" && it.status === "failed"));
   assert.ok(items.some((it) => it.kind === "tool" && it.status === "failed"));
@@ -321,11 +319,6 @@ async function configureAgentDefaults(app: FastifyInstance) {
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          permissions: {
-            allowRead: true,
-            allowWrite: true,
-            allowBash: true
-          },
           defaultModel: null
         }
       ]
@@ -375,7 +368,6 @@ test("GET /api/settings/agent/agents 返回每个 agent 的 resolvedModel", asyn
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          permissions: { allowRead: true, allowWrite: true, allowBash: true },
           defaultModel: null
         },
         {
@@ -385,7 +377,6 @@ test("GET /api/settings/agent/agents 返回每个 agent 的 resolvedModel", asyn
           prompt: "Use a custom model.",
           tools: ["bash", "read"],
           mcpServers: [],
-          permissions: { allowRead: true, allowWrite: false, allowBash: true },
           defaultModel: { providerId: "agent_provider", modelId: "agent_model" }
         }
       ]
@@ -458,7 +449,7 @@ async function getRunState(app: FastifyInstance, sessionId: string) {
   const res = await app.inject({ method: "GET", url: `/api/agent/sessions/${sessionId}/run-state` });
   assert.equal(res.statusCode, 200, `get run-state failed: ${res.body}`);
   return res.json() as {
-    status: "idle" | "running" | "waiting_permission";
+    status: "idle" | "running";
     activeRunId: string | null;
     runNoticeText: string;
     lastTerminalStatus: "completed" | "failed" | "cancelled" | null;
@@ -509,7 +500,7 @@ async function createContextItemInternal(params: {
   step: number | null;
   prevId: number | null;
   kind: "user" | "assistant" | "tool" | "system";
-  status: "streaming" | "queued" | "running" | "awaiting_permission" | "completed" | "failed" | "denied" | "cancelled";
+  status: "streaming" | "queued" | "running" | "completed" | "failed" | "cancelled";
   output: Record<string, unknown>;
 }) {
   const res = await params.app.inject({
@@ -538,7 +529,7 @@ async function updateContextItemInternal(params: {
   app: FastifyInstance;
   internalToken: string;
   itemId: number;
-  status?: "streaming" | "queued" | "running" | "awaiting_permission" | "completed" | "failed" | "denied" | "cancelled";
+  status?: "streaming" | "queued" | "running" | "completed" | "failed" | "cancelled";
   output?: Record<string, unknown>;
 }) {
   const res = await params.app.inject({
@@ -561,10 +552,9 @@ async function updateRunStateInternal(params: {
   internalToken: string;
   workspaceId: string;
   sessionId: string;
-  status: "idle" | "running" | "waiting_permission";
+  status: "idle" | "running";
   activeRunId: string | null;
   activeAssistantItemId: number | null;
-  waitingToolItemId: number | null;
   runNoticeText?: string | null;
   updatedAt?: number;
 }) {
@@ -580,7 +570,6 @@ async function updateRunStateInternal(params: {
       status: params.status,
       activeRunId: params.activeRunId,
       activeAssistantItemId: params.activeAssistantItemId,
-      waitingToolItemId: params.waitingToolItemId,
       ...(Object.prototype.hasOwnProperty.call(params, "runNoticeText") ? { runNoticeText: params.runNoticeText } : {}),
       ...(Object.prototype.hasOwnProperty.call(params, "updatedAt") ? { updatedAt: params.updatedAt } : {})
     }
@@ -612,7 +601,7 @@ async function getPromptContextInternal(params: {
     system: string;
     tools: Array<{ name: string }>;
     messages: Array<{ role: string; content: unknown }>;
-    pendingTools: Array<{ itemId: number; approved?: boolean; status: string; toolName: string }>;
+    pendingTools: Array<{ itemId: number; status: string; toolName: string }>;
   };
 }
 
@@ -1057,123 +1046,6 @@ test("非 system item 写入 boundaryReason 会被忽略", async () => {
   assert.equal(context.items[0]?.boundaryReason, null);
 });
 
-test("agent tool-permission 支持 approve/deny 并更新状态", async () => {
-  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
-  const session = await createSession(fixture.app, fixture.workspaceId);
-  const runId = newSortableId("run");
-
-  const userItem = await createContextItemInternal({
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: null,
-    step: null,
-    prevId: null,
-    kind: "user",
-    status: "completed",
-    output: {
-      type: "user_text",
-      text: "need read permission"
-    }
-  });
-
-  const toolApprove = await createContextItemInternal({
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: "turn_a",
-    step: 1,
-    prevId: userItem.item.id,
-    kind: "tool",
-    status: "awaiting_permission",
-    output: {
-      type: "tool",
-      toolName: "read",
-      args: {
-        filePath: "README.md"
-      }
-    }
-  });
-
-  await updateRunStateInternal({
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    status: "waiting_permission",
-    activeRunId: runId,
-    activeAssistantItemId: null,
-    waitingToolItemId: toolApprove.item.id
-  });
-
-  const approveRes = await fixture.app.inject({
-    method: "POST",
-    url: `/api/agent/sessions/${session.id}/tool-permission`,
-    payload: {
-      workspaceId: fixture.workspaceId,
-      toolItemId: toolApprove.item.id,
-      decision: "approve"
-    }
-  });
-  assert.equal(approveRes.statusCode, 200, `approve tool permission failed: ${approveRes.body}`);
-
-  const approvedItem = await getContextItem(fixture.app, session.id, toolApprove.item.id);
-  assert.equal(approvedItem.status, "queued");
-
-  const runStateAfterApprove = await getRunState(fixture.app, session.id);
-  assert.equal(runStateAfterApprove.status, "running");
-
-  const toolDeny = await createContextItemInternal({
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: "turn_b",
-    step: 2,
-    prevId: toolApprove.item.id,
-    kind: "tool",
-    status: "awaiting_permission",
-    output: {
-      type: "tool",
-      toolName: "bash",
-      args: {
-        command: "pwd"
-      }
-    }
-  });
-
-  await updateRunStateInternal({
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    status: "waiting_permission",
-    activeRunId: runId,
-    activeAssistantItemId: null,
-    waitingToolItemId: toolDeny.item.id
-  });
-
-  const denyRes = await fixture.app.inject({
-    method: "POST",
-    url: `/api/agent/sessions/${session.id}/tool-permission`,
-    payload: {
-      workspaceId: fixture.workspaceId,
-      toolItemId: toolDeny.item.id,
-      decision: "deny"
-    }
-  });
-  assert.equal(denyRes.statusCode, 200, `deny tool permission failed: ${denyRes.body}`);
-
-  const deniedItem = await getContextItem(fixture.app, session.id, toolDeny.item.id);
-  assert.equal(deniedItem.status, "denied");
-  assert.equal(String(deniedItem.output.error || ""), "permission denied");
-});
-
 test("agent cancel 仅终止执行并保留消息,活跃项标记为 cancelled", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
@@ -1252,7 +1124,6 @@ test("agent cancel 仅终止执行并保留消息,活跃项标记为 cancelled",
     status: "running",
     activeRunId: runId,
     activeAssistantItemId: assistantItem.item.id,
-    waitingToolItemId: null
   });
 
   const cancelRes = await fixture.app.inject({
@@ -1725,11 +1596,6 @@ test("agent prompt-context 对 subtask 会话隐藏 subtask 工具", async () =>
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write", "subtask"],
           mcpServers: [],
-          permissions: {
-            allowRead: true,
-            allowWrite: true,
-            allowBash: true
-          },
           defaultModel: null
         }
       ]
@@ -1792,11 +1658,6 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write", "subtask"],
           mcpServers: [],
-          permissions: {
-            allowRead: true,
-            allowWrite: true,
-            allowBash: true
-          },
           defaultModel: null
         }
       ]
@@ -2083,11 +1944,6 @@ test("agent prompt-context 对 primary 会话保留 subtask 工具", async () =>
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write", "subtask"],
           mcpServers: [],
-          permissions: {
-            allowRead: true,
-            allowWrite: true,
-            allowBash: true
-          },
           defaultModel: null
         }
       ]
@@ -2209,7 +2065,6 @@ test("agent clear 在会话运行中返回 AGENT_CLEAR_NOT_IDLE", async () => {
     status: "running",
     activeRunId: newSortableId("run"),
     activeAssistantItemId: null,
-    waitingToolItemId: null
   });
 
   const clearRes = await fixture.app.inject({
@@ -2280,7 +2135,6 @@ test("agent revert 在会话运行中返回 AGENT_REVERT_NOT_IDLE", async () => 
     status: "running",
     activeRunId: runId,
     activeAssistantItemId: assistantItem.item.id,
-    waitingToolItemId: null
   });
 
   const revertRes = await fixture.app.inject({
@@ -2569,7 +2423,6 @@ test("run-state 支持 runNoticeText 更新与 idle 自动清空", async () => {
     status: "running",
     activeRunId: runId,
     activeAssistantItemId: null,
-    waitingToolItemId: null,
     runNoticeText: "Request failed, retrying in 2s (1/3): timeout"
   });
 
@@ -2585,7 +2438,6 @@ test("run-state 支持 runNoticeText 更新与 idle 自动清空", async () => {
     status: "idle",
     activeRunId: null,
     activeAssistantItemId: null,
-    waitingToolItemId: null
   });
 
   const idleState = await getRunState(fixture.app, session.id);
@@ -2620,7 +2472,6 @@ test("run-state 返回最近一次终态 run 结果", async () => {
     status: "idle",
     activeRunId: null,
     activeAssistantItemId: null,
-    waitingToolItemId: null,
     updatedAt: createdAt
   });
 
@@ -2656,7 +2507,6 @@ test("run-state 不应把旧 terminal run 误认为当前这次 idle 的终态",
     status: "idle",
     activeRunId: null,
     activeAssistantItemId: null,
-    waitingToolItemId: null,
     updatedAt: createdAt + 1000
   });
 
@@ -2729,11 +2579,6 @@ test("single-call model profile 始终使用全局默认模型", async () => {
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          permissions: {
-            allowRead: true,
-            allowWrite: true,
-            allowBash: true
-          },
           defaultModel: {
             providerId: "agent_provider",
             modelId: "agent_model"
@@ -4397,62 +4242,6 @@ test("write artifact 文件缺失时返回 404", async () => {
   assert.equal(artifactRes.statusCode, 404);
 });
 
-test("write 在 deny 终态会瘦身 args.content", async () => {
-  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
-  const session = await createSession(fixture.app, fixture.workspaceId);
-  const runId = newSortableId("run");
-
-  const toolItem = await createContextItemInternal({
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: "turn_write",
-    step: 1,
-    prevId: null,
-    kind: "tool",
-    status: "awaiting_permission",
-    output: {
-      type: "tool",
-      toolName: "write",
-      toolCallId: "call_write_deny",
-      args: {
-        filePath: "deny.txt",
-        content: "secret deny payload"
-      }
-    }
-  });
-
-  await updateRunStateInternal({
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    status: "waiting_permission",
-    activeRunId: runId,
-    activeAssistantItemId: null,
-    waitingToolItemId: toolItem.item.id
-  });
-
-  const denyRes = await fixture.app.inject({
-    method: "POST",
-    url: `/api/agent/sessions/${session.id}/tool-permission`,
-    payload: {
-      workspaceId: fixture.workspaceId,
-      toolItemId: toolItem.item.id,
-      decision: "deny"
-    }
-  });
-  assert.equal(denyRes.statusCode, 200, `deny write permission failed: ${denyRes.body}`);
-
-  const deniedItem = await getContextItem(fixture.app, session.id, toolItem.item.id);
-  assert.equal(deniedItem.status, "denied");
-  const args = (deniedItem.output as { args?: Record<string, unknown> }).args || {};
-  assert.equal(Object.prototype.hasOwnProperty.call(args, "content"), false);
-  assert.equal(typeof args.contentBytes, "number");
-});
-
 test("write 在 cancel 终态会瘦身 args.content", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
@@ -4488,7 +4277,6 @@ test("write 在 cancel 终态会瘦身 args.content", async () => {
     status: "running",
     activeRunId: runId,
     activeAssistantItemId: null,
-    waitingToolItemId: null
   });
 
   const cancelRes = await fixture.app.inject({
@@ -4646,8 +4434,7 @@ test("agent 兼容部分迁移数据: tool_call_json 缺失时回退 legacy outp
     toolCallId: "call_legacy_read",
     args: {
       filePath: "README.md"
-    },
-    approved: true
+    }
   };
 
   const toolItem = await createContextItemInternal({
@@ -4660,7 +4447,7 @@ test("agent 兼容部分迁移数据: tool_call_json 缺失时回退 legacy outp
     step: 1,
     prevId: assistantItem.item.id,
     kind: "tool",
-    status: "awaiting_permission",
+    status: "queued",
     output: legacyToolOutput
   });
 
@@ -4688,7 +4475,6 @@ test("agent 兼容部分迁移数据: tool_call_json 缺失时回退 legacy outp
   assert.equal(String(detail.output.toolName || ""), "read");
   assert.equal(String(detail.output.toolCallId || ""), "call_legacy_read");
   assert.equal(String((detail.output.args as { filePath?: string } | undefined)?.filePath || ""), "README.md");
-  assert.equal(detail.output.approved, true);
 
   const promptContext = await getPromptContextInternal({
     app: fixture.app,
@@ -4698,7 +4484,6 @@ test("agent 兼容部分迁移数据: tool_call_json 缺失时回退 legacy outp
     runId
   });
   assert.equal(promptContext.pendingTools.length, 1);
-  assert.equal(promptContext.pendingTools[0]?.approved, true);
 });
 
 test("agent 兼容早期拆分数据: 缺少 resultFormat 时保留结构化工具结果", async () => {
@@ -4825,11 +4610,6 @@ test("agent settings 兼容缺省 globalPromptIds", async () => {
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          permissions: {
-            allowRead: true,
-            allowWrite: true,
-            allowBash: true
-          },
           defaultModel: null
         }
       ]
@@ -4924,11 +4704,6 @@ test("agent prompt-context 全局提示词按列表顺序注入(方案A)", async
           globalPromptIds: ["global_system_prompt", "gp_b", "gp_a"],
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          permissions: {
-            allowRead: true,
-            allowWrite: true,
-            allowBash: true
-          },
           defaultModel: null
         }
       ]
@@ -5004,11 +4779,6 @@ test("agent prompt-context 同时存在 global/workspace/agent 时按既定顺�
           globalPromptIds: ["gp_b", "gp_a"],
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          permissions: {
-            allowRead: true,
-            allowWrite: true,
-            allowBash: true
-          },
           defaultModel: null
         }
       ]
@@ -5172,11 +4942,6 @@ test("agent prompt-context 在 agent prompt 为空且无 workspace/global 时仅
           prompt: "",
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          permissions: {
-            allowRead: true,
-            allowWrite: true,
-            allowBash: true
-          },
           defaultModel: null
         }
       ]

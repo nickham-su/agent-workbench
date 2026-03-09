@@ -206,13 +206,6 @@ export const AgentToolNameSchema = Type.Union([
 ]);
 export type AgentToolName = Static<typeof AgentToolNameSchema>;
 
-export const AgentPermissionsSchema = Type.Object({
-  allowRead: Type.Boolean(),
-  allowWrite: Type.Boolean(),
-  allowBash: Type.Boolean()
-});
-export type AgentPermissions = Static<typeof AgentPermissionsSchema>;
-
 export const AgentDefaultModelSchema = Type.Union([AgentProvidersDefaultSchema, Type.Null()]);
 export type AgentDefaultModel = Static<typeof AgentDefaultModelSchema>;
 
@@ -240,7 +233,6 @@ export const AgentItemSchema = Type.Object({
   globalPromptIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
   tools: Type.Array(AgentToolNameSchema),
   mcpServers: Type.Array(Type.String({ minLength: 1 })),
-  permissions: AgentPermissionsSchema,
   defaultModel: AgentDefaultModelSchema
 });
 export type AgentItem = Static<typeof AgentItemSchema>;
@@ -253,7 +245,6 @@ export const AgentItemViewSchema = Type.Object({
   globalPromptIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
   tools: Type.Array(AgentToolNameSchema),
   mcpServers: Type.Array(Type.String({ minLength: 1 })),
-  permissions: AgentPermissionsSchema,
   defaultModel: AgentDefaultModelSchema,
   resolvedModel: Type.Union([AgentResolvedModelSchema, Type.Null()])
 });

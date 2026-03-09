@@ -23,8 +23,7 @@ export type AgentContextToolName = Static<typeof AgentContextToolNameSchema>;
 
 export const AgentRunStatusSchema = Type.Union([
   Type.Literal("idle"),
-  Type.Literal("running"),
-  Type.Literal("waiting_permission")
+  Type.Literal("running")
 ]);
 export type AgentRunStatus = Static<typeof AgentRunStatusSchema>;
 
@@ -40,10 +39,8 @@ export const AgentContextItemStatusSchema = Type.Union([
   Type.Literal("streaming"),
   Type.Literal("queued"),
   Type.Literal("running"),
-  Type.Literal("awaiting_permission"),
   Type.Literal("completed"),
   Type.Literal("failed"),
-  Type.Literal("denied"),
   Type.Literal("cancelled")
 ]);
 export type AgentContextItemStatus = Static<typeof AgentContextItemStatusSchema>;
@@ -71,7 +68,6 @@ export const AgentToolOutputSchema = Type.Object({
   toolName: AgentContextToolNameSchema,
   toolCallId: Type.Optional(Type.String({ minLength: 1 })),
   args: Type.Optional(Type.Any()),
-  approved: Type.Optional(Type.Boolean()),
   text: Type.Optional(Type.String()),
   textTruncated: Type.Optional(Type.Boolean()),
   textArtifactPath: Type.Optional(Type.String({ minLength: 1 })),
@@ -146,7 +142,6 @@ export const AgentSessionRunStateSchema = Type.Object({
   status: AgentRunStatusSchema,
   activeRunId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
   activeAssistantItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
-  waitingToolItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
   lastResponseTotalTokens: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
   // 通用运行态提示文本;空字符串表示无提示。
   runNoticeText: Type.String(),
@@ -247,12 +242,3 @@ export const AgentContextItemsQuerySchema = Type.Object(
 );
 export type AgentContextItemsQuery = Static<typeof AgentContextItemsQuerySchema>;
 
-export const AgentPermissionDecisionSchema = Type.Union([Type.Literal("approve"), Type.Literal("deny")]);
-export type AgentPermissionDecision = Static<typeof AgentPermissionDecisionSchema>;
-
-export const AgentToolPermissionRequestSchema = Type.Object({
-  workspaceId: Type.String({ minLength: 1 }),
-  toolItemId: Type.Number({ minimum: 1 }),
-  decision: AgentPermissionDecisionSchema
-});
-export type AgentToolPermissionRequest = Static<typeof AgentToolPermissionRequestSchema>;

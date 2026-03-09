@@ -90,7 +90,6 @@ import type {
   AgentSessionRunState,
   AgentControlResult,
   AgentCancelSessionRequest,
-  AgentToolPermissionRequest,
   AgentProvidersSettingsView,
   AgentGlobalPromptSettings,
   AgentMcpSettings,
@@ -979,18 +978,6 @@ export async function compactAgentSession(sessionId: string, body: AgentCompactS
 export async function clearAgentSession(sessionId: string, body: AgentClearSessionRequest) {
   try {
     const res = await client.post<AgentControlResult>(`/agent/sessions/${sessionId}/clear`, body);
-    return res.data;
-  } catch (err) {
-    throw toApiError(err);
-  }
-}
-
-export async function decideAgentToolPermission(sessionId: string, body: AgentToolPermissionRequest) {
-  try {
-    const res = await client.post<{ runId: string; decision: "approve" | "deny" }>(
-      `/agent/sessions/${sessionId}/tool-permission`,
-      body
-    );
     return res.data;
   } catch (err) {
     throw toApiError(err);

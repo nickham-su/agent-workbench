@@ -457,15 +457,26 @@ export async function runReadTool(params: {
     const end = Math.min(items.length, start + effectiveLimit);
     const sliced = items.slice(start, end);
     const truncated = end < items.length;
+    const offsetOutOfRange = items.length < offset && !(items.length === 0 && offset === 1);
     let body = sliced.join("\n");
-    if (truncated) {
-      body += `\n\n(Showing ${sliced.length} of ${items.length} entries. Use offset=${offset + sliced.length} to continue.)`;
+    const actualStart = sliced.length > 0 ? offset : undefined;
+    const actualEnd = sliced.length > 0 ? offset + sliced.length - 1 : undefined;
+    if (offsetOutOfRange) {
+      body = `(End of directory - total ${items.length} entries. Requested offset=${offset} exceeds directory length. No more entries to read. Do not call read again for this directory unless the directory contents change.)`;
+    } else if (truncated) {
+      body += `\n\n(Showing ${sliced.length} of ${items.length} entries. To continue reading this same directory, use exactly offset=${offset + sliced.length}. Do not guess the next offset.)`;
     } else {
-      body += `\n\n(${items.length} entries)`;
+      body += `\n\n(End of directory - total ${items.length} entries. No more entries to read.)`;
     }
     return {
       summary: `读取目录 ${safePath}`,
-      content: body
+      content: body,
+      actualStart,
+      actualEnd,
+      totalEntries: items.length,
+      nextOffset: !offsetOutOfRange && truncated ? offset + sliced.length : undefined,
+      eof: offsetOutOfRange || !truncated,
+      offsetOutOfRange
     };
   }
 
@@ -571,29 +582,34 @@ export async function runReadTool(params: {
     await handle.close();
   }
 
-  if (lines < offset && !(lines === 0 && offset === 1)) {
-    throw new Error(`offset ${offset} is out of range for this file (${lines} lines)`);
-  }
-
   const content = raw.map((line, index) => `${index + offset}: ${line}`);
   let body = content.join("\n");
   const totalLines = lines;
+  const offsetOutOfRange = lines < offset && !(lines === 0 && offset === 1);
   const lastReadLine = raw.length > 0 ? offset + raw.length - 1 : 0;
   const nextOffset = raw.length > 0 ? lastReadLine + 1 : offset;
   let suffix = "";
-  if (raw.length === 0) {
-    suffix = `(End of file - total ${totalLines} lines)`;
+  if (offsetOutOfRange) {
+    suffix = `(End of file - total ${totalLines} lines. Requested offset=${offset} exceeds file length. No more content to read. Do not call read again for this file unless the file changes.)`;
+  } else if (raw.length === 0) {
+    suffix = `(End of file - total ${totalLines} lines. No more content to read.)`;
   } else if (truncatedByBytes) {
-    suffix = `(Output capped at ${MAX_BYTES_LABEL}. Showing lines ${offset}-${lastReadLine}. Use offset=${nextOffset} to continue.)`;
+    suffix = `(Output capped at ${MAX_BYTES_LABEL}. Showing lines ${offset}-${lastReadLine}. To continue reading this same file, use exactly offset=${nextOffset}. Do not guess the next offset.)`;
   } else if (hasMoreLines) {
-    suffix = `(Showing lines ${offset}-${lastReadLine} of ${totalLines}. Use offset=${nextOffset} to continue.)`;
+    suffix = `(Showing lines ${offset}-${lastReadLine} of ${totalLines}. To continue reading this same file, use exactly offset=${nextOffset}. Do not guess the next offset.)`;
   } else {
-    suffix = `(End of file - total ${totalLines} lines)`;
+    suffix = `(End of file - total ${totalLines} lines. No more content to read.)`;
   }
   body = body ? `${body}\n\n${suffix}` : suffix;
   return {
     summary: `读取文件 ${safePath}`,
-    content: body
+    content: body,
+    actualStart: raw.length > 0 ? offset : undefined,
+    actualEnd: raw.length > 0 ? lastReadLine : undefined,
+    totalLines,
+    nextOffset: !offsetOutOfRange && raw.length > 0 && (truncatedByBytes || hasMoreLines) ? nextOffset : undefined,
+    eof: offsetOutOfRange || (!truncatedByBytes && !hasMoreLines),
+    offsetOutOfRange
   };
 }
 

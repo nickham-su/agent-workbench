@@ -9,17 +9,29 @@
   >
     <a-tab-pane v-for="tab in tabs" :key="tab.key">
       <template #tab>
-        <span class="editor-tab-label px-1.5 inline-flex items-center">
-          <a-tooltip :title="tab.path || tab.title" placement="top" :mouseEnterDelay="0.8" :mouseLeaveDelay="0.1" :autoAdjustOverflow="false">
-            <span class="truncate max-w-[220px]">{{ tab.title }}</span>
-          </a-tooltip>
-          <span v-if="tab.kind === 'file' && tab.dirty && !tab.saving" class="ml-1 text-[10px] text-[color:var(--warning-color)]">●</span>
-          <CloseOutlined
-            class="cursor-pointer text-[color:var(--text-tertiary)] hover:text-[color:var(--text-secondary)] !ml-1 !mr-0 text-xs"
-            @mousedown.stop.prevent
-            @click.stop.prevent="requestCloseTab(tab.key)"
-          />
-        </span>
+        <a-dropdown :trigger="['contextmenu']">
+          <span class="editor-tab-label px-1.5 inline-flex items-center" @contextmenu.prevent.stop>
+            <a-tooltip :title="tab.path || tab.title" placement="top" :mouseEnterDelay="0.8" :mouseLeaveDelay="0.1" :autoAdjustOverflow="false">
+              <span class="truncate max-w-[220px]">{{ tab.title }}</span>
+            </a-tooltip>
+            <span v-if="tab.kind === 'file' && tab.dirty && !tab.saving" class="ml-1 text-[10px] text-[color:var(--warning-color)]">●</span>
+            <CloseOutlined
+              class="cursor-pointer text-[color:var(--text-tertiary)] hover:text-[color:var(--text-secondary)] !ml-1 !mr-0 text-xs"
+              @mousedown.stop.prevent
+              @click.stop.prevent="requestCloseTab(tab.key)"
+            />
+          </span>
+          <template #overlay>
+            <a-menu @click="onContextMenuClick(tab.key, $event)">
+              <a-menu-item key="closeOthers" :disabled="tabs.length <= 1">
+                {{ t("files.actions.closeOthers") }}
+              </a-menu-item>
+              <a-menu-item key="closeAll" :disabled="tabs.length === 0">
+                {{ t("files.actions.closeAll") }}
+              </a-menu-item>
+            </a-menu>
+          </template>
+        </a-dropdown>
       </template>
     </a-tab-pane>
   </a-tabs>
@@ -27,16 +39,30 @@
 
 <script setup lang="ts">
 import { CloseOutlined } from "@ant-design/icons-vue";
+import { useI18n } from "vue-i18n";
 
 const props = defineProps<{
   tabs: Array<{ key: string; title: string; path?: string; kind: "file" | "preview" | "diff"; dirty?: boolean; saving?: boolean }>;
   activeTabKey: string;
   onActiveTabUpdate: (key: string) => void;
   requestCloseTab: (key: string) => void;
+  requestCloseOtherTabs: (key: string) => void;
+  requestCloseAllTabs: () => void;
 }>();
+
+const { t } = useI18n();
 
 function onUpdateActiveKey(key: string | number) {
   props.onActiveTabUpdate(String(key));
+}
+
+function onContextMenuClick(tabKey: string, info: { key?: string | number }) {
+  const key = String(info?.key || "");
+  if (key === "closeOthers") {
+    props.requestCloseOtherTabs(tabKey);
+    return;
+  }
+  if (key === "closeAll") props.requestCloseAllTabs();
 }
 </script>
 

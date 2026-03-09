@@ -38,12 +38,7 @@ test("tool 文本过长且 artifact 不可写时降级为 completed + artifact u
     const result = await (runner as any).executeTool({
       profile: {
         agent: {
-          tools: ["read"],
-          permissions: {
-            allowRead: true,
-            allowWrite: true,
-            allowBash: true
-          }
+          tools: ["read"]
         }
       },
       run: {
@@ -87,6 +82,135 @@ test("tool 文本过长且 artifact 不可写时降级为 completed + artifact u
   });
 });
 
+test("read offset 越界时应 completed 且不输出误导性的请求 range", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    await fs.writeFile(path.join(workspacePath, "small.txt"), "alpha\nbeta\n", "utf8");
+
+    const updates: Array<{ status?: string; output?: unknown }> = [];
+    const apiClient = {
+      async updateContextItem(input: { status?: string; output?: unknown }) {
+        updates.push({ status: input.status, output: input.output });
+        return { id: 1 };
+      },
+      async updateRunState() {
+        return;
+      }
+    };
+
+    const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+    const result = await (runner as any).executeTool({
+      profile: {
+        agent: {
+          tools: ["read"]
+        }
+      },
+      run: {
+        workspaceId: "ws_test",
+        sessionId: "ses_test",
+        runId: "run_test",
+        workspacePath
+      },
+      tool: {
+        itemId: 124,
+        status: "queued",
+        toolName: "read",
+        toolCallId: "call_read_2",
+        args: {
+          filePath: "small.txt",
+          offset: 5,
+          limit: 20
+        }
+      },
+      signal: new AbortController().signal
+    });
+
+    assert.equal(result.paused, false);
+    assert.equal(updates.some((item) => item.status === "failed"), false);
+
+    let completed: { status?: string; output?: unknown } | null = null;
+    for (let i = updates.length - 1; i >= 0; i -= 1) {
+      const item = updates[i];
+      if (item?.status === "completed") {
+        completed = item;
+        break;
+      }
+    }
+    assert.ok(completed, "should have completed update");
+
+    const output = (completed.output || {}) as Record<string, unknown>;
+    const text = String(output.text || "");
+    assert.equal(String(output.error || ""), "");
+    assert.equal(text.includes("tool: read"), true);
+    assert.equal(text.includes("status: completed"), true);
+    assert.equal(text.includes("End of file - total 2 lines. Requested offset=5 exceeds file length. No more content to read. Do not call read again for this file unless the file changes."), true);
+    assert.equal(text.includes("range: 5-24"), false);
+    assert.equal(text.includes("range: 5"), false);
+  });
+});
+
+test("read 目录 offset 越界时应 completed 且不输出误导性的请求 range", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    await fs.mkdir(path.join(workspacePath, "nested"), { recursive: true });
+    await fs.writeFile(path.join(workspacePath, "nested", "a.txt"), "a", "utf8");
+    await fs.writeFile(path.join(workspacePath, "nested", "b.txt"), "b", "utf8");
+
+    const updates: Array<{ status?: string; output?: unknown }> = [];
+    const apiClient = {
+      async updateContextItem(input: { status?: string; output?: unknown }) {
+        updates.push({ status: input.status, output: input.output });
+        return { id: 1 };
+      },
+      async updateRunState() {
+        return;
+      }
+    };
+
+    const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+    const result = await (runner as any).executeTool({
+      profile: {
+        agent: {
+          tools: ["read"]
+        }
+      },
+      run: {
+        workspaceId: "ws_test",
+        sessionId: "ses_test",
+        runId: "run_test",
+        workspacePath
+      },
+      tool: {
+        itemId: 125,
+        status: "queued",
+        toolName: "read",
+        toolCallId: "call_read_3",
+        args: {
+          filePath: "nested",
+          offset: 5,
+          limit: 20
+        }
+      },
+      signal: new AbortController().signal
+    });
+
+    assert.equal(result.paused, false);
+    assert.equal(updates.some((item) => item.status === "failed"), false);
+
+    let completed: { status?: string; output?: unknown } | null = null;
+    for (let i = updates.length - 1; i >= 0; i -= 1) {
+      const item = updates[i];
+      if (item?.status === "completed") {
+        completed = item;
+        break;
+      }
+    }
+    assert.ok(completed, "should have completed update");
+    const text = String(((completed.output || {}) as Record<string, unknown>).text || "");
+    assert.equal(text.includes("End of directory - total 2 entries. Requested offset=5 exceeds directory length. No more entries to read. Do not call read again for this directory unless the directory contents change."), true);
+    assert.equal(text.includes("range: 5-24"), false);
+    assert.equal(text.includes("range: 5"), false);
+  });
+});
+
 test("bash workdir 不存在时应提示 bash.workdir not found", async () => {
   await withTempWorkspace(async (workspacePath) => {
     const updates: Array<{ status?: string; output?: unknown }> = [];
@@ -104,12 +228,7 @@ test("bash workdir 不存在时应提示 bash.workdir not found", async () => {
     const result = await (runner as any).executeTool({
       profile: {
         agent: {
-          tools: ["bash"],
-          permissions: {
-            allowRead: true,
-            allowWrite: true,
-            allowBash: true
-          }
+          tools: ["bash"]
         }
       },
       run: {
@@ -167,12 +286,7 @@ test("bash workdir 为文件时应提示 bash.workdir must be a directory", asyn
     const result = await (runner as any).executeTool({
       profile: {
         agent: {
-          tools: ["bash"],
-          permissions: {
-            allowRead: true,
-            allowWrite: true,
-            allowBash: true
-          }
+          tools: ["bash"]
         }
       },
       run: {
@@ -231,12 +345,7 @@ test("bash 未传 workdir 且 workspace 根目录不存在时应提示 bash.cwd 
     const result = await (runner as any).executeTool({
       profile: {
         agent: {
-          tools: ["bash"],
-          permissions: {
-            allowRead: true,
-            allowWrite: true,
-            allowBash: true
-          }
+          tools: ["bash"]
         }
       },
       run: {
@@ -293,12 +402,7 @@ test("bash workdir 某级为文件导致 ENOTDIR 时应提示 must be a director
     const result = await (runner as any).executeTool({
       profile: {
         agent: {
-          tools: ["bash"],
-          permissions: {
-            allowRead: true,
-            allowWrite: true,
-            allowBash: true
-          }
+          tools: ["bash"]
         }
       },
       run: {

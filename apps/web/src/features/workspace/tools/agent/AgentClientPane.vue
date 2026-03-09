@@ -251,6 +251,7 @@
               :expanded="isTextMessageExpanded(item.id)"
               :max-height-px="100"
               :tone="item.tone"
+              :class="bashTextClass(item.status)"
               @toggle="(expanded) => onToggleTextMessageExpanded(item.id, expanded)"
               @request-measure="(messageId) => onRequestVirtualMeasure(messageId)"
               @clamp-change="(clamped) => onTextMessageClampChange(item.id, clamped)"
@@ -281,27 +282,6 @@
               :class="[item.tone === 'error' ? 'text-red-500' : '']"
             >
               {{ item.text }}
-            </div>
-
-            <div
-              v-if="item.role === 'tool' && item.status === 'awaiting_permission'"
-              class="pt-2 flex items-center gap-1"
-            >
-              <a-button
-                size="small"
-                :loading="actionLoading === 'approve' && actionTargetId === item.id"
-                @click="onToolPermission(item.id, 'approve')"
-              >
-                {{ t("agent.client.approve") }}
-              </a-button>
-              <a-button
-                size="small"
-                danger
-                :loading="actionLoading === 'deny' && actionTargetId === item.id"
-                @click="onToolPermission(item.id, 'deny')"
-              >
-                {{ t("agent.client.deny") }}
-              </a-button>
             </div>
           </div>
         </div>
@@ -433,7 +413,6 @@ import {
   cancelAgentSession,
   clearAgentSession,
   compactAgentSession,
-  decideAgentToolPermission,
   forkAgentSession,
   getAgentContextItem,
   getAgentContextItems,
@@ -555,6 +534,7 @@ const emit = defineEmits<{
   "open-subtask": [sessionId: string];
   "open-parent": [sessionId: string];
   "choose-session": [];
+  "session-title-sync-needed": [sessionId: string];
 }>();
 
 const { t } = useI18n();
@@ -606,12 +586,12 @@ const FOLLOW_BOTTOM_LOCK_TIMEOUT_MS = 1400;
 // 仅用于判断用户是否在主动向上滚动(一旦向上滚,立刻取消吸底,避免被自动 scrollToBottom 抢回去)。
 let lastKnownScrollTop = 0;
 
-const actionLoading = ref<"cancel" | "fork" | "revert" | "approve" | "deny" | null>(null);
+const actionLoading = ref<"cancel" | "fork" | "revert" | null>(null);
 const actionTargetId = ref<number | null>(null);
 let contextRefreshTimer: number | null = null;
 
 let settlePollRemaining = 0;
-const terminalStatuses = new Set<AgentContextItemRecord["status"]>(["completed", "failed", "denied", "cancelled"]);
+const terminalStatuses = new Set<AgentContextItemRecord["status"]>(["completed", "failed", "cancelled"]);
 const isSubtaskSession = computed(() => props.sessionKind === "subtask");
 let runElapsedTimer: number | null = null;
 
@@ -902,7 +882,7 @@ const latestUserMessageCreatedAt = computed(() => {
 
 const currentRunElapsedText = computed(() => {
   const status = runState.value.status;
-  if (status !== "running" && status !== "waiting_permission") return "";
+  if (status !== "running") return "";
   const startedAt = latestUserMessageCreatedAt.value;
   if (!(startedAt > 0)) return "";
   return formatElapsedDuration(nowTickMs.value - startedAt);
@@ -967,7 +947,7 @@ const displayItems = computed<DisplayItem[]>(() => {
       const argsText = formatToolArgs(item.output.args);
       const callText = `${item.output.toolName}(${argsText})`;
       // 文本型工具消息默认不展示 [completed],仅在失败/拒绝/取消等异常状态时展示状态。
-      const showStatus = item.status === "failed" || item.status === "denied" || item.status === "cancelled";
+      const showStatus = item.status === "failed" || item.status === "cancelled";
       const statusText = showStatus ? `[${item.status}]` : "";
       const headText = statusText ? `${callText} ${statusText}` : callText;
       const toolCallId = typeof item.output.toolCallId === "string" && item.output.toolCallId.trim()
@@ -996,7 +976,7 @@ const displayItems = computed<DisplayItem[]>(() => {
             status: item.status,
             toolName: item.output.toolName,
             ...(toolCallId ? { toolCallId } : {}),
-            tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
+            tone: item.status === "failed" ? "error" : "normal"
           };
         }
         return {
@@ -1011,7 +991,7 @@ const displayItems = computed<DisplayItem[]>(() => {
           ...(toolCallId ? { toolCallId } : {}),
           ...(errorText ? { toolError: errorText } : {}),
           ...(applyPatch ? { applyPatch } : {}),
-          tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
+          tone: item.status === "failed" ? "error" : "normal"
         };
       }
       if (item.output.toolName === "todolist") {
@@ -1031,7 +1011,7 @@ const displayItems = computed<DisplayItem[]>(() => {
             status: item.status,
             toolName: item.output.toolName,
             ...(toolCallId ? { toolCallId } : {}),
-            tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
+            tone: item.status === "failed" ? "error" : "normal"
           };
         }
         return {
@@ -1046,7 +1026,7 @@ const displayItems = computed<DisplayItem[]>(() => {
           ...(toolCallId ? { toolCallId } : {}),
           ...(errorText ? { toolError: errorText } : {}),
           todoList,
-          tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
+          tone: item.status === "failed" ? "error" : "normal"
         };
       }
       if (item.output.toolName === "write") {
@@ -1066,7 +1046,7 @@ const displayItems = computed<DisplayItem[]>(() => {
             status: item.status,
             toolName: item.output.toolName,
             ...(toolCallId ? { toolCallId } : {}),
-            tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
+            tone: item.status === "failed" ? "error" : "normal"
           };
         }
         return {
@@ -1081,7 +1061,7 @@ const displayItems = computed<DisplayItem[]>(() => {
           ...(toolCallId ? { toolCallId } : {}),
           ...(errorText ? { toolError: errorText } : {}),
           writeResult,
-          tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
+          tone: item.status === "failed" ? "error" : "normal"
         };
       }
       if (item.output.toolName === "subtask") {
@@ -1108,7 +1088,7 @@ const displayItems = computed<DisplayItem[]>(() => {
           ...(mode ? { subtaskMode: mode } : {}),
           ...(agentId ? { subtaskAgentId: agentId } : {}),
           ...(agentName ? { subtaskAgentName: agentName } : {}),
-          tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
+            tone: item.status === "failed" ? "error" : "normal"
         };
       }
       let line = headText;
@@ -1126,7 +1106,7 @@ const displayItems = computed<DisplayItem[]>(() => {
         toolName: item.output.toolName,
         ...(toolCallId ? { toolCallId } : {}),
         ...(subtaskSessionId ? { subtaskSessionId } : {}),
-        tone: item.status === "failed" || item.status === "denied" ? "error" : "normal"
+        tone: item.status === "failed" ? "error" : "normal"
       };
     }
     if (item.kind === "system" && item.output.type === "system_text") {
@@ -1375,8 +1355,6 @@ function subtaskStatusIcon(status: AgentContextItemRecord["status"]) {
   if (status === "completed") return CheckCircleOutlined;
   if (status === "failed") return ExclamationCircleOutlined;
   if (status === "cancelled") return CloseCircleOutlined;
-  if (status === "denied") return MinusCircleOutlined;
-  if (status === "awaiting_permission") return QuestionCircleOutlined;
   if (status === "queued") return ClockCircleOutlined;
   if (status === "running" || status === "streaming") return LoadingOutlined;
   return QuestionCircleOutlined;
@@ -1390,8 +1368,6 @@ function subtaskStatusIconClass(status: AgentContextItemRecord["status"]) {
   if (status === "completed") return "text-emerald-500";
   if (status === "failed") return "text-red-500";
   if (status === "cancelled") return "text-[color:var(--text-tertiary)]";
-  if (status === "denied") return "text-red-500";
-  if (status === "awaiting_permission") return "text-amber-500";
   if (status === "queued") return "text-[color:var(--text-tertiary)]";
   if (status === "running" || status === "streaming") return "text-blue-500";
   return "text-[color:var(--text-tertiary)]";
@@ -1411,6 +1387,11 @@ function bashStatusIconClass(status: AgentContextItemRecord["status"]) {
   if (status === "failed") return "text-red-500";
   if (status === "running" || status === "streaming") return "text-blue-500";
   return "text-[color:var(--text-tertiary)]";
+}
+
+function bashTextClass(status: AgentContextItemRecord["status"]) {
+  if (status === "running" || status === "streaming") return "!text-blue-500";
+  return "";
 }
 
 function truncateText(input: string, maxLen: number) {
@@ -2271,25 +2252,6 @@ function onRevertToMessage(itemId: number) {
   });
 }
 
-async function onToolPermission(itemId: number, decision: "approve" | "deny") {
-  actionLoading.value = decision;
-  actionTargetId.value = itemId;
-  try {
-    await decideAgentToolPermission(props.sessionId, {
-      workspaceId: props.workspaceId,
-      toolItemId: itemId,
-      decision
-    });
-    statusStore.bumpPollHint(props.sessionId, { immediate: true, warmup: true });
-    await refreshAll(false);
-  } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err));
-  } finally {
-    actionLoading.value = null;
-    actionTargetId.value = null;
-  }
-}
-
 async function onSend() {
   if (isSubtaskSession.value) return;
   if (!hasAvailableAgents.value) {
@@ -2334,6 +2296,7 @@ async function onSend() {
       });
     }
     draft.value = "";
+    emit("session-title-sync-needed", targetSessionId);
 
     // 发送消息后应进入 follow-bottom 模式,便于用户继续查看运行中的最新输出。
     stickToBottom.value = true;
@@ -2413,7 +2376,7 @@ watch(
     if (!sessionId || !active || !props.sessionReady) return;
     const prevStatus = prev?.[2];
     const statusChanged = status !== prevStatus;
-    if (status === "running" || status === "waiting_permission") {
+    if (status === "running") {
       void refreshAll(false, false, prevStatus ?? null);
       return;
     }
@@ -2431,7 +2394,7 @@ watch(
       clearRunElapsedTimer();
       return;
     }
-    if ((status === "running" || status === "waiting_permission") && startedAt > 0) {
+    if (status === "running" && startedAt > 0) {
       nowTickMs.value = Date.now();
       ensureRunElapsedTimer();
       return;

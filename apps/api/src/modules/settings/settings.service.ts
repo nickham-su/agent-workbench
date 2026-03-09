@@ -260,14 +260,6 @@ function normalizeProviderModelOptions(raw: unknown, providerNpm: AgentProviderN
   return out;
 }
 
-function defaultAgentPermissions() {
-  return {
-    allowRead: true,
-    allowWrite: true,
-    allowBash: true
-  };
-}
-
 function normalizeRuntimeTimeoutMsFromStored(raw: unknown) {
   const n = typeof raw === "number" ? raw : Number(raw);
   if (!Number.isFinite(n)) return 0;
@@ -851,12 +843,6 @@ function getAgentSettingsStored(ctx: AppContext) {
       ids.add(id);
       const name = typeof agent.name === "string" && agent.name.trim() ? agent.name.trim() : id;
       const prompt = typeof agent.prompt === "string" ? agent.prompt : "";
-      const permissionsRaw = (agent.permissions ?? {}) as Record<string, unknown>;
-      const permissions = {
-        allowRead: typeof permissionsRaw.allowRead === "boolean" ? permissionsRaw.allowRead : true,
-        allowWrite: typeof permissionsRaw.allowWrite === "boolean" ? permissionsRaw.allowWrite : true,
-        allowBash: typeof permissionsRaw.allowBash === "boolean" ? permissionsRaw.allowBash : true
-      };
       const modelRefRaw = (agent.defaultModel ?? null) as { providerId?: unknown; modelId?: unknown } | null;
       const modelProviderId = typeof modelRefRaw?.providerId === "string" ? modelRefRaw.providerId.trim() : "";
       const modelId = typeof modelRefRaw?.modelId === "string" ? modelRefRaw.modelId.trim() : "";
@@ -868,7 +854,6 @@ function getAgentSettingsStored(ctx: AppContext) {
         globalPromptIds: normalizeAgentGlobalPromptIds(agent.globalPromptIds, globalPromptIds),
         tools: normalizeAgentTools(agent.tools),
         mcpServers: normalizeAgentMcpServers(agent.mcpServers, mcpServerIds),
-        permissions,
         defaultModel: modelProviderId && modelId ? { providerId: modelProviderId, modelId } : null
       };
     })
@@ -1281,13 +1266,6 @@ export function updateAgentSettings(ctx: AppContext, logger: FastifyBaseLogger, 
     const tools = normalizeAgentTools(agent.tools);
     const globalPromptIds = normalizeAgentGlobalPromptIds(agent.globalPromptIds, availableGlobalPromptIds);
     const mcpServers = normalizeAgentMcpServers(agent.mcpServers, availableMcpIds);
-    const permissionsRaw = (agent.permissions ?? {}) as Record<string, unknown>;
-    const fallbackPermissions = defaultAgentPermissions();
-    const permissions = {
-      allowRead: typeof permissionsRaw.allowRead === "boolean" ? permissionsRaw.allowRead : fallbackPermissions.allowRead,
-      allowWrite: typeof permissionsRaw.allowWrite === "boolean" ? permissionsRaw.allowWrite : fallbackPermissions.allowWrite,
-      allowBash: typeof permissionsRaw.allowBash === "boolean" ? permissionsRaw.allowBash : fallbackPermissions.allowBash
-    };
     const modelRaw = (agent.defaultModel ?? null) as { providerId?: unknown; modelId?: unknown } | null;
     const providerId = typeof modelRaw?.providerId === "string" ? modelRaw.providerId.trim() : "";
     const modelId = typeof modelRaw?.modelId === "string" ? modelRaw.modelId.trim() : "";
@@ -1300,7 +1278,6 @@ export function updateAgentSettings(ctx: AppContext, logger: FastifyBaseLogger, 
       globalPromptIds,
       tools,
       mcpServers,
-      permissions,
       defaultModel
     };
   });

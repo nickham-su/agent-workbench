@@ -296,7 +296,7 @@ export default {
       reachedTop: "Reached the beginning",
       contextBoundary: "Context boundary",
       inputPlaceholderIdle: "Type a message, Enter to send, Shift+Enter for newline, Tab to switch agent",
-      inputPlaceholderRunning: "Running, Shift+Enter for newline, Esc to cancel current run",
+      inputPlaceholderRunning: "Running, Esc to cancel current run",
       inputPlaceholderNoAgent: "Create an agent before sending messages",
       noAgentHint: "No available agent, please create one first",
       goCreateAgent: "Create agent",
@@ -325,7 +325,7 @@ export default {
       todoListGoal: "Goal",
       todoListEmpty: "Todo list is empty",
       applyPatchCardTitle: "Patch changes",
-      applyPatchPreview: "Pending approval preview",
+      applyPatchPreview: "Patch preview",
       applyPatchApplied: "Applied",
       applyPatchFileCount: "Files",
       applyPatchLineStats: "Line changes",
@@ -341,8 +341,6 @@ export default {
       revertConfirmTitleAssistant: "Revert to this assistant message?",
       revertConfirmContentAssistant: "This will revert to this assistant message and keep it in the timeline. Messages after this point will become hidden from current timeline.",
       reverted: "Reverted to selected message",
-      approve: "Approve",
-      deny: "Deny",
       roles: {
         user: "You",
         assistant: "Assistant",
@@ -557,6 +555,18 @@ export default {
       title: "Close unsaved file?",
       content: "This file has unsaved changes. Close anyway?",
       ok: "Close",
+      cancel: "Cancel"
+    },
+    closeOthersConfirm: {
+      title: "Close other tabs?",
+      content: "There are {count} unsaved files in the other tabs. Close the other tabs anyway?",
+      ok: "Close others",
+      cancel: "Cancel"
+    },
+    closeAllConfirm: {
+      title: "Close all tabs?",
+      content: "There are {count} unsaved files in the current tabs. Close all tabs anyway?",
+      ok: "Close all",
       cancel: "Cancel"
     },
     conflict: {
@@ -896,7 +906,7 @@ export default {
       saved: "Saved"
     },
     agentProfiles: {
-      description: "Configure AI agents, default agent, tool permissions, and default model.",
+      description: "Configure AI agents, default agent, allowed tools, and default model.",
       saving: "Saving...",
       empty: "No agents yet. Add one to start.",
       actions: {
@@ -910,7 +920,6 @@ export default {
         mcpServers: "MCP Servers",
         globalPrompts: "Prompt library",
         summary: "Summary",
-        permissions: "Permissions",
         defaultModel: "Default model",
         useGlobalDefault: "Use global default model",
         customDefaultModel: "Use custom default model"
@@ -925,11 +934,6 @@ export default {
         archiveSearch: "Archive Search",
         archiveRead: "Archive Read",
         archiveTail: "Archive Tail"
-      },
-      permissions: {
-        allowRead: "Allow Read",
-        allowWrite: "Allow Write",
-        allowBash: "Allow Bash"
       },
       modal: {
         ok: "OK",

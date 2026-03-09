@@ -62,12 +62,13 @@
              :tool-id="toolId"
              :agent-options="agentOptions"
               @update:model-value="(value) => setSessionAgent(session.id, value)"
-              @forked="onSessionForked"
-             @open-subtask="onOpenSubtask"
-             @open-parent="(parentSessionId) => onOpenParent(session.id, parentSessionId)"
-             @choose-session="openChooseSessionModal(session.id)"
-           />
-         </div>
+               @forked="onSessionForked"
+              @open-subtask="onOpenSubtask"
+              @open-parent="(parentSessionId) => onOpenParent(session.id, parentSessionId)"
+              @session-title-sync-needed="requestSessionTitleSync"
+              @choose-session="openChooseSessionModal(session.id)"
+            />
+          </div>
       </a-tab-pane>
 
       <a-tab-pane key="__agent_add__">
@@ -185,6 +186,7 @@ const sessionsInitialized = ref(false);
 const serverSessionsLoaded = ref(false);
 
 const suppressTabNoPersist = ref(false);
+const pendingSessionTitleSyncUpdatedAt = reactive<Record<string, number>>({});
 const draftCreatePromises = new Map<string, Promise<string>>();
 
 const statusStore = createAgentSessionStatusStore();
@@ -480,8 +482,9 @@ function pruneOpenedSubtaskSessions() {
 }
 
 async function refreshSessions() {
-  if (loadingSessions.value) return;
+  if (loadingSessions.value) return false;
   loadingSessions.value = true;
+  let ok = false;
   try {
     const list = await listAgentSessions(props.workspaceId);
     serverSessions.value = [...list].sort((a, b) => b.updatedAt - a.updatedAt);
@@ -502,16 +505,27 @@ async function refreshSessions() {
       activeKey.value = effectiveActiveKey.value;
       persistActiveKey(effectiveActiveKey.value);
     }
+    ok = true;
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
     loadingSessions.value = false;
   }
+  return ok;
 }
 
 async function refreshAll() {
   await Promise.all([refreshAgents(), refreshSessions()]);
 }
+
+function requestSessionTitleSync(sessionId: string) {
+  const targetSessionId = String(sessionId || "").trim();
+  if (!targetSessionId) return;
+  const runState = statusStore.runStateOf(targetSessionId);
+  const updatedAt = typeof runState.updatedAt === "number" && Number.isFinite(runState.updatedAt) ? runState.updatedAt : 0;
+  pendingSessionTitleSyncUpdatedAt[targetSessionId] = updatedAt;
+}
+
 
 async function createOneSession() {
   if (creating.value) return;
@@ -589,6 +603,7 @@ async function ensureSessionCreated(sessionId: string) {
 
     // 新会话首条消息: draft pane 可能在发送期间被卸载,导致其 emit 的 poll hint 丢失。
     // 这里在创建成功后主动 bump 一次,确保新 pane 至少会做一次刷新+短轮询兜底。
+    requestSessionTitleSync(created.id);
     statusStore.bumpPollHint(created.id, { immediate: true, warmup: true });
     return created.id;
   })()
@@ -798,6 +813,9 @@ watch(
     for (const key of Object.keys(selectedAgentBySession)) {
       delete selectedAgentBySession[key];
     }
+    for (const key of Object.keys(pendingSessionTitleSyncUpdatedAt)) {
+      delete pendingSessionTitleSyncUpdatedAt[key];
+    }
     restorePersistedState();
     await refreshAll();
     suppressTabNoPersist.value = false;
@@ -836,6 +854,28 @@ watch(
       visibleSessionIds: visibleSessions.value.map((item) => item.id),
       sessionKinds: Object.fromEntries(serverSessions.value.map((item) => [item.id, item.kind])),
       ...(serverSessionsLoaded.value ? { registeredSessionIds: serverSessions.value.map((item) => item.id) } : {})
+    });
+  },
+  { immediate: true }
+);
+
+watch(
+  () => {
+    const sessionId = effectiveActiveKey.value;
+    const baselineUpdatedAt = sessionId ? (pendingSessionTitleSyncUpdatedAt[sessionId] ?? null) : null;
+    const runState = sessionId ? statusStore.runStateOf(sessionId) : null;
+    return [sessionId, baselineUpdatedAt, runState?.status ?? "", runState?.updatedAt ?? 0, loadingSessions.value] as const;
+  },
+  ([sessionId, baselineUpdatedAt, status, updatedAt, loading]) => {
+    if (!sessionId || baselineUpdatedAt == null || loading) return;
+    if (status !== "idle") return;
+    const nextUpdatedAt = typeof updatedAt === "number" && Number.isFinite(updatedAt) ? updatedAt : 0;
+    if (nextUpdatedAt <= baselineUpdatedAt) return;
+    const retryBaseline = pendingSessionTitleSyncUpdatedAt[sessionId];
+    delete pendingSessionTitleSyncUpdatedAt[sessionId];
+    void refreshSessions().then((ok) => {
+      if (ok) return;
+      pendingSessionTitleSyncUpdatedAt[sessionId] = retryBaseline ?? baselineUpdatedAt;
     });
   },
   { immediate: true }
