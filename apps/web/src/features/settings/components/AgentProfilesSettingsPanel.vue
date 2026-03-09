@@ -18,17 +18,31 @@
       {{ t("settings.agentProfiles.empty") }}
     </div>
 
-    <div v-else class="divide-y divide-[var(--border-color-secondary)] border border-[var(--border-color-secondary)] rounded">
+    <div
+      v-else
+      class="divide-y divide-[var(--border-color-secondary)] border border-[var(--border-color-secondary)] rounded"
+      @dragover.prevent
+    >
       <div
-        v-for="agent in agents"
+        v-for="(agent, index) in agents"
         :key="agent.id"
         class="group flex items-start justify-between gap-3 px-2 py-2 hover:bg-[var(--panel-bg-elevated)]"
+        :class="draggingAgentId === agent.id ? 'opacity-60' : ''"
+        draggable="true"
+        @dragstart="onDragStart(agent.id)"
+        @dragenter.prevent="onDragEnter(index)"
+        @dragend="onDragEnd"
+        @drop.prevent="onDrop(index)"
       >
         <div class="min-w-0 flex-1 space-y-1">
           <div class="flex items-center gap-2">
+            <span
+              class="cursor-move text-xs text-[color:var(--text-tertiary)] select-none"
+              :title="t('settings.agentProfiles.actions.dragSort')"
+            >⋮⋮</span>
             <div class="font-semibold text-xs truncate" :title="agent.name">{{ agent.name }}</div>
             <div class="text-xs text-[color:var(--text-tertiary)] truncate">{{ agent.id }}</div>
-            <a-tag v-if="isDefaultAgent(agent.id)" color="blue" class="!text-[10px] !leading-[16px] !px-1 !py-0">{{ t("common.default") }}</a-tag>
+            <a-tag color="default" class="!text-[10px] !leading-[16px] !px-1 !py-0">{{ scopeLabel(agent.scope) }}</a-tag>
           </div>
 
           <div class="text-[11px] text-[color:var(--text-tertiary)] truncate">
@@ -57,14 +71,13 @@
 
         <div class="shrink-0 flex items-center gap-1 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity">
           <a-button
-            v-if="!isDefaultAgent(agent.id)"
             size="small"
             type="text"
-            @click="setDefaultAgent(agent.id)"
-            :title="t('settings.agentProfiles.actions.setDefault')"
-            :aria-label="t('settings.agentProfiles.actions.setDefault')"
+            @click="moveAgent(agent.id, -1)"
+            :title="t('settings.agentProfiles.actions.moveUp')"
+            :aria-label="t('settings.agentProfiles.actions.moveUp')"
           >
-            {{ t("settings.agentProfiles.actions.setDefault") }}
+            ↑
           </a-button>
           <a-button
             size="small"
@@ -74,6 +87,15 @@
             :aria-label="t('settings.agentProfiles.actions.edit')"
           >
             <template #icon><EditOutlined /></template>
+          </a-button>
+          <a-button
+            size="small"
+            type="text"
+            @click="moveAgent(agent.id, 1)"
+            :title="t('settings.agentProfiles.actions.moveDown')"
+            :aria-label="t('settings.agentProfiles.actions.moveDown')"
+          >
+            ↓
           </a-button>
           <a-button
             size="small"
@@ -165,11 +187,15 @@
           />
         </a-form-item>
 
-        <a-form-item>
-          <a-checkbox v-model:checked="agentFormSetAsDefault">{{ t("settings.agentProfiles.agentForm.setAsDefault") }}</a-checkbox>
+        <a-form-item :label="t('settings.agentProfiles.fields.scope')" :required="true">
+          <a-select v-model:value="agentFormScope" :options="scopeOptions" />
         </a-form-item>
       </a-form>
     </a-modal>
+
+    <div v-if="agents.length > 1" class="text-xs text-[color:var(--text-tertiary)]">
+      {{ t("settings.agentProfiles.sortHelp") }}
+    </div>
   </div>
 </template>
 
@@ -179,6 +205,7 @@ import type {
   AgentGlobalPromptSettings,
   AgentMcpSettings,
   AgentProvidersSettingsView,
+  AgentScope,
   AgentSettings,
   AgentToolName,
   UpdateAgentSettingsRequest
@@ -194,6 +221,7 @@ import {
   getAgentSettings,
   updateAgentSettings
 } from "@/shared/api";
+import { persistAgentProfilesDraft } from "./agentProfilesPersist";
 
 const { t } = useI18n();
 
@@ -206,6 +234,8 @@ type EditingAgent = {
   tools: AgentToolName[];
   mcpServers: string[];
   defaultModel: AgentDefaultModel;
+  scope: AgentScope;
+  order: number;
 };
 
 const GLOBAL_DEFAULT_MODEL_PATH = "__global__";
@@ -242,7 +272,10 @@ const providersSettings = ref<AgentProvidersSettingsView | null>(null);
 const mcpSettings = ref<AgentMcpSettings | null>(null);
 const globalPromptSettings = ref<AgentGlobalPromptSettings | null>(null);
 const agents = ref<EditingAgent[]>([]);
-const selectedDefaultAgentId = ref<string | null>(null);
+const draggingAgentId = ref("");
+const dragOverIndex = ref<number | null>(null);
+const saveRevision = ref(0);
+const appliedRevision = ref(0);
 
 const agentModalOpen = ref(false);
 const agentModalMode = ref<"create" | "edit">("create");
@@ -254,7 +287,7 @@ const agentFormGlobalPromptIds = ref<string[]>([]);
 const agentFormTools = ref<AgentToolName[]>([...DEFAULT_TOOLS]);
 const agentFormMcpServers = ref<string[]>([]);
 const agentFormDefaultModelPath = ref<string[]>([GLOBAL_DEFAULT_MODEL_PATH]);
-const agentFormSetAsDefault = ref(false);
+const agentFormScope = ref<AgentScope>("both");
 
 const defaultModelCascaderOptions = computed(() => {
   const providers = providersSettings.value?.providers ?? [];
@@ -291,6 +324,12 @@ const globalPromptOptions = computed(() => {
     value: item.id
   }));
 });
+
+const scopeOptions = computed(() => [
+  { label: t("settings.agentProfiles.scope.user"), value: "user" },
+  { label: t("settings.agentProfiles.scope.subtask"), value: "subtask" },
+  { label: t("settings.agentProfiles.scope.both"), value: "both" }
+]);
 
 const agentPromptBytes = computed(() => new TextEncoder().encode(agentFormPrompt.value).length);
 
@@ -373,14 +412,13 @@ function mapFromSettings(
     name: agent.name,
     summary: agent.summary,
     prompt: agent.prompt,
-    globalPromptIds: normalizeGlobalPromptIds(agent.globalPromptIds),
-    tools: normalizeTools(agent.tools),
-    mcpServers: normalizeMcpServers(agent.mcpServers),
-    defaultModel: agent.defaultModel
-  }));
-
-  const candidate = settings.default?.agentId?.trim() || null;
-  selectedDefaultAgentId.value = candidate && agents.value.some((item) => item.id === candidate) ? candidate : null;
+      globalPromptIds: normalizeGlobalPromptIds(agent.globalPromptIds),
+      tools: normalizeTools(agent.tools),
+      mcpServers: normalizeMcpServers(agent.mcpServers),
+      defaultModel: agent.defaultModel,
+      scope: agent.scope,
+      order: agent.order
+    }));
 }
 
 function getProviderById(providerId: string) {
@@ -442,26 +480,26 @@ function globalPromptSummary(ids: string[]) {
   return labels.join(", ");
 }
 
-function isDefaultAgent(agentId: string) {
-  return selectedDefaultAgentId.value === agentId;
+function scopeLabel(scope: AgentScope) {
+  if (scope === "user") return t("settings.agentProfiles.scope.user");
+  if (scope === "subtask") return t("settings.agentProfiles.scope.subtask");
+  return t("settings.agentProfiles.scope.both");
 }
 
-function syncDefaultAgent() {
-  if (!selectedDefaultAgentId.value) return;
-  if (!agents.value.some((agent) => agent.id === selectedDefaultAgentId.value)) {
-    selectedDefaultAgentId.value = null;
-  }
+function markDirty() {
+  saveRevision.value += 1;
+  return saveRevision.value;
 }
 
 function toRequestBody() {
-  syncDefaultAgent();
   return {
-    default: selectedDefaultAgentId.value ? { agentId: selectedDefaultAgentId.value } : null,
     agents: agents.value.map((agent) => ({
       id: agent.id,
       name: agent.name.trim() || agent.id,
       summary: agent.summary.trim(),
       prompt: agent.prompt,
+      scope: agent.scope,
+      order: agent.order,
       globalPromptIds: normalizeGlobalPromptIds(agent.globalPromptIds),
       tools: normalizeTools(agent.tools),
       mcpServers: normalizeMcpServers(agent.mcpServers),
@@ -480,7 +518,7 @@ function openCreateAgent() {
   agentFormTools.value = [...DEFAULT_TOOLS];
   agentFormMcpServers.value = [];
   agentFormDefaultModelPath.value = [GLOBAL_DEFAULT_MODEL_PATH];
-  agentFormSetAsDefault.value = false;
+  agentFormScope.value = "both";
   agentModalOpen.value = true;
 }
 
@@ -498,8 +536,7 @@ function openEditAgent(agentId: string) {
   agentFormDefaultModelPath.value = target.defaultModel
     ? [target.defaultModel.providerId, target.defaultModel.modelId]
     : [GLOBAL_DEFAULT_MODEL_PATH];
-
-  agentFormSetAsDefault.value = isDefaultAgent(target.id);
+  agentFormScope.value = target.scope;
   agentModalOpen.value = true;
 }
 
@@ -514,7 +551,7 @@ function closeAgentModal() {
   agentFormTools.value = [...DEFAULT_TOOLS];
   agentFormMcpServers.value = [];
   agentFormDefaultModelPath.value = [GLOBAL_DEFAULT_MODEL_PATH];
-  agentFormSetAsDefault.value = false;
+  agentFormScope.value = "both";
 }
 
 function submitAgent() {
@@ -548,7 +585,9 @@ function submitAgent() {
     globalPromptIds: normalizeGlobalPromptIds(agentFormGlobalPromptIds.value),
     tools: normalizeTools(agentFormTools.value),
     mcpServers: normalizeMcpServers(agentFormMcpServers.value),
-    defaultModel
+    defaultModel,
+    scope: agentFormScope.value,
+    order: agentModalMode.value === "create" ? agents.value.length : 0
   };
 
   if (agentModalMode.value === "create") {
@@ -557,25 +596,69 @@ function submitAgent() {
       return;
     }
     agents.value.push(payload);
+    markDirty();
+    normalizeAgentOrder();
   } else {
     const idx = agents.value.findIndex((item) => item.id === id);
     if (idx < 0) return;
-    agents.value[idx] = payload;
-  }
-
-  if (agentFormSetAsDefault.value) {
-    selectedDefaultAgentId.value = id;
-  } else if (selectedDefaultAgentId.value === id && agentModalMode.value === "edit") {
-    selectedDefaultAgentId.value = null;
+    agents.value[idx] = { ...payload, order: agents.value[idx]?.order ?? idx };
+    markDirty();
   }
 
   closeAgentModal();
   void persist({ toast: true });
 }
 
-function setDefaultAgent(agentId: string) {
-  selectedDefaultAgentId.value = agentId;
+function normalizeAgentOrder() {
+  agents.value = agents.value.map((agent, index) => ({ ...agent, order: index }));
+}
+
+function moveAgent(agentId: string, offset: -1 | 1) {
+  const currentIndex = agents.value.findIndex((item) => item.id === agentId);
+  if (currentIndex < 0) return;
+  const nextIndex = currentIndex + offset;
+  if (nextIndex < 0 || nextIndex >= agents.value.length) return;
+  const next = [...agents.value];
+  const [moved] = next.splice(currentIndex, 1);
+  next.splice(nextIndex, 0, moved);
+  agents.value = next;
+  markDirty();
+  normalizeAgentOrder();
   void persist({ toast: false });
+}
+
+function onDragStart(agentId: string) {
+  draggingAgentId.value = agentId;
+}
+
+function onDragEnter(index: number) {
+  dragOverIndex.value = index;
+}
+
+function onDrop(index: number) {
+  const sourceId = draggingAgentId.value;
+  const fromIndex = agents.value.findIndex((item) => item.id === sourceId);
+  if (fromIndex < 0) {
+    onDragEnd();
+    return;
+  }
+  if (fromIndex === index) {
+    onDragEnd();
+    return;
+  }
+  const next = [...agents.value];
+  const [moved] = next.splice(fromIndex, 1);
+  next.splice(index, 0, moved);
+  agents.value = next;
+  markDirty();
+  normalizeAgentOrder();
+  onDragEnd();
+  void persist({ toast: false });
+}
+
+function onDragEnd() {
+  draggingAgentId.value = "";
+  dragOverIndex.value = null;
 }
 
 function confirmDeleteAgent(agentId: string) {
@@ -586,15 +669,14 @@ function confirmDeleteAgent(agentId: string) {
     content: t("settings.agentProfiles.deleteAgent.content", { name: target.name }),
     okText: t("settings.agentProfiles.deleteAgent.ok"),
     cancelText: t("settings.agentProfiles.deleteAgent.cancel"),
-    okType: "danger",
-    onOk: () => {
-      agents.value = agents.value.filter((item) => item.id !== agentId);
-      if (selectedDefaultAgentId.value === agentId) {
-        selectedDefaultAgentId.value = null;
-      }
-      void persist({ toast: true });
-    }
-  });
+     okType: "danger",
+     onOk: () => {
+       agents.value = agents.value.filter((item) => item.id !== agentId);
+       markDirty();
+       normalizeAgentOrder();
+       void persist({ toast: true });
+     }
+   });
 }
 
 async function refreshDraft() {
@@ -623,13 +705,21 @@ async function persist(params: { toast: boolean }) {
   saving.value = true;
   try {
     const body = toRequestBody();
-    const res = await updateAgentSettings(body);
-    mapFromSettings(
-      res,
-      providersSettings.value ?? { default: null, providers: [], updatedAt: 0 },
-      mcpSettings.value ?? { servers: [], updatedAt: 0 },
-      globalPromptSettings.value ?? { items: [], updatedAt: 0 }
-    );
+    await persistAgentProfilesDraft({
+      getRevision: () => saveRevision.value,
+      body,
+      update: updateAgentSettings,
+      applyIfLatest: (res, revision) => {
+        if (revision !== saveRevision.value || revision < appliedRevision.value) return;
+        appliedRevision.value = revision;
+        mapFromSettings(
+          res,
+          providersSettings.value ?? { default: null, providers: [], updatedAt: 0 },
+          mcpSettings.value ?? { servers: [], updatedAt: 0 },
+          globalPromptSettings.value ?? { items: [], updatedAt: 0 }
+        );
+      }
+    });
     if (params.toast) message.success(t("settings.agentProfiles.saved"));
   } catch (err) {
     // 自动保存失败时保留本地改动, 后续操作会再次触发 persist

@@ -297,8 +297,8 @@ export default {
       contextBoundary: "Context boundary",
       inputPlaceholderIdle: "Type a message, Enter to send, Shift+Enter for newline, Tab to switch agent",
       inputPlaceholderRunning: "Running, Esc to cancel current run",
-      inputPlaceholderNoAgent: "Create an agent before sending messages",
-      noAgentHint: "No available agent, please create one first",
+      inputPlaceholderNoAgent: "No agent is available for user sessions. Update scope in settings or add a new agent.",
+      noAgentHint: "No agent is available for user sessions. Update scope in settings or add a new agent.",
       goCreateAgent: "Create agent",
       chooseSession: "Choose session",
       chooseSessionTitle: "Choose a session to continue",
@@ -906,18 +906,22 @@ export default {
       saved: "Saved"
     },
     agentProfiles: {
-      description: "Configure AI agents, default agent, allowed tools, and default model.",
+      description: "Configure AI agents, scope, ordering, allowed tools, and default model.",
       saving: "Saving...",
       empty: "No agents yet. Add one to start.",
+      sortHelp: "Drag to reorder or use the arrow buttons. The first visible agent becomes the default for that surface.",
       actions: {
         addAgent: "Add agent",
         edit: "Edit",
         delete: "Delete",
-        setDefault: "Set default"
+        dragSort: "Drag to reorder",
+        moveUp: "Move up",
+        moveDown: "Move down"
       },
       fields: {
         tools: "Tools",
         mcpServers: "MCP Servers",
+        scope: "Scope",
         globalPrompts: "Prompt library",
         summary: "Summary",
         defaultModel: "Default model",
@@ -934,6 +938,11 @@ export default {
         archiveSearch: "Archive Search",
         archiveRead: "Archive Read",
         archiveTail: "Archive Tail"
+      },
+      scope: {
+        user: "User only",
+        subtask: "Subtask only",
+        both: "Shared by user and subtask"
       },
       modal: {
         ok: "OK",
@@ -960,8 +969,7 @@ export default {
         defaultProviderLabel: "Provider",
         defaultProviderPlaceholder: "Select a provider",
         defaultModelLabel: "Model",
-        defaultModelPlaceholder: "Select a model",
-        setAsDefault: "Set as default agent"
+        defaultModelPlaceholder: "Select a model"
       },
       deleteAgent: {
         title: "Delete agent?",

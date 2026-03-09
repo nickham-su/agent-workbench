@@ -77,6 +77,7 @@ import {
   getAgentRuntimeSettings,
   registerGlobalSystemPromptTextProvider,
   getAgentSettings,
+  listAvailableAgentsForSurface,
   resolveGlobalDefaultModelProfile,
   resolveExecutionProfile
 } from "../settings/settings.service.js";
@@ -1926,6 +1927,7 @@ export class AgentService {
     }
 
     const profile = resolveExecutionProfile(this.ctx, {
+      surface: "user",
       requestedAgentId: params.body.agentId
     });
 
@@ -2135,6 +2137,7 @@ export class AgentService {
       }
 
       const profile = resolveExecutionProfile(this.ctx, {
+        surface: "user",
         requestedAgentId: params.body.agentId
       });
 
@@ -2820,6 +2823,7 @@ export class AgentService {
     }
 
     const profile = resolveExecutionProfile(this.ctx, {
+      surface: "subtask",
       requestedAgentId: resolvedAgentId
     });
 
@@ -2978,6 +2982,7 @@ export class AgentService {
     }
 
     const profile = resolveExecutionProfile(this.ctx, {
+      surface: session.kind === "subtask" ? "subtask" : "user",
       agentIdFromRun: run.agentId,
       providerIdFromRun: run.providerId,
       modelIdFromRun: run.modelId
@@ -3388,6 +3393,7 @@ export class AgentService {
     }
 
     const profile = resolveExecutionProfile(this.ctx, {
+      surface: session.kind === "subtask" ? "subtask" : "user",
       agentIdFromRun: run.agentId,
       providerIdFromRun: run.providerId,
       modelIdFromRun: run.modelId
@@ -3635,7 +3641,7 @@ export class AgentService {
 
     const subtaskDescription = enabledToolNames.includes("subtask")
       ? buildSubtaskToolDescription(
-          getAgentSettings(this.ctx).agents.map((item) => ({
+          listAvailableAgentsForSurface(this.ctx, "subtask").map((item) => ({
             id: item.id,
             name: item.name,
             summary: item.summary

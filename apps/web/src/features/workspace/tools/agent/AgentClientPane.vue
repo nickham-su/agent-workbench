@@ -424,7 +424,6 @@ import { getInitialLocale } from "@/shared/i18n/locale";
 type AgentOption = {
   value: string;
   label: string;
-  isDefault?: boolean;
   resolvedModel?: {
     providerId: string;
     contextWindowTokens: number;
@@ -798,8 +797,6 @@ const sessionTitleText = computed(() => {
 });
 
 const fallbackAgentId = computed(() => {
-  const defaultOption = props.agentOptions.find((item) => item.isDefault);
-  if (defaultOption) return defaultOption.value;
   return props.agentOptions[0]?.value ?? "";
 });
 
@@ -2318,10 +2315,10 @@ async function onSend() {
 }
 
 watch(
-  () => [String(props.modelValue || ""), props.agentOptions.map((item) => `${item.value}:${item.isDefault ? "1" : "0"}`).join("|")],
+  () => [String(props.modelValue || ""), props.agentOptions.map((item) => item.value).join("|")],
   () => {
     if (!hasAvailableAgents.value) {
-      if (props.modelValue) {
+      if (props.modelValue != null) {
         emit("update:modelValue", null);
       }
       return;

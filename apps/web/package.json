@@ -6,7 +6,8 @@
     "dev": "vite",
     "build": "vue-tsc -p tsconfig.json --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "vue-tsc -p tsconfig.json --noEmit"
+    "typecheck": "vue-tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test src/features/settings/components/agentProfilesPersist.test.ts"
   },
   "dependencies": {
     "@agent-workbench/shared": "*",

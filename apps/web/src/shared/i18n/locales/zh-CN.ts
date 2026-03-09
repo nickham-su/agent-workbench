@@ -295,8 +295,8 @@ export default {
       contextBoundary: "上下文边界",
       inputPlaceholderIdle: "输入消息,Enter 发送,Shift+Enter 换行,Tab 切换 Agent",
       inputPlaceholderRunning: "运行中,Esc 取消当前运行",
-      inputPlaceholderNoAgent: "请先创建 Agent 后再发送消息",
-      noAgentHint: "当前没有可用 Agent,请先创建 Agent",
+      inputPlaceholderNoAgent: "当前没有可用于用户会话的 Agent,请前往设置页调整范围或新增 Agent",
+      noAgentHint: "当前没有可用于用户会话的 Agent,请前往设置页调整范围或新增 Agent",
       goCreateAgent: "前往创建",
       chooseSession: "选择会话",
       chooseSessionTitle: "选择要继续的会话",
@@ -904,18 +904,22 @@ export default {
       saved: "已保存"
     },
     agentProfiles: {
-      description: "配置 AI Agent 列表、默认 Agent、可用工具与默认模型。",
+      description: "配置 AI Agent 列表、可见范围、排序、可用工具与默认模型。",
       saving: "正在保存...",
       empty: "暂无 Agent，请先新增",
+      sortHelp: "拖拽或使用上下箭头调整顺序。当前场景默认使用过滤后排在第一位的 Agent。",
       actions: {
         addAgent: "新增 Agent",
         edit: "编辑",
         delete: "删除",
-        setDefault: "设为默认"
+        dragSort: "拖拽排序",
+        moveUp: "上移",
+        moveDown: "下移"
       },
       fields: {
         tools: "工具",
         mcpServers: "MCP Server",
+        scope: "可用范围",
         globalPrompts: "提示词库",
         summary: "简介",
         defaultModel: "默认模型",
@@ -932,6 +936,11 @@ export default {
         archiveSearch: "Archive Search",
         archiveRead: "Archive Read",
         archiveTail: "Archive Tail"
+      },
+      scope: {
+        user: "仅用户可选",
+        subtask: "仅子任务可选",
+        both: "用户与子任务通用"
       },
       modal: {
         ok: "确定",
@@ -958,8 +967,7 @@ export default {
         defaultProviderLabel: "Provider",
         defaultProviderPlaceholder: "请选择 Provider",
         defaultModelLabel: "模型",
-        defaultModelPlaceholder: "请选择模型",
-        setAsDefault: "设为默认 Agent"
+        defaultModelPlaceholder: "请选择模型"
       },
       deleteAgent: {
         title: "删除 Agent？",

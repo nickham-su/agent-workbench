@@ -308,9 +308,6 @@ async function configureAgentDefaults(app: FastifyInstance) {
     method: "PUT",
     url: "/api/settings/agent/agents",
     payload: {
-      default: {
-        agentId: "default"
-      },
       agents: [
         {
           id: "default",
@@ -319,13 +316,134 @@ async function configureAgentDefaults(app: FastifyInstance) {
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          defaultModel: null
+          defaultModel: null,
+          scope: "both",
+          order: 0
         }
       ]
     }
   });
   assert.equal(agentsRes.statusCode, 200, `configure agents failed: ${agentsRes.body}`);
 }
+
+
+
+test("agent settings 兼容缺省 scope/order 并按原顺序归一化", async () => {
+  const fixture = await createFixture();
+  const res = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      agents: [
+        {
+          id: "b",
+          name: "B",
+          summary: "",
+          prompt: "b",
+          tools: ["bash", "read"],
+          mcpServers: [],
+          defaultModel: null,
+          scope: "both",
+          order: 9
+        },
+        {
+          id: "a",
+          name: "A",
+          summary: "",
+          prompt: "a",
+          tools: ["bash", "read"],
+          mcpServers: [],
+          defaultModel: null,
+          scope: "user",
+          order: 3
+        }
+      ]
+    }
+  });
+  assert.equal(res.statusCode, 200, `update agent settings failed: ${res.body}`);
+
+  setSettingJson(fixture.db, "agent_agents_v1", {
+    agents: [
+      { id: "legacy-1", name: "Legacy 1", summary: "", prompt: "", tools: ["bash"], mcpServers: [], defaultModel: null },
+      { id: "legacy-2", name: "Legacy 2", summary: "", prompt: "", tools: ["read"], mcpServers: [], defaultModel: null }
+    ]
+  }, Date.now());
+
+  const getRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/agents" });
+  assert.equal(getRes.statusCode, 200, `get agent settings failed: ${getRes.body}`);
+  const body = getRes.json() as { agents: Array<{ id: string; scope: string; order: number }> };
+  assert.deepEqual(body.agents.map((item) => ({ id: item.id, scope: item.scope, order: item.order })), [
+    { id: "legacy-1", scope: "both", order: 0 },
+    { id: "legacy-2", scope: "both", order: 1 }
+  ]);
+});
+
+test("agent prompt-context 生成 subtask 描述时仅暴露 subtask/both agent", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      agents: [
+        { id: "user-only", name: "User Only", summary: "for user", prompt: "", tools: ["bash", "subtask"], mcpServers: [], defaultModel: null, scope: "user", order: 0 },
+        { id: "subtask-only", name: "Subtask Only", summary: "for subtask", prompt: "", tools: ["bash", "subtask"], mcpServers: [], defaultModel: null, scope: "subtask", order: 1 },
+        { id: "shared", name: "Shared", summary: "shared", prompt: "", tools: ["bash", "subtask"], mcpServers: [], defaultModel: null, scope: "both", order: 2 }
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `configure agents failed: ${agentsRes.body}`);
+
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: 1, agentId: "shared", providerId: "ppchat", uiLocale: "en-US", modelId: "gpt-5.2", status: "running", createdAt: Date.now()
+  });
+
+  const promptContext = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+  const subtaskTool = promptContext.tools.find((item) => item.name === "subtask");
+  assert.ok(subtaskTool, "subtask tool should exist");
+  const description = String((subtaskTool as { description?: string } | undefined)?.description || "");
+  assert.equal(description.includes("user-only"), false, "user-only agent should be hidden from subtask description");
+  assert.equal(description.includes("subtask-only"), true, "subtask-only agent should be visible");
+  assert.equal(description.includes("shared"), true, "shared agent should be visible");
+});
+
+test("agent scope 校验会拒绝错误场景的 agent 并在无可用 agent 时返回明确错误", async () => {
+  const fixture = await createFixture();
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      agents: [
+        { id: "subtask-only", name: "Subtask Only", summary: "", prompt: "", tools: ["bash", "read"], mcpServers: [], defaultModel: null, scope: "subtask", order: 0 }
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `configure agents failed: ${agentsRes.body}`);
+
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const wrongRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/messages`,
+    payload: { workspaceId: fixture.workspaceId, text: "hi", clientRequestId: "req_scope_wrong", agentId: "subtask-only" }
+  });
+  assert.equal(wrongRes.statusCode, 400, `wrong scope should fail: ${wrongRes.body}`);
+  assert.equal(wrongRes.json().code, "AGENT_SCOPE_NOT_ALLOWED");
+
+  const fallbackRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/messages`,
+    payload: { workspaceId: fixture.workspaceId, text: "hi", clientRequestId: "req_scope_none" }
+  });
+  assert.equal(fallbackRes.statusCode, 400, `no available user agent should fail: ${fallbackRes.body}`);
+  assert.equal(fallbackRes.json().code, "AGENT_NO_AVAILABLE_FOR_SURFACE");
+});
 
 test("GET /api/settings/agent/agents 返回每个 agent 的 resolvedModel", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
@@ -359,7 +477,6 @@ test("GET /api/settings/agent/agents 返回每个 agent 的 resolvedModel", asyn
     method: "PUT",
     url: "/api/settings/agent/agents",
     payload: {
-      default: { agentId: "default" },
       agents: [
         {
           id: "default",
@@ -368,7 +485,9 @@ test("GET /api/settings/agent/agents 返回每个 agent 的 resolvedModel", asyn
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          defaultModel: null
+          defaultModel: null,
+          scope: "both",
+          order: 0
         },
         {
           id: "custom",
@@ -377,7 +496,9 @@ test("GET /api/settings/agent/agents 返回每个 agent 的 resolvedModel", asyn
           prompt: "Use a custom model.",
           tools: ["bash", "read"],
           mcpServers: [],
-          defaultModel: { providerId: "agent_provider", modelId: "agent_model" }
+          defaultModel: { providerId: "agent_provider", modelId: "agent_model" },
+          scope: "both",
+          order: 1
         }
       ]
     }
@@ -1394,6 +1515,105 @@ test("agent runtime settings 可通过 execution-profile 下发", async () => {
   assert.equal(typeof profile.model?.contextWindowTokens, "number");
 });
 
+test("subtask session 的 execution-profile 按 subtask surface 校验", async () => {
+  const fixture = await createFixture();
+
+  const settingsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      agents: [
+        {
+          id: "subtask-agent",
+          name: "subtask-agent",
+          summary: "",
+          prompt: "You are a subtask specialist.",
+          tools: ["bash", "read"],
+          mcpServers: [],
+          defaultModel: null,
+          scope: "subtask",
+          order: 0
+        }
+      ]
+    }
+  });
+  assert.equal(settingsRes.statusCode, 200, `update agent settings failed: ${settingsRes.body}`);
+
+  const sessionRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions",
+    payload: { workspaceId: fixture.workspaceId, title: "subtask-profile", kind: "subtask" }
+  });
+  assert.equal(sessionRes.statusCode, 201, `create subtask session failed: ${sessionRes.body}`);
+  const session = sessionRes.json() as { id: string };
+
+  const createdAt = Date.now();
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "subtask-agent",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    uiLocale: null,
+    status: "running",
+    createdAt
+  });
+
+  const profileRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/execution-profile",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId }
+  });
+  assert.equal(profileRes.statusCode, 200, `get subtask execution profile failed: ${profileRes.body}`);
+  const profile = profileRes.json() as any;
+  assert.equal(profile.agent?.id, "subtask-agent");
+});
+
+test("run 创建后若 agent scope 改为不允许, execution-profile 会返回明确错误", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const sent = await sendMessage(fixture.app, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "hi",
+    clientRequestId: "req_scope_changed_after_run"
+  });
+
+  const updateRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          summary: "",
+          prompt: "You are a helpful coding assistant.",
+          tools: ["bash", "read", "write"],
+          mcpServers: [],
+          defaultModel: null,
+          scope: "subtask",
+          order: 0
+        }
+      ]
+    }
+  });
+  assert.equal(updateRes.statusCode, 200, `update agent settings failed: ${updateRes.body}`);
+
+  const profileRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/execution-profile",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId: sent.runId }
+  });
+  assert.equal(profileRes.statusCode, 400, `execution profile should reject changed scope: ${profileRes.body}`);
+  assert.equal(profileRes.json().code, "AGENT_SCOPE_NOT_ALLOWED");
+});
+
 test("agent prompt-context 根据 run uiLocale 注入语言与时间运行时约束", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
@@ -1587,7 +1807,6 @@ test("agent prompt-context 对 subtask 会话隐藏 subtask 工具", async () =>
     method: "PUT",
     url: "/api/settings/agent/agents",
     payload: {
-      default: { agentId: "default" },
       agents: [
         {
           id: "default",
@@ -1596,7 +1815,9 @@ test("agent prompt-context 对 subtask 会话隐藏 subtask 工具", async () =>
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write", "subtask"],
           mcpServers: [],
-          defaultModel: null
+          defaultModel: null,
+          scope: "both",
+          order: 0
         }
       ]
     }
@@ -1649,7 +1870,6 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
     method: "PUT",
     url: "/api/settings/agent/agents",
     payload: {
-      default: { agentId: "default" },
       agents: [
         {
           id: "default",
@@ -1658,7 +1878,9 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write", "subtask"],
           mcpServers: [],
-          defaultModel: null
+          defaultModel: null,
+          scope: "both",
+          order: 0
         }
       ]
     }
@@ -1935,7 +2157,6 @@ test("agent prompt-context 对 primary 会话保留 subtask 工具", async () =>
     method: "PUT",
     url: "/api/settings/agent/agents",
     payload: {
-      default: { agentId: "default" },
       agents: [
         {
           id: "default",
@@ -1944,7 +2165,9 @@ test("agent prompt-context 对 primary 会话保留 subtask 工具", async () =>
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write", "subtask"],
           mcpServers: [],
-          defaultModel: null
+          defaultModel: null,
+          scope: "both",
+          order: 0
         }
       ]
     }
@@ -2568,9 +2791,6 @@ test("single-call model profile 始终使用全局默认模型", async () => {
     method: "PUT",
     url: "/api/settings/agent/agents",
     payload: {
-      default: {
-        agentId: "default"
-      },
       agents: [
         {
           id: "default",
@@ -2582,7 +2802,9 @@ test("single-call model profile 始终使用全局默认模型", async () => {
           defaultModel: {
             providerId: "agent_provider",
             modelId: "agent_model"
-          }
+          },
+          scope: "both",
+          order: 0
         }
       ]
     }
@@ -4601,7 +4823,6 @@ test("agent settings 兼容缺省 globalPromptIds", async () => {
     method: "PUT",
     url: "/api/settings/agent/agents",
     payload: {
-      default: { agentId: "default" },
       agents: [
         {
           id: "default",
@@ -4610,7 +4831,9 @@ test("agent settings 兼容缺省 globalPromptIds", async () => {
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          defaultModel: null
+          defaultModel: null,
+          scope: "both",
+          order: 0
         }
       ]
     }
@@ -4694,7 +4917,6 @@ test("agent prompt-context 全局提示词按列表顺序注入(方案A)", async
     method: "PUT",
     url: "/api/settings/agent/agents",
     payload: {
-      default: { agentId: "default" },
       agents: [
         {
           id: "default",
@@ -4704,7 +4926,9 @@ test("agent prompt-context 全局提示词按列表顺序注入(方案A)", async
           globalPromptIds: ["global_system_prompt", "gp_b", "gp_a"],
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          defaultModel: null
+          defaultModel: null,
+          scope: "both",
+          order: 0
         }
       ]
     }
@@ -4769,7 +4993,6 @@ test("agent prompt-context 同时存在 global/workspace/agent 时按既定顺�
     method: "PUT",
     url: "/api/settings/agent/agents",
     payload: {
-      default: { agentId: "default" },
       agents: [
         {
           id: "default",
@@ -4779,7 +5002,9 @@ test("agent prompt-context 同时存在 global/workspace/agent 时按既定顺�
           globalPromptIds: ["gp_b", "gp_a"],
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          defaultModel: null
+          defaultModel: null,
+          scope: "both",
+          order: 0
         }
       ]
     }
@@ -4933,7 +5158,6 @@ test("agent prompt-context 在 agent prompt 为空且无 workspace/global 时仅
     method: "PUT",
     url: "/api/settings/agent/agents",
     payload: {
-      default: { agentId: "default" },
       agents: [
         {
           id: "default",
@@ -4942,7 +5166,9 @@ test("agent prompt-context 在 agent prompt 为空且无 workspace/global 时仅
           prompt: "",
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          defaultModel: null
+          defaultModel: null,
+          scope: "both",
+          order: 0
         }
       ]
     }
