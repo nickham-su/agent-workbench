@@ -12,6 +12,7 @@ import {
   AgentRevertSessionRequestSchema,
   AgentSendMessageRequestSchema,
   AgentSendMessageResponseSchema,
+  type AgentSendMessageRequest,
   AgentClearSessionRequestSchema,
   AgentCompactSessionRequestSchema,
   AgentCompactSessionResponseSchema,
@@ -19,6 +20,8 @@ import {
   AgentSessionRunStateSchema,
   AgentUiLocaleSchema,
   AgentProviderNpmSchema,
+  PluginToolCanonicalNameSchema,
+  PluginRuntimeSnapshotsResponseSchema,
   ErrorResponseSchema
 } from "@agent-workbench/shared";
 import type { AgentRuntimePort } from "./agent.runtime-port.js";
@@ -37,7 +40,8 @@ const AgentBuiltinToolNameSchema = Type.Union([
 ]);
 const AgentDynamicToolNameSchema = Type.Union([
   AgentBuiltinToolNameSchema,
-  Type.String({ pattern: "^mcp_[A-Za-z0-9_-]+_[A-Za-z0-9_-]+$" })
+  Type.String({ pattern: "^mcp_[A-Za-z0-9_-]+_[A-Za-z0-9_-]+$" }),
+  PluginToolCanonicalNameSchema
 ]);
 
 function assertInternalToken(req: FastifyRequest, service: AgentService) {
@@ -226,7 +230,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
     },
     async (req, reply) => {
       const p = req.params as { sessionId: string };
-      const body = req.body as { workspaceId: string; text: string; clientRequestId: string; agentId?: string; uiLocale?: "zh-CN" | "en-US" };
+      const body = req.body as AgentSendMessageRequest;
       const result = await params.service.sendMessage({ sessionId: p.sessionId, body });
       if (!result.deduplicated) {
         const workspace = params.service.getWorkspace(body.workspaceId);
@@ -373,6 +377,24 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
     async (req) => {
       assertInternalToken(req, params.service);
       return params.service.getAgentMcpSettingsFromWorker();
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/plugins/runtime-snapshots",
+    {
+      schema: {
+        tags: ["agent"],
+        body: Type.Object({}),
+        response: {
+          200: PluginRuntimeSnapshotsResponseSchema,
+          401: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      return params.service.getPluginRuntimeSnapshotsFromWorker();
     }
   );
 
@@ -824,12 +846,13 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
             agent: Type.Object({
               id: Type.String({ minLength: 1 }),
               name: Type.String({ minLength: 1 }),
-              summary: Type.String({ maxLength: 160 }),
-              prompt: Type.String(),
-              tools: Type.Array(AgentBuiltinToolNameSchema),
-              mcpServers: Type.Array(Type.String({ minLength: 1 })),
-              defaultModel: Type.Union([
-                Type.Object({ providerId: Type.String({ minLength: 1 }), modelId: Type.String({ minLength: 1 }) }),
+               summary: Type.String({ maxLength: 160 }),
+               prompt: Type.String(),
+               tools: Type.Array(AgentBuiltinToolNameSchema),
+               pluginTools: Type.Array(PluginToolCanonicalNameSchema),
+               mcpServers: Type.Array(Type.String({ minLength: 1 })),
+               defaultModel: Type.Union([
+                 Type.Object({ providerId: Type.String({ minLength: 1 }), modelId: Type.String({ minLength: 1 }) }),
                 Type.Null()
               ])
             }),

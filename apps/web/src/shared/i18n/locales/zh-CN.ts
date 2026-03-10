@@ -631,6 +631,7 @@ export default {
       agentGlobalPrompts: "提示词库",
       agentMcp: "MCP",
       agentProfiles: "角色配置",
+      agentPlugins: "插件",
       agentRuntime: "运行参数",
       security: "安全"
     },
@@ -919,6 +920,7 @@ export default {
       fields: {
         tools: "工具",
         mcpServers: "MCP Server",
+        pluginTools: "插件工具",
         scope: "可用范围",
         globalPrompts: "提示词库",
         summary: "简介",
@@ -962,6 +964,8 @@ export default {
         globalPromptsPlaceholder: "选择提示词库条目",
         globalPromptsHelp: "支持多选，注入顺序按提示词库列表顺序。",
         mcpServersPlaceholder: "选择可用的 MCP Server",
+        pluginToolsPlaceholder: "选择已启用插件提供的工具",
+        pluginToolsHelp: "仅可选择全局已启用且状态为 Ready 的插件工具。",
         defaultModelCascaderPlaceholder: "选择默认模型策略",
         defaultModelModeLabel: "默认模型策略",
         defaultProviderLabel: "Provider",
@@ -1050,6 +1054,28 @@ export default {
         duplicateServerId: "Server ID 已存在"
       },
       saved: "已保存"
+    },
+    agentPlugins: {
+      description: "管理本地发现的工具插件，查看诊断信息，并控制全局启用状态。",
+      saving: "正在保存...",
+      empty: "暂未发现插件。请将插件包放到 <dataDir>/plugins 下。",
+      saved: "已保存",
+      actions: {
+        refresh: "刷新"
+      },
+      fields: {
+        enabled: "已启用",
+        entry: "入口"
+      },
+      state: {
+        ready: "可用",
+        disabled: "已禁用",
+        invalidManifest: "Manifest 无效",
+        incompatible: "版本不兼容",
+        configInvalid: "配置无效",
+        loadFailed: "加载失败",
+        manifestMismatch: "Manifest 不匹配"
+      }
     },
     security: {
       description: "查看主密钥来源与 SSH 主机信任状态，并提供必要的重置入口。",

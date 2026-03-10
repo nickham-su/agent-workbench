@@ -114,6 +114,14 @@ export function workspaceAgentArtifactsRoot(workspacePath: string) {
   return path.join(workspaceAgentInternalRoot(workspacePath), "artifacts");
 }
 
+export function pluginsRoot(dataDir: string) {
+  return path.join(dataDir, "plugins");
+}
+
+export function pluginRoot(dataDir: string, pluginId: string) {
+  return path.join(pluginsRoot(dataDir), pluginId);
+}
+
 export function agentWorkerPidPath(dataDir: string) {
   return path.join(dataDir, "agent-worker.pid");
 }

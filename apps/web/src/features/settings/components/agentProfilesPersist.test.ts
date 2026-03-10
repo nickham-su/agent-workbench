@@ -13,6 +13,7 @@ function makeSettings(updatedAt: number): AgentSettings {
         prompt: "",
         globalPromptIds: [],
         tools: ["bash"],
+        pluginTools: [],
         mcpServers: [],
         defaultModel: null,
         scope: "both",
@@ -58,4 +59,34 @@ test("persistAgentProfilesDraft 仅在 revision 仍匹配时应用返回结果",
   await first;
 
   assert.equal(appliedUpdatedAt, 2);
+});
+
+
+test("agent profiles draft preserves existing pluginTools when editing unrelated fields", async () => {
+  const settings = makeSettings(3);
+  settings.agents[0].pluginTools = ["plugin_debug-tools_echo_inspect"];
+
+  const body = {
+    agents: [
+      {
+        ...settings.agents[0],
+        name: "Updated Agent"
+      }
+    ],
+    updatedAt: settings.updatedAt
+  };
+
+  let applied: AgentSettings | null = null;
+  await persistAgentProfilesDraft({
+    getRevision: () => 1,
+    body,
+    update: async () => body,
+    applyIfLatest: (res) => {
+      applied = res;
+    }
+  });
+
+  if (applied === null) throw new Error("expected applied settings");
+  const appliedSettings: AgentSettings = applied;
+  assert.deepEqual(appliedSettings.agents[0]?.pluginTools, ["plugin_debug-tools_echo_inspect"]);
 });

@@ -3,7 +3,7 @@ import { loadRootEnvLocalIntoProcessEnv } from "./config/dotenv.js";
 import { detectAppVersion } from "./config/version.js";
 import { detectRepoRoot } from "./config/repoRoot.js";
 import { ensureDir } from "./infra/fs/fs.js";
-import { reposRoot, workspacesRoot } from "./infra/fs/paths.js";
+import { pluginsRoot, reposRoot, workspacesRoot } from "./infra/fs/paths.js";
 import { openDb } from "./infra/db/db.js";
 import { createApp } from "./app/createApp.js";
 import { ensureNodePtyReady } from "./infra/pty/ensureNodePty.js";
@@ -17,6 +17,7 @@ const repoRoot = await detectRepoRoot();
 await ensureDir(env.dataDir);
 await ensureDir(reposRoot(env.dataDir));
 await ensureDir(workspacesRoot(env.dataDir));
+await ensureDir(pluginsRoot(env.dataDir));
 await ensureNodePtyReady();
 
 const credentialMasterKey = await loadCredentialMasterKey({ dataDir: env.dataDir, processEnv: process.env });

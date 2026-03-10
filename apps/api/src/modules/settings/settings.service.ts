@@ -12,6 +12,7 @@ import type {
   AgentProvidersSettings,
   AgentResolvedModel,
   AgentProvidersSettingsView,
+  AgentPluginTools,
   AgentSettings,
   AgentSettingsView,
   AgentToolName,
@@ -48,6 +49,7 @@ const AGENT_PROVIDERS_SETTINGS_KEY = "agent_providers_v1";
 const AGENT_SETTINGS_KEY = "agent_agents_v1";
 const AGENT_MCP_SETTINGS_KEY = "agent_mcp_v1";
 const AGENT_GLOBAL_PROMPTS_SETTINGS_KEY = "agent_global_prompts_v1";
+export const AGENT_PLUGINS_SETTINGS_KEY = "agent_plugins_v1";
 const AGENT_RUNTIME_SETTINGS_KEY = "agent_runtime_v1";
 export const AGENT_GLOBAL_SYSTEM_PROMPT_ID = "global_system_prompt";
 export const AGENT_GLOBAL_SYSTEM_PROMPT_TITLE = "Global System Prompt";
@@ -502,6 +504,20 @@ function normalizeAgentTools(raw: unknown): AgentToolName[] {
   return out.length > 0 ? out : ["bash", "read", "write", "apply_patch", "todolist", "subtask", "archive_search", "archive_read"];
 }
 
+function normalizeAgentPluginTools(raw: unknown): AgentPluginTools {
+  if (!Array.isArray(raw)) return [];
+  const out: AgentPluginTools = [];
+  const seen = new Set<string>();
+  const pattern = /^plugin_[a-z0-9][a-z0-9-]{0,63}_[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+  for (const item of raw) {
+    const value = typeof item === "string" ? item.trim() : "";
+    if (!value || seen.has(value) || !pattern.test(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
+}
+
 function normalizeServerId(raw: unknown) {
   const value = typeof raw === "string" ? raw.trim() : "";
   if (!value) return "";
@@ -898,6 +914,7 @@ function getAgentSettingsStored(ctx: AppContext) {
         globalPromptIds: normalizeAgentGlobalPromptIds(agent.globalPromptIds, globalPromptIds),
         tools: normalizeAgentTools(agent.tools),
         mcpServers: normalizeAgentMcpServers(agent.mcpServers, mcpServerIds),
+        pluginTools: normalizeAgentPluginTools(agent.pluginTools),
         defaultModel: modelProviderId && modelId ? { providerId: modelProviderId, modelId } : null
       };
     })
@@ -1306,6 +1323,7 @@ export function updateAgentSettings(ctx: AppContext, logger: FastifyBaseLogger, 
     const summary = normalizeAgentSummaryForUpdate(agent.summary);
     const tools = normalizeAgentTools(agent.tools);
     const globalPromptIds = normalizeAgentGlobalPromptIds(agent.globalPromptIds, availableGlobalPromptIds);
+    const pluginTools = normalizeAgentPluginTools(agent.pluginTools);
     const mcpServers = normalizeAgentMcpServers(agent.mcpServers, availableMcpIds);
     const modelRaw = (agent.defaultModel ?? null) as { providerId?: unknown; modelId?: unknown } | null;
     const providerId = typeof modelRaw?.providerId === "string" ? modelRaw.providerId.trim() : "";
@@ -1322,6 +1340,7 @@ export function updateAgentSettings(ctx: AppContext, logger: FastifyBaseLogger, 
       order,
       globalPromptIds,
       tools,
+      pluginTools,
       mcpServers,
       defaultModel
     };

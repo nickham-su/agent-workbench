@@ -82,6 +82,7 @@ import {
   resolveExecutionProfile
 } from "../settings/settings.service.js";
 import { projectToolCallInputForPrompt } from "./prompt/tool-projectors/index.js";
+import { listPluginRuntimeSnapshots } from "../plugins/plugin.service.js";
 
 export type AgentQueuedRun = {
   workspaceId: string;
@@ -3105,6 +3106,7 @@ export class AgentService {
         modelId: profile.model.id
       },
       agent: profile.agent,
+      // profile.agent 现已包含 pluginTools，共享契约扩展不改变当前执行逻辑。
       provider: profile.provider,
       model: profile.model,
       runtime
@@ -3139,6 +3141,10 @@ export class AgentService {
 
   getAgentMcpSettingsFromWorker() {
     return getAgentMcpSettings(this.ctx);
+  }
+
+  async getPluginRuntimeSnapshotsFromWorker() {
+    return listPluginRuntimeSnapshots(this.ctx);
   }
 
   async compactContextFromWorker(params: {

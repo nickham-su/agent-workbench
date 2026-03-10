@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "debug-tools",
+  "name": "Debug Tools",
+  "version": "0.1.0",
+  "description": "最小样板插件，用于验证本地工具插件闭环。",
+  "entry": "dist/index.js",
+  "engines": {
+    "agentWorkbench": "^0.1.0"
+  },
+  "capabilities": ["tools"],
+  "tools": [
+    {
+      "name": "echo_inspect",
+      "description": "回显输入并输出稳定文本，可选返回 raw。",
+      "riskLevel": "low",
+      "outputMode": "text+raw"
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

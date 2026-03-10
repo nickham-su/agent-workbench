@@ -143,6 +143,7 @@ async function configureAgentDefaults(baseUrl: string, llmBaseURL: string) {
           summary: "",
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write"],
+          pluginTools: [],
           mcpServers: [],
           defaultModel: null
         }

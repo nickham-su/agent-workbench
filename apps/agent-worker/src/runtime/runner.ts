@@ -5,15 +5,17 @@ import { jsonSchema, streamText, tool } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call";
-import { runBashCommand } from "./bash.js";
-import { getBashToolAppendix } from "./bashTools.js";
 import { AgentApiClient, ApiConflictError, type ExecutionProfile, type PromptContext } from "./apiClient.js";
 import type { AgentUiLocale } from "@agent-workbench/shared";
-import { runReadTool, runWriteTool } from "./fileTools.js";
 import { McpManager } from "./mcpManager.js";
-import { applyPreparedPatch, prepareApplyPatchTool, type ApplyPatchPrepared } from "./applyPatch.js";
-import { parseTodolistArgs, toTodolistResult } from "./todolist.js";
 import { buildRetryMessages, chunkStartsVisibleOutput, shouldRetryAfterPartialText } from "./modelRetry.js";
+import { PluginRuntimeManager } from "./plugins/runtimeManager.js";
+import { ToolRegistry } from "./tools/registry.js";
+import { BuiltinToolProvider } from "./tools/providers/builtin.js";
+import { LocalPluginToolProvider } from "./tools/providers/local-plugin.js";
+import { McpToolProvider } from "./tools/providers/mcp.js";
+import type { ToolExecutionContext } from "./tools/types.js";
+import { isMcpToolName, isPluginToolName } from "./tools/types.js";
 
 function nowMs() {
   return Date.now();
@@ -308,7 +310,18 @@ function buildToolSuccessText(params: {
     });
   }
 
-  if (isMcpTool(params.toolName)) {
+  if (isMcpToolName(params.toolName)) {
+    const body = typeof resultObj?.text === "string"
+      ? resultObj.text
+      : stringifyResult(resultObj?.raw ?? params.result);
+    return buildToolText({
+      toolName: params.toolName,
+      status: params.status,
+      body
+    });
+  }
+
+  if (isPluginToolName(params.toolName)) {
     const body = typeof resultObj?.text === "string"
       ? resultObj.text
       : stringifyResult(resultObj?.raw ?? params.result);
@@ -467,6 +480,16 @@ type ToolCall = {
 type ToolExecutionBatch = {
   mode: "parallel" | "serial";
   tools: PendingTool[];
+};
+
+const EMPTY_PROMPT_CONTEXT: PromptContext = {
+  headItemId: null,
+  system: "",
+  messages: [],
+  tools: [],
+  pendingTools: [],
+  lastResponseTotalTokens: null,
+  uiLocale: null
 };
 
 const RESERVED_MODEL_OPTION_KEYS = new Set([
@@ -630,53 +653,12 @@ function toolSignature(toolName: string, args: Record<string, unknown>) {
   return `${toolName}:${JSON.stringify(args)}`;
 }
 
-function isBuiltinTool(toolName: string) {
-  return (
-    toolName === "bash" ||
-    toolName === "read" ||
-    toolName === "write" ||
-    toolName === "apply_patch" ||
-    toolName === "todolist" ||
-    toolName === "archive_search" ||
-    toolName === "archive_read"
-  );
-}
-
 function isSubtaskTool(toolName: string) {
   return toolName === "subtask";
 }
 
 function isConcurrentExecutionTool(toolName: string) {
   return toolName === "bash" || toolName === "subtask";
-}
-
-function isMcpTool(toolName: string) {
-  return toolName.startsWith("mcp_");
-}
-
-function isToolEnabledForAgent(profile: ExecutionProfile, toolName: string) {
-  if (isBuiltinTool(toolName) || isSubtaskTool(toolName)) {
-    return profile.agent.tools.includes(
-      toolName as
-        | "bash"
-        | "read"
-        | "write"
-        | "apply_patch"
-        | "todolist"
-        | "subtask"
-        | "archive_search"
-        | "archive_read"
-    );
-  }
-  if (isMcpTool(toolName)) {
-    return true;
-  }
-  return false;
-}
-
-function toRecord(raw: unknown) {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  return raw as Record<string, unknown>;
 }
 
 function toNonNegativeInt(raw: unknown) {
@@ -743,71 +725,6 @@ async function readStreamTotalTokens(stream: unknown): Promise<number | null> {
   return null;
 }
 
-function requireNonEmptyStringArg(raw: unknown, fieldName: string) {
-  if (typeof raw !== "string") {
-    throw new Error(`${fieldName} must be a non-empty string`);
-  }
-  const value = raw.trim();
-  if (!value) {
-    throw new Error(`${fieldName} must be a non-empty string`);
-  }
-  return value;
-}
-
-function parseOptionalPositiveIntegerArg(raw: unknown, fieldName: string) {
-  if (raw === undefined || raw === null) return undefined;
-  if (typeof raw === "string" && raw.trim() === "") return undefined;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 1) {
-    throw new Error(`${fieldName} must be an integer >= 1`);
-  }
-  return parsed;
-}
-
-type ParsedSubtaskArgs = {
-  description: string;
-  prompt: string;
-  agentId: string;
-  session: {
-    mode: "new" | "existing" | "fork";
-    sessionId?: string;
-  };
-};
-
-function parseSubtaskArgs(raw: Record<string, unknown>): ParsedSubtaskArgs {
-  const description = requireNonEmptyStringArg(raw.description, "subtask.description");
-  if (description.length > 20) {
-    throw new Error("subtask.description must be <= 20 characters");
-  }
-  const prompt = requireNonEmptyStringArg(raw.prompt, "subtask.prompt");
-  const agentId = requireNonEmptyStringArg(raw.agentId, "subtask.agentId");
-  const sessionRaw = toRecord(raw.session);
-  const modeRaw = requireNonEmptyStringArg(sessionRaw.mode, "subtask.session.mode");
-  let mode: "new" | "existing" | "fork";
-  if (modeRaw === "new" || modeRaw === "existing" || modeRaw === "fork") {
-    mode = modeRaw;
-  } else {
-    throw new Error(`subtask.session.mode must be one of: new, existing, fork`);
-  }
-  const sessionId = String(sessionRaw.sessionId || "").trim();
-  if (mode === "existing" && !sessionId) {
-    throw new Error("subtask.session.sessionId is required when mode=existing");
-  }
-  if ((mode === "new" || mode === "fork") && sessionId) {
-    throw new Error(`subtask.session.sessionId is not allowed when mode=${mode}`);
-  }
-
-  return {
-    description,
-    prompt,
-    agentId,
-    session: {
-      mode,
-      ...(sessionId ? { sessionId } : {})
-    }
-  };
-}
-
 function buildToolExecutionBatches(tools: PendingTool[], parallelLimit = TOOL_PARALLEL_BATCH_LIMIT): ToolExecutionBatch[] {
   const batches: ToolExecutionBatch[] = [];
   const limit = Math.max(1, Math.floor(parallelLimit));
@@ -847,19 +764,13 @@ export function buildToolExecutionBatchesForTest(tools: PendingTool[], parallelL
   return buildToolExecutionBatches(tools, parallelLimit);
 }
 
-function toApplyPatchResult(prepared: ApplyPatchPrepared) {
-  return {
-    text: prepared.text,
-    summary: prepared.summary,
-    files: prepared.files
-  };
-}
-
 export class AgentRunner {
   private readonly queue: QueuedRun[] = [];
   private readonly queuedRunIds = new Set<string>();
   private readonly runningSessions = new Set<string>();
   private readonly controllers = new Map<string, AbortController>();
+  private readonly pluginRuntimeManager: PluginRuntimeManager;
+  private readonly toolRegistry: ToolRegistry;
   private activeCount = 0;
 
   constructor(
@@ -867,7 +778,14 @@ export class AgentRunner {
     private readonly mcpManager: McpManager,
     private readonly logger: Pick<Console, "info" | "warn" | "error">,
     private readonly concurrency: number
-  ) {}
+  ) {
+    this.pluginRuntimeManager = new PluginRuntimeManager(this.logger);
+    this.toolRegistry = new ToolRegistry([
+      new BuiltinToolProvider(),
+      new McpToolProvider(this.mcpManager),
+      new LocalPluginToolProvider(this.pluginRuntimeManager)
+    ]);
+  }
 
   enqueueRun(run: QueuedRun) {
     if (this.queuedRunIds.has(run.runId)) return;
@@ -921,6 +839,7 @@ export class AgentRunner {
     run: QueuedRun;
     tool: PendingTool;
     signal: AbortSignal;
+    availableToolNames?: ReadonlySet<string>;
   }) {
     const { profile, run, tool, signal } = params;
     if (signal.aborted) return { paused: false as const };
@@ -932,7 +851,18 @@ export class AgentRunner {
       args: tool.args
     };
 
-    if (!isToolEnabledForAgent(profile, tool.toolName)) {
+    const executionAvailableToolNames = params.availableToolNames ?? (() => {
+      const names = new Set<string>();
+      for (const name of profile.agent.tools) names.add(name);
+      for (const name of profile.agent.pluginTools) names.add(name);
+      return names;
+    })();
+    if (!(await this.toolRegistry.isToolEnabled(tool.toolName, {
+      profile,
+      promptContext: EMPTY_PROMPT_CONTEXT,
+      apiClient: this.apiClient,
+      availableToolNames: executionAvailableToolNames
+    }))) {
       const error = `tool is disabled for current agent: ${tool.toolName}`;
       await this.apiClient.updateContextItem({
         itemId: tool.itemId,
@@ -947,55 +877,6 @@ export class AgentRunner {
       return { paused: false as const };
     }
 
-    let applyPatchPrepared: ApplyPatchPrepared | null = null;
-    if (tool.toolName === "apply_patch") {
-      const patchText = requireNonEmptyStringArg(tool.args.patchText, "apply_patch.patchText");
-      try {
-        applyPatchPrepared = await prepareApplyPatchTool({
-          workspacePath: run.workspacePath,
-          patchText,
-          signal
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        const error = message.startsWith("apply_patch verification failed:")
-          ? message
-          : `apply_patch verification failed: ${message}`;
-        await this.apiClient.updateContextItem({
-          itemId: tool.itemId,
-          status: "failed",
-          output: {
-            ...outputBase,
-            text: buildToolErrorText({ toolName: tool.toolName, status: "failed", error }),
-            error
-          },
-          updatedAt: nowMs()
-        });
-        await writeItemLog({
-          logger: this.logger,
-          workspacePath: run.workspacePath,
-          kind: "tool",
-          itemId: tool.itemId,
-          payload: {
-            meta: {
-              workspaceId: run.workspaceId,
-              sessionId: run.sessionId,
-              runId: run.runId,
-              toolItemId: tool.itemId
-            },
-            request: {
-              toolName: tool.toolName,
-              toolCallId: tool.toolCallId,
-              args: tool.args
-            },
-            status: "failed",
-            error
-          }
-        });
-        return { paused: false as const };
-      }
-    }
-
     await this.apiClient.updateContextItem({
       itemId: tool.itemId,
       status: "running",
@@ -1006,234 +887,35 @@ export class AgentRunner {
       updatedAt: nowMs()
     });
 
-    let subtaskSessionId: string | undefined;
-    let subtaskResultText: string | undefined;
-
     try {
-      let result: unknown;
-      if (tool.toolName === "bash") {
-        const command = requireNonEmptyStringArg(tool.args.command, "bash.command");
-        // timeout 参数单位为秒。
-        const timeoutSeconds = parseOptionalPositiveIntegerArg(tool.args.timeout, "bash.timeout");
-        let cwd = run.workspacePath;
-        let workdirLabelForError: string | null = null;
-        if (tool.args.workdir !== undefined && tool.args.workdir !== null) {
-          if (typeof tool.args.workdir !== "string") {
-            throw new Error("bash.workdir must be a non-empty string");
-          }
-          const workdir = tool.args.workdir.trim();
-          if (!workdir) {
-            throw new Error("bash.workdir must be a non-empty string");
-          }
-          workdirLabelForError = workdir;
-          cwd = path.isAbsolute(workdir) ? workdir : path.resolve(run.workspacePath, workdir);
-        }
-
-        // 预检查 cwd,避免把 cwd 不存在误报为 spawn ENOENT。
-        // - 未传 workdir 时,默认 cwd 为 workspace 根目录。
-        // - 仅使用用户给出的 workdir 文本作为错误提示,避免泄露 workspace 绝对路径。
-        const isUserWorkdir = typeof workdirLabelForError === "string" && workdirLabelForError.length > 0;
-        const label = isUserWorkdir ? workdirLabelForError : "workspace root";
-        try {
-          const stat = await fs.stat(cwd);
-          if (!stat.isDirectory()) {
-            throw new Error(isUserWorkdir ? `bash.workdir must be a directory: ${label}` : `bash.cwd must be a directory: ${label}`);
-          }
-        } catch (err: any) {
-          const code = err && typeof err === "object" ? String(err.code || "") : "";
-          if (code === "ENOENT") {
-            throw new Error(isUserWorkdir ? `bash.workdir not found: ${label}` : `bash.cwd not found: ${label}`);
-          }
-          if (code === "ENOTDIR") {
-            throw new Error(isUserWorkdir ? `bash.workdir must be a directory: ${label}` : `bash.cwd must be a directory: ${label}`);
-          }
-          throw err;
-        }
-        const bash = await runBashCommand({
-          command,
-          cwd,
-          timeoutMs: Math.min(ENV_TIMEOUT_MS_MAX, (timeoutSeconds ?? 120) * 1000),
-          maxOutputBytes: 512 * 1024,
-          signal
-        });
-        result = {
-          command,
-          exitCode: bash.code,
-          timedOut: bash.timedOut,
-          outputLimitExceeded: bash.outputLimitExceeded,
-          stdout: bash.stdout,
-          stderr: bash.stderr
-        };
-      } else if (tool.toolName === "read") {
-        const filePath = requireNonEmptyStringArg(tool.args.filePath, "read.filePath");
-        const offset = parseOptionalPositiveIntegerArg(tool.args.offset, "read.offset");
-        const limit = parseOptionalPositiveIntegerArg(tool.args.limit, "read.limit");
-        result = await runReadTool({
-          workspacePath: run.workspacePath,
-          filePath,
-          offset,
-          limit,
-          signal
-        });
-      } else if (tool.toolName === "write") {
-        const filePath = requireNonEmptyStringArg(tool.args.filePath, "write.filePath");
-        if (typeof tool.args.content !== "string") {
-          throw new Error("write.content must be a string");
-        }
-        const content = tool.args.content;
-        result = await runWriteTool({
-          workspacePath: run.workspacePath,
-          filePath,
-          content,
-          signal
-        });
-      } else if (tool.toolName === "apply_patch") {
-        if (!applyPatchPrepared) {
-          throw new Error("apply_patch verification failed: prepared patch is missing");
-        }
-        await applyPreparedPatch({
-          workspacePath: run.workspacePath,
-          prepared: applyPatchPrepared,
-          signal
-        });
-        result = toApplyPatchResult(applyPatchPrepared);
-      } else if (tool.toolName === "todolist") {
-        const parsed = parseTodolistArgs(tool.args);
-        result = toTodolistResult(parsed);
-      } else if (tool.toolName === "archive_search") {
-        const query = requireNonEmptyStringArg(tool.args.query, "archive_search.query");
-        const beforePos = parseOptionalPositiveIntegerArg(tool.args.beforePos, "archive_search.beforePos");
-        if (beforePos != null && beforePos < 2) {
-          throw new Error("archive_search.beforePos must be an integer >= 2");
-        }
-        const maxHits = parseOptionalPositiveIntegerArg(tool.args.maxHits, "archive_search.maxHits");
-        if (maxHits != null && maxHits > 100) {
-          throw new Error("archive_search.maxHits must be an integer between 1 and 100");
-        }
-        const maxChars = parseOptionalPositiveIntegerArg(tool.args.maxChars, "archive_search.maxChars");
-        if (maxChars != null && (maxChars < 1000 || maxChars > 10000)) {
-          throw new Error("archive_search.maxChars must be an integer between 1000 and 10000");
-        }
-        if (tool.args.snippet != null && typeof tool.args.snippet !== "boolean") {
-          throw new Error("archive_search.snippet must be a boolean");
-        }
-        const snippet = tool.args.snippet === true;
-        const regex = tool.args.regex === true;
-        result = await this.apiClient.archiveSearch({
-          workspaceId: run.workspaceId,
-          sessionId: run.sessionId,
-          query,
-          beforePos,
-          maxHits,
-          maxChars,
-          snippet,
-          regex
-        });
-      } else if (tool.toolName === "archive_read") {
-        const beforePos = parseOptionalPositiveIntegerArg(tool.args.beforePos, "archive_read.beforePos");
-        if (beforePos != null && beforePos < 2) {
-          throw new Error("archive_read.beforePos must be an integer >= 2");
-        }
-        const lineCount = parseOptionalPositiveIntegerArg(tool.args.lineCount, "archive_read.lineCount");
-        if (lineCount != null && lineCount > 200) {
-          throw new Error("archive_read.lineCount must be an integer between 1 and 200");
-        }
-        const maxChars = parseOptionalPositiveIntegerArg(tool.args.maxChars, "archive_read.maxChars");
-        if (maxChars != null && (maxChars < 1000 || maxChars > 10000)) {
-          throw new Error("archive_read.maxChars must be an integer between 1000 and 10000");
-        }
-        result = await this.apiClient.archiveRead({
-          workspaceId: run.workspaceId,
-          sessionId: run.sessionId,
-          beforePos,
-          lineCount,
-          maxChars
-        });
-      } else if (tool.toolName === "subtask") {
-        const parsed = parseSubtaskArgs(tool.args);
-        const started = await this.apiClient.startSubtaskRun({
-          workspaceId: run.workspaceId,
-          parentSessionId: run.sessionId,
-          parentRunId: run.runId,
-          parentToolItemId: tool.itemId,
-          description: parsed.description,
-          prompt: parsed.prompt,
-          agentId: parsed.agentId,
-          session: parsed.session
-        });
-        subtaskSessionId = started.sessionId;
-
-        await this.apiClient.updateContextItem({
+      const toolCtx: ToolExecutionContext = {
+        profile,
+        run,
+        pendingTool: {
           itemId: tool.itemId,
-          status: "running",
-          output: {
-            ...outputBase,
-            text: buildToolText({
-              toolName: tool.toolName,
-              status: "running",
-              headers: [["subtask_session_id", subtaskSessionId]],
-              body: "Subtask started."
-            }),
-            result: {
-              subtaskSessionId
-            }
-          },
-          updatedAt: nowMs()
-        });
-
-        await this.processRun(
-          {
-            workspaceId: run.workspaceId,
-            sessionId: started.sessionId,
-            runId: started.runId,
-            inputText: parsed.prompt,
-            workspacePath: started.workspacePath
-          },
-          signal
-        );
-
-        const subtaskStatus = await this.apiClient.getSubtaskStatus({
-          workspaceId: run.workspaceId,
-          sessionId: started.sessionId,
-          runId: started.runId
-        });
-
-        if (signal.aborted) {
-          await this.apiClient.completeRun({
-            workspaceId: run.workspaceId,
-            sessionId: started.sessionId,
-            runId: started.runId,
-            status: "cancelled",
+          status: tool.status,
+          toolName: tool.toolName,
+          toolCallId: tool.toolCallId,
+          args: tool.args
+        },
+        signal,
+        apiClient: this.apiClient,
+        processNestedRun: (nestedRun, nestedSignal) => this.processRun(nestedRun, nestedSignal),
+        updateToolItem: async ({ status, output }) => {
+          await this.apiClient.updateContextItem({ itemId: tool.itemId, status, output, updatedAt: nowMs() });
+        },
+        nowMs,
+        reportRunningOutput: async (patch) => {
+          await this.apiClient.updateContextItem({
+            itemId: tool.itemId,
+            status: "running",
+            output: { ...outputBase, ...(typeof patch.text === "string" ? { text: patch.text } : {}), ...(patch.result !== undefined ? { result: patch.result } : {}) },
             updatedAt: nowMs()
           });
-        } else if (subtaskStatus.status === "running") {
-          throw new Error(`subtask did not reach terminal status: ${subtaskStatus.status}`);
-        }
-
-        const subtaskResult = await this.apiClient.getSubtaskResult({
-          workspaceId: run.workspaceId,
-          sessionId: started.sessionId,
-          runId: started.runId
-        });
-        result = {
-          subtaskSessionId: started.sessionId,
-          resultText: subtaskResult.resultText
-        };
-        subtaskResultText = typeof subtaskResult.resultText === "string" ? subtaskResult.resultText : undefined;
-        if (subtaskStatus.status === "failed" || subtaskStatus.status === "cancelled") {
-          throw new Error(`subtask ${subtaskStatus.status}`);
-        }
-      } else if (isMcpTool(tool.toolName)) {
-        const mcpResult = await this.mcpManager.callTool(tool.toolName, tool.args);
-        result = {
-          serverId: mcpResult.serverId,
-          toolName: mcpResult.toolName,
-          text: mcpResult.text,
-          raw: mcpResult.raw
-        };
-      } else {
-        throw new Error(`unsupported tool: ${tool.toolName}`);
-      }
+        },
+        renderToolText: (input) => buildToolText(input)
+      };
+      const result = await this.toolRegistry.execute(tool.toolName, tool.args, toolCtx);
 
       if (signal.aborted) return { paused: false as const };
 
@@ -1307,6 +989,10 @@ export class AgentRunner {
     } catch (err) {
       if (signal.aborted) return { paused: false as const };
       const error = err instanceof Error ? err.message : String(err);
+      const subtaskSessionId = err && typeof err === "object" ? String((err as any).subtaskSessionId || "").trim() : "";
+      const subtaskResultText = err && typeof err === "object" && typeof (err as any).subtaskResultText === "string"
+        ? (err as any).subtaskResultText as string
+        : undefined;
       await this.apiClient.updateContextItem({
         itemId: tool.itemId,
         status: "failed",
@@ -1357,6 +1043,7 @@ export class AgentRunner {
     run: QueuedRun;
     tool: PendingTool;
     signal: AbortSignal;
+    availableToolNames?: ReadonlySet<string>;
   }) {
     try {
       return await this.executeTool(params);
@@ -1406,13 +1093,16 @@ export class AgentRunner {
     run: QueuedRun;
     batch: ToolExecutionBatch;
     signal: AbortSignal;
+    availableToolNames?: ReadonlySet<string>;
   }) {
     if (params.batch.mode === "serial") {
       const tool = params.batch.tools[0];
       if (!tool) return { paused: false as const };
-      return await this.executeToolSafely({ ...params, tool });
+      return await this.executeToolSafely({ ...params, tool, availableToolNames: params.availableToolNames });
     }
-    const settled = await Promise.allSettled(params.batch.tools.map((tool) => this.executeToolSafely({ ...params, tool })));
+    const settled = await Promise.allSettled(
+      params.batch.tools.map((tool) => this.executeToolSafely({ ...params, tool, availableToolNames: params.availableToolNames }))
+    );
     return { paused: settled.some((item) => item.status === "fulfilled" && item.value.paused) } as const;
   }
 
@@ -1422,6 +1112,12 @@ export class AgentRunner {
     context: PromptContext;
     signal: AbortSignal;
   }) {
+    const availableToolDefinitions = await this.toolRegistry.listTools({
+      profile: params.profile,
+      promptContext: params.context,
+      apiClient: this.apiClient
+    });
+    const availableToolNames = new Set<string>(availableToolDefinitions.map((tool) => tool.name));
     const batches: ToolExecutionBatch[] = [];
     let segment: PendingTool[] = [];
     const flushSegment = () => {
@@ -1431,7 +1127,12 @@ export class AgentRunner {
     };
 
     for (const item of params.context.pendingTools) {
-      if (!isToolEnabledForAgent(params.profile, item.toolName)) {
+      if (!(await this.toolRegistry.isToolEnabled(item.toolName, {
+        profile: params.profile,
+        promptContext: params.context,
+        apiClient: this.apiClient,
+        availableToolNames
+      }))) {
         flushSegment();
         const error = `tool is disabled for current agent: ${item.toolName}`;
         await this.apiClient.updateContextItem({
@@ -1515,7 +1216,8 @@ export class AgentRunner {
         profile: params.profile,
         run: params.run,
         batch,
-        signal: params.signal
+        signal: params.signal,
+        availableToolNames
       });
       if (result.paused) {
         return { paused: true as const };
@@ -1661,28 +1363,20 @@ export class AgentRunner {
       updatedAt: nowMs()
     });
 
+    const toolDefinitions = await this.toolRegistry.listTools({
+      profile,
+      promptContext: context,
+      apiClient: this.apiClient
+    });
     const toolSet: Record<string, any> = {};
-    for (const item of context.tools) {
-      let description = item.description;
-      if (item.name === "bash") {
-        const appendix = getBashToolAppendix();
-        if (appendix) {
-          description = `${description}\n\n${appendix}`;
-        }
-      }
-      toolSet[item.name] = tool({
-        description,
-        inputSchema: jsonSchema(item.inputSchema)
-      });
-    }
-
-    const mcpTools = await this.mcpManager.listTools(profile.agent.mcpServers);
-    for (const item of mcpTools) {
+    for (const item of toolDefinitions) {
       toolSet[item.name] = tool({
         description: item.description,
         inputSchema: jsonSchema(item.inputSchema)
       });
     }
+    // 当前 turn 的 availableToolNames 是 builtin + MCP 合并后的快照；pendingTools 执行阶段必须严格按该快照校验，避免越权执行旧工具。
+    // TODO(plugin-phase2): 若后续 provider 引入缓存/热更新，需要把该快照显式透传到执行阶段，而不是仅从 promptContext 重新推导。
     const availableToolNames = new Set<string>(Object.keys(toolSet));
 
     const requestBase: Record<string, unknown> = {

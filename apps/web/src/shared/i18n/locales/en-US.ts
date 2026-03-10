@@ -633,6 +633,7 @@ export default {
       agentGlobalPrompts: "Prompt Library",
       agentMcp: "MCP",
       agentProfiles: "Role Profiles",
+      agentPlugins: "Plugins",
       agentRuntime: "Runtime",
       security: "Security"
     },
@@ -921,6 +922,7 @@ export default {
       fields: {
         tools: "Tools",
         mcpServers: "MCP Servers",
+        pluginTools: "Plugin Tools",
         scope: "Scope",
         globalPrompts: "Prompt library",
         summary: "Summary",
@@ -964,6 +966,8 @@ export default {
         globalPromptsPlaceholder: "Select prompt library entries",
         globalPromptsHelp: "Multi-select supported. Injection order follows the prompt library list order.",
         mcpServersPlaceholder: "Select allowed MCP servers",
+        pluginToolsPlaceholder: "Select enabled plugin tools",
+        pluginToolsHelp: "Only tools from globally enabled, ready plugins are selectable.",
         defaultModelCascaderPlaceholder: "Select default model strategy",
         defaultModelModeLabel: "Default model strategy",
         defaultProviderLabel: "Provider",
@@ -1052,6 +1056,28 @@ export default {
         duplicateServerId: "Server ID already exists"
       },
       saved: "Saved"
+    },
+    agentPlugins: {
+      description: "Manage locally discovered tool plugins, inspect diagnostics, and control global enablement.",
+      saving: "Saving...",
+      empty: "No plugins discovered yet. Put plugin packages under <dataDir>/plugins.",
+      saved: "Saved",
+      actions: {
+        refresh: "Refresh"
+      },
+      fields: {
+        enabled: "Enabled",
+        entry: "Entry"
+      },
+      state: {
+        ready: "Ready",
+        disabled: "Disabled",
+        invalidManifest: "Invalid manifest",
+        incompatible: "Incompatible",
+        configInvalid: "Invalid config",
+        loadFailed: "Load failed",
+        manifestMismatch: "Manifest mismatch"
+      }
     },
     security: {
       description: "View master key source and SSH trust status, and provide necessary reset actions.",

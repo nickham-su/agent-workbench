@@ -1,5 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import type { Static } from "@sinclair/typebox";
+import { PluginToolCanonicalNameSchema } from "./plugin.js";
 
 export const AgentUiLocaleSchema = Type.Union([Type.Literal("zh-CN"), Type.Literal("en-US")]);
 export type AgentUiLocale = Static<typeof AgentUiLocaleSchema>;
@@ -17,7 +18,8 @@ export const AgentContextToolNameSchema = Type.Union([
   Type.Literal("subtask"),
   Type.Literal("archive_search"),
   Type.Literal("archive_read"),
-  AgentMcpToolNameSchema
+  AgentMcpToolNameSchema,
+  PluginToolCanonicalNameSchema
 ]);
 export type AgentContextToolName = Static<typeof AgentContextToolNameSchema>;
 
@@ -123,7 +125,6 @@ export const AgentContextItemsResponseSchema = Type.Object({
   sessionId: Type.String({ minLength: 1 }),
   headItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
   appliedItemId: Type.Number({ minimum: 0 }),
-  // 可选: 用于分页场景,指示是否还有更早历史.
   hasMoreBefore: Type.Optional(Type.Boolean()),
   items: Type.Array(AgentContextItemRecordSchema)
 });
@@ -143,9 +144,8 @@ export const AgentSessionRunStateSchema = Type.Object({
   activeRunId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
   activeAssistantItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
   lastResponseTotalTokens: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
-  // 通用运行态提示文本;空字符串表示无提示。
-  runNoticeText: Type.String(),
   nonTerminalItemIds: Type.Array(Type.Number({ minimum: 1 })),
+  runNoticeText: Type.Union([Type.String(), Type.Null()]),
   updatedAt: Type.Number(),
   lastTerminalStatus: AgentSessionTerminalStatusSchema,
   appliedItemId: Type.Number({ minimum: 0 })
@@ -159,6 +159,69 @@ export const AgentCreateSessionRequestSchema = Type.Object({
 });
 export type AgentCreateSessionRequest = Static<typeof AgentCreateSessionRequestSchema>;
 
+export const AgentSendMessageRequestSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
+  text: Type.String({ minLength: 1 }),
+  clientRequestId: Type.String({ minLength: 1 }),
+  agentId: Type.Optional(Type.String({ minLength: 1 })),
+  uiLocale: Type.Optional(AgentUiLocaleSchema)
+}, { additionalProperties: false });
+export type AgentSendMessageRequest = Static<typeof AgentSendMessageRequestSchema>;
+
+export const AgentSendMessageResponseSchema = Type.Object({
+  sessionId: Type.String({ minLength: 1 }),
+  messageItemId: Type.Number({ minimum: 1 }),
+  runId: Type.String({ minLength: 1 }),
+  deduplicated: Type.Boolean()
+}, { additionalProperties: false });
+export type AgentSendMessageResponse = Static<typeof AgentSendMessageResponseSchema>;
+
+export const AgentControlResultSchema = Type.Object({
+  ok: Type.Boolean(),
+  session: AgentSessionRecordSchema,
+  runState: AgentSessionRunStateSchema
+});
+export type AgentControlResult = Static<typeof AgentControlResultSchema>;
+
+export const AgentCancelSessionRequestSchema = Type.Object({
+  updatedAt: Type.Optional(Type.Number())
+});
+export type AgentCancelSessionRequest = Static<typeof AgentCancelSessionRequestSchema>;
+
+export const AgentClearSessionRequestSchema = Type.Object({
+  updatedAt: Type.Optional(Type.Number())
+});
+export type AgentClearSessionRequest = Static<typeof AgentClearSessionRequestSchema>;
+
+export const AgentContextItemsQuerySchema = Type.Object({
+  afterId: Type.Optional(Type.Number({ minimum: 0 })),
+  tailLimit: Type.Optional(Type.Number({ minimum: 1, maximum: 500 })),
+  beforeId: Type.Optional(Type.Number({ minimum: 1 })),
+  limit: Type.Optional(Type.Number({ minimum: 1, maximum: 500 })),
+  expectedHeadItemId: Type.Optional(Type.Number({ minimum: 1 }))
+});
+export type AgentContextItemsQuery = Static<typeof AgentContextItemsQuerySchema>;
+
+export const AgentCompactSessionRequestSchema = Type.Object({
+  updatedAt: Type.Optional(Type.Number())
+});
+export type AgentCompactSessionRequest = Static<typeof AgentCompactSessionRequestSchema>;
+
+export const AgentCompactSessionResponseSchema = Type.Object({
+  ok: Type.Boolean(),
+  session: AgentSessionRecordSchema,
+  runState: AgentSessionRunStateSchema,
+  scheduled: Type.Boolean(),
+  skippedReason: Type.Optional(Type.String())
+});
+export type AgentCompactSessionResponse = Static<typeof AgentCompactSessionResponseSchema>;
+
+export const AgentRevertSessionRequestSchema = Type.Object({
+  itemId: Type.Number({ minimum: 1 }),
+  updatedAt: Type.Optional(Type.Number())
+});
+export type AgentRevertSessionRequest = Static<typeof AgentRevertSessionRequestSchema>;
+
 export const AgentForkSessionRequestSchema = Type.Object({
   fromSessionId: Type.String({ minLength: 1 }),
   fromItemId: Type.Number({ minimum: 1 }),
@@ -167,78 +230,3 @@ export const AgentForkSessionRequestSchema = Type.Object({
   kind: Type.Optional(AgentSessionKindSchema)
 });
 export type AgentForkSessionRequest = Static<typeof AgentForkSessionRequestSchema>;
-
-export const AgentSendMessageRequestSchema = Type.Object({
-  workspaceId: Type.String({ minLength: 1 }),
-  text: Type.String({ minLength: 1 }),
-  clientRequestId: Type.String({ minLength: 1 }),
-  agentId: Type.Optional(Type.String({ minLength: 1 })),
-  uiLocale: Type.Optional(AgentUiLocaleSchema)
-});
-export type AgentSendMessageRequest = Static<typeof AgentSendMessageRequestSchema>;
-
-export const AgentSendMessageResponseSchema = Type.Object({
-  sessionId: Type.String({ minLength: 1 }),
-  messageItemId: Type.Number({ minimum: 1 }),
-  runId: Type.String({ minLength: 1 }),
-  deduplicated: Type.Boolean()
-});
-export type AgentSendMessageResponse = Static<typeof AgentSendMessageResponseSchema>;
-
-export const AgentCompactSessionRequestSchema = Type.Object({
-  workspaceId: Type.String({ minLength: 1 }),
-  clientRequestId: Type.String({ minLength: 1 }),
-  agentId: Type.Optional(Type.String({ minLength: 1 })),
-  uiLocale: Type.Optional(AgentUiLocaleSchema)
-});
-export type AgentCompactSessionRequest = Static<typeof AgentCompactSessionRequestSchema>;
-
-export const AgentCompactSessionResponseSchema = Type.Object({
-  sessionId: Type.String({ minLength: 1 }),
-  runId: Type.String({ minLength: 1 }),
-  deduplicated: Type.Boolean()
-});
-export type AgentCompactSessionResponse = Static<typeof AgentCompactSessionResponseSchema>;
-
-export const AgentClearSessionRequestSchema = Type.Object({
-  workspaceId: Type.String({ minLength: 1 }),
-  reason: Type.Optional(Type.String({ minLength: 1 })),
-  uiLocale: Type.Optional(AgentUiLocaleSchema)
-});
-export type AgentClearSessionRequest = Static<typeof AgentClearSessionRequestSchema>;
-
-export const AgentRevertSessionRequestSchema = Type.Object({
-  workspaceId: Type.String({ minLength: 1 }),
-  toItemId: Type.Number({ minimum: 1 }),
-  reason: Type.Optional(Type.String({ minLength: 1 }))
-});
-export type AgentRevertSessionRequest = Static<typeof AgentRevertSessionRequestSchema>;
-
-export const AgentCancelSessionRequestSchema = Type.Object({
-  workspaceId: Type.String({ minLength: 1 })
-});
-export type AgentCancelSessionRequest = Static<typeof AgentCancelSessionRequestSchema>;
-
-export const AgentControlResultSchema = Type.Object({
-  sessionId: Type.String({ minLength: 1 }),
-  headItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()])
-});
-export type AgentControlResult = Static<typeof AgentControlResultSchema>;
-
-// 注意: 这里不使用 Union(oneOf/anyOf)来表达互斥,避免在 removeAdditional 场景下
-// query 被错误地“净化”成空对象,导致 afterId/tailLimit/beforeId 丢失。
-// 互斥语义由服务端做运行时校验并返回 400。
-export const AgentContextItemsQuerySchema = Type.Object(
-  {
-    afterId: Type.Optional(Type.Number({ minimum: 0 })),
-    // 从 head 向前取最近 N 条(包含 archived)
-    tailLimit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })),
-    // 从 beforeId 的前驱开始向更早方向分页
-    beforeId: Type.Optional(Type.Integer({ minimum: 1 })),
-    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })),
-    // 可选: head 最小值约束,避免 head 回退(分支切换/回退)后继续沿旧链向前翻页。
-    expectedHeadItemId: Type.Optional(Type.Integer({ minimum: 1 }))
-  },
-  { additionalProperties: false }
-);
-export type AgentContextItemsQuery = Static<typeof AgentContextItemsQuerySchema>;

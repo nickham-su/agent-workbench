@@ -53,6 +53,18 @@
             {{ t("settings.agentProfiles.fields.globalPrompts") }}: {{ globalPromptSummary(agent.globalPromptIds) }}
           </div>
 
+          <div v-if="agent.pluginTools.length > 0" class="text-[11px] text-[color:var(--text-tertiary)]">
+            <span>{{ t("settings.agentProfiles.fields.pluginTools") }}:</span>
+            <div class="mt-1 flex flex-wrap gap-1">
+              <a-tag
+                v-for="pluginTool in agent.pluginTools"
+                :key="`${agent.id}-${pluginTool}`"
+                color="blue"
+                class="!m-0 !text-[10px] !leading-[16px] !px-1 !py-0"
+              >{{ pluginToolLabel(pluginTool) }}</a-tag>
+            </div>
+          </div>
+
           <div class="flex flex-wrap gap-1">
             <a-tag
               v-for="tool in agent.tools"
@@ -177,6 +189,18 @@
           />
         </a-form-item>
 
+        <a-form-item :label="t('settings.agentProfiles.fields.pluginTools')">
+          <a-select
+            v-model:value="agentFormPluginTools"
+            mode="multiple"
+            :options="pluginToolOptions"
+            :placeholder="t('settings.agentProfiles.agentForm.pluginToolsPlaceholder')"
+          />
+          <div class="pt-1 text-xs text-[color:var(--text-tertiary)]">
+            {{ t("settings.agentProfiles.agentForm.pluginToolsHelp") }}
+          </div>
+        </a-form-item>
+
         <a-form-item :label="t('settings.agentProfiles.fields.defaultModel')">
           <a-cascader
             v-model:value="agentFormDefaultModelPath"
@@ -206,7 +230,10 @@ import type {
   AgentMcpSettings,
   AgentProvidersSettingsView,
   AgentScope,
+  AgentPluginSettings,
+  PluginRuntimeSnapshot,
   AgentSettings,
+  AgentPluginTools,
   AgentToolName,
   UpdateAgentSettingsRequest
 } from "@agent-workbench/shared";
@@ -217,11 +244,14 @@ import { useI18n } from "vue-i18n";
 import {
   getAgentGlobalPromptSettings,
   getAgentMcpSettings,
+  getAgentPluginRuntimeSnapshots,
+  getAgentPluginSettings,
   getAgentProvidersSettings,
   getAgentSettings,
   updateAgentSettings
 } from "@/shared/api";
 import { persistAgentProfilesDraft } from "./agentProfilesPersist";
+import { toPluginToolOptions } from "./agentPluginViewModel";
 
 const { t } = useI18n();
 
@@ -233,6 +263,7 @@ type EditingAgent = {
   globalPromptIds: string[];
   tools: AgentToolName[];
   mcpServers: string[];
+  pluginTools: AgentPluginTools;
   defaultModel: AgentDefaultModel;
   scope: AgentScope;
   order: number;
@@ -268,6 +299,8 @@ const loading = ref(false);
 const saving = ref(false);
 const pendingSave = ref(false);
 
+const pluginSettings = ref<AgentPluginSettings | null>(null);
+const pluginRuntimeSnapshots = ref<PluginRuntimeSnapshot[]>([]);
 const providersSettings = ref<AgentProvidersSettingsView | null>(null);
 const mcpSettings = ref<AgentMcpSettings | null>(null);
 const globalPromptSettings = ref<AgentGlobalPromptSettings | null>(null);
@@ -286,6 +319,7 @@ const agentFormPrompt = ref("");
 const agentFormGlobalPromptIds = ref<string[]>([]);
 const agentFormTools = ref<AgentToolName[]>([...DEFAULT_TOOLS]);
 const agentFormMcpServers = ref<string[]>([]);
+const agentFormPluginTools = ref<AgentPluginTools>([]);
 const agentFormDefaultModelPath = ref<string[]>([GLOBAL_DEFAULT_MODEL_PATH]);
 const agentFormScope = ref<AgentScope>("both");
 
@@ -324,6 +358,10 @@ const globalPromptOptions = computed(() => {
     value: item.id
   }));
 });
+
+const pluginToolOptions = computed(() => (
+  toPluginToolOptions({ settings: pluginSettings.value, snapshots: pluginRuntimeSnapshots.value })
+));
 
 const scopeOptions = computed(() => [
   { label: t("settings.agentProfiles.scope.user"), value: "user" },
@@ -382,6 +420,27 @@ function normalizeMcpServers(raw: unknown): string[] {
   return out;
 }
 
+function normalizePluginTools(raw: unknown): AgentPluginTools {
+  if (!Array.isArray(raw)) return [];
+  const out: AgentPluginTools = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    const value = typeof item === "string" ? item.trim() : "";
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
+}
+
+function pluginToolLabel(canonicalName: string) {
+  for (const snapshot of pluginRuntimeSnapshots.value) {
+    const tool = (snapshot.capabilities.tools ?? []).find((item) => item.canonicalName === canonicalName);
+    if (tool) return `${tool.shortName} · ${snapshot.id}`;
+  }
+  return canonicalName;
+}
+
 function normalizeGlobalPromptIds(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
   const available = new Set(
@@ -402,23 +461,28 @@ function mapFromSettings(
   settings: AgentSettings,
   providers: AgentProvidersSettingsView,
   mcp: AgentMcpSettings,
-  globalPrompts: AgentGlobalPromptSettings
+  globalPrompts: AgentGlobalPromptSettings,
+  plugins: AgentPluginSettings,
+  pluginSnapshots: PluginRuntimeSnapshot[]
 ) {
   providersSettings.value = providers;
   mcpSettings.value = mcp;
+  pluginSettings.value = plugins;
+  pluginRuntimeSnapshots.value = pluginSnapshots;
   globalPromptSettings.value = globalPrompts;
   agents.value = settings.agents.map((agent) => ({
     id: agent.id,
     name: agent.name,
     summary: agent.summary,
     prompt: agent.prompt,
-      globalPromptIds: normalizeGlobalPromptIds(agent.globalPromptIds),
-      tools: normalizeTools(agent.tools),
-      mcpServers: normalizeMcpServers(agent.mcpServers),
-      defaultModel: agent.defaultModel,
-      scope: agent.scope,
-      order: agent.order
-    }));
+    globalPromptIds: normalizeGlobalPromptIds(agent.globalPromptIds),
+    tools: normalizeTools(agent.tools),
+    mcpServers: normalizeMcpServers(agent.mcpServers),
+    pluginTools: normalizePluginTools(agent.pluginTools),
+    defaultModel: agent.defaultModel,
+    scope: agent.scope,
+    order: agent.order
+  }));
 }
 
 function getProviderById(providerId: string) {
@@ -503,6 +567,7 @@ function toRequestBody() {
       globalPromptIds: normalizeGlobalPromptIds(agent.globalPromptIds),
       tools: normalizeTools(agent.tools),
       mcpServers: normalizeMcpServers(agent.mcpServers),
+      pluginTools: [...agent.pluginTools],
       defaultModel: agent.defaultModel
     }))
   } satisfies UpdateAgentSettingsRequest;
@@ -517,6 +582,7 @@ function openCreateAgent() {
   agentFormGlobalPromptIds.value = [];
   agentFormTools.value = [...DEFAULT_TOOLS];
   agentFormMcpServers.value = [];
+  agentFormPluginTools.value = [];
   agentFormDefaultModelPath.value = [GLOBAL_DEFAULT_MODEL_PATH];
   agentFormScope.value = "both";
   agentModalOpen.value = true;
@@ -533,6 +599,7 @@ function openEditAgent(agentId: string) {
   agentFormGlobalPromptIds.value = normalizeGlobalPromptIds(target.globalPromptIds);
   agentFormTools.value = normalizeTools(target.tools);
   agentFormMcpServers.value = normalizeMcpServers(target.mcpServers);
+  agentFormPluginTools.value = normalizePluginTools(target.pluginTools);
   agentFormDefaultModelPath.value = target.defaultModel
     ? [target.defaultModel.providerId, target.defaultModel.modelId]
     : [GLOBAL_DEFAULT_MODEL_PATH];
@@ -550,6 +617,7 @@ function closeAgentModal() {
   agentFormGlobalPromptIds.value = [];
   agentFormTools.value = [...DEFAULT_TOOLS];
   agentFormMcpServers.value = [];
+  agentFormPluginTools.value = [];
   agentFormDefaultModelPath.value = [GLOBAL_DEFAULT_MODEL_PATH];
   agentFormScope.value = "both";
 }
@@ -585,6 +653,7 @@ function submitAgent() {
     globalPromptIds: normalizeGlobalPromptIds(agentFormGlobalPromptIds.value),
     tools: normalizeTools(agentFormTools.value),
     mcpServers: normalizeMcpServers(agentFormMcpServers.value),
+    pluginTools: normalizePluginTools(agentFormPluginTools.value),
     defaultModel,
     scope: agentFormScope.value,
     order: agentModalMode.value === "create" ? agents.value.length : 0
@@ -669,27 +738,29 @@ function confirmDeleteAgent(agentId: string) {
     content: t("settings.agentProfiles.deleteAgent.content", { name: target.name }),
     okText: t("settings.agentProfiles.deleteAgent.ok"),
     cancelText: t("settings.agentProfiles.deleteAgent.cancel"),
-     okType: "danger",
-     onOk: () => {
-       agents.value = agents.value.filter((item) => item.id !== agentId);
-       markDirty();
-       normalizeAgentOrder();
-       void persist({ toast: true });
-     }
-   });
+    okType: "danger",
+    onOk: () => {
+      agents.value = agents.value.filter((item) => item.id !== agentId);
+      markDirty();
+      normalizeAgentOrder();
+      void persist({ toast: true });
+    }
+  });
 }
 
 async function refreshDraft() {
   if (loading.value) return;
   loading.value = true;
   try {
-    const [agentSettings, providerSettings, mcp, globalPrompts] = await Promise.all([
+    const [agentSettings, providerSettings, mcp, globalPrompts, plugins, pluginSnapshots] = await Promise.all([
       getAgentSettings(),
       getAgentProvidersSettings(),
       getAgentMcpSettings(),
-      getAgentGlobalPromptSettings()
+      getAgentGlobalPromptSettings(),
+      getAgentPluginSettings(),
+      getAgentPluginRuntimeSnapshots()
     ]);
-    mapFromSettings(agentSettings, providerSettings, mcp, globalPrompts);
+    mapFromSettings(agentSettings, providerSettings, mcp, globalPrompts, plugins, pluginSnapshots.plugins);
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
@@ -716,7 +787,9 @@ async function persist(params: { toast: boolean }) {
           res,
           providersSettings.value ?? { default: null, providers: [], updatedAt: 0 },
           mcpSettings.value ?? { servers: [], updatedAt: 0 },
-          globalPromptSettings.value ?? { items: [], updatedAt: 0 }
+          globalPromptSettings.value ?? { items: [], updatedAt: 0 },
+          pluginSettings.value ?? { plugins: [], updatedAt: 0 },
+          pluginRuntimeSnapshots.value
         );
       }
     });

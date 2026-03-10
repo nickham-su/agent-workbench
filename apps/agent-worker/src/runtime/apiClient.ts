@@ -1,4 +1,9 @@
-import type { AgentUiLocale } from "@agent-workbench/shared";
+import type {
+  AgentToolName,
+  AgentUiLocale,
+  PluginRuntimeSnapshotsResponse,
+  PluginToolCanonicalName
+} from "@agent-workbench/shared";
 
 export class ApiConflictError extends Error {}
 
@@ -48,10 +53,9 @@ export type ExecutionProfile = {
     name: string;
     summary: string;
     prompt: string;
-    tools: Array<
-      "bash" | "read" | "write" | "apply_patch" | "todolist" | "subtask" | "archive_search" | "archive_read"
-    >;
+    tools: AgentToolName[];
     mcpServers: string[];
+    pluginTools: PluginToolCanonicalName[];
     defaultModel: { providerId: string; modelId: string } | null;
   };
   provider: {
@@ -311,6 +315,13 @@ export class AgentApiClient {
 
   async getAgentMcpSettings() {
     return this.request<AgentMcpSettingsPayload>("/api/internal/agent/mcp-settings", {
+      method: "POST",
+      body: {}
+    });
+  }
+
+  async getPluginRuntimeSnapshots() {
+    return this.request<PluginRuntimeSnapshotsResponse>("/api/internal/agent/plugins/runtime-snapshots", {
       method: "POST",
       body: {}
     });

@@ -1,5 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import type { Static } from "@sinclair/typebox";
+import { PluginToolCanonicalNameSchema } from "./plugin.js";
 
 export const NetworkSettingsSchema = Type.Object({
   httpProxy: Type.Union([Type.String(), Type.Null()]),
@@ -206,6 +207,9 @@ export const AgentToolNameSchema = Type.Union([
 ]);
 export type AgentToolName = Static<typeof AgentToolNameSchema>;
 
+export const AgentPluginToolsSchema = Type.Array(PluginToolCanonicalNameSchema);
+export type AgentPluginTools = Static<typeof AgentPluginToolsSchema>;
+
 export const AgentDefaultModelSchema = Type.Union([AgentProvidersDefaultSchema, Type.Null()]);
 export type AgentDefaultModel = Static<typeof AgentDefaultModelSchema>;
 
@@ -240,6 +244,7 @@ export const AgentItemSchema = Type.Object({
   globalPromptIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
   tools: Type.Array(AgentToolNameSchema),
   mcpServers: Type.Array(Type.String({ minLength: 1 })),
+  pluginTools: AgentPluginToolsSchema,
   defaultModel: AgentDefaultModelSchema,
   scope: AgentScopeSchema,
   order: Type.Integer({ minimum: 0 })
@@ -254,6 +259,7 @@ export const AgentItemViewSchema = Type.Object({
   globalPromptIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
   tools: Type.Array(AgentToolNameSchema),
   mcpServers: Type.Array(Type.String({ minLength: 1 })),
+  pluginTools: AgentPluginToolsSchema,
   defaultModel: AgentDefaultModelSchema,
   scope: AgentScopeSchema,
   order: Type.Integer({ minimum: 0 }),

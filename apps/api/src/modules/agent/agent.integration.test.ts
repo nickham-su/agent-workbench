@@ -315,6 +315,7 @@ async function configureAgentDefaults(app: FastifyInstance) {
           summary: "",
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write"],
+          pluginTools: [],
           mcpServers: [],
           defaultModel: null,
           scope: "both",
@@ -364,8 +365,8 @@ test("agent settings 兼容缺省 scope/order 并按原顺序归一化", async (
 
   setSettingJson(fixture.db, "agent_agents_v1", {
     agents: [
-      { id: "legacy-1", name: "Legacy 1", summary: "", prompt: "", tools: ["bash"], mcpServers: [], defaultModel: null },
-      { id: "legacy-2", name: "Legacy 2", summary: "", prompt: "", tools: ["read"], mcpServers: [], defaultModel: null }
+      { id: "legacy-1", name: "Legacy 1", summary: "", prompt: "", tools: ["bash"], pluginTools: [], mcpServers: [], defaultModel: null },
+      { id: "legacy-2", name: "Legacy 2", summary: "", prompt: "", tools: ["read"], pluginTools: [], mcpServers: [], defaultModel: null }
     ]
   }, Date.now());
 
@@ -385,9 +386,9 @@ test("agent prompt-context 生成 subtask 描述时仅暴露 subtask/both agent"
     url: "/api/settings/agent/agents",
     payload: {
       agents: [
-        { id: "user-only", name: "User Only", summary: "for user", prompt: "", tools: ["bash", "subtask"], mcpServers: [], defaultModel: null, scope: "user", order: 0 },
-        { id: "subtask-only", name: "Subtask Only", summary: "for subtask", prompt: "", tools: ["bash", "subtask"], mcpServers: [], defaultModel: null, scope: "subtask", order: 1 },
-        { id: "shared", name: "Shared", summary: "shared", prompt: "", tools: ["bash", "subtask"], mcpServers: [], defaultModel: null, scope: "both", order: 2 }
+        { id: "user-only", name: "User Only", summary: "for user", prompt: "", tools: ["bash", "subtask"], pluginTools: [], mcpServers: [], defaultModel: null, scope: "user", order: 0 },
+        { id: "subtask-only", name: "Subtask Only", summary: "for subtask", prompt: "", tools: ["bash", "subtask"], pluginTools: [], mcpServers: [], defaultModel: null, scope: "subtask", order: 1 },
+        { id: "shared", name: "Shared", summary: "shared", prompt: "", tools: ["bash", "subtask"], pluginTools: [], mcpServers: [], defaultModel: null, scope: "both", order: 2 }
       ]
     }
   });
@@ -484,7 +485,7 @@ test("agent scope 校验会拒绝错误场景的 agent 并在无可用 agent 时
     url: "/api/settings/agent/agents",
     payload: {
       agents: [
-        { id: "subtask-only", name: "Subtask Only", summary: "", prompt: "", tools: ["bash", "read"], mcpServers: [], defaultModel: null, scope: "subtask", order: 0 }
+        { id: "subtask-only", name: "Subtask Only", summary: "", prompt: "", tools: ["bash", "read"], pluginTools: [], mcpServers: [], defaultModel: null, scope: "subtask", order: 0 }
       ]
     }
   });

@@ -275,7 +275,11 @@ export class McpManager {
     return definitions;
   }
 
-  async callTool(toolName: string, args: Record<string, unknown>) {
+  async callTool(toolName: string, args: Record<string, unknown>, _options?: {
+    signal?: AbortSignal;
+  }) {
+    // TODO(plugin-phase2): 当前 MCP SDK client.callTool 未见显式 AbortSignal 接口；先保留参数与注释，
+    // 使执行链路具备取消协作扩展点，待上游 SDK 或本地封装支持后继续透传。
     let target = this.toolTargets.get(toolName);
     if (!target) {
       await this.syncSettings();

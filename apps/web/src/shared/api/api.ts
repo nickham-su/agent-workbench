@@ -94,6 +94,10 @@ import type {
   AgentGlobalPromptSettings,
   AgentMcpSettings,
   AgentRuntimeSettings,
+  AgentPluginSettings,
+  PluginRuntimeSnapshot,
+  PluginRuntimeSnapshotsResponse,
+  UpdateAgentPluginSettingsRequest,
   UpdateAgentMcpSettingsRequest,
   UpdateAgentProvidersSettingsRequest,
   UpdateAgentGlobalPromptSettingsRequest,
@@ -876,6 +880,33 @@ export async function getAgentMcpSettings() {
 export async function updateAgentMcpSettings(body: UpdateAgentMcpSettingsRequest) {
   try {
     const res = await client.put<AgentMcpSettings>("/settings/agent/mcp", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getAgentPluginSettings() {
+  try {
+    const res = await client.get<AgentPluginSettings>("/settings/agent/plugins");
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getAgentPluginRuntimeSnapshots() {
+  try {
+    const res = await client.get<PluginRuntimeSnapshotsResponse>("/settings/agent/plugins/runtime-snapshots");
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function updateAgentPluginSettings(body: UpdateAgentPluginSettingsRequest) {
+  try {
+    const res = await client.put<AgentPluginSettings>("/settings/agent/plugins", body);
     return res.data;
   } catch (err) {
     throw toApiError(err);
