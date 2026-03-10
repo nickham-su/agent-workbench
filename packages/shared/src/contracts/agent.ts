@@ -202,7 +202,8 @@ export type AgentCompactSessionResponse = Static<typeof AgentCompactSessionRespo
 
 export const AgentClearSessionRequestSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
-  reason: Type.Optional(Type.String({ minLength: 1 }))
+  reason: Type.Optional(Type.String({ minLength: 1 })),
+  uiLocale: Type.Optional(AgentUiLocaleSchema)
 });
 export type AgentClearSessionRequest = Static<typeof AgentClearSessionRequestSchema>;
 
@@ -241,4 +242,3 @@ export const AgentContextItemsQuerySchema = Type.Object(
   { additionalProperties: false }
 );
 export type AgentContextItemsQuery = Static<typeof AgentContextItemsQuerySchema>;
-

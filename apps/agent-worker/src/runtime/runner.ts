@@ -8,6 +8,7 @@ import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call"
 import { runBashCommand } from "./bash.js";
 import { getBashToolAppendix } from "./bashTools.js";
 import { AgentApiClient, ApiConflictError, type ExecutionProfile, type PromptContext } from "./apiClient.js";
+import type { AgentUiLocale } from "@agent-workbench/shared";
 import { runReadTool, runWriteTool } from "./fileTools.js";
 import { McpManager } from "./mcpManager.js";
 import { applyPreparedPatch, prepareApplyPatchTool, type ApplyPatchPrepared } from "./applyPatch.js";
@@ -50,11 +51,37 @@ const TOOL_ARTIFACT_MAX_CHARS = Math.max(
   TOOL_OUTPUT_TEXT_MAX_CHARS,
   parseIntOrDefault(process.env.AWB_TOOL_ARTIFACT_MAX_CHARS, 200_000)
 );
-const COMPACTION_USER_PROMPT = [
-  "请基于当前会话内容输出一份结构化总结,用于后续模型继续同一任务。",
-  "总结目标不是回顾,而是帮助后续模型快速接手并继续执行。",
-  "",
-  "重点覆盖:",
+
+export function buildCompactionUserPrompt(input: { uiLocale: AgentUiLocale | null }) {
+  if (input.uiLocale !== "zh-CN") {
+    return [
+      "Please produce a structured summary of the current session so a later model can continue the same task.",
+      "The goal is not to review the conversation, but to help the next model take over quickly and keep executing.",
+      "",
+      "Focus on:",
+      "- what has already been completed",
+      "- what is currently in progress",
+      "- key files, modules, APIs, commands, or tools that matter for the remaining work",
+      "- next TODOs in priority order, preferably as directly executable actions",
+      "- user constraints and preferences that must continue to be honored",
+      "- important technical decisions and why they were made",
+      "- discarded approaches, failed attempts, or anything that should not be retried blindly",
+      "- if the history used the subtask tool, you must include a reusable subtask sessions section; each item should include at least: purpose (description), subtask_session_id, output summary, and reuse value or suitable scenarios",
+      "",
+      "Output requirements:",
+      "- output only the summary; do not answer questions from the conversation",
+      "- do not invent information that does not appear in the session",
+      "- clearly distinguish confirmed facts, pending confirmations, and unfinished work",
+      "- keep the structure clear with fixed sections and bullet points",
+      "- if a category has no relevant information, omit that section instead of fabricating content"
+    ].join("\n");
+  }
+
+  return [
+    "请基于当前会话内容输出一份结构化总结,用于后续模型继续同一任务。",
+    "总结目标不是回顾,而是帮助后续模型快速接手并继续执行。",
+    "",
+    "重点覆盖:",
   "- 已完成了什么",
   "- 当前正在做什么",
   "- 与后续工作直接相关的关键文件、模块、接口、命令或工具",
@@ -66,11 +93,12 @@ const COMPACTION_USER_PROMPT = [
   "",
   "输出要求:",
   "- 只输出总结,不要回答会话中的问题",
-  "- 不要编造未出现的信息",
-  "- 明确区分已确认事实、待确认事项、未完成事项",
-  "- 结构清晰,使用固定小节与项目符号",
-  "- 如果没有某类信息,可省略对应小节,不要硬编"
-].join("\n");
+    "- 不要编造未出现的信息",
+    "- 明确区分已确认事实、待确认事项、未完成事项",
+    "- 结构清晰,使用固定小节与项目符号",
+    "- 如果没有某类信息,可省略对应小节,不要硬编"
+  ].join("\n");
+}
 const COMPACTION_TIMEOUT_MS = 300_000;
 
 const MANUAL_COMPACT_SENTINEL = "__awb_compact__";
@@ -1394,6 +1422,26 @@ export class AgentRunner {
     return lastTotalTokens >= threshold;
   }
 
+  protected async generateCompactionSummary(params: {
+    profile: ExecutionProfile;
+    context: PromptContext;
+    signal: AbortSignal;
+  }) {
+    const response = await generateSingleCallText(
+      {
+        provider: params.profile.provider,
+        model: params.profile.model
+      },
+      {
+        system: params.context.system || undefined,
+        messages: [...params.context.messages, { role: "user", content: buildCompactionUserPrompt({ uiLocale: params.context.uiLocale }) }],
+        timeoutMs: COMPACTION_TIMEOUT_MS,
+        abortSignal: params.signal
+      }
+    );
+    return String(response.text || "").trim();
+  }
+
   private async compactContext(params: {
     profile: ExecutionProfile;
     run: QueuedRun;
@@ -1404,19 +1452,11 @@ export class AgentRunner {
     const expectedHeadItemId = context.headItemId;
     if (expectedHeadItemId == null) return false;
 
-    const response = await generateSingleCallText(
-      {
-        provider: profile.provider,
-        model: profile.model
-      },
-      {
-        system: context.system || undefined,
-        messages: [...context.messages, { role: "user", content: COMPACTION_USER_PROMPT }],
-        timeoutMs: COMPACTION_TIMEOUT_MS,
-        abortSignal: signal
-      }
-    );
-    const summaryText = String(response.text || "").trim();
+    const summaryText = await this.generateCompactionSummary({
+      profile,
+      context,
+      signal
+    });
     if (!summaryText) return false;
 
     const compacted = await this.apiClient.compactContext({

@@ -17,6 +17,7 @@ import {
   AgentCompactSessionResponseSchema,
   AgentSessionRecordSchema,
   AgentSessionRunStateSchema,
+  AgentUiLocaleSchema,
   AgentProviderNpmSchema,
   ErrorResponseSchema
 } from "@agent-workbench/shared";
@@ -305,7 +306,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
     },
     async (req) => {
       const p = req.params as { sessionId: string };
-      const body = req.body as { workspaceId: string; reason?: string };
+      const body = req.body as { workspaceId: string; reason?: string; uiLocale?: "zh-CN" | "en-US" };
       return params.service.clearSession(p.sessionId, body);
     }
   );
@@ -784,7 +785,8 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
                 args: Type.Any()
               })
             ),
-            lastResponseTotalTokens: Type.Union([Type.Number({ minimum: 0 }), Type.Null()])
+            lastResponseTotalTokens: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
+            uiLocale: Type.Union([AgentUiLocaleSchema, Type.Null()])
           }),
           400: ErrorResponseSchema,
           401: ErrorResponseSchema,

@@ -2146,7 +2146,8 @@ async function executeSlashCommand(params: {
   }
   if (params.command.action === "clear") {
     await clearAgentSession(params.sessionId, {
-      workspaceId: params.workspaceId
+      workspaceId: params.workspaceId,
+      uiLocale: getInitialLocale()
     });
     return;
   }

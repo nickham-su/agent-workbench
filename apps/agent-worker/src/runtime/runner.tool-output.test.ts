@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { AgentRunner } from "./runner.js";
+import { getBashToolAppendix, startBashToolProbe } from "./bashTools.js";
 
 async function withTempWorkspace(fn: (workspacePath: string) => Promise<void>) {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "awb-runner-tool-output-"));
@@ -13,6 +14,16 @@ async function withTempWorkspace(fn: (workspacePath: string) => Promise<void>) {
     await fs.rm(workspacePath, { recursive: true, force: true });
   }
 }
+
+test("bash tool appendix uses English labels", async () => {
+  startBashToolProbe({ warn() {} });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const appendix = getBashToolAppendix();
+  if (!appendix) return;
+  assert.equal(appendix.includes("Known available tools:") || appendix.includes("Runtime environment:"), true);
+  assert.equal(appendix.includes("已知可用工具:"), false);
+  assert.equal(appendix.includes("运行环境:"), false);
+});
 
 test("tool 文本过长且 artifact 不可写时降级为 completed + artifact unavailable", async () => {
   await withTempWorkspace(async (workspacePath) => {

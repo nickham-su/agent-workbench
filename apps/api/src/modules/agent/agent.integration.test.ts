@@ -414,6 +414,69 @@ test("agent prompt-context 生成 subtask 描述时仅暴露 subtask/both agent"
   assert.equal(description.includes("shared"), true, "shared agent should be visible");
 });
 
+test("agent prompt-context 中的工具描述与 schema 说明使用英文", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          summary: "",
+          prompt: "",
+          tools: ["bash", "subtask", "todolist", "apply_patch"],
+          mcpServers: [],
+          defaultModel: null,
+          scope: "both",
+          order: 0
+        }
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `update agents failed: ${agentsRes.body}`);
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    uiLocale: "zh-CN",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+  const promptContext = await getPromptContextInternal({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId });
+  const bashTool = promptContext.tools.find((item) => item.name === "bash");
+  const subtaskTool = promptContext.tools.find((item) => item.name === "subtask");
+  const todolistTool = promptContext.tools.find((item) => item.name === "todolist");
+  const applyPatchTool = promptContext.tools.find((item) => item.name === "apply_patch");
+  assert.ok(String(bashTool?.description || "").includes("Run a bash command and return stdout/stderr."));
+  assert.ok(String((bashTool?.inputSchema as any)?.properties?.timeout?.description || "").includes("Timeout in seconds"));
+  assert.ok(String(subtaskTool?.description || "").includes("Available agents:"));
+  assert.equal(String(subtaskTool?.description || "").includes("可选Agent"), false);
+  assert.ok(String(todolistTool?.description || "").includes("Example input:"));
+  assert.equal(String(todolistTool?.description || "").includes("完成 todolist goal 增强"), false);
+  assert.equal(String(todolistTool?.description || "").includes("梳理需求与约束"), false);
+  assert.ok(
+    String((applyPatchTool?.inputSchema as any)?.properties?.patchText?.description || "").includes(
+      "patchText must be a git unified diff text"
+    )
+  );
+  const sessionSchema = (subtaskTool?.inputSchema as any)?.properties?.session;
+  const oneOf = Array.isArray(sessionSchema?.oneOf) ? sessionSchema.oneOf : [];
+  assert.ok(oneOf.length >= 3, "subtask.session.oneOf should contain multiple options");
+  assert.equal(
+    oneOf.every((item: any) => typeof item?.description === "string" && !/[\u4e00-\u9fff]/.test(item.description)),
+    true,
+    "subtask.session.oneOf descriptions should be English"
+  );
+});
+
 test("agent scope 校验会拒绝错误场景的 agent 并在无可用 agent 时返回明确错误", async () => {
   const fixture = await createFixture();
   const agentsRes = await fixture.app.inject({
@@ -564,6 +627,20 @@ async function sendMessage(app: FastifyInstance, params: { sessionId: string; wo
   });
   assert.equal(res.statusCode, 201, `send message failed: ${res.body}`);
   return res.json() as { messageItemId: number; runId: string; deduplicated: boolean };
+}
+
+function extractPromptSection(system: string, tag: string) {
+  const marker = `[${tag}]`;
+  const start = system.indexOf(marker);
+  if (start < 0) return "";
+  const afterMarker = system.indexOf("\n\n", start);
+  if (afterMarker < 0) return "";
+  const bodyStart = afterMarker + 2;
+  const nextSection = system.indexOf("\n\n---\n[", bodyStart);
+  if (nextSection < 0) {
+    return system.slice(bodyStart).trim();
+  }
+  return system.slice(bodyStart, nextSection).trim();
 }
 
 async function getRunState(app: FastifyInstance, sessionId: string) {
@@ -720,7 +797,8 @@ async function getPromptContextInternal(params: {
   assert.equal(res.statusCode, 200, `get prompt-context failed: ${res.body}`);
   return res.json() as {
     system: string;
-    tools: Array<{ name: string }>;
+    tools: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }>;
+    uiLocale: "zh-CN" | "en-US" | null;
     messages: Array<{ role: string; content: unknown }>;
     pendingTools: Array<{ itemId: number; status: string; toolName: string }>;
   };
@@ -1642,11 +1720,119 @@ test("agent prompt-context 根据 run uiLocale 注入语言与时间运行时约
     sessionId: session.id,
     runId: body.runId
   });
-  assert.ok(prompt.system.includes("## Runtime Constraints"), "system should include runtime constraints section");
-  assert.ok(prompt.system.includes("Language requirement: use English consistently for this run."));
-  assert.ok(prompt.system.includes("If you call todolist, the goal and todos[].content must also be in English."));
-  assert.ok(prompt.system.includes("Current system time:"));
-  assert.ok(prompt.system.includes("Time zone:"));
+  const outputSection = extractPromptSection(prompt.system, "output_format_instructions");
+  const runtimeSection = extractPromptSection(prompt.system, "runtime_constraints");
+
+  assert.ok(prompt.system.includes("[output_format_instructions]"), "system should include output format instructions section");
+  assert.ok(prompt.system.includes("[runtime_constraints]"), "system should include runtime constraints section");
+  assert.equal(prompt.system.includes("## Runtime Constraints"), false, "system should not include legacy runtime constraints heading");
+  assert.ok(outputSection.includes("Output format requirements:"));
+  assert.ok(runtimeSection.includes("Completion constraints:"), "runtime constraints should include completion constraints");
+  assert.ok(runtimeSection.includes("Language requirement: use English consistently for this run."));
+  assert.ok(runtimeSection.includes("If you call todolist, the goal and todos[].content must also be in English."));
+  assert.ok(runtimeSection.includes("Current system time:"));
+  assert.ok(runtimeSection.includes("Time zone:"));
+  assert.equal(outputSection.includes("Completion constraints:"), false, "output format instructions should not contain completion constraints");
+});
+
+test("agent prompt-context 在 zh-CN locale 下使用中文 output/runtime sections 且完成判定约束只在 runtime_constraints 中", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    uiLocale: "zh-CN",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const prompt = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+  const outputSection = extractPromptSection(prompt.system, "output_format_instructions");
+  const runtimeSection = extractPromptSection(prompt.system, "runtime_constraints");
+
+  assert.ok(outputSection.includes("输出格式要求："));
+  assert.ok(runtimeSection.includes("完成判定约束："));
+  assert.ok(runtimeSection.includes("语言要求：本轮对话请统一使用简体中文。"));
+  assert.ok(runtimeSection.includes("当前系统时间："));
+  assert.ok(runtimeSection.includes("当前时区："));
+  assert.equal(outputSection.includes("完成判定约束："), false, "output format instructions should not contain completion constraints");
+});
+
+test("agent prompt-context 在缺省 locale 下使用 locale-neutral 英文 output/runtime sections 且不附加语言要求", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const msg = await sendMessage(fixture.app, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "hi",
+    clientRequestId: "req_locale_null_prompt"
+  });
+
+  const prompt = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: msg.runId
+  });
+  const outputSection = extractPromptSection(prompt.system, "output_format_instructions");
+  const runtimeSection = extractPromptSection(prompt.system, "runtime_constraints");
+
+  assert.ok(outputSection.includes("Output format requirements:"));
+  assert.ok(runtimeSection.includes("Completion constraints:"));
+  assert.ok(runtimeSection.includes("Current system time:"));
+  assert.ok(runtimeSection.includes("Time zone:"));
+  assert.equal(runtimeSection.includes("Language requirement: use English consistently for this run."), false, "null locale should not add English language requirement");
+  assert.equal(outputSection.includes("输出格式要求："), false, "null locale should not mix Chinese output instruction text");
+});
+
+test("agent prompt-context 对 store 中非法 uiLocale 回退为 locale-neutral 英文，避免中英混用", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    uiLocale: "fr-FR" as any,
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const runRecord = getRunRecord(fixture.db, runId);
+  assert.ok(runRecord, "run record should exist");
+  assert.equal(runRecord?.uiLocale, "fr-FR", "store may still contain legacy invalid locale data");
+
+  const prompt = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+  const outputSection = extractPromptSection(prompt.system, "output_format_instructions");
+  const runtimeSection = extractPromptSection(prompt.system, "runtime_constraints");
+
+  assert.ok(outputSection.includes("Output format requirements:"));
+  assert.ok(runtimeSection.includes("Completion constraints:"));
+  assert.equal(outputSection.includes("输出格式要求："), false, "invalid locale fallback should not use Chinese output text");
+  assert.equal(runtimeSection.includes("语言要求：本轮对话请统一使用简体中文。"), false, "invalid locale fallback should not use Chinese runtime text");
 });
 
 test("agent compact 在 worker 不可用时仍接受 uiLocale 参数", async () => {
@@ -1715,7 +1901,8 @@ test("agent clear 会归档当前可见上下文并插入 clear 边界 marker", 
     url: `/api/agent/sessions/${session.id}/clear`,
     payload: {
       workspaceId: fixture.workspaceId,
-      reason: "切换新任务"
+      reason: "切换新任务",
+      uiLocale: "zh-CN"
     }
   });
   assert.equal(clearRes.statusCode, 200, `clear session failed: ${clearRes.body}`);
@@ -1773,6 +1960,62 @@ test("agent clear 会归档当前可见上下文并插入 clear 边界 marker", 
   });
   assert.equal(clearAgainRes.statusCode, 400, `clear should be no-op when only marker visible: ${clearAgainRes.body}`);
   assert.equal(clearAgainRes.json().code, "AGENT_CLEAR_NOT_NEEDED");
+});
+
+test("agent clear 在 en-US locale 下生成英文摘要，且缺省 locale 回退英文", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "old task" }
+  });
+
+  const clearRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/clear`,
+    payload: {
+      workspaceId: fixture.workspaceId,
+      reason: "switch task",
+      uiLocale: "en-US"
+    }
+  });
+  assert.equal(clearRes.statusCode, 200, `clear session failed: ${clearRes.body}`);
+
+  const context = await getContextItems(fixture.app, session.id);
+  assert.ok(String(context.items.at(-1)?.output?.text || "").includes("A new task has started (switch task)."));
+
+  const session2 = await createSession(fixture.app, fixture.workspaceId);
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session2.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "another old task" }
+  });
+  const clearRes2 = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session2.id}/clear`,
+    payload: { workspaceId: fixture.workspaceId }
+  });
+  assert.equal(clearRes2.statusCode, 200, `clear session without locale failed: ${clearRes2.body}`);
+  const context2 = await getContextItems(fixture.app, session2.id);
+  assert.ok(String(context2.items.at(-1)?.output?.text || "").includes("A new task has started."));
 });
 
 test("agent clear 对 subtask 会话返回只读错误", async () => {
@@ -2015,7 +2258,7 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
   assert.equal(systemItem?.kind, "system");
   assert.equal(systemItem?.output.type, "system_text");
   assert.equal(
-    String((systemItem?.output as { text?: string }).text || "").includes("在本条系统消息之前的全部历史内容，均来自父会话复制"),
+    String((systemItem?.output as { text?: string }).text || "").includes("All history before this system message was copied from the parent session"),
     true
   );
   assert.equal(promptUser?.kind, "user");
@@ -2033,20 +2276,83 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
     promptContext.messages.some((message) =>
       message.role === "system" &&
       typeof message.content === "string" &&
-      message.content.includes("在本条系统消息之前的全部历史内容，均来自父会话复制")
+      message.content.includes("All history before this system message was copied from the parent session")
     ),
-    true,
-    "prompt-context should include fork guard system message"
+    true
   );
+  assert.equal(promptContext.uiLocale, "en-US");
   assert.equal(
     promptContext.tools.some((tool) => tool.name === "subtask"),
     false,
     "forked subtask session should not expose subtask tool"
   );
-  assert.ok(promptContext.system.includes("## Runtime Constraints"));
+  assert.ok(promptContext.system.includes("[runtime_constraints]"));
+  assert.equal(promptContext.system.includes("## Runtime Constraints"), false);
   assert.ok(promptContext.system.includes("Language requirement: use English consistently for this run."));
   assert.ok(promptContext.system.includes("Current system time:"));
   assert.ok(promptContext.system.includes("Time zone:"));
+});
+
+test("agent subtask fork 对父 run 非法 locale 做归一化回退，避免继续传播非法值", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          summary: "",
+          prompt: "You are a helpful coding assistant.",
+          tools: ["bash", "read", "write", "subtask"],
+          mcpServers: [],
+          defaultModel: null,
+          scope: "both",
+          order: 0
+        }
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `configure agents with subtask failed: ${agentsRes.body}`);
+
+  const parentSession = await createSession(fixture.app, fixture.workspaceId);
+  const parentRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: parentRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    uiLocale: "fr-FR" as any,
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+  const toolItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_subtask_invalid_locale",
+    step: 1,
+    prevId: null,
+    kind: "tool",
+    status: "queued",
+    output: { type: "tool", toolName: "subtask", toolCallId: "call_subtask_invalid_locale", args: { description: "研究问题", prompt: "请直接完成这个子任务", agentId: "default", session: { mode: "fork" } } }
+  });
+  const startRes = await fixture.app.inject({ method: "POST", url: "/api/internal/agent/subtask/start", headers: { "x-awb-agent-internal-token": fixture.internalToken }, payload: { workspaceId: fixture.workspaceId, parentSessionId: parentSession.id, parentRunId, parentToolItemId: toolItem.item.id, description: "研究问题", prompt: "请直接完成这个子任务", agentId: "default", session: { mode: "fork" } } });
+  assert.equal(startRes.statusCode, 200, `start subtask failed: ${startRes.body}`);
+  const started = startRes.json() as { sessionId: string; runId: string };
+  const subtaskRun = getRunRecord(fixture.db, started.runId);
+  assert.equal(subtaskRun?.uiLocale, null);
+  const items = getSessionTranscriptItems(fixture.db, fixture.workspaceId, started.sessionId);
+  const guardItem = items.find((item) => item.kind === "system" && item.output.type === "system_text");
+  assert.ok(guardItem);
+  assert.equal(String((guardItem?.output as { text?: string } | undefined)?.text || "").includes("You are working in a subtask session derived from a parent session."), true);
 });
 
 test("subtask 失败时 getSubtaskRunResultFromWorker 仍返回 partial text", async () => {
@@ -2850,6 +3156,7 @@ test("agent context 压缩后会归档并支持 archive_search/read", async () =
     sessionId: session.id,
     triggerItemId: 1,
     agentId: "default",
+    uiLocale: "en-US",
     providerId: "ppchat",
     modelId: "gpt-5.2",
     status: "running",
@@ -2927,7 +3234,7 @@ test("agent context 压缩后会归档并支持 archive_search/read", async () =
     (item) => item.role === "system" && String(item.content || "").includes("压缩摘要")
   );
   const snippetIndex = promptContext.messages.findIndex(
-    (item) => item.role === "system" && String(item.content || "").includes("压缩前尾部摘录")
+    (item) => item.role === "system" && (String(item.content || "").includes("压缩前尾部摘录") || String(item.content || "").includes("Pre-compaction tail excerpt"))
   );
   assert.ok(snippetIndex >= 0, "compaction snippet should be injected after summary");
   assert.ok(summaryIndex >= 0 && snippetIndex === summaryIndex + 1, "snippet should appear right after compaction summary");
@@ -3370,7 +3677,7 @@ test("agent prompt-context compaction snippet 缓存缺失时应即时重建", a
     sessionId: session.id,
     runId
   });
-  assert.ok(ctx1.messages.some((m) => m.role === "system" && String(m.content || "").includes("压缩前尾部摘录")));
+  assert.ok(ctx1.messages.some((m) => m.role === "system" && String(m.content || "").includes("Pre-compaction tail excerpt")));
 
   const cachePath = compactionSnippetPath(fixture.dataDir, fixture.workspaceId, session.id, summaryItemId);
   await fs.rm(cachePath, { force: true });
@@ -3383,7 +3690,51 @@ test("agent prompt-context compaction snippet 缓存缺失时应即时重建", a
     sessionId: session.id,
     runId
   });
-  assert.ok(ctx2.messages.some((m) => m.role === "system" && String(m.content || "").includes("压缩前尾部摘录")));
+  assert.ok(ctx2.messages.some((m) => m.role === "system" && String(m.content || "").includes("Pre-compaction tail excerpt")));
+});
+
+test("compaction snippet 在 zh-CN locale 下保持中文提示", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    uiLocale: "zh-CN",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "旧上下文" }
+  });
+  const compact = await compactContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    expectedHeadItemId: userItem.item.id,
+    summaryText: "压缩摘要"
+  });
+  assert.equal(compact.compacted, true);
+  const ctx = await getPromptContextInternal({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId });
+  assert.ok(ctx.messages.some((m) => m.role === "system" && String(m.content || "").includes("压缩前尾部摘录")));
 });
 
 test("archive v2 边界行为: 校验/大小写/跨文件pos/截断/半行过滤", async () => {
@@ -3607,7 +3958,7 @@ test("agent prompt-context 使用结构化 tool-call/tool-result 消息", async 
         content: "hello"
       },
       result: {
-        summary: "写入文件 tool_test.txt",
+        summary: "Wrote file tool_test.txt",
         content: "ok"
       }
     }
@@ -4314,7 +4665,7 @@ test("write completed 后瘦身 args/result 并支持 artifact 拉取", async ()
         content: writeContent
       },
       result: {
-        summary: "写入文件 foo.txt",
+        summary: "Wrote file foo.txt",
         filePath: "foo.txt",
         bytesWritten: writeBytes,
         existedBefore: false,
@@ -4435,7 +4786,7 @@ test("write artifact 文件缺失时返回 404", async () => {
       toolCallId: "call_write_1",
       args: { filePath: "foo.txt", content: "hello" },
       result: {
-        summary: "写入文件 foo.txt",
+        summary: "Wrote file foo.txt",
         filePath: "foo.txt",
         bytesWritten: 5,
         existedBefore: false,
@@ -5034,19 +5385,43 @@ test("agent prompt-context 同时存在 global/workspace/agent 时按既定顺�
   const idxCore = context.system.indexOf("# 工作方式与流程(全局)");
   const idxA = context.system.indexOf("PROMPT_A");
   const idxB = context.system.indexOf("PROMPT_B");
-  const idxWorkspace = context.system.indexOf("## Workspace Instructions: AGENTS.md");
+  const idxOutput = context.system.indexOf("[output_format_instructions]");
+  const idxRuntime = context.system.indexOf("[runtime_constraints]");
+  const idxSystemBaseTag = context.system.indexOf("[system_base]");
+  const idxATag = context.system.indexOf("[global_prompt] A");
+  const idxBTag = context.system.indexOf("[global_prompt] B");
+  const idxWorkspace = context.system.indexOf("[workspace_instructions] AGENTS.md");
+  const idxAgentTag = context.system.indexOf("[agent_prompt] default");
   const idxAgent = context.system.indexOf("AGENT_PROMPT");
 
+  assert.equal(context.system.includes("## Global Prompt:"), false, "system should not include legacy global prompt headings");
+  assert.equal(context.system.includes("## Workspace Instructions:"), false, "system should not include legacy workspace headings");
+  assert.equal(context.system.includes("## Agent Prompt:"), false, "system should not include legacy agent headings");
+  assert.equal(context.system.includes("## Runtime Constraints"), false, "system should not include legacy runtime heading");
+  assert.ok(idxSystemBaseTag >= 0, "system should include system base section tag");
+  assert.ok(idxATag >= 0, "system should include global prompt A section tag");
+  assert.ok(idxBTag >= 0, "system should include global prompt B section tag");
   assert.ok(idxCore >= 0, "system should include global workflow prompt");
   assert.ok(idxA >= 0, "system should include PROMPT_A");
   assert.ok(idxB >= 0, "system should include PROMPT_B");
   assert.ok(idxWorkspace >= 0, "system should include workspace instructions section");
+  assert.ok(idxOutput >= 0, "system should include output format instructions section");
+  assert.ok(idxRuntime >= 0, "system should include runtime constraints section");
+  assert.ok(context.system.includes("Output format requirements:"), "system should include output format instruction body");
+  assert.ok(context.system.includes("Completion constraints:"), "runtime constraints should include completion rule");
+  assert.ok(context.system.includes("The current runtime treats a plain-text response as task completion."), "runtime constraints should mention plain text completion");
   assert.ok(idxAgent >= 0, "system should include AGENT_PROMPT");
 
-  assert.ok(idxCore < idxA, "order: core before global prompts");
-  assert.ok(idxA < idxB, "order: global prompts follow global list order");
-  assert.ok(idxB < idxWorkspace, "order: global prompts before workspace instructions");
-  assert.ok(idxWorkspace < idxAgent, "order: workspace instructions before agent prompt");
+  assert.ok(idxSystemBaseTag < idxATag, "order: system base tag before global prompts");
+  assert.ok(idxATag < idxBTag, "order: global prompt tags follow global list order");
+  assert.ok(idxBTag < idxWorkspace, "order: global prompts before workspace instructions");
+  assert.ok(idxWorkspace < idxAgentTag, "order: workspace instructions before agent prompt");
+  assert.ok(idxAgentTag < idxOutput, "order: agent prompt before output format instructions");
+  assert.ok(idxOutput < idxRuntime, "order: output format instructions before runtime constraints");
+  assert.ok(idxCore < idxA, "order: system base body before global prompt body");
+  assert.ok(idxA < idxB, "order: global prompt bodies follow global list order");
+  assert.ok(idxB < context.system.indexOf("WORKSPACE_RULE"), "order: global prompt bodies before workspace instructions body");
+  assert.ok(context.system.indexOf("WORKSPACE_RULE") < idxAgent, "order: workspace instructions body before agent prompt body");
 });
 
 test("agent prompt-context 在 workspace 根 AGENTS.md 缺失时忽略", async () => {
@@ -5076,13 +5451,16 @@ test("agent prompt-context 在 workspace 根 AGENTS.md 缺失时忽略", async (
   });
 
   assert.ok(context.system.includes("# 工作方式与流程(全局)"), "system should include global workflow prompt");
-  assert.ok(context.system.includes("## Agent Prompt: default"), "system should include agent section");
+  assert.ok(context.system.includes("[system_base]"), "system should include system base section");
+  assert.ok(context.system.includes("[agent_prompt] default"), "system should include agent section");
+  assert.ok(context.system.includes("[output_format_instructions]"), "system should include output format instructions");
+  assert.ok(context.system.includes("[runtime_constraints]"), "system should include runtime constraints");
   assert.ok(
     context.system.includes("You are a helpful coding assistant."),
     "system should include agent prompt content"
   );
   assert.equal(
-    context.system.includes("## Workspace Instructions: AGENTS.md"),
+    context.system.includes("[workspace_instructions] AGENTS.md"),
     false,
     "system should ignore missing workspace AGENTS.md"
   );
@@ -5196,13 +5574,20 @@ test("agent prompt-context 在 agent prompt 为空且无 workspace/global 时仅
   });
 
   assert.ok(context.system.includes("# 工作方式与流程(全局)"), "system should include global workflow prompt");
+  assert.ok(context.system.includes("[system_base]"), "system should include system base section");
+  assert.ok(context.system.includes("[output_format_instructions]"), "system should include output format instructions");
+  assert.ok(context.system.includes("[runtime_constraints]"), "system should include runtime constraints");
+  assert.ok(context.system.includes("Completion constraints:"), "runtime constraints should include completion rule");
   assert.equal(context.system.includes("## Global Prompt:"), false, "system should not include global prompt sections");
+  assert.equal(context.system.includes("[global_prompt]"), false, "system should not include global prompt blocks when none selected");
   assert.equal(
     context.system.includes("## Workspace Instructions:"),
     false,
     "system should not include workspace instructions when missing"
   );
+  assert.equal(context.system.includes("[workspace_instructions]"), false, "system should not include workspace instructions block when missing");
   assert.equal(context.system.includes("## Agent Prompt:"), false, "system should not include agent prompt section when empty");
+  assert.equal(context.system.includes("[agent_prompt]"), false, "system should not include agent prompt block when empty");
 });
 
 test("agent prompt-context 对 workspace AGENTS.md 做 32KB 截断并追加标记", async () => {
@@ -5234,12 +5619,13 @@ test("agent prompt-context 对 workspace AGENTS.md 做 32KB 截断并追加标�
   });
 
   assert.ok(
-    context.system.includes("## Workspace Instructions: AGENTS.md"),
+    context.system.includes("[workspace_instructions] AGENTS.md"),
     "system should include workspace section with relative path"
   );
   assert.ok(
     context.system.includes("[workspace AGENTS.md truncated: first 32KB]"),
     "system should include truncation marker"
   );
-  assert.ok(context.system.includes("## Agent Prompt: default"), "system should include agent section when workspace section exists");
+  assert.ok(context.system.includes("[agent_prompt] default"), "system should include agent section when workspace section exists");
+  assert.equal(context.system.includes("## Workspace Instructions:"), false, "system should not include legacy workspace heading when workspace section exists");
 });

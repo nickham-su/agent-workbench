@@ -1,3 +1,5 @@
+import type { AgentUiLocale } from "@agent-workbench/shared";
+
 export class ApiConflictError extends Error {}
 
 type PromptTextPart = {
@@ -87,6 +89,7 @@ export type PromptContext = {
     args: Record<string, unknown>;
   }>;
   lastResponseTotalTokens: number | null;
+  uiLocale: AgentUiLocale | null;
 };
 
 export type AgentMcpSettingsPayload = {
