@@ -51,6 +51,7 @@ const TOOL_ARTIFACT_MAX_CHARS = Math.max(
   TOOL_OUTPUT_TEXT_MAX_CHARS,
   parseIntOrDefault(process.env.AWB_TOOL_ARTIFACT_MAX_CHARS, 200_000)
 );
+const TOOL_PARALLEL_BATCH_LIMIT = 3;
 
 export function buildCompactionUserPrompt(input: { uiLocale: AgentUiLocale | null }) {
   if (input.uiLocale !== "zh-CN") {
@@ -463,6 +464,11 @@ type ToolCall = {
   args: Record<string, unknown>;
 };
 
+type ToolExecutionBatch = {
+  mode: "parallel" | "serial";
+  tools: PendingTool[];
+};
+
 const RESERVED_MODEL_OPTION_KEYS = new Set([
   "model",
   "system",
@@ -640,6 +646,10 @@ function isSubtaskTool(toolName: string) {
   return toolName === "subtask";
 }
 
+function isConcurrentExecutionTool(toolName: string) {
+  return toolName === "bash" || toolName === "subtask";
+}
+
 function isMcpTool(toolName: string) {
   return toolName.startsWith("mcp_");
 }
@@ -796,6 +806,45 @@ function parseSubtaskArgs(raw: Record<string, unknown>): ParsedSubtaskArgs {
       ...(sessionId ? { sessionId } : {})
     }
   };
+}
+
+function buildToolExecutionBatches(tools: PendingTool[], parallelLimit = TOOL_PARALLEL_BATCH_LIMIT): ToolExecutionBatch[] {
+  const batches: ToolExecutionBatch[] = [];
+  const limit = Math.max(1, Math.floor(parallelLimit));
+  let index = 0;
+
+  while (index < tools.length) {
+    const current = tools[index];
+    if (!current) break;
+
+    if (!isConcurrentExecutionTool(current.toolName)) {
+      batches.push({ mode: "serial", tools: [current] });
+      index += 1;
+      continue;
+    }
+
+    const concurrentToolName = current.toolName;
+    const concurrentTools: PendingTool[] = [];
+    while (index < tools.length) {
+      const item = tools[index];
+      if (!item || item.toolName !== concurrentToolName) break;
+      concurrentTools.push(item);
+      index += 1;
+    }
+
+    for (let offset = 0; offset < concurrentTools.length; offset += limit) {
+      batches.push({
+        mode: "parallel",
+        tools: concurrentTools.slice(offset, offset + limit)
+      });
+    }
+  }
+
+  return batches;
+}
+
+export function buildToolExecutionBatchesForTest(tools: PendingTool[], parallelLimit = TOOL_PARALLEL_BATCH_LIMIT) {
+  return buildToolExecutionBatches(tools, parallelLimit);
 }
 
 function toApplyPatchResult(prepared: ApplyPatchPrepared) {
@@ -1303,15 +1352,87 @@ export class AgentRunner {
     }
   }
 
+  private async executeToolSafely(params: {
+    profile: ExecutionProfile;
+    run: QueuedRun;
+    tool: PendingTool;
+    signal: AbortSignal;
+  }) {
+    try {
+      return await this.executeTool(params);
+    } catch (err) {
+      if (params.signal.aborted) return { paused: false as const };
+      const error = err instanceof Error ? err.message : String(err);
+      await this.apiClient.updateContextItem({
+        itemId: params.tool.itemId,
+        status: "failed",
+        output: {
+          type: "tool",
+          toolName: params.tool.toolName,
+          toolCallId: params.tool.toolCallId,
+          args: params.tool.args,
+          text: buildToolErrorText({ toolName: params.tool.toolName, status: "failed", error }),
+          error
+        },
+        updatedAt: nowMs()
+      });
+      await writeItemLog({
+        logger: this.logger,
+        workspacePath: params.run.workspacePath,
+        kind: "tool",
+        itemId: params.tool.itemId,
+        payload: {
+          meta: {
+            workspaceId: params.run.workspaceId,
+            sessionId: params.run.sessionId,
+            runId: params.run.runId,
+            toolItemId: params.tool.itemId
+          },
+          request: {
+            toolName: params.tool.toolName,
+            toolCallId: params.tool.toolCallId,
+            args: params.tool.args
+          },
+          status: "failed",
+          error
+        }
+      });
+      return { paused: false as const };
+    }
+  }
+
+  private async executeToolBatch(params: {
+    profile: ExecutionProfile;
+    run: QueuedRun;
+    batch: ToolExecutionBatch;
+    signal: AbortSignal;
+  }) {
+    if (params.batch.mode === "serial") {
+      const tool = params.batch.tools[0];
+      if (!tool) return { paused: false as const };
+      return await this.executeToolSafely({ ...params, tool });
+    }
+    const settled = await Promise.allSettled(params.batch.tools.map((tool) => this.executeToolSafely({ ...params, tool })));
+    return { paused: settled.some((item) => item.status === "fulfilled" && item.value.paused) } as const;
+  }
+
   private async executePendingTools(params: {
     profile: ExecutionProfile;
     run: QueuedRun;
     context: PromptContext;
     signal: AbortSignal;
   }) {
-    const pending: PendingTool[] = [];
+    const batches: ToolExecutionBatch[] = [];
+    let segment: PendingTool[] = [];
+    const flushSegment = () => {
+      if (segment.length === 0) return;
+      batches.push(...buildToolExecutionBatches(segment));
+      segment = [];
+    };
+
     for (const item of params.context.pendingTools) {
       if (!isToolEnabledForAgent(params.profile, item.toolName)) {
+        flushSegment();
         const error = `tool is disabled for current agent: ${item.toolName}`;
         await this.apiClient.updateContextItem({
           itemId: item.itemId,
@@ -1329,6 +1450,7 @@ export class AgentRunner {
         continue;
       }
       if (item.status === "running") {
+        flushSegment();
         const outputBase = {
           type: "tool" as const,
           toolName: item.toolName,
@@ -1369,10 +1491,16 @@ export class AgentRunner {
         });
         continue;
       }
-      if (item.status !== "queued") continue;
+      if (item.status !== "queued") {
+        flushSegment();
+        continue;
+      }
       const toolCallId = String(item.toolCallId || "").trim();
-      if (!toolCallId) continue;
-      pending.push({
+      if (!toolCallId) {
+        flushSegment();
+        continue;
+      }
+      segment.push({
         itemId: item.itemId,
         status: item.status,
         toolName: item.toolName,
@@ -1381,11 +1509,12 @@ export class AgentRunner {
       });
     }
 
-    for (const tool of pending) {
-      const result = await this.executeTool({
+    flushSegment();
+    for (const batch of batches) {
+      const result = await this.executeToolBatch({
         profile: params.profile,
         run: params.run,
-        tool,
+        batch,
         signal: params.signal
       });
       if (result.paused) {

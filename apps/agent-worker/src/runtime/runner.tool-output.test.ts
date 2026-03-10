@@ -3,8 +3,23 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { AgentRunner } from "./runner.js";
+import { AgentRunner, buildToolExecutionBatchesForTest } from "./runner.js";
 import { getBashToolAppendix, startBashToolProbe } from "./bashTools.js";
+
+function pendingTool(input: {
+  itemId: number;
+  toolName: string;
+  toolCallId?: string;
+  args?: Record<string, unknown>;
+}) {
+  return {
+    itemId: input.itemId,
+    status: "queued" as const,
+    toolName: input.toolName,
+    toolCallId: input.toolCallId ?? `call_${input.itemId}`,
+    args: input.args ?? {}
+  };
+}
 
 async function withTempWorkspace(fn: (workspacePath: string) => Promise<void>) {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "awb-runner-tool-output-"));
@@ -23,6 +38,357 @@ test("bash tool appendix uses English labels", async () => {
   assert.equal(appendix.includes("Known available tools:") || appendix.includes("Runtime environment:"), true);
   assert.equal(appendix.includes("已知可用工具:"), false);
   assert.equal(appendix.includes("运行环境:"), false);
+});
+
+test("bash 后接 subtask 时拆成两个并发段", () => {
+  const batches = buildToolExecutionBatchesForTest([
+    pendingTool({ itemId: 1, toolName: "bash" }),
+    pendingTool({ itemId: 2, toolName: "subtask" }),
+    pendingTool({ itemId: 3, toolName: "bash" })
+  ]);
+
+  assert.deepEqual(
+    batches.map((batch) => ({ mode: batch.mode, itemIds: batch.tools.map((tool) => tool.itemId) })),
+    [
+      { mode: "parallel", itemIds: [1] },
+      { mode: "parallel", itemIds: [2] },
+      { mode: "parallel", itemIds: [3] }
+    ]
+  );
+});
+
+test("subtask 后接 bash 时拆成两个并发段", () => {
+  const batches = buildToolExecutionBatchesForTest([
+    pendingTool({ itemId: 1, toolName: "subtask" }),
+    pendingTool({ itemId: 2, toolName: "bash" }),
+    pendingTool({ itemId: 3, toolName: "subtask" })
+  ]);
+
+  assert.deepEqual(
+    batches.map((batch) => ({ mode: batch.mode, itemIds: batch.tools.map((tool) => tool.itemId) })),
+    [
+      { mode: "parallel", itemIds: [1] },
+      { mode: "parallel", itemIds: [2] },
+      { mode: "parallel", itemIds: [3] }
+    ]
+  );
+});
+
+test("非并发工具会打断并发段", () => {
+  const batches = buildToolExecutionBatchesForTest([
+    pendingTool({ itemId: 1, toolName: "bash" }),
+    pendingTool({ itemId: 2, toolName: "bash" }),
+    pendingTool({ itemId: 3, toolName: "read" }),
+    pendingTool({ itemId: 4, toolName: "subtask" }),
+    pendingTool({ itemId: 5, toolName: "subtask" })
+  ]);
+
+  assert.deepEqual(
+    batches.map((batch) => ({ mode: batch.mode, itemIds: batch.tools.map((tool) => tool.itemId) })),
+    [
+      { mode: "parallel", itemIds: [1, 2] },
+      { mode: "serial", itemIds: [3] },
+      { mode: "parallel", itemIds: [4, 5] }
+    ]
+  );
+});
+
+test("并发段超过上限时自动拆段", () => {
+  const batches = buildToolExecutionBatchesForTest([
+    pendingTool({ itemId: 1, toolName: "bash" }),
+    pendingTool({ itemId: 2, toolName: "bash" }),
+    pendingTool({ itemId: 3, toolName: "bash" }),
+    pendingTool({ itemId: 4, toolName: "bash" }),
+    pendingTool({ itemId: 5, toolName: "bash" })
+  ]);
+
+  assert.deepEqual(
+    batches.map((batch) => ({ mode: batch.mode, itemIds: batch.tools.map((tool) => tool.itemId) })),
+    [
+      { mode: "parallel", itemIds: [1, 2, 3] },
+      { mode: "parallel", itemIds: [4, 5] }
+    ]
+  );
+});
+
+test("并发段中单个工具失败不影响其他工具与后续段", async () => {
+  const executionOrder: string[] = [];
+  const runner = new AgentRunner(
+    {
+      async updateContextItem() {
+        return { id: 1 };
+      },
+      async updateRunState() {
+        executionOrder.push("updateRunState");
+      }
+    } as any,
+    {} as any,
+    { info() {}, warn() {}, error() {} },
+    1
+  );
+
+  (runner as any).executeTool = async ({ tool }: { tool: { itemId: number; toolName: string } }) => {
+    executionOrder.push(`start:${tool.itemId}:${tool.toolName}`);
+    if (tool.itemId === 1) {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      executionOrder.push(`done:${tool.itemId}`);
+      return { paused: false as const };
+    }
+    if (tool.itemId === 2) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      executionOrder.push(`fail:${tool.itemId}`);
+      throw new Error("simulated failure");
+    }
+    executionOrder.push(`done:${tool.itemId}`);
+    return { paused: false as const };
+  };
+
+  const result = await (runner as any).executePendingTools({
+    profile: {
+      agent: {
+        tools: ["bash", "subtask", "read"]
+      }
+    },
+    run: {
+      workspaceId: "ws_test",
+      sessionId: "ses_test",
+      runId: "run_test",
+      workspacePath: process.cwd()
+    },
+    context: {
+      pendingTools: [
+        pendingTool({ itemId: 1, toolName: "bash" }),
+        pendingTool({ itemId: 2, toolName: "bash" }),
+        pendingTool({ itemId: 3, toolName: "read" })
+      ]
+    },
+    signal: new AbortController().signal
+  });
+
+  assert.equal(result.paused, false);
+  assert.deepEqual(
+    executionOrder,
+    [
+      "start:1:bash",
+      "start:2:bash",
+      "fail:2",
+      "done:1",
+      "start:3:read",
+      "done:3",
+      "updateRunState"
+    ]
+  );
+});
+
+test("并发段中某个工具 paused 时当前 step 返回 paused 且后续段不再启动", async () => {
+  const executionOrder: string[] = [];
+  const runner = new AgentRunner(
+    {
+      async updateContextItem() {
+        return { id: 1 };
+      },
+      async updateRunState() {
+        executionOrder.push("updateRunState");
+      }
+    } as any,
+    {} as any,
+    { info() {}, warn() {}, error() {} },
+    1
+  );
+
+  (runner as any).executeTool = async ({ tool }: { tool: { itemId: number; toolName: string } }) => {
+    executionOrder.push(`start:${tool.itemId}:${tool.toolName}`);
+    if (tool.itemId === 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      executionOrder.push(`done:${tool.itemId}`);
+      return { paused: false as const };
+    }
+    if (tool.itemId === 2) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      executionOrder.push(`paused:${tool.itemId}`);
+      return { paused: true as const };
+    }
+    executionOrder.push(`done:${tool.itemId}`);
+    return { paused: false as const };
+  };
+
+  const result = await (runner as any).executePendingTools({
+    profile: {
+      agent: {
+        tools: ["bash", "subtask", "read"]
+      }
+    },
+    run: {
+      workspaceId: "ws_test",
+      sessionId: "ses_test",
+      runId: "run_test",
+      workspacePath: process.cwd()
+    },
+    context: {
+      pendingTools: [
+        pendingTool({ itemId: 1, toolName: "bash" }),
+        pendingTool({ itemId: 2, toolName: "bash" }),
+        pendingTool({ itemId: 3, toolName: "read" })
+      ]
+    },
+    signal: new AbortController().signal
+  });
+
+  assert.equal(result.paused, true);
+  assert.deepEqual(executionOrder, ["start:1:bash", "start:2:bash", "paused:2", "done:1"]);
+});
+
+test("被预处理掉的中间工具仍会打断并发段", async () => {
+  const executionOrder: string[] = [];
+  const runner = new AgentRunner(
+    {
+      async updateContextItem(input: { itemId: number; status?: string }) {
+        executionOrder.push(`update:${input.itemId}:${input.status ?? ""}`);
+        return { id: input.itemId };
+      },
+      async updateRunState() {
+        executionOrder.push("updateRunState");
+      }
+    } as any,
+    {} as any,
+    { info() {}, warn() {}, error() {} },
+    1
+  );
+
+  (runner as any).executeTool = async ({ tool }: { tool: { itemId: number; toolName: string } }) => {
+    executionOrder.push(`start:${tool.itemId}:${tool.toolName}`);
+    await new Promise((resolve) => setTimeout(resolve, tool.itemId === 1 ? 25 : 5));
+    executionOrder.push(`done:${tool.itemId}`);
+    return { paused: false as const };
+  };
+
+  const result = await (runner as any).executePendingTools({
+    profile: {
+      agent: {
+        tools: ["bash"]
+      }
+    },
+    run: {
+      workspaceId: "ws_test",
+      sessionId: "ses_test",
+      runId: "run_test",
+      workspacePath: process.cwd()
+    },
+    context: {
+      pendingTools: [
+        pendingTool({ itemId: 1, toolName: "bash" }),
+        pendingTool({ itemId: 2, toolName: "read" }),
+        pendingTool({ itemId: 3, toolName: "bash" })
+      ]
+    },
+    signal: new AbortController().signal
+  });
+
+  assert.equal(result.paused, false);
+  assert.deepEqual(executionOrder, [
+    "update:2:failed",
+    "start:1:bash",
+    "done:1",
+    "start:3:bash",
+    "done:3",
+    "updateRunState"
+  ]);
+});
+
+test("纯非并发多工具保持原有串行语义", async () => {
+  const executionOrder: string[] = [];
+  const runner = new AgentRunner(
+    {
+      async updateContextItem() {
+        return { id: 1 };
+      },
+      async updateRunState() {
+        executionOrder.push("updateRunState");
+      }
+    } as any,
+    {} as any,
+    { info() {}, warn() {}, error() {} },
+    1
+  );
+
+  (runner as any).executeTool = async ({ tool }: { tool: { itemId: number; toolName: string } }) => {
+    executionOrder.push(`start:${tool.itemId}:${tool.toolName}`);
+    await new Promise((resolve) => setTimeout(resolve, tool.itemId === 1 ? 25 : 5));
+    executionOrder.push(`done:${tool.itemId}`);
+    return { paused: false as const };
+  };
+
+  const result = await (runner as any).executePendingTools({
+    profile: {
+      agent: {
+        tools: ["read", "write", "apply_patch"]
+      }
+    },
+    run: {
+      workspaceId: "ws_test",
+      sessionId: "ses_test",
+      runId: "run_test",
+      workspacePath: process.cwd()
+    },
+    context: {
+      pendingTools: [
+        pendingTool({ itemId: 1, toolName: "read" }),
+        pendingTool({ itemId: 2, toolName: "write" }),
+        pendingTool({ itemId: 3, toolName: "apply_patch" })
+      ]
+    },
+    signal: new AbortController().signal
+  });
+
+  assert.equal(result.paused, false);
+  assert.deepEqual(executionOrder, ["start:1:read", "done:1", "start:2:write", "done:2", "start:3:apply_patch", "done:3", "updateRunState"]);
+});
+
+test("单个 bash 或 subtask 仍按单段执行，行为与旧实现一致", async () => {
+  for (const toolName of ["bash", "subtask"] as const) {
+    const executionOrder: string[] = [];
+    const runner = new AgentRunner(
+      {
+        async updateContextItem() {
+          return { id: 1 };
+        },
+        async updateRunState() {
+          executionOrder.push("updateRunState");
+        }
+      } as any,
+      {} as any,
+      { info() {}, warn() {}, error() {} },
+      1
+    );
+
+    (runner as any).executeTool = async ({ tool }: { tool: { itemId: number; toolName: string } }) => {
+      executionOrder.push(`start:${tool.itemId}:${tool.toolName}`);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      executionOrder.push(`done:${tool.itemId}`);
+      return { paused: false as const };
+    };
+
+    const result = await (runner as any).executePendingTools({
+      profile: {
+        agent: {
+          tools: [toolName]
+        }
+      },
+      run: {
+        workspaceId: "ws_test",
+        sessionId: `ses_${toolName}`,
+        runId: `run_${toolName}`,
+        workspacePath: process.cwd()
+      },
+      context: {
+        pendingTools: [pendingTool({ itemId: 1, toolName })]
+      },
+      signal: new AbortController().signal
+    });
+
+    assert.equal(result.paused, false);
+    assert.deepEqual(executionOrder, [`start:1:${toolName}`, "done:1", "updateRunState"]);
+  }
 });
 
 test("tool 文本过长且 artifact 不可写时降级为 completed + artifact unavailable", async () => {
