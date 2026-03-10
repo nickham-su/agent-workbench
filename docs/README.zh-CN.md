@@ -27,13 +27,22 @@ git clone https://github.com/nickham-su/agent-workbench.git
 ```
 
 - 可选配置（推荐）
-  - 复制 `.env.docker.example` 为 `.env`，按需修改变量
-  - 若不创建 `.env`，Docker Compose 会使用 `docker-compose.yml` 中的默认值
+  - 复制 `.env.example` 为 `.env`（推荐），按需修改变量
+    - `.env.docker.example` 作为兼容保留，内容与 `.env.example` 一致
+  - 若不创建 `.env`，Docker Compose 会使用 `docker-compose.yml` 的默认值（Compose 默认值），
+    未指定的运行参数会回落到应用代码默认值
 
 - 启动服务
 
 ```bash
 docker compose up -d --build
+```
+
+**验证环境变量已注入容器（可选）**
+
+```bash
+docker compose exec agent-workbench printenv AWB_AGENT_WORKER_CONCURRENCY
+docker compose exec agent-workbench printenv AWB_AGENT_LOOP_MAX_STEPS
 ```
 
 **访问入口**
@@ -68,7 +77,8 @@ docker compose up -d --build
 
 **安全提示**
 
-默认为了方便会对外发布端口 `4310` 与 `AWB_WORKSPACE_PORT_RANGE`. 如果你把服务部署在远程主机上, 建议优先按更安全的方式暴露服务:
+`docker-compose.yml` 为了方便默认会对外发布端口 `4310` 与 `AWB_WORKSPACE_PORT_RANGE`（当未创建 `.env` 时）。
+推荐的 `.env.example` 模板默认仅绑定 localhost（`AWB_PUBLISH_HOST=127.0.0.1`）。如果你把服务部署在远程主机上, 建议优先按更安全的方式暴露服务:
 
 - 通过 `.env` 设置 `AWB_PUBLISH_HOST=127.0.0.1`, 仅允许本机访问
 - 在宿主机上使用 Nginx/Caddy 等做 HTTPS 反代对外提供访问
@@ -78,6 +88,9 @@ docker compose up -d --build
 如果你需要在局域网/公网直接暴露端口, 可以使用 `AWB_PUBLISH_HOST=0.0.0.0`, 并配合防火墙规则与鉴权设置.
 
 **环境变量**
+
+> 说明：Docker Compose 的 `.env` 默认主要用于变量替换。只有在 `docker-compose.yml` 的
+> `services.<name>.environment`（或 `env_file`）中显式注入的变量，才会进入容器内进程环境。
 
 | 变量 | 说明 |
 |------|------|
@@ -89,8 +102,14 @@ docker compose up -d --build
 | `AWB_AUTH_TOKEN` | 访问 token 保护（可选）。设置后需要在首页输入 token 登录（会话 Cookie）才能访问 Web UI/API。 |
 | `AWB_AUTH_COOKIE_SECURE` | HTTPS 场景建议设为 `1`(为会话 Cookie 添加 `Secure`), 本地 HTTP 开发保持 `0`. |
 | `AWB_PUBLISH_HOST` | 端口发布的宿主机绑定地址(Docker Compose). 设为 `127.0.0.1` 可仅允许本机访问. |
+| `AWB_AGENT_STARTUP_RECOVERY_MODE` | Agent 启动恢复策略：`fail`（默认，终止未完成 run）或 `recover`（尝试恢复未完成 run）。 |
+| `AWB_AGENT_WORKER_ENABLED` | 是否启用 agent worker 进程（默认 `true`）。设为 `0` 会回退到 API 进程内 runtime（一般仅用于排障）。 |
+| `AWB_AGENT_WORKER_CONCURRENCY` | worker 并发执行 run 的上限（默认 `2`）。注意：同一个 sessionId 的 run 仍会串行。 |
+| `AWB_AGENT_LOOP_MAX_STEPS` | worker 的 step-loop 最大轮数（默认 `128`），`<=0` 表示不限制。 |
+| `AWB_AGENT_LOOP_REPEAT_TOOL_CALL_THRESHOLD` | step-loop 中连续重复工具调用阈值（默认 `20`），`<=0` 表示不限制。 |
+| `AWB_AGENT_DEBUG_DUMP` | 调试落盘开关（`1` 开启）。会在 `<workspace>/.debug/agent_context_item_logs/` 写入日志。 |
 
-其他 Compose 相关变量(如 `AWB_HOST`, `AWB_DATA_DIR`, `AWB_SERVE_WEB`, `AWB_WEB_DIST_DIR`)请以 `.env.docker.example` 为准.
+其他 Compose 相关变量(如 `AWB_HOST`, `AWB_DATA_DIR`, `AWB_SERVE_WEB`, `AWB_WEB_DIST_DIR`)请以 `.env.example` 为准.
 
 ---
 
@@ -139,7 +158,7 @@ npm run dev
 
 **本地环境变量**
 
-- 复制 `.env.example` 为 `.env.local`，按需修改变量
+- 复制 `.env.dev.example` 为 `.env.local`，按需修改变量
   - `AWB_PORT`：后端监听端口（默认 `4310`）
   - `AWB_DEV_WEB_PORT`：仅前端开发期（Vite dev server）使用：前端 dev server 端口（可选）
   - `AWB_DEV_API_ORIGIN`：仅前端开发期使用：前端 dev proxy 的后端目标地址（可选；默认 `http://127.0.0.1:${AWB_PORT}`）

@@ -55,14 +55,14 @@
 
 ## 环境变量与本地数据
 
-- 环境变量文件使用仓库根目录的 `.env.local`（从 `.env.example` 复制）
+- 环境变量文件使用仓库根目录的 `.env.local`（从 `.env.dev.example` 复制）
 - 后端会在启动时读取根目录 `.env.local` 中的 `AWB_*` 变量，并且不会覆盖已存在的 `process.env`
   - 根目录定位规则：从 `process.cwd()` 开始向上查找，遇到包含 `workspaces` 字段的 `package.json` 即视为仓库根目录
 - `GET /api/health` 的 `version` 为运行时探测值
   - 优先读 `AWB_APP_VERSION`，其次从启动目录或仓库内的 `apps/api/package.json` 探测，最终回退 `"0.0.0"`
 - 前端 Vite 的 `envDir` 指向仓库根目录，开发期通过 proxy 把 `/api` 与 WebSocket 代理到后端
 
-关键变量（示例见 `.env.example`）
+关键变量（示例见 `.env.dev.example`）
 
 - `AWB_DATA_DIR`
   - 默认 `.data`，后端会 `path.resolve` 成绝对路径

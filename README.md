@@ -31,13 +31,22 @@ git clone https://github.com/nickham-su/agent-workbench.git
 ```
 
 - Optional config (recommended)
-  - Copy `.env.docker.example` to `.env` and edit variables as needed
-  - If you skip this step, Docker Compose will use defaults from `docker-compose.yml`
+  - Copy `.env.example` to `.env` and edit variables as needed (recommended)
+    - `.env.docker.example` is kept for compatibility and mirrors `.env.example`
+  - If you skip this step, Docker Compose will use defaults from `docker-compose.yml` (Compose defaults),
+    and any unspecified runtime parameters will fall back to application defaults.
 
 - Start the service
 
 ```bash
 docker compose up -d --build
+```
+
+**Verify env injection (optional)**
+
+```bash
+docker compose exec agent-workbench printenv AWB_AGENT_WORKER_CONCURRENCY
+docker compose exec agent-workbench printenv AWB_AGENT_LOOP_MAX_STEPS
 ```
 
 **Access**
@@ -71,7 +80,9 @@ Two named volumes are used by default:
 
 **Security**
 
-By default, for convenience, `AWB_PORT` and `AWB_WORKSPACE_PORT_RANGE` are published on all interfaces. If you deploy this on a remote host, prefer a safer exposure model:
+The Compose file publishes `AWB_PORT` and `AWB_WORKSPACE_PORT_RANGE` on all interfaces by default for convenience
+(when no `.env` is provided). The recommended `.env.example` template binds them to localhost (`AWB_PUBLISH_HOST=127.0.0.1`).
+If you deploy this on a remote host, prefer a safer exposure model:
 
 - Bind to localhost via `.env`: `AWB_PUBLISH_HOST=127.0.0.1`
 - Put Nginx/Caddy in front as an HTTPS reverse proxy
@@ -81,6 +92,10 @@ By default, for convenience, `AWB_PORT` and `AWB_WORKSPACE_PORT_RANGE` are publi
 If you need to publish ports to LAN/public directly, use `AWB_PUBLISH_HOST=0.0.0.0` and apply firewall rules + auth accordingly.
 
 **Environment Variables**
+
+> Note: Docker Compose `.env` is mainly for variable substitution. Only variables explicitly
+> injected via `docker-compose.yml` `services.<name>.environment` (or `env_file`) will be visible
+> to the process inside the container.
 
 | Variable | Description |
 |----------|-------------|
@@ -93,8 +108,13 @@ If you need to publish ports to LAN/public directly, use `AWB_PUBLISH_HOST=0.0.0
 | `AWB_AUTH_COOKIE_SECURE` | Set to `1` when serving over HTTPS (adds `Secure` to the session cookie). Keep `0` for local HTTP dev. |
 | `AWB_PUBLISH_HOST` | Host IP to publish ports on (Docker Compose). Set `127.0.0.1` to allow localhost access only. |
 | `AWB_AGENT_STARTUP_RECOVERY_MODE` | Agent startup recovery mode: `fail` (default, terminate inflight runs) or `recover` (resume inflight runs). |
+| `AWB_AGENT_WORKER_ENABLED` | Enable agent worker process (default `true`). Set to `0` to fall back to API in-process runtime (debug only). |
+| `AWB_AGENT_WORKER_CONCURRENCY` | Max number of runs the worker executes concurrently (default `2`). Note: runs within the same session still execute serially. |
+| `AWB_AGENT_LOOP_MAX_STEPS` | Max loop steps per run in worker (default `128`). Set `<=0` for unlimited. |
+| `AWB_AGENT_LOOP_REPEAT_TOOL_CALL_THRESHOLD` | Threshold for repeated tool calls in a loop (default `20`). Set `<=0` for unlimited. |
+| `AWB_AGENT_DEBUG_DUMP` | Debug dump switch (`1` to enable). Writes per-context logs under `<workspace>/.debug/agent_context_item_logs/`. |
 
-Other Compose-related variables (e.g. `AWB_HOST`, `AWB_DATA_DIR`, `AWB_SERVE_WEB`, `AWB_WEB_DIST_DIR`) are documented in `.env.docker.example`.
+Other Compose-related variables (e.g. `AWB_HOST`, `AWB_DATA_DIR`, `AWB_SERVE_WEB`, `AWB_WEB_DIST_DIR`) are documented in `.env.example`.
 
 ---
 
@@ -143,7 +163,7 @@ npm run dev
 
 **Local env**
 
-- Copy `.env.example` to `.env.local` and adjust variables as needed
+- Copy `.env.dev.example` to `.env.local` and adjust variables as needed
   - `AWB_PORT`: backend listen port (default: `4310`)
   - `AWB_DEV_WEB_PORT`: Vite dev server port (optional)
   - `AWB_DEV_API_ORIGIN`: dev proxy target (optional, default: `http://127.0.0.1:${AWB_PORT}`)
