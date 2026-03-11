@@ -188,6 +188,20 @@ function hasClosedMermaidFence(text: string) {
   return /```\s*mermaid[\t ]*\r?\n[\s\S]*?```/i.test(text);
 }
 
+function isMermaidErrorSvg(svgText: string) {
+  const text = String(svgText || "");
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  // mermaid 解析失败时经常返回一个“错误 SVG”(而不是抛异常)
+  // 该 SVG 通常带有 aria-roledescription="error" 与 Syntax error 文本。
+  return (
+    lower.includes('aria-roledescription="error"') ||
+    lower.includes("syntax error") ||
+    lower.includes("error-icon") ||
+    lower.includes("error-text")
+  );
+}
+
 ensurePurifyHooks();
 
 const rootEl = ref<HTMLElement | null>(null);
@@ -289,14 +303,43 @@ async function renderMermaidBlocks(seq: number, rawText: string) {
         const renderId = `awb_mermaid_${props.messageId}_${props.sectionKey || "body"}_${i}_${Date.now()}`;
         const rendered = await mermaid.render(renderId, source);
         const rawSvg = typeof rendered === "string" ? rendered : rendered.svg;
+
+        // 方案A：mermaid 语法错误时可能会返回“错误 SVG”(包含错误图标与错误提示文字)。
+        // 我们不将其展示为图片，直接回退为原代码块。
+        if (isMermaidErrorSvg(rawSvg)) {
+          if (import.meta.env.DEV) {
+            // eslint-disable-next-line no-console
+            console.warn("[awb mermaid] render returned error svg, fallback to code block", { source });
+          }
+          continue;
+        }
+
         const sanitizedSvg = DOMPurify.sanitize(rawSvg, SVG_SANITIZE_CONFIG);
         const safeSvgText = typeof sanitizedSvg === "string" ? sanitizedSvg : String(sanitizedSvg);
         safeSvg = stripSvgLinks(safeSvgText);
+
+        // sanitize 可能会清空 SVG，避免替换为一个空节点。
+        if (!safeSvg || !safeSvg.includes("<svg")) {
+          if (import.meta.env.DEV) {
+            // eslint-disable-next-line no-console
+            console.warn("[awb mermaid] sanitized svg is empty, fallback to code block", { source });
+          }
+          safeSvg = null;
+          continue;
+        }
+
         setCacheValue(mermaidCache, cacheKey, safeSvg, MERMAID_CACHE_MAX);
-      } catch {
+      } catch (err) {
+        if (import.meta.env.DEV) {
+          // eslint-disable-next-line no-console
+          console.warn("[awb mermaid] render failed, fallback to code block", err);
+        }
         continue;
       }
     }
+
+    // 可能因错误/清洗为空而回退
+    if (!safeSvg) continue;
 
     const pre = codeEl.parentElement;
     if (!pre || pre.tagName.toLowerCase() !== "pre") continue;
@@ -438,5 +481,18 @@ onBeforeUnmount(() => {
   max-width: 100%;
   height: auto;
   margin: 0 auto;
+}
+
+/*
+ * Mermaid 的 SVG 在安全清洗时会移除 style 属性，可能导致 text/tspan 继承到 fill="none" 而不可见。
+ * 这里用安全的 CSS 兜底，保证文字可见。
+ */
+.assistant-markdown-message :deep(.assistant-mermaid-wrapper) {
+  color: var(--text-color);
+}
+
+.assistant-markdown-message :deep(.assistant-mermaid-wrapper svg text),
+.assistant-markdown-message :deep(.assistant-mermaid-wrapper svg tspan) {
+  fill: currentColor !important;
 }
 </style>
