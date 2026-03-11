@@ -17,6 +17,10 @@
           </a-button>
           <div class="min-w-0 flex items-center gap-2">
             <span class="text-[14px] leading-none truncate text-[color:var(--text-secondary)]">{{ sessionTitleText }}</span>
+            <template v-if="headerTokensText">
+              <span class="leading-none whitespace-nowrap">·</span>
+              <span class="leading-none whitespace-nowrap tabular-nums">{{ headerTokensText }}</span>
+            </template>
             <template v-if="currentRunElapsedText">
               <span class="leading-none whitespace-nowrap">·</span>
               <span class="leading-none whitespace-nowrap tabular-nums">{{ currentRunElapsedText }}</span>
@@ -28,6 +32,10 @@
           class="min-w-0 flex-1 flex items-center gap-2"
         >
           <div class="text-[14px] leading-none truncate text-[color:var(--text-secondary)]">{{ sessionTitleText }}</div>
+          <template v-if="headerTokensText">
+            <span class="leading-none whitespace-nowrap">·</span>
+            <span class="leading-none whitespace-nowrap tabular-nums">{{ headerTokensText }}</span>
+          </template>
           <template v-if="currentRunElapsedText">
             <span class="leading-none whitespace-nowrap">·</span>
             <span class="leading-none whitespace-nowrap tabular-nums">{{ currentRunElapsedText }}</span>
@@ -361,28 +369,29 @@
       <div class="pt-2">
         <div class="flex items-center justify-between gap-2">
           <div v-if="hasAvailableAgents" class="flex items-center gap-2 min-w-0">
-           <a-select
-             :value="effectiveAgentId"
-             :options="props.agentOptions"
-             size="small"
-             style="min-width: 180px; max-width: 320px"
-             @update:value="onAgentChange"
-           />
-           <div v-if="effectiveModelLabel" class="min-w-0 max-w-[360px] text-[0.9em] text-[color:var(--text-tertiary)] truncate" :title="effectiveModelLabel">
-             {{ effectiveModelLabel }}
-           </div>
-           </div>
+            <a-select
+              :value="effectiveAgentId"
+              :options="props.agentOptions"
+              size="small"
+              style="min-width: 180px; max-width: 320px"
+              @update:value="onAgentChange"
+            />
+            <div
+              v-if="effectiveModelLabel"
+              class="min-w-0 max-w-[360px] text-[0.9em] text-[color:var(--text-tertiary)] truncate"
+              :title="effectiveModelLabel"
+            >
+              {{ effectiveModelLabel }}
+            </div>
+          </div>
           <div v-else class="flex items-center gap-2 text-[0.9em] text-[color:var(--text-tertiary)]">
             <span>{{ t("agent.client.noAgentHint") }}</span>
             <a-button type="link" size="small" class="!px-0" @click="goAgentProfiles">
               {{ t("agent.client.goCreateAgent") }}
             </a-button>
-           </div>
-           <div class="text-[0.9em] text-[color:var(--text-tertiary)] whitespace-nowrap">
-            {{ t("agent.client.lastTotalTokens") }}: {{ formattedLastTotalTokensWithRatio }}
-           </div>
-         </div>
-       </div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -831,24 +840,24 @@ const effectiveContextWindowTokens = computed(() => {
   return Math.floor(value);
 });
 
-const formattedLastTotalTokens = computed(() => {
-  const value = runState.value.lastResponseTotalTokens;
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "-";
-  return new Intl.NumberFormat().format(Math.floor(value));
+const headerTokensNumberFormatter = new Intl.NumberFormat();
+const headerTokensPercentFormatter = new Intl.NumberFormat(undefined, {
+  style: "percent",
+  maximumFractionDigits: 1
 });
 
-const formattedLastTotalTokensWithRatio = computed(() => {
+const headerTokensText = computed(() => {
   const value = runState.value.lastResponseTotalTokens;
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "-";
-  const formattedTokens = new Intl.NumberFormat().format(Math.floor(value));
+  // 需求：null/0 不展示 tokens 段
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return "";
+  const formattedTokens = headerTokensNumberFormatter.format(Math.floor(value));
   const limit = effectiveContextWindowTokens.value;
-  if (typeof limit !== "number" || !Number.isFinite(limit) || limit < 1) return formattedTokens;
+  if (typeof limit !== "number" || !Number.isFinite(limit) || limit < 1) {
+    return `${formattedTokens} tokens`;
+  }
   const ratio = value / limit;
-  const formattedRatio = new Intl.NumberFormat(undefined, {
-    style: "percent",
-    maximumFractionDigits: 1
-  }).format(ratio);
-  return `${formattedTokens} (${formattedRatio})`;
+  const formattedRatio = headerTokensPercentFormatter.format(ratio);
+  return `${formattedTokens} tokens (${formattedRatio})`;
 });
 const inputPlaceholder = computed(() => {
   if (!hasAvailableAgents.value) {
