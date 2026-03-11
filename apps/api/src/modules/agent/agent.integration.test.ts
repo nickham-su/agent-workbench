@@ -1815,7 +1815,6 @@ test("agent prompt-context 根据 run uiLocale 注入语言与时间运行时约
   assert.ok(prompt.system.includes("[runtime_constraints]"), "system should include runtime constraints section");
   assert.equal(prompt.system.includes("## Runtime Constraints"), false, "system should not include legacy runtime constraints heading");
   assert.ok(outputSection.includes("Output format requirements:"));
-  assert.ok(runtimeSection.includes("Completion constraints:"), "runtime constraints should include completion constraints");
   assert.ok(runtimeSection.includes("Language requirement: use English consistently for this run."));
   assert.ok(runtimeSection.includes("If you call todolist, the goal and todos[].content must also be in English."));
   assert.ok(runtimeSection.includes("Current system time:"));
@@ -1851,7 +1850,6 @@ test("agent prompt-context 在 zh-CN locale 下使用中文 output/runtime secti
   const runtimeSection = extractPromptSection(prompt.system, "runtime_constraints");
 
   assert.ok(outputSection.includes("输出格式要求："));
-  assert.ok(runtimeSection.includes("完成判定约束："));
   assert.ok(runtimeSection.includes("语言要求：本轮对话请统一使用简体中文。"));
   assert.ok(runtimeSection.includes("当前系统时间："));
   assert.ok(runtimeSection.includes("当前时区："));
@@ -1879,7 +1877,6 @@ test("agent prompt-context 在缺省 locale 下使用 locale-neutral 英文 outp
   const runtimeSection = extractPromptSection(prompt.system, "runtime_constraints");
 
   assert.ok(outputSection.includes("Output format requirements:"));
-  assert.ok(runtimeSection.includes("Completion constraints:"));
   assert.ok(runtimeSection.includes("Current system time:"));
   assert.ok(runtimeSection.includes("Time zone:"));
   assert.equal(runtimeSection.includes("Language requirement: use English consistently for this run."), false, "null locale should not add English language requirement");
@@ -1918,7 +1915,6 @@ test("agent prompt-context 对 store 中非法 uiLocale 回退为 locale-neutral
   const runtimeSection = extractPromptSection(prompt.system, "runtime_constraints");
 
   assert.ok(outputSection.includes("Output format requirements:"));
-  assert.ok(runtimeSection.includes("Completion constraints:"));
   assert.equal(outputSection.includes("输出格式要求："), false, "invalid locale fallback should not use Chinese output text");
   assert.equal(runtimeSection.includes("语言要求：本轮对话请统一使用简体中文。"), false, "invalid locale fallback should not use Chinese runtime text");
 });
@@ -5496,8 +5492,6 @@ test("agent prompt-context 同时存在 global/workspace/agent 时按既定顺�
   assert.ok(idxOutput >= 0, "system should include output format instructions section");
   assert.ok(idxRuntime >= 0, "system should include runtime constraints section");
   assert.ok(context.system.includes("Output format requirements:"), "system should include output format instruction body");
-  assert.ok(context.system.includes("Completion constraints:"), "runtime constraints should include completion rule");
-  assert.ok(context.system.includes("The current runtime treats a plain-text response as task completion."), "runtime constraints should mention plain text completion");
   assert.ok(idxAgent >= 0, "system should include AGENT_PROMPT");
 
   assert.ok(idxSystemBaseTag < idxATag, "order: system base tag before global prompts");
@@ -5665,7 +5659,6 @@ test("agent prompt-context 在 agent prompt 为空且无 workspace/global 时仅
   assert.ok(context.system.includes("[system_base]"), "system should include system base section");
   assert.ok(context.system.includes("[output_format_instructions]"), "system should include output format instructions");
   assert.ok(context.system.includes("[runtime_constraints]"), "system should include runtime constraints");
-  assert.ok(context.system.includes("Completion constraints:"), "runtime constraints should include completion rule");
   assert.equal(context.system.includes("## Global Prompt:"), false, "system should not include global prompt sections");
   assert.equal(context.system.includes("[global_prompt]"), false, "system should not include global prompt blocks when none selected");
   assert.equal(

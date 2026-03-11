@@ -819,12 +819,6 @@ function buildRuntimeInstruction(input: { uiLocale: AgentUiLocale | null; now: D
 
   if (input.uiLocale === "zh-CN") {
     pushGroup([
-      "完成判定约束：",
-      "- 当前运行环境会将纯文本输出视为任务结束。",
-      "- 因此，在任务最终完成之前，每次回复都必须包含工具调用，不能只输出纯文本。",
-      "- 只有在确认任务已经完成、无需继续执行时，才能发送纯文本的最终答复。"
-    ]);
-    pushGroup([
       "语言要求：本轮对话请统一使用简体中文。",
       "对用户的回答使用简体中文。",
       "内部思考/推理文本使用简体中文。",
@@ -836,12 +830,6 @@ function buildRuntimeInstruction(input: { uiLocale: AgentUiLocale | null; now: D
       `当前时区：${timeZone}`
     ]);
   } else {
-    pushGroup([
-      "Completion constraints:",
-      "- The current runtime treats a plain-text response as task completion.",
-      "- Therefore, before the task is actually complete, every reply must include at least one tool call and must not be plain text only.",
-      "- Only when you are sure the task is complete and no more execution is needed may you send a plain-text final answer."
-    ]);
     if (input.uiLocale === "en-US") {
       pushGroup([
         "Language requirement: use English consistently for this run.",
