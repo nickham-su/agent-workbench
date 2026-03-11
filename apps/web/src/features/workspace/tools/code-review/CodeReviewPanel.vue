@@ -289,6 +289,9 @@ const unstaged = ref<ChangeItem[]>([]);
 const staged = ref<ChangeItem[]>([]);
 const selected = ref<Selected>(null);
 const selectedFingerprint = ref<string | null>(null);
+// 仅当用户点击列表项触发选中时才允许打开 diff 编辑器；用于避免 refresh/stage/unstage/轮询等路径触发自动打开
+// 用 selectionKey 精确绑定一次打开请求，避免异步 refreshCompare() 过程中标记残留或错配
+const openDiffRequestedByUserKey = ref<string | null>(null);
 // 记录每个 mode 下,用户上次选中的(排序后)索引,用于刷新后回退到“原位置上的文件”
 const lastSelectedIndexByMode = ref<Record<ChangeMode, number>>({unstaged: 0, staged: 0});
 
@@ -370,6 +373,8 @@ function isSelected(mode: ChangeMode, path: string) {
 
 function selectFile(mode: ChangeMode, path: string, oldPath?: string) {
   selected.value = {mode, path, oldPath};
+  // 放在 selected 之后设置：即使重复点击同一项（selected 不变），也能通过 key 变化触发 watcher 打开 diff
+  openDiffRequestedByUserKey.value = `${mode}|${path}|${oldPath || ""}`;
   const list = mode === "unstaged" ? unstagedFiles.value : stagedFiles.value;
   const match =
       list.find((f) => f.path === path && (f.oldPath || "") === (oldPath || "")) ||
@@ -455,8 +460,6 @@ async function reconcileSelectedAfterRefresh() {
 
   const primaryMode = sel.mode;
   const primaryList = primaryMode === "unstaged" ? unstagedFiles.value : stagedFiles.value;
-  const otherMode: ChangeMode = primaryMode === "unstaged" ? "staged" : "unstaged";
-  const otherList = primaryMode === "unstaged" ? stagedFiles.value : unstagedFiles.value;
 
   const primaryMatch = findBestMatch(primaryList, sel);
   if (primaryMatch) {
@@ -480,27 +483,8 @@ async function reconcileSelectedAfterRefresh() {
     return;
   }
 
-  // “留在当前 mode 优先”: 当前 mode 中不存在原选中项时,优先选中原位置上的文件
-  if (primaryList.length > 0) {
-    const rawIdx = lastSelectedIndexByMode.value[primaryMode] ?? 0;
-    const idx = Math.max(0, Math.min(primaryList.length - 1, rawIdx));
-    const next = primaryList[idx]!;
-    selectedFingerprint.value = fingerprintFor(primaryMode, next);
-    selected.value = {mode: primaryMode, path: next.path, oldPath: next.oldPath};
-    lastSelectedIndexByMode.value[primaryMode] = idx;
-    return;
-  }
-
-  // 当前 mode 为空时,才允许切到另一个 mode 继续选中原文件
-  const otherMatch = findBestMatch(otherList, sel);
-  if (otherMatch) {
-    const idx = otherList.indexOf(otherMatch);
-    if (idx >= 0) lastSelectedIndexByMode.value[otherMode] = idx;
-    selectedFingerprint.value = fingerprintFor(otherMode, otherMatch);
-    selected.value = {mode: otherMode, path: otherMatch.path, oldPath: otherMatch.oldPath};
-    return;
-  }
-
+  // 当原选中项在当前 mode 中已不存在时：不再自动选中“下一个/原位置”或切到另一列表匹配。
+  // 直接清空选中，等待用户手动选择。
   selectedFingerprint.value = null;
   selected.value = null;
 }
@@ -767,13 +751,31 @@ async function refreshCompare() {
   }
 }
 
-watch(selected, async () => {
+watch([selected, openDiffRequestedByUserKey], async () => {
   const selectionKey = selected.value ? `${selected.value.mode}|${selected.value.path}|${selected.value.oldPath || ""}` : null;
   const selectedPath = selected.value?.path ?? "";
+
+  // selected 为空时：不触发 refreshCompare（避免 compare 清空/多余请求）。
+  // 同时让任何 in-flight compare 请求失效，避免在取消选中后写回 compare / 卡住 loading。
+  if (!selectionKey) {
+    openDiffRequestedByUserKey.value = null;
+    compareReqSeq += 1;
+    compareLoading.value = false;
+    return;
+  }
+
+  // 只允许“用户点击触发的选中”打开 diff；其他路径（refresh/stage/unstage/轮询/重对齐）不打开编辑器
+  const requestedKey = openDiffRequestedByUserKey.value;
+  const shouldOpenDiff = !!selectionKey && !!requestedKey && requestedKey === selectionKey;
+  // 立刻清空（一次性消费），避免 refreshCompare() 失败/不可预览等路径导致标记残留，从而下一次意外自动打开
+  openDiffRequestedByUserKey.value = null;
+
+  if (!shouldOpenDiff) return;
+
   await refreshCompare();
-  if (!selectionKey) return;
   const latestKey = selected.value ? `${selected.value.mode}|${selected.value.path}|${selected.value.oldPath || ""}` : null;
   if (latestKey !== selectionKey) return;
+
   if (compareError.value) {
     message.error(`${selectedPath}: ${compareError.value}`);
     return;
