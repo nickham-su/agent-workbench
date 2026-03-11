@@ -483,26 +483,33 @@ function toAgentProvidersSettingsView(settings: AgentProvidersSettingsStored, up
 }
 
 function normalizeAgentTools(raw: unknown): AgentToolName[] {
-  if (!Array.isArray(raw)) return ["bash", "read", "write", "apply_patch", "note", "todolist", "subtask", "archive_search", "archive_read"];
+  // Baseline tools (read/todolist/note/archive_*) are always available at runtime and no longer need to be stored in agent profiles.
+  // This function keeps only user-configurable tools.
+  const defaultTools: AgentToolName[] = ["bash", "write", "apply_patch", "subtask"];
+  if (!Array.isArray(raw)) return defaultTools;
   const out: AgentToolName[] = [];
   const seen = new Set<AgentToolName>();
   for (const item of raw) {
     if (
       item !== "bash" &&
-      item !== "read" &&
       item !== "write" &&
       item !== "apply_patch" &&
-      item !== "note" &&
-      item !== "todolist" &&
       item !== "subtask" &&
+      // Legacy baseline tool names are intentionally ignored.
+      item !== "read" &&
+      item !== "todolist" &&
+      item !== "note" &&
       item !== "archive_search" &&
       item !== "archive_read"
     ) continue;
+    if (item === "read" || item === "todolist" || item === "note" || item === "archive_search" || item === "archive_read") {
+      continue;
+    }
     if (seen.has(item)) continue;
     seen.add(item);
     out.push(item);
   }
-  return out.length > 0 ? out : ["bash", "read", "write", "apply_patch", "note", "todolist", "subtask", "archive_search", "archive_read"];
+  return out;
 }
 
 function normalizeAgentPluginTools(raw: unknown): AgentPluginTools {

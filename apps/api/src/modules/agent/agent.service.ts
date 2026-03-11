@@ -3490,7 +3490,7 @@ export class AgentService {
     const dirPath = agentArchiveSessionDir(this.ctx.dataDir, params.workspaceId, session.id);
     const files = await listArchiveFilesAsc(dirPath);
     if (files.length === 0) {
-      return { text: "" };
+      return { text: "", noArchive: true };
     }
 
     const newestFirstLines: string[] = [];
@@ -3840,7 +3840,7 @@ export class AgentService {
     const dirPath = agentArchiveSessionDir(this.ctx.dataDir, params.workspaceId, session.id);
     const files = await listArchiveFilesAsc(dirPath);
     if (files.length === 0) {
-      return { text: "" };
+      return { text: "", noArchive: true };
     }
 
     const newestFirstLines: string[] = [];
@@ -3908,17 +3908,18 @@ export class AgentService {
       compactionSnippetUiLocale: normalizeAgentUiLocale(run.uiLocale)
     });
 
-    const hasArchivedItems = getSessionTranscriptItems(this.ctx.db, params.workspaceId, params.sessionId).some(
-      (item) => item.archiveAt != null
-      );
-    const hasArchiveFiles =
-      (await listArchiveFilesAsc(agentArchiveSessionDir(this.ctx.dataDir, params.workspaceId, session.id))).length > 0;
-    const hasArchive = hasArchivedItems && hasArchiveFiles;
-    let enabledToolNames = hasArchive
-      ? [...profile.agent.tools]
-      : profile.agent.tools.filter((name) => name !== "archive_search" && name !== "archive_read");
+    const baselineToolNames = ["read", "todolist", "archive_search", "archive_read", "note"] as const;
+    const enabledToolNames: string[] = [];
+    const enabledToolNameSet = new Set<string>();
+    for (const name of [...baselineToolNames, ...profile.agent.tools]) {
+      if (!name || enabledToolNameSet.has(name)) continue;
+      enabledToolNameSet.add(name);
+      enabledToolNames.push(name);
+    }
     if (session.kind === "subtask") {
-      enabledToolNames = enabledToolNames.filter((name) => name !== "subtask");
+      const filtered = enabledToolNames.filter((name) => name !== "subtask");
+      enabledToolNames.length = 0;
+      enabledToolNames.push(...filtered);
     }
 
     const subtaskDescription = enabledToolNames.includes("subtask")

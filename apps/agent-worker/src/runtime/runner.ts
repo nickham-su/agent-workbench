@@ -297,7 +297,12 @@ function buildToolSuccessText(params: {
   }
 
   if (params.toolName === "archive_search" || params.toolName === "archive_read") {
-    const body = typeof resultObj?.text === "string" ? resultObj.text : stringifyResult(params.result);
+    const noArchive = resultObj?.noArchive === true;
+    const body = noArchive
+      ? "No archive yet."
+      : typeof resultObj?.text === "string"
+        ? resultObj.text
+        : stringifyResult(params.result);
     return buildToolText({
       toolName: params.toolName,
       status: params.status,

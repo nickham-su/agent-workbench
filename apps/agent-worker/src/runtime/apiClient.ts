@@ -284,11 +284,10 @@ export class AgentApiClient {
     snippet?: boolean;
     regex?: boolean;
   }) {
-    const res = await this.request<{ text: string }>("/api/internal/agent/archive/search", {
+    return await this.request<{ text: string; noArchive?: boolean }>("/api/internal/agent/archive/search", {
       method: "POST",
       body: input
     });
-    return res.text;
   }
 
   async archiveRead(input: {
@@ -298,11 +297,10 @@ export class AgentApiClient {
     lineCount?: number;
     maxChars?: number;
   }) {
-    const res = await this.request<{ text: string }>("/api/internal/agent/archive/read", {
+    return await this.request<{ text: string; noArchive?: boolean }>("/api/internal/agent/archive/read", {
       method: "POST",
       body: input
     });
-    return res.text;
   }
 
   async startSubtaskRun(input: {

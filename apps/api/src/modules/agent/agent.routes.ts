@@ -716,7 +716,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
           regex: Type.Optional(Type.Boolean())
         }),
         response: {
-          200: Type.Object({ text: Type.String() }),
+          200: Type.Object({ text: Type.String(), noArchive: Type.Optional(Type.Boolean()) }),
           400: ErrorResponseSchema,
           401: ErrorResponseSchema,
           404: ErrorResponseSchema
@@ -752,7 +752,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
           maxChars: Type.Optional(Type.Integer({ minimum: 1000, maximum: 10000 }))
         }),
         response: {
-          200: Type.Object({ text: Type.String() }),
+          200: Type.Object({ text: Type.String(), noArchive: Type.Optional(Type.Boolean()) }),
           400: ErrorResponseSchema,
           401: ErrorResponseSchema,
           404: ErrorResponseSchema

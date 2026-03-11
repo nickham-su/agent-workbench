@@ -275,26 +275,16 @@ const RESERVED_GLOBAL_SYSTEM_PROMPT_ID = "global_system_prompt";
 
 const DEFAULT_TOOLS: AgentToolName[] = [
   "bash",
-  "read",
   "write",
   "apply_patch",
-  "note",
-  "todolist",
   "subtask",
-  "archive_search",
-  "archive_read"
 ];
 
 const toolOptions = computed(() => [
   { label: t("settings.agentProfiles.tools.bash"), value: "bash" },
-  { label: t("settings.agentProfiles.tools.read"), value: "read" },
   { label: t("settings.agentProfiles.tools.write"), value: "write" },
   { label: t("settings.agentProfiles.tools.applyPatch"), value: "apply_patch" },
-  { label: t("settings.agentProfiles.tools.note"), value: "note" },
-  { label: t("settings.agentProfiles.tools.todolist"), value: "todolist" },
-  { label: t("settings.agentProfiles.tools.subtask"), value: "subtask" },
-  { label: t("settings.agentProfiles.tools.archiveSearch"), value: "archive_search" },
-  { label: t("settings.agentProfiles.tools.archiveRead"), value: "archive_read" }
+  { label: t("settings.agentProfiles.tools.subtask"), value: "subtask" }
 ]);
 
 const loading = ref(false);
@@ -376,7 +366,6 @@ const agentPromptBytes = computed(() => new TextEncoder().encode(agentFormPrompt
 const canSubmitAgent = computed(() => {
   if (!agentFormId.value.trim()) return false;
   if (!agentFormName.value.trim()) return false;
-  if (agentFormTools.value.length === 0) return false;
   if (toDefaultModelFromPath(agentFormDefaultModelPath.value) === undefined) return false;
   return true;
 });
@@ -393,20 +382,15 @@ function normalizeTools(raw: AgentToolName[]) {
   for (const item of raw) {
     if (
       item !== "bash" &&
-      item !== "read" &&
       item !== "write" &&
       item !== "apply_patch" &&
-      item !== "note" &&
-      item !== "todolist" &&
-      item !== "subtask" &&
-      item !== "archive_search" &&
-      item !== "archive_read"
+      item !== "subtask"
     ) continue;
     if (seen.has(item)) continue;
     seen.add(item);
     out.push(item);
   }
-  return out.length > 0 ? out : [...DEFAULT_TOOLS];
+  return out;
 }
 
 function normalizeMcpServers(raw: unknown): string[] {

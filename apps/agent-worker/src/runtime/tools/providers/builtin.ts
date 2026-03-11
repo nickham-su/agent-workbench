@@ -116,6 +116,9 @@ export class BuiltinToolProvider implements ToolProvider {
 
   isToolEnabled(toolName: string, ctx: AvailableToolContext | ToolExecutionContext) {
     if (!isBuiltinToolName(toolName)) return false;
+    if (toolName === "read" || toolName === "todolist" || toolName === "archive_search" || toolName === "archive_read" || toolName === "note") {
+      return true;
+    }
     return ctx.profile.agent.tools.includes(toolName as BuiltinToolName);
   }
 
