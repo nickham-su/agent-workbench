@@ -704,6 +704,68 @@ function toTerminalWriteOutput(output: AgentContextItemRecord["output"]) {
   };
 }
 
+function buildToolText(params: {
+  toolName: string;
+  status: "running" | "completed" | "failed" | "cancelled";
+  headers?: Array<[string, string | undefined]>;
+  body?: string;
+}) {
+  const lines: string[] = [`tool: ${params.toolName}`, `status: ${params.status}`];
+  for (const [key, value] of params.headers ?? []) {
+    if (value == null || !String(value).trim()) continue;
+    lines.push(`${key}: ${String(value).trim()}`);
+  }
+  lines.push("");
+  const body = typeof params.body === "string" ? params.body : "";
+  if (body) lines.push(body);
+  return lines.join("\n");
+}
+
+function parseSubtaskSessionIdFromToolText(text: unknown) {
+  if (typeof text !== "string") return "";
+  const match = text.match(/(?:^|\n)subtask_session_id:\s*([^\s]+)/);
+  return match ? String(match[1] || "").trim() : "";
+}
+
+function toTerminalSubtaskCancelledOutput(output: AgentContextItemRecord["output"]) {
+  if (!output || output.type !== "tool" || output.toolName !== "subtask") return output;
+
+  const resultObj = output.result && typeof output.result === "object" ? (output.result as Record<string, unknown>) : null;
+  const fromResult = typeof resultObj?.subtaskSessionId === "string" ? resultObj.subtaskSessionId.trim() : "";
+  const fromText = parseSubtaskSessionIdFromToolText((output as { text?: unknown }).text);
+  const subtaskSessionId = fromResult || fromText;
+
+  const body = subtaskSessionId
+    ? `Subtask was cancelled. To continue it later, call subtask with session: { mode: "existing", sessionId: "${subtaskSessionId}" }.`
+    : "Subtask was cancelled.";
+
+  const nextResult = resultObj
+    ? {
+        ...resultObj,
+        ...(subtaskSessionId && !fromResult ? { subtaskSessionId } : {})
+      }
+    : output.result;
+
+  return {
+    ...output,
+    text: buildToolText({
+      toolName: "subtask",
+      status: "cancelled",
+      headers: [["subtask_session_id", subtaskSessionId || undefined]],
+      body
+    }),
+    ...(nextResult !== output.result ? { result: nextResult } : {})
+  } as AgentContextItemRecord["output"];
+}
+
+function toTerminalCancelledOutput(output: AgentContextItemRecord["output"]) {
+  // cancelSession: 只在终态收尾时做最小必要的输出规整。
+  // - write: 瘦身 args.content
+  // - subtask: 明确 cancelled，并保留 subtask_session_id + 复用提示
+  const writeNormalized = toTerminalWriteOutput(output);
+  return toTerminalSubtaskCancelledOutput(writeNormalized);
+}
+
 async function ensureRealPathUnderRoot(rootAbs: string, targetAbs: string) {
   const rootReal = await fs.realpath(rootAbs);
   const targetReal = await fs.realpath(targetAbs);
@@ -2492,7 +2554,7 @@ export class AgentService {
         updateContextItem(this.ctx.db, {
           itemId,
           status: "cancelled",
-          output: toTerminalWriteOutput(item.output),
+          output: toTerminalCancelledOutput(item.output),
           updatedAt: createdAt
         });
       }
