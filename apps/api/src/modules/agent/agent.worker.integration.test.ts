@@ -139,17 +139,19 @@ async function configureAgentDefaults(baseUrl: string, llmBaseURL: string) {
       agents: [
         {
           id: "default",
-          name: "default",
-          summary: "",
-          prompt: "You are a helpful coding assistant.",
-          tools: ["bash", "read", "write"],
-          pluginTools: [],
-          mcpServers: [],
-          defaultModel: null
-        }
-      ]
-    }
-  });
+           name: "default",
+           summary: "",
+           prompt: "You are a helpful coding assistant.",
+           tools: ["bash", "read", "write"],
+           pluginTools: [],
+           mcpServers: [],
+           defaultModel: null,
+           scope: "both",
+           order: 0
+         }
+       ]
+     }
+   });
   assert.equal(agents.response.status, 200, `configure agents failed: ${agents.text}`);
 
   const runtime = await requestJson(baseUrl, {
@@ -174,16 +176,18 @@ async function createFixture(): Promise<Fixture> {
   const dataDir = await fs.mkdtemp(path.join(testsRoot, "agent-worker-it-"));
 
   let llmStub: Awaited<ReturnType<typeof startLlmStubServer>> | null = null;
+  let app: FastifyInstance | null = null;
+  let db: Db | null = null;
   try {
     llmStub = await startLlmStubServer();
-  const apiPort = await getFreePort();
-  const workerPort = await getFreePort();
+   const apiPort = await getFreePort();
+   const workerPort = await getFreePort();
 
-  const db = await openDb(dataDir);
-  const app = await createApp({
-    db,
-    repoRoot,
-    dataDir,
+   db = await openDb(dataDir);
+   app = await createApp({
+     db,
+     repoRoot,
+     dataDir,
     fileMaxBytes: 1024 * 1024,
     version: "test",
     logLevel: "error",
@@ -220,9 +224,9 @@ async function createFixture(): Promise<Fixture> {
     updatedAt: ts
   });
 
-  await app.listen({ host: "127.0.0.1", port: apiPort });
-  const baseUrl = `http://127.0.0.1:${apiPort}`;
-  await configureAgentDefaults(baseUrl, llmStub.baseURL);
+   await app.listen({ host: "127.0.0.1", port: apiPort });
+   const baseUrl = `http://127.0.0.1:${apiPort}`;
+   await configureAgentDefaults(baseUrl, llmStub.baseURL);
 
   const fixture: Fixture = {
     app,
@@ -234,12 +238,39 @@ async function createFixture(): Promise<Fixture> {
     workerPidFilePath: agentWorkerPidPath(dataDir),
     llmStub: llmStub.server
   };
-  fixtures.add(fixture);
-  return fixture;
-  } catch (err) {
-    await new Promise<void>((resolve) => llmStub?.server.close(() => resolve()));
-    throw err;
-  }
+   fixtures.add(fixture);
+   return fixture;
+   } catch (err) {
+     // Best-effort cleanup to avoid leaving worker process / server handles behind,
+     // which may cause the test runner to hang.
+     const errors: unknown[] = [];
+     try {
+       await new Promise<void>((resolve) => llmStub?.server.close(() => resolve()));
+     } catch (cleanupErr) {
+       errors.push(cleanupErr);
+     }
+     try {
+       await app?.close();
+     } catch (cleanupErr) {
+       errors.push(cleanupErr);
+     }
+     try {
+       db?.close();
+     } catch (cleanupErr) {
+       errors.push(cleanupErr);
+     }
+     try {
+       await rmrf(dataDir);
+     } catch (cleanupErr) {
+       errors.push(cleanupErr);
+     }
+     if (errors.length > 0) {
+       // Keep the original error as the primary failure signal.
+       // Attach cleanup issues for debugging without changing the thrown type.
+       (err as any).cleanupErrors = errors;
+     }
+     throw err;
+   }
 }
 
 async function closeFixture(fixture: Fixture) {
