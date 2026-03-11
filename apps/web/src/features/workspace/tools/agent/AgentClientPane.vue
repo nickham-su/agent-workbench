@@ -217,6 +217,11 @@
               :error-text="item.toolError"
               @request-measure="onRequestVirtualMeasure(item.id)"
             />
+            <AgentNoteCard
+              v-else-if="isNoteCard(item)"
+              :content="item.noteContent || ''"
+              :error-text="item.toolError"
+            />
             <div v-else-if="item.role === 'assistant'" class="flex flex-col gap-1">
               <div v-if="item.reasoningText && item.reasoningText.trim().length > 0" class="assistant-reasoning-block">
                 <AssistantMarkdownMessage :text="item.reasoningText" :message-id="item.id" :streaming="!isTerminalStatus(item.status)" class="assistant-reasoning-markdown" section-key="reasoning" />
@@ -406,6 +411,7 @@ import AgentTextMessage from "./AgentTextMessage.vue";
 import AgentUserMessage from "./AgentUserMessage.vue";
 import AssistantMarkdownMessage from "./AssistantMarkdownMessage.vue";
 import AgentTodoListCard from "./AgentTodoListCard.vue";
+import AgentNoteCard from "./AgentNoteCard.vue";
 import AgentWriteCard from "./AgentWriteCard.vue";
 import { useAgentSessionStatusStore } from "./useAgentSessionStatusStore";
 import {
@@ -494,6 +500,7 @@ type DisplayItem = {
   todoList?: TodoListDisplay;
   applyPatch?: ApplyPatchDisplay;
   writeResult?: WriteDisplay;
+  noteContent?: string;
   tone?: "normal" | "error";
 };
 
@@ -1088,6 +1095,44 @@ const displayItems = computed<DisplayItem[]>(() => {
             tone: item.status === "failed" ? "error" : "normal"
         };
       }
+      if (item.output.toolName === "note") {
+        const contentRaw = typeof resultObj?.content === "string" ? resultObj.content : undefined;
+        const argsObj = toRecord(item.output.args);
+        const argsContent = typeof argsObj?.content === "string" ? argsObj.content : undefined;
+        const noteContent = contentRaw ?? argsContent;
+        if (noteContent === undefined) {
+          let line = headText;
+          if (errorText) {
+            line += `\nerror: ${errorText}`;
+          }
+          return {
+            id: item.id,
+            prevId: item.prevId,
+            archiveAt,
+            boundaryReason,
+            role: "tool",
+            text: line,
+            status: item.status,
+            toolName: item.output.toolName,
+            ...(toolCallId ? { toolCallId } : {}),
+            tone: item.status === "failed" ? "error" : "normal"
+          };
+        }
+        return {
+          id: item.id,
+          prevId: item.prevId,
+          archiveAt,
+          boundaryReason,
+          role: "tool",
+          text: headText,
+          status: item.status,
+          toolName: item.output.toolName,
+          ...(toolCallId ? { toolCallId } : {}),
+          ...(errorText ? { toolError: errorText } : {}),
+          noteContent,
+          tone: item.status === "failed" ? "error" : "normal"
+        };
+      }
       let line = headText;
       if (errorText) {
         line += `\nerror: ${errorText}`;
@@ -1333,12 +1378,16 @@ function isWriteCard(item: DisplayItem) {
   return item.role === "tool" && item.toolName === "write" && !!item.writeResult;
 }
 
+function isNoteCard(item: DisplayItem) {
+  return item.role === "tool" && item.toolName === "note" && typeof item.noteContent === "string";
+}
+
 function isBashTextMessage(item: DisplayItem) {
   return item.role === "tool" && item.toolName === "bash";
 }
 
 function isRichToolCard(item: DisplayItem) {
-  return isSubtaskCard(item) || isTodolistCard(item) || isApplyPatchCard(item) || isWriteCard(item);
+  return isSubtaskCard(item) || isTodolistCard(item) || isApplyPatchCard(item) || isWriteCard(item) || isNoteCard(item);
 }
 
 function formatSubtaskMode(mode?: string) {

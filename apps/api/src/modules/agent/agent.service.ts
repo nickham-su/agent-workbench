@@ -175,6 +175,20 @@ function toolArgsSchema(toolName: AgentContextToolName) {
       }
     };
   }
+  if (toolName === "note") {
+    return {
+      type: "object",
+      required: ["content"],
+      additionalProperties: false,
+      properties: {
+        content: {
+          type: "string",
+          maxLength: 200,
+          description: "A short note to record. Suggested <= 200 characters."
+        }
+      }
+    };
+  }
   if (toolName === "archive_search") {
     return {
       type: "object",
@@ -439,8 +453,19 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
       "  - Discovering omissions, splitting, merging, rolling back, or adding tasks (structural changes also require an update)",
        "- Goal: keep the user seeing a clear, trustworthy, real-time progress view, and enforce traceable, priority-driven execution instead of unplanned expansion.",
         "",
-       "Example input:",
+        "Example input:",
         "{\"goal\":\"Complete the todolist goal enhancement\",\"todos\":[{\"content\":\"Review requirements and constraints\",\"status\":\"completed\"},{\"content\":\"Implement core logic\",\"status\":\"in_progress\"},{\"content\":\"Add tests and verification\",\"status\":\"pending\"}]}"
+      ].join("\n");
+    }
+    if (toolName === "note") {
+      return [
+        "Record a short note into the runtime session state as persistent working memory.",
+        "",
+        "Arguments:",
+        "- content: Required string. Suggested <= 200 characters.",
+        "",
+        "Example input:",
+        "{\"content\":\"Plan: read agent.service.ts to find tool registry\"}"
       ].join("\n");
     }
   if (toolName === "archive_search") {

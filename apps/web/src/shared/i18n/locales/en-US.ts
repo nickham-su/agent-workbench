@@ -935,6 +935,7 @@ export default {
         read: "Read",
         write: "Write",
         applyPatch: "Apply Patch",
+        note: "Note",
         todolist: "Todo List",
         subtask: "Subtask",
         archiveSearch: "Archive Search",

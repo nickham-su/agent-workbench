@@ -5,6 +5,7 @@ import { applyPreparedPatch, prepareApplyPatchTool } from "../../applyPatch.js";
 import { getBashToolAppendix } from "../../bashTools.js";
 import { runReadTool, runWriteTool } from "../../fileTools.js";
 import { parseTodolistArgs, toTodolistResult } from "../../todolist.js";
+import { parseNoteArgs, toNoteResult } from "../../note.js";
 import type { AvailableToolContext, ResolvedToolDefinition, ToolExecutionContext, ToolListContext, ToolProvider } from "../types.js";
 import { isBuiltinToolName, type BuiltinToolName } from "../types.js";
 
@@ -221,6 +222,10 @@ export class BuiltinToolProvider implements ToolProvider {
       case "todolist": {
         const parsed = parseTodolistArgs(args);
         return toTodolistResult(parsed);
+      }
+      case "note": {
+        const parsed = parseNoteArgs(args);
+        return toNoteResult(parsed);
       }
       case "archive_search": {
         const query = requireNonEmptyStringArg(args.query, "archive_search.query");

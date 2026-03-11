@@ -278,6 +278,7 @@ const DEFAULT_TOOLS: AgentToolName[] = [
   "read",
   "write",
   "apply_patch",
+  "note",
   "todolist",
   "subtask",
   "archive_search",
@@ -289,6 +290,7 @@ const toolOptions = computed(() => [
   { label: t("settings.agentProfiles.tools.read"), value: "read" },
   { label: t("settings.agentProfiles.tools.write"), value: "write" },
   { label: t("settings.agentProfiles.tools.applyPatch"), value: "apply_patch" },
+  { label: t("settings.agentProfiles.tools.note"), value: "note" },
   { label: t("settings.agentProfiles.tools.todolist"), value: "todolist" },
   { label: t("settings.agentProfiles.tools.subtask"), value: "subtask" },
   { label: t("settings.agentProfiles.tools.archiveSearch"), value: "archive_search" },
@@ -394,6 +396,7 @@ function normalizeTools(raw: AgentToolName[]) {
       item !== "read" &&
       item !== "write" &&
       item !== "apply_patch" &&
+      item !== "note" &&
       item !== "todolist" &&
       item !== "subtask" &&
       item !== "archive_search" &&

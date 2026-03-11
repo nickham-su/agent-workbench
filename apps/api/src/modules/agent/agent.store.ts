@@ -189,7 +189,7 @@ function encodeStoredColumns(params: {
     ...(typeof params.output.args !== "undefined" ? { args: params.output.args } : {})
   };
   const shouldPersistStructuredResult =
-    toolName === "apply_patch" || toolName === "todolist" || toolName === "subtask" || toolName === "write";
+    toolName === "apply_patch" || toolName === "todolist" || toolName === "subtask" || toolName === "write" || toolName === "note";
   const toolResultPayload: StoredToolResult = {
     status: params.status,
     ...(shouldPersistStructuredResult && Object.prototype.hasOwnProperty.call(params.output, "result")

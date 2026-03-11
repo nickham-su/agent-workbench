@@ -232,6 +232,16 @@ function buildToolSuccessText(params: {
     });
   }
 
+  if (params.toolName === "note") {
+    const content = typeof resultObj?.content === "string" ? resultObj.content : "";
+    const body = content.length > 0 ? "Note saved" : "Note saved (empty content)";
+    return buildToolText({
+      toolName: params.toolName,
+      status: params.status,
+      body
+    });
+  }
+
   if (params.toolName === "read") {
     const source = typeof params.args.filePath === "string" ? params.args.filePath : undefined;
     const actualStart = toIntOrNull(resultObj?.actualStart);
@@ -762,6 +772,15 @@ function buildToolExecutionBatches(tools: PendingTool[], parallelLimit = TOOL_PA
 
 export function buildToolExecutionBatchesForTest(tools: PendingTool[], parallelLimit = TOOL_PARALLEL_BATCH_LIMIT) {
   return buildToolExecutionBatches(tools, parallelLimit);
+}
+
+export function buildToolSuccessTextForTest(params: { toolName: string; args: Record<string, unknown>; result: unknown }) {
+  return buildToolSuccessText({
+    toolName: params.toolName,
+    status: "completed",
+    args: params.args,
+    result: params.result
+  });
 }
 
 export class AgentRunner {
