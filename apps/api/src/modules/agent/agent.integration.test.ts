@@ -431,7 +431,7 @@ test("agent prompt-context 中的工具描述与 schema 说明使用英文", asy
            name: "default",
            summary: "",
            prompt: "",
-           tools: ["bash", "subtask", "todolist", "apply_patch"],
+           tools: ["bash", "read", "subtask", "todolist", "apply_patch"],
            pluginTools: [],
            mcpServers: [],
            defaultModel: null,
@@ -456,11 +456,17 @@ test("agent prompt-context 中的工具描述与 schema 说明使用英文", asy
   });
   const promptContext = await getPromptContextInternal({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId });
   const bashTool = promptContext.tools.find((item) => item.name === "bash");
+  const readTool = promptContext.tools.find((item) => item.name === "read");
   const subtaskTool = promptContext.tools.find((item) => item.name === "subtask");
   const todolistTool = promptContext.tools.find((item) => item.name === "todolist");
   const applyPatchTool = promptContext.tools.find((item) => item.name === "apply_patch");
   assert.ok(String(bashTool?.description || "").includes("Run a bash command and return stdout/stderr."));
   assert.ok(String((bashTool?.inputSchema as any)?.properties?.timeout?.description || "").includes("Timeout in seconds"));
+  const readLimit = (readTool?.inputSchema as any)?.properties?.limit;
+  assert.equal(readLimit?.default, 500);
+  assert.equal(readLimit?.maximum, 2000);
+  assert.ok(String(readLimit?.description || "").includes("Default: 500"));
+  assert.ok(String(readLimit?.description || "").includes("Maximum: 2000"));
   assert.ok(String(subtaskTool?.description || "").includes("Available agents:"));
   assert.equal(String(subtaskTool?.description || "").includes("可选Agent"), false);
   assert.ok(String(todolistTool?.description || "").includes("Example input:"));

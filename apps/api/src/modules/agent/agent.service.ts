@@ -120,7 +120,13 @@ function toolArgsSchema(toolName: AgentContextToolName) {
       properties: {
         filePath: { type: "string", minLength: 1 },
         offset: { type: "number", minimum: 1 },
-        limit: { type: "number", minimum: 1 }
+        limit: {
+          type: "number",
+          minimum: 1,
+          maximum: 2000,
+          default: 500,
+          description: "Maximum lines (file) or entries (directory) to return. Default: 500. Maximum: 2000."
+        }
       }
     };
   }
