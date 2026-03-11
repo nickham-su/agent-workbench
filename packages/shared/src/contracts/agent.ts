@@ -184,11 +184,15 @@ export const AgentControlResultSchema = Type.Object({
 export type AgentControlResult = Static<typeof AgentControlResultSchema>;
 
 export const AgentCancelSessionRequestSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
   updatedAt: Type.Optional(Type.Number())
 });
 export type AgentCancelSessionRequest = Static<typeof AgentCancelSessionRequestSchema>;
 
 export const AgentClearSessionRequestSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
+  reason: Type.Optional(Type.String()),
+  uiLocale: Type.Optional(AgentUiLocaleSchema),
   updatedAt: Type.Optional(Type.Number())
 });
 export type AgentClearSessionRequest = Static<typeof AgentClearSessionRequestSchema>;
@@ -203,6 +207,10 @@ export const AgentContextItemsQuerySchema = Type.Object({
 export type AgentContextItemsQuery = Static<typeof AgentContextItemsQuerySchema>;
 
 export const AgentCompactSessionRequestSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
+  clientRequestId: Type.String({ minLength: 1 }),
+  agentId: Type.Optional(Type.String({ minLength: 1 })),
+  uiLocale: Type.Optional(AgentUiLocaleSchema),
   updatedAt: Type.Optional(Type.Number())
 });
 export type AgentCompactSessionRequest = Static<typeof AgentCompactSessionRequestSchema>;
@@ -211,13 +219,16 @@ export const AgentCompactSessionResponseSchema = Type.Object({
   ok: Type.Boolean(),
   session: AgentSessionRecordSchema,
   runState: AgentSessionRunStateSchema,
+  runId: Type.String({ minLength: 1 }),
   scheduled: Type.Boolean(),
   skippedReason: Type.Optional(Type.String())
 });
 export type AgentCompactSessionResponse = Static<typeof AgentCompactSessionResponseSchema>;
 
 export const AgentRevertSessionRequestSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
   itemId: Type.Number({ minimum: 1 }),
+  reason: Type.Optional(Type.String()),
   updatedAt: Type.Optional(Type.Number())
 });
 export type AgentRevertSessionRequest = Static<typeof AgentRevertSessionRequestSchema>;

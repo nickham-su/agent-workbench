@@ -2228,14 +2228,14 @@ function onRevertToMessage(itemId: number) {
     async onOk() {
       actionLoading.value = "revert";
       actionTargetId.value = itemId;
-      try {
-        await revertAgentSession(props.sessionId, {
-          workspaceId: props.workspaceId,
-          toItemId,
-          reason: "manual_revert"
-        });
-        if (isUserTarget && revertDraft.trim()) {
-          draft.value = revertDraft;
+       try {
+         await revertAgentSession(props.sessionId, {
+           workspaceId: props.workspaceId,
+           itemId: toItemId,
+           reason: "manual_revert"
+         });
+         if (isUserTarget && revertDraft.trim()) {
+           draft.value = revertDraft;
         }
         message.success(t("agent.client.reverted"));
         statusStore.bumpPollHint(props.sessionId, { immediate: true, warmup: true });

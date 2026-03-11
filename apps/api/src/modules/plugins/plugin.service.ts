@@ -10,6 +10,7 @@ import type {
   PluginManifest,
   PluginRuntimeSnapshot,
   PluginState,
+  PluginToolManifestItem,
   PluginToolRuntimeSnapshot,
   UpdateAgentPluginSettingsRequest,
   PluginRuntimeSnapshotsResponse
@@ -148,7 +149,7 @@ function normalizeManifest(raw: unknown): PluginManifest {
   }
 
   const toolsRaw = Array.isArray(value.tools) ? value.tools : undefined;
-  const tools = toolsRaw?.map((itemRaw) => {
+  const tools: PluginToolManifestItem[] | undefined = toolsRaw?.map((itemRaw) => {
     const item = toRecordObject(itemRaw);
     if (!item) {
       throw new Error("tool manifest item must be an object");
@@ -157,13 +158,22 @@ function normalizeManifest(raw: unknown): PluginManifest {
     if (!toolName) throw new Error("tool manifest name is invalid");
     const description = typeof item.description === "string" ? item.description.trim() : "";
     if (!description) throw new Error(`tool '${toolName}' description is required`);
-    const riskLevel = item.riskLevel;
-    const outputMode = item.outputMode;
+
+    const riskLevelRaw = typeof item.riskLevel === "string" ? item.riskLevel.trim() : "";
+    const riskLevel: PluginToolManifestItem["riskLevel"] | undefined =
+      riskLevelRaw === "low" || riskLevelRaw === "medium" || riskLevelRaw === "high"
+        ? (riskLevelRaw as PluginToolManifestItem["riskLevel"])
+        : undefined;
+    const outputModeRaw = typeof item.outputMode === "string" ? item.outputMode.trim() : "";
+    const outputMode: PluginToolManifestItem["outputMode"] | undefined =
+      outputModeRaw === "text" || outputModeRaw === "text+raw"
+        ? (outputModeRaw as PluginToolManifestItem["outputMode"])
+        : undefined;
     return {
       name: toolName,
       description,
-      ...(riskLevel === "low" || riskLevel === "medium" || riskLevel === "high" ? { riskLevel } : {}),
-      ...(outputMode === "text" || outputMode === "text+raw" ? { outputMode } : {})
+      ...(riskLevel ? { riskLevel } : {}),
+      ...(outputMode ? { outputMode } : {})
     };
   });
 

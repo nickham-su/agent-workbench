@@ -1323,7 +1323,7 @@ export function updateAgentSettings(ctx: AppContext, logger: FastifyBaseLogger, 
     const summary = normalizeAgentSummaryForUpdate(agent.summary);
     const tools = normalizeAgentTools(agent.tools);
     const globalPromptIds = normalizeAgentGlobalPromptIds(agent.globalPromptIds, availableGlobalPromptIds);
-    const pluginTools = normalizeAgentPluginTools(agent.pluginTools);
+    const pluginTools = normalizeAgentPluginTools(agent.pluginTools ?? []);
     const mcpServers = normalizeAgentMcpServers(agent.mcpServers, availableMcpIds);
     const modelRaw = (agent.defaultModel ?? null) as { providerId?: unknown; modelId?: unknown } | null;
     const providerId = typeof modelRaw?.providerId === "string" ? modelRaw.providerId.trim() : "";

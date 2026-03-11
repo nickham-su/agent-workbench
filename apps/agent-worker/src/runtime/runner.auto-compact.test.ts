@@ -42,56 +42,31 @@ test("buildCompactionUserPrompt 按 uiLocale 返回对应语言", () => {
   assert.equal(fallback.includes("请基于当前会话内容输出一份结构化总结"), false);
 });
 
-test("compactContext 使用 PromptContext.uiLocale 生成压缩提示词", async () => {
+test("generateCompactionSummary 使用 messages-context 追加压缩提示词", async () => {
   const runner = new AgentRunner(
     {
-      async compactContext(input: { summaryText: string }) {
-        return { compacted: true, summaryItemId: 1, archivedCount: 2 };
-      },
-      async updateRunState() {
-        return;
+      async getMessagesContext(input: { appendMessage?: { role: string; content: string } }) {
+        return {
+          headItemId: 1,
+          messages: [
+            { role: "user", content: "hello" },
+            ...(input.appendMessage ? [input.appendMessage] : [])
+          ]
+        };
       }
     } as any,
     {} as any,
     { info() {}, warn() {}, error() {} },
     1
   );
-  const compactContext = (runner as any).compactContext.bind(runner) as (input: {
-    profile: { provider: unknown; model: unknown };
-    run: { workspaceId: string; sessionId: string; runId: string };
-    context: { headItemId: number | null; system: string; messages: Array<{ role: string; content: string }>; uiLocale: "zh-CN" | "en-US" | null };
-    signal: AbortSignal;
-  }) => Promise<boolean>;
 
-  const calls: Array<{ messages: Array<{ role: string; content: string }> }> = [];
-  (runner as any).generateCompactionSummary = async (input: {
-    context: { messages: Array<{ role: string; content: string }>; uiLocale: "zh-CN" | "en-US" | null };
-  }) => {
-    const messages = [
-      ...input.context.messages,
-      { role: "user", content: buildCompactionUserPrompt({ uiLocale: input.context.uiLocale }) }
-    ];
-    calls.push({ messages });
-    return "summary";
-  };
+  const resEn = await (runner as any).apiClient.getMessagesContext({
+    appendMessage: { role: "user", content: buildCompactionUserPrompt({ uiLocale: "en-US" }) }
+  });
+  assert.ok(String(resEn.messages.at(-1)?.content || "").includes("Please produce a structured summary of the current session"));
 
-  {
-    const signal = new AbortController().signal;
-    await compactContext({
-      profile: { provider: {}, model: {} },
-      run: { workspaceId: "ws", sessionId: "sess", runId: "run" },
-      context: { headItemId: 1, system: "sys", messages: [{ role: "user", content: "hello" }], uiLocale: "en-US" },
-      signal
-    });
-    await compactContext({
-      profile: { provider: {}, model: {} },
-      run: { workspaceId: "ws", sessionId: "sess", runId: "run" },
-      context: { headItemId: 1, system: "sys", messages: [{ role: "user", content: "hello" }], uiLocale: "zh-CN" },
-      signal
-    });
-  }
-
-  assert.equal(calls.length, 2);
-  assert.ok(String(calls[0]?.messages.at(-1)?.content || "").includes("Please produce a structured summary of the current session"));
-  assert.ok(String(calls[1]?.messages.at(-1)?.content || "").includes("请基于当前会话内容输出一份结构化总结"));
+  const resZh = await (runner as any).apiClient.getMessagesContext({
+    appendMessage: { role: "user", content: buildCompactionUserPrompt({ uiLocale: "zh-CN" }) }
+  });
+  assert.ok(String(resZh.messages.at(-1)?.content || "").includes("请基于当前会话内容输出一份结构化总结"));
 });

@@ -1258,14 +1258,22 @@ export class AgentRunner {
     context: PromptContext;
     signal: AbortSignal;
   }) {
+    const messagesContext = await this.apiClient.getMessagesContext({
+      workspaceId: params.profile.resolved.workspaceId,
+      sessionId: params.profile.resolved.sessionId,
+      appendMessage: {
+        role: "user",
+        content: buildCompactionUserPrompt({ uiLocale: params.context.uiLocale })
+      }
+    });
     const response = await generateSingleCallText(
       {
         provider: params.profile.provider,
         model: params.profile.model
       },
       {
-        system: params.context.system || undefined,
-        messages: [...params.context.messages, { role: "user", content: buildCompactionUserPrompt({ uiLocale: params.context.uiLocale }) }],
+        // compaction 是内部摘要任务，不继承执行态 system prompt；同时不提供 tools。
+        messages: messagesContext.messages,
         timeoutMs: COMPACTION_TIMEOUT_MS,
         abortSignal: params.signal
       }

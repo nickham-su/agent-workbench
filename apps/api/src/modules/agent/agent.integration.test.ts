@@ -339,24 +339,26 @@ test("agent settings 兼容缺省 scope/order 并按原顺序归一化", async (
         {
           id: "b",
           name: "B",
-          summary: "",
-          prompt: "b",
-          tools: ["bash", "read"],
-          mcpServers: [],
-          defaultModel: null,
-          scope: "both",
-          order: 9
+           summary: "",
+           prompt: "b",
+           tools: ["bash", "read"],
+           pluginTools: [],
+           mcpServers: [],
+           defaultModel: null,
+           scope: "both",
+           order: 9
         },
         {
           id: "a",
           name: "A",
-          summary: "",
-          prompt: "a",
-          tools: ["bash", "read"],
-          mcpServers: [],
-          defaultModel: null,
-          scope: "user",
-          order: 3
+           summary: "",
+           prompt: "a",
+           tools: ["bash", "read"],
+           pluginTools: [],
+           mcpServers: [],
+           defaultModel: null,
+           scope: "user",
+           order: 3
         }
       ]
     }
@@ -426,14 +428,15 @@ test("agent prompt-context 中的工具描述与 schema 说明使用英文", asy
       agents: [
         {
           id: "default",
-          name: "default",
-          summary: "",
-          prompt: "",
-          tools: ["bash", "subtask", "todolist", "apply_patch"],
-          mcpServers: [],
-          defaultModel: null,
-          scope: "both",
-          order: 0
+           name: "default",
+           summary: "",
+           prompt: "",
+           tools: ["bash", "subtask", "todolist", "apply_patch"],
+           pluginTools: [],
+           mcpServers: [],
+           defaultModel: null,
+           scope: "both",
+           order: 0
         }
       ]
     }
@@ -545,24 +548,26 @@ test("GET /api/settings/agent/agents 返回每个 agent 的 resolvedModel", asyn
         {
           id: "default",
           name: "default",
-          summary: "",
-          prompt: "You are a helpful coding assistant.",
-          tools: ["bash", "read", "write"],
-          mcpServers: [],
-          defaultModel: null,
-          scope: "both",
-          order: 0
+           summary: "",
+           prompt: "You are a helpful coding assistant.",
+           tools: ["bash", "read", "write"],
+           pluginTools: [],
+           mcpServers: [],
+           defaultModel: null,
+           scope: "both",
+           order: 0
         },
         {
           id: "custom",
           name: "custom",
-          summary: "",
-          prompt: "Use a custom model.",
-          tools: ["bash", "read"],
-          mcpServers: [],
-          defaultModel: { providerId: "agent_provider", modelId: "agent_model" },
-          scope: "both",
-          order: 1
+           summary: "",
+           prompt: "Use a custom model.",
+           tools: ["bash", "read"],
+           pluginTools: [],
+           mcpServers: [],
+           defaultModel: { providerId: "agent_provider", modelId: "agent_model" },
+           scope: "both",
+           order: 1
         }
       ]
     }
@@ -652,6 +657,32 @@ async function getRunState(app: FastifyInstance, sessionId: string) {
     activeRunId: string | null;
     runNoticeText: string;
     lastTerminalStatus: "completed" | "failed" | "cancelled" | null;
+  };
+}
+
+async function getMessagesContextInternal(params: {
+  app: FastifyInstance;
+  internalToken: string;
+  workspaceId: string;
+  sessionId: string;
+  appendMessage?: { role: "system" | "user"; content: string };
+}) {
+  const res = await params.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/messages-context",
+    headers: {
+      "x-awb-agent-internal-token": params.internalToken
+    },
+    payload: {
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+      ...(params.appendMessage ? { appendMessage: params.appendMessage } : {})
+    }
+  });
+  assert.equal(res.statusCode, 200, `get messages-context failed: ${res.body}`);
+  return res.json() as {
+    headItemId: number | null;
+    messages: Array<{ role: string; content: unknown }>;
   };
 }
 
@@ -920,6 +951,62 @@ test("agent 消息去重与上下文项追加", async () => {
   const userItems = context.items.filter((item) => item.kind === "user");
   assert.equal(userItems.length, 1);
   assert.ok(String(userItems[0]?.output?.text || "").includes("hello integration"));
+});
+
+test("agent messages-context 返回完整 messages 且支持 appendMessage", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const user = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "hello" }
+  });
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: user.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: { type: "assistant_text", text: "world" }
+  });
+
+  const ctx = await getMessagesContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    appendMessage: { role: "user", content: "append" }
+  });
+  assert.equal(typeof ctx.headItemId, "number");
+  assert.ok(ctx.messages.length >= 3);
+  assert.equal(ctx.messages.at(-1)?.role, "user");
+  assert.equal(ctx.messages.at(-1)?.content, "append");
 });
 
 test("agent context-items 支持 afterId 增量查询", async () => {
@@ -1334,9 +1421,9 @@ test("agent cancel 仅终止执行并保留消息,活跃项标记为 cancelled",
     }
   });
   assert.equal(cancelRes.statusCode, 200, `cancel run failed: ${cancelRes.body}`);
-  const cancelBody = cancelRes.json() as { sessionId: string; headItemId: number | null };
-  assert.equal(cancelBody.sessionId, session.id);
-  assert.equal(cancelBody.headItemId, toolItem.item.id);
+  const cancelBody = cancelRes.json() as { ok: boolean; session: { id: string; headItemId: number | null } };
+  assert.equal(cancelBody.session.id, session.id);
+  assert.equal(cancelBody.session.headItemId, toolItem.item.id);
 
   const runState = await getRunState(fixture.app, session.id);
   assert.equal(runState.status, "idle");
@@ -1907,9 +1994,9 @@ test("agent clear 会归档当前可见上下文并插入 clear 边界 marker", 
     }
   });
   assert.equal(clearRes.statusCode, 200, `clear session failed: ${clearRes.body}`);
-  const clearBody = clearRes.json() as { sessionId: string; headItemId: number | null };
-  assert.equal(clearBody.sessionId, session.id);
-  assert.ok((clearBody.headItemId ?? 0) > assistantItem.item.id);
+  const clearBody = clearRes.json() as { ok: boolean; session: { id: string; headItemId: number | null } };
+  assert.equal(clearBody.session.id, session.id);
+  assert.ok((clearBody.session.headItemId ?? 0) > assistantItem.item.id);
 
   const context = await getContextItems(fixture.app, session.id);
   assert.equal(context.items.length, 3);
@@ -1925,7 +2012,7 @@ test("agent clear 会归档当前可见上下文并插入 clear 边界 marker", 
     runId,
     workspaceId: fixture.workspaceId,
     sessionId: session.id,
-    triggerItemId: clearBody.headItemId || context.items[2]!.id,
+    triggerItemId: clearBody.session.headItemId || context.items[2]!.id,
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
@@ -2672,7 +2759,7 @@ test("agent revert 在会话运行中返回 AGENT_REVERT_NOT_IDLE", async () => 
     url: `/api/agent/sessions/${session.id}/revert`,
     payload: {
       workspaceId: fixture.workspaceId,
-      toItemId: userItem.item.id,
+      itemId: userItem.item.id,
       reason: "manual_revert"
     }
   });
@@ -2728,7 +2815,7 @@ test("agent revert 在 idle 且存在非终态残留 item 时返回 AGENT_REVERT
     url: `/api/agent/sessions/${session.id}/revert`,
     payload: {
       workspaceId: fixture.workspaceId,
-      toItemId: userItem.item.id,
+      itemId: userItem.item.id,
       reason: "manual_revert"
     }
   });
@@ -2794,14 +2881,14 @@ test("agent revert 在 idle 时可回退到可见 item 并隐藏后续分支", a
     url: `/api/agent/sessions/${session.id}/revert`,
     payload: {
       workspaceId: fixture.workspaceId,
-      toItemId: assistantItem.item.id,
+      itemId: assistantItem.item.id,
       reason: "manual_revert"
     }
   });
   assert.equal(revertRes.statusCode, 200, `revert visible item should succeed: ${revertRes.body}`);
-  const revertBody = revertRes.json() as { headItemId: number | null; sessionId: string };
-  assert.equal(revertBody.sessionId, session.id);
-  assert.equal(revertBody.headItemId, assistantItem.item.id);
+  const revertBody = revertRes.json() as { ok: boolean; session: { id: string; headItemId: number | null } };
+  assert.equal(revertBody.session.id, session.id);
+  assert.equal(revertBody.session.headItemId, assistantItem.item.id);
 
   const context = await getContextItems(fixture.app, session.id);
   assert.equal(context.headItemId, assistantItem.item.id);
@@ -3360,7 +3447,7 @@ test("agent context 压缩后会归档并支持 archive_search/read", async () =
     url: `/api/agent/sessions/${session.id}/revert`,
     payload: {
       workspaceId: fixture.workspaceId,
-      toItemId: userItem.item.id,
+      itemId: userItem.item.id,
       reason: "manual_revert"
     }
   });
@@ -3426,7 +3513,7 @@ test("agent context 压缩后会归档并支持 archive_search/read", async () =
     runId: forkRunId,
     turnId: null,
     step: null,
-    prevId: clearRollbackRes.json().headItemId,
+    prevId: clearRollbackRes.json().session.headItemId,
     kind: "user",
     status: "completed",
     output: { type: "user_text", text: "新的可见问题" }

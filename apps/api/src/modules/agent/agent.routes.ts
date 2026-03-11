@@ -267,7 +267,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
       const p = req.params as { sessionId: string };
       const body = req.body as { workspaceId: string; clientRequestId: string; agentId?: string; uiLocale?: "zh-CN" | "en-US" };
       const result = await params.service.compactSession({ sessionId: p.sessionId, body });
-      if (!result.deduplicated) {
+      if (result.scheduled) {
         const workspace = params.service.getWorkspace(body.workspaceId);
         if (!workspace) throw new HttpError(404, "workspace not found");
         try {
@@ -327,7 +327,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
     },
     async (req) => {
       const p = req.params as { sessionId: string };
-      const body = req.body as { workspaceId: string; toItemId: number; reason?: string };
+      const body = req.body as { workspaceId: string; itemId: number; reason?: string };
       const result = params.service.revertSession(p.sessionId, body);
       await params.runtime.cancelSession(p.sessionId);
       return result;
@@ -820,6 +820,48 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
       assertInternalToken(req, params.service);
       const body = req.body as { workspaceId: string; sessionId: string; runId: string };
       return params.service.getPromptContextForRun(body);
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/messages-context",
+    {
+      schema: {
+        tags: ["agent"],
+        body: Type.Object({
+          workspaceId: Type.String({ minLength: 1 }),
+          sessionId: Type.String({ minLength: 1 }),
+          appendMessage: Type.Optional(
+            Type.Object({
+              role: Type.Union([Type.Literal("system"), Type.Literal("user")]),
+              content: Type.String({ minLength: 1 })
+            })
+          )
+        }),
+        response: {
+          200: Type.Object({
+            headItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
+            messages: Type.Array(
+              Type.Object({
+                role: Type.Union([Type.Literal("system"), Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool")]),
+                content: Type.Any()
+              })
+            )
+          }),
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as {
+        workspaceId: string;
+        sessionId: string;
+        appendMessage?: { role: "system" | "user"; content: string };
+      };
+      return params.service.getMessagesContext(body);
     }
   );
 

@@ -244,7 +244,7 @@ export const AgentItemSchema = Type.Object({
   globalPromptIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
   tools: Type.Array(AgentToolNameSchema),
   mcpServers: Type.Array(Type.String({ minLength: 1 })),
-  pluginTools: AgentPluginToolsSchema,
+  pluginTools: Type.Optional(AgentPluginToolsSchema),
   defaultModel: AgentDefaultModelSchema,
   scope: AgentScopeSchema,
   order: Type.Integer({ minimum: 0 })
@@ -259,7 +259,7 @@ export const AgentItemViewSchema = Type.Object({
   globalPromptIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
   tools: Type.Array(AgentToolNameSchema),
   mcpServers: Type.Array(Type.String({ minLength: 1 })),
-  pluginTools: AgentPluginToolsSchema,
+  pluginTools: Type.Optional(AgentPluginToolsSchema),
   defaultModel: AgentDefaultModelSchema,
   scope: AgentScopeSchema,
   order: Type.Integer({ minimum: 0 }),

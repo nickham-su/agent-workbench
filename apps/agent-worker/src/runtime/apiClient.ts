@@ -32,6 +32,11 @@ type PromptMessage =
   | { role: "assistant"; content: string | Array<PromptTextPart | PromptToolCallPart> }
   | { role: "tool"; content: PromptToolResultPart[] };
 
+export type MessagesContext = {
+  headItemId: number | null;
+  messages: PromptMessage[];
+};
+
 export type ExecutionProfile = {
   resolved: {
     runId: string;
@@ -230,6 +235,26 @@ export class AgentApiClient {
       throw new Error(`get prompt context failed: ${response.status} ${txt}`);
     }
     return (await response.json()) as PromptContext;
+  }
+
+  async getMessagesContext(input: {
+    workspaceId: string;
+    sessionId: string;
+    appendMessage?: { role: "system" | "user"; content: string };
+  }) {
+    const response = await fetch(`${this.params.apiOrigin}/api/internal/agent/messages-context`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-awb-agent-internal-token": this.params.internalToken
+      },
+      body: JSON.stringify(input)
+    });
+    if (!response.ok) {
+      const txt = await response.text();
+      throw new Error(`get messages context failed: ${response.status} ${txt}`);
+    }
+    return (await response.json()) as MessagesContext;
   }
 
   async compactContext(input: {

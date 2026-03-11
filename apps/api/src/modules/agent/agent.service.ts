@@ -2215,9 +2215,12 @@ export class AgentService {
       });
       if (dedup) {
         return {
-          sessionId: session.id,
+          ok: true,
+          session,
+          runState: this.getRunState(session.id),
           runId: dedup.runId,
-          deduplicated: true
+          scheduled: false,
+          skippedReason: "deduplicated"
         };
       }
 
@@ -2288,9 +2291,11 @@ export class AgentService {
       tx();
 
       return {
-        sessionId: session.id,
+        ok: true,
+        session,
+        runState: this.getRunState(session.id),
         runId,
-        deduplicated: false
+        scheduled: true
       };
     });
   }
@@ -2422,10 +2427,10 @@ export class AgentService {
     const session = getAgentSession(this.ctx.db, sessionId);
     if (!session) throw new HttpError(404, "session not found");
     if (session.workspaceId !== body.workspaceId) throw new HttpError(400, "workspaceId mismatch");
-    const target = getTranscriptItemById(this.ctx.db, session.workspaceId, session.id, body.toItemId);
-    if (!target) throw new HttpError(400, "toItemId is invalid");
+    const target = getTranscriptItemById(this.ctx.db, session.workspaceId, session.id, body.itemId);
+    if (!target) throw new HttpError(400, "itemId is invalid");
     if (target.archiveAt != null) {
-      throw new HttpError(400, "toItemId is archived", "AGENT_ARCHIVED_ITEM_IMMUTABLE");
+      throw new HttpError(400, "itemId is archived", "AGENT_ARCHIVED_ITEM_IMMUTABLE");
     }
 
     const state = getRunState(this.ctx.db, session.workspaceId, session.id);
@@ -2442,7 +2447,7 @@ export class AgentService {
         workspaceId: session.workspaceId,
         sessionId: session.id,
         expectedHeadItemId: session.headItemId,
-        nextHeadItemId: body.toItemId,
+        nextHeadItemId: body.itemId,
         updatedAt: createdAt
       });
     });
@@ -2451,13 +2456,14 @@ export class AgentService {
     } catch (err) {
       if (err instanceof AgentConflictError) throw conflictToHttpError(err);
       if (err instanceof Error && err.message === "invalid target head item") {
-        throw new HttpError(400, "toItemId is invalid");
+        throw new HttpError(400, "itemId is invalid");
       }
       throw err;
     }
 
-    const headItemId = getSessionHead(this.ctx.db, session.workspaceId, session.id);
-    return { sessionId: session.id, headItemId };
+    const updated = getAgentSession(this.ctx.db, session.id);
+    if (!updated) throw new HttpError(500, "session not found after revert");
+    return { ok: true, session: updated, runState: this.getRunState(updated.id) };
   }
 
   cancelSession(sessionId: string, body: AgentCancelSessionRequest): AgentControlResult {
@@ -2516,9 +2522,9 @@ export class AgentService {
     });
 
     tx();
-
-    const headItemId = getSessionHead(this.ctx.db, session.workspaceId, session.id);
-    return { sessionId: session.id, headItemId };
+    const updated = getAgentSession(this.ctx.db, session.id);
+    if (!updated) throw new HttpError(500, "session not found after cancel");
+    return { ok: true, session: updated, runState: this.getRunState(updated.id) };
   }
 
   appendContextItemFromWorker(params: {
@@ -3326,8 +3332,9 @@ export class AgentService {
         throw err;
       }
 
-      const headItemId = getSessionHead(this.ctx.db, session.workspaceId, session.id);
-      return { sessionId: session.id, headItemId };
+      const updated = getAgentSession(this.ctx.db, session.id);
+      if (!updated) throw new HttpError(500, "session not found after clear");
+      return { ok: true, session: updated, runState: this.getRunState(updated.id) };
     });
   }
 
@@ -3434,6 +3441,253 @@ export class AgentService {
     return { text: formatArchiveToolResultText(newestFirstLines, maxChars) };
   }
 
+  private async buildPromptMessagesForSession(params: {
+    workspaceId: string;
+    sessionId: string;
+    // 仅 prompt-context 需要 locale 用于 compaction snippet 文案。
+    compactionSnippetUiLocale: AgentUiLocale | null;
+  }) {
+    const visible = getSessionVisibleItems(this.ctx.db, params.workspaceId, params.sessionId);
+    const hasCompactionBoundaryMarker = visible.some((item) => {
+      if (!item) return false;
+      if (item.kind !== "system" || item.status !== "completed") return false;
+      if (item.output.type !== "system_text") return false;
+      const boundary = typeof item.boundaryReason === "string" ? item.boundaryReason.trim() : "";
+      if (boundary !== "compaction") return false;
+      return shouldIncludeSystemTextInPrompt(item.output.text);
+    });
+    const transcript = hasCompactionBoundaryMarker
+      ? getSessionTranscriptItems(this.ctx.db, params.workspaceId, params.sessionId)
+      : ([] as AgentContextItemRecord[]);
+    const latestArchiveAt = hasCompactionBoundaryMarker
+      ? transcript.reduce((max, item) => {
+          if (typeof item.archiveAt !== "number" || !Number.isFinite(item.archiveAt)) return max;
+          return Math.max(max, item.archiveAt);
+        }, 0)
+      : 0;
+    const messages: PromptMessage[] = [];
+    let mostRecentFailedAssistantId: number | null = null;
+    const assistantHasToolItems = new Set<number>();
+    for (let i = visible.length - 1; i >= 0; i -= 1) {
+      const item = visible[i];
+      if (!item) continue;
+      if (mostRecentFailedAssistantId == null && item.kind === "assistant" && item.output.type === "assistant_text" && item.status === "failed") {
+        mostRecentFailedAssistantId = item.id;
+      }
+      if (item.kind !== "tool") continue;
+      for (let j = i - 1; j >= 0; j -= 1) {
+        const prev = visible[j];
+        if (!prev) continue;
+        if (prev.kind !== "assistant") continue;
+        if (prev.runId === item.runId && prev.turnId === item.turnId && prev.step === item.step) {
+          assistantHasToolItems.add(prev.id);
+          break;
+        }
+      }
+    }
+    for (let i = 0; i < visible.length; i += 1) {
+      const item = visible[i];
+      if (!item) continue;
+
+      if (item.kind === "user" && item.output.type === "user_text") {
+        if (!item.output.text) continue;
+        messages.push({ role: "user", content: item.output.text });
+        continue;
+      }
+
+      if (item.kind === "system" && item.output.type === "system_text" && item.status === "completed") {
+        if (!shouldIncludeSystemTextInPrompt(item.output.text)) continue;
+        messages.push({ role: "system", content: item.output.text });
+
+        // compaction: 在摘要后注入“压缩前尾部摘录”(归档原文 + archive 工具提示).
+        const boundary = typeof item.boundaryReason === "string" ? item.boundaryReason.trim() : "";
+        if (boundary === "compaction") {
+          const summaryItemId = item.id;
+          let snippetText = "";
+          try {
+            snippetText = await readCompactionSnippetCacheBestEffort({
+              dataDir: this.ctx.dataDir,
+              workspaceId: params.workspaceId,
+              sessionId: params.sessionId,
+              summaryItemId
+            });
+          } catch {
+            snippetText = "";
+          }
+
+          if (!snippetText.trim()) {
+            try {
+              if (latestArchiveAt <= 0) {
+                throw new Error("archive batch not found");
+              }
+              const batch = transcript.filter((t) => t.archiveAt === latestArchiveAt);
+              const batchArchivable = batch.filter((t) => buildArchiveLine(t) != null);
+              const last20 = batchArchivable.slice(-20);
+              const last10UserAssistant = batchArchivable
+                .filter((t) => {
+                  if (t.kind === "user" && t.output.type === "user_text") return String(t.output.text || "").trim().length > 0;
+                  if (t.kind === "assistant" && t.output.type === "assistant_text") return String(t.output.text || "").trim().length > 0;
+                  return false;
+                })
+                .slice(-10);
+
+              const mergedIds: number[] = [];
+              const seen = new Set<number>();
+              for (const row of [...last10UserAssistant, ...last20]) {
+                if (!row) continue;
+                if (seen.has(row.id)) continue;
+                seen.add(row.id);
+                mergedIds.push(row.id);
+              }
+
+              const posLines = await buildCompactionSnippetExcerptLines({
+                dataDir: this.ctx.dataDir,
+                workspaceId: params.workspaceId,
+                sessionId: params.sessionId,
+                itemIds: mergedIds
+              });
+
+              if (posLines.length > 0) {
+                const excerptLines: string[] = [];
+                let prevPos = 0;
+                for (const row of posLines) {
+                  if (prevPos > 0 && row.pos !== prevPos + 1) {
+                    excerptLines.push("...");
+                  }
+                  excerptLines.push(`pos=${row.pos} | ${row.line}`);
+                  prevPos = row.pos;
+                }
+                const minPos = Math.min(...posLines.map((r) => r.pos));
+                snippetText = buildCompactionSnippetMessageText({
+                  excerptLines,
+                  minPos,
+                  uiLocale: params.compactionSnippetUiLocale
+                });
+                await writeCompactionSnippetCacheBestEffort({
+                  dataDir: this.ctx.dataDir,
+                  workspaceId: params.workspaceId,
+                  sessionId: params.sessionId,
+                  summaryItemId,
+                  text: snippetText,
+                  logger: this.logger
+                });
+              }
+            } catch (err) {
+              this.logger.warn({ err, sessionId: params.sessionId }, "failed to build compaction snippet");
+              snippetText = "";
+            }
+          }
+
+          if (snippetText.trim()) {
+            messages.push({ role: "system", content: snippetText });
+          }
+        }
+        continue;
+      }
+
+      const includeFailedAssistant =
+        item.kind === "assistant" &&
+        item.output.type === "assistant_text" &&
+        item.status === "failed" &&
+        item.id === mostRecentFailedAssistantId &&
+        !assistantHasToolItems.has(item.id) &&
+        String(item.output.text || "").trim().length > 0;
+
+      if (item.kind !== "assistant" || item.output.type !== "assistant_text" || (item.status !== "completed" && !includeFailedAssistant)) {
+        continue;
+      }
+
+      const assistantParts: Array<PromptTextPart | PromptToolCallPart> = [];
+      if (item.output.text) {
+        assistantParts.push({ type: "text", text: item.output.text });
+      }
+
+      const toolResultParts: PromptToolResultPart[] = [];
+      let cursor = i + 1;
+      while (cursor < visible.length) {
+        const toolItem = visible[cursor];
+        if (!toolItem || toolItem.kind !== "tool") break;
+        if (toolItem.runId !== item.runId || toolItem.turnId !== item.turnId || toolItem.step !== item.step) break;
+        if (toolItem.output.type !== "tool" || !TERMINAL_TOOL_ITEM_STATUS.has(toolItem.status)) {
+          cursor += 1;
+          continue;
+        }
+
+        const toolCallId = typeof toolItem.output.toolCallId === "string" ? toolItem.output.toolCallId.trim() : "";
+        if (!toolCallId) {
+          cursor += 1;
+          continue;
+        }
+        const toolInput =
+          toolItem.output.args && typeof toolItem.output.args === "object" && !Array.isArray(toolItem.output.args)
+            ? (toolItem.output.args as Record<string, unknown>)
+            : {};
+        const promptInput = projectToolCallInputForPrompt({
+          toolName: toolItem.output.toolName,
+          status: toolItem.status,
+          args: toolInput
+        });
+        assistantParts.push({
+          type: "tool-call",
+          toolCallId,
+          toolName: toolItem.output.toolName,
+          input: promptInput
+        });
+
+        const promptToolText = resolveToolOutputText(toolItem.output).trim() || `status=${toolItem.status}`;
+        const toolErrorText =
+          typeof toolItem.output.error === "string" && toolItem.output.error.trim()
+            ? toolItem.output.error
+            : resolveToolOutputText(toolItem.output).trim() || `status=${toolItem.status}`;
+        const toolOutput = toolItem.output.error
+          ? { type: "error-text" as const, value: toolErrorText }
+          : { type: "text" as const, value: promptToolText };
+        toolResultParts.push({
+          type: "tool-result",
+          toolCallId,
+          toolName: toolItem.output.toolName,
+          output: toolOutput
+        });
+        cursor += 1;
+      }
+
+      if (assistantParts.length === 1 && assistantParts[0].type === "text") {
+        messages.push({ role: "assistant", content: assistantParts[0].text });
+      } else if (assistantParts.length > 0) {
+        messages.push({ role: "assistant", content: assistantParts });
+      }
+
+      if (!includeFailedAssistant && toolResultParts.length > 0) {
+        messages.push({ role: "tool", content: toolResultParts });
+      }
+
+      i = cursor - 1;
+    }
+
+    return { messages, visible };
+  }
+
+  async getMessagesContext(params: {
+    workspaceId: string;
+    sessionId: string;
+    appendMessage?: { role: "system" | "user"; content: string };
+  }) {
+    const session = getAgentSession(this.ctx.db, params.sessionId);
+    if (!session) throw new HttpError(404, "session not found");
+    if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
+
+    const { messages } = await this.buildPromptMessagesForSession({
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+      // messages-context 是通用 messages 视图，不应隐式依赖 active run 的 uiLocale；此处固定为 null。
+      compactionSnippetUiLocale: null
+    });
+    if (params.appendMessage && params.appendMessage.content.trim()) {
+      messages.push({ role: params.appendMessage.role, content: params.appendMessage.content });
+    }
+    return { headItemId: session.headItemId, messages };
+  }
+
   async archiveReadFromWorker(params: {
     workspaceId: string;
     sessionId: string;
@@ -3522,225 +3776,15 @@ export class AgentService {
     });
 
     const visible = getSessionVisibleItems(this.ctx.db, params.workspaceId, params.sessionId);
-    const hasCompactionBoundaryMarker = visible.some((item) => {
-      if (!item) return false;
-      if (item.kind !== "system" || item.status !== "completed") return false;
-      if (item.output.type !== "system_text") return false;
-      const boundary = typeof item.boundaryReason === "string" ? item.boundaryReason.trim() : "";
-      if (boundary !== "compaction") return false;
-      return shouldIncludeSystemTextInPrompt(item.output.text);
+    const { messages } = await this.buildPromptMessagesForSession({
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+      compactionSnippetUiLocale: normalizeAgentUiLocale(run.uiLocale)
     });
-    const transcript = hasCompactionBoundaryMarker
-      ? getSessionTranscriptItems(this.ctx.db, params.workspaceId, params.sessionId)
-      : ([] as AgentContextItemRecord[]);
-    const latestArchiveAt = hasCompactionBoundaryMarker
-      ? transcript.reduce((max, item) => {
-          if (typeof item.archiveAt !== "number" || !Number.isFinite(item.archiveAt)) return max;
-          return Math.max(max, item.archiveAt);
-        }, 0)
-      : 0;
-    const messages: PromptMessage[] = [];
-    let mostRecentFailedAssistantId: number | null = null;
-    const assistantHasToolItems = new Set<number>();
-    for (let i = visible.length - 1; i >= 0; i -= 1) {
-      const item = visible[i];
-      if (!item) continue;
-      if (mostRecentFailedAssistantId == null && item.kind === "assistant" && item.output.type === "assistant_text" && item.status === "failed") {
-        mostRecentFailedAssistantId = item.id;
-      }
-      if (item.kind !== "tool") continue;
-      for (let j = i - 1; j >= 0; j -= 1) {
-        const prev = visible[j];
-        if (!prev) continue;
-        if (prev.kind !== "assistant") continue;
-        if (prev.runId === item.runId && prev.turnId === item.turnId && prev.step === item.step) {
-          assistantHasToolItems.add(prev.id);
-          break;
-        }
-      }
-    }
-    for (let i = 0; i < visible.length; i += 1) {
-      const item = visible[i];
-      if (!item) continue;
-
-      if (item.kind === "user" && item.output.type === "user_text") {
-        if (!item.output.text) continue;
-        messages.push({ role: "user", content: item.output.text });
-        continue;
-      }
-
-      if (item.kind === "system" && item.output.type === "system_text" && item.status === "completed") {
-        if (!shouldIncludeSystemTextInPrompt(item.output.text)) continue;
-        messages.push({ role: "system", content: item.output.text });
-
-        // compaction: 在摘要后注入“压缩前尾部摘录”(归档原文 + archive 工具提示).
-        const boundary = typeof item.boundaryReason === "string" ? item.boundaryReason.trim() : "";
-        if (boundary === "compaction") {
-          const summaryItemId = item.id;
-          let snippetText = "";
-          try {
-            snippetText = await readCompactionSnippetCacheBestEffort({
-              dataDir: this.ctx.dataDir,
-              workspaceId: params.workspaceId,
-              sessionId: params.sessionId,
-              summaryItemId
-            });
-          } catch {
-            snippetText = "";
-          }
-
-          if (!snippetText.trim()) {
-            try {
-              if (latestArchiveAt <= 0) {
-                throw new Error("archive batch not found");
-              }
-              const batch = transcript.filter((t) => t.archiveAt === latestArchiveAt);
-              // 归档会过滤“空 assistant(仅 tool-call)”,若直接按 item 取 tail 会导致最终 pos 行数偏少。
-              // 这里先按“可归档行”过滤,确保 tail 的 20 条能映射到归档文件中的实际行。
-              const batchArchivable = batch.filter((t) => buildArchiveLine(t) != null);
-              const last20 = batchArchivable.slice(-20);
-              const last10UserAssistant = batchArchivable
-                .filter((t) => {
-                  if (t.kind === "user" && t.output.type === "user_text") return String(t.output.text || "").trim().length > 0;
-                  if (t.kind === "assistant" && t.output.type === "assistant_text") return String(t.output.text || "").trim().length > 0;
-                  return false;
-                })
-                .slice(-10);
-
-              const mergedIds: number[] = [];
-              const seen = new Set<number>();
-              for (const row of [...last10UserAssistant, ...last20]) {
-                if (!row) continue;
-                if (seen.has(row.id)) continue;
-                seen.add(row.id);
-                mergedIds.push(row.id);
-              }
-
-              const posLines = await buildCompactionSnippetExcerptLines({
-                dataDir: this.ctx.dataDir,
-                workspaceId: params.workspaceId,
-                sessionId: params.sessionId,
-                itemIds: mergedIds
-              });
-
-              if (posLines.length > 0) {
-                const excerptLines: string[] = [];
-                let prevPos = 0;
-                for (const row of posLines) {
-                  if (prevPos > 0 && row.pos !== prevPos + 1) {
-                    excerptLines.push("...");
-                  }
-                  excerptLines.push(`pos=${row.pos} | ${row.line}`);
-                  prevPos = row.pos;
-                }
-                const minPos = Math.min(...posLines.map((r) => r.pos));
-                snippetText = buildCompactionSnippetMessageText({ excerptLines, minPos, uiLocale: run.uiLocale });
-                await writeCompactionSnippetCacheBestEffort({
-                  dataDir: this.ctx.dataDir,
-                  workspaceId: params.workspaceId,
-                  sessionId: params.sessionId,
-                  summaryItemId,
-                  text: snippetText,
-                  logger: this.logger
-                });
-              }
-            } catch (err) {
-              this.logger.warn({ err, sessionId: params.sessionId }, "failed to build compaction snippet");
-              snippetText = "";
-            }
-          }
-
-          if (snippetText.trim()) {
-            messages.push({ role: "system", content: snippetText });
-          }
-        }
-        continue;
-      }
-
-      const includeFailedAssistant =
-        item.kind === "assistant"
-        && item.output.type === "assistant_text"
-        && item.status === "failed"
-        && item.id === mostRecentFailedAssistantId
-        && !assistantHasToolItems.has(item.id)
-        && String(item.output.text || "").trim().length > 0;
-
-      if (item.kind !== "assistant" || item.output.type !== "assistant_text" || (item.status !== "completed" && !includeFailedAssistant)) {
-        continue;
-      }
-
-      const assistantParts: Array<PromptTextPart | PromptToolCallPart> = [];
-      if (item.output.text) {
-        assistantParts.push({ type: "text", text: item.output.text });
-      }
-
-      const toolResultParts: PromptToolResultPart[] = [];
-      let cursor = i + 1;
-      while (cursor < visible.length) {
-        const toolItem = visible[cursor];
-        if (!toolItem || toolItem.kind !== "tool") break;
-        if (toolItem.runId !== item.runId || toolItem.turnId !== item.turnId || toolItem.step !== item.step) break;
-        if (toolItem.output.type !== "tool" || !TERMINAL_TOOL_ITEM_STATUS.has(toolItem.status)) {
-          cursor += 1;
-          continue;
-        }
-
-        const toolCallId = typeof toolItem.output.toolCallId === "string" ? toolItem.output.toolCallId.trim() : "";
-        if (!toolCallId) {
-          cursor += 1;
-          continue;
-        }
-        const toolInput = toolItem.output.args && typeof toolItem.output.args === "object" && !Array.isArray(toolItem.output.args)
-          ? (toolItem.output.args as Record<string, unknown>)
-          : {};
-        const promptInput = projectToolCallInputForPrompt({
-          toolName: toolItem.output.toolName,
-          status: toolItem.status,
-          args: toolInput
-        });
-        assistantParts.push({
-          type: "tool-call",
-          toolCallId,
-          toolName: toolItem.output.toolName,
-          input: promptInput
-        });
-
-        const promptToolText = resolveToolOutputText(toolItem.output).trim() || `status=${toolItem.status}`;
-        const toolErrorText =
-          typeof toolItem.output.error === "string" && toolItem.output.error.trim()
-            ? toolItem.output.error
-            : resolveToolOutputText(toolItem.output).trim() || `status=${toolItem.status}`;
-        const toolOutput = toolItem.output.error
-          ? { type: "error-text" as const, value: toolErrorText }
-          : {
-              type: "text" as const,
-              value: promptToolText
-            };
-        toolResultParts.push({
-          type: "tool-result",
-          toolCallId,
-          toolName: toolItem.output.toolName,
-          output: toolOutput
-        });
-        cursor += 1;
-      }
-
-      if (assistantParts.length === 1 && assistantParts[0].type === "text") {
-        messages.push({ role: "assistant", content: assistantParts[0].text });
-      } else if (assistantParts.length > 0) {
-        messages.push({ role: "assistant", content: assistantParts });
-      }
-
-      if (!includeFailedAssistant && toolResultParts.length > 0) {
-        messages.push({ role: "tool", content: toolResultParts });
-      }
-
-      i = cursor - 1;
-    }
 
     const hasArchivedItems = getSessionTranscriptItems(this.ctx.db, params.workspaceId, params.sessionId).some(
       (item) => item.archiveAt != null
-    );
+      );
     const hasArchiveFiles =
       (await listArchiveFilesAsc(agentArchiveSessionDir(this.ctx.dataDir, params.workspaceId, session.id))).length > 0;
     const hasArchive = hasArchivedItems && hasArchiveFiles;
