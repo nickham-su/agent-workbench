@@ -1542,6 +1542,107 @@ test("agent cancel 会将 subtask 工具项明确改写为 cancelled 并保留 s
   assert.equal(text.includes(`sessionId: "${subtaskSessionId}"`), true);
 });
 
+test("run-complete(cancelled) 会收敛该 run 下的非终态 context items", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "agent-default",
+    providerId: "openai",
+    modelId: "gpt-4.1",
+    status: "running",
+    createdAt
+  });
+
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_run_complete_cancelled",
+    step: 1,
+    prevId: null,
+    kind: "assistant",
+    status: "streaming",
+    output: {
+      type: "assistant_text",
+      text: "partial streaming..."
+    }
+  });
+
+  const toolItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_run_complete_cancelled",
+    step: 1,
+    prevId: assistantItem.item.id,
+    kind: "tool",
+    status: "running",
+    output: {
+      type: "tool",
+      toolName: "subtask",
+      toolCallId: "call_run_complete_cancelled_subtask",
+      args: { description: "研究问题", prompt: "...", agentId: "default", session: { mode: "new" } },
+      text: "tool: subtask\nstatus: running\nsubtask_session_id: sess_sub_x\n\nSubtask started.",
+      result: { subtaskSessionId: "sess_sub_x" }
+    }
+  });
+
+  // Mark run-state as running, so completeRunFromWorker should settle it to idle.
+  await updateRunStateInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "running",
+    activeRunId: runId,
+    activeAssistantItemId: assistantItem.item.id
+  });
+
+  const completeRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/run-complete",
+    headers: {
+      "x-awb-agent-internal-token": fixture.internalToken
+    },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      runId,
+      status: "cancelled",
+      updatedAt: createdAt + 123
+    }
+  });
+  assert.equal(completeRes.statusCode, 200, `run-complete cancelled failed: ${completeRes.body}`);
+
+  const runRecord = getRunRecord(fixture.db, runId);
+  assert.equal(runRecord?.status, "cancelled");
+
+  const runState = await getRunState(fixture.app, session.id);
+  assert.equal(runState.status, "idle");
+  assert.equal(runState.activeRunId, null);
+
+  const assistantAfter = await getContextItem(fixture.app, session.id, assistantItem.item.id);
+  assert.equal(assistantAfter.status, "cancelled");
+
+  const toolAfter = await getContextItem(fixture.app, session.id, toolItem.item.id);
+  assert.equal(toolAfter.status, "cancelled");
+  assert.equal(toolAfter.output.type, "tool");
+  const toolText = String((toolAfter.output as { text?: string }).text || "");
+  assert.equal(toolText.includes("tool: subtask"), true);
+  assert.equal(toolText.includes("status: cancelled"), true);
+});
+
 test("agent cancel 会收敛隐藏链上的未终态 items 与关联 run", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);

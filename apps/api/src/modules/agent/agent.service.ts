@@ -58,6 +58,7 @@ import {
   listAgentSessions,
   listNonTerminalVisibleItemIds,
   listNonTerminalSessionItemIds,
+  listNonTerminalSessionItemIdsByRunId,
   hasNonTerminalSessionItems,
   listNonTerminalRunIdsByItemIds,
   listNonTerminalRunIdsBySession,
@@ -2889,21 +2890,57 @@ export class AgentService {
       return;
     }
 
-    updateRunRecordStatus(this.ctx.db, {
-      runId: params.runId,
-      status: params.status,
-      updatedAt: ts
+    const tx = this.ctx.db.transaction(() => {
+      updateRunRecordStatus(this.ctx.db, {
+        runId: params.runId,
+        status: params.status,
+        updatedAt: ts
+      });
+
+      if (params.status === "cancelled") {
+        const nonTerminalItemIds = listNonTerminalSessionItemIdsByRunId(this.ctx.db, {
+          workspaceId: params.workspaceId,
+          sessionId: params.sessionId,
+          runId: params.runId
+        });
+        for (const itemId of nonTerminalItemIds) {
+          const item = getContextItemById(this.ctx.db, itemId);
+          if (!item) continue;
+          if (item.workspaceId !== params.workspaceId || item.sessionId !== params.sessionId || item.runId !== params.runId) {
+            continue;
+          }
+          // tool items: normalize output (including subtask cancelled reuse hint).
+          if (item.kind === "tool" && item.output.type === "tool") {
+            updateContextItem(this.ctx.db, {
+              itemId,
+              status: "cancelled",
+              output: toTerminalCancelledOutput(item.output),
+              updatedAt: ts
+            });
+            continue;
+          }
+          // assistant/user/system: only settle status, keep output unchanged.
+          updateContextItem(this.ctx.db, {
+            itemId,
+            status: "cancelled",
+            updatedAt: ts
+          });
+        }
+      }
+
+      const state = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
+      if (state.activeRunId !== params.runId) {
+        return;
+      }
+      setRunStateIdle(this.ctx.db, {
+        workspaceId: params.workspaceId,
+        sessionId: params.sessionId,
+        updatedAt: ts,
+        appliedItemId: getLatestSessionItemId(this.ctx.db, params.workspaceId, params.sessionId)
+      });
     });
-    const state = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
-    if (state.activeRunId !== params.runId) {
-      return;
-    }
-    setRunStateIdle(this.ctx.db, {
-      workspaceId: params.workspaceId,
-      sessionId: params.sessionId,
-      updatedAt: ts,
-      appliedItemId: getLatestSessionItemId(this.ctx.db, params.workspaceId, params.sessionId)
-    });
+
+    tx();
   }
 
   async startSubtaskRunFromWorker(params: {
