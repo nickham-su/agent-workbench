@@ -70,6 +70,10 @@ IM 插件方案在描述 “channel/service 的唯一标识” 时，需要与�
 
 - `/ss`
   - 无参：跨 **所有 workspace** 列最近更新的 10 个 session（`title + id + workspace 标识`）
+    - workspace 标识默认格式（执行前默认推荐）：
+      - 展示名：优先使用 `workspace.title`，若为空则回退 `workspace.dirName`
+      - 并附加 `workspaceId`（建议括号附上）
+      - 示例：`agent-workbench (w_abc123)`
   - `/ss <sessionId|index>`：绑定/覆盖当前飞书会话到 session
     - 若切换到新的 session：清空当前会话的 agent 选择（必须重新 `/a`）
 - `/a`
@@ -102,6 +106,20 @@ IM 插件方案在描述 “channel/service 的唯一标识” 时，需要与�
 - 支持将“上次水位后未投递的群消息”聚合为 **单条 user 消息**发送给模型
 - 不要求飞书消息与模型 messages 一一对应
 - 聚合时为每条消息增加用户名前缀，并用分隔符分隔
+
+群聚合窗口默认值与截断策略（执行前默认推荐）：
+
+- 默认值：
+  - `maxMessages = 50`
+  - `maxChars = 8000`
+- 截断策略：
+  1) 超过 `maxMessages` 时：优先丢弃更早的消息（保留更接近触发点的上下文）。
+  2) 若在满足 `maxMessages` 后仍超过 `maxChars`：对“最早保留的一条消息”进行尾部截断。
+  3) 发生丢弃/截断时：在聚合文本顶部增加提示行，例如：
+     - `（提示：已省略更早的群消息，或部分内容已截断）`
+- 文本格式：
+  - 每条消息：`senderName: text`
+  - 分隔符：使用单独一行 `---`
 
 > 注意：聚合能力要求下沉到宿主 `ChannelRuntime`（见 5.3），插件仅负责提交 inbound。
 
@@ -159,6 +177,20 @@ IM 插件方案在描述 “channel/service 的唯一标识” 时，需要与�
 2) 解析并校验 runtime definition（tools/channels/services）
 3) 运行 channels/services
 4) 对外提供工具执行 RPC，供 worker 调用
+
+Plugin Host 运行形态（执行前默认推荐）：
+
+- 推荐：由 API 进程管理的独立子进程作为 Plugin Host（例如 `agent-plugin-host`），API internal routes 作为代理/门面。
+- API 与 plugin-host 通信方式：
+  - 默认推荐：unix domain socket（便于权限隔离、热重启与故障诊断）
+  - 备选：`child_process.fork()` 的 IPC message channel
+- worker 侧约束：仅调用 API internal routes（见第 7 节 Tool RPC），不直接连接 plugin-host。
+
+理由：
+
+- 隔离插件代码，避免阻塞 Fastify event loop（插件可能进行网络 IO / CPU 密集操作）。
+- plugin-host 崩溃可由 API 自动重启，降低“插件问题影响主服务”的风险。
+- worker 仅依赖 API internal routes，有利于统一鉴权、审计与错误归一化。
 
 worker 不再 import 插件包，仅通过 RPC：
 
@@ -440,55 +472,335 @@ worker 侧不再：
 
 > 以下为建议的内部 service 方法/内部 route。可先 internal-only，不必对 web 暴露。
 
-### 7.1 tool RPC（为单一权威加载点服务）
+### 7.0 与现有 internal routes 的一致性说明
 
-- `POST /api/internal/plugins/tools/list`
-  - 返回：全部可用 plugin tools（含 canonicalName/description/inputSchema/outputMode/riskLevel）
+本方案新增 internal routes **必须对齐现状约定**：
 
-- `POST /api/internal/plugins/tools/execute`
-  - 输入：`toolName`, `args`, `workspaceId`, `sessionId`, `runId`（可选）
-  - 输出：`{ text, raw? }`
+- 路径统一挂在：`/api/internal/agent/...`
+- 鉴权统一使用 header：`x-awb-agent-internal-token`
+  - 参考：`apps/api/src/modules/agent/agent.routes.ts#assertInternalToken`
+- 调用端（worker/内部服务）统一走 `AgentApiClient.request` 风格：
+  - 以 `POST + JSON body` 为主（即便是“查询”）
+  - 参考：`apps/agent-worker/src/runtime/apiClient.ts`，例如：
+    - `POST /api/internal/agent/plugins/runtime-snapshots`（body 为 `{}`）
+    - `POST /api/internal/agent/mcp-settings`（body 为 `{}`）
+
+错误返回风格对齐 `HttpError`：
+
+- API 抛出：`new HttpError(statusCode, message, code?)`（见 `apps/api/src/app/errors.ts`）
+- 由 `apps/api/src/app/createApp.ts` 统一转换为：`{ message: string, code?: string }`
+
+---
+
+### 7.1 Tool RPC（单一权威加载点）
+
+> 背景：本方案要求“单一权威加载点”，即 **插件包的 import/校验/执行由 API 侧 Plugin Host 统一负责**。
+> worker 不再 import 插件包，而是通过 internal routes RPC 调用插件工具。
+
+#### 7.1.1 `POST /api/internal/agent/plugins/tools/list`
+
+用途：
+
+- worker 获取 plugin tools 的模型可见定义（`description + inputSchema + outputMode + riskLevel`）
+- 返回 `updatedAt` 用于 worker 内存缓存（减少每 turn 拉取）
+
+请求（JSON body）：
+
+```json
+{
+  "toolNames": ["plugin_debug-tools_echo_inspect"],
+  "includeAll": false
+}
+```
+
+约定：
+
+- `toolNames` 可选：若不传，则默认返回所有可用 plugin tools。
+- `includeAll` 可选：默认 `false`。
+- 建议 worker 传入当前 `ExecutionProfile.agent.pluginTools`（从而只列 agent 允许的工具；payload 更小）。
+
+响应（200）：
+
+```json
+{
+  "updatedAt": 1710000000000,
+  "tools": [
+    {
+      "toolName": "plugin_debug-tools_echo_inspect",
+      "pluginId": "debug-tools",
+      "shortName": "echo_inspect",
+      "description": "回显输入参数并输出调试摘要",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "message": { "type": "string" }
+        }
+      },
+      "outputMode": "text+raw",
+      "riskLevel": "low"
+    }
+  ]
+}
+```
+
+字段约束：
+
+- `toolName` 必须为 canonical name（现状规则）：`plugin_<pluginId>_<toolShortName>`
+- `inputSchema` 必须为 JSON object（worker 侧可直接用于 `ai` SDK `jsonSchema(...)`）
+
+缓存建议：
+
+- worker 缓存 `{ updatedAt, tools[] }`
+- 当 `POST /api/internal/agent/plugins/runtime-snapshots` 的 `updatedAt` 或本接口的 `updatedAt` 变化时刷新
+
+错误约定：
+
+- 401：internal token 无效
+- 500：Plugin Host 异常
+  - `{ message, code?: "PLUGIN_TOOL_LIST_FAILED" }`
+
+#### 7.1.2 `POST /api/internal/agent/plugins/tools/execute`
+
+用途：
+
+- worker 执行 plugin tool 时，通过该 RPC 由 API Plugin Host 执行并返回 `{ text, raw? }`
+
+请求（JSON body）：
+
+```json
+{
+  "toolName": "plugin_debug-tools_echo_inspect",
+  "args": {
+    "message": "hello"
+  },
+  "ctx": {
+    "workspaceId": "w_xxx",
+    "sessionId": "sess_xxx",
+    "runId": "run_xxx",
+    "turnId": "turn_xxx"
+  }
+}
+```
+
+说明：
+
+- `ctx` 为最小执行上下文（用于审计/日志/未来扩展）；`runId/turnId` 可选。
+- 在 worker 场景下，建议尽可能传入 `workspaceId/sessionId/runId/turnId` 以便定位问题。
+
+响应（200）：
+
+```json
+{
+  "text": "tool: plugin_debug-tools_echo_inspect\nstatus: completed\n...",
+  "raw": {
+    "receivedArgs": { "message": "hello" }
+  }
+}
+```
+
+错误与状态码约定（沿用 `HttpError` 风格，返回 `{ message, code }`）：
+
+- 401：`Unauthorized`
+- 404：tool 不存在或 plugin 未 ready
+  - `code`：`PLUGIN_TOOL_NOT_FOUND` / `PLUGIN_NOT_READY`
+- 409：tool 不允许执行（plugin disabled / tool 不在 agent 允许列表）
+  - `code`：`PLUGIN_TOOL_DISABLED`
+- 400：参数不合法（args 不符合 schema / 缺少字段）
+  - `code`：`PLUGIN_TOOL_ARGS_INVALID`
+- 500：执行异常
+  - `code`：`PLUGIN_TOOL_EXECUTION_FAILED`
+
+> worker 侧应将上述错误归一化为 tool item 的失败输出（文本化），与现有工具一致。
+
+---
 
 ### 7.2 `/st` 状态摘要（聚合）
 
-- `GET /api/internal/agent/sessions/:sessionId/status-summary?agentId=...`
-  - 输出：
-    - session 基本信息
-    - selected agent 信息
-    - runState
-    - elapsed（通过 `agent_run.created_at` 计算）
-    - lastResponseTotalTokens
-    - contextWindowTokens（通过 profile 解析获取）
-    - ratio
-    - runNoticeText
+目标：
 
-### 7.3 inbound ingest + group aggregate
+- IM 插件不复制 web 的分散计算逻辑
+- 由 API 提供一个“可直接渲染为 `/st` 文本”的状态摘要数据源
+- running 冲突时也复用同一份摘要数据
 
-- `ChannelRuntime.ingestInboundMessage(...)`
-  - 做 allowlist 校验
-  - 做 external_message_id 去重
-  - 写入 `channel_inbound_message`
+#### 7.2.1 推荐 endpoint：`POST /api/internal/agent/sessions/status-summary`
 
-- `ChannelRuntime.buildAggregatedUserPrompt(...)`
-  - 输入：conversation_key + 触发 message_id
-  - 输出：单条聚合 user 文本
-  - 内部策略：
-    - 只取 watermark 之后的消息
-    - 限制 maxMessages/maxChars
-    - 添加 `senderName:` 前缀与分隔符
+请求（JSON body）：
 
-- `ChannelRuntime.advanceWatermark(...)`
-  - 在成功触发 run 后更新 watermark
+```json
+{
+  "sessionId": "sess_00mm...",
+  "agentId": "coding-main"
+}
+```
 
-### 7.4 run trigger（沿用 web 的 running 规则）
+说明：
 
-- `ChannelRuntime.tryAppendUserMessageAndStartRun(...)`
-  - 输入：sessionId/workspaceId/selectedAgentId/text/clientRequestId
-  - 行为：
-    - 先读 run-state：running 则拒绝
-    - idle 则调用现有 `AgentService.sendMessage` + enqueue worker
+- `agentId` 可选：
+  - 若 IM conversation 已选定 agent，则传入
+  - 若未选 agent，则可不传（此时 `contextWindowTokens/contextTokenRatio` 可为 null）
 
-> 说明：必须沿用 `AgentService.sendMessage` 的冲突与 dedup 语义（409 running；clientRequestId dedup）。
+响应（200）：
+
+```json
+{
+  "updatedAt": 1710000000000,
+  "session": {
+    "id": "sess_00mm...",
+    "workspaceId": "w_xxx",
+    "title": "飞书测试会话",
+    "kind": "primary",
+    "updatedAt": 1710000000000
+  },
+  "agent": {
+    "id": "coding-main",
+    "name": "Coding Main"
+  },
+  "runState": {
+    "sessionId": "sess_00mm...",
+    "status": "running",
+    "activeRunId": "run_xxx",
+    "activeAssistantItemId": 123,
+    "lastResponseTotalTokens": 18240,
+    "terminalStatus": null,
+    "runNoticeText": "...",
+    "updatedAt": 1710000000000
+  },
+  "startedAt": 1710000000000,
+  "elapsedMs": 42000,
+  "contextWindowTokens": 128000,
+  "contextTokenRatio": 0.143
+}
+```
+
+字段来源建议：
+
+- `runState`：复用现有 `AgentService.getRunState`（`/api/agent/sessions/:sessionId/run-state` 的内部实现）
+- `startedAt/elapsedMs`：建议通过 `agent_run.created_at`（activeRunId 对应记录）计算，避免 web 侧估算漂移
+- `contextWindowTokens`：建议复用 execution profile 解析逻辑得到（模型配置）
+- `agent`：推荐复用现有设置接口 `GET /api/settings/agent/agents`（`AgentSettingsView`）的同源数据，并沿用 web 端过滤规则（`scope === "user" || scope === "both"`）
+- `contextTokenRatio`：`lastResponseTotalTokens / contextWindowTokens`（任一缺失则为 null）
+
+错误约定：
+
+- 401：internal token 无效
+- 404：session 不存在
+  - `code`：`SESSION_NOT_FOUND`
+- 500：聚合失败
+  - `code`：`SESSION_STATUS_SUMMARY_FAILED`
+
+---
+
+### 7.3 inbound ingest / group aggregate / run trigger（ChannelRuntime 内部方法）
+
+> v1 推荐这些能力下沉到宿主 `ChannelRuntime`，以保证多 IM 渠道实现一致。未来如需拆进子进程或跨进程，可再 HTTP 化为 `/api/internal/agent/channels/...`。
+
+#### 7.3.1 `ingestInboundMessage`
+
+```ts
+type IngestInboundMessageInput = {
+  pluginId: string;
+  channelName: string;
+  accountId: string;
+  conversationKey: string;
+  chatType: "direct" | "group";
+  chatId: string;
+  externalMessageId: string;
+  createdAtExternalMs?: number;
+  sender: { id: string; displayName?: string };
+  mentionedBot?: boolean;
+  text: string;
+};
+
+type IngestInboundMessageResult =
+  | { ok: true; deduplicated: boolean }
+  | { ok: false; errorCode: "NOT_ALLOWED" | "PAYLOAD_INVALID"; message: string };
+
+function ingestInboundMessage(input: IngestInboundMessageInput): Promise<IngestInboundMessageResult>;
+```
+
+规则：
+
+- allowlist 校验（4.5）
+- external_message_id 去重（4.6）
+- 写入 `channel_inbound_message`
+
+#### 7.3.2 `buildAggregatedUserPrompt`
+
+```ts
+type BuildAggregatedUserPromptInput = {
+  pluginId: string;
+  channelName: string;
+  accountId: string;
+  conversationKey: string;
+  upperBoundExternalMessageId: string;
+  maxMessages: number;
+  maxChars: number;
+};
+
+type BuildAggregatedUserPromptResult = {
+  text: string;
+  consumedExternalMessageId: string;
+};
+
+function buildAggregatedUserPrompt(input: BuildAggregatedUserPromptInput): Promise<BuildAggregatedUserPromptResult>;
+```
+
+规则：
+
+- 从 `channel_conversation_binding.watermark_external_message_id`（若为空则从最早）开始聚合
+- 只聚合到 `upperBoundExternalMessageId`（通常为本次 @ 触发消息）
+- 限制 `maxMessages/maxChars`
+  - 执行前默认推荐：`maxMessages = 50`，`maxChars = 8000`
+  - 超过 `maxMessages`：优先丢弃更早的消息
+  - 若在满足 `maxMessages` 后仍超过 `maxChars`：对最早保留消息进行尾部截断
+  - 发生丢弃/截断时：在顶部加入提示行 `（提示：已省略更早的群消息，或部分内容已截断）`
+- 每条消息格式：`senderName: text`
+- 用分隔符隔开（单独一行 `---`）
+
+#### 7.3.3 `advanceWatermark`
+
+```ts
+function advanceWatermark(input: {
+  pluginId: string;
+  channelName: string;
+  accountId: string;
+  conversationKey: string;
+  watermarkExternalMessageId: string;
+}): Promise<void>;
+```
+
+规则：
+
+- 仅在成功触发 run（并创建 reply job）后推进 watermark
+- 推进到本次聚合上界（通常为触发 message_id）
+
+#### 7.3.4 `tryAppendUserMessageAndStartRun`
+
+```ts
+type TryAppendUserMessageAndStartRunInput = {
+  workspaceId: string;
+  sessionId: string;
+  agentId: string;
+  text: string;
+  clientRequestId: string;
+};
+
+type TryAppendUserMessageAndStartRunResult =
+  | { ok: true; runId: string }
+  | { ok: false; errorCode: "SESSION_RUNNING" | "SESSION_NOT_FOUND" | "AGENT_NOT_SELECTED"; message: string };
+
+function tryAppendUserMessageAndStartRun(input: TryAppendUserMessageAndStartRunInput): Promise<TryAppendUserMessageAndStartRunResult>;
+```
+
+规则：
+
+- 必须沿用 `AgentService.sendMessage` 的冲突与 dedup 语义：
+  - running 时拒绝（409 类语义）
+  - `clientRequestId` 用于幂等
+- 成功后由宿主 enqueue worker
+
+> 说明：IM 触发 run 时建议使用稳定的 `clientRequestId = im_<plugin>_<conversationKey>_<externalMessageId>`。
 
 ---
 
@@ -501,6 +813,9 @@ worker 侧不再：
 1) 校验 sender 是否在 allowlist
 2) 查询所有 workspace 下最近更新的 10 个 session（按 updated_at desc）
 3) 返回：`index + title + sessionId + workspace 标识`
+   - workspace 标识默认格式（同 2.2）：
+     - `workspace.title`（为空则回退 `workspace.dirName`）
+     - 并附加 `workspaceId`
 
 #### /ss <sessionId|index>
 
@@ -518,6 +833,10 @@ worker 侧不再：
 1) 校验 allowlist
 2) 若未绑定 session：提示先 `/ss`
 3) 从绑定的 workspaceId 取得可选 agent 列表
+   - agent 列表来源与排序（执行前默认推荐，保持与 web 一致）：
+     - 数据来源：复用 `GET /api/settings/agent/agents`（`AgentSettingsView`）
+     - 过滤规则：仅允许 `scope` 为 `user` 或 `both`
+     - 排序规则：先按 `order` 升序，再按 `name` 升序
 4) 返回：`index + agentId + agentName` + 当前已选 agent（若有）
 
 #### /a <agentId|index>
