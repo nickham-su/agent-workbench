@@ -209,13 +209,36 @@ function normalizeManifest(raw: unknown): PluginManifest {
 
   const description = typeof value.description === "string" && value.description.trim() ? value.description.trim() : undefined;
   const configSchema = value.configSchema !== undefined ? value.configSchema : undefined;
+
+  const uiHintsRaw = toRecordObject(value.uiHints);
+  const sensitiveKeysRaw = Array.isArray(uiHintsRaw?.sensitiveKeys) ? uiHintsRaw?.sensitiveKeys : null;
+  const sensitiveKeys = sensitiveKeysRaw
+    ? sensitiveKeysRaw
+        .map((item) => (typeof item === "string" ? item.trim() : ""))
+        .filter(Boolean)
+        .slice(0, 64)
+    : [];
+  const uiHints = sensitiveKeys.length
+    ? {
+        sensitiveKeys
+      }
+    : undefined;
+
   if (configSchema !== undefined) {
+    if (!isPlainObject(configSchema)) {
+      throw new Error("configSchema must be a JSON object schema");
+    }
     if (!isJsonSerializable(configSchema)) {
       throw new Error("configSchema must be JSON-serializable");
     }
-    const validation = validatePluginConfigWithSchema(configSchema, {});
-    if (!validation.ok) {
-      throw new Error(`configSchema is invalid: ${(validation.errors || []).join("; ")}`);
+    // Validate schema syntax only.
+    // Do NOT validate a sample instance (like {}) here, because many plugins legitimately
+    // require secrets/credentials in configSchema.required. Instance validation happens
+    // when user saves plugin settings.
+    try {
+      ajv.compile(configSchema as any);
+    } catch (err) {
+      throw new Error(`configSchema is invalid: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -225,6 +248,7 @@ function normalizeManifest(raw: unknown): PluginManifest {
     name,
     version,
     entry,
+    ...(uiHints ? { uiHints } : {}),
     capabilities,
     ...(description ? { description } : {}),
     ...(engines && Object.keys(engines).length > 0 ? { engines } : {}),
@@ -405,7 +429,7 @@ async function discoverPluginRecord(pluginDirPath: string): Promise<PluginDiscov
   }
 
   const seenCapabilities = new Set(manifest.capabilities);
-  for (const capability of ["channels", "hooks", "services"] as const) {
+  for (const capability of ["hooks"] as const) {
     if (seenCapabilities.has(capability)) {
       pushDiagnostic(diagnostics, {
         code: "unsupported_capability",
@@ -443,6 +467,39 @@ export async function updateAgentPluginSettings(
   const seen = new Set<string>();
   const discovered = await listPluginRuntimeSnapshots(ctx);
   const snapshotById = new Map(discovered.plugins.map((item) => [item.id, item]));
+  const existing = getAgentPluginSettingsStored(ctx);
+  const existingById = new Map(existing.settings.plugins.map((item) => [item.id, item]));
+
+  function mergeSecrets(params: { pluginId: string; incomingConfig: unknown }): unknown {
+    const snapshot = snapshotById.get(params.pluginId);
+    const sensitiveKeys = snapshot?.manifest?.uiHints?.sensitiveKeys ?? [];
+    if (!params.incomingConfig || typeof params.incomingConfig !== "object" || Array.isArray(params.incomingConfig)) {
+      return params.incomingConfig;
+    }
+    if (sensitiveKeys.length === 0) return params.incomingConfig;
+
+    const prev = existingById.get(params.pluginId)?.config;
+    const prevObj = prev && typeof prev === "object" && !Array.isArray(prev) ? (prev as Record<string, unknown>) : null;
+    const next = { ...(params.incomingConfig as Record<string, unknown>) };
+
+    for (const key of sensitiveKeys) {
+      const hasKey = Object.prototype.hasOwnProperty.call(next, key);
+      const v = (next as any)[key];
+      const keep =
+        !hasKey ||
+        v === undefined ||
+        (typeof v === "string" && (v.trim() === "" || v.trim() === "***"));
+      if (keep && prevObj && Object.prototype.hasOwnProperty.call(prevObj, key)) {
+        (next as any)[key] = (prevObj as any)[key];
+      }
+      if (keep && (!prevObj || !Object.prototype.hasOwnProperty.call(prevObj, key))) {
+        delete (next as any)[key];
+      }
+    }
+
+    return next;
+  }
+
   const plugins = incoming.map((itemRaw) => {
     const item = toRecordObject(itemRaw);
     const id = normalizePluginId(item?.id);
@@ -453,24 +510,44 @@ export async function updateAgentPluginSettings(
       throw new HttpError(400, "Duplicate plugin id", "AGENT_PLUGIN_DUPLICATE");
     }
     seen.add(id);
+
     const enabled = typeof item?.enabled === "boolean" ? item.enabled : false;
-    const config = item?.config;
-    if (config !== undefined && !isJsonSerializable(config)) {
+
+    // Note: treat config as optional. When caller does not provide config,
+    // we keep the existing config (if any). This allows disabling a plugin
+    // even when its config would fail configSchema validation.
+    const hasConfigProp = !!item && Object.prototype.hasOwnProperty.call(item, "config");
+    const incomingConfig = hasConfigProp ? item?.config : undefined;
+    if (incomingConfig !== undefined && !isJsonSerializable(incomingConfig)) {
       throw new HttpError(400, "Plugin config must be JSON-serializable", "AGENT_PLUGIN_CONFIG_INVALID");
     }
+
     const snapshot = snapshotById.get(id);
-    const schemaValidation = validatePluginConfigWithSchema(snapshot?.manifest?.configSchema, config ?? {});
-    if (!schemaValidation.ok) {
-      throw new HttpError(
-        400,
-        `Plugin config is invalid: ${(schemaValidation.errors || []).join('; ')}`,
-        "AGENT_PLUGIN_CONFIG_INVALID"
-      );
+
+    const prevConfig = existingById.get(id)?.config;
+    const mergedConfig = hasConfigProp
+      ? incomingConfig === undefined
+        ? undefined
+        : mergeSecrets({ pluginId: id, incomingConfig: incomingConfig })
+      : prevConfig;
+
+    // Validate config only when plugin is enabled.
+    // - Enabled + missing config should be treated as invalid if configSchema requires it.
+    // - Disabled plugin can be saved without passing configSchema.
+    if (enabled) {
+      const schemaValidation = validatePluginConfigWithSchema(snapshot?.manifest?.configSchema, mergedConfig ?? {});
+      if (!schemaValidation.ok) {
+        throw new HttpError(
+          400,
+          `Plugin config is invalid: ${(schemaValidation.errors || []).join("; ")}`,
+          "AGENT_PLUGIN_CONFIG_INVALID"
+        );
+      }
     }
     return {
       id,
       enabled,
-      ...(config === undefined ? {} : { config })
+      ...(mergedConfig === undefined ? {} : { config: mergedConfig })
     };
   });
 
@@ -531,24 +608,26 @@ export async function listPluginRuntimeSnapshots(ctx: AppContext): Promise<Plugi
     const diagnostics = [...record.diagnostics];
     const enabled = configured?.enabled === true;
     let configValid = true;
-    if (configured?.config !== undefined && !isJsonSerializable(configured.config)) {
-      configValid = false;
-      pushDiagnostic(diagnostics, {
-        code: "config_invalid",
-        severity: "error",
-        source: "config",
-        message: "Plugin config must be JSON-serializable"
-      });
-    } else if (configured?.config !== undefined && record.manifest?.configSchema !== undefined) {
-      const validation = validatePluginConfigWithSchema(record.manifest.configSchema, configured.config);
-      if (!validation.ok) {
+    if (enabled) {
+      if (configured?.config !== undefined && !isJsonSerializable(configured.config)) {
         configValid = false;
         pushDiagnostic(diagnostics, {
           code: "config_invalid",
           severity: "error",
           source: "config",
-          message: `Plugin config does not match configSchema: ${(validation.errors || []).join("; ")}`
+          message: "Plugin config must be JSON-serializable"
         });
+      } else if (record.manifest?.configSchema !== undefined) {
+        const validation = validatePluginConfigWithSchema(record.manifest.configSchema, configured?.config ?? {});
+        if (!validation.ok) {
+          configValid = false;
+          pushDiagnostic(diagnostics, {
+            code: "config_invalid",
+            severity: "error",
+            source: "config",
+            message: `Plugin config does not match configSchema: ${(validation.errors || []).join("; ")}`
+          });
+        }
       }
     }
     if (!enabled) {

@@ -203,11 +203,13 @@ async function createFixture(): Promise<Fixture> {
     agentWorkerHost: "127.0.0.1",
     agentWorkerPort: workerPort,
     agentWorkerSocketPath: path.join(dataDir, "agent-worker.sock"),
-    agentWorkerConcurrency: 2,
-    agentInternalToken: "worker-integration-token",
-    agentApiOrigin: `http://127.0.0.1:${apiPort}`,
-    agentStartupRecoveryMode: "recover"
-  });
+     agentWorkerConcurrency: 2,
+     agentInternalToken: "worker-integration-token",
+     agentApiOrigin: `http://127.0.0.1:${apiPort}`,
+     agentStartupRecoveryMode: "recover",
+     agentPluginHostEnabled: false,
+     agentPluginHostSocketPath: path.join(dataDir, "agent-plugin-host.sock")
+   });
   const workspaceId = newSortableId("ws");
   const workspaceDirName = newSortableId("workspace");
   const workspacePath = workspaceRoot(dataDir, workspaceDirName);

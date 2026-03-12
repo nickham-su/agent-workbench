@@ -22,6 +22,7 @@ import type {
   AgentSessionRecord,
   AgentSessionRunState,
   AgentContextToolName,
+  AgentRecentSessionsResponse,
 } from "@agent-workbench/shared";
 import { HttpError } from "../../app/errors.js";
 import type { AppContext } from "../../app/context.js";
@@ -43,6 +44,8 @@ import {
   findClientRequestDedup,
   getAgentSession,
   getContextItemById,
+  getLatestCompletedAssistantTextByRunId,
+  getLatestTerminalAssistantTextByRunId,
   getLatestTerminalRunRecord,
   getLatestSessionItemId,
   getRunRecord,
@@ -56,6 +59,7 @@ import {
   getSessionVisibleItems,
   insertClientRequestDedup,
   listAgentSessions,
+  listRecentSessionsAcrossWorkspaces,
   listNonTerminalVisibleItemIds,
   listNonTerminalSessionItemIds,
   listNonTerminalSessionItemIdsByRunId,
@@ -1897,6 +1901,10 @@ export class AgentService {
     return listAgentSessions(this.ctx.db, workspaceId);
   }
 
+  listRecentSessions(params: { limit: number }): AgentRecentSessionsResponse {
+    return { items: listRecentSessionsAcrossWorkspaces(this.ctx.db, Math.max(1, Math.min(50, params.limit || 10))) };
+  }
+
   getSession(sessionId: string) {
     return getAgentSession(this.ctx.db, sessionId);
   }
@@ -2501,8 +2509,80 @@ export class AgentService {
     };
   }
 
+  getSessionStatusSummary(params: { sessionId: string; agentId?: string | null; selectedAgentId?: string | null }) {
+    const sessionId = String(params.sessionId || "").trim();
+    if (!sessionId) {
+      throw new HttpError(400, "sessionId is required", "SESSION_ID_REQUIRED");
+    }
+    const session = getAgentSession(this.ctx.db, sessionId);
+    if (!session) throw new HttpError(404, "session not found", "SESSION_NOT_FOUND");
+
+    const runState = this.getRunState(session.id);
+
+    const generatedAt = nowMs();
+    let startedAt: number | null = null;
+    let elapsedMs: number | null = null;
+    if (runState.activeRunId) {
+      const run = getRunRecord(this.ctx.db, runState.activeRunId);
+      if (run && run.workspaceId === session.workspaceId && run.sessionId === session.id) {
+        startedAt = run.createdAt;
+        elapsedMs = Math.max(0, generatedAt - run.createdAt);
+      }
+    }
+
+    // Compatibility precedence: selectedAgentId wins.
+    const selectedAgentIdRaw =
+      typeof params.selectedAgentId === "string" && params.selectedAgentId.trim()
+        ? params.selectedAgentId
+        : typeof params.agentId === "string"
+          ? params.agentId
+          : "";
+    const selectedAgentId = String(selectedAgentIdRaw || "").trim();
+    const agent = selectedAgentId
+      ? (() => {
+          const item = listAvailableAgentsForSurface(this.ctx, "user").find((a) => a.id === selectedAgentId);
+          if (!item) throw new HttpError(400, "Agent not found", "AGENT_NOT_FOUND");
+          // keep minimal fields for IM display
+          return { id: item.id, name: item.name, contextWindowTokens: item.resolvedModel?.contextWindowTokens ?? null };
+        })()
+      : null;
+
+    const contextWindowTokens = agent?.contextWindowTokens ?? null;
+    const lastResponseTotalTokens = runState.lastResponseTotalTokens;
+    const contextTokenRatio =
+      typeof lastResponseTotalTokens === "number" && typeof contextWindowTokens === "number" && contextWindowTokens > 0
+        ? lastResponseTotalTokens / contextWindowTokens
+        : null;
+
+    // updatedAt should reflect the underlying data change time, not "now".
+    const updatedAt = Math.max(session.updatedAt, runState.updatedAt, startedAt ?? 0);
+    return {
+      updatedAt,
+      generatedAt,
+      session,
+      agent: agent ? { id: agent.id, name: agent.name } : null,
+      runState: {
+        ...runState,
+        // Compatibility: IM design doc uses terminalStatus.
+        terminalStatus: runState.lastTerminalStatus
+      },
+      startedAt,
+      elapsedMs,
+      contextWindowTokens,
+      contextTokenRatio
+    };
+  }
+
   getContextItemById(itemId: number) {
     return getContextItemById(this.ctx.db, itemId);
+  }
+
+  getLatestTerminalAssistantTextByRunId(params: { runId: string }) {
+    return getLatestTerminalAssistantTextByRunId(this.ctx.db, params);
+  }
+
+  getLatestCompletedAssistantTextByRunId(params: { runId: string }) {
+    return getLatestCompletedAssistantTextByRunId(this.ctx.db, params);
   }
 
   revertSession(sessionId: string, body: AgentRevertSessionRequest): AgentControlResult {

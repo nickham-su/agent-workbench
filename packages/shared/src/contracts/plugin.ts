@@ -1,6 +1,7 @@
 import { Type } from "@sinclair/typebox";
 import type { Static } from "@sinclair/typebox";
 
+// --------------------------------------------------------------------------------------
 export const PluginIdSchema = Type.String({ pattern: "^[a-z0-9][a-z0-9-]{0,63}$" });
 export type PluginId = Static<typeof PluginIdSchema>;
 
@@ -46,6 +47,15 @@ export const PluginManifestSchema = Type.Object({
   version: Type.String({ minLength: 1, maxLength: 64 }),
   description: Type.Optional(Type.String({ maxLength: 2000 })),
   entry: Type.String({ minLength: 1 }),
+  uiHints: Type.Optional(
+    Type.Object(
+      {
+        // 声明 config 中哪些 key 属于敏感字段（secret），用于 settings/runtime-snapshots 输出脱敏。
+        sensitiveKeys: Type.Array(Type.String({ minLength: 1, maxLength: 200 }), { maxItems: 64 })
+      },
+      { additionalProperties: false }
+    )
+  ),
   engines: Type.Optional(
     Type.Object({
       agentWorkbench: Type.Optional(Type.String({ minLength: 1 }))
@@ -168,3 +178,72 @@ export const PluginRuntimeSnapshotsResponseSchema = Type.Object({
   updatedAt: Type.Number()
 });
 export type PluginRuntimeSnapshotsResponse = Static<typeof PluginRuntimeSnapshotsResponseSchema>;
+
+// --------------------------------------------------------------------------------------
+// Plugin Tool RPC (internal-only)
+//
+// 这些 schema 用于 worker -> API internal routes -> plugin-host 的工具执行链路。
+// 目前仅覆盖 tools 能力，channels/services 在后续阶段实现。
+//
+// 设计文档：docs/design/agent/plugin/im-channel-plugins-v1.md#71-tool-rpc
+// --------------------------------------------------------------------------------------
+
+export const PluginToolRpcListRequestSchema = Type.Object(
+  {
+    toolNames: Type.Optional(Type.Array(PluginToolCanonicalNameSchema)),
+    includeAll: Type.Optional(Type.Boolean())
+  },
+  { additionalProperties: false }
+);
+export type PluginToolRpcListRequest = Static<typeof PluginToolRpcListRequestSchema>;
+
+export const PluginToolRpcListItemSchema = Type.Object(
+  {
+    toolName: PluginToolCanonicalNameSchema,
+    pluginId: PluginIdSchema,
+    shortName: PluginToolShortNameSchema,
+    description: Type.String({ minLength: 1 }),
+    inputSchema: Type.Any(),
+    outputMode: Type.Optional(Type.Union([Type.Literal("text"), Type.Literal("text+raw")])),
+    riskLevel: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")]))
+  },
+  { additionalProperties: false }
+);
+export type PluginToolRpcListItem = Static<typeof PluginToolRpcListItemSchema>;
+
+export const PluginToolRpcListResponseSchema = Type.Object(
+  {
+    updatedAt: Type.Number(),
+    tools: Type.Array(PluginToolRpcListItemSchema)
+  },
+  { additionalProperties: false }
+);
+export type PluginToolRpcListResponse = Static<typeof PluginToolRpcListResponseSchema>;
+
+export const PluginToolRpcExecuteRequestSchema = Type.Object(
+  {
+    toolName: PluginToolCanonicalNameSchema,
+    args: Type.Any(),
+    allowedToolNames: Type.Array(PluginToolCanonicalNameSchema, { minItems: 1 }),
+    ctx: Type.Object(
+      {
+        workspaceId: Type.String({ minLength: 1 }),
+        sessionId: Type.String({ minLength: 1 }),
+        runId: Type.Optional(Type.String({ minLength: 1 })),
+        turnId: Type.Optional(Type.String({ minLength: 1 }))
+      },
+      { additionalProperties: false }
+    )
+  },
+  { additionalProperties: false }
+);
+export type PluginToolRpcExecuteRequest = Static<typeof PluginToolRpcExecuteRequestSchema>;
+
+export const PluginToolRpcExecuteResponseSchema = Type.Object(
+  {
+    text: Type.String(),
+    raw: Type.Optional(Type.Any())
+  },
+  { additionalProperties: false }
+);
+export type PluginToolRpcExecuteResponse = Static<typeof PluginToolRpcExecuteResponseSchema>;

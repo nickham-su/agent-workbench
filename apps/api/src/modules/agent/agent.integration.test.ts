@@ -23,6 +23,7 @@ import {
   updateRunState
 } from "./agent.store.js";
 import { newSortableId } from "../../utils/ids.js";
+import { countReplyJobsForRun } from "../channels/channels.store.js";
 
 type Fixture = {
   app: FastifyInstance;
@@ -31,6 +32,7 @@ type Fixture = {
   workspaceId: string;
   workspacePath: string;
   internalToken: string;
+  repoRoot: string;
 };
 
 const fixtures = new Set<Fixture>();
@@ -44,6 +46,8 @@ async function createFixture(options?: {
   agentTestFaults?: {
     archiveWrite?: { failAfterChunks?: number } | null;
   };
+  enablePluginHost?: boolean;
+  enablePluginServices?: boolean;
 }): Promise<Fixture> {
   const repoRoot = path.resolve(process.cwd(), "../..");
   const testsRoot = path.join(repoRoot, ".tmp-tests");
@@ -75,6 +79,9 @@ async function createFixture(options?: {
     agentInternalToken: internalToken,
     agentApiOrigin: "http://127.0.0.1:0",
     agentStartupRecoveryMode: "recover",
+    agentPluginHostEnabled: options?.enablePluginHost === true,
+    agentPluginHostSocketPath: path.join(dataDir, "agent-plugin-host.sock"),
+    agentPluginServicesEnabled: options?.enablePluginServices === true,
     agentTestFaults: options?.agentTestFaults
   });
   const workspaceId = newSortableId("ws");
@@ -95,10 +102,111 @@ async function createFixture(options?: {
 
   await app.ready();
   await configureAgentDefaults(app);
-  const fixture: Fixture = { app, db, dataDir, workspaceId, workspacePath, internalToken };
+  const fixture: Fixture = { app, db, dataDir, workspaceId, workspacePath, internalToken, repoRoot };
   fixtures.add(fixture);
   return fixture;
 }
+
+test("plugin-host services reconcile can start/stop feishu gateway", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0, enablePluginHost: true, enablePluginServices: true });
+
+  // Prepare a mock feishu plugin under dataDir/plugins so plugin discovery can find it.
+  // We intentionally avoid network calls in tests.
+  const pluginRoot = path.join(fixture.dataDir, "plugins", "feishu");
+  await ensureDir(path.join(pluginRoot, "dist"));
+  await fs.writeFile(
+    path.join(pluginRoot, "agent-workbench.plugin.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        id: "feishu",
+        name: "Feishu IM",
+        version: "0.0.0-test",
+        description: "mock feishu plugin for integration tests",
+        entry: "dist/index.mjs",
+        capabilities: ["services"],
+        services: [{ name: "gateway" }],
+        uiHints: { sensitiveKeys: ["appSecret"] },
+        configSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["appId", "appSecret"],
+          properties: {
+            appId: { type: "string", minLength: 1 },
+            appSecret: { type: "string", minLength: 1 }
+          }
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  await fs.writeFile(
+    path.join(pluginRoot, "dist", "index.mjs"),
+    [
+      "export default {",
+      "  meta: { id: 'feishu', name: 'Feishu IM', version: '0.0.0-test' },",
+      "  services: {",
+      "    gateway: {",
+      "      async start() {",
+      "        // no-op gateway (no network)",
+      "        return { stop: async () => {} };",
+      "      }",
+      "    }",
+      "  }",
+      "};",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+
+  // Enable plugin with minimal config.
+  const enableRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/plugins",
+    payload: {
+      plugins: [
+        {
+          id: "feishu",
+          enabled: true,
+          config: { appId: "test", appSecret: "test" }
+        }
+      ]
+    }
+  });
+  assert.equal(enableRes.statusCode, 200, `enable plugin failed: ${enableRes.body}`);
+
+  // Wait for services runtime reconcile hook to fire.
+  await sleep(800);
+
+  const host = new (await import("./agent.plugin-host-client.js" as any)).AgentPluginHostClient({
+    pluginHostSocketPath: path.join(fixture.dataDir, "agent-plugin-host.sock"),
+    internalToken: fixture.internalToken,
+    logger: fixture.app.log
+  });
+
+  const status1 = await host.getServicesStatus();
+  assert.equal(status1.running, true, `expected running=true, got running=${String(status1.running)}`);
+
+  // Disable plugin.
+  const disableRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/plugins",
+    payload: {
+      plugins: [
+        {
+          id: "feishu",
+          enabled: false
+        }
+      ]
+    }
+  });
+  assert.equal(disableRes.statusCode, 200, `disable plugin failed: ${disableRes.body}`);
+  await sleep(500);
+  const status2 = await host.getServicesStatus();
+  assert.equal(status2.running, false, `expected running=false, got running=${String(status2.running)}`);
+});
 
 test("agent startup recovery mode=fail 会终止 in-flight run 并回收 run-state", async () => {
   const repoRoot = path.resolve(process.cwd(), "../..");
@@ -243,7 +351,9 @@ test("agent startup recovery mode=fail 会终止 in-flight run 并回收 run-sta
     agentWorkerConcurrency: 1,
     agentInternalToken: internalToken,
     agentApiOrigin: "http://127.0.0.1:0",
-    agentStartupRecoveryMode: "fail"
+    agentStartupRecoveryMode: "fail",
+    agentPluginHostEnabled: false,
+    agentPluginHostSocketPath: path.join(dataDir, "agent-plugin-host.sock")
   });
 
   await app.ready();
@@ -607,6 +717,86 @@ test("GET /api/settings/agent/agents 返回每个 agent 的 resolvedModel", asyn
   });
 });
 
+test("channels: H2 聚合按 watermark/upperBound 的 DB 级过滤（>600 条）", async () => {
+  await withEnv("AWB_CHANNEL_SENDER_ALLOWLIST", "u_allowed", async () => {
+    const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+    const created = await createSession(fixture.app, fixture.workspaceId);
+    const session = getAgentSession(fixture.db, created.id)!;
+
+    await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/conversations/upsert-binding",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_h2",
+        chatId: "h2",
+        chatType: "group",
+        sessionId: session.id
+      }
+    });
+
+    // insert 700 inbound messages
+    for (let i = 1; i <= 700; i += 1) {
+      const res = await fixture.app.inject({
+        method: "POST",
+        url: "/api/internal/agent/channels/inbound/ingest",
+        headers: { "x-awb-agent-internal-token": fixture.internalToken },
+        payload: {
+          pluginId: "feishu",
+          channelName: "im",
+          accountId: "default",
+          conversationKey: "feishu_default_chat_h2",
+          chatType: "group",
+          chatId: "h2",
+          externalMessageId: `mh2_${i}`,
+          sender: { id: "u_allowed", displayName: "Alice" },
+          mentionedBot: true,
+          text: `${i}:x`
+        }
+      });
+      assert.equal(res.statusCode, 200);
+    }
+
+    // set watermark to message 650
+    fixture.db
+      .prepare(
+        `update channel_conversation_binding
+         set watermark_external_message_id='mh2_650'
+         where plugin_id='feishu' and channel_name='im' and account_id='default' and conversation_key='feishu_default_chat_h2'`
+      )
+      .run();
+
+    const agg = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/inbound/aggregate",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_h2",
+        upperBoundExternalMessageId: "mh2_700"
+      }
+    });
+    assert.equal(agg.statusCode, 200, `aggregate failed: ${agg.body}`);
+    const body = agg.json() as any;
+
+    // Must not include <=650
+    assert.equal(/(^|\n)Alice: 650:/.test(body.text), false);
+    assert.ok(/(^|\n)Alice: 651:/.test(body.text));
+    // Should include upperBound 700
+    assert.ok(/(^|\n)Alice: 700:/.test(body.text));
+
+    // Ensure maxMessages=50: from 651..700 is exactly 50 messages
+    // We can assert 651 appears and 650 doesn't.
+    // Also ensure it doesn't include 652? (should include all 651..700)
+    assert.equal(/(^|\n)Alice: 649:/.test(body.text), false);
+  });
+});
+
 async function closeFixture(fixture: Fixture) {
   fixtures.delete(fixture);
   await fixture.app.close();
@@ -656,6 +846,18 @@ function extractPromptSection(system: string, tag: string) {
     return system.slice(bodyStart).trim();
   }
   return system.slice(bodyStart, nextSection).trim();
+}
+
+function withEnv<T>(key: string, value: string, fn: () => Promise<T>): Promise<T> {
+  const prev = process.env[key];
+  process.env[key] = value;
+  return fn().finally(() => {
+    if (prev == null) {
+      delete process.env[key];
+    } else {
+      process.env[key] = prev;
+    }
+  });
 }
 
 async function getRunState(app: FastifyInstance, sessionId: string) {
@@ -3332,6 +3534,168 @@ test("run-state 不应把旧 terminal run 误认为当前这次 idle 的终态",
   assert.equal(runState.lastTerminalStatus, null);
 });
 
+test("internal sessions/status-summary 返回 run 摘要（elapsed/contextWindowTokens/ratio）", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+
+  const created = await createSession(fixture.app, fixture.workspaceId);
+  const session = getAgentSession(fixture.db, created.id)!;
+
+  const runId = newSortableId("run");
+  const createdAt = Date.now() - 1500;
+  const updatedAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+  updateRunState(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "running",
+    activeRunId: runId,
+    activeAssistantItemId: null,
+    lastResponseTotalTokens: 64000,
+    runNoticeText: "",
+    updatedAt,
+    appliedItemId: 0
+  });
+
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/status-summary",
+    headers: {
+      "x-awb-agent-internal-token": fixture.internalToken
+    },
+    payload: {
+      sessionId: session.id,
+      // Compatibility: use `agentId` as documented.
+      agentId: "default"
+    }
+  });
+  assert.equal(res.statusCode, 200, `status-summary failed: ${res.body}`);
+  const body = res.json() as any;
+  assert.equal(body.session?.id, session.id);
+  assert.equal(body.session?.workspaceId, fixture.workspaceId);
+  assert.equal(body.agent?.id, "default");
+  assert.equal(body.agent?.name, "default");
+  assert.equal(body.runState?.status, "running");
+  assert.equal(body.runState?.activeRunId, runId);
+  assert.equal(body.runState?.lastResponseTotalTokens, 64000);
+  // Compatibility: runState.terminalStatus alias
+  assert.equal(body.runState?.terminalStatus, body.runState?.lastTerminalStatus);
+  assert.equal(body.startedAt, createdAt);
+  assert.equal(body.contextWindowTokens, 128000);
+  assert.ok(Math.abs(body.contextTokenRatio - 0.5) < 1e-9);
+  assert.ok(typeof body.elapsedMs === "number" && body.elapsedMs >= 0);
+
+  {
+    // Precedence: selectedAgentId wins when both are provided.
+    const resPreferSelected = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/sessions/status-summary",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: { sessionId: session.id, agentId: "missing", selectedAgentId: "default" }
+    });
+    assert.equal(resPreferSelected.statusCode, 200);
+    const prefer = resPreferSelected.json() as any;
+    assert.equal(prefer.agent?.id, "default");
+  }
+
+  // updatedAt should be stable across calls (generatedAt changes)
+  const updatedAt1 = body.updatedAt;
+  const generatedAt1 = body.generatedAt;
+  await sleep(10);
+  const res2 = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/status-summary",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { sessionId: session.id, agentId: "default" }
+  });
+  assert.equal(res2.statusCode, 200);
+  const body2 = res2.json() as any;
+  assert.equal(body2.updatedAt, updatedAt1);
+  assert.ok(typeof body2.generatedAt === "number" && body2.generatedAt >= generatedAt1);
+
+  const resNoAgent = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/status-summary",
+    headers: {
+      "x-awb-agent-internal-token": fixture.internalToken
+    },
+    payload: {
+      sessionId: session.id
+    }
+  });
+  assert.equal(resNoAgent.statusCode, 200, `status-summary(no agent) failed: ${resNoAgent.body}`);
+  const bodyNoAgent = resNoAgent.json() as any;
+  assert.equal(bodyNoAgent.agent, null);
+  assert.equal(bodyNoAgent.contextWindowTokens, null);
+  assert.equal(bodyNoAgent.contextTokenRatio, null);
+});
+
+test("internal sessions/status-summary 需要 internal token 且 sessionId 必须存在", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+
+  const noTokenRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/status-summary",
+    payload: { sessionId: "sess_missing" }
+  });
+  assert.equal(noTokenRes.statusCode, 401);
+
+  const notFoundRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/status-summary",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { sessionId: "sess_missing" }
+  });
+  assert.equal(notFoundRes.statusCode, 404);
+  assert.equal(notFoundRes.json().code, "SESSION_NOT_FOUND");
+
+  const agentNotFoundRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/status-summary",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { sessionId: "sess_missing", selectedAgentId: "agent_missing" }
+  });
+  // sessionId missing still dominates; ensure agent not found is covered in another test
+  assert.equal(agentNotFoundRes.statusCode, 404);
+});
+
+test("internal sessions/status-summary sessionId 为空白时返回 400 + SESSION_ID_REQUIRED", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/status-summary",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { sessionId: "   " }
+  });
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.json().code, "SESSION_ID_REQUIRED");
+});
+
+test("internal sessions/status-summary agent 不存在时返回 400 + AGENT_NOT_FOUND", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const created = await createSession(fixture.app, fixture.workspaceId);
+  const session = getAgentSession(fixture.db, created.id)!;
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/status-summary",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { sessionId: session.id, agentId: "agent_missing" }
+  });
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.json().code, "AGENT_NOT_FOUND");
+});
+
 test("single-call model profile 始终使用全局默认模型", async () => {
   const fixture = await createFixture();
 
@@ -5791,11 +6155,13 @@ test("agent startup seed 会修复脏的 global prompts settings", async () => {
       agentWorkerHost: "127.0.0.1",
       agentWorkerPort: 0,
       agentWorkerSocketPath: path.join(dataDir, "agent-worker.sock"),
-      agentWorkerConcurrency: 0,
-      agentInternalToken: internalToken,
-      agentApiOrigin: "http://127.0.0.1:0",
-      agentStartupRecoveryMode: "recover"
-    });
+        agentWorkerConcurrency: 0,
+        agentInternalToken: internalToken,
+        agentApiOrigin: "http://127.0.0.1:0",
+        agentStartupRecoveryMode: "recover",
+        agentPluginHostEnabled: false,
+        agentPluginHostSocketPath: path.join(dataDir, "agent-plugin-host.sock")
+      });
     await app.ready();
     const res = await app.inject({ method: "GET", url: "/api/settings/agent/global-prompts" });
     assert.equal(res.statusCode, 200);
@@ -5913,4 +6279,551 @@ test("agent prompt-context 对 workspace AGENTS.md 做 32KB 截断并追加标�
   );
   assert.ok(context.system.includes("[agent_prompt] default"), "system should include agent section when workspace section exists");
   assert.equal(context.system.includes("## Workspace Instructions:"), false, "system should not include legacy workspace heading when workspace section exists");
+});
+
+test("channels: inbound 去重 + 触发 run 幂等（不重复创建 reply_job）", async () => {
+  await withEnv("AWB_CHANNEL_SENDER_ALLOWLIST", "u_allowed", async () => {
+    const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+    const created = await createSession(fixture.app, fixture.workspaceId);
+    const session = getAgentSession(fixture.db, created.id)!;
+
+    // bind conversation to session
+    const upsertRes = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/conversations/upsert-binding",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_c1",
+        chatId: "c1",
+        chatType: "direct",
+        sessionId: session.id
+      }
+    });
+    assert.equal(upsertRes.statusCode, 200, `upsert-binding failed: ${upsertRes.body}`);
+
+    // select agent: update store directly (ChannelRuntime will enforce agent selected)
+    fixture.db
+      .prepare(
+        `update channel_conversation_binding set selected_agent_id = 'default' where plugin_id='feishu' and channel_name='im' and account_id='default' and conversation_key='feishu_default_chat_c1'`
+      )
+      .run();
+
+    const ingest1 = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/inbound/ingest",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_c1",
+        chatType: "direct",
+        chatId: "c1",
+        externalMessageId: "m1",
+        sender: { id: "u_allowed", displayName: "Alice" },
+        mentionedBot: false,
+        text: "hello"
+      }
+    });
+    assert.equal(ingest1.statusCode, 200, `ingest1 failed: ${ingest1.body}`);
+    assert.equal((ingest1.json() as any).ok, true);
+    assert.equal((ingest1.json() as any).deduplicated, false);
+
+    const ingest2 = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/inbound/ingest",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_c1",
+        chatType: "direct",
+        chatId: "c1",
+        externalMessageId: "m1",
+        sender: { id: "u_allowed", displayName: "Alice" },
+        mentionedBot: false,
+        text: "hello"
+      }
+    });
+    assert.equal(ingest2.statusCode, 200, `ingest2 failed: ${ingest2.body}`);
+    assert.equal((ingest2.json() as any).ok, true);
+    assert.equal((ingest2.json() as any).deduplicated, true);
+
+    const trigger1 = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/run/trigger",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_c1",
+        triggerExternalMessageId: "m1",
+        text: "hello"
+      }
+    });
+    assert.equal(trigger1.statusCode, 200, `trigger1 failed: ${trigger1.body}`);
+    const body1 = trigger1.json() as any;
+    assert.equal(body1.ok, true);
+    assert.ok(typeof body1.runId === "string" && body1.runId.length > 0);
+    assert.equal(countReplyJobsForRun(fixture.db, body1.runId), 1);
+
+    // idempotent: same clientRequestId derived from externalMessageId -> AgentService dedup, reply_job remains 1
+    const trigger2 = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/run/trigger",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_c1",
+        triggerExternalMessageId: "m1",
+        text: "hello"
+      }
+    });
+    assert.equal(trigger2.statusCode, 200, `trigger2 failed: ${trigger2.body}`);
+    const body2 = trigger2.json() as any;
+    assert.equal(body2.ok, true);
+    assert.equal(body2.runId, body1.runId);
+    assert.equal(countReplyJobsForRun(fixture.db, body1.runId), 1);
+  });
+});
+
+test("channels: session running 冲突时 trigger 返回 status-summary", async () => {
+  await withEnv("AWB_CHANNEL_SENDER_ALLOWLIST", "u_allowed", async () => {
+    const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+    const created = await createSession(fixture.app, fixture.workspaceId);
+    const session = getAgentSession(fixture.db, created.id)!;
+
+    // bind and select agent
+    await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/conversations/upsert-binding",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_c2",
+        chatId: "c2",
+        chatType: "direct",
+        sessionId: session.id
+      }
+    });
+    fixture.db
+      .prepare(
+        `update channel_conversation_binding set selected_agent_id = 'default' where plugin_id='feishu' and channel_name='im' and account_id='default' and conversation_key='feishu_default_chat_c2'`
+      )
+      .run();
+
+    // ingest the trigger message so run/trigger can bind to an inbound row (H1)
+    const ingest = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/inbound/ingest",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_c2",
+        chatType: "direct",
+        chatId: "c2",
+        externalMessageId: "m2",
+        sender: { id: "u_allowed", displayName: "Alice" },
+        mentionedBot: false,
+        text: "hello"
+      }
+    });
+    assert.equal(ingest.statusCode, 200);
+
+    // make session running
+    updateRunState(fixture.db, {
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      status: "running",
+      activeRunId: newSortableId("run"),
+      activeAssistantItemId: null,
+      runNoticeText: "",
+      updatedAt: Date.now(),
+      appliedItemId: 0
+    });
+
+    const trigger = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/run/trigger",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_c2",
+        triggerExternalMessageId: "m2",
+        text: "hello"
+      }
+    });
+    assert.equal(trigger.statusCode, 200, `trigger failed: ${trigger.body}`);
+    const body = trigger.json() as any;
+    assert.equal(body.ok, false);
+    assert.equal(body.errorCode, "SESSION_RUNNING");
+    assert.ok(body.statusSummary);
+    assert.equal(body.statusSummary.runState.status, "running");
+  });
+});
+
+test("channels: H1 未 ingest 的 trigger 必须失败且不创建 reply_job", async () => {
+  await withEnv("AWB_CHANNEL_SENDER_ALLOWLIST", "u_allowed", async () => {
+    const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+    const created = await createSession(fixture.app, fixture.workspaceId);
+    const session = getAgentSession(fixture.db, created.id)!;
+
+    await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/conversations/upsert-binding",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_h1",
+        chatId: "h1",
+        chatType: "direct",
+        sessionId: session.id
+      }
+    });
+    fixture.db
+      .prepare(
+        `update channel_conversation_binding set selected_agent_id = 'default' where plugin_id='feishu' and channel_name='im' and account_id='default' and conversation_key='feishu_default_chat_h1'`
+      )
+      .run();
+
+    const before = fixture.db.prepare(`select count(1) as cnt from channel_reply_job`).get() as any;
+    const trigger = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/run/trigger",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_h1",
+        triggerExternalMessageId: "m_missing",
+        text: "hello"
+      }
+    });
+    assert.equal(trigger.statusCode, 200);
+    const body = trigger.json() as any;
+    assert.equal(body.ok, false);
+    assert.equal(body.errorCode, "INBOUND_NOT_FOUND");
+    const after = fixture.db.prepare(`select count(1) as cnt from channel_reply_job`).get() as any;
+    assert.equal(after.cnt, before.cnt);
+  });
+});
+
+test("channels: H1 sender 不在 allowlist 时 trigger 必须失败且不触发 run", async () => {
+  await withEnv("AWB_CHANNEL_SENDER_ALLOWLIST", "u_allowed", async () => {
+    const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+    const created = await createSession(fixture.app, fixture.workspaceId);
+    const session = getAgentSession(fixture.db, created.id)!;
+
+    await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/conversations/upsert-binding",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_h1b",
+        chatId: "h1b",
+        chatType: "direct",
+        sessionId: session.id
+      }
+    });
+    fixture.db
+      .prepare(
+        `update channel_conversation_binding set selected_agent_id = 'default' where plugin_id='feishu' and channel_name='im' and account_id='default' and conversation_key='feishu_default_chat_h1b'`
+      )
+      .run();
+
+    // Ingest with not-allowed sender (should fail), so insert row directly to simulate bypass attempt.
+    fixture.db
+      .prepare(
+        `insert into channel_inbound_message (plugin_id, channel_name, account_id, conversation_key, external_message_id, sender_id, sender_name, mentioned_bot, text, created_at_external, created_at_local)
+         values ('feishu','im','default','feishu_default_chat_h1b','m3','u_not_allowed','Bob',0,'hi',null, @ts)`
+      )
+      .run({ ts: Date.now() });
+
+    const trigger = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/run/trigger",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_h1b",
+        triggerExternalMessageId: "m3",
+        text: "hi"
+      }
+    });
+    assert.equal(trigger.statusCode, 200);
+    const body = trigger.json() as any;
+    assert.equal(body.ok, false);
+    assert.equal(body.errorCode, "NOT_ALLOWED");
+  });
+});
+
+test("channels: 群聚合默认窗口与截断（maxMessages=50/maxChars=8000）", async () => {
+  await withEnv("AWB_CHANNEL_SENDER_ALLOWLIST", "u_allowed", async () => {
+    const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+    const created = await createSession(fixture.app, fixture.workspaceId);
+    const session = getAgentSession(fixture.db, created.id)!;
+
+    await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/conversations/upsert-binding",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_g1",
+        chatId: "g1",
+        chatType: "group",
+        sessionId: session.id
+      }
+    });
+
+    // create 60 messages, each 200 chars => should drop earlier to 50 and then truncate to <=8000
+    const big = "x".repeat(200);
+    for (let i = 1; i <= 60; i += 1) {
+      const msgId = `mg_${i}`;
+      const res = await fixture.app.inject({
+        method: "POST",
+        url: "/api/internal/agent/channels/inbound/ingest",
+        headers: { "x-awb-agent-internal-token": fixture.internalToken },
+        payload: {
+          pluginId: "feishu",
+          channelName: "im",
+          accountId: "default",
+          conversationKey: "feishu_default_chat_g1",
+          chatType: "group",
+          chatId: "g1",
+          externalMessageId: msgId,
+          sender: { id: "u_allowed", displayName: "Alice" },
+          mentionedBot: true,
+          text: `${i}:${big}`
+        }
+      });
+      assert.equal(res.statusCode, 200);
+    }
+
+    const agg = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/inbound/aggregate",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_g1",
+        upperBoundExternalMessageId: "mg_60"
+      }
+    });
+    assert.equal(agg.statusCode, 200, `aggregate failed: ${agg.body}`);
+    const body = agg.json() as any;
+    assert.ok(typeof body.text === "string");
+    assert.ok(body.text.length <= 8000, `aggregated text too long: ${body.text.length}`);
+    assert.ok(body.text.startsWith("（提示：已省略更早的群消息"), "should include truncation hint line");
+    // dropped earlier messages -> mg_1 should be absent, mg_60 should exist
+    assert.equal(/(^|\n)Alice: 1:[^0-9]/.test(body.text), false);
+    assert.ok(/(^|\n)Alice: 60:/.test(body.text));
+  });
+});
+
+test("reply dispatcher: pending job -> sent (final-only, via plugin-host outbound)", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0, enablePluginHost: true, enablePluginServices: true });
+
+  // Prepare a mock feishu plugin that supports outbound replyText.
+  const pluginRoot = path.join(fixture.dataDir, "plugins", "feishu");
+  await ensureDir(path.join(pluginRoot, "dist"));
+  await fs.writeFile(
+    path.join(pluginRoot, "agent-workbench.plugin.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        id: "feishu",
+        name: "Feishu IM",
+        version: "0.0.0-test",
+        description: "mock feishu plugin for reply dispatcher test",
+        entry: "dist/index.mjs",
+        capabilities: ["services"],
+        services: [{ name: "gateway" }],
+        uiHints: { sensitiveKeys: ["appSecret"] },
+        configSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["appId", "appSecret"],
+          properties: {
+            appId: { type: "string", minLength: 1 },
+            appSecret: { type: "string", minLength: 1 }
+          }
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  // Outbox file for assertion.
+  const outboxPath = path.join(fixture.dataDir, "feishu-outbox.jsonl");
+  await fs.writeFile(outboxPath, "", "utf8");
+
+  await fs.writeFile(
+    path.join(pluginRoot, "dist", "index.mjs"),
+    [
+      "import fs from 'node:fs/promises';",
+      "export default {",
+      "  meta: { id: 'feishu', name: 'Feishu IM', version: '0.0.0-test' },",
+      "  services: {",
+      "    gateway: {",
+      "      async start() {",
+      "        return {",
+      "          replyText: async ({ chatId, messageId, text }) => {",
+      `            await fs.appendFile(${JSON.stringify(outboxPath)}, JSON.stringify({ chatId, messageId, text }) + "\\n", "utf8");`,
+      "          },",
+      "          stop: async () => {}",
+      "        };",
+      "      }",
+      "    }",
+      "  }",
+      "};",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+
+  // Enable plugin with minimal config to start gateway in plugin-host.
+  const enableRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/plugins",
+    payload: {
+      plugins: [
+        {
+          id: "feishu",
+          enabled: true,
+          config: { appId: "test", appSecret: "test" }
+        }
+      ]
+    }
+  });
+  assert.equal(enableRes.statusCode, 200, `enable plugin failed: ${enableRes.body}`);
+
+  // Wait for services runtime reconcile hook to fire.
+  await sleep(800);
+
+  // Create a session and a completed run with assistant output.
+  const created = await createSession(fixture.app, fixture.workspaceId);
+  const session = getAgentSession(fixture.db, created.id)!;
+  const runId = newSortableId("run");
+  const ts = Date.now();
+
+  const user = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "hello" },
+    createdAt: ts
+  });
+  appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: 1,
+    prevId: user.id,
+    kind: "assistant",
+    status: "completed",
+    output: { type: "assistant_text", text: "final answer" },
+    createdAt: ts
+  });
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: user.id,
+    agentId: "default",
+    providerId: "openai",
+    modelId: "gpt-4o-mini",
+    status: "completed",
+    createdAt: ts
+  });
+
+  // Create conversation binding (reply dispatcher needs chatId).
+  const upsertRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/conversations/upsert-binding",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: {
+      pluginId: "feishu",
+      channelName: "im",
+      accountId: "default",
+      conversationKey: "feishu_default_chat_reply_dispatcher",
+      chatId: "chat_x",
+      chatType: "direct",
+      sessionId: session.id
+    }
+  });
+  assert.equal(upsertRes.statusCode, 200, `upsert-binding failed: ${upsertRes.body}`);
+
+  // Insert a pending reply job.
+  fixture.db
+    .prepare(
+      `
+        insert into channel_reply_job (
+          plugin_id, channel_name, account_id, conversation_key,
+          workspace_id, session_id, run_id,
+          reply_to_external_message_id,
+          status, error_text,
+          created_at, updated_at
+        ) values (
+          'feishu', 'im', 'default', 'feishu_default_chat_reply_dispatcher',
+          @workspaceId, @sessionId, @runId,
+          'm_reply_to',
+          'pending', null,
+          @ts, @ts
+        )
+      `
+    )
+    .run({ workspaceId: fixture.workspaceId, sessionId: session.id, runId, ts });
+
+  // Wait for reply dispatcher to poll and send (poll DB to reduce flakiness).
+  const deadline = Date.now() + 5000;
+  let jobRow: any = null;
+  while (Date.now() < deadline) {
+    jobRow = fixture.db
+      .prepare(`select status, error_text as errorText from channel_reply_job where run_id = ?`)
+      .get(runId) as any;
+    if (jobRow?.status === "sent" || jobRow?.status === "failed") {
+      break;
+    }
+    await sleep(200);
+  }
+
+  assert.ok(jobRow, "job row should exist");
+  assert.equal(jobRow.status, "sent", `expected job sent, got ${String(jobRow.status)} err=${String(jobRow.errorText || "")}`);
+
+  const outbox = await fs.readFile(outboxPath, "utf8");
+  assert.ok(outbox.includes("final answer"), "expected outbox to include final assistant text");
 });

@@ -2,7 +2,11 @@ import type {
   AgentToolName,
   AgentUiLocale,
   PluginRuntimeSnapshotsResponse,
-  PluginToolCanonicalName
+  PluginToolCanonicalName,
+  PluginToolRpcExecuteRequest,
+  PluginToolRpcExecuteResponse,
+  PluginToolRpcListRequest,
+  PluginToolRpcListResponse
 } from "@agent-workbench/shared";
 
 export class ApiConflictError extends Error {}
@@ -133,7 +137,14 @@ export class AgentApiClient {
     }
     if (!response.ok) {
       const txt = await response.text();
-      throw new Error(`request failed: ${response.status} ${txt}`);
+      try {
+        const parsed = txt ? (JSON.parse(txt) as { message?: unknown; code?: unknown }) : null;
+        const message = typeof parsed?.message === "string" ? parsed.message : txt;
+        const code = typeof parsed?.code === "string" ? parsed.code : "";
+        throw new Error(`request failed: ${response.status} ${message}${code ? ` (${code})` : ""}`);
+      } catch {
+        throw new Error(`request failed: ${response.status} ${txt}`);
+      }
     }
     return (await response.json()) as T;
   }
@@ -347,6 +358,20 @@ export class AgentApiClient {
     return this.request<PluginRuntimeSnapshotsResponse>("/api/internal/agent/plugins/runtime-snapshots", {
       method: "POST",
       body: {}
+    });
+  }
+
+  async listPluginTools(input: PluginToolRpcListRequest) {
+    return this.request<PluginToolRpcListResponse>("/api/internal/agent/plugins/tools/list", {
+      method: "POST",
+      body: input
+    });
+  }
+
+  async executePluginTool(input: PluginToolRpcExecuteRequest) {
+    return this.request<PluginToolRpcExecuteResponse>("/api/internal/agent/plugins/tools/execute", {
+      method: "POST",
+      body: input
     });
   }
 }

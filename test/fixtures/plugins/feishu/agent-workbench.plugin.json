@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "feishu",
+  "name": "Feishu IM",
+  "version": "0.1.0",
+  "description": "飞书 IM 渠道插件（services.gateway + channels.im）MVP",
+  "entry": "dist/index.js",
+  "engines": {
+    "agentWorkbench": "*"
+  },
+  "capabilities": ["channels", "services"],
+  "channels": [{ "name": "im" }],
+  "services": [{ "name": "gateway" }],
+  "uiHints": {
+    "sensitiveKeys": ["appSecret"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["appId", "appSecret"],
+    "properties": {
+      "enabled": { "type": "boolean" },
+      "appId": { "type": "string", "minLength": 1 },
+      "appSecret": { "type": "string", "minLength": 1 },
+      "botOpenId": { "type": "string" },
+      "domain": { "type": "string" }
+    }
+  }
+}

@@ -20,13 +20,25 @@ import {
   AgentSessionRunStateSchema,
   AgentUiLocaleSchema,
   AgentProviderNpmSchema,
+  AgentRecentSessionsRequestSchema,
+  AgentRecentSessionsResponseSchema,
+  AgentListAvailableAgentsRequestSchema,
+  AgentListAvailableAgentsResponseSchema,
+  AgentSessionStatusSummaryRequestSchema,
+  AgentSessionStatusSummaryResponseSchema,
   PluginToolCanonicalNameSchema,
   PluginRuntimeSnapshotsResponseSchema,
+  PluginToolRpcExecuteRequestSchema,
+  PluginToolRpcExecuteResponseSchema,
+  PluginToolRpcListRequestSchema,
+  PluginToolRpcListResponseSchema,
   ErrorResponseSchema
 } from "@agent-workbench/shared";
 import type { AgentRuntimePort } from "./agent.runtime-port.js";
 import type { AgentService } from "./agent.service.js";
 import { HttpError } from "../../app/errors.js";
+import type { AgentPluginHostClient } from "./agent.plugin-host-client.js";
+import { listAvailableAgentsForSurface } from "../settings/settings.service.js";
 
 const AgentBuiltinToolNameSchema = Type.Union([
   Type.Literal("bash"),
@@ -52,7 +64,10 @@ function assertInternalToken(req: FastifyRequest, service: AgentService) {
   }
 }
 
-export async function registerAgentRoutes(app: FastifyInstance, params: { service: AgentService; runtime: AgentRuntimePort }) {
+export async function registerAgentRoutes(
+  app: FastifyInstance,
+  params: { service: AgentService; runtime: AgentRuntimePort; pluginHost?: AgentPluginHostClient | null }
+) {
   app.get(
     "/api/agent/sessions",
     {
@@ -400,6 +415,55 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
   );
 
   app.post(
+    "/api/internal/agent/plugins/tools/list",
+    {
+      schema: {
+        tags: ["agent"],
+        body: PluginToolRpcListRequestSchema,
+        response: {
+          200: PluginToolRpcListResponseSchema,
+          401: ErrorResponseSchema,
+          503: ErrorResponseSchema,
+          500: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      if (!params.pluginHost) {
+        throw new HttpError(503, "plugin host unavailable", "PLUGIN_HOST_UNAVAILABLE");
+      }
+      return await params.pluginHost.listTools(req.body as any);
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/plugins/tools/execute",
+    {
+      schema: {
+        tags: ["agent"],
+        body: PluginToolRpcExecuteRequestSchema,
+        response: {
+          200: PluginToolRpcExecuteResponseSchema,
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+          503: ErrorResponseSchema,
+          500: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      if (!params.pluginHost) {
+        throw new HttpError(503, "plugin host unavailable", "PLUGIN_HOST_UNAVAILABLE");
+      }
+      return await params.pluginHost.executeTool(req.body as any);
+    }
+  );
+
+  app.post(
     "/api/internal/agent/subtask/start",
     {
       schema: {
@@ -559,6 +623,86 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
         createdAt: body.createdAt
       });
       return { ok: true, item };
+      }
+  );
+
+  app.post(
+    "/api/internal/agent/sessions/recent",
+    {
+      schema: {
+        tags: ["agent"],
+        body: AgentRecentSessionsRequestSchema,
+        response: {
+          200: AgentRecentSessionsResponseSchema,
+          401: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as { limit?: number };
+      const limit = typeof body.limit === "number" ? body.limit : 10;
+      return params.service.listRecentSessions({ limit });
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/agents/list",
+    {
+      schema: {
+        tags: ["agent"],
+        body: AgentListAvailableAgentsRequestSchema,
+        response: {
+          200: AgentListAvailableAgentsResponseSchema,
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as { workspaceId: string; surface?: string };
+      const workspaceId = String(body.workspaceId || "").trim();
+      if (!workspaceId) throw new HttpError(400, "workspaceId is required", "WORKSPACE_ID_REQUIRED");
+      const ws = params.service.getWorkspace(workspaceId);
+      if (!ws) throw new HttpError(404, "workspace not found", "WORKSPACE_NOT_FOUND");
+      const surface = "user";
+      const agents = listAvailableAgentsForSurface(params.service.getContext(), surface)
+        .filter((a) => a.scope === "user" || a.scope === "both")
+        .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name));
+      return { agents };
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/sessions/status-summary",
+    {
+      schema: {
+        tags: ["agent"],
+        body: AgentSessionStatusSummaryRequestSchema,
+        response: {
+          200: AgentSessionStatusSummaryResponseSchema,
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          500: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      try {
+        const body = req.body as { sessionId: string; agentId?: string; selectedAgentId?: string };
+        return params.service.getSessionStatusSummary({
+          sessionId: body.sessionId,
+          agentId: body.agentId,
+          selectedAgentId: body.selectedAgentId
+        });
+      } catch (err) {
+        if (err instanceof HttpError) throw err;
+        throw new HttpError(500, "failed to get session status summary", "SESSION_STATUS_SUMMARY_FAILED");
+      }
     }
   );
 

@@ -1,6 +1,7 @@
 import { Type } from "@sinclair/typebox";
 import type { Static } from "@sinclair/typebox";
 import { PluginToolCanonicalNameSchema } from "./plugin.js";
+import { AgentItemViewSchema } from "./settings.js";
 
 export const AgentUiLocaleSchema = Type.Union([Type.Literal("zh-CN"), Type.Literal("en-US")]);
 export type AgentUiLocale = Static<typeof AgentUiLocaleSchema>;
@@ -152,6 +153,104 @@ export const AgentSessionRunStateSchema = Type.Object({
   appliedItemId: Type.Number({ minimum: 0 })
 });
 export type AgentSessionRunState = Static<typeof AgentSessionRunStateSchema>;
+
+export const AgentSessionStatusSummaryRequestSchema = Type.Object(
+  {
+    sessionId: Type.String({ minLength: 1 }),
+    // Compatibility:
+    // - IM design doc v1 used `agentId`
+    // - current implementation used `selectedAgentId`
+    // Accept both. If both are provided, `selectedAgentId` wins.
+    agentId: Type.Optional(Type.String({ minLength: 1 })),
+    selectedAgentId: Type.Optional(Type.String({ minLength: 1 }))
+  },
+  { additionalProperties: false }
+);
+export type AgentSessionStatusSummaryRequest = Static<typeof AgentSessionStatusSummaryRequestSchema>;
+
+// Compatibility: IM design doc uses `terminalStatus`, while existing run-state uses `lastTerminalStatus`.
+// Keep both in status-summary response.
+export const AgentSessionRunStateWithTerminalStatusSchema = Type.Intersect(
+  [
+    AgentSessionRunStateSchema,
+    Type.Object({
+      terminalStatus: AgentSessionTerminalStatusSchema
+    })
+  ],
+  { additionalProperties: false }
+);
+
+export const AgentSessionStatusSummaryResponseSchema = Type.Object(
+  {
+    updatedAt: Type.Number(),
+    generatedAt: Type.Optional(Type.Number()),
+    session: AgentSessionRecordSchema,
+    agent: Type.Union([
+      Type.Object({
+        id: Type.String({ minLength: 1 }),
+        name: Type.String({ minLength: 1 })
+      }),
+      Type.Null()
+    ]),
+    runState: AgentSessionRunStateWithTerminalStatusSchema,
+    startedAt: Type.Union([Type.Number(), Type.Null()]),
+    elapsedMs: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
+    contextWindowTokens: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]),
+    contextTokenRatio: Type.Union([Type.Number({ minimum: 0 }), Type.Null()])
+  },
+  { additionalProperties: false }
+);
+export type AgentSessionStatusSummaryResponse = Static<typeof AgentSessionStatusSummaryResponseSchema>;
+
+// --------------------------------------------------------------------------------------
+// IM plugins helpers (internal-only)
+// --------------------------------------------------------------------------------------
+
+export const AgentRecentSessionsRequestSchema = Type.Object(
+  {
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 }))
+  },
+  { additionalProperties: false }
+);
+export type AgentRecentSessionsRequest = Static<typeof AgentRecentSessionsRequestSchema>;
+
+export const AgentRecentSessionItemSchema = Type.Object(
+  {
+    sessionId: Type.String({ minLength: 1 }),
+    sessionTitle: Type.String({ minLength: 1 }),
+    sessionUpdatedAt: Type.Number(),
+    workspaceId: Type.String({ minLength: 1 }),
+    workspaceTitle: Type.String({ minLength: 1 }),
+    workspaceDirName: Type.String({ minLength: 1 })
+  },
+  { additionalProperties: false }
+);
+export type AgentRecentSessionItem = Static<typeof AgentRecentSessionItemSchema>;
+
+export const AgentRecentSessionsResponseSchema = Type.Object(
+  {
+    items: Type.Array(AgentRecentSessionItemSchema)
+  },
+  { additionalProperties: false }
+);
+export type AgentRecentSessionsResponse = Static<typeof AgentRecentSessionsResponseSchema>;
+
+export const AgentListAvailableAgentsRequestSchema = Type.Object(
+  {
+    workspaceId: Type.String({ minLength: 1 }),
+    surface: Type.Optional(Type.Literal("user"))
+  },
+  { additionalProperties: false }
+);
+export type AgentListAvailableAgentsRequest = Static<typeof AgentListAvailableAgentsRequestSchema>;
+
+export const AgentListAvailableAgentsResponseSchema = Type.Object(
+  {
+    agents: Type.Array(AgentItemViewSchema)
+  },
+  { additionalProperties: false }
+);
+export type AgentListAvailableAgentsResponse = Static<typeof AgentListAvailableAgentsResponseSchema>;
 
 export const AgentCreateSessionRequestSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),

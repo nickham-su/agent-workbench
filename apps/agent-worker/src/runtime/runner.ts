@@ -13,6 +13,7 @@ import { PluginRuntimeManager } from "./plugins/runtimeManager.js";
 import { ToolRegistry } from "./tools/registry.js";
 import { BuiltinToolProvider } from "./tools/providers/builtin.js";
 import { LocalPluginToolProvider } from "./tools/providers/local-plugin.js";
+import { RemotePluginToolProvider, REMOTE_PLUGIN_TOOLS_ENABLED } from "./tools/providers/remote-plugin.js";
 import { McpToolProvider } from "./tools/providers/mcp.js";
 import type { ToolExecutionContext } from "./tools/types.js";
 import { isMcpToolName, isPluginToolName } from "./tools/types.js";
@@ -804,11 +805,10 @@ export class AgentRunner {
     private readonly concurrency: number
   ) {
     this.pluginRuntimeManager = new PluginRuntimeManager(this.logger);
-    this.toolRegistry = new ToolRegistry([
-      new BuiltinToolProvider(),
-      new McpToolProvider(this.mcpManager),
-      new LocalPluginToolProvider(this.pluginRuntimeManager)
-    ]);
+    const pluginProvider = REMOTE_PLUGIN_TOOLS_ENABLED
+      ? new RemotePluginToolProvider()
+      : new LocalPluginToolProvider(this.pluginRuntimeManager);
+    this.toolRegistry = new ToolRegistry([new BuiltinToolProvider(), new McpToolProvider(this.mcpManager), pluginProvider]);
   }
 
   enqueueRun(run: QueuedRun) {

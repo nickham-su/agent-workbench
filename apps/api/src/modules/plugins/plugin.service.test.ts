@@ -56,6 +56,108 @@ test("plugin service discovers debug-tools fixture and exposes runtime snapshot"
   }
 });
 
+test("updateAgentPluginSettings keeps existing config when config is omitted", async () => {
+  const fixture = await createFixture();
+  try {
+    const sourcePluginDir = path.join(process.cwd(), "test", "fixtures", "plugins", "feishu");
+    const targetPluginDir = path.join(fixture.dataDir, "plugins", "feishu");
+    await ensureDir(path.join(fixture.dataDir, "plugins"));
+    await fs.cp(sourcePluginDir, targetPluginDir, { recursive: true });
+
+    await setSettingJson(
+      fixture.db,
+      "agent_plugins_v1",
+      {
+        plugins: [
+          {
+            id: "feishu",
+            enabled: true,
+            config: { appId: "a", appSecret: "b", domain: "https://open.feishu.cn" }
+          }
+        ]
+      },
+      Date.now()
+    );
+
+    const updated = await updateAgentPluginSettings({ db: fixture.db, dataDir: fixture.dataDir } as any, {
+      plugins: [{ id: "feishu", enabled: true }]
+    });
+
+    assert.equal(updated.plugins.length, 1);
+    assert.equal(updated.plugins[0]?.id, "feishu");
+    assert.equal(updated.plugins[0]?.enabled, true);
+    assert.deepEqual(updated.plugins[0]?.config, { appId: "a", appSecret: "b", domain: "https://open.feishu.cn" });
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("updateAgentPluginSettings allows disabling plugin without config", async () => {
+  const fixture = await createFixture();
+  try {
+    const sourcePluginDir = path.join(process.cwd(), "test", "fixtures", "plugins", "feishu");
+    const targetPluginDir = path.join(fixture.dataDir, "plugins", "feishu");
+    await ensureDir(path.join(fixture.dataDir, "plugins"));
+    await fs.cp(sourcePluginDir, targetPluginDir, { recursive: true });
+
+    const updated = await updateAgentPluginSettings({ db: fixture.db, dataDir: fixture.dataDir } as any, {
+      plugins: [{ id: "feishu", enabled: false }]
+    });
+    assert.equal(updated.plugins.length, 1);
+    assert.equal(updated.plugins[0]?.enabled, false);
+
+    const snapshots = await listPluginRuntimeSnapshots({ db: fixture.db, dataDir: fixture.dataDir } as any);
+    const feishu = snapshots.plugins.find((item) => item.id === "feishu");
+    assert.ok(feishu);
+    assert.equal(feishu?.enabled, false);
+    assert.equal(feishu?.state, "disabled");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("plugin service discovers feishu fixture with channels/services capabilities", async () => {
+  const fixture = await createFixture();
+  try {
+    const sourcePluginDir = path.join(process.cwd(), "test", "fixtures", "plugins", "feishu");
+    const targetPluginDir = path.join(fixture.dataDir, "plugins", "feishu");
+    await ensureDir(path.join(fixture.dataDir, "plugins"));
+    await fs.cp(sourcePluginDir, targetPluginDir, { recursive: true });
+
+    await setSettingJson(
+      fixture.db,
+      "agent_plugins_v1",
+      {
+        plugins: [
+          {
+            id: "feishu",
+            enabled: true,
+            config: {
+              appId: "cli_test",
+              appSecret: "secret_test",
+              domain: "https://open.feishu.cn"
+            }
+          }
+        ]
+      },
+      Date.now()
+    );
+
+    const snapshots = await listPluginRuntimeSnapshots({
+      db: fixture.db,
+      dataDir: fixture.dataDir
+    } as any);
+    const feishu = snapshots.plugins.find((item) => item.id === "feishu");
+    assert.ok(feishu, "feishu should be discovered");
+    assert.equal(feishu?.enabled, true);
+    assert.equal(feishu?.state, "ready");
+    assert.ok(feishu?.capabilities.channels?.some((c) => c.name === "im"));
+    assert.ok(feishu?.capabilities.services?.some((s) => s.name === "gateway"));
+  } finally {
+    await fixture.close();
+  }
+});
+
 test("plugin service rejects entry whose real path escapes plugin root", async () => {
   const fixture = await createFixture();
   try {
