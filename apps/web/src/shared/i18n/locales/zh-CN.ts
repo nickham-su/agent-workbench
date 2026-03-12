@@ -1080,7 +1080,7 @@ export default {
         rawSchemaTitle: "查看原始 Schema",
         schemaComplexHint: "该 schema 较复杂，字段说明仅供参考，最终以服务端校验为准。",
         editorTitle: "配置 JSON",
-        editorPlaceholder: "请输入 JSON 对象，例如 {\"appId\":\"cli_xxx\"}",
+        editorPlaceholder: "请输入 JSON 对象",
         enableHint: "启用前请先补充必填字段：{fields}",
         actions: {
           generateTemplate: "生成模板"

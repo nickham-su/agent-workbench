@@ -1082,7 +1082,7 @@ export default {
         rawSchemaTitle: "Show raw schema",
         schemaComplexHint: "This schema is complex. Field reference is for guidance only; backend validation is final.",
         editorTitle: "Config JSON",
-        editorPlaceholder: "Enter JSON object, e.g. {\"appId\":\"cli_xxx\"}",
+        editorPlaceholder: "Enter JSON object",
         enableHint: "Please fill required fields before enabling: {fields}",
         actions: {
           generateTemplate: "Generate template"
