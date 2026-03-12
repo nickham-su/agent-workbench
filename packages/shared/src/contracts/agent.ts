@@ -140,17 +140,66 @@ export const AgentSessionTerminalStatusSchema = Type.Union([
 ]);
 export type AgentSessionTerminalStatus = Static<typeof AgentSessionTerminalStatusSchema>;
 
+export const AgentSessionActiveRunSchema = Type.Object(
+  {
+    runId: Type.String({ minLength: 1 }),
+    startedAt: Type.Number()
+  },
+  { additionalProperties: false }
+);
+export type AgentSessionActiveRun = Static<typeof AgentSessionActiveRunSchema>;
+
+export const AgentSessionLastRunStatusSchema = Type.Union([
+  Type.Literal("completed"),
+  Type.Literal("failed"),
+  Type.Literal("cancelled")
+]);
+export type AgentSessionLastRunStatus = Static<typeof AgentSessionLastRunStatusSchema>;
+
+export const AgentSessionLastRunSchema = Type.Object(
+  {
+    runId: Type.String({ minLength: 1 }),
+    status: AgentSessionLastRunStatusSchema,
+    startedAt: Type.Number(),
+    endedAt: Type.Number(),
+    durationMs: Type.Number({ minimum: 0 })
+  },
+  { additionalProperties: false }
+);
+export type AgentSessionLastRun = Static<typeof AgentSessionLastRunSchema>;
+
 export const AgentSessionRunStateSchema = Type.Object({
   sessionId: Type.String({ minLength: 1 }),
   status: AgentRunStatusSchema,
   activeRunId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
   activeAssistantItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
+  // Optional for backward compatibility; server may include it.
+  //
+  // Semantics:
+  // - When present, `activeRun` describes the currently running run (if any).
+  // - It is meant for persistent display (e.g. header elapsed timer) during `status: "running"`.
+  activeRun: Type.Optional(Type.Union([AgentSessionActiveRunSchema, Type.Null()])),
   lastResponseTotalTokens: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
   nonTerminalItemIds: Type.Array(Type.Number({ minimum: 1 })),
   runNoticeText: Type.Union([Type.String(), Type.Null()]),
   updatedAt: Type.Number(),
+
+  // Semantics (event-like):
+  // - `lastTerminalStatus` is a strict, time-aligned terminal status intended to represent
+  //   the run that *just finished*.
+  // - It is computed with additional constraints (e.g. timestamps) to avoid mis-reporting
+  //   an older run as the just-finished one.
+  // - Consumers should NOT use it as the persistent "most recent run" status.
   lastTerminalStatus: AgentSessionTerminalStatusSchema,
-  appliedItemId: Type.Number({ minimum: 0 })
+  appliedItemId: Type.Number({ minimum: 0 }),
+
+  // Optional for backward compatibility; server may include it.
+  //
+  // Semantics (persistent):
+  // - `lastRun` represents the most recent *terminal* run (completed/failed/cancelled).
+  // - It is designed for persistent display (e.g. show last elapsed after run finishes).
+  // - It may be present even when `status: "running"` (meaning it refers to the previous run).
+  lastRun: Type.Optional(Type.Union([AgentSessionLastRunSchema, Type.Null()]))
 });
 export type AgentSessionRunState = Static<typeof AgentSessionRunStateSchema>;
 

@@ -2494,18 +2494,64 @@ export class AgentService {
     const latestTerminalRun = getLatestTerminalRunRecord(this.ctx.db, { workspaceId: session.workspaceId, sessionId: session.id });
     const lastTerminalStatus =
       latestTerminalRun && state.status === "idle" && latestTerminalRun.updatedAt === state.updatedAt ? latestTerminalRun.status : null;
+
+    const activeRun = (() => {
+      const activeRunId = state.activeRunId;
+      if (!activeRunId) return null;
+      const run = getRunRecord(this.ctx.db, activeRunId);
+      if (!run) {
+        this.logger.warn(
+          { sessionId: session.id, workspaceId: session.workspaceId, activeRunId },
+          "run-state has activeRunId but run record not found"
+        );
+        return null;
+      }
+      if (run.workspaceId !== session.workspaceId || run.sessionId !== session.id) {
+        this.logger.warn(
+          {
+            sessionId: session.id,
+            workspaceId: session.workspaceId,
+            activeRunId,
+            runWorkspaceId: run.workspaceId,
+            runSessionId: run.sessionId
+          },
+          "run-state activeRunId does not belong to the session"
+        );
+        return null;
+      }
+      return {
+        runId: run.runId,
+        startedAt: run.createdAt
+      };
+    })();
+
+    const lastRun = (() => {
+      if (!latestTerminalRun) return null;
+      const startedAt = latestTerminalRun.createdAt;
+      const endedAt = latestTerminalRun.updatedAt;
+      return {
+        runId: latestTerminalRun.runId,
+        status: latestTerminalRun.status,
+        startedAt,
+        endedAt,
+        durationMs: Math.max(0, endedAt - startedAt)
+      };
+    })();
+
     const nonTerminalItemIds = listNonTerminalVisibleItemIds(this.ctx.db, session.workspaceId, session.id);
     return {
       sessionId: session.id,
       status: state.status,
       activeRunId: state.activeRunId,
       activeAssistantItemId: state.activeAssistantItemId,
+      activeRun,
       lastResponseTotalTokens: state.lastResponseTotalTokens,
       runNoticeText: state.runNoticeText,
       nonTerminalItemIds,
       updatedAt: state.updatedAt,
       lastTerminalStatus,
-      appliedItemId: state.appliedItemId
+      appliedItemId: state.appliedItemId,
+      lastRun
     };
   }
 

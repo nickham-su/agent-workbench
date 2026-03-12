@@ -247,9 +247,6 @@
               />
               <div v-if="!isTerminalStatus(item.status)" class="flex items-center gap-2 text-[0.9em] text-[color:var(--text-tertiary)]">
                 <LoadingOutlined spin />
-                <span v-if="currentRunElapsedText" class="whitespace-nowrap tabular-nums">
-                  {{ currentRunElapsedText }}
-                </span>
               </div>
             </div>
             <AgentUserMessage
@@ -883,22 +880,16 @@ function formatElapsedDuration(ms: number) {
   return `${seconds}s`;
 }
 
-const latestUserMessageCreatedAt = computed(() => {
-  for (let i = items.value.length - 1; i >= 0; i -= 1) {
-    const item = items.value[i];
-    if (!item || item.kind !== "user" || item.output.type !== "user_text") continue;
-    const createdAt = typeof item.createdAt === "number" && Number.isFinite(item.createdAt) ? item.createdAt : 0;
-    if (createdAt > 0) return createdAt;
-  }
-  return 0;
-});
-
 const currentRunElapsedText = computed(() => {
-  const status = runState.value.status;
-  if (status !== "running") return "";
-  const startedAt = latestUserMessageCreatedAt.value;
-  if (!(startedAt > 0)) return "";
-  return formatElapsedDuration(nowTickMs.value - startedAt);
+  const state = runState.value;
+  if (state.status === "running") {
+    const startedAt = state.activeRun?.startedAt;
+    if (typeof startedAt !== "number" || !Number.isFinite(startedAt) || startedAt <= 0) return "";
+    return formatElapsedDuration(nowTickMs.value - startedAt);
+  }
+  const durationMs = state.lastRun?.durationMs;
+  if (typeof durationMs !== "number" || !Number.isFinite(durationMs) || durationMs < 0) return "";
+  return formatElapsedDuration(durationMs);
 });
 
 function clearRunElapsedTimer() {
@@ -2444,13 +2435,18 @@ watch(
 );
 
 watch(
-  () => [props.active, runState.value.status, latestUserMessageCreatedAt.value] as const,
+  () => [props.active, runState.value.status, runState.value.activeRun?.startedAt ?? 0] as const,
   ([active, status, startedAt]) => {
     if (!active) {
       clearRunElapsedTimer();
       return;
     }
-    if (status === "running" && startedAt > 0) {
+    if (
+      status === "running"
+      && typeof startedAt === "number"
+      && Number.isFinite(startedAt)
+      && startedAt > 0
+    ) {
       nowTickMs.value = Date.now();
       ensureRunElapsedTimer();
       return;
