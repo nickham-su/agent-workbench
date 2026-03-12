@@ -118,6 +118,27 @@ export class ChannelsService {
     return { ok: true };
   }
 
+  private logAllowlistRejected(input: {
+    channelType: string;
+    channelName: string;
+    senderExternalId: string;
+    conversationExternalId: string;
+    externalMessageId?: string | null;
+    reason: string;
+  }) {
+    this.logger.warn(
+      {
+        channelType: input.channelType,
+        channelName: input.channelName,
+        senderExternalId: input.senderExternalId,
+        conversationExternalId: input.conversationExternalId,
+        externalMessageId: input.externalMessageId ?? null,
+        reason: input.reason
+      },
+      "channels: inbound rejected by sender allowlist"
+    );
+  }
+
   getConversationBinding(key: ChannelRuntimeKey) {
     return getConversationBinding(this.ctx.db, key);
   }
@@ -159,7 +180,17 @@ export class ChannelsService {
     if (!senderId) return { ok: false, errorCode: "PAYLOAD_INVALID", message: "sender.id is required" };
 
     const allow = this.assertAllowed(senderId);
-    if (!allow.ok) return { ok: false, errorCode: "NOT_ALLOWED", message: allow.message };
+    if (!allow.ok) {
+      this.logAllowlistRejected({
+        channelType: input.pluginId,
+        channelName: input.channelName,
+        senderExternalId: senderId,
+        conversationExternalId: String(input.chatId || "").trim(),
+        externalMessageId: String(input.externalMessageId || "").trim() || null,
+        reason: allow.message
+      });
+      return { ok: false, errorCode: "NOT_ALLOWED", message: allow.message };
+    }
 
     const externalMessageId = String(input.externalMessageId || "").trim();
     const text = String(input.text || "").trim();
@@ -326,6 +357,14 @@ export class ChannelsService {
     // Re-check allowlist using inbound sender id to prevent bypassing ingest.
     const allow = this.assertAllowed(inbound.senderId);
     if (!allow.ok) {
+      this.logAllowlistRejected({
+        channelType: input.pluginId,
+        channelName: input.channelName,
+        senderExternalId: inbound.senderId,
+        conversationExternalId: binding.chatId,
+        externalMessageId: input.triggerExternalMessageId,
+        reason: allow.message
+      });
       return { ok: false, errorCode: "NOT_ALLOWED", message: allow.message };
     }
 

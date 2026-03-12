@@ -399,25 +399,28 @@ export function listPendingReplyJobs(db: Db, params: { limit: number }) {
       `
         select
           id,
-          plugin_id as pluginId,
-          channel_name as channelName,
-          account_id as accountId,
-          conversation_key as conversationKey,
-          workspace_id as workspaceId,
-          session_id as sessionId,
-          run_id as runId,
-          reply_to_external_message_id as replyToExternalMessageId,
-          status,
-          error_text as errorText,
-          attempt_count as attemptCount,
-          last_attempt_at as lastAttemptAt,
-          max_attempts as maxAttempts,
-          created_at as createdAt,
-          updated_at as updatedAt
-        from channel_reply_job
-        where status = 'pending'
-          and attempt_count < max_attempts
-        order by updated_at asc, id asc
+          rj.plugin_id as pluginId,
+          rj.channel_name as channelName,
+          rj.account_id as accountId,
+          rj.conversation_key as conversationKey,
+          rj.workspace_id as workspaceId,
+          rj.session_id as sessionId,
+          rj.run_id as runId,
+          rj.reply_to_external_message_id as replyToExternalMessageId,
+          rj.status,
+          rj.error_text as errorText,
+          rj.attempt_count as attemptCount,
+          rj.last_attempt_at as lastAttemptAt,
+          rj.max_attempts as maxAttempts,
+          rj.created_at as createdAt,
+          rj.updated_at as updatedAt
+        from channel_reply_job rj
+        left join agent_run
+          on agent_run.run_id = rj.run_id
+        where rj.status = 'pending'
+          and rj.attempt_count < rj.max_attempts
+          and (agent_run.status is null or agent_run.status != 'running')
+        order by rj.updated_at asc, rj.id asc
         limit ?
       `
     )
