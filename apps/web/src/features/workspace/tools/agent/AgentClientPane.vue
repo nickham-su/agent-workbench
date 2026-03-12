@@ -225,9 +225,9 @@
               :error-text="item.toolError"
               @request-measure="onRequestVirtualMeasure(item.id)"
             />
-            <AgentNoteCard
-              v-else-if="isNoteCard(item)"
-              :content="item.noteContent || ''"
+            <AgentScratchpadCard
+              v-else-if="isScratchpadCard(item)"
+              :content="item.scratchpadContent || ''"
               :error-text="item.toolError"
             />
             <div v-else-if="item.role === 'assistant'" class="flex flex-col gap-1">
@@ -417,7 +417,7 @@ import AgentTextMessage from "./AgentTextMessage.vue";
 import AgentUserMessage from "./AgentUserMessage.vue";
 import AssistantMarkdownMessage from "./AssistantMarkdownMessage.vue";
 import AgentTodoListCard from "./AgentTodoListCard.vue";
-import AgentNoteCard from "./AgentNoteCard.vue";
+import AgentScratchpadCard from "./AgentScratchpadCard.vue";
 import AgentWriteCard from "./AgentWriteCard.vue";
 import { useAgentSessionStatusStore } from "./useAgentSessionStatusStore";
 import {
@@ -506,7 +506,7 @@ type DisplayItem = {
   todoList?: TodoListDisplay;
   applyPatch?: ApplyPatchDisplay;
   writeResult?: WriteDisplay;
-  noteContent?: string;
+  scratchpadContent?: string;
   tone?: "normal" | "error";
 };
 
@@ -1095,12 +1095,12 @@ const displayItems = computed<DisplayItem[]>(() => {
             tone: item.status === "failed" ? "error" : "normal"
         };
       }
-      if (item.output.toolName === "note") {
+      if (item.output.toolName === "scratchpad") {
         const contentRaw = typeof resultObj?.content === "string" ? resultObj.content : undefined;
         const argsObj = toRecord(item.output.args);
         const argsContent = typeof argsObj?.content === "string" ? argsObj.content : undefined;
-        const noteContent = contentRaw ?? argsContent;
-        if (noteContent === undefined) {
+        const scratchpadContent = contentRaw ?? argsContent;
+        if (scratchpadContent === undefined) {
           let line = headText;
           if (errorText) {
             line += `\nerror: ${errorText}`;
@@ -1129,7 +1129,7 @@ const displayItems = computed<DisplayItem[]>(() => {
           toolName: item.output.toolName,
           ...(toolCallId ? { toolCallId } : {}),
           ...(errorText ? { toolError: errorText } : {}),
-          noteContent,
+          scratchpadContent,
           tone: item.status === "failed" ? "error" : "normal"
         };
       }
@@ -1378,8 +1378,8 @@ function isWriteCard(item: DisplayItem) {
   return item.role === "tool" && item.toolName === "write" && !!item.writeResult;
 }
 
-function isNoteCard(item: DisplayItem) {
-  return item.role === "tool" && item.toolName === "note" && typeof item.noteContent === "string";
+function isScratchpadCard(item: DisplayItem) {
+  return item.role === "tool" && item.toolName === "scratchpad" && typeof item.scratchpadContent === "string";
 }
 
 function isBashTextMessage(item: DisplayItem) {
@@ -1387,7 +1387,7 @@ function isBashTextMessage(item: DisplayItem) {
 }
 
 function isRichToolCard(item: DisplayItem) {
-  return isSubtaskCard(item) || isTodolistCard(item) || isApplyPatchCard(item) || isWriteCard(item) || isNoteCard(item);
+  return isSubtaskCard(item) || isTodolistCard(item) || isApplyPatchCard(item) || isWriteCard(item) || isScratchpadCard(item);
 }
 
 function formatSubtaskMode(mode?: string) {

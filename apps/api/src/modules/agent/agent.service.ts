@@ -180,7 +180,7 @@ function toolArgsSchema(toolName: AgentContextToolName) {
       }
     };
   }
-  if (toolName === "note") {
+  if (toolName === "scratchpad") {
     return {
       type: "object",
       required: ["content"],
@@ -189,7 +189,7 @@ function toolArgsSchema(toolName: AgentContextToolName) {
         content: {
           type: "string",
           maxLength: 200,
-          description: "A short note to record. Suggested <= 200 characters."
+          description: "A short scratchpad entry to record. Suggested <= 200 characters."
         }
       }
     };
@@ -462,9 +462,9 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
         "{\"goal\":\"Complete the todolist goal enhancement\",\"todos\":[{\"content\":\"Review requirements and constraints\",\"status\":\"completed\"},{\"content\":\"Implement core logic\",\"status\":\"in_progress\"},{\"content\":\"Add tests and verification\",\"status\":\"pending\"}]}"
       ].join("\n");
     }
-    if (toolName === "note") {
+    if (toolName === "scratchpad") {
       return [
-        "Record a short note into the runtime session state as persistent working memory.",
+        "Record a short scratchpad entry into the runtime session state as persistent working memory.",
         "",
         "Arguments:",
         "- content: Required string. Suggested <= 200 characters.",
@@ -4034,7 +4034,7 @@ export class AgentService {
       compactionSnippetUiLocale: normalizeAgentUiLocale(run.uiLocale)
     });
 
-    const baselineToolNames = ["read", "todolist", "archive_search", "archive_read", "note"] as const;
+    const baselineToolNames = ["read", "todolist", "archive_search", "archive_read", "scratchpad"] as const;
     const enabledToolNames: string[] = [];
     const enabledToolNameSet = new Set<string>();
     for (const name of [...baselineToolNames, ...profile.agent.tools]) {

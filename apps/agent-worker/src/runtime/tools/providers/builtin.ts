@@ -5,7 +5,7 @@ import { applyPreparedPatch, prepareApplyPatchTool } from "../../applyPatch.js";
 import { getBashToolAppendix } from "../../bashTools.js";
 import { runReadTool, runWriteTool } from "../../fileTools.js";
 import { parseTodolistArgs, toTodolistResult } from "../../todolist.js";
-import { parseNoteArgs, toNoteResult } from "../../note.js";
+import { parseScratchpadArgs, toScratchpadResult } from "../../scratchpad.js";
 import type { AvailableToolContext, ResolvedToolDefinition, ToolExecutionContext, ToolListContext, ToolProvider } from "../types.js";
 import { isBuiltinToolName, type BuiltinToolName } from "../types.js";
 
@@ -116,7 +116,7 @@ export class BuiltinToolProvider implements ToolProvider {
 
   isToolEnabled(toolName: string, ctx: AvailableToolContext | ToolExecutionContext) {
     if (!isBuiltinToolName(toolName)) return false;
-    if (toolName === "read" || toolName === "todolist" || toolName === "archive_search" || toolName === "archive_read" || toolName === "note") {
+    if (toolName === "read" || toolName === "todolist" || toolName === "archive_search" || toolName === "archive_read" || toolName === "scratchpad") {
       return true;
     }
     return ctx.profile.agent.tools.includes(toolName as BuiltinToolName);
@@ -226,9 +226,9 @@ export class BuiltinToolProvider implements ToolProvider {
         const parsed = parseTodolistArgs(args);
         return toTodolistResult(parsed);
       }
-      case "note": {
-        const parsed = parseNoteArgs(args);
-        return toNoteResult(parsed);
+      case "scratchpad": {
+        const parsed = parseScratchpadArgs(args);
+        return toScratchpadResult(parsed);
       }
       case "archive_search": {
         const query = requireNonEmptyStringArg(args.query, "archive_search.query");

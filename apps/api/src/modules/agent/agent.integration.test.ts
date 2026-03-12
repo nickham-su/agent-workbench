@@ -537,14 +537,14 @@ test("agent prompt-context 中的工具描述与 schema 说明使用英文", asy
     payload: {
       agents: [
         {
-           id: "default",
-            name: "default",
-            summary: "",
+            id: "default",
+             name: "default",
+             summary: "",
             prompt: "",
-            tools: ["bash", "read", "note", "subtask", "todolist", "apply_patch"],
-            pluginTools: [],
-            mcpServers: [],
-            defaultModel: null,
+             tools: ["bash", "read", "scratchpad", "subtask", "todolist", "apply_patch"],
+             pluginTools: [],
+             mcpServers: [],
+             defaultModel: null,
             scope: "both",
             order: 0
          }
@@ -569,7 +569,7 @@ test("agent prompt-context 中的工具描述与 schema 说明使用英文", asy
   const readTool = promptContext.tools.find((item) => item.name === "read");
   const subtaskTool = promptContext.tools.find((item) => item.name === "subtask");
   const todolistTool = promptContext.tools.find((item) => item.name === "todolist");
-  const noteTool = promptContext.tools.find((item) => item.name === "note");
+  const scratchpadTool = promptContext.tools.find((item) => item.name === "scratchpad");
   const applyPatchTool = promptContext.tools.find((item) => item.name === "apply_patch");
   assert.ok(String(bashTool?.description || "").includes("Run a bash command and return stdout/stderr."));
   assert.ok(String((bashTool?.inputSchema as any)?.properties?.timeout?.description || "").includes("Timeout in seconds"));
@@ -581,8 +581,8 @@ test("agent prompt-context 中的工具描述与 schema 说明使用英文", asy
   assert.ok(String(subtaskTool?.description || "").includes("Available agents:"));
   assert.equal(String(subtaskTool?.description || "").includes("可选Agent"), false);
   assert.ok(String(todolistTool?.description || "").includes("Example input:"));
-  assert.ok(String(noteTool?.description || "").includes("Suggested <= 200 characters"));
-  assert.equal((noteTool?.inputSchema as any)?.properties?.content?.maxLength, 200);
+  assert.ok(String(scratchpadTool?.description || "").includes("Suggested <= 200 characters"));
+  assert.equal((scratchpadTool?.inputSchema as any)?.properties?.content?.maxLength, 200);
   assert.equal(String(todolistTool?.description || "").includes("完成 todolist goal 增强"), false);
   assert.equal(String(todolistTool?.description || "").includes("梳理需求与约束"), false);
   assert.ok(

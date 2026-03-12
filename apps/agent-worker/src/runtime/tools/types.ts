@@ -77,7 +77,7 @@ export const BUILTIN_TOOL_NAMES = [
   "read",
   "write",
   "apply_patch",
-  "note",
+  "scratchpad",
   "todolist",
   "subtask",
   "archive_search",

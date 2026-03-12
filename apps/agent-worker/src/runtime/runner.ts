@@ -233,9 +233,9 @@ function buildToolSuccessText(params: {
     });
   }
 
-  if (params.toolName === "note") {
+  if (params.toolName === "scratchpad") {
     const content = typeof resultObj?.content === "string" ? resultObj.content : "";
-    const body = content.length > 0 ? "Note saved" : "Note saved (empty content)";
+    const body = content.length > 0 ? "Scratchpad saved" : "Scratchpad saved (empty content)";
     return buildToolText({
       toolName: params.toolName,
       status: params.status,

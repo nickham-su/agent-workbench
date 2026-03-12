@@ -200,7 +200,7 @@ export const AgentToolNameSchema = Type.Union([
   Type.Literal("read"),
   Type.Literal("write"),
   Type.Literal("apply_patch"),
-  Type.Literal("note"),
+  Type.Literal("scratchpad"),
   Type.Literal("todolist"),
   Type.Literal("subtask"),
   Type.Literal("archive_search"),
