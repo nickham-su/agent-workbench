@@ -16,18 +16,7 @@ import {
   upsertConversationBinding,
   updateBindingSelectedAgentId
 } from "./channels.store.js";
-
-export const CHANNEL_SENDER_ALLOWLIST_ENV = "AWB_CHANNEL_SENDER_ALLOWLIST";
-
-function parseAllowlist(raw: string | undefined | null): Set<string> {
-  const text = String(raw || "").trim();
-  if (!text) return new Set();
-  const parts = text
-    .split(/[\n,\s]+/g)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  return new Set(parts);
-}
+import { getAgentChannelSenderAllowlistSettings } from "../settings/settings.service.js";
 
 export type ChannelRuntimeKey = {
   pluginId: string;
@@ -103,16 +92,17 @@ export class ChannelsService {
     // no-op
   }
 
-  private assertAllowed(senderId: string): { ok: true } | { ok: false; message: string } {
-    // Security-first decision:
-    // - Default deny if allowlist is empty.
-    // - Configure with env AWB_CHANNEL_SENDER_ALLOWLIST=open_id1,open_id2
-    // Note: parse on each call (cheap) to support dynamic env in integration tests.
-    const allowlist = parseAllowlist(process.env[CHANNEL_SENDER_ALLOWLIST_ENV]);
-    if (allowlist.size === 0) {
+  private assertAllowed(input: { channel: string; senderId: string }): { ok: true } | { ok: false; message: string } {
+    const stored = getAgentChannelSenderAllowlistSettings(this.ctx);
+    const bySettings = new Set(
+      (stored.items || []).map((it) => `${String(it.channel || "").trim()}\u0000${String(it.senderId || "").trim()}`)
+    );
+
+    if (bySettings.size === 0) {
       return { ok: false, message: "channel sender allowlist is empty" };
     }
-    if (!allowlist.has(senderId)) {
+    const key = `${input.channel}\u0000${input.senderId}`;
+    if (!bySettings.has(key)) {
       return { ok: false, message: "sender is not allowed" };
     }
     return { ok: true };
@@ -178,19 +168,6 @@ export class ChannelsService {
   ingestInboundMessage(input: IngestInboundMessageInput): IngestInboundMessageResult {
     const senderId = String(input.sender?.id || "").trim();
     if (!senderId) return { ok: false, errorCode: "PAYLOAD_INVALID", message: "sender.id is required" };
-
-    const allow = this.assertAllowed(senderId);
-    if (!allow.ok) {
-      this.logAllowlistRejected({
-        channelType: input.pluginId,
-        channelName: input.channelName,
-        senderExternalId: senderId,
-        conversationExternalId: String(input.chatId || "").trim(),
-        externalMessageId: String(input.externalMessageId || "").trim() || null,
-        reason: allow.message
-      });
-      return { ok: false, errorCode: "NOT_ALLOWED", message: allow.message };
-    }
 
     const externalMessageId = String(input.externalMessageId || "").trim();
     const text = String(input.text || "").trim();
@@ -354,8 +331,8 @@ export class ChannelsService {
       return { ok: false, errorCode: "INBOUND_NOT_FOUND", message: "trigger inbound message not found" };
     }
 
-    // Re-check allowlist using inbound sender id to prevent bypassing ingest.
-    const allow = this.assertAllowed(inbound.senderId);
+    // Allowlist applies before trigger/run (ingest is allowed to persist).
+    const allow = this.assertAllowed({ channel: input.pluginId, senderId: inbound.senderId });
     if (!allow.ok) {
       this.logAllowlistRejected({
         channelType: input.pluginId,

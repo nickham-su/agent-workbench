@@ -635,6 +635,7 @@ export default {
       agentProfiles: "角色配置",
       agentPlugins: "插件",
       agentRuntime: "运行参数",
+      agentChannelSenderAllowlist: "IM用户列表",
       security: "安全"
     },
     groups: {
@@ -1105,6 +1106,33 @@ export default {
         configInvalid: "配置无效",
         loadFailed: "加载失败",
         manifestMismatch: "Manifest 不匹配"
+      }
+    },
+    agentChannelSenderAllowlist: {
+      description: "配置可触发渠道会话运行的发送者名单。列表为空时默认拒绝。",
+      emptyChannels: "当前未发现具备 channels 能力的插件，请先启用相关插件。",
+      empty: "暂无白名单项",
+      created: "已添加",
+      removed: "已移除",
+      saved: "已保存",
+      modal: {
+        createTitle: "添加 IM 用户"
+      },
+      fields: {
+        channel: "渠道",
+        senderId: "发送者 ID",
+        remark: "备注",
+        senderIdPlaceholder: "例如 ou_xxx 或平台用户 ID",
+        remarkPlaceholder: "可选，便于识别"
+      },
+      actions: {
+        add: "添加",
+        remove: "移除"
+      },
+      errors: {
+        channelRequired: "请选择渠道",
+        senderIdRequired: "请输入发送者 ID",
+        duplicate: "该渠道下的发送者已存在"
       }
     },
     security: {

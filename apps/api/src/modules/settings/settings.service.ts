@@ -14,6 +14,7 @@ import type {
   AgentProvidersSettingsView,
   AgentPluginTools,
   AgentSettings,
+  AgentChannelSenderAllowlistSettings,
   AgentSettingsView,
   AgentToolName,
   ClearAllGitIdentityResponse,
@@ -24,6 +25,7 @@ import type {
   SecurityStatus,
   UpdateAgentProvidersSettingsRequest,
   UpdateAgentGlobalPromptSettingsRequest,
+  UpdateAgentChannelSenderAllowlistRequest,
   UpdateAgentMcpSettingsRequest,
   UpdateAgentRuntimeSettingsRequest,
   UpdateAgentSettingsRequest,
@@ -51,6 +53,7 @@ const AGENT_MCP_SETTINGS_KEY = "agent_mcp_v1";
 const AGENT_GLOBAL_PROMPTS_SETTINGS_KEY = "agent_global_prompts_v1";
 export const AGENT_PLUGINS_SETTINGS_KEY = "agent_plugins_v1";
 const AGENT_RUNTIME_SETTINGS_KEY = "agent_runtime_v1";
+export const AGENT_CHANNEL_SENDER_ALLOWLIST_SETTINGS_KEY = "agent_channel_sender_allowlist_v1";
 export const AGENT_GLOBAL_SYSTEM_PROMPT_ID = "global_system_prompt";
 export const AGENT_GLOBAL_SYSTEM_PROMPT_TITLE = "Global System Prompt";
 
@@ -970,6 +973,26 @@ export function getSearchSettings(ctx: AppContext): SearchSettings {
   };
 }
 
+export function getAgentChannelSenderAllowlistSettings(ctx: AppContext): AgentChannelSenderAllowlistSettings {
+  const row = getSettingJson(ctx.db, AGENT_CHANNEL_SENDER_ALLOWLIST_SETTINGS_KEY);
+  const value = row?.value as Partial<AgentChannelSenderAllowlistSettings> | undefined;
+  const src = Array.isArray(value?.items) ? value.items : [];
+  const seen = new Set<string>();
+  const items = src
+    .map((it) => {
+      const channel = typeof it?.channel === "string" ? it.channel.trim() : "";
+      const senderId = typeof it?.senderId === "string" ? it.senderId.trim() : "";
+      const remarkRaw = typeof it?.remark === "string" ? it.remark.trim() : "";
+      if (!channel || !senderId) return null;
+      const key = `${channel}\u0000${senderId}`;
+      if (seen.has(key)) return null;
+      seen.add(key);
+      return { channel, senderId, ...(remarkRaw ? { remark: remarkRaw.slice(0, 200) } : {}) };
+    })
+    .filter((it): it is NonNullable<typeof it> => Boolean(it));
+  return { items, updatedAt: row?.updatedAt ?? 0 };
+}
+
 export function getAgentProvidersSettings(ctx: AppContext): AgentProvidersSettingsView {
   const loaded = getAgentProvidersSettingsStored(ctx);
   return toAgentProvidersSettingsView(loaded.settings, loaded.updatedAt);
@@ -1010,6 +1033,28 @@ export function getAgentRuntimeSettings(ctx: AppContext): AgentRuntimeSettings {
     sessionTerminalSoundEnabled: loaded.settings.sessionTerminalSoundEnabled,
     updatedAt: loaded.updatedAt
   };
+}
+
+export function updateAgentChannelSenderAllowlistSettings(
+  ctx: AppContext,
+  logger: FastifyBaseLogger,
+  bodyRaw: unknown
+): AgentChannelSenderAllowlistSettings {
+  const body = (bodyRaw ?? {}) as UpdateAgentChannelSenderAllowlistRequest;
+  const src = Array.isArray(body.items) ? body.items : [];
+  const seen = new Set<string>();
+  const items: AgentChannelSenderAllowlistSettings["items"] = [];
+  for (const it of src) {
+    const channel = typeof it?.channel === "string" ? it.channel.trim() : "";
+    const senderId = typeof it?.senderId === "string" ? it.senderId.trim() : "";
+    const remarkRaw = typeof it?.remark === "string" ? it.remark.trim() : "";
+    if (!channel || !senderId) throw new HttpError(400, "channel/senderId is required", "CHANNEL_SENDER_ALLOWLIST_INVALID");
+    const key = `${channel}\u0000${senderId}`;
+    if (seen.has(key)) throw new HttpError(400, "duplicate channel/senderId", "CHANNEL_SENDER_ALLOWLIST_DUPLICATE");
+    seen.add(key);
+    items.push({ channel, senderId, ...(remarkRaw ? { remark: remarkRaw.slice(0, 200) } : {}) });
+  }
+  const updatedAt = nowMs(); setSettingJson(ctx.db, AGENT_CHANNEL_SENDER_ALLOWLIST_SETTINGS_KEY, { items }, updatedAt); logger.info({ count: items.length, updatedAt }, "agent channel sender allowlist updated"); return { items, updatedAt };
 }
 
 export function updateAgentRuntimeSettings(

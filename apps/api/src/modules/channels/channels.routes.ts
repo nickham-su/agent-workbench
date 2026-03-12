@@ -28,6 +28,15 @@ export async function registerChannelsRoutes(
   app: FastifyInstance,
   params: { service: ChannelsService; agentService: AgentService }
 ) {
+  function assertPluginCaller(req: FastifyRequest, pluginId: string) {
+    const caller = String(req.headers["x-awb-plugin-id"] || "").trim();
+    if (!caller) {
+      throw new HttpError(401, "Unauthorized", "PLUGIN_CALLER_REQUIRED");
+    }
+    if (caller !== String(pluginId || "").trim()) {
+      throw new HttpError(401, "Unauthorized", "PLUGIN_CALLER_MISMATCH");
+    }
+  }
   app.post(
     "/api/internal/agent/channels/conversations/upsert-binding",
     {
@@ -46,6 +55,7 @@ export async function registerChannelsRoutes(
     async (req) => {
       assertInternalToken(req, params.agentService);
       const body = req.body as any;
+      assertPluginCaller(req, body.pluginId);
       return params.service.upsertConversationBinding(body);
     }
   );
@@ -67,6 +77,7 @@ export async function registerChannelsRoutes(
     async (req) => {
       assertInternalToken(req, params.agentService);
       const body = req.body as any;
+      assertPluginCaller(req, body.pluginId);
       return params.service.getConversationBinding(body);
     }
   );
@@ -88,6 +99,7 @@ export async function registerChannelsRoutes(
     async (req) => {
       assertInternalToken(req, params.agentService);
       const body = req.body as any;
+      assertPluginCaller(req, body.pluginId);
       params.service.setSelectedAgentId(body);
       return { ok: true };
     }
@@ -109,6 +121,8 @@ export async function registerChannelsRoutes(
     },
     async (req) => {
       assertInternalToken(req, params.agentService);
+      const body = req.body as any;
+      assertPluginCaller(req, body.pluginId);
       return params.service.ingestInboundMessage(req.body as any);
     }
   );
@@ -131,6 +145,7 @@ export async function registerChannelsRoutes(
     async (req) => {
       assertInternalToken(req, params.agentService);
       const body = req.body as any;
+      assertPluginCaller(req, body.pluginId);
       return params.service.buildAggregatedUserPrompt(body);
     }
   );
@@ -154,6 +169,7 @@ export async function registerChannelsRoutes(
     async (req) => {
       assertInternalToken(req, params.agentService);
       const body = req.body as any;
+      assertPluginCaller(req, body.pluginId);
       const res = await params.service.tryAppendUserMessageAndStartRun({
         pluginId: body.pluginId,
         channelName: body.channelName,

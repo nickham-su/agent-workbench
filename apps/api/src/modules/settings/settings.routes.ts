@@ -8,6 +8,8 @@ import {
   AgentRuntimeSettingsSchema,
   AgentSettingsSchema,
   ErrorResponseSchema,
+  AgentChannelSenderAllowlistSettingsSchema,
+  UpdateAgentChannelSenderAllowlistRequestSchema,
   ClearAllGitIdentityResponseSchema,
   GitGlobalIdentitySchema,
   NetworkSettingsSchema,
@@ -29,6 +31,8 @@ import {
   getAgentMcpSettings,
   getAgentRuntimeSettings,
   getAgentSettings,
+  getAgentChannelSenderAllowlistSettings,
+  updateAgentChannelSenderAllowlistSettings,
   clearAllGitIdentity,
   getGitGlobalIdentity,
   getNetworkSettings,
@@ -253,6 +257,29 @@ export async function registerSettingsRoutes(app: FastifyInstance, ctx: AppConte
       }
     },
     async () => getAgentSettings(ctx)
+  );
+
+  app.get(
+    "/api/settings/agent/channels/sender-allowlist",
+    {
+      schema: {
+        tags: ["settings"],
+        response: { 200: AgentChannelSenderAllowlistSettingsSchema }
+      }
+    },
+    async () => getAgentChannelSenderAllowlistSettings(ctx)
+  );
+
+  app.put(
+    "/api/settings/agent/channels/sender-allowlist",
+    {
+      schema: {
+        tags: ["settings"],
+        body: UpdateAgentChannelSenderAllowlistRequestSchema,
+        response: { 200: AgentChannelSenderAllowlistSettingsSchema, 400: ErrorResponseSchema }
+      }
+    },
+    async (req) => updateAgentChannelSenderAllowlistSettings(ctx, app.log, req.body)
   );
 
   app.put(

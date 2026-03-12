@@ -637,6 +637,7 @@ export default {
       agentProfiles: "Role Profiles",
       agentPlugins: "Plugins",
       agentRuntime: "Runtime",
+      agentChannelSenderAllowlist: "IM User List",
       security: "Security"
     },
     groups: {
@@ -1107,6 +1108,33 @@ export default {
         configInvalid: "Invalid config",
         loadFailed: "Load failed",
         manifestMismatch: "Manifest mismatch"
+      }
+    },
+    agentChannelSenderAllowlist: {
+      description: "Configure senders allowed to trigger channel session runs. Empty list denies by default.",
+      emptyChannels: "No plugins with channels capability found. Please enable a related plugin first.",
+      empty: "No allowlist items",
+      created: "Added",
+      removed: "Removed",
+      saved: "Saved",
+      modal: {
+        createTitle: "Add IM user"
+      },
+      fields: {
+        channel: "Channel",
+        senderId: "Sender ID",
+        remark: "Remark",
+        senderIdPlaceholder: "e.g. ou_xxx or platform user id",
+        remarkPlaceholder: "Optional, for management"
+      },
+      actions: {
+        add: "Add",
+        remove: "Remove"
+      },
+      errors: {
+        channelRequired: "Please select a channel",
+        senderIdRequired: "Please enter sender ID",
+        duplicate: "This sender already exists under the channel"
       }
     },
     security: {

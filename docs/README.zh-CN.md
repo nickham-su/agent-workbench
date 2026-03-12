@@ -170,10 +170,11 @@ npm run dev
 - `AWB_AGENT_PLUGIN_HOST_ENABLED=true`
 - `AWB_AGENT_PLUGIN_HOST_DEV=1`
 - `AWB_AGENT_PLUGIN_SERVICES_ENABLED=true`
-- `AWB_CHANNEL_SENDER_ALLOWLIST=<允许的发送者ID，逗号分隔>`
 
 并确保 agent worker 正常运行（默认 `AWB_AGENT_WORKER_ENABLED=true`）。
 若 worker 未运行，run 无法完成，reply dispatcher 不会派发最终回复。
+
+允许触发 IM 会话运行的发送者请在设置页 `设置 -> Agent -> IM用户列表` 中配置。
 
 **其他脚本**
 

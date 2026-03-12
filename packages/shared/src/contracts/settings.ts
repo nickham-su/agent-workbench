@@ -298,6 +298,33 @@ export const SecurityStatusSchema = Type.Object({
 });
 export type SecurityStatus = Static<typeof SecurityStatusSchema>;
 
+export const AgentChannelSenderAllowlistItemSchema = Type.Object(
+  {
+    channel: Type.String({ minLength: 1, maxLength: 64 }),
+    senderId: Type.String({ minLength: 1, maxLength: 256 }),
+    remark: Type.Optional(Type.String({ maxLength: 200 }))
+  },
+  { additionalProperties: false }
+);
+export type AgentChannelSenderAllowlistItem = Static<typeof AgentChannelSenderAllowlistItemSchema>;
+
+export const AgentChannelSenderAllowlistSettingsSchema = Type.Object(
+  {
+    items: Type.Array(AgentChannelSenderAllowlistItemSchema),
+    updatedAt: Type.Number()
+  },
+  { additionalProperties: false }
+);
+export type AgentChannelSenderAllowlistSettings = Static<typeof AgentChannelSenderAllowlistSettingsSchema>;
+
+export const UpdateAgentChannelSenderAllowlistRequestSchema = Type.Object(
+  {
+    items: Type.Array(AgentChannelSenderAllowlistItemSchema)
+  },
+  { additionalProperties: false }
+);
+export type UpdateAgentChannelSenderAllowlistRequest = Static<typeof UpdateAgentChannelSenderAllowlistRequestSchema>;
+
 export const ResetKnownHostRequestSchema = Type.Object({
   host: Type.String({ minLength: 1 })
 });

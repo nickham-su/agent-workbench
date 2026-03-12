@@ -96,6 +96,8 @@ import type {
   AgentRuntimeSettings,
   AgentPluginSettings,
   PluginRuntimeSnapshot,
+  AgentChannelSenderAllowlistSettings,
+  UpdateAgentChannelSenderAllowlistRequest,
   PluginRuntimeSnapshotsResponse,
   UpdateAgentPluginSettingsRequest,
   UpdateAgentMcpSettingsRequest,
@@ -907,6 +909,24 @@ export async function getAgentPluginRuntimeSnapshots() {
 export async function updateAgentPluginSettings(body: UpdateAgentPluginSettingsRequest) {
   try {
     const res = await client.put<AgentPluginSettings>("/settings/agent/plugins", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getAgentChannelSenderAllowlistSettings() {
+  try {
+    const res = await client.get<AgentChannelSenderAllowlistSettings>("/settings/agent/channels/sender-allowlist");
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function updateAgentChannelSenderAllowlistSettings(body: UpdateAgentChannelSenderAllowlistRequest) {
+  try {
+    const res = await client.put<AgentChannelSenderAllowlistSettings>("/settings/agent/channels/sender-allowlist", body);
     return res.data;
   } catch (err) {
     throw toApiError(err);
