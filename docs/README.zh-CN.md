@@ -163,6 +163,18 @@ npm run dev
   - `AWB_DEV_WEB_PORT`：仅前端开发期（Vite dev server）使用：前端 dev server 端口（可选）
   - `AWB_DEV_API_ORIGIN`：仅前端开发期使用：前端 dev proxy 的后端目标地址（可选；默认 `http://127.0.0.1:${AWB_PORT}`）
 
+**飞书插件本地调试（`npm run dev`）**
+
+如需本地调试飞书 IM 插件，请至少设置：
+
+- `AWB_AGENT_PLUGIN_HOST_ENABLED=true`
+- `AWB_AGENT_PLUGIN_HOST_DEV=1`
+- `AWB_AGENT_PLUGIN_SERVICES_ENABLED=true`
+- `AWB_CHANNEL_SENDER_ALLOWLIST=<允许的发送者ID，逗号分隔>`
+
+并确保 agent worker 正常运行（默认 `AWB_AGENT_WORKER_ENABLED=true`）。
+若 worker 未运行，run 无法完成，reply dispatcher 不会派发最终回复。
+
 **其他脚本**
 
 | 命令 | 说明 |

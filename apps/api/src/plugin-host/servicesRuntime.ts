@@ -68,7 +68,7 @@ async function fileExists(filePath: string) {
   }
 }
 
-export function createPluginServicesRuntime(params: { db: Db; dataDir: string; apiOrigin: string; internalToken: string }) {
+export function createPluginServicesRuntime(params: { db: Db; dataDir: string; apiOrigin: string; internalToken: string; repoRoot: string }) {
   let running: PluginServiceRuntime | null = null;
   let runningFingerprint = "";
   let lastError: { message: string; code?: string } | null = null;
@@ -115,7 +115,11 @@ export function createPluginServicesRuntime(params: { db: Db; dataDir: string; a
   }
 
   async function reconcileOnce() {
-    const snapshots = await listPluginRuntimeSnapshots({ db: params.db, dataDir: params.dataDir } as any);
+    const snapshots = await listPluginRuntimeSnapshots({
+      db: params.db,
+      dataDir: params.dataDir,
+      repoRoot: params.repoRoot
+    } as any);
     const feishu = snapshots.plugins.find((p) => p.id === "feishu");
 
     const config = (feishu?.config ?? undefined) as FeishuPluginConfig | undefined;

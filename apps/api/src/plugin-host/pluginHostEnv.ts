@@ -6,6 +6,7 @@ export type PluginHostEnv = {
   internalToken: string;
   apiOrigin: string;
   pidFilePath: string | null;
+  repoRoot: string;
 };
 
 export function loadPluginHostEnv(processEnv: NodeJS.ProcessEnv): PluginHostEnv {
@@ -27,12 +28,15 @@ export function loadPluginHostEnv(processEnv: NodeJS.ProcessEnv): PluginHostEnv 
 
   const resolvedDataDir = path.resolve(dataDir);
   const socketPath = path.resolve(socketRaw);
+  // plugin-host 进程由 API 以 repoRoot 作为 cwd 启动，这里直接使用 process.cwd()。
+  const repoRoot = path.resolve(process.cwd());
 
   return {
     dataDir: resolvedDataDir,
     socketPath,
     internalToken,
     apiOrigin,
-    pidFilePath: pidFileRaw ? path.resolve(pidFileRaw) : null
+    pidFilePath: pidFileRaw ? path.resolve(pidFileRaw) : null,
+    repoRoot
   };
 }

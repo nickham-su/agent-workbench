@@ -21,6 +21,7 @@ RUN npm ci
 # 再复制源码并构建
 COPY apps ./apps
 COPY packages ./packages
+COPY plugins ./plugins
 
 RUN npm run build
 
@@ -73,6 +74,7 @@ COPY --from=builder /app/apps/api /app/apps/api
 COPY --from=builder /app/apps/agent-worker /app/apps/agent-worker
 COPY --from=builder /app/apps/web /app/apps/web
 COPY --from=builder /app/packages/shared /app/packages/shared
+COPY --from=builder /app/plugins /app/plugins
 
 EXPOSE 4310
 

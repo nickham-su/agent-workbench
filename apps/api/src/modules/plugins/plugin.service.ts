@@ -559,14 +559,46 @@ export async function updateAgentPluginSettings(
   };
 }
 
+type PluginRootSpec = {
+  source: "user" | "official";
+  rootPath: string;
+  priority: number;
+};
+
+type PluginDiscoveryResolvedRecord = PluginDiscoveryRecord & {
+  rootSource: PluginRootSpec["source"];
+  rootPriority: number;
+};
+
+function resolvePluginRoots(ctx: AppContext): PluginRootSpec[] {
+  const resolvedRepoRoot = path.resolve(ctx.repoRoot || process.cwd());
+  return [
+    { source: "user", rootPath: pluginsRoot(ctx.dataDir), priority: 100 },
+    { source: "official", rootPath: path.join(resolvedRepoRoot, "plugins"), priority: 10 }
+  ];
+}
+
 export async function listPluginRuntimeSnapshots(ctx: AppContext): Promise<PluginRuntimeSnapshotsResponse> {
-  await ensureDir(pluginsRoot(ctx.dataDir));
-  const pluginRootPath = pluginsRoot(ctx.dataDir);
+  const roots = resolvePluginRoots(ctx);
+  const userRoot = roots.find((item) => item.source === "user")?.rootPath;
+  if (userRoot) {
+    await ensureDir(userRoot);
+  }
   const settings = await getAgentPluginSettings(ctx);
   const settingsById = new Map(settings.plugins.map((item) => [item.id, item]));
-  const pluginDirs = await discoverPluginDirectories(pluginRootPath);
-  const discovered = await Promise.all(pluginDirs.map((dirPath) => discoverPluginRecord(dirPath)));
-  const idToRecords = new Map<string, PluginDiscoveryRecord[]>();
+  const discoveredByRoot = await Promise.all(
+    roots.map(async (root): Promise<PluginDiscoveryResolvedRecord[]> => {
+      const pluginDirs = await discoverPluginDirectories(root.rootPath);
+      const discovered = await Promise.all(pluginDirs.map((dirPath) => discoverPluginRecord(dirPath)));
+      return discovered.map((record) => ({
+        ...record,
+        rootSource: root.source,
+        rootPriority: root.priority
+      }));
+    })
+  );
+  const discovered = discoveredByRoot.flat();
+  const idToRecords = new Map<string, PluginDiscoveryResolvedRecord[]>();
   for (const record of discovered) {
     const list = idToRecords.get(record.id) ?? [];
     list.push(record);
@@ -575,14 +607,21 @@ export async function listPluginRuntimeSnapshots(ctx: AppContext): Promise<Plugi
 
   const snapshots: PluginRuntimeSnapshot[] = [];
   for (const [pluginId, records] of idToRecords.entries()) {
-    if (records.length > 1) {
-      for (const record of records) {
+    const ranked = [...records].sort((a, b) => {
+      if (b.rootPriority !== a.rootPriority) return b.rootPriority - a.rootPriority;
+      return a.path.localeCompare(b.path);
+    });
+    const selected = ranked[0]!;
+    const samePriorityRecords = ranked.filter((item) => item.rootPriority === selected.rootPriority);
+
+    if (samePriorityRecords.length > 1) {
+      for (const record of samePriorityRecords) {
         const diagnostics = [...record.diagnostics];
         pushDiagnostic(diagnostics, {
           code: "tool_name_conflict",
           severity: "error",
           source: "discovery",
-          message: `Duplicate plugin id '${pluginId}' discovered under pluginRoot`
+          message: `Duplicate plugin id '${pluginId}' discovered under ${record.rootSource} root`
         });
         snapshots.push({
           id: pluginId,
@@ -603,10 +642,28 @@ export async function listPluginRuntimeSnapshots(ctx: AppContext): Promise<Plugi
       continue;
     }
 
-    const record = records[0]!;
+    const record = selected;
     const configured = settingsById.get(pluginId);
     const diagnostics = [...record.diagnostics];
     const enabled = configured?.enabled === true;
+
+    const userRecords = ranked.filter((item) => item.rootSource === "user");
+    const officialRecords = ranked.filter((item) => item.rootSource === "official");
+    if (userRecords.length > 0 && officialRecords.length > 0) {
+      pushDiagnostic(diagnostics, {
+        code: "PLUGIN_ID_CONFLICT_OVERRIDDEN",
+        severity: "warning",
+        source: "discovery",
+        message: `Plugin '${pluginId}' exists in both user and official roots; user root overrides official root`,
+        details: {
+          userCount: userRecords.length,
+          officialCount: officialRecords.length,
+          hasConflict: true,
+          resolvedSource: record.rootSource
+        }
+      });
+    }
+
     let configValid = true;
     if (enabled) {
       if (configured?.config !== undefined && !isJsonSerializable(configured.config)) {

@@ -208,7 +208,7 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
       apiOrigin: ctx.agentApiOrigin,
       internalToken: ctx.agentInternalToken,
       pidFilePath,
-      devMode: ctx.version === "test",
+      devMode: ctx.version === "test" ? true : undefined,
       logger: app.log
     });
     await pluginHostManager.start();

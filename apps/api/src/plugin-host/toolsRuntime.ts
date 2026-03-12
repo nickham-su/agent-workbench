@@ -42,14 +42,15 @@ function normalizeToolFilter(input: PluginToolRpcListRequest): { includeAll: boo
   return { includeAll, names };
 }
 
-export function createPluginToolsRuntime(params: { db: Db; dataDir: string }) {
+export function createPluginToolsRuntime(params: { db: Db; dataDir: string; repoRoot: string }) {
   const runtimeManager = new PluginRuntimeManager(console);
 
   async function getSnapshots(): Promise<{ updatedAt: number; plugins: PluginRuntimeSnapshot[] }> {
     try {
       const res = await listPluginRuntimeSnapshots({
         db: params.db,
-        dataDir: params.dataDir
+        dataDir: params.dataDir,
+        repoRoot: params.repoRoot
       } as any);
       return { updatedAt: res.updatedAt, plugins: res.plugins };
     } catch (err) {

@@ -110,6 +110,7 @@ export const PluginDiagnosticCodeSchema = Type.Union([
   Type.Literal("plugin_load_failed"),
   Type.Literal("plugin_manifest_mismatch"),
   Type.Literal("tool_name_conflict"),
+  Type.Literal("PLUGIN_ID_CONFLICT_OVERRIDDEN"),
   Type.Literal("unsupported_capability")
 ]);
 export type PluginDiagnosticCode = Static<typeof PluginDiagnosticCodeSchema>;

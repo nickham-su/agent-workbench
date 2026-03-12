@@ -67,13 +67,15 @@ export function createPluginHostServer(params: {
   apiOrigin: string;
   db: Db;
   dataDir: string;
+  repoRoot: string;
 }) {
-  const runtime = createPluginToolsRuntime({ db: params.db, dataDir: params.dataDir });
+  const runtime = createPluginToolsRuntime({ db: params.db, dataDir: params.dataDir, repoRoot: params.repoRoot });
   const servicesRuntime = createPluginServicesRuntime({
     db: params.db,
     dataDir: params.dataDir,
     apiOrigin: params.apiOrigin,
-    internalToken: params.internalToken
+    internalToken: params.internalToken,
+    repoRoot: params.repoRoot
   });
 
   const server = createServer(async (req, res) => {

@@ -12,7 +12,8 @@ const server = createPluginHostServer({
   internalToken: env.internalToken,
   apiOrigin: env.apiOrigin,
   db,
-  dataDir: env.dataDir
+  dataDir: env.dataDir,
+  repoRoot: env.repoRoot
 });
 
 await server.listen();

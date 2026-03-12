@@ -59,7 +59,7 @@ test("plugin service discovers debug-tools fixture and exposes runtime snapshot"
 test("updateAgentPluginSettings keeps existing config when config is omitted", async () => {
   const fixture = await createFixture();
   try {
-    const sourcePluginDir = path.join(process.cwd(), "test", "fixtures", "plugins", "feishu");
+    const sourcePluginDir = path.join(process.cwd(), "plugins", "feishu");
     const targetPluginDir = path.join(fixture.dataDir, "plugins", "feishu");
     await ensureDir(path.join(fixture.dataDir, "plugins"));
     await fs.cp(sourcePluginDir, targetPluginDir, { recursive: true });
@@ -95,7 +95,7 @@ test("updateAgentPluginSettings keeps existing config when config is omitted", a
 test("updateAgentPluginSettings allows disabling plugin without config", async () => {
   const fixture = await createFixture();
   try {
-    const sourcePluginDir = path.join(process.cwd(), "test", "fixtures", "plugins", "feishu");
+    const sourcePluginDir = path.join(process.cwd(), "plugins", "feishu");
     const targetPluginDir = path.join(fixture.dataDir, "plugins", "feishu");
     await ensureDir(path.join(fixture.dataDir, "plugins"));
     await fs.cp(sourcePluginDir, targetPluginDir, { recursive: true });
@@ -119,7 +119,7 @@ test("updateAgentPluginSettings allows disabling plugin without config", async (
 test("plugin service discovers feishu fixture with channels/services capabilities", async () => {
   const fixture = await createFixture();
   try {
-    const sourcePluginDir = path.join(process.cwd(), "test", "fixtures", "plugins", "feishu");
+    const sourcePluginDir = path.join(process.cwd(), "plugins", "feishu");
     const targetPluginDir = path.join(fixture.dataDir, "plugins", "feishu");
     await ensureDir(path.join(fixture.dataDir, "plugins"));
     await fs.cp(sourcePluginDir, targetPluginDir, { recursive: true });
@@ -153,6 +153,47 @@ test("plugin service discovers feishu fixture with channels/services capabilitie
     assert.equal(feishu?.state, "ready");
     assert.ok(feishu?.capabilities.channels?.some((c) => c.name === "im"));
     assert.ok(feishu?.capabilities.services?.some((s) => s.name === "gateway"));
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("plugin service uses user root plugin over official root and emits override warning", async () => {
+  const fixture = await createFixture();
+  try {
+    const userPluginDir = path.join(fixture.dataDir, "plugins", "feishu");
+    await ensureDir(path.join(fixture.dataDir, "plugins"));
+    await fs.cp(path.join(process.cwd(), "plugins", "feishu"), userPluginDir, { recursive: true });
+
+    const userManifestPath = path.join(userPluginDir, "agent-workbench.plugin.json");
+    const rawManifest = await fs.readFile(userManifestPath, "utf8");
+    const userManifest = JSON.parse(rawManifest) as any;
+    userManifest.description = "user override";
+    await fs.writeFile(userManifestPath, JSON.stringify(userManifest, null, 2), "utf8");
+
+    await setSettingJson(
+      fixture.db,
+      "agent_plugins_v1",
+      { plugins: [{ id: "feishu", enabled: true }] },
+      Date.now()
+    );
+
+    const snapshots = await listPluginRuntimeSnapshots({
+      db: fixture.db,
+      dataDir: fixture.dataDir,
+      repoRoot: process.cwd()
+    } as any);
+    const feishu = snapshots.plugins.find((item) => item.id === "feishu");
+    assert.ok(feishu, "feishu should be discovered");
+    assert.equal(feishu?.manifest?.description, "user override", "should resolve to userRoot plugin");
+
+    const warning = feishu?.diagnostics.find((item) => item.code === "PLUGIN_ID_CONFLICT_OVERRIDDEN");
+    assert.ok(warning, "should include override warning");
+    assert.equal(warning?.severity, "warning");
+    assert.equal((warning as any)?.details?.resolvedSource, "user");
+    assert.equal((warning as any)?.details?.hasConflict, true);
+    assert.equal((warning as any)?.details?.userCount, 1);
+    assert.equal((warning as any)?.details?.officialCount, 1);
   } finally {
     await fixture.close();
   }
