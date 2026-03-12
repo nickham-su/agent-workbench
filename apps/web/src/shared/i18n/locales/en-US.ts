@@ -13,6 +13,8 @@ export default {
     loading: "Loading...",
     reset: "Reset",
     default: "Default",
+    yes: "Yes",
+    no: "No",
     format: {
       parens: "({text})",
       parensSuffix: " ({text})"
@@ -1064,11 +1066,38 @@ export default {
       empty: "No plugins discovered yet. Put plugin packages under <dataDir>/plugins.",
       saved: "Saved",
       actions: {
-        refresh: "Refresh"
+        refresh: "Refresh",
+        editConfig: "Edit config"
       },
       fields: {
         enabled: "Enabled",
         entry: "Entry"
+      },
+      configModal: {
+        title: "Edit plugin config · {name}",
+        maskedHint: "Hint: backend may return masked values (e.g. ***). Keep *** to preserve existing secret values.",
+        schemaFieldsTitle: "Field reference (from configSchema)",
+        schemaFieldsEmpty: "This plugin does not declare configSchema fields. You can edit JSON directly.",
+        rawSchemaTitle: "Show raw schema",
+        schemaComplexHint: "This schema is complex. Field reference is for guidance only; backend validation is final.",
+        editorTitle: "Config JSON",
+        editorPlaceholder: "Enter JSON object, e.g. {\"appId\":\"cli_xxx\"}",
+        enableHint: "Please fill required fields before enabling: {fields}",
+        actions: {
+          generateTemplate: "Generate template"
+        },
+        schemaTable: {
+          field: "Field",
+          type: "Type",
+          required: "Required",
+          description: "Description",
+          defaultOrExample: "Default/Example"
+        },
+        errors: {
+          emptyJson: "Config is required. Please input a JSON object.",
+          objectExpected: "Config must be a JSON object.",
+          invalidJson: "Invalid JSON format."
+        }
       },
       state: {
         ready: "Ready",

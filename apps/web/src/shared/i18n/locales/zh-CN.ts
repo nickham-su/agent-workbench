@@ -13,6 +13,8 @@ export default {
     loading: "加载中...",
     reset: "重置",
     default: "默认",
+    yes: "是",
+    no: "否",
     format: {
       parens: "（{text}）",
       parensSuffix: "（{text}）"
@@ -1062,11 +1064,38 @@ export default {
       empty: "暂未发现插件。请将插件包放到 <dataDir>/plugins 下。",
       saved: "已保存",
       actions: {
-        refresh: "刷新"
+        refresh: "刷新",
+        editConfig: "编辑配置"
       },
       fields: {
         enabled: "已启用",
         entry: "入口"
+      },
+      configModal: {
+        title: "编辑插件配置 · {name}",
+        maskedHint: "提示：后端可能会返回脱敏值（例如 ***）。保留 *** 表示该敏感值保持不变。",
+        schemaFieldsTitle: "字段说明（来自 configSchema）",
+        schemaFieldsEmpty: "当前插件未声明 configSchema 字段信息，可直接编辑 JSON。",
+        rawSchemaTitle: "查看原始 Schema",
+        schemaComplexHint: "该 schema 较复杂，字段说明仅供参考，最终以服务端校验为准。",
+        editorTitle: "配置 JSON",
+        editorPlaceholder: "请输入 JSON 对象，例如 {\"appId\":\"cli_xxx\"}",
+        enableHint: "启用前请先补充必填字段：{fields}",
+        actions: {
+          generateTemplate: "生成模板"
+        },
+        schemaTable: {
+          field: "字段",
+          type: "类型",
+          required: "必填",
+          description: "说明",
+          defaultOrExample: "默认值/示例"
+        },
+        errors: {
+          emptyJson: "配置不能为空，请输入 JSON 对象。",
+          objectExpected: "配置必须是 JSON 对象。",
+          invalidJson: "JSON 格式错误。"
+        }
       },
       state: {
         ready: "可用",
