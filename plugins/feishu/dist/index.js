@@ -132,13 +132,19 @@ function toFiniteNumber(value) {
 }
 
 function buildStatusText(summary) {
-  const lines = [];
-  lines.push(`session: ${summary.session.title} (${summary.session.id})`);
+  const sessionTitle = normalizeText(summary.session.title) || "(untitled)";
+  const sessionId = normalizeText(summary.session.id) || "";
+  const workspaceId = normalizeText(summary.session.workspaceId) || "";
   const workspaceLabel =
     normalizeText(summary.session.workspaceTitle) ||
     normalizeText(summary.session.workspaceDirName) ||
-    summary.session.workspaceId;
+    workspaceId;
+
+  const lines = [];
+  lines.push(`session: ${sessionTitle}`);
+  lines.push(`session_id: ${sessionId}`);
   lines.push(`workspace: ${workspaceLabel}`);
+  lines.push(`workspace_id: ${workspaceId}`);
   if (summary.agent) {
     lines.push(`agent: ${summary.agent.name || "(未命名)"}`);
   } else {
