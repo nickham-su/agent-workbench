@@ -290,8 +290,21 @@ export class ChannelsService {
       kept = kept.slice(kept.length - maxMessages);
     }
 
+    const formatSenderLabel = (senderName: string | null, senderId: string) => {
+      const name = String(senderName || "").trim();
+      if (name) return name;
+      const sid = String(senderId || "").trim();
+      if (sid.startsWith("ou_")) {
+        const suffix = sid.slice(3, 11);
+        if (suffix) {
+          return `ou_${suffix}`;
+        }
+      }
+      return sid || "unknown";
+    };
+
     let lines = kept.map((m) => {
-      const name = (m.senderName || m.senderId || "unknown").trim() || "unknown";
+      const name = formatSenderLabel(m.senderName, m.senderId);
       const msg = String(m.text || "");
       return `${name}: ${msg}`;
     });

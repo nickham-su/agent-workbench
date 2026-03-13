@@ -725,6 +725,13 @@ function createGateway(params) {
       return;
     }
 
+    if (ctx.chatType === "group" && ctx.mentionedBot) {
+      const cleaned = stripLeadingMentionsForCommand(ctx.text);
+      if (normalizeText(cleaned)) {
+        ctx.text = cleaned;
+      }
+    }
+
     const ingest = await ingestNonCommandMessage({ accountId, pluginId, channelName, conversationKey, ctx });
     if (!ingest?.ok) {
       if (ctx.chatType === "direct") {
