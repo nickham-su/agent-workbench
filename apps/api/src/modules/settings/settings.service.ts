@@ -8,10 +8,14 @@ import type {
   AgentMcpSettings,
   AgentRuntimeSettings,
   AgentProviderNpm,
+  AgentScope,
   AgentProvidersSettings,
+  AgentProviderOpenAiApiMode,
   AgentResolvedModel,
   AgentProvidersSettingsView,
+  AgentPluginTools,
   AgentSettings,
+  AgentChannelSenderAllowlistSettings,
   AgentSettingsView,
   AgentToolName,
   ClearAllGitIdentityResponse,
@@ -22,6 +26,7 @@ import type {
   SecurityStatus,
   UpdateAgentProvidersSettingsRequest,
   UpdateAgentGlobalPromptSettingsRequest,
+  UpdateAgentChannelSenderAllowlistRequest,
   UpdateAgentMcpSettingsRequest,
   UpdateAgentRuntimeSettingsRequest,
   UpdateAgentSettingsRequest,
@@ -47,7 +52,9 @@ const AGENT_PROVIDERS_SETTINGS_KEY = "agent_providers_v1";
 const AGENT_SETTINGS_KEY = "agent_agents_v1";
 const AGENT_MCP_SETTINGS_KEY = "agent_mcp_v1";
 const AGENT_GLOBAL_PROMPTS_SETTINGS_KEY = "agent_global_prompts_v1";
+export const AGENT_PLUGINS_SETTINGS_KEY = "agent_plugins_v1";
 const AGENT_RUNTIME_SETTINGS_KEY = "agent_runtime_v1";
+export const AGENT_CHANNEL_SENDER_ALLOWLIST_SETTINGS_KEY = "agent_channel_sender_allowlist_v1";
 export const AGENT_GLOBAL_SYSTEM_PROMPT_ID = "global_system_prompt";
 export const AGENT_GLOBAL_SYSTEM_PROMPT_TITLE = "Global System Prompt";
 
@@ -79,6 +86,11 @@ type ExecutionProfileResolved = {
   agent: AgentItem;
   provider: AgentProviderStored;
   model: AgentProviderStored["models"][number];
+};
+
+type AgentExecutionSurface = "user" | "subtask";
+type AgentViewWithResolvedModel = AgentItem & {
+  resolvedModel: AgentResolvedModel | null;
 };
 
 type GlobalDefaultModelResolved = {
@@ -168,6 +180,8 @@ const RESERVED_MODEL_OPTION_KEYS = new Set([
   "toolChoice"
 ]);
 
+const DEFAULT_OPENAI_API_MODE: AgentProviderOpenAiApiMode = "responses";
+
 function isSafeObjectKey(raw: string) {
   if (!raw) return false;
   return raw !== "__proto__" && raw !== "prototype" && raw !== "constructor";
@@ -190,6 +204,18 @@ function normalizeProviderNpmInput(raw: unknown): AgentProviderNpm {
 
 function providerOptionsKeyByNpm(npm: AgentProviderNpm) {
   return npm === "@ai-sdk/anthropic" ? "anthropic" : "openai";
+}
+
+function normalizeOpenAiApiModeStored(raw: unknown): AgentProviderOpenAiApiMode {
+  if (raw === "chatCompletions") return raw;
+  return DEFAULT_OPENAI_API_MODE;
+}
+
+function normalizeOpenAiApiModeInput(raw: unknown): AgentProviderOpenAiApiMode {
+  if (raw === undefined) return DEFAULT_OPENAI_API_MODE;
+  if (raw == null || raw === "") return DEFAULT_OPENAI_API_MODE;
+  if (raw === "responses" || raw === "chatCompletions") return raw;
+  throw new HttpError(400, "OpenAI provider apiMode is invalid", "AGENT_PROVIDER_OPENAI_API_MODE_INVALID");
 }
 
 function normalizeAiSdkOptions(raw: unknown) {
@@ -432,10 +458,12 @@ function getAgentProvidersSettingsStored(ctx: AppContext) {
           npm,
           options: {
             baseURL: normalizeBaseURL(optionsRaw.baseURL),
-            apiKey: normalizeApiKeyInput(optionsRaw.apiKey) ?? null
+            apiKey: normalizeApiKeyInput(optionsRaw.apiKey) ?? null,
+            ...(npm === "@ai-sdk/openai" ? { apiMode: normalizeOpenAiApiModeStored(optionsRaw.apiMode) } : {})
           },
           models
         };
+
       } catch {
         return null;
       }
@@ -466,7 +494,8 @@ function toAgentProvidersSettingsView(settings: AgentProvidersSettingsStored, up
       options: {
         baseURL: provider.options.baseURL,
         hasApiKey: Boolean(provider.options.apiKey),
-        apiKeyMasked: maskApiKey(provider.options.apiKey ?? null)
+        apiKeyMasked: maskApiKey(provider.options.apiKey ?? null),
+        ...(provider.npm === "@ai-sdk/openai" ? { apiMode: normalizeOpenAiApiModeStored((provider.options as any).apiMode) } : {})
       },
       models: provider.models
     })),
@@ -475,25 +504,47 @@ function toAgentProvidersSettingsView(settings: AgentProvidersSettingsStored, up
 }
 
 function normalizeAgentTools(raw: unknown): AgentToolName[] {
-  if (!Array.isArray(raw)) return ["bash", "read", "write", "apply_patch", "todolist", "subtask", "archive_search", "archive_read"];
+  // Baseline tools (read/todolist/scratchpad/archive_*) are always available at runtime and no longer need to be stored in agent profiles.
+  // This function keeps only user-configurable tools.
+  const defaultTools: AgentToolName[] = ["bash", "write", "apply_patch", "subtask"];
+  if (!Array.isArray(raw)) return defaultTools;
   const out: AgentToolName[] = [];
   const seen = new Set<AgentToolName>();
   for (const item of raw) {
     if (
       item !== "bash" &&
-      item !== "read" &&
       item !== "write" &&
       item !== "apply_patch" &&
-      item !== "todolist" &&
       item !== "subtask" &&
+      // Legacy baseline tool names are intentionally ignored.
+      item !== "read" &&
+      item !== "todolist" &&
+      item !== "scratchpad" &&
       item !== "archive_search" &&
       item !== "archive_read"
     ) continue;
+    if (item === "read" || item === "todolist" || item === "scratchpad" || item === "archive_search" || item === "archive_read") {
+      continue;
+    }
     if (seen.has(item)) continue;
     seen.add(item);
     out.push(item);
   }
-  return out.length > 0 ? out : ["bash", "read", "write", "apply_patch", "todolist", "subtask", "archive_search", "archive_read"];
+  return out;
+}
+
+function normalizeAgentPluginTools(raw: unknown): AgentPluginTools {
+  if (!Array.isArray(raw)) return [];
+  const out: AgentPluginTools = [];
+  const seen = new Set<string>();
+  const pattern = /^plugin_[a-z0-9][a-z0-9-]{0,63}_[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+  for (const item of raw) {
+    const value = typeof item === "string" ? item.trim() : "";
+    if (!value || seen.has(value) || !pattern.test(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
 }
 
 function normalizeServerId(raw: unknown) {
@@ -652,6 +703,42 @@ function normalizeAgentPromptForUpdate(raw: unknown) {
     throw new HttpError(400, "Agent prompt is too long", "AGENT_PROMPT_TOO_LONG");
   }
   return value;
+}
+
+function normalizeAgentScopeFromStored(raw: unknown): AgentScope {
+  if (raw === "user" || raw === "subtask") return raw;
+  return "both";
+}
+
+function normalizeAgentScopeForUpdate(raw: unknown): AgentScope {
+  if (raw === "user" || raw === "subtask" || raw === "both") return raw;
+  throw new HttpError(400, "Agent scope is invalid", "AGENT_SCOPE_INVALID");
+}
+
+function normalizeAgentOrderValue(raw: unknown) {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n)) return null;
+  const v = Math.floor(n);
+  if (v !== n || v < 0) return null;
+  return v;
+}
+
+function normalizeAgentOrderForUpdate(raw: unknown) {
+  const value = normalizeAgentOrderValue(raw);
+  if (value == null) {
+    throw new HttpError(400, "Agent order must be an integer >= 0", "AGENT_ORDER_INVALID");
+  }
+  return value;
+}
+
+function normalizeAgentOrdering<T extends Omit<AgentItem, "order"> & { order?: number | null }>(agents: T[]): AgentItem[] {
+  const ordered = [...agents].sort((a, b) => {
+    const ao = typeof a.order === "number" ? a.order : Number.MAX_SAFE_INTEGER;
+    const bo = typeof b.order === "number" ? b.order : Number.MAX_SAFE_INTEGER;
+    if (ao !== bo) return ao - bo;
+    return agents.indexOf(a) - agents.indexOf(b);
+  });
+  return ordered.map((agent, index) => ({ ...agent, order: index }));
 }
 
 function normalizeGlobalPromptId(raw: unknown) {
@@ -849,22 +936,23 @@ function getAgentSettingsStored(ctx: AppContext) {
       return {
         id,
         name,
+        scope: normalizeAgentScopeFromStored(agent.scope),
+        order: normalizeAgentOrderValue(agent.order),
         summary: normalizeAgentSummaryFromStored(agent.summary),
         prompt,
         globalPromptIds: normalizeAgentGlobalPromptIds(agent.globalPromptIds, globalPromptIds),
         tools: normalizeAgentTools(agent.tools),
         mcpServers: normalizeAgentMcpServers(agent.mcpServers, mcpServerIds),
+        pluginTools: normalizeAgentPluginTools(agent.pluginTools),
         defaultModel: modelProviderId && modelId ? { providerId: modelProviderId, modelId } : null
       };
     })
     .filter((x): x is NonNullable<typeof x> => Boolean(x));
 
-  const defaultValue = value?.default as { agentId?: unknown } | null | undefined;
-  const defaultAgentId = typeof defaultValue?.agentId === "string" ? defaultValue.agentId.trim() : "";
+  const normalizedAgents = normalizeAgentOrdering(agents);
   return {
     settings: {
-      default: defaultAgentId ? { agentId: defaultAgentId } : null,
-      agents
+      agents: normalizedAgents
     },
     updatedAt: row?.updatedAt ?? 0
   };
@@ -901,6 +989,27 @@ export function getSearchSettings(ctx: AppContext): SearchSettings {
     excludeGlobs,
     updatedAt: row?.updatedAt ?? 0
   };
+}
+
+export function getAgentChannelSenderAllowlistSettings(ctx: AppContext): AgentChannelSenderAllowlistSettings {
+  const row = getSettingJson(ctx.db, AGENT_CHANNEL_SENDER_ALLOWLIST_SETTINGS_KEY);
+  const value = row?.value as Partial<AgentChannelSenderAllowlistSettings> | undefined;
+  const src = Array.isArray(value?.items) ? value.items : [];
+  const seen = new Set<string>();
+  const items = src
+    .map((it) => {
+      const channel = typeof it?.channel === "string" ? it.channel.trim() : "";
+      const senderId = typeof it?.senderId === "string" ? it.senderId.trim() : "";
+      const remarkRaw = typeof it?.remark === "string" ? it.remark.trim() : "";
+      if (!channel || !senderId) return null;
+      const key = `${channel}\u0000${senderId}`;
+      if (seen.has(key)) return null;
+      seen.add(key);
+      const role: "admin" | "user" = it?.role === "admin" ? "admin" : "user";
+      return { channel, senderId, role, ...(remarkRaw ? { remark: remarkRaw.slice(0, 200) } : {}) };
+    })
+    .filter((it): it is NonNullable<typeof it> => Boolean(it));
+  return { items, updatedAt: row?.updatedAt ?? 0 };
 }
 
 export function getAgentProvidersSettings(ctx: AppContext): AgentProvidersSettingsView {
@@ -943,6 +1052,29 @@ export function getAgentRuntimeSettings(ctx: AppContext): AgentRuntimeSettings {
     sessionTerminalSoundEnabled: loaded.settings.sessionTerminalSoundEnabled,
     updatedAt: loaded.updatedAt
   };
+}
+
+export function updateAgentChannelSenderAllowlistSettings(
+  ctx: AppContext,
+  logger: FastifyBaseLogger,
+  bodyRaw: unknown
+): AgentChannelSenderAllowlistSettings {
+  const body = (bodyRaw ?? {}) as UpdateAgentChannelSenderAllowlistRequest;
+  const src = Array.isArray(body.items) ? body.items : [];
+  const seen = new Set<string>();
+  const items: AgentChannelSenderAllowlistSettings["items"] = [];
+  for (const it of src) {
+    const channel = typeof it?.channel === "string" ? it.channel.trim() : "";
+    const senderId = typeof it?.senderId === "string" ? it.senderId.trim() : "";
+    const remarkRaw = typeof it?.remark === "string" ? it.remark.trim() : "";
+    if (!channel || !senderId) throw new HttpError(400, "channel/senderId is required", "CHANNEL_SENDER_ALLOWLIST_INVALID");
+    const key = `${channel}\u0000${senderId}`;
+    if (seen.has(key)) throw new HttpError(400, "duplicate channel/senderId", "CHANNEL_SENDER_ALLOWLIST_DUPLICATE");
+    const role: "admin" | "user" = it?.role === "admin" ? "admin" : "user";
+    seen.add(key);
+    items.push({ channel, senderId, role, ...(remarkRaw ? { remark: remarkRaw.slice(0, 200) } : {}) });
+  }
+  const updatedAt = nowMs(); setSettingJson(ctx.db, AGENT_CHANNEL_SENDER_ALLOWLIST_SETTINGS_KEY, { items }, updatedAt); logger.info({ count: items.length, updatedAt }, "agent channel sender allowlist updated"); return { items, updatedAt };
 }
 
 export function updateAgentRuntimeSettings(
@@ -1136,6 +1268,18 @@ export function updateAgentProvidersSettings(
     const optionsRaw = (provider.options ?? {}) as Record<string, unknown>;
     const apiKeyInput = normalizeApiKeyInput(optionsRaw.apiKey);
     const previous = currentById.get(id);
+    const previousApiModeRaw = previous?.npm === "@ai-sdk/openai"
+      ? (previous.options as Record<string, unknown>).apiMode
+      : undefined;
+    const openAiApiMode =
+      npm === "@ai-sdk/openai"
+        ? optionsRaw.apiMode === undefined
+          ? previousApiModeRaw === undefined
+            ? DEFAULT_OPENAI_API_MODE
+            : normalizeOpenAiApiModeStored(previousApiModeRaw)
+          : normalizeOpenAiApiModeInput(optionsRaw.apiMode)
+        : undefined;
+
     const apiKey = apiKeyInput === undefined ? previous?.options.apiKey ?? null : apiKeyInput;
 
     const modelsRaw = Array.isArray(provider.models) ? provider.models : [];
@@ -1170,9 +1314,11 @@ export function updateAgentProvidersSettings(
       npm,
       options: {
         baseURL: normalizeBaseURL(optionsRaw.baseURL),
-        apiKey
+        apiKey,
+        ...(npm === "@ai-sdk/openai" ? { apiMode: openAiApiMode } : {})
       },
       models
+
     };
   });
 
@@ -1238,7 +1384,6 @@ export function getAgentSettings(ctx: AppContext): AgentSettingsView {
   const loaded = getAgentSettingsStored(ctx);
   const providersSettings = getAgentProvidersSettingsInternal(ctx);
   return {
-    default: loaded.settings.default,
     agents: loaded.settings.agents.map((agent) => ({
       ...agent,
       resolvedModel: resolveAgentResolvedModel(agent, providersSettings)
@@ -1265,53 +1410,78 @@ export function updateAgentSettings(ctx: AppContext, logger: FastifyBaseLogger, 
     const summary = normalizeAgentSummaryForUpdate(agent.summary);
     const tools = normalizeAgentTools(agent.tools);
     const globalPromptIds = normalizeAgentGlobalPromptIds(agent.globalPromptIds, availableGlobalPromptIds);
+    const pluginTools = normalizeAgentPluginTools(agent.pluginTools ?? []);
     const mcpServers = normalizeAgentMcpServers(agent.mcpServers, availableMcpIds);
     const modelRaw = (agent.defaultModel ?? null) as { providerId?: unknown; modelId?: unknown } | null;
     const providerId = typeof modelRaw?.providerId === "string" ? modelRaw.providerId.trim() : "";
     const modelId = typeof modelRaw?.modelId === "string" ? modelRaw.modelId.trim() : "";
+    const scope = normalizeAgentScopeForUpdate(agent.scope);
+    const order = normalizeAgentOrderForUpdate(agent.order);
     const defaultModel = providerId && modelId ? { providerId, modelId } : null;
     return {
       id,
       name,
       summary,
       prompt,
+      scope,
+      order,
       globalPromptIds,
       tools,
+      pluginTools,
       mcpServers,
       defaultModel
     };
   });
 
   assertUniqueIdsOrThrow(agents.map((agent) => agent.id), "AGENT_DUPLICATE", "Duplicate agent id");
-
-  const defaultValue = (body.default ?? null) as { agentId?: unknown } | null;
-  const defaultAgentId = typeof defaultValue?.agentId === "string" ? defaultValue.agentId.trim() : "";
-  const defaultRef = defaultAgentId ? { agentId: defaultAgentId } : null;
-
-  if (defaultRef && !agents.some((agent) => agent.id === defaultRef.agentId)) {
-    throw new HttpError(400, "Default agentId not found", "AGENT_DEFAULT_NOT_FOUND");
-  }
+  const normalizedAgents = normalizeAgentOrdering(agents);
 
   const updatedAt = nowMs();
   setSettingJson(
     ctx.db,
     AGENT_SETTINGS_KEY,
     {
-      default: defaultRef,
-      agents
+      agents: normalizedAgents
     },
     updatedAt
   );
   logger.info({ agents: agents.length, updatedAt }, "agent settings updated");
 
   return {
-    default: defaultRef,
-    agents,
+    agents: normalizedAgents,
     updatedAt
   };
 }
 
+function isAgentScopeAllowed(scope: AgentScope, surface: AgentExecutionSurface) {
+  return scope === "both" || scope === surface;
+}
+
+export function listAvailableAgentsForSurface(ctx: AppContext, surface: AgentExecutionSurface): AgentViewWithResolvedModel[] {
+  return getAgentSettings(ctx).agents.filter((agent) => isAgentScopeAllowed(agent.scope, surface));
+}
+
+function resolveAgentForSurface(ctx: AppContext, surface: AgentExecutionSurface, requestedAgentId?: string | null) {
+  const normalizedRequestedAgentId = typeof requestedAgentId === "string" ? requestedAgentId.trim() : "";
+  if (normalizedRequestedAgentId) {
+    const requested = getAgentSettings(ctx).agents.find((item) => item.id === normalizedRequestedAgentId);
+    if (!requested) {
+      throw new HttpError(400, "Agent not found", "AGENT_NOT_FOUND");
+    }
+    if (!isAgentScopeAllowed(requested.scope, surface)) {
+      throw new HttpError(400, `Agent is not allowed for ${surface}`, "AGENT_SCOPE_NOT_ALLOWED");
+    }
+    return requested;
+  }
+  const fallback = listAvailableAgentsForSurface(ctx, surface)[0];
+  if (!fallback) {
+    throw new HttpError(400, `No available ${surface} agent`, "AGENT_NO_AVAILABLE_FOR_SURFACE");
+  }
+  return fallback;
+}
+
 export function resolveExecutionProfile(ctx: AppContext, input: {
+  surface: AgentExecutionSurface;
   requestedAgentId?: string | null;
   agentIdFromRun?: string | null;
   providerIdFromRun?: string | null;
@@ -1320,17 +1490,17 @@ export function resolveExecutionProfile(ctx: AppContext, input: {
   const providersSettings = getAgentProvidersSettingsInternal(ctx);
   const agentSettings = getAgentSettings(ctx);
 
-  const resolvedAgentId = [input.agentIdFromRun, input.requestedAgentId, agentSettings.default?.agentId]
-    .map((item) => (typeof item === "string" ? item.trim() : ""))
-    .find((item) => item.length > 0);
-  if (!resolvedAgentId) {
-    throw new HttpError(400, "Agent is not configured", "AGENT_NOT_CONFIGURED");
-  }
-
-  const agent = agentSettings.agents.find((item) => item.id === resolvedAgentId);
-  if (!agent) {
-    throw new HttpError(400, "Agent not found", "AGENT_NOT_FOUND");
-  }
+  const agent = input.agentIdFromRun
+    ? (() => {
+        const runAgentId = input.agentIdFromRun?.trim();
+        const runAgent = agentSettings.agents.find((item) => item.id === runAgentId);
+        if (!runAgent) throw new HttpError(400, "Agent not found", "AGENT_NOT_FOUND");
+        if (!isAgentScopeAllowed(runAgent.scope, input.surface)) {
+          throw new HttpError(400, `Agent is not allowed for ${input.surface}`, "AGENT_SCOPE_NOT_ALLOWED");
+        }
+        return runAgent;
+      })()
+    : resolveAgentForSurface(ctx, input.surface, input.requestedAgentId);
 
   const fallbackModel = agent.defaultModel ?? providersSettings.default;
   const resolvedProviderId = [input.providerIdFromRun, fallbackModel?.providerId]

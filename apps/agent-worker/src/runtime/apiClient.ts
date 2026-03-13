@@ -1,3 +1,14 @@
+import type {
+  AgentToolName,
+  AgentUiLocale,
+  PluginRuntimeSnapshotsResponse,
+  PluginToolCanonicalName,
+  PluginToolRpcExecuteRequest,
+  PluginToolRpcExecuteResponse,
+  PluginToolRpcListRequest,
+  PluginToolRpcListResponse
+} from "@agent-workbench/shared";
+
 export class ApiConflictError extends Error {}
 
 type PromptTextPart = {
@@ -25,6 +36,11 @@ type PromptMessage =
   | { role: "assistant"; content: string | Array<PromptTextPart | PromptToolCallPart> }
   | { role: "tool"; content: PromptToolResultPart[] };
 
+export type MessagesContext = {
+  headItemId: number | null;
+  messages: PromptMessage[];
+};
+
 export type ExecutionProfile = {
   resolved: {
     runId: string;
@@ -46,10 +62,9 @@ export type ExecutionProfile = {
     name: string;
     summary: string;
     prompt: string;
-    tools: Array<
-      "bash" | "read" | "write" | "apply_patch" | "todolist" | "subtask" | "archive_search" | "archive_read"
-    >;
+    tools: AgentToolName[];
     mcpServers: string[];
+    pluginTools: PluginToolCanonicalName[];
     defaultModel: { providerId: string; modelId: string } | null;
   };
   provider: {
@@ -59,6 +74,7 @@ export type ExecutionProfile = {
     options: {
       baseURL: string;
       apiKey: string;
+      apiMode?: "responses" | "chatCompletions";
     };
   };
   model: {
@@ -87,6 +103,7 @@ export type PromptContext = {
     args: Record<string, unknown>;
   }>;
   lastResponseTotalTokens: number | null;
+  uiLocale: AgentUiLocale | null;
 };
 
 export type AgentMcpSettingsPayload = {
@@ -121,7 +138,14 @@ export class AgentApiClient {
     }
     if (!response.ok) {
       const txt = await response.text();
-      throw new Error(`request failed: ${response.status} ${txt}`);
+      try {
+        const parsed = txt ? (JSON.parse(txt) as { message?: unknown; code?: unknown }) : null;
+        const message = typeof parsed?.message === "string" ? parsed.message : txt;
+        const code = typeof parsed?.code === "string" ? parsed.code : "";
+        throw new Error(`request failed: ${response.status} ${message}${code ? ` (${code})` : ""}`);
+      } catch {
+        throw new Error(`request failed: ${response.status} ${txt}`);
+      }
     }
     return (await response.json()) as T;
   }
@@ -225,6 +249,26 @@ export class AgentApiClient {
     return (await response.json()) as PromptContext;
   }
 
+  async getMessagesContext(input: {
+    workspaceId: string;
+    sessionId: string;
+    appendMessage?: { role: "system" | "user"; content: string };
+  }) {
+    const response = await fetch(`${this.params.apiOrigin}/api/internal/agent/messages-context`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-awb-agent-internal-token": this.params.internalToken
+      },
+      body: JSON.stringify(input)
+    });
+    if (!response.ok) {
+      const txt = await response.text();
+      throw new Error(`get messages context failed: ${response.status} ${txt}`);
+    }
+    return (await response.json()) as MessagesContext;
+  }
+
   async compactContext(input: {
     workspaceId: string;
     sessionId: string;
@@ -252,11 +296,10 @@ export class AgentApiClient {
     snippet?: boolean;
     regex?: boolean;
   }) {
-    const res = await this.request<{ text: string }>("/api/internal/agent/archive/search", {
+    return await this.request<{ text: string; noArchive?: boolean }>("/api/internal/agent/archive/search", {
       method: "POST",
       body: input
     });
-    return res.text;
   }
 
   async archiveRead(input: {
@@ -266,11 +309,30 @@ export class AgentApiClient {
     lineCount?: number;
     maxChars?: number;
   }) {
-    const res = await this.request<{ text: string }>("/api/internal/agent/archive/read", {
+    return await this.request<{ text: string; noArchive?: boolean }>("/api/internal/agent/archive/read", {
       method: "POST",
       body: input
     });
-    return res.text;
+  }
+
+  async getSubtaskPreforkPlan(input: {
+    workspaceId: string;
+    parentSessionId: string;
+    parentRunId: string;
+    parentToolItemId: number;
+    agentId: string;
+    thresholdPct?: number;
+  }) {
+    return this.request<{
+      shouldPrefork: boolean;
+      thresholdPct: number;
+      parentLastResponseTotalTokens: number | null;
+      childContextWindowTokens: number;
+      thresholdTokens: number;
+    }>("/api/internal/agent/subtask/prefork-plan", {
+      method: "POST",
+      body: input
+    });
   }
 
   async startSubtaskRun(input: {
@@ -282,6 +344,12 @@ export class AgentApiClient {
     prompt: string;
     agentId: string;
     session: { mode: "new" | "existing" | "fork"; sessionId?: string };
+    preforkSummaryText?: string;
+    preforkMeta?: {
+      thresholdPct: number;
+      parentLastResponseTotalTokens: number;
+      childContextWindowTokens: number;
+    };
   }) {
     return this.request<{ sessionId: string; runId: string; workspacePath: string }>("/api/internal/agent/subtask/start", {
       method: "POST",
@@ -310,6 +378,27 @@ export class AgentApiClient {
     return this.request<AgentMcpSettingsPayload>("/api/internal/agent/mcp-settings", {
       method: "POST",
       body: {}
+    });
+  }
+
+  async getPluginRuntimeSnapshots() {
+    return this.request<PluginRuntimeSnapshotsResponse>("/api/internal/agent/plugins/runtime-snapshots", {
+      method: "POST",
+      body: {}
+    });
+  }
+
+  async listPluginTools(input: PluginToolRpcListRequest) {
+    return this.request<PluginToolRpcListResponse>("/api/internal/agent/plugins/tools/list", {
+      method: "POST",
+      body: input
+    });
+  }
+
+  async executePluginTool(input: PluginToolRpcExecuteRequest) {
+    return this.request<PluginToolRpcExecuteResponse>("/api/internal/agent/plugins/tools/execute", {
+      method: "POST",
+      body: input
     });
   }
 }

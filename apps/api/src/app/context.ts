@@ -30,5 +30,8 @@ export type AppContext = {
   agentInternalToken: string;
   agentApiOrigin: string;
   agentStartupRecoveryMode: "fail" | "recover";
+  agentPluginHostEnabled: boolean;
+  agentPluginHostSocketPath: string;
+  agentPluginServicesEnabled?: boolean;
   agentTestFaults?: AgentTestFaults;
 };

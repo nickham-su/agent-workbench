@@ -18,6 +18,9 @@ export type Env = {
   agentInternalToken: string;
   agentApiOrigin: string;
   agentStartupRecoveryMode: "fail" | "recover";
+  agentPluginHostEnabled: boolean;
+  agentPluginHostSocketPath: string;
+  agentPluginServicesEnabled: boolean;
 };
 
 function parsePositiveInt(raw: string, name: string) {
@@ -58,6 +61,9 @@ export function loadEnv(processEnv: NodeJS.ProcessEnv): Env {
   const internalTokenRaw = processEnv.AWB_AGENT_INTERNAL_TOKEN?.trim() || "";
   const apiOriginRaw = processEnv.AWB_AGENT_API_ORIGIN?.trim() || "";
   const startupRecoveryModeRaw = processEnv.AWB_AGENT_STARTUP_RECOVERY_MODE?.trim() || "";
+  const pluginHostEnabledRaw = processEnv.AWB_AGENT_PLUGIN_HOST_ENABLED?.trim() || "";
+  const pluginHostSocketRaw = processEnv.AWB_AGENT_PLUGIN_HOST_SOCKET?.trim() || "";
+  const pluginServicesEnabledRaw = processEnv.AWB_AGENT_PLUGIN_SERVICES_ENABLED?.trim() || "";
 
   const port = parsePositiveInt(portRaw, "AWB_PORT");
   const fileMaxBytes = parsePositiveInt(fileMaxBytesRaw, "AWB_FILE_MAX_BYTES");
@@ -72,8 +78,11 @@ export function loadEnv(processEnv: NodeJS.ProcessEnv): Env {
   const agentInternalToken = internalTokenRaw || randomBytes(24).toString("hex");
   const resolvedDataDir = path.resolve(dataDir);
   const agentWorkerSocketPath = path.resolve(workerSocketRaw || path.join(resolvedDataDir, "agent-worker.sock"));
+  const agentPluginHostSocketPath = path.resolve(pluginHostSocketRaw || path.join(resolvedDataDir, "agent-plugin-host.sock"));
   const apiHost = normalizeApiOriginHost(host);
   const agentApiOrigin = apiOriginRaw || `http://${apiHost}:${port}`;
+  const agentPluginHostEnabled = parseBool(pluginHostEnabledRaw, false);
+  const agentPluginServicesEnabled = parseBool(pluginServicesEnabledRaw, false);
 
   const agentStartupRecoveryMode = (startupRecoveryModeRaw || "fail").toLowerCase();
   if (agentStartupRecoveryMode !== "fail" && agentStartupRecoveryMode !== "recover") {
@@ -98,6 +107,9 @@ export function loadEnv(processEnv: NodeJS.ProcessEnv): Env {
     agentWorkerConcurrency,
     agentInternalToken,
     agentApiOrigin,
-    agentStartupRecoveryMode: agentStartupRecoveryMode as "fail" | "recover"
+    agentStartupRecoveryMode: agentStartupRecoveryMode as "fail" | "recover",
+    agentPluginHostEnabled,
+    agentPluginHostSocketPath,
+    agentPluginServicesEnabled
   };
 }

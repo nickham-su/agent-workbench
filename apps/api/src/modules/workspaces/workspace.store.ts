@@ -1,6 +1,6 @@
 import path from "node:path";
 import type { Db } from "../../infra/db/db.js";
-import type { WorkspaceRecord } from "@agent-workbench/shared";
+import type { AgentRecentWorkspaceItem, WorkspaceRecord } from "@agent-workbench/shared";
 
 type WorkspaceRow = {
   id: string;
@@ -10,6 +10,14 @@ type WorkspaceRow = {
   terminalCredentialId: string | null;
   createdAt: number;
   updatedAt: number;
+};
+
+type WorkspaceRecentRow = {
+  id: string;
+  title: string;
+  dirName: string;
+  updatedAt: number;
+  lastUsedAt: number | null;
 };
 
 function mapRow(row: any): WorkspaceRecord {
@@ -65,6 +73,25 @@ export function touchWorkspaceLastUsedAt(db: Db, workspaceId: string, lastUsedAt
       where id = @workspaceId
     `
   ).run({ workspaceId, lastUsedAt });
+}
+
+export function listRecentWorkspaces(db: Db, limit: number): AgentRecentWorkspaceItem[] {
+  const rows = db
+    .prepare(
+      `
+        select
+          id,
+          title,
+          dir_name as dirName,
+          updated_at as updatedAt,
+          last_used_at as lastUsedAt
+        from workspaces
+        order by coalesce(last_used_at, updated_at) desc, updated_at desc
+        limit @limit
+      `
+    )
+    .all({ limit }) as WorkspaceRecentRow[];
+  return rows.map((row) => ({ ...row, lastUsedAt: row.lastUsedAt ?? null }));
 }
 
 export function getWorkspace(db: Db, workspaceId: string): WorkspaceRecord | null {

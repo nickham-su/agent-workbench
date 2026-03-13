@@ -129,7 +129,6 @@ import { agentSessionStatusStoreKey, createAgentSessionStatusStore } from "./use
 type AgentOption = {
   value: string;
   label: string;
-  isDefault?: boolean;
   resolvedModel?: {
     providerId: string;
     contextWindowTokens: number;
@@ -454,13 +453,13 @@ function setSessionAgent(sessionId: string, value: string | null) {
 async function refreshAgents() {
   try {
     const res = await getAgentSettings();
-    const defaultAgentId = res.default?.agentId ?? "";
-    agentOptions.value = res.agents.map((agent) => ({
-      value: agent.id,
-      label: agent.name,
-      isDefault: defaultAgentId === agent.id,
-      resolvedModel: agent.resolvedModel ?? null
-    }));
+    agentOptions.value = res.agents
+      .filter((agent) => agent.scope === "user" || agent.scope === "both")
+      .map((agent) => ({
+        value: agent.id,
+        label: agent.name,
+        resolvedModel: agent.resolvedModel ?? null
+      }));
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   }
@@ -536,7 +535,7 @@ async function createOneSession() {
     const draft: DraftAgentSession = {
       id: draftId,
       workspaceId: props.workspaceId,
-      title: t("agent.client.newTitle", { time: new Date(now).toLocaleTimeString() }),
+      title: t("agent.client.newTitle"),
       kind: "primary",
       createdAt: now,
       updatedAt: now,

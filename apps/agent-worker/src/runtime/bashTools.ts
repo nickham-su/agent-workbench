@@ -121,7 +121,7 @@ export function startBashToolProbe(logger: Pick<Console, "warn">) {
 export function getBashToolAppendix() {
   const lines: string[] = [];
   if (cache.environment) lines.push(cache.environment);
-  if (cache.tools.length > 0) lines.push(`已知可用工具: ${cache.tools.join(", ")}`);
+  if (cache.tools.length > 0) lines.push(`Known available tools: ${cache.tools.join(", ")}`);
   return lines.join("\n");
 }
 
@@ -132,7 +132,7 @@ async function readEnvironmentInfo(logger: Pick<Console, "warn">) {
   const distro = await readOsRelease(logger);
   const parts = [`${platform} ${arch}`, `kernel ${kernel}`];
   if (distro) parts.push(distro);
-  return `运行环境: ${parts.join(", ")}`;
+  return `Runtime environment: ${parts.join(", ")}`;
 }
 
 async function readOsRelease(logger: Pick<Console, "warn">) {

@@ -13,6 +13,8 @@ export default {
     loading: "加载中...",
     reset: "重置",
     default: "默认",
+    yes: "是",
+    no: "否",
     format: {
       parens: "（{text}）",
       parensSuffix: "（{text}）"
@@ -285,7 +287,7 @@ export default {
     },
     client: {
       tabLabel: "会话 {index}",
-      newTitle: "AI Client {time}",
+      newTitle: "new session",
       cancel: "取消运行",
       cancelConfirmTitle: "确认取消当前运行？",
       cancelConfirmContent: "将中断当前执行,并保留当前会话消息。当前正在执行的 AI 或工具会标记为已取消。",
@@ -295,8 +297,8 @@ export default {
       contextBoundary: "上下文边界",
       inputPlaceholderIdle: "输入消息,Enter 发送,Shift+Enter 换行,Tab 切换 Agent",
       inputPlaceholderRunning: "运行中,Esc 取消当前运行",
-      inputPlaceholderNoAgent: "请先创建 Agent 后再发送消息",
-      noAgentHint: "当前没有可用 Agent,请先创建 Agent",
+      inputPlaceholderNoAgent: "当前没有可用于用户会话的 Agent,请前往设置页调整范围或新增 Agent",
+      noAgentHint: "当前没有可用于用户会话的 Agent,请前往设置页调整范围或新增 Agent",
       goCreateAgent: "前往创建",
       chooseSession: "选择会话",
       chooseSessionTitle: "选择要继续的会话",
@@ -631,7 +633,9 @@ export default {
       agentGlobalPrompts: "提示词库",
       agentMcp: "MCP",
       agentProfiles: "角色配置",
+      agentPlugins: "插件",
       agentRuntime: "运行参数",
+      agentChannelSenderAllowlist: "IM用户列表",
       security: "安全"
     },
     groups: {
@@ -814,6 +818,7 @@ export default {
         npmLabel: "Provider 类型",
         baseUrlLabel: "Base URL",
         apiKeyLabel: "API Key",
+        apiModeLabel: "API 模式",
         apiKeyPlaceholder: "输入 API Key（可留空）",
         apiKeyEditPlaceholder: "输入新 API Key（留空保持不变）",
         apiKeyCreateHelp: "创建时可先留空，后续再补充。",
@@ -904,18 +909,23 @@ export default {
       saved: "已保存"
     },
     agentProfiles: {
-      description: "配置 AI Agent 列表、默认 Agent、可用工具与默认模型。",
+      description: "配置 AI Agent 列表、可见范围、排序、可用工具与默认模型。",
       saving: "正在保存...",
       empty: "暂无 Agent，请先新增",
+      sortHelp: "拖拽或使用上下箭头调整顺序。当前场景默认使用过滤后排在第一位的 Agent。",
       actions: {
         addAgent: "新增 Agent",
         edit: "编辑",
         delete: "删除",
-        setDefault: "设为默认"
+        dragSort: "拖拽排序",
+        moveUp: "上移",
+        moveDown: "下移"
       },
       fields: {
         tools: "工具",
         mcpServers: "MCP Server",
+        pluginTools: "插件工具",
+        scope: "可用范围",
         globalPrompts: "提示词库",
         summary: "简介",
         defaultModel: "默认模型",
@@ -927,11 +937,17 @@ export default {
         read: "Read",
         write: "Write",
         applyPatch: "Apply Patch",
+        scratchpad: "Scratchpad",
         todolist: "Todo List",
         subtask: "Subtask",
         archiveSearch: "Archive Search",
         archiveRead: "Archive Read",
         archiveTail: "Archive Tail"
+      },
+      scope: {
+        user: "仅用户可选",
+        subtask: "仅子任务可选",
+        both: "用户与子任务通用"
       },
       modal: {
         ok: "确定",
@@ -953,13 +969,14 @@ export default {
         globalPromptsPlaceholder: "选择提示词库条目",
         globalPromptsHelp: "支持多选，注入顺序按提示词库列表顺序。",
         mcpServersPlaceholder: "选择可用的 MCP Server",
+        pluginToolsPlaceholder: "选择已启用插件提供的工具",
+        pluginToolsHelp: "仅可选择全局已启用且状态为 Ready 的插件工具。",
         defaultModelCascaderPlaceholder: "选择默认模型策略",
         defaultModelModeLabel: "默认模型策略",
         defaultProviderLabel: "Provider",
         defaultProviderPlaceholder: "请选择 Provider",
         defaultModelLabel: "模型",
-        defaultModelPlaceholder: "请选择模型",
-        setAsDefault: "设为默认 Agent"
+        defaultModelPlaceholder: "请选择模型"
       },
       deleteAgent: {
         title: "删除 Agent？",
@@ -1042,6 +1059,91 @@ export default {
         duplicateServerId: "Server ID 已存在"
       },
       saved: "已保存"
+    },
+    agentPlugins: {
+      description: "管理本地发现的工具插件，查看诊断信息，并控制全局启用状态。",
+      saving: "正在保存...",
+      empty: "暂未发现插件。请将插件包放到 <dataDir>/plugins 下。",
+      saved: "已保存",
+      actions: {
+        refresh: "刷新",
+        editConfig: "编辑配置"
+      },
+      fields: {
+        enabled: "已启用",
+        entry: "入口"
+      },
+      configModal: {
+        title: "编辑插件配置 · {name}",
+        maskedHint: "提示：后端可能会返回脱敏值（例如 ***）。保留 *** 表示该敏感值保持不变。",
+        schemaFieldsTitle: "字段说明（来自 configSchema）",
+        schemaFieldsEmpty: "当前插件未声明 configSchema 字段信息，可直接编辑 JSON。",
+        rawSchemaTitle: "查看原始 Schema",
+        schemaComplexHint: "该 schema 较复杂，字段说明仅供参考，最终以服务端校验为准。",
+        editorTitle: "配置 JSON",
+        editorPlaceholder: "请输入 JSON 对象",
+        enableHint: "启用前请先补充必填字段：{fields}",
+        actions: {
+          generateTemplate: "生成模板"
+        },
+        schemaTable: {
+          field: "字段",
+          type: "类型",
+          required: "必填",
+          description: "说明",
+          defaultOrExample: "默认值/示例"
+        },
+        errors: {
+          emptyJson: "配置不能为空，请输入 JSON 对象。",
+          objectExpected: "配置必须是 JSON 对象。",
+          invalidJson: "JSON 格式错误。"
+        }
+      },
+      state: {
+        ready: "可用",
+        disabled: "已禁用",
+        invalidManifest: "Manifest 无效",
+        incompatible: "版本不兼容",
+        configInvalid: "配置无效",
+        loadFailed: "加载失败",
+        manifestMismatch: "Manifest 不匹配"
+      }
+    },
+    agentChannelSenderAllowlist: {
+      description: "配置可触发渠道会话运行的发送者名单。列表为空时默认拒绝。",
+      emptyChannels: "当前未发现具备 channels 能力的插件，请先启用相关插件。",
+      empty: "暂无白名单项",
+      created: "已添加",
+      removed: "已移除",
+      saved: "已保存",
+      updated: "已更新",
+      modal: {
+        createTitle: "添加 IM 用户",
+        editTitle: "编辑 IM 用户"
+      },
+      fields: {
+        channel: "渠道",
+        senderId: "发送者 ID",
+        role: "角色",
+        remark: "备注",
+        actions: "操作",
+        senderIdPlaceholder: "例如 ou_xxx 或平台用户 ID",
+        remarkPlaceholder: "可选，便于识别"
+      },
+      roles: {
+        admin: "管理员",
+        user: "普通用户"
+      },
+      actions: {
+        add: "添加",
+        edit: "编辑",
+        remove: "移除"
+      },
+      errors: {
+        channelRequired: "请选择渠道",
+        senderIdRequired: "请输入发送者 ID",
+        duplicate: "该渠道下的发送者已存在"
+      }
     },
     security: {
       description: "查看主密钥来源与 SSH 主机信任状态，并提供必要的重置入口。",

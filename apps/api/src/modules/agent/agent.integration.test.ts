@@ -23,6 +23,7 @@ import {
   updateRunState
 } from "./agent.store.js";
 import { newSortableId } from "../../utils/ids.js";
+import { countReplyJobsForRun } from "../channels/channels.store.js";
 
 type Fixture = {
   app: FastifyInstance;
@@ -31,6 +32,7 @@ type Fixture = {
   workspaceId: string;
   workspacePath: string;
   internalToken: string;
+  repoRoot: string;
 };
 
 const fixtures = new Set<Fixture>();
@@ -44,6 +46,8 @@ async function createFixture(options?: {
   agentTestFaults?: {
     archiveWrite?: { failAfterChunks?: number } | null;
   };
+  enablePluginHost?: boolean;
+  enablePluginServices?: boolean;
 }): Promise<Fixture> {
   const repoRoot = path.resolve(process.cwd(), "../..");
   const testsRoot = path.join(repoRoot, ".tmp-tests");
@@ -75,6 +79,9 @@ async function createFixture(options?: {
     agentInternalToken: internalToken,
     agentApiOrigin: "http://127.0.0.1:0",
     agentStartupRecoveryMode: "recover",
+    agentPluginHostEnabled: options?.enablePluginHost === true,
+    agentPluginHostSocketPath: path.join(dataDir, "agent-plugin-host.sock"),
+    agentPluginServicesEnabled: options?.enablePluginServices === true,
     agentTestFaults: options?.agentTestFaults
   });
   const workspaceId = newSortableId("ws");
@@ -95,10 +102,114 @@ async function createFixture(options?: {
 
   await app.ready();
   await configureAgentDefaults(app);
-  const fixture: Fixture = { app, db, dataDir, workspaceId, workspacePath, internalToken };
+  setSettingJson(db, "agent_channel_sender_allowlist_v1", {
+    items: [{ channel: "feishu", senderId: "u_allowed", remark: "default test allowlist" }]
+  }, Date.now());
+  const fixture: Fixture = { app, db, dataDir, workspaceId, workspacePath, internalToken, repoRoot };
   fixtures.add(fixture);
   return fixture;
 }
+
+test("plugin-host services reconcile can start/stop feishu gateway", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0, enablePluginHost: true, enablePluginServices: true });
+
+  // Prepare a mock feishu plugin under dataDir/plugins so plugin discovery can find it.
+  // We intentionally avoid network calls in tests.
+  const pluginRoot = path.join(fixture.dataDir, "plugins", "feishu");
+  await ensureDir(path.join(pluginRoot, "dist"));
+  await fs.writeFile(
+    path.join(pluginRoot, "agent-workbench.plugin.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        id: "feishu",
+        name: "Feishu IM",
+        version: "0.0.0-test",
+        description: "mock feishu plugin for integration tests",
+        entry: "dist/index.mjs",
+        capabilities: ["services"],
+        services: [{ name: "gateway" }],
+        uiHints: { sensitiveKeys: ["appSecret"] },
+        configSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["appId", "appSecret"],
+          properties: {
+            appId: { type: "string", minLength: 1 },
+            appSecret: { type: "string", minLength: 1 }
+          }
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  await fs.writeFile(
+    path.join(pluginRoot, "dist", "index.mjs"),
+    [
+      "export default {",
+      "  meta: { id: 'feishu', name: 'Feishu IM', version: '0.0.0-test' },",
+      "  services: {",
+      "    gateway: {",
+      "      async start() {",
+      "        // no-op gateway (no network)",
+      "        return { stop: async () => {} };",
+      "      }",
+      "    }",
+      "  }",
+      "};",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+
+  // Enable plugin with minimal config.
+  const enableRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/plugins",
+    payload: {
+      plugins: [
+        {
+          id: "feishu",
+          enabled: true,
+          config: { appId: "test", appSecret: "test" }
+        }
+      ]
+    }
+  });
+  assert.equal(enableRes.statusCode, 200, `enable plugin failed: ${enableRes.body}`);
+
+  // Wait for services runtime reconcile hook to fire.
+  await sleep(800);
+
+  const host = new (await import("./agent.plugin-host-client.js" as any)).AgentPluginHostClient({
+    pluginHostSocketPath: path.join(fixture.dataDir, "agent-plugin-host.sock"),
+    internalToken: fixture.internalToken,
+    logger: fixture.app.log
+  });
+
+  const status1 = await host.getServicesStatus();
+  assert.equal(status1.running, true, `expected running=true, got running=${String(status1.running)}`);
+
+  // Disable plugin.
+  const disableRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/plugins",
+    payload: {
+      plugins: [
+        {
+          id: "feishu",
+          enabled: false
+        }
+      ]
+    }
+  });
+  assert.equal(disableRes.statusCode, 200, `disable plugin failed: ${disableRes.body}`);
+  await sleep(500);
+  const status2 = await host.getServicesStatus();
+  assert.equal(status2.running, false, `expected running=false, got running=${String(status2.running)}`);
+});
 
 test("agent startup recovery mode=fail 会终止 in-flight run 并回收 run-state", async () => {
   const repoRoot = path.resolve(process.cwd(), "../..");
@@ -243,7 +354,9 @@ test("agent startup recovery mode=fail 会终止 in-flight run 并回收 run-sta
     agentWorkerConcurrency: 1,
     agentInternalToken: internalToken,
     agentApiOrigin: "http://127.0.0.1:0",
-    agentStartupRecoveryMode: "fail"
+    agentStartupRecoveryMode: "fail",
+    agentPluginHostEnabled: false,
+    agentPluginHostSocketPath: path.join(dataDir, "agent-plugin-host.sock")
   });
 
   await app.ready();
@@ -308,9 +421,6 @@ async function configureAgentDefaults(app: FastifyInstance) {
     method: "PUT",
     url: "/api/settings/agent/agents",
     payload: {
-      default: {
-        agentId: "default"
-      },
       agents: [
         {
           id: "default",
@@ -318,14 +428,211 @@ async function configureAgentDefaults(app: FastifyInstance) {
           summary: "",
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write"],
+          pluginTools: [],
           mcpServers: [],
-          defaultModel: null
+          defaultModel: null,
+          scope: "both",
+          order: 0
         }
       ]
     }
   });
   assert.equal(agentsRes.statusCode, 200, `configure agents failed: ${agentsRes.body}`);
 }
+
+
+
+test("agent settings 兼容缺省 scope/order 并按原顺序归一化", async () => {
+  const fixture = await createFixture();
+  const res = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      agents: [
+        {
+          id: "b",
+          name: "B",
+           summary: "",
+           prompt: "b",
+           tools: ["bash", "read"],
+           pluginTools: [],
+           mcpServers: [],
+           defaultModel: null,
+           scope: "both",
+           order: 9
+        },
+        {
+          id: "a",
+          name: "A",
+           summary: "",
+           prompt: "a",
+           tools: ["bash", "read"],
+           pluginTools: [],
+           mcpServers: [],
+           defaultModel: null,
+           scope: "user",
+           order: 3
+        }
+      ]
+    }
+  });
+  assert.equal(res.statusCode, 200, `update agent settings failed: ${res.body}`);
+
+  setSettingJson(fixture.db, "agent_agents_v1", {
+    agents: [
+      { id: "legacy-1", name: "Legacy 1", summary: "", prompt: "", tools: ["bash"], pluginTools: [], mcpServers: [], defaultModel: null },
+      { id: "legacy-2", name: "Legacy 2", summary: "", prompt: "", tools: ["read"], pluginTools: [], mcpServers: [], defaultModel: null }
+    ]
+  }, Date.now());
+
+  const getRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/agents" });
+  assert.equal(getRes.statusCode, 200, `get agent settings failed: ${getRes.body}`);
+  const body = getRes.json() as { agents: Array<{ id: string; scope: string; order: number }> };
+  assert.deepEqual(body.agents.map((item) => ({ id: item.id, scope: item.scope, order: item.order })), [
+    { id: "legacy-1", scope: "both", order: 0 },
+    { id: "legacy-2", scope: "both", order: 1 }
+  ]);
+});
+
+test("agent prompt-context 生成 subtask 描述时仅暴露 subtask/both agent", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      agents: [
+        { id: "user-only", name: "User Only", summary: "for user", prompt: "", tools: ["bash", "subtask"], pluginTools: [], mcpServers: [], defaultModel: null, scope: "user", order: 0 },
+        { id: "subtask-only", name: "Subtask Only", summary: "for subtask", prompt: "", tools: ["bash", "subtask"], pluginTools: [], mcpServers: [], defaultModel: null, scope: "subtask", order: 1 },
+        { id: "shared", name: "Shared", summary: "shared", prompt: "", tools: ["bash", "subtask"], pluginTools: [], mcpServers: [], defaultModel: null, scope: "both", order: 2 }
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `configure agents failed: ${agentsRes.body}`);
+
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: 1, agentId: "shared", providerId: "ppchat", uiLocale: "en-US", modelId: "gpt-5.2", status: "running", createdAt: Date.now()
+  });
+
+  const promptContext = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+  const subtaskTool = promptContext.tools.find((item) => item.name === "subtask");
+  assert.ok(subtaskTool, "subtask tool should exist");
+  const description = String((subtaskTool as { description?: string } | undefined)?.description || "");
+  assert.equal(description.includes("user-only"), false, "user-only agent should be hidden from subtask description");
+  assert.equal(description.includes("subtask-only"), true, "subtask-only agent should be visible");
+  assert.equal(description.includes("shared"), true, "shared agent should be visible");
+});
+
+test("agent prompt-context 中的工具描述与 schema 说明使用英文", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      agents: [
+        {
+            id: "default",
+             name: "default",
+             summary: "",
+            prompt: "",
+             tools: ["bash", "read", "scratchpad", "subtask", "todolist", "apply_patch"],
+             pluginTools: [],
+             mcpServers: [],
+             defaultModel: null,
+            scope: "both",
+            order: 0
+         }
+       ]
+     }
+   });
+  assert.equal(agentsRes.statusCode, 200, `update agents failed: ${agentsRes.body}`);
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    uiLocale: "zh-CN",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+  const promptContext = await getPromptContextInternal({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId });
+  const bashTool = promptContext.tools.find((item) => item.name === "bash");
+  const readTool = promptContext.tools.find((item) => item.name === "read");
+  const subtaskTool = promptContext.tools.find((item) => item.name === "subtask");
+  const todolistTool = promptContext.tools.find((item) => item.name === "todolist");
+  const scratchpadTool = promptContext.tools.find((item) => item.name === "scratchpad");
+  const applyPatchTool = promptContext.tools.find((item) => item.name === "apply_patch");
+  assert.ok(String(bashTool?.description || "").includes("Run a bash command and return stdout/stderr."));
+  assert.ok(String((bashTool?.inputSchema as any)?.properties?.timeout?.description || "").includes("Timeout in seconds"));
+  const readLimit = (readTool?.inputSchema as any)?.properties?.limit;
+  assert.equal(readLimit?.default, 500);
+  assert.equal(readLimit?.maximum, 2000);
+  assert.ok(String(readLimit?.description || "").includes("Default: 500"));
+  assert.ok(String(readLimit?.description || "").includes("Maximum: 2000"));
+  assert.ok(String(subtaskTool?.description || "").includes("Available agents:"));
+  assert.equal(String(subtaskTool?.description || "").includes("可选Agent"), false);
+  assert.ok(String(todolistTool?.description || "").includes("Example input:"));
+  assert.ok(String(scratchpadTool?.description || "").includes("Suggested <= 200 characters"));
+  assert.equal((scratchpadTool?.inputSchema as any)?.properties?.content?.maxLength, 200);
+  assert.equal(String(todolistTool?.description || "").includes("完成 todolist goal 增强"), false);
+  assert.equal(String(todolistTool?.description || "").includes("梳理需求与约束"), false);
+  assert.ok(
+    String((applyPatchTool?.inputSchema as any)?.properties?.patchText?.description || "").includes(
+      "patchText must be a git unified diff text"
+    )
+  );
+  const sessionSchema = (subtaskTool?.inputSchema as any)?.properties?.session;
+  const oneOf = Array.isArray(sessionSchema?.oneOf) ? sessionSchema.oneOf : [];
+  assert.ok(oneOf.length >= 3, "subtask.session.oneOf should contain multiple options");
+  assert.equal(
+    oneOf.every((item: any) => typeof item?.description === "string" && !/[\u4e00-\u9fff]/.test(item.description)),
+    true,
+    "subtask.session.oneOf descriptions should be English"
+  );
+});
+
+test("agent scope 校验会拒绝错误场景的 agent 并在无可用 agent 时返回明确错误", async () => {
+  const fixture = await createFixture();
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      agents: [
+        { id: "subtask-only", name: "Subtask Only", summary: "", prompt: "", tools: ["bash", "read"], pluginTools: [], mcpServers: [], defaultModel: null, scope: "subtask", order: 0 }
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `configure agents failed: ${agentsRes.body}`);
+
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const wrongRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/messages`,
+    payload: { workspaceId: fixture.workspaceId, text: "hi", clientRequestId: "req_scope_wrong", agentId: "subtask-only" }
+  });
+  assert.equal(wrongRes.statusCode, 400, `wrong scope should fail: ${wrongRes.body}`);
+  assert.equal(wrongRes.json().code, "AGENT_SCOPE_NOT_ALLOWED");
+
+  const fallbackRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/messages`,
+    payload: { workspaceId: fixture.workspaceId, text: "hi", clientRequestId: "req_scope_none" }
+  });
+  assert.equal(fallbackRes.statusCode, 400, `no available user agent should fail: ${fallbackRes.body}`);
+  assert.equal(fallbackRes.json().code, "AGENT_NO_AVAILABLE_FOR_SURFACE");
+});
 
 test("GET /api/settings/agent/agents 返回每个 agent 的 resolvedModel", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
@@ -359,25 +666,30 @@ test("GET /api/settings/agent/agents 返回每个 agent 的 resolvedModel", asyn
     method: "PUT",
     url: "/api/settings/agent/agents",
     payload: {
-      default: { agentId: "default" },
       agents: [
         {
           id: "default",
           name: "default",
-          summary: "",
-          prompt: "You are a helpful coding assistant.",
-          tools: ["bash", "read", "write"],
-          mcpServers: [],
-          defaultModel: null
+           summary: "",
+           prompt: "You are a helpful coding assistant.",
+           tools: ["bash", "read", "write"],
+           pluginTools: [],
+           mcpServers: [],
+           defaultModel: null,
+           scope: "both",
+           order: 0
         },
         {
           id: "custom",
           name: "custom",
-          summary: "",
-          prompt: "Use a custom model.",
-          tools: ["bash", "read"],
-          mcpServers: [],
-          defaultModel: { providerId: "agent_provider", modelId: "agent_model" }
+           summary: "",
+           prompt: "Use a custom model.",
+           tools: ["bash", "read"],
+           pluginTools: [],
+           mcpServers: [],
+           defaultModel: { providerId: "agent_provider", modelId: "agent_model" },
+           scope: "both",
+           order: 1
         }
       ]
     }
@@ -406,6 +718,84 @@ test("GET /api/settings/agent/agents 返回每个 agent 的 resolvedModel", asyn
     modelName: "Agent Model",
     source: "agent_default"
   });
+});
+
+test("channels: H2 聚合按 watermark/upperBound 的 DB 级过滤（>600 条）", async () => {
+    const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+    const created = await createSession(fixture.app, fixture.workspaceId);
+    const session = getAgentSession(fixture.db, created.id)!;
+
+    await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/conversations/upsert-binding",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_h2",
+        chatId: "h2",
+        chatType: "group",
+        sessionId: session.id
+      }
+    });
+
+    // insert 700 inbound messages
+    for (let i = 1; i <= 700; i += 1) {
+      const res = await fixture.app.inject({
+        method: "POST",
+        url: "/api/internal/agent/channels/inbound/ingest",
+        headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+        payload: {
+          pluginId: "feishu",
+          channelName: "im",
+          accountId: "default",
+          conversationKey: "feishu_default_chat_h2",
+          chatType: "group",
+          chatId: "h2",
+          externalMessageId: `mh2_${i}`,
+          sender: { id: "u_allowed", displayName: "Alice" },
+          mentionedBot: true,
+          text: `${i}:x`
+        }
+      });
+      assert.equal(res.statusCode, 200);
+    }
+
+    // set watermark to message 650
+    fixture.db
+      .prepare(
+        `update channel_conversation_binding
+         set watermark_external_message_id='mh2_650'
+         where plugin_id='feishu' and channel_name='im' and account_id='default' and conversation_key='feishu_default_chat_h2'`
+      )
+      .run();
+
+    const agg = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/inbound/aggregate",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_h2",
+        upperBoundExternalMessageId: "mh2_700"
+      }
+    });
+    assert.equal(agg.statusCode, 200, `aggregate failed: ${agg.body}`);
+    const body = agg.json() as any;
+
+    // Must not include <=650
+    assert.equal(/(^|\n)Alice: 650:/.test(body.text), false);
+    assert.ok(/(^|\n)Alice: 651:/.test(body.text));
+    // Should include upperBound 700
+    assert.ok(/(^|\n)Alice: 700:/.test(body.text));
+
+    // Ensure maxMessages=50: from 651..700 is exactly 50 messages
+    // We can assert 651 appears and 650 doesn't.
+    // Also ensure it doesn't include 652? (should include all 651..700)
+    assert.equal(/(^|\n)Alice: 649:/.test(body.text), false);
 });
 
 async function closeFixture(fixture: Fixture) {
@@ -445,6 +835,20 @@ async function sendMessage(app: FastifyInstance, params: { sessionId: string; wo
   return res.json() as { messageItemId: number; runId: string; deduplicated: boolean };
 }
 
+function extractPromptSection(system: string, tag: string) {
+  const marker = `[${tag}]`;
+  const start = system.indexOf(marker);
+  if (start < 0) return "";
+  const afterMarker = system.indexOf("\n\n", start);
+  if (afterMarker < 0) return "";
+  const bodyStart = afterMarker + 2;
+  const nextSection = system.indexOf("\n\n---\n[", bodyStart);
+  if (nextSection < 0) {
+    return system.slice(bodyStart).trim();
+  }
+  return system.slice(bodyStart, nextSection).trim();
+}
+
 async function getRunState(app: FastifyInstance, sessionId: string) {
   const res = await app.inject({ method: "GET", url: `/api/agent/sessions/${sessionId}/run-state` });
   assert.equal(res.statusCode, 200, `get run-state failed: ${res.body}`);
@@ -453,6 +857,32 @@ async function getRunState(app: FastifyInstance, sessionId: string) {
     activeRunId: string | null;
     runNoticeText: string;
     lastTerminalStatus: "completed" | "failed" | "cancelled" | null;
+  };
+}
+
+async function getMessagesContextInternal(params: {
+  app: FastifyInstance;
+  internalToken: string;
+  workspaceId: string;
+  sessionId: string;
+  appendMessage?: { role: "system" | "user"; content: string };
+}) {
+  const res = await params.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/messages-context",
+    headers: {
+      "x-awb-agent-internal-token": params.internalToken
+    },
+    payload: {
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+      ...(params.appendMessage ? { appendMessage: params.appendMessage } : {})
+    }
+  });
+  assert.equal(res.statusCode, 200, `get messages-context failed: ${res.body}`);
+  return res.json() as {
+    headItemId: number | null;
+    messages: Array<{ role: string; content: unknown }>;
   };
 }
 
@@ -599,7 +1029,8 @@ async function getPromptContextInternal(params: {
   assert.equal(res.statusCode, 200, `get prompt-context failed: ${res.body}`);
   return res.json() as {
     system: string;
-    tools: Array<{ name: string }>;
+    tools: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }>;
+    uiLocale: "zh-CN" | "en-US" | null;
     messages: Array<{ role: string; content: unknown }>;
     pendingTools: Array<{ itemId: number; status: string; toolName: string }>;
   };
@@ -720,6 +1151,62 @@ test("agent 消息去重与上下文项追加", async () => {
   const userItems = context.items.filter((item) => item.kind === "user");
   assert.equal(userItems.length, 1);
   assert.ok(String(userItems[0]?.output?.text || "").includes("hello integration"));
+});
+
+test("agent messages-context 返回完整 messages 且支持 appendMessage", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const user = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "hello" }
+  });
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: user.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: { type: "assistant_text", text: "world" }
+  });
+
+  const ctx = await getMessagesContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    appendMessage: { role: "user", content: "append" }
+  });
+  assert.equal(typeof ctx.headItemId, "number");
+  assert.ok(ctx.messages.length >= 3);
+  assert.equal(ctx.messages.at(-1)?.role, "user");
+  assert.equal(ctx.messages.at(-1)?.content, "append");
 });
 
 test("agent context-items 支持 afterId 增量查询", async () => {
@@ -1134,9 +1621,9 @@ test("agent cancel 仅终止执行并保留消息,活跃项标记为 cancelled",
     }
   });
   assert.equal(cancelRes.statusCode, 200, `cancel run failed: ${cancelRes.body}`);
-  const cancelBody = cancelRes.json() as { sessionId: string; headItemId: number | null };
-  assert.equal(cancelBody.sessionId, session.id);
-  assert.equal(cancelBody.headItemId, toolItem.item.id);
+  const cancelBody = cancelRes.json() as { ok: boolean; session: { id: string; headItemId: number | null } };
+  assert.equal(cancelBody.session.id, session.id);
+  assert.equal(cancelBody.session.headItemId, toolItem.item.id);
 
   const runState = await getRunState(fixture.app, session.id);
   assert.equal(runState.status, "idle");
@@ -1150,6 +1637,201 @@ test("agent cancel 仅终止执行并保留消息,活跃项标记为 cancelled",
   const latestTool = context.items.find((item) => item.id === toolItem.item.id);
   assert.equal(latestAssistant?.status, "cancelled");
   assert.equal(latestTool?.status, "cancelled");
+});
+
+test("agent cancel 会将 subtask 工具项明确改写为 cancelled 并保留 subtask_session_id + existing 提示", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const subtaskSessionId = "sess_subtask_cancelled_1";
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "agent-default",
+    providerId: "openai",
+    modelId: "gpt-4.1",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_cancel_subtask",
+    step: 1,
+    prevId: null,
+    kind: "assistant",
+    status: "streaming",
+    output: {
+      type: "assistant_text",
+      text: "starting subtask..."
+    }
+  });
+
+  const toolItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_cancel_subtask",
+    step: 1,
+    prevId: assistantItem.item.id,
+    kind: "tool",
+    status: "running",
+    output: {
+      type: "tool",
+      toolName: "subtask",
+      toolCallId: "call_cancel_subtask_1",
+      args: {
+        description: "研究问题",
+        prompt: "请直接完成这个子任务",
+        agentId: "default",
+        session: { mode: "fork" }
+      },
+      text: `tool: subtask\nstatus: running\nsubtask_session_id: ${subtaskSessionId}\n\nSubtask started.`,
+      result: {
+        subtaskSessionId
+      }
+    }
+  });
+
+  await updateRunStateInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "running",
+    activeRunId: runId,
+    activeAssistantItemId: assistantItem.item.id,
+  });
+
+  const cancelRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/cancel`,
+    payload: {
+      workspaceId: fixture.workspaceId
+    }
+  });
+  assert.equal(cancelRes.statusCode, 200, `cancel subtask run failed: ${cancelRes.body}`);
+
+  const cancelledItem = await getContextItem(fixture.app, session.id, toolItem.item.id);
+  assert.equal(cancelledItem.status, "cancelled");
+  assert.equal(cancelledItem.output.type, "tool");
+
+  const text = String((cancelledItem.output as { text?: string }).text || "");
+  assert.equal(text.includes("tool: subtask"), true);
+  assert.equal(text.includes("status: cancelled"), true);
+  assert.equal(text.includes(`subtask_session_id: ${subtaskSessionId}`), true);
+  assert.equal(text.includes('mode: "existing"'), true);
+  assert.equal(text.includes(`sessionId: "${subtaskSessionId}"`), true);
+});
+
+test("run-complete(cancelled) 会收敛该 run 下的非终态 context items", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const createdAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "agent-default",
+    providerId: "openai",
+    modelId: "gpt-4.1",
+    status: "running",
+    createdAt
+  });
+
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_run_complete_cancelled",
+    step: 1,
+    prevId: null,
+    kind: "assistant",
+    status: "streaming",
+    output: {
+      type: "assistant_text",
+      text: "partial streaming..."
+    }
+  });
+
+  const toolItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_run_complete_cancelled",
+    step: 1,
+    prevId: assistantItem.item.id,
+    kind: "tool",
+    status: "running",
+    output: {
+      type: "tool",
+      toolName: "subtask",
+      toolCallId: "call_run_complete_cancelled_subtask",
+      args: { description: "研究问题", prompt: "...", agentId: "default", session: { mode: "new" } },
+      text: "tool: subtask\nstatus: running\nsubtask_session_id: sess_sub_x\n\nSubtask started.",
+      result: { subtaskSessionId: "sess_sub_x" }
+    }
+  });
+
+  // Mark run-state as running, so completeRunFromWorker should settle it to idle.
+  await updateRunStateInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "running",
+    activeRunId: runId,
+    activeAssistantItemId: assistantItem.item.id
+  });
+
+  const completeRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/run-complete",
+    headers: {
+      "x-awb-agent-internal-token": fixture.internalToken
+    },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      runId,
+      status: "cancelled",
+      updatedAt: createdAt + 123
+    }
+  });
+  assert.equal(completeRes.statusCode, 200, `run-complete cancelled failed: ${completeRes.body}`);
+
+  const runRecord = getRunRecord(fixture.db, runId);
+  assert.equal(runRecord?.status, "cancelled");
+
+  const runState = await getRunState(fixture.app, session.id);
+  assert.equal(runState.status, "idle");
+  assert.equal(runState.activeRunId, null);
+
+  const assistantAfter = await getContextItem(fixture.app, session.id, assistantItem.item.id);
+  assert.equal(assistantAfter.status, "cancelled");
+
+  const toolAfter = await getContextItem(fixture.app, session.id, toolItem.item.id);
+  assert.equal(toolAfter.status, "cancelled");
+  assert.equal(toolAfter.output.type, "tool");
+  const toolText = String((toolAfter.output as { text?: string }).text || "");
+  assert.equal(toolText.includes("tool: subtask"), true);
+  assert.equal(toolText.includes("status: cancelled"), true);
 });
 
 test("agent cancel 会收敛隐藏链上的未终态 items 与关联 run", async () => {
@@ -1392,6 +2074,267 @@ test("agent runtime settings 可通过 execution-profile 下发", async () => {
   assert.equal(profile.runtime?.modelRequestMaxRetries, 4);
   assert.equal(typeof profile.runtime?.autoCompactThresholdPct, "number");
   assert.equal(typeof profile.model?.contextWindowTokens, "number");
+  assert.equal(profile.provider?.options?.apiMode, "responses");
+});
+
+test("openai provider apiMode 会在 settings 与 execution-profile/single-call profile 中透传", async () => {
+  const fixture = await createFixture();
+
+  const providersRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: {
+      default: { providerId: "compat_openai", modelId: "deepseek-v3" },
+      providers: [
+        {
+          id: "compat_openai",
+          name: "compat_openai",
+          npm: "@ai-sdk/openai",
+          options: {
+            baseURL: "https://example.openai-compatible.invalid/v1",
+            apiKey: "sk-compat",
+            apiMode: "chatCompletions"
+          },
+          models: [
+            {
+              id: "deepseek-v3",
+              name: "deepseek-v3",
+              contextWindowTokens: 128000
+            }
+          ]
+        },
+        {
+          id: "anthropic_provider",
+          name: "anthropic_provider",
+          npm: "@ai-sdk/anthropic",
+          options: {
+            baseURL: "https://api.anthropic.com/v1",
+            apiKey: "sk-anthropic",
+            // 非 openai provider 上送该字段也应被忽略。
+            apiMode: "chatCompletions"
+          },
+          models: [
+            {
+              id: "claude-sonnet",
+              name: "claude-sonnet",
+              contextWindowTokens: 200000
+            }
+          ]
+        }
+      ]
+    }
+  });
+  assert.equal(providersRes.statusCode, 200, `update providers failed: ${providersRes.body}`);
+
+  const getProvidersRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/providers" });
+  assert.equal(getProvidersRes.statusCode, 200, `get providers failed: ${getProvidersRes.body}`);
+  const providersBody = getProvidersRes.json() as any;
+  const openaiProvider = providersBody.providers.find((item: any) => item.id === "compat_openai");
+  const anthropicProvider = providersBody.providers.find((item: any) => item.id === "anthropic_provider");
+  assert.equal(openaiProvider?.options?.apiMode, "chatCompletions");
+  assert.equal(anthropicProvider?.options?.apiMode, undefined);
+
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const msg = await sendMessage(fixture.app, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "hi",
+    clientRequestId: "req_provider_api_mode"
+  });
+
+  const executionProfileRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/execution-profile",
+    headers: {
+      "x-awb-agent-internal-token": fixture.internalToken
+    },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      runId: msg.runId
+    }
+  });
+  assert.equal(executionProfileRes.statusCode, 200, `get execution profile failed: ${executionProfileRes.body}`);
+  const executionProfile = executionProfileRes.json() as any;
+  assert.equal(executionProfile.provider?.id, "compat_openai");
+  assert.equal(executionProfile.provider?.options?.apiMode, "chatCompletions");
+
+  const singleCallProfileRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/single-call-model-profile",
+    headers: {
+      "x-awb-agent-internal-token": fixture.internalToken
+    },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      runId: msg.runId
+    }
+  });
+  assert.equal(singleCallProfileRes.statusCode, 200, `get single-call model profile failed: ${singleCallProfileRes.body}`);
+  const singleCallProfile = singleCallProfileRes.json() as any;
+  assert.equal(singleCallProfile.provider?.id, "compat_openai");
+  assert.equal(singleCallProfile.provider?.options?.apiMode, "chatCompletions");
+
+  const invalidModeRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: {
+      default: { providerId: "compat_openai", modelId: "deepseek-v3" },
+      providers: [
+        {
+          id: "compat_openai",
+          name: "compat_openai",
+          npm: "@ai-sdk/openai",
+          options: {
+            baseURL: "https://example.openai-compatible.invalid/v1",
+            apiKey: "sk-compat",
+            apiMode: "invalid-mode"
+          },
+          models: [
+            {
+              id: "deepseek-v3",
+              name: "deepseek-v3",
+              contextWindowTokens: 128000
+            }
+          ]
+        }
+      ]
+    }
+  });
+
+  assert.equal(invalidModeRes.statusCode, 400, `update provider with invalid apiMode should fail: ${invalidModeRes.body}`);
+  const invalidModeBody = invalidModeRes.json() as any;
+  assert.equal(typeof invalidModeBody?.message, "string");
+
+  const keepModeRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: {
+      default: { providerId: "compat_openai", modelId: "deepseek-v3" },
+      providers: [
+        {
+          id: "compat_openai",
+          name: "compat_openai",
+          npm: "@ai-sdk/openai",
+          options: {
+            baseURL: "https://example.openai-compatible.invalid/v1",
+            apiKey: "sk-compat"
+          },
+          models: [
+            {
+              id: "deepseek-v3",
+              name: "deepseek-v3",
+              contextWindowTokens: 128000
+            }
+          ]
+        }
+      ]
+    }
+  });
+  assert.equal(keepModeRes.statusCode, 200, `update provider without apiMode failed: ${keepModeRes.body}`);
+  const keepModeBody = keepModeRes.json() as any;
+  const keepModeProvider = keepModeBody.providers.find((item: any) => item.id === "compat_openai");
+  assert.equal(keepModeProvider?.options?.apiMode, "chatCompletions");
+});
+
+test("subtask session 的 execution-profile 按 subtask surface 校验", async () => {
+  const fixture = await createFixture();
+
+  const settingsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      agents: [
+        {
+          id: "subtask-agent",
+          name: "subtask-agent",
+          summary: "",
+          prompt: "You are a subtask specialist.",
+          tools: ["bash", "read"],
+          mcpServers: [],
+          defaultModel: null,
+          scope: "subtask",
+          order: 0
+        }
+      ]
+    }
+  });
+  assert.equal(settingsRes.statusCode, 200, `update agent settings failed: ${settingsRes.body}`);
+
+  const sessionRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions",
+    payload: { workspaceId: fixture.workspaceId, title: "subtask-profile", kind: "subtask" }
+  });
+  assert.equal(sessionRes.statusCode, 201, `create subtask session failed: ${sessionRes.body}`);
+  const session = sessionRes.json() as { id: string };
+
+  const createdAt = Date.now();
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "subtask-agent",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    uiLocale: null,
+    status: "running",
+    createdAt
+  });
+
+  const profileRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/execution-profile",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId }
+  });
+  assert.equal(profileRes.statusCode, 200, `get subtask execution profile failed: ${profileRes.body}`);
+  const profile = profileRes.json() as any;
+  assert.equal(profile.agent?.id, "subtask-agent");
+});
+
+test("run 创建后若 agent scope 改为不允许, execution-profile 会返回明确错误", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const sent = await sendMessage(fixture.app, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "hi",
+    clientRequestId: "req_scope_changed_after_run"
+  });
+
+  const updateRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          summary: "",
+          prompt: "You are a helpful coding assistant.",
+          tools: ["bash", "read", "write"],
+          mcpServers: [],
+          defaultModel: null,
+          scope: "subtask",
+          order: 0
+        }
+      ]
+    }
+  });
+  assert.equal(updateRes.statusCode, 200, `update agent settings failed: ${updateRes.body}`);
+
+  const profileRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/execution-profile",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId: sent.runId }
+  });
+  assert.equal(profileRes.statusCode, 400, `execution profile should reject changed scope: ${profileRes.body}`);
+  assert.equal(profileRes.json().code, "AGENT_SCOPE_NOT_ALLOWED");
 });
 
 test("agent prompt-context 根据 run uiLocale 注入语言与时间运行时约束", async () => {
@@ -1422,11 +2365,115 @@ test("agent prompt-context 根据 run uiLocale 注入语言与时间运行时约
     sessionId: session.id,
     runId: body.runId
   });
-  assert.ok(prompt.system.includes("## Runtime Constraints"), "system should include runtime constraints section");
-  assert.ok(prompt.system.includes("Language requirement: use English consistently for this run."));
-  assert.ok(prompt.system.includes("If you call todolist, the goal and todos[].content must also be in English."));
-  assert.ok(prompt.system.includes("Current system time:"));
-  assert.ok(prompt.system.includes("Time zone:"));
+  const outputSection = extractPromptSection(prompt.system, "output_format_instructions");
+  const runtimeSection = extractPromptSection(prompt.system, "runtime_constraints");
+
+  assert.ok(prompt.system.includes("[output_format_instructions]"), "system should include output format instructions section");
+  assert.ok(prompt.system.includes("[runtime_constraints]"), "system should include runtime constraints section");
+  assert.equal(prompt.system.includes("## Runtime Constraints"), false, "system should not include legacy runtime constraints heading");
+  assert.ok(outputSection.includes("Output format requirements:"));
+  assert.ok(runtimeSection.includes("Language requirement: use English consistently for this run."));
+  assert.ok(runtimeSection.includes("If you call todolist, the goal and todos[].content must also be in English."));
+  assert.ok(runtimeSection.includes("Current system time:"));
+  assert.ok(runtimeSection.includes("Time zone:"));
+  assert.equal(outputSection.includes("Completion constraints:"), false, "output format instructions should not contain completion constraints");
+});
+
+test("agent prompt-context 在 zh-CN locale 下使用中文 output/runtime sections 且完成判定约束只在 runtime_constraints 中", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    uiLocale: "zh-CN",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const prompt = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+  const outputSection = extractPromptSection(prompt.system, "output_format_instructions");
+  const runtimeSection = extractPromptSection(prompt.system, "runtime_constraints");
+
+  assert.ok(outputSection.includes("输出格式要求："));
+  assert.ok(runtimeSection.includes("语言要求：本轮对话请统一使用简体中文。"));
+  assert.ok(runtimeSection.includes("当前系统时间："));
+  assert.ok(runtimeSection.includes("当前时区："));
+  assert.equal(outputSection.includes("完成判定约束："), false, "output format instructions should not contain completion constraints");
+});
+
+test("agent prompt-context 在缺省 locale 下使用 locale-neutral 英文 output/runtime sections 且不附加语言要求", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const msg = await sendMessage(fixture.app, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "hi",
+    clientRequestId: "req_locale_null_prompt"
+  });
+
+  const prompt = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: msg.runId
+  });
+  const outputSection = extractPromptSection(prompt.system, "output_format_instructions");
+  const runtimeSection = extractPromptSection(prompt.system, "runtime_constraints");
+
+  assert.ok(outputSection.includes("Output format requirements:"));
+  assert.ok(runtimeSection.includes("Current system time:"));
+  assert.ok(runtimeSection.includes("Time zone:"));
+  assert.equal(runtimeSection.includes("Language requirement: use English consistently for this run."), false, "null locale should not add English language requirement");
+  assert.equal(outputSection.includes("输出格式要求："), false, "null locale should not mix Chinese output instruction text");
+});
+
+test("agent prompt-context 对 store 中非法 uiLocale 回退为 locale-neutral 英文，避免中英混用", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    uiLocale: "fr-FR" as any,
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const runRecord = getRunRecord(fixture.db, runId);
+  assert.ok(runRecord, "run record should exist");
+  assert.equal(runRecord?.uiLocale, "fr-FR", "store may still contain legacy invalid locale data");
+
+  const prompt = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+  const outputSection = extractPromptSection(prompt.system, "output_format_instructions");
+  const runtimeSection = extractPromptSection(prompt.system, "runtime_constraints");
+
+  assert.ok(outputSection.includes("Output format requirements:"));
+  assert.equal(outputSection.includes("输出格式要求："), false, "invalid locale fallback should not use Chinese output text");
+  assert.equal(runtimeSection.includes("语言要求：本轮对话请统一使用简体中文。"), false, "invalid locale fallback should not use Chinese runtime text");
 });
 
 test("agent compact 在 worker 不可用时仍接受 uiLocale 参数", async () => {
@@ -1495,13 +2542,14 @@ test("agent clear 会归档当前可见上下文并插入 clear 边界 marker", 
     url: `/api/agent/sessions/${session.id}/clear`,
     payload: {
       workspaceId: fixture.workspaceId,
-      reason: "切换新任务"
+      reason: "切换新任务",
+      uiLocale: "zh-CN"
     }
   });
   assert.equal(clearRes.statusCode, 200, `clear session failed: ${clearRes.body}`);
-  const clearBody = clearRes.json() as { sessionId: string; headItemId: number | null };
-  assert.equal(clearBody.sessionId, session.id);
-  assert.ok((clearBody.headItemId ?? 0) > assistantItem.item.id);
+  const clearBody = clearRes.json() as { ok: boolean; session: { id: string; headItemId: number | null } };
+  assert.equal(clearBody.session.id, session.id);
+  assert.ok((clearBody.session.headItemId ?? 0) > assistantItem.item.id);
 
   const context = await getContextItems(fixture.app, session.id);
   assert.equal(context.items.length, 3);
@@ -1517,7 +2565,7 @@ test("agent clear 会归档当前可见上下文并插入 clear 边界 marker", 
     runId,
     workspaceId: fixture.workspaceId,
     sessionId: session.id,
-    triggerItemId: clearBody.headItemId || context.items[2]!.id,
+    triggerItemId: clearBody.session.headItemId || context.items[2]!.id,
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
@@ -1555,6 +2603,62 @@ test("agent clear 会归档当前可见上下文并插入 clear 边界 marker", 
   assert.equal(clearAgainRes.json().code, "AGENT_CLEAR_NOT_NEEDED");
 });
 
+test("agent clear 在 en-US locale 下生成英文摘要，且缺省 locale 回退英文", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "old task" }
+  });
+
+  const clearRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/clear`,
+    payload: {
+      workspaceId: fixture.workspaceId,
+      reason: "switch task",
+      uiLocale: "en-US"
+    }
+  });
+  assert.equal(clearRes.statusCode, 200, `clear session failed: ${clearRes.body}`);
+
+  const context = await getContextItems(fixture.app, session.id);
+  assert.ok(String(context.items.at(-1)?.output?.text || "").includes("A new task has started (switch task)."));
+
+  const session2 = await createSession(fixture.app, fixture.workspaceId);
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session2.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "another old task" }
+  });
+  const clearRes2 = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session2.id}/clear`,
+    payload: { workspaceId: fixture.workspaceId }
+  });
+  assert.equal(clearRes2.statusCode, 200, `clear session without locale failed: ${clearRes2.body}`);
+  const context2 = await getContextItems(fixture.app, session2.id);
+  assert.ok(String(context2.items.at(-1)?.output?.text || "").includes("A new task has started."));
+});
+
 test("agent clear 对 subtask 会话返回只读错误", async () => {
   const fixture = await createFixture();
   const createSubtaskRes = await fixture.app.inject({
@@ -1587,7 +2691,6 @@ test("agent prompt-context 对 subtask 会话隐藏 subtask 工具", async () =>
     method: "PUT",
     url: "/api/settings/agent/agents",
     payload: {
-      default: { agentId: "default" },
       agents: [
         {
           id: "default",
@@ -1596,7 +2699,9 @@ test("agent prompt-context 对 subtask 会话隐藏 subtask 工具", async () =>
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write", "subtask"],
           mcpServers: [],
-          defaultModel: null
+          defaultModel: null,
+          scope: "both",
+          order: 0
         }
       ]
     }
@@ -1649,7 +2754,6 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
     method: "PUT",
     url: "/api/settings/agent/agents",
     payload: {
-      default: { agentId: "default" },
       agents: [
         {
           id: "default",
@@ -1658,7 +2762,9 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write", "subtask"],
           mcpServers: [],
-          defaultModel: null
+          defaultModel: null,
+          scope: "both",
+          order: 0
         }
       ]
     }
@@ -1793,7 +2899,7 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
   assert.equal(systemItem?.kind, "system");
   assert.equal(systemItem?.output.type, "system_text");
   assert.equal(
-    String((systemItem?.output as { text?: string }).text || "").includes("在本条系统消息之前的全部历史内容，均来自父会话复制"),
+    String((systemItem?.output as { text?: string }).text || "").includes("All history before this system message was copied from the parent session"),
     true
   );
   assert.equal(promptUser?.kind, "user");
@@ -1811,20 +2917,665 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
     promptContext.messages.some((message) =>
       message.role === "system" &&
       typeof message.content === "string" &&
-      message.content.includes("在本条系统消息之前的全部历史内容，均来自父会话复制")
+      message.content.includes("All history before this system message was copied from the parent session")
     ),
-    true,
-    "prompt-context should include fork guard system message"
+    true
   );
+  assert.equal(promptContext.uiLocale, "en-US");
   assert.equal(
     promptContext.tools.some((tool) => tool.name === "subtask"),
     false,
     "forked subtask session should not expose subtask tool"
   );
-  assert.ok(promptContext.system.includes("## Runtime Constraints"));
+  assert.ok(promptContext.system.includes("[runtime_constraints]"));
+  assert.equal(promptContext.system.includes("## Runtime Constraints"), false);
   assert.ok(promptContext.system.includes("Language requirement: use English consistently for this run."));
   assert.ok(promptContext.system.includes("Current system time:"));
   assert.ok(promptContext.system.includes("Time zone:"));
+});
+
+test("subtask start with preforkSummaryText should inject summary->guard->prompt without copying parent history", async () => {
+  const fixture = await createFixture();
+  await configureAgentDefaults(fixture.app);
+
+  const parentSessionRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions",
+    payload: { workspaceId: fixture.workspaceId, title: "parent-prefork" }
+  });
+  assert.equal(parentSessionRes.statusCode, 201, `create parent session failed: ${parentSessionRes.body}`);
+  const parentSession = parentSessionRes.json() as { id: string };
+
+  const parentRunId = newSortableId("run");
+  const parentUser = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "this is parent history that must not be copied"
+    }
+  });
+  createRunRecord(fixture.db, {
+    runId: parentRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    triggerItemId: parentUser.item.id,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const parentAssistant = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_prefork",
+    step: 1,
+    prevId: parentUser.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: {
+      type: "assistant_text",
+      text: "prepare subtask"
+    }
+  });
+
+  const subtaskTool = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_prefork",
+    step: 1,
+    prevId: parentAssistant.item.id,
+    kind: "tool",
+    status: "queued",
+    output: {
+      type: "tool",
+      toolName: "subtask",
+      toolCallId: "call_prefork",
+      args: {
+        description: "prefork",
+        prompt: "please do prefork task",
+        agentId: "default",
+        session: { mode: "fork" }
+      }
+    }
+  });
+
+  updateRunState(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    status: "running",
+    activeRunId: parentRunId,
+    activeAssistantItemId: null,
+    lastResponseTotalTokens: 200000,
+    runNoticeText: "",
+    updatedAt: Date.now(),
+    appliedItemId: subtaskTool.item.id
+  });
+
+  const startRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/start",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      parentSessionId: parentSession.id,
+      parentRunId,
+      parentToolItemId: subtaskTool.item.id,
+      description: "prefork",
+      prompt: "please do prefork task",
+      agentId: "default",
+      session: { mode: "fork" },
+      preforkSummaryText: "prefork summary",
+      preforkMeta: { thresholdPct: 95, parentLastResponseTotalTokens: 200000, childContextWindowTokens: 128000 }
+    }
+  });
+  assert.equal(startRes.statusCode, 200, `start subtask failed: ${startRes.body}`);
+  const started = startRes.json() as { sessionId: string };
+
+  const items = getSessionTranscriptItems(fixture.db, fixture.workspaceId, started.sessionId);
+  assert.equal(items.length, 3, "prefork path should only inject summary/guard/prompt items");
+  assert.equal(items[0]?.kind, "system");
+  assert.equal((items[0]?.output as { text?: string } | undefined)?.text, "prefork summary");
+  assert.equal(items[1]?.kind, "system");
+  assert.equal(String((items[1]?.output as { text?: string } | undefined)?.text || "").includes("All history before this system message was copied from the parent session"), true);
+  assert.equal(items[2]?.kind, "user");
+  assert.equal((items[2]?.output as { text?: string } | undefined)?.text, "please do prefork task");
+  assert.equal(items.some((item) => item.kind === "user" && (item.output as { text?: string }).text === "this is parent history that must not be copied"), false);
+});
+
+test("subtask start should reject preforkSummaryText when mode=new/existing", async () => {
+  const fixture = await createFixture();
+  await configureAgentDefaults(fixture.app);
+
+  const parentSession = await createSession(fixture.app, fixture.workspaceId);
+  const parentRunId = newSortableId("run");
+  const parentUser = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "prepare prefork mode reject" }
+  });
+
+  createRunRecord(fixture.db, {
+    runId: parentRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    triggerItemId: parentUser.item.id,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const subtaskTool = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_prefork_mode_reject",
+    step: 1,
+    prevId: parentUser.item.id,
+    kind: "tool",
+    status: "queued",
+    output: {
+      type: "tool",
+      toolName: "subtask",
+      toolCallId: "call_prefork_mode_reject",
+      args: {
+        description: "prefork",
+        prompt: "please do prefork task",
+        agentId: "default",
+        session: { mode: "fork" }
+      }
+    }
+  });
+
+  const modeNewRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/start",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      parentSessionId: parentSession.id,
+      parentRunId,
+      parentToolItemId: subtaskTool.item.id,
+      description: "prefork",
+      prompt: "please do prefork task",
+      agentId: "default",
+      session: { mode: "new" },
+      preforkSummaryText: "prefork summary"
+    }
+  });
+  assert.equal(modeNewRes.statusCode, 400);
+  assert.equal((modeNewRes.json() as { code?: string }).code, "AGENT_SUBTASK_PREFORK_NOT_ALLOWED");
+
+  const existingSessionRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions",
+    payload: {
+      workspaceId: fixture.workspaceId,
+      title: "existing-subtask",
+      kind: "subtask"
+    }
+  });
+  assert.equal(existingSessionRes.statusCode, 201, `create existing subtask session failed: ${existingSessionRes.body}`);
+  const existingSession = existingSessionRes.json() as { id: string };
+
+  const modeExistingRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/start",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      parentSessionId: parentSession.id,
+      parentRunId,
+      parentToolItemId: subtaskTool.item.id,
+      description: "prefork",
+      prompt: "please do prefork task",
+      agentId: "default",
+      session: { mode: "existing", sessionId: existingSession.id },
+      preforkSummaryText: "prefork summary"
+    }
+  });
+  assert.equal(modeExistingRes.statusCode, 400);
+  assert.equal((modeExistingRes.json() as { code?: string }).code, "AGENT_SUBTASK_PREFORK_NOT_ALLOWED");
+});
+
+test("subtask start should reject too long preforkSummaryText", async () => {
+  const fixture = await createFixture();
+  await configureAgentDefaults(fixture.app);
+
+  const parentSession = await createSession(fixture.app, fixture.workspaceId);
+  const parentRunId = newSortableId("run");
+  const parentUser = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "prepare prefork too long" }
+  });
+
+  createRunRecord(fixture.db, {
+    runId: parentRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    triggerItemId: parentUser.item.id,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const subtaskTool = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_prefork_too_long",
+    step: 1,
+    prevId: parentUser.item.id,
+    kind: "tool",
+    status: "queued",
+    output: {
+      type: "tool",
+      toolName: "subtask",
+      toolCallId: "call_prefork_too_long",
+      args: {
+        description: "prefork",
+        prompt: "please do prefork task",
+        agentId: "default",
+        session: { mode: "fork" }
+      }
+    }
+  });
+
+  const tooLongSummary = "x".repeat(20_001);
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/start",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      parentSessionId: parentSession.id,
+      parentRunId,
+      parentToolItemId: subtaskTool.item.id,
+      description: "prefork",
+      prompt: "please do prefork task",
+      agentId: "default",
+      session: { mode: "fork" },
+      preforkSummaryText: tooLongSummary
+    }
+  });
+  assert.equal(res.statusCode, 400);
+  assert.equal((res.json() as { code?: string }).code, "AGENT_SUBTASK_PREFORK_SUMMARY_TOO_LONG");
+});
+
+test("subtask start should reject mismatched preforkMeta", async () => {
+  const fixture = await createFixture();
+  await configureAgentDefaults(fixture.app);
+
+  const parentSession = await createSession(fixture.app, fixture.workspaceId);
+  const parentRunId = newSortableId("run");
+  const parentUser = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "prepare prefork meta mismatch" }
+  });
+
+  createRunRecord(fixture.db, {
+    runId: parentRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    triggerItemId: parentUser.item.id,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const subtaskTool = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_prefork_meta_mismatch",
+    step: 1,
+    prevId: parentUser.item.id,
+    kind: "tool",
+    status: "queued",
+    output: {
+      type: "tool",
+      toolName: "subtask",
+      toolCallId: "call_prefork_meta_mismatch",
+      args: {
+        description: "prefork",
+        prompt: "please do prefork task",
+        agentId: "default",
+        session: { mode: "fork" }
+      }
+    }
+  });
+
+  const updatedAt = Date.now();
+  updateRunState(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    status: "running",
+    activeRunId: parentRunId,
+    activeAssistantItemId: null,
+    lastResponseTotalTokens: 200000,
+    runNoticeText: "",
+    updatedAt,
+    appliedItemId: subtaskTool.item.id
+  });
+
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/start",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      parentSessionId: parentSession.id,
+      parentRunId,
+      parentToolItemId: subtaskTool.item.id,
+      description: "prefork",
+      prompt: "please do prefork task",
+      agentId: "default",
+      session: { mode: "fork" },
+      preforkSummaryText: "prefork summary",
+      preforkMeta: { thresholdPct: 95, parentLastResponseTotalTokens: 199999, childContextWindowTokens: 128000 }
+    }
+  });
+  assert.equal(res.statusCode, 400);
+  assert.equal((res.json() as { code?: string }).code, "AGENT_SUBTASK_PREFORK_META_MISMATCH");
+});
+
+test("subtask prefork-plan should use default threshold and return correct shouldPrefork", async () => {
+  const fixture = await createFixture();
+  await configureAgentDefaults(fixture.app);
+
+  const parentSessionRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions",
+    payload: { workspaceId: fixture.workspaceId, title: "parent-prefork-plan" }
+  });
+  assert.equal(parentSessionRes.statusCode, 201, `create parent session failed: ${parentSessionRes.body}`);
+  const parentSession = parentSessionRes.json() as { id: string };
+
+  const parentRunId = newSortableId("run");
+  const parentUser = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "prefork-plan parent user"
+    }
+  });
+  createRunRecord(fixture.db, {
+    runId: parentRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    triggerItemId: parentUser.item.id,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const subtaskTool = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_prefork_plan",
+    step: 1,
+    prevId: parentUser.item.id,
+    kind: "tool",
+    status: "queued",
+    output: {
+      type: "tool",
+      toolName: "subtask",
+      toolCallId: "call_prefork_plan",
+      args: {
+        description: "prefork",
+        prompt: "please do prefork task",
+        agentId: "default",
+        session: { mode: "fork" }
+      }
+    }
+  });
+
+  const shouldNotPreforkRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/prefork-plan",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      parentSessionId: parentSession.id,
+      parentRunId,
+      parentToolItemId: subtaskTool.item.id,
+      agentId: "default"
+    }
+  });
+  assert.equal(shouldNotPreforkRes.statusCode, 200, `prefork-plan failed: ${shouldNotPreforkRes.body}`);
+  const shouldNotPreforkBody = shouldNotPreforkRes.json() as {
+    shouldPrefork: boolean;
+    thresholdPct: number;
+    parentLastResponseTotalTokens: number | null;
+    childContextWindowTokens: number;
+    thresholdTokens: number;
+  };
+  assert.equal(shouldNotPreforkBody.thresholdPct, 95);
+  assert.equal(shouldNotPreforkBody.childContextWindowTokens, 128000);
+  assert.equal(shouldNotPreforkBody.thresholdTokens, 121600);
+  assert.equal(shouldNotPreforkBody.parentLastResponseTotalTokens, null);
+  assert.equal(shouldNotPreforkBody.shouldPrefork, false);
+
+  const updatedAt = Date.now();
+  updateRunState(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    status: "running",
+    activeRunId: parentRunId,
+    activeAssistantItemId: null,
+    lastResponseTotalTokens: 200000,
+    runNoticeText: "",
+    updatedAt,
+    appliedItemId: subtaskTool.item.id
+  });
+
+  const shouldPreforkRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/prefork-plan",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      parentSessionId: parentSession.id,
+      parentRunId,
+      parentToolItemId: subtaskTool.item.id,
+      agentId: "default"
+    }
+  });
+  assert.equal(shouldPreforkRes.statusCode, 200, `prefork-plan failed: ${shouldPreforkRes.body}`);
+  const shouldPreforkBody = shouldPreforkRes.json() as {
+    shouldPrefork: boolean;
+    parentLastResponseTotalTokens: number | null;
+  };
+  assert.equal(shouldPreforkBody.parentLastResponseTotalTokens, 200000);
+  assert.equal(shouldPreforkBody.shouldPrefork, true);
+});
+
+test("subtask prefork-plan should reject invalid thresholdPct", async () => {
+  const fixture = await createFixture();
+  await configureAgentDefaults(fixture.app);
+
+  const parentSession = await createSession(fixture.app, fixture.workspaceId);
+  const parentRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: parentRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+  const subtaskTool = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_prefork_plan_invalid",
+    step: 1,
+    prevId: null,
+    kind: "tool",
+    status: "queued",
+    output: {
+      type: "tool",
+      toolName: "subtask",
+      toolCallId: "call_prefork_plan_invalid",
+      args: {
+        description: "prefork",
+        prompt: "please do prefork task",
+        agentId: "default",
+        session: { mode: "fork" }
+      }
+    }
+  });
+
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/prefork-plan",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      parentSessionId: parentSession.id,
+      parentRunId,
+      parentToolItemId: subtaskTool.item.id,
+      agentId: "default",
+      thresholdPct: 49
+    }
+  });
+  assert.equal(res.statusCode, 400);
+  assert.equal((res.json() as { code?: string }).code, "AGENT_SUBTASK_PREFORK_THRESHOLD_INVALID");
+});
+
+test("agent subtask fork 对父 run 非法 locale 做归一化回退，避免继续传播非法值", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          summary: "",
+          prompt: "You are a helpful coding assistant.",
+          tools: ["bash", "read", "write", "subtask"],
+          mcpServers: [],
+          defaultModel: null,
+          scope: "both",
+          order: 0
+        }
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `configure agents with subtask failed: ${agentsRes.body}`);
+
+  const parentSession = await createSession(fixture.app, fixture.workspaceId);
+  const parentRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: parentRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    uiLocale: "fr-FR" as any,
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+  const toolItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_subtask_invalid_locale",
+    step: 1,
+    prevId: null,
+    kind: "tool",
+    status: "queued",
+    output: { type: "tool", toolName: "subtask", toolCallId: "call_subtask_invalid_locale", args: { description: "研究问题", prompt: "请直接完成这个子任务", agentId: "default", session: { mode: "fork" } } }
+  });
+  const startRes = await fixture.app.inject({ method: "POST", url: "/api/internal/agent/subtask/start", headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" }, payload: { workspaceId: fixture.workspaceId, parentSessionId: parentSession.id, parentRunId, parentToolItemId: toolItem.item.id, description: "研究问题", prompt: "请直接完成这个子任务", agentId: "default", session: { mode: "fork" } } });
+  assert.equal(startRes.statusCode, 200, `start subtask failed: ${startRes.body}`);
+  const started = startRes.json() as { sessionId: string; runId: string };
+  const subtaskRun = getRunRecord(fixture.db, started.runId);
+  assert.equal(subtaskRun?.uiLocale, null);
+  const items = getSessionTranscriptItems(fixture.db, fixture.workspaceId, started.sessionId);
+  const guardItem = items.find((item) => item.kind === "system" && item.output.type === "system_text");
+  assert.ok(guardItem);
+  assert.equal(String((guardItem?.output as { text?: string } | undefined)?.text || "").includes("You are working in a subtask session derived from a parent session."), true);
 });
 
 test("subtask 失败时 getSubtaskRunResultFromWorker 仍返回 partial text", async () => {
@@ -1935,7 +3686,6 @@ test("agent prompt-context 对 primary 会话保留 subtask 工具", async () =>
     method: "PUT",
     url: "/api/settings/agent/agents",
     payload: {
-      default: { agentId: "default" },
       agents: [
         {
           id: "default",
@@ -1944,7 +3694,9 @@ test("agent prompt-context 对 primary 会话保留 subtask 工具", async () =>
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write", "subtask"],
           mcpServers: [],
-          defaultModel: null
+          defaultModel: null,
+          scope: "both",
+          order: 0
         }
       ]
     }
@@ -2142,7 +3894,7 @@ test("agent revert 在会话运行中返回 AGENT_REVERT_NOT_IDLE", async () => 
     url: `/api/agent/sessions/${session.id}/revert`,
     payload: {
       workspaceId: fixture.workspaceId,
-      toItemId: userItem.item.id,
+      itemId: userItem.item.id,
       reason: "manual_revert"
     }
   });
@@ -2198,7 +3950,7 @@ test("agent revert 在 idle 且存在非终态残留 item 时返回 AGENT_REVERT
     url: `/api/agent/sessions/${session.id}/revert`,
     payload: {
       workspaceId: fixture.workspaceId,
-      toItemId: userItem.item.id,
+      itemId: userItem.item.id,
       reason: "manual_revert"
     }
   });
@@ -2264,14 +4016,14 @@ test("agent revert 在 idle 时可回退到可见 item 并隐藏后续分支", a
     url: `/api/agent/sessions/${session.id}/revert`,
     payload: {
       workspaceId: fixture.workspaceId,
-      toItemId: assistantItem.item.id,
+      itemId: assistantItem.item.id,
       reason: "manual_revert"
     }
   });
   assert.equal(revertRes.statusCode, 200, `revert visible item should succeed: ${revertRes.body}`);
-  const revertBody = revertRes.json() as { headItemId: number | null; sessionId: string };
-  assert.equal(revertBody.sessionId, session.id);
-  assert.equal(revertBody.headItemId, assistantItem.item.id);
+  const revertBody = revertRes.json() as { ok: boolean; session: { id: string; headItemId: number | null } };
+  assert.equal(revertBody.session.id, session.id);
+  assert.equal(revertBody.session.headItemId, assistantItem.item.id);
 
   const context = await getContextItems(fixture.app, session.id);
   assert.equal(context.headItemId, assistantItem.item.id);
@@ -2515,6 +4267,279 @@ test("run-state 不应把旧 terminal run 误认为当前这次 idle 的终态",
   assert.equal(runState.lastTerminalStatus, null);
 });
 
+test("internal sessions/status-summary 返回 run 摘要（elapsed/contextWindowTokens/ratio）", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+
+  const created = await createSession(fixture.app, fixture.workspaceId);
+  const session = getAgentSession(fixture.db, created.id)!;
+
+  const runId = newSortableId("run");
+  const createdAt = Date.now() - 1500;
+  const updatedAt = Date.now();
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt
+  });
+  updateRunState(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "running",
+    activeRunId: runId,
+    activeAssistantItemId: null,
+    lastResponseTotalTokens: 64000,
+    runNoticeText: "",
+    updatedAt,
+    appliedItemId: 0
+  });
+
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/status-summary",
+    headers: {
+      "x-awb-agent-internal-token": fixture.internalToken
+    },
+    payload: {
+      sessionId: session.id,
+      // Compatibility: use `agentId` as documented.
+      agentId: "default"
+    }
+  });
+  assert.equal(res.statusCode, 200, `status-summary failed: ${res.body}`);
+  const body = res.json() as any;
+  assert.equal(body.session?.id, session.id);
+  assert.equal(body.session?.workspaceId, fixture.workspaceId);
+  assert.equal(body.agent?.id, "default");
+  assert.equal(body.agent?.name, "default");
+  assert.equal(body.runState?.status, "running");
+  assert.equal(body.runState?.activeRunId, runId);
+  assert.equal(body.runState?.lastResponseTotalTokens, 64000);
+  // Compatibility: runState.terminalStatus alias
+  assert.equal(body.runState?.terminalStatus, body.runState?.lastTerminalStatus);
+  assert.equal(body.startedAt, createdAt);
+  assert.equal(body.contextWindowTokens, 128000);
+  assert.ok(Math.abs(body.contextTokenRatio - 0.5) < 1e-9);
+  assert.ok(typeof body.elapsedMs === "number" && body.elapsedMs >= 0);
+
+  {
+    // Precedence: selectedAgentId wins when both are provided.
+    const resPreferSelected = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/sessions/status-summary",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+      payload: { sessionId: session.id, agentId: "missing", selectedAgentId: "default" }
+    });
+    assert.equal(resPreferSelected.statusCode, 200);
+    const prefer = resPreferSelected.json() as any;
+    assert.equal(prefer.agent?.id, "default");
+  }
+
+  // updatedAt should be stable across calls (generatedAt changes)
+  const updatedAt1 = body.updatedAt;
+  const generatedAt1 = body.generatedAt;
+  await sleep(10);
+  const res2 = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/status-summary",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: { sessionId: session.id, agentId: "default" }
+  });
+  assert.equal(res2.statusCode, 200);
+  const body2 = res2.json() as any;
+  assert.equal(body2.updatedAt, updatedAt1);
+  assert.ok(typeof body2.generatedAt === "number" && body2.generatedAt >= generatedAt1);
+
+  const resNoAgent = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/status-summary",
+    headers: {
+      "x-awb-agent-internal-token": fixture.internalToken
+    },
+    payload: {
+      sessionId: session.id
+    }
+  });
+  assert.equal(resNoAgent.statusCode, 200, `status-summary(no agent) failed: ${resNoAgent.body}`);
+  const bodyNoAgent = resNoAgent.json() as any;
+  assert.equal(bodyNoAgent.agent, null);
+  assert.equal(bodyNoAgent.contextWindowTokens, null);
+  assert.equal(bodyNoAgent.contextTokenRatio, null);
+});
+
+test("internal sessions/status-summary 需要 internal token 且 sessionId 必须存在", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+
+  const noTokenRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/status-summary",
+    payload: { sessionId: "sess_missing" }
+  });
+  assert.equal(noTokenRes.statusCode, 401);
+
+  const notFoundRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/status-summary",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: { sessionId: "sess_missing" }
+  });
+  assert.equal(notFoundRes.statusCode, 404);
+  assert.equal(notFoundRes.json().code, "SESSION_NOT_FOUND");
+
+  const agentNotFoundRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/status-summary",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: { sessionId: "sess_missing", selectedAgentId: "agent_missing" }
+  });
+  // sessionId missing still dominates; ensure agent not found is covered in another test
+  assert.equal(agentNotFoundRes.statusCode, 404);
+});
+
+test("internal sessions/status-summary sessionId 为空白时返回 400 + SESSION_ID_REQUIRED", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/status-summary",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: { sessionId: "   " }
+  });
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.json().code, "SESSION_ID_REQUIRED");
+});
+
+test("internal sessions/status-summary agent 不存在时返回 400 + AGENT_NOT_FOUND", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const created = await createSession(fixture.app, fixture.workspaceId);
+  const session = getAgentSession(fixture.db, created.id)!;
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/status-summary",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: { sessionId: session.id, agentId: "agent_missing" }
+  });
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.json().code, "AGENT_NOT_FOUND");
+});
+
+test("internal sessions/context-items-tail 返回尾部上下文项", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const user1 = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: "turn_tail_1",
+    step: 1,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "hello 1" }
+  });
+  const assistant2 = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: "turn_tail_1",
+    step: 2,
+    prevId: user1.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: { type: "assistant_text", text: "hello 2" }
+  });
+  const tool3 = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: "turn_tail_1",
+    step: 3,
+    prevId: assistant2.item.id,
+    kind: "tool",
+    status: "completed",
+    output: { type: "tool", toolName: "todolist", result: { goal: "x", todos: [] } }
+  });
+
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/context-items-tail",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: { pluginId: "feishu", sessionId: session.id, tailLimit: 2 }
+  });
+  assert.equal(res.statusCode, 200, `context-items-tail failed: ${res.body}`);
+  const body = res.json() as any;
+  assert.equal(body.sessionId, session.id);
+  assert.equal(Array.isArray(body.items), true);
+  assert.equal(body.items.length, 2);
+  assert.equal(body.items[0]?.id, assistant2.item.id);
+  assert.equal(body.items[1]?.id, tool3.item.id);
+});
+
+test("internal sessions/context-items-tail sessionId 为空白时返回 400 + SESSION_ID_REQUIRED", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/context-items-tail",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: { pluginId: "feishu", sessionId: "   ", tailLimit: 1 }
+  });
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.json().code, "SESSION_ID_REQUIRED");
+});
+
+test("internal sessions/context-items-tail 缺少 x-awb-plugin-id 时返回 400 + PLUGIN_ID_REQUIRED", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/context-items-tail",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { pluginId: "feishu", sessionId: session.id, tailLimit: 1 }
+  });
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.json().code, "PLUGIN_ID_REQUIRED");
+});
+
+test("internal sessions/context-items-tail 缺少 body.pluginId 时返回 400 + PLUGIN_ID_REQUIRED", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/context-items-tail",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: { sessionId: session.id, tailLimit: 1 }
+  });
+
+  assert.equal(res.statusCode, 400);
+  assert.ok(typeof res.json().message === "string" && res.json().message.length > 0);
+});
+
+test("internal sessions/context-items-tail header/body pluginId 不一致时返回 401 + PLUGIN_ID_MISMATCH", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/context-items-tail",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: { pluginId: "slack", sessionId: session.id, tailLimit: 1 }
+  });
+  assert.equal(res.statusCode, 401);
+  assert.equal(res.json().code, "PLUGIN_ID_MISMATCH");
+});
+
 test("single-call model profile 始终使用全局默认模型", async () => {
   const fixture = await createFixture();
 
@@ -2568,9 +4593,6 @@ test("single-call model profile 始终使用全局默认模型", async () => {
     method: "PUT",
     url: "/api/settings/agent/agents",
     payload: {
-      default: {
-        agentId: "default"
-      },
       agents: [
         {
           id: "default",
@@ -2582,7 +4604,9 @@ test("single-call model profile 始终使用全局默认模型", async () => {
           defaultModel: {
             providerId: "agent_provider",
             modelId: "agent_model"
-          }
+          },
+          scope: "both",
+          order: 0
         }
       ]
     }
@@ -2628,6 +4652,7 @@ test("agent context 压缩后会归档并支持 archive_search/read", async () =
     sessionId: session.id,
     triggerItemId: 1,
     agentId: "default",
+    uiLocale: "en-US",
     providerId: "ppchat",
     modelId: "gpt-5.2",
     status: "running",
@@ -2705,7 +4730,7 @@ test("agent context 压缩后会归档并支持 archive_search/read", async () =
     (item) => item.role === "system" && String(item.content || "").includes("压缩摘要")
   );
   const snippetIndex = promptContext.messages.findIndex(
-    (item) => item.role === "system" && String(item.content || "").includes("压缩前尾部摘录")
+    (item) => item.role === "system" && (String(item.content || "").includes("压缩前尾部摘录") || String(item.content || "").includes("Pre-compaction tail excerpt"))
   );
   assert.ok(snippetIndex >= 0, "compaction snippet should be injected after summary");
   assert.ok(summaryIndex >= 0 && snippetIndex === summaryIndex + 1, "snippet should appear right after compaction summary");
@@ -2830,7 +4855,7 @@ test("agent context 压缩后会归档并支持 archive_search/read", async () =
     url: `/api/agent/sessions/${session.id}/revert`,
     payload: {
       workspaceId: fixture.workspaceId,
-      toItemId: userItem.item.id,
+      itemId: userItem.item.id,
       reason: "manual_revert"
     }
   });
@@ -2896,7 +4921,7 @@ test("agent context 压缩后会归档并支持 archive_search/read", async () =
     runId: forkRunId,
     turnId: null,
     step: null,
-    prevId: clearRollbackRes.json().headItemId,
+    prevId: clearRollbackRes.json().session.headItemId,
     kind: "user",
     status: "completed",
     output: { type: "user_text", text: "新的可见问题" }
@@ -3148,7 +5173,7 @@ test("agent prompt-context compaction snippet 缓存缺失时应即时重建", a
     sessionId: session.id,
     runId
   });
-  assert.ok(ctx1.messages.some((m) => m.role === "system" && String(m.content || "").includes("压缩前尾部摘录")));
+  assert.ok(ctx1.messages.some((m) => m.role === "system" && String(m.content || "").includes("Pre-compaction tail excerpt")));
 
   const cachePath = compactionSnippetPath(fixture.dataDir, fixture.workspaceId, session.id, summaryItemId);
   await fs.rm(cachePath, { force: true });
@@ -3161,7 +5186,51 @@ test("agent prompt-context compaction snippet 缓存缺失时应即时重建", a
     sessionId: session.id,
     runId
   });
-  assert.ok(ctx2.messages.some((m) => m.role === "system" && String(m.content || "").includes("压缩前尾部摘录")));
+  assert.ok(ctx2.messages.some((m) => m.role === "system" && String(m.content || "").includes("Pre-compaction tail excerpt")));
+});
+
+test("compaction snippet 在 zh-CN locale 下保持中文提示", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    uiLocale: "zh-CN",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const userItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "旧上下文" }
+  });
+  const compact = await compactContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    expectedHeadItemId: userItem.item.id,
+    summaryText: "压缩摘要"
+  });
+  assert.equal(compact.compacted, true);
+  const ctx = await getPromptContextInternal({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId });
+  assert.ok(ctx.messages.some((m) => m.role === "system" && String(m.content || "").includes("压缩前尾部摘录")));
 });
 
 test("archive v2 边界行为: 校验/大小写/跨文件pos/截断/半行过滤", async () => {
@@ -3385,7 +5454,7 @@ test("agent prompt-context 使用结构化 tool-call/tool-result 消息", async 
         content: "hello"
       },
       result: {
-        summary: "写入文件 tool_test.txt",
+        summary: "Wrote file tool_test.txt",
         content: "ok"
       }
     }
@@ -4092,7 +6161,7 @@ test("write completed 后瘦身 args/result 并支持 artifact 拉取", async ()
         content: writeContent
       },
       result: {
-        summary: "写入文件 foo.txt",
+        summary: "Wrote file foo.txt",
         filePath: "foo.txt",
         bytesWritten: writeBytes,
         existedBefore: false,
@@ -4213,7 +6282,7 @@ test("write artifact 文件缺失时返回 404", async () => {
       toolCallId: "call_write_1",
       args: { filePath: "foo.txt", content: "hello" },
       result: {
-        summary: "写入文件 foo.txt",
+        summary: "Wrote file foo.txt",
         filePath: "foo.txt",
         bytesWritten: 5,
         existedBefore: false,
@@ -4601,7 +6670,6 @@ test("agent settings 兼容缺省 globalPromptIds", async () => {
     method: "PUT",
     url: "/api/settings/agent/agents",
     payload: {
-      default: { agentId: "default" },
       agents: [
         {
           id: "default",
@@ -4610,7 +6678,9 @@ test("agent settings 兼容缺省 globalPromptIds", async () => {
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          defaultModel: null
+          defaultModel: null,
+          scope: "both",
+          order: 0
         }
       ]
     }
@@ -4694,7 +6764,6 @@ test("agent prompt-context 全局提示词按列表顺序注入(方案A)", async
     method: "PUT",
     url: "/api/settings/agent/agents",
     payload: {
-      default: { agentId: "default" },
       agents: [
         {
           id: "default",
@@ -4704,7 +6773,9 @@ test("agent prompt-context 全局提示词按列表顺序注入(方案A)", async
           globalPromptIds: ["global_system_prompt", "gp_b", "gp_a"],
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          defaultModel: null
+          defaultModel: null,
+          scope: "both",
+          order: 0
         }
       ]
     }
@@ -4769,7 +6840,6 @@ test("agent prompt-context 同时存在 global/workspace/agent 时按既定顺�
     method: "PUT",
     url: "/api/settings/agent/agents",
     payload: {
-      default: { agentId: "default" },
       agents: [
         {
           id: "default",
@@ -4779,7 +6849,9 @@ test("agent prompt-context 同时存在 global/workspace/agent 时按既定顺�
           globalPromptIds: ["gp_b", "gp_a"],
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          defaultModel: null
+          defaultModel: null,
+          scope: "both",
+          order: 0
         }
       ]
     }
@@ -4809,19 +6881,41 @@ test("agent prompt-context 同时存在 global/workspace/agent 时按既定顺�
   const idxCore = context.system.indexOf("# 工作方式与流程(全局)");
   const idxA = context.system.indexOf("PROMPT_A");
   const idxB = context.system.indexOf("PROMPT_B");
-  const idxWorkspace = context.system.indexOf("## Workspace Instructions: AGENTS.md");
+  const idxOutput = context.system.indexOf("[output_format_instructions]");
+  const idxRuntime = context.system.indexOf("[runtime_constraints]");
+  const idxSystemBaseTag = context.system.indexOf("[system_base]");
+  const idxATag = context.system.indexOf("[global_prompt] A");
+  const idxBTag = context.system.indexOf("[global_prompt] B");
+  const idxWorkspace = context.system.indexOf("[workspace_instructions] AGENTS.md");
+  const idxAgentTag = context.system.indexOf("[agent_prompt] default");
   const idxAgent = context.system.indexOf("AGENT_PROMPT");
 
+  assert.equal(context.system.includes("## Global Prompt:"), false, "system should not include legacy global prompt headings");
+  assert.equal(context.system.includes("## Workspace Instructions:"), false, "system should not include legacy workspace headings");
+  assert.equal(context.system.includes("## Agent Prompt:"), false, "system should not include legacy agent headings");
+  assert.equal(context.system.includes("## Runtime Constraints"), false, "system should not include legacy runtime heading");
+  assert.ok(idxSystemBaseTag >= 0, "system should include system base section tag");
+  assert.ok(idxATag >= 0, "system should include global prompt A section tag");
+  assert.ok(idxBTag >= 0, "system should include global prompt B section tag");
   assert.ok(idxCore >= 0, "system should include global workflow prompt");
   assert.ok(idxA >= 0, "system should include PROMPT_A");
   assert.ok(idxB >= 0, "system should include PROMPT_B");
   assert.ok(idxWorkspace >= 0, "system should include workspace instructions section");
+  assert.ok(idxOutput >= 0, "system should include output format instructions section");
+  assert.ok(idxRuntime >= 0, "system should include runtime constraints section");
+  assert.ok(context.system.includes("Output format requirements:"), "system should include output format instruction body");
   assert.ok(idxAgent >= 0, "system should include AGENT_PROMPT");
 
-  assert.ok(idxCore < idxA, "order: core before global prompts");
-  assert.ok(idxA < idxB, "order: global prompts follow global list order");
-  assert.ok(idxB < idxWorkspace, "order: global prompts before workspace instructions");
-  assert.ok(idxWorkspace < idxAgent, "order: workspace instructions before agent prompt");
+  assert.ok(idxSystemBaseTag < idxATag, "order: system base tag before global prompts");
+  assert.ok(idxATag < idxBTag, "order: global prompt tags follow global list order");
+  assert.ok(idxBTag < idxWorkspace, "order: global prompts before workspace instructions");
+  assert.ok(idxWorkspace < idxAgentTag, "order: workspace instructions before agent prompt");
+  assert.ok(idxAgentTag < idxOutput, "order: agent prompt before output format instructions");
+  assert.ok(idxOutput < idxRuntime, "order: output format instructions before runtime constraints");
+  assert.ok(idxCore < idxA, "order: system base body before global prompt body");
+  assert.ok(idxA < idxB, "order: global prompt bodies follow global list order");
+  assert.ok(idxB < context.system.indexOf("WORKSPACE_RULE"), "order: global prompt bodies before workspace instructions body");
+  assert.ok(context.system.indexOf("WORKSPACE_RULE") < idxAgent, "order: workspace instructions body before agent prompt body");
 });
 
 test("agent prompt-context 在 workspace 根 AGENTS.md 缺失时忽略", async () => {
@@ -4851,13 +6945,16 @@ test("agent prompt-context 在 workspace 根 AGENTS.md 缺失时忽略", async (
   });
 
   assert.ok(context.system.includes("# 工作方式与流程(全局)"), "system should include global workflow prompt");
-  assert.ok(context.system.includes("## Agent Prompt: default"), "system should include agent section");
+  assert.ok(context.system.includes("[system_base]"), "system should include system base section");
+  assert.ok(context.system.includes("[agent_prompt] default"), "system should include agent section");
+  assert.ok(context.system.includes("[output_format_instructions]"), "system should include output format instructions");
+  assert.ok(context.system.includes("[runtime_constraints]"), "system should include runtime constraints");
   assert.ok(
     context.system.includes("You are a helpful coding assistant."),
     "system should include agent prompt content"
   );
   assert.equal(
-    context.system.includes("## Workspace Instructions: AGENTS.md"),
+    context.system.includes("[workspace_instructions] AGENTS.md"),
     false,
     "system should ignore missing workspace AGENTS.md"
   );
@@ -4902,11 +6999,13 @@ test("agent startup seed 会修复脏的 global prompts settings", async () => {
       agentWorkerHost: "127.0.0.1",
       agentWorkerPort: 0,
       agentWorkerSocketPath: path.join(dataDir, "agent-worker.sock"),
-      agentWorkerConcurrency: 0,
-      agentInternalToken: internalToken,
-      agentApiOrigin: "http://127.0.0.1:0",
-      agentStartupRecoveryMode: "recover"
-    });
+        agentWorkerConcurrency: 0,
+        agentInternalToken: internalToken,
+        agentApiOrigin: "http://127.0.0.1:0",
+        agentStartupRecoveryMode: "recover",
+        agentPluginHostEnabled: false,
+        agentPluginHostSocketPath: path.join(dataDir, "agent-plugin-host.sock")
+      });
     await app.ready();
     const res = await app.inject({ method: "GET", url: "/api/settings/agent/global-prompts" });
     assert.equal(res.statusCode, 200);
@@ -4933,7 +7032,6 @@ test("agent prompt-context 在 agent prompt 为空且无 workspace/global 时仅
     method: "PUT",
     url: "/api/settings/agent/agents",
     payload: {
-      default: { agentId: "default" },
       agents: [
         {
           id: "default",
@@ -4942,7 +7040,9 @@ test("agent prompt-context 在 agent prompt 为空且无 workspace/global 时仅
           prompt: "",
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          defaultModel: null
+          defaultModel: null,
+          scope: "both",
+          order: 0
         }
       ]
     }
@@ -4970,13 +7070,19 @@ test("agent prompt-context 在 agent prompt 为空且无 workspace/global 时仅
   });
 
   assert.ok(context.system.includes("# 工作方式与流程(全局)"), "system should include global workflow prompt");
+  assert.ok(context.system.includes("[system_base]"), "system should include system base section");
+  assert.ok(context.system.includes("[output_format_instructions]"), "system should include output format instructions");
+  assert.ok(context.system.includes("[runtime_constraints]"), "system should include runtime constraints");
   assert.equal(context.system.includes("## Global Prompt:"), false, "system should not include global prompt sections");
+  assert.equal(context.system.includes("[global_prompt]"), false, "system should not include global prompt blocks when none selected");
   assert.equal(
     context.system.includes("## Workspace Instructions:"),
     false,
     "system should not include workspace instructions when missing"
   );
+  assert.equal(context.system.includes("[workspace_instructions]"), false, "system should not include workspace instructions block when missing");
   assert.equal(context.system.includes("## Agent Prompt:"), false, "system should not include agent prompt section when empty");
+  assert.equal(context.system.includes("[agent_prompt]"), false, "system should not include agent prompt block when empty");
 });
 
 test("agent prompt-context 对 workspace AGENTS.md 做 32KB 截断并追加标记", async () => {
@@ -5008,12 +7114,855 @@ test("agent prompt-context 对 workspace AGENTS.md 做 32KB 截断并追加标�
   });
 
   assert.ok(
-    context.system.includes("## Workspace Instructions: AGENTS.md"),
+    context.system.includes("[workspace_instructions] AGENTS.md"),
     "system should include workspace section with relative path"
   );
   assert.ok(
     context.system.includes("[workspace AGENTS.md truncated: first 32KB]"),
     "system should include truncation marker"
   );
-  assert.ok(context.system.includes("## Agent Prompt: default"), "system should include agent section when workspace section exists");
+  assert.ok(context.system.includes("[agent_prompt] default"), "system should include agent section when workspace section exists");
+  assert.equal(context.system.includes("## Workspace Instructions:"), false, "system should not include legacy workspace heading when workspace section exists");
+});
+
+test("channels: inbound 去重 + 触发 run 幂等（不重复创建 reply_job）", async () => {
+    const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+    const created = await createSession(fixture.app, fixture.workspaceId);
+    const session = getAgentSession(fixture.db, created.id)!;
+
+    // bind conversation to session
+    const upsertRes = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/conversations/upsert-binding",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_c1",
+        chatId: "c1",
+        chatType: "direct",
+        sessionId: session.id
+      }
+    });
+    assert.equal(upsertRes.statusCode, 200, `upsert-binding failed: ${upsertRes.body}`);
+
+    // select agent: update store directly (ChannelRuntime will enforce agent selected)
+    fixture.db
+      .prepare(
+        `update channel_conversation_binding set selected_agent_id = 'default' where plugin_id='feishu' and channel_name='im' and account_id='default' and conversation_key='feishu_default_chat_c1'`
+      )
+      .run();
+
+    const ingest1 = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/inbound/ingest",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_c1",
+        chatType: "direct",
+        chatId: "c1",
+        externalMessageId: "m1",
+        sender: { id: "u_allowed", displayName: "Alice" },
+        mentionedBot: false,
+        text: "hello"
+      }
+    });
+    assert.equal(ingest1.statusCode, 200, `ingest1 failed: ${ingest1.body}`);
+    assert.equal((ingest1.json() as any).ok, true);
+    assert.equal((ingest1.json() as any).deduplicated, false);
+
+    const ingest2 = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/inbound/ingest",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_c1",
+        chatType: "direct",
+        chatId: "c1",
+        externalMessageId: "m1",
+        sender: { id: "u_allowed", displayName: "Alice" },
+        mentionedBot: false,
+        text: "hello"
+      }
+    });
+    assert.equal(ingest2.statusCode, 200, `ingest2 failed: ${ingest2.body}`);
+    assert.equal((ingest2.json() as any).ok, true);
+    assert.equal((ingest2.json() as any).deduplicated, true);
+
+    const trigger1 = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/run/trigger",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_c1",
+        triggerExternalMessageId: "m1",
+        text: "hello"
+      }
+    });
+    assert.equal(trigger1.statusCode, 200, `trigger1 failed: ${trigger1.body}`);
+    const body1 = trigger1.json() as any;
+    assert.equal(body1.ok, true);
+    assert.ok(typeof body1.runId === "string" && body1.runId.length > 0);
+    assert.equal(countReplyJobsForRun(fixture.db, body1.runId), 1);
+
+    // idempotent: same clientRequestId derived from externalMessageId -> AgentService dedup, reply_job remains 1
+    const trigger2 = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/run/trigger",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_c1",
+        triggerExternalMessageId: "m1",
+        text: "hello"
+      }
+    });
+    assert.equal(trigger2.statusCode, 200, `trigger2 failed: ${trigger2.body}`);
+    const body2 = trigger2.json() as any;
+    assert.equal(body2.ok, true);
+    assert.equal(body2.runId, body1.runId);
+    assert.equal(countReplyJobsForRun(fixture.db, body1.runId), 1);
+});
+
+test("channels: session running 冲突时 trigger 返回 status-summary", async () => {
+    const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+    const created = await createSession(fixture.app, fixture.workspaceId);
+    const session = getAgentSession(fixture.db, created.id)!;
+
+    // bind and select agent
+    await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/conversations/upsert-binding",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_c2",
+        chatId: "c2",
+        chatType: "direct",
+        sessionId: session.id
+      }
+    });
+    fixture.db
+      .prepare(
+        `update channel_conversation_binding set selected_agent_id = 'default' where plugin_id='feishu' and channel_name='im' and account_id='default' and conversation_key='feishu_default_chat_c2'`
+      )
+      .run();
+
+    // ingest the trigger message so run/trigger can bind to an inbound row (H1)
+    const ingest = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/inbound/ingest",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_c2",
+        chatType: "direct",
+        chatId: "c2",
+        externalMessageId: "m2",
+        sender: { id: "u_allowed", displayName: "Alice" },
+        mentionedBot: false,
+        text: "hello"
+      }
+    });
+    assert.equal(ingest.statusCode, 200);
+
+    // make session running
+    updateRunState(fixture.db, {
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      status: "running",
+      activeRunId: newSortableId("run"),
+      activeAssistantItemId: null,
+      runNoticeText: "",
+      updatedAt: Date.now(),
+      appliedItemId: 0
+    });
+
+    const trigger = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/run/trigger",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_c2",
+        triggerExternalMessageId: "m2",
+        text: "hello"
+      }
+    });
+    assert.equal(trigger.statusCode, 200, `trigger failed: ${trigger.body}`);
+    const body = trigger.json() as any;
+    assert.equal(body.ok, false);
+    assert.equal(body.errorCode, "SESSION_RUNNING");
+    assert.ok(body.statusSummary);
+    assert.equal(body.statusSummary.runState.status, "running");
+});
+
+test("channels: H1 未 ingest 的 trigger 必须失败且不创建 reply_job", async () => {
+    const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+    const created = await createSession(fixture.app, fixture.workspaceId);
+    const session = getAgentSession(fixture.db, created.id)!;
+
+    await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/conversations/upsert-binding",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_h1",
+        chatId: "h1",
+        chatType: "direct",
+        sessionId: session.id
+      }
+    });
+    fixture.db
+      .prepare(
+        `update channel_conversation_binding set selected_agent_id = 'default' where plugin_id='feishu' and channel_name='im' and account_id='default' and conversation_key='feishu_default_chat_h1'`
+      )
+      .run();
+
+    const before = fixture.db.prepare(`select count(1) as cnt from channel_reply_job`).get() as any;
+    const trigger = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/run/trigger",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_h1",
+        triggerExternalMessageId: "m_missing",
+        text: "hello"
+      }
+    });
+    assert.equal(trigger.statusCode, 200);
+    const body = trigger.json() as any;
+    assert.equal(body.ok, false);
+    assert.equal(body.errorCode, "INBOUND_NOT_FOUND");
+    const after = fixture.db.prepare(`select count(1) as cnt from channel_reply_job`).get() as any;
+    assert.equal(after.cnt, before.cnt);
+});
+
+test("channels: H1 sender 不在 allowlist 时 trigger 必须失败且不触发 run", async () => {
+    const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+    const created = await createSession(fixture.app, fixture.workspaceId);
+    const session = getAgentSession(fixture.db, created.id)!;
+
+    await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/conversations/upsert-binding",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_h1b",
+        chatId: "h1b",
+        chatType: "direct",
+        sessionId: session.id
+      }
+    });
+    fixture.db
+      .prepare(
+        `update channel_conversation_binding set selected_agent_id = 'default' where plugin_id='feishu' and channel_name='im' and account_id='default' and conversation_key='feishu_default_chat_h1b'`
+      )
+      .run();
+
+    // Ingest with not-allowed sender (should fail), so insert row directly to simulate bypass attempt.
+    fixture.db
+      .prepare(
+        `insert into channel_inbound_message (plugin_id, channel_name, account_id, conversation_key, external_message_id, sender_id, sender_name, mentioned_bot, text, created_at_external, created_at_local)
+         values ('feishu','im','default','feishu_default_chat_h1b','m3','u_not_allowed','Bob',0,'hi',null, @ts)`
+      )
+      .run({ ts: Date.now() });
+
+    const trigger = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/run/trigger",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_h1b",
+        triggerExternalMessageId: "m3",
+        text: "hi"
+      }
+    });
+    assert.equal(trigger.statusCode, 200);
+    const body = trigger.json() as any;
+    assert.equal(body.ok, false);
+    assert.equal(body.errorCode, "NOT_ALLOWED");
+});
+
+test("channels: settings allowlist 为空时 trigger/run 拒绝", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const created = await createSession(fixture.app, fixture.workspaceId);
+  const session = getAgentSession(fixture.db, created.id)!;
+
+  setSettingJson(fixture.db, "agent_channel_sender_allowlist_v1", { items: [] }, Date.now());
+
+  await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/conversations/upsert-binding",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: {
+      pluginId: "feishu",
+      channelName: "im",
+      accountId: "default",
+      conversationKey: "feishu_default_chat_allowlist_empty",
+      chatId: "allowlist_empty",
+      chatType: "direct",
+      sessionId: session.id
+    }
+  });
+  fixture.db
+    .prepare(
+      `update channel_conversation_binding set selected_agent_id = 'default' where plugin_id='feishu' and channel_name='im' and account_id='default' and conversation_key='feishu_default_chat_allowlist_empty'`
+    )
+    .run();
+
+  fixture.db
+    .prepare(
+      `insert into channel_inbound_message (plugin_id, channel_name, account_id, conversation_key, external_message_id, sender_id, sender_name, mentioned_bot, text, created_at_external, created_at_local)
+       values ('feishu','im','default','feishu_default_chat_allowlist_empty','m_allowlist_empty','u_allowed','Alice',0,'hi',null, @ts)`
+    )
+    .run({ ts: Date.now() });
+
+  const trigger = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/run/trigger",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: {
+      pluginId: "feishu",
+      channelName: "im",
+      accountId: "default",
+      conversationKey: "feishu_default_chat_allowlist_empty",
+      triggerExternalMessageId: "m_allowlist_empty",
+      text: "hi"
+    }
+  });
+  assert.equal(trigger.statusCode, 200);
+  const body = trigger.json() as any;
+  assert.equal(body.ok, false);
+  assert.equal(body.errorCode, "NOT_ALLOWED");
+  assert.equal(body.message, "channel sender allowlist is empty");
+});
+
+test("channels: 写入 settings allowlist 后 trigger/run 允许", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const created = await createSession(fixture.app, fixture.workspaceId);
+  const session = getAgentSession(fixture.db, created.id)!;
+
+  setSettingJson(
+    fixture.db,
+    "agent_channel_sender_allowlist_v1",
+    { items: [{ channel: "feishu", senderId: "u_settings_allowed", remark: "it" }] },
+    Date.now()
+  );
+
+  await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/conversations/upsert-binding",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: {
+      pluginId: "feishu",
+      channelName: "im",
+      accountId: "default",
+      conversationKey: "feishu_default_chat_allowlist_hit",
+      chatId: "allowlist_hit",
+      chatType: "direct",
+      sessionId: session.id
+    }
+  });
+  fixture.db
+    .prepare(
+      `update channel_conversation_binding set selected_agent_id = 'default' where plugin_id='feishu' and channel_name='im' and account_id='default' and conversation_key='feishu_default_chat_allowlist_hit'`
+    )
+    .run();
+
+  const ingest = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/inbound/ingest",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: {
+      pluginId: "feishu",
+      channelName: "im",
+      accountId: "default",
+      conversationKey: "feishu_default_chat_allowlist_hit",
+      chatType: "direct",
+      chatId: "allowlist_hit",
+      externalMessageId: "m_allowlist_hit",
+      sender: { id: "u_settings_allowed", displayName: "Alice" },
+      mentionedBot: false,
+      text: "hello"
+    }
+  });
+  assert.equal(ingest.statusCode, 200);
+
+  const trigger = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/run/trigger",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: {
+      pluginId: "feishu",
+      channelName: "im",
+      accountId: "default",
+      conversationKey: "feishu_default_chat_allowlist_hit",
+      triggerExternalMessageId: "m_allowlist_hit",
+      text: "hello"
+    }
+  });
+  assert.equal(trigger.statusCode, 200);
+  const body = trigger.json() as any;
+  assert.equal(body.ok, true);
+  assert.ok(typeof body.runId === "string" && body.runId.length > 0);
+});
+
+test("channels: allowlist/check 返回 role，历史条目缺省 role 时默认 user", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  setSettingJson(
+    fixture.db,
+    "agent_channel_sender_allowlist_v1",
+    {
+      items: [
+        { channel: "feishu", senderId: "u_without_role", remark: "legacy" },
+        { channel: "feishu", senderId: "u_admin", role: "admin", remark: "manager" }
+      ]
+    },
+    Date.now()
+  );
+
+  const legacy = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/allowlist/check",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: { pluginId: "feishu", senderId: "u_without_role" }
+  });
+  assert.equal(legacy.statusCode, 200);
+  const legacyBody = legacy.json() as any;
+  assert.equal(legacyBody.allowed, true);
+  assert.equal(legacyBody.role, "user");
+
+  const admin = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/allowlist/check",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: { pluginId: "feishu", senderId: "u_admin" }
+  });
+  assert.equal(admin.statusCode, 200);
+  const adminBody = admin.json() as any;
+  assert.equal(adminBody.allowed, true);
+  assert.equal(adminBody.role, "admin");
+
+  const denied = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/allowlist/check",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: { pluginId: "feishu", senderId: "u_none" }
+  });
+  assert.equal(denied.statusCode, 200);
+  const deniedBody = denied.json() as any;
+  assert.equal(deniedBody.allowed, false);
+});
+
+test("channels: run/trigger 对 admin 与 user 允许，对 none 拒绝", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const created = await createSession(fixture.app, fixture.workspaceId);
+  const session = getAgentSession(fixture.db, created.id)!;
+
+  setSettingJson(
+    fixture.db,
+    "agent_channel_sender_allowlist_v1",
+    {
+      items: [
+        { channel: "feishu", senderId: "u_role_admin", role: "admin" },
+        { channel: "feishu", senderId: "u_role_user", role: "user" }
+      ]
+    },
+    Date.now()
+  );
+
+  await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/conversations/upsert-binding",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: {
+      pluginId: "feishu",
+      channelName: "im",
+      accountId: "default",
+      conversationKey: "feishu_default_chat_allowlist_role",
+      chatId: "allowlist_role",
+      chatType: "direct",
+      sessionId: session.id
+    }
+  });
+  fixture.db
+    .prepare(
+      `update channel_conversation_binding set selected_agent_id = 'default' where plugin_id='feishu' and channel_name='im' and account_id='default' and conversation_key='feishu_default_chat_allowlist_role'`
+    )
+    .run();
+
+  const ingestAdmin = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/inbound/ingest",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: {
+      pluginId: "feishu",
+      channelName: "im",
+      accountId: "default",
+      conversationKey: "feishu_default_chat_allowlist_role",
+      chatType: "direct",
+      chatId: "allowlist_role",
+      externalMessageId: "m_role_admin",
+      sender: { id: "u_role_admin", displayName: "Admin" },
+      mentionedBot: false,
+      text: "hello from admin"
+    }
+  });
+  assert.equal(ingestAdmin.statusCode, 200);
+  const triggerAdmin = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/run/trigger",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: {
+      pluginId: "feishu",
+      channelName: "im",
+      accountId: "default",
+      conversationKey: "feishu_default_chat_allowlist_role",
+      triggerExternalMessageId: "m_role_admin",
+      text: "hello from admin"
+    }
+  });
+  assert.equal(triggerAdmin.statusCode, 200);
+  const adminBody = triggerAdmin.json() as any;
+  assert.notEqual(adminBody.errorCode, "NOT_ALLOWED");
+  assert.equal(adminBody.ok || adminBody.errorCode === "SESSION_RUNNING", true);
+
+  const ingestUser = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/inbound/ingest",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: {
+      pluginId: "feishu",
+      channelName: "im",
+      accountId: "default",
+      conversationKey: "feishu_default_chat_allowlist_role",
+      chatType: "direct",
+      chatId: "allowlist_role",
+      externalMessageId: "m_role_user",
+      sender: { id: "u_role_user", displayName: "User" },
+      mentionedBot: false,
+      text: "hello from user"
+    }
+  });
+  assert.equal(ingestUser.statusCode, 200);
+  const triggerUser = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/run/trigger",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: {
+      pluginId: "feishu",
+      channelName: "im",
+      accountId: "default",
+      conversationKey: "feishu_default_chat_allowlist_role",
+      triggerExternalMessageId: "m_role_user",
+      text: "hello from user"
+    }
+  });
+  assert.equal(triggerUser.statusCode, 200);
+  const userBody = triggerUser.json() as any;
+  assert.notEqual(userBody.errorCode, "NOT_ALLOWED");
+  assert.equal(userBody.ok || userBody.errorCode === "SESSION_RUNNING", true);
+
+  fixture.db
+    .prepare(
+      `insert into channel_inbound_message (plugin_id, channel_name, account_id, conversation_key, external_message_id, sender_id, sender_name, mentioned_bot, text, created_at_external, created_at_local)
+       values ('feishu','im','default','feishu_default_chat_allowlist_role','m_role_none','u_role_none','None',0,'hello none',null, @ts)`
+    )
+    .run({ ts: Date.now() });
+  const triggerNone = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/run/trigger",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: {
+      pluginId: "feishu",
+      channelName: "im",
+      accountId: "default",
+      conversationKey: "feishu_default_chat_allowlist_role",
+      triggerExternalMessageId: "m_role_none",
+      text: "hello none"
+    }
+  });
+  assert.equal(triggerNone.statusCode, 200);
+  const noneBody = triggerNone.json() as any;
+  assert.equal(noneBody.ok, false);
+  assert.equal(noneBody.errorCode, "NOT_ALLOWED");
+});
+
+test("channels: 群聚合默认窗口与截断（maxMessages=50/maxChars=8000）", async () => {
+    const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+    const created = await createSession(fixture.app, fixture.workspaceId);
+    const session = getAgentSession(fixture.db, created.id)!;
+
+    await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/conversations/upsert-binding",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_g1",
+        chatId: "g1",
+        chatType: "group",
+        sessionId: session.id
+      }
+    });
+
+    // create 60 messages, each 200 chars => should drop earlier to 50 and then truncate to <=8000
+    const big = "x".repeat(200);
+    for (let i = 1; i <= 60; i += 1) {
+      const msgId = `mg_${i}`;
+      const res = await fixture.app.inject({
+        method: "POST",
+        url: "/api/internal/agent/channels/inbound/ingest",
+        headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+        payload: {
+          pluginId: "feishu",
+          channelName: "im",
+          accountId: "default",
+          conversationKey: "feishu_default_chat_g1",
+          chatType: "group",
+          chatId: "g1",
+          externalMessageId: msgId,
+          sender: { id: "u_allowed", displayName: "Alice" },
+          mentionedBot: true,
+          text: `${i}:${big}`
+        }
+      });
+      assert.equal(res.statusCode, 200);
+    }
+
+    const agg = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/channels/inbound/aggregate",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+      payload: {
+        pluginId: "feishu",
+        channelName: "im",
+        accountId: "default",
+        conversationKey: "feishu_default_chat_g1",
+        upperBoundExternalMessageId: "mg_60"
+      }
+    });
+    assert.equal(agg.statusCode, 200, `aggregate failed: ${agg.body}`);
+    const body = agg.json() as any;
+    assert.ok(typeof body.text === "string");
+    assert.ok(body.text.length <= 8000, `aggregated text too long: ${body.text.length}`);
+    assert.ok(body.text.startsWith("（提示：已省略更早的群消息"), "should include truncation hint line");
+    // dropped earlier messages -> mg_1 should be absent, mg_60 should exist
+    assert.equal(/(^|\n)Alice: 1:[^0-9]/.test(body.text), false);
+    assert.ok(/(^|\n)Alice: 60:/.test(body.text));
+});
+
+test("reply dispatcher: pending job -> sent (final-only, via plugin-host outbound)", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0, enablePluginHost: true, enablePluginServices: true });
+
+  // Prepare a mock feishu plugin that supports outbound replyText.
+  const pluginRoot = path.join(fixture.dataDir, "plugins", "feishu");
+  await ensureDir(path.join(pluginRoot, "dist"));
+  await fs.writeFile(
+    path.join(pluginRoot, "agent-workbench.plugin.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        id: "feishu",
+        name: "Feishu IM",
+        version: "0.0.0-test",
+        description: "mock feishu plugin for reply dispatcher test",
+        entry: "dist/index.mjs",
+        capabilities: ["services"],
+        services: [{ name: "gateway" }],
+        uiHints: { sensitiveKeys: ["appSecret"] },
+        configSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["appId", "appSecret"],
+          properties: {
+            appId: { type: "string", minLength: 1 },
+            appSecret: { type: "string", minLength: 1 }
+          }
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  // Outbox file for assertion.
+  const outboxPath = path.join(fixture.dataDir, "feishu-outbox.jsonl");
+  await fs.writeFile(outboxPath, "", "utf8");
+
+  await fs.writeFile(
+    path.join(pluginRoot, "dist", "index.mjs"),
+    [
+      "import fs from 'node:fs/promises';",
+      "export default {",
+      "  meta: { id: 'feishu', name: 'Feishu IM', version: '0.0.0-test' },",
+      "  services: {",
+      "    gateway: {",
+      "      async start() {",
+      "        return {",
+      "          replyText: async ({ chatId, messageId, text }) => {",
+      `            await fs.appendFile(${JSON.stringify(outboxPath)}, JSON.stringify({ chatId, messageId, text }) + "\\n", "utf8");`,
+      "          },",
+      "          stop: async () => {}",
+      "        };",
+      "      }",
+      "    }",
+      "  }",
+      "};",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+
+  // Enable plugin with minimal config to start gateway in plugin-host.
+  const enableRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/plugins",
+    payload: {
+      plugins: [
+        {
+          id: "feishu",
+          enabled: true,
+          config: { appId: "test", appSecret: "test" }
+        }
+      ]
+    }
+  });
+  assert.equal(enableRes.statusCode, 200, `enable plugin failed: ${enableRes.body}`);
+
+  // Wait for services runtime reconcile hook to fire.
+  await sleep(800);
+
+  // Create a session and a completed run with assistant output.
+  const created = await createSession(fixture.app, fixture.workspaceId);
+  const session = getAgentSession(fixture.db, created.id)!;
+  const runId = newSortableId("run");
+  const ts = Date.now();
+
+  const user = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "hello" },
+    createdAt: ts
+  });
+  appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: 1,
+    prevId: user.id,
+    kind: "assistant",
+    status: "completed",
+    output: { type: "assistant_text", text: "final answer" },
+    createdAt: ts
+  });
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: user.id,
+    agentId: "default",
+    providerId: "openai",
+    modelId: "gpt-4o-mini",
+    status: "completed",
+    createdAt: ts
+  });
+
+  // Create conversation binding (reply dispatcher needs chatId).
+  const upsertRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/conversations/upsert-binding",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: {
+      pluginId: "feishu",
+      channelName: "im",
+      accountId: "default",
+      conversationKey: "feishu_default_chat_reply_dispatcher",
+      chatId: "chat_x",
+      chatType: "direct",
+      sessionId: session.id
+    }
+  });
+  assert.equal(upsertRes.statusCode, 200, `upsert-binding failed: ${upsertRes.body}`);
+
+  // Insert a pending reply job.
+  fixture.db
+    .prepare(
+      `
+        insert into channel_reply_job (
+          plugin_id, channel_name, account_id, conversation_key,
+          workspace_id, session_id, run_id,
+          reply_to_external_message_id,
+          status, error_text,
+          created_at, updated_at
+        ) values (
+          'feishu', 'im', 'default', 'feishu_default_chat_reply_dispatcher',
+          @workspaceId, @sessionId, @runId,
+          'm_reply_to',
+          'pending', null,
+          @ts, @ts
+        )
+      `
+    )
+    .run({ workspaceId: fixture.workspaceId, sessionId: session.id, runId, ts });
+
+  // Wait for reply dispatcher to poll and send (poll DB to reduce flakiness).
+  const deadline = Date.now() + 5000;
+  let jobRow: any = null;
+  while (Date.now() < deadline) {
+    jobRow = fixture.db
+      .prepare(`select status, error_text as errorText from channel_reply_job where run_id = ?`)
+      .get(runId) as any;
+    if (jobRow?.status === "sent" || jobRow?.status === "failed") {
+      break;
+    }
+    await sleep(200);
+  }
+
+  assert.ok(jobRow, "job row should exist");
+  assert.equal(jobRow.status, "sent", `expected job sent, got ${String(jobRow.status)} err=${String(jobRow.errorText || "")}`);
+
+  const outbox = await fs.readFile(outboxPath, "utf8");
+  assert.ok(outbox.includes("final answer"), "expected outbox to include final assistant text");
 });

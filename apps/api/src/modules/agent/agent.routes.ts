@@ -10,25 +10,47 @@ import {
   AgentCreateSessionRequestSchema,
   AgentForkSessionRequestSchema,
   AgentRevertSessionRequestSchema,
+  AgentInternalCreateSessionRequestSchema,
   AgentSendMessageRequestSchema,
   AgentSendMessageResponseSchema,
+  type AgentSendMessageRequest,
   AgentClearSessionRequestSchema,
   AgentCompactSessionRequestSchema,
   AgentCompactSessionResponseSchema,
   AgentSessionRecordSchema,
   AgentSessionRunStateSchema,
+  AgentUiLocaleSchema,
   AgentProviderNpmSchema,
+  AgentRecentSessionsRequestSchema,
+  AgentRecentSessionsResponseSchema,
+  AgentListAvailableAgentsRequestSchema,
+  AgentListAvailableAgentsResponseSchema,
+  AgentSessionStatusSummaryRequestSchema,
+  AgentSessionContextItemsTailRequestSchema,
+  AgentSessionContextItemsTailResponseSchema,
+  AgentRecentWorkspacesRequestSchema,
+  AgentRecentWorkspacesResponseSchema,
+  AgentSessionStatusSummaryResponseSchema,
+  PluginToolCanonicalNameSchema,
+  PluginRuntimeSnapshotsResponseSchema,
+  PluginToolRpcExecuteRequestSchema,
+  PluginToolRpcExecuteResponseSchema,
+  PluginToolRpcListRequestSchema,
+  PluginToolRpcListResponseSchema,
   ErrorResponseSchema
 } from "@agent-workbench/shared";
 import type { AgentRuntimePort } from "./agent.runtime-port.js";
 import type { AgentService } from "./agent.service.js";
 import { HttpError } from "../../app/errors.js";
+import type { AgentPluginHostClient } from "./agent.plugin-host-client.js";
+import { listAvailableAgentsForSurface } from "../settings/settings.service.js";
 
 const AgentBuiltinToolNameSchema = Type.Union([
   Type.Literal("bash"),
   Type.Literal("read"),
   Type.Literal("write"),
   Type.Literal("apply_patch"),
+  Type.Literal("scratchpad"),
   Type.Literal("todolist"),
   Type.Literal("subtask"),
   Type.Literal("archive_search"),
@@ -36,7 +58,8 @@ const AgentBuiltinToolNameSchema = Type.Union([
 ]);
 const AgentDynamicToolNameSchema = Type.Union([
   AgentBuiltinToolNameSchema,
-  Type.String({ pattern: "^mcp_[A-Za-z0-9_-]+_[A-Za-z0-9_-]+$" })
+  Type.String({ pattern: "^mcp_[A-Za-z0-9_-]+_[A-Za-z0-9_-]+$" }),
+  PluginToolCanonicalNameSchema
 ]);
 
 function assertInternalToken(req: FastifyRequest, service: AgentService) {
@@ -46,7 +69,10 @@ function assertInternalToken(req: FastifyRequest, service: AgentService) {
   }
 }
 
-export async function registerAgentRoutes(app: FastifyInstance, params: { service: AgentService; runtime: AgentRuntimePort }) {
+export async function registerAgentRoutes(
+  app: FastifyInstance,
+  params: { service: AgentService; runtime: AgentRuntimePort; pluginHost?: AgentPluginHostClient | null }
+) {
   app.get(
     "/api/agent/sessions",
     {
@@ -225,7 +251,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
     },
     async (req, reply) => {
       const p = req.params as { sessionId: string };
-      const body = req.body as { workspaceId: string; text: string; clientRequestId: string; agentId?: string; uiLocale?: "zh-CN" | "en-US" };
+      const body = req.body as AgentSendMessageRequest;
       const result = await params.service.sendMessage({ sessionId: p.sessionId, body });
       if (!result.deduplicated) {
         const workspace = params.service.getWorkspace(body.workspaceId);
@@ -262,7 +288,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
       const p = req.params as { sessionId: string };
       const body = req.body as { workspaceId: string; clientRequestId: string; agentId?: string; uiLocale?: "zh-CN" | "en-US" };
       const result = await params.service.compactSession({ sessionId: p.sessionId, body });
-      if (!result.deduplicated) {
+      if (result.scheduled) {
         const workspace = params.service.getWorkspace(body.workspaceId);
         if (!workspace) throw new HttpError(404, "workspace not found");
         try {
@@ -305,7 +331,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
     },
     async (req) => {
       const p = req.params as { sessionId: string };
-      const body = req.body as { workspaceId: string; reason?: string };
+      const body = req.body as { workspaceId: string; reason?: string; uiLocale?: "zh-CN" | "en-US" };
       return params.service.clearSession(p.sessionId, body);
     }
   );
@@ -322,7 +348,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
     },
     async (req) => {
       const p = req.params as { sessionId: string };
-      const body = req.body as { workspaceId: string; toItemId: number; reason?: string };
+      const body = req.body as { workspaceId: string; itemId: number; reason?: string };
       const result = params.service.revertSession(p.sessionId, body);
       await params.runtime.cancelSession(p.sessionId);
       return result;
@@ -376,6 +402,114 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
   );
 
   app.post(
+    "/api/internal/agent/plugins/runtime-snapshots",
+    {
+      schema: {
+        tags: ["agent"],
+        body: Type.Object({}),
+        response: {
+          200: PluginRuntimeSnapshotsResponseSchema,
+          401: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      return params.service.getPluginRuntimeSnapshotsFromWorker();
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/plugins/tools/list",
+    {
+      schema: {
+        tags: ["agent"],
+        body: PluginToolRpcListRequestSchema,
+        response: {
+          200: PluginToolRpcListResponseSchema,
+          401: ErrorResponseSchema,
+          503: ErrorResponseSchema,
+          500: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      if (!params.pluginHost) {
+        throw new HttpError(503, "plugin host unavailable", "PLUGIN_HOST_UNAVAILABLE");
+      }
+      return await params.pluginHost.listTools(req.body as any);
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/plugins/tools/execute",
+    {
+      schema: {
+        tags: ["agent"],
+        body: PluginToolRpcExecuteRequestSchema,
+        response: {
+          200: PluginToolRpcExecuteResponseSchema,
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+          503: ErrorResponseSchema,
+          500: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      if (!params.pluginHost) {
+        throw new HttpError(503, "plugin host unavailable", "PLUGIN_HOST_UNAVAILABLE");
+      }
+      return await params.pluginHost.executeTool(req.body as any);
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/subtask/prefork-plan",
+    {
+      schema: {
+        tags: ["agent"],
+        body: Type.Object({
+          workspaceId: Type.String({ minLength: 1 }),
+          parentSessionId: Type.String({ minLength: 1 }),
+          parentRunId: Type.String({ minLength: 1 }),
+          parentToolItemId: Type.Number({ minimum: 1 }),
+          agentId: Type.String({ minLength: 1 }),
+          thresholdPct: Type.Optional(Type.Number())
+        }),
+        response: {
+          200: Type.Object({
+            shouldPrefork: Type.Boolean(),
+            thresholdPct: Type.Integer({ minimum: 50, maximum: 99 }),
+            parentLastResponseTotalTokens: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
+            childContextWindowTokens: Type.Integer({ minimum: 1 }),
+            thresholdTokens: Type.Integer({ minimum: 1 })
+          }),
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as {
+        workspaceId: string;
+        parentSessionId: string;
+        parentRunId: string;
+        parentToolItemId: number;
+        agentId: string;
+        thresholdPct?: number;
+      };
+      return params.service.getSubtaskPreforkPlanFromWorker(body);
+    }
+  );
+
+  app.post(
     "/api/internal/agent/subtask/start",
     {
       schema: {
@@ -390,9 +524,17 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
           agentId: Type.String({ minLength: 1 }),
           session: Type.Union([
             Type.Object({ mode: Type.Literal("new") }),
-            Type.Object({ mode: Type.Literal("existing"), sessionId: Type.String({ minLength: 1 }) }),
-            Type.Object({ mode: Type.Literal("fork") })
-          ])
+             Type.Object({ mode: Type.Literal("existing"), sessionId: Type.String({ minLength: 1 }) }),
+             Type.Object({ mode: Type.Literal("fork") })
+           ]),
+           preforkSummaryText: Type.Optional(Type.String({ minLength: 1, maxLength: 100_000 })),
+           preforkMeta: Type.Optional(Type.Object({
+             thresholdPct: Type.Integer({ minimum: 50, maximum: 99 }),
+             parentLastResponseTotalTokens: Type.Number({ minimum: 0 }),
+            childContextWindowTokens: Type.Integer({ minimum: 1 })
+          }, {
+            additionalProperties: false
+          }))
         }),
         response: {
           200: Type.Object({
@@ -418,6 +560,12 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
         prompt: string;
         agentId: string;
         session: { mode: "new" | "existing" | "fork"; sessionId?: string };
+        preforkSummaryText?: string;
+        preforkMeta?: {
+          thresholdPct: number;
+          parentLastResponseTotalTokens: number;
+          childContextWindowTokens: number;
+        };
       };
       return params.service.startSubtaskRunFromWorker(body);
     }
@@ -535,6 +683,165 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
         createdAt: body.createdAt
       });
       return { ok: true, item };
+      }
+  );
+
+  app.post(
+    "/api/internal/agent/sessions/recent",
+    {
+      schema: {
+        tags: ["agent"],
+        body: AgentRecentSessionsRequestSchema,
+        response: {
+          200: AgentRecentSessionsResponseSchema,
+          401: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as { limit?: number; kind?: "primary" | "subtask" | "all" };
+      const limit = typeof body.limit === "number" ? body.limit : 10;
+      const kind = body.kind === "primary" || body.kind === "subtask" || body.kind === "all" ? body.kind : "all";
+      return params.service.listRecentSessions({ limit, kind });
+    }
+  );
+
+  app.get(
+    "/api/internal/agent/workspaces/list",
+    {
+      schema: {
+        tags: ["agent"],
+        querystring: AgentRecentWorkspacesRequestSchema,
+        response: {
+          200: AgentRecentWorkspacesResponseSchema,
+          401: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const query = req.query as { limit?: number };
+      const limit = typeof query.limit === "number" ? query.limit : 10;
+      return params.service.listRecentWorkspaces({ limit });
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/sessions/create",
+    {
+      schema: {
+        tags: ["agent"],
+        body: AgentInternalCreateSessionRequestSchema,
+        response: { 201: AgentSessionRecordSchema, 400: ErrorResponseSchema, 401: ErrorResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req, reply) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as { workspaceId: string; title?: string; kind?: "primary" | "subtask" };
+      const session = params.service.createSession(body);
+      return reply.code(201).send(session);
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/agents/list",
+    {
+      schema: {
+        tags: ["agent"],
+        body: AgentListAvailableAgentsRequestSchema,
+        response: {
+          200: AgentListAvailableAgentsResponseSchema,
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as { workspaceId: string; surface?: string };
+      const workspaceId = String(body.workspaceId || "").trim();
+      if (!workspaceId) throw new HttpError(400, "workspaceId is required", "WORKSPACE_ID_REQUIRED");
+      const ws = params.service.getWorkspace(workspaceId);
+      if (!ws) throw new HttpError(404, "workspace not found", "WORKSPACE_NOT_FOUND");
+      const surface = "user";
+      const agents = listAvailableAgentsForSurface(params.service.getContext(), surface)
+        .filter((a) => a.scope === "user" || a.scope === "both")
+        .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name));
+      return { agents };
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/sessions/status-summary",
+    {
+      schema: {
+        tags: ["agent"],
+        body: AgentSessionStatusSummaryRequestSchema,
+        response: {
+          200: AgentSessionStatusSummaryResponseSchema,
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          500: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      try {
+        const body = req.body as { sessionId: string; agentId?: string; selectedAgentId?: string };
+        return params.service.getSessionStatusSummary({
+          sessionId: body.sessionId,
+          agentId: body.agentId,
+          selectedAgentId: body.selectedAgentId
+        });
+      } catch (err) {
+        if (err instanceof HttpError) throw err;
+        throw new HttpError(500, "failed to get session status summary", "SESSION_STATUS_SUMMARY_FAILED");
+      }
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/sessions/context-items-tail",
+    {
+      schema: {
+        tags: ["agent"],
+        body: AgentSessionContextItemsTailRequestSchema,
+        response: {
+          200: AgentSessionContextItemsTailResponseSchema,
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+          500: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const pluginId = String(req.headers["x-awb-plugin-id"] || "").trim();
+      if (!pluginId) {
+        throw new HttpError(400, "x-awb-plugin-id is required", "PLUGIN_ID_REQUIRED");
+      }
+      const body = req.body as { pluginId: string; sessionId: string; tailLimit?: number };
+      const bodyPluginId = String(body.pluginId || "").trim();
+      if (!bodyPluginId) {
+        throw new HttpError(400, "pluginId is required", "PLUGIN_ID_REQUIRED");
+      }
+      if (bodyPluginId !== pluginId) {
+        throw new HttpError(401, "pluginId mismatch", "PLUGIN_ID_MISMATCH");
+      }
+
+      const sessionId = String(body.sessionId || "").trim();
+
+      if (!sessionId) {
+        throw new HttpError(400, "sessionId is required", "SESSION_ID_REQUIRED");
+      }
+
+      return params.service.getContextItems(sessionId, { tailLimit: body.tailLimit });
     }
   );
 
@@ -692,7 +999,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
           regex: Type.Optional(Type.Boolean())
         }),
         response: {
-          200: Type.Object({ text: Type.String() }),
+          200: Type.Object({ text: Type.String(), noArchive: Type.Optional(Type.Boolean()) }),
           400: ErrorResponseSchema,
           401: ErrorResponseSchema,
           404: ErrorResponseSchema
@@ -728,7 +1035,7 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
           maxChars: Type.Optional(Type.Integer({ minimum: 1000, maximum: 10000 }))
         }),
         response: {
-          200: Type.Object({ text: Type.String() }),
+          200: Type.Object({ text: Type.String(), noArchive: Type.Optional(Type.Boolean()) }),
           400: ErrorResponseSchema,
           401: ErrorResponseSchema,
           404: ErrorResponseSchema
@@ -784,7 +1091,8 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
                 args: Type.Any()
               })
             ),
-            lastResponseTotalTokens: Type.Union([Type.Number({ minimum: 0 }), Type.Null()])
+            lastResponseTotalTokens: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
+            uiLocale: Type.Union([AgentUiLocaleSchema, Type.Null()])
           }),
           400: ErrorResponseSchema,
           401: ErrorResponseSchema,
@@ -796,6 +1104,48 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
       assertInternalToken(req, params.service);
       const body = req.body as { workspaceId: string; sessionId: string; runId: string };
       return params.service.getPromptContextForRun(body);
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/messages-context",
+    {
+      schema: {
+        tags: ["agent"],
+        body: Type.Object({
+          workspaceId: Type.String({ minLength: 1 }),
+          sessionId: Type.String({ minLength: 1 }),
+          appendMessage: Type.Optional(
+            Type.Object({
+              role: Type.Union([Type.Literal("system"), Type.Literal("user")]),
+              content: Type.String({ minLength: 1 })
+            })
+          )
+        }),
+        response: {
+          200: Type.Object({
+            headItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
+            messages: Type.Array(
+              Type.Object({
+                role: Type.Union([Type.Literal("system"), Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool")]),
+                content: Type.Any()
+              })
+            )
+          }),
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as {
+        workspaceId: string;
+        sessionId: string;
+        appendMessage?: { role: "system" | "user"; content: string };
+      };
+      return params.service.getMessagesContext(body);
     }
   );
 
@@ -822,12 +1172,13 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
             agent: Type.Object({
               id: Type.String({ minLength: 1 }),
               name: Type.String({ minLength: 1 }),
-              summary: Type.String({ maxLength: 160 }),
-              prompt: Type.String(),
-              tools: Type.Array(AgentBuiltinToolNameSchema),
-              mcpServers: Type.Array(Type.String({ minLength: 1 })),
-              defaultModel: Type.Union([
-                Type.Object({ providerId: Type.String({ minLength: 1 }), modelId: Type.String({ minLength: 1 }) }),
+               summary: Type.String({ maxLength: 160 }),
+               prompt: Type.String(),
+               tools: Type.Array(AgentBuiltinToolNameSchema),
+               pluginTools: Type.Array(PluginToolCanonicalNameSchema),
+               mcpServers: Type.Array(Type.String({ minLength: 1 })),
+               defaultModel: Type.Union([
+                 Type.Object({ providerId: Type.String({ minLength: 1 }), modelId: Type.String({ minLength: 1 }) }),
                 Type.Null()
               ])
             }),
@@ -837,7 +1188,8 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
               npm: AgentProviderNpmSchema,
               options: Type.Object({
                 baseURL: Type.String({ minLength: 1 }),
-                apiKey: Type.String({ minLength: 1 })
+                apiKey: Type.String({ minLength: 1 }),
+                apiMode: Type.Optional(Type.Union([Type.Literal("responses"), Type.Literal("chatCompletions")]))
               })
             }),
             model: Type.Object({
@@ -898,7 +1250,8 @@ export async function registerAgentRoutes(app: FastifyInstance, params: { servic
               npm: AgentProviderNpmSchema,
               options: Type.Object({
                 baseURL: Type.String({ minLength: 1 }),
-                apiKey: Type.String({ minLength: 1 })
+                apiKey: Type.String({ minLength: 1 }),
+                apiMode: Type.Optional(Type.Union([Type.Literal("responses"), Type.Literal("chatCompletions")]))
               })
             }),
             model: Type.Object({

@@ -22,12 +22,14 @@ import type {
   AgentSessionRecord,
   AgentSessionRunState,
   AgentContextToolName,
+  AgentRecentSessionsResponse,
+  AgentRecentWorkspacesResponse,
 } from "@agent-workbench/shared";
 import { HttpError } from "../../app/errors.js";
 import type { AppContext } from "../../app/context.js";
 import { nowMs } from "../../utils/time.js";
 import { newSortableId } from "../../utils/ids.js";
-import { getWorkspace } from "../workspaces/workspace.store.js";
+import { getWorkspace, listRecentWorkspaces } from "../workspaces/workspace.store.js";
 import {
   agentArchiveSessionDir,
   applyPatchUiArtifactPath,
@@ -43,6 +45,8 @@ import {
   findClientRequestDedup,
   getAgentSession,
   getContextItemById,
+  getLatestCompletedAssistantTextByRunId,
+  getLatestTerminalAssistantTextByRunId,
   getLatestTerminalRunRecord,
   getLatestSessionItemId,
   getRunRecord,
@@ -56,8 +60,10 @@ import {
   getSessionVisibleItems,
   insertClientRequestDedup,
   listAgentSessions,
+  listRecentSessionsAcrossWorkspaces,
   listNonTerminalVisibleItemIds,
   listNonTerminalSessionItemIds,
+  listNonTerminalSessionItemIdsByRunId,
   hasNonTerminalSessionItems,
   listNonTerminalRunIdsByItemIds,
   listNonTerminalRunIdsBySession,
@@ -77,10 +83,12 @@ import {
   getAgentRuntimeSettings,
   registerGlobalSystemPromptTextProvider,
   getAgentSettings,
+  listAvailableAgentsForSurface,
   resolveGlobalDefaultModelProfile,
   resolveExecutionProfile
 } from "../settings/settings.service.js";
 import { projectToolCallInputForPrompt } from "./prompt/tool-projectors/index.js";
+import { listPluginRuntimeSnapshots } from "../plugins/plugin.service.js";
 
 export type AgentQueuedRun = {
   workspaceId: string;
@@ -105,7 +113,7 @@ function toolArgsSchema(toolName: AgentContextToolName) {
           type: "integer",
           minimum: 1,
           default: 120,
-          description: "超时秒数(整数),默认 120 秒。注意: 单位是秒,不是毫秒。"
+          description: "Timeout in seconds (integer). Default is 120. Note: the unit is seconds, not milliseconds."
         }
       }
     };
@@ -118,7 +126,13 @@ function toolArgsSchema(toolName: AgentContextToolName) {
       properties: {
         filePath: { type: "string", minLength: 1 },
         offset: { type: "number", minimum: 1 },
-        limit: { type: "number", minimum: 1 }
+        limit: {
+          type: "number",
+          minimum: 1,
+          maximum: 2000,
+          default: 500,
+          description: "Maximum lines (file) or entries (directory) to return. Default: 500. Maximum: 2000."
+        }
       }
     };
   }
@@ -132,11 +146,11 @@ function toolArgsSchema(toolName: AgentContextToolName) {
           type: "string",
           minLength: 1,
           description: [
-            "patchText 是 git unified diff(文本)字符串,包含 diff --git/---/+++/@@ 等行。",
-            "支持: 修改/新增/删除文本文件;多文件 diff;单文件多个 @@ hunk;rename/move(含 rename-only)。",
-            "不支持: 二进制补丁(GIT binary patch)、submodule、copy from/to 等高级元数据。",
-            "限制: 仅文本;路径必须在当前目录内且拒绝 symlink/越界路径;新增文件不允许覆盖已存在路径。",
-            "失败提示: 若应用失败(上下文不匹配),请基于当前目录重新生成 diff,或增加上下文行数(例如 git diff -U5)。"
+            "patchText must be a git unified diff text containing lines such as diff --git/---/+++/@@.",
+            "Supported: modify/add/delete text files, multi-file diffs, multiple @@ hunks in one file, and rename/move operations (including rename-only).",
+            "Not supported: binary patches (GIT binary patch), submodules, copy from/to, or other advanced metadata.",
+            "Constraints: text only; paths must stay inside the current directory and symlink/out-of-workspace paths are rejected; new files must not overwrite existing paths.",
+            "Failure hint: if the patch fails to apply due to context mismatch, regenerate the diff from the current directory or include more context lines (for example, git diff -U5)."
           ].join("\n")
         }
       }
@@ -163,6 +177,20 @@ function toolArgsSchema(toolName: AgentContextToolName) {
               }
             }
           }
+        }
+      }
+    };
+  }
+  if (toolName === "scratchpad") {
+    return {
+      type: "object",
+      required: ["content"],
+      additionalProperties: false,
+      properties: {
+        content: {
+          type: "string",
+          maxLength: 200,
+          description: "A short scratchpad entry to record. Suggested <= 200 characters."
         }
       }
     };
@@ -204,20 +232,20 @@ function toolArgsSchema(toolName: AgentContextToolName) {
           type: "string",
           minLength: 1,
           maxLength: 20,
-          description: "用20字以内介绍任务目标"
+          description: "Briefly describe the task goal in 20 characters or fewer."
         },
         prompt: {
           type: "string",
           minLength: 1,
-          description: "子任务详细指令,建议写清输入范围、约束和期望输出格式"
+          description: "Detailed instructions for the subtask. Clearly describe the input scope, constraints, and expected output format."
         },
         agentId: {
           type: "string",
           minLength: 1,
-          description: "执行子任务的Agent ID"
+          description: "The agent ID that should execute the subtask."
         },
         session: {
-          description: "子任务会话策略",
+          description: "The session strategy for the subtask.",
           oneOf: [
             {
               type: "object",
@@ -226,7 +254,7 @@ function toolArgsSchema(toolName: AgentContextToolName) {
               properties: {
                 mode: { const: "new" }
               },
-              description: "new: 从头开始,或需要独立思考时使用"
+              description: "new: start from scratch, or use when the subtask needs independent thinking."
             },
             {
               type: "object",
@@ -236,7 +264,7 @@ function toolArgsSchema(toolName: AgentContextToolName) {
                 mode: { const: "existing" },
                 sessionId: { type: "string", minLength: 1 }
               },
-              description: "existing: 基于既有工作成果继续推进"
+              description: "existing: continue based on an existing subtask session to reuse prior work."
             },
             {
               type: "object",
@@ -245,7 +273,7 @@ function toolArgsSchema(toolName: AgentContextToolName) {
               properties: {
                 mode: { const: "fork" }
               },
-              description: "fork: 需要完整背景信息,仅靠提示词无法充分表达时使用"
+              description: "fork: use when the subtask needs the full parent-session context and the prompt alone is not sufficient."
             }
           ]
         }
@@ -265,19 +293,19 @@ function toolArgsSchema(toolName: AgentContextToolName) {
 
 function buildSubtaskToolDescription(agentItems: Array<{ id: string; name: string; summary: string }>) {
   const header = [
-    "将任务放到子会话执行,再把结果带回主会话。",
-    "适用场景:",
-    "- 控制主会话上下文质量: 高噪声或长过程任务先在子会话处理,仅回传提炼后的有效信息",
-    "- 只关注结果、不关注过程: 主会话只保留结论和关键依据",
-    "- 复杂任务分治: 仅在复杂或可并行拆分场景使用; 简单任务不建议拆分,否则会增加协调成本",
+    "Run the task in a subtask session and bring the result back to the parent session.",
+    "Recommended use cases:",
+    "- Preserve parent-session context quality: handle noisy or long-running work in a subtask first, then return only the distilled useful information.",
+    "- Focus on results instead of process: keep only the conclusion and key evidence in the parent session.",
+    "- Divide complex work: use only for tasks that are genuinely complex or can be parallelized; avoid splitting simple tasks because it adds coordination cost.",
     "",
-    "session.mode 选择建议:",
-    "- new: 从头开始,或需要独立思考时使用",
-    "  示例: 网络调研可因“从头开始”使用new; 代码审查可因“独立思考”使用new",
-    "- fork: 需要完整背景信息,仅靠提示词无法充分表达时使用",
-    "- existing: 基于既有工作成果继续推进,避免重复劳动",
+    "Guidance for choosing session.mode:",
+    "- new: start from scratch, or use when independent thinking is needed.",
+    "  Example: use new for web research when starting fresh is useful, or for code review when independent thinking is preferred.",
+    "- fork: use when the full parent-session context is needed and the prompt alone cannot express it adequately.",
+    "- existing: continue from an existing subtask session to avoid repeating work.",
     "",
-    "结果: 成功后返回 subtaskSessionId 与子任务结果文本。"
+    "Result: on success, returns subtaskSessionId and the subtask result text."
   ];
 
   const normalizedAgents = agentItems
@@ -289,31 +317,31 @@ function buildSubtaskToolDescription(agentItems: Array<{ id: string; name: strin
     .filter((item) => item.id.length > 0 && item.name.length > 0);
 
   if (normalizedAgents.length === 0) {
-    return `${header.join("\n")}\n\n可选Agent:\n- 当前无可用Agent`;
+    return `${header.join("\n")}\n\nAvailable agents:\n- No agents are currently available`;
   }
 
   const lines = normalizedAgents.map((item) =>
     item.summary ? `- ${item.id}: ${item.name} - ${item.summary}` : `- ${item.id}: ${item.name}`
   );
-  return `${header.join("\n")}\n\n可选Agent:\n${lines.join("\n")}`;
+  return `${header.join("\n")}\n\nAvailable agents:\n${lines.join("\n")}`;
 }
 
 function toolDescription(toolName: AgentContextToolName, options?: { subtaskDescription?: string }) {
   if (toolName === "bash") {
     return [
-      "执行一个 bash 命令并返回 stdout/stderr。",
-      "内部等价于: bash -lc <command>",
+      "Run a bash command and return stdout/stderr.",
+      "Internally equivalent to: bash -lc <command>",
       "",
-      "参数:",
-      "- command: 必填,字符串。直接写要执行的命令,不要传数组,也不要在 command 里再写 bash -lc。",
-      "- workdir: 可选,工作目录。强烈建议不填(默认就是当前目录)。如需指定,尽量使用相对路径(相对当前目录),避免写 /workspace 之类的绝对路径。",
-      "- timeout: 可选,超时秒数(整数),默认 120。",
-      "  注意: timeout 的单位是秒(不是毫秒),不要传 120000 这类毫秒值。",
+      "Arguments:",
+      "- command: Required string. Provide the exact command to run. Do not pass an array, and do not wrap it in bash -lc again.",
+      "- workdir: Optional working directory. Prefer leaving it unset (the current directory is the default). If needed, prefer a relative path inside the current directory rather than an absolute path such as /workspace.",
+      "- timeout: Optional timeout in seconds (integer). Default: 120.",
+      "  Note: timeout is measured in seconds, not milliseconds. Do not pass values such as 120000.",
       "",
-      "建议:",
-      "- 尽量在当前目录内行动,路径优先使用相对路径。",
+      "Guidance:",
+      "- Prefer operating inside the current directory, and prefer relative paths when possible.",
       "",
-      "示例:",
+      "Examples:",
       "- {\"command\":\"pwd\"}",
       "- {\"command\":\"pwd && ls -la\"}",
       "- {\"command\":\"rg -n \\\"TODO\\\" .\",\"workdir\":\"apps/api\"}"
@@ -321,34 +349,34 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
   }
   if (toolName === "read") {
     return [
-      "读取当前目录内目录或UTF-8文本文件,支持offset/limit,超长行截断,输出上限50KB,不支持非文本或特殊文件类型。",
-      "读取文件时,offset 表示从第几行开始读取;读取目录时,offset 表示从第几个条目开始读取;二者都从 1 开始计数。",
-      "继续读取同一文件或目录时,应使用上一次 read 返回结果中明确给出的 offset,不要自行猜测下一个 offset。",
-      "如果读取文件的结果显示 End of file,表示该文件已经没有更多内容可读,不要继续对同一文件分页调用 read,除非文件发生变化。",
-      "如果请求的 offset 超过文件总行数,工具会返回文件结尾说明,而不是失败。"
+      "Read a directory or UTF-8 text file inside the current directory. Supports offset/limit pagination, truncates very long lines, and caps output at 50KB. Non-text and special file types are not supported.",
+      "When reading a file, offset is the starting line number. When reading a directory, offset is the starting entry number. Both are 1-based.",
+      "When continuing to read the same file or directory, use the offset explicitly returned by the previous read result instead of guessing the next offset yourself.",
+      "If the result says End of file, the file has no more content to read. Do not continue paging the same file unless it changes.",
+      "If the requested offset exceeds the file length, the tool returns an end-of-file notice instead of failing."
     ].join(" ");
   }
   if (toolName === "apply_patch") {
     return [
-      "用 git unified diff(文本)批量修改当前目录内文件,用于最小改动与多文件联动。",
+      "Apply a git unified diff (text) to update files inside the current directory. Best for minimal edits and coordinated multi-file changes.",
       "",
-      "格式:",
-      "- patchText 必须是 git diff/unified diff 常见文本格式,包含 diff --git/---/+++/@@ 等行。",
+      "Format:",
+      "- patchText must be a standard git diff / unified diff text containing lines such as diff --git, ---, +++, and @@.",
       "",
-      "支持:",
-      "- 多文件 diff",
-      "- 单文件多个 @@ hunk",
-      "- 新增文件: --- /dev/null +++ b/<path>",
-      "- 删除文件: --- a/<path> +++ /dev/null",
-      "- rename/move: rename from/rename to(支持 rename-only 与 rename+修改)",
+      "Supported:",
+      "- Multi-file diffs",
+      "- Multiple @@ hunks in a single file",
+      "- Add file: --- /dev/null +++ b/<path>",
+      "- Delete file: --- a/<path> +++ /dev/null",
+      "- rename/move: rename from / rename to (supports rename-only and rename+modify)",
       "",
-      "限制:",
-       "- 仅文本;不支持二进制补丁(GIT binary patch)、submodule。",
-       "- 路径必须在当前目录内,拒绝 symlink/越界路径。",
-       "- 新增文件不允许覆盖已存在路径。",
-       "- 为降低语法错误或上下文不匹配导致整批失败的风险,优先将互不依赖的改动拆成多个更小粒度的 apply_patch 调用;若这些调用彼此独立,可并发执行。若改动彼此强相关或需要原子性,则应保持在同一次 patch 中。",
+      "Constraints:",
+       "- Text only; binary patches (GIT binary patch) and submodules are not supported.",
+       "- Paths must stay inside the current directory; symlink and out-of-workspace paths are rejected.",
+       "- New files must not overwrite existing paths.",
+       "- To reduce the risk of a batch failure caused by syntax errors or context mismatches, prefer splitting unrelated edits into multiple smaller apply_patch calls. If those calls are independent, they may be executed in parallel. If changes are tightly coupled or need atomicity, keep them in a single patch.",
        "",
-       "示例(最小更新):",
+       "Example (minimal update):",
        "diff --git a/src/foo.txt b/src/foo.txt",
        "index 1111111..2222222 100644",
        "--- a/src/foo.txt",
@@ -357,7 +385,7 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
        "-old",
        "+new",
        "",
-       "示例(单文件多段更新):",
+       "Example (multiple hunks in one file):",
        "diff --git a/src/foo.txt b/src/foo.txt",
        "index 1111111..3333333 100644",
        "--- a/src/foo.txt",
@@ -371,7 +399,7 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
        "+gamma-1",
        " delta",
        "",
-       "示例(新增文件):",
+       "Example (add file):",
        "diff --git a/src/new-file.txt b/src/new-file.txt",
        "new file mode 100644",
        "--- /dev/null",
@@ -380,7 +408,7 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
        "+hello",
        "+world",
        "",
-       "示例(多文件 diff):",
+       "Example (multi-file diff):",
        "diff --git a/src/a.txt b/src/a.txt",
        "index 1111111..2222222 100644",
        "--- a/src/a.txt",
@@ -396,61 +424,72 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
        "-old-b",
        "+new-b",
        "",
-       "示例(rename/move):",
+       "Example (rename/move):",
        "diff --git a/src/old-name.txt b/src/new-name.txt",
        "similarity index 100%",
        "rename from src/old-name.txt",
        "rename to src/new-name.txt"
      ].join("\n");
-   }
-   if (toolName === "todolist") {
-    return [
-      "这是用于维护任务清单与执行进度的管理工具（面向用户展示进度，也用于约束你按计划推进）。",
-      "",
-       "快速自检（满足任一条即可跳过 todolist）：",
-       "- 如果你规划的任务步骤数 <= 3 步；或",
-       "- 如果你预计完成该请求所需调用工具的总次数 <= 10 次；",
-       "则可以不使用 todolist，直接执行。",
-       "否则（更复杂/更长流程/不确定会做多少步或多少次工具调用），必须使用 todolist：先给出任务清单，再开始执行。",
-        "",
-        "使用规则：",
-       "- 总体目标通过 goal 表达；goal 为必填，表示这份任务清单当前服务的目标。",
-       "- goal 应保持简短，建议控制在 50 字内；若过长，运行时会自动截断。",
-       "- 每次调用都提交完整的 todos 数组；语义是“全量替换”，不是增量 patch。",
-       "- 若 goal 或任务列表发生变化，都应提交完整的 goal + todos 作为最新状态。",
-       "- todos 从上到下代表优先级：先规划再执行，优先做靠前项。",
-       "- 任务状态仅允许：pending | in_progress | completed | cancelled。",
-       "- 允许同时存在多个 in_progress，但应尽量保持进行中的任务数量可控、符合实际。",
-      "- 每条 todo 必须包含：",
-      "  - content：非空字符串（trim 后不能为空）",
-      "  - status：上述枚举之一",
-      "- 当任务状态发生变化时必须立即更新清单，包括但不限于：",
-      "  - 开始执行某项（pending -> in_progress）",
-      "  - 完成（-> completed）",
-      "  - 取消/不再需要（-> cancelled）",
-      "  - 发现遗漏、拆分、合并、回退或新增任务（结构变化也要更新）",
-       "- 目标：让用户持续看到清晰、可信、实时的进度窗口，并促使你以可追踪、按优先级的方式推进，避免无计划地展开。",
+    }
+    if (toolName === "todolist") {
+     return [
+       "Use this management tool to maintain a task list and execution progress. It is shown to the user and also helps enforce planned execution.",
        "",
-       "输入示例：",
-       "{\"goal\":\"完成 todolist goal 增强\",\"todos\":[{\"content\":\"梳理需求与约束\",\"status\":\"completed\"},{\"content\":\"实现核心逻辑\",\"status\":\"in_progress\"},{\"content\":\"补充测试与验证\",\"status\":\"pending\"}]}"
-     ].join("\n");
-   }
+        "Quick self-check (skip todolist if any condition is met):",
+        "- If your planned work has 3 steps or fewer; or",
+        "- If you expect to need 10 tool calls or fewer to complete the request;",
+        "you may skip todolist and proceed directly.",
+       "Otherwise, for longer, more complex, or uncertain work, you must use todolist: first present the task list, then begin execution.",
+        "",
+        "Usage rules:",
+       "- Express the overall objective with goal; goal is required and states what the current task list is serving.",
+       "- Keep goal short; 50 characters or fewer is recommended. Longer values may be truncated at runtime.",
+       "- Submit the full todos array on every call; the semantics are full replacement, not an incremental patch.",
+       "- If goal or the task list changes, submit the full goal + todos as the latest state.",
+       "- Todos are ordered by priority from top to bottom: plan first, then execute, and prioritize earlier items.",
+       "- Allowed task statuses are: pending | in_progress | completed | cancelled.",
+       "- Multiple in_progress items are allowed, but keep the number of active tasks realistic and manageable.",
+      "- Each todo must include:",
+      "  - content: a non-empty string (it must remain non-empty after trim)",
+      "  - status: one of the allowed enum values above",
+      "- Update the list immediately whenever task status changes, including but not limited to:",
+      "  - Starting a task (pending -> in_progress)",
+      "  - Completing a task (-> completed)",
+      "  - Cancelling / no longer needing a task (-> cancelled)",
+      "  - Discovering omissions, splitting, merging, rolling back, or adding tasks (structural changes also require an update)",
+       "- Goal: keep the user seeing a clear, trustworthy, real-time progress view, and enforce traceable, priority-driven execution instead of unplanned expansion.",
+        "",
+        "Example input:",
+        "{\"goal\":\"Complete the todolist goal enhancement\",\"todos\":[{\"content\":\"Review requirements and constraints\",\"status\":\"completed\"},{\"content\":\"Implement core logic\",\"status\":\"in_progress\"},{\"content\":\"Add tests and verification\",\"status\":\"pending\"}]}"
+      ].join("\n");
+    }
+    if (toolName === "scratchpad") {
+      return [
+        "Record a short scratchpad entry into the runtime session state as persistent working memory.",
+        "",
+        "Arguments:",
+        "- content: Required string. Suggested <= 200 characters.",
+        "",
+        "Example input:",
+        "{\"content\":\"Plan: read agent.service.ts to find tool registry\"}"
+      ].join("\n");
+    }
   if (toolName === "archive_search") {
     return (
-      "在当前会话归档日志中检索关键词,输出按旧到新排序的纯文本行,每行包含 pos 前缀。" +
-      "默认返回整行;传 snippet=true 时返回命中窗口片段。" +
-      "可通过 beforePos 继续读取更旧命中。" +
-      "提示: 你也可以直接搜索归档元数据字段来过滤,例如 kind/status/tool/item/ts。" +
-      "示例(整行,找最近5条用户或assistant消息): {\"query\":\"kind=(user|assistant)\",\"regex\":true,\"maxHits\":5}" +
-      "示例(关键词命中多时先限制并可翻页): {\"query\":\"timeout\",\"snippet\":true,\"maxHits\":10,\"maxChars\":3000} 然后用 beforePos=<pos> 翻页。"
+      "Search the current session archive log for keywords and return plain-text lines sorted from oldest to newest, each prefixed with pos." +
+      " By default, full lines are returned; if snippet=true, matched windows are returned instead." +
+      " Use beforePos to continue reading older hits." +
+      " Hint: you can also search archive metadata fields directly, such as kind/status/tool/item/ts." +
+      " Example (full lines, find the latest 5 user or assistant messages): {\"query\":\"kind=(user|assistant)\",\"regex\":true,\"maxHits\":5}" +
+      " Example (too many hits, limit first and then page): {\"query\":\"timeout\",\"snippet\":true,\"maxHits\":10,\"maxChars\":3000} Then page with beforePos=<pos>."
     );
   }
   if (toolName === "archive_read") {
-    return "读取归档日志中的最近若干行,输出按旧到新排序的纯文本行,每行包含 pos 前缀。可通过 beforePos 限定只读更旧内容。";
+    return "Read the most recent lines from the archive log and return plain-text lines sorted from oldest to newest, each prefixed with pos. Use beforePos to restrict the read to older content only.";
   }
-  if (toolName === "subtask") return options?.subtaskDescription || "在子会话中执行任务。";
-  if (toolName.startsWith("mcp_")) return `调用 MCP 工具 ${toolName}`;
-  return "写入当前目录内文件并全量覆盖,作为确定性兜底工具,当需要直接重写完整内容或 patch 匹配不稳定时使用。";
+  if (toolName === "subtask") return options?.subtaskDescription || "Execute a task in a subtask session.";
+  if (toolName.startsWith("mcp_")) return `Call MCP tool ${toolName}`;
+  return "Write and fully overwrite a file inside the current directory. Use this as a deterministic fallback when you need to rewrite the whole file or when patch matching is unstable.";
 }
 
 function stringifyToolResult(raw: unknown) {
@@ -634,7 +673,7 @@ function splitWriteResult(raw: unknown): {
   const summary = typeof src.summary === "string" && src.summary.trim()
     ? src.summary
     : filePath
-      ? `写入文件 ${filePath}`
+      ? `Wrote file ${filePath}`
       : "write completed";
   const before = normalizeWriteUiSide(src.before, "missing_file");
   const after = normalizeWriteUiSide(src.after, "missing_content");
@@ -694,6 +733,68 @@ function toTerminalWriteOutput(output: AgentContextItemRecord["output"]) {
     ...output,
     args: toWriteSlimArgs(output.args)
   };
+}
+
+function buildToolText(params: {
+  toolName: string;
+  status: "running" | "completed" | "failed" | "cancelled";
+  headers?: Array<[string, string | undefined]>;
+  body?: string;
+}) {
+  const lines: string[] = [`tool: ${params.toolName}`, `status: ${params.status}`];
+  for (const [key, value] of params.headers ?? []) {
+    if (value == null || !String(value).trim()) continue;
+    lines.push(`${key}: ${String(value).trim()}`);
+  }
+  lines.push("");
+  const body = typeof params.body === "string" ? params.body : "";
+  if (body) lines.push(body);
+  return lines.join("\n");
+}
+
+function parseSubtaskSessionIdFromToolText(text: unknown) {
+  if (typeof text !== "string") return "";
+  const match = text.match(/(?:^|\n)subtask_session_id:\s*([^\s]+)/);
+  return match ? String(match[1] || "").trim() : "";
+}
+
+function toTerminalSubtaskCancelledOutput(output: AgentContextItemRecord["output"]) {
+  if (!output || output.type !== "tool" || output.toolName !== "subtask") return output;
+
+  const resultObj = output.result && typeof output.result === "object" ? (output.result as Record<string, unknown>) : null;
+  const fromResult = typeof resultObj?.subtaskSessionId === "string" ? resultObj.subtaskSessionId.trim() : "";
+  const fromText = parseSubtaskSessionIdFromToolText((output as { text?: unknown }).text);
+  const subtaskSessionId = fromResult || fromText;
+
+  const body = subtaskSessionId
+    ? `Subtask was cancelled. To continue it later, call subtask with session: { mode: "existing", sessionId: "${subtaskSessionId}" }.`
+    : "Subtask was cancelled.";
+
+  const nextResult = resultObj
+    ? {
+        ...resultObj,
+        ...(subtaskSessionId && !fromResult ? { subtaskSessionId } : {})
+      }
+    : output.result;
+
+  return {
+    ...output,
+    text: buildToolText({
+      toolName: "subtask",
+      status: "cancelled",
+      headers: [["subtask_session_id", subtaskSessionId || undefined]],
+      body
+    }),
+    ...(nextResult !== output.result ? { result: nextResult } : {})
+  } as AgentContextItemRecord["output"];
+}
+
+function toTerminalCancelledOutput(output: AgentContextItemRecord["output"]) {
+  // cancelSession: 只在终态收尾时做最小必要的输出规整。
+  // - write: 瘦身 args.content
+  // - subtask: 明确 cancelled，并保留 subtask_session_id + 复用提示
+  const writeNormalized = toTerminalWriteOutput(output);
+  return toTerminalSubtaskCancelledOutput(writeNormalized);
 }
 
 async function ensureRealPathUnderRoot(rootAbs: string, targetAbs: string) {
@@ -779,30 +880,70 @@ function formatRuntimeDateTime(date: Date) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
+function buildOutputFormatInstruction(input: { uiLocale: AgentUiLocale | null }) {
+  if (input.uiLocale !== "zh-CN") {
+    return [
+      "Output format requirements:",
+      "- Prefer Markdown in responses when it improves readability.",
+      "- When appropriate, prefer headings, lists, tables, blockquotes, inline code, code blocks, and links.",
+      "- For comparisons, parameter descriptions, or option differences, prefer tables.",
+      "- For commands, code, configuration, or log snippets, prefer fenced code blocks.",
+      "- When useful for flows or relationships, Mermaid fenced code blocks may be used.",
+      "- Do not rely on images, embedded HTML, task list checkboxes, or mathematical formulas.",
+      "- If Markdown would reduce clarity, use plain text instead."
+    ].join("\n");
+  }
+
+  return [
+    "输出格式要求：",
+    "- 回复时优先使用 Markdown，以提升可读性。",
+    "- 在合适时优先使用标题、列表、表格、引用、行内代码、代码块和链接。",
+    "- 对比信息、参数说明、选项差异等内容，优先使用表格展示。",
+    "- 命令、代码、配置、日志片段应优先使用 fenced code block。",
+    "- 需要表达流程或关系图时，可使用 Mermaid fenced code block。",
+    "- 不要依赖图片、内嵌 HTML、任务列表复选框或数学公式等格式。",
+    "- 如果 Markdown 会降低表达清晰度，则直接使用纯文本。"
+  ].join("\n");
+}
+
 function buildRuntimeInstruction(input: { uiLocale: AgentUiLocale | null; now: Date }) {
   const timeText = formatRuntimeDateTime(input.now);
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   const lines: string[] = [];
+  const pushGroup = (group: string[]) => {
+    if (!group.length) return;
+    if (lines.length) lines.push("");
+    lines.push(...group);
+  };
+
   if (input.uiLocale === "zh-CN") {
-    lines.push(
+    pushGroup([
       "语言要求：本轮对话请统一使用简体中文。",
       "对用户的回答使用简体中文。",
       "内部思考/推理文本使用简体中文。",
       "若调用 todolist，其中的 goal 与 todos[].content 必须使用简体中文。",
-      "代码、命令、路径、接口名、配置键名、报错原文等需要保真的内容可保持原样，不必翻译。",
+      "代码、命令、路径、接口名、配置键名、报错原文等需要保真的内容可保持原样，不必翻译。"
+    ]);
+    pushGroup([
       `当前系统时间：${timeText}`,
       `当前时区：${timeZone}`
-    );
+    ]);
   } else {
-    lines.push(
+    if (input.uiLocale === "en-US") {
+      pushGroup([
+        "Language requirement: use English consistently for this run.",
+        "Respond to the user in English.",
+        "Use English for internal reasoning/thought text.",
+        "If you call todolist, the goal and todos[].content must also be in English.",
+        "Code, commands, paths, API names, config keys, and original error messages may remain verbatim when needed."
+      ]);
+    }
+    pushGroup([
       `Current system time: ${timeText}`,
       `Time zone: ${timeZone}`
-    );
-    if (input.uiLocale === "en-US") {
-      lines.unshift("Code, commands, paths, API names, config keys, and original error messages may remain verbatim when needed.", "If you call todolist, the goal and todos[].content must also be in English.", "Use English for internal reasoning/thought text.", "Respond to the user in English.", "Language requirement: use English consistently for this run.");
-    }
+    ]);
   }
-  return `## Runtime Constraints\n${lines.join("\n")}`;
+  return lines.join("\n");
 }
 
 function normalizeTodolistGoal(value: unknown) {
@@ -812,9 +953,17 @@ function normalizeTodolistGoal(value: unknown) {
   return toSessionTitleFromFirstMessage(compact);
 }
 
-function buildClearSummaryText(reason?: string) {
-  const rawReason = typeof reason === "string" ? reason.trim() : "";
+function buildClearSummaryText(input: { uiLocale: AgentUiLocale | null; reason?: string }) {
+  const uiLocale = normalizeAgentUiLocale(input.uiLocale);
+  const rawReason = typeof input.reason === "string" ? input.reason.trim() : "";
   const normalizedReason = rawReason.length > 200 ? `${rawReason.slice(0, 200)}...` : rawReason;
+  if (uiLocale !== "zh-CN") {
+    if (!normalizedReason) {
+      return "A new task has started. Previous context has been archived; use archive_search or archive_read if you need to recall earlier decisions.";
+    }
+    return `A new task has started (${normalizedReason}). Previous context has been archived; use archive_search or archive_read if you need to recall earlier decisions.`;
+  }
+
   if (!normalizedReason) {
     return "已开始新任务。之前的上下文已归档,如需回忆历史决策请使用 archive_search 或 archive_read。";
   }
@@ -854,13 +1003,26 @@ const ARCHIVE_RESULT_TRUNCATED_MARKER = "[超过最大字符数限制,从此处�
 const ARCHIVABLE_ITEM_STATUS = new Set<AgentContextItemStatus>(["completed", "failed", "cancelled"]);
 const RUN_STATUS_SYSTEM_TEXT_PREFIX = "[run] ";
 const COMPACTION_SNIPPET_CACHE_MAX_BYTES = 256 * 1024;
-const SUBTASK_FORK_GUARD_SYSTEM_TEXT = [
-  "你正在一个由主会话派生出的子任务会话中工作。",
-  "在本条系统消息之前的全部历史内容，均来自父会话复制，仅作为背景信息，不构成对你的直接执行指令。",
-  "只有本条系统消息之后出现的用户消息，才构成你在此子任务会话中应当遵循的任务指令。",
-  "你可以参考此前历史中的背景、约束、线索和证据，但不要把其中的行动要求当作当前待执行命令；尤其不要继续执行其中关于“调用 subtask”“转交给其他 agent”“继续让助手做某事”等元指令。",
-  "若此前历史与本条系统消息之后的用户消息不一致，以本条系统消息之后的用户消息为准。"
-].join("\n");
+const SUBTASK_PREFORK_SUMMARY_MAX_CHARS = 20_000;
+function buildSubtaskForkGuardSystemText(input: { uiLocale: AgentUiLocale | null }) {
+  if (normalizeAgentUiLocale(input.uiLocale) !== "zh-CN") {
+    return [
+      "You are working in a subtask session derived from a parent session.",
+      "All history before this system message was copied from the parent session and is provided only as background context; it does not constitute direct execution instructions for this subtask session.",
+      "Only user messages that appear after this system message should be treated as the instructions you must follow in this subtask session.",
+      "You may reference earlier history for background, constraints, clues, and evidence, but do not treat prior action requests as commands to execute now; in particular, do not continue prior meta-instructions such as calling subtask again, delegating to another agent, or continuing work that was directed at a previous assistant.",
+      "If earlier history conflicts with user messages that appear after this system message, follow the later user messages."
+    ].join("\n");
+  }
+
+  return [
+    "你正在一个由主会话派生出的子任务会话中工作。",
+    "在本条系统消息之前的全部历史内容，均来自父会话复制，仅作为背景信息，不构成对你的直接执行指令。",
+    "只有本条系统消息之后出现的用户消息，才构成你在此子任务会话中应当遵循的任务指令。",
+    "你可以参考此前历史中的背景、约束、线索和证据，但不要把其中的行动要求当作当前待执行命令；尤其不要继续执行其中关于“调用 subtask”“转交给其他 agent”“继续让助手做某事”等元指令。",
+    "若此前历史与本条系统消息之后的用户消息不一致，以本条系统消息之后的用户消息为准。"
+  ].join("\n");
+}
 
 function normalizeRunNoticeText(raw: unknown) {
   if (raw == null) return "";
@@ -904,8 +1066,26 @@ function parseArchivedItemIdFromArchiveLine(line: string) {
 function buildCompactionSnippetMessageText(params: {
   excerptLines: string[];
   minPos: number;
+  uiLocale: AgentUiLocale | null;
 }) {
   const body = params.excerptLines.join("\n");
+  if (normalizeAgentUiLocale(params.uiLocale) !== "zh-CN") {
+    return [
+      "## Pre-compaction tail excerpt (archived original text; pos can be used as archive_read beforePos)",
+      "",
+      body,
+      "",
+      "## Archive tool hints (when you need more context)",
+      "",
+      "- You can use archive_read to continue reading earlier archived lines:",
+      `  - Start from an earlier position: use beforePos=${params.minPos}`,
+      "  - Read more lines: increase lineCount",
+      "- You can use archive_search to search across all archived content by keyword:",
+      "  - Prefer specific nouns for query (file names / function names / error codes / tool names / key phrases)",
+      "  - If there are too many hits, combine it with beforePos to page backward"
+    ].join("\n");
+  }
+
   return [
     "## 压缩前尾部摘录(归档原文; pos 可用于 archive_read 的 beforePos)",
     "",
@@ -1642,38 +1822,52 @@ function buildSystemPrompt(input: {
   agentName: string;
   agentPrompt: string;
   agentGlobalPromptIds: string[];
+  outputFormatInstruction?: string;
   globalPrompts: Array<{ id: string; title: string; prompt: string }>;
   runtimeInstruction?: string;
   workspaceInstructions: { filePath: string; displayPath: string; content: string } | null;
 }) {
   const agentPrompt = input.agentPrompt || "";
   const selectedGlobalIds = new Set(input.agentGlobalPromptIds);
+  const outputFormatInstruction = String(input.outputFormatInstruction || "").trim();
   const runtimeInstruction = String(input.runtimeInstruction || "").trim();
+
+  const formatSection = (kind: string, body: string, label?: string) => {
+    const normalizedBody = String(body || "").trim();
+    if (!normalizedBody) return "";
+    const normalizedLabel = typeof label === "string" ? label.trim() : "";
+    const prefix = normalizedLabel ? `[${kind}] ${normalizedLabel}` : `[${kind}]`;
+    return `${prefix}\n\n${normalizedBody}`;
+  };
 
   const sections: string[] = [];
   const systemBase = input.globalPrompts.find((item) => item.id === AGENT_GLOBAL_SYSTEM_PROMPT_ID)?.prompt?.trim() || GLOBAL_WORKFLOW_SYSTEM_PROMPT.trim();
-  sections.push(systemBase);
+  sections.push(formatSection("system_base", systemBase));
 
   for (const item of input.globalPrompts) {
     if (!selectedGlobalIds.has(item.id)) continue;
     if (!item.prompt.trim()) continue;
     if (item.id === AGENT_GLOBAL_SYSTEM_PROMPT_ID) continue;
-    sections.push(`## Global Prompt: ${item.title}\n${item.prompt}`);
+    sections.push(formatSection("global_prompt", item.prompt, item.title));
   }
 
   if (input.workspaceInstructions?.content.trim()) {
-    sections.push(`## Workspace Instructions: ${input.workspaceInstructions.displayPath}\n${input.workspaceInstructions.content}`);
+    sections.push(formatSection("workspace_instructions", input.workspaceInstructions.content, input.workspaceInstructions.displayPath));
   }
 
   if (agentPrompt.trim()) {
-    sections.push(`## Agent Prompt: ${input.agentName}\n${agentPrompt}`);
+    sections.push(formatSection("agent_prompt", agentPrompt, input.agentName));
+  }
+
+  if (outputFormatInstruction) {
+    sections.push(formatSection("output_format_instructions", outputFormatInstruction));
   }
 
   if (runtimeInstruction) {
-    sections.push(runtimeInstruction);
+    sections.push(formatSection("runtime_constraints", runtimeInstruction));
   }
 
-  return sections.join("\n\n");
+  return sections.filter(Boolean).join("\n\n---\n");
 }
 
 export class AgentService {
@@ -1709,8 +1903,18 @@ export class AgentService {
     return listAgentSessions(this.ctx.db, workspaceId);
   }
 
+  listRecentSessions(params: { limit: number; kind?: "primary" | "subtask" | "all" }): AgentRecentSessionsResponse {
+    const kind = params.kind === "primary" || params.kind === "subtask" ? params.kind : "all";
+    return { items: listRecentSessionsAcrossWorkspaces(this.ctx.db, Math.max(1, Math.min(50, params.limit || 10)), kind) };
+  }
+
   getSession(sessionId: string) {
     return getAgentSession(this.ctx.db, sessionId);
+  }
+
+  listRecentWorkspaces(params: { limit: number }): AgentRecentWorkspacesResponse {
+    const limit = Math.max(1, Math.min(50, params.limit || 10));
+    return { items: listRecentWorkspaces(this.ctx.db, limit) };
   }
 
   getWorkspace(workspaceId: string) {
@@ -1926,6 +2130,7 @@ export class AgentService {
     }
 
     const profile = resolveExecutionProfile(this.ctx, {
+      surface: "user",
       requestedAgentId: params.body.agentId
     });
 
@@ -2108,9 +2313,12 @@ export class AgentService {
       });
       if (dedup) {
         return {
-          sessionId: session.id,
+          ok: true,
+          session,
+          runState: this.getRunState(session.id),
           runId: dedup.runId,
-          deduplicated: true
+          scheduled: false,
+          skippedReason: "deduplicated"
         };
       }
 
@@ -2135,6 +2343,7 @@ export class AgentService {
       }
 
       const profile = resolveExecutionProfile(this.ctx, {
+        surface: "user",
         requestedAgentId: params.body.agentId
       });
 
@@ -2180,9 +2389,11 @@ export class AgentService {
       tx();
 
       return {
-        sessionId: session.id,
+        ok: true,
+        session,
+        runState: this.getRunState(session.id),
         runId,
-        deduplicated: false
+        scheduled: true
       };
     });
   }
@@ -2291,18 +2502,128 @@ export class AgentService {
     const latestTerminalRun = getLatestTerminalRunRecord(this.ctx.db, { workspaceId: session.workspaceId, sessionId: session.id });
     const lastTerminalStatus =
       latestTerminalRun && state.status === "idle" && latestTerminalRun.updatedAt === state.updatedAt ? latestTerminalRun.status : null;
+
+    const activeRun = (() => {
+      const activeRunId = state.activeRunId;
+      if (!activeRunId) return null;
+      const run = getRunRecord(this.ctx.db, activeRunId);
+      if (!run) {
+        this.logger.warn(
+          { sessionId: session.id, workspaceId: session.workspaceId, activeRunId },
+          "run-state has activeRunId but run record not found"
+        );
+        return null;
+      }
+      if (run.workspaceId !== session.workspaceId || run.sessionId !== session.id) {
+        this.logger.warn(
+          {
+            sessionId: session.id,
+            workspaceId: session.workspaceId,
+            activeRunId,
+            runWorkspaceId: run.workspaceId,
+            runSessionId: run.sessionId
+          },
+          "run-state activeRunId does not belong to the session"
+        );
+        return null;
+      }
+      return {
+        runId: run.runId,
+        startedAt: run.createdAt
+      };
+    })();
+
+    const lastRun = (() => {
+      if (!latestTerminalRun) return null;
+      const startedAt = latestTerminalRun.createdAt;
+      const endedAt = latestTerminalRun.updatedAt;
+      return {
+        runId: latestTerminalRun.runId,
+        status: latestTerminalRun.status,
+        startedAt,
+        endedAt,
+        durationMs: Math.max(0, endedAt - startedAt)
+      };
+    })();
+
     const nonTerminalItemIds = listNonTerminalVisibleItemIds(this.ctx.db, session.workspaceId, session.id);
     return {
       sessionId: session.id,
       status: state.status,
       activeRunId: state.activeRunId,
       activeAssistantItemId: state.activeAssistantItemId,
+      activeRun,
       lastResponseTotalTokens: state.lastResponseTotalTokens,
       runNoticeText: state.runNoticeText,
       nonTerminalItemIds,
       updatedAt: state.updatedAt,
       lastTerminalStatus,
-      appliedItemId: state.appliedItemId
+      appliedItemId: state.appliedItemId,
+      lastRun
+    };
+  }
+
+  getSessionStatusSummary(params: { sessionId: string; agentId?: string | null; selectedAgentId?: string | null }) {
+    const sessionId = String(params.sessionId || "").trim();
+    if (!sessionId) {
+      throw new HttpError(400, "sessionId is required", "SESSION_ID_REQUIRED");
+    }
+    const session = getAgentSession(this.ctx.db, sessionId);
+    if (!session) throw new HttpError(404, "session not found", "SESSION_NOT_FOUND");
+
+    const runState = this.getRunState(session.id);
+
+    const generatedAt = nowMs();
+    let startedAt: number | null = null;
+    let elapsedMs: number | null = null;
+    if (runState.activeRunId) {
+      const run = getRunRecord(this.ctx.db, runState.activeRunId);
+      if (run && run.workspaceId === session.workspaceId && run.sessionId === session.id) {
+        startedAt = run.createdAt;
+        elapsedMs = Math.max(0, generatedAt - run.createdAt);
+      }
+    }
+
+    // Compatibility precedence: selectedAgentId wins.
+    const selectedAgentIdRaw =
+      typeof params.selectedAgentId === "string" && params.selectedAgentId.trim()
+        ? params.selectedAgentId
+        : typeof params.agentId === "string"
+          ? params.agentId
+          : "";
+    const selectedAgentId = String(selectedAgentIdRaw || "").trim();
+    const agent = selectedAgentId
+      ? (() => {
+          const item = listAvailableAgentsForSurface(this.ctx, "user").find((a) => a.id === selectedAgentId);
+          if (!item) throw new HttpError(400, "Agent not found", "AGENT_NOT_FOUND");
+          // keep minimal fields for IM display
+          return { id: item.id, name: item.name, contextWindowTokens: item.resolvedModel?.contextWindowTokens ?? null };
+        })()
+      : null;
+
+    const contextWindowTokens = agent?.contextWindowTokens ?? null;
+    const lastResponseTotalTokens = runState.lastResponseTotalTokens;
+    const contextTokenRatio =
+      typeof lastResponseTotalTokens === "number" && typeof contextWindowTokens === "number" && contextWindowTokens > 0
+        ? lastResponseTotalTokens / contextWindowTokens
+        : null;
+
+    // updatedAt should reflect the underlying data change time, not "now".
+    const updatedAt = Math.max(session.updatedAt, runState.updatedAt, startedAt ?? 0);
+    return {
+      updatedAt,
+      generatedAt,
+      session,
+      agent: agent ? { id: agent.id, name: agent.name } : null,
+      runState: {
+        ...runState,
+        // Compatibility: IM design doc uses terminalStatus.
+        terminalStatus: runState.lastTerminalStatus
+      },
+      startedAt,
+      elapsedMs,
+      contextWindowTokens,
+      contextTokenRatio
     };
   }
 
@@ -2310,14 +2631,22 @@ export class AgentService {
     return getContextItemById(this.ctx.db, itemId);
   }
 
+  getLatestTerminalAssistantTextByRunId(params: { runId: string }) {
+    return getLatestTerminalAssistantTextByRunId(this.ctx.db, params);
+  }
+
+  getLatestCompletedAssistantTextByRunId(params: { runId: string }) {
+    return getLatestCompletedAssistantTextByRunId(this.ctx.db, params);
+  }
+
   revertSession(sessionId: string, body: AgentRevertSessionRequest): AgentControlResult {
     const session = getAgentSession(this.ctx.db, sessionId);
     if (!session) throw new HttpError(404, "session not found");
     if (session.workspaceId !== body.workspaceId) throw new HttpError(400, "workspaceId mismatch");
-    const target = getTranscriptItemById(this.ctx.db, session.workspaceId, session.id, body.toItemId);
-    if (!target) throw new HttpError(400, "toItemId is invalid");
+    const target = getTranscriptItemById(this.ctx.db, session.workspaceId, session.id, body.itemId);
+    if (!target) throw new HttpError(400, "itemId is invalid");
     if (target.archiveAt != null) {
-      throw new HttpError(400, "toItemId is archived", "AGENT_ARCHIVED_ITEM_IMMUTABLE");
+      throw new HttpError(400, "itemId is archived", "AGENT_ARCHIVED_ITEM_IMMUTABLE");
     }
 
     const state = getRunState(this.ctx.db, session.workspaceId, session.id);
@@ -2334,7 +2663,7 @@ export class AgentService {
         workspaceId: session.workspaceId,
         sessionId: session.id,
         expectedHeadItemId: session.headItemId,
-        nextHeadItemId: body.toItemId,
+        nextHeadItemId: body.itemId,
         updatedAt: createdAt
       });
     });
@@ -2343,13 +2672,14 @@ export class AgentService {
     } catch (err) {
       if (err instanceof AgentConflictError) throw conflictToHttpError(err);
       if (err instanceof Error && err.message === "invalid target head item") {
-        throw new HttpError(400, "toItemId is invalid");
+        throw new HttpError(400, "itemId is invalid");
       }
       throw err;
     }
 
-    const headItemId = getSessionHead(this.ctx.db, session.workspaceId, session.id);
-    return { sessionId: session.id, headItemId };
+    const updated = getAgentSession(this.ctx.db, session.id);
+    if (!updated) throw new HttpError(500, "session not found after revert");
+    return { ok: true, session: updated, runState: this.getRunState(updated.id) };
   }
 
   cancelSession(sessionId: string, body: AgentCancelSessionRequest): AgentControlResult {
@@ -2384,7 +2714,7 @@ export class AgentService {
         updateContextItem(this.ctx.db, {
           itemId,
           status: "cancelled",
-          output: toTerminalWriteOutput(item.output),
+          output: toTerminalCancelledOutput(item.output),
           updatedAt: createdAt
         });
       }
@@ -2408,9 +2738,9 @@ export class AgentService {
     });
 
     tx();
-
-    const headItemId = getSessionHead(this.ctx.db, session.workspaceId, session.id);
-    return { sessionId: session.id, headItemId };
+    const updated = getAgentSession(this.ctx.db, session.id);
+    if (!updated) throw new HttpError(500, "session not found after cancel");
+    return { ok: true, session: updated, runState: this.getRunState(updated.id) };
   }
 
   appendContextItemFromWorker(params: {
@@ -2694,21 +3024,139 @@ export class AgentService {
       return;
     }
 
-    updateRunRecordStatus(this.ctx.db, {
-      runId: params.runId,
-      status: params.status,
-      updatedAt: ts
+    const tx = this.ctx.db.transaction(() => {
+      updateRunRecordStatus(this.ctx.db, {
+        runId: params.runId,
+        status: params.status,
+        updatedAt: ts
+      });
+
+      if (params.status === "cancelled") {
+        const nonTerminalItemIds = listNonTerminalSessionItemIdsByRunId(this.ctx.db, {
+          workspaceId: params.workspaceId,
+          sessionId: params.sessionId,
+          runId: params.runId
+        });
+        for (const itemId of nonTerminalItemIds) {
+          const item = getContextItemById(this.ctx.db, itemId);
+          if (!item) continue;
+          if (item.workspaceId !== params.workspaceId || item.sessionId !== params.sessionId || item.runId !== params.runId) {
+            continue;
+          }
+          // tool items: normalize output (including subtask cancelled reuse hint).
+          if (item.kind === "tool" && item.output.type === "tool") {
+            updateContextItem(this.ctx.db, {
+              itemId,
+              status: "cancelled",
+              output: toTerminalCancelledOutput(item.output),
+              updatedAt: ts
+            });
+            continue;
+          }
+          // assistant/user/system: only settle status, keep output unchanged.
+          updateContextItem(this.ctx.db, {
+            itemId,
+            status: "cancelled",
+            updatedAt: ts
+          });
+        }
+      }
+
+      const state = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
+      if (state.activeRunId !== params.runId) {
+        return;
+      }
+      setRunStateIdle(this.ctx.db, {
+        workspaceId: params.workspaceId,
+        sessionId: params.sessionId,
+        updatedAt: ts,
+        appliedItemId: getLatestSessionItemId(this.ctx.db, params.workspaceId, params.sessionId)
+      });
     });
-    const state = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
-    if (state.activeRunId !== params.runId) {
-      return;
+
+    tx();
+  }
+
+  private resolveSubtaskParentContext(params: {
+    workspaceId: string;
+    parentSessionId: string;
+    parentRunId: string;
+    parentToolItemId: number;
+  }) {
+    const parentSession = getAgentSession(this.ctx.db, params.parentSessionId);
+    if (!parentSession) throw new HttpError(404, "parent session not found");
+    if (parentSession.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
+
+    const parentRun = getRunRecord(this.ctx.db, params.parentRunId);
+    if (!parentRun || parentRun.sessionId !== params.parentSessionId || parentRun.workspaceId !== params.workspaceId) {
+      throw new HttpError(404, "parent run not found");
     }
-    setRunStateIdle(this.ctx.db, {
-      workspaceId: params.workspaceId,
-      sessionId: params.sessionId,
-      updatedAt: ts,
-      appliedItemId: getLatestSessionItemId(this.ctx.db, params.workspaceId, params.sessionId)
+    const parentUiLocale = normalizeAgentUiLocale(parentRun.uiLocale);
+
+    const anchor = getContextItemById(this.ctx.db, params.parentToolItemId);
+    if (!anchor || anchor.sessionId !== params.parentSessionId || anchor.workspaceId !== params.workspaceId || anchor.kind !== "tool") {
+      throw new HttpError(400, "invalid subtask anchor");
+    }
+    if (anchor.runId !== params.parentRunId) {
+      throw new HttpError(400, "invalid subtask anchor run", "AGENT_SUBTASK_ANCHOR_RUN_MISMATCH");
+    }
+    if (anchor.output.type !== "tool" || anchor.output.toolName !== "subtask") {
+      throw new HttpError(400, "invalid subtask anchor", "AGENT_SUBTASK_ANCHOR_INVALID");
+    }
+
+    return {
+      parentSession,
+      parentRun,
+      parentUiLocale,
+      anchor
+    };
+  }
+
+  getSubtaskPreforkPlanFromWorker(params: {
+    workspaceId: string;
+    parentSessionId: string;
+    parentRunId: string;
+    parentToolItemId: number;
+    agentId: string;
+    thresholdPct?: number;
+  }) {
+    this.resolveSubtaskParentContext(params);
+
+    const resolvedAgentId = String(params.agentId || "").trim();
+    if (!resolvedAgentId) {
+      throw new HttpError(400, "subtask agentId is required", "AGENT_SUBTASK_AGENT_REQUIRED");
+    }
+
+    const thresholdRaw = params.thresholdPct;
+    const thresholdPct =
+      thresholdRaw == null
+        ? 95
+        : Number.isFinite(Number(thresholdRaw))
+          ? Math.floor(Number(thresholdRaw))
+          : Number.NaN;
+    if (!Number.isFinite(thresholdPct) || thresholdPct < 50 || thresholdPct > 99) {
+      throw new HttpError(400, "thresholdPct must be between 50 and 99", "AGENT_SUBTASK_PREFORK_THRESHOLD_INVALID");
+    }
+
+    const profile = resolveExecutionProfile(this.ctx, {
+      surface: "subtask",
+      requestedAgentId: resolvedAgentId
     });
+    const childContextWindowTokens = Math.max(1, Math.floor(Number(profile.model.contextWindowTokens || 0)));
+    const thresholdTokens = Math.floor(childContextWindowTokens * (thresholdPct / 100));
+
+    const parentState = getRunState(this.ctx.db, params.workspaceId, params.parentSessionId);
+    const parentLastResponseTotalTokens = typeof parentState.lastResponseTotalTokens === "number"
+      ? Math.max(0, Math.floor(parentState.lastResponseTotalTokens))
+      : null;
+
+    return {
+      shouldPrefork: parentLastResponseTotalTokens != null && parentLastResponseTotalTokens >= thresholdTokens,
+      thresholdPct,
+      parentLastResponseTotalTokens,
+      childContextWindowTokens,
+      thresholdTokens
+    };
   }
 
   async startSubtaskRunFromWorker(params: {
@@ -2723,26 +3171,24 @@ export class AgentService {
       mode: "new" | "existing" | "fork";
       sessionId?: string;
     };
+    preforkSummaryText?: string;
+    preforkMeta?: {
+      thresholdPct: number;
+      parentLastResponseTotalTokens: number;
+      childContextWindowTokens: number;
+    };
   }) {
-    const parentSession = getAgentSession(this.ctx.db, params.parentSessionId);
-    if (!parentSession) throw new HttpError(404, "parent session not found");
-    if (parentSession.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
-
-    const parentRun = getRunRecord(this.ctx.db, params.parentRunId);
-    if (!parentRun || parentRun.sessionId !== params.parentSessionId || parentRun.workspaceId !== params.workspaceId) {
-      throw new HttpError(404, "parent run not found");
-    }
-
-    const anchor = getContextItemById(this.ctx.db, params.parentToolItemId);
-    if (!anchor || anchor.sessionId !== params.parentSessionId || anchor.workspaceId !== params.workspaceId || anchor.kind !== "tool") {
-      throw new HttpError(400, "invalid subtask anchor");
-    }
-    if (anchor.runId !== params.parentRunId) {
-      throw new HttpError(400, "invalid subtask anchor run", "AGENT_SUBTASK_ANCHOR_RUN_MISMATCH");
-    }
-    if (anchor.output.type !== "tool" || anchor.output.toolName !== "subtask") {
-      throw new HttpError(400, "invalid subtask anchor", "AGENT_SUBTASK_ANCHOR_INVALID");
-    }
+    const {
+      parentSession,
+      parentRun,
+      parentUiLocale,
+      anchor
+    } = this.resolveSubtaskParentContext({
+      workspaceId: params.workspaceId,
+      parentSessionId: params.parentSessionId,
+      parentRunId: params.parentRunId,
+      parentToolItemId: params.parentToolItemId
+    });
 
     const normalizedDescription = params.description.trim();
     if (!normalizedDescription) {
@@ -2756,6 +3202,54 @@ export class AgentService {
     if (!resolvedAgentId) {
       throw new HttpError(400, "subtask agentId is required", "AGENT_SUBTASK_AGENT_REQUIRED");
     }
+
+    const hasPreforkSummaryText = Object.prototype.hasOwnProperty.call(params, "preforkSummaryText");
+    const hasPreforkMeta = Object.prototype.hasOwnProperty.call(params, "preforkMeta") && params.preforkMeta != null;
+    if (params.session.mode !== "fork" && (hasPreforkSummaryText || hasPreforkMeta)) {
+      throw new HttpError(
+        400,
+        "preforkSummaryText/preforkMeta is only allowed when session.mode=fork",
+        "AGENT_SUBTASK_PREFORK_NOT_ALLOWED"
+      );
+    }
+
+    const preforkSummaryText = String(params.preforkSummaryText || "").trim();
+    if (preforkSummaryText.length > SUBTASK_PREFORK_SUMMARY_MAX_CHARS) {
+      throw new HttpError(
+        400,
+        `preforkSummaryText must be <= ${SUBTASK_PREFORK_SUMMARY_MAX_CHARS} characters`,
+        "AGENT_SUBTASK_PREFORK_SUMMARY_TOO_LONG"
+      );
+    }
+
+    if (hasPreforkMeta && !preforkSummaryText) {
+      throw new HttpError(400, "preforkMeta requires non-empty preforkSummaryText", "AGENT_SUBTASK_PREFORK_META_INVALID");
+    }
+    if (hasPreforkMeta) {
+      const preforkMeta = params.preforkMeta!;
+      const expected = this.getSubtaskPreforkPlanFromWorker({
+        workspaceId: params.workspaceId,
+        parentSessionId: params.parentSessionId,
+        parentRunId: params.parentRunId,
+        parentToolItemId: params.parentToolItemId,
+        agentId: resolvedAgentId,
+        thresholdPct: preforkMeta.thresholdPct
+      });
+      const expectedParentLast = expected.parentLastResponseTotalTokens;
+      const expectedChildWindow = expected.childContextWindowTokens;
+      if (
+        expectedParentLast == null
+        || expectedParentLast !== preforkMeta.parentLastResponseTotalTokens
+        || expectedChildWindow !== preforkMeta.childContextWindowTokens
+      ) {
+        throw new HttpError(
+          400,
+          "preforkMeta does not match current prefork plan",
+          "AGENT_SUBTASK_PREFORK_META_MISMATCH"
+        );
+      }
+    }
+
     const requestedSessionId = String(params.session.sessionId || "").trim();
     const forkBoundaryItemId = params.session.mode === "fork"
       ? this.resolveSubtaskForkBoundaryItemId({
@@ -2764,6 +3258,8 @@ export class AgentService {
           anchor
         })
       : null;
+    const shouldUsePreforkSummary = params.session.mode === "fork" && preforkSummaryText.length > 0;
+
 
     let session = null as AgentSessionRecord | null;
     if (params.session.mode === "existing") {
@@ -2783,7 +3279,15 @@ export class AgentService {
       if (requestedSessionId) {
         throw new HttpError(400, "sessionId is not allowed when mode=fork", "AGENT_SUBTASK_SESSION_ID_NOT_ALLOWED");
       }
-      if (forkBoundaryItemId == null) {
+      if (shouldUsePreforkSummary) {
+        session = this.createSession({
+          workspaceId: params.workspaceId,
+          title: `${subtaskTitleBase} (fork)`,
+          kind: "subtask",
+          forkedFromSessionId: params.parentSessionId,
+          forkedFromItemId: params.parentToolItemId
+        });
+      } else if (forkBoundaryItemId == null) {
         session = this.createSession({
           workspaceId: params.workspaceId,
           title: `${subtaskTitleBase} (fork)`,
@@ -2820,6 +3324,7 @@ export class AgentService {
     }
 
     const profile = resolveExecutionProfile(this.ctx, {
+      surface: "subtask",
       requestedAgentId: resolvedAgentId
     });
 
@@ -2835,6 +3340,24 @@ export class AgentService {
 
     const tx = this.ctx.db.transaction(() => {
       let head = getSessionHead(this.ctx.db, session.workspaceId, session.id);
+      if (shouldUsePreforkSummary) {
+        const summaryItem = appendContextItem(this.ctx.db, {
+          workspaceId: session.workspaceId,
+          sessionId: session.id,
+          runId: null,
+          turnId: null,
+          step: null,
+          prevId: head,
+          kind: "system",
+          status: "completed",
+          output: {
+            type: "system_text",
+            text: preforkSummaryText
+          },
+          createdAt
+        });
+        head = summaryItem.id;
+      }
       if (params.session.mode === "fork") {
         const systemItem = appendContextItem(this.ctx.db, {
           workspaceId: session.workspaceId,
@@ -2847,7 +3370,7 @@ export class AgentService {
           status: "completed",
           output: {
             type: "system_text",
-            text: SUBTASK_FORK_GUARD_SYSTEM_TEXT
+            text: buildSubtaskForkGuardSystemText({ uiLocale: parentUiLocale })
           },
           createdAt
         });
@@ -2876,7 +3399,7 @@ export class AgentService {
         triggerItemId: item.id,
         agentId: profile.agent.id,
         providerId: profile.provider.id,
-        uiLocale: parentRun.uiLocale ?? null,
+        uiLocale: parentUiLocale,
         modelId: profile.model.id,
         status: "running",
         createdAt
@@ -2978,6 +3501,7 @@ export class AgentService {
     }
 
     const profile = resolveExecutionProfile(this.ctx, {
+      surface: session.kind === "subtask" ? "subtask" : "user",
       agentIdFromRun: run.agentId,
       providerIdFromRun: run.providerId,
       modelIdFromRun: run.modelId
@@ -2995,6 +3519,7 @@ export class AgentService {
         modelId: profile.model.id
       },
       agent: profile.agent,
+      // profile.agent 现已包含 pluginTools，共享契约扩展不改变当前执行逻辑。
       provider: profile.provider,
       model: profile.model,
       runtime
@@ -3029,6 +3554,10 @@ export class AgentService {
 
   getAgentMcpSettingsFromWorker() {
     return getAgentMcpSettings(this.ctx);
+  }
+
+  async getPluginRuntimeSnapshotsFromWorker() {
+    return listPluginRuntimeSnapshots(this.ctx);
   }
 
   async compactContextFromWorker(params: {
@@ -3137,7 +3666,7 @@ export class AgentService {
     });
   }
 
-  async clearSession(sessionId: string, body: AgentClearSessionRequest): Promise<AgentControlResult> {
+  async clearSession(sessionId: string, body: AgentClearSessionRequest & { uiLocale?: AgentUiLocale | null }): Promise<AgentControlResult> {
     return this.runSessionOperationExclusive(sessionId, async () => {
       const session = getAgentSession(this.ctx.db, sessionId);
       if (!session) throw new HttpError(404, "session not found");
@@ -3182,7 +3711,7 @@ export class AgentService {
           sessionId: session.id,
           runId: null,
           expectedHeadItemId: session.headItemId,
-          summaryText: buildClearSummaryText(body.reason),
+          summaryText: buildClearSummaryText({ uiLocale: normalizeAgentUiLocale(body.uiLocale), reason: body.reason }),
           boundaryReason: "clear",
           summaryCreatedAt: createdAt,
           archiveItemIds: visible.map((item) => item.id),
@@ -3210,8 +3739,9 @@ export class AgentService {
         throw err;
       }
 
-      const headItemId = getSessionHead(this.ctx.db, session.workspaceId, session.id);
-      return { sessionId: session.id, headItemId };
+      const updated = getAgentSession(this.ctx.db, session.id);
+      if (!updated) throw new HttpError(500, "session not found after clear");
+      return { ok: true, session: updated, runState: this.getRunState(updated.id) };
     });
   }
 
@@ -3249,7 +3779,7 @@ export class AgentService {
     const dirPath = agentArchiveSessionDir(this.ctx.dataDir, params.workspaceId, session.id);
     const files = await listArchiveFilesAsc(dirPath);
     if (files.length === 0) {
-      return { text: "" };
+      return { text: "", noArchive: true };
     }
 
     const newestFirstLines: string[] = [];
@@ -3318,91 +3848,12 @@ export class AgentService {
     return { text: formatArchiveToolResultText(newestFirstLines, maxChars) };
   }
 
-  async archiveReadFromWorker(params: {
+  private async buildPromptMessagesForSession(params: {
     workspaceId: string;
     sessionId: string;
-    beforePos?: number;
-    lineCount?: number;
-    maxChars?: number;
+    // 仅 prompt-context 需要 locale 用于 compaction snippet 文案。
+    compactionSnippetUiLocale: AgentUiLocale | null;
   }) {
-    const session = getAgentSession(this.ctx.db, params.sessionId);
-    if (!session) throw new HttpError(404, "session not found");
-    if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
-    const beforePos = normalizeBeforePos(params.beforePos);
-
-    const lineCount = normalizePositiveInt(params.lineCount, {
-      fallback: ARCHIVE_READ_LINE_COUNT_DEFAULT,
-      min: 1,
-      max: ARCHIVE_READ_LINE_COUNT_MAX
-    });
-    const maxChars = normalizePositiveInt(params.maxChars, {
-      fallback: ARCHIVE_MAX_CHARS_DEFAULT,
-      min: ARCHIVE_MAX_CHARS_MIN,
-      max: ARCHIVE_MAX_CHARS_MAX
-    });
-
-    const dirPath = agentArchiveSessionDir(this.ctx.dataDir, params.workspaceId, session.id);
-    const files = await listArchiveFilesAsc(dirPath);
-    if (files.length === 0) {
-      return { text: "" };
-    }
-
-    const newestFirstLines: string[] = [];
-
-    outer: for (let i = files.length - 1; i >= 0; i -= 1) {
-      const fileName = files[i] || "";
-      if (!fileName) continue;
-      const fileSeq = parseArchiveFileName(fileName);
-      if (fileSeq == null) continue;
-      const filePath = path.join(dirPath, fileName);
-      const content = await fs.readFile(filePath, "utf-8").catch((err: any) => {
-        if (err && err.code === "ENOENT") return "";
-        throw err;
-      });
-      const lines = splitArchiveFileLines(content);
-      let upper = lines.length;
-      if (beforePos != null) {
-        const maxLineExclusive = beforePos - (fileSeq - 1) * ARCHIVE_FILE_LINE_LIMIT;
-        upper = Math.min(upper, Math.max(0, maxLineExclusive - 1));
-      }
-      for (let lineNo = upper; lineNo >= 1; lineNo -= 1) {
-        if (newestFirstLines.length >= lineCount) break outer;
-        const pos = toArchivePos(fileSeq, lineNo);
-        if (beforePos != null && pos >= beforePos) continue;
-        newestFirstLines.push(`pos=${pos} | ${String(lines[lineNo - 1] || "")}`);
-      }
-    }
-
-    return { text: formatArchiveToolResultText(newestFirstLines, maxChars) };
-  }
-
-  async getPromptContextForRun(params: { workspaceId: string; sessionId: string; runId: string }) {
-    const session = getAgentSession(this.ctx.db, params.sessionId);
-    if (!session) throw new HttpError(404, "session not found");
-    if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
-    const workspace = this.ensureWorkspace(params.workspaceId);
-
-    const run = getRunRecord(this.ctx.db, params.runId);
-    if (!run || run.sessionId !== params.sessionId || run.workspaceId !== params.workspaceId) {
-      throw new HttpError(404, "run not found");
-    }
-
-    const profile = resolveExecutionProfile(this.ctx, {
-      agentIdFromRun: run.agentId,
-      providerIdFromRun: run.providerId,
-      modelIdFromRun: run.modelId
-    });
-    const globalPrompts = getAgentGlobalPromptSettings(this.ctx);
-    const workspaceInstructions = await readWorkspaceAgentsInstructions(workspace.path, this.logger);
-    const system = buildSystemPrompt({
-      agentName: profile.agent.name,
-      agentPrompt: profile.agent.prompt || "",
-      agentGlobalPromptIds: Array.isArray(profile.agent.globalPromptIds) ? profile.agent.globalPromptIds : [],
-      globalPrompts: globalPrompts.items,
-      workspaceInstructions,
-      runtimeInstruction: buildRuntimeInstruction({ uiLocale: run.uiLocale, now: new Date() })
-    });
-
     const visible = getSessionVisibleItems(this.ctx.db, params.workspaceId, params.sessionId);
     const hasCompactionBoundaryMarker = visible.some((item) => {
       if (!item) return false;
@@ -3481,17 +3932,23 @@ export class AgentService {
               // 这里先按“可归档行”过滤,确保 tail 的 20 条能映射到归档文件中的实际行。
               const batchArchivable = batch.filter((t) => buildArchiveLine(t) != null);
               const last20 = batchArchivable.slice(-20);
-              const last10UserAssistant = batchArchivable
+              const last10UserAssistantSystem = batchArchivable
                 .filter((t) => {
                   if (t.kind === "user" && t.output.type === "user_text") return String(t.output.text || "").trim().length > 0;
                   if (t.kind === "assistant" && t.output.type === "assistant_text") return String(t.output.text || "").trim().length > 0;
+                  if (t.kind === "system" && t.output.type === "system_text") {
+                    const text = String(t.output.text || "").trim();
+                    if (!text) return false;
+                    // 与 prompt 构造保持一致: 排除 [run] 开头的运行状态系统消息。
+                    return shouldIncludeSystemTextInPrompt(text);
+                  }
                   return false;
                 })
                 .slice(-10);
 
               const mergedIds: number[] = [];
               const seen = new Set<number>();
-              for (const row of [...last10UserAssistant, ...last20]) {
+              for (const row of [...last10UserAssistantSystem, ...last20]) {
                 if (!row) continue;
                 if (seen.has(row.id)) continue;
                 seen.add(row.id);
@@ -3516,7 +3973,11 @@ export class AgentService {
                   prevPos = row.pos;
                 }
                 const minPos = Math.min(...posLines.map((r) => r.pos));
-                snippetText = buildCompactionSnippetMessageText({ excerptLines, minPos });
+                snippetText = buildCompactionSnippetMessageText({
+                  excerptLines,
+                  minPos,
+                  uiLocale: params.compactionSnippetUiLocale
+                });
                 await writeCompactionSnippetCacheBestEffort({
                   dataDir: this.ctx.dataDir,
                   workspaceId: params.workspaceId,
@@ -3540,12 +4001,12 @@ export class AgentService {
       }
 
       const includeFailedAssistant =
-        item.kind === "assistant"
-        && item.output.type === "assistant_text"
-        && item.status === "failed"
-        && item.id === mostRecentFailedAssistantId
-        && !assistantHasToolItems.has(item.id)
-        && String(item.output.text || "").trim().length > 0;
+        item.kind === "assistant" &&
+        item.output.type === "assistant_text" &&
+        item.status === "failed" &&
+        item.id === mostRecentFailedAssistantId &&
+        !assistantHasToolItems.has(item.id) &&
+        String(item.output.text || "").trim().length > 0;
 
       if (item.kind !== "assistant" || item.output.type !== "assistant_text" || (item.status !== "completed" && !includeFailedAssistant)) {
         continue;
@@ -3572,9 +4033,10 @@ export class AgentService {
           cursor += 1;
           continue;
         }
-        const toolInput = toolItem.output.args && typeof toolItem.output.args === "object" && !Array.isArray(toolItem.output.args)
-          ? (toolItem.output.args as Record<string, unknown>)
-          : {};
+        const toolInput =
+          toolItem.output.args && typeof toolItem.output.args === "object" && !Array.isArray(toolItem.output.args)
+            ? (toolItem.output.args as Record<string, unknown>)
+            : {};
         const promptInput = projectToolCallInputForPrompt({
           toolName: toolItem.output.toolName,
           status: toolItem.status,
@@ -3594,10 +4056,7 @@ export class AgentService {
             : resolveToolOutputText(toolItem.output).trim() || `status=${toolItem.status}`;
         const toolOutput = toolItem.output.error
           ? { type: "error-text" as const, value: toolErrorText }
-          : {
-              type: "text" as const,
-              value: promptToolText
-            };
+          : { type: "text" as const, value: promptToolText };
         toolResultParts.push({
           type: "tool-result",
           toolCallId,
@@ -3620,22 +4079,141 @@ export class AgentService {
       i = cursor - 1;
     }
 
-    const hasArchivedItems = getSessionTranscriptItems(this.ctx.db, params.workspaceId, params.sessionId).some(
-      (item) => item.archiveAt != null
-    );
-    const hasArchiveFiles =
-      (await listArchiveFilesAsc(agentArchiveSessionDir(this.ctx.dataDir, params.workspaceId, session.id))).length > 0;
-    const hasArchive = hasArchivedItems && hasArchiveFiles;
-    let enabledToolNames = hasArchive
-      ? [...profile.agent.tools]
-      : profile.agent.tools.filter((name) => name !== "archive_search" && name !== "archive_read");
+    return { messages, visible };
+  }
+
+  async getMessagesContext(params: {
+    workspaceId: string;
+    sessionId: string;
+    appendMessage?: { role: "system" | "user"; content: string };
+  }) {
+    const session = getAgentSession(this.ctx.db, params.sessionId);
+    if (!session) throw new HttpError(404, "session not found");
+    if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
+
+    const { messages } = await this.buildPromptMessagesForSession({
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+      // messages-context 是通用 messages 视图，不应隐式依赖 active run 的 uiLocale；此处固定为 null。
+      compactionSnippetUiLocale: null
+    });
+    if (params.appendMessage && params.appendMessage.content.trim()) {
+      messages.push({ role: params.appendMessage.role, content: params.appendMessage.content });
+    }
+    return { headItemId: session.headItemId, messages };
+  }
+
+  async archiveReadFromWorker(params: {
+    workspaceId: string;
+    sessionId: string;
+    beforePos?: number;
+    lineCount?: number;
+    maxChars?: number;
+  }) {
+    const session = getAgentSession(this.ctx.db, params.sessionId);
+    if (!session) throw new HttpError(404, "session not found");
+    if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
+    const beforePos = normalizeBeforePos(params.beforePos);
+
+    const lineCount = normalizePositiveInt(params.lineCount, {
+      fallback: ARCHIVE_READ_LINE_COUNT_DEFAULT,
+      min: 1,
+      max: ARCHIVE_READ_LINE_COUNT_MAX
+    });
+    const maxChars = normalizePositiveInt(params.maxChars, {
+      fallback: ARCHIVE_MAX_CHARS_DEFAULT,
+      min: ARCHIVE_MAX_CHARS_MIN,
+      max: ARCHIVE_MAX_CHARS_MAX
+    });
+
+    const dirPath = agentArchiveSessionDir(this.ctx.dataDir, params.workspaceId, session.id);
+    const files = await listArchiveFilesAsc(dirPath);
+    if (files.length === 0) {
+      return { text: "", noArchive: true };
+    }
+
+    const newestFirstLines: string[] = [];
+
+    outer: for (let i = files.length - 1; i >= 0; i -= 1) {
+      const fileName = files[i] || "";
+      if (!fileName) continue;
+      const fileSeq = parseArchiveFileName(fileName);
+      if (fileSeq == null) continue;
+      const filePath = path.join(dirPath, fileName);
+      const content = await fs.readFile(filePath, "utf-8").catch((err: any) => {
+        if (err && err.code === "ENOENT") return "";
+        throw err;
+      });
+      const lines = splitArchiveFileLines(content);
+      let upper = lines.length;
+      if (beforePos != null) {
+        const maxLineExclusive = beforePos - (fileSeq - 1) * ARCHIVE_FILE_LINE_LIMIT;
+        upper = Math.min(upper, Math.max(0, maxLineExclusive - 1));
+      }
+      for (let lineNo = upper; lineNo >= 1; lineNo -= 1) {
+        if (newestFirstLines.length >= lineCount) break outer;
+        const pos = toArchivePos(fileSeq, lineNo);
+        if (beforePos != null && pos >= beforePos) continue;
+        newestFirstLines.push(`pos=${pos} | ${String(lines[lineNo - 1] || "")}`);
+      }
+    }
+
+    return { text: formatArchiveToolResultText(newestFirstLines, maxChars) };
+  }
+
+  async getPromptContextForRun(params: { workspaceId: string; sessionId: string; runId: string }) {
+    const session = getAgentSession(this.ctx.db, params.sessionId);
+    if (!session) throw new HttpError(404, "session not found");
+    if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
+    const workspace = this.ensureWorkspace(params.workspaceId);
+
+    const run = getRunRecord(this.ctx.db, params.runId);
+    if (!run || run.sessionId !== params.sessionId || run.workspaceId !== params.workspaceId) {
+      throw new HttpError(404, "run not found");
+    }
+
+    const profile = resolveExecutionProfile(this.ctx, {
+      surface: session.kind === "subtask" ? "subtask" : "user",
+      agentIdFromRun: run.agentId,
+      providerIdFromRun: run.providerId,
+      modelIdFromRun: run.modelId
+    });
+    const globalPrompts = getAgentGlobalPromptSettings(this.ctx);
+    const workspaceInstructions = await readWorkspaceAgentsInstructions(workspace.path, this.logger);
+    const system = buildSystemPrompt({
+      agentName: profile.agent.name,
+      agentPrompt: profile.agent.prompt || "",
+      agentGlobalPromptIds: Array.isArray(profile.agent.globalPromptIds) ? profile.agent.globalPromptIds : [],
+      globalPrompts: globalPrompts.items,
+      outputFormatInstruction: buildOutputFormatInstruction({ uiLocale: run.uiLocale }),
+      workspaceInstructions,
+      runtimeInstruction: buildRuntimeInstruction({ uiLocale: run.uiLocale, now: new Date() })
+    });
+
+    const visible = getSessionVisibleItems(this.ctx.db, params.workspaceId, params.sessionId);
+    const { messages } = await this.buildPromptMessagesForSession({
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+      compactionSnippetUiLocale: normalizeAgentUiLocale(run.uiLocale)
+    });
+
+    const baselineToolNames = ["read", "todolist", "archive_search", "archive_read", "scratchpad"] as const;
+    const enabledToolNames: string[] = [];
+    const enabledToolNameSet = new Set<string>();
+    for (const name of [...baselineToolNames, ...profile.agent.tools]) {
+      if (!name || enabledToolNameSet.has(name)) continue;
+      enabledToolNameSet.add(name);
+      enabledToolNames.push(name);
+    }
     if (session.kind === "subtask") {
-      enabledToolNames = enabledToolNames.filter((name) => name !== "subtask");
+      const filtered = enabledToolNames.filter((name) => name !== "subtask");
+      enabledToolNames.length = 0;
+      enabledToolNames.push(...filtered);
     }
 
     const subtaskDescription = enabledToolNames.includes("subtask")
       ? buildSubtaskToolDescription(
-          getAgentSettings(this.ctx).agents.map((item) => ({
+          listAvailableAgentsForSurface(this.ctx, "subtask").map((item) => ({
             id: item.id,
             name: item.name,
             summary: item.summary
@@ -3679,7 +4257,8 @@ export class AgentService {
       messages,
       tools,
       pendingTools,
-      lastResponseTotalTokens: runState.lastResponseTotalTokens
+      lastResponseTotalTokens: runState.lastResponseTotalTokens,
+      uiLocale: normalizeAgentUiLocale(run.uiLocale)
     };
   }
 

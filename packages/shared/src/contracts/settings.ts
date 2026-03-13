@@ -1,5 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import type { Static } from "@sinclair/typebox";
+import { PluginToolCanonicalNameSchema } from "./plugin.js";
 
 export const NetworkSettingsSchema = Type.Object({
   httpProxy: Type.Union([Type.String(), Type.Null()]),
@@ -52,9 +53,16 @@ export type AgentProviderModel = Static<typeof AgentProviderModelSchema>;
 export const AgentProviderNpmSchema = Type.Union([Type.Literal("@ai-sdk/openai"), Type.Literal("@ai-sdk/anthropic")]);
 export type AgentProviderNpm = Static<typeof AgentProviderNpmSchema>;
 
+export const AgentProviderOpenAiApiModeSchema = Type.Union([
+  Type.Literal("responses"),
+  Type.Literal("chatCompletions")
+]);
+export type AgentProviderOpenAiApiMode = Static<typeof AgentProviderOpenAiApiModeSchema>;
+
 export const AgentProviderOptionsInputSchema = Type.Object({
   baseURL: Type.String({ minLength: 1 }),
-  apiKey: Type.Optional(Type.Union([Type.String(), Type.Null()]))
+  apiKey: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  apiMode: Type.Optional(AgentProviderOpenAiApiModeSchema)
 });
 export type AgentProviderOptionsInput = Static<typeof AgentProviderOptionsInputSchema>;
 
@@ -89,7 +97,8 @@ export type UpdateAgentProvidersSettingsRequest = Static<typeof UpdateAgentProvi
 export const AgentProviderOptionsViewSchema = Type.Object({
   baseURL: Type.String({ minLength: 1 }),
   hasApiKey: Type.Boolean(),
-  apiKeyMasked: Type.Union([Type.String(), Type.Null()])
+  apiKeyMasked: Type.Union([Type.String(), Type.Null()]),
+  apiMode: Type.Optional(AgentProviderOpenAiApiModeSchema)
 });
 export type AgentProviderOptionsView = Static<typeof AgentProviderOptionsViewSchema>;
 
@@ -199,12 +208,16 @@ export const AgentToolNameSchema = Type.Union([
   Type.Literal("read"),
   Type.Literal("write"),
   Type.Literal("apply_patch"),
+  Type.Literal("scratchpad"),
   Type.Literal("todolist"),
   Type.Literal("subtask"),
   Type.Literal("archive_search"),
   Type.Literal("archive_read")
 ]);
 export type AgentToolName = Static<typeof AgentToolNameSchema>;
+
+export const AgentPluginToolsSchema = Type.Array(PluginToolCanonicalNameSchema);
+export type AgentPluginTools = Static<typeof AgentPluginToolsSchema>;
 
 export const AgentDefaultModelSchema = Type.Union([AgentProvidersDefaultSchema, Type.Null()]);
 export type AgentDefaultModel = Static<typeof AgentDefaultModelSchema>;
@@ -225,6 +238,13 @@ export const AgentResolvedModelSchema = Type.Object({
 });
 export type AgentResolvedModel = Static<typeof AgentResolvedModelSchema>;
 
+export const AgentScopeSchema = Type.Union([
+  Type.Literal("user"),
+  Type.Literal("subtask"),
+  Type.Literal("both")
+]);
+export type AgentScope = Static<typeof AgentScopeSchema>;
+
 export const AgentItemSchema = Type.Object({
   id: Type.String({ minLength: 1 }),
   name: Type.String({ minLength: 1 }),
@@ -233,7 +253,10 @@ export const AgentItemSchema = Type.Object({
   globalPromptIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
   tools: Type.Array(AgentToolNameSchema),
   mcpServers: Type.Array(Type.String({ minLength: 1 })),
-  defaultModel: AgentDefaultModelSchema
+  pluginTools: Type.Optional(AgentPluginToolsSchema),
+  defaultModel: AgentDefaultModelSchema,
+  scope: AgentScopeSchema,
+  order: Type.Integer({ minimum: 0 })
 });
 export type AgentItem = Static<typeof AgentItemSchema>;
 
@@ -245,32 +268,27 @@ export const AgentItemViewSchema = Type.Object({
   globalPromptIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
   tools: Type.Array(AgentToolNameSchema),
   mcpServers: Type.Array(Type.String({ minLength: 1 })),
+  pluginTools: Type.Optional(AgentPluginToolsSchema),
   defaultModel: AgentDefaultModelSchema,
+  scope: AgentScopeSchema,
+  order: Type.Integer({ minimum: 0 }),
   resolvedModel: Type.Union([AgentResolvedModelSchema, Type.Null()])
 });
 export type AgentItemView = Static<typeof AgentItemViewSchema>;
 
-export const AgentSettingsDefaultSchema = Type.Object({
-  agentId: Type.String({ minLength: 1 })
-});
-export type AgentSettingsDefault = Static<typeof AgentSettingsDefaultSchema>;
-
 export const AgentSettingsSchema = Type.Object({
-  default: Type.Union([AgentSettingsDefaultSchema, Type.Null()]),
   agents: Type.Array(AgentItemSchema),
   updatedAt: Type.Number()
 });
 export type AgentSettings = Static<typeof AgentSettingsSchema>;
 
 export const AgentSettingsViewSchema = Type.Object({
-  default: Type.Union([AgentSettingsDefaultSchema, Type.Null()]),
   agents: Type.Array(AgentItemViewSchema),
   updatedAt: Type.Number()
 });
 export type AgentSettingsView = Static<typeof AgentSettingsViewSchema>;
 
 export const UpdateAgentSettingsRequestSchema = Type.Object({
-  default: Type.Union([AgentSettingsDefaultSchema, Type.Null()]),
   agents: Type.Array(AgentItemSchema)
 });
 export type UpdateAgentSettingsRequest = Static<typeof UpdateAgentSettingsRequestSchema>;
@@ -287,6 +305,36 @@ export const SecurityStatusSchema = Type.Object({
   sshKnownHostsPath: Type.String()
 });
 export type SecurityStatus = Static<typeof SecurityStatusSchema>;
+
+export const AgentChannelSenderRoleSchema = Type.Union([Type.Literal("admin"), Type.Literal("user")]);
+export type AgentChannelSenderRole = Static<typeof AgentChannelSenderRoleSchema>;
+export const AgentChannelSenderAllowlistItemSchema = Type.Object(
+  {
+    channel: Type.String({ minLength: 1, maxLength: 64 }),
+    senderId: Type.String({ minLength: 1, maxLength: 256 }),
+    role: Type.Optional(AgentChannelSenderRoleSchema),
+    remark: Type.Optional(Type.String({ maxLength: 200 }))
+  },
+  { additionalProperties: false }
+);
+export type AgentChannelSenderAllowlistItem = Static<typeof AgentChannelSenderAllowlistItemSchema>;
+
+export const AgentChannelSenderAllowlistSettingsSchema = Type.Object(
+  {
+    items: Type.Array(AgentChannelSenderAllowlistItemSchema),
+    updatedAt: Type.Number()
+  },
+  { additionalProperties: false }
+);
+export type AgentChannelSenderAllowlistSettings = Static<typeof AgentChannelSenderAllowlistSettingsSchema>;
+
+export const UpdateAgentChannelSenderAllowlistRequestSchema = Type.Object(
+  {
+    items: Type.Array(AgentChannelSenderAllowlistItemSchema)
+  },
+  { additionalProperties: false }
+);
+export type UpdateAgentChannelSenderAllowlistRequest = Static<typeof UpdateAgentChannelSenderAllowlistRequestSchema>;
 
 export const ResetKnownHostRequestSchema = Type.Object({
   host: Type.String({ minLength: 1 })

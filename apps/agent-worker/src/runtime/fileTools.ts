@@ -2,7 +2,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { TextDecoder } from "node:util";
 
-const DEFAULT_READ_LIMIT = 2000;
+const DEFAULT_READ_LIMIT = 500;
+const MAX_READ_LIMIT = 2000;
 const MAX_BYTES = 50 * 1024;
 const MAX_BYTES_LABEL = `${MAX_BYTES / 1024}KB`;
 const MAX_LINE_LENGTH = 2000;
@@ -452,7 +453,7 @@ export async function runReadTool(params: {
     const limit = Number.isFinite(params.limit)
       ? Math.max(1, Math.floor(params.limit || DEFAULT_READ_LIMIT))
       : DEFAULT_READ_LIMIT;
-    const effectiveLimit = Math.min(limit, DEFAULT_READ_LIMIT);
+    const effectiveLimit = Math.min(limit, MAX_READ_LIMIT);
     const start = offset - 1;
     const end = Math.min(items.length, start + effectiveLimit);
     const sliced = items.slice(start, end);
@@ -492,7 +493,7 @@ export async function runReadTool(params: {
   const limit = Number.isFinite(params.limit)
     ? Math.max(1, Math.floor(params.limit || DEFAULT_READ_LIMIT))
     : DEFAULT_READ_LIMIT;
-  const effectiveLimit = Math.min(limit, DEFAULT_READ_LIMIT);
+  const effectiveLimit = Math.min(limit, MAX_READ_LIMIT);
   const raw: string[] = [];
   const decoder = createStreamingDecoder(sampleKind.encoding);
   const chunkSize = 64 * 1024;

@@ -17,6 +17,10 @@
           </a-button>
           <div class="min-w-0 flex items-center gap-2">
             <span class="text-[14px] leading-none truncate text-[color:var(--text-secondary)]">{{ sessionTitleText }}</span>
+            <template v-if="headerTokensText">
+              <span class="leading-none whitespace-nowrap">·</span>
+              <span class="leading-none whitespace-nowrap tabular-nums">{{ headerTokensText }}</span>
+            </template>
             <template v-if="currentRunElapsedText">
               <span class="leading-none whitespace-nowrap">·</span>
               <span class="leading-none whitespace-nowrap tabular-nums">{{ currentRunElapsedText }}</span>
@@ -28,6 +32,10 @@
           class="min-w-0 flex-1 flex items-center gap-2"
         >
           <div class="text-[14px] leading-none truncate text-[color:var(--text-secondary)]">{{ sessionTitleText }}</div>
+          <template v-if="headerTokensText">
+            <span class="leading-none whitespace-nowrap">·</span>
+            <span class="leading-none whitespace-nowrap tabular-nums">{{ headerTokensText }}</span>
+          </template>
           <template v-if="currentRunElapsedText">
             <span class="leading-none whitespace-nowrap">·</span>
             <span class="leading-none whitespace-nowrap tabular-nums">{{ currentRunElapsedText }}</span>
@@ -217,6 +225,11 @@
               :error-text="item.toolError"
               @request-measure="onRequestVirtualMeasure(item.id)"
             />
+            <AgentScratchpadCard
+              v-else-if="isScratchpadCard(item)"
+              :content="item.scratchpadContent || ''"
+              :error-text="item.toolError"
+            />
             <div v-else-if="item.role === 'assistant'" class="flex flex-col gap-1">
               <div v-if="item.reasoningText && item.reasoningText.trim().length > 0" class="assistant-reasoning-block">
                 <AssistantMarkdownMessage :text="item.reasoningText" :message-id="item.id" :streaming="!isTerminalStatus(item.status)" class="assistant-reasoning-markdown" section-key="reasoning" />
@@ -234,9 +247,6 @@
               />
               <div v-if="!isTerminalStatus(item.status)" class="flex items-center gap-2 text-[0.9em] text-[color:var(--text-tertiary)]">
                 <LoadingOutlined spin />
-                <span v-if="currentRunElapsedText" class="whitespace-nowrap tabular-nums">
-                  {{ currentRunElapsedText }}
-                </span>
               </div>
             </div>
             <AgentUserMessage
@@ -356,28 +366,29 @@
       <div class="pt-2">
         <div class="flex items-center justify-between gap-2">
           <div v-if="hasAvailableAgents" class="flex items-center gap-2 min-w-0">
-           <a-select
-             :value="effectiveAgentId"
-             :options="props.agentOptions"
-             size="small"
-             style="min-width: 180px; max-width: 320px"
-             @update:value="onAgentChange"
-           />
-           <div v-if="effectiveModelLabel" class="min-w-0 max-w-[360px] text-[0.9em] text-[color:var(--text-tertiary)] truncate" :title="effectiveModelLabel">
-             {{ effectiveModelLabel }}
-           </div>
-           </div>
+            <a-select
+              :value="effectiveAgentId"
+              :options="props.agentOptions"
+              size="small"
+              style="min-width: 180px; max-width: 320px"
+              @update:value="onAgentChange"
+            />
+            <div
+              v-if="effectiveModelLabel"
+              class="min-w-0 max-w-[360px] text-[0.9em] text-[color:var(--text-tertiary)] truncate"
+              :title="effectiveModelLabel"
+            >
+              {{ effectiveModelLabel }}
+            </div>
+          </div>
           <div v-else class="flex items-center gap-2 text-[0.9em] text-[color:var(--text-tertiary)]">
             <span>{{ t("agent.client.noAgentHint") }}</span>
             <a-button type="link" size="small" class="!px-0" @click="goAgentProfiles">
               {{ t("agent.client.goCreateAgent") }}
             </a-button>
-           </div>
-           <div class="text-[0.9em] text-[color:var(--text-tertiary)] whitespace-nowrap">
-            {{ t("agent.client.lastTotalTokens") }}: {{ formattedLastTotalTokensWithRatio }}
-           </div>
-         </div>
-       </div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -406,6 +417,7 @@ import AgentTextMessage from "./AgentTextMessage.vue";
 import AgentUserMessage from "./AgentUserMessage.vue";
 import AssistantMarkdownMessage from "./AssistantMarkdownMessage.vue";
 import AgentTodoListCard from "./AgentTodoListCard.vue";
+import AgentScratchpadCard from "./AgentScratchpadCard.vue";
 import AgentWriteCard from "./AgentWriteCard.vue";
 import { useAgentSessionStatusStore } from "./useAgentSessionStatusStore";
 import {
@@ -424,7 +436,6 @@ import { getInitialLocale } from "@/shared/i18n/locale";
 type AgentOption = {
   value: string;
   label: string;
-  isDefault?: boolean;
   resolvedModel?: {
     providerId: string;
     contextWindowTokens: number;
@@ -495,6 +506,7 @@ type DisplayItem = {
   todoList?: TodoListDisplay;
   applyPatch?: ApplyPatchDisplay;
   writeResult?: WriteDisplay;
+  scratchpadContent?: string;
   tone?: "normal" | "error";
 };
 
@@ -798,8 +810,6 @@ const sessionTitleText = computed(() => {
 });
 
 const fallbackAgentId = computed(() => {
-  const defaultOption = props.agentOptions.find((item) => item.isDefault);
-  if (defaultOption) return defaultOption.value;
   return props.agentOptions[0]?.value ?? "";
 });
 
@@ -827,24 +837,24 @@ const effectiveContextWindowTokens = computed(() => {
   return Math.floor(value);
 });
 
-const formattedLastTotalTokens = computed(() => {
-  const value = runState.value.lastResponseTotalTokens;
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "-";
-  return new Intl.NumberFormat().format(Math.floor(value));
+const headerTokensNumberFormatter = new Intl.NumberFormat();
+const headerTokensPercentFormatter = new Intl.NumberFormat(undefined, {
+  style: "percent",
+  maximumFractionDigits: 1
 });
 
-const formattedLastTotalTokensWithRatio = computed(() => {
+const headerTokensText = computed(() => {
   const value = runState.value.lastResponseTotalTokens;
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "-";
-  const formattedTokens = new Intl.NumberFormat().format(Math.floor(value));
+  // 需求：null/0 不展示 tokens 段
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return "";
+  const formattedTokens = headerTokensNumberFormatter.format(Math.floor(value));
   const limit = effectiveContextWindowTokens.value;
-  if (typeof limit !== "number" || !Number.isFinite(limit) || limit < 1) return formattedTokens;
+  if (typeof limit !== "number" || !Number.isFinite(limit) || limit < 1) {
+    return `${formattedTokens} tokens`;
+  }
   const ratio = value / limit;
-  const formattedRatio = new Intl.NumberFormat(undefined, {
-    style: "percent",
-    maximumFractionDigits: 1
-  }).format(ratio);
-  return `${formattedTokens} (${formattedRatio})`;
+  const formattedRatio = headerTokensPercentFormatter.format(ratio);
+  return `${formattedTokens} tokens (${formattedRatio})`;
 });
 const inputPlaceholder = computed(() => {
   if (!hasAvailableAgents.value) {
@@ -870,22 +880,16 @@ function formatElapsedDuration(ms: number) {
   return `${seconds}s`;
 }
 
-const latestUserMessageCreatedAt = computed(() => {
-  for (let i = items.value.length - 1; i >= 0; i -= 1) {
-    const item = items.value[i];
-    if (!item || item.kind !== "user" || item.output.type !== "user_text") continue;
-    const createdAt = typeof item.createdAt === "number" && Number.isFinite(item.createdAt) ? item.createdAt : 0;
-    if (createdAt > 0) return createdAt;
-  }
-  return 0;
-});
-
 const currentRunElapsedText = computed(() => {
-  const status = runState.value.status;
-  if (status !== "running") return "";
-  const startedAt = latestUserMessageCreatedAt.value;
-  if (!(startedAt > 0)) return "";
-  return formatElapsedDuration(nowTickMs.value - startedAt);
+  const state = runState.value;
+  if (state.status === "running") {
+    const startedAt = state.activeRun?.startedAt;
+    if (typeof startedAt !== "number" || !Number.isFinite(startedAt) || startedAt <= 0) return "";
+    return formatElapsedDuration(nowTickMs.value - startedAt);
+  }
+  const durationMs = state.lastRun?.durationMs;
+  if (typeof durationMs !== "number" || !Number.isFinite(durationMs) || durationMs < 0) return "";
+  return formatElapsedDuration(durationMs);
 });
 
 function clearRunElapsedTimer() {
@@ -1089,6 +1093,44 @@ const displayItems = computed<DisplayItem[]>(() => {
           ...(agentId ? { subtaskAgentId: agentId } : {}),
           ...(agentName ? { subtaskAgentName: agentName } : {}),
             tone: item.status === "failed" ? "error" : "normal"
+        };
+      }
+      if (item.output.toolName === "scratchpad") {
+        const contentRaw = typeof resultObj?.content === "string" ? resultObj.content : undefined;
+        const argsObj = toRecord(item.output.args);
+        const argsContent = typeof argsObj?.content === "string" ? argsObj.content : undefined;
+        const scratchpadContent = contentRaw ?? argsContent;
+        if (scratchpadContent === undefined) {
+          let line = headText;
+          if (errorText) {
+            line += `\nerror: ${errorText}`;
+          }
+          return {
+            id: item.id,
+            prevId: item.prevId,
+            archiveAt,
+            boundaryReason,
+            role: "tool",
+            text: line,
+            status: item.status,
+            toolName: item.output.toolName,
+            ...(toolCallId ? { toolCallId } : {}),
+            tone: item.status === "failed" ? "error" : "normal"
+          };
+        }
+        return {
+          id: item.id,
+          prevId: item.prevId,
+          archiveAt,
+          boundaryReason,
+          role: "tool",
+          text: headText,
+          status: item.status,
+          toolName: item.output.toolName,
+          ...(toolCallId ? { toolCallId } : {}),
+          ...(errorText ? { toolError: errorText } : {}),
+          scratchpadContent,
+          tone: item.status === "failed" ? "error" : "normal"
         };
       }
       let line = headText;
@@ -1336,12 +1378,16 @@ function isWriteCard(item: DisplayItem) {
   return item.role === "tool" && item.toolName === "write" && !!item.writeResult;
 }
 
+function isScratchpadCard(item: DisplayItem) {
+  return item.role === "tool" && item.toolName === "scratchpad" && typeof item.scratchpadContent === "string";
+}
+
 function isBashTextMessage(item: DisplayItem) {
   return item.role === "tool" && item.toolName === "bash";
 }
 
 function isRichToolCard(item: DisplayItem) {
-  return isSubtaskCard(item) || isTodolistCard(item) || isApplyPatchCard(item) || isWriteCard(item);
+  return isSubtaskCard(item) || isTodolistCard(item) || isApplyPatchCard(item) || isWriteCard(item) || isScratchpadCard(item);
 }
 
 function formatSubtaskMode(mode?: string) {
@@ -2149,7 +2195,8 @@ async function executeSlashCommand(params: {
   }
   if (params.command.action === "clear") {
     await clearAgentSession(params.sessionId, {
-      workspaceId: params.workspaceId
+      workspaceId: params.workspaceId,
+      uiLocale: getInitialLocale()
     });
     return;
   }
@@ -2230,14 +2277,14 @@ function onRevertToMessage(itemId: number) {
     async onOk() {
       actionLoading.value = "revert";
       actionTargetId.value = itemId;
-      try {
-        await revertAgentSession(props.sessionId, {
-          workspaceId: props.workspaceId,
-          toItemId,
-          reason: "manual_revert"
-        });
-        if (isUserTarget && revertDraft.trim()) {
-          draft.value = revertDraft;
+       try {
+         await revertAgentSession(props.sessionId, {
+           workspaceId: props.workspaceId,
+           itemId: toItemId,
+           reason: "manual_revert"
+         });
+         if (isUserTarget && revertDraft.trim()) {
+           draft.value = revertDraft;
         }
         message.success(t("agent.client.reverted"));
         statusStore.bumpPollHint(props.sessionId, { immediate: true, warmup: true });
@@ -2318,10 +2365,10 @@ async function onSend() {
 }
 
 watch(
-  () => [String(props.modelValue || ""), props.agentOptions.map((item) => `${item.value}:${item.isDefault ? "1" : "0"}`).join("|")],
+  () => [String(props.modelValue || ""), props.agentOptions.map((item) => item.value).join("|")],
   () => {
     if (!hasAvailableAgents.value) {
-      if (props.modelValue) {
+      if (props.modelValue != null) {
         emit("update:modelValue", null);
       }
       return;
@@ -2388,13 +2435,18 @@ watch(
 );
 
 watch(
-  () => [props.active, runState.value.status, latestUserMessageCreatedAt.value] as const,
+  () => [props.active, runState.value.status, runState.value.activeRun?.startedAt ?? 0] as const,
   ([active, status, startedAt]) => {
     if (!active) {
       clearRunElapsedTimer();
       return;
     }
-    if (status === "running" && startedAt > 0) {
+    if (
+      status === "running"
+      && typeof startedAt === "number"
+      && Number.isFinite(startedAt)
+      && startedAt > 0
+    ) {
       nowTickMs.value = Date.now();
       ensureRunElapsedTimer();
       return;

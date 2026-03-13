@@ -13,6 +13,8 @@ export default {
     loading: "Loading...",
     reset: "Reset",
     default: "Default",
+    yes: "Yes",
+    no: "No",
     format: {
       parens: "({text})",
       parensSuffix: " ({text})"
@@ -287,7 +289,7 @@ export default {
     },
     client: {
       tabLabel: "Session {index}",
-      newTitle: "AI Client {time}",
+      newTitle: "new session",
       cancel: "Cancel run",
       cancelConfirmTitle: "Cancel current run?",
       cancelConfirmContent: "This stops the current execution and keeps all messages. The currently running AI/tool item will be marked as cancelled.",
@@ -297,8 +299,8 @@ export default {
       contextBoundary: "Context boundary",
       inputPlaceholderIdle: "Type a message, Enter to send, Shift+Enter for newline, Tab to switch agent",
       inputPlaceholderRunning: "Running, Esc to cancel current run",
-      inputPlaceholderNoAgent: "Create an agent before sending messages",
-      noAgentHint: "No available agent, please create one first",
+      inputPlaceholderNoAgent: "No agent is available for user sessions. Update scope in settings or add a new agent.",
+      noAgentHint: "No agent is available for user sessions. Update scope in settings or add a new agent.",
       goCreateAgent: "Create agent",
       chooseSession: "Choose session",
       chooseSessionTitle: "Choose a session to continue",
@@ -633,7 +635,9 @@ export default {
       agentGlobalPrompts: "Prompt Library",
       agentMcp: "MCP",
       agentProfiles: "Role Profiles",
+      agentPlugins: "Plugins",
       agentRuntime: "Runtime",
+      agentChannelSenderAllowlist: "IM User List",
       security: "Security"
     },
     groups: {
@@ -816,6 +820,7 @@ export default {
         npmLabel: "Provider Type",
         baseUrlLabel: "Base URL",
         apiKeyLabel: "API Key",
+        apiModeLabel: "API Mode",
         apiKeyPlaceholder: "Enter API key (optional)",
         apiKeyEditPlaceholder: "Enter new API key (leave blank to keep)",
         apiKeyCreateHelp: "You can leave it blank for now and fill it later.",
@@ -906,18 +911,23 @@ export default {
       saved: "Saved"
     },
     agentProfiles: {
-      description: "Configure AI agents, default agent, allowed tools, and default model.",
+      description: "Configure AI agents, scope, ordering, allowed tools, and default model.",
       saving: "Saving...",
       empty: "No agents yet. Add one to start.",
+      sortHelp: "Drag to reorder or use the arrow buttons. The first visible agent becomes the default for that surface.",
       actions: {
         addAgent: "Add agent",
         edit: "Edit",
         delete: "Delete",
-        setDefault: "Set default"
+        dragSort: "Drag to reorder",
+        moveUp: "Move up",
+        moveDown: "Move down"
       },
       fields: {
         tools: "Tools",
         mcpServers: "MCP Servers",
+        pluginTools: "Plugin Tools",
+        scope: "Scope",
         globalPrompts: "Prompt library",
         summary: "Summary",
         defaultModel: "Default model",
@@ -929,11 +939,17 @@ export default {
         read: "Read",
         write: "Write",
         applyPatch: "Apply Patch",
+        scratchpad: "Scratchpad",
         todolist: "Todo List",
         subtask: "Subtask",
         archiveSearch: "Archive Search",
         archiveRead: "Archive Read",
         archiveTail: "Archive Tail"
+      },
+      scope: {
+        user: "User only",
+        subtask: "Subtask only",
+        both: "Shared by user and subtask"
       },
       modal: {
         ok: "OK",
@@ -955,13 +971,14 @@ export default {
         globalPromptsPlaceholder: "Select prompt library entries",
         globalPromptsHelp: "Multi-select supported. Injection order follows the prompt library list order.",
         mcpServersPlaceholder: "Select allowed MCP servers",
+        pluginToolsPlaceholder: "Select enabled plugin tools",
+        pluginToolsHelp: "Only tools from globally enabled, ready plugins are selectable.",
         defaultModelCascaderPlaceholder: "Select default model strategy",
         defaultModelModeLabel: "Default model strategy",
         defaultProviderLabel: "Provider",
         defaultProviderPlaceholder: "Select a provider",
         defaultModelLabel: "Model",
-        defaultModelPlaceholder: "Select a model",
-        setAsDefault: "Set as default agent"
+        defaultModelPlaceholder: "Select a model"
       },
       deleteAgent: {
         title: "Delete agent?",
@@ -1044,6 +1061,91 @@ export default {
         duplicateServerId: "Server ID already exists"
       },
       saved: "Saved"
+    },
+    agentPlugins: {
+      description: "Manage locally discovered tool plugins, inspect diagnostics, and control global enablement.",
+      saving: "Saving...",
+      empty: "No plugins discovered yet. Put plugin packages under <dataDir>/plugins.",
+      saved: "Saved",
+      actions: {
+        refresh: "Refresh",
+        editConfig: "Edit config"
+      },
+      fields: {
+        enabled: "Enabled",
+        entry: "Entry"
+      },
+      configModal: {
+        title: "Edit plugin config · {name}",
+        maskedHint: "Hint: backend may return masked values (e.g. ***). Keep *** to preserve existing secret values.",
+        schemaFieldsTitle: "Field reference (from configSchema)",
+        schemaFieldsEmpty: "This plugin does not declare configSchema fields. You can edit JSON directly.",
+        rawSchemaTitle: "Show raw schema",
+        schemaComplexHint: "This schema is complex. Field reference is for guidance only; backend validation is final.",
+        editorTitle: "Config JSON",
+        editorPlaceholder: "Enter JSON object",
+        enableHint: "Please fill required fields before enabling: {fields}",
+        actions: {
+          generateTemplate: "Generate template"
+        },
+        schemaTable: {
+          field: "Field",
+          type: "Type",
+          required: "Required",
+          description: "Description",
+          defaultOrExample: "Default/Example"
+        },
+        errors: {
+          emptyJson: "Config is required. Please input a JSON object.",
+          objectExpected: "Config must be a JSON object.",
+          invalidJson: "Invalid JSON format."
+        }
+      },
+      state: {
+        ready: "Ready",
+        disabled: "Disabled",
+        invalidManifest: "Invalid manifest",
+        incompatible: "Incompatible",
+        configInvalid: "Invalid config",
+        loadFailed: "Load failed",
+        manifestMismatch: "Manifest mismatch"
+      }
+    },
+    agentChannelSenderAllowlist: {
+      description: "Configure senders allowed to trigger channel session runs. Empty list denies by default.",
+      emptyChannels: "No plugins with channels capability found. Please enable a related plugin first.",
+      empty: "No allowlist items",
+      created: "Added",
+      removed: "Removed",
+      saved: "Saved",
+      updated: "Updated",
+      modal: {
+        createTitle: "Add IM user",
+        editTitle: "Edit IM user"
+      },
+      fields: {
+        channel: "Channel",
+        senderId: "Sender ID",
+        role: "Role",
+        remark: "Remark",
+        actions: "Actions",
+        senderIdPlaceholder: "e.g. ou_xxx or platform user id",
+        remarkPlaceholder: "Optional, for management"
+      },
+      roles: {
+        admin: "Administrator",
+        user: "User"
+      },
+      actions: {
+        add: "Add",
+        edit: "Edit",
+        remove: "Remove"
+      },
+      errors: {
+        channelRequired: "Please select a channel",
+        senderIdRequired: "Please enter sender ID",
+        duplicate: "This sender already exists under the channel"
+      }
     },
     security: {
       description: "View master key source and SSH trust status, and provide necessary reset actions.",

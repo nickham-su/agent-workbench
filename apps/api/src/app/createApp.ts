@@ -18,6 +18,7 @@ import { registerCredentialsModule } from "../modules/credentials/credentials.mo
 import { registerSettingsModule } from "../modules/settings/settings.module.js";
 import { ensureAgentGlobalSystemPromptSeeded } from "../modules/settings/settings.service.js";
 import { registerAgentModule } from "../modules/agent/agent.module.js";
+import { registerPluginsModule } from "../modules/plugins/plugin.module.js";
 
 export async function createApp(ctx: AppContext) {
   const app = Fastify({
@@ -76,6 +77,7 @@ export async function createApp(ctx: AppContext) {
   ensureAgentGlobalSystemPromptSeeded(ctx, app.log);
   await registerWorkspacesModule(app, ctx);
   await registerTerminalsModule(app, ctx);
+  await registerPluginsModule(app, ctx);
   await registerGitModule(app, ctx);
   await registerFilesModule(app, ctx);
   await registerAgentModule(app, ctx);

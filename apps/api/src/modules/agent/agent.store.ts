@@ -4,7 +4,8 @@ import type {
   AgentUiLocale,
   AgentContextItemStatus,
   AgentRunStatus,
-  AgentSessionRecord
+  AgentSessionRecord,
+  AgentRecentSessionItem
 } from "@agent-workbench/shared";
 import type { Db } from "../../infra/db/db.js";
 
@@ -189,7 +190,7 @@ function encodeStoredColumns(params: {
     ...(typeof params.output.args !== "undefined" ? { args: params.output.args } : {})
   };
   const shouldPersistStructuredResult =
-    toolName === "apply_patch" || toolName === "todolist" || toolName === "subtask" || toolName === "write";
+    toolName === "apply_patch" || toolName === "todolist" || toolName === "subtask" || toolName === "write" || toolName === "scratchpad";
   const toolResultPayload: StoredToolResult = {
     status: params.status,
     ...(shouldPersistStructuredResult && Object.prototype.hasOwnProperty.call(params.output, "result")
@@ -630,6 +631,36 @@ export function getAgentSession(db: Db, sessionId: string): AgentSessionRecord |
   return row ? mapSession(row) : null;
 }
 
+export function listRecentSessionsAcrossWorkspaces(db: Db, limit: number, kind: "primary" | "subtask" | "all" = "all"): AgentRecentSessionItem[] {
+  const rows = db
+    .prepare(
+      `
+        select
+          s.id as sessionId,
+          s.title as sessionTitle,
+          s.updated_at as sessionUpdatedAt,
+          s.workspace_id as workspaceId,
+          w.title as workspaceTitle,
+          w.dir_name as workspaceDirName
+        from agent_session s
+        join workspaces w
+          on w.id = s.workspace_id
+        ${kind === "all" ? "" : "where s.kind = ?"}
+        order by s.updated_at desc
+        limit ?
+      `
+    )
+    .all(...(kind === "all" ? [limit] : [kind, limit])) as any[];
+  return rows.map((row) => ({
+    sessionId: String(row.sessionId),
+    sessionTitle: String(row.sessionTitle || ""),
+    sessionUpdatedAt: Number(row.sessionUpdatedAt || 0),
+    workspaceId: String(row.workspaceId),
+    workspaceTitle: String(row.workspaceTitle || "") || String(row.workspaceDirName || ""),
+    workspaceDirName: String(row.workspaceDirName || "")
+  }));
+}
+
 export function createAgentSession(db: Db, params: {
   id: string;
   workspaceId: string;
@@ -880,6 +911,79 @@ export function updateContextItem(db: Db, params: {
 export function getContextItemById(db: Db, itemId: number) {
   const row = readContextItemRowById(db, itemId);
   return row ? mapContextItem(row) : null;
+}
+
+export function getLatestTerminalAssistantTextByRunId(
+  db: Db,
+  params: {
+    runId: string;
+  }
+): { text: string; itemId: number | null } {
+  const runId = String(params.runId || "").trim();
+  if (!runId) return { text: "", itemId: null };
+
+  // NOTE: Use output_text column which is normalized for assistant_text.
+  // We only look at terminal assistant items. This is final-only.
+  const rows = db
+    .prepare(
+      `
+        select
+          id,
+          output_text as outputText,
+          status
+        from agent_context_item
+        where run_id = ?
+          and kind = 'assistant'
+          and status in ('completed', 'failed', 'cancelled')
+        order by id desc
+        limit 20
+      `
+    )
+    .all(runId) as Array<{ id: number; outputText: string; status: string }>;
+
+  for (const row of rows) {
+    const text = typeof row.outputText === "string" ? row.outputText : "";
+    if (text.trim()) {
+      return { text, itemId: row.id };
+    }
+  }
+
+  return { text: "", itemId: rows.length > 0 ? rows[0]!.id : null };
+}
+
+export function getLatestCompletedAssistantTextByRunId(
+  db: Db,
+  params: {
+    runId: string;
+  }
+): { text: string; itemId: number | null } {
+  const runId = String(params.runId || "").trim();
+  if (!runId) return { text: "", itemId: null };
+
+  const rows = db
+    .prepare(
+      `
+        select
+          id,
+          output_text as outputText
+        from agent_context_item
+        where run_id = ?
+          and kind = 'assistant'
+          and status = 'completed'
+        order by id desc
+        limit 20
+      `
+    )
+    .all(runId) as Array<{ id: number; outputText: string }>;
+
+  for (const row of rows) {
+    const text = typeof row.outputText === "string" ? row.outputText : "";
+    if (text.trim()) {
+      return { text, itemId: row.id };
+    }
+  }
+
+  return { text: "", itemId: rows.length > 0 ? rows[0]!.id : null };
 }
 
 function listSessionItems(
@@ -1418,6 +1522,29 @@ export function listNonTerminalSessionItemIds(db: Db, workspaceId: string, sessi
       `
     )
     .all(workspaceId, sessionId) as Array<{ id: number }>;
+
+  return rows
+    .map((row) => Number(row.id))
+    .filter((id) => Number.isFinite(id) && id > 0);
+}
+
+export function listNonTerminalSessionItemIdsByRunId(
+  db: Db,
+  params: { workspaceId: string; sessionId: string; runId: string }
+) {
+  const rows = db
+    .prepare(
+      `
+        select id
+        from agent_context_item
+        where workspace_id = @workspaceId
+          and session_id = @sessionId
+          and run_id = @runId
+          and status not in ('completed', 'failed', 'cancelled')
+        order by id asc
+      `
+    )
+    .all(params) as Array<{ id: number }>;
 
   return rows
     .map((row) => Number(row.id))

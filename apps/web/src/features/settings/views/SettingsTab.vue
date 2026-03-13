@@ -18,6 +18,8 @@
           <a-menu-item key="agent/runtime">{{ t('settings.tabs.agentRuntime') }}</a-menu-item>
           <a-menu-item key="agent/prompt-library">{{ t('settings.tabs.agentGlobalPrompts') }}</a-menu-item>
           <a-menu-item key="agent/mcp">{{ t('settings.tabs.agentMcp') }}</a-menu-item>
+          <a-menu-item key="agent/plugins">{{ t('settings.tabs.agentPlugins') }}</a-menu-item>
+          <a-menu-item key="agent/channels-sender-allowlist">{{ t('settings.tabs.agentChannelSenderAllowlist') }}</a-menu-item>
         </a-sub-menu>
         <a-sub-menu key="identity" :title="t('settings.groups.identity')">
           <a-menu-item key="identity/git-identity">{{ t('settings.tabs.gitIdentity') }}</a-menu-item>
@@ -290,8 +292,16 @@
 	          <AgentRuntimeSettingsPanel ref="agentRuntimePanelRef" />
 	        </a-tab-pane>
 
-	  	        <a-tab-pane key="agentProfiles" :tab="t('settings.tabs.agentProfiles')">
+	        <a-tab-pane key="agentProfiles" :tab="t('settings.tabs.agentProfiles')">
 	          <AgentProfilesSettingsPanel ref="agentProfilesPanelRef" />
+	        </a-tab-pane>
+
+ 	        <a-tab-pane key="agentPlugins" :tab="t('settings.tabs.agentPlugins')">
+	          <AgentPluginsSettingsPanel ref="agentPluginsPanelRef" />
+	        </a-tab-pane>
+
+	        <a-tab-pane key="agentChannelSenderAllowlist" :tab="t('settings.tabs.agentChannelSenderAllowlist')">
+	          <AgentChannelsSenderAllowlistPanel ref="agentChannelSenderAllowlistPanelRef" />
 	        </a-tab-pane>
 
 	        <a-tab-pane key="security" :tab="t('settings.tabs.security')">
@@ -352,7 +362,9 @@ import AgentProfilesSettingsPanel from "@/features/settings/components/AgentProf
 import AgentMcpSettingsPanel from "@/features/settings/components/AgentMcpSettingsPanel.vue";
 import AgentProvidersSettingsPanel from "@/features/settings/components/AgentProvidersSettingsPanel.vue";
 import AgentGlobalPromptsSettingsPanel from "@/features/settings/components/AgentGlobalPromptsSettingsPanel.vue";
+import AgentPluginsSettingsPanel from "@/features/settings/components/AgentPluginsSettingsPanel.vue";
 import AgentRuntimeSettingsPanel from "@/features/settings/components/AgentRuntimeSettingsPanel.vue";
+import AgentChannelsSenderAllowlistPanel from "@/features/settings/components/AgentChannelsSenderAllowlistPanel.vue";
 import {
   clearAllGitIdentity,
   createCredential,
@@ -380,7 +392,9 @@ const agentProvidersPanelRef = ref<{ refresh?: () => Promise<void> } | null>(nul
 const agentGlobalPromptsPanelRef = ref<{ refresh?: () => Promise<void> } | null>(null);
 const agentMcpPanelRef = ref<{ refresh?: () => Promise<void> } | null>(null);
 const agentRuntimePanelRef = ref<{ refresh?: () => Promise<void> } | null>(null);
+const agentPluginsPanelRef = ref<{ refresh?: () => Promise<void> } | null>(null);
 const agentProfilesPanelRef = ref<{ refresh?: () => Promise<void> } | null>(null);
+const agentChannelSenderAllowlistPanelRef = ref<{ refresh?: () => Promise<void> } | null>(null);
 
 const settingsTabKeys = [
   "general",
@@ -392,7 +406,9 @@ const settingsTabKeys = [
   "agentGlobalPrompts",
   "agentMcp",
   "agentRuntime",
+  "agentPlugins",
   "agentProfiles",
+  "agentChannelSenderAllowlist",
   "security"
 ] as const;
 type SettingsTabKey = (typeof settingsTabKeys)[number];
@@ -417,8 +433,10 @@ const settingsRouteMap: Record<SettingsGroupKey, Record<string, SettingsTabKey>>
     "prompt-library": "agentGlobalPrompts",
     profiles: "agentProfiles",
     runtime: "agentRuntime",
+    plugins: "agentPlugins",
     providers: "agentProviders",
-    mcp: "agentMcp"
+    mcp: "agentMcp",
+    "channels-sender-allowlist": "agentChannelSenderAllowlist"
   }
 };
 
@@ -883,7 +901,9 @@ watch(
     else if (k === "agentGlobalPrompts") await agentGlobalPromptsPanelRef.value?.refresh?.();
     else if (k === "agentMcp") await agentMcpPanelRef.value?.refresh?.();
     else if (k === "agentRuntime") await agentRuntimePanelRef.value?.refresh?.();
+    else if (k === "agentPlugins") await agentPluginsPanelRef.value?.refresh?.();
     else if (k === "agentProfiles") await agentProfilesPanelRef.value?.refresh?.();
+    else if (k === "agentChannelSenderAllowlist") await agentChannelSenderAllowlistPanelRef.value?.refresh?.();
     else if (k === "security") await refreshSecurity();
   },
   { immediate: true }
