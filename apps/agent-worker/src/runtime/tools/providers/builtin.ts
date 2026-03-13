@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call";
 import { runBashCommand } from "../../bash.js";
 import { applyPreparedPatch, prepareApplyPatchTool } from "../../applyPatch.js";
 import { getBashToolAppendix } from "../../bashTools.js";
@@ -10,6 +11,7 @@ import type { AvailableToolContext, ResolvedToolDefinition, ToolExecutionContext
 import { isBuiltinToolName, type BuiltinToolName } from "../types.js";
 
 const ENV_TIMEOUT_MS_MAX = 2_147_483_647;
+const COMPACTION_TIMEOUT_MS = 300_000;
 
 type ParsedSubtaskArgs = {
   description: string;
@@ -87,6 +89,25 @@ function toApplyPatchResult(prepared: Awaited<ReturnType<typeof prepareApplyPatc
     summary: prepared.summary,
     files: prepared.files
   };
+}
+
+function buildSubtaskPreforkSummaryPrompt(input: { uiLocale: "zh-CN" | "en-US" | null; subtaskPrompt: string }) {
+  if (input.uiLocale !== "zh-CN") {
+    return [
+      "Produce a concise structured summary of the current parent session so a subtask model can continue the work safely.",
+      "Focus only on facts, constraints, decisions, and actionable context relevant to the subtask.",
+      "",
+      `Subtask prompt to focus on:\n${input.subtaskPrompt}`,
+      "Do not quote or restate the subtask prompt verbatim in the summary; extract only actionable goals, constraints, and relevant context."
+    ].join("\n");
+  }
+  return [
+    "请基于父会话生成一份精简结构化总结,帮助子任务模型安全接手执行。",
+    "只保留与子任务直接相关的事实、约束、决策和可执行上下文。",
+    "",
+    `用于聚焦的子任务提示词:\n${input.subtaskPrompt}`,
+    "不要在总结中逐字复述子任务提示词原文,请只提炼可执行目标、约束和相关上下文。"
+  ].join("\n");
 }
 
 export class BuiltinToolProvider implements ToolProvider {
@@ -281,6 +302,62 @@ export class BuiltinToolProvider implements ToolProvider {
       }
       case "subtask": {
         const parsed = parseSubtaskArgs(args);
+        const thresholdPct = 95;
+
+        let preforkSummaryText: string | undefined;
+        let preforkMeta: {
+          thresholdPct: number;
+          parentLastResponseTotalTokens: number;
+          childContextWindowTokens: number;
+        } | undefined;
+        if (parsed.session.mode === "fork") {
+          try {
+            const plan = await ctx.apiClient.getSubtaskPreforkPlan({
+              workspaceId: ctx.run.workspaceId,
+              parentSessionId: ctx.run.sessionId,
+              parentRunId: ctx.run.runId,
+              parentToolItemId: ctx.pendingTool.itemId,
+              agentId: parsed.agentId,
+              thresholdPct
+            });
+            if (plan.shouldPrefork) {
+              const messagesContext = await ctx.apiClient.getMessagesContext({
+                workspaceId: ctx.run.workspaceId,
+                sessionId: ctx.run.sessionId,
+                appendMessage: {
+                  role: "user",
+                  content: buildSubtaskPreforkSummaryPrompt({
+                    uiLocale: null,
+                    subtaskPrompt: parsed.prompt
+                  })
+                }
+              });
+
+              const summary = await generateSingleCallText(
+                {
+                  provider: ctx.profile.provider,
+                  model: ctx.profile.model
+                },
+                {
+                  messages: messagesContext.messages,
+                  timeoutMs: COMPACTION_TIMEOUT_MS,
+                  abortSignal: ctx.signal
+                }
+              );
+              const summaryText = String(summary.text || "").trim();
+              if (summaryText) {
+                preforkSummaryText = summaryText;
+                preforkMeta = {
+                  thresholdPct: plan.thresholdPct,
+                  parentLastResponseTotalTokens: plan.parentLastResponseTotalTokens ?? 0,
+                  childContextWindowTokens: plan.childContextWindowTokens
+                };
+              }
+            }
+          } catch {
+            // prefork 预压缩失败时，回退到原有 subtask 启动路径。
+          }
+        }
         const started = await ctx.apiClient.startSubtaskRun({
           workspaceId: ctx.run.workspaceId,
           parentSessionId: ctx.run.sessionId,
@@ -289,7 +366,9 @@ export class BuiltinToolProvider implements ToolProvider {
           description: parsed.description,
           prompt: parsed.prompt,
           agentId: parsed.agentId,
-          session: parsed.session
+          session: parsed.session,
+          ...(preforkSummaryText ? { preforkSummaryText } : {}),
+          ...(preforkMeta ? { preforkMeta } : {})
         });
 
         await ctx.updateToolItem({

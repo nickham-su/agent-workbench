@@ -1003,6 +1003,7 @@ const ARCHIVE_RESULT_TRUNCATED_MARKER = "[超过最大字符数限制,从此处�
 const ARCHIVABLE_ITEM_STATUS = new Set<AgentContextItemStatus>(["completed", "failed", "cancelled"]);
 const RUN_STATUS_SYSTEM_TEXT_PREFIX = "[run] ";
 const COMPACTION_SNIPPET_CACHE_MAX_BYTES = 256 * 1024;
+const SUBTASK_PREFORK_SUMMARY_MAX_CHARS = 20_000;
 function buildSubtaskForkGuardSystemText(input: { uiLocale: AgentUiLocale | null }) {
   if (normalizeAgentUiLocale(input.uiLocale) !== "zh-CN") {
     return [
@@ -3076,18 +3077,11 @@ export class AgentService {
     tx();
   }
 
-  async startSubtaskRunFromWorker(params: {
+  private resolveSubtaskParentContext(params: {
     workspaceId: string;
     parentSessionId: string;
     parentRunId: string;
     parentToolItemId: number;
-    description: string;
-    prompt: string;
-    agentId: string;
-    session: {
-      mode: "new" | "existing" | "fork";
-      sessionId?: string;
-    };
   }) {
     const parentSession = getAgentSession(this.ctx.db, params.parentSessionId);
     if (!parentSession) throw new HttpError(404, "parent session not found");
@@ -3110,6 +3104,92 @@ export class AgentService {
       throw new HttpError(400, "invalid subtask anchor", "AGENT_SUBTASK_ANCHOR_INVALID");
     }
 
+    return {
+      parentSession,
+      parentRun,
+      parentUiLocale,
+      anchor
+    };
+  }
+
+  getSubtaskPreforkPlanFromWorker(params: {
+    workspaceId: string;
+    parentSessionId: string;
+    parentRunId: string;
+    parentToolItemId: number;
+    agentId: string;
+    thresholdPct?: number;
+  }) {
+    this.resolveSubtaskParentContext(params);
+
+    const resolvedAgentId = String(params.agentId || "").trim();
+    if (!resolvedAgentId) {
+      throw new HttpError(400, "subtask agentId is required", "AGENT_SUBTASK_AGENT_REQUIRED");
+    }
+
+    const thresholdRaw = params.thresholdPct;
+    const thresholdPct =
+      thresholdRaw == null
+        ? 95
+        : Number.isFinite(Number(thresholdRaw))
+          ? Math.floor(Number(thresholdRaw))
+          : Number.NaN;
+    if (!Number.isFinite(thresholdPct) || thresholdPct < 50 || thresholdPct > 99) {
+      throw new HttpError(400, "thresholdPct must be between 50 and 99", "AGENT_SUBTASK_PREFORK_THRESHOLD_INVALID");
+    }
+
+    const profile = resolveExecutionProfile(this.ctx, {
+      surface: "subtask",
+      requestedAgentId: resolvedAgentId
+    });
+    const childContextWindowTokens = Math.max(1, Math.floor(Number(profile.model.contextWindowTokens || 0)));
+    const thresholdTokens = Math.floor(childContextWindowTokens * (thresholdPct / 100));
+
+    const parentState = getRunState(this.ctx.db, params.workspaceId, params.parentSessionId);
+    const parentLastResponseTotalTokens = typeof parentState.lastResponseTotalTokens === "number"
+      ? Math.max(0, Math.floor(parentState.lastResponseTotalTokens))
+      : null;
+
+    return {
+      shouldPrefork: parentLastResponseTotalTokens != null && parentLastResponseTotalTokens >= thresholdTokens,
+      thresholdPct,
+      parentLastResponseTotalTokens,
+      childContextWindowTokens,
+      thresholdTokens
+    };
+  }
+
+  async startSubtaskRunFromWorker(params: {
+    workspaceId: string;
+    parentSessionId: string;
+    parentRunId: string;
+    parentToolItemId: number;
+    description: string;
+    prompt: string;
+    agentId: string;
+    session: {
+      mode: "new" | "existing" | "fork";
+      sessionId?: string;
+    };
+    preforkSummaryText?: string;
+    preforkMeta?: {
+      thresholdPct: number;
+      parentLastResponseTotalTokens: number;
+      childContextWindowTokens: number;
+    };
+  }) {
+    const {
+      parentSession,
+      parentRun,
+      parentUiLocale,
+      anchor
+    } = this.resolveSubtaskParentContext({
+      workspaceId: params.workspaceId,
+      parentSessionId: params.parentSessionId,
+      parentRunId: params.parentRunId,
+      parentToolItemId: params.parentToolItemId
+    });
+
     const normalizedDescription = params.description.trim();
     if (!normalizedDescription) {
       throw new HttpError(400, "subtask description is required", "AGENT_SUBTASK_DESCRIPTION_REQUIRED");
@@ -3122,6 +3202,54 @@ export class AgentService {
     if (!resolvedAgentId) {
       throw new HttpError(400, "subtask agentId is required", "AGENT_SUBTASK_AGENT_REQUIRED");
     }
+
+    const hasPreforkSummaryText = Object.prototype.hasOwnProperty.call(params, "preforkSummaryText");
+    const hasPreforkMeta = Object.prototype.hasOwnProperty.call(params, "preforkMeta") && params.preforkMeta != null;
+    if (params.session.mode !== "fork" && (hasPreforkSummaryText || hasPreforkMeta)) {
+      throw new HttpError(
+        400,
+        "preforkSummaryText/preforkMeta is only allowed when session.mode=fork",
+        "AGENT_SUBTASK_PREFORK_NOT_ALLOWED"
+      );
+    }
+
+    const preforkSummaryText = String(params.preforkSummaryText || "").trim();
+    if (preforkSummaryText.length > SUBTASK_PREFORK_SUMMARY_MAX_CHARS) {
+      throw new HttpError(
+        400,
+        `preforkSummaryText must be <= ${SUBTASK_PREFORK_SUMMARY_MAX_CHARS} characters`,
+        "AGENT_SUBTASK_PREFORK_SUMMARY_TOO_LONG"
+      );
+    }
+
+    if (hasPreforkMeta && !preforkSummaryText) {
+      throw new HttpError(400, "preforkMeta requires non-empty preforkSummaryText", "AGENT_SUBTASK_PREFORK_META_INVALID");
+    }
+    if (hasPreforkMeta) {
+      const preforkMeta = params.preforkMeta!;
+      const expected = this.getSubtaskPreforkPlanFromWorker({
+        workspaceId: params.workspaceId,
+        parentSessionId: params.parentSessionId,
+        parentRunId: params.parentRunId,
+        parentToolItemId: params.parentToolItemId,
+        agentId: resolvedAgentId,
+        thresholdPct: preforkMeta.thresholdPct
+      });
+      const expectedParentLast = expected.parentLastResponseTotalTokens;
+      const expectedChildWindow = expected.childContextWindowTokens;
+      if (
+        expectedParentLast == null
+        || expectedParentLast !== preforkMeta.parentLastResponseTotalTokens
+        || expectedChildWindow !== preforkMeta.childContextWindowTokens
+      ) {
+        throw new HttpError(
+          400,
+          "preforkMeta does not match current prefork plan",
+          "AGENT_SUBTASK_PREFORK_META_MISMATCH"
+        );
+      }
+    }
+
     const requestedSessionId = String(params.session.sessionId || "").trim();
     const forkBoundaryItemId = params.session.mode === "fork"
       ? this.resolveSubtaskForkBoundaryItemId({
@@ -3130,6 +3258,8 @@ export class AgentService {
           anchor
         })
       : null;
+    const shouldUsePreforkSummary = params.session.mode === "fork" && preforkSummaryText.length > 0;
+
 
     let session = null as AgentSessionRecord | null;
     if (params.session.mode === "existing") {
@@ -3149,7 +3279,15 @@ export class AgentService {
       if (requestedSessionId) {
         throw new HttpError(400, "sessionId is not allowed when mode=fork", "AGENT_SUBTASK_SESSION_ID_NOT_ALLOWED");
       }
-      if (forkBoundaryItemId == null) {
+      if (shouldUsePreforkSummary) {
+        session = this.createSession({
+          workspaceId: params.workspaceId,
+          title: `${subtaskTitleBase} (fork)`,
+          kind: "subtask",
+          forkedFromSessionId: params.parentSessionId,
+          forkedFromItemId: params.parentToolItemId
+        });
+      } else if (forkBoundaryItemId == null) {
         session = this.createSession({
           workspaceId: params.workspaceId,
           title: `${subtaskTitleBase} (fork)`,
@@ -3202,6 +3340,24 @@ export class AgentService {
 
     const tx = this.ctx.db.transaction(() => {
       let head = getSessionHead(this.ctx.db, session.workspaceId, session.id);
+      if (shouldUsePreforkSummary) {
+        const summaryItem = appendContextItem(this.ctx.db, {
+          workspaceId: session.workspaceId,
+          sessionId: session.id,
+          runId: null,
+          turnId: null,
+          step: null,
+          prevId: head,
+          kind: "system",
+          status: "completed",
+          output: {
+            type: "system_text",
+            text: preforkSummaryText
+          },
+          createdAt
+        });
+        head = summaryItem.id;
+      }
       if (params.session.mode === "fork") {
         const systemItem = appendContextItem(this.ctx.db, {
           workspaceId: session.workspaceId,
