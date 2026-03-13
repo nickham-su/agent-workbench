@@ -46,7 +46,6 @@ function buildHelpText() {
     "- /a (/agent) <id|n>       选择 agent",
     "- /c (/compact)            压缩当前会话上下文",
     "- /st (/status)            查看状态摘要",
-    "- /m (/mode)               循环切换群聊模式（mention_only/direct_whitelist，仅管理员）",
     "- /h (/help)               帮助"
   ].join("\n");
 }
@@ -59,8 +58,7 @@ const COMMAND_ALIAS_MAP = {
   "/status": "/st",
   "/new": "/n",
   "/workspace": "/ws",
-  "/compact": "/c",
-  "/mode": "/m"
+  "/compact": "/c"
 };
 
 function normalizeCommandAlias(cmd) {
@@ -640,18 +638,9 @@ function createGateway(params) {
       accountId,
       conversationKey
     });
-    const rawGroupMode = normalizeText(binding?.groupMode).toLowerCase();
-    const groupMode = rawGroupMode === "direct_whitelist" ? "direct_whitelist" : "mention_only";
     const senderAllowed = senderRole === "admin" || senderRole === "user";
-    if (groupMode === "mention_only") {
-      if (!ctx.mentionedBot) return;
-      if (!senderAllowed) return;
-    } else if (groupMode === "direct_whitelist") {
-      if (!senderAllowed) return;
-    } else {
-      if (!ctx.mentionedBot) return;
-      if (!senderAllowed) return;
-    }
+    if (!ctx.mentionedBot) return;
+    if (!senderAllowed) return;
     const hasSession = Boolean(normalizeText(binding?.sessionId));
     const hasAgent = Boolean(normalizeText(binding?.selectedAgentId));
     if (!hasSession && !hasAgent) {
@@ -1132,42 +1121,6 @@ function createGateway(params) {
         selectedAgentId: binding.selectedAgentId
       });
       void replyText(chatId, messageId, buildStatusText(summary));
-      return;
-    }
-
-    if (cmd.cmd === "/m") {
-      const binding = await client.post("/api/internal/agent/channels/conversations/get-binding", {
-        pluginId,
-        channelName,
-        accountId,
-        conversationKey
-      });
-      if (!normalizeText(binding?.sessionId)) {
-        void replyText(chatId, messageId, "请先使用 /ss 绑定会话");
-        return;
-      }
-      const arg = normalizeText(cmd.arg);
-      if (arg) {
-        void replyText(chatId, messageId, "用法错误：/m（不接受参数）");
-        return;
-      }
-      const rawMode = normalizeText(binding?.groupMode).toLowerCase();
-      const currentMode = rawMode === "direct_whitelist" ? "direct_whitelist" : "mention_only";
-      const targetMode = currentMode === "mention_only" ? "direct_whitelist" : "mention_only";
-
-      await client.post("/api/internal/agent/channels/conversations/set-group-mode", {
-        pluginId,
-        channelName,
-        accountId,
-        conversationKey,
-        groupMode: targetMode
-      });
-
-      const modeDesc =
-        targetMode === "mention_only"
-          ? "mention_only（仅@机器人消息触发）"
-          : "direct_whitelist（白名单用户消息直接触发，无需@）";
-      void replyText(chatId, messageId, `群聊模式已切换为：${modeDesc}`);
       return;
     }
 

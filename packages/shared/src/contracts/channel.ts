@@ -6,7 +6,6 @@ export type ChannelChatType = Static<typeof ChannelChatTypeSchema>;
 
 export const ChannelSenderRoleSchema = Type.Union([Type.Literal("admin"), Type.Literal("user")]);
 export type ChannelSenderRole = Static<typeof ChannelSenderRoleSchema>;
-export const ChannelGroupModeSchema = Type.Union([Type.Literal("mention_only"), Type.Literal("direct_whitelist")]);
 
 export const ChannelIngestInboundMessageRequestSchema = Type.Object(
   {
@@ -171,7 +170,7 @@ export const ChannelConversationBindingSchema = Type.Object(
     workspaceId: Type.String(),
     sessionId: Type.String(),
     selectedAgentId: Type.Union([Type.String(), Type.Null()]),
-    groupMode: Type.Optional(Type.Union([ChannelGroupModeSchema, Type.Null()])),
+    groupMode: Type.Optional(Type.Union([Type.String(), Type.Null()])),
     watermarkExternalMessageId: Type.Union([Type.String(), Type.Null()]),
     createdAt: Type.Number(),
     updatedAt: Type.Number()
@@ -191,17 +190,3 @@ export const ChannelSetSelectedAgentRequestSchema = Type.Object(
   { additionalProperties: false }
 );
 export type ChannelSetSelectedAgentRequest = Static<typeof ChannelSetSelectedAgentRequestSchema>;
-
-export const ChannelSetGroupModeRequestSchema = Type.Object(
-  {
-    pluginId: Type.String({ minLength: 1 }),
-    channelName: Type.String({ minLength: 1 }),
-    accountId: Type.String({ minLength: 1 }),
-    conversationKey: Type.String({ minLength: 1 }),
-    groupMode: ChannelGroupModeSchema
-  },
-  { additionalProperties: false }
-);
-export type ChannelSetGroupModeRequest = Static<typeof ChannelSetGroupModeRequestSchema>;
-export const ChannelSetGroupModeResponseSchema = Type.Object({ ok: Type.Boolean() }, { additionalProperties: false });
-export type ChannelSetGroupModeResponse = Static<typeof ChannelSetGroupModeResponseSchema>;

@@ -105,23 +105,6 @@ export function upsertConversationBinding(
   });
 }
 
-export function updateBindingGroupMode(
-  db: Db,
-  input: { pluginId: string; channelName: string; accountId: string; conversationKey: string; groupMode: string | null; updatedAt: number }
-) {
-  db.prepare(
-    `
-      update channel_conversation_binding
-      set group_mode=@groupMode,
-          updated_at=@updatedAt
-      where plugin_id=@pluginId
-        and channel_name=@channelName
-        and account_id=@accountId
-        and conversation_key=@conversationKey
-    `
-  ).run(input);
-}
-
 export type InboundMessageRow = {
   id: number;
   pluginId: string;

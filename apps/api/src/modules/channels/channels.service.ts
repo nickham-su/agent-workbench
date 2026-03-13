@@ -14,8 +14,7 @@ import {
   insertInboundMessageDedup,
   listInboundMessagesForAggregation,
   upsertConversationBinding,
-  updateBindingSelectedAgentId,
-  updateBindingGroupMode
+  updateBindingSelectedAgentId
 } from "./channels.store.js";
 import { getAgentChannelSenderAllowlistSettings } from "../settings/settings.service.js";
 
@@ -196,15 +195,6 @@ export class ChannelsService {
   setSelectedAgentId(input: ChannelRuntimeKey & { selectedAgentId: string | null }) {
     const ts = nowMs();
     updateBindingSelectedAgentId(this.ctx.db, { ...input, updatedAt: ts });
-  }
-
-  setGroupMode(input: ChannelRuntimeKey & { groupMode: "mention_only" | "direct_whitelist" }) {
-    const existing = getConversationBinding(this.ctx.db, input);
-    if (!existing || !existing.sessionId) {
-      throw new HttpError(404, "conversation binding not found", "BINDING_NOT_FOUND");
-    }
-    const ts = nowMs();
-    updateBindingGroupMode(this.ctx.db, { ...input, groupMode: input.groupMode, updatedAt: ts });
   }
 
   ingestInboundMessage(input: IngestInboundMessageInput): IngestInboundMessageResult {
