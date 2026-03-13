@@ -3847,6 +3847,117 @@ test("internal sessions/status-summary agent 不存在时返回 400 + AGENT_NOT_
   assert.equal(res.json().code, "AGENT_NOT_FOUND");
 });
 
+test("internal sessions/context-items-tail 返回尾部上下文项", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const user1 = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: "turn_tail_1",
+    step: 1,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "hello 1" }
+  });
+  const assistant2 = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: "turn_tail_1",
+    step: 2,
+    prevId: user1.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: { type: "assistant_text", text: "hello 2" }
+  });
+  const tool3 = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: "turn_tail_1",
+    step: 3,
+    prevId: assistant2.item.id,
+    kind: "tool",
+    status: "completed",
+    output: { type: "tool", toolName: "todolist", result: { goal: "x", todos: [] } }
+  });
+
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/context-items-tail",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: { pluginId: "feishu", sessionId: session.id, tailLimit: 2 }
+  });
+  assert.equal(res.statusCode, 200, `context-items-tail failed: ${res.body}`);
+  const body = res.json() as any;
+  assert.equal(body.sessionId, session.id);
+  assert.equal(Array.isArray(body.items), true);
+  assert.equal(body.items.length, 2);
+  assert.equal(body.items[0]?.id, assistant2.item.id);
+  assert.equal(body.items[1]?.id, tool3.item.id);
+});
+
+test("internal sessions/context-items-tail sessionId 为空白时返回 400 + SESSION_ID_REQUIRED", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/context-items-tail",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: { pluginId: "feishu", sessionId: "   ", tailLimit: 1 }
+  });
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.json().code, "SESSION_ID_REQUIRED");
+});
+
+test("internal sessions/context-items-tail 缺少 x-awb-plugin-id 时返回 400 + PLUGIN_ID_REQUIRED", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/context-items-tail",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { pluginId: "feishu", sessionId: session.id, tailLimit: 1 }
+  });
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.json().code, "PLUGIN_ID_REQUIRED");
+});
+
+test("internal sessions/context-items-tail 缺少 body.pluginId 时返回 400 + PLUGIN_ID_REQUIRED", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/context-items-tail",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: { sessionId: session.id, tailLimit: 1 }
+  });
+
+  assert.equal(res.statusCode, 400);
+  assert.ok(typeof res.json().message === "string" && res.json().message.length > 0);
+});
+
+test("internal sessions/context-items-tail header/body pluginId 不一致时返回 401 + PLUGIN_ID_MISMATCH", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/context-items-tail",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: { pluginId: "slack", sessionId: session.id, tailLimit: 1 }
+  });
+  assert.equal(res.statusCode, 401);
+  assert.equal(res.json().code, "PLUGIN_ID_MISMATCH");
+});
+
 test("single-call model profile 始终使用全局默认模型", async () => {
   const fixture = await createFixture();
 

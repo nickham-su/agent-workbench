@@ -336,6 +336,27 @@ export const AgentListAvailableAgentsResponseSchema = Type.Object(
 );
 export type AgentListAvailableAgentsResponse = Static<typeof AgentListAvailableAgentsResponseSchema>;
 
+export const AgentSessionContextItemsTailRequestSchema = Type.Object(
+  {
+    pluginId: Type.String({ minLength: 1 }),
+    sessionId: Type.String({ minLength: 1 }),
+    tailLimit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 }))
+  },
+  { additionalProperties: false }
+);
+export type AgentSessionContextItemsTailRequest = Static<typeof AgentSessionContextItemsTailRequestSchema>;
+
+export const AgentSessionContextItemsTailResponseSchema = Type.Object(
+  {
+    sessionId: Type.String({ minLength: 1 }),
+    headItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
+    appliedItemId: Type.Number({ minimum: 0 }),
+    items: Type.Array(AgentContextItemRecordSchema)
+  },
+  { additionalProperties: false }
+);
+export type AgentSessionContextItemsTailResponse = Static<typeof AgentSessionContextItemsTailResponseSchema>;
+
 export const AgentCreateSessionRequestSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
   title: Type.Optional(Type.String({ minLength: 1 })),

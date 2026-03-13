@@ -26,6 +26,8 @@ import {
   AgentListAvailableAgentsRequestSchema,
   AgentListAvailableAgentsResponseSchema,
   AgentSessionStatusSummaryRequestSchema,
+  AgentSessionContextItemsTailRequestSchema,
+  AgentSessionContextItemsTailResponseSchema,
   AgentRecentWorkspacesRequestSchema,
   AgentRecentWorkspacesResponseSchema,
   AgentSessionStatusSummaryResponseSchema,
@@ -744,6 +746,47 @@ export async function registerAgentRoutes(
         if (err instanceof HttpError) throw err;
         throw new HttpError(500, "failed to get session status summary", "SESSION_STATUS_SUMMARY_FAILED");
       }
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/sessions/context-items-tail",
+    {
+      schema: {
+        tags: ["agent"],
+        body: AgentSessionContextItemsTailRequestSchema,
+        response: {
+          200: AgentSessionContextItemsTailResponseSchema,
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+          500: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const pluginId = String(req.headers["x-awb-plugin-id"] || "").trim();
+      if (!pluginId) {
+        throw new HttpError(400, "x-awb-plugin-id is required", "PLUGIN_ID_REQUIRED");
+      }
+      const body = req.body as { pluginId: string; sessionId: string; tailLimit?: number };
+      const bodyPluginId = String(body.pluginId || "").trim();
+      if (!bodyPluginId) {
+        throw new HttpError(400, "pluginId is required", "PLUGIN_ID_REQUIRED");
+      }
+      if (bodyPluginId !== pluginId) {
+        throw new HttpError(401, "pluginId mismatch", "PLUGIN_ID_MISMATCH");
+      }
+
+      const sessionId = String(body.sessionId || "").trim();
+
+      if (!sessionId) {
+        throw new HttpError(400, "sessionId is required", "SESSION_ID_REQUIRED");
+      }
+
+      return params.service.getContextItems(sessionId, { tailLimit: body.tailLimit });
     }
   );
 

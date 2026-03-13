@@ -46,12 +46,14 @@ function buildHelpText() {
     "- /a (/agent) <id|n>       选择 agent",
     "- /c (/compact)            压缩当前会话上下文",
     "- /st (/status)            查看状态摘要",
+    "- /l (/last)               查看最后一条 assistant 消息（运行中不可用）",
     "- /h (/help)               帮助"
   ].join("\n");
 }
 
 const COMMAND_ALIAS_MAP = {
   "/a": "/a",
+  "/last": "/l",
   "/agent": "/a",
   "/session": "/ss",
   "/help": "/h",
@@ -846,6 +848,83 @@ function createGateway(params) {
       }
     }
 
+    async function fetchContextItemsTail(sessionId, tailLimit) {
+      const sid = normalizeText(sessionId);
+      if (!sid) return [];
+      const res = await client.post("/api/internal/agent/sessions/context-items-tail", {
+        pluginId,
+        sessionId: sid,
+        tailLimit: Number.isFinite(tailLimit) ? Number(tailLimit) : void 0
+      });
+      return Array.isArray(res?.items) ? res.items : [];
+    }
+
+    function extractOutputText(item) {
+      const output = item && typeof item === "object" ? item.output : null;
+      if (!output || typeof output !== "object") return "";
+      const text = normalizeText(output.text);
+      if (text) return text;
+      return "";
+    }
+
+    function findLatestTodolistItem(items) {
+      if (!Array.isArray(items)) return null;
+      for (let idx = items.length - 1; idx >= 0; idx -= 1) {
+        const item = items[idx];
+        const output = item && typeof item === "object" ? item.output : null;
+        if (!output || typeof output !== "object") continue;
+        if (normalizeText(output.type) !== "tool") continue;
+        if (normalizeText(output.toolName) !== "todolist") continue;
+        return item;
+      }
+      return null;
+    }
+
+    function formatTodolistAppend(item, limit = 20) {
+      if (!item || typeof item !== "object") return "";
+      const output = item.output && typeof item.output === "object" ? item.output : null;
+      if (!output) return "";
+      const result = output.result && typeof output.result === "object" ? output.result : null;
+      const goal = normalizeText(result?.goal);
+      const todos = Array.isArray(result?.todos) ? result.todos : [];
+      const lines = [];
+      lines.push("\n---\n最近 todolist:");
+      if (goal) {
+        lines.push(`goal: ${goal}`);
+      }
+      if (todos.length === 0) {
+        const fallback = normalizeText(output.text);
+        if (fallback) {
+          lines.push(fallback.length > 1200 ? `${fallback.slice(0, 1200)}...` : fallback);
+        } else {
+          lines.push("(无任务)");
+        }
+        return lines.join("\n");
+      }
+      const shown = todos.slice(0, Math.max(1, limit));
+      for (const todo of shown) {
+        const content = normalizeText(todo?.content) || "(empty)";
+        const status = normalizeText(todo?.status) || "pending";
+        lines.push(`- [${status}] ${content}`);
+      }
+      if (todos.length > shown.length) {
+        lines.push(`... +${todos.length - shown.length} more`);
+      }
+      return lines.join("\n");
+    }
+
+    function formatLastAssistantMessage(item) {
+      const kind = normalizeText(item?.kind);
+      const output = item && typeof item === "object" ? item.output : null;
+      const outputType = normalizeText(output?.type);
+      const text = normalizeText(output?.text);
+      if (kind === "assistant" && outputType === "assistant_text" && text) {
+        const maxChars = 3000;
+        return text.length > maxChars ? `${text.slice(0, maxChars)}...` : text;
+      }
+      return `最后一条消息不是 assistant 消息（kind=${kind || "unknown"}, type=${outputType || "unknown"}）`;
+    }
+
     if (cmd.cmd === "/ws") {
       try {
         const workspaces = await listWorkspaces();
@@ -1105,22 +1184,80 @@ function createGateway(params) {
       return;
     }
 
-    if (cmd.cmd === "/st") {
-      const binding = await client.post("/api/internal/agent/channels/conversations/get-binding", {
-        pluginId,
-        channelName,
-        accountId,
-        conversationKey
-      });
-      if (!normalizeText(binding?.sessionId)) {
-        void replyText(chatId, messageId, "请先使用 /ss 绑定会话");
-        return;
+    if (cmd.cmd === "/l") {
+      try {
+        const binding = await client.post("/api/internal/agent/channels/conversations/get-binding", {
+          pluginId,
+          channelName,
+          accountId,
+          conversationKey
+        });
+        const sessionId = normalizeText(binding?.sessionId);
+        if (!sessionId) {
+          void replyText(chatId, messageId, "请先使用 /ss 绑定会话");
+          return;
+        }
+
+        const summary = await client.post("/api/internal/agent/sessions/status-summary", {
+          sessionId,
+          selectedAgentId: binding.selectedAgentId
+        });
+        if (normalizeText(summary?.runState?.status).toLowerCase() === "running") {
+          void replyText(chatId, messageId, "正在运行中，请稍后再试");
+          return;
+        }
+
+        const items = await fetchContextItemsTail(sessionId, 1);
+        if (items.length === 0) {
+          void replyText(chatId, messageId, "当前会话暂无消息");
+          return;
+        }
+        void replyText(chatId, messageId, formatLastAssistantMessage(items[items.length - 1]));
+      } catch (e) {
+        logger.error(`[feishu] /l failed: ${e instanceof Error ? e.message : String(e)}`);
+        void replyText(chatId, messageId, "查询状态失败，请稍后重试");
       }
-      const summary = await client.post("/api/internal/agent/sessions/status-summary", {
-        sessionId: binding.sessionId,
-        selectedAgentId: binding.selectedAgentId
-      });
-      void replyText(chatId, messageId, buildStatusText(summary));
+      return;
+    }
+
+    if (cmd.cmd === "/st") {
+      try {
+        const binding = await client.post("/api/internal/agent/channels/conversations/get-binding", {
+          pluginId,
+          channelName,
+          accountId,
+          conversationKey
+        });
+        if (!normalizeText(binding?.sessionId)) {
+          void replyText(chatId, messageId, "请先使用 /ss 绑定会话");
+          return;
+        }
+        const summary = await client.post("/api/internal/agent/sessions/status-summary", {
+          sessionId: binding.sessionId,
+          selectedAgentId: binding.selectedAgentId
+        });
+        let text = buildStatusText(summary);
+        if (normalizeText(summary?.runState?.status).toLowerCase() === "running") {
+          let items = await fetchContextItemsTail(binding.sessionId, 50);
+          let latestTodo = findLatestTodolistItem(items);
+          if (!latestTodo) {
+            items = await fetchContextItemsTail(binding.sessionId, 200);
+            latestTodo = findLatestTodolistItem(items);
+          }
+          const appendix = formatTodolistAppend(latestTodo, 20);
+          if (appendix) {
+            text += appendix;
+          }
+        }
+        const maxReplyChars = 5000;
+        if (text.length > maxReplyChars) {
+          text = `${text.slice(0, maxReplyChars)}...`;
+        }
+        void replyText(chatId, messageId, text);
+      } catch (e) {
+        logger.error(`[feishu] /st failed: ${e instanceof Error ? e.message : String(e)}`);
+        void replyText(chatId, messageId, "查询状态失败，请稍后重试");
+      }
       return;
     }
 
