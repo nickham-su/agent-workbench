@@ -315,6 +315,26 @@ export class AgentApiClient {
     });
   }
 
+  async getSubtaskPreforkPlan(input: {
+    workspaceId: string;
+    parentSessionId: string;
+    parentRunId: string;
+    parentToolItemId: number;
+    agentId: string;
+    thresholdPct?: number;
+  }) {
+    return this.request<{
+      shouldPrefork: boolean;
+      thresholdPct: number;
+      parentLastResponseTotalTokens: number | null;
+      childContextWindowTokens: number;
+      thresholdTokens: number;
+    }>("/api/internal/agent/subtask/prefork-plan", {
+      method: "POST",
+      body: input
+    });
+  }
+
   async startSubtaskRun(input: {
     workspaceId: string;
     parentSessionId: string;
@@ -324,6 +344,12 @@ export class AgentApiClient {
     prompt: string;
     agentId: string;
     session: { mode: "new" | "existing" | "fork"; sessionId?: string };
+    preforkSummaryText?: string;
+    preforkMeta?: {
+      thresholdPct: number;
+      parentLastResponseTotalTokens: number;
+      childContextWindowTokens: number;
+    };
   }) {
     return this.request<{ sessionId: string; runId: string; workspacePath: string }>("/api/internal/agent/subtask/start", {
       method: "POST",

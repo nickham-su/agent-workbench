@@ -469,6 +469,47 @@ export async function registerAgentRoutes(
   );
 
   app.post(
+    "/api/internal/agent/subtask/prefork-plan",
+    {
+      schema: {
+        tags: ["agent"],
+        body: Type.Object({
+          workspaceId: Type.String({ minLength: 1 }),
+          parentSessionId: Type.String({ minLength: 1 }),
+          parentRunId: Type.String({ minLength: 1 }),
+          parentToolItemId: Type.Number({ minimum: 1 }),
+          agentId: Type.String({ minLength: 1 }),
+          thresholdPct: Type.Optional(Type.Number())
+        }),
+        response: {
+          200: Type.Object({
+            shouldPrefork: Type.Boolean(),
+            thresholdPct: Type.Integer({ minimum: 50, maximum: 99 }),
+            parentLastResponseTotalTokens: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
+            childContextWindowTokens: Type.Integer({ minimum: 1 }),
+            thresholdTokens: Type.Integer({ minimum: 1 })
+          }),
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as {
+        workspaceId: string;
+        parentSessionId: string;
+        parentRunId: string;
+        parentToolItemId: number;
+        agentId: string;
+        thresholdPct?: number;
+      };
+      return params.service.getSubtaskPreforkPlanFromWorker(body);
+    }
+  );
+
+  app.post(
     "/api/internal/agent/subtask/start",
     {
       schema: {
@@ -483,9 +524,17 @@ export async function registerAgentRoutes(
           agentId: Type.String({ minLength: 1 }),
           session: Type.Union([
             Type.Object({ mode: Type.Literal("new") }),
-            Type.Object({ mode: Type.Literal("existing"), sessionId: Type.String({ minLength: 1 }) }),
-            Type.Object({ mode: Type.Literal("fork") })
-          ])
+             Type.Object({ mode: Type.Literal("existing"), sessionId: Type.String({ minLength: 1 }) }),
+             Type.Object({ mode: Type.Literal("fork") })
+           ]),
+           preforkSummaryText: Type.Optional(Type.String({ minLength: 1, maxLength: 100_000 })),
+           preforkMeta: Type.Optional(Type.Object({
+             thresholdPct: Type.Integer({ minimum: 50, maximum: 99 }),
+             parentLastResponseTotalTokens: Type.Number({ minimum: 0 }),
+            childContextWindowTokens: Type.Integer({ minimum: 1 })
+          }, {
+            additionalProperties: false
+          }))
         }),
         response: {
           200: Type.Object({
@@ -511,6 +560,12 @@ export async function registerAgentRoutes(
         prompt: string;
         agentId: string;
         session: { mode: "new" | "existing" | "fork"; sessionId?: string };
+        preforkSummaryText?: string;
+        preforkMeta?: {
+          thresholdPct: number;
+          parentLastResponseTotalTokens: number;
+          childContextWindowTokens: number;
+        };
       };
       return params.service.startSubtaskRunFromWorker(body);
     }

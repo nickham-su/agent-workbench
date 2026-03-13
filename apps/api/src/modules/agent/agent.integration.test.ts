@@ -2934,6 +2934,519 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
   assert.ok(promptContext.system.includes("Time zone:"));
 });
 
+test("subtask start with preforkSummaryText should inject summary->guard->prompt without copying parent history", async () => {
+  const fixture = await createFixture();
+  await configureAgentDefaults(fixture.app);
+
+  const parentSessionRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions",
+    payload: { workspaceId: fixture.workspaceId, title: "parent-prefork" }
+  });
+  assert.equal(parentSessionRes.statusCode, 201, `create parent session failed: ${parentSessionRes.body}`);
+  const parentSession = parentSessionRes.json() as { id: string };
+
+  const parentRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: parentRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    triggerItemId: null,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const parentUser = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "this is parent history that must not be copied"
+    }
+  });
+
+  const parentAssistant = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_prefork",
+    step: 1,
+    prevId: parentUser.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: {
+      type: "assistant_text",
+      text: "prepare subtask"
+    }
+  });
+
+  const subtaskTool = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_prefork",
+    step: 1,
+    prevId: parentAssistant.item.id,
+    kind: "tool",
+    status: "queued",
+    output: {
+      type: "tool",
+      toolName: "subtask",
+      toolCallId: "call_prefork",
+      args: {
+        description: "prefork",
+        prompt: "please do prefork task",
+        agentId: "default",
+        session: { mode: "fork" }
+      }
+    }
+  });
+
+  const startRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/start",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      parentSessionId: parentSession.id,
+      parentRunId,
+      parentToolItemId: subtaskTool.item.id,
+      description: "prefork",
+      prompt: "please do prefork task",
+      agentId: "default",
+      session: { mode: "fork" },
+      preforkSummaryText: "prefork summary",
+      preforkMeta: { thresholdPct: 95, parentLastResponseTotalTokens: 200000, childContextWindowTokens: 128000 }
+    }
+  });
+  assert.equal(startRes.statusCode, 200, `start subtask failed: ${startRes.body}`);
+  const started = startRes.json() as { sessionId: string };
+
+  const items = getSessionTranscriptItems(fixture.db, fixture.workspaceId, started.sessionId);
+  assert.equal(items.length, 3, "prefork path should only inject summary/guard/prompt items");
+  assert.equal(items[0]?.kind, "system");
+  assert.equal((items[0]?.output as { text?: string } | undefined)?.text, "prefork summary");
+  assert.equal(items[1]?.kind, "system");
+  assert.equal(String((items[1]?.output as { text?: string } | undefined)?.text || "").includes("All history before this system message was copied from the parent session"), true);
+  assert.equal(items[2]?.kind, "user");
+  assert.equal((items[2]?.output as { text?: string } | undefined)?.text, "please do prefork task");
+  assert.equal(items.some((item) => item.kind === "user" && (item.output as { text?: string }).text === "this is parent history that must not be copied"), false);
+});
+
+test("subtask start should reject preforkSummaryText when mode=new/existing", async () => {
+  const fixture = await createFixture();
+  await configureAgentDefaults(fixture.app);
+
+  const parentSession = await createSession(fixture.app, fixture.workspaceId);
+  const parentRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: parentRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    triggerItemId: null,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const subtaskTool = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_prefork_mode_reject",
+    step: 1,
+    prevId: null,
+    kind: "tool",
+    status: "queued",
+    output: {
+      type: "tool",
+      toolName: "subtask",
+      toolCallId: "call_prefork_mode_reject",
+      args: {
+        description: "prefork",
+        prompt: "please do prefork task",
+        agentId: "default",
+        session: { mode: "fork" }
+      }
+    }
+  });
+
+  const modeNewRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/start",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      parentSessionId: parentSession.id,
+      parentRunId,
+      parentToolItemId: subtaskTool.item.id,
+      description: "prefork",
+      prompt: "please do prefork task",
+      agentId: "default",
+      session: { mode: "new" },
+      preforkSummaryText: "prefork summary"
+    }
+  });
+  assert.equal(modeNewRes.statusCode, 400);
+  assert.equal((modeNewRes.json() as { code?: string }).code, "AGENT_SUBTASK_PREFORK_NOT_ALLOWED");
+
+  const existingSessionRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions",
+    payload: {
+      workspaceId: fixture.workspaceId,
+      title: "existing-subtask",
+      kind: "subtask"
+    }
+  });
+  assert.equal(existingSessionRes.statusCode, 201, `create existing subtask session failed: ${existingSessionRes.body}`);
+  const existingSession = existingSessionRes.json() as { id: string };
+
+  const modeExistingRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/start",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      parentSessionId: parentSession.id,
+      parentRunId,
+      parentToolItemId: subtaskTool.item.id,
+      description: "prefork",
+      prompt: "please do prefork task",
+      agentId: "default",
+      session: { mode: "existing", sessionId: existingSession.id },
+      preforkSummaryText: "prefork summary"
+    }
+  });
+  assert.equal(modeExistingRes.statusCode, 400);
+  assert.equal((modeExistingRes.json() as { code?: string }).code, "AGENT_SUBTASK_PREFORK_NOT_ALLOWED");
+});
+
+test("subtask start should reject too long preforkSummaryText", async () => {
+  const fixture = await createFixture();
+  await configureAgentDefaults(fixture.app);
+
+  const parentSession = await createSession(fixture.app, fixture.workspaceId);
+  const parentRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: parentRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    triggerItemId: null,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const subtaskTool = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_prefork_too_long",
+    step: 1,
+    prevId: null,
+    kind: "tool",
+    status: "queued",
+    output: {
+      type: "tool",
+      toolName: "subtask",
+      toolCallId: "call_prefork_too_long",
+      args: {
+        description: "prefork",
+        prompt: "please do prefork task",
+        agentId: "default",
+        session: { mode: "fork" }
+      }
+    }
+  });
+
+  const tooLongSummary = "x".repeat(20_001);
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/start",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      parentSessionId: parentSession.id,
+      parentRunId,
+      parentToolItemId: subtaskTool.item.id,
+      description: "prefork",
+      prompt: "please do prefork task",
+      agentId: "default",
+      session: { mode: "fork" },
+      preforkSummaryText: tooLongSummary
+    }
+  });
+  assert.equal(res.statusCode, 400);
+  assert.equal((res.json() as { code?: string }).code, "AGENT_SUBTASK_PREFORK_SUMMARY_TOO_LONG");
+});
+
+test("subtask start should reject mismatched preforkMeta", async () => {
+  const fixture = await createFixture();
+  await configureAgentDefaults(fixture.app);
+
+  const parentSession = await createSession(fixture.app, fixture.workspaceId);
+  const parentRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: parentRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    triggerItemId: null,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const subtaskTool = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_prefork_meta_mismatch",
+    step: 1,
+    prevId: null,
+    kind: "tool",
+    status: "queued",
+    output: {
+      type: "tool",
+      toolName: "subtask",
+      toolCallId: "call_prefork_meta_mismatch",
+      args: {
+        description: "prefork",
+        prompt: "please do prefork task",
+        agentId: "default",
+        session: { mode: "fork" }
+      }
+    }
+  });
+
+  const updatedAt = Date.now();
+  updateRunState(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    status: "running",
+    activeRunId: parentRunId,
+    activeAssistantItemId: null,
+    lastResponseTotalTokens: 200000,
+    runNoticeText: "",
+    updatedAt,
+    appliedItemId: subtaskTool.item.id
+  });
+
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/start",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      parentSessionId: parentSession.id,
+      parentRunId,
+      parentToolItemId: subtaskTool.item.id,
+      description: "prefork",
+      prompt: "please do prefork task",
+      agentId: "default",
+      session: { mode: "fork" },
+      preforkSummaryText: "prefork summary",
+      preforkMeta: { thresholdPct: 95, parentLastResponseTotalTokens: 199999, childContextWindowTokens: 128000 }
+    }
+  });
+  assert.equal(res.statusCode, 400);
+  assert.equal((res.json() as { code?: string }).code, "AGENT_SUBTASK_PREFORK_META_MISMATCH");
+});
+
+test("subtask prefork-plan should use default threshold and return correct shouldPrefork", async () => {
+  const fixture = await createFixture();
+  await configureAgentDefaults(fixture.app);
+
+  const parentSessionRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions",
+    payload: { workspaceId: fixture.workspaceId, title: "parent-prefork-plan" }
+  });
+  assert.equal(parentSessionRes.statusCode, 201, `create parent session failed: ${parentSessionRes.body}`);
+  const parentSession = parentSessionRes.json() as { id: string };
+
+  const parentRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: parentRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    triggerItemId: null,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const subtaskTool = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_prefork_plan",
+    step: 1,
+    prevId: null,
+    kind: "tool",
+    status: "queued",
+    output: {
+      type: "tool",
+      toolName: "subtask",
+      toolCallId: "call_prefork_plan",
+      args: {
+        description: "prefork",
+        prompt: "please do prefork task",
+        agentId: "default",
+        session: { mode: "fork" }
+      }
+    }
+  });
+
+  const shouldNotPreforkRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/prefork-plan",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      parentSessionId: parentSession.id,
+      parentRunId,
+      parentToolItemId: subtaskTool.item.id,
+      agentId: "default"
+    }
+  });
+  assert.equal(shouldNotPreforkRes.statusCode, 200, `prefork-plan failed: ${shouldNotPreforkRes.body}`);
+  const shouldNotPreforkBody = shouldNotPreforkRes.json() as {
+    shouldPrefork: boolean;
+    thresholdPct: number;
+    parentLastResponseTotalTokens: number | null;
+    childContextWindowTokens: number;
+    thresholdTokens: number;
+  };
+  assert.equal(shouldNotPreforkBody.thresholdPct, 95);
+  assert.equal(shouldNotPreforkBody.childContextWindowTokens, 128000);
+  assert.equal(shouldNotPreforkBody.thresholdTokens, 121600);
+  assert.equal(shouldNotPreforkBody.parentLastResponseTotalTokens, null);
+  assert.equal(shouldNotPreforkBody.shouldPrefork, false);
+
+  const updatedAt = Date.now();
+  updateRunState(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    status: "running",
+    activeRunId: parentRunId,
+    activeAssistantItemId: null,
+    lastResponseTotalTokens: 200000,
+    runNoticeText: "",
+    updatedAt,
+    appliedItemId: subtaskTool.item.id
+  });
+
+  const shouldPreforkRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/prefork-plan",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      parentSessionId: parentSession.id,
+      parentRunId,
+      parentToolItemId: subtaskTool.item.id,
+      agentId: "default"
+    }
+  });
+  assert.equal(shouldPreforkRes.statusCode, 200, `prefork-plan failed: ${shouldPreforkRes.body}`);
+  const shouldPreforkBody = shouldPreforkRes.json() as {
+    shouldPrefork: boolean;
+    parentLastResponseTotalTokens: number | null;
+  };
+  assert.equal(shouldPreforkBody.parentLastResponseTotalTokens, 200000);
+  assert.equal(shouldPreforkBody.shouldPrefork, true);
+});
+
+test("subtask prefork-plan should reject invalid thresholdPct", async () => {
+  const fixture = await createFixture();
+  await configureAgentDefaults(fixture.app);
+
+  const parentSession = await createSession(fixture.app, fixture.workspaceId);
+  const parentRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: parentRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+  const subtaskTool = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_prefork_plan_invalid",
+    step: 1,
+    prevId: null,
+    kind: "tool",
+    status: "queued",
+    output: {
+      type: "tool",
+      toolName: "subtask",
+      toolCallId: "call_prefork_plan_invalid",
+      args: {
+        description: "prefork",
+        prompt: "please do prefork task",
+        agentId: "default",
+        session: { mode: "fork" }
+      }
+    }
+  });
+
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/prefork-plan",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      parentSessionId: parentSession.id,
+      parentRunId,
+      parentToolItemId: subtaskTool.item.id,
+      agentId: "default",
+      thresholdPct: 49
+    }
+  });
+  assert.equal(res.statusCode, 400);
+  assert.equal((res.json() as { code?: string }).code, "AGENT_SUBTASK_PREFORK_THRESHOLD_INVALID");
+});
+
 test("agent subtask fork 对父 run 非法 locale 做归一化回退，避免继续传播非法值", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
 
