@@ -257,6 +257,13 @@ export type AgentSessionStatusSummaryResponse = Static<typeof AgentSessionStatus
 
 export const AgentRecentSessionsRequestSchema = Type.Object(
   {
+    kind: Type.Optional(
+      Type.Union([
+        Type.Literal("primary"),
+        Type.Literal("subtask"),
+        Type.Literal("all")
+      ])
+    ),
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 }))
   },
   { additionalProperties: false }
@@ -284,6 +291,34 @@ export const AgentRecentSessionsResponseSchema = Type.Object(
 );
 export type AgentRecentSessionsResponse = Static<typeof AgentRecentSessionsResponseSchema>;
 
+export const AgentRecentWorkspacesRequestSchema = Type.Object(
+  {
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 }))
+  },
+  { additionalProperties: false }
+);
+export type AgentRecentWorkspacesRequest = Static<typeof AgentRecentWorkspacesRequestSchema>;
+
+export const AgentRecentWorkspaceItemSchema = Type.Object(
+  {
+    id: Type.String({ minLength: 1 }),
+    title: Type.String({ minLength: 1 }),
+    dirName: Type.String({ minLength: 1 }),
+    updatedAt: Type.Number(),
+    lastUsedAt: Type.Union([Type.Number(), Type.Null()])
+  },
+  { additionalProperties: false }
+);
+export type AgentRecentWorkspaceItem = Static<typeof AgentRecentWorkspaceItemSchema>;
+
+export const AgentRecentWorkspacesResponseSchema = Type.Object(
+  {
+    items: Type.Array(AgentRecentWorkspaceItemSchema)
+  },
+  { additionalProperties: false }
+);
+export type AgentRecentWorkspacesResponse = Static<typeof AgentRecentWorkspacesResponseSchema>;
+
 export const AgentListAvailableAgentsRequestSchema = Type.Object(
   {
     workspaceId: Type.String({ minLength: 1 }),
@@ -307,6 +342,16 @@ export const AgentCreateSessionRequestSchema = Type.Object({
   kind: Type.Optional(AgentSessionKindSchema)
 });
 export type AgentCreateSessionRequest = Static<typeof AgentCreateSessionRequestSchema>;
+
+export const AgentInternalCreateSessionRequestSchema = Type.Object(
+  {
+    workspaceId: Type.String({ minLength: 1 }),
+    title: Type.Optional(Type.String({ minLength: 1 })),
+    kind: Type.Optional(AgentSessionKindSchema)
+  },
+  { additionalProperties: false }
+);
+export type AgentInternalCreateSessionRequest = Static<typeof AgentInternalCreateSessionRequestSchema>;
 
 export const AgentSendMessageRequestSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),

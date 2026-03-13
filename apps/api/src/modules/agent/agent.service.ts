@@ -23,12 +23,13 @@ import type {
   AgentSessionRunState,
   AgentContextToolName,
   AgentRecentSessionsResponse,
+  AgentRecentWorkspacesResponse,
 } from "@agent-workbench/shared";
 import { HttpError } from "../../app/errors.js";
 import type { AppContext } from "../../app/context.js";
 import { nowMs } from "../../utils/time.js";
 import { newSortableId } from "../../utils/ids.js";
-import { getWorkspace } from "../workspaces/workspace.store.js";
+import { getWorkspace, listRecentWorkspaces } from "../workspaces/workspace.store.js";
 import {
   agentArchiveSessionDir,
   applyPatchUiArtifactPath,
@@ -1901,12 +1902,18 @@ export class AgentService {
     return listAgentSessions(this.ctx.db, workspaceId);
   }
 
-  listRecentSessions(params: { limit: number }): AgentRecentSessionsResponse {
-    return { items: listRecentSessionsAcrossWorkspaces(this.ctx.db, Math.max(1, Math.min(50, params.limit || 10))) };
+  listRecentSessions(params: { limit: number; kind?: "primary" | "subtask" | "all" }): AgentRecentSessionsResponse {
+    const kind = params.kind === "primary" || params.kind === "subtask" ? params.kind : "all";
+    return { items: listRecentSessionsAcrossWorkspaces(this.ctx.db, Math.max(1, Math.min(50, params.limit || 10)), kind) };
   }
 
   getSession(sessionId: string) {
     return getAgentSession(this.ctx.db, sessionId);
+  }
+
+  listRecentWorkspaces(params: { limit: number }): AgentRecentWorkspacesResponse {
+    const limit = Math.max(1, Math.min(50, params.limit || 10));
+    return { items: listRecentWorkspaces(this.ctx.db, limit) };
   }
 
   getWorkspace(workspaceId: string) {

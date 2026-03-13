@@ -55,6 +55,16 @@ export type BuildAggregatedUserPromptInput = {
 
 export type BuildAggregatedUserPromptResult = { text: string; consumedExternalMessageId: string };
 
+export type ChannelAllowlistCheckInput = {
+  pluginId: string;
+  senderId: string;
+};
+
+export type ChannelAllowlistCheckResult = {
+  allowed: boolean;
+  reason?: string;
+};
+
 export type TryAppendUserMessageAndStartRunInput = {
   pluginId: string;
   channelName: string;
@@ -127,6 +137,16 @@ export class ChannelsService {
       },
       "channels: inbound rejected by sender allowlist"
     );
+  }
+
+  checkSenderAllowlist(input: ChannelAllowlistCheckInput): ChannelAllowlistCheckResult {
+    const pluginId = String(input.pluginId || "").trim();
+    const senderId = String(input.senderId || "").trim();
+    const allow = this.assertAllowed({ channel: pluginId, senderId });
+    if (!allow.ok) {
+      return { allowed: false, reason: allow.message };
+    }
+    return { allowed: true };
   }
 
   getConversationBinding(key: ChannelRuntimeKey) {

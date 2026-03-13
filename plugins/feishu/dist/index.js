@@ -38,22 +38,62 @@ function buildConversationKey(accountId, chatId) {
 function buildHelpText() {
   return [
     "命令：",
-    "- /ss           列出最近会话（跨 workspace）",
-    "- /ss <id|n>    绑定当前飞书会话到 session",
-    "- /a            列出可选 agent",
-    "- /a <id|n>     选择 agent",
-    "- /st           查看状态摘要",
-    "- /h            帮助"
+    "- /ws (/workspace)         列出最近使用的 workspace（最多 10 个）",
+    "- /ss (/session)           列出最近会话（跨 workspace）",
+    "- /ss (/session) <id|n>    绑定当前飞书会话到 session（保持已选 agent）",
+    "- /n (/new) [workspaceId]  新建并切换会话；不传参=当前 workspace，传参=指定 workspace",
+    "- /a (/agent)              列出可选 agent",
+    "- /a (/agent) <id|n>       选择 agent",
+    "- /c (/compact)            压缩当前会话上下文",
+    "- /st (/status)            查看状态摘要",
+    "- /h (/help)               帮助"
   ].join("\n");
+}
+
+const COMMAND_ALIAS_MAP = {
+  "/agent": "/a",
+  "/session": "/ss",
+  "/help": "/h",
+  "/status": "/st",
+  "/new": "/n",
+  "/workspace": "/ws",
+  "/compact": "/c"
+};
+
+function normalizeCommandAlias(cmd) {
+  const key = normalizeText(cmd).toLowerCase();
+  return COMMAND_ALIAS_MAP[key] || key;
 }
 
 function parseCommand(text) {
   const t = normalizeText(text);
   if (!t.startsWith("/")) return null;
   const parts = t.split(/\s+/g).filter(Boolean);
-  const cmd = parts[0] || "";
+  const cmd = normalizeCommandAlias(parts[0] || "");
   const arg = parts.length > 1 ? parts.slice(1).join(" ") : "";
   return { cmd, arg };
+}
+
+function stripLeadingMentionsForCommand(text) {
+  let t = typeof text === "string" ? text : "";
+  if (!t) return "";
+
+  while (true) {
+    const before = t;
+
+    // 1) <at ...>...</at>
+    t = t.replace(/^\s*<at\b[^>]*>[\s\S]*?<\/at>/i, "");
+
+    // 2) @xxx / ＠xxx (until whitespace or common separators)
+    t = t.replace(/^\s*[＠@][^\s:：,，]+/, "");
+
+    // 3) separators and spaces between mention and command text
+    t = t.replace(/^[\s:：,，]+/, "");
+
+    if (t === before) break;
+  }
+
+  return t.replace(/^\s+/, "");
 }
 
 function resolveIndexOrId(arg, items) {
@@ -124,6 +164,33 @@ function buildStatusText(summary) {
 
 function createInternalClient(params) {
   const { apiOrigin, internalToken } = params;
+  async function get(path, options) {
+    const pluginId = String(options?.pluginId || "").trim();
+    const res = await fetch(`${apiOrigin}${path}`, {
+      method: "GET",
+      headers: {
+        "x-awb-agent-internal-token": internalToken,
+        ...(pluginId ? { "x-awb-plugin-id": pluginId } : {})
+      }
+    });
+    const txt = await res.text();
+    let json = null;
+    try {
+      json = txt ? JSON.parse(txt) : null;
+    } catch {
+      // ignore
+    }
+    if (!res.ok) {
+      const msg = (json && typeof json.message === "string" && json.message) || txt || `http ${res.status}`;
+      const code = (json && typeof json.code === "string" && json.code) || "";
+      const err = new Error(`${msg}${code ? ` (${code})` : ""}`);
+      err.statusCode = res.status;
+      err.code = code;
+      throw err;
+    }
+    return json;
+  }
+
   async function post(path, body) {
     const pluginId = String(body?.pluginId || "").trim();
     const res = await fetch(`${apiOrigin}${path}`, {
@@ -152,7 +219,7 @@ function createInternalClient(params) {
     }
     return json;
   }
-  return { post };
+  return { post, get };
 }
 
 // ---------------- gateway (Lark WS protocol, simplified) ----------------
@@ -471,6 +538,17 @@ function createGateway(params) {
     const channelName = "im";
     const conversationKey = buildConversationKey(accountId, ctx.chatId);
 
+    if (ctx.chatType === "group" && ctx.mentionedBot) {
+      const allow = await client.post("/api/internal/agent/channels/allowlist/check", {
+        pluginId,
+        senderId: ctx.sender.id
+      });
+      if (!allow?.allowed) {
+        void replyText(ctx.chatId, ctx.messageId, `请联系我的主人添加白名单。open_id: ${ctx.sender.id}`);
+        return;
+      }
+    }
+
     // Ingest every message for dedupe + allowlist enforcement.
     const ingest = await client.post("/api/internal/agent/channels/inbound/ingest", {
       pluginId,
@@ -498,7 +576,12 @@ function createGateway(params) {
       return;
     }
 
-    const cmd = parseCommand(ctx.text);
+    let cmdText = ctx.text;
+    if (ctx.chatType === "group" && ctx.mentionedBot) {
+      const stripped = stripLeadingMentionsForCommand(cmdText);
+      cmdText = stripped || cmdText;
+    }
+    const cmd = parseCommand(cmdText);
     if (cmd) {
       await handleCommand({
         chatId: ctx.chatId,
@@ -523,11 +606,18 @@ function createGateway(params) {
       conversationKey
     });
 
-    if (!binding) {
+    const hasSession = Boolean(normalizeText(binding?.sessionId));
+    const hasAgent = Boolean(normalizeText(binding?.selectedAgentId));
+
+    if (!hasSession && !hasAgent) {
+      void replyText(ctx.chatId, ctx.messageId, "请先设置 session 与 agent：先使用 /ss 绑定会话，再使用 /a 选择 agent");
+      return;
+    }
+    if (!hasSession) {
       void replyText(ctx.chatId, ctx.messageId, "请先使用 /ss 绑定会话");
       return;
     }
-    if (!binding.selectedAgentId) {
+    if (!hasAgent) {
       void replyText(ctx.chatId, ctx.messageId, "请先使用 /a 选择 agent");
       return;
     }
@@ -578,8 +668,65 @@ function createGateway(params) {
       return;
     }
 
+    async function isAgentAvailableInWorkspace(workspaceId, agentId) {
+      const wsId = normalizeText(workspaceId);
+      const targetAgentId = normalizeText(agentId);
+      if (!wsId || !targetAgentId) return false;
+      const list = await client.post("/api/internal/agent/agents/list", { workspaceId: wsId, surface: "user" });
+      const agents = Array.isArray(list?.agents) ? list.agents : [];
+      return agents.some((a) => normalizeText(a?.id) === targetAgentId);
+    }
+
+    async function listWorkspaces() {
+      const res = await client.get("/api/internal/agent/workspaces/list?limit=10", { pluginId });
+      return Array.isArray(res?.items) ? res.items : [];
+    }
+
+    function formatWorkspaceOption(item) {
+      const id = normalizeText(item?.id);
+      const label = normalizeText(item?.title) || normalizeText(item?.dirName) || id;
+      return { id, label: label || id };
+    }
+
+    async function keepAgentAfterBinding({ binding, previousAgentId }) {
+      let keepAgentRejected = false;
+      let keptAgentId = normalizeText(binding?.selectedAgentId);
+      if (previousAgentId && keptAgentId !== previousAgentId) {
+        const canKeep = await isAgentAvailableInWorkspace(binding?.workspaceId, previousAgentId);
+        if (canKeep) {
+          await client.post("/api/internal/agent/channels/conversations/set-agent", {
+            pluginId,
+            channelName,
+            accountId,
+            conversationKey,
+            selectedAgentId: previousAgentId
+          });
+          keptAgentId = previousAgentId;
+        } else {
+          keepAgentRejected = true;
+        }
+      }
+      return { keptAgentId, keepAgentRejected };
+    }
+
+    if (cmd.cmd === "/ws") {
+      try {
+        const workspaces = await listWorkspaces();
+        const top = workspaces.map(formatWorkspaceOption).filter((w) => w.id);
+        if (top.length === 0) {
+          void replyText(chatId, messageId, "暂无 workspace");
+          return;
+        }
+        void replyText(chatId, messageId, top.map((w, idx) => `${idx + 1}. ${w.label} (${w.id})`).join("\n"));
+      } catch (e) {
+        logger.error(`[feishu] list workspaces failed: ${e instanceof Error ? e.message : String(e)}`);
+        void replyText(chatId, messageId, "获取 workspace 列表失败，请稍后重试");
+      }
+      return;
+    }
+
     if (cmd.cmd === "/ss") {
-      const recent = await client.post("/api/internal/agent/sessions/recent", { limit: 10 });
+      const recent = await client.post("/api/internal/agent/sessions/recent", { limit: 10, kind: "primary" });
       const items = Array.isArray(recent.items) ? recent.items : [];
       if (!cmd.arg) {
         if (items.length === 0) {
@@ -597,6 +744,14 @@ function createGateway(params) {
         return;
       }
 
+      const before = await client.post("/api/internal/agent/channels/conversations/get-binding", {
+        pluginId,
+        channelName,
+        accountId,
+        conversationKey
+      });
+      const previousAgentId = normalizeText(before?.selectedAgentId);
+
       const binding = await client.post("/api/internal/agent/channels/conversations/upsert-binding", {
         pluginId,
         channelName,
@@ -610,7 +765,90 @@ function createGateway(params) {
         void replyText(chatId, messageId, "绑定失败");
         return;
       }
-      void replyText(chatId, messageId, `已绑定：${binding.sessionId}，请使用 /a 选择 agent`);
+
+      const { keptAgentId, keepAgentRejected } = await keepAgentAfterBinding({ binding, previousAgentId });
+
+      if (keptAgentId) {
+        void replyText(chatId, messageId, `已绑定：${binding.sessionId}，保持当前 agent：${keptAgentId}`);
+      } else if (keepAgentRejected) {
+        void replyText(chatId, messageId, `已绑定：${binding.sessionId}，原 agent 不适用于当前 workspace/已不可用，请使用 /a 重新选择`);
+      } else {
+        void replyText(chatId, messageId, `已绑定：${binding.sessionId}，请使用 /a 选择 agent`);
+      }
+      return;
+    }
+
+    if (cmd.cmd === "/n") {
+      const before = await client.post("/api/internal/agent/channels/conversations/get-binding", {
+        pluginId,
+        channelName,
+        accountId,
+        conversationKey
+      });
+      const workspaceId = normalizeText(before?.workspaceId);
+      const currentSessionId = normalizeText(before?.sessionId);
+      const previousAgentId = normalizeText(before?.selectedAgentId);
+      if (!workspaceId || !currentSessionId) {
+        void replyText(chatId, messageId, "请先使用 /ss 绑定会话");
+        return;
+      }
+
+      let targetWorkspaceId = workspaceId;
+      const rawArg = normalizeText(cmd.arg);
+      if (rawArg) {
+        const parts = rawArg.split(/\s+/g).filter(Boolean);
+        if (parts.length !== 1) {
+          void replyText(chatId, messageId, "用法错误：/n [workspaceId]");
+          return;
+        }
+        targetWorkspaceId = normalizeText(parts[0]);
+      }
+
+      let created = null;
+      try {
+        created = await client.post("/api/internal/agent/sessions/create", {
+          workspaceId: targetWorkspaceId,
+          title: "new session"
+        });
+      } catch (e) {
+        const statusCode = Number(e && typeof e === "object" ? e.statusCode : 0);
+        if (statusCode === 404) {
+          void replyText(chatId, messageId, "workspace 不存在，请使用 /ws 查看可用列表");
+          return;
+        }
+        logger.error(`[feishu] create session failed: ${e instanceof Error ? e.message : String(e)}`);
+        void replyText(chatId, messageId, "新建会话失败，请稍后重试");
+        return;
+      }
+      const newSessionId = normalizeText(created?.id);
+      if (!newSessionId) {
+        void replyText(chatId, messageId, "新建会话失败");
+        return;
+      }
+
+      const binding = await client.post("/api/internal/agent/channels/conversations/upsert-binding", {
+        pluginId,
+        channelName,
+        accountId,
+        conversationKey,
+        chatId,
+        chatType: chatType === "group" ? "group" : "direct",
+        sessionId: newSessionId
+      });
+      if (!binding) {
+        void replyText(chatId, messageId, "切换新会话失败");
+        return;
+      }
+
+      const { keptAgentId, keepAgentRejected } = await keepAgentAfterBinding({ binding, previousAgentId });
+
+      if (keptAgentId) {
+        void replyText(chatId, messageId, `已新建并切换会话：${newSessionId}，保持当前 agent：${keptAgentId}`);
+      } else if (keepAgentRejected) {
+        void replyText(chatId, messageId, `已新建并切换会话：${newSessionId}，原 agent 不适用于当前 workspace/已不可用，请使用 /a 重新选择`);
+      } else {
+        void replyText(chatId, messageId, `已新建并切换会话：${newSessionId}，请使用 /a 选择 agent`);
+      }
       return;
     }
 
@@ -621,7 +859,7 @@ function createGateway(params) {
         accountId,
         conversationKey
       });
-      if (!binding) {
+      if (!normalizeText(binding?.sessionId)) {
         void replyText(chatId, messageId, "请先使用 /ss 绑定会话");
         return;
       }
@@ -654,6 +892,48 @@ function createGateway(params) {
       return;
     }
 
+    if (cmd.cmd === "/c") {
+      const binding = await client.post("/api/internal/agent/channels/conversations/get-binding", {
+        pluginId,
+        channelName,
+        accountId,
+        conversationKey
+      });
+      const sessionId = normalizeText(binding?.sessionId);
+      const workspaceId = normalizeText(binding?.workspaceId);
+      if (!sessionId || !workspaceId) {
+        void replyText(chatId, messageId, "请先使用 /ss 绑定会话");
+        return;
+      }
+
+      try {
+        const result = await client.post(`/api/agent/sessions/${encodeURIComponent(sessionId)}/compact`, {
+          workspaceId,
+          clientRequestId: `im_${pluginId}_${conversationKey}_${messageId}_compact`,
+          ...(normalizeText(binding.selectedAgentId) ? { agentId: normalizeText(binding.selectedAgentId) } : {})
+        });
+        if (result?.scheduled) {
+          void replyText(chatId, messageId, "已触发 compact，正在处理…");
+          return;
+        }
+        if (result?.skippedReason === "deduplicated") {
+          void replyText(chatId, messageId, "compact 请求已存在，已忽略重复触发");
+          return;
+        }
+        void replyText(chatId, messageId, "compact 已受理");
+      } catch (e) {
+        const statusCode = Number(e && typeof e === "object" ? e.statusCode : 0);
+        const errorCode = normalizeText(e && typeof e === "object" ? e.code : "");
+        if (statusCode === 409 || errorCode === "SESSION_RUNNING") {
+          void replyText(chatId, messageId, "当前会话正在运行中，请稍后再执行 /c");
+          return;
+        }
+        logger.error(`[feishu] compact failed: ${e instanceof Error ? e.message : String(e)}`);
+        void replyText(chatId, messageId, "compact 失败，请稍后重试");
+      }
+      return;
+    }
+
     if (cmd.cmd === "/st") {
       const binding = await client.post("/api/internal/agent/channels/conversations/get-binding", {
         pluginId,
@@ -661,7 +941,7 @@ function createGateway(params) {
         accountId,
         conversationKey
       });
-      if (!binding) {
+      if (!normalizeText(binding?.sessionId)) {
         void replyText(chatId, messageId, "请先使用 /ss 绑定会话");
         return;
       }

@@ -631,7 +631,7 @@ export function getAgentSession(db: Db, sessionId: string): AgentSessionRecord |
   return row ? mapSession(row) : null;
 }
 
-export function listRecentSessionsAcrossWorkspaces(db: Db, limit: number): AgentRecentSessionItem[] {
+export function listRecentSessionsAcrossWorkspaces(db: Db, limit: number, kind: "primary" | "subtask" | "all" = "all"): AgentRecentSessionItem[] {
   const rows = db
     .prepare(
       `
@@ -645,11 +645,12 @@ export function listRecentSessionsAcrossWorkspaces(db: Db, limit: number): Agent
         from agent_session s
         join workspaces w
           on w.id = s.workspace_id
+        ${kind === "all" ? "" : "where s.kind = ?"}
         order by s.updated_at desc
         limit ?
       `
     )
-    .all(limit) as any[];
+    .all(...(kind === "all" ? [limit] : [kind, limit])) as any[];
   return rows.map((row) => ({
     sessionId: String(row.sessionId),
     sessionTitle: String(row.sessionTitle || ""),

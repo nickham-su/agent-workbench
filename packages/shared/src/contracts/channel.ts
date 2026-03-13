@@ -50,6 +50,24 @@ export const ChannelIngestInboundMessageResponseSchema = Type.Union(
 );
 export type ChannelIngestInboundMessageResponse = Static<typeof ChannelIngestInboundMessageResponseSchema>;
 
+export const ChannelAllowlistCheckRequestSchema = Type.Object(
+  {
+    pluginId: Type.String({ minLength: 1 }),
+    senderId: Type.String({ minLength: 1 })
+  },
+  { additionalProperties: false }
+);
+export type ChannelAllowlistCheckRequest = Static<typeof ChannelAllowlistCheckRequestSchema>;
+
+export const ChannelAllowlistCheckResponseSchema = Type.Object(
+  {
+    allowed: Type.Boolean(),
+    reason: Type.Optional(Type.String({ minLength: 1 }))
+  },
+  { additionalProperties: false }
+);
+export type ChannelAllowlistCheckResponse = Static<typeof ChannelAllowlistCheckResponseSchema>;
+
 export const ChannelBuildAggregatedUserPromptRequestSchema = Type.Object(
   {
     pluginId: Type.String({ minLength: 1 }),

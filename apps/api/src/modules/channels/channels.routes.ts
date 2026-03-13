@@ -4,6 +4,8 @@ import {
   ChannelBuildAggregatedUserPromptRequestSchema,
   ChannelBuildAggregatedUserPromptResponseSchema,
   ChannelIngestInboundMessageRequestSchema,
+  ChannelAllowlistCheckRequestSchema,
+  ChannelAllowlistCheckResponseSchema,
   ChannelIngestInboundMessageResponseSchema,
   ChannelTriggerRunRequestSchema,
   ChannelTriggerRunResponseSchema,
@@ -124,6 +126,28 @@ export async function registerChannelsRoutes(
       const body = req.body as any;
       assertPluginCaller(req, body.pluginId);
       return params.service.ingestInboundMessage(req.body as any);
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/channels/allowlist/check",
+    {
+      schema: {
+        tags: ["agent"],
+        body: ChannelAllowlistCheckRequestSchema,
+        response: {
+          200: ChannelAllowlistCheckResponseSchema,
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          500: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.agentService);
+      const body = req.body as any;
+      assertPluginCaller(req, body.pluginId);
+      return params.service.checkSenderAllowlist(body);
     }
   );
 

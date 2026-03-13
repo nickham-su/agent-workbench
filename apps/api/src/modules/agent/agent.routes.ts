@@ -10,6 +10,7 @@ import {
   AgentCreateSessionRequestSchema,
   AgentForkSessionRequestSchema,
   AgentRevertSessionRequestSchema,
+  AgentInternalCreateSessionRequestSchema,
   AgentSendMessageRequestSchema,
   AgentSendMessageResponseSchema,
   type AgentSendMessageRequest,
@@ -25,6 +26,8 @@ import {
   AgentListAvailableAgentsRequestSchema,
   AgentListAvailableAgentsResponseSchema,
   AgentSessionStatusSummaryRequestSchema,
+  AgentRecentWorkspacesRequestSchema,
+  AgentRecentWorkspacesResponseSchema,
   AgentSessionStatusSummaryResponseSchema,
   PluginToolCanonicalNameSchema,
   PluginRuntimeSnapshotsResponseSchema,
@@ -640,9 +643,47 @@ export async function registerAgentRoutes(
     },
     async (req) => {
       assertInternalToken(req, params.service);
-      const body = req.body as { limit?: number };
+      const body = req.body as { limit?: number; kind?: "primary" | "subtask" | "all" };
       const limit = typeof body.limit === "number" ? body.limit : 10;
-      return params.service.listRecentSessions({ limit });
+      const kind = body.kind === "primary" || body.kind === "subtask" || body.kind === "all" ? body.kind : "all";
+      return params.service.listRecentSessions({ limit, kind });
+    }
+  );
+
+  app.get(
+    "/api/internal/agent/workspaces/list",
+    {
+      schema: {
+        tags: ["agent"],
+        querystring: AgentRecentWorkspacesRequestSchema,
+        response: {
+          200: AgentRecentWorkspacesResponseSchema,
+          401: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const query = req.query as { limit?: number };
+      const limit = typeof query.limit === "number" ? query.limit : 10;
+      return params.service.listRecentWorkspaces({ limit });
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/sessions/create",
+    {
+      schema: {
+        tags: ["agent"],
+        body: AgentInternalCreateSessionRequestSchema,
+        response: { 201: AgentSessionRecordSchema, 400: ErrorResponseSchema, 401: ErrorResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req, reply) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as { workspaceId: string; title?: string; kind?: "primary" | "subtask" };
+      const session = params.service.createSession(body);
+      return reply.code(201).send(session);
     }
   );
 
