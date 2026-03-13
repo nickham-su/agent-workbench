@@ -549,7 +549,7 @@ function createGateway(params) {
       }
     }
 
-    // Ingest every message for dedupe + allowlist enforcement.
+    // Ingest every message for dedupe/persistence/aggregation; allowlist is enforced by check or run trigger.
     const ingest = await client.post("/api/internal/agent/channels/inbound/ingest", {
       pluginId,
       channelName,
