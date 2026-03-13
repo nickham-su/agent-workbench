@@ -1116,14 +1116,17 @@ export default {
       created: "已添加",
       removed: "已移除",
       saved: "已保存",
+      updated: "已更新",
       modal: {
-        createTitle: "添加 IM 用户"
+        createTitle: "添加 IM 用户",
+        editTitle: "编辑 IM 用户"
       },
       fields: {
         channel: "渠道",
         senderId: "发送者 ID",
         role: "角色",
         remark: "备注",
+        actions: "操作",
         senderIdPlaceholder: "例如 ou_xxx 或平台用户 ID",
         remarkPlaceholder: "可选，便于识别"
       },
@@ -1133,6 +1136,7 @@ export default {
       },
       actions: {
         add: "添加",
+        edit: "编辑",
         remove: "移除"
       },
       errors: {

@@ -1118,14 +1118,17 @@ export default {
       created: "Added",
       removed: "Removed",
       saved: "Saved",
+      updated: "Updated",
       modal: {
-        createTitle: "Add IM user"
+        createTitle: "Add IM user",
+        editTitle: "Edit IM user"
       },
       fields: {
         channel: "Channel",
         senderId: "Sender ID",
         role: "Role",
         remark: "Remark",
+        actions: "Actions",
         senderIdPlaceholder: "e.g. ou_xxx or platform user id",
         remarkPlaceholder: "Optional, for management"
       },
@@ -1135,6 +1138,7 @@ export default {
       },
       actions: {
         add: "Add",
+        edit: "Edit",
         remove: "Remove"
       },
       errors: {

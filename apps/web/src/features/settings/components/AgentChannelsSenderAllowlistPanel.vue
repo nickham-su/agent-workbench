@@ -22,28 +22,32 @@
             <tr>
               <th class="text-left font-semibold px-3 py-2 w-[180px]">{{ t("settings.agentChannelSenderAllowlist.fields.channel") }}</th>
               <th class="text-left font-semibold px-3 py-2">{{ t("settings.agentChannelSenderAllowlist.fields.senderId") }}</th>
-              <th class="text-left font-semibold px-3 py-2">{{ t("settings.agentChannelSenderAllowlist.fields.remark") }}</th>
               <th class="text-left font-semibold px-3 py-2 w-[140px]">{{ t("settings.agentChannelSenderAllowlist.fields.role") }}</th>
+              <th class="text-left font-semibold px-3 py-2">{{ t("settings.agentChannelSenderAllowlist.fields.remark") }}</th>
+              <th class="text-left font-semibold px-3 py-2 w-[180px]">{{ t("settings.agentChannelSenderAllowlist.fields.actions") }}</th>
             </tr>
           </thead>
           <tbody v-if="items.length > 0">
             <tr v-for="(item, idx) in items" :key="`${item.channel}\u0000${item.senderId}\u0000${idx}`" class="border-t border-[var(--border-color-secondary)] align-top">
               <td class="px-3 py-2 font-mono">{{ item.channel }}</td>
               <td class="px-3 py-2 font-mono break-all">{{ item.senderId }}</td>
-              <td class="px-3 py-2 break-all">
-                <div class="flex items-start justify-between gap-2">
-                  <span class="break-all">{{ item.remark || "-" }}</span>
+              <td class="px-3 py-2">{{ item.role === "admin" ? t("settings.agentChannelSenderAllowlist.roles.admin") : t("settings.agentChannelSenderAllowlist.roles.user") }}</td>
+              <td class="px-3 py-2 break-all">{{ item.remark || "-" }}</td>
+              <td class="px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <a-button type="text" size="small" :disabled="submitting" @click="openEditModal(item, idx)">
+                    {{ t("settings.agentChannelSenderAllowlist.actions.edit") }}
+                  </a-button>
                   <a-button type="text" danger size="small" :loading="submitting" @click="removeItem(idx)">
                     {{ t("settings.agentChannelSenderAllowlist.actions.remove") }}
                   </a-button>
                 </div>
               </td>
-              <td class="px-3 py-2">{{ item.role === "admin" ? t("settings.agentChannelSenderAllowlist.roles.admin") : t("settings.agentChannelSenderAllowlist.roles.user") }}</td>
             </tr>
           </tbody>
           <tbody v-else>
             <tr>
-              <td colspan="4" class="px-3 py-4 text-xs text-[color:var(--text-tertiary)]">{{ t("settings.agentChannelSenderAllowlist.empty") }}</td>
+              <td colspan="5" class="px-3 py-4 text-xs text-[color:var(--text-tertiary)]">{{ t("settings.agentChannelSenderAllowlist.empty") }}</td>
             </tr>
           </tbody>
         </table>
@@ -86,6 +90,38 @@
         </a-form-item>
       </a-form>
     </a-modal>
+
+    <a-modal
+      v-model:open="editModalOpen"
+      :title="t('settings.agentChannelSenderAllowlist.modal.editTitle')"
+      :confirm-loading="submitting"
+      :ok-text="t('common.save')"
+      :cancel-text="t('common.cancel')"
+      @ok="submitEdit"
+      @cancel="closeEditModal"
+    >
+      <a-form layout="vertical">
+        <a-form-item :label="t('settings.agentChannelSenderAllowlist.fields.senderId')" required>
+          <a-input
+            v-model:value="editForm.senderId"
+            :placeholder="t('settings.agentChannelSenderAllowlist.fields.senderIdPlaceholder')"
+          />
+        </a-form-item>
+        <a-form-item :label="t('settings.agentChannelSenderAllowlist.fields.role')" required>
+          <a-select
+            v-model:value="editForm.role"
+            :options="roleOptions"
+            :placeholder="t('settings.agentChannelSenderAllowlist.fields.role')"
+          />
+        </a-form-item>
+        <a-form-item :label="t('settings.agentChannelSenderAllowlist.fields.remark')">
+          <a-input
+            v-model:value="editForm.remark"
+            :placeholder="t('settings.agentChannelSenderAllowlist.fields.remarkPlaceholder')"
+          />
+        </a-form-item>
+      </a-form>
+    </a-modal>
   </div>
 </template>
 
@@ -111,6 +147,14 @@ type SenderRole = NonNullable<AgentChannelSenderAllowlistItem["role"]>;
 const createModalOpen = ref(false);
 const createForm = ref<{ channel: string; senderId: string; role: SenderRole; remark: string }>({
   channel: "",
+  senderId: "",
+  role: "user",
+  remark: ""
+});
+
+const editModalOpen = ref(false);
+const editIndex = ref<number>(-1);
+const editForm = ref<{ senderId: string; role: SenderRole; remark: string }>({
   senderId: "",
   role: "user",
   remark: ""
@@ -169,6 +213,26 @@ function closeCreateModal() {
   resetCreateForm();
 }
 
+function openEditModal(item: AgentChannelSenderAllowlistItem, index: number) {
+  editIndex.value = index;
+  editForm.value = {
+    senderId: String(item.senderId || ""),
+    role: item.role === "admin" ? "admin" : "user",
+    remark: String(item.remark || "")
+  };
+  editModalOpen.value = true;
+}
+
+function closeEditModal() {
+  editModalOpen.value = false;
+  editIndex.value = -1;
+  editForm.value = {
+    senderId: "",
+    role: "user",
+    remark: ""
+  };
+}
+
 async function persistItems(nextItems: AgentChannelSenderAllowlistItem[], successMessageKey = "settings.agentChannelSenderAllowlist.saved") {
   if (submitting.value) return;
   submitting.value = true;
@@ -219,6 +283,38 @@ async function submitCreate() {
   const ok = await persistItems(nextItems, "settings.agentChannelSenderAllowlist.created");
   if (ok) {
     closeCreateModal();
+  }
+}
+
+async function submitEdit() {
+  const index = editIndex.value;
+  if (index < 0 || index >= items.value.length) return;
+
+  const current = items.value[index];
+  if (!current) return;
+
+  const senderId = String(editForm.value.senderId || "").trim();
+  const role: SenderRole = editForm.value.role === "admin" ? "admin" : "user";
+  const remarkRaw = String(editForm.value.remark || "").trim();
+  const remark = remarkRaw ? remarkRaw : undefined;
+
+  if (!senderId) {
+    message.warning(t("settings.agentChannelSenderAllowlist.errors.senderIdRequired"));
+    return;
+  }
+
+  if (items.value.some((it, idx) => idx !== index && it.channel === current.channel && it.senderId === senderId)) {
+    message.warning(t("settings.agentChannelSenderAllowlist.errors.duplicate"));
+    return;
+  }
+
+  const nextItems = items.value.map((it, idx) =>
+    idx === index ? { channel: current.channel, senderId, role, ...(remark ? { remark } : {}) } : it
+  );
+
+  const ok = await persistItems(nextItems, "settings.agentChannelSenderAllowlist.updated");
+  if (ok) {
+    closeEditModal();
   }
 }
 
