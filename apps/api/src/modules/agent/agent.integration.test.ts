@@ -2947,18 +2947,6 @@ test("subtask start with preforkSummaryText should inject summary->guard->prompt
   const parentSession = parentSessionRes.json() as { id: string };
 
   const parentRunId = newSortableId("run");
-  createRunRecord(fixture.db, {
-    runId: parentRunId,
-    workspaceId: fixture.workspaceId,
-    sessionId: parentSession.id,
-    triggerItemId: null,
-    agentId: "default",
-    providerId: "ppchat",
-    modelId: "gpt-5.2",
-    status: "running",
-    createdAt: Date.now()
-  });
-
   const parentUser = await createContextItemInternal({
     app: fixture.app,
     internalToken: fixture.internalToken,
@@ -2974,6 +2962,17 @@ test("subtask start with preforkSummaryText should inject summary->guard->prompt
       type: "user_text",
       text: "this is parent history that must not be copied"
     }
+  });
+  createRunRecord(fixture.db, {
+    runId: parentRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    triggerItemId: parentUser.item.id,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
   });
 
   const parentAssistant = await createContextItemInternal({
@@ -3017,6 +3016,18 @@ test("subtask start with preforkSummaryText should inject summary->guard->prompt
     }
   });
 
+  updateRunState(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    status: "running",
+    activeRunId: parentRunId,
+    activeAssistantItemId: null,
+    lastResponseTotalTokens: 200000,
+    runNoticeText: "",
+    updatedAt: Date.now(),
+    appliedItemId: subtaskTool.item.id
+  });
+
   const startRes = await fixture.app.inject({
     method: "POST",
     url: "/api/internal/agent/subtask/start",
@@ -3054,11 +3065,25 @@ test("subtask start should reject preforkSummaryText when mode=new/existing", as
 
   const parentSession = await createSession(fixture.app, fixture.workspaceId);
   const parentRunId = newSortableId("run");
+  const parentUser = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "prepare prefork mode reject" }
+  });
+
   createRunRecord(fixture.db, {
     runId: parentRunId,
     workspaceId: fixture.workspaceId,
     sessionId: parentSession.id,
-    triggerItemId: null,
+    triggerItemId: parentUser.item.id,
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
@@ -3074,7 +3099,7 @@ test("subtask start should reject preforkSummaryText when mode=new/existing", as
     runId: parentRunId,
     turnId: "turn_prefork_mode_reject",
     step: 1,
-    prevId: null,
+    prevId: parentUser.item.id,
     kind: "tool",
     status: "queued",
     output: {
@@ -3147,11 +3172,25 @@ test("subtask start should reject too long preforkSummaryText", async () => {
 
   const parentSession = await createSession(fixture.app, fixture.workspaceId);
   const parentRunId = newSortableId("run");
+  const parentUser = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "prepare prefork too long" }
+  });
+
   createRunRecord(fixture.db, {
     runId: parentRunId,
     workspaceId: fixture.workspaceId,
     sessionId: parentSession.id,
-    triggerItemId: null,
+    triggerItemId: parentUser.item.id,
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
@@ -3167,7 +3206,7 @@ test("subtask start should reject too long preforkSummaryText", async () => {
     runId: parentRunId,
     turnId: "turn_prefork_too_long",
     step: 1,
-    prevId: null,
+    prevId: parentUser.item.id,
     kind: "tool",
     status: "queued",
     output: {
@@ -3210,11 +3249,25 @@ test("subtask start should reject mismatched preforkMeta", async () => {
 
   const parentSession = await createSession(fixture.app, fixture.workspaceId);
   const parentRunId = newSortableId("run");
+  const parentUser = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "prepare prefork meta mismatch" }
+  });
+
   createRunRecord(fixture.db, {
     runId: parentRunId,
     workspaceId: fixture.workspaceId,
     sessionId: parentSession.id,
-    triggerItemId: null,
+    triggerItemId: parentUser.item.id,
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
@@ -3230,7 +3283,7 @@ test("subtask start should reject mismatched preforkMeta", async () => {
     runId: parentRunId,
     turnId: "turn_prefork_meta_mismatch",
     step: 1,
-    prevId: null,
+    prevId: parentUser.item.id,
     kind: "tool",
     status: "queued",
     output: {
@@ -3293,11 +3346,27 @@ test("subtask prefork-plan should use default threshold and return correct shoul
   const parentSession = parentSessionRes.json() as { id: string };
 
   const parentRunId = newSortableId("run");
+  const parentUser = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "prefork-plan parent user"
+    }
+  });
   createRunRecord(fixture.db, {
     runId: parentRunId,
     workspaceId: fixture.workspaceId,
     sessionId: parentSession.id,
-    triggerItemId: null,
+    triggerItemId: parentUser.item.id,
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
@@ -3313,7 +3382,7 @@ test("subtask prefork-plan should use default threshold and return correct shoul
     runId: parentRunId,
     turnId: "turn_prefork_plan",
     step: 1,
-    prevId: null,
+    prevId: parentUser.item.id,
     kind: "tool",
     status: "queued",
     output: {
