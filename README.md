@@ -99,22 +99,45 @@ If you need to publish ports to LAN/public directly, use `AWB_PUBLISH_HOST=0.0.0
 
 | Variable | Description |
 |----------|-------------|
-| `AWB_PORT` | Published port for Web UI + API (default `4310`). |
-| `AWB_WORKSPACE_PORT_RANGE` | Reserved workspace port range (default `30000-30100`) for publishing services started inside workspaces. |
-| `AWB_FILE_MAX_BYTES` | Max bytes for file preview/compare (default `1048576`). |
-| `AWB_APP_VERSION` | Optional override for `/api/health` version. |
-| `AWB_CREDENTIAL_MASTER_KEY` | Encryption key for credentials (32-byte hex/base64/base64url). Auto-generated and saved to `/data/keys/credential-master-key.json` if not set. Recommended to set explicitly for migration scenarios. |
-| `AWB_AUTH_TOKEN` | Optional access token protection. If set, Web UI/API requires signing in with this token (session cookie). |
-| `AWB_AUTH_COOKIE_SECURE` | Set to `1` when serving over HTTPS (adds `Secure` to the session cookie). Keep `0` for local HTTP dev. |
-| `AWB_PUBLISH_HOST` | Host IP to publish ports on (Docker Compose). Set `127.0.0.1` to allow localhost access only. |
-| `AWB_AGENT_STARTUP_RECOVERY_MODE` | Agent startup recovery mode: `fail` (default, terminate inflight runs) or `recover` (resume inflight runs). |
-| `AWB_AGENT_WORKER_ENABLED` | Enable agent worker process (default `true`). Set to `0` to fall back to API in-process runtime (debug only). |
-| `AWB_AGENT_WORKER_CONCURRENCY` | Max number of runs the worker executes concurrently (default `2`). Note: runs within the same session still execute serially. |
-| `AWB_AGENT_LOOP_MAX_STEPS` | Max loop steps per run in worker (default `128`). Set `<=0` for unlimited. |
-| `AWB_AGENT_LOOP_REPEAT_TOOL_CALL_THRESHOLD` | Threshold for repeated tool calls in a loop (default `20`). Set `<=0` for unlimited. |
+| `AWB_DATA_DIR` | `.env.example`: `/data`; `.env.dev.example`: `.data`. Data root for DB/keys/workspaces. |
+| `AWB_HOST` | `.env.example`: `0.0.0.0`; `.env.dev.example`: `127.0.0.1`. API listen host (Docker usually binds all interfaces in-container; local dev defaults to loopback). |
+| `AWB_PORT` | `.env.example`: `4310`; `.env.dev.example`: `4310`. Web UI + API port. |
+| `AWB_FILE_MAX_BYTES` | `.env.example`: `1048576`; `.env.dev.example`: `1048576`. Max bytes for file preview/compare. |
+| `AWB_APP_VERSION` | Optional override for `/api/health` version (empty by default). |
+| `AWB_SERVE_WEB` | `.env.example`: `1`; `.env.dev.example`: `0`. `1` = API serves built web assets (single-port mode); `0` = local dev usually uses Vite dev server. |
+| `AWB_WEB_DIST_DIR` | `.env.example`: `/app/apps/web/dist`; `.env.dev.example`: `apps/web/dist`. Web static asset directory when `AWB_SERVE_WEB=1`. |
+| `AWB_CREDENTIAL_MASTER_KEY` | Optional credential master key. If empty, generated on first start and stored at `AWB_DATA_DIR/keys/credential-master-key.json` (recommended to set explicitly for migration scenarios). |
+| `AWB_AUTH_TOKEN` | Optional access token protection for Web UI/API (session cookie after sign-in). |
+| `AWB_AUTH_COOKIE_SECURE` | Cookie `Secure` flag: use `1` under HTTPS; keep `0` for local HTTP dev. |
+| `AWB_AGENT_WORKER_ENABLED` | Enable agent worker process (`1` by default). Set `0` to fall back to API in-process runtime (debug only). |
+| `AWB_AGENT_WORKER_CONCURRENCY` | Worker concurrency: `.env.example` default `5`; `.env.dev.example` default `3`. Runs in the same session are still serialized. |
+| `AWB_AGENT_LOOP_MAX_STEPS` | Max loop steps per run (default `128`; `<=0` means unlimited). |
+| `AWB_AGENT_LOOP_REPEAT_TOOL_CALL_THRESHOLD` | Repeated tool-call threshold in loop (default `20`; `<=0` means unlimited). |
 | `AWB_AGENT_DEBUG_DUMP` | Debug dump switch (`1` to enable). Writes per-context logs under `<workspace>/.debug/agent_context_item_logs/`. |
+| `AWB_AGENT_STARTUP_RECOVERY_MODE` | Startup recovery mode: `fail` (default, mark inflight runs failed) or `recover` (resume inflight runs). |
+| `AWB_AGENT_PLUGIN_HOST_ENABLED` | Plugin host process switch (default `0`, disabled). |
+| `AWB_AGENT_PLUGIN_HOST_DEV` | Plugin host dev mode switch (default `0`; `1` starts plugin host from source). |
+| `AWB_AGENT_PLUGIN_SERVICES_ENABLED` | Plugin services registry/call switch (default `0`, disabled). |
 
-Other Compose-related variables (e.g. `AWB_HOST`, `AWB_DATA_DIR`, `AWB_SERVE_WEB`, `AWB_WEB_DIST_DIR`) are documented in `.env.example`.
+**Docker / Compose only (`.env.example`)**
+
+| Variable | Description |
+|----------|-------------|
+| `AWB_PUBLISH_HOST` | Host bind IP for published ports. Default `127.0.0.1`; use `0.0.0.0` only with firewall/auth/reverse-proxy protections. |
+| `AWB_WORKSPACE_PORT_RANGE` | Published workspace service port range (default `30000-30100`). |
+
+**Local source dev only (`.env.dev.example`)**
+
+| Variable | Description |
+|----------|-------------|
+| `AWB_DEV_WEB_PORT` | Optional Vite dev server port (frontend dev only). |
+| `AWB_DEV_API_ORIGIN` | Optional proxy target for frontend dev server (defaults to `http://127.0.0.1:${AWB_PORT}`). |
+| `AWB_MAX_TERMINALS` | Reserved for global terminal-session limit (currently not implemented). |
+| `AWB_AGENT_WORKER_HOST` | Worker listen host for local dev (default `127.0.0.1`). |
+| `AWB_AGENT_WORKER_PORT` | Worker listen port for local dev (default `4312`). |
+| `AWB_AGENT_WORKER_SOCKET` | Worker unix socket path (empty = auto at `AWB_DATA_DIR/agent-worker.sock`, preferred over TCP when available). |
+| `AWB_AGENT_INTERNAL_TOKEN` | Internal API↔worker auth token (empty = auto-generated by API at startup and passed to worker). |
+| `AWB_AGENT_API_ORIGIN` | Worker callback origin to API (usually keep empty for auto-derive). |
 
 ---
 
