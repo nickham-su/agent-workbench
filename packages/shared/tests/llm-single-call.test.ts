@@ -71,3 +71,12 @@ test("generateSingleCallText 校验 timeoutMs", async () => {
     /timeoutMs must be >= 1/
   );
 });
+
+test("openai apiMode 支持 chatCompletions 值", async () => {
+  const profile = createMockProfile();
+  profile.provider.options.apiMode = "chatCompletions";
+  await assert.rejects(
+    () => generateSingleCallText(profile, { messages: [{ role: "user", content: "hello" }], timeoutMs: 0 }),
+    /timeoutMs must be >= 1/
+  );
+});

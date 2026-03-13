@@ -715,6 +715,43 @@ function createGateway(params) {
       return { keptAgentId, keepAgentRejected };
     }
 
+    function formatSessionDisplay(sessionId, sessionTitle) {
+      const id = normalizeText(sessionId);
+      const title = normalizeText(sessionTitle) || "(untitled)";
+      return id ? `${title} (${id})` : title;
+    }
+
+    function formatAgentDisplay(agentId, agentName) {
+      const id = normalizeText(agentId);
+      const name = normalizeText(agentName) || "(unknown agent)";
+      return id ? `${name} (${id})` : name;
+    }
+
+    function resolveAgentNameFromSummary(summary, agentId) {
+      const targetId = normalizeText(agentId);
+      if (!targetId) return "";
+      const summaryAgentId = normalizeText(summary?.agent?.id);
+      if (!summaryAgentId || summaryAgentId !== targetId) return "";
+      return normalizeText(summary?.agent?.name);
+    }
+
+    async function loadStatusSummary(sessionId, workspaceId) {
+      const sid = normalizeText(sessionId);
+      const wid = normalizeText(workspaceId);
+      if (!sid || !wid) return null;
+      try {
+        return await client.post("/api/internal/agent/sessions/status-summary", {
+          sessionId: sid,
+          workspaceId: wid,
+          accountId,
+          pluginId
+        });
+      } catch (e) {
+        logger.warn(`[feishu] load status summary failed: ${e instanceof Error ? e.message : String(e)}`);
+        return null;
+      }
+    }
+
     if (cmd.cmd === "/ws") {
       try {
         const workspaces = await listWorkspaces();
@@ -739,7 +776,11 @@ function createGateway(params) {
           void replyText(chatId, messageId, "暂无会话");
           return;
         }
-        const lines = items.map((it, idx) => `${idx + 1}. ${it.sessionTitle} (${it.sessionId}) @ ${formatWorkspaceLabel(it)}`);
+        const lines = items.map((it, idx) => {
+          const sessionTitle = normalizeText(it?.sessionTitle) || "(untitled)";
+          const sessionId = normalizeText(it?.sessionId);
+          return `${idx + 1}. ${sessionTitle} (${sessionId}) @ ${formatWorkspaceLabel(it)}`;
+        });
         void replyText(chatId, messageId, lines.join("\n"));
         return;
       }
@@ -774,12 +815,26 @@ function createGateway(params) {
 
       const { keptAgentId, keepAgentRejected } = await keepAgentAfterBinding({ binding, previousAgentId });
 
+      const currentSessionId = normalizeText(binding.sessionId) || id;
+      const summary = await loadStatusSummary(currentSessionId, binding?.workspaceId);
+      const sessionDisplay = formatSessionDisplay(currentSessionId, summary?.session?.title);
+
       if (keptAgentId) {
-        void replyText(chatId, messageId, `已绑定：${binding.sessionId}，保持当前 agent：${keptAgentId}`);
+        const keptAgentDisplay = formatAgentDisplay(keptAgentId, resolveAgentNameFromSummary(summary, keptAgentId));
+        void replyText(chatId, messageId, `已绑定会话：${sessionDisplay}，保持当前 agent：${keptAgentDisplay}`);
       } else if (keepAgentRejected) {
-        void replyText(chatId, messageId, `已绑定：${binding.sessionId}，原 agent 不适用于当前 workspace/已不可用，请使用 /a 重新选择`);
+        const previousAgentDisplay = formatAgentDisplay(previousAgentId, resolveAgentNameFromSummary(summary, previousAgentId));
+        void replyText(
+          chatId,
+          messageId,
+          `已绑定会话：${sessionDisplay}，原 agent 不适用于当前 workspace/已不可用：${previousAgentDisplay}，请使用 /a 重新选择 agent`
+        );
       } else {
-        void replyText(chatId, messageId, `已绑定：${binding.sessionId}，请使用 /a 选择 agent`);
+        void replyText(
+          chatId,
+          messageId,
+          `已绑定会话：${sessionDisplay}，当前 agent：${formatAgentDisplay("", "(unknown agent)")}，请使用 /a 选择 agent`
+        );
       }
       return;
     }
@@ -792,12 +847,7 @@ function createGateway(params) {
         conversationKey
       });
       const workspaceId = normalizeText(before?.workspaceId);
-      const currentSessionId = normalizeText(before?.sessionId);
       const previousAgentId = normalizeText(before?.selectedAgentId);
-      if (!workspaceId || !currentSessionId) {
-        void replyText(chatId, messageId, "请先使用 /ss 绑定会话");
-        return;
-      }
 
       let targetWorkspaceId = workspaceId;
       const rawArg = normalizeText(cmd.arg);
@@ -808,6 +858,11 @@ function createGateway(params) {
           return;
         }
         targetWorkspaceId = normalizeText(parts[0]);
+      }
+
+      if (!targetWorkspaceId) {
+        void replyText(chatId, messageId, "请先指定 workspace：/n <workspaceId>（可先用 /ws 查看列表）");
+        return;
       }
 
       let created = null;
@@ -848,12 +903,26 @@ function createGateway(params) {
 
       const { keptAgentId, keepAgentRejected } = await keepAgentAfterBinding({ binding, previousAgentId });
 
+      const currentSessionId = normalizeText(binding.sessionId) || newSessionId;
+      const summary = await loadStatusSummary(currentSessionId, binding?.workspaceId);
+      const sessionDisplay = formatSessionDisplay(currentSessionId, summary?.session?.title || created?.title);
+
       if (keptAgentId) {
-        void replyText(chatId, messageId, `已新建并切换会话：${newSessionId}，保持当前 agent：${keptAgentId}`);
+        const keptAgentDisplay = formatAgentDisplay(keptAgentId, resolveAgentNameFromSummary(summary, keptAgentId));
+        void replyText(chatId, messageId, `已新建并切换会话：${sessionDisplay}，保持当前 agent：${keptAgentDisplay}`);
       } else if (keepAgentRejected) {
-        void replyText(chatId, messageId, `已新建并切换会话：${newSessionId}，原 agent 不适用于当前 workspace/已不可用，请使用 /a 重新选择`);
+        const previousAgentDisplay = formatAgentDisplay(previousAgentId, resolveAgentNameFromSummary(summary, previousAgentId));
+        void replyText(
+          chatId,
+          messageId,
+          `已新建并切换会话：${sessionDisplay}，原 agent 不适用于当前 workspace/已不可用：${previousAgentDisplay}，请使用 /a 重新选择 agent`
+        );
       } else {
-        void replyText(chatId, messageId, `已新建并切换会话：${newSessionId}，请使用 /a 选择 agent`);
+        void replyText(
+          chatId,
+          messageId,
+          `已新建并切换会话：${sessionDisplay}，当前 agent：${formatAgentDisplay("", "(unknown agent)")}，请使用 /a 选择 agent`
+        );
       }
       return;
     }
@@ -875,7 +944,8 @@ function createGateway(params) {
       if (!cmd.arg) {
         const lines = agents.map((a, idx) => {
           const current = binding.selectedAgentId === a.id ? " *" : "";
-          return `${idx + 1}. ${a.name} (${a.id})${current}`;
+          const agentName = normalizeText(a?.name) || "(unknown agent)";
+          return `${idx + 1}. ${agentName} (${a.id})${current}`;
         });
         void replyText(chatId, messageId, lines.length ? lines.join("\n") : "无可用 agent");
         return;
@@ -894,7 +964,8 @@ function createGateway(params) {
         conversationKey,
         selectedAgentId: target
       });
-      void replyText(chatId, messageId, `已选择 agent：${target}`);
+      const targetAgentName = normalizeText(agents.find((a) => normalizeText(a?.id) === target)?.name);
+      void replyText(chatId, messageId, `已选择 agent：${formatAgentDisplay(target, targetAgentName)}`);
       return;
     }
 

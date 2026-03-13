@@ -74,6 +74,7 @@ export type ExecutionProfile = {
     options: {
       baseURL: string;
       apiKey: string;
+      apiMode?: "responses" | "chatCompletions";
     };
   };
   model: {

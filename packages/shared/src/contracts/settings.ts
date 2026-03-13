@@ -53,9 +53,16 @@ export type AgentProviderModel = Static<typeof AgentProviderModelSchema>;
 export const AgentProviderNpmSchema = Type.Union([Type.Literal("@ai-sdk/openai"), Type.Literal("@ai-sdk/anthropic")]);
 export type AgentProviderNpm = Static<typeof AgentProviderNpmSchema>;
 
+export const AgentProviderOpenAiApiModeSchema = Type.Union([
+  Type.Literal("responses"),
+  Type.Literal("chatCompletions")
+]);
+export type AgentProviderOpenAiApiMode = Static<typeof AgentProviderOpenAiApiModeSchema>;
+
 export const AgentProviderOptionsInputSchema = Type.Object({
   baseURL: Type.String({ minLength: 1 }),
-  apiKey: Type.Optional(Type.Union([Type.String(), Type.Null()]))
+  apiKey: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  apiMode: Type.Optional(AgentProviderOpenAiApiModeSchema)
 });
 export type AgentProviderOptionsInput = Static<typeof AgentProviderOptionsInputSchema>;
 
@@ -90,7 +97,8 @@ export type UpdateAgentProvidersSettingsRequest = Static<typeof UpdateAgentProvi
 export const AgentProviderOptionsViewSchema = Type.Object({
   baseURL: Type.String({ minLength: 1 }),
   hasApiKey: Type.Boolean(),
-  apiKeyMasked: Type.Union([Type.String(), Type.Null()])
+  apiKeyMasked: Type.Union([Type.String(), Type.Null()]),
+  apiMode: Type.Optional(AgentProviderOpenAiApiModeSchema)
 });
 export type AgentProviderOptionsView = Static<typeof AgentProviderOptionsViewSchema>;
 

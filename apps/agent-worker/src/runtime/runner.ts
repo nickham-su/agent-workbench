@@ -577,6 +577,27 @@ function buildModelRuntimeOptions(profile: ExecutionProfile) {
   };
 }
 
+function resolveOpenAiModelFactory(sdk: Record<string, unknown>, apiMode: "responses" | "chatCompletions") {
+  const responses = typeof sdk.responses === "function" ? (sdk.responses as (modelId: string) => unknown) : null;
+  const chat = typeof sdk.chat === "function" ? (sdk.chat as (modelId: string) => unknown) : null;
+  const chatCompletions =
+    typeof sdk.chatCompletions === "function" ? (sdk.chatCompletions as (modelId: string) => unknown) : null;
+
+  if (apiMode === "chatCompletions") {
+    if (chat) return chat;
+    if (chatCompletions) return chatCompletions;
+    throw new Error(`openai sdk does not expose chat/chatCompletions model factories for apiMode=${apiMode}`);
+  }
+
+  if (responses) return responses;
+  throw new Error(`openai sdk does not expose responses model factory for apiMode=${apiMode}`);
+}
+
+function normalizeOpenAiApiMode(raw: unknown): "responses" | "chatCompletions" {
+  if (raw === "responses" || raw === "chatCompletions") return raw;
+  return "responses";
+}
+
 function createLanguageModel(profile: ExecutionProfile) {
   const providerModelId =
     typeof profile.model.providerModelId === "string" && profile.model.providerModelId.trim()
@@ -588,7 +609,9 @@ function createLanguageModel(profile: ExecutionProfile) {
       apiKey: profile.provider.options.apiKey,
       baseURL: profile.provider.options.baseURL
     });
-    return sdk.responses(providerModelId);
+    const apiMode = normalizeOpenAiApiMode(profile.provider.options.apiMode);
+    const createModel = resolveOpenAiModelFactory(sdk as unknown as Record<string, unknown>, apiMode);
+    return createModel(providerModelId);
   }
 
   if (profile.provider.npm === "@ai-sdk/anthropic") {

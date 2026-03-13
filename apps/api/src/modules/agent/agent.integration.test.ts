@@ -2074,6 +2074,168 @@ test("agent runtime settings 可通过 execution-profile 下发", async () => {
   assert.equal(profile.runtime?.modelRequestMaxRetries, 4);
   assert.equal(typeof profile.runtime?.autoCompactThresholdPct, "number");
   assert.equal(typeof profile.model?.contextWindowTokens, "number");
+  assert.equal(profile.provider?.options?.apiMode, "responses");
+});
+
+test("openai provider apiMode 会在 settings 与 execution-profile/single-call profile 中透传", async () => {
+  const fixture = await createFixture();
+
+  const providersRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: {
+      default: { providerId: "compat_openai", modelId: "deepseek-v3" },
+      providers: [
+        {
+          id: "compat_openai",
+          name: "compat_openai",
+          npm: "@ai-sdk/openai",
+          options: {
+            baseURL: "https://example.openai-compatible.invalid/v1",
+            apiKey: "sk-compat",
+            apiMode: "chatCompletions"
+          },
+          models: [
+            {
+              id: "deepseek-v3",
+              name: "deepseek-v3",
+              contextWindowTokens: 128000
+            }
+          ]
+        },
+        {
+          id: "anthropic_provider",
+          name: "anthropic_provider",
+          npm: "@ai-sdk/anthropic",
+          options: {
+            baseURL: "https://api.anthropic.com/v1",
+            apiKey: "sk-anthropic",
+            // 非 openai provider 上送该字段也应被忽略。
+            apiMode: "chatCompletions"
+          },
+          models: [
+            {
+              id: "claude-sonnet",
+              name: "claude-sonnet",
+              contextWindowTokens: 200000
+            }
+          ]
+        }
+      ]
+    }
+  });
+  assert.equal(providersRes.statusCode, 200, `update providers failed: ${providersRes.body}`);
+
+  const getProvidersRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/providers" });
+  assert.equal(getProvidersRes.statusCode, 200, `get providers failed: ${getProvidersRes.body}`);
+  const providersBody = getProvidersRes.json() as any;
+  const openaiProvider = providersBody.providers.find((item: any) => item.id === "compat_openai");
+  const anthropicProvider = providersBody.providers.find((item: any) => item.id === "anthropic_provider");
+  assert.equal(openaiProvider?.options?.apiMode, "chatCompletions");
+  assert.equal(anthropicProvider?.options?.apiMode, undefined);
+
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const msg = await sendMessage(fixture.app, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "hi",
+    clientRequestId: "req_provider_api_mode"
+  });
+
+  const executionProfileRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/execution-profile",
+    headers: {
+      "x-awb-agent-internal-token": fixture.internalToken
+    },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      runId: msg.runId
+    }
+  });
+  assert.equal(executionProfileRes.statusCode, 200, `get execution profile failed: ${executionProfileRes.body}`);
+  const executionProfile = executionProfileRes.json() as any;
+  assert.equal(executionProfile.provider?.id, "compat_openai");
+  assert.equal(executionProfile.provider?.options?.apiMode, "chatCompletions");
+
+  const singleCallProfileRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/single-call-model-profile",
+    headers: {
+      "x-awb-agent-internal-token": fixture.internalToken
+    },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      runId: msg.runId
+    }
+  });
+  assert.equal(singleCallProfileRes.statusCode, 200, `get single-call model profile failed: ${singleCallProfileRes.body}`);
+  const singleCallProfile = singleCallProfileRes.json() as any;
+  assert.equal(singleCallProfile.provider?.id, "compat_openai");
+  assert.equal(singleCallProfile.provider?.options?.apiMode, "chatCompletions");
+
+  const invalidModeRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: {
+      default: { providerId: "compat_openai", modelId: "deepseek-v3" },
+      providers: [
+        {
+          id: "compat_openai",
+          name: "compat_openai",
+          npm: "@ai-sdk/openai",
+          options: {
+            baseURL: "https://example.openai-compatible.invalid/v1",
+            apiKey: "sk-compat",
+            apiMode: "invalid-mode"
+          },
+          models: [
+            {
+              id: "deepseek-v3",
+              name: "deepseek-v3",
+              contextWindowTokens: 128000
+            }
+          ]
+        }
+      ]
+    }
+  });
+
+  assert.equal(invalidModeRes.statusCode, 400, `update provider with invalid apiMode should fail: ${invalidModeRes.body}`);
+  const invalidModeBody = invalidModeRes.json() as any;
+  assert.equal(typeof invalidModeBody?.message, "string");
+
+  const keepModeRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: {
+      default: { providerId: "compat_openai", modelId: "deepseek-v3" },
+      providers: [
+        {
+          id: "compat_openai",
+          name: "compat_openai",
+          npm: "@ai-sdk/openai",
+          options: {
+            baseURL: "https://example.openai-compatible.invalid/v1",
+            apiKey: "sk-compat"
+          },
+          models: [
+            {
+              id: "deepseek-v3",
+              name: "deepseek-v3",
+              contextWindowTokens: 128000
+            }
+          ]
+        }
+      ]
+    }
+  });
+  assert.equal(keepModeRes.statusCode, 200, `update provider without apiMode failed: ${keepModeRes.body}`);
+  const keepModeBody = keepModeRes.json() as any;
+  const keepModeProvider = keepModeBody.providers.find((item: any) => item.id === "compat_openai");
+  assert.equal(keepModeProvider?.options?.apiMode, "chatCompletions");
 });
 
 test("subtask session 的 execution-profile 按 subtask surface 校验", async () => {

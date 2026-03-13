@@ -1090,7 +1090,8 @@ export async function registerAgentRoutes(
               npm: AgentProviderNpmSchema,
               options: Type.Object({
                 baseURL: Type.String({ minLength: 1 }),
-                apiKey: Type.String({ minLength: 1 })
+                apiKey: Type.String({ minLength: 1 }),
+                apiMode: Type.Optional(Type.Union([Type.Literal("responses"), Type.Literal("chatCompletions")]))
               })
             }),
             model: Type.Object({
@@ -1151,7 +1152,8 @@ export async function registerAgentRoutes(
               npm: AgentProviderNpmSchema,
               options: Type.Object({
                 baseURL: Type.String({ minLength: 1 }),
-                apiKey: Type.String({ minLength: 1 })
+                apiKey: Type.String({ minLength: 1 }),
+                apiMode: Type.Optional(Type.Union([Type.Literal("responses"), Type.Literal("chatCompletions")]))
               })
             }),
             model: Type.Object({

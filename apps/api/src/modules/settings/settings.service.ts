@@ -10,6 +10,7 @@ import type {
   AgentProviderNpm,
   AgentScope,
   AgentProvidersSettings,
+  AgentProviderOpenAiApiMode,
   AgentResolvedModel,
   AgentProvidersSettingsView,
   AgentPluginTools,
@@ -179,6 +180,8 @@ const RESERVED_MODEL_OPTION_KEYS = new Set([
   "toolChoice"
 ]);
 
+const DEFAULT_OPENAI_API_MODE: AgentProviderOpenAiApiMode = "responses";
+
 function isSafeObjectKey(raw: string) {
   if (!raw) return false;
   return raw !== "__proto__" && raw !== "prototype" && raw !== "constructor";
@@ -201,6 +204,18 @@ function normalizeProviderNpmInput(raw: unknown): AgentProviderNpm {
 
 function providerOptionsKeyByNpm(npm: AgentProviderNpm) {
   return npm === "@ai-sdk/anthropic" ? "anthropic" : "openai";
+}
+
+function normalizeOpenAiApiModeStored(raw: unknown): AgentProviderOpenAiApiMode {
+  if (raw === "chatCompletions") return raw;
+  return DEFAULT_OPENAI_API_MODE;
+}
+
+function normalizeOpenAiApiModeInput(raw: unknown): AgentProviderOpenAiApiMode {
+  if (raw === undefined) return DEFAULT_OPENAI_API_MODE;
+  if (raw == null || raw === "") return DEFAULT_OPENAI_API_MODE;
+  if (raw === "responses" || raw === "chatCompletions") return raw;
+  throw new HttpError(400, "OpenAI provider apiMode is invalid", "AGENT_PROVIDER_OPENAI_API_MODE_INVALID");
 }
 
 function normalizeAiSdkOptions(raw: unknown) {
@@ -443,10 +458,12 @@ function getAgentProvidersSettingsStored(ctx: AppContext) {
           npm,
           options: {
             baseURL: normalizeBaseURL(optionsRaw.baseURL),
-            apiKey: normalizeApiKeyInput(optionsRaw.apiKey) ?? null
+            apiKey: normalizeApiKeyInput(optionsRaw.apiKey) ?? null,
+            ...(npm === "@ai-sdk/openai" ? { apiMode: normalizeOpenAiApiModeStored(optionsRaw.apiMode) } : {})
           },
           models
         };
+
       } catch {
         return null;
       }
@@ -477,7 +494,8 @@ function toAgentProvidersSettingsView(settings: AgentProvidersSettingsStored, up
       options: {
         baseURL: provider.options.baseURL,
         hasApiKey: Boolean(provider.options.apiKey),
-        apiKeyMasked: maskApiKey(provider.options.apiKey ?? null)
+        apiKeyMasked: maskApiKey(provider.options.apiKey ?? null),
+        ...(provider.npm === "@ai-sdk/openai" ? { apiMode: normalizeOpenAiApiModeStored((provider.options as any).apiMode) } : {})
       },
       models: provider.models
     })),
@@ -1248,6 +1266,18 @@ export function updateAgentProvidersSettings(
     const optionsRaw = (provider.options ?? {}) as Record<string, unknown>;
     const apiKeyInput = normalizeApiKeyInput(optionsRaw.apiKey);
     const previous = currentById.get(id);
+    const previousApiModeRaw = previous?.npm === "@ai-sdk/openai"
+      ? (previous.options as Record<string, unknown>).apiMode
+      : undefined;
+    const openAiApiMode =
+      npm === "@ai-sdk/openai"
+        ? optionsRaw.apiMode === undefined
+          ? previousApiModeRaw === undefined
+            ? DEFAULT_OPENAI_API_MODE
+            : normalizeOpenAiApiModeStored(previousApiModeRaw)
+          : normalizeOpenAiApiModeInput(optionsRaw.apiMode)
+        : undefined;
+
     const apiKey = apiKeyInput === undefined ? previous?.options.apiKey ?? null : apiKeyInput;
 
     const modelsRaw = Array.isArray(provider.models) ? provider.models : [];
@@ -1282,9 +1312,11 @@ export function updateAgentProvidersSettings(
       npm,
       options: {
         baseURL: normalizeBaseURL(optionsRaw.baseURL),
-        apiKey
+        apiKey,
+        ...(npm === "@ai-sdk/openai" ? { apiMode: openAiApiMode } : {})
       },
       models
+
     };
   });
 

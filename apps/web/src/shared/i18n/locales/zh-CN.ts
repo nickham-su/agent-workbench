@@ -818,6 +818,7 @@ export default {
         npmLabel: "Provider 类型",
         baseUrlLabel: "Base URL",
         apiKeyLabel: "API Key",
+        apiModeLabel: "API 模式",
         apiKeyPlaceholder: "输入 API Key（可留空）",
         apiKeyEditPlaceholder: "输入新 API Key（留空保持不变）",
         apiKeyCreateHelp: "创建时可先留空，后续再补充。",

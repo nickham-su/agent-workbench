@@ -820,6 +820,7 @@ export default {
         npmLabel: "Provider Type",
         baseUrlLabel: "Base URL",
         apiKeyLabel: "API Key",
+        apiModeLabel: "API Mode",
         apiKeyPlaceholder: "Enter API key (optional)",
         apiKeyEditPlaceholder: "Enter new API key (leave blank to keep)",
         apiKeyCreateHelp: "You can leave it blank for now and fill it later.",
