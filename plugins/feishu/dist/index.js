@@ -46,18 +46,21 @@ function buildHelpText() {
     "- /a (/agent) <id|n>       选择 agent",
     "- /c (/compact)            压缩当前会话上下文",
     "- /st (/status)            查看状态摘要",
+    "- /m (/mode)               循环切换群聊模式（mention_only/direct_whitelist，仅管理员）",
     "- /h (/help)               帮助"
   ].join("\n");
 }
 
 const COMMAND_ALIAS_MAP = {
+  "/a": "/a",
   "/agent": "/a",
   "/session": "/ss",
   "/help": "/h",
   "/status": "/st",
   "/new": "/n",
   "/workspace": "/ws",
-  "/compact": "/c"
+  "/compact": "/c",
+  "/mode": "/m"
 };
 
 function normalizeCommandAlias(cmd) {
@@ -425,6 +428,8 @@ function createGateway(params) {
   let stopped = false;
   let reconnectTimer = null;
   let pingTimer = null;
+  const roleCache = new Map();
+  const ROLE_CACHE_TTL_MS = 60 * 1000;
 
   const client = createInternalClient({ apiOrigin, internalToken });
 
@@ -538,25 +543,40 @@ function createGateway(params) {
     };
   }
 
-  async function handleMessageEvent(ctx) {
-    const accountId = "default";
-    const pluginId = "feishu";
-    const channelName = "im";
-    const conversationKey = buildConversationKey(accountId, ctx.chatId);
+  function normalizeSenderRole(raw) {
+    const role = normalizeText(raw).toLowerCase();
+    if (role === "admin") return "admin";
+    if (role === "user") return "user";
+    return "none";
+  }
 
-    if (ctx.chatType === "group" && ctx.mentionedBot) {
-      const allow = await client.post("/api/internal/agent/channels/allowlist/check", {
-        pluginId,
-        senderId: ctx.sender.id
-      });
-      if (!allow?.allowed) {
-        void replyText(ctx.chatId, ctx.messageId, `请联系我的主人添加白名单。open_id: ${ctx.sender.id}`);
-        return;
-      }
+  async function getSenderRole(pluginId, accountId, senderId) {
+    const pid = normalizeText(pluginId);
+    const aid = normalizeText(accountId);
+    const sid = normalizeText(senderId);
+    if (!sid) return { role: "none", allowed: false, reason: "sender.id is required" };
+    const now = Date.now();
+    const cached = roleCache.get(`${pid}\0${aid}\0${sid}`);
+    if (cached && cached.expiresAt > now) {
+      return cached.value;
     }
+    const allow = await client.post("/api/internal/agent/channels/allowlist/check", {
+      pluginId,
+      senderId: sid
+    });
+    const normalizedRole = allow?.allowed ? normalizeSenderRole(allow?.role) : "none";
+    const value = {
+      role: normalizedRole,
+      allowed: normalizedRole === "admin" || normalizedRole === "user",
+      reason: normalizeText(allow?.reason)
+    };
+    roleCache.set(`${pid}\0${aid}\0${sid}`, { value, expiresAt: now + ROLE_CACHE_TTL_MS });
+    return value;
+  }
 
-    // Ingest every message for dedupe/persistence/aggregation; allowlist is enforced by check or run trigger.
-    const ingest = await client.post("/api/internal/agent/channels/inbound/ingest", {
+  async function ingestNonCommandMessage(params) {
+    const { accountId, pluginId, channelName, conversationKey, ctx } = params;
+    return client.post("/api/internal/agent/channels/inbound/ingest", {
       pluginId,
       channelName,
       accountId,
@@ -568,53 +588,72 @@ function createGateway(params) {
       mentionedBot: Boolean(ctx.mentionedBot),
       text: ctx.text
     });
+  }
 
-    if (!ingest?.ok) {
-      // NOT_ALLOWED: ignore in groups, reply in direct
-      if (ctx.chatType === "direct") {
-        void replyText(ctx.chatId, ctx.messageId, `无权限：${ingest?.message || "NOT_ALLOWED"}`);
-      }
-      return;
-    }
-
-    // Idempotency: if this external message_id was already ingested, do not execute commands / trigger run twice.
-    if (ingest?.deduplicated) {
-      return;
-    }
-
-    let cmdText = ctx.text;
-    if (ctx.chatType === "group" && ctx.mentionedBot) {
-      const stripped = stripLeadingMentionsForCommand(cmdText);
-      cmdText = stripped || cmdText;
-    }
-    const cmd = parseCommand(cmdText);
-    if (cmd) {
-      await handleCommand({
-        chatId: ctx.chatId,
-        messageId: ctx.messageId,
-        senderId: ctx.sender.id,
-        conversationKey,
-        chatType: ctx.chatType,
-        cmd
-      });
-      return;
-    }
-
-    // normal message
-    if (ctx.chatType === "group" && !ctx.mentionedBot) {
-      return;
-    }
-
+  async function handleDirectNormalMessage(params) {
+    const { ctx, accountId, pluginId, channelName, conversationKey } = params;
     const binding = await client.post("/api/internal/agent/channels/conversations/get-binding", {
       pluginId,
       channelName,
       accountId,
       conversationKey
     });
-
     const hasSession = Boolean(normalizeText(binding?.sessionId));
     const hasAgent = Boolean(normalizeText(binding?.selectedAgentId));
+    if (!hasSession && !hasAgent) {
+      void replyText(ctx.chatId, ctx.messageId, "请先设置 session 与 agent：先使用 /ss 绑定会话，再使用 /a 选择 agent");
+      return;
+    }
+    if (!hasSession) {
+      void replyText(ctx.chatId, ctx.messageId, "请先使用 /ss 绑定会话");
+      return;
+    }
+    if (!hasAgent) {
+      void replyText(ctx.chatId, ctx.messageId, "请先使用 /a 选择 agent");
+      return;
+    }
+    const trigger = await client.post("/api/internal/agent/channels/run/trigger", {
+      pluginId,
+      channelName,
+      accountId,
+      conversationKey,
+      triggerExternalMessageId: ctx.messageId,
+      text: ctx.text,
+      clientRequestId: `im_${pluginId}_${conversationKey}_${ctx.messageId}`
+    });
+    if (!trigger.ok) {
+      if (trigger.errorCode === "SESSION_RUNNING" && trigger.statusSummary) {
+        void replyText(ctx.chatId, ctx.messageId, `正在运行中，请稍后再试。\n${buildStatusText(trigger.statusSummary)}`);
+        return;
+      }
+      void replyText(ctx.chatId, ctx.messageId, `触发失败：${trigger.message || trigger.errorCode}`);
+      return;
+    }
+    void replyText(ctx.chatId, ctx.messageId, trigger.deduplicated ? "已收到（重复消息已忽略）" : "已收到，开始处理…");
+  }
 
+  async function handleGroupNormalMessage(params) {
+    const { ctx, accountId, pluginId, channelName, conversationKey, senderRole } = params;
+    const binding = await client.post("/api/internal/agent/channels/conversations/get-binding", {
+      pluginId,
+      channelName,
+      accountId,
+      conversationKey
+    });
+    const rawGroupMode = normalizeText(binding?.groupMode).toLowerCase();
+    const groupMode = rawGroupMode === "direct_whitelist" ? "direct_whitelist" : "mention_only";
+    const senderAllowed = senderRole === "admin" || senderRole === "user";
+    if (groupMode === "mention_only") {
+      if (!ctx.mentionedBot) return;
+      if (!senderAllowed) return;
+    } else if (groupMode === "direct_whitelist") {
+      if (!senderAllowed) return;
+    } else {
+      if (!ctx.mentionedBot) return;
+      if (!senderAllowed) return;
+    }
+    const hasSession = Boolean(normalizeText(binding?.sessionId));
+    const hasAgent = Boolean(normalizeText(binding?.selectedAgentId));
     if (!hasSession && !hasAgent) {
       void replyText(ctx.chatId, ctx.messageId, "请先设置 session 与 agent：先使用 /ss 绑定会话，再使用 /a 选择 agent");
       return;
@@ -628,18 +667,14 @@ function createGateway(params) {
       return;
     }
 
-    let userText = ctx.text;
-    if (ctx.chatType === "group") {
-      const agg = await client.post("/api/internal/agent/channels/inbound/aggregate", {
-        pluginId,
-        channelName,
-        accountId,
-        conversationKey,
-        upperBoundExternalMessageId: ctx.messageId
-      });
-      userText = agg.text;
-    }
-
+    const agg = await client.post("/api/internal/agent/channels/inbound/aggregate", {
+      pluginId,
+      channelName,
+      accountId,
+      conversationKey,
+      upperBoundExternalMessageId: ctx.messageId
+    });
+    const userText = agg.text;
     const trigger = await client.post("/api/internal/agent/channels/run/trigger", {
       pluginId,
       channelName,
@@ -648,9 +683,8 @@ function createGateway(params) {
       triggerExternalMessageId: ctx.messageId,
       text: userText,
       clientRequestId: `im_${pluginId}_${conversationKey}_${ctx.messageId}`,
-      watermarkAdvanceExternalMessageId: ctx.chatType === "group" ? ctx.messageId : undefined
+      watermarkAdvanceExternalMessageId: ctx.messageId
     });
-
     if (!trigger.ok) {
       if (trigger.errorCode === "SESSION_RUNNING" && trigger.statusSummary) {
         void replyText(ctx.chatId, ctx.messageId, `正在运行中，请稍后再试。\n${buildStatusText(trigger.statusSummary)}`);
@@ -659,8 +693,79 @@ function createGateway(params) {
       void replyText(ctx.chatId, ctx.messageId, `触发失败：${trigger.message || trigger.errorCode}`);
       return;
     }
-
     void replyText(ctx.chatId, ctx.messageId, trigger.deduplicated ? "已收到（重复消息已忽略）" : "已收到，开始处理…");
+  }
+
+  async function handleMessageEvent(ctx) {
+    const accountId = "default";
+    const pluginId = "feishu";
+    const channelName = "im";
+    const conversationKey = buildConversationKey(accountId, ctx.chatId);
+    const senderAccess = await getSenderRole(pluginId, accountId, ctx.sender.id);
+
+    let cmdText = ctx.text;
+    if (ctx.chatType === "group" && ctx.mentionedBot) {
+      const stripped = stripLeadingMentionsForCommand(cmdText);
+      cmdText = stripped || cmdText;
+    }
+    const cmd = parseCommand(cmdText);
+    if (cmd) {
+      if (senderAccess.role !== "admin") {
+        if (senderAccess.role === "none") {
+          void replyText(ctx.chatId, ctx.messageId, `请联系我的主人添加白名单。open_id: ${ctx.sender.id}`);
+        } else {
+          void replyText(ctx.chatId, ctx.messageId, "无权限：仅管理员可执行命令，请联系管理员。");
+        }
+        return;
+      }
+      await handleCommand({
+        chatId: ctx.chatId,
+        messageId: ctx.messageId,
+        senderId: ctx.sender.id,
+        conversationKey,
+        chatType: ctx.chatType,
+        cmd
+      });
+      return;
+    }
+
+    if (ctx.chatType === "group" && ctx.mentionedBot && senderAccess.role === "none") {
+      void replyText(ctx.chatId, ctx.messageId, `请联系我的主人添加白名单。open_id: ${ctx.sender.id}`);
+      return;
+    }
+
+    const ingest = await ingestNonCommandMessage({ accountId, pluginId, channelName, conversationKey, ctx });
+    if (!ingest?.ok) {
+      if (ctx.chatType === "direct") {
+        void replyText(ctx.chatId, ctx.messageId, `请联系我的主人添加白名单。open_id: ${ctx.sender.id}`);
+      }
+      return;
+    }
+
+    if (ingest?.deduplicated) {
+      return;
+    }
+
+    if (ctx.chatType === "group") {
+      await handleGroupNormalMessage({
+        ctx,
+        accountId,
+        pluginId,
+        channelName,
+        conversationKey,
+        senderRole: senderAccess.role
+      });
+      return;
+    }
+
+    if (senderAccess.role === "none") {
+      if (ctx.chatType === "direct") {
+        void replyText(ctx.chatId, ctx.messageId, `请联系我的主人添加白名单。open_id: ${ctx.sender.id}`);
+      }
+      return;
+    }
+
+    await handleDirectNormalMessage({ ctx, accountId, pluginId, channelName, conversationKey });
   }
 
   async function handleCommand(params) {
@@ -1027,6 +1132,42 @@ function createGateway(params) {
         selectedAgentId: binding.selectedAgentId
       });
       void replyText(chatId, messageId, buildStatusText(summary));
+      return;
+    }
+
+    if (cmd.cmd === "/m") {
+      const binding = await client.post("/api/internal/agent/channels/conversations/get-binding", {
+        pluginId,
+        channelName,
+        accountId,
+        conversationKey
+      });
+      if (!normalizeText(binding?.sessionId)) {
+        void replyText(chatId, messageId, "请先使用 /ss 绑定会话");
+        return;
+      }
+      const arg = normalizeText(cmd.arg);
+      if (arg) {
+        void replyText(chatId, messageId, "用法错误：/m（不接受参数）");
+        return;
+      }
+      const rawMode = normalizeText(binding?.groupMode).toLowerCase();
+      const currentMode = rawMode === "direct_whitelist" ? "direct_whitelist" : "mention_only";
+      const targetMode = currentMode === "mention_only" ? "direct_whitelist" : "mention_only";
+
+      await client.post("/api/internal/agent/channels/conversations/set-group-mode", {
+        pluginId,
+        channelName,
+        accountId,
+        conversationKey,
+        groupMode: targetMode
+      });
+
+      const modeDesc =
+        targetMode === "mention_only"
+          ? "mention_only（仅@机器人消息触发）"
+          : "direct_whitelist（白名单用户消息直接触发，无需@）";
+      void replyText(chatId, messageId, `群聊模式已切换为：${modeDesc}`);
       return;
     }
 

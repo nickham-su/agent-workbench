@@ -1124,9 +1124,14 @@ export default {
       fields: {
         channel: "Channel",
         senderId: "Sender ID",
+        role: "Role",
         remark: "Remark",
         senderIdPlaceholder: "e.g. ou_xxx or platform user id",
         remarkPlaceholder: "Optional, for management"
+      },
+      roles: {
+        admin: "Administrator",
+        user: "User"
       },
       actions: {
         add: "Add",

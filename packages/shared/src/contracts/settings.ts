@@ -306,10 +306,13 @@ export const SecurityStatusSchema = Type.Object({
 });
 export type SecurityStatus = Static<typeof SecurityStatusSchema>;
 
+export const AgentChannelSenderRoleSchema = Type.Union([Type.Literal("admin"), Type.Literal("user")]);
+export type AgentChannelSenderRole = Static<typeof AgentChannelSenderRoleSchema>;
 export const AgentChannelSenderAllowlistItemSchema = Type.Object(
   {
     channel: Type.String({ minLength: 1, maxLength: 64 }),
     senderId: Type.String({ minLength: 1, maxLength: 256 }),
+    role: Type.Optional(AgentChannelSenderRoleSchema),
     remark: Type.Optional(Type.String({ maxLength: 200 }))
   },
   { additionalProperties: false }

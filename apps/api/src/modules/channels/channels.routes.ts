@@ -13,6 +13,8 @@ import {
   ChannelGetConversationBindingRequestSchema,
   ChannelSetSelectedAgentRequestSchema,
   ChannelConversationBindingSchema,
+  ChannelSetGroupModeRequestSchema,
+  ChannelSetGroupModeResponseSchema,
   ErrorResponseSchema
 } from "@agent-workbench/shared";
 import { HttpError } from "../../app/errors.js";
@@ -103,6 +105,30 @@ export async function registerChannelsRoutes(
       const body = req.body as any;
       assertPluginCaller(req, body.pluginId);
       params.service.setSelectedAgentId(body);
+      return { ok: true };
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/channels/conversations/set-group-mode",
+    {
+      schema: {
+        tags: ["agent"],
+        body: ChannelSetGroupModeRequestSchema,
+        response: {
+          200: ChannelSetGroupModeResponseSchema,
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          500: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.agentService);
+      const body = req.body as any;
+      assertPluginCaller(req, body.pluginId);
+      params.service.setGroupMode(body);
       return { ok: true };
     }
   );

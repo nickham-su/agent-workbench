@@ -14,7 +14,8 @@ import {
   insertInboundMessageDedup,
   listInboundMessagesForAggregation,
   upsertConversationBinding,
-  updateBindingSelectedAgentId
+  updateBindingSelectedAgentId,
+  updateBindingGroupMode
 } from "./channels.store.js";
 import { getAgentChannelSenderAllowlistSettings } from "../settings/settings.service.js";
 
@@ -62,6 +63,7 @@ export type ChannelAllowlistCheckInput = {
 
 export type ChannelAllowlistCheckResult = {
   allowed: boolean;
+  role?: "admin" | "user";
   reason?: string;
 };
 
@@ -102,20 +104,31 @@ export class ChannelsService {
     // no-op
   }
 
-  private assertAllowed(input: { channel: string; senderId: string }): { ok: true } | { ok: false; message: string } {
+  private getSenderRole(input: { channel: string; senderId: string }): { role: "admin" | "user" } | { role: null; message: string } {
     const stored = getAgentChannelSenderAllowlistSettings(this.ctx);
-    const bySettings = new Set(
-      (stored.items || []).map((it) => `${String(it.channel || "").trim()}\u0000${String(it.senderId || "").trim()}`)
-    );
+    const bySettings = new Map<string, "admin" | "user">();
+    for (const it of stored.items || []) {
+      const channel = String(it.channel || "").trim();
+      const senderId = String(it.senderId || "").trim();
+      if (!channel || !senderId) continue;
+      const role = String((it as any).role || "").trim() === "admin" ? "admin" : "user";
+      bySettings.set(`${channel}\u0000${senderId}`, role);
+    }
 
     if (bySettings.size === 0) {
-      return { ok: false, message: "channel sender allowlist is empty" };
+      return { role: null, message: "channel sender allowlist is empty" };
     }
     const key = `${input.channel}\u0000${input.senderId}`;
-    if (!bySettings.has(key)) {
-      return { ok: false, message: "sender is not allowed" };
+    const role = bySettings.get(key);
+    if (!role) {
+      return { role: null, message: "sender is not allowed" };
     }
-    return { ok: true };
+    return { role };
+  }
+
+  private assertAllowed(input: { channel: string; senderId: string }): { ok: true } | { ok: false; message: string } {
+    const role = this.getSenderRole(input);
+    return role.role ? { ok: true } : { ok: false, message: role.message };
   }
 
   private logAllowlistRejected(input: {
@@ -142,11 +155,11 @@ export class ChannelsService {
   checkSenderAllowlist(input: ChannelAllowlistCheckInput): ChannelAllowlistCheckResult {
     const pluginId = String(input.pluginId || "").trim();
     const senderId = String(input.senderId || "").trim();
-    const allow = this.assertAllowed({ channel: pluginId, senderId });
-    if (!allow.ok) {
-      return { allowed: false, reason: allow.message };
+    const role = this.getSenderRole({ channel: pluginId, senderId });
+    if (!role.role) {
+      return { allowed: false, reason: role.message };
     }
-    return { allowed: true };
+    return { allowed: true, role: role.role };
   }
 
   getConversationBinding(key: ChannelRuntimeKey) {
@@ -183,6 +196,15 @@ export class ChannelsService {
   setSelectedAgentId(input: ChannelRuntimeKey & { selectedAgentId: string | null }) {
     const ts = nowMs();
     updateBindingSelectedAgentId(this.ctx.db, { ...input, updatedAt: ts });
+  }
+
+  setGroupMode(input: ChannelRuntimeKey & { groupMode: "mention_only" | "direct_whitelist" }) {
+    const existing = getConversationBinding(this.ctx.db, input);
+    if (!existing || !existing.sessionId) {
+      throw new HttpError(404, "conversation binding not found", "BINDING_NOT_FOUND");
+    }
+    const ts = nowMs();
+    updateBindingGroupMode(this.ctx.db, { ...input, groupMode: input.groupMode, updatedAt: ts });
   }
 
   ingestInboundMessage(input: IngestInboundMessageInput): IngestInboundMessageResult {

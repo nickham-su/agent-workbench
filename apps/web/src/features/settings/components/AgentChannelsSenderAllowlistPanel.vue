@@ -23,6 +23,7 @@
               <th class="text-left font-semibold px-3 py-2 w-[180px]">{{ t("settings.agentChannelSenderAllowlist.fields.channel") }}</th>
               <th class="text-left font-semibold px-3 py-2">{{ t("settings.agentChannelSenderAllowlist.fields.senderId") }}</th>
               <th class="text-left font-semibold px-3 py-2">{{ t("settings.agentChannelSenderAllowlist.fields.remark") }}</th>
+              <th class="text-left font-semibold px-3 py-2 w-[140px]">{{ t("settings.agentChannelSenderAllowlist.fields.role") }}</th>
             </tr>
           </thead>
           <tbody v-if="items.length > 0">
@@ -37,11 +38,12 @@
                   </a-button>
                 </div>
               </td>
+              <td class="px-3 py-2">{{ item.role === "admin" ? t("settings.agentChannelSenderAllowlist.roles.admin") : t("settings.agentChannelSenderAllowlist.roles.user") }}</td>
             </tr>
           </tbody>
           <tbody v-else>
             <tr>
-              <td colspan="3" class="px-3 py-4 text-xs text-[color:var(--text-tertiary)]">{{ t("settings.agentChannelSenderAllowlist.empty") }}</td>
+              <td colspan="4" class="px-3 py-4 text-xs text-[color:var(--text-tertiary)]">{{ t("settings.agentChannelSenderAllowlist.empty") }}</td>
             </tr>
           </tbody>
         </table>
@@ -69,6 +71,13 @@
             :placeholder="t('settings.agentChannelSenderAllowlist.fields.senderIdPlaceholder')"
           />
         </a-form-item>
+        <a-form-item :label="t('settings.agentChannelSenderAllowlist.fields.role')" required>
+          <a-select
+            v-model:value="createForm.role"
+            :options="roleOptions"
+            :placeholder="t('settings.agentChannelSenderAllowlist.fields.role')"
+          />
+        </a-form-item>
         <a-form-item :label="t('settings.agentChannelSenderAllowlist.fields.remark')">
           <a-input
             v-model:value="createForm.remark"
@@ -81,7 +90,7 @@
 </template>
 
 <script setup lang="ts">
-import type { AgentChannelSenderAllowlistItem, PluginRuntimeSnapshot } from "@agent-workbench/shared";
+import type { AgentChannelSenderAllowlistItem, PluginRuntimeSnapshot, UpdateAgentChannelSenderAllowlistRequest } from "@agent-workbench/shared";
 import { message } from "ant-design-vue";
 import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
@@ -97,11 +106,13 @@ const loading = ref(false);
 const submitting = ref(false);
 const items = ref<AgentChannelSenderAllowlistItem[]>([]);
 const runtimePlugins = ref<PluginRuntimeSnapshot[]>([]);
+type SenderRole = NonNullable<AgentChannelSenderAllowlistItem["role"]>;
 
 const createModalOpen = ref(false);
-const createForm = ref({
+const createForm = ref<{ channel: string; senderId: string; role: SenderRole; remark: string }>({
   channel: "",
   senderId: "",
+  role: "user",
   remark: ""
 });
 
@@ -119,10 +130,16 @@ const channelOptions = computed(() => {
   return options;
 });
 
+const roleOptions = computed<{ value: SenderRole; label: string }[]>(() => [
+  { value: "admin", label: t("settings.agentChannelSenderAllowlist.roles.admin") },
+  { value: "user", label: t("settings.agentChannelSenderAllowlist.roles.user") }
+]);
+
 function resetCreateForm() {
   createForm.value = {
     channel: channelOptions.value[0]?.value ?? "",
     senderId: "",
+    role: "user",
     remark: ""
   };
 }
@@ -156,10 +173,11 @@ async function persistItems(nextItems: AgentChannelSenderAllowlistItem[], succes
   if (submitting.value) return;
   submitting.value = true;
   try {
-    const payload = {
+    const payload: UpdateAgentChannelSenderAllowlistRequest = {
       items: nextItems.map((it) => ({
         channel: String(it.channel || "").trim(),
         senderId: String(it.senderId || "").trim(),
+        role: (it.role === "admin" ? "admin" : "user") as SenderRole,
         ...(String(it.remark || "").trim() ? { remark: String(it.remark || "").trim() } : {})
       }))
     };
@@ -178,6 +196,7 @@ async function persistItems(nextItems: AgentChannelSenderAllowlistItem[], succes
 async function submitCreate() {
   const channel = String(createForm.value.channel || "").trim();
   const senderId = String(createForm.value.senderId || "").trim();
+  const role: SenderRole = createForm.value.role === "admin" ? "admin" : "user";
   const remarkRaw = String(createForm.value.remark || "").trim();
   const remark = remarkRaw ? remarkRaw : undefined;
 
@@ -196,7 +215,7 @@ async function submitCreate() {
     return;
   }
 
-  const nextItems = [...items.value, { channel, senderId, ...(remark ? { remark } : {}) }];
+  const nextItems: AgentChannelSenderAllowlistItem[] = [...items.value, { channel, senderId, role, ...(remark ? { remark } : {}) }];
   const ok = await persistItems(nextItems, "settings.agentChannelSenderAllowlist.created");
   if (ok) {
     closeCreateModal();

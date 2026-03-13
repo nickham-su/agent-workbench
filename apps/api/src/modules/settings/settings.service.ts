@@ -1005,7 +1005,8 @@ export function getAgentChannelSenderAllowlistSettings(ctx: AppContext): AgentCh
       const key = `${channel}\u0000${senderId}`;
       if (seen.has(key)) return null;
       seen.add(key);
-      return { channel, senderId, ...(remarkRaw ? { remark: remarkRaw.slice(0, 200) } : {}) };
+      const role: "admin" | "user" = it?.role === "admin" ? "admin" : "user";
+      return { channel, senderId, role, ...(remarkRaw ? { remark: remarkRaw.slice(0, 200) } : {}) };
     })
     .filter((it): it is NonNullable<typeof it> => Boolean(it));
   return { items, updatedAt: row?.updatedAt ?? 0 };
@@ -1069,8 +1070,9 @@ export function updateAgentChannelSenderAllowlistSettings(
     if (!channel || !senderId) throw new HttpError(400, "channel/senderId is required", "CHANNEL_SENDER_ALLOWLIST_INVALID");
     const key = `${channel}\u0000${senderId}`;
     if (seen.has(key)) throw new HttpError(400, "duplicate channel/senderId", "CHANNEL_SENDER_ALLOWLIST_DUPLICATE");
+    const role: "admin" | "user" = it?.role === "admin" ? "admin" : "user";
     seen.add(key);
-    items.push({ channel, senderId, ...(remarkRaw ? { remark: remarkRaw.slice(0, 200) } : {}) });
+    items.push({ channel, senderId, role, ...(remarkRaw ? { remark: remarkRaw.slice(0, 200) } : {}) });
   }
   const updatedAt = nowMs(); setSettingJson(ctx.db, AGENT_CHANNEL_SENDER_ALLOWLIST_SETTINGS_KEY, { items }, updatedAt); logger.info({ count: items.length, updatedAt }, "agent channel sender allowlist updated"); return { items, updatedAt };
 }

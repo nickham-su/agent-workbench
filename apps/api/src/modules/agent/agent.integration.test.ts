@@ -6845,6 +6845,262 @@ test("channels: 写入 settings allowlist 后 trigger/run 允许", async () => {
   assert.ok(typeof body.runId === "string" && body.runId.length > 0);
 });
 
+test("channels: allowlist/check 返回 role，历史条目缺省 role 时默认 user", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  setSettingJson(
+    fixture.db,
+    "agent_channel_sender_allowlist_v1",
+    {
+      items: [
+        { channel: "feishu", senderId: "u_without_role", remark: "legacy" },
+        { channel: "feishu", senderId: "u_admin", role: "admin", remark: "manager" }
+      ]
+    },
+    Date.now()
+  );
+
+  const legacy = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/allowlist/check",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: { pluginId: "feishu", senderId: "u_without_role" }
+  });
+  assert.equal(legacy.statusCode, 200);
+  const legacyBody = legacy.json() as any;
+  assert.equal(legacyBody.allowed, true);
+  assert.equal(legacyBody.role, "user");
+
+  const admin = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/allowlist/check",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: { pluginId: "feishu", senderId: "u_admin" }
+  });
+  assert.equal(admin.statusCode, 200);
+  const adminBody = admin.json() as any;
+  assert.equal(adminBody.allowed, true);
+  assert.equal(adminBody.role, "admin");
+
+  const denied = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/allowlist/check",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: { pluginId: "feishu", senderId: "u_none" }
+  });
+  assert.equal(denied.statusCode, 200);
+  const deniedBody = denied.json() as any;
+  assert.equal(deniedBody.allowed, false);
+});
+
+test("channels: set-group-mode 可写入并在 get-binding 中读到", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const created = await createSession(fixture.app, fixture.workspaceId);
+  const session = getAgentSession(fixture.db, created.id)!;
+
+  const upsert = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/conversations/upsert-binding",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: {
+      pluginId: "feishu",
+      channelName: "im",
+      accountId: "default",
+      conversationKey: "feishu_default_chat_group_mode",
+      chatId: "group_mode",
+      chatType: "group",
+      sessionId: session.id
+    }
+  });
+  assert.equal(upsert.statusCode, 200);
+
+  const setMode = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/conversations/set-group-mode",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: {
+      pluginId: "feishu",
+      channelName: "im",
+      accountId: "default",
+      conversationKey: "feishu_default_chat_group_mode",
+      groupMode: "direct_whitelist"
+    }
+  });
+  assert.equal(setMode.statusCode, 200, setMode.body);
+  assert.equal((setMode.json() as any).ok, true);
+
+  const getBinding = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/conversations/get-binding",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: {
+      pluginId: "feishu",
+      channelName: "im",
+      accountId: "default",
+      conversationKey: "feishu_default_chat_group_mode"
+    }
+  });
+  assert.equal(getBinding.statusCode, 200);
+  const binding = getBinding.json() as any;
+  assert.equal(binding.groupMode, "direct_whitelist");
+});
+
+test("channels: 未绑定会话时 set-group-mode 返回 BINDING_NOT_FOUND", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+
+  const setMode = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/conversations/set-group-mode",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: {
+      pluginId: "feishu",
+      channelName: "im",
+      accountId: "default",
+      conversationKey: "feishu_default_chat_group_mode_missing_binding",
+      groupMode: "direct_whitelist"
+    }
+  });
+
+  assert.equal(setMode.statusCode, 404, setMode.body);
+  const body = setMode.json() as any;
+  assert.equal(body.code, "BINDING_NOT_FOUND");
+  assert.equal(typeof body.message, "string");
+  assert.ok(body.message.length > 0);
+});
+
+test("channels: run/trigger 对 admin 与 user 允许，对 none 拒绝", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const created = await createSession(fixture.app, fixture.workspaceId);
+  const session = getAgentSession(fixture.db, created.id)!;
+
+  setSettingJson(
+    fixture.db,
+    "agent_channel_sender_allowlist_v1",
+    {
+      items: [
+        { channel: "feishu", senderId: "u_role_admin", role: "admin" },
+        { channel: "feishu", senderId: "u_role_user", role: "user" }
+      ]
+    },
+    Date.now()
+  );
+
+  await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/conversations/upsert-binding",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: {
+      pluginId: "feishu",
+      channelName: "im",
+      accountId: "default",
+      conversationKey: "feishu_default_chat_allowlist_role",
+      chatId: "allowlist_role",
+      chatType: "direct",
+      sessionId: session.id
+    }
+  });
+  fixture.db
+    .prepare(
+      `update channel_conversation_binding set selected_agent_id = 'default' where plugin_id='feishu' and channel_name='im' and account_id='default' and conversation_key='feishu_default_chat_allowlist_role'`
+    )
+    .run();
+
+  const ingestAdmin = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/inbound/ingest",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: {
+      pluginId: "feishu",
+      channelName: "im",
+      accountId: "default",
+      conversationKey: "feishu_default_chat_allowlist_role",
+      chatType: "direct",
+      chatId: "allowlist_role",
+      externalMessageId: "m_role_admin",
+      sender: { id: "u_role_admin", displayName: "Admin" },
+      mentionedBot: false,
+      text: "hello from admin"
+    }
+  });
+  assert.equal(ingestAdmin.statusCode, 200);
+  const triggerAdmin = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/run/trigger",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: {
+      pluginId: "feishu",
+      channelName: "im",
+      accountId: "default",
+      conversationKey: "feishu_default_chat_allowlist_role",
+      triggerExternalMessageId: "m_role_admin",
+      text: "hello from admin"
+    }
+  });
+  assert.equal(triggerAdmin.statusCode, 200);
+  const adminBody = triggerAdmin.json() as any;
+  assert.notEqual(adminBody.errorCode, "NOT_ALLOWED");
+  assert.equal(adminBody.ok || adminBody.errorCode === "SESSION_RUNNING", true);
+
+  const ingestUser = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/inbound/ingest",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: {
+      pluginId: "feishu",
+      channelName: "im",
+      accountId: "default",
+      conversationKey: "feishu_default_chat_allowlist_role",
+      chatType: "direct",
+      chatId: "allowlist_role",
+      externalMessageId: "m_role_user",
+      sender: { id: "u_role_user", displayName: "User" },
+      mentionedBot: false,
+      text: "hello from user"
+    }
+  });
+  assert.equal(ingestUser.statusCode, 200);
+  const triggerUser = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/run/trigger",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: {
+      pluginId: "feishu",
+      channelName: "im",
+      accountId: "default",
+      conversationKey: "feishu_default_chat_allowlist_role",
+      triggerExternalMessageId: "m_role_user",
+      text: "hello from user"
+    }
+  });
+  assert.equal(triggerUser.statusCode, 200);
+  const userBody = triggerUser.json() as any;
+  assert.notEqual(userBody.errorCode, "NOT_ALLOWED");
+  assert.equal(userBody.ok || userBody.errorCode === "SESSION_RUNNING", true);
+
+  fixture.db
+    .prepare(
+      `insert into channel_inbound_message (plugin_id, channel_name, account_id, conversation_key, external_message_id, sender_id, sender_name, mentioned_bot, text, created_at_external, created_at_local)
+       values ('feishu','im','default','feishu_default_chat_allowlist_role','m_role_none','u_role_none','None',0,'hello none',null, @ts)`
+    )
+    .run({ ts: Date.now() });
+  const triggerNone = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/channels/run/trigger",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: {
+      pluginId: "feishu",
+      channelName: "im",
+      accountId: "default",
+      conversationKey: "feishu_default_chat_allowlist_role",
+      triggerExternalMessageId: "m_role_none",
+      text: "hello none"
+    }
+  });
+  assert.equal(triggerNone.statusCode, 200);
+  const noneBody = triggerNone.json() as any;
+  assert.equal(noneBody.ok, false);
+  assert.equal(noneBody.errorCode, "NOT_ALLOWED");
+});
+
 test("channels: 群聚合默认窗口与截断（maxMessages=50/maxChars=8000）", async () => {
     const fixture = await createFixture({ agentWorkerConcurrency: 0 });
     const created = await createSession(fixture.app, fixture.workspaceId);

@@ -1122,9 +1122,14 @@ export default {
       fields: {
         channel: "渠道",
         senderId: "发送者 ID",
+        role: "角色",
         remark: "备注",
         senderIdPlaceholder: "例如 ou_xxx 或平台用户 ID",
         remarkPlaceholder: "可选，便于识别"
+      },
+      roles: {
+        admin: "管理员",
+        user: "普通用户"
       },
       actions: {
         add: "添加",
