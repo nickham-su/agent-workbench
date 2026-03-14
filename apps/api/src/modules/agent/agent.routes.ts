@@ -44,6 +44,7 @@ import type { AgentService } from "./agent.service.js";
 import { HttpError } from "../../app/errors.js";
 import type { AgentPluginHostClient } from "./agent.plugin-host-client.js";
 import { listAvailableAgentsForSurface } from "../settings/settings.service.js";
+import { type AgentRunCompletedEventHub, toSseEventChunk } from "./run-completed-events.js";
 
 const AgentBuiltinToolNameSchema = Type.Union([
   Type.Literal("bash"),
@@ -71,7 +72,12 @@ function assertInternalToken(req: FastifyRequest, service: AgentService) {
 
 export async function registerAgentRoutes(
   app: FastifyInstance,
-  params: { service: AgentService; runtime: AgentRuntimePort; pluginHost?: AgentPluginHostClient | null }
+  params: {
+    service: AgentService;
+    runtime: AgentRuntimePort;
+    pluginHost?: AgentPluginHostClient | null;
+    runCompletedEventHub: AgentRunCompletedEventHub;
+  }
 ) {
   app.get(
     "/api/agent/sessions",
@@ -743,6 +749,118 @@ export async function registerAgentRoutes(
       return reply.code(201).send(session);
     }
   );
+
+  app.post(
+    "/api/internal/agent/runs/trigger",
+    {
+      schema: {
+        tags: ["agent"],
+        body: Type.Object({
+          workspaceId: Type.String({ minLength: 1 }),
+          sessionId: Type.String({ minLength: 1 }),
+          agentId: Type.String({ minLength: 1 }),
+          text: Type.String({ minLength: 1 }),
+          clientRequestId: Type.String({ minLength: 1 }),
+          uiLocale: Type.Optional(AgentUiLocaleSchema)
+        }),
+        response: {
+          201: AgentSendMessageResponseSchema,
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema
+        }
+      }
+    },
+    async (req, reply) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as {
+        workspaceId: string;
+        sessionId: string;
+        agentId: string;
+        text: string;
+        clientRequestId: string;
+        uiLocale?: "zh-CN" | "en-US";
+      };
+      const result = await params.service.sendMessage({
+        sessionId: body.sessionId,
+        body: {
+          workspaceId: body.workspaceId,
+          agentId: body.agentId,
+          text: body.text,
+          clientRequestId: body.clientRequestId,
+          uiLocale: body.uiLocale
+        }
+      });
+      if (!result.deduplicated) {
+        const workspace = params.service.getWorkspace(body.workspaceId);
+        if (!workspace) throw new HttpError(404, "workspace not found");
+        try {
+          await params.runtime.enqueueRun({
+            workspaceId: body.workspaceId,
+            sessionId: body.sessionId,
+            runId: result.runId,
+            workspacePath: workspace.path,
+            inputText: body.text
+          });
+        } catch (err) {
+          params.service.failRunOnEnqueueFailure({
+            workspaceId: body.workspaceId,
+            sessionId: body.sessionId,
+            runId: result.runId,
+            updatedAt: Date.now()
+          });
+          throw err;
+        }
+      }
+      return reply.code(201).send(result);
+    }
+  );
+
+  app.get(
+    "/api/internal/agent/runs/:runId/final-text",
+    {
+      schema: {
+        tags: ["agent"],
+        params: Type.Object({ runId: Type.String({ minLength: 1 }) }),
+        response: {
+          200: Type.Object({
+            found: Type.Boolean(),
+            text: Type.String()
+          }),
+          401: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const p = req.params as { runId: string };
+      return params.service.getRunFinalText({ runId: p.runId });
+    }
+  );
+
+  app.get("/api/internal/agent/events/sse", async (req, reply) => {
+    assertInternalToken(req, params.service);
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no"
+    });
+    reply.hijack();
+    reply.raw.write(": connected\n\n");
+
+    const heartbeat = setInterval(() => {
+      reply.raw.write(": keepalive\n\n");
+    }, 15_000);
+    const unsubscribe = params.runCompletedEventHub.subscribe((event) => {
+      reply.raw.write(toSseEventChunk(event));
+    });
+    req.raw.once("close", () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    });
+  });
 
   app.post(
     "/api/internal/agent/agents/list",

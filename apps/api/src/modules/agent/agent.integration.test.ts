@@ -803,6 +803,210 @@ test("channels: H2 聚合按 watermark/upperBound 的 DB 级过滤（>600 条）
     assert.equal(/(^|\n)Alice: 649:/.test(body.text), false);
 });
 
+test("internal runs/trigger 支持 clientRequestId 去重", async () => {
+  const fixture = await createFixture();
+  await configureAgentDefaults(fixture.app);
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const payload = {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    agentId: "default",
+    text: "hello from internal trigger",
+    clientRequestId: "it_trigger_dedup_1"
+  };
+
+  const first = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/runs/trigger",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload
+  });
+  assert.equal(first.statusCode, 201, `internal trigger first failed: ${first.body}`);
+  const firstBody = first.json() as { runId: string; deduplicated: boolean; sessionId: string; messageItemId: number };
+  assert.equal(firstBody.deduplicated, false);
+  assert.equal(firstBody.sessionId, session.id);
+  assert.ok(String(firstBody.runId).length > 0);
+
+  const second = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/runs/trigger",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload
+  });
+  assert.equal(second.statusCode, 201, `internal trigger second failed: ${second.body}`);
+  const secondBody = second.json() as { runId: string; deduplicated: boolean; sessionId: string; messageItemId: number };
+  assert.equal(secondBody.deduplicated, true);
+  assert.equal(secondBody.runId, firstBody.runId);
+  assert.equal(secondBody.messageItemId, firstBody.messageItemId);
+});
+
+test("internal runs/:runId/final-text 返回最终 assistant 文本", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const assistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: newSortableId("turn"),
+    step: 1,
+    prevId: null,
+    kind: "assistant",
+    status: "completed",
+    output: { type: "assistant_text", text: "final answer from integration test" }
+  });
+  assert.ok(assistantItem.item.id > 0);
+  const runComplete = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/run-complete",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      runId,
+      status: "completed"
+    }
+  });
+  assert.equal(runComplete.statusCode, 200, `run complete failed: ${runComplete.body}`);
+
+  const finalText = await fixture.app.inject({
+    method: "GET",
+    url: `/api/internal/agent/runs/${encodeURIComponent(runId)}/final-text`,
+    headers: { "x-awb-agent-internal-token": fixture.internalToken }
+  });
+  assert.equal(finalText.statusCode, 200, `final-text query failed: ${finalText.body}`);
+  const finalBody = finalText.json() as { found: boolean; text: string };
+  assert.equal(finalBody.found, true);
+  assert.equal(finalBody.text, "final answer from integration test");
+});
+
+test("internal events/sse 返回 run-complete 事件 chunk", async () => {
+  const fixture = await createFixture();
+  await configureAgentDefaults(fixture.app);
+
+  await fixture.app.listen({ host: "127.0.0.1", port: 0 });
+  const addr = fixture.app.server.address();
+  const port = typeof addr === "object" && addr ? addr.port : 0;
+  assert.ok(port > 0, "listen should allocate a port");
+
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const sseAbort = new AbortController();
+  let sseReader: any = null;
+  let sseBody: any = null;
+  let sseReady = false;
+
+  const ssePromise = (async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/internal/agent/events/sse`, {
+      method: "GET",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      signal: sseAbort.signal
+    });
+    assert.equal(res.status, 200);
+    assert.equal(String(res.headers.get("content-type") || "").includes("text/event-stream"), true);
+    const body = res.body;
+    if (!body) throw new Error("sse body missing");
+    sseBody = body;
+    const reader = body.getReader();
+    sseReader = reader;
+    const decoder = new TextDecoder();
+    let text = "";
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < 5_000) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+      if (text.includes(": connected")) sseReady = true;
+
+      if (text.includes("event: agent.run.completed.v1") && text.includes("data: {")) {
+        return text;
+      }
+    }
+    throw new Error(`sse chunk timeout: ${text}`);
+  })();
+
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const readyStart = Date.now();
+  while (!sseReady && Date.now() - readyStart < 3_000) {
+    await sleep(20);
+  }
+  if (!sseReady) {
+    throw new Error("sse ready timeout");
+  }
+
+  try {
+    const complete = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/run-complete",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      runId,
+      status: "completed"
+    }
+  });
+    assert.equal(complete.statusCode, 200, `run-complete for sse failed: ${complete.body}`);
+
+    const sseText = await ssePromise;
+
+    assert.equal(sseText.includes("event: agent.run.completed.v1"), true);
+    assert.equal(sseText.includes(`\"runId\":\"${runId}\"`), true);
+    assert.equal(sseText.includes("data: {"), true);
+    assert.equal(sseText.includes("\"eventType\":\"agent.run.completed.v1\""), true);
+    assert.equal(sseText.includes("id: evt_"), true);
+  } finally {
+    sseAbort.abort();
+    if (sseReader) {
+      try {
+        await sseReader.cancel();
+      } catch {
+        // ignore
+      }
+      sseReader = null;
+    }
+    if (sseBody) {
+      try {
+        await sseBody.cancel();
+      } catch {
+        // ignore
+      }
+      sseBody = null;
+    }
+    await ssePromise.catch(() => {
+      // ignore: teardown path may abort reader/fetch
+    });
+  }
+});
+
 async function closeFixture(fixture: Fixture) {
   fixtures.delete(fixture);
   await fixture.app.close();

@@ -229,11 +229,20 @@ export const AgentSessionRunStateWithTerminalStatusSchema = Type.Intersect(
   { additionalProperties: false }
 );
 
+const AgentSessionStatusSummarySessionSchema = Type.Object(
+  {
+    ...AgentSessionRecordSchema.properties,
+    workspaceTitle: Type.Optional(Type.String({ minLength: 1 })),
+    workspaceDirName: Type.Optional(Type.String({ minLength: 1 }))
+  },
+  { additionalProperties: false }
+);
+
 export const AgentSessionStatusSummaryResponseSchema = Type.Object(
   {
     updatedAt: Type.Number(),
     generatedAt: Type.Optional(Type.Number()),
-    session: AgentSessionRecordSchema,
+    session: AgentSessionStatusSummarySessionSchema,
     agent: Type.Union([
       Type.Object({
         id: Type.String({ minLength: 1 }),

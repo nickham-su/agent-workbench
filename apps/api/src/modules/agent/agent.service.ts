@@ -89,6 +89,7 @@ import {
 } from "../settings/settings.service.js";
 import { projectToolCallInputForPrompt } from "./prompt/tool-projectors/index.js";
 import { listPluginRuntimeSnapshots } from "../plugins/plugin.service.js";
+import type { AgentRunCompletedEventHub } from "./run-completed-events.js";
 
 export type AgentQueuedRun = {
   workspaceId: string;
@@ -1870,7 +1871,11 @@ function buildSystemPrompt(input: {
 export class AgentService {
   private readonly sessionOpLocks = new Map<string, Promise<void>>();
 
-  constructor(private readonly ctx: AppContext, private readonly logger: FastifyBaseLogger) {}
+  constructor(
+    private readonly ctx: AppContext,
+    private readonly logger: FastifyBaseLogger,
+    private readonly runCompletedEventHub?: AgentRunCompletedEventHub | null
+  ) {}
 
   private async runSessionOperationExclusive<T>(sessionId: string, action: () => Promise<T>): Promise<T> {
     const previous = this.sessionOpLocks.get(sessionId) ?? Promise.resolve();
@@ -2607,10 +2612,17 @@ export class AgentService {
 
     // updatedAt should reflect the underlying data change time, not "now".
     const updatedAt = Math.max(session.updatedAt, runState.updatedAt, startedAt ?? 0);
+    const workspace = getWorkspace(this.ctx.db, session.workspaceId);
+    const sessionSummary = {
+      ...session,
+      workspaceTitle: workspace?.title,
+      workspaceDirName: workspace?.dirName
+    };
+
     return {
       updatedAt,
       generatedAt,
-      session,
+      session: sessionSummary,
       agent: agent ? { id: agent.id, name: agent.name } : null,
       runState: {
         ...runState,
@@ -3072,6 +3084,16 @@ export class AgentService {
     });
 
     tx();
+
+    this.runCompletedEventHub?.publish({
+      eventId: newSortableId("evt"),
+      eventType: "agent.run.completed.v1",
+      occurredAt: ts,
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+      runId: params.runId,
+      finalStatus: params.status
+    });
   }
 
   private resolveSubtaskParentContext(params: {
@@ -3482,6 +3504,19 @@ export class AgentService {
     return {
       status: run.status
     };
+  }
+
+  getRunFinalText(params: { runId: string }) {
+    const runId = String(params.runId || "").trim();
+    if (!runId) {
+      return { found: false, text: "" };
+    }
+    const run = getRunRecord(this.ctx.db, runId);
+    if (!run) {
+      return { found: false, text: "" };
+    }
+    const latest = getLatestTerminalAssistantTextByRunId(this.ctx.db, { runId });
+    return { found: latest.itemId != null, text: latest.text };
   }
 
   getExecutionProfileForRun(params: { workspaceId: string; sessionId: string; runId: string }) {

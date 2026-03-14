@@ -184,3 +184,12 @@ npm run dev
 | `npm run dev:web` | 仅启动前端 |
 | `npm run build` | 构建生产版本 |
 | `npm run typecheck` | 类型检查 |
+
+---
+
+## 设计文档
+
+设计方案与架构讨论文档位于 `docs/design/`。
+
+- `docs/design/feishu-plugin-ts-rewrite-and-sse-broadcast.md`
+  - 飞书插件 TS 重写与平台级 SSE 广播方案（最终版）
