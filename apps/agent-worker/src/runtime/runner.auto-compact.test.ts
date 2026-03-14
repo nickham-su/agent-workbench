@@ -39,6 +39,8 @@ test("buildCompactionUserPrompt 按 uiLocale 返回对应语言", () => {
   assert.ok(en.includes("Please produce a structured summary of the current session"));
   assert.ok(en.includes("Focus on:"));
   assert.ok(fallback.includes("Please produce a structured summary of the current session"));
+  assert.ok(zh.includes("若上下文包含与工作目标相关的文档,请在总结中列出文档路径"));
+  assert.ok(en.includes("if the context includes documents relevant to the work goal, list their document paths in the summary"));
   assert.equal(fallback.includes("请基于当前会话内容输出一份结构化总结"), false);
 });
 
