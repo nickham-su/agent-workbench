@@ -50,10 +50,7 @@ function parseOptionalPositiveIntegerArg(raw: unknown, fieldName: string) {
 }
 
 function parseSubtaskArgs(raw: Record<string, unknown>): ParsedSubtaskArgs {
-  const description = requireNonEmptyStringArg(raw.description, "subtask.description");
-  if (description.length > 20) {
-    throw new Error("subtask.description must be <= 20 characters");
-  }
+  const description = requireNonEmptyStringArg(raw.description, "subtask.description").slice(0, 50);
   const prompt = requireNonEmptyStringArg(raw.prompt, "subtask.prompt");
   const agentId = requireNonEmptyStringArg(raw.agentId, "subtask.agentId");
   const sessionRaw = toRecord(raw.session);

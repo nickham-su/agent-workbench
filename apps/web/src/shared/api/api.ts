@@ -94,6 +94,8 @@ import type {
   AgentGlobalPromptSettings,
   AgentMcpSettings,
   AgentRuntimeSettings,
+  AgentProviderModelsListView,
+  AgentProviderModelsListQuery,
   AgentPluginSettings,
   PluginRuntimeSnapshot,
   AgentChannelSenderAllowlistSettings,
@@ -819,6 +821,17 @@ export async function getAgentProvidersSettings() {
 export async function updateAgentProvidersSettings(body: UpdateAgentProvidersSettingsRequest) {
   try {
     const res = await client.put<AgentProvidersSettingsView>("/settings/agent/providers", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getAgentProviderModels(providerId: string, query?: AgentProviderModelsListQuery) {
+  try {
+    const res = await client.get<AgentProviderModelsListView>(`/settings/agent/providers/${encodeURIComponent(providerId)}/models`, {
+      params: query
+    });
     return res.data;
   } catch (err) {
     throw toApiError(err);

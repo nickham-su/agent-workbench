@@ -594,6 +594,11 @@ test("agent prompt-context 中的工具描述与 schema 说明使用英文", asy
     )
   );
   const sessionSchema = (subtaskTool?.inputSchema as any)?.properties?.session;
+  const subtaskDescriptionSchema = (subtaskTool?.inputSchema as any)?.properties?.description;
+  assert.equal(subtaskDescriptionSchema?.minLength, 1);
+  assert.equal(subtaskDescriptionSchema?.maxLength, undefined);
+  assert.ok(String(subtaskDescriptionSchema?.description || "").includes("Longer values will be truncated to 50 characters."));
+
   const oneOf = Array.isArray(sessionSchema?.oneOf) ? sessionSchema.oneOf : [];
   assert.ok(oneOf.length >= 3, "subtask.session.oneOf should contain multiple options");
   assert.equal(
@@ -3241,6 +3246,97 @@ test("subtask start should reject too long preforkSummaryText", async () => {
   });
   assert.equal(res.statusCode, 400);
   assert.equal((res.json() as { code?: string }).code, "AGENT_SUBTASK_PREFORK_SUMMARY_TOO_LONG");
+});
+
+test("subtask start should allow description length 50 and silently truncate >50", async () => {
+  const fixture = await createFixture();
+  await configureAgentDefaults(fixture.app);
+
+  const parentSession = await createSession(fixture.app, fixture.workspaceId);
+  const parentRunId = newSortableId("run");
+  const parentUser = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "prepare description length boundary" }
+  });
+
+  createRunRecord(fixture.db, {
+    runId: parentRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    triggerItemId: parentUser.item.id,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const subtaskTool = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_description_boundary",
+    step: 1,
+    prevId: parentUser.item.id,
+    kind: "tool",
+    status: "queued",
+    output: {
+      type: "tool",
+      toolName: "subtask",
+      toolCallId: "call_description_boundary",
+      args: {
+        description: "prefork",
+        prompt: "please do prefork task",
+        agentId: "default",
+        session: { mode: "fork" }
+      }
+    }
+  });
+
+  const maxAllowedDescription = "d".repeat(50);
+  const basePayload = {
+    workspaceId: fixture.workspaceId,
+    parentSessionId: parentSession.id,
+    parentRunId,
+    parentToolItemId: subtaskTool.item.id,
+    prompt: "please do subtask with max allowed description length",
+    agentId: "default",
+    session: { mode: "fork" as const }
+  };
+  const acceptedRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/start",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { ...basePayload, description: maxAllowedDescription }
+  });
+  assert.equal(acceptedRes.statusCode, 200, `description length 50 should be accepted: ${acceptedRes.body}`);
+  const acceptedBody = acceptedRes.json() as { sessionId: string };
+  const acceptedSession = getAgentSession(fixture.db, acceptedBody.sessionId);
+  assert.equal(acceptedSession?.title, `${maxAllowedDescription} (fork)`);
+
+  const tooLongDescription = `  ${"d".repeat(51)}  `;
+  const truncatedDescription = "d".repeat(50);
+  const truncatedRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/start",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { ...basePayload, description: tooLongDescription }
+  });
+  assert.equal(truncatedRes.statusCode, 200, `description length 51 should be accepted and truncated: ${truncatedRes.body}`);
+  const truncatedBody = truncatedRes.json() as { sessionId: string };
+  const truncatedSession = getAgentSession(fixture.db, truncatedBody.sessionId);
+  assert.equal(truncatedSession?.title, `${truncatedDescription} (fork)`);
 });
 
 test("subtask start should reject mismatched preforkMeta", async () => {

@@ -231,8 +231,7 @@ function toolArgsSchema(toolName: AgentContextToolName) {
         description: {
           type: "string",
           minLength: 1,
-          maxLength: 20,
-          description: "Briefly describe the task goal in 20 characters or fewer."
+          description: "Briefly describe the task goal in 50 characters or fewer. Longer values will be truncated to 50 characters."
         },
         prompt: {
           type: "string",
@@ -3188,12 +3187,9 @@ export class AgentService {
       parentToolItemId: params.parentToolItemId
     });
 
-    const normalizedDescription = params.description.trim();
+    const normalizedDescription = params.description.trim().slice(0, 50);
     if (!normalizedDescription) {
       throw new HttpError(400, "subtask description is required", "AGENT_SUBTASK_DESCRIPTION_REQUIRED");
-    }
-    if (normalizedDescription.length > 20) {
-      throw new HttpError(400, "subtask description must be <= 20 characters", "AGENT_SUBTASK_DESCRIPTION_TOO_LONG");
     }
     const subtaskTitleBase = normalizedDescription;
     const resolvedAgentId = String(params.agentId || "").trim();

@@ -519,7 +519,7 @@ export async function registerAgentRoutes(
           parentSessionId: Type.String({ minLength: 1 }),
           parentRunId: Type.String({ minLength: 1 }),
           parentToolItemId: Type.Number({ minimum: 1 }),
-          description: Type.String({ minLength: 1, maxLength: 20 }),
+          description: Type.String({ minLength: 1 }),
           prompt: Type.String({ minLength: 1 }),
           agentId: Type.String({ minLength: 1 }),
           session: Type.Union([
