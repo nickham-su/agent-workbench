@@ -383,6 +383,24 @@ export const AgentInternalCreateSessionRequestSchema = Type.Object(
 );
 export type AgentInternalCreateSessionRequest = Static<typeof AgentInternalCreateSessionRequestSchema>;
 
+export const AgentInternalChannelSenderRoleSchema = Type.Union([Type.Literal("admin"), Type.Literal("user")]);
+export type AgentInternalChannelSenderRole = Static<typeof AgentInternalChannelSenderRoleSchema>;
+
+export const AgentChannelAllowlistCheckRequestSchema = Type.Object(
+  {
+    pluginId: Type.String({ minLength: 1 }),
+    senderId: Type.String({ minLength: 1 })
+  },
+  { additionalProperties: false }
+);
+export type AgentChannelAllowlistCheckRequest = Static<typeof AgentChannelAllowlistCheckRequestSchema>;
+
+export const AgentChannelAllowlistCheckResponseSchema = Type.Object(
+  { allowed: Type.Boolean(), role: Type.Optional(AgentInternalChannelSenderRoleSchema), reason: Type.Optional(Type.String({ minLength: 1 })) },
+  { additionalProperties: false }
+);
+export type AgentChannelAllowlistCheckResponse = Static<typeof AgentChannelAllowlistCheckResponseSchema>;
+
 export const AgentSendMessageRequestSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
   text: Type.String({ minLength: 1 }),

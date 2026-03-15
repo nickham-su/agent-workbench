@@ -1,5 +1,11 @@
 # IM 对接插件（channels + services）方案 v1
 
+> ⚠️ **已弃用 / 历史文档**
+>
+> 本文描述的是早期 channels + reply-job + watermark 方案，现已下线。
+>
+> 请以新版设计为准：[`docs/design/feishu-plugin-ts-rewrite-and-sse-broadcast.md`](../../feishu-plugin-ts-rewrite-and-sse-broadcast.md)
+
 Status: draft
 
 > 本文面向工程落地，描述如何在 **agent-workbench 已落地的本地工具插件体系**基础上，扩展出 **IM 对接插件能力**（`channels + services`），以支持飞书机器人私聊/群聊与 Agent Session 的绑定与对话。

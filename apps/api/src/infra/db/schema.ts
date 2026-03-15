@@ -178,55 +178,6 @@ export function initSchema(db: Db) {
       foreign key (session_id) references agent_session(id) on delete cascade
     );
 
-    -- IM channels runtime
-    create table if not exists channel_conversation_binding (
-      plugin_id text not null,
-      channel_name text not null,
-      account_id text not null,
-      conversation_key text not null,
-      chat_id text not null,
-      chat_type text not null,
-      workspace_id text not null,
-      session_id text not null,
-      selected_agent_id text,
-      group_mode text,
-      watermark_external_message_id text,
-      created_at integer not null,
-      updated_at integer not null,
-      primary key (plugin_id, channel_name, account_id, conversation_key),
-      foreign key (session_id) references agent_session(id) on delete cascade
-    );
-
-    create table if not exists channel_inbound_message (
-      id integer primary key autoincrement,
-      plugin_id text not null,
-      channel_name text not null,
-      account_id text not null,
-      conversation_key text not null,
-      external_message_id text not null,
-      sender_id text not null,
-      sender_name text,
-      mentioned_bot integer not null default 0,
-      text text not null,
-      created_at_external integer,
-      created_at_local integer not null
-    );
-
-    create table if not exists channel_reply_job (
-      id integer primary key autoincrement,
-      plugin_id text not null,
-      channel_name text not null,
-      account_id text not null,
-      conversation_key text not null,
-      workspace_id text not null,
-      session_id text not null,
-      run_id text not null,
-      status text not null,
-      error_text text,
-      created_at integer not null,
-      updated_at integer not null,
-      foreign key (session_id) references agent_session(id) on delete cascade
-    );
   `);
 
   ensureColumn(db, { table: "repos", column: "credential_id", ddl: "credential_id text" });
@@ -237,10 +188,6 @@ export function initSchema(db: Db) {
   ensureColumn(db, { table: "agent_session", column: "forked_from_item_id", ddl: "forked_from_item_id integer" });
   ensureColumn(db, { table: "agent_session", column: "forked_from_session_id", ddl: "forked_from_session_id text" });
   ensureColumn(db, { table: "agent_session_head", column: "head_item_id", ddl: "head_item_id integer" });
-  ensureColumn(db, { table: "channel_reply_job", column: "reply_to_external_message_id", ddl: "reply_to_external_message_id text" });
-  ensureColumn(db, { table: "channel_reply_job", column: "attempt_count", ddl: "attempt_count integer not null default 0" });
-  ensureColumn(db, { table: "channel_reply_job", column: "last_attempt_at", ddl: "last_attempt_at integer" });
-  ensureColumn(db, { table: "channel_reply_job", column: "max_attempts", ddl: "max_attempts integer not null default 5" });
   ensureColumn(db, { table: "agent_client_request", column: "message_item_id", ddl: "message_item_id integer" });
   ensureColumn(db, { table: "agent_session_run_state", column: "active_assistant_item_id", ddl: "active_assistant_item_id integer" });
   ensureColumn(db, { table: "agent_session_run_state", column: "last_response_total_tokens", ddl: "last_response_total_tokens integer" });
@@ -306,43 +253,6 @@ export function initSchema(db: Db) {
     sql: "create index idx_agent_run_session_status on agent_run(session_id, status, updated_at desc)"
   });
 
-  createIndexIfNotExists(db, {
-    index: "idx_channel_binding_session_id",
-    sql: "create index idx_channel_binding_session_id on channel_conversation_binding(session_id)"
-  });
-  createIndexIfNotExists(db, {
-    index: "idx_channel_binding_workspace_session",
-    sql: "create index idx_channel_binding_workspace_session on channel_conversation_binding(workspace_id, session_id)"
-  });
-
-  // dedup: (plugin_id, channel_name, account_id, external_message_id)
-  createIndexIfNotExists(db, {
-    index: "idx_channel_inbound_message_dedup",
-    sql: "create unique index idx_channel_inbound_message_dedup on channel_inbound_message(plugin_id, channel_name, account_id, external_message_id)"
-  });
-  createIndexIfNotExists(db, {
-    index: "idx_channel_inbound_message_conversation_created",
-    sql: "create index idx_channel_inbound_message_conversation_created on channel_inbound_message(plugin_id, channel_name, account_id, conversation_key, created_at_local)"
-  });
-
-  createIndexIfNotExists(db, {
-    index: "idx_channel_reply_job_run_id",
-    sql: "create unique index idx_channel_reply_job_run_id on channel_reply_job(run_id)"
-  });
-  createIndexIfNotExists(db, {
-    index: "idx_channel_reply_job_status",
-    sql: "create index idx_channel_reply_job_status on channel_reply_job(status, updated_at desc)"
-  });
-
-  // For reply dispatcher polling.
-  createIndexIfNotExists(db, {
-    index: "idx_channel_reply_job_pending",
-    sql: "create index idx_channel_reply_job_pending on channel_reply_job(status, updated_at asc, id asc)"
-  });
-  createIndexIfNotExists(db, {
-    index: "idx_channel_reply_job_session",
-    sql: "create index idx_channel_reply_job_session on channel_reply_job(session_id)"
-  });
 }
 
 function createIndexIfNotExists(db: Db, params: { index: string; sql: string }) {

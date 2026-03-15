@@ -13,6 +13,8 @@ import {
   AgentInternalCreateSessionRequestSchema,
   AgentSendMessageRequestSchema,
   AgentSendMessageResponseSchema,
+  AgentChannelAllowlistCheckRequestSchema,
+  AgentChannelAllowlistCheckResponseSchema,
   type AgentSendMessageRequest,
   AgentClearSessionRequestSchema,
   AgentCompactSessionRequestSchema,
@@ -67,6 +69,16 @@ function assertInternalToken(req: FastifyRequest, service: AgentService) {
   const token = String(req.headers["x-awb-agent-internal-token"] || "");
   if (token !== service.getContext().agentInternalToken) {
     throw new HttpError(401, "Unauthorized");
+  }
+}
+
+function assertPluginCaller(req: FastifyRequest, pluginId: string) {
+  const caller = String(req.headers["x-awb-plugin-id"] || "").trim();
+  if (!caller) {
+    throw new HttpError(401, "Unauthorized", "PLUGIN_CALLER_REQUIRED");
+  }
+  if (caller !== String(pluginId || "").trim()) {
+    throw new HttpError(401, "Unauthorized", "PLUGIN_CALLER_MISMATCH");
   }
 }
 
@@ -730,6 +742,28 @@ export async function registerAgentRoutes(
       const query = req.query as { limit?: number };
       const limit = typeof query.limit === "number" ? query.limit : 10;
       return params.service.listRecentWorkspaces({ limit });
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/channels/allowlist/check",
+    {
+      schema: {
+        tags: ["agent"],
+        body: AgentChannelAllowlistCheckRequestSchema,
+        response: {
+          200: AgentChannelAllowlistCheckResponseSchema,
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          500: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as { pluginId: string; senderId: string };
+      assertPluginCaller(req, body.pluginId);
+      return params.service.checkChannelSenderAllowlist(body);
     }
   );
 

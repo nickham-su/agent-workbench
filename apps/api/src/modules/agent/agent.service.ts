@@ -85,6 +85,7 @@ import {
   getAgentSettings,
   listAvailableAgentsForSurface,
   resolveGlobalDefaultModelProfile,
+  getAgentChannelSenderAllowlistSettings,
   resolveExecutionProfile
 } from "../settings/settings.service.js";
 import { projectToolCallInputForPrompt } from "./prompt/tool-projectors/index.js";
@@ -4289,6 +4290,24 @@ export class AgentService {
       lastResponseTotalTokens: runState.lastResponseTotalTokens,
       uiLocale: normalizeAgentUiLocale(run.uiLocale)
     };
+  }
+
+  checkChannelSenderAllowlist(input: { pluginId: string; senderId: string }) {
+    const pluginId = String(input.pluginId || "").trim();
+    const senderId = String(input.senderId || "").trim();
+    const stored = getAgentChannelSenderAllowlistSettings(this.ctx);
+    const bySettings = new Map<string, "admin" | "user">();
+    for (const it of stored.items || []) {
+      const channel = String(it.channel || "").trim();
+      const itemSenderId = String(it.senderId || "").trim();
+      if (!channel || !itemSenderId) continue;
+      const role = String((it as any).role || "").trim() === "admin" ? "admin" : "user";
+      bySettings.set(`${channel}\u0000${itemSenderId}`, role);
+    }
+    if (bySettings.size === 0) return { allowed: false, reason: "channel sender allowlist is empty" as const };
+    const role = bySettings.get(`${pluginId}\u0000${senderId}`);
+    if (!role) return { allowed: false, reason: "sender is not allowed" as const };
+    return { allowed: true, role };
   }
 
   private ensureWorkspace(workspaceId: string) {

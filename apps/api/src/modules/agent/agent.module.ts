@@ -21,7 +21,6 @@ import {
 import { agentWorkerPidPath } from "../../infra/fs/paths.js";
 import { AgentPluginHostClient } from "./agent.plugin-host-client.js";
 import { AgentPluginHostProcessManager } from "./agent.plugin-host-manager.js";
-import { registerChannelsModule } from "../channels/channels.module.js";
 import { nowMs } from "../../utils/time.js";
 import { AgentRunCompletedEventHub } from "./run-completed-events.js";
 
@@ -220,7 +219,6 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
   }
 
   await registerAgentRoutes(app, { service, runtime, pluginHost: pluginHostClient, runCompletedEventHub });
-  await registerChannelsModule(app, { ctx, agentService: service, runtime, pluginHost: pluginHostClient });
 
   // 开发期默认：fail 模式直接在 listen 前完成 DB 清理，避免外部请求进入后出现竞态。
   if (ctx.agentStartupRecoveryMode === "fail") {

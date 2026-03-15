@@ -21,12 +21,12 @@
 
 ### 2.1 当前为什么只有“飞书触发 run”才会回飞书
 
-当前链路中，飞书最终回复依赖 `channel_reply_job`。该 job 仅在 channels 的 `run/trigger` 路径创建。
+（历史背景）旧版链路中，飞书最终回复依赖 `channel_reply_job`，并在 channels 的 `run/trigger` 路径创建。
 
-- 飞书消息 -> channels `run/trigger` -> 创建 `channel_reply_job` -> dispatcher 发送飞书回复
-- Web 消息 -> `sendMessage` -> 不创建 `channel_reply_job` -> 无飞书回传
+- 飞书消息 -> channels `run/trigger` -> 创建 `channel_reply_job` -> dispatcher 发送飞书回复（旧）
+- Web 消息 -> `sendMessage` -> 不创建 `channel_reply_job` -> 无飞书回传（旧）
 
-因此，Web 触发 run 时，飞书侧收不到结果。
+因此旧版中，Web 触发 run 时，飞书侧收不到结果；现已改为 SSE `agent.run.completed.v1` + 插件自治过滤/发送。
 
 ### 2.2 当前飞书插件工程化问题
 
