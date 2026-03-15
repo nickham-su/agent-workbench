@@ -756,7 +756,7 @@ function sanitizeSkillToolError(err: unknown) {
   const safeMessages = new Set([
     "operation aborted",
     "skill.id is required",
-    "skill.id must start with builtin/ or ws/",
+    "skill.id must start with builtin/ or ws/ or repo/",
     "path is required",
     "invalid path",
     "absolute path is not allowed",
@@ -782,6 +782,7 @@ export async function runSkillTool(params: {
   workspacePath: string;
   repoRoot: string;
   id: string;
+  repoSkillRoots?: Array<{ repoId: string; rootDir: string; rootPath: string }>;
   signal?: AbortSignal;
 }) {
   try {
@@ -789,15 +790,32 @@ export async function runSkillTool(params: {
     const id = String(params.id || "").trim();
     if (!id) throw new Error("skill.id is required");
     const slashIndex = id.indexOf("/");
-    if (slashIndex <= 0) throw new Error("skill.id must start with builtin/ or ws/");
+    if (slashIndex <= 0) throw new Error("skill.id must start with builtin/ or ws/ or repo/");
     const ns = id.slice(0, slashIndex);
     const rel = id.slice(slashIndex + 1);
-    if (ns !== "builtin" && ns !== "ws") throw new Error("skill.id must start with builtin/ or ws/");
-    const safeRel = ensureSafeRelativePath(rel);
 
-    const rootPath = ns === "builtin"
-      ? path.resolve(params.repoRoot, "skills")
-      : path.resolve(params.workspacePath, ".awb", "skills");
+    let rootPath = "";
+    let safeRel = "";
+    if (ns === "builtin" || ns === "ws") {
+      safeRel = ensureSafeRelativePath(rel);
+      rootPath = ns === "builtin"
+        ? path.resolve(params.repoRoot, "skills")
+        : path.resolve(params.workspacePath, ".awb", "skills");
+    } else if (ns === "repo") {
+      const [repoIdRaw, rootDirRaw, ...rest] = rel.split("/");
+      const repoId = String(repoIdRaw || "").trim();
+      const rootDir = String(rootDirRaw || "").trim();
+      if (!repoId || !rootDir) {
+        throw new Error("skill.id must start with builtin/ or ws/ or repo/");
+      }
+      const mapping = (params.repoSkillRoots || []).find((it) => it.repoId === repoId && it.rootDir === rootDir);
+      if (!mapping) throw new Error("skill node not found");
+      rootPath = path.resolve(mapping.rootPath);
+      safeRel = rest.length > 0 ? ensureSafeRelativePath(rest.join("/")) : ".";
+    } else {
+      throw new Error("skill.id must start with builtin/ or ws/ or repo/");
+    }
+
     const targetPath = resolveWithinWorkspace(rootPath, safeRel);
     const stat = await fs.lstat(targetPath);
     if (stat.isSymbolicLink()) {
@@ -847,7 +865,9 @@ export async function runSkillTool(params: {
       if (entry.isFile()) {
         if (entry.name === "SKILL.md") continue;
         children.push({
-          id: `${ns}/${path.posix.join(safeRel, entry.name)}`,
+          id: ns === "repo"
+            ? `${ns}/${rel}/${entry.name}`
+            : `${ns}/${path.posix.join(safeRel, entry.name)}`,
           type: "file",
           name: entry.name
         });
@@ -865,7 +885,9 @@ export async function runSkillTool(params: {
       if (childKind.kind !== "text") continue;
       const childDecoded = await readTextFileCapped({ fullPath: childSkillPath, encoding: childKind.encoding, signal: params.signal });
       const childParsed = parseSkillFrontmatter(childDecoded.lines.join("\n"));
-      const childRelPath = path.posix.join(safeRel, entry.name);
+      const childRelPath = ns === "repo"
+        ? `${rel}/${entry.name}`
+        : path.posix.join(safeRel, entry.name);
       children.push({
         id: `${ns}/${childRelPath}`,
         type: "skill",

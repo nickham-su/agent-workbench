@@ -1279,7 +1279,14 @@ export async function registerAgentRoutes(
               })
             ),
             lastResponseTotalTokens: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
-            uiLocale: Type.Union([AgentUiLocaleSchema, Type.Null()])
+            uiLocale: Type.Union([AgentUiLocaleSchema, Type.Null()]),
+            repoSkillRoots: Type.Array(
+              Type.Object({
+                repoId: Type.String({ minLength: 1 }),
+                rootDir: Type.String({ minLength: 1 }),
+                rootPath: Type.String({ minLength: 1 })
+              })
+            )
           }),
           400: ErrorResponseSchema,
           401: ErrorResponseSchema,

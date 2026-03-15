@@ -541,7 +541,8 @@ const EMPTY_PROMPT_CONTEXT: PromptContext = {
   tools: [],
   pendingTools: [],
   lastResponseTotalTokens: null,
-  uiLocale: null
+  uiLocale: null,
+  repoSkillRoots: []
 };
 
 const RESERVED_MODEL_OPTION_KEYS = new Set([
@@ -923,6 +924,7 @@ export class AgentRunner {
     tool: PendingTool;
     signal: AbortSignal;
     availableToolNames?: ReadonlySet<string>;
+    promptContext: PromptContext;
   }) {
     const { profile, run, tool, signal } = params;
     if (signal.aborted) return { paused: false as const };
@@ -983,6 +985,7 @@ export class AgentRunner {
         },
         signal,
         apiClient: this.apiClient,
+        promptContext: params.promptContext,
         processNestedRun: (nestedRun, nestedSignal) => this.processRun(nestedRun, nestedSignal),
         updateToolItem: async ({ status, output }) => {
           await this.apiClient.updateContextItem({ itemId: tool.itemId, status, output, updatedAt: nowMs() });
@@ -1127,6 +1130,7 @@ export class AgentRunner {
     tool: PendingTool;
     signal: AbortSignal;
     availableToolNames?: ReadonlySet<string>;
+    promptContext: PromptContext;
   }) {
     try {
       return await this.executeTool(params);
@@ -1177,6 +1181,7 @@ export class AgentRunner {
     batch: ToolExecutionBatch;
     signal: AbortSignal;
     availableToolNames?: ReadonlySet<string>;
+    promptContext: PromptContext;
   }) {
     if (params.batch.mode === "serial") {
       const tool = params.batch.tools[0];
@@ -1297,11 +1302,12 @@ export class AgentRunner {
     for (const batch of batches) {
       const result = await this.executeToolBatch({
         profile: params.profile,
-        run: params.run,
-        batch,
-        signal: params.signal,
-        availableToolNames
-      });
+          run: params.run,
+          batch,
+          signal: params.signal,
+          promptContext: params.context,
+          availableToolNames
+        });
       if (result.paused) {
         return { paused: true as const };
       }

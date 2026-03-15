@@ -23,7 +23,8 @@ function createToolListContext(): ToolListContext {
       tools: [],
       pendingTools: [],
       lastResponseTotalTokens: null,
-      uiLocale: null
+      uiLocale: null,
+      repoSkillRoots: []
     },
     apiClient: {} as any
   };
@@ -47,6 +48,7 @@ function createExecutionContext(): ToolExecutionContext {
     },
     signal: new AbortController().signal,
     apiClient: {} as any,
+    promptContext: createToolListContext().promptContext,
     processNestedRun: async () => {},
     updateToolItem: async () => {},
     nowMs: () => Date.now(),

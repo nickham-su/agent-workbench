@@ -352,6 +352,10 @@ export default {
       compactionArchivedHint: "Earlier messages have been archived",
       slashCommandHintTitle: "Commands",
       slashCommandHintStrictOnly: "Exact match",
+      repoSkillsTitle: "Repo skills roots",
+      repoSkillsHint: "Choose repo skills roots to enable. Changes apply to subsequent new runs only; the current run is not refreshed.",
+      repoSkillsEmpty: "No candidate skills directories were detected",
+      repoSkillsSaved: "Repo skills settings saved",
       slashCommandHintNoMatch: "No matching command: /{query}",
       slashCommands: {
         compact: {

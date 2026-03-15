@@ -1,3 +1,4 @@
+import { Type } from "@sinclair/typebox";
 import type { FastifyInstance } from "fastify";
 import type { AppContext } from "../../app/context.js";
 import { ErrorResponseSchema } from "@agent-workbench/shared";
@@ -7,19 +8,29 @@ import {
   UpdateWorkspaceRequestSchema,
   WorkspaceDetailSchema
 } from "@agent-workbench/shared";
-import { nowMs } from "../../utils/time.js";
 import {
   attachRepoToWorkspace,
   createWorkspace,
+  detectWorkspaceRepoSkillsRoots,
   deleteWorkspace,
   detachRepoFromWorkspace,
   getWorkspaceDetailById,
+  getWorkspaceRepoSkillsRootsSettings,
   listWorkspaceDetails,
+  updateWorkspaceRepoSkillsRootsSettings,
   updateWorkspaceById
 } from "./workspace.service.js";
+import {
+  UpdateWorkspaceRepoSkillsRootsSettingsRequestSchema,
+  WorkspaceRepoSkillsRootsDetectResponseSchema,
+  WorkspaceRepoSkillsRootsSettingsResponseSchema
+} from "@agent-workbench/shared";
+import { nowMs } from "../../utils/time.js";
 import { touchWorkspaceLastUsedAt } from "./workspace.store.js";
 
 export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppContext) {
+  const WorkspaceIdParamsSchema = Type.Object({ workspaceId: Type.String({ minLength: 1 }) });
+
   app.get(
     "/api/workspaces",
     {
@@ -125,6 +136,52 @@ export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppCon
     async (req) => {
       const params = req.params as { workspaceId: string; repoId: string };
       return detachRepoFromWorkspace(ctx, app.log, params.workspaceId, params.repoId);
+    }
+  );
+
+  app.get(
+    "/api/workspaces/:workspaceId/repo-skills-roots/detect",
+    {
+      schema: {
+        tags: ["workspaces"],
+        params: WorkspaceIdParamsSchema,
+        response: { 200: WorkspaceRepoSkillsRootsDetectResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      const params = req.params as { workspaceId: string };
+      return detectWorkspaceRepoSkillsRoots(ctx, app.log, params.workspaceId);
+    }
+  );
+
+  app.get(
+    "/api/workspaces/:workspaceId/repo-skills-roots/settings",
+    {
+      schema: {
+        tags: ["workspaces"],
+        params: WorkspaceIdParamsSchema,
+        response: { 200: WorkspaceRepoSkillsRootsSettingsResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      const params = req.params as { workspaceId: string };
+      return getWorkspaceRepoSkillsRootsSettings(ctx, params.workspaceId);
+    }
+  );
+
+  app.put(
+    "/api/workspaces/:workspaceId/repo-skills-roots/settings",
+    {
+      schema: {
+        tags: ["workspaces"],
+        params: WorkspaceIdParamsSchema,
+        body: UpdateWorkspaceRepoSkillsRootsSettingsRequestSchema,
+        response: { 200: WorkspaceRepoSkillsRootsSettingsResponseSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      const params = req.params as { workspaceId: string };
+      return updateWorkspaceRepoSkillsRootsSettings(ctx, app.log, params.workspaceId, req.body as any);
     }
   );
 }

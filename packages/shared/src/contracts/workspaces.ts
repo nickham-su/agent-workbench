@@ -60,3 +60,45 @@ export const AttachWorkspaceRepoRequestSchema = Type.Object({
   branch: Type.Optional(Type.String({ minLength: 1 }))
 });
 export type AttachWorkspaceRepoRequest = Static<typeof AttachWorkspaceRepoRequestSchema>;
+
+export const WorkspaceRepoSkillsRootSchema = Type.Object({
+  repoId: Type.String({ minLength: 1 }),
+  repoDirName: Type.String({ minLength: 1 }),
+  relativePath: Type.String({ minLength: 1 }),
+  displayName: Type.String({ minLength: 1 }),
+  enabled: Type.Boolean()
+});
+export type WorkspaceRepoSkillsRoot = Static<typeof WorkspaceRepoSkillsRootSchema>;
+
+export const WorkspaceRepoSkillsRootsDetectResponseSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
+  items: Type.Array(WorkspaceRepoSkillsRootSchema),
+  updatedAt: Type.Number()
+});
+export type WorkspaceRepoSkillsRootsDetectResponse = Static<typeof WorkspaceRepoSkillsRootsDetectResponseSchema>;
+
+export const WorkspaceRepoSkillsRootInputSchema = Type.Object({
+  repoId: Type.String({ minLength: 1 }),
+  relativePath: Type.String({ minLength: 1 })
+});
+export type WorkspaceRepoSkillsRootInput = Static<typeof WorkspaceRepoSkillsRootInputSchema>;
+
+export const WorkspaceRepoSkillsRootsSettingsItemSchema = Type.Object({
+  repoId: Type.String({ minLength: 1 }),
+  relativePath: Type.String({ minLength: 1 }),
+  displayName: Type.String({ minLength: 1 }),
+  enabledAt: Type.Number()
+});
+export type WorkspaceRepoSkillsRootsSettingsItem = Static<typeof WorkspaceRepoSkillsRootsSettingsItemSchema>;
+
+export const WorkspaceRepoSkillsRootsSettingsResponseSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
+  enabledRoots: Type.Array(WorkspaceRepoSkillsRootsSettingsItemSchema),
+  updatedAt: Type.Number()
+});
+export type WorkspaceRepoSkillsRootsSettingsResponse = Static<typeof WorkspaceRepoSkillsRootsSettingsResponseSchema>;
+
+export const UpdateWorkspaceRepoSkillsRootsSettingsRequestSchema = Type.Object({
+  enabledRoots: Type.Array(WorkspaceRepoSkillsRootInputSchema)
+});
+export type UpdateWorkspaceRepoSkillsRootsSettingsRequest = Static<typeof UpdateWorkspaceRepoSkillsRootsSettingsRequestSchema>;

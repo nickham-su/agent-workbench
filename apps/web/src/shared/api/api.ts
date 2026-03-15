@@ -35,6 +35,10 @@ import type {
   CreateWorkspaceRequest,
   AttachWorkspaceRepoRequest,
   ChangesResponse,
+  UpdateWorkspaceRepoSkillsRootsSettingsRequest,
+  WorkspaceRepoSkillsRootsDetectResponse,
+  WorkspaceRepoSkillsRootsSettingsResponse,
+  WorkspaceRepoSkillsRootInput,
   CredentialRecord,
   GenerateSshKeypairResponse,
   FileCompareResponse,
@@ -414,6 +418,38 @@ export async function attachWorkspaceRepo(workspaceId: string, body: AttachWorks
 export async function detachWorkspaceRepo(workspaceId: string, repoId: string) {
   try {
     const res = await client.delete<WorkspaceDetail>(`/workspaces/${workspaceId}/repos/${repoId}`);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function detectWorkspaceRepoSkillsRoots(workspaceId: string) {
+  try {
+    const res = await client.get<WorkspaceRepoSkillsRootsDetectResponse>(`/workspaces/${workspaceId}/repo-skills-roots/detect`);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getWorkspaceRepoSkillsRootsSettings(workspaceId: string) {
+  try {
+    const res = await client.get<WorkspaceRepoSkillsRootsSettingsResponse>(`/workspaces/${workspaceId}/repo-skills-roots/settings`);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function updateWorkspaceRepoSkillsRootsSettings(
+  workspaceId: string,
+  body: UpdateWorkspaceRepoSkillsRootsSettingsRequest
+) {
+  try {
+    const res = await client.put<WorkspaceRepoSkillsRootsSettingsResponse>(`/workspaces/${workspaceId}/repo-skills-roots/settings`, {
+      enabledRoots: (body.enabledRoots || []).map((it: WorkspaceRepoSkillsRootInput) => ({ repoId: it.repoId, relativePath: it.relativePath }))
+    });
     return res.data;
   } catch (err) {
     throw toApiError(err);

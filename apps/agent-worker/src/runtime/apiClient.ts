@@ -104,6 +104,11 @@ export type PromptContext = {
   }>;
   lastResponseTotalTokens: number | null;
   uiLocale: AgentUiLocale | null;
+  repoSkillRoots: Array<{
+    repoId: string;
+    rootDir: string;
+    rootPath: string;
+  }>;
 };
 
 export type AgentMcpSettingsPayload = {

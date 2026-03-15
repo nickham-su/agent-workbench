@@ -108,6 +108,16 @@ function createExecutionContext(mode: "ok" | "throw" | "long_text", includeRaw =
     },
     signal: new AbortController().signal,
     apiClient: createApiClient({ plugins: [], updatedAt: Date.now() }),
+    promptContext: {
+      headItemId: null,
+      system: "",
+      messages: [],
+      tools: [],
+      pendingTools: [],
+      lastResponseTotalTokens: null,
+      uiLocale: null,
+      repoSkillRoots: []
+    },
     processNestedRun: async () => {},
     updateToolItem: async () => {},
     nowMs: () => Date.now(),

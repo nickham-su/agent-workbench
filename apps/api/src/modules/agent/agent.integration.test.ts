@@ -7,9 +7,10 @@ import { createApp } from "../../app/createApp.js";
 import { openDb } from "../../infra/db/db.js";
 import type { Db } from "../../infra/db/db.js";
 import { ensureDir, rmrf } from "../../infra/fs/fs.js";
-import { agentArchiveSessionDir, compactionSnippetPath, workspaceRoot } from "../../infra/fs/paths.js";
+import { agentArchiveSessionDir, compactionSnippetPath, workspaceRepoDirPath, workspaceRoot } from "../../infra/fs/paths.js";
 import { setSettingJson } from "../settings/settings.store.js";
-import { insertWorkspace } from "../workspaces/workspace.store.js";
+import { insertWorkspace, insertWorkspaceRepo } from "../workspaces/workspace.store.js";
+import { insertRepo } from "../repos/repo.store.js";
 import {
   appendContextItem,
   createAgentSession,
@@ -1170,6 +1171,7 @@ async function getPromptContextInternal(params: {
     uiLocale: "zh-CN" | "en-US" | null;
     messages: Array<{ role: string; content: unknown }>;
     pendingTools: Array<{ itemId: number; status: string; toolName: string }>;
+    repoSkillRoots: Array<{ repoId: string; rootDir: string; rootPath: string }>;
   };
 }
 
@@ -7489,20 +7491,58 @@ test("agent prompt-context 注入 skills 摘要并在同 run 缓存静态部分"
 
   const builtinSkillDir = path.join(fixture.repoRoot, "skills", `it-builtin-${Date.now()}`);
   const wsSkillDir = path.join(fixture.workspacePath, ".awb", "skills", "deploy");
+  const repoId = newSortableId("repo");
+  const repoDirName = "repo-it";
+  const repoPath = workspaceRepoDirPath(fixture.dataDir, path.basename(fixture.workspacePath), repoDirName);
+  const repoSkillsRootDir = "ai-skills";
+  const repoTopSkillDir = "ops";
+  const repoSkillDir = path.join(repoPath, repoSkillsRootDir);
   try {
     await fs.mkdir(path.join(builtinSkillDir, "child"), { recursive: true });
     await fs.mkdir(wsSkillDir, { recursive: true });
+    await fs.mkdir(path.join(repoSkillDir, repoTopSkillDir), { recursive: true });
+    await fs.mkdir(repoSkillDir, { recursive: true });
     await fs.writeFile(
       path.join(builtinSkillDir, "SKILL.md"),
       "---\nname: Builtin Skill V1\ndescription: builtin-desc-v1\n---\n\nbody",
       "utf8"
     );
+    insertRepo(fixture.db, {
+      id: repoId,
+      url: `https://example.test/${repoId}.git`,
+      credentialId: null,
+      defaultBranch: "main",
+      mirrorPath: path.join(fixture.dataDir, "repos", repoId, "mirror.git"),
+      syncStatus: "idle",
+      syncError: null,
+      lastSyncAt: Date.now(),
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    });
+    insertWorkspaceRepo(fixture.db, {
+      workspaceId: fixture.workspaceId,
+      repoId,
+      dirName: repoDirName,
+      path: repoPath,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    });
     await fs.writeFile(path.join(builtinSkillDir, "child", "SKILL.md"), "---\nname: Child\ndescription: hidden\n---\n", "utf8");
     await fs.writeFile(
       path.join(wsSkillDir, "SKILL.md"),
       "---\nname: Workspace Skill V1\ndescription: ws-desc-v1\n---\n\nbody",
       "utf8"
     );
+    await fs.writeFile(
+      path.join(repoSkillDir, repoTopSkillDir, "SKILL.md"),
+      "---\nname: Repo Skill V1\ndescription: repo-desc-v1\n---\n\nbody",
+      "utf8"
+    );
+    setSettingJson(fixture.db, "workspace_repo_skills_roots_v1", {
+      workspaces: {
+        [fixture.workspaceId]: { enabledRoots: [{ repoId, relativePath: repoSkillsRootDir, enabledAt: Date.now() }], updatedAt: Date.now() }
+      }
+    }, Date.now());
     await fs.writeFile(path.join(fixture.workspacePath, "AGENTS.md"), "RULE_V1", "utf8");
 
     createRunRecord(fixture.db, {
@@ -7530,11 +7570,15 @@ test("agent prompt-context 注入 skills 摘要并在同 run 缓存静态部分"
     assert.ok(first.system.includes("name: Builtin Skill V1"));
     assert.ok(first.system.includes("id: ws/deploy"), "workspace skill id should be injected");
     assert.ok(first.system.includes("description: ws-desc-v1"));
+    assert.ok(first.system.includes(`id: repo/${repoId}/${repoSkillsRootDir}/${repoTopSkillDir}`), "repo skill id should be injected");
+    assert.ok(first.system.includes("description: repo-desc-v1"));
     assert.equal(first.system.includes(fixture.workspacePath), false, "system prompt should not expose workspace real path");
+    assert.equal(first.system.includes(repoPath), false, "system prompt should not expose repo real path");
     assert.equal(first.system.includes(`builtin/${path.basename(builtinSkillDir)}/child`), false, "only top-level skills should be injected");
     assert.equal(first.tools.some((tool) => tool.name === "skill"), true, "skill tool should be available");
 
     await fs.writeFile(path.join(wsSkillDir, "SKILL.md"), "---\nname: Workspace Skill V2\ndescription: ws-desc-v2\n---\n", "utf8");
+    await fs.writeFile(path.join(repoSkillDir, repoTopSkillDir, "SKILL.md"), "---\nname: Repo Skill V2\ndescription: repo-desc-v2\n---\n", "utf8");
     await fs.writeFile(path.join(fixture.workspacePath, "AGENTS.md"), "RULE_V2", "utf8");
     await sleep(1100);
 
@@ -7549,6 +7593,8 @@ test("agent prompt-context 注入 skills 摘要并在同 run 缓存静态部分"
     assert.equal(second.system.includes("RULE_V2"), false, "same run should not see updated workspace AGENTS");
     assert.ok(second.system.includes("ws-desc-v1"), "same run should keep cached skill summary");
     assert.equal(second.system.includes("ws-desc-v2"), false, "same run should not see updated skill summary");
+    assert.ok(second.system.includes("repo-desc-v1"), "same run should keep cached repo skill summary");
+    assert.equal(second.system.includes("repo-desc-v2"), false, "same run should not see updated repo skill summary");
 
     const runId2 = newSortableId("run");
     createRunRecord(fixture.db, {
@@ -7566,7 +7612,95 @@ test("agent prompt-context 注入 skills 摘要并在同 run 缓存静态部分"
     const third = await getPromptContextInternal({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId: runId2 });
     assert.ok(third.system.includes("RULE_V2"), "new run should observe updated workspace AGENTS");
     assert.ok(third.system.includes("ws-desc-v2"), "new run should observe updated skill summary");
+    assert.ok(third.system.includes("repo-desc-v2"), "new run should observe updated repo skill summary");
   } finally {
     await fs.rm(builtinSkillDir, { recursive: true, force: true });
   }
+});
+
+test("agent prompt-context 对 repo 根 symlink/路径失配安全跳过", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const ts = Date.now();
+
+  const repoId = newSortableId("repo");
+  const repoDirName = "repo-safe";
+  const repoPath = path.join(fixture.workspacePath, repoDirName);
+  await fs.mkdir(path.join(repoPath, "ai-skill", "ops"), { recursive: true });
+  await fs.writeFile(path.join(repoPath, "ai-skill", "ops", "SKILL.md"), "---\nname: Safe\ndescription: safe-desc\n---\n", "utf8");
+
+  insertRepo(fixture.db, {
+    id: repoId,
+    url: `https://example.test/${repoId}.git`,
+    credentialId: null,
+    defaultBranch: "main",
+    mirrorPath: path.join(fixture.dataDir, "repos", repoId, "mirror.git"),
+    syncStatus: "idle",
+    syncError: null,
+    lastSyncAt: ts,
+    createdAt: ts,
+    updatedAt: ts
+  });
+  insertWorkspaceRepo(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    repoId,
+    dirName: repoDirName,
+    path: repoPath,
+    createdAt: ts,
+    updatedAt: ts
+  });
+
+  setSettingJson(fixture.db, "workspace_repo_skills_roots_v1", {
+    workspaces: {
+      [fixture.workspaceId]: {
+        enabledRoots: [{ repoId, relativePath: "ai-skill", enabledAt: ts }],
+        updatedAt: ts
+      }
+    }
+  }, ts);
+
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    uiLocale: "en-US",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: ts
+  });
+
+  const first = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId
+  });
+  assert.ok(first.system.includes("safe-desc"), "valid repo root should be injected");
+
+  const symlinkPath = path.join(fixture.workspacePath, "repo-symlink");
+  await fs.rename(repoPath, path.join(fixture.workspacePath, "repo-safe-target"));
+  await fs.symlink(path.join(fixture.workspacePath, "repo-safe-target"), symlinkPath, "dir");
+  fixture.db.prepare("update workspace_repos set path = ? where workspace_id = ? and repo_id = ?").run(symlinkPath, fixture.workspaceId, repoId);
+
+  const runId2 = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: runId2,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    uiLocale: "en-US",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+  const second = await getPromptContextInternal({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId: runId2 });
+  assert.equal(second.system.includes("safe-desc"), false, "repo symlink/mismatch should be skipped");
+  assert.equal(second.repoSkillRoots.length, 0, "repo skill roots mapping should also skip invalid repo root");
 });

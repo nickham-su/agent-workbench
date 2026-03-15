@@ -211,6 +211,7 @@ export class BuiltinToolProvider implements ToolProvider {
           workspacePath: ctx.run.workspacePath,
           repoRoot,
           id,
+          repoSkillRoots: ctx.promptContext.repoSkillRoots,
           signal: ctx.signal
         });
       }

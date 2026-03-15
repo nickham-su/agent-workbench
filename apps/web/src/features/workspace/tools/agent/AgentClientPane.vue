@@ -380,6 +380,16 @@
             >
               {{ effectiveModelLabel }}
             </div>
+            <a-button
+              size="small"
+              type="text"
+              class="!px-1"
+              :title="t('agent.client.repoSkillsTitle')"
+              :aria-label="t('agent.client.repoSkillsTitle')"
+              @click="onOpenRepoSkillsModal"
+            >
+              <template #icon><AppstoreOutlined /></template>
+            </a-button>
           </div>
           <div v-else class="flex items-center gap-2 text-[0.9em] text-[color:var(--text-tertiary)]">
             <span>{{ t("agent.client.noAgentHint") }}</span>
@@ -390,6 +400,45 @@
         </div>
       </div>
     </div>
+
+    <a-modal
+      :open="repoSkillsModalVisible"
+      :title="t('agent.client.repoSkillsTitle')"
+      :ok-text="t('common.save')"
+      :cancel-text="t('common.cancel')"
+      :confirm-loading="repoSkillsSaving"
+      :ok-button-props="{ disabled: repoSkillsLoading || !!repoSkillsError }"
+      @ok="onSaveRepoSkillsSettings"
+      @cancel="repoSkillsModalVisible = false"
+    >
+      <div class="text-[0.9em] text-[color:var(--text-tertiary)] mb-3">
+        {{ t("agent.client.repoSkillsHint") }}
+      </div>
+      <div v-if="repoSkillsLoading" class="py-6 text-center text-[color:var(--text-tertiary)]">
+        {{ t("common.loading") }}
+      </div>
+      <div v-else-if="repoSkillsError" class="py-3 text-red-500 whitespace-pre-wrap break-words">
+        {{ repoSkillsError }}
+      </div>
+      <div v-else-if="repoSkillsCandidates.length === 0" class="py-6 text-center text-[color:var(--text-tertiary)]">
+        {{ t("agent.client.repoSkillsEmpty") }}
+      </div>
+      <div v-else class="max-h-[50vh] overflow-auto">
+        <a-checkbox-group v-model:value="repoSkillsSelectedKeys" class="w-full">
+          <div class="flex flex-col gap-2">
+            <label
+              v-for="item in repoSkillsCandidates"
+              :key="repoSkillsKey(item.repoId, item.relativePath)"
+              class="border border-[var(--border-color-secondary)] rounded px-2 py-1.5"
+            >
+              <a-checkbox :value="repoSkillsKey(item.repoId, item.relativePath)">
+                {{ item.displayName }}
+              </a-checkbox>
+            </label>
+          </div>
+        </a-checkbox-group>
+      </div>
+    </a-modal>
   </div>
 </template>
 
@@ -400,6 +449,7 @@ import {
   ClockCircleOutlined,
   CloseCircleOutlined,
   CopyOutlined,
+  AppstoreOutlined,
   DoubleRightOutlined,
   ExclamationCircleOutlined,
   ForkOutlined,
@@ -429,9 +479,12 @@ import {
   getAgentContextItem,
   getAgentContextItems,
   revertAgentSession,
-  sendAgentMessage
+  detectWorkspaceRepoSkillsRoots,
+  sendAgentMessage,
+  updateWorkspaceRepoSkillsRootsSettings
 } from "@/shared/api";
 import { getInitialLocale } from "@/shared/i18n/locale";
+
 
 type AgentOption = {
   value: string;
@@ -573,6 +626,13 @@ const stickToBottom = ref(true);
 const userUnfollowed = ref(false);
 const forcedBottomOnFirstActive = ref(false);
 const nowTickMs = ref(Date.now());
+const repoSkillsModalVisible = ref(false);
+const repoSkillsLoading = ref(false);
+const repoSkillsSaving = ref(false);
+const repoSkillsError = ref("");
+const repoSkillsCandidates = ref<Array<{ repoId: string; relativePath: string; displayName: string; enabled: boolean }>>([]);
+const repoSkillsSelectedKeys = ref<string[]>([]);
+
 
 type SavedScrollState = {
   scrollTop: number;
@@ -2297,6 +2357,58 @@ function onRevertToMessage(itemId: number) {
       }
     }
   });
+}
+
+function repoSkillsKey(repoId: string, relativePath: string) {
+  return `${repoId}\u0000${relativePath}`;
+}
+
+async function onOpenRepoSkillsModal() {
+  repoSkillsModalVisible.value = true;
+  repoSkillsLoading.value = true;
+  repoSkillsError.value = "";
+  try {
+    const data = await detectWorkspaceRepoSkillsRoots(props.workspaceId);
+    const items = (data.items || []).map((it) => ({
+      repoId: String(it.repoId || "").trim(),
+      relativePath: String(it.relativePath || "").trim(),
+      displayName: String(it.displayName || "").trim(),
+      enabled: it.enabled === true
+    })).filter((it) => it.repoId && it.relativePath);
+    repoSkillsCandidates.value = items;
+    repoSkillsSelectedKeys.value = items.filter((it) => it.enabled).map((it) => repoSkillsKey(it.repoId, it.relativePath));
+  } catch (err) {
+    repoSkillsCandidates.value = [];
+    repoSkillsSelectedKeys.value = [];
+    repoSkillsError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    repoSkillsLoading.value = false;
+  }
+}
+
+async function onSaveRepoSkillsSettings() {
+  if (repoSkillsLoading.value || repoSkillsError.value) return;
+  if (repoSkillsSaving.value) return;
+  repoSkillsSaving.value = true;
+  repoSkillsError.value = "";
+  try {
+    const selected = new Set(repoSkillsSelectedKeys.value);
+    const enabledRoots = repoSkillsCandidates.value
+      .map((it) => ({
+        repoId: it.repoId,
+        relativePath: it.relativePath,
+        enabled: selected.has(repoSkillsKey(it.repoId, it.relativePath))
+      }))
+      .filter((it) => it.enabled)
+      .map((it) => ({ repoId: it.repoId, relativePath: it.relativePath }));
+    await updateWorkspaceRepoSkillsRootsSettings(props.workspaceId, { enabledRoots });
+    message.success(t("agent.client.repoSkillsSaved"));
+    repoSkillsModalVisible.value = false;
+  } catch (err) {
+    repoSkillsError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    repoSkillsSaving.value = false;
+  }
 }
 
 async function onSend() {

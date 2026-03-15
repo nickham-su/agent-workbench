@@ -1,11 +1,19 @@
 import crypto from "node:crypto";
+import fs from "node:fs/promises";
 import path from "node:path";
 import type { FastifyBaseLogger } from "fastify";
-import type { WorkspaceDetail, WorkspaceRecord } from "@agent-workbench/shared";
+import type {
+  UpdateWorkspaceRepoSkillsRootsSettingsRequest,
+  WorkspaceDetail,
+  WorkspaceRecord,
+  WorkspaceRepoSkillsRootsDetectResponse,
+  WorkspaceRepoSkillsRootsSettingsResponse
+} from "@agent-workbench/shared";
 import { HttpError } from "../../app/errors.js";
 import type { AppContext } from "../../app/context.js";
 import { newId } from "../../utils/ids.js";
 import { nowMs } from "../../utils/time.js";
+import { getSettingJson, setSettingJson } from "../settings/settings.store.js";
 import { getRepo } from "../repos/repo.store.js";
 import { getOriginDefaultBranch, listHeadsBranches } from "../../infra/git/refs.js";
 import { withRepoLock } from "../../infra/locks/repoLock.js";
@@ -37,6 +45,8 @@ import {
 import { tmuxHasSession, tmuxKillSession } from "../../infra/tmux/session.js";
 import { withWorkspaceRepoLock } from "../../infra/locks/workspaceRepoLock.js";
 import { withWorkspaceLock } from "../../infra/locks/workspaceLock.js";
+
+const WORKSPACE_REPO_SKILLS_ROOTS_SETTINGS_KEY = "workspace_repo_skills_roots_v1";
 
 function formatRepoDisplayName(rawUrl: string) {
   let s = String(rawUrl || "").trim();
@@ -586,4 +596,261 @@ export async function deleteWorkspace(ctx: AppContext, logger: FastifyBaseLogger
   deleteWorkspaceReposByWorkspace(ctx.db, ws.id);
   deleteWorkspaceRecord(ctx.db, ws.id);
   logger.info({ workspaceId: ws.id }, "workspace deleted");
+}
+
+type RepoSkillEnabledRoot = {
+  repoId: string;
+  relativePath: string;
+  enabledAt: number;
+};
+
+type RepoSkillSettingsPayload = {
+  workspaces?: Record<string, { enabledRoots?: RepoSkillEnabledRoot[]; updatedAt?: number }>;
+};
+
+function normalizeRelativeRepoPath(raw: string) {
+  const normalized = String(raw || "").trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  if (!normalized || normalized === "." || normalized === "..") return "";
+  const segments = normalized.split("/").filter(Boolean);
+  if (segments.some((seg) => seg === "." || seg === "..")) return "";
+  return segments.join("/");
+}
+
+function normalizeTopLevelSkillRootName(raw: string) {
+  const normalized = normalizeRelativeRepoPath(raw);
+  if (!normalized) return "";
+  if (normalized.includes("/")) return "";
+  if (!normalized.toLowerCase().includes("skill")) return "";
+  return normalized;
+}
+
+function isPathInside(rootPath: string, targetPath: string) {
+  const normalizedRoot = path.resolve(rootPath);
+  const normalizedTarget = path.resolve(targetPath);
+  const withSep = normalizedRoot.endsWith(path.sep) ? normalizedRoot : `${normalizedRoot}${path.sep}`;
+  return normalizedTarget === normalizedRoot || normalizedTarget.startsWith(withSep);
+}
+
+async function resolveWorkspaceRepoBasePath(params: {
+  ctx: AppContext;
+  workspace: Pick<WorkspaceRecord, "id" | "dirName" | "path">;
+  repo: { repoId: string; dirName: string; path: string };
+  logger: FastifyBaseLogger;
+  source: "detect" | "settings";
+}) {
+  const expectedPath = workspaceRepoDirPath(params.ctx.dataDir, params.workspace.dirName, params.repo.dirName);
+  if (path.resolve(params.repo.path) !== path.resolve(expectedPath)) {
+    params.logger.warn(
+      { workspaceId: params.workspace.id, repoId: params.repo.repoId, source: params.source },
+      "skip repo skill roots: workspace repo path mismatch"
+    );
+    return null;
+  }
+  const repoStat = await fs.lstat(params.repo.path).catch((err: any) => {
+    if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return null;
+    throw err;
+  });
+  if (!repoStat || !repoStat.isDirectory() || repoStat.isSymbolicLink()) return null;
+  const [workspaceRealPath, repoRealPath] = await Promise.all([
+    fs.realpath(params.workspace.path).catch((err: any) => {
+      if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return "";
+      throw err;
+    }),
+    fs.realpath(params.repo.path).catch((err: any) => {
+      if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return "";
+      throw err;
+    })
+  ]);
+  if (!workspaceRealPath || !repoRealPath) return null;
+  if (!isPathInside(workspaceRealPath, repoRealPath)) {
+    params.logger.warn(
+      { workspaceId: params.workspace.id, repoId: params.repo.repoId, source: params.source },
+      "skip repo skill roots: workspace repo realpath is outside workspace"
+    );
+    return null;
+  }
+  return params.repo.path;
+}
+
+async function listWorkspaceRepoSkillsCandidates(ctx: AppContext, logger: FastifyBaseLogger, ws: WorkspaceRecord) {
+  const repos = listWorkspaceRepos(ctx.db, ws.id);
+  const candidates: Array<{ repoId: string; repoDirName: string; relativePath: string; displayName: string }> = [];
+  for (const repo of repos) {
+    const repoBasePath = await resolveWorkspaceRepoBasePath({ ctx, workspace: ws, repo, logger, source: "detect" });
+    if (!repoBasePath) continue;
+    let entries: Array<{ name: string; isDirectory: () => boolean; isSymbolicLink: () => boolean }> = [];
+    try {
+      entries = await fs.readdir(repoBasePath, { withFileTypes: true });
+    } catch (err: any) {
+      if (err?.code === "ENOENT" || err?.code === "ENOTDIR") continue;
+      logger.warn({ err, workspaceId: ws.id, repoId: repo.repoId }, "detect repo skills roots failed to list repo path");
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      const relativePath = normalizeTopLevelSkillRootName(String(entry.name || ""));
+      if (!relativePath) continue;
+      candidates.push({ repoId: repo.repoId, repoDirName: repo.dirName, relativePath, displayName: `${repo.dirName}/${relativePath}` });
+    }
+  }
+  candidates.sort((a, b) => (a.displayName === b.displayName ? a.repoId.localeCompare(b.repoId) : a.displayName.localeCompare(b.displayName)));
+  return candidates;
+}
+
+export async function resolveWorkspaceRepoSkillRootPath(params: {
+  ctx: AppContext;
+  workspace: Pick<WorkspaceRecord, "id" | "dirName" | "path">;
+  repo: { repoId: string; dirName: string; path: string };
+  relativePath: string;
+  logger: FastifyBaseLogger;
+  source: "detect" | "settings" | "prompt";
+}) {
+  const normalizedRootName = normalizeTopLevelSkillRootName(params.relativePath);
+  if (!normalizedRootName) return null;
+  const repoBasePath = await resolveWorkspaceRepoBasePath({
+    ctx: params.ctx,
+    workspace: params.workspace,
+    repo: params.repo,
+    logger: params.logger,
+    source: params.source === "prompt" ? "settings" : params.source
+  });
+  if (!repoBasePath) return null;
+  const rootPath = path.join(repoBasePath, normalizedRootName);
+  const rootStat = await fs.lstat(rootPath).catch((err: any) => {
+    if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return null;
+    throw err;
+  });
+  if (!rootStat || !rootStat.isDirectory() || rootStat.isSymbolicLink()) return null;
+  const [repoRealPath, rootRealPath] = await Promise.all([
+    fs.realpath(repoBasePath).catch(() => ""),
+    fs.realpath(rootPath).catch(() => "")
+  ]);
+  if (!repoRealPath || !rootRealPath) return null;
+  if (!isPathInside(repoRealPath, rootRealPath)) {
+    params.logger.warn(
+      { workspaceId: params.workspace.id, repoId: params.repo.repoId, relativePath: normalizedRootName, source: params.source },
+      "skip repo skill root: resolved path outside repo root"
+    );
+    return null;
+  }
+  return rootPath;
+}
+
+function readRepoSkillsSettings(ctx: AppContext): RepoSkillSettingsPayload {
+  const found = getSettingJson(ctx.db, WORKSPACE_REPO_SKILLS_ROOTS_SETTINGS_KEY);
+  const value = found?.value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { workspaces: {} };
+  const workspaces = (value as any).workspaces;
+  if (!workspaces || typeof workspaces !== "object" || Array.isArray(workspaces)) {
+    return { workspaces: {} };
+  }
+  return { workspaces: workspaces as RepoSkillSettingsPayload["workspaces"] };
+}
+
+function persistRepoSkillsSettings(ctx: AppContext, payload: RepoSkillSettingsPayload, updatedAt: number) {
+  setSettingJson(ctx.db, WORKSPACE_REPO_SKILLS_ROOTS_SETTINGS_KEY, payload, updatedAt);
+}
+
+export function listEnabledWorkspaceRepoSkillRoots(ctx: AppContext, workspaceId: string) {
+  const settings = readRepoSkillsSettings(ctx);
+  const workspace = settings.workspaces?.[workspaceId];
+  const entries = Array.isArray(workspace?.enabledRoots) ? workspace.enabledRoots : [];
+  const normalized = new Map<string, RepoSkillEnabledRoot>();
+  for (const it of entries) {
+    const repoId = String(it?.repoId || "").trim();
+    const relativePath = normalizeTopLevelSkillRootName(String(it?.relativePath || ""));
+    if (!repoId || !relativePath) continue;
+    const key = `${repoId}\u0000${relativePath}`;
+    normalized.set(key, {
+      repoId,
+      relativePath,
+      enabledAt: Number.isFinite(Number(it?.enabledAt)) ? Math.floor(Number(it.enabledAt)) : 0
+    });
+  }
+  return [...normalized.values()].sort((a, b) => (a.repoId === b.repoId ? a.relativePath.localeCompare(b.relativePath) : a.repoId.localeCompare(b.repoId)));
+}
+
+export async function detectWorkspaceRepoSkillsRoots(
+  ctx: AppContext,
+  logger: FastifyBaseLogger,
+  workspaceId: string
+): Promise<WorkspaceRepoSkillsRootsDetectResponse> {
+  const ws = await getWorkspaceById(ctx, workspaceId);
+  const enabledSet = new Set(listEnabledWorkspaceRepoSkillRoots(ctx, workspaceId).map((it) => `${it.repoId}\u0000${it.relativePath}`));
+  const items = (await listWorkspaceRepoSkillsCandidates(ctx, logger, ws)).map((item) => ({
+    ...item,
+    enabled: enabledSet.has(`${item.repoId}\u0000${item.relativePath}`)
+  }));
+  return { workspaceId: ws.id, items, updatedAt: nowMs() };
+}
+
+export async function getWorkspaceRepoSkillsRootsSettings(
+  ctx: AppContext,
+  workspaceId: string
+): Promise<WorkspaceRepoSkillsRootsSettingsResponse> {
+  const ws = await getWorkspaceById(ctx, workspaceId);
+  const reposById = new Map(listWorkspaceRepos(ctx.db, ws.id).map((repo) => [repo.repoId, repo] as const));
+  const enabled = listEnabledWorkspaceRepoSkillRoots(ctx, workspaceId);
+  const enabledRoots = enabled
+    .map((it) => {
+      const repo = reposById.get(it.repoId);
+      if (!repo) return null;
+      return {
+        repoId: it.repoId,
+        relativePath: it.relativePath,
+        displayName: `${repo.dirName}/${it.relativePath}`,
+        enabledAt: it.enabledAt || 0
+      };
+    })
+    .filter((it): it is NonNullable<typeof it> => it !== null);
+
+  const settings = readRepoSkillsSettings(ctx);
+  const updatedAt = Number(settings.workspaces?.[ws.id]?.updatedAt || 0) || 0;
+  return { workspaceId: ws.id, enabledRoots, updatedAt };
+}
+
+export async function updateWorkspaceRepoSkillsRootsSettings(
+  ctx: AppContext,
+  logger: FastifyBaseLogger,
+  workspaceId: string,
+  payload: UpdateWorkspaceRepoSkillsRootsSettingsRequest
+): Promise<WorkspaceRepoSkillsRootsSettingsResponse> {
+  const ws = await getWorkspaceById(ctx, workspaceId);
+  const reposById = new Map(listWorkspaceRepos(ctx.db, ws.id).map((repo) => [repo.repoId, repo] as const));
+  const candidateSet = new Set((await listWorkspaceRepoSkillsCandidates(ctx, logger, ws)).map((it) => `${it.repoId}\u0000${it.relativePath}`));
+  const now = nowMs();
+
+  const deduped = new Map<string, RepoSkillEnabledRoot>();
+  for (const item of payload.enabledRoots || []) {
+    const repoId = String(item?.repoId || "").trim();
+    const relativePath = normalizeTopLevelSkillRootName(String(item?.relativePath || ""));
+    const repo = repoId ? reposById.get(repoId) : null;
+    const validRootPath = repo
+      ? await resolveWorkspaceRepoSkillRootPath({ ctx, workspace: ws, repo, relativePath, logger, source: "settings" })
+      : null;
+    if (!repo || !relativePath || !validRootPath || !candidateSet.has(`${repoId}\u0000${relativePath}`)) {
+      throw new HttpError(
+        400,
+        `invalid repo skills root: ${repoId}/${relativePath}`,
+        "WORKSPACE_REPO_SKILLS_ROOT_INVALID"
+      );
+    }
+    deduped.set(`${repoId}\u0000${relativePath}`, { repoId, relativePath, enabledAt: now });
+  }
+
+  const settings = readRepoSkillsSettings(ctx);
+  const workspaces = { ...(settings.workspaces || {}) };
+  workspaces[ws.id] = {
+    enabledRoots: [...deduped.values()].sort((a, b) => (a.repoId === b.repoId ? a.relativePath.localeCompare(b.relativePath) : a.repoId.localeCompare(b.repoId))),
+    updatedAt: now
+  };
+  persistRepoSkillsSettings(ctx, { workspaces }, now);
+
+  const enabledRoots = [...deduped.values()].map((it) => ({
+    repoId: it.repoId,
+    relativePath: it.relativePath,
+    displayName: `${reposById.get(it.repoId)?.dirName || it.repoId}/${it.relativePath}`,
+    enabledAt: it.enabledAt
+  }));
+  return { workspaceId: ws.id, enabledRoots, updatedAt: now };
 }

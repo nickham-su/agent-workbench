@@ -29,7 +29,8 @@ import { HttpError } from "../../app/errors.js";
 import type { AppContext } from "../../app/context.js";
 import { nowMs } from "../../utils/time.js";
 import { newSortableId } from "../../utils/ids.js";
-import { getWorkspace, listRecentWorkspaces } from "../workspaces/workspace.store.js";
+import { getWorkspace, listRecentWorkspaces, listWorkspaceRepos } from "../workspaces/workspace.store.js";
+import { listEnabledWorkspaceRepoSkillRoots, resolveWorkspaceRepoSkillRootPath } from "../workspaces/workspace.service.js";
 import {
   agentArchiveSessionDir,
   applyPatchUiArtifactPath,
@@ -1742,6 +1743,7 @@ type RunPromptStatic = {
     description: string;
     inputSchema: Record<string, unknown>;
   }>;
+  repoSkillRoots: Array<{ repoId: string; rootDir: string; rootPath: string }>;
 };
 
 function parseSkillFrontmatter(text: string): { name: string; description: string } {
@@ -1768,8 +1770,9 @@ function parseSkillFrontmatter(text: string): { name: string; description: strin
 
 async function scanTopLevelSkillSummaries(params: {
   rootPath: string;
-  idPrefix: "builtin" | "ws";
+  idPrefix: "builtin" | "ws" | "repo";
   logger: FastifyBaseLogger;
+  idBasePath?: string;
 }) {
   const rootEntries = await fs.readdir(params.rootPath, { withFileTypes: true }).catch((err: any) => {
     if (err?.code === "ENOENT") return [] as Awaited<ReturnType<typeof fs.readdir>>;
@@ -1797,8 +1800,9 @@ async function scanTopLevelSkillSummaries(params: {
       continue;
     }
     const parsed = parseSkillFrontmatter(text);
+    const base = params.idBasePath ? `${params.idBasePath}/` : "";
     items.push({
-      id: `${params.idPrefix}/${entryName}`,
+      id: `${params.idPrefix}/${base}${entryName}`,
       name: parsed.name || entryName,
       description: parsed.description || ""
     });
@@ -1809,10 +1813,11 @@ async function scanTopLevelSkillSummaries(params: {
 function buildSkillsInstructionSection(input: {
   builtin: SkillSummaryItem[];
   workspace: SkillSummaryItem[];
+  repo: SkillSummaryItem[];
 }) {
   const lines: string[] = [];
   lines.push("Use the builtin skill tool to load details on demand by id.");
-  lines.push("Never reveal filesystem paths; use only logical ids (builtin/... or ws/...).");
+  lines.push("Never reveal filesystem paths; use only logical ids (builtin/... or ws/... or repo/...).");
   lines.push("");
   lines.push("Top-level builtin skills:");
   if (input.builtin.length === 0) {
@@ -1828,6 +1833,15 @@ function buildSkillsInstructionSection(input: {
     lines.push("- (none)");
   } else {
     for (const item of input.workspace) {
+      lines.push(`- id: ${item.id}; name: ${item.name}; description: ${item.description}`);
+    }
+  }
+  lines.push("");
+  lines.push("Top-level enabled repo skills:");
+  if (input.repo.length === 0) {
+    lines.push("- (none)");
+  } else {
+    for (const item of input.repo) {
       lines.push(`- id: ${item.id}; name: ${item.name}; description: ${item.description}`);
     }
   }
@@ -4387,6 +4401,39 @@ export class AgentService {
             })
           ]);
 
+          const workspaceRepos = listWorkspaceRepos(this.ctx.db, workspace.id);
+          const repoById = new Map(workspaceRepos.map((repo) => [repo.repoId, repo] as const));
+          const enabledRepoRoots = listEnabledWorkspaceRepoSkillRoots(this.ctx, workspace.id);
+          const repoSkillRoots: Array<{ repoId: string; rootDir: string; rootPath: string }> = [];
+          const repoSkills: SkillSummaryItem[] = [];
+
+          for (const root of enabledRepoRoots) {
+            const repo = repoById.get(root.repoId);
+            if (!repo) continue;
+            const rootPath = await resolveWorkspaceRepoSkillRootPath({
+              ctx: this.ctx,
+              workspace,
+              repo,
+              relativePath: root.relativePath,
+              logger: this.logger,
+              source: "prompt"
+            });
+            if (!rootPath) continue;
+
+            repoSkillRoots.push({ repoId: root.repoId, rootDir: root.relativePath, rootPath });
+            const scanned = await scanTopLevelSkillSummaries({
+              rootPath,
+              idPrefix: "repo",
+              idBasePath: `${root.repoId}/${root.relativePath}`,
+              logger: this.logger
+            }).catch((err) => {
+              this.logger.warn({ err, workspaceId: workspace.id, repoId: root.repoId }, "scan repo skill roots failed");
+              return [] as SkillSummaryItem[];
+            });
+            repoSkills.push(...scanned);
+          }
+          repoSkills.sort((a, b) => a.id.localeCompare(b.id));
+
           const baselineToolNames = ["read", "todolist", "archive_search", "archive_read", "scratchpad", "skill"] as const;
           const enabledToolNames: string[] = [];
           const enabledToolNameSet = new Set<string>();
@@ -4419,14 +4466,15 @@ export class AgentService {
               globalPrompts: globalPrompts.items,
               outputFormatInstruction: buildOutputFormatInstruction({ uiLocale: run.uiLocale }),
               workspaceInstructions,
-              skillsInstruction: buildSkillsInstructionSection({ builtin: builtinSkills, workspace: workspaceSkills })
+              skillsInstruction: buildSkillsInstructionSection({ builtin: builtinSkills, workspace: workspaceSkills, repo: repoSkills })
             }),
 
             tools: enabledToolNames.map((name) => ({
               name,
               description: toolDescription(name, { subtaskDescription }),
               inputSchema: toolArgsSchema(name)
-            }))
+            })),
+            repoSkillRoots
           };
         })();
     this.runPromptStaticCache.set(params.runId, {
@@ -4475,7 +4523,8 @@ export class AgentService {
       tools,
       pendingTools,
       lastResponseTotalTokens: runState.lastResponseTotalTokens,
-      uiLocale: normalizeAgentUiLocale(run.uiLocale)
+      uiLocale: normalizeAgentUiLocale(run.uiLocale),
+      repoSkillRoots: staticPrompt.repoSkillRoots
     };
   }
 

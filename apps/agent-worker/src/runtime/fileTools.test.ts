@@ -298,6 +298,49 @@ test("skill 对非法 id 仍返回明确校验错误", async () => {
 
   await assert.rejects(
     () => runSkillTool({ workspacePath, repoRoot, id: "bad-id" }),
-    /skill.id must start with builtin\/ or ws\//
+    /skill.id must start with builtin\/ or ws\/ or repo\//
   );
+});
+
+test("skill 支持 repo 命名空间目录与文件读取", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  const repoSkillRoot = path.join(workspacePath, "repo-a", "ai-skills");
+  await fs.mkdir(path.join(repoSkillRoot, "child"), { recursive: true });
+  await fs.writeFile(
+    path.join(repoSkillRoot, "SKILL.md"),
+    "---\nname: Repo Skill\ndescription: Repo desc\n---\n\nrepo body",
+    "utf8"
+  );
+  await fs.writeFile(path.join(repoSkillRoot, "child", "SKILL.md"), "---\nname: Child\n---\n", "utf8");
+  await fs.writeFile(path.join(repoSkillRoot, "guide.txt"), "repo guide", "utf8");
+
+  const rootResult = await runSkillTool({
+    workspacePath,
+    repoRoot,
+    id: "repo/repo-a/ai-skills",
+    repoSkillRoots: [{ repoId: "repo-a", rootDir: "ai-skills", rootPath: repoSkillRoot }]
+  });
+  assert.equal(rootResult.type, "skill");
+  assert.equal(rootResult.id, "repo/repo-a/ai-skills");
+  assert.equal(rootResult.name, "Repo Skill");
+  assert.deepEqual(
+    rootResult.children.map((it) => it.id),
+    ["repo/repo-a/ai-skills/child", "repo/repo-a/ai-skills/guide.txt"]
+  );
+
+  const fileResult = await runSkillTool({
+    workspacePath,
+    repoRoot,
+    id: "repo/repo-a/ai-skills/guide.txt",
+    repoSkillRoots: [{ repoId: "repo-a", rootDir: "ai-skills", rootPath: repoSkillRoot }]
+  });
+  assert.equal(fileResult.type, "file");
+  assert.equal(fileResult.content, "repo guide");
+});
+
+test("skill 在 repo 映射缺失时返回脱敏错误", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  await assert.rejects(() => runSkillTool({ workspacePath, repoRoot, id: "repo/repo-a/ai-skills" }), /skill node not found/);
 });
