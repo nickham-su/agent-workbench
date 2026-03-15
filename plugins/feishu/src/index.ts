@@ -769,15 +769,30 @@ function createGateway(params: GatewayStartParams): FeishuGateway {
         await replyText(ctx.chatId, ctx.messageId, "请先使用 /ss 绑定会话");
         return;
       }
-      const result = await client.post(`/api/agent/sessions/${encodeURIComponent(sessionId)}/compact`, {
-        workspaceId,
-        clientRequestId: `im_feishu_${buildChatKey(ctx.chatId)}_${ctx.messageId}_compact`,
-        ...(normalizeText(binding?.agentId) ? { agentId: normalizeText(binding?.agentId) } : {})
-      });
-      if (result?.scheduled) {
-        await replyText(ctx.chatId, ctx.messageId, "已触发 compact，正在处理…");
-      } else {
-        await replyText(ctx.chatId, ctx.messageId, "compact 已受理");
+      try {
+        const result = await client.post(`/api/agent/sessions/${encodeURIComponent(sessionId)}/compact`, {
+          workspaceId,
+          clientRequestId: `im_feishu_${buildChatKey(ctx.chatId)}_${ctx.messageId}_compact`,
+          ...(normalizeText(binding?.agentId) ? { agentId: normalizeText(binding?.agentId) } : {})
+        });
+        if (result?.scheduled) {
+          await replyText(ctx.chatId, ctx.messageId, "已触发 compact，正在处理…");
+        } else {
+          await replyText(ctx.chatId, ctx.messageId, "compact 已受理");
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const statusCode = typeof (err as any)?.statusCode === "number" ? Number((err as any).statusCode) : 0;
+        logger.warn(`[feishu] compact command failed: ${message}`);
+        if (statusCode === 404) {
+          await replyText(ctx.chatId, ctx.messageId, "compact 失败：会话或工作区不存在，请重新 /ss 绑定后再试");
+        } else if (statusCode === 409) {
+          await replyText(ctx.chatId, ctx.messageId, "compact 失败：当前会话正在运行，请稍后再试");
+        } else if (statusCode === 503) {
+          await replyText(ctx.chatId, ctx.messageId, "compact 失败：服务暂不可用，请稍后再试");
+        } else {
+          await replyText(ctx.chatId, ctx.messageId, `compact 失败：${message || "未知错误"}`);
+        }
       }
       return;
     }
