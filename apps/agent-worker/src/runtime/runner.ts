@@ -1302,6 +1302,21 @@ export class AgentRunner {
     return lastTotalTokens >= threshold;
   }
 
+  protected async generateSingleCallSummary(params: {
+    profile: {
+      provider: ExecutionProfile["provider"];
+      model: ExecutionProfile["model"];
+    };
+    input: {
+      messages: Array<{ role: string; content: unknown }>;
+      system?: string;
+      timeoutMs: number;
+      abortSignal: AbortSignal;
+    };
+  }) {
+    return generateSingleCallText(params.profile, params.input);
+  }
+
   protected async generateCompactionSummary(params: {
     profile: ExecutionProfile;
     context: PromptContext;
@@ -1315,18 +1330,19 @@ export class AgentRunner {
         content: buildCompactionUserPrompt({ uiLocale: params.context.uiLocale })
       }
     });
-    const response = await generateSingleCallText(
-      {
+    const response = await this.generateSingleCallSummary({
+      profile: {
         provider: params.profile.provider,
         model: params.profile.model
       },
-      {
-        // compaction 是内部摘要任务，不继承执行态 system prompt；同时不提供 tools。
+      input: {
+        // compaction 是内部摘要任务，不继承执行态完整 system prompt；使用 messages-context 提供的 one-shot system。
+        system: messagesContext.system,
         messages: messagesContext.messages,
         timeoutMs: COMPACTION_TIMEOUT_MS,
         abortSignal: params.signal
       }
-    );
+    });
     return String(response.text || "").trim();
   }
 

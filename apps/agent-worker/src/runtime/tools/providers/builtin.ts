@@ -140,6 +140,21 @@ export class BuiltinToolProvider implements ToolProvider {
     return ctx.profile.agent.tools.includes(toolName as BuiltinToolName);
   }
 
+  protected async generateSingleCallSummary(params: {
+    profile: {
+      provider: ToolExecutionContext["profile"]["provider"];
+      model: ToolExecutionContext["profile"]["model"];
+    };
+    input: {
+      messages: Array<{ role: string; content: unknown }>;
+      system?: string;
+      timeoutMs: number;
+      abortSignal: AbortSignal;
+    };
+  }) {
+    return generateSingleCallText(params.profile, params.input);
+  }
+
   async execute(toolName: string, args: Record<string, unknown>, ctx: ToolExecutionContext): Promise<unknown> {
     switch (toolName) {
       case "bash": {
@@ -330,17 +345,19 @@ export class BuiltinToolProvider implements ToolProvider {
                 }
               });
 
-              const summary = await generateSingleCallText(
-                {
+              const summary = await this.generateSingleCallSummary({
+                profile: {
                   provider: ctx.profile.provider,
                   model: ctx.profile.model
                 },
-                {
+                input: {
+                  // subtask prefork 是 one-shot 摘要任务，使用 messages-context 提供的通用最小 system。
+                  system: messagesContext.system,
                   messages: messagesContext.messages,
                   timeoutMs: COMPACTION_TIMEOUT_MS,
                   abortSignal: ctx.signal
                 }
-              );
+              });
               const summaryText = String(summary.text || "").trim();
               if (summaryText) {
                 preforkSummaryText = summaryText;

@@ -46,6 +46,8 @@ import {
   getAgentSession,
   getContextItemById,
   getLatestCompletedAssistantTextByRunId,
+  getLatestRunUiLocaleBySession,
+  getLatestRunUiLocaleGlobal,
   getLatestTerminalAssistantTextByRunId,
   getLatestTerminalRunRecord,
   getLatestSessionItemId,
@@ -907,6 +909,32 @@ function buildOutputFormatInstruction(input: { uiLocale: AgentUiLocale | null })
   ].join("\n");
 }
 
+function buildLanguageInstruction(input: { uiLocale: AgentUiLocale | null }) {
+  if (input.uiLocale === "zh-CN") {
+    return [
+      "语言要求：本轮对话请统一使用简体中文。",
+      "对用户的回答使用简体中文。",
+      "内部思考/推理文本使用简体中文。",
+      "若调用 todolist，其中的 goal 与 todos[].content 必须使用简体中文。",
+      "代码、命令、路径、接口名、配置键名、报错原文等需要保真的内容可保持原样，不必翻译。"
+    ].join("\n");
+  }
+  if (input.uiLocale === "en-US") {
+    return [
+      "Language requirement: use English consistently for this run.",
+      "Respond to the user in English.",
+      "Use English for internal reasoning/thought text.",
+      "If you call todolist, the goal and todos[].content must also be in English.",
+      "Code, commands, paths, API names, config keys, and original error messages may remain verbatim when needed."
+    ].join("\n");
+  }
+  return "";
+}
+
+function buildOneShotSystemPrompt(input: { uiLocale: AgentUiLocale | null }) {
+  return buildLanguageInstruction(input);
+}
+
 function buildRuntimeInstruction(input: { uiLocale: AgentUiLocale | null; now: Date }) {
   const timeText = formatRuntimeDateTime(input.now);
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -917,28 +945,14 @@ function buildRuntimeInstruction(input: { uiLocale: AgentUiLocale | null; now: D
     lines.push(...group);
   };
 
+  const languageInstruction = buildLanguageInstruction({ uiLocale: input.uiLocale });
+  if (languageInstruction) pushGroup(languageInstruction.split("\n"));
   if (input.uiLocale === "zh-CN") {
-    pushGroup([
-      "语言要求：本轮对话请统一使用简体中文。",
-      "对用户的回答使用简体中文。",
-      "内部思考/推理文本使用简体中文。",
-      "若调用 todolist，其中的 goal 与 todos[].content 必须使用简体中文。",
-      "代码、命令、路径、接口名、配置键名、报错原文等需要保真的内容可保持原样，不必翻译。"
-    ]);
     pushGroup([
       `当前系统时间：${timeText}`,
       `当前时区：${timeZone}`
     ]);
   } else {
-    if (input.uiLocale === "en-US") {
-      pushGroup([
-        "Language requirement: use English consistently for this run.",
-        "Respond to the user in English.",
-        "Use English for internal reasoning/thought text.",
-        "If you call todolist, the goal and todos[].content must also be in English.",
-        "Code, commands, paths, API names, config keys, and original error messages may remain verbatim when needed."
-      ]);
-    }
     pushGroup([
       `Current system time: ${timeText}`,
       `Time zone: ${timeZone}`
@@ -4112,6 +4126,22 @@ export class AgentService {
     return { messages, visible };
   }
 
+  private resolveUiLocaleForSessionContext(params: {
+    workspaceId: string;
+    sessionId: string;
+    activeRunId: string | null;
+  }): AgentUiLocale | null {
+    const activeRunUiLocale = params.activeRunId
+      ? normalizeAgentUiLocale(getRunRecord(this.ctx.db, params.activeRunId)?.uiLocale ?? null)
+      : null;
+    const sessionLatestRunUiLocale = getLatestRunUiLocaleBySession(this.ctx.db, {
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId
+    });
+    const globalLatestRunUiLocale = getLatestRunUiLocaleGlobal(this.ctx.db);
+    return activeRunUiLocale ?? sessionLatestRunUiLocale ?? globalLatestRunUiLocale;
+  }
+
   async getMessagesContext(params: {
     workspaceId: string;
     sessionId: string;
@@ -4127,10 +4157,14 @@ export class AgentService {
       // messages-context 是通用 messages 视图，不应隐式依赖 active run 的 uiLocale；此处固定为 null。
       compactionSnippetUiLocale: null
     });
+    const runState = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
+    const uiLocale = this.resolveUiLocaleForSessionContext({ workspaceId: params.workspaceId, sessionId: params.sessionId, activeRunId: runState.activeRunId });
+    const system = buildOneShotSystemPrompt({ uiLocale });
+
     if (params.appendMessage && params.appendMessage.content.trim()) {
       messages.push({ role: params.appendMessage.role, content: params.appendMessage.content });
     }
-    return { headItemId: session.headItemId, messages };
+    return { headItemId: session.headItemId, messages, system };
   }
 
   async archiveReadFromWorker(params: {
@@ -4208,6 +4242,13 @@ export class AgentService {
       providerIdFromRun: run.providerId,
       modelIdFromRun: run.modelId
     });
+    const runState = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
+    const uiLocale = this.resolveUiLocaleForSessionContext({
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+      activeRunId: runState.activeRunId
+    });
+
     const globalPrompts = getAgentGlobalPromptSettings(this.ctx);
     const workspaceInstructions = await readWorkspaceAgentsInstructions(workspace.path, this.logger);
     const system = buildSystemPrompt({
@@ -4215,16 +4256,16 @@ export class AgentService {
       agentPrompt: profile.agent.prompt || "",
       agentGlobalPromptIds: Array.isArray(profile.agent.globalPromptIds) ? profile.agent.globalPromptIds : [],
       globalPrompts: globalPrompts.items,
-      outputFormatInstruction: buildOutputFormatInstruction({ uiLocale: run.uiLocale }),
+      outputFormatInstruction: buildOutputFormatInstruction({ uiLocale }),
       workspaceInstructions,
-      runtimeInstruction: buildRuntimeInstruction({ uiLocale: run.uiLocale, now: new Date() })
+      runtimeInstruction: buildRuntimeInstruction({ uiLocale, now: new Date() })
     });
 
     const visible = getSessionVisibleItems(this.ctx.db, params.workspaceId, params.sessionId);
     const { messages } = await this.buildPromptMessagesForSession({
       workspaceId: params.workspaceId,
       sessionId: params.sessionId,
-      compactionSnippetUiLocale: normalizeAgentUiLocale(run.uiLocale)
+      compactionSnippetUiLocale: uiLocale
     });
 
     const baselineToolNames = ["read", "todolist", "archive_search", "archive_read", "scratchpad"] as const;
@@ -4280,7 +4321,6 @@ export class AgentService {
         args: Record<string, unknown>;
       } => item !== null);
 
-    const runState = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
     return {
       headItemId: session.headItemId,
       system,
@@ -4288,7 +4328,7 @@ export class AgentService {
       tools,
       pendingTools,
       lastResponseTotalTokens: runState.lastResponseTotalTokens,
-      uiLocale: normalizeAgentUiLocale(run.uiLocale)
+      uiLocale
     };
   }
 

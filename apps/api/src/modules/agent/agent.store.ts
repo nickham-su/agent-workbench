@@ -1610,6 +1610,12 @@ export function createRunRecord(db: Db, params: {
   });
 }
 
+function normalizeRunUiLocale(raw: unknown): AgentUiLocale | null {
+  const value = String(raw || "").trim();
+  if (value === "zh-CN" || value === "en-US") return value;
+  return null;
+}
+
 export function getRunRecord(db: Db, runId: string) {
   const row = db
     .prepare(
@@ -1634,9 +1640,44 @@ export function getRunRecord(db: Db, runId: string) {
   return row ? { ...row, status: normalizeRunRecordStatus(row.status) } : null;
 }
 
+export function getLatestRunUiLocaleBySession(db: Db, params: { workspaceId: string; sessionId: string }): AgentUiLocale | null {
+  const row = db
+    .prepare(
+      `
+        select ui_locale as uiLocale
+        from agent_run
+        where workspace_id = ?
+          and session_id = ?
+          and ui_locale is not null
+        order by updated_at desc, created_at desc
+        limit 1
+      `
+    )
+    .get(params.workspaceId, params.sessionId) as { uiLocale: unknown } | undefined;
+  if (!row) return null;
+  return normalizeRunUiLocale(row.uiLocale);
+}
+
+export function getLatestRunUiLocaleGlobal(db: Db): AgentUiLocale | null {
+  const row = db
+    .prepare(
+      `
+        select ui_locale as uiLocale
+        from agent_run
+        where ui_locale is not null
+        order by updated_at desc, created_at desc
+        limit 1
+      `
+    )
+    .get() as { uiLocale: unknown } | undefined;
+  if (!row) return null;
+  return normalizeRunUiLocale(row.uiLocale);
+}
+
 export function getLatestTerminalRunRecord(db: Db, params: { workspaceId: string; sessionId: string }): (AgentRunRecord & {
   status: "completed" | "failed" | "cancelled";
 }) | null {
+
   const row = db
     .prepare(
       `

@@ -1311,6 +1311,7 @@ export async function registerAgentRoutes(
         response: {
           200: Type.Object({
             headItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
+            system: Type.String(),
             messages: Type.Array(
               Type.Object({
                 role: Type.Union([Type.Literal("system"), Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool")]),
