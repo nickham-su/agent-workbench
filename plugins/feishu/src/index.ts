@@ -150,8 +150,13 @@ function formatDurationMs(ms: number) {
   return `${minutes}min ${seconds}s`;
 }
 
-function formatInteger(value: number) {
-  return Math.max(0, Math.floor(value)).toLocaleString("en-US");
+function formatTokensK(value: number) {
+  const n = Math.max(0, Math.floor(value));
+  if (n === 0) return "0k";
+  const k = n / 1000;
+  if (k < 0.1) return "<0.1k";
+  if (k >= 100) return `${Math.round(k)}k`;
+  return `${k.toFixed(1).replace(/\.0$/, "")}k`;
 }
 
 function formatTokenUsageLine(summary: any) {
@@ -168,13 +173,13 @@ function formatTokenUsageLine(summary: any) {
   if (usedTokens !== null && windowTokens !== null) {
     const pct = ratio !== null ? ratio * 100 : (usedTokens / windowTokens) * 100;
     const pctText = `${Math.round(pct)}%`;
-    return `总Tokens：${formatInteger(usedTokens)} / ${formatInteger(windowTokens)}（${pctText}）`;
+    return `总Tokens：${formatTokensK(usedTokens)} / ${formatTokensK(windowTokens)}（${pctText}）`;
   }
   if (usedTokens !== null) {
-    return `总Tokens：${formatInteger(usedTokens)}`;
+    return `总Tokens：${formatTokensK(usedTokens)}`;
   }
   if (windowTokens !== null) {
-    return `模型 Token 上限：${formatInteger(windowTokens)}`;
+    return `模型 Token 上限：${formatTokensK(windowTokens)}`;
   }
   return "";
 }
