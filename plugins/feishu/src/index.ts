@@ -150,6 +150,35 @@ function formatDurationMs(ms: number) {
   return `${minutes}min ${seconds}s`;
 }
 
+function formatInteger(value: number) {
+  return Math.max(0, Math.floor(value)).toLocaleString("en-US");
+}
+
+function formatTokenUsageLine(summary: any) {
+  const usedTokens = typeof summary?.runState?.lastResponseTotalTokens === "number" && Number.isFinite(summary.runState.lastResponseTotalTokens)
+    ? Math.max(0, Math.floor(summary.runState.lastResponseTotalTokens))
+    : null;
+  const windowTokens = typeof summary?.contextWindowTokens === "number" && Number.isFinite(summary.contextWindowTokens)
+    ? Math.max(1, Math.floor(summary.contextWindowTokens))
+    : null;
+  const ratio = typeof summary?.contextTokenRatio === "number" && Number.isFinite(summary.contextTokenRatio)
+    ? Math.max(0, summary.contextTokenRatio)
+    : null;
+
+  if (usedTokens !== null && windowTokens !== null) {
+    const pct = ratio !== null ? ratio * 100 : (usedTokens / windowTokens) * 100;
+    const pctText = `${Math.round(pct)}%`;
+    return `总Tokens：${formatInteger(usedTokens)} / ${formatInteger(windowTokens)}（${pctText}）`;
+  }
+  if (usedTokens !== null) {
+    return `总Tokens：${formatInteger(usedTokens)}`;
+  }
+  if (windowTokens !== null) {
+    return `模型 Token 上限：${formatInteger(windowTokens)}`;
+  }
+  return "";
+}
+
 function buildStatusText(summary: any, policy: string) {
   const sessionTitle = normalizeText(summary?.session?.title) || "未命名会话";
   const sessionId = normalizeText(summary?.session?.id);
@@ -183,6 +212,10 @@ function buildStatusText(summary: any, policy: string) {
     if (lastRunDurationMs !== null) {
       lines.push(`上次运行时长：${formatDurationMs(lastRunDurationMs)}`);
     }
+  }
+  const tokenUsageLine = formatTokenUsageLine(summary);
+  if (tokenUsageLine) {
+    lines.push(tokenUsageLine);
   }
   return lines.join("\n");
 }
