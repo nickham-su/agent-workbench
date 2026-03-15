@@ -81,6 +81,7 @@ export const BUILTIN_TOOL_NAMES = [
   "todolist",
   "subtask",
   "archive_search",
+  "skill",
   "archive_read"
 ] as const;
 

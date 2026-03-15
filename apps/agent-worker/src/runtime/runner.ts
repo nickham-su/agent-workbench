@@ -275,6 +275,40 @@ function buildToolSuccessText(params: {
     });
   }
 
+  if (params.toolName === "skill") {
+    const id = typeof resultObj?.id === "string" ? resultObj.id : (typeof params.args.id === "string" ? params.args.id : undefined);
+    const type = typeof resultObj?.type === "string" ? resultObj.type : undefined;
+    const truncated = resultObj?.truncated === true;
+    if (type === "file") {
+      const content = typeof resultObj?.content === "string" ? resultObj.content : "";
+      return buildToolText({
+        toolName: params.toolName,
+        status: params.status,
+        headers: [["id", id], ["type", "file"], ["truncated", truncated ? "true" : undefined]],
+        body: content || "(empty file content)"
+      });
+    }
+
+    const name = typeof resultObj?.name === "string" ? resultObj.name : "";
+    const description = typeof resultObj?.description === "string" ? resultObj.description : "";
+    const children = Array.isArray(resultObj?.children) ? resultObj.children : [];
+    const lines: string[] = [];
+    if (name) lines.push(`name: ${name}`);
+    if (description) lines.push(`description: ${description}`);
+    if (children.length === 0) {
+      lines.push("children:\n- (none)");
+    } else {
+      lines.push("children:");
+      for (const child of children) {
+        const c = toRecordObject(child);
+        lines.push(`- id: ${String(c?.id || "")}; type: ${String(c?.type || "")}; name: ${String(c?.name || "")}`);
+      }
+    }
+    const content = typeof resultObj?.content === "string" ? resultObj.content : "";
+    const body = `${lines.join("\n")}\n\n${content || "(empty skill content)"}`.trim();
+    return buildToolText({ toolName: params.toolName, status: params.status, headers: [["id", id], ["type", "skill"], ["truncated", truncated ? "true" : undefined]], body });
+  }
+
   if (params.toolName === "bash") {
     const command = typeof resultObj?.command === "string" ? resultObj.command : "";
     const exitCode = toIntOrNull(resultObj?.exitCode);

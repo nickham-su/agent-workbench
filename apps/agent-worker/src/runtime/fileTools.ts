@@ -426,6 +426,142 @@ async function readWriteBeforeSide(filePath: string, maxBytes: number): Promise<
   }
 }
 
+type ReadTextCappedResult = {
+  lines: string[];
+  truncatedByBytes: boolean;
+  hasMoreLines: boolean;
+  totalLines: number;
+};
+
+type ReadTextFileCappedParams = {
+  fullPath: string;
+  encoding: SampleEncoding;
+  signal?: AbortSignal;
+};
+
+type SkillNodeChild = {
+  id: string;
+  type: "file" | "skill";
+  name: string;
+  description?: string;
+};
+
+type SkillFrontmatter = {
+  name: string;
+  description: string;
+  body: string;
+};
+
+function parseSkillFrontmatter(text: string): SkillFrontmatter {
+  const raw = String(text || "");
+  if (!raw.startsWith("---\n")) {
+    return { name: "", description: "", body: raw };
+  }
+  const end = raw.indexOf("\n---\n", 4);
+  if (end < 0) {
+    return { name: "", description: "", body: raw };
+  }
+  const yaml = raw.slice(4, end);
+  const body = raw.slice(end + "\n---\n".length);
+  let name = "";
+  let description = "";
+  for (const line of yaml.split(/\r?\n/)) {
+    const idx = line.indexOf(":");
+    if (idx <= 0) continue;
+    const key = line.slice(0, idx).trim().toLowerCase();
+    let value = line.slice(idx + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (key === "name" && !name) name = value;
+    if (key === "description" && !description) description = value;
+  }
+  return { name, description, body };
+}
+
+async function readTextFileCapped(params: ReadTextFileCappedParams): Promise<ReadTextCappedResult> {
+  const { fullPath, encoding, signal } = params;
+  const raw: string[] = [];
+  const decoder = createStreamingDecoder(encoding);
+  const chunkSize = 64 * 1024;
+  const handle = await fs.open(fullPath, "r");
+  const buffer = Buffer.alloc(chunkSize);
+  let pending = "";
+  let bytes = 0;
+  let truncatedByBytes = false;
+  let lines = 0;
+  let hasMoreLines = false;
+  let pendingEndedWithCr = false;
+
+  const consumeText = (text: string, flush = false) => {
+    let normalized = text;
+    if (pendingEndedWithCr) {
+      if (normalized.startsWith("\n")) {
+        normalized = normalized.slice(1);
+      }
+      pending += "\n";
+      pendingEndedWithCr = false;
+    }
+    if (!flush && normalized.endsWith("\r")) {
+      normalized = normalized.slice(0, -1);
+      pendingEndedWithCr = true;
+    }
+    pending += normalized.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    while (true) {
+      const idx = pending.indexOf("\n");
+      if (idx < 0) break;
+      const lineText = pending.slice(0, idx);
+      pending = pending.slice(idx + 1);
+      lines += 1;
+      const line = lineText.length > MAX_LINE_LENGTH ? lineText.slice(0, MAX_LINE_LENGTH) + MAX_LINE_SUFFIX : lineText;
+      const size = Buffer.byteLength(line, "utf8") + (raw.length > 0 ? 1 : 0);
+      if (bytes + size > MAX_BYTES) {
+        truncatedByBytes = true;
+        hasMoreLines = true;
+        return false;
+      }
+      raw.push(line);
+      bytes += size;
+    }
+    if (flush && pending.length > 0) {
+      if (pendingEndedWithCr) {
+        pending += "\n";
+        pendingEndedWithCr = false;
+      }
+      lines += 1;
+      const line = pending.length > MAX_LINE_LENGTH ? pending.slice(0, MAX_LINE_LENGTH) + MAX_LINE_SUFFIX : pending;
+      const size = Buffer.byteLength(line, "utf8") + (raw.length > 0 ? 1 : 0);
+      if (bytes + size > MAX_BYTES) {
+        truncatedByBytes = true;
+        hasMoreLines = true;
+        pending = "";
+        return false;
+      }
+      raw.push(line);
+      bytes += size;
+      pending = "";
+    }
+    return true;
+  };
+
+  try {
+    while (true) {
+      throwIfAborted(signal);
+      const { bytesRead } = await handle.read(buffer, 0, chunkSize, null);
+      if (bytesRead <= 0) break;
+      const chunkText = decoder.write(buffer.subarray(0, bytesRead));
+      if (!consumeText(chunkText, false)) break;
+    }
+    if (!truncatedByBytes) {
+      consumeText(decoder.end(), true);
+    }
+  } finally {
+    await handle.close();
+  }
+
+  return { lines: raw, truncatedByBytes, hasMoreLines, totalLines: lines };
+}
+
 export async function runReadTool(params: {
   workspacePath: string;
   filePath: string;
@@ -612,6 +748,144 @@ export async function runReadTool(params: {
     eof: offsetOutOfRange || (!truncatedByBytes && !hasMoreLines),
     offsetOutOfRange
   };
+}
+
+function sanitizeSkillToolError(err: unknown) {
+  const message = err instanceof Error ? err.message : String(err || "");
+  const code = err && typeof err === "object" ? String((err as any).code || "") : "";
+  const safeMessages = new Set([
+    "operation aborted",
+    "skill.id is required",
+    "skill.id must start with builtin/ or ws/",
+    "path is required",
+    "invalid path",
+    "absolute path is not allowed",
+    "path is outside workspace",
+    "symlink path is not allowed",
+    "binary file is not supported",
+    "unsupported non-regular file type",
+    "skill node not found"
+  ]);
+  if (safeMessages.has(message)) {
+    return new Error(message);
+  }
+  if (code === "ENOENT" || code === "ENOTDIR") {
+    return new Error("skill target not found");
+  }
+  if (code === "EACCES" || code === "EPERM") {
+    return new Error("skill target is not accessible");
+  }
+  return new Error("skill tool failed to read target");
+}
+
+export async function runSkillTool(params: {
+  workspacePath: string;
+  repoRoot: string;
+  id: string;
+  signal?: AbortSignal;
+}) {
+  try {
+    throwIfAborted(params.signal);
+    const id = String(params.id || "").trim();
+    if (!id) throw new Error("skill.id is required");
+    const slashIndex = id.indexOf("/");
+    if (slashIndex <= 0) throw new Error("skill.id must start with builtin/ or ws/");
+    const ns = id.slice(0, slashIndex);
+    const rel = id.slice(slashIndex + 1);
+    if (ns !== "builtin" && ns !== "ws") throw new Error("skill.id must start with builtin/ or ws/");
+    const safeRel = ensureSafeRelativePath(rel);
+
+    const rootPath = ns === "builtin"
+      ? path.resolve(params.repoRoot, "skills")
+      : path.resolve(params.workspacePath, ".awb", "skills");
+    const targetPath = resolveWithinWorkspace(rootPath, safeRel);
+    const stat = await fs.lstat(targetPath);
+    if (stat.isSymbolicLink()) {
+      throw new Error("symlink path is not allowed");
+    }
+    await ensureRealPathInsideWorkspace(rootPath, targetPath);
+    throwIfAborted(params.signal);
+
+    if (stat.isFile()) {
+      const sampleKind = await classifyTextSample(targetPath, Number(stat.size));
+      if (sampleKind.kind !== "text") {
+        throw new Error("binary file is not supported");
+      }
+      const decoded = await readTextFileCapped({ fullPath: targetPath, encoding: sampleKind.encoding, signal: params.signal });
+      return {
+        id,
+        type: "file" as const,
+        content: decoded.lines.join("\n"),
+        truncated: decoded.truncatedByBytes || decoded.hasMoreLines
+      };
+    }
+
+    if (!stat.isDirectory()) {
+      throw new Error("unsupported non-regular file type");
+    }
+    const skillMdPath = path.join(targetPath, "SKILL.md");
+    const skillMdStat = await fs.lstat(skillMdPath).catch((err: any) => {
+      if (err && err.code === "ENOENT") return null;
+      throw err;
+    });
+    if (!skillMdStat || !skillMdStat.isFile() || skillMdStat.isSymbolicLink()) {
+      throw new Error("skill node not found");
+    }
+    await ensureRealPathInsideWorkspace(rootPath, skillMdPath);
+    const skillKind = await classifyTextSample(skillMdPath, Number(skillMdStat.size));
+    if (skillKind.kind !== "text") {
+      throw new Error("binary file is not supported");
+    }
+    const skillDecoded = await readTextFileCapped({ fullPath: skillMdPath, encoding: skillKind.encoding, signal: params.signal });
+    const skillRaw = skillDecoded.lines.join("\n");
+    const skillParsed = parseSkillFrontmatter(skillRaw);
+
+    const entries = await fs.readdir(targetPath, { withFileTypes: true });
+    const children: SkillNodeChild[] = [];
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isFile()) {
+        if (entry.name === "SKILL.md") continue;
+        children.push({
+          id: `${ns}/${path.posix.join(safeRel, entry.name)}`,
+          type: "file",
+          name: entry.name
+        });
+        continue;
+      }
+      if (!entry.isDirectory()) continue;
+      const childSkillPath = path.join(targetPath, entry.name, "SKILL.md");
+      const childStat = await fs.lstat(childSkillPath).catch((err: any) => {
+        if (err && err.code === "ENOENT") return null;
+        throw err;
+      });
+      if (!childStat || !childStat.isFile() || childStat.isSymbolicLink()) continue;
+      await ensureRealPathInsideWorkspace(rootPath, childSkillPath);
+      const childKind = await classifyTextSample(childSkillPath, Number(childStat.size));
+      if (childKind.kind !== "text") continue;
+      const childDecoded = await readTextFileCapped({ fullPath: childSkillPath, encoding: childKind.encoding, signal: params.signal });
+      const childParsed = parseSkillFrontmatter(childDecoded.lines.join("\n"));
+      const childRelPath = path.posix.join(safeRel, entry.name);
+      children.push({
+        id: `${ns}/${childRelPath}`,
+        type: "skill",
+        name: childParsed.name || entry.name,
+        description: childParsed.description || ""
+      });
+    }
+
+    return {
+      id,
+      type: "skill" as const,
+      name: skillParsed.name || path.basename(targetPath),
+      description: skillParsed.description || "",
+      content: skillParsed.body,
+      children,
+      truncated: skillDecoded.truncatedByBytes || skillDecoded.hasMoreLines
+    };
+  } catch (err) {
+    throw sanitizeSkillToolError(err);
+  }
 }
 
 export async function runWriteTool(params: {

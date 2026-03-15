@@ -4,7 +4,7 @@ import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call"
 import { runBashCommand } from "../../bash.js";
 import { applyPreparedPatch, prepareApplyPatchTool } from "../../applyPatch.js";
 import { getBashToolAppendix } from "../../bashTools.js";
-import { runReadTool, runWriteTool } from "../../fileTools.js";
+import { runReadTool, runSkillTool, runWriteTool } from "../../fileTools.js";
 import { parseTodolistArgs, toTodolistResult } from "../../todolist.js";
 import { parseScratchpadArgs, toScratchpadResult } from "../../scratchpad.js";
 import type { AvailableToolContext, ResolvedToolDefinition, ToolExecutionContext, ToolListContext, ToolProvider } from "../types.js";
@@ -134,7 +134,7 @@ export class BuiltinToolProvider implements ToolProvider {
 
   isToolEnabled(toolName: string, ctx: AvailableToolContext | ToolExecutionContext) {
     if (!isBuiltinToolName(toolName)) return false;
-    if (toolName === "read" || toolName === "todolist" || toolName === "archive_search" || toolName === "archive_read" || toolName === "scratchpad") {
+    if (toolName === "read" || toolName === "todolist" || toolName === "archive_search" || toolName === "archive_read" || toolName === "scratchpad" || toolName === "skill") {
       return true;
     }
     return ctx.profile.agent.tools.includes(toolName as BuiltinToolName);
@@ -204,6 +204,17 @@ export class BuiltinToolProvider implements ToolProvider {
           signal: ctx.signal
         });
       }
+      case "skill": {
+        const id = requireNonEmptyStringArg(args.id, "skill.id");
+        const repoRoot = String(process.env.AWB_AGENT_REPO_ROOT || "").trim() || process.cwd();
+        return await runSkillTool({
+          workspacePath: ctx.run.workspacePath,
+          repoRoot,
+          id,
+          signal: ctx.signal
+        });
+      }
+
       case "write": {
         const filePath = requireNonEmptyStringArg(args.filePath, "write.filePath");
         if (typeof args.content !== "string") {

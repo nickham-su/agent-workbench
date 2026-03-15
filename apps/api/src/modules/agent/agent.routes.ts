@@ -57,6 +57,7 @@ const AgentBuiltinToolNameSchema = Type.Union([
   Type.Literal("todolist"),
   Type.Literal("subtask"),
   Type.Literal("archive_search"),
+  Type.Literal("skill"),
   Type.Literal("archive_read")
 ]);
 const AgentDynamicToolNameSchema = Type.Union([

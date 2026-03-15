@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
-import { runReadTool, runWriteTool } from "./fileTools.js";
+import { runReadTool, runSkillTool, runWriteTool } from "./fileTools.js";
 
 const workspaces: string[] = [];
 
@@ -225,4 +225,79 @@ test("read 在目录 offset 超过条目数时返回 EOF 说明而不是失败",
 
   assert.equal(result.summary, "读取目录 nested");
   assert.equal(result.content, "(End of directory - total 2 entries. Requested offset=5 exceeds directory length. No more entries to read. Do not call read again for this directory unless the directory contents change.)");
+});
+
+test("skill 读取 skill 节点时返回正文与 children（文件 + 直接子 skill）", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  await fs.mkdir(path.join(repoRoot, "skills", "tooling", "child"), { recursive: true });
+  await fs.writeFile(
+    path.join(repoRoot, "skills", "tooling", "SKILL.md"),
+    "---\nname: Tooling\ndescription: Tooling desc\n---\n\nTooling body",
+    "utf8"
+  );
+  await fs.writeFile(path.join(repoRoot, "skills", "tooling", "notes.txt"), "hello", "utf8");
+  await fs.writeFile(
+    path.join(repoRoot, "skills", "tooling", "child", "SKILL.md"),
+    "---\nname: Child\ndescription: Child desc\n---\n\nchild body",
+    "utf8"
+  );
+
+  const result = await runSkillTool({ workspacePath, repoRoot, id: "builtin/tooling" });
+
+  assert.equal(result.type, "skill");
+  assert.equal(result.id, "builtin/tooling");
+  assert.equal(result.name, "Tooling");
+  assert.equal(result.description, "Tooling desc");
+  assert.equal(result.content.includes("Tooling body"), true);
+  assert.deepEqual(
+    result.children.map((item) => ({ id: item.id, type: item.type, name: item.name })),
+    [
+      { id: "builtin/tooling/child", type: "skill", name: "Child" },
+      { id: "builtin/tooling/notes.txt", type: "file", name: "notes.txt" }
+    ]
+  );
+});
+
+test("skill 读取文件 id 时仅返回文件内容", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  await fs.mkdir(path.join(workspacePath, ".awb", "skills", "deploy"), { recursive: true });
+  await fs.writeFile(path.join(workspacePath, ".awb", "skills", "deploy", "SKILL.md"), "Deploy skill", "utf8");
+  await fs.writeFile(path.join(workspacePath, ".awb", "skills", "deploy", "template.yaml"), "kind: Pod", "utf8");
+
+  const result = await runSkillTool({ workspacePath, repoRoot, id: "ws/deploy/template.yaml" });
+
+  assert.equal(result.type, "file");
+  assert.equal(result.id, "ws/deploy/template.yaml");
+  assert.equal(result.content, "kind: Pod");
+  assert.equal(Object.prototype.hasOwnProperty.call(result, "children"), false);
+});
+
+test("skill 在目标不存在时返回脱敏错误，且不泄露绝对路径", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  await fs.mkdir(path.join(repoRoot, "skills"), { recursive: true });
+
+  let message = "";
+  try {
+    await runSkillTool({ workspacePath, repoRoot, id: "builtin/not-exists" });
+  } catch (err) {
+    message = err instanceof Error ? err.message : String(err);
+  }
+
+  assert.equal(message, "skill target not found");
+  assert.equal(message.includes(repoRoot), false);
+  assert.equal(message.includes(workspacePath), false);
+  assert.equal(message.includes("/"), false);
+});
+
+test("skill 对非法 id 仍返回明确校验错误", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+
+  await assert.rejects(
+    () => runSkillTool({ workspacePath, repoRoot, id: "bad-id" }),
+    /skill.id must start with builtin\/ or ws\//
+  );
 });

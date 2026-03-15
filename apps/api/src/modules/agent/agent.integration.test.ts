@@ -577,6 +577,7 @@ test("agent prompt-context 中的工具描述与 schema 说明使用英文", asy
   const subtaskTool = promptContext.tools.find((item) => item.name === "subtask");
   const todolistTool = promptContext.tools.find((item) => item.name === "todolist");
   const scratchpadTool = promptContext.tools.find((item) => item.name === "scratchpad");
+  const skillTool = promptContext.tools.find((item) => item.name === "skill");
   const applyPatchTool = promptContext.tools.find((item) => item.name === "apply_patch");
   assert.ok(String(bashTool?.description || "").includes("Run a bash command and return stdout/stderr."));
   assert.ok(String((bashTool?.inputSchema as any)?.properties?.timeout?.description || "").includes("Timeout in seconds"));
@@ -590,6 +591,7 @@ test("agent prompt-context 中的工具描述与 schema 说明使用英文", asy
   assert.ok(String(todolistTool?.description || "").includes("Example input:"));
   assert.ok(String(scratchpadTool?.description || "").includes("Suggested <= 200 characters"));
   assert.equal((scratchpadTool?.inputSchema as any)?.properties?.content?.maxLength, 200);
+  assert.ok(String(skillTool?.description || "").includes("Load skill content by logical id"));
   assert.equal(String(todolistTool?.description || "").includes("完成 todolist goal 增强"), false);
   assert.equal(String(todolistTool?.description || "").includes("梳理需求与约束"), false);
   assert.ok(
@@ -7478,4 +7480,93 @@ test("agent prompt-context 对 workspace AGENTS.md 做 32KB 截断并追加标�
   );
   assert.ok(context.system.includes("[agent_prompt] default"), "system should include agent section when workspace section exists");
   assert.equal(context.system.includes("## Workspace Instructions:"), false, "system should not include legacy workspace heading when workspace section exists");
+});
+
+test("agent prompt-context 注入 skills 摘要并在同 run 缓存静态部分", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+
+  const builtinSkillDir = path.join(fixture.repoRoot, "skills", `it-builtin-${Date.now()}`);
+  const wsSkillDir = path.join(fixture.workspacePath, ".awb", "skills", "deploy");
+  try {
+    await fs.mkdir(path.join(builtinSkillDir, "child"), { recursive: true });
+    await fs.mkdir(wsSkillDir, { recursive: true });
+    await fs.writeFile(
+      path.join(builtinSkillDir, "SKILL.md"),
+      "---\nname: Builtin Skill V1\ndescription: builtin-desc-v1\n---\n\nbody",
+      "utf8"
+    );
+    await fs.writeFile(path.join(builtinSkillDir, "child", "SKILL.md"), "---\nname: Child\ndescription: hidden\n---\n", "utf8");
+    await fs.writeFile(
+      path.join(wsSkillDir, "SKILL.md"),
+      "---\nname: Workspace Skill V1\ndescription: ws-desc-v1\n---\n\nbody",
+      "utf8"
+    );
+    await fs.writeFile(path.join(fixture.workspacePath, "AGENTS.md"), "RULE_V1", "utf8");
+
+    createRunRecord(fixture.db, {
+      runId,
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      triggerItemId: 1,
+      agentId: "default",
+      providerId: "ppchat",
+      uiLocale: "en-US",
+      modelId: "gpt-5.2",
+      status: "running",
+      createdAt: Date.now()
+    });
+
+    const first = await getPromptContextInternal({
+      app: fixture.app,
+      internalToken: fixture.internalToken,
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      runId
+    });
+    assert.ok(first.system.includes("[skills]"), "skills section should be present");
+    assert.ok(first.system.includes(`id: builtin/${path.basename(builtinSkillDir)}`), "builtin skill id should be injected");
+    assert.ok(first.system.includes("name: Builtin Skill V1"));
+    assert.ok(first.system.includes("id: ws/deploy"), "workspace skill id should be injected");
+    assert.ok(first.system.includes("description: ws-desc-v1"));
+    assert.equal(first.system.includes(fixture.workspacePath), false, "system prompt should not expose workspace real path");
+    assert.equal(first.system.includes(`builtin/${path.basename(builtinSkillDir)}/child`), false, "only top-level skills should be injected");
+    assert.equal(first.tools.some((tool) => tool.name === "skill"), true, "skill tool should be available");
+
+    await fs.writeFile(path.join(wsSkillDir, "SKILL.md"), "---\nname: Workspace Skill V2\ndescription: ws-desc-v2\n---\n", "utf8");
+    await fs.writeFile(path.join(fixture.workspacePath, "AGENTS.md"), "RULE_V2", "utf8");
+    await sleep(1100);
+
+    const second = await getPromptContextInternal({
+      app: fixture.app,
+      internalToken: fixture.internalToken,
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      runId
+    });
+    assert.ok(second.system.includes("RULE_V1"), "same run should keep cached workspace AGENTS content");
+    assert.equal(second.system.includes("RULE_V2"), false, "same run should not see updated workspace AGENTS");
+    assert.ok(second.system.includes("ws-desc-v1"), "same run should keep cached skill summary");
+    assert.equal(second.system.includes("ws-desc-v2"), false, "same run should not see updated skill summary");
+
+    const runId2 = newSortableId("run");
+    createRunRecord(fixture.db, {
+      runId: runId2,
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      triggerItemId: 1,
+      agentId: "default",
+      providerId: "ppchat",
+      uiLocale: "en-US",
+      modelId: "gpt-5.2",
+      status: "running",
+      createdAt: Date.now()
+    });
+    const third = await getPromptContextInternal({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId: runId2 });
+    assert.ok(third.system.includes("RULE_V2"), "new run should observe updated workspace AGENTS");
+    assert.ok(third.system.includes("ws-desc-v2"), "new run should observe updated skill summary");
+  } finally {
+    await fs.rm(builtinSkillDir, { recursive: true, force: true });
+  }
 });

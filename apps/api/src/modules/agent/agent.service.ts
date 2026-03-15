@@ -224,6 +224,17 @@ function toolArgsSchema(toolName: AgentContextToolName) {
       }
     };
   }
+  if (toolName === "skill") {
+    return {
+      type: "object",
+      required: ["id"],
+      additionalProperties: false,
+      properties: {
+        id: { type: "string", minLength: 1 }
+      }
+    };
+  }
+
   if (toolName === "subtask") {
     return {
       type: "object",
@@ -357,6 +368,16 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
       "If the requested offset exceeds the file length, the tool returns an end-of-file notice instead of failing."
     ].join(" ");
   }
+  if (toolName === "skill") {
+    return [
+      "Load skill content by logical id (no filesystem paths).",
+      "Input: id (string), using builtin/... or ws/... prefixes.",
+      "If id points to a skill node (directory containing SKILL.md), it returns the skill content and children.",
+      "Children include sibling files (excluding SKILL.md) and direct child skill nodes.",
+      "If id points to a file, it returns file content only."
+    ].join(" ");
+  }
+
   if (toolName === "apply_patch") {
     return [
       "Apply a git unified diff (text) to update files inside the current directory. Best for minimal edits and coordinated multi-file changes.",
@@ -989,6 +1010,9 @@ const WORKSPACE_AGENTS_MAX_BYTES = 32 * 1024;
 const ARCHIVE_FILE_NAME_WIDTH = 8;
 const ARCHIVE_FILE_LINE_LIMIT = 100;
 const ARCHIVE_SEARCH_MAX_HITS_DEFAULT = 10;
+const RUN_PROMPT_STATIC_CACHE_TTL_MS = 30 * 60 * 1000;
+const BUILTIN_SKILLS_ROOT = "skills";
+const WORKSPACE_SKILLS_ROOT = ".awb/skills";
 const ARCHIVE_SEARCH_MAX_HITS_MAX = 100;
 const ARCHIVE_MAX_CHARS_DEFAULT = 8_000;
 const ARCHIVE_MAX_CHARS_MIN = 1_000;
@@ -1705,6 +1729,111 @@ function decodeUtf8Prefix(bytes: Buffer, maxBytes: number) {
   return { text: "", truncated };
 }
 
+type SkillSummaryItem = {
+  id: string;
+  name: string;
+  description: string;
+};
+
+type RunPromptStatic = {
+  systemStatic: string;
+  tools: Array<{
+    name: string;
+    description: string;
+    inputSchema: Record<string, unknown>;
+  }>;
+};
+
+function parseSkillFrontmatter(text: string): { name: string; description: string } {
+  const raw = String(text || "");
+  if (!raw.startsWith("---\n")) return { name: "", description: "" };
+  const end = raw.indexOf("\n---\n", 4);
+  if (end < 0) return { name: "", description: "" };
+  const yaml = raw.slice(4, end);
+  let name = "";
+  let description = "";
+  for (const line of yaml.split(/\r?\n/)) {
+    const idx = line.indexOf(":");
+    if (idx <= 0) continue;
+    const key = line.slice(0, idx).trim().toLowerCase();
+    let value = line.slice(idx + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (key === "name" && !name) name = value;
+    if (key === "description" && !description) description = value;
+  }
+  return { name, description };
+}
+
+async function scanTopLevelSkillSummaries(params: {
+  rootPath: string;
+  idPrefix: "builtin" | "ws";
+  logger: FastifyBaseLogger;
+}) {
+  const rootEntries = await fs.readdir(params.rootPath, { withFileTypes: true }).catch((err: any) => {
+    if (err?.code === "ENOENT") return [] as Awaited<ReturnType<typeof fs.readdir>>;
+    throw err;
+  });
+
+  const items: SkillSummaryItem[] = [];
+  for (const entry of rootEntries.sort((a, b) => String(a.name).localeCompare(String(b.name)))) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+    const entryName = String(entry.name);
+    const skillDir = path.join(params.rootPath, entryName);
+    const skillMdPath = path.join(skillDir, "SKILL.md");
+    const skillStat = await fs.lstat(skillMdPath).catch((err: any) => {
+      if (err?.code === "ENOENT") return null;
+      throw err;
+    });
+    if (!skillStat || !skillStat.isFile() || skillStat.isSymbolicLink()) continue;
+    let text = "";
+    try {
+      const bytes = await fs.readFile(skillMdPath);
+      if (bytes.includes(0x00)) continue;
+      text = bytes.toString("utf8");
+    } catch (err) {
+      params.logger.warn({ err, skillMdPath }, "failed to read top-level skill summary");
+      continue;
+    }
+    const parsed = parseSkillFrontmatter(text);
+    items.push({
+      id: `${params.idPrefix}/${entryName}`,
+      name: parsed.name || entryName,
+      description: parsed.description || ""
+    });
+  }
+  return items;
+}
+
+function buildSkillsInstructionSection(input: {
+  builtin: SkillSummaryItem[];
+  workspace: SkillSummaryItem[];
+}) {
+  const lines: string[] = [];
+  lines.push("Use the builtin skill tool to load details on demand by id.");
+  lines.push("Never reveal filesystem paths; use only logical ids (builtin/... or ws/...).");
+  lines.push("");
+  lines.push("Top-level builtin skills:");
+  if (input.builtin.length === 0) {
+    lines.push("- (none)");
+  } else {
+    for (const item of input.builtin) {
+      lines.push(`- id: ${item.id}; name: ${item.name}; description: ${item.description}`);
+    }
+  }
+  lines.push("");
+  lines.push("Top-level workspace skills:");
+  if (input.workspace.length === 0) {
+    lines.push("- (none)");
+  } else {
+    for (const item of input.workspace) {
+      lines.push(`- id: ${item.id}; name: ${item.name}; description: ${item.description}`);
+    }
+  }
+  return lines.join("\n");
+}
+
 async function readWorkspaceAgentsInstructions(workspacePath: string, logger: FastifyBaseLogger) {
   const filePath = path.join(workspacePath, WORKSPACE_AGENTS_FILENAME);
   const relativePath = path.relative(workspacePath, filePath);
@@ -1825,6 +1954,7 @@ function buildSystemPrompt(input: {
   globalPrompts: Array<{ id: string; title: string; prompt: string }>;
   runtimeInstruction?: string;
   workspaceInstructions: { filePath: string; displayPath: string; content: string } | null;
+  skillsInstruction?: string;
 }) {
   const agentPrompt = input.agentPrompt || "";
   const selectedGlobalIds = new Set(input.agentGlobalPromptIds);
@@ -1858,6 +1988,10 @@ function buildSystemPrompt(input: {
     sections.push(formatSection("agent_prompt", agentPrompt, input.agentName));
   }
 
+  if (String(input.skillsInstruction || "").trim()) {
+    sections.push(formatSection("skills", String(input.skillsInstruction || "")));
+  }
+
   if (outputFormatInstruction) {
     sections.push(formatSection("output_format_instructions", outputFormatInstruction));
   }
@@ -1869,14 +2003,34 @@ function buildSystemPrompt(input: {
   return sections.filter(Boolean).join("\n\n---\n");
 }
 
+function appendRuntimeConstraintsSection(systemStatic: string, runtimeInstruction: string) {
+  const runtime = String(runtimeInstruction || "").trim();
+  if (!runtime) return systemStatic;
+  const runtimeSection = `[runtime_constraints]\n\n${runtime}`;
+  const base = String(systemStatic || "").trim();
+  if (!base) return runtimeSection;
+  return `${base}\n\n---\n${runtimeSection}`;
+}
+
 export class AgentService {
   private readonly sessionOpLocks = new Map<string, Promise<void>>();
+  private readonly runPromptStaticCache = new Map<
+    string,
+    {
+      expiresAt: number;
+      promise: Promise<RunPromptStatic>;
+    }
+  >();
 
   constructor(
     private readonly ctx: AppContext,
     private readonly logger: FastifyBaseLogger,
     private readonly runCompletedEventHub?: AgentRunCompletedEventHub | null
   ) {}
+
+  private clearRunPromptStaticCache(runId: string) {
+    this.runPromptStaticCache.delete(runId);
+  }
 
   private async runSessionOperationExclusive<T>(sessionId: string, action: () => Promise<T>): Promise<T> {
     const previous = this.sessionOpLocks.get(sessionId) ?? Promise.resolve();
@@ -2414,6 +2568,7 @@ export class AgentService {
       status: "failed",
       updatedAt: ts
     });
+    this.clearRunPromptStaticCache(params.runId);
     const state = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
     if (state.activeRunId !== params.runId) return;
     setRunStateIdle(this.ctx.db, {
@@ -2741,9 +2896,11 @@ export class AgentService {
           status: "cancelled",
           updatedAt: createdAt
         });
+        this.clearRunPromptStaticCache(runId);
       }
       if (state.activeRunId && !relatedRunIds.has(state.activeRunId)) {
         updateRunRecordStatus(this.ctx.db, { runId: state.activeRunId, status: "cancelled", updatedAt: createdAt });
+        this.clearRunPromptStaticCache(state.activeRunId);
       }
     });
 
@@ -3040,6 +3197,7 @@ export class AgentService {
         status: params.status,
         updatedAt: ts
       });
+      this.clearRunPromptStaticCache(params.runId);
 
       if (params.status === "cancelled") {
         const nonTerminalItemIds = listNonTerminalSessionItemIdsByRunId(this.ctx.db, {
@@ -4208,17 +4366,77 @@ export class AgentService {
       providerIdFromRun: run.providerId,
       modelIdFromRun: run.modelId
     });
-    const globalPrompts = getAgentGlobalPromptSettings(this.ctx);
-    const workspaceInstructions = await readWorkspaceAgentsInstructions(workspace.path, this.logger);
-    const system = buildSystemPrompt({
-      agentName: profile.agent.name,
-      agentPrompt: profile.agent.prompt || "",
-      agentGlobalPromptIds: Array.isArray(profile.agent.globalPromptIds) ? profile.agent.globalPromptIds : [],
-      globalPrompts: globalPrompts.items,
-      outputFormatInstruction: buildOutputFormatInstruction({ uiLocale: run.uiLocale }),
-      workspaceInstructions,
-      runtimeInstruction: buildRuntimeInstruction({ uiLocale: run.uiLocale, now: new Date() })
+
+    const now = Date.now();
+    const cachedStatic = this.runPromptStaticCache.get(params.runId);
+    const staticPromptPromise = cachedStatic && cachedStatic.expiresAt > now
+      ? cachedStatic.promise
+      : (async (): Promise<RunPromptStatic> => {
+          const [globalPrompts, workspaceInstructions, builtinSkills, workspaceSkills] = await Promise.all([
+            Promise.resolve(getAgentGlobalPromptSettings(this.ctx)),
+            readWorkspaceAgentsInstructions(workspace.path, this.logger),
+            scanTopLevelSkillSummaries({
+              rootPath: path.join(this.ctx.repoRoot, BUILTIN_SKILLS_ROOT),
+              idPrefix: "builtin",
+              logger: this.logger
+            }),
+            scanTopLevelSkillSummaries({
+              rootPath: path.join(workspace.path, WORKSPACE_SKILLS_ROOT),
+              idPrefix: "ws",
+              logger: this.logger
+            })
+          ]);
+
+          const baselineToolNames = ["read", "todolist", "archive_search", "archive_read", "scratchpad", "skill"] as const;
+          const enabledToolNames: string[] = [];
+          const enabledToolNameSet = new Set<string>();
+          for (const name of [...baselineToolNames, ...profile.agent.tools]) {
+            if (!name || enabledToolNameSet.has(name)) continue;
+            enabledToolNameSet.add(name);
+            enabledToolNames.push(name);
+          }
+          if (session.kind === "subtask") {
+            const filtered = enabledToolNames.filter((name) => name !== "subtask");
+            enabledToolNames.length = 0;
+            enabledToolNames.push(...filtered);
+          }
+
+          const subtaskDescription = enabledToolNames.includes("subtask")
+            ? buildSubtaskToolDescription(
+                listAvailableAgentsForSurface(this.ctx, "subtask").map((item) => ({
+                  id: item.id,
+                  name: item.name,
+                  summary: item.summary
+                }))
+              )
+            : undefined;
+
+          return {
+            systemStatic: buildSystemPrompt({
+              agentName: profile.agent.name,
+              agentPrompt: profile.agent.prompt || "",
+              agentGlobalPromptIds: Array.isArray(profile.agent.globalPromptIds) ? profile.agent.globalPromptIds : [],
+              globalPrompts: globalPrompts.items,
+              outputFormatInstruction: buildOutputFormatInstruction({ uiLocale: run.uiLocale }),
+              workspaceInstructions,
+              skillsInstruction: buildSkillsInstructionSection({ builtin: builtinSkills, workspace: workspaceSkills })
+            }),
+
+            tools: enabledToolNames.map((name) => ({
+              name,
+              description: toolDescription(name, { subtaskDescription }),
+              inputSchema: toolArgsSchema(name)
+            }))
+          };
+        })();
+    this.runPromptStaticCache.set(params.runId, {
+      expiresAt: now + RUN_PROMPT_STATIC_CACHE_TTL_MS,
+      promise: staticPromptPromise
     });
+
+    const staticPrompt = await staticPromptPromise;
+    const runtimeInstruction = buildRuntimeInstruction({ uiLocale: run.uiLocale, now: new Date() });
+    const system = appendRuntimeConstraintsSection(staticPrompt.systemStatic, runtimeInstruction);
 
     const visible = getSessionVisibleItems(this.ctx.db, params.workspaceId, params.sessionId);
     const { messages } = await this.buildPromptMessagesForSession({
@@ -4226,38 +4444,7 @@ export class AgentService {
       sessionId: params.sessionId,
       compactionSnippetUiLocale: normalizeAgentUiLocale(run.uiLocale)
     });
-
-    const baselineToolNames = ["read", "todolist", "archive_search", "archive_read", "scratchpad"] as const;
-    const enabledToolNames: string[] = [];
-    const enabledToolNameSet = new Set<string>();
-    for (const name of [...baselineToolNames, ...profile.agent.tools]) {
-      if (!name || enabledToolNameSet.has(name)) continue;
-      enabledToolNameSet.add(name);
-      enabledToolNames.push(name);
-    }
-    if (session.kind === "subtask") {
-      const filtered = enabledToolNames.filter((name) => name !== "subtask");
-      enabledToolNames.length = 0;
-      enabledToolNames.push(...filtered);
-    }
-
-    const subtaskDescription = enabledToolNames.includes("subtask")
-      ? buildSubtaskToolDescription(
-          listAvailableAgentsForSurface(this.ctx, "subtask").map((item) => ({
-            id: item.id,
-            name: item.name,
-            summary: item.summary
-          }))
-        )
-      : undefined;
-
-    const tools = enabledToolNames.map((name) => {
-      return {
-        name,
-        description: toolDescription(name, { subtaskDescription }),
-        inputSchema: toolArgsSchema(name)
-      };
-    });
+    const tools = staticPrompt.tools;
 
     const pendingTools = visible
       .filter((item) => item.runId === params.runId && item.kind === "tool")
@@ -4295,6 +4482,7 @@ export class AgentService {
   checkChannelSenderAllowlist(input: { pluginId: string; senderId: string }) {
     const pluginId = String(input.pluginId || "").trim();
     const senderId = String(input.senderId || "").trim();
+
     const stored = getAgentChannelSenderAllowlistSettings(this.ctx);
     const bySettings = new Map<string, "admin" | "user">();
     for (const it of stored.items || []) {
