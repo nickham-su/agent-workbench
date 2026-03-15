@@ -91,6 +91,35 @@ export async function registerAgentRoutes(
     runCompletedEventHub: AgentRunCompletedEventHub;
   }
 ) {
+  async function handleCompactRequest(
+    sessionId: string,
+    body: { workspaceId: string; clientRequestId: string; agentId?: string; uiLocale?: "zh-CN" | "en-US" }
+  ) {
+    const result = await params.service.compactSession({ sessionId, body });
+    if (result.scheduled) {
+      const workspace = params.service.getWorkspace(body.workspaceId);
+      if (!workspace) throw new HttpError(404, "workspace not found");
+      try {
+        await params.runtime.enqueueRun({
+          workspaceId: body.workspaceId,
+          sessionId,
+          runId: result.runId,
+          workspacePath: workspace.path,
+          inputText: "__awb_compact__"
+        });
+      } catch (err) {
+        params.service.failRunOnEnqueueFailure({
+          workspaceId: body.workspaceId,
+          sessionId,
+          runId: result.runId,
+          updatedAt: Date.now()
+        });
+        throw err;
+      }
+    }
+    return result;
+  }
+
   app.get(
     "/api/agent/sessions",
     {
@@ -305,28 +334,33 @@ export async function registerAgentRoutes(
     async (req, reply) => {
       const p = req.params as { sessionId: string };
       const body = req.body as { workspaceId: string; clientRequestId: string; agentId?: string; uiLocale?: "zh-CN" | "en-US" };
-      const result = await params.service.compactSession({ sessionId: p.sessionId, body });
-      if (result.scheduled) {
-        const workspace = params.service.getWorkspace(body.workspaceId);
-        if (!workspace) throw new HttpError(404, "workspace not found");
-        try {
-          await params.runtime.enqueueRun({
-            workspaceId: body.workspaceId,
-            sessionId: p.sessionId,
-            runId: result.runId,
-            workspacePath: workspace.path,
-            inputText: "__awb_compact__"
-          });
-        } catch (err) {
-          params.service.failRunOnEnqueueFailure({
-            workspaceId: body.workspaceId,
-            sessionId: p.sessionId,
-            runId: result.runId,
-            updatedAt: Date.now()
-          });
-          throw err;
+      const result = await handleCompactRequest(p.sessionId, body);
+      return reply.code(201).send(result);
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/sessions/:sessionId/compact",
+    {
+      schema: {
+        tags: ["agent"],
+        params: Type.Object({ sessionId: Type.String({ minLength: 1 }) }),
+        body: AgentCompactSessionRequestSchema,
+        response: {
+          201: AgentCompactSessionResponseSchema,
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+          503: ErrorResponseSchema
         }
       }
+    },
+    async (req, reply) => {
+      assertInternalToken(req, params.service);
+      const p = req.params as { sessionId: string };
+      const body = req.body as { workspaceId: string; clientRequestId: string; agentId?: string; uiLocale?: "zh-CN" | "en-US" };
+      const result = await handleCompactRequest(p.sessionId, body);
       return reply.code(201).send(result);
     }
   );

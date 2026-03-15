@@ -770,7 +770,7 @@ function createGateway(params: GatewayStartParams): FeishuGateway {
         return;
       }
       try {
-        const result = await client.post(`/api/agent/sessions/${encodeURIComponent(sessionId)}/compact`, {
+        const result = await client.post(`/api/internal/agent/sessions/${encodeURIComponent(sessionId)}/compact`, {
           workspaceId,
           clientRequestId: `im_feishu_${buildChatKey(ctx.chatId)}_${ctx.messageId}_compact`,
           ...(normalizeText(binding?.agentId) ? { agentId: normalizeText(binding?.agentId) } : {})
@@ -786,6 +786,22 @@ function createGateway(params: GatewayStartParams): FeishuGateway {
         logger.warn(`[feishu] compact command failed: ${message}`);
         if (statusCode === 404) {
           await replyText(ctx.chatId, ctx.messageId, "compact 失败：会话或工作区不存在，请重新 /ss 绑定后再试");
+        } else if (statusCode === 401) {
+          await replyText(ctx.chatId, ctx.messageId, "compact 失败：鉴权失败，请联系管理员检查服务配置");
+        } else if (statusCode === 400) {
+          const errCode = normalizeText((err as any)?.code).toUpperCase();
+          const lower = normalizeText(message).toLowerCase();
+          if (errCode === "AGENT_COMPACTION_EMPTY" || errCode === "AGENT_COMPACTION_NOT_NEEDED") {
+            await replyText(ctx.chatId, ctx.messageId, "compact 失败：当前会话暂无可压缩上下文");
+          } else if (errCode === "AGENT_SUBTASK_READONLY") {
+            await replyText(ctx.chatId, ctx.messageId, "compact 失败：子任务会话不支持压缩");
+          } else if (lower.includes("workspaceid mismatch")) {
+            await replyText(ctx.chatId, ctx.messageId, "compact 失败：会话与工作区不匹配，请重新 /ss 绑定后再试");
+          } else if (lower.includes("clientrequestid is required")) {
+            await replyText(ctx.chatId, ctx.messageId, "compact 失败：请求参数缺失，请稍后重试");
+          } else {
+            await replyText(ctx.chatId, ctx.messageId, "compact 失败：当前请求不满足压缩条件");
+          }
         } else if (statusCode === 409) {
           await replyText(ctx.chatId, ctx.messageId, "compact 失败：当前会话正在运行，请稍后再试");
         } else if (statusCode === 503) {

@@ -2635,6 +2635,41 @@ test("agent compact 在 worker 不可用时返回 503", async () => {
   assert.equal(res.json().code, "AGENT_WORKER_UNAVAILABLE");
 });
 
+test("internal compact 需要 internal token", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: `/api/internal/agent/sessions/${session.id}/compact`,
+    payload: {
+      workspaceId: fixture.workspaceId,
+      clientRequestId: "req_internal_compact_unauthorized"
+    }
+  });
+  assert.equal(res.statusCode, 401, `internal compact should require token: ${res.body}`);
+});
+
+test("internal compact 在 worker 不可用时返回 503", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: `/api/internal/agent/sessions/${session.id}/compact`,
+    headers: {
+      "x-awb-agent-internal-token": fixture.internalToken
+    },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      clientRequestId: "req_internal_compact_worker_unavailable",
+      uiLocale: "zh-CN"
+    }
+  });
+  assert.equal(res.statusCode, 503, `internal compact should fail when worker disabled: ${res.body}`);
+  assert.equal(res.json().code, "AGENT_WORKER_UNAVAILABLE");
+});
+
 test("agent clear 会归档当前可见上下文并插入 clear 边界 marker", async () => {
   const fixture = await createFixture();
   const session = await createSession(fixture.app, fixture.workspaceId);
