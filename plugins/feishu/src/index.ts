@@ -480,8 +480,12 @@ function createGateway(params: GatewayStartParams): FeishuGateway {
   }
 
   async function listRecentSessions() {
-    const res = await client.post("/api/internal/agent/sessions/recent", { kind: "all", limit: 10 });
-    return Array.isArray(res?.items) ? res.items : [];
+    const res = await client.post("/api/internal/agent/sessions/recent", { kind: "primary", limit: 10 });
+    const items = Array.isArray(res?.items) ? res.items : [];
+    return items.filter((it: any) => {
+      const kind = normalizeText(it?.kind).toLowerCase();
+      return kind !== "subtask";
+    });
   }
 
   async function listAgents(workspaceId: string) {
