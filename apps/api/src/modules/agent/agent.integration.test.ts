@@ -374,6 +374,11 @@ test("agent startup recovery mode=fail 会终止 in-flight run 并回收 run-sta
   const items = getSessionTranscriptItems(db, workspaceId, sessionId);
   assert.ok(items.some((it) => it.kind === "assistant" && it.status === "failed"));
   assert.ok(items.some((it) => it.kind === "tool" && it.status === "failed"));
+  const startupFailNotice = items.find(
+    (it) => it.kind === "system" && it.output.type === "system_text" && it.output.text === "[run] marked failed on server restart (startup recovery mode: fail)"
+  );
+  assert.ok(startupFailNotice, "startup fail notice should be appended");
+  assert.equal(startupFailNotice?.boundaryReason, null);
 
   // 断言：脏 run-state 也会被回收
   const dirty = getRunStateRow(db, workspaceId, dirtySessionId);

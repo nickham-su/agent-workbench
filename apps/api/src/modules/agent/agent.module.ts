@@ -121,7 +121,7 @@ async function failRecoveringRuns(service: AgentService, logger: FastifyInstance
             prevId: head,
             kind: "system",
             status: "completed",
-            boundaryReason: "startup_terminated",
+            boundaryReason: null,
             output: {
               type: "system_text",
               text
