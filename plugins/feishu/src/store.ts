@@ -127,6 +127,14 @@ export function createFeishuStore(params: { dataDir: string }) {
       primary key(event_id, chat_key)
     );
 
+    create table if not exists compact_pending (
+      run_id text primary key,
+      chat_key text not null,
+      chat_id text not null,
+      message_id text not null,
+      created_at integer not null
+    );
+
     create index if not exists idx_chat_binding_session_id on chat_binding(session_id);
     create index if not exists idx_run_map_chat_key on run_map(chat_key);
   `);
@@ -240,6 +248,24 @@ export function createFeishuStore(params: { dataDir: string }) {
         )
         .all(sessionId) as ChatBinding[];
       return rows;
+    },
+    mapCompactPending(runId: string, input: { chatKey: string; chatId: string; messageId: string }) {
+      db.prepare(`insert or replace into compact_pending(run_id,chat_key,chat_id,message_id,created_at) values(?,?,?,?,?)`).run(
+        runId,
+        input.chatKey,
+        input.chatId,
+        input.messageId,
+        now()
+      );
+    },
+    getCompactPending(runId: string): { chatKey: string; chatId: string; messageId: string } | null {
+      const row = db.prepare(`select chat_key as chatKey, chat_id as chatId, message_id as messageId from compact_pending where run_id=?`).get(runId) as
+        | { chatKey: string; chatId: string; messageId: string }
+        | undefined;
+      return row ?? null;
+    },
+    deleteCompactPending(runId: string) {
+      db.prepare(`delete from compact_pending where run_id=?`).run(runId);
     }
   };
 }

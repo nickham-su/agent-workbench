@@ -538,6 +538,15 @@ function createGateway(params: GatewayStartParams): FeishuGateway {
 
   async function handleRunCompleted(event: RunCompletedEvent) {
     if (event.finalStatus !== "completed") return;
+    const compactPending = store.getCompactPending(event.runId);
+    if (compactPending) {
+      if (store.hasSent(event.eventId, compactPending.chatKey)) return;
+      await replyText(compactPending.chatId, compactPending.messageId, "压缩完成");
+      store.saveSent(event.eventId, compactPending.chatKey, event.runId);
+      store.deleteCompactPending(event.runId);
+      return;
+    }
+
     const runMap = store.getRunMap(event.runId);
     if (runMap) {
       const binding = store.getBinding(runMap.chatKey);
@@ -776,6 +785,10 @@ function createGateway(params: GatewayStartParams): FeishuGateway {
           ...(normalizeText(binding?.agentId) ? { agentId: normalizeText(binding?.agentId) } : {})
         });
         if (result?.scheduled) {
+          const runId = normalizeText(result?.runId);
+          if (runId) {
+            store.mapCompactPending(runId, { chatKey: buildChatKey(ctx.chatId), chatId: ctx.chatId, messageId: ctx.messageId });
+          }
           await replyText(ctx.chatId, ctx.messageId, "已触发 compact，正在处理…");
         } else {
           await replyText(ctx.chatId, ctx.messageId, "compact 已受理");
