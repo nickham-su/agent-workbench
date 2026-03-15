@@ -229,6 +229,10 @@ export function initSchema(db: Db) {
     sql: "create index idx_agent_context_item_session_id_id on agent_context_item(session_id, id)"
   });
   createIndexIfNotExists(db, {
+    index: "idx_agent_context_item_session_run_id",
+    sql: "create index idx_agent_context_item_session_run_id on agent_context_item(session_id, run_id, id)"
+  });
+  createIndexIfNotExists(db, {
     index: "idx_agent_context_item_session_prev",
     sql: "create index idx_agent_context_item_session_prev on agent_context_item(session_id, prev_id)"
   });
@@ -251,6 +255,10 @@ export function initSchema(db: Db) {
   createIndexIfNotExists(db, {
     index: "idx_agent_run_session_status",
     sql: "create index idx_agent_run_session_status on agent_run(session_id, status, updated_at desc)"
+  });
+  createIndexIfNotExists(db, {
+    index: "idx_agent_session_run_state_status_active_run",
+    sql: "create index idx_agent_session_run_state_status_active_run on agent_session_run_state(status, active_run_id)"
   });
 
 }
