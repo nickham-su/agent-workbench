@@ -1648,7 +1648,7 @@ export function getLatestRunUiLocaleBySession(db: Db, params: { workspaceId: str
         from agent_run
         where workspace_id = ?
           and session_id = ?
-          and ui_locale is not null
+          and ui_locale in ('zh-CN', 'en-US')
         order by updated_at desc, created_at desc
         limit 1
       `
@@ -1664,7 +1664,7 @@ export function getLatestRunUiLocaleGlobal(db: Db): AgentUiLocale | null {
       `
         select ui_locale as uiLocale
         from agent_run
-        where ui_locale is not null
+        where ui_locale in ('zh-CN', 'en-US')
         order by updated_at desc, created_at desc
         limit 1
       `

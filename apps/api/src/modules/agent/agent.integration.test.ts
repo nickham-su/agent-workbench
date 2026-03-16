@@ -1490,6 +1490,59 @@ test("agent messages-context 在当前 session 无可用 locale 时回退到全�
   assert.ok(ctx.system.includes("语言要求：本轮对话请统一使用简体中文。"));
 });
 
+test("agent messages-context 回退到全局最近 run 时会忽略非法 uiLocale 脏值", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const targetSession = await createSession(fixture.app, fixture.workspaceId);
+  const otherSession = await createSession(fixture.app, fixture.workspaceId);
+
+  createRunRecord(fixture.db, {
+    runId: newSortableId("run"),
+    workspaceId: fixture.workspaceId,
+    sessionId: targetSession.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    uiLocale: null,
+    status: "completed",
+    createdAt: Date.now() - 30_000
+  });
+  createRunRecord(fixture.db, {
+    runId: newSortableId("run"),
+    workspaceId: fixture.workspaceId,
+    sessionId: otherSession.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    uiLocale: "en-US",
+    status: "completed",
+    createdAt: Date.now() - 20_000
+  });
+  createRunRecord(fixture.db, {
+    runId: newSortableId("run"),
+    workspaceId: fixture.workspaceId,
+    sessionId: otherSession.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    uiLocale: "fr-FR" as any,
+    status: "completed",
+    createdAt: Date.now() - 10_000
+  });
+
+  const ctx = await getMessagesContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: targetSession.id
+  });
+
+  assert.ok(ctx.system.includes("Language requirement: use English consistently for this run."));
+  assert.equal(ctx.system.includes("语言要求：本轮对话请统一使用简体中文。"), false);
+});
+
 test("agent context-items 支持 afterId 增量查询", async () => {
   const fixture = await createFixture();
   const session = await createSession(fixture.app, fixture.workspaceId);

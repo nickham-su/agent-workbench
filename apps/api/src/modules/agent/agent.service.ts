@@ -4306,12 +4306,14 @@ export class AgentService {
     const activeRunUiLocale = params.activeRunId
       ? normalizeAgentUiLocale(getRunRecord(this.ctx.db, params.activeRunId)?.uiLocale ?? null)
       : null;
+    if (activeRunUiLocale) return activeRunUiLocale;
+
     const sessionLatestRunUiLocale = getLatestRunUiLocaleBySession(this.ctx.db, {
       workspaceId: params.workspaceId,
       sessionId: params.sessionId
     });
-    const globalLatestRunUiLocale = getLatestRunUiLocaleGlobal(this.ctx.db);
-    return activeRunUiLocale ?? sessionLatestRunUiLocale ?? globalLatestRunUiLocale;
+    if (sessionLatestRunUiLocale) return sessionLatestRunUiLocale;
+    return getLatestRunUiLocaleGlobal(this.ctx.db);
   }
 
   async getMessagesContext(params: {
