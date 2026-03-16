@@ -30,6 +30,7 @@ import type { AppContext } from "../../app/context.js";
 import { nowMs } from "../../utils/time.js";
 import { newSortableId } from "../../utils/ids.js";
 import { getWorkspace, listRecentWorkspaces } from "../workspaces/workspace.store.js";
+import { listEnabledWorkspaceExternalSkillRoots } from "../workspaces/workspace.service.js";
 import {
   agentArchiveSessionDir,
   applyPatchUiArtifactPath,
@@ -46,6 +47,8 @@ import {
   getAgentSession,
   getContextItemById,
   getLatestCompletedAssistantTextByRunId,
+  getLatestRunUiLocaleBySession,
+  getLatestRunUiLocaleGlobal,
   getLatestTerminalAssistantTextByRunId,
   getLatestTerminalRunRecord,
   getLatestSessionItemId,
@@ -85,10 +88,13 @@ import {
   getAgentSettings,
   listAvailableAgentsForSurface,
   resolveGlobalDefaultModelProfile,
+  getAgentChannelSenderAllowlistSettings,
   resolveExecutionProfile
 } from "../settings/settings.service.js";
 import { projectToolCallInputForPrompt } from "./prompt/tool-projectors/index.js";
 import { listPluginRuntimeSnapshots } from "../plugins/plugin.service.js";
+import { parseSkillFrontmatter, scanReadableTopLevelSkills } from "./top-level-skill.js";
+import type { AgentRunCompletedEventHub } from "./run-completed-events.js";
 
 export type AgentQueuedRun = {
   workspaceId: string;
@@ -222,6 +228,17 @@ function toolArgsSchema(toolName: AgentContextToolName) {
       }
     };
   }
+  if (toolName === "skill") {
+    return {
+      type: "object",
+      required: ["id"],
+      additionalProperties: false,
+      properties: {
+        id: { type: "string", minLength: 1 }
+      }
+    };
+  }
+
   if (toolName === "subtask") {
     return {
       type: "object",
@@ -231,8 +248,7 @@ function toolArgsSchema(toolName: AgentContextToolName) {
         description: {
           type: "string",
           minLength: 1,
-          maxLength: 20,
-          description: "Briefly describe the task goal in 20 characters or fewer."
+          description: "Briefly describe the task goal in 50 characters or fewer. Longer values will be truncated to 50 characters."
         },
         prompt: {
           type: "string",
@@ -356,6 +372,16 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
       "If the requested offset exceeds the file length, the tool returns an end-of-file notice instead of failing."
     ].join(" ");
   }
+  if (toolName === "skill") {
+    return [
+      "Load skill content by logical id (no filesystem paths).",
+      "Input: id (string), using builtin/... or workspace/... or repo/... prefixes.",
+      "If id points to a skill node (directory containing SKILL.md), it returns the skill content and children.",
+      "Children include sibling files (excluding SKILL.md) and direct child skill nodes.",
+      "If id points to a file, it returns file content only."
+    ].join(" ");
+  }
+
   if (toolName === "apply_patch") {
     return [
       "Apply a git unified diff (text) to update files inside the current directory. Best for minimal edits and coordinated multi-file changes.",
@@ -906,6 +932,32 @@ function buildOutputFormatInstruction(input: { uiLocale: AgentUiLocale | null })
   ].join("\n");
 }
 
+function buildLanguageInstruction(input: { uiLocale: AgentUiLocale | null }) {
+  if (input.uiLocale === "zh-CN") {
+    return [
+      "语言要求：本轮对话请统一使用简体中文。",
+      "对用户的回答使用简体中文。",
+      "内部思考/推理文本使用简体中文。",
+      "若调用 todolist，其中的 goal 与 todos[].content 必须使用简体中文。",
+      "代码、命令、路径、接口名、配置键名、报错原文等需要保真的内容可保持原样，不必翻译。"
+    ].join("\n");
+  }
+  if (input.uiLocale === "en-US") {
+    return [
+      "Language requirement: use English consistently for this run.",
+      "Respond to the user in English.",
+      "Use English for internal reasoning/thought text.",
+      "If you call todolist, the goal and todos[].content must also be in English.",
+      "Code, commands, paths, API names, config keys, and original error messages may remain verbatim when needed."
+    ].join("\n");
+  }
+  return "";
+}
+
+function buildOneShotSystemPrompt(input: { uiLocale: AgentUiLocale | null }) {
+  return buildLanguageInstruction(input);
+}
+
 function buildRuntimeInstruction(input: { uiLocale: AgentUiLocale | null; now: Date }) {
   const timeText = formatRuntimeDateTime(input.now);
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -916,28 +968,14 @@ function buildRuntimeInstruction(input: { uiLocale: AgentUiLocale | null; now: D
     lines.push(...group);
   };
 
+  const languageInstruction = buildLanguageInstruction({ uiLocale: input.uiLocale });
+  if (languageInstruction) pushGroup(languageInstruction.split("\n"));
   if (input.uiLocale === "zh-CN") {
-    pushGroup([
-      "语言要求：本轮对话请统一使用简体中文。",
-      "对用户的回答使用简体中文。",
-      "内部思考/推理文本使用简体中文。",
-      "若调用 todolist，其中的 goal 与 todos[].content 必须使用简体中文。",
-      "代码、命令、路径、接口名、配置键名、报错原文等需要保真的内容可保持原样，不必翻译。"
-    ]);
     pushGroup([
       `当前系统时间：${timeText}`,
       `当前时区：${timeZone}`
     ]);
   } else {
-    if (input.uiLocale === "en-US") {
-      pushGroup([
-        "Language requirement: use English consistently for this run.",
-        "Respond to the user in English.",
-        "Use English for internal reasoning/thought text.",
-        "If you call todolist, the goal and todos[].content must also be in English.",
-        "Code, commands, paths, API names, config keys, and original error messages may remain verbatim when needed."
-      ]);
-    }
     pushGroup([
       `Current system time: ${timeText}`,
       `Time zone: ${timeZone}`
@@ -988,6 +1026,8 @@ const WORKSPACE_AGENTS_MAX_BYTES = 32 * 1024;
 const ARCHIVE_FILE_NAME_WIDTH = 8;
 const ARCHIVE_FILE_LINE_LIMIT = 100;
 const ARCHIVE_SEARCH_MAX_HITS_DEFAULT = 10;
+const RUN_PROMPT_STATIC_CACHE_TTL_MS = 30 * 60 * 1000;
+const BUILTIN_SKILLS_ROOT = "skills";
 const ARCHIVE_SEARCH_MAX_HITS_MAX = 100;
 const ARCHIVE_MAX_CHARS_DEFAULT = 8_000;
 const ARCHIVE_MAX_CHARS_MIN = 1_000;
@@ -1704,6 +1744,73 @@ function decodeUtf8Prefix(bytes: Buffer, maxBytes: number) {
   return { text: "", truncated };
 }
 
+type SkillSummaryItem = {
+  id: string;
+  name: string;
+  description: string;
+};
+
+type RunPromptStatic = {
+  systemStatic: string;
+  tools: Array<{
+    name: string;
+    description: string;
+    inputSchema: Record<string, unknown>;
+  }>;
+  externalSkillRoots: Array<{ sourceType: "workspace" | "repo"; repoId?: string; rootDir: string; rootPath: string }>;
+};
+
+async function scanTopLevelSkillSummaries(params: {
+  rootPath: string;
+  idPrefix: "builtin" | "workspace" | "repo";
+  logger: FastifyBaseLogger;
+  idBasePath?: string;
+}) {
+  const readableItems = await scanReadableTopLevelSkills({
+    rootPath: params.rootPath,
+    logger: params.logger,
+    logMessage: "failed to read top-level skill summary"
+  });
+
+  const items: SkillSummaryItem[] = [];
+  for (const item of readableItems) {
+    const parsed = parseSkillFrontmatter(item.text);
+    const base = params.idBasePath ? `${params.idBasePath}/` : "";
+    items.push({
+      id: `${params.idPrefix}/${base}${item.entryName}`,
+      name: parsed.name || item.entryName,
+      description: parsed.description || ""
+    });
+  }
+  return items;
+}
+
+function buildSkillsInstructionSection(input: {
+  builtin: SkillSummaryItem[];
+  external: SkillSummaryItem[];
+}) {
+  const lines: string[] = [];
+  lines.push("Use the builtin skill tool to load details on demand by id.");
+  lines.push("Never reveal filesystem paths; use only logical ids (builtin/... or workspace/... or repo/...).");
+  lines.push("");
+  lines.push("Top-level builtin skills:");
+  if (input.builtin.length === 0) {
+    lines.push("- (none)");
+  } else {
+    for (const item of input.builtin) lines.push(`- id: ${item.id}; name: ${item.name}; description: ${item.description}`);
+  }
+  lines.push("");
+  lines.push("Top-level enabled external skills:");
+  if (input.external.length === 0) {
+    lines.push("- (none)");
+  } else {
+    for (const item of input.external) {
+      lines.push(`- id: ${item.id}; name: ${item.name}; description: ${item.description}`);
+    }
+  }
+  return lines.join("\n");
+}
+
 async function readWorkspaceAgentsInstructions(workspacePath: string, logger: FastifyBaseLogger) {
   const filePath = path.join(workspacePath, WORKSPACE_AGENTS_FILENAME);
   const relativePath = path.relative(workspacePath, filePath);
@@ -1824,6 +1931,7 @@ function buildSystemPrompt(input: {
   globalPrompts: Array<{ id: string; title: string; prompt: string }>;
   runtimeInstruction?: string;
   workspaceInstructions: { filePath: string; displayPath: string; content: string } | null;
+  skillsInstruction?: string;
 }) {
   const agentPrompt = input.agentPrompt || "";
   const selectedGlobalIds = new Set(input.agentGlobalPromptIds);
@@ -1857,6 +1965,10 @@ function buildSystemPrompt(input: {
     sections.push(formatSection("agent_prompt", agentPrompt, input.agentName));
   }
 
+  if (String(input.skillsInstruction || "").trim()) {
+    sections.push(formatSection("skills", String(input.skillsInstruction || "")));
+  }
+
   if (outputFormatInstruction) {
     sections.push(formatSection("output_format_instructions", outputFormatInstruction));
   }
@@ -1868,10 +1980,34 @@ function buildSystemPrompt(input: {
   return sections.filter(Boolean).join("\n\n---\n");
 }
 
+function appendRuntimeConstraintsSection(systemStatic: string, runtimeInstruction: string) {
+  const runtime = String(runtimeInstruction || "").trim();
+  if (!runtime) return systemStatic;
+  const runtimeSection = `[runtime_constraints]\n\n${runtime}`;
+  const base = String(systemStatic || "").trim();
+  if (!base) return runtimeSection;
+  return `${base}\n\n---\n${runtimeSection}`;
+}
+
 export class AgentService {
   private readonly sessionOpLocks = new Map<string, Promise<void>>();
+  private readonly runPromptStaticCache = new Map<
+    string,
+    {
+      expiresAt: number;
+      promise: Promise<RunPromptStatic>;
+    }
+  >();
 
-  constructor(private readonly ctx: AppContext, private readonly logger: FastifyBaseLogger) {}
+  constructor(
+    private readonly ctx: AppContext,
+    private readonly logger: FastifyBaseLogger,
+    private readonly runCompletedEventHub?: AgentRunCompletedEventHub | null
+  ) {}
+
+  private clearRunPromptStaticCache(runId: string) {
+    this.runPromptStaticCache.delete(runId);
+  }
 
   private async runSessionOperationExclusive<T>(sessionId: string, action: () => Promise<T>): Promise<T> {
     const previous = this.sessionOpLocks.get(sessionId) ?? Promise.resolve();
@@ -2409,6 +2545,7 @@ export class AgentService {
       status: "failed",
       updatedAt: ts
     });
+    this.clearRunPromptStaticCache(params.runId);
     const state = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
     if (state.activeRunId !== params.runId) return;
     setRunStateIdle(this.ctx.db, {
@@ -2531,6 +2668,42 @@ export class AgentService {
       };
     })();
 
+    const contextRun = (() => {
+      const activeRunId = state.activeRunId;
+      if (activeRunId) {
+        const active = getRunRecord(this.ctx.db, activeRunId);
+        if (active && active.workspaceId === session.workspaceId && active.sessionId === session.id) {
+          return active;
+        }
+      }
+      return latestTerminalRun ?? null;
+    })();
+
+    let contextWindowTokens: number | null = null;
+    if (contextRun) {
+      try {
+        const profile = resolveExecutionProfile(this.ctx, {
+          surface: session.kind === "subtask" ? "subtask" : "user",
+          agentIdFromRun: contextRun.agentId,
+          providerIdFromRun: contextRun.providerId,
+          modelIdFromRun: contextRun.modelId
+        });
+        const rawTokens = Number(profile.model.contextWindowTokens);
+        if (Number.isFinite(rawTokens) && rawTokens >= 1) {
+          contextWindowTokens = Math.floor(rawTokens);
+        }
+      } catch (err) {
+        this.logger.warn(
+          { err, sessionId: session.id, workspaceId: session.workspaceId, runId: contextRun.runId },
+          "resolve context-window tokens failed for run-state"
+        );
+      }
+    }
+    const contextTokenRatio =
+      typeof state.lastResponseTotalTokens === "number" && typeof contextWindowTokens === "number" && contextWindowTokens > 0
+        ? state.lastResponseTotalTokens / contextWindowTokens
+        : null;
+
     const lastRun = (() => {
       if (!latestTerminalRun) return null;
       const startedAt = latestTerminalRun.createdAt;
@@ -2557,7 +2730,9 @@ export class AgentService {
       updatedAt: state.updatedAt,
       lastTerminalStatus,
       appliedItemId: state.appliedItemId,
-      lastRun
+      lastRun,
+      contextWindowTokens,
+      contextTokenRatio
     };
   }
 
@@ -2596,22 +2771,22 @@ export class AgentService {
           if (!item) throw new HttpError(400, "Agent not found", "AGENT_NOT_FOUND");
           // keep minimal fields for IM display
           return { id: item.id, name: item.name, contextWindowTokens: item.resolvedModel?.contextWindowTokens ?? null };
-        })()
+         })()
       : null;
-
-    const contextWindowTokens = agent?.contextWindowTokens ?? null;
-    const lastResponseTotalTokens = runState.lastResponseTotalTokens;
-    const contextTokenRatio =
-      typeof lastResponseTotalTokens === "number" && typeof contextWindowTokens === "number" && contextWindowTokens > 0
-        ? lastResponseTotalTokens / contextWindowTokens
-        : null;
 
     // updatedAt should reflect the underlying data change time, not "now".
     const updatedAt = Math.max(session.updatedAt, runState.updatedAt, startedAt ?? 0);
+    const workspace = getWorkspace(this.ctx.db, session.workspaceId);
+    const sessionSummary = {
+      ...session,
+      workspaceTitle: workspace?.title,
+      workspaceDirName: workspace?.dirName
+    };
+
     return {
       updatedAt,
       generatedAt,
-      session,
+      session: sessionSummary,
       agent: agent ? { id: agent.id, name: agent.name } : null,
       runState: {
         ...runState,
@@ -2620,8 +2795,8 @@ export class AgentService {
       },
       startedAt,
       elapsedMs,
-      contextWindowTokens,
-      contextTokenRatio
+      contextWindowTokens: runState.contextWindowTokens ?? null,
+      contextTokenRatio: runState.contextTokenRatio ?? null
     };
   }
 
@@ -2729,9 +2904,11 @@ export class AgentService {
           status: "cancelled",
           updatedAt: createdAt
         });
+        this.clearRunPromptStaticCache(runId);
       }
       if (state.activeRunId && !relatedRunIds.has(state.activeRunId)) {
         updateRunRecordStatus(this.ctx.db, { runId: state.activeRunId, status: "cancelled", updatedAt: createdAt });
+        this.clearRunPromptStaticCache(state.activeRunId);
       }
     });
 
@@ -3028,6 +3205,7 @@ export class AgentService {
         status: params.status,
         updatedAt: ts
       });
+      this.clearRunPromptStaticCache(params.runId);
 
       if (params.status === "cancelled") {
         const nonTerminalItemIds = listNonTerminalSessionItemIdsByRunId(this.ctx.db, {
@@ -3073,6 +3251,16 @@ export class AgentService {
     });
 
     tx();
+
+    this.runCompletedEventHub?.publish({
+      eventId: newSortableId("evt"),
+      eventType: "agent.run.completed.v1",
+      occurredAt: ts,
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+      runId: params.runId,
+      finalStatus: params.status
+    });
   }
 
   private resolveSubtaskParentContext(params: {
@@ -3188,12 +3376,9 @@ export class AgentService {
       parentToolItemId: params.parentToolItemId
     });
 
-    const normalizedDescription = params.description.trim();
+    const normalizedDescription = params.description.trim().slice(0, 50);
     if (!normalizedDescription) {
       throw new HttpError(400, "subtask description is required", "AGENT_SUBTASK_DESCRIPTION_REQUIRED");
-    }
-    if (normalizedDescription.length > 20) {
-      throw new HttpError(400, "subtask description must be <= 20 characters", "AGENT_SUBTASK_DESCRIPTION_TOO_LONG");
     }
     const subtaskTitleBase = normalizedDescription;
     const resolvedAgentId = String(params.agentId || "").trim();
@@ -3419,7 +3604,8 @@ export class AgentService {
     return {
       sessionId: session.id,
       runId,
-      workspacePath: workspace.path
+      workspacePath: workspace.path,
+      agentName: profile.agent.name
     };
   }
 
@@ -3486,6 +3672,19 @@ export class AgentService {
     return {
       status: run.status
     };
+  }
+
+  getRunFinalText(params: { runId: string }) {
+    const runId = String(params.runId || "").trim();
+    if (!runId) {
+      return { found: false, text: "" };
+    }
+    const run = getRunRecord(this.ctx.db, runId);
+    if (!run) {
+      return { found: false, text: "" };
+    }
+    const latest = getLatestTerminalAssistantTextByRunId(this.ctx.db, { runId });
+    return { found: latest.itemId != null, text: latest.text };
   }
 
   getExecutionProfileForRun(params: { workspaceId: string; sessionId: string; runId: string }) {
@@ -4080,6 +4279,24 @@ export class AgentService {
     return { messages, visible };
   }
 
+  private resolveUiLocaleForSessionContext(params: {
+    workspaceId: string;
+    sessionId: string;
+    activeRunId: string | null;
+  }): AgentUiLocale | null {
+    const activeRunUiLocale = params.activeRunId
+      ? normalizeAgentUiLocale(getRunRecord(this.ctx.db, params.activeRunId)?.uiLocale ?? null)
+      : null;
+    if (activeRunUiLocale) return activeRunUiLocale;
+
+    const sessionLatestRunUiLocale = getLatestRunUiLocaleBySession(this.ctx.db, {
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId
+    });
+    if (sessionLatestRunUiLocale) return sessionLatestRunUiLocale;
+    return getLatestRunUiLocaleGlobal(this.ctx.db);
+  }
+
   async getMessagesContext(params: {
     workspaceId: string;
     sessionId: string;
@@ -4095,10 +4312,14 @@ export class AgentService {
       // messages-context 是通用 messages 视图，不应隐式依赖 active run 的 uiLocale；此处固定为 null。
       compactionSnippetUiLocale: null
     });
+    const runState = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
+    const uiLocale = this.resolveUiLocaleForSessionContext({ workspaceId: params.workspaceId, sessionId: params.sessionId, activeRunId: runState.activeRunId });
+    const system = buildOneShotSystemPrompt({ uiLocale });
+
     if (params.appendMessage && params.appendMessage.content.trim()) {
       messages.push({ role: params.appendMessage.role, content: params.appendMessage.content });
     }
-    return { headItemId: session.headItemId, messages };
+    return { headItemId: session.headItemId, messages, system };
   }
 
   async archiveReadFromWorker(params: {
@@ -4176,56 +4397,115 @@ export class AgentService {
       providerIdFromRun: run.providerId,
       modelIdFromRun: run.modelId
     });
-    const globalPrompts = getAgentGlobalPromptSettings(this.ctx);
-    const workspaceInstructions = await readWorkspaceAgentsInstructions(workspace.path, this.logger);
-    const system = buildSystemPrompt({
-      agentName: profile.agent.name,
-      agentPrompt: profile.agent.prompt || "",
-      agentGlobalPromptIds: Array.isArray(profile.agent.globalPromptIds) ? profile.agent.globalPromptIds : [],
-      globalPrompts: globalPrompts.items,
-      outputFormatInstruction: buildOutputFormatInstruction({ uiLocale: run.uiLocale }),
-      workspaceInstructions,
-      runtimeInstruction: buildRuntimeInstruction({ uiLocale: run.uiLocale, now: new Date() })
+
+    const runState = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
+    const uiLocale = this.resolveUiLocaleForSessionContext({
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+      activeRunId: runState.activeRunId
     });
+
+    const now = Date.now();
+    const cachedStatic = this.runPromptStaticCache.get(params.runId);
+    const staticPromptPromise = cachedStatic && cachedStatic.expiresAt > now
+      ? cachedStatic.promise
+      : (async (): Promise<RunPromptStatic> => {
+          const [globalPrompts, workspaceInstructions, builtinSkills, enabledExternalRoots] = await Promise.all([
+            Promise.resolve(getAgentGlobalPromptSettings(this.ctx)),
+            readWorkspaceAgentsInstructions(workspace.path, this.logger),
+            scanTopLevelSkillSummaries({
+              rootPath: path.join(this.ctx.repoRoot, BUILTIN_SKILLS_ROOT),
+              idPrefix: "builtin",
+              logger: this.logger
+            }),
+            listEnabledWorkspaceExternalSkillRoots(this.ctx, this.logger, workspace.id)
+          ]);
+
+          const externalSkillRoots: Array<{ sourceType: "workspace" | "repo"; repoId?: string; rootDir: string; rootPath: string }> = [];
+          const externalSkills: SkillSummaryItem[] = [];
+
+          for (const root of enabledExternalRoots) {
+            externalSkillRoots.push({
+              sourceType: root.sourceType,
+              ...(root.sourceType === "repo" ? { repoId: root.repoId } : {}),
+              rootDir: root.rootDir,
+              rootPath: root.rootPath
+            });
+            const scanned = await scanTopLevelSkillSummaries({
+              rootPath: root.rootPath,
+              idPrefix: root.sourceType === "workspace" ? "workspace" : "repo",
+              idBasePath: root.sourceType === "workspace" ? root.rootDir : `${root.repoId}/${root.rootDir}`,
+              logger: this.logger
+            }).catch((err) => {
+              this.logger.warn(
+                { err, workspaceId: workspace.id, sourceType: root.sourceType, repoId: root.sourceType === "repo" ? root.repoId : undefined },
+                "scan external skill roots failed"
+              );
+              return [] as SkillSummaryItem[];
+            });
+            externalSkills.push(...scanned);
+          }
+          externalSkills.sort((a, b) => a.id.localeCompare(b.id));
+
+          const baselineToolNames = ["read", "todolist", "archive_search", "archive_read", "scratchpad", "skill"] as const;
+          const enabledToolNames: string[] = [];
+          const enabledToolNameSet = new Set<string>();
+          for (const name of [...baselineToolNames, ...profile.agent.tools]) {
+            if (!name || enabledToolNameSet.has(name)) continue;
+            enabledToolNameSet.add(name);
+            enabledToolNames.push(name);
+          }
+          if (session.kind === "subtask") {
+            const filtered = enabledToolNames.filter((name) => name !== "subtask");
+            enabledToolNames.length = 0;
+            enabledToolNames.push(...filtered);
+          }
+
+          const subtaskDescription = enabledToolNames.includes("subtask")
+            ? buildSubtaskToolDescription(
+                listAvailableAgentsForSurface(this.ctx, "subtask").map((item) => ({
+                  id: item.id,
+                  name: item.name,
+                  summary: item.summary
+                }))
+              )
+            : undefined;
+
+          return {
+            systemStatic: buildSystemPrompt({
+              agentName: profile.agent.name,
+              agentPrompt: profile.agent.prompt || "",
+              agentGlobalPromptIds: Array.isArray(profile.agent.globalPromptIds) ? profile.agent.globalPromptIds : [],
+              globalPrompts: globalPrompts.items,
+              outputFormatInstruction: buildOutputFormatInstruction({ uiLocale }),
+              workspaceInstructions,
+              skillsInstruction: buildSkillsInstructionSection({ builtin: builtinSkills, external: externalSkills })
+            }),
+
+            tools: enabledToolNames.map((name) => ({
+              name,
+              description: toolDescription(name, { subtaskDescription }),
+              inputSchema: toolArgsSchema(name)
+            })),
+            externalSkillRoots
+          };
+        })();
+    this.runPromptStaticCache.set(params.runId, {
+      expiresAt: now + RUN_PROMPT_STATIC_CACHE_TTL_MS,
+      promise: staticPromptPromise
+    });
+
+    const staticPrompt = await staticPromptPromise;
+    const runtimeInstruction = buildRuntimeInstruction({ uiLocale, now: new Date() });
+    const system = appendRuntimeConstraintsSection(staticPrompt.systemStatic, runtimeInstruction);
 
     const visible = getSessionVisibleItems(this.ctx.db, params.workspaceId, params.sessionId);
     const { messages } = await this.buildPromptMessagesForSession({
       workspaceId: params.workspaceId,
       sessionId: params.sessionId,
-      compactionSnippetUiLocale: normalizeAgentUiLocale(run.uiLocale)
+      compactionSnippetUiLocale: uiLocale
     });
-
-    const baselineToolNames = ["read", "todolist", "archive_search", "archive_read", "scratchpad"] as const;
-    const enabledToolNames: string[] = [];
-    const enabledToolNameSet = new Set<string>();
-    for (const name of [...baselineToolNames, ...profile.agent.tools]) {
-      if (!name || enabledToolNameSet.has(name)) continue;
-      enabledToolNameSet.add(name);
-      enabledToolNames.push(name);
-    }
-    if (session.kind === "subtask") {
-      const filtered = enabledToolNames.filter((name) => name !== "subtask");
-      enabledToolNames.length = 0;
-      enabledToolNames.push(...filtered);
-    }
-
-    const subtaskDescription = enabledToolNames.includes("subtask")
-      ? buildSubtaskToolDescription(
-          listAvailableAgentsForSurface(this.ctx, "subtask").map((item) => ({
-            id: item.id,
-            name: item.name,
-            summary: item.summary
-          }))
-        )
-      : undefined;
-
-    const tools = enabledToolNames.map((name) => {
-      return {
-        name,
-        description: toolDescription(name, { subtaskDescription }),
-        inputSchema: toolArgsSchema(name)
-      };
-    });
+    const tools = staticPrompt.tools;
 
     const pendingTools = visible
       .filter((item) => item.runId === params.runId && item.kind === "tool")
@@ -4248,7 +4528,6 @@ export class AgentService {
         args: Record<string, unknown>;
       } => item !== null);
 
-    const runState = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
     return {
       headItemId: session.headItemId,
       system,
@@ -4256,8 +4535,28 @@ export class AgentService {
       tools,
       pendingTools,
       lastResponseTotalTokens: runState.lastResponseTotalTokens,
-      uiLocale: normalizeAgentUiLocale(run.uiLocale)
+      uiLocale,
+      externalSkillRoots: staticPrompt.externalSkillRoots
     };
+  }
+
+  checkChannelSenderAllowlist(input: { pluginId: string; senderId: string }) {
+    const pluginId = String(input.pluginId || "").trim();
+    const senderId = String(input.senderId || "").trim();
+
+    const stored = getAgentChannelSenderAllowlistSettings(this.ctx);
+    const bySettings = new Map<string, "admin" | "user">();
+    for (const it of stored.items || []) {
+      const channel = String(it.channel || "").trim();
+      const itemSenderId = String(it.senderId || "").trim();
+      if (!channel || !itemSenderId) continue;
+      const role = String((it as any).role || "").trim() === "admin" ? "admin" : "user";
+      bySettings.set(`${channel}\u0000${itemSenderId}`, role);
+    }
+    if (bySettings.size === 0) return { allowed: false, reason: "channel sender allowlist is empty" as const };
+    const role = bySettings.get(`${pluginId}\u0000${senderId}`);
+    if (!role) return { allowed: false, reason: "sender is not allowed" as const };
+    return { allowed: true, role };
   }
 
   private ensureWorkspace(workspaceId: string) {

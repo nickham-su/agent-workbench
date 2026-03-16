@@ -380,6 +380,16 @@
             >
               {{ effectiveModelLabel }}
             </div>
+            <a-button
+              size="small"
+              type="text"
+              class="!px-1"
+              :title="t('agent.client.externalSkillRootsTitle')"
+              :aria-label="t('agent.client.externalSkillRootsTitle')"
+              @click="onOpenExternalSkillRootsModal"
+            >
+              <template #icon><AppstoreOutlined /></template>
+            </a-button>
           </div>
           <div v-else class="flex items-center gap-2 text-[0.9em] text-[color:var(--text-tertiary)]">
             <span>{{ t("agent.client.noAgentHint") }}</span>
@@ -390,6 +400,50 @@
         </div>
       </div>
     </div>
+
+    <a-modal
+      :open="externalSkillRootsModalVisible"
+      :title="t('agent.client.externalSkillRootsTitle')"
+      :ok-text="t('common.save')"
+      :cancel-text="t('common.cancel')"
+      :confirm-loading="externalSkillRootsSaving"
+      :ok-button-props="{ disabled: externalSkillRootsLoading || !!externalSkillRootsError }"
+      @ok="onSaveExternalSkillRootsSettings"
+      @cancel="externalSkillRootsModalVisible = false"
+    >
+      <div class="text-[0.9em] text-[color:var(--text-tertiary)] mb-3">
+        {{ t("agent.client.externalSkillRootsHint") }}
+      </div>
+      <div v-if="externalSkillRootsLoading" class="py-6 text-center text-[color:var(--text-tertiary)]">
+        {{ t("common.loading") }}
+      </div>
+      <div v-else-if="externalSkillRootsError" class="py-3 text-red-500 whitespace-pre-wrap break-words">
+        {{ externalSkillRootsError }}
+      </div>
+      <div v-else-if="externalSkillRootsCandidates.length === 0" class="py-6 text-center text-[color:var(--text-tertiary)]">
+        {{ t("agent.client.externalSkillRootsEmpty") }}
+      </div>
+      <div v-else class="max-h-[50vh] overflow-auto">
+        <a-checkbox-group v-model:value="externalSkillRootsSelectedKeys" class="w-full">
+          <div class="flex flex-col gap-2">
+            <label
+              v-for="item in externalSkillRootsCandidates"
+              :key="externalSkillRootsKey(item)"
+              class="external-skill-root-item block w-full border border-[var(--border-color-secondary)] rounded px-2 py-1.5"
+            >
+              <a-checkbox :value="externalSkillRootsKey(item)" class="external-skill-root-checkbox w-full">
+                <span class="external-skill-root-content">
+                  <span class="external-skill-root-name text-[color:var(--text-primary)]" :title="item.displayName">{{ item.displayName }}</span>
+                  <span class="external-skill-root-count text-[0.85em] text-[color:var(--text-tertiary)]">
+                  {{ t("agent.client.externalSkillRootsMeta", { count: item.topLevelSkillCount }) }}
+                  </span>
+                </span>
+              </a-checkbox>
+            </label>
+          </div>
+        </a-checkbox-group>
+      </div>
+    </a-modal>
   </div>
 </template>
 
@@ -400,6 +454,7 @@ import {
   ClockCircleOutlined,
   CloseCircleOutlined,
   CopyOutlined,
+  AppstoreOutlined,
   DoubleRightOutlined,
   ExclamationCircleOutlined,
   ForkOutlined,
@@ -420,6 +475,7 @@ import AgentTodoListCard from "./AgentTodoListCard.vue";
 import AgentScratchpadCard from "./AgentScratchpadCard.vue";
 import AgentWriteCard from "./AgentWriteCard.vue";
 import { useAgentSessionStatusStore } from "./useAgentSessionStatusStore";
+import { resolveSubtaskSessionIdForDisplay } from "./subtaskSessionId";
 import {
   ApiError,
   cancelAgentSession,
@@ -429,9 +485,12 @@ import {
   getAgentContextItem,
   getAgentContextItems,
   revertAgentSession,
-  sendAgentMessage
+  detectWorkspaceExternalSkillRoots,
+  sendAgentMessage,
+  updateWorkspaceExternalSkillRootsSettings
 } from "@/shared/api";
 import { getInitialLocale } from "@/shared/i18n/locale";
+
 
 type AgentOption = {
   value: string;
@@ -573,6 +632,13 @@ const stickToBottom = ref(true);
 const userUnfollowed = ref(false);
 const forcedBottomOnFirstActive = ref(false);
 const nowTickMs = ref(Date.now());
+const externalSkillRootsModalVisible = ref(false);
+const externalSkillRootsLoading = ref(false);
+const externalSkillRootsSaving = ref(false);
+const externalSkillRootsError = ref("");
+const externalSkillRootsCandidates = ref<Array<{ sourceType: "workspace" | "repo"; repoId?: string; rootDir: string; displayName: string; topLevelSkillCount: number; enabled: boolean }>>([]);
+const externalSkillRootsSelectedKeys = ref<string[]>([]);
+
 
 type SavedScrollState = {
   scrollTop: number;
@@ -829,14 +895,6 @@ const effectiveModelLabel = computed(() => {
   return `${resolved.providerName} / ${resolved.modelName}`;
 });
 
-const effectiveContextWindowTokens = computed(() => {
-  const agentId = effectiveAgentId.value;
-  const option = props.agentOptions.find((item) => item.value === agentId);
-  const value = option?.resolvedModel?.contextWindowTokens;
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 1) return null;
-  return Math.floor(value);
-});
-
 const headerTokensNumberFormatter = new Intl.NumberFormat();
 const headerTokensPercentFormatter = new Intl.NumberFormat(undefined, {
   style: "percent",
@@ -848,12 +906,11 @@ const headerTokensText = computed(() => {
   // 需求：null/0 不展示 tokens 段
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return "";
   const formattedTokens = headerTokensNumberFormatter.format(Math.floor(value));
-  const limit = effectiveContextWindowTokens.value;
-  if (typeof limit !== "number" || !Number.isFinite(limit) || limit < 1) {
+  const ratioFromRunState = runState.value.contextTokenRatio;
+  if (typeof ratioFromRunState !== "number" || !Number.isFinite(ratioFromRunState) || ratioFromRunState < 0) {
     return `${formattedTokens} tokens`;
   }
-  const ratio = value / limit;
-  const formattedRatio = headerTokensPercentFormatter.format(ratio);
+  const formattedRatio = headerTokensPercentFormatter.format(ratioFromRunState);
   return `${formattedTokens} tokens (${formattedRatio})`;
 });
 const inputPlaceholder = computed(() => {
@@ -958,10 +1015,11 @@ const displayItems = computed<DisplayItem[]>(() => {
         ? item.output.toolCallId.trim()
         : undefined;
       const resultObj = toRecord(item.output.result);
-      const subtaskSessionId =
-        typeof resultObj?.subtaskSessionId === "string" && resultObj.subtaskSessionId.trim()
-          ? resultObj.subtaskSessionId.trim()
-          : undefined;
+      const subtaskSessionId = resolveSubtaskSessionIdForDisplay({
+        resultSubtaskSessionId: resultObj?.subtaskSessionId,
+        outputText: item.output.text,
+        fallbackText: headText
+      }) || undefined;
       const errorText = item.output.error ? truncateText(item.output.error, 220) : undefined;
       if (item.output.toolName === "apply_patch") {
         const applyPatch = parseApplyPatchDisplay(item.output.result);
@@ -1075,7 +1133,12 @@ const displayItems = computed<DisplayItem[]>(() => {
         const modeRaw = typeof session?.mode === "string" ? session.mode.trim() : "";
         const mode = modeRaw === "new" || modeRaw === "existing" || modeRaw === "fork" ? modeRaw : "";
         const agentId = typeof argsObj?.agentId === "string" ? argsObj.agentId.trim() : "";
-        const agentName = agentId ? resolveAgentName(agentId) : "";
+        const resultAgentName = typeof resultObj?.subtaskAgentName === "string" ? resultObj.subtaskAgentName.trim() : "";
+        const resultAgentId = typeof resultObj?.subtaskAgentId === "string" ? resultObj.subtaskAgentId.trim() : "";
+        const stableAgentId = agentId || resultAgentId;
+        const fallbackAgentName = stableAgentId ? resolveAgentName(stableAgentId) : "";
+        const agentName = resultAgentName || fallbackAgentName;
+
         return {
           id: item.id,
           prevId: item.prevId,
@@ -1090,7 +1153,7 @@ const displayItems = computed<DisplayItem[]>(() => {
           ...(errorText ? { toolError: errorText } : {}),
           ...(description ? { subtaskDescription: description } : {}),
           ...(mode ? { subtaskMode: mode } : {}),
-          ...(agentId ? { subtaskAgentId: agentId } : {}),
+          ...(stableAgentId ? { subtaskAgentId: stableAgentId } : {}),
           ...(agentName ? { subtaskAgentName: agentName } : {}),
             tone: item.status === "failed" ? "error" : "normal"
         };
@@ -2299,6 +2362,61 @@ function onRevertToMessage(itemId: number) {
   });
 }
 
+function externalSkillRootsKey(item: { sourceType: "workspace" | "repo"; repoId?: string; rootDir: string }) {
+  return item.sourceType === "workspace" ? `workspace\u0000${item.rootDir}` : `repo\u0000${String(item.repoId || "")}\u0000${item.rootDir}`;
+}
+
+async function onOpenExternalSkillRootsModal() {
+  externalSkillRootsModalVisible.value = true;
+  externalSkillRootsLoading.value = true;
+  externalSkillRootsError.value = "";
+  try {
+    const data = await detectWorkspaceExternalSkillRoots(props.workspaceId);
+    const items = (data.items || []).map((it) => ({
+      sourceType: it.sourceType === "workspace" ? "workspace" as const : "repo" as const,
+      repoId: String(it.repoId || "").trim() || undefined,
+      rootDir: String(it.rootDir || "").trim(),
+      displayName: String(it.displayName || "").trim(),
+      topLevelSkillCount: Number.isFinite(Number(it.topLevelSkillCount)) ? Math.max(0, Math.floor(Number(it.topLevelSkillCount))) : 0,
+      enabled: it.enabled === true
+    })).filter((it) => it.rootDir && (it.sourceType === "workspace" || !!it.repoId));
+    externalSkillRootsCandidates.value = items;
+    externalSkillRootsSelectedKeys.value = items.filter((it) => it.enabled).map((it) => externalSkillRootsKey(it));
+  } catch (err) {
+    externalSkillRootsCandidates.value = [];
+    externalSkillRootsSelectedKeys.value = [];
+    externalSkillRootsError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    externalSkillRootsLoading.value = false;
+  }
+}
+
+async function onSaveExternalSkillRootsSettings() {
+  if (externalSkillRootsLoading.value || externalSkillRootsError.value) return;
+  if (externalSkillRootsSaving.value) return;
+  externalSkillRootsSaving.value = true;
+  externalSkillRootsError.value = "";
+  try {
+    const selected = new Set(externalSkillRootsSelectedKeys.value);
+    const enabledRoots = externalSkillRootsCandidates.value
+      .map((it) => ({
+        sourceType: it.sourceType,
+        repoId: it.repoId,
+        rootDir: it.rootDir,
+        enabled: selected.has(externalSkillRootsKey(it))
+      }))
+      .filter((it) => it.enabled)
+      .map((it) => ({ sourceType: it.sourceType, repoId: it.repoId, rootDir: it.rootDir }));
+    await updateWorkspaceExternalSkillRootsSettings(props.workspaceId, { enabledRoots });
+    message.success(t("agent.client.externalSkillRootsSaved"));
+    externalSkillRootsModalVisible.value = false;
+  } catch (err) {
+    externalSkillRootsError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    externalSkillRootsSaving.value = false;
+  }
+}
+
 async function onSend() {
   if (isSubtaskSession.value) return;
   if (!hasAvailableAgents.value) {
@@ -2695,5 +2813,53 @@ onBeforeUnmount(() => {
 
 :deep(.agent-input-textarea) {
   border-radius: 4px;
+}
+
+.external-skill-root-item {
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .external-skill-root-item:hover {
+    background: rgba(255, 255, 255, 0.03);
+    border-color: rgba(59, 130, 246, 0.28);
+  }
+}
+
+.external-skill-root-checkbox :deep(.ant-checkbox-wrapper) {
+  display: flex !important;
+  align-items: center;
+  width: 100%;
+  margin-inline-end: 0;
+}
+
+.external-skill-root-checkbox :deep(.ant-checkbox + span) {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  padding-inline-start: 8px;
+}
+
+.external-skill-root-content {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+}
+
+.external-skill-root-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.external-skill-root-count {
+  flex: none;
+  white-space: nowrap;
 }
 </style>

@@ -21,8 +21,8 @@ import {
 import { agentWorkerPidPath } from "../../infra/fs/paths.js";
 import { AgentPluginHostClient } from "./agent.plugin-host-client.js";
 import { AgentPluginHostProcessManager } from "./agent.plugin-host-manager.js";
-import { registerChannelsModule } from "../channels/channels.module.js";
 import { nowMs } from "../../utils/time.js";
+import { AgentRunCompletedEventHub } from "./run-completed-events.js";
 
 async function enqueueRecoveringRuns(service: AgentService, runtime: AgentRuntimePort, logger: FastifyInstance["log"]) {
   const rows = listRecoverableRuns(service.getContext().db);
@@ -121,7 +121,7 @@ async function failRecoveringRuns(service: AgentService, logger: FastifyInstance
             prevId: head,
             kind: "system",
             status: "completed",
-            boundaryReason: "startup_terminated",
+            boundaryReason: null,
             output: {
               type: "system_text",
               text
@@ -162,7 +162,8 @@ async function failRecoveringRuns(service: AgentService, logger: FastifyInstance
 }
 
 export async function registerAgentModule(app: FastifyInstance, ctx: AppContext) {
-  const service = new AgentService(ctx, app.log);
+  const runCompletedEventHub = new AgentRunCompletedEventHub();
+  const service = new AgentService(ctx, app.log, runCompletedEventHub);
 
   let runtime: AgentRuntimePort;
   let workerManager: AgentWorkerProcessManager | null = null;
@@ -217,8 +218,7 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
     });
   }
 
-  await registerAgentRoutes(app, { service, runtime, pluginHost: pluginHostClient });
-  await registerChannelsModule(app, { ctx, agentService: service, runtime, pluginHost: pluginHostClient });
+  await registerAgentRoutes(app, { service, runtime, pluginHost: pluginHostClient, runCompletedEventHub });
 
   // 开发期默认：fail 模式直接在 listen 前完成 DB 清理，避免外部请求进入后出现竞态。
   if (ctx.agentStartupRecoveryMode === "fail") {

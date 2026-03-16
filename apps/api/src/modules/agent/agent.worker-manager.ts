@@ -66,7 +66,8 @@ export class AgentWorkerProcessManager {
         AWB_AGENT_WORKER_CONCURRENCY: String(this.params.workerConcurrency),
         AWB_AGENT_API_ORIGIN: this.params.apiOrigin,
         AWB_AGENT_INTERNAL_TOKEN: this.params.internalToken,
-        AWB_AGENT_WORKER_PID_FILE: this.params.pidFilePath
+        AWB_AGENT_WORKER_PID_FILE: this.params.pidFilePath,
+        AWB_AGENT_REPO_ROOT: this.params.repoRoot
       }
     });
     child.unref();

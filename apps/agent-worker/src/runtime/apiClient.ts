@@ -39,6 +39,7 @@ type PromptMessage =
 export type MessagesContext = {
   headItemId: number | null;
   messages: PromptMessage[];
+  system: string;
 };
 
 export type ExecutionProfile = {
@@ -104,6 +105,12 @@ export type PromptContext = {
   }>;
   lastResponseTotalTokens: number | null;
   uiLocale: AgentUiLocale | null;
+  externalSkillRoots: Array<{
+    sourceType: "workspace" | "repo";
+    repoId?: string;
+    rootDir: string;
+    rootPath: string;
+  }>;
 };
 
 export type AgentMcpSettingsPayload = {
@@ -351,7 +358,7 @@ export class AgentApiClient {
       childContextWindowTokens: number;
     };
   }) {
-    return this.request<{ sessionId: string; runId: string; workspacePath: string }>("/api/internal/agent/subtask/start", {
+    return this.request<{ sessionId: string; runId: string; workspacePath: string; agentName: string }>("/api/internal/agent/subtask/start", {
       method: "POST",
       body: input
     });

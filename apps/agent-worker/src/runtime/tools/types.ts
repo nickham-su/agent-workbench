@@ -58,6 +58,7 @@ export type ToolExecutionContext = {
   pendingTool: PendingToolExecution;
   signal: AbortSignal;
   apiClient: AgentApiClient;
+  promptContext: PromptContext;
   processNestedRun: (run: NestedRunContext, signal: AbortSignal) => Promise<void>;
   updateToolItem: (params: { status: "running" | "completed" | "failed"; output: Record<string, unknown> }) => Promise<void>;
   nowMs: () => number;
@@ -81,6 +82,7 @@ export const BUILTIN_TOOL_NAMES = [
   "todolist",
   "subtask",
   "archive_search",
+  "skill",
   "archive_read"
 ] as const;
 

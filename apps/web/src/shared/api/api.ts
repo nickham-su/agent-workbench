@@ -35,6 +35,10 @@ import type {
   CreateWorkspaceRequest,
   AttachWorkspaceRepoRequest,
   ChangesResponse,
+  UpdateWorkspaceExternalSkillRootsSettingsRequest,
+  WorkspaceExternalSkillRootsDetectResponse,
+  WorkspaceExternalSkillRootsSettingsResponse,
+  WorkspaceExternalSkillRootInput,
   CredentialRecord,
   GenerateSshKeypairResponse,
   FileCompareResponse,
@@ -94,6 +98,8 @@ import type {
   AgentGlobalPromptSettings,
   AgentMcpSettings,
   AgentRuntimeSettings,
+  AgentProviderModelsListView,
+  AgentProviderModelsListQuery,
   AgentPluginSettings,
   PluginRuntimeSnapshot,
   AgentChannelSenderAllowlistSettings,
@@ -412,6 +418,38 @@ export async function attachWorkspaceRepo(workspaceId: string, body: AttachWorks
 export async function detachWorkspaceRepo(workspaceId: string, repoId: string) {
   try {
     const res = await client.delete<WorkspaceDetail>(`/workspaces/${workspaceId}/repos/${repoId}`);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function detectWorkspaceExternalSkillRoots(workspaceId: string) {
+  try {
+    const res = await client.get<WorkspaceExternalSkillRootsDetectResponse>(`/workspaces/${workspaceId}/external-skill-roots/detect`);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getWorkspaceExternalSkillRootsSettings(workspaceId: string) {
+  try {
+    const res = await client.get<WorkspaceExternalSkillRootsSettingsResponse>(`/workspaces/${workspaceId}/external-skill-roots/settings`);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function updateWorkspaceExternalSkillRootsSettings(
+  workspaceId: string,
+  body: UpdateWorkspaceExternalSkillRootsSettingsRequest
+) {
+  try {
+    const res = await client.put<WorkspaceExternalSkillRootsSettingsResponse>(`/workspaces/${workspaceId}/external-skill-roots/settings`, {
+      enabledRoots: (body.enabledRoots || []).map((it: WorkspaceExternalSkillRootInput) => ({ sourceType: it.sourceType, repoId: it.repoId, rootDir: it.rootDir }))
+    });
     return res.data;
   } catch (err) {
     throw toApiError(err);
@@ -819,6 +857,17 @@ export async function getAgentProvidersSettings() {
 export async function updateAgentProvidersSettings(body: UpdateAgentProvidersSettingsRequest) {
   try {
     const res = await client.put<AgentProvidersSettingsView>("/settings/agent/providers", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getAgentProviderModels(providerId: string, query?: AgentProviderModelsListQuery) {
+  try {
+    const res = await client.get<AgentProviderModelsListView>(`/settings/agent/providers/${encodeURIComponent(providerId)}/models`, {
+      params: query
+    });
     return res.data;
   } catch (err) {
     throw toApiError(err);

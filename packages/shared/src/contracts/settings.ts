@@ -118,6 +118,40 @@ export const AgentProvidersSettingsViewSchema = Type.Object({
 });
 export type AgentProvidersSettingsView = Static<typeof AgentProvidersSettingsViewSchema>;
 
+export const AgentProviderModelsListParamsSchema = Type.Object({
+  providerId: Type.String({ minLength: 1 })
+});
+export type AgentProviderModelsListParams = Static<typeof AgentProviderModelsListParamsSchema>;
+
+export const AgentProviderModelsListQuerySchema = Type.Object({
+  refresh: Type.Optional(Type.Boolean())
+});
+export type AgentProviderModelsListQuery = Static<typeof AgentProviderModelsListQuerySchema>;
+
+export const AgentProviderModelsListItemSchema = Type.Object({
+  id: Type.String({ minLength: 1 }),
+  label: Type.String({ minLength: 1 })
+});
+export type AgentProviderModelsListItem = Static<typeof AgentProviderModelsListItemSchema>;
+
+export const AgentProviderModelsListSourceSchema = Type.Union([
+  Type.Literal("remote"),
+  Type.Literal("cache"),
+  Type.Literal("fallback")
+]);
+export type AgentProviderModelsListSource = Static<typeof AgentProviderModelsListSourceSchema>;
+
+export const AgentProviderModelsListViewSchema = Type.Object({
+  providerId: Type.String({ minLength: 1 }),
+  items: Type.Array(AgentProviderModelsListItemSchema),
+  source: AgentProviderModelsListSourceSchema,
+  cached: Type.Boolean(),
+  fetchedAt: Type.Number(),
+  expiresAt: Type.Number(),
+  warning: Type.Union([Type.String(), Type.Null()])
+});
+export type AgentProviderModelsListView = Static<typeof AgentProviderModelsListViewSchema>;
+
 export const AgentMcpServerLocalConfigSchema = Type.Object({
   type: Type.Literal("local"),
   command: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
@@ -212,6 +246,7 @@ export const AgentToolNameSchema = Type.Union([
   Type.Literal("todolist"),
   Type.Literal("subtask"),
   Type.Literal("archive_search"),
+  Type.Literal("skill"),
   Type.Literal("archive_read")
 ]);
 export type AgentToolName = Static<typeof AgentToolNameSchema>;

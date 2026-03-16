@@ -19,6 +19,7 @@ export const AgentContextToolNameSchema = Type.Union([
   Type.Literal("todolist"),
   Type.Literal("subtask"),
   Type.Literal("archive_search"),
+  Type.Literal("skill"),
   Type.Literal("archive_read"),
   AgentMcpToolNameSchema,
   PluginToolCanonicalNameSchema
@@ -199,8 +200,13 @@ export const AgentSessionRunStateSchema = Type.Object({
   // - `lastRun` represents the most recent *terminal* run (completed/failed/cancelled).
   // - It is designed for persistent display (e.g. show last elapsed after run finishes).
   // - It may be present even when `status: "running"` (meaning it refers to the previous run).
-  lastRun: Type.Optional(Type.Union([AgentSessionLastRunSchema, Type.Null()]))
-});
+  lastRun: Type.Optional(Type.Union([AgentSessionLastRunSchema, Type.Null()])),
+
+  // Authoritative context-window metadata aligned with the same effective run
+  // used by `lastResponseTotalTokens` display (prefer active run, fallback last terminal run).
+  contextWindowTokens: Type.Optional(Type.Union([Type.Integer({ minimum: 1 }), Type.Null()])),
+  contextTokenRatio: Type.Optional(Type.Union([Type.Number({ minimum: 0 }), Type.Null()]))
+}, { additionalProperties: false });
 export type AgentSessionRunState = Static<typeof AgentSessionRunStateSchema>;
 
 export const AgentSessionStatusSummaryRequestSchema = Type.Object(
@@ -219,13 +225,22 @@ export type AgentSessionStatusSummaryRequest = Static<typeof AgentSessionStatusS
 
 // Compatibility: IM design doc uses `terminalStatus`, while existing run-state uses `lastTerminalStatus`.
 // Keep both in status-summary response.
-export const AgentSessionRunStateWithTerminalStatusSchema = Type.Intersect(
-  [
-    AgentSessionRunStateSchema,
-    Type.Object({
-      terminalStatus: AgentSessionTerminalStatusSchema
-    })
-  ],
+export const AgentSessionRunStateWithTerminalStatusSchema = Type.Object(
+  {
+    ...AgentSessionRunStateSchema.properties,
+    terminalStatus: AgentSessionTerminalStatusSchema
+  },
+  {
+    additionalProperties: false
+  }
+);
+
+const AgentSessionStatusSummarySessionSchema = Type.Object(
+  {
+    ...AgentSessionRecordSchema.properties,
+    workspaceTitle: Type.Optional(Type.String({ minLength: 1 })),
+    workspaceDirName: Type.Optional(Type.String({ minLength: 1 }))
+  },
   { additionalProperties: false }
 );
 
@@ -233,7 +248,7 @@ export const AgentSessionStatusSummaryResponseSchema = Type.Object(
   {
     updatedAt: Type.Number(),
     generatedAt: Type.Optional(Type.Number()),
-    session: AgentSessionRecordSchema,
+    session: AgentSessionStatusSummarySessionSchema,
     agent: Type.Union([
       Type.Object({
         id: Type.String({ minLength: 1 }),
@@ -373,6 +388,24 @@ export const AgentInternalCreateSessionRequestSchema = Type.Object(
   { additionalProperties: false }
 );
 export type AgentInternalCreateSessionRequest = Static<typeof AgentInternalCreateSessionRequestSchema>;
+
+export const AgentInternalChannelSenderRoleSchema = Type.Union([Type.Literal("admin"), Type.Literal("user")]);
+export type AgentInternalChannelSenderRole = Static<typeof AgentInternalChannelSenderRoleSchema>;
+
+export const AgentChannelAllowlistCheckRequestSchema = Type.Object(
+  {
+    pluginId: Type.String({ minLength: 1 }),
+    senderId: Type.String({ minLength: 1 })
+  },
+  { additionalProperties: false }
+);
+export type AgentChannelAllowlistCheckRequest = Static<typeof AgentChannelAllowlistCheckRequestSchema>;
+
+export const AgentChannelAllowlistCheckResponseSchema = Type.Object(
+  { allowed: Type.Boolean(), role: Type.Optional(AgentInternalChannelSenderRoleSchema), reason: Type.Optional(Type.String({ minLength: 1 })) },
+  { additionalProperties: false }
+);
+export type AgentChannelAllowlistCheckResponse = Static<typeof AgentChannelAllowlistCheckResponseSchema>;
 
 export const AgentSendMessageRequestSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),

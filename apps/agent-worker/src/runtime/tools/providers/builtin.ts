@@ -4,7 +4,7 @@ import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call"
 import { runBashCommand } from "../../bash.js";
 import { applyPreparedPatch, prepareApplyPatchTool } from "../../applyPatch.js";
 import { getBashToolAppendix } from "../../bashTools.js";
-import { runReadTool, runWriteTool } from "../../fileTools.js";
+import { runReadTool, runSkillTool, runWriteTool } from "../../fileTools.js";
 import { parseTodolistArgs, toTodolistResult } from "../../todolist.js";
 import { parseScratchpadArgs, toScratchpadResult } from "../../scratchpad.js";
 import type { AvailableToolContext, ResolvedToolDefinition, ToolExecutionContext, ToolListContext, ToolProvider } from "../types.js";
@@ -50,10 +50,7 @@ function parseOptionalPositiveIntegerArg(raw: unknown, fieldName: string) {
 }
 
 function parseSubtaskArgs(raw: Record<string, unknown>): ParsedSubtaskArgs {
-  const description = requireNonEmptyStringArg(raw.description, "subtask.description");
-  if (description.length > 20) {
-    throw new Error("subtask.description must be <= 20 characters");
-  }
+  const description = requireNonEmptyStringArg(raw.description, "subtask.description").slice(0, 50);
   const prompt = requireNonEmptyStringArg(raw.prompt, "subtask.prompt");
   const agentId = requireNonEmptyStringArg(raw.agentId, "subtask.agentId");
   const sessionRaw = toRecord(raw.session);
@@ -137,10 +134,25 @@ export class BuiltinToolProvider implements ToolProvider {
 
   isToolEnabled(toolName: string, ctx: AvailableToolContext | ToolExecutionContext) {
     if (!isBuiltinToolName(toolName)) return false;
-    if (toolName === "read" || toolName === "todolist" || toolName === "archive_search" || toolName === "archive_read" || toolName === "scratchpad") {
+    if (toolName === "read" || toolName === "todolist" || toolName === "archive_search" || toolName === "archive_read" || toolName === "scratchpad" || toolName === "skill") {
       return true;
     }
     return ctx.profile.agent.tools.includes(toolName as BuiltinToolName);
+  }
+
+  protected async generateSingleCallSummary(params: {
+    profile: {
+      provider: ToolExecutionContext["profile"]["provider"];
+      model: ToolExecutionContext["profile"]["model"];
+    };
+    input: {
+      messages: Array<{ role: string; content: unknown }>;
+      system?: string;
+      timeoutMs: number;
+      abortSignal: AbortSignal;
+    };
+  }) {
+    return generateSingleCallText(params.profile, params.input);
   }
 
   async execute(toolName: string, args: Record<string, unknown>, ctx: ToolExecutionContext): Promise<unknown> {
@@ -207,6 +219,18 @@ export class BuiltinToolProvider implements ToolProvider {
           signal: ctx.signal
         });
       }
+      case "skill": {
+        const id = requireNonEmptyStringArg(args.id, "skill.id");
+        const repoRoot = String(process.env.AWB_AGENT_REPO_ROOT || "").trim() || process.cwd();
+        return await runSkillTool({
+          workspacePath: ctx.run.workspacePath,
+          repoRoot,
+          id,
+          externalSkillRoots: ctx.promptContext.externalSkillRoots,
+          signal: ctx.signal
+        });
+      }
+
       case "write": {
         const filePath = requireNonEmptyStringArg(args.filePath, "write.filePath");
         if (typeof args.content !== "string") {
@@ -333,17 +357,19 @@ export class BuiltinToolProvider implements ToolProvider {
                 }
               });
 
-              const summary = await generateSingleCallText(
-                {
+              const summary = await this.generateSingleCallSummary({
+                profile: {
                   provider: ctx.profile.provider,
                   model: ctx.profile.model
                 },
-                {
+                input: {
+                  // subtask prefork 是 one-shot 摘要任务，使用 messages-context 提供的通用最小 system。
+                  system: messagesContext.system,
                   messages: messagesContext.messages,
                   timeoutMs: COMPACTION_TIMEOUT_MS,
                   abortSignal: ctx.signal
                 }
-              );
+              });
               const summaryText = String(summary.text || "").trim();
               if (summaryText) {
                 preforkSummaryText = summaryText;
@@ -385,7 +411,9 @@ export class BuiltinToolProvider implements ToolProvider {
               body: "Subtask started."
             }),
             result: {
-              subtaskSessionId: started.sessionId
+              subtaskSessionId: started.sessionId,
+              subtaskAgentId: parsed.agentId,
+              subtaskAgentName: started.agentName
             }
           }
         });
@@ -426,6 +454,8 @@ export class BuiltinToolProvider implements ToolProvider {
         });
         const result = {
           subtaskSessionId: started.sessionId,
+          subtaskAgentId: parsed.agentId,
+          subtaskAgentName: started.agentName,
           resultText: subtaskResult.resultText
         };
         if (subtaskStatus.status === "failed" || subtaskStatus.status === "cancelled") {

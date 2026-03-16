@@ -15,6 +15,7 @@ COPY apps/api/package.json apps/api/package.json
 COPY apps/agent-worker/package.json apps/agent-worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY packages/shared/package.json packages/shared/package.json
+COPY plugins/feishu/package.json plugins/feishu/package.json
 
 RUN npm ci
 
@@ -22,6 +23,7 @@ RUN npm ci
 COPY apps ./apps
 COPY packages ./packages
 COPY plugins ./plugins
+COPY skills ./skills
 
 RUN npm run build
 
@@ -75,6 +77,7 @@ COPY --from=builder /app/apps/agent-worker /app/apps/agent-worker
 COPY --from=builder /app/apps/web /app/apps/web
 COPY --from=builder /app/packages/shared /app/packages/shared
 COPY --from=builder /app/plugins /app/plugins
+COPY --from=builder /app/skills /app/skills
 
 EXPOSE 4310
 

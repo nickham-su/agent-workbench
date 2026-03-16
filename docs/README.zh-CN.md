@@ -172,7 +172,7 @@ npm run dev
 - `AWB_AGENT_PLUGIN_SERVICES_ENABLED=true`
 
 并确保 agent worker 正常运行（默认 `AWB_AGENT_WORKER_ENABLED=true`）。
-若 worker 未运行，run 无法完成，reply dispatcher 不会派发最终回复。
+若 worker 未运行，run 无法完成，因此也不会触发 SSE `run.completed` 事件，飞书侧无法收到最终完成消息。
 
 允许触发 IM 会话运行的发送者请在设置页 `设置 -> Agent -> IM用户列表` 中配置。
 
@@ -184,3 +184,12 @@ npm run dev
 | `npm run dev:web` | 仅启动前端 |
 | `npm run build` | 构建生产版本 |
 | `npm run typecheck` | 类型检查 |
+
+---
+
+## 设计文档
+
+设计方案与架构讨论文档位于 `docs/design/`。
+
+- `docs/design/feishu-plugin-ts-rewrite-and-sse-broadcast.md`
+  - 飞书插件 TS 重写与平台级 SSE 广播方案（最终版）

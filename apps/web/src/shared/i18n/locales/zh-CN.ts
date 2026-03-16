@@ -350,6 +350,13 @@ export default {
       compactionArchivedHint: "更早的内容已归档",
       slashCommandHintTitle: "特殊指令",
       slashCommandHintStrictOnly: "精确匹配",
+      externalSkillRootsTitle: "skill目录",
+      externalSkillRootsHint: "选择要启用的skill目录。保存后在下次发送消息时生效。",
+      externalSkillRootsEmpty: "未探测到候选 skill目录",
+      externalSkillRootsSaved: "已保存 skill目录配置",
+      externalSkillRootsSourceWorkspace: "Workspace",
+      externalSkillRootsSourceRepo: "Repo",
+      externalSkillRootsMeta: "{count} 个skills",
       slashCommandHintNoMatch: "未找到匹配的指令: /{query}",
       slashCommands: {
         compact: {
@@ -835,7 +842,9 @@ export default {
         empty: "暂无模型"
       },
       modelForm: {
-        idLabel: "Model 内部ID(自动生成)",
+        idLabel: "Model 内部ID",
+        idHelp: "支持从候选列表选择, 也支持手动输入任意 Model ID。",
+        renameGuardLabel: "改名引用检查",
         providerModelIdLabel: "Provider 模型ID",
         nameLabel: "显示名称",
         contextWindowTokensLabel: "上下文窗口 Token 上限",
@@ -866,7 +875,12 @@ export default {
         invalidAiSdkJson: "AI SDK 通用参数 JSON 格式错误, 需要是对象",
         invalidProviderOptionsJson: "Provider 参数 JSON 格式错误, 需要是对象",
         duplicateProviderId: "Provider ID 已存在",
-        duplicateModelId: "Model ID 已存在"
+        duplicateModelId: "Model ID 已存在",
+        modelListLoadFailed: "加载模型候选失败, 可手动输入 Model ID。",
+        renameBlocked: "当前模型 ID 正被引用, 请先解除引用后再修改：{refs}",
+        renameBlockedGlobalDefault: "全局默认模型",
+        renameBlockedAgent: "Agent {id}",
+        renameBlockedGeneric: "模型 ID 正被引用, 请先解除引用后再修改。"
       },
       saved: "已保存"
     },

@@ -121,6 +121,13 @@ export function createPluginHostServer(params: {
         return;
       }
 
+      if (method === "POST" && pathname === "/internal/plugins/feishu/send-text") {
+        const body = await readJsonBody(req);
+        const result = await servicesRuntime.feishuSendText(body as any);
+        sendJson(res, 200, result);
+        return;
+      }
+
       if (method === "POST" && pathname === "/internal/plugins/tools/execute") {
         const body = await readJsonBody(req);
         const result = await runtime.executeTool(body);

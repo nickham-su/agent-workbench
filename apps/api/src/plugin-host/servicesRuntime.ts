@@ -9,6 +9,7 @@ type PluginServiceRuntime = {
   // Optional outbound channel operations.
   // For feishu, we need replyText(chatId,messageId,text).
   replyText?: (params: { chatId: string; messageId: string; text: string }) => Promise<void> | void;
+  sendText?: (params: { chatId: string; text: string }) => Promise<void> | void;
 };
 
 type FeishuPluginConfig = {
@@ -25,6 +26,7 @@ type FeishuPluginDefinition = {
         config: FeishuPluginConfig;
         apiOrigin: string;
         internalToken: string;
+        dataDir: string;
         logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void };
       }) => Promise<PluginServiceRuntime>;
     };
@@ -106,6 +108,7 @@ export function createPluginServicesRuntime(params: { db: Db; dataDir: string; a
       config,
       apiOrigin: params.apiOrigin,
       internalToken: params.internalToken,
+      dataDir: params.dataDir,
       logger: {
         info: (msg) => console.log(`[agent-plugin-host][feishu] ${msg}`),
         warn: (msg) => console.warn(`[agent-plugin-host][feishu] ${msg}`),
@@ -208,6 +211,31 @@ export function createPluginServicesRuntime(params: { db: Db; dataDir: string; a
       }
 
       await running.replyText({ chatId, messageId, text });
+      return { ok: true } as const;
+    },
+    async feishuSendText(input: { chatId: string; text: string }) {
+      if (!running || typeof running.sendText !== "function") {
+        const err: any = new Error("feishu gateway is not running");
+        err.statusCode = 503;
+        err.code = "FEISHU_GATEWAY_NOT_RUNNING";
+        throw err;
+      }
+      const chatId = String(input.chatId || "").trim();
+      let text = typeof input.text === "string" ? input.text : String(input.text ?? "");
+      if (!chatId) {
+        const err: any = new Error("chatId is required");
+        err.statusCode = 400;
+        err.code = "FEISHU_SEND_ARGS_INVALID";
+        throw err;
+      }
+      const MAX_CHARS = 6000;
+      const suffix = "\n\n（已截断，超过长度限制）";
+      if (text.length > MAX_CHARS) {
+        const headLen = Math.max(0, MAX_CHARS - suffix.length);
+        text = text.slice(0, headLen) + suffix;
+      }
+
+      await running.sendText({ chatId, text });
       return { ok: true } as const;
     },
     async stop() {

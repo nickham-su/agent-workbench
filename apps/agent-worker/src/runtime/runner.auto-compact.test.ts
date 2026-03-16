@@ -39,7 +39,59 @@ test("buildCompactionUserPrompt 按 uiLocale 返回对应语言", () => {
   assert.ok(en.includes("Please produce a structured summary of the current session"));
   assert.ok(en.includes("Focus on:"));
   assert.ok(fallback.includes("Please produce a structured summary of the current session"));
+  assert.ok(zh.includes("若上下文包含与工作目标相关的文档,请在总结中列出文档路径"));
+  assert.ok(en.includes("if the context includes documents relevant to the work goal, list their document paths in the summary"));
   assert.equal(fallback.includes("请基于当前会话内容输出一份结构化总结"), false);
+});
+
+test("generateCompactionSummary 透传 messages-context.system 到单次调用", async () => {
+  let captured: {
+    system?: string;
+    messages: Array<{ role: string; content: unknown }>;
+  } | null = null;
+  class TestRunner extends AgentRunner {
+    protected override async generateSingleCallSummary(params: {
+      profile: {
+        provider: unknown;
+        model: unknown;
+      };
+      input: {
+        messages: Array<{ role: string; content: unknown }>;
+        system?: string;
+        timeoutMs: number;
+        abortSignal: AbortSignal;
+      };
+    }) {
+      captured = {
+        system: params.input.system,
+        messages: params.input.messages
+      };
+      return { text: "ok", totalTokens: null };
+    }
+  }
+
+  const runner = new TestRunner(
+    {
+      async getMessagesContext(input: { appendMessage?: { role: string; content: string } }) {
+        return {
+          headItemId: 1,
+          system: "LANG-SYSTEM",
+          messages: [{ role: "user", content: "hello" }, ...(input.appendMessage ? [input.appendMessage] : [])]
+        };
+      }
+    } as any,
+    {} as any,
+    { info() {}, warn() {}, error() {} },
+    1
+  );
+
+  const text = await (runner as any).generateCompactionSummary({
+    profile: { resolved: { workspaceId: "ws", sessionId: "sess" }, provider: {}, model: {} },
+    context: { uiLocale: "zh-CN" },
+    signal: AbortSignal.timeout(1_000)
+  });
+  assert.equal(text, "ok");
+  assert.equal((captured as { system?: string } | null)?.system, "LANG-SYSTEM");
 });
 
 test("generateCompactionSummary 使用 messages-context 追加压缩提示词", async () => {
@@ -48,6 +100,7 @@ test("generateCompactionSummary 使用 messages-context 追加压缩提示词", 
       async getMessagesContext(input: { appendMessage?: { role: string; content: string } }) {
         return {
           headItemId: 1,
+          system: "",
           messages: [
             { role: "user", content: "hello" },
             ...(input.appendMessage ? [input.appendMessage] : [])

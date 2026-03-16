@@ -1,9 +1,13 @@
 import type { FastifyBaseLogger } from "fastify";
 import fs from "node:fs/promises";
+import { createHash } from "node:crypto";
 import type {
   AgentItem,
   AgentGlobalPromptItem,
   AgentGlobalPromptSettings,
+  AgentProviderModelsListQuery,
+  AgentProviderModelsListView,
+  AgentProviderModelsListParams,
   AgentMcpServerConfig,
   AgentMcpSettings,
   AgentRuntimeSettings,
@@ -73,6 +77,10 @@ const RUNTIME_AUTO_COMPACT_THRESHOLD_DEFAULT = 80;
 const RUNTIME_AUTO_COMPACT_THRESHOLD_MIN = 50;
 const RUNTIME_AUTO_COMPACT_THRESHOLD_MAX = 99;
 const RUNTIME_SESSION_TERMINAL_SOUND_ENABLED_DEFAULT = true;
+const PROVIDER_MODELS_REMOTE_TIMEOUT_MS = 5_000;
+const PROVIDER_MODELS_CACHE_TTL_MS = 5 * 60 * 1000;
+const DEFAULT_ANTHROPIC_VERSION = "2023-06-01";
+const PROVIDER_MODELS_FALLBACK_WARNING = "AGENT_PROVIDER_MODELS_REMOTE_UNAVAILABLE";
 
 type AgentProvidersSettingsStored = Omit<AgentProvidersSettings, "updatedAt">;
 type AgentSettingsStored = Omit<AgentSettings, "updatedAt">;
@@ -87,6 +95,19 @@ type ExecutionProfileResolved = {
   provider: AgentProviderStored;
   model: AgentProviderStored["models"][number];
 };
+
+type ProviderModelsCacheItem = {
+  value: AgentProviderModelsListView;
+  expiresAt: number;
+};
+
+const providerModelsCache = new Map<string, ProviderModelsCacheItem>();
+
+function fingerprintSecret(value: string | null | undefined) {
+  const source = typeof value === "string" ? value.trim() : "";
+  if (!source) return "none";
+  return createHash("sha256").update(source).digest("hex").slice(0, 16);
+}
 
 type AgentExecutionSurface = "user" | "subtask";
 type AgentViewWithResolvedModel = AgentItem & {
@@ -153,6 +174,30 @@ function normalizeBaseURL(raw: unknown) {
     throw new HttpError(400, "Invalid provider baseURL", "AGENT_PROVIDER_BASE_URL_INVALID");
   }
   return value.endsWith("/") ? value.slice(0, -1) : value;
+}
+
+function normalizeProviderModelsUrl(baseURL: string) {
+  const trimmed = normalizeBaseURL(baseURL);
+  if (trimmed.endsWith("/v1")) return `${trimmed}/models`;
+  return `${trimmed}/v1/models`;
+}
+
+function buildProviderModelsCacheKey(provider: AgentProviderStored) {
+  return [provider.id, provider.npm, provider.options.baseURL, fingerprintSecret(provider.options.apiKey)].join("\u0001");
+}
+
+function clearProviderModelsCache(providerIds?: Iterable<string>) {
+  if (!providerIds) {
+    providerModelsCache.clear();
+    return;
+  }
+  const idSet = new Set(Array.from(providerIds).map((id) => id.trim()).filter(Boolean));
+  if (idSet.size === 0) return;
+  for (const [cacheKey, entry] of providerModelsCache.entries()) {
+    if (idSet.has(entry.value.providerId)) {
+      providerModelsCache.delete(cacheKey);
+    }
+  }
 }
 
 function normalizeApiKeyInput(raw: unknown) {
@@ -501,6 +546,137 @@ function toAgentProvidersSettingsView(settings: AgentProvidersSettingsStored, up
     })),
     updatedAt
   };
+}
+
+function listConfiguredProviderModels(provider: AgentProviderStored) {
+  const seen = new Set<string>();
+  return provider.models
+    .map((item) => item.id.trim())
+    .filter((id) => {
+      if (!id || seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    })
+    .map((id) => ({ id, label: id }));
+}
+
+function parseRemoteModelsItems(raw: unknown) {
+  const payload = toRecordObject(raw);
+  const data = Array.isArray(payload?.data) ? payload.data : [];
+  const seen = new Set<string>();
+  const items: Array<{ id: string; label: string }> = [];
+  for (const item of data) {
+    const id = typeof (item as { id?: unknown })?.id === "string" ? (item as { id: string }).id.trim() : "";
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    items.push({ id, label: id });
+  }
+  return items;
+}
+
+async function fetchRemoteProviderModels(provider: AgentProviderStored) {
+  const apiKey = provider.options.apiKey?.trim();
+  if (!apiKey) {
+    throw new HttpError(400, `Provider '${provider.id}' apiKey is missing`, "AGENT_PROVIDER_API_KEY_MISSING");
+  }
+  if (provider.npm !== "@ai-sdk/openai" && provider.npm !== "@ai-sdk/anthropic") {
+    throw new HttpError(400, `Unsupported provider npm: ${provider.npm}`, "AGENT_PROVIDER_MODELS_UNSUPPORTED_PROVIDER");
+  }
+
+  const url = normalizeProviderModelsUrl(provider.options.baseURL);
+  const headers: Record<string, string> = {
+    Accept: "application/json"
+  };
+  if (provider.npm === "@ai-sdk/openai") {
+    headers.Authorization = `Bearer ${apiKey}`;
+  } else {
+    headers["x-api-key"] = apiKey;
+    headers["anthropic-version"] = DEFAULT_ANTHROPIC_VERSION;
+  }
+
+  const res = await fetch(url, {
+    method: "GET",
+    headers,
+    signal: AbortSignal.timeout(PROVIDER_MODELS_REMOTE_TIMEOUT_MS)
+  });
+  if (!res.ok) {
+    throw new Error(`models list request failed: ${res.status}`);
+  }
+  const payload = await res.json();
+  return parseRemoteModelsItems(payload);
+}
+
+export async function getAgentProviderModels(
+  ctx: AppContext,
+  logger: FastifyBaseLogger,
+  paramsRaw: unknown,
+  queryRaw?: unknown
+): Promise<AgentProviderModelsListView> {
+  const params = (paramsRaw ?? {}) as Partial<AgentProviderModelsListParams>;
+  const providerId = typeof params.providerId === "string" ? params.providerId.trim() : "";
+  if (!providerId) {
+    throw new HttpError(400, "Provider id is required", "AGENT_PROVIDER_NOT_FOUND");
+  }
+
+  const query = (queryRaw ?? {}) as AgentProviderModelsListQuery;
+  const refresh = query.refresh === true;
+
+  const settings = getAgentProvidersSettingsInternal(ctx);
+  const provider = settings.providers.find((item) => item.id === providerId);
+  if (!provider) {
+    throw new HttpError(400, "Provider not found", "AGENT_PROVIDER_NOT_FOUND");
+  }
+
+  const cacheKey = buildProviderModelsCacheKey(provider);
+  const now = nowMs();
+  if (!refresh) {
+    const cached = providerModelsCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      return {
+        ...cached.value,
+        source: "cache",
+        cached: true
+      };
+    }
+  }
+
+  try {
+    const items = await fetchRemoteProviderModels(provider);
+    const value: AgentProviderModelsListView = {
+      providerId: provider.id,
+      items,
+      source: "remote",
+      cached: false,
+      fetchedAt: now,
+      expiresAt: now + PROVIDER_MODELS_CACHE_TTL_MS,
+      warning: null
+    };
+    providerModelsCache.set(cacheKey, { value, expiresAt: value.expiresAt });
+    return value;
+  } catch (err) {
+    logger.warn(
+      {
+        providerId: provider.id,
+        providerNpm: provider.npm,
+        providerBaseURL: provider.options.baseURL,
+        errCode: err instanceof HttpError ? err.code : undefined,
+        errStatusCode: err instanceof HttpError ? err.statusCode : undefined,
+        errMessage: err instanceof Error ? err.message : String(err ?? "unknown")
+      },
+      "agent provider models fetch failed, fallback to configured models"
+    );
+    const value: AgentProviderModelsListView = {
+      providerId: provider.id,
+      items: listConfiguredProviderModels(provider),
+      source: "fallback",
+      cached: false,
+      fetchedAt: now,
+      expiresAt: now + PROVIDER_MODELS_CACHE_TTL_MS,
+      warning: PROVIDER_MODELS_FALLBACK_WARNING
+    };
+    providerModelsCache.set(cacheKey, { value, expiresAt: value.expiresAt });
+    return value;
+  }
 }
 
 function normalizeAgentTools(raw: unknown): AgentToolName[] {
@@ -1054,6 +1230,46 @@ export function getAgentRuntimeSettings(ctx: AppContext): AgentRuntimeSettings {
   };
 }
 
+function assertProviderModelRenameNotReferenced(
+  currentProviders: AgentProvidersSettings["providers"],
+  nextProviders: AgentProvidersSettings["providers"],
+  currentDefault: AgentProvidersSettings["default"],
+  agentSettings: AgentSettingsStored
+) {
+  const currentByProviderId = new Map(currentProviders.map((provider) => [provider.id, provider]));
+
+  for (const provider of nextProviders) {
+    const prevProvider = currentByProviderId.get(provider.id);
+    if (!prevProvider) continue;
+    const prevModelIds = new Set(prevProvider.models.map((model) => model.id));
+    const nextModelIds = new Set(provider.models.map((model) => model.id));
+    const removedIds = [...prevModelIds].filter((id) => !nextModelIds.has(id));
+    const addedIds = [...nextModelIds].filter((id) => !prevModelIds.has(id));
+    if (addedIds.length === 0) continue;
+    if (removedIds.length === 0) continue;
+
+    const referencedDetails: string[] = [];
+    for (const oldId of removedIds) {
+      if (currentDefault?.providerId === provider.id && currentDefault.modelId === oldId) {
+        referencedDetails.push(`global default: ${provider.id}/${oldId}`);
+      }
+      for (const agent of agentSettings.agents) {
+        if (agent.defaultModel?.providerId === provider.id && agent.defaultModel.modelId === oldId) {
+          referencedDetails.push(`agent '${agent.id}': ${provider.id}/${oldId}`);
+        }
+      }
+    }
+
+    if (referencedDetails.length > 0) {
+      throw new HttpError(
+        409,
+        `Model id rename is blocked because old id is referenced: ${referencedDetails.join(", ")}`,
+        "AGENT_PROVIDER_MODEL_RENAME_REFERENCED"
+      );
+    }
+  }
+}
+
 export function updateAgentChannelSenderAllowlistSettings(
   ctx: AppContext,
   logger: FastifyBaseLogger,
@@ -1343,6 +1559,14 @@ export function updateAgentProvidersSettings(
     }
   }
 
+  const currentAgentSettings = getAgentSettingsStored(ctx).settings;
+  assertProviderModelRenameNotReferenced(
+    current.providers,
+    providers,
+    current.default,
+    currentAgentSettings
+  );
+
   const updatedAt = nowMs();
   setSettingJson(
     ctx.db,
@@ -1353,6 +1577,9 @@ export function updateAgentProvidersSettings(
     },
     updatedAt
   );
+
+  const affectedProviderIds = new Set([...current.providers.map((provider) => provider.id), ...providers.map((provider) => provider.id)]);
+  clearProviderModelsCache(affectedProviderIds);
 
   logger.info({ providers: providers.length, updatedAt }, "agent providers settings updated");
   return toAgentProvidersSettingsView({ default: defaultRef, providers }, updatedAt);

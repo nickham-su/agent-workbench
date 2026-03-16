@@ -352,6 +352,13 @@ export default {
       compactionArchivedHint: "Earlier messages have been archived",
       slashCommandHintTitle: "Commands",
       slashCommandHintStrictOnly: "Exact match",
+      externalSkillRootsTitle: "Skill Directories",
+      externalSkillRootsHint: "Choose skill directories to enable. Changes take effect the next time you send a message.",
+      externalSkillRootsEmpty: "No candidate skill directories were detected",
+      externalSkillRootsSaved: "Skill directories settings saved",
+      externalSkillRootsSourceWorkspace: "Workspace",
+      externalSkillRootsSourceRepo: "Repo",
+      externalSkillRootsMeta: "{count} skills",
       slashCommandHintNoMatch: "No matching command: /{query}",
       slashCommands: {
         compact: {
@@ -837,7 +844,9 @@ export default {
         empty: "No models"
       },
       modelForm: {
-        idLabel: "Model Internal ID (auto)",
+        idLabel: "Model Internal ID",
+        idHelp: "Choose from suggestions or manually input any model ID.",
+        renameGuardLabel: "Rename reference check",
         providerModelIdLabel: "Provider Model ID",
         nameLabel: "Display name",
         contextWindowTokensLabel: "Context Window Tokens",
@@ -868,7 +877,12 @@ export default {
         invalidAiSdkJson: "Invalid AI SDK params JSON, object expected",
         invalidProviderOptionsJson: "Invalid provider params JSON, object expected",
         duplicateProviderId: "Provider ID already exists",
-        duplicateModelId: "Model ID already exists"
+        duplicateModelId: "Model ID already exists",
+        modelListLoadFailed: "Failed to load model suggestions. You can still input model ID manually.",
+        renameBlocked: "This model ID is still referenced. Remove references before renaming: {refs}",
+        renameBlockedGlobalDefault: "Global default model",
+        renameBlockedAgent: "Agent {id}",
+        renameBlockedGeneric: "This model ID is still referenced. Remove references before renaming."
       },
       saved: "Saved"
     },

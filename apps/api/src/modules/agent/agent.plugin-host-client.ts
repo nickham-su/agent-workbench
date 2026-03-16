@@ -138,4 +138,14 @@ export class AgentPluginHostClient {
       throw new HttpError(503, "plugin host unavailable", "PLUGIN_HOST_UNAVAILABLE");
     }
   }
+
+  async feishuSendText(input: { chatId: string; text: string }): Promise<{ ok: true }> {
+    try {
+      return await this.postBySocket("/internal/plugins/feishu/send-text", input ?? {}, 15_000);
+    } catch (err) {
+      this.params.logger.error({ err }, "plugin-host feishuSendText failed");
+      if (err instanceof HttpError) throw err;
+      throw new HttpError(503, "plugin host unavailable", "PLUGIN_HOST_UNAVAILABLE");
+    }
+  }
 }

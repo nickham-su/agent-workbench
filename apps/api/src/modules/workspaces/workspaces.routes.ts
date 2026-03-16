@@ -1,3 +1,4 @@
+import { Type } from "@sinclair/typebox";
 import type { FastifyInstance } from "fastify";
 import type { AppContext } from "../../app/context.js";
 import { ErrorResponseSchema } from "@agent-workbench/shared";
@@ -7,19 +8,29 @@ import {
   UpdateWorkspaceRequestSchema,
   WorkspaceDetailSchema
 } from "@agent-workbench/shared";
-import { nowMs } from "../../utils/time.js";
 import {
   attachRepoToWorkspace,
   createWorkspace,
+  detectWorkspaceExternalSkillRoots,
   deleteWorkspace,
   detachRepoFromWorkspace,
   getWorkspaceDetailById,
+  getWorkspaceExternalSkillRootsSettings,
   listWorkspaceDetails,
+  updateWorkspaceExternalSkillRootsSettings,
   updateWorkspaceById
 } from "./workspace.service.js";
+import {
+  UpdateWorkspaceExternalSkillRootsSettingsRequestSchema,
+  WorkspaceExternalSkillRootsDetectResponseSchema,
+  WorkspaceExternalSkillRootsSettingsResponseSchema
+} from "@agent-workbench/shared";
+import { nowMs } from "../../utils/time.js";
 import { touchWorkspaceLastUsedAt } from "./workspace.store.js";
 
 export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppContext) {
+  const WorkspaceIdParamsSchema = Type.Object({ workspaceId: Type.String({ minLength: 1 }) });
+
   app.get(
     "/api/workspaces",
     {
@@ -125,6 +136,52 @@ export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppCon
     async (req) => {
       const params = req.params as { workspaceId: string; repoId: string };
       return detachRepoFromWorkspace(ctx, app.log, params.workspaceId, params.repoId);
+    }
+  );
+
+  app.get(
+    "/api/workspaces/:workspaceId/external-skill-roots/detect",
+    {
+      schema: {
+        tags: ["workspaces"],
+        params: WorkspaceIdParamsSchema,
+        response: { 200: WorkspaceExternalSkillRootsDetectResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      const params = req.params as { workspaceId: string };
+      return detectWorkspaceExternalSkillRoots(ctx, app.log, params.workspaceId);
+    }
+  );
+
+  app.get(
+    "/api/workspaces/:workspaceId/external-skill-roots/settings",
+    {
+      schema: {
+        tags: ["workspaces"],
+        params: WorkspaceIdParamsSchema,
+        response: { 200: WorkspaceExternalSkillRootsSettingsResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      const params = req.params as { workspaceId: string };
+      return getWorkspaceExternalSkillRootsSettings(ctx, params.workspaceId);
+    }
+  );
+
+  app.put(
+    "/api/workspaces/:workspaceId/external-skill-roots/settings",
+    {
+      schema: {
+        tags: ["workspaces"],
+        params: WorkspaceIdParamsSchema,
+        body: UpdateWorkspaceExternalSkillRootsSettingsRequestSchema,
+        response: { 200: WorkspaceExternalSkillRootsSettingsResponseSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      const params = req.params as { workspaceId: string };
+      return updateWorkspaceExternalSkillRootsSettings(ctx, app.log, params.workspaceId, req.body as any);
     }
   );
 }

@@ -5,6 +5,9 @@ import {
   AgentGlobalPromptSettingsSchema,
   AgentMcpSettingsSchema,
   AgentSettingsViewSchema,
+  AgentProviderModelsListParamsSchema,
+  AgentProviderModelsListQuerySchema,
+  AgentProviderModelsListViewSchema,
   AgentRuntimeSettingsSchema,
   AgentSettingsSchema,
   ErrorResponseSchema,
@@ -30,6 +33,7 @@ import {
   getAgentGlobalPromptSettings,
   getAgentMcpSettings,
   getAgentRuntimeSettings,
+  getAgentProviderModels,
   getAgentSettings,
   getAgentChannelSenderAllowlistSettings,
   updateAgentChannelSenderAllowlistSettings,
@@ -173,10 +177,26 @@ export async function registerSettingsRoutes(app: FastifyInstance, ctx: AppConte
       schema: {
         tags: ["settings"],
         body: UpdateAgentProvidersSettingsRequestSchema,
-        response: { 200: AgentProvidersSettingsViewSchema, 400: ErrorResponseSchema }
+        response: { 200: AgentProvidersSettingsViewSchema, 400: ErrorResponseSchema, 409: ErrorResponseSchema }
       }
     },
     async (req) => updateAgentProvidersSettings(ctx, app.log, req.body)
+  );
+
+  app.get(
+    "/api/settings/agent/providers/:providerId/models",
+    {
+      schema: {
+        tags: ["settings"],
+        params: AgentProviderModelsListParamsSchema,
+        querystring: AgentProviderModelsListQuerySchema,
+        response: {
+          200: AgentProviderModelsListViewSchema,
+          400: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => getAgentProviderModels(ctx, app.log, req.params, req.query)
   );
 
   app.get(

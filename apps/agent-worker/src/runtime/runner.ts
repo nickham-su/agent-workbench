@@ -66,6 +66,7 @@ export function buildCompactionUserPrompt(input: { uiLocale: AgentUiLocale | nul
       "- what has already been completed",
       "- what is currently in progress",
       "- key files, modules, APIs, commands, or tools that matter for the remaining work",
+      "- if the context includes documents relevant to the work goal, list their document paths in the summary",
       "- next TODOs in priority order, preferably as directly executable actions",
       "- user constraints and preferences that must continue to be honored",
       "- important technical decisions and why they were made",
@@ -89,6 +90,7 @@ export function buildCompactionUserPrompt(input: { uiLocale: AgentUiLocale | nul
   "- 已完成了什么",
   "- 当前正在做什么",
   "- 与后续工作直接相关的关键文件、模块、接口、命令或工具",
+  "- 若上下文包含与工作目标相关的文档,请在总结中列出文档路径",
   "- 下一步待办(按优先级列出,尽量写成可直接执行的动作)",
   "- 需要持续遵守的用户约束与偏好",
   "- 关键技术决策及原因",
@@ -271,6 +273,40 @@ function buildToolSuccessText(params: {
       headers,
       body
     });
+  }
+
+  if (params.toolName === "skill") {
+    const id = typeof resultObj?.id === "string" ? resultObj.id : (typeof params.args.id === "string" ? params.args.id : undefined);
+    const type = typeof resultObj?.type === "string" ? resultObj.type : undefined;
+    const truncated = resultObj?.truncated === true;
+    if (type === "file") {
+      const content = typeof resultObj?.content === "string" ? resultObj.content : "";
+      return buildToolText({
+        toolName: params.toolName,
+        status: params.status,
+        headers: [["id", id], ["type", "file"], ["truncated", truncated ? "true" : undefined]],
+        body: content || "(empty file content)"
+      });
+    }
+
+    const name = typeof resultObj?.name === "string" ? resultObj.name : "";
+    const description = typeof resultObj?.description === "string" ? resultObj.description : "";
+    const children = Array.isArray(resultObj?.children) ? resultObj.children : [];
+    const lines: string[] = [];
+    if (name) lines.push(`name: ${name}`);
+    if (description) lines.push(`description: ${description}`);
+    if (children.length === 0) {
+      lines.push("children:\n- (none)");
+    } else {
+      lines.push("children:");
+      for (const child of children) {
+        const c = toRecordObject(child);
+        lines.push(`- id: ${String(c?.id || "")}; type: ${String(c?.type || "")}; name: ${String(c?.name || "")}`);
+      }
+    }
+    const content = typeof resultObj?.content === "string" ? resultObj.content : "";
+    const body = `${lines.join("\n")}\n\n${content || "(empty skill content)"}`.trim();
+    return buildToolText({ toolName: params.toolName, status: params.status, headers: [["id", id], ["type", "skill"], ["truncated", truncated ? "true" : undefined]], body });
   }
 
   if (params.toolName === "bash") {
@@ -505,7 +541,8 @@ const EMPTY_PROMPT_CONTEXT: PromptContext = {
   tools: [],
   pendingTools: [],
   lastResponseTotalTokens: null,
-  uiLocale: null
+  uiLocale: null,
+  externalSkillRoots: []
 };
 
 const RESERVED_MODEL_OPTION_KEYS = new Set([
@@ -887,6 +924,7 @@ export class AgentRunner {
     tool: PendingTool;
     signal: AbortSignal;
     availableToolNames?: ReadonlySet<string>;
+    promptContext: PromptContext;
   }) {
     const { profile, run, tool, signal } = params;
     if (signal.aborted) return { paused: false as const };
@@ -947,6 +985,7 @@ export class AgentRunner {
         },
         signal,
         apiClient: this.apiClient,
+        promptContext: params.promptContext,
         processNestedRun: (nestedRun, nestedSignal) => this.processRun(nestedRun, nestedSignal),
         updateToolItem: async ({ status, output }) => {
           await this.apiClient.updateContextItem({ itemId: tool.itemId, status, output, updatedAt: nowMs() });
@@ -1091,6 +1130,7 @@ export class AgentRunner {
     tool: PendingTool;
     signal: AbortSignal;
     availableToolNames?: ReadonlySet<string>;
+    promptContext: PromptContext;
   }) {
     try {
       return await this.executeTool(params);
@@ -1141,6 +1181,7 @@ export class AgentRunner {
     batch: ToolExecutionBatch;
     signal: AbortSignal;
     availableToolNames?: ReadonlySet<string>;
+    promptContext: PromptContext;
   }) {
     if (params.batch.mode === "serial") {
       const tool = params.batch.tools[0];
@@ -1261,11 +1302,12 @@ export class AgentRunner {
     for (const batch of batches) {
       const result = await this.executeToolBatch({
         profile: params.profile,
-        run: params.run,
-        batch,
-        signal: params.signal,
-        availableToolNames
-      });
+          run: params.run,
+          batch,
+          signal: params.signal,
+          promptContext: params.context,
+          availableToolNames
+        });
       if (result.paused) {
         return { paused: true as const };
       }
@@ -1300,6 +1342,21 @@ export class AgentRunner {
     return lastTotalTokens >= threshold;
   }
 
+  protected async generateSingleCallSummary(params: {
+    profile: {
+      provider: ExecutionProfile["provider"];
+      model: ExecutionProfile["model"];
+    };
+    input: {
+      messages: Array<{ role: string; content: unknown }>;
+      system?: string;
+      timeoutMs: number;
+      abortSignal: AbortSignal;
+    };
+  }) {
+    return generateSingleCallText(params.profile, params.input);
+  }
+
   protected async generateCompactionSummary(params: {
     profile: ExecutionProfile;
     context: PromptContext;
@@ -1313,18 +1370,19 @@ export class AgentRunner {
         content: buildCompactionUserPrompt({ uiLocale: params.context.uiLocale })
       }
     });
-    const response = await generateSingleCallText(
-      {
+    const response = await this.generateSingleCallSummary({
+      profile: {
         provider: params.profile.provider,
         model: params.profile.model
       },
-      {
-        // compaction 是内部摘要任务，不继承执行态 system prompt；同时不提供 tools。
+      input: {
+        // compaction 是内部摘要任务，不继承执行态完整 system prompt；使用 messages-context 提供的 one-shot system。
+        system: messagesContext.system,
         messages: messagesContext.messages,
         timeoutMs: COMPACTION_TIMEOUT_MS,
         abortSignal: params.signal
       }
-    );
+    });
     return String(response.text || "").trim();
   }
 

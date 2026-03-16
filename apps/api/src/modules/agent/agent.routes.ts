@@ -13,6 +13,8 @@ import {
   AgentInternalCreateSessionRequestSchema,
   AgentSendMessageRequestSchema,
   AgentSendMessageResponseSchema,
+  AgentChannelAllowlistCheckRequestSchema,
+  AgentChannelAllowlistCheckResponseSchema,
   type AgentSendMessageRequest,
   AgentClearSessionRequestSchema,
   AgentCompactSessionRequestSchema,
@@ -44,6 +46,7 @@ import type { AgentService } from "./agent.service.js";
 import { HttpError } from "../../app/errors.js";
 import type { AgentPluginHostClient } from "./agent.plugin-host-client.js";
 import { listAvailableAgentsForSurface } from "../settings/settings.service.js";
+import { type AgentRunCompletedEventHub, toSseEventChunk } from "./run-completed-events.js";
 
 const AgentBuiltinToolNameSchema = Type.Union([
   Type.Literal("bash"),
@@ -54,6 +57,7 @@ const AgentBuiltinToolNameSchema = Type.Union([
   Type.Literal("todolist"),
   Type.Literal("subtask"),
   Type.Literal("archive_search"),
+  Type.Literal("skill"),
   Type.Literal("archive_read")
 ]);
 const AgentDynamicToolNameSchema = Type.Union([
@@ -69,10 +73,54 @@ function assertInternalToken(req: FastifyRequest, service: AgentService) {
   }
 }
 
+function assertPluginCaller(req: FastifyRequest, pluginId: string) {
+  const caller = String(req.headers["x-awb-plugin-id"] || "").trim();
+  if (!caller) {
+    throw new HttpError(401, "Unauthorized", "PLUGIN_CALLER_REQUIRED");
+  }
+  if (caller !== String(pluginId || "").trim()) {
+    throw new HttpError(401, "Unauthorized", "PLUGIN_CALLER_MISMATCH");
+  }
+}
+
 export async function registerAgentRoutes(
   app: FastifyInstance,
-  params: { service: AgentService; runtime: AgentRuntimePort; pluginHost?: AgentPluginHostClient | null }
+  params: {
+    service: AgentService;
+    runtime: AgentRuntimePort;
+    pluginHost?: AgentPluginHostClient | null;
+    runCompletedEventHub: AgentRunCompletedEventHub;
+  }
 ) {
+  async function handleCompactRequest(
+    sessionId: string,
+    body: { workspaceId: string; clientRequestId: string; agentId?: string; uiLocale?: "zh-CN" | "en-US" }
+  ) {
+    const result = await params.service.compactSession({ sessionId, body });
+    if (result.scheduled) {
+      const workspace = params.service.getWorkspace(body.workspaceId);
+      if (!workspace) throw new HttpError(404, "workspace not found");
+      try {
+        await params.runtime.enqueueRun({
+          workspaceId: body.workspaceId,
+          sessionId,
+          runId: result.runId,
+          workspacePath: workspace.path,
+          inputText: "__awb_compact__"
+        });
+      } catch (err) {
+        params.service.failRunOnEnqueueFailure({
+          workspaceId: body.workspaceId,
+          sessionId,
+          runId: result.runId,
+          updatedAt: Date.now()
+        });
+        throw err;
+      }
+    }
+    return result;
+  }
+
   app.get(
     "/api/agent/sessions",
     {
@@ -287,28 +335,33 @@ export async function registerAgentRoutes(
     async (req, reply) => {
       const p = req.params as { sessionId: string };
       const body = req.body as { workspaceId: string; clientRequestId: string; agentId?: string; uiLocale?: "zh-CN" | "en-US" };
-      const result = await params.service.compactSession({ sessionId: p.sessionId, body });
-      if (result.scheduled) {
-        const workspace = params.service.getWorkspace(body.workspaceId);
-        if (!workspace) throw new HttpError(404, "workspace not found");
-        try {
-          await params.runtime.enqueueRun({
-            workspaceId: body.workspaceId,
-            sessionId: p.sessionId,
-            runId: result.runId,
-            workspacePath: workspace.path,
-            inputText: "__awb_compact__"
-          });
-        } catch (err) {
-          params.service.failRunOnEnqueueFailure({
-            workspaceId: body.workspaceId,
-            sessionId: p.sessionId,
-            runId: result.runId,
-            updatedAt: Date.now()
-          });
-          throw err;
+      const result = await handleCompactRequest(p.sessionId, body);
+      return reply.code(201).send(result);
+    }
+  );
+
+  app.post(
+    "/api/internal/agent/sessions/:sessionId/compact",
+    {
+      schema: {
+        tags: ["agent"],
+        params: Type.Object({ sessionId: Type.String({ minLength: 1 }) }),
+        body: AgentCompactSessionRequestSchema,
+        response: {
+          201: AgentCompactSessionResponseSchema,
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+          503: ErrorResponseSchema
         }
       }
+    },
+    async (req, reply) => {
+      assertInternalToken(req, params.service);
+      const p = req.params as { sessionId: string };
+      const body = req.body as { workspaceId: string; clientRequestId: string; agentId?: string; uiLocale?: "zh-CN" | "en-US" };
+      const result = await handleCompactRequest(p.sessionId, body);
       return reply.code(201).send(result);
     }
   );
@@ -519,7 +572,7 @@ export async function registerAgentRoutes(
           parentSessionId: Type.String({ minLength: 1 }),
           parentRunId: Type.String({ minLength: 1 }),
           parentToolItemId: Type.Number({ minimum: 1 }),
-          description: Type.String({ minLength: 1, maxLength: 20 }),
+          description: Type.String({ minLength: 1 }),
           prompt: Type.String({ minLength: 1 }),
           agentId: Type.String({ minLength: 1 }),
           session: Type.Union([
@@ -540,7 +593,8 @@ export async function registerAgentRoutes(
           200: Type.Object({
             sessionId: Type.String({ minLength: 1 }),
             runId: Type.String({ minLength: 1 }),
-            workspacePath: Type.String({ minLength: 1 })
+            workspacePath: Type.String({ minLength: 1 }),
+            agentName: Type.String({ minLength: 1 })
           }),
           400: ErrorResponseSchema,
           401: ErrorResponseSchema,
@@ -728,6 +782,28 @@ export async function registerAgentRoutes(
   );
 
   app.post(
+    "/api/internal/agent/channels/allowlist/check",
+    {
+      schema: {
+        tags: ["agent"],
+        body: AgentChannelAllowlistCheckRequestSchema,
+        response: {
+          200: AgentChannelAllowlistCheckResponseSchema,
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          500: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as { pluginId: string; senderId: string };
+      assertPluginCaller(req, body.pluginId);
+      return params.service.checkChannelSenderAllowlist(body);
+    }
+  );
+
+  app.post(
     "/api/internal/agent/sessions/create",
     {
       schema: {
@@ -743,6 +819,118 @@ export async function registerAgentRoutes(
       return reply.code(201).send(session);
     }
   );
+
+  app.post(
+    "/api/internal/agent/runs/trigger",
+    {
+      schema: {
+        tags: ["agent"],
+        body: Type.Object({
+          workspaceId: Type.String({ minLength: 1 }),
+          sessionId: Type.String({ minLength: 1 }),
+          agentId: Type.String({ minLength: 1 }),
+          text: Type.String({ minLength: 1 }),
+          clientRequestId: Type.String({ minLength: 1 }),
+          uiLocale: Type.Optional(AgentUiLocaleSchema)
+        }),
+        response: {
+          201: AgentSendMessageResponseSchema,
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema
+        }
+      }
+    },
+    async (req, reply) => {
+      assertInternalToken(req, params.service);
+      const body = req.body as {
+        workspaceId: string;
+        sessionId: string;
+        agentId: string;
+        text: string;
+        clientRequestId: string;
+        uiLocale?: "zh-CN" | "en-US";
+      };
+      const result = await params.service.sendMessage({
+        sessionId: body.sessionId,
+        body: {
+          workspaceId: body.workspaceId,
+          agentId: body.agentId,
+          text: body.text,
+          clientRequestId: body.clientRequestId,
+          uiLocale: body.uiLocale
+        }
+      });
+      if (!result.deduplicated) {
+        const workspace = params.service.getWorkspace(body.workspaceId);
+        if (!workspace) throw new HttpError(404, "workspace not found");
+        try {
+          await params.runtime.enqueueRun({
+            workspaceId: body.workspaceId,
+            sessionId: body.sessionId,
+            runId: result.runId,
+            workspacePath: workspace.path,
+            inputText: body.text
+          });
+        } catch (err) {
+          params.service.failRunOnEnqueueFailure({
+            workspaceId: body.workspaceId,
+            sessionId: body.sessionId,
+            runId: result.runId,
+            updatedAt: Date.now()
+          });
+          throw err;
+        }
+      }
+      return reply.code(201).send(result);
+    }
+  );
+
+  app.get(
+    "/api/internal/agent/runs/:runId/final-text",
+    {
+      schema: {
+        tags: ["agent"],
+        params: Type.Object({ runId: Type.String({ minLength: 1 }) }),
+        response: {
+          200: Type.Object({
+            found: Type.Boolean(),
+            text: Type.String()
+          }),
+          401: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, params.service);
+      const p = req.params as { runId: string };
+      return params.service.getRunFinalText({ runId: p.runId });
+    }
+  );
+
+  app.get("/api/internal/agent/events/sse", async (req, reply) => {
+    assertInternalToken(req, params.service);
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no"
+    });
+    reply.hijack();
+    reply.raw.write(": connected\n\n");
+
+    const heartbeat = setInterval(() => {
+      reply.raw.write(": keepalive\n\n");
+    }, 15_000);
+    const unsubscribe = params.runCompletedEventHub.subscribe((event) => {
+      reply.raw.write(toSseEventChunk(event));
+    });
+    req.raw.once("close", () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    });
+  });
 
   app.post(
     "/api/internal/agent/agents/list",
@@ -1092,7 +1280,15 @@ export async function registerAgentRoutes(
               })
             ),
             lastResponseTotalTokens: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
-            uiLocale: Type.Union([AgentUiLocaleSchema, Type.Null()])
+            uiLocale: Type.Union([AgentUiLocaleSchema, Type.Null()]),
+            externalSkillRoots: Type.Array(
+              Type.Object({
+                sourceType: Type.Union([Type.Literal("workspace"), Type.Literal("repo")]),
+                repoId: Type.Optional(Type.String({ minLength: 1 })),
+                rootDir: Type.String({ minLength: 1 }),
+                rootPath: Type.String({ minLength: 1 })
+              })
+            )
           }),
           400: ErrorResponseSchema,
           401: ErrorResponseSchema,
@@ -1125,6 +1321,7 @@ export async function registerAgentRoutes(
         response: {
           200: Type.Object({
             headItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
+            system: Type.String(),
             messages: Type.Array(
               Type.Object({
                 role: Type.Union([Type.Literal("system"), Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool")]),
