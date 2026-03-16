@@ -116,7 +116,7 @@ function createExecutionContext(mode: "ok" | "throw" | "long_text", includeRaw =
       pendingTools: [],
       lastResponseTotalTokens: null,
       uiLocale: null,
-      repoSkillRoots: []
+      externalSkillRoots: []
     },
     processNestedRun: async () => {},
     updateToolItem: async () => {},

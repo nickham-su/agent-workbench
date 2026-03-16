@@ -11,8 +11,8 @@ import { HttpError } from "../../app/errors.js";
 import { insertRepo } from "../repos/repo.store.js";
 import { insertWorkspace, insertWorkspaceRepo } from "./workspace.store.js";
 import {
-  detectWorkspaceRepoSkillsRoots,
-  updateWorkspaceRepoSkillsRootsSettings
+  detectWorkspaceExternalSkillRoots,
+  updateWorkspaceExternalSkillRootsSettings
 } from "./workspace.service.js";
 
 const tempDirs: string[] = [];
@@ -115,7 +115,7 @@ afterEach(async () => {
   }
 });
 
-test("workspace repo skills: 仅允许一级目录且目录名包含 skill", async () => {
+test("workspace external skills: 仅允许一级目录且目录名包含 skill", async () => {
   const logger = createLogger();
   const fixture = await createFixture();
   const repoPath = path.join(fixture.workspacePath, "repo-a");
@@ -130,20 +130,25 @@ test("workspace repo skills: 仅允许一级目录且目录名包含 skill", asy
     repoPath
   });
 
-  const detected = await detectWorkspaceRepoSkillsRoots(fixture.ctx, logger, fixture.workspaceId);
-  assert.deepEqual(detected.items.map((it) => it.relativePath), ["ai-skill"]);
+  await fs.mkdir(path.join(fixture.workspacePath, "workspace-skill"), { recursive: true });
 
-  const updated = await updateWorkspaceRepoSkillsRootsSettings(
+  const detected = await detectWorkspaceExternalSkillRoots(fixture.ctx, logger, fixture.workspaceId);
+  assert.deepEqual(detected.items.map((it) => `${it.sourceType}/${it.rootDir}`), ["workspace/workspace-skill", "repo/ai-skill"]);
+
+  const updated = await updateWorkspaceExternalSkillRootsSettings(
     fixture.ctx,
     logger,
     fixture.workspaceId,
-    { enabledRoots: [{ repoId: "repo_a", relativePath: "ai-skill" }] }
+    { enabledRoots: [{ sourceType: "workspace", rootDir: "workspace-skill" }, { sourceType: "repo", repoId: "repo_a", rootDir: "ai-skill" }] }
   );
-  assert.equal(updated.enabledRoots.length, 1);
-  assert.equal(updated.enabledRoots[0]?.relativePath, "ai-skill");
+  assert.equal(updated.enabledRoots.length, 2);
+  assert.equal(updated.enabledRoots[0]?.sourceType, "workspace");
+  assert.equal(updated.enabledRoots[0]?.rootDir, "workspace-skill");
+  assert.equal(updated.enabledRoots[1]?.sourceType, "repo");
+  assert.equal(updated.enabledRoots[1]?.rootDir, "ai-skill");
 });
 
-test("workspace repo skills: 非法 relativePath 会被拒绝", async () => {
+test("workspace external skills: 非法 rootDir 会被拒绝", async () => {
   const logger = createLogger();
   const fixture = await createFixture();
   const repoPath = path.join(fixture.workspacePath, "repo-b");
@@ -158,17 +163,17 @@ test("workspace repo skills: 非法 relativePath 会被拒绝", async () => {
 
   await assert.rejects(
     () =>
-      updateWorkspaceRepoSkillsRootsSettings(
+      updateWorkspaceExternalSkillRootsSettings(
         fixture.ctx,
         logger,
         fixture.workspaceId,
-        { enabledRoots: [{ repoId: "repo_b", relativePath: "nested/inner-skill" }] }
+        { enabledRoots: [{ sourceType: "repo", repoId: "repo_b", rootDir: "nested/inner-skill" }] }
       ),
-    (err: unknown) => err instanceof HttpError && err.statusCode === 400 && err.code === "WORKSPACE_REPO_SKILLS_ROOT_INVALID"
+    (err: unknown) => err instanceof HttpError && err.statusCode === 400 && err.code === "WORKSPACE_EXTERNAL_SKILL_ROOT_INVALID"
   );
 });
 
-test("workspace repo skills: symlink repo 根/候选目录与失效目录应安全跳过", async () => {
+test("workspace external skills: symlink repo 根/候选目录与失效目录应安全跳过", async () => {
   const logger = createLogger();
   const fixture = await createFixture();
 
@@ -203,6 +208,27 @@ test("workspace repo skills: symlink repo 根/候选目录与失效目录应安�
     repoPath: missingRepoPath
   });
 
-  const detected = await detectWorkspaceRepoSkillsRoots(fixture.ctx, logger, fixture.workspaceId);
-  assert.deepEqual(detected.items.map((it) => `${it.repoId}/${it.relativePath}`), ["repo_c/ai-skill"]);
+  const detected = await detectWorkspaceExternalSkillRoots(fixture.ctx, logger, fixture.workspaceId);
+  assert.deepEqual(detected.items.map((it) => `${it.sourceType}/${it.repoId || "-"}/${it.rootDir}`), ["repo/repo_c/ai-skill"]);
+});
+
+test("workspace external skills: count 语义与可读口径（直系文件不计数、count=0仍展示、非文本不计数）", async () => {
+  const logger = createLogger();
+  const fixture = await createFixture();
+  const rootDir = "workspace-skill";
+  const rootPath = path.join(fixture.workspacePath, rootDir);
+  await fs.mkdir(rootPath, { recursive: true });
+  await fs.writeFile(path.join(rootPath, "SKILL.md"), "---\nname: root-only\n---\n", "utf8");
+
+  const nonTextDir = path.join(rootPath, "binary-node");
+  await fs.mkdir(nonTextDir, { recursive: true });
+  await fs.writeFile(path.join(nonTextDir, "SKILL.md"), Buffer.from([0x2d, 0x2d, 0x2d, 0x00, 0x61]));
+
+  const detected = await detectWorkspaceExternalSkillRoots(fixture.ctx, logger, fixture.workspaceId);
+  const item = detected.items.find((it) => it.sourceType === "workspace" && it.rootDir === rootDir);
+  assert.ok(item, "candidate should still be listed when directory exists");
+  assert.equal(item?.topLevelSkillCount, 0, "root direct file or non-text top-level node should not be counted");
+
+  const updated = await updateWorkspaceExternalSkillRootsSettings(fixture.ctx, logger, fixture.workspaceId, { enabledRoots: [{ sourceType: "workspace", rootDir }] });
+  assert.equal(updated.enabledRoots.length, 1, "count=0 candidate should still be enable-able");
 });

@@ -1281,9 +1281,10 @@ export async function registerAgentRoutes(
             ),
             lastResponseTotalTokens: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
             uiLocale: Type.Union([AgentUiLocaleSchema, Type.Null()]),
-            repoSkillRoots: Type.Array(
+            externalSkillRoots: Type.Array(
               Type.Object({
-                repoId: Type.String({ minLength: 1 }),
+                sourceType: Type.Union([Type.Literal("workspace"), Type.Literal("repo")]),
+                repoId: Type.Optional(Type.String({ minLength: 1 })),
                 rootDir: Type.String({ minLength: 1 }),
                 rootPath: Type.String({ minLength: 1 })
               })

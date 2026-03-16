@@ -24,7 +24,7 @@ function createToolListContext(): ToolListContext {
       pendingTools: [],
       lastResponseTotalTokens: null,
       uiLocale: null,
-      repoSkillRoots: []
+      externalSkillRoots: []
     },
     apiClient: {} as any
   };

@@ -61,44 +61,62 @@ export const AttachWorkspaceRepoRequestSchema = Type.Object({
 });
 export type AttachWorkspaceRepoRequest = Static<typeof AttachWorkspaceRepoRequestSchema>;
 
-export const WorkspaceRepoSkillsRootSchema = Type.Object({
-  repoId: Type.String({ minLength: 1 }),
-  repoDirName: Type.String({ minLength: 1 }),
-  relativePath: Type.String({ minLength: 1 }),
+export const WorkspaceExternalSkillRootSourceSchema = Type.Union([
+  Type.Literal("workspace"),
+  Type.Literal("repo")
+]);
+export type WorkspaceExternalSkillRootSource = Static<typeof WorkspaceExternalSkillRootSourceSchema>;
+
+export const WorkspaceExternalSkillRootSchema = Type.Object({
+  sourceType: WorkspaceExternalSkillRootSourceSchema,
+  repoId: Type.Optional(Type.String({ minLength: 1 })),
+  repoDirName: Type.Optional(Type.String({ minLength: 1 })),
+  rootDir: Type.String({ minLength: 1 }),
   displayName: Type.String({ minLength: 1 }),
+  topLevelSkillCount: Type.Number({ minimum: 0 }),
   enabled: Type.Boolean()
 });
-export type WorkspaceRepoSkillsRoot = Static<typeof WorkspaceRepoSkillsRootSchema>;
+export type WorkspaceExternalSkillRoot = Static<typeof WorkspaceExternalSkillRootSchema>;
 
-export const WorkspaceRepoSkillsRootsDetectResponseSchema = Type.Object({
+export const WorkspaceExternalSkillRootsDetectResponseSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
-  items: Type.Array(WorkspaceRepoSkillsRootSchema),
+  items: Type.Array(WorkspaceExternalSkillRootSchema),
   updatedAt: Type.Number()
 });
-export type WorkspaceRepoSkillsRootsDetectResponse = Static<typeof WorkspaceRepoSkillsRootsDetectResponseSchema>;
+export type WorkspaceExternalSkillRootsDetectResponse = Static<typeof WorkspaceExternalSkillRootsDetectResponseSchema>;
 
-export const WorkspaceRepoSkillsRootInputSchema = Type.Object({
-  repoId: Type.String({ minLength: 1 }),
-  relativePath: Type.String({ minLength: 1 })
+export const WorkspaceExternalSkillRootInputSchema = Type.Object({
+  sourceType: WorkspaceExternalSkillRootSourceSchema,
+  repoId: Type.Optional(Type.String({ minLength: 1 })),
+  rootDir: Type.String({ minLength: 1 })
 });
-export type WorkspaceRepoSkillsRootInput = Static<typeof WorkspaceRepoSkillsRootInputSchema>;
+export type WorkspaceExternalSkillRootInput = Static<typeof WorkspaceExternalSkillRootInputSchema>;
 
-export const WorkspaceRepoSkillsRootsSettingsItemSchema = Type.Object({
-  repoId: Type.String({ minLength: 1 }),
-  relativePath: Type.String({ minLength: 1 }),
+export const WorkspaceExternalSkillRootsSettingsItemSchema = Type.Object({
+  sourceType: WorkspaceExternalSkillRootSourceSchema,
+  repoId: Type.Optional(Type.String({ minLength: 1 })),
+  rootDir: Type.String({ minLength: 1 }),
   displayName: Type.String({ minLength: 1 }),
   enabledAt: Type.Number()
 });
-export type WorkspaceRepoSkillsRootsSettingsItem = Static<typeof WorkspaceRepoSkillsRootsSettingsItemSchema>;
+export type WorkspaceExternalSkillRootsSettingsItem = Static<typeof WorkspaceExternalSkillRootsSettingsItemSchema>;
 
-export const WorkspaceRepoSkillsRootsSettingsResponseSchema = Type.Object({
+export const WorkspaceExternalSkillRootsSettingsResponseSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
-  enabledRoots: Type.Array(WorkspaceRepoSkillsRootsSettingsItemSchema),
+  enabledRoots: Type.Array(WorkspaceExternalSkillRootsSettingsItemSchema),
   updatedAt: Type.Number()
 });
-export type WorkspaceRepoSkillsRootsSettingsResponse = Static<typeof WorkspaceRepoSkillsRootsSettingsResponseSchema>;
+export type WorkspaceExternalSkillRootsSettingsResponse = Static<typeof WorkspaceExternalSkillRootsSettingsResponseSchema>;
 
-export const UpdateWorkspaceRepoSkillsRootsSettingsRequestSchema = Type.Object({
-  enabledRoots: Type.Array(WorkspaceRepoSkillsRootInputSchema)
+export const UpdateWorkspaceExternalSkillRootsSettingsRequestSchema = Type.Object({
+  enabledRoots: Type.Array(WorkspaceExternalSkillRootInputSchema)
 });
-export type UpdateWorkspaceRepoSkillsRootsSettingsRequest = Static<typeof UpdateWorkspaceRepoSkillsRootsSettingsRequestSchema>;
+export type UpdateWorkspaceExternalSkillRootsSettingsRequest = Static<typeof UpdateWorkspaceExternalSkillRootsSettingsRequestSchema>;
+
+export const AgentPromptContextExternalSkillRootSchema = Type.Object({
+  sourceType: WorkspaceExternalSkillRootSourceSchema,
+  repoId: Type.Optional(Type.String({ minLength: 1 })),
+  rootDir: Type.String({ minLength: 1 }),
+  rootPath: Type.String({ minLength: 1 })
+});
+export type AgentPromptContextExternalSkillRoot = Static<typeof AgentPromptContextExternalSkillRootSchema>;

@@ -542,7 +542,7 @@ const EMPTY_PROMPT_CONTEXT: PromptContext = {
   pendingTools: [],
   lastResponseTotalTokens: null,
   uiLocale: null,
-  repoSkillRoots: []
+  externalSkillRoots: []
 };
 
 const RESERVED_MODEL_OPTION_KEYS = new Set([

@@ -34,9 +34,9 @@ test("runner skill tool-result text for skill node", () => {
 test("runner skill tool-result text for skill file", () => {
   const text = buildToolSuccessTextForTest({
     toolName: "skill",
-    args: { id: "ws/deploy/template.yaml" },
+    args: { id: "workspace/deploy/template.yaml" },
     result: {
-      id: "ws/deploy/template.yaml",
+      id: "workspace/deploy/template.yaml",
       type: "file",
       content: "kind: Pod",
       truncated: true
@@ -44,7 +44,7 @@ test("runner skill tool-result text for skill file", () => {
   });
 
   assert.ok(text.includes("tool: skill"));
-  assert.ok(text.includes("id: ws/deploy/template.yaml"));
+  assert.ok(text.includes("id: workspace/deploy/template.yaml"));
   assert.ok(text.includes("type: file"));
   assert.ok(text.includes("truncated: true"));
   assert.ok(text.includes("kind: Pod"));

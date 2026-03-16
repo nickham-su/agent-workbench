@@ -350,10 +350,13 @@ export default {
       compactionArchivedHint: "更早的内容已归档",
       slashCommandHintTitle: "特殊指令",
       slashCommandHintStrictOnly: "精确匹配",
-      repoSkillsTitle: "Repo Skills 目录",
-      repoSkillsHint: "选择要启用的 repo skills 根目录。保存后仅对后续新运行生效，当前运行不会刷新。",
-      repoSkillsEmpty: "未探测到候选 skills 目录",
-      repoSkillsSaved: "已保存 repo skills 配置",
+      externalSkillRootsTitle: "External Skill Roots",
+      externalSkillRootsHint: "选择要启用的外部 skill 根目录。保存后仅对后续新运行生效，当前运行不会刷新。",
+      externalSkillRootsEmpty: "未探测到候选 skills 目录",
+      externalSkillRootsSaved: "已保存外部 skill roots 配置",
+      externalSkillRootsSourceWorkspace: "Workspace",
+      externalSkillRootsSourceRepo: "Repo",
+      externalSkillRootsMeta: "{source} · {count} 个顶级 skills",
       slashCommandHintNoMatch: "未找到匹配的指令: /{query}",
       slashCommands: {
         compact: {

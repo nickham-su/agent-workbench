@@ -1174,7 +1174,7 @@ async function getPromptContextInternal(params: {
     uiLocale: "zh-CN" | "en-US" | null;
     messages: Array<{ role: string; content: unknown }>;
     pendingTools: Array<{ itemId: number; status: string; toolName: string }>;
-    repoSkillRoots: Array<{ repoId: string; rootDir: string; rootPath: string }>;
+    externalSkillRoots: Array<{ sourceType: "workspace" | "repo"; repoId?: string; rootDir: string; rootPath: string }>;
   };
 }
 
@@ -7792,7 +7792,8 @@ test("agent prompt-context 注入 skills 摘要并在同 run 缓存静态部分"
   const runId = newSortableId("run");
 
   const builtinSkillDir = path.join(fixture.repoRoot, "skills", `it-builtin-${Date.now()}`);
-  const wsSkillDir = path.join(fixture.workspacePath, ".awb", "skills", "deploy");
+  const wsSkillDir = path.join(fixture.workspacePath, "deploy-skill", "deploy");
+  const wsBinarySkillDir = path.join(fixture.workspacePath, "deploy-skill", "nontext");
   const repoId = newSortableId("repo");
   const repoDirName = "repo-it";
   const repoPath = workspaceRepoDirPath(fixture.dataDir, path.basename(fixture.workspacePath), repoDirName);
@@ -7803,6 +7804,7 @@ test("agent prompt-context 注入 skills 摘要并在同 run 缓存静态部分"
     await fs.mkdir(path.join(builtinSkillDir, "child"), { recursive: true });
     await fs.mkdir(wsSkillDir, { recursive: true });
     await fs.mkdir(path.join(repoSkillDir, repoTopSkillDir), { recursive: true });
+    await fs.mkdir(wsBinarySkillDir, { recursive: true });
     await fs.mkdir(repoSkillDir, { recursive: true });
     await fs.writeFile(
       path.join(builtinSkillDir, "SKILL.md"),
@@ -7835,14 +7837,21 @@ test("agent prompt-context 注入 skills 摘要并在同 run 缓存静态部分"
       "---\nname: Workspace Skill V1\ndescription: ws-desc-v1\n---\n\nbody",
       "utf8"
     );
+    await fs.writeFile(path.join(wsBinarySkillDir, "SKILL.md"), Buffer.from([0x2d, 0x2d, 0x2d, 0x00, 0x61]));
     await fs.writeFile(
       path.join(repoSkillDir, repoTopSkillDir, "SKILL.md"),
       "---\nname: Repo Skill V1\ndescription: repo-desc-v1\n---\n\nbody",
       "utf8"
     );
-    setSettingJson(fixture.db, "workspace_repo_skills_roots_v1", {
+    setSettingJson(fixture.db, "workspace_external_skill_roots_v1", {
       workspaces: {
-        [fixture.workspaceId]: { enabledRoots: [{ repoId, relativePath: repoSkillsRootDir, enabledAt: Date.now() }], updatedAt: Date.now() }
+        [fixture.workspaceId]: {
+          enabledRoots: [
+            { sourceType: "workspace", rootDir: "deploy-skill", enabledAt: Date.now() },
+            { sourceType: "repo", repoId, rootDir: repoSkillsRootDir, enabledAt: Date.now() }
+          ],
+          updatedAt: Date.now()
+        }
       }
     }, Date.now());
     await fs.writeFile(path.join(fixture.workspacePath, "AGENTS.md"), "RULE_V1", "utf8");
@@ -7870,13 +7879,14 @@ test("agent prompt-context 注入 skills 摘要并在同 run 缓存静态部分"
     assert.ok(first.system.includes("[skills]"), "skills section should be present");
     assert.ok(first.system.includes(`id: builtin/${path.basename(builtinSkillDir)}`), "builtin skill id should be injected");
     assert.ok(first.system.includes("name: Builtin Skill V1"));
-    assert.ok(first.system.includes("id: ws/deploy"), "workspace skill id should be injected");
+    assert.ok(first.system.includes("id: workspace/deploy-skill/deploy"), "workspace skill id should be injected");
     assert.ok(first.system.includes("description: ws-desc-v1"));
     assert.ok(first.system.includes(`id: repo/${repoId}/${repoSkillsRootDir}/${repoTopSkillDir}`), "repo skill id should be injected");
     assert.ok(first.system.includes("description: repo-desc-v1"));
     assert.equal(first.system.includes(fixture.workspacePath), false, "system prompt should not expose workspace real path");
     assert.equal(first.system.includes(repoPath), false, "system prompt should not expose repo real path");
     assert.equal(first.system.includes(`builtin/${path.basename(builtinSkillDir)}/child`), false, "only top-level skills should be injected");
+    assert.equal(first.system.includes("id: workspace/deploy-skill/nontext"), false, "non-text top-level skill should not be injected");
     assert.equal(first.tools.some((tool) => tool.name === "skill"), true, "skill tool should be available");
 
     await fs.writeFile(path.join(wsSkillDir, "SKILL.md"), "---\nname: Workspace Skill V2\ndescription: ws-desc-v2\n---\n", "utf8");
@@ -7953,10 +7963,10 @@ test("agent prompt-context 对 repo 根 symlink/路径失配安全跳过", async
     updatedAt: ts
   });
 
-  setSettingJson(fixture.db, "workspace_repo_skills_roots_v1", {
+  setSettingJson(fixture.db, "workspace_external_skill_roots_v1", {
     workspaces: {
       [fixture.workspaceId]: {
-        enabledRoots: [{ repoId, relativePath: "ai-skill", enabledAt: ts }],
+        enabledRoots: [{ sourceType: "repo", repoId, rootDir: "ai-skill", enabledAt: ts }],
         updatedAt: ts
       }
     }
@@ -8004,5 +8014,5 @@ test("agent prompt-context 对 repo 根 symlink/路径失配安全跳过", async
   });
   const second = await getPromptContextInternal({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId: runId2 });
   assert.equal(second.system.includes("safe-desc"), false, "repo symlink/mismatch should be skipped");
-  assert.equal(second.repoSkillRoots.length, 0, "repo skill roots mapping should also skip invalid repo root");
+  assert.equal(second.externalSkillRoots.length, 0, "external skill roots mapping should also skip invalid repo root");
 });

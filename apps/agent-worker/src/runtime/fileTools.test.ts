@@ -262,14 +262,15 @@ test("skill 读取 skill 节点时返回正文与 children（文件 + 直接子 
 test("skill 读取文件 id 时仅返回文件内容", async () => {
   const workspacePath = await createWorkspace();
   const repoRoot = await createWorkspace();
-  await fs.mkdir(path.join(workspacePath, ".awb", "skills", "deploy"), { recursive: true });
-  await fs.writeFile(path.join(workspacePath, ".awb", "skills", "deploy", "SKILL.md"), "Deploy skill", "utf8");
-  await fs.writeFile(path.join(workspacePath, ".awb", "skills", "deploy", "template.yaml"), "kind: Pod", "utf8");
+  const workspaceRoot = path.join(workspacePath, "deploy");
+  await fs.mkdir(workspaceRoot, { recursive: true });
+  await fs.writeFile(path.join(workspaceRoot, "SKILL.md"), "Deploy skill", "utf8");
+  await fs.writeFile(path.join(workspaceRoot, "template.yaml"), "kind: Pod", "utf8");
 
-  const result = await runSkillTool({ workspacePath, repoRoot, id: "ws/deploy/template.yaml" });
+  const result = await runSkillTool({ workspacePath, repoRoot, id: "workspace/deploy/template.yaml", externalSkillRoots: [{ sourceType: "workspace", rootDir: "deploy", rootPath: workspaceRoot }] });
 
   assert.equal(result.type, "file");
-  assert.equal(result.id, "ws/deploy/template.yaml");
+  assert.equal(result.id, "workspace/deploy/template.yaml");
   assert.equal(result.content, "kind: Pod");
   assert.equal(Object.prototype.hasOwnProperty.call(result, "children"), false);
 });
@@ -298,7 +299,7 @@ test("skill 对非法 id 仍返回明确校验错误", async () => {
 
   await assert.rejects(
     () => runSkillTool({ workspacePath, repoRoot, id: "bad-id" }),
-    /skill.id must start with builtin\/ or ws\/ or repo\//
+    /skill.id must start with builtin\/ or workspace\/ or repo\//
   );
 });
 
@@ -319,7 +320,7 @@ test("skill 支持 repo 命名空间目录与文件读取", async () => {
     workspacePath,
     repoRoot,
     id: "repo/repo-a/ai-skills",
-    repoSkillRoots: [{ repoId: "repo-a", rootDir: "ai-skills", rootPath: repoSkillRoot }]
+    externalSkillRoots: [{ sourceType: "repo", repoId: "repo-a", rootDir: "ai-skills", rootPath: repoSkillRoot }]
   });
   assert.equal(rootResult.type, "skill");
   assert.equal(rootResult.id, "repo/repo-a/ai-skills");
@@ -333,7 +334,7 @@ test("skill 支持 repo 命名空间目录与文件读取", async () => {
     workspacePath,
     repoRoot,
     id: "repo/repo-a/ai-skills/guide.txt",
-    repoSkillRoots: [{ repoId: "repo-a", rootDir: "ai-skills", rootPath: repoSkillRoot }]
+    externalSkillRoots: [{ sourceType: "repo", repoId: "repo-a", rootDir: "ai-skills", rootPath: repoSkillRoot }]
   });
   assert.equal(fileResult.type, "file");
   assert.equal(fileResult.content, "repo guide");

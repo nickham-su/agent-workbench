@@ -384,9 +384,9 @@
               size="small"
               type="text"
               class="!px-1"
-              :title="t('agent.client.repoSkillsTitle')"
-              :aria-label="t('agent.client.repoSkillsTitle')"
-              @click="onOpenRepoSkillsModal"
+              :title="t('agent.client.externalSkillRootsTitle')"
+              :aria-label="t('agent.client.externalSkillRootsTitle')"
+              @click="onOpenExternalSkillRootsModal"
             >
               <template #icon><AppstoreOutlined /></template>
             </a-button>
@@ -402,38 +402,41 @@
     </div>
 
     <a-modal
-      :open="repoSkillsModalVisible"
-      :title="t('agent.client.repoSkillsTitle')"
+      :open="externalSkillRootsModalVisible"
+      :title="t('agent.client.externalSkillRootsTitle')"
       :ok-text="t('common.save')"
       :cancel-text="t('common.cancel')"
-      :confirm-loading="repoSkillsSaving"
-      :ok-button-props="{ disabled: repoSkillsLoading || !!repoSkillsError }"
-      @ok="onSaveRepoSkillsSettings"
-      @cancel="repoSkillsModalVisible = false"
+      :confirm-loading="externalSkillRootsSaving"
+      :ok-button-props="{ disabled: externalSkillRootsLoading || !!externalSkillRootsError }"
+      @ok="onSaveExternalSkillRootsSettings"
+      @cancel="externalSkillRootsModalVisible = false"
     >
       <div class="text-[0.9em] text-[color:var(--text-tertiary)] mb-3">
-        {{ t("agent.client.repoSkillsHint") }}
+        {{ t("agent.client.externalSkillRootsHint") }}
       </div>
-      <div v-if="repoSkillsLoading" class="py-6 text-center text-[color:var(--text-tertiary)]">
+      <div v-if="externalSkillRootsLoading" class="py-6 text-center text-[color:var(--text-tertiary)]">
         {{ t("common.loading") }}
       </div>
-      <div v-else-if="repoSkillsError" class="py-3 text-red-500 whitespace-pre-wrap break-words">
-        {{ repoSkillsError }}
+      <div v-else-if="externalSkillRootsError" class="py-3 text-red-500 whitespace-pre-wrap break-words">
+        {{ externalSkillRootsError }}
       </div>
-      <div v-else-if="repoSkillsCandidates.length === 0" class="py-6 text-center text-[color:var(--text-tertiary)]">
-        {{ t("agent.client.repoSkillsEmpty") }}
+      <div v-else-if="externalSkillRootsCandidates.length === 0" class="py-6 text-center text-[color:var(--text-tertiary)]">
+        {{ t("agent.client.externalSkillRootsEmpty") }}
       </div>
       <div v-else class="max-h-[50vh] overflow-auto">
-        <a-checkbox-group v-model:value="repoSkillsSelectedKeys" class="w-full">
+        <a-checkbox-group v-model:value="externalSkillRootsSelectedKeys" class="w-full">
           <div class="flex flex-col gap-2">
             <label
-              v-for="item in repoSkillsCandidates"
-              :key="repoSkillsKey(item.repoId, item.relativePath)"
+              v-for="item in externalSkillRootsCandidates"
+              :key="externalSkillRootsKey(item)"
               class="border border-[var(--border-color-secondary)] rounded px-2 py-1.5"
             >
-              <a-checkbox :value="repoSkillsKey(item.repoId, item.relativePath)">
+              <a-checkbox :value="externalSkillRootsKey(item)">
                 {{ item.displayName }}
               </a-checkbox>
+              <div class="pl-6 text-[0.85em] text-[color:var(--text-tertiary)]">
+                {{ t("agent.client.externalSkillRootsMeta", { source: item.sourceType === "workspace" ? t("agent.client.externalSkillRootsSourceWorkspace") : t("agent.client.externalSkillRootsSourceRepo"), count: item.topLevelSkillCount }) }}
+              </div>
             </label>
           </div>
         </a-checkbox-group>
@@ -480,9 +483,9 @@ import {
   getAgentContextItem,
   getAgentContextItems,
   revertAgentSession,
-  detectWorkspaceRepoSkillsRoots,
+  detectWorkspaceExternalSkillRoots,
   sendAgentMessage,
-  updateWorkspaceRepoSkillsRootsSettings
+  updateWorkspaceExternalSkillRootsSettings
 } from "@/shared/api";
 import { getInitialLocale } from "@/shared/i18n/locale";
 
@@ -627,12 +630,12 @@ const stickToBottom = ref(true);
 const userUnfollowed = ref(false);
 const forcedBottomOnFirstActive = ref(false);
 const nowTickMs = ref(Date.now());
-const repoSkillsModalVisible = ref(false);
-const repoSkillsLoading = ref(false);
-const repoSkillsSaving = ref(false);
-const repoSkillsError = ref("");
-const repoSkillsCandidates = ref<Array<{ repoId: string; relativePath: string; displayName: string; enabled: boolean }>>([]);
-const repoSkillsSelectedKeys = ref<string[]>([]);
+const externalSkillRootsModalVisible = ref(false);
+const externalSkillRootsLoading = ref(false);
+const externalSkillRootsSaving = ref(false);
+const externalSkillRootsError = ref("");
+const externalSkillRootsCandidates = ref<Array<{ sourceType: "workspace" | "repo"; repoId?: string; rootDir: string; displayName: string; topLevelSkillCount: number; enabled: boolean }>>([]);
+const externalSkillRootsSelectedKeys = ref<string[]>([]);
 
 
 type SavedScrollState = {
@@ -2357,55 +2360,58 @@ function onRevertToMessage(itemId: number) {
   });
 }
 
-function repoSkillsKey(repoId: string, relativePath: string) {
-  return `${repoId}\u0000${relativePath}`;
+function externalSkillRootsKey(item: { sourceType: "workspace" | "repo"; repoId?: string; rootDir: string }) {
+  return item.sourceType === "workspace" ? `workspace\u0000${item.rootDir}` : `repo\u0000${String(item.repoId || "")}\u0000${item.rootDir}`;
 }
 
-async function onOpenRepoSkillsModal() {
-  repoSkillsModalVisible.value = true;
-  repoSkillsLoading.value = true;
-  repoSkillsError.value = "";
+async function onOpenExternalSkillRootsModal() {
+  externalSkillRootsModalVisible.value = true;
+  externalSkillRootsLoading.value = true;
+  externalSkillRootsError.value = "";
   try {
-    const data = await detectWorkspaceRepoSkillsRoots(props.workspaceId);
+    const data = await detectWorkspaceExternalSkillRoots(props.workspaceId);
     const items = (data.items || []).map((it) => ({
-      repoId: String(it.repoId || "").trim(),
-      relativePath: String(it.relativePath || "").trim(),
+      sourceType: it.sourceType === "workspace" ? "workspace" as const : "repo" as const,
+      repoId: String(it.repoId || "").trim() || undefined,
+      rootDir: String(it.rootDir || "").trim(),
       displayName: String(it.displayName || "").trim(),
+      topLevelSkillCount: Number.isFinite(Number(it.topLevelSkillCount)) ? Math.max(0, Math.floor(Number(it.topLevelSkillCount))) : 0,
       enabled: it.enabled === true
-    })).filter((it) => it.repoId && it.relativePath);
-    repoSkillsCandidates.value = items;
-    repoSkillsSelectedKeys.value = items.filter((it) => it.enabled).map((it) => repoSkillsKey(it.repoId, it.relativePath));
+    })).filter((it) => it.rootDir && (it.sourceType === "workspace" || !!it.repoId));
+    externalSkillRootsCandidates.value = items;
+    externalSkillRootsSelectedKeys.value = items.filter((it) => it.enabled).map((it) => externalSkillRootsKey(it));
   } catch (err) {
-    repoSkillsCandidates.value = [];
-    repoSkillsSelectedKeys.value = [];
-    repoSkillsError.value = err instanceof Error ? err.message : String(err);
+    externalSkillRootsCandidates.value = [];
+    externalSkillRootsSelectedKeys.value = [];
+    externalSkillRootsError.value = err instanceof Error ? err.message : String(err);
   } finally {
-    repoSkillsLoading.value = false;
+    externalSkillRootsLoading.value = false;
   }
 }
 
-async function onSaveRepoSkillsSettings() {
-  if (repoSkillsLoading.value || repoSkillsError.value) return;
-  if (repoSkillsSaving.value) return;
-  repoSkillsSaving.value = true;
-  repoSkillsError.value = "";
+async function onSaveExternalSkillRootsSettings() {
+  if (externalSkillRootsLoading.value || externalSkillRootsError.value) return;
+  if (externalSkillRootsSaving.value) return;
+  externalSkillRootsSaving.value = true;
+  externalSkillRootsError.value = "";
   try {
-    const selected = new Set(repoSkillsSelectedKeys.value);
-    const enabledRoots = repoSkillsCandidates.value
+    const selected = new Set(externalSkillRootsSelectedKeys.value);
+    const enabledRoots = externalSkillRootsCandidates.value
       .map((it) => ({
+        sourceType: it.sourceType,
         repoId: it.repoId,
-        relativePath: it.relativePath,
-        enabled: selected.has(repoSkillsKey(it.repoId, it.relativePath))
+        rootDir: it.rootDir,
+        enabled: selected.has(externalSkillRootsKey(it))
       }))
       .filter((it) => it.enabled)
-      .map((it) => ({ repoId: it.repoId, relativePath: it.relativePath }));
-    await updateWorkspaceRepoSkillsRootsSettings(props.workspaceId, { enabledRoots });
-    message.success(t("agent.client.repoSkillsSaved"));
-    repoSkillsModalVisible.value = false;
+      .map((it) => ({ sourceType: it.sourceType, repoId: it.repoId, rootDir: it.rootDir }));
+    await updateWorkspaceExternalSkillRootsSettings(props.workspaceId, { enabledRoots });
+    message.success(t("agent.client.externalSkillRootsSaved"));
+    externalSkillRootsModalVisible.value = false;
   } catch (err) {
-    repoSkillsError.value = err instanceof Error ? err.message : String(err);
+    externalSkillRootsError.value = err instanceof Error ? err.message : String(err);
   } finally {
-    repoSkillsSaving.value = false;
+    externalSkillRootsSaving.value = false;
   }
 }
 

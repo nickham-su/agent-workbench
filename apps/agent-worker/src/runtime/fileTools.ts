@@ -756,7 +756,7 @@ function sanitizeSkillToolError(err: unknown) {
   const safeMessages = new Set([
     "operation aborted",
     "skill.id is required",
-    "skill.id must start with builtin/ or ws/ or repo/",
+    "skill.id must start with builtin/ or workspace/ or repo/",
     "path is required",
     "invalid path",
     "absolute path is not allowed",
@@ -782,7 +782,7 @@ export async function runSkillTool(params: {
   workspacePath: string;
   repoRoot: string;
   id: string;
-  repoSkillRoots?: Array<{ repoId: string; rootDir: string; rootPath: string }>;
+  externalSkillRoots?: Array<{ sourceType: "workspace" | "repo"; repoId?: string; rootDir: string; rootPath: string }>;
   signal?: AbortSignal;
 }) {
   try {
@@ -790,30 +790,42 @@ export async function runSkillTool(params: {
     const id = String(params.id || "").trim();
     if (!id) throw new Error("skill.id is required");
     const slashIndex = id.indexOf("/");
-    if (slashIndex <= 0) throw new Error("skill.id must start with builtin/ or ws/ or repo/");
+    if (slashIndex <= 0) throw new Error("skill.id must start with builtin/ or workspace/ or repo/");
     const ns = id.slice(0, slashIndex);
     const rel = id.slice(slashIndex + 1);
 
     let rootPath = "";
     let safeRel = "";
-    if (ns === "builtin" || ns === "ws") {
+    let logicalBaseRel = "";
+    if (ns === "builtin" || ns === "workspace") {
       safeRel = ensureSafeRelativePath(rel);
-      rootPath = ns === "builtin"
-        ? path.resolve(params.repoRoot, "skills")
-        : path.resolve(params.workspacePath, ".awb", "skills");
+      rootPath = path.resolve(params.repoRoot, "skills");
+      logicalBaseRel = safeRel;
+      if (ns === "workspace") {
+        const rootDir = String(rel.split("/")[0] || "").trim();
+        const mapping = (params.externalSkillRoots || []).find((it) => it.sourceType === "workspace" && it.rootDir === rootDir);
+        if (!mapping) throw new Error("skill node not found");
+        rootPath = path.resolve(mapping.rootPath);
+        const [, ...rest] = safeRel.split("/");
+        safeRel = rest.length > 0 ? ensureSafeRelativePath(rest.join("/")) : ".";
+        logicalBaseRel = path.posix.join(rootDir, safeRel === "." ? "" : safeRel);
+      }
     } else if (ns === "repo") {
       const [repoIdRaw, rootDirRaw, ...rest] = rel.split("/");
       const repoId = String(repoIdRaw || "").trim();
       const rootDir = String(rootDirRaw || "").trim();
       if (!repoId || !rootDir) {
-        throw new Error("skill.id must start with builtin/ or ws/ or repo/");
+        throw new Error("skill.id must start with builtin/ or workspace/ or repo/");
       }
-      const mapping = (params.repoSkillRoots || []).find((it) => it.repoId === repoId && it.rootDir === rootDir);
+      const mapping = (params.externalSkillRoots || []).find(
+        (it) => it.sourceType === "repo" && it.repoId === repoId && it.rootDir === rootDir
+      );
       if (!mapping) throw new Error("skill node not found");
       rootPath = path.resolve(mapping.rootPath);
       safeRel = rest.length > 0 ? ensureSafeRelativePath(rest.join("/")) : ".";
+      logicalBaseRel = rel;
     } else {
-      throw new Error("skill.id must start with builtin/ or ws/ or repo/");
+      throw new Error("skill.id must start with builtin/ or workspace/ or repo/");
     }
 
     const targetPath = resolveWithinWorkspace(rootPath, safeRel);
@@ -865,9 +877,7 @@ export async function runSkillTool(params: {
       if (entry.isFile()) {
         if (entry.name === "SKILL.md") continue;
         children.push({
-          id: ns === "repo"
-            ? `${ns}/${rel}/${entry.name}`
-            : `${ns}/${path.posix.join(safeRel, entry.name)}`,
+          id: `${ns}/${path.posix.join(logicalBaseRel, entry.name)}`,
           type: "file",
           name: entry.name
         });
@@ -885,9 +895,7 @@ export async function runSkillTool(params: {
       if (childKind.kind !== "text") continue;
       const childDecoded = await readTextFileCapped({ fullPath: childSkillPath, encoding: childKind.encoding, signal: params.signal });
       const childParsed = parseSkillFrontmatter(childDecoded.lines.join("\n"));
-      const childRelPath = ns === "repo"
-        ? `${rel}/${entry.name}`
-        : path.posix.join(safeRel, entry.name);
+      const childRelPath = path.posix.join(logicalBaseRel, entry.name);
       children.push({
         id: `${ns}/${childRelPath}`,
         type: "skill",

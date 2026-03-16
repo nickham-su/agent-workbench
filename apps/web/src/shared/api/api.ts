@@ -35,10 +35,10 @@ import type {
   CreateWorkspaceRequest,
   AttachWorkspaceRepoRequest,
   ChangesResponse,
-  UpdateWorkspaceRepoSkillsRootsSettingsRequest,
-  WorkspaceRepoSkillsRootsDetectResponse,
-  WorkspaceRepoSkillsRootsSettingsResponse,
-  WorkspaceRepoSkillsRootInput,
+  UpdateWorkspaceExternalSkillRootsSettingsRequest,
+  WorkspaceExternalSkillRootsDetectResponse,
+  WorkspaceExternalSkillRootsSettingsResponse,
+  WorkspaceExternalSkillRootInput,
   CredentialRecord,
   GenerateSshKeypairResponse,
   FileCompareResponse,
@@ -424,31 +424,31 @@ export async function detachWorkspaceRepo(workspaceId: string, repoId: string) {
   }
 }
 
-export async function detectWorkspaceRepoSkillsRoots(workspaceId: string) {
+export async function detectWorkspaceExternalSkillRoots(workspaceId: string) {
   try {
-    const res = await client.get<WorkspaceRepoSkillsRootsDetectResponse>(`/workspaces/${workspaceId}/repo-skills-roots/detect`);
+    const res = await client.get<WorkspaceExternalSkillRootsDetectResponse>(`/workspaces/${workspaceId}/external-skill-roots/detect`);
     return res.data;
   } catch (err) {
     throw toApiError(err);
   }
 }
 
-export async function getWorkspaceRepoSkillsRootsSettings(workspaceId: string) {
+export async function getWorkspaceExternalSkillRootsSettings(workspaceId: string) {
   try {
-    const res = await client.get<WorkspaceRepoSkillsRootsSettingsResponse>(`/workspaces/${workspaceId}/repo-skills-roots/settings`);
+    const res = await client.get<WorkspaceExternalSkillRootsSettingsResponse>(`/workspaces/${workspaceId}/external-skill-roots/settings`);
     return res.data;
   } catch (err) {
     throw toApiError(err);
   }
 }
 
-export async function updateWorkspaceRepoSkillsRootsSettings(
+export async function updateWorkspaceExternalSkillRootsSettings(
   workspaceId: string,
-  body: UpdateWorkspaceRepoSkillsRootsSettingsRequest
+  body: UpdateWorkspaceExternalSkillRootsSettingsRequest
 ) {
   try {
-    const res = await client.put<WorkspaceRepoSkillsRootsSettingsResponse>(`/workspaces/${workspaceId}/repo-skills-roots/settings`, {
-      enabledRoots: (body.enabledRoots || []).map((it: WorkspaceRepoSkillsRootInput) => ({ repoId: it.repoId, relativePath: it.relativePath }))
+    const res = await client.put<WorkspaceExternalSkillRootsSettingsResponse>(`/workspaces/${workspaceId}/external-skill-roots/settings`, {
+      enabledRoots: (body.enabledRoots || []).map((it: WorkspaceExternalSkillRootInput) => ({ sourceType: it.sourceType, repoId: it.repoId, rootDir: it.rootDir }))
     });
     return res.data;
   } catch (err) {

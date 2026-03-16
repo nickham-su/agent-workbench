@@ -352,10 +352,13 @@ export default {
       compactionArchivedHint: "Earlier messages have been archived",
       slashCommandHintTitle: "Commands",
       slashCommandHintStrictOnly: "Exact match",
-      repoSkillsTitle: "Repo skills roots",
-      repoSkillsHint: "Choose repo skills roots to enable. Changes apply to subsequent new runs only; the current run is not refreshed.",
-      repoSkillsEmpty: "No candidate skills directories were detected",
-      repoSkillsSaved: "Repo skills settings saved",
+      externalSkillRootsTitle: "External Skill Roots",
+      externalSkillRootsHint: "Choose external skill roots to enable. Changes apply to subsequent new runs only; the current run is not refreshed.",
+      externalSkillRootsEmpty: "No candidate skills directories were detected",
+      externalSkillRootsSaved: "External skill roots settings saved",
+      externalSkillRootsSourceWorkspace: "Workspace",
+      externalSkillRootsSourceRepo: "Repo",
+      externalSkillRootsMeta: "{source} · {count} top-level skills",
       slashCommandHintNoMatch: "No matching command: /{query}",
       slashCommands: {
         compact: {

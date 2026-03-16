@@ -105,8 +105,9 @@ export type PromptContext = {
   }>;
   lastResponseTotalTokens: number | null;
   uiLocale: AgentUiLocale | null;
-  repoSkillRoots: Array<{
-    repoId: string;
+  externalSkillRoots: Array<{
+    sourceType: "workspace" | "repo";
+    repoId?: string;
     rootDir: string;
     rootPath: string;
   }>;
