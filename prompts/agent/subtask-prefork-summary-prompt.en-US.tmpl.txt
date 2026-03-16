@@ -1,0 +1,6 @@
+Produce a concise structured summary of the current parent session so a subtask model can continue the work safely.
+Focus only on facts, constraints, decisions, and actionable context relevant to the subtask.
+
+Subtask prompt to focus on:
+{{subtaskPrompt}}
+Do not quote or restate the subtask prompt verbatim in the summary; extract only actionable goals, constraints, and relevant context.

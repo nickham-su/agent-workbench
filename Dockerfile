@@ -24,6 +24,7 @@ COPY apps ./apps
 COPY packages ./packages
 COPY plugins ./plugins
 COPY skills ./skills
+COPY prompts ./prompts
 
 RUN npm run build
 
@@ -78,6 +79,7 @@ COPY --from=builder /app/apps/web /app/apps/web
 COPY --from=builder /app/packages/shared /app/packages/shared
 COPY --from=builder /app/plugins /app/plugins
 COPY --from=builder /app/skills /app/skills
+COPY --from=builder /app/prompts /app/prompts
 
 EXPOSE 4310
 

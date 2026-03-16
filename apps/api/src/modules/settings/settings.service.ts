@@ -109,9 +109,14 @@ function fingerprintSecret(value: string | null | undefined) {
   return createHash("sha256").update(source).digest("hex").slice(0, 16);
 }
 
-type AgentExecutionSurface = "user" | "subtask";
-type AgentViewWithResolvedModel = AgentItem & {
+export type AgentExecutionSurface = "user" | "subtask";
+export type AgentViewWithResolvedModel = AgentItem & {
   resolvedModel: AgentResolvedModel | null;
+};
+
+type WorkspaceAgentEnablementInput = {
+  mode: "all" | "subset";
+  enabledAgentIds: string[];
 };
 
 type GlobalDefaultModelResolved = {
@@ -1684,11 +1689,40 @@ function isAgentScopeAllowed(scope: AgentScope, surface: AgentExecutionSurface) 
   return scope === "both" || scope === surface;
 }
 
-export function listAvailableAgentsForSurface(ctx: AppContext, surface: AgentExecutionSurface): AgentViewWithResolvedModel[] {
-  return getAgentSettings(ctx).agents.filter((agent) => isAgentScopeAllowed(agent.scope, surface));
+export function isAgentEnabledForWorkspace(params: {
+  agentId: string;
+  workspaceEnablement?: WorkspaceAgentEnablementInput | null;
+}) {
+  const enabled = params.workspaceEnablement;
+  if (!enabled || enabled.mode !== "subset") return true;
+  return new Set(enabled.enabledAgentIds).has(params.agentId);
 }
 
-function resolveAgentForSurface(ctx: AppContext, surface: AgentExecutionSurface, requestedAgentId?: string | null) {
+function filterAgentsByWorkspaceEnablement(params: {
+  agents: AgentViewWithResolvedModel[];
+  workspaceEnablement?: WorkspaceAgentEnablementInput | null;
+}) {
+  const enabled = params.workspaceEnablement;
+  if (!enabled || enabled.mode !== "subset") return params.agents;
+  const enabledSet = new Set(enabled.enabledAgentIds);
+  return params.agents.filter((agent) => enabledSet.has(agent.id));
+}
+
+export function listAvailableAgentsForSurface(
+  ctx: AppContext,
+  surface: AgentExecutionSurface,
+  options?: { workspaceEnablement?: WorkspaceAgentEnablementInput | null }
+): AgentViewWithResolvedModel[] {
+  const scoped = getAgentSettings(ctx).agents.filter((agent) => isAgentScopeAllowed(agent.scope, surface));
+  return filterAgentsByWorkspaceEnablement({ agents: scoped, workspaceEnablement: options?.workspaceEnablement });
+}
+
+function resolveAgentForSurface(
+  ctx: AppContext,
+  surface: AgentExecutionSurface,
+  requestedAgentId?: string | null,
+  workspaceEnablement?: WorkspaceAgentEnablementInput | null
+) {
   const normalizedRequestedAgentId = typeof requestedAgentId === "string" ? requestedAgentId.trim() : "";
   if (normalizedRequestedAgentId) {
     const requested = getAgentSettings(ctx).agents.find((item) => item.id === normalizedRequestedAgentId);
@@ -1698,10 +1732,16 @@ function resolveAgentForSurface(ctx: AppContext, surface: AgentExecutionSurface,
     if (!isAgentScopeAllowed(requested.scope, surface)) {
       throw new HttpError(400, `Agent is not allowed for ${surface}`, "AGENT_SCOPE_NOT_ALLOWED");
     }
+    if (!isAgentEnabledForWorkspace({ agentId: requested.id, workspaceEnablement })) {
+      throw new HttpError(400, "Agent is disabled in current workspace", "AGENT_DISABLED_IN_WORKSPACE");
+    }
     return requested;
   }
-  const fallback = listAvailableAgentsForSurface(ctx, surface)[0];
+  const fallback = listAvailableAgentsForSurface(ctx, surface, { workspaceEnablement })[0];
   if (!fallback) {
+    if (workspaceEnablement?.mode === "subset") {
+      throw new HttpError(400, "No available agent in current workspace", "AGENT_NO_AVAILABLE_IN_WORKSPACE");
+    }
     throw new HttpError(400, `No available ${surface} agent`, "AGENT_NO_AVAILABLE_FOR_SURFACE");
   }
   return fallback;
@@ -1710,6 +1750,7 @@ function resolveAgentForSurface(ctx: AppContext, surface: AgentExecutionSurface,
 export function resolveExecutionProfile(ctx: AppContext, input: {
   surface: AgentExecutionSurface;
   requestedAgentId?: string | null;
+  workspaceEnablement?: WorkspaceAgentEnablementInput | null;
   agentIdFromRun?: string | null;
   providerIdFromRun?: string | null;
   modelIdFromRun?: string | null;
@@ -1725,9 +1766,12 @@ export function resolveExecutionProfile(ctx: AppContext, input: {
         if (!isAgentScopeAllowed(runAgent.scope, input.surface)) {
           throw new HttpError(400, `Agent is not allowed for ${input.surface}`, "AGENT_SCOPE_NOT_ALLOWED");
         }
+        if (!isAgentEnabledForWorkspace({ agentId: runAgent.id, workspaceEnablement: input.workspaceEnablement })) {
+          throw new HttpError(400, "Agent is disabled in current workspace", "AGENT_DISABLED_IN_WORKSPACE");
+        }
         return runAgent;
       })()
-    : resolveAgentForSurface(ctx, input.surface, input.requestedAgentId);
+    : resolveAgentForSurface(ctx, input.surface, input.requestedAgentId, input.workspaceEnablement);
 
   const fallbackModel = agent.defaultModel ?? providersSettings.default;
   const resolvedProviderId = [input.providerIdFromRun, fallbackModel?.providerId]

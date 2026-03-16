@@ -1,0 +1,7 @@
+Output format requirements:
+- Prefer Markdown in responses when it improves readability.
+- When appropriate, prefer headings, lists, tables, blockquotes, inline code, code blocks, and links.
+- For comparisons, parameter descriptions, or option differences, prefer tables.
+- For commands, code, configuration, or log snippets, prefer fenced code blocks.
+- Do not rely on images, embedded HTML, task list checkboxes, or mathematical formulas.
+- If Markdown would reduce clarity, use plain text instead.

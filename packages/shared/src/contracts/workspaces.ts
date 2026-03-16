@@ -1,5 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import type { Static } from "@sinclair/typebox";
+import { AgentItemViewSchema } from "./settings.js";
 
 export const WorkspaceRecordSchema = Type.Object(
   {
@@ -112,6 +113,43 @@ export const UpdateWorkspaceExternalSkillRootsSettingsRequestSchema = Type.Objec
   enabledRoots: Type.Array(WorkspaceExternalSkillRootInputSchema)
 });
 export type UpdateWorkspaceExternalSkillRootsSettingsRequest = Static<typeof UpdateWorkspaceExternalSkillRootsSettingsRequestSchema>;
+
+export const WorkspaceAgentEnablementModeSchema = Type.Union([Type.Literal("all"), Type.Literal("subset")]);
+export type WorkspaceAgentEnablementMode = Static<typeof WorkspaceAgentEnablementModeSchema>;
+
+export const WorkspaceAgentEnablementItemSchema = Type.Object({
+  id: Type.String({ minLength: 1 }),
+  name: Type.String({ minLength: 1 }),
+  scope: Type.Union([Type.Literal("user"), Type.Literal("subtask"), Type.Literal("both")]),
+  enabled: Type.Boolean()
+});
+export type WorkspaceAgentEnablementItem = Static<typeof WorkspaceAgentEnablementItemSchema>;
+
+export const WorkspaceAgentEnablementDetectResponseSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
+  items: Type.Array(WorkspaceAgentEnablementItemSchema),
+  updatedAt: Type.Number()
+});
+export type WorkspaceAgentEnablementDetectResponse = Static<typeof WorkspaceAgentEnablementDetectResponseSchema>;
+
+export const WorkspaceAgentEnablementSettingsResponseSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
+  mode: WorkspaceAgentEnablementModeSchema,
+  enabledAgentIds: Type.Array(Type.String({ minLength: 1 })),
+  updatedAt: Type.Number()
+});
+export type WorkspaceAgentEnablementSettingsResponse = Static<typeof WorkspaceAgentEnablementSettingsResponseSchema>;
+
+export const UpdateWorkspaceAgentEnablementSettingsRequestSchema = Type.Object({
+  mode: WorkspaceAgentEnablementModeSchema,
+  enabledAgentIds: Type.Optional(Type.Array(Type.String({ minLength: 1 })))
+});
+export type UpdateWorkspaceAgentEnablementSettingsRequest = Static<typeof UpdateWorkspaceAgentEnablementSettingsRequestSchema>;
+
+export const WorkspaceAvailableAgentsResponseSchema = Type.Object({
+  agents: Type.Array(AgentItemViewSchema)
+});
+export type WorkspaceAvailableAgentsResponse = Static<typeof WorkspaceAvailableAgentsResponseSchema>;
 
 export const AgentPromptContextExternalSkillRootSchema = Type.Object({
   sourceType: WorkspaceExternalSkillRootSourceSchema,

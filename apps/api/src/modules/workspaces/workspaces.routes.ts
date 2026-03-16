@@ -15,19 +15,27 @@ import {
   deleteWorkspace,
   detachRepoFromWorkspace,
   getWorkspaceDetailById,
+  getWorkspaceAgentEnablementSettings,
   getWorkspaceExternalSkillRootsSettings,
   listWorkspaceDetails,
+  detectWorkspaceAgentEnablement,
+  filterAgentsByWorkspaceEnablement,
   updateWorkspaceExternalSkillRootsSettings,
+  updateWorkspaceAgentEnablementSettings,
   updateWorkspaceById
 } from "./workspace.service.js";
+import { listAvailableAgentsForSurface } from "../settings/settings.service.js";
 import {
+  WorkspaceAgentEnablementDetectResponseSchema,
+  WorkspaceAgentEnablementSettingsResponseSchema,
+  UpdateWorkspaceAgentEnablementSettingsRequestSchema,
   UpdateWorkspaceExternalSkillRootsSettingsRequestSchema,
   WorkspaceExternalSkillRootsDetectResponseSchema,
-  WorkspaceExternalSkillRootsSettingsResponseSchema
+  WorkspaceExternalSkillRootsSettingsResponseSchema,
+  AgentListAvailableAgentsResponseSchema
 } from "@agent-workbench/shared";
 import { nowMs } from "../../utils/time.js";
 import { touchWorkspaceLastUsedAt } from "./workspace.store.js";
-
 export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppContext) {
   const WorkspaceIdParamsSchema = Type.Object({ workspaceId: Type.String({ minLength: 1 }) });
 
@@ -182,6 +190,78 @@ export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppCon
     async (req) => {
       const params = req.params as { workspaceId: string };
       return updateWorkspaceExternalSkillRootsSettings(ctx, app.log, params.workspaceId, req.body as any);
+    }
+  );
+
+  app.get(
+    "/api/workspaces/:workspaceId/agent-enablement/detect",
+    {
+      schema: {
+        tags: ["workspaces"],
+        params: WorkspaceIdParamsSchema,
+        response: { 200: WorkspaceAgentEnablementDetectResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      const params = req.params as { workspaceId: string };
+      return detectWorkspaceAgentEnablement(ctx, params.workspaceId);
+    }
+  );
+
+  app.get(
+    "/api/workspaces/:workspaceId/agent-enablement/settings",
+    {
+      schema: {
+        tags: ["workspaces"],
+        params: WorkspaceIdParamsSchema,
+        response: { 200: WorkspaceAgentEnablementSettingsResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      const params = req.params as { workspaceId: string };
+      return getWorkspaceAgentEnablementSettings(ctx, params.workspaceId);
+    }
+  );
+
+  app.put(
+    "/api/workspaces/:workspaceId/agent-enablement/settings",
+    {
+      schema: {
+        tags: ["workspaces"],
+        params: WorkspaceIdParamsSchema,
+        body: UpdateWorkspaceAgentEnablementSettingsRequestSchema,
+        response: { 200: WorkspaceAgentEnablementSettingsResponseSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      const params = req.params as { workspaceId: string };
+      return updateWorkspaceAgentEnablementSettings(ctx, params.workspaceId, req.body as any);
+    }
+  );
+
+  app.get(
+    "/api/workspaces/:workspaceId/agents/available",
+    {
+      schema: {
+        tags: ["workspaces"],
+        params: WorkspaceIdParamsSchema,
+        querystring: Type.Object({ surface: Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("subtask")])) }),
+        response: { 200: AgentListAvailableAgentsResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      const params = req.params as { workspaceId: string };
+      await getWorkspaceDetailById(ctx, params.workspaceId);
+      const query = req.query as { surface?: "user" | "subtask" };
+      const surface = query.surface === "subtask" ? "subtask" : "user";
+      const all = listAvailableAgentsForSurface(ctx, surface);
+      const enabled = await getWorkspaceAgentEnablementSettings(ctx, params.workspaceId);
+      const filtered = filterAgentsByWorkspaceEnablement({
+        agents: all,
+        enabledAgentIds: enabled.enabledAgentIds,
+        mode: enabled.mode
+      });
+      return { agents: filtered };
     }
   );
 }

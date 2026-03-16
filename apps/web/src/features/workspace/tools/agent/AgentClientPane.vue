@@ -364,7 +364,7 @@
         />
       </div>
       <div class="pt-2">
-        <div class="flex items-center justify-between gap-2">
+        <div class="flex items-center gap-2">
           <div v-if="hasAvailableAgents" class="flex items-center gap-2 min-w-0">
             <a-select
               :value="effectiveAgentId"
@@ -380,26 +380,123 @@
             >
               {{ effectiveModelLabel }}
             </div>
-            <a-button
-              size="small"
-              type="text"
-              class="!px-1"
-              :title="t('agent.client.externalSkillRootsTitle')"
-              :aria-label="t('agent.client.externalSkillRootsTitle')"
-              @click="onOpenExternalSkillRootsModal"
-            >
-              <template #icon><AppstoreOutlined /></template>
-            </a-button>
+            <div class="flex items-center gap-1">
+              <a-tooltip :title="t('agent.client.agentEnablementTooltip')" placement="top">
+                <a-button
+                  size="small"
+                  type="text"
+                  class="!px-1"
+                  :aria-label="t('agent.client.agentEnablementTitle')"
+                  @click="onOpenAgentEnablementModal"
+                >
+                  <template #icon><RobotOutlined /></template>
+                </a-button>
+              </a-tooltip>
+              <a-tooltip :title="t('agent.client.externalSkillRootsTooltip')" placement="top">
+                <a-button
+                  size="small"
+                  type="text"
+                  class="!px-1"
+                  :aria-label="t('agent.client.externalSkillRootsTitle')"
+                  @click="onOpenExternalSkillRootsModal"
+                >
+                  <template #icon><AppstoreOutlined /></template>
+                </a-button>
+              </a-tooltip>
+            </div>
           </div>
           <div v-else class="flex items-center gap-2 text-[0.9em] text-[color:var(--text-tertiary)]">
             <span>{{ t("agent.client.noAgentHint") }}</span>
             <a-button type="link" size="small" class="!px-0" @click="goAgentProfiles">
               {{ t("agent.client.goCreateAgent") }}
             </a-button>
+            <div class="flex items-center gap-1">
+              <a-tooltip :title="t('agent.client.agentEnablementTooltip')" placement="top">
+                <a-button
+                  size="small"
+                  type="text"
+                  class="!px-1"
+                  :aria-label="t('agent.client.agentEnablementTitle')"
+                  @click="onOpenAgentEnablementModal"
+                >
+                  <template #icon><RobotOutlined /></template>
+                </a-button>
+              </a-tooltip>
+              <a-tooltip :title="t('agent.client.externalSkillRootsTooltip')" placement="top">
+                <a-button
+                  size="small"
+                  type="text"
+                  class="!px-1"
+                  :aria-label="t('agent.client.externalSkillRootsTitle')"
+                  @click="onOpenExternalSkillRootsModal"
+                >
+                  <template #icon><AppstoreOutlined /></template>
+                </a-button>
+              </a-tooltip>
+            </div>
           </div>
         </div>
       </div>
     </div>
+
+    <a-modal
+      :open="agentEnablementModalVisible"
+      :title="t('agent.client.agentEnablementTitle')"
+      :ok-text="t('common.save')"
+      :cancel-text="t('common.cancel')"
+      :confirm-loading="agentEnablementSaving"
+      :ok-button-props="{ disabled: agentEnablementLoading || !!agentEnablementError }"
+      @ok="onSaveAgentEnablementSettings"
+      @cancel="agentEnablementModalVisible = false"
+    >
+      <div class="flex items-center justify-between gap-2 mb-3">
+        <div class="text-[0.9em] text-[color:var(--text-tertiary)]">
+          {{ t("agent.client.agentEnablementHint") }}
+        </div>
+        <div class="flex items-center gap-2">
+          <a-button type="link" size="small" class="!px-0" @click="onSelectAllAgents">
+            {{ t("agent.client.selectAll") }}
+          </a-button>
+          <a-button
+            type="link"
+            size="small"
+            class="!px-0"
+            @click="onSelectNoAgents"
+          >
+            {{ t("agent.client.selectNone") }}
+          </a-button>
+        </div>
+      </div>
+      <div v-if="agentEnablementLoading" class="py-6 text-center text-[color:var(--text-tertiary)]">
+        {{ t("common.loading") }}
+      </div>
+      <div v-else-if="agentEnablementError" class="py-3 text-red-500 whitespace-pre-wrap break-words">
+        {{ agentEnablementError }}
+      </div>
+      <div v-else-if="agentEnablementCandidates.length === 0" class="py-6 text-center text-[color:var(--text-tertiary)]">
+        {{ t("agent.client.agentEnablementEmpty") }}
+      </div>
+      <div v-else class="max-h-[50vh] overflow-auto">
+        <a-checkbox-group v-model:value="agentEnablementSelectedIds" class="w-full">
+          <div class="flex flex-col gap-2">
+            <label
+              v-for="item in agentEnablementCandidates"
+              :key="item.id"
+              class="external-skill-root-item block w-full border border-[var(--border-color-secondary)] rounded px-2 py-1.5"
+            >
+              <a-checkbox :value="item.id" class="external-skill-root-checkbox w-full">
+                <span class="external-skill-root-content">
+                  <span class="external-skill-root-name text-[color:var(--text-primary)]" :title="item.name">{{ item.name }}</span>
+                  <span class="external-skill-root-count text-[0.85em] text-[color:var(--text-tertiary)]">
+                    {{ agentScopeLabel(item.scope) }}
+                  </span>
+                </span>
+              </a-checkbox>
+            </label>
+          </div>
+        </a-checkbox-group>
+      </div>
+    </a-modal>
 
     <a-modal
       :open="externalSkillRootsModalVisible"
@@ -456,6 +553,7 @@ import {
   CopyOutlined,
   AppstoreOutlined,
   DoubleRightOutlined,
+  RobotOutlined,
   ExclamationCircleOutlined,
   ForkOutlined,
   LoadingOutlined,
@@ -486,6 +584,9 @@ import {
   getAgentContextItems,
   revertAgentSession,
   detectWorkspaceExternalSkillRoots,
+  detectWorkspaceAgentEnablement,
+  updateWorkspaceAgentEnablementSettings,
+  getWorkspaceAgentEnablementSettings,
   sendAgentMessage,
   updateWorkspaceExternalSkillRootsSettings
 } from "@/shared/api";
@@ -606,11 +707,16 @@ const emit = defineEmits<{
   "open-parent": [sessionId: string];
   "choose-session": [];
   "session-title-sync-needed": [sessionId: string];
+  "agent-enablement-saved": [];
 }>();
 
 const { t } = useI18n();
 const router = useRouter();
 const statusStore = useAgentSessionStatusStore();
+
+function agentScopeLabel(scope: "user" | "subtask" | "both") {
+  return t(`settings.agentProfiles.scope.${scope}`);
+}
 
 const loading = ref(false);
 const loadingEarlier = ref(false);
@@ -638,6 +744,12 @@ const externalSkillRootsSaving = ref(false);
 const externalSkillRootsError = ref("");
 const externalSkillRootsCandidates = ref<Array<{ sourceType: "workspace" | "repo"; repoId?: string; rootDir: string; displayName: string; topLevelSkillCount: number; enabled: boolean }>>([]);
 const externalSkillRootsSelectedKeys = ref<string[]>([]);
+const agentEnablementModalVisible = ref(false);
+const agentEnablementLoading = ref(false);
+const agentEnablementSaving = ref(false);
+const agentEnablementError = ref("");
+const agentEnablementCandidates = ref<Array<{ id: string; name: string; scope: "user" | "subtask" | "both"; enabled: boolean }>>([]);
+const agentEnablementSelectedIds = ref<string[]>([]);
 
 
 type SavedScrollState = {
@@ -2417,6 +2529,59 @@ async function onSaveExternalSkillRootsSettings() {
   }
 }
 
+async function onOpenAgentEnablementModal() {
+  agentEnablementModalVisible.value = true;
+  agentEnablementLoading.value = true;
+  agentEnablementError.value = "";
+  try {
+    const [detect, settings] = await Promise.all([
+      detectWorkspaceAgentEnablement(props.workspaceId),
+      getWorkspaceAgentEnablementSettings(props.workspaceId)
+    ]);
+    agentEnablementCandidates.value = detect.items;
+    if (settings.mode === "all") {
+      agentEnablementSelectedIds.value = detect.items.map((it) => it.id);
+    } else {
+      const set = new Set(settings.enabledAgentIds || []);
+      agentEnablementSelectedIds.value = detect.items.map((it) => it.id).filter((id) => set.has(id));
+    }
+  } catch (err) {
+    agentEnablementError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    agentEnablementLoading.value = false;
+  }
+}
+
+function onSelectAllAgents() {
+  agentEnablementSelectedIds.value = agentEnablementCandidates.value.map((it) => it.id);
+}
+
+function onSelectNoAgents() {
+  agentEnablementSelectedIds.value = [];
+}
+
+async function onSaveAgentEnablementSettings() {
+  if (agentEnablementSaving.value) return;
+  agentEnablementSaving.value = true;
+  agentEnablementError.value = "";
+  try {
+    const allIds = agentEnablementCandidates.value.map((it) => it.id);
+    const selected = new Set(agentEnablementSelectedIds.value);
+    const mode = selected.size === allIds.length ? "all" : "subset";
+    await updateWorkspaceAgentEnablementSettings(props.workspaceId, {
+      mode,
+      ...(mode === "subset" ? { enabledAgentIds: allIds.filter((id) => selected.has(id)) } : {})
+    });
+    message.success(t("agent.client.agentEnablementSaved"));
+    agentEnablementModalVisible.value = false;
+    emit("agent-enablement-saved");
+  } catch (err) {
+    agentEnablementError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    agentEnablementSaving.value = false;
+  }
+}
+
 async function onSend() {
   if (isSubtaskSession.value) return;
   if (!hasAvailableAgents.value) {
@@ -2476,7 +2641,14 @@ async function onSend() {
     }
     statusStore.bumpPollHint(targetSessionId, { immediate: true, warmup: true });
   } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err));
+    if (err instanceof ApiError && err.code === "AGENT_DISABLED_IN_WORKSPACE") {
+      message.warning(t("agent.client.agentDisabledInWorkspace"));
+    } else if (err instanceof ApiError && err.code === "AGENT_NO_AVAILABLE_IN_WORKSPACE") {
+      message.warning(t("agent.client.agentNoAvailableInWorkspace"));
+    } else {
+      message.error(err instanceof Error ? err.message : String(err));
+    }
+    emit("agent-enablement-saved");
   } finally {
     sending.value = false;
   }

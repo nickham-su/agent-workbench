@@ -13,6 +13,10 @@
     "./llm-single-call": {
       "types": "./dist/llm/single-call.d.ts",
       "default": "./dist/llm/single-call.js"
+    },
+    "./prompts": {
+      "types": "./dist/prompts.d.ts",
+      "default": "./dist/prompts.js"
     }
   },
   "scripts": {

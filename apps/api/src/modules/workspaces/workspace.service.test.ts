@@ -12,10 +12,16 @@ import { insertRepo } from "../repos/repo.store.js";
 import { insertWorkspace, insertWorkspaceRepo } from "./workspace.store.js";
 import {
   detectWorkspaceExternalSkillRoots,
+  detectWorkspaceAgentEnablement,
+  getWorkspaceAgentEnablementSettings,
+  updateWorkspaceAgentEnablementSettings,
   updateWorkspaceExternalSkillRootsSettings
 } from "./workspace.service.js";
+import { setSettingJson } from "../settings/settings.store.js";
+import { registerGlobalSystemPromptTextProvider } from "../settings/settings.service.js";
 
 const tempDirs: string[] = [];
+const AGENT_SETTINGS_KEY = "agent_agents_v1";
 
 function createLogger() {
   const noop = () => {};
@@ -31,6 +37,8 @@ function createLogger() {
 }
 
 async function createFixture() {
+  registerGlobalSystemPromptTextProvider(() => "test global system prompt");
+
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "awb-ws-service-test-"));
   tempDirs.push(dataDir);
   const db = await openDb(dataDir);
@@ -231,4 +239,67 @@ test("workspace external skills: count 语义与可读口径（直系文件不�
 
   const updated = await updateWorkspaceExternalSkillRootsSettings(fixture.ctx, logger, fixture.workspaceId, { enabledRoots: [{ sourceType: "workspace", rootDir }] });
   assert.equal(updated.enabledRoots.length, 1, "count=0 candidate should still be enable-able");
+});
+
+test("workspace agent enablement: 默认 all，全部视为启用", async () => {
+  const fixture = await createFixture();
+  const now = Date.now();
+  setSettingJson(fixture.ctx.db, AGENT_SETTINGS_KEY, {
+    agents: [
+      { id: "agent_a", name: "Agent A", scope: "user", prompt: "" },
+      { id: "agent_b", name: "Agent B", scope: "both", prompt: "" }
+    ]
+  }, now);
+
+  const settings = await getWorkspaceAgentEnablementSettings(fixture.ctx, fixture.workspaceId);
+  assert.equal(settings.mode, "all");
+
+  const detected = await detectWorkspaceAgentEnablement(fixture.ctx, fixture.workspaceId);
+  assert.equal(detected.items.length, 2);
+  assert.equal(detected.items.every((it) => it.enabled), true);
+});
+
+test("workspace agent enablement: subset 仅保留存在的 agent 并生效过滤", async () => {
+  const fixture = await createFixture();
+  const now = Date.now();
+  setSettingJson(fixture.ctx.db, AGENT_SETTINGS_KEY, {
+    agents: [
+      { id: "agent_a", name: "Agent A", scope: "user", prompt: "" },
+      { id: "agent_b", name: "Agent B", scope: "both", prompt: "" }
+    ]
+  }, now);
+
+  const updated = await updateWorkspaceAgentEnablementSettings(fixture.ctx, fixture.workspaceId, {
+    mode: "subset",
+    enabledAgentIds: ["agent_b", "agent_missing", "agent_b"]
+  });
+  assert.equal(updated.mode, "subset");
+  assert.deepEqual(updated.enabledAgentIds, ["agent_b"]);
+
+  const detected = await detectWorkspaceAgentEnablement(fixture.ctx, fixture.workspaceId);
+  assert.deepEqual(
+    detected.items.map((it) => ({ id: it.id, enabled: it.enabled })),
+    [
+      { id: "agent_a", enabled: false },
+      { id: "agent_b", enabled: true }
+    ]
+  );
+});
+
+test("workspace agent enablement: subset 空数组表示全不选", async () => {
+  const fixture = await createFixture();
+  const now = Date.now();
+  setSettingJson(fixture.ctx.db, AGENT_SETTINGS_KEY, {
+    agents: [{ id: "agent_a", name: "Agent A", scope: "user", prompt: "" }]
+  }, now);
+
+  const updated = await updateWorkspaceAgentEnablementSettings(fixture.ctx, fixture.workspaceId, {
+    mode: "subset",
+    enabledAgentIds: []
+  });
+  assert.equal(updated.mode, "subset");
+  assert.deepEqual(updated.enabledAgentIds, []);
+
+  const detected = await detectWorkspaceAgentEnablement(fixture.ctx, fixture.workspaceId);
+  assert.deepEqual(detected.items.map((it) => it.enabled), [false]);
 });

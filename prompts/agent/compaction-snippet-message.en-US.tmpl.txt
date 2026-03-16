@@ -1,0 +1,12 @@
+## Pre-compaction tail excerpt (archived original text; pos can be used as archive_read beforePos)
+
+{{body}}
+
+## Archive tool hints (when you need more context)
+
+- You can use archive_read to continue reading earlier archived lines:
+  - Start from an earlier position: use beforePos={{minPos}}
+  - Read more lines: increase lineCount
+- You can use archive_search to search across all archived content by keyword:
+  - Prefer specific nouns for query (file names / function names / error codes / tool names / key phrases)
+  - If there are too many hits, combine it with beforePos to page backward
