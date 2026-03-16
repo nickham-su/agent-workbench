@@ -5090,6 +5090,80 @@ test("internal sessions/status-summary agent 不存在时返回 400 + AGENT_NOT_
   assert.equal(res.json().code, "AGENT_NOT_FOUND");
 });
 
+test("internal agents/list 传入非法 surface 返回 400", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const res = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/agents/list",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: { workspaceId: fixture.workspaceId, surface: "subtask" }
+  });
+  assert.equal(res.statusCode, 400);
+  assert.equal(String((res.json() as { message?: string }).message || "").toLowerCase().includes("surface"), true);
+});
+
+test("subtask prefork-plan 在 workspace 全不选时返回 AGENT_DISABLED_IN_WORKSPACE", async () => {
+  const fixture = await createFixture();
+  await configureAgentDefaults(fixture.app);
+  setSettingJson(
+    fixture.db,
+    "workspace_agent_enablement_v1",
+    {
+      workspaces: {
+        [fixture.workspaceId]: {
+          mode: "subset",
+          enabledAgentIds: [],
+          updatedAt: Date.now()
+        }
+      }
+    },
+    Date.now()
+  );
+
+  const parentSession = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    uiLocale: null,
+    status: "running",
+    createdAt: Date.now()
+  });
+  const subtaskTool = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId,
+    turnId: "turn_prefork_no_agent_enabled",
+    step: 1,
+    prevId: null,
+    kind: "tool",
+    status: "queued",
+    output: { type: "tool", toolName: "subtask", toolCallId: "call_prefork_no_agent_enabled", args: { description: "do task", prompt: "do task", agentId: "default", session: { mode: "fork" } } }
+  });
+
+  const planRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/prefork-plan",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: {
+      workspaceId: fixture.workspaceId,
+      parentSessionId: parentSession.id,
+      parentRunId: runId,
+      parentToolItemId: subtaskTool.item.id,
+      agentId: "default"
+    }
+  });
+  assert.equal(planRes.statusCode, 400);
+  assert.equal((planRes.json() as { code?: string }).code, "AGENT_DISABLED_IN_WORKSPACE");
+});
+
 test("internal sessions/context-items-tail 返回尾部上下文项", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
@@ -8015,4 +8089,68 @@ test("agent prompt-context 对 repo 根 symlink/路径失配安全跳过", async
   const second = await getPromptContextInternal({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId: runId2 });
   assert.equal(second.system.includes("safe-desc"), false, "repo symlink/mismatch should be skipped");
   assert.equal(second.externalSkillRoots.length, 0, "external skill roots mapping should also skip invalid repo root");
+});
+
+test("subtask start 在 workspace 全不选时返回 AGENT_DISABLED_IN_WORKSPACE", async () => {
+  const fixture = await createFixture();
+  await configureAgentDefaults(fixture.app);
+  setSettingJson(
+    fixture.db,
+    "workspace_agent_enablement_v1",
+    {
+      workspaces: {
+        [fixture.workspaceId]: {
+          mode: "subset",
+          enabledAgentIds: [],
+          updatedAt: Date.now()
+        }
+      }
+    },
+    Date.now()
+  );
+
+  const parentSession = await createSession(fixture.app, fixture.workspaceId);
+  const parentRunId = newSortableId("run");
+  const parentUser = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "prepare subtask when no agents enabled" }
+  });
+  createRunRecord(fixture.db, {
+    runId: parentRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    triggerItemId: parentUser.item.id,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    uiLocale: null,
+    status: "running",
+    createdAt: Date.now()
+  });
+  const subtaskTool = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_subtask_no_agent_enabled",
+    step: 1,
+    prevId: parentUser.item.id,
+    kind: "tool",
+    status: "queued",
+    output: { type: "tool", toolName: "subtask", toolCallId: "call_subtask_no_agent_enabled", args: { description: "do task", prompt: "do task", agentId: "default", session: { mode: "fork" } } }
+  });
+
+  const startRes = await fixture.app.inject({ method: "POST", url: "/api/internal/agent/subtask/start", headers: { "x-awb-agent-internal-token": fixture.internalToken }, payload: { workspaceId: fixture.workspaceId, parentSessionId: parentSession.id, parentRunId: parentRunId, parentToolItemId: subtaskTool.item.id, description: "do task", prompt: "do task", agentId: "default", session: { mode: "fork" } } });
+  assert.equal(startRes.statusCode, 400);
+  assert.equal((startRes.json() as { code?: string }).code, "AGENT_DISABLED_IN_WORKSPACE");
 });

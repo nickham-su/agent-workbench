@@ -46,6 +46,7 @@ import type { AgentService } from "./agent.service.js";
 import { HttpError } from "../../app/errors.js";
 import type { AgentPluginHostClient } from "./agent.plugin-host-client.js";
 import { listAvailableAgentsForSurface } from "../settings/settings.service.js";
+import { getWorkspaceEnabledAgentIds } from "../workspaces/workspace.service.js";
 import { type AgentRunCompletedEventHub, toSseEventChunk } from "./run-completed-events.js";
 
 const AgentBuiltinToolNameSchema = Type.Union([
@@ -953,9 +954,11 @@ export async function registerAgentRoutes(
       if (!workspaceId) throw new HttpError(400, "workspaceId is required", "WORKSPACE_ID_REQUIRED");
       const ws = params.service.getWorkspace(workspaceId);
       if (!ws) throw new HttpError(404, "workspace not found", "WORKSPACE_NOT_FOUND");
-      const surface = "user";
-      const agents = listAvailableAgentsForSurface(params.service.getContext(), surface)
-        .filter((a) => a.scope === "user" || a.scope === "both")
+      const surface = body.surface ?? "user";
+      if (surface !== "user") throw new HttpError(400, "surface must be user", "AGENT_SURFACE_INVALID");
+
+      const workspaceEnablement = getWorkspaceEnabledAgentIds(params.service.getContext(), workspaceId);
+      const agents = listAvailableAgentsForSurface(params.service.getContext(), surface, { workspaceEnablement })
         .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name));
       return { agents };
     }

@@ -7,7 +7,11 @@ import type {
   WorkspaceDetail,
   WorkspaceExternalSkillRoot,
   WorkspaceExternalSkillRootsDetectResponse,
-  WorkspaceExternalSkillRootsSettingsResponse
+  WorkspaceExternalSkillRootsSettingsResponse,
+  WorkspaceAgentEnablementMode,
+  WorkspaceAgentEnablementSettingsResponse,
+  UpdateWorkspaceAgentEnablementSettingsRequest,
+  WorkspaceAgentEnablementDetectResponse
 } from "@agent-workbench/shared";
 import type { WorkspaceRecord } from "@agent-workbench/shared";
 import { HttpError } from "../../app/errors.js";
@@ -16,6 +20,7 @@ import { newId } from "../../utils/ids.js";
 import { nowMs } from "../../utils/time.js";
 import { getSettingJson, setSettingJson } from "../settings/settings.store.js";
 import { getRepo } from "../repos/repo.store.js";
+import { getAgentSettings } from "../settings/settings.service.js";
 import { getOriginDefaultBranch, listHeadsBranches } from "../../infra/git/refs.js";
 import { withRepoLock } from "../../infra/locks/repoLock.js";
 import { cloneFromMirror } from "../../infra/git/clone.js";
@@ -48,6 +53,7 @@ import { scanReadableTopLevelSkills } from "../agent/top-level-skill.js";
 import { withWorkspaceLock } from "../../infra/locks/workspaceLock.js";
 
 const WORKSPACE_EXTERNAL_SKILL_ROOTS_SETTINGS_KEY = "workspace_external_skill_roots_v1";
+const WORKSPACE_AGENT_ENABLEMENT_SETTINGS_KEY = "workspace_agent_enablement_v1";
 
 function formatRepoDisplayName(rawUrl: string) {
   let s = String(rawUrl || "").trim();
@@ -472,6 +478,10 @@ type ExternalSkillCandidate = WorkspaceExternalSkillRoot & {
   rootPath: string;
 };
 
+type WorkspaceAgentEnablementSettingsPayload = {
+  workspaces?: Record<string, { mode?: WorkspaceAgentEnablementMode; enabledAgentIds?: string[]; updatedAt?: number }>;
+};
+
 function normalizeRelativeRepoPath(raw: string) {
   const normalized = String(raw || "").trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
   if (!normalized || normalized === "." || normalized === "..") return "";
@@ -771,6 +781,119 @@ function listEnabledWorkspaceExternalSkillRootsRaw(ctx: AppContext, workspaceId:
     if (repoCmp !== 0) return repoCmp;
     return a.rootDir.localeCompare(b.rootDir);
   });
+}
+
+function readWorkspaceAgentEnablementSettings(ctx: AppContext): WorkspaceAgentEnablementSettingsPayload {
+  const found = getSettingJson(ctx.db, WORKSPACE_AGENT_ENABLEMENT_SETTINGS_KEY);
+  const value = found?.value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { workspaces: {} };
+  const workspaces = (value as any).workspaces;
+  if (!workspaces || typeof workspaces !== "object" || Array.isArray(workspaces)) return { workspaces: {} };
+  return { workspaces: workspaces as WorkspaceAgentEnablementSettingsPayload["workspaces"] };
+}
+
+function persistWorkspaceAgentEnablementSettings(ctx: AppContext, payload: WorkspaceAgentEnablementSettingsPayload, updatedAt: number) {
+  setSettingJson(ctx.db, WORKSPACE_AGENT_ENABLEMENT_SETTINGS_KEY, payload, updatedAt);
+}
+
+function normalizeEnabledAgentIds(raw: unknown) {
+  if (!Array.isArray(raw)) return [] as string[];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    const id = String(item || "").trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+export function getWorkspaceEnabledAgentIds(ctx: AppContext, workspaceId: string) {
+  const settings = readWorkspaceAgentEnablementSettings(ctx);
+  const ws = settings.workspaces?.[workspaceId];
+  const mode: WorkspaceAgentEnablementMode = String(ws?.mode || "").trim() === "subset" ? "subset" : "all";
+  const enabledAgentIds = normalizeEnabledAgentIds(ws?.enabledAgentIds);
+  const updatedAt = Number(ws?.updatedAt || 0) || 0;
+  return {
+    mode,
+    enabledAgentIds,
+    updatedAt,
+    isDefaultAll: mode === "all"
+  };
+}
+
+export function filterAgentsByWorkspaceEnablement<T extends { id: string }>(params: {
+  agents: T[];
+  enabledAgentIds: string[];
+  mode: WorkspaceAgentEnablementMode;
+}) {
+  if (params.mode !== "subset") return params.agents;
+  const enabledSet = new Set(params.enabledAgentIds);
+  return params.agents.filter((item) => enabledSet.has(item.id));
+}
+
+export async function detectWorkspaceAgentEnablement(
+  ctx: AppContext,
+  workspaceId: string
+): Promise<WorkspaceAgentEnablementDetectResponse> {
+  const ws = await getWorkspaceById(ctx, workspaceId);
+  const globalAgents = getAgentSettings(ctx).agents;
+  const setting = getWorkspaceEnabledAgentIds(ctx, ws.id);
+  const enabledSet = new Set(setting.enabledAgentIds);
+  const items = globalAgents.map((agent) => ({
+    id: agent.id,
+    name: agent.name,
+    scope: agent.scope,
+    enabled: setting.mode === "all" ? true : enabledSet.has(agent.id)
+  }));
+  return { workspaceId: ws.id, items, updatedAt: setting.updatedAt || nowMs() };
+}
+
+export async function getWorkspaceAgentEnablementSettings(
+  ctx: AppContext,
+  workspaceId: string
+): Promise<WorkspaceAgentEnablementSettingsResponse> {
+  const ws = await getWorkspaceById(ctx, workspaceId);
+  const setting = getWorkspaceEnabledAgentIds(ctx, ws.id);
+  return {
+    workspaceId: ws.id,
+    mode: setting.mode,
+    enabledAgentIds: setting.enabledAgentIds,
+    updatedAt: setting.updatedAt
+  };
+}
+
+export async function updateWorkspaceAgentEnablementSettings(
+  ctx: AppContext,
+  workspaceId: string,
+  payload: UpdateWorkspaceAgentEnablementSettingsRequest
+): Promise<WorkspaceAgentEnablementSettingsResponse> {
+  const ws = await getWorkspaceById(ctx, workspaceId);
+  const mode: WorkspaceAgentEnablementMode = String((payload as any)?.mode || "").trim() === "subset" ? "subset" : "all";
+  const now = nowMs();
+
+  let enabledAgentIds: string[] = [];
+  if (mode === "subset") {
+    const existing = new Set(getAgentSettings(ctx).agents.map((item) => item.id));
+    enabledAgentIds = normalizeEnabledAgentIds((payload as any)?.enabledAgentIds).filter((id) => existing.has(id));
+  }
+
+  const settings = readWorkspaceAgentEnablementSettings(ctx);
+  const workspaces = { ...(settings.workspaces || {}) };
+  workspaces[ws.id] = {
+    mode,
+    enabledAgentIds,
+    updatedAt: now
+  };
+  persistWorkspaceAgentEnablementSettings(ctx, { workspaces }, now);
+
+  return {
+    workspaceId: ws.id,
+    mode,
+    enabledAgentIds,
+    updatedAt: now
+  };
 }
 
 export async function detectWorkspaceExternalSkillRoots(

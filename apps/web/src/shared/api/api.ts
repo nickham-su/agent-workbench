@@ -39,6 +39,10 @@ import type {
   WorkspaceExternalSkillRootsDetectResponse,
   WorkspaceExternalSkillRootsSettingsResponse,
   WorkspaceExternalSkillRootInput,
+  WorkspaceAgentEnablementDetectResponse,
+  WorkspaceAgentEnablementSettingsResponse,
+  UpdateWorkspaceAgentEnablementSettingsRequest,
+  WorkspaceAvailableAgentsResponse,
   CredentialRecord,
   GenerateSshKeypairResponse,
   FileCompareResponse,
@@ -450,6 +454,51 @@ export async function updateWorkspaceExternalSkillRootsSettings(
     const res = await client.put<WorkspaceExternalSkillRootsSettingsResponse>(`/workspaces/${workspaceId}/external-skill-roots/settings`, {
       enabledRoots: (body.enabledRoots || []).map((it: WorkspaceExternalSkillRootInput) => ({ sourceType: it.sourceType, repoId: it.repoId, rootDir: it.rootDir }))
     });
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function detectWorkspaceAgentEnablement(workspaceId: string) {
+  try {
+    const res = await client.get<WorkspaceAgentEnablementDetectResponse>(`/workspaces/${workspaceId}/agent-enablement/detect`);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getWorkspaceAgentEnablementSettings(workspaceId: string) {
+  try {
+    const res = await client.get<WorkspaceAgentEnablementSettingsResponse>(`/workspaces/${workspaceId}/agent-enablement/settings`);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function updateWorkspaceAgentEnablementSettings(
+  workspaceId: string,
+  body: UpdateWorkspaceAgentEnablementSettingsRequest
+) {
+  try {
+    const mode = body.mode === "subset" ? "subset" : "all";
+    const res = await client.put<WorkspaceAgentEnablementSettingsResponse>(`/workspaces/${workspaceId}/agent-enablement/settings`, {
+      mode,
+      ...(mode === "subset"
+        ? { enabledAgentIds: (body.enabledAgentIds || []).map((it) => String(it || "").trim()).filter(Boolean) }
+        : {})
+    });
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function listWorkspaceAvailableAgents(workspaceId: string, surface: "user" | "subtask" = "user") {
+  try {
+    const res = await client.get<WorkspaceAvailableAgentsResponse>(`/workspaces/${workspaceId}/agents/available`, { params: { surface } });
     return res.data;
   } catch (err) {
     throw toApiError(err);

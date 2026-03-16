@@ -97,6 +97,7 @@ import { projectToolCallInputForPrompt } from "./prompt/tool-projectors/index.js
 import { listPluginRuntimeSnapshots } from "../plugins/plugin.service.js";
 import { parseSkillFrontmatter, scanReadableTopLevelSkills } from "./top-level-skill.js";
 import type { AgentRunCompletedEventHub } from "./run-completed-events.js";
+import { getWorkspaceEnabledAgentIds } from "../workspaces/workspace.service.js";
 
 export type AgentQueuedRun = {
   workspaceId: string;
@@ -2142,7 +2143,8 @@ export class AgentService {
 
     const profile = resolveExecutionProfile(this.ctx, {
       surface: "user",
-      requestedAgentId: params.body.agentId
+      requestedAgentId: params.body.agentId,
+      workspaceEnablement: getWorkspaceEnabledAgentIds(this.ctx, session.workspaceId)
     });
 
     const createdAt = nowMs();
@@ -2355,7 +2357,8 @@ export class AgentService {
 
       const profile = resolveExecutionProfile(this.ctx, {
         surface: "user",
-        requestedAgentId: params.body.agentId
+        requestedAgentId: params.body.agentId,
+        workspaceEnablement: getWorkspaceEnabledAgentIds(this.ctx, session.workspaceId)
       });
 
       const createdAt = nowMs();
@@ -2562,6 +2565,7 @@ export class AgentService {
         const profile = resolveExecutionProfile(this.ctx, {
           surface: session.kind === "subtask" ? "subtask" : "user",
           agentIdFromRun: contextRun.agentId,
+          workspaceEnablement: getWorkspaceEnabledAgentIds(this.ctx, session.workspaceId),
           providerIdFromRun: contextRun.providerId,
           modelIdFromRun: contextRun.modelId
         });
@@ -2644,7 +2648,9 @@ export class AgentService {
     const selectedAgentId = String(selectedAgentIdRaw || "").trim();
     const agent = selectedAgentId
       ? (() => {
-          const item = listAvailableAgentsForSurface(this.ctx, "user").find((a) => a.id === selectedAgentId);
+          const item = listAvailableAgentsForSurface(this.ctx, "user", {
+            workspaceEnablement: getWorkspaceEnabledAgentIds(this.ctx, session.workspaceId)
+          }).find((a) => a.id === selectedAgentId);
           if (!item) throw new HttpError(400, "Agent not found", "AGENT_NOT_FOUND");
           // keep minimal fields for IM display
           return { id: item.id, name: item.name, contextWindowTokens: item.resolvedModel?.contextWindowTokens ?? null };
@@ -3203,7 +3209,8 @@ export class AgentService {
 
     const profile = resolveExecutionProfile(this.ctx, {
       surface: "subtask",
-      requestedAgentId: resolvedAgentId
+      requestedAgentId: resolvedAgentId,
+      workspaceEnablement: getWorkspaceEnabledAgentIds(this.ctx, params.workspaceId)
     });
     const childContextWindowTokens = Math.max(1, Math.floor(Number(profile.model.contextWindowTokens || 0)));
     const thresholdTokens = Math.floor(childContextWindowTokens * (thresholdPct / 100));
@@ -3385,7 +3392,8 @@ export class AgentService {
 
     const profile = resolveExecutionProfile(this.ctx, {
       surface: "subtask",
-      requestedAgentId: resolvedAgentId
+      requestedAgentId: resolvedAgentId,
+      workspaceEnablement: getWorkspaceEnabledAgentIds(this.ctx, params.workspaceId)
     });
 
     const workspace = getWorkspace(this.ctx.db, params.workspaceId);
@@ -3577,6 +3585,7 @@ export class AgentService {
     const profile = resolveExecutionProfile(this.ctx, {
       surface: session.kind === "subtask" ? "subtask" : "user",
       agentIdFromRun: run.agentId,
+      workspaceEnablement: getWorkspaceEnabledAgentIds(this.ctx, session.workspaceId),
       providerIdFromRun: run.providerId,
       modelIdFromRun: run.modelId
     });
@@ -4271,6 +4280,7 @@ export class AgentService {
     const profile = resolveExecutionProfile(this.ctx, {
       surface: session.kind === "subtask" ? "subtask" : "user",
       agentIdFromRun: run.agentId,
+      workspaceEnablement: getWorkspaceEnabledAgentIds(this.ctx, session.workspaceId),
       providerIdFromRun: run.providerId,
       modelIdFromRun: run.modelId
     });

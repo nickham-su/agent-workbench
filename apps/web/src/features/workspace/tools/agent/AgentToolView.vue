@@ -64,12 +64,13 @@
               @update:model-value="(value) => setSessionAgent(session.id, value)"
                @forked="onSessionForked"
               @open-subtask="onOpenSubtask"
-              @open-parent="(parentSessionId) => onOpenParent(session.id, parentSessionId)"
-              @session-title-sync-needed="requestSessionTitleSync"
-              @choose-session="openChooseSessionModal(session.id)"
-            />
-          </div>
-      </a-tab-pane>
+               @open-parent="(parentSessionId) => onOpenParent(session.id, parentSessionId)"
+               @session-title-sync-needed="requestSessionTitleSync"
+               @choose-session="openChooseSessionModal(session.id)"
+               @agent-enablement-saved="onAgentEnablementSaved"
+             />
+           </div>
+       </a-tab-pane>
 
       <a-tab-pane key="__agent_add__">
         <template #tab>
@@ -121,7 +122,7 @@ import { CloseOutlined, MinusOutlined, PlusOutlined } from "@ant-design/icons-vu
 import { message } from "ant-design-vue";
 import { computed, onActivated, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { createAgentSession, getAgentSettings, listAgentSessions } from "@/shared/api";
+import { createAgentSession, listAgentSessions, listWorkspaceAvailableAgents } from "@/shared/api";
 import { useWorkspaceHost } from "@/features/workspace/host";
 import AgentClientPane from "./AgentClientPane.vue";
 import { agentSessionStatusStoreKey, createAgentSessionStatusStore } from "./useAgentSessionStatusStore";
@@ -452,9 +453,8 @@ function setSessionAgent(sessionId: string, value: string | null) {
 
 async function refreshAgents() {
   try {
-    const res = await getAgentSettings();
+    const res = await listWorkspaceAvailableAgents(props.workspaceId, "user");
     agentOptions.value = res.agents
-      .filter((agent) => agent.scope === "user" || agent.scope === "both")
       .map((agent) => ({
         value: agent.id,
         label: agent.name,
@@ -463,6 +463,10 @@ async function refreshAgents() {
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   }
+}
+
+function onAgentEnablementSaved() {
+  void refreshAgents();
 }
 
 function pruneOpenedSubtaskSessions() {

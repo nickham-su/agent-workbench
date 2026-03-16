@@ -750,7 +750,11 @@ function createGateway(params: GatewayStartParams): FeishuGateway {
       const agents = await listAgents(workspaceId);
       if (!normalizeText(cmd.arg)) {
         const lines = agents.map((a: any, i: number) => `${i + 1}. ${normalizeText(a.name) || "(unknown)"} (${normalizeText(a.id)})`);
-        await replyText(ctx.chatId, ctx.messageId, lines.length > 0 ? lines.join("\n") : "无可用 agent");
+        await replyText(
+          ctx.chatId,
+          ctx.messageId,
+          lines.length > 0 ? lines.join("\n") : "当前 workspace 未启用任何可用 agent，请先在 Web 端工作区中启用后再试 /a"
+        );
         return;
       }
       const target = resolveIndexOrId(cmd.arg, agents.map((a: any) => ({ id: String(a.id) })));
@@ -828,14 +832,42 @@ function createGateway(params: GatewayStartParams): FeishuGateway {
 
     if (cmd.cmd === "/l") {
       const sessionId = normalizeText(binding?.sessionId);
-      if (!sessionId) {
+      const workspaceId = normalizeText(binding?.workspaceId);
+      if (!sessionId || !workspaceId) {
         await replyText(ctx.chatId, ctx.messageId, "请先使用 /ss 绑定会话");
         return;
       }
-      const summary = await client.post("/api/internal/agent/sessions/status-summary", {
-        sessionId,
-        selectedAgentId: normalizeText(binding?.agentId) || undefined
-      });
+
+      const agents = await listAgents(workspaceId);
+      if (agents.length === 0) {
+        await replyText(ctx.chatId, ctx.messageId, "当前 workspace 未启用任何可用 agent，请先在 Web 端工作区中启用后再试 /a");
+        return;
+      }
+      const selectedAgentId = normalizeText(binding?.agentId);
+      if (selectedAgentId && !agents.some((a: any) => normalizeText(a.id) === selectedAgentId)) {
+        await replyText(ctx.chatId, ctx.messageId, "当前 workspace 已禁用已绑定 agent，请重新执行 /a 选择可用 agent");
+        return;
+      }
+
+      let summary: any;
+      try {
+        summary = await client.post("/api/internal/agent/sessions/status-summary", {
+          sessionId,
+          selectedAgentId: selectedAgentId || undefined
+        });
+      } catch (err) {
+        const errCode = normalizeText((err as any)?.code).toUpperCase();
+        if (errCode === "AGENT_DISABLED_IN_WORKSPACE") {
+          await replyText(ctx.chatId, ctx.messageId, "当前 workspace 已禁用已绑定 agent，请重新执行 /a 选择可用 agent");
+          return;
+        }
+        if (errCode === "AGENT_NO_AVAILABLE_IN_WORKSPACE") {
+          await replyText(ctx.chatId, ctx.messageId, "当前 workspace 未启用任何可用 agent，请先在 Web 端工作区中启用后再试 /a");
+          return;
+        }
+        throw err;
+      }
+
       if (normalizeText(summary?.runState?.status).toLowerCase() === "running") {
         await replyText(ctx.chatId, ctx.messageId, "正在运行中，请稍后再试");
         return;
@@ -853,10 +885,42 @@ function createGateway(params: GatewayStartParams): FeishuGateway {
         await replyText(ctx.chatId, ctx.messageId, `状态：未绑定会话\n请先使用 /ss 绑定会话\n当前策略：${policyLabel(store.getPolicy(buildChatKey(ctx.chatId)))}`);
         return;
       }
-      const summary = await client.post("/api/internal/agent/sessions/status-summary", {
-        sessionId,
-        selectedAgentId: normalizeText(binding?.agentId) || undefined
-      });
+
+      const workspaceId = normalizeText(binding?.workspaceId);
+      if (!workspaceId) {
+        await replyText(ctx.chatId, ctx.messageId, "状态：未绑定工作区\n请先使用 /ss 绑定会话");
+        return;
+      }
+      const agents = await listAgents(workspaceId);
+      if (agents.length === 0) {
+        await replyText(ctx.chatId, ctx.messageId, "当前 workspace 未启用任何可用 agent，请先在 Web 端工作区中启用后再试 /a");
+        return;
+      }
+      const selectedAgentId = normalizeText(binding?.agentId);
+      if (selectedAgentId && !agents.some((a: any) => normalizeText(a.id) === selectedAgentId)) {
+        await replyText(ctx.chatId, ctx.messageId, "当前 workspace 已禁用已绑定 agent，请重新执行 /a 选择可用 agent");
+        return;
+      }
+
+      let summary: any;
+      try {
+        summary = await client.post("/api/internal/agent/sessions/status-summary", {
+          sessionId,
+          selectedAgentId: selectedAgentId || undefined
+        });
+      } catch (err) {
+        const errCode = normalizeText((err as any)?.code).toUpperCase();
+        if (errCode === "AGENT_DISABLED_IN_WORKSPACE") {
+          await replyText(ctx.chatId, ctx.messageId, "当前 workspace 已禁用已绑定 agent，请重新执行 /a 选择可用 agent");
+          return;
+        }
+        if (errCode === "AGENT_NO_AVAILABLE_IN_WORKSPACE") {
+          await replyText(ctx.chatId, ctx.messageId, "当前 workspace 未启用任何可用 agent，请先在 Web 端工作区中启用后再试 /a");
+          return;
+        }
+        throw err;
+      }
+
       const policy = store.getPolicy(buildChatKey(ctx.chatId));
       await replyText(ctx.chatId, ctx.messageId, buildStatusText(summary, policy));
       return;
@@ -874,17 +938,31 @@ function createGateway(params: GatewayStartParams): FeishuGateway {
       return;
     }
 
-    const trigger = await client.post("/api/internal/agent/runs/trigger", {
-      workspaceId,
-      sessionId,
-      agentId,
-      text: formatIncomingText(ctx.text),
-      clientRequestId: `im_feishu_${buildChatKey(ctx.chatId)}_${ctx.messageId}`
-    });
-    if (!trigger?.deduplicated) {
-      store.mapRun(String(trigger.runId), buildChatKey(ctx.chatId), ctx.messageId);
+    try {
+      const trigger = await client.post("/api/internal/agent/runs/trigger", {
+        workspaceId,
+        sessionId,
+        agentId,
+        text: formatIncomingText(ctx.text),
+        clientRequestId: `im_feishu_${buildChatKey(ctx.chatId)}_${ctx.messageId}`
+      });
+      if (!trigger?.deduplicated) {
+        store.mapRun(String(trigger.runId), buildChatKey(ctx.chatId), ctx.messageId);
+      }
+      await replyText(ctx.chatId, ctx.messageId, trigger?.deduplicated ? "已收到（重复消息已忽略）" : "已收到，开始处理…");
+    } catch (err) {
+      const errCode = normalizeText((err as any)?.code).toUpperCase();
+      const message = err instanceof Error ? err.message : String(err);
+      if (errCode === "AGENT_DISABLED_IN_WORKSPACE") {
+        await replyText(ctx.chatId, ctx.messageId, "当前 workspace 已禁用该 agent，请重新执行 /a 选择可用 agent");
+        return;
+      }
+      if (errCode === "AGENT_NO_AVAILABLE_IN_WORKSPACE") {
+        await replyText(ctx.chatId, ctx.messageId, "当前 workspace 未启用任何可用 agent，请先在 Web 端工作区中启用后再试 /a");
+        return;
+      }
+      await replyText(ctx.chatId, ctx.messageId, `发送失败：${message || "未知错误"}`);
     }
-    await replyText(ctx.chatId, ctx.messageId, trigger?.deduplicated ? "已收到（重复消息已忽略）" : "已收到，开始处理…");
   }
 
   async function handleMessageEvent(ctx: MessageEventContext) {
