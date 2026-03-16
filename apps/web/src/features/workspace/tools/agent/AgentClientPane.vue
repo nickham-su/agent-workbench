@@ -470,6 +470,7 @@ import AgentTodoListCard from "./AgentTodoListCard.vue";
 import AgentScratchpadCard from "./AgentScratchpadCard.vue";
 import AgentWriteCard from "./AgentWriteCard.vue";
 import { useAgentSessionStatusStore } from "./useAgentSessionStatusStore";
+import { resolveSubtaskSessionIdForDisplay } from "./subtaskSessionId";
 import {
   ApiError,
   cancelAgentSession,
@@ -889,14 +890,6 @@ const effectiveModelLabel = computed(() => {
   return `${resolved.providerName} / ${resolved.modelName}`;
 });
 
-const effectiveContextWindowTokens = computed(() => {
-  const agentId = effectiveAgentId.value;
-  const option = props.agentOptions.find((item) => item.value === agentId);
-  const value = option?.resolvedModel?.contextWindowTokens;
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 1) return null;
-  return Math.floor(value);
-});
-
 const headerTokensNumberFormatter = new Intl.NumberFormat();
 const headerTokensPercentFormatter = new Intl.NumberFormat(undefined, {
   style: "percent",
@@ -908,12 +901,11 @@ const headerTokensText = computed(() => {
   // 需求：null/0 不展示 tokens 段
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return "";
   const formattedTokens = headerTokensNumberFormatter.format(Math.floor(value));
-  const limit = effectiveContextWindowTokens.value;
-  if (typeof limit !== "number" || !Number.isFinite(limit) || limit < 1) {
+  const ratioFromRunState = runState.value.contextTokenRatio;
+  if (typeof ratioFromRunState !== "number" || !Number.isFinite(ratioFromRunState) || ratioFromRunState < 0) {
     return `${formattedTokens} tokens`;
   }
-  const ratio = value / limit;
-  const formattedRatio = headerTokensPercentFormatter.format(ratio);
+  const formattedRatio = headerTokensPercentFormatter.format(ratioFromRunState);
   return `${formattedTokens} tokens (${formattedRatio})`;
 });
 const inputPlaceholder = computed(() => {
@@ -1018,10 +1010,11 @@ const displayItems = computed<DisplayItem[]>(() => {
         ? item.output.toolCallId.trim()
         : undefined;
       const resultObj = toRecord(item.output.result);
-      const subtaskSessionId =
-        typeof resultObj?.subtaskSessionId === "string" && resultObj.subtaskSessionId.trim()
-          ? resultObj.subtaskSessionId.trim()
-          : undefined;
+      const subtaskSessionId = resolveSubtaskSessionIdForDisplay({
+        resultSubtaskSessionId: resultObj?.subtaskSessionId,
+        outputText: item.output.text,
+        fallbackText: headText
+      }) || undefined;
       const errorText = item.output.error ? truncateText(item.output.error, 220) : undefined;
       if (item.output.toolName === "apply_patch") {
         const applyPatch = parseApplyPatchDisplay(item.output.result);
@@ -1135,7 +1128,12 @@ const displayItems = computed<DisplayItem[]>(() => {
         const modeRaw = typeof session?.mode === "string" ? session.mode.trim() : "";
         const mode = modeRaw === "new" || modeRaw === "existing" || modeRaw === "fork" ? modeRaw : "";
         const agentId = typeof argsObj?.agentId === "string" ? argsObj.agentId.trim() : "";
-        const agentName = agentId ? resolveAgentName(agentId) : "";
+        const resultAgentName = typeof resultObj?.subtaskAgentName === "string" ? resultObj.subtaskAgentName.trim() : "";
+        const resultAgentId = typeof resultObj?.subtaskAgentId === "string" ? resultObj.subtaskAgentId.trim() : "";
+        const stableAgentId = agentId || resultAgentId;
+        const fallbackAgentName = stableAgentId ? resolveAgentName(stableAgentId) : "";
+        const agentName = resultAgentName || fallbackAgentName;
+
         return {
           id: item.id,
           prevId: item.prevId,
@@ -1150,7 +1148,7 @@ const displayItems = computed<DisplayItem[]>(() => {
           ...(errorText ? { toolError: errorText } : {}),
           ...(description ? { subtaskDescription: description } : {}),
           ...(mode ? { subtaskMode: mode } : {}),
-          ...(agentId ? { subtaskAgentId: agentId } : {}),
+          ...(stableAgentId ? { subtaskAgentId: stableAgentId } : {}),
           ...(agentName ? { subtaskAgentName: agentName } : {}),
             tone: item.status === "failed" ? "error" : "normal"
         };

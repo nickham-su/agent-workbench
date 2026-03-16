@@ -593,7 +593,8 @@ export async function registerAgentRoutes(
           200: Type.Object({
             sessionId: Type.String({ minLength: 1 }),
             runId: Type.String({ minLength: 1 }),
-            workspacePath: Type.String({ minLength: 1 })
+            workspacePath: Type.String({ minLength: 1 }),
+            agentName: Type.String({ minLength: 1 })
           }),
           400: ErrorResponseSchema,
           401: ErrorResponseSchema,

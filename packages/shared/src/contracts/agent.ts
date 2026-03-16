@@ -200,8 +200,13 @@ export const AgentSessionRunStateSchema = Type.Object({
   // - `lastRun` represents the most recent *terminal* run (completed/failed/cancelled).
   // - It is designed for persistent display (e.g. show last elapsed after run finishes).
   // - It may be present even when `status: "running"` (meaning it refers to the previous run).
-  lastRun: Type.Optional(Type.Union([AgentSessionLastRunSchema, Type.Null()]))
-});
+  lastRun: Type.Optional(Type.Union([AgentSessionLastRunSchema, Type.Null()])),
+
+  // Authoritative context-window metadata aligned with the same effective run
+  // used by `lastResponseTotalTokens` display (prefer active run, fallback last terminal run).
+  contextWindowTokens: Type.Optional(Type.Union([Type.Integer({ minimum: 1 }), Type.Null()])),
+  contextTokenRatio: Type.Optional(Type.Union([Type.Number({ minimum: 0 }), Type.Null()]))
+}, { additionalProperties: false });
 export type AgentSessionRunState = Static<typeof AgentSessionRunStateSchema>;
 
 export const AgentSessionStatusSummaryRequestSchema = Type.Object(
@@ -220,14 +225,14 @@ export type AgentSessionStatusSummaryRequest = Static<typeof AgentSessionStatusS
 
 // Compatibility: IM design doc uses `terminalStatus`, while existing run-state uses `lastTerminalStatus`.
 // Keep both in status-summary response.
-export const AgentSessionRunStateWithTerminalStatusSchema = Type.Intersect(
-  [
-    AgentSessionRunStateSchema,
-    Type.Object({
-      terminalStatus: AgentSessionTerminalStatusSchema
-    })
-  ],
-  { additionalProperties: false }
+export const AgentSessionRunStateWithTerminalStatusSchema = Type.Object(
+  {
+    ...AgentSessionRunStateSchema.properties,
+    terminalStatus: AgentSessionTerminalStatusSchema
+  },
+  {
+    additionalProperties: false
+  }
 );
 
 const AgentSessionStatusSummarySessionSchema = Type.Object(

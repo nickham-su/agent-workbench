@@ -411,7 +411,9 @@ export class BuiltinToolProvider implements ToolProvider {
               body: "Subtask started."
             }),
             result: {
-              subtaskSessionId: started.sessionId
+              subtaskSessionId: started.sessionId,
+              subtaskAgentId: parsed.agentId,
+              subtaskAgentName: started.agentName
             }
           }
         });
@@ -452,6 +454,8 @@ export class BuiltinToolProvider implements ToolProvider {
         });
         const result = {
           subtaskSessionId: started.sessionId,
+          subtaskAgentId: parsed.agentId,
+          subtaskAgentName: started.agentName,
           resultText: subtaskResult.resultText
         };
         if (subtaskStatus.status === "failed" || subtaskStatus.status === "cancelled") {

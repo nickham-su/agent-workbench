@@ -2719,6 +2719,42 @@ export class AgentService {
       };
     })();
 
+    const contextRun = (() => {
+      const activeRunId = state.activeRunId;
+      if (activeRunId) {
+        const active = getRunRecord(this.ctx.db, activeRunId);
+        if (active && active.workspaceId === session.workspaceId && active.sessionId === session.id) {
+          return active;
+        }
+      }
+      return latestTerminalRun ?? null;
+    })();
+
+    let contextWindowTokens: number | null = null;
+    if (contextRun) {
+      try {
+        const profile = resolveExecutionProfile(this.ctx, {
+          surface: session.kind === "subtask" ? "subtask" : "user",
+          agentIdFromRun: contextRun.agentId,
+          providerIdFromRun: contextRun.providerId,
+          modelIdFromRun: contextRun.modelId
+        });
+        const rawTokens = Number(profile.model.contextWindowTokens);
+        if (Number.isFinite(rawTokens) && rawTokens >= 1) {
+          contextWindowTokens = Math.floor(rawTokens);
+        }
+      } catch (err) {
+        this.logger.warn(
+          { err, sessionId: session.id, workspaceId: session.workspaceId, runId: contextRun.runId },
+          "resolve context-window tokens failed for run-state"
+        );
+      }
+    }
+    const contextTokenRatio =
+      typeof state.lastResponseTotalTokens === "number" && typeof contextWindowTokens === "number" && contextWindowTokens > 0
+        ? state.lastResponseTotalTokens / contextWindowTokens
+        : null;
+
     const lastRun = (() => {
       if (!latestTerminalRun) return null;
       const startedAt = latestTerminalRun.createdAt;
@@ -2745,7 +2781,9 @@ export class AgentService {
       updatedAt: state.updatedAt,
       lastTerminalStatus,
       appliedItemId: state.appliedItemId,
-      lastRun
+      lastRun,
+      contextWindowTokens,
+      contextTokenRatio
     };
   }
 
@@ -2784,15 +2822,8 @@ export class AgentService {
           if (!item) throw new HttpError(400, "Agent not found", "AGENT_NOT_FOUND");
           // keep minimal fields for IM display
           return { id: item.id, name: item.name, contextWindowTokens: item.resolvedModel?.contextWindowTokens ?? null };
-        })()
+         })()
       : null;
-
-    const contextWindowTokens = agent?.contextWindowTokens ?? null;
-    const lastResponseTotalTokens = runState.lastResponseTotalTokens;
-    const contextTokenRatio =
-      typeof lastResponseTotalTokens === "number" && typeof contextWindowTokens === "number" && contextWindowTokens > 0
-        ? lastResponseTotalTokens / contextWindowTokens
-        : null;
 
     // updatedAt should reflect the underlying data change time, not "now".
     const updatedAt = Math.max(session.updatedAt, runState.updatedAt, startedAt ?? 0);
@@ -2815,8 +2846,8 @@ export class AgentService {
       },
       startedAt,
       elapsedMs,
-      contextWindowTokens,
-      contextTokenRatio
+      contextWindowTokens: runState.contextWindowTokens ?? null,
+      contextTokenRatio: runState.contextTokenRatio ?? null
     };
   }
 
@@ -3624,7 +3655,8 @@ export class AgentService {
     return {
       sessionId: session.id,
       runId,
-      workspacePath: workspace.path
+      workspacePath: workspace.path,
+      agentName: profile.agent.name
     };
   }
 

@@ -995,6 +995,8 @@ async function getRunState(app: FastifyInstance, sessionId: string) {
     activeRunId: string | null;
     runNoticeText: string;
     lastTerminalStatus: "completed" | "failed" | "cancelled" | null;
+    contextWindowTokens?: number | null;
+    contextTokenRatio?: number | null;
   };
 }
 
@@ -3351,7 +3353,9 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
     }
   });
   assert.equal(startRes.statusCode, 200, `start subtask failed: ${startRes.body}`);
-  const started = startRes.json() as { sessionId: string; runId: string };
+  const started = startRes.json() as { sessionId: string; runId: string; agentName: string };
+  assert.equal(started.agentName, "default");
+
 
   const items = getSessionTranscriptItems(fixture.db, fixture.workspaceId, started.sessionId);
   assert.equal(items.length >= 3, true, "forked subtask session should contain copied user, system guard and prompt user");
@@ -4881,10 +4885,14 @@ test("internal sessions/status-summary 返回 run 摘要（elapsed/contextWindow
   assert.equal(body.runState?.activeRunId, runId);
   assert.equal(body.runState?.lastResponseTotalTokens, 64000);
   // Compatibility: runState.terminalStatus alias
+  assert.equal(body.runState?.contextWindowTokens, 128000);
+  assert.ok(Math.abs((body.runState?.contextTokenRatio ?? 0) - 0.5) < 1e-9);
   assert.equal(body.runState?.terminalStatus, body.runState?.lastTerminalStatus);
   assert.equal(body.startedAt, createdAt);
   assert.equal(body.contextWindowTokens, 128000);
+  assert.equal(body.contextWindowTokens, body.runState?.contextWindowTokens);
   assert.ok(Math.abs(body.contextTokenRatio - 0.5) < 1e-9);
+  assert.equal(body.contextTokenRatio, body.runState?.contextTokenRatio);
   assert.ok(typeof body.elapsedMs === "number" && body.elapsedMs >= 0);
 
   {
@@ -4928,8 +4936,8 @@ test("internal sessions/status-summary 返回 run 摘要（elapsed/contextWindow
   assert.equal(resNoAgent.statusCode, 200, `status-summary(no agent) failed: ${resNoAgent.body}`);
   const bodyNoAgent = resNoAgent.json() as any;
   assert.equal(bodyNoAgent.agent, null);
-  assert.equal(bodyNoAgent.contextWindowTokens, null);
-  assert.equal(bodyNoAgent.contextTokenRatio, null);
+  assert.equal(bodyNoAgent.contextWindowTokens, bodyNoAgent.runState?.contextWindowTokens ?? null);
+  assert.equal(bodyNoAgent.contextTokenRatio, bodyNoAgent.runState?.contextTokenRatio ?? null);
 });
 
 test("internal channels/allowlist/check 命中 allowlist 时返回 allowed=true 与 role", async () => {
