@@ -161,7 +161,6 @@ const ADD_TAB_KEY = "__agent_add__";
 const ACTIVE_KEY_STORAGE_PREFIX = "agent-workbench.workspace.agent.activeClient";
 const AGENT_PICK_STORAGE_PREFIX = "agent-workbench.workspace.agent.pickBySession";
 const CLOSED_SESSION_STORAGE_PREFIX = "agent-workbench.workspace.agent.closedSessions";
-const AGENT_TAB_NO_STORAGE_KEY_PREFIX = "agent-workbench.workspace.agent.tabNoMap";
 const OPENED_SUBTASK_SESSION_STORAGE_PREFIX = "agent-workbench.workspace.agent.openedSubtaskSessions";
 
 const props = defineProps<{ workspaceId: string; toolId: string }>();
@@ -184,8 +183,6 @@ const chooseSessionItems = ref<ChooseSessionItem[]>([]);
 const chooseSessionSourceId = ref("");
 const sessionsInitialized = ref(false);
 const serverSessionsLoaded = ref(false);
-
-const suppressTabNoPersist = ref(false);
 const pendingSessionTitleSyncUpdatedAt = reactive<Record<string, number>>({});
 const draftCreatePromises = new Map<string, Promise<string>>();
 
@@ -241,43 +238,6 @@ function openedSubtaskSessionStorageKey(workspaceId: string) {
   return `${OPENED_SUBTASK_SESSION_STORAGE_PREFIX}.v1.${id}`;
 }
 
-function agentTabNoStorageKey(workspaceId: string) {
-  const id = String(workspaceId || "").trim();
-  if (!id) return `${AGENT_TAB_NO_STORAGE_KEY_PREFIX}.v1`;
-  return `${AGENT_TAB_NO_STORAGE_KEY_PREFIX}.v1.${id}`;
-}
-
-function restoreTabNoMapFromStorage(workspaceId: string) {
-  const id = String(workspaceId || "").trim();
-  if (!id) return;
-  try {
-    const raw = localStorage.getItem(agentTabNoStorageKey(id));
-    if (!raw) return;
-    const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== "object") return;
-    const map: Record<string, number> = {};
-    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-      if (typeof k !== "string" || !k.trim()) continue;
-      const n = typeof v === "number" ? v : Number.NaN;
-      if (!Number.isFinite(n) || n <= 0) continue;
-      map[k] = Math.floor(n);
-    }
-    tabNoMap.value = map;
-  } catch {
-    // ignore
-  }
-}
-
-function persistTabNoMapToStorage(workspaceId: string, map: Record<string, number>) {
-  const id = String(workspaceId || "").trim();
-  if (!id) return;
-  try {
-    localStorage.setItem(agentTabNoStorageKey(id), JSON.stringify(map));
-  } catch {
-    // ignore
-  }
-}
-
 function reconcileTabNoMap(params: { workspaceId: string; sessions: AgentSessionTab[] }) {
   const id = String(params.workspaceId || "").trim();
   if (!id) return;
@@ -298,26 +258,48 @@ function reconcileTabNoMap(params: { workspaceId: string; sessions: AgentSession
     if (!present.has(k)) delete nextMap[k];
   }
 
+  const used = new Set<number>();
   let max = 0;
-  for (const n of Object.values(nextMap)) {
-    if (Number.isFinite(n) && n > max) max = n;
+
+  // 先保留当前可见 tabs 中有效且不冲突的已有编号
+  for (const sess of sessionsInWs) {
+    const existing = nextMap[sess.id];
+    if (typeof existing !== "number" || !Number.isFinite(existing) || existing <= 0) {
+      delete nextMap[sess.id];
+      continue;
+    }
+    const normalized = Math.floor(existing);
+    if (used.has(normalized)) {
+      delete nextMap[sess.id];
+      continue;
+    }
+    nextMap[sess.id] = normalized;
+    used.add(normalized);
+    if (normalized > max) max = normalized;
   }
 
+  // 对缺失/冲突项按当前 max+1 分配
   for (const sess of sessionsInWs) {
     const existing = nextMap[sess.id];
     if (typeof existing === "number" && Number.isFinite(existing) && existing > 0) continue;
     max += 1;
+    while (used.has(max)) max += 1;
     nextMap[sess.id] = max;
+    used.add(max);
   }
 
   tabNoMap.value = nextMap;
-  if (suppressTabNoPersist.value) return;
-  persistTabNoMapToStorage(id, nextMap);
 }
 
-function agentDisplayIndex(sessionId: string, fallback: number) {
+function agentDisplayIndex(sessionId: string, index: number) {
   const n = tabNoMap.value[sessionId];
-  return Number.isFinite(n) && n > 0 ? n : fallback;
+  if (Number.isFinite(n) && n > 0) return n;
+  // 无映射时用 "当前已分配最大编号 + 当前序位" 兜底，避免同屏显示重复 1。
+  let max = 0;
+  for (const value of Object.values(tabNoMap.value)) {
+    if (Number.isFinite(value) && value > max) max = value;
+  }
+  return max + Math.max(1, index + 1);
 }
 
 function persistClosedSessions() {
@@ -396,7 +378,6 @@ function restorePersistedState() {
   } catch {
     // ignore
   }
-  restoreTabNoMapFromStorage(props.workspaceId);
 }
 
 function persistActiveKey(key: string) {
@@ -416,7 +397,7 @@ function persistAgentPick() {
 }
 
 function tabLabel(session: AgentSessionTab, index: number) {
-  const displayIndex = agentDisplayIndex(session.id, index + 1);
+  const displayIndex = agentDisplayIndex(session.id, index);
   return t("agent.client.tabLabel", { index: displayIndex });
 }
 
@@ -592,9 +573,6 @@ async function ensureSessionCreated(sessionId: string) {
       nextMap[created.id] = nextMap[sessionId]!;
       delete nextMap[sessionId];
       tabNoMap.value = nextMap;
-      if (!suppressTabNoPersist.value) {
-        persistTabNoMapToStorage(props.workspaceId, nextMap);
-      }
     }
 
     if (activeKey.value === sessionId) {
@@ -628,9 +606,6 @@ function closeSessionTab(sessionId: string) {
     const nextMap = { ...tabNoMap.value };
     delete nextMap[sessionId];
     tabNoMap.value = nextMap;
-    if (!suppressTabNoPersist.value) {
-      persistTabNoMapToStorage(props.workspaceId, nextMap);
-    }
   }
 
   if (activeKey.value !== sessionId) return;
@@ -667,6 +642,7 @@ async function onSessionForked(sessionId: string) {
   if (!sessionId) return;
   delete closedSessionIds[sessionId];
   persistClosedSessions();
+  reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
   activeKey.value = sessionId;
   statusStore.markSessionSeen(sessionId);
   persistActiveKey(sessionId);
@@ -679,6 +655,7 @@ async function onOpenSubtask(sessionId: string) {
   await refreshSessions();
   delete closedSessionIds[sessionId];
   persistClosedSessions();
+  reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
   activeKey.value = sessionId;
   statusStore.markSessionSeen(sessionId);
   persistActiveKey(sessionId);
@@ -694,6 +671,7 @@ async function onOpenParent(sourceSessionId: string, sessionId: string) {
   }
   delete closedSessionIds[sessionId];
   persistClosedSessions();
+  reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
   activeKey.value = sessionId;
   statusStore.markSessionSeen(sessionId);
   persistActiveKey(sessionId);
@@ -725,9 +703,6 @@ function replaceDraftWithSession(params: { fromSessionId: string; targetSessionI
   }
   delete nextMap[fromSessionId];
   tabNoMap.value = nextMap;
-  if (!suppressTabNoPersist.value) {
-    persistTabNoMapToStorage(props.workspaceId, nextMap);
-  }
 
   delete selectedAgentBySession[fromSessionId];
   persistAgentPick();
@@ -811,7 +786,6 @@ watch(
     for (const key of Object.keys(openedSubtaskSessionIds)) {
       delete openedSubtaskSessionIds[key];
     }
-    suppressTabNoPersist.value = true;
     tabNoMap.value = {};
     for (const key of Object.keys(selectedAgentBySession)) {
       delete selectedAgentBySession[key];
@@ -821,7 +795,6 @@ watch(
     }
     restorePersistedState();
     await refreshAll();
-    suppressTabNoPersist.value = false;
     statusStore.bindWorkspace(props.workspaceId);
     if (visibleSessions.value.length === 0) {
       await createOneSession();
