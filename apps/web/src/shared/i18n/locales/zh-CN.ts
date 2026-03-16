@@ -356,7 +356,7 @@ export default {
       externalSkillRootsSaved: "已保存外部 skill roots 配置",
       externalSkillRootsSourceWorkspace: "Workspace",
       externalSkillRootsSourceRepo: "Repo",
-      externalSkillRootsMeta: "{source} · {count} 个顶级 skills",
+      externalSkillRootsMeta: "{count} 个skills",
       slashCommandHintNoMatch: "未找到匹配的指令: /{query}",
       slashCommands: {
         compact: {

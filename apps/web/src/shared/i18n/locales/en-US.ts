@@ -358,7 +358,7 @@ export default {
       externalSkillRootsSaved: "External skill roots settings saved",
       externalSkillRootsSourceWorkspace: "Workspace",
       externalSkillRootsSourceRepo: "Repo",
-      externalSkillRootsMeta: "{source} · {count} top-level skills",
+      externalSkillRootsMeta: "{count} skills",
       slashCommandHintNoMatch: "No matching command: /{query}",
       slashCommands: {
         compact: {

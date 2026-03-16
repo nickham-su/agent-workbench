@@ -429,14 +429,16 @@
             <label
               v-for="item in externalSkillRootsCandidates"
               :key="externalSkillRootsKey(item)"
-              class="border border-[var(--border-color-secondary)] rounded px-2 py-1.5"
+              class="external-skill-root-item block w-full border border-[var(--border-color-secondary)] rounded px-2 py-1.5"
             >
-              <a-checkbox :value="externalSkillRootsKey(item)">
-                {{ item.displayName }}
+              <a-checkbox :value="externalSkillRootsKey(item)" class="external-skill-root-checkbox w-full">
+                <span class="external-skill-root-content">
+                  <span class="external-skill-root-name text-[color:var(--text-primary)]" :title="item.displayName">{{ item.displayName }}</span>
+                  <span class="external-skill-root-count text-[0.85em] text-[color:var(--text-tertiary)]">
+                  {{ t("agent.client.externalSkillRootsMeta", { count: item.topLevelSkillCount }) }}
+                  </span>
+                </span>
               </a-checkbox>
-              <div class="pl-6 text-[0.85em] text-[color:var(--text-tertiary)]">
-                {{ t("agent.client.externalSkillRootsMeta", { source: item.sourceType === "workspace" ? t("agent.client.externalSkillRootsSourceWorkspace") : t("agent.client.externalSkillRootsSourceRepo"), count: item.topLevelSkillCount }) }}
-              </div>
             </label>
           </div>
         </a-checkbox-group>
@@ -2811,5 +2813,53 @@ onBeforeUnmount(() => {
 
 :deep(.agent-input-textarea) {
   border-radius: 4px;
+}
+
+.external-skill-root-item {
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .external-skill-root-item:hover {
+    background: rgba(255, 255, 255, 0.03);
+    border-color: rgba(59, 130, 246, 0.28);
+  }
+}
+
+.external-skill-root-checkbox :deep(.ant-checkbox-wrapper) {
+  display: flex !important;
+  align-items: center;
+  width: 100%;
+  margin-inline-end: 0;
+}
+
+.external-skill-root-checkbox :deep(.ant-checkbox + span) {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  padding-inline-start: 8px;
+}
+
+.external-skill-root-content {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+}
+
+.external-skill-root-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.external-skill-root-count {
+  flex: none;
+  white-space: nowrap;
 }
 </style>
