@@ -280,7 +280,22 @@ function updateChildren(dir: string, entries: FileEntry[]) {
   rebuildNodeMap();
 }
 
+function isDirExpanded(dir: string) {
+  const key = dir ? dir : ROOT_KEY;
+  return expandedKeys.value.includes(key);
+}
+
+function clearLoadedOnCollapse(key: string) {
+  if (key === ROOT_KEY) {
+    loadedDirs.clear();
+    return;
+  }
+  const dir = toDirPath(key);
+  removeLoadedDirsUnder(dir, true);
+}
+
 function markLoaded(dir: string) {
+  if (!isDirExpanded(dir)) return;
   loadedDirs.add(dir);
 }
 
@@ -362,9 +377,11 @@ function onExpandedKeysUpdate(keys: (string | number)[]) {
   let pruned = next;
   for (const ck of collapsed) {
     if (ck === ROOT_KEY) {
+      clearLoadedOnCollapse(ck);
       pruned = pruned.filter((k) => k === ROOT_KEY);
       continue;
     }
+    clearLoadedOnCollapse(ck);
     pruned = pruned.filter((k) => k !== ck && !k.startsWith(ck + "/"));
   }
   expandedKeys.value = pruned;
@@ -407,9 +424,11 @@ function onNodeDblClick(node: TreeNode) {
   const isExpanded = expandedKeys.value.includes(key);
   if (isExpanded) {
     if (key === ROOT_KEY) {
+      clearLoadedOnCollapse(key);
       expandedKeys.value = [];
       return;
     }
+    clearLoadedOnCollapse(key);
     expandedKeys.value = expandedKeys.value.filter((k) => k !== key && !k.startsWith(key + "/"));
     return;
   }
