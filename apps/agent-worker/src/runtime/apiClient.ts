@@ -39,6 +39,7 @@ type PromptMessage =
 export type MessagesContext = {
   headItemId: number | null;
   messages: PromptMessage[];
+  system: string;
 };
 
 export type ExecutionProfile = {
