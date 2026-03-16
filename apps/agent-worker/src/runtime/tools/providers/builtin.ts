@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call";
+import { renderPromptTemplateFile } from "@agent-workbench/shared/prompts";
 import { runBashCommand } from "../../bash.js";
 import { applyPreparedPatch, prepareApplyPatchTool } from "../../applyPatch.js";
 import { getBashToolAppendix } from "../../bashTools.js";
@@ -89,22 +90,14 @@ function toApplyPatchResult(prepared: Awaited<ReturnType<typeof prepareApplyPatc
 }
 
 function buildSubtaskPreforkSummaryPrompt(input: { uiLocale: "zh-CN" | "en-US" | null; subtaskPrompt: string }) {
-  if (input.uiLocale !== "zh-CN") {
-    return [
-      "Produce a concise structured summary of the current parent session so a subtask model can continue the work safely.",
-      "Focus only on facts, constraints, decisions, and actionable context relevant to the subtask.",
-      "",
-      `Subtask prompt to focus on:\n${input.subtaskPrompt}`,
-      "Do not quote or restate the subtask prompt verbatim in the summary; extract only actionable goals, constraints, and relevant context."
-    ].join("\n");
+  if (input.uiLocale === "zh-CN") {
+    return renderPromptTemplateFile("agent/subtask-prefork-summary-prompt.zh-CN.tmpl.txt", {
+      subtaskPrompt: input.subtaskPrompt
+    });
   }
-  return [
-    "请基于父会话生成一份精简结构化总结,帮助子任务模型安全接手执行。",
-    "只保留与子任务直接相关的事实、约束、决策和可执行上下文。",
-    "",
-    `用于聚焦的子任务提示词:\n${input.subtaskPrompt}`,
-    "不要在总结中逐字复述子任务提示词原文,请只提炼可执行目标、约束和相关上下文。"
-  ].join("\n");
+  return renderPromptTemplateFile("agent/subtask-prefork-summary-prompt.en-US.tmpl.txt", {
+    subtaskPrompt: input.subtaskPrompt
+  });
 }
 
 export class BuiltinToolProvider implements ToolProvider {

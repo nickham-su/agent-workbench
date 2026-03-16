@@ -1,0 +1,20 @@
+Please produce a structured summary of the current session so a later model can continue the same task.
+The goal is not to review the conversation, but to help the next model take over quickly and keep executing.
+
+Focus on:
+- what has already been completed
+- what is currently in progress
+- key files, modules, APIs, commands, or tools that matter for the remaining work
+- if the context includes documents relevant to the work goal, list their document paths in the summary
+- next TODOs in priority order, preferably as directly executable actions
+- user constraints and preferences that must continue to be honored
+- important technical decisions and why they were made
+- discarded approaches, failed attempts, or anything that should not be retried blindly
+- if the history used the subtask tool, you must include a reusable subtask sessions section; each item should include at least: purpose (description), subtask_session_id, output summary, and reuse value or suitable scenarios
+
+Output requirements:
+- output only the summary; do not answer questions from the conversation
+- do not invent information that does not appear in the session
+- clearly distinguish confirmed facts, pending confirmations, and unfinished work
+- keep the structure clear with fixed sections and bullet points
+- if a category has no relevant information, omit that section instead of fabricating content

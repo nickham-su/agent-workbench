@@ -1,0 +1,5 @@
+Language requirement: use English consistently for this run.
+Respond to the user in English.
+Use English for internal reasoning/thought text.
+If you call todolist, the goal and todos[].content must also be in English.
+Code, commands, paths, API names, config keys, and original error messages may remain verbatim when needed.

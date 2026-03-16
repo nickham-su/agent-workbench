@@ -7,6 +7,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call";
 import { AgentApiClient, ApiConflictError, type ExecutionProfile, type PromptContext } from "./apiClient.js";
 import type { AgentUiLocale } from "@agent-workbench/shared";
+import { getPromptText } from "@agent-workbench/shared/prompts";
 import { McpManager } from "./mcpManager.js";
 import { buildRetryMessages, chunkStartsVisibleOutput, shouldRetryAfterPartialText } from "./modelRetry.js";
 import { PluginRuntimeManager } from "./plugins/runtimeManager.js";
@@ -57,53 +58,10 @@ const TOOL_ARTIFACT_MAX_CHARS = Math.max(
 const TOOL_PARALLEL_BATCH_LIMIT = 3;
 
 export function buildCompactionUserPrompt(input: { uiLocale: AgentUiLocale | null }) {
-  if (input.uiLocale !== "zh-CN") {
-    return [
-      "Please produce a structured summary of the current session so a later model can continue the same task.",
-      "The goal is not to review the conversation, but to help the next model take over quickly and keep executing.",
-      "",
-      "Focus on:",
-      "- what has already been completed",
-      "- what is currently in progress",
-      "- key files, modules, APIs, commands, or tools that matter for the remaining work",
-      "- if the context includes documents relevant to the work goal, list their document paths in the summary",
-      "- next TODOs in priority order, preferably as directly executable actions",
-      "- user constraints and preferences that must continue to be honored",
-      "- important technical decisions and why they were made",
-      "- discarded approaches, failed attempts, or anything that should not be retried blindly",
-      "- if the history used the subtask tool, you must include a reusable subtask sessions section; each item should include at least: purpose (description), subtask_session_id, output summary, and reuse value or suitable scenarios",
-      "",
-      "Output requirements:",
-      "- output only the summary; do not answer questions from the conversation",
-      "- do not invent information that does not appear in the session",
-      "- clearly distinguish confirmed facts, pending confirmations, and unfinished work",
-      "- keep the structure clear with fixed sections and bullet points",
-      "- if a category has no relevant information, omit that section instead of fabricating content"
-    ].join("\n");
+  if (input.uiLocale === "zh-CN") {
+    return getPromptText("agent/compaction-user-prompt.zh-CN.txt");
   }
-
-  return [
-    "请基于当前会话内容输出一份结构化总结,用于后续模型继续同一任务。",
-    "总结目标不是回顾,而是帮助后续模型快速接手并继续执行。",
-    "",
-    "重点覆盖:",
-  "- 已完成了什么",
-  "- 当前正在做什么",
-  "- 与后续工作直接相关的关键文件、模块、接口、命令或工具",
-  "- 若上下文包含与工作目标相关的文档,请在总结中列出文档路径",
-  "- 下一步待办(按优先级列出,尽量写成可直接执行的动作)",
-  "- 需要持续遵守的用户约束与偏好",
-  "- 关键技术决策及原因",
-  "- 已排除的方案、失败尝试或需要避免重复踩坑的信息",
-  "- 如果历史消息中调用过 subtask 工具,必须输出“可复用的 subtask 会话”小节; 每项至少包含: 目的(description)、subtask_session_id、产出摘要、后续可复用价值或适用场景",
-  "",
-  "输出要求:",
-  "- 只输出总结,不要回答会话中的问题",
-    "- 不要编造未出现的信息",
-    "- 明确区分已确认事实、待确认事项、未完成事项",
-    "- 结构清晰,使用固定小节与项目符号",
-    "- 如果没有某类信息,可省略对应小节,不要硬编"
-  ].join("\n");
+  return getPromptText("agent/compaction-user-prompt.en-US.txt");
 }
 const COMPACTION_TIMEOUT_MS = 300_000;
 

@@ -1,0 +1,12 @@
+## 压缩前尾部摘录(归档原文; pos 可用于 archive_read 的 beforePos)
+
+{{body}}
+
+## 归档工具提示(需要更多上下文时)
+
+- 你可以使用 archive_read 继续向前读取更早的归档行:
+  - 从更早的位置开始: 使用 beforePos={{minPos}}
+  - 读取更多行: 增大 lineCount
+- 你可以使用 archive_search 在全部归档中按关键词检索:
+  - query 建议使用具体名词(文件名/函数名/错误码/工具名/关键短语)
+  - 如果命中太多,配合 beforePos 向前翻页
