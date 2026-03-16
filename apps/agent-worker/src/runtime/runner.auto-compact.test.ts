@@ -91,7 +91,7 @@ test("generateCompactionSummary 透传 messages-context.system 到单次调用",
     signal: AbortSignal.timeout(1_000)
   });
   assert.equal(text, "ok");
-  assert.equal(captured?.system, "LANG-SYSTEM");
+  assert.equal((captured as { system?: string } | null)?.system, "LANG-SYSTEM");
 });
 
 test("generateCompactionSummary 使用 messages-context 追加压缩提示词", async () => {

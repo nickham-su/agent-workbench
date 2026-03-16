@@ -102,6 +102,6 @@ test("subtask prefork summary 透传 messages-context.system 到 one-shot 调用
   );
 
   assert.equal((result as any).subtaskSessionId, "sub_sess");
-  assert.equal(captured?.system, "LANG-SYSTEM");
+  assert.equal((captured as { system?: string } | null)?.system, "LANG-SYSTEM");
   assert.equal(updatedToolItems[0]?.status, "running");
 });
