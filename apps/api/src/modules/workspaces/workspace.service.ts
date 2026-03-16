@@ -9,6 +9,7 @@ import type {
   WorkspaceExternalSkillRootsDetectResponse,
   WorkspaceExternalSkillRootsSettingsResponse
 } from "@agent-workbench/shared";
+import type { WorkspaceRecord } from "@agent-workbench/shared";
 import { HttpError } from "../../app/errors.js";
 import type { AppContext } from "../../app/context.js";
 import { newId } from "../../utils/ids.js";
@@ -21,7 +22,6 @@ import { cloneFromMirror } from "../../infra/git/clone.js";
 import { ensureDir, pathExists, rmrf } from "../../infra/fs/fs.js";
 import { agentArchiveWorkspaceDir, workspaceRepoDirPath, workspaceRoot } from "../../infra/fs/paths.js";
 import { ensureRepoMirror } from "../../infra/git/mirror.js";
-import { buildGitEnv } from "../../infra/git/gitEnv.js";
 import {
   deleteWorkspaceRecord,
   deleteWorkspaceReposByWorkspace,
@@ -207,18 +207,21 @@ export async function createWorkspace(
 
   for (const r of repos) {
     const row = getWorkspaceRepoByRepoId(ctx.db, wsId, r.id)!;
-    await withWorkspaceRepoLock({ workspaceId: wsId, repoId: r.id }, async () => {
-      await ensureRepoMirror(ctx, logger, r.id);
+    await withWorkspaceRepoLock({ workspaceId: wsId, dirName: row.dirName }, async () => {
+      await ensureRepoMirror({
+        repoId: r.id,
+        url: r.url,
+        dataDir: ctx.dataDir,
+        mirrorPath: r.mirrorPath
+      });
       await ensureDir(row.path);
-      await cloneFromMirror(
-        {
-          mirrorPath: r.mirrorPath,
-          workspaceRepoPath: row.path,
-          branch: r.defaultBranch,
-          logger
-        },
-        { env: buildGitEnv(ctx, r.credentialId) }
-      );
+      await cloneFromMirror({
+        mirrorPath: r.mirrorPath,
+        repoUrl: r.url,
+        worktreePath: row.path,
+        branch: r.defaultBranch || "main",
+        dataDir: ctx.dataDir
+      });
     });
   }
 
@@ -304,19 +307,24 @@ export async function attachRepoToWorkspace(
     const dirName = uniqueDirName(preferred, (d) => used.has(d));
 
     let branch = String(params.branch || "").trim();
-    await ensureRepoMirror(ctx, logger, repo.id);
+    await ensureRepoMirror({
+      repoId: repo.id,
+      url: repo.url,
+      dataDir: ctx.dataDir,
+      mirrorPath: repo.mirrorPath
+    });
 
     if (!branch) {
       try {
-        branch = await getOriginDefaultBranch(repo.mirrorPath);
+        branch = (await getOriginDefaultBranch({ mirrorPath: repo.mirrorPath, cwd: ctx.dataDir })) || "";
       } catch {
         branch = "";
       }
     }
     if (!branch) {
-      const heads = await listHeadsBranches(repo.mirrorPath);
-      if (heads.length === 1) branch = heads[0]!;
-      if (!branch) branch = repo.defaultBranch;
+      const heads = await listHeadsBranches({ mirrorPath: repo.mirrorPath, cwd: ctx.dataDir });
+      if (heads.length === 1) branch = heads[0]?.name || "";
+      if (!branch) branch = repo.defaultBranch || "";
     }
 
     const ts = nowMs();
@@ -329,17 +337,15 @@ export async function attachRepoToWorkspace(
       updatedAt: ts
     };
 
-    await withWorkspaceRepoLock({ workspaceId: ws.id, repoId: repo.id }, async () => {
+    await withWorkspaceRepoLock({ workspaceId: ws.id, dirName: row.dirName }, async () => {
       await ensureDir(row.path);
-      await cloneFromMirror(
-        {
-          mirrorPath: repo.mirrorPath,
-          workspaceRepoPath: row.path,
-          branch,
-          logger
-        },
-        { env: buildGitEnv(ctx, repo.credentialId) }
-      );
+      await cloneFromMirror({
+        mirrorPath: repo.mirrorPath,
+        repoUrl: repo.url,
+        worktreePath: row.path,
+        branch,
+        dataDir: ctx.dataDir
+      });
     });
 
     const nextTerminalCredentialId = resolveTerminalCredentialId({
@@ -374,17 +380,6 @@ export async function detachRepoFromWorkspace(
     const row = getWorkspaceRepoByRepoId(ctx.db, ws.id, id);
     if (!row) throw new HttpError(404, "Repo not attached to workspace");
 
-    const terms = listTerminalsByWorkspace(ctx.db, ws.id).filter((t) => t.workspaceRepoId === id);
-    for (const term of terms) {
-      try {
-        if (await tmuxHasSession(term.tmuxSession)) {
-          await tmuxKillSession(term.tmuxSession);
-        }
-      } finally {
-        deleteTerminalRecord(ctx.db, term.id);
-      }
-    }
-
     const nextRows = listWorkspaceRepos(ctx.db, ws.id).filter((r) => r.repoId !== id);
     const nextTerminalCredentialId = resolveTerminalCredentialId({
       repoCredentialIds: nextRows.map((item) => getRepo(ctx.db, item.repoId)?.credentialId ?? null),
@@ -418,8 +413,8 @@ export async function deleteWorkspace(ctx: AppContext, logger: FastifyBaseLogger
   const terms = listTerminalsByWorkspace(ctx.db, ws.id);
   for (const term of terms) {
     try {
-      if (await tmuxHasSession(term.tmuxSession)) {
-        await tmuxKillSession(term.tmuxSession);
+      if (await tmuxHasSession({ sessionName: term.sessionName, cwd: ws.path })) {
+        await tmuxKillSession({ sessionName: term.sessionName, cwd: ws.path });
       }
     } finally {
       deleteTerminalRecord(ctx.db, term.id);
