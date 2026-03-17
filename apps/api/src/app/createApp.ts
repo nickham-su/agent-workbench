@@ -19,6 +19,7 @@ import { registerSettingsModule } from "../modules/settings/settings.module.js";
 import { ensureAgentGlobalSystemPromptSeeded } from "../modules/settings/settings.service.js";
 import { registerAgentModule } from "../modules/agent/agent.module.js";
 import { registerPluginsModule } from "../modules/plugins/plugin.module.js";
+import { registerGitEnvModule } from "../modules/git-env/git-env.module.js";
 
 export async function createApp(ctx: AppContext) {
   const app = Fastify({
@@ -81,6 +82,7 @@ export async function createApp(ctx: AppContext) {
   await registerGitModule(app, ctx);
   await registerFilesModule(app, ctx);
   await registerAgentModule(app, ctx);
+  await registerGitEnvModule(app, ctx);
   await registerWebUi(app, ctx);
 
   return app;
