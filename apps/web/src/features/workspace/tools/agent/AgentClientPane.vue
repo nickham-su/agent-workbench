@@ -330,19 +330,19 @@
         v-if="activeInputHint.visible"
         class="mb-2"
       >
-        <div class="flex flex-col gap-1">
+        <div class="flex flex-col gap-0.5">
           <button
             v-for="candidate in activeInputHint.items"
             :key="candidate.id"
             type="button"
-            class="input-candidate-item w-full rounded border border-transparent px-2 py-1 text-left"
-            :class="candidate.id === activeInputHint.activeId ? 'is-active border-blue-500/40 bg-blue-500/10' : ''"
+            class="input-candidate-item w-full rounded px-2 py-0.5 text-left text-[color:var(--text-secondary)] opacity-70"
+            :class="candidate.id === activeInputHint.activeId ? 'is-active bg-blue-500/10 text-white opacity-100' : ''"
             @click="onPickInputCandidate(candidate)"
           >
             <div v-if="candidate.kind === 'slash' && candidate.command" class="flex items-center gap-2 min-w-0">
               <span class="font-mono text-[0.9em] whitespace-nowrap">{{ candidate.command.usage }}</span>
-              <span class="text-[0.9em] text-[color:var(--text-secondary)] min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{{ t(candidate.command.summaryKey) }}</span>
-              <span v-if="candidate.command.strictOnly" class="text-[0.85em] text-[color:var(--text-tertiary)] whitespace-nowrap">
+              <span class="text-[0.85em] min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{{ t(candidate.command.summaryKey) }}</span>
+              <span v-if="candidate.command.strictOnly" class="text-[0.8em] whitespace-nowrap">
                 {{ t("agent.client.slashCommandHintStrictOnly") }}
               </span>
             </div>
@@ -350,13 +350,13 @@
               <span class="font-mono text-[0.9em] min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{{ candidate.label }}</span>
               <span
                 v-if="candidate.kind !== 'slash' && candidate.description"
-                class="text-[0.9em] text-[color:var(--text-secondary)] min-w-0 overflow-hidden text-ellipsis whitespace-nowrap"
+                class="text-[0.85em] min-w-0 overflow-hidden text-ellipsis whitespace-nowrap"
               >
                 {{ candidate.description }}
               </span>
             </div>
           </button>
-          <div v-if="!activeInputHint.loading && activeInputHint.items.length === 0" class="px-2 py-1 text-[0.9em] text-[color:var(--text-tertiary)]">
+          <div v-if="!activeInputHint.loading && activeInputHint.items.length === 0" class="px-2 py-0.5 text-[0.9em] text-[color:var(--text-tertiary)]">
             {{ activeInputHint.emptyText }}
           </div>
         </div>
