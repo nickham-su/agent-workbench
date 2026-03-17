@@ -368,6 +368,7 @@ export default {
       externalSkillRootsSourceRepo: "Repo",
       externalSkillRootsMeta: "{count} 个skills",
       slashCommandHintNoMatch: "未找到匹配的指令: /{query}",
+      inputCandidateNoMatch: "未找到匹配项: {query}",
       slashCommands: {
         compact: {
           summary: "手动压缩当前会话上下文"

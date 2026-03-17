@@ -114,6 +114,30 @@ export const UpdateWorkspaceExternalSkillRootsSettingsRequestSchema = Type.Objec
 });
 export type UpdateWorkspaceExternalSkillRootsSettingsRequest = Static<typeof UpdateWorkspaceExternalSkillRootsSettingsRequestSchema>;
 
+export const WorkspaceTopLevelSkillSourceSchema = Type.Union([
+  Type.Literal("builtin"),
+  Type.Literal("workspace"),
+  Type.Literal("repo")
+]);
+export type WorkspaceTopLevelSkillSource = Static<typeof WorkspaceTopLevelSkillSourceSchema>;
+
+export const WorkspaceTopLevelSkillItemSchema = Type.Object({
+  id: Type.String({ minLength: 1 }),
+  name: Type.String(),
+  description: Type.String(),
+  sourceType: WorkspaceTopLevelSkillSourceSchema,
+  repoId: Type.Optional(Type.String({ minLength: 1 })),
+  rootDir: Type.Optional(Type.String({ minLength: 1 }))
+});
+export type WorkspaceTopLevelSkillItem = Static<typeof WorkspaceTopLevelSkillItemSchema>;
+
+export const WorkspaceTopLevelSkillsResponseSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
+  items: Type.Array(WorkspaceTopLevelSkillItemSchema),
+  updatedAt: Type.Number()
+});
+export type WorkspaceTopLevelSkillsResponse = Static<typeof WorkspaceTopLevelSkillsResponseSchema>;
+
 export const WorkspaceAgentEnablementModeSchema = Type.Union([Type.Literal("all"), Type.Literal("subset")]);
 export type WorkspaceAgentEnablementMode = Static<typeof WorkspaceAgentEnablementModeSchema>;
 

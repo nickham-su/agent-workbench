@@ -40,6 +40,7 @@ import type {
   WorkspaceExternalSkillRootsSettingsResponse,
   WorkspaceExternalSkillRootInput,
   WorkspaceAgentEnablementDetectResponse,
+  WorkspaceTopLevelSkillsResponse,
   WorkspaceAgentEnablementSettingsResponse,
   UpdateWorkspaceAgentEnablementSettingsRequest,
   WorkspaceAvailableAgentsResponse,
@@ -460,6 +461,15 @@ export async function updateWorkspaceExternalSkillRootsSettings(
   }
 }
 
+export async function listWorkspaceTopLevelSkills(workspaceId: string) {
+  try {
+    const res = await client.get<WorkspaceTopLevelSkillsResponse>(`/workspaces/${workspaceId}/skills/top-level`);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
 export async function detectWorkspaceAgentEnablement(workspaceId: string) {
   try {
     const res = await client.get<WorkspaceAgentEnablementDetectResponse>(`/workspaces/${workspaceId}/agent-enablement/detect`);
@@ -744,6 +754,16 @@ export async function searchWorkspaceFiles(params: { workspaceId: string } & Wor
   try {
     const { workspaceId, ...body } = params;
     const res = await client.post<FileSearchResponse>(`/workspaces/${workspaceId}/files/search`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function suggestWorkspaceFilePaths(params: { workspaceId: string; query?: string; limit?: number }) {
+  try {
+    const { workspaceId, ...body } = params;
+    const res = await client.post<{ items: string[] }>(`/workspaces/${workspaceId}/files/suggest`, body);
     return res.data;
   } catch (err) {
     throw toApiError(err);

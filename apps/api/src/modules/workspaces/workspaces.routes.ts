@@ -20,6 +20,7 @@ import {
   listWorkspaceDetails,
   detectWorkspaceAgentEnablement,
   filterAgentsByWorkspaceEnablement,
+  listWorkspaceTopLevelSkills,
   updateWorkspaceExternalSkillRootsSettings,
   updateWorkspaceAgentEnablementSettings,
   updateWorkspaceById
@@ -32,7 +33,8 @@ import {
   UpdateWorkspaceExternalSkillRootsSettingsRequestSchema,
   WorkspaceExternalSkillRootsDetectResponseSchema,
   WorkspaceExternalSkillRootsSettingsResponseSchema,
-  AgentListAvailableAgentsResponseSchema
+  AgentListAvailableAgentsResponseSchema,
+  WorkspaceTopLevelSkillsResponseSchema
 } from "@agent-workbench/shared";
 import { nowMs } from "../../utils/time.js";
 import { touchWorkspaceLastUsedAt } from "./workspace.store.js";
@@ -190,6 +192,21 @@ export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppCon
     async (req) => {
       const params = req.params as { workspaceId: string };
       return updateWorkspaceExternalSkillRootsSettings(ctx, app.log, params.workspaceId, req.body as any);
+    }
+  );
+
+  app.get(
+    "/api/workspaces/:workspaceId/skills/top-level",
+    {
+      schema: {
+        tags: ["workspaces"],
+        params: WorkspaceIdParamsSchema,
+        response: { 200: WorkspaceTopLevelSkillsResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      const params = req.params as { workspaceId: string };
+      return listWorkspaceTopLevelSkills(ctx, app.log, params.workspaceId);
     }
   );
 

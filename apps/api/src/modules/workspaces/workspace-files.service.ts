@@ -23,7 +23,9 @@ import type {
   WorkspaceFileRenameRequest,
   WorkspaceFileSearchRequest,
   WorkspaceFileStatRequest,
-  WorkspaceFileWriteRequest
+  WorkspaceFileWriteRequest,
+  WorkspaceFileSuggestRequest,
+  WorkspaceFileSuggestResponse
 } from "@agent-workbench/shared";
 import type { AppContext } from "../../app/context.js";
 import { HttpError } from "../../app/errors.js";
@@ -47,6 +49,8 @@ import {
 
 const DENYLIST_SEGMENTS = [".git"];
 const MAX_DOWNLOAD_DIR_BYTES = 100 * 1024 * 1024;
+const DEFAULT_SUGGEST_LIMIT = 50;
+const MAX_SUGGEST_LIMIT = 200;
 
 type WorkspaceScope = {
   workspaceId: string;
@@ -696,6 +700,82 @@ export async function searchWorkspaceFiles(
     excludeGlobs,
     searchPaths
   });
+}
+
+async function collectFileSuggestionsUnderRoot(params: {
+  rootAbs: string;
+  prefix: string;
+  queryLower: string;
+  limit: number;
+  items: string[];
+  seen: Set<string>;
+}) {
+  if (params.items.length >= params.limit) return;
+  const fs = await import("node:fs/promises");
+  const absDir = safeResolveUnderRoot({ root: params.rootAbs, rel: params.prefix || "." });
+  if (!absDir) return;
+  let dirents: import("node:fs").Dirent[];
+  try {
+    dirents = await fs.readdir(absDir, { withFileTypes: true });
+  } catch (err: any) {
+    if (err && (err.code === "ENOENT" || err.code === "ENOTDIR" || err.code === "EACCES" || err.code === "EPERM")) return;
+    throw err;
+  }
+  for (const dirent of dirents) {
+    if (params.items.length >= params.limit) return;
+    const name = dirent.name;
+    if (!name || DENYLIST_SEGMENTS.includes(name)) continue;
+    const rel = params.prefix ? `${params.prefix}/${name}` : name;
+    const abs = safeResolveUnderRoot({ root: params.rootAbs, rel });
+    if (!abs || abs === params.rootAbs) continue;
+    let st: import("node:fs").Stats;
+    try {
+      st = await fs.lstat(abs);
+    } catch (err: any) {
+      if (err && (err.code === "ENOENT" || err.code === "ENOTDIR" || err.code === "EACCES" || err.code === "EPERM")) continue;
+      throw err;
+    }
+    if (st.isSymbolicLink()) continue;
+    await ensureRealPathUnderRoot(params.rootAbs, abs);
+    if (st.isDirectory()) {
+      await collectFileSuggestionsUnderRoot({ ...params, prefix: rel });
+      continue;
+    }
+    if (!st.isFile()) continue;
+    const fileNameLower = name.toLowerCase();
+    const relLower = rel.toLowerCase();
+    if (params.queryLower && !fileNameLower.includes(params.queryLower) && !relLower.includes(params.queryLower)) continue;
+    if (params.seen.has(rel)) continue;
+    params.seen.add(rel);
+    params.items.push(rel);
+  }
+}
+
+export async function suggestWorkspaceFilePaths(
+  ctx: AppContext,
+  workspaceIdRaw: string,
+  bodyRaw: unknown
+): Promise<WorkspaceFileSuggestResponse> {
+  const body = (bodyRaw ?? {}) as WorkspaceFileSuggestRequest;
+  const scope = buildWorkspaceScope(ctx, workspaceIdRaw);
+  const query = typeof (body as any).query === "string" ? (body as any).query.trim() : "";
+  const queryLower = query.toLowerCase();
+  const rawLimit = Number((body as any).limit);
+  const limit = Number.isFinite(rawLimit)
+    ? Math.max(1, Math.min(MAX_SUGGEST_LIMIT, Math.floor(rawLimit)))
+    : DEFAULT_SUGGEST_LIMIT;
+
+  const items: string[] = [];
+  const seen = new Set<string>();
+  await collectFileSuggestionsUnderRoot({
+    rootAbs: scope.rootAbs,
+    prefix: "",
+    queryLower,
+    limit,
+    items,
+    seen
+  });
+  return { items };
 }
 
 export async function statWorkspaceFile(ctx: AppContext, workspaceIdRaw: string, bodyRaw: unknown): Promise<FileStatResponse> {

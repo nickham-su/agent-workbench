@@ -84,3 +84,14 @@ export const WorkspaceFileSearchRequestSchema = Type.Object({
   repoDirNames: Type.Optional(Type.Array(Type.String({ minLength: 1 })))
 });
 export type WorkspaceFileSearchRequest = Static<typeof WorkspaceFileSearchRequestSchema>;
+
+export const WorkspaceFileSuggestRequestSchema = Type.Object({
+  query: Type.Optional(Type.String()),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 }))
+});
+export type WorkspaceFileSuggestRequest = Static<typeof WorkspaceFileSuggestRequestSchema>;
+
+export const WorkspaceFileSuggestResponseSchema = Type.Object({
+  items: Type.Array(Type.String({ minLength: 1 }))
+});
+export type WorkspaceFileSuggestResponse = Static<typeof WorkspaceFileSuggestResponseSchema>;

@@ -1730,7 +1730,7 @@ function buildSkillsInstructionSection(input: {
 }) {
   const lines: string[] = [];
   lines.push("Use the builtin skill tool to load details on demand by id.");
-  lines.push("If the user mentions anything related to skills, be sure to use the "skill" tool, read the corresponding entry, and then proceed with the action.");
+  lines.push('If the user mentions anything related to skills, be sure to use the "skill" tool, read the corresponding entry, and then proceed with the action.');
   lines.push("");
   lines.push("builtin skills:");
   if (input.builtin.length === 0) {

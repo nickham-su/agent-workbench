@@ -370,6 +370,7 @@ export default {
       externalSkillRootsSourceRepo: "Repo",
       externalSkillRootsMeta: "{count} skills",
       slashCommandHintNoMatch: "No matching command: /{query}",
+      inputCandidateNoMatch: "No matching suggestion: {query}",
       slashCommands: {
         compact: {
           summary: "Compact the current session context"
