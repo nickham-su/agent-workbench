@@ -50,6 +50,106 @@ function parseOptionalPositiveIntegerArg(raw: unknown, fieldName: string) {
   return parsed;
 }
 
+function tokenizeShellCommand(input: string): string[] {
+  const s = String(input || "");
+  const tokens: string[] = [];
+  let cur = "";
+  let i = 0;
+  let mode: "none" | "single" | "double" = "none";
+  const push = () => {
+    if (cur) tokens.push(cur);
+    cur = "";
+  };
+  while (i < s.length) {
+    const ch = s[i] ?? "";
+    if (mode === "none") {
+      if (ch === "\"" || ch === "'") {
+        mode = ch === "'" ? "single" : "double";
+        i += 1;
+        continue;
+      }
+      if (ch === "\\") {
+        const next = s[i + 1];
+        if (next) cur += next;
+        i += 2;
+        continue;
+      }
+      if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") {
+        push();
+        i += 1;
+        while (i < s.length && /\s/.test(s[i] ?? "")) i += 1;
+        continue;
+      }
+      cur += ch;
+      i += 1;
+      continue;
+    }
+    if (mode === "single") {
+      if (ch === "'") {
+        mode = "none";
+        i += 1;
+        continue;
+      }
+      cur += ch;
+      i += 1;
+      continue;
+    }
+    // double
+    if (ch === "\"") {
+      mode = "none";
+      i += 1;
+      continue;
+    }
+    if (ch === "\\") {
+      const next = s[i + 1];
+      if (next) cur += next;
+      i += 2;
+      continue;
+    }
+    cur += ch;
+    i += 1;
+  }
+  push();
+  return tokens;
+}
+
+function shouldPrepareGitEnvForCommand(command: string) {
+  const tokens = tokenizeShellCommand(command.trim());
+  if (!tokens.length) return false;
+  const whitelist = new Set(["clone", "fetch", "pull", "push", "ls-remote", "submodule"]);
+
+  // Scan the entire token sequence for a `git <subcommand>` occurrence.
+  // This is intentionally heuristic (V1): it does not attempt to parse shell operators.
+  for (let start = 0; start < tokens.length; start += 1) {
+    if (tokens[start] !== "git") continue;
+
+    // Skip global git options right after `git`.
+    // NOTE: This is intentionally minimal for V1.
+    let i = start + 1;
+    while (i < tokens.length) {
+      const t = tokens[i] ?? "";
+      if (!t.startsWith("-")) break;
+      if (t === "-C" || t === "-c" || t === "--git-dir" || t === "--work-tree" || t === "--namespace" || t === "--config-env") {
+        i += 2;
+        continue;
+      }
+      if (t.startsWith("-C") && t.length > 2) {
+        i += 1;
+        continue;
+      }
+      if (t.startsWith("-c") && t.length > 2) {
+        i += 1;
+        continue;
+      }
+      // unknown option: skip it
+      i += 1;
+    }
+    const sub = tokens[i] ?? "";
+    if (whitelist.has(sub)) return true;
+  }
+  return false;
+}
+
 function parseSubtaskArgs(raw: Record<string, unknown>): ParsedSubtaskArgs {
   const description = requireNonEmptyStringArg(raw.description, "subtask.description").slice(0, 50);
   const prompt = requireNonEmptyStringArg(raw.prompt, "subtask.prompt");
@@ -184,20 +284,65 @@ export class BuiltinToolProvider implements ToolProvider {
           }
           throw err;
         }
-        const bash = await runBashCommand({
-          command,
-          cwd,
-          timeoutMs: Math.min(ENV_TIMEOUT_MS_MAX, (timeoutSeconds ?? 120) * 1000),
-          maxOutputBytes: 512 * 1024,
-          signal: ctx.signal
-        });
+
+        const timeoutMs = Math.min(ENV_TIMEOUT_MS_MAX, (timeoutSeconds ?? 120) * 1000);
+        const needsGitEnv = shouldPrepareGitEnvForCommand(command);
+
+        let extraEnv: Record<string, string> | undefined;
+        let leaseId: string | null = null;
+        let leaseKind: string | null = null;
+
+        if (needsGitEnv) {
+          const prepared = await ctx.apiClient.prepareGitEnvForBash({
+            workspaceId: ctx.run.workspaceId,
+            cwd,
+            purpose: "bash",
+            timeoutMs
+          });
+          if (!prepared.ok) {
+            if (prepared.errorCode === "CWD_OUTSIDE_WORKSPACE") {
+              // Degrade gracefully: run bash without injected env.
+              console.warn(`[agent-worker] git-env prepare skipped: cwd outside workspace (${prepared.errorCode})`);
+            } else {
+              throw new Error(`git-env prepare failed: ${prepared.error}${prepared.errorCode ? ` (${prepared.errorCode})` : ""}`);
+            }
+          } else {
+            extraEnv = prepared.env;
+            leaseId = prepared.leaseId;
+            leaseKind = prepared.kind;
+          }
+        }
+
+        let bash: Awaited<ReturnType<typeof runBashCommand>> | null = null;
+        try {
+          bash = await runBashCommand({
+            command,
+            cwd,
+            timeoutMs,
+            maxOutputBytes: 512 * 1024,
+            signal: ctx.signal,
+            extraEnv
+          });
+        } finally {
+          if (leaseId) {
+            try {
+              await ctx.apiClient.cleanupGitEnvLease({ leaseId });
+            } catch (err) {
+              // best-effort: do not override bash result
+              const msg = err instanceof Error ? err.message : String(err);
+              // Avoid printing env; only log lease id / kind.
+              console.warn(`[agent-worker] git-env cleanup failed (leaseId=${leaseId}, kind=${leaseKind ?? ""}): ${msg}`);
+            }
+          }
+        }
+
         return {
           command,
-          exitCode: bash.code,
-          timedOut: bash.timedOut,
-          outputLimitExceeded: bash.outputLimitExceeded,
-          stdout: bash.stdout,
-          stderr: bash.stderr
+          exitCode: bash?.code ?? null,
+          timedOut: bash?.timedOut ?? false,
+          outputLimitExceeded: bash?.outputLimitExceeded ?? false,
+          stdout: bash?.stdout ?? "",
+          stderr: bash?.stderr ?? ""
         };
       }
       case "read": {

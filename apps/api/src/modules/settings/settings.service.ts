@@ -130,6 +130,7 @@ function defaultNetworkSettings(): NetworkSettingsV1 {
 
 function defaultSearchExcludeGlobs() {
   return [
+    ".awb/**",
     "node_modules/**",
     "dist/**",
     "build/**",

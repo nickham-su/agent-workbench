@@ -327,26 +327,37 @@
       :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
     >
       <div
-        v-if="slashCommandHint.visible"
+        v-if="activeInputHint.visible"
         class="mb-2"
       >
-        <div class="flex flex-col gap-1">
+        <div class="flex flex-col gap-0.5">
           <button
-            v-for="cmd in slashCommandHint.commands"
-            :key="cmd.name"
+            v-for="candidate in activeInputHint.items"
+            :key="candidate.id"
             type="button"
-            class="slash-command-item w-full rounded border border-transparent px-2 py-1 text-left"
-            :class="cmd.name === slashCommandHint.activeCommand ? 'is-active border-blue-500/40 bg-blue-500/10' : ''"
-            @click="onPickSlashCommand(cmd.name)"
+            class="input-candidate-item w-full rounded px-2 py-0.5 text-left text-[color:var(--text-secondary)] opacity-70"
+            :class="candidate.id === activeInputHint.activeId ? 'is-active bg-blue-500/10 text-white opacity-100' : ''"
+            @click="onPickInputCandidate(candidate)"
           >
-            <div class="flex items-center gap-2 min-w-0">
-              <span class="font-mono text-[0.9em] whitespace-nowrap">{{ cmd.usage }}</span>
-              <span class="text-[0.9em] text-[color:var(--text-secondary)] min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{{ t(cmd.summaryKey) }}</span>
-              <span v-if="cmd.strictOnly" class="text-[0.85em] text-[color:var(--text-tertiary)] whitespace-nowrap">{{ t("agent.client.slashCommandHintStrictOnly") }}</span>
+            <div v-if="candidate.kind === 'slash' && candidate.command" class="flex items-center gap-2 min-w-0">
+              <span class="font-mono text-[0.9em] whitespace-nowrap">{{ candidate.command.usage }}</span>
+              <span class="text-[0.85em] min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{{ t(candidate.command.summaryKey) }}</span>
+              <span v-if="candidate.command.strictOnly" class="text-[0.8em] whitespace-nowrap">
+                {{ t("agent.client.slashCommandHintStrictOnly") }}
+              </span>
+            </div>
+            <div v-else class="flex items-center gap-2 min-w-0">
+              <span class="font-mono text-[0.9em] min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{{ candidate.label }}</span>
+              <span
+                v-if="candidate.kind !== 'slash' && candidate.description"
+                class="text-[0.85em] min-w-0 overflow-hidden text-ellipsis whitespace-nowrap"
+              >
+                {{ candidate.description }}
+              </span>
             </div>
           </button>
-          <div v-if="slashCommandHint.commands.length === 0" class="px-2 py-1 text-[0.9em] text-[color:var(--text-tertiary)]">
-            {{ t("agent.client.slashCommandHintNoMatch", { query: slashCommandHint.query }) }}
+          <div v-if="!activeInputHint.loading && activeInputHint.items.length === 0" class="px-2 py-0.5 text-[0.9em] text-[color:var(--text-tertiary)]">
+            {{ activeInputHint.emptyText }}
           </div>
         </div>
       </div>
@@ -361,6 +372,9 @@
           :auto-size="{ minRows: 2, maxRows: 6 }"
           :placeholder="inputPlaceholder"
           @keydown="onInputKeydown"
+          @keyup="onInputCursorEvent"
+          @click="onInputCursorEvent"
+          @focus="onInputCursorEvent"
         />
       </div>
       <div class="pt-2">
@@ -587,10 +601,20 @@ import {
   detectWorkspaceAgentEnablement,
   updateWorkspaceAgentEnablementSettings,
   getWorkspaceAgentEnablementSettings,
+  listWorkspaceTopLevelSkills,
+  suggestWorkspaceFilePaths,
   sendAgentMessage,
   updateWorkspaceExternalSkillRootsSettings
 } from "@/shared/api";
 import { getInitialLocale } from "@/shared/i18n/locale";
+import {
+  buildSlashCommandHint,
+  findMentionTarget,
+  isSlashMode,
+  resolveSlashCommand,
+  type SlashCommandAction,
+  type SlashCommandDefinition
+} from "./agentInputCandidates";
 
 
 type AgentOption = {
@@ -796,15 +820,31 @@ watch(
   { flush: "sync" }
 );
 
-type SlashCommandAction = "compact" | "clear";
-
-type SlashCommandDefinition = {
-  name: string;
-  usage: string;
-  summaryKey: string;
-  strictOnly: boolean;
-  action: SlashCommandAction;
+type SlashCandidateItem = {
+  id: string;
+  kind: "slash";
+  label: string;
+  command: SlashCommandDefinition;
 };
+
+type MentionCandidateItem = {
+  id: string;
+  kind: "skill" | "file";
+  label: string;
+  description?: string;
+  insertText: string;
+};
+
+type InputCandidateItem = SlashCandidateItem | MentionCandidateItem;
+
+const MAX_INPUT_CANDIDATES = 10;
+const MENTION_FETCH_DEBOUNCE_MS = 120;
+
+const mentionCandidates = ref<MentionCandidateItem[]>([]);
+const mentionCandidatesLoading = ref(false);
+const mentionFetchSeq = ref(0);
+let mentionFetchTimer: number | null = null;
+const skillMentionCache = ref<{ workspaceId: string; items: Awaited<ReturnType<typeof listWorkspaceTopLevelSkills>>["items"] } | null>(null);
 
 const slashCommands: SlashCommandDefinition[] = [
   {
@@ -824,41 +864,111 @@ const slashCommands: SlashCommandDefinition[] = [
 ];
 
 const slashCommandMap = new Map(slashCommands.map((item) => [item.name, item] as const));
-const slashCommandSelection = ref("");
+const inputCandidateSelection = ref("");
+const inputCaretIndex = ref(0);
+const inputHintDismissed = ref(false);
 
 const slashCommandHint = computed(() => {
-  const text = draft.value.trimStart();
-  if (!text.startsWith("/")) {
+  return buildSlashCommandHint({
+    text: draft.value,
+    commands: slashCommands,
+    selectedName: inputCandidateSelection.value.startsWith("slash:") ? inputCandidateSelection.value.slice(6) : inputCandidateSelection.value
+  });
+});
+
+const mentionTarget = computed(() => {
+  if (isSlashMode(draft.value)) return null;
+  return findMentionTarget(draft.value, inputCaretIndex.value);
+});
+
+const mentionHint = computed(() => {
+  const target = mentionTarget.value;
+  if (!target) {
     return {
       visible: false,
       query: "",
-      commands: [] as SlashCommandDefinition[],
-      activeCommand: ""
+      items: [] as MentionCandidateItem[],
+      activeId: "",
+      loading: false
     };
   }
-  const normalized = text.trim().toLowerCase();
-  for (const item of slashCommands) {
-    if (normalized === item.usage) {
-      return {
-        visible: false,
-        query: "",
-        commands: [] as SlashCommandDefinition[],
-        activeCommand: ""
-      };
-    }
-  }
-  const query = text.slice(1).split(/\s+/, 1)[0]?.toLowerCase() || "";
-  const commands = slashCommands.filter((item) => !query || item.name.startsWith(query));
-  const active = commands.some((item) => item.name === slashCommandSelection.value)
-    ? slashCommandSelection.value
-    : (commands[0]?.name || "");
+  const activeId = mentionCandidates.value.some((it) => it.id === inputCandidateSelection.value)
+    ? inputCandidateSelection.value
+    : (mentionCandidates.value[0]?.id || "");
   return {
     visible: true,
-    query,
-    commands,
-    activeCommand: active
+    query: target.query,
+    items: mentionCandidates.value,
+    activeId,
+    loading: mentionCandidatesLoading.value
   };
 });
+
+const activeInputHint = computed(() => {
+  if (inputHintDismissed.value) {
+    return {
+      visible: false,
+      kind: "mention" as const,
+      query: "",
+      items: [] as InputCandidateItem[],
+      activeId: "",
+      loading: false,
+      emptyText: ""
+    };
+  }
+  if (slashCommandHint.value.visible) {
+    const items: InputCandidateItem[] = slashCommandHint.value.commands.map((cmd) => ({
+      id: `slash:${cmd.name}`,
+      kind: "slash",
+      label: cmd.usage,
+      command: cmd
+    }));
+    const activeId = items.some((it) => it.id === inputCandidateSelection.value)
+      ? inputCandidateSelection.value
+      : (items[0]?.id || "");
+    return {
+      visible: true,
+      kind: "slash" as const,
+      query: slashCommandHint.value.query,
+      items,
+      activeId,
+      loading: false,
+      emptyText: t("agent.client.slashCommandHintNoMatch", { query: slashCommandHint.value.query })
+    };
+  }
+  if (!mentionHint.value.visible) {
+    return {
+      visible: false,
+      kind: "mention" as const,
+      query: "",
+      items: [] as InputCandidateItem[],
+      activeId: "",
+      loading: false,
+      emptyText: ""
+    };
+  }
+  const q = mentionHint.value.query;
+  return {
+    visible: true,
+    kind: "mention" as const,
+    query: q,
+    items: mentionHint.value.items,
+    activeId: mentionHint.value.activeId,
+    loading: mentionHint.value.loading,
+    emptyText: t("agent.client.inputCandidateNoMatch", { query: `@${q}` })
+  };
+});
+
+function syncInputCaretFromNative() {
+  const raw = (inputEl.value as any)?.resizableTextArea?.textArea as HTMLTextAreaElement | undefined;
+  if (!raw) return;
+  const next = typeof raw.selectionStart === "number" ? raw.selectionStart : draft.value.length;
+  inputCaretIndex.value = Math.max(0, Math.min(draft.value.length, next));
+}
+
+function onInputCursorEvent() {
+  syncInputCaretFromNative();
+}
 
 function toRecord(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -2284,26 +2394,128 @@ function newClientRequestId() {
 function onPickSlashCommand(name: string) {
   const cmd = slashCommandMap.get(name);
   if (!cmd) return;
-  slashCommandSelection.value = cmd.name;
+  inputCandidateSelection.value = `slash:${cmd.name}`;
   draft.value = cmd.usage;
+  nextTick(() => syncInputCaretFromNative());
   void focusInputIfNeeded();
 }
 
-function moveSlashCommandSelection(step: 1 | -1) {
-  const hint = slashCommandHint.value;
-  if (!hint.visible || hint.commands.length === 0) return;
-  const currentIdx = Math.max(0, hint.commands.findIndex((item) => item.name === hint.activeCommand));
-  const nextIdx = (currentIdx + step + hint.commands.length) % hint.commands.length;
-  slashCommandSelection.value = hint.commands[nextIdx]?.name || "";
+function moveInputCandidateSelection(step: 1 | -1) {
+  const hint = activeInputHint.value;
+  if (!hint.visible || hint.items.length === 0) return;
+  const currentIdx = Math.max(0, hint.items.findIndex((item) => item.id === hint.activeId));
+  const nextIdx = (currentIdx + step + hint.items.length) % hint.items.length;
+  inputCandidateSelection.value = hint.items[nextIdx]?.id || "";
 }
 
-function pickActiveSlashCommand() {
-  const hint = slashCommandHint.value;
-  if (!hint.visible || hint.commands.length === 0) return false;
-  const targetName = hint.activeCommand || hint.commands[0]?.name;
-  if (!targetName) return false;
-  onPickSlashCommand(targetName);
+function applyMentionCandidate(candidate: MentionCandidateItem) {
+  const target = mentionTarget.value;
+  if (!target || !candidate.insertText) return false;
+  const before = draft.value.slice(0, target.replaceFrom);
+  const after = draft.value.slice(target.replaceTo);
+  const inserted = `@${candidate.insertText} `;
+  const nextText = `${before}${inserted}${after}`;
+  const caretPos = before.length + inserted.length;
+  draft.value = nextText;
+  inputCandidateSelection.value = "";
+  mentionCandidates.value = [];
+  mentionCandidatesLoading.value = false;
+  void nextTick(() => {
+    const raw = (inputEl.value as any)?.resizableTextArea?.textArea as HTMLTextAreaElement | undefined;
+    if (!raw) return;
+    raw.focus();
+    raw.setSelectionRange(caretPos, caretPos);
+    inputCaretIndex.value = caretPos;
+  });
   return true;
+}
+
+function onPickInputCandidate(candidate: InputCandidateItem) {
+  if (candidate.kind === "slash" && candidate.command) {
+    onPickSlashCommand(candidate.command.name);
+    return;
+  }
+  if (candidate.kind === "skill" || candidate.kind === "file") {
+    applyMentionCandidate(candidate);
+  }
+}
+
+function pickActiveInputCandidate() {
+  const hint = activeInputHint.value;
+  if (!hint.visible || hint.items.length === 0) return false;
+  const target = hint.items.find((item) => item.id === hint.activeId) || hint.items[0];
+  if (!target) return false;
+  onPickInputCandidate(target);
+  return true;
+}
+
+async function loadSkillMentionCandidates(query: string) {
+  const q = query.trim().toLowerCase();
+  let rows = skillMentionCache.value?.workspaceId === props.workspaceId
+    ? skillMentionCache.value.items
+    : null;
+  if (!rows) {
+    const res = await listWorkspaceTopLevelSkills(props.workspaceId);
+    rows = res.items || [];
+    skillMentionCache.value = { workspaceId: props.workspaceId, items: rows };
+  }
+  return rows
+    .map<MentionCandidateItem>((item) => ({
+      id: `skill:${item.id}`,
+      kind: "skill",
+      label: `skill:${item.id}`,
+      description: [item.name, item.description].filter(Boolean).join(" + "),
+      insertText: `skill:${item.id}`
+    }))
+    .filter((item) => {
+      if (!q) return true;
+      return item.label.toLowerCase().includes(q) || item.description?.toLowerCase().includes(q);
+    });
+}
+
+async function loadFileMentionCandidates(query: string) {
+  const q = query.trim();
+  const res = await suggestWorkspaceFilePaths({
+    workspaceId: props.workspaceId,
+    query: q,
+    limit: MAX_INPUT_CANDIDATES
+  });
+  return (res.items || [])
+    .map((path: string) => path.trim())
+    .filter(Boolean)
+    .map<MentionCandidateItem>((path: string) => ({
+      id: `file:${path}`,
+      kind: "file",
+      label: path,
+      insertText: path
+    }));
+}
+
+async function refreshMentionCandidates() {
+  const target = mentionTarget.value;
+  if (!target || isSlashMode(draft.value)) {
+    mentionCandidatesLoading.value = false;
+    mentionCandidates.value = [];
+    return;
+  }
+  mentionCandidatesLoading.value = true;
+  const seq = ++mentionFetchSeq.value;
+  try {
+    const [skills, files] = await Promise.all([
+      loadSkillMentionCandidates(target.query),
+      loadFileMentionCandidates(target.query)
+    ]);
+    if (seq !== mentionFetchSeq.value) return;
+    mentionCandidates.value = [...skills, ...files].slice(0, MAX_INPUT_CANDIDATES);
+    if (!mentionCandidates.value.some((it) => it.id === inputCandidateSelection.value)) {
+      inputCandidateSelection.value = mentionCandidates.value[0]?.id || "";
+    }
+  } catch {
+    if (seq !== mentionFetchSeq.value) return;
+    mentionCandidates.value = [];
+  } finally {
+    if (seq === mentionFetchSeq.value) mentionCandidatesLoading.value = false;
+  }
 }
 
 function onInputKeydown(event: KeyboardEvent) {
@@ -2311,45 +2523,51 @@ function onInputKeydown(event: KeyboardEvent) {
 
   if (event.key === "Escape") {
     event.preventDefault();
+    if (activeInputHint.value.visible) {
+      inputHintDismissed.value = true;
+      inputCandidateSelection.value = "";
+      mentionCandidates.value = [];
+      mentionCandidatesLoading.value = false;
+      if (mentionFetchTimer != null) {
+        window.clearTimeout(mentionFetchTimer);
+        mentionFetchTimer = null;
+      }
+      return;
+    }
     void onCancelRun();
     return;
   }
 
   if (event.key === "Tab") {
+    if (activeInputHint.value.visible) {
+      event.preventDefault();
+      void pickActiveInputCandidate();
+      return;
+    }
     event.preventDefault();
     onCycleAgent(event.shiftKey ? -1 : 1);
     return;
   }
 
-  if (slashCommandHint.value.visible && event.key === "ArrowDown") {
+  if (activeInputHint.value.visible && event.key === "ArrowDown") {
     event.preventDefault();
-    moveSlashCommandSelection(1);
+    moveInputCandidateSelection(1);
     return;
   }
 
-  if (slashCommandHint.value.visible && event.key === "ArrowUp") {
+  if (activeInputHint.value.visible && event.key === "ArrowUp") {
     event.preventDefault();
-    moveSlashCommandSelection(-1);
+    moveInputCandidateSelection(-1);
     return;
   }
 
   if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
     event.preventDefault();
-    if (pickActiveSlashCommand()) {
+    if (pickActiveInputCandidate()) {
       return;
     }
     void onSend();
   }
-}
-
-function resolveSlashCommand(text: string) {
-  const normalized = text.trim().toLowerCase();
-  if (!normalized.startsWith("/")) return null;
-  const commandName = normalized.slice(1);
-  const command = slashCommandMap.get(commandName);
-  if (!command) return null;
-  if (command.strictOnly && normalized !== command.usage) return null;
-  return command;
 }
 
 async function executeSlashCommand(params: {
@@ -2520,6 +2738,7 @@ async function onSaveExternalSkillRootsSettings() {
       .filter((it) => it.enabled)
       .map((it) => ({ sourceType: it.sourceType, repoId: it.repoId, rootDir: it.rootDir }));
     await updateWorkspaceExternalSkillRootsSettings(props.workspaceId, { enabledRoots });
+    skillMentionCache.value = null;
     message.success(t("agent.client.externalSkillRootsSaved"));
     externalSkillRootsModalVisible.value = false;
   } catch (err) {
@@ -2607,7 +2826,7 @@ async function onSend() {
     }
 
     const clientRequestId = newClientRequestId();
-    const slashCommand = resolveSlashCommand(text);
+    const slashCommand = resolveSlashCommand(text, slashCommandMap);
     if (slashCommand) {
       await executeSlashCommand({
         command: slashCommand,
@@ -2653,6 +2872,36 @@ async function onSend() {
     sending.value = false;
   }
 }
+
+watch(
+  () => props.workspaceId,
+  () => {
+    skillMentionCache.value = null;
+    mentionCandidates.value = [];
+    mentionCandidatesLoading.value = false;
+  }
+);
+
+watch(
+  () => [draft.value, mentionTarget.value?.triggerIndex, mentionTarget.value?.replaceTo, mentionTarget.value?.query, props.workspaceId],
+  () => {
+    inputHintDismissed.value = false;
+    nextTick(() => syncInputCaretFromNative());
+    if (mentionFetchTimer != null) {
+      window.clearTimeout(mentionFetchTimer);
+      mentionFetchTimer = null;
+    }
+    if (!mentionTarget.value || isSlashMode(draft.value)) {
+      mentionCandidates.value = [];
+      mentionCandidatesLoading.value = false;
+      return;
+    }
+    mentionFetchTimer = window.setTimeout(() => {
+      mentionFetchTimer = null;
+      void refreshMentionCandidates();
+    }, MENTION_FETCH_DEBOUNCE_MS);
+  }
+);
 
 watch(
   () => [String(props.modelValue || ""), props.agentOptions.map((item) => item.value).join("|")],
@@ -2794,6 +3043,10 @@ onBeforeUnmount(() => {
   clearContextRefreshTimer();
   clearRunElapsedTimer();
   clearFollowBottomLock();
+  if (mentionFetchTimer != null) {
+    window.clearTimeout(mentionFetchTimer);
+    mentionFetchTimer = null;
+  }
   scrollToBottomSeq += 1;
 });
 </script>
@@ -2955,20 +3208,20 @@ onBeforeUnmount(() => {
   font-size: 1.05em;
 }
 
-.slash-command-item {
+.input-candidate-item {
   appearance: none;
   background: transparent;
   color: inherit;
   transition: background-color 0.15s ease, border-color 0.15s ease;
 }
 
-.slash-command-item.is-active {
+.input-candidate-item.is-active {
   border-color: rgba(59, 130, 246, 0.4);
   background: rgba(59, 130, 246, 0.12);
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .slash-command-item:hover {
+  .input-candidate-item:hover {
     border-color: rgba(59, 130, 246, 0.28);
     background: rgba(59, 130, 246, 0.08);
   }

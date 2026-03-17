@@ -15,16 +15,26 @@ export async function runBashCommand(params: {
   timeoutMs: number;
   maxOutputBytes?: number;
   signal?: AbortSignal;
+  /** 子进程级 env 增量：会与 process.env 合并；不会污染 worker 进程环境 */
+  extraEnv?: NodeJS.ProcessEnv;
 }): Promise<BashRunResult> {
   return new Promise<BashRunResult>((resolve, reject) => {
     const maxOutputBytes = params.maxOutputBytes ?? 512 * 1024;
+
+    // Ensure env values are strings (Node requires string values in spawn env).
+    const extraEnv: NodeJS.ProcessEnv = {};
+    if (params.extraEnv) {
+      for (const [k, v] of Object.entries(params.extraEnv)) {
+        if (typeof v === "string") extraEnv[k] = v;
+      }
+    }
 
     // POSIX: detached=true creates a new process group so we can kill the entire command tree.
     // Windows: detached does not give us killpg semantics; we use taskkill to kill the process tree.
     const child = spawn("bash", ["-lc", params.command], {
       cwd: params.cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      env: process.env,
+      env: { ...process.env, ...extraEnv },
       detached: process.platform !== "win32"
     });
 

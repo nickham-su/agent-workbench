@@ -1,5 +1,6 @@
 # Workspace 工具开发手册 v2(Runtime + Store + Call + Indicator)
 
+
 ## 适用范围
 
 - 本手册描述 Workspace 工具在 v2 架构下的接入方式

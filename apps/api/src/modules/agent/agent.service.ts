@@ -1730,15 +1730,16 @@ function buildSkillsInstructionSection(input: {
 }) {
   const lines: string[] = [];
   lines.push("Use the builtin skill tool to load details on demand by id.");
+  lines.push('If the user mentions anything related to skills, be sure to use the "skill" tool, read the corresponding entry, and then proceed with the action.');
   lines.push("");
-  lines.push("Top-level builtin skills:");
+  lines.push("builtin skills:");
   if (input.builtin.length === 0) {
     lines.push("- (none)");
   } else {
     for (const item of input.builtin) lines.push(`- id: ${item.id}; name: ${item.name}; description: ${item.description}`);
   }
   lines.push("");
-  lines.push("Top-level enabled external skills:");
+  lines.push("external skills:");
   if (input.external.length === 0) {
     lines.push("- (none)");
   } else {

@@ -87,6 +87,20 @@ export type ExecutionProfile = {
   };
 };
 
+export type GitEnvPrepareResponse =
+  | {
+      ok: true;
+      kind: "https" | "ssh" | "none";
+      env: Record<string, string>;
+      leaseId: string | null;
+      expiresAt: string | null;
+    }
+  | {
+      ok: false;
+      errorCode: string;
+      error: string;
+    };
+
 export type PromptContext = {
   headItemId: number | null;
   system: string;
@@ -404,6 +418,20 @@ export class AgentApiClient {
 
   async executePluginTool(input: PluginToolRpcExecuteRequest) {
     return this.request<PluginToolRpcExecuteResponse>("/api/internal/agent/plugins/tools/execute", {
+      method: "POST",
+      body: input
+    });
+  }
+
+  async prepareGitEnvForBash(input: { workspaceId: string; cwd: string; purpose?: string; timeoutMs?: number }) {
+    return this.request<GitEnvPrepareResponse>("/api/internal/git-env/prepare", {
+      method: "POST",
+      body: input
+    });
+  }
+
+  async cleanupGitEnvLease(input: { leaseId: string }) {
+    return this.request<{ ok: true }>("/api/internal/git-env/cleanup", {
       method: "POST",
       body: input
     });

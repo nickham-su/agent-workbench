@@ -26,6 +26,8 @@ import {
   WorkspaceFileSearchRequestSchema,
   WorkspaceFileStatRequestSchema,
   WorkspaceFileUploadRequestSchema,
+  WorkspaceFileSuggestRequestSchema,
+  WorkspaceFileSuggestResponseSchema,
   WorkspaceFileUploadResponseSchema,
   WorkspaceFileWriteRequestSchema
 } from "@agent-workbench/shared";
@@ -41,6 +43,7 @@ import {
   resolveWorkspaceUploadTarget,
   searchWorkspaceFiles,
   saveWorkspaceUploadFile,
+  suggestWorkspaceFilePaths,
   statWorkspaceFile,
   withWorkspaceUploadLock,
   writeWorkspaceFileText
@@ -100,6 +103,21 @@ export async function registerWorkspaceFilesRoutes(app: FastifyInstance, ctx: Ap
     async (req) => {
       const params = req.params as { workspaceId: string };
       return searchWorkspaceFiles(ctx, params.workspaceId, req.body);
+    }
+  );
+
+  app.post(
+    "/api/workspaces/:workspaceId/files/suggest",
+    {
+      schema: {
+        tags: ["workspaces"],
+        body: WorkspaceFileSuggestRequestSchema,
+        response: { 200: WorkspaceFileSuggestResponseSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      const params = req.params as { workspaceId: string };
+      return suggestWorkspaceFilePaths(ctx, params.workspaceId, req.body);
     }
   );
 

@@ -11,7 +11,8 @@ import type {
   WorkspaceAgentEnablementMode,
   WorkspaceAgentEnablementSettingsResponse,
   UpdateWorkspaceAgentEnablementSettingsRequest,
-  WorkspaceAgentEnablementDetectResponse
+  WorkspaceAgentEnablementDetectResponse,
+  WorkspaceTopLevelSkillsResponse
 } from "@agent-workbench/shared";
 import type { WorkspaceRecord } from "@agent-workbench/shared";
 import { HttpError } from "../../app/errors.js";
@@ -49,11 +50,12 @@ import {
 } from "../terminals/terminal.store.js";
 import { tmuxHasSession, tmuxKillSession } from "../../infra/tmux/session.js";
 import { withWorkspaceRepoLock } from "../../infra/locks/workspaceRepoLock.js";
-import { scanReadableTopLevelSkills } from "../agent/top-level-skill.js";
+import { parseSkillFrontmatter, scanReadableTopLevelSkills } from "../agent/top-level-skill.js";
 import { withWorkspaceLock } from "../../infra/locks/workspaceLock.js";
 
 const WORKSPACE_EXTERNAL_SKILL_ROOTS_SETTINGS_KEY = "workspace_external_skill_roots_v1";
 const WORKSPACE_AGENT_ENABLEMENT_SETTINGS_KEY = "workspace_agent_enablement_v1";
+const BUILTIN_SKILLS_ROOT = "skills";
 
 function formatRepoDisplayName(rawUrl: string) {
   let s = String(rawUrl || "").trim();
@@ -1048,6 +1050,57 @@ export async function updateWorkspaceExternalSkillRootsSettings(
     }));
 
   return { workspaceId: ws.id, enabledRoots, updatedAt: now };
+}
+
+export async function listWorkspaceTopLevelSkills(
+  ctx: AppContext,
+  logger: FastifyBaseLogger,
+  workspaceId: string
+): Promise<WorkspaceTopLevelSkillsResponse> {
+  const ws = await getWorkspaceById(ctx, workspaceId);
+  const rows: WorkspaceTopLevelSkillsResponse["items"] = [];
+
+  const builtinRootPath = path.join(ctx.repoRoot, BUILTIN_SKILLS_ROOT);
+  const builtin = await scanReadableTopLevelSkills({
+    rootPath: builtinRootPath,
+    logger,
+    logMessage: "failed to read builtin top-level skill summary"
+  });
+  for (const item of builtin) {
+    const parsed = parseSkillFrontmatter(item.text);
+    rows.push({
+      id: `builtin/${item.entryName}`,
+      name: parsed.name || item.entryName,
+      description: parsed.description || "",
+      sourceType: "builtin"
+    });
+  }
+
+  const enabledRoots = await listEnabledWorkspaceExternalSkillRoots(ctx, logger, workspaceId);
+  for (const root of enabledRoots) {
+    const skills = await scanReadableTopLevelSkills({
+      rootPath: root.rootPath,
+      logger,
+      logMessage: "failed to read workspace top-level skill summary"
+    });
+    const idPrefix = root.sourceType === "workspace"
+      ? `workspace/${root.rootDir}`
+      : `repo/${root.repoId}/${root.rootDir}`;
+    for (const item of skills) {
+      const parsed = parseSkillFrontmatter(item.text);
+      rows.push({
+        id: `${idPrefix}/${item.entryName}`,
+        name: parsed.name || item.entryName,
+        description: parsed.description || "",
+        sourceType: root.sourceType,
+        ...(root.repoId ? { repoId: root.repoId } : {}),
+        rootDir: root.rootDir
+      });
+    }
+  }
+
+  rows.sort((a, b) => a.id.localeCompare(b.id));
+  return { workspaceId: ws.id, items: rows, updatedAt: nowMs() };
 }
 
 export async function listEnabledWorkspaceExternalSkillRoots(
