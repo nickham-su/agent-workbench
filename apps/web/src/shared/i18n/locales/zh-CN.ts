@@ -513,6 +513,7 @@ export default {
       newFile: "新建文件",
       newFolder: "新建文件夹",
       upload: "上传",
+      searchInFolder: "搜索此文件夹",
       copyName: "复制名称",
       copyPath: "复制仓库内路径",
       copyRepoPath: "复制仓库内路径",
@@ -606,7 +607,9 @@ export default {
     placeholder: {
       selectRepo: "请选择仓库",
       query: "输入搜索内容(按回车键搜索)",
-      queryEmpty: "请输入搜索内容"
+      queryEmpty: "请输入搜索内容",
+      path: "路径",
+      pathHint: "输入相对路径(空或 . 表示全局)，如 repoA/src"
     },
     scope: {
       global: "全局",

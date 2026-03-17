@@ -43,6 +43,10 @@
                   {{ t("files.actions.newFolder") }}
                 </a-menu-item>
                 <a-menu-divider v-if="selectedNode?.data.kind === 'dir'" />
+                <a-menu-item v-if="selectedNode?.data.kind === 'dir'" key="searchInFolder">
+                  {{ t("files.actions.searchInFolder") }}
+                </a-menu-item>
+                <a-menu-divider v-if="selectedNode?.data.kind === 'dir'" />
                 <a-menu-item v-if="selectedNode?.data.kind === 'dir'" key="upload">
                   {{ t("files.actions.upload") }}
                 </a-menu-item>
