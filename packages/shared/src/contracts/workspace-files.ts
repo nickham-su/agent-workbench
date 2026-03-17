@@ -77,10 +77,11 @@ export type WorkspaceFileSearchScope = Static<typeof WorkspaceFileSearchScopeSch
 
 export const WorkspaceFileSearchRequestSchema = Type.Object({
   query: Type.String({ minLength: 1 }),
+  path: Type.Optional(Type.String()),
   useRegex: Type.Boolean(),
   caseSensitive: Type.Boolean(),
   wholeWord: Type.Optional(Type.Boolean()),
-  scope: WorkspaceFileSearchScopeSchema,
+  scope: Type.Optional(WorkspaceFileSearchScopeSchema),
   repoDirNames: Type.Optional(Type.Array(Type.String({ minLength: 1 })))
 });
 export type WorkspaceFileSearchRequest = Static<typeof WorkspaceFileSearchRequestSchema>;

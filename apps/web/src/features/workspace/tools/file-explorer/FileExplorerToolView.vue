@@ -585,6 +585,14 @@ function onContextMenuClick(info: { key: string }) {
   if (key === "copyRepoPath" || key === "copyPath") return void copySelectedRepoPath();
   if (key === "copyWorkspacePath") return void copySelectedWorkspacePath();
   if (key === "upload") return void uploadSelectedFiles();
+  if (key === "searchInFolder") {
+    const node = selectedNode.value;
+    if (!node || node.data.kind !== "dir") return;
+    const path = selectedNodeWorkspacePath();
+    host.openTool("search");
+    host.emitToolEvent("search", { type: "search.prefillPath", payload: { path }, sourceToolId: props.toolId });
+    return;
+  }
   if (key === "download") return void downloadSelected();
   if (key === "newFile") return openCreateModal("file");
   if (key === "newFolder") return openCreateModal("dir");

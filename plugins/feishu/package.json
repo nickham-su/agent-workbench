@@ -6,7 +6,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test tests/policy.test.ts tests/run-completed.test.ts"
+    "test": "tsx --test tests/*.test.ts"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.1"

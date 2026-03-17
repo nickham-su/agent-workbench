@@ -5,6 +5,7 @@
         <a-input
           v-model:value="query"
           :placeholder="t('search.placeholder.query')"
+          allowClear
           @pressEnter="runSearch"
         />
         <a-button type="primary" size="small" :loading="loading" :disabled="!canSearch" @click="runSearch">
@@ -12,26 +13,16 @@
         </a-button>
       </div>
 
-      <div v-if="!isRepoSelectionHidden" class="flex items-center gap-2 text-xs text-[color:var(--text-tertiary)]">
-        <a-radio-group v-model:value="scope" size="small">
-          <a-radio value="global">{{ t("search.scope.global") }}</a-radio>
-          <a-radio value="repos">{{ t("search.scope.repos") }}</a-radio>
-        </a-radio-group>
-        <span
-          v-if="scope === 'repos'"
-          class="h-full w-px bg-[var(--border-color-secondary)]"
-          aria-hidden="true"
-        ></span>
-        <a-checkbox-group
-          v-if="scope === 'repos'"
-          v-model:value="repoDirNames"
-          class="flex flex-wrap gap-2 flex-1 min-w-0 pl-[10px]"
-        >
-          <a-checkbox v-for="option in repoOptions" :key="option.value" :value="option.value">
-            {{ option.label }}
-          </a-checkbox>
-          </a-checkbox-group>
-        </div>
+      <div class="flex items-center gap-2 text-xs text-[color:var(--text-tertiary)]">
+        <a-input
+          v-model:value="path"
+          size="small"
+          class="min-w-0"
+          :placeholder="t('search.placeholder.pathHint')"
+          :aria-label="t('search.placeholder.path')"
+          allowClear
+        />
+      </div>
 
       <div class="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-[color:var(--text-tertiary)]">
         <a-checkbox v-model:checked="caseSensitive" class="shrink-0 whitespace-nowrap">
@@ -130,7 +121,9 @@ import { getSearchStore } from "./store";
 const props = defineProps<{
   workspaceId: string;
   toolId: string;
+  // 保留以兼容 WorkspaceLayout 传参（历史上 search 支持按 repo 选择范围），当前实现不再使用。
   workspaceRepos?: WorkspaceDetail["repos"];
+  // 同上：保留兼容字段。
   currentRepoDirName?: string;
 }>();
 const { t } = useI18n();
@@ -138,11 +131,10 @@ const host = useWorkspaceHost(props.toolId);
 const store = getSearchStore(props.workspaceId);
 
 const query = store.query;
+const path = store.path;
 const useRegex = store.useRegex;
 const caseSensitive = store.caseSensitive;
 const wholeWord = store.wholeWord;
-const scope = store.scope;
-const repoDirNames = store.repoDirNames;
 const matches = store.matches;
 const blocks = store.blocks;
 const loading = store.loading;
@@ -150,17 +142,9 @@ const error = store.error;
 const truncated = store.truncated;
 const timedOut = store.timedOut;
 const tookMs = store.tookMs;
-const repoOptions = computed(() => {
-  return (props.workspaceRepos ?? []).map((item) => ({
-    label: item.dirName,
-    value: item.dirName
-  }));
-});
-const isRepoSelectionHidden = computed(() => (props.workspaceRepos ?? []).length <= 1);
 const canSearch = computed(() => {
   if (!query.value.trim()) return false;
-  if (scope.value === "global") return true;
-  return repoDirNames.value.length > 0;
+  return true;
 });
 
 const summaryLabel = computed(() => {
@@ -228,37 +212,12 @@ watch(
 );
 
 watch(
-  () => scope.value,
+  () => path.value,
   () => {
     store.nextRequestSeq();
     store.resetResults();
     loading.value = false;
   }
-);
-
-watch(
-  () => repoDirNames.value.join("|"),
-  () => {
-    if (scope.value !== "repos") return;
-    store.nextRequestSeq();
-    store.resetResults();
-    loading.value = false;
-  }
-);
-
-watch(
-  () => props.workspaceRepos,
-  (repos) => {
-    const repoCount = repos?.length ?? 0;
-    const available = new Set((repos ?? []).map((item) => item.dirName));
-    const filtered = repoDirNames.value.filter((name) => available.has(name));
-    if (filtered.length !== repoDirNames.value.length) repoDirNames.value = filtered;
-    if (repoCount <= 1) {
-      scope.value = "global";
-      repoDirNames.value = [];
-    }
-  },
-  { immediate: true }
 );
 
 async function openBlock(block: FileSearchBlock) {
@@ -291,10 +250,6 @@ async function runSearch() {
     message.warning(t("search.placeholder.queryEmpty"));
     return;
   }
-  if (scope.value === "repos" && repoDirNames.value.length === 0) {
-    message.warning(t("search.placeholder.selectRepo"));
-    return;
-  }
   const seq = store.nextRequestSeq();
   store.resetResults();
   loading.value = true;
@@ -302,11 +257,12 @@ async function runSearch() {
     const res = await searchWorkspaceFiles({
       workspaceId: props.workspaceId,
       query: q,
+      path: path.value,
       useRegex: useRegex.value,
       caseSensitive: caseSensitive.value,
       wholeWord: wholeWord.value || undefined,
-      scope: scope.value,
-      repoDirNames: scope.value === "repos" ? repoDirNames.value : undefined
+      // 兼容旧后端/旧协议：scope 字段历史上为必填
+      scope: "global"
     });
     if (seq !== store.requestSeq.value) return;
     matches.value = res.matches;

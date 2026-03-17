@@ -306,12 +306,28 @@ async function ensureDirSafe(absPath: string) {
   return st;
 }
 
+const rootRealPathCache = new Map<string, Promise<string>>();
+
+async function ensureRootRealPath(rootAbs: string) {
+  const key = path.resolve(rootAbs);
+  const existing = rootRealPathCache.get(key);
+  if (existing) return await existing;
+  const p = (async () => {
+    const fs = await import("node:fs/promises");
+    const real = await fs.realpath(key);
+    return path.resolve(real);
+  })();
+  rootRealPathCache.set(key, p);
+  return await p;
+}
+
 async function ensureRealPathUnderRoot(rootAbs: string, absPath: string) {
   const fs = await import("node:fs/promises");
+  const rootRealAbs = await ensureRootRealPath(rootAbs);
   const real = await fs.realpath(absPath);
   const realAbs = path.resolve(real);
-  if (realAbs === rootAbs) return realAbs;
-  if (!realAbs.startsWith(rootAbs + path.sep)) throw new HttpError(400, "Invalid path");
+  if (realAbs === rootRealAbs) return realAbs;
+  if (!realAbs.startsWith(rootRealAbs + path.sep)) throw new HttpError(400, "Invalid path");
   return realAbs;
 }
 
@@ -661,35 +677,68 @@ export async function searchWorkspaceFiles(
   const query = typeof (body as any).query === "string" ? (body as any).query.trim() : "";
   if (!query) throw new HttpError(400, "Invalid query");
 
+  const rawPath = typeof (body as any).path === "string" ? (body as any).path.trim() : "";
+
   const useRegex = Boolean((body as any).useRegex);
   const caseSensitive = Boolean((body as any).caseSensitive);
   const wholeWord = parseBool((body as any).wholeWord, false);
-  const scopeMode = typeof (body as any).scope === "string" ? (body as any).scope.trim() : "";
-  if (scopeMode !== "global" && scopeMode !== "repos") throw new HttpError(400, "Invalid scope");
 
   const settings = getSearchSettings(ctx);
   const baseExcludeGlobs = [...settings.excludeGlobs, ...SEARCH_FORCED_EXCLUDES];
 
-  let searchPaths: string[] = [];
-  if (scopeMode === "global") {
-    searchPaths = ["."];
-  } else {
-    const rawList = Array.isArray((body as any).repoDirNames) ? (body as any).repoDirNames : [];
-    const selected: string[] = [];
-    const seen = new Set<string>();
-    for (const item of rawList) {
-      const name = typeof item === "string" ? item.trim() : "";
-      if (!name) continue;
-      if (!scope.repoDirNames.has(name)) throw new HttpError(400, "Invalid repo selection");
-      if (seen.has(name)) continue;
-      seen.add(name);
-      selected.push(name);
-    }
-    if (selected.length === 0) throw new HttpError(400, "Repo required");
-    searchPaths = selected;
-  }
+  let excludeGlobs: string[] = [];
 
-  const excludeGlobs = scopeMode === "global" ? expandWorkspaceExcludeGlobs(baseExcludeGlobs) : baseExcludeGlobs;
+  let searchPaths: string[] = [];
+  if (rawPath) {
+    // 新模式：按 workspace 相对路径限定搜索范围
+    // 为空或 '.' 表示全局搜索
+    const rel = normalizeDir(rawPath);
+    assertValidDir(rel);
+    const abs = safeResolveUnderRoot({ root: scope.rootAbs, rel: rel || "." });
+    if (!abs) throw new HttpError(400, "Invalid path");
+
+    // 路径安全：禁止符号链接，且必须在 workspaceRoot 的 realpath 下（防符号链接逃逸）
+    const fs = await import("node:fs/promises");
+    try {
+      const st = await fs.lstat(abs);
+      if (st.isSymbolicLink()) throw new HttpError(400, "Invalid path");
+      await ensureRealPathUnderRoot(scope.rootAbs, abs);
+    } catch (err: any) {
+      if (err && (err.code === "ENOENT" || err.code === "ENOTDIR")) throw new HttpError(404, "Path not found");
+      throw err;
+    }
+
+    // 进一步避免搜索 denylist 目录
+    if (hasDeniedSegment(rel)) throw new HttpError(400, "Invalid path");
+    searchPaths = [rel || "."];
+
+    // path 模式等同于在 workspace 范围内搜索，使用 global 的 exclude 规则展开逻辑
+    excludeGlobs = expandWorkspaceExcludeGlobs(baseExcludeGlobs);
+  } else {
+    // 兼容旧模式：scope + repoDirNames
+    const scopeMode = typeof (body as any).scope === "string" ? (body as any).scope.trim() : "";
+    if (scopeMode !== "global" && scopeMode !== "repos") throw new HttpError(400, "Invalid scope");
+
+    if (scopeMode === "global") {
+      searchPaths = ["."];
+      excludeGlobs = expandWorkspaceExcludeGlobs(baseExcludeGlobs);
+    } else {
+      const rawList = Array.isArray((body as any).repoDirNames) ? (body as any).repoDirNames : [];
+      const selected: string[] = [];
+      const seen = new Set<string>();
+      for (const item of rawList) {
+        const name = typeof item === "string" ? item.trim() : "";
+        if (!name) continue;
+        if (!scope.repoDirNames.has(name)) throw new HttpError(400, "Invalid repo selection");
+        if (seen.has(name)) continue;
+        seen.add(name);
+        selected.push(name);
+      }
+      if (selected.length === 0) throw new HttpError(400, "Repo required");
+      searchPaths = selected;
+      excludeGlobs = baseExcludeGlobs;
+    }
+  }
 
   return runFileSearch({
     cwd: scope.rootAbs,

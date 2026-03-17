@@ -515,6 +515,7 @@ export default {
       newFile: "New file",
       newFolder: "New folder",
       upload: "Upload",
+      searchInFolder: "Search this folder",
       copyName: "Copy name",
       copyPath: "Copy repo path",
       copyRepoPath: "Copy repo path",
@@ -608,7 +609,9 @@ export default {
     placeholder: {
       selectRepo: "Select a repo",
       query: "Enter search text",
-      queryEmpty: "Enter search text"
+      queryEmpty: "Enter search text",
+      path: "Path",
+      pathHint: "Relative path (empty or '.' = global), e.g. repoA/src"
     },
     scope: {
       global: "Global",

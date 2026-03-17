@@ -79,6 +79,7 @@ function parseCommand(text: string): { cmd: string; arg: string } | null {
   const parts = t.split(/\s+/g).filter(Boolean);
   const cmdRaw = normalizeText(parts[0]).toLowerCase();
   const alias: Record<string, string> = {
+    "/todo": "/t",
     "/help": "/h",
     "/status": "/st",
     "/session": "/ss",
@@ -92,6 +93,70 @@ function parseCommand(text: string): { cmd: string; arg: string } | null {
   const cmd = alias[cmdRaw] ?? cmdRaw;
   const arg = parts.length > 1 ? parts.slice(1).join(" ") : "";
   return { cmd, arg };
+}
+
+/**
+ * todolist 状态到符号的映射。
+ * - completed: ●
+ * - pending: ○
+ * - in_progress: ▶
+ * - cancelled: ×（需求未指定，这里选用 × 并在 /t help 中说明）
+ */
+const TODOLIST_STATUS_SYMBOL: Record<string, string> = {
+  completed: "●",
+  pending: "○",
+  in_progress: "▶",
+  cancelled: "×",
+  canceled: "×"
+};
+
+function todolistStatusSymbol(status: unknown) {
+  const s = normalizeText(status).toLowerCase().replace(/[-\s]/g, "_");
+  return TODOLIST_STATUS_SYMBOL[s] ?? TODOLIST_STATUS_SYMBOL.pending;
+}
+
+export function formatTodolistResult(result: any): string | null {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return null;
+  const goal = normalizeText((result as any).goal);
+  const todosRaw = (result as any).todos;
+  if (!Array.isArray(todosRaw)) return null;
+
+  const lines: string[] = [];
+  if (goal) lines.push(`目标：${goal}`);
+  if (todosRaw.length === 0) {
+    lines.push("(无任务)");
+    return lines.join("\n");
+  }
+  for (const t of todosRaw) {
+    const content = normalizeText((t as any)?.content) || "(empty)";
+    lines.push(`${todolistStatusSymbol((t as any)?.status)} ${content}`);
+  }
+  return lines.join("\n");
+}
+
+export function formatTodolistToolOutput(toolOutput: any): string {
+  const formatted = formatTodolistResult(toolOutput?.result);
+  if (formatted) return formatted;
+  const text = normalizeText(toolOutput?.text);
+  if (text) return text;
+  return "(empty)";
+}
+
+export function findLatestTodolistToolItem(items: any[]): any | null {
+  if (!Array.isArray(items) || items.length === 0) return null;
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const it = items[i];
+    // 兼容：若 kind 存在，则必须是 tool
+    const kind = normalizeText(it?.kind).toLowerCase();
+    if (kind && kind !== "tool") continue;
+
+    const out = it?.output;
+    if (!out || typeof out !== "object") continue;
+    if (normalizeText(out.type).toLowerCase() !== "tool") continue;
+    if (normalizeText(out.toolName).toLowerCase() !== "todolist") continue;
+    return it;
+  }
+  return null;
 }
 
 function stripLeadingMentionsForCommand(text: string) {
@@ -117,6 +182,7 @@ function buildHelpText() {
     "- /p               切换 policy(self_only/session_all)",
     "- /st              查看状态（含 policy）",
     "- /l               查看最后一条 assistant 消息",
+    "- /t               查看最近一条 todolist（别名 /todo；完成● 等待○ 进行中▶ 取消×）",
     "- /c               触发 compact",
     "- /h               帮助"
   ].join("\n");
@@ -876,6 +942,66 @@ function createGateway(params: GatewayStartParams): FeishuGateway {
       const item = items[items.length - 1];
       const text = normalizeText(item?.output?.text);
       await replyText(ctx.chatId, ctx.messageId, text || "当前会话暂无消息");
+      return;
+    }
+
+    if (cmd.cmd === "/t") {
+      const sessionId = normalizeText(binding?.sessionId);
+      const workspaceId = normalizeText(binding?.workspaceId);
+      if (!sessionId || !workspaceId) {
+        await replyText(ctx.chatId, ctx.messageId, "请先使用 /ss 绑定会话");
+        return;
+      }
+
+      const agents = await listAgents(workspaceId);
+      if (agents.length === 0) {
+        await replyText(ctx.chatId, ctx.messageId, "当前 workspace 未启用任何可用 agent，请先在 Web 端工作区中启用后再试 /a");
+        return;
+      }
+      const selectedAgentId = normalizeText(binding?.agentId);
+      if (selectedAgentId && !agents.some((a: any) => normalizeText(a.id) === selectedAgentId)) {
+        await replyText(ctx.chatId, ctx.messageId, "当前 workspace 已禁用已绑定 agent，请重新执行 /a 选择可用 agent");
+        return;
+      }
+
+      let summary: any;
+      try {
+        summary = await client.post("/api/internal/agent/sessions/status-summary", {
+          sessionId,
+          selectedAgentId: selectedAgentId || undefined
+        });
+      } catch (err) {
+        const errCode = normalizeText((err as any)?.code).toUpperCase();
+        if (errCode === "AGENT_DISABLED_IN_WORKSPACE") {
+          await replyText(ctx.chatId, ctx.messageId, "当前 workspace 已禁用已绑定 agent，请重新执行 /a 选择可用 agent");
+          return;
+        }
+        if (errCode === "AGENT_NO_AVAILABLE_IN_WORKSPACE") {
+          await replyText(ctx.chatId, ctx.messageId, "当前 workspace 未启用任何可用 agent，请先在 Web 端工作区中启用后再试 /a");
+          return;
+        }
+        throw err;
+      }
+
+      if (normalizeText(summary?.runState?.status).toLowerCase() === "running") {
+        await replyText(ctx.chatId, ctx.messageId, "正在运行中，请稍后再试");
+        return;
+      }
+
+      // 只取尾部一段上下文：优先用较小窗口；找不到再扩大窗口。
+      // 经验值：todolist 往往靠近会话尾部，但也可能因长对话而被推远。
+      let toolItem: any | null = null;
+      for (const tailLimit of [200, 500]) {
+        const items = await fetchContextItemsTail(sessionId, tailLimit);
+        toolItem = findLatestTodolistToolItem(items);
+        if (toolItem) break;
+      }
+      if (!toolItem) {
+        await replyText(ctx.chatId, ctx.messageId, "当前会话未找到 todolist 记录（仅扫描最近 500 条上下文）");
+        return;
+      }
+      const text = formatTodolistToolOutput(toolItem.output);
+      await replyText(ctx.chatId, ctx.messageId, text);
       return;
     }
 
