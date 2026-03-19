@@ -159,6 +159,16 @@ export function findLatestTodolistToolItem(items: any[]): any | null {
   return null;
 }
 
+export function buildTodoReplyText(params: { isRunning: boolean; todolistText: string }): string {
+  // 重要：不要改变原 todolistText 的内容（包括首尾空白/换行）。
+  // 仅在文本为空或全空白时兜底为 (empty)。
+  const raw = typeof params?.todolistText === "string" ? params.todolistText : "";
+  const base = raw.trim() ? raw : "(empty)";
+  if (!params?.isRunning) return base;
+  // 提示行拼接保持简单可靠：前置一行提示 + 原文本。
+  return ["当前会话正在运行中", base].join("\n");
+}
+
 function stripLeadingMentionsForCommand(text: string) {
   let t = typeof text === "string" ? text : "";
   while (t) {
@@ -980,13 +990,10 @@ function createGateway(params: GatewayStartParams): FeishuGateway {
           await replyText(ctx.chatId, ctx.messageId, "当前 workspace 未启用任何可用 agent，请先在 Web 端工作区中启用后再试 /a");
           return;
         }
-        throw err;
-      }
+         throw err;
+       }
 
-      if (normalizeText(summary?.runState?.status).toLowerCase() === "running") {
-        await replyText(ctx.chatId, ctx.messageId, "正在运行中，请稍后再试");
-        return;
-      }
+      const isRunning = normalizeText(summary?.runState?.status).toLowerCase() === "running";
 
       // 只取尾部一段上下文：优先用较小窗口；找不到再扩大窗口。
       // 经验值：todolist 往往靠近会话尾部，但也可能因长对话而被推远。
@@ -997,11 +1004,12 @@ function createGateway(params: GatewayStartParams): FeishuGateway {
         if (toolItem) break;
       }
       if (!toolItem) {
-        await replyText(ctx.chatId, ctx.messageId, "当前会话未找到 todolist 记录（仅扫描最近 500 条上下文）");
-        return;
-      }
+         await replyText(ctx.chatId, ctx.messageId, "当前会话未找到 todolist 记录（仅扫描最近 500 条上下文）");
+         return;
+       }
       const text = formatTodolistToolOutput(toolItem.output);
-      await replyText(ctx.chatId, ctx.messageId, text);
+      const reply = buildTodoReplyText({ isRunning, todolistText: text });
+      await replyText(ctx.chatId, ctx.messageId, reply);
       return;
     }
 

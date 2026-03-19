@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { shouldBroadcastToChat } from "../src/run-events.js";
-import { findLatestTodolistToolItem, formatTodolistResult, formatTodolistToolOutput } from "../src/index.js";
+import { buildTodoReplyText, findLatestTodolistToolItem, formatTodolistResult, formatTodolistToolOutput } from "../src/index.js";
 
 test("run_map 命中时不应广播 send", () => {
   assert.equal(shouldBroadcastToChat({ policy: "self_only", hasRunMap: true }), false);
@@ -66,4 +66,25 @@ test("findLatestTodolistToolItem：kind 存在且非 tool 时不应误命中", (
   ];
   const it = findLatestTodolistToolItem(items);
   assert.equal(it?.output?.result?.goal, "ok");
+});
+
+test("buildTodoReplyText：running 时追加提示，非 running 保持不变", () => {
+  const base = ["目标：g", "○ x"].join("\n");
+
+  const nonRunning = buildTodoReplyText({ isRunning: false, todolistText: base });
+  assert.equal(nonRunning, base);
+
+  const running = buildTodoReplyText({ isRunning: true, todolistText: base });
+  assert.equal(
+    running,
+    ["当前会话正在运行中", base].join("\n")
+  );
+});
+
+test("buildTodoReplyText：保留原文本首尾空白，仅全空白时兜底 (empty)", () => {
+  const baseWithSpaces = "  hi  \n";
+  assert.equal(buildTodoReplyText({ isRunning: false, todolistText: baseWithSpaces }), baseWithSpaces);
+
+  const whitespaceOnly = " \n\n  \t";
+  assert.equal(buildTodoReplyText({ isRunning: false, todolistText: whitespaceOnly }), "(empty)");
 });

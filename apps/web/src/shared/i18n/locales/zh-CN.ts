@@ -857,7 +857,7 @@ export default {
       },
       modelForm: {
         idLabel: "Model 内部ID",
-        idHelp: "支持从候选列表选择, 也支持手动输入任意 Model ID。",
+        idHelp: "系统生成的内部标识，用于内部引用。",
         renameGuardLabel: "改名引用检查",
         providerModelIdLabel: "Provider 模型ID",
         nameLabel: "显示名称",

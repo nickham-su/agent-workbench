@@ -859,7 +859,7 @@ export default {
       },
       modelForm: {
         idLabel: "Model Internal ID",
-        idHelp: "Choose from suggestions or manually input any model ID.",
+        idHelp: "System-generated internal identifier for references.",
         renameGuardLabel: "Rename reference check",
         providerModelIdLabel: "Provider Model ID",
         nameLabel: "Display name",

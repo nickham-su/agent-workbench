@@ -218,33 +218,38 @@
             {{ t('settings.agentProviders.modal.ok') }}
           </a-button>
         </div>
-      </template>
-      <a-form layout="vertical">
-        <a-form-item :label="t('settings.agentProviders.modelForm.idLabel')" :required="true">
-          <a-select
-            v-model:value="modelFormId"
-            show-search
-            :filter-option="filterModelIdOption"
-            mode="combobox"
-            :options="modelIdOptions"
-            :loading="modelIdOptionsLoading"
-            :not-found-content="modelIdOptionsLoading ? t('common.loading') : undefined"
-            @search="onModelIdSearch"
-            @change="onModelIdChange"
-          />
-          <div class="pt-1 text-xs text-[color:var(--text-tertiary)]">
-            {{ t('settings.agentProviders.modelForm.idHelp') }}
-          </div>
-          <div v-if="modelIdOptionsWarning" class="pt-1 text-xs text-[color:var(--text-tertiary)]">
-            {{ modelIdOptionsWarning }}
-          </div>
-        </a-form-item>
-        <a-form-item :label="t('settings.agentProviders.modelForm.providerModelIdLabel')" :required="true">
-          <a-input v-model:value="modelFormProviderModelId" />
-        </a-form-item>
-        <a-form-item v-if="modelModalMode === 'edit' && renameReferenceError" :label="t('settings.agentProviders.modelForm.renameGuardLabel')">
-          <a-alert
-            type="warning"
+       </template>
+       <a-form layout="vertical">
+         <a-form-item :label="t('settings.agentProviders.modelForm.idLabel')" :required="true">
+            <a-input
+              v-model:value="modelFormId"
+              disabled
+            />
+            <div class="pt-1 text-xs text-[color:var(--text-tertiary)]">
+              {{ t('settings.agentProviders.modelForm.idHelp') }}
+            </div>
+         </a-form-item>
+         <a-form-item :label="t('settings.agentProviders.modelForm.providerModelIdLabel')" :required="true">
+           <a-select
+              v-model:value="modelFormProviderModelId"
+               show-search
+               :filter-option="filterProviderModelIdOption"
+               mode="combobox"
+               :getPopupContainer="(triggerNode: HTMLElement) => (triggerNode.closest('.ant-modal-content') as HTMLElement | null) ?? (triggerNode.closest('.ant-modal-body') as HTMLElement | null) ?? triggerNode.ownerDocument.body"
+               :dropdownStyle="{ zIndex: MODEL_EDITOR_Z_INDEX + 10 }"
+               :options="providerModelIdOptions"
+               :loading="providerModelIdOptionsLoading"
+               :not-found-content="providerModelIdOptionsLoading ? t('common.loading') : undefined"
+               @search="onProviderModelIdSearch"
+               @change="onProviderModelIdChange"
+             />
+           <div v-if="providerModelIdOptionsWarning" class="pt-1 text-xs text-[color:var(--text-tertiary)]">
+             {{ providerModelIdOptionsWarning }}
+           </div>
+         </a-form-item>
+         <a-form-item v-if="modelModalMode === 'edit' && renameReferenceError" :label="t('settings.agentProviders.modelForm.renameGuardLabel')">
+           <a-alert
+             type="warning"
             :message="renameReferenceError"
             show-icon
           />
@@ -400,11 +405,13 @@ const modelFormContextWindowTokens = ref<number>(128000);
 const modelFormAiSdkJson = ref("{}");
 const modelFormProviderOptionsJson = ref("{}");
 const modelFormDefault = ref(false);
-const modelIdInputSearch = ref("");
-const modelIdOptionsLoading = ref(false);
-const modelIdOptionsWarning = ref("");
-const modelIdOptions = ref<Array<{ value: string; label: string }>>([]);
-const modelIdRemoteItems = ref<AgentProviderModelsListItem[]>([]);
+
+const providerModelIdInputSearch = ref("");
+const providerModelIdOptionsLoading = ref(false);
+const providerModelIdOptionsWarning = ref("");
+const providerModelIdOptions = ref<Array<{ value: string; label: string }>>([]);
+const providerModelIdRemoteItems = ref<AgentProviderModelsListItem[]>([]);
+const providerModelIdOptionsRequestSeq = ref(0);
 const agentsSnapshot = ref<AgentSettingsView["agents"]>([]);
 const renameReferenceError = ref("");
 
@@ -456,7 +463,7 @@ const canSubmitModel = computed(() => {
   return true;
 });
 
-const filterModelIdOption: SelectProps["filterOption"] = (input, option) => {
+const filterProviderModelIdOption: SelectProps["filterOption"] = (input, option) => {
   const candidate = typeof option?.label === "string"
     ? option.label
     : typeof option?.value === "string"
@@ -465,15 +472,15 @@ const filterModelIdOption: SelectProps["filterOption"] = (input, option) => {
   return candidate.toLowerCase().includes((input ?? "").toLowerCase());
 };
 
-function rebuildModelIdOptions() {
+function rebuildProviderModelIdOptions() {
   const seen = new Set<string>();
   const candidates: string[] = [
-    ...modelIdRemoteItems.value.map((item) => item.id),
-    modelIdInputSearch.value.trim(),
-    modelFormId.value.trim()
+    ...providerModelIdRemoteItems.value.map((item) => item.id),
+    providerModelIdInputSearch.value.trim(),
+    modelFormProviderModelId.value.trim()
   ]
     .filter((item) => Boolean(item));
-  modelIdOptions.value = candidates.filter((id) => {
+  providerModelIdOptions.value = candidates.filter((id) => {
     if (seen.has(id)) return false;
     seen.add(id);
     return true;
@@ -766,10 +773,10 @@ function openAddModel(providerId: string) {
   modelFormAiSdkJson.value = "{}";
   modelFormProviderOptionsJson.value = "{}";
   modelFormDefault.value = false;
-  modelIdInputSearch.value = "";
   renameReferenceError.value = "";
-  modelIdRemoteItems.value = [];
-  rebuildModelIdOptions();
+  providerModelIdInputSearch.value = "";
+  providerModelIdRemoteItems.value = [];
+  rebuildProviderModelIdOptions();
   modelModalOpen.value = true;
   void loadProviderModelOptions(provider.id);
 }
@@ -795,10 +802,10 @@ async function openEditModel(providerId: string, modelId: string) {
   modelFormAiSdkJson.value = stringifyPretty(aiSdk);
   modelFormProviderOptionsJson.value = stringifyPretty(providerOptions);
   modelFormDefault.value = isDefaultModel(provider.id, model.id);
-  modelIdInputSearch.value = "";
-  modelIdRemoteItems.value = [];
   renameReferenceError.value = "";
-  rebuildModelIdOptions();
+  providerModelIdInputSearch.value = "";
+  providerModelIdRemoteItems.value = [];
+  rebuildProviderModelIdOptions();
   modelModalOpen.value = true;
   await refreshAgentsSnapshot();
   updateRenameReferenceError();
@@ -806,33 +813,48 @@ async function openEditModel(providerId: string, modelId: string) {
 }
 
 async function loadProviderModelOptions(providerId: string) {
-  modelIdOptionsLoading.value = true;
-  modelIdOptionsWarning.value = "";
+  const seq = ++providerModelIdOptionsRequestSeq.value;
+  const shouldApply = () => {
+    return (
+      seq === providerModelIdOptionsRequestSeq.value &&
+      modelModalOpen.value === true &&
+      providerId === modelFormProviderId.value
+    );
+  };
+
+  providerModelIdOptionsLoading.value = true;
+  providerModelIdOptionsWarning.value = "";
   try {
     const res = await getAgentProviderModels(providerId);
-    modelIdRemoteItems.value = Array.isArray(res.items) ? res.items : [];
-    modelIdOptionsWarning.value = res.warning ?? "";
-    rebuildModelIdOptions();
+
+    if (!shouldApply()) return;
+
+    providerModelIdRemoteItems.value = Array.isArray(res.items) ? res.items : [];
+    providerModelIdOptionsWarning.value = res.warning ?? "";
+    rebuildProviderModelIdOptions();
   } catch (err) {
-    modelIdRemoteItems.value = [];
-    modelIdOptionsWarning.value = t("settings.agentProviders.errors.modelListLoadFailed");
-    rebuildModelIdOptions();
+    if (!shouldApply()) return;
+
+    providerModelIdRemoteItems.value = [];
+    providerModelIdOptionsWarning.value = t("settings.agentProviders.errors.modelListLoadFailed");
+    rebuildProviderModelIdOptions();
   } finally {
-    modelIdOptionsLoading.value = false;
+    if (!shouldApply()) return;
+    providerModelIdOptionsLoading.value = false;
   }
 }
 
-function onModelIdSearch(value: string) {
-  modelIdInputSearch.value = value;
-  if (!modelFormId.value.trim() && value.trim()) {
-    modelFormId.value = value.trim();
+function onProviderModelIdSearch(value: string) {
+  providerModelIdInputSearch.value = value;
+  if (!modelFormProviderModelId.value.trim() && value.trim()) {
+    modelFormProviderModelId.value = value.trim();
   }
-  rebuildModelIdOptions();
+  rebuildProviderModelIdOptions();
   updateRenameReferenceError();
 }
 
-function onModelIdChange(value: string) {
-  modelFormId.value = typeof value === "string" ? value.trim() : "";
+function onProviderModelIdChange(value: string) {
+  modelFormProviderModelId.value = typeof value === "string" ? value.trim() : "";
   updateRenameReferenceError();
 }
 
@@ -896,10 +918,15 @@ function closeModelModal() {
   modelFormAiSdkJson.value = "{}";
   modelFormProviderOptionsJson.value = "{}";
   modelFormDefault.value = false;
-  modelIdInputSearch.value = "";
-  modelIdOptionsWarning.value = "";
-  modelIdRemoteItems.value = [];
-  modelIdOptions.value = [];
+
+  // make any in-flight provider model list request stale
+  providerModelIdOptionsRequestSeq.value += 1;
+  providerModelIdOptionsLoading.value = false;
+
+  providerModelIdInputSearch.value = "";
+  providerModelIdOptionsWarning.value = "";
+  providerModelIdRemoteItems.value = [];
+  providerModelIdOptions.value = [];
   renameReferenceError.value = "";
 }
 
