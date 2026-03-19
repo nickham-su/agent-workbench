@@ -77,7 +77,7 @@ test("buildTodoReplyText：running 时追加提示，非 running 保持不变", 
   const running = buildTodoReplyText({ isRunning: true, todolistText: base });
   assert.equal(
     running,
-    ["当前会话正在运行中，以下为最近一次已记录的 todolist（可能不是最新）", base].join("\n")
+    ["当前会话正在运行中", base].join("\n")
   );
 });
 

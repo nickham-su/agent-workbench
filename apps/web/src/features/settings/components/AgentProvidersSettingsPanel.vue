@@ -221,27 +221,28 @@
        </template>
        <a-form layout="vertical">
          <a-form-item :label="t('settings.agentProviders.modelForm.idLabel')" :required="true">
-           <a-input
-             v-model:value="modelFormId"
-             @input="onModelIdInput"
-             @blur="onModelIdBlur"
-           />
-           <div class="pt-1 text-xs text-[color:var(--text-tertiary)]">
-             {{ t('settings.agentProviders.modelForm.idHelp') }}
-           </div>
+            <a-input
+              v-model:value="modelFormId"
+              disabled
+            />
+            <div class="pt-1 text-xs text-[color:var(--text-tertiary)]">
+              {{ t('settings.agentProviders.modelForm.idHelp') }}
+            </div>
          </a-form-item>
          <a-form-item :label="t('settings.agentProviders.modelForm.providerModelIdLabel')" :required="true">
            <a-select
-             v-model:value="modelFormProviderModelId"
-             show-search
-             :filter-option="filterProviderModelIdOption"
-             mode="combobox"
-             :options="providerModelIdOptions"
-             :loading="providerModelIdOptionsLoading"
-             :not-found-content="providerModelIdOptionsLoading ? t('common.loading') : undefined"
-             @search="onProviderModelIdSearch"
-             @change="onProviderModelIdChange"
-           />
+              v-model:value="modelFormProviderModelId"
+               show-search
+               :filter-option="filterProviderModelIdOption"
+               mode="combobox"
+               :getPopupContainer="(triggerNode: HTMLElement) => (triggerNode.closest('.ant-modal-content') as HTMLElement | null) ?? (triggerNode.closest('.ant-modal-body') as HTMLElement | null) ?? triggerNode.ownerDocument.body"
+               :dropdownStyle="{ zIndex: MODEL_EDITOR_Z_INDEX + 10 }"
+               :options="providerModelIdOptions"
+               :loading="providerModelIdOptionsLoading"
+               :not-found-content="providerModelIdOptionsLoading ? t('common.loading') : undefined"
+               @search="onProviderModelIdSearch"
+               @change="onProviderModelIdChange"
+             />
            <div v-if="providerModelIdOptionsWarning" class="pt-1 text-xs text-[color:var(--text-tertiary)]">
              {{ providerModelIdOptionsWarning }}
            </div>
@@ -404,7 +405,6 @@ const modelFormContextWindowTokens = ref<number>(128000);
 const modelFormAiSdkJson = ref("{}");
 const modelFormProviderOptionsJson = ref("{}");
 const modelFormDefault = ref(false);
-const modelFormAutoId = ref("");
 
 const providerModelIdInputSearch = ref("");
 const providerModelIdOptionsLoading = ref(false);
@@ -485,26 +485,6 @@ function rebuildProviderModelIdOptions() {
     seen.add(id);
     return true;
   }).map((id) => ({ value: id, label: id }));
-}
-
-function maybeSyncModelIdFromProviderModelId(nextProviderModelId: string) {
-  if (modelModalMode.value !== "create") return;
-  const value = nextProviderModelId.trim();
-  if (!value) return;
-
-  // optional enhancement: if modelFormId is still the auto-generated temp id, overwrite it with selected providerModelId.
-  if (modelFormAutoId.value && modelFormId.value.trim() === modelFormAutoId.value.trim()) {
-    modelFormId.value = value;
-  }
-}
-
-function onModelIdInput() {
-  updateRenameReferenceError();
-}
-
-function onModelIdBlur() {
-  modelFormId.value = modelFormId.value.trim();
-  updateRenameReferenceError();
 }
 
 function getProvider(providerId: string) {
@@ -787,7 +767,6 @@ function openAddModel(providerId: string) {
   modelFormProviderId.value = provider.id;
   modelFormOriginalId.value = "";
   modelFormId.value = newLocalId(`${provider.id}-model`);
-  modelFormAutoId.value = modelFormId.value;
   modelFormProviderModelId.value = "";
   modelFormName.value = "";
   modelFormContextWindowTokens.value = 128000;
@@ -812,7 +791,6 @@ async function openEditModel(providerId: string, modelId: string) {
   modelFormProviderId.value = provider.id;
   modelFormOriginalId.value = model.id;
   modelFormId.value = model.id;
-  modelFormAutoId.value = "";
   modelFormProviderModelId.value = model.providerModelId;
   modelFormName.value = model.name;
   modelFormContextWindowTokens.value = Math.max(1, Math.floor(Number(model.contextWindowTokens || 1)));
@@ -877,7 +855,6 @@ function onProviderModelIdSearch(value: string) {
 
 function onProviderModelIdChange(value: string) {
   modelFormProviderModelId.value = typeof value === "string" ? value.trim() : "";
-  maybeSyncModelIdFromProviderModelId(modelFormProviderModelId.value);
   updateRenameReferenceError();
 }
 
@@ -941,7 +918,6 @@ function closeModelModal() {
   modelFormAiSdkJson.value = "{}";
   modelFormProviderOptionsJson.value = "{}";
   modelFormDefault.value = false;
-  modelFormAutoId.value = "";
 
   // make any in-flight provider model list request stale
   providerModelIdOptionsRequestSeq.value += 1;

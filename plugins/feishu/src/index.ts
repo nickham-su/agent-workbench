@@ -166,7 +166,7 @@ export function buildTodoReplyText(params: { isRunning: boolean; todolistText: s
   const base = raw.trim() ? raw : "(empty)";
   if (!params?.isRunning) return base;
   // 提示行拼接保持简单可靠：前置一行提示 + 原文本。
-  return ["当前会话正在运行中，以下为最近一次已记录的 todolist（可能不是最新）", base].join("\n");
+  return ["当前会话正在运行中", base].join("\n");
 }
 
 function stripLeadingMentionsForCommand(text: string) {
