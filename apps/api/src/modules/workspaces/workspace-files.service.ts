@@ -400,7 +400,18 @@ async function listUnderRoot(rootAbs: string, dir: string): Promise<FileListResp
     throw new HttpError(400, "Invalid dir");
   }
 
-  await ensureDirSafe(absDir);
+  try {
+    await ensureDirSafe(absDir);
+  } catch (err: any) {
+    if (err && (err.code === "ENOENT" || err.code === "ENOTDIR")) {
+      // 仅当 workspace 根目录缺失时，才返回 410；子目录缺失应为 404。
+      if (absDir === rootAbs) {
+        throw new HttpError(410, "Workspace directory missing", "WORKSPACE_DIR_MISSING");
+      }
+      throw new HttpError(404, "Path not found");
+    }
+    throw err;
+  }
   await ensureRealPathUnderRoot(rootAbs, absDir);
 
   const fs = await import("node:fs/promises");

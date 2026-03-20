@@ -8,19 +8,21 @@ export async function cloneFromMirror(params: {
   worktreePath: string;
   branch: string;
   dataDir: string;
+  env?: NodeJS.ProcessEnv;
 }) {
   await ensureDir(path.dirname(params.worktreePath));
   // 注意：mirror 是一个 bare repo，但它存的是 refs/remotes/origin/*（而不是 refs/heads/*）。
   // 直接 `git clone <mirror>` 会因为 mirror 缺少 refs/heads 而克隆不出任何远端分支。
   // 这里改为 init + fetch，把 mirror 里的 refs 映射成标准的 origin/* 远端分支，然后再切分支。
-  const init = await runGit(["init", params.worktreePath], { cwd: params.dataDir });
+  const init = await runGit(["init", params.worktreePath], { cwd: params.dataDir, env: params.env });
   if (!init.ok) {
     await rmrf(params.worktreePath);
     throw new Error(`git init failed: ${(init.stderr || init.stdout).trim().replace(/\\s+/g, " ")}`);
   }
 
   const addRemote = await runGit(["-C", params.worktreePath, "remote", "add", "origin", params.mirrorPath], {
-    cwd: params.dataDir
+    cwd: params.dataDir,
+    env: params.env
   });
   if (!addRemote.ok) {
     await rmrf(params.worktreePath);
@@ -41,7 +43,7 @@ export async function cloneFromMirror(params: {
       "+refs/heads/*:refs/remotes/origin/*",
       "+refs/remotes/origin/*:refs/remotes/origin/*"
     ],
-    { cwd: params.dataDir }
+    { cwd: params.dataDir, env: params.env }
   );
   if (!fetch.ok) {
     await rmrf(params.worktreePath);
@@ -50,7 +52,8 @@ export async function cloneFromMirror(params: {
 
   const remoteRef = `origin/${params.branch}`;
   const checkout = await runGit(["-C", params.worktreePath, "checkout", "-b", params.branch, "--track", remoteRef], {
-    cwd: params.dataDir
+    cwd: params.dataDir,
+    env: params.env
   });
   if (!checkout.ok) {
     await rmrf(params.worktreePath);
@@ -59,16 +62,18 @@ export async function cloneFromMirror(params: {
 
   // 切回真正的远端地址，并恢复标准 fetch 规则（从远端 refs/heads/* 拉取到本地 origin/*）。
   const setUrl = await runGit(["-C", params.worktreePath, "remote", "set-url", "origin", params.repoUrl], {
-    cwd: params.dataDir
+    cwd: params.dataDir,
+    env: params.env
   });
   if (!setUrl.ok) {
     await rmrf(params.worktreePath);
     throw new Error(`git remote set-url failed: ${(setUrl.stderr || setUrl.stdout).trim().replace(/\\s+/g, " ")}`);
   }
 
-  await runGit(["-C", params.worktreePath, "config", "--unset-all", "remote.origin.fetch"], { cwd: params.dataDir });
+  await runGit(["-C", params.worktreePath, "config", "--unset-all", "remote.origin.fetch"], { cwd: params.dataDir, env: params.env });
   const addFetch = await runGit(["-C", params.worktreePath, "config", "--add", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], {
-    cwd: params.dataDir
+    cwd: params.dataDir,
+    env: params.env
   });
   if (!addFetch.ok) {
     await rmrf(params.worktreePath);
