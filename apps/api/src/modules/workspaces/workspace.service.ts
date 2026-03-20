@@ -28,6 +28,7 @@ import { cloneFromMirror } from "../../infra/git/clone.js";
 import { ensureDir, pathExists, rmrf } from "../../infra/fs/fs.js";
 import { agentArchiveWorkspaceDir, workspaceRepoDirPath, workspaceRoot } from "../../infra/fs/paths.js";
 import { ensureRepoMirror } from "../../infra/git/mirror.js";
+import { buildGitEnv } from "../../infra/git/gitEnv.js";
 import {
   deleteWorkspaceRecord,
   deleteWorkspaceReposByWorkspace,
@@ -213,24 +214,51 @@ export async function createWorkspace(
     }
   })();
 
-  for (const r of repos) {
-    const row = getWorkspaceRepoByRepoId(ctx.db, wsId, r.id)!;
-    await withWorkspaceRepoLock({ workspaceId: wsId, dirName: row.dirName }, async () => {
-      await ensureRepoMirror({
-        repoId: r.id,
-        url: r.url,
-        dataDir: ctx.dataDir,
-        mirrorPath: r.mirrorPath
+  try {
+    for (const r of repos) {
+      const row = getWorkspaceRepoByRepoId(ctx.db, wsId, r.id)!;
+      await withWorkspaceRepoLock({ workspaceId: wsId, dirName: row.dirName }, async () => {
+        const gitEnv = await buildGitEnv({ ctx, repoUrl: r.url, credentialId: r.credentialId });
+        try {
+          await ensureRepoMirror({
+            repoId: r.id,
+            url: r.url,
+            dataDir: ctx.dataDir,
+            mirrorPath: r.mirrorPath,
+            env: gitEnv.env
+          });
+          await ensureDir(row.path);
+          await cloneFromMirror({
+            mirrorPath: r.mirrorPath,
+            repoUrl: r.url,
+            worktreePath: row.path,
+            branch: r.defaultBranch || "main",
+            dataDir: ctx.dataDir,
+            env: gitEnv.env
+          });
+        } finally {
+          await gitEnv.cleanup();
+        }
       });
-      await ensureDir(row.path);
-      await cloneFromMirror({
-        mirrorPath: r.mirrorPath,
-        repoUrl: r.url,
-        worktreePath: row.path,
-        branch: r.defaultBranch || "main",
-        dataDir: ctx.dataDir
-      });
-    });
+    }
+  } catch (err) {
+    // git 初始化失败时回滚，避免留下“前端报错但 workspace 已创建”的脏状态
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ workspaceId: wsId, err: message }, "workspace create failed; rollback");
+    try {
+      ctx.db.transaction(() => {
+        deleteWorkspaceReposByWorkspace(ctx.db, wsId);
+        deleteWorkspaceRecord(ctx.db, wsId);
+      })();
+    } catch (rollbackErr) {
+      logger.error({ workspaceId: wsId, err: rollbackErr }, "workspace create rollback db failed");
+    }
+    try {
+      await rmrf(wsPath);
+    } catch (rollbackErr) {
+      logger.error({ workspaceId: wsId, err: rollbackErr }, "workspace create rollback dir failed");
+    }
+    throw new HttpError(409, `Failed to initialize workspace repositories: ${message}`);
   }
 
   logger.info({ workspaceId: wsId, title, repoCount: repos.length }, "workspace created");
@@ -315,62 +343,69 @@ export async function attachRepoToWorkspace(
     const dirName = uniqueDirName(preferred, (d) => used.has(d));
 
     let branch = String(params.branch || "").trim();
-    await ensureRepoMirror({
-      repoId: repo.id,
-      url: repo.url,
-      dataDir: ctx.dataDir,
-      mirrorPath: repo.mirrorPath
-    });
-
-    if (!branch) {
-      try {
-        branch = (await getOriginDefaultBranch({ mirrorPath: repo.mirrorPath, cwd: ctx.dataDir })) || "";
-      } catch {
-        branch = "";
-      }
-    }
-    if (!branch) {
-      const heads = await listHeadsBranches({ mirrorPath: repo.mirrorPath, cwd: ctx.dataDir });
-      if (heads.length === 1) branch = heads[0]?.name || "";
-      if (!branch) branch = repo.defaultBranch || "";
-    }
-
-    const ts = nowMs();
-    const row = {
-      workspaceId: ws.id,
-      repoId: repo.id,
-      dirName,
-      path: workspaceRepoDirPath(ctx.dataDir, ws.dirName, dirName),
-      createdAt: ts,
-      updatedAt: ts
-    };
-
-    await withWorkspaceRepoLock({ workspaceId: ws.id, dirName: row.dirName }, async () => {
-      await ensureDir(row.path);
-      await cloneFromMirror({
+    const gitEnv = await buildGitEnv({ ctx, repoUrl: repo.url, credentialId: repo.credentialId });
+    try {
+      await ensureRepoMirror({
+        repoId: repo.id,
+        url: repo.url,
+        dataDir: ctx.dataDir,
         mirrorPath: repo.mirrorPath,
-        repoUrl: repo.url,
-        worktreePath: row.path,
-        branch,
-        dataDir: ctx.dataDir
+        env: gitEnv.env
       });
-    });
 
-    const nextTerminalCredentialId = resolveTerminalCredentialId({
-      repoCredentialIds: [...existing.map((item) => getRepo(ctx.db, item.repoId)?.credentialId ?? null), repo.credentialId],
-      useTerminalCredential: ws.terminalCredentialId !== null
-    });
-
-    ctx.db.transaction(() => {
-      insertWorkspaceRepo(ctx.db, row);
-      if (ws.terminalCredentialId !== null) {
-        updateWorkspaceTerminalCredentialId(ctx.db, ws.id, nextTerminalCredentialId, nowMs());
+      if (!branch) {
+        try {
+          branch = (await getOriginDefaultBranch({ mirrorPath: repo.mirrorPath, cwd: ctx.dataDir })) || "";
+        } catch {
+          branch = "";
+        }
       }
-      touchWorkspaceUpdatedAt(ctx.db, ws.id, nowMs());
-    })();
+      if (!branch) {
+        const heads = await listHeadsBranches({ mirrorPath: repo.mirrorPath, cwd: ctx.dataDir });
+        if (heads.length === 1) branch = heads[0]?.name || "";
+        if (!branch) branch = repo.defaultBranch || "";
+      }
 
-    logger.info({ workspaceId: ws.id, repoId: repo.id, dirName }, "repo attached to workspace");
-    return getWorkspaceDetailById(ctx, ws.id);
+      const ts = nowMs();
+      const row = {
+        workspaceId: ws.id,
+        repoId: repo.id,
+        dirName,
+        path: workspaceRepoDirPath(ctx.dataDir, ws.dirName, dirName),
+        createdAt: ts,
+        updatedAt: ts
+      };
+
+      await withWorkspaceRepoLock({ workspaceId: ws.id, dirName: row.dirName }, async () => {
+        await ensureDir(row.path);
+        await cloneFromMirror({
+          mirrorPath: repo.mirrorPath,
+          repoUrl: repo.url,
+          worktreePath: row.path,
+          branch,
+          dataDir: ctx.dataDir,
+          env: gitEnv.env
+        });
+      });
+
+      const nextTerminalCredentialId = resolveTerminalCredentialId({
+        repoCredentialIds: [...existing.map((item) => getRepo(ctx.db, item.repoId)?.credentialId ?? null), repo.credentialId],
+        useTerminalCredential: ws.terminalCredentialId !== null
+      });
+
+      ctx.db.transaction(() => {
+        insertWorkspaceRepo(ctx.db, row);
+        if (ws.terminalCredentialId !== null) {
+          updateWorkspaceTerminalCredentialId(ctx.db, ws.id, nextTerminalCredentialId, nowMs());
+        }
+        touchWorkspaceUpdatedAt(ctx.db, ws.id, nowMs());
+      })();
+
+      logger.info({ workspaceId: ws.id, repoId: repo.id, dirName }, "repo attached to workspace");
+      return getWorkspaceDetailById(ctx, ws.id);
+    } finally {
+      await gitEnv.cleanup();
+    }
   });
 }
 
@@ -417,31 +452,57 @@ export async function detachRepoFromWorkspace(
 export async function deleteWorkspace(ctx: AppContext, logger: FastifyBaseLogger, workspaceId: string) {
   const ws = await getWorkspaceById(ctx, workspaceId);
 
-  // 杀掉该 workspace 下所有 tmux 会话并删除 terminal 记录
-  const terms = listTerminalsByWorkspace(ctx.db, ws.id);
-  for (const term of terms) {
-    try {
-      if (await tmuxHasSession({ sessionName: term.sessionName, cwd: ws.path })) {
-        await tmuxKillSession({ sessionName: term.sessionName, cwd: ws.path });
-      }
-    } finally {
-      deleteTerminalRecord(ctx.db, term.id);
-    }
-  }
-
   const expectedPath = workspaceRoot(ctx.dataDir, ws.dirName);
   // 删除前做强校验：即使 DB/path 字段出现脏数据，也不允许越界递归删除。
+  // 同时前置校验，避免 ws.path 异常时先执行 tmux 等副作用操作。
   if (path.resolve(ws.path) !== path.resolve(expectedPath)) {
     logger.error({ workspaceId: ws.id, wsPath: ws.path, expectedPath }, "workspace path mismatch; abort delete");
     throw new HttpError(409, "Workspace path is invalid; aborting delete.", "WORKSPACE_PATH_INVALID");
   }
 
+  // 杀掉该 workspace 下所有 tmux 会话并删除 terminal 记录
+  const terms = listTerminalsByWorkspace(ctx.db, ws.id);
+  let killFailed = false;
+  for (const term of terms) {
+    let killedOrMissing = false;
+    try {
+      const exists = await tmuxHasSession({ sessionName: term.sessionName, cwd: ws.path });
+      if (!exists) {
+        killedOrMissing = true;
+      } else {
+        await tmuxKillSession({ sessionName: term.sessionName, cwd: ws.path });
+        killedOrMissing = true;
+      }
+    } catch (err) {
+      // kill 失败不应中断整体流程，但也不能无条件删除 terminal 记录，避免产生新不一致
+      killFailed = true;
+      logger.warn({ workspaceId: ws.id, terminalId: term.id, sessionName: term.sessionName, err }, "tmux kill-session failed");
+    }
+
+    if (killedOrMissing) {
+      deleteTerminalRecord(ctx.db, term.id);
+    }
+  }
+
+  if (killFailed) {
+    // 保留 workspace 记录与未清理的 terminal，便于用户重试或手工处理；避免“删一半”。
+    throw new HttpError(409, "Failed to kill one or more terminal sessions; aborting delete.", "TERMINAL_KILL_FAILED");
+  }
+
+  // 先删 DB（事务），避免外键 restrict 导致“删一半”；目录与归档清理改为 best-effort。
+  ctx.db.transaction(() => {
+    // agent_session.workspace_id 对 workspaces 是 on delete restrict；必须先清理 workspace 下的 session。
+    // agent_client_request 没有外键，需手动清理。
+    ctx.db.prepare(`delete from agent_client_request where workspace_id = ?`).run(ws.id);
+    ctx.db.prepare(`delete from agent_session where workspace_id = ?`).run(ws.id);
+    deleteWorkspaceReposByWorkspace(ctx.db, ws.id);
+    deleteWorkspaceRecord(ctx.db, ws.id);
+  })();
+
   try {
     await rmrf(expectedPath);
   } catch (err) {
-    // 删除失败时保留 DB 记录，便于后续重试/排障；避免变成“数据库已删但目录残留”的不可回收状态
     logger.warn({ workspaceId: ws.id, path: expectedPath, err }, "remove workspace path failed");
-    throw new HttpError(409, "Failed to delete workspace directory");
   }
 
   const archivePath = agentArchiveWorkspaceDir(ctx.dataDir, ws.id);
@@ -455,13 +516,10 @@ export async function deleteWorkspace(ctx: AppContext, logger: FastifyBaseLogger
     try {
       await rmrf(archivePath);
     } catch (err) {
-      // 归档属于附属数据,清理失败不阻塞 workspace 删除主流程。
       logger.warn({ workspaceId: ws.id, archivePath, err }, "remove workspace archive path failed");
     }
   }
 
-  deleteWorkspaceReposByWorkspace(ctx.db, ws.id);
-  deleteWorkspaceRecord(ctx.db, ws.id);
   logger.info({ workspaceId: ws.id }, "workspace deleted");
 }
 

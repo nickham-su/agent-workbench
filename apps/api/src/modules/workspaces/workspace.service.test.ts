@@ -5,12 +5,17 @@ import path from "node:path";
 import { afterEach, test } from "node:test";
 import type { FastifyBaseLogger } from "fastify";
 import { openDb } from "../../infra/db/db.js";
-import { workspaceRoot } from "../../infra/fs/paths.js";
+import { repoMirrorPath, workspaceRoot } from "../../infra/fs/paths.js";
+import { pathExists } from "../../infra/fs/fs.js";
 import type { AppContext } from "../../app/context.js";
 import { HttpError } from "../../app/errors.js";
 import { insertRepo } from "../repos/repo.store.js";
-import { insertWorkspace, insertWorkspaceRepo } from "./workspace.store.js";
+import { createAgentSession } from "../agent/agent.store.js";
+import { listWorkspaceFiles } from "./workspace-files.service.js";
+import { getWorkspace, insertWorkspace, insertWorkspaceRepo, listWorkspaces } from "./workspace.store.js";
 import {
+  createWorkspace,
+  deleteWorkspace,
   detectWorkspaceExternalSkillRoots,
   detectWorkspaceAgentEnablement,
   getWorkspaceAgentEnablementSettings,
@@ -85,6 +90,43 @@ async function createFixture() {
   } satisfies AppContext;
 
   return { ctx, workspaceId, workspacePath, workspaceDirName };
+}
+
+async function createEmptyFixture() {
+  registerGlobalSystemPromptTextProvider(() => "test global system prompt");
+
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "awb-ws-service-test-"));
+  tempDirs.push(dataDir);
+  const db = await openDb(dataDir);
+
+  const ctx = {
+    db,
+    repoRoot: process.cwd(),
+    dataDir,
+    fileMaxBytes: 1024 * 1024,
+    version: "test",
+    serveWeb: false,
+    webDistDir: null,
+    credentialMasterKey: Buffer.alloc(32, 7),
+    credentialMasterKeySource: "generated",
+    credentialMasterKeyId: "testkey",
+    credentialMasterKeyCreatedAt: Date.now(),
+    authToken: null,
+    authCookieSecure: false,
+    agentWorkerEnabled: false,
+    agentWorkerHost: "127.0.0.1",
+    agentWorkerPort: 0,
+    agentWorkerSocketPath: path.join(dataDir, "agent-worker.sock"),
+    agentWorkerConcurrency: 1,
+    agentInternalToken: "token",
+    agentApiOrigin: "http://127.0.0.1:0",
+    agentStartupRecoveryMode: "recover",
+    agentPluginHostEnabled: false,
+    agentPluginHostSocketPath: path.join(dataDir, "agent-plugin-host.sock"),
+    agentPluginServicesEnabled: false
+  } satisfies AppContext;
+
+  return { ctx, dataDir };
 }
 
 async function addWorkspaceRepo(params: {
@@ -302,4 +344,103 @@ test("workspace agent enablement: subset 空数组表示全不选", async () => 
 
   const detected = await detectWorkspaceAgentEnablement(fixture.ctx, fixture.workspaceId);
   assert.deepEqual(detected.items.map((it) => it.enabled), [false]);
+});
+
+test("workspace create: git 初始化失败应回滚 DB 与目录", async () => {
+  const logger = createLogger();
+  const fixture = await createEmptyFixture();
+  const now = Date.now();
+  // 使用本地不存在的 file:// 作为 origin，确保失败稳定且不依赖网络/DNS。
+  const missingOriginAbs = path.join(fixture.ctx.dataDir, "no-such-origin.git");
+  insertRepo(fixture.ctx.db, {
+    id: "repo_bad",
+    url: `file://${missingOriginAbs}`,
+    credentialId: null,
+    defaultBranch: "main",
+    mirrorPath: repoMirrorPath(fixture.ctx.dataDir, "repo_bad"),
+    syncStatus: "idle",
+    syncError: null,
+    lastSyncAt: now,
+    createdAt: now,
+    updatedAt: now
+  });
+
+  await assert.rejects(
+    () => createWorkspace(fixture.ctx, logger, { repoIds: ["repo_bad"], title: "ws" }),
+    (err) => err instanceof HttpError && err.statusCode === 409
+  );
+
+  assert.equal(listWorkspaces(fixture.ctx.db).length, 0);
+  assert.equal(await pathExists(workspaceRoot(fixture.ctx.dataDir, "ws")), false);
+});
+
+test("workspace delete: 应清理 agent_session 外键引用，避免删一半", async () => {
+  const logger = createLogger();
+  const fixture = await createEmptyFixture();
+  const wsId = "ws_delete_test";
+  const wsDirName = "ws_delete_test";
+  const wsPath = workspaceRoot(fixture.ctx.dataDir, wsDirName);
+  await fs.mkdir(wsPath, { recursive: true });
+  const now = Date.now();
+  insertWorkspace(fixture.ctx.db, {
+    id: wsId,
+    dirName: wsDirName,
+    title: "ws",
+    path: wsPath,
+    terminalCredentialId: null,
+    createdAt: now,
+    updatedAt: now
+  });
+
+  createAgentSession(fixture.ctx.db, { id: "sess_1", workspaceId: wsId, title: "t", kind: "primary", createdAt: now });
+  await deleteWorkspace(fixture.ctx, logger, wsId);
+  assert.equal(getWorkspace(fixture.ctx.db, wsId), null);
+  const sessions = fixture.ctx.db.prepare(`select count(*) as c from agent_session where workspace_id = ?`).get(wsId) as { c: number };
+  assert.equal(sessions.c, 0);
+});
+
+test("files/list: workspace 目录缺失应返回 410", async () => {
+  const fixture = await createEmptyFixture();
+  const wsId = "ws_missing_dir";
+  const wsDirName = "ws_missing_dir";
+  const wsPath = workspaceRoot(fixture.ctx.dataDir, wsDirName);
+  const now = Date.now();
+  // 注意：不创建目录，模拟目录已被删除但 DB 仍存在
+  insertWorkspace(fixture.ctx.db, {
+    id: wsId,
+    dirName: wsDirName,
+    title: "ws",
+    path: wsPath,
+    terminalCredentialId: null,
+    createdAt: now,
+    updatedAt: now
+  });
+
+  await assert.rejects(
+    () => listWorkspaceFiles(fixture.ctx, wsId, { dir: "" }),
+    (err) => err instanceof HttpError && err.statusCode === 410 && err.code === "WORKSPACE_DIR_MISSING"
+  );
+});
+
+test("files/list: 子目录不存在应返回 404", async () => {
+  const fixture = await createEmptyFixture();
+  const wsId = "ws_subdir_missing";
+  const wsDirName = "ws_subdir_missing";
+  const wsPath = workspaceRoot(fixture.ctx.dataDir, wsDirName);
+  await fs.mkdir(wsPath, { recursive: true });
+  const now = Date.now();
+  insertWorkspace(fixture.ctx.db, {
+    id: wsId,
+    dirName: wsDirName,
+    title: "ws",
+    path: wsPath,
+    terminalCredentialId: null,
+    createdAt: now,
+    updatedAt: now
+  });
+
+  await assert.rejects(
+    () => listWorkspaceFiles(fixture.ctx, wsId, { dir: "missing" }),
+    (err) => err instanceof HttpError && err.statusCode === 404
+  );
 });
