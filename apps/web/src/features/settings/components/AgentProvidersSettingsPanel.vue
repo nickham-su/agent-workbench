@@ -854,7 +854,13 @@ function onProviderModelIdSearch(value: string) {
 }
 
 function onProviderModelIdChange(value: string) {
-  modelFormProviderModelId.value = typeof value === "string" ? value.trim() : "";
+  const nextProviderModelId = typeof value === "string" ? value.trim() : "";
+  modelFormProviderModelId.value = nextProviderModelId;
+
+  if (!modelFormName.value.trim() && nextProviderModelId) {
+    modelFormName.value = nextProviderModelId;
+  }
+
   updateRenameReferenceError();
 }
 
