@@ -368,6 +368,7 @@ export default {
       externalSkillRootsSourceRepo: "Repo",
       externalSkillRootsMeta: "{count} 个skills",
       slashCommandHintNoMatch: "未找到匹配的指令: /{query}",
+      promptCommandsLoadFailedHint: "提示词指令加载失败，将仅显示内置指令",
       inputCandidateNoMatch: "未找到匹配项: {query}",
       slashCommands: {
         compact: {
@@ -916,6 +917,10 @@ export default {
       form: {
         idLabel: "条目 ID(自动生成)",
         titleLabel: "标题",
+        commandLabel: "指令(可选)",
+        commandPlaceholder: "例如 summarize（将以 /summarize 触发）",
+        commandHelp: "仅支持字母/数字/下划线/中划线；不需要填写 /；最多 64 字符；留空则不作为指令。",
+        commandDisabledHint: "系统提示词条目不允许配置指令。",
         promptLabel: "提示词",
         promptPlaceholder: "输入该条目的提示词内容",
         promptHelp: "最多 {maxKb}KB，当前 {bytes} bytes",
@@ -932,7 +937,12 @@ export default {
         duplicateId: "条目 ID 已存在",
         titleTooLong: "标题过长，最多 {max} 个字符",
         promptTooLong: "提示词过长，最多 {maxKb}KB",
-        reservedDelete: "系统提示词条目不允许删除"
+        reservedDelete: "系统提示词条目不允许删除",
+        commandInvalid: "指令格式不合法",
+        commandDuplicate: "指令已存在",
+        commandConflictsBuiltin: "指令与内置命令冲突",
+        commandReserved: "系统提示词条目不允许配置指令",
+        commandTooLong: "指令过长，最多 {max} 个字符"
       },
       saved: "已保存"
     },

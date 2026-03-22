@@ -222,7 +222,8 @@ export type UpdateAgentRuntimeSettingsRequest = Static<typeof UpdateAgentRuntime
 export const AgentGlobalPromptItemSchema = Type.Object({
   id: Type.String({ minLength: 1 }),
   title: Type.String({ minLength: 1, maxLength: 20 }),
-  prompt: Type.String()
+  prompt: Type.String(),
+  command: Type.Optional(Type.String())
 });
 export type AgentGlobalPromptItem = Static<typeof AgentGlobalPromptItemSchema>;
 

@@ -370,6 +370,7 @@ export default {
       externalSkillRootsSourceRepo: "Repo",
       externalSkillRootsMeta: "{count} skills",
       slashCommandHintNoMatch: "No matching command: /{query}",
+      promptCommandsLoadFailedHint: "Failed to load prompt commands. Only builtin commands are available.",
       inputCandidateNoMatch: "No matching suggestion: {query}",
       slashCommands: {
         compact: {
@@ -918,6 +919,10 @@ export default {
       form: {
         idLabel: "Entry ID (auto)",
         titleLabel: "Title",
+        commandLabel: "Command (optional)",
+        commandPlaceholder: "e.g. summarize (triggered as /summarize)",
+        commandHelp: "Letters/numbers/underscore/hyphen only; don't include '/'; max 64 chars; leave empty to disable.",
+        commandDisabledHint: "Commands are not allowed for the system prompt entry.",
         promptLabel: "Prompt",
         promptPlaceholder: "Enter prompt text for this entry",
         promptHelp: "Up to {maxKb}KB, current {bytes} bytes",
@@ -934,7 +939,12 @@ export default {
         duplicateId: "Entry ID already exists",
         titleTooLong: "Title is too long. Maximum {max} characters",
         promptTooLong: "Prompt is too long. Maximum {maxKb}KB",
-        reservedDelete: "The system prompt entry cannot be deleted"
+        reservedDelete: "The system prompt entry cannot be deleted",
+        commandInvalid: "Invalid command format",
+        commandDuplicate: "Command already exists",
+        commandConflictsBuiltin: "Command conflicts with builtin commands",
+        commandReserved: "Commands are not allowed for the system prompt entry",
+        commandTooLong: "Command is too long. Maximum {max} characters"
       },
       saved: "Saved"
     },

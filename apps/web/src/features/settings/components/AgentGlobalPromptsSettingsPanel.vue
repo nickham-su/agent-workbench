@@ -29,6 +29,9 @@
             <div class="font-semibold text-xs truncate" :title="item.title">{{ item.title }}</div>
             <div class="text-xs text-[color:var(--text-tertiary)] truncate" :title="item.id">{{ item.id }}</div>
           </div>
+          <div v-if="item.command" class="text-[11px] text-[color:var(--text-tertiary)] font-mono" :title="'/' + item.command">
+            /{{ item.command }}
+          </div>
           <div
             class="text-[11px] text-[color:var(--text-tertiary)] whitespace-pre-wrap break-words overflow-hidden"
             :style="{
@@ -83,6 +86,22 @@
         <a-form-item :label="t('settings.agentGlobalPrompts.form.titleLabel')" :required="true">
           <a-input v-model:value="formTitle" :maxlength="MAX_TITLE_LENGTH" :disabled="isReservedItem(formId)" />
         </a-form-item>
+
+        <a-form-item :label="t('settings.agentGlobalPrompts.form.commandLabel')">
+          <a-input
+            v-model:value="formCommand"
+            :disabled="isReservedItem(formId)"
+            :maxlength="MAX_COMMAND_LENGTH"
+            :placeholder="t('settings.agentGlobalPrompts.form.commandPlaceholder')"
+          />
+          <div v-if="isReservedItem(formId)" class="pt-1 text-xs text-[color:var(--text-tertiary)]">
+            {{ t("settings.agentGlobalPrompts.form.commandDisabledHint") }}
+          </div>
+          <div v-else class="pt-1 text-xs text-[color:var(--text-tertiary)]">
+            {{ t("settings.agentGlobalPrompts.form.commandHelp") }}
+          </div>
+        </a-form-item>
+
         <a-form-item :label="t('settings.agentGlobalPrompts.form.promptLabel')" :required="true">
           <a-textarea
             v-model:value="formPrompt"
@@ -111,8 +130,10 @@ import { getAgentGlobalPromptSettings, updateAgentGlobalPromptSettings } from "@
 
 const MAX_TITLE_LENGTH = 20;
 const MAX_PROMPT_BYTES = 32 * 1024;
+const MAX_COMMAND_LENGTH = 64;
 const RESERVED_GLOBAL_SYSTEM_PROMPT_ID = "global_system_prompt";
 const RESERVED_GLOBAL_SYSTEM_PROMPT_TITLE = "Global System Prompt";
+const GLOBAL_PROMPT_COMMAND_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
 const { t } = useI18n();
 
@@ -125,6 +146,7 @@ const modalOpen = ref(false);
 const modalMode = ref<"create" | "edit">("create");
 const formId = ref("");
 const formTitle = ref("");
+const formCommand = ref("");
 const formPrompt = ref("");
 
 const promptBytes = computed(() => new TextEncoder().encode(formPrompt.value).length);
@@ -144,9 +166,10 @@ function normalizeItems(raw: unknown): AgentGlobalPromptItem[] {
     const id = typeof item.id === "string" ? item.id.trim() : "";
     const title = typeof item.title === "string" ? item.title.trim() : "";
     const prompt = typeof item.prompt === "string" ? item.prompt : "";
+    const command = typeof item.command === "string" ? item.command.trim() : "";
     if (!id || !title || seen.has(id)) continue;
     seen.add(id);
-    out.push({ id, title, prompt });
+    out.push({ id, title, prompt, ...(command ? { command } : {}) });
   }
   return out;
 }
@@ -167,7 +190,8 @@ function toRequestBody() {
     items: items.value.map((item) => ({
       id: item.id,
       title: item.title.trim(),
-      prompt: item.prompt
+      prompt: item.prompt,
+      ...(item.command ? { command: item.command } : {})
     }))
   };
 }
@@ -176,6 +200,7 @@ function openCreate() {
   modalMode.value = "create";
   formId.value = newLocalId("gprompt");
   formTitle.value = "";
+  formCommand.value = "";
   formPrompt.value = "";
   modalOpen.value = true;
 }
@@ -186,6 +211,7 @@ function openEdit(id: string) {
   modalMode.value = "edit";
   formId.value = target.id;
   formTitle.value = isReservedItem(target.id) ? RESERVED_GLOBAL_SYSTEM_PROMPT_TITLE : target.title;
+  formCommand.value = target.command || "";
   formPrompt.value = target.prompt;
   modalOpen.value = true;
 }
@@ -195,6 +221,7 @@ function closeModal() {
   modalMode.value = "create";
   formId.value = "";
   formTitle.value = "";
+  formCommand.value = "";
   formPrompt.value = "";
 }
 
@@ -226,10 +253,44 @@ function submit() {
   const id = formId.value.trim();
   const title = formTitle.value.trim();
   const prompt = formPrompt.value;
+  const commandRaw = formCommand.value.trim();
   if (!id || !title || !prompt.trim()) {
     message.error(t("settings.agentGlobalPrompts.errors.invalidForm"));
     return;
   }
+
+  let command: string | undefined;
+  if (isReservedItem(id)) {
+    if (commandRaw) {
+      message.error(t("settings.agentGlobalPrompts.errors.commandReserved"));
+      return;
+    }
+  } else if (commandRaw) {
+    if (commandRaw.length > MAX_COMMAND_LENGTH) {
+      message.error(t("settings.agentGlobalPrompts.errors.commandTooLong", { max: MAX_COMMAND_LENGTH }));
+      return;
+    }
+    if (!GLOBAL_PROMPT_COMMAND_PATTERN.test(commandRaw)) {
+      message.error(t("settings.agentGlobalPrompts.errors.commandInvalid"));
+      return;
+    }
+    const normalized = commandRaw.toLowerCase();
+    if (normalized === "clear" || normalized === "compact") {
+      message.error(t("settings.agentGlobalPrompts.errors.commandConflictsBuiltin"));
+      return;
+    }
+    const dup = items.value.some((it) => {
+      if (it.id === id) return false;
+      const other = typeof it.command === "string" ? it.command.trim().toLowerCase() : "";
+      return other && other === normalized;
+    });
+    if (dup) {
+      message.error(t("settings.agentGlobalPrompts.errors.commandDuplicate"));
+      return;
+    }
+    command = normalized;
+  }
+
   const normalizedTitle = isReservedItem(id) ? RESERVED_GLOBAL_SYSTEM_PROMPT_TITLE : title;
   if (title.length > MAX_TITLE_LENGTH) {
     message.error(t("settings.agentGlobalPrompts.errors.titleTooLong", { max: MAX_TITLE_LENGTH }));
@@ -243,7 +304,8 @@ function submit() {
   const payload: AgentGlobalPromptItem = {
     id,
     title: normalizedTitle,
-    prompt
+    prompt,
+    ...(command ? { command } : {})
   };
 
   if (modalMode.value === "create") {
