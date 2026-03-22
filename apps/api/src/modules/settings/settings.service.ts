@@ -67,6 +67,10 @@ const SEARCH_EXCLUDE_MAX_LENGTH = 200;
 const AGENT_PROMPT_MAX_BYTES = 32 * 1024;
 const AGENT_GLOBAL_PROMPT_TITLE_MAX_LENGTH = 20;
 const AGENT_GLOBAL_PROMPT_MAX_BYTES = 32 * 1024;
+const AGENT_GLOBAL_PROMPT_COMMAND_MAX_LENGTH = 64;
+
+const GLOBAL_PROMPT_COMMAND_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+const RESERVED_BUILTIN_SLASH_COMMANDS = new Set(["clear", "compact"]);
 
 // Node.js setTimeout 上限接近 2^31-1,超过后会出现不符合预期的行为。
 const RUNTIME_TIMEOUT_MS_MAX = 2_147_483_647;
@@ -980,6 +984,40 @@ function normalizeAgentGlobalPromptPromptStored(raw: unknown) {
   return value;
 }
 
+function normalizeAgentGlobalPromptCommandStored(raw: unknown) {
+  const value = typeof raw === "string" ? raw.trim() : "";
+  if (!value) return "";
+  if (value.includes("\0") || value.includes("\n") || value.includes("\r")) return "";
+  if (value.length > AGENT_GLOBAL_PROMPT_COMMAND_MAX_LENGTH) return "";
+  if (!GLOBAL_PROMPT_COMMAND_PATTERN.test(value)) return "";
+  const normalized = value.toLowerCase();
+  if (RESERVED_BUILTIN_SLASH_COMMANDS.has(normalized)) return "";
+  return normalized;
+}
+
+function normalizeAgentGlobalPromptCommandForUpdate(raw: unknown) {
+  const value = typeof raw === "string" ? raw.trim() : "";
+  if (!value) return undefined;
+  if (value.includes("\0") || value.includes("\n") || value.includes("\r")) {
+    throw new HttpError(400, "Global prompt command is invalid", "AGENT_GLOBAL_PROMPT_COMMAND_INVALID");
+  }
+  if (value.length > AGENT_GLOBAL_PROMPT_COMMAND_MAX_LENGTH) {
+    throw new HttpError(400, "Global prompt command is too long", "AGENT_GLOBAL_PROMPT_COMMAND_TOO_LONG");
+  }
+  if (!GLOBAL_PROMPT_COMMAND_PATTERN.test(value)) {
+    throw new HttpError(400, "Global prompt command is invalid", "AGENT_GLOBAL_PROMPT_COMMAND_INVALID");
+  }
+  const normalized = value.toLowerCase();
+  if (RESERVED_BUILTIN_SLASH_COMMANDS.has(normalized)) {
+    throw new HttpError(
+      400,
+      "Global prompt command conflicts with builtin slash command",
+      "AGENT_GLOBAL_PROMPT_COMMAND_CONFLICT"
+    );
+  }
+  return normalized;
+}
+
 let globalSystemPromptTextProvider: (() => string) | null = null;
 
 export function registerGlobalSystemPromptTextProvider(provider: () => string) {
@@ -1024,6 +1062,7 @@ function sanitizeAgentGlobalPromptItemsStored(itemsRaw: unknown, logger?: Fastif
     seen.add(id);
     const titleRaw = typeof item.title === "string" ? item.title.trim() : "";
     const prompt = normalizeAgentGlobalPromptPromptStored(item.prompt);
+    const command = normalizeAgentGlobalPromptCommandStored(item.command);
 
     if (id === AGENT_GLOBAL_SYSTEM_PROMPT_ID) {
       if (systemSeen) {
@@ -1036,6 +1075,10 @@ function sanitizeAgentGlobalPromptItemsStored(itemsRaw: unknown, logger?: Fastif
       if (!prompt || titleRaw !== AGENT_GLOBAL_SYSTEM_PROMPT_TITLE) {
         changed = true;
         logger?.warn({ id }, "global system prompt repaired during settings normalize");
+      }
+      if (command) {
+        changed = true;
+        logger?.warn({ id }, "global system prompt command ignored during settings normalize");
       }
       out.push({ id, title: AGENT_GLOBAL_SYSTEM_PROMPT_TITLE, prompt: nextPrompt });
       continue;
@@ -1051,7 +1094,7 @@ function sanitizeAgentGlobalPromptItemsStored(itemsRaw: unknown, logger?: Fastif
       logger?.warn({ id }, "invalid global prompt ignored during settings normalize");
       continue;
     }
-    out.push({ id, title: titleRaw, prompt });
+    out.push({ id, title: titleRaw, prompt, ...(command ? { command } : {}) });
   }
 
   if (!systemSeen) {
@@ -1374,12 +1417,16 @@ export function updateAgentGlobalPromptSettings(
     if (!id) {
       throw new HttpError(400, "Global prompt id is required", "AGENT_GLOBAL_PROMPT_ID_REQUIRED");
     }
+    const command = id === AGENT_GLOBAL_SYSTEM_PROMPT_ID
+      ? undefined
+      : normalizeAgentGlobalPromptCommandForUpdate(item.command);
     return {
       id,
       title: id === AGENT_GLOBAL_SYSTEM_PROMPT_ID
         ? AGENT_GLOBAL_SYSTEM_PROMPT_TITLE
         : normalizeAgentGlobalPromptTitleForUpdate(item.title),
-      prompt: normalizeAgentGlobalPromptPromptForUpdate(item.prompt)
+      prompt: normalizeAgentGlobalPromptPromptForUpdate(item.prompt),
+      ...(command ? { command } : {})
     };
   });
 
@@ -1392,6 +1439,12 @@ export function updateAgentGlobalPromptSettings(
     "AGENT_GLOBAL_PROMPT_DUPLICATE",
     "Duplicate global prompt id"
   );
+
+  const commands = items
+    .filter((item) => item.id !== AGENT_GLOBAL_SYSTEM_PROMPT_ID)
+    .map((item) => (typeof item.command === "string" ? item.command.trim().toLowerCase() : ""))
+    .filter(Boolean);
+  assertUniqueIdsOrThrow(commands, "AGENT_GLOBAL_PROMPT_COMMAND_DUPLICATE", "Duplicate global prompt command");
 
   const updatedAt = nowMs();
   setSettingJson(

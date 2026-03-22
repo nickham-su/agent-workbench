@@ -355,15 +355,22 @@
                 {{ candidate.description }}
               </span>
             </div>
-          </button>
-          <div v-if="!activeInputHint.loading && activeInputHint.items.length === 0" class="px-2 py-0.5 text-[0.9em] text-[color:var(--text-tertiary)]">
-            {{ activeInputHint.emptyText }}
-          </div>
-        </div>
-      </div>
+           </button>
+           <div v-if="!activeInputHint.loading && activeInputHint.items.length === 0 && !(activeInputHint.kind === 'slash' && promptCommandError)" class="px-2 py-0.5 text-[0.9em] text-[color:var(--text-tertiary)]">
+             {{ activeInputHint.emptyText }}
+           </div>
+           <div
+             v-if="activeInputHint.kind === 'slash' && !activeInputHint.loading && promptCommandError"
+             class="px-2 py-0.5 text-[0.9em] text-[color:var(--text-tertiary)]"
+             :title="promptCommandError"
+           >
+             {{ t("agent.client.promptCommandsLoadFailedHint") }}
+           </div>
+         </div>
+       </div>
 
-      <div class="flex items-end gap-2">
-        <a-textarea
+       <div class="flex items-end gap-2">
+         <a-textarea
           ref="inputEl"
           v-model:value="draft"
           class="agent-input-textarea"
@@ -559,7 +566,7 @@
 </template>
 
 <script setup lang="ts">
-import type { AgentContextItemRecord, AgentSessionRunState } from "@agent-workbench/shared";
+import type { AgentContextItemRecord, AgentGlobalPromptItem, AgentSessionRunState } from "@agent-workbench/shared";
 import {
   CheckCircleOutlined,
   ClockCircleOutlined,
@@ -601,6 +608,7 @@ import {
   detectWorkspaceAgentEnablement,
   updateWorkspaceAgentEnablementSettings,
   getWorkspaceAgentEnablementSettings,
+  getAgentGlobalPromptSettings,
   listWorkspaceTopLevelSkills,
   suggestWorkspaceFilePaths,
   sendAgentMessage,
@@ -827,6 +835,14 @@ type SlashCandidateItem = {
   command: SlashCommandDefinition;
 };
 
+type PromptCommandCandidateItem = {
+  id: string;
+  kind: "prompt_command";
+  label: string; // /<command>
+  description?: string; // prompt title
+  command: string; // <command>
+};
+
 type MentionCandidateItem = {
   id: string;
   kind: "skill" | "file";
@@ -835,7 +851,7 @@ type MentionCandidateItem = {
   insertText: string;
 };
 
-type InputCandidateItem = SlashCandidateItem | MentionCandidateItem;
+type InputCandidateItem = SlashCandidateItem | PromptCommandCandidateItem | MentionCandidateItem;
 
 const MAX_INPUT_CANDIDATES = 10;
 const MENTION_FETCH_DEBOUNCE_MS = 120;
@@ -864,6 +880,40 @@ const slashCommands: SlashCommandDefinition[] = [
 ];
 
 const slashCommandMap = new Map(slashCommands.map((item) => [item.name, item] as const));
+
+const promptCommandItems = ref<AgentGlobalPromptItem[]>([]);
+const promptCommandLoading = ref(false);
+const promptCommandError = ref("");
+
+const promptCommandMap = computed(() => {
+  const map = new Map<string, AgentGlobalPromptItem>();
+  for (const item of promptCommandItems.value) {
+    if (!item || item.id === "global_system_prompt") continue;
+    const cmd = typeof item.command === "string" ? item.command.trim().toLowerCase() : "";
+    if (!cmd) continue;
+    // 内置命令优先：即使命令冲突，前端也不显示/不执行 prompt command。
+    if (slashCommandMap.has(cmd)) continue;
+    if (!map.has(cmd)) map.set(cmd, item);
+  }
+  return map;
+});
+
+async function refreshPromptCommandItems() {
+  if (promptCommandLoading.value) return;
+  promptCommandLoading.value = true;
+  promptCommandError.value = "";
+  try {
+    const res = await getAgentGlobalPromptSettings();
+    const list = Array.isArray(res.items) ? res.items : [];
+    promptCommandItems.value = list as AgentGlobalPromptItem[];
+  } catch (err) {
+    promptCommandError.value = err instanceof Error ? err.message : String(err);
+    promptCommandItems.value = [];
+  } finally {
+    promptCommandLoading.value = false;
+  }
+}
+
 const inputCandidateSelection = ref("");
 const inputCaretIndex = ref(0);
 const inputHintDismissed = ref(false);
@@ -904,6 +954,16 @@ const mentionHint = computed(() => {
   };
 });
 
+const exactPromptCommandName = computed(() => {
+  const normalized = draft.value.trim().toLowerCase();
+  const m = normalized.match(/^\/([A-Za-z0-9][A-Za-z0-9_-]*)$/);
+  if (!m) return "";
+  const cmd = m[1] || "";
+  if (!cmd) return "";
+  if (slashCommandMap.has(cmd)) return "";
+  return promptCommandMap.value.has(cmd) ? cmd : "";
+});
+
 const activeInputHint = computed(() => {
   if (inputHintDismissed.value) {
     return {
@@ -916,13 +976,23 @@ const activeInputHint = computed(() => {
       emptyText: ""
     };
   }
-  if (slashCommandHint.value.visible) {
-    const items: InputCandidateItem[] = slashCommandHint.value.commands.map((cmd) => ({
+  if (slashCommandHint.value.visible && !exactPromptCommandName.value) {
+    const slashItems: InputCandidateItem[] = slashCommandHint.value.commands.map((cmd) => ({
       id: `slash:${cmd.name}`,
       kind: "slash",
       label: cmd.usage,
       command: cmd
     }));
+    const promptItems: InputCandidateItem[] = [...promptCommandMap.value.entries()]
+      .filter(([name]) => !slashCommandHint.value.query || name.startsWith(slashCommandHint.value.query))
+      .map(([name, item]) => ({
+        id: `prompt_command:${name}`,
+        kind: "prompt_command",
+        label: `/${name}`,
+        description: item.title,
+        command: name
+      }));
+    const items = [...slashItems, ...promptItems].slice(0, MAX_INPUT_CANDIDATES);
     const activeId = items.some((it) => it.id === inputCandidateSelection.value)
       ? inputCandidateSelection.value
       : (items[0]?.id || "");
@@ -932,7 +1002,7 @@ const activeInputHint = computed(() => {
       query: slashCommandHint.value.query,
       items,
       activeId,
-      loading: false,
+      loading: promptCommandLoading.value,
       emptyText: t("agent.client.slashCommandHintNoMatch", { query: slashCommandHint.value.query })
     };
   }
@@ -2435,6 +2505,13 @@ function onPickInputCandidate(candidate: InputCandidateItem) {
     onPickSlashCommand(candidate.command.name);
     return;
   }
+  if (candidate.kind === "prompt_command") {
+    inputCandidateSelection.value = candidate.id;
+    draft.value = candidate.label;
+    nextTick(() => syncInputCaretFromNative());
+    void focusInputIfNeeded();
+    return;
+  }
   if (candidate.kind === "skill" || candidate.kind === "file") {
     applyMentionCandidate(candidate);
   }
@@ -2836,9 +2913,23 @@ async function onSend() {
         agentId
       });
     } else {
+      let finalText = text;
+      const m = finalText.match(/^\/([A-Za-z0-9][A-Za-z0-9_-]*)$/);
+      if (m) {
+        const cmd = m[1]?.toLowerCase() || "";
+        let item = cmd ? promptCommandMap.value.get(cmd) : undefined;
+        // 兜底：首次进入 Agent 面板时可能还没拉到 settings，此处按需刷新一次。
+        if (!item && cmd && !promptCommandLoading.value && promptCommandItems.value.length === 0) {
+          await refreshPromptCommandItems();
+          item = promptCommandMap.value.get(cmd);
+        }
+        if (item && typeof item.prompt === "string" && item.prompt.trim()) {
+          finalText = item.prompt;
+        }
+      }
       await sendAgentMessage(targetSessionId, {
         workspaceId: props.workspaceId,
-        text,
+        text: finalText,
         clientRequestId,
         agentId,
         uiLocale: getInitialLocale()
@@ -2879,6 +2970,7 @@ watch(
     skillMentionCache.value = null;
     mentionCandidates.value = [];
     mentionCandidatesLoading.value = false;
+    void refreshPromptCommandItems();
   }
 );
 
@@ -3007,6 +3099,7 @@ watch(
     }
 
     statusStore.markSessionSeen(props.sessionId);
+    void refreshPromptCommandItems();
 
     const forceFollowBottom = !forcedBottomOnFirstActive.value;
     if (forceFollowBottom && !hasSavedScrollPosition(props.sessionId)) {
@@ -3018,7 +3111,8 @@ watch(
     const forceFull = items.value.length === 0;
     void refreshVisibleSession({ forceFull, forceFollowBottom });
     void focusInputIfNeeded();
-  }
+  },
+  { immediate: true }
 );
 
 // Workspace 内切换工具时,AgentToolView 被 KeepAlive 缓存,组件不会重新挂载。

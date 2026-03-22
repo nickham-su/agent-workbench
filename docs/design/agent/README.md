@@ -105,3 +105,4 @@
 - `truncation.md`: 截断算法、artifact 写入、prompt 注入策略
 - `opencode-compat.md`: 与 opencode 的兼容目标(B)
 - `client.md`: Web client 行为与多 client 场景
+- `prompt-library-command-in-agent-input-v1.md`: 提示词库条目新增 `command` 字段，并支持输入框 `/` 候选与发送替换
