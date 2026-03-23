@@ -32,7 +32,7 @@ import type { AppContext } from "../../app/context.js";
 import { nowMs } from "../../utils/time.js";
 import { newSortableId } from "../../utils/ids.js";
 import { getWorkspace, listRecentWorkspaces } from "../workspaces/workspace.store.js";
-import { listEnabledWorkspaceExternalSkillRoots } from "../workspaces/workspace.service.js";
+import { listEnabledWorkspaceAgentsInstructions, listEnabledWorkspaceExternalSkillRoots } from "../workspaces/workspace.service.js";
 import {
   agentArchiveSessionDir,
   applyPatchUiArtifactPath,
@@ -1750,16 +1750,15 @@ function buildSkillsInstructionSection(input: {
   return lines.join("\n");
 }
 
-async function readWorkspaceAgentsInstructions(workspacePath: string, logger: FastifyBaseLogger) {
-  const filePath = path.join(workspacePath, WORKSPACE_AGENTS_FILENAME);
-  const relativePath = path.relative(workspacePath, filePath);
-  const displayPath = relativePath && !relativePath.startsWith("..") ? relativePath : filePath;
+async function readAgentsInstructionFile(params: { filePath: string; displayPath: string; logger: FastifyBaseLogger }) {
+  const filePath = params.filePath;
+  const displayPath = params.displayPath;
   let stat: Awaited<ReturnType<typeof fs.lstat>>;
   try {
     stat = await fs.lstat(filePath);
   } catch (err: any) {
     if (err && err.code === "ENOENT") return null;
-    logger.warn({ err, filePath }, "read workspace AGENTS.md failed");
+    params.logger.warn({ err, filePath }, "read AGENTS.md failed");
     return null;
   }
 
@@ -1777,25 +1776,32 @@ async function readWorkspaceAgentsInstructions(workspacePath: string, logger: Fa
     }
     const chunk = buf.subarray(0, totalRead);
     if (chunk.includes(0x00)) {
-      logger.warn({ filePath }, "workspace AGENTS.md appears binary, ignored");
+      params.logger.warn({ filePath }, "AGENTS.md appears binary, ignored");
       return null;
     }
 
     const decoded = decodeUtf8Prefix(chunk, WORKSPACE_AGENTS_MAX_BYTES);
     if (!decoded.text.trim()) return null;
 
-    const extra = decoded.truncated ? "\n\n[workspace AGENTS.md truncated: first 32KB]" : "";
+    const extra = decoded.truncated ? "\n\n[AGENTS.md truncated: first 32KB]" : "";
     return {
       filePath,
       displayPath,
       content: `${decoded.text}${extra}`
     };
   } catch (err) {
-    logger.warn({ err, filePath }, "read workspace AGENTS.md failed");
+    params.logger.warn({ err, filePath }, "read AGENTS.md failed");
     return null;
   } finally {
     await fd?.close().catch(() => undefined);
   }
+}
+
+async function readWorkspaceAgentsInstructions(workspacePath: string, logger: FastifyBaseLogger) {
+  const filePath = path.join(workspacePath, WORKSPACE_AGENTS_FILENAME);
+  const relativePath = path.relative(workspacePath, filePath);
+  const displayPath = relativePath && !relativePath.startsWith("..") ? relativePath : filePath;
+  return readAgentsInstructionFile({ filePath, displayPath, logger });
 }
 
 const GLOBAL_WORKFLOW_SYSTEM_PROMPT = getPromptText("agent/global-workflow-system-prompt.zh-CN.txt");
@@ -1809,7 +1815,7 @@ function buildSystemPrompt(input: {
   outputFormatInstruction?: string;
   globalPrompts: Array<{ id: string; title: string; prompt: string }>;
   runtimeInstruction?: string;
-  workspaceInstructions: { filePath: string; displayPath: string; content: string } | null;
+  agentsInstructions: Array<{ filePath: string; displayPath: string; content: string }>;
   skillsInstruction?: string;
 }) {
   const agentPrompt = input.agentPrompt || "";
@@ -1836,8 +1842,9 @@ function buildSystemPrompt(input: {
     sections.push(formatSection("global_prompt", item.prompt, item.title));
   }
 
-  if (input.workspaceInstructions?.content.trim()) {
-    sections.push(formatSection("workspace_instructions", input.workspaceInstructions.content, input.workspaceInstructions.displayPath));
+  for (const item of input.agentsInstructions || []) {
+    if (!item?.content?.trim()) continue;
+    sections.push(formatSection("agents_instructions", item.content, item.displayPath));
   }
 
   if (agentPrompt.trim()) {
@@ -4298,9 +4305,9 @@ export class AgentService {
     const staticPromptPromise = cachedStatic && cachedStatic.expiresAt > now
       ? cachedStatic.promise
       : (async (): Promise<RunPromptStatic> => {
-          const [globalPrompts, workspaceInstructions, builtinSkills, enabledExternalRoots] = await Promise.all([
+          const [globalPrompts, enabledAgentsSources, builtinSkills, enabledExternalRoots] = await Promise.all([
             Promise.resolve(getAgentGlobalPromptSettings(this.ctx)),
-            readWorkspaceAgentsInstructions(workspace.path, this.logger),
+            listEnabledWorkspaceAgentsInstructions({ ctx: this.ctx, logger: this.logger, workspaceId: workspace.id }),
             scanTopLevelSkillSummaries({
               rootPath: path.join(this.ctx.repoRoot, BUILTIN_SKILLS_ROOT),
               idPrefix: "builtin",
@@ -4308,6 +4315,14 @@ export class AgentService {
             }),
             listEnabledWorkspaceExternalSkillRoots(this.ctx, this.logger, workspace.id)
           ]);
+
+          const agentsInstructions = (await Promise.all(
+            enabledAgentsSources.map((it) =>
+              readAgentsInstructionFile({ filePath: it.filePath, displayPath: it.displayPath, logger: this.logger })
+            )
+          ))
+            .filter((it): it is NonNullable<typeof it> => it !== null)
+            ;
 
           const externalSkillRoots: Array<{ sourceType: "workspace" | "repo"; repoId?: string; rootDir: string; rootPath: string }> = [];
           const externalSkills: SkillSummaryItem[] = [];
@@ -4366,7 +4381,7 @@ export class AgentService {
               agentGlobalPromptIds: Array.isArray(profile.agent.globalPromptIds) ? profile.agent.globalPromptIds : [],
               globalPrompts: globalPrompts.items,
               outputFormatInstruction: buildOutputFormatInstruction({ uiLocale }),
-              workspaceInstructions,
+              agentsInstructions,
               skillsInstruction: buildSkillsInstructionSection({ builtin: builtinSkills, external: externalSkills })
             }),
 

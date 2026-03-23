@@ -413,13 +413,13 @@
                   <template #icon><RobotOutlined /></template>
                 </a-button>
               </a-tooltip>
-              <a-tooltip :title="t('agent.client.externalSkillRootsTooltip')" placement="top">
+              <a-tooltip :title="t('agent.client.contextManagerTooltip')" placement="top">
                 <a-button
                   size="small"
                   type="text"
                   class="!px-1"
-                  :aria-label="t('agent.client.externalSkillRootsTitle')"
-                  @click="onOpenExternalSkillRootsModal"
+                  :aria-label="t('agent.client.contextManagerTitle')"
+                  @click="onOpenContextManagerModal"
                 >
                   <template #icon><AppstoreOutlined /></template>
                 </a-button>
@@ -443,13 +443,13 @@
                   <template #icon><RobotOutlined /></template>
                 </a-button>
               </a-tooltip>
-              <a-tooltip :title="t('agent.client.externalSkillRootsTooltip')" placement="top">
+              <a-tooltip :title="t('agent.client.contextManagerTooltip')" placement="top">
                 <a-button
                   size="small"
                   type="text"
                   class="!px-1"
-                  :aria-label="t('agent.client.externalSkillRootsTitle')"
-                  @click="onOpenExternalSkillRootsModal"
+                  :aria-label="t('agent.client.contextManagerTitle')"
+                  @click="onOpenContextManagerModal"
                 >
                   <template #icon><AppstoreOutlined /></template>
                 </a-button>
@@ -520,46 +520,75 @@
     </a-modal>
 
     <a-modal
-      :open="externalSkillRootsModalVisible"
-      :title="t('agent.client.externalSkillRootsTitle')"
+      :open="contextManagerModalVisible"
+      :title="t('agent.client.contextManagerTitle')"
       :ok-text="t('common.save')"
       :cancel-text="t('common.cancel')"
-      :confirm-loading="externalSkillRootsSaving"
-      :ok-button-props="{ disabled: externalSkillRootsLoading || !!externalSkillRootsError }"
-      @ok="onSaveExternalSkillRootsSettings"
-      @cancel="externalSkillRootsModalVisible = false"
+      :confirm-loading="contextManagerSaving"
+      :ok-button-props="{ disabled: contextManagerLoading || !!contextManagerError }"
+      @ok="onSaveContextManagerSettings"
+      @cancel="contextManagerModalVisible = false"
     >
       <div class="text-[0.9em] text-[color:var(--text-tertiary)] mb-3">
-        {{ t("agent.client.externalSkillRootsHint") }}
+        {{ t("agent.client.contextManagerHint") }}
       </div>
-      <div v-if="externalSkillRootsLoading" class="py-6 text-center text-[color:var(--text-tertiary)]">
+      <div v-if="contextManagerLoading" class="py-6 text-center text-[color:var(--text-tertiary)]">
         {{ t("common.loading") }}
       </div>
-      <div v-else-if="externalSkillRootsError" class="py-3 text-red-500 whitespace-pre-wrap break-words">
-        {{ externalSkillRootsError }}
+      <div v-else-if="contextManagerError" class="py-3 text-red-500 whitespace-pre-wrap break-words">
+        {{ contextManagerError }}
       </div>
-      <div v-else-if="externalSkillRootsCandidates.length === 0" class="py-6 text-center text-[color:var(--text-tertiary)]">
-        {{ t("agent.client.externalSkillRootsEmpty") }}
-      </div>
-      <div v-else class="max-h-[50vh] overflow-auto">
-        <a-checkbox-group v-model:value="externalSkillRootsSelectedKeys" class="w-full">
-          <div class="flex flex-col gap-2">
-            <label
-              v-for="item in externalSkillRootsCandidates"
-              :key="externalSkillRootsKey(item)"
-              class="external-skill-root-item block w-full border border-[var(--border-color-secondary)] rounded px-2 py-1.5"
-            >
-              <a-checkbox :value="externalSkillRootsKey(item)" class="external-skill-root-checkbox w-full">
-                <span class="external-skill-root-content">
-                  <span class="external-skill-root-name text-[color:var(--text-primary)]" :title="item.displayName">{{ item.displayName }}</span>
-                  <span class="external-skill-root-count text-[0.85em] text-[color:var(--text-tertiary)]">
-                  {{ t("agent.client.externalSkillRootsMeta", { count: item.topLevelSkillCount }) }}
+      <div v-else class="max-h-[60vh] overflow-auto">
+        <div class="text-[0.9em] font-medium text-[color:var(--text-secondary)] mb-2">
+          {{ t("agent.client.contextAgentsGroupTitle") }}
+        </div>
+        <div v-if="agentsInstructionsCandidates.length === 0" class="py-3 text-[color:var(--text-tertiary)]">
+          {{ t("agent.client.contextAgentsEmpty") }}
+        </div>
+        <div v-else class="mb-5">
+          <a-checkbox-group v-model:value="agentsInstructionsSelectedKeys" class="w-full">
+            <div class="flex flex-col gap-2">
+              <label
+                v-for="item in agentsInstructionsCandidates"
+                :key="agentsInstructionsKey(item)"
+                class="external-skill-root-item block w-full border border-[var(--border-color-secondary)] rounded px-2 py-1.5"
+              >
+                <a-checkbox :value="agentsInstructionsKey(item)" class="external-skill-root-checkbox w-full">
+                  <span class="external-skill-root-content">
+                    <span class="external-skill-root-name text-[color:var(--text-primary)]" :title="item.displayPath">{{ item.displayPath }}</span>
                   </span>
-                </span>
-              </a-checkbox>
-            </label>
-          </div>
-        </a-checkbox-group>
+                </a-checkbox>
+              </label>
+            </div>
+          </a-checkbox-group>
+        </div>
+
+        <div class="text-[0.9em] font-medium text-[color:var(--text-secondary)] mb-2">
+          {{ t("agent.client.contextSkillsGroupTitle") }}
+        </div>
+        <div v-if="externalSkillRootsCandidates.length === 0" class="py-3 text-[color:var(--text-tertiary)]">
+          {{ t("agent.client.externalSkillRootsEmpty") }}
+        </div>
+        <div v-else>
+          <a-checkbox-group v-model:value="externalSkillRootsSelectedKeys" class="w-full">
+            <div class="flex flex-col gap-2">
+              <label
+                v-for="item in externalSkillRootsCandidates"
+                :key="externalSkillRootsKey(item)"
+                class="external-skill-root-item block w-full border border-[var(--border-color-secondary)] rounded px-2 py-1.5"
+              >
+                <a-checkbox :value="externalSkillRootsKey(item)" class="external-skill-root-checkbox w-full">
+                  <span class="external-skill-root-content">
+                    <span class="external-skill-root-name text-[color:var(--text-primary)]" :title="item.displayName">{{ item.displayName }}</span>
+                    <span class="external-skill-root-count text-[0.85em] text-[color:var(--text-tertiary)]">
+                      {{ t("agent.client.externalSkillRootsMeta", { count: item.topLevelSkillCount }) }}
+                    </span>
+                  </span>
+                </a-checkbox>
+              </label>
+            </div>
+          </a-checkbox-group>
+        </div>
       </div>
     </a-modal>
   </div>
@@ -604,8 +633,10 @@ import {
   getAgentContextItem,
   getAgentContextItems,
   revertAgentSession,
+  detectWorkspaceAgentsInstructions,
   detectWorkspaceExternalSkillRoots,
   detectWorkspaceAgentEnablement,
+  updateWorkspaceAgentsInstructionsSettings,
   updateWorkspaceAgentEnablementSettings,
   getWorkspaceAgentEnablementSettings,
   getAgentGlobalPromptSettings,
@@ -776,6 +807,16 @@ const externalSkillRootsSaving = ref(false);
 const externalSkillRootsError = ref("");
 const externalSkillRootsCandidates = ref<Array<{ sourceType: "workspace" | "repo"; repoId?: string; rootDir: string; displayName: string; topLevelSkillCount: number; enabled: boolean }>>([]);
 const externalSkillRootsSelectedKeys = ref<string[]>([]);
+
+// v1: 统一上下文管理弹窗（AGENTS + Skills）
+const contextManagerModalVisible = externalSkillRootsModalVisible;
+const contextManagerLoading = externalSkillRootsLoading;
+const contextManagerSaving = externalSkillRootsSaving;
+const contextManagerError = externalSkillRootsError;
+
+const agentsInstructionsCandidates = ref<Array<{ sourceType: "workspace" | "repo"; repoId?: string; displayPath: string; enabled: boolean }>>([]);
+const agentsInstructionsSelectedKeys = ref<string[]>([]);
+
 const agentEnablementModalVisible = ref(false);
 const agentEnablementLoading = ref(false);
 const agentEnablementSaving = ref(false);
@@ -2771,6 +2812,112 @@ function onRevertToMessage(itemId: number) {
 
 function externalSkillRootsKey(item: { sourceType: "workspace" | "repo"; repoId?: string; rootDir: string }) {
   return item.sourceType === "workspace" ? `workspace\u0000${item.rootDir}` : `repo\u0000${String(item.repoId || "")}\u0000${item.rootDir}`;
+}
+
+function agentsInstructionsKey(item: { sourceType: "workspace" | "repo"; repoId?: string }) {
+  return item.sourceType === "workspace" ? "workspace" : `repo\u0000${String(item.repoId || "")}`;
+}
+
+async function onOpenContextManagerModal() {
+  contextManagerModalVisible.value = true;
+  contextManagerLoading.value = true;
+  contextManagerError.value = "";
+  try {
+    const [agents, skills] = await Promise.all([
+      detectWorkspaceAgentsInstructions(props.workspaceId),
+      detectWorkspaceExternalSkillRoots(props.workspaceId)
+    ]);
+
+    const agentItems = (agents.items || [])
+      .map((it) => ({
+        sourceType: it.sourceType === "workspace" ? ("workspace" as const) : ("repo" as const),
+        repoId: String(it.repoId || "").trim() || undefined,
+        displayPath: String(it.displayPath || "").trim(),
+        enabled: it.enabled === true
+      }))
+      .filter((it) => it.displayPath && (it.sourceType === "workspace" || !!it.repoId));
+    agentsInstructionsCandidates.value = agentItems;
+    agentsInstructionsSelectedKeys.value = agentItems.filter((it) => it.enabled).map((it) => agentsInstructionsKey(it));
+
+    const skillItems = (skills.items || [])
+      .map((it) => ({
+        sourceType: it.sourceType === "workspace" ? ("workspace" as const) : ("repo" as const),
+        repoId: String(it.repoId || "").trim() || undefined,
+        rootDir: String(it.rootDir || "").trim(),
+        displayName: String(it.displayName || "").trim(),
+        topLevelSkillCount: Number.isFinite(Number(it.topLevelSkillCount)) ? Math.max(0, Math.floor(Number(it.topLevelSkillCount))) : 0,
+        enabled: it.enabled === true
+      }))
+      .filter((it) => it.rootDir && (it.sourceType === "workspace" || !!it.repoId));
+    externalSkillRootsCandidates.value = skillItems;
+    externalSkillRootsSelectedKeys.value = skillItems.filter((it) => it.enabled).map((it) => externalSkillRootsKey(it));
+  } catch (err) {
+    agentsInstructionsCandidates.value = [];
+    agentsInstructionsSelectedKeys.value = [];
+    externalSkillRootsCandidates.value = [];
+    externalSkillRootsSelectedKeys.value = [];
+    contextManagerError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    contextManagerLoading.value = false;
+  }
+}
+
+async function onSaveContextManagerSettings() {
+  if (contextManagerLoading.value || contextManagerError.value) return;
+  if (contextManagerSaving.value) return;
+  contextManagerSaving.value = true;
+  contextManagerError.value = "";
+  try {
+    const selectedAgents = new Set(agentsInstructionsSelectedKeys.value);
+    const enabledSources = agentsInstructionsCandidates.value
+      .map((it) => ({ sourceType: it.sourceType, repoId: it.repoId, enabled: selectedAgents.has(agentsInstructionsKey(it)) }))
+      .filter((it) => it.enabled)
+      .map((it) => (it.sourceType === "workspace" ? ({ sourceType: "workspace" as const }) : ({ sourceType: "repo" as const, repoId: String(it.repoId || "").trim() })))
+      .filter((it) => it.sourceType === "workspace" || (it.sourceType === "repo" && it.repoId));
+
+    const selectedSkills = new Set(externalSkillRootsSelectedKeys.value);
+    const enabledRoots = externalSkillRootsCandidates.value
+      .map((it) => ({
+        sourceType: it.sourceType,
+        repoId: it.repoId,
+        rootDir: it.rootDir,
+        enabled: selectedSkills.has(externalSkillRootsKey(it))
+      }))
+      .filter((it) => it.enabled)
+      .map((it) => ({ sourceType: it.sourceType, repoId: it.repoId, rootDir: it.rootDir }));
+
+    const [agentsRes, skillsRes] = await Promise.allSettled([
+      updateWorkspaceAgentsInstructionsSettings(props.workspaceId, { enabledSources }),
+      updateWorkspaceExternalSkillRootsSettings(props.workspaceId, { enabledRoots })
+    ]);
+
+    const agentOk = agentsRes.status === "fulfilled";
+    const skillOk = skillsRes.status === "fulfilled";
+    if (!agentOk || !skillOk) {
+      // 失败时重新拉取真实状态，避免“部分成功但用户以为全失败”造成勾选状态错乱
+      await onOpenContextManagerModal();
+
+      const agentErr = agentOk ? "" : (agentsRes as PromiseRejectedResult).reason instanceof Error ? (agentsRes as PromiseRejectedResult).reason.message : String((agentsRes as PromiseRejectedResult).reason);
+      const skillErr = skillOk ? "" : (skillsRes as PromiseRejectedResult).reason instanceof Error ? (skillsRes as PromiseRejectedResult).reason.message : String((skillsRes as PromiseRejectedResult).reason);
+
+      if (agentOk && !skillOk) {
+        contextManagerError.value = `Skills 保存失败：${skillErr}`;
+      } else if (!agentOk && skillOk) {
+        contextManagerError.value = `AGENTS 保存失败：${agentErr}`;
+      } else {
+        contextManagerError.value = `AGENTS 保存失败：${agentErr}\nSkills 保存失败：${skillErr}`;
+      }
+      return;
+    }
+
+    skillMentionCache.value = null;
+    message.success(t("agent.client.contextManagerSaved"));
+    contextManagerModalVisible.value = false;
+  } catch (err) {
+    contextManagerError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    contextManagerSaving.value = false;
+  }
 }
 
 async function onOpenExternalSkillRootsModal() {

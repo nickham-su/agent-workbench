@@ -114,6 +114,55 @@ export const UpdateWorkspaceExternalSkillRootsSettingsRequestSchema = Type.Objec
 });
 export type UpdateWorkspaceExternalSkillRootsSettingsRequest = Static<typeof UpdateWorkspaceExternalSkillRootsSettingsRequestSchema>;
 
+export const WorkspaceAgentsInstructionSourceSchema = Type.Union([Type.Literal("workspace"), Type.Literal("repo")]);
+export type WorkspaceAgentsInstructionSource = Static<typeof WorkspaceAgentsInstructionSourceSchema>;
+
+export const WorkspaceAgentsInstructionCandidateSchema = Type.Object({
+  sourceType: WorkspaceAgentsInstructionSourceSchema,
+  repoId: Type.Optional(Type.String({ minLength: 1 })),
+  displayPath: Type.String({ minLength: 1 }),
+  enabled: Type.Boolean()
+});
+export type WorkspaceAgentsInstructionCandidate = Static<typeof WorkspaceAgentsInstructionCandidateSchema>;
+
+export const WorkspaceAgentsInstructionsDetectResponseSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
+  items: Type.Array(WorkspaceAgentsInstructionCandidateSchema),
+  updatedAt: Type.Number()
+});
+export type WorkspaceAgentsInstructionsDetectResponse = Static<typeof WorkspaceAgentsInstructionsDetectResponseSchema>;
+
+export const WorkspaceAgentsInstructionSourceInputSchema = Type.Union([
+  Type.Object({
+    sourceType: Type.Literal("workspace")
+  }),
+  Type.Object({
+    sourceType: Type.Literal("repo"),
+    repoId: Type.String({ minLength: 1 })
+  })
+]);
+export type WorkspaceAgentsInstructionSourceInput = Static<typeof WorkspaceAgentsInstructionSourceInputSchema>;
+
+export const WorkspaceAgentsInstructionsSettingsItemSchema = Type.Object({
+  sourceType: WorkspaceAgentsInstructionSourceSchema,
+  repoId: Type.Optional(Type.String({ minLength: 1 })),
+  displayPath: Type.String({ minLength: 1 }),
+  enabledAt: Type.Number()
+});
+export type WorkspaceAgentsInstructionsSettingsItem = Static<typeof WorkspaceAgentsInstructionsSettingsItemSchema>;
+
+export const WorkspaceAgentsInstructionsSettingsResponseSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
+  enabledSources: Type.Array(WorkspaceAgentsInstructionsSettingsItemSchema),
+  updatedAt: Type.Number()
+});
+export type WorkspaceAgentsInstructionsSettingsResponse = Static<typeof WorkspaceAgentsInstructionsSettingsResponseSchema>;
+
+export const UpdateWorkspaceAgentsInstructionsSettingsRequestSchema = Type.Object({
+  enabledSources: Type.Array(WorkspaceAgentsInstructionSourceInputSchema)
+});
+export type UpdateWorkspaceAgentsInstructionsSettingsRequest = Static<typeof UpdateWorkspaceAgentsInstructionsSettingsRequestSchema>;
+
 export const WorkspaceTopLevelSkillSourceSchema = Type.Union([
   Type.Literal("builtin"),
   Type.Literal("workspace"),

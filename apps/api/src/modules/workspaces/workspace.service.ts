@@ -3,7 +3,11 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { FastifyBaseLogger } from "fastify";
 import type {
+  UpdateWorkspaceAgentsInstructionsSettingsRequest,
   UpdateWorkspaceExternalSkillRootsSettingsRequest,
+  WorkspaceAgentsInstructionCandidate,
+  WorkspaceAgentsInstructionsDetectResponse,
+  WorkspaceAgentsInstructionsSettingsResponse,
   WorkspaceDetail,
   WorkspaceExternalSkillRoot,
   WorkspaceExternalSkillRootsDetectResponse,
@@ -55,8 +59,10 @@ import { parseSkillFrontmatter, scanReadableTopLevelSkills } from "../agent/top-
 import { withWorkspaceLock } from "../../infra/locks/workspaceLock.js";
 
 const WORKSPACE_EXTERNAL_SKILL_ROOTS_SETTINGS_KEY = "workspace_external_skill_roots_v1";
+const WORKSPACE_AGENTS_INSTRUCTIONS_SETTINGS_KEY = "workspace_agents_instructions_v1";
 const WORKSPACE_AGENT_ENABLEMENT_SETTINGS_KEY = "workspace_agent_enablement_v1";
 const BUILTIN_SKILLS_ROOT = "skills";
+const WORKSPACE_AGENTS_FILENAME = "AGENTS.md";
 
 function formatRepoDisplayName(rawUrl: string) {
   let s = String(rawUrl || "").trim();
@@ -148,6 +154,191 @@ function buildWorkspaceDetail(ctx: AppContext, ws: WorkspaceRecord, terminalCoun
     createdAt: ws.createdAt,
     updatedAt: ws.updatedAt
   };
+}
+
+export async function detectWorkspaceAgentsInstructions(
+  ctx: AppContext,
+  logger: FastifyBaseLogger,
+  workspaceId: string
+): Promise<WorkspaceAgentsInstructionsDetectResponse> {
+  const ws = await getWorkspaceById(ctx, workspaceId);
+  const enabledSet = new Set(
+    listEnabledWorkspaceAgentsInstructionsSourcesRaw(ctx, workspaceId).map((it) =>
+      getAgentsSourceIdentityKey({ sourceType: it.sourceType, repoId: it.repoId })
+    )
+  );
+  const candidates = await listWorkspaceAgentsInstructionsCandidates(ctx, logger, ws);
+  const items: WorkspaceAgentsInstructionCandidate[] = candidates.map((it) => ({
+    sourceType: it.sourceType,
+    ...(it.sourceType === "repo" ? { repoId: it.repoId } : {}),
+    displayPath: it.displayPath,
+    enabled: enabledSet.has(getAgentsSourceIdentityKey({ sourceType: it.sourceType, repoId: it.repoId }))
+  }));
+
+  items.sort((a, b) => {
+    if (a.sourceType !== b.sourceType) return a.sourceType === "workspace" ? -1 : 1;
+    if (a.sourceType === "workspace") return 0;
+    return String(a.repoId || "").localeCompare(String(b.repoId || ""));
+  });
+
+  return { workspaceId: ws.id, items, updatedAt: nowMs() };
+}
+
+export async function getWorkspaceAgentsInstructionsSettings(
+  ctx: AppContext,
+  workspaceId: string
+): Promise<WorkspaceAgentsInstructionsSettingsResponse> {
+  const ws = await getWorkspaceById(ctx, workspaceId);
+  const reposById = new Map(listWorkspaceRepos(ctx.db, ws.id).map((repo) => [repo.repoId, repo] as const));
+  const enabled = listEnabledWorkspaceAgentsInstructionsSourcesRaw(ctx, workspaceId);
+  const enabledSources = enabled
+    .map((it) => {
+      if (it.sourceType === "workspace") {
+        return {
+          sourceType: "workspace" as const,
+          displayPath: WORKSPACE_AGENTS_FILENAME,
+          enabledAt: it.enabledAt || 0
+        };
+      }
+      if (!it.repoId) return null;
+      const repo = reposById.get(it.repoId);
+      if (!repo) return null;
+      return {
+        sourceType: "repo" as const,
+        repoId: it.repoId,
+        displayPath: `${repo.dirName}/${WORKSPACE_AGENTS_FILENAME}`,
+        enabledAt: it.enabledAt || 0
+      };
+    })
+    .filter((it): it is NonNullable<typeof it> => it !== null);
+
+  const settings = readWorkspaceAgentsInstructionsSettings(ctx);
+  const updatedAt = Number(settings.workspaces?.[ws.id]?.updatedAt || 0) || 0;
+  return { workspaceId: ws.id, enabledSources, updatedAt };
+}
+
+export async function updateWorkspaceAgentsInstructionsSettings(
+  ctx: AppContext,
+  logger: FastifyBaseLogger,
+  workspaceId: string,
+  payload: UpdateWorkspaceAgentsInstructionsSettingsRequest
+): Promise<WorkspaceAgentsInstructionsSettingsResponse> {
+  const ws = await getWorkspaceById(ctx, workspaceId);
+  const candidates = await listWorkspaceAgentsInstructionsCandidates(ctx, logger, ws);
+  const candidateMap = new Map(
+    candidates.map((it) => [getAgentsSourceIdentityKey({ sourceType: it.sourceType, repoId: it.repoId }), it] as const)
+  );
+  const reposById = new Map(listWorkspaceRepos(ctx.db, ws.id).map((repo) => [repo.repoId, repo] as const));
+  const now = nowMs();
+
+  const deduped = new Map<string, WorkspaceAgentsEnabledSource>();
+  for (const item of payload.enabledSources || []) {
+    const sourceType = String((item as any)?.sourceType || "").trim();
+    const normalizedSource = sourceType === "workspace" ? "workspace" : sourceType === "repo" ? "repo" : "";
+    if (!normalizedSource) {
+      throw new HttpError(400, "invalid AGENTS instructions source", "WORKSPACE_AGENTS_INSTRUCTIONS_INVALID");
+    }
+    const repoId = normalizedSource === "repo" ? String((item as any)?.repoId || "").trim() : undefined;
+    if (normalizedSource === "workspace" && String((item as any)?.repoId || "").trim()) {
+      throw new HttpError(400, "workspace source must not include repoId", "WORKSPACE_AGENTS_INSTRUCTIONS_INVALID");
+    }
+    if (normalizedSource === "repo" && !repoId) {
+      throw new HttpError(400, "repo source must include repoId", "WORKSPACE_AGENTS_INSTRUCTIONS_INVALID");
+    }
+
+    const key = getAgentsSourceIdentityKey({ sourceType: normalizedSource, repoId });
+    const candidate = candidateMap.get(key);
+    if (!candidate) {
+      throw new HttpError(400, `invalid AGENTS instructions source: ${normalizedSource}/${repoId || ""}`, "WORKSPACE_AGENTS_INSTRUCTIONS_INVALID");
+    }
+    if (normalizedSource === "repo" && repoId && !reposById.has(repoId)) {
+      throw new HttpError(400, `invalid AGENTS instructions source: ${normalizedSource}/${repoId}`, "WORKSPACE_AGENTS_INSTRUCTIONS_INVALID");
+    }
+    deduped.set(key, {
+      sourceType: normalizedSource,
+      repoId,
+      enabledAt: now
+    });
+  }
+
+  const settings = readWorkspaceAgentsInstructionsSettings(ctx);
+  const workspaces = { ...(settings.workspaces || {}) };
+  workspaces[ws.id] = {
+    enabledSources: [...deduped.values()],
+    updatedAt: now
+  };
+  persistWorkspaceAgentsInstructionsSettings(ctx, { workspaces }, now);
+
+  const enabledSources = [...deduped.values()]
+    .sort((a, b) => {
+      if (a.sourceType !== b.sourceType) return a.sourceType === "workspace" ? -1 : 1;
+      if (a.sourceType === "workspace") return 0;
+      return String(a.repoId || "").localeCompare(String(b.repoId || ""));
+    })
+    .map((it) => ({
+      sourceType: it.sourceType,
+      ...(it.sourceType === "repo" ? { repoId: it.repoId } : {}),
+      displayPath:
+        it.sourceType === "workspace"
+          ? WORKSPACE_AGENTS_FILENAME
+          : `${reposById.get(String(it.repoId || ""))?.dirName || it.repoId}/${WORKSPACE_AGENTS_FILENAME}`,
+      enabledAt: it.enabledAt
+    }));
+
+  return { workspaceId: ws.id, enabledSources, updatedAt: now };
+}
+
+export async function listEnabledWorkspaceAgentsInstructions(params: {
+  ctx: AppContext;
+  logger: FastifyBaseLogger;
+  workspaceId: string;
+}) {
+  const ws = await getWorkspaceById(params.ctx, params.workspaceId);
+  const enabled = listEnabledWorkspaceAgentsInstructionsSourcesRaw(params.ctx, params.workspaceId);
+  const reposById = new Map(listWorkspaceRepos(params.ctx.db, ws.id).map((repo) => [repo.repoId, repo] as const));
+
+  const workspaceItems: Array<{ sourceType: "workspace"; filePath: string; displayPath: string }> = [];
+  const repoItems: Array<{ sourceType: "repo"; repoId: string; repoDirName: string; filePath: string; displayPath: string }> = [];
+
+  for (const item of enabled) {
+    if (item.sourceType === "workspace") {
+      workspaceItems.push({
+        sourceType: "workspace",
+        filePath: path.join(ws.path, WORKSPACE_AGENTS_FILENAME),
+        displayPath: WORKSPACE_AGENTS_FILENAME
+      });
+      continue;
+    }
+
+    if (!item.repoId) continue;
+    const repo = reposById.get(item.repoId);
+    if (!repo) continue;
+    const repoBasePath = await resolveWorkspaceRepoBasePath({ ctx: params.ctx, workspace: ws, repo, logger: params.logger, source: "settings" });
+    if (!repoBasePath) continue;
+    repoItems.push({
+      sourceType: "repo",
+      repoId: item.repoId,
+      repoDirName: repo.dirName,
+      filePath: path.join(repoBasePath, WORKSPACE_AGENTS_FILENAME),
+      displayPath: `${repo.dirName}/${WORKSPACE_AGENTS_FILENAME}`
+    });
+  }
+
+  repoItems.sort((a, b) => {
+    const nameCmp = a.repoDirName.localeCompare(b.repoDirName);
+    if (nameCmp !== 0) return nameCmp;
+    return a.repoId.localeCompare(b.repoId);
+  });
+
+  return [
+    ...workspaceItems,
+    ...repoItems.map((it) => ({
+      sourceType: "repo" as const,
+      repoId: it.repoId,
+      filePath: it.filePath,
+      displayPath: it.displayPath
+    }))
+  ];
 }
 
 export async function getWorkspaceById(ctx: AppContext, workspaceId: string): Promise<WorkspaceRecord> {
@@ -542,6 +733,16 @@ type WorkspaceAgentEnablementSettingsPayload = {
   workspaces?: Record<string, { mode?: WorkspaceAgentEnablementMode; enabledAgentIds?: string[]; updatedAt?: number }>;
 };
 
+type WorkspaceAgentsEnabledSource = {
+  sourceType: "workspace" | "repo";
+  repoId?: string;
+  enabledAt: number;
+};
+
+type WorkspaceAgentsInstructionsSettingsPayload = {
+  workspaces?: Record<string, { enabledSources?: WorkspaceAgentsEnabledSource[]; updatedAt?: number }>;
+};
+
 function normalizeRelativeRepoPath(raw: string) {
   const normalized = String(raw || "").trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
   if (!normalized || normalized === "." || normalized === "..") return "";
@@ -841,6 +1042,84 @@ function listEnabledWorkspaceExternalSkillRootsRaw(ctx: AppContext, workspaceId:
     if (repoCmp !== 0) return repoCmp;
     return a.rootDir.localeCompare(b.rootDir);
   });
+}
+
+function readWorkspaceAgentsInstructionsSettings(ctx: AppContext): WorkspaceAgentsInstructionsSettingsPayload {
+  const found = getSettingJson(ctx.db, WORKSPACE_AGENTS_INSTRUCTIONS_SETTINGS_KEY);
+  const value = found?.value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { workspaces: {} };
+  const workspaces = (value as any).workspaces;
+  if (!workspaces || typeof workspaces !== "object" || Array.isArray(workspaces)) return { workspaces: {} };
+  return { workspaces: workspaces as WorkspaceAgentsInstructionsSettingsPayload["workspaces"] };
+}
+
+function persistWorkspaceAgentsInstructionsSettings(
+  ctx: AppContext,
+  payload: WorkspaceAgentsInstructionsSettingsPayload,
+  updatedAt: number
+) {
+  setSettingJson(ctx.db, WORKSPACE_AGENTS_INSTRUCTIONS_SETTINGS_KEY, payload, updatedAt);
+}
+
+function getAgentsSourceIdentityKey(input: { sourceType: "workspace" | "repo"; repoId?: string }) {
+  return input.sourceType === "workspace" ? "workspace" : `repo\u0000${String(input.repoId || "")}`;
+}
+
+function listEnabledWorkspaceAgentsInstructionsSourcesRaw(ctx: AppContext, workspaceId: string) {
+  const settings = readWorkspaceAgentsInstructionsSettings(ctx);
+  const workspace = settings.workspaces?.[workspaceId];
+  const entries = Array.isArray(workspace?.enabledSources) ? workspace.enabledSources : [];
+  const normalized = new Map<string, WorkspaceAgentsEnabledSource>();
+  for (const it of entries) {
+    const sourceType = String((it as any)?.sourceType || "").trim() === "workspace" ? "workspace" : "repo";
+    const repoId = sourceType === "repo" ? String((it as any)?.repoId || "").trim() : undefined;
+    if (sourceType === "repo" && !repoId) continue;
+    if (sourceType === "workspace" && String((it as any)?.repoId || "").trim()) continue;
+    const key = getAgentsSourceIdentityKey({ sourceType, repoId });
+    normalized.set(key, {
+      sourceType,
+      repoId,
+      enabledAt: Number.isFinite(Number((it as any)?.enabledAt)) ? Math.floor(Number((it as any).enabledAt)) : 0
+    });
+  }
+  return [...normalized.values()].sort((a, b) => {
+    if (a.sourceType !== b.sourceType) return a.sourceType === "workspace" ? -1 : 1;
+    if (a.sourceType === "workspace") return 0;
+    return String(a.repoId || "").localeCompare(String(b.repoId || ""));
+  });
+}
+
+async function listWorkspaceAgentsInstructionsCandidates(
+  ctx: AppContext,
+  logger: FastifyBaseLogger,
+  ws: WorkspaceRecord
+): Promise<Array<Pick<WorkspaceAgentsInstructionCandidate, "sourceType" | "repoId" | "displayPath">>> {
+  const items: Array<Pick<WorkspaceAgentsInstructionCandidate, "sourceType" | "repoId" | "displayPath">> = [];
+
+  const wsFilePath = path.join(ws.path, WORKSPACE_AGENTS_FILENAME);
+  const wsStat = await fs.lstat(wsFilePath).catch((err: any) => {
+    if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return null;
+    throw err;
+  });
+  if (wsStat && wsStat.isFile() && !wsStat.isSymbolicLink()) {
+    items.push({ sourceType: "workspace", displayPath: WORKSPACE_AGENTS_FILENAME });
+  }
+
+  const repos = listWorkspaceRepos(ctx.db, ws.id);
+  for (const repo of repos) {
+    const repoBasePath = await resolveWorkspaceRepoBasePath({ ctx, workspace: ws, repo, logger, source: "detect" });
+    if (!repoBasePath) continue;
+    const repoFilePath = path.join(repoBasePath, WORKSPACE_AGENTS_FILENAME);
+    const repoStat = await fs.lstat(repoFilePath).catch((err: any) => {
+      if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return null;
+      throw err;
+    });
+    if (repoStat && repoStat.isFile() && !repoStat.isSymbolicLink()) {
+      items.push({ sourceType: "repo", repoId: repo.repoId, displayPath: `${repo.dirName}/${WORKSPACE_AGENTS_FILENAME}` });
+    }
+  }
+
+  return items;
 }
 
 function readWorkspaceAgentEnablementSettings(ctx: AppContext): WorkspaceAgentEnablementSettingsPayload {
