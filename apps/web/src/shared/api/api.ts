@@ -35,7 +35,10 @@ import type {
   CreateWorkspaceRequest,
   AttachWorkspaceRepoRequest,
   ChangesResponse,
+  UpdateWorkspaceAgentsInstructionsSettingsRequest,
   UpdateWorkspaceExternalSkillRootsSettingsRequest,
+  WorkspaceAgentsInstructionsDetectResponse,
+  WorkspaceAgentsInstructionsSettingsResponse,
   WorkspaceExternalSkillRootsDetectResponse,
   WorkspaceExternalSkillRootsSettingsResponse,
   WorkspaceExternalSkillRootInput,
@@ -423,6 +426,39 @@ export async function attachWorkspaceRepo(workspaceId: string, body: AttachWorks
 export async function detachWorkspaceRepo(workspaceId: string, repoId: string) {
   try {
     const res = await client.delete<WorkspaceDetail>(`/workspaces/${workspaceId}/repos/${repoId}`);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function detectWorkspaceAgentsInstructions(workspaceId: string) {
+  try {
+    const res = await client.get<WorkspaceAgentsInstructionsDetectResponse>(`/workspaces/${workspaceId}/agents-instructions/detect`);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getWorkspaceAgentsInstructionsSettings(workspaceId: string) {
+  try {
+    const res = await client.get<WorkspaceAgentsInstructionsSettingsResponse>(`/workspaces/${workspaceId}/agents-instructions/settings`);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function updateWorkspaceAgentsInstructionsSettings(
+  workspaceId: string,
+  body: UpdateWorkspaceAgentsInstructionsSettingsRequest
+) {
+  try {
+    const enabledSources = (body.enabledSources || []).map((it) => (it.sourceType === "workspace" ? { sourceType: "workspace" as const } : { sourceType: "repo" as const, repoId: it.repoId }));
+    const res = await client.put<WorkspaceAgentsInstructionsSettingsResponse>(`/workspaces/${workspaceId}/agents-instructions/settings`, {
+      enabledSources
+    });
     return res.data;
   } catch (err) {
     throw toApiError(err);

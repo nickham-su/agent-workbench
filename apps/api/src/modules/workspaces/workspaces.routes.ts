@@ -13,7 +13,9 @@ import {
   createWorkspace,
   detectWorkspaceExternalSkillRoots,
   deleteWorkspace,
+  detectWorkspaceAgentsInstructions,
   detachRepoFromWorkspace,
+  getWorkspaceAgentsInstructionsSettings,
   getWorkspaceDetailById,
   getWorkspaceAgentEnablementSettings,
   getWorkspaceExternalSkillRootsSettings,
@@ -21,6 +23,7 @@ import {
   detectWorkspaceAgentEnablement,
   filterAgentsByWorkspaceEnablement,
   listWorkspaceTopLevelSkills,
+  updateWorkspaceAgentsInstructionsSettings,
   updateWorkspaceExternalSkillRootsSettings,
   updateWorkspaceAgentEnablementSettings,
   updateWorkspaceById
@@ -34,6 +37,9 @@ import {
   WorkspaceExternalSkillRootsDetectResponseSchema,
   WorkspaceExternalSkillRootsSettingsResponseSchema,
   AgentListAvailableAgentsResponseSchema,
+  WorkspaceAgentsInstructionsDetectResponseSchema,
+  WorkspaceAgentsInstructionsSettingsResponseSchema,
+  UpdateWorkspaceAgentsInstructionsSettingsRequestSchema,
   WorkspaceTopLevelSkillsResponseSchema
 } from "@agent-workbench/shared";
 import { nowMs } from "../../utils/time.js";
@@ -146,6 +152,52 @@ export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppCon
     async (req) => {
       const params = req.params as { workspaceId: string; repoId: string };
       return detachRepoFromWorkspace(ctx, app.log, params.workspaceId, params.repoId);
+    }
+  );
+
+  app.get(
+    "/api/workspaces/:workspaceId/agents-instructions/detect",
+    {
+      schema: {
+        tags: ["workspaces"],
+        params: WorkspaceIdParamsSchema,
+        response: { 200: WorkspaceAgentsInstructionsDetectResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      const params = req.params as { workspaceId: string };
+      return detectWorkspaceAgentsInstructions(ctx, app.log, params.workspaceId);
+    }
+  );
+
+  app.get(
+    "/api/workspaces/:workspaceId/agents-instructions/settings",
+    {
+      schema: {
+        tags: ["workspaces"],
+        params: WorkspaceIdParamsSchema,
+        response: { 200: WorkspaceAgentsInstructionsSettingsResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      const params = req.params as { workspaceId: string };
+      return getWorkspaceAgentsInstructionsSettings(ctx, params.workspaceId);
+    }
+  );
+
+  app.put(
+    "/api/workspaces/:workspaceId/agents-instructions/settings",
+    {
+      schema: {
+        tags: ["workspaces"],
+        params: WorkspaceIdParamsSchema,
+        body: UpdateWorkspaceAgentsInstructionsSettingsRequestSchema,
+        response: { 200: WorkspaceAgentsInstructionsSettingsResponseSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      const params = req.params as { workspaceId: string };
+      return updateWorkspaceAgentsInstructionsSettings(ctx, app.log, params.workspaceId, req.body as any);
     }
   );
 
