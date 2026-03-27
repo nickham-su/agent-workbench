@@ -104,6 +104,7 @@ const expandedKeys = ref<string[]>([]);
 const selectedKeys = ref<string[]>([]);
 const treeLoading = ref(false);
 const loadedDirs = new Set<string>();
+const loadingDirs = new Set<string>();
 const nodeByPath = new Map<string, TreeNode>();
 const dirRequestSeqByDir = new Map<string, number>();
 let scopeSeq = 0;
@@ -234,6 +235,7 @@ function initRootTree() {
   expandedKeys.value = [ROOT_KEY];
   selectedKeys.value = [];
   loadedDirs.clear();
+  loadingDirs.clear();
   nodeByPath.clear();
   selectedNode.value = null;
   rebuildNodeMap();
@@ -280,14 +282,14 @@ function updateChildren(dir: string, entries: FileEntry[]) {
   rebuildNodeMap();
 }
 
-function isDirExpanded(dir: string) {
-  const key = dir ? dir : ROOT_KEY;
-  return expandedKeys.value.includes(key);
+function isDirKnown(dir: string) {
+  return !dir || nodeByPath.has(dir);
 }
 
 function clearLoadedOnCollapse(key: string) {
   if (key === ROOT_KEY) {
     loadedDirs.clear();
+    loadingDirs.clear();
     return;
   }
   const dir = toDirPath(key);
@@ -295,8 +297,11 @@ function clearLoadedOnCollapse(key: string) {
 }
 
 function markLoaded(dir: string) {
-  if (!isDirExpanded(dir)) return;
   loadedDirs.add(dir);
+}
+
+function clearLoading(dir: string) {
+  loadingDirs.delete(dir);
 }
 
 async function fetchDirEntries(dir: string, scopeSnapshot: number) {
@@ -319,6 +324,30 @@ async function loadDir(dir: string) {
   if (!entries) return;
   updateChildren(dir, entries);
   markLoaded(dir);
+}
+
+async function loadDirIfNeeded(dir: string) {
+  if (loadedDirs.has(dir)) return;
+  if (loadingDirs.has(dir)) return;
+  if (!isDirKnown(dir)) return;
+  loadingDirs.add(dir);
+  try {
+    await loadDir(dir);
+  } finally {
+    clearLoading(dir);
+  }
+}
+
+function loadNewExpandedDirs(prev: string[], next: string[]) {
+  const prevSet = new Set(prev);
+  for (const key of next) {
+    if (prevSet.has(key)) continue;
+    if (key === ROOT_KEY) continue;
+    const dir = toDirPath(key);
+    void loadDirIfNeeded(dir).catch((err) => {
+      message.error(err instanceof Error ? err.message : String(err));
+    });
+  }
 }
 
 function getRefreshDirs() {
@@ -385,6 +414,7 @@ function onExpandedKeysUpdate(keys: (string | number)[]) {
     pruned = pruned.filter((k) => k !== ck && !k.startsWith(ck + "/"));
   }
   expandedKeys.value = pruned;
+  loadNewExpandedDirs(prev, pruned);
 }
 
 function onSelectedKeysUpdate(keys: (string | number)[]) {
@@ -395,12 +425,7 @@ async function onLoadData(node: any) {
   const key = String(node?.key || "");
   if (!key) return;
   const dir = toDirPath(key);
-  if (loadedDirs.has(dir)) return;
-  try {
-    await loadDir(dir);
-  } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err));
-  }
+  await loadDirIfNeeded(dir);
 }
 
 function openFileInEditor(path: string) {
@@ -434,8 +459,8 @@ function onNodeDblClick(node: TreeNode) {
   }
   expandedKeys.value = [...expandedKeys.value, key];
   const dir = toDirPath(key);
-  if (loadedDirs.has(dir)) return;
-  void loadDir(dir).catch((err) => {
+  if (loadedDirs.has(dir) || loadingDirs.has(dir)) return;
+  void loadDirIfNeeded(dir).catch((err) => {
     message.error(err instanceof Error ? err.message : String(err));
   });
 }
@@ -617,6 +642,7 @@ function resetTree() {
   expandedKeys.value = [];
   selectedKeys.value = [];
   loadedDirs.clear();
+  loadingDirs.clear();
   nodeByPath.clear();
   selectedNode.value = null;
   treeKey.value += 1;
@@ -696,8 +722,15 @@ function removeLoadedDirsUnder(path: string, isDir: boolean) {
     if (dir === path || dir.startsWith(path + "/")) continue;
     next.add(dir);
   }
+  const nextLoading = new Set<string>();
+  for (const dir of loadingDirs) {
+    if (dir === path || dir.startsWith(path + "/")) continue;
+    nextLoading.add(dir);
+  }
   loadedDirs.clear();
+  loadingDirs.clear();
   for (const dir of next) loadedDirs.add(dir);
+  for (const dir of nextLoading) loadingDirs.add(dir);
 }
 
 async function submitRename() {
@@ -781,6 +814,7 @@ watch(
   async () => {
     scopeSeq += 1;
     dirRequestSeqByDir.clear();
+    loadingDirs.clear();
     resetTree();
     initRootTree();
     await refreshRoot();
