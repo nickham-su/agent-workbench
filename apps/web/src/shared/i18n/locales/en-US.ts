@@ -408,7 +408,13 @@ export default {
       commit: "Commit",
       commitEllipsis: "Commit…",
       commitAndPush: "Commit & push",
-      cancel: "Cancel"
+      cancel: "Cancel",
+      openDiff: "Open diff",
+      openFile: "Open file",
+      openFileUnavailable: "This file has been deleted and cannot be opened in editor",
+      copyPath: "Copy path",
+      copyFailed: "Copy failed, please select and copy manually",
+      pathCopied: "Path copied"
     },
     status: {
       noChanges: "No changes"
