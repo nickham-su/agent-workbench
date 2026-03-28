@@ -406,7 +406,13 @@ export default {
       commit: "提交",
       commitEllipsis: "提交…",
       commitAndPush: "提交并推送",
-      cancel: "取消"
+      cancel: "取消",
+      openDiff: "打开差异",
+      openFile: "打开文件",
+      openFileUnavailable: "该文件已删除，无法在编辑器中打开",
+      copyPath: "复制路径",
+      copyFailed: "复制失败，请手动选择并复制",
+      pathCopied: "路径已复制"
     },
     status: {
       noChanges: "无变更"

@@ -50,59 +50,61 @@
                class="p-3 text-xs text-[color:var(--text-tertiary)]">
             {{ t("codeReview.status.noChanges") }}
           </div>
-          <div
-              v-for="f in unstagedFiles"
-              :key="`u:${f.path}`"
-              class="group w-full text-left pl-3 pr-1 py-1.5 hover:bg-[var(--hover-bg)] cursor-pointer"
-              :class="isSelected('unstaged', f.path) ? 'bg-[var(--fill-secondary)] border-l-2 border-l-[var(--info-color)]' : 'border-l-2 border-l-transparent'"
-              @click="selectFile('unstaged', f.path, f.oldPath)"
-          >
-            <div class="flex items-center gap-2 min-w-0">
-              <a-tooltip :title="f.status" :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="top">
-                <div
-                    class="text-xs text-[color:var(--text-secondary)] shrink-0 text-center flex items-center justify-center"
-                    :class="statusBadgeClass(f.status)"
-                >
-                  <component :is="statusIconComponent(f.status)"/>
-                </div>
-              </a-tooltip>
-              <div class="min-w-0 flex-1">
-                <div class="text-xs font-mono min-w-0 flex items-center">
-                  <span class="text-[color:var(--text-secondary)] min-w-0 flex-initial truncate block">{{
-                      fileDir(f.path)
-                    }}</span>
-                  <span class="text-[color:var(--text-color)] shrink-0 whitespace-nowrap">{{ fileBase(f.path) }}</span>
-                </div>
-                <div v-if="f.oldPath" class="mt-0.5 text-[11px] font-mono truncate text-[color:var(--text-tertiary)]">
-                  {{ t("codeReview.file.oldPath", {oldPath: f.oldPath}) }}
-                </div>
-              </div>
-              <div class="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100">
-                <a-tooltip :title="t('codeReview.actions.stage')" :mouseEnterDelay="0" :mouseLeaveDelay="0"
-                           placement="top">
-                  <span class="inline-flex">
-                    <a-button size="small" type="text" :disabled="gitBusy" @click.stop="stageOne(f)"
-                              :aria-label="t('codeReview.actions.stage')">
-                      <template #icon><PlusOutlined/></template>
-                    </a-button>
-                  </span>
+          <a-dropdown v-for="f in unstagedFiles" :key="`u:${f.path}`" :trigger="['contextmenu']" class="block">
+            <div
+                class="group w-full text-left pl-3 pr-1 py-1.5 hover:bg-[var(--hover-bg)] cursor-pointer"
+                :class="isSelected('unstaged', f.path) ? 'bg-[var(--fill-secondary)] border-l-2 border-l-[var(--info-color)]' : 'border-l-2 border-l-transparent'"
+                @click="selectFile('unstaged', f.path, f.oldPath)"
+                @contextmenu.prevent="selectFile('unstaged', f.path, f.oldPath, false)"
+            >
+              <div class="flex items-center gap-2 min-w-0">
+                <a-tooltip :title="f.status" :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="top">
+                  <div
+                      class="text-xs text-[color:var(--text-secondary)] shrink-0 text-center flex items-center justify-center"
+                      :class="statusBadgeClass(f.status)"
+                  >
+                    <component :is="statusIconComponent(f.status)"/>
+                  </div>
                 </a-tooltip>
-                <a-tooltip :title="discardOneLabel(f)" :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="top">
-                  <span class="inline-flex">
-                    <a-button
-                        size="small"
-                        type="text"
-                        :disabled="gitBusy"
-                        @click.stop="discardOne(f)"
-                        :aria-label="discardOneLabel(f)"
-                    >
-                      <template #icon><RollbackOutlined/></template>
-                    </a-button>
-                  </span>
-                </a-tooltip>
+                <div class="min-w-0 flex-1">
+                  <div class="text-xs font-mono min-w-0 flex items-center">
+                    <span class="text-[color:var(--text-secondary)] min-w-0 flex-initial truncate block">{{ fileDir(f.path) }}</span>
+                    <span class="text-[color:var(--text-color)] shrink-0 whitespace-nowrap">{{ fileBase(f.path) }}</span>
+                  </div>
+                  <div v-if="f.oldPath" class="mt-0.5 text-[11px] font-mono truncate text-[color:var(--text-tertiary)]">
+                    {{ t("codeReview.file.oldPath", {oldPath: f.oldPath}) }}
+                  </div>
+                </div>
+                <div class="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100">
+                  <a-tooltip :title="t('codeReview.actions.stage')" :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="top">
+                    <span class="inline-flex">
+                      <a-button size="small" type="text" :disabled="gitBusy" @click.stop="stageOne(f)" :aria-label="t('codeReview.actions.stage')">
+                        <template #icon><PlusOutlined/></template>
+                      </a-button>
+                    </span>
+                  </a-tooltip>
+                  <a-tooltip :title="discardOneLabel(f)" :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="top">
+                    <span class="inline-flex">
+                      <a-button size="small" type="text" :disabled="gitBusy" @click.stop="discardOne(f)" :aria-label="discardOneLabel(f)">
+                        <template #icon><RollbackOutlined/></template>
+                      </a-button>
+                    </span>
+                  </a-tooltip>
+                </div>
               </div>
             </div>
-          </div>
+            <template #overlay>
+              <a-menu @click="onUnstagedContextMenuClick(f, $event)">
+                <a-menu-item key="openDiff">{{ t('codeReview.actions.openDiff') }}</a-menu-item>
+                <a-menu-item key="openFile" :disabled="isOpenFileDisabled(f)">{{ t('codeReview.actions.openFile') }}</a-menu-item>
+                <a-menu-divider/>
+                <a-menu-item key="stage" :disabled="gitBusy">{{ t('codeReview.actions.stage') }}</a-menu-item>
+                <a-menu-item key="discard" :disabled="gitBusy" danger>{{ discardOneLabel(f) }}</a-menu-item>
+                <a-menu-divider/>
+                <a-menu-item key="copyPath">{{ t('codeReview.actions.copyPath') }}</a-menu-item>
+              </a-menu>
+            </template>
+          </a-dropdown>
         </div>
       </div>
 
@@ -141,46 +143,53 @@
           <div v-if="stagedLoaded && stagedFiles.length === 0" class="p-3 text-xs text-[color:var(--text-tertiary)]">
             {{ t("codeReview.status.noChanges") }}
           </div>
-          <div
-              v-for="f in stagedFiles"
-              :key="`s:${f.path}`"
-              class="group w-full text-left pl-3 pr-1 py-1.5 hover:bg-[var(--hover-bg)] cursor-pointer"
-              :class="isSelected('staged', f.path) ? 'bg-[var(--fill-secondary)] border-l-2 border-l-[var(--info-color)]' : 'border-l-2 border-l-transparent'"
-              @click="selectFile('staged', f.path, f.oldPath)"
-          >
-            <div class="flex items-center gap-2 min-w-0">
-              <a-tooltip :title="f.status" :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="top">
-                <div
-                    class="text-xs text-[color:var(--text-secondary)] shrink-0 text-center flex items-center justify-center"
-                    :class="statusBadgeClass(f.status)"
-                >
-                  <component :is="statusIconComponent(f.status)"/>
-                </div>
-              </a-tooltip>
-              <div class="min-w-0 flex-1">
-                <div class="text-xs font-mono min-w-0 flex items-center">
-                  <span class="text-[color:var(--text-secondary)] min-w-0 flex-initial truncate block">{{
-                      fileDir(f.path)
-                    }}</span>
-                  <span class="text-[color:var(--text-color)] shrink-0 whitespace-nowrap">{{ fileBase(f.path) }}</span>
-                </div>
-                <div v-if="f.oldPath" class="mt-0.5 text-[11px] font-mono truncate text-[color:var(--text-tertiary)]">
-                  {{ t("codeReview.file.oldPath", {oldPath: f.oldPath}) }}
-                </div>
-              </div>
-              <div class="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100">
-                <a-tooltip :title="t('codeReview.actions.unstage')" :mouseEnterDelay="0" :mouseLeaveDelay="0"
-                           placement="top">
-                  <span class="inline-flex">
-                    <a-button size="small" type="text" :disabled="gitBusy" @click.stop="unstageOne(f)"
-                              :aria-label="t('codeReview.actions.unstage')">
-                      <template #icon><MinusOutlined/></template>
-                    </a-button>
-                  </span>
+          <a-dropdown v-for="f in stagedFiles" :key="`s:${f.path}`" :trigger="['contextmenu']" class="block">
+            <div
+                class="group w-full text-left pl-3 pr-1 py-1.5 hover:bg-[var(--hover-bg)] cursor-pointer"
+                :class="isSelected('staged', f.path) ? 'bg-[var(--fill-secondary)] border-l-2 border-l-[var(--info-color)]' : 'border-l-2 border-l-transparent'"
+                @click="selectFile('staged', f.path, f.oldPath)"
+                @contextmenu.prevent="selectFile('staged', f.path, f.oldPath, false)"
+            >
+              <div class="flex items-center gap-2 min-w-0">
+                <a-tooltip :title="f.status" :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="top">
+                  <div
+                      class="text-xs text-[color:var(--text-secondary)] shrink-0 text-center flex items-center justify-center"
+                      :class="statusBadgeClass(f.status)"
+                  >
+                    <component :is="statusIconComponent(f.status)"/>
+                  </div>
                 </a-tooltip>
+                <div class="min-w-0 flex-1">
+                  <div class="text-xs font-mono min-w-0 flex items-center">
+                    <span class="text-[color:var(--text-secondary)] min-w-0 flex-initial truncate block">{{ fileDir(f.path) }}</span>
+                    <span class="text-[color:var(--text-color)] shrink-0 whitespace-nowrap">{{ fileBase(f.path) }}</span>
+                  </div>
+                  <div v-if="f.oldPath" class="mt-0.5 text-[11px] font-mono truncate text-[color:var(--text-tertiary)]">
+                    {{ t("codeReview.file.oldPath", {oldPath: f.oldPath}) }}
+                  </div>
+                </div>
+                <div class="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100">
+                  <a-tooltip :title="t('codeReview.actions.unstage')" :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="top">
+                    <span class="inline-flex">
+                      <a-button size="small" type="text" :disabled="gitBusy" @click.stop="unstageOne(f)" :aria-label="t('codeReview.actions.unstage')">
+                        <template #icon><MinusOutlined/></template>
+                      </a-button>
+                    </span>
+                  </a-tooltip>
+                </div>
               </div>
             </div>
-          </div>
+            <template #overlay>
+              <a-menu @click="onStagedContextMenuClick(f, $event)">
+                <a-menu-item key="openDiff">{{ t('codeReview.actions.openDiff') }}</a-menu-item>
+                <a-menu-item key="openFile" :disabled="isOpenFileDisabled(f)">{{ t('codeReview.actions.openFile') }}</a-menu-item>
+                <a-menu-divider/>
+                <a-menu-item key="unstage" :disabled="gitBusy">{{ t('codeReview.actions.unstage') }}</a-menu-item>
+                <a-menu-divider/>
+                <a-menu-item key="copyPath">{{ t('codeReview.actions.copyPath') }}</a-menu-item>
+              </a-menu>
+            </template>
+          </a-dropdown>
         </div>
       </div>
     </div>
@@ -371,10 +380,10 @@ function isSelected(mode: ChangeMode, path: string) {
   return selected.value?.mode === mode && selected.value.path === path;
 }
 
-function selectFile(mode: ChangeMode, path: string, oldPath?: string) {
+function selectFile(mode: ChangeMode, path: string, oldPath?: string, openDiffByUser = true) {
   selected.value = {mode, path, oldPath};
-  // 放在 selected 之后设置：即使重复点击同一项（selected 不变），也能通过 key 变化触发 watcher 打开 diff
-  openDiffRequestedByUserKey.value = `${mode}|${path}|${oldPath || ""}`;
+  // 仅用户明确触发“打开差异”时设置该 key，避免右键选中、刷新等路径自动打开 diff
+  openDiffRequestedByUserKey.value = openDiffByUser ? `${mode}|${path}|${oldPath || ""}` : null;
   const list = mode === "unstaged" ? unstagedFiles.value : stagedFiles.value;
   const match =
       list.find((f) => f.path === path && (f.oldPath || "") === (oldPath || "")) ||
@@ -521,6 +530,139 @@ async function refreshAll() {
   await Promise.all([refreshChanges("unstaged"), refreshChanges("staged")]);
   emit("changesSummary", {unstaged: unstaged.value.length, staged: staged.value.length});
   await reconcileSelectedAfterRefresh();
+}
+
+function normalizeStatusForAction(statusRaw: string) {
+  if (!statusRaw) return "";
+  if (statusRaw === "??" || statusRaw === "!!") return statusRaw;
+  if (statusRaw.includes("U")) return "U";
+  return statusRaw[0] || "";
+}
+
+function isDeletedChange(f: ChangeItem) {
+  return normalizeStatusForAction(f.status) === "D";
+}
+
+function normalizeRelPath(rawInput: string) {
+  let raw = String(rawInput || "").trim();
+  if (!raw) return "";
+  while (raw.startsWith("./")) raw = raw.slice(2);
+  raw = raw.replace(/\\/g, "/");
+  raw = raw.replace(/\/{2,}/g, "/");
+  while (raw.endsWith("/")) raw = raw.slice(0, -1);
+  if (!raw || raw.startsWith("/")) return "";
+  const parts = raw.split("/").filter(Boolean);
+  if (parts.some((part) => part === "..")) return "";
+  return parts.join("/");
+}
+
+function isOpenFileDisabled(f: ChangeItem) {
+  return isDeletedChange(f) || !resolveOpenFilePath(f);
+}
+
+function resolveOpenFilePath(f: ChangeItem) {
+  if (isDeletedChange(f)) return "";
+  const repoRel = normalizeRelPath(f.path);
+  if (!repoRel) return "";
+
+  const target = props.target;
+  if (!target || target.kind !== "workspaceRepo") return repoRel;
+  const repoDirName = normalizeRelPath(target.dirName);
+  // codeReview 的变更 path 语义是“仓库内相对路径”，这里确定性转换为“工作区相对路径”
+  // 禁止依赖字符串前缀启发式，避免合法路径误判（如 repo 名同名目录前缀）。
+  if (!repoDirName) return repoRel;
+  return `${repoDirName}/${repoRel}`;
+}
+
+async function openFileFromChange(f: ChangeItem) {
+  const path = resolveOpenFilePath(f);
+  if (!path) {
+    message.warning(t("codeReview.actions.openFileUnavailable"));
+    return;
+  }
+  try {
+    host.call("editor", {
+      type: "editor.openFile",
+      payload: {
+        path,
+        mode: "edit"
+      }
+    });
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
+  }
+}
+
+async function copyPath(path: string) {
+  const content = String(path ?? "");
+  if (!content) return;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(content);
+      message.success(t("codeReview.actions.pathCopied"));
+      return;
+    }
+  } catch {
+    // fallback
+  }
+
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = content;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    ta.style.top = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    if (ok) {
+      message.success(t("codeReview.actions.pathCopied"));
+      return;
+    }
+  } catch {
+    // ignore
+  }
+  message.error(t("codeReview.actions.copyFailed"));
+}
+
+function onContextMenuAction(mode: ChangeMode, f: ChangeItem, info: { key?: string | number }) {
+  const key = String(info?.key || "");
+  if (!key) return;
+  selectFile(mode, f.path, f.oldPath, false);
+
+  if (key === "openDiff") {
+    selectFile(mode, f.path, f.oldPath, true);
+    return;
+  }
+  if (key === "openFile") {
+    void openFileFromChange(f);
+    return;
+  }
+  if (key === "copyPath") {
+    void copyPath(f.path);
+    return;
+  }
+  if (key === "stage" && mode === "unstaged") {
+    void stageOne(f);
+    return;
+  }
+  if (key === "discard" && mode === "unstaged") {
+    void discardOne(f);
+    return;
+  }
+  if (key === "unstage" && mode === "staged") {
+    void unstageOne(f);
+  }
+}
+
+function onUnstagedContextMenuClick(f: ChangeItem, info: { key?: string | number }) {
+  onContextMenuAction("unstaged", f, info);
+}
+
+function onStagedContextMenuClick(f: ChangeItem, info: { key?: string | number }) {
+  onContextMenuAction("staged", f, info);
 }
 
 function openCommit() {
