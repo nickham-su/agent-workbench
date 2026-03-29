@@ -528,15 +528,43 @@ function scheduleApplyEditor() {
     if (!editor && shouldHaveEditor) initEditor();
     if (!editor) return;
 
+    const previousModel = editor.getModel();
+    const previousTab = activeFileTabFromModel(previousModel);
+    if (previousTab) {
+      const latestModel = editor.getModel();
+      if (latestModel && previousTab.model === previousModel && latestModel === previousModel) {
+        previousTab.viewState = editor.saveViewState();
+      }
+    }
+
     const model = shouldHaveEditor ? tab?.model ?? null : null;
     editor.setModel(model);
     editor.updateOptions({ readOnly: tab?.kind === "file" ? tab.readOnly : true });
     if (tab?.kind === "file" && model) {
       const openAt = tab.openAt;
       const tabKey = tab.key;
-      requestAnimationFrame(() => applyOpenAtWhenReady(tabKey, model, openAt));
+      const hasOpenAtLine = typeof openAt?.line === "number" && Number.isFinite(openAt.line) && openAt.line > 0;
+      if (hasOpenAtLine) {
+        requestAnimationFrame(() => applyOpenAtWhenReady(tabKey, model, openAt));
+        return;
+      }
+
+      requestAnimationFrame(() => {
+        const latest = activeTab.value;
+        if (!editor || !latest || latest.kind !== "file" || latest.key !== tabKey || latest.model !== model) return;
+        clearHighlightDecorations();
+        if (latest.viewState) {
+          try {
+            editor.restoreViewState(latest.viewState);
+          } catch {
+            latest.viewState = null;
+          }
+        }
+        editor.layout();
+      });
       return;
     }
+
     clearHighlightDecorations();
     requestAnimationFrame(() => {
       editor?.layout();

@@ -49,6 +49,7 @@ export type FileEditorTab = {
   openAt?: EditorOpenAt;
   readOnly: boolean;
   disposable?: monaco.IDisposable;
+  viewState?: monaco.editor.ICodeEditorViewState | null;
 };
 
 export type PreviewEditorTab = {
