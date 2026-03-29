@@ -155,6 +155,14 @@
 
     <a-modal v-model:open="createOpen" :title="t('workspaces.create.modalTitle')" :confirm-loading="creating" @ok="submitCreate">
       <a-form layout="vertical">
+        <a-form-item :label="t('workspaces.create.titleLabel')" required>
+          <a-input
+            v-model:value="titleInput"
+            :placeholder="t('workspaces.create.titlePlaceholder')"
+            @input="onTitleInput"
+          />
+        </a-form-item>
+
         <a-form-item :label="t('workspaces.create.repoLabel')">
           <a-select
             v-model:value="selectedRepoIds"
@@ -179,14 +187,6 @@
               </span>
             </a-select-option>
           </a-select>
-        </a-form-item>
-
-        <a-form-item :label="t('workspaces.create.titleLabel')">
-          <a-input
-            v-model:value="titleInput"
-            :placeholder="t('workspaces.create.titlePlaceholder')"
-            @input="onTitleInput"
-          />
         </a-form-item>
 
         <a-form-item v-if="terminalCredentialState === 'available'" :label="t('workspaces.create.terminalCredentialLabel')">
@@ -586,9 +586,13 @@ async function submitCreate() {
     }
 
     const title = titleInput.value.trim();
+    if (!title) {
+      message.error(t("workspaces.create.titleRequired"));
+      return;
+    }
     await createWorkspace({
       repoIds: selectedRepoIds.value,
-      title: title ? title : undefined,
+      title,
       useTerminalCredential: useTerminalCredential.value || undefined
     });
 

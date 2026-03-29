@@ -145,7 +145,8 @@ export default {
       repoLabel: "Repo",
       repoPlaceholder: "Select repo",
       titleLabel: "Title",
-      titlePlaceholder: "Optional: defaults to concatenated repo names",
+      titlePlaceholder: "Enter workspace title",
+      titleRequired: "Title is required",
       terminalCredentialLabel: "Terminal credential",
       terminalCredentialHelp: "Apply this credential to terminals in this workspace",
       terminalCredentialDisabledWarning:

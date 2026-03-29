@@ -106,6 +106,32 @@ function hash8(input: string) {
   return crypto.createHash("sha256").update(String(input || "")).digest("hex").slice(0, 8);
 }
 
+function randomDirToken(bytes: number) {
+  return crypto.randomBytes(bytes).toString("base64url").replace(/=+$/g, "");
+}
+
+async function isWorkspaceDirAvailable(dataDir: string, dirName: string, existsInDb: (d: string) => boolean) {
+  if (existsInDb(dirName)) return false;
+  const p = workspaceRoot(dataDir, dirName);
+  return !(await pathExists(p));
+}
+
+async function pickWorkspaceDirName(params: { dataDir: string; existsInDb: (d: string) => boolean }) {
+  for (let i = 0; i < 50; i += 1) {
+    const candidate = `w_${randomDirToken(6)}`;
+    if (await isWorkspaceDirAvailable(params.dataDir, candidate, params.existsInDb)) return candidate;
+  }
+
+  // 兜底分支也必须做可用性检查，避免直接返回潜在撞名目录。
+  for (let i = 0; i < 50; i += 1) {
+    const salt = `${Date.now()}:${i}:${randomDirToken(8)}`;
+    const fallback = `w_${hash8(salt)}`;
+    if (await isWorkspaceDirAvailable(params.dataDir, fallback, params.existsInDb)) return fallback;
+  }
+
+  throw new HttpError(500, "Failed to allocate workspace directory name");
+}
+
 function uniqueDirName(preferred: string, exists: (d: string) => boolean) {
   const base = sanitizeDirName(preferred);
   if (!exists(base)) return base;
@@ -364,8 +390,7 @@ export async function createWorkspace(
 
   const wsId = newId("ws");
   const existingDirNames = new Set(listWorkspaces(ctx.db).map((w) => w.dirName));
-  const baseName = sanitizeDirName(title) || "workspace";
-  const wsDirName = uniqueDirName(baseName, (d) => existingDirNames.has(d));
+  const wsDirName = await pickWorkspaceDirName({ dataDir: ctx.dataDir, existsInDb: (d) => existingDirNames.has(d) });
   const wsPath = workspaceRoot(ctx.dataDir, wsDirName);
   const ts = nowMs();
   const terminalCredentialId = resolveTerminalCredentialId({

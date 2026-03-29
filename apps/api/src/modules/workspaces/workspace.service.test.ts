@@ -346,6 +346,17 @@ test("workspace agent enablement: subset 空数组表示全不选", async () => 
   assert.deepEqual(detected.items.map((it) => it.enabled), [false]);
 });
 
+test("workspace create: 成功时目录名应为 w_ 随机串且 path 与 dirName 一致", async () => {
+  const logger = createLogger();
+  const fixture = await createEmptyFixture();
+
+  const ws = await createWorkspace(fixture.ctx, logger, { repoIds: [], title: "workspace title" });
+  assert.match(ws.dirName, /^w_[A-Za-z0-9_-]+$/);
+  assert.equal(ws.path, workspaceRoot(fixture.ctx.dataDir, ws.dirName));
+  assert.equal(await pathExists(ws.path), true);
+  assert.equal(ws.title, "workspace title");
+});
+
 test("workspace create: git 初始化失败应回滚 DB 与目录", async () => {
   const logger = createLogger();
   const fixture = await createEmptyFixture();
@@ -365,13 +376,16 @@ test("workspace create: git 初始化失败应回滚 DB 与目录", async () => 
     updatedAt: now
   });
 
+  const workspaceRootEntriesBefore = await fs.readdir(path.join(fixture.ctx.dataDir, "workspaces")).catch(() => [] as string[]);
+
   await assert.rejects(
     () => createWorkspace(fixture.ctx, logger, { repoIds: ["repo_bad"], title: "ws" }),
     (err) => err instanceof HttpError && err.statusCode === 409
   );
 
   assert.equal(listWorkspaces(fixture.ctx.db).length, 0);
-  assert.equal(await pathExists(workspaceRoot(fixture.ctx.dataDir, "ws")), false);
+  const workspaceRootEntriesAfter = await fs.readdir(path.join(fixture.ctx.dataDir, "workspaces")).catch(() => [] as string[]);
+  assert.deepEqual(workspaceRootEntriesAfter.sort(), workspaceRootEntriesBefore.sort());
 });
 
 test("workspace delete: 应清理 agent_session 外键引用，避免删一半", async () => {
