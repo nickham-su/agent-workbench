@@ -520,7 +520,7 @@ function loadDockLayout(workspaceId: string): DockLayoutV3 | null {
       updatedAt: typeof json.updatedAt === "number" ? json.updatedAt : Date.now(),
       ratios: {
         topBottom: clampRatio(typeof ratios.topBottom === "number" ? ratios.topBottom : 2 / 3),
-        topLeft: clampRatio(typeof ratios.topLeft === "number" ? ratios.topLeft : 2 / 3)
+        topLeft: clampRatio(typeof ratios.topLeft === "number" ? ratios.topLeft : 1 / 3)
       },
       toolArea: toolAreaOut,
       toolMinimized: { ...toolMinimizedOut, editor: true },
@@ -627,7 +627,7 @@ function resetDockLayoutDefaults() {
   toolMinimized.editor = true;
   setToolOrderByArea(defaultToolOrderByArea());
   topBottomRatio.value = 2 / 3;
-  topLeftRatio.value = 2 / 3;
+  topLeftRatio.value = 1 / 3;
 }
 
 function applyDockLayout(layout: DockLayoutV3) {
@@ -1167,7 +1167,7 @@ function setTopEl(el: Element | ComponentPublicInstance | null) {
 }
 
 const topBottomRatio = ref(2 / 3);
-const topLeftRatio = ref(2 / 3);
+const topLeftRatio = ref(1 / 3);
 
 watch(
   () => props.workspaceId,
