@@ -109,7 +109,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch, type ComponentPublicInstance } from "vue";
 import { Modal, message } from "ant-design-vue";
-import { CodeOutlined, EditOutlined, FolderOpenOutlined, RobotOutlined, SearchOutlined } from "@ant-design/icons-vue";
+import { CodeOutlined, DownOutlined, EditOutlined, FolderOpenOutlined, RobotOutlined, SearchOutlined, UpOutlined } from "@ant-design/icons-vue";
 import { useI18n } from "vue-i18n";
 import type { GitBranchesResponse, GitPushRequest, GitStatusResponse, WorkspaceDetail } from "@agent-workbench/shared";
 import {
@@ -181,6 +181,8 @@ const currentRepoStatus = computed(() => {
   return repoStatusByDirName[repo.dirName] ?? null;
 });
 
+const editorDiffTabActive = ref(false);
+
 const tools = computed<ToolDefinition[]>(() => [
   {
     toolId: "files",
@@ -217,6 +219,7 @@ const tools = computed<ToolDefinition[]>(() => [
         label: t("workspace.actions.pull"),
         loading: pullLoading.value,
         disabled: gitBusy.value || !currentTarget.value,
+        groupKey: "repo.sync",
         onClick: () => void pullWithUi()
       },
       {
@@ -224,6 +227,7 @@ const tools = computed<ToolDefinition[]>(() => [
         label: t("workspace.actions.push"),
         loading: pushLoading.value,
         disabled: gitBusy.value || !currentTarget.value,
+        groupKey: "repo.sync",
         onClick: () => void pushWithUi()
       }
     ]
@@ -254,6 +258,28 @@ const tools = computed<ToolDefinition[]>(() => [
     defaultArea: "rightTop",
     allowedAreas: ["rightTop"],
     createRuntime: (ctx) => createEditorRuntime(ctx),
+    headerActions: () => [
+      ...(editorDiffTabActive.value ? [
+      {
+        id: "editor.prevDiff",
+        tooltip: t("workspace.actions.previousChange"),
+        groupKey: "editor.diffNav",
+        icon: UpOutlined,
+        onClick: () => {
+          void toolCommands.get("editor")?.goToPreviousDiff?.();
+        }
+      },
+      {
+        id: "editor.nextDiff",
+        tooltip: t("workspace.actions.nextChange"),
+        groupKey: "editor.diffNav",
+        icon: DownOutlined,
+        onClick: () => {
+          void toolCommands.get("editor")?.goToNextDiff?.();
+        }
+      }
+      ] : [])
+    ],
     keepAlive: true
   }
 ]);
@@ -988,6 +1014,9 @@ function toolViewProps(toolId: ToolId) {
 
 function toolViewListeners(toolId: ToolId) {
   if (toolId === "codeReview") return { changesSummary: onChangesSummary };
+  if (toolId === "editor") {
+    return { diffTabActiveChange: (active: boolean) => { editorDiffTabActive.value = Boolean(active); } };
+  }
   return {};
 }
 
@@ -1077,9 +1106,16 @@ const pushIdentitySubmitting = ref(false);
 const headerActionGroups = computed(() => {
   const order: DockArea[] = ["leftTop", "leftBottom", "rightTop"];
   const res: { key: string; actions: HeaderAction[] }[] = [];
+
+  const codeReviewActions = toolById.value.get("codeReview")?.headerActions?.() ?? [];
+  if (codeReviewActions.length > 0) {
+    res.push({ key: "always:codeReview", actions: codeReviewActions });
+  }
+
   for (const area of order) {
     const toolId = visibleToolIdByArea.value[area];
     if (!toolId) continue;
+    if (toolId === "codeReview") continue;
     const def = toolById.value.get(toolId);
     const actions = def?.headerActions?.() ?? [];
     if (actions.length === 0) continue;

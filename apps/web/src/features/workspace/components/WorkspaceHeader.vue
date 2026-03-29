@@ -39,19 +39,45 @@
         {{ t("workspace.actions.checkout") }}
       </a-button>
 
-      <template v-for="group in headerActionGroups" :key="group.key">
+      <template v-for="(group, groupIndex) in headerActionGroups" :key="group.key">
+        <a-divider v-if="groupIndex > 0" type="vertical" class="!mx-0 !h-5 !border-[var(--border-color-secondary)]" />
+
         <div class="flex items-center gap-2">
-          <a-button
-            v-for="action in group.actions"
-            :key="action.id"
-            size="small"
-            :disabled="action.disabled"
-            :loading="action.loading"
-            @click="action.onClick"
-          >
-            {{ action.label }}
-          </a-button>
-        </div>
+          <template v-for="(segment, segmentIndex) in splitActionSegments(group.actions)" :key="`${group.key}:${segment.key}`">
+            <a-divider v-if="segmentIndex > 0" type="vertical" class="!mx-0 !h-4 !border-[var(--border-color-secondary)]" />
+
+            <template v-for="action in segment.actions" :key="action.id">
+            <a-button
+              v-if="!action.tooltip"
+              size="small"
+              :disabled="action.disabled"
+              :loading="action.loading"
+              @click="action.onClick"
+            >
+              <template v-if="action.icon" #icon><component :is="action.icon" /></template>
+              <span v-if="action.label">{{ action.label }}</span>
+            </a-button>
+
+            <a-tooltip
+              v-else
+              :title="action.tooltip"
+              :mouseEnterDelay="0"
+              :mouseLeaveDelay="0"
+              placement="top"
+            >
+              <a-button
+                size="small"
+                :disabled="action.disabled"
+                :loading="action.loading"
+                @click="action.onClick"
+              >
+                <template v-if="action.icon" #icon><component :is="action.icon" /></template>
+                <span v-if="action.label">{{ action.label }}</span>
+              </a-button>
+            </a-tooltip>
+            </template>
+          </template>
+          </div>
       </template>
     </div>
 
@@ -87,6 +113,24 @@ const repoDirName = computed({
   get: () => props.currentRepoDirName,
   set: (value: string) => emit("update:currentRepoDirName", value)
 });
+
+function normalizedActionGroupKey(groupKey: string | undefined) {
+  return groupKey?.trim() || "__default";
+}
+
+function splitActionSegments(actions: HeaderActionGroup["actions"]) {
+  const segments: { key: string; actions: HeaderActionGroup["actions"] }[] = [];
+  for (const action of actions) {
+    const key = normalizedActionGroupKey(action.groupKey);
+    const prev = segments[segments.length - 1];
+    if (!prev || prev.key !== key) {
+      segments.push({ key, actions: [action] });
+      continue;
+    }
+    prev.actions.push(action);
+  }
+  return segments;
+}
 
 function onCheckout() {
   emit("checkout");

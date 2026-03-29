@@ -80,6 +80,10 @@ import MonacoDiffViewer from "@/shared/components/MonacoDiffViewer.vue";
 
 const props = defineProps<{ workspaceId: string; toolId: string }>();
 const { t } = useI18n();
+const emit = defineEmits<{
+  (e: "diffTabActiveChange", active: boolean): void;
+}>();
+
 const host = useWorkspaceHost(props.toolId);
 const store = getEditorStore(props.workspaceId);
 
@@ -101,7 +105,7 @@ let editorSaveCommandId: string | null = null;
 let editorApplyScheduled = false;
 let highlightDecorations: string[] = [];
 const fileRequestSeqByPath = new Map<string, number>();
-let unregisterRefresh: (() => void) | null = null;
+let unregisterToolCommands: (() => void) | null = null;
 let latestOpenFileSeq = 0;
 const openingFileTasks = ref(0);
 
@@ -669,6 +673,14 @@ watch(
 );
 
 watch(
+  () => activeTab.value?.kind,
+  (kind) => {
+    emit("diffTabActiveChange", kind === "diff");
+  },
+  { immediate: true }
+);
+
+watch(
   () => store.tabs.length,
   (next, prev) => {
     if (next !== 0) return;
@@ -681,8 +693,22 @@ watch(() => openingFileTasks.value, (next) => {
   if (next === 0) maybeMinimizeEditorWhenEmpty();
 });
 
+function goToPreviousDiff() {
+  if (activeTab.value?.kind !== "diff") return;
+  diffViewerRef.value?.goToPreviousDiff();
+}
+
+function goToNextDiff() {
+  if (activeTab.value?.kind !== "diff") return;
+  diffViewerRef.value?.goToNextDiff();
+}
+
 onMounted(() => {
-  unregisterRefresh = host.registerToolCommands(props.toolId, { refresh: () => refreshActiveFileTab() });
+  unregisterToolCommands = host.registerToolCommands(props.toolId, {
+    refresh: () => refreshActiveFileTab(),
+    goToPreviousDiff,
+    goToNextDiff
+  });
   scheduleApplyEditor();
   requestAnimationFrame(() => maybeMinimizeEditorWhenEmpty());
   if (typeof window !== "undefined") window.addEventListener("keydown", handleEditorKeydown, true);
@@ -691,8 +717,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   if (typeof window !== "undefined") window.removeEventListener("keydown", handleEditorKeydown, true);
   clearHighlightDecorations();
-  unregisterRefresh?.();
-  unregisterRefresh = null;
+  unregisterToolCommands?.();
+  unregisterToolCommands = null;
   editorBlurDisposable?.dispose();
   editor?.dispose();
   editorSaveCommandId = null;

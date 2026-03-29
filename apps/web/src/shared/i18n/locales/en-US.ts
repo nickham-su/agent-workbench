@@ -182,7 +182,9 @@ export default {
       pull: "Pull",
       push: "Push",
       attachRepo: "Add repo",
-      detachRepo: "Remove repo"
+      detachRepo: "Remove repo",
+      previousChange: "Previous change",
+      nextChange: "Next change"
     },
     repoSelector: {
       placeholder: "Select repo",

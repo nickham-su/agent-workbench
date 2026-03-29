@@ -180,7 +180,9 @@ export default {
       pull: "拉取",
       push: "推送",
       attachRepo: "添加仓库",
-      detachRepo: "移除仓库"
+      detachRepo: "移除仓库",
+      previousChange: "上一处变更",
+      nextChange: "下一处变更"
     },
     repoSelector: {
       placeholder: "选择仓库",
