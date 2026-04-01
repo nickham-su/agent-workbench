@@ -145,7 +145,8 @@ export default {
       repoLabel: "Repo",
       repoPlaceholder: "Select repo",
       titleLabel: "Title",
-      titlePlaceholder: "Optional: defaults to concatenated repo names",
+      titlePlaceholder: "Enter workspace title",
+      titleRequired: "Title is required",
       terminalCredentialLabel: "Terminal credential",
       terminalCredentialHelp: "Apply this credential to terminals in this workspace",
       terminalCredentialDisabledWarning:
@@ -182,7 +183,9 @@ export default {
       pull: "Pull",
       push: "Push",
       attachRepo: "Add repo",
-      detachRepo: "Remove repo"
+      detachRepo: "Remove repo",
+      previousChange: "Previous change",
+      nextChange: "Next change"
     },
     repoSelector: {
       placeholder: "Select repo",

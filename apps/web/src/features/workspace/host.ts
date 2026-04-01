@@ -5,6 +5,8 @@ export type DockArea = "leftTop" | "leftBottom" | "rightTop";
 
 export type WorkspaceToolCommandMap = {
   refresh?: () => void | Promise<void>;
+  goToPreviousDiff?: () => void | Promise<void>;
+  goToNextDiff?: () => void | Promise<void>;
 };
 
 export type ToolCall = {
