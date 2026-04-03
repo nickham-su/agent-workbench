@@ -64,7 +64,6 @@
 - 解析与净化栈为：
   - `markdown-it`
   - `dompurify`
-  - `mermaid`
   - 关键实现位于 `agent-workbench/apps/web/src/features/workspace/tools/agent/AssistantMarkdownMessage.vue`
 
 当前明确支持的结构：
@@ -76,7 +75,7 @@
 - 行内代码
 - 代码块
 - 链接
-- Mermaid fenced code block
+- Mermaid fenced code block（作为普通代码块展示）
 
 当前明确不支持或不应依赖的结构：
 
@@ -287,7 +286,6 @@
 - 在合适时优先使用标题、列表、表格、引用、行内代码、代码块和链接。
 - 对比信息、参数说明、选项差异等内容，优先使用表格展示。
 - 命令、代码、配置、日志片段应优先使用 fenced code block。
-- 需要表达流程或关系图时，可使用 Mermaid fenced code block。
 - 不要依赖图片、内嵌 HTML、任务列表复选框或数学公式等格式。
 - 如果 Markdown 会降低表达清晰度，则直接使用纯文本。
 
@@ -320,15 +318,15 @@
 - 在合适时优先使用标题、列表、表格、引用、行内代码、代码块和链接。
 - 对比信息、参数说明、选项差异等内容，优先使用表格展示。
 - 命令、代码、配置、日志片段应优先使用 fenced code block。
-- 需要表达流程或关系图时，可使用 Mermaid fenced code block。
 - 不要依赖图片、内嵌 HTML、任务列表复选框或数学公式等格式。
 - 如果 Markdown 会降低表达清晰度，则直接使用纯文本。
 ```
 
 设计依据：
 
-- 当前 assistant Markdown 渲染能力由 `markdown-it + dompurify + mermaid` 提供。
-- 标题、列表、表格、引用、代码块、链接、Mermaid 是当前可稳定使用的结构。
+- 当前 assistant Markdown 渲染能力由 `markdown-it + dompurify` 提供。
+- 标题、列表、表格、引用、代码块、链接是当前可稳定使用的结构。
+- Mermaid fenced code block 当前按普通代码块展示，不做图形渲染。
 - 图片、HTML、任务列表复选框、数学公式不是当前应鼓励模型依赖的结构。
 
 ### `runtime_constraints` 的呈现方式
@@ -548,7 +546,7 @@
 - 发起一次中文 run 与英文 run，确认 `runtime_constraints` 内容仍随 locale 变化。
 - 检查最终 `context.system` 中，完成判定约束位于 `runtime_constraints` 内，而不出现在 `output_format_instructions` 中。
 - 在前端验证 assistant 回复中：
-  - 表格、代码块、链接、Mermaid 呈现正常
+  - 表格、代码块、链接呈现正常，` ```mermaid ` 代码块按普通代码块展示
   - 图片、HTML、任务列表复选框、数学公式不被当作受支持格式依赖
 
 ### 回归关注点
