@@ -323,7 +323,7 @@
 
     <div
       v-if="!isSubtaskSession"
-      class="p-3 border-t border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]"
+      class="p-2 border-t border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]"
       :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
     >
       <div
@@ -386,7 +386,7 @@
       </div>
       <div class="pt-2">
         <div class="flex items-center gap-2">
-          <div v-if="hasAvailableAgents" class="flex items-center gap-2 min-w-0">
+          <div v-if="hasAvailableAgents" class="flex items-center gap-0.5 min-w-0">
             <a-select
               :value="effectiveAgentId"
               :options="props.agentOptions"
@@ -394,25 +394,21 @@
               style="min-width: 180px; max-width: 320px"
               @update:value="onAgentChange"
             />
-            <div v-if="hasAvailableAgents" class="min-w-0 max-w-[360px]">
-              <a-tooltip :title="t('agent.client.modelEditTooltip')" placement="top">
+            <div v-if="hasAvailableAgents" class="min-w-0 max-w-[360px] flex items-center ml-1 mr-2">
+              <a-tooltip :title="t('agent.client.modelEditTooltip')" placement="top" :mouse-enter-delay="0.45">
                 <a-button
-                  type="link"
+                  type="text"
                   size="small"
-                  class="!px-0 !h-auto max-w-full"
+                  class="!px-0.5 max-w-full"
                   :title="effectiveModelLabel || t('agent.client.modelEditUnavailable')"
                   @click="onOpenAgentModelModal"
                 >
-                  <span
-                    class="inline-block min-w-0 max-w-[360px] truncate text-[0.9em] text-[color:var(--text-tertiary)]"
-                  >
-                    {{ effectiveModelLabel || t("agent.client.modelEditUnavailable") }}
-                  </span>
+                 {{ effectiveModelLabel || t("agent.client.modelEditUnavailable") }}
                 </a-button>
               </a-tooltip>
             </div>
             <div class="flex items-center gap-1">
-              <a-tooltip :title="t('agent.client.agentEnablementTooltip')" placement="top">
+              <a-tooltip :title="t('agent.client.agentEnablementTooltip')" placement="top" :mouse-enter-delay="0.45">
                 <a-button
                   size="small"
                   type="text"
@@ -423,7 +419,7 @@
                   <template #icon><RobotOutlined /></template>
                 </a-button>
               </a-tooltip>
-              <a-tooltip :title="t('agent.client.contextManagerTooltip')" placement="top">
+              <a-tooltip :title="t('agent.client.contextManagerTooltip')" placement="top" :mouse-enter-delay="0.45">
                 <a-button
                   size="small"
                   type="text"
@@ -442,7 +438,7 @@
               {{ t("agent.client.goCreateAgent") }}
             </a-button>
             <div class="flex items-center gap-1">
-              <a-tooltip :title="t('agent.client.agentEnablementTooltip')" placement="top">
+              <a-tooltip :title="t('agent.client.agentEnablementTooltip')" placement="top" :mouse-enter-delay="0.45">
                 <a-button
                   size="small"
                   type="text"
@@ -453,7 +449,7 @@
                   <template #icon><RobotOutlined /></template>
                 </a-button>
               </a-tooltip>
-              <a-tooltip :title="t('agent.client.contextManagerTooltip')" placement="top">
+              <a-tooltip :title="t('agent.client.contextManagerTooltip')" placement="top" :mouse-enter-delay="0.45">
                 <a-button
                   size="small"
                   type="text"
