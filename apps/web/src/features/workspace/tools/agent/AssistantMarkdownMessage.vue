@@ -49,7 +49,7 @@ markdown.renderer.rules.fence = (tokens, idx, options) => {
   const classAttr = className ? ` class="${className}"` : "";
   const copyLabel = escapeHtml(t("agent.client.copyCode"));
   const code = escapeHtml(String(token.content || ""));
-  return `<div class="assistant-code-block" data-assistant-code-block="1"><button type="button" class="assistant-code-copy-btn" data-copy-code="1" aria-label="${copyLabel}">${copyLabel}</button><pre><code${classAttr}>${code}</code></pre></div>`;
+  return `<div class="assistant-code-block" data-assistant-code-block="1"><button type="button" class="assistant-code-copy-btn" data-copy-code="1" aria-label="${copyLabel}" title="${copyLabel}"><span class="assistant-code-copy-icon" aria-hidden="true"></span></button><pre><code${classAttr}>${code}</code></pre></div>`;
 };
 
 let hookInstalled = false;
@@ -317,11 +317,30 @@ onBeforeUnmount(() => {
   right: 0.45rem;
   border: 1px solid var(--border-color-secondary);
   border-radius: 6px;
-  padding: 0.08rem 0.45rem;
-  font-size: 0.9em;
+  padding: 0.18rem;
   color: var(--text-secondary);
   background: var(--panel-bg-elevated);
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.assistant-markdown-message :deep(.assistant-code-copy-icon) {
+  display: inline-flex;
+  width: 12px;
+  height: 12px;
+}
+
+.assistant-markdown-message :deep(.assistant-code-copy-icon::before) {
+  content: "";
+  display: block;
+  width: 100%;
+  height: 100%;
+  background-color: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='64 64 896 896'%3E%3Cpath d='M832 64H296c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h496v688c0 4.4 3.6 8 8 8h56c4.4 0 8-3.6 8-8V96c0-17.7-14.3-32-32-32zM704 192H192c-17.7 0-32 14.3-32 32v530.7c0 8.5 3.4 16.6 9.4 22.6l173.3 173.3c2.2 2.2 4.7 4 7.4 5.5v1.9h4.2c3.5 1.3 7.2 2 11 2H704c17.7 0 32-14.3 32-32V224c0-17.7-14.3-32-32-32zM350 856.2L263.9 770H350v86.2zM664 888H414V746c0-22.1-17.9-40-40-40H232V264h432v624z'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='64 64 896 896'%3E%3Cpath d='M832 64H296c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h496v688c0 4.4 3.6 8 8 8h56c4.4 0 8-3.6 8-8V96c0-17.7-14.3-32-32-32zM704 192H192c-17.7 0-32 14.3-32 32v530.7c0 8.5 3.4 16.6 9.4 22.6l173.3 173.3c2.2 2.2 4.7 4 7.4 5.5v1.9h4.2c3.5 1.3 7.2 2 11 2H704c17.7 0 32-14.3 32-32V224c0-17.7-14.3-32-32-32zM350 856.2L263.9 770H350v86.2zM664 888H414V746c0-22.1-17.9-40-40-40H232V264h432v624z'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 
 .assistant-markdown-message :deep(a[href]) {
