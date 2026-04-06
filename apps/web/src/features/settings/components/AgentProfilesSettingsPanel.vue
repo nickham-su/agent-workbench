@@ -164,6 +164,16 @@
           </div>
         </a-form-item>
 
+        <a-form-item :label="t('settings.agentProfiles.fields.defaultModel')">
+          <a-cascader
+            v-model:value="agentFormDefaultModelPath"
+            :options="defaultModelCascaderOptions"
+            :placeholder="t('settings.agentProfiles.agentForm.defaultModelCascaderPlaceholder')"
+            :show-search="true"
+            expand-trigger="hover"
+          />
+        </a-form-item>
+
         <a-form-item :label="t('settings.agentProfiles.fields.globalPrompts')">
           <a-select
             v-model:value="agentFormGlobalPromptIds"
@@ -199,16 +209,6 @@
           <div class="pt-1 text-xs text-[color:var(--text-tertiary)]">
             {{ t("settings.agentProfiles.agentForm.pluginToolsHelp") }}
           </div>
-        </a-form-item>
-
-        <a-form-item :label="t('settings.agentProfiles.fields.defaultModel')">
-          <a-cascader
-            v-model:value="agentFormDefaultModelPath"
-            :options="defaultModelCascaderOptions"
-            :placeholder="t('settings.agentProfiles.agentForm.defaultModelCascaderPlaceholder')"
-            :show-search="true"
-            expand-trigger="hover"
-          />
         </a-form-item>
 
         <a-form-item :label="t('settings.agentProfiles.fields.scope')" :required="true">

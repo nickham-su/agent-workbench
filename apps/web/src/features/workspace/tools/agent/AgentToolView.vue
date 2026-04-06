@@ -64,13 +64,13 @@
               @update:model-value="(value) => setSessionAgent(session.id, value)"
                @forked="onSessionForked"
               @open-subtask="onOpenSubtask"
-               @open-parent="(parentSessionId) => onOpenParent(session.id, parentSessionId)"
-               @session-title-sync-needed="requestSessionTitleSync"
-               @choose-session="openChooseSessionModal(session.id)"
-               @agent-enablement-saved="onAgentEnablementSaved"
-             />
-           </div>
-       </a-tab-pane>
+                @open-parent="(parentSessionId) => onOpenParent(session.id, parentSessionId)"
+                @session-title-sync-needed="requestSessionTitleSync"
+                @choose-session="openChooseSessionModal(session.id)"
+                @agent-settings-updated="onAgentSettingsUpdated"
+              />
+            </div>
+        </a-tab-pane>
 
       <a-tab-pane key="__agent_add__">
         <template #tab>
@@ -446,7 +446,7 @@ async function refreshAgents() {
   }
 }
 
-function onAgentEnablementSaved() {
+function onAgentSettingsUpdated() {
   void refreshAgents();
 }
 

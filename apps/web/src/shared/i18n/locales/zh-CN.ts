@@ -379,6 +379,12 @@ export default {
       externalSkillRootsSourceRepo: "Repo",
       externalSkillRootsMeta: "{count} 个skills",
       slashCommandHintNoMatch: "未找到匹配的指令: /{query}",
+      modelEditTitle: "修改 Agent 模型",
+      modelEditHint: "将修改当前选中 Agent 的默认模型（全局生效，跨 workspace）。",
+      modelEditSaved: "已保存 Agent 默认模型",
+      modelEditUnavailable: "模型信息不可用，点击可设置默认模型",
+      modelEditTooltip: "点击后将修改该 Agent 的全局默认模型（跨 workspace 生效）",
+      modelEditAgentMissing: "当前 Agent 不存在或已被删除",
       promptCommandsLoadFailedHint: "提示词指令加载失败，将仅显示内置指令",
       inputCandidateNoMatch: "未找到匹配项: {query}",
       slashCommands: {

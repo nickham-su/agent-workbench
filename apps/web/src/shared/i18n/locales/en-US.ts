@@ -381,6 +381,12 @@ export default {
       externalSkillRootsSourceRepo: "Repo",
       externalSkillRootsMeta: "{count} skills",
       slashCommandHintNoMatch: "No matching command: /{query}",
+      modelEditTitle: "Edit agent model",
+      modelEditHint: "This updates the selected agent's default model globally (across workspaces).",
+      modelEditSaved: "Agent default model saved",
+      modelEditUnavailable: "Model info unavailable. Click to set default model",
+      modelEditTooltip: "Click to update this agent's global default model (applies across workspaces)",
+      modelEditAgentMissing: "The current agent does not exist or was removed",
       promptCommandsLoadFailedHint: "Failed to load prompt commands. Only builtin commands are available.",
       inputCandidateNoMatch: "No matching suggestion: {query}",
       slashCommands: {
