@@ -1,4 +1,5 @@
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { TextDecoder } from "node:util";
 import { createHash } from "node:crypto";
 import type { Readable } from "node:stream";
@@ -51,6 +52,7 @@ const DENYLIST_SEGMENTS = [".git"];
 const MAX_DOWNLOAD_DIR_BYTES = 100 * 1024 * 1024;
 const DEFAULT_SUGGEST_LIMIT = 50;
 const MAX_SUGGEST_LIMIT = 200;
+const SUGGEST_TIMEOUT_MS = 5000;
 
 type WorkspaceScope = {
   workspaceId: string;
@@ -762,53 +764,70 @@ export async function searchWorkspaceFiles(
   });
 }
 
-async function collectFileSuggestionsUnderRoot(params: {
+function isRgUserError(message: string) {
+  const lower = message.toLowerCase();
+  if (!lower) return false;
+  return (
+    lower.includes("regex parse error") ||
+    lower.includes("error parsing regex") ||
+    lower.includes("invalid regex") ||
+    lower.includes("error parsing --glob") ||
+    lower.includes("invalid glob") ||
+    lower.includes("error parsing glob") ||
+    lower.includes("unrecognized escape") ||
+    lower.includes("invalid escape")
+  );
+}
+
+async function listWorkspaceFilesByRg(params: {
   rootAbs: string;
-  prefix: string;
-  queryLower: string;
-  limit: number;
-  items: string[];
-  seen: Set<string>;
-}) {
-  if (params.items.length >= params.limit) return;
-  const fs = await import("node:fs/promises");
-  const absDir = safeResolveUnderRoot({ root: params.rootAbs, rel: params.prefix || "." });
-  if (!absDir) return;
-  let dirents: import("node:fs").Dirent[];
-  try {
-    dirents = await fs.readdir(absDir, { withFileTypes: true });
-  } catch (err: any) {
-    if (err && (err.code === "ENOENT" || err.code === "ENOTDIR" || err.code === "EACCES" || err.code === "EPERM")) return;
-    throw err;
+  excludeGlobs: string[];
+}): Promise<string[]> {
+  const args = ["--no-config", "--no-follow", "--files", "--hidden"];
+  for (const glob of params.excludeGlobs) {
+    args.push("--glob", `!${glob}`);
   }
-  for (const dirent of dirents) {
-    if (params.items.length >= params.limit) return;
-    const name = dirent.name;
-    if (!name || DENYLIST_SEGMENTS.includes(name)) continue;
-    const rel = params.prefix ? `${params.prefix}/${name}` : name;
-    const abs = safeResolveUnderRoot({ root: params.rootAbs, rel });
-    if (!abs || abs === params.rootAbs) continue;
-    let st: import("node:fs").Stats;
-    try {
-      st = await fs.lstat(abs);
-    } catch (err: any) {
-      if (err && (err.code === "ENOENT" || err.code === "ENOTDIR" || err.code === "EACCES" || err.code === "EPERM")) continue;
-      throw err;
-    }
-    if (st.isSymbolicLink()) continue;
-    await ensureRealPathUnderRoot(params.rootAbs, abs);
-    if (st.isDirectory()) {
-      await collectFileSuggestionsUnderRoot({ ...params, prefix: rel });
-      continue;
-    }
-    if (!st.isFile()) continue;
-    const fileNameLower = name.toLowerCase();
-    const relLower = rel.toLowerCase();
-    if (params.queryLower && !fileNameLower.includes(params.queryLower) && !relLower.includes(params.queryLower)) continue;
-    if (params.seen.has(rel)) continue;
-    params.seen.add(rel);
-    params.items.push(rel);
-  }
+  args.push(".");
+
+  let timedOut = false;
+  let stderrText = "";
+  let stdoutBuffer = "";
+
+  const child = spawn("rg", args, { cwd: params.rootAbs });
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+
+  const done = new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, SUGGEST_TIMEOUT_MS);
+
+    child.stdout.on("data", (chunk: string) => {
+      stdoutBuffer += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      stderrText += chunk;
+    });
+    child.on("error", (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timeout);
+      if (timedOut) return reject(new HttpError(408, "Search timed out"));
+      if (code === 0 || code === 1) return resolve();
+      const reason = stderrText.trim() || "rg failed";
+      const status = isRgUserError(reason) ? 400 : 500;
+      reject(new HttpError(status, reason));
+    });
+  });
+
+  await done;
+  return stdoutBuffer
+    .split(/\r?\n/g)
+    .map((line) => line.trim())
+    .filter(Boolean);
 }
 
 export async function suggestWorkspaceFilePaths(
@@ -825,16 +844,21 @@ export async function suggestWorkspaceFilePaths(
     ? Math.max(1, Math.min(MAX_SUGGEST_LIMIT, Math.floor(rawLimit)))
     : DEFAULT_SUGGEST_LIMIT;
 
+  const settings = getSearchSettings(ctx);
+  const baseExcludeGlobs = [...settings.excludeGlobs, ...SEARCH_FORCED_EXCLUDES];
+  // suggest 在 workspace 根范围遍历，使用与 global workspace search 一致的 exclude 展开语义
+  const excludeGlobs = expandWorkspaceExcludeGlobs(baseExcludeGlobs);
+
+  const allFiles = await listWorkspaceFilesByRg({ rootAbs: scope.rootAbs, excludeGlobs });
   const items: string[] = [];
-  const seen = new Set<string>();
-  await collectFileSuggestionsUnderRoot({
-    rootAbs: scope.rootAbs,
-    prefix: "",
-    queryLower,
-    limit,
-    items,
-    seen
-  });
+  for (const rel of allFiles) {
+    if (items.length >= limit) break;
+    const fileName = rel.split("/").pop() ?? rel;
+    const fileNameLower = fileName.toLowerCase();
+    const relLower = rel.toLowerCase();
+    if (queryLower && !fileNameLower.includes(queryLower) && !relLower.includes(queryLower)) continue;
+    items.push(rel);
+  }
   return { items };
 }
 
