@@ -1,12 +1,14 @@
 <template>
-  <div class="assistant-markdown-message break-words" :class="toneClass" v-html="safeHtml" />
+  <div ref="rootEl" class="assistant-markdown-message break-words" :class="toneClass" v-html="safeHtml" @click="onMarkdownClick" />
 </template>
 
 <script setup lang="ts">
+import { message } from "ant-design-vue";
 import DOMPurify from "dompurify";
 import MarkdownIt from "markdown-it";
 import type { Config as DOMPurifyConfig } from "dompurify";
 import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
 
 const props = defineProps<{
   text: string;
@@ -21,6 +23,10 @@ const MARKDOWN_CACHE_MAX = 240;
 
 const markdownCache = new Map<string, string>();
 
+const { t, locale } = useI18n();
+
+const rootEl = ref<HTMLElement | null>(null);
+
 const markdown = new MarkdownIt({
   html: false,
   linkify: true,
@@ -28,8 +34,23 @@ const markdown = new MarkdownIt({
   typographer: false
 });
 
+function escapeHtml(value: string) {
+  return markdown.utils.escapeHtml(value);
+}
+
 // 当前版本不支持图片渲染.
 markdown.renderer.rules.image = () => "";
+
+markdown.renderer.rules.fence = (tokens, idx, options) => {
+  const token = tokens[idx];
+  const info = markdown.utils.unescapeAll(String(token.info || "")).trim();
+  const languageName = info.split(/\s+/, 1)[0] || "";
+  const className = languageName ? `${options.langPrefix}${escapeHtml(languageName)}` : "";
+  const classAttr = className ? ` class="${className}"` : "";
+  const copyLabel = escapeHtml(t("agent.client.copyCode"));
+  const code = escapeHtml(String(token.content || ""));
+  return `<div class="assistant-code-block" data-assistant-code-block="1"><button type="button" class="assistant-code-copy-btn" data-copy-code="1" aria-label="${copyLabel}">${copyLabel}</button><pre><code${classAttr}>${code}</code></pre></div>`;
+};
 
 let hookInstalled = false;
 
@@ -80,7 +101,7 @@ function ensurePurifyHooks() {
 
 const MARKDOWN_SANITIZE_CONFIG: DOMPurifyConfig = {
   USE_PROFILES: { html: true },
-  FORBID_TAGS: ["img", "script", "style", "iframe", "object", "embed", "form", "input", "button", "textarea", "select", "option", "meta", "link"],
+  FORBID_TAGS: ["img", "script", "style", "iframe", "object", "embed", "form", "input", "textarea", "select", "option", "meta", "link"],
   FORBID_ATTR: ["style"]
 };
 
@@ -149,7 +170,7 @@ function scheduleMarkdownRender() {
 async function renderMarkdown() {
   const seq = ++renderSeq;
   const rawText = String(props.text || "");
-  const key = cacheKeyOf(rawText, `markdown:${props.sectionKey || "body"}`);
+  const key = cacheKeyOf(rawText, `markdown:${props.sectionKey || "body"}:${locale.value}`);
   const cached = getCacheValue(markdownCache, key);
   if (cached != null) {
     safeHtml.value = cached;
@@ -164,12 +185,43 @@ async function renderMarkdown() {
   setCacheValue(markdownCache, key, safe, MARKDOWN_CACHE_MAX);
 }
 
+async function onCopyCode(code: string) {
+  try {
+    await navigator.clipboard.writeText(code);
+    message.success(t("agent.client.codeCopied"));
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err || "unknown error");
+    message.error(t("common.copyFailed", { reason }));
+  }
+}
+
+function onMarkdownClick(event: MouseEvent) {
+  const target = event.target as HTMLElement | null;
+  if (!target) return;
+  const button = target.closest<HTMLElement>("[data-copy-code='1']");
+  if (!button || !rootEl.value?.contains(button)) return;
+  const block = button.closest<HTMLElement>("[data-assistant-code-block='1']");
+  const codeElement = block?.querySelector<HTMLElement>("pre > code");
+  if (!codeElement) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+  void onCopyCode(codeElement.textContent || "");
+}
+
 watch(
   () => [props.text, !!props.streaming] as const,
   () => {
     scheduleMarkdownRender();
   },
   { immediate: true }
+);
+
+watch(
+  () => locale.value,
+  () => {
+    scheduleMarkdownRender();
+  }
 );
 
 onBeforeUnmount(() => {
@@ -249,16 +301,39 @@ onBeforeUnmount(() => {
   background: var(--panel-bg-elevated);
 }
 
-.assistant-markdown-message :deep(pre code) {
+.assistant-markdown-message :deep(.assistant-code-block) {
+  position: relative;
+  margin: 0.5rem 0;
+}
+
+.assistant-markdown-message :deep(.assistant-code-block > pre) {
+  margin: 0;
+  padding-top: 2rem;
+}
+
+.assistant-markdown-message :deep(.assistant-code-copy-btn) {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.45rem;
+  border: 1px solid var(--border-color-secondary);
+  border-radius: 6px;
+  padding: 0.08rem 0.45rem;
   font-size: 0.9em;
-  line-height: 1.5;
-  white-space: pre;
+  color: var(--text-secondary);
+  background: var(--panel-bg-elevated);
+  cursor: pointer;
 }
 
 .assistant-markdown-message :deep(a[href]) {
   color: rgb(37 99 235);
   text-decoration: underline;
   text-underline-offset: 2px;
+}
+
+.assistant-markdown-message :deep(pre code) {
+  font-size: 0.9em;
+  line-height: 1.5;
+  white-space: pre;
 }
 
 .assistant-markdown-message :deep(table) {

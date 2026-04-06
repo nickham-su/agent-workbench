@@ -315,6 +315,8 @@ export default {
       backToParent: "Back",
       copySessionId: "Copy session ID",
       sessionIdCopied: "Session ID copied",
+      copyCode: "Copy code",
+      codeCopied: "Code copied",
       parentSessionMissing: "Parent session not found",
       subtaskRunningHint: "Running for {elapsed}. Cancel in the parent session.",
       subtaskCancelInParentHint: "Cancel in the parent session if needed.",

@@ -313,6 +313,8 @@ export default {
       backToParent: "返回",
       copySessionId: "复制 Session ID",
       sessionIdCopied: "已复制 Session ID",
+      copyCode: "复制代码",
+      codeCopied: "代码已复制",
       parentSessionMissing: "未找到父会话",
       subtaskRunningHint: "已运行 {elapsed}，如需取消请到主会话",
       subtaskCancelInParentHint: "如需取消，请到主会话",
