@@ -386,7 +386,7 @@ export default {
       modelEditTitle: "Edit agent model",
       modelEditHint: "This updates the selected agent's default model globally (across workspaces).",
       modelEditSaved: "Agent default model saved",
-      modelEditUnavailable: "Model info unavailable. Click to set default model",
+      modelEditUnavailable: "Model info unavailable",
       modelEditTooltip: "Change model",
       modelEditAgentMissing: "The current agent does not exist or was removed",
       promptCommandsLoadFailedHint: "Failed to load prompt commands. Only builtin commands are available.",
@@ -840,8 +840,7 @@ export default {
         addModel: "Add model",
         copy: "Copy",
         edit: "Edit",
-        delete: "Delete",
-        setDefault: "Set default"
+        delete: "Delete"
       },
       fields: {
         baseURL: "Base URL",
@@ -896,8 +895,7 @@ export default {
         aiSdkDocsLink: "AI SDK docs",
         providerOptionsLabel: "Provider Params JSON (auto wrapped as {key})",
         providerOptionsHelp: "Only provide the current provider sub-object. The system wraps it into providerOptions.{key} automatically.",
-        providerDocsLink: "Provider docs",
-        setAsDefault: "Set as default model"
+        providerDocsLink: "Provider docs"
       },
       deleteProvider: {
         title: "Delete provider?",
@@ -920,7 +918,6 @@ export default {
         duplicateModelId: "Model ID already exists",
         modelListLoadFailed: "Failed to load model suggestions. You can still input model ID manually.",
         renameBlocked: "This model ID is still referenced. Remove references before renaming: {refs}",
-        renameBlockedGlobalDefault: "Global default model",
         renameBlockedAgent: "Agent {id}",
         renameBlockedGeneric: "This model ID is still referenced. Remove references before renaming."
       },
@@ -994,7 +991,6 @@ export default {
         globalPrompts: "Prompt library",
         summary: "Summary",
         defaultModel: "Default model",
-        useGlobalDefault: "Use global default model",
         customDefaultModel: "Use custom default model"
       },
       tools: {
@@ -1036,8 +1032,8 @@ export default {
         mcpServersPlaceholder: "Select allowed MCP servers",
         pluginToolsPlaceholder: "Select enabled plugin tools",
         pluginToolsHelp: "Only tools from globally enabled, ready plugins are selectable.",
-        defaultModelCascaderPlaceholder: "Select default model strategy",
-        defaultModelModeLabel: "Default model strategy",
+        defaultModelCascaderPlaceholder: "Select a default model",
+        defaultModelModeLabel: "Default model",
         defaultProviderLabel: "Provider",
         defaultProviderPlaceholder: "Select a provider",
         defaultModelLabel: "Model",
@@ -1052,7 +1048,7 @@ export default {
       errors: {
         invalidAgentForm: "Please complete required agent fields",
         duplicateAgentId: "Agent ID already exists",
-        defaultModelInvalid: "Default model does not exist, please reselect",
+        defaultModelRequired: "Please select a default model",
         promptTooLong: "Role setup is too long. Maximum {maxKb}KB"
       },
       saved: "Saved"

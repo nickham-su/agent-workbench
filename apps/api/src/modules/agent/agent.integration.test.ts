@@ -435,7 +435,7 @@ async function configureAgentDefaults(app: FastifyInstance) {
           tools: ["bash", "read", "write"],
           pluginTools: [],
           mcpServers: [],
-          defaultModel: null,
+          defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
           scope: "both",
           order: 0
         }
@@ -462,7 +462,7 @@ test("agent settings 兼容缺省 scope/order 并按原顺序归一化", async (
            tools: ["bash", "read"],
            pluginTools: [],
            mcpServers: [],
-           defaultModel: null,
+           defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
            scope: "both",
            order: 9
         },
@@ -474,7 +474,7 @@ test("agent settings 兼容缺省 scope/order 并按原顺序归一化", async (
            tools: ["bash", "read"],
            pluginTools: [],
            mcpServers: [],
-           defaultModel: null,
+           defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
            scope: "user",
            order: 3
         }
@@ -506,9 +506,9 @@ test("agent prompt-context 生成 subtask 描述时仅暴露 subtask/both agent"
     url: "/api/settings/agent/agents",
     payload: {
       agents: [
-        { id: "user-only", name: "User Only", summary: "for user", prompt: "", tools: ["bash", "subtask"], pluginTools: [], mcpServers: [], defaultModel: null, scope: "user", order: 0 },
-        { id: "subtask-only", name: "Subtask Only", summary: "for subtask", prompt: "", tools: ["bash", "subtask"], pluginTools: [], mcpServers: [], defaultModel: null, scope: "subtask", order: 1 },
-        { id: "shared", name: "Shared", summary: "shared", prompt: "", tools: ["bash", "subtask"], pluginTools: [], mcpServers: [], defaultModel: null, scope: "both", order: 2 }
+        { id: "user-only", name: "User Only", summary: "for user", prompt: "", tools: ["bash", "subtask"], pluginTools: [], mcpServers: [], defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" }, scope: "user", order: 0 },
+        { id: "subtask-only", name: "Subtask Only", summary: "for subtask", prompt: "", tools: ["bash", "subtask"], pluginTools: [], mcpServers: [], defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" }, scope: "subtask", order: 1 },
+        { id: "shared", name: "Shared", summary: "shared", prompt: "", tools: ["bash", "subtask"], pluginTools: [], mcpServers: [], defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" }, scope: "both", order: 2 }
       ]
     }
   });
@@ -552,7 +552,7 @@ test("agent prompt-context 中的工具描述与 schema 说明使用英文", asy
              tools: ["bash", "read", "scratchpad", "subtask", "todolist", "apply_patch"],
              pluginTools: [],
              mcpServers: [],
-             defaultModel: null,
+             defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
             scope: "both",
             order: 0
          }
@@ -622,7 +622,7 @@ test("agent scope 校验会拒绝错误场景的 agent 并在无可用 agent 时
     url: "/api/settings/agent/agents",
     payload: {
       agents: [
-        { id: "subtask-only", name: "Subtask Only", summary: "", prompt: "", tools: ["bash", "read"], pluginTools: [], mcpServers: [], defaultModel: null, scope: "subtask", order: 0 }
+        { id: "subtask-only", name: "Subtask Only", summary: "", prompt: "", tools: ["bash", "read"], pluginTools: [], mcpServers: [], defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" }, scope: "subtask", order: 0 }
       ]
     }
   });
@@ -684,12 +684,12 @@ test("GET /api/settings/agent/agents 返回每个 agent 的 resolvedModel", asyn
           name: "default",
            summary: "",
            prompt: "You are a helpful coding assistant.",
-           tools: ["bash", "read", "write"],
-           pluginTools: [],
-           mcpServers: [],
-           defaultModel: null,
-           scope: "both",
-           order: 0
+            tools: ["bash", "read", "write"],
+            pluginTools: [],
+            mcpServers: [],
+            defaultModel: { providerId: "global_provider", modelId: "global_model" },
+            scope: "both",
+            order: 0
         },
         {
           id: "custom",
@@ -720,7 +720,7 @@ test("GET /api/settings/agent/agents 返回每个 agent 的 resolvedModel", asyn
     contextWindowTokens: 128000,
     modelId: "global_model",
     modelName: "Global Model",
-    source: "global_default"
+    source: "agent_default"
   });
   assert.deepEqual(customAgent?.resolvedModel, {
     providerId: "agent_provider",
@@ -2470,6 +2470,27 @@ test("openai provider apiMode 会在 settings 与 execution-profile/single-call 
   assert.equal(openaiProvider?.options?.apiMode, "chatCompletions");
   assert.equal(anthropicProvider?.options?.apiMode, undefined);
 
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          summary: "",
+          prompt: "You are a helpful coding assistant.",
+          tools: ["bash", "read", "write"],
+          mcpServers: [],
+          defaultModel: { providerId: "compat_openai", modelId: "deepseek-v3" },
+          scope: "both",
+          order: 0
+        }
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `update agents failed: ${agentsRes.body}`);
+
   const session = await createSession(fixture.app, fixture.workspaceId);
   const msg = await sendMessage(fixture.app, {
     sessionId: session.id,
@@ -2589,7 +2610,7 @@ test("subtask session 的 execution-profile 按 subtask surface 校验", async (
           prompt: "You are a subtask specialist.",
           tools: ["bash", "read"],
           mcpServers: [],
-          defaultModel: null,
+          defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
           scope: "subtask",
           order: 0
         }
@@ -2654,7 +2675,7 @@ test("run 创建后若 agent scope 改为不允许, execution-profile 会返回�
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          defaultModel: null,
+          defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
           scope: "subtask",
           order: 0
         }
@@ -3169,7 +3190,7 @@ test("agent prompt-context 对 subtask 会话隐藏 subtask 工具", async () =>
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write", "subtask"],
           mcpServers: [],
-          defaultModel: null,
+          defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
           scope: "both",
           order: 0
         }
@@ -3232,7 +3253,7 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write", "subtask"],
           mcpServers: [],
-          defaultModel: null,
+          defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
           scope: "both",
           order: 0
         }
@@ -4094,7 +4115,7 @@ test("agent subtask fork 对父 run 非法 locale 做归一化回退，避免继
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write", "subtask"],
           mcpServers: [],
-          defaultModel: null,
+          defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
           scope: "both",
           order: 0
         }
@@ -4257,7 +4278,7 @@ test("agent prompt-context 对 primary 会话保留 subtask 工具", async () =>
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write", "subtask"],
           mcpServers: [],
-          defaultModel: null,
+          defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
           scope: "both",
           order: 0
         }
@@ -5275,7 +5296,7 @@ test("internal sessions/context-items-tail header/body pluginId 不一致时返�
   assert.equal(res.json().code, "PLUGIN_ID_MISMATCH");
 });
 
-test("single-call model profile 始终使用全局默认模型", async () => {
+test("single-call model profile 使用 agent 显式默认模型", async () => {
   const fixture = await createFixture();
 
   const providersRes = await fixture.app.inject({
@@ -5370,9 +5391,9 @@ test("single-call model profile 始终使用全局默认模型", async () => {
   });
   assert.equal(profileRes.statusCode, 200, `get single-call model profile failed: ${profileRes.body}`);
   const profile = profileRes.json() as any;
-  assert.equal(profile.resolved?.source, "global_default");
-  assert.equal(profile.provider?.id, "global_provider");
-  assert.equal(profile.model?.id, "global_model");
+  assert.equal(profile.resolved?.source, "agent_default");
+  assert.equal(profile.provider?.id, "agent_provider");
+  assert.equal(profile.model?.id, "agent_model");
 });
 
 test("agent context 压缩后会归档并支持 archive_search/read", async () => {
@@ -7413,7 +7434,7 @@ test("agent settings 兼容缺省 globalPromptIds", async () => {
           prompt: "You are a helpful coding assistant.",
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          defaultModel: null,
+          defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
           scope: "both",
           order: 0
         }
@@ -7508,7 +7529,7 @@ test("agent prompt-context 全局提示词按列表顺序注入(方案A)", async
           globalPromptIds: ["global_system_prompt", "gp_b", "gp_a"],
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          defaultModel: null,
+          defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
           scope: "both",
           order: 0
         }
@@ -7558,6 +7579,14 @@ test("agent prompt-context 同时存在 global/workspace/agent 时按既定顺�
   const createdAt = Date.now();
 
   await fs.writeFile(path.join(fixture.workspacePath, "AGENTS.md"), "WORKSPACE_RULE", "utf-8");
+  setSettingJson(fixture.db, "workspace_agents_instructions_v1", {
+    workspaces: {
+      [fixture.workspaceId]: {
+        enabledSources: [{ sourceType: "workspace", enabledAt: Date.now() }],
+        updatedAt: Date.now()
+      }
+    }
+  }, Date.now());
 
   const globalPromptsRes = await fixture.app.inject({
     method: "PUT",
@@ -7584,7 +7613,7 @@ test("agent prompt-context 同时存在 global/workspace/agent 时按既定顺�
           globalPromptIds: ["gp_b", "gp_a"],
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          defaultModel: null,
+          defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
           scope: "both",
           order: 0
         }
@@ -7621,7 +7650,7 @@ test("agent prompt-context 同时存在 global/workspace/agent 时按既定顺�
   const idxSystemBaseTag = context.system.indexOf("[system_base]");
   const idxATag = context.system.indexOf("[global_prompt] A");
   const idxBTag = context.system.indexOf("[global_prompt] B");
-  const idxWorkspace = context.system.indexOf("[workspace_instructions] AGENTS.md");
+  const idxWorkspace = context.system.indexOf("[agents_instructions] AGENTS.md");
   const idxAgentTag = context.system.indexOf("[agent_prompt] default");
   const idxAgent = context.system.indexOf("AGENT_PROMPT");
 
@@ -7775,7 +7804,7 @@ test("agent prompt-context 在 agent prompt 为空且无 workspace/global 时仅
           prompt: "",
           tools: ["bash", "read", "write"],
           mcpServers: [],
-          defaultModel: null,
+          defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
           scope: "both",
           order: 0
         }
@@ -7827,6 +7856,14 @@ test("agent prompt-context 对 workspace AGENTS.md 做 32KB 截断并追加标�
   const createdAt = Date.now();
   const agentsPath = path.join(fixture.workspacePath, "AGENTS.md");
   await fs.writeFile(agentsPath, `RULE\n${"A".repeat(40 * 1024)}`, "utf-8");
+  setSettingJson(fixture.db, "workspace_agents_instructions_v1", {
+    workspaces: {
+      [fixture.workspaceId]: {
+        enabledSources: [{ sourceType: "workspace", enabledAt: Date.now() }],
+        updatedAt: Date.now()
+      }
+    }
+  }, Date.now());
 
   createRunRecord(fixture.db, {
     runId,
@@ -7849,11 +7886,11 @@ test("agent prompt-context 对 workspace AGENTS.md 做 32KB 截断并追加标�
   });
 
   assert.ok(
-    context.system.includes("[workspace_instructions] AGENTS.md"),
+    context.system.includes("[agents_instructions] AGENTS.md"),
     "system should include workspace section with relative path"
   );
   assert.ok(
-    context.system.includes("[workspace AGENTS.md truncated: first 32KB]"),
+    context.system.includes("[AGENTS.md truncated: first 32KB]"),
     "system should include truncation marker"
   );
   assert.ok(context.system.includes("[agent_prompt] default"), "system should include agent section when workspace section exists");
@@ -7924,6 +7961,14 @@ test("agent prompt-context 注入 skills 摘要并在同 run 缓存静态部分"
             { sourceType: "workspace", rootDir: "deploy-skill", enabledAt: Date.now() },
             { sourceType: "repo", repoId, rootDir: repoSkillsRootDir, enabledAt: Date.now() }
           ],
+          updatedAt: Date.now()
+        }
+      }
+    }, Date.now());
+    setSettingJson(fixture.db, "workspace_agents_instructions_v1", {
+      workspaces: {
+        [fixture.workspaceId]: {
+          enabledSources: [{ sourceType: "workspace", enabledAt: Date.now() }],
           updatedAt: Date.now()
         }
       }

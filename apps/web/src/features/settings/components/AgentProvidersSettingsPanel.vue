@@ -30,13 +30,6 @@
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-2">
                   <div class="font-semibold text-xs truncate" :title="provider.name">{{ provider.name }}</div>
-                  <a-tag
-                    v-if="isDefaultProvider(provider.id)"
-                    color="blue"
-                    class="!text-[10px] !leading-[16px] !px-1 !py-0"
-                  >
-                    {{ t("common.default") }}
-                  </a-tag>
                   <a-tag v-if="provider.npm" color="default" class="!text-[10px] !leading-[16px] !px-1 !py-0">{{ provider.npm }}</a-tag>
                 </div>
                 <div class="mt-0.5 text-[11px] text-[color:var(--text-tertiary)] truncate" :title="provider.id">{{ provider.id }}</div>
@@ -95,13 +88,6 @@
                   <div class="text-left text-xs font-semibold truncate">
                     {{ model.name }}
                   </div>
-                  <a-tag
-                    v-if="isDefaultModel(activeProviderId, model.id)"
-                    color="blue"
-                    class="!text-[10px] !leading-[16px] !px-1 !py-0"
-                  >
-                    {{ t("common.default") }}
-                  </a-tag>
                 </div>
                 <div class="text-[11px] text-[color:var(--text-tertiary)] truncate">
                   {{ t('settings.agentProviders.modelForm.idLabel') }}: {{ model.id }}
@@ -114,14 +100,6 @@
                 </div>
               </div>
               <div class="shrink-0 flex items-center gap-1">
-                <a-button
-                  v-if="activeProvider && !isDefaultModel(activeProviderId, model.id)"
-                  size="small"
-                  type="text"
-                  @click="setDefaultModel(activeProviderId, model.id, true)"
-                >
-                  {{ t('settings.agentProviders.actions.setDefault') }}
-                </a-button>
                 <a-button size="small" type="text" @click="openEditModel(activeProviderId, model.id)">
                   {{ t('settings.agentProviders.actions.edit') }}
                 </a-button>
@@ -300,9 +278,6 @@
             </a>
           </div>
         </a-form-item>
-        <a-form-item>
-          <a-checkbox v-model:checked="modelFormDefault">{{ t('settings.agentProviders.modelForm.setAsDefault') }}</a-checkbox>
-        </a-form-item>
       </a-form>
     </a-modal>
   </div>
@@ -355,11 +330,6 @@ type EditingProvider = {
   models: EditingModel[];
 };
 
-type ProviderDefaultRef = {
-  providerId: string;
-  modelId: string;
-};
-
 const DEFAULT_PROVIDER_NPM: AgentProviderNpm = "@ai-sdk/openai";
 const MODEL_EDITOR_Z_INDEX = 1100;
 
@@ -379,7 +349,6 @@ const providerApiModeOptions: Array<{ value: AgentProviderOpenAiApiMode; label: 
 
 const saving = ref(false);
 const providers = ref<EditingProvider[]>([]);
-const selectedDefault = ref<ProviderDefaultRef | null>(null);
 
 const activeProviderId = ref("");
 
@@ -404,7 +373,6 @@ const modelFormName = ref("");
 const modelFormContextWindowTokens = ref<number>(128000);
 const modelFormAiSdkJson = ref("{}");
 const modelFormProviderOptionsJson = ref("{}");
-const modelFormDefault = ref(false);
 
 const providerModelIdInputSearch = ref("");
 const providerModelIdOptionsLoading = ref(false);
@@ -420,15 +388,8 @@ const activeProvider = computed(() => getProvider(activeProviderId.value));
 const sortedActiveModels = computed(() => {
   const provider = activeProvider.value;
   if (!provider) return [];
-
-  const defaultModelId = selectedDefault.value?.providerId === provider.id ? selectedDefault.value?.modelId ?? null : null;
   const models = [...provider.models];
   models.sort((a, b) => {
-    const aIsDefault = defaultModelId ? a.id === defaultModelId : false;
-    const bIsDefault = defaultModelId ? b.id === defaultModelId : false;
-    if (aIsDefault && !bIsDefault) return -1;
-    if (!aIsDefault && bIsDefault) return 1;
-
     const aName = a.name?.trim() || a.id;
     const bName = b.name?.trim() || b.id;
     return aName.localeCompare(bName, undefined, { sensitivity: "base" });
@@ -491,26 +452,11 @@ function getProvider(providerId: string) {
   return providers.value.find((item) => item.id === providerId) ?? null;
 }
 
-function sanitizeDefault(selection: ProviderDefaultRef | null, providerList: EditingProvider[]) {
-  if (!selection) return null;
-  const provider = providerList.find((item) => item.id === selection.providerId);
-  if (!provider) return null;
-  if (!provider.models.some((model) => model.id === selection.modelId)) return null;
-  return selection;
-}
-
-function syncDefaultWithProviders() {
-  selectedDefault.value = sanitizeDefault(selectedDefault.value, providers.value);
-}
-
 function sanitizeActiveProviderId(nextProviders: EditingProvider[]) {
   if (nextProviders.length === 0) return "";
 
   const current = activeProviderId.value;
   if (current && nextProviders.some((p) => p.id === current)) return current;
-
-  const defaultProviderId = selectedDefault.value?.providerId;
-  if (defaultProviderId && nextProviders.some((p) => p.id === defaultProviderId)) return defaultProviderId;
 
   return nextProviders[0]?.id ?? "";
 }
@@ -540,15 +486,8 @@ function mapFromSettings(view: AgentProvidersSettingsView) {
   }));
 
   providers.value = nextProviders;
-  selectedDefault.value = sanitizeDefault(view.default, nextProviders);
   activeProviderId.value = sanitizeActiveProviderId(nextProviders);
 }
-
-const isDefaultProvider = (providerId: string) => selectedDefault.value?.providerId === providerId;
-
-const isDefaultModel = (providerId: string, modelId: string) => {
-  return selectedDefault.value?.providerId === providerId && selectedDefault.value?.modelId === modelId;
-};
 
 function providerOptionsKeyForNpm(npm: AgentProviderNpm) {
   return npm === "@ai-sdk/anthropic" ? "anthropic" : "openai";
@@ -749,12 +688,10 @@ function confirmDeleteProvider(providerId: string) {
     onOk: () => {
       const nextProviders = providers.value.filter((item) => item.id !== providerId);
       providers.value = nextProviders;
-      if (selectedDefault.value?.providerId === providerId) selectedDefault.value = null;
       if (activeProviderId.value === providerId) {
         // keep selection stable: if deleting active provider, switch to next available
         activeProviderId.value = sanitizeActiveProviderId(nextProviders);
       }
-      syncDefaultWithProviders();
       void persist({ toast: true });
     }
   });
@@ -772,7 +709,6 @@ function openAddModel(providerId: string) {
   modelFormContextWindowTokens.value = 128000;
   modelFormAiSdkJson.value = "{}";
   modelFormProviderOptionsJson.value = "{}";
-  modelFormDefault.value = false;
   renameReferenceError.value = "";
   providerModelIdInputSearch.value = "";
   providerModelIdRemoteItems.value = [];
@@ -801,7 +737,6 @@ async function openEditModel(providerId: string, modelId: string) {
   const providerOptions = toJsonRecord(providerOptionsByKey[providerKey]);
   modelFormAiSdkJson.value = stringifyPretty(aiSdk);
   modelFormProviderOptionsJson.value = stringifyPretty(providerOptions);
-  modelFormDefault.value = isDefaultModel(provider.id, model.id);
   renameReferenceError.value = "";
   providerModelIdInputSearch.value = "";
   providerModelIdRemoteItems.value = [];
@@ -882,9 +817,6 @@ function updateRenameReferenceError() {
   if (!providerId || !oldId || !nextId || oldId === nextId) return;
 
   const refs: string[] = [];
-  if (selectedDefault.value?.providerId === providerId && selectedDefault.value?.modelId === oldId) {
-    refs.push(t("settings.agentProviders.errors.renameBlockedGlobalDefault"));
-  }
   for (const agent of agentsSnapshot.value) {
     if (agent.defaultModel?.providerId === providerId && agent.defaultModel?.modelId === oldId) {
       refs.push(t("settings.agentProviders.errors.renameBlockedAgent", { id: agent.id }));
@@ -923,7 +855,6 @@ function closeModelModal() {
   modelFormContextWindowTokens.value = 128000;
   modelFormAiSdkJson.value = "{}";
   modelFormProviderOptionsJson.value = "{}";
-  modelFormDefault.value = false;
 
   // make any in-flight provider model list request stale
   providerModelIdOptionsRequestSeq.value += 1;
@@ -979,22 +910,11 @@ function submitModel() {
 
   if (modelModalMode.value === "create") {
     provider.models.push(modelPayload);
-    if (modelFormDefault.value) {
-      selectedDefault.value = { providerId: provider.id, modelId: nextId };
-    }
   } else {
     const idx = provider.models.findIndex((item) => item.id === modelFormOriginalId.value);
     if (idx < 0) return;
     provider.models[idx] = modelPayload;
-
-    if (modelFormDefault.value) {
-      selectedDefault.value = { providerId: provider.id, modelId: nextId };
-    } else if (isDefaultModel(provider.id, modelFormOriginalId.value)) {
-      selectedDefault.value = null;
-    }
   }
-
-  syncDefaultWithProviders();
   closeModelModal();
   void persist({ toast: true });
 }
@@ -1014,22 +934,14 @@ function confirmDeleteModel(providerId: string, modelId: string) {
     okType: "danger",
     onOk: () => {
       provider.models = provider.models.filter((item) => item.id !== modelId);
-      if (isDefaultModel(provider.id, modelId)) selectedDefault.value = null;
-      syncDefaultWithProviders();
       void persist({ toast: true });
     }
   });
 }
 
-function setDefaultModel(providerId: string, modelId: string, toast = false) {
-  selectedDefault.value = { providerId, modelId };
-  void persist({ toast });
-}
-
 function toDraft() {
-  syncDefaultWithProviders();
   return {
-    default: selectedDefault.value,
+    default: null,
     providers: providers.value.map((provider) => {
       const options = {
         baseURL: provider.baseURL.trim()

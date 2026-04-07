@@ -1440,9 +1440,10 @@ export async function registerAgentRoutes(
               runId: Type.String({ minLength: 1 }),
               sessionId: Type.String({ minLength: 1 }),
               workspaceId: Type.String({ minLength: 1 }),
+              agentId: Type.String({ minLength: 1 }),
               providerId: Type.String({ minLength: 1 }),
               modelId: Type.String({ minLength: 1 }),
-              source: Type.Literal("global_default")
+              source: Type.Literal("agent_default")
             }),
             provider: Type.Object({
               id: Type.String({ minLength: 1 }),

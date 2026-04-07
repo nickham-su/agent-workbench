@@ -258,9 +258,11 @@ export type AgentPluginTools = Static<typeof AgentPluginToolsSchema>;
 export const AgentDefaultModelSchema = Type.Union([AgentProvidersDefaultSchema, Type.Null()]);
 export type AgentDefaultModel = Static<typeof AgentDefaultModelSchema>;
 
+export const AgentRequiredDefaultModelSchema = AgentProvidersDefaultSchema;
+export type AgentRequiredDefaultModel = Static<typeof AgentRequiredDefaultModelSchema>;
+
 export const AgentResolvedModelSourceSchema = Type.Union([
-  Type.Literal("agent_default"),
-  Type.Literal("global_default")
+  Type.Literal("agent_default")
 ]);
 export type AgentResolvedModelSource = Static<typeof AgentResolvedModelSourceSchema>;
 
@@ -324,8 +326,23 @@ export const AgentSettingsViewSchema = Type.Object({
 });
 export type AgentSettingsView = Static<typeof AgentSettingsViewSchema>;
 
+export const UpdateAgentItemSchema = Type.Object({
+  id: Type.String({ minLength: 1 }),
+  name: Type.String({ minLength: 1 }),
+  summary: Type.String({ maxLength: 160 }),
+  prompt: Type.String(),
+  globalPromptIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+  tools: Type.Array(AgentToolNameSchema),
+  mcpServers: Type.Array(Type.String({ minLength: 1 })),
+  pluginTools: Type.Optional(AgentPluginToolsSchema),
+  defaultModel: AgentRequiredDefaultModelSchema,
+  scope: AgentScopeSchema,
+  order: Type.Integer({ minimum: 0 })
+});
+export type UpdateAgentItem = Static<typeof UpdateAgentItemSchema>;
+
 export const UpdateAgentSettingsRequestSchema = Type.Object({
-  agents: Type.Array(AgentItemSchema)
+  agents: Type.Array(UpdateAgentItemSchema)
 });
 export type UpdateAgentSettingsRequest = Static<typeof UpdateAgentSettingsRequestSchema>;
 

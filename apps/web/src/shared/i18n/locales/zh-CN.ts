@@ -384,7 +384,7 @@ export default {
       modelEditTitle: "修改 Agent 模型",
       modelEditHint: "将修改当前选中 Agent 的默认模型（全局生效，跨 workspace）。",
       modelEditSaved: "已保存 Agent 默认模型",
-      modelEditUnavailable: "模型信息不可用，点击可设置默认模型",
+      modelEditUnavailable: "模型信息不可用",
       modelEditTooltip: "修改模型",
       modelEditAgentMissing: "当前 Agent 不存在或已被删除",
       promptCommandsLoadFailedHint: "提示词指令加载失败，将仅显示内置指令",
@@ -838,8 +838,7 @@ export default {
         addModel: "添加模型",
         copy: "复制",
         edit: "编辑",
-        delete: "删除",
-        setDefault: "设为默认"
+        delete: "删除"
       },
       fields: {
         baseURL: "Base URL",
@@ -894,8 +893,7 @@ export default {
         aiSdkDocsLink: "AI SDK 文档",
         providerOptionsLabel: "Provider 参数 JSON (自动包装为 {key})",
         providerOptionsHelp: "仅填写当前 Provider 的子对象, 系统会自动包装到 providerOptions.{key}。",
-        providerDocsLink: "Provider 文档",
-        setAsDefault: "设为默认模型"
+        providerDocsLink: "Provider 文档"
       },
       deleteProvider: {
         title: "删除 Provider？",
@@ -918,7 +916,6 @@ export default {
         duplicateModelId: "Model ID 已存在",
         modelListLoadFailed: "加载模型候选失败, 可手动输入 Model ID。",
         renameBlocked: "当前模型 ID 正被引用, 请先解除引用后再修改：{refs}",
-        renameBlockedGlobalDefault: "全局默认模型",
         renameBlockedAgent: "Agent {id}",
         renameBlockedGeneric: "模型 ID 正被引用, 请先解除引用后再修改。"
       },
@@ -992,7 +989,6 @@ export default {
         globalPrompts: "提示词库",
         summary: "简介",
         defaultModel: "默认模型",
-        useGlobalDefault: "默认模型",
         customDefaultModel: "使用自定义默认模型"
       },
       tools: {
@@ -1034,8 +1030,8 @@ export default {
         mcpServersPlaceholder: "选择可用的 MCP Server",
         pluginToolsPlaceholder: "选择已启用插件提供的工具",
         pluginToolsHelp: "仅可选择全局已启用且状态为 Ready 的插件工具。",
-        defaultModelCascaderPlaceholder: "选择默认模型策略",
-        defaultModelModeLabel: "默认模型策略",
+        defaultModelCascaderPlaceholder: "请选择默认模型",
+        defaultModelModeLabel: "默认模型",
         defaultProviderLabel: "Provider",
         defaultProviderPlaceholder: "请选择 Provider",
         defaultModelLabel: "模型",
@@ -1050,7 +1046,7 @@ export default {
       errors: {
         invalidAgentForm: "请完整填写 Agent 必填项",
         duplicateAgentId: "Agent ID 已存在",
-        defaultModelInvalid: "默认模型不存在, 请重新选择",
+        defaultModelRequired: "请选择默认模型",
         promptTooLong: "角色设定过长，最多 {maxKb}KB"
       },
       saved: "已保存"

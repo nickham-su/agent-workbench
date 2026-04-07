@@ -269,7 +269,6 @@ type EditingAgent = {
   order: number;
 };
 
-const GLOBAL_DEFAULT_MODEL_PATH = "__global__";
 const AGENT_PROMPT_MAX_BYTES = 32 * 1024;
 const RESERVED_GLOBAL_SYSTEM_PROMPT_ID = "global_system_prompt";
 
@@ -312,17 +311,12 @@ const agentFormGlobalPromptIds = ref<string[]>([]);
 const agentFormTools = ref<AgentToolName[]>([...DEFAULT_TOOLS]);
 const agentFormMcpServers = ref<string[]>([]);
 const agentFormPluginTools = ref<AgentPluginTools>([]);
-const agentFormDefaultModelPath = ref<string[]>([GLOBAL_DEFAULT_MODEL_PATH]);
+const agentFormDefaultModelPath = ref<string[]>([]);
 const agentFormScope = ref<AgentScope>("both");
 
 const defaultModelCascaderOptions = computed(() => {
   const providers = providersSettings.value?.providers ?? [];
-  return [
-    {
-      label: t("settings.agentProfiles.fields.useGlobalDefault"),
-      value: GLOBAL_DEFAULT_MODEL_PATH
-    },
-    ...providers
+  return providers
       .filter((provider) => provider.models.length > 0)
       .map((provider) => ({
         label: provider.name,
@@ -332,7 +326,7 @@ const defaultModelCascaderOptions = computed(() => {
           value: model.id
         }))
       }))
-  ];
+  ;
 });
 
 const mcpServerOptions = computed(() => {
@@ -488,7 +482,6 @@ function toDefaultModelFromPath(pathRaw: unknown): AgentDefaultModel | undefined
   const path = Array.isArray(pathRaw)
     ? pathRaw.map((item) => String(item || "").trim()).filter((item) => item.length > 0)
     : [];
-  if (path.length === 1 && path[0] === GLOBAL_DEFAULT_MODEL_PATH) return null;
   if (path.length !== 2) return undefined;
   const [providerId, modelId] = path;
   if (!providerId || !modelId) return undefined;
@@ -498,7 +491,7 @@ function toDefaultModelFromPath(pathRaw: unknown): AgentDefaultModel | undefined
 }
 
 function defaultModelLabel(defaultModel: AgentDefaultModel) {
-  if (!defaultModel) return t("settings.agentProfiles.fields.useGlobalDefault");
+  if (!defaultModel) return t("agent.client.modelEditUnavailable");
   const found = findModel(defaultModel.providerId, defaultModel.modelId);
   if (!found) {
     return `${defaultModel.providerId}/${defaultModel.modelId}`;
@@ -570,7 +563,7 @@ function openCreateAgent() {
   agentFormTools.value = [...DEFAULT_TOOLS];
   agentFormMcpServers.value = [];
   agentFormPluginTools.value = [];
-  agentFormDefaultModelPath.value = [GLOBAL_DEFAULT_MODEL_PATH];
+  agentFormDefaultModelPath.value = [];
   agentFormScope.value = "both";
   agentModalOpen.value = true;
 }
@@ -589,7 +582,7 @@ function openEditAgent(agentId: string) {
   agentFormPluginTools.value = normalizePluginTools(target.pluginTools);
   agentFormDefaultModelPath.value = target.defaultModel
     ? [target.defaultModel.providerId, target.defaultModel.modelId]
-    : [GLOBAL_DEFAULT_MODEL_PATH];
+    : [];
   agentFormScope.value = target.scope;
   agentModalOpen.value = true;
 }
@@ -605,7 +598,7 @@ function closeAgentModal() {
   agentFormTools.value = [...DEFAULT_TOOLS];
   agentFormMcpServers.value = [];
   agentFormPluginTools.value = [];
-  agentFormDefaultModelPath.value = [GLOBAL_DEFAULT_MODEL_PATH];
+  agentFormDefaultModelPath.value = [];
   agentFormScope.value = "both";
 }
 
@@ -623,8 +616,12 @@ function submitAgent() {
   }
 
   const defaultModel = toDefaultModelFromPath(agentFormDefaultModelPath.value);
+  if (agentFormDefaultModelPath.value.length === 0) {
+    message.error(t("settings.agentProfiles.errors.defaultModelRequired"));
+    return;
+  }
   if (defaultModel === undefined) {
-    message.error(t("settings.agentProfiles.errors.defaultModelInvalid"));
+    message.error(t("settings.agentProfiles.errors.defaultModelRequired"));
     return;
   }
   if (agentPromptBytes.value > AGENT_PROMPT_MAX_BYTES) {

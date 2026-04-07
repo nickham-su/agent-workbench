@@ -796,7 +796,6 @@ const HISTORY_PAGE_LIMIT = 100;
 const TOP_LOAD_THRESHOLD_PX = 80;
 const POLL_RUNNING_MS = 850;
 const POLL_LOCAL_NON_TERMINAL_MS = 700;
-const GLOBAL_DEFAULT_MODEL_PATH = "__global__";
 const SCROLL_TO_BOTTOM_BUTTON_THRESHOLD_PX = 240;
 
 const props = defineProps<{
@@ -879,8 +878,8 @@ const agentModelModalVisible = ref(false);
 const agentModelLoading = ref(false);
 const agentModelSaving = ref(false);
 const agentModelError = ref("");
-const agentModelFormPath = ref<string[]>([GLOBAL_DEFAULT_MODEL_PATH]);
-const agentModelInitialPath = ref<string[]>([GLOBAL_DEFAULT_MODEL_PATH]);
+const agentModelFormPath = ref<string[]>([]);
+const agentModelInitialPath = ref<string[]>([]);
 const agentModelTargetAgentId = ref("");
 const agentModelProvidersSettings = ref<AgentProvidersSettingsView | null>(null);
 
@@ -1290,12 +1289,7 @@ const effectiveModelLabel = computed(() => {
 
 const agentModelCascaderOptions = computed(() => {
   const providers = agentModelProvidersSettings.value?.providers ?? [];
-  return [
-    {
-      label: t("settings.agentProfiles.fields.useGlobalDefault"),
-      value: GLOBAL_DEFAULT_MODEL_PATH
-    },
-    ...providers
+  return providers
       .filter((provider) => provider.models.length > 0)
       .map((provider) => ({
         label: provider.name,
@@ -1305,7 +1299,7 @@ const agentModelCascaderOptions = computed(() => {
           value: model.id
         }))
       }))
-  ];
+  ;
 });
 
 function findAgentProviderModel(providerId: string, modelId: string) {
@@ -1319,7 +1313,6 @@ function findAgentProviderModel(providerId: string, modelId: string) {
 
 function toAgentDefaultModelFromPath(pathRaw: unknown): AgentDefaultModel | undefined {
   const path = Array.isArray(pathRaw) ? pathRaw.map((item) => String(item || "").trim()).filter((item) => item.length > 0) : [];
-  if (path.length === 1 && path[0] === GLOBAL_DEFAULT_MODEL_PATH) return null;
   if (path.length !== 2) return undefined;
   const [providerId, modelId] = path;
   if (!providerId || !modelId) return undefined;
@@ -3147,7 +3140,7 @@ async function onOpenAgentModelModal() {
     }
     const initialPath = target.defaultModel
       ? [target.defaultModel.providerId, target.defaultModel.modelId]
-      : [GLOBAL_DEFAULT_MODEL_PATH];
+      : [];
     agentModelFormPath.value = [...initialPath];
     agentModelInitialPath.value = [...initialPath];
   } catch (err) {
@@ -3165,14 +3158,13 @@ async function onSaveAgentModel() {
   const defaultModel = toAgentDefaultModelFromPath(agentModelFormPath.value);
   const initialDefaultModel = toAgentDefaultModelFromPath(agentModelInitialPath.value);
   if (defaultModel === undefined) {
-    message.error(t("settings.agentProfiles.errors.defaultModelInvalid"));
+    message.error(t("settings.agentProfiles.errors.defaultModelRequired"));
     return;
   }
-  if (initialDefaultModel === undefined) {
-    message.error(t("settings.agentProfiles.errors.defaultModelInvalid"));
-    return;
-  }
-  if (isSameAgentDefaultModel(defaultModel, initialDefaultModel)) {
+
+  // 历史非法配置（initialDefaultModel === undefined）允许保存修复；
+  // 仅在初始值可解析且确实未变更时直接关闭弹窗。
+  if (initialDefaultModel !== undefined && isSameAgentDefaultModel(defaultModel, initialDefaultModel)) {
     agentModelModalVisible.value = false;
     return;
   }

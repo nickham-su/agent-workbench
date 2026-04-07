@@ -89,7 +89,6 @@ import {
   registerGlobalSystemPromptTextProvider,
   getAgentSettings,
   listAvailableAgentsForSurface,
-  resolveGlobalDefaultModelProfile,
   getAgentChannelSenderAllowlistSettings,
   resolveExecutionProfile
 } from "../settings/settings.service.js";
@@ -3627,16 +3626,23 @@ export class AgentService {
       throw new HttpError(404, "run not found");
     }
 
-    const profile = resolveGlobalDefaultModelProfile(this.ctx);
+    const profile = resolveExecutionProfile(this.ctx, {
+      surface: session.kind === "subtask" ? "subtask" : "user",
+      agentIdFromRun: run.agentId,
+      workspaceEnablement: getWorkspaceEnabledAgentIds(this.ctx, session.workspaceId),
+      providerIdFromRun: run.providerId,
+      modelIdFromRun: run.modelId
+    });
 
     return {
       resolved: {
         runId: params.runId,
         sessionId: params.sessionId,
         workspaceId: params.workspaceId,
+        agentId: profile.agent.id,
         providerId: profile.provider.id,
         modelId: profile.model.id,
-        source: "global_default" as const
+        source: "agent_default" as const
       },
       provider: profile.provider,
       model: profile.model
