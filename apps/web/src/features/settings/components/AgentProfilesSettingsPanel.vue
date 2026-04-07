@@ -535,9 +535,14 @@ function markDirty() {
   return saveRevision.value;
 }
 
-function toRequestBody() {
-  return {
-    agents: agents.value.map((agent) => ({
+function toRequestBody(): UpdateAgentSettingsRequest | null {
+  const requestAgents: UpdateAgentSettingsRequest["agents"] = [];
+  for (const agent of agents.value) {
+    if (!agent.defaultModel) {
+      message.error(t("settings.agentProfiles.errors.defaultModelRequired"));
+      return null;
+    }
+    requestAgents.push({
       id: agent.id,
       name: agent.name.trim() || agent.id,
       summary: agent.summary.trim(),
@@ -549,7 +554,10 @@ function toRequestBody() {
       mcpServers: normalizeMcpServers(agent.mcpServers),
       pluginTools: [...agent.pluginTools],
       defaultModel: agent.defaultModel
-    }))
+    });
+  }
+  return {
+    agents: requestAgents
   } satisfies UpdateAgentSettingsRequest;
 }
 
@@ -760,6 +768,7 @@ async function persist(params: { toast: boolean }) {
   saving.value = true;
   try {
     const body = toRequestBody();
+    if (!body) return;
     await persistAgentProfilesDraft({
       getRevision: () => saveRevision.value,
       body,

@@ -3178,8 +3178,14 @@ async function onSaveAgentModel() {
       agentModelError.value = t("agent.client.modelEditAgentMissing");
       return;
     }
-    const payload = {
-      agents: settingsRes.agents.map((agent) => ({
+    const requestAgents: UpdateAgentSettingsRequest["agents"] = [];
+    for (const agent of settingsRes.agents) {
+      const nextDefaultModel = agent.id === targetId ? defaultModel : agent.defaultModel;
+      if (!nextDefaultModel) {
+        message.error(t("settings.agentProfiles.errors.defaultModelRequired"));
+        return;
+      }
+      requestAgents.push({
         id: agent.id,
         name: agent.name,
         summary: agent.summary,
@@ -3188,10 +3194,13 @@ async function onSaveAgentModel() {
         tools: agent.tools,
         mcpServers: agent.mcpServers,
         pluginTools: agent.pluginTools,
-        defaultModel: agent.id === targetId ? defaultModel : agent.defaultModel,
+        defaultModel: nextDefaultModel,
         scope: agent.scope,
         order: agent.order
-      }))
+      });
+    }
+    const payload = {
+      agents: requestAgents
     } satisfies UpdateAgentSettingsRequest;
     await updateAgentSettings(payload);
     message.success(t("agent.client.modelEditSaved"));

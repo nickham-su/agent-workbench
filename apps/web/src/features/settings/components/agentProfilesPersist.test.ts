@@ -15,7 +15,7 @@ function makeSettings(updatedAt: number): AgentSettings {
         tools: ["bash"],
         pluginTools: [],
         mcpServers: [],
-        defaultModel: null,
+        defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
         scope: "both",
         order: 0
       }
