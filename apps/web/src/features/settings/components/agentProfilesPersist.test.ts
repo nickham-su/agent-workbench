@@ -1,25 +1,33 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { AgentSettings } from "@agent-workbench/shared";
+import type { AgentSettings, UpdateAgentSettingsRequest } from "@agent-workbench/shared";
 import { persistAgentProfilesDraft } from "./agentProfilesPersist";
+
+function makeAgent(updatedAt: number): UpdateAgentSettingsRequest["agents"][number] {
+  return {
+    id: `agent-${updatedAt}`,
+    name: `Agent ${updatedAt}`,
+    summary: "",
+    prompt: "",
+    globalPromptIds: [],
+    tools: ["bash"],
+    pluginTools: [],
+    mcpServers: [],
+    defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
+    scope: "both",
+    order: 0
+  };
+}
+
+function makeRequestBody(updatedAt: number): UpdateAgentSettingsRequest {
+  return {
+    agents: [makeAgent(updatedAt)]
+  };
+}
 
 function makeSettings(updatedAt: number): AgentSettings {
   return {
-    agents: [
-      {
-        id: `agent-${updatedAt}`,
-        name: `Agent ${updatedAt}`,
-        summary: "",
-        prompt: "",
-        globalPromptIds: [],
-        tools: ["bash"],
-        pluginTools: [],
-        mcpServers: [],
-        defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
-        scope: "both",
-        order: 0
-      }
-    ],
+    agents: [makeAgent(updatedAt)],
     updatedAt
   };
 }
@@ -31,7 +39,7 @@ test("persistAgentProfilesDraft 仅在 revision 仍匹配时应用返回结果",
 
   const first = persistAgentProfilesDraft({
     getRevision: () => revision,
-    body: makeSettings(1),
+    body: makeRequestBody(1),
     update: async () => await new Promise<AgentSettings>((resolve) => {
       resolveFirst = resolve;
     }),
@@ -45,7 +53,7 @@ test("persistAgentProfilesDraft 仅在 revision 仍匹配时应用返回结果",
 
   const second = persistAgentProfilesDraft({
     getRevision: () => revision,
-    body: makeSettings(2),
+    body: makeRequestBody(2),
     update: async () => makeSettings(2),
     applyIfLatest: (res, responseRevision) => {
       if (responseRevision !== revision) return;
@@ -64,15 +72,31 @@ test("persistAgentProfilesDraft 仅在 revision 仍匹配时应用返回结果",
 
 test("agent profiles draft preserves existing pluginTools when editing unrelated fields", async () => {
   const settings = makeSettings(3);
-  settings.agents[0].pluginTools = ["plugin_debug-tools_echo_inspect"];
+  const current = settings.agents[0];
+  if (!current) throw new Error("expected existing agent");
+  current.pluginTools = ["plugin_debug-tools_echo_inspect"];
+  if (!current.defaultModel) throw new Error("expected defaultModel");
 
-  const body = {
+  const body: UpdateAgentSettingsRequest = {
     agents: [
       {
-        ...settings.agents[0],
-        name: "Updated Agent"
+        id: current.id,
+        name: "Updated Agent",
+        summary: current.summary,
+        prompt: current.prompt,
+        globalPromptIds: current.globalPromptIds,
+        tools: current.tools,
+        mcpServers: current.mcpServers,
+        pluginTools: current.pluginTools,
+        defaultModel: current.defaultModel,
+        scope: current.scope,
+        order: current.order
       }
-    ],
+    ]
+  };
+
+  const response: AgentSettings = {
+    agents: body.agents,
     updatedAt: settings.updatedAt
   };
 
@@ -80,7 +104,7 @@ test("agent profiles draft preserves existing pluginTools when editing unrelated
   await persistAgentProfilesDraft({
     getRevision: () => 1,
     body,
-    update: async () => body,
+    update: async () => response,
     applyIfLatest: (res) => {
       applied = res;
     }
