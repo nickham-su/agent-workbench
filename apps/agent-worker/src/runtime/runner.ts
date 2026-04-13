@@ -63,7 +63,7 @@ export function buildCompactionUserPrompt(input: { uiLocale: AgentUiLocale | nul
   }
   return getPromptText("agent/compaction-user-prompt.en-US.txt");
 }
-const COMPACTION_TIMEOUT_MS = 900_000;
+const COMPACTION_TIMEOUT_MS = 600_000;
 
 const MANUAL_COMPACT_SENTINEL = "__awb_compact__";
 
