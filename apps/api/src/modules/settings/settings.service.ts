@@ -98,6 +98,11 @@ type ExecutionProfileResolved = {
   agent: AgentItem;
   provider: AgentProviderStored;
   model: AgentProviderStored["models"][number];
+  vision: {
+    source: "runtime_vision" | "agent_default_fallback";
+    provider: AgentProviderStored;
+    model: AgentProviderStored["models"][number];
+  } | null;
 };
 
 type ProviderModelsCacheItem = {
@@ -1121,13 +1126,23 @@ function getAgentRuntimeSettingsStored(ctx: AppContext) {
   const modelRequestMaxRetries = normalizeModelRequestMaxRetriesFromStored(value?.modelRequestMaxRetries);
   const autoCompactThresholdPct = normalizeAutoCompactThresholdPctFromStored(value?.autoCompactThresholdPct);
   const sessionTerminalSoundEnabled = normalizeSessionTerminalSoundEnabledFromStored(value?.sessionTerminalSoundEnabled);
+  const visionModelRaw = (value?.visionModel ?? null) as { providerId?: unknown; modelId?: unknown } | null;
+  const visionProviderId = typeof visionModelRaw?.providerId === "string" ? visionModelRaw.providerId.trim() : "";
+  const visionModelId = typeof visionModelRaw?.modelId === "string" ? visionModelRaw.modelId.trim() : "";
+  const visionModel = visionProviderId && visionModelId
+    ? {
+        providerId: visionProviderId,
+        modelId: visionModelId
+      }
+    : null;
   return {
     settings: {
       modelIdleTimeoutMs,
       modelTotalTimeoutMs,
       modelRequestMaxRetries,
       autoCompactThresholdPct,
-      sessionTerminalSoundEnabled
+      sessionTerminalSoundEnabled,
+      visionModel
     },
     updatedAt: row?.updatedAt ?? 0
   };
@@ -1270,6 +1285,7 @@ export function getAgentRuntimeSettings(ctx: AppContext): AgentRuntimeSettings {
     modelRequestMaxRetries: loaded.settings.modelRequestMaxRetries,
     autoCompactThresholdPct: loaded.settings.autoCompactThresholdPct,
     sessionTerminalSoundEnabled: loaded.settings.sessionTerminalSoundEnabled,
+    visionModel: loaded.settings.visionModel,
     updatedAt: loaded.updatedAt
   };
 }
@@ -1277,7 +1293,8 @@ export function getAgentRuntimeSettings(ctx: AppContext): AgentRuntimeSettings {
 function assertProviderModelRenameNotReferenced(
   currentProviders: AgentProvidersSettings["providers"],
   nextProviders: AgentProvidersSettings["providers"],
-  agentSettings: AgentSettingsStored
+  agentSettings: AgentSettingsStored,
+  runtimeSettings: AgentRuntimeSettingsStored
 ) {
   const currentByProviderId = new Map(currentProviders.map((provider) => [provider.id, provider]));
 
@@ -1297,6 +1314,10 @@ function assertProviderModelRenameNotReferenced(
         if (agent.defaultModel?.providerId === provider.id && agent.defaultModel.modelId === oldId) {
           referencedDetails.push(`agent '${agent.id}': ${provider.id}/${oldId}`);
         }
+      }
+
+      if (runtimeSettings.visionModel?.providerId === provider.id && runtimeSettings.visionModel.modelId === oldId) {
+        referencedDetails.push(`runtime visionModel: ${provider.id}/${oldId}`);
       }
     }
 
@@ -1361,6 +1382,21 @@ export function updateAgentRuntimeSettings(
     (body as any).sessionTerminalSoundEnabled !== undefined
       ? normalizeSessionTerminalSoundEnabledForUpdate((body as any).sessionTerminalSoundEnabled, "sessionTerminalSoundEnabled")
       : current.sessionTerminalSoundEnabled;
+  const visionModel =
+    (body as any).visionModel !== undefined
+      ? (() => {
+          const raw = (body as any).visionModel;
+          if (raw == null) return null;
+          const providerId = typeof raw?.providerId === "string" ? raw.providerId.trim() : "";
+          const modelId = typeof raw?.modelId === "string" ? raw.modelId.trim() : "";
+          if (!providerId || !modelId) {
+            throw new HttpError(400, "visionModel.providerId/modelId is required", "AGENT_MODEL_REQUIRED");
+          }
+          const providersSettings = getAgentProvidersSettingsInternal(ctx);
+          resolveProviderModelOrThrow(providersSettings, providerId, modelId);
+          return { providerId, modelId };
+        })()
+      : current.visionModel;
 
   const updatedAt = nowMs();
   setSettingJson(
@@ -1371,13 +1407,14 @@ export function updateAgentRuntimeSettings(
       modelTotalTimeoutMs,
       modelRequestMaxRetries,
       autoCompactThresholdPct,
-      sessionTerminalSoundEnabled
+      sessionTerminalSoundEnabled,
+      visionModel
     },
     updatedAt
   );
 
   logger.info(
-    { modelIdleTimeoutMs, modelTotalTimeoutMs, modelRequestMaxRetries, autoCompactThresholdPct, sessionTerminalSoundEnabled, updatedAt },
+    { modelIdleTimeoutMs, modelTotalTimeoutMs, modelRequestMaxRetries, autoCompactThresholdPct, sessionTerminalSoundEnabled, visionModel, updatedAt },
     "agent runtime settings updated"
   );
   return {
@@ -1386,8 +1423,25 @@ export function updateAgentRuntimeSettings(
     modelRequestMaxRetries,
     autoCompactThresholdPct,
     sessionTerminalSoundEnabled,
+    visionModel,
     updatedAt
   };
+}
+
+function resolveProviderModelOrThrow(
+  providersSettings: AgentProvidersSettings,
+  providerId: string,
+  modelId: string
+) {
+  const provider = providersSettings.providers.find((item) => item.id === providerId);
+  if (!provider) {
+    throw new HttpError(400, "Provider not found", "AGENT_PROVIDER_NOT_FOUND");
+  }
+  const model = provider.models.find((item) => item.id === modelId);
+  if (!model) {
+    throw new HttpError(400, "Model not found", "AGENT_MODEL_NOT_FOUND");
+  }
+  return { provider, model };
 }
 
 export function updateAgentGlobalPromptSettings(
@@ -1595,10 +1649,12 @@ export function updateAgentProvidersSettings(
   );
 
   const currentAgentSettings = getAgentSettingsStored(ctx).settings;
+  const currentRuntimeSettings = getAgentRuntimeSettingsStored(ctx).settings;
   assertProviderModelRenameNotReferenced(
     current.providers,
     providers,
-    currentAgentSettings
+    currentAgentSettings,
+    currentRuntimeSettings
   );
 
   const updatedAt = nowMs();
@@ -1838,22 +1894,38 @@ export function resolveExecutionProfile(ctx: AppContext, input: {
     throw new HttpError(400, "Agent model is not configured", "AGENT_MODEL_NOT_CONFIGURED");
   }
 
-  const provider = providersSettings.providers.find((item) => item.id === resolvedProviderId);
-  if (!provider) {
-    throw new HttpError(400, "Provider not found", "AGENT_PROVIDER_NOT_FOUND");
-  }
-  const model = provider.models.find((item) => item.id === resolvedModelId);
-  if (!model) {
-    throw new HttpError(400, "Model not found", "AGENT_MODEL_NOT_FOUND");
-  }
+  const { provider, model } = resolveProviderModelOrThrow(providersSettings, resolvedProviderId, resolvedModelId);
   if (!provider.options.apiKey) {
     throw new HttpError(400, `Provider '${provider.id}' apiKey is missing`, "AGENT_PROVIDER_API_KEY_MISSING");
+  }
+
+  const runtimeSettings = getAgentRuntimeSettings(ctx);
+  const runtimeVisionProviderId = typeof runtimeSettings.visionModel?.providerId === "string" ? runtimeSettings.visionModel.providerId.trim() : "";
+  const runtimeVisionModelId = typeof runtimeSettings.visionModel?.modelId === "string" ? runtimeSettings.visionModel.modelId.trim() : "";
+  let vision: ExecutionProfileResolved["vision"] = null;
+  if (runtimeVisionProviderId && runtimeVisionModelId) {
+    const resolvedVision = resolveProviderModelOrThrow(providersSettings, runtimeVisionProviderId, runtimeVisionModelId);
+    if (!resolvedVision.provider.options.apiKey) {
+      throw new HttpError(400, `Provider '${resolvedVision.provider.id}' apiKey is missing`, "AGENT_PROVIDER_API_KEY_MISSING");
+    }
+    vision = {
+      source: "runtime_vision",
+      provider: resolvedVision.provider,
+      model: resolvedVision.model
+    };
+  } else {
+    vision = {
+      source: "agent_default_fallback",
+      provider,
+      model
+    };
   }
 
   return {
     agent,
     provider,
-    model
+    model,
+    vision
   } satisfies ExecutionProfileResolved;
 }
 

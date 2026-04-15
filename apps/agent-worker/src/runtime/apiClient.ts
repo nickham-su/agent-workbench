@@ -56,8 +56,29 @@ export type ExecutionProfile = {
     modelTotalTimeoutMs: number;
     modelRequestMaxRetries: number;
     autoCompactThresholdPct: number;
+    visionModel: { providerId: string; modelId: string } | null;
     updatedAt: number;
   };
+  vision: {
+    source: "runtime_vision" | "agent_default_fallback";
+    provider: {
+      id: string;
+      name: string;
+      npm: "@ai-sdk/openai" | "@ai-sdk/anthropic";
+      options: {
+        baseURL: string;
+        apiKey: string;
+        apiMode?: "responses" | "chatCompletions";
+      };
+    };
+    model: {
+      id: string;
+      providerModelId?: string;
+      name: string;
+      contextWindowTokens: number;
+      options?: Record<string, unknown>;
+    };
+  } | null;
   agent: {
     id: string;
     name: string;

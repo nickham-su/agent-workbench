@@ -230,6 +230,23 @@ function toolArgsSchema(toolName: AgentContextToolName) {
       }
     };
   }
+  if (toolName === "visual_analyze") {
+    return {
+      type: "object",
+      required: ["paths"],
+      additionalProperties: false,
+      properties: {
+        paths: {
+          type: "array",
+          minItems: 1,
+          items: { type: "string", minLength: 1 }
+        },
+        prompt: {
+          type: "string"
+        }
+      }
+    };
+  }
   if (toolName === "skill") {
     return {
       type: "object",
@@ -381,6 +398,15 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
       "If id points to a skill node (directory containing SKILL.md), it returns the skill content and children.",
       "Children include sibling files (excluding SKILL.md) and direct child skill nodes.",
       "If id points to a file, it returns file content only."
+    ].join(" ");
+  }
+  if (toolName === "visual_analyze") {
+    return [
+      "Analyze visual files inside the current workspace and return natural-language findings.",
+      "Supported file types: PNG, JPG/JPEG, WEBP, GIF, PDF.",
+      "Accepts multiple files and interprets them in input order.",
+      "Input paths must be relative paths inside the workspace.",
+      "If model/provider/SDK/service does not support the given files, the tool returns an error result."
     ].join(" ");
   }
 
@@ -3612,6 +3638,7 @@ export class AgentService {
       // profile.agent 现已包含 pluginTools，共享契约扩展不改变当前执行逻辑。
       provider: profile.provider,
       model: profile.model,
+      vision: profile.vision,
       runtime
     };
   }
@@ -4356,7 +4383,7 @@ export class AgentService {
           }
           externalSkills.sort((a, b) => a.id.localeCompare(b.id));
 
-          const baselineToolNames = ["read", "todolist", "archive_search", "archive_read", "scratchpad", "skill"] as const;
+          const baselineToolNames = ["read", "todolist", "archive_search", "archive_read", "scratchpad", "skill", "visual_analyze"] as const;
           const enabledToolNames: string[] = [];
           const enabledToolNameSet = new Set<string>();
           for (const name of [...baselineToolNames, ...profile.agent.tools]) {

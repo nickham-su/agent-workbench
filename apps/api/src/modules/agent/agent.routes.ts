@@ -59,7 +59,8 @@ const AgentBuiltinToolNameSchema = Type.Union([
   Type.Literal("subtask"),
   Type.Literal("archive_search"),
   Type.Literal("skill"),
-  Type.Literal("archive_read")
+  Type.Literal("archive_read"),
+  Type.Literal("visual_analyze")
 ]);
 const AgentDynamicToolNameSchema = Type.Union([
   AgentBuiltinToolNameSchema,
@@ -1404,8 +1405,38 @@ export async function registerAgentRoutes(
               modelTotalTimeoutMs: Type.Integer({ minimum: 0 }),
               modelRequestMaxRetries: Type.Integer({ minimum: 0, maximum: 100 }),
               autoCompactThresholdPct: Type.Integer({ minimum: 50, maximum: 99 }),
+              visionModel: Type.Union([
+                Type.Object({
+                  providerId: Type.String({ minLength: 1 }),
+                  modelId: Type.String({ minLength: 1 })
+                }),
+                Type.Null()
+              ]),
               updatedAt: Type.Number()
-            })
+            }),
+            vision: Type.Union([
+              Type.Object({
+                source: Type.Union([Type.Literal("runtime_vision"), Type.Literal("agent_default_fallback")]),
+                provider: Type.Object({
+                  id: Type.String({ minLength: 1 }),
+                  name: Type.String({ minLength: 1 }),
+                  npm: AgentProviderNpmSchema,
+                  options: Type.Object({
+                    baseURL: Type.String({ minLength: 1 }),
+                    apiKey: Type.String({ minLength: 1 }),
+                    apiMode: Type.Optional(Type.Union([Type.Literal("responses"), Type.Literal("chatCompletions")]))
+                  })
+                }),
+                model: Type.Object({
+                  id: Type.String({ minLength: 1 }),
+                  providerModelId: Type.Optional(Type.String({ minLength: 1 })),
+                  name: Type.String({ minLength: 1 }),
+                  contextWindowTokens: Type.Integer({ minimum: 1 }),
+                  options: Type.Optional(Type.Any())
+                })
+              }),
+              Type.Null()
+            ]),
           }),
           400: ErrorResponseSchema,
           401: ErrorResponseSchema,

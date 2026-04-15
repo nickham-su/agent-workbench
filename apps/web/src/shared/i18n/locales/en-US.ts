@@ -1074,12 +1074,21 @@ export default {
           label: "Model max retries",
           help: "Automatically retries only when a request fails before receiving the first chunk. 0 disables retries."
         },
+        visionModel: {
+          label: "Vision model",
+          placeholder: "Select a vision model (optional)",
+          help: "Global default vision model used by visual_analyze; falls back to the current agent primary model when unset."
+        },
         sessionTerminalSoundEnabled: {
           label: "Run completion sound",
           help: "Play a sound when a run completes. Applies to all sessions."
         }
+      },
+      errors: {
+        visionModelInvalid: "Invalid vision model selection. Please reselect."
       }
     },
+
     agentMcp: {
       description: "Manage global MCP server configuration. Use JSON input when adding or editing.",
       saving: "Saving...",

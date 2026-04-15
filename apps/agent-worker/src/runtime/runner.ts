@@ -320,6 +320,19 @@ function buildToolSuccessText(params: {
     });
   }
 
+  if (params.toolName === "visual_analyze") {
+    const files = Array.isArray(resultObj?.files) ? resultObj.files.length : undefined;
+    const body = typeof resultObj?.text === "string"
+      ? resultObj.text
+      : stringifyResult(params.result);
+    return buildToolText({
+      toolName: params.toolName,
+      status: params.status,
+      headers: [["files", typeof files === "number" ? String(files) : undefined]],
+      body
+    });
+  }
+
   if (isMcpToolName(params.toolName)) {
     const body = typeof resultObj?.text === "string"
       ? resultObj.text

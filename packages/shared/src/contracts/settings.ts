@@ -205,6 +205,7 @@ export const AgentRuntimeSettingsSchema = Type.Object({
   modelRequestMaxRetries: Type.Integer({ minimum: 0, maximum: 100 }),
   // 自动压缩阈值百分比,达到 model.contextWindowTokens * pct/100 触发压缩。
   autoCompactThresholdPct: Type.Integer({ minimum: 50, maximum: 99 }),
+  visionModel: Type.Union([AgentProvidersDefaultSchema, Type.Null()]),
   sessionTerminalSoundEnabled: Type.Boolean(),
   updatedAt: Type.Number()
 });
@@ -215,6 +216,7 @@ export const UpdateAgentRuntimeSettingsRequestSchema = Type.Object({
   modelTotalTimeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
   modelRequestMaxRetries: Type.Optional(Type.Integer({ minimum: 0, maximum: 100 })),
   autoCompactThresholdPct: Type.Optional(Type.Integer({ minimum: 50, maximum: 99 })),
+  visionModel: Type.Optional(Type.Union([AgentProvidersDefaultSchema, Type.Null()])),
   sessionTerminalSoundEnabled: Type.Optional(Type.Boolean())
 });
 export type UpdateAgentRuntimeSettingsRequest = Static<typeof UpdateAgentRuntimeSettingsRequestSchema>;
@@ -248,7 +250,8 @@ export const AgentToolNameSchema = Type.Union([
   Type.Literal("subtask"),
   Type.Literal("archive_search"),
   Type.Literal("skill"),
-  Type.Literal("archive_read")
+  Type.Literal("archive_read"),
+  Type.Literal("visual_analyze")
 ]);
 export type AgentToolName = Static<typeof AgentToolNameSchema>;
 

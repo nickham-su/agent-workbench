@@ -14,6 +14,22 @@ import { isBuiltinToolName, type BuiltinToolName } from "../types.js";
 const ENV_TIMEOUT_MS_MAX = 2_147_483_647;
 const COMPACTION_TIMEOUT_MS = 300_000;
 
+const VISUAL_MEDIA_TYPES = new Map<string, string>([
+  [".png", "image/png"],
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
+  [".webp", "image/webp"],
+  [".gif", "image/gif"],
+  [".pdf", "application/pdf"]
+]);
+
+type VisualAnalyzeInputFile = {
+  relativePath: string;
+  absolutePath: string;
+  mediaType: string;
+  bytes: Uint8Array;
+};
+
 type ParsedSubtaskArgs = {
   description: string;
   prompt: string;
@@ -150,6 +166,50 @@ function shouldPrepareGitEnvForCommand(command: string) {
   return false;
 }
 
+function ensureSafeRelativePath(input: unknown, fieldName: string) {
+  if (typeof input !== "string") throw new Error(`${fieldName} must be a non-empty string`);
+  const value = input.trim();
+  if (!value) throw new Error(`${fieldName} must be a non-empty string`);
+  if (value.includes("\0") || value.includes("\n") || value.includes("\r")) {
+    throw new Error(`${fieldName} is invalid`);
+  }
+  if (path.isAbsolute(value)) {
+    throw new Error(`${fieldName} must be a relative path inside workspace`);
+  }
+  return value;
+}
+
+function isPathInside(rootPath: string, targetPath: string) {
+  const normalizedRoot = path.resolve(rootPath);
+  const normalizedTarget = path.resolve(targetPath);
+  const withSep = normalizedRoot.endsWith(path.sep) ? normalizedRoot : `${normalizedRoot}${path.sep}`;
+  return normalizedTarget === normalizedRoot || normalizedTarget.startsWith(withSep);
+}
+
+async function resolveVisualInputFile(params: {
+  workspacePath: string;
+  relativePath: string;
+}): Promise<VisualAnalyzeInputFile> {
+  const absolutePath = path.resolve(params.workspacePath, params.relativePath);
+  if (!isPathInside(params.workspacePath, absolutePath)) {
+    throw new Error(`path is outside workspace: ${params.relativePath}`);
+  }
+  const [workspaceRealPath, targetRealPath] = await Promise.all([fs.realpath(params.workspacePath), fs.realpath(absolutePath)]);
+  if (!isPathInside(workspaceRealPath, targetRealPath)) {
+    throw new Error(`path is outside workspace: ${params.relativePath}`);
+  }
+  const stat = await fs.stat(targetRealPath);
+  if (!stat.isFile()) {
+    throw new Error(`path is not a file: ${params.relativePath}`);
+  }
+  const mediaType = VISUAL_MEDIA_TYPES.get(path.extname(params.relativePath).toLowerCase());
+  if (!mediaType) {
+    throw new Error(`unsupported file type: ${params.relativePath}. Supported: PNG, JPG/JPEG, WEBP, GIF, PDF`);
+  }
+  const bytes = await fs.readFile(targetRealPath);
+  return { relativePath: params.relativePath, absolutePath: targetRealPath, mediaType, bytes };
+}
+
 function parseSubtaskArgs(raw: Record<string, unknown>): ParsedSubtaskArgs {
   const description = requireNonEmptyStringArg(raw.description, "subtask.description").slice(0, 50);
   const prompt = requireNonEmptyStringArg(raw.prompt, "subtask.prompt");
@@ -227,7 +287,15 @@ export class BuiltinToolProvider implements ToolProvider {
 
   isToolEnabled(toolName: string, ctx: AvailableToolContext | ToolExecutionContext) {
     if (!isBuiltinToolName(toolName)) return false;
-    if (toolName === "read" || toolName === "todolist" || toolName === "archive_search" || toolName === "archive_read" || toolName === "scratchpad" || toolName === "skill") {
+    if (
+      toolName === "read"
+      || toolName === "todolist"
+      || toolName === "archive_search"
+      || toolName === "archive_read"
+      || toolName === "scratchpad"
+      || toolName === "skill"
+      || toolName === "visual_analyze"
+    ) {
       return true;
     }
     return ctx.profile.agent.tools.includes(toolName as BuiltinToolName);
@@ -606,6 +674,54 @@ export class BuiltinToolProvider implements ToolProvider {
           throw error;
         }
         return result;
+      }
+      case "visual_analyze": {
+        const pathsRaw = Array.isArray(args.paths) ? args.paths : [];
+        if (pathsRaw.length === 0) {
+          throw new Error("visual_analyze.paths must contain at least one file path");
+        }
+        const relativePaths = pathsRaw.map((item, index) => ensureSafeRelativePath(item, `visual_analyze.paths[${index}]`));
+        const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";
+        const files = await Promise.all(
+          relativePaths.map((relativePath) => resolveVisualInputFile({ workspacePath: ctx.run.workspacePath, relativePath }))
+        );
+
+        const userInstruction = prompt || "Analyze these visual files in order and provide concise, practical findings in natural language.";
+        const lines = [
+          `You are analyzing ${files.length} visual file(s) from a coding workspace.`,
+          "Use the input order as sequence and refer to them as 文件1, 文件2, ... in your response.",
+          "Return plain natural language only."
+        ];
+        const parts: Array<Record<string, unknown>> = [
+          {
+            type: "text",
+            text: `${lines.join("\n")}\n\nUser request:\n${userInstruction}`
+          }
+        ];
+        for (const file of files) {
+          parts.push({
+            type: "file",
+            data: file.bytes,
+            mediaType: file.mediaType,
+            filename: path.basename(file.relativePath)
+          });
+        }
+
+        const chosen = ctx.profile.vision ?? {
+          source: "agent_default_fallback" as const,
+          provider: ctx.profile.provider,
+          model: ctx.profile.model
+        };
+        const timeoutMs = Math.max(30_000, Math.floor(Number(ctx.profile.runtime.modelTotalTimeoutMs || 0)) || 120_000);
+        const response = await this.generateSingleCallSummary({
+          profile: { provider: chosen.provider, model: chosen.model },
+          input: { messages: [{ role: "user", content: parts }], timeoutMs, abortSignal: ctx.signal }
+        });
+        return {
+          text: response.text,
+          files: files.map((item) => item.relativePath),
+          source: chosen.source
+        };
       }
       default:
         throw new Error(`unsupported tool: ${toolName}`);

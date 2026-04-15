@@ -1072,12 +1072,21 @@ export default {
           label: "模型重试最大次数",
           help: "仅在首包前失败时自动重试。0 表示不重试。"
         },
+        visionModel: {
+          label: "视觉模型",
+          placeholder: "请选择视觉模型（可选）",
+          help: "全局默认视觉模型，供 visual_analyze 工具使用；未配置时回退到当前 agent 主模型。"
+        },
         sessionTerminalSoundEnabled: {
           label: "运行结束提示音",
           help: "当运行结束时播放提示音。对所有会话生效。"
         }
+      },
+      errors: {
+        visionModelInvalid: "视觉模型配置无效，请重新选择。"
       }
     },
+
     agentMcp: {
       description: "管理全局 MCP Server 配置。新增/编辑时使用 JSON 输入。",
       saving: "正在保存...",
