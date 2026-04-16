@@ -59,7 +59,8 @@ description: 一句话描述这个 skill 解决什么问题
 
 - 同级普通文件（除 `SKILL.md`）会作为 `children` 的 `file` 项返回。
 - 直接子目录中若包含 `SKILL.md`，会作为 `children` 的 `skill` 项返回。
-- 只识别**直接子级**，不是递归整棵树。
+- 读取**根 skill 节点**时，`children` 会递归展开整棵子树，包含所有可读文本文件（排除 `SKILL.md`）与后代 skill 节点。
+- 读取**非根 skill 节点**时，`children` 仍只包含直接子级。
 
 示例：
 
@@ -71,7 +72,7 @@ my-skill/
     SKILL.md               # children: skill
   deep/
     nested/
-      SKILL.md             # 不会直接出现在 my-skill 的 children 中
+      SKILL.md             # 读取 my-skill（根节点）时会出现在 children 中；读取 prompts 时仍按直接子级返回
 ```
 
 ## 2.3 指向 file 与 skill 的差别
@@ -117,7 +118,8 @@ workspace/repo 候选目录遵循统一规则：
 模型通过内置 `skill` 工具：
 - 输入：`id: string`
 - 支持前缀：`builtin/... | workspace/... | repo/...`
-- 命中 skill 节点返回正文与 children
+- 命中根 skill 节点：返回正文与递归 children（整棵子树摘要）
+- 命中非根 skill 节点：返回正文与直接 children
 - 命中文件返回文件内容
 
 ---
@@ -152,7 +154,7 @@ workspace/repo 候选目录遵循统一规则：
 - 不是 `skill.md`，而是 `SKILL.md`（区分大小写）。
 
 2) 目录层级写太深
-- children 只看直接子级；深层内容要靠逐层读取。
+- 根 skill 会递归披露深层内容；非根 skill 仍只看直接子级。
 
 3) 把二进制/超重内容当正文
 - `skill` 工具遵循文本读取限制；二进制不可读。

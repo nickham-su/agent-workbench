@@ -259,6 +259,105 @@ test("skill 读取 skill 节点时返回正文与 children（文件 + 直接子 
   );
 });
 
+test("skill 读取根节点时 children 递归返回深层 skill 与文件", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  await fs.mkdir(path.join(repoRoot, "skills", "root", "middle", "deep-skill"), { recursive: true });
+  await fs.writeFile(path.join(repoRoot, "skills", "root", "SKILL.md"), "---\nname: Root\ndescription: Root desc\n---\n\nroot body", "utf8");
+  await fs.writeFile(path.join(repoRoot, "skills", "root", "notes.txt"), "root notes", "utf8");
+  await fs.writeFile(path.join(repoRoot, "skills", "root", "middle", "guide.md"), "---\ndescription: guide desc\n---\n\n# Guide", "utf8");
+  await fs.writeFile(path.join(repoRoot, "skills", "root", "middle", "deep-skill", "SKILL.md"), "---\nname: Deep Skill\ndescription: Deep desc\n---\n\ndeep body", "utf8");
+
+  const result = await runSkillTool({ workspacePath, repoRoot, id: "builtin/root" });
+
+  assert.equal(result.type, "skill");
+  assert.deepEqual(
+    result.children.map((item) => ({ id: item.id, type: item.type, name: item.name, description: item.description || "" })),
+    [
+      { id: "builtin/root/middle/deep-skill", type: "skill", name: "Deep Skill", description: "Deep desc" },
+      { id: "builtin/root/middle/guide.md", type: "file", name: "guide.md", description: "guide desc" },
+      { id: "builtin/root/notes.txt", type: "file", name: "notes.txt", description: "" }
+    ]
+  );
+});
+
+test("skill 读取非根节点时 children 仍仅包含直接子级", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  await fs.mkdir(path.join(repoRoot, "skills", "root", "child", "nested"), { recursive: true });
+  await fs.writeFile(path.join(repoRoot, "skills", "root", "SKILL.md"), "---\nname: Root\n---\n\nroot", "utf8");
+  await fs.writeFile(path.join(repoRoot, "skills", "root", "child", "SKILL.md"), "---\nname: Child\ndescription: Child desc\n---\n\nchild", "utf8");
+  await fs.writeFile(path.join(repoRoot, "skills", "root", "child", "direct.txt"), "direct", "utf8");
+  await fs.writeFile(path.join(repoRoot, "skills", "root", "child", "nested", "deep.txt"), "deep", "utf8");
+  await fs.writeFile(path.join(repoRoot, "skills", "root", "child", "nested", "SKILL.md"), "---\nname: Nested\n---\n", "utf8");
+
+  const result = await runSkillTool({ workspacePath, repoRoot, id: "builtin/root/child" });
+
+  assert.equal(result.type, "skill");
+  assert.deepEqual(
+    result.children.map((item) => item.id),
+    ["builtin/root/child/direct.txt", "builtin/root/child/nested"]
+  );
+});
+
+test("skill 根节点递归会穿透无 SKILL.md 的中间目录并发现文件", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  await fs.mkdir(path.join(repoRoot, "skills", "root", "docs", "recipes"), { recursive: true });
+  await fs.writeFile(path.join(repoRoot, "skills", "root", "SKILL.md"), "---\nname: Root\n---\n", "utf8");
+  await fs.writeFile(path.join(repoRoot, "skills", "root", "docs", "recipes", "tips.md"), "# tips", "utf8");
+
+  const result = await runSkillTool({ workspacePath, repoRoot, id: "builtin/root" });
+
+  assert.equal(result.type, "skill");
+  assert.equal(result.children.some((item) => item.id === "builtin/root/docs/recipes/tips.md" && item.type === "file"), true);
+});
+
+test("skill 读取 workspace 根节点时 children 递归返回深层文件与深层 skill", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  const workspaceRoot = path.join(workspacePath, "deploy");
+  await fs.mkdir(path.join(workspaceRoot, "docs", "nested", "child-skill"), { recursive: true });
+  await fs.writeFile(path.join(workspaceRoot, "SKILL.md"), "---\nname: Deploy Root\n---\n\nroot", "utf8");
+  await fs.writeFile(path.join(workspaceRoot, "docs", "nested", "guide.md"), "---\ndescription: workspace guide\n---\n", "utf8");
+  await fs.writeFile(path.join(workspaceRoot, "docs", "nested", "child-skill", "SKILL.md"), "---\nname: Workspace Deep\ndescription: deep\n---\n", "utf8");
+
+  const result = await runSkillTool({
+    workspacePath,
+    repoRoot,
+    id: "workspace/deploy",
+    externalSkillRoots: [{ sourceType: "workspace", rootDir: "deploy", rootPath: workspaceRoot }]
+  });
+
+  assert.equal(result.type, "skill");
+  assert.deepEqual(
+    result.children.map((item) => item.id),
+    ["workspace/deploy/docs/nested/child-skill", "workspace/deploy/docs/nested/guide.md"]
+  );
+});
+
+test("skill 读取 repo 非根节点时 children 仍仅包含直接子级", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  const repoSkillRoot = path.join(workspacePath, "repo-a", "ai-skills");
+  await fs.mkdir(path.join(repoSkillRoot, "ops", "nested"), { recursive: true });
+  await fs.writeFile(path.join(repoSkillRoot, "SKILL.md"), "---\nname: Repo Root\n---\n", "utf8");
+  await fs.writeFile(path.join(repoSkillRoot, "ops", "SKILL.md"), "---\nname: Ops\n---\n", "utf8");
+  await fs.writeFile(path.join(repoSkillRoot, "ops", "quick.txt"), "quick", "utf8");
+  await fs.writeFile(path.join(repoSkillRoot, "ops", "nested", "deep.txt"), "deep", "utf8");
+  await fs.writeFile(path.join(repoSkillRoot, "ops", "nested", "SKILL.md"), "---\nname: Nested\n---\n", "utf8");
+
+  const result = await runSkillTool({
+    workspacePath,
+    repoRoot,
+    id: "repo/repo-a/ai-skills/ops",
+    externalSkillRoots: [{ sourceType: "repo", repoId: "repo-a", rootDir: "ai-skills", rootPath: repoSkillRoot }]
+  });
+
+  assert.equal(result.type, "skill");
+  assert.deepEqual(result.children.map((item) => item.id), ["repo/repo-a/ai-skills/ops/nested", "repo/repo-a/ai-skills/ops/quick.txt"]);
+});
+
 test("skill 读取文件 id 时仅返回文件内容", async () => {
   const workspacePath = await createWorkspace();
   const repoRoot = await createWorkspace();

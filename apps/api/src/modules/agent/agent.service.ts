@@ -396,7 +396,8 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
       "Load skill content by logical id (no filesystem paths).",
       "Input: id (string), using builtin/... or workspace/... or repo/... prefixes.",
       "If id points to a skill node (directory containing SKILL.md), it returns the skill content and children.",
-      "Children include sibling files (excluding SKILL.md) and direct child skill nodes.",
+      "When reading a root skill node, children are recursively expanded to include all readable descendant files (excluding SKILL.md) and descendant skill nodes.",
+      "When reading a non-root skill node, children include sibling files (excluding SKILL.md) and direct child skill nodes.",
       "If id points to a file, it returns file content only."
     ].join(" ");
   }
