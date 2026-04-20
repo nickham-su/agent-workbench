@@ -1560,6 +1560,33 @@ export class AgentRunner {
       pendingFlush = true;
     };
 
+    const resetVisibleOutputForRetry = async () => {
+      const prevText = text;
+      const prevReasoningText = reasoningText;
+      const prevLastFlushedText = lastFlushedText;
+      const prevLastFlushedReasoningText = lastFlushedReasoningText;
+      const prevLastFlushAt = lastFlushAt;
+      const prevPendingFlush = pendingFlush;
+
+      text = "";
+      reasoningText = "";
+      try {
+        await flushAssistant("streaming", true);
+      } catch (err) {
+        text = prevText;
+        reasoningText = prevReasoningText;
+        lastFlushedText = prevLastFlushedText;
+        lastFlushedReasoningText = prevLastFlushedReasoningText;
+        lastFlushAt = prevLastFlushAt;
+        pendingFlush = prevPendingFlush;
+
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `[agent-worker] reset visible output before retry failed(item=${assistant.id}, retry=${retryCount + 1}/${modelRequestMaxRetries}): ${message}`
+        );
+      }
+    };
+
     while (true) {
       if (signal.aborted) {
         return { aborted: true as const, assistantItemId: assistant.id };
@@ -1752,6 +1779,7 @@ export class AgentRunner {
           });
 
           retryCount = retryAttempt;
+          await resetVisibleOutputForRetry();
           const continueRunning = await sleepMsWithAbort(delayMs, signal);
           if (!continueRunning) {
             return { aborted: true as const, assistantItemId: assistant.id };
