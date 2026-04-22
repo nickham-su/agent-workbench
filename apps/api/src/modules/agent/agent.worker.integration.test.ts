@@ -142,13 +142,13 @@ async function configureAgentDefaults(baseUrl: string, llmBaseURL: string) {
            name: "default",
            summary: "",
            prompt: "You are a helpful coding assistant.",
-           tools: ["bash", "read", "write"],
-           pluginTools: [],
-           mcpServers: [],
-           defaultModel: null,
-           scope: "both",
-           order: 0
-         }
+            tools: ["bash", "read", "write"],
+            pluginTools: [],
+            mcpServers: [],
+            defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
+            scope: "both",
+            order: 0
+          }
        ]
      }
    });

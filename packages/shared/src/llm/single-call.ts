@@ -336,23 +336,23 @@ function buildSingleCallRequest(profile: SingleCallModelProfile, params: SingleC
 }
 
 export async function generateSingleCallText(profile: SingleCallModelProfile, params: SingleCallModelParams): Promise<SingleCallGenerateResult> {
-  const timeoutMs = normalizeTimeoutMs(params.timeoutMs);
-  const timed = createTimedAbortSignal({
-    timeoutMs,
-    abortSignal: params.abortSignal
-  });
-  try {
-    const request = buildSingleCallRequest(profile, params, timed.signal);
-    const response = await generateText(request as any);
-    const responseObj = response as unknown as Record<string, unknown>;
-    const totalTokens = extractTotalTokens(responseObj.usage) ?? extractTotalTokens(responseObj.totalUsage);
-    return {
-      text: String(response.text || ""),
-      totalTokens
-    };
-  } finally {
-    timed.cleanup();
+  let text = "";
+  let totalTokens: number | null = null;
+
+  for await (const event of streamSingleCallText(profile, params)) {
+    if (event.type === "text-delta") {
+      text += event.text;
+      continue;
+    }
+    if (event.type === "finish") {
+      totalTokens = event.totalTokens;
+    }
   }
+
+  return {
+    text,
+    totalTokens
+  };
 }
 
 export function streamSingleCallText(profile: SingleCallModelProfile, params: SingleCallModelParams): AsyncIterable<SingleCallStreamEvent> {
@@ -377,17 +377,22 @@ export function streamSingleCallText(profile: SingleCallModelProfile, params: Si
             continue;
           }
           if (chunk.type === "finish") {
-            const totalTokens =
+            let totalTokens =
               extractTotalTokens((chunk as Record<string, unknown>).usage) ??
               extractTotalTokens((chunk as Record<string, unknown>).totalUsage) ??
               null;
+            if (totalTokens == null) {
+              totalTokens = await readStreamTotalTokens(stream);
+            }
             finishEmitted = true;
             yield { type: "finish", totalTokens };
             continue;
           }
           if (chunk.type === "error") {
-            const message = chunk.error instanceof Error ? chunk.error.message : String(chunk.error || "stream error");
-            throw new Error(message);
+            if ((chunk as Record<string, unknown>).error !== undefined) {
+              throw (chunk as Record<string, unknown>).error;
+            }
+            throw new Error("stream error");
           }
         }
 

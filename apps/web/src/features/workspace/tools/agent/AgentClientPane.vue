@@ -323,7 +323,7 @@
 
     <div
       v-if="!isSubtaskSession"
-      class="p-3 border-t border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]"
+      class="p-2 border-t border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]"
       :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
     >
       <div
@@ -386,7 +386,7 @@
       </div>
       <div class="pt-2">
         <div class="flex items-center gap-2">
-          <div v-if="hasAvailableAgents" class="flex items-center gap-2 min-w-0">
+          <div v-if="hasAvailableAgents" class="flex items-center gap-0.5 min-w-0">
             <a-select
               :value="effectiveAgentId"
               :options="props.agentOptions"
@@ -394,15 +394,21 @@
               style="min-width: 180px; max-width: 320px"
               @update:value="onAgentChange"
             />
-            <div
-              v-if="effectiveModelLabel"
-              class="min-w-0 max-w-[360px] text-[0.9em] text-[color:var(--text-tertiary)] truncate"
-              :title="effectiveModelLabel"
-            >
-              {{ effectiveModelLabel }}
+            <div v-if="hasAvailableAgents" class="min-w-0 max-w-[360px] flex items-center ml-1 mr-2">
+              <a-tooltip :title="t('agent.client.modelEditTooltip')" placement="top" :mouse-enter-delay="0.45">
+                <a-button
+                  type="text"
+                  size="small"
+                  class="!px-0.5 max-w-full"
+                  :title="effectiveModelLabel || t('agent.client.modelEditUnavailable')"
+                  @click="onOpenAgentModelModal"
+                >
+                 {{ effectiveModelLabel || t("agent.client.modelEditUnavailable") }}
+                </a-button>
+              </a-tooltip>
             </div>
             <div class="flex items-center gap-1">
-              <a-tooltip :title="t('agent.client.agentEnablementTooltip')" placement="top">
+              <a-tooltip :title="t('agent.client.agentEnablementTooltip')" placement="top" :mouse-enter-delay="0.45">
                 <a-button
                   size="small"
                   type="text"
@@ -413,7 +419,7 @@
                   <template #icon><RobotOutlined /></template>
                 </a-button>
               </a-tooltip>
-              <a-tooltip :title="t('agent.client.contextManagerTooltip')" placement="top">
+              <a-tooltip :title="t('agent.client.contextManagerTooltip')" placement="top" :mouse-enter-delay="0.45">
                 <a-button
                   size="small"
                   type="text"
@@ -432,7 +438,7 @@
               {{ t("agent.client.goCreateAgent") }}
             </a-button>
             <div class="flex items-center gap-1">
-              <a-tooltip :title="t('agent.client.agentEnablementTooltip')" placement="top">
+              <a-tooltip :title="t('agent.client.agentEnablementTooltip')" placement="top" :mouse-enter-delay="0.45">
                 <a-button
                   size="small"
                   type="text"
@@ -443,7 +449,7 @@
                   <template #icon><RobotOutlined /></template>
                 </a-button>
               </a-tooltip>
-              <a-tooltip :title="t('agent.client.contextManagerTooltip')" placement="top">
+              <a-tooltip :title="t('agent.client.contextManagerTooltip')" placement="top" :mouse-enter-delay="0.45">
                 <a-button
                   size="small"
                   type="text"
@@ -516,6 +522,40 @@
             </label>
           </div>
         </a-checkbox-group>
+      </div>
+    </a-modal>
+
+    <a-modal
+      :open="agentModelModalVisible"
+      :title="t('agent.client.modelEditTitle')"
+      :ok-text="t('common.save')"
+      :cancel-text="t('common.cancel')"
+      :confirm-loading="agentModelSaving"
+      :ok-button-props="{ disabled: agentModelLoading || !!agentModelError }"
+      @ok="onSaveAgentModel"
+      @cancel="agentModelModalVisible = false"
+    >
+      <div class="text-[0.9em] text-[color:var(--text-tertiary)] mb-3">
+        {{ t("agent.client.modelEditHint") }}
+      </div>
+      <div v-if="agentModelLoading" class="py-6 text-center text-[color:var(--text-tertiary)]">
+        {{ t("common.loading") }}
+      </div>
+      <div v-else-if="agentModelError" class="py-3 text-red-500 whitespace-pre-wrap break-words">
+        {{ agentModelError }}
+      </div>
+      <div v-else>
+        <a-form layout="vertical">
+          <a-form-item :label="t('settings.agentProfiles.fields.defaultModel')">
+            <a-cascader
+              v-model:value="agentModelFormPath"
+              :options="agentModelCascaderOptions"
+              :placeholder="t('settings.agentProfiles.agentForm.defaultModelCascaderPlaceholder')"
+              :show-search="true"
+              expand-trigger="hover"
+            />
+          </a-form-item>
+        </a-form>
       </div>
     </a-modal>
 
@@ -595,7 +635,14 @@
 </template>
 
 <script setup lang="ts">
-import type { AgentContextItemRecord, AgentGlobalPromptItem, AgentSessionRunState } from "@agent-workbench/shared";
+import type {
+  AgentContextItemRecord,
+  AgentDefaultModel,
+  AgentGlobalPromptItem,
+  AgentProvidersSettingsView,
+  AgentSessionRunState,
+  UpdateAgentSettingsRequest
+} from "@agent-workbench/shared";
 import {
   CheckCircleOutlined,
   ClockCircleOutlined,
@@ -641,7 +688,10 @@ import {
   getWorkspaceAgentEnablementSettings,
   getAgentGlobalPromptSettings,
   listWorkspaceTopLevelSkills,
+  getAgentProvidersSettings,
+  getAgentSettings,
   suggestWorkspaceFilePaths,
+  updateAgentSettings,
   sendAgentMessage,
   updateWorkspaceExternalSkillRootsSettings
 } from "@/shared/api";
@@ -770,7 +820,7 @@ const emit = defineEmits<{
   "open-parent": [sessionId: string];
   "choose-session": [];
   "session-title-sync-needed": [sessionId: string];
-  "agent-enablement-saved": [];
+  "agent-settings-updated": [];
 }>();
 
 const { t } = useI18n();
@@ -823,6 +873,15 @@ const agentEnablementSaving = ref(false);
 const agentEnablementError = ref("");
 const agentEnablementCandidates = ref<Array<{ id: string; name: string; scope: "user" | "subtask" | "both"; enabled: boolean }>>([]);
 const agentEnablementSelectedIds = ref<string[]>([]);
+
+const agentModelModalVisible = ref(false);
+const agentModelLoading = ref(false);
+const agentModelSaving = ref(false);
+const agentModelError = ref("");
+const agentModelFormPath = ref<string[]>([]);
+const agentModelInitialPath = ref<string[]>([]);
+const agentModelTargetAgentId = ref("");
+const agentModelProvidersSettings = ref<AgentProvidersSettingsView | null>(null);
 
 
 type SavedScrollState = {
@@ -1227,6 +1286,44 @@ const effectiveModelLabel = computed(() => {
   if (!resolved) return "";
   return `${resolved.providerName} / ${resolved.modelName}`;
 });
+
+const agentModelCascaderOptions = computed(() => {
+  const providers = agentModelProvidersSettings.value?.providers ?? [];
+  return providers
+      .filter((provider) => provider.models.length > 0)
+      .map((provider) => ({
+        label: provider.name,
+        value: provider.id,
+        children: provider.models.map((model) => ({
+          label: model.name,
+          value: model.id
+        }))
+      }))
+  ;
+});
+
+function findAgentProviderModel(providerId: string, modelId: string) {
+  const providers = agentModelProvidersSettings.value?.providers ?? [];
+  const provider = providers.find((item) => item.id === providerId);
+  if (!provider) return null;
+  const model = provider.models.find((item) => item.id === modelId);
+  if (!model) return null;
+  return { provider, model };
+}
+
+function toAgentDefaultModelFromPath(pathRaw: unknown): AgentDefaultModel | undefined {
+  const path = Array.isArray(pathRaw) ? pathRaw.map((item) => String(item || "").trim()).filter((item) => item.length > 0) : [];
+  if (path.length !== 2) return undefined;
+  const [providerId, modelId] = path;
+  if (!providerId || !modelId) return undefined;
+  if (!findAgentProviderModel(providerId, modelId)) return undefined;
+  return { providerId, modelId };
+}
+
+function isSameAgentDefaultModel(left: AgentDefaultModel, right: AgentDefaultModel) {
+  if (left === null || right === null) return left === right;
+  return left.providerId === right.providerId && left.modelId === right.modelId;
+}
 
 const headerTokensNumberFormatter = new Intl.NumberFormat();
 const headerTokensPercentFormatter = new Intl.NumberFormat(undefined, {
@@ -3017,11 +3114,102 @@ async function onSaveAgentEnablementSettings() {
     });
     message.success(t("agent.client.agentEnablementSaved"));
     agentEnablementModalVisible.value = false;
-    emit("agent-enablement-saved");
+    emit("agent-settings-updated");
   } catch (err) {
     agentEnablementError.value = err instanceof Error ? err.message : String(err);
   } finally {
     agentEnablementSaving.value = false;
+  }
+}
+
+async function onOpenAgentModelModal() {
+  const agentId = String(effectiveAgentId.value || "").trim();
+  if (!agentId) return;
+  agentModelModalVisible.value = true;
+  agentModelLoading.value = true;
+  agentModelSaving.value = false;
+  agentModelError.value = "";
+  agentModelTargetAgentId.value = agentId;
+  try {
+    const [providersRes, settingsRes] = await Promise.all([getAgentProvidersSettings(), getAgentSettings()]);
+    agentModelProvidersSettings.value = providersRes;
+    const target = settingsRes.agents.find((item) => item.id === agentId);
+    if (!target) {
+      agentModelError.value = t("agent.client.modelEditAgentMissing");
+      return;
+    }
+    const initialPath = target.defaultModel
+      ? [target.defaultModel.providerId, target.defaultModel.modelId]
+      : [];
+    agentModelFormPath.value = [...initialPath];
+    agentModelInitialPath.value = [...initialPath];
+  } catch (err) {
+    agentModelError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    agentModelLoading.value = false;
+  }
+}
+
+async function onSaveAgentModel() {
+  if (agentModelLoading.value || agentModelError.value) return;
+  if (agentModelSaving.value) return;
+  const targetId = String(agentModelTargetAgentId.value || "").trim();
+  if (!targetId) return;
+  const defaultModel = toAgentDefaultModelFromPath(agentModelFormPath.value);
+  const initialDefaultModel = toAgentDefaultModelFromPath(agentModelInitialPath.value);
+  if (defaultModel === undefined) {
+    message.error(t("settings.agentProfiles.errors.defaultModelRequired"));
+    return;
+  }
+
+  // 历史非法配置（initialDefaultModel === undefined）允许保存修复；
+  // 仅在初始值可解析且确实未变更时直接关闭弹窗。
+  if (initialDefaultModel !== undefined && isSameAgentDefaultModel(defaultModel, initialDefaultModel)) {
+    agentModelModalVisible.value = false;
+    return;
+  }
+
+  agentModelSaving.value = true;
+  agentModelError.value = "";
+  try {
+    const settingsRes = await getAgentSettings();
+    const targetExists = settingsRes.agents.some((item) => item.id === targetId);
+    if (!targetExists) {
+      agentModelError.value = t("agent.client.modelEditAgentMissing");
+      return;
+    }
+    const requestAgents: UpdateAgentSettingsRequest["agents"] = [];
+    for (const agent of settingsRes.agents) {
+      const nextDefaultModel = agent.id === targetId ? defaultModel : agent.defaultModel;
+      if (!nextDefaultModel) {
+        message.error(t("settings.agentProfiles.errors.defaultModelRequired"));
+        return;
+      }
+      requestAgents.push({
+        id: agent.id,
+        name: agent.name,
+        summary: agent.summary,
+        prompt: agent.prompt,
+        globalPromptIds: agent.globalPromptIds,
+        tools: agent.tools,
+        mcpServers: agent.mcpServers,
+        pluginTools: agent.pluginTools,
+        defaultModel: nextDefaultModel,
+        scope: agent.scope,
+        order: agent.order
+      });
+    }
+    const payload = {
+      agents: requestAgents
+    } satisfies UpdateAgentSettingsRequest;
+    await updateAgentSettings(payload);
+    message.success(t("agent.client.modelEditSaved"));
+    agentModelModalVisible.value = false;
+    emit("agent-settings-updated");
+  } catch (err) {
+    agentModelError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    agentModelSaving.value = false;
   }
 }
 
@@ -3105,7 +3293,7 @@ async function onSend() {
     } else {
       message.error(err instanceof Error ? err.message : String(err));
     }
-    emit("agent-enablement-saved");
+    emit("agent-settings-updated");
   } finally {
     sending.value = false;
   }

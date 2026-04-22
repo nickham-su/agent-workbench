@@ -164,6 +164,16 @@
           </div>
         </a-form-item>
 
+        <a-form-item :label="t('settings.agentProfiles.fields.defaultModel')">
+          <a-cascader
+            v-model:value="agentFormDefaultModelPath"
+            :options="defaultModelCascaderOptions"
+            :placeholder="t('settings.agentProfiles.agentForm.defaultModelCascaderPlaceholder')"
+            :show-search="true"
+            expand-trigger="hover"
+          />
+        </a-form-item>
+
         <a-form-item :label="t('settings.agentProfiles.fields.globalPrompts')">
           <a-select
             v-model:value="agentFormGlobalPromptIds"
@@ -199,16 +209,6 @@
           <div class="pt-1 text-xs text-[color:var(--text-tertiary)]">
             {{ t("settings.agentProfiles.agentForm.pluginToolsHelp") }}
           </div>
-        </a-form-item>
-
-        <a-form-item :label="t('settings.agentProfiles.fields.defaultModel')">
-          <a-cascader
-            v-model:value="agentFormDefaultModelPath"
-            :options="defaultModelCascaderOptions"
-            :placeholder="t('settings.agentProfiles.agentForm.defaultModelCascaderPlaceholder')"
-            :show-search="true"
-            expand-trigger="hover"
-          />
         </a-form-item>
 
         <a-form-item :label="t('settings.agentProfiles.fields.scope')" :required="true">
@@ -269,7 +269,6 @@ type EditingAgent = {
   order: number;
 };
 
-const GLOBAL_DEFAULT_MODEL_PATH = "__global__";
 const AGENT_PROMPT_MAX_BYTES = 32 * 1024;
 const RESERVED_GLOBAL_SYSTEM_PROMPT_ID = "global_system_prompt";
 
@@ -312,17 +311,12 @@ const agentFormGlobalPromptIds = ref<string[]>([]);
 const agentFormTools = ref<AgentToolName[]>([...DEFAULT_TOOLS]);
 const agentFormMcpServers = ref<string[]>([]);
 const agentFormPluginTools = ref<AgentPluginTools>([]);
-const agentFormDefaultModelPath = ref<string[]>([GLOBAL_DEFAULT_MODEL_PATH]);
+const agentFormDefaultModelPath = ref<string[]>([]);
 const agentFormScope = ref<AgentScope>("both");
 
 const defaultModelCascaderOptions = computed(() => {
   const providers = providersSettings.value?.providers ?? [];
-  return [
-    {
-      label: t("settings.agentProfiles.fields.useGlobalDefault"),
-      value: GLOBAL_DEFAULT_MODEL_PATH
-    },
-    ...providers
+  return providers
       .filter((provider) => provider.models.length > 0)
       .map((provider) => ({
         label: provider.name,
@@ -332,7 +326,7 @@ const defaultModelCascaderOptions = computed(() => {
           value: model.id
         }))
       }))
-  ];
+  ;
 });
 
 const mcpServerOptions = computed(() => {
@@ -488,7 +482,6 @@ function toDefaultModelFromPath(pathRaw: unknown): AgentDefaultModel | undefined
   const path = Array.isArray(pathRaw)
     ? pathRaw.map((item) => String(item || "").trim()).filter((item) => item.length > 0)
     : [];
-  if (path.length === 1 && path[0] === GLOBAL_DEFAULT_MODEL_PATH) return null;
   if (path.length !== 2) return undefined;
   const [providerId, modelId] = path;
   if (!providerId || !modelId) return undefined;
@@ -498,7 +491,7 @@ function toDefaultModelFromPath(pathRaw: unknown): AgentDefaultModel | undefined
 }
 
 function defaultModelLabel(defaultModel: AgentDefaultModel) {
-  if (!defaultModel) return t("settings.agentProfiles.fields.useGlobalDefault");
+  if (!defaultModel) return t("agent.client.modelEditUnavailable");
   const found = findModel(defaultModel.providerId, defaultModel.modelId);
   if (!found) {
     return `${defaultModel.providerId}/${defaultModel.modelId}`;
@@ -542,9 +535,14 @@ function markDirty() {
   return saveRevision.value;
 }
 
-function toRequestBody() {
-  return {
-    agents: agents.value.map((agent) => ({
+function toRequestBody(): UpdateAgentSettingsRequest | null {
+  const requestAgents: UpdateAgentSettingsRequest["agents"] = [];
+  for (const agent of agents.value) {
+    if (!agent.defaultModel) {
+      message.error(t("settings.agentProfiles.errors.defaultModelRequired"));
+      return null;
+    }
+    requestAgents.push({
       id: agent.id,
       name: agent.name.trim() || agent.id,
       summary: agent.summary.trim(),
@@ -556,7 +554,10 @@ function toRequestBody() {
       mcpServers: normalizeMcpServers(agent.mcpServers),
       pluginTools: [...agent.pluginTools],
       defaultModel: agent.defaultModel
-    }))
+    });
+  }
+  return {
+    agents: requestAgents
   } satisfies UpdateAgentSettingsRequest;
 }
 
@@ -570,7 +571,7 @@ function openCreateAgent() {
   agentFormTools.value = [...DEFAULT_TOOLS];
   agentFormMcpServers.value = [];
   agentFormPluginTools.value = [];
-  agentFormDefaultModelPath.value = [GLOBAL_DEFAULT_MODEL_PATH];
+  agentFormDefaultModelPath.value = [];
   agentFormScope.value = "both";
   agentModalOpen.value = true;
 }
@@ -589,7 +590,7 @@ function openEditAgent(agentId: string) {
   agentFormPluginTools.value = normalizePluginTools(target.pluginTools);
   agentFormDefaultModelPath.value = target.defaultModel
     ? [target.defaultModel.providerId, target.defaultModel.modelId]
-    : [GLOBAL_DEFAULT_MODEL_PATH];
+    : [];
   agentFormScope.value = target.scope;
   agentModalOpen.value = true;
 }
@@ -605,7 +606,7 @@ function closeAgentModal() {
   agentFormTools.value = [...DEFAULT_TOOLS];
   agentFormMcpServers.value = [];
   agentFormPluginTools.value = [];
-  agentFormDefaultModelPath.value = [GLOBAL_DEFAULT_MODEL_PATH];
+  agentFormDefaultModelPath.value = [];
   agentFormScope.value = "both";
 }
 
@@ -623,8 +624,12 @@ function submitAgent() {
   }
 
   const defaultModel = toDefaultModelFromPath(agentFormDefaultModelPath.value);
+  if (agentFormDefaultModelPath.value.length === 0) {
+    message.error(t("settings.agentProfiles.errors.defaultModelRequired"));
+    return;
+  }
   if (defaultModel === undefined) {
-    message.error(t("settings.agentProfiles.errors.defaultModelInvalid"));
+    message.error(t("settings.agentProfiles.errors.defaultModelRequired"));
     return;
   }
   if (agentPromptBytes.value > AGENT_PROMPT_MAX_BYTES) {
@@ -763,6 +768,7 @@ async function persist(params: { toast: boolean }) {
   saving.value = true;
   try {
     const body = toRequestBody();
+    if (!body) return;
     await persistAgentProfilesDraft({
       getRevision: () => saveRevision.value,
       body,

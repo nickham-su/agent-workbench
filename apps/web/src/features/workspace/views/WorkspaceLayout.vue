@@ -213,24 +213,27 @@ const tools = computed<ToolDefinition[]>(() => [
     allowedAreas: ["leftTop", "leftBottom"],
     keepAlive: true,
     createRuntime: (ctx) => createCodeReviewRuntime(ctx),
-    headerActions: () => [
-      {
-        id: "pull",
-        label: t("workspace.actions.pull"),
-        loading: pullLoading.value,
-        disabled: gitBusy.value || !currentTarget.value,
-        groupKey: "repo.sync",
-        onClick: () => void pullWithUi()
-      },
-      {
-        id: "push",
-        label: t("workspace.actions.push"),
-        loading: pushLoading.value,
-        disabled: gitBusy.value || !currentTarget.value,
-        groupKey: "repo.sync",
-        onClick: () => void pushWithUi()
-      }
-    ]
+    headerActions: () => {
+      if (!hasRepos.value) return [];
+      return [
+        {
+          id: "pull",
+          label: t("workspace.actions.pull"),
+          loading: pullLoading.value,
+          disabled: gitBusy.value || !currentTarget.value,
+          groupKey: "repo.sync",
+          onClick: () => void pullWithUi()
+        },
+        {
+          id: "push",
+          label: t("workspace.actions.push"),
+          loading: pushLoading.value,
+          disabled: gitBusy.value || !currentTarget.value,
+          groupKey: "repo.sync",
+          onClick: () => void pushWithUi()
+        }
+      ];
+    }
   },
   {
     toolId: "terminal",

@@ -778,6 +778,78 @@ function sanitizeSkillToolError(err: unknown) {
   return new Error("skill tool failed to read target");
 }
 
+function isRootSkillNode(ns: string, safeRel: string) {
+  if (ns === "builtin") {
+    return safeRel !== "." && !safeRel.includes("/");
+  }
+  return safeRel === ".";
+}
+
+async function collectRecursiveRootSkillChildren(params: {
+  rootPath: string;
+  ns: string;
+  logicalBaseRel: string;
+  targetPath: string;
+  signal?: AbortSignal;
+}): Promise<SkillNodeChild[]> {
+  const children: SkillNodeChild[] = [];
+
+  const walk = async (dirPath: string, dirRelPath: string) => {
+    throwIfAborted(params.signal);
+    const entries = await fs.readdir(dirPath, { withFileTypes: true });
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (entry.isSymbolicLink()) continue;
+      const entryPath = path.join(dirPath, entry.name);
+      const entryRelPath = path.posix.join(dirRelPath, entry.name);
+      if (entry.isFile()) {
+        if (entry.name === "SKILL.md") continue;
+        await ensureRealPathInsideWorkspace(params.rootPath, entryPath);
+        const entryStat = await fs.lstat(entryPath);
+        if (!entryStat.isFile() || entryStat.isSymbolicLink()) continue;
+        const fileKind = await classifyTextSample(entryPath, Number(entryStat.size));
+        if (fileKind.kind !== "text") continue;
+        const fileDecoded = await readTextFileCapped({ fullPath: entryPath, encoding: fileKind.encoding, signal: params.signal });
+        const fileParsed = parseSkillFrontmatter(fileDecoded.lines.join("\n"));
+        children.push({
+          id: `${params.ns}/${entryRelPath}`,
+          type: "file",
+          name: entry.name,
+          description: fileParsed.description || ""
+        });
+        continue;
+      }
+      if (!entry.isDirectory()) continue;
+
+      const childSkillPath = path.join(entryPath, "SKILL.md");
+      const childStat = await fs.lstat(childSkillPath).catch((err: any) => {
+        if (err && err.code === "ENOENT") return null;
+        throw err;
+      });
+      if (childStat && childStat.isFile() && !childStat.isSymbolicLink()) {
+        await ensureRealPathInsideWorkspace(params.rootPath, childSkillPath);
+        const childKind = await classifyTextSample(childSkillPath, Number(childStat.size));
+        if (childKind.kind === "text") {
+          const childDecoded = await readTextFileCapped({ fullPath: childSkillPath, encoding: childKind.encoding, signal: params.signal });
+          const childParsed = parseSkillFrontmatter(childDecoded.lines.join("\n"));
+          children.push({
+            id: `${params.ns}/${entryRelPath}`,
+            type: "skill",
+            name: childParsed.name || entry.name,
+            description: childParsed.description || ""
+          });
+        }
+      }
+
+      await ensureRealPathInsideWorkspace(params.rootPath, entryPath);
+      await walk(entryPath, entryRelPath);
+    }
+  };
+
+  await walk(params.targetPath, params.logicalBaseRel);
+  children.sort((a, b) => a.id.localeCompare(b.id));
+  return children;
+}
+
 export async function runSkillTool(params: {
   workspacePath: string;
   repoRoot: string;
@@ -870,6 +942,8 @@ export async function runSkillTool(params: {
     const skillRaw = skillDecoded.lines.join("\n");
     const skillParsed = parseSkillFrontmatter(skillRaw);
 
+    const rootNode = isRootSkillNode(ns, safeRel);
+
     const entries = await fs.readdir(targetPath, { withFileTypes: true });
     const children: SkillNodeChild[] = [];
     for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
@@ -903,6 +977,20 @@ export async function runSkillTool(params: {
         description: childParsed.description || ""
       });
     }
+    // children 语义约定：
+    // - 根 skill：children 递归展开为整棵 skill 子树下的可读摘要（便于一次性披露）
+    // - 非根 skill：children 保持直接子级（避免每层重复回传整树）
+    // 这里显式分支，降低后续维护时把两种语义混淆的风险。
+
+    const resultChildren = rootNode
+      ? await collectRecursiveRootSkillChildren({
+          rootPath,
+          ns,
+          logicalBaseRel,
+          targetPath,
+          signal: params.signal
+        })
+      : children;
 
     return {
       id,
@@ -910,7 +998,7 @@ export async function runSkillTool(params: {
       name: skillParsed.name || path.basename(targetPath),
       description: skillParsed.description || "",
       content: skillParsed.body,
-      children,
+      children: resultChildren,
       truncated: skillDecoded.truncatedByBytes || skillDecoded.hasMoreLines
     };
   } catch (err) {

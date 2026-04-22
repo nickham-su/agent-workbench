@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { AgentRunner, buildCompactionUserPrompt } from "./runner.js";
+import { ApiConflictError } from "./apiClient.js";
 
 test("shouldAutoCompact 基于当前模型 contextWindowTokens 计算阈值", () => {
   const runner = new AgentRunner({} as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
@@ -122,4 +123,251 @@ test("generateCompactionSummary 使用 messages-context 追加压缩提示词", 
     appendMessage: { role: "user", content: buildCompactionUserPrompt({ uiLocale: "zh-CN" }) }
   });
   assert.ok(String(resZh.messages.at(-1)?.content || "").includes("请基于当前会话内容输出一份结构化总结"));
+});
+
+test("compactContext 在可恢复失败时按 modelRequestMaxRetries 重试", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => {
+    return originalSetTimeout(handler, 0, ...args);
+  }) as typeof setTimeout;
+
+  try {
+    let compactCalls = 0;
+    const runStateUpdates: Array<{ runNoticeText?: string }> = [];
+    class TestRunner extends AgentRunner {
+      protected override async generateCompactionSummary() {
+        return "summary-ok";
+      }
+    }
+    const runner = new TestRunner(
+      {
+        async compactContext() {
+          compactCalls += 1;
+          if (compactCalls === 1) {
+            throw new Error("request failed: 500 upstream unavailable");
+          }
+          return { compacted: true, summaryItemId: 10, archivedCount: 4 };
+        },
+        async updateRunState(input: { runNoticeText?: string }) {
+          runStateUpdates.push(input);
+        }
+      } as any,
+      {} as any,
+      { info() {}, warn() {}, error() {} },
+      1
+    );
+
+    const result = await (runner as any).compactContext({
+      profile: {
+        runtime: { modelRequestMaxRetries: 1 },
+        model: {},
+        provider: {}
+      },
+      run: {
+        workspaceId: "ws",
+        sessionId: "sess",
+        runId: "run"
+      },
+      context: {
+        headItemId: 1,
+        uiLocale: "zh-CN"
+      },
+      signal: AbortSignal.timeout(1_000)
+    });
+
+    assert.equal(result, true);
+    assert.equal(compactCalls, 2);
+    assert.ok(runStateUpdates.some((it) => String(it.runNoticeText || "").includes("Compaction failed, retrying")));
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("compactContext 已重试后遇到 ApiConflictError 保留错误语义", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => {
+    return originalSetTimeout(handler, 0, ...args);
+  }) as typeof setTimeout;
+
+  try {
+  let compactCalls = 0;
+  class TestRunner extends AgentRunner {
+    protected override async generateCompactionSummary() {
+      return "summary-ok";
+    }
+  }
+  const runner = new TestRunner(
+    {
+      async compactContext() {
+        compactCalls += 1;
+        if (compactCalls === 1) throw new Error("request failed: 500 upstream unavailable");
+        throw new ApiConflictError("context conflict");
+      },
+      async updateRunState() {}
+    } as any,
+    {} as any,
+    { info() {}, warn() {}, error() {} },
+    1
+  );
+
+  await assert.rejects(
+    () =>
+      (runner as any).compactContext({
+        profile: {
+          runtime: { modelRequestMaxRetries: 3 },
+          model: {},
+          provider: {}
+        },
+        run: {
+          workspaceId: "ws",
+          sessionId: "sess",
+          runId: "run"
+        },
+        context: {
+          headItemId: 1,
+          uiLocale: "zh-CN"
+        },
+        signal: AbortSignal.timeout(1_000)
+      }),
+    ApiConflictError
+  );
+    assert.equal(compactCalls, 2);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("compactContext 返回 compacted:false 时不重试并清理 notice", async () => {
+  let compactCalls = 0;
+  class TestRunner extends AgentRunner {
+    protected override async generateCompactionSummary() {
+      return "summary-ok";
+    }
+  }
+  const runner = new TestRunner(
+    {
+      async compactContext() {
+        compactCalls += 1;
+        return { compacted: false, summaryItemId: null, archivedCount: 0 };
+      },
+      async updateRunState() {}
+    } as any,
+    {} as any,
+    { info() {}, warn() {}, error() {} },
+    1
+  );
+
+  const result = await (runner as any).compactContext({
+    profile: {
+      runtime: { modelRequestMaxRetries: 3 },
+      model: {},
+      provider: {}
+    },
+    run: {
+      workspaceId: "ws",
+      sessionId: "sess",
+      runId: "run"
+    },
+    context: {
+      headItemId: 1,
+      uiLocale: "zh-CN"
+    },
+    signal: AbortSignal.timeout(1_000)
+  });
+
+  assert.equal(result, false);
+  assert.equal(compactCalls, 1);
+});
+
+test("compactContext 压缩成功后 updateRunState 失败不应触发重试", async () => {
+  let compactCalls = 0;
+  let runStateCalls = 0;
+  class TestRunner extends AgentRunner {
+    protected override async generateCompactionSummary() {
+      return "summary-ok";
+    }
+  }
+  const runner = new TestRunner(
+    {
+      async compactContext() {
+        compactCalls += 1;
+        return { compacted: true, summaryItemId: 8, archivedCount: 2 };
+      },
+      async updateRunState() {
+        runStateCalls += 1;
+        throw new Error("request failed: 500 update failed");
+      }
+    } as any,
+    {} as any,
+    { info() {}, warn() {}, error() {} },
+    1
+  );
+
+  const result = await (runner as any).compactContext({
+    profile: {
+      runtime: { modelRequestMaxRetries: 3 },
+      model: {},
+      provider: {}
+    },
+    run: {
+      workspaceId: "ws",
+      sessionId: "sess",
+      runId: "run"
+    },
+    context: {
+      headItemId: 1,
+      uiLocale: "zh-CN"
+    },
+    signal: AbortSignal.timeout(1_000)
+  });
+
+  assert.equal(result, true);
+  assert.equal(compactCalls, 1);
+  assert.equal(runStateCalls, 1);
+});
+
+test("compactContext 重试后 summary 为空会清理 retry notice", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => {
+    return originalSetTimeout(handler, 0, ...args);
+  }) as typeof setTimeout;
+  try {
+    let summaryCalls = 0;
+    const runStateUpdates: Array<{ runNoticeText?: string }> = [];
+    class TestRunner extends AgentRunner {
+      protected override async generateCompactionSummary() {
+        summaryCalls += 1;
+        if (summaryCalls === 1) {
+          throw new Error("request failed: 500 summary unavailable");
+        }
+        return "";
+      }
+    }
+    const runner = new TestRunner(
+      {
+        async compactContext() {
+          throw new Error("compactContext should not be called when summary is empty");
+        },
+        async updateRunState(input: { runNoticeText?: string }) {
+          runStateUpdates.push(input);
+        }
+      } as any,
+      {} as any,
+      { info() {}, warn() {}, error() {} },
+      1
+    );
+
+    const result = await (runner as any).compactContext({
+      profile: { runtime: { modelRequestMaxRetries: 1 }, model: {}, provider: {} },
+      run: { workspaceId: "ws", sessionId: "sess", runId: "run" },
+      context: { headItemId: 1, uiLocale: "zh-CN" },
+      signal: AbortSignal.timeout(1_000)
+    });
+
+    assert.equal(result, false);
+    assert.ok(runStateUpdates.some((it) => String(it.runNoticeText || "").includes("Compaction failed, retrying")));
+    assert.equal(runStateUpdates.at(-1)?.runNoticeText, "");
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
 });

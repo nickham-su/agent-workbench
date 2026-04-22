@@ -1,17 +1,14 @@
 <template>
-  <div
-    ref="rootEl"
-    class="assistant-markdown-message break-words"
-    :class="toneClass"
-    v-html="safeHtml"
-  />
+  <div ref="rootEl" class="assistant-markdown-message break-words" :class="toneClass" v-html="safeHtml" @click="onMarkdownClick" />
 </template>
 
 <script setup lang="ts">
+import { message } from "ant-design-vue";
 import DOMPurify from "dompurify";
 import MarkdownIt from "markdown-it";
 import type { Config as DOMPurifyConfig } from "dompurify";
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
 
 const props = defineProps<{
   text: string;
@@ -22,12 +19,13 @@ const props = defineProps<{
 }>();
 
 const MARKDOWN_DEBOUNCE_MS = 280;
-const MERMAID_DEBOUNCE_MS = 900;
 const MARKDOWN_CACHE_MAX = 240;
-const MERMAID_CACHE_MAX = 180;
 
 const markdownCache = new Map<string, string>();
-const mermaidCache = new Map<string, string>();
+
+const { t, locale } = useI18n();
+
+const rootEl = ref<HTMLElement | null>(null);
 
 const markdown = new MarkdownIt({
   html: false,
@@ -36,8 +34,23 @@ const markdown = new MarkdownIt({
   typographer: false
 });
 
+function escapeHtml(value: string) {
+  return markdown.utils.escapeHtml(value);
+}
+
 // 当前版本不支持图片渲染.
 markdown.renderer.rules.image = () => "";
+
+markdown.renderer.rules.fence = (tokens, idx, options) => {
+  const token = tokens[idx];
+  const info = markdown.utils.unescapeAll(String(token.info || "")).trim();
+  const languageName = info.split(/\s+/, 1)[0] || "";
+  const className = languageName ? `${options.langPrefix}${escapeHtml(languageName)}` : "";
+  const classAttr = className ? ` class="${className}"` : "";
+  const copyLabel = escapeHtml(t("agent.client.copyCode"));
+  const code = escapeHtml(String(token.content || ""));
+  return `<div class="assistant-code-block" data-assistant-code-block="1"><button type="button" class="assistant-code-copy-btn" data-copy-code="1" aria-label="${copyLabel}" title="${copyLabel}"><span class="assistant-code-copy-icon" aria-hidden="true"></span></button><pre><code${classAttr}>${code}</code></pre></div>`;
+};
 
 let hookInstalled = false;
 
@@ -88,46 +101,9 @@ function ensurePurifyHooks() {
 
 const MARKDOWN_SANITIZE_CONFIG: DOMPurifyConfig = {
   USE_PROFILES: { html: true },
-  FORBID_TAGS: ["img", "script", "style", "iframe", "object", "embed", "form", "input", "button", "textarea", "select", "option", "meta", "link"],
+  FORBID_TAGS: ["img", "script", "style", "iframe", "object", "embed", "form", "input", "textarea", "select", "option", "meta", "link"],
   FORBID_ATTR: ["style"]
 };
-
-const SVG_SANITIZE_CONFIG: DOMPurifyConfig = {
-  USE_PROFILES: { svg: true, svgFilters: true },
-  FORBID_TAGS: ["a", "foreignObject"],
-  FORBID_ATTR: ["style", "href", "xlink:href"]
-};
-
-type MermaidApi = {
-  initialize: (config: Record<string, unknown>) => void;
-  render: (id: string, text: string) => Promise<{ svg: string } | string>;
-};
-
-let mermaidApiPromise: Promise<MermaidApi> | null = null;
-let mermaidInitialized = false;
-
-async function getMermaidApi() {
-  if (!mermaidApiPromise) {
-    mermaidApiPromise = import("mermaid").then((mod) => {
-      const api = (mod.default ?? mod) as MermaidApi;
-      if (!mermaidInitialized) {
-        api.initialize({
-          startOnLoad: false,
-          securityLevel: "strict",
-          flowchart: { htmlLabels: false },
-          sequence: { useMaxWidth: true }
-        });
-        mermaidInitialized = true;
-      }
-      return api;
-    }).catch((err) => {
-      // 首次加载失败时清空缓存,后续渲染可继续重试.
-      mermaidApiPromise = null;
-      throw err;
-    });
-  }
-  return mermaidApiPromise;
-}
 
 function stableHash(input: string) {
   let hash = 2166136261;
@@ -163,66 +139,18 @@ function setCacheValue(cache: Map<string, string>, key: string, value: string, m
   }
 }
 
-function stripSvgLinks(svgText: string) {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(svgText, "image/svg+xml");
-  const links = Array.from(doc.querySelectorAll("a"));
-  for (const link of links) {
-    const parent = link.parentNode;
-    if (!parent) continue;
-    while (link.firstChild) {
-      parent.insertBefore(link.firstChild, link);
-    }
-    parent.removeChild(link);
-  }
-  const hrefNodes = Array.from(doc.querySelectorAll("[href], [xlink\\:href]"));
-  for (const node of hrefNodes) {
-    node.removeAttribute("href");
-    node.removeAttribute("xlink:href");
-  }
-  const svg = doc.documentElement;
-  return svg ? new XMLSerializer().serializeToString(svg) : "";
-}
-
-function hasClosedMermaidFence(text: string) {
-  return /```\s*mermaid[\t ]*\r?\n[\s\S]*?```/i.test(text);
-}
-
-function isMermaidErrorSvg(svgText: string) {
-  const text = String(svgText || "");
-  if (!text) return false;
-  const lower = text.toLowerCase();
-  // mermaid 解析失败时经常返回一个“错误 SVG”(而不是抛异常)
-  // 该 SVG 通常带有 aria-roledescription="error" 与 Syntax error 文本。
-  return (
-    lower.includes('aria-roledescription="error"') ||
-    lower.includes("syntax error") ||
-    lower.includes("error-icon") ||
-    lower.includes("error-text")
-  );
-}
-
 ensurePurifyHooks();
 
-const rootEl = ref<HTMLElement | null>(null);
 const safeHtml = ref("");
 const toneClass = computed(() => (props.tone === "error" ? "is-error" : ""));
 
 let markdownTimer: number | null = null;
-let mermaidTimer: number | null = null;
 let renderSeq = 0;
-let lastRawText = "";
 
 function clearMarkdownTimer() {
   if (markdownTimer == null) return;
   window.clearTimeout(markdownTimer);
   markdownTimer = null;
-}
-
-function clearMermaidTimer() {
-  if (mermaidTimer == null) return;
-  window.clearTimeout(mermaidTimer);
-  mermaidTimer = null;
 }
 
 function scheduleMarkdownRender() {
@@ -239,25 +167,13 @@ function scheduleMarkdownRender() {
   }, delay);
 }
 
-function scheduleMermaidRender(seq: number, rawText: string) {
-  clearMermaidTimer();
-  if (!hasClosedMermaidFence(rawText)) return;
-  const delay = props.streaming ? MERMAID_DEBOUNCE_MS : 80;
-  mermaidTimer = window.setTimeout(() => {
-    mermaidTimer = null;
-    void renderMermaidBlocks(seq, rawText);
-  }, delay);
-}
-
 async function renderMarkdown() {
   const seq = ++renderSeq;
   const rawText = String(props.text || "");
-  lastRawText = rawText;
-  const key = cacheKeyOf(rawText, `markdown:${props.sectionKey || "body"}`);
+  const key = cacheKeyOf(rawText, `markdown:${props.sectionKey || "body"}:${locale.value}`);
   const cached = getCacheValue(markdownCache, key);
   if (cached != null) {
     safeHtml.value = cached;
-    scheduleMermaidRender(seq, rawText);
     return;
   }
 
@@ -267,87 +183,30 @@ async function renderMarkdown() {
   const safe = typeof sanitized === "string" ? sanitized : String(sanitized);
   safeHtml.value = safe;
   setCacheValue(markdownCache, key, safe, MARKDOWN_CACHE_MAX);
-  scheduleMermaidRender(seq, rawText);
 }
 
-async function renderMermaidBlocks(seq: number, rawText: string) {
-  if (seq !== renderSeq) return;
-  if (rawText !== lastRawText) return;
-
-  await nextTick();
-  if (seq !== renderSeq) return;
-  if (rawText !== lastRawText) return;
-
-  const root = rootEl.value;
-  if (!root) return;
-
-  const blocks = Array.from(root.querySelectorAll("pre > code")).filter((node) => {
-    const classList = String(node.className || "").split(/\s+/);
-    return classList.some((name) => name === "language-mermaid" || name === "lang-mermaid");
-  });
-  if (blocks.length === 0) return;
-
-  const mermaid = await getMermaidApi();
-  for (let i = 0; i < blocks.length; i += 1) {
-    if (seq !== renderSeq) return;
-    if (rawText !== lastRawText) return;
-
-    const codeEl = blocks[i];
-    const source = String(codeEl.textContent || "").trim();
-    if (!source) continue;
-
-    const cacheKey = cacheKeyOf(source, `mermaid:${props.sectionKey || "body"}`);
-    let safeSvg = getCacheValue(mermaidCache, cacheKey);
-    if (safeSvg == null) {
-      try {
-        const renderId = `awb_mermaid_${props.messageId}_${props.sectionKey || "body"}_${i}_${Date.now()}`;
-        const rendered = await mermaid.render(renderId, source);
-        const rawSvg = typeof rendered === "string" ? rendered : rendered.svg;
-
-        // 方案A：mermaid 语法错误时可能会返回“错误 SVG”(包含错误图标与错误提示文字)。
-        // 我们不将其展示为图片，直接回退为原代码块。
-        if (isMermaidErrorSvg(rawSvg)) {
-          if (import.meta.env.DEV) {
-            // eslint-disable-next-line no-console
-            console.warn("[awb mermaid] render returned error svg, fallback to code block", { source });
-          }
-          continue;
-        }
-
-        const sanitizedSvg = DOMPurify.sanitize(rawSvg, SVG_SANITIZE_CONFIG);
-        const safeSvgText = typeof sanitizedSvg === "string" ? sanitizedSvg : String(sanitizedSvg);
-        safeSvg = stripSvgLinks(safeSvgText);
-
-        // sanitize 可能会清空 SVG，避免替换为一个空节点。
-        if (!safeSvg || !safeSvg.includes("<svg")) {
-          if (import.meta.env.DEV) {
-            // eslint-disable-next-line no-console
-            console.warn("[awb mermaid] sanitized svg is empty, fallback to code block", { source });
-          }
-          safeSvg = null;
-          continue;
-        }
-
-        setCacheValue(mermaidCache, cacheKey, safeSvg, MERMAID_CACHE_MAX);
-      } catch (err) {
-        if (import.meta.env.DEV) {
-          // eslint-disable-next-line no-console
-          console.warn("[awb mermaid] render failed, fallback to code block", err);
-        }
-        continue;
-      }
-    }
-
-    // 可能因错误/清洗为空而回退
-    if (!safeSvg) continue;
-
-    const pre = codeEl.parentElement;
-    if (!pre || pre.tagName.toLowerCase() !== "pre") continue;
-    const wrapper = document.createElement("div");
-    wrapper.className = "assistant-mermaid-wrapper";
-    wrapper.innerHTML = safeSvg;
-    pre.replaceWith(wrapper);
+async function onCopyCode(code: string) {
+  try {
+    await navigator.clipboard.writeText(code);
+    message.success(t("agent.client.codeCopied"));
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err || "unknown error");
+    message.error(t("common.copyFailed", { reason }));
   }
+}
+
+function onMarkdownClick(event: MouseEvent) {
+  const target = event.target as HTMLElement | null;
+  if (!target) return;
+  const button = target.closest<HTMLElement>("[data-copy-code='1']");
+  if (!button || !rootEl.value?.contains(button)) return;
+  const block = button.closest<HTMLElement>("[data-assistant-code-block='1']");
+  const codeElement = block?.querySelector<HTMLElement>("pre > code");
+  if (!codeElement) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+  void onCopyCode(codeElement.textContent || "");
 }
 
 watch(
@@ -358,9 +217,15 @@ watch(
   { immediate: true }
 );
 
+watch(
+  () => locale.value,
+  () => {
+    scheduleMarkdownRender();
+  }
+);
+
 onBeforeUnmount(() => {
   clearMarkdownTimer();
-  clearMermaidTimer();
   renderSeq += 1;
 });
 </script>
@@ -436,16 +301,58 @@ onBeforeUnmount(() => {
   background: var(--panel-bg-elevated);
 }
 
-.assistant-markdown-message :deep(pre code) {
-  font-size: 0.9em;
-  line-height: 1.5;
-  white-space: pre;
+.assistant-markdown-message :deep(.assistant-code-block) {
+  position: relative;
+  margin: 0.5rem 0;
+}
+
+.assistant-markdown-message :deep(.assistant-code-block > pre) {
+  margin: 0;
+  padding-top: 2rem;
+}
+
+.assistant-markdown-message :deep(.assistant-code-copy-btn) {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.45rem;
+  border: 1px solid var(--border-color-secondary);
+  border-radius: 6px;
+  padding: 0.18rem;
+  color: var(--text-secondary);
+  background: var(--panel-bg-elevated);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.assistant-markdown-message :deep(.assistant-code-copy-icon) {
+  display: inline-flex;
+  width: 12px;
+  height: 12px;
+}
+
+.assistant-markdown-message :deep(.assistant-code-copy-icon::before) {
+  content: "";
+  display: block;
+  width: 100%;
+  height: 100%;
+  background-color: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='64 64 896 896'%3E%3Cpath d='M832 64H296c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h496v688c0 4.4 3.6 8 8 8h56c4.4 0 8-3.6 8-8V96c0-17.7-14.3-32-32-32zM704 192H192c-17.7 0-32 14.3-32 32v530.7c0 8.5 3.4 16.6 9.4 22.6l173.3 173.3c2.2 2.2 4.7 4 7.4 5.5v1.9h4.2c3.5 1.3 7.2 2 11 2H704c17.7 0 32-14.3 32-32V224c0-17.7-14.3-32-32-32zM350 856.2L263.9 770H350v86.2zM664 888H414V746c0-22.1-17.9-40-40-40H232V264h432v624z'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='64 64 896 896'%3E%3Cpath d='M832 64H296c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h496v688c0 4.4 3.6 8 8 8h56c4.4 0 8-3.6 8-8V96c0-17.7-14.3-32-32-32zM704 192H192c-17.7 0-32 14.3-32 32v530.7c0 8.5 3.4 16.6 9.4 22.6l173.3 173.3c2.2 2.2 4.7 4 7.4 5.5v1.9h4.2c3.5 1.3 7.2 2 11 2H704c17.7 0 32-14.3 32-32V224c0-17.7-14.3-32-32-32zM350 856.2L263.9 770H350v86.2zM664 888H414V746c0-22.1-17.9-40-40-40H232V264h432v624z'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 
 .assistant-markdown-message :deep(a[href]) {
   color: rgb(37 99 235);
   text-decoration: underline;
   text-underline-offset: 2px;
+}
+
+.assistant-markdown-message :deep(pre code) {
+  font-size: 0.9em;
+  line-height: 1.5;
+  white-space: pre;
 }
 
 .assistant-markdown-message :deep(table) {
@@ -465,34 +372,5 @@ onBeforeUnmount(() => {
 .assistant-markdown-message :deep(th) {
   background: var(--panel-bg-elevated);
   font-weight: 600;
-}
-
-.assistant-markdown-message :deep(.assistant-mermaid-wrapper) {
-  margin: 0.5rem 0;
-  padding: 0.4rem;
-  border: 1px solid var(--border-color-secondary);
-  border-radius: 6px;
-  overflow-x: auto;
-  background: var(--panel-bg-elevated);
-}
-
-.assistant-markdown-message :deep(.assistant-mermaid-wrapper svg) {
-  display: block;
-  max-width: 100%;
-  height: auto;
-  margin: 0 auto;
-}
-
-/*
- * Mermaid 的 SVG 在安全清洗时会移除 style 属性，可能导致 text/tspan 继承到 fill="none" 而不可见。
- * 这里用安全的 CSS 兜底，保证文字可见。
- */
-.assistant-markdown-message :deep(.assistant-mermaid-wrapper) {
-  color: var(--text-color);
-}
-
-.assistant-markdown-message :deep(.assistant-mermaid-wrapper svg text),
-.assistant-markdown-message :deep(.assistant-mermaid-wrapper svg tspan) {
-  fill: currentColor !important;
 }
 </style>

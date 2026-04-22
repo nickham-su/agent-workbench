@@ -153,7 +153,7 @@
       </div>
     </div>
 
-    <a-modal v-model:open="createOpen" :title="t('workspaces.create.modalTitle')" :confirm-loading="creating" @ok="submitCreate">
+    <a-modal v-model:open="createOpen" :width="720" :title="t('workspaces.create.modalTitle')" :confirm-loading="creating" @ok="submitCreate">
       <a-form layout="vertical">
         <a-form-item :label="t('workspaces.create.titleLabel')" required>
           <a-input

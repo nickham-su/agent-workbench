@@ -89,7 +89,6 @@ import {
   registerGlobalSystemPromptTextProvider,
   getAgentSettings,
   listAvailableAgentsForSurface,
-  resolveGlobalDefaultModelProfile,
   getAgentChannelSenderAllowlistSettings,
   resolveExecutionProfile
 } from "../settings/settings.service.js";
@@ -228,6 +227,23 @@ function toolArgsSchema(toolName: AgentContextToolName) {
         beforePos: { type: "integer", minimum: 2 },
         lineCount: { type: "integer", minimum: 1, maximum: 200 },
         maxChars: { type: "integer", minimum: 1000, maximum: 10000 }
+      }
+    };
+  }
+  if (toolName === "visual_analyze") {
+    return {
+      type: "object",
+      required: ["paths"],
+      additionalProperties: false,
+      properties: {
+        paths: {
+          type: "array",
+          minItems: 1,
+          items: { type: "string", minLength: 1 }
+        },
+        prompt: {
+          type: "string"
+        }
       }
     };
   }
@@ -380,8 +396,18 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
       "Load skill content by logical id (no filesystem paths).",
       "Input: id (string), using builtin/... or workspace/... or repo/... prefixes.",
       "If id points to a skill node (directory containing SKILL.md), it returns the skill content and children.",
-      "Children include sibling files (excluding SKILL.md) and direct child skill nodes.",
+      "When reading a root skill node, children are recursively expanded to include all readable descendant files (excluding SKILL.md) and descendant skill nodes.",
+      "When reading a non-root skill node, children include sibling files (excluding SKILL.md) and direct child skill nodes.",
       "If id points to a file, it returns file content only."
+    ].join(" ");
+  }
+  if (toolName === "visual_analyze") {
+    return [
+      "Analyze visual files inside the current workspace and return natural-language findings.",
+      "Supported file types: PNG, JPG/JPEG, WEBP, GIF, PDF.",
+      "Accepts multiple files and interprets them in input order.",
+      "Input paths must be relative paths inside the workspace.",
+      "If model/provider/SDK/service does not support the given files, the tool returns an error result."
     ].join(" ");
   }
 
@@ -3613,6 +3639,7 @@ export class AgentService {
       // profile.agent 现已包含 pluginTools，共享契约扩展不改变当前执行逻辑。
       provider: profile.provider,
       model: profile.model,
+      vision: profile.vision,
       runtime
     };
   }
@@ -3627,16 +3654,23 @@ export class AgentService {
       throw new HttpError(404, "run not found");
     }
 
-    const profile = resolveGlobalDefaultModelProfile(this.ctx);
+    const profile = resolveExecutionProfile(this.ctx, {
+      surface: session.kind === "subtask" ? "subtask" : "user",
+      agentIdFromRun: run.agentId,
+      workspaceEnablement: getWorkspaceEnabledAgentIds(this.ctx, session.workspaceId),
+      providerIdFromRun: run.providerId,
+      modelIdFromRun: run.modelId
+    });
 
     return {
       resolved: {
         runId: params.runId,
         sessionId: params.sessionId,
         workspaceId: params.workspaceId,
+        agentId: profile.agent.id,
         providerId: profile.provider.id,
         modelId: profile.model.id,
-        source: "global_default" as const
+        source: "agent_default" as const
       },
       provider: profile.provider,
       model: profile.model
@@ -4350,7 +4384,7 @@ export class AgentService {
           }
           externalSkills.sort((a, b) => a.id.localeCompare(b.id));
 
-          const baselineToolNames = ["read", "todolist", "archive_search", "archive_read", "scratchpad", "skill"] as const;
+          const baselineToolNames = ["read", "todolist", "archive_search", "archive_read", "scratchpad", "skill", "visual_analyze"] as const;
           const enabledToolNames: string[] = [];
           const enabledToolNameSet = new Set<string>();
           for (const name of [...baselineToolNames, ...profile.agent.tools]) {

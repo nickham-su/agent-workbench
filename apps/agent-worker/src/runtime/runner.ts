@@ -63,7 +63,7 @@ export function buildCompactionUserPrompt(input: { uiLocale: AgentUiLocale | nul
   }
   return getPromptText("agent/compaction-user-prompt.en-US.txt");
 }
-const COMPACTION_TIMEOUT_MS = 300_000;
+const COMPACTION_TIMEOUT_MS = 600_000;
 
 const MANUAL_COMPACT_SENTINEL = "__awb_compact__";
 
@@ -78,6 +78,23 @@ function computeRetryBackoffMs(attemptIndex: number) {
   const factor = 2 ** Math.floor(attemptIndex);
   const delay = MODEL_RETRY_BACKOFF_BASE_MS * factor;
   return Math.min(MODEL_RETRY_BACKOFF_MAX_MS, Math.max(MODEL_RETRY_BACKOFF_BASE_MS, delay));
+}
+
+function parseHttpStatusFromError(err: unknown) {
+  const message = err instanceof Error ? err.message : String(err || "");
+  const match = /^request failed:\s*(\d{3})\b/.exec(message);
+  if (!match) return null;
+  const status = Number(match[1]);
+  return Number.isFinite(status) ? status : null;
+}
+
+function isRetryableCompactionError(err: unknown) {
+  if (err instanceof ApiConflictError) return false;
+  const status = parseHttpStatusFromError(err);
+  if (status == null) return true;
+  if (status === 408 || status === 429) return true;
+  if (status >= 500 && status <= 599) return true;
+  return false;
 }
 
 async function sleepMsWithAbort(ms: number, signal: AbortSignal) {
@@ -316,6 +333,19 @@ function buildToolSuccessText(params: {
       toolName: params.toolName,
       status: params.status,
       headers: [["target", target]],
+      body
+    });
+  }
+
+  if (params.toolName === "visual_analyze") {
+    const files = Array.isArray(resultObj?.files) ? resultObj.files.length : undefined;
+    const body = typeof resultObj?.text === "string"
+      ? resultObj.text
+      : stringifyResult(params.result);
+    return buildToolText({
+      toolName: params.toolName,
+      status: params.status,
+      headers: [["files", typeof files === "number" ? String(files) : undefined]],
       body
     });
   }
@@ -1351,38 +1381,116 @@ export class AgentRunner {
     signal: AbortSignal;
   }) {
     const { profile, run, context, signal } = params;
-    const expectedHeadItemId = context.headItemId;
-    if (expectedHeadItemId == null) return false;
 
-    const summaryText = await this.generateCompactionSummary({
-      profile,
-      context,
-      signal
-    });
-    if (!summaryText) return false;
+    const modelRequestMaxRetries = Math.max(0, Math.floor((profile as any).runtime?.modelRequestMaxRetries ?? 0));
+    const clearCompactionNotice = async () => {
+      try {
+        await this.apiClient.updateRunState({
+          workspaceId: run.workspaceId,
+          sessionId: run.sessionId,
+          status: "running",
+          activeRunId: run.runId,
+          activeAssistantItemId: null,
+          runNoticeText: "",
+          updatedAt: nowMs()
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `[agent-worker] clear compaction notice failed(session=${run.sessionId}, run=${run.runId}): ${message}`
+        );
+      }
+    };
 
-    const compacted = await this.apiClient.compactContext({
-      workspaceId: run.workspaceId,
-      sessionId: run.sessionId,
-      runId: run.runId,
-      expectedHeadItemId,
-      summaryText
-    });
+    const updateCompactionSuccessState = async () => {
+      try {
+        await this.apiClient.updateRunState({
+          workspaceId: run.workspaceId,
+          sessionId: run.sessionId,
+          status: "running",
+          activeRunId: run.runId,
+          activeAssistantItemId: null,
+          runNoticeText: "",
+          lastResponseTotalTokens: null,
+          updatedAt: nowMs()
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `[agent-worker] update run state after compaction success failed(session=${run.sessionId}, run=${run.runId}): ${message}`
+        );
+      }
+    };
 
-    if (!compacted.compacted) {
-      return false;
+    let retryCount = 0;
+
+    while (!signal.aborted) {
+      const expectedHeadItemId = context.headItemId;
+      if (expectedHeadItemId == null) return false;
+
+      try {
+        const summaryText = await this.generateCompactionSummary({
+          profile,
+          context,
+          signal
+        });
+        if (!summaryText) {
+          await clearCompactionNotice();
+          return false;
+        }
+
+        const compacted = await this.apiClient.compactContext({
+          workspaceId: run.workspaceId,
+          sessionId: run.sessionId,
+          runId: run.runId,
+          expectedHeadItemId,
+          summaryText
+        });
+        if (!compacted.compacted) {
+          await clearCompactionNotice();
+          return false;
+        }
+
+        await updateCompactionSuccessState();
+        return true;
+      } catch (err) {
+        if (signal.aborted) return false;
+        const canRetry = retryCount < modelRequestMaxRetries && isRetryableCompactionError(err);
+        if (!canRetry) {
+          throw err;
+        }
+
+        const delayMs = computeRetryBackoffMs(retryCount);
+        const retryAttempt = retryCount + 1;
+        const message = err instanceof Error ? err.message : String(err);
+        const noticeText = `Compaction failed, retrying in ${Math.floor(delayMs / 1000)}s (${retryAttempt}/${modelRequestMaxRetries}): ${message}`;
+        this.logger.warn(
+          `[agent-worker] compaction retry scheduled(session=${run.sessionId}, run=${run.runId}, retry=${retryAttempt}/${modelRequestMaxRetries}): ${message}`
+        );
+        try {
+          await this.apiClient.updateRunState({
+            workspaceId: run.workspaceId,
+            sessionId: run.sessionId,
+            status: "running",
+            activeRunId: run.runId,
+            activeAssistantItemId: null,
+            runNoticeText: noticeText,
+            updatedAt: nowMs()
+          });
+        } catch (noticeErr) {
+          const noticeMessage = noticeErr instanceof Error ? noticeErr.message : String(noticeErr);
+          this.logger.warn(
+            `[agent-worker] update compaction retry notice failed(session=${run.sessionId}, run=${run.runId}, retry=${retryAttempt}/${modelRequestMaxRetries}): ${noticeMessage}`
+          );
+        }
+
+        retryCount = retryAttempt;
+        const continueRunning = await sleepMsWithAbort(delayMs, signal);
+        if (!continueRunning) return false;
+      }
     }
 
-    await this.apiClient.updateRunState({
-      workspaceId: run.workspaceId,
-      sessionId: run.sessionId,
-      status: "running",
-      activeRunId: run.runId,
-      activeAssistantItemId: null,
-      lastResponseTotalTokens: null,
-      updatedAt: nowMs()
-    });
-    return true;
+    return false;
   }
 
   private async runModelStep(params: {
@@ -1545,6 +1653,33 @@ export class AgentRunner {
         return;
       }
       pendingFlush = true;
+    };
+
+    const resetVisibleOutputForRetry = async () => {
+      const prevText = text;
+      const prevReasoningText = reasoningText;
+      const prevLastFlushedText = lastFlushedText;
+      const prevLastFlushedReasoningText = lastFlushedReasoningText;
+      const prevLastFlushAt = lastFlushAt;
+      const prevPendingFlush = pendingFlush;
+
+      text = "";
+      reasoningText = "";
+      try {
+        await flushAssistant("streaming", true);
+      } catch (err) {
+        text = prevText;
+        reasoningText = prevReasoningText;
+        lastFlushedText = prevLastFlushedText;
+        lastFlushedReasoningText = prevLastFlushedReasoningText;
+        lastFlushAt = prevLastFlushAt;
+        pendingFlush = prevPendingFlush;
+
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `[agent-worker] reset visible output before retry failed(item=${assistant.id}, retry=${retryCount + 1}/${modelRequestMaxRetries}): ${message}`
+        );
+      }
     };
 
     while (true) {
@@ -1739,6 +1874,7 @@ export class AgentRunner {
           });
 
           retryCount = retryAttempt;
+          await resetVisibleOutputForRetry();
           const continueRunning = await sleepMsWithAbort(delayMs, signal);
           if (!continueRunning) {
             return { aborted: true as const, assistantItemId: assistant.id };

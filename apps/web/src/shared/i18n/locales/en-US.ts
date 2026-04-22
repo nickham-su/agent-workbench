@@ -315,6 +315,8 @@ export default {
       backToParent: "Back",
       copySessionId: "Copy session ID",
       sessionIdCopied: "Session ID copied",
+      copyCode: "Copy code",
+      codeCopied: "Code copied",
       parentSessionMissing: "Parent session not found",
       subtaskRunningHint: "Running for {elapsed}. Cancel in the parent session.",
       subtaskCancelInParentHint: "Cancel in the parent session if needed.",
@@ -356,7 +358,7 @@ export default {
       slashCommandHintTitle: "Commands",
       slashCommandHintStrictOnly: "Exact match",
       contextManagerTitle: "Context Management",
-      contextManagerTooltip: "Manage workspace context sources (AGENTS/skills)",
+      contextManagerTooltip: "Manage context",
       contextManagerHint: "Choose context sources to enable. Changes usually take effect in a new conversation / new run.",
       contextAgentsGroupTitle: "Instruction Context (AGENTS.md)",
       contextAgentsEmpty: "No candidate AGENTS.md detected",
@@ -369,7 +371,7 @@ export default {
       externalSkillRootsSaved: "Skill directories settings saved",
       agentEnablementTitle: "Agent Management",
       agentEnablementHint: "Choose which agents are available in this workspace.",
-      agentEnablementTooltip: "Manage enabled agents for this workspace",
+      agentEnablementTooltip: "Manage agents",
       externalSkillRootsTooltip: "Manage enabled skill directories for this workspace",
       agentEnablementEmpty: "No agents available for configuration",
       agentEnablementSaved: "Agent enablement settings saved",
@@ -381,6 +383,12 @@ export default {
       externalSkillRootsSourceRepo: "Repo",
       externalSkillRootsMeta: "{count} skills",
       slashCommandHintNoMatch: "No matching command: /{query}",
+      modelEditTitle: "Edit agent model",
+      modelEditHint: "This updates the selected agent's default model globally (across workspaces).",
+      modelEditSaved: "Agent default model saved",
+      modelEditUnavailable: "Model info unavailable",
+      modelEditTooltip: "Change model",
+      modelEditAgentMissing: "The current agent does not exist or was removed",
       promptCommandsLoadFailedHint: "Failed to load prompt commands. Only builtin commands are available.",
       inputCandidateNoMatch: "No matching suggestion: {query}",
       slashCommands: {
@@ -832,8 +840,7 @@ export default {
         addModel: "Add model",
         copy: "Copy",
         edit: "Edit",
-        delete: "Delete",
-        setDefault: "Set default"
+        delete: "Delete"
       },
       fields: {
         baseURL: "Base URL",
@@ -888,8 +895,7 @@ export default {
         aiSdkDocsLink: "AI SDK docs",
         providerOptionsLabel: "Provider Params JSON (auto wrapped as {key})",
         providerOptionsHelp: "Only provide the current provider sub-object. The system wraps it into providerOptions.{key} automatically.",
-        providerDocsLink: "Provider docs",
-        setAsDefault: "Set as default model"
+        providerDocsLink: "Provider docs"
       },
       deleteProvider: {
         title: "Delete provider?",
@@ -912,7 +918,6 @@ export default {
         duplicateModelId: "Model ID already exists",
         modelListLoadFailed: "Failed to load model suggestions. You can still input model ID manually.",
         renameBlocked: "This model ID is still referenced. Remove references before renaming: {refs}",
-        renameBlockedGlobalDefault: "Global default model",
         renameBlockedAgent: "Agent {id}",
         renameBlockedGeneric: "This model ID is still referenced. Remove references before renaming."
       },
@@ -986,7 +991,6 @@ export default {
         globalPrompts: "Prompt library",
         summary: "Summary",
         defaultModel: "Default model",
-        useGlobalDefault: "Use global default model",
         customDefaultModel: "Use custom default model"
       },
       tools: {
@@ -1028,8 +1032,8 @@ export default {
         mcpServersPlaceholder: "Select allowed MCP servers",
         pluginToolsPlaceholder: "Select enabled plugin tools",
         pluginToolsHelp: "Only tools from globally enabled, ready plugins are selectable.",
-        defaultModelCascaderPlaceholder: "Select default model strategy",
-        defaultModelModeLabel: "Default model strategy",
+        defaultModelCascaderPlaceholder: "Select a default model",
+        defaultModelModeLabel: "Default model",
         defaultProviderLabel: "Provider",
         defaultProviderPlaceholder: "Select a provider",
         defaultModelLabel: "Model",
@@ -1044,7 +1048,7 @@ export default {
       errors: {
         invalidAgentForm: "Please complete required agent fields",
         duplicateAgentId: "Agent ID already exists",
-        defaultModelInvalid: "Default model does not exist, please reselect",
+        defaultModelRequired: "Please select a default model",
         promptTooLong: "Role setup is too long. Maximum {maxKb}KB"
       },
       saved: "Saved"
@@ -1070,12 +1074,21 @@ export default {
           label: "Model max retries",
           help: "Automatically retries only when a request fails before receiving the first chunk. 0 disables retries."
         },
+        visionModel: {
+          label: "Vision model",
+          placeholder: "Select a vision model (optional)",
+          help: "Global default vision model used by visual_analyze; falls back to the current agent primary model when unset."
+        },
         sessionTerminalSoundEnabled: {
           label: "Run completion sound",
           help: "Play a sound when a run completes. Applies to all sessions."
         }
+      },
+      errors: {
+        visionModelInvalid: "Invalid vision model selection. Please reselect."
       }
     },
+
     agentMcp: {
       description: "Manage global MCP server configuration. Use JSON input when adding or editing.",
       saving: "Saving...",

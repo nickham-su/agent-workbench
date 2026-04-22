@@ -44,7 +44,14 @@ services:
       timeout: 3s
       retries: 10
     restart: unless-stopped
+    networks:
+      - awb-net
 
 volumes:
   agent-workbench-data:
   agent-workbench-home:
+
+networks:
+  awb-net:
+    name: awb-net
+    driver: bridge

@@ -21,6 +21,7 @@ export const AgentContextToolNameSchema = Type.Union([
   Type.Literal("archive_search"),
   Type.Literal("skill"),
   Type.Literal("archive_read"),
+  Type.Literal("visual_analyze"),
   AgentMcpToolNameSchema,
   PluginToolCanonicalNameSchema
 ]);

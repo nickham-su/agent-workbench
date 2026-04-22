@@ -83,7 +83,8 @@ export const BUILTIN_TOOL_NAMES = [
   "subtask",
   "archive_search",
   "skill",
-  "archive_read"
+  "archive_read",
+  "visual_analyze"
 ] as const;
 
 export type BuiltinToolName = (typeof BUILTIN_TOOL_NAMES)[number];

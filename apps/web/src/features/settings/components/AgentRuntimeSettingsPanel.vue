@@ -48,6 +48,22 @@
 
       <a-divider class="!my-2" />
 
+      <a-form-item :label="t('settings.agentRuntime.fields.visionModel.label')">
+        <a-cascader
+          v-model:value="visionModelPath"
+          :options="visionModelCascaderOptions"
+          :placeholder="t('settings.agentRuntime.fields.visionModel.placeholder')"
+          :show-search="true"
+          :allow-clear="true"
+          expand-trigger="hover"
+        />
+        <div class="pt-2 text-xs text-[color:var(--text-tertiary)]">
+          {{ t("settings.agentRuntime.fields.visionModel.help") }}
+        </div>
+      </a-form-item>
+
+      <a-divider class="!my-2" />
+
       <a-form-item :label="t('settings.agentRuntime.fields.sessionTerminalSoundEnabled.label')">
         <a-switch v-model:checked="sessionTerminalSoundEnabled" />
         <div class="pt-2 text-xs text-[color:var(--text-tertiary)]">
@@ -71,12 +87,14 @@
 
 <script setup lang="ts">
 import { message } from "ant-design-vue";
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import type { AgentRuntimeSettings } from "@agent-workbench/shared";
-import { getAgentRuntimeSettings, updateAgentRuntimeSettings } from "@/shared/api";
+import { getAgentProvidersSettings, getAgentRuntimeSettings, updateAgentRuntimeSettings } from "@/shared/api";
 
 const { t } = useI18n();
+
+type AgentProvidersSettings = Awaited<ReturnType<typeof getAgentProvidersSettings>>;
 
 const loading = ref(false);
 const saving = ref(false);
@@ -86,6 +104,9 @@ const modelTotalTimeoutSeconds = ref<number>(0);
 const modelRequestMaxRetries = ref<number>(5);
 const autoCompactThresholdPct = ref<number>(80);
 const sessionTerminalSoundEnabled = ref(true);
+
+const providersSettings = ref<AgentProvidersSettings | null>(null);
+const visionModelPath = ref<string[]>([]);
 
 function toSeconds(rawMs: number) {
   const ms = Math.max(0, Number(rawMs || 0));
@@ -99,20 +120,58 @@ function toMs(rawSeconds: number) {
   return Math.round(seconds) * 1000;
 }
 
+const visionModelCascaderOptions = computed(() => {
+  const providers = providersSettings.value?.providers ?? [];
+  return providers
+    .filter((provider) => provider.models.length > 0)
+    .map((provider) => ({
+      label: provider.name,
+      value: provider.id,
+      children: provider.models.map((model) => ({
+        label: model.name,
+        value: model.id
+      }))
+    }));
+});
+
+function findModel(providerId: string, modelId: string) {
+  const provider = providersSettings.value?.providers.find((item) => item.id === providerId);
+  if (!provider) return null;
+  const model = provider.models.find((item) => item.id === modelId);
+  if (!model) return null;
+  return { provider, model };
+}
+
+function toVisionModelFromPath(path: string[]) {
+  if (!Array.isArray(path) || path.length === 0) return null;
+  const [providerId, modelId] = path;
+  if (!providerId || !modelId) return undefined;
+  const found = findModel(providerId, modelId);
+  if (!found) return undefined;
+  return { providerId, modelId };
+}
+
 function mapFromSettings(settings: AgentRuntimeSettings) {
   modelIdleTimeoutSeconds.value = toSeconds(settings.modelIdleTimeoutMs ?? 0);
   modelTotalTimeoutSeconds.value = toSeconds(settings.modelTotalTimeoutMs ?? 0);
   modelRequestMaxRetries.value = Math.min(100, Math.max(0, Math.floor(Number(settings.modelRequestMaxRetries ?? 5))));
   autoCompactThresholdPct.value = Math.min(99, Math.max(50, Math.floor(Number(settings.autoCompactThresholdPct || 80))));
   sessionTerminalSoundEnabled.value = settings.sessionTerminalSoundEnabled !== false;
+  visionModelPath.value = settings.visionModel
+    ? [settings.visionModel.providerId, settings.visionModel.modelId]
+    : [];
 }
 
 async function refresh() {
   if (loading.value) return;
   loading.value = true;
   try {
-    const res = await getAgentRuntimeSettings();
-    mapFromSettings(res);
+    const [runtimeRes, providersRes] = await Promise.all([
+      getAgentRuntimeSettings(),
+      getAgentProvidersSettings()
+    ]);
+    providersSettings.value = providersRes;
+    mapFromSettings(runtimeRes);
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
@@ -124,12 +183,18 @@ async function save() {
   if (saving.value) return;
   saving.value = true;
   try {
+    const visionModel = toVisionModelFromPath(visionModelPath.value);
+    if (visionModel === undefined) {
+      message.error(t("settings.agentRuntime.errors.visionModelInvalid"));
+      return;
+    }
     const res = await updateAgentRuntimeSettings({
       modelIdleTimeoutMs: toMs(modelIdleTimeoutSeconds.value ?? 0),
       modelTotalTimeoutMs: toMs(modelTotalTimeoutSeconds.value ?? 0),
       modelRequestMaxRetries: Math.min(100, Math.max(0, Math.floor(Number(modelRequestMaxRetries.value || 0)))),
       autoCompactThresholdPct: Math.min(99, Math.max(50, Math.floor(Number(autoCompactThresholdPct.value || 80)))),
-      sessionTerminalSoundEnabled: !!sessionTerminalSoundEnabled.value
+      sessionTerminalSoundEnabled: !!sessionTerminalSoundEnabled.value,
+      visionModel
     });
     mapFromSettings(res);
     window.dispatchEvent(new CustomEvent("awb:agent-runtime-settings-updated"));

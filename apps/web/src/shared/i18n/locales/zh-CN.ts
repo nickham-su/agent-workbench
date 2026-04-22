@@ -313,6 +313,8 @@ export default {
       backToParent: "返回",
       copySessionId: "复制 Session ID",
       sessionIdCopied: "已复制 Session ID",
+      copyCode: "复制代码",
+      codeCopied: "代码已复制",
       parentSessionMissing: "未找到父会话",
       subtaskRunningHint: "已运行 {elapsed}，如需取消请到主会话",
       subtaskCancelInParentHint: "如需取消，请到主会话",
@@ -354,7 +356,7 @@ export default {
       slashCommandHintTitle: "特殊指令",
       slashCommandHintStrictOnly: "精确匹配",
       contextManagerTitle: "上下文管理",
-      contextManagerTooltip: "管理当前工作区启用的上下文来源（AGENTS/skills）",
+      contextManagerTooltip: "管理上下文",
       contextManagerHint: "选择要启用的上下文来源。保存后通常在新对话/新 run 中生效。",
       contextAgentsGroupTitle: "指令上下文（AGENTS.md）",
       contextAgentsEmpty: "未探测到候选 AGENTS.md",
@@ -367,7 +369,7 @@ export default {
       externalSkillRootsSaved: "已保存 skill目录配置",
       agentEnablementTitle: "Agent 管理",
       agentEnablementHint: "选择当前工作区可用的 Agent。",
-      agentEnablementTooltip: "管理当前工作区启用的 Agent",
+      agentEnablementTooltip: "管理 Agent",
       externalSkillRootsTooltip: "管理当前工作区启用的 skill目录",
       agentEnablementEmpty: "暂无可配置 Agent",
       agentEnablementSaved: "已保存 Agent 启用配置",
@@ -379,6 +381,12 @@ export default {
       externalSkillRootsSourceRepo: "Repo",
       externalSkillRootsMeta: "{count} 个skills",
       slashCommandHintNoMatch: "未找到匹配的指令: /{query}",
+      modelEditTitle: "修改 Agent 模型",
+      modelEditHint: "将修改当前选中 Agent 的默认模型（全局生效，跨 workspace）。",
+      modelEditSaved: "已保存 Agent 默认模型",
+      modelEditUnavailable: "模型信息不可用",
+      modelEditTooltip: "修改模型",
+      modelEditAgentMissing: "当前 Agent 不存在或已被删除",
       promptCommandsLoadFailedHint: "提示词指令加载失败，将仅显示内置指令",
       inputCandidateNoMatch: "未找到匹配项: {query}",
       slashCommands: {
@@ -830,8 +838,7 @@ export default {
         addModel: "添加模型",
         copy: "复制",
         edit: "编辑",
-        delete: "删除",
-        setDefault: "设为默认"
+        delete: "删除"
       },
       fields: {
         baseURL: "Base URL",
@@ -886,8 +893,7 @@ export default {
         aiSdkDocsLink: "AI SDK 文档",
         providerOptionsLabel: "Provider 参数 JSON (自动包装为 {key})",
         providerOptionsHelp: "仅填写当前 Provider 的子对象, 系统会自动包装到 providerOptions.{key}。",
-        providerDocsLink: "Provider 文档",
-        setAsDefault: "设为默认模型"
+        providerDocsLink: "Provider 文档"
       },
       deleteProvider: {
         title: "删除 Provider？",
@@ -910,7 +916,6 @@ export default {
         duplicateModelId: "Model ID 已存在",
         modelListLoadFailed: "加载模型候选失败, 可手动输入 Model ID。",
         renameBlocked: "当前模型 ID 正被引用, 请先解除引用后再修改：{refs}",
-        renameBlockedGlobalDefault: "全局默认模型",
         renameBlockedAgent: "Agent {id}",
         renameBlockedGeneric: "模型 ID 正被引用, 请先解除引用后再修改。"
       },
@@ -984,7 +989,6 @@ export default {
         globalPrompts: "提示词库",
         summary: "简介",
         defaultModel: "默认模型",
-        useGlobalDefault: "默认模型",
         customDefaultModel: "使用自定义默认模型"
       },
       tools: {
@@ -1026,8 +1030,8 @@ export default {
         mcpServersPlaceholder: "选择可用的 MCP Server",
         pluginToolsPlaceholder: "选择已启用插件提供的工具",
         pluginToolsHelp: "仅可选择全局已启用且状态为 Ready 的插件工具。",
-        defaultModelCascaderPlaceholder: "选择默认模型策略",
-        defaultModelModeLabel: "默认模型策略",
+        defaultModelCascaderPlaceholder: "请选择默认模型",
+        defaultModelModeLabel: "默认模型",
         defaultProviderLabel: "Provider",
         defaultProviderPlaceholder: "请选择 Provider",
         defaultModelLabel: "模型",
@@ -1042,7 +1046,7 @@ export default {
       errors: {
         invalidAgentForm: "请完整填写 Agent 必填项",
         duplicateAgentId: "Agent ID 已存在",
-        defaultModelInvalid: "默认模型不存在, 请重新选择",
+        defaultModelRequired: "请选择默认模型",
         promptTooLong: "角色设定过长，最多 {maxKb}KB"
       },
       saved: "已保存"
@@ -1068,12 +1072,21 @@ export default {
           label: "模型重试最大次数",
           help: "仅在首包前失败时自动重试。0 表示不重试。"
         },
+        visionModel: {
+          label: "视觉模型",
+          placeholder: "请选择视觉模型（可选）",
+          help: "全局默认视觉模型，供 visual_analyze 工具使用；未配置时回退到当前 agent 主模型。"
+        },
         sessionTerminalSoundEnabled: {
           label: "运行结束提示音",
           help: "当运行结束时播放提示音。对所有会话生效。"
         }
+      },
+      errors: {
+        visionModelInvalid: "视觉模型配置无效，请重新选择。"
       }
     },
+
     agentMcp: {
       description: "管理全局 MCP Server 配置。新增/编辑时使用 JSON 输入。",
       saving: "正在保存...",
