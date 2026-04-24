@@ -2731,8 +2731,8 @@ test("agent prompt-context 根据 run uiLocale 注入语言与时间运行时约
   assert.ok(outputSection.includes("Output format requirements:"));
   assert.ok(runtimeSection.includes("Language requirement: use English consistently for this run."));
   assert.ok(runtimeSection.includes("If you call todolist, the goal and todos[].content must also be in English."));
-  assert.ok(runtimeSection.includes("Current system time:"));
-  assert.ok(runtimeSection.includes("Time zone:"));
+  assert.equal(runtimeSection.includes("Current system time:"), false);
+  assert.equal(runtimeSection.includes("Time zone:"), false);
   assert.equal(outputSection.includes("Completion constraints:"), false, "output format instructions should not contain completion constraints");
 });
 
@@ -2765,8 +2765,8 @@ test("agent prompt-context 在 zh-CN locale 下使用中文 output/runtime secti
 
   assert.ok(outputSection.includes("输出格式要求："));
   assert.ok(runtimeSection.includes("语言要求：本轮对话请统一使用简体中文。"));
-  assert.ok(runtimeSection.includes("当前系统时间："));
-  assert.ok(runtimeSection.includes("当前时区："));
+  assert.equal(runtimeSection.includes("当前系统时间："), false);
+  assert.equal(runtimeSection.includes("当前时区："), false);
   assert.equal(outputSection.includes("完成判定约束："), false, "output format instructions should not contain completion constraints");
 });
 
@@ -2791,8 +2791,8 @@ test("agent prompt-context 在缺省 locale 下使用 locale-neutral 英文 outp
   const runtimeSection = extractPromptSection(prompt.system, "runtime_constraints");
 
   assert.ok(outputSection.includes("Output format requirements:"));
-  assert.ok(runtimeSection.includes("Current system time:"));
-  assert.ok(runtimeSection.includes("Time zone:"));
+  assert.equal(runtimeSection.includes("Current system time:"), false);
+  assert.equal(runtimeSection.includes("Time zone:"), false);
   assert.equal(runtimeSection.includes("Language requirement: use English consistently for this run."), false, "null locale should not add English language requirement");
   assert.equal(outputSection.includes("输出格式要求："), false, "null locale should not mix Chinese output instruction text");
 });
@@ -3423,8 +3423,8 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
   assert.ok(promptContext.system.includes("[runtime_constraints]"));
   assert.equal(promptContext.system.includes("## Runtime Constraints"), false);
   assert.ok(promptContext.system.includes("Language requirement: use English consistently for this run."));
-  assert.ok(promptContext.system.includes("Current system time:"));
-  assert.ok(promptContext.system.includes("Time zone:"));
+  assert.equal(promptContext.system.includes("Current system time:"), false);
+  assert.equal(promptContext.system.includes("Time zone:"), false);
 });
 
 test("subtask start with preforkSummaryText should inject summary->guard->prompt without copying parent history", async () => {
@@ -7666,7 +7666,7 @@ test("agent prompt-context 同时存在 global/workspace/agent 时按既定顺�
   assert.ok(idxB >= 0, "system should include PROMPT_B");
   assert.ok(idxWorkspace >= 0, "system should include workspace instructions section");
   assert.ok(idxOutput >= 0, "system should include output format instructions section");
-  assert.ok(idxRuntime >= 0, "system should include runtime constraints section");
+  assert.equal(idxRuntime >= 0, false, "system should not include runtime constraints when runtime instruction is empty");
   assert.ok(context.system.includes("Output format requirements:"), "system should include output format instruction body");
   assert.ok(idxAgent >= 0, "system should include AGENT_PROMPT");
 
@@ -7675,7 +7675,7 @@ test("agent prompt-context 同时存在 global/workspace/agent 时按既定顺�
   assert.ok(idxBTag < idxWorkspace, "order: global prompts before workspace instructions");
   assert.ok(idxWorkspace < idxAgentTag, "order: workspace instructions before agent prompt");
   assert.ok(idxAgentTag < idxOutput, "order: agent prompt before output format instructions");
-  assert.ok(idxOutput < idxRuntime, "order: output format instructions before runtime constraints");
+  assert.equal(context.system.includes("[runtime_constraints]"), false, "system should not include runtime constraints section");
   assert.ok(idxCore < idxA, "order: system base body before global prompt body");
   assert.ok(idxA < idxB, "order: global prompt bodies follow global list order");
   assert.ok(idxB < context.system.indexOf("WORKSPACE_RULE"), "order: global prompt bodies before workspace instructions body");
@@ -7712,7 +7712,7 @@ test("agent prompt-context 在 workspace 根 AGENTS.md 缺失时忽略", async (
   assert.ok(context.system.includes("[system_base]"), "system should include system base section");
   assert.ok(context.system.includes("[agent_prompt] default"), "system should include agent section");
   assert.ok(context.system.includes("[output_format_instructions]"), "system should include output format instructions");
-  assert.ok(context.system.includes("[runtime_constraints]"), "system should include runtime constraints");
+  assert.equal(context.system.includes("[runtime_constraints]"), false, "system should not include runtime constraints when runtime instruction is empty");
   assert.ok(
     context.system.includes("You are a helpful coding assistant."),
     "system should include agent prompt content"
@@ -7836,7 +7836,7 @@ test("agent prompt-context 在 agent prompt 为空且无 workspace/global 时仅
   assert.ok(context.system.includes("# 工作方式与流程(全局)"), "system should include global workflow prompt");
   assert.ok(context.system.includes("[system_base]"), "system should include system base section");
   assert.ok(context.system.includes("[output_format_instructions]"), "system should include output format instructions");
-  assert.ok(context.system.includes("[runtime_constraints]"), "system should include runtime constraints");
+  assert.equal(context.system.includes("[runtime_constraints]"), false, "system should not include runtime constraints when runtime instruction is empty");
   assert.equal(context.system.includes("## Global Prompt:"), false, "system should not include global prompt sections");
   assert.equal(context.system.includes("[global_prompt]"), false, "system should not include global prompt blocks when none selected");
   assert.equal(

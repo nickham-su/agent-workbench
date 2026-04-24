@@ -930,11 +930,6 @@ function normalizeAgentUiLocale(value: unknown): AgentUiLocale | null {
   return null;
 }
 
-function formatRuntimeDateTime(date: Date) {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
-}
-
 function buildOutputFormatInstruction(input: { uiLocale: AgentUiLocale | null }) {
   if (input.uiLocale === "zh-CN") {
     return getPromptText("agent/output-format-instruction.zh-CN.txt");
@@ -956,9 +951,7 @@ function buildOneShotSystemPrompt(input: { uiLocale: AgentUiLocale | null }) {
   return buildLanguageInstruction(input);
 }
 
-function buildRuntimeInstruction(input: { uiLocale: AgentUiLocale | null; now: Date }) {
-  const timeText = formatRuntimeDateTime(input.now);
-  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+function buildRuntimeInstruction(input: { uiLocale: AgentUiLocale | null }) {
   const lines: string[] = [];
   const pushGroup = (group: string[]) => {
     if (!group.length) return;
@@ -968,17 +961,6 @@ function buildRuntimeInstruction(input: { uiLocale: AgentUiLocale | null; now: D
 
   const languageInstruction = buildLanguageInstruction({ uiLocale: input.uiLocale });
   if (languageInstruction) pushGroup(languageInstruction.split("\n"));
-  if (input.uiLocale === "zh-CN") {
-    pushGroup([
-      `当前系统时间：${timeText}`,
-      `当前时区：${timeZone}`
-    ]);
-  } else {
-    pushGroup([
-      `Current system time: ${timeText}`,
-      `Time zone: ${timeZone}`
-    ]);
-  }
   return lines.join("\n");
 }
 
@@ -4433,7 +4415,7 @@ export class AgentService {
     });
 
     const staticPrompt = await staticPromptPromise;
-    const runtimeInstruction = buildRuntimeInstruction({ uiLocale, now: new Date() });
+    const runtimeInstruction = buildRuntimeInstruction({ uiLocale });
     const system = appendRuntimeConstraintsSection(staticPrompt.systemStatic, runtimeInstruction);
 
     const visible = getSessionVisibleItems(this.ctx.db, params.workspaceId, params.sessionId);
