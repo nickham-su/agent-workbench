@@ -2731,8 +2731,8 @@ test("agent prompt-context 根据 run uiLocale 注入语言与时间运行时约
   assert.ok(outputSection.includes("Output format requirements:"));
   assert.ok(runtimeSection.includes("Language requirement: use English consistently for this run."));
   assert.ok(runtimeSection.includes("If you call todolist, the goal and todos[].content must also be in English."));
-  assert.ok(runtimeSection.includes("Current system time:"));
-  assert.ok(runtimeSection.includes("Time zone:"));
+  assert.equal(runtimeSection.includes("Current system time:"), false);
+  assert.equal(runtimeSection.includes("Time zone:"), false);
   assert.equal(outputSection.includes("Completion constraints:"), false, "output format instructions should not contain completion constraints");
 });
 
@@ -2765,8 +2765,8 @@ test("agent prompt-context 在 zh-CN locale 下使用中文 output/runtime secti
 
   assert.ok(outputSection.includes("输出格式要求："));
   assert.ok(runtimeSection.includes("语言要求：本轮对话请统一使用简体中文。"));
-  assert.ok(runtimeSection.includes("当前系统时间："));
-  assert.ok(runtimeSection.includes("当前时区："));
+  assert.equal(runtimeSection.includes("当前系统时间："), false);
+  assert.equal(runtimeSection.includes("当前时区："), false);
   assert.equal(outputSection.includes("完成判定约束："), false, "output format instructions should not contain completion constraints");
 });
 
@@ -2791,8 +2791,8 @@ test("agent prompt-context 在缺省 locale 下使用 locale-neutral 英文 outp
   const runtimeSection = extractPromptSection(prompt.system, "runtime_constraints");
 
   assert.ok(outputSection.includes("Output format requirements:"));
-  assert.ok(runtimeSection.includes("Current system time:"));
-  assert.ok(runtimeSection.includes("Time zone:"));
+  assert.equal(runtimeSection.includes("Current system time:"), false);
+  assert.equal(runtimeSection.includes("Time zone:"), false);
   assert.equal(runtimeSection.includes("Language requirement: use English consistently for this run."), false, "null locale should not add English language requirement");
   assert.equal(outputSection.includes("输出格式要求："), false, "null locale should not mix Chinese output instruction text");
 });
@@ -3423,8 +3423,8 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
   assert.ok(promptContext.system.includes("[runtime_constraints]"));
   assert.equal(promptContext.system.includes("## Runtime Constraints"), false);
   assert.ok(promptContext.system.includes("Language requirement: use English consistently for this run."));
-  assert.ok(promptContext.system.includes("Current system time:"));
-  assert.ok(promptContext.system.includes("Time zone:"));
+  assert.equal(promptContext.system.includes("Current system time:"), false);
+  assert.equal(promptContext.system.includes("Time zone:"), false);
 });
 
 test("subtask start with preforkSummaryText should inject summary->guard->prompt without copying parent history", async () => {
@@ -7666,7 +7666,7 @@ test("agent prompt-context 同时存在 global/workspace/agent 时按既定顺�
   assert.ok(idxB >= 0, "system should include PROMPT_B");
   assert.ok(idxWorkspace >= 0, "system should include workspace instructions section");
   assert.ok(idxOutput >= 0, "system should include output format instructions section");
-  assert.ok(idxRuntime >= 0, "system should include runtime constraints section");
+  assert.equal(idxRuntime >= 0, false, "system should not include runtime constraints when runtime instruction is empty");
   assert.ok(context.system.includes("Output format requirements:"), "system should include output format instruction body");
   assert.ok(idxAgent >= 0, "system should include AGENT_PROMPT");
 
@@ -7675,7 +7675,7 @@ test("agent prompt-context 同时存在 global/workspace/agent 时按既定顺�
   assert.ok(idxBTag < idxWorkspace, "order: global prompts before workspace instructions");
   assert.ok(idxWorkspace < idxAgentTag, "order: workspace instructions before agent prompt");
   assert.ok(idxAgentTag < idxOutput, "order: agent prompt before output format instructions");
-  assert.ok(idxOutput < idxRuntime, "order: output format instructions before runtime constraints");
+  assert.equal(context.system.includes("[runtime_constraints]"), false, "system should not include runtime constraints section");
   assert.ok(idxCore < idxA, "order: system base body before global prompt body");
   assert.ok(idxA < idxB, "order: global prompt bodies follow global list order");
   assert.ok(idxB < context.system.indexOf("WORKSPACE_RULE"), "order: global prompt bodies before workspace instructions body");
@@ -7712,7 +7712,7 @@ test("agent prompt-context 在 workspace 根 AGENTS.md 缺失时忽略", async (
   assert.ok(context.system.includes("[system_base]"), "system should include system base section");
   assert.ok(context.system.includes("[agent_prompt] default"), "system should include agent section");
   assert.ok(context.system.includes("[output_format_instructions]"), "system should include output format instructions");
-  assert.ok(context.system.includes("[runtime_constraints]"), "system should include runtime constraints");
+  assert.equal(context.system.includes("[runtime_constraints]"), false, "system should not include runtime constraints when runtime instruction is empty");
   assert.ok(
     context.system.includes("You are a helpful coding assistant."),
     "system should include agent prompt content"
@@ -7836,7 +7836,7 @@ test("agent prompt-context 在 agent prompt 为空且无 workspace/global 时仅
   assert.ok(context.system.includes("# 工作方式与流程(全局)"), "system should include global workflow prompt");
   assert.ok(context.system.includes("[system_base]"), "system should include system base section");
   assert.ok(context.system.includes("[output_format_instructions]"), "system should include output format instructions");
-  assert.ok(context.system.includes("[runtime_constraints]"), "system should include runtime constraints");
+  assert.equal(context.system.includes("[runtime_constraints]"), false, "system should not include runtime constraints when runtime instruction is empty");
   assert.equal(context.system.includes("## Global Prompt:"), false, "system should not include global prompt sections");
   assert.equal(context.system.includes("[global_prompt]"), false, "system should not include global prompt blocks when none selected");
   assert.equal(
@@ -8198,4 +8198,137 @@ test("subtask start 在 workspace 全不选时返回 AGENT_DISABLED_IN_WORKSPACE
   const startRes = await fixture.app.inject({ method: "POST", url: "/api/internal/agent/subtask/start", headers: { "x-awb-agent-internal-token": fixture.internalToken }, payload: { workspaceId: fixture.workspaceId, parentSessionId: parentSession.id, parentRunId: parentRunId, parentToolItemId: subtaskTool.item.id, description: "do task", prompt: "do task", agentId: "default", session: { mode: "fork" } } });
   assert.equal(startRes.statusCode, 400);
   assert.equal((startRes.json() as { code?: string }).code, "AGENT_DISABLED_IN_WORKSPACE");
+});
+
+test("openai-compatible provider 可在 settings 与 profile 中保存透传", async () => {
+  const fixture = await createFixture();
+
+  const providersRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: {
+      default: { providerId: "compat_openai", modelId: "deepseek-v3" },
+      providers: [
+        {
+          id: "compat_openai",
+          name: "compat_openai",
+          npm: "@ai-sdk/openai-compatible",
+          options: {
+            baseURL: "https://example.openai-compatible.invalid/v1",
+            apiKey: "sk-compat"
+          },
+          models: [
+            {
+              id: "deepseek-v3",
+              name: "deepseek-v3",
+              contextWindowTokens: 128000
+            }
+          ]
+        }
+      ]
+    }
+  });
+  assert.equal(providersRes.statusCode, 200, `update providers failed: ${providersRes.body}`);
+
+  const getProvidersRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/providers" });
+  assert.equal(getProvidersRes.statusCode, 200, `get providers failed: ${getProvidersRes.body}`);
+  const providersBody = getProvidersRes.json() as any;
+  const provider = providersBody.providers.find((item: any) => item.id === "compat_openai");
+  assert.equal(provider?.npm, "@ai-sdk/openai-compatible");
+  assert.equal(provider?.options?.apiMode, undefined);
+
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          summary: "",
+          prompt: "You are a helpful coding assistant.",
+          tools: ["bash", "read", "write"],
+          mcpServers: [],
+          defaultModel: { providerId: "compat_openai", modelId: "deepseek-v3" },
+          scope: "both",
+          order: 0
+        }
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `update agents failed: ${agentsRes.body}`);
+
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const msg = await sendMessage(fixture.app, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "hi",
+    clientRequestId: "req_provider_openai_compatible"
+  });
+
+  const singleCallProfileRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/single-call-model-profile",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId: msg.runId }
+  });
+  assert.equal(singleCallProfileRes.statusCode, 200, `get single-call model profile failed: ${singleCallProfileRes.body}`);
+  const singleCallProfile = singleCallProfileRes.json() as any;
+  assert.equal(singleCallProfile.provider?.id, "compat_openai");
+  assert.equal(singleCallProfile.provider?.npm, "@ai-sdk/openai-compatible");
+  assert.equal(singleCallProfile.provider?.options?.apiMode, undefined);
+});
+
+test("openai-compatible provider 支持按 OpenAI 风格拉取远程模型列表", async () => {
+  const fixture = await createFixture();
+  const originalFetch = globalThis.fetch;
+  let requestUrl = "";
+  let authHeader = "";
+
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const headers = new Headers(init?.headers);
+    authHeader = headers.get("authorization") ?? "";
+    return new Response(JSON.stringify({ data: [{ id: "deepseek-chat" }, { id: "qwen-max" }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  }) as typeof fetch;
+
+  try {
+    const providersRes = await fixture.app.inject({
+      method: "PUT",
+      url: "/api/settings/agent/providers",
+      payload: {
+        default: { providerId: "compat_openai", modelId: "deepseek-chat" },
+        providers: [
+          {
+            id: "compat_openai",
+            name: "compat_openai",
+            npm: "@ai-sdk/openai-compatible",
+            options: {
+              baseURL: "https://example.openai-compatible.invalid/v1",
+              apiKey: "sk-compat"
+            },
+            models: []
+          }
+        ]
+      }
+    });
+    assert.equal(providersRes.statusCode, 200, `update providers failed: ${providersRes.body}`);
+
+    const modelsRes = await fixture.app.inject({
+      method: "GET",
+      url: "/api/settings/agent/providers/compat_openai/models"
+    });
+    assert.equal(modelsRes.statusCode, 200, `get provider models failed: ${modelsRes.body}`);
+    const body = modelsRes.json() as any;
+    assert.equal(body.providerId, "compat_openai");
+    assert.equal(body.source, "remote");
+    assert.deepEqual(body.items.map((item: any) => item.id), ["deepseek-chat", "qwen-max"]);
+    assert.equal(requestUrl, "https://example.openai-compatible.invalid/v1/models");
+    assert.equal(authHeader, "Bearer sk-compat");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

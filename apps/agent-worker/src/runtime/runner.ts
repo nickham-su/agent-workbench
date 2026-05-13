@@ -4,6 +4,7 @@ import path from "node:path";
 import { jsonSchema, streamText, tool } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call";
 import { AgentApiClient, ApiConflictError, type ExecutionProfile, type PromptContext } from "./apiClient.js";
 import type { AgentUiLocale } from "@agent-workbench/shared";
@@ -556,6 +557,7 @@ function toRecordObject(raw: unknown) {
 }
 
 function providerOptionsKeyByNpm(npm: ExecutionProfile["provider"]["npm"]) {
+  if (npm === "@ai-sdk/openai-compatible") return "openaiCompatible";
   return npm === "@ai-sdk/anthropic" ? "anthropic" : "openai";
 }
 
@@ -637,6 +639,15 @@ function createLanguageModel(profile: ExecutionProfile) {
     const apiMode = normalizeOpenAiApiMode(profile.provider.options.apiMode);
     const createModel = resolveOpenAiModelFactory(sdk as unknown as Record<string, unknown>, apiMode);
     return createModel(providerModelId);
+  }
+
+  if (profile.provider.npm === "@ai-sdk/openai-compatible") {
+    const sdk = createOpenAICompatible({
+      name: profile.provider.id,
+      apiKey: profile.provider.options.apiKey,
+      baseURL: profile.provider.options.baseURL
+    });
+    return sdk.chatModel(providerModelId);
   }
 
   if (profile.provider.npm === "@ai-sdk/anthropic") {

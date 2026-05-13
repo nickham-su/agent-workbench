@@ -12,6 +12,7 @@
     "@agent-workbench/shared": "*",
     "@ai-sdk/anthropic": "^2.0.67",
     "@ai-sdk/openai": "^2.0.23",
+    "@ai-sdk/openai-compatible": "^1.0.39",
     "@modelcontextprotocol/sdk": "^1.18.2",
     "ai": "^5.0.22"
   },

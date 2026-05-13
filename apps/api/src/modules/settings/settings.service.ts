@@ -248,16 +248,18 @@ function toRecordObject(raw: unknown) {
 }
 
 function normalizeProviderNpmStored(raw: unknown): AgentProviderNpm {
+  if (raw === "@ai-sdk/openai-compatible") return raw;
   if (raw === "@ai-sdk/anthropic") return raw;
   return DEFAULT_PROVIDER_NPM;
 }
 
 function normalizeProviderNpmInput(raw: unknown): AgentProviderNpm {
-  if (raw === "@ai-sdk/openai" || raw === "@ai-sdk/anthropic") return raw;
+  if (raw === "@ai-sdk/openai" || raw === "@ai-sdk/openai-compatible" || raw === "@ai-sdk/anthropic") return raw;
   throw new HttpError(400, `Unsupported provider npm: ${String(raw)}`, "AGENT_PROVIDER_NPM_UNSUPPORTED");
 }
 
 function providerOptionsKeyByNpm(npm: AgentProviderNpm) {
+  if (npm === "@ai-sdk/openai-compatible") return "openaiCompatible";
   return npm === "@ai-sdk/anthropic" ? "anthropic" : "openai";
 }
 
@@ -589,7 +591,7 @@ async function fetchRemoteProviderModels(provider: AgentProviderStored) {
   if (!apiKey) {
     throw new HttpError(400, `Provider '${provider.id}' apiKey is missing`, "AGENT_PROVIDER_API_KEY_MISSING");
   }
-  if (provider.npm !== "@ai-sdk/openai" && provider.npm !== "@ai-sdk/anthropic") {
+  if (provider.npm !== "@ai-sdk/openai" && provider.npm !== "@ai-sdk/openai-compatible" && provider.npm !== "@ai-sdk/anthropic") {
     throw new HttpError(400, `Unsupported provider npm: ${provider.npm}`, "AGENT_PROVIDER_MODELS_UNSUPPORTED_PROVIDER");
   }
 
@@ -597,7 +599,7 @@ async function fetchRemoteProviderModels(provider: AgentProviderStored) {
   const headers: Record<string, string> = {
     Accept: "application/json"
   };
-  if (provider.npm === "@ai-sdk/openai") {
+  if (provider.npm === "@ai-sdk/openai" || provider.npm === "@ai-sdk/openai-compatible") {
     headers.Authorization = `Bearer ${apiKey}`;
   } else {
     headers["x-api-key"] = apiKey;
