@@ -8199,3 +8199,136 @@ test("subtask start 在 workspace 全不选时返回 AGENT_DISABLED_IN_WORKSPACE
   assert.equal(startRes.statusCode, 400);
   assert.equal((startRes.json() as { code?: string }).code, "AGENT_DISABLED_IN_WORKSPACE");
 });
+
+test("openai-compatible provider 可在 settings 与 profile 中保存透传", async () => {
+  const fixture = await createFixture();
+
+  const providersRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: {
+      default: { providerId: "compat_openai", modelId: "deepseek-v3" },
+      providers: [
+        {
+          id: "compat_openai",
+          name: "compat_openai",
+          npm: "@ai-sdk/openai-compatible",
+          options: {
+            baseURL: "https://example.openai-compatible.invalid/v1",
+            apiKey: "sk-compat"
+          },
+          models: [
+            {
+              id: "deepseek-v3",
+              name: "deepseek-v3",
+              contextWindowTokens: 128000
+            }
+          ]
+        }
+      ]
+    }
+  });
+  assert.equal(providersRes.statusCode, 200, `update providers failed: ${providersRes.body}`);
+
+  const getProvidersRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/providers" });
+  assert.equal(getProvidersRes.statusCode, 200, `get providers failed: ${getProvidersRes.body}`);
+  const providersBody = getProvidersRes.json() as any;
+  const provider = providersBody.providers.find((item: any) => item.id === "compat_openai");
+  assert.equal(provider?.npm, "@ai-sdk/openai-compatible");
+  assert.equal(provider?.options?.apiMode, undefined);
+
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          summary: "",
+          prompt: "You are a helpful coding assistant.",
+          tools: ["bash", "read", "write"],
+          mcpServers: [],
+          defaultModel: { providerId: "compat_openai", modelId: "deepseek-v3" },
+          scope: "both",
+          order: 0
+        }
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `update agents failed: ${agentsRes.body}`);
+
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const msg = await sendMessage(fixture.app, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "hi",
+    clientRequestId: "req_provider_openai_compatible"
+  });
+
+  const singleCallProfileRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/single-call-model-profile",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId: msg.runId }
+  });
+  assert.equal(singleCallProfileRes.statusCode, 200, `get single-call model profile failed: ${singleCallProfileRes.body}`);
+  const singleCallProfile = singleCallProfileRes.json() as any;
+  assert.equal(singleCallProfile.provider?.id, "compat_openai");
+  assert.equal(singleCallProfile.provider?.npm, "@ai-sdk/openai-compatible");
+  assert.equal(singleCallProfile.provider?.options?.apiMode, undefined);
+});
+
+test("openai-compatible provider 支持按 OpenAI 风格拉取远程模型列表", async () => {
+  const fixture = await createFixture();
+  const originalFetch = globalThis.fetch;
+  let requestUrl = "";
+  let authHeader = "";
+
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const headers = new Headers(init?.headers);
+    authHeader = headers.get("authorization") ?? "";
+    return new Response(JSON.stringify({ data: [{ id: "deepseek-chat" }, { id: "qwen-max" }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  }) as typeof fetch;
+
+  try {
+    const providersRes = await fixture.app.inject({
+      method: "PUT",
+      url: "/api/settings/agent/providers",
+      payload: {
+        default: { providerId: "compat_openai", modelId: "deepseek-chat" },
+        providers: [
+          {
+            id: "compat_openai",
+            name: "compat_openai",
+            npm: "@ai-sdk/openai-compatible",
+            options: {
+              baseURL: "https://example.openai-compatible.invalid/v1",
+              apiKey: "sk-compat"
+            },
+            models: []
+          }
+        ]
+      }
+    });
+    assert.equal(providersRes.statusCode, 200, `update providers failed: ${providersRes.body}`);
+
+    const modelsRes = await fixture.app.inject({
+      method: "GET",
+      url: "/api/settings/agent/providers/compat_openai/models"
+    });
+    assert.equal(modelsRes.statusCode, 200, `get provider models failed: ${modelsRes.body}`);
+    const body = modelsRes.json() as any;
+    assert.equal(body.providerId, "compat_openai");
+    assert.equal(body.source, "remote");
+    assert.deepEqual(body.items.map((item: any) => item.id), ["deepseek-chat", "qwen-max"]);
+    assert.equal(requestUrl, "https://example.openai-compatible.invalid/v1/models");
+    assert.equal(authHeader, "Bearer sk-compat");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

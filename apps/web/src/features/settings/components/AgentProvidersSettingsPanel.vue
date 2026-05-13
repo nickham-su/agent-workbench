@@ -338,6 +338,7 @@ const DEFAULT_OPENAI_API_MODE: AgentProviderOpenAiApiMode = "responses";
 
 const providerNpmOptions: Array<{ value: AgentProviderNpm; label: string }> = [
   { value: "@ai-sdk/openai", label: "OpenAI (@ai-sdk/openai)" },
+  { value: "@ai-sdk/openai-compatible", label: "OpenAI Compatible / Third-Party (@ai-sdk/openai-compatible)" },
   { value: "@ai-sdk/anthropic", label: "Anthropic (@ai-sdk/anthropic)" }
 ];
 
@@ -490,11 +491,15 @@ function mapFromSettings(view: AgentProvidersSettingsView) {
 }
 
 function providerOptionsKeyForNpm(npm: AgentProviderNpm) {
+  if (npm === "@ai-sdk/openai-compatible") return "openaiCompatible";
   return npm === "@ai-sdk/anthropic" ? "anthropic" : "openai";
 }
 
 function providerDocsUrlForNpm(npm: AgentProviderNpm) {
   if (npm === "@ai-sdk/anthropic") return "https://ai-sdk.dev/providers/ai-sdk-providers/anthropic";
+  if (npm === "@ai-sdk/openai-compatible") {
+    return "https://ai-sdk.dev/providers/openai-compatible-providers/openai-compatible";
+  }
   return "https://ai-sdk.dev/providers/ai-sdk-providers/openai";
 }
 
@@ -553,6 +558,7 @@ function maskApiKey(raw: string) {
 
 function defaultBaseURLForNpm(npm: AgentProviderNpm) {
   if (npm === "@ai-sdk/anthropic") return "https://api.anthropic.com/v1";
+  if (npm === "@ai-sdk/openai-compatible") return "https://your-openai-compatible-host/v1";
   return "https://api.openai.com/v1";
 }
 

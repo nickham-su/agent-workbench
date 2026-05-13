@@ -1,5 +1,6 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { generateText, streamText, type ToolSet } from "ai";
 
 const MODEL_TIMEOUT_MS_DEFAULT = 60_000;
@@ -29,7 +30,7 @@ const SINGLE_CALL_ALLOWED_PARAM_KEYS = new Set([
   "allowTools"
 ]);
 
-export type SingleCallProviderNpm = "@ai-sdk/openai" | "@ai-sdk/anthropic";
+export type SingleCallProviderNpm = "@ai-sdk/openai" | "@ai-sdk/openai-compatible" | "@ai-sdk/anthropic";
 
 export type SingleCallModelProfile = {
   provider: {
@@ -171,6 +172,7 @@ function assertAllowedParamKeys(params: SingleCallModelParams) {
 }
 
 function providerOptionsKeyByNpm(npm: SingleCallProviderNpm) {
+  if (npm === "@ai-sdk/openai-compatible") return "openaiCompatible";
   return npm === "@ai-sdk/anthropic" ? "anthropic" : "openai";
 }
 
@@ -252,6 +254,15 @@ function createLanguageModel(profile: SingleCallModelProfile) {
     const apiMode = normalizeOpenAiApiMode(profile.provider.options.apiMode);
     const createModel = resolveOpenAiModelFactory(sdk as unknown as Record<string, unknown>, apiMode);
     return createModel(providerModelId);
+  }
+
+  if (profile.provider.npm === "@ai-sdk/openai-compatible") {
+    const sdk = createOpenAICompatible({
+      name: profile.provider.id,
+      apiKey: profile.provider.options.apiKey,
+      baseURL: profile.provider.options.baseURL
+    });
+    return sdk.chatModel(providerModelId);
   }
 
   const sdk = createAnthropic({

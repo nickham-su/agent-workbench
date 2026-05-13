@@ -64,7 +64,7 @@ export type ExecutionProfile = {
     provider: {
       id: string;
       name: string;
-      npm: "@ai-sdk/openai" | "@ai-sdk/anthropic";
+      npm: "@ai-sdk/openai" | "@ai-sdk/openai-compatible" | "@ai-sdk/anthropic";
       options: {
         baseURL: string;
         apiKey: string;
@@ -92,7 +92,7 @@ export type ExecutionProfile = {
   provider: {
     id: string;
     name: string;
-    npm: "@ai-sdk/openai" | "@ai-sdk/anthropic";
+    npm: "@ai-sdk/openai" | "@ai-sdk/openai-compatible" | "@ai-sdk/anthropic";
     options: {
       baseURL: string;
       apiKey: string;
