@@ -89,12 +89,415 @@ export type ApplyPatchPrepared = {
   operations: ResolvedOperation[];
   files: ApplyPatchFileResult[];
   summary: ApplyPatchSummary;
+  notes: string[];
   text: string;
+  snapshots: ApplyPatchSnapshot[];
 };
+
+type ApplyPatchSnapshot =
+  | {
+      kind: "present";
+      path: string;
+      fullPath: string;
+      content: string;
+    }
+  | {
+      kind: "absent";
+      path: string;
+      fullPath: string;
+    };
+
+type NormalizedApplyPatchInput = {
+  text: string;
+  notes: string[];
+};
+
+type ApplyPatchFailureCode =
+  | "INVALID_FORMAT"
+  | "LEGACY_PATCH_FORMAT"
+  | "CONTEXT_MISMATCH"
+  | "PATH_OUT_OF_SCOPE"
+  | "PATH_INVALID"
+  | "BINARY_UNSUPPORTED"
+  | "SUBMODULE_UNSUPPORTED"
+  | "COPY_UNSUPPORTED"
+  | "CONFLICT"
+  | "ABORTED"
+  | "IO_RETRYABLE"
+  | "MISSING_PARENT_DIR"
+  | "INTERNAL_ERROR";
 
 function throwIfAborted(signal?: AbortSignal) {
   if (!signal?.aborted) return;
   throw new Error("operation aborted");
+}
+
+function buildApplyPatchFailureText(params: {
+  code: ApplyPatchFailureCode;
+  retryable: boolean;
+  repairAttempted: boolean;
+  failedFiles: string[];
+  details: string[];
+  hint: string;
+}) {
+  const lines = [`apply_patch verification failed: ${params.code}`];
+  lines.push("", "Summary:");
+  lines.push(`- Retryable: ${params.retryable ? "yes" : "no"}`);
+  lines.push(`- Repair attempted: ${params.repairAttempted ? "yes" : "no"}`);
+  if (params.failedFiles.length > 0) {
+    lines.push(`- Failed files: ${params.failedFiles.join(", ")}`);
+  }
+  lines.push("", "Details:");
+  if (params.details.length > 0) {
+    for (const detail of params.details) {
+      lines.push(`- ${detail}`);
+    }
+  } else {
+    lines.push("- (no additional details)");
+  }
+  lines.push("", "Hint:");
+  lines.push(params.hint || "Regenerate the patch and try again.");
+  return lines.join("\n");
+}
+
+export type ApplyPatchFailureClassification = ReturnType<typeof classifyApplyPatchFailureMessage>;
+
+export function formatApplyPatchFailureTextFromMessage(message: string, params?: { repairAttempted?: boolean }) {
+  const classified = classifyApplyPatchFailureMessage(message);
+  return buildApplyPatchFailureText({
+    code: classified.code,
+    retryable: classified.retryable,
+    repairAttempted: params?.repairAttempted ?? false,
+    failedFiles: classified.failedFiles,
+    details: message.split("\n").filter((line) => String(line || "").trim().length > 0),
+    hint: classified.hint
+  });
+}
+
+function buildSnapshotMismatchMessage(params: {
+  reason: string;
+  path: string;
+  fullPath: string;
+  details: string[];
+}) {
+  const lines = [`prepare/apply snapshot mismatch: ${params.reason}`];
+  lines.push(`Failed file: ${params.path}`);
+  lines.push(`Path: ${params.fullPath}`);
+  for (const detail of params.details) {
+    lines.push(detail);
+  }
+  lines.push("Hint: re-run apply_patch after re-reading the latest workspace files.");
+  return lines.join("\n");
+}
+
+function summarizeSnapshotContent(label: string, content: string) {
+  const normalized = content.replace(/\r\n?/g, "\n");
+  const preview = normalized.split("\n").slice(0, 3).join("\n");
+  const suffix = countLines(normalized) > 3 ? "…" : "";
+  return `${label}: ${countLines(normalized)} line(s), ${Buffer.byteLength(content, "utf8")} byte(s)${preview ? `, preview: ${JSON.stringify(preview + suffix)}` : ""}.`;
+}
+
+export function classifyApplyPatchFailureMessage(message: string): {
+  code: ApplyPatchFailureCode;
+  retryable: boolean;
+  failedFiles: string[];
+  hint: string;
+} {
+  const normalized = String(message || "");
+  const failedFiles = extractFailedFilesFromMessage(normalized);
+
+  if (/operation aborted/i.test(normalized)) {
+    return {
+      code: "ABORTED",
+      retryable: false,
+      failedFiles,
+      hint: "The operation was aborted. Re-run the patch if the task is still needed."
+    };
+  }
+
+  if (/legacy patch format/i.test(normalized) || /only supports git unified diff/i.test(normalized)) {
+    return {
+      code: "LEGACY_PATCH_FORMAT",
+      retryable: false,
+      failedFiles,
+      hint: "Rewrite the patch using git unified diff syntax, starting with diff --git, --- and +++ lines."
+    };
+  }
+
+  if (
+    /outside workspace/i.test(normalized) ||
+    /absolute path is not allowed/i.test(normalized) ||
+    /symlink path is not allowed/i.test(normalized)
+  ) {
+    return {
+      code: "PATH_OUT_OF_SCOPE",
+      retryable: false,
+      failedFiles,
+      hint: "Use a path inside the current workspace and avoid symlinks or parent-directory escapes."
+    };
+  }
+
+  if (/invalid path/i.test(normalized)) {
+    return {
+      code: "PATH_INVALID",
+      retryable: false,
+      failedFiles,
+      hint: "Use a valid relative file path without NUL or newline characters."
+    };
+  }
+
+  if (/binary patch is not supported/i.test(normalized)) {
+    return {
+      code: "BINARY_UNSUPPORTED",
+      retryable: false,
+      failedFiles,
+      hint: "Use apply_patch only for text files. Handle binary files with another workflow."
+    };
+  }
+
+  if (/submodule diff is not supported/i.test(normalized)) {
+    return {
+      code: "SUBMODULE_UNSUPPORTED",
+      retryable: false,
+      failedFiles,
+      hint: "Submodule changes are not supported by apply_patch. Use git operations or another workflow."
+    };
+  }
+
+  if (/copy from\/to is not supported/i.test(normalized)) {
+    return {
+      code: "COPY_UNSUPPORTED",
+      retryable: false,
+      failedFiles,
+      hint: "Rewrite the patch as an explicit add/update/delete sequence instead of copy from/to."
+    };
+  }
+
+  if (/Failed to find expected lines/i.test(normalized) || /did not match current file content/i.test(normalized)) {
+    return {
+      code: "CONTEXT_MISMATCH",
+      retryable: true,
+      failedFiles,
+      hint: "Re-read the target file and regenerate a smaller patch with more accurate context."
+    };
+  }
+
+  if (/snapshot mismatch/i.test(normalized) || /state drift/i.test(normalized) || /changed after prepare/i.test(normalized)) {
+    return {
+      code: "CONFLICT",
+      retryable: false,
+      failedFiles,
+      hint: "Re-read the latest workspace state and regenerate the patch against the current file contents."
+    };
+  }
+
+  if (/^MISSING_PARENT_DIR:/i.test(normalized) || /missing parent directory/i.test(normalized)) {
+    return {
+      code: "MISSING_PARENT_DIR",
+      retryable: true,
+      failedFiles,
+      hint: "Re-run after ensuring the target parent directory exists and is writable."
+    };
+  }
+
+  if (/^IO_RETRYABLE:/i.test(normalized) || /\b(EBUSY|EAGAIN|EMFILE|ENFILE|ETXTBSY)\b/i.test(normalized)) {
+    return {
+      code: "IO_RETRYABLE",
+      retryable: true,
+      failedFiles,
+      hint: "Retry the operation once after the transient filesystem error clears."
+    };
+  }
+
+  if (/already exists/i.test(normalized)) {
+    return {
+      code: "CONFLICT",
+      retryable: false,
+      failedFiles,
+      hint: "Adjust the patch so it does not create or move a file over an existing target."
+    };
+  }
+
+  if (/invalid patch/i.test(normalized) || /invalid unified diff/i.test(normalized) || /no hunks found/i.test(normalized)) {
+    return {
+      code: "INVALID_FORMAT",
+      retryable: false,
+      failedFiles,
+      hint: "Provide a valid git unified diff patch with diff --git, ---/+++ file headers, and @@ hunks."
+    };
+  }
+
+  return {
+    code: "INTERNAL_ERROR",
+    retryable: false,
+    failedFiles,
+    hint: "Fix the patch and try again. If the problem persists, regenerate the diff from the latest file contents."
+  };
+}
+
+function extractFailedFilesFromMessage(message: string) {
+  const matches = [
+    /(?:MISSING_PARENT_DIR|IO_RETRYABLE): .*? for (.+)/i,
+    /Failed to read file to (?:delete|move|update): (.+)/i,
+    /add target already exists: (.+)/i,
+    /move target already exists: (.+)/i,
+    /Failed to find expected lines in (.+)/i,
+    /symlink path is not allowed: (.+)/i,
+    /absolute path is not allowed(?:[: ]+(.+))?/i,
+    /path is outside workspace(?:[: ]+(.+))?/i
+  ];
+  for (const pattern of matches) {
+    const result = pattern.exec(message);
+    if (result?.[1]) {
+      return [result[1].trim()];
+    }
+  }
+  return [];
+}
+
+function normalizeMarkdownFence(text: string) {
+  const lines = text.split("\n");
+  if (lines.length < 3) return null;
+  const first = lines[0]?.trim() ?? "";
+  const last = lines[lines.length - 1]?.trim() ?? "";
+  const match = /^```([A-Za-z0-9_-]+)?\s*$/.exec(first);
+  if (!match || last !== "```") return null;
+  return {
+    language: match[1] ?? "",
+    body: lines.slice(1, -1).join("\n").trim()
+  };
+}
+
+function normalizeApplyPatchInput(input: string): NormalizedApplyPatchInput {
+  let text = String(input ?? "");
+  const notes: string[] = [];
+
+  if (/\r/.test(text)) {
+    text = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    notes.push("Normalized line endings to LF.");
+  }
+
+  const trimmed = text.trim();
+  if (trimmed !== text) {
+    text = trimmed;
+    notes.push("Trimmed leading and trailing whitespace.");
+  }
+
+  const fenced = normalizeMarkdownFence(text);
+  if (fenced) {
+    text = fenced.body;
+    notes.push(`Removed outer Markdown code block${fenced.language ? ` (${fenced.language})` : ""}.`);
+  }
+
+  const diffIndex = text.search(/^diff --git /m);
+  if (diffIndex > 0) {
+    const prefix = text.slice(0, diffIndex).trim();
+    if (prefix) {
+      text = text.slice(diffIndex).trimEnd();
+      notes.push("Removed leading explanatory text before diff --git.");
+    }
+  }
+
+  return { text, notes };
+}
+
+async function readCurrentFileStateForValidation(fullPath: string) {
+  const stat = await fs.lstat(fullPath).catch(() => null);
+  if (!stat) {
+    return { exists: false, content: "" };
+  }
+  if (stat.isDirectory()) {
+    throw new Error(`Path is a directory: ${fullPath}`);
+  }
+  if (stat.isSymbolicLink()) {
+    throw new Error(`symlink path is not allowed: ${fullPath}`);
+  }
+  const content = await fs.readFile(fullPath, "utf8");
+  return { exists: true, content };
+}
+
+async function validatePreparedPatchSnapshots(params: {
+  workspacePath: string;
+  workspaceRealPath: string;
+  snapshots: ApplyPatchSnapshot[];
+}) {
+  const seen = new Set<string>();
+  for (const snapshot of params.snapshots) {
+    const key = path.resolve(snapshot.fullPath);
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    await ensureExistingPathSegmentsSafeForValidation({
+      workspacePath: params.workspacePath,
+      workspaceRealPath: params.workspaceRealPath,
+      fullPath: snapshot.fullPath
+    });
+    const current = await readCurrentFileStateForValidation(snapshot.fullPath);
+
+    if (snapshot.kind === "absent") {
+      if (current.exists) {
+        throw new Error(
+          buildSnapshotMismatchMessage({
+            reason: "target already exists before apply",
+            path: snapshot.path,
+            fullPath: snapshot.fullPath,
+            details: ["Expected: file to be absent at apply time.", summarizeSnapshotContent("Actual", current.content)]
+          })
+        );
+      }
+      continue;
+    }
+
+    if (!current.exists) {
+      throw new Error(
+        buildSnapshotMismatchMessage({
+          reason: "source disappeared before apply",
+          path: snapshot.path,
+          fullPath: snapshot.fullPath,
+          details: ["Expected: file to still exist at apply time.", "Actual: file is missing."]
+        })
+      );
+    }
+    if (current.content !== snapshot.content) {
+      throw new Error(
+        buildSnapshotMismatchMessage({
+          reason: "content changed after prepare",
+          path: snapshot.path,
+          fullPath: snapshot.fullPath,
+          details: [summarizeSnapshotContent("Expected", snapshot.content), summarizeSnapshotContent("Actual", current.content)]
+        })
+      );
+    }
+  }
+}
+
+async function ensureExistingPathSegmentsSafeForValidation(params: {
+  workspacePath: string;
+  workspaceRealPath: string;
+  fullPath: string;
+}) {
+  if (!isPathInside(params.workspacePath, params.fullPath)) {
+    throw new Error("path is outside workspace");
+  }
+
+  let current = path.resolve(params.workspacePath);
+  await ensureRealPathInsideWorkspace(params.workspaceRealPath, current);
+
+  const relative = path.relative(current, params.fullPath);
+  const parts = relative.split(path.sep).filter(Boolean);
+  for (const part of parts) {
+    current = path.join(current, part);
+    const stat = await fs.lstat(current).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (!stat) return;
+    if (stat.isSymbolicLink()) {
+      throw new Error(`symlink path is not allowed: ${current}`);
+    }
+    await ensureRealPathInsideWorkspace(params.workspaceRealPath, current);
+    if (!stat.isDirectory()) return;
+  }
 }
 
 function ensureSafeRelativePath(input: string) {
@@ -737,17 +1140,21 @@ async function verifyExistingRegularFile(workspaceRealPath: string, fullPath: st
   await ensureRealPathInsideWorkspace(workspaceRealPath, fullPath);
 }
 
-function buildSummaryText(summary: ApplyPatchSummary) {
+function buildSummaryText(files: ApplyPatchFileResult[], notes: string[]) {
   const lines = ["Success. Updated the following files:"];
-  for (const item of summary.added) {
-    lines.push(`A ${item}`);
+  for (const file of files) {
+    const prefix = file.type === "add" ? "A" : file.type === "delete" ? "D" : file.type === "move" ? "R" : "M";
+    const pathLabel = file.type === "move" && file.fromPath ? `${file.fromPath} -> ${file.path}` : file.path;
+    lines.push(`${prefix} ${pathLabel} (+${file.additions} -${file.deletions})`);
   }
-  for (const item of summary.modified) {
-    lines.push(`M ${item}`);
+
+  if (notes.length > 0) {
+    lines.push("", "Notes:");
+    for (const note of notes) {
+      lines.push(`- ${note}`);
+    }
   }
-  for (const item of summary.deleted) {
-    lines.push(`D ${item}`);
-  }
+
   return lines.join("\n");
 }
 
@@ -758,7 +1165,8 @@ export async function prepareApplyPatchTool(params: {
 }): Promise<ApplyPatchPrepared> {
   throwIfAborted(params.signal);
 
-  const parsed = parseAnyPatchText(params.patchText);
+  const normalizedInput = normalizeApplyPatchInput(params.patchText);
+  const parsed = parseAnyPatchText(normalizedInput.text);
   if (parsed.hunks.length === 0) {
     throw new Error("no hunks found");
   }
@@ -766,6 +1174,7 @@ export async function prepareApplyPatchTool(params: {
   const workspaceRealPath = await fs.realpath(params.workspacePath);
   const operations: ResolvedOperation[] = [];
   const files: ApplyPatchFileResult[] = [];
+  const snapshots: ApplyPatchSnapshot[] = [];
   const virtualFiles = new Map<string, VirtualFileState>();
 
   const added: string[] = [];
@@ -791,6 +1200,7 @@ export async function prepareApplyPatchTool(params: {
         fullPath,
         createMissing: false
       });
+      snapshots.push({ kind: "absent", path: relativePath, fullPath });
       const current = await readVirtualFileState({
         virtualFiles,
         relativePath,
@@ -847,6 +1257,7 @@ export async function prepareApplyPatchTool(params: {
         throw new Error(`Failed to read file to delete: ${fullPath}`);
       }
       const before = current.content;
+      snapshots.push({ kind: "present", path: relativePath, fullPath, content: before });
       if (hunk.chunks.length === 0 && before !== "" && hunk.allowDeleteWithoutHunks !== true) {
         throw new Error(`delete patch for non-empty file must include hunks: ${fullPath}`);
       }
@@ -903,6 +1314,7 @@ export async function prepareApplyPatchTool(params: {
         throw new Error(`Failed to read file to move: ${fromFullPath}`);
       }
       const before = current.content;
+      snapshots.push({ kind: "present", path: fromPath, fullPath: fromFullPath, content: before });
 
       await ensureParentDirectorySafe({
         workspacePath: params.workspacePath,
@@ -910,6 +1322,9 @@ export async function prepareApplyPatchTool(params: {
         fullPath: toFullPath,
         createMissing: false
       });
+      if (toFullPath !== fromFullPath) {
+        snapshots.push({ kind: "absent", path: toPath, fullPath: toFullPath });
+      }
 
       if (toFullPath === fromFullPath) {
         operations.push({
@@ -1005,6 +1420,7 @@ export async function prepareApplyPatchTool(params: {
       throw new Error(`Failed to read file to update: ${fullPath}`);
     }
     const before = current.content;
+    snapshots.push({ kind: "present", path: relativePath, fullPath, content: before });
     const after = deriveNewContentFromChunks({
       filePath: fullPath,
       originalContent: before,
@@ -1093,6 +1509,7 @@ export async function prepareApplyPatchTool(params: {
     if (moveCurrent.exists) {
       throw new Error(`move target already exists: ${moveFullPath}`);
     }
+    snapshots.push({ kind: "absent", path: movePath, fullPath: moveFullPath });
     operations.push({
       kind: "move",
       path: movePath,
@@ -1152,7 +1569,9 @@ export async function prepareApplyPatchTool(params: {
     operations,
     files,
     summary,
-    text: buildSummaryText(summary)
+    notes: normalizedInput.notes,
+    text: buildSummaryText(files, normalizedInput.notes),
+    snapshots
   };
 }
 
@@ -1184,6 +1603,12 @@ export async function applyPreparedPatch(params: {
   throwIfAborted(params.signal);
   const workspaceRealPath = await fs.realpath(params.workspacePath);
 
+  await validatePreparedPatchSnapshots({
+    workspacePath: params.workspacePath,
+    workspaceRealPath,
+    snapshots: params.prepared.snapshots
+  });
+
   for (const operation of params.prepared.operations) {
     throwIfAborted(params.signal);
 
@@ -1196,6 +1621,12 @@ export async function applyPreparedPatch(params: {
         if (code === "EEXIST") {
           throw new Error(`add target already exists: ${operation.fullPath}`);
         }
+        if (code === "ENOENT") {
+          throw new Error(`MISSING_PARENT_DIR: add failed for ${operation.fullPath}`);
+        }
+        if (code === "EBUSY" || code === "EAGAIN" || code === "EMFILE" || code === "ENFILE" || code === "ETXTBSY") {
+          throw new Error(`IO_RETRYABLE: add failed for ${operation.fullPath} (${code})`);
+        }
         throw err;
       }
       continue;
@@ -1203,7 +1634,18 @@ export async function applyPreparedPatch(params: {
 
     if (operation.kind === "update") {
       await ensureWritableParent(params.workspacePath, workspaceRealPath, operation.fullPath);
-      await fs.writeFile(operation.fullPath, operation.content, { encoding: "utf8" });
+      try {
+        await fs.writeFile(operation.fullPath, operation.content, { encoding: "utf8" });
+      } catch (err) {
+        const code = (err as { code?: string }).code;
+        if (code === "ENOENT") {
+          throw new Error(`MISSING_PARENT_DIR: update failed for ${operation.fullPath}`);
+        }
+        if (code === "EBUSY" || code === "EAGAIN" || code === "EMFILE" || code === "ENFILE" || code === "ETXTBSY") {
+          throw new Error(`IO_RETRYABLE: update failed for ${operation.fullPath} (${code})`);
+        }
+        throw err;
+      }
       continue;
     }
 
@@ -1216,6 +1658,12 @@ export async function applyPreparedPatch(params: {
         const code = (err as { code?: string }).code;
         if (code === "EEXIST") {
           throw new Error(`move target already exists: ${operation.fullPath}`);
+        }
+        if (code === "ENOENT") {
+          throw new Error(`MISSING_PARENT_DIR: move failed for ${operation.fullPath}`);
+        }
+        if (code === "EBUSY" || code === "EAGAIN" || code === "EMFILE" || code === "ENFILE" || code === "ETXTBSY") {
+          throw new Error(`IO_RETRYABLE: move failed for ${operation.fullPath} (${code})`);
         }
         throw err;
       }

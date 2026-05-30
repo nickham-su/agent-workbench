@@ -105,3 +105,76 @@ test("subtask prefork summary 透传 messages-context.system 到 one-shot 调用
   assert.equal((captured as { system?: string } | null)?.system, "LANG-SYSTEM");
   assert.equal(updatedToolItems[0]?.status, "running");
 });
+
+test("apply_patch 仅对明确可恢复的 prepare IO 错误单次重试", async () => {
+  class TestBuiltinProvider extends BuiltinToolProvider {
+    prepareCalls = 0;
+    applyCalls = 0;
+
+    protected override async prepareApplyPatch(params: { workspacePath: string; patchText: string; signal?: AbortSignal }) {
+      this.prepareCalls += 1;
+      if (this.prepareCalls === 1) {
+        throw new Error("IO_RETRYABLE: add failed for /tmp/workspace/a.txt (EBUSY)");
+      }
+      return {
+        operations: [],
+        files: [],
+        summary: { added: [], modified: [], deleted: [], moved: [], fileCount: 0, additions: 0, deletions: 0 },
+        notes: [],
+        text: "Success. Updated the following files:\n",
+        snapshots: []
+      } as any;
+    }
+
+    protected override async applyPreparedPatch() {
+      this.applyCalls += 1;
+    }
+  }
+
+  const provider = new TestBuiltinProvider();
+  const result = await provider.execute(
+    "apply_patch",
+    { patchText: "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old\n+new" },
+    {
+      profile: { provider: {}, model: {}, agent: { tools: ["apply_patch"], pluginTools: [], mcpServers: [] } },
+      run: { workspaceId: "ws", sessionId: "sess", runId: "run", workspacePath: process.cwd() },
+      signal: new AbortController().signal,
+      apiClient: {} as any
+    } as any
+  );
+
+  assert.equal(provider.prepareCalls, 2);
+  assert.equal(provider.applyCalls, 1);
+  assert.equal((result as any).text, "Success. Updated the following files:\n");
+});
+
+test("apply_patch 不会对 legacy patch 做自动重试且失败文本不重复套壳", async () => {
+  class TestBuiltinProvider extends BuiltinToolProvider {
+    prepareCalls = 0;
+
+    protected override async prepareApplyPatch(): Promise<any> {
+      this.prepareCalls += 1;
+      throw new Error("only supports git unified diff\nDetected legacy patch format");
+    }
+  }
+
+  const provider = new TestBuiltinProvider();
+  await assert.rejects(
+    () => provider.execute(
+      "apply_patch",
+      { patchText: "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch" },
+      {
+        profile: { provider: {}, model: {}, agent: { tools: ["apply_patch"], pluginTools: [], mcpServers: [] } },
+        run: { workspaceId: "ws", sessionId: "sess", runId: "run", workspacePath: process.cwd() },
+        signal: new AbortController().signal,
+        apiClient: {} as any
+      } as any
+    ),
+    (err: unknown) => {
+      assert.match(String(err), /apply_patch verification failed: LEGACY_PATCH_FORMAT/);
+      assert.match(String(err), /Repair attempted: no/);
+      return true;
+    }
+  );
+  assert.equal(provider.prepareCalls, 1);
+});

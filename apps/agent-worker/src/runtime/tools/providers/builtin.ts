@@ -3,7 +3,13 @@ import path from "node:path";
 import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call";
 import { renderPromptTemplateFile } from "@agent-workbench/shared/prompts";
 import { runBashCommand } from "../../bash.js";
-import { applyPreparedPatch, prepareApplyPatchTool } from "../../applyPatch.js";
+import {
+  applyPreparedPatch,
+  classifyApplyPatchFailureMessage,
+  formatApplyPatchFailureTextFromMessage,
+  prepareApplyPatchTool,
+  type ApplyPatchPrepared
+} from "../../applyPatch.js";
 import { getBashToolAppendix } from "../../bashTools.js";
 import { runReadTool, runSkillTool, runWriteTool } from "../../fileTools.js";
 import { parseTodolistArgs, toTodolistResult } from "../../todolist.js";
@@ -260,6 +266,52 @@ function buildSubtaskPreforkSummaryPrompt(input: { uiLocale: "zh-CN" | "en-US" |
   });
 }
 
+function isFormattedApplyPatchFailure(message: string) {
+  return message.startsWith("apply_patch verification failed:");
+}
+
+function formatApplyPatchProviderFailure(message: string, params: { repairAttempted: boolean }) {
+  return isFormattedApplyPatchFailure(message)
+    ? message
+    : formatApplyPatchFailureTextFromMessage(message, params);
+}
+
+async function executeApplyPatchWithSingleRepairAttempt(params: {
+  workspacePath: string;
+  patchText: string;
+  signal?: AbortSignal;
+  prepare: (input: { workspacePath: string; patchText: string; signal?: AbortSignal }) => Promise<ApplyPatchPrepared>;
+  apply: (input: { workspacePath: string; prepared: ApplyPatchPrepared; signal?: AbortSignal }) => Promise<void>;
+}) {
+  let repairAttempted = false;
+  let prepared: ApplyPatchPrepared;
+  try {
+    prepared = await params.prepare({ workspacePath: params.workspacePath, patchText: params.patchText, signal: params.signal });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const classified = classifyApplyPatchFailureMessage(message);
+    if (!classified.retryable || classified.code !== "IO_RETRYABLE") {
+      throw new Error(formatApplyPatchProviderFailure(message, { repairAttempted }));
+    }
+    repairAttempted = true;
+    try {
+      prepared = await params.prepare({ workspacePath: params.workspacePath, patchText: params.patchText, signal: params.signal });
+    } catch (retryErr) {
+      const retryMessage = retryErr instanceof Error ? retryErr.message : String(retryErr);
+      throw new Error(formatApplyPatchProviderFailure(retryMessage, { repairAttempted }));
+    }
+  }
+
+  try {
+    await params.apply({ workspacePath: params.workspacePath, prepared, signal: params.signal });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(formatApplyPatchProviderFailure(message, { repairAttempted }));
+  }
+
+  return prepared;
+}
+
 export class BuiltinToolProvider implements ToolProvider {
   canHandle(toolName: string) {
     return isBuiltinToolName(toolName);
@@ -314,6 +366,22 @@ export class BuiltinToolProvider implements ToolProvider {
     };
   }) {
     return generateSingleCallText(params.profile, params.input);
+  }
+
+  protected async prepareApplyPatch(params: { workspacePath: string; patchText: string; signal?: AbortSignal }) {
+    return prepareApplyPatchTool({
+      workspacePath: params.workspacePath,
+      patchText: params.patchText,
+      signal: params.signal
+    });
+  }
+
+  protected async applyPreparedPatch(params: { workspacePath: string; prepared: ApplyPatchPrepared; signal?: AbortSignal }) {
+    await applyPreparedPatch({
+      workspacePath: params.workspacePath,
+      prepared: params.prepared,
+      signal: params.signal
+    });
   }
 
   async execute(toolName: string, args: Record<string, unknown>, ctx: ToolExecutionContext): Promise<unknown> {
@@ -451,25 +519,12 @@ export class BuiltinToolProvider implements ToolProvider {
       }
       case "apply_patch": {
         const patchText = requireNonEmptyStringArg(args.patchText, "apply_patch.patchText");
-        let prepared: Awaited<ReturnType<typeof prepareApplyPatchTool>>;
-        try {
-          prepared = await prepareApplyPatchTool({
-            workspacePath: ctx.run.workspacePath,
-            patchText,
-            signal: ctx.signal
-          });
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          throw new Error(
-            message.startsWith("apply_patch verification failed:")
-              ? message
-              : `apply_patch verification failed: ${message}`
-          );
-        }
-        await applyPreparedPatch({
+        const prepared = await executeApplyPatchWithSingleRepairAttempt({
           workspacePath: ctx.run.workspacePath,
-          prepared,
-          signal: ctx.signal
+          patchText,
+          signal: ctx.signal,
+          prepare: (input) => this.prepareApplyPatch(input),
+          apply: (input) => this.applyPreparedPatch(input)
         });
         return toApplyPatchResult(prepared);
       }
