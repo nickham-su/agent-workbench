@@ -27,6 +27,7 @@ const SINGLE_CALL_ALLOWED_PARAM_KEYS = new Set([
   "timeoutMs",
   "abortSignal",
   "tools",
+  "workspaceId",
   "allowTools"
 ]);
 
@@ -55,6 +56,7 @@ type SingleCallModelParams = {
     role: string;
     content: unknown;
   }>;
+  workspaceId?: string;
   temperature?: number;
   topP?: number;
   maxOutputTokens?: number;
@@ -240,6 +242,22 @@ function normalizeOpenAiApiMode(raw: unknown): "responses" | "chatCompletions" {
   return "responses";
 }
 
+function hasValidPromptCacheKey(providerOptions: Record<string, unknown>) {
+  const value = providerOptions.promptCacheKey;
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function buildProviderOptionsWithPromptCacheKey(params: {
+  providerNpm: SingleCallProviderNpm;
+  workspaceId?: string;
+  providerOptions: Record<string, unknown>;
+}) {
+  if (params.providerNpm !== "@ai-sdk/openai") return params.providerOptions;
+  if (!params.workspaceId || !params.workspaceId.trim()) return params.providerOptions;
+  if (hasValidPromptCacheKey(params.providerOptions)) return params.providerOptions;
+  return { ...params.providerOptions, promptCacheKey: `awb:${params.workspaceId}` };
+}
+
 function createLanguageModel(profile: SingleCallModelProfile) {
   const providerModelId =
     typeof profile.model.providerModelId === "string" && profile.model.providerModelId.trim()
@@ -322,9 +340,14 @@ function buildSingleCallRequest(profile: SingleCallModelProfile, params: SingleC
   if (Object.keys(runtimeOptions.aiSdk).length > 0) {
     Object.assign(request, runtimeOptions.aiSdk);
   }
-  if (Object.keys(runtimeOptions.providerOptions).length > 0) {
+  const providerOptions = buildProviderOptionsWithPromptCacheKey({
+    providerNpm: profile.provider.npm,
+    workspaceId: params.workspaceId,
+    providerOptions: runtimeOptions.providerOptions
+  });
+  if (Object.keys(providerOptions).length > 0) {
     request.providerOptions = {
-      [runtimeOptions.providerKey]: runtimeOptions.providerOptions
+      [runtimeOptions.providerKey]: providerOptions
     };
   }
 

@@ -3,7 +3,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { AgentRunner, buildToolExecutionBatchesForTest } from "./runner.js";
+import {
+  AgentRunner,
+  buildProviderOptionsWithPromptCacheKeyForTest,
+  buildToolExecutionBatchesForTest,
+  hasValidPromptCacheKeyForTest
+} from "./runner.js";
 import { getBashToolAppendix, startBashToolProbe } from "./bashTools.js";
 
 function pendingTool(input: {
@@ -54,6 +59,97 @@ test("bash 后接 subtask 时拆成两个并发段", () => {
       { mode: "parallel", itemIds: [2] },
       { mode: "parallel", itemIds: [3] }
     ]
+  );
+});
+
+test("openai providerOptions 为空时自动补 promptCacheKey", () => {
+  const options = buildProviderOptionsWithPromptCacheKeyForTest({
+    providerNpm: "@ai-sdk/openai",
+    workspaceId: "ws_123",
+    providerOptions: {}
+  });
+
+  assert.deepEqual(options, {
+    promptCacheKey: "awb:ws_123"
+  });
+});
+
+test("openai providerOptions 缺少 promptCacheKey 时自动补默认值", () => {
+  const options = buildProviderOptionsWithPromptCacheKeyForTest({
+    providerNpm: "@ai-sdk/openai",
+    workspaceId: "ws_123",
+    providerOptions: { temperature: 0.2 }
+  });
+
+  assert.deepEqual(options, {
+    temperature: 0.2,
+    promptCacheKey: "awb:ws_123"
+  });
+});
+
+test("openai providerOptions 已配置 promptCacheKey 时保持原值", () => {
+  const options = buildProviderOptionsWithPromptCacheKeyForTest({
+    providerNpm: "@ai-sdk/openai",
+    workspaceId: "ws_123",
+    providerOptions: { temperature: 0.2, promptCacheKey: "user-defined" }
+  });
+
+  assert.deepEqual(options, {
+    temperature: 0.2,
+    promptCacheKey: "user-defined"
+  });
+});
+
+test("仅有效非空字符串 promptCacheKey 才视为已配置", () => {
+  assert.equal(hasValidPromptCacheKeyForTest({ promptCacheKey: "user-defined" }), true);
+  assert.equal(hasValidPromptCacheKeyForTest({ promptCacheKey: "  user-defined  " }), true);
+  assert.equal(hasValidPromptCacheKeyForTest({ promptCacheKey: "" }), false);
+  assert.equal(hasValidPromptCacheKeyForTest({ promptCacheKey: "   " }), false);
+  assert.equal(hasValidPromptCacheKeyForTest({ promptCacheKey: null }), false);
+  assert.equal(hasValidPromptCacheKeyForTest({ promptCacheKey: undefined }), false);
+  assert.equal(hasValidPromptCacheKeyForTest({ promptCacheKey: 123 }), false);
+});
+
+test("openai providerOptions 的空字符串 promptCacheKey 会回退默认值", () => {
+  const options = buildProviderOptionsWithPromptCacheKeyForTest({
+    providerNpm: "@ai-sdk/openai",
+    workspaceId: "ws_123",
+    providerOptions: { promptCacheKey: "" }
+  });
+
+  assert.deepEqual(options, {
+    promptCacheKey: "awb:ws_123"
+  });
+});
+
+test("openai providerOptions 的空白 promptCacheKey 会回退默认值", () => {
+  const options = buildProviderOptionsWithPromptCacheKeyForTest({
+    providerNpm: "@ai-sdk/openai",
+    workspaceId: "ws_123",
+    providerOptions: { promptCacheKey: "   " }
+  });
+
+  assert.deepEqual(options, {
+    promptCacheKey: "awb:ws_123"
+  });
+});
+
+test("openai providerOptions 的 null/undefined/非字符串 promptCacheKey 会回退默认值", () => {
+  assert.deepEqual(
+    buildProviderOptionsWithPromptCacheKeyForTest({
+      providerNpm: "@ai-sdk/openai",
+      workspaceId: "ws_123",
+      providerOptions: { promptCacheKey: null }
+    }),
+    { promptCacheKey: "awb:ws_123" }
+  );
+  assert.deepEqual(
+    buildProviderOptionsWithPromptCacheKeyForTest({
+      providerNpm: "@ai-sdk/openai",
+      workspaceId: "ws_123",
+      providerOptions: { promptCacheKey: undefined, other: true }
+    }),
+    { promptCacheKey: "awb:ws_123", other: true }
   );
 });
 

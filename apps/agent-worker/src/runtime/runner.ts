@@ -604,6 +604,25 @@ function buildModelRuntimeOptions(profile: ExecutionProfile) {
   };
 }
 
+function hasValidPromptCacheKey(providerOptions: Record<string, unknown>) {
+  const value = providerOptions.promptCacheKey;
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function buildProviderOptionsWithPromptCacheKey(params: {
+  providerNpm: ExecutionProfile["provider"]["npm"];
+  workspaceId: string;
+  providerOptions: Record<string, unknown>;
+}) {
+  if (params.providerNpm !== "@ai-sdk/openai") return params.providerOptions;
+  if (hasValidPromptCacheKey(params.providerOptions)) return params.providerOptions;
+
+  return {
+    ...params.providerOptions,
+    promptCacheKey: `awb:${params.workspaceId}`
+  };
+}
+
 function resolveOpenAiModelFactory(sdk: Record<string, unknown>, apiMode: "responses" | "chatCompletions") {
   const responses = typeof sdk.responses === "function" ? (sdk.responses as (modelId: string) => unknown) : null;
   const chat = typeof sdk.chat === "function" ? (sdk.chat as (modelId: string) => unknown) : null;
@@ -1349,10 +1368,12 @@ export class AgentRunner {
     input: {
       messages: Array<{ role: string; content: unknown }>;
       system?: string;
+      workspaceId?: string;
       timeoutMs: number;
       abortSignal: AbortSignal;
     };
   }) {
+    // one-shot summary 若提供 workspaceId，则共享主模型请求的 OpenAI 默认 promptCacheKey 策略。
     return generateSingleCallText(params.profile, params.input);
   }
 
@@ -1377,6 +1398,7 @@ export class AgentRunner {
       input: {
         // compaction 是内部摘要任务，不继承执行态完整 system prompt；使用 messages-context 提供的 one-shot system。
         system: messagesContext.system,
+        workspaceId: params.profile.resolved.workspaceId,
         messages: messagesContext.messages,
         timeoutMs: COMPACTION_TIMEOUT_MS,
         abortSignal: params.signal
@@ -1579,9 +1601,13 @@ export class AgentRunner {
     if (Object.keys(runtimeOptions.aiSdk).length > 0) {
       Object.assign(requestBase, runtimeOptions.aiSdk);
     }
-    if (Object.keys(runtimeOptions.providerOptions).length > 0) {
+    if (Object.keys(runtimeOptions.providerOptions).length > 0 || profile.provider.npm === "@ai-sdk/openai") {
       requestBase.providerOptions = {
-        [runtimeOptions.providerKey]: runtimeOptions.providerOptions
+        [runtimeOptions.providerKey]: buildProviderOptionsWithPromptCacheKey({
+          providerNpm: profile.provider.npm,
+          workspaceId: run.workspaceId,
+          providerOptions: runtimeOptions.providerOptions
+        })
       };
     }
     // 自定义重试策略由本文件控制,禁用 AI SDK 内建重试避免双重重试。
@@ -2257,3 +2283,15 @@ export type EnqueuePayload = {
   inputText?: string;
   workspacePath: string;
 };
+
+export function buildProviderOptionsWithPromptCacheKeyForTest(params: {
+  providerNpm: ExecutionProfile["provider"]["npm"];
+  workspaceId: string;
+  providerOptions: Record<string, unknown>;
+}) {
+  return buildProviderOptionsWithPromptCacheKey(params);
+}
+
+export function hasValidPromptCacheKeyForTest(providerOptions: Record<string, unknown>) {
+  return hasValidPromptCacheKey(providerOptions);
+}
