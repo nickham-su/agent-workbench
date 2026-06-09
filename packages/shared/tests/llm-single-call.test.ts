@@ -82,6 +82,53 @@ test("openai apiMode 支持 chatCompletions 值", async () => {
   );
 });
 
+test("single-call openai 在提供 workspaceId 且未配置有效 promptCacheKey 时自动补默认值", async () => {
+  const profile = createMockProfile();
+  profile.model.options = {
+    providerOptionsByKey: {
+      openai: {
+        promptCacheKey: "   "
+      }
+    }
+  };
+  profile.provider.options.apiMode = "chatCompletions";
+  let requestBody = "";
+
+  const server = createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) {
+      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+    }
+    requestBody = Buffer.concat(chunks).toString("utf8");
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write('data: {"id":"resp_1","object":"chat.completion.chunk","choices":[{"delta":{"content":"hello"},"index":0}]}\n\n');
+    res.write('data: {"id":"resp_1","object":"chat.completion.chunk","choices":[{"delta":{},"finish_reason":"stop","index":0}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}\n\n');
+    res.end("data: [DONE]\n\n");
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.listen(0, "127.0.0.1", () => resolve());
+    server.once("error", reject);
+  });
+
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server address unavailable");
+    profile.provider.options.baseURL = `http://127.0.0.1:${address.port}/v1`;
+
+    const result = await generateSingleCallText(profile, {
+      workspaceId: "ws_single",
+      messages: [{ role: "user", content: "hello" }],
+      timeoutMs: 5_000
+    });
+
+    assert.equal(result.text, "hello");
+    assert.match(requestBody, /"prompt_cache_key":"awb:ws_single"/);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  }
+});
+
 test("openai-compatible provider 会走 shared single-call 分支并发起 chat/completions 请求", async () => {
   const profile = createMockProfile();
   profile.provider.npm = "@ai-sdk/openai-compatible";

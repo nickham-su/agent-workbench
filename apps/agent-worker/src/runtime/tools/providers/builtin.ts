@@ -361,6 +361,7 @@ export class BuiltinToolProvider implements ToolProvider {
     input: {
       messages: Array<{ role: string; content: unknown }>;
       system?: string;
+      workspaceId?: string;
       timeoutMs: number;
       abortSignal: AbortSignal;
     };
@@ -626,6 +627,7 @@ export class BuiltinToolProvider implements ToolProvider {
                 input: {
                   // subtask prefork 是 one-shot 摘要任务，使用 messages-context 提供的通用最小 system。
                   system: messagesContext.system,
+                  workspaceId: ctx.run.workspaceId,
                   messages: messagesContext.messages,
                   timeoutMs: COMPACTION_TIMEOUT_MS,
                   abortSignal: ctx.signal
@@ -770,7 +772,7 @@ export class BuiltinToolProvider implements ToolProvider {
         const timeoutMs = Math.max(30_000, Math.floor(Number(ctx.profile.runtime.modelTotalTimeoutMs || 0)) || 120_000);
         const response = await this.generateSingleCallSummary({
           profile: { provider: chosen.provider, model: chosen.model },
-          input: { messages: [{ role: "user", content: parts }], timeoutMs, abortSignal: ctx.signal }
+          input: { workspaceId: ctx.run.workspaceId, messages: [{ role: "user", content: parts }], timeoutMs, abortSignal: ctx.signal }
         });
         return {
           text: response.text,
