@@ -185,8 +185,18 @@
                 <span class="inline-block w-3" />
                 {{ t("agent.client.subtaskMode") }}: {{ formatSubtaskMode(item.subtaskMode) }}
               </div>
-              <div class="pt-0.5 text-[color:var(--text-secondary)]">
+              <div class="pt-0.5 text-[color:var(--text-secondary)] flex items-center gap-1 min-w-0">
                 {{ t("agent.client.subtaskSessionId") }}: {{ item.subtaskSessionId || "-" }}
+                <a-button
+                  v-if="item.subtaskSessionId"
+                  size="small"
+                  type="text"
+                  class="!px-1 !text-[color:var(--text-tertiary)] hover:!text-[color:var(--text-tertiary)] shrink-0"
+                  :aria-label="t('agent.client.copySessionId')"
+                  @click="onCopySubtaskSessionId(item.subtaskSessionId, $event)"
+                >
+                  <template #icon><CopyOutlined class="text-[12px]" /></template>
+                </a-button>
               </div>
               <div v-if="item.toolError" class="pt-1 text-red-500">
                 Error: {{ item.toolError }}
@@ -2585,14 +2595,25 @@ function onOpenParent() {
   emit("open-parent", sessionId);
 }
 
-async function onCopySessionId() {
+async function copySessionId(sessionId: string) {
   try {
-    await navigator.clipboard.writeText(props.sessionId);
+    await navigator.clipboard.writeText(sessionId);
     message.success(t("agent.client.sessionIdCopied"));
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err || "unknown error");
     message.error(t("common.copyFailed", { reason }));
   }
+}
+
+async function onCopySessionId() {
+  await copySessionId(props.sessionId);
+}
+
+async function onCopySubtaskSessionId(sessionId?: string, event?: MouseEvent) {
+  event?.stopPropagation();
+  const normalizedSessionId = String(sessionId || "").trim();
+  if (!normalizedSessionId) return;
+  await copySessionId(normalizedSessionId);
 }
 
 function newClientRequestId() {
