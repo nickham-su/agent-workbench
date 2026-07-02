@@ -21,6 +21,14 @@
               <template #icon><MinusOutlined /></template>
             </a-button>
           </a-tooltip>
+          <a-tooltip v-if="activeResetSourceSessionId" :title="t('agent.client.restoreOriginalSession')">
+            <a-button size="small" type="text" @click="restoreResetSourceSession">
+              {{ t("agent.client.restoreOriginalSession") }}
+            </a-button>
+          </a-tooltip>
+          <a-button v-else-if="hasClosedSessions" size="small" type="text" :disabled="creating" @click="reopenAllSessions">
+            {{ t("agent.actions.reopenClosed") }}
+          </a-button>
         </div>
       </template>
 
@@ -55,19 +63,21 @@
             :parent-session-id="!isDraftSession(session) ? session.forkedFromSessionId : null"
             :session-title="session.title"
             :session-ready="!isDraftSession(session)"
+            :initial-draft="draftInitialTextBySession[session.id] ?? ''"
             :ensure-session="ensureSessionCreated"
-             :can-choose-session="canChooseSessionFrom(session.id)"
-             :active="effectiveActiveKey === session.id"
-             :model-value="selectedAgentBySession[session.id] ?? null"
-             :tool-id="toolId"
-             :agent-options="agentOptions"
-              @update:model-value="(value) => setSessionAgent(session.id, value)"
-               @forked="onSessionForked"
-              @open-subtask="onOpenSubtask"
-                @open-parent="(parentSessionId) => onOpenParent(session.id, parentSessionId)"
-                @session-title-sync-needed="requestSessionTitleSync"
-                @choose-session="openChooseSessionModal(session.id)"
-                @agent-settings-updated="onAgentSettingsUpdated"
+            :can-choose-session="canChooseSessionFrom(session.id)"
+            :active="effectiveActiveKey === session.id"
+            :model-value="selectedAgentBySession[session.id] ?? null"
+            :tool-id="toolId"
+            :agent-options="agentOptions"
+            @update:model-value="(value) => setSessionAgent(session.id, value)"
+            @forked="onSessionForked"
+            @open-subtask="onOpenSubtask"
+            @open-parent="(parentSessionId) => onOpenParent(session.id, parentSessionId)"
+            @session-title-sync-needed="requestSessionTitleSync"
+            @choose-session="openChooseSessionModal(session.id)"
+            @agent-settings-updated="onAgentSettingsUpdated"
+            @reset-to-draft="(payload) => replaceSessionTabWithDraft(payload)"
               />
             </div>
         </a-tab-pane>
@@ -176,8 +186,10 @@ const selectedAgentBySession = reactive<Record<string, string | null>>({});
 const agentOptions = ref<AgentOption[]>([]);
 const closedSessionIds = reactive<Record<string, true>>({});
 const openedSubtaskSessionIds = reactive<Record<string, true>>({});
+const draftResetSourceSessionById = reactive<Record<string, string>>({});
 const tabNoMap = ref<Record<string, number>>({});
 const chooseSessionModalOpen = ref(false);
+const draftInitialTextBySession = reactive<Record<string, string>>({});
 const chooseSessionLoading = ref(false);
 const chooseSessionItems = ref<ChooseSessionItem[]>([]);
 const chooseSessionSourceId = ref("");
@@ -217,6 +229,16 @@ const visibleSessions = computed(() => {
     // fallback: 保持稳定
     return a.createdAt - b.createdAt;
   });
+});
+
+const hasClosedSessions = computed(() => Object.keys(closedSessionIds).length > 0);
+
+const activeResetSourceSessionId = computed(() => {
+  const draftId = effectiveActiveKey.value;
+  if (!draftId) return "";
+  const sourceId = String(draftResetSourceSessionById[draftId] || "").trim();
+  if (!sourceId || !closedSessionIds[sourceId]) return "";
+  return sourceId;
 });
 
 function activeKeyStorageKey(workspaceId: string) {
@@ -507,6 +529,14 @@ async function refreshAll() {
   await Promise.all([refreshAgents(), refreshSessions()]);
 }
 
+function setDraftInitialText(sessionId: string, text: string) {
+  const key = String(sessionId || "").trim();
+  if (!key) return;
+  const next = String(text || "");
+  if (draftInitialTextBySession[key] === next) return;
+  draftInitialTextBySession[key] = next;
+}
+
 function requestSessionTitleSync(sessionId: string) {
   const targetSessionId = String(sessionId || "").trim();
   if (!targetSessionId) return;
@@ -534,6 +564,7 @@ async function createOneSession() {
     draftSessions.value = [...draftSessions.value, draft];
     delete closedSessionIds[draft.id];
     persistClosedSessions();
+    setDraftInitialText(draft.id, "");
     reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
     activeKey.value = draft.id;
     persistActiveKey(draft.id);
@@ -558,6 +589,8 @@ async function ensureSessionCreated(sessionId: string) {
     });
 
     draftSessions.value = draftSessions.value.filter((item) => item.id !== sessionId);
+    delete draftInitialTextBySession[sessionId];
+    delete draftResetSourceSessionById[sessionId];
     serverSessions.value = [created, ...serverSessions.value.filter((item) => item.id !== created.id)].sort(
       (a, b) => b.updatedAt - a.updatedAt
     );
@@ -612,6 +645,8 @@ function closeSessionTab(sessionId: string) {
     delete nextMap[sessionId];
     tabNoMap.value = nextMap;
   }
+  delete draftInitialTextBySession[sessionId];
+  delete draftResetSourceSessionById[sessionId];
 
   if (activeKey.value !== sessionId) return;
   const next = visibleSessions.value.find((item) => item.id !== sessionId)?.id ?? "";
@@ -641,6 +676,20 @@ function reopenAllSessions() {
   statusStore.markSessionSeen(next);
   if (next) {
     persistActiveKey(next);
+  }
+}
+
+function restoreResetSourceSession() {
+  const sourceSessionId = activeResetSourceSessionId.value;
+  if (!sourceSessionId) return;
+  delete closedSessionIds[sourceSessionId];
+  persistClosedSessions();
+  reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
+  const activeDraftId = effectiveActiveKey.value;
+  if (activeDraftId) {
+    delete draftResetSourceSessionById[activeDraftId];
+    activeKey.value = activeDraftId;
+    persistActiveKey(activeDraftId);
   }
 }
 
@@ -752,6 +801,62 @@ function replaceDraftWithSession(params: { fromSessionId: string; targetSessionI
   activeKey.value = target.id;
   statusStore.markSessionSeen(target.id);
   persistActiveKey(target.id);
+
+  reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
+}
+
+function replaceSessionTabWithDraft(payload: { sessionId: string; draftText: string }) {
+  const sourceSessionId = String(payload.sessionId || "").trim();
+  if (!sourceSessionId) return;
+  const sourceSession = serverSessions.value.find((item) => item.id === sourceSessionId);
+  if (!sourceSession || sourceSession.kind !== "primary") return;
+
+  const now = Date.now();
+  const draftId = newDraftSessionId();
+  const draft: DraftAgentSession = {
+    id: draftId,
+    workspaceId: props.workspaceId,
+    title: t("agent.client.newTitle"),
+    kind: "primary",
+    createdAt: now,
+    updatedAt: now,
+    isDraft: true
+  };
+
+  const nextDrafts = [...draftSessions.value, draft];
+  const sourceTabNo = tabNoMap.value[sourceSessionId];
+  const sourceAgent = selectedAgentBySession[sourceSessionId] ?? null;
+  const hadPendingTitleSync = Object.prototype.hasOwnProperty.call(pendingSessionTitleSyncUpdatedAt, sourceSessionId);
+  const sourceWasClosed = !!closedSessionIds[sourceSessionId];
+
+  draftSessions.value = nextDrafts;
+  setDraftInitialText(draftId, payload.draftText);
+  delete draftInitialTextBySession[sourceSessionId];
+  draftResetSourceSessionById[draftId] = sourceSessionId;
+  selectedAgentBySession[draftId] = sourceAgent;
+  persistAgentPick();
+
+  const nextMap = { ...tabNoMap.value };
+  if (typeof sourceTabNo === "number" && Number.isFinite(sourceTabNo) && sourceTabNo > 0) {
+    nextMap[draftId] = sourceTabNo;
+  }
+  delete nextMap[sourceSessionId];
+  tabNoMap.value = nextMap;
+
+  if (!sourceWasClosed) {
+    closedSessionIds[sourceSessionId] = true;
+  }
+  delete closedSessionIds[draftId];
+  persistClosedSessions();
+
+  if (hadPendingTitleSync) {
+    delete pendingSessionTitleSyncUpdatedAt[sourceSessionId];
+  }
+
+  invalidateOpenParentIntent();
+  activeKey.value = draftId;
+  persistActiveKey(draftId);
+  statusStore.markSessionSeen(draftId);
 
   reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
 }

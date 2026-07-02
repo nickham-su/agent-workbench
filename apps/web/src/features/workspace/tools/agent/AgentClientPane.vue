@@ -145,13 +145,12 @@
                   <template #icon><ForkOutlined /></template>
                 </a-button>
               </a-tooltip>
-              <a-tooltip v-if="item.archiveAt == null" :title="t('agent.client.revert')" placement="top">
+              <a-tooltip v-if="item.archiveAt == null" :title="revertActionLabel(item)" placement="top">
                 <a-button
                   size="small"
                   type="text"
-                  :disabled="item.role === 'user' ? item.prevId == null : false"
                   :loading="actionLoading === 'revert' && actionTargetId === item.id"
-                  :aria-label="t('agent.client.revert')"
+                  :aria-label="revertActionLabel(item)"
                   @click="onRevertToMessage(item.id)"
                 >
                   <template #icon><RollbackOutlined /></template>
@@ -816,6 +815,7 @@ const props = defineProps<{
   sessionTitle?: string;
   parentSessionId?: string | null;
   sessionReady: boolean;
+  initialDraft?: string;
   ensureSession?: (sessionId: string) => Promise<string>;
   canChooseSession?: boolean;
   active: boolean;
@@ -831,6 +831,7 @@ const emit = defineEmits<{
   "choose-session": [];
   "session-title-sync-needed": [sessionId: string];
   "agent-settings-updated": [];
+  "reset-to-draft": [payload: { sessionId: string; draftText: string }];
 }>();
 
 const { t } = useI18n();
@@ -925,6 +926,15 @@ let contextRefreshTimer: number | null = null;
 let settlePollRemaining = 0;
 const terminalStatuses = new Set<AgentContextItemRecord["status"]>(["completed", "failed", "cancelled"]);
 const isSubtaskSession = computed(() => props.sessionKind === "subtask");
+
+function isFirstUserDisplayItem(item: DisplayItem) {
+  return item.role === "user" && item.prevId == null;
+}
+
+function revertActionLabel(item: DisplayItem) {
+  return isFirstUserDisplayItem(item) ? t("agent.client.resetToDraft") : t("agent.client.revert");
+}
+
 let runElapsedTimer: number | null = null;
 
 // 兼容中文输入法习惯: 用户输入首字符为“、”时,自动替换为“/”。
@@ -2893,10 +2903,36 @@ function onRevertToMessage(itemId: number) {
     toItemId = target.id;
   }
 
-  if (toItemId == null) {
+  const isFirstUserMessage = isUserTarget && target.prevId == null;
+  if (!isFirstUserMessage && toItemId == null) {
     message.warning(t("agent.client.revertTargetMissing"));
     return;
   }
+
+  if (isFirstUserMessage) {
+    if (runState.value.status !== "idle") {
+      message.warning(t("agent.client.resetDraftWhileRunning"));
+      return;
+    }
+    Modal.confirm({
+      title: t("agent.client.resetDraftConfirmTitle"),
+      content: t("agent.client.resetDraftConfirmContent"),
+      okText: t("agent.client.resetToDraft"),
+      cancelText: t("common.cancel"),
+      async onOk() {
+        if (runState.value.status !== "idle") {
+          message.warning(t("agent.client.resetDraftWhileRunning"));
+          throw new Error("agent_session_not_idle");
+        }
+        emit("reset-to-draft", {
+          sessionId: props.sessionId,
+          draftText: revertDraft
+        });
+      }
+    });
+    return;
+  }
+  const confirmedToItemId = toItemId as number;
 
   Modal.confirm({
     title: isUserTarget ? t("agent.client.revertConfirmTitle") : t("agent.client.revertConfirmTitleAssistant"),
@@ -2908,11 +2944,11 @@ function onRevertToMessage(itemId: number) {
       actionTargetId.value = itemId;
        try {
          await revertAgentSession(props.sessionId, {
-           workspaceId: props.workspaceId,
-           itemId: toItemId,
-           reason: "manual_revert"
-         });
-         if (isUserTarget && revertDraft.trim()) {
+            workspaceId: props.workspaceId,
+            itemId: confirmedToItemId,
+            reason: "manual_revert"
+          });
+          if (isUserTarget && revertDraft.trim()) {
            draft.value = revertDraft;
         }
         message.success(t("agent.client.reverted"));
@@ -3400,6 +3436,17 @@ watch(
       });
       void focusInputIfNeeded();
     }
+  },
+  { immediate: true }
+);
+
+watch(
+  () => [props.sessionReady, props.initialDraft, props.sessionId] as const,
+  ([sessionReady, initialDraft]) => {
+    if (sessionReady) return;
+    const next = typeof initialDraft === "string" ? initialDraft : "";
+    if (draft.value === next) return;
+    draft.value = next;
   },
   { immediate: true }
 );
