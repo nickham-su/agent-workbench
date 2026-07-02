@@ -1,15 +1,7 @@
 <template>
   <div class="h-full min-h-0 flex flex-col bg-[var(--panel-bg)]">
     <div v-if="visibleSessions.length === 0" class="h-full min-h-0 flex flex-col items-center justify-center gap-3">
-      <div class="text-[0.9em] text-[color:var(--text-tertiary)]">{{ allSessions.length === 0 ? t("agent.empty") : t("agent.closedEmpty") }}</div>
-      <a-button
-        v-if="allSessions.length > 0"
-        size="small"
-        :disabled="creating"
-        @click="reopenAllSessions"
-      >
-        {{ t("agent.actions.reopenClosed") }}
-      </a-button>
+      <div class="text-[0.9em] text-[color:var(--text-tertiary)]">{{ t("agent.empty") }}</div>
       <a-button size="small" type="primary" :loading="creating" @click="createOneSession">{{ t("agent.actions.newClient") }}</a-button>
     </div>
 
@@ -21,14 +13,6 @@
               <template #icon><MinusOutlined /></template>
             </a-button>
           </a-tooltip>
-          <a-tooltip v-if="activeResetSourceSessionId" :title="t('agent.client.restoreOriginalSession')">
-            <a-button size="small" type="text" @click="restoreResetSourceSession">
-              {{ t("agent.client.restoreOriginalSession") }}
-            </a-button>
-          </a-tooltip>
-          <a-button v-else-if="hasClosedSessions" size="small" type="text" :disabled="creating" @click="reopenAllSessions">
-            {{ t("agent.actions.reopenClosed") }}
-          </a-button>
         </div>
       </template>
 
@@ -186,7 +170,6 @@ const selectedAgentBySession = reactive<Record<string, string | null>>({});
 const agentOptions = ref<AgentOption[]>([]);
 const closedSessionIds = reactive<Record<string, true>>({});
 const openedSubtaskSessionIds = reactive<Record<string, true>>({});
-const draftResetSourceSessionById = reactive<Record<string, string>>({});
 const tabNoMap = ref<Record<string, number>>({});
 const chooseSessionModalOpen = ref(false);
 const draftInitialTextBySession = reactive<Record<string, string>>({});
@@ -229,16 +212,6 @@ const visibleSessions = computed(() => {
     // fallback: 保持稳定
     return a.createdAt - b.createdAt;
   });
-});
-
-const hasClosedSessions = computed(() => Object.keys(closedSessionIds).length > 0);
-
-const activeResetSourceSessionId = computed(() => {
-  const draftId = effectiveActiveKey.value;
-  if (!draftId) return "";
-  const sourceId = String(draftResetSourceSessionById[draftId] || "").trim();
-  if (!sourceId || !closedSessionIds[sourceId]) return "";
-  return sourceId;
 });
 
 function activeKeyStorageKey(workspaceId: string) {
@@ -590,7 +563,6 @@ async function ensureSessionCreated(sessionId: string) {
 
     draftSessions.value = draftSessions.value.filter((item) => item.id !== sessionId);
     delete draftInitialTextBySession[sessionId];
-    delete draftResetSourceSessionById[sessionId];
     serverSessions.value = [created, ...serverSessions.value.filter((item) => item.id !== created.id)].sort(
       (a, b) => b.updatedAt - a.updatedAt
     );
@@ -646,7 +618,6 @@ function closeSessionTab(sessionId: string) {
     tabNoMap.value = nextMap;
   }
   delete draftInitialTextBySession[sessionId];
-  delete draftResetSourceSessionById[sessionId];
 
   if (activeKey.value !== sessionId) return;
   const next = visibleSessions.value.find((item) => item.id !== sessionId)?.id ?? "";
@@ -660,37 +631,6 @@ function closeSessionTab(sessionId: string) {
 
   // 若关闭后无可见 tab,立即补一个新的草稿会话,避免出现“已全部关闭”空态。
   void createOneSession();
-}
-
-function reopenAllSessions() {
-  for (const id of Object.keys(closedSessionIds)) {
-    delete closedSessionIds[id];
-  }
-  persistClosedSessions();
-
-  // reopen 后对当前可见 tabs 重新分配/对齐编号
-  reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
-  invalidateOpenParentIntent();
-  const next = visibleSessions.value[0]?.id ?? "";
-  activeKey.value = next;
-  statusStore.markSessionSeen(next);
-  if (next) {
-    persistActiveKey(next);
-  }
-}
-
-function restoreResetSourceSession() {
-  const sourceSessionId = activeResetSourceSessionId.value;
-  if (!sourceSessionId) return;
-  delete closedSessionIds[sourceSessionId];
-  persistClosedSessions();
-  reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
-  const activeDraftId = effectiveActiveKey.value;
-  if (activeDraftId) {
-    delete draftResetSourceSessionById[activeDraftId];
-    activeKey.value = activeDraftId;
-    persistActiveKey(activeDraftId);
-  }
 }
 
 async function onSessionForked(sessionId: string) {
@@ -826,13 +766,12 @@ function replaceSessionTabWithDraft(payload: { sessionId: string; draftText: str
   const nextDrafts = [...draftSessions.value, draft];
   const sourceTabNo = tabNoMap.value[sourceSessionId];
   const sourceAgent = selectedAgentBySession[sourceSessionId] ?? null;
-  const hadPendingTitleSync = Object.prototype.hasOwnProperty.call(pendingSessionTitleSyncUpdatedAt, sourceSessionId);
   const sourceWasClosed = !!closedSessionIds[sourceSessionId];
+  const hadPendingTitleSync = Object.prototype.hasOwnProperty.call(pendingSessionTitleSyncUpdatedAt, sourceSessionId);
 
   draftSessions.value = nextDrafts;
   setDraftInitialText(draftId, payload.draftText);
   delete draftInitialTextBySession[sourceSessionId];
-  draftResetSourceSessionById[draftId] = sourceSessionId;
   selectedAgentBySession[draftId] = sourceAgent;
   persistAgentPick();
 
@@ -843,11 +782,13 @@ function replaceSessionTabWithDraft(payload: { sessionId: string; draftText: str
   delete nextMap[sourceSessionId];
   tabNoMap.value = nextMap;
 
+  // 首条消息“回退到此处”本质上是把当前窗口切成 draft。
+  // 这里继续隐藏原 session，避免它作为额外 tab 留在可见列表里；
+  // 但它仍保留在 serverSessions 中，可通过当前 draft 的“选择会话”入口重新找到。
   if (!sourceWasClosed) {
     closedSessionIds[sourceSessionId] = true;
+    persistClosedSessions();
   }
-  delete closedSessionIds[draftId];
-  persistClosedSessions();
 
   if (hadPendingTitleSync) {
     delete pendingSessionTitleSyncUpdatedAt[sourceSessionId];

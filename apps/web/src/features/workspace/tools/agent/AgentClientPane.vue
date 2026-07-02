@@ -145,12 +145,12 @@
                   <template #icon><ForkOutlined /></template>
                 </a-button>
               </a-tooltip>
-              <a-tooltip v-if="item.archiveAt == null" :title="revertActionLabel(item)" placement="top">
+              <a-tooltip v-if="item.archiveAt == null" :title="t('agent.client.revert')" placement="top">
                 <a-button
                   size="small"
                   type="text"
                   :loading="actionLoading === 'revert' && actionTargetId === item.id"
-                  :aria-label="revertActionLabel(item)"
+                  :aria-label="t('agent.client.revert')"
                   @click="onRevertToMessage(item.id)"
                 >
                   <template #icon><RollbackOutlined /></template>
@@ -929,10 +929,6 @@ const isSubtaskSession = computed(() => props.sessionKind === "subtask");
 
 function isFirstUserDisplayItem(item: DisplayItem) {
   return item.role === "user" && item.prevId == null;
-}
-
-function revertActionLabel(item: DisplayItem) {
-  return isFirstUserDisplayItem(item) ? t("agent.client.resetToDraft") : t("agent.client.revert");
 }
 
 let runElapsedTimer: number | null = null;
@@ -2943,9 +2939,9 @@ function onRevertToMessage(itemId: number) {
       return;
     }
     Modal.confirm({
-      title: t("agent.client.resetDraftConfirmTitle"),
-      content: t("agent.client.resetDraftConfirmContent"),
-      okText: t("agent.client.resetToDraft"),
+      title: t("agent.client.revertConfirmTitle"),
+      content: t("agent.client.revertConfirmContent"),
+      okText: t("agent.client.revert"),
       cancelText: t("common.cancel"),
       async onOk() {
         if (runState.value.status !== "idle") {

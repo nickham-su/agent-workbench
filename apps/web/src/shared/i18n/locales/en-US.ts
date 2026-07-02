@@ -282,14 +282,12 @@ export default {
   },
   agent: {
     empty: "No sessions yet. Create an AI client to start.",
-    closedEmpty: "All client tabs are closed",
     actions: {
       newClient: "New client",
       creating: "Creating...",
       refresh: "Refresh",
       minimize: "Minimize",
-      closeClient: "Close session",
-      reopenClosed: "Reopen closed clients"
+      closeClient: "Close session"
     },
     client: {
       tabLabel: "Session {index}",
@@ -343,14 +341,10 @@ export default {
       fork: "Fork from here",
       forked: "Created a new client from this message",
       revert: "Revert to here",
-      resetToDraft: "Reset to draft",
-      restoreOriginalSession: "Restore original session",
       revertTargetMissing: "No previous message found to revert to",
       revertConfirmTitle: "Revert to this message?",
       revertConfirmContent: "This will revert to before this message and put it back into the input box. Messages after this point will become hidden from current timeline.",
       resetDraftWhileRunning: "This session is still running. Wait for it to finish or cancel it before reverting.",
-      resetDraftConfirmTitle: "Reset this window to a draft?",
-      resetDraftConfirmContent: "This window will switch back to a draft and put the first message back into the input box for editing. The original session will still be kept and can be restored later.",
       revertConfirmTitleAssistant: "Revert to this assistant message?",
       revertConfirmContentAssistant: "This will revert to this assistant message and keep it in the timeline. Messages after this point will become hidden from current timeline.",
       reverted: "Reverted to selected message",
