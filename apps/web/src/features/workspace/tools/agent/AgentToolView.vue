@@ -185,6 +185,11 @@ const sessionsInitialized = ref(false);
 const serverSessionsLoaded = ref(false);
 const pendingSessionTitleSyncUpdatedAt = reactive<Record<string, number>>({});
 const draftCreatePromises = new Map<string, Promise<string>>();
+let openParentIntentId = 0;
+
+function invalidateOpenParentIntent() {
+  openParentIntentId += 1;
+}
 
 const statusStore = createAgentSessionStatusStore();
 provide(agentSessionStatusStoreKey, statusStore);
@@ -610,6 +615,7 @@ function closeSessionTab(sessionId: string) {
 
   if (activeKey.value !== sessionId) return;
   const next = visibleSessions.value.find((item) => item.id !== sessionId)?.id ?? "";
+  invalidateOpenParentIntent();
   activeKey.value = next;
   statusStore.markSessionSeen(next);
   if (next) {
@@ -629,6 +635,7 @@ function reopenAllSessions() {
 
   // reopen 后对当前可见 tabs 重新分配/对齐编号
   reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
+  invalidateOpenParentIntent();
   const next = visibleSessions.value[0]?.id ?? "";
   activeKey.value = next;
   statusStore.markSessionSeen(next);
@@ -642,6 +649,7 @@ async function onSessionForked(sessionId: string) {
   if (!sessionId) return;
   delete closedSessionIds[sessionId];
   persistClosedSessions();
+  invalidateOpenParentIntent();
   reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
   activeKey.value = sessionId;
   statusStore.markSessionSeen(sessionId);
@@ -655,6 +663,17 @@ async function onOpenSubtask(sessionId: string) {
   await refreshSessions();
   delete closedSessionIds[sessionId];
   persistClosedSessions();
+  invalidateOpenParentIntent();
+  reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
+  activeKey.value = sessionId;
+  statusStore.markSessionSeen(sessionId);
+  persistActiveKey(sessionId);
+}
+
+function activateParentSessionTab(sessionId: string) {
+  if (!sessionId) return;
+  delete closedSessionIds[sessionId];
+  persistClosedSessions();
   reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
   activeKey.value = sessionId;
   statusStore.markSessionSeen(sessionId);
@@ -663,18 +682,40 @@ async function onOpenSubtask(sessionId: string) {
 
 async function onOpenParent(sourceSessionId: string, sessionId: string) {
   if (!sessionId) return;
+  const localTarget = serverSessions.value.find((item) => item.id === sessionId && item.kind === "primary");
+  if (localTarget) {
+    const intentId = ++openParentIntentId;
+    activateParentSessionTab(sessionId);
+    if (sourceSessionId && sourceSessionId !== sessionId) {
+      closeSessionTab(sourceSessionId);
+    }
+    void refreshSessions().then((ok) => {
+      if (!ok) return;
+      if (intentId !== openParentIntentId) return;
+      const refreshedTarget = serverSessions.value.find((item) => item.id === sessionId);
+      if (refreshedTarget) return;
+      const fallback = effectiveActiveKey.value || visibleSessions.value[0]?.id || "";
+      if (fallback) {
+        activeKey.value = fallback;
+        statusStore.markSessionSeen(fallback);
+        persistActiveKey(fallback);
+      } else {
+        void createOneSession();
+      }
+      if (activeKey.value !== fallback && activeKey.value !== sessionId) return;
+      message.warning(t("agent.client.parentSessionMissing"));
+    });
+    return;
+  }
+  const intentId = ++openParentIntentId;
   await refreshSessions();
+  if (intentId !== openParentIntentId) return;
   const target = serverSessions.value.find((item) => item.id === sessionId);
   if (!target) {
     message.warning(t("agent.client.parentSessionMissing"));
     return;
   }
-  delete closedSessionIds[sessionId];
-  persistClosedSessions();
-  reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
-  activeKey.value = sessionId;
-  statusStore.markSessionSeen(sessionId);
-  persistActiveKey(sessionId);
+  activateParentSessionTab(sessionId);
   if (sourceSessionId && sourceSessionId !== sessionId) {
     closeSessionTab(sourceSessionId);
   }
@@ -707,6 +748,7 @@ function replaceDraftWithSession(params: { fromSessionId: string; targetSessionI
   delete selectedAgentBySession[fromSessionId];
   persistAgentPick();
 
+  invalidateOpenParentIntent();
   activeKey.value = target.id;
   statusStore.markSessionSeen(target.id);
   persistActiveKey(target.id);
@@ -760,9 +802,11 @@ function chooseSession(targetSessionId: string) {
 function onChangeTab(key: string | number) {
   const next = String(key || "");
   if (next === ADD_TAB_KEY) {
+    invalidateOpenParentIntent();
     void createOneSession();
     return;
   }
+  invalidateOpenParentIntent();
   activeKey.value = next;
   statusStore.markSessionSeen(next);
   persistActiveKey(next);
@@ -776,6 +820,7 @@ watch(
   () => props.workspaceId,
   async () => {
     sessionsInitialized.value = false;
+    invalidateOpenParentIntent();
     activeKey.value = "";
     serverSessions.value = [];
     serverSessionsLoaded.value = false;
