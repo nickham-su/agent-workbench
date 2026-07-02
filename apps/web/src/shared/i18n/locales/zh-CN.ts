@@ -15,6 +15,7 @@ export default {
     default: "默认",
     yes: "是",
     no: "否",
+    copyFailed: "复制失败：{reason}",
     format: {
       parens: "（{text}）",
       parensSuffix: "（{text}）"

@@ -2606,12 +2606,40 @@ function onOpenParent() {
 }
 
 async function copySessionId(sessionId: string) {
+  const content = String(sessionId ?? "").trim();
+  if (!content) return;
   try {
-    await navigator.clipboard.writeText(sessionId);
+    const writeText = navigator.clipboard?.writeText;
+    if (typeof writeText === "function") {
+      await writeText.call(navigator.clipboard, content);
+      message.success(t("agent.client.sessionIdCopied"));
+      return;
+    }
+  } catch {
+    // ignore and fallback below
+  }
+
+  let ta: HTMLTextAreaElement | null = null;
+  try {
+    ta = document.createElement("textarea");
+    ta.value = content;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    ta.style.top = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const copied = document.execCommand("copy");
+    if (!copied) {
+      throw new Error("document.execCommand('copy') returned false");
+    }
     message.success(t("agent.client.sessionIdCopied"));
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err || "unknown error");
     message.error(t("common.copyFailed", { reason }));
+  } finally {
+    ta?.remove();
   }
 }
 

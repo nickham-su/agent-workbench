@@ -15,6 +15,7 @@ export default {
     default: "Default",
     yes: "Yes",
     no: "No",
+    copyFailed: "Copy failed: {reason}",
     format: {
       parens: "({text})",
       parensSuffix: " ({text})"
