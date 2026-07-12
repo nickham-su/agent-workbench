@@ -57,6 +57,7 @@ const TOOL_ARTIFACT_MAX_CHARS = Math.max(
   TOOL_OUTPUT_TEXT_MAX_CHARS,
   parseIntOrDefault(process.env.AWB_TOOL_ARTIFACT_MAX_CHARS, 200_000)
 );
+const TOOL_OUTPUT_TEXT_UNTRUNCATED_NAMES = new Set(["subtask"]);
 const TOOL_PARALLEL_BATCH_LIMIT = 3;
 
 export function buildCompactionUserPrompt(input: { uiLocale: AgentUiLocale | null }) {
@@ -121,6 +122,20 @@ async function sleepMsWithAbort(ms: number, signal: AbortSignal) {
       resolve(false);
     };
     signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function buildSubtaskErrorText(params: {
+  status: "failed" | "cancelled";
+  error: string;
+  subtaskSessionId?: string;
+  subtaskResultText?: string;
+}) {
+  return buildToolText({
+    toolName: "subtask",
+    status: params.status,
+    headers: [["subtask_session_id", params.subtaskSessionId]],
+    body: typeof params.subtaskResultText === "string" ? `${params.error}\n\n${params.subtaskResultText}` : params.error
   });
 }
 
@@ -422,6 +437,13 @@ async function finalizeToolText(params: {
   text: string;
 }) {
   const normalized = normalizeToolText(params.text).trimEnd();
+  if (TOOL_OUTPUT_TEXT_UNTRUNCATED_NAMES.has(params.toolName)) {
+    return {
+      text: normalized,
+      textTruncated: false as const,
+      textArtifactPath: undefined as string | undefined
+    };
+  }
   if (normalized.length <= TOOL_OUTPUT_TEXT_MAX_CHARS) {
     return {
       text: normalized,
@@ -1106,16 +1128,20 @@ export class AgentRunner {
       const subtaskResultText = err && typeof err === "object" && typeof (err as any).subtaskResultText === "string"
         ? (err as any).subtaskResultText as string
         : undefined;
+      const isSubtaskWithResult = tool.toolName === "subtask" && (subtaskSessionId || typeof subtaskResultText === "string");
+      const errorText = isSubtaskWithResult
+        ? buildSubtaskErrorText({ status: "failed", error, subtaskSessionId: subtaskSessionId || undefined, subtaskResultText })
+        : buildToolErrorText({ toolName: tool.toolName, status: "failed", error });
       await this.apiClient.updateContextItem({
         itemId: tool.itemId,
         status: "failed",
         output: {
           ...outputBase,
-          text: buildToolErrorText({ toolName: tool.toolName, status: "failed", error }),
-          ...(subtaskSessionId
+          text: errorText,
+          ...(isSubtaskWithResult
             ? {
                 result: {
-                  subtaskSessionId,
+                  ...(subtaskSessionId ? { subtaskSessionId } : {}),
                   ...(typeof subtaskResultText === "string"
                     ? { resultText: subtaskResultText }
                     : {})
@@ -2328,4 +2354,14 @@ export function hasVisibleAssistantTextForTest(text: string) {
 
 export function shouldStopForMaxStepsForTest(step: number, maxSteps: number) {
   return shouldStopForMaxSteps(step, maxSteps);
+}
+
+export async function finalizeToolTextForTest(params: {
+  workspacePath: string;
+  itemId: number;
+  toolName: string;
+  toolCallId?: string;
+  text: string;
+}) {
+  return finalizeToolText(params);
 }
