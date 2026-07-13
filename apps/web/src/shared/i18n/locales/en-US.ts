@@ -15,6 +15,7 @@ export default {
     default: "Default",
     yes: "Yes",
     no: "No",
+    copyFailed: "Copy failed: {reason}",
     format: {
       parens: "({text})",
       parensSuffix: " ({text})"
@@ -281,14 +282,12 @@ export default {
   },
   agent: {
     empty: "No sessions yet. Create an AI client to start.",
-    closedEmpty: "All client tabs are closed",
     actions: {
       newClient: "New client",
       creating: "Creating...",
       refresh: "Refresh",
       minimize: "Minimize",
-      closeClient: "Close session",
-      reopenClosed: "Reopen closed clients"
+      closeClient: "Close session"
     },
     client: {
       tabLabel: "Session {index}",
@@ -345,6 +344,7 @@ export default {
       revertTargetMissing: "No previous message found to revert to",
       revertConfirmTitle: "Revert to this message?",
       revertConfirmContent: "This will revert to before this message and put it back into the input box. Messages after this point will become hidden from current timeline.",
+      resetDraftWhileRunning: "This session is still running. Wait for it to finish or cancel it before reverting.",
       revertConfirmTitleAssistant: "Revert to this assistant message?",
       revertConfirmContentAssistant: "This will revert to this assistant message and keep it in the timeline. Messages after this point will become hidden from current timeline.",
       reverted: "Reverted to selected message",

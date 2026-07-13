@@ -149,7 +149,6 @@
                 <a-button
                   size="small"
                   type="text"
-                  :disabled="item.role === 'user' ? item.prevId == null : false"
                   :loading="actionLoading === 'revert' && actionTargetId === item.id"
                   :aria-label="t('agent.client.revert')"
                   @click="onRevertToMessage(item.id)"
@@ -185,8 +184,18 @@
                 <span class="inline-block w-3" />
                 {{ t("agent.client.subtaskMode") }}: {{ formatSubtaskMode(item.subtaskMode) }}
               </div>
-              <div class="pt-0.5 text-[color:var(--text-secondary)]">
+              <div class="pt-0.5 text-[color:var(--text-secondary)] flex items-center gap-1 min-w-0">
                 {{ t("agent.client.subtaskSessionId") }}: {{ item.subtaskSessionId || "-" }}
+                <a-button
+                  v-if="item.subtaskSessionId"
+                  size="small"
+                  type="text"
+                  class="!px-1 !text-[color:var(--text-tertiary)] hover:!text-[color:var(--text-tertiary)] shrink-0"
+                  :aria-label="t('agent.client.copySessionId')"
+                  @click="onCopySubtaskSessionId(item.subtaskSessionId, $event)"
+                >
+                  <template #icon><CopyOutlined class="text-[12px]" /></template>
+                </a-button>
               </div>
               <div v-if="item.toolError" class="pt-1 text-red-500">
                 Error: {{ item.toolError }}
@@ -806,6 +815,7 @@ const props = defineProps<{
   sessionTitle?: string;
   parentSessionId?: string | null;
   sessionReady: boolean;
+  initialDraft?: string;
   ensureSession?: (sessionId: string) => Promise<string>;
   canChooseSession?: boolean;
   active: boolean;
@@ -821,6 +831,7 @@ const emit = defineEmits<{
   "choose-session": [];
   "session-title-sync-needed": [sessionId: string];
   "agent-settings-updated": [];
+  "reset-to-draft": [payload: { sessionId: string; draftText: string }];
 }>();
 
 const { t } = useI18n();
@@ -915,6 +926,11 @@ let contextRefreshTimer: number | null = null;
 let settlePollRemaining = 0;
 const terminalStatuses = new Set<AgentContextItemRecord["status"]>(["completed", "failed", "cancelled"]);
 const isSubtaskSession = computed(() => props.sessionKind === "subtask");
+
+function isFirstUserDisplayItem(item: DisplayItem) {
+  return item.role === "user" && item.prevId == null;
+}
+
 let runElapsedTimer: number | null = null;
 
 // 兼容中文输入法习惯: 用户输入首字符为“、”时,自动替换为“/”。
@@ -2585,14 +2601,53 @@ function onOpenParent() {
   emit("open-parent", sessionId);
 }
 
-async function onCopySessionId() {
+async function copySessionId(sessionId: string) {
+  const content = String(sessionId ?? "").trim();
+  if (!content) return;
   try {
-    await navigator.clipboard.writeText(props.sessionId);
+    const writeText = navigator.clipboard?.writeText;
+    if (typeof writeText === "function") {
+      await writeText.call(navigator.clipboard, content);
+      message.success(t("agent.client.sessionIdCopied"));
+      return;
+    }
+  } catch {
+    // ignore and fallback below
+  }
+
+  let ta: HTMLTextAreaElement | null = null;
+  try {
+    ta = document.createElement("textarea");
+    ta.value = content;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    ta.style.top = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const copied = document.execCommand("copy");
+    if (!copied) {
+      throw new Error("document.execCommand('copy') returned false");
+    }
     message.success(t("agent.client.sessionIdCopied"));
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err || "unknown error");
     message.error(t("common.copyFailed", { reason }));
+  } finally {
+    ta?.remove();
   }
+}
+
+async function onCopySessionId() {
+  await copySessionId(props.sessionId);
+}
+
+async function onCopySubtaskSessionId(sessionId?: string, event?: MouseEvent) {
+  event?.stopPropagation();
+  const normalizedSessionId = String(sessionId || "").trim();
+  if (!normalizedSessionId) return;
+  await copySessionId(normalizedSessionId);
 }
 
 function newClientRequestId() {
@@ -2872,10 +2927,36 @@ function onRevertToMessage(itemId: number) {
     toItemId = target.id;
   }
 
-  if (toItemId == null) {
+  const isFirstUserMessage = isUserTarget && target.prevId == null;
+  if (!isFirstUserMessage && toItemId == null) {
     message.warning(t("agent.client.revertTargetMissing"));
     return;
   }
+
+  if (isFirstUserMessage) {
+    if (runState.value.status !== "idle") {
+      message.warning(t("agent.client.resetDraftWhileRunning"));
+      return;
+    }
+    Modal.confirm({
+      title: t("agent.client.revertConfirmTitle"),
+      content: t("agent.client.revertConfirmContent"),
+      okText: t("agent.client.revert"),
+      cancelText: t("common.cancel"),
+      async onOk() {
+        if (runState.value.status !== "idle") {
+          message.warning(t("agent.client.resetDraftWhileRunning"));
+          throw new Error("agent_session_not_idle");
+        }
+        emit("reset-to-draft", {
+          sessionId: props.sessionId,
+          draftText: revertDraft
+        });
+      }
+    });
+    return;
+  }
+  const confirmedToItemId = toItemId as number;
 
   Modal.confirm({
     title: isUserTarget ? t("agent.client.revertConfirmTitle") : t("agent.client.revertConfirmTitleAssistant"),
@@ -2887,11 +2968,11 @@ function onRevertToMessage(itemId: number) {
       actionTargetId.value = itemId;
        try {
          await revertAgentSession(props.sessionId, {
-           workspaceId: props.workspaceId,
-           itemId: toItemId,
-           reason: "manual_revert"
-         });
-         if (isUserTarget && revertDraft.trim()) {
+            workspaceId: props.workspaceId,
+            itemId: confirmedToItemId,
+            reason: "manual_revert"
+          });
+          if (isUserTarget && revertDraft.trim()) {
            draft.value = revertDraft;
         }
         message.success(t("agent.client.reverted"));
@@ -3379,6 +3460,17 @@ watch(
       });
       void focusInputIfNeeded();
     }
+  },
+  { immediate: true }
+);
+
+watch(
+  () => [props.sessionReady, props.initialDraft, props.sessionId] as const,
+  ([sessionReady, initialDraft]) => {
+    if (sessionReady) return;
+    const next = typeof initialDraft === "string" ? initialDraft : "";
+    if (draft.value === next) return;
+    draft.value = next;
   },
   { immediate: true }
 );

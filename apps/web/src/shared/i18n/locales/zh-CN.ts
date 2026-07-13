@@ -15,6 +15,7 @@ export default {
     default: "默认",
     yes: "是",
     no: "否",
+    copyFailed: "复制失败：{reason}",
     format: {
       parens: "（{text}）",
       parensSuffix: "（{text}）"
@@ -279,14 +280,12 @@ export default {
   },
   agent: {
     empty: "暂无会话,请新建一个 AI client",
-    closedEmpty: "当前 client 已全部关闭",
     actions: {
       newClient: "新建 client",
       creating: "创建中...",
       refresh: "刷新",
       minimize: "最小化",
-      closeClient: "关闭会话",
-      reopenClosed: "恢复已关闭 client"
+      closeClient: "关闭会话"
     },
     client: {
       tabLabel: "会话 {index}",
@@ -343,6 +342,7 @@ export default {
       revertTargetMissing: "未找到可回退的上一条事件",
       revertConfirmTitle: "确认回退到这条消息？",
       revertConfirmContent: "将回退到该消息之前,并把该条消息填入输入框。回退后,后续对话分支将暂时不可见。",
+      resetDraftWhileRunning: "当前会话仍在运行，请先等待结束或取消后再回退。",
       revertConfirmTitleAssistant: "确认回退到这条 AI 消息？",
       revertConfirmContentAssistant: "将回退到该条 AI 消息并保留该消息。回退后,后续对话分支将暂时不可见。",
       reverted: "已回退到选中消息",

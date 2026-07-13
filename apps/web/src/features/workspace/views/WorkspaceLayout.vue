@@ -818,6 +818,9 @@ function onToolIconClick(toolId: ToolId) {
   if (!isToolEnabled(toolId)) return;
   const area = toolCurrentArea(toolId);
   if (activeToolIdByArea[area] === toolId) {
+    if (area === "leftTop") {
+      return;
+    }
     toolMinimized[toolId] = !toolMinimized[toolId];
     return;
   }

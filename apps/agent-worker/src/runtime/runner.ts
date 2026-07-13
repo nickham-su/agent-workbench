@@ -47,6 +47,7 @@ const ENV_MODEL_TOTAL_TIMEOUT_MS = Math.min(
 );
 const MODEL_RETRY_BACKOFF_BASE_MS = 2_000;
 const MODEL_RETRY_BACKOFF_MAX_MS = 60_000;
+const EMPTY_RESPONSE_COMPLETE_THRESHOLD = 6;
 const TOOL_OUTPUT_TEXT_MAX_CHARS = Math.max(1_000, parseIntOrDefault(process.env.AWB_TOOL_OUTPUT_TEXT_MAX_CHARS, 8_000));
 const TOOL_OUTPUT_TEXT_PREVIEW_CHARS = Math.max(
   500,
@@ -56,6 +57,7 @@ const TOOL_ARTIFACT_MAX_CHARS = Math.max(
   TOOL_OUTPUT_TEXT_MAX_CHARS,
   parseIntOrDefault(process.env.AWB_TOOL_ARTIFACT_MAX_CHARS, 200_000)
 );
+const TOOL_OUTPUT_TEXT_UNTRUNCATED_NAMES = new Set(["subtask"]);
 const TOOL_PARALLEL_BATCH_LIMIT = 3;
 
 export function buildCompactionUserPrompt(input: { uiLocale: AgentUiLocale | null }) {
@@ -72,6 +74,14 @@ function newSortableId(prefix: string) {
   const ts = Date.now().toString(36).padStart(10, "0");
   const random = randomBytes(6).toString("hex");
   return `${prefix}_${ts}${random}`;
+}
+
+function hasVisibleAssistantText(text: string) {
+  return text.trim().length > 0;
+}
+
+function shouldStopForMaxSteps(step: number, maxSteps: number) {
+  return maxSteps > 0 && step >= Math.max(maxSteps, EMPTY_RESPONSE_COMPLETE_THRESHOLD);
 }
 
 function computeRetryBackoffMs(attemptIndex: number) {
@@ -112,6 +122,20 @@ async function sleepMsWithAbort(ms: number, signal: AbortSignal) {
       resolve(false);
     };
     signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function buildSubtaskErrorText(params: {
+  status: "failed" | "cancelled";
+  error: string;
+  subtaskSessionId?: string;
+  subtaskResultText?: string;
+}) {
+  return buildToolText({
+    toolName: "subtask",
+    status: params.status,
+    headers: [["subtask_session_id", params.subtaskSessionId]],
+    body: typeof params.subtaskResultText === "string" ? `${params.error}\n\n${params.subtaskResultText}` : params.error
   });
 }
 
@@ -413,6 +437,13 @@ async function finalizeToolText(params: {
   text: string;
 }) {
   const normalized = normalizeToolText(params.text).trimEnd();
+  if (TOOL_OUTPUT_TEXT_UNTRUNCATED_NAMES.has(params.toolName)) {
+    return {
+      text: normalized,
+      textTruncated: false as const,
+      textArtifactPath: undefined as string | undefined
+    };
+  }
   if (normalized.length <= TOOL_OUTPUT_TEXT_MAX_CHARS) {
     return {
       text: normalized,
@@ -1097,16 +1128,20 @@ export class AgentRunner {
       const subtaskResultText = err && typeof err === "object" && typeof (err as any).subtaskResultText === "string"
         ? (err as any).subtaskResultText as string
         : undefined;
+      const isSubtaskWithResult = tool.toolName === "subtask" && (subtaskSessionId || typeof subtaskResultText === "string");
+      const errorText = isSubtaskWithResult
+        ? buildSubtaskErrorText({ status: "failed", error, subtaskSessionId: subtaskSessionId || undefined, subtaskResultText })
+        : buildToolErrorText({ toolName: tool.toolName, status: "failed", error });
       await this.apiClient.updateContextItem({
         itemId: tool.itemId,
         status: "failed",
         output: {
           ...outputBase,
-          text: buildToolErrorText({ toolName: tool.toolName, status: "failed", error }),
-          ...(subtaskSessionId
+          text: errorText,
+          ...(isSubtaskWithResult
             ? {
                 result: {
-                  subtaskSessionId,
+                  ...(subtaskSessionId ? { subtaskSessionId } : {}),
                   ...(typeof subtaskResultText === "string"
                     ? { resultText: subtaskResultText }
                     : {})
@@ -2098,7 +2133,7 @@ export class AgentRunner {
         updatedAt: nowMs()
       });
 
-      return { aborted: false as const, toolCallCount: recognizedCalls.length, assistantItemId: assistant.id };
+      return { aborted: false as const, toolCallCount: recognizedCalls.length, assistantItemId: assistant.id, hasVisibleText: hasVisibleAssistantText(text) };
   }
 
   private async processRun(run: QueuedRun, signal: AbortSignal) {
@@ -2121,6 +2156,7 @@ export class AgentRunner {
 
       let step = 0;
       const repeatedToolCallCounter = new Map<string, number>();
+      let emptyResponseCount = 0;
 
       // 手动压缩: 仅执行一次 compaction,不进入正常 step 循环.
       if (run.inputText === MANUAL_COMPACT_SENTINEL) {
@@ -2198,7 +2234,7 @@ export class AgentRunner {
           }
         }
 
-        if (LOOP_MAX_STEPS > 0 && step >= LOOP_MAX_STEPS) {
+        if (shouldStopForMaxSteps(step, LOOP_MAX_STEPS)) {
           const head = context.headItemId;
           if (head != null) {
             await this.apiClient.createContextItem({
@@ -2239,7 +2275,23 @@ export class AgentRunner {
         if (result.aborted || signal.aborted) {
           return;
         }
-        if (result.toolCallCount === 0) {
+        if (result.toolCallCount > 0) {
+          emptyResponseCount = 0;
+          continue;
+        }
+        if (result.hasVisibleText) {
+          emptyResponseCount = 0;
+          await this.apiClient.completeRun({
+            workspaceId: run.workspaceId,
+            sessionId: run.sessionId,
+            runId: run.runId,
+            status: "completed",
+            updatedAt: nowMs()
+          });
+          return;
+        }
+        emptyResponseCount += 1;
+        if (emptyResponseCount >= EMPTY_RESPONSE_COMPLETE_THRESHOLD) {
           await this.apiClient.completeRun({
             workspaceId: run.workspaceId,
             sessionId: run.sessionId,
@@ -2294,4 +2346,22 @@ export function buildProviderOptionsWithPromptCacheKeyForTest(params: {
 
 export function hasValidPromptCacheKeyForTest(providerOptions: Record<string, unknown>) {
   return hasValidPromptCacheKey(providerOptions);
+}
+
+export function hasVisibleAssistantTextForTest(text: string) {
+  return hasVisibleAssistantText(text);
+}
+
+export function shouldStopForMaxStepsForTest(step: number, maxSteps: number) {
+  return shouldStopForMaxSteps(step, maxSteps);
+}
+
+export async function finalizeToolTextForTest(params: {
+  workspacePath: string;
+  itemId: number;
+  toolName: string;
+  toolCallId?: string;
+  text: string;
+}) {
+  return finalizeToolText(params);
 }

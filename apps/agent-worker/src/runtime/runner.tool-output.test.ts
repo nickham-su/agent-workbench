@@ -7,6 +7,7 @@ import {
   AgentRunner,
   buildProviderOptionsWithPromptCacheKeyForTest,
   buildToolExecutionBatchesForTest,
+  finalizeToolTextForTest,
   hasValidPromptCacheKeyForTest
 } from "./runner.js";
 import { getBashToolAppendix, startBashToolProbe } from "./bashTools.js";
@@ -43,6 +44,184 @@ test("bash tool appendix uses English labels", async () => {
   assert.equal(appendix.includes("Known available tools:") || appendix.includes("Runtime environment:"), true);
   assert.equal(appendix.includes("已知可用工具:"), false);
   assert.equal(appendix.includes("运行环境:"), false);
+});
+
+test("subtask 长输出不截断且不生成 artifact", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const longText = "S".repeat(9_500);
+    const output = await finalizeToolTextForTest({
+      workspacePath,
+      itemId: 1,
+      toolName: "subtask",
+      toolCallId: "call_subtask_long",
+      text: longText
+    });
+
+    assert.equal(output.text, longText);
+    assert.equal(output.textTruncated, false);
+    assert.equal(output.textArtifactPath, undefined);
+    await assert.rejects(
+      fs.access(path.join(workspacePath, ".awb", "agent", "artifacts", "by_tool_call", "subtask", "call_subtask_long.txt"))
+    );
+  });
+});
+
+test("非 subtask 长输出仍截断并写入 artifact", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const longText = "B".repeat(9_500);
+    const output = await finalizeToolTextForTest({
+      workspacePath,
+      itemId: 2,
+      toolName: "bash",
+      toolCallId: "call_bash_long",
+      text: longText
+    });
+
+    assert.equal(output.textTruncated, true);
+    assert.equal(output.text.includes("[truncated]"), true);
+    assert.equal(output.textArtifactPath, ".awb/agent/artifacts/by_tool_call/bash/call_bash_long.txt");
+    assert.equal(await fs.readFile(path.join(workspacePath, output.textArtifactPath), "utf8"), longText);
+  });
+});
+
+test("subtask executeTool 成功时 completed output 保留完整长文本且无 artifact", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const updates: Array<{ status?: string; output?: Record<string, unknown> }> = [];
+    const longText = "R".repeat(9_500);
+    const apiClient = {
+      async updateContextItem(input: { status?: string; output?: Record<string, unknown> }) {
+        updates.push({ status: input.status, output: input.output });
+        return { id: 1 };
+      },
+      async updateRunState() {
+        return;
+      },
+      async startSubtaskRun() {
+        return { sessionId: "sub_succ", runId: "run_sub_succ", workspacePath, agentName: "Researcher" };
+      },
+      async getSubtaskStatus() {
+        return { status: "completed" as const };
+      },
+      async getSubtaskResult() {
+        return { resultText: longText };
+      }
+    };
+
+    const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+    (runner as any).processRun = async () => {};
+
+    const result = await (runner as any).executeTool({
+      profile: {
+        agent: {
+          tools: ["subtask"],
+          pluginTools: []
+        }
+      },
+      run: {
+        workspaceId: "ws_test",
+        sessionId: "ses_test",
+        runId: "run_test",
+        workspacePath
+      },
+      tool: pendingTool({
+        itemId: 201,
+        toolName: "subtask",
+        toolCallId: "call_subtask_execute_success",
+        args: { description: "desc", prompt: "prompt", agentId: "agent_a", session: { mode: "new" } }
+      }),
+      signal: new AbortController().signal,
+      promptContext: { tools: [] }
+    });
+
+    assert.equal(result.paused, false);
+    let completed: { status?: string; output?: Record<string, unknown> } | null = null;
+    for (let i = updates.length - 1; i >= 0; i -= 1) {
+      const item = updates[i];
+      if (item?.status === "completed") {
+        completed = item;
+        break;
+      }
+    }
+    assert.ok(completed, "should have completed update");
+    const output = (completed.output || {}) as Record<string, unknown>;
+    assert.equal(output.text, `tool: subtask\nstatus: completed\nsubtask_session_id: sub_succ\n\n${longText}`);
+    assert.equal(output.textTruncated, undefined);
+    assert.equal(output.textArtifactPath, undefined);
+    assert.deepEqual(output.result, {
+      subtaskSessionId: "sub_succ",
+      subtaskAgentId: "agent_a",
+      subtaskAgentName: "Researcher",
+      resultText: longText
+    });
+  });
+});
+
+test("subtask executeTool 失败时 failed output 保留错误状态与完整结果且无 artifact", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const updates: Array<{ status?: string; output?: Record<string, unknown> }> = [];
+    const longText = "F".repeat(9_500);
+    const apiClient = {
+      async updateContextItem(input: { status?: string; output?: Record<string, unknown> }) {
+        updates.push({ status: input.status, output: input.output });
+        return { id: 1 };
+      },
+      async updateRunState() {
+        return;
+      },
+      async startSubtaskRun() {
+        return { sessionId: "sub_fail", runId: "run_sub_fail", workspacePath, agentName: "Researcher" };
+      },
+      async getSubtaskStatus() {
+        return { status: "failed" as const };
+      },
+      async getSubtaskResult() {
+        return { resultText: longText };
+      }
+    };
+
+    const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+    (runner as any).processRun = async () => {};
+
+    const result = await (runner as any).executeTool({
+      profile: {
+        agent: {
+          tools: ["subtask"],
+          pluginTools: []
+        }
+      },
+      run: {
+        workspaceId: "ws_test",
+        sessionId: "ses_test",
+        runId: "run_test",
+        workspacePath
+      },
+      tool: pendingTool({
+        itemId: 202,
+        toolName: "subtask",
+        toolCallId: "call_subtask_execute_failed",
+        args: { description: "desc", prompt: "prompt", agentId: "agent_a", session: { mode: "new" } }
+      }),
+      signal: new AbortController().signal,
+      promptContext: { tools: [] }
+    });
+
+    assert.equal(result.paused, false);
+    let failed: { status?: string; output?: Record<string, unknown> } | null = null;
+    for (let i = updates.length - 1; i >= 0; i -= 1) {
+      const item = updates[i];
+      if (item?.status === "failed") {
+        failed = item;
+        break;
+      }
+    }
+    assert.ok(failed, "should have failed update");
+    const output = (failed.output || {}) as Record<string, unknown>;
+    assert.equal(output.text, `tool: subtask\nstatus: failed\nsubtask_session_id: sub_fail\n\nsubtask failed\n\n${longText}`);
+    assert.equal(output.textTruncated, undefined);
+    assert.equal(output.textArtifactPath, undefined);
+    assert.equal(output.error, "subtask failed");
+    assert.deepEqual(output.result, { subtaskSessionId: "sub_fail", resultText: longText });
+  });
 });
 
 test("bash 后接 subtask 时拆成两个并发段", () => {
