@@ -602,17 +602,45 @@ test("agent prompt-context 中的工具描述与 schema 说明使用英文", asy
   );
   const sessionSchema = (subtaskTool?.inputSchema as any)?.properties?.session;
   const subtaskDescriptionSchema = (subtaskTool?.inputSchema as any)?.properties?.description;
+  const subtaskPromptSchema = (subtaskTool?.inputSchema as any)?.properties?.prompt;
+  const subtaskAgentIdSchema = (subtaskTool?.inputSchema as any)?.properties?.agentId;
   assert.equal(subtaskDescriptionSchema?.minLength, 1);
   assert.equal(subtaskDescriptionSchema?.maxLength, undefined);
   assert.ok(String(subtaskDescriptionSchema?.description || "").includes("Longer values will be truncated to 50 characters."));
+  assert.ok(String(subtaskPromptSchema?.description || "").includes("goal, scope or constraints, and deliverable boundary"));
+  assert.ok(String(subtaskAgentIdSchema?.description || "").includes("assignee role template"));
+  assert.ok(String(subtaskAgentIdSchema?.description || "").includes("not a specific assignee instance"));
+  assert.ok(String(sessionSchema?.description || "").includes("background context or reuses prior session memory"));
 
   const oneOf = Array.isArray(sessionSchema?.oneOf) ? sessionSchema.oneOf : [];
   assert.ok(oneOf.length >= 3, "subtask.session.oneOf should contain multiple options");
+  const newOption = oneOf.find((item: any) => item?.properties?.mode?.const === "new");
+  const existingOption = oneOf.find((item: any) => item?.properties?.mode?.const === "existing");
+  const forkOption = oneOf.find((item: any) => item?.properties?.mode?.const === "fork");
   assert.equal(
     oneOf.every((item: any) => typeof item?.description === "string" && !/[\u4e00-\u9fff]/.test(item.description)),
     true,
     "subtask.session.oneOf descriptions should be English"
   );
+  assert.ok(String(newOption?.description || "").includes("no parent-session or prior subtask background"));
+  assert.ok(String(existingOption?.description || "").includes("follow-up research"));
+  assert.ok(String(existingOption?.properties?.sessionId?.description || "").includes("existing subtask session ID"));
+  assert.ok(String(forkOption?.description || "").includes("full current parent-session history"));
+  const subtaskDescription = String(subtaskTool?.description || "");
+  assert.ok(subtaskDescription.includes("Recommended use cases:"));
+  assert.ok(subtaskDescription.includes("Preserve parent-session context quality"));
+  assert.ok(subtaskDescription.includes("Focus on results instead of process"));
+  assert.ok(subtaskDescription.includes("Divide complex work"));
+  assert.ok(subtaskDescription.includes("Usage guidance:"));
+  assert.ok(subtaskDescription.includes("independent work"));
+  assert.ok(subtaskDescription.includes("implementation and code review must not be delegated in parallel"));
+  assert.ok(subtaskDescription.includes("prefer fork so the user's intent can be passed"));
+  assert.ok(subtaskDescription.includes("full parent-session context"));
+  assert.ok(subtaskDescription.includes("todolists"));
+  assert.ok(subtaskDescription.includes("same agentId"));
+  assert.ok(subtaskDescription.includes("same existing sessionId"));
+  assert.ok(subtaskDescription.includes("fails after a session ID has already been created"));
+  assert.ok(subtaskDescription.includes("succeeds but returns no summary"));
 });
 
 test("agent scope 校验会拒绝错误场景的 agent 并在无可用 agent 时返回明确错误", async () => {
