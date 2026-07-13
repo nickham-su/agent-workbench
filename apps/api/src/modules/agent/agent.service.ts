@@ -272,15 +272,15 @@ function toolArgsSchema(toolName: AgentContextToolName) {
         prompt: {
           type: "string",
           minLength: 1,
-          description: "Detailed instructions for the subtask. Clearly describe the input scope, constraints, and expected output format."
+          description: "Task instructions for the subtask. Clearly define the goal, scope or constraints, and deliverable boundary so the assignee knows exactly what to do and what not to do."
         },
         agentId: {
           type: "string",
           minLength: 1,
-          description: "The agent ID that should execute the subtask."
+          description: "The agent ID of the assignee role template, not a specific assignee instance. The same agentId may be reused across multiple subtasks. It defines the assignee's capabilities, working style, and deliverable requirements."
         },
         session: {
-          description: "The session strategy for the subtask.",
+          description: "Controls whether the subtask receives background context or reuses prior session memory for the assignee role.",
           oneOf: [
             {
               type: "object",
@@ -289,7 +289,7 @@ function toolArgsSchema(toolName: AgentContextToolName) {
               properties: {
                 mode: { const: "new" }
               },
-              description: "new: start from scratch, or use when the subtask needs independent thinking."
+              description: "new: start a brand-new task with no parent-session or prior subtask background; give instructions only through the prompt."
             },
             {
               type: "object",
@@ -297,9 +297,13 @@ function toolArgsSchema(toolName: AgentContextToolName) {
               additionalProperties: false,
               properties: {
                 mode: { const: "existing" },
-                sessionId: { type: "string", minLength: 1 }
+                sessionId: {
+                  type: "string",
+                  minLength: 1,
+                  description: "The existing subtask session ID whose content and memory should be resumed."
+                }
               },
-              description: "existing: continue based on an existing subtask session to reuse prior work."
+              description: "existing: continue a specified subtask session to reuse its content and memory. Best for follow-up research, post-fix review, and other work where repeating context gathering would be wasteful."
             },
             {
               type: "object",
@@ -308,7 +312,7 @@ function toolArgsSchema(toolName: AgentContextToolName) {
               properties: {
                 mode: { const: "fork" }
               },
-              description: "fork: use when the subtask needs the full parent-session context and the prompt alone is not sufficient."
+              description: "fork: provide the subtask with the full current parent-session history as background context. Use this when the user's intent must be passed through without loss."
             }
           ]
         }
@@ -334,11 +338,18 @@ function buildSubtaskToolDescription(agentItems: Array<{ id: string; name: strin
     "- Focus on results instead of process: keep only the conclusion and key evidence in the parent session.",
     "- Divide complex work: use only for tasks that are genuinely complex or can be parallelized; avoid splitting simple tasks because it adds coordination cost.",
     "",
+    "Usage guidance:",
+    "Use parallel subtasks only for independent work. Tasks with dependencies must be delegated serially, one step at a time. For example, implementation and code review must not be delegated in parallel.",
+    "For coding or documentation work driven by the user's request, prefer fork so the user's intent can be passed to the subtask without loss.",
+    "When using fork, the subtask receives the full parent-session context, which may include overall planning information such as todolists. Therefore the prompt must explicitly state the subtask's concrete goal, deliverable boundary, and responsibilities it should not take on.",
+    "Concurrent subtasks may reuse the same agentId, but do not assign the same existing sessionId to multiple concurrent tasks.",
+    "If a subtask call fails after a session ID has already been created, prefer reusing that session with existing instead of starting over, because useful partial progress may already exist.",
+    "If a subtask call succeeds but returns no summary, you must reuse that session to check progress and continue the work if it is not actually finished.",
+    "",
     "Guidance for choosing session.mode:",
-    "- new: start from scratch, or use when independent thinking is needed.",
-    "  Example: use new for web research when starting fresh is useful, or for code review when independent thinking is preferred.",
-    "- fork: use when the full parent-session context is needed and the prompt alone cannot express it adequately.",
-    "- existing: continue from an existing subtask session to avoid repeating work.",
+    "- new: start a fresh task with no inherited context; use only the prompt as instructions.",
+    "- fork: send the full parent-session context to the subtask when the prompt alone cannot capture the user's intent or constraints.",
+    "- existing: resume an earlier subtask session to reuse memory, continue unfinished work, or avoid repeating research and review setup.",
     "",
     "Result: on success, returns subtaskSessionId and the subtask result text."
   ];
