@@ -692,21 +692,19 @@ export class BuiltinToolProvider implements ToolProvider {
           ctx.signal
         );
 
+        if (ctx.signal.aborted) {
+          const abortError = new Error("subtask cancelled by parent abort");
+          (abortError as Error & { name: string }).name = "AbortError";
+          throw abortError;
+        }
+
         const subtaskStatus = await ctx.apiClient.getSubtaskStatus({
           workspaceId: ctx.run.workspaceId,
           sessionId: started.sessionId,
           runId: started.runId
         });
 
-        if (ctx.signal.aborted) {
-          await ctx.apiClient.completeRun({
-            workspaceId: ctx.run.workspaceId,
-            sessionId: started.sessionId,
-            runId: started.runId,
-            status: "cancelled",
-            updatedAt: ctx.nowMs()
-          });
-        } else if (subtaskStatus.status === "running") {
+        if (subtaskStatus.status === "running") {
           throw new Error(`subtask did not reach terminal status: ${subtaskStatus.status}`);
         }
 
