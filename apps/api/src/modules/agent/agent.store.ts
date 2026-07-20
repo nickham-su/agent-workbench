@@ -74,6 +74,11 @@ type StoredToolResult = {
   } | unknown;
 };
 
+type SubtaskToolRefRow = {
+  toolResultJson: string | null;
+  outputText: string;
+};
+
 function parseJson(raw: string | null) {
   if (typeof raw !== "string" || !raw.trim()) return null;
   try {
@@ -101,6 +106,12 @@ function toResultText(raw: unknown) {
   } catch {
     return String(raw);
   }
+}
+
+function parseSubtaskSessionIdFromToolText(text: unknown) {
+  if (typeof text !== "string") return "";
+  const match = text.match(/(?:^|\n)subtask_session_id:\s*([^\s]+)/);
+  return match ? String(match[1] || "").trim() : "";
 }
 
 function normalizeTextOutput(kind: AgentContextItemRecord["kind"], output: AgentContextItemOutput) {
@@ -1738,6 +1749,46 @@ export function listNonTerminalRunIdsByItemIds(db: Db, params: { workspaceId: st
     .all(params.workspaceId, params.sessionId, ...params.itemIds) as Array<{ runId: string | null }>;
 
   return rows.map((row) => String(row.runId || "").trim()).filter((runId) => runId.length > 0);
+}
+
+export function listSubtaskChildSessionIdsByRunId(
+  db: Db,
+  params: { workspaceId: string; sessionId: string; runId: string }
+) {
+  const rows = db
+    .prepare(
+      `
+        select
+          tool_result_json as toolResultJson,
+          output_text as outputText
+        from agent_context_item
+        where workspace_id = @workspaceId
+          and session_id = @sessionId
+          and run_id = @runId
+          and kind = 'tool'
+          and status in ('queued', 'running', 'streaming')
+          and tool_name = 'subtask'
+        order by id asc
+      `
+    )
+    .all(params) as SubtaskToolRefRow[];
+
+  const seen = new Set<string>();
+  const childSessionIds: string[] = [];
+  for (const row of rows) {
+    const result = parseJson(row.toolResultJson) as StoredToolResult | null;
+    const resultMeta = typeof result?.meta === "object" && result.meta && !Array.isArray(result.meta)
+      ? (result.meta as Record<string, unknown>)
+      : null;
+    const rawResult = resultMeta && Object.prototype.hasOwnProperty.call(resultMeta, "result") ? resultMeta.result : undefined;
+    const resultObj = rawResult && typeof rawResult === "object" && !Array.isArray(rawResult) ? (rawResult as Record<string, unknown>) : null;
+    const fromResult = typeof resultObj?.subtaskSessionId === "string" ? resultObj.subtaskSessionId.trim() : "";
+    const childSessionId = fromResult || parseSubtaskSessionIdFromToolText(row.outputText);
+    if (!childSessionId || seen.has(childSessionId)) continue;
+    seen.add(childSessionId);
+    childSessionIds.push(childSessionId);
+  }
+  return childSessionIds;
 }
 
 export function updateRunRecordStatus(db: Db, params: { runId: string; status: AgentRunRecord["status"]; updatedAt: number }) {

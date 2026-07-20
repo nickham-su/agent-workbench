@@ -2393,6 +2393,262 @@ test("agent cancel 不应把仅因脏 non-terminal item 命中的 terminal run �
   assert.equal(terminalRunAfter?.status, "completed");
 });
 
+test("agent cancel 会基于当前 active run 的 subtask 结果精确级联取消活动 child，且不误取消历史 fork child", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const now = Date.now();
+
+  const parent = await createSession(fixture.app, fixture.workspaceId);
+  const parentRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: parentRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: parent.id,
+    triggerItemId: 1,
+    agentId: "agent-default",
+    providerId: "openai",
+    modelId: "gpt-4.1",
+    status: "running",
+    createdAt: now
+  });
+
+  const parentAssistant = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parent.id,
+    runId: parentRunId,
+    turnId: "turn_parent_cancel_cascade",
+    step: 1,
+    prevId: null,
+    kind: "assistant",
+    status: "streaming",
+    output: { type: "assistant_text", text: "starting child" }
+  });
+
+  const staleForkChildId = newSortableId("sess");
+  createAgentSession(fixture.db, {
+    id: staleForkChildId,
+    workspaceId: fixture.workspaceId,
+    title: "stale-child",
+    kind: "subtask",
+    createdAt: now + 1,
+    forkedFromSessionId: parent.id,
+    forkedFromItemId: parentAssistant.item.id
+  });
+  const staleForkRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: staleForkRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: staleForkChildId,
+    triggerItemId: 1,
+    agentId: "agent-default",
+    providerId: "openai",
+    modelId: "gpt-4.1",
+    status: "running",
+    createdAt: now + 1
+  });
+  const staleForkAssistant = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: staleForkChildId,
+    runId: staleForkRunId,
+    turnId: "turn_stale_child",
+    step: 1,
+    prevId: null,
+    kind: "assistant",
+    status: "streaming",
+    output: { type: "assistant_text", text: "stale child still running" },
+    createdAt: now + 1
+  });
+  updateRunState(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: staleForkChildId,
+    status: "running",
+    activeRunId: staleForkRunId,
+    activeAssistantItemId: staleForkAssistant.id,
+    runNoticeText: "",
+    updatedAt: now + 1,
+    appliedItemId: staleForkAssistant.id
+  });
+
+  const activeChildId = newSortableId("sess");
+  createAgentSession(fixture.db, {
+    id: activeChildId,
+    workspaceId: fixture.workspaceId,
+    title: "active-existing-child",
+    kind: "subtask",
+    createdAt: now + 2,
+    forkedFromSessionId: newSortableId("sess"),
+    forkedFromItemId: null
+  });
+  const activeChildRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: activeChildRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: activeChildId,
+    triggerItemId: 1,
+    agentId: "agent-default",
+    providerId: "openai",
+    modelId: "gpt-4.1",
+    status: "running",
+    createdAt: now + 2
+  });
+  const activeChildAssistant = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: activeChildId,
+    runId: activeChildRunId,
+    turnId: "turn_active_child",
+    step: 1,
+    prevId: null,
+    kind: "assistant",
+    status: "streaming",
+    output: { type: "assistant_text", text: "active child running" },
+    createdAt: now + 2
+  });
+  updateRunState(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: activeChildId,
+    status: "running",
+    activeRunId: activeChildRunId,
+    activeAssistantItemId: activeChildAssistant.id,
+    runNoticeText: "",
+    updatedAt: now + 2,
+    appliedItemId: activeChildAssistant.id
+  });
+
+  const reusedCompletedChildId = newSortableId("sess");
+  createAgentSession(fixture.db, {
+    id: reusedCompletedChildId,
+    workspaceId: fixture.workspaceId,
+    title: "reused-completed-child",
+    kind: "subtask",
+    createdAt: now + 3,
+    forkedFromSessionId: newSortableId("sess"),
+    forkedFromItemId: null
+  });
+  const reusedCompletedChildRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: reusedCompletedChildRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: reusedCompletedChildId,
+    triggerItemId: 1,
+    agentId: "agent-default",
+    providerId: "openai",
+    modelId: "gpt-4.1",
+    status: "running",
+    createdAt: now + 3
+  });
+  const reusedCompletedChildAssistant = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: reusedCompletedChildId,
+    runId: reusedCompletedChildRunId,
+    turnId: "turn_reused_completed_child",
+    step: 1,
+    prevId: null,
+    kind: "assistant",
+    status: "streaming",
+    output: { type: "assistant_text", text: "reused child still running elsewhere" },
+    createdAt: now + 3
+  });
+  updateRunState(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: reusedCompletedChildId,
+    status: "running",
+    activeRunId: reusedCompletedChildRunId,
+    activeAssistantItemId: reusedCompletedChildAssistant.id,
+    runNoticeText: "",
+    updatedAt: now + 3,
+    appliedItemId: reusedCompletedChildAssistant.id
+  });
+
+  const completedSubtaskItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parent.id,
+    runId: parentRunId,
+    turnId: "turn_parent_cancel_cascade_completed",
+    step: 0,
+    prevId: parentAssistant.item.id,
+    kind: "tool",
+    status: "completed",
+    output: {
+      type: "tool",
+      toolName: "subtask",
+      toolCallId: "call_parent_cancel_cascade_completed",
+      args: { description: "old child", prompt: "finished", session: { mode: "existing", sessionId: reusedCompletedChildId } },
+      text: `tool: subtask\nstatus: completed\nsubtask_session_id: ${reusedCompletedChildId}\n\nCompleted.`,
+      result: { subtaskSessionId: reusedCompletedChildId }
+    }
+  });
+
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parent.id,
+    runId: parentRunId,
+    turnId: "turn_parent_cancel_cascade",
+    step: 1,
+    prevId: completedSubtaskItem.item.id,
+    kind: "tool",
+    status: "running",
+    output: {
+      type: "tool",
+      toolName: "subtask",
+      toolCallId: "call_parent_cancel_cascade_1",
+      args: { description: "reuse child", prompt: "continue child", session: { mode: "existing", sessionId: activeChildId } },
+      text: `tool: subtask\nstatus: running\nsubtask_session_id: ${activeChildId}\n\nSubtask started.`,
+      result: { subtaskSessionId: activeChildId }
+    }
+  });
+
+  await updateRunStateInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: parent.id,
+    status: "running",
+    activeRunId: parentRunId,
+    activeAssistantItemId: parentAssistant.item.id
+  });
+
+  const cancelRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${parent.id}/cancel`,
+    payload: { workspaceId: fixture.workspaceId }
+  });
+  assert.equal(cancelRes.statusCode, 200, `cancel cascade failed: ${cancelRes.body}`);
+
+  const parentState = await getRunState(fixture.app, parent.id);
+  assert.equal(parentState.status, "idle");
+  assert.equal(parentState.lastTerminalStatus, "cancelled");
+
+  const activeChildState = await getRunState(fixture.app, activeChildId);
+  assert.equal(activeChildState.status, "idle");
+  assert.equal(activeChildState.lastTerminalStatus, "cancelled");
+
+  const activeChildRun = getRunRecord(fixture.db, activeChildRunId);
+  assert.equal(activeChildRun?.status, "cancelled");
+  const activeChildAssistantAfter = getContextItemById(fixture.db, activeChildAssistant.id);
+  assert.equal(activeChildAssistantAfter?.status, "cancelled");
+
+  const staleForkState = await getRunState(fixture.app, staleForkChildId);
+  assert.equal(staleForkState.status, "running");
+  assert.equal(staleForkState.activeRunId, staleForkRunId);
+  const staleForkRun = getRunRecord(fixture.db, staleForkRunId);
+  assert.equal(staleForkRun?.status, "running");
+  const staleForkAssistantAfter = getContextItemById(fixture.db, staleForkAssistant.id);
+  assert.equal(staleForkAssistantAfter?.status, "streaming");
+
+  const reusedCompletedChildState = await getRunState(fixture.app, reusedCompletedChildId);
+  assert.equal(reusedCompletedChildState.status, "running");
+  assert.equal(reusedCompletedChildState.activeRunId, reusedCompletedChildRunId);
+  const reusedCompletedChildRun = getRunRecord(fixture.db, reusedCompletedChildRunId);
+  assert.equal(reusedCompletedChildRun?.status, "running");
+  const reusedCompletedChildAssistantAfter = getContextItemById(fixture.db, reusedCompletedChildAssistant.id);
+  assert.equal(reusedCompletedChildAssistantAfter?.status, "streaming");
+});
+
 test("agent runtime settings 可通过 execution-profile 下发", async () => {
   const fixture = await createFixture();
 

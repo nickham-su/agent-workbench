@@ -423,8 +423,14 @@ export async function registerAgentRoutes(
     async (req) => {
       const p = req.params as { sessionId: string };
       const body = req.body as { workspaceId: string };
-      const result = params.service.cancelSession(p.sessionId, body);
-      await params.runtime.cancelSession(p.sessionId);
+      const { result, runtimeCancelSessionIds } = params.service.cancelSessionCascade(p.sessionId, body);
+      const settled = await Promise.allSettled(runtimeCancelSessionIds.map((sessionId) => params.runtime.cancelSession(sessionId)));
+      for (let i = 0; i < settled.length; i += 1) {
+        const item = settled[i];
+        const targetSessionId = runtimeCancelSessionIds[i];
+        if (!item || item.status !== "rejected") continue;
+        req.log.warn({ err: item.reason, rootSessionId: p.sessionId, targetSessionId }, "agent cancel runtime session failed");
+      }
       return result;
     }
   );

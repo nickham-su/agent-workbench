@@ -72,6 +72,7 @@ import {
   hasNonTerminalSessionItems,
   listNonTerminalRunIdsByItemIds,
   listNonTerminalRunIdsBySession,
+  listSubtaskChildSessionIdsByRunId,
   moveSessionHead,
   setContextItemsArchiveAt,
   setRunStateIdle,
@@ -102,6 +103,11 @@ export type AgentQueuedRun = {
   workspaceId: string;
   sessionId: string;
   runId: string;
+};
+
+type AgentCancelCascadeResult = {
+  result: AgentControlResult;
+  runtimeCancelSessionIds: string[];
 };
 
 function conflictToHttpError(err: AgentConflictError): HttpError {
@@ -339,7 +345,8 @@ function buildSubtaskToolDescription(agentItems: Array<{ id: string; name: strin
     "- Divide complex work: use only for tasks that are genuinely complex or can be parallelized; avoid splitting simple tasks because it adds coordination cost.",
     "",
     "Usage guidance:",
-    "Use parallel subtasks only for independent work. Tasks with dependencies must be delegated serially, one step at a time. For example, implementation and code review must not be delegated in parallel.",
+    "In a single response, invoking multiple subtask tools indicates that the subtasks are executed in parallel. If the execution order of the subtasks needs to be guaranteed, you can only invoke one subtask tool at a time, making multiple separate calls.",
+    "Using parallel subtasks for multiple independent tasks is often a good way to improve efficiency. However, tasks that have dependencies must be delegated one by one in sequence. For example, implementation and code review cannot be delegated in parallel.",
     "For coding or documentation work driven by the user's request, prefer fork so the user's intent can be passed to the subtask without loss.",
     "When using fork, the subtask receives the full parent-session context, which may include overall planning information such as todolists. Therefore the prompt must explicitly state the subtask's concrete goal, deliverable boundary, and responsibilities it should not take on.",
     "Concurrent subtasks may reuse the same agentId, but do not assign the same existing sessionId to multiple concurrent tasks.",
@@ -2765,7 +2772,97 @@ export class AgentService {
     return { ok: true, session: updated, runState: this.getRunState(updated.id) };
   }
 
+  private collectActiveCascadeCancelSessionIds(params: {
+    workspaceId: string;
+    rootSessionId: string;
+  }) {
+    const visited = new Set<string>();
+    const queue = [params.rootSessionId];
+    const ordered: string[] = [];
+
+    while (queue.length > 0) {
+      const sessionId = queue.shift();
+      if (!sessionId || visited.has(sessionId)) continue;
+      visited.add(sessionId);
+
+      const session = getAgentSession(this.ctx.db, sessionId);
+      if (!session || session.workspaceId !== params.workspaceId) continue;
+      ordered.push(session.id);
+
+      const state = getRunState(this.ctx.db, session.workspaceId, session.id);
+      if (state.status !== "running" || !state.activeRunId) continue;
+
+      for (const childSessionId of listSubtaskChildSessionIdsByRunId(this.ctx.db, {
+        workspaceId: session.workspaceId,
+        sessionId: session.id,
+        runId: state.activeRunId
+      })) {
+        if (visited.has(childSessionId)) continue;
+        const child = getAgentSession(this.ctx.db, childSessionId);
+        if (!child || child.workspaceId !== params.workspaceId) continue;
+        const childState = getRunState(this.ctx.db, child.workspaceId, child.id);
+        if (childState.status !== "running" || !childState.activeRunId) continue;
+        queue.push(child.id);
+      }
+    }
+
+    return ordered;
+  }
+
+  private cancelSingleSessionInTx(params: { workspaceId: string; sessionId: string; updatedAt: number }) {
+    const session = getAgentSession(this.ctx.db, params.sessionId);
+    if (!session || session.workspaceId !== params.workspaceId) return;
+
+    const state = getRunState(this.ctx.db, session.workspaceId, session.id);
+    const allItemIds = new Set<number>();
+    for (const itemId of listNonTerminalSessionItemIds(this.ctx.db, session.workspaceId, session.id)) {
+      allItemIds.add(itemId);
+    }
+
+    const relatedRunIds = new Set<string>(listNonTerminalRunIdsBySession(this.ctx.db, {
+      workspaceId: session.workspaceId,
+      sessionId: session.id
+    }));
+    for (const runId of listNonTerminalRunIdsByItemIds(this.ctx.db, {
+      workspaceId: session.workspaceId,
+      sessionId: session.id,
+      itemIds: Array.from(allItemIds)
+    })) {
+      relatedRunIds.add(runId);
+    }
+
+    for (const itemId of allItemIds) {
+      const item = getContextItemById(this.ctx.db, itemId);
+      if (!item || !NON_TERMINAL_ITEM_STATUS.has(item.status)) continue;
+      updateContextItem(this.ctx.db, {
+        itemId,
+        status: "cancelled",
+        output: toTerminalCancelledOutput(item.output),
+        updatedAt: params.updatedAt
+      });
+    }
+
+    setRunStateIdle(this.ctx.db, {
+      workspaceId: session.workspaceId,
+      sessionId: session.id,
+      updatedAt: params.updatedAt,
+      appliedItemId: getLatestSessionItemId(this.ctx.db, session.workspaceId, session.id)
+    });
+    for (const runId of relatedRunIds) {
+      updateRunRecordStatus(this.ctx.db, { runId, status: "cancelled", updatedAt: params.updatedAt });
+      this.clearRunPromptStaticCache(runId);
+    }
+    if (state.activeRunId && !relatedRunIds.has(state.activeRunId)) {
+      updateRunRecordStatus(this.ctx.db, { runId: state.activeRunId, status: "cancelled", updatedAt: params.updatedAt });
+      this.clearRunPromptStaticCache(state.activeRunId);
+    }
+  }
+
   cancelSession(sessionId: string, body: AgentCancelSessionRequest): AgentControlResult {
+    return this.cancelSessionCascade(sessionId, body).result;
+  }
+
+  cancelSessionCascade(sessionId: string, body: AgentCancelSessionRequest): AgentCancelCascadeResult {
     const session = getAgentSession(this.ctx.db, sessionId);
     if (!session) throw new HttpError(404, "session not found");
     if (session.workspaceId !== body.workspaceId) throw new HttpError(400, "workspaceId mismatch");
@@ -2774,58 +2871,20 @@ export class AgentService {
     const createdAt = nowMs();
 
     const tx = this.ctx.db.transaction(() => {
-      const allItemIds = new Set<number>();
-      for (const itemId of listNonTerminalSessionItemIds(this.ctx.db, session.workspaceId, session.id)) {
-        allItemIds.add(itemId);
+      const cascadeSessionIds = this.collectActiveCascadeCancelSessionIds({ workspaceId: session.workspaceId, rootSessionId: session.id });
+      for (const targetSessionId of cascadeSessionIds) {
+        this.cancelSingleSessionInTx({ workspaceId: session.workspaceId, sessionId: targetSessionId, updatedAt: createdAt });
       }
-
-      const relatedRunIds = new Set<string>(listNonTerminalRunIdsBySession(this.ctx.db, {
-        workspaceId: session.workspaceId,
-        sessionId: session.id
-      }));
-      for (const runId of listNonTerminalRunIdsByItemIds(this.ctx.db, {
-        workspaceId: session.workspaceId,
-        sessionId: session.id,
-        itemIds: Array.from(allItemIds)
-      })) {
-        relatedRunIds.add(runId);
-      }
-
-      for (const itemId of allItemIds) {
-        const item = getContextItemById(this.ctx.db, itemId);
-        if (!item || !NON_TERMINAL_ITEM_STATUS.has(item.status)) continue;
-        updateContextItem(this.ctx.db, {
-          itemId,
-          status: "cancelled",
-          output: toTerminalCancelledOutput(item.output),
-          updatedAt: createdAt
-        });
-      }
-
-      setRunStateIdle(this.ctx.db, {
-        workspaceId: session.workspaceId,
-        sessionId: session.id,
-        updatedAt: createdAt,
-        appliedItemId: getLatestSessionItemId(this.ctx.db, session.workspaceId, session.id)
-      });
-      for (const runId of relatedRunIds) {
-        updateRunRecordStatus(this.ctx.db, {
-          runId,
-          status: "cancelled",
-          updatedAt: createdAt
-        });
-        this.clearRunPromptStaticCache(runId);
-      }
-      if (state.activeRunId && !relatedRunIds.has(state.activeRunId)) {
-        updateRunRecordStatus(this.ctx.db, { runId: state.activeRunId, status: "cancelled", updatedAt: createdAt });
-        this.clearRunPromptStaticCache(state.activeRunId);
-      }
+      return cascadeSessionIds;
     });
 
-    tx();
+    const runtimeCancelSessionIds = tx();
     const updated = getAgentSession(this.ctx.db, session.id);
     if (!updated) throw new HttpError(500, "session not found after cancel");
-    return { ok: true, session: updated, runState: this.getRunState(updated.id) };
+    return {
+      result: { ok: true, session: updated, runState: this.getRunState(updated.id) },
+      runtimeCancelSessionIds
+    };
   }
 
   appendContextItemFromWorker(params: {

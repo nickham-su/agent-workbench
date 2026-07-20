@@ -554,6 +554,18 @@ type ToolExecutionBatch = {
   tools: PendingTool[];
 };
 
+function isAbortLikeError(err: unknown, signal?: AbortSignal) {
+  if (signal?.aborted) return true;
+  if (!err || typeof err !== "object") return false;
+  const name = typeof (err as any).name === "string" ? (err as any).name : "";
+  const code = typeof (err as any).code === "string" ? (err as any).code : "";
+  const message = typeof (err as any).message === "string" ? (err as any).message : "";
+  return name === "AbortError"
+    || code === "ABORT_ERR"
+    || /\babort(ed)?\b/i.test(message)
+    || /\babort(ed)?\b/i.test(name);
+}
+
 const EMPTY_PROMPT_CONTEXT: PromptContext = {
   headItemId: null,
   system: "",
@@ -904,6 +916,8 @@ export class AgentRunner {
   private readonly runningSessions = new Set<string>();
   private readonly controllers = new Map<string, AbortController>();
   private readonly pluginRuntimeManager: PluginRuntimeManager;
+  private readonly nestedChildrenByParent = new Map<string, Set<string>>();
+  private readonly nestedParentByChild = new Map<string, string>();
   private readonly toolRegistry: ToolRegistry;
   private activeCount = 0;
 
@@ -927,15 +941,72 @@ export class AgentRunner {
     this.pump();
   }
 
-  cancelSession(sessionId: string) {
-    const controller = this.controllers.get(sessionId);
-    if (controller) controller.abort();
+  private registerController(sessionId: string, controller: AbortController) {
+    const existing = this.controllers.get(sessionId);
+    if (existing && existing !== controller) {
+      this.logger.error(`[agent-worker] controller conflict for session: ${sessionId}`);
+      throw new Error(`controller conflict for session: ${sessionId}`);
+    }
+    this.controllers.set(sessionId, controller);
+  }
+
+  private unlinkNestedChild(childSessionId: string) {
+    const parentSessionId = this.nestedParentByChild.get(childSessionId);
+    if (!parentSessionId) return;
+    this.nestedParentByChild.delete(childSessionId);
+    const children = this.nestedChildrenByParent.get(parentSessionId);
+    if (!children) return;
+    children.delete(childSessionId);
+    if (children.size === 0) {
+      this.nestedChildrenByParent.delete(parentSessionId);
+    }
+  }
+
+  private linkNestedChild(parentSessionId: string, childSessionId: string) {
+    const existingParent = this.nestedParentByChild.get(childSessionId);
+    if (existingParent && existingParent !== parentSessionId) {
+      this.logger.error(`[agent-worker] nested child already linked: child=${childSessionId} parent=${existingParent} newParent=${parentSessionId}`);
+      throw new Error(`nested child already linked: ${childSessionId}`);
+    }
+    this.nestedParentByChild.set(childSessionId, parentSessionId);
+    let children = this.nestedChildrenByParent.get(parentSessionId);
+    if (!children) {
+      children = new Set<string>();
+      this.nestedChildrenByParent.set(parentSessionId, children);
+    }
+    children.add(childSessionId);
+  }
+
+  private deleteControllerIfSame(sessionId: string, controller: AbortController) {
+    if (this.controllers.get(sessionId) === controller) {
+      this.controllers.delete(sessionId);
+    }
+  }
+
+  private removeQueuedRunsBySession(sessionId: string) {
     for (let i = this.queue.length - 1; i >= 0; i -= 1) {
       const item = this.queue[i];
       if (!item || item.sessionId !== sessionId) continue;
       this.queuedRunIds.delete(item.runId);
       this.queue.splice(i, 1);
     }
+  }
+
+  private abortSessionTree(sessionId: string, visited = new Set<string>()) {
+    if (visited.has(sessionId)) return;
+    visited.add(sessionId);
+    const controller = this.controllers.get(sessionId);
+    controller?.abort();
+    this.removeQueuedRunsBySession(sessionId);
+    const children = this.nestedChildrenByParent.get(sessionId);
+    if (!children || children.size === 0) return;
+    for (const childSessionId of [...children]) {
+      this.abortSessionTree(childSessionId, visited);
+    }
+  }
+
+  cancelSession(sessionId: string) {
+    this.abortSessionTree(sessionId);
   }
 
   private pump() {
@@ -952,25 +1023,65 @@ export class AgentRunner {
   private startRun(run: QueuedRun) {
     this.activeCount += 1;
     this.runningSessions.add(run.sessionId);
-    const controller = new AbortController();
-    this.controllers.set(run.sessionId, controller);
+    let controller: AbortController;
+    try {
+      controller = new AbortController();
+      this.registerController(run.sessionId, controller);
+    } catch (err) {
+      this.runningSessions.delete(run.sessionId);
+      this.activeCount -= 1;
+      this.logger.error("worker startRun failed", err);
+      this.pump();
+      return;
+    }
 
     void this.processRun(run, controller.signal)
       .catch((err) => {
         this.logger.error("worker run failed", err);
       })
       .finally(() => {
-        this.controllers.delete(run.sessionId);
+        this.deleteControllerIfSame(run.sessionId, controller);
+        this.unlinkNestedChild(run.sessionId);
         this.runningSessions.delete(run.sessionId);
         this.activeCount -= 1;
         this.pump();
       });
   }
 
+  private async processNestedRunWithController(params: {
+    parentSessionId: string;
+    run: QueuedRun;
+    parentSignal: AbortSignal;
+  }) {
+    const childController = new AbortController();
+    const onParentAbort = () => {
+      childController.abort();
+    };
+    try {
+      this.registerController(params.run.sessionId, childController);
+      this.linkNestedChild(params.parentSessionId, params.run.sessionId);
+      if (params.parentSignal.aborted) {
+        childController.abort();
+      } else {
+        params.parentSignal.addEventListener("abort", onParentAbort, { once: true });
+      }
+      await this.processRun(params.run, childController.signal);
+    } catch (err) {
+      this.deleteControllerIfSame(params.run.sessionId, childController);
+      this.unlinkNestedChild(params.run.sessionId);
+      throw err;
+    } finally {
+      params.parentSignal.removeEventListener("abort", onParentAbort);
+      this.deleteControllerIfSame(params.run.sessionId, childController);
+      this.unlinkNestedChild(params.run.sessionId);
+    }
+  }
+
   private async executeTool(params: {
     profile: ExecutionProfile;
     run: QueuedRun;
     tool: PendingTool;
+    parentSessionId: string;
     signal: AbortSignal;
     availableToolNames?: ReadonlySet<string>;
     promptContext: PromptContext;
@@ -1035,7 +1146,11 @@ export class AgentRunner {
         signal,
         apiClient: this.apiClient,
         promptContext: params.promptContext,
-        processNestedRun: (nestedRun, nestedSignal) => this.processRun(nestedRun, nestedSignal),
+        processNestedRun: (nestedRun, nestedSignal) => this.processNestedRunWithController({
+          parentSessionId: params.parentSessionId,
+          run: nestedRun,
+          parentSignal: nestedSignal
+        }),
         updateToolItem: async ({ status, output }) => {
           await this.apiClient.updateContextItem({ itemId: tool.itemId, status, output, updatedAt: nowMs() });
         },
@@ -1122,7 +1237,7 @@ export class AgentRunner {
       });
       return { paused: false as const };
     } catch (err) {
-      if (signal.aborted) return { paused: false as const };
+      if (isAbortLikeError(err, signal)) return { paused: false as const };
       const error = err instanceof Error ? err.message : String(err);
       const subtaskSessionId = err && typeof err === "object" ? String((err as any).subtaskSessionId || "").trim() : "";
       const subtaskResultText = err && typeof err === "object" && typeof (err as any).subtaskResultText === "string"
@@ -1181,6 +1296,7 @@ export class AgentRunner {
     profile: ExecutionProfile;
     run: QueuedRun;
     tool: PendingTool;
+    parentSessionId: string;
     signal: AbortSignal;
     availableToolNames?: ReadonlySet<string>;
     promptContext: PromptContext;
@@ -1239,10 +1355,10 @@ export class AgentRunner {
     if (params.batch.mode === "serial") {
       const tool = params.batch.tools[0];
       if (!tool) return { paused: false as const };
-      return await this.executeToolSafely({ ...params, tool, availableToolNames: params.availableToolNames });
+      return await this.executeToolSafely({ ...params, tool, availableToolNames: params.availableToolNames, parentSessionId: params.run.sessionId });
     }
     const settled = await Promise.allSettled(
-      params.batch.tools.map((tool) => this.executeToolSafely({ ...params, tool, availableToolNames: params.availableToolNames }))
+      params.batch.tools.map((tool) => this.executeToolSafely({ ...params, tool, availableToolNames: params.availableToolNames, parentSessionId: params.run.sessionId }))
     );
     return { paused: settled.some((item) => item.status === "fulfilled" && item.value.paused) } as const;
   }
@@ -2137,6 +2253,54 @@ export class AgentRunner {
   }
 
   private async processRun(run: QueuedRun, signal: AbortSignal) {
+    let committedTerminalStatus: "completed" | "failed" | "cancelled" | null = null;
+    let terminalSubmission: Promise<void> | null = null;
+    let terminalSubmittingStatus: "completed" | "failed" | "cancelled" | null = null;
+    class TerminalStatusSubmitError extends Error {
+      constructor(
+        readonly status: "completed" | "failed" | "cancelled",
+        cause: unknown
+      ) {
+        super(`submit terminal status failed: ${status}`);
+        this.name = "TerminalStatusSubmitError";
+        (this as Error & { cause?: unknown }).cause = cause;
+      }
+    }
+    const finishOnce = async (status: "completed" | "failed" | "cancelled") => {
+      if (committedTerminalStatus) return;
+      if (terminalSubmission) return await terminalSubmission;
+      terminalSubmittingStatus = status;
+      terminalSubmission = (async () => {
+        try {
+          await this.apiClient.completeRun({
+            workspaceId: run.workspaceId,
+            sessionId: run.sessionId,
+            runId: run.runId,
+            status,
+            updatedAt: nowMs()
+          });
+          committedTerminalStatus = status;
+        } catch (err) {
+          throw new TerminalStatusSubmitError(status, err);
+        } finally {
+          terminalSubmission = null;
+          terminalSubmittingStatus = null;
+        }
+      })();
+      return await terminalSubmission;
+    };
+    const tryFinishOnce = async (status: "completed" | "failed" | "cancelled") => {
+      try {
+        await finishOnce(status);
+      } catch (err) {
+        const cause = err instanceof TerminalStatusSubmitError ? err.cause : err;
+        if (cause instanceof ApiConflictError) {
+          this.logger.warn(`run append conflict, stop run: ${run.sessionId} ${run.runId}`);
+          return;
+        }
+        throw err;
+      }
+    };
     try {
       const profile = await this.apiClient.getExecutionProfile({
         workspaceId: run.workspaceId,
@@ -2166,13 +2330,7 @@ export class AgentRunner {
           runId: run.runId
         });
         if (context.pendingTools.length > 0) {
-          await this.apiClient.completeRun({
-            workspaceId: run.workspaceId,
-            sessionId: run.sessionId,
-            runId: run.runId,
-            status: "failed",
-            updatedAt: nowMs()
-          });
+          await finishOnce("failed");
           return;
         }
 
@@ -2192,13 +2350,11 @@ export class AgentRunner {
           context,
           signal
         });
-        await this.apiClient.completeRun({
-          workspaceId: run.workspaceId,
-          sessionId: run.sessionId,
-          runId: run.runId,
-          status: "completed",
-          updatedAt: nowMs()
-        });
+        if (signal.aborted) {
+          await finishOnce("cancelled");
+          return;
+        }
+        await finishOnce("completed");
         return;
       }
 
@@ -2217,6 +2373,7 @@ export class AgentRunner {
             signal
           });
           if (pendingResult.paused || signal.aborted) {
+            if (signal.aborted) await finishOnce("cancelled");
             return;
           }
           continue;
@@ -2230,6 +2387,7 @@ export class AgentRunner {
             signal
           });
           if (compacted || signal.aborted) {
+            if (signal.aborted) await finishOnce("cancelled");
             continue;
           }
         }
@@ -2253,13 +2411,7 @@ export class AgentRunner {
               createdAt: nowMs()
             });
           }
-          await this.apiClient.completeRun({
-            workspaceId: run.workspaceId,
-            sessionId: run.sessionId,
-            runId: run.runId,
-            status: "failed",
-            updatedAt: nowMs()
-          });
+          await finishOnce("failed");
           return;
         }
 
@@ -2273,6 +2425,7 @@ export class AgentRunner {
           repeatedToolCallCounter
         });
         if (result.aborted || signal.aborted) {
+          await finishOnce("cancelled");
           return;
         }
         if (result.toolCallCount > 0) {
@@ -2281,30 +2434,22 @@ export class AgentRunner {
         }
         if (result.hasVisibleText) {
           emptyResponseCount = 0;
-          await this.apiClient.completeRun({
-            workspaceId: run.workspaceId,
-            sessionId: run.sessionId,
-            runId: run.runId,
-            status: "completed",
-            updatedAt: nowMs()
-          });
+          await finishOnce("completed");
           return;
         }
         emptyResponseCount += 1;
         if (emptyResponseCount >= EMPTY_RESPONSE_COMPLETE_THRESHOLD) {
-          await this.apiClient.completeRun({
-            workspaceId: run.workspaceId,
-            sessionId: run.sessionId,
-            runId: run.runId,
-            status: "completed",
-            updatedAt: nowMs()
-          });
+          await finishOnce("completed");
           return;
         }
       }
-    } catch (err) {
       if (signal.aborted) {
+        await finishOnce("cancelled");
+      }
+    } catch (err) {
+      if (isAbortLikeError(err, signal)) {
         this.logger.info(`run aborted: ${run.sessionId} ${run.runId}`);
+        await tryFinishOnce("cancelled");
         return;
       }
       if (err instanceof ApiConflictError) {
@@ -2312,15 +2457,12 @@ export class AgentRunner {
         return;
       }
 
-      const message = err instanceof Error ? err.message : String(err);
+      const terminalSubmitError = err instanceof TerminalStatusSubmitError ? err : null;
+      const fallbackStatus = terminalSubmitError?.status ?? "failed";
+      const cause = terminalSubmitError?.cause ?? err;
+      const message = cause instanceof Error ? cause.message : String(cause);
       try {
-        await this.apiClient.completeRun({
-          workspaceId: run.workspaceId,
-          sessionId: run.sessionId,
-          runId: run.runId,
-          status: "failed",
-          updatedAt: nowMs()
-        });
+        await tryFinishOnce(fallbackStatus);
       } catch {
         this.logger.error(`run failed and fallback append failed: ${run.sessionId} ${run.runId} ${message}`);
       }
@@ -2350,6 +2492,34 @@ export function hasValidPromptCacheKeyForTest(providerOptions: Record<string, un
 
 export function hasVisibleAssistantTextForTest(text: string) {
   return hasVisibleAssistantText(text);
+}
+
+export function getRegisteredControllerForTest(runner: AgentRunner, sessionId: string) {
+  return (runner as any).controllers.get(sessionId) as AbortController | undefined;
+}
+
+export function getNestedChildrenForTest(runner: AgentRunner, sessionId: string) {
+  const children = (runner as any).nestedChildrenByParent.get(sessionId) as Set<string> | undefined;
+  return children ? [...children] : [];
+}
+
+export function getNestedParentForTest(runner: AgentRunner, sessionId: string) {
+  return (runner as any).nestedParentByChild.get(sessionId) as string | undefined;
+}
+
+export async function processNestedRunWithControllerForTest(
+  runner: AgentRunner,
+  params: { parentSessionId: string; run: QueuedRun; parentSignal: AbortSignal }
+) {
+  return await (runner as any).processNestedRunWithController(params);
+}
+
+export async function processRunForTest(runner: AgentRunner, run: QueuedRun, signal: AbortSignal) {
+  return await (runner as any).processRun(run, signal);
+}
+
+export async function executeToolForTest(runner: AgentRunner, params: Record<string, unknown>) {
+  return await (runner as any).executeTool(params);
 }
 
 export function shouldStopForMaxStepsForTest(step: number, maxSteps: number) {
