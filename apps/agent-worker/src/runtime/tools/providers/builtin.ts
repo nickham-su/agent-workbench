@@ -344,7 +344,6 @@ export class BuiltinToolProvider implements ToolProvider {
       || toolName === "todolist"
       || toolName === "archive_search"
       || toolName === "archive_read"
-      || toolName === "scratchpad"
       || toolName === "skill"
       || toolName === "visual_analyze"
     ) {
