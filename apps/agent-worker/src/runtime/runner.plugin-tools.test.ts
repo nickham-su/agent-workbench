@@ -109,3 +109,96 @@ test("executePendingTools uses ToolRegistry snapshot so queued plugin tools are 
   assert.equal((receivedAvailableToolNames as ReadonlySet<string>).has("plugin_debug-tools_echo_inspect"), true);
   assert.equal(updates.some((item) => item.status === "failed"), false);
 });
+
+test("processRun reuses runModelStep tool snapshot for next pending plugin tool execution", async () => {
+  const contexts = [
+    {
+      pendingTools: [],
+      tools: [],
+      headItemId: null,
+      system: "",
+      messages: [],
+      lastResponseTotalTokens: null,
+      uiLocale: null,
+      externalSkillRoots: []
+    },
+    {
+      pendingTools: [queuedPluginTool()],
+      tools: [],
+      headItemId: null,
+      system: "",
+      messages: [],
+      lastResponseTotalTokens: null,
+      uiLocale: null,
+      externalSkillRoots: []
+    }
+  ];
+  const completed: string[] = [];
+  const apiClient = {
+    async getExecutionProfile() {
+      return {
+        model: "openai:gpt-4o-mini",
+        provider: { npm: "@ai-sdk/openai", options: {} },
+        agent: {
+          tools: ["read"],
+          pluginTools: ["plugin_debug-tools_echo_inspect"],
+          mcpServers: []
+        },
+        runtime: {}
+      };
+    },
+    async updateRunState() {
+      return;
+    },
+    async getPromptContext() {
+      return contexts.shift() ?? {
+        pendingTools: [],
+        tools: [],
+        headItemId: null,
+        system: "",
+        messages: [],
+        lastResponseTotalTokens: null,
+        uiLocale: null,
+        externalSkillRoots: []
+      };
+    },
+    async completeRun(input: { status: string }) {
+      completed.push(input.status);
+      return;
+    }
+  };
+
+  const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+  const stepSnapshot = new Set<string>(["plugin_debug-tools_echo_inspect"]);
+  let runModelStepCallCount = 0;
+  let capturedAvailableToolNames: ReadonlySet<string> | undefined;
+  (runner as any).runModelStep = async () => {
+    runModelStepCallCount += 1;
+    if (runModelStepCallCount === 1) {
+      return {
+        aborted: false as const,
+        toolCallCount: 1,
+        assistantItemId: 1,
+        hasVisibleText: false,
+        availableToolNames: stepSnapshot
+      };
+    }
+    return { aborted: false as const, toolCallCount: 0, assistantItemId: 2, hasVisibleText: true };
+  };
+  (runner as any).executePendingTools = async (params: { availableToolNames?: ReadonlySet<string> }) => {
+    capturedAvailableToolNames = params.availableToolNames;
+    return { paused: false as const };
+  };
+
+  await (runner as any).processRun({
+    workspaceId: "ws_test",
+    sessionId: "sess_test",
+    runId: "run_test",
+    workspacePath: process.cwd(),
+    inputText: "hello"
+  }, new AbortController().signal);
+
+  assert.equal(capturedAvailableToolNames, stepSnapshot);
+  assert.equal(runModelStepCallCount, 2);
+  assert.deepEqual(completed, ["completed"]);
+});
