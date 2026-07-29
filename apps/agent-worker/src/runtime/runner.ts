@@ -910,6 +910,19 @@ export function buildToolSuccessTextForTest(params: { toolName: string; args: Re
   });
 }
 
+type AgentRunnerDeps = {
+  streamText?: typeof streamText;
+  nowMs?: () => number;
+};
+
+type StreamTextResultLike = {
+  fullStream: AsyncIterable<unknown>;
+  reasoningText?: PromiseLike<unknown>;
+  usage?: PromiseLike<unknown> | unknown;
+  totalUsage?: PromiseLike<unknown> | unknown;
+  response?: PromiseLike<unknown> | unknown;
+};
+
 export class AgentRunner {
   private readonly queue: QueuedRun[] = [];
   private readonly queuedRunIds = new Set<string>();
@@ -921,12 +934,18 @@ export class AgentRunner {
   private readonly toolRegistry: ToolRegistry;
   private activeCount = 0;
 
+  private readonly streamTextFn: typeof streamText;
+  private readonly nowMsFn: () => number;
+
   constructor(
     private readonly apiClient: AgentApiClient,
     private readonly mcpManager: McpManager,
     private readonly logger: Pick<Console, "info" | "warn" | "error">,
-    private readonly concurrency: number
+    private readonly concurrency: number,
+    deps: AgentRunnerDeps = {}
   ) {
+    this.streamTextFn = deps.streamText ?? streamText;
+    this.nowMsFn = deps.nowMs ?? nowMs;
     this.pluginRuntimeManager = new PluginRuntimeManager(this.logger);
     const pluginProvider = REMOTE_PLUGIN_TOOLS_ENABLED
       ? new RemotePluginToolProvider()
@@ -1098,8 +1117,8 @@ export class AgentRunner {
 
     const executionAvailableToolNames = params.availableToolNames ?? (() => {
       const names = new Set<string>();
-      for (const name of profile.agent.tools) names.add(name);
-      for (const name of profile.agent.pluginTools) names.add(name);
+      for (const name of profile.agent.tools ?? []) names.add(name);
+      for (const name of profile.agent.pluginTools ?? []) names.add(name);
       return names;
     })();
     if (!(await this.toolRegistry.isToolEnabled(tool.toolName, {
@@ -1367,14 +1386,19 @@ export class AgentRunner {
     profile: ExecutionProfile;
     run: QueuedRun;
     context: PromptContext;
+    availableToolNames?: ReadonlySet<string>;
     signal: AbortSignal;
   }) {
-    const availableToolDefinitions = await this.toolRegistry.listTools({
+    const promptContextForAvailability = params.context.tools ? params.context : {
+      ...EMPTY_PROMPT_CONTEXT,
+      ...params.context,
+      tools: params.context.tools ?? []
+    };
+    const availableToolNames = params.availableToolNames ?? new Set<string>((await this.toolRegistry.listTools({
       profile: params.profile,
-      promptContext: params.context,
+      promptContext: promptContextForAvailability,
       apiClient: this.apiClient
-    });
-    const availableToolNames = new Set<string>(availableToolDefinitions.map((tool) => tool.name));
+    })).map((tool) => tool.name));
     const batches: ToolExecutionBatch[] = [];
     let segment: PendingTool[] = [];
     const flushSegment = () => {
@@ -1386,7 +1410,7 @@ export class AgentRunner {
     for (const item of params.context.pendingTools) {
       if (!(await this.toolRegistry.isToolEnabled(item.toolName, {
         profile: params.profile,
-        promptContext: params.context,
+        promptContext: promptContextForAvailability,
         apiClient: this.apiClient,
         availableToolNames
       }))) {
@@ -1709,11 +1733,11 @@ export class AgentRunner {
       prevId: context.headItemId,
       kind: "assistant",
       status: "streaming",
-      output: {
-        type: "assistant_text",
-        text: ""
-      },
-      createdAt: nowMs()
+        output: {
+          type: "assistant_text",
+          text: ""
+        },
+      createdAt: this.nowMsFn()
     });
 
     await this.apiClient.updateRunState({
@@ -1723,7 +1747,7 @@ export class AgentRunner {
       activeRunId: run.runId,
       activeAssistantItemId: assistant.id,
       runNoticeText: "",
-      updatedAt: nowMs()
+      updatedAt: this.nowMsFn()
     });
 
     const toolDefinitions = await this.toolRegistry.listTools({
@@ -1764,12 +1788,12 @@ export class AgentRunner {
     // 自定义重试策略由本文件控制,禁用 AI SDK 内建重试避免双重重试。
     requestBase.maxRetries = 0;
 
-    const assistantStreamFlushIntervalMs = 240;
-    const assistantStreamFlushCharsThreshold = 80;
+    const assistantStreamFlushIntervalMs = 1_000;
+    const assistantStreamFlushCharsThreshold = 160;
     let text = "";
     let reasoningText = "";
     const toolCalls: ToolCall[] = [];
-    const startedAt = nowMs();
+    const startedAt = this.nowMsFn();
     let responseTotalTokens: number | null = null;
 
     await writeItemLog({
@@ -1801,7 +1825,7 @@ export class AgentRunner {
     let successfulStream: any = null;
     let lastFlushedText = "";
     let lastFlushedReasoningText = "";
-    let lastFlushAt = nowMs();
+    let lastFlushAt = this.nowMsFn();
     let pendingFlush = false;
 
     const flushAssistant = async (status: "streaming" | "completed" | "failed", force = false) => {
@@ -1821,16 +1845,16 @@ export class AgentRunner {
           text,
           ...(reasoningText ? { reasoning: { text: reasoningText } } : {})
         },
-        updatedAt: nowMs()
+        updatedAt: this.nowMsFn()
       });
       lastFlushedText = text;
       lastFlushedReasoningText = reasoningText;
-      lastFlushAt = nowMs();
+      lastFlushAt = this.nowMsFn();
       pendingFlush = false;
     };
 
     const maybeFlushAssistantStreaming = async (force = false) => {
-      const now = nowMs();
+      const now = this.nowMsFn();
       const deltaChars = (text.length - lastFlushedText.length) + (reasoningText.length - lastFlushedReasoningText.length);
       if (
         force
@@ -1880,14 +1904,14 @@ export class AgentRunner {
           await this.apiClient.updateRunState({
             workspaceId: run.workspaceId,
             sessionId: run.sessionId,
-            status: "running",
-            activeRunId: run.runId,
-            activeAssistantItemId: assistant.id,
-                  runNoticeText: "",
-            updatedAt: nowMs()
-          });
-        } catch {
-          // ignore notice clear failure
+              status: "running",
+              activeRunId: run.runId,
+              activeAssistantItemId: assistant.id,
+              runNoticeText: "",
+              updatedAt: this.nowMsFn()
+            });
+          } catch {
+            // ignore notice clear failure
         }
       }
 
@@ -1896,7 +1920,7 @@ export class AgentRunner {
       const requestController = new AbortController();
       let idleTimedOut = false;
       let totalTimedOut = false;
-      let lastChunkAt = nowMs();
+      let lastChunkAt = this.nowMsFn();
       // 只要本次请求已经开始产生可见输出(文本/tool-call),就不再自动重试。
       // 这样可以避免重试导致的重复内容,以及工具重复执行带来的副作用。
       let attemptStartedVisibleOutput = false;
@@ -1915,7 +1939,7 @@ export class AgentRunner {
         const checkIntervalMs = Math.max(50, Math.min(1000, Math.floor(modelIdleTimeoutMs / 4)));
         idleTimer = setInterval(() => {
           if (requestController.signal.aborted) return;
-          const elapsed = nowMs() - lastChunkAt;
+          const elapsed = this.nowMsFn() - lastChunkAt;
           if (elapsed < modelIdleTimeoutMs) return;
           idleTimedOut = true;
           requestController.abort();
@@ -1945,14 +1969,14 @@ export class AgentRunner {
       };
 
       try {
-        const stream = streamText(request as any);
+        const stream = this.streamTextFn(request as any) as StreamTextResultLike;
         successfulStream = stream;
         for await (const chunk of stream.fullStream as AsyncIterable<any>) {
           if (requestController.signal.aborted) break;
           if (!attemptStartedVisibleOutput && chunkStartsVisibleOutput(chunk, availableToolNames)) {
             attemptStartedVisibleOutput = true;
           }
-          lastChunkAt = nowMs();
+          lastChunkAt = this.nowMsFn();
           if (!chunk || typeof chunk !== "object") continue;
           if (chunk.type === "text-delta") {
             const delta = String(chunk.text || "");
@@ -2030,8 +2054,8 @@ export class AgentRunner {
               status: "running",
               activeRunId: run.runId,
               activeAssistantItemId: assistant.id,
-                      runNoticeText: noticeText,
-              updatedAt: nowMs()
+              runNoticeText: noticeText,
+              updatedAt: this.nowMsFn()
             });
           } catch {
             // ignore notice update failure
@@ -2081,8 +2105,8 @@ export class AgentRunner {
             status: "running",
             activeRunId: run.runId,
             activeAssistantItemId: assistant.id,
-                  runNoticeText: "",
-            updatedAt: nowMs()
+            runNoticeText: "",
+            updatedAt: this.nowMsFn()
           });
         } catch {
           // ignore notice clear failure
@@ -2097,7 +2121,7 @@ export class AgentRunner {
               ...(reasoningText ? { reasoning: { text: reasoningText } } : {}),
               error: finalMessage
             },
-            updatedAt: nowMs()
+            updatedAt: this.nowMsFn()
           });
         } catch {
           // 忽略更新失败，保持原始异常抛出
@@ -2110,7 +2134,7 @@ export class AgentRunner {
           payload: {
             status: "failed",
             startedAt,
-            finishedAt: nowMs(),
+            finishedAt: this.nowMsFn(),
             meta: {
               workspaceId: run.workspaceId,
               sessionId: run.sessionId,
@@ -2170,7 +2194,7 @@ export class AgentRunner {
             toolCallId: call.toolCallId,
             args: call.args
           },
-          createdAt: nowMs()
+          createdAt: this.nowMsFn()
         });
         prevId = toolItem.id;
         await writeItemLog({
@@ -2219,7 +2243,7 @@ export class AgentRunner {
         payload: {
           status: "completed",
           startedAt,
-          finishedAt: nowMs(),
+          finishedAt: this.nowMsFn(),
           meta: {
             workspaceId: run.workspaceId,
             sessionId: run.sessionId,
@@ -2244,12 +2268,18 @@ export class AgentRunner {
         status: "running",
         activeRunId: run.runId,
         activeAssistantItemId: null,
-          lastResponseTotalTokens: responseTotalTokens,
+        lastResponseTotalTokens: responseTotalTokens,
         runNoticeText: "",
-        updatedAt: nowMs()
+        updatedAt: this.nowMsFn()
       });
 
-      return { aborted: false as const, toolCallCount: recognizedCalls.length, assistantItemId: assistant.id, hasVisibleText: hasVisibleAssistantText(text) };
+      return {
+        aborted: false as const,
+        toolCallCount: recognizedCalls.length,
+        assistantItemId: assistant.id,
+        hasVisibleText: hasVisibleAssistantText(text),
+        availableToolNames: recognizedCalls.length > 0 ? availableToolNames : undefined
+      };
   }
 
   private async processRun(run: QueuedRun, signal: AbortSignal) {
@@ -2358,6 +2388,7 @@ export class AgentRunner {
         return;
       }
 
+      let pendingToolNamesSnapshot: ReadonlySet<string> | undefined;
       while (!signal.aborted) {
         const context = await this.apiClient.getPromptContext({
           workspaceId: run.workspaceId,
@@ -2365,10 +2396,14 @@ export class AgentRunner {
           runId: run.runId
         });
 
+        // 快照只允许命中“紧接着的一次 pending-tools 检查机会”；若本轮没有 pendingTools，必须立刻丢弃，避免跨 compaction/下一模型 step 泄漏。
+        const nextPendingToolNamesSnapshot = pendingToolNamesSnapshot;
+        pendingToolNamesSnapshot = undefined;
         if (context.pendingTools.length > 0) {
           const pendingResult = await this.executePendingTools({
             profile,
             run,
+            availableToolNames: nextPendingToolNamesSnapshot,
             context,
             signal
           });
@@ -2430,6 +2465,7 @@ export class AgentRunner {
         }
         if (result.toolCallCount > 0) {
           emptyResponseCount = 0;
+          pendingToolNamesSnapshot = result.availableToolNames;
           continue;
         }
         if (result.hasVisibleText) {

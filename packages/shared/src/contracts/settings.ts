@@ -229,7 +229,8 @@ export const AgentGlobalPromptItemSchema = Type.Object({
   id: Type.String({ minLength: 1 }),
   title: Type.String({ minLength: 1, maxLength: 20 }),
   prompt: Type.String(),
-  command: Type.Optional(Type.String())
+  command: Type.Optional(Type.String()),
+  expandOnSelect: Type.Optional(Type.Boolean())
 });
 export type AgentGlobalPromptItem = Static<typeof AgentGlobalPromptItemSchema>;
 

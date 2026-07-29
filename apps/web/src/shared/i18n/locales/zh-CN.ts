@@ -922,7 +922,7 @@ export default {
       saved: "已保存"
     },
     agentGlobalPrompts: {
-      description: "管理提示词库条目。普通条目仅在 Agent 中选中后生效，Global System Prompt 会全局生效。",
+      description: "管理提示词库条目。普通条目可在 Agent 配置中选中为系统提示词，也可配置 / 指令在输入框中使用；Global System Prompt 会全局生效。",
       saving: "正在保存...",
       empty: "暂无提示词库条目，请先新增",
       actions: {
@@ -943,6 +943,8 @@ export default {
         commandPlaceholder: "例如 summarize（将以 /summarize 触发）",
         commandHelp: "仅支持字母/数字/下划线/中划线；不需要填写 /；最多 64 字符；留空则不作为指令。",
         commandDisabledHint: "系统提示词条目不允许配置指令。",
+        expandOnSelectLabel: "选择指令后展开提示词内容",
+        expandOnSelectHelp: "开启后，从 / 候选列表选择该指令时会将提示词内容直接插入输入框，可在发送前编辑。",
         promptLabel: "提示词",
         promptPlaceholder: "输入该条目的提示词内容",
         promptHelp: "最多 {maxKb}KB，当前 {bytes} bytes",

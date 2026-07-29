@@ -692,8 +692,8 @@ export async function getAgentProviderModels(
 }
 
 function normalizeAgentTools(raw: unknown): AgentToolName[] {
-  // Baseline tools (read/todolist/scratchpad/archive_*) are always available at runtime and no longer need to be stored in agent profiles.
-  // This function keeps only user-configurable tools.
+  // Keep only user-configurable builtin tools persisted in agent profiles.
+  // Legacy baseline tool names that are not configurable in settings are intentionally ignored.
   const defaultTools: AgentToolName[] = ["bash", "write", "apply_patch", "subtask"];
   if (!Array.isArray(raw)) return defaultTools;
   const out: AgentToolName[] = [];
@@ -704,14 +704,14 @@ function normalizeAgentTools(raw: unknown): AgentToolName[] {
       item !== "write" &&
       item !== "apply_patch" &&
       item !== "subtask" &&
-      // Legacy baseline tool names are intentionally ignored.
+      item !== "scratchpad" &&
+      // Legacy baseline-only tool names are intentionally ignored.
       item !== "read" &&
       item !== "todolist" &&
-      item !== "scratchpad" &&
       item !== "archive_search" &&
       item !== "archive_read"
     ) continue;
-    if (item === "read" || item === "todolist" || item === "scratchpad" || item === "archive_search" || item === "archive_read") {
+    if (item === "read" || item === "todolist" || item === "archive_search" || item === "archive_read") {
       continue;
     }
     if (seen.has(item)) continue;
@@ -1082,6 +1082,10 @@ function sanitizeAgentGlobalPromptItemsStored(itemsRaw: unknown, logger?: Fastif
         changed = true;
         logger?.warn({ id }, "global system prompt command ignored during settings normalize");
       }
+      if ("expandOnSelect" in item) {
+        changed = true;
+        logger?.warn({ id }, "global system prompt expand-on-select ignored during settings normalize");
+      }
       out.push({ id, title: AGENT_GLOBAL_SYSTEM_PROMPT_TITLE, prompt: nextPrompt });
       continue;
     }
@@ -1096,7 +1100,18 @@ function sanitizeAgentGlobalPromptItemsStored(itemsRaw: unknown, logger?: Fastif
       logger?.warn({ id }, "invalid global prompt ignored during settings normalize");
       continue;
     }
-    out.push({ id, title: titleRaw, prompt, ...(command ? { command } : {}) });
+    const expandOnSelect = item.expandOnSelect === true && Boolean(command);
+    if ("expandOnSelect" in item && !expandOnSelect) {
+      changed = true;
+      logger?.warn({ id }, "invalid global prompt expand-on-select ignored during settings normalize");
+    }
+    out.push({
+      id,
+      title: titleRaw,
+      prompt,
+      ...(command ? { command } : {}),
+      ...(expandOnSelect ? { expandOnSelect: true } : {})
+    });
   }
 
   if (!systemSeen) {
@@ -1467,13 +1482,15 @@ export function updateAgentGlobalPromptSettings(
     const command = id === AGENT_GLOBAL_SYSTEM_PROMPT_ID
       ? undefined
       : normalizeAgentGlobalPromptCommandForUpdate(item.command);
+    const expandOnSelect = Boolean(command) && item.expandOnSelect === true;
     return {
       id,
       title: id === AGENT_GLOBAL_SYSTEM_PROMPT_ID
         ? AGENT_GLOBAL_SYSTEM_PROMPT_TITLE
         : normalizeAgentGlobalPromptTitleForUpdate(item.title),
       prompt: normalizeAgentGlobalPromptPromptForUpdate(item.prompt),
-      ...(command ? { command } : {})
+      ...(command ? { command } : {}),
+      ...(expandOnSelect ? { expandOnSelect: true } : {})
     };
   });
 

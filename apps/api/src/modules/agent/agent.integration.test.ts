@@ -8,7 +8,7 @@ import { openDb } from "../../infra/db/db.js";
 import type { Db } from "../../infra/db/db.js";
 import { ensureDir, rmrf } from "../../infra/fs/fs.js";
 import { agentArchiveSessionDir, compactionSnippetPath, workspaceRepoDirPath, workspaceRoot } from "../../infra/fs/paths.js";
-import { setSettingJson } from "../settings/settings.store.js";
+import { getSettingJson, setSettingJson } from "../settings/settings.store.js";
 import { insertWorkspace, insertWorkspaceRepo } from "../workspaces/workspace.store.js";
 import { insertRepo } from "../repos/repo.store.js";
 import {
@@ -48,6 +48,8 @@ async function createFixture(options?: {
   };
   enablePluginHost?: boolean;
   enablePluginServices?: boolean;
+  agentGlobalPromptsStored?: unknown;
+  agentGlobalPromptsUpdatedAt?: number;
 }): Promise<Fixture> {
   const repoRoot = path.resolve(process.cwd(), "../..");
   const testsRoot = path.join(repoRoot, ".tmp-tests");
@@ -56,6 +58,14 @@ async function createFixture(options?: {
   const internalToken = "test-internal-token";
 
   const db = await openDb(dataDir);
+  if (options?.agentGlobalPromptsStored !== undefined) {
+    setSettingJson(
+      db,
+      "agent_global_prompts_v1",
+      options.agentGlobalPromptsStored,
+      options.agentGlobalPromptsUpdatedAt ?? Date.now()
+    );
+  }
   const app = await createApp({
     db,
     repoRoot,
@@ -499,6 +509,81 @@ test("agent settings 兼容缺省 scope/order 并按原顺序归一化", async (
   ]);
 });
 
+test("agent settings 保存并回读 scratchpad，默认工具列表仍不包含它", async () => {
+  const fixture = await createFixture();
+  const res = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      agents: [
+        {
+          id: "default",
+          name: "default",
+          summary: "",
+          prompt: "",
+          tools: ["bash", "scratchpad", "read", "scratchpad", "subtask"],
+          pluginTools: [],
+          mcpServers: [],
+          defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
+          scope: "both",
+          order: 0
+        }
+      ]
+    }
+  });
+  assert.equal(res.statusCode, 200, `update agent settings failed: ${res.body}`);
+
+  const body = res.json() as { agents: Array<{ tools: string[] }> };
+  assert.deepEqual(body.agents[0]?.tools, ["bash", "scratchpad", "subtask"]);
+
+  const getRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/agents" });
+  assert.equal(getRes.statusCode, 200, `get agent settings failed: ${getRes.body}`);
+  const getBody = getRes.json() as { agents: Array<{ tools: string[] }> };
+  assert.deepEqual(getBody.agents[0]?.tools, ["bash", "scratchpad", "subtask"]);
+
+  setSettingJson(fixture.db, "agent_agents_v1", {
+    agents: [
+      { id: "legacy", name: "Legacy", summary: "", prompt: "", tools: undefined, pluginTools: [], mcpServers: [], defaultModel: null }
+    ]
+  }, Date.now());
+  const fallbackRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/agents" });
+  const fallbackBody = fallbackRes.json() as { agents: Array<{ tools: string[] }> };
+  assert.deepEqual(fallbackBody.agents[0]?.tools, ["bash", "write", "apply_patch", "subtask"]);
+});
+
+test("agent prompt-context 仅在 agent.tools 显式包含 scratchpad 时暴露该工具", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+
+  const hiddenRunId = newSortableId("run");
+  await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      agents: [{ id: "default", name: "default", summary: "", prompt: "", tools: ["bash", "subtask"], pluginTools: [], mcpServers: [], defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" }, scope: "both", order: 0 }]
+    }
+  });
+  createRunRecord(fixture.db, { runId: hiddenRunId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: 1, agentId: "default", providerId: "ppchat", uiLocale: "en-US", modelId: "gpt-5.2", status: "running", createdAt: Date.now() });
+  const hiddenContext = await getPromptContextInternal({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId: hiddenRunId });
+  assert.equal(hiddenContext.tools.some((item) => item.name === "scratchpad"), false);
+
+  const visibleRunId = newSortableId("run");
+  const visibleRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      agents: [{ id: "default", name: "default", summary: "", prompt: "", tools: ["bash", "scratchpad", "subtask"], pluginTools: [], mcpServers: [], defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" }, scope: "both", order: 0 }]
+    }
+  });
+  assert.equal(visibleRes.statusCode, 200, `update agents failed: ${visibleRes.body}`);
+  createRunRecord(fixture.db, { runId: visibleRunId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: 1, agentId: "default", providerId: "ppchat", uiLocale: "en-US", modelId: "gpt-5.2", status: "running", createdAt: Date.now() });
+  const visibleContext = await getPromptContextInternal({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId: visibleRunId });
+  const scratchpadTool = visibleContext.tools.find((item) => item.name === "scratchpad");
+  assert.ok(scratchpadTool);
+  assert.ok(String(scratchpadTool.description || "").includes("Suggested <= 200 characters"));
+  assert.equal((scratchpadTool.inputSchema as any)?.properties?.content?.maxLength, 200);
+});
+
 test("agent prompt-context 生成 subtask 描述时仅暴露 subtask/both agent", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   const agentsRes = await fixture.app.inject({
@@ -632,8 +717,8 @@ test("agent prompt-context 中的工具描述与 schema 说明使用英文", asy
   assert.ok(subtaskDescription.includes("Focus on results instead of process"));
   assert.ok(subtaskDescription.includes("Divide complex work"));
   assert.ok(subtaskDescription.includes("Usage guidance:"));
-  assert.ok(subtaskDescription.includes("independent work"));
-  assert.ok(subtaskDescription.includes("implementation and code review must not be delegated in parallel"));
+  assert.ok(subtaskDescription.includes("multiple independent tasks"));
+  assert.ok(subtaskDescription.includes("implementation and code review cannot be delegated in parallel"));
   assert.ok(subtaskDescription.includes("prefer fork so the user's intent can be passed"));
   assert.ok(subtaskDescription.includes("full parent-session context"));
   assert.ok(subtaskDescription.includes("todolists"));
@@ -7730,6 +7815,135 @@ test("agent settings 兼容缺省 globalPromptIds", async () => {
   assert.deepEqual(body.agents[0]?.globalPromptIds ?? [], []);
 });
 
+test("agent global prompts 保存选择指令后展开提示词内容配置", async () => {
+  const fixture = await createFixture();
+  const res = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/global-prompts",
+    payload: {
+      items: [
+        {
+          id: "global_system_prompt",
+          title: "ignored",
+          prompt: "SYSTEM",
+          command: "system-command",
+          expandOnSelect: true
+        },
+        {
+          id: "gp_expand",
+          title: "Expand",
+          prompt: "EXPAND_PROMPT",
+          command: "expand",
+          expandOnSelect: true
+        },
+        {
+          id: "gp_disabled",
+          title: "Disabled",
+          prompt: "DISABLED_PROMPT",
+          command: "disabled",
+          expandOnSelect: false
+        },
+        {
+          id: "gp_without_command",
+          title: "Without command",
+          prompt: "WITHOUT_COMMAND_PROMPT",
+          expandOnSelect: true
+        }
+      ]
+    }
+  });
+  assert.equal(res.statusCode, 200, `update global prompts failed: ${res.body}`);
+
+  const items = (res.json() as {
+    items: Array<{ id: string; command?: string; expandOnSelect?: boolean }>;
+  }).items;
+  assert.deepEqual(items.find((item) => item.id === "gp_expand"), {
+    id: "gp_expand",
+    title: "Expand",
+    prompt: "EXPAND_PROMPT",
+    command: "expand",
+    expandOnSelect: true
+  });
+  assert.equal(items.find((item) => item.id === "gp_disabled")?.expandOnSelect, undefined);
+  assert.equal(items.find((item) => item.id === "gp_without_command")?.expandOnSelect, undefined);
+  assert.equal(items.find((item) => item.id === "gp_without_command")?.command, undefined);
+  assert.equal(items.find((item) => item.id === "global_system_prompt")?.expandOnSelect, undefined);
+  assert.equal(items.find((item) => item.id === "global_system_prompt")?.command, undefined);
+
+  const getRes = await fixture.app.inject({
+    method: "GET",
+    url: "/api/settings/agent/global-prompts"
+  });
+  assert.equal(getRes.statusCode, 200, `get global prompts failed: ${getRes.body}`);
+  const getItems = (getRes.json() as {
+    items: Array<{ id: string; command?: string; expandOnSelect?: boolean }>;
+  }).items;
+  assert.equal(getItems.find((item) => item.id === "gp_expand")?.expandOnSelect, true);
+  assert.equal(getItems.find((item) => item.id === "gp_disabled")?.expandOnSelect, undefined);
+});
+
+test("agent global prompts 拒绝非布尔的选择展开配置", async () => {
+  const fixture = await createFixture();
+  for (const expandOnSelect of ["true", 1]) {
+    const res = await fixture.app.inject({
+      method: "PUT",
+      url: "/api/settings/agent/global-prompts",
+      payload: {
+        items: [
+          { id: "global_system_prompt", title: "ignored", prompt: "SYSTEM" },
+          { id: "gp_invalid", title: "Invalid", prompt: "PROMPT", command: "invalid", expandOnSelect }
+        ]
+      }
+    });
+    assert.equal(res.statusCode, 400, `invalid expand-on-select should fail: ${res.body}`);
+  }
+});
+
+test("agent global prompts 归一化历史选择展开配置且不重写缺失字段", async () => {
+  const legacyUpdatedAt = 123;
+  const legacyFixture = await createFixture({
+    agentGlobalPromptsStored: {
+      items: [
+        { id: "global_system_prompt", title: "Global System Prompt", prompt: "SYSTEM" },
+        { id: "gp_legacy", title: "Legacy", prompt: "LEGACY", command: "legacy" }
+      ]
+    },
+    agentGlobalPromptsUpdatedAt: legacyUpdatedAt
+  });
+  assert.equal(
+    getSettingJson(legacyFixture.db, "agent_global_prompts_v1")?.updatedAt,
+    legacyUpdatedAt,
+    "missing expandOnSelect should not trigger a settings rewrite"
+  );
+
+  const fixture = await createFixture({
+    agentGlobalPromptsStored: {
+      items: [
+        {
+          id: "global_system_prompt",
+          title: "Global System Prompt",
+          prompt: "SYSTEM",
+          expandOnSelect: true
+        },
+        { id: "gp_enabled", title: "Enabled", prompt: "ENABLED", command: "enabled", expandOnSelect: true },
+        { id: "gp_false", title: "False", prompt: "FALSE", command: "false", expandOnSelect: false },
+        { id: "gp_invalid", title: "Invalid", prompt: "INVALID", command: "invalid", expandOnSelect: "true" },
+        { id: "gp_no_command", title: "No command", prompt: "NO_COMMAND", expandOnSelect: true }
+      ]
+    },
+    agentGlobalPromptsUpdatedAt: legacyUpdatedAt
+  });
+
+  const stored = getSettingJson(fixture.db, "agent_global_prompts_v1");
+  assert.ok(stored, "normalized settings should be stored");
+  assert.ok(stored.updatedAt > legacyUpdatedAt, "invalid historical values should be normalized and persisted");
+  const storedItems = (stored?.value as { items: Array<{ id: string; command?: string; expandOnSelect?: boolean }> }).items;
+  assert.equal(storedItems.find((item) => item.id === "gp_enabled")?.expandOnSelect, true);
+  assert.equal(storedItems.find((item) => item.id === "gp_false")?.expandOnSelect, undefined);
+  assert.equal(storedItems.find((item) => item.id === "gp_invalid")?.expandOnSelect, undefined);
+  assert.equal(storedItems.find((item) => item.id === "gp_no_command")?.expandOnSelect, undefined);
+});
+
 test("agent prompt-context 全局提示词按列表顺序注入(方案A)", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
@@ -8131,6 +8345,16 @@ test("agent prompt-context 在 agent prompt 为空且无 workspace/global 时仅
   assert.equal(context.system.includes("[workspace_instructions]"), false, "system should not include workspace instructions block when missing");
   assert.equal(context.system.includes("## Agent Prompt:"), false, "system should not include agent prompt section when empty");
   assert.equal(context.system.includes("[agent_prompt]"), false, "system should not include agent prompt block when empty");
+  assert.ok(context.system.includes("若当前可用工具列表包含 scratchpad"), "system should bind scratchpad guidance to available tools");
+  assert.ok(context.system.includes("若当前可用工具列表不包含 scratchpad，则跳过该工具要求并继续完成任务"), "system should allow proceeding without unavailable scratchpad");
+  assert.ok(
+    context.system.includes("执行过程短期记忆(仅当当前可用工具列表包含 scratchpad): 优先将 scratchpad 与其他必要工具并发调用；不要为此额外制造无意义工具调用。"),
+    "system should scope scratchpad concurrency guidance to enabled agents"
+  );
+  assert.ok(context.system.includes("允许单独调用一次 scratchpad"), "system should allow standalone scratchpad when genuinely necessary");
+  assert.equal(context.system.includes("若当前 Agent 已启用 scratchpad"), false, "system should not rely on ambiguous agent-enabled wording");
+  assert.equal(context.system.includes("严禁单独调用scratchpad"), false, "system should not forbid standalone scratchpad unconditionally");
+  assert.equal(context.system.includes("执行过程短期记忆(仅当已启用 scratchpad): scratchpad + 其他工具调用。"), false, "system should not keep legacy scratchpad concurrency template");
 });
 
 test("agent prompt-context 对 workspace AGENTS.md 做 32KB 截断并追加标记", async () => {

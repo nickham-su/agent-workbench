@@ -27,6 +27,15 @@ function pendingTool(input: {
   };
 }
 
+function stubListedTools(runner: AgentRunner, names: string[]) {
+  (runner as any).toolRegistry.listTools = async () => names.map((name) => ({
+    name,
+    description: `fixture ${name}`,
+    inputSchema: { type: "object", properties: {} },
+    source: name.startsWith("plugin_") ? "plugin" : name.startsWith("mcp_") ? "mcp" : "builtin"
+  }));
+}
+
 async function withTempWorkspace(fn: (workspacePath: string) => Promise<void>) {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "awb-runner-tool-output-"));
   try {
@@ -401,6 +410,7 @@ test("并发段中单个工具失败不影响其他工具与后续段", async ()
     { info() {}, warn() {}, error() {} },
     1
   );
+  stubListedTools(runner, ["bash", "subtask", "read"]);
 
   (runner as any).executeTool = async ({ tool }: { tool: { itemId: number; toolName: string } }) => {
     executionOrder.push(`start:${tool.itemId}:${tool.toolName}`);
@@ -470,6 +480,7 @@ test("并发段中某个工具 paused 时当前 step 返回 paused 且后续段�
     { info() {}, warn() {}, error() {} },
     1
   );
+  stubListedTools(runner, ["bash", "subtask", "read"]);
 
   (runner as any).executeTool = async ({ tool }: { tool: { itemId: number; toolName: string } }) => {
     executionOrder.push(`start:${tool.itemId}:${tool.toolName}`);
@@ -513,7 +524,7 @@ test("并发段中某个工具 paused 时当前 step 返回 paused 且后续段�
   assert.deepEqual(executionOrder, ["start:1:bash", "start:2:bash", "paused:2", "done:1"]);
 });
 
-test("被预处理掉的中间工具仍会打断并发段", async () => {
+test("中间工具仍会打断并发段", async () => {
   const executionOrder: string[] = [];
   const runner = new AgentRunner(
     {
@@ -529,6 +540,7 @@ test("被预处理掉的中间工具仍会打断并发段", async () => {
     { info() {}, warn() {}, error() {} },
     1
   );
+  stubListedTools(runner, ["bash"]);
 
   (runner as any).executeTool = async ({ tool }: { tool: { itemId: number; toolName: string } }) => {
     executionOrder.push(`start:${tool.itemId}:${tool.toolName}`);
@@ -561,9 +573,10 @@ test("被预处理掉的中间工具仍会打断并发段", async () => {
 
   assert.equal(result.paused, false);
   assert.deepEqual(executionOrder, [
-    "update:2:failed",
     "start:1:bash",
     "done:1",
+    "start:2:read",
+    "done:2",
     "start:3:bash",
     "done:3",
     "updateRunState"
@@ -585,6 +598,7 @@ test("纯非并发多工具保持原有串行语义", async () => {
     { info() {}, warn() {}, error() {} },
     1
   );
+  stubListedTools(runner, ["read", "write", "apply_patch"]);
 
   (runner as any).executeTool = async ({ tool }: { tool: { itemId: number; toolName: string } }) => {
     executionOrder.push(`start:${tool.itemId}:${tool.toolName}`);
@@ -619,6 +633,176 @@ test("纯非并发多工具保持原有串行语义", async () => {
   assert.deepEqual(executionOrder, ["start:1:read", "done:1", "start:2:write", "done:2", "start:3:apply_patch", "done:3", "updateRunState"]);
 });
 
+test("executePendingTools 传入快照时复用 availableToolNames 且不重复 listTools", async () => {
+  const updates: Array<{ itemId: number; status?: string }> = [];
+  const runner = new AgentRunner(
+    {
+      async updateContextItem(input: { itemId: number; status?: string }) {
+        updates.push({ itemId: input.itemId, status: input.status });
+        return { id: input.itemId };
+      },
+      async updateRunState() {
+        return;
+      }
+    } as any,
+    {} as any,
+    { info() {}, warn() {}, error() {} },
+    1
+  );
+
+  let listToolsCallCount = 0;
+  let receivedAvailableToolNames: ReadonlySet<string> | undefined;
+  (runner as any).toolRegistry.listTools = async () => {
+    listToolsCallCount += 1;
+    return [
+      {
+        name: "write",
+        description: "fixture write",
+        inputSchema: { type: "object", properties: {} },
+        source: "builtin"
+      }
+    ];
+  };
+  (runner as any).toolRegistry.isToolEnabled = async (_toolName: string, ctx: { availableToolNames?: ReadonlySet<string> }) => {
+    receivedAvailableToolNames = ctx.availableToolNames;
+    return true;
+  };
+  (runner as any).executeTool = async () => ({ paused: false as const });
+
+  const snapshot = new Set<string>(["read"]);
+  const result = await (runner as any).executePendingTools({
+    profile: {
+      agent: {
+        tools: ["read"]
+      }
+    },
+    run: {
+      workspaceId: "ws_test",
+      sessionId: "ses_test",
+      runId: "run_test",
+      workspacePath: process.cwd()
+    },
+    availableToolNames: snapshot,
+    context: {
+      pendingTools: [pendingTool({ itemId: 1, toolName: "read" })]
+    },
+    signal: new AbortController().signal
+  });
+
+  assert.equal(result.paused, false);
+  assert.equal(listToolsCallCount, 0);
+  assert.equal(receivedAvailableToolNames, snapshot);
+  assert.deepEqual(updates, []);
+});
+
+test("executePendingTools 快照缺失时回退到当前 listTools", async () => {
+  const runner = new AgentRunner(
+    {
+      async updateContextItem() {
+        return { id: 1 };
+      },
+      async updateRunState() {
+        return;
+      }
+    } as any,
+    {} as any,
+    { info() {}, warn() {}, error() {} },
+    1
+  );
+
+  let listToolsCallCount = 0;
+  let receivedAvailableToolNames: ReadonlySet<string> | undefined;
+  (runner as any).toolRegistry.listTools = async () => {
+    listToolsCallCount += 1;
+    return [
+      {
+        name: "read",
+        description: "fixture read",
+        inputSchema: { type: "object", properties: {} },
+        source: "builtin"
+      }
+    ];
+  };
+  (runner as any).toolRegistry.isToolEnabled = async (_toolName: string, ctx: { availableToolNames?: ReadonlySet<string> }) => {
+    receivedAvailableToolNames = ctx.availableToolNames;
+    return true;
+  };
+  (runner as any).executeTool = async () => ({ paused: false as const });
+
+  const result = await (runner as any).executePendingTools({
+    profile: {
+      agent: {
+        tools: ["read"]
+      }
+    },
+    run: {
+      workspaceId: "ws_test",
+      sessionId: "ses_test",
+      runId: "run_test",
+      workspacePath: process.cwd()
+    },
+    context: {
+      pendingTools: [pendingTool({ itemId: 1, toolName: "read" })]
+    },
+    signal: new AbortController().signal
+  });
+
+  assert.equal(result.paused, false);
+  assert.equal(listToolsCallCount, 1);
+  assert.ok(receivedAvailableToolNames);
+  assert.equal(receivedAvailableToolNames?.has("read"), true);
+});
+
+test("executePendingTools 传入快照时未知工具仍按失败处理且不回退 listTools", async () => {
+  const updates: Array<{ itemId: number; status?: string; output?: unknown }> = [];
+  const runner = new AgentRunner(
+    {
+      async updateContextItem(input: { itemId: number; status?: string; output?: unknown }) {
+        updates.push(input);
+        return { id: input.itemId };
+      },
+      async updateRunState() {
+        return;
+      }
+    } as any,
+    {} as any,
+    { info() {}, warn() {}, error() {} },
+    1
+  );
+
+  let listToolsCallCount = 0;
+  (runner as any).toolRegistry.listTools = async () => {
+    listToolsCallCount += 1;
+    return [];
+  };
+  (runner as any).executeTool = async () => ({ paused: false as const });
+
+  const result = await (runner as any).executePendingTools({
+    profile: {
+      agent: {
+        tools: ["read"],
+        pluginTools: [],
+        mcpServers: []
+      }
+    },
+    run: {
+      workspaceId: "ws_test",
+      sessionId: "ses_test",
+      runId: "run_test",
+      workspacePath: process.cwd()
+    },
+    availableToolNames: new Set<string>(["read"]),
+    context: {
+      pendingTools: [pendingTool({ itemId: 1, toolName: "unknown_tool" })]
+    },
+    signal: new AbortController().signal
+  });
+
+  assert.equal(result.paused, false);
+  assert.equal(listToolsCallCount, 0);
+  assert.equal(updates.some((item) => item.itemId === 1 && item.status === "failed"), true);
+});
+
 test("单个 bash 或 subtask 仍按单段执行，行为与旧实现一致", async () => {
   for (const toolName of ["bash", "subtask"] as const) {
     const executionOrder: string[] = [];
@@ -635,6 +819,7 @@ test("单个 bash 或 subtask 仍按单段执行，行为与旧实现一致", as
       { info() {}, warn() {}, error() {} },
       1
     );
+    stubListedTools(runner, [toolName]);
 
     (runner as any).executeTool = async ({ tool }: { tool: { itemId: number; toolName: string } }) => {
       executionOrder.push(`start:${tool.itemId}:${tool.toolName}`);

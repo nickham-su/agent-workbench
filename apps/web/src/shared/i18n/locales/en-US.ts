@@ -924,7 +924,7 @@ export default {
       saved: "Saved"
     },
     agentGlobalPrompts: {
-      description: "Manage prompt library entries. Regular entries take effect only when selected by an agent profile, while Global System Prompt always applies globally.",
+      description: "Manage prompt library entries. Regular entries can be selected in Agent settings as system prompts or configured as / commands for the input; Global System Prompt always applies globally.",
       saving: "Saving...",
       empty: "No prompt library entries yet. Add one to start.",
       actions: {
@@ -945,6 +945,8 @@ export default {
         commandPlaceholder: "e.g. summarize (triggered as /summarize)",
         commandHelp: "Letters/numbers/underscore/hyphen only; don't include '/'; max 64 chars; leave empty to disable.",
         commandDisabledHint: "Commands are not allowed for the system prompt entry.",
+        expandOnSelectLabel: "Expand prompt content after selecting the command",
+        expandOnSelectHelp: "When enabled, selecting this command from the / list inserts the prompt content directly into the input so you can edit it before sending.",
         promptLabel: "Prompt",
         promptPlaceholder: "Enter prompt text for this entry",
         promptHelp: "Up to {maxKb}KB, current {bytes} bytes",

@@ -1,4 +1,4 @@
-# 提示词库条目新增“指令(command)”配置，并支持 AI Agent 输入框 `/` 指令候选与发送替换（v1）
+# 提示词库条目新增“指令(command)”配置，并支持 AI Agent 输入框 `/` 指令候选、展开与发送替换（v1）
 
 ## 背景与现状
 
@@ -31,7 +31,8 @@ agent-workbench 已有“提示词库（Prompt library）”能力：
 本方案在不改变既有内置命令语义的前提下，为提示词库条目新增 `command` 字段，并让 Agent 输入框支持：
 
 - `/` 触发候选匹配（包含内置命令 + 用户配置命令）
-- 在发送时将用户输入 `/command` 替换为对应提示词库条目的 `prompt` 内容，作为 user message 发送
+- 可选地在选择候选时将提示词内容直接回填输入框，以便发送前编辑
+- 在发送时将最终输入为 `/command` 的文本替换为对应提示词库条目的 `prompt` 内容，作为 user message 发送
 
 > 备注：该能力属于“输入增强/快捷指令”，不改变运行时 system prompt 的拼接策略。
 
@@ -43,7 +44,8 @@ agent-workbench 已有“提示词库（Prompt library）”能力：
 - Web 设置页支持配置该字段（创建/编辑时可填）。
 - Agent 输入框在 slash 模式下提供 `/command` 候选：
   - 候选包含：内置 `/compact`、`/clear` + 用户配置的 prompt commands。
-  - 候选选择后把输入框内容替换为对应 `/command`（与现有 slash 交互保持一致）。
+  - 默认选择后把输入框内容替换为对应 `/command`。
+  - 条目开启“选择指令后展开提示词内容”后，选择时直接回填提示词原文，允许用户继续编辑。
 - 发送链路支持替换：当用户发送 `/command` 且该 command 对应提示词库条目时，发送内容改为该条目的 `prompt`。
 - 完整的冲突/校验规则：
   - `command` 唯一性
@@ -57,6 +59,7 @@ agent-workbench 已有“提示词库（Prompt library）”能力：
 - 不新增后端独立“commands 列表”接口；复用现有 `GET /api/settings/agent/global-prompts`。
 - 不改变提示词库条目被 Agent profile 选择后注入 system prompt 的行为。
 - 不将 prompt command 作为“工具/控制指令”写入事件模型；仍然只是一条 user message 文本替换。
+- 不追踪候选展开内容的来源；发送始终按输入框最终文本解析。
 - 不实现跨 workspace 的不同命令集（命令全局生效）。
 
 ---
@@ -80,7 +83,14 @@ v1 交互新增：
     - placeholder：`例如 summarize（将以 /summarize 触发）`
     - help：
       - “仅支持字母/数字/下划线/中划线；不含空格；不需要填写 /；留空则不作为指令。”
-      - “若与内置命令或其他条目冲突，将无法保存。”
+  - “若与内置命令或其他条目冲突，将无法保存。”
+
+新增开关：
+
+- 标签：`选择指令后展开提示词内容`
+- 仅普通条目显示；系统提示词条目不显示。
+- 普通条目未配置 `command` 时开关禁用；移除指令时自动关闭。
+- 开启时仅保存 `expandOnSelect: true`；关闭时省略该字段。系统提示词条目的 `command` 与 `expandOnSelect` 均会被忽略。
 
 特殊规则：
 
@@ -117,7 +127,17 @@ v1 交互新增：
 
 选中后的插入行为：
 
-- 选中 prompt command 候选后，将输入框内容替换为 `/<command>`（可选在尾部补一个空格，但 v1 推荐不补空格，避免误导用户继续输入参数）。
+- 选中 prompt command 候选后替换整个输入框内容：
+  - `expandOnSelect` 缺失或为 `false`：回填 `/<command>`（不补空格）。
+  - `expandOnSelect === true`：原样回填对应 `prompt` 内容。
+- 两种方式均聚焦输入框并将光标定位到回填内容末尾。
+- 候选仅在输入框开头的 slash 模式显示，保持现有整段替换行为，不支持在正文任意位置插入。
+- 中文顿号快捷输入仅在空输入以 `、` 开始时转换为 `/`；回填的提示词正文不受该快捷规则影响。
+
+展开后的发送规则：
+
+- 不记录“内容来自提示词展开”的额外状态，用户可完全修改回填内容。
+- 发送始终按最终文本解析：最终是 `/clear`、`/compact` 或另一个完整 `/command` 时，仍执行对应的内置命令或提示词替换。
 
 ### 3) 发送替换规则
 
@@ -164,6 +184,7 @@ type AgentGlobalPromptItem = {
   title: string;
   prompt: string;
   command?: string; // 可选：slash 指令名，不含前缀 '/'
+  expandOnSelect?: boolean; // 仅 command 存在时为 true：选择候选后直接回填 prompt
 };
 ```
 
@@ -172,12 +193,15 @@ JSON schema 建议：
 - `command`：`Type.Optional(Type.String())`
   - 形状校验放宽（与现有 prompt item 的 schema 风格一致）
   - 具体合法性与冲突校验由 API `updateAgentGlobalPromptSettings` 中执行
+- `expandOnSelect`：`Type.Optional(Type.Boolean())`；缺失等价于 `false`。
 
 ### 2) 字段语义
 
 - `command` 为“指令名”，不包含 `/`。
 - 对应输入触发文本为 `/${command}`。
 - `command` 为空/缺失：该条目不参与输入框候选，不参与替换。
+- `expandOnSelect === true` 时，候选选择会将 `prompt` 回填到输入框；否则回填 `/${command}`。
+- 仅普通条目存在有效 `command` 时保存 `expandOnSelect: true`；系统提示词、无指令条目及关闭状态均省略该字段。
 
 ### 3) 保留条目约束
 
@@ -209,6 +233,10 @@ JSON schema 建议：
 - modal 表单新增 `a-form-item`：`command`
 - `submit()` 时将 `command` 一并写入 payload：
   - 空字符串应转换为 `undefined`（避免保存大量空字段）
+- 表单状态增加 `formExpandOnSelect`：
+  - 新建默认关闭，编辑时回填。
+  - 无有效指令时禁用并自动清除。
+  - 仅在 `command` 存在且开启时写入 `expandOnSelect: true`。
 - 对保留条目：隐藏/禁用 command 字段
 
 前端轻量校验（减少无效请求）：
@@ -260,7 +288,7 @@ type InputCandidateItem = SlashCandidateItem | MentionCandidateItem | PromptComm
 选中行为：
 
 - 扩展 `onPickInputCandidate`：
-  - `prompt_command`：将 `draft` 设置为 `/${command}`，并清空候选/selection
+  - `prompt_command`：根据条目 `expandOnSelect` 将 `draft` 设置为 `/${command}` 或 `prompt`，并将光标置于末尾。
 
 ### 3) 发送链路：替换实现点
 
@@ -281,6 +309,8 @@ v1 替换逻辑插入点：
   3. 调用 `sendAgentMessage`
 
 此处无需后端配合：替换发生在前端发送前。
+
+`AgentClientPane` 在 KeepAlive 激活时会刷新提示词配置，确保返回 Agent 后使用最新的开关和值。
 
 ---
 
@@ -425,8 +455,9 @@ v1 替换逻辑插入点：
 
 3. **Web 设置页**
    - 更新 `apps/web/src/features/settings/components/AgentGlobalPromptsSettingsPanel.vue`
-     - 表单支持 command 字段
-     - 前端校验 + i18n 文案
+    - 表单支持 command 字段
+    - 表单支持 `expandOnSelect` 开关及其序列化规则
+    - 前端校验 + i18n 文案
 
 4. **Web 输入框候选与发送替换**
    - 更新 `AgentClientPane.vue`
@@ -452,14 +483,17 @@ v1 替换逻辑插入点：
 
 3. Web（轻量 E2E / 手工）
    - 在提示词库新增条目：`title=Summarize, command=summarize, prompt=...`
-   - 在 Agent 输入框输入 `/sum`：候选出现 `/summarize`，Enter 选中
+   - 开关关闭时，在 Agent 输入框输入 `/sum`：候选出现 `/summarize`，Enter 选中后回填 `/summarize`
+   - 开关开启时，Enter 选中后回填 prompt 原文，光标在内容末尾，用户可编辑
    - 再次 Enter 发送：实际发送的 user message 文本为 prompt 内容
    - `/clear` 仍执行清空，不会被 prompt command 覆盖
+   - 将展开内容编辑为另一个完整 `/command` 后发送，仍按该指令替换
 
 ### 手工回归
 
 - 旧数据无 command：不影响设置页展示与发送。
 - command 留空：条目不出现在候选。
+- 旧数据无 `expandOnSelect`：默认回填 `/${command}`。
 
 ---
 

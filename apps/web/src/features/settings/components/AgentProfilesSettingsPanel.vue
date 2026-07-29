@@ -251,6 +251,12 @@ import {
   updateAgentSettings
 } from "@/shared/api";
 import { persistAgentProfilesDraft } from "./agentProfilesPersist";
+import {
+  DEFAULT_AGENT_TOOLS,
+  agentToolLabelKey,
+  normalizeAgentTools,
+  toAgentToolOptions
+} from "./agentTools";
 import { toPluginToolOptions } from "./agentPluginViewModel";
 
 const { t } = useI18n();
@@ -272,19 +278,7 @@ type EditingAgent = {
 const AGENT_PROMPT_MAX_BYTES = 32 * 1024;
 const RESERVED_GLOBAL_SYSTEM_PROMPT_ID = "global_system_prompt";
 
-const DEFAULT_TOOLS: AgentToolName[] = [
-  "bash",
-  "write",
-  "apply_patch",
-  "subtask",
-];
-
-const toolOptions = computed(() => [
-  { label: t("settings.agentProfiles.tools.bash"), value: "bash" },
-  { label: t("settings.agentProfiles.tools.write"), value: "write" },
-  { label: t("settings.agentProfiles.tools.applyPatch"), value: "apply_patch" },
-  { label: t("settings.agentProfiles.tools.subtask"), value: "subtask" }
-]);
+const toolOptions = computed(() => toAgentToolOptions((key) => t(key)));
 
 const loading = ref(false);
 const saving = ref(false);
@@ -308,7 +302,7 @@ const agentFormName = ref("");
 const agentFormSummary = ref("");
 const agentFormPrompt = ref("");
 const agentFormGlobalPromptIds = ref<string[]>([]);
-const agentFormTools = ref<AgentToolName[]>([...DEFAULT_TOOLS]);
+const agentFormTools = ref<AgentToolName[]>([...DEFAULT_AGENT_TOOLS]);
 const agentFormMcpServers = ref<string[]>([]);
 const agentFormPluginTools = ref<AgentPluginTools>([]);
 const agentFormDefaultModelPath = ref<string[]>([]);
@@ -368,23 +362,6 @@ function newLocalId(prefix: string) {
   const ts = Date.now().toString(36);
   const random = Math.random().toString(36).slice(2, 8);
   return `${prefix}-${ts}${random}`;
-}
-
-function normalizeTools(raw: AgentToolName[]) {
-  const out: AgentToolName[] = [];
-  const seen = new Set<AgentToolName>();
-  for (const item of raw) {
-    if (
-      item !== "bash" &&
-      item !== "write" &&
-      item !== "apply_patch" &&
-      item !== "subtask"
-    ) continue;
-    if (seen.has(item)) continue;
-    seen.add(item);
-    out.push(item);
-  }
-  return out;
 }
 
 function normalizeMcpServers(raw: unknown): string[] {
@@ -457,7 +434,7 @@ function mapFromSettings(
     summary: agent.summary,
     prompt: agent.prompt,
     globalPromptIds: normalizeGlobalPromptIds(agent.globalPromptIds),
-    tools: normalizeTools(agent.tools),
+    tools: normalizeAgentTools(agent.tools),
     mcpServers: normalizeMcpServers(agent.mcpServers),
     pluginTools: normalizePluginTools(agent.pluginTools),
     defaultModel: agent.defaultModel,
@@ -500,15 +477,7 @@ function defaultModelLabel(defaultModel: AgentDefaultModel) {
 }
 
 function toolLabel(tool: AgentToolName) {
-  if (tool === "bash") return t("settings.agentProfiles.tools.bash");
-  if (tool === "read") return t("settings.agentProfiles.tools.read");
-  if (tool === "write") return t("settings.agentProfiles.tools.write");
-  if (tool === "apply_patch") return t("settings.agentProfiles.tools.applyPatch");
-  if (tool === "todolist") return t("settings.agentProfiles.tools.todolist");
-  if (tool === "subtask") return t("settings.agentProfiles.tools.subtask");
-  if (tool === "archive_search") return t("settings.agentProfiles.tools.archiveSearch");
-  if (tool === "archive_read") return t("settings.agentProfiles.tools.archiveRead");
-  return tool;
+  return t(agentToolLabelKey(tool));
 }
 
 function globalPromptLabel(id: string) {
@@ -550,7 +519,7 @@ function toRequestBody(): UpdateAgentSettingsRequest | null {
       scope: agent.scope,
       order: agent.order,
       globalPromptIds: normalizeGlobalPromptIds(agent.globalPromptIds),
-      tools: normalizeTools(agent.tools),
+      tools: normalizeAgentTools(agent.tools),
       mcpServers: normalizeMcpServers(agent.mcpServers),
       pluginTools: [...agent.pluginTools],
       defaultModel: agent.defaultModel
@@ -568,7 +537,7 @@ function openCreateAgent() {
   agentFormSummary.value = "";
   agentFormPrompt.value = "";
   agentFormGlobalPromptIds.value = [];
-  agentFormTools.value = [...DEFAULT_TOOLS];
+  agentFormTools.value = [...DEFAULT_AGENT_TOOLS];
   agentFormMcpServers.value = [];
   agentFormPluginTools.value = [];
   agentFormDefaultModelPath.value = [];
@@ -585,7 +554,7 @@ function openEditAgent(agentId: string) {
   agentFormSummary.value = target.summary;
   agentFormPrompt.value = target.prompt;
   agentFormGlobalPromptIds.value = normalizeGlobalPromptIds(target.globalPromptIds);
-  agentFormTools.value = normalizeTools(target.tools);
+  agentFormTools.value = normalizeAgentTools(target.tools);
   agentFormMcpServers.value = normalizeMcpServers(target.mcpServers);
   agentFormPluginTools.value = normalizePluginTools(target.pluginTools);
   agentFormDefaultModelPath.value = target.defaultModel
@@ -603,7 +572,7 @@ function closeAgentModal() {
   agentFormSummary.value = "";
   agentFormPrompt.value = "";
   agentFormGlobalPromptIds.value = [];
-  agentFormTools.value = [...DEFAULT_TOOLS];
+  agentFormTools.value = [...DEFAULT_AGENT_TOOLS];
   agentFormMcpServers.value = [];
   agentFormPluginTools.value = [];
   agentFormDefaultModelPath.value = [];
@@ -643,7 +612,7 @@ function submitAgent() {
     summary: agentFormSummary.value.trim(),
     prompt: agentFormPrompt.value,
     globalPromptIds: normalizeGlobalPromptIds(agentFormGlobalPromptIds.value),
-    tools: normalizeTools(agentFormTools.value),
+    tools: normalizeAgentTools(agentFormTools.value),
     mcpServers: normalizeMcpServers(agentFormMcpServers.value),
     pluginTools: normalizePluginTools(agentFormPluginTools.value),
     defaultModel,

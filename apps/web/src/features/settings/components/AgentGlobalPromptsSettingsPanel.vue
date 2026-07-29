@@ -102,6 +102,16 @@
           </div>
         </a-form-item>
 
+        <a-form-item
+          v-if="!isReservedItem(formId)"
+          :label="t('settings.agentGlobalPrompts.form.expandOnSelectLabel')"
+        >
+          <a-switch v-model:checked="formExpandOnSelect" :disabled="!formCommand.trim()" />
+          <div class="pt-1 text-xs text-[color:var(--text-tertiary)]">
+            {{ t("settings.agentGlobalPrompts.form.expandOnSelectHelp") }}
+          </div>
+        </a-form-item>
+
         <a-form-item :label="t('settings.agentGlobalPrompts.form.promptLabel')" :required="true">
           <a-textarea
             v-model:value="formPrompt"
@@ -123,15 +133,19 @@
 <script setup lang="ts">
 import type { AgentGlobalPromptItem, AgentGlobalPromptSettings } from "@agent-workbench/shared";
 import { Modal, message } from "ant-design-vue";
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { DeleteOutlined, EditOutlined } from "@ant-design/icons-vue";
 import { useI18n } from "vue-i18n";
 import { getAgentGlobalPromptSettings, updateAgentGlobalPromptSettings } from "@/shared/api";
+import {
+  isReservedAgentGlobalPromptItem,
+  normalizeAgentGlobalPromptItems,
+  toAgentGlobalPromptsRequest
+} from "./agentGlobalPrompts";
 
 const MAX_TITLE_LENGTH = 20;
 const MAX_PROMPT_BYTES = 32 * 1024;
 const MAX_COMMAND_LENGTH = 64;
-const RESERVED_GLOBAL_SYSTEM_PROMPT_ID = "global_system_prompt";
 const RESERVED_GLOBAL_SYSTEM_PROMPT_TITLE = "Global System Prompt";
 const GLOBAL_PROMPT_COMMAND_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
@@ -148,6 +162,7 @@ const formId = ref("");
 const formTitle = ref("");
 const formCommand = ref("");
 const formPrompt = ref("");
+const formExpandOnSelect = ref(false);
 
 const promptBytes = computed(() => new TextEncoder().encode(formPrompt.value).length);
 
@@ -158,20 +173,7 @@ function newLocalId(prefix: string) {
 }
 
 function normalizeItems(raw: unknown): AgentGlobalPromptItem[] {
-  if (!Array.isArray(raw)) return [];
-  const out: AgentGlobalPromptItem[] = [];
-  const seen = new Set<string>();
-  for (const itemRaw of raw) {
-    const item = itemRaw as Record<string, unknown>;
-    const id = typeof item.id === "string" ? item.id.trim() : "";
-    const title = typeof item.title === "string" ? item.title.trim() : "";
-    const prompt = typeof item.prompt === "string" ? item.prompt : "";
-    const command = typeof item.command === "string" ? item.command.trim() : "";
-    if (!id || !title || seen.has(id)) continue;
-    seen.add(id);
-    out.push({ id, title, prompt, ...(command ? { command } : {}) });
-  }
-  return out;
+  return normalizeAgentGlobalPromptItems(raw);
 }
 
 function mapFromSettings(settings: AgentGlobalPromptSettings) {
@@ -182,18 +184,11 @@ function mapFromSettings(settings: AgentGlobalPromptSettings) {
 }
 
 function isReservedItem(id: string) {
-  return id.trim() === RESERVED_GLOBAL_SYSTEM_PROMPT_ID;
+  return isReservedAgentGlobalPromptItem(id);
 }
 
 function toRequestBody() {
-  return {
-    items: items.value.map((item) => ({
-      id: item.id,
-      title: item.title.trim(),
-      prompt: item.prompt,
-      ...(item.command ? { command: item.command } : {})
-    }))
-  };
+  return toAgentGlobalPromptsRequest(items.value);
 }
 
 function openCreate() {
@@ -202,6 +197,7 @@ function openCreate() {
   formTitle.value = "";
   formCommand.value = "";
   formPrompt.value = "";
+  formExpandOnSelect.value = false;
   modalOpen.value = true;
 }
 
@@ -213,6 +209,7 @@ function openEdit(id: string) {
   formTitle.value = isReservedItem(target.id) ? RESERVED_GLOBAL_SYSTEM_PROMPT_TITLE : target.title;
   formCommand.value = target.command || "";
   formPrompt.value = target.prompt;
+  formExpandOnSelect.value = target.expandOnSelect === true;
   modalOpen.value = true;
 }
 
@@ -223,6 +220,7 @@ function closeModal() {
   formTitle.value = "";
   formCommand.value = "";
   formPrompt.value = "";
+  formExpandOnSelect.value = false;
 }
 
 async function persist(params: { toast: boolean }) {
@@ -305,7 +303,8 @@ function submit() {
     id,
     title: normalizedTitle,
     prompt,
-    ...(command ? { command } : {})
+    ...(command ? { command } : {}),
+    ...(command && formExpandOnSelect.value ? { expandOnSelect: true } : {})
   };
 
   if (modalMode.value === "create") {
@@ -356,6 +355,12 @@ async function refreshDraft() {
     loading.value = false;
   }
 }
+
+watch(formCommand, (command) => {
+  if (!command.trim()) {
+    formExpandOnSelect.value = false;
+  }
+});
 
 onMounted(() => {
   void refreshDraft();
