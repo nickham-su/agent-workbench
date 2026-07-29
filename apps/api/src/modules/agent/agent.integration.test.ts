@@ -8,7 +8,7 @@ import { openDb } from "../../infra/db/db.js";
 import type { Db } from "../../infra/db/db.js";
 import { ensureDir, rmrf } from "../../infra/fs/fs.js";
 import { agentArchiveSessionDir, compactionSnippetPath, workspaceRepoDirPath, workspaceRoot } from "../../infra/fs/paths.js";
-import { setSettingJson } from "../settings/settings.store.js";
+import { getSettingJson, setSettingJson } from "../settings/settings.store.js";
 import { insertWorkspace, insertWorkspaceRepo } from "../workspaces/workspace.store.js";
 import { insertRepo } from "../repos/repo.store.js";
 import {
@@ -48,6 +48,8 @@ async function createFixture(options?: {
   };
   enablePluginHost?: boolean;
   enablePluginServices?: boolean;
+  agentGlobalPromptsStored?: unknown;
+  agentGlobalPromptsUpdatedAt?: number;
 }): Promise<Fixture> {
   const repoRoot = path.resolve(process.cwd(), "../..");
   const testsRoot = path.join(repoRoot, ".tmp-tests");
@@ -56,6 +58,14 @@ async function createFixture(options?: {
   const internalToken = "test-internal-token";
 
   const db = await openDb(dataDir);
+  if (options?.agentGlobalPromptsStored !== undefined) {
+    setSettingJson(
+      db,
+      "agent_global_prompts_v1",
+      options.agentGlobalPromptsStored,
+      options.agentGlobalPromptsUpdatedAt ?? Date.now()
+    );
+  }
   const app = await createApp({
     db,
     repoRoot,
@@ -7803,6 +7813,135 @@ test("agent settings 兼容缺省 globalPromptIds", async () => {
   assert.equal(res.statusCode, 200, `update agent settings failed: ${res.body}`);
   const body = res.json() as { agents: Array<{ globalPromptIds?: string[] }> };
   assert.deepEqual(body.agents[0]?.globalPromptIds ?? [], []);
+});
+
+test("agent global prompts 保存选择指令后展开提示词内容配置", async () => {
+  const fixture = await createFixture();
+  const res = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/global-prompts",
+    payload: {
+      items: [
+        {
+          id: "global_system_prompt",
+          title: "ignored",
+          prompt: "SYSTEM",
+          command: "system-command",
+          expandOnSelect: true
+        },
+        {
+          id: "gp_expand",
+          title: "Expand",
+          prompt: "EXPAND_PROMPT",
+          command: "expand",
+          expandOnSelect: true
+        },
+        {
+          id: "gp_disabled",
+          title: "Disabled",
+          prompt: "DISABLED_PROMPT",
+          command: "disabled",
+          expandOnSelect: false
+        },
+        {
+          id: "gp_without_command",
+          title: "Without command",
+          prompt: "WITHOUT_COMMAND_PROMPT",
+          expandOnSelect: true
+        }
+      ]
+    }
+  });
+  assert.equal(res.statusCode, 200, `update global prompts failed: ${res.body}`);
+
+  const items = (res.json() as {
+    items: Array<{ id: string; command?: string; expandOnSelect?: boolean }>;
+  }).items;
+  assert.deepEqual(items.find((item) => item.id === "gp_expand"), {
+    id: "gp_expand",
+    title: "Expand",
+    prompt: "EXPAND_PROMPT",
+    command: "expand",
+    expandOnSelect: true
+  });
+  assert.equal(items.find((item) => item.id === "gp_disabled")?.expandOnSelect, undefined);
+  assert.equal(items.find((item) => item.id === "gp_without_command")?.expandOnSelect, undefined);
+  assert.equal(items.find((item) => item.id === "gp_without_command")?.command, undefined);
+  assert.equal(items.find((item) => item.id === "global_system_prompt")?.expandOnSelect, undefined);
+  assert.equal(items.find((item) => item.id === "global_system_prompt")?.command, undefined);
+
+  const getRes = await fixture.app.inject({
+    method: "GET",
+    url: "/api/settings/agent/global-prompts"
+  });
+  assert.equal(getRes.statusCode, 200, `get global prompts failed: ${getRes.body}`);
+  const getItems = (getRes.json() as {
+    items: Array<{ id: string; command?: string; expandOnSelect?: boolean }>;
+  }).items;
+  assert.equal(getItems.find((item) => item.id === "gp_expand")?.expandOnSelect, true);
+  assert.equal(getItems.find((item) => item.id === "gp_disabled")?.expandOnSelect, undefined);
+});
+
+test("agent global prompts 拒绝非布尔的选择展开配置", async () => {
+  const fixture = await createFixture();
+  for (const expandOnSelect of ["true", 1]) {
+    const res = await fixture.app.inject({
+      method: "PUT",
+      url: "/api/settings/agent/global-prompts",
+      payload: {
+        items: [
+          { id: "global_system_prompt", title: "ignored", prompt: "SYSTEM" },
+          { id: "gp_invalid", title: "Invalid", prompt: "PROMPT", command: "invalid", expandOnSelect }
+        ]
+      }
+    });
+    assert.equal(res.statusCode, 400, `invalid expand-on-select should fail: ${res.body}`);
+  }
+});
+
+test("agent global prompts 归一化历史选择展开配置且不重写缺失字段", async () => {
+  const legacyUpdatedAt = 123;
+  const legacyFixture = await createFixture({
+    agentGlobalPromptsStored: {
+      items: [
+        { id: "global_system_prompt", title: "Global System Prompt", prompt: "SYSTEM" },
+        { id: "gp_legacy", title: "Legacy", prompt: "LEGACY", command: "legacy" }
+      ]
+    },
+    agentGlobalPromptsUpdatedAt: legacyUpdatedAt
+  });
+  assert.equal(
+    getSettingJson(legacyFixture.db, "agent_global_prompts_v1")?.updatedAt,
+    legacyUpdatedAt,
+    "missing expandOnSelect should not trigger a settings rewrite"
+  );
+
+  const fixture = await createFixture({
+    agentGlobalPromptsStored: {
+      items: [
+        {
+          id: "global_system_prompt",
+          title: "Global System Prompt",
+          prompt: "SYSTEM",
+          expandOnSelect: true
+        },
+        { id: "gp_enabled", title: "Enabled", prompt: "ENABLED", command: "enabled", expandOnSelect: true },
+        { id: "gp_false", title: "False", prompt: "FALSE", command: "false", expandOnSelect: false },
+        { id: "gp_invalid", title: "Invalid", prompt: "INVALID", command: "invalid", expandOnSelect: "true" },
+        { id: "gp_no_command", title: "No command", prompt: "NO_COMMAND", expandOnSelect: true }
+      ]
+    },
+    agentGlobalPromptsUpdatedAt: legacyUpdatedAt
+  });
+
+  const stored = getSettingJson(fixture.db, "agent_global_prompts_v1");
+  assert.ok(stored, "normalized settings should be stored");
+  assert.ok(stored.updatedAt > legacyUpdatedAt, "invalid historical values should be normalized and persisted");
+  const storedItems = (stored?.value as { items: Array<{ id: string; command?: string; expandOnSelect?: boolean }> }).items;
+  assert.equal(storedItems.find((item) => item.id === "gp_enabled")?.expandOnSelect, true);
+  assert.equal(storedItems.find((item) => item.id === "gp_false")?.expandOnSelect, undefined);
+  assert.equal(storedItems.find((item) => item.id === "gp_invalid")?.expandOnSelect, undefined);
+  assert.equal(storedItems.find((item) => item.id === "gp_no_command")?.expandOnSelect, undefined);
 });
 
 test("agent prompt-context 全局提示词按列表顺序注入(方案A)", async () => {

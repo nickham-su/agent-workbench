@@ -1,3 +1,5 @@
+import type { AgentGlobalPromptItem } from "@agent-workbench/shared";
+
 export type SlashCommandAction = "compact" | "clear";
 
 export type SlashCommandDefinition = {
@@ -54,6 +56,19 @@ export function resolveSlashCommand(text: string, commandMap: Map<string, SlashC
   if (!command) return null;
   if (command.strictOnly && normalized !== command.usage) return null;
   return command;
+}
+
+export function shouldConvertLeadingIdeographicCommaToSlash(previousText: string, nextText: string) {
+  return previousText.length === 0 && nextText.startsWith("、");
+}
+
+export function promptCommandInsertText(item: AgentGlobalPromptItem, command: string) {
+  if (item.expandOnSelect === true) return item.prompt;
+  return `/${command}`;
+}
+
+export function promptCommandInsertCaret(item: AgentGlobalPromptItem, command: string) {
+  return promptCommandInsertText(item, command).length;
 }
 
 const MENTION_TERMINATORS = /[\s,;:)\]}，；：。]/;

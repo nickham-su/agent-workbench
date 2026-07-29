@@ -709,7 +709,10 @@ import {
   buildSlashCommandHint,
   findMentionTarget,
   isSlashMode,
+  promptCommandInsertCaret,
+  promptCommandInsertText,
   resolveSlashCommand,
+  shouldConvertLeadingIdeographicCommaToSlash,
   type SlashCommandAction,
   type SlashCommandDefinition
 } from "./agentInputCandidates";
@@ -933,12 +936,11 @@ function isFirstUserDisplayItem(item: DisplayItem) {
 
 let runElapsedTimer: number | null = null;
 
-// 兼容中文输入法习惯: 用户输入首字符为“、”时,自动替换为“/”。
+// 兼容中文输入法习惯: 仅从空输入以“、”开始时,自动替换为“/”。
 watch(
   draft,
-  (next) => {
-    if (typeof next !== "string" || next.length === 0) return;
-    if (next[0] !== "、") return;
+  (next, previous) => {
+    if (!shouldConvertLeadingIdeographicCommaToSlash(previous || "", next || "")) return;
     draft.value = `/${next.slice(1)}`;
   },
   { flush: "sync" }
@@ -2699,10 +2701,22 @@ function onPickInputCandidate(candidate: InputCandidateItem) {
     return;
   }
   if (candidate.kind === "prompt_command") {
+    const item = promptCommandMap.value.get(candidate.command);
+    const insertText = item ? promptCommandInsertText(item, candidate.command) : candidate.label;
+    const caretPos = item ? promptCommandInsertCaret(item, candidate.command) : insertText.length;
     inputCandidateSelection.value = candidate.id;
-    draft.value = candidate.label;
-    nextTick(() => syncInputCaretFromNative());
-    void focusInputIfNeeded();
+    draft.value = insertText;
+    void nextTick(() => {
+      const raw = (inputEl.value as any)?.resizableTextArea?.textArea as HTMLTextAreaElement | undefined;
+      if (raw) {
+        raw.focus();
+        raw.setSelectionRange(caretPos, caretPos);
+        inputCaretIndex.value = caretPos;
+        return;
+      }
+      void focusInputIfNeeded();
+      syncInputCaretFromNative();
+    });
     return;
   }
   if (candidate.kind === "skill" || candidate.kind === "file") {
@@ -3546,6 +3560,7 @@ watch(
 // activated 时主动 refresh,避免回到 Agent 后列表为空且不触发拉取。
 onActivated(() => {
   if (!props.active) return;
+  void refreshPromptCommandItems();
   if (!props.sessionId) return;
   if (!props.sessionReady) return;
   // KeepAlive 恢复时优先恢复上次离开的位置;仅在列表为空时再兜底刷新。

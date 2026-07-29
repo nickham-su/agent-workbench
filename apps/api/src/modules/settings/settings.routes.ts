@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { AppContext } from "../../app/context.js";
+import { HttpError } from "../../app/errors.js";
 import {
   AgentProvidersSettingsViewSchema,
   AgentGlobalPromptSettingsSchema,
@@ -52,6 +53,20 @@ import {
   updateNetworkSettings,
   updateSearchSettings
 } from "./settings.service.js";
+
+// Fastify's default AJV coercion would otherwise convert "true" and 1 to booleans.
+function assertAgentGlobalPromptExpandOnSelectBoolean(body: unknown) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return;
+  const items = (body as { items?: unknown }).items;
+  if (!Array.isArray(items)) return;
+  for (const item of items) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+    if ("expandOnSelect" in record && typeof record.expandOnSelect !== "boolean") {
+      throw new HttpError(400, "expandOnSelect must be a boolean", "AGENT_GLOBAL_PROMPT_EXPAND_ON_SELECT_INVALID");
+    }
+  }
+}
 
 export async function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext) {
   app.get(
@@ -217,6 +232,9 @@ export async function registerSettingsRoutes(app: FastifyInstance, ctx: AppConte
         tags: ["settings"],
         body: UpdateAgentGlobalPromptSettingsRequestSchema,
         response: { 200: AgentGlobalPromptSettingsSchema, 400: ErrorResponseSchema }
+      },
+      preValidation: async (req) => {
+        assertAgentGlobalPromptExpandOnSelectBoolean(req.body);
       }
     },
     async (req) => updateAgentGlobalPromptSettings(ctx, app.log, req.body)
