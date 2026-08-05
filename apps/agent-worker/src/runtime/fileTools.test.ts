@@ -266,9 +266,9 @@ test("skill V2 根读取返回正文和扁平可复制文件路径", async () =>
 
   const result = await runSkillTool({ workspacePath, repoRoot, skillId: " builtin/tooling " });
 
-  assert.equal(result.skill_id, "builtin/tooling");
-  assert.equal(result.file_path, "SKILL.md");
-  assert.deepEqual(Object.keys(result).sort(), ["content", "file_path", "skill_id", "truncated"]);
+  assert.equal(result.skillId, "builtin/tooling");
+  assert.equal(result.filePath, "SKILL.md");
+  assert.deepEqual(Object.keys(result).sort(), ["content", "filePath", "skillId", "truncated"]);
   assert.equal(result.truncated, false);
   assert.match(result.content, /Tooling body\r\n/);
   assert.match(result.content, /\n\n---\n\n## Skill files\n\n```text\nnested\/SKILL\.md\nnotes\.txt\n```$/);
@@ -285,8 +285,8 @@ test("skill V2 指定辅助文件保持通用读取器规范化且不剥离嵌�
 
   const result = await runSkillTool({ workspacePath, repoRoot, skillId: "builtin/tooling", filePath: "nested/SKILL.md" });
 
-  assert.equal(result.file_path, "nested/SKILL.md");
-  assert.deepEqual(Object.keys(result).sort(), ["content", "file_path", "skill_id", "truncated"]);
+  assert.equal(result.filePath, "nested/SKILL.md");
+  assert.deepEqual(Object.keys(result).sort(), ["content", "filePath", "skillId", "truncated"]);
   assert.equal(result.content, "---\nname: helper\n---\nline");
   assert.equal(result.truncated, false);
 });
@@ -332,7 +332,7 @@ test("skill V2 指定辅助文件将 CRLF 和孤立 CR 规范为 LF，并去除 
   assert.equal(result.content.includes("\ufeff"), false);
 });
 
-test("skill V2 接受且只接受根读取 file_path 特例", async () => {
+test("skill V2 接受且只接受根读取 filePath 特例", async () => {
   const workspacePath = await createWorkspace();
   const repoRoot = await createWorkspace();
   const skillRoot = path.join(repoRoot, "skills", "tooling");
@@ -341,7 +341,7 @@ test("skill V2 接受且只接受根读取 file_path 特例", async () => {
 
   for (const skillPath of [undefined, "", " \t", "SKILL.md"]) {
     const result = await runSkillTool({ workspacePath, repoRoot, skillId: "builtin/tooling", ...(skillPath === undefined ? {} : { filePath: skillPath }) });
-    assert.equal(result.file_path, "SKILL.md");
+    assert.equal(result.filePath, "SKILL.md");
   }
   for (const skillPath of [" SKILL.md", "SKILL.md ", "./SKILL.md", "\n", "\u00a0"]) {
     await assert.rejects(

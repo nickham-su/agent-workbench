@@ -679,26 +679,32 @@ test("agent prompt-context 中的工具描述与 schema 说明使用英文", asy
   assert.ok(String(scratchpadTool?.description || "").includes("Suggested <= 200 characters"));
   assert.equal((scratchpadTool?.inputSchema as any)?.properties?.content?.maxLength, 200);
   assert.ok(String(skillTool?.description || "").includes("stable logical identifier"));
-  assert.ok(String(skillTool?.description || "").includes("skill_id"));
-  assert.ok(String(skillTool?.description || "").includes("file_path"));
+  assert.ok(String(skillTool?.description || "").includes("skillId"));
+  assert.ok(String(skillTool?.description || "").includes("filePath"));
   const skillProperties = (skillTool?.inputSchema as any)?.properties;
-  assert.deepEqual((skillTool?.inputSchema as any)?.required, ["skill_id"]);
-  assert.deepEqual(Object.keys(skillProperties || {}).sort(), ["file_path", "skill_id"]);
+  assert.deepEqual((skillTool?.inputSchema as any)?.required, ["skillId"]);
+  assert.deepEqual(Object.keys(skillProperties || {}).sort(), ["filePath", "skillId"]);
   assert.equal(skillProperties?.id, undefined);
   assert.equal(skillProperties?.skill, undefined);
   assert.equal(skillProperties?.path, undefined);
-  assert.equal(skillProperties?.skill_id?.minLength, undefined);
-  assert.ok(String(skillProperties?.skill_id?.description || "").includes("Stable logical skill identifier"));
-  assert.ok(String(skillProperties?.file_path?.description || "").includes("spaces/tabs"));
+  assert.equal(skillProperties?.skill_id, undefined);
+  assert.equal(skillProperties?.file_path, undefined);
+  assert.equal(skillProperties?.skillId?.minLength, undefined);
+  assert.ok(String(skillProperties?.skillId?.description || "").includes("Stable logical skill identifier"));
+  assert.ok(String(skillProperties?.filePath?.description || "").includes("spaces/tabs"));
   const validateSkillArgs = new Ajv({ allErrors: true, strict: false }).compile(skillTool?.inputSchema as Record<string, unknown>);
-  assert.equal(validateSkillArgs({ skill_id: "builtin/skill-authoring" }), true);
-  assert.equal(validateSkillArgs({ skill_id: "builtin/skill-authoring", file_path: "reference.md" }), true);
+  assert.equal(validateSkillArgs({ skillId: "builtin/skill-authoring" }), true);
+  assert.equal(validateSkillArgs({ skillId: "builtin/skill-authoring", filePath: "reference.md" }), true);
   for (const legacyPayload of [
     { id: "builtin/skill-authoring" },
     { skill: "builtin/skill-authoring" },
     { skill: "builtin/skill-authoring", path: "reference.md" },
-    { skill_id: "builtin/skill-authoring", path: "reference.md" },
-    { skill_id: "builtin/skill-authoring", id: "builtin/skill-authoring" }
+    { skill_id: "builtin/skill-authoring" },
+    { skill_id: "builtin/skill-authoring", file_path: "reference.md" },
+    { skillId: "builtin/skill-authoring", path: "reference.md" },
+    { skillId: "builtin/skill-authoring", file_path: "reference.md" },
+    { skillId: "builtin/skill-authoring", skill_id: "builtin/skill-authoring" },
+    { skillId: "builtin/skill-authoring", id: "builtin/skill-authoring" }
   ]) {
     assert.equal(validateSkillArgs(legacyPayload), false, `legacy payload must fail schema validation: ${JSON.stringify(legacyPayload)}`);
     assert.ok(
@@ -8535,23 +8541,25 @@ test("agent prompt-context 注入 skills 摘要并在同 run 缓存静态部分"
       runId
     });
     assert.ok(first.system.includes("[skills]"), "skills section should be present");
-    assert.ok(first.system.includes(`skill_id: builtin/${path.basename(builtinSkillDir)}`), "builtin skill identifier should be injected");
+    assert.ok(first.system.includes(`skillId: builtin/${path.basename(builtinSkillDir)}`), "builtin skill identifier should be injected");
     assert.ok(first.system.includes("name: Builtin Skill V1"));
-    assert.ok(first.system.includes(`skill_id: builtin/${path.basename(builtinSkillDir)}; name: Builtin Skill V1\n`), "empty description must not leave a trailing separator");
-    assert.equal(first.system.includes(`skill_id: builtin/${path.basename(builtinSkillDir)}; name: Builtin Skill V1; description:`), false, "empty description must be omitted");
-    assert.ok(first.system.includes("skill_id: workspace/deploy-skill/deploy"), "workspace skill identifier should be injected");
+    assert.ok(first.system.includes(`skillId: builtin/${path.basename(builtinSkillDir)}; name: Builtin Skill V1\n`), "empty description must not leave a trailing separator");
+    assert.equal(first.system.includes(`skillId: builtin/${path.basename(builtinSkillDir)}; name: Builtin Skill V1; description:`), false, "empty description must be omitted");
+    assert.ok(first.system.includes("skillId: workspace/deploy-skill/deploy"), "workspace skill identifier should be injected");
     assert.ok(first.system.includes("description: ws-desc-v1"));
-    assert.ok(first.system.includes(`skill_id: repo/${repoId}/${repoSkillsRootDir}/${repoTopSkillDir}`), "repo skill identifier should be injected");
+    assert.ok(first.system.includes(`skillId: repo/${repoId}/${repoSkillsRootDir}/${repoTopSkillDir}`), "repo skill identifier should be injected");
     assert.ok(first.system.includes("description: repo-desc-v1"));
     assert.equal(first.system.includes(fixture.workspacePath), false, "system prompt should not expose workspace real path");
     assert.equal(first.system.includes(repoPath), false, "system prompt should not expose repo real path");
     assert.equal(first.system.includes(`builtin/${path.basename(builtinSkillDir)}/child`), false, "only top-level skills should be injected");
-    assert.equal(first.system.includes("skill_id: workspace/deploy-skill/nontext"), false, "non-text top-level skill should not be injected");
-    assert.equal(first.system.includes("skill_id: workspace/deploy-skill/ invalid"), false, "non-callable physical skill must be omitted from prompt summaries");
+    assert.equal(first.system.includes("skillId: workspace/deploy-skill/nontext"), false, "non-text top-level skill should not be injected");
+    assert.equal(first.system.includes("skillId: workspace/deploy-skill/ invalid"), false, "non-callable physical skill must be omitted from prompt summaries");
     assert.equal(first.tools.some((tool) => tool.name === "skill"), true, "skill tool should be available");
     assert.ok(first.system.includes("First read the root:"), "skills prompt should require a root read first");
     assert.ok(first.system.includes("flat (not tree-shaped) Skill files list"), "skills prompt should describe the flat list");
-    assert.ok(first.system.includes("copy one complete path line verbatim into file_path"), "skills prompt should explain direct path reuse");
+    assert.ok(first.system.includes("copy one complete path line verbatim into filePath"), "skills prompt should explain direct path reuse");
+    assert.equal(first.system.includes("skill_id:"), false, "skills prompt must not expose snake_case parameter labels");
+    assert.equal(first.system.includes("file_path"), false, "skills prompt must not expose snake_case parameter labels");
 
     await fs.writeFile(path.join(wsSkillDir, "SKILL.md"), "---\nname: Workspace Skill V2\ndescription: ws-desc-v2\n---\n", "utf8");
     await fs.writeFile(path.join(repoSkillDir, repoTopSkillDir, "SKILL.md"), "---\nname: Repo Skill V2\ndescription: repo-desc-v2\n---\n", "utf8");

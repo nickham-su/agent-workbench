@@ -55,7 +55,7 @@ large-skill/
 
 ```json
 {
-  "skill_id": "builtin/skill-authoring"
+  "skillId": "builtin/skill-authoring"
 }
 ```
 
@@ -67,21 +67,21 @@ workspace/<rootDir>/<skillDir>
 repo/<repoId>/<rootDir>/<skillDir>
 ```
 
-读取根说明和可用文件列表时，省略 `file_path`，传空字符串或仅由空格/tab 组成的字符串，或精确传入 `SKILL.md`：
+读取根说明和可用文件列表时，省略 `filePath`，传空字符串或仅由空格/tab 组成的字符串，或精确传入 `SKILL.md`：
 
 ```json
 {
-  "skill_id": "builtin/skill-authoring",
-  "file_path": "SKILL.md"
+  "skillId": "builtin/skill-authoring",
+  "filePath": "SKILL.md"
 }
 ```
 
-根读取会返回根正文和扁平的 `Skill files` 列表。代码块中的每一行都是可直接复制到后续 `file_path` 的完整相对路径：
+根读取会返回根正文和扁平的 `Skill files` 列表。代码块中的每一行都是可直接复制到后续 `filePath` 的完整相对路径：
 
 ```json
 {
-  "skill_id": "builtin/skill-authoring",
-  "file_path": "reference.md"
+  "skillId": "builtin/skill-authoring",
+  "filePath": "reference.md"
 }
 ```
 
@@ -91,7 +91,7 @@ repo/<repoId>/<rootDir>/<skillDir>
 
 - 一个 skill 聚焦一个明确目标，正文先写结论和最小可执行步骤。
 - 把较长参考内容、示例和清单放入平级辅助文件，让根说明只保留导航和关键约束。
-- 在根说明中准确引用文件路径；路径应能直接复制到 `file_path` 参数。
+- 在根说明中准确引用文件路径；路径应能直接复制到 `filePath` 参数。
 - 目录名应稳定、短且语义清晰，例如 `plugin-development`、`skill-authoring`。
 - 不要放入二进制、密钥、token、隐私数据或高度临时的信息。
 
@@ -100,6 +100,6 @@ repo/<repoId>/<rootDir>/<skillDir>
 - 顶层目录是否有直属、常规文件类型的 `SKILL.md`？
 - 是否优先采用平级多文件，而不是不必要地增加层级？
 - 根说明是否包含目标读者、最小步骤和可复制示例？
-- 每个辅助文件路径是否是规范相对路径，并适合直接填入 `file_path`？
+- 每个辅助文件路径是否是规范相对路径，并适合直接填入 `filePath`？
 - 名称和描述是否仅作为展示元数据，而非定位或授权依据？
 - 内容是否与当前加载协议、工具 schema 和实际行为一致？

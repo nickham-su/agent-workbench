@@ -24,42 +24,47 @@ function createSkillExecutionContext(skillsRoot: string) {
   } as any;
 }
 
-test("builtin provider skill 仅映射 own skill_id 和 own file_path", async () => {
+test("builtin provider skill 仅映射 own skillId 和 own filePath", async () => {
   const fixture = await createSkillFixture();
   try {
     const provider = new BuiltinToolProvider();
     const ctx = createSkillExecutionContext(fixture.skillsRoot);
 
-    const root = await provider.execute("skill", { skill_id: fixture.skillId }, ctx) as Record<string, unknown>;
-    assert.deepEqual(Object.keys(root).sort(), ["content", "file_path", "skill_id", "truncated"]);
-    assert.equal(root.skill_id, fixture.skillId);
-    assert.equal(root.file_path, "SKILL.md");
+    const root = await provider.execute("skill", { skillId: fixture.skillId }, ctx) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(root).sort(), ["content", "filePath", "skillId", "truncated"]);
+    assert.equal(root.skillId, fixture.skillId);
+    assert.equal(root.filePath, "SKILL.md");
     assert.equal(root.content, "root instructions\n\n---\n\n## Skill files\n\n```text\nreference.md\n```");
 
     const file = await provider.execute("skill", {
-      skill_id: fixture.skillId,
-      file_path: "reference.md"
+      skillId: fixture.skillId,
+      filePath: "reference.md"
     }, ctx) as Record<string, unknown>;
-    assert.equal(file.skill_id, fixture.skillId);
-    assert.equal(file.file_path, "reference.md");
+    assert.equal(file.skillId, fixture.skillId);
+    assert.equal(file.filePath, "reference.md");
     assert.equal(file.content, "reference content");
 
     const nullPrototypeArgs = Object.assign(Object.create(null), {
-      skill_id: fixture.skillId,
-      file_path: "reference.md"
+      skillId: fixture.skillId,
+      filePath: "reference.md"
     }) as Record<string, unknown>;
     const nullPrototypeFile = await provider.execute("skill", nullPrototypeArgs, ctx) as Record<string, unknown>;
-    assert.equal(nullPrototypeFile.file_path, "reference.md");
+    assert.equal(nullPrototypeFile.filePath, "reference.md");
     assert.equal(nullPrototypeFile.content, "reference content");
 
     for (const [invalidArgs, message] of [
-      [{ skill_id: fixture.skillId, path: "reference.md" }, "invalid skill path"],
-      [{ skill_id: fixture.skillId, id: fixture.skillId }, "invalid skill identifier"],
-      [{ skill_id: fixture.skillId, skill: fixture.skillId }, "invalid skill identifier"],
-      [{ skill_id: fixture.skillId, unexpected: true }, "invalid skill identifier"],
+      [{ skillId: fixture.skillId, path: "reference.md" }, "invalid skill identifier"],
+      [{ skillId: fixture.skillId, file_path: "reference.md" }, "invalid skill identifier"],
+      [{ skillId: fixture.skillId, id: fixture.skillId }, "invalid skill identifier"],
+      [{ skillId: fixture.skillId, skill: fixture.skillId }, "invalid skill identifier"],
+      [{ skillId: fixture.skillId, skill_id: fixture.skillId }, "invalid skill identifier"],
+      [{ skillId: fixture.skillId, unexpected: true }, "invalid skill identifier"],
       [{ id: fixture.skillId }, "skill is required"],
       [{ skill: fixture.skillId }, "skill is required"],
-      [{ skill: fixture.skillId, path: "reference.md" }, "invalid skill path"]
+      [{ skill_id: fixture.skillId }, "skill is required"],
+      [{ skill: fixture.skillId, path: "reference.md" }, "skill is required"],
+      [{ skill_id: fixture.skillId, file_path: "reference.md" }, "skill is required"],
+      [{ unexpected: true }, "skill is required"]
     ] as const) {
       await assert.rejects(
         () => provider.execute("skill", invalidArgs, ctx),
@@ -67,13 +72,18 @@ test("builtin provider skill 仅映射 own skill_id 和 own file_path", async ()
       );
     }
 
-    const symbolFieldArgs = { skill_id: fixture.skillId, [Symbol("unexpected")]: true } as Record<string | symbol, unknown>;
+    await assert.rejects(
+      () => provider.execute("skill", { skillId: fixture.skillId, filePath: 1 }, ctx),
+      { message: "invalid skill path" }
+    );
+
+    const symbolFieldArgs = { skillId: fixture.skillId, [Symbol("unexpected")]: true } as Record<string | symbol, unknown>;
     await assert.rejects(
       () => provider.execute("skill", symbolFieldArgs as Record<string, unknown>, ctx),
       { message: "invalid skill identifier" }
     );
 
-    const inheritedSkillId = Object.create({ skill_id: fixture.skillId }) as Record<string, unknown>;
+    const inheritedSkillId = Object.create({ skillId: fixture.skillId }) as Record<string, unknown>;
     await assert.rejects(
       () => provider.execute("skill", inheritedSkillId, ctx),
       { message: "skill is required" }

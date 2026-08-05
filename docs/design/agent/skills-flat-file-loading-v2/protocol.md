@@ -17,8 +17,8 @@
 
 V2 将 Skills 读取模型收敛为“一个顶层 skill 根目录 + 一个根说明文件 + 普通辅助文本文件”：
 
-- 模型先以 `skill_id` 传入稳定逻辑标识选择一个顶层 skill，再以相对 `file_path` 读取根内文件；
-- 根读取返回根正文与扁平 `Skill files` 清单；清单每行可直接作为后续 `file_path`；
+- 模型先以 `skillId` 传入稳定逻辑标识选择一个顶层 skill，再以相对 `filePath` 读取根内文件；
+- 根读取返回根正文与扁平 `Skill files` 清单；清单每行可直接作为后续 `filePath`；
 - 不采用树形结构，因为树形展示要求模型把层级转换成参数路径，增加填写错误；
 - 嵌套 `SKILL.md` 是普通辅助文件，不能形成子 skill；
 - builtin、workspace、repo roots，external roots 启用，`topLevelSkillCount` 与 run 级静态缓存维持现有模型。
@@ -30,8 +30,8 @@ V2 将 Skills 读取模型收敛为“一个顶层 skill 根目录 + 一个根�
 | 根 `SKILL.md` | skill 根目录直属、名称精确为 `SKILL.md` 的文件；唯一具有元数据语义的文件。 |
 | 辅助文件 | skill 根目录内除根 `SKILL.md` 外的任何文件，包括任意深度的 `SKILL.md`。 |
 | 稳定逻辑标识 | 不暴露绝对路径的定位键，例如 `builtin/skill-authoring`。 |
-| 根读取 | `file_path` 缺失、为空字符串或仅由 U+0020 SPACE/U+0009 TAB 组成的字符串，或原始值精确为 `SKILL.md` 时的读取。 |
-| 指定文件读取 | 对非根、有效相对 `file_path` 的读取。 |
+| 根读取 | `filePath` 缺失、为空字符串或仅由 U+0020 SPACE/U+0009 TAB 组成的字符串，或原始值精确为 `SKILL.md` 时的读取。 |
+| 指定文件读取 | 对非根、有效相对 `filePath` 的读取。 |
 | `Skill files` section | 根读取 `content` 中的文件发现段，包含它自己的前导分隔片段或标题；不是树，也不是白名单。 |
 | 根源文本 | 根文件原始 bytes 经 `Buffer.toString("utf8")` 解码、尚未做 frontmatter 剥离或正文预算裁剪的文本。 |
 | 规范化文本内容 | 当前 Worker 通用文本读取器对辅助文件解码、行尾规范化、长行处理和容量裁剪后产生的字符串。 |
@@ -129,7 +129,7 @@ semanticDescription = trim(description) 非空 ? trim(description) : undefined
 
 ### 精确稳定逻辑标识语法
 
-`skill_id` 必须是字符串。缺失、空字符串，或只由 U+0020 SPACE 与 U+0009 TAB 组成的字符串，必须报 `skill is required`；非字符串必须报 `invalid skill identifier`。公开错误字符串沿用既有固定合同，不随字段名改名。
+`skillId` 必须是字符串。缺失、空字符串，或只由 U+0020 SPACE 与 U+0009 TAB 组成的字符串，必须报 `skill is required`；非字符串必须报 `invalid skill identifier`。公开错误字符串沿用既有固定合同，不随字段名改名。
 
 为保留轻量调用容错，执行器只能在整体两端移除 U+0020 SPACE 与 U+0009 TAB，必须使用等价于下列语义的 `trimAsciiSpaceTab()`，不得调用 JavaScript `trim()`、`trimStart()` 或 `trimEnd()`：
 
@@ -138,7 +138,7 @@ const trimAsciiSpaceTab = (value: string): string =>
   value.replace(/^[\u0020\u0009]+|[\u0020\u0009]+$/g, "");
 ```
 
-对 `skill_id` 应用 `trimAsciiSpaceTab()` 后为空仍必须报 `skill is required`。其余规范值按 `/` 分段，必须满足以下通用规则：
+对 `skillId` 应用 `trimAsciiSpaceTab()` 后为空仍必须报 `skill is required`。其余规范值按 `/` 分段，必须满足以下通用规则：
 
 - 分隔符只能是 `/`，并且每个 segment 必须独立通过本节字符校验；
 - 调用方传入的每个 segment 必须是 well-formed Unicode scalar sequence，不得包含 lone surrogate；
@@ -149,7 +149,7 @@ const trimAsciiSpaceTab = (value: string): string =>
 - 任一 segment 的首尾不得是 U+0020 SPACE、U+0009 TAB 或其他 Unicode whitespace；不得借助任何 trim/normalize 修正后接受；
 - namespace 必须精确小写匹配，所有 mapping 字段匹配均大小写敏感，且不得 normalize。
 
-因此 `" builtin/foo "` 与 `"\tbuiltin/foo\t"` 作为 `skill_id` 的规范值均为 `builtin/foo`；前后包含 `\n`、`\r`、U+2028、U+2029、U+FEFF 或 NBSP 的输入不会被移除，必须按上述字符规则报 `invalid skill identifier`。稳定标识的 mapping、返回实体 `skill_id` 与任何后续结果回显均必须使用 `trimAsciiSpaceTab()` 产生的规范值。
+因此 `" builtin/foo "` 与 `"\tbuiltin/foo\t"` 作为 `skillId` 的规范值均为 `builtin/foo`；前后包含 `\n`、`\r`、U+2028、U+2029、U+FEFF 或 NBSP 的输入不会被移除，必须按上述字符规则报 `invalid skill identifier`。稳定标识的 mapping、返回实体 `skillId` 与任何后续结果回显均必须使用 `trimAsciiSpaceTab()` 产生的规范值。
 
 以上字符与 Unicode well-formed 限制是 V2 可调用标识语法的一部分，而不是物理顶层发现资格。若 `scanReadableTopLevelSkills()` 发现的实际顶层目录名（或组成其 stable identifier 的 external-root mapping segment）无法生成合规 identifier，物理发现与 `topLevelSkillCount` **必须保持不变**；但 prompt 的可用 Skills 列表、Worker 的可调用映射和 `listWorkspaceTopLevelSkills().items` **必须**排除该条目。prompt summaries、Worker mapping 与 workspace items 的过滤必须使用同一 well-formed segment 校验。不得新增 shared schema 字段，也不得把该条目以不可调用或“可直接调用”状态放入 `items`；因此该极端字符场景中 `items.length` 可以小于物理 `topLevelSkillCount`，这是有意差异，UI 无需新增 callable 状态。若现有 string-based physical scan 已无法无损定位某个非法文件名字节，仍按其现有物理发现行为处理，V2 不扩大该口径；实现必须记录受控内部诊断，且不得把物理路径泄露给模型。
 
@@ -163,7 +163,7 @@ const trimAsciiSpaceTab = (value: string): string =>
 
 `builtin` 的 `skillDir` 必须精确匹配 builtin Skills root 的一级实际目录名。`workspace` / `repo` 的 `rootDir`、`repoId`、`skillDir` 必须精确匹配当前 prompt context 的已启用 external root mapping 及其顶层目录名。不得新增“rootDir 必须包含 skill”等 mapping 已有发现/启用流程之外的规则。
 
-非字符串、字符、lone surrogate、段数或 namespace 结构非法时必须报 `invalid skill identifier`；仅缺失、空或 ASCII spaces/tabs-only `skill_id` 报 `skill is required`。external root mapping 未启用/不存在，或其对应顶层 `skillDir` 目录不存在时必须报 `skill not found`。已定位且仍存在的顶层目录，其直属根文件失效时适用 `skill root is not readable`。
+非字符串、字符、lone surrogate、段数或 namespace 结构非法时必须报 `invalid skill identifier`；仅缺失、空或 ASCII spaces/tabs-only `skillId` 报 `skill is required`。external root mapping 未启用/不存在，或其对应顶层 `skillDir` 目录不存在时必须报 `skill not found`。已定位且仍存在的顶层目录，其直属根文件失效时适用 `skill root is not readable`。
 
 ### 工具 schema 与模型说明
 
@@ -173,40 +173,40 @@ const trimAsciiSpaceTab = (value: string): string =>
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["skill_id"],
+  "required": ["skillId"],
   "properties": {
-    "skill_id": {
+    "skillId": {
       "type": "string",
       "description": "Stable logical skill identifier shown in the available skills list, such as builtin/skill-authoring."
     },
-    "file_path": {
+    "filePath": {
       "type": "string",
-      "description": "Optional file path relative to the skill root. Omit it, pass an empty string or a string containing only spaces/tabs, or pass exactly SKILL.md to read root instructions and available file paths."
+      "description": "Optional file path relative to the skill root. Omit filePath, pass an empty string or a string containing only spaces/tabs, or pass exactly SKILL.md to read root instructions and available file paths."
     }
   }
 }
 ```
 
-schema 的 properties 必须**仅**包含 `skill_id` 和可选 `file_path`；`skill_id` 不得设置 `minLength`，以使空字符串到达 Worker 并精确映射为 `skill is required`。旧 `{ "id": "..." }` 及未发布的中间 `{ "skill": "...", "path": "..." }` 均不得保留为 property、别名、隐式转换或兼容入口。工具级 description 必须说明：`skill_id` 使用可用列表中的稳定逻辑标识；省略 `file_path`、传空字符串或仅由 spaces/tabs 组成的字符串、或精确 `SKILL.md` 均读取根说明和文件路径；其他 `file_path` 返回当前 Worker 文本读取器产生的规范化文本内容。
+schema 的 properties 必须**仅**包含 `skillId` 和可选 `filePath`；`skillId` 不得设置 `minLength`，以使空字符串到达 Worker 并精确映射为 `skill is required`。旧 `{ "id": "..." }`、未发布的 `{ "skill": "...", "path": "..." }` 及 `{ "skill_id": "...", "file_path": "..." }` 均不得保留为 property、别名、隐式转换或兼容入口。工具级 description 必须说明：`skillId` 使用可用列表中的稳定逻辑标识；省略 `filePath`、传空字符串或仅由 spaces/tabs 组成的字符串、或精确 `SKILL.md` 均读取根说明和文件路径；其他 `filePath` 返回当前 Worker 文本读取器产生的规范化文本内容。
 
-Provider 必须将外部 JSON 的 `skill_id` / `file_path` 映射为 Worker 内部 TypeScript 入参 `skillId` / `filePath`；这是命名映射，不是兼容入口。稳定 skill identifier 的领域概念、既有 helper 命名与 workspace top-level skills API/shared contract 的 `item.id` 均不因本次字段切换机械改名。
+Provider 与 Worker TypeScript 入参均直接使用 `skillId` / `filePath`，不得保留 snake_case 到 camelCase 的映射层。稳定 skill identifier 的领域概念、既有 helper 命名与 workspace top-level skills API/shared contract 的 `item.id` 均不因本次字段切换机械改名。
 
-工具级 description、`skill_id`/`file_path` descriptions 与 Skills 系统提示词必须在同一变更中同步更新。系统提示词和 authoring 手册也必须明确：omit `file_path`、pass an empty string or a string containing only spaces/tabs、or pass exactly `SKILL.md` 都是根读取；从扁平 `Skill files` 逐行完整复制到 `file_path` 读取辅助文件。它们不得提到或暗示 `id`、`skill`/`path` 工具字段、skill node、child skill、`children`、目录读取或“任意 `SKILL.md` 形成节点”。
+工具级 description、`skillId`/`filePath` descriptions 与 Skills 系统提示词必须在同一变更中同步更新。系统提示词和 authoring 手册也必须明确：omit `filePath`、pass an empty string or a string containing only spaces/tabs、or pass exactly `SKILL.md` 都是根读取；从扁平 `Skill files` 逐行完整复制到 `filePath` 读取辅助文件。它们不得提到或暗示 `id`、`skill`/`path`、`skill_id`/`file_path` 工具字段、skill node、child skill、`children`、目录读取或“任意 `SKILL.md` 形成节点”。
 
 ---
 
-## `file_path` 算法与文件系统安全
+## `filePath` 算法与文件系统安全
 
-### 逐步处理原始 `file_path`
+### 逐步处理原始 `filePath`
 
-执行器必须按下列顺序处理原始 `file_path`，不得交换：
+执行器必须按下列顺序处理原始 `filePath`，不得交换：
 
-1. `file_path` 缺失：根读取。
-2. `file_path` 是字符串且仅由 U+0020 SPACE 与 U+0009 TAB 组成（允许空字符串）：根读取。
-3. 原始 `file_path` 精确等于 `"SKILL.md"`：根读取。
-4. 其他情况：不得 trim、normalize 或修正后接受；执行严格非根文件路径验证。
+1. `filePath` 缺失：根读取。
+2. `filePath` 是字符串且仅由 U+0020 SPACE 与 U+0009 TAB 组成（允许空字符串）：根读取。
+3. 原始 `filePath` 精确等于 `"SKILL.md"`：根读取。
+4. 其他情况：不得 trim、normalize 或修正后接受；执行严格非根 filePath 验证。
 
-只有第 2 步的 spaces/tabs-only 特例可以使 TAB（Cc）作为根读取输入；其他控制/格式/空白字符一律不具有根读取特权。`file_path` 非字符串必须报 `invalid skill path`。以下都不是根读取，必须报 `invalid skill path`：
+只有第 2 步的 spaces/tabs-only 特例可以使 TAB（Cc）作为根读取输入；其他控制/格式/空白字符一律不具有根读取特权。`filePath` 非字符串必须报 `invalid skill path`。以下都不是根读取，必须报 `invalid skill path`：
 
 ```text
  SKILL.md
@@ -221,9 +221,9 @@ U+FEFF
 NBSP-only
 ```
 
-### 非根 `file_path` 语法与安全
+### 非根 `filePath` 语法与安全
 
-非根 `file_path` 必须是原始、规范 POSIX 相对文件路径：
+非根 `filePath` 必须是原始、规范 POSIX 相对文件路径：
 
 - 仅使用 `/` 分隔，不得有反斜杠；
 - 不得是 POSIX 或 Windows 绝对形式；
@@ -231,9 +231,9 @@ NBSP-only
 - 每个 segment 不得含反引号（U+0060）、Unicode General Category `Cc`（含 U+0000–U+001F、U+007F–U+009F）或 `Cf`（如 bidi controls、zero-width format controls），以及 U+2028 或 U+2029；
 - 不得有空段、`.` 段、`..` 段、开头/末尾 `/` 或 `//`；
 - 每段首尾不得有空白；
-- 验证前不得通过 file_path normalize/resolve 的结果修正输入。
+- 验证前不得通过 filePath normalize/resolve 的结果修正输入。
 
-因此辅助文件的实际相对路径只要任一 segment 含 lone surrogate、上述禁止字符或反引号，就不得进入 `Skill files`，也不得通过已知 `file_path` 读取。这同时保证固定的 ```` ```text ```` fence 不会被路径行关闭、拆分或扰乱。
+因此辅助文件的实际相对路径只要任一 segment 含 lone surrogate、上述禁止字符或反引号，就不得进入 `Skill files`，也不得通过已知 `filePath` 读取。这同时保证固定的 ```` ```text ```` fence 不会被路径行关闭、拆分或扰乱。
 
 允许：
 
@@ -273,7 +273,7 @@ dotfile/dot-directory 不做隐式过滤；它们与其他名称采用同一资�
 - Windows、macOS 等原生字符串平台也必须拒绝非 well-formed JavaScript 字符串；不得将 U+FFFD 一概拒绝，因为它可能是物理文件名中合法、可重新访问的字符；
 - 列出的每个合格路径必须在同一稳定夹具中可按该路径字符串直接回读。此规则仅约束辅助文件枚举和可调用映射的 V2 展示/访问，不改变 API 顶层 physical scan 或 `topLevelSkillCount` 的既有口径。
 
-对非根 `file_path`，Worker 必须作 lexical root-inside 检查、每级 `lstat`、根/目标 `realpath` root-inside 检查、普通文件检查与读时重检。目录必须报 `skill path must reference a file`；symlink、经 symlink 父目录、非目录特殊文件或其他不具安全可读资格的对象必须报 `skill path is not a readable file`。
+对非根 `filePath`，Worker 必须作 lexical root-inside 检查、每级 `lstat`、根/目标 `realpath` root-inside 检查、普通文件检查与读时重检。目录必须报 `skill path must reference a file`；symlink、经 symlink 父目录、非目录特殊文件或其他不具安全可读资格的对象必须报 `skill path is not a readable file`。
 
 列表资格检查与直接指定读取必须共用同一个辅助文件安全读取 helper；枚举成功后直接读取同一路径时，helper 必须再次完成下列完整检查，不能相信枚举时状态：
 
@@ -299,7 +299,7 @@ dotfile/dot-directory 不做隐式过滤；它们与其他名称采用同一资�
 - 保留语义正文中的解码后 LF、CRLF、孤立 CR 序列，不应用通用辅助文件读取器的行处理；
 - 对语义正文及截断提示按 UTF-8 预算裁剪；
 - 全量扫描、排序并序列化 `Skill files` section；
-- 返回 `file_path: "SKILL.md"`。
+- 返回 `filePath: "SKILL.md"`。
 
 根正文非空时：
 
@@ -359,8 +359,8 @@ type NormalizedSkillFileRead = {
 
 ```ts
 type SkillToolResult = {
-  skill_id: string;
-  file_path: string; // 根读取时精确为 "SKILL.md"
+  skillId: string;
+  filePath: string; // 根读取时精确为 "SKILL.md"
   content: string;
   truncated: boolean;
 };
@@ -368,7 +368,7 @@ type SkillToolResult = {
 
 `truncated` 必须且只能按下列定义计算：根正文、指定文件内容、`Skill files` section 或最终 `content` 防御性兜底任一发生截断时为 `true`；四者均未截断时为 `false`。因此 section 单独因路径数、section 字节预算或防御性兜底被缩减时，`truncated` 必须为 `true`。
 
-Runner 必须回显 `skill_id`、规范化 `file_path`、`truncated`，随后按 `content` 原值输出；不得再输出 `id`、`skill`、`path`、`type: "skill"`、name、description 或 `children`。当 `content === ""` 时，结果实体仍是空字符串，Runner 在 headers 后不得合成 `(empty file content)`、`(empty skill content)` 或任何业务占位文本。
+Runner 是模型可读文本展示层，不改变工具 JSON args 或成功结果实体的 camelCase。它必须从结果实体的 `skillId`、规范化 `filePath` 与 `truncated` 取值，并按固定 header 名渲染 `skill_id:`、`file_path:`、`truncated:`，随后按 `content` 原值输出；这些 snake_case headers 与项目既有 `exit_code`、`subtask_session_id` 风格一致。不得渲染 `id`、`skill`、`path`、`type: "skill"`、name、description 或 `children` headers。当 `content === ""` 时，结果实体仍是空字符串，Runner 在 headers 后不得合成 `(empty file content)`、`(empty skill content)` 或任何业务占位文本。
 
 ---
 
@@ -429,7 +429,7 @@ const ROOT_BODY_TRUNCATION_SUFFIX = "\n\nRoot skill content truncated.";
 
 - 根正文预算对剥离边界完整 frontmatter 后的正文计量；没有边界完整 frontmatter 时对全文正文计量；
 - `Skill files section` 预算不含 body，但**包含 section 自己的前导片段**：body 非空时的分隔线、标题、空行、code fence、路径行间换行、空列表文字和截断提示；
-- 最终 `SkillToolResult.content` 预算不含 runner 的 `skill_id`/`file_path`/`truncated` headers；
+- 最终 `SkillToolResult.content` 预算不含 runner 的 `skill_id`/`file_path`/`truncated` text headers；
 - 指定文件继续使用当前通用读取器的既有 `MAX_BYTES` 和输出截断行为，不把其数值复制为 V2 新常量。
 
 若语义根正文的 UTF-8 字节数超过 `MAX_ROOT_BODY_UTF8_BYTES`，body 必须精确序列化为“最长有效 UTF-8 前缀 + `ROOT_BODY_TRUNCATION_SUFFIX`”。前缀与固定 suffix 合计必须 `<= 40 * 1024`，suffix 必须恰好出现一次；不得根据前缀是否以 LF、CRLF、孤立 CR 或其他字符结尾改变、折叠、移除或额外插入分隔字符。该情形令 `truncated: true`。
@@ -464,15 +464,15 @@ const ROOT_BODY_TRUNCATION_SUFFIX = "\n\nRoot skill content truncated.";
 
 | 公开字符串 | 必须映射的场景 |
 |---|---|
-| `skill is required` | `skill_id` 缺失、空字符串，或仅由 U+0020 SPACE/U+0009 TAB 组成。 |
-| `invalid skill identifier` | `skill_id` 非字符串，或经 `trimAsciiSpaceTab()` 后不符合稳定逻辑标识的 Unicode scalar sequence、字符、段数或 namespace 语法；前后 CR/LF、U+2028/U+2029、U+FEFF、NBSP 均属于本项。 |
+| `skill is required` | `skillId` 缺失、空字符串，或仅由 U+0020 SPACE/U+0009 TAB 组成。 |
+| `invalid skill identifier` | `skillId` 非字符串，或经 `trimAsciiSpaceTab()` 后不符合稳定逻辑标识的 Unicode scalar sequence、字符、段数或 namespace 语法；前后 CR/LF、U+2028/U+2029、U+FEFF、NBSP 均属于本项。 |
 | `skill not found` | 标识语法合法但 external root mapping 未启用/不存在，或相应顶层 `skillDir` 目录不存在；prompt 缓存后目录被删除也属于本项。 |
 | `skill root is not readable` | 已定位且仍存在的顶层目录，其直属根 `SKILL.md` 缺失、不可访问、是 symlink/非普通文件、读取失败、含 NUL 或其他不满足 API 等价根资格的状态。 |
-| `invalid skill path` | `file_path` 非字符串，或未触发 spaces/tabs-only/精确 `SKILL.md` 根读取且违反 Unicode scalar sequence 或原始 POSIX path 语法。 |
-| `skill path must reference a file` | 有效非根 `file_path` 指向目录。 |
-| `skill path is not a readable file` | `file_path`/父级是 symlink，目标是非目录特殊文件，或不具安全可读文件资格。 |
+| `invalid skill path` | `filePath` 非字符串，或未触发 spaces/tabs-only/精确 `SKILL.md` 根读取且违反 Unicode scalar sequence 或原始 POSIX path 语法。 |
+| `skill path must reference a file` | 有效非根 `filePath` 指向目录。 |
+| `skill path is not a readable file` | `filePath`/父级是 symlink，目标是非目录特殊文件，或不具安全可读文件资格。 |
 | `binary file is not supported` | 安全普通辅助文件被 Worker 文本分类为 binary。 |
-| `skill file not found` | 有效非根 `file_path` 的目标不存在或在直接读取前消失。 |
+| `skill file not found` | 有效非根 `filePath` 的目标不存在或在直接读取前消失。 |
 | `skill file is not accessible` | 有效目标因权限或 I/O 在直接读取时不可访问。 |
 | `skill tool failed to read target` | 未归入上述类别的内部读取失败。 |
 | `operation aborted` | 任一阶段检测到 `AbortSignal` 已中止。 |
@@ -485,10 +485,10 @@ const ROOT_BODY_TRUNCATION_SUFFIX = "\n\nRoot skill content truncated.";
 
 实施 V2 时，必须在同一原子变更中同步：
 
-- `toolDescription("skill")` 与 `skill_id`/`file_path` 参数 descriptions；
-- Skills 系统提示词及顶层摘要说明：模型 prompt 省略空 description、以 `skill_id` 传入 stable identifier，并省略 `file_path` 读根或完整复制 `Skill files` 行到 `file_path`；
+- `toolDescription("skill")` 与 `skillId`/`filePath` 参数 descriptions；
+- Skills 系统提示词及顶层摘要说明：模型 prompt 省略空 description、以 `skillId` 传入 stable identifier，并省略 `filePath` 读根或完整复制 `Skill files` 行到 `filePath`；
 - 现有 workspace top-level skills API/shared contract/UI：保留 `description: ""` 兼容字段，UI 不渲染空描述；
 - `skills/skill-authoring/SKILL.md`：移除 `id`、`children`、子 skill/skill node，写入新 schema、扁平可复制路径、平级优先与大 skill 分层建议；
-- API、Worker、runner、external roots 与本协议测试。
+- API、Worker、runner、external roots 与本协议测试；runner 的模型可读 text headers 固定为 `skill_id:` / `file_path:` / `truncated:`，但 JSON args/result 保持 camelCase。
 
-不得只改参数名而保留旧输出模型，也不得保留 `{ skill, path? }` 作为未发布中间协议的兼容入口，更不得把辅助文件规范化读取表述为字节或换行保真读取。
+不得只改参数名而保留旧输出模型，也不得保留 `{ skill_id, file_path? }`、`{ skill, path? }` 或 `{ id }` 作为兼容入口，更不得把辅助文件规范化读取表述为字节或换行保真读取。

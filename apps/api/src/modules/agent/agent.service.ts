@@ -257,16 +257,16 @@ function toolArgsSchema(toolName: AgentContextToolName) {
   if (toolName === "skill") {
     return {
       type: "object",
-      required: ["skill_id"],
+      required: ["skillId"],
       additionalProperties: false,
       properties: {
-        skill_id: {
+        skillId: {
           type: "string",
           description: "Stable logical skill identifier shown in the available skills list, such as builtin/skill-authoring."
         },
-        file_path: {
+        filePath: {
           type: "string",
-          description: "Optional file path relative to the skill root. Omit file_path, pass an empty string or a string containing only spaces/tabs, or pass exactly SKILL.md to read root instructions and available file paths."
+          description: "Optional file path relative to the skill root. Omit filePath, pass an empty string or a string containing only spaces/tabs, or pass exactly SKILL.md to read root instructions and available file paths."
         }
       }
     };
@@ -420,10 +420,10 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
   if (toolName === "skill") {
     return [
       "Load a top-level skill and its text files by stable logical identifier (no filesystem paths).",
-      "Input: skill_id (string) is one of the identifiers in the available skills list, using builtin/... or workspace/... or repo/... prefixes.",
-      "file_path is optional and is relative to the selected skill root.",
-      "Omit file_path, pass an empty string or a string containing only spaces/tabs, or pass exactly SKILL.md to read root instructions and a flat list of available file paths.",
-      "Any other valid file_path reads that text file with the Worker text reader's normalized content."
+      "Input: skillId (string) is one of the identifiers in the available skills list, using builtin/... or workspace/... or repo/... prefixes.",
+      "filePath is optional and is relative to the selected skill root.",
+      "Omit filePath, pass an empty string or a string containing only spaces/tabs, or pass exactly SKILL.md to read root instructions and a flat list of available file paths.",
+      "Any other valid filePath reads that text file with the Worker text reader's normalized content."
     ].join(" ");
   }
   if (toolName === "visual_analyze") {
@@ -1769,13 +1769,13 @@ function buildSkillsInstructionSection(input: {
 }) {
   const lines: string[] = [];
   lines.push("Use the builtin skill tool to load details on demand by stable logical skill identifier.");
-  lines.push('If the user mentions anything related to skills, use the "skill" tool with the corresponding skill entry, then proceed with the action. First read the root: omit file_path, pass an empty string or spaces/tabs only, or pass exactly SKILL.md. Root content includes a flat (not tree-shaped) Skill files list; copy one complete path line verbatim into file_path to read that auxiliary text file.');
+  lines.push('If the user mentions anything related to skills, use the "skill" tool with the corresponding skill entry, then proceed with the action. First read the root: omit filePath, pass an empty string or spaces/tabs only, or pass exactly SKILL.md. Root content includes a flat (not tree-shaped) Skill files list; copy one complete path line verbatim into filePath to read that auxiliary text file.');
   lines.push("");
   lines.push("builtin skills:");
   if (input.builtin.length === 0) {
     lines.push("- (none)");
   } else {
-    for (const item of input.builtin) lines.push(`- skill_id: ${item.skill}; name: ${item.name}${item.description ? `; description: ${item.description}` : ""}`);
+    for (const item of input.builtin) lines.push(`- skillId: ${item.skill}; name: ${item.name}${item.description ? `; description: ${item.description}` : ""}`);
   }
   lines.push("");
   lines.push("external skills:");
@@ -1783,7 +1783,7 @@ function buildSkillsInstructionSection(input: {
     lines.push("- (none)");
   } else {
     for (const item of input.external) {
-      lines.push(`- skill_id: ${item.skill}; name: ${item.name}${item.description ? `; description: ${item.description}` : ""}`);
+      lines.push(`- skillId: ${item.skill}; name: ${item.name}${item.description ? `; description: ${item.description}` : ""}`);
     }
   }
   return lines.join("\n");

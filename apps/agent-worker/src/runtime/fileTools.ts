@@ -733,8 +733,8 @@ type SafeSkillFile = {
 };
 
 type SkillToolResult = {
-  skill_id: string;
-  file_path: string;
+  skillId: string;
+  filePath: string;
   content: string;
   truncated: boolean;
 };
@@ -1307,8 +1307,8 @@ async function runSkillToolInternal(params: RunSkillToolParams, testing?: SkillT
         if (kind.kind !== "text") skillError("binary file is not supported");
         const read = await readTextFileCappedFromHandle({ handle: file.handle, encoding: kind.encoding, signal: params.signal });
         return {
-          skill_id: target.skill,
-          file_path: requestedPath.path,
+          skillId: target.skill,
+          filePath: requestedPath.path,
           content: read.content,
           truncated: read.truncatedByBytes || read.hasMoreLines || read.truncatedByLineLength
         };
@@ -1341,7 +1341,7 @@ async function runSkillToolInternal(params: RunSkillToolParams, testing?: SkillT
       content = root.body + section.content;
       truncated = true;
     }
-    return { skill_id: target.skill, file_path: "SKILL.md", content, truncated };
+    return { skillId: target.skill, filePath: "SKILL.md", content, truncated };
   } catch (err) {
     throw sanitizeSkillToolError(err, params.signal);
   }

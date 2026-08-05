@@ -22,8 +22,8 @@ Skills 用于将稳定、可按需读取的知识从常驻系统提示词中拆�
 ## 目标
 
 - 将一个顶层目录定义为一个独立 skill；根 `SKILL.md` 是唯一具元数据语义的文件。
-- 使用 `skill_id` 传入稳定逻辑标识选择 skill，并使用可选相对 `file_path` 选择 skill 内文件。
-- 根读取返回根正文和可直接复制为 `file_path` 的扁平文件列表，而不是树或 `children`。
+- 使用 `skillId` 传入稳定逻辑标识选择 skill，并使用可选相对 `filePath` 选择 skill 内文件。
+- 根读取返回根正文和可直接复制为 `filePath` 的扁平文件列表，而不是树或 `children`。
 - 仅将 `name`、`description` 作为可选展示元数据，不因其缺失或异常阻止 skill 加载。
 - 保持 builtin、workspace、repo roots 的发现、启用、命名空间和 run 级静态缓存模型。
 - 明确文本、安全、容量、错误与迁移边界，使协议可独立实现、审查和验收。
@@ -58,9 +58,9 @@ V2 适用于每个已生效的 Skills root 下的顶层 skill：
 | skill 根目录 | Skills root 下一个顶层 skill 的目录，例如 `skills/skill-authoring/`。 |
 | 根 `SKILL.md` | skill 根目录直属的 `SKILL.md`；唯一具有 V2 元数据语义的文件。 |
 | 辅助文件 | skill 根目录内除根 `SKILL.md` 外的任何文件；含任意深度的 `SKILL.md`，均按普通文本处理。 |
-| 稳定逻辑标识 | 不暴露绝对路径、可供 `skill_id` 参数传入的标识，如 `builtin/skill-authoring`。 |
-| 根读取 | `file_path` 缺失、为空字符串或仅由 U+0020 SPACE/U+0009 TAB 组成，或精确为 `SKILL.md` 时的读取。 |
-| 指定文件读取 | `file_path` 为其他有效相对路径时，对一个辅助文件的读取；返回现有 Worker 通用文本读取器产生的规范化文本内容。 |
+| 稳定逻辑标识 | 不暴露绝对路径、可供 `skillId` 参数传入的标识，如 `builtin/skill-authoring`。 |
+| 根读取 | `filePath` 缺失、为空字符串或仅由 U+0020 SPACE/U+0009 TAB 组成，或精确为 `SKILL.md` 时的读取。 |
+| 指定文件读取 | `filePath` 为其他有效相对路径时，对一个辅助文件的读取；返回现有 Worker 通用文本读取器产生的规范化文本内容。 |
 | `Skill files` | 根读取结果末尾的扁平、可直接调用的辅助文件路径清单。 |
 | 文本资格 | 文件同时满足 V2 安全限制和当前文本识别/读取限制，可被 skill 工具作为文本返回。 |
 
@@ -70,30 +70,30 @@ V2 适用于每个已生效的 Skills root 下的顶层 skill：
 顶层 skill 摘要发现
   └─ 扫描每个生效 root 的一级目录
       └─ 根目录直属、安全且可读的 SKILL.md => 一个有效 skill
-          └─ 解析可选展示元数据，向 prompt 注入稳定逻辑标识
+           └─ 解析可选展示元数据，向 prompt 注入稳定逻辑标识
 
 模型调用 skill 工具
-  ├─ skill_id：传入一个已发现的稳定逻辑标识
-  └─ file_path：
+  ├─ skillId：传入一个已发现的稳定逻辑标识
+  └─ filePath：
       ├─ 缺失 / 空 / 仅 spaces/tabs / SKILL.md
       │   └─ 根读取：根正文（按边界完整 frontmatter 剥离）+ Skill files
       └─ 其他有效相对路径
           └─ 指定文件读取：返回当前 Worker 通用文本读取器产生的规范化文本内容
 ```
 
-V2 的关键原则是：`skill_id` 只传入并定位顶层 skill 根的稳定逻辑标识，`file_path` 只定位该根内的文件；目录不是可读取目标；任意嵌套 `SKILL.md` 都不是子 skill。根读取中的文件发现清单是按完整相对路径排序的扁平列表，不采用树形结构，因为模型必须能不经路径转换直接完整复制某一行到 `file_path`。
+V2 的关键原则是：`skillId` 只传入并定位顶层 skill 根的稳定逻辑标识，`filePath` 只定位该根内的文件；目录不是可读取目标；任意嵌套 `SKILL.md` 都不是子 skill。根读取中的文件发现清单是按完整相对路径排序的扁平列表，不采用树形结构，因为模型必须能不经路径转换直接完整复制某一行到 `filePath`。
 
 ## 关键决策总表
 
 | 决策 | 已冻结口径 | 取舍原因 |
 |---|---|---|
-| 定位参数 | `skill_id` 传入 `builtin/...`、`workspace/...`、`repo/...` 稳定逻辑标识 | 展示名可变且可重名；逻辑标识可跨来源无歧义定位。 |
-| 参数切换 | 一次性从 `{ id }` 和未发布的 `{ skill, path? }` 切换至 `{ skill_id, file_path? }`；无兼容层 | 避免模型在双协议间选择错误；旧子 skill 无法无歧义兼容。 |
+| 定位参数 | `skillId` 传入 `builtin/...`、`workspace/...`、`repo/...` 稳定逻辑标识 | 展示名可变且可重名；逻辑标识可跨来源无歧义定位。 |
+| 参数切换 | 一次性从 `{ id }`、未发布的 `{ skill, path? }` 和 `{ skill_id, file_path? }` 切换至 `{ skillId, filePath? }`；无兼容层 | 避免模型在双协议间选择错误；旧子 skill 无法无歧义兼容。 |
 | 元数据边界 | 仅根 `SKILL.md` 有元数据语义 | 消除“文件名决定子 skill”的隐式模型。 |
 | frontmatter | 可选、容错、仅展示；不使用完整 YAML | 不让元数据问题阻断知识读取，同时避免新增解析依赖。 |
 | 根源读取 | API 与 Worker 均以完整根文件、全文件 NUL 检查和 `Buffer.toString("utf8")` 等价语义解析根；Worker 不走辅助读取器 | 保持“API 可发现即 Worker 可根读取”的合同，同时避免通用读取器预截断、长行和换行规范化破坏根 frontmatter 与正文语义。 |
 | 辅助文件读取 | 继承 `classifyTextSample()` 与 `readTextFileCapped()` 的规范化文本行为 | 复用成熟的编码、二进制和输出限制能力；不另建字节或换行保真协议。 |
-| 根读取发现 | 正文后追加扁平 `Skill files` | 每行路径可直接完整复制到 `file_path`；不采用树形结构，避免模型把层级转换为参数路径。 |
+| 根读取发现 | 正文后追加扁平 `Skill files` | 每行路径可直接完整复制到 `filePath`；不采用树形结构，避免模型把层级转换为参数路径。 |
 | 文件组织建议 | 少量文件优先平级；仅大型或明显分类时多级 | 降低路径复杂度，保留大型 skill 的可维护性。 |
 | 文件列表资格 | 只展示与读取共享安全/文本资格的文件 | 承诺“列表每一行原则上可直接读取”。 |
 | 安全 | POSIX 相对 path + well-formed Unicode + lexical/realpath 双重边界 + 禁止 symlink、U+0060、`Cc`、`Cf`、U+2028/U+2029 | 防止路径穿越、编码失真和链接绕过，并确保固定 Markdown fence 不能被文件名注入关闭或扰乱。 |
@@ -115,16 +115,16 @@ V2 的关键原则是：`skill_id` 只传入并定位顶层 skill 根的稳定�
 - `body 非空` 精确为 `body.length > 0`，不得 trim；只有空格、LF、CRLF 或孤立 CR 的正文仍使用 `"\n\n---\n\n## Skill files\n\n"` 前导。`content` 精确为 `body + section`。正常算法的 `40 KiB + 10 KiB` 是 50 KiB 的数学不变量，最终检查只处理内部 invariant violation，且只能缩减 section。
 - 全体合格路径为空时 section 输出 `No additional readable text files.`；若合格路径非空却连第一条完整路径也无法装入 10 KiB，最大确定性前缀可以为 0，section 只输出标题与 code block 外的截断提示，不输出空 code block 或空列表文字，且 `truncated: true`。
 - 遍历必须完成全部安全候选的扫描与资格检查，结果等价于全量固定 UTF-16 code-unit 排序再取前缀；不得因输出预算停止扫描。首选有界选择，仅保留最小 501 条及总数/`hasMore`，而不是要求全体路径同时在内存中。
-- `file_path` 仅对缺失、空字符串或仅由 U+0020 SPACE/U+0009 TAB 组成的字符串、或原始值精确为 `SKILL.md` 执行根读取；schema、工具级 description 与系统提示词必须同样表述为 omit `file_path`, pass an empty string or a string containing only spaces/tabs, or pass exactly `SKILL.md`。换行、U+2028/U+2029、U+FEFF、NBSP-only 及其他输入不得 trim/normalize 后接受。
-- `skill_id` 缺失、为空或仅由 ASCII SPACE/TAB 组成时为 `skill is required`；其他字符串只能先经 `trimAsciiSpaceTab()` 去除整体两端 ASCII SPACE/TAB，再满足固定 2/3/4 段 stable identifier 语法。不得使用 JavaScript `trim()`：前后 CR/LF、U+2028/U+2029、U+FEFF、NBSP 均为 `invalid skill identifier`。调用方传入的 skill_id/file_path 每段必须是 well-formed Unicode scalar sequence，拒绝 lone surrogate、反斜杠、U+0060、`Cc`、`Cf`、U+2028/U+2029、段内首尾空白、空段、点段和绝对形式；结果 `skill_id` 使用 ASCII 包裹移除后的规范值。辅助 file_path 使用同一禁止字符集，从而保护固定 ```` ```text ```` fence。
+- `filePath` 仅对缺失、空字符串或仅由 U+0020 SPACE/U+0009 TAB 组成的字符串、或原始值精确为 `SKILL.md` 执行根读取；schema、工具级 description 与系统提示词必须同样表述为 omit `filePath`, pass an empty string or a string containing only spaces/tabs, or pass exactly `SKILL.md`。换行、U+2028/U+2029、U+FEFF、NBSP-only 及其他输入不得 trim/normalize 后接受。
+- `skillId` 缺失、为空或仅由 ASCII SPACE/TAB 组成时为 `skill is required`；其他字符串只能先经 `trimAsciiSpaceTab()` 去除整体两端 ASCII SPACE/TAB，再满足固定 2/3/4 段 stable identifier 语法。不得使用 JavaScript `trim()`：前后 CR/LF、U+2028/U+2029、U+FEFF、NBSP 均为 `invalid skill identifier`。调用方传入的 skillId/filePath 每段必须是 well-formed Unicode scalar sequence，拒绝 lone surrogate、反斜杠、U+0060、`Cc`、`Cf`、U+2028/U+2029、段内首尾空白、空段、点段和绝对形式；结果 `skillId` 使用 ASCII 包裹移除后的规范值。辅助 filePath 使用同一禁止字符集，从而保护固定 ```` ```text ```` fence。
 - 顶层有效性与 `topLevelSkillCount` 沿用现有 `scanReadableTopLevelSkills()`。Worker 根读取先做等价根资格检查，再读取完整根文件、检查全文件 NUL、按 `Buffer.toString("utf8")` 解码和解析 frontmatter；不设置 V2 根源大小门槛，且不走通用辅助读取器。对同一未变更且可生成合规 identifier 的根，API 可发现即 Worker 可根读取；根正文保留解码后的 CRLF/孤立 CR。
 - 物理顶层发现与 count 不因不可生成合规 identifier 的目录或 external-root mapping 改变；但 prompt、Worker mapping 和 `listWorkspaceTopLevelSkills().items` 必须过滤该条目，不新增 shared schema callable 字段。因此 `items.length` 可以小于物理 `topLevelSkillCount`，UI 无需新增状态；记录受控诊断。
 - POSIX 枚举必须以 buffer filename 或等价方式 fatal UTF-8 解码并 re-encode byte-for-byte round-trip；非法 UTF-8 bytes 的辅助文件跳过并记录诊断。真实合法 U+FFFD 不因字符本身被拒绝；每个列出路径都必须可按同一字符串回读。
 - 辅助文件必须在实际读取前后完成既有边界/父级 symlink 检查，并保存 `lstat` 的 `dev` + `ino` identity；支持时用 `O_NOFOLLOW` 打开，通过 `FileHandle.stat()` / `fstat` 与 identity 二次确认。分类与内容读取必须使用同一个已验证 fd 的 fd-based core，不能按 path reopen；不支持时必须有等价防护和平台说明，不能静默降级。
 - 合法 identifier 的 external mapping 未启用/不存在或顶层 skill 目录不存在时为 `skill not found`；目录仍在但直属 `SKILL.md` 缺失或失效时为 `skill root is not readable`。
 - 指定辅助文件不是字节、BOM 或换行保真读取：它继承 Worker 通用读取器的编码选择、decoder、BOM 移除、CRLF/孤立 CR 规范化为 LF、长行处理与既有输出截断；嵌套 `SKILL.md` 只保证 frontmatter block 不解析、不剥离。
-- 外部工具字段为 `skill_id` / `file_path`，Worker 内部推荐 `skillId` / `filePath`；stable skill identifier、相关 helper 以及 workspace top-level skills API/shared contract 的 `item.id` 均保持现有领域命名，不因字段重命名而改动。
-- 成功结果精确为 `{ skill_id, file_path, content, truncated }`；根读取的 `file_path` 为 `"SKILL.md"`。Runner 在 headers 中回显 `skill_id`、`file_path`、`truncated`，随后按 `content` 原值输出；空字符串不产生 `(empty file content)`、`(empty skill content)` 或其他占位文本。
+- 外部工具字段、Provider/Worker 入参和成功结果均为 `skillId` / `filePath`；stable skill identifier、相关 helper 以及 workspace top-level skills API/shared contract 的 `item.id` 均保持现有领域命名，不因字段重命名而改动。
+- 成功结果精确为 `{ skillId, filePath, content, truncated }`；根读取的 `filePath` 为 `"SKILL.md"`。Runner 从 camelCase 结果取值，但在模型可读 headers 中固定回显 `skill_id:`、`file_path:`、`truncated:`；随后按 `content` 原值输出。空字符串不产生 `(empty file content)`、`(empty skill content)` 或其他占位文本。
 - 语义 description 为空时，模型 prompt 省略字段和多余分隔符；workspace top-level skills API/shared contract 继续给必填 `description: ""`，相关 UI 仅在非空时渲染。
 - 工具对外错误是固定英文合同；不得暴露真实绝对路径。
 

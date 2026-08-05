@@ -276,8 +276,8 @@ function buildToolSuccessText(params: {
   }
 
   if (params.toolName === "skill") {
-    const skillId = typeof resultObj?.skill_id === "string" ? resultObj.skill_id : (typeof params.args.skill_id === "string" ? params.args.skill_id : undefined);
-    const filePath = typeof resultObj?.file_path === "string" ? resultObj.file_path : (typeof params.args.file_path === "string" ? params.args.file_path : undefined);
+    const skillId = typeof resultObj?.skillId === "string" ? resultObj.skillId : (typeof params.args.skillId === "string" ? params.args.skillId : undefined);
+    const filePath = typeof resultObj?.filePath === "string" ? resultObj.filePath : (typeof params.args.filePath === "string" ? params.args.filePath : undefined);
     const truncated = resultObj?.truncated === true;
     const content = typeof resultObj?.content === "string" ? resultObj.content : "";
     // V2 根读取承诺保留正文的 CRLF、孤立 CR 与尾部内容；不能复用通用

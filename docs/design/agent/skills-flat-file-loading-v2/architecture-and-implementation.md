@@ -1,11 +1,11 @@
 # Skills 扁平文件加载协议 V2：架构与实施方案
 
 **状态：proposed**
-**协议依据：** [protocol.md](./protocol.md) 是 V2 唯一协议真源。本文只映射当前代码、给出实施职责和顺序；容量、frontmatter、`file_path`、排序、错误和输出语义均以该文件为准。
+**协议依据：** [protocol.md](./protocol.md) 是 V2 唯一协议真源。本文只映射当前代码、给出实施职责和顺序；容量、frontmatter、`filePath`、排序、错误和输出语义均以该文件为准。
 
 ## 架构目标与不变边界
 
-V2 将当前“一个 `id` 可指向 skill 节点或文件”的读取模型改为“`skill_id` 传入顶层根的稳定逻辑标识，`file_path` 选择根内文件”。同一原子交付必须同步 API schema/description/prompt、Worker、runner、测试和 authoring 手册。
+V2 将当前“一个 `id` 可指向 skill 节点或文件”的读取模型改为“`skillId` 传入顶层根的稳定逻辑标识，`filePath` 选择根内文件”。同一原子交付必须同步 API schema/description/prompt、Worker、runner、测试和 authoring 手册。
 
 本期不改变：
 
@@ -57,22 +57,22 @@ API 顶层发现（口径不变）
         │
         ▼
 API prompt context（缓存模型不变）
-  - schema: { skill_id, file_path? }
+  - schema: { skillId, filePath? }
   - schema/tool description/prompt 使用同一 V2 术语
         │
         ▼
 Worker provider
-  - args.skill_id + optional args.file_path
+  - args.skillId + optional args.filePath
         │
         ▼
 runSkillTool({ skillId, filePath, externalSkillRoots })
   - 等价根资格检查后定位一个顶层根
-  - file_path 判定：根读取或严格原始 POSIX 文件路径
+  - filePath 判定：根读取或严格原始 POSIX 文件路径
   - 根读取：根专用完整 UTF-8 源读取/解析 + 正文 + 全量扫描后排序的扁平 Skill files 前缀
   - 指定读取：一个安全普通辅助文件的 Worker 规范化文本内容
         │
         ▼
-runner 渲染 skill_id/file_path/truncated/content
+runner 从 camelCase 结果取值，渲染 skill_id:/file_path:/truncated: text headers 与 content
 ```
 
 ## 实体设计
@@ -105,8 +105,8 @@ type SkillFilesSection = {
 };
 
 type SkillToolResult = {
-  skill_id: string;
-  file_path: string; // 根读取时精确为 "SKILL.md"
+  skillId: string;
+  filePath: string; // 根读取时精确为 "SKILL.md"
   content: string;
   // root body、requested file、Skill files section 或 final content fallback 任一截断即 true
   truncated: boolean;
@@ -126,7 +126,7 @@ const isValidSkillIdentifierSegment = (segment: string): boolean => {
 };
 ```
 
-`trimAsciiSpaceTab()` 是稳定 identifier 的唯一整体修整 helper：只删除两端 U+0020 SPACE/U+0009 TAB，绝不能用 JavaScript `trim()`、`trimStart()` 或 `trimEnd()`。外部 `skill_id` 经该 helper 规范化后，Worker 内部使用 camelCase `skillId`；外部 `file_path` 对应 Worker 内部 `filePath`。实现还应提供 `isWellFormedSkillString()` 或等价公共 helper，拒绝 lone surrogate；prompt summaries、Worker identifier/file_path 校验与 `listWorkspaceTopLevelSkills().items` 过滤必须复用同一语义。
+`trimAsciiSpaceTab()` 是稳定 identifier 的唯一整体修整 helper：只删除两端 U+0020 SPACE/U+0009 TAB，绝不能用 JavaScript `trim()`、`trimStart()` 或 `trimEnd()`。模型公开 JSON、Provider 与 Worker 都直接使用 `skillId` / `filePath`，不设 snake_case 映射层；Runner 仅将其模型可读 text headers 固定渲染为 `skill_id:` / `file_path:`。实现还应提供 `isWellFormedSkillString()` 或等价公共 helper，拒绝 lone surrogate；prompt summaries、Worker identifier/filePath 校验与 `listWorkspaceTopLevelSkills().items` 过滤必须复用同一语义。
 
 ## 模块与代码集成点
 
@@ -134,36 +134,36 @@ const isValidSkillIdentifierSegment = (segment: string): boolean => {
 |---|---|---|
 | `apps/api/src/modules/agent/top-level-skill.ts` | `scanReadableTopLevelSkills()` | 保持当前顶层根资格：一级非 symlink 目录、直属非 symlink 普通 `SKILL.md`、`readFile` 成功、无 NUL、`Buffer.toString("utf8")`。不得用辅助文件文本分类扩大/收紧 `topLevelSkillCount`。 |
 | 同上 | `parseSkillFrontmatter()` | 改为与 Worker 共用“已解码文本” helper，或使用完全一致的测试向量；支持 protocol 规定的 LF/CRLF、BOM、首个结束边界、引号、大小写 key 和重复字段。API 仍以 `readFile + Buffer.toString("utf8")` 提供已解码文本。 |
-| `apps/api/src/modules/agent/agent.service.ts` | `scanTopLevelSkillSummaries()`、`buildSkillsInstructionSection()` | 使用 `isValidSkillIdentifierSegment` 与 well-formed Unicode 公共/等价 helper 生成可调用 mapping；物理发现/count 不变，但目录名或 external-root mapping segment 不合规的条目不得注入 prompt，记录受控诊断。对模型公开文案必须使用 `skill_id` 作为工具字段，同时保留 stable skill identifier 的领域术语。 |
-| 同上 | `toolArgsSchema("skill")`、`toolDescription("skill")`、`buildSkillsInstructionSection()` | 原子切换为 `{ skill_id, file_path? }`；工具级 description、`file_path` description 与系统提示词必须一致说明 omit `file_path`、empty string or string containing only spaces/tabs、or exactly `SKILL.md` 均为根读取，并要求从 `Skill files` 逐行完整复制到 `file_path`；不得保留可调用 `id`、`skill` 或 `path`。 |
+| `apps/api/src/modules/agent/agent.service.ts` | `scanTopLevelSkillSummaries()`、`buildSkillsInstructionSection()` | 使用 `isValidSkillIdentifierSegment` 与 well-formed Unicode 公共/等价 helper 生成可调用 mapping；物理发现/count 不变，但目录名或 external-root mapping segment 不合规的条目不得注入 prompt，记录受控诊断。对模型公开文案必须使用 `skillId` 作为工具字段，同时保留 stable skill identifier 的领域术语。 |
+| 同上 | `toolArgsSchema("skill")`、`toolDescription("skill")`、`buildSkillsInstructionSection()` | 原子切换为 `{ skillId, filePath? }`；工具级 description、`filePath` description 与系统提示词必须一致说明 omit `filePath`、empty string or string containing only spaces/tabs、or exactly `SKILL.md` 均为根读取，并要求从 `Skill files` 逐行完整复制到 `filePath`；不得保留可调用 `id`、`skill`、`path`、`skill_id` 或 `file_path`。 |
 | 同上 | `getPromptContextForRun()` / `runPromptStaticCache` | 缓存更新后的 schema、description、摘要和 external roots；同 run 静态语义不变。 |
 | `apps/api/src/modules/workspaces/workspace.service.ts`、`packages/shared/src/contracts/workspaces.ts` | `scanTopLevelSkillCount()`、`listWorkspaceTopLevelSkills()`、`WorkspaceTopLevelSkillItemSchema` | 保持 count 使用物理顶层发现口径。`listWorkspaceTopLevelSkills().items` 必须用 segment + well-formed Unicode 公共/等价 helper 过滤不可生成合规 identifier 的条目；不新增 schema 字段，因此 `items.length` 可小于 `topLevelSkillCount`，UI 无 callable 状态。shared contract 的 `name`、`description` 仍为必填 string，空语义 description 序列化为 `""`。 |
-| `apps/agent-worker/src/runtime/tools/providers/builtin.ts` | `case "skill"` | 必填 `args.skill_id`，接收 optional `args.file_path`，并映射为内部 `skillId` / `filePath`；schema 不得以 `minLength` 先行拒绝空字符串，令 Worker 将缺失/空/ASCII SPACE/TAB-only `skill_id` 映射为 `skill is required`；非字符串 `file_path` 归一为 `invalid skill path`；不得读取 `args.id`、`args.skill` 或 `args.path`。 |
-| `apps/agent-worker/src/runtime/fileTools.ts` | `runSkillTool()` | `skillId` 仅定位顶层根；使用 `isValidSkillIdentifierSegment` 公共/等价 helper 执行精确标识解析，随后作等价根资格检查、逐步 `filePath` 算法、固定错误合同、根正文/section/最终 content 容量控制；成功时序列化外部 `skill_id` / `file_path`。 |
+| `apps/agent-worker/src/runtime/tools/providers/builtin.ts` | `case "skill"` | 必填 `args.skillId`，接收 optional `args.filePath`，并直接传入 Worker 的 `skillId` / `filePath`；schema 不得以 `minLength` 先行拒绝空字符串，令 Worker 将缺失/空/ASCII SPACE/TAB-only `skillId` 映射为 `skill is required`；非字符串 `filePath` 归一为 `invalid skill path`；不得读取 `args.id`、`args.skill`、`args.path`、`args.skill_id` 或 `args.file_path`。 |
+| `apps/agent-worker/src/runtime/fileTools.ts` | `runSkillTool()` | `skillId` 仅定位顶层根；使用 `isValidSkillIdentifierSegment` 公共/等价 helper 执行精确标识解析，随后作等价根资格检查、逐步 `filePath` 算法、固定错误合同、根正文/section/最终 content 容量控制；成功时序列化外部 `skillId` / `filePath`。 |
 | 同上 | 根专用读取 helper、`parseSkillFrontmatter()` | 新增根专用 helper：完整读取 raw bytes、检查全文件 NUL、`Buffer.toString("utf8")` 解码、调用已解码文本 frontmatter helper；不得设置 V2 根源大小上限，根不得先走 `classifyTextSample()` 或 `readTextFileCapped()`，且正文不做通用行规范化或长行截断。 |
 | 同上 | `classifyTextSampleFromHandle()`、`readTextFileCappedFromHandle()` 或等价 fd-based core | 从既有 `classifyTextSample()`、`readTextFileCapped()` 抽取同一算法/输出行为；V2 的列表资格和直接指定读取只能以已验证 handle 调用 core，不能按 path reopen。包装/扩展读取结果暴露 `truncatedByBytes`、`hasMoreLines`、`truncatedByLineLength`，并将三者 OR 到 V2 `truncated`。 |
 | 同上 | 辅助文件安全读取 helper | 列表资格与直接读取共用：保存目标 `lstat` 的 `dev` + `ino` identity，支持时 `O_NOFOLLOW` 打开，以 `FileHandle.stat()` / `fstat` 重检 regular file 与 identity；分类和读取复用同一 handle，列表完成 fd 采样后关闭；能力缺失必须有等价防护、平台说明和测试。 |
 | 同上 | `SkillNodeChild`、`isRootSkillNode()`、`collectRecursiveRootSkillChildren()` | 删除/停用旧子节点逻辑，替换为全部候选扫描/资格检查、501 有界选择、固定 comparator 与 section 前缀序列化。 |
 | 同上 | `sanitizeSkillToolError()` | 只公开 protocol 冻结的英文字符串；内部诊断不得进入工具返回。 |
-| `apps/agent-worker/src/runtime/runner.ts` | skill success branch | 只渲染 `skill_id/file_path/truncated/content`；headers 后按 content 原值输出，空字符串不得生成旧 `(empty file content)` / `(empty skill content)` 占位。 |
+| `apps/agent-worker/src/runtime/runner.ts` | skill success branch | 从 camelCase success result 的 `skillId`/`filePath`/`truncated`/`content` 取值，仅渲染 `skill_id:`/`file_path:`/`truncated:` text headers；headers 后按 content 原值输出，空字符串不得生成旧 `(empty file content)` / `(empty skill content)` 占位。 |
 
 ## Worker 详细实施方案
 
 ### 根定位与资格
 
 - 保留现有 builtin/workspace/repo 标识到 root 的映射及 `externalSkillRoots` 选择；未启用 root 不得回退扫描。
-- `skill_id` 缺失、空字符串或 ASCII SPACE/TAB-only 时返回 `skill is required`；非字符串返回 `invalid skill identifier`。Provider 将其交给内部 `skillId`；其余输入仅先经 `trimAsciiSpaceTab()`，再只接受 `builtin/<skillDir>` 的 2 段、`workspace/<rootDir>/<skillDir>` 的 3 段、`repo/<repoId>/<rootDir>/<skillDir>` 的 4 段。不得使用 JavaScript `trim()`；前后 CR/LF、U+2028/U+2029、U+FEFF、NBSP 必须保留至 segment 校验并返回 `invalid skill identifier`。所有 segment 必须 well-formed，并通过 `isValidSkillIdentifierSegment`：拒绝 U+005C、U+0060、`Cc`、`Cf`、U+2028/U+2029、点段和首尾 Unicode whitespace。mapping 必须精确大小写匹配，不做 normalize；后续 mapping、结果 `skill_id` 均使用该 ASCII 包裹移除后的规范值。结构/字符非法为 `invalid skill identifier`；mapping 未启用/不存在或顶层目录不存在为 `skill not found`。
+- `skillId` 缺失、空字符串或 ASCII SPACE/TAB-only 时返回 `skill is required`；非字符串返回 `invalid skill identifier`。Provider 直接将其传给 Worker；其余输入仅先经 `trimAsciiSpaceTab()`，再只接受 `builtin/<skillDir>` 的 2 段、`workspace/<rootDir>/<skillDir>` 的 3 段、`repo/<repoId>/<rootDir>/<skillDir>` 的 4 段。不得使用 JavaScript `trim()`；前后 CR/LF、U+2028/U+2029、U+FEFF、NBSP 必须保留至 segment 校验并返回 `invalid skill identifier`。所有 segment 必须 well-formed，并通过 `isValidSkillIdentifierSegment`：拒绝 U+005C、U+0060、`Cc`、`Cf`、U+2028/U+2029、点段和首尾 Unicode whitespace。mapping 必须精确大小写匹配，不做 normalize；后续 mapping、结果 `skillId` 均使用该 ASCII 包裹移除后的规范值。结构/字符非法为 `invalid skill identifier`；mapping 未启用/不存在或顶层目录不存在为 `skill not found`。
 - 解析出顶层 skill 目录后，先区分目录不存在，再仅对仍存在目录按 `scanReadableTopLevelSkills()` 的精确口径检查直属根文件。
 - prompt 缓存后目录删除仍为 `skill not found`；已定位且仍存在的目录中，根 `SKILL.md` 缺失、symlink、非普通、不可访问、读取失败或含 NUL 才是 `skill root is not readable`。
 - Worker 根文件以专用 helper 完整读取：在完整 raw bytes 上先检查 NUL，再按 `Buffer.toString("utf8")` 解码并调用与 API 共用/等价的 helper；不得设置 V2 source-size cap。对同一未变更且可生成合规 identifier 的根，API 可发现即 Worker 可根读取；非法 identifier 的物理发现条目在 prompt/Worker mapping 阶段排除；仅发现后的竞态、权限变化或中止可以打破其余条目的关系。
 - API/Worker 都使用同一已解码文本 frontmatter helper，或同一向量测试其等价行为；首个有效结束 `---` 结束 block，只要边界完整就剥离 block。根正文保留解码后的 CRLF/孤立 CR，直到 UTF-8 预算裁剪。
 
-### file_path、安全与文件资格
+### filePath、安全与文件资格
 
-- 先按 protocol 的四步算法区分根读取与非根 `file_path`；仅 `skill_id` 的非空验证可 trim，非根 `file_path` 的原始值不得 trim/normalize 后接受。
+- 先按 protocol 的四步算法区分根读取与非根 `filePath`；仅 `skillId` 的非空验证可 trim，非根 `filePath` 的原始值不得 trim/normalize 后接受。
 - 为 skill 新增专用 helper，避免改变 read/write 的通用 `ensureSafeRelativePath()` 行为。
-- 根读取仅限 `file_path` 缺失、空字符串或仅由 SPACE/TAB 组成的字符串、以及原始精确 `SKILL.md`；不得以 `filePath.trim()` 或其他笼统 whitespace 判定。CR/LF、U+2028/U+2029、U+FEFF、NBSP-only 都进入严格验证并失败。
-- 对非根 `file_path` 的每个 well-formed segment 先拒绝 lone surrogate、U+0060、`Cc`、`Cf`、U+2028/U+2029，再作词法 root-inside、每级 lstat、root/target realpath root-inside、普通文件和文本资格检查；禁止反引号使固定 ```text fence 不能被路径注入关闭或扰乱。
+- 根读取仅限 `filePath` 缺失、空字符串或仅由 SPACE/TAB 组成的字符串、以及原始精确 `SKILL.md`；不得以 `filePath.trim()` 或其他笼统 whitespace 判定。CR/LF、U+2028/U+2029、U+FEFF、NBSP-only 都进入严格验证并失败。
+- 对非根 `filePath` 的每个 well-formed segment 先拒绝 lone surrogate、U+0060、`Cc`、`Cf`、U+2028/U+2029，再作词法 root-inside、每级 lstat、root/target realpath root-inside、普通文件和文本资格检查；禁止反引号使固定 ```text fence 不能被路径注入关闭或扰乱。
 - POSIX 遍历用 buffer filename 或等价方式做 fatal UTF-8 decode/re-encode byte-for-byte round-trip；不能无损表示的物理 segment 跳过并记录受控诊断。原生字符串平台拒绝非 well-formed JS 字符串，但 U+FFFD 本身允许；每条列出路径必须可用相同字符串回读。
 - 对列表与指定读取共享同一辅助文件安全/文本资格 helper；dotfile/dot-directory 不特殊过滤。直接读取不能信任枚举时状态，必须重新完成检查。
 - 打开前完成 lexical/root realpath 边界与父级非 symlink 检查，对目标 `lstat` 为普通文件时保存 `dev` + `ino` identity；平台不能可靠提供时选择可验证等价 identity。
@@ -185,7 +185,7 @@ const isValidSkillIdentifierSegment = (segment: string): boolean => {
 
 - `truncated` 不是选择性字段：root body、requested file、section 或 final fallback 任一截断即 `true`。
 - 指定文件由同一已验证 handle 的 fd-based `classifyTextSampleFromHandle()` / `readTextFileCappedFromHandle()` 或等价 core 产生规范化文本内容：BOM 按 decoder 行为移除，CRLF/孤立 CR 规范为 LF，长行和既有预算依当前读取器处理；包装/扩展结果保留 `truncatedByBytes`、`hasMoreLines`、`truncatedByLineLength`，三者 OR 后写入 V2 `truncated`。嵌套 `SKILL.md` 只是不解析、不剥离 frontmatter，不是保真例外。
-- 成功实体精确为 `{ skill_id, file_path, content, truncated }`；根读取返回 `file_path: "SKILL.md"`。Runner 在 header 回显 `skill_id`、`file_path`、`truncated`，然后按 `content` 原值输出；headers 不计入 50 KiB content 预算。`content === ""` 时结果保持空字符串，不得输出 `(empty file content)`、`(empty skill content)` 或其他业务占位。
+- 成功实体精确为 `{ skillId, filePath, content, truncated }`；根读取返回 `filePath: "SKILL.md"`。Runner 从 camelCase 结果获取取值，但在模型可读 text header 固定回显 `skill_id:`、`file_path:`、`truncated:`；headers 不计入 50 KiB content 预算。随后按 `content` 原值输出，`content === ""` 时结果保持空字符串，不得输出 `(empty file content)`、`(empty skill content)` 或其他业务占位。
 
 ## 性能、缓存与安全取舍
 
@@ -200,13 +200,13 @@ const isValidSkillIdentifierSegment = (segment: string): boolean => {
 | 阶段 | 工作项 | 完成条件 |
 |---|---|---|
 | 协议向量 | 编写/共享 frontmatter、标识、path、错误和 UTF-8 裁剪测试向量 | API 与 Worker 可证明边界/字段行为等价，含结束边界在大源文件后段的完整 frontmatter、U+0060/`Cc`/`Cf`/U+2028/U+2029 字符向量。 |
-| Worker 基础 | 实现等价根资格、完整根专用读取 helper、逐步 filePath helper、错误映射、辅助文件资格与 fd 读取 helper | 根/直接 file_path 均无旧 node 分支；根不依赖通用辅助读取器或 V2 source-size cap；辅助读取具备 identity/fd TOCTOU 重检。 |
+| Worker 基础 | 实现等价根资格、完整根专用读取 helper、逐步 filePath helper、错误映射、辅助文件资格与 fd 读取 helper | 根/直接 filePath 均无旧 node 分支；根不依赖通用辅助读取器或 V2 source-size cap；辅助读取具备 identity/fd TOCTOU 重检。 |
 | 列表与容量 | 实现全量扫描、501 有界选择、固定排序、section/max-content 序列化与精确 `truncated` | 输出等价于概念全排序前缀，预算/fence/UTF-8、suffix 与所有截断来源均可断言。 |
-| 工具接入 | 修改 provider、`runSkillTool` 结果、runner 渲染 | 只接受外部 `skill_id`/`file_path`，映射内部 `skillId`/`filePath`，并只输出 V2 `skill_id`/`file_path` 字段。 |
-| API 接入 | 修改 schema、description、prompt、摘要展示回退 | 模型所见 `{ skill_id, file_path? }` 合同与 Worker 完全一致。 |
+| 工具接入 | 修改 provider、`runSkillTool` 结果、runner 渲染 | 只接受/输出 `skillId`/`filePath`，无 snake_case 映射；Runner 仅在 text headers 渲染 `skill_id:`/`file_path:`。 |
+| API 接入 | 修改 schema、description、prompt、摘要展示回退 | 模型所见 `{ skillId, filePath? }` 合同与 Worker 完全一致。 |
 | roots 回归 | 验证 external roots、`topLevelSkillCount`、静态缓存 | 仅读取协议变化，无 roots 模型回归。 |
 | 文档与验证 | 重写 authoring 手册、执行定向测试/typecheck/build | 满足 `test-and-acceptance.md`。 |
 
 ## 原子交付要求
 
-合并请求必须同时包含：Worker 根专用/辅助文件规范化 V2 行为和固定错误、API schema/description/prompt、workspace shared contract 的 `description: ""` 兼容与空值 UI 行为、runner、测试、`skills/skill-authoring/SKILL.md` 重写、迁移说明。不得出现 schema 已切换而 Worker 仍读 `id`、`skill` 或 `path`，根读取仍依赖 `readTextFileCapped()`、Worker 已返回列表但 runner 仍渲染 `children`、或 authoring 手册仍教旧协议的中间状态。
+合并请求必须同时包含：Worker 根专用/辅助文件规范化 V2 行为和固定错误、API schema/description/prompt、workspace shared contract 的 `description: ""` 兼容与空值 UI 行为、runner、测试、`skills/skill-authoring/SKILL.md` 重写、迁移说明。不得出现 schema 已切换而 Worker 仍读 `id`、`skill`、`path`、`skill_id` 或 `file_path`，根读取仍依赖 `readTextFileCapped()`、Worker 已返回列表但 runner 仍渲染 `children`、或 authoring 手册仍教旧协议的中间状态。

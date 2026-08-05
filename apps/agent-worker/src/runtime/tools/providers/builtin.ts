@@ -68,19 +68,17 @@ function parseSkillToolArgs(args: unknown) {
   }
   const record = args as Record<string, unknown>;
   const hasOwn = (key: string) => Object.prototype.hasOwnProperty.call(record, key);
-  const ownKeys = Reflect.ownKeys(record);
-  const hasLegacyPath = hasOwn("path");
-  const hasUnexpectedField = ownKeys.some((key) => key !== "skill_id" && key !== "file_path");
-  if (hasLegacyPath) {
-    throw new Error("invalid skill path");
+  if (!hasOwn("skillId")) {
+    throw new Error("skill is required");
   }
+  const ownKeys = Reflect.ownKeys(record);
+  const hasUnexpectedField = ownKeys.some((key) => key !== "skillId" && key !== "filePath");
   if (hasUnexpectedField) {
-    if (!hasOwn("skill_id")) throw new Error("skill is required");
     throw new Error("invalid skill identifier");
   }
   return {
-    skillId: hasOwn("skill_id") ? record.skill_id : undefined,
-    ...(hasOwn("file_path") ? { filePath: record.file_path } : {})
+    skillId: record.skillId,
+    ...(hasOwn("filePath") ? { filePath: record.filePath } : {})
   };
 }
 
