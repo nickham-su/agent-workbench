@@ -19,6 +19,7 @@ import {
   detectWorkspaceExternalSkillRoots,
   detectWorkspaceAgentEnablement,
   getWorkspaceAgentEnablementSettings,
+  listWorkspaceTopLevelSkills,
   updateWorkspaceAgentEnablementSettings,
   updateWorkspaceExternalSkillRootsSettings
 } from "./workspace.service.js";
@@ -281,6 +282,43 @@ test("workspace external skills: count 语义与可读口径（直系文件不�
 
   const updated = await updateWorkspaceExternalSkillRootsSettings(fixture.ctx, logger, fixture.workspaceId, { enabledRoots: [{ sourceType: "workspace", rootDir }] });
   assert.equal(updated.enabledRoots.length, 1, "count=0 candidate should still be enable-able");
+});
+
+test("workspace top-level skills 仅返回可生成 V2 stable identifier 的物理技能", async () => {
+  const warnings: Array<{ fields: unknown; message: unknown }> = [];
+  const logger = {
+    ...createLogger(),
+    warn: (fields: unknown, message: unknown) => warnings.push({ fields, message })
+  } as unknown as FastifyBaseLogger;
+  const fixture = await createFixture();
+  const rootDir = "workspace-skill";
+  const rootPath = path.join(fixture.workspacePath, rootDir);
+  await fs.mkdir(path.join(rootPath, "valid"), { recursive: true });
+  await fs.mkdir(path.join(rootPath, " invalid"), { recursive: true });
+  await fs.writeFile(path.join(rootPath, "valid", "SKILL.md"), "---\nname: Valid\n---\nbody", "utf8");
+  await fs.writeFile(path.join(rootPath, " invalid", "SKILL.md"), "---\nname: Invalid\n---\nbody", "utf8");
+
+  const detected = await detectWorkspaceExternalSkillRoots(fixture.ctx, logger, fixture.workspaceId);
+  const candidate = detected.items.find((item) => item.sourceType === "workspace" && item.rootDir === rootDir);
+  assert.equal(candidate?.topLevelSkillCount, 2, "physical count retains the existing discovery rule");
+  await updateWorkspaceExternalSkillRootsSettings(
+    fixture.ctx,
+    logger,
+    fixture.workspaceId,
+    { enabledRoots: [{ sourceType: "workspace", rootDir }] }
+  );
+
+  const result = await listWorkspaceTopLevelSkills(fixture.ctx, logger, fixture.workspaceId);
+  const workspaceItems = result.items.filter((item) => item.sourceType === "workspace" && item.rootDir === rootDir);
+  assert.deepEqual(workspaceItems.map((item) => item.id), [`workspace/${rootDir}/valid`]);
+  assert.equal(workspaceItems[0]?.description, "");
+  assert.deepEqual(warnings, [{
+    fields: { sourceType: "workspace", rootDir },
+    message: "skip top-level skill with non-callable identifier"
+  }]);
+  const serializedWarnings = JSON.stringify(warnings);
+  assert.equal(serializedWarnings.includes(rootPath), false, "warning must not expose physical root path");
+  assert.equal(serializedWarnings.includes(" invalid"), false, "warning must not expose invalid entry name");
 });
 
 test("workspace agent enablement: 默认 all，全部视为启用", async () => {

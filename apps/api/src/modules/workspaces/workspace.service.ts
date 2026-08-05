@@ -19,6 +19,7 @@ import type {
   WorkspaceTopLevelSkillsResponse
 } from "@agent-workbench/shared";
 import type { WorkspaceRecord } from "@agent-workbench/shared";
+import { isValidSkillPathSegment } from "@agent-workbench/shared";
 import { HttpError } from "../../app/errors.js";
 import type { AppContext } from "../../app/context.js";
 import { newId } from "../../utils/ids.js";
@@ -1429,11 +1430,15 @@ export async function listWorkspaceTopLevelSkills(
     logMessage: "failed to read builtin top-level skill summary"
   });
   for (const item of builtin) {
+    if (!["builtin", item.entryName].every(isValidSkillPathSegment)) {
+      logger.warn({ sourceType: "builtin" }, "skip top-level skill with non-callable identifier");
+      continue;
+    }
     const parsed = parseSkillFrontmatter(item.text);
     rows.push({
       id: `builtin/${item.entryName}`,
-      name: parsed.name || item.entryName,
-      description: parsed.description || "",
+      name: parsed.name.trim() || item.entryName,
+      description: parsed.description.trim(),
       sourceType: "builtin"
     });
   }
@@ -1449,11 +1454,18 @@ export async function listWorkspaceTopLevelSkills(
       ? `workspace/${root.rootDir}`
       : `repo/${root.repoId}/${root.rootDir}`;
     for (const item of skills) {
+      const segments = root.sourceType === "workspace"
+        ? ["workspace", root.rootDir, item.entryName]
+        : ["repo", String(root.repoId || ""), root.rootDir, item.entryName];
+      if (!segments.every(isValidSkillPathSegment)) {
+        logger.warn({ sourceType: root.sourceType, ...(root.repoId ? { repoId: root.repoId } : {}), rootDir: root.rootDir }, "skip top-level skill with non-callable identifier");
+        continue;
+      }
       const parsed = parseSkillFrontmatter(item.text);
       rows.push({
         id: `${idPrefix}/${item.entryName}`,
-        name: parsed.name || item.entryName,
-        description: parsed.description || "",
+        name: parsed.name.trim() || item.entryName,
+        description: parsed.description.trim(),
         sourceType: root.sourceType,
         ...(root.repoId ? { repoId: root.repoId } : {}),
         rootDir: root.rootDir

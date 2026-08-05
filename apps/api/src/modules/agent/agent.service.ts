@@ -25,6 +25,7 @@ import type {
   AgentRecentSessionsResponse,
   AgentRecentWorkspacesResponse,
 } from "@agent-workbench/shared";
+import { isValidSkillPathSegment } from "@agent-workbench/shared";
 import { getPromptText, renderPromptTemplateFile } from "@agent-workbench/shared/prompts";
 import { HttpError } from "../../app/errors.js";
 
@@ -256,10 +257,17 @@ function toolArgsSchema(toolName: AgentContextToolName) {
   if (toolName === "skill") {
     return {
       type: "object",
-      required: ["id"],
+      required: ["skill_id"],
       additionalProperties: false,
       properties: {
-        id: { type: "string", minLength: 1 }
+        skill_id: {
+          type: "string",
+          description: "Stable logical skill identifier shown in the available skills list, such as builtin/skill-authoring."
+        },
+        file_path: {
+          type: "string",
+          description: "Optional file path relative to the skill root. Omit file_path, pass an empty string or a string containing only spaces/tabs, or pass exactly SKILL.md to read root instructions and available file paths."
+        }
       }
     };
   }
@@ -411,12 +419,11 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
   }
   if (toolName === "skill") {
     return [
-      "Load skill content by logical id (no filesystem paths).",
-      "Input: id (string), using builtin/... or workspace/... or repo/... prefixes.",
-      "If id points to a skill node (directory containing SKILL.md), it returns the skill content and children.",
-      "When reading a root skill node, children are recursively expanded to include all readable descendant files (excluding SKILL.md) and descendant skill nodes.",
-      "When reading a non-root skill node, children include sibling files (excluding SKILL.md) and direct child skill nodes.",
-      "If id points to a file, it returns file content only."
+      "Load a top-level skill and its text files by stable logical identifier (no filesystem paths).",
+      "Input: skill_id (string) is one of the identifiers in the available skills list, using builtin/... or workspace/... or repo/... prefixes.",
+      "file_path is optional and is relative to the selected skill root.",
+      "Omit file_path, pass an empty string or a string containing only spaces/tabs, or pass exactly SKILL.md to read root instructions and a flat list of available file paths.",
+      "Any other valid file_path reads that text file with the Worker text reader's normalized content."
     ].join(" ");
   }
   if (toolName === "visual_analyze") {
@@ -1710,9 +1717,9 @@ function decodeUtf8Prefix(bytes: Buffer, maxBytes: number) {
 }
 
 type SkillSummaryItem = {
-  id: string;
+  skill: string;
   name: string;
-  description: string;
+  description?: string;
 };
 
 type RunPromptStatic = {
@@ -1741,10 +1748,16 @@ async function scanTopLevelSkillSummaries(params: {
   for (const item of readableItems) {
     const parsed = parseSkillFrontmatter(item.text);
     const base = params.idBasePath ? `${params.idBasePath}/` : "";
+    const identifierSegments = [params.idPrefix, ...base.split("/").filter(Boolean), item.entryName];
+    if (!identifierSegments.every(isValidSkillPathSegment)) {
+      params.logger.warn({ skillNamespace: params.idPrefix }, "skip top-level skill with non-callable identifier");
+      continue;
+    }
+    const description = parsed.description.trim();
     items.push({
-      id: `${params.idPrefix}/${base}${item.entryName}`,
-      name: parsed.name || item.entryName,
-      description: parsed.description || ""
+      skill: `${params.idPrefix}/${base}${item.entryName}`,
+      name: parsed.name.trim() || item.entryName,
+      ...(description ? { description } : {})
     });
   }
   return items;
@@ -1755,14 +1768,14 @@ function buildSkillsInstructionSection(input: {
   external: SkillSummaryItem[];
 }) {
   const lines: string[] = [];
-  lines.push("Use the builtin skill tool to load details on demand by id.");
-  lines.push('If the user mentions anything related to skills, be sure to use the "skill" tool, read the corresponding entry, and then proceed with the action.');
+  lines.push("Use the builtin skill tool to load details on demand by stable logical skill identifier.");
+  lines.push('If the user mentions anything related to skills, use the "skill" tool with the corresponding skill entry, then proceed with the action. First read the root: omit file_path, pass an empty string or spaces/tabs only, or pass exactly SKILL.md. Root content includes a flat (not tree-shaped) Skill files list; copy one complete path line verbatim into file_path to read that auxiliary text file.');
   lines.push("");
   lines.push("builtin skills:");
   if (input.builtin.length === 0) {
     lines.push("- (none)");
   } else {
-    for (const item of input.builtin) lines.push(`- id: ${item.id}; name: ${item.name}; description: ${item.description}`);
+    for (const item of input.builtin) lines.push(`- skill_id: ${item.skill}; name: ${item.name}${item.description ? `; description: ${item.description}` : ""}`);
   }
   lines.push("");
   lines.push("external skills:");
@@ -1770,7 +1783,7 @@ function buildSkillsInstructionSection(input: {
     lines.push("- (none)");
   } else {
     for (const item of input.external) {
-      lines.push(`- id: ${item.id}; name: ${item.name}; description: ${item.description}`);
+      lines.push(`- skill_id: ${item.skill}; name: ${item.name}${item.description ? `; description: ${item.description}` : ""}`);
     }
   }
   return lines.join("\n");
@@ -4434,7 +4447,7 @@ export class AgentService {
             });
             externalSkills.push(...scanned);
           }
-          externalSkills.sort((a, b) => a.id.localeCompare(b.id));
+          externalSkills.sort((a, b) => a.skill < b.skill ? -1 : a.skill > b.skill ? 1 : 0);
 
           const baselineToolNames = ["read", "todolist", "archive_search", "archive_read", "skill", "visual_analyze"] as const;
           const enabledToolNames: string[] = [];

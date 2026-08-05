@@ -11,3 +11,4 @@ export * from "./contracts/plugin.js";
 export * from "./contracts/settings.js";
 export * from "./contracts/auth.js";
 export * from "./contracts/agent.js";
+export * from "./skills-protocol.js";

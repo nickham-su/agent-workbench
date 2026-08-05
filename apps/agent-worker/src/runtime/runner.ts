@@ -276,37 +276,20 @@ function buildToolSuccessText(params: {
   }
 
   if (params.toolName === "skill") {
-    const id = typeof resultObj?.id === "string" ? resultObj.id : (typeof params.args.id === "string" ? params.args.id : undefined);
-    const type = typeof resultObj?.type === "string" ? resultObj.type : undefined;
+    const skillId = typeof resultObj?.skill_id === "string" ? resultObj.skill_id : (typeof params.args.skill_id === "string" ? params.args.skill_id : undefined);
+    const filePath = typeof resultObj?.file_path === "string" ? resultObj.file_path : (typeof params.args.file_path === "string" ? params.args.file_path : undefined);
     const truncated = resultObj?.truncated === true;
-    if (type === "file") {
-      const content = typeof resultObj?.content === "string" ? resultObj.content : "";
-      return buildToolText({
-        toolName: params.toolName,
-        status: params.status,
-        headers: [["id", id], ["type", "file"], ["truncated", truncated ? "true" : undefined]],
-        body: content || "(empty file content)"
-      });
-    }
-
-    const name = typeof resultObj?.name === "string" ? resultObj.name : "";
-    const description = typeof resultObj?.description === "string" ? resultObj.description : "";
-    const children = Array.isArray(resultObj?.children) ? resultObj.children : [];
-    const lines: string[] = [];
-    if (name) lines.push(`name: ${name}`);
-    if (description) lines.push(`description: ${description}`);
-    if (children.length === 0) {
-      lines.push("children:\n- (none)");
-    } else {
-      lines.push("children:");
-      for (const child of children) {
-        const c = toRecordObject(child);
-        lines.push(`- id: ${String(c?.id || "")}; type: ${String(c?.type || "")}; name: ${String(c?.name || "")}`);
-      }
-    }
     const content = typeof resultObj?.content === "string" ? resultObj.content : "";
-    const body = `${lines.join("\n")}\n\n${content || "(empty skill content)"}`.trim();
-    return buildToolText({ toolName: params.toolName, status: params.status, headers: [["id", id], ["type", "skill"], ["truncated", truncated ? "true" : undefined]], body });
+    // V2 根读取承诺保留正文的 CRLF、孤立 CR 与尾部内容；不能复用通用
+    // buildToolText() 的换行规范化和 trimEnd()。
+    const headers = [
+      `tool: ${params.toolName}`,
+      `status: ${params.status}`,
+      ...(skillId ? [`skill_id: ${skillId}`] : []),
+      ...(filePath ? [`file_path: ${filePath}`] : []),
+      `truncated: ${truncated ? "true" : "false"}`
+    ];
+    return content === "" ? headers.join("\n") : `${headers.join("\n")}\n\n${content}`;
   }
 
   if (params.toolName === "bash") {

@@ -62,6 +62,28 @@ function requireNonEmptyStringArg(raw: unknown, fieldName: string) {
   return value;
 }
 
+function parseSkillToolArgs(args: unknown) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    throw new Error("skill is required");
+  }
+  const record = args as Record<string, unknown>;
+  const hasOwn = (key: string) => Object.prototype.hasOwnProperty.call(record, key);
+  const ownKeys = Reflect.ownKeys(record);
+  const hasLegacyPath = hasOwn("path");
+  const hasUnexpectedField = ownKeys.some((key) => key !== "skill_id" && key !== "file_path");
+  if (hasLegacyPath) {
+    throw new Error("invalid skill path");
+  }
+  if (hasUnexpectedField) {
+    if (!hasOwn("skill_id")) throw new Error("skill is required");
+    throw new Error("invalid skill identifier");
+  }
+  return {
+    skillId: hasOwn("skill_id") ? record.skill_id : undefined,
+    ...(hasOwn("file_path") ? { filePath: record.file_path } : {})
+  };
+}
+
 function parseOptionalPositiveIntegerArg(raw: unknown, fieldName: string) {
   if (raw === undefined || raw === null) return undefined;
   if (typeof raw === "string" && raw.trim() === "") return undefined;
@@ -494,12 +516,15 @@ export class BuiltinToolProvider implements ToolProvider {
         });
       }
       case "skill": {
-        const id = requireNonEmptyStringArg(args.id, "skill.id");
+        const skillArgs = parseSkillToolArgs(args);
         const repoRoot = String(process.env.AWB_AGENT_REPO_ROOT || "").trim() || process.cwd();
         return await runSkillTool({
           workspacePath: ctx.run.workspacePath,
           repoRoot,
-          id,
+          skillId: skillArgs.skillId,
+          ...(Object.prototype.hasOwnProperty.call(skillArgs, "filePath")
+            ? { filePath: skillArgs.filePath }
+            : {}),
           externalSkillRoots: ctx.promptContext.externalSkillRoots,
           signal: ctx.signal
         });

@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { FastifyBaseLogger } from "fastify";
+export { parseSkillFrontmatter } from "@agent-workbench/shared";
 
 export type ReadableTopLevelSkillNode = {
   entryName: string;
@@ -40,24 +41,4 @@ export async function scanReadableTopLevelSkills(params: {
     items.push({ entryName, text });
   }
   return items;
-}
-
-export function parseSkillFrontmatter(text: string): { name: string; description: string } {
-  const raw = String(text || "");
-  if (!raw.startsWith("---\n")) return { name: "", description: "" };
-  const end = raw.indexOf("\n---\n", 4);
-  if (end < 0) return { name: "", description: "" };
-  const yaml = raw.slice(4, end);
-  let name = "";
-  let description = "";
-  for (const line of yaml.split(/\r?\n/)) {
-    const idx = line.indexOf(":");
-    if (idx <= 0) continue;
-    const key = line.slice(0, idx).trim().toLowerCase();
-    let value = line.slice(idx + 1).trim();
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
-    if (key === "name" && !name) name = value;
-    if (key === "description" && !description) description = value;
-  }
-  return { name, description };
 }

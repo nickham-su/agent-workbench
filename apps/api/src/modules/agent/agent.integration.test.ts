@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, test } from "node:test";
+import Ajv from "ajv";
 import type { FastifyInstance } from "fastify";
 import { createApp } from "../../app/createApp.js";
 import { openDb } from "../../infra/db/db.js";
@@ -677,7 +678,34 @@ test("agent prompt-context 中的工具描述与 schema 说明使用英文", asy
   assert.ok(String(todolistTool?.description || "").includes("Example input:"));
   assert.ok(String(scratchpadTool?.description || "").includes("Suggested <= 200 characters"));
   assert.equal((scratchpadTool?.inputSchema as any)?.properties?.content?.maxLength, 200);
-  assert.ok(String(skillTool?.description || "").includes("Load skill content by logical id"));
+  assert.ok(String(skillTool?.description || "").includes("stable logical identifier"));
+  assert.ok(String(skillTool?.description || "").includes("skill_id"));
+  assert.ok(String(skillTool?.description || "").includes("file_path"));
+  const skillProperties = (skillTool?.inputSchema as any)?.properties;
+  assert.deepEqual((skillTool?.inputSchema as any)?.required, ["skill_id"]);
+  assert.deepEqual(Object.keys(skillProperties || {}).sort(), ["file_path", "skill_id"]);
+  assert.equal(skillProperties?.id, undefined);
+  assert.equal(skillProperties?.skill, undefined);
+  assert.equal(skillProperties?.path, undefined);
+  assert.equal(skillProperties?.skill_id?.minLength, undefined);
+  assert.ok(String(skillProperties?.skill_id?.description || "").includes("Stable logical skill identifier"));
+  assert.ok(String(skillProperties?.file_path?.description || "").includes("spaces/tabs"));
+  const validateSkillArgs = new Ajv({ allErrors: true, strict: false }).compile(skillTool?.inputSchema as Record<string, unknown>);
+  assert.equal(validateSkillArgs({ skill_id: "builtin/skill-authoring" }), true);
+  assert.equal(validateSkillArgs({ skill_id: "builtin/skill-authoring", file_path: "reference.md" }), true);
+  for (const legacyPayload of [
+    { id: "builtin/skill-authoring" },
+    { skill: "builtin/skill-authoring" },
+    { skill: "builtin/skill-authoring", path: "reference.md" },
+    { skill_id: "builtin/skill-authoring", path: "reference.md" },
+    { skill_id: "builtin/skill-authoring", id: "builtin/skill-authoring" }
+  ]) {
+    assert.equal(validateSkillArgs(legacyPayload), false, `legacy payload must fail schema validation: ${JSON.stringify(legacyPayload)}`);
+    assert.ok(
+      validateSkillArgs.errors?.some((error) => error.keyword === "required" || error.keyword === "additionalProperties"),
+      `legacy payload should fail required/additional-property validation: ${JSON.stringify(legacyPayload)}`
+    );
+  }
   assert.equal(String(todolistTool?.description || "").includes("完成 todolist goal 增强"), false);
   assert.equal(String(todolistTool?.description || "").includes("梳理需求与约束"), false);
   assert.ok(
@@ -8413,6 +8441,7 @@ test("agent prompt-context 注入 skills 摘要并在同 run 缓存静态部分"
   const builtinSkillDir = path.join(fixture.repoRoot, "skills", `it-builtin-${Date.now()}`);
   const wsSkillDir = path.join(fixture.workspacePath, "deploy-skill", "deploy");
   const wsBinarySkillDir = path.join(fixture.workspacePath, "deploy-skill", "nontext");
+  const wsInvalidSkillDir = path.join(fixture.workspacePath, "deploy-skill", " invalid");
   const repoId = newSortableId("repo");
   const repoDirName = "repo-it";
   const repoPath = workspaceRepoDirPath(fixture.dataDir, path.basename(fixture.workspacePath), repoDirName);
@@ -8422,12 +8451,13 @@ test("agent prompt-context 注入 skills 摘要并在同 run 缓存静态部分"
   try {
     await fs.mkdir(path.join(builtinSkillDir, "child"), { recursive: true });
     await fs.mkdir(wsSkillDir, { recursive: true });
+    await fs.mkdir(wsInvalidSkillDir, { recursive: true });
     await fs.mkdir(path.join(repoSkillDir, repoTopSkillDir), { recursive: true });
     await fs.mkdir(wsBinarySkillDir, { recursive: true });
     await fs.mkdir(repoSkillDir, { recursive: true });
     await fs.writeFile(
       path.join(builtinSkillDir, "SKILL.md"),
-      "---\nname: Builtin Skill V1\ndescription: builtin-desc-v1\n---\n\nbody",
+      "---\nname: Builtin Skill V1\n---\n\nbody",
       "utf8"
     );
     insertRepo(fixture.db, {
@@ -8456,6 +8486,7 @@ test("agent prompt-context 注入 skills 摘要并在同 run 缓存静态部分"
       "---\nname: Workspace Skill V1\ndescription: ws-desc-v1\n---\n\nbody",
       "utf8"
     );
+    await fs.writeFile(path.join(wsInvalidSkillDir, "SKILL.md"), "---\nname: Invalid workspace skill\n---\nbody", "utf8");
     await fs.writeFile(path.join(wsBinarySkillDir, "SKILL.md"), Buffer.from([0x2d, 0x2d, 0x2d, 0x00, 0x61]));
     await fs.writeFile(
       path.join(repoSkillDir, repoTopSkillDir, "SKILL.md"),
@@ -8504,17 +8535,23 @@ test("agent prompt-context 注入 skills 摘要并在同 run 缓存静态部分"
       runId
     });
     assert.ok(first.system.includes("[skills]"), "skills section should be present");
-    assert.ok(first.system.includes(`id: builtin/${path.basename(builtinSkillDir)}`), "builtin skill id should be injected");
+    assert.ok(first.system.includes(`skill_id: builtin/${path.basename(builtinSkillDir)}`), "builtin skill identifier should be injected");
     assert.ok(first.system.includes("name: Builtin Skill V1"));
-    assert.ok(first.system.includes("id: workspace/deploy-skill/deploy"), "workspace skill id should be injected");
+    assert.ok(first.system.includes(`skill_id: builtin/${path.basename(builtinSkillDir)}; name: Builtin Skill V1\n`), "empty description must not leave a trailing separator");
+    assert.equal(first.system.includes(`skill_id: builtin/${path.basename(builtinSkillDir)}; name: Builtin Skill V1; description:`), false, "empty description must be omitted");
+    assert.ok(first.system.includes("skill_id: workspace/deploy-skill/deploy"), "workspace skill identifier should be injected");
     assert.ok(first.system.includes("description: ws-desc-v1"));
-    assert.ok(first.system.includes(`id: repo/${repoId}/${repoSkillsRootDir}/${repoTopSkillDir}`), "repo skill id should be injected");
+    assert.ok(first.system.includes(`skill_id: repo/${repoId}/${repoSkillsRootDir}/${repoTopSkillDir}`), "repo skill identifier should be injected");
     assert.ok(first.system.includes("description: repo-desc-v1"));
     assert.equal(first.system.includes(fixture.workspacePath), false, "system prompt should not expose workspace real path");
     assert.equal(first.system.includes(repoPath), false, "system prompt should not expose repo real path");
     assert.equal(first.system.includes(`builtin/${path.basename(builtinSkillDir)}/child`), false, "only top-level skills should be injected");
-    assert.equal(first.system.includes("id: workspace/deploy-skill/nontext"), false, "non-text top-level skill should not be injected");
+    assert.equal(first.system.includes("skill_id: workspace/deploy-skill/nontext"), false, "non-text top-level skill should not be injected");
+    assert.equal(first.system.includes("skill_id: workspace/deploy-skill/ invalid"), false, "non-callable physical skill must be omitted from prompt summaries");
     assert.equal(first.tools.some((tool) => tool.name === "skill"), true, "skill tool should be available");
+    assert.ok(first.system.includes("First read the root:"), "skills prompt should require a root read first");
+    assert.ok(first.system.includes("flat (not tree-shaped) Skill files list"), "skills prompt should describe the flat list");
+    assert.ok(first.system.includes("copy one complete path line verbatim into file_path"), "skills prompt should explain direct path reuse");
 
     await fs.writeFile(path.join(wsSkillDir, "SKILL.md"), "---\nname: Workspace Skill V2\ndescription: ws-desc-v2\n---\n", "utf8");
     await fs.writeFile(path.join(repoSkillDir, repoTopSkillDir, "SKILL.md"), "---\nname: Repo Skill V2\ndescription: repo-desc-v2\n---\n", "utf8");
