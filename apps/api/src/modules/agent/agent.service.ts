@@ -3705,6 +3705,7 @@ export class AgentService {
       provider: profile.provider,
       model: profile.model,
       vision: profile.vision,
+      compaction: profile.compaction,
       runtime
     };
   }

@@ -2814,6 +2814,145 @@ test("agent runtime settings 可通过 execution-profile 下发", async () => {
   assert.equal(typeof profile.runtime?.autoCompactThresholdPct, "number");
   assert.equal(typeof profile.model?.contextWindowTokens, "number");
   assert.equal(profile.provider?.options?.apiMode, "responses");
+  assert.equal(profile.compaction, null);
+});
+
+test("agent runtime compactionModel 支持保存、下发、清空和引用保护", async () => {
+  const fixture = await createFixture();
+
+  const providers = [
+    {
+      id: "ppchat",
+      name: "ppchat",
+      npm: "@ai-sdk/openai",
+      options: { baseURL: "https://code.ppchat.vip/v1", apiKey: "sk-test" },
+      models: [{ id: "gpt-5.2", name: "gpt-5.2", contextWindowTokens: 128000 }]
+    },
+    {
+      id: "compaction-provider",
+      name: "Compaction Provider",
+      npm: "@ai-sdk/openai-compatible",
+      options: { baseURL: "https://example.invalid/v1", apiKey: "sk-compaction" },
+      models: [{ id: "compact-model", name: "Compact Model", contextWindowTokens: 32000 }]
+    }
+  ];
+
+  const providersRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: { default: null, providers }
+  });
+  assert.equal(providersRes.statusCode, 200, `configure providers failed: ${providersRes.body}`);
+
+  const emptyRuntimeRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/runtime" });
+  assert.equal(emptyRuntimeRes.statusCode, 200);
+  assert.equal(emptyRuntimeRes.json().compactionModel, null);
+
+  const invalidRuntimeRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/runtime",
+    payload: { compactionModel: { providerId: "compaction-provider", modelId: "missing-model" } }
+  });
+  assert.equal(invalidRuntimeRes.statusCode, 400);
+  assert.equal(invalidRuntimeRes.json().code, "AGENT_MODEL_NOT_FOUND");
+
+  const runtimeRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/runtime",
+    payload: { compactionModel: { providerId: "compaction-provider", modelId: "compact-model" } }
+  });
+  assert.equal(runtimeRes.statusCode, 200, `update runtime settings failed: ${runtimeRes.body}`);
+  assert.deepEqual(runtimeRes.json().compactionModel, {
+    providerId: "compaction-provider",
+    modelId: "compact-model"
+  });
+
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const msg = await sendMessage(fixture.app, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "hi",
+    clientRequestId: "req_runtime_compaction_model"
+  });
+  const profileRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/execution-profile",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId: msg.runId }
+  });
+  assert.equal(profileRes.statusCode, 200, `get execution profile failed: ${profileRes.body}`);
+  const profile = profileRes.json() as any;
+  assert.equal(profile.model?.id, "gpt-5.2");
+  assert.equal(profile.compaction?.source, "runtime_compaction");
+  assert.equal(profile.compaction?.provider?.id, "compaction-provider");
+  assert.equal(profile.compaction?.model?.id, "compact-model");
+
+  const clearRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/runtime",
+    payload: { compactionModel: null }
+  });
+  assert.equal(clearRes.statusCode, 200);
+  assert.equal(clearRes.json().compactionModel, null);
+
+  const profileAfterClearRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/execution-profile",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId: msg.runId }
+  });
+  assert.equal(profileAfterClearRes.statusCode, 200);
+  assert.equal(profileAfterClearRes.json().compaction, null);
+
+  const setAgainRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/runtime",
+    payload: { compactionModel: { providerId: "compaction-provider", modelId: "compact-model" } }
+  });
+  assert.equal(setAgainRes.statusCode, 200);
+
+  const clearCompactionApiKeyRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: {
+      default: null,
+      providers: providers.map((provider) => provider.id === "compaction-provider"
+        ? { ...provider, options: { ...provider.options, apiKey: null } }
+        : provider)
+    }
+  });
+  assert.equal(clearCompactionApiKeyRes.statusCode, 200, `clear compaction apiKey failed: ${clearCompactionApiKeyRes.body}`);
+
+  const profileWithoutCompactionKeyRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/execution-profile",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId: msg.runId }
+  });
+  assert.equal(profileWithoutCompactionKeyRes.statusCode, 200, `get execution profile without compaction key failed: ${profileWithoutCompactionKeyRes.body}`);
+  assert.equal(profileWithoutCompactionKeyRes.json().model?.id, "gpt-5.2");
+  assert.equal(profileWithoutCompactionKeyRes.json().compaction, null);
+
+  const removeReferencedProviderRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: { default: null, providers: [providers[0]] }
+  });
+  assert.equal(removeReferencedProviderRes.statusCode, 409);
+  assert.equal(removeReferencedProviderRes.json().code, "AGENT_PROVIDER_MODEL_RENAME_REFERENCED");
+
+  const renameReferencedModelRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: {
+      default: null,
+      providers: providers.map((provider) => provider.id === "compaction-provider"
+        ? { ...provider, models: [{ id: "compact-model-v2", name: "Compact Model v2", contextWindowTokens: 32000 }] }
+        : provider)
+    }
+  });
+  assert.equal(renameReferencedModelRes.statusCode, 409);
+  assert.equal(renameReferencedModelRes.json().code, "AGENT_PROVIDER_MODEL_RENAME_REFERENCED");
 });
 
 test("openai provider apiMode 会在 settings 与 execution-profile/single-call profile 中透传", async () => {

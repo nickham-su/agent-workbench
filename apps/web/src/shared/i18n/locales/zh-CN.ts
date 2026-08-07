@@ -1079,13 +1079,19 @@ export default {
           placeholder: "请选择视觉模型（可选）",
           help: "全局默认视觉模型，供 visual_analyze 工具使用；未配置时回退到当前 agent 主模型。"
         },
+        compactionModel: {
+          label: "压缩默认模型",
+          placeholder: "请选择压缩默认模型（可选）",
+          help: "用于生成上下文压缩摘要；留空时使用当前 Agent 模型。若候选模型容量不足或不适用，将回退到当前 Agent 主模型。"
+        },
         sessionTerminalSoundEnabled: {
           label: "运行结束提示音",
           help: "当运行结束时播放提示音。对所有会话生效。"
         }
       },
       errors: {
-        visionModelInvalid: "视觉模型配置无效，请重新选择。"
+        visionModelInvalid: "视觉模型配置无效，请重新选择。",
+        compactionModelInvalid: "压缩默认模型配置无效，请重新选择。"
       }
     },
 

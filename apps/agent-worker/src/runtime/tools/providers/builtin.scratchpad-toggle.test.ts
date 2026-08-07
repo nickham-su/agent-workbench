@@ -20,9 +20,11 @@ function createProfile(tools: ExecutionProfile["agent"]["tools"]): ExecutionProf
       modelRequestMaxRetries: 0,
       autoCompactThresholdPct: 80,
       visionModel: null,
+      compactionModel: null,
       updatedAt: Date.now()
     },
     vision: null,
+    compaction: null,
     agent: {
       id: "agent_1",
       name: "agent_1",

@@ -33,9 +33,11 @@ function baseProfile(): ExecutionProfile {
       modelRequestMaxRetries: 0,
       autoCompactThresholdPct: 80,
       visionModel: null,
+      compactionModel: null,
       updatedAt: Date.now()
     },
     vision: null,
+    compaction: null,
     agent: {
       id: "agent_test",
       name: "agent_test",

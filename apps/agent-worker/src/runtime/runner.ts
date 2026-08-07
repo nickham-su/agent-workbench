@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { jsonSchema, streamText, tool } from "ai";
+import { APICallError, jsonSchema, streamText, tool } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
@@ -91,6 +91,99 @@ function computeRetryBackoffMs(attemptIndex: number) {
   return Math.min(MODEL_RETRY_BACKOFF_MAX_MS, Math.max(MODEL_RETRY_BACKOFF_BASE_MS, delay));
 }
 
+function toErrorRecord(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function normalizeErrorCode(value: unknown) {
+  if (typeof value !== "string") return "";
+  return value.trim().toLowerCase().replace(/[\s.-]+/g, "_");
+}
+
+function parseJsonErrorValue(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return null;
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function collectErrorCodes(value: unknown, depth = 0): string[] {
+  if (depth > 3) return [];
+  if (typeof value === "string") {
+    const parsed = parseJsonErrorValue(value);
+    return parsed == null ? [] : collectErrorCodes(parsed, depth + 1);
+  }
+  const record = toErrorRecord(value);
+  if (!record) return [];
+
+  const codes = [normalizeErrorCode(record.code), normalizeErrorCode(record.type)].filter(Boolean);
+  for (const key of ["error", "data", "details"] as const) {
+    codes.push(...collectErrorCodes(record[key], depth + 1));
+  }
+  return codes;
+}
+
+function collectErrorText(value: unknown, depth = 0): string[] {
+  if (depth > 3) return [];
+  if (typeof value === "string") return [value];
+  if (value instanceof Error) {
+    return [value.message, ...collectErrorText((value as Error & { cause?: unknown }).cause, depth + 1)];
+  }
+  const record = toErrorRecord(value);
+  if (!record) return [];
+
+  const values: string[] = [];
+  for (const key of ["message", "responseBody", "body", "error", "data", "details", "cause"] as const) {
+    values.push(...collectErrorText(record[key], depth + 1));
+  }
+  return values;
+}
+
+const CONTEXT_LIMIT_ERROR_CODES = new Set([
+  "context_length_exceeded",
+  "context_limit_exceeded",
+  "context_window_exceeded",
+  "input_too_long",
+  "prompt_too_long",
+  "request_too_large"
+]);
+
+function hasContextLimitText(text: string) {
+  const normalized = text.toLowerCase().replace(/[._-]+/g, " ");
+  return (
+    /\bcontext[\s_-]*(?:length|window|limit)\b/.test(normalized)
+    || /\b(?:prompt|input)\s+(?:is\s+)?too\s+(?:long|large)\b/.test(normalized)
+    || /\brequest\s+(?:is\s+)?too\s+large\b/.test(normalized)
+    || /\b(?:prompt|input)\b[\s\S]{0,80}\b(?:exceed(?:s|ed)?|maximum|max(?:imum)?|limit)\b/.test(normalized)
+    || /\b(?:exceed(?:s|ed)?|maximum|max(?:imum)?|limit)\b[\s\S]{0,80}\b(?:prompt|input)\b/.test(normalized)
+  );
+}
+
+function isContextLengthExceededError(err: unknown) {
+  const apiCallError = APICallError.isInstance(err) ? err : null;
+  const record = toErrorRecord(err);
+  const codes = [
+    ...collectErrorCodes(apiCallError?.data),
+    ...collectErrorCodes(record)
+  ];
+  if (codes.some((code) => CONTEXT_LIMIT_ERROR_CODES.has(code))) return true;
+
+  const statusCode = apiCallError?.statusCode
+    ?? (typeof record?.statusCode === "number" ? record.statusCode : null)
+    ?? (typeof record?.status === "number" ? record.status : null);
+  if (statusCode != null && ![400, 413, 422].includes(statusCode)) return false;
+
+  return [
+    ...collectErrorText(apiCallError?.responseBody),
+    ...collectErrorText(apiCallError?.data),
+    ...collectErrorText(err)
+  ].some(hasContextLimitText);
+}
+
 function parseHttpStatusFromError(err: unknown) {
   const message = err instanceof Error ? err.message : String(err || "");
   const match = /^request failed:\s*(\d{3})\b/.exec(message);
@@ -100,6 +193,7 @@ function parseHttpStatusFromError(err: unknown) {
 }
 
 function isRetryableCompactionError(err: unknown) {
+  if (isContextLengthExceededError(err)) return false;
   if (err instanceof ApiConflictError) return false;
   const status = parseHttpStatusFromError(err);
   if (status == null) return true;
@@ -1518,6 +1612,40 @@ export class AgentRunner {
     return lastTotalTokens >= threshold;
   }
 
+  private selectCompactionModel(params: {
+    profile: ExecutionProfile;
+    context: PromptContext;
+  }) {
+    const primary = {
+      provider: params.profile.provider,
+      model: params.profile.model
+    };
+    const candidate = params.profile.compaction
+      ? {
+          provider: params.profile.compaction.provider,
+          model: params.profile.compaction.model
+        }
+      : null;
+    if (!candidate) return { profile: primary, isCandidate: false };
+
+    const lastTotalTokens = typeof params.context.lastResponseTotalTokens === "number"
+      && Number.isFinite(params.context.lastResponseTotalTokens)
+      ? Math.max(0, Math.floor(params.context.lastResponseTotalTokens))
+      : null;
+    const candidateContextWindow = Math.max(1, Math.floor(Number(candidate.model.contextWindowTokens || 0)));
+    if (lastTotalTokens == null || lastTotalTokens <= candidateContextWindow) {
+      return { profile: candidate, isCandidate: true };
+    }
+    return { profile: primary, isCandidate: false };
+  }
+
+  private isSameCompactionModelProfile(
+    left: { provider: ExecutionProfile["provider"]; model: ExecutionProfile["model"] },
+    right: { provider: ExecutionProfile["provider"]; model: ExecutionProfile["model"] }
+  ) {
+    return left.provider.id === right.provider.id && left.model.id === right.model.id;
+  }
+
   protected async generateSingleCallSummary(params: {
     profile: {
       provider: ExecutionProfile["provider"];
@@ -1548,10 +1676,18 @@ export class AgentRunner {
         content: buildCompactionUserPrompt({ uiLocale: params.context.uiLocale })
       }
     });
-    const response = await this.generateSingleCallSummary({
+    const primary = {
+      provider: params.profile.provider,
+      model: params.profile.model
+    };
+    const selected = this.selectCompactionModel({
+      profile: params.profile,
+      context: params.context
+    });
+    const generateSummary = async (profile: typeof primary) => await this.generateSingleCallSummary({
       profile: {
-        provider: params.profile.provider,
-        model: params.profile.model
+        provider: profile.provider,
+        model: profile.model
       },
       input: {
         // compaction 是内部摘要任务，不继承执行态完整 system prompt；使用 messages-context 提供的 one-shot system。
@@ -1562,6 +1698,22 @@ export class AgentRunner {
         abortSignal: params.signal
       }
     });
+
+    let response;
+    try {
+      response = await generateSummary(selected.profile);
+    } catch (err) {
+      if (
+        selected.isCandidate
+        && !params.signal.aborted
+        && !this.isSameCompactionModelProfile(selected.profile, primary)
+        && isContextLengthExceededError(err)
+      ) {
+        response = await generateSummary(primary);
+      } else {
+        throw err;
+      }
+    }
     return String(response.text || "").trim();
   }
 

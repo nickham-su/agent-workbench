@@ -1081,13 +1081,19 @@ export default {
           placeholder: "Select a vision model (optional)",
           help: "Global default vision model used by visual_analyze; falls back to the current agent primary model when unset."
         },
+        compactionModel: {
+          label: "Default compaction model",
+          placeholder: "Select a default compaction model (optional)",
+          help: "Used to generate context-compaction summaries; when unset, the current agent model is used. If the candidate model lacks capacity or is not suitable, the current agent primary model is used instead."
+        },
         sessionTerminalSoundEnabled: {
           label: "Run completion sound",
           help: "Play a sound when a run completes. Applies to all sessions."
         }
       },
       errors: {
-        visionModelInvalid: "Invalid vision model selection. Please reselect."
+        visionModelInvalid: "Invalid vision model selection. Please reselect.",
+        compactionModelInvalid: "Invalid default compaction model selection. Please reselect."
       }
     },
 

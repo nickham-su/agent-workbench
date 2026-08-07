@@ -1,7 +1,135 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { APICallError } from "ai";
 import { AgentRunner, buildCompactionUserPrompt } from "./runner.js";
 import { ApiConflictError } from "./apiClient.js";
+
+function createCompactionProfile(input?: {
+  candidate?: { providerId?: string; modelId?: string; contextWindowTokens?: number } | null;
+}) {
+  const candidate = input?.candidate === null
+    ? null
+    : {
+        source: "runtime_compaction" as const,
+        provider: {
+          id: input?.candidate?.providerId ?? "compaction-provider",
+          name: "Compaction Provider",
+          npm: "@ai-sdk/openai" as const,
+          options: { baseURL: "https://compaction.example.test", apiKey: "compaction-key" }
+        },
+        model: {
+          id: input?.candidate?.modelId ?? "compaction-model",
+          name: "Compaction Model",
+          contextWindowTokens: input?.candidate?.contextWindowTokens ?? 100_000
+        }
+      };
+  return {
+    resolved: { workspaceId: "ws", sessionId: "sess" },
+    runtime: {
+      modelRequestMaxRetries: 0,
+      autoCompactThresholdPct: 80,
+      compactionModel: candidate ? { providerId: candidate.provider.id, modelId: candidate.model.id } : null
+    },
+    provider: {
+      id: "primary-provider",
+      name: "Primary Provider",
+      npm: "@ai-sdk/openai" as const,
+      options: { baseURL: "https://primary.example.test", apiKey: "primary-key" }
+    },
+    model: {
+      id: "primary-model",
+      name: "Primary Model",
+      contextWindowTokens: 128_000
+    },
+    compaction: candidate
+  };
+}
+
+function createCompactionContext(lastResponseTotalTokens: number | null) {
+  return {
+    lastResponseTotalTokens,
+    uiLocale: "en-US" as const
+  };
+}
+
+function createMessagesContext() {
+  return {
+    headItemId: 1,
+    system: "Compaction system",
+    messages: [{ role: "user", content: "Summarize this session." }]
+  };
+}
+
+function createProcessRunPromptContext(lastResponseTotalTokens: number | null, headItemId: number) {
+  return {
+    pendingTools: [],
+    tools: [],
+    headItemId,
+    system: "",
+    messages: [],
+    lastResponseTotalTokens,
+    uiLocale: "en-US" as const,
+    externalSkillRoots: []
+  };
+}
+
+async function runProcessRunAutoCompactionTest(input: { candidateContextLimitError: boolean }) {
+  const profile = createCompactionProfile({ candidate: { contextWindowTokens: 110_000 } });
+  const summaryCalls: string[] = [];
+  const compactCalls: Array<{ expectedHeadItemId: number | null }> = [];
+  const terminalStatuses: string[] = [];
+  let promptContextCallCount = 0;
+  const controller = new AbortController();
+
+  class TestRunner extends AgentRunner {
+    protected override async generateSingleCallSummary(params: any): Promise<{ text: string; totalTokens: number | null }> {
+      const modelKey = `${params.profile.provider.id}/${params.profile.model.id}`;
+      summaryCalls.push(modelKey);
+      if (input.candidateContextLimitError && modelKey === "compaction-provider/compaction-model") {
+        const error = new Error("context length exceeded") as Error & { statusCode: number };
+        error.statusCode = 400;
+        throw error;
+      }
+      return { text: "summary", totalTokens: null };
+    }
+  }
+
+  const runner = new TestRunner(
+    {
+      async getExecutionProfile() {
+        return profile;
+      },
+      async updateRunState() {},
+      async getPromptContext() {
+        promptContextCallCount += 1;
+        return promptContextCallCount === 1
+          ? createProcessRunPromptContext(110_000, 1)
+          : createProcessRunPromptContext(null, 2);
+      },
+      async getMessagesContext() {
+        return createMessagesContext();
+      },
+      async compactContext(input: { expectedHeadItemId: number | null }) {
+        compactCalls.push({ expectedHeadItemId: input.expectedHeadItemId });
+        controller.abort();
+        return { compacted: true, summaryItemId: 2, archivedCount: 1 };
+      },
+      async completeRun(input: { status: string }) {
+        terminalStatuses.push(input.status);
+      }
+    } as any,
+    {} as any,
+    { info() {}, warn() {}, error() {} },
+    1
+  );
+
+  await (runner as any).processRun(
+    { workspaceId: "ws", sessionId: "sess", runId: "run", workspacePath: "." },
+    controller.signal
+  );
+
+  return { summaryCalls, compactCalls, terminalStatuses };
+}
 
 test("shouldAutoCompact 基于当前模型 contextWindowTokens 计算阈值", () => {
   const runner = new AgentRunner({} as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
@@ -28,6 +156,16 @@ test("shouldAutoCompact 基于当前模型 contextWindowTokens 计算阈值", ()
     }),
     false
   );
+
+  const profile = createCompactionProfile({ candidate: { contextWindowTokens: 64_000 } });
+  assert.equal(
+    shouldAutoCompact({
+      context: { lastResponseTotalTokens: 90_000 },
+      model: profile.model,
+      runtime: profile.runtime
+    }),
+    false
+  );
 });
 
 test("buildCompactionUserPrompt 按 uiLocale 返回对应语言", () => {
@@ -43,6 +181,269 @@ test("buildCompactionUserPrompt 按 uiLocale 返回对应语言", () => {
   assert.ok(zh.includes("若上下文包含与工作目标相关的文档,请在总结中列出文档路径"));
   assert.ok(en.includes("if the context includes documents relevant to the work goal, list their document paths in the summary"));
   assert.equal(fallback.includes("请基于当前会话内容输出一份结构化总结"), false);
+});
+
+test("generateCompactionSummary 未配置候选时使用主模型", async () => {
+  const calls: string[] = [];
+  class TestRunner extends AgentRunner {
+    protected override async generateSingleCallSummary(params: any) {
+      calls.push(`${params.profile.provider.id}/${params.profile.model.id}`);
+      return { text: "summary", totalTokens: null };
+    }
+  }
+  const runner = new TestRunner(
+    { async getMessagesContext() { return createMessagesContext(); } } as any,
+    {} as any,
+    { info() {}, warn() {}, error() {} },
+    1
+  );
+
+  await (runner as any).generateCompactionSummary({
+    profile: createCompactionProfile({ candidate: null }),
+    context: createCompactionContext(80_000),
+    signal: AbortSignal.timeout(1_000)
+  });
+
+  assert.deepEqual(calls, ["primary-provider/primary-model"]);
+});
+
+test("generateCompactionSummary 候选容量足够时使用候选模型", async () => {
+  const calls: string[] = [];
+  class TestRunner extends AgentRunner {
+    protected override async generateSingleCallSummary(params: any) {
+      calls.push(`${params.profile.provider.id}/${params.profile.model.id}`);
+      return { text: "summary", totalTokens: null };
+    }
+  }
+  const runner = new TestRunner(
+    { async getMessagesContext() { return createMessagesContext(); } } as any,
+    {} as any,
+    { info() {}, warn() {}, error() {} },
+    1
+  );
+
+  await (runner as any).generateCompactionSummary({
+    profile: createCompactionProfile({ candidate: { contextWindowTokens: 100_000 } }),
+    context: createCompactionContext(100_000),
+    signal: AbortSignal.timeout(1_000)
+  });
+
+  assert.deepEqual(calls, ["compaction-provider/compaction-model"]);
+});
+
+test("generateCompactionSummary 候选容量不足时使用主模型", async () => {
+  const calls: string[] = [];
+  class TestRunner extends AgentRunner {
+    protected override async generateSingleCallSummary(params: any) {
+      calls.push(`${params.profile.provider.id}/${params.profile.model.id}`);
+      return { text: "summary", totalTokens: null };
+    }
+  }
+  const runner = new TestRunner(
+    { async getMessagesContext() { return createMessagesContext(); } } as any,
+    {} as any,
+    { info() {}, warn() {}, error() {} },
+    1
+  );
+
+  await (runner as any).generateCompactionSummary({
+    profile: createCompactionProfile({ candidate: { contextWindowTokens: 99_999 } }),
+    context: createCompactionContext(100_000),
+    signal: AbortSignal.timeout(1_000)
+  });
+
+  assert.deepEqual(calls, ["primary-provider/primary-model"]);
+});
+
+test("generateCompactionSummary usage 缺失时先尝试候选模型", async () => {
+  const calls: string[] = [];
+  class TestRunner extends AgentRunner {
+    protected override async generateSingleCallSummary(params: any) {
+      calls.push(`${params.profile.provider.id}/${params.profile.model.id}`);
+      return { text: "summary", totalTokens: null };
+    }
+  }
+  const runner = new TestRunner(
+    { async getMessagesContext() { return createMessagesContext(); } } as any,
+    {} as any,
+    { info() {}, warn() {}, error() {} },
+    1
+  );
+
+  await (runner as any).generateCompactionSummary({
+    profile: createCompactionProfile(),
+    context: createCompactionContext(null),
+    signal: AbortSignal.timeout(1_000)
+  });
+
+  assert.deepEqual(calls, ["compaction-provider/compaction-model"]);
+});
+
+test("generateCompactionSummary 候选上下文超限时仅回退主模型一次", async () => {
+  const calls: string[] = [];
+  class TestRunner extends AgentRunner {
+    protected override async generateSingleCallSummary(params: any) {
+      const profile = `${params.profile.provider.id}/${params.profile.model.id}`;
+      calls.push(profile);
+      if (profile === "compaction-provider/compaction-model") {
+        const error = new Error("The prompt is too long for this model") as Error & { statusCode: number };
+        error.statusCode = 400;
+        throw error;
+      }
+      return { text: "primary summary", totalTokens: null };
+    }
+  }
+  const runner = new TestRunner(
+    { async getMessagesContext() { return createMessagesContext(); } } as any,
+    {} as any,
+    { info() {}, warn() {}, error() {} },
+    1
+  );
+
+  const text = await (runner as any).generateCompactionSummary({
+    profile: createCompactionProfile(),
+    context: createCompactionContext(null),
+    signal: AbortSignal.timeout(1_000)
+  });
+
+  assert.equal(text, "primary summary");
+  assert.deepEqual(calls, ["compaction-provider/compaction-model", "primary-provider/primary-model"]);
+});
+
+test("generateCompactionSummary 识别结构化上下文超限错误并回退主模型", async () => {
+  const calls: string[] = [];
+  class TestRunner extends AgentRunner {
+    protected override async generateSingleCallSummary(params: any) {
+      const profile = `${params.profile.provider.id}/${params.profile.model.id}`;
+      calls.push(profile);
+      if (profile === "compaction-provider/compaction-model") {
+        throw new APICallError({
+          message: "bad request",
+          url: "https://compaction.example.test",
+          requestBodyValues: {},
+          statusCode: 400,
+          data: { error: { code: "context_length_exceeded" } }
+        });
+      }
+      return { text: "primary summary", totalTokens: null };
+    }
+  }
+  const runner = new TestRunner(
+    { async getMessagesContext() { return createMessagesContext(); } } as any,
+    {} as any,
+    { info() {}, warn() {}, error() {} },
+    1
+  );
+
+  await (runner as any).generateCompactionSummary({
+    profile: createCompactionProfile(),
+    context: createCompactionContext(null),
+    signal: AbortSignal.timeout(1_000)
+  });
+
+  assert.deepEqual(calls, ["compaction-provider/compaction-model", "primary-provider/primary-model"]);
+});
+
+test("generateCompactionSummary 非上下文超限错误不回退主模型", async () => {
+  const calls: string[] = [];
+  class TestRunner extends AgentRunner {
+    protected override async generateSingleCallSummary(params: any): Promise<{ text: string; totalTokens: number | null }> {
+      calls.push(`${params.profile.provider.id}/${params.profile.model.id}`);
+      throw new Error("request failed: 429 rate limited");
+    }
+  }
+  const runner = new TestRunner(
+    { async getMessagesContext() { return createMessagesContext(); } } as any,
+    {} as any,
+    { info() {}, warn() {}, error() {} },
+    1
+  );
+
+  await assert.rejects(
+    () => (runner as any).generateCompactionSummary({
+      profile: createCompactionProfile(),
+      context: createCompactionContext(null),
+      signal: AbortSignal.timeout(1_000)
+    }),
+    /429 rate limited/
+  );
+  assert.deepEqual(calls, ["compaction-provider/compaction-model"]);
+});
+
+test("generateCompactionSummary 不把 maxOutputTokens 校验错误误判为上下文超限", async () => {
+  const calls: string[] = [];
+  class TestRunner extends AgentRunner {
+    protected override async generateSingleCallSummary(params: any): Promise<{ text: string; totalTokens: number | null }> {
+      calls.push(`${params.profile.provider.id}/${params.profile.model.id}`);
+      throw new Error("maxOutputTokens must be a finite number");
+    }
+  }
+  const runner = new TestRunner(
+    { async getMessagesContext() { return createMessagesContext(); } } as any,
+    {} as any,
+    { info() {}, warn() {}, error() {} },
+    1
+  );
+
+  await assert.rejects(
+    () => (runner as any).generateCompactionSummary({
+      profile: createCompactionProfile(),
+      context: createCompactionContext(null),
+      signal: AbortSignal.timeout(1_000)
+    }),
+    /maxOutputTokens must be a finite number/
+  );
+  assert.deepEqual(calls, ["compaction-provider/compaction-model"]);
+});
+
+test("generateCompactionSummary 候选与主模型相同时不重复回退", async () => {
+  const calls: string[] = [];
+  class TestRunner extends AgentRunner {
+    protected override async generateSingleCallSummary(params: any): Promise<{ text: string; totalTokens: number | null }> {
+      calls.push(`${params.profile.provider.id}/${params.profile.model.id}`);
+      const error = new Error("context length exceeded") as Error & { statusCode: number };
+      error.statusCode = 400;
+      throw error;
+    }
+  }
+  const runner = new TestRunner(
+    { async getMessagesContext() { return createMessagesContext(); } } as any,
+    {} as any,
+    { info() {}, warn() {}, error() {} },
+    1
+  );
+  const profile = createCompactionProfile({
+    candidate: { providerId: "primary-provider", modelId: "primary-model", contextWindowTokens: 128_000 }
+  });
+
+  await assert.rejects(
+    () => (runner as any).generateCompactionSummary({
+      profile,
+      context: createCompactionContext(null),
+      signal: AbortSignal.timeout(1_000)
+    }),
+    /context length exceeded/
+  );
+  assert.deepEqual(calls, ["primary-provider/primary-model"]);
+});
+
+test("processRun 自动压缩真实入口使用候选模型", async () => {
+  const result = await runProcessRunAutoCompactionTest({ candidateContextLimitError: false });
+
+  assert.deepEqual(result.summaryCalls, ["compaction-provider/compaction-model"]);
+  assert.deepEqual(result.compactCalls, [{ expectedHeadItemId: 1 }]);
+  assert.deepEqual(result.terminalStatuses, ["cancelled"]);
+});
+
+test("processRun 自动压缩真实入口在候选超限时回退主模型", async () => {
+  const result = await runProcessRunAutoCompactionTest({ candidateContextLimitError: true });
+
+  assert.deepEqual(result.summaryCalls, [
+    "compaction-provider/compaction-model",
+    "primary-provider/primary-model"
+  ]);
+  assert.deepEqual(result.compactCalls, [{ expectedHeadItemId: 1 }]);
+  assert.deepEqual(result.terminalStatuses, ["cancelled"]);
 });
 
 test("generateCompactionSummary 透传 messages-context.system 到单次调用", async () => {
@@ -178,6 +579,52 @@ test("compactContext 在可恢复失败时按 modelRequestMaxRetries 重试", as
     assert.equal(result, true);
     assert.equal(compactCalls, 2);
     assert.ok(runStateUpdates.some((it) => String(it.runNoticeText || "").includes("Compaction failed, retrying")));
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("compactContext 候选和主模型都上下文超限时不重复 candidate->primary 流程", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => {
+    return originalSetTimeout(handler, 0, ...args);
+  }) as typeof setTimeout;
+
+  try {
+    const summaryCalls: string[] = [];
+    class TestRunner extends AgentRunner {
+      protected override async generateSingleCallSummary(params: any): Promise<{ text: string; totalTokens: number | null }> {
+        const profile = `${params.profile.provider.id}/${params.profile.model.id}`;
+        summaryCalls.push(profile);
+        const error = new Error("context length exceeded") as Error & { statusCode: number };
+        error.statusCode = 400;
+        throw error;
+      }
+    }
+    const runner = new TestRunner(
+      { async getMessagesContext() { return createMessagesContext(); }, async updateRunState() {} } as any,
+      {} as any,
+      { info() {}, warn() {}, error() {} },
+      1
+    );
+
+    await assert.rejects(
+      () => (runner as any).compactContext({
+        profile: {
+          ...createCompactionProfile(),
+          runtime: { modelRequestMaxRetries: 3 }
+        },
+        run: { workspaceId: "ws", sessionId: "sess", runId: "run" },
+        context: { ...createCompactionContext(null), headItemId: 1 },
+        signal: AbortSignal.timeout(1_000)
+      }),
+      /context length exceeded/
+    );
+
+    assert.deepEqual(summaryCalls, [
+      "compaction-provider/compaction-model",
+      "primary-provider/primary-model"
+    ]);
   } finally {
     globalThis.setTimeout = originalSetTimeout;
   }

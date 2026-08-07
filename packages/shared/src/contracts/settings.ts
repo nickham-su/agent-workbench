@@ -210,6 +210,8 @@ export const AgentRuntimeSettingsSchema = Type.Object({
   // 自动压缩阈值百分比,达到 model.contextWindowTokens * pct/100 触发压缩。
   autoCompactThresholdPct: Type.Integer({ minimum: 50, maximum: 99 }),
   visionModel: Type.Union([AgentProvidersDefaultSchema, Type.Null()]),
+  // 上下文压缩摘要的默认模型;未配置时使用当前 Agent 模型。
+  compactionModel: Type.Union([AgentProvidersDefaultSchema, Type.Null()]),
   sessionTerminalSoundEnabled: Type.Boolean(),
   updatedAt: Type.Number()
 });
@@ -221,6 +223,7 @@ export const UpdateAgentRuntimeSettingsRequestSchema = Type.Object({
   modelRequestMaxRetries: Type.Optional(Type.Integer({ minimum: 0, maximum: 100 })),
   autoCompactThresholdPct: Type.Optional(Type.Integer({ minimum: 50, maximum: 99 })),
   visionModel: Type.Optional(Type.Union([AgentProvidersDefaultSchema, Type.Null()])),
+  compactionModel: Type.Optional(Type.Union([AgentProvidersDefaultSchema, Type.Null()])),
   sessionTerminalSoundEnabled: Type.Optional(Type.Boolean())
 });
 export type UpdateAgentRuntimeSettingsRequest = Static<typeof UpdateAgentRuntimeSettingsRequestSchema>;
