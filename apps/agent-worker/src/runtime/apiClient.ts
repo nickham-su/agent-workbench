@@ -414,7 +414,7 @@ export class AgentApiClient {
       childContextWindowTokens: number;
     };
   }) {
-    return this.request<{ sessionId: string; runId: string; workspacePath: string; agentName: string }>("/api/internal/agent/subtask/start", {
+    return this.request<{ sessionId: string; runId: string; workspacePath: string; agentName: string; reused: boolean }>("/api/internal/agent/subtask/start", {
       method: "POST",
       body: input
     });

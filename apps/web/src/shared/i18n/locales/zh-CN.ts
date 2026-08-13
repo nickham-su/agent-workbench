@@ -1062,6 +1062,10 @@ export default {
           label: "自动压缩阈值(%)",
           help: "当最近一次模型响应总 token 达到当前模型 context window * 阈值/100 时触发自动压缩。范围 50-99。"
         },
+        maxSubtaskDepth: {
+          label: "Subtask 最大嵌套深度",
+          help: "限制 subtask 调用链的最大嵌套层级。独立主会话的首个运行是第 0 层；设为 1 时，仅允许主运行创建第一层 subtask；范围 1-5。仅限制嵌套深度，不限制同层数量、并发数或 token 消耗。"
+        },
         modelTotalTimeoutMs: {
           label: "单次请求超时（秒）",
           help: "单次模型请求的总超时时间。达到后将中止该次请求并标记为失败。仅支持整数秒,0 表示关闭。"

@@ -17,13 +17,20 @@ import {
   createAgentSession,
   createRunRecord,
   getAgentSession,
+  findSubtaskRunByParentTool,
   getRunRecord,
   getContextItemById,
+  getLatestRunRecordBySession,
+  getLatestTerminalRunRecord,
   getRunState as getRunStateRow,
   getSessionTranscriptItems,
   moveSessionHead,
+  setRunStateIdle,
+  updateRunRecordStatus,
   updateRunState
 } from "./agent.store.js";
+import { isSubtaskParentToolUniqueConstraintError } from "./agent.service.js";
+import { normalizeMaxSubtaskDepthForUpdate } from "../settings/settings.service.js";
 import { newSortableId } from "../../utils/ids.js";
 
 type Fixture = {
@@ -306,6 +313,9 @@ test("agent startup recovery mode=fail 会终止 in-flight run 并回收 run-sta
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
+    subtaskDepth: null,
+    parentRunId: null,
+    parentToolItemId: null,
     status: "running",
     createdAt: ts
   });
@@ -399,6 +409,212 @@ test("agent startup recovery mode=fail 会终止 in-flight run 并回收 run-sta
     await app?.close();
     db.close();
     await rmrf(dataDir);
+  }
+});
+
+test("agent run mapper 对 SQLite 弱类型 lineage 值 fail-closed", async () => {
+  const fixture = await createFixture();
+  try {
+    const sessionId = newSortableId("sess");
+    createAgentSession(fixture.db, {
+      id: sessionId,
+      workspaceId: fixture.workspaceId,
+      title: "run-mapper",
+      kind: "primary",
+      createdAt: Date.now(),
+      forkedFromSessionId: null,
+      forkedFromItemId: null
+    });
+    const parentRunId = newSortableId("run");
+    const childRunId = newSortableId("run");
+    createRunRecord(fixture.db, {
+      runId: childRunId,
+      workspaceId: fixture.workspaceId,
+      sessionId,
+      triggerItemId: 1,
+      agentId: "default",
+      providerId: "ppchat",
+      modelId: "gpt-5.2",
+      subtaskDepth: 1,
+      parentRunId,
+      parentToolItemId: 7,
+      status: "completed",
+      createdAt: Date.now()
+    });
+    fixture.db.prepare(`update agent_run set subtask_depth = ?, parent_tool_item_id = ?, parent_run_id = ? where run_id = ?`)
+      .run("not-a-number", -1, "", childRunId);
+
+    const record = getRunRecord(fixture.db, childRunId);
+    assert.equal(record?.subtaskDepth, null);
+    assert.equal(record?.parentToolItemId, null);
+    assert.equal(record?.parentRunId, null);
+    assert.equal(getLatestTerminalRunRecord(fixture.db, { workspaceId: fixture.workspaceId, sessionId })?.subtaskDepth, null);
+    assert.equal(getLatestRunRecordBySession(fixture.db, { workspaceId: fixture.workspaceId, sessionId })?.parentToolItemId, null);
+
+    fixture.db.prepare(`update agent_run set parent_run_id = ?, parent_tool_item_id = ?, subtask_depth = ? where run_id = ?`)
+      .run(parentRunId, 7, -2, childRunId);
+    assert.equal(findSubtaskRunByParentTool(fixture.db, { parentRunId, parentToolItemId: 7 })?.subtaskDepth, null);
+  } finally {
+    await closeFixture(fixture);
+  }
+});
+
+test("普通继续按最近实际 run 继承 depth，即使该 run 尚未 terminal", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  await configureAgentDefaults(fixture.app);
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const createdAt = Date.now();
+  createRunRecord(fixture.db, {
+    runId: "run_terminal_depth_0",
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    subtaskDepth: 0,
+    parentRunId: null,
+    parentToolItemId: null,
+    status: "completed",
+    createdAt
+  });
+  createRunRecord(fixture.db, {
+    runId: "run_running_depth_2",
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 2,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    subtaskDepth: 2,
+    parentRunId: null,
+    parentToolItemId: null,
+    status: "running",
+    createdAt: createdAt + 1
+  });
+  const next = await sendMessage(fixture.app, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "continue from latest run",
+    clientRequestId: "latest-actual-run-depth"
+  });
+  assert.equal(getRunRecord(fixture.db, next.runId)?.subtaskDepth, 2);
+});
+
+test("agent run 会保存 subtask depth lineage，并按 parent tool 查询 child run", async () => {
+  const fixture = await createFixture();
+  try {
+    const sessionId = newSortableId("sess");
+    createAgentSession(fixture.db, {
+      id: sessionId,
+      workspaceId: fixture.workspaceId,
+      title: "run-lineage",
+      kind: "subtask",
+      createdAt: Date.now(),
+      forkedFromSessionId: null,
+      forkedFromItemId: null
+    });
+    const parentRunId = newSortableId("run");
+    const childRunId = newSortableId("run");
+    const createdAt = Date.now();
+
+    createRunRecord(fixture.db, {
+      runId: childRunId,
+      workspaceId: fixture.workspaceId,
+      sessionId,
+      triggerItemId: 1,
+      agentId: "default",
+      providerId: "ppchat",
+      modelId: "gpt-5.2",
+      subtaskDepth: 2,
+      parentRunId,
+      parentToolItemId: 42,
+      status: "running",
+      createdAt
+    });
+
+    const record = getRunRecord(fixture.db, childRunId);
+    assert.ok(record);
+    assert.equal(record.subtaskDepth, 2);
+    assert.equal(record.parentRunId, parentRunId);
+    assert.equal(record.parentToolItemId, 42);
+
+    const byParentTool = findSubtaskRunByParentTool(fixture.db, {
+      parentRunId,
+      parentToolItemId: 42
+    });
+    assert.equal(byParentTool?.runId, childRunId);
+    assert.equal(findSubtaskRunByParentTool(fixture.db, { parentRunId, parentToolItemId: 43 }), null);
+  } finally {
+    await closeFixture(fixture);
+  }
+});
+
+test("agent run 的 parent tool partial unique index 仅约束 subtask lineage", async () => {
+  const fixture = await createFixture();
+  try {
+    const sessionId = newSortableId("sess");
+    createAgentSession(fixture.db, {
+      id: sessionId,
+      workspaceId: fixture.workspaceId,
+      title: "run-lineage-index",
+      kind: "primary",
+      createdAt: Date.now(),
+      forkedFromSessionId: null,
+      forkedFromItemId: null
+    });
+    const parentRunId = newSortableId("run");
+    const base = {
+      workspaceId: fixture.workspaceId,
+      sessionId,
+      triggerItemId: 1,
+      agentId: "default",
+      providerId: "ppchat",
+      modelId: "gpt-5.2",
+      status: "running" as const,
+      createdAt: Date.now()
+    };
+
+    createRunRecord(fixture.db, { ...base, runId: newSortableId("run"), subtaskDepth: 1, parentRunId, parentToolItemId: 7 });
+    assert.throws(
+      () => createRunRecord(fixture.db, { ...base, runId: newSortableId("run"), subtaskDepth: 1, parentRunId, parentToolItemId: 7 }),
+      /UNIQUE constraint failed/
+    );
+    createRunRecord(fixture.db, { ...base, runId: newSortableId("run"), subtaskDepth: 0, parentRunId, parentToolItemId: null });
+    createRunRecord(fixture.db, { ...base, runId: newSortableId("run"), subtaskDepth: null, parentRunId, parentToolItemId: null });
+  } finally {
+    await closeFixture(fixture);
+  }
+});
+
+test("subtask parent tool unique 冲突判定仅匹配目标 SQLite 约束", () => {
+  assert.equal(
+    isSubtaskParentToolUniqueConstraintError({
+      code: "SQLITE_CONSTRAINT_UNIQUE",
+      message: "UNIQUE constraint failed: agent_run.parent_run_id, agent_run.parent_tool_item_id"
+    }),
+    true
+  );
+  assert.equal(
+    isSubtaskParentToolUniqueConstraintError({ code: "SQLITE_CONSTRAINT_UNIQUE", message: "UNIQUE constraint failed: other_table.value" }),
+    false
+  );
+  assert.equal(
+    isSubtaskParentToolUniqueConstraintError({ code: "SQLITE_CONSTRAINT_FOREIGNKEY", message: "FOREIGN KEY constraint failed" }),
+    false
+  );
+  assert.equal(isSubtaskParentToolUniqueConstraintError(new Error("transaction failed")), false);
+});
+
+test("maxSubtaskDepth 更新规范化只接受有限整数范围", () => {
+  assert.equal(normalizeMaxSubtaskDepthForUpdate(1), 1);
+  assert.equal(normalizeMaxSubtaskDepthForUpdate(5), 5);
+  for (const invalid of ["1", "5", 1.5, 0, 6, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.throws(
+      () => normalizeMaxSubtaskDepthForUpdate(invalid),
+      (err: unknown) => (err as { statusCode?: unknown; code?: unknown }).statusCode === 400
+        && (err as { code?: unknown }).code === "AGENT_MAX_SUBTASK_DEPTH_INVALID"
+    );
   }
 });
 
@@ -564,7 +780,7 @@ test("agent prompt-context 仅在 agent.tools 显式包含 scratchpad 时暴露�
       agents: [{ id: "default", name: "default", summary: "", prompt: "", tools: ["bash", "subtask"], pluginTools: [], mcpServers: [], defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" }, scope: "both", order: 0 }]
     }
   });
-  createRunRecord(fixture.db, { runId: hiddenRunId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: 1, agentId: "default", providerId: "ppchat", uiLocale: "en-US", modelId: "gpt-5.2", status: "running", createdAt: Date.now() });
+  createRunRecord(fixture.db, { runId: hiddenRunId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: 1, agentId: "default", providerId: "ppchat", uiLocale: "en-US", modelId: "gpt-5.2", subtaskDepth: 0, parentRunId: null, parentToolItemId: null, status: "running", createdAt: Date.now() });
   const hiddenContext = await getPromptContextInternal({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId: hiddenRunId });
   assert.equal(hiddenContext.tools.some((item) => item.name === "scratchpad"), false);
 
@@ -577,7 +793,7 @@ test("agent prompt-context 仅在 agent.tools 显式包含 scratchpad 时暴露�
     }
   });
   assert.equal(visibleRes.statusCode, 200, `update agents failed: ${visibleRes.body}`);
-  createRunRecord(fixture.db, { runId: visibleRunId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: 1, agentId: "default", providerId: "ppchat", uiLocale: "en-US", modelId: "gpt-5.2", status: "running", createdAt: Date.now() });
+  createRunRecord(fixture.db, { runId: visibleRunId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: 1, agentId: "default", providerId: "ppchat", uiLocale: "en-US", modelId: "gpt-5.2", subtaskDepth: 0, parentRunId: null, parentToolItemId: null, status: "running", createdAt: Date.now() });
   const visibleContext = await getPromptContextInternal({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId: visibleRunId });
   const scratchpadTool = visibleContext.tools.find((item) => item.name === "scratchpad");
   assert.ok(scratchpadTool);
@@ -603,7 +819,7 @@ test("agent prompt-context 生成 subtask 描述时仅暴露 subtask/both agent"
   const session = await createSession(fixture.app, fixture.workspaceId);
   const runId = newSortableId("run");
   createRunRecord(fixture.db, {
-    runId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: 1, agentId: "shared", providerId: "ppchat", uiLocale: "en-US", modelId: "gpt-5.2", status: "running", createdAt: Date.now()
+    runId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: 1, agentId: "shared", providerId: "ppchat", uiLocale: "en-US", modelId: "gpt-5.2", subtaskDepth: 0, status: "running", createdAt: Date.now()
   });
 
   const promptContext = await getPromptContextInternal({
@@ -655,6 +871,7 @@ test("agent prompt-context 中的工具描述与 schema 说明使用英文", asy
     providerId: "ppchat",
     uiLocale: "zh-CN",
     modelId: "gpt-5.2",
+    subtaskDepth: 0,
     status: "running",
     createdAt: Date.now()
   });
@@ -930,6 +1147,7 @@ test("internal runs/:runId/final-text 返回最终 assistant 文本", async () =
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
+    subtaskDepth: 0,
     status: "running",
     createdAt: Date.now()
   });
@@ -1026,6 +1244,7 @@ test("internal events/sse 返回 run-complete 事件 chunk", async () => {
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
+    subtaskDepth: 0,
     status: "running",
     createdAt: Date.now()
   });
@@ -1119,6 +1338,410 @@ async function sendMessage(app: FastifyInstance, params: { sessionId: string; wo
   assert.equal(res.statusCode, 201, `send message failed: ${res.body}`);
   return res.json() as { messageItemId: number; runId: string; deduplicated: boolean };
 }
+
+async function createSubtaskAnchor(params: {
+  fixture: Awaited<ReturnType<typeof createFixture>>;
+  parentDepth: number | null;
+  sessionMode: "new" | "existing" | "fork";
+  existingSessionId?: string;
+}) {
+  const parentSession = await createSession(params.fixture.app, params.fixture.workspaceId);
+  const parentRunId = newSortableId("run");
+  const userItem = await createContextItemInternal({
+    app: params.fixture.app,
+    internalToken: params.fixture.internalToken,
+    workspaceId: params.fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "parent task" }
+  });
+  createRunRecord(params.fixture.db, {
+    runId: parentRunId,
+    workspaceId: params.fixture.workspaceId,
+    sessionId: parentSession.id,
+    triggerItemId: userItem.item.id,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    subtaskDepth: params.parentDepth,
+    status: "running",
+    createdAt: Date.now()
+  });
+  const toolItem = await createContextItemInternal({
+    app: params.fixture.app,
+    internalToken: params.fixture.internalToken,
+    workspaceId: params.fixture.workspaceId,
+    sessionId: parentSession.id,
+    runId: parentRunId,
+    turnId: "turn_subtask_depth",
+    step: 1,
+    prevId: userItem.item.id,
+    kind: "tool",
+    status: "queued",
+    output: {
+      type: "tool",
+      toolName: "subtask",
+      toolCallId: "call_subtask_depth",
+      args: { description: "child", prompt: "complete child", agentId: "default", session: { mode: params.sessionMode } }
+    }
+  });
+  return { parentSession, parentRunId, toolItem };
+}
+
+async function startSubtaskForAnchor(params: {
+  fixture: Awaited<ReturnType<typeof createFixture>>;
+  parentSessionId: string;
+  parentRunId: string;
+  parentToolItemId: number;
+  session: { mode: "new" | "existing" | "fork"; sessionId?: string };
+}) {
+  return await params.fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/subtask/start",
+    headers: { "x-awb-agent-internal-token": params.fixture.internalToken },
+    payload: {
+      workspaceId: params.fixture.workspaceId,
+      parentSessionId: params.parentSessionId,
+      parentRunId: params.parentRunId,
+      parentToolItemId: params.parentToolItemId,
+      description: "child",
+      prompt: "complete child",
+      agentId: "default",
+      session: params.session
+    }
+  });
+}
+
+test("agent run depth 为 root、继续和 compaction 传播", async () => {
+  const fixture = await createFixture();
+  await configureAgentDefaults(fixture.app);
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const first = await sendMessage(fixture.app, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "first",
+    clientRequestId: "depth-root"
+  });
+  const firstRun = getRunRecord(fixture.db, first.runId);
+  assert.equal(firstRun?.subtaskDepth, 0);
+  assert.equal(firstRun?.parentRunId, null);
+  assert.equal(firstRun?.parentToolItemId, null);
+  updateRunRecordStatus(fixture.db, { runId: first.runId, status: "completed", updatedAt: Date.now() });
+  setRunStateIdle(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    updatedAt: Date.now(),
+    appliedItemId: first.messageItemId
+  });
+
+  const second = await sendMessage(fixture.app, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "second",
+    clientRequestId: "depth-continue"
+  });
+  assert.equal(getRunRecord(fixture.db, second.runId)?.subtaskDepth, 0);
+  updateRunRecordStatus(fixture.db, { runId: second.runId, status: "completed", updatedAt: Date.now() });
+  setRunStateIdle(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    updatedAt: Date.now(),
+    appliedItemId: second.messageItemId
+  });
+
+  const compactRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: compactRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: second.messageItemId,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    subtaskDepth: getLatestTerminalRunRecord(fixture.db, { workspaceId: fixture.workspaceId, sessionId: session.id })?.subtaskDepth ?? null,
+    parentRunId: null,
+    parentToolItemId: null,
+    status: "running",
+    createdAt: Date.now()
+  });
+  const compactRun = getRunRecord(fixture.db, compactRunId);
+  assert.equal(compactRun?.subtaskDepth, 0);
+  assert.equal(compactRun?.parentRunId, null);
+  assert.equal(compactRun?.parentToolItemId, null);
+});
+
+test("普通 UI fork 首 run 继承来源 depth，来源不明时为 unknown", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  await configureAgentDefaults(fixture.app);
+  const source = await createSession(fixture.app, fixture.workspaceId);
+  const sourceRunId = newSortableId("run");
+  const sourceItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: source.id,
+    runId: sourceRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "source" }
+  });
+  createRunRecord(fixture.db, {
+    runId: sourceRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: source.id,
+    triggerItemId: sourceItem.item.id,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    subtaskDepth: 2,
+    status: "completed",
+    createdAt: Date.now()
+  });
+  const forkRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions/fork",
+    payload: { fromSessionId: source.id, fromItemId: sourceItem.item.id, mode: "visible_only" }
+  });
+  assert.equal(forkRes.statusCode, 201, forkRes.body);
+  const forked = forkRes.json() as { id: string };
+  const forkRun = await sendMessage(fixture.app, {
+    sessionId: forked.id,
+    workspaceId: fixture.workspaceId,
+    text: "fork continuation",
+    clientRequestId: "fork-depth"
+  });
+  const inherited = getRunRecord(fixture.db, forkRun.runId);
+  assert.equal(inherited?.subtaskDepth, 2);
+  assert.equal(inherited?.parentRunId, sourceRunId);
+  assert.equal(inherited?.parentToolItemId, null);
+
+  const unknownSource = await createSession(fixture.app, fixture.workspaceId);
+  const unknownItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: unknownSource.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "legacy source without run" }
+  });
+  const unknownForkRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions/fork",
+    payload: { fromSessionId: unknownSource.id, fromItemId: unknownItem.item.id, mode: "visible_only" }
+  });
+  assert.equal(unknownForkRes.statusCode, 201, unknownForkRes.body);
+  const unknownFork = unknownForkRes.json() as { id: string };
+  const unknownForkRun = await sendMessage(fixture.app, {
+    sessionId: unknownFork.id,
+    workspaceId: fixture.workspaceId,
+    text: "unknown fork continuation",
+    clientRequestId: "fork-depth-unknown"
+  });
+  const unknownLineage = getRunRecord(fixture.db, unknownForkRun.runId);
+  assert.equal(unknownLineage?.subtaskDepth, null);
+  assert.equal(unknownLineage?.parentRunId, null);
+  assert.equal(unknownLineage?.parentToolItemId, null);
+
+  const nullDepthSource = await createSession(fixture.app, fixture.workspaceId);
+  const nullDepthRunId = newSortableId("run");
+  const nullDepthItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: nullDepthSource.id,
+    runId: nullDepthRunId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "legacy source with unknown depth" }
+  });
+  createRunRecord(fixture.db, {
+    runId: nullDepthRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: nullDepthSource.id,
+    triggerItemId: nullDepthItem.item.id,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    subtaskDepth: null,
+    parentRunId: null,
+    parentToolItemId: null,
+    status: "completed",
+    createdAt: Date.now()
+  });
+  const nullDepthForkRes = await fixture.app.inject({ method: "POST", url: "/api/agent/sessions/fork", payload: { fromSessionId: nullDepthSource.id, fromItemId: nullDepthItem.item.id, mode: "visible_only" } });
+  assert.equal(nullDepthForkRes.statusCode, 201, nullDepthForkRes.body);
+  const nullDepthFork = nullDepthForkRes.json() as { id: string };
+  const nullDepthForkRun = await sendMessage(fixture.app, { sessionId: nullDepthFork.id, workspaceId: fixture.workspaceId, text: "keep unknown lineage", clientRequestId: "fork-depth-null-source" });
+  const nullDepthLineage = getRunRecord(fixture.db, nullDepthForkRun.runId);
+  assert.equal(nullDepthLineage?.subtaskDepth, null);
+  assert.equal(nullDepthLineage?.parentRunId, nullDepthRunId);
+  assert.equal(nullDepthLineage?.parentToolItemId, null);
+});
+
+test("subtask start 按 depth 执行限制、mode 和轻量幂等", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  await configureAgentDefaults(fixture.app);
+  const runtimeRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/runtime",
+    payload: { maxSubtaskDepth: 2 }
+  });
+  assert.equal(runtimeRes.statusCode, 200, runtimeRes.body);
+
+  for (const mode of ["new", "fork"] as const) {
+    const parent = await createSubtaskAnchor({ fixture, parentDepth: 0, sessionMode: mode });
+    const res = await startSubtaskForAnchor({
+      fixture,
+      parentSessionId: parent.parentSession.id,
+      parentRunId: parent.parentRunId,
+      parentToolItemId: parent.toolItem.item.id,
+      session: { mode }
+    });
+    assert.equal(res.statusCode, 200, res.body);
+    const body = res.json() as { runId: string; reused: boolean };
+    assert.equal(body.reused, false);
+    const child = getRunRecord(fixture.db, body.runId);
+    assert.equal(child?.subtaskDepth, 1);
+    assert.equal(child?.parentRunId, parent.parentRunId);
+    assert.equal(child?.parentToolItemId, parent.toolItem.item.id);
+  }
+
+  const existingSessionRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions",
+    payload: { workspaceId: fixture.workspaceId, title: "existing", kind: "subtask" }
+  });
+  assert.equal(existingSessionRes.statusCode, 201, existingSessionRes.body);
+  const existingSession = existingSessionRes.json() as { id: string };
+  const existingParent = await createSubtaskAnchor({ fixture, parentDepth: 1, sessionMode: "existing" });
+  const existingRes = await startSubtaskForAnchor({
+    fixture,
+    parentSessionId: existingParent.parentSession.id,
+    parentRunId: existingParent.parentRunId,
+    parentToolItemId: existingParent.toolItem.item.id,
+    session: { mode: "existing", sessionId: existingSession.id }
+  });
+  assert.equal(existingRes.statusCode, 200, existingRes.body);
+  assert.equal((existingRes.json() as { agentName: string }).agentName, "default");
+  assert.equal(getRunRecord(fixture.db, (existingRes.json() as { runId: string }).runId)?.subtaskDepth, 2);
+
+  const duplicate = await startSubtaskForAnchor({
+    fixture,
+    parentSessionId: existingParent.parentSession.id,
+    parentRunId: existingParent.parentRunId,
+    parentToolItemId: existingParent.toolItem.item.id,
+    session: { mode: "existing", sessionId: existingSession.id }
+  });
+  assert.equal(duplicate.statusCode, 200, duplicate.body);
+  assert.equal((duplicate.json() as { agentName: string }).agentName, "default");
+  assert.equal((duplicate.json() as { reused: boolean }).reused, true);
+  assert.equal((duplicate.json() as { runId: string }).runId, (existingRes.json() as { runId: string }).runId);
+
+  const differentExistingSessionRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions",
+    payload: { workspaceId: fixture.workspaceId, title: "different-existing", kind: "subtask" }
+  });
+  assert.equal(differentExistingSessionRes.statusCode, 201, differentExistingSessionRes.body);
+  const mismatch = await startSubtaskForAnchor({
+    fixture,
+    parentSessionId: existingParent.parentSession.id,
+    parentRunId: existingParent.parentRunId,
+    parentToolItemId: existingParent.toolItem.item.id,
+    session: { mode: "existing", sessionId: (differentExistingSessionRes.json() as { id: string }).id }
+  });
+  assert.equal(mismatch.statusCode, 409);
+  assert.equal(mismatch.json().code, "AGENT_SUBTASK_EXISTING_SESSION_MISMATCH");
+  assert.equal(
+    mismatch.json().message,
+    "existing subtask session does not match the previously created child run"
+  );
+});
+
+test("subtask start 对 unknown 和超限 parent depth 返回明确错误", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  await configureAgentDefaults(fixture.app);
+  const unknown = await createSubtaskAnchor({ fixture, parentDepth: null, sessionMode: "new" });
+  const unknownRes = await startSubtaskForAnchor({
+    fixture,
+    parentSessionId: unknown.parentSession.id,
+    parentRunId: unknown.parentRunId,
+    parentToolItemId: unknown.toolItem.item.id,
+    session: { mode: "new" }
+  });
+  assert.equal(unknownRes.statusCode, 409);
+  assert.equal(unknownRes.json().code, "AGENT_SUBTASK_DEPTH_UNKNOWN");
+
+  const maxRes = await fixture.app.inject({ method: "PUT", url: "/api/settings/agent/runtime", payload: { maxSubtaskDepth: 1 } });
+  assert.equal(maxRes.statusCode, 200, maxRes.body);
+  const exceeded = await createSubtaskAnchor({ fixture, parentDepth: 1, sessionMode: "new" });
+  const exceededRes = await startSubtaskForAnchor({
+    fixture,
+    parentSessionId: exceeded.parentSession.id,
+    parentRunId: exceeded.parentRunId,
+    parentToolItemId: exceeded.toolItem.item.id,
+    session: { mode: "new" }
+  });
+  assert.equal(exceededRes.statusCode, 409);
+  assert.equal(exceededRes.json().code, "AGENT_SUBTASK_MAX_DEPTH_EXCEEDED");
+});
+
+test("已有 child 可在配置下调后复用，而新的同层调用按最新上限拒绝", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  await configureAgentDefaults(fixture.app);
+  await fixture.app.inject({ method: "PUT", url: "/api/settings/agent/runtime", payload: { maxSubtaskDepth: 2 } });
+  const existing = await createSubtaskAnchor({ fixture, parentDepth: 1, sessionMode: "new" });
+  const started = await startSubtaskForAnchor({
+    fixture,
+    parentSessionId: existing.parentSession.id,
+    parentRunId: existing.parentRunId,
+    parentToolItemId: existing.toolItem.item.id,
+    session: { mode: "new" }
+  });
+  assert.equal(started.statusCode, 200, started.body);
+  const original = started.json() as { runId: string; reused: boolean };
+  assert.equal(original.reused, false);
+
+  const lowered = await fixture.app.inject({ method: "PUT", url: "/api/settings/agent/runtime", payload: { maxSubtaskDepth: 1 } });
+  assert.equal(lowered.statusCode, 200, lowered.body);
+  const retried = await startSubtaskForAnchor({
+    fixture,
+    parentSessionId: existing.parentSession.id,
+    parentRunId: existing.parentRunId,
+    parentToolItemId: existing.toolItem.item.id,
+    session: { mode: "new" }
+  });
+  assert.equal(retried.statusCode, 200, retried.body);
+  assert.equal((retried.json() as { runId: string; reused: boolean }).runId, original.runId);
+  assert.equal((retried.json() as { reused: boolean }).reused, true);
+
+  const nextTool = await createSubtaskAnchor({ fixture, parentDepth: 1, sessionMode: "new" });
+  const rejected = await startSubtaskForAnchor({
+    fixture,
+    parentSessionId: nextTool.parentSession.id,
+    parentRunId: nextTool.parentRunId,
+    parentToolItemId: nextTool.toolItem.item.id,
+    session: { mode: "new" }
+  });
+  assert.equal(rejected.statusCode, 409);
+  assert.equal(rejected.json().code, "AGENT_SUBTASK_MAX_DEPTH_EXCEEDED");
+});
 
 function extractPromptSection(system: string, tag: string) {
   const marker = `[${tag}]`;
@@ -1831,6 +2454,7 @@ test("assistant reasoning 不应进入 prompt-context", async () => {
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
+    subtaskDepth: 0,
     status: "running",
     createdAt
   });
@@ -1950,6 +2574,7 @@ test("prompt-context 仅注入最近一次且无 tool item 的 failed assistant"
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
+    subtaskDepth: 0,
     status: "running",
     createdAt
   });
@@ -2768,6 +3393,51 @@ test("agent cancel 会基于当前 active run 的 subtask 结果精确级联取�
   assert.equal(reusedCompletedChildAssistantAfter?.status, "streaming");
 });
 
+test("agent runtime settings maxSubtaskDepth 默认值、边界和非法更新", async () => {
+  const fixture = await createFixture();
+
+  const defaultRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/runtime" });
+  assert.equal(defaultRes.statusCode, 200);
+  assert.equal(defaultRes.json().maxSubtaskDepth, 1);
+
+  const minRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/runtime",
+    payload: { maxSubtaskDepth: 1 }
+  });
+  assert.equal(minRes.statusCode, 200, minRes.body);
+  assert.equal(minRes.json().maxSubtaskDepth, 1);
+
+  const maxRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/runtime",
+    payload: { maxSubtaskDepth: 5 }
+  });
+  assert.equal(maxRes.statusCode, 200, maxRes.body);
+  assert.equal(maxRes.json().maxSubtaskDepth, 5);
+
+  for (const invalid of [0, 6, -1, 1.5, "1", "5"]) {
+    const invalidRes = await fixture.app.inject({
+      method: "PUT",
+      url: "/api/settings/agent/runtime",
+      payload: { maxSubtaskDepth: invalid }
+    });
+    assert.equal(invalidRes.statusCode, 400, invalidRes.body);
+    assert.equal(invalidRes.json().code, "AGENT_MAX_SUBTASK_DEPTH_INVALID");
+  }
+
+  const unchangedRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/runtime" });
+  assert.equal(unchangedRes.statusCode, 200);
+  assert.equal(unchangedRes.json().maxSubtaskDepth, 5);
+
+  for (const corrupt of [0, 6, 1.5, "1", null]) {
+    setSettingJson(fixture.db, "agent_runtime_v1", { maxSubtaskDepth: corrupt }, Date.now());
+    const corruptRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/runtime" });
+    assert.equal(corruptRes.statusCode, 200);
+    assert.equal(corruptRes.json().maxSubtaskDepth, 1, `stored ${String(corrupt)} should fall back to default`);
+  }
+});
+
 test("agent runtime settings 可通过 execution-profile 下发", async () => {
   const fixture = await createFixture();
 
@@ -3358,7 +4028,7 @@ test("agent prompt-context 对 store 中非法 uiLocale 回退为 locale-neutral
 
   const runRecord = getRunRecord(fixture.db, runId);
   assert.ok(runRecord, "run record should exist");
-  assert.equal(runRecord?.uiLocale, "fr-FR", "store may still contain legacy invalid locale data");
+  assert.equal(runRecord?.uiLocale, null, "run mapper should fail closed for invalid locale data");
 
   const prompt = await getPromptContextInternal({
     app: fixture.app,
@@ -3602,6 +4272,7 @@ test("agent clear 会归档当前可见上下文并插入 clear 边界 marker", 
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
+    subtaskDepth: 0,
     status: "running",
     createdAt: Date.now()
   });
@@ -3717,7 +4388,7 @@ test("agent clear 对 subtask 会话返回只读错误", async () => {
   assert.equal(clearRes.json().code, "AGENT_SUBTASK_READONLY");
 });
 
-test("agent prompt-context 对 subtask 会话隐藏 subtask 工具", async () => {
+test("agent prompt-context 在 depth 达到上限时隐藏 subtask 工具", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
 
   const agentsRes = await fixture.app.inject({
@@ -3763,6 +4434,7 @@ test("agent prompt-context 对 subtask 会话隐藏 subtask 工具", async () =>
     providerId: "ppchat",
     uiLocale: "en-US",
     modelId: "gpt-5.2",
+    subtaskDepth: 1,
     status: "running",
     createdAt: Date.now()
   });
@@ -3776,8 +4448,53 @@ test("agent prompt-context 对 subtask 会话隐藏 subtask 工具", async () =>
   });
 
   const toolNames = promptContext.tools.map((item) => item.name);
-  assert.equal(toolNames.includes("subtask"), false, "subtask tool should be hidden for subtask sessions");
+  assert.equal(toolNames.includes("subtask"), false, "subtask tool should be hidden at the configured depth limit");
   assert.equal(toolNames.includes("bash"), true, "other enabled tools should remain visible");
+});
+
+test("agent prompt-context 在 depth=1、max=2 的 subtask run 中保留 subtask 工具", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const settingsRes = await fixture.app.inject({ method: "PUT", url: "/api/settings/agent/runtime", payload: { maxSubtaskDepth: 2 } });
+  assert.equal(settingsRes.statusCode, 200, settingsRes.body);
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      agents: [{
+        id: "default",
+        name: "default",
+        summary: "",
+        prompt: "",
+        tools: ["bash", "subtask"],
+        pluginTools: [],
+        mcpServers: [],
+        defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
+        scope: "both",
+        order: 0
+      }]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, agentsRes.body);
+  const session = await fixture.app.inject({ method: "POST", url: "/api/agent/sessions", payload: { workspaceId: fixture.workspaceId, title: "nested", kind: "subtask" } });
+  assert.equal(session.statusCode, 201, session.body);
+  const sessionId = (session.json() as { id: string }).id;
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    subtaskDepth: 1,
+    parentRunId: newSortableId("run"),
+    parentToolItemId: 1,
+    status: "running",
+    createdAt: Date.now()
+  });
+  const context = await getPromptContextInternal({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId, runId });
+  assert.equal(context.tools.some((item) => item.name === "subtask"), true);
 });
 
 test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 提示", async () => {
@@ -3816,6 +4533,7 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
     providerId: "ppchat",
     uiLocale: "en-US",
     modelId: "gpt-5.2",
+    subtaskDepth: 0,
     status: "running",
     createdAt
   });
@@ -4006,6 +4724,7 @@ test("subtask start with preforkSummaryText should inject summary->guard->prompt
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
+    subtaskDepth: 0,
     status: "running",
     createdAt: Date.now()
   });
@@ -4306,6 +5025,7 @@ test("subtask start should allow description length 50 and silently truncate >50
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
+    subtaskDepth: 0,
     status: "running",
     createdAt: Date.now()
   });
@@ -4677,6 +5397,7 @@ test("agent subtask fork 对父 run 非法 locale 做归一化回退，避免继
     providerId: "ppchat",
     uiLocale: "fr-FR" as any,
     modelId: "gpt-5.2",
+    subtaskDepth: 0,
     status: "running",
     createdAt: Date.now()
   });
@@ -4866,6 +5587,7 @@ test("agent prompt-context 对 primary 会话保留 subtask 工具", async () =>
       agentId: "default",
       providerId: "ppchat",
       modelId: "gpt-5.2",
+      subtaskDepth: 0,
       status: "running",
       createdAt: Date.now()
     });
@@ -8473,7 +9195,7 @@ test("agent prompt-context 在 agent prompt 为空且无 workspace/global 时仅
           name: "default",
           summary: "",
           prompt: "",
-          tools: ["bash", "read", "write"],
+          tools: ["bash", "read", "write", "scratchpad"],
           mcpServers: [],
           defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
           scope: "both",
@@ -8492,6 +9214,7 @@ test("agent prompt-context 在 agent prompt 为空且无 workspace/global 时仅
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
+    subtaskDepth: 0,
     status: "running",
     createdAt
   });
@@ -8518,16 +9241,6 @@ test("agent prompt-context 在 agent prompt 为空且无 workspace/global 时仅
   assert.equal(context.system.includes("[workspace_instructions]"), false, "system should not include workspace instructions block when missing");
   assert.equal(context.system.includes("## Agent Prompt:"), false, "system should not include agent prompt section when empty");
   assert.equal(context.system.includes("[agent_prompt]"), false, "system should not include agent prompt block when empty");
-  assert.ok(context.system.includes("若当前可用工具列表包含 scratchpad"), "system should bind scratchpad guidance to available tools");
-  assert.ok(context.system.includes("若当前可用工具列表不包含 scratchpad，则跳过该工具要求并继续完成任务"), "system should allow proceeding without unavailable scratchpad");
-  assert.ok(
-    context.system.includes("执行过程短期记忆(仅当当前可用工具列表包含 scratchpad): 优先将 scratchpad 与其他必要工具并发调用；不要为此额外制造无意义工具调用。"),
-    "system should scope scratchpad concurrency guidance to enabled agents"
-  );
-  assert.ok(context.system.includes("允许单独调用一次 scratchpad"), "system should allow standalone scratchpad when genuinely necessary");
-  assert.equal(context.system.includes("若当前 Agent 已启用 scratchpad"), false, "system should not rely on ambiguous agent-enabled wording");
-  assert.equal(context.system.includes("严禁单独调用scratchpad"), false, "system should not forbid standalone scratchpad unconditionally");
-  assert.equal(context.system.includes("执行过程短期记忆(仅当已启用 scratchpad): scratchpad + 其他工具调用。"), false, "system should not keep legacy scratchpad concurrency template");
 });
 
 test("agent prompt-context 对 workspace AGENTS.md 做 32KB 截断并追加标记", async () => {
@@ -8869,6 +9582,7 @@ test("subtask start 在 workspace 全不选时返回 AGENT_DISABLED_IN_WORKSPACE
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
+    subtaskDepth: 0,
     uiLocale: null,
     status: "running",
     createdAt: Date.now()

@@ -23,6 +23,20 @@
         </div>
       </a-form-item>
 
+      <a-form-item :label="t('settings.agentRuntime.fields.maxSubtaskDepth.label')">
+        <a-input-number
+          v-model:value="maxSubtaskDepth"
+          :min="1"
+          :max="5"
+          :step="1"
+          :precision="0"
+          style="max-width: 260px"
+        />
+        <div class="pt-2 text-xs text-[color:var(--text-tertiary)]">
+          {{ t("settings.agentRuntime.fields.maxSubtaskDepth.help") }}
+        </div>
+      </a-form-item>
+
       <a-form-item :label="t('settings.agentRuntime.fields.compactionModel.label')">
         <a-cascader
           v-model:value="compactionModelPath"
@@ -105,7 +119,12 @@ import { computed, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import type { AgentRuntimeSettings } from "@agent-workbench/shared";
 import { getAgentProvidersSettings, getAgentRuntimeSettings, updateAgentRuntimeSettings } from "@/shared/api";
-import { modelPathFromReference, modelReferenceFromPath } from "./agentRuntimeSettings";
+import {
+  modelPathFromReference,
+  modelReferenceFromPath,
+  normalizeMaxSubtaskDepth,
+  toRuntimeSettingsMaxSubtaskDepthPayload
+} from "./agentRuntimeSettings";
 
 const { t } = useI18n();
 
@@ -118,6 +137,7 @@ const modelIdleTimeoutSeconds = ref<number>(0);
 const modelTotalTimeoutSeconds = ref<number>(0);
 const modelRequestMaxRetries = ref<number>(5);
 const autoCompactThresholdPct = ref<number>(80);
+const maxSubtaskDepth = ref<number>(1);
 const sessionTerminalSoundEnabled = ref(true);
 
 const providersSettings = ref<AgentProvidersSettings | null>(null);
@@ -167,6 +187,7 @@ function mapFromSettings(settings: AgentRuntimeSettings) {
   modelTotalTimeoutSeconds.value = toSeconds(settings.modelTotalTimeoutMs ?? 0);
   modelRequestMaxRetries.value = Math.min(100, Math.max(0, Math.floor(Number(settings.modelRequestMaxRetries ?? 5))));
   autoCompactThresholdPct.value = Math.min(99, Math.max(50, Math.floor(Number(settings.autoCompactThresholdPct || 80))));
+  maxSubtaskDepth.value = normalizeMaxSubtaskDepth(settings.maxSubtaskDepth);
   sessionTerminalSoundEnabled.value = settings.sessionTerminalSoundEnabled !== false;
   visionModelPath.value = modelPathFromReference(settings.visionModel);
   compactionModelPath.value = modelPathFromReference(settings.compactionModel);
@@ -208,6 +229,7 @@ async function save() {
       modelTotalTimeoutMs: toMs(modelTotalTimeoutSeconds.value ?? 0),
       modelRequestMaxRetries: Math.min(100, Math.max(0, Math.floor(Number(modelRequestMaxRetries.value || 0)))),
       autoCompactThresholdPct: Math.min(99, Math.max(50, Math.floor(Number(autoCompactThresholdPct.value || 80)))),
+      maxSubtaskDepth: toRuntimeSettingsMaxSubtaskDepthPayload(maxSubtaskDepth.value),
       sessionTerminalSoundEnabled: !!sessionTerminalSoundEnabled.value,
       visionModel,
       compactionModel

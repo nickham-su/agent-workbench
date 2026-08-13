@@ -47,12 +47,14 @@ import {
   createAgentSession,
   createRunRecord,
   findClientRequestDedup,
+  findSubtaskRunByParentTool,
   getAgentSession,
   getContextItemById,
   getLatestCompletedAssistantTextByRunId,
   getLatestRunUiLocaleBySession,
   getLatestRunUiLocaleGlobal,
   getLatestTerminalAssistantTextByRunId,
+  getLatestRunRecordBySession,
   getLatestTerminalRunRecord,
   getLatestSessionItemId,
   getRunRecord,
@@ -113,6 +115,16 @@ type AgentCancelCascadeResult = {
 
 function conflictToHttpError(err: AgentConflictError): HttpError {
   return new HttpError(409, "session head conflict", `conflict_head:${String(err.currentHeadItemId ?? "null")}`);
+}
+
+export function isSubtaskParentToolUniqueConstraintError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const candidate = err as { code?: unknown; message?: unknown };
+  // SQLite reports the indexed columns rather than the partial index name.
+  return candidate.code === "SQLITE_CONSTRAINT_UNIQUE"
+    && typeof candidate.message === "string"
+    && candidate.message.includes("agent_run.parent_run_id")
+    && candidate.message.includes("agent_run.parent_tool_item_id");
 }
 
 function toolArgsSchema(toolName: AgentContextToolName) {
@@ -2238,6 +2250,7 @@ export class AgentService {
           createdAt
         });
 
+        const lineage = this.resolveRunLineageForSession(session);
         createRunRecord(this.ctx.db, {
           runId,
           workspaceId: session.workspaceId,
@@ -2247,6 +2260,9 @@ export class AgentService {
           providerId: profile.provider.id,
           modelId: profile.model.id,
           uiLocale,
+          subtaskDepth: lineage.subtaskDepth,
+          parentRunId: lineage.parentRunId,
+          parentToolItemId: lineage.parentToolItemId,
           status: "running",
           createdAt
         });
@@ -2413,6 +2429,7 @@ export class AgentService {
       const uiLocale = normalizeAgentUiLocale(params.body.uiLocale);
 
       const tx = this.ctx.db.transaction(() => {
+        const lineage = this.resolveRunLineageForSession(session);
         createRunRecord(this.ctx.db, {
           runId,
           workspaceId: session.workspaceId,
@@ -2422,6 +2439,9 @@ export class AgentService {
           providerId: profile.provider.id,
           modelId: profile.model.id,
           uiLocale,
+          subtaskDepth: lineage.subtaskDepth,
+          parentRunId: null,
+          parentToolItemId: null,
           status: "running",
           createdAt
         });
@@ -3280,6 +3300,74 @@ export class AgentService {
     };
   }
 
+  /**
+   * Resolves lineage for a newly-created ordinary run.
+   * The most recent actual run is preferred; only a first run of a forked session
+   * consults the original source item. Unknown legacy lineage stays NULL.
+   */
+  private resolveRunLineageForSession(session: AgentSessionRecord) {
+    const latestRun = getLatestRunRecordBySession(this.ctx.db, {
+      workspaceId: session.workspaceId,
+      sessionId: session.id
+    });
+    if (latestRun) {
+      return {
+        subtaskDepth: latestRun.subtaskDepth,
+        parentRunId: null,
+        parentToolItemId: null
+      };
+    }
+
+    if (session.forkedFromSessionId == null || session.forkedFromItemId == null) {
+      return {
+        subtaskDepth: 0,
+        parentRunId: null,
+        parentToolItemId: null
+      };
+    }
+
+    const sourceItem = getTranscriptItemById(
+      this.ctx.db,
+      session.workspaceId,
+      session.forkedFromSessionId,
+      session.forkedFromItemId
+    );
+    if (sourceItem?.runId == null) {
+      return {
+        subtaskDepth: null,
+        parentRunId: null,
+        parentToolItemId: null
+      };
+    }
+
+    const sourceRun = getRunRecord(this.ctx.db, sourceItem.runId);
+    if (!sourceRun || sourceRun.workspaceId !== session.workspaceId) {
+      return {
+        subtaskDepth: null,
+        parentRunId: null,
+        parentToolItemId: null
+      };
+    }
+    return {
+      subtaskDepth: sourceRun.subtaskDepth,
+      parentRunId: sourceRun.runId,
+      parentToolItemId: null
+    };
+  }
+
+  private toReusedSubtaskStartResponse(existingRun: ReturnType<typeof findSubtaskRunByParentTool>, workspacePath: string) {
+    if (!existingRun) throw new Error("existing subtask run is required");
+    const agent = getAgentSettings(this.ctx).agents.find((item) => item.id === existingRun.agentId);
+    return {
+      sessionId: existingRun.sessionId,
+      runId: existingRun.runId,
+      workspacePath,
+      // A historical/removed agent must not make an otherwise idempotent retry fail.
+      agentName: agent?.name || existingRun.agentId,
+      reused: true
+    };
+  }
+
   getSubtaskPreforkPlanFromWorker(params: {
     workspaceId: string;
     parentSessionId: string;
@@ -3414,6 +3502,32 @@ export class AgentService {
           "AGENT_SUBTASK_PREFORK_META_MISMATCH"
         );
       }
+    }
+
+    const existingChildRun = findSubtaskRunByParentTool(this.ctx.db, {
+      parentRunId: parentRun.runId,
+      parentToolItemId: anchor.id
+    });
+    if (existingChildRun) {
+      if (params.session.mode === "existing" && existingChildRun.sessionId !== String(params.session.sessionId || "").trim()) {
+        throw new HttpError(
+          409,
+          "existing subtask session does not match the previously created child run",
+          "AGENT_SUBTASK_EXISTING_SESSION_MISMATCH"
+        );
+      }
+      const workspace = getWorkspace(this.ctx.db, params.workspaceId);
+      if (!workspace) throw new HttpError(404, "workspace not found");
+      return this.toReusedSubtaskStartResponse(existingChildRun, workspace.path);
+    }
+
+    const runtime = getAgentRuntimeSettings(this.ctx);
+    if (parentRun.subtaskDepth == null) {
+      throw new HttpError(409, "subtask depth cannot be determined for current parent run", "AGENT_SUBTASK_DEPTH_UNKNOWN");
+    }
+    const childDepth = parentRun.subtaskDepth + 1;
+    if (childDepth > runtime.maxSubtaskDepth) {
+      throw new HttpError(409, "subtask depth exceeds configured maximum", "AGENT_SUBTASK_MAX_DEPTH_EXCEEDED");
     }
 
     const requestedSessionId = String(params.session.sessionId || "").trim();
@@ -3565,12 +3679,15 @@ export class AgentService {
         sessionId: session.id,
         triggerItemId: item.id,
         agentId: profile.agent.id,
-        providerId: profile.provider.id,
-        uiLocale: parentUiLocale,
-        modelId: profile.model.id,
-        status: "running",
-        createdAt
-      });
+          providerId: profile.provider.id,
+          uiLocale: parentUiLocale,
+          modelId: profile.model.id,
+          subtaskDepth: childDepth,
+          parentRunId: parentRun.runId,
+          parentToolItemId: anchor.id,
+          status: "running",
+          createdAt
+        });
 
       updateRunState(this.ctx.db, {
         workspaceId: session.workspaceId,
@@ -3581,15 +3698,26 @@ export class AgentService {
         runNoticeText: "",
         updatedAt: createdAt,
         appliedItemId: item.id
+        });
       });
-    });
-    tx();
+    try {
+      tx();
+    } catch (err) {
+      if (!isSubtaskParentToolUniqueConstraintError(err)) throw err;
+      const existingAfterConflict = findSubtaskRunByParentTool(this.ctx.db, {
+        parentRunId: parentRun.runId,
+        parentToolItemId: anchor.id
+      });
+      if (!existingAfterConflict) throw err;
+      return this.toReusedSubtaskStartResponse(existingAfterConflict, workspace.path);
+    }
 
     return {
       sessionId: session.id,
       runId,
       workspacePath: workspace.path,
-      agentName: profile.agent.name
+      agentName: profile.agent.name,
+      reused: false
     };
   }
 
@@ -4458,12 +4586,15 @@ export class AgentService {
             enabledToolNameSet.add(name);
             enabledToolNames.push(name);
           }
-          if (session.kind === "subtask") {
+          const runtime = getAgentRuntimeSettings(this.ctx);
+          const canExposeSubtask = run.subtaskDepth != null && run.subtaskDepth < runtime.maxSubtaskDepth;
+          if (!canExposeSubtask) {
             const filtered = enabledToolNames.filter((name) => name !== "subtask");
             enabledToolNames.length = 0;
             enabledToolNames.push(...filtered);
           }
 
+          // Tool visibility is computed once per run; later settings changes do not hot-update this run.
           const subtaskDescription = enabledToolNames.includes("subtask")
             ? buildSubtaskToolDescription(
                 listAvailableAgentsForSurface(this.ctx, "subtask").map((item) => ({

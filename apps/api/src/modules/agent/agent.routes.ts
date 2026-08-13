@@ -602,7 +602,8 @@ export async function registerAgentRoutes(
             sessionId: Type.String({ minLength: 1 }),
             runId: Type.String({ minLength: 1 }),
             workspacePath: Type.String({ minLength: 1 }),
-            agentName: Type.String({ minLength: 1 })
+            agentName: Type.String({ minLength: 1 }),
+            reused: Type.Boolean()
           }),
           400: ErrorResponseSchema,
           401: ErrorResponseSchema,
