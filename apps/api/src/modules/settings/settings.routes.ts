@@ -68,6 +68,16 @@ function assertAgentGlobalPromptExpandOnSelectBoolean(body: unknown) {
   }
 }
 
+function assertMaxSubtaskDepth(body: unknown) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return;
+  const record = body as Record<string, unknown>;
+  if (!("maxSubtaskDepth" in record)) return;
+  const value = record.maxSubtaskDepth;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 5) {
+    throw new HttpError(400, "maxSubtaskDepth must be an integer between 1 and 5", "AGENT_MAX_SUBTASK_DEPTH_INVALID");
+  }
+}
+
 export async function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext) {
   app.get(
     "/api/settings/network",
@@ -281,7 +291,8 @@ export async function registerSettingsRoutes(app: FastifyInstance, ctx: AppConte
         tags: ["settings"],
         body: UpdateAgentRuntimeSettingsRequestSchema,
         response: { 200: AgentRuntimeSettingsSchema, 400: ErrorResponseSchema }
-      }
+      },
+      preValidation: async (req) => assertMaxSubtaskDepth(req.body)
     },
     async (req) => updateAgentRuntimeSettings(ctx, app.log, req.body)
   );

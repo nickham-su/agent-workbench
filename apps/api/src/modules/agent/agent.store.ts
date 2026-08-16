@@ -358,6 +358,9 @@ export type AgentRunRecord = {
   providerId: string;
   modelId: string;
   uiLocale: AgentUiLocale | null;
+  subtaskDepth: number | null;
+  parentRunId: string | null;
+  parentToolItemId: number | null;
   status: "running" | "completed" | "failed" | "cancelled";
   createdAt: number;
   updatedAt: number;
@@ -379,6 +382,54 @@ function normalizeRunRecordStatus(raw: unknown): AgentRunRecord["status"] {
   if (raw === "running") return "running";
   if (raw === "completed" || raw === "failed" || raw === "cancelled") return raw;
   return "failed";
+}
+
+type AgentRunRow = {
+  runId: unknown;
+  workspaceId: unknown;
+  sessionId: unknown;
+  triggerItemId: unknown;
+  agentId: unknown;
+  providerId: unknown;
+  modelId: unknown;
+  uiLocale?: unknown;
+  subtaskDepth: unknown;
+  parentRunId: unknown;
+  parentToolItemId: unknown;
+  status: unknown;
+  createdAt: unknown;
+  updatedAt: unknown;
+};
+
+function toNonNegativeSafeInteger(raw: unknown) {
+  return typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0 ? raw : null;
+}
+
+function toPositiveSafeInteger(raw: unknown) {
+  return typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 1 ? raw : null;
+}
+
+function toNonEmptyString(raw: unknown) {
+  return typeof raw === "string" && raw.trim() ? raw : null;
+}
+
+function mapRunRecord(row: AgentRunRow): AgentRunRecord {
+  return {
+    runId: toNonEmptyString(row.runId) ?? "",
+    workspaceId: toNonEmptyString(row.workspaceId) ?? "",
+    sessionId: toNonEmptyString(row.sessionId) ?? "",
+    triggerItemId: toPositiveSafeInteger(row.triggerItemId) ?? 0,
+    agentId: toNonEmptyString(row.agentId) ?? "",
+    providerId: toNonEmptyString(row.providerId) ?? "",
+    modelId: toNonEmptyString(row.modelId) ?? "",
+    uiLocale: normalizeRunUiLocale(row.uiLocale),
+    subtaskDepth: toNonNegativeSafeInteger(row.subtaskDepth),
+    parentRunId: toNonEmptyString(row.parentRunId),
+    parentToolItemId: toPositiveSafeInteger(row.parentToolItemId),
+    status: normalizeRunRecordStatus(row.status),
+    createdAt: typeof row.createdAt === "number" && Number.isFinite(row.createdAt) ? row.createdAt : 0,
+    updatedAt: typeof row.updatedAt === "number" && Number.isFinite(row.updatedAt) ? row.updatedAt : 0
+  };
 }
 
 function toHeadItemId(row: { headItemId: number | null } | undefined) {
@@ -1575,6 +1626,9 @@ export function createRunRecord(db: Db, params: {
   providerId: string;
   modelId: string;
   uiLocale?: AgentUiLocale | null;
+  subtaskDepth?: number | null;
+  parentRunId?: string | null;
+  parentToolItemId?: number | null;
   status: AgentRunRecord["status"];
   createdAt: number;
 }) {
@@ -1589,6 +1643,9 @@ export function createRunRecord(db: Db, params: {
         provider_id,
         ui_locale,
         model_id,
+        subtask_depth,
+        parent_run_id,
+        parent_tool_item_id,
         status,
         created_at,
         updated_at
@@ -1601,6 +1658,9 @@ export function createRunRecord(db: Db, params: {
         @providerId,
         @uiLocale,
         @modelId,
+        @subtaskDepth,
+        @parentRunId,
+        @parentToolItemId,
         @status,
         @createdAt,
         @updatedAt
@@ -1615,6 +1675,9 @@ export function createRunRecord(db: Db, params: {
     providerId: params.providerId,
     uiLocale: params.uiLocale ?? null,
     modelId: params.modelId,
+    subtaskDepth: params.subtaskDepth ?? null,
+    parentRunId: params.parentRunId ?? null,
+    parentToolItemId: params.parentToolItemId ?? null,
     status: params.status,
     createdAt: params.createdAt,
     updatedAt: params.createdAt
@@ -1640,6 +1703,9 @@ export function getRunRecord(db: Db, runId: string) {
           provider_id as providerId,
           ui_locale as uiLocale,
           model_id as modelId,
+          subtask_depth as subtaskDepth,
+          parent_run_id as parentRunId,
+          parent_tool_item_id as parentToolItemId,
           status,
           created_at as createdAt,
           updated_at as updatedAt
@@ -1647,8 +1713,40 @@ export function getRunRecord(db: Db, runId: string) {
         where run_id = ?
       `
     )
-    .get(runId) as AgentRunRecord | undefined;
-  return row ? { ...row, status: normalizeRunRecordStatus(row.status) } : null;
+    .get(runId) as AgentRunRow | undefined;
+  return row ? mapRunRecord(row) : null;
+}
+
+export function findSubtaskRunByParentTool(
+  db: Db,
+  params: { parentRunId: string; parentToolItemId: number }
+) {
+  const row = db
+    .prepare(
+      `
+        select
+          run_id as runId,
+          workspace_id as workspaceId,
+          session_id as sessionId,
+          trigger_item_id as triggerItemId,
+          agent_id as agentId,
+          provider_id as providerId,
+          ui_locale as uiLocale,
+          model_id as modelId,
+          subtask_depth as subtaskDepth,
+          parent_run_id as parentRunId,
+          parent_tool_item_id as parentToolItemId,
+          status,
+          created_at as createdAt,
+          updated_at as updatedAt
+        from agent_run
+        where parent_run_id = @parentRunId
+          and parent_tool_item_id = @parentToolItemId
+        limit 1
+      `
+    )
+    .get(params) as AgentRunRow | undefined;
+  return row ? mapRunRecord(row) : null;
 }
 
 export function getLatestRunUiLocaleBySession(db: Db, params: { workspaceId: string; sessionId: string }): AgentUiLocale | null {
@@ -1699,19 +1797,54 @@ export function getLatestTerminalRunRecord(db: Db, params: { workspaceId: string
           trigger_item_id as triggerItemId,
           agent_id as agentId,
           provider_id as providerId,
+          ui_locale as uiLocale,
           model_id as modelId,
+          subtask_depth as subtaskDepth,
+          parent_run_id as parentRunId,
+          parent_tool_item_id as parentToolItemId,
           status,
           created_at as createdAt,
           updated_at as updatedAt
         from agent_run
         where workspace_id = ? and session_id = ?
           and status in ('completed', 'failed', 'cancelled')
-        order by updated_at desc, created_at desc
+        order by created_at desc, run_id desc
         limit 1
       `
     )
-    .get(params.workspaceId, params.sessionId) as (AgentRunRecord & { status: "completed" | "failed" | "cancelled" }) | undefined;
-  return row ?? null;
+    .get(params.workspaceId, params.sessionId) as AgentRunRow | undefined;
+  const mapped = row ? mapRunRecord(row) : null;
+  if (!mapped || mapped.status === "running") return null;
+  return mapped as AgentRunRecord & { status: "completed" | "failed" | "cancelled" };
+}
+
+export function getLatestRunRecordBySession(db: Db, params: { workspaceId: string; sessionId: string }): AgentRunRecord | null {
+  const row = db
+    .prepare(
+      `
+        select
+          run_id as runId,
+          workspace_id as workspaceId,
+          session_id as sessionId,
+          trigger_item_id as triggerItemId,
+          agent_id as agentId,
+          provider_id as providerId,
+          ui_locale as uiLocale,
+          model_id as modelId,
+          subtask_depth as subtaskDepth,
+          parent_run_id as parentRunId,
+          parent_tool_item_id as parentToolItemId,
+          status,
+          created_at as createdAt,
+          updated_at as updatedAt
+        from agent_run
+        where workspace_id = ? and session_id = ?
+        order by created_at desc, run_id desc
+        limit 1
+      `
+    )
+    .get(params.workspaceId, params.sessionId) as AgentRunRow | undefined;
+  return row ? mapRunRecord(row) : null;
 }
 
 export function listNonTerminalRunIdsBySession(db: Db, params: { workspaceId: string; sessionId: string }) {

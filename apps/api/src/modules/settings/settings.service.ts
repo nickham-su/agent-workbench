@@ -80,6 +80,9 @@ const MODEL_CONTEXT_WINDOW_TOKENS_MAX = 10_000_000;
 const RUNTIME_AUTO_COMPACT_THRESHOLD_DEFAULT = 80;
 const RUNTIME_AUTO_COMPACT_THRESHOLD_MIN = 50;
 const RUNTIME_AUTO_COMPACT_THRESHOLD_MAX = 99;
+const RUNTIME_MAX_SUBTASK_DEPTH_DEFAULT = 1;
+const RUNTIME_MAX_SUBTASK_DEPTH_MIN = 1;
+const RUNTIME_MAX_SUBTASK_DEPTH_MAX = 5;
 const RUNTIME_SESSION_TERMINAL_SOUND_ENABLED_DEFAULT = true;
 const PROVIDER_MODELS_REMOTE_TIMEOUT_MS = 5_000;
 const PROVIDER_MODELS_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -100,6 +103,11 @@ type ExecutionProfileResolved = {
   model: AgentProviderStored["models"][number];
   vision: {
     source: "runtime_vision" | "agent_default_fallback";
+    provider: AgentProviderStored;
+    model: AgentProviderStored["models"][number];
+  } | null;
+  compaction: {
+    source: "runtime_compaction";
     provider: AgentProviderStored;
     model: AgentProviderStored["models"][number];
   } | null;
@@ -462,6 +470,26 @@ function normalizeAutoCompactThresholdPctForUpdate(raw: unknown, field: string) 
     );
   }
   return v;
+}
+
+function normalizeMaxSubtaskDepthFromStored(raw: unknown) {
+  const n = typeof raw === "number" ? raw : Number.NaN;
+  if (!Number.isFinite(n)) return RUNTIME_MAX_SUBTASK_DEPTH_DEFAULT;
+  const v = Math.floor(n);
+  if (v !== n || v < RUNTIME_MAX_SUBTASK_DEPTH_MIN || v > RUNTIME_MAX_SUBTASK_DEPTH_MAX) {
+    return RUNTIME_MAX_SUBTASK_DEPTH_DEFAULT;
+  }
+  return v;
+}
+
+export function normalizeMaxSubtaskDepthForUpdate(raw: unknown, field = "maxSubtaskDepth") {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    throw new HttpError(400, `${field} must be an integer between 1 and 5`, "AGENT_MAX_SUBTASK_DEPTH_INVALID");
+  }
+  if (!Number.isInteger(raw) || raw < RUNTIME_MAX_SUBTASK_DEPTH_MIN || raw > RUNTIME_MAX_SUBTASK_DEPTH_MAX) {
+    throw new HttpError(400, `${field} must be an integer between 1 and 5`, "AGENT_MAX_SUBTASK_DEPTH_INVALID");
+  }
+  return raw;
 }
 
 function normalizeSessionTerminalSoundEnabledFromStored(raw: unknown) {
@@ -1142,6 +1170,7 @@ function getAgentRuntimeSettingsStored(ctx: AppContext) {
   const modelTotalTimeoutMs = normalizeRuntimeTimeoutMsFromStored(value?.modelTotalTimeoutMs);
   const modelRequestMaxRetries = normalizeModelRequestMaxRetriesFromStored(value?.modelRequestMaxRetries);
   const autoCompactThresholdPct = normalizeAutoCompactThresholdPctFromStored(value?.autoCompactThresholdPct);
+  const maxSubtaskDepth = normalizeMaxSubtaskDepthFromStored(value?.maxSubtaskDepth);
   const sessionTerminalSoundEnabled = normalizeSessionTerminalSoundEnabledFromStored(value?.sessionTerminalSoundEnabled);
   const visionModelRaw = (value?.visionModel ?? null) as { providerId?: unknown; modelId?: unknown } | null;
   const visionProviderId = typeof visionModelRaw?.providerId === "string" ? visionModelRaw.providerId.trim() : "";
@@ -1152,14 +1181,22 @@ function getAgentRuntimeSettingsStored(ctx: AppContext) {
         modelId: visionModelId
       }
     : null;
+  const compactionModelRaw = (value?.compactionModel ?? null) as { providerId?: unknown; modelId?: unknown } | null;
+  const compactionProviderId = typeof compactionModelRaw?.providerId === "string" ? compactionModelRaw.providerId.trim() : "";
+  const compactionModelId = typeof compactionModelRaw?.modelId === "string" ? compactionModelRaw.modelId.trim() : "";
+  const compactionModel = compactionProviderId && compactionModelId
+    ? { providerId: compactionProviderId, modelId: compactionModelId }
+    : null;
   return {
     settings: {
       modelIdleTimeoutMs,
       modelTotalTimeoutMs,
       modelRequestMaxRetries,
       autoCompactThresholdPct,
+      maxSubtaskDepth,
       sessionTerminalSoundEnabled,
-      visionModel
+      visionModel,
+      compactionModel
     },
     updatedAt: row?.updatedAt ?? 0
   };
@@ -1301,8 +1338,10 @@ export function getAgentRuntimeSettings(ctx: AppContext): AgentRuntimeSettings {
     modelTotalTimeoutMs: loaded.settings.modelTotalTimeoutMs,
     modelRequestMaxRetries: loaded.settings.modelRequestMaxRetries,
     autoCompactThresholdPct: loaded.settings.autoCompactThresholdPct,
+    maxSubtaskDepth: loaded.settings.maxSubtaskDepth,
     sessionTerminalSoundEnabled: loaded.settings.sessionTerminalSoundEnabled,
     visionModel: loaded.settings.visionModel,
+    compactionModel: loaded.settings.compactionModel,
     updatedAt: loaded.updatedAt
   };
 }
@@ -1315,12 +1354,29 @@ function assertProviderModelRenameNotReferenced(
 ) {
   const currentByProviderId = new Map(currentProviders.map((provider) => [provider.id, provider]));
 
+  const assertCompactionReferenceNotRemoved = (providerId: string, modelId?: string) => {
+    const reference = runtimeSettings.compactionModel;
+    if (
+      !reference
+      || reference.providerId !== providerId
+      || (modelId !== undefined && reference.modelId !== modelId)
+    ) {
+      return;
+    }
+    throw new HttpError(
+      409,
+      `Provider/model removal is blocked because it is referenced: runtime compactionModel: ${providerId}/${reference.modelId}`,
+      "AGENT_PROVIDER_MODEL_RENAME_REFERENCED"
+    );
+  };
+
   for (const provider of nextProviders) {
     const prevProvider = currentByProviderId.get(provider.id);
     if (!prevProvider) continue;
     const prevModelIds = new Set(prevProvider.models.map((model) => model.id));
     const nextModelIds = new Set(provider.models.map((model) => model.id));
     const removedIds = [...prevModelIds].filter((id) => !nextModelIds.has(id));
+    for (const oldId of removedIds) assertCompactionReferenceNotRemoved(provider.id, oldId);
     const addedIds = [...nextModelIds].filter((id) => !prevModelIds.has(id));
     if (addedIds.length === 0) continue;
     if (removedIds.length === 0) continue;
@@ -1336,6 +1392,9 @@ function assertProviderModelRenameNotReferenced(
       if (runtimeSettings.visionModel?.providerId === provider.id && runtimeSettings.visionModel.modelId === oldId) {
         referencedDetails.push(`runtime visionModel: ${provider.id}/${oldId}`);
       }
+      if (runtimeSettings.compactionModel?.providerId === provider.id && runtimeSettings.compactionModel.modelId === oldId) {
+        referencedDetails.push(`runtime compactionModel: ${provider.id}/${oldId}`);
+      }
     }
 
     if (referencedDetails.length > 0) {
@@ -1344,6 +1403,12 @@ function assertProviderModelRenameNotReferenced(
         `Model id rename is blocked because old id is referenced: ${referencedDetails.join(", ")}`,
         "AGENT_PROVIDER_MODEL_RENAME_REFERENCED"
       );
+    }
+  }
+
+  for (const provider of currentProviders) {
+    if (!nextProviders.some((nextProvider) => nextProvider.id === provider.id)) {
+      assertCompactionReferenceNotRemoved(provider.id);
     }
   }
 }
@@ -1395,6 +1460,10 @@ export function updateAgentRuntimeSettings(
     (body as any).autoCompactThresholdPct !== undefined
       ? normalizeAutoCompactThresholdPctForUpdate((body as any).autoCompactThresholdPct, "autoCompactThresholdPct")
       : current.autoCompactThresholdPct;
+  const maxSubtaskDepth =
+    (body as any).maxSubtaskDepth !== undefined
+      ? normalizeMaxSubtaskDepthForUpdate((body as any).maxSubtaskDepth, "maxSubtaskDepth")
+      : current.maxSubtaskDepth;
   const sessionTerminalSoundEnabled =
     (body as any).sessionTerminalSoundEnabled !== undefined
       ? normalizeSessionTerminalSoundEnabledForUpdate((body as any).sessionTerminalSoundEnabled, "sessionTerminalSoundEnabled")
@@ -1414,6 +1483,21 @@ export function updateAgentRuntimeSettings(
           return { providerId, modelId };
         })()
       : current.visionModel;
+  const compactionModel =
+    (body as any).compactionModel !== undefined
+      ? (() => {
+          const raw = (body as any).compactionModel;
+          if (raw == null) return null;
+          const providerId = typeof raw?.providerId === "string" ? raw.providerId.trim() : "";
+          const modelId = typeof raw?.modelId === "string" ? raw.modelId.trim() : "";
+          if (!providerId || !modelId) {
+            throw new HttpError(400, "compactionModel.providerId/modelId is required", "AGENT_MODEL_REQUIRED");
+          }
+          const providersSettings = getAgentProvidersSettingsInternal(ctx);
+          resolveProviderModelOrThrow(providersSettings, providerId, modelId);
+          return { providerId, modelId };
+        })()
+      : current.compactionModel;
 
   const updatedAt = nowMs();
   setSettingJson(
@@ -1424,14 +1508,16 @@ export function updateAgentRuntimeSettings(
       modelTotalTimeoutMs,
       modelRequestMaxRetries,
       autoCompactThresholdPct,
+      maxSubtaskDepth,
       sessionTerminalSoundEnabled,
-      visionModel
+      visionModel,
+      compactionModel
     },
     updatedAt
   );
 
   logger.info(
-    { modelIdleTimeoutMs, modelTotalTimeoutMs, modelRequestMaxRetries, autoCompactThresholdPct, sessionTerminalSoundEnabled, visionModel, updatedAt },
+    { modelIdleTimeoutMs, modelTotalTimeoutMs, modelRequestMaxRetries, autoCompactThresholdPct, maxSubtaskDepth, sessionTerminalSoundEnabled, visionModel, compactionModel, updatedAt },
     "agent runtime settings updated"
   );
   return {
@@ -1439,8 +1525,10 @@ export function updateAgentRuntimeSettings(
     modelTotalTimeoutMs,
     modelRequestMaxRetries,
     autoCompactThresholdPct,
+    maxSubtaskDepth,
     sessionTerminalSoundEnabled,
     visionModel,
+    compactionModel,
     updatedAt
   };
 }
@@ -1940,11 +2028,27 @@ export function resolveExecutionProfile(ctx: AppContext, input: {
     };
   }
 
+  const runtimeCompactionProviderId = typeof runtimeSettings.compactionModel?.providerId === "string" ? runtimeSettings.compactionModel.providerId.trim() : "";
+  const runtimeCompactionModelId = typeof runtimeSettings.compactionModel?.modelId === "string" ? runtimeSettings.compactionModel.modelId.trim() : "";
+  let compaction: ExecutionProfileResolved["compaction"] = null;
+  if (runtimeCompactionProviderId && runtimeCompactionModelId) {
+    const compactionProvider = providersSettings.providers.find((item) => item.id === runtimeCompactionProviderId);
+    const compactionModel = compactionProvider?.models.find((item) => item.id === runtimeCompactionModelId);
+    if (compactionProvider?.options.apiKey && compactionModel) {
+      compaction = {
+        source: "runtime_compaction",
+        provider: compactionProvider,
+        model: compactionModel
+      };
+    }
+  }
+
   return {
     agent,
     provider,
     model,
-    vision
+    vision,
+    compaction
   } satisfies ExecutionProfileResolved;
 }
 

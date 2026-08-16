@@ -602,7 +602,8 @@ export async function registerAgentRoutes(
             sessionId: Type.String({ minLength: 1 }),
             runId: Type.String({ minLength: 1 }),
             workspacePath: Type.String({ minLength: 1 }),
-            agentName: Type.String({ minLength: 1 })
+            agentName: Type.String({ minLength: 1 }),
+            reused: Type.Boolean()
           }),
           400: ErrorResponseSchema,
           401: ErrorResponseSchema,
@@ -1418,11 +1419,41 @@ export async function registerAgentRoutes(
                 }),
                 Type.Null()
               ]),
+              compactionModel: Type.Union([
+                Type.Object({
+                  providerId: Type.String({ minLength: 1 }),
+                  modelId: Type.String({ minLength: 1 })
+                }),
+                Type.Null()
+              ]),
               updatedAt: Type.Number()
             }),
             vision: Type.Union([
               Type.Object({
                 source: Type.Union([Type.Literal("runtime_vision"), Type.Literal("agent_default_fallback")]),
+                provider: Type.Object({
+                  id: Type.String({ minLength: 1 }),
+                  name: Type.String({ minLength: 1 }),
+                  npm: AgentProviderNpmSchema,
+                  options: Type.Object({
+                    baseURL: Type.String({ minLength: 1 }),
+                    apiKey: Type.String({ minLength: 1 }),
+                    apiMode: Type.Optional(Type.Union([Type.Literal("responses"), Type.Literal("chatCompletions")]))
+                  })
+                }),
+                model: Type.Object({
+                  id: Type.String({ minLength: 1 }),
+                  providerModelId: Type.Optional(Type.String({ minLength: 1 })),
+                  name: Type.String({ minLength: 1 }),
+                  contextWindowTokens: Type.Integer({ minimum: 1 }),
+                  options: Type.Optional(Type.Any())
+                })
+              }),
+              Type.Null()
+            ]),
+            compaction: Type.Union([
+              Type.Object({
+                source: Type.Literal("runtime_compaction"),
                 provider: Type.Object({
                   id: Type.String({ minLength: 1 }),
                   name: Type.String({ minLength: 1 }),

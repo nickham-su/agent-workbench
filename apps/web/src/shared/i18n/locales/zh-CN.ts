@@ -1062,6 +1062,10 @@ export default {
           label: "自动压缩阈值(%)",
           help: "当最近一次模型响应总 token 达到当前模型 context window * 阈值/100 时触发自动压缩。范围 50-99。"
         },
+        maxSubtaskDepth: {
+          label: "Subtask 最大嵌套深度",
+          help: "限制 subtask 调用链的最大嵌套层级。独立主会话的首个运行是第 0 层；设为 1 时，仅允许主运行创建第一层 subtask；范围 1-5。仅限制嵌套深度，不限制同层数量、并发数或 token 消耗。"
+        },
         modelTotalTimeoutMs: {
           label: "单次请求超时（秒）",
           help: "单次模型请求的总超时时间。达到后将中止该次请求并标记为失败。仅支持整数秒,0 表示关闭。"
@@ -1079,13 +1083,19 @@ export default {
           placeholder: "请选择视觉模型（可选）",
           help: "全局默认视觉模型，供 visual_analyze 工具使用；未配置时回退到当前 agent 主模型。"
         },
+        compactionModel: {
+          label: "压缩默认模型",
+          placeholder: "请选择压缩默认模型（可选）",
+          help: "用于生成上下文压缩摘要；留空时使用当前 Agent 模型。若候选模型容量不足或不适用，将回退到当前 Agent 主模型。"
+        },
         sessionTerminalSoundEnabled: {
           label: "运行结束提示音",
           help: "当运行结束时播放提示音。对所有会话生效。"
         }
       },
       errors: {
-        visionModelInvalid: "视觉模型配置无效，请重新选择。"
+        visionModelInvalid: "视觉模型配置无效，请重新选择。",
+        compactionModelInvalid: "压缩默认模型配置无效，请重新选择。"
       }
     },
 

@@ -172,6 +172,9 @@ export function initSchema(db: Db) {
       agent_id text not null,
       provider_id text not null,
       model_id text not null,
+      subtask_depth integer,
+      parent_run_id text,
+      parent_tool_item_id integer,
       status text not null,
       created_at integer not null,
       updated_at integer not null,
@@ -197,6 +200,9 @@ export function initSchema(db: Db) {
   ensureColumn(db, { table: "agent_run", column: "provider_id", ddl: "provider_id text" });
   ensureColumn(db, { table: "agent_run", column: "model_id", ddl: "model_id text" });
   ensureColumn(db, { table: "agent_run", column: "ui_locale", ddl: "ui_locale text" });
+  ensureColumn(db, { table: "agent_run", column: "subtask_depth", ddl: "subtask_depth integer" });
+  ensureColumn(db, { table: "agent_run", column: "parent_run_id", ddl: "parent_run_id text" });
+  ensureColumn(db, { table: "agent_run", column: "parent_tool_item_id", ddl: "parent_tool_item_id integer" });
   ensureColumn(db, { table: "agent_context_item", column: "output_text", ddl: "output_text text not null default ''" });
   ensureColumn(db, { table: "agent_context_item", column: "assistant_reasoning_text", ddl: "assistant_reasoning_text text" });
   ensureColumn(db, {
@@ -255,6 +261,14 @@ export function initSchema(db: Db) {
   createIndexIfNotExists(db, {
     index: "idx_agent_run_session_status",
     sql: "create index idx_agent_run_session_status on agent_run(session_id, status, updated_at desc)"
+  });
+  createIndexIfNotExists(db, {
+    index: "idx_agent_run_parent_run_id",
+    sql: "create index idx_agent_run_parent_run_id on agent_run(parent_run_id)"
+  });
+  createIndexIfNotExists(db, {
+    index: "idx_agent_run_parent_tool_unique",
+    sql: "create unique index idx_agent_run_parent_tool_unique on agent_run(parent_run_id, parent_tool_item_id) where parent_tool_item_id is not null"
   });
   createIndexIfNotExists(db, {
     index: "idx_agent_session_run_state_status_active_run",

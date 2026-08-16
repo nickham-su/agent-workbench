@@ -6,9 +6,8 @@ Status: draft
 
 - `write` 工具当前是确定性兜底能力: 直接将 `args.content` 全量写入 `args.filePath`.
 - 当前 UI 对 `write` 的展示仅为工具调用行与文本输出,缺少面向用户的可视化反馈(例如覆盖了哪些内容).
-- 当前数据层会持久化 `write` 的 `args.content`.
-  - 会导致 `/context-items` 响应体体积随历史 write 增长.
-  - 工具调用行可能暴露 content 片段(尽管 UI 有截断,但仍存在泄漏风险).
+- 历史 `write` 的 tool-call input 必须保留原始完整 `args.content`,与执行 schema 一致.
+  - 不能将 `content` 替换为 `contentBytes/contentPreview/contentTruncated`,否则后续模型可能模仿不合法的参数形态.
 
 本项目尚未上线.
 
@@ -22,8 +21,9 @@ Status: draft
 - fork 后 artifact 身份稳定复用:
   - key 使用 `toolCallId`.
   - artifact 路径不包含 `sessionId` 或 `itemId`.
-- `write` 完成后瘦身 DB 持久化:
-  - 不在 DB 中长期保留 `args.content`.
+- `write` 完成后保留原始完整调用 input:
+  - DB 与历史 Prompt 中的 `args` 始终保留 `filePath` 与完整 `content`.
+  - `result` 仍只保留轻量摘要.
   - `before/after` 不进 DB,仅进入 service UI artifact.
 - 审批阶段不需要 diff 预览.
 
@@ -42,20 +42,26 @@ Status: draft
   - toolCallId 与 ai-sdk 的 tool-call/tool-result 关联一致.
   - fork 会克隆 tool item 的 `output.toolCallId`,因此新 session 可复用同一份 artifact.
 
-### completed 后移除 args.content
+### 终态保留原始 args.content
 
-- `write` 进入终态后,将 `args` 中的 `content` 从 DB 移除,仅保留:
-  - `filePath`
-  - `contentBytes`
-  - `contentPreview` 与 `contentTruncated`
+- `write` 进入 `completed`、`failed` 或 `cancelled` 后,保留模型生成的原始调用参数:
+
+```json
+{
+  "filePath": "src/a.ts",
+  "content": "完整文件内容"
+}
+```
+
 - 理由:
-  - 降低 `/context-items` 体积.
-  - 降低意外泄漏风险.
-  - 完整 after 已可通过 artifact 或 workspace 文件获得.
+  - 历史 tool-call input 与 `write` 执行 schema 一致.
+  - 后续模型可以理解此前完整写入意图,不会将展示元数据误认为可执行参数.
 
 补充:
 
-- 对 `denied/failed/cancelled` 的 write,也建议同样进行 args 瘦身,避免 DB 长期保存用户拒绝执行或失败的敏感内容.
+- `result` 中的 before/after 仍然不进入 DB;UI artifact 仍可按大小阈值截断.
+- 保留完整 `args.content` 会增加 DB、Prompt 和 fork 的内容体积,并扩大敏感内容存储范围;调试日志不应额外复制完整 content.
+- 旧的 metadata-only 记录无法安全恢复完整 content 时,Prompt 仅输出输入不可用的历史文本,不伪造 `content` 且不生成不符合 schema 的 write tool-call.
 
 ## 路径约定
 
@@ -167,7 +173,7 @@ Status: draft
 
 ## API 实现方案
 
-### completed 时写入 service UI artifact 并瘦身入库
+### completed 时写入 service UI artifact 并瘦身 result
 
 - 触发点: API 接收到 worker 对 tool item 的 update,且该 item:
   - `kind=tool`
@@ -183,8 +189,7 @@ Status: draft
   - 成功: UI 可拉取 diff
   - 失败: tool 仍保持终态,仅记录日志,UI 展示 `diff unavailable`
 - 将 `output.result` 替换为 `slimResult` 再写入 DB.
-- 同步瘦身 `output.args`:
-  - 移除 `args.content`,保留 `filePath` 与 `contentBytes/contentPreview`.
+- 保留 `output.args` 的原始完整 `filePath/content`,不做压缩或截断.
 
 ### 拉取接口
 
@@ -207,13 +212,12 @@ Status: draft
 
 ### write tool-call input projector
 
-- 目标: 避免将完整 `args.content` 作为 tool-call input 塞进 prompt messages.
-- 做法:
-  - 为 `write` 增加 prompt projector,将 tool-call input 投影为:
-    - `filePath`
-    - `contentBytes`
-    - `contentPreview`(短前缀,例如 200-400 chars)
-    - `contentTruncated`
+- 目标: 历史 tool-call input 与 `write` 执行 schema 完全一致,保留此前操作的完整意图.
+- 做法: 为 `write` 保留显式 identity projector,原样透传:
+
+```json
+{"filePath":"src/a.ts","content":"完整文件内容"}
+```
 
 补充:
 
@@ -260,16 +264,17 @@ Status: draft
 
 - write completed 后:
   - DB 中 `output.result` 不包含 before/after.
-  - DB 中 `output.args` 不包含 content,仅保留 slim 字段.
+  - DB 中 `output.args` 保留完整 `filePath/content`,不包含 `contentBytes/contentPreview/contentTruncated` 替代字段.
   - service UI artifact 文件存在且可读.
   - 拉取接口返回 200 且包含 before/after(或明确 unavailable).
 - artifact 文件缺失时返回 404.
 
 ### 前端验收
 
-- 会话列表默认滚动性能不受 write 历史影响明显恶化(相比原方案有改善).
 - write 卡片默认不渲染 diff.
 - 展开后可以加载并展示 diff,失败时显示 `diff unavailable`.
+- 完整 `args.content` 会增加 context、Prompt 与存储成本,这是为了保留 schema 合法且完整的历史 write 意图的有意取舍.
+- 默认不加载 diff artifact,避免将完整 args 的成本与大 diff 渲染成本叠加到会话列表初始渲染。
 
 ## 开发落点
 
@@ -280,8 +285,8 @@ Status: draft
 - API:
   - `apps/api/src/infra/fs/paths.ts`: 增加 `writeUiArtifactPath(dataDir, workspaceId, toolCallId)`.
   - `apps/api/src/modules/agent/agent.routes.ts`: 增加 write artifact 拉取接口.
-  - `apps/api/src/modules/agent/agent.service.ts`: 在 updateContextItemFromWorker 中写 artifact 并瘦身 result/args.
-  - `apps/api/src/modules/agent/prompt/tool-projectors/`: 增加 write 的 tool-call input projector.
+  - `apps/api/src/modules/agent/agent.service.ts`: 在 updateContextItemFromWorker 中写 artifact 并瘦身 result,保留原始 args.
+  - `apps/api/src/modules/agent/prompt/tool-projectors/`: 为 write 保留原样透传的 tool-call input projector.
 
 - 前端:
   - `apps/web/src/features/workspace/tools/agent/AgentClientPane.vue`: 增加 write display model 与卡片渲染分支.

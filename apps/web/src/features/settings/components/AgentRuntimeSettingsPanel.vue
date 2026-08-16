@@ -23,6 +23,34 @@
         </div>
       </a-form-item>
 
+      <a-form-item :label="t('settings.agentRuntime.fields.maxSubtaskDepth.label')">
+        <a-input-number
+          v-model:value="maxSubtaskDepth"
+          :min="1"
+          :max="5"
+          :step="1"
+          :precision="0"
+          style="max-width: 260px"
+        />
+        <div class="pt-2 text-xs text-[color:var(--text-tertiary)]">
+          {{ t("settings.agentRuntime.fields.maxSubtaskDepth.help") }}
+        </div>
+      </a-form-item>
+
+      <a-form-item :label="t('settings.agentRuntime.fields.compactionModel.label')">
+        <a-cascader
+          v-model:value="compactionModelPath"
+          :options="visionModelCascaderOptions"
+          :placeholder="t('settings.agentRuntime.fields.compactionModel.placeholder')"
+          :show-search="true"
+          :allow-clear="true"
+          expand-trigger="hover"
+        />
+        <div class="pt-2 text-xs text-[color:var(--text-tertiary)]">
+          {{ t("settings.agentRuntime.fields.compactionModel.help") }}
+        </div>
+      </a-form-item>
+
       <a-divider class="!my-2" />
 
       <a-form-item :label="t('settings.agentRuntime.fields.modelTotalTimeoutMs.label')">
@@ -91,6 +119,12 @@ import { computed, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import type { AgentRuntimeSettings } from "@agent-workbench/shared";
 import { getAgentProvidersSettings, getAgentRuntimeSettings, updateAgentRuntimeSettings } from "@/shared/api";
+import {
+  modelPathFromReference,
+  modelReferenceFromPath,
+  normalizeMaxSubtaskDepth,
+  toRuntimeSettingsMaxSubtaskDepthPayload
+} from "./agentRuntimeSettings";
 
 const { t } = useI18n();
 
@@ -103,10 +137,12 @@ const modelIdleTimeoutSeconds = ref<number>(0);
 const modelTotalTimeoutSeconds = ref<number>(0);
 const modelRequestMaxRetries = ref<number>(5);
 const autoCompactThresholdPct = ref<number>(80);
+const maxSubtaskDepth = ref<number>(1);
 const sessionTerminalSoundEnabled = ref(true);
 
 const providersSettings = ref<AgentProvidersSettings | null>(null);
 const visionModelPath = ref<string[]>([]);
+const compactionModelPath = ref<string[]>([]);
 
 function toSeconds(rawMs: number) {
   const ms = Math.max(0, Number(rawMs || 0));
@@ -143,12 +179,7 @@ function findModel(providerId: string, modelId: string) {
 }
 
 function toVisionModelFromPath(path: string[]) {
-  if (!Array.isArray(path) || path.length === 0) return null;
-  const [providerId, modelId] = path;
-  if (!providerId || !modelId) return undefined;
-  const found = findModel(providerId, modelId);
-  if (!found) return undefined;
-  return { providerId, modelId };
+  return modelReferenceFromPath(path, (providerId, modelId) => findModel(providerId, modelId) !== null);
 }
 
 function mapFromSettings(settings: AgentRuntimeSettings) {
@@ -156,10 +187,10 @@ function mapFromSettings(settings: AgentRuntimeSettings) {
   modelTotalTimeoutSeconds.value = toSeconds(settings.modelTotalTimeoutMs ?? 0);
   modelRequestMaxRetries.value = Math.min(100, Math.max(0, Math.floor(Number(settings.modelRequestMaxRetries ?? 5))));
   autoCompactThresholdPct.value = Math.min(99, Math.max(50, Math.floor(Number(settings.autoCompactThresholdPct || 80))));
+  maxSubtaskDepth.value = normalizeMaxSubtaskDepth(settings.maxSubtaskDepth);
   sessionTerminalSoundEnabled.value = settings.sessionTerminalSoundEnabled !== false;
-  visionModelPath.value = settings.visionModel
-    ? [settings.visionModel.providerId, settings.visionModel.modelId]
-    : [];
+  visionModelPath.value = modelPathFromReference(settings.visionModel);
+  compactionModelPath.value = modelPathFromReference(settings.compactionModel);
 }
 
 async function refresh() {
@@ -188,13 +219,20 @@ async function save() {
       message.error(t("settings.agentRuntime.errors.visionModelInvalid"));
       return;
     }
+    const compactionModel = toVisionModelFromPath(compactionModelPath.value);
+    if (compactionModel === undefined) {
+      message.error(t("settings.agentRuntime.errors.compactionModelInvalid"));
+      return;
+    }
     const res = await updateAgentRuntimeSettings({
       modelIdleTimeoutMs: toMs(modelIdleTimeoutSeconds.value ?? 0),
       modelTotalTimeoutMs: toMs(modelTotalTimeoutSeconds.value ?? 0),
       modelRequestMaxRetries: Math.min(100, Math.max(0, Math.floor(Number(modelRequestMaxRetries.value || 0)))),
       autoCompactThresholdPct: Math.min(99, Math.max(50, Math.floor(Number(autoCompactThresholdPct.value || 80)))),
+      maxSubtaskDepth: toRuntimeSettingsMaxSubtaskDepthPayload(maxSubtaskDepth.value),
       sessionTerminalSoundEnabled: !!sessionTerminalSoundEnabled.value,
-      visionModel
+      visionModel,
+      compactionModel
     });
     mapFromSettings(res);
     window.dispatchEvent(new CustomEvent("awb:agent-runtime-settings-updated"));

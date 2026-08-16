@@ -1,6 +1,9 @@
+import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { TextDecoder } from "node:util";
+import { isValidSkillRelativePath, parseSkillFrontmatter, parseStableSkillIdentifier } from "@agent-workbench/shared";
 
 const DEFAULT_READ_LIMIT = 500;
 const MAX_READ_LIMIT = 2000;
@@ -9,6 +12,12 @@ const MAX_BYTES_LABEL = `${MAX_BYTES / 1024}KB`;
 const MAX_LINE_LENGTH = 2000;
 const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`;
 const TEXT_SAMPLE_BYTES = 32 * 1024;
+const MAX_ROOT_BODY_UTF8_BYTES = 40 * 1024;
+const MAX_SKILL_FILES_SECTION_UTF8_BYTES = 10 * 1024;
+const MAX_ROOT_CONTENT_UTF8_BYTES = 50 * 1024;
+const MAX_SKILL_FILE_PATHS = 500;
+const ROOT_BODY_TRUNCATION_SUFFIX = "\n\nRoot skill content truncated.";
+
 const WRITE_UI_ARTIFACT_MAX_BYTES_PER_SIDE = readPositiveIntEnv("AWB_WRITE_UI_ARTIFACT_MAX_BYTES_PER_SIDE", 200 * 1024);
 
 type SampleEncoding = "utf8" | "utf16le" | "utf16be" | "utf32le" | "utf32be" | "latin1";
@@ -277,11 +286,9 @@ function splitDecodedLines(text: string) {
   return lines;
 }
 
-async function classifyTextSample(filePath: string, size: number): Promise<TextSampleKind> {
+async function classifyTextSampleFromHandle(handle: FileHandle, size: number): Promise<TextSampleKind> {
   if (size === 0) return { kind: "text", encoding: "utf8" };
   const sampleSize = Math.min(TEXT_SAMPLE_BYTES, size);
-  const handle = await fs.open(filePath, "r");
-  try {
     const buffer = Buffer.alloc(sampleSize);
     const { bytesRead } = await handle.read(buffer, 0, sampleSize, 0);
     if (bytesRead === 0) return { kind: "text", encoding: "utf8" };
@@ -317,6 +324,12 @@ async function classifyTextSample(filePath: string, size: number): Promise<TextS
       }
       return textLikeChars / Math.max(1, lossyDecoded.length) >= 0.85 ? { kind: "text", encoding: "latin1" } : { kind: "binary" };
     }
+}
+
+async function classifyTextSample(filePath: string, size: number): Promise<TextSampleKind> {
+  const handle = await fs.open(filePath, "r");
+  try {
+    return await classifyTextSampleFromHandle(handle, size);
   } finally {
     await handle.close();
   }
@@ -426,140 +439,104 @@ async function readWriteBeforeSide(filePath: string, maxBytes: number): Promise<
   }
 }
 
-type ReadTextCappedResult = {
-  lines: string[];
+type NormalizedSkillFileRead = {
+  content: string;
   truncatedByBytes: boolean;
   hasMoreLines: boolean;
-  totalLines: number;
+  truncatedByLineLength: boolean;
 };
 
-type ReadTextFileCappedParams = {
-  fullPath: string;
+async function readTextFileCappedFromHandle(params: {
+  handle: FileHandle;
   encoding: SampleEncoding;
   signal?: AbortSignal;
-};
-
-type SkillNodeChild = {
-  id: string;
-  type: "file" | "skill";
-  name: string;
-  description?: string;
-};
-
-type SkillFrontmatter = {
-  name: string;
-  description: string;
-  body: string;
-};
-
-function parseSkillFrontmatter(text: string): SkillFrontmatter {
-  const raw = String(text || "");
-  if (!raw.startsWith("---\n")) {
-    return { name: "", description: "", body: raw };
-  }
-  const end = raw.indexOf("\n---\n", 4);
-  if (end < 0) {
-    return { name: "", description: "", body: raw };
-  }
-  const yaml = raw.slice(4, end);
-  const body = raw.slice(end + "\n---\n".length);
-  let name = "";
-  let description = "";
-  for (const line of yaml.split(/\r?\n/)) {
-    const idx = line.indexOf(":");
-    if (idx <= 0) continue;
-    const key = line.slice(0, idx).trim().toLowerCase();
-    let value = line.slice(idx + 1).trim();
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1);
-    }
-    if (key === "name" && !name) name = value;
-    if (key === "description" && !description) description = value;
-  }
-  return { name, description, body };
-}
-
-async function readTextFileCapped(params: ReadTextFileCappedParams): Promise<ReadTextCappedResult> {
-  const { fullPath, encoding, signal } = params;
+}): Promise<NormalizedSkillFileRead> {
   const raw: string[] = [];
-  const decoder = createStreamingDecoder(encoding);
-  const chunkSize = 64 * 1024;
-  const handle = await fs.open(fullPath, "r");
-  const buffer = Buffer.alloc(chunkSize);
+  const decoder = createStreamingDecoder(params.encoding);
+  const buffer = Buffer.alloc(64 * 1024);
   let pending = "";
+  let pendingEndedWithCr = false;
   let bytes = 0;
   let truncatedByBytes = false;
-  let lines = 0;
   let hasMoreLines = false;
-  let pendingEndedWithCr = false;
+  let truncatedByLineLength = false;
+
+  const appendLine = (lineText: string) => {
+    let line = lineText;
+    if (line.length > MAX_LINE_LENGTH) {
+      line = line.slice(0, MAX_LINE_LENGTH) + MAX_LINE_SUFFIX;
+      truncatedByLineLength = true;
+    }
+    const size = Buffer.byteLength(line, "utf8") + (raw.length > 0 ? 1 : 0);
+    if (bytes + size > MAX_BYTES) {
+      truncatedByBytes = true;
+      hasMoreLines = true;
+      return false;
+    }
+    raw.push(line);
+    bytes += size;
+    return true;
+  };
+
+  const consumeCompleteLines = () => {
+    while (true) {
+      const index = pending.indexOf("\n");
+      if (index < 0) return true;
+      const line = pending.slice(0, index);
+      pending = pending.slice(index + 1);
+      if (!appendLine(line)) return false;
+    }
+  };
 
   const consumeText = (text: string, flush = false) => {
     let normalized = text;
     if (pendingEndedWithCr) {
-      if (normalized.startsWith("\n")) {
-        normalized = normalized.slice(1);
-      }
+      if (normalized.startsWith("\n")) normalized = normalized.slice(1);
       pending += "\n";
       pendingEndedWithCr = false;
+      if (!consumeCompleteLines()) return false;
     }
     if (!flush && normalized.endsWith("\r")) {
       normalized = normalized.slice(0, -1);
       pendingEndedWithCr = true;
     }
     pending += normalized.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-    while (true) {
-      const idx = pending.indexOf("\n");
-      if (idx < 0) break;
-      const lineText = pending.slice(0, idx);
-      pending = pending.slice(idx + 1);
-      lines += 1;
-      const line = lineText.length > MAX_LINE_LENGTH ? lineText.slice(0, MAX_LINE_LENGTH) + MAX_LINE_SUFFIX : lineText;
-      const size = Buffer.byteLength(line, "utf8") + (raw.length > 0 ? 1 : 0);
-      if (bytes + size > MAX_BYTES) {
-        truncatedByBytes = true;
-        hasMoreLines = true;
-        return false;
-      }
-      raw.push(line);
-      bytes += size;
-    }
-    if (flush && pending.length > 0) {
+    if (!consumeCompleteLines()) return false;
+    if (flush) {
       if (pendingEndedWithCr) {
         pending += "\n";
         pendingEndedWithCr = false;
+        if (!consumeCompleteLines()) return false;
       }
-      lines += 1;
-      const line = pending.length > MAX_LINE_LENGTH ? pending.slice(0, MAX_LINE_LENGTH) + MAX_LINE_SUFFIX : pending;
-      const size = Buffer.byteLength(line, "utf8") + (raw.length > 0 ? 1 : 0);
-      if (bytes + size > MAX_BYTES) {
-        truncatedByBytes = true;
-        hasMoreLines = true;
-        pending = "";
-        return false;
-      }
-      raw.push(line);
-      bytes += size;
+      if (pending.length > 0 && !appendLine(pending)) return false;
       pending = "";
     }
     return true;
   };
 
+  while (true) {
+    throwIfAborted(params.signal);
+    const { bytesRead } = await params.handle.read(buffer, 0, buffer.length, null);
+    if (bytesRead <= 0) break;
+    if (!consumeText(decoder.write(buffer.subarray(0, bytesRead)))) break;
+  }
+  if (!truncatedByBytes) consumeText(decoder.end(), true);
+
+  return {
+    content: raw.join("\n"),
+    truncatedByBytes,
+    hasMoreLines,
+    truncatedByLineLength
+  };
+}
+
+async function readTextFileCapped(params: { fullPath: string; encoding: SampleEncoding; signal?: AbortSignal }) {
+  const handle = await fs.open(params.fullPath, "r");
   try {
-    while (true) {
-      throwIfAborted(signal);
-      const { bytesRead } = await handle.read(buffer, 0, chunkSize, null);
-      if (bytesRead <= 0) break;
-      const chunkText = decoder.write(buffer.subarray(0, bytesRead));
-      if (!consumeText(chunkText, false)) break;
-    }
-    if (!truncatedByBytes) {
-      consumeText(decoder.end(), true);
-    }
+    return await readTextFileCappedFromHandle({ handle, encoding: params.encoding, signal: params.signal });
   } finally {
     await handle.close();
   }
-
-  return { lines: raw, truncatedByBytes, hasMoreLines, totalLines: lines };
 }
 
 export async function runReadTool(params: {
@@ -750,261 +727,634 @@ export async function runReadTool(params: {
   };
 }
 
-function sanitizeSkillToolError(err: unknown) {
+type SafeSkillFile = {
+  handle: FileHandle;
+  stat: Awaited<ReturnType<typeof fs.lstat>>;
+};
+
+type SkillToolResult = {
+  skillId: string;
+  filePath: string;
+  content: string;
+  truncated: boolean;
+};
+
+const PUBLIC_SKILL_ERRORS = new Set([
+  "skill is required",
+  "invalid skill identifier",
+  "skill not found",
+  "skill root is not readable",
+  "invalid skill path",
+  "skill path must reference a file",
+  "skill path is not a readable file",
+  "binary file is not supported",
+  "skill file not found",
+  "skill file is not accessible",
+  "skill tool failed to read target",
+  "operation aborted"
+]);
+
+function compareSkillPath(a: string, b: string) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function skillError(message: string): never {
+  throw new Error(message);
+}
+
+function errorCode(err: unknown) {
+  return err && typeof err === "object" ? String((err as { code?: unknown }).code || "") : "";
+}
+
+function isAbortError(err: unknown, signal?: AbortSignal) {
+  return signal?.aborted || (err instanceof Error && (err.name === "AbortError" || /\babort(?:ed)?\b/i.test(err.message)));
+}
+
+function sanitizeSkillToolError(err: unknown, signal?: AbortSignal) {
+  if (isAbortError(err, signal)) return new Error("operation aborted");
   const message = err instanceof Error ? err.message : String(err || "");
-  const code = err && typeof err === "object" ? String((err as any).code || "") : "";
-  const safeMessages = new Set([
-    "operation aborted",
-    "skill.id is required",
-    "skill.id must start with builtin/ or workspace/ or repo/",
-    "path is required",
-    "invalid path",
-    "absolute path is not allowed",
-    "path is outside workspace",
-    "symlink path is not allowed",
-    "binary file is not supported",
-    "unsupported non-regular file type",
-    "skill node not found"
-  ]);
-  if (safeMessages.has(message)) {
-    return new Error(message);
-  }
-  if (code === "ENOENT" || code === "ENOTDIR") {
-    return new Error("skill target not found");
-  }
-  if (code === "EACCES" || code === "EPERM") {
-    return new Error("skill target is not accessible");
-  }
+  if (PUBLIC_SKILL_ERRORS.has(message)) return new Error(message);
+  const code = errorCode(err);
+  if (code === "ENOENT" || code === "ENOTDIR") return new Error("skill file not found");
+  if (code === "EACCES" || code === "EPERM") return new Error("skill file is not accessible");
   return new Error("skill tool failed to read target");
 }
 
-function isRootSkillNode(ns: string, safeRel: string) {
-  if (ns === "builtin") {
-    return safeRel !== "." && !safeRel.includes("/");
-  }
-  return safeRel === ".";
+function isAsciiSpaceTabOnly(value: string) {
+  return /^[\u0020\u0009]*$/.test(value);
 }
 
-async function collectRecursiveRootSkillChildren(params: {
-  rootPath: string;
-  ns: string;
-  logicalBaseRel: string;
-  targetPath: string;
-  signal?: AbortSignal;
-}): Promise<SkillNodeChild[]> {
-  const children: SkillNodeChild[] = [];
+function parseSkillPath(raw: unknown): { root: true } | { root: false; path: string } {
+  if (raw === undefined) return { root: true };
+  if (typeof raw !== "string") skillError("invalid skill path");
+  if (isAsciiSpaceTabOnly(raw) || raw === "SKILL.md") return { root: true };
+  if (!isValidSkillRelativePath(raw)) skillError("invalid skill path");
+  return { root: false, path: raw };
+}
 
-  const walk = async (dirPath: string, dirRelPath: string) => {
+type SkillDiagnosticReason =
+  | "non_utf8_filename"
+  | "unreadable_directory"
+  | "unreadable_file"
+  | "root_content_invariant";
+
+type SkillToolTestingOptions = {
+  afterInitialRootDirectoryLstat?: (params: { skillsRoot: string; skillDirectory: string }) => void | Promise<void>;
+  afterRootDirectoryRevalidationBeforeRootFileLstat?: (params: { skillsRoot: string; skillDirectory: string; rootSkillPath: string }) => void | Promise<void>;
+  beforeOpenRootSkillFile?: (params: { skillsRoot: string; skillDirectory: string; rootSkillPath: string }) => void | Promise<void>;
+  afterOpenRootSkillFileBeforeAfterLstat?: (params: { skillsRoot: string; skillDirectory: string; rootSkillPath: string }) => void | Promise<void>;
+  beforeFinalRootSkillFileRevalidation?: (params: { skillsRoot: string; skillDirectory: string; rootSkillPath: string }) => void | Promise<void>;
+  beforeOpenSkillFile?: (params: { skillRoot: string; targetPath: string }) => void | Promise<void>;
+  afterOpenSkillFileBeforeStat?: (params: { handle: FileHandle; targetPath: string }) => void | Promise<void>;
+  beforeEnumeratingSkillEntry?: (params: { relativePath: string; kind: "directory" | "file" }) => void | Promise<void>;
+  rootFilesSectionBudgetOverride?: number;
+  onRootContentInvariantFallback?: () => void | Promise<void>;
+  onSkillDiagnostic?: (diagnostic: { source: "skills-v2"; reason: SkillDiagnosticReason }) => void | Promise<void>;
+};
+
+type RootDirectoryState =
+  | { kind: "missing" }
+  | { kind: "unsafe" }
+  | {
+      kind: "ready";
+      skillsRootRealPath: string;
+      skillDirectoryStat: { dev: number; ino: number };
+    };
+
+function hasSameIdentity(
+  first: { dev: number; ino: number },
+  second: { dev: number; ino: number }
+) {
+  return first.dev === second.dev && first.ino === second.ino;
+}
+
+function isMissingPathError(err: unknown) {
+  const code = errorCode(err);
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
+function reportSkillDiagnostic(options: SkillToolTestingOptions | undefined, reason: SkillDiagnosticReason) {
+  const diagnostic = { source: "skills-v2" as const, reason };
+  console.warn("[agent-worker] skills-v2 diagnostic", diagnostic);
+  return options?.onSkillDiagnostic?.(diagnostic);
+}
+
+async function readWholeFileFromHandle(handle: FileHandle, signal?: AbortSignal) {
+  const chunks: Buffer[] = [];
+  const buffer = Buffer.alloc(64 * 1024);
+  while (true) {
+    throwIfAborted(signal);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+    if (bytesRead <= 0) break;
+    chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
+  }
+  return Buffer.concat(chunks);
+}
+
+async function currentRootDirectoryPresence(params: { skillsRoot: string; skillDirectory: string }): Promise<"missing" | "unsafe" | { skillDirectoryStat: { dev: number; ino: number } }> {
+  const skillsRootStat = await fs.lstat(params.skillsRoot).catch((err: unknown) => isMissingPathError(err) ? null : undefined);
+  if (skillsRootStat === null) return "missing";
+  if (!skillsRootStat || !skillsRootStat.isDirectory() || skillsRootStat.isSymbolicLink()) return "unsafe";
+
+  const skillDirectoryStat = await fs.lstat(params.skillDirectory).catch((err: unknown) => isMissingPathError(err) ? null : undefined);
+  if (skillDirectoryStat === null) return "missing";
+  if (!skillDirectoryStat || !skillDirectoryStat.isDirectory() || skillDirectoryStat.isSymbolicLink()) return "unsafe";
+  return { skillDirectoryStat };
+}
+
+async function currentRootDirectoryState(params: {
+  skillsRoot: string;
+  skillDirectory: string;
+  afterSkillDirectoryLstat?: () => void | Promise<void>;
+}): Promise<RootDirectoryState> {
+  if (!isPathInside(params.skillsRoot, params.skillDirectory) || params.skillDirectory === path.resolve(params.skillsRoot)) {
+    return { kind: "unsafe" };
+  }
+  // The caller may use this seam only to cover the lstat -> realpath race in tests.
+  const presence = await currentRootDirectoryPresence(params);
+  if (presence === "missing") return { kind: "missing" };
+  if (presence === "unsafe") return { kind: "unsafe" };
+
+  await params.afterSkillDirectoryLstat?.();
+  try {
+    const [skillsRootRealPath, skillDirectoryRealPath] = await Promise.all([
+      fs.realpath(params.skillsRoot),
+      fs.realpath(params.skillDirectory)
+    ]);
+    if (!isPathInside(skillsRootRealPath, skillDirectoryRealPath)) return { kind: "unsafe" };
+    return { kind: "ready", skillsRootRealPath, skillDirectoryStat: presence.skillDirectoryStat };
+  } catch {
+    // The directory may have disappeared between lstat and realpath; refresh before mapping it.
+    const refreshedPresence = await currentRootDirectoryPresence(params);
+    if (refreshedPresence === "missing") return { kind: "missing" };
+    return { kind: "unsafe" };
+  }
+}
+
+function throwForRootDirectoryState(
+  state: RootDirectoryState,
+  expected?: { skillsRootRealPath: string; skillDirectoryStat: { dev: number; ino: number } }
+): never | Extract<RootDirectoryState, { kind: "ready" }> {
+  if (state.kind === "missing") skillError("skill not found");
+  if (state.kind === "unsafe") skillError("skill root is not readable");
+  if (
+    expected
+    && (state.skillsRootRealPath !== expected.skillsRootRealPath
+      || !hasSameIdentity(state.skillDirectoryStat, expected.skillDirectoryStat))
+  ) {
+    skillError("skill root is not readable");
+  }
+  return state;
+}
+
+async function assertCurrentRootDirectory(params: {
+  skillsRoot: string;
+  skillDirectory: string;
+  expected?: { skillsRootRealPath: string; skillDirectoryStat: { dev: number; ino: number } };
+  afterSkillDirectoryLstat?: () => void | Promise<void>;
+}) {
+  return throwForRootDirectoryState(await currentRootDirectoryState(params), params.expected);
+}
+
+async function mapRootFilesystemFailure(params: {
+  skillsRoot: string;
+  skillDirectory: string;
+  signal?: AbortSignal;
+}, err: unknown): Promise<never> {
+  if (isAbortError(err, params.signal)) skillError("operation aborted");
+  await assertCurrentRootDirectory(params);
+  skillError("skill root is not readable");
+}
+
+async function runRootFilesystemOperation<T>(params: {
+  skillsRoot: string;
+  skillDirectory: string;
+  signal?: AbortSignal;
+}, operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (err) {
+    return mapRootFilesystemFailure(params, err);
+  }
+}
+
+async function revalidateOpenedRootSkillFile(params: {
+  skillsRoot: string;
+  skillDirectory: string;
+  signal?: AbortSignal;
+  rootSkillPath: string;
+  rootBefore: { dev: number; ino: number };
+  opened: { dev: number; ino: number };
+}) {
+  const finalRootStat = await runRootFilesystemOperation(params, () => fs.lstat(params.rootSkillPath));
+  if (
+    !finalRootStat.isFile()
+    || finalRootStat.isSymbolicLink()
+    || !hasSameIdentity(params.rootBefore, finalRootStat)
+    || !hasSameIdentity(params.opened, finalRootStat)
+  ) {
+    skillError("skill root is not readable");
+  }
+}
+
+function mapRootSkillError(err: unknown, signal?: AbortSignal): never {
+  if (isAbortError(err, signal)) skillError("operation aborted");
+  const message = err instanceof Error ? err.message : "";
+  if (message === "skill not found" || message === "skill root is not readable") skillError(message);
+  skillError("skill root is not readable");
+}
+
+async function validateSkillRoot(params: {
+  skillsRoot: string;
+  skillDirectory: string;
+  signal?: AbortSignal;
+  testing?: SkillToolTestingOptions;
+}) {
+  let handle: FileHandle | undefined;
+  try {
     throwIfAborted(params.signal);
-    const entries = await fs.readdir(dirPath, { withFileTypes: true });
-    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    const directory = await assertCurrentRootDirectory({
+      skillsRoot: params.skillsRoot,
+      skillDirectory: params.skillDirectory,
+      afterSkillDirectoryLstat: async () => { await params.testing?.afterInitialRootDirectoryLstat?.({ skillsRoot: params.skillsRoot, skillDirectory: params.skillDirectory }); }
+    });
+    const expectedDirectory = {
+      skillsRootRealPath: directory.skillsRootRealPath,
+      skillDirectoryStat: directory.skillDirectoryStat
+    };
+    const rootSkillPath = path.join(params.skillDirectory, "SKILL.md");
+
+    await params.testing?.afterRootDirectoryRevalidationBeforeRootFileLstat?.({
+      skillsRoot: params.skillsRoot,
+      skillDirectory: params.skillDirectory,
+      rootSkillPath
+    });
+    throwIfAborted(params.signal);
+    await assertCurrentRootDirectory({ ...params, expected: expectedDirectory });
+    const before = await runRootFilesystemOperation(params, () => fs.lstat(rootSkillPath));
+    if (!before.isFile() || before.isSymbolicLink()) skillError("skill root is not readable");
+
+    await params.testing?.beforeOpenRootSkillFile?.({
+      skillsRoot: params.skillsRoot,
+      skillDirectory: params.skillDirectory,
+      rootSkillPath
+    });
+    throwIfAborted(params.signal);
+    handle = await runRootFilesystemOperation(params, () => fs.open(
+      rootSkillPath,
+      fsConstants.O_RDONLY | (typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0)
+    ));
+    const opened = await runRootFilesystemOperation(params, () => handle!.stat());
+    if (!opened.isFile() || !hasSameIdentity(before, opened)) skillError("skill root is not readable");
+
+    await params.testing?.afterOpenRootSkillFileBeforeAfterLstat?.({
+      skillsRoot: params.skillsRoot,
+      skillDirectory: params.skillDirectory,
+      rootSkillPath
+    });
+    throwIfAborted(params.signal);
+    const after = await runRootFilesystemOperation(params, () => fs.lstat(rootSkillPath));
+    if (!after.isFile() || after.isSymbolicLink() || !hasSameIdentity(before, after)) skillError("skill root is not readable");
+
+    await assertCurrentRootDirectory({ ...params, expected: expectedDirectory });
+    await params.testing?.beforeFinalRootSkillFileRevalidation?.({
+      skillsRoot: params.skillsRoot,
+      skillDirectory: params.skillDirectory,
+      rootSkillPath
+    });
+    throwIfAborted(params.signal);
+    await revalidateOpenedRootSkillFile({
+      skillsRoot: params.skillsRoot,
+      skillDirectory: params.skillDirectory,
+      signal: params.signal,
+      rootSkillPath,
+      rootBefore: before,
+      opened
+    });
+
+    const bytes = await runRootFilesystemOperation(params, () => readWholeFileFromHandle(handle!, params.signal));
+    if (bytes.includes(0x00)) skillError("skill root is not readable");
+    return bytes.toString("utf8");
+  } catch (err) {
+    return mapRootSkillError(err, params.signal);
+  } finally {
+    if (handle) await handle.close().catch(() => undefined);
+  }
+}
+
+function mapDirectSkillFileError(err: unknown, signal?: AbortSignal): never {
+  if (isAbortError(err, signal)) skillError("operation aborted");
+  const message = err instanceof Error ? err.message : "";
+  if (PUBLIC_SKILL_ERRORS.has(message)) skillError(message);
+  const code = errorCode(err);
+  if (code === "ENOENT" || code === "ENOTDIR") skillError("skill file not found");
+  if (code === "EACCES" || code === "EPERM") skillError("skill file is not accessible");
+  if (code === "ELOOP") skillError("skill path is not a readable file");
+  skillError("skill tool failed to read target");
+}
+
+async function assertSafeSkillDirectory(skillRoot: string, relativeDirectory: string) {
+  const rootStat = await fs.lstat(skillRoot);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) skillError("skill path is not a readable file");
+  const rootRealPath = await fs.realpath(skillRoot);
+  const segments = relativeDirectory ? relativeDirectory.split("/") : [];
+  let current = skillRoot;
+  for (const segment of segments) {
+    current = path.join(current, segment);
+    const stat = await fs.lstat(current);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) skillError("skill path is not a readable file");
+  }
+  const targetRealPath = await fs.realpath(current);
+  if (!isPathInside(rootRealPath, targetRealPath)) skillError("skill path is not a readable file");
+}
+
+async function openSafeSkillFile(params: {
+  skillRoot: string;
+  relativePath: string;
+  signal?: AbortSignal;
+  testing?: SkillToolTestingOptions;
+}): Promise<SafeSkillFile> {
+  let handle: FileHandle | undefined;
+  try {
+    throwIfAborted(params.signal);
+    const segments = params.relativePath.split("/");
+    const targetPath = path.resolve(params.skillRoot, ...segments);
+    if (!isPathInside(params.skillRoot, targetPath) || targetPath === path.resolve(params.skillRoot)) {
+      skillError("skill path is not a readable file");
+    }
+    await assertSafeSkillDirectory(params.skillRoot, segments.slice(0, -1).join("/"));
+    const before = await fs.lstat(targetPath);
+    if (before.isDirectory()) skillError("skill path must reference a file");
+    if (!before.isFile() || before.isSymbolicLink()) skillError("skill path is not a readable file");
+    const rootRealPath = await fs.realpath(params.skillRoot);
+    const targetRealPath = await fs.realpath(targetPath);
+    if (!isPathInside(rootRealPath, targetRealPath)) skillError("skill path is not a readable file");
+
+    await params.testing?.beforeOpenSkillFile?.({ skillRoot: params.skillRoot, targetPath });
+    throwIfAborted(params.signal);
+    const flags = fsConstants.O_RDONLY | (typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0);
+    handle = await fs.open(targetPath, flags);
+    await params.testing?.afterOpenSkillFileBeforeStat?.({ handle, targetPath });
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) {
+      skillError("skill path is not a readable file");
+    }
+    const after = await fs.lstat(targetPath);
+    if (!after.isFile() || after.isSymbolicLink() || after.dev !== before.dev || after.ino !== before.ino) {
+      skillError("skill path is not a readable file");
+    }
+    await assertSafeSkillDirectory(params.skillRoot, segments.slice(0, -1).join("/"));
+    const finalRealPath = await fs.realpath(targetPath);
+    if (!isPathInside(rootRealPath, finalRealPath)) skillError("skill path is not a readable file");
+    return { handle, stat: opened };
+  } catch (err) {
+    if (handle) await handle.close().catch(() => undefined);
+    return mapDirectSkillFileError(err, params.signal);
+  }
+}
+
+function decodeDirectoryEntryName(rawName: unknown) {
+  if (Buffer.isBuffer(rawName)) {
+    try {
+      const name = new TextDecoder("utf-8", { fatal: true }).decode(rawName);
+      if (!Buffer.from(name, "utf8").equals(rawName)) return null;
+      return name;
+    } catch {
+      return null;
+    }
+  }
+  return typeof rawName === "string" ? rawName : null;
+}
+
+async function listSafeSkillFilePaths(params: { skillRoot: string; signal?: AbortSignal; testing?: SkillToolTestingOptions }) {
+  const selected: string[] = [];
+  let candidateCount = 0;
+
+  const addCandidate = (relativePath: string) => {
+    candidateCount += 1;
+    selected.push(relativePath);
+    selected.sort(compareSkillPath);
+    if (selected.length > MAX_SKILL_FILE_PATHS + 1) selected.pop();
+  };
+
+  const walk = async (relativeDirectory: string): Promise<void> => {
+    throwIfAborted(params.signal);
+    try {
+      await assertSafeSkillDirectory(params.skillRoot, relativeDirectory);
+    } catch {
+      await reportSkillDiagnostic(params.testing, "unreadable_directory");
+      return;
+    }
+
+    let entries: Array<{ name: string; isDirectory: () => boolean; isFile: () => boolean; isSymbolicLink: () => boolean }>;
+    try {
+      const rawEntries = await fs.readdir(path.join(params.skillRoot, ...relativeDirectory.split("/").filter(Boolean)), {
+        withFileTypes: true,
+        encoding: "buffer"
+      } as any) as Array<any>;
+      entries = (await Promise.all(rawEntries.map(async (entry) => {
+        const name = decodeDirectoryEntryName(entry.name);
+        if (name === null) {
+          await reportSkillDiagnostic(params.testing, "non_utf8_filename");
+          return null;
+        }
+        return { entry, name };
+      })))
+        .filter((item): item is { entry: any; name: string } => item !== null)
+        .map(({ entry, name }) => ({ name, isDirectory: () => entry.isDirectory(), isFile: () => entry.isFile(), isSymbolicLink: () => entry.isSymbolicLink() }))
+        .sort((a, b) => compareSkillPath(a.name, b.name));
+    } catch {
+      await reportSkillDiagnostic(params.testing, "unreadable_directory");
+      return;
+    }
+
+    for (const entry of entries) {
+      throwIfAborted(params.signal);
       if (entry.isSymbolicLink()) continue;
-      const entryPath = path.join(dirPath, entry.name);
-      const entryRelPath = path.posix.join(dirRelPath, entry.name);
-      if (entry.isFile()) {
-        if (entry.name === "SKILL.md") continue;
-        await ensureRealPathInsideWorkspace(params.rootPath, entryPath);
-        const entryStat = await fs.lstat(entryPath);
-        if (!entryStat.isFile() || entryStat.isSymbolicLink()) continue;
-        const fileKind = await classifyTextSample(entryPath, Number(entryStat.size));
-        if (fileKind.kind !== "text") continue;
-        const fileDecoded = await readTextFileCapped({ fullPath: entryPath, encoding: fileKind.encoding, signal: params.signal });
-        const fileParsed = parseSkillFrontmatter(fileDecoded.lines.join("\n"));
-        children.push({
-          id: `${params.ns}/${entryRelPath}`,
-          type: "file",
-          name: entry.name,
-          description: fileParsed.description || ""
-        });
+      const relativePath = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name;
+      if (!isValidSkillRelativePath(relativePath)) continue;
+      await params.testing?.beforeEnumeratingSkillEntry?.({
+        relativePath,
+        kind: entry.isDirectory() ? "directory" : "file"
+      });
+      throwIfAborted(params.signal);
+      if (entry.isDirectory()) {
+        await walk(relativePath);
         continue;
       }
-      if (!entry.isDirectory()) continue;
-
-      const childSkillPath = path.join(entryPath, "SKILL.md");
-      const childStat = await fs.lstat(childSkillPath).catch((err: any) => {
-        if (err && err.code === "ENOENT") return null;
-        throw err;
-      });
-      if (childStat && childStat.isFile() && !childStat.isSymbolicLink()) {
-        await ensureRealPathInsideWorkspace(params.rootPath, childSkillPath);
-        const childKind = await classifyTextSample(childSkillPath, Number(childStat.size));
-        if (childKind.kind === "text") {
-          const childDecoded = await readTextFileCapped({ fullPath: childSkillPath, encoding: childKind.encoding, signal: params.signal });
-          const childParsed = parseSkillFrontmatter(childDecoded.lines.join("\n"));
-          children.push({
-            id: `${params.ns}/${entryRelPath}`,
-            type: "skill",
-            name: childParsed.name || entry.name,
-            description: childParsed.description || ""
-          });
+      if (!entry.isFile() || relativePath === "SKILL.md") continue;
+      try {
+        const file = await openSafeSkillFile({ skillRoot: params.skillRoot, relativePath, signal: params.signal, testing: params.testing });
+        try {
+          const kind = await classifyTextSampleFromHandle(file.handle, Number(file.stat.size));
+          if (kind.kind === "text") addCandidate(relativePath);
+        } finally {
+          await file.handle.close();
         }
+      } catch (err) {
+        if (isAbortError(err, params.signal)) throw err;
+        await reportSkillDiagnostic(params.testing, "unreadable_file");
       }
-
-      await ensureRealPathInsideWorkspace(params.rootPath, entryPath);
-      await walk(entryPath, entryRelPath);
     }
   };
 
-  await walk(params.targetPath, params.logicalBaseRel);
-  children.sort((a, b) => a.id.localeCompare(b.id));
-  return children;
+  await walk("");
+  selected.sort(compareSkillPath);
+  return { paths: selected.slice(0, MAX_SKILL_FILE_PATHS), candidateCount };
 }
 
-export async function runSkillTool(params: {
+function truncateRootBody(text: string) {
+  if (Buffer.byteLength(text, "utf8") <= MAX_ROOT_BODY_UTF8_BYTES) return { body: text, truncated: false };
+  const suffixBytes = Buffer.byteLength(ROOT_BODY_TRUNCATION_SUFFIX, "utf8");
+  const bytes = Buffer.from(text, "utf8");
+  let end = Math.min(bytes.length, MAX_ROOT_BODY_UTF8_BYTES - suffixBytes);
+  while (end > 0) {
+    try {
+      const prefix = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, end));
+      return { body: prefix + ROOT_BODY_TRUNCATION_SUFFIX, truncated: true };
+    } catch {
+      end -= 1;
+    }
+  }
+  return { body: ROOT_BODY_TRUNCATION_SUFFIX, truncated: true };
+}
+
+function buildSkillFilesSection(params: { body: string; paths: string[]; candidateCount: number; budget?: number }) {
+  const budget = params.budget ?? MAX_SKILL_FILES_SECTION_UTF8_BYTES;
+  const prefix = params.body.length > 0 ? "\n\n---\n\n## Skill files\n\n" : "## Skill files\n\n";
+  if (params.candidateCount === 0) {
+    return { content: `${prefix}No additional readable text files.`, truncated: false };
+  }
+
+  const available = params.paths;
+  const listHint = "\n\nSkill file list truncated; additional files may be accessed if their paths are known.";
+  const serialize = (count: number) => {
+    const hasMore = count < available.length || params.candidateCount > available.length;
+    return `${prefix}\`\`\`text\n${available.slice(0, count).join("\n")}\n\`\`\`${hasMore ? listHint : ""}`;
+  };
+
+  let bestCount = 0;
+  for (let count = 1; count <= available.length; count += 1) {
+    if (Buffer.byteLength(serialize(count), "utf8") <= budget) bestCount = count;
+  }
+  if (bestCount === 0) {
+    return { content: `${prefix}Skill file list truncated; additional files may be accessed if their paths are known.`, truncated: true };
+  }
+  const content = serialize(bestCount);
+  return { content, truncated: bestCount < available.length || params.candidateCount > available.length };
+}
+
+async function resolveSkillDirectory(params: {
   workspacePath: string;
   repoRoot: string;
-  id: string;
+  skillId: unknown;
+  externalSkillRoots?: Array<{ sourceType: "workspace" | "repo"; repoId?: string; rootDir: string; rootPath: string }>;
+}) {
+  if (params.skillId === undefined) skillError("skill is required");
+  const parsed = parseStableSkillIdentifier(params.skillId);
+  if (parsed.kind === "required") skillError("skill is required");
+  if (parsed.kind === "invalid") skillError("invalid skill identifier");
+  const value = parsed.value;
+  let skillsRoot: string;
+  if (value.namespace === "builtin") {
+    skillsRoot = path.resolve(params.repoRoot, "skills");
+  } else if (value.namespace === "workspace") {
+    const mapping = (params.externalSkillRoots || []).find(
+      (item) => item.sourceType === "workspace" && item.rootDir === value.rootDir
+    );
+    if (!mapping) skillError("skill not found");
+    skillsRoot = path.resolve(mapping.rootPath);
+  } else {
+    const mapping = (params.externalSkillRoots || []).find(
+      (item) => item.sourceType === "repo" && item.repoId === value.repoId && item.rootDir === value.rootDir
+    );
+    if (!mapping) skillError("skill not found");
+    skillsRoot = path.resolve(mapping.rootPath);
+  }
+  return { skill: value.skill, skillsRoot, skillDirectory: path.join(skillsRoot, value.skillDir) };
+}
+
+type RunSkillToolParams = {
+  workspacePath: string;
+  repoRoot: string;
+  skillId: unknown;
+  filePath?: unknown;
   externalSkillRoots?: Array<{ sourceType: "workspace" | "repo"; repoId?: string; rootDir: string; rootPath: string }>;
   signal?: AbortSignal;
-}) {
+};
+
+async function runSkillToolInternal(params: RunSkillToolParams, testing?: SkillToolTestingOptions): Promise<SkillToolResult> {
   try {
     throwIfAborted(params.signal);
-    const id = String(params.id || "").trim();
-    if (!id) throw new Error("skill.id is required");
-    const slashIndex = id.indexOf("/");
-    if (slashIndex <= 0) throw new Error("skill.id must start with builtin/ or workspace/ or repo/");
-    const ns = id.slice(0, slashIndex);
-    const rel = id.slice(slashIndex + 1);
-
-    let rootPath = "";
-    let safeRel = "";
-    let logicalBaseRel = "";
-    if (ns === "builtin" || ns === "workspace") {
-      safeRel = ensureSafeRelativePath(rel);
-      rootPath = path.resolve(params.repoRoot, "skills");
-      logicalBaseRel = safeRel;
-      if (ns === "workspace") {
-        const rootDir = String(rel.split("/")[0] || "").trim();
-        const mapping = (params.externalSkillRoots || []).find((it) => it.sourceType === "workspace" && it.rootDir === rootDir);
-        if (!mapping) throw new Error("skill node not found");
-        rootPath = path.resolve(mapping.rootPath);
-        const [, ...rest] = safeRel.split("/");
-        safeRel = rest.length > 0 ? ensureSafeRelativePath(rest.join("/")) : ".";
-        logicalBaseRel = path.posix.join(rootDir, safeRel === "." ? "" : safeRel);
-      }
-    } else if (ns === "repo") {
-      const [repoIdRaw, rootDirRaw, ...rest] = rel.split("/");
-      const repoId = String(repoIdRaw || "").trim();
-      const rootDir = String(rootDirRaw || "").trim();
-      if (!repoId || !rootDir) {
-        throw new Error("skill.id must start with builtin/ or workspace/ or repo/");
-      }
-      const mapping = (params.externalSkillRoots || []).find(
-        (it) => it.sourceType === "repo" && it.repoId === repoId && it.rootDir === rootDir
-      );
-      if (!mapping) throw new Error("skill node not found");
-      rootPath = path.resolve(mapping.rootPath);
-      safeRel = rest.length > 0 ? ensureSafeRelativePath(rest.join("/")) : ".";
-      logicalBaseRel = rel;
-    } else {
-      throw new Error("skill.id must start with builtin/ or workspace/ or repo/");
-    }
-
-    const targetPath = resolveWithinWorkspace(rootPath, safeRel);
-    const stat = await fs.lstat(targetPath);
-    if (stat.isSymbolicLink()) {
-      throw new Error("symlink path is not allowed");
-    }
-    await ensureRealPathInsideWorkspace(rootPath, targetPath);
-    throwIfAborted(params.signal);
-
-    if (stat.isFile()) {
-      const sampleKind = await classifyTextSample(targetPath, Number(stat.size));
-      if (sampleKind.kind !== "text") {
-        throw new Error("binary file is not supported");
-      }
-      const decoded = await readTextFileCapped({ fullPath: targetPath, encoding: sampleKind.encoding, signal: params.signal });
-      return {
-        id,
-        type: "file" as const,
-        content: decoded.lines.join("\n"),
-        truncated: decoded.truncatedByBytes || decoded.hasMoreLines
-      };
-    }
-
-    if (!stat.isDirectory()) {
-      throw new Error("unsupported non-regular file type");
-    }
-    const skillMdPath = path.join(targetPath, "SKILL.md");
-    const skillMdStat = await fs.lstat(skillMdPath).catch((err: any) => {
-      if (err && err.code === "ENOENT") return null;
-      throw err;
+    const target = await resolveSkillDirectory(params);
+    const rootSource = await validateSkillRoot({
+      skillsRoot: target.skillsRoot,
+      skillDirectory: target.skillDirectory,
+      signal: params.signal,
+      testing
     });
-    if (!skillMdStat || !skillMdStat.isFile() || skillMdStat.isSymbolicLink()) {
-      throw new Error("skill node not found");
-    }
-    await ensureRealPathInsideWorkspace(rootPath, skillMdPath);
-    const skillKind = await classifyTextSample(skillMdPath, Number(skillMdStat.size));
-    if (skillKind.kind !== "text") {
-      throw new Error("binary file is not supported");
-    }
-    const skillDecoded = await readTextFileCapped({ fullPath: skillMdPath, encoding: skillKind.encoding, signal: params.signal });
-    const skillRaw = skillDecoded.lines.join("\n");
-    const skillParsed = parseSkillFrontmatter(skillRaw);
+    const requestedPath = parseSkillPath(params.filePath);
 
-    const rootNode = isRootSkillNode(ns, safeRel);
-
-    const entries = await fs.readdir(targetPath, { withFileTypes: true });
-    const children: SkillNodeChild[] = [];
-    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      if (entry.isSymbolicLink()) continue;
-      if (entry.isFile()) {
-        if (entry.name === "SKILL.md") continue;
-        children.push({
-          id: `${ns}/${path.posix.join(logicalBaseRel, entry.name)}`,
-          type: "file",
-          name: entry.name
-        });
-        continue;
+    if (!requestedPath.root) {
+      const file = await openSafeSkillFile({
+        skillRoot: target.skillDirectory,
+        relativePath: requestedPath.path,
+        signal: params.signal,
+        testing
+      });
+      try {
+        const kind = await classifyTextSampleFromHandle(file.handle, Number(file.stat.size));
+        if (kind.kind !== "text") skillError("binary file is not supported");
+        const read = await readTextFileCappedFromHandle({ handle: file.handle, encoding: kind.encoding, signal: params.signal });
+        return {
+          skillId: target.skill,
+          filePath: requestedPath.path,
+          content: read.content,
+          truncated: read.truncatedByBytes || read.hasMoreLines || read.truncatedByLineLength
+        };
+      } finally {
+        await file.handle.close();
       }
-      if (!entry.isDirectory()) continue;
-      const childSkillPath = path.join(targetPath, entry.name, "SKILL.md");
-      const childStat = await fs.lstat(childSkillPath).catch((err: any) => {
-        if (err && err.code === "ENOENT") return null;
-        throw err;
-      });
-      if (!childStat || !childStat.isFile() || childStat.isSymbolicLink()) continue;
-      await ensureRealPathInsideWorkspace(rootPath, childSkillPath);
-      const childKind = await classifyTextSample(childSkillPath, Number(childStat.size));
-      if (childKind.kind !== "text") continue;
-      const childDecoded = await readTextFileCapped({ fullPath: childSkillPath, encoding: childKind.encoding, signal: params.signal });
-      const childParsed = parseSkillFrontmatter(childDecoded.lines.join("\n"));
-      const childRelPath = path.posix.join(logicalBaseRel, entry.name);
-      children.push({
-        id: `${ns}/${childRelPath}`,
-        type: "skill",
-        name: childParsed.name || entry.name,
-        description: childParsed.description || ""
-      });
     }
-    // children 语义约定：
-    // - 根 skill：children 递归展开为整棵 skill 子树下的可读摘要（便于一次性披露）
-    // - 非根 skill：children 保持直接子级（避免每层重复回传整树）
-    // 这里显式分支，降低后续维护时把两种语义混淆的风险。
 
-    const resultChildren = rootNode
-      ? await collectRecursiveRootSkillChildren({
-          rootPath,
-          ns,
-          logicalBaseRel,
-          targetPath,
-          signal: params.signal
-        })
-      : children;
-
-    return {
-      id,
-      type: "skill" as const,
-      name: skillParsed.name || path.basename(targetPath),
-      description: skillParsed.description || "",
-      content: skillParsed.body,
-      children: resultChildren,
-      truncated: skillDecoded.truncatedByBytes || skillDecoded.hasMoreLines
-    };
+    const root = truncateRootBody(parseSkillFrontmatter(rootSource).body);
+    const files = await listSafeSkillFilePaths({ skillRoot: target.skillDirectory, signal: params.signal, testing });
+    let section = buildSkillFilesSection({
+      body: root.body,
+      paths: files.paths,
+      candidateCount: files.candidateCount,
+      ...(testing?.rootFilesSectionBudgetOverride === undefined
+        ? {}
+        : { budget: testing.rootFilesSectionBudgetOverride })
+    });
+    let content = root.body + section.content;
+    let truncated = root.truncated || section.truncated;
+    if (Buffer.byteLength(content, "utf8") > MAX_ROOT_CONTENT_UTF8_BYTES) {
+      await reportSkillDiagnostic(testing, "root_content_invariant");
+      await testing?.onRootContentInvariantFallback?.();
+      section = buildSkillFilesSection({
+        body: root.body,
+        paths: files.paths,
+        candidateCount: files.candidateCount,
+        budget: Math.max(0, MAX_ROOT_CONTENT_UTF8_BYTES - Buffer.byteLength(root.body, "utf8"))
+      });
+      content = root.body + section.content;
+      truncated = true;
+    }
+    return { skillId: target.skill, filePath: "SKILL.md", content, truncated };
   } catch (err) {
-    throw sanitizeSkillToolError(err);
+    throw sanitizeSkillToolError(err, params.signal);
   }
 }
+
+export async function runSkillTool(params: RunSkillToolParams): Promise<SkillToolResult> {
+  return runSkillToolInternal(params);
+}
+
+export const __testing = {
+  runSkillTool: (params: RunSkillToolParams, options: SkillToolTestingOptions) => runSkillToolInternal(params, options),
+  buildSkillFilesSection
+};
 
 export async function runWriteTool(params: {
   workspacePath: string;

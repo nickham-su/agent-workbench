@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { TextDecoder } from "node:util";
 import { afterEach, test } from "node:test";
-import { runReadTool, runSkillTool, runWriteTool } from "./fileTools.js";
+import { parseSkillFrontmatter, parseStableSkillIdentifier } from "@agent-workbench/shared";
+import { __testing, runReadTool, runSkillTool, runWriteTool } from "./fileTools.js";
 
 const workspaces: string[] = [];
 
@@ -227,220 +230,569 @@ test("read 在目录 offset 超过条目数时返回 EOF 说明而不是失败",
   assert.equal(result.content, "(End of directory - total 2 entries. Requested offset=5 exceeds directory length. No more entries to read. Do not call read again for this directory unless the directory contents change.)");
 });
 
-test("skill 读取 skill 节点时返回正文与 children（文件 + 直接子 skill）", async () => {
-  const workspacePath = await createWorkspace();
-  const repoRoot = await createWorkspace();
-  await fs.mkdir(path.join(repoRoot, "skills", "tooling", "child"), { recursive: true });
-  await fs.writeFile(
-    path.join(repoRoot, "skills", "tooling", "SKILL.md"),
-    "---\nname: Tooling\ndescription: Tooling desc\n---\n\nTooling body",
-    "utf8"
-  );
-  await fs.writeFile(path.join(repoRoot, "skills", "tooling", "notes.txt"), "hello", "utf8");
-  await fs.writeFile(
-    path.join(repoRoot, "skills", "tooling", "child", "SKILL.md"),
-    "---\nname: Child\ndescription: Child desc\n---\n\nchild body",
-    "utf8"
-  );
-
-  const result = await runSkillTool({ workspacePath, repoRoot, id: "builtin/tooling" });
-
-  assert.equal(result.type, "skill");
-  assert.equal(result.id, "builtin/tooling");
-  assert.equal(result.name, "Tooling");
-  assert.equal(result.description, "Tooling desc");
-  assert.equal(result.content.includes("Tooling body"), true);
+test("skill V2 共用 frontmatter helper 保留根正文并遵守完整边界", () => {
   assert.deepEqual(
-    result.children.map((item) => ({ id: item.id, type: item.type, name: item.name })),
-    [
-      { id: "builtin/tooling/child", type: "skill", name: "Child" },
-      { id: "builtin/tooling/notes.txt", type: "file", name: "notes.txt" }
-    ]
+    parseSkillFrontmatter("---\r\nNAME: \"  First  \"\r\ndescription:\r\nDescription: '  desc  '\r\n---\r\nbody\r\n"),
+    { name: "First", description: "desc", body: "body\r\n" }
   );
-});
-
-test("skill 读取根节点时 children 递归返回深层 skill 与文件", async () => {
-  const workspacePath = await createWorkspace();
-  const repoRoot = await createWorkspace();
-  await fs.mkdir(path.join(repoRoot, "skills", "root", "middle", "deep-skill"), { recursive: true });
-  await fs.writeFile(path.join(repoRoot, "skills", "root", "SKILL.md"), "---\nname: Root\ndescription: Root desc\n---\n\nroot body", "utf8");
-  await fs.writeFile(path.join(repoRoot, "skills", "root", "notes.txt"), "root notes", "utf8");
-  await fs.writeFile(path.join(repoRoot, "skills", "root", "middle", "guide.md"), "---\ndescription: guide desc\n---\n\n# Guide", "utf8");
-  await fs.writeFile(path.join(repoRoot, "skills", "root", "middle", "deep-skill", "SKILL.md"), "---\nname: Deep Skill\ndescription: Deep desc\n---\n\ndeep body", "utf8");
-
-  const result = await runSkillTool({ workspacePath, repoRoot, id: "builtin/root" });
-
-  assert.equal(result.type, "skill");
   assert.deepEqual(
-    result.children.map((item) => ({ id: item.id, type: item.type, name: item.name, description: item.description || "" })),
-    [
-      { id: "builtin/root/middle/deep-skill", type: "skill", name: "Deep Skill", description: "Deep desc" },
-      { id: "builtin/root/middle/guide.md", type: "file", name: "guide.md", description: "guide desc" },
-      { id: "builtin/root/notes.txt", type: "file", name: "notes.txt", description: "" }
-    ]
+    parseSkillFrontmatter("\ufeff---\nname: ignored\n---\nbody"),
+    { name: "", description: "", body: "\ufeff---\nname: ignored\n---\nbody" }
   );
-});
-
-test("skill 读取非根节点时 children 仍仅包含直接子级", async () => {
-  const workspacePath = await createWorkspace();
-  const repoRoot = await createWorkspace();
-  await fs.mkdir(path.join(repoRoot, "skills", "root", "child", "nested"), { recursive: true });
-  await fs.writeFile(path.join(repoRoot, "skills", "root", "SKILL.md"), "---\nname: Root\n---\n\nroot", "utf8");
-  await fs.writeFile(path.join(repoRoot, "skills", "root", "child", "SKILL.md"), "---\nname: Child\ndescription: Child desc\n---\n\nchild", "utf8");
-  await fs.writeFile(path.join(repoRoot, "skills", "root", "child", "direct.txt"), "direct", "utf8");
-  await fs.writeFile(path.join(repoRoot, "skills", "root", "child", "nested", "deep.txt"), "deep", "utf8");
-  await fs.writeFile(path.join(repoRoot, "skills", "root", "child", "nested", "SKILL.md"), "---\nname: Nested\n---\n", "utf8");
-
-  const result = await runSkillTool({ workspacePath, repoRoot, id: "builtin/root/child" });
-
-  assert.equal(result.type, "skill");
   assert.deepEqual(
-    result.children.map((item) => item.id),
-    ["builtin/root/child/direct.txt", "builtin/root/child/nested"]
+    parseSkillFrontmatter("---\rname: ignored\r---\rbody"),
+    { name: "", description: "", body: "---\rname: ignored\r---\rbody" }
   );
 });
 
-test("skill 根节点递归会穿透无 SKILL.md 的中间目录并发现文件", async () => {
-  const workspacePath = await createWorkspace();
-  const repoRoot = await createWorkspace();
-  await fs.mkdir(path.join(repoRoot, "skills", "root", "docs", "recipes"), { recursive: true });
-  await fs.writeFile(path.join(repoRoot, "skills", "root", "SKILL.md"), "---\nname: Root\n---\n", "utf8");
-  await fs.writeFile(path.join(repoRoot, "skills", "root", "docs", "recipes", "tips.md"), "# tips", "utf8");
-
-  const result = await runSkillTool({ workspacePath, repoRoot, id: "builtin/root" });
-
-  assert.equal(result.type, "skill");
-  assert.equal(result.children.some((item) => item.id === "builtin/root/docs/recipes/tips.md" && item.type === "file"), true);
-});
-
-test("skill 读取 workspace 根节点时 children 递归返回深层文件与深层 skill", async () => {
-  const workspacePath = await createWorkspace();
-  const repoRoot = await createWorkspace();
-  const workspaceRoot = path.join(workspacePath, "deploy");
-  await fs.mkdir(path.join(workspaceRoot, "docs", "nested", "child-skill"), { recursive: true });
-  await fs.writeFile(path.join(workspaceRoot, "SKILL.md"), "---\nname: Deploy Root\n---\n\nroot", "utf8");
-  await fs.writeFile(path.join(workspaceRoot, "docs", "nested", "guide.md"), "---\ndescription: workspace guide\n---\n", "utf8");
-  await fs.writeFile(path.join(workspaceRoot, "docs", "nested", "child-skill", "SKILL.md"), "---\nname: Workspace Deep\ndescription: deep\n---\n", "utf8");
-
-  const result = await runSkillTool({
-    workspacePath,
-    repoRoot,
-    id: "workspace/deploy",
-    externalSkillRoots: [{ sourceType: "workspace", rootDir: "deploy", rootPath: workspaceRoot }]
+test("skill V2 stable identifier 只修剪 ASCII 空格和 tab", () => {
+  assert.deepEqual(parseStableSkillIdentifier(" \tbuiltin/tooling\t "), {
+    kind: "valid",
+    value: { skill: "builtin/tooling", namespace: "builtin", skillDir: "tooling" }
   });
-
-  assert.equal(result.type, "skill");
-  assert.deepEqual(
-    result.children.map((item) => item.id),
-    ["workspace/deploy/docs/nested/child-skill", "workspace/deploy/docs/nested/guide.md"]
-  );
+  assert.deepEqual(parseStableSkillIdentifier("\nbuiltin/tooling"), { kind: "invalid" });
+  assert.deepEqual(parseStableSkillIdentifier("\u00a0"), { kind: "invalid" });
+  assert.deepEqual(parseStableSkillIdentifier("  \t"), { kind: "required" });
 });
 
-test("skill 读取 repo 非根节点时 children 仍仅包含直接子级", async () => {
+test("skill V2 根读取返回正文和扁平可复制文件路径", async () => {
   const workspacePath = await createWorkspace();
   const repoRoot = await createWorkspace();
-  const repoSkillRoot = path.join(workspacePath, "repo-a", "ai-skills");
-  await fs.mkdir(path.join(repoSkillRoot, "ops", "nested"), { recursive: true });
-  await fs.writeFile(path.join(repoSkillRoot, "SKILL.md"), "---\nname: Repo Root\n---\n", "utf8");
-  await fs.writeFile(path.join(repoSkillRoot, "ops", "SKILL.md"), "---\nname: Ops\n---\n", "utf8");
-  await fs.writeFile(path.join(repoSkillRoot, "ops", "quick.txt"), "quick", "utf8");
-  await fs.writeFile(path.join(repoSkillRoot, "ops", "nested", "deep.txt"), "deep", "utf8");
-  await fs.writeFile(path.join(repoSkillRoot, "ops", "nested", "SKILL.md"), "---\nname: Nested\n---\n", "utf8");
+  const skillRoot = path.join(repoRoot, "skills", "tooling");
+  await fs.mkdir(path.join(skillRoot, "nested"), { recursive: true });
+  await fs.writeFile(path.join(skillRoot, "SKILL.md"), "---\r\nname: Tooling\r\ndescription: Tooling desc\r\n---\r\n\r\nTooling body\r\n", "utf8");
+  await fs.writeFile(path.join(skillRoot, "notes.txt"), "notes", "utf8");
+  await fs.writeFile(path.join(skillRoot, "nested", "SKILL.md"), "---\nname: ordinary helper\n---\nnested body", "utf8");
 
-  const result = await runSkillTool({
-    workspacePath,
-    repoRoot,
-    id: "repo/repo-a/ai-skills/ops",
-    externalSkillRoots: [{ sourceType: "repo", repoId: "repo-a", rootDir: "ai-skills", rootPath: repoSkillRoot }]
-  });
+  const result = await runSkillTool({ workspacePath, repoRoot, skillId: " builtin/tooling " });
 
-  assert.equal(result.type, "skill");
-  assert.deepEqual(result.children.map((item) => item.id), ["repo/repo-a/ai-skills/ops/nested", "repo/repo-a/ai-skills/ops/quick.txt"]);
+  assert.equal(result.skillId, "builtin/tooling");
+  assert.equal(result.filePath, "SKILL.md");
+  assert.deepEqual(Object.keys(result).sort(), ["content", "filePath", "skillId", "truncated"]);
+  assert.equal(result.truncated, false);
+  assert.match(result.content, /Tooling body\r\n/);
+  assert.match(result.content, /\n\n---\n\n## Skill files\n\n```text\nnested\/SKILL\.md\nnotes\.txt\n```$/);
+  assert.equal(result.content.includes("Tooling desc"), false);
 });
 
-test("skill 读取文件 id 时仅返回文件内容", async () => {
+test("skill V2 指定辅助文件保持通用读取器规范化且不剥离嵌套 frontmatter", async () => {
   const workspacePath = await createWorkspace();
   const repoRoot = await createWorkspace();
-  const workspaceRoot = path.join(workspacePath, "deploy");
-  await fs.mkdir(workspaceRoot, { recursive: true });
-  await fs.writeFile(path.join(workspaceRoot, "SKILL.md"), "Deploy skill", "utf8");
-  await fs.writeFile(path.join(workspaceRoot, "template.yaml"), "kind: Pod", "utf8");
+  const skillRoot = path.join(repoRoot, "skills", "tooling");
+  await fs.mkdir(path.join(skillRoot, "nested"), { recursive: true });
+  await fs.writeFile(path.join(skillRoot, "SKILL.md"), "root", "utf8");
+  await fs.writeFile(path.join(skillRoot, "nested", "SKILL.md"), "---\r\nname: helper\r\n---\r\nline", "utf8");
 
-  const result = await runSkillTool({ workspacePath, repoRoot, id: "workspace/deploy/template.yaml", externalSkillRoots: [{ sourceType: "workspace", rootDir: "deploy", rootPath: workspaceRoot }] });
+  const result = await runSkillTool({ workspacePath, repoRoot, skillId: "builtin/tooling", filePath: "nested/SKILL.md" });
 
-  assert.equal(result.type, "file");
-  assert.equal(result.id, "workspace/deploy/template.yaml");
-  assert.equal(result.content, "kind: Pod");
-  assert.equal(Object.prototype.hasOwnProperty.call(result, "children"), false);
+  assert.equal(result.filePath, "nested/SKILL.md");
+  assert.deepEqual(Object.keys(result).sort(), ["content", "filePath", "skillId", "truncated"]);
+  assert.equal(result.content, "---\nname: helper\n---\nline");
+  assert.equal(result.truncated, false);
 });
 
-test("skill 在目标不存在时返回脱敏错误，且不泄露绝对路径", async () => {
+test("skill V2 列表中的平级、嵌套与 Unicode 路径均可按原字符串回读", async () => {
   const workspacePath = await createWorkspace();
   const repoRoot = await createWorkspace();
-  await fs.mkdir(path.join(repoRoot, "skills"), { recursive: true });
-
-  let message = "";
-  try {
-    await runSkillTool({ workspacePath, repoRoot, id: "builtin/not-exists" });
-  } catch (err) {
-    message = err instanceof Error ? err.message : String(err);
+  const skillRoot = path.join(repoRoot, "skills", "roundtrip");
+  const expected = new Map([
+    ["plain.txt", "plain"],
+    ["nested/guide.md", "nested"],
+    ["unicode/real-�.txt", "replacement is valid"]
+  ]);
+  await fs.mkdir(path.join(skillRoot, "nested"), { recursive: true });
+  await fs.mkdir(path.join(skillRoot, "unicode"), { recursive: true });
+  await fs.writeFile(path.join(skillRoot, "SKILL.md"), "root", "utf8");
+  for (const [relativePath, content] of expected) {
+    await fs.writeFile(path.join(skillRoot, ...relativePath.split("/")), content, "utf8");
   }
 
-  assert.equal(message, "skill target not found");
-  assert.equal(message.includes(repoRoot), false);
-  assert.equal(message.includes(workspacePath), false);
-  assert.equal(message.includes("/"), false);
+  const root = await runSkillTool({ workspacePath, repoRoot, skillId: "builtin/roundtrip" });
+  const listed = root.content.match(/```text\n([\s\S]*?)\n```/)?.[1]?.split("\n") || [];
+  assert.deepEqual(listed, [...expected.keys()].sort());
+  for (const [relativePath, content] of expected) {
+    const file = await runSkillTool({ workspacePath, repoRoot, skillId: "builtin/roundtrip", filePath: relativePath });
+    assert.equal(file.content, content, `listed path ${relativePath} must round-trip`);
+  }
 });
 
-test("skill 对非法 id 仍返回明确校验错误", async () => {
+test("skill V2 指定辅助文件将 CRLF 和孤立 CR 规范为 LF，并去除 BOM", async () => {
   const workspacePath = await createWorkspace();
   const repoRoot = await createWorkspace();
+  const skillRoot = path.join(repoRoot, "skills", "normalized");
+  await fs.mkdir(skillRoot, { recursive: true });
+  await fs.writeFile(path.join(skillRoot, "SKILL.md"), "root", "utf8");
+  await fs.writeFile(path.join(skillRoot, "normalized.txt"), Buffer.concat([
+    Buffer.from([0xef, 0xbb, 0xbf]),
+    Buffer.from("alpha\r\nbeta\rgamma\n", "utf8")
+  ]));
+
+  const result = await runSkillTool({ workspacePath, repoRoot, skillId: "builtin/normalized", filePath: "normalized.txt" });
+  assert.equal(result.content, "alpha\nbeta\ngamma");
+  assert.equal(result.content.includes("\ufeff"), false);
+});
+
+test("skill V2 接受且只接受根读取 filePath 特例", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  const skillRoot = path.join(repoRoot, "skills", "tooling");
+  await fs.mkdir(skillRoot, { recursive: true });
+  await fs.writeFile(path.join(skillRoot, "SKILL.md"), "root", "utf8");
+
+  for (const skillPath of [undefined, "", " \t", "SKILL.md"]) {
+    const result = await runSkillTool({ workspacePath, repoRoot, skillId: "builtin/tooling", ...(skillPath === undefined ? {} : { filePath: skillPath }) });
+    assert.equal(result.filePath, "SKILL.md");
+  }
+  for (const skillPath of [" SKILL.md", "SKILL.md ", "./SKILL.md", "\n", "\u00a0"]) {
+    await assert.rejects(
+      () => runSkillTool({ workspacePath, repoRoot, skillId: "builtin/tooling", filePath: skillPath }),
+      { message: "invalid skill path" }
+    );
+  }
+});
+
+test("skill V2 production 入口不兼容旧 payload 字段", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  await assert.rejects(
+    () => runSkillTool({ workspacePath, repoRoot, skill: "builtin/tooling" } as unknown as Parameters<typeof runSkillTool>[0]),
+    { message: "skill is required" }
+  );
+});
+
+test("skill V2 使用固定 identifier 和 path 错误合同", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  const skillRoot = path.join(repoRoot, "skills", "tooling");
+  await fs.mkdir(path.join(skillRoot, "dir"), { recursive: true });
+  await fs.writeFile(path.join(skillRoot, "SKILL.md"), "root", "utf8");
+  await fs.writeFile(path.join(skillRoot, "binary.bin"), Buffer.from([0, 1, 2]));
+  await fs.mkdir(path.join(repoRoot, "skills", "missing-root"), { recursive: true });
+  await fs.mkdir(path.join(repoRoot, "skills", "nul-root"), { recursive: true });
+  await fs.writeFile(path.join(repoRoot, "skills", "nul-root", "SKILL.md"), Buffer.from([0x61, 0x00]));
+
+  await assert.rejects(() => runSkillTool({ workspacePath, repoRoot, skillId: "" }), { message: "skill is required" });
+  await assert.rejects(() => runSkillTool({ workspacePath, repoRoot, skillId: "builtin/tooling/extra" }), { message: "invalid skill identifier" });
+  await assert.rejects(() => runSkillTool({ workspacePath, repoRoot, skillId: "builtin/missing" }), { message: "skill not found" });
+  await assert.rejects(() => runSkillTool({ workspacePath, repoRoot, skillId: "builtin/missing-root" }), { message: "skill root is not readable" });
+  await assert.rejects(() => runSkillTool({ workspacePath, repoRoot, skillId: "builtin/nul-root" }), { message: "skill root is not readable" });
+  await assert.rejects(() => runSkillTool({ workspacePath, repoRoot, skillId: "builtin/tooling", filePath: "dir" }), { message: "skill path must reference a file" });
+  await assert.rejects(() => runSkillTool({ workspacePath, repoRoot, skillId: "builtin/tooling", filePath: "missing.txt" }), { message: "skill file not found" });
+  await assert.rejects(() => runSkillTool({ workspacePath, repoRoot, skillId: "builtin/tooling", filePath: "binary.bin" }), { message: "binary file is not supported" });
+});
+
+test("skill V2 根正文和文件列表均遵守容量与排序", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  const skillRoot = path.join(repoRoot, "skills", "tooling");
+  await fs.mkdir(skillRoot, { recursive: true });
+  await fs.writeFile(path.join(skillRoot, "SKILL.md"), "😀".repeat(30_000), "utf8");
+  await Promise.all(["z.txt", "A.txt", ".notes.md"].map((name) => fs.writeFile(path.join(skillRoot, name), "text", "utf8")));
+
+  const result = await runSkillTool({ workspacePath, repoRoot, skillId: "builtin/tooling" });
+
+  assert.equal(result.truncated, true);
+  assert.ok(Buffer.byteLength(result.content, "utf8") <= 50 * 1024);
+  assert.equal((result.content.match(/Root skill content truncated\./g) || []).length, 1);
+  assert.ok(result.content.indexOf(".notes.md") < result.content.indexOf("A.txt"));
+  assert.ok(result.content.indexOf("A.txt") < result.content.indexOf("z.txt"));
+});
+
+test("skill V2 支持 workspace 和 repo external roots", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  const workspaceSkills = path.join(workspacePath, "workspace-skills");
+  const repoSkills = path.join(workspacePath, "repo-skills");
+  await fs.mkdir(path.join(workspaceSkills, "deploy"), { recursive: true });
+  await fs.mkdir(path.join(repoSkills, "review"), { recursive: true });
+  await fs.writeFile(path.join(workspaceSkills, "deploy", "SKILL.md"), "workspace root", "utf8");
+  await fs.writeFile(path.join(repoSkills, "review", "SKILL.md"), "repo root", "utf8");
+  const externalSkillRoots = [
+    { sourceType: "workspace" as const, rootDir: "workspace-skills", rootPath: workspaceSkills },
+    { sourceType: "repo" as const, repoId: "repo_a", rootDir: "repo-skills", rootPath: repoSkills }
+  ];
+
+  assert.equal((await runSkillTool({ workspacePath, repoRoot, skillId: "workspace/workspace-skills/deploy", externalSkillRoots })).content.startsWith("workspace root"), true);
+  assert.equal((await runSkillTool({ workspacePath, repoRoot, skillId: "repo/repo_a/repo-skills/review", externalSkillRoots })).content.startsWith("repo root"), true);
+});
+
+test("skill V2 排除 symlink 文件并拒绝其直接读取", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  const skillRoot = path.join(repoRoot, "skills", "tooling");
+  const outside = path.join(repoRoot, "outside.txt");
+  await fs.mkdir(skillRoot, { recursive: true });
+  await fs.writeFile(path.join(skillRoot, "SKILL.md"), "root", "utf8");
+  await fs.writeFile(outside, "outside", "utf8");
+  await fs.symlink(outside, path.join(skillRoot, "link.txt"));
+
+  const root = await runSkillTool({ workspacePath, repoRoot, skillId: "builtin/tooling" });
+  assert.equal(root.content.includes("link.txt"), false);
+  await assert.rejects(
+    () => runSkillTool({ workspacePath, repoRoot, skillId: "builtin/tooling", filePath: "link.txt" }),
+    { message: "skill path is not a readable file" }
+  );
+});
+
+test("skill V2 标记辅助文件长行截断和 500 项文件列表截断", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  const skillRoot = path.join(repoRoot, "skills", "tooling");
+  await fs.mkdir(skillRoot, { recursive: true });
+  await fs.writeFile(path.join(skillRoot, "SKILL.md"), "root", "utf8");
+  await fs.writeFile(path.join(skillRoot, "long.txt"), "x".repeat(3000), "utf8");
+  await Promise.all(Array.from({ length: 501 }, (_, index) => fs.writeFile(path.join(skillRoot, `file-${String(index).padStart(3, "0")}.txt`), "text", "utf8")));
+
+  const long = await runSkillTool({ workspacePath, repoRoot, skillId: "builtin/tooling", filePath: "long.txt" });
+  assert.equal(long.truncated, true);
+  assert.match(long.content, /line truncated to 2000 chars/);
+
+  const root = await runSkillTool({ workspacePath, repoRoot, skillId: "builtin/tooling" });
+  assert.equal(root.truncated, true);
+  assert.match(root.content, /file-000\.txt/);
+  assert.equal(root.content.includes("file-500.txt"), false);
+  assert.match(root.content, /Skill file list truncated; additional files may be accessed if their paths are known\./);
+});
+
+test("skill V2 后代枚举失败时跳过故障项、继续兄弟项且不泄露路径", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  const skillRoot = path.join(repoRoot, "skills", "enumeration");
+  await fs.mkdir(path.join(skillRoot, "gone"), { recursive: true });
+  await fs.writeFile(path.join(skillRoot, "SKILL.md"), "root", "utf8");
+  await fs.writeFile(path.join(skillRoot, "gone", "hidden.txt"), "hidden", "utf8");
+  await fs.writeFile(path.join(skillRoot, "sibling.txt"), "visible", "utf8");
+  const diagnostics: Array<{ source: string; reason: string }> = [];
+
+  const root = await __testing.runSkillTool({ workspacePath, repoRoot, skillId: "builtin/enumeration" }, {
+    async beforeEnumeratingSkillEntry({ relativePath, kind }) {
+      if (relativePath === "gone" && kind === "directory") {
+        await fs.rm(path.join(skillRoot, "gone"), { recursive: true, force: true });
+      }
+    },
+    onSkillDiagnostic: (diagnostic) => { diagnostics.push(diagnostic); }
+  });
+
+  assert.match(root.content, /sibling\.txt/);
+  assert.equal(root.content.includes("gone"), false);
+  assert.equal(root.content.includes(skillRoot), false);
+  assert.ok(diagnostics.some((diagnostic) => diagnostic.reason === "unreadable_directory"));
+  assert.equal(JSON.stringify(diagnostics).includes(skillRoot), false);
+});
+
+test("skill V2 后代文件在枚举后消失时跳过该文件、继续兄弟项且不泄露路径", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  const skillRoot = path.join(repoRoot, "skills", "enumeration-file");
+  await fs.mkdir(skillRoot, { recursive: true });
+  await fs.writeFile(path.join(skillRoot, "SKILL.md"), "root", "utf8");
+  await fs.writeFile(path.join(skillRoot, "gone.txt"), "hidden", "utf8");
+  await fs.writeFile(path.join(skillRoot, "sibling.txt"), "visible", "utf8");
+  const diagnostics: Array<{ source: string; reason: string }> = [];
+
+  const root = await __testing.runSkillTool({ workspacePath, repoRoot, skillId: "builtin/enumeration-file" }, {
+    async beforeEnumeratingSkillEntry({ relativePath, kind }) {
+      if (relativePath === "gone.txt" && kind === "file") await fs.rm(path.join(skillRoot, "gone.txt"));
+    },
+    onSkillDiagnostic: (diagnostic) => { diagnostics.push(diagnostic); }
+  });
+
+  assert.match(root.content, /sibling\.txt/);
+  assert.equal(root.content.includes("gone.txt"), false);
+  assert.equal(root.content.includes(skillRoot), false);
+  assert.ok(diagnostics.some((diagnostic) => diagnostic.reason === "unreadable_file"));
+  assert.equal(JSON.stringify(diagnostics).includes(skillRoot), false);
+});
+
+test("skill V2 非法 callable identifier 无法命中 Worker mapping", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  const skillsRoot = path.join(repoRoot, "skills");
+  await fs.mkdir(path.join(skillsRoot, " invalid"), { recursive: true });
+  await fs.writeFile(path.join(skillsRoot, " invalid", "SKILL.md"), "root", "utf8");
 
   await assert.rejects(
-    () => runSkillTool({ workspacePath, repoRoot, id: "bad-id" }),
-    /skill.id must start with builtin\/ or workspace\/ or repo\//
+    () => runSkillTool({ workspacePath, repoRoot, skillId: "builtin/ invalid" }),
+    { message: "invalid skill identifier" }
   );
 });
 
-test("skill 支持 repo 命名空间目录与文件读取", async () => {
+test("skill V2 根读取通过同一安全 fd 拒绝根文件替换竞态", async () => {
   const workspacePath = await createWorkspace();
   const repoRoot = await createWorkspace();
-  const repoSkillRoot = path.join(workspacePath, "repo-a", "ai-skills");
-  await fs.mkdir(path.join(repoSkillRoot, "child"), { recursive: true });
-  await fs.writeFile(
-    path.join(repoSkillRoot, "SKILL.md"),
-    "---\nname: Repo Skill\ndescription: Repo desc\n---\n\nrepo body",
-    "utf8"
-  );
-  await fs.writeFile(path.join(repoSkillRoot, "child", "SKILL.md"), "---\nname: Child\n---\n", "utf8");
-  await fs.writeFile(path.join(repoSkillRoot, "guide.txt"), "repo guide", "utf8");
+  const skillRoot = path.join(repoRoot, "skills", "tooling");
+  await fs.mkdir(skillRoot, { recursive: true });
+  await fs.writeFile(path.join(skillRoot, "SKILL.md"), "safe root", "utf8");
 
-  const rootResult = await runSkillTool({
-    workspacePath,
-    repoRoot,
-    id: "repo/repo-a/ai-skills",
-    externalSkillRoots: [{ sourceType: "repo", repoId: "repo-a", rootDir: "ai-skills", rootPath: repoSkillRoot }]
-  });
-  assert.equal(rootResult.type, "skill");
-  assert.equal(rootResult.id, "repo/repo-a/ai-skills");
-  assert.equal(rootResult.name, "Repo Skill");
-  assert.deepEqual(
-    rootResult.children.map((it) => it.id),
-    ["repo/repo-a/ai-skills/child", "repo/repo-a/ai-skills/guide.txt"]
+  await assert.rejects(
+    () => __testing.runSkillTool({ workspacePath, repoRoot, skillId: "builtin/tooling" }, {
+      async beforeOpenRootSkillFile({ rootSkillPath }) {
+        await fs.rename(rootSkillPath, `${rootSkillPath}.old`);
+        await fs.writeFile(rootSkillPath, "replaced root", "utf8");
+      }
+    }),
+    { message: "skill root is not readable" }
   );
-
-  const fileResult = await runSkillTool({
-    workspacePath,
-    repoRoot,
-    id: "repo/repo-a/ai-skills/guide.txt",
-    externalSkillRoots: [{ sourceType: "repo", repoId: "repo-a", rootDir: "ai-skills", rootPath: repoSkillRoot }]
-  });
-  assert.equal(fileResult.type, "file");
-  assert.equal(fileResult.content, "repo guide");
 });
 
-test("skill 在 repo 映射缺失时返回脱敏错误", async () => {
+test("skill V2 根目录在打开前删除时精确返回 skill not found", async () => {
   const workspacePath = await createWorkspace();
   const repoRoot = await createWorkspace();
-  await assert.rejects(() => runSkillTool({ workspacePath, repoRoot, id: "repo/repo-a/ai-skills" }), /skill node not found/);
+  const skillRoot = path.join(repoRoot, "skills", "tooling");
+  await fs.mkdir(skillRoot, { recursive: true });
+  await fs.writeFile(path.join(skillRoot, "SKILL.md"), "safe root", "utf8");
+
+  await assert.rejects(
+    () => __testing.runSkillTool({ workspacePath, repoRoot, skillId: "builtin/tooling" }, {
+      beforeOpenRootSkillFile: () => fs.rm(skillRoot, { recursive: true, force: true })
+    }),
+    { message: "skill not found" }
+  );
+});
+
+test("skill V2 根目录在打开后删除时精确返回 skill not found", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  const skillRoot = path.join(repoRoot, "skills", "tooling");
+  await fs.mkdir(skillRoot, { recursive: true });
+  await fs.writeFile(path.join(skillRoot, "SKILL.md"), "safe root", "utf8");
+
+  await assert.rejects(
+    () => __testing.runSkillTool({ workspacePath, repoRoot, skillId: "builtin/tooling" }, {
+      beforeFinalRootSkillFileRevalidation: () => fs.rm(skillRoot, { recursive: true, force: true })
+    }),
+    { message: "skill not found" }
+  );
+});
+
+test("skill V2 根文件在打开后、最终重检前删除时返回 skill root is not readable", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  const skillRoot = path.join(repoRoot, "skills", "tooling");
+  const rootSkillPath = path.join(skillRoot, "SKILL.md");
+  await fs.mkdir(skillRoot, { recursive: true });
+  await fs.writeFile(rootSkillPath, "safe root", "utf8");
+
+  await assert.rejects(
+    () => __testing.runSkillTool({ workspacePath, repoRoot, skillId: "builtin/tooling" }, {
+      beforeFinalRootSkillFileRevalidation: () => fs.rm(rootSkillPath)
+    }),
+    (err: unknown) => {
+      assert.equal(err instanceof Error ? err.message : String(err), "skill root is not readable");
+      assert.equal(err instanceof Error ? err.message.includes(skillRoot) : false, false);
+      return true;
+    }
+  );
+});
+
+test("skill V2 根文件在打开后、最终重检前替换或变为 symlink 时返回 skill root is not readable", async () => {
+  for (const mutation of ["replace", "symlink"] as const) {
+    const workspacePath = await createWorkspace();
+    const repoRoot = await createWorkspace();
+    const skillRoot = path.join(repoRoot, "skills", `tooling-${mutation}`);
+    const rootSkillPath = path.join(skillRoot, "SKILL.md");
+    const outsidePath = path.join(repoRoot, `${mutation}-outside.md`);
+    await fs.mkdir(skillRoot, { recursive: true });
+    await fs.writeFile(rootSkillPath, "safe root", "utf8");
+    await fs.writeFile(outsidePath, "outside", "utf8");
+
+    await assert.rejects(
+      () => __testing.runSkillTool({ workspacePath, repoRoot, skillId: `builtin/tooling-${mutation}` }, {
+        async beforeFinalRootSkillFileRevalidation() {
+          await fs.rename(rootSkillPath, `${rootSkillPath}.old`);
+          if (mutation === "replace") {
+            await fs.writeFile(rootSkillPath, "replacement", "utf8");
+          } else {
+            await fs.symlink(outsidePath, rootSkillPath);
+          }
+        }
+      }),
+      (err: unknown) => {
+        assert.equal(err instanceof Error ? err.message : String(err), "skill root is not readable");
+        assert.equal(err instanceof Error ? err.message.includes(skillRoot) : false, false);
+        return true;
+      }
+    );
+  }
+});
+
+test("skill V2 根目录在初始 lstat 后 realpath 前、以及 root lstat/open 前消失时返回 skill not found", async () => {
+  for (const phase of ["initial", "before-root-lstat"] as const) {
+    const workspacePath = await createWorkspace();
+    const repoRoot = await createWorkspace();
+    const skillRoot = path.join(repoRoot, "skills", `race-${phase}`);
+    await fs.mkdir(skillRoot, { recursive: true });
+    await fs.writeFile(path.join(skillRoot, "SKILL.md"), "safe root", "utf8");
+
+    await assert.rejects(
+      () => __testing.runSkillTool({ workspacePath, repoRoot, skillId: `builtin/race-${phase}` }, phase === "initial"
+        ? { afterInitialRootDirectoryLstat: () => fs.rm(skillRoot, { recursive: true, force: true }) }
+        : { afterRootDirectoryRevalidationBeforeRootFileLstat: () => fs.rm(skillRoot, { recursive: true, force: true }) }),
+      { message: "skill not found" }
+    );
+  }
+});
+
+test("skill V2 根目录在 root open 后、after-lstat 前消失时返回 skill not found", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  const skillRoot = path.join(repoRoot, "skills", "after-open-race");
+  await fs.mkdir(skillRoot, { recursive: true });
+  await fs.writeFile(path.join(skillRoot, "SKILL.md"), "safe root", "utf8");
+
+  await assert.rejects(
+    () => __testing.runSkillTool({ workspacePath, repoRoot, skillId: "builtin/after-open-race" }, {
+      afterOpenRootSkillFileBeforeAfterLstat: () => fs.rm(skillRoot, { recursive: true, force: true })
+    }),
+    { message: "skill not found" }
+  );
+});
+
+test("skill V2 用 post-open fd size 分类，不信任打开前 size", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  const skillRoot = path.join(repoRoot, "skills", "tooling");
+  await fs.mkdir(skillRoot, { recursive: true });
+  await fs.writeFile(path.join(skillRoot, "SKILL.md"), "root", "utf8");
+  await fs.writeFile(path.join(skillRoot, "mutable.txt"), "x", "utf8");
+
+  const result = await __testing.runSkillTool({
+    workspacePath,
+    repoRoot,
+    skillId: "builtin/tooling",
+    filePath: "mutable.txt"
+  }, {
+    async afterOpenSkillFileBeforeStat({ targetPath }) {
+      await fs.truncate(targetPath, 0);
+      await fs.writeFile(targetPath, "updated via same inode", "utf8");
+    }
+  });
+
+  assert.equal(result.content, "updated via same inode");
+  assert.equal(result.truncated, false);
+});
+
+test("skill V2 根读取不设 source cap，能在 1 MiB 后剥离 frontmatter", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  const skillRoot = path.join(repoRoot, "skills", "late-frontmatter");
+  await fs.mkdir(skillRoot, { recursive: true });
+  const padding = "comment: x\n".repeat(110_000);
+  await fs.writeFile(path.join(skillRoot, "SKILL.md"), `---\n${padding}name: Late\n---\nbody after late boundary`, "utf8");
+
+  const result = await runSkillTool({ workspacePath, repoRoot, skillId: "builtin/late-frontmatter" });
+
+  assert.equal(result.content.startsWith("body after late boundary"), true);
+  assert.equal(result.content.includes("comment: x"), false);
+  assert.equal(result.truncated, false);
+});
+
+test("skill V2 在 section 预算无法容纳首条路径时使用零前缀", async () => {
+  const result = __testing.buildSkillFilesSection({
+    body: "",
+    paths: ["a".repeat(10_300)],
+    candidateCount: 1
+  });
+
+  assert.equal(result.content, "## Skill files\n\nSkill file list truncated; additional files may be accessed if their paths are known.");
+  assert.equal(result.truncated, true);
+});
+
+test("skill V2 final 50KiB 防御分支只缩减 section 并保持有效输出", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  const skillRoot = path.join(repoRoot, "skills", "fallback");
+  const body = "b".repeat(39 * 1024);
+  const paths = Array.from({ length: 500 }, (_, index) => `file-${String(index).padStart(3, "0")}-${"x".repeat(40)}.txt`);
+  await fs.mkdir(skillRoot, { recursive: true });
+  await fs.writeFile(path.join(skillRoot, "SKILL.md"), body, "utf8");
+  await Promise.all(paths.map((filePath) => fs.writeFile(path.join(skillRoot, filePath), "text", "utf8")));
+
+  const initialSection = __testing.buildSkillFilesSection({
+    body,
+    paths,
+    candidateCount: paths.length,
+    budget: 12 * 1024
+  });
+  let fallbackCount = 0;
+  const result = await __testing.runSkillTool({
+    workspacePath,
+    repoRoot,
+    skillId: "builtin/fallback"
+  }, {
+    rootFilesSectionBudgetOverride: 12 * 1024,
+    onRootContentInvariantFallback: () => { fallbackCount += 1; }
+  });
+  const section = result.content.slice(body.length);
+  const listedPaths = section.match(/```text\n([\s\S]*?)\n```/)?.[1]?.split("\n") || [];
+
+  assert.equal(fallbackCount, 1, "test seam should prove the defensive branch ran");
+  assert.equal(result.content.slice(0, body.length), body, "fallback must preserve root body byte-for-byte");
+  assert.ok(Buffer.byteLength(section, "utf8") < Buffer.byteLength(initialSection.content, "utf8"), "fallback must reduce only the section");
+  assert.ok(Buffer.byteLength(result.content, "utf8") <= 50 * 1024);
+  assert.equal(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(result.content, "utf8")), result.content);
+  assert.ok(section.includes("```text\n") && section.includes("\n```"), "section fence must be closed");
+  assert.ok(listedPaths.length > 0 && listedPaths.every((filePath) => paths.includes(filePath)), "section must contain complete paths only");
+  assert.equal(result.truncated, true);
+});
+
+test("skill V2 501 bounded selection 独立于创建顺序并返回固定排序前缀", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  const skillRoot = path.join(repoRoot, "skills", "ordered");
+  await fs.mkdir(skillRoot, { recursive: true });
+  await fs.writeFile(path.join(skillRoot, "SKILL.md"), "root", "utf8");
+  const names = Array.from({ length: 520 }, (_, index) => `file-${String(index).padStart(3, "0")}.txt`).reverse();
+  for (const name of names) await fs.writeFile(path.join(skillRoot, name), "text", "utf8");
+
+  const result = await runSkillTool({ workspacePath, repoRoot, skillId: "builtin/ordered" });
+  const block = result.content.match(/```text\n([\s\S]*?)\n```/)?.[1]?.split("\n") || [];
+
+  assert.equal(block.length, 500);
+  assert.deepEqual(block, Array.from({ length: 500 }, (_, index) => `file-${String(index).padStart(3, "0")}.txt`));
+  assert.equal(result.truncated, true);
+});
+
+test("skill V2 拒绝 identifier/path 中的格式和分隔字符", async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  const skillRoot = path.join(repoRoot, "skills", "tooling");
+  await fs.mkdir(skillRoot, { recursive: true });
+  await fs.writeFile(path.join(skillRoot, "SKILL.md"), "root", "utf8");
+  await fs.writeFile(path.join(skillRoot, "plain.txt"), "text", "utf8");
+
+  for (const skillId of ["builtin/tool`ing", `builtin/tool${String.fromCodePoint(0x200b)}ing`, `builtin/tool${String.fromCodePoint(0x2028)}ing`, `builtin/${String.fromCharCode(0xd800)}`]) {
+    await assert.rejects(() => runSkillTool({ workspacePath, repoRoot, skillId }), { message: "invalid skill identifier" });
+  }
+  for (const skillPath of ["plain`.txt", `plain${String.fromCodePoint(0x200b)}.txt`, `plain${String.fromCodePoint(0x2028)}.txt`, `${String.fromCharCode(0xd800)}.txt`]) {
+    await assert.rejects(
+      () => runSkillTool({ workspacePath, repoRoot, skillId: "builtin/tooling", filePath: skillPath }),
+      { message: "invalid skill path" }
+    );
+  }
+});
+
+test("skill V2 POSIX 枚举跳过非 UTF-8 名称，但保留真实 U+FFFD 名称", { skip: process.platform === "win32" ? "POSIX buffer filename enumeration only" : false }, async () => {
+  const workspacePath = await createWorkspace();
+  const repoRoot = await createWorkspace();
+  const skillRoot = path.join(repoRoot, "skills", "filenames");
+  await fs.mkdir(skillRoot, { recursive: true });
+  await fs.writeFile(path.join(skillRoot, "SKILL.md"), "root", "utf8");
+  await fs.writeFile(path.join(skillRoot, "real-�.txt"), "replacement is valid", "utf8");
+  const invalidName = Buffer.from([0x69, 0x6e, 0x76, 0x61, 0x6c, 0x69, 0x64, 0x2d, 0xff, 0x2e, 0x74, 0x78, 0x74]);
+  fsSync.writeFileSync(Buffer.concat([Buffer.from(`${skillRoot}${path.sep}`), invalidName]), "bad");
+  const diagnostics: Array<{ source: string; reason: string }> = [];
+
+  const root = await __testing.runSkillTool({ workspacePath, repoRoot, skillId: "builtin/filenames" }, {
+    onSkillDiagnostic: (diagnostic) => { diagnostics.push(diagnostic); }
+  });
+  assert.match(root.content, /real-�\.txt/);
+  assert.equal(root.content.includes("invalid-�.txt"), false);
+  assert.ok(diagnostics.some((diagnostic) => diagnostic.reason === "non_utf8_filename"));
+  const serializedDiagnostics = JSON.stringify(diagnostics);
+  assert.equal(serializedDiagnostics.includes(skillRoot), false);
+  assert.equal(serializedDiagnostics.includes(invalidName.toString("hex")), false);
+  assert.equal(serializedDiagnostics.includes("invalid-�.txt"), false);
+  const file = await runSkillTool({ workspacePath, repoRoot, skillId: "builtin/filenames", filePath: "real-�.txt" });
+  assert.equal(file.content, "replacement is valid");
 });

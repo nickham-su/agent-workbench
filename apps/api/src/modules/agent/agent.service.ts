@@ -25,6 +25,7 @@ import type {
   AgentRecentSessionsResponse,
   AgentRecentWorkspacesResponse,
 } from "@agent-workbench/shared";
+import { isValidSkillPathSegment } from "@agent-workbench/shared";
 import { getPromptText, renderPromptTemplateFile } from "@agent-workbench/shared/prompts";
 import { HttpError } from "../../app/errors.js";
 
@@ -46,12 +47,14 @@ import {
   createAgentSession,
   createRunRecord,
   findClientRequestDedup,
+  findSubtaskRunByParentTool,
   getAgentSession,
   getContextItemById,
   getLatestCompletedAssistantTextByRunId,
   getLatestRunUiLocaleBySession,
   getLatestRunUiLocaleGlobal,
   getLatestTerminalAssistantTextByRunId,
+  getLatestRunRecordBySession,
   getLatestTerminalRunRecord,
   getLatestSessionItemId,
   getRunRecord,
@@ -112,6 +115,16 @@ type AgentCancelCascadeResult = {
 
 function conflictToHttpError(err: AgentConflictError): HttpError {
   return new HttpError(409, "session head conflict", `conflict_head:${String(err.currentHeadItemId ?? "null")}`);
+}
+
+export function isSubtaskParentToolUniqueConstraintError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const candidate = err as { code?: unknown; message?: unknown };
+  // SQLite reports the indexed columns rather than the partial index name.
+  return candidate.code === "SQLITE_CONSTRAINT_UNIQUE"
+    && typeof candidate.message === "string"
+    && candidate.message.includes("agent_run.parent_run_id")
+    && candidate.message.includes("agent_run.parent_tool_item_id");
 }
 
 function toolArgsSchema(toolName: AgentContextToolName) {
@@ -256,10 +269,17 @@ function toolArgsSchema(toolName: AgentContextToolName) {
   if (toolName === "skill") {
     return {
       type: "object",
-      required: ["id"],
+      required: ["skillId"],
       additionalProperties: false,
       properties: {
-        id: { type: "string", minLength: 1 }
+        skillId: {
+          type: "string",
+          description: "Stable logical skill identifier shown in the available skills list, such as builtin/skill-authoring."
+        },
+        filePath: {
+          type: "string",
+          description: "Optional file path relative to the skill root. Omit filePath, pass an empty string or a string containing only spaces/tabs, or pass exactly SKILL.md to read root instructions and available file paths."
+        }
       }
     };
   }
@@ -322,6 +342,17 @@ function toolArgsSchema(toolName: AgentContextToolName) {
             }
           ]
         }
+      }
+    };
+  }
+  if (toolName === "write") {
+    return {
+      type: "object",
+      required: ["filePath", "content"],
+      additionalProperties: false,
+      properties: {
+        filePath: { type: "string", minLength: 1 },
+        content: { type: "string" }
       }
     };
   }
@@ -411,12 +442,11 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
   }
   if (toolName === "skill") {
     return [
-      "Load skill content by logical id (no filesystem paths).",
-      "Input: id (string), using builtin/... or workspace/... or repo/... prefixes.",
-      "If id points to a skill node (directory containing SKILL.md), it returns the skill content and children.",
-      "When reading a root skill node, children are recursively expanded to include all readable descendant files (excluding SKILL.md) and descendant skill nodes.",
-      "When reading a non-root skill node, children include sibling files (excluding SKILL.md) and direct child skill nodes.",
-      "If id points to a file, it returns file content only."
+      "Load a top-level skill and its text files by stable logical identifier (no filesystem paths).",
+      "Input: skillId (string) is one of the identifiers in the available skills list, using builtin/... or workspace/... or repo/... prefixes.",
+      "filePath is optional and is relative to the selected skill root.",
+      "Omit filePath, pass an empty string or a string containing only spaces/tabs, or pass exactly SKILL.md to read root instructions and a flat list of available file paths.",
+      "Any other valid filePath reads that text file with the Worker text reader's normalized content."
     ].join(" ");
   }
   if (toolName === "visual_analyze") {
@@ -561,6 +591,19 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
     return "Read the most recent lines from the archive log and return plain-text lines sorted from oldest to newest, each prefixed with pos. Use beforePos to restrict the read to older content only.";
   }
   if (toolName === "subtask") return options?.subtaskDescription || "Execute a task in a subtask session.";
+  if (toolName === "write") {
+    return [
+      "Write and fully overwrite a workspace-relative file.",
+      "",
+      "Arguments:",
+      "- filePath: Required workspace-relative file path.",
+      "- content: Required complete file content as a string.",
+      "",
+      "The content field must contain the complete intended file text.",
+      "contentBytes, contentPreview, and contentTruncated are not valid write arguments.",
+      "For localized changes to an existing file, prefer apply_patch."
+    ].join("\n");
+  }
   if (toolName.startsWith("mcp_")) return `Call MCP tool ${toolName}`;
   return "Write and fully overwrite a file inside the current directory. Use this as a deterministic fallback when you need to rewrite the whole file or when patch matching is unstable.";
 }
@@ -640,8 +683,6 @@ type WriteUiArtifactV1 = {
   before: WriteUiArtifactSide;
   after: WriteUiArtifactSide;
 };
-
-const WRITE_ARGS_PREVIEW_MAX_CHARS = 280;
 
 function splitApplyPatchResult(raw: unknown): {
   slim: ApplyPatchSlimResult;
@@ -772,42 +813,6 @@ function splitWriteResult(raw: unknown): {
   };
 }
 
-function toWriteSlimArgs(raw: unknown) {
-  const src = toRecord(raw) || {};
-  const filePath = typeof src.filePath === "string" ? src.filePath : "";
-  const content = typeof src.content === "string" ? src.content : "";
-  if (!content && !Object.prototype.hasOwnProperty.call(src, "content")) {
-    const contentBytes = toNonNegativeInt(src.contentBytes ?? 0);
-    const contentPreview = typeof src.contentPreview === "string" ? src.contentPreview : "";
-    const contentTruncated = src.contentTruncated === true;
-    return {
-      ...(filePath ? { filePath } : {}),
-      contentBytes,
-      ...(contentPreview ? { contentPreview } : {}),
-      ...(contentTruncated ? { contentTruncated: true } : {})
-    };
-  }
-
-  const contentBytes = Buffer.byteLength(content, "utf8");
-  const contentPreview = content.slice(0, WRITE_ARGS_PREVIEW_MAX_CHARS);
-  const contentTruncated = contentPreview.length < content.length;
-
-  return {
-    ...(filePath ? { filePath } : {}),
-    contentBytes,
-    ...(contentPreview ? { contentPreview } : {}),
-    ...(contentTruncated ? { contentTruncated: true } : {})
-  };
-}
-
-function toTerminalWriteOutput(output: AgentContextItemRecord["output"]) {
-  if (!output || output.type !== "tool" || output.toolName !== "write") return output;
-  return {
-    ...output,
-    args: toWriteSlimArgs(output.args)
-  };
-}
-
 function buildToolText(params: {
   toolName: string;
   status: "running" | "completed" | "failed" | "cancelled";
@@ -864,10 +869,8 @@ function toTerminalSubtaskCancelledOutput(output: AgentContextItemRecord["output
 
 function toTerminalCancelledOutput(output: AgentContextItemRecord["output"]) {
   // cancelSession: 只在终态收尾时做最小必要的输出规整。
-  // - write: 瘦身 args.content
   // - subtask: 明确 cancelled，并保留 subtask_session_id + 复用提示
-  const writeNormalized = toTerminalWriteOutput(output);
-  return toTerminalSubtaskCancelledOutput(writeNormalized);
+  return toTerminalSubtaskCancelledOutput(output);
 }
 
 async function ensureRealPathUnderRoot(rootAbs: string, targetAbs: string) {
@@ -1710,9 +1713,9 @@ function decodeUtf8Prefix(bytes: Buffer, maxBytes: number) {
 }
 
 type SkillSummaryItem = {
-  id: string;
+  skill: string;
   name: string;
-  description: string;
+  description?: string;
 };
 
 type RunPromptStatic = {
@@ -1741,10 +1744,16 @@ async function scanTopLevelSkillSummaries(params: {
   for (const item of readableItems) {
     const parsed = parseSkillFrontmatter(item.text);
     const base = params.idBasePath ? `${params.idBasePath}/` : "";
+    const identifierSegments = [params.idPrefix, ...base.split("/").filter(Boolean), item.entryName];
+    if (!identifierSegments.every(isValidSkillPathSegment)) {
+      params.logger.warn({ skillNamespace: params.idPrefix }, "skip top-level skill with non-callable identifier");
+      continue;
+    }
+    const description = parsed.description.trim();
     items.push({
-      id: `${params.idPrefix}/${base}${item.entryName}`,
-      name: parsed.name || item.entryName,
-      description: parsed.description || ""
+      skill: `${params.idPrefix}/${base}${item.entryName}`,
+      name: parsed.name.trim() || item.entryName,
+      ...(description ? { description } : {})
     });
   }
   return items;
@@ -1755,14 +1764,14 @@ function buildSkillsInstructionSection(input: {
   external: SkillSummaryItem[];
 }) {
   const lines: string[] = [];
-  lines.push("Use the builtin skill tool to load details on demand by id.");
-  lines.push('If the user mentions anything related to skills, be sure to use the "skill" tool, read the corresponding entry, and then proceed with the action.');
+  lines.push("Use the builtin skill tool to load details on demand by stable logical skill identifier.");
+  lines.push('If the user mentions anything related to skills, use the "skill" tool with the corresponding skill entry, then proceed with the action. First read the root: omit filePath, pass an empty string or spaces/tabs only, or pass exactly SKILL.md. Root content includes a flat (not tree-shaped) Skill files list; copy one complete path line verbatim into filePath to read that auxiliary text file.');
   lines.push("");
   lines.push("builtin skills:");
   if (input.builtin.length === 0) {
     lines.push("- (none)");
   } else {
-    for (const item of input.builtin) lines.push(`- id: ${item.id}; name: ${item.name}; description: ${item.description}`);
+    for (const item of input.builtin) lines.push(`- skillId: ${item.skill}; name: ${item.name}${item.description ? `; description: ${item.description}` : ""}`);
   }
   lines.push("");
   lines.push("external skills:");
@@ -1770,7 +1779,7 @@ function buildSkillsInstructionSection(input: {
     lines.push("- (none)");
   } else {
     for (const item of input.external) {
-      lines.push(`- id: ${item.id}; name: ${item.name}; description: ${item.description}`);
+      lines.push(`- skillId: ${item.skill}; name: ${item.name}${item.description ? `; description: ${item.description}` : ""}`);
     }
   }
   return lines.join("\n");
@@ -2225,6 +2234,7 @@ export class AgentService {
           createdAt
         });
 
+        const lineage = this.resolveRunLineageForSession(session);
         createRunRecord(this.ctx.db, {
           runId,
           workspaceId: session.workspaceId,
@@ -2234,6 +2244,9 @@ export class AgentService {
           providerId: profile.provider.id,
           modelId: profile.model.id,
           uiLocale,
+          subtaskDepth: lineage.subtaskDepth,
+          parentRunId: lineage.parentRunId,
+          parentToolItemId: lineage.parentToolItemId,
           status: "running",
           createdAt
         });
@@ -2400,6 +2413,7 @@ export class AgentService {
       const uiLocale = normalizeAgentUiLocale(params.body.uiLocale);
 
       const tx = this.ctx.db.transaction(() => {
+        const lineage = this.resolveRunLineageForSession(session);
         createRunRecord(this.ctx.db, {
           runId,
           workspaceId: session.workspaceId,
@@ -2409,6 +2423,9 @@ export class AgentService {
           providerId: profile.provider.id,
           modelId: profile.model.id,
           uiLocale,
+          subtaskDepth: lineage.subtaskDepth,
+          parentRunId: null,
+          parentToolItemId: null,
           status: "running",
           createdAt
         });
@@ -3060,11 +3077,6 @@ export class AgentService {
           result: slim
         } as any;
       }
-
-      nextOutput = {
-        ...(nextOutput as any),
-        args: toWriteSlimArgs(tool.args)
-      } as any;
     }
 
     const updatedAt = params.updatedAt ?? nowMs();
@@ -3267,6 +3279,74 @@ export class AgentService {
     };
   }
 
+  /**
+   * Resolves lineage for a newly-created ordinary run.
+   * The most recent actual run is preferred; only a first run of a forked session
+   * consults the original source item. Unknown legacy lineage stays NULL.
+   */
+  private resolveRunLineageForSession(session: AgentSessionRecord) {
+    const latestRun = getLatestRunRecordBySession(this.ctx.db, {
+      workspaceId: session.workspaceId,
+      sessionId: session.id
+    });
+    if (latestRun) {
+      return {
+        subtaskDepth: latestRun.subtaskDepth,
+        parentRunId: null,
+        parentToolItemId: null
+      };
+    }
+
+    if (session.forkedFromSessionId == null || session.forkedFromItemId == null) {
+      return {
+        subtaskDepth: 0,
+        parentRunId: null,
+        parentToolItemId: null
+      };
+    }
+
+    const sourceItem = getTranscriptItemById(
+      this.ctx.db,
+      session.workspaceId,
+      session.forkedFromSessionId,
+      session.forkedFromItemId
+    );
+    if (sourceItem?.runId == null) {
+      return {
+        subtaskDepth: null,
+        parentRunId: null,
+        parentToolItemId: null
+      };
+    }
+
+    const sourceRun = getRunRecord(this.ctx.db, sourceItem.runId);
+    if (!sourceRun || sourceRun.workspaceId !== session.workspaceId) {
+      return {
+        subtaskDepth: null,
+        parentRunId: null,
+        parentToolItemId: null
+      };
+    }
+    return {
+      subtaskDepth: sourceRun.subtaskDepth,
+      parentRunId: sourceRun.runId,
+      parentToolItemId: null
+    };
+  }
+
+  private toReusedSubtaskStartResponse(existingRun: ReturnType<typeof findSubtaskRunByParentTool>, workspacePath: string) {
+    if (!existingRun) throw new Error("existing subtask run is required");
+    const agent = getAgentSettings(this.ctx).agents.find((item) => item.id === existingRun.agentId);
+    return {
+      sessionId: existingRun.sessionId,
+      runId: existingRun.runId,
+      workspacePath,
+      // A historical/removed agent must not make an otherwise idempotent retry fail.
+      agentName: agent?.name || existingRun.agentId,
+      reused: true
+    };
+  }
+
   getSubtaskPreforkPlanFromWorker(params: {
     workspaceId: string;
     parentSessionId: string;
@@ -3401,6 +3481,32 @@ export class AgentService {
           "AGENT_SUBTASK_PREFORK_META_MISMATCH"
         );
       }
+    }
+
+    const existingChildRun = findSubtaskRunByParentTool(this.ctx.db, {
+      parentRunId: parentRun.runId,
+      parentToolItemId: anchor.id
+    });
+    if (existingChildRun) {
+      if (params.session.mode === "existing" && existingChildRun.sessionId !== String(params.session.sessionId || "").trim()) {
+        throw new HttpError(
+          409,
+          "existing subtask session does not match the previously created child run",
+          "AGENT_SUBTASK_EXISTING_SESSION_MISMATCH"
+        );
+      }
+      const workspace = getWorkspace(this.ctx.db, params.workspaceId);
+      if (!workspace) throw new HttpError(404, "workspace not found");
+      return this.toReusedSubtaskStartResponse(existingChildRun, workspace.path);
+    }
+
+    const runtime = getAgentRuntimeSettings(this.ctx);
+    if (parentRun.subtaskDepth == null) {
+      throw new HttpError(409, "subtask depth cannot be determined for current parent run", "AGENT_SUBTASK_DEPTH_UNKNOWN");
+    }
+    const childDepth = parentRun.subtaskDepth + 1;
+    if (childDepth > runtime.maxSubtaskDepth) {
+      throw new HttpError(409, "subtask depth exceeds configured maximum", "AGENT_SUBTASK_MAX_DEPTH_EXCEEDED");
     }
 
     const requestedSessionId = String(params.session.sessionId || "").trim();
@@ -3552,12 +3658,15 @@ export class AgentService {
         sessionId: session.id,
         triggerItemId: item.id,
         agentId: profile.agent.id,
-        providerId: profile.provider.id,
-        uiLocale: parentUiLocale,
-        modelId: profile.model.id,
-        status: "running",
-        createdAt
-      });
+          providerId: profile.provider.id,
+          uiLocale: parentUiLocale,
+          modelId: profile.model.id,
+          subtaskDepth: childDepth,
+          parentRunId: parentRun.runId,
+          parentToolItemId: anchor.id,
+          status: "running",
+          createdAt
+        });
 
       updateRunState(this.ctx.db, {
         workspaceId: session.workspaceId,
@@ -3568,15 +3677,26 @@ export class AgentService {
         runNoticeText: "",
         updatedAt: createdAt,
         appliedItemId: item.id
+        });
       });
-    });
-    tx();
+    try {
+      tx();
+    } catch (err) {
+      if (!isSubtaskParentToolUniqueConstraintError(err)) throw err;
+      const existingAfterConflict = findSubtaskRunByParentTool(this.ctx.db, {
+        parentRunId: parentRun.runId,
+        parentToolItemId: anchor.id
+      });
+      if (!existingAfterConflict) throw err;
+      return this.toReusedSubtaskStartResponse(existingAfterConflict, workspace.path);
+    }
 
     return {
       sessionId: session.id,
       runId,
       workspacePath: workspace.path,
-      agentName: profile.agent.name
+      agentName: profile.agent.name,
+      reused: false
     };
   }
 
@@ -3692,6 +3812,7 @@ export class AgentService {
       provider: profile.provider,
       model: profile.model,
       vision: profile.vision,
+      compaction: profile.compaction,
       runtime
     };
   }
@@ -4214,6 +4335,25 @@ export class AgentService {
           toolItem.output.args && typeof toolItem.output.args === "object" && !Array.isArray(toolItem.output.args)
             ? (toolItem.output.args as Record<string, unknown>)
             : {};
+        const isWriteTool = toolItem.output.toolName === "write";
+        const hasCompleteWriteInput =
+          typeof toolInput.filePath === "string" &&
+          toolInput.filePath.trim().length > 0 &&
+          typeof toolInput.content === "string";
+        if (isWriteTool && !hasCompleteWriteInput) {
+          const filePath = typeof toolInput.filePath === "string" ? toolInput.filePath.trim() : "";
+          const resultText = (typeof toolItem.output.error === "string" && toolItem.output.error.trim()
+            ? toolItem.output.error
+            : resolveToolOutputText(toolItem.output).trim()) || `status=${toolItem.status}`;
+          assistantParts.push({
+            type: "text",
+            text: filePath
+              ? `[Historical write input unavailable: ${filePath}; status=${toolItem.status}; result=${resultText}]`
+              : `[Historical write input unavailable; status=${toolItem.status}; result=${resultText}]`
+          });
+          cursor += 1;
+          continue;
+        }
         const promptInput = projectToolCallInputForPrompt({
           toolName: toolItem.output.toolName,
           status: toolItem.status,
@@ -4434,7 +4574,7 @@ export class AgentService {
             });
             externalSkills.push(...scanned);
           }
-          externalSkills.sort((a, b) => a.id.localeCompare(b.id));
+          externalSkills.sort((a, b) => a.skill < b.skill ? -1 : a.skill > b.skill ? 1 : 0);
 
           const baselineToolNames = ["read", "todolist", "archive_search", "archive_read", "skill", "visual_analyze"] as const;
           const enabledToolNames: string[] = [];
@@ -4444,12 +4584,15 @@ export class AgentService {
             enabledToolNameSet.add(name);
             enabledToolNames.push(name);
           }
-          if (session.kind === "subtask") {
+          const runtime = getAgentRuntimeSettings(this.ctx);
+          const canExposeSubtask = run.subtaskDepth != null && run.subtaskDepth < runtime.maxSubtaskDepth;
+          if (!canExposeSubtask) {
             const filtered = enabledToolNames.filter((name) => name !== "subtask");
             enabledToolNames.length = 0;
             enabledToolNames.push(...filtered);
           }
 
+          // Tool visibility is computed once per run; later settings changes do not hot-update this run.
           const subtaskDescription = enabledToolNames.includes("subtask")
             ? buildSubtaskToolDescription(
                 listAvailableAgentsForSurface(this.ctx, "subtask").map((item) => ({

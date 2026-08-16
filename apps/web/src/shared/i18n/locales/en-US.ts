@@ -1064,6 +1064,10 @@ export default {
           label: "Auto-compaction threshold (%)",
           help: "Auto-compaction triggers when last response total tokens reach current model context window * threshold/100. Range: 50-99."
         },
+        maxSubtaskDepth: {
+          label: "Maximum subtask nesting depth",
+          help: "Limits the maximum nesting depth of the subtask call chain. An independent primary session's first run is depth 0; at 1, only a primary run can create a first-level subtask; range: 1-5. This limits nesting depth only, not sibling count, concurrency, or token usage."
+        },
         modelTotalTimeoutMs: {
           label: "Model total timeout (seconds)",
           help: "Total timeout for a single model request. When reached, the request is aborted and the run fails. Integer seconds only; 0 disables."
@@ -1081,13 +1085,19 @@ export default {
           placeholder: "Select a vision model (optional)",
           help: "Global default vision model used by visual_analyze; falls back to the current agent primary model when unset."
         },
+        compactionModel: {
+          label: "Default compaction model",
+          placeholder: "Select a default compaction model (optional)",
+          help: "Used to generate context-compaction summaries; when unset, the current agent model is used. If the candidate model lacks capacity or is not suitable, the current agent primary model is used instead."
+        },
         sessionTerminalSoundEnabled: {
           label: "Run completion sound",
           help: "Play a sound when a run completes. Applies to all sessions."
         }
       },
       errors: {
-        visionModelInvalid: "Invalid vision model selection. Please reselect."
+        visionModelInvalid: "Invalid vision model selection. Please reselect.",
+        compactionModelInvalid: "Invalid default compaction model selection. Please reselect."
       }
     },
 

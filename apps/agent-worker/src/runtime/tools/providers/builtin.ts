@@ -19,6 +19,17 @@ import { isBuiltinToolName, type BuiltinToolName } from "../types.js";
 
 const ENV_TIMEOUT_MS_MAX = 2_147_483_647;
 const COMPACTION_TIMEOUT_MS = 300_000;
+// Reused children are observed, never re-executed. Polling is bounded so a parent
+// tool call can finish without changing the still-running child.
+function subtaskReusedPollIntervalMs() {
+  const value = Number(process.env.AWB_SUBTASK_REUSED_POLL_INTERVAL_MS || 500);
+  return Number.isFinite(value) && value >= 1 ? Math.floor(value) : 500;
+}
+
+function subtaskReusedWaitTimeoutMs() {
+  const value = Number(process.env.AWB_SUBTASK_REUSED_WAIT_TIMEOUT_MS || COMPACTION_TIMEOUT_MS);
+  return Number.isFinite(value) && value >= 1 ? Math.floor(value) : COMPACTION_TIMEOUT_MS;
+}
 
 const VISUAL_MEDIA_TYPES = new Map<string, string>([
   [".png", "image/png"],
@@ -51,6 +62,22 @@ function toRecord(raw: unknown) {
   return raw as Record<string, unknown>;
 }
 
+async function sleepMsWithAbort(ms: number, signal: AbortSignal) {
+  if (signal.aborted) return false;
+  return await new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      resolve(false);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 function requireNonEmptyStringArg(raw: unknown, fieldName: string) {
   if (typeof raw !== "string") {
     throw new Error(`${fieldName} must be a non-empty string`);
@@ -60,6 +87,26 @@ function requireNonEmptyStringArg(raw: unknown, fieldName: string) {
     throw new Error(`${fieldName} must be a non-empty string`);
   }
   return value;
+}
+
+function parseSkillToolArgs(args: unknown) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    throw new Error("skill is required");
+  }
+  const record = args as Record<string, unknown>;
+  const hasOwn = (key: string) => Object.prototype.hasOwnProperty.call(record, key);
+  if (!hasOwn("skillId")) {
+    throw new Error("skill is required");
+  }
+  const ownKeys = Reflect.ownKeys(record);
+  const hasUnexpectedField = ownKeys.some((key) => key !== "skillId" && key !== "filePath");
+  if (hasUnexpectedField) {
+    throw new Error("invalid skill identifier");
+  }
+  return {
+    skillId: record.skillId,
+    ...(hasOwn("filePath") ? { filePath: record.filePath } : {})
+  };
 }
 
 function parseOptionalPositiveIntegerArg(raw: unknown, fieldName: string) {
@@ -494,12 +541,15 @@ export class BuiltinToolProvider implements ToolProvider {
         });
       }
       case "skill": {
-        const id = requireNonEmptyStringArg(args.id, "skill.id");
+        const skillArgs = parseSkillToolArgs(args);
         const repoRoot = String(process.env.AWB_AGENT_REPO_ROOT || "").trim() || process.cwd();
         return await runSkillTool({
           workspacePath: ctx.run.workspacePath,
           repoRoot,
-          id,
+          skillId: skillArgs.skillId,
+          ...(Object.prototype.hasOwnProperty.call(skillArgs, "filePath")
+            ? { filePath: skillArgs.filePath }
+            : {}),
           externalSkillRoots: ctx.promptContext.externalSkillRoots,
           signal: ctx.signal
         });
@@ -680,16 +730,18 @@ export class BuiltinToolProvider implements ToolProvider {
           }
         });
 
-        await ctx.processNestedRun(
-          {
-            workspaceId: ctx.run.workspaceId,
-            sessionId: started.sessionId,
-            runId: started.runId,
-            inputText: parsed.prompt,
-            workspacePath: started.workspacePath
-          },
-          ctx.signal
-        );
+        if (!started.reused) {
+          await ctx.processNestedRun(
+            {
+              workspaceId: ctx.run.workspaceId,
+              sessionId: started.sessionId,
+              runId: started.runId,
+              inputText: parsed.prompt,
+              workspacePath: started.workspacePath
+            },
+            ctx.signal
+          );
+        }
 
         if (ctx.signal.aborted) {
           const abortError = new Error("subtask cancelled by parent abort");
@@ -697,13 +749,36 @@ export class BuiltinToolProvider implements ToolProvider {
           throw abortError;
         }
 
-        const subtaskStatus = await ctx.apiClient.getSubtaskStatus({
+        let subtaskStatus = await ctx.apiClient.getSubtaskStatus({
           workspaceId: ctx.run.workspaceId,
           sessionId: started.sessionId,
           runId: started.runId
         });
 
+        let reusedWaitTimeoutMs: number | null = null;
+        if (started.reused && subtaskStatus.status === "running") {
+          reusedWaitTimeoutMs = subtaskReusedWaitTimeoutMs();
+          const pollIntervalMs = subtaskReusedPollIntervalMs();
+          const deadline = Date.now() + reusedWaitTimeoutMs;
+          while (subtaskStatus.status === "running" && Date.now() < deadline) {
+            if (!(await sleepMsWithAbort(pollIntervalMs, ctx.signal))) {
+              const abortError = new Error("subtask cancelled by parent abort");
+              (abortError as Error & { name: string }).name = "AbortError";
+              throw abortError;
+            }
+            subtaskStatus = await ctx.apiClient.getSubtaskStatus({
+              workspaceId: ctx.run.workspaceId,
+              sessionId: started.sessionId,
+              runId: started.runId
+            });
+          }
+        }
         if (subtaskStatus.status === "running") {
+          if (started.reused) {
+            throw new Error(
+              `subtask reused-child wait timed out after ${reusedWaitTimeoutMs ?? subtaskReusedWaitTimeoutMs()}ms; child may still be running and was not modified`
+            );
+          }
           throw new Error(`subtask did not reach terminal status: ${subtaskStatus.status}`);
         }
 
