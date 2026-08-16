@@ -8089,7 +8089,7 @@ test("apply_patch artifact 文件缺失时返回 404", async () => {
   assert.equal(artifactRes.statusCode, 404);
 });
 
-test("write completed 后瘦身 args/result 并支持 artifact 拉取", async () => {
+test("write completed 后保留完整 args、瘦身 result 并支持 artifact 拉取", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
   const runId = newSortableId("run");
@@ -8141,7 +8141,12 @@ test("write completed 后瘦身 args/result 并支持 artifact 拉取", async ()
     }
   });
 
-  const writeContent = "hello\nworld\n";
+  const writeContent = [
+    "# 完整历史写入内容",
+    "中文多行内容必须原样保留。",
+    "x".repeat(320),
+    "最后一行不能被截断。"
+  ].join("\n");
   const writeBytes = Buffer.byteLength(writeContent, "utf8");
 
   const toolItem = await createContextItemInternal({
@@ -8205,8 +8210,11 @@ test("write completed 后瘦身 args/result 并支持 artifact 拉取", async ()
   const storedTool = await getContextItem(fixture.app, session.id, toolItem.item.id);
   const storedOutput = storedTool.output as { args?: Record<string, unknown>; result?: Record<string, unknown> };
   const storedArgs = storedOutput.args || {};
-  assert.equal(Object.prototype.hasOwnProperty.call(storedArgs, "content"), false, "write args should strip content");
-  assert.equal(Number(storedArgs.contentBytes), writeBytes);
+  assert.equal(storedArgs.filePath, "foo.txt");
+  assert.equal(storedArgs.content, writeContent, "write args should preserve complete content");
+  assert.equal(Object.prototype.hasOwnProperty.call(storedArgs, "contentBytes"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(storedArgs, "contentPreview"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(storedArgs, "contentTruncated"), false);
 
   const storedResult = storedOutput.result || {};
   assert.equal(Object.prototype.hasOwnProperty.call(storedResult, "before"), false, "write result should strip before");
@@ -8248,9 +8256,190 @@ test("write completed 后瘦身 args/result 并支持 artifact 拉取", async ()
       })
     : null;
   const input = (toolCallPart as { input?: Record<string, unknown> } | null)?.input ?? {};
-  assert.equal(typeof input.filePath, "string");
-  assert.equal(typeof input.contentBytes, "number");
-  assert.equal(Object.prototype.hasOwnProperty.call(input, "content"), false, "write tool-call input should strip content");
+  assert.equal(input.filePath, "foo.txt");
+  assert.equal(input.content, writeContent, "write tool-call input should preserve complete content");
+  assert.equal(Object.prototype.hasOwnProperty.call(input, "contentBytes"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(input, "contentPreview"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(input, "contentTruncated"), false);
+  assert.equal(artifact.after?.text, writeContent);
+
+  const messagesContext = await getMessagesContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id
+  });
+  const messagesAssistant = messagesContext.messages.find((message) => {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) return false;
+    return message.content.some((part) => {
+      if (!part || typeof part !== "object") return false;
+      return (part as { type?: string; toolName?: string }).type === "tool-call" &&
+        (part as { toolName?: string }).toolName === "write";
+    });
+  });
+  const messagesToolCallPart = Array.isArray(messagesAssistant?.content)
+    ? messagesAssistant.content.find((part) => {
+        if (!part || typeof part !== "object") return false;
+        return (part as { type?: string; toolName?: string }).type === "tool-call" &&
+          (part as { toolName?: string }).toolName === "write";
+      })
+    : null;
+  const messagesInput = (messagesToolCallPart as { input?: Record<string, unknown> } | null)?.input ?? {};
+  assert.equal(messagesInput.content, writeContent, "messages-context should preserve complete write content");
+
+  const forkBoundary = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: toolItem.item.id,
+    kind: "user",
+    status: "completed",
+    output: {
+      type: "user_text",
+      text: "继续处理"
+    }
+  });
+  const forkRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions/fork",
+    payload: {
+      fromSessionId: session.id,
+      fromItemId: forkBoundary.item.id,
+      mode: "visible_only"
+    }
+  });
+  assert.equal(forkRes.statusCode, 201, `fork write session failed: ${forkRes.body}`);
+  const forked = forkRes.json() as { id: string };
+  const forkContext = await getMessagesContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: forked.id
+  });
+  const forkedWriteAssistant = forkContext.messages.find((message) => {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) return false;
+    return message.content.some((part) => {
+      if (!part || typeof part !== "object") return false;
+      return (part as { type?: string; toolName?: string }).type === "tool-call" &&
+        (part as { toolName?: string }).toolName === "write";
+    });
+  });
+  const forkedWritePart = Array.isArray(forkedWriteAssistant?.content)
+    ? forkedWriteAssistant.content.find((part) => {
+        if (!part || typeof part !== "object") return false;
+        return (part as { type?: string; toolName?: string }).type === "tool-call" &&
+          (part as { toolName?: string }).toolName === "write";
+      })
+    : null;
+  const forkedWriteInput = (forkedWritePart as { input?: Record<string, unknown> } | null)?.input ?? {};
+  assert.equal(forkedWriteInput.content, writeContent, "forked Prompt should preserve complete write content");
+
+  const legacyAssistantItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_write_legacy",
+    step: 2,
+    prevId: forkBoundary.item.id,
+    kind: "assistant",
+    status: "completed",
+    output: {
+      type: "assistant_text",
+      text: "处理旧 write 记录"
+    }
+  });
+  const legacyCompletedItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_write_legacy",
+    step: 2,
+    prevId: legacyAssistantItem.item.id,
+    kind: "tool",
+    status: "completed",
+    output: {
+      type: "tool",
+      toolName: "write",
+      toolCallId: "call_write_legacy",
+      args: {
+        filePath: "legacy.txt",
+        contentBytes: 123,
+        contentPreview: "legacy preview"
+      },
+      text: "legacy write completed"
+    }
+  });
+  const legacyFailedItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_write_legacy",
+    step: 2,
+    prevId: legacyCompletedItem.item.id,
+    kind: "tool",
+    status: "failed",
+    output: {
+      type: "tool",
+      toolName: "write",
+      toolCallId: "call_write_legacy_failed",
+      args: {
+        filePath: "legacy-failed.txt",
+        contentBytes: 456
+      },
+      text: "legacy write fallback text",
+      error: "legacy write failure"
+    }
+  });
+
+  const legacyContext = await getMessagesContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id
+  });
+  const legacyAssistant = legacyContext.messages.find((message) => {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) return false;
+    return message.content.some((part) => {
+      if (!part || typeof part !== "object") return false;
+      return (part as { type?: string; text?: string }).type === "text" &&
+        String((part as { text?: string }).text || "").includes("Historical write input unavailable: legacy.txt");
+    });
+  });
+  assert.ok(legacyAssistant, "legacy metadata-only writes should degrade to text records");
+  const legacyParts = Array.isArray(legacyAssistant?.content) ? legacyAssistant.content : [];
+  const legacyText = legacyParts
+    .filter((part): part is { type: "text"; text: string } => !!part && typeof part === "object" && (part as { type?: string }).type === "text")
+    .map((part) => part.text)
+    .join("\n");
+  assert.ok(legacyText.includes("Historical write input unavailable: legacy.txt"));
+  assert.ok(legacyText.includes("legacy write completed"), "completed legacy result should remain in history");
+  assert.ok(legacyText.includes("Historical write input unavailable: legacy-failed.txt"));
+  assert.ok(legacyText.includes("legacy write failure"), "failed legacy error should remain in history");
+  const legacyWriteCalls = legacyParts.filter((part) => {
+    if (!part || typeof part !== "object") return false;
+    return (part as { type?: string; toolName?: string }).type === "tool-call" &&
+      (part as { toolName?: string }).toolName === "write";
+  });
+  assert.equal(legacyWriteCalls.length, 0, "legacy metadata-only writes must not become schema-invalid tool-calls");
+  const legacyToolResults = legacyContext.messages
+    .filter((message) => message.role === "tool" && Array.isArray(message.content))
+    .flatMap((message) => message.content)
+    .filter((part) => {
+      if (!part || typeof part !== "object") return false;
+      return (part as { type?: string; toolName?: string }).type === "tool-result" &&
+        (part as { toolName?: string }).toolName === "write";
+    });
+  assert.equal(legacyToolResults.length, 1, "only the complete write should retain a tool-result");
 });
 
 test("write artifact 文件缺失时返回 404", async () => {
@@ -8331,7 +8520,7 @@ test("write artifact 文件缺失时返回 404", async () => {
   assert.equal(artifactRes.statusCode, 404);
 });
 
-test("write 在 cancel 终态会瘦身 args.content", async () => {
+test("write 在 cancel 终态会保留完整 args.content", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
   const runId = newSortableId("run");
@@ -8380,8 +8569,63 @@ test("write 在 cancel 终态会瘦身 args.content", async () => {
   const cancelledItem = await getContextItem(fixture.app, session.id, toolItem.item.id);
   assert.equal(cancelledItem.status, "cancelled");
   const args = (cancelledItem.output as { args?: Record<string, unknown> }).args || {};
-  assert.equal(Object.prototype.hasOwnProperty.call(args, "content"), false);
-  assert.equal(typeof args.contentBytes, "number");
+  assert.equal(args.filePath, "cancel.txt");
+  assert.equal(args.content, "secret cancel payload");
+  assert.equal(Object.prototype.hasOwnProperty.call(args, "contentBytes"), false);
+});
+
+test("write 在 failed 终态会保留完整 args.content", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const writeContent = "失败时也必须保留完整写入意图\n".repeat(30);
+
+  const toolItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn_write_failed",
+    step: 1,
+    prevId: null,
+    kind: "tool",
+    status: "running",
+    output: {
+      type: "tool",
+      toolName: "write",
+      toolCallId: "call_write_failed",
+      args: {
+        filePath: "failed.txt",
+        content: writeContent
+      }
+    }
+  });
+
+  await updateContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    itemId: toolItem.item.id,
+    status: "failed",
+    output: {
+      type: "tool",
+      toolName: "write",
+      toolCallId: "call_write_failed",
+      args: {
+        filePath: "failed.txt",
+        content: writeContent
+      },
+      text: "write failed",
+      error: "simulated failure"
+    }
+  });
+
+  const failedItem = await getContextItem(fixture.app, session.id, toolItem.item.id);
+  assert.equal(failedItem.status, "failed");
+  const args = (failedItem.output as { args?: Record<string, unknown> }).args || {};
+  assert.equal(args.filePath, "failed.txt");
+  assert.equal(args.content, writeContent);
+  assert.equal(Object.prototype.hasOwnProperty.call(args, "contentBytes"), false);
 });
 
 test("agent tool 字符串结果保持原始字符串语义", async () => {

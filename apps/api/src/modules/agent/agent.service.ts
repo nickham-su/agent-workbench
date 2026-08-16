@@ -345,6 +345,17 @@ function toolArgsSchema(toolName: AgentContextToolName) {
       }
     };
   }
+  if (toolName === "write") {
+    return {
+      type: "object",
+      required: ["filePath", "content"],
+      additionalProperties: false,
+      properties: {
+        filePath: { type: "string", minLength: 1 },
+        content: { type: "string" }
+      }
+    };
+  }
   return {
     type: "object",
     required: ["filePath", "content"],
@@ -580,6 +591,19 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
     return "Read the most recent lines from the archive log and return plain-text lines sorted from oldest to newest, each prefixed with pos. Use beforePos to restrict the read to older content only.";
   }
   if (toolName === "subtask") return options?.subtaskDescription || "Execute a task in a subtask session.";
+  if (toolName === "write") {
+    return [
+      "Write and fully overwrite a workspace-relative file.",
+      "",
+      "Arguments:",
+      "- filePath: Required workspace-relative file path.",
+      "- content: Required complete file content as a string.",
+      "",
+      "The content field must contain the complete intended file text.",
+      "contentBytes, contentPreview, and contentTruncated are not valid write arguments.",
+      "For localized changes to an existing file, prefer apply_patch."
+    ].join("\n");
+  }
   if (toolName.startsWith("mcp_")) return `Call MCP tool ${toolName}`;
   return "Write and fully overwrite a file inside the current directory. Use this as a deterministic fallback when you need to rewrite the whole file or when patch matching is unstable.";
 }
@@ -659,8 +683,6 @@ type WriteUiArtifactV1 = {
   before: WriteUiArtifactSide;
   after: WriteUiArtifactSide;
 };
-
-const WRITE_ARGS_PREVIEW_MAX_CHARS = 280;
 
 function splitApplyPatchResult(raw: unknown): {
   slim: ApplyPatchSlimResult;
@@ -791,42 +813,6 @@ function splitWriteResult(raw: unknown): {
   };
 }
 
-function toWriteSlimArgs(raw: unknown) {
-  const src = toRecord(raw) || {};
-  const filePath = typeof src.filePath === "string" ? src.filePath : "";
-  const content = typeof src.content === "string" ? src.content : "";
-  if (!content && !Object.prototype.hasOwnProperty.call(src, "content")) {
-    const contentBytes = toNonNegativeInt(src.contentBytes ?? 0);
-    const contentPreview = typeof src.contentPreview === "string" ? src.contentPreview : "";
-    const contentTruncated = src.contentTruncated === true;
-    return {
-      ...(filePath ? { filePath } : {}),
-      contentBytes,
-      ...(contentPreview ? { contentPreview } : {}),
-      ...(contentTruncated ? { contentTruncated: true } : {})
-    };
-  }
-
-  const contentBytes = Buffer.byteLength(content, "utf8");
-  const contentPreview = content.slice(0, WRITE_ARGS_PREVIEW_MAX_CHARS);
-  const contentTruncated = contentPreview.length < content.length;
-
-  return {
-    ...(filePath ? { filePath } : {}),
-    contentBytes,
-    ...(contentPreview ? { contentPreview } : {}),
-    ...(contentTruncated ? { contentTruncated: true } : {})
-  };
-}
-
-function toTerminalWriteOutput(output: AgentContextItemRecord["output"]) {
-  if (!output || output.type !== "tool" || output.toolName !== "write") return output;
-  return {
-    ...output,
-    args: toWriteSlimArgs(output.args)
-  };
-}
-
 function buildToolText(params: {
   toolName: string;
   status: "running" | "completed" | "failed" | "cancelled";
@@ -883,10 +869,8 @@ function toTerminalSubtaskCancelledOutput(output: AgentContextItemRecord["output
 
 function toTerminalCancelledOutput(output: AgentContextItemRecord["output"]) {
   // cancelSession: 只在终态收尾时做最小必要的输出规整。
-  // - write: 瘦身 args.content
   // - subtask: 明确 cancelled，并保留 subtask_session_id + 复用提示
-  const writeNormalized = toTerminalWriteOutput(output);
-  return toTerminalSubtaskCancelledOutput(writeNormalized);
+  return toTerminalSubtaskCancelledOutput(output);
 }
 
 async function ensureRealPathUnderRoot(rootAbs: string, targetAbs: string) {
@@ -3093,11 +3077,6 @@ export class AgentService {
           result: slim
         } as any;
       }
-
-      nextOutput = {
-        ...(nextOutput as any),
-        args: toWriteSlimArgs(tool.args)
-      } as any;
     }
 
     const updatedAt = params.updatedAt ?? nowMs();
@@ -4356,6 +4335,25 @@ export class AgentService {
           toolItem.output.args && typeof toolItem.output.args === "object" && !Array.isArray(toolItem.output.args)
             ? (toolItem.output.args as Record<string, unknown>)
             : {};
+        const isWriteTool = toolItem.output.toolName === "write";
+        const hasCompleteWriteInput =
+          typeof toolInput.filePath === "string" &&
+          toolInput.filePath.trim().length > 0 &&
+          typeof toolInput.content === "string";
+        if (isWriteTool && !hasCompleteWriteInput) {
+          const filePath = typeof toolInput.filePath === "string" ? toolInput.filePath.trim() : "";
+          const resultText = (typeof toolItem.output.error === "string" && toolItem.output.error.trim()
+            ? toolItem.output.error
+            : resolveToolOutputText(toolItem.output).trim()) || `status=${toolItem.status}`;
+          assistantParts.push({
+            type: "text",
+            text: filePath
+              ? `[Historical write input unavailable: ${filePath}; status=${toolItem.status}; result=${resultText}]`
+              : `[Historical write input unavailable; status=${toolItem.status}; result=${resultText}]`
+          });
+          cursor += 1;
+          continue;
+        }
         const promptInput = projectToolCallInputForPrompt({
           toolName: toolItem.output.toolName,
           status: toolItem.status,
