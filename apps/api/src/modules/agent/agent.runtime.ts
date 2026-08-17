@@ -1,15 +1,12 @@
 import type { FastifyBaseLogger } from "fastify";
 import { nowMs } from "../../utils/time.js";
 import { newSortableId } from "../../utils/ids.js";
-import type { AgentRuntimePort } from "./agent.runtime-port.js";
-import type { AgentQueuedRun, AgentService } from "./agent.service.js";
+import type { AgentRuntimePort, AgentRuntimeRun } from "./agent.runtime-port.js";
+import type { AgentService } from "./agent.service.js";
 
 const DEFAULT_RUNTIME_CONCURRENCY = 2;
 
-type RuntimeQueuedRun = AgentQueuedRun & {
-  inputText?: string;
-  workspacePath: string;
-};
+type RuntimeQueuedRun = AgentRuntimeRun;
 
 export class AgentRuntime implements AgentRuntimePort {
   private readonly queue: RuntimeQueuedRun[] = [];

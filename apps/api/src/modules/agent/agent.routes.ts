@@ -43,6 +43,7 @@ import {
 } from "@agent-workbench/shared";
 import type { AgentRuntimePort } from "./agent.runtime-port.js";
 import type { AgentService } from "./agent.service.js";
+import { getAgentWorkspaceRunContext } from "./agent-run-context.js";
 import { HttpError } from "../../app/errors.js";
 import type { AgentPluginHostClient } from "./agent.plugin-host-client.js";
 import { listAvailableAgentsForSurface } from "../settings/settings.service.js";
@@ -100,14 +101,14 @@ export async function registerAgentRoutes(
   ) {
     const result = await params.service.compactSession({ sessionId, body });
     if (result.scheduled) {
-      const workspace = params.service.getWorkspace(body.workspaceId);
-      if (!workspace) throw new HttpError(404, "workspace not found");
+      const runContext = getAgentWorkspaceRunContext(params.service.getContext(), body.workspaceId);
+      if (!runContext) throw new HttpError(404, "workspace not found");
       try {
         await params.runtime.enqueueRun({
           workspaceId: body.workspaceId,
           sessionId,
           runId: result.runId,
-          workspacePath: workspace.path,
+          ...runContext,
           inputText: "__awb_compact__"
         });
       } catch (err) {
@@ -304,13 +305,13 @@ export async function registerAgentRoutes(
       const body = req.body as AgentSendMessageRequest;
       const result = await params.service.sendMessage({ sessionId: p.sessionId, body });
       if (!result.deduplicated) {
-        const workspace = params.service.getWorkspace(body.workspaceId);
-        if (!workspace) throw new HttpError(404, "workspace not found");
+        const runContext = getAgentWorkspaceRunContext(params.service.getContext(), body.workspaceId);
+        if (!runContext) throw new HttpError(404, "workspace not found");
         await params.runtime.enqueueRun({
           workspaceId: body.workspaceId,
           sessionId: p.sessionId,
           runId: result.runId,
-          workspacePath: workspace.path,
+          ...runContext,
           inputText: body.text
         });
       }
@@ -872,14 +873,14 @@ export async function registerAgentRoutes(
         }
       });
       if (!result.deduplicated) {
-        const workspace = params.service.getWorkspace(body.workspaceId);
-        if (!workspace) throw new HttpError(404, "workspace not found");
+        const runContext = getAgentWorkspaceRunContext(params.service.getContext(), body.workspaceId);
+        if (!runContext) throw new HttpError(404, "workspace not found");
         try {
           await params.runtime.enqueueRun({
             workspaceId: body.workspaceId,
             sessionId: body.sessionId,
             runId: result.runId,
-            workspacePath: workspace.path,
+            ...runContext,
             inputText: body.text
           });
         } catch (err) {

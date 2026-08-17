@@ -37,7 +37,8 @@ function createExecutionContext(): ToolExecutionContext {
       workspaceId: "ws_test",
       sessionId: "sess_test",
       runId: "run_test",
-      workspacePath: process.cwd()
+      workspacePath: process.cwd(),
+      workspaceRepoDirNames: []
     },
     pendingTool: {
       itemId: 1,

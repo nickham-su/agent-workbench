@@ -115,6 +115,7 @@ test("subtask provider 父 abort 后不再额外 complete child cancelled", asyn
       sessionId: "sess_parent",
       runId: "run_parent",
       workspacePath: process.cwd(),
+      workspaceRepoDirNames: [],
       inputText: "parent"
     },
     pendingTool: {
@@ -184,7 +185,7 @@ test("subtask provider 复用 running child 时轮询而不重复执行", async 
   };
   const ctx: ToolExecutionContext = {
     profile: baseProfile(),
-    run: { workspaceId: "ws_test", sessionId: "sess_parent", runId: "run_parent", workspacePath: process.cwd() },
+    run: { workspaceId: "ws_test", sessionId: "sess_parent", runId: "run_parent", workspacePath: process.cwd(), workspaceRepoDirNames: [] },
     pendingTool: { itemId: 1, status: "queued", toolName: "subtask", toolCallId: "call_subtask", args: {} },
     signal: new AbortController().signal,
     apiClient: asAgentApiClient(apiClient),
@@ -234,7 +235,7 @@ test("subtask provider 复用 terminal child 时直接读取结果", async () =>
   };
   const ctx: ToolExecutionContext = {
     profile: baseProfile(),
-    run: { workspaceId: "ws_test", sessionId: "sess_parent", runId: "run_parent", workspacePath: process.cwd() },
+    run: { workspaceId: "ws_test", sessionId: "sess_parent", runId: "run_parent", workspacePath: process.cwd(), workspaceRepoDirNames: [] },
     pendingTool: { itemId: 1, status: "queued", toolName: "subtask", toolCallId: "call_subtask", args: {} },
     signal: new AbortController().signal,
     apiClient: asAgentApiClient(apiClient),
@@ -290,7 +291,7 @@ test("subtask provider reused child 等待超时只结束当前等待，不修�
     };
     const ctx: ToolExecutionContext = {
       profile: baseProfile(),
-      run: { workspaceId: "ws_test", sessionId: "sess_parent", runId: "run_parent", workspacePath: process.cwd() },
+      run: { workspaceId: "ws_test", sessionId: "sess_parent", runId: "run_parent", workspacePath: process.cwd(), workspaceRepoDirNames: [] },
       pendingTool: { itemId: 1, status: "queued", toolName: "subtask", toolCallId: "call_subtask", args: {} },
       signal: new AbortController().signal,
       apiClient: asAgentApiClient(apiClient),
@@ -340,7 +341,7 @@ test("subtask provider 保留 API 深度拒绝的 409 错误文本", async () =>
     };
     const ctx: ToolExecutionContext = {
       profile: baseProfile(),
-      run: { workspaceId: "ws_test", sessionId: "sess_parent", runId: "run_parent", workspacePath: process.cwd() },
+      run: { workspaceId: "ws_test", sessionId: "sess_parent", runId: "run_parent", workspacePath: process.cwd(), workspaceRepoDirNames: [] },
       pendingTool: { itemId: 1, status: "queued", toolName: "subtask", toolCallId: "call_subtask", args: {} },
       signal: new AbortController().signal,
       apiClient: asAgentApiClient(apiClient),

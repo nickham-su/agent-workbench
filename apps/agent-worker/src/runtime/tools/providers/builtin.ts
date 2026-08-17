@@ -534,6 +534,7 @@ export class BuiltinToolProvider implements ToolProvider {
         const limit = parseOptionalPositiveIntegerArg(args.limit, "read.limit");
         return await runReadTool({
           workspacePath: ctx.run.workspacePath,
+          workspaceRepoDirNames: ctx.run.workspaceRepoDirNames,
           filePath,
           offset,
           limit,
@@ -737,7 +738,8 @@ export class BuiltinToolProvider implements ToolProvider {
               sessionId: started.sessionId,
               runId: started.runId,
               inputText: parsed.prompt,
-              workspacePath: started.workspacePath
+              workspacePath: started.workspacePath,
+              workspaceRepoDirNames: [...ctx.run.workspaceRepoDirNames]
             },
             ctx.signal
           );

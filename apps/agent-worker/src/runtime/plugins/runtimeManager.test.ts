@@ -92,6 +92,7 @@ function createExecutionContext(mode: "ok" | "throw" | "long_text", includeRaw =
       sessionId: "sess_test",
       runId: "run_test",
       workspacePath: repoRoot,
+      workspaceRepoDirNames: [],
       inputText: undefined
     },
     pendingTool: {

@@ -35,6 +35,7 @@ export type QueuedRunContext = {
   runId: string;
   inputText?: string;
   workspacePath: string;
+  workspaceRepoDirNames: string[];
 };
 
 export type NestedRunContext = {
@@ -43,6 +44,7 @@ export type NestedRunContext = {
   runId: string;
   inputText?: string;
   workspacePath: string;
+  workspaceRepoDirNames: string[];
 };
 
 export type ToolTextRenderInput = {

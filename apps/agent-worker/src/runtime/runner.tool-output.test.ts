@@ -7,10 +7,12 @@ import {
   AgentRunner,
   buildProviderOptionsWithPromptCacheKeyForTest,
   buildToolExecutionBatchesForTest,
+  executeToolForTest,
   finalizeToolTextForTest,
   hasValidPromptCacheKeyForTest
 } from "./runner.js";
 import { getBashToolAppendix, startBashToolProbe } from "./bashTools.js";
+import { runReadTool } from "./fileTools.js";
 
 function pendingTool(input: {
   itemId: number;
@@ -75,6 +77,70 @@ test("subtask 长输出不截断且不生成 artifact", async () => {
   });
 });
 
+test("read 的 repo 路径提示错误仍以 failed 工具项持久化且没有 result", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const updates: Array<{ status?: string; output?: Record<string, unknown> }> = [];
+    const runner = new AgentRunner(
+      {
+        async updateContextItem(input: { status?: string; output?: Record<string, unknown> }) {
+          updates.push(input);
+          return { id: 1 };
+        }
+      } as any,
+      {} as any,
+      { info() {}, warn() {}, error() {} },
+      1
+    );
+    await fs.mkdir(path.join(workspacePath, "repo-a", "src"), { recursive: true });
+    await fs.writeFile(path.join(workspacePath, "repo-a", "src", "a.ts"), "export {};", "utf8");
+    (runner as any).toolRegistry = {
+      async isToolEnabled() {
+        return true;
+      },
+      async execute(_toolName: string, args: { filePath: string }, context: { run: { workspacePath: string; workspaceRepoDirNames: string[] } }) {
+        return await runReadTool({
+          workspacePath: context.run.workspacePath,
+          workspaceRepoDirNames: context.run.workspaceRepoDirNames,
+          filePath: args.filePath
+        });
+      }
+    };
+
+    await executeToolForTest(runner, {
+    profile: { agent: { tools: ["read"], pluginTools: [] } },
+    run: {
+      workspaceId: "ws_test",
+      sessionId: "sess_test",
+      runId: "run_test",
+      workspacePath,
+      workspaceRepoDirNames: ["repo-a"]
+    },
+    tool: pendingTool({ itemId: 901, toolName: "read", args: { filePath: "src/a.ts" } }),
+    parentSessionId: "sess_test",
+    signal: new AbortController().signal,
+    promptContext: { tools: [] }
+    });
+
+    let failed: { status?: string; output?: Record<string, unknown> } | undefined;
+    for (let index = updates.length - 1; index >= 0; index -= 1) {
+      if (updates[index]?.status === "failed") {
+        failed = updates[index];
+        break;
+      }
+    }
+    assert.ok(failed, "read error should persist a failed tool item");
+    const error = String(failed.output?.error || "");
+    const hint = "Path exists in registered workspace repo(s). Retry read with one of:\n- repo-a/src/a.ts";
+    assert.match(error, /^ENOENT: no such file or directory/);
+    assert.equal(error.endsWith(`\n\n${hint}`), true);
+    assert.equal(typeof failed.output?.text, "string");
+    assert.equal((failed.output?.text as string).includes("tool: read"), true);
+    assert.equal((failed.output?.text as string).includes("status: failed"), true);
+    assert.equal((failed.output?.text as string).includes(error), true);
+    assert.equal("result" in (failed.output ?? {}), false);
+  });
+});
+
 test("非 subtask 长输出仍截断并写入 artifact", async () => {
   await withTempWorkspace(async (workspacePath) => {
     const longText = "B".repeat(9_500);
@@ -130,7 +196,8 @@ test("subtask executeTool 成功时 completed output 保留完整长文本且无
         workspaceId: "ws_test",
         sessionId: "ses_test",
         runId: "run_test",
-        workspacePath
+        workspacePath,
+        workspaceRepoDirNames: []
       },
       tool: pendingTool({
         itemId: 201,
@@ -202,7 +269,8 @@ test("subtask executeTool 失败时 failed output 保留错误状态与完整结
         workspaceId: "ws_test",
         sessionId: "ses_test",
         runId: "run_test",
-        workspacePath
+        workspacePath,
+        workspaceRepoDirNames: []
       },
       tool: pendingTool({
         itemId: 202,
@@ -438,7 +506,8 @@ test("并发段中单个工具失败不影响其他工具与后续段", async ()
       workspaceId: "ws_test",
       sessionId: "ses_test",
       runId: "run_test",
-      workspacePath: process.cwd()
+      workspacePath: process.cwd(),
+      workspaceRepoDirNames: []
     },
     context: {
       pendingTools: [
@@ -508,7 +577,8 @@ test("并发段中某个工具 paused 时当前 step 返回 paused 且后续段�
       workspaceId: "ws_test",
       sessionId: "ses_test",
       runId: "run_test",
-      workspacePath: process.cwd()
+      workspacePath: process.cwd(),
+      workspaceRepoDirNames: []
     },
     context: {
       pendingTools: [
@@ -559,7 +629,8 @@ test("中间工具仍会打断并发段", async () => {
       workspaceId: "ws_test",
       sessionId: "ses_test",
       runId: "run_test",
-      workspacePath: process.cwd()
+      workspacePath: process.cwd(),
+      workspaceRepoDirNames: []
     },
     context: {
       pendingTools: [
@@ -617,7 +688,8 @@ test("纯非并发多工具保持原有串行语义", async () => {
       workspaceId: "ws_test",
       sessionId: "ses_test",
       runId: "run_test",
-      workspacePath: process.cwd()
+      workspacePath: process.cwd(),
+      workspaceRepoDirNames: []
     },
     context: {
       pendingTools: [
@@ -680,7 +752,8 @@ test("executePendingTools 传入快照时复用 availableToolNames 且不重复 
       workspaceId: "ws_test",
       sessionId: "ses_test",
       runId: "run_test",
-      workspacePath: process.cwd()
+      workspacePath: process.cwd(),
+      workspaceRepoDirNames: []
     },
     availableToolNames: snapshot,
     context: {
@@ -739,7 +812,8 @@ test("executePendingTools 快照缺失时回退到当前 listTools", async () =>
       workspaceId: "ws_test",
       sessionId: "ses_test",
       runId: "run_test",
-      workspacePath: process.cwd()
+      workspacePath: process.cwd(),
+      workspaceRepoDirNames: []
     },
     context: {
       pendingTools: [pendingTool({ itemId: 1, toolName: "read" })]
@@ -789,7 +863,8 @@ test("executePendingTools 传入快照时未知工具仍按失败处理且不回
       workspaceId: "ws_test",
       sessionId: "ses_test",
       runId: "run_test",
-      workspacePath: process.cwd()
+      workspacePath: process.cwd(),
+      workspaceRepoDirNames: []
     },
     availableToolNames: new Set<string>(["read"]),
     context: {
@@ -838,7 +913,8 @@ test("单个 bash 或 subtask 仍按单段执行，行为与旧实现一致", as
         workspaceId: "ws_test",
         sessionId: `ses_${toolName}`,
         runId: `run_${toolName}`,
-        workspacePath: process.cwd()
+        workspacePath: process.cwd(),
+      workspaceRepoDirNames: []
       },
       context: {
         pendingTools: [pendingTool({ itemId: 1, toolName })]

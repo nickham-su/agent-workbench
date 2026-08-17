@@ -610,6 +610,7 @@ type QueuedRun = {
   runId: string;
   inputText?: string;
   workspacePath: string;
+  workspaceRepoDirNames: string[];
 };
 
 type PendingTool = {
@@ -2647,6 +2648,7 @@ export type EnqueuePayload = {
   runId: string;
   inputText?: string;
   workspacePath: string;
+  workspaceRepoDirNames?: string[];
 };
 
 export function buildProviderOptionsWithPromptCacheKeyForTest(params: {

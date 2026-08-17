@@ -27,6 +27,7 @@ test("read 允许读取包含少量非法 utf8 字节但整体像文本的文件
 
   const result = await runReadTool({
     workspacePath,
+    workspaceRepoDirNames: [],
     filePath: "lossy.txt"
   });
 
@@ -41,6 +42,7 @@ test("read 允许读取 UTF-16 LE BOM 文本", async () => {
 
   const result = await runReadTool({
     workspacePath,
+    workspaceRepoDirNames: [],
     filePath: "utf16.txt"
   });
 
@@ -55,6 +57,7 @@ test("read 允许读取 UTF-32 LE BOM 文本", async () => {
 
   const result = await runReadTool({
     workspacePath,
+    workspaceRepoDirNames: [],
     filePath: "utf32.txt"
   });
 
@@ -69,6 +72,7 @@ test("read 允许读取非 UTF-8 但整体像文本的高位字节内容", async
 
   const result = await runReadTool({
     workspacePath,
+    workspaceRepoDirNames: [],
     filePath: "legacy.txt"
   });
 
@@ -98,6 +102,7 @@ test("read 对以换行结尾的文件不额外多算空白尾行", async () => 
 
   const result = await runReadTool({
     workspacePath,
+    workspaceRepoDirNames: [],
     filePath: "tail-newline.txt"
   });
 
@@ -115,6 +120,7 @@ test("read 支持对大文件使用 offset 继续读取", async () => {
 
   const result = await runReadTool({
     workspacePath,
+    workspaceRepoDirNames: [],
     filePath: "large.txt",
     offset: 5500,
     limit: 3
@@ -130,7 +136,7 @@ test("read 在 offset 超过文件总行数时返回 EOF 说明而不是失败",
   const filePath = path.join(workspacePath, "small.txt");
   await fs.writeFile(filePath, "alpha\nbeta\n", "utf8");
 
-  const result = await runReadTool({ workspacePath, filePath: "small.txt", offset: 5, limit: 20 });
+  const result = await runReadTool({ workspacePath, workspaceRepoDirNames: [], filePath: "small.txt", offset: 5, limit: 20 });
 
   assert.equal(result.summary, "读取文件 small.txt");
   assert.equal(result.content, "(End of file - total 2 lines. Requested offset=5 exceeds file length. No more content to read. Do not call read again for this file unless the file changes.)");
@@ -145,6 +151,7 @@ test("read 仍拒绝明显的二进制文件", async () => {
     () =>
       runReadTool({
         workspacePath,
+        workspaceRepoDirNames: [],
         filePath: "image.png"
       }),
     /binary file is not supported/
@@ -158,6 +165,7 @@ test("read 读取目录行为保持不变", async () => {
 
   const result = await runReadTool({
     workspacePath,
+    workspaceRepoDirNames: [],
     filePath: "nested"
   });
 
@@ -178,6 +186,7 @@ test("read 在样本之后遇到少量坏 utf8 字节时仍保留后续有效文
 
   const result = await runReadTool({
     workspacePath,
+    workspaceRepoDirNames: [],
     filePath: "late-lossy.txt",
     offset: 2,
     limit: 2
@@ -194,6 +203,7 @@ test("read 在 CRLF 跨 chunk 边界时不应额外产生空行", async () => {
 
   const result = await runReadTool({
     workspacePath,
+    workspaceRepoDirNames: [],
     filePath: "crlf-boundary.txt",
     offset: 2,
     limit: 2
@@ -210,7 +220,7 @@ test("read 读取目录分页时提示使用返回的 offset", async () => {
   await fs.writeFile(path.join(workspacePath, "nested", "b.txt"), "b", "utf8");
   await fs.writeFile(path.join(workspacePath, "nested", "c.txt"), "c", "utf8");
 
-  const result = await runReadTool({ workspacePath, filePath: "nested", offset: 1, limit: 2 });
+  const result = await runReadTool({ workspacePath, workspaceRepoDirNames: [], filePath: "nested", offset: 1, limit: 2 });
 
   assert.match(result.content, /a\.txt/);
   assert.match(result.content, /b\.txt/);
@@ -224,10 +234,347 @@ test("read 在目录 offset 超过条目数时返回 EOF 说明而不是失败",
   await fs.writeFile(path.join(workspacePath, "nested", "a.txt"), "a", "utf8");
   await fs.writeFile(path.join(workspacePath, "nested", "b.txt"), "b", "utf8");
 
-  const result = await runReadTool({ workspacePath, filePath: "nested", offset: 5, limit: 20 });
+  const result = await runReadTool({ workspacePath, workspaceRepoDirNames: [], filePath: "nested", offset: 5, limit: 20 });
 
   assert.equal(result.summary, "读取目录 nested");
   assert.equal(result.content, "(End of directory - total 2 entries. Requested offset=5 exceeds directory length. No more entries to read. Do not call read again for this directory unless the directory contents change.)");
+});
+
+test("read 根路径缺失时仍失败并提示单个登记 repo 候选", async () => {
+  const workspacePath = await createWorkspace();
+  await fs.mkdir(path.join(workspacePath, "repo-a", "src"), { recursive: true });
+  await fs.writeFile(path.join(workspacePath, "repo-a", "src", "a.ts"), "export {};", "utf8");
+
+  await assert.rejects(
+    () => runReadTool({ workspacePath, workspaceRepoDirNames: ["repo-a"], filePath: "src/a.ts" }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /^ENOENT:/);
+      assert.match(error.message, /\n\nPath exists in registered workspace repo\(s\)\. Retry read with one of:\n- repo-a\/src\/a\.ts$/);
+      assert.equal(error.message.includes(workspacePath), true, "root error prefix remains unchanged");
+      return true;
+    }
+  );
+});
+
+test("read repo 候选按 UTF-8 字节序稳定排序，且不自动读取", async () => {
+  const workspacePath = await createWorkspace();
+  for (const repoName of ["repo-z", "repo-a"]) {
+    await fs.mkdir(path.join(workspacePath, repoName, "src"), { recursive: true });
+    await fs.writeFile(path.join(workspacePath, repoName, "src", "a.ts"), "export {};", "utf8");
+  }
+
+  await assert.rejects(
+    () => runReadTool({ workspacePath, workspaceRepoDirNames: ["repo-z", "repo-a"], filePath: "src/a.ts" }),
+    /- repo-a\/src\/a\.ts\n- repo-z\/src\/a\.ts$/
+  );
+});
+
+test("read repo 探测无候选或非法名称时保持原始错误", async () => {
+  const workspacePath = await createWorkspace();
+  await fs.mkdir(path.join(workspacePath, "repo-a"), { recursive: true });
+
+  await assert.rejects(
+    () => runReadTool({ workspacePath, workspaceRepoDirNames: ["..", "repo/a", "repo-a"], filePath: "src/a.ts" }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /^ENOENT:/);
+      assert.doesNotMatch(error.message, /Path exists in registered workspace repo/);
+      return true;
+    }
+  );
+});
+
+test("read 对 ENOTDIR 根错误提示 repo 候选", async () => {
+  const workspacePath = await createWorkspace();
+  await fs.writeFile(path.join(workspacePath, "src"), "not a directory", "utf8");
+  await fs.mkdir(path.join(workspacePath, "repo-a", "src"), { recursive: true });
+  await fs.writeFile(path.join(workspacePath, "repo-a", "src", "a.ts"), "export {};", "utf8");
+
+  await assert.rejects(
+    () => runReadTool({ workspacePath, workspaceRepoDirNames: ["repo-a"], filePath: "src/a.ts" }),
+    /ENOTDIR:.*\n\nPath exists in registered workspace repo\(s\)\. Retry read with one of:\n- repo-a\/src\/a\.ts$/s
+  );
+});
+
+test("read 不提示 repo 根或最终候选自身为 symlink", async (t) => {
+  const workspacePath = await createWorkspace();
+  const outsidePath = await createWorkspace();
+  const targetPath = path.join(outsidePath, "target");
+  await fs.mkdir(path.join(targetPath, "src"), { recursive: true });
+  await fs.writeFile(path.join(targetPath, "src", "a.ts"), "export {};", "utf8");
+  try {
+    await fs.symlink(targetPath, path.join(workspacePath, "repo-root-link"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EPERM") t.skip("symlink is unavailable on this platform");
+    else throw error;
+  }
+  await fs.mkdir(path.join(workspacePath, "repo-file-link", "src"), { recursive: true });
+  await fs.symlink(path.join(targetPath, "src", "a.ts"), path.join(workspacePath, "repo-file-link", "src", "a.ts"));
+
+  await assert.rejects(
+    () => runReadTool({ workspacePath, workspaceRepoDirNames: ["repo-root-link", "repo-file-link"], filePath: "src/a.ts" }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.doesNotMatch(error.message, /Path exists in registered workspace repo/);
+      return true;
+    }
+  );
+});
+
+test("read 可提示 workspace 内中间 symlink，但不提示逃逸中间 symlink", async (t) => {
+  const workspacePath = await createWorkspace();
+  const internalTarget = path.join(workspacePath, "internal-target");
+  const outsidePath = await createWorkspace();
+  await fs.mkdir(internalTarget, { recursive: true });
+  await fs.mkdir(path.join(outsidePath, "external-target"), { recursive: true });
+  await fs.writeFile(path.join(internalTarget, "a.ts"), "export {};", "utf8");
+  await fs.writeFile(path.join(outsidePath, "external-target", "a.ts"), "export {};", "utf8");
+  await fs.mkdir(path.join(workspacePath, "repo-internal"), { recursive: true });
+  await fs.mkdir(path.join(workspacePath, "repo-external"), { recursive: true });
+  try {
+    await fs.symlink(internalTarget, path.join(workspacePath, "repo-internal", "src"));
+    await fs.symlink(path.join(outsidePath, "external-target"), path.join(workspacePath, "repo-external", "src"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EPERM") return t.skip("symlink is unavailable on this platform");
+    else throw error;
+  }
+
+  await assert.rejects(
+    () => runReadTool({ workspacePath, workspaceRepoDirNames: ["repo-external", "repo-internal"], filePath: "src/a.ts" }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /- repo-internal\/src\/a\.ts/);
+      assert.doesNotMatch(error.message, /repo-external\/src\/a\.ts/);
+      return true;
+    }
+  );
+});
+
+test("read repo 提示最多显示十项并报告剩余数量", async () => {
+  const workspacePath = await createWorkspace();
+  const repoNames = Array.from({ length: 12 }, (_, index) => `repo-${String(index).padStart(2, "0")}`);
+  for (const repoName of repoNames) {
+    await fs.mkdir(path.join(workspacePath, repoName, "src"), { recursive: true });
+    await fs.writeFile(path.join(workspacePath, repoName, "src", "a.ts"), "export {};", "utf8");
+  }
+
+  await assert.rejects(
+    () => runReadTool({ workspacePath, workspaceRepoDirNames: [...repoNames].reverse(), filePath: "src/a.ts" }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /- repo-00\/src\/a\.ts/);
+      assert.match(error.message, /- repo-09\/src\/a\.ts/);
+      assert.doesNotMatch(error.message, /- repo-10\/src\/a\.ts/);
+      assert.match(error.message, /- \.\.\. and 2 more candidate\(s\) not shown$/);
+      return true;
+    }
+  );
+});
+
+test("read probe 在已取消时不追加候选提示", async () => {
+  const workspacePath = await createWorkspace();
+  await fs.mkdir(path.join(workspacePath, "repo-a", "src"), { recursive: true });
+  await fs.writeFile(path.join(workspacePath, "repo-a", "src", "a.ts"), "export {};", "utf8");
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.rejects(
+    () => runReadTool({ workspacePath, workspaceRepoDirNames: ["repo-a"], filePath: "src/a.ts", signal: controller.signal }),
+    /operation aborted/
+  );
+});
+
+test("repo probe 在中途取消后不派发后续候选，也不返回已完成匹配", async () => {
+  const workspacePath = await createWorkspace();
+  for (const repoName of ["repo-a", "repo-b"]) {
+    await fs.mkdir(path.join(workspacePath, repoName, "src"), { recursive: true });
+    await fs.writeFile(path.join(workspacePath, repoName, "src", "a.ts"), "export {};", "utf8");
+  }
+  const controller = new AbortController();
+  let releaseFirstProbe!: () => void;
+  const firstProbeGate = new Promise<void>((resolve) => {
+    releaseFirstProbe = resolve;
+  });
+  const originalLstat = fs.lstat;
+  let repoRootCalls = 0;
+  (fs as any).lstat = async (targetPath: string) => {
+    if (targetPath === path.join(workspacePath, "repo-a")) {
+      repoRootCalls += 1;
+      await firstProbeGate;
+    }
+    return await originalLstat(targetPath);
+  };
+  try {
+    const probe = __testing.probeRegisteredRepoCandidates({
+      workspacePath,
+      repoDirNames: ["repo-a", "repo-b"],
+      safePath: "src/a.ts",
+      signal: controller.signal
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    controller.abort();
+    releaseFirstProbe();
+    assert.deepEqual(await probe, []);
+    assert.equal(repoRootCalls, 1);
+  } finally {
+    (fs as any).lstat = originalLstat;
+  }
+});
+
+test("repo probe 忽略单个候选内部异常并继续其他候选", async () => {
+  const workspacePath = await createWorkspace();
+  await fs.mkdir(path.join(workspacePath, "repo-a", "src"), { recursive: true });
+  await fs.mkdir(path.join(workspacePath, "repo-b", "src"), { recursive: true });
+  await fs.writeFile(path.join(workspacePath, "repo-a", "src", "a.ts"), "export {};", "utf8");
+  await fs.writeFile(path.join(workspacePath, "repo-b", "src", "a.ts"), "export {};", "utf8");
+  const originalLstat = fs.lstat;
+  (fs as any).lstat = async (targetPath: string) => {
+    if (targetPath === path.join(workspacePath, "repo-a")) throw new Error("probe fixture failure");
+    return await originalLstat(targetPath);
+  };
+  try {
+    assert.deepEqual(
+      await __testing.probeRegisteredRepoCandidates({
+        workspacePath,
+        repoDirNames: ["repo-a", "repo-b"],
+        safePath: "src/a.ts"
+      }),
+      ["repo-b/src/a.ts"]
+    );
+  } finally {
+    (fs as any).lstat = originalLstat;
+  }
+});
+
+test("read 对登记 repo 下的目录候选仍失败并给出重试提示", async () => {
+  const workspacePath = await createWorkspace();
+  await fs.mkdir(path.join(workspacePath, "repo-a", "docs"), { recursive: true });
+
+  await assert.rejects(
+    () => runReadTool({ workspacePath, workspaceRepoDirNames: ["repo-a"], filePath: "docs" }),
+    (error: unknown) => {
+      const message = String(error);
+      return message.includes("ENOENT:") && message.includes("- repo-a/docs");
+    }
+  );
+});
+
+test("仅 ENOENT 和 ENOTDIR 根错误会触发 repo probe", () => {
+  assert.equal(__testing.isMissingRootPathError({ code: "ENOENT" }), true);
+  assert.equal(__testing.isMissingRootPathError({ code: "ENOTDIR" }), true);
+  assert.equal(__testing.isMissingRootPathError({ code: "EACCES" }), false);
+  assert.equal(__testing.isMissingRootPathError(new Error("ENOENT in message only")), false);
+});
+
+test("read 根 lstat 的非缺失错误不探测登记 repo", async () => {
+  const workspacePath = await createWorkspace();
+  const accessError = new Error("permission denied") as NodeJS.ErrnoException;
+  accessError.code = "EACCES";
+  const messageOnlyError = new Error("ENOENT appears only in this error message");
+
+  for (const rootError of [accessError, messageOnlyError]) {
+    let probeCalls = 0;
+    await assert.rejects(
+      () =>
+        __testing.runReadTool(
+          {
+            workspacePath,
+            workspaceRepoDirNames: ["repo-a"],
+            filePath: "src/a.ts"
+          },
+          {
+            rootLstat: async () => {
+              throw rootError;
+            },
+            probeCandidates: async () => {
+              probeCalls += 1;
+              return ["repo-a/src/a.ts"];
+            }
+          }
+        ),
+      (error: unknown) => {
+        assert.equal(error, rootError);
+        assert.equal(String(error).includes("Path exists in registered workspace repo(s). Retry read with one of:"), false);
+        return true;
+      }
+    );
+    assert.equal(probeCalls, 0);
+  }
+});
+
+test("repo probe 的部分内部异常不会丢失其他有效候选", async () => {
+  const workspacePath = "/workspace";
+  const stat = { isSymbolicLink: () => false } as any;
+  const fileSystem = {
+    async lstat(target: string) {
+      if (target.endsWith("repo-b/src/a.ts")) {
+        const error = new Error("candidate io failure") as NodeJS.ErrnoException;
+        error.code = "EIO";
+        throw error;
+      }
+      return stat;
+    },
+    async realpath(target: string) {
+      return target;
+    }
+  };
+
+  const matches = await __testing.probeRegisteredRepoCandidates({
+    workspacePath,
+    repoDirNames: ["repo-b", "repo-a"],
+    safePath: "src/a.ts"
+  }, fileSystem);
+
+  assert.deepEqual(matches, ["repo-a/src/a.ts"]);
+});
+
+test("repo probe 的全部内部异常只产生空候选，由调用方保留根错误", async () => {
+  const workspacePath = "/workspace";
+  const fileSystem = {
+    async lstat() {
+      const error = new Error("probe unavailable") as NodeJS.ErrnoException;
+      error.code = "EIO";
+      throw error;
+    },
+    async realpath(target: string) {
+      return target;
+    }
+  };
+
+  const matches = await __testing.probeRegisteredRepoCandidates({
+    workspacePath,
+    repoDirNames: ["repo-a", "repo-b"],
+    safePath: "src/a.ts"
+  }, fileSystem);
+
+  assert.deepEqual(matches, []);
+});
+
+test("候选在 lstat 后、realpath 前消失时不作为匹配提示", async () => {
+  const workspacePath = "/workspace";
+  const stat = { isSymbolicLink: () => false } as any;
+  const fileSystem = {
+    async lstat() {
+      return stat;
+    },
+    async realpath(target: string) {
+      if (target.endsWith("repo-a/src/a.ts")) {
+        const error = new Error("candidate disappeared") as NodeJS.ErrnoException;
+        error.code = "ENOENT";
+        throw error;
+      }
+      return target;
+    }
+  };
+
+  const matches = await __testing.probeRegisteredRepoCandidates({
+    workspacePath,
+    repoDirNames: ["repo-a"],
+    safePath: "src/a.ts"
+  }, fileSystem);
+
+  assert.deepEqual(matches, []);
 });
 
 test("skill V2 共用 frontmatter helper 保留根正文并遵守完整边界", () => {

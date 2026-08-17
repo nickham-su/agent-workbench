@@ -42,6 +42,7 @@ function makeRun(sessionId: string, runId: string) {
     sessionId,
     runId,
     workspacePath: process.cwd(),
+    workspaceRepoDirNames: [],
     inputText: "hello"
   };
 }
@@ -356,5 +357,43 @@ test("executeTool 遇到 AbortError 不会把工具项更新为 failed", async (
   });
 
   assert.deepEqual(result, { paused: false });
+  assert.deepEqual(statuses, ["running"]);
+});
+
+test("read probe 期间 signal abort 时不会把根路径错误写成 failed", async () => {
+  const statuses: string[] = [];
+  const controller = new AbortController();
+  const apiClient = {
+    async updateContextItem(input: { status: string }) {
+      statuses.push(input.status);
+      return;
+    }
+  };
+  const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+  (runner as any).toolRegistry = {
+    async isToolEnabled() {
+      return true;
+    },
+    async execute() {
+      controller.abort();
+      throw new Error("ENOENT: no such file or directory, lstat '/workspace/src/a.ts'");
+    }
+  };
+
+  await executeToolForTest(runner, {
+    profile: baseProfile(),
+    run: makeRun("sess_parent", "run_parent"),
+    tool: {
+      itemId: 2,
+      status: "queued",
+      toolName: "read",
+      toolCallId: "call_abort_read",
+      args: { filePath: "src/a.ts" }
+    },
+    parentSessionId: "sess_parent",
+    signal: controller.signal,
+    promptContext: baseContext()
+  });
+
   assert.deepEqual(statuses, ["running"]);
 });

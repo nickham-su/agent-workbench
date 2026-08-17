@@ -3,6 +3,13 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { EnqueuePayload } from "./runtime/runner.js";
 import { AgentRunner } from "./runtime/runner.js";
+import { normalizeWorkspaceRepoDirNames as normalizeWorkerWorkspaceRepoDirNames } from "./runtime/workspaceRepoDirNames.js";
+
+/** Normalizes untrusted enqueue JSON without touching the filesystem. */
+export function normalizeWorkspaceRepoDirNames(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return normalizeWorkerWorkspaceRepoDirNames(value);
+}
 
 async function readJsonBody(req: IncomingMessage) {
   const chunks: Buffer[] = [];
@@ -61,7 +68,8 @@ export function createWorkerServer(params: {
           sessionId: body.sessionId,
           runId: body.runId,
           inputText: body.inputText,
-          workspacePath: body.workspacePath
+          workspacePath: body.workspacePath,
+          workspaceRepoDirNames: normalizeWorkspaceRepoDirNames(body.workspaceRepoDirNames)
         });
         sendJson(res, 202, { ok: true });
         return;

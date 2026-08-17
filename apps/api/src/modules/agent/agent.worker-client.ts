@@ -1,13 +1,9 @@
 import type { FastifyBaseLogger } from "fastify";
 import { request as httpRequest } from "node:http";
 import { HttpError } from "../../app/errors.js";
-import type { AgentRuntimePort } from "./agent.runtime-port.js";
-import type { AgentQueuedRun } from "./agent.service.js";
+import type { AgentRuntimePort, AgentRuntimeRun } from "./agent.runtime-port.js";
 
-type WorkerQueuedRun = AgentQueuedRun & {
-  inputText?: string;
-  workspacePath: string;
-};
+type WorkerQueuedRun = AgentRuntimeRun;
 
 export class AgentWorkerClient implements AgentRuntimePort {
   constructor(

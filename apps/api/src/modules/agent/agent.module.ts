@@ -4,6 +4,7 @@ import { registerAgentRoutes } from "./agent.routes.js";
 import { AgentRuntime } from "./agent.runtime.js";
 import type { AgentRuntimePort } from "./agent.runtime-port.js";
 import { AgentService } from "./agent.service.js";
+import { getAgentWorkspaceRunContext } from "./agent-run-context.js";
 import { AgentWorkerClient } from "./agent.worker-client.js";
 import { AgentWorkerProcessManager } from "./agent.worker-manager.js";
 import {
@@ -29,8 +30,8 @@ async function enqueueRecoveringRuns(service: AgentService, runtime: AgentRuntim
   for (const row of rows) {
     const session = service.getSession(row.sessionId);
     if (!session) continue;
-    const workspace = service.getWorkspace(session.workspaceId);
-    if (!workspace) continue;
+    const runContext = getAgentWorkspaceRunContext(service.getContext(), row.workspaceId);
+    if (!runContext) continue;
     let inputText = "";
     if (row.triggerItemId) {
       const trigger = service.getContextItemById(row.triggerItemId);
@@ -44,7 +45,7 @@ async function enqueueRecoveringRuns(service: AgentService, runtime: AgentRuntim
         sessionId: row.sessionId,
         runId: row.runId,
         inputText,
-        workspacePath: workspace.path
+        ...runContext
       });
     } catch (err) {
       // recover 模式下，enqueue 失败不应阻塞服务启动。
