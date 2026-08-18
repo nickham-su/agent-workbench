@@ -176,6 +176,7 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
       workerOrigin: `http://${ctx.agentWorkerHost}:${ctx.agentWorkerPort}`,
       workerSocketPath: ctx.agentWorkerSocketPath,
       internalToken: ctx.agentInternalToken,
+      responseValidation: ctx.agentWorkerResponseValidation,
       logger: app.log
     });
     workerManager = new AgentWorkerProcessManager({

@@ -1,7 +1,13 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { EnqueuePayload } from "./runtime/runner.js";
+import { Value } from "@sinclair/typebox/value";
+import { AgentWorkerEndpoints } from "@agent-workbench/shared/internal-contracts/endpoints";
+import {
+  AgentWorkerCancelSessionRequestSchema,
+  AgentWorkerEnqueueRequestSchema
+} from "@agent-workbench/shared/internal-contracts/agent-worker";
+import type { AgentWorkerEnqueueRequest } from "@agent-workbench/shared/internal-contracts/agent-worker";
 import { AgentRunner } from "./runtime/runner.js";
 import { normalizeWorkspaceRepoDirNames as normalizeWorkerWorkspaceRepoDirNames } from "./runtime/workspaceRepoDirNames.js";
 
@@ -46,38 +52,43 @@ export function createWorkerServer(params: {
       const method = String(req.method || "GET").toUpperCase();
       const pathname = String(req.url || "").split("?")[0] || "";
 
-      if (method === "GET" && pathname === "/internal/health") {
+      if (method === AgentWorkerEndpoints.health.method && pathname === AgentWorkerEndpoints.health.path) {
         sendJson(res, 200, { ok: true });
         return;
       }
 
-      if (method === "POST" && pathname === "/internal/runs/enqueue") {
-        const body = (await readJsonBody(req)) as Partial<EnqueuePayload>;
-        if (
-          typeof body.workspaceId !== "string" ||
-          typeof body.sessionId !== "string" ||
-          typeof body.runId !== "string" ||
-          (body.inputText != null && typeof body.inputText !== "string") ||
-          typeof body.workspacePath !== "string"
-        ) {
+      if (method === AgentWorkerEndpoints.enqueueRun.method && pathname === AgentWorkerEndpoints.enqueueRun.path) {
+        const body: unknown = await readJsonBody(req);
+        if (!Value.Check(AgentWorkerEnqueueRequestSchema, body)) {
+          const diagnostics = [...Value.Errors(AgentWorkerEnqueueRequestSchema, body)].map((error) => ({
+            path: error.path,
+            message: error.message
+          }));
+          console.warn("invalid agent-worker enqueue payload", { diagnostics });
           sendJson(res, 400, { message: "invalid enqueue payload" });
           return;
         }
+        const enqueue = body as AgentWorkerEnqueueRequest;
         params.runner.enqueueRun({
-          workspaceId: body.workspaceId,
-          sessionId: body.sessionId,
-          runId: body.runId,
-          inputText: body.inputText,
-          workspacePath: body.workspacePath,
-          workspaceRepoDirNames: normalizeWorkspaceRepoDirNames(body.workspaceRepoDirNames)
+          workspaceId: enqueue.workspaceId,
+          sessionId: enqueue.sessionId,
+          runId: enqueue.runId,
+          inputText: enqueue.inputText === null ? undefined : enqueue.inputText,
+          workspacePath: enqueue.workspacePath,
+          workspaceRepoDirNames: normalizeWorkspaceRepoDirNames(enqueue.workspaceRepoDirNames)
         });
         sendJson(res, 202, { ok: true });
         return;
       }
 
-      if (method === "POST" && pathname === "/internal/runs/cancel-session") {
-        const body = (await readJsonBody(req)) as { sessionId?: unknown };
-        if (typeof body.sessionId !== "string") {
+      if (method === AgentWorkerEndpoints.cancelSession.method && pathname === AgentWorkerEndpoints.cancelSession.path) {
+        const body: unknown = await readJsonBody(req);
+        if (!Value.Check(AgentWorkerCancelSessionRequestSchema, body)) {
+          const diagnostics = [...Value.Errors(AgentWorkerCancelSessionRequestSchema, body)].map((error) => ({
+            path: error.path,
+            message: error.message
+          }));
+          console.warn("invalid agent-worker cancel-session payload", { diagnostics });
           sendJson(res, 400, { message: "invalid sessionId" });
           return;
         }

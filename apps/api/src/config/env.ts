@@ -16,6 +16,7 @@ export type Env = {
   agentWorkerSocketPath: string;
   agentWorkerConcurrency: number;
   agentInternalToken: string;
+  agentWorkerResponseValidation: "strict" | "warn";
   agentApiOrigin: string;
   agentStartupRecoveryMode: "fail" | "recover";
   agentPluginHostEnabled: boolean;
@@ -59,6 +60,7 @@ export function loadEnv(processEnv: NodeJS.ProcessEnv): Env {
   const workerSocketRaw = processEnv.AWB_AGENT_WORKER_SOCKET?.trim() || "";
   const workerConcurrencyRaw = processEnv.AWB_AGENT_WORKER_CONCURRENCY?.trim() || "2";
   const internalTokenRaw = processEnv.AWB_AGENT_INTERNAL_TOKEN?.trim() || "";
+  const responseValidationRaw = processEnv.AWB_INTERNAL_RPC_RESPONSE_VALIDATION?.trim().toLowerCase() || "strict";
   const apiOriginRaw = processEnv.AWB_AGENT_API_ORIGIN?.trim() || "";
   const startupRecoveryModeRaw = processEnv.AWB_AGENT_STARTUP_RECOVERY_MODE?.trim() || "";
   const pluginHostEnabledRaw = processEnv.AWB_AGENT_PLUGIN_HOST_ENABLED?.trim() || "";
@@ -76,6 +78,11 @@ export function loadEnv(processEnv: NodeJS.ProcessEnv): Env {
   const authCookieSecure = parseBool(authCookieSecureRaw, false);
   const agentWorkerEnabled = parseBool(workerEnabledRaw, true);
   const agentInternalToken = internalTokenRaw || randomBytes(24).toString("hex");
+  if (responseValidationRaw !== "strict" && responseValidationRaw !== "warn") {
+    throw new Error(
+      `Invalid AWB_INTERNAL_RPC_RESPONSE_VALIDATION: ${responseValidationRaw}. Expected "strict" or "warn".`
+    );
+  }
   const resolvedDataDir = path.resolve(dataDir);
   const agentWorkerSocketPath = path.resolve(workerSocketRaw || path.join(resolvedDataDir, "agent-worker.sock"));
   const agentPluginHostSocketPath = path.resolve(pluginHostSocketRaw || path.join(resolvedDataDir, "agent-plugin-host.sock"));
@@ -106,6 +113,7 @@ export function loadEnv(processEnv: NodeJS.ProcessEnv): Env {
     agentWorkerSocketPath,
     agentWorkerConcurrency,
     agentInternalToken,
+    agentWorkerResponseValidation: responseValidationRaw,
     agentApiOrigin,
     agentStartupRecoveryMode: agentStartupRecoveryMode as "fail" | "recover",
     agentPluginHostEnabled,

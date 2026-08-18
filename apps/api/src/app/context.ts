@@ -28,6 +28,7 @@ export type AppContext = {
   agentWorkerSocketPath: string;
   agentWorkerConcurrency: number;
   agentInternalToken: string;
+  agentWorkerResponseValidation?: "strict" | "warn";
   agentApiOrigin: string;
   agentStartupRecoveryMode: "fail" | "recover";
   agentPluginHostEnabled: boolean;

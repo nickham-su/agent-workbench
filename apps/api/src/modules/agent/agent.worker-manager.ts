@@ -3,6 +3,7 @@ import { request as httpRequest } from "node:http";
 import path from "node:path";
 import fs from "node:fs/promises";
 import type { FastifyBaseLogger } from "fastify";
+import { AgentWorkerEndpoints } from "@agent-workbench/shared/internal-contracts/endpoints";
 
 async function fileExists(filePath: string) {
   try {
@@ -182,8 +183,8 @@ export class AgentWorkerProcessManager {
             const req = httpRequest(
               {
                 socketPath: this.params.socketPath,
-                path: "/internal/health",
-                method: "GET",
+                path: AgentWorkerEndpoints.health.path,
+                method: AgentWorkerEndpoints.health.method,
                 headers: {
                   "x-awb-agent-internal-token": this.params.internalToken
                 }
@@ -202,7 +203,8 @@ export class AgentWorkerProcessManager {
           });
           if (ok) return;
         } else {
-          const response = await fetch(`${origin}/internal/health`, {
+          const response = await fetch(`${origin}${AgentWorkerEndpoints.health.path}`, {
+            method: AgentWorkerEndpoints.health.method,
             headers: {
               "x-awb-agent-internal-token": this.params.internalToken
             }

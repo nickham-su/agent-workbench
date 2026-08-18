@@ -44,6 +44,7 @@ const app = await createApp({
   agentWorkerSocketPath: env.agentWorkerSocketPath,
   agentWorkerConcurrency: env.agentWorkerConcurrency,
   agentInternalToken: env.agentInternalToken,
+  agentWorkerResponseValidation: env.agentWorkerResponseValidation,
   agentApiOrigin: env.agentApiOrigin,
   agentStartupRecoveryMode: env.agentStartupRecoveryMode,
   agentPluginHostEnabled: env.agentPluginHostEnabled,
