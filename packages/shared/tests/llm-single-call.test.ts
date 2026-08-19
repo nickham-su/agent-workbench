@@ -82,7 +82,7 @@ test("openai apiMode 支持 chatCompletions 值", async () => {
   );
 });
 
-test("single-call openai 在提供 workspaceId 且未配置有效 promptCacheKey 时自动补默认值", async () => {
+test("single-call openai 在提供 sessionId 且未配置有效 promptCacheKey 时自动补默认值", async () => {
   const profile = createMockProfile();
   profile.model.options = {
     providerOptionsByKey: {
@@ -117,13 +117,13 @@ test("single-call openai 在提供 workspaceId 且未配置有效 promptCacheKey
     profile.provider.options.baseURL = `http://127.0.0.1:${address.port}/v1`;
 
     const result = await generateSingleCallText(profile, {
-      workspaceId: "ws_single",
+      sessionId: "sess_single",
       messages: [{ role: "user", content: "hello" }],
       timeoutMs: 5_000
     });
 
     assert.equal(result.text, "hello");
-    assert.match(requestBody, /"prompt_cache_key":"awb:ws_single"/);
+    assert.match(requestBody, /"prompt_cache_key":"awb:sess_single"/);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
   }

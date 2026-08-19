@@ -13,7 +13,7 @@ type SummaryParams = {
   input: {
     messages: Array<{ role: string; content: unknown }>;
     system?: string;
-    workspaceId?: string;
+    sessionId?: string;
     timeoutMs: number;
     abortSignal: AbortSignal;
   };
@@ -39,6 +39,7 @@ function createPreforkContext(apiClient: PreforkApiClient, signal = new AbortCon
 test("subtask prefork summary 透传 messages-context.system 到 one-shot 调用", async () => {
   let captured: {
     system?: string;
+    sessionId?: string;
     messages: Array<{ role: string; content: unknown }>;
   } | null = null;
 
@@ -51,12 +52,14 @@ test("subtask prefork summary 透传 messages-context.system 到 one-shot 调用
       input: {
         messages: Array<{ role: string; content: unknown }>;
         system?: string;
+        sessionId?: string;
         timeoutMs: number;
         abortSignal: AbortSignal;
       };
     }) {
       captured = {
         system: params.input.system,
+        sessionId: params.input.sessionId,
         messages: params.input.messages
       };
       return { text: "prefork summary", totalTokens: null };
@@ -138,6 +141,7 @@ test("subtask prefork summary 透传 messages-context.system 到 one-shot 调用
 
   assert.equal((result as any).subtaskSessionId, "sub_sess");
   assert.equal((captured as { system?: string } | null)?.system, "LANG-SYSTEM");
+  assert.equal((captured as { sessionId?: string } | null)?.sessionId, "sess_parent");
   assert.equal(updatedToolItems[0]?.status, "running");
 });
 

@@ -321,32 +321,32 @@ test("bash 后接 subtask 时拆成两个并发段", () => {
 test("openai providerOptions 为空时自动补 promptCacheKey", () => {
   const options = buildProviderOptionsWithPromptCacheKeyForTest({
     providerNpm: "@ai-sdk/openai",
-    workspaceId: "ws_123",
+    sessionId: "sess_123",
     providerOptions: {}
   });
 
   assert.deepEqual(options, {
-    promptCacheKey: "awb:ws_123"
+    promptCacheKey: "awb:sess_123"
   });
 });
 
 test("openai providerOptions 缺少 promptCacheKey 时自动补默认值", () => {
   const options = buildProviderOptionsWithPromptCacheKeyForTest({
     providerNpm: "@ai-sdk/openai",
-    workspaceId: "ws_123",
+    sessionId: "sess_123",
     providerOptions: { temperature: 0.2 }
   });
 
   assert.deepEqual(options, {
     temperature: 0.2,
-    promptCacheKey: "awb:ws_123"
+    promptCacheKey: "awb:sess_123"
   });
 });
 
 test("openai providerOptions 已配置 promptCacheKey 时保持原值", () => {
   const options = buildProviderOptionsWithPromptCacheKeyForTest({
     providerNpm: "@ai-sdk/openai",
-    workspaceId: "ws_123",
+    sessionId: "sess_123",
     providerOptions: { temperature: 0.2, promptCacheKey: "user-defined" }
   });
 
@@ -369,24 +369,24 @@ test("仅有效非空字符串 promptCacheKey 才视为已配置", () => {
 test("openai providerOptions 的空字符串 promptCacheKey 会回退默认值", () => {
   const options = buildProviderOptionsWithPromptCacheKeyForTest({
     providerNpm: "@ai-sdk/openai",
-    workspaceId: "ws_123",
+    sessionId: "sess_123",
     providerOptions: { promptCacheKey: "" }
   });
 
   assert.deepEqual(options, {
-    promptCacheKey: "awb:ws_123"
+    promptCacheKey: "awb:sess_123"
   });
 });
 
 test("openai providerOptions 的空白 promptCacheKey 会回退默认值", () => {
   const options = buildProviderOptionsWithPromptCacheKeyForTest({
     providerNpm: "@ai-sdk/openai",
-    workspaceId: "ws_123",
+    sessionId: "sess_123",
     providerOptions: { promptCacheKey: "   " }
   });
 
   assert.deepEqual(options, {
-    promptCacheKey: "awb:ws_123"
+    promptCacheKey: "awb:sess_123"
   });
 });
 
@@ -394,18 +394,18 @@ test("openai providerOptions 的 null/undefined/非字符串 promptCacheKey 会�
   assert.deepEqual(
     buildProviderOptionsWithPromptCacheKeyForTest({
       providerNpm: "@ai-sdk/openai",
-      workspaceId: "ws_123",
+      sessionId: "sess_123",
       providerOptions: { promptCacheKey: null }
     }),
-    { promptCacheKey: "awb:ws_123" }
+    { promptCacheKey: "awb:sess_123" }
   );
   assert.deepEqual(
     buildProviderOptionsWithPromptCacheKeyForTest({
       providerNpm: "@ai-sdk/openai",
-      workspaceId: "ws_123",
+      sessionId: "sess_123",
       providerOptions: { promptCacheKey: undefined, other: true }
     }),
-    { promptCacheKey: "awb:ws_123", other: true }
+    { promptCacheKey: "awb:sess_123", other: true }
   );
 });
 

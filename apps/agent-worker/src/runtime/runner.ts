@@ -732,7 +732,7 @@ function hasValidPromptCacheKey(providerOptions: Record<string, unknown>) {
 
 function buildProviderOptionsWithPromptCacheKey(params: {
   providerNpm: ExecutionProfile["provider"]["npm"];
-  workspaceId: string;
+  sessionId: string;
   providerOptions: Record<string, unknown>;
 }) {
   if (params.providerNpm !== "@ai-sdk/openai") return params.providerOptions;
@@ -740,7 +740,7 @@ function buildProviderOptionsWithPromptCacheKey(params: {
 
   return {
     ...params.providerOptions,
-    promptCacheKey: `awb:${params.workspaceId}`
+    promptCacheKey: `awb:${params.sessionId}`
   };
 }
 
@@ -1655,12 +1655,12 @@ export class AgentRunner {
     input: {
       messages: Array<{ role: string; content: unknown }>;
       system?: string;
-      workspaceId?: string;
+      sessionId?: string;
       timeoutMs: number;
       abortSignal: AbortSignal;
     };
   }) {
-    // one-shot summary 若提供 workspaceId，则共享主模型请求的 OpenAI 默认 promptCacheKey 策略。
+    // one-shot summary 若提供 sessionId，则共享主模型请求的 OpenAI 默认 promptCacheKey 策略。
     return generateSingleCallText(params.profile, params.input);
   }
 
@@ -1693,7 +1693,7 @@ export class AgentRunner {
       input: {
         // compaction 是内部摘要任务，不继承执行态完整 system prompt；使用 messages-context 提供的 one-shot system。
         system: messagesContext.system,
-        workspaceId: params.profile.resolved.workspaceId,
+        sessionId: params.profile.resolved.sessionId,
         messages: messagesContext.messages,
         timeoutMs: COMPACTION_TIMEOUT_MS,
         abortSignal: params.signal
@@ -1916,7 +1916,7 @@ export class AgentRunner {
       requestBase.providerOptions = {
         [runtimeOptions.providerKey]: buildProviderOptionsWithPromptCacheKey({
           providerNpm: profile.provider.npm,
-          workspaceId: run.workspaceId,
+          sessionId: run.sessionId,
           providerOptions: runtimeOptions.providerOptions
         })
       };
@@ -2653,7 +2653,7 @@ export type EnqueuePayload = {
 
 export function buildProviderOptionsWithPromptCacheKeyForTest(params: {
   providerNpm: ExecutionProfile["provider"]["npm"];
-  workspaceId: string;
+  sessionId: string;
   providerOptions: Record<string, unknown>;
 }) {
   return buildProviderOptionsWithPromptCacheKey(params);
