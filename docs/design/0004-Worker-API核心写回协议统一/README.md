@@ -56,7 +56,8 @@ P1-4  POST /api/internal/agent/subtask/prefork-plan
 
 ## 核心不变量
 
-- 请求当前真实顺序保持为：**Fastify schema validation → handler 内 `assertInternalToken()` → Service**。无效 token 与无效 body 同时出现时返回 schema `400`，不是 `401`；1B 不将鉴权前移。
+- 请求当前真实顺序保持为：**全局 `onRequest` token 鉴权 → Fastify schema validation → handler/Service**。依据 `apps/api/src/app/auth.ts:15-28`，无效 token 与无效 body 同时出现时由全局鉴权优先返回 `401`，不是 `400`。
+- Route handler 内既有 `assertInternalToken()` 可继续作为防御性检查，但不是通常请求的主要 HTTP 鉴权顺序；1B 不移动鉴权 hook，也不改变其他 `/api/internal/*` 路由的错误优先级。
 - TypeBox `Type.Object` 未声明 `additionalProperties: false` 时，未知字段通过校验并保留；设置 `false` 时，当前 AJV `removeAdditional: true` 会剥离未知字段而非必然 `400`。
 - `run-state`、`run-complete` 的既有 ignored 分支继续返回 `200 { ok: true }`。
 - Context create 的 head 冲突仍为 `409`；terminal item update 仍为 `200` 返回原 item，且可能在 Store 判定 ignored 前已经有 artifact 文件副作用。

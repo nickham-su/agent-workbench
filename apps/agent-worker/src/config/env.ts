@@ -4,6 +4,7 @@ export type WorkerEnv = {
   socketPath: string | null;
   apiOrigin: string;
   internalToken: string;
+  responseValidation: "strict" | "warn";
   concurrency: number;
   pidFilePath: string | null;
 };
@@ -25,6 +26,12 @@ export function loadWorkerEnv(processEnv: NodeJS.ProcessEnv): WorkerEnv {
   if (!internalToken) {
     throw new Error("AWB_AGENT_INTERNAL_TOKEN is required");
   }
+  const responseValidation = (processEnv.AWB_INTERNAL_RPC_RESPONSE_VALIDATION || "strict").trim().toLowerCase();
+  if (responseValidation !== "strict" && responseValidation !== "warn") {
+    throw new Error(
+      `Invalid AWB_INTERNAL_RPC_RESPONSE_VALIDATION: ${responseValidation}. Expected "strict" or "warn".`
+    );
+  }
   const concurrency = parsePositiveInt(
     (processEnv.AWB_AGENT_WORKER_CONCURRENCY || "2").trim(),
     "AWB_AGENT_WORKER_CONCURRENCY"
@@ -37,6 +44,7 @@ export function loadWorkerEnv(processEnv: NodeJS.ProcessEnv): WorkerEnv {
     socketPath: socketPathRaw || null,
     apiOrigin,
     internalToken,
+    responseValidation,
     concurrency,
     pidFilePath: pidFileRaw || null
   };

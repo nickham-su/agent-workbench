@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { createServer } from "node:net";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
@@ -22,6 +23,7 @@ type Fixture = {
   baseUrl: string;
   workerPidFilePath: string;
   llmStub?: HttpServer;
+  internalRpcCalls: Array<{ method: string; url: string; body: unknown }>;
 };
 
 const fixtures = new Set<Fixture>();
@@ -170,7 +172,12 @@ async function configureAgentDefaults(baseUrl: string, llmBaseURL: string) {
 }
 
 async function createFixture(): Promise<Fixture> {
-  const repoRoot = path.resolve(process.cwd(), "../..");
+  const repoRoot = [
+    process.cwd(),
+    path.resolve(process.cwd(), ".."),
+    path.resolve(process.cwd(), "../..")
+  ].find((candidate) => existsSync(path.join(candidate, "node_modules", ".bin", "tsx")))
+    ?? path.resolve(process.cwd(), "../..");
   const testsRoot = path.join(repoRoot, ".tmp-tests");
   await ensureDir(testsRoot);
   const dataDir = await fs.mkdtemp(path.join(testsRoot, "agent-worker-it-"));
@@ -180,99 +187,108 @@ async function createFixture(): Promise<Fixture> {
   let db: Db | null = null;
   try {
     llmStub = await startLlmStubServer();
-   const apiPort = await getFreePort();
-   const workerPort = await getFreePort();
+    const apiPort = await getFreePort();
+    const workerPort = await getFreePort();
 
-   db = await openDb(dataDir);
-   app = await createApp({
-     db,
-     repoRoot,
-     dataDir,
-    fileMaxBytes: 1024 * 1024,
-    version: "test",
-    logLevel: "error",
-    serveWeb: false,
-    webDistDir: null,
-    credentialMasterKey: Buffer.alloc(32, 7),
-    credentialMasterKeySource: "generated",
-    credentialMasterKeyId: "testkey",
-    credentialMasterKeyCreatedAt: Date.now(),
-    authToken: null,
-    authCookieSecure: false,
-    agentWorkerEnabled: true,
-    agentWorkerHost: "127.0.0.1",
-    agentWorkerPort: workerPort,
-    agentWorkerSocketPath: path.join(dataDir, "agent-worker.sock"),
-     agentWorkerConcurrency: 2,
-     agentInternalToken: "worker-integration-token",
-     agentApiOrigin: `http://127.0.0.1:${apiPort}`,
-     agentStartupRecoveryMode: "recover",
-     agentPluginHostEnabled: false,
-     agentPluginHostSocketPath: path.join(dataDir, "agent-plugin-host.sock")
-   });
-  const workspaceId = newSortableId("ws");
-  const workspaceDirName = newSortableId("workspace");
-  const workspacePath = workspaceRoot(dataDir, workspaceDirName);
-  await ensureDir(workspacePath);
+    db = await openDb(dataDir);
+    app = await createApp({
+      db,
+      repoRoot,
+      dataDir,
+      fileMaxBytes: 1024 * 1024,
+      version: "test",
+      logLevel: "error",
+      serveWeb: false,
+      webDistDir: null,
+      credentialMasterKey: Buffer.alloc(32, 7),
+      credentialMasterKeySource: "generated",
+      credentialMasterKeyId: "testkey",
+      credentialMasterKeyCreatedAt: Date.now(),
+      authToken: null,
+      authCookieSecure: false,
+      agentWorkerEnabled: true,
+      agentWorkerHost: "127.0.0.1",
+      agentWorkerPort: workerPort,
+      agentWorkerSocketPath: path.join(dataDir, "agent-worker.sock"),
+      agentWorkerConcurrency: 2,
+      agentInternalToken: "worker-integration-token",
+      agentWorkerResponseValidation: "strict",
+      agentApiOrigin: `http://127.0.0.1:${apiPort}`,
+      agentStartupRecoveryMode: "recover",
+      agentPluginHostEnabled: false,
+      agentPluginHostSocketPath: path.join(dataDir, "agent-plugin-host.sock")
+    });
 
-  const ts = Date.now();
-  insertWorkspace(db, {
-    id: workspaceId,
-    dirName: workspaceDirName,
-    title: "worker-it-workspace",
-    path: workspacePath,
-    terminalCredentialId: null,
-    createdAt: ts,
-    updatedAt: ts
-  });
+    const workspaceId = newSortableId("ws");
+    const workspaceDirName = newSortableId("workspace");
+    const workspacePath = workspaceRoot(dataDir, workspaceDirName);
+    await ensureDir(workspacePath);
 
-   await app.listen({ host: "127.0.0.1", port: apiPort });
-   const baseUrl = `http://127.0.0.1:${apiPort}`;
-   await configureAgentDefaults(baseUrl, llmStub.baseURL);
+    const ts = Date.now();
+    insertWorkspace(db, {
+      id: workspaceId,
+      dirName: workspaceDirName,
+      title: "worker-it-workspace",
+      path: workspacePath,
+      terminalCredentialId: null,
+      createdAt: ts,
+      updatedAt: ts
+    });
 
-  const fixture: Fixture = {
-    app,
-    db,
-    dataDir,
-    workspaceId,
-    workspacePath,
-    baseUrl,
-    workerPidFilePath: agentWorkerPidPath(dataDir),
-    llmStub: llmStub.server
-  };
-   fixtures.add(fixture);
-   return fixture;
-   } catch (err) {
-     // Best-effort cleanup to avoid leaving worker process / server handles behind,
-     // which may cause the test runner to hang.
-     const errors: unknown[] = [];
-     try {
-       await new Promise<void>((resolve) => llmStub?.server.close(() => resolve()));
-     } catch (cleanupErr) {
-       errors.push(cleanupErr);
-     }
-     try {
-       await app?.close();
-     } catch (cleanupErr) {
-       errors.push(cleanupErr);
-     }
-     try {
-       db?.close();
-     } catch (cleanupErr) {
-       errors.push(cleanupErr);
-     }
-     try {
-       await rmrf(dataDir);
-     } catch (cleanupErr) {
-       errors.push(cleanupErr);
-     }
-     if (errors.length > 0) {
-       // Keep the original error as the primary failure signal.
-       // Attach cleanup issues for debugging without changing the thrown type.
-       (err as any).cleanupErrors = errors;
-     }
-     throw err;
-   }
+    // 真实 API-managed Worker 的 internal request recorder，必须在 app.listen 前安装。
+    const internalRpcCalls: Fixture["internalRpcCalls"] = [];
+    app.addHook("preHandler", async (request) => {
+      if (!request.url.startsWith("/api/internal/agent/")) return;
+      internalRpcCalls.push({ method: request.method, url: request.url, body: request.body });
+    });
+    await app.listen({ host: "127.0.0.1", port: apiPort });
+    const baseUrl = `http://127.0.0.1:${apiPort}`;
+    await configureAgentDefaults(baseUrl, llmStub.baseURL);
+
+    const fixture: Fixture = {
+      app,
+      db,
+      dataDir,
+      workspaceId,
+      workspacePath,
+      baseUrl,
+      workerPidFilePath: agentWorkerPidPath(dataDir),
+      llmStub: llmStub.server,
+      internalRpcCalls
+    };
+    fixtures.add(fixture);
+    return fixture;
+  } catch (err) {
+    // Best-effort cleanup to avoid leaving worker process / server handles behind,
+    // which may cause the test runner to hang.
+    const errors: unknown[] = [];
+    try {
+      if (llmStub) await new Promise<void>((resolve) => llmStub?.server.close(() => resolve()));
+    } catch (cleanupErr) {
+      errors.push(cleanupErr);
+    }
+    try {
+      if (app) await app.close();
+    } catch (cleanupErr) {
+      errors.push(cleanupErr);
+    }
+    try {
+      db?.close();
+    } catch (cleanupErr) {
+      errors.push(cleanupErr);
+    }
+    try {
+      await rmrf(dataDir);
+    } catch (cleanupErr) {
+      errors.push(cleanupErr);
+    }
+    if (errors.length > 0) {
+      // Keep the original error as the primary failure signal.
+      // Attach cleanup issues for debugging without changing the thrown type.
+      (err as any).cleanupErrors = errors;
+    }
+    throw err;
+  }
 }
 
 async function closeFixture(fixture: Fixture) {
@@ -361,6 +377,32 @@ test("worker 模式: 发送消息后会落地 context items", async () => {
     "string",
     "worker failure should be persisted as assistant output.error"
   );
+
+  const internalCalls = fixture.internalRpcCalls;
+  const callIndex = (predicate: (call: Fixture["internalRpcCalls"][number]) => boolean) => {
+    const index = internalCalls.findIndex(predicate);
+    assert.notEqual(index, -1, "real API-managed Worker internal request was not recorded");
+    return index;
+  };
+  const contextCreateIndex = callIndex((call) => call.method === "POST" && call.url === "/api/internal/agent/context-items");
+  const runStateIndex = callIndex((call) => call.method === "POST" && call.url === "/api/internal/agent/run-state");
+  const contextUpdateIndex = callIndex((call) => call.method === "PATCH" && call.url.startsWith("/api/internal/agent/context-items/"));
+  const runCompleteIndex = callIndex((call) => call.method === "POST" && call.url === "/api/internal/agent/run-complete");
+  assert.notEqual(contextCreateIndex, runStateIndex, "context create and run-state should be distinct requests");
+  assert.notEqual(runStateIndex, contextUpdateIndex, "run-state and context update should be distinct requests");
+  assert.ok(runStateIndex < contextUpdateIndex, "run-state should precede context update writeback");
+  assert.ok(contextUpdateIndex < runCompleteIndex, "context update should precede run completion");
+
+  const contextCreateBody = internalCalls[contextCreateIndex]?.body as { workspaceId?: unknown; sessionId?: unknown; runId?: unknown };
+  const runStateBody = internalCalls[runStateIndex]?.body as { workspaceId?: unknown; sessionId?: unknown; activeRunId?: unknown };
+  const runCompleteBody = internalCalls[runCompleteIndex]?.body as { workspaceId?: unknown; sessionId?: unknown; runId?: unknown };
+  for (const [name, body] of [["context create", contextCreateBody], ["run-state", runStateBody], ["run-complete", runCompleteBody]] as const) {
+    assert.equal(body.workspaceId, fixture.workspaceId, `${name} should carry workspaceId`);
+    assert.equal(body.sessionId, session.id, `${name} should carry sessionId`);
+  }
+  assert.equal(typeof contextCreateBody.runId, "string");
+  assert.equal(typeof runStateBody.activeRunId, "string");
+  assert.equal(typeof runCompleteBody.runId, "string");
 });
 
 test("worker 模式: worker pid 文件会被写入", async () => {

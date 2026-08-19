@@ -13,7 +13,7 @@
 |---|---|---|
 | shared contract | export、path/method、TypeBox 正反例、literal response | `agent-api` 可从 package export 导入；九 endpoint 定义完整；非法 schema 不通过 |
 | API env / Manager | strict/warn 默认、非法 fail-fast、显式 child env 覆盖 | API 和独立 Worker 均验证四种值；spawn env 带规范化值 |
-| API Route/Service | schema-first、token、业务 ignored/conflict/error、response serialization | Fastify injection + Store/Service fixture 验证 status/body/DB |
+| API Route/Service | 全局 onRequest token → schema validation、业务 ignored/conflict/error、response serialization | Fastify injection + Store/Service fixture 验证 status/body/DB |
 | Worker Client | request method/path/body、success schema、strict/warn、non2xx | mock fetch，断言 warning 与抛错类别 |
 | Worker Runner/tool | context 合法 output、compact conflict、prefork 降级、cancel | 复用既有 runner/builtin 测试文件，不建设第二套 runner harness |
 | API/Worker integration | 启动链、配置、核心写回 | 真实/近真实 Worker→API 主力流程 |
@@ -34,7 +34,8 @@
 
 #### 顺序与 unknown fields
 
-- 对每个代表性 endpoint 至少确认无效 body + 无效 token 返回 `400`，且 Service 未调用；合法 body + 无效 token 返回 `401`。
+- 对每个代表性 endpoint 至少确认无效 body + 无效 token 由全局 `onRequest` 优先返回 `401`，且 schema validation、handler、Service 均未执行；合法 body + 无效 token 同样返回 `401`。
+- 对 token 合法 + 无效 body 的代表性 endpoint，确认全局鉴权通过后由 schema validation 返回 `400`，handler/Service 不执行。
 - 对未 strict 的 object，追加未知顶层字段后请求通过且字段在 handler body 保留（可通过受控 fixture/spy 证实）。
 - `subtask.start.preforkMeta` 的未知字段被剥离后请求继续。
 - `subtask.start.session.mode=new|fork` 加额外 `sessionId` 必须通过宽松 union，进入 Service 并返回 `400 AGENT_SUBTASK_SESSION_ID_NOT_ALLOWED`。
@@ -58,7 +59,7 @@
 | 场景 | 断言 |
 |---|---|
 | 合法 Worker output create | 200，完整 record 符合 public schema；Worker 可取 item.id |
-| 非法 tool name create/update | request validation `4xx`，不发生 response serializer 500 |
+| 非法 tool name create/update | schema validation `400`，不发生 response serializer 500 |
 | create prevId/head mismatch | 409，`code=conflict_head:<id|null>`；Worker Client 转 `ApiConflictError` |
 | update 正常 | 200，完整 record |
 | update terminal item | 200 原 item，DB 未写；测试/文档不声称 artifact 绝无副作用 |

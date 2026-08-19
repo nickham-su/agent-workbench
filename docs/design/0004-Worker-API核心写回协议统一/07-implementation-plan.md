@@ -11,7 +11,7 @@
 
 **文件**：不新增生产实现；补充或确认 `agent.integration.test.ts`、`agent.worker.integration.test.ts`、Worker runner/client 测试的基线证据。
 
-**改动**：记录九接口当前 method/path/body/params/success/status；冻结 schema-first token 顺序、unknown field 行为、RS/RC ignored、context conflict/terminal ignored、compact 双 409、subtask error code/reuse/partial result、recover cancel 主行为。
+**改动**：记录九接口当前 method/path/body/params/success/status；冻结全局 `onRequest` token 鉴权 → schema validation → handler/Service 顺序、unknown field 行为、RS/RC ignored、context conflict/terminal ignored、compact 双 409、subtask error code/reuse/partial result、recover cancel 主行为。
 
 **禁止改动**：shared exports、Route schema、Client、Service、Store、Manager；不得“边调研边修复”。
 
@@ -32,31 +32,38 @@ packages/shared/src/internal-contracts/agent-api-context.ts
 packages/shared/src/internal-contracts/agent-api-subtask.ts
 packages/shared/package.json
 packages/shared/tests/internal-contracts.test.ts
+apps/api/src/config/env.ts
+apps/api/src/config/env.test.ts
+apps/api/src/app/context.ts
+apps/api/src/main.ts
+apps/api/src/modules/agent/agent.module.ts
+apps/api/src/modules/agent/agent.worker-manager.ts
+apps/api/src/modules/agent/agent.worker.integration.test.ts
 ```
 
-**改动**：定义九 endpoint registry、path builder、request/params/success response schema/type；复用 public context schema；仅新增 `./internal-contracts/agent-api` export；为 stable subtask code 建立最小常量集合。
+**改动**：定义九 endpoint registry、path builder、request/params/success response schema/type；复用 public context schema；仅新增 `./internal-contracts/agent-api` export；为 stable subtask code 建立最小常量集合。将 `AWB_INTERNAL_RPC_RESPONSE_VALIDATION` 的 API 侧规范化值纳入现有传播链：`loadEnv()` → `AppContext.agentWorkerResponseValidation` → `agent.module.ts` → `AgentWorkerProcessManager`，由 Manager 在 child env 中显式写入 `AWB_INTERNAL_RPC_RESPONSE_VALIDATION=<strict|warn>`。
 
-**禁止改动**：不修改 `contracts/agent.ts`，不改根 index，不新增 workspace/通配 exports，不迁移 Route/Client，不引入 HTTP/error framework。
+**禁止改动**：不修改 `contracts/agent.ts`，不改根 index，不新增 workspace/通配 exports，不迁移 Route/Client，不引入 HTTP/error framework；不把配置写入数据库、Settings、插件配置或公共 feature flag；不依赖 `...process.env` 偶然继承，不改变 Manager 的健康探针、启动顺序、并发、重启/backoff/circuit breaker。
 
-**完成条件**：shared build 生成可导入 JS/declaration；只存在一个新增公开入口；schema 精确表达 literal ok、context record、compact/subtask response。
+**完成条件**：shared build 生成可导入 JS/declaration；只存在一个新增公开入口；schema 精确表达 literal ok、context record、compact/subtask response；API 缺失值默认为 `strict`、仅接受规范化的 `strict|warn`、非法值 fail-fast；`AppContext`、`agent.module.ts` 与 Manager 接线完整，Manager 显式覆盖 child env，即使父 `process.env` 含非法原值也不被继承。
 
-**测试**：shared TypeBox 正反例、export smoke、合法 Worker output、非法 tool name、path builder、stable code 常量。
+**测试**：shared TypeBox 正反例、export smoke、合法 Worker output、非法 tool name、path builder、stable code 常量；API env 覆盖缺失/大小写与空白归一后的 `strict`/`warn`/非法值；API context/main/module 注入和 Manager spawn env 覆盖测试，确认传出的值为规范化配置。
 
-**审查/暂存/回滚**：审查 schema 是否复制真实现状、未过度 strict；复审通过后暂存 shared+tests。回滚必须整体回退，不留下无消费者的 public API。
+**审查/暂存/回滚**：审查 schema 是否复制真实现状、未过度 strict，并核对 API env → context → module → Manager 的完整传播及显式覆盖；复审通过后暂存 shared、API 配置接线与对应 tests 的原子集。回滚必须整体回退该原子集，不留下无消费者的 public API 或半条配置传播链；不得回滚成仅依赖父环境继承的状态。
 
 ## P1-1：Run（run-state / run-complete）
 
-**文件**：`agent-api-run.ts`/聚合入口、`agent.routes.ts`、`agent.service.ts`（只在显式映射确有需要时）、`apiClient.ts`、Run/API Client 测试。
+**文件**：`agent-api-run.ts`/聚合入口、`agent.routes.ts`、`agent.service.ts`（只在显式映射确有需要时）、`apps/agent-worker/src/config/env.ts`、`apps/agent-worker/src/main.ts`、`apps/agent-worker/src/runtime/apiClient.ts`、`apps/api/src/config/env.test.ts`、`apps/api/src/modules/agent/agent.worker.integration.test.ts`、`apps/api/src/modules/agent/agent.worker-client.test.ts`、`apps/agent-worker/src/config/env.test.ts`、`apps/agent-worker/src/runtime/apiClient.test.ts`。
 
-**改动**：Route/Client 使用共享 method/path/schema/type；success response 收紧为 literal `{ok:true}`；Client 对两接口做 runtime success validation；保留 Service ignored 分支。
+**改动**：Route/Client 使用共享 method/path/schema/type；success response 收紧为 literal `{ok:true}`；Client 对两接口做 runtime success validation；保留 Service ignored 分支。补齐 Worker 侧配置传播：`loadWorkerEnv()` 解析显式传入的 `AWB_INTERNAL_RPC_RESPONSE_VALIDATION`（缺失默认为 `strict`，非法值 fail-fast），`main.ts` 将 `WorkerEnv.responseValidation` 与 logger 传给 `AgentApiClient`，Client 按 strict/warn 执行成功响应校验。
 
-**禁止改动**：不得把 RS/RC 改为 404/409/applied；不得改 run-state machine、completion fallback、events、transaction、timeout/retry 或 token 顺序。
+**禁止改动**：不得把 RS/RC 改为 404/409/applied；不得改 run-state machine、completion fallback、events、transaction、timeout/retry 或 token 顺序；不得让 Worker 独立启动依赖 API 进程注入，不得把 warn 扩展为非 JSON、non-2xx 或错误响应的容错，不得改变现有 fetch、token header、URL、错误解析和 logger 脱敏边界。
 
-**完成条件**：RS-1~3、RC-1~3 都是 200 literal ok 且 DB 不变；正常写回无回归；strict/warn 可验证。
+**完成条件**：RS-1~3、RC-1~3 都是 200 literal ok 且 DB 不变；正常写回无回归；Worker 独立启动和 API 管理启动都能获得 `strict|warn`；`main.ts` 到 Client 的值和 logger 接线完整；strict/warn 可验证。
 
-**测试**：冻结表中全部 Run 场景，Client strict/warn/non2xx，API schema-first token 代表场景。
+**测试**：冻结表中全部 Run 场景，Worker env 覆盖缺失/strict/warn/非法值，Worker main 构造注入，Client strict/warn/non2xx 及成功 schema mismatch；API 全局鉴权优先级代表场景（无效 token + 无效 body 为 `401`，token 合法 + 无效 body 为 schema `400`）。
 
-**审查/暂存/回滚**：审查 ignored 语义和 ok literal；修复后复审、暂存 Run 的 shared/Route/Client/tests 原子集。失败时整体回退该集。
+**审查/暂存/回滚**：审查 ignored 语义和 ok literal，并核对 API 显式 spawn env 与 Worker env/main/Client 的端到端传播；修复后复审、暂存 Run 的 shared/Route/Client/配置/tests 原子集。失败时整体回退该集，不留下只改 API 或只改 Worker 的断链配置。
 
 ## P1-2：Context（create / update）
 

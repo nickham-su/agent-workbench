@@ -31,7 +31,7 @@
 
 | endpoint | 文件/基线行号 | 当前关键事实 |
 |---|---|---|
-| prefork-plan | `agent.routes.ts:533-572` | inline body、handler token、response 200/400/401/404 |
+| prefork-plan | `agent.routes.ts:533-572` | inline body、handler 内防御性 token 检查、response 200/400/401/404 |
 | subtask start | `:574-636` | `new`/`fork` member 宽松，`existing.sessionId` 必填，`preforkMeta` strict；existing 缺 sessionId 在 schema 阶段失败，new/fork 额外 sessionId 到 Service 处理 |
 | subtask result/status | `:638-695` | body workspace/session/run，读取 response |
 | context create | `:697-751` | `output:Type.Any()`、`ok:boolean` wrapper；迁移为 public output 与 literal ok |
@@ -39,7 +39,7 @@
 | run-state | `:1084-1117` 附近 | status/active fields，`ok:boolean`；保持 ignored 语义由 Service 决定 |
 | run-complete | `:1119-1146` 附近 | terminal status，`ok:boolean` |
 | compact | `:1148-1184` 附近 | response 是 `compacted/summaryItemId/archivedCount`，不是 ok wrapper |
-| token helper | `:72-77` | `assertInternalToken()` 在 handler 内，因此 route schema-first |
+| token helper | `:72-77` | Route handler 内的 `assertInternalToken()` 是防御性检查；通常请求先经过全局 `onRequest` 鉴权，再进行 schema validation。全局 hook 依据 `apps/api/src/app/auth.ts:15-28` |
 
 所有 handler 当前使用 `req.body as {...}`。迁移目标是 shared `Static` 类型和显式 Service 映射，禁止保留等价手写边界类型。现有 response `ok:boolean` 的收紧为 literal true 必须同步 Route、Client 与测试。
 

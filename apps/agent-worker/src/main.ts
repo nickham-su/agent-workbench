@@ -11,7 +11,9 @@ const env = loadWorkerEnv(process.env);
 
 const apiClient = new AgentApiClient({
   apiOrigin: env.apiOrigin,
-  internalToken: env.internalToken
+  internalToken: env.internalToken,
+  responseValidation: env.responseValidation,
+  logger: console
 });
 
 const mcpManager = new McpManager(apiClient, console);

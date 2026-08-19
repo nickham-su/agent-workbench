@@ -41,6 +41,38 @@ import {
   PluginToolRpcListResponseSchema,
   ErrorResponseSchema
 } from "@agent-workbench/shared";
+import {
+  AgentApiEndpoints,
+  AgentApiContextItemParamsSchema,
+  AgentApiCreateContextItemRequestSchema,
+  AgentApiCreateContextItemResponseSchema,
+  AgentApiUpdateContextItemRequestSchema,
+  AgentApiUpdateContextItemResponseSchema,
+  AgentApiCompactContextRequestSchema,
+  AgentApiCompactContextResponseSchema,
+  AgentApiSubtaskPreforkPlanRequestSchema,
+  AgentApiSubtaskPreforkPlanResponseSchema,
+  AgentApiSubtaskStartRequestSchema,
+  AgentApiSubtaskStartResponseSchema,
+  AgentApiSubtaskResultRequestSchema,
+  AgentApiSubtaskResultResponseSchema,
+  AgentApiSubtaskStatusRequestSchema,
+  AgentApiSubtaskStatusResponseSchema,
+  AgentApiRunCompleteRequestSchema,
+  AgentApiRunCompleteResponseSchema,
+  AgentApiRunStateRequestSchema,
+  AgentApiRunStateResponseSchema,
+  type AgentApiContextItemParams,
+  type AgentApiCreateContextItemRequest,
+  type AgentApiUpdateContextItemRequest,
+  type AgentApiCompactContextRequest,
+  type AgentApiSubtaskPreforkPlanRequest,
+  type AgentApiSubtaskStartRequest,
+  type AgentApiSubtaskResultRequest,
+  type AgentApiSubtaskStatusRequest,
+  type AgentApiRunCompleteRequest,
+  type AgentApiRunStateRequest
+} from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { AgentRuntimePort } from "./agent.runtime-port.js";
 import type { AgentService } from "./agent.service.js";
 import { getAgentWorkspaceRunContext } from "./agent-run-context.js";
@@ -530,225 +562,108 @@ export async function registerAgentRoutes(
     }
   );
 
-  app.post(
-    "/api/internal/agent/subtask/prefork-plan",
-    {
-      schema: {
-        tags: ["agent"],
-        body: Type.Object({
-          workspaceId: Type.String({ minLength: 1 }),
-          parentSessionId: Type.String({ minLength: 1 }),
-          parentRunId: Type.String({ minLength: 1 }),
-          parentToolItemId: Type.Number({ minimum: 1 }),
-          agentId: Type.String({ minLength: 1 }),
-          thresholdPct: Type.Optional(Type.Number())
-        }),
-        response: {
-          200: Type.Object({
-            shouldPrefork: Type.Boolean(),
-            thresholdPct: Type.Integer({ minimum: 50, maximum: 99 }),
-            parentLastResponseTotalTokens: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
-            childContextWindowTokens: Type.Integer({ minimum: 1 }),
-            thresholdTokens: Type.Integer({ minimum: 1 })
-          }),
-          400: ErrorResponseSchema,
-          401: ErrorResponseSchema,
-          404: ErrorResponseSchema
-        }
+  app.route({
+    method: AgentApiEndpoints.getSubtaskPreforkPlan.method,
+    url: AgentApiEndpoints.getSubtaskPreforkPlan.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiSubtaskPreforkPlanRequestSchema,
+      response: {
+        200: AgentApiSubtaskPreforkPlanResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+        404: ErrorResponseSchema
       }
     },
-    async (req) => {
+    handler: async (req) => {
       assertInternalToken(req, params.service);
-      const body = req.body as {
-        workspaceId: string;
-        parentSessionId: string;
-        parentRunId: string;
-        parentToolItemId: number;
-        agentId: string;
-        thresholdPct?: number;
-      };
+      const body = req.body as AgentApiSubtaskPreforkPlanRequest;
       return params.service.getSubtaskPreforkPlanFromWorker(body);
     }
-  );
+  });
 
-  app.post(
-    "/api/internal/agent/subtask/start",
-    {
-      schema: {
-        tags: ["agent"],
-        body: Type.Object({
-          workspaceId: Type.String({ minLength: 1 }),
-          parentSessionId: Type.String({ minLength: 1 }),
-          parentRunId: Type.String({ minLength: 1 }),
-          parentToolItemId: Type.Number({ minimum: 1 }),
-          description: Type.String({ minLength: 1 }),
-          prompt: Type.String({ minLength: 1 }),
-          agentId: Type.String({ minLength: 1 }),
-          session: Type.Union([
-            Type.Object({ mode: Type.Literal("new") }),
-             Type.Object({ mode: Type.Literal("existing"), sessionId: Type.String({ minLength: 1 }) }),
-             Type.Object({ mode: Type.Literal("fork") })
-           ]),
-           preforkSummaryText: Type.Optional(Type.String({ minLength: 1, maxLength: 100_000 })),
-           preforkMeta: Type.Optional(Type.Object({
-             thresholdPct: Type.Integer({ minimum: 50, maximum: 99 }),
-             parentLastResponseTotalTokens: Type.Number({ minimum: 0 }),
-            childContextWindowTokens: Type.Integer({ minimum: 1 })
-          }, {
-            additionalProperties: false
-          }))
-        }),
-        response: {
-          200: Type.Object({
-            sessionId: Type.String({ minLength: 1 }),
-            runId: Type.String({ minLength: 1 }),
-            workspacePath: Type.String({ minLength: 1 }),
-            agentName: Type.String({ minLength: 1 }),
-            reused: Type.Boolean()
-          }),
-          400: ErrorResponseSchema,
-          401: ErrorResponseSchema,
-          404: ErrorResponseSchema,
-          409: ErrorResponseSchema
-        }
+  app.route({
+    method: AgentApiEndpoints.startSubtask.method,
+    url: AgentApiEndpoints.startSubtask.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiSubtaskStartRequestSchema,
+      response: {
+        200: AgentApiSubtaskStartResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+        404: ErrorResponseSchema,
+        409: ErrorResponseSchema
       }
     },
-    async (req) => {
+    handler: async (req) => {
       assertInternalToken(req, params.service);
-      const body = req.body as {
-        workspaceId: string;
-        parentSessionId: string;
-        parentRunId: string;
-        parentToolItemId: number;
-        description: string;
-        prompt: string;
-        agentId: string;
-        session: { mode: "new" | "existing" | "fork"; sessionId?: string };
-        preforkSummaryText?: string;
-        preforkMeta?: {
-          thresholdPct: number;
-          parentLastResponseTotalTokens: number;
-          childContextWindowTokens: number;
-        };
-      };
+      const body = req.body as AgentApiSubtaskStartRequest;
       return params.service.startSubtaskRunFromWorker(body);
     }
-  );
+  });
 
-  app.post(
-    "/api/internal/agent/subtask/result",
-    {
-      schema: {
-        tags: ["agent"],
-        body: Type.Object({
-          workspaceId: Type.String({ minLength: 1 }),
-          sessionId: Type.String({ minLength: 1 }),
-          runId: Type.String({ minLength: 1 })
-        }),
-        response: {
-          200: Type.Object({
-            resultText: Type.String()
-          }),
-          400: ErrorResponseSchema,
-          401: ErrorResponseSchema,
-          404: ErrorResponseSchema
-        }
+  app.route({
+    method: AgentApiEndpoints.getSubtaskResult.method,
+    url: AgentApiEndpoints.getSubtaskResult.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiSubtaskResultRequestSchema,
+      response: {
+        200: AgentApiSubtaskResultResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+        404: ErrorResponseSchema
       }
     },
-    async (req) => {
+    handler: async (req) => {
       assertInternalToken(req, params.service);
-      const body = req.body as { workspaceId: string; sessionId: string; runId: string };
+      const body = req.body as AgentApiSubtaskResultRequest;
       return params.service.getSubtaskRunResultFromWorker(body);
     }
-  );
+  });
 
-  app.post(
-    "/api/internal/agent/subtask/status",
-    {
-      schema: {
-        tags: ["agent"],
-        body: Type.Object({
-          workspaceId: Type.String({ minLength: 1 }),
-          sessionId: Type.String({ minLength: 1 }),
-          runId: Type.String({ minLength: 1 })
-        }),
-        response: {
-          200: Type.Object({
-            status: Type.Union([
-              Type.Literal("running"),
-              Type.Literal("completed"),
-              Type.Literal("failed"),
-              Type.Literal("cancelled")
-            ])
-          }),
-          400: ErrorResponseSchema,
-          401: ErrorResponseSchema,
-          404: ErrorResponseSchema
-        }
+  app.route({
+    method: AgentApiEndpoints.getSubtaskStatus.method,
+    url: AgentApiEndpoints.getSubtaskStatus.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiSubtaskStatusRequestSchema,
+      response: {
+        200: AgentApiSubtaskStatusResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+        404: ErrorResponseSchema
       }
     },
-    async (req) => {
+    handler: async (req) => {
       assertInternalToken(req, params.service);
-      const body = req.body as { workspaceId: string; sessionId: string; runId: string };
+      const body = req.body as AgentApiSubtaskStatusRequest;
       return params.service.getSubtaskRunStatusFromWorker(body);
     }
-  );
+  });
 
-  app.post(
-    "/api/internal/agent/context-items",
-    {
-      schema: {
-        tags: ["agent"],
-        body: Type.Object({
-          workspaceId: Type.String({ minLength: 1 }),
-          sessionId: Type.String({ minLength: 1 }),
-          runId: Type.Union([Type.String(), Type.Null()]),
-          turnId: Type.Union([Type.String(), Type.Null()]),
-          step: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
-          prevId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
-          kind: Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool"), Type.Literal("system")]),
-          status: AgentContextItemStatusSchema,
-          output: Type.Any(),
-          createdAt: Type.Optional(Type.Number())
-        }),
-        response: {
-          200: Type.Object({ ok: Type.Boolean(), item: AgentContextItemRecordSchema }),
-          400: ErrorResponseSchema,
-          401: ErrorResponseSchema,
-          404: ErrorResponseSchema,
-          409: ErrorResponseSchema
-        }
+  app.route({
+    method: AgentApiEndpoints.createContextItem.method,
+    url: AgentApiEndpoints.createContextItem.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiCreateContextItemRequestSchema,
+      response: {
+        200: AgentApiCreateContextItemResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+        404: ErrorResponseSchema,
+        409: ErrorResponseSchema
       }
     },
-    async (req) => {
+    handler: async (req) => {
       assertInternalToken(req, params.service);
-      const body = req.body as {
-        workspaceId: string;
-        sessionId: string;
-        runId: string | null;
-         turnId: string | null;
-         step: number | null;
-         prevId: number | null;
-         kind: "user" | "assistant" | "tool" | "system";
-         status: "streaming" | "queued" | "running" | "completed" | "failed" | "cancelled";
-         output: unknown;
-         createdAt?: number;
-       };
-      const item = params.service.appendContextItemFromWorker({
-        workspaceId: body.workspaceId,
-        sessionId: body.sessionId,
-        runId: body.runId,
-        turnId: body.turnId,
-        step: body.step,
-        prevId: body.prevId,
-        kind: body.kind,
-        status: body.status,
-        output: body.output as any,
-        createdAt: body.createdAt
-      });
+      const body = req.body as AgentApiCreateContextItemRequest;
+      const item = params.service.appendContextItemFromWorker(body);
       return { ok: true, item };
-      }
-  );
+    }
+  });
 
   app.post(
     "/api/internal/agent/sessions/recent",
@@ -1045,143 +960,89 @@ export async function registerAgentRoutes(
     }
   );
 
-  app.patch(
-    "/api/internal/agent/context-items/:itemId",
-    {
-      schema: {
-        tags: ["agent"],
-        params: Type.Object({ itemId: Type.Number({ minimum: 1 }) }),
-        body: Type.Object({
-          status: Type.Optional(AgentContextItemStatusSchema),
-          output: Type.Optional(Type.Any()),
-          updatedAt: Type.Optional(Type.Number())
-        }),
-        response: {
-          200: Type.Object({ ok: Type.Boolean(), item: AgentContextItemRecordSchema }),
-          401: ErrorResponseSchema,
-          404: ErrorResponseSchema
-        }
+  app.route({
+    method: AgentApiEndpoints.updateContextItem.method,
+    url: AgentApiEndpoints.updateContextItem.routeTemplate,
+    schema: {
+      tags: ["agent"],
+      params: AgentApiContextItemParamsSchema,
+      body: AgentApiUpdateContextItemRequestSchema,
+      response: {
+        200: AgentApiUpdateContextItemResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+        404: ErrorResponseSchema
       }
     },
-    async (req) => {
+    handler: async (req) => {
       assertInternalToken(req, params.service);
-      const p = req.params as { itemId: number };
-      const body = req.body as {
-        status?: "streaming" | "queued" | "running" | "completed" | "failed" | "cancelled";
-        output?: unknown;
-        updatedAt?: number;
-      };
-      const item = await params.service.updateContextItemFromWorker({
-        itemId: p.itemId,
-        status: body.status,
-        output: body.output as any,
-        updatedAt: body.updatedAt
-      });
+      const routeParams = req.params as AgentApiContextItemParams;
+      const body = req.body as AgentApiUpdateContextItemRequest;
+      const item = await params.service.updateContextItemFromWorker({ itemId: routeParams.itemId, ...body });
       return { ok: true, item };
     }
-  );
+  });
 
-  app.post(
-    "/api/internal/agent/run-state",
-    {
-      schema: {
-        tags: ["agent"],
-        body: Type.Object({
-          workspaceId: Type.String({ minLength: 1 }),
-          sessionId: Type.String({ minLength: 1 }),
-          status: Type.Union([Type.Literal("idle"), Type.Literal("running")]),
-          activeRunId: Type.Union([Type.String(), Type.Null()]),
-          activeAssistantItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
-          lastResponseTotalTokens: Type.Optional(Type.Union([Type.Number({ minimum: 0 }), Type.Null()])),
-          runNoticeText: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-          updatedAt: Type.Optional(Type.Number())
-        }),
-        response: { 200: Type.Object({ ok: Type.Boolean() }), 401: ErrorResponseSchema }
+  app.route({
+    method: AgentApiEndpoints.updateRunState.method,
+    url: AgentApiEndpoints.updateRunState.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiRunStateRequestSchema,
+      response: {
+        200: AgentApiRunStateResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema
       }
     },
-    async (req) => {
+    handler: async (req) => {
       assertInternalToken(req, params.service);
-      const body = req.body as {
-        workspaceId: string;
-        sessionId: string;
-        status: "idle" | "running";
-        activeRunId: string | null;
-        activeAssistantItemId: number | null;
-        lastResponseTotalTokens?: number | null;
-        runNoticeText?: string | null;
-        updatedAt?: number;
-      };
+      const body = req.body as AgentApiRunStateRequest;
       params.service.updateRunStateFromWorker(body);
       return { ok: true };
     }
-  );
+  });
 
-  app.post(
-    "/api/internal/agent/run-complete",
-    {
-      schema: {
-        tags: ["agent"],
-        body: Type.Object({
-          workspaceId: Type.String({ minLength: 1 }),
-          sessionId: Type.String({ minLength: 1 }),
-          runId: Type.String({ minLength: 1 }),
-          status: Type.Union([Type.Literal("completed"), Type.Literal("failed"), Type.Literal("cancelled")]),
-          updatedAt: Type.Optional(Type.Number())
-        }),
-        response: { 200: Type.Object({ ok: Type.Boolean() }), 401: ErrorResponseSchema }
+  app.route({
+    method: AgentApiEndpoints.completeRun.method,
+    url: AgentApiEndpoints.completeRun.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiRunCompleteRequestSchema,
+      response: {
+        200: AgentApiRunCompleteResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema
       }
     },
-    async (req) => {
+    handler: async (req) => {
       assertInternalToken(req, params.service);
-      const body = req.body as {
-        workspaceId: string;
-        sessionId: string;
-        runId: string;
-        status: "completed" | "failed" | "cancelled";
-        updatedAt?: number;
-      };
+      const body = req.body as AgentApiRunCompleteRequest;
       params.service.completeRunFromWorker(body);
       return { ok: true };
     }
-  );
+  });
 
-  app.post(
-    "/api/internal/agent/context/compact",
-    {
-      schema: {
-        tags: ["agent"],
-        body: Type.Object({
-          workspaceId: Type.String({ minLength: 1 }),
-          sessionId: Type.String({ minLength: 1 }),
-          runId: Type.String({ minLength: 1 }),
-          expectedHeadItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
-          summaryText: Type.String({ minLength: 1 })
-        }),
-        response: {
-          200: Type.Object({
-            compacted: Type.Boolean(),
-            summaryItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
-            archivedCount: Type.Number({ minimum: 0 })
-          }),
-          400: ErrorResponseSchema,
-          401: ErrorResponseSchema,
-          404: ErrorResponseSchema,
-          409: ErrorResponseSchema
-        }
+  app.route({
+    method: AgentApiEndpoints.compactContext.method,
+    url: AgentApiEndpoints.compactContext.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiCompactContextRequestSchema,
+      response: {
+        200: AgentApiCompactContextResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+        404: ErrorResponseSchema,
+        409: ErrorResponseSchema
       }
     },
-    async (req) => {
+    handler: async (req) => {
       assertInternalToken(req, params.service);
-      const body = req.body as {
-        workspaceId: string;
-        sessionId: string;
-        runId: string;
-        expectedHeadItemId: number | null;
-        summaryText: string;
-      };
+      const body = req.body as AgentApiCompactContextRequest;
       return params.service.compactContextFromWorker(body);
     }
-  );
+  });
 
   app.post(
     "/api/internal/agent/archive/search",

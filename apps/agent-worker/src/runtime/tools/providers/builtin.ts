@@ -51,10 +51,7 @@ type ParsedSubtaskArgs = {
   description: string;
   prompt: string;
   agentId: string;
-  session: {
-    mode: "new" | "existing" | "fork";
-    sessionId?: string;
-  };
+  session: AgentApiSubtaskSession;
 };
 
 function toRecord(raw: unknown) {
@@ -87,6 +84,18 @@ function requireNonEmptyStringArg(raw: unknown, fieldName: string) {
     throw new Error(`${fieldName} must be a non-empty string`);
   }
   return value;
+}
+
+function isAbortLikeError(err: unknown, signal: AbortSignal) {
+  if (signal.aborted) return true;
+  if (!err || typeof err !== "object") return false;
+  const name = typeof (err as { name?: unknown }).name === "string" ? String((err as { name: string }).name) : "";
+  const code = typeof (err as { code?: unknown }).code === "string" ? String((err as { code: string }).code) : "";
+  const message = typeof (err as { message?: unknown }).message === "string" ? String((err as { message: string }).message) : "";
+  return name === "AbortError"
+    || code === "ABORT_ERR"
+    || /\babort(ed)?\b/i.test(name)
+    || /\babort(ed)?\b/i.test(message);
 }
 
 function parseSkillToolArgs(args: unknown) {
@@ -283,15 +292,12 @@ function parseSubtaskArgs(raw: Record<string, unknown>): ParsedSubtaskArgs {
     throw new Error(`subtask.session.sessionId is not allowed when mode=${mode}`);
   }
 
-  return {
-    description,
-    prompt,
-    agentId,
-    session: {
-      mode,
-      ...(sessionId ? { sessionId } : {})
-    }
-  };
+  const session: AgentApiSubtaskSession = mode === "existing"
+    ? { mode: "existing", sessionId }
+    : mode === "new"
+      ? { mode: "new", ...(sessionId ? { sessionId } : {}) }
+      : { mode: "fork", ...(sessionId ? { sessionId } : {}) };
+  return { description, prompt, agentId, session };
 }
 
 function toApplyPatchResult(prepared: Awaited<ReturnType<typeof prepareApplyPatchTool>>) {
@@ -693,9 +699,18 @@ export class BuiltinToolProvider implements ToolProvider {
                 };
               }
             }
-          } catch {
-            // prefork 预压缩失败时，回退到原有 subtask 启动路径。
+          } catch (err) {
+            if (isAbortLikeError(err, ctx.signal)) {
+              throw err;
+            }
+            // 只记录固定诊断，不打印 prompt、token、完整 response 或错误 payload。
+            console.warn("[agent-worker] subtask prefork summary failed; falling back to normal fork");
           }
+        }
+        if (ctx.signal.aborted) {
+          const abortError = new Error("subtask cancelled by parent abort");
+          (abortError as Error & { name: string }).name = "AbortError";
+          throw abortError;
         }
         const started = await ctx.apiClient.startSubtaskRun({
           workspaceId: ctx.run.workspaceId,
@@ -859,3 +874,4 @@ export class BuiltinToolProvider implements ToolProvider {
     }
   }
 }
+import type { AgentApiSubtaskSession } from "@agent-workbench/shared/internal-contracts/agent-api";

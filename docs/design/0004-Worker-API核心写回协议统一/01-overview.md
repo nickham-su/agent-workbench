@@ -23,15 +23,15 @@
 ```text
 AgentRunner / builtin subtask tool
   -> AgentApiClient（共享 endpoint + request schema/type）
+  -> 全局 onRequest token 鉴权
   -> API Fastify Route（schema validation）
-  -> handler assertInternalToken()
-  -> AgentService / AgentStore / artifact archive
+  -> handler / AgentService / AgentStore / artifact archive
   -> API success response（共享 response schema）
   -> AgentApiClient runtime response validation
   -> Runner 继续、停止或按既有业务层补偿
 ```
 
-请求校验和 token 的顺序是当前实现的一部分：Fastify 在进入 handler 前做 schema 校验，而 token 断言位于 handler 内。因此本期不能把文档或实现表述成“鉴权先于 schema”，也不能把鉴权前移到 `preValidation`/`onRequest`。
+请求处理顺序是当前全局鉴权合同的一部分：`apps/api/src/app/auth.ts:15-28` 的全局 `onRequest` 先执行 token 鉴权，再进入 Fastify schema validation，最后进入 handler/Service。无效 token + 无效 body 当前返回 `401`。Route handler 内的 `assertInternalToken()` 可继续保留为防御性检查，但不应被写成通常请求的主要 HTTP 鉴权步骤。1B 不移动该 hook，不把 token 检查改到 `preValidation`，也不改变其他 `/api/internal/*` 路由的错误优先级。
 
 ## 本期范围
 
@@ -73,7 +73,7 @@ transport timeout / retry
 
 - 九个 endpoint 在 shared 中有统一定义，并且只有 `@agent-workbench/shared/internal-contracts/agent-api` 作为新增公开入口。
 - 每批的 Route、Worker Client、Service 映射和测试与冻结合同一致；不得仅用 `as any` 绕过边界。
-- 合法现有 Worker context output 均通过新 request schema；非法 output 在边界以 validation `4xx` 失败，而不是在成功响应序列化阶段造成 `500`。
+- 合法现有 Worker context output 均通过新 request schema；非法 output 在边界以 schema validation `400` 失败，而不是在成功响应序列化阶段造成 `500`。
 - strict/warn 配置从 API 正规化、显式传入 Worker 子进程，并由 Worker `AgentApiClient` 使用。
 - 忽略、冲突、文件副作用、subtask reuse/recover 等已知边界有自动测试或明确的手测/风险记录。
 - 每批完成冻结测试、独立审查、修复、复审和暂存后才允许推进；最终完成全量审查和主力手测。

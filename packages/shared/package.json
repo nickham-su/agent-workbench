@@ -29,6 +29,10 @@
     "./internal-contracts/agent-worker": {
       "types": "./dist/internal-contracts/agent-worker.d.ts",
       "default": "./dist/internal-contracts/agent-worker.js"
+    },
+    "./internal-contracts/agent-api": {
+      "types": "./dist/internal-contracts/agent-api.d.ts",
+      "default": "./dist/internal-contracts/agent-api.js"
     }
   },
   "scripts": {

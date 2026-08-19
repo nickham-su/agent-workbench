@@ -684,6 +684,44 @@ test("compactContext 已重试后遇到 ApiConflictError 保留错误语义", as
   }
 });
 
+test("compactContext 首次遇到 ApiConflictError 不安排重试并立即向上抛出", async () => {
+  let compactCalls = 0;
+  class TestRunner extends AgentRunner {
+    protected override async generateCompactionSummary() {
+      return "summary-ok";
+    }
+  }
+  const runner = new TestRunner(
+    {
+      async compactContext() {
+        compactCalls += 1;
+        throw new ApiConflictError("context conflict");
+      },
+      async updateRunState() {
+        throw new Error("run state should not be updated for a conflict");
+      }
+    } as any,
+    {} as any,
+    { info() {}, warn() {}, error() {} },
+    1
+  );
+
+  await assert.rejects(
+    () => (runner as any).compactContext({
+      profile: {
+        runtime: { modelRequestMaxRetries: 3 },
+        model: {},
+        provider: {}
+      },
+      run: { workspaceId: "ws", sessionId: "sess", runId: "run" },
+      context: { headItemId: 1, uiLocale: "zh-CN" },
+      signal: AbortSignal.timeout(1_000)
+    }),
+    ApiConflictError
+  );
+  assert.equal(compactCalls, 1);
+});
+
 test("compactContext 返回 compacted:false 时不重试并清理 notice", async () => {
   let compactCalls = 0;
   class TestRunner extends AgentRunner {

@@ -187,6 +187,7 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
       workerConcurrency: ctx.agentWorkerConcurrency,
       apiOrigin: ctx.agentApiOrigin,
       internalToken: ctx.agentInternalToken,
+      responseValidation: ctx.agentWorkerResponseValidation,
       pidFilePath: agentWorkerPidPath(ctx.dataDir),
       logger: app.log
     });

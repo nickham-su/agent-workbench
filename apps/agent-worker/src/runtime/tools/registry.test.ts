@@ -3,6 +3,8 @@ import test from "node:test";
 
 import { ToolRegistry } from "./registry.js";
 import type { ResolvedToolDefinition, ToolExecutionContext, ToolListContext, ToolProvider } from "./types.js";
+import { toMcpToolNameForTest } from "../mcpManager.js";
+import { isMcpToolName } from "./types.js";
 
 function createToolListContext(): ToolListContext {
   return {
@@ -56,6 +58,16 @@ function createExecutionContext(): ToolExecutionContext {
     renderToolText: () => ""
   };
 }
+
+test("isMcpToolName matches the shared canonical MCP name contract", () => {
+  assert.equal(isMcpToolName("mcp_server_name"), true);
+  assert.equal(isMcpToolName("mcp_server-name_tool_name"), true);
+  assert.equal(isMcpToolName("mcp_x"), false);
+  assert.equal(isMcpToolName("mcp__tool"), false);
+  assert.equal(isMcpToolName("mcp_server_tool!"), false);
+  assert.equal(toMcpToolNameForTest("demo server", "read.file"), "mcp_demo_server_read_file");
+  assert.equal(toMcpToolNameForTest("demo", ""), null);
+});
 
 test("ToolRegistry dedupes tools by name", async () => {
   const provider: ToolProvider = {

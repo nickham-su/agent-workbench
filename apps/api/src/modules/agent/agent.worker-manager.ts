@@ -14,6 +14,32 @@ async function fileExists(filePath: string) {
   }
 }
 
+export function buildAgentWorkerSpawnEnv(params: {
+  parentEnv: NodeJS.ProcessEnv;
+  repoRoot: string;
+  workerHost: string;
+  workerPort: number;
+  socketPath: string;
+  workerConcurrency: number;
+  apiOrigin: string;
+  internalToken: string;
+  responseValidation: "strict" | "warn";
+  pidFilePath: string;
+}): NodeJS.ProcessEnv {
+  return {
+    ...params.parentEnv,
+    AWB_AGENT_WORKER_HOST: params.workerHost,
+    AWB_AGENT_WORKER_PORT: String(params.workerPort),
+    AWB_AGENT_WORKER_SOCKET: params.socketPath,
+    AWB_AGENT_WORKER_CONCURRENCY: String(params.workerConcurrency),
+    AWB_AGENT_API_ORIGIN: params.apiOrigin,
+    AWB_AGENT_INTERNAL_TOKEN: params.internalToken,
+    AWB_INTERNAL_RPC_RESPONSE_VALIDATION: params.responseValidation,
+    AWB_AGENT_WORKER_PID_FILE: params.pidFilePath,
+    AWB_AGENT_REPO_ROOT: params.repoRoot
+  };
+}
+
 export class AgentWorkerProcessManager {
   private child: ChildProcess | null = null;
   private stopping = false;
@@ -30,6 +56,7 @@ export class AgentWorkerProcessManager {
       workerConcurrency: number;
       apiOrigin: string;
       internalToken: string;
+      responseValidation: "strict" | "warn";
       pidFilePath: string;
       logger: FastifyBaseLogger;
     }
@@ -59,17 +86,18 @@ export class AgentWorkerProcessManager {
     const child = spawn(command, args, {
       cwd: this.params.repoRoot,
       stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        AWB_AGENT_WORKER_HOST: this.params.workerHost,
-        AWB_AGENT_WORKER_PORT: String(this.params.workerPort),
-        AWB_AGENT_WORKER_SOCKET: this.params.socketPath,
-        AWB_AGENT_WORKER_CONCURRENCY: String(this.params.workerConcurrency),
-        AWB_AGENT_API_ORIGIN: this.params.apiOrigin,
-        AWB_AGENT_INTERNAL_TOKEN: this.params.internalToken,
-        AWB_AGENT_WORKER_PID_FILE: this.params.pidFilePath,
-        AWB_AGENT_REPO_ROOT: this.params.repoRoot
-      }
+      env: buildAgentWorkerSpawnEnv({
+        parentEnv: process.env,
+        repoRoot: this.params.repoRoot,
+        workerHost: this.params.workerHost,
+        workerPort: this.params.workerPort,
+        socketPath: this.params.socketPath,
+        workerConcurrency: this.params.workerConcurrency,
+        apiOrigin: this.params.apiOrigin,
+        internalToken: this.params.internalToken,
+        responseValidation: this.params.responseValidation,
+        pidFilePath: this.params.pidFilePath
+      })
     });
     child.unref();
     this.child = child;

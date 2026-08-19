@@ -1,3 +1,5 @@
+import { AgentMcpToolNameSchema } from "@agent-workbench/shared";
+import { Value } from "@sinclair/typebox/value";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -43,7 +45,8 @@ function sanitizeSegment(raw: string) {
 }
 
 function toMcpToolName(serverId: string, toolName: string) {
-  return `mcp_${sanitizeSegment(serverId)}_${sanitizeSegment(toolName)}`;
+  const name = `mcp_${sanitizeSegment(serverId)}_${sanitizeSegment(toolName)}`;
+  return Value.Check(AgentMcpToolNameSchema, name) ? name : null;
 }
 
 function normalizeContentItem(item: unknown) {
@@ -251,6 +254,7 @@ export class McpManager {
         const response = await entry.client.listTools();
         for (const tool of response.tools) {
           const name = toMcpToolName(serverId, tool.name);
+          if (!name) continue;
           this.toolTargets.set(name, {
             serverId,
             toolName: tool.name
@@ -287,7 +291,9 @@ export class McpManager {
         try {
           const response = await entry.client.listTools();
           for (const tool of response.tools) {
-            this.toolTargets.set(toMcpToolName(serverId, tool.name), {
+            const name = toMcpToolName(serverId, tool.name);
+            if (!name) continue;
+            this.toolTargets.set(name, {
               serverId,
               toolName: tool.name
             });
@@ -319,4 +325,8 @@ export class McpManager {
       raw: result
     };
   }
+}
+
+export function toMcpToolNameForTest(serverId: string, toolName: string) {
+  return toMcpToolName(serverId, toolName);
 }

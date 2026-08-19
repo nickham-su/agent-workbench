@@ -35,15 +35,15 @@ run 是所有后续生命周期的最小状态底座；context create/update 是
 
 ## 行为保留决策
 
-### 保持 schema-first 鉴权行为
+### 保持全局 onRequest 鉴权行为
 
-当前 token 在 handler 内，Fastify schema 在 handler 前。将 token 前移会把“无效 token + 无效 body”从 `400` 改成 `401`，这是可观察合同变化，且不属于本期协议统一。因此必须保持：
+当前全局 `onRequest` hook 已在 Fastify schema validation 前执行 token 鉴权，依据 `apps/api/src/app/auth.ts:15-28`。因此真实顺序是：
 
 ```text
-schema validation -> assertInternalToken -> Service
+global onRequest token auth -> schema validation -> handler/Service
 ```
 
-鉴权优先、全局 hook 或错误 body 统一须另行立项。
+无效 token + 无效 body 当前返回 `401`，这是可观察 HTTP 合同。方案 A 选择保持该行为：不移动鉴权 hook、不将 token 检查移到 `preValidation`，避免扩大 1B 范围，也不改变其他 `/api/internal/*` 路由的错误优先级。handler 内既有 `assertInternalToken()` 可继续作为防御性检查，但不作为通常请求的主要鉴权步骤。本期合同以全局 hook 优先为准。
 
 ### 未知字段按 endpoint 的真实现状建模
 
@@ -61,7 +61,7 @@ RS-1~RS-3、RC-1~RC-3 继续 `200 {ok:true}`，不添加 `applied:false`，不�
 
 ### Context output 有意收紧非法内部输入
 
-Route `Type.Any()` 并不是兼容承诺。已知非法 tool output 可被接受，随后导致 response serialization `500`。选择直接复用 `AgentContextItemOutputSchema`，使当前合法 Worker output 不变，并把非法 payload 前移为 validation `4xx`。
+Route `Type.Any()` 并不是兼容承诺。已知非法 tool output 可被接受，随后导致 response serialization `500`。选择直接复用 `AgentContextItemOutputSchema`，使当前合法 Worker output 不变，并把非法 payload 前移为 schema validation `400`。
 
 这是本期唯一明确接受范围改变：只承诺公共 schema 表达的合法 output；动态 `args/result` 保持 `Type.Any()`，不建设全量工具结果精确 schema。审查与测试必须明确证明该改变，而不能将它掩盖为纯重构。
 

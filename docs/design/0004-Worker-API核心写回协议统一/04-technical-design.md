@@ -101,7 +101,7 @@ Type.Object({
 
 ## API Route 与 Service 迁移
 
-每批 Route 将 inline TypeBox schema 替换为 shared schema，并用 shared `Static` 类型接收 `req.body`/`req.params`。Route 仍负责：schema 声明、handler 内 `assertInternalToken()`、把协议输入显式映射给 Service、返回现有响应。不得用 `as any` 将 `output` 绕开新 schema。
+每批 Route 将 inline TypeBox schema 替换为 shared schema，并用 shared `Static` 类型接收 `req.body`/`req.params`。请求通常先经过全局 `onRequest` token 鉴权，再经过 schema validation；Route 仍负责保留 handler 内既有 `assertInternalToken()` 防御性检查、把协议输入显式映射给 Service、返回现有响应。不得用 `as any` 将 `output` 绕开新 schema。
 
 Service 不必被迫以 HTTP type 为唯一参数类型：
 
@@ -111,7 +111,7 @@ shared HTTP input -> Route 显式映射 -> 既有业务 input / Service
 
 只有完全等价且无业务重整时才可直接使用 shared type。Service 的归属校验、CAS、terminal ignored、transaction、artifact、subtask depth 和 session 不变量全部保留；Runner 也不复制 route validation。
 
-Fastify schema-first 顺序必须原样保留。不得将 `assertInternalToken` 移入 hook，或为“更安全”改变无效 token+无效 body 的 status。
+全局 `onRequest` token 鉴权 → schema validation → handler/Service 的顺序必须保持。不得移动鉴权 hook、将 token 检查改到 `preValidation`，或改变无效 token + 无效 body 当前返回 `401` 的 status；也不得改变其他 `/api/internal/*` 路由的错误优先级。
 
 ## Worker `AgentApiClient` 迁移与成功响应校验
 

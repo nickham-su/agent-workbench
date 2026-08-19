@@ -15,7 +15,6 @@ import type {
   AgentCompactSessionRequest,
   AgentCompactSessionResponse,
   AgentRevertSessionRequest,
-  AgentRunStatus,
   AgentUiLocale,
   AgentSendMessageRequest,
   AgentSendMessageResponse,
@@ -27,6 +26,18 @@ import type {
 } from "@agent-workbench/shared";
 import { isValidSkillPathSegment } from "@agent-workbench/shared";
 import { getPromptText, renderPromptTemplateFile } from "@agent-workbench/shared/prompts";
+import { AgentSubtaskErrorCode } from "@agent-workbench/shared/internal-contracts/agent-api";
+import type {
+  AgentApiCreateContextItemRequest,
+  AgentApiUpdateContextItemRequest,
+  AgentApiCompactContextRequest,
+  AgentApiSubtaskPreforkPlanRequest,
+  AgentApiSubtaskStartRequest,
+  AgentApiSubtaskResultRequest,
+  AgentApiSubtaskStatusRequest,
+  AgentApiRunCompleteRequest,
+  AgentApiRunStateRequest
+} from "@agent-workbench/shared/internal-contracts/agent-api";
 import { HttpError } from "../../app/errors.js";
 
 import type { AppContext } from "../../app/context.js";
@@ -2904,25 +2915,13 @@ export class AgentService {
     };
   }
 
-  appendContextItemFromWorker(params: {
-    workspaceId: string;
-    sessionId: string;
-    runId: string | null;
-    turnId: string | null;
-    step: number | null;
-    prevId: number | null;
-    kind: AgentContextItemRecord["kind"];
-    status: AgentContextItemStatus;
-    output: AgentContextItemRecord["output"];
-    createdAt?: number;
-  }) {
+  appendContextItemFromWorker(params: AgentApiCreateContextItemRequest) {
     if (
       params.kind === "tool" &&
       params.status === "completed" &&
-      params.output &&
-      (params.output as any).type === "tool" &&
-      (params.output as any).toolName === "apply_patch" &&
-      Object.prototype.hasOwnProperty.call(params.output as any, "result")
+      params.output.type === "tool" &&
+      params.output.toolName === "apply_patch" &&
+      Object.prototype.hasOwnProperty.call(params.output, "result")
     ) {
       // 本项目不保留 apply_patch 的 before/after 在 DB 中,必须走 update 路径写入 service artifact 后再瘦身入库。
       throw new HttpError(400, "apply_patch completed tool item must be updated, not appended");
@@ -2967,12 +2966,7 @@ export class AgentService {
     }
   }
 
-  async updateContextItemFromWorker(params: {
-    itemId: number;
-    status?: AgentContextItemStatus;
-    output?: AgentContextItemRecord["output"];
-    updatedAt?: number;
-  }) {
+  async updateContextItemFromWorker(params: AgentApiUpdateContextItemRequest & { itemId: number }) {
     const current = getContextItemById(this.ctx.db, params.itemId);
     const nextStatus = params.status ?? current?.status;
     let nextOutput = params.output;
@@ -2981,11 +2975,11 @@ export class AgentService {
     if (
       nextStatus === "completed" &&
       nextOutput &&
-      (nextOutput as any).type === "tool" &&
-      (nextOutput as any).toolName === "apply_patch" &&
-      Object.prototype.hasOwnProperty.call(nextOutput as any, "result")
+      nextOutput.type === "tool" &&
+      nextOutput.toolName === "apply_patch" &&
+      Object.prototype.hasOwnProperty.call(nextOutput, "result")
     ) {
-      const tool = nextOutput as any as { toolCallId?: unknown; result?: unknown };
+      const tool = nextOutput;
       const toolCallId = typeof tool.toolCallId === "string" ? tool.toolCallId.trim() : "";
       const workspaceId = current?.workspaceId;
       const { slim, artifact } = splitApplyPatchResult(tool.result);
@@ -3023,18 +3017,15 @@ export class AgentService {
       }
 
       nextOutput = {
-        ...(nextOutput as any),
+        ...nextOutput,
         result: slim
-      } as any;
+      };
     }
 
-    const isWriteTool = nextOutput &&
-      (nextOutput as any).type === "tool" &&
-      (nextOutput as any).toolName === "write";
     const isWriteTerminalStatus = nextStatus === "completed" || nextStatus === "failed" || nextStatus === "cancelled";
 
-    if (isWriteTool && isWriteTerminalStatus) {
-      const tool = nextOutput as any as { toolCallId?: unknown; result?: unknown; args?: unknown };
+    if (nextOutput?.type === "tool" && nextOutput.toolName === "write" && isWriteTerminalStatus) {
+      const tool = nextOutput;
       const toolCallId = typeof tool.toolCallId === "string" ? tool.toolCallId.trim() : "";
       const workspaceId = current?.workspaceId;
 
@@ -3073,9 +3064,9 @@ export class AgentService {
         }
 
         nextOutput = {
-          ...(nextOutput as any),
+          ...nextOutput,
           result: slim
-        } as any;
+        };
       }
     }
 
@@ -3108,16 +3099,7 @@ export class AgentService {
     return item;
   }
 
-  updateRunStateFromWorker(params: {
-    workspaceId: string;
-    sessionId: string;
-    status: AgentRunStatus;
-    activeRunId: string | null;
-    activeAssistantItemId: number | null;
-    lastResponseTotalTokens?: number | null;
-    runNoticeText?: string | null;
-    updatedAt?: number;
-  }) {
+  updateRunStateFromWorker(params: AgentApiRunStateRequest) {
     const currentState = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
     const activeRunId = typeof params.activeRunId === "string" && params.activeRunId.trim() ? params.activeRunId : null;
     const activeRun = activeRunId ? getRunRecord(this.ctx.db, activeRunId) : null;
@@ -3165,13 +3147,7 @@ export class AgentService {
     }
   }
 
-  completeRunFromWorker(params: {
-    workspaceId: string;
-    sessionId: string;
-    runId: string;
-    status: "completed" | "failed" | "cancelled";
-    updatedAt?: number;
-  }) {
+  completeRunFromWorker(params: AgentApiRunCompleteRequest) {
     const ts = params.updatedAt ?? nowMs();
     const run = getRunRecord(this.ctx.db, params.runId);
     if (!run) return;
@@ -3265,10 +3241,10 @@ export class AgentService {
       throw new HttpError(400, "invalid subtask anchor");
     }
     if (anchor.runId !== params.parentRunId) {
-      throw new HttpError(400, "invalid subtask anchor run", "AGENT_SUBTASK_ANCHOR_RUN_MISMATCH");
+      throw new HttpError(400, "invalid subtask anchor run", AgentSubtaskErrorCode.AnchorRunMismatch);
     }
     if (anchor.output.type !== "tool" || anchor.output.toolName !== "subtask") {
-      throw new HttpError(400, "invalid subtask anchor", "AGENT_SUBTASK_ANCHOR_INVALID");
+      throw new HttpError(400, "invalid subtask anchor", AgentSubtaskErrorCode.AnchorInvalid);
     }
 
     return {
@@ -3347,19 +3323,12 @@ export class AgentService {
     };
   }
 
-  getSubtaskPreforkPlanFromWorker(params: {
-    workspaceId: string;
-    parentSessionId: string;
-    parentRunId: string;
-    parentToolItemId: number;
-    agentId: string;
-    thresholdPct?: number;
-  }) {
+  getSubtaskPreforkPlanFromWorker(params: AgentApiSubtaskPreforkPlanRequest) {
     this.resolveSubtaskParentContext(params);
 
     const resolvedAgentId = String(params.agentId || "").trim();
     if (!resolvedAgentId) {
-      throw new HttpError(400, "subtask agentId is required", "AGENT_SUBTASK_AGENT_REQUIRED");
+      throw new HttpError(400, "subtask agentId is required", AgentSubtaskErrorCode.AgentRequired);
     }
 
     const thresholdRaw = params.thresholdPct;
@@ -3370,7 +3339,7 @@ export class AgentService {
           ? Math.floor(Number(thresholdRaw))
           : Number.NaN;
     if (!Number.isFinite(thresholdPct) || thresholdPct < 50 || thresholdPct > 99) {
-      throw new HttpError(400, "thresholdPct must be between 50 and 99", "AGENT_SUBTASK_PREFORK_THRESHOLD_INVALID");
+      throw new HttpError(400, "thresholdPct must be between 50 and 99", AgentSubtaskErrorCode.PreforkThresholdInvalid);
     }
 
     const profile = resolveExecutionProfile(this.ctx, {
@@ -3379,7 +3348,7 @@ export class AgentService {
       workspaceEnablement: getWorkspaceEnabledAgentIds(this.ctx, params.workspaceId)
     });
     const childContextWindowTokens = Math.max(1, Math.floor(Number(profile.model.contextWindowTokens || 0)));
-    const thresholdTokens = Math.floor(childContextWindowTokens * (thresholdPct / 100));
+    const thresholdTokens = Math.max(1, Math.floor(childContextWindowTokens * (thresholdPct / 100)));
 
     const parentState = getRunState(this.ctx.db, params.workspaceId, params.parentSessionId);
     const parentLastResponseTotalTokens = typeof parentState.lastResponseTotalTokens === "number"
@@ -3395,25 +3364,7 @@ export class AgentService {
     };
   }
 
-  async startSubtaskRunFromWorker(params: {
-    workspaceId: string;
-    parentSessionId: string;
-    parentRunId: string;
-    parentToolItemId: number;
-    description: string;
-    prompt: string;
-    agentId: string;
-    session: {
-      mode: "new" | "existing" | "fork";
-      sessionId?: string;
-    };
-    preforkSummaryText?: string;
-    preforkMeta?: {
-      thresholdPct: number;
-      parentLastResponseTotalTokens: number;
-      childContextWindowTokens: number;
-    };
-  }) {
+  async startSubtaskRunFromWorker(params: AgentApiSubtaskStartRequest) {
     const {
       parentSession,
       parentRun,
@@ -3428,12 +3379,22 @@ export class AgentService {
 
     const normalizedDescription = params.description.trim().slice(0, 50);
     if (!normalizedDescription) {
-      throw new HttpError(400, "subtask description is required", "AGENT_SUBTASK_DESCRIPTION_REQUIRED");
+      throw new HttpError(400, "subtask description is required", AgentSubtaskErrorCode.DescriptionRequired);
     }
     const subtaskTitleBase = normalizedDescription;
     const resolvedAgentId = String(params.agentId || "").trim();
     if (!resolvedAgentId) {
-      throw new HttpError(400, "subtask agentId is required", "AGENT_SUBTASK_AGENT_REQUIRED");
+      throw new HttpError(400, "subtask agentId is required", AgentSubtaskErrorCode.AgentRequired);
+    }
+    if (
+      (params.session.mode === "new" || params.session.mode === "fork")
+      && String(params.session.sessionId || "").trim()
+    ) {
+      throw new HttpError(
+        400,
+        `sessionId is not allowed when mode=${params.session.mode}`,
+        AgentSubtaskErrorCode.SessionIdNotAllowed
+      );
     }
 
     const hasPreforkSummaryText = Object.prototype.hasOwnProperty.call(params, "preforkSummaryText");
@@ -3442,7 +3403,7 @@ export class AgentService {
       throw new HttpError(
         400,
         "preforkSummaryText/preforkMeta is only allowed when session.mode=fork",
-        "AGENT_SUBTASK_PREFORK_NOT_ALLOWED"
+        AgentSubtaskErrorCode.PreforkNotAllowed
       );
     }
 
@@ -3451,12 +3412,12 @@ export class AgentService {
       throw new HttpError(
         400,
         `preforkSummaryText must be <= ${SUBTASK_PREFORK_SUMMARY_MAX_CHARS} characters`,
-        "AGENT_SUBTASK_PREFORK_SUMMARY_TOO_LONG"
+        AgentSubtaskErrorCode.PreforkSummaryTooLong
       );
     }
 
     if (hasPreforkMeta && !preforkSummaryText) {
-      throw new HttpError(400, "preforkMeta requires non-empty preforkSummaryText", "AGENT_SUBTASK_PREFORK_META_INVALID");
+      throw new HttpError(400, "preforkMeta requires non-empty preforkSummaryText", AgentSubtaskErrorCode.PreforkMetaInvalid);
     }
     if (hasPreforkMeta) {
       const preforkMeta = params.preforkMeta!;
@@ -3478,9 +3439,14 @@ export class AgentService {
         throw new HttpError(
           400,
           "preforkMeta does not match current prefork plan",
-          "AGENT_SUBTASK_PREFORK_META_MISMATCH"
+          AgentSubtaskErrorCode.PreforkMetaMismatch
         );
       }
+    }
+
+    const requestedSessionId = String(params.session.sessionId || "").trim();
+    if ((params.session.mode === "new" || params.session.mode === "fork") && requestedSessionId) {
+      throw new HttpError(400, `sessionId is not allowed when mode=${params.session.mode}`, AgentSubtaskErrorCode.SessionIdNotAllowed);
     }
 
     const existingChildRun = findSubtaskRunByParentTool(this.ctx.db, {
@@ -3492,7 +3458,7 @@ export class AgentService {
         throw new HttpError(
           409,
           "existing subtask session does not match the previously created child run",
-          "AGENT_SUBTASK_EXISTING_SESSION_MISMATCH"
+          AgentSubtaskErrorCode.ExistingSessionMismatch
         );
       }
       const workspace = getWorkspace(this.ctx.db, params.workspaceId);
@@ -3502,14 +3468,13 @@ export class AgentService {
 
     const runtime = getAgentRuntimeSettings(this.ctx);
     if (parentRun.subtaskDepth == null) {
-      throw new HttpError(409, "subtask depth cannot be determined for current parent run", "AGENT_SUBTASK_DEPTH_UNKNOWN");
+      throw new HttpError(409, "subtask depth cannot be determined for current parent run", AgentSubtaskErrorCode.DepthUnknown);
     }
     const childDepth = parentRun.subtaskDepth + 1;
     if (childDepth > runtime.maxSubtaskDepth) {
-      throw new HttpError(409, "subtask depth exceeds configured maximum", "AGENT_SUBTASK_MAX_DEPTH_EXCEEDED");
+      throw new HttpError(409, "subtask depth exceeds configured maximum", AgentSubtaskErrorCode.MaxDepthExceeded);
     }
 
-    const requestedSessionId = String(params.session.sessionId || "").trim();
     const forkBoundaryItemId = params.session.mode === "fork"
       ? this.resolveSubtaskForkBoundaryItemId({
           workspaceId: params.workspaceId,
@@ -3524,19 +3489,19 @@ export class AgentService {
     if (params.session.mode === "existing") {
       const sessionId = requestedSessionId;
       if (!sessionId) {
-        throw new HttpError(400, "existing sessionId is required", "AGENT_SUBTASK_EXISTING_SESSION_REQUIRED");
+        throw new HttpError(400, "existing sessionId is required", AgentSubtaskErrorCode.ExistingSessionRequired);
       }
       session = getAgentSession(this.ctx.db, sessionId);
-      if (!session) throw new HttpError(404, "subtask session not found", "AGENT_SUBTASK_SESSION_NOT_FOUND");
+      if (!session) throw new HttpError(404, "subtask session not found", AgentSubtaskErrorCode.SessionNotFound);
       if (session.workspaceId !== params.workspaceId) {
-        throw new HttpError(400, "subtask session workspace mismatch", "AGENT_SUBTASK_WORKSPACE_MISMATCH");
+        throw new HttpError(400, "subtask session workspace mismatch", AgentSubtaskErrorCode.WorkspaceMismatch);
       }
       if (session.kind !== "subtask") {
-        throw new HttpError(400, "existing session must be subtask", "AGENT_SUBTASK_KIND_MISMATCH");
+        throw new HttpError(400, "existing session must be subtask", AgentSubtaskErrorCode.KindMismatch);
       }
     } else if (params.session.mode === "fork") {
       if (requestedSessionId) {
-        throw new HttpError(400, "sessionId is not allowed when mode=fork", "AGENT_SUBTASK_SESSION_ID_NOT_ALLOWED");
+        throw new HttpError(400, "sessionId is not allowed when mode=fork", AgentSubtaskErrorCode.SessionIdNotAllowed);
       }
       if (shouldUsePreforkSummary) {
         session = this.createSession({
@@ -3564,7 +3529,7 @@ export class AgentService {
       }
     } else if (params.session.mode === "new") {
       if (requestedSessionId) {
-        throw new HttpError(400, "sessionId is not allowed when mode=new", "AGENT_SUBTASK_SESSION_ID_NOT_ALLOWED");
+        throw new HttpError(400, "sessionId is not allowed when mode=new", AgentSubtaskErrorCode.SessionIdNotAllowed);
       }
       session = this.createSession({
         workspaceId: params.workspaceId,
@@ -3574,12 +3539,12 @@ export class AgentService {
         forkedFromItemId: params.parentToolItemId
       });
     } else {
-      throw new HttpError(400, "invalid subtask session mode", "AGENT_SUBTASK_SESSION_MODE_INVALID");
+      throw new HttpError(400, "invalid subtask session mode", AgentSubtaskErrorCode.SessionModeInvalid);
     }
 
     const state = getRunState(this.ctx.db, session.workspaceId, session.id);
     if (state.status !== "idle") {
-      throw new HttpError(409, "subtask session is running", "AGENT_SUBTASK_SESSION_RUNNING");
+      throw new HttpError(409, "subtask session is running", AgentSubtaskErrorCode.SessionRunning);
     }
 
     const profile = resolveExecutionProfile(this.ctx, {
@@ -3595,7 +3560,7 @@ export class AgentService {
     const runId = newSortableId("run");
     const text = params.prompt.trim();
     if (!text) {
-      throw new HttpError(400, "subtask prompt is required", "AGENT_SUBTASK_PROMPT_REQUIRED");
+      throw new HttpError(400, "subtask prompt is required", AgentSubtaskErrorCode.PromptRequired);
     }
 
     const tx = this.ctx.db.transaction(() => {
@@ -3709,7 +3674,7 @@ export class AgentService {
     while (cursorId != null) {
       const item = getContextItemById(this.ctx.db, cursorId);
       if (!item || item.workspaceId !== params.workspaceId || item.sessionId !== params.sessionId) {
-        throw new HttpError(400, "invalid subtask fork boundary", "AGENT_SUBTASK_FORK_BOUNDARY_INVALID");
+        throw new HttpError(400, "invalid subtask fork boundary", AgentSubtaskErrorCode.ForkBoundaryInvalid);
       }
       if (
         item.kind === "assistant"
@@ -3724,7 +3689,7 @@ export class AgentService {
     return null;
   }
 
-  getSubtaskRunResultFromWorker(params: { workspaceId: string; sessionId: string; runId: string }) {
+  getSubtaskRunResultFromWorker(params: AgentApiSubtaskResultRequest) {
     const session = getAgentSession(this.ctx.db, params.sessionId);
     if (!session) throw new HttpError(404, "session not found");
     if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
@@ -3739,12 +3704,14 @@ export class AgentService {
 
     for (let i = items.length - 1; i >= 0; i -= 1) {
       const item = items[i];
-      if (!item) continue;
-      if (item.kind === "assistant" && item.output.type === "assistant_text" && String(item.output.text || "").trim()) {
+      if (item?.kind === "assistant" && item.output.type === "assistant_text" && String(item.output.text || "").trim()) {
         // 失败 assistant 在超过重试次数后也返回其 partial text,错误由 run status 承载。
         return { resultText: item.output.text || "" };
       }
-      if (item.kind === "system" && item.output.type === "system_text") {
+    }
+    for (let i = items.length - 1; i >= 0; i -= 1) {
+      const item = items[i];
+      if (item?.kind === "system" && item.output.type === "system_text" && String(item.output.text || "").trim()) {
         return { resultText: item.output.text || "" };
       }
     }
@@ -3752,7 +3719,7 @@ export class AgentService {
     return { resultText: "" };
   }
 
-  getSubtaskRunStatusFromWorker(params: { workspaceId: string; sessionId: string; runId: string }) {
+  getSubtaskRunStatusFromWorker(params: AgentApiSubtaskStatusRequest) {
     const session = getAgentSession(this.ctx.db, params.sessionId);
     if (!session) throw new HttpError(404, "session not found");
     if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
@@ -3858,13 +3825,7 @@ export class AgentService {
     return listPluginRuntimeSnapshots(this.ctx);
   }
 
-  async compactContextFromWorker(params: {
-    workspaceId: string;
-    sessionId: string;
-    runId: string;
-    expectedHeadItemId: number | null;
-    summaryText: string;
-  }) {
+  async compactContextFromWorker(params: AgentApiCompactContextRequest) {
     return this.runSessionOperationExclusive(params.sessionId, async () => {
       const session = getAgentSession(this.ctx.db, params.sessionId);
       if (!session) throw new HttpError(404, "session not found");
@@ -3950,7 +3911,7 @@ export class AgentService {
           status: state.status,
           activeRunId: state.activeRunId,
           activeAssistantItemId: state.activeAssistantItemId,
-              lastResponseTotalTokens: null,
+          lastResponseTotalTokens: null,
           updatedAt: archiveAt,
           appliedItemId: getLatestSessionItemId(this.ctx.db, params.workspaceId, params.sessionId)
         });

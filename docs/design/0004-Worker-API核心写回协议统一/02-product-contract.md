@@ -7,14 +7,16 @@
 纳入 endpoint 当前均遵循：
 
 ```text
-Fastify request schema validation
-  -> route handler 内 assertInternalToken()
-  -> AgentService
+全局 onRequest token 鉴权
+  -> Fastify request schema validation
+  -> route handler / AgentService
 ```
 
-- schema 不合法时 handler 不执行；无效 token + 无效 body 返回 `400` body validation error。
-- schema 合法但 token 无效时按当前 token 断言返回 `401`。
-- 1B 不改变顺序、不前移 token、不重写全局错误 body。
+- 全局鉴权依据 `apps/api/src/app/auth.ts:15-28`，在 schema validation 前执行。
+- token 无效时请求在全局 `onRequest` 被拒绝；即使 body 同时无效，也返回 `401`，不进入 schema validation、handler 或 Service。
+- token 合法后，schema 不合法时 handler/Service 不执行并返回 `400`；schema 合法后才进入 handler/Service。
+- Route handler 内既有 `assertInternalToken()` 可继续作为防御性检查，但不是通常请求的主要 HTTP 鉴权步骤。
+- 1B 不移动鉴权 hook，不将 token 检查移到 `preValidation`，也不改变其他 `/api/internal/*` 路由的错误优先级。
 
 ### 未知字段
 
@@ -37,7 +39,7 @@ Fastify request schema validation
 | params | 无 |
 | success | `200 { "ok": true }` |
 | 正常语义 | 对当前 active run 更新 session run-state；保留既有 Store/Service 的状态收敛与事件行为 |
-| token/schema | schema-first，再在 handler 内 token 断言 |
+| token/schema | 全局 `onRequest` token 鉴权 → schema validation → handler/Service |
 
 以下 ignored 情形都必须直接成功返回，不新增 `applied` 字段、不改为 `404/409`，默认不记录 warning：
 
@@ -57,7 +59,7 @@ Fastify request schema validation
 | params | 无 |
 | success | `200 { "ok": true }` |
 | 正常语义 | 收敛 run record 与 session run-state，保留当前 completion 事件和业务层 fallback 行为 |
-| token/schema | schema-first，再在 handler 内 token 断言 |
+| token/schema | 全局 `onRequest` token 鉴权 → schema validation → handler/Service |
 
 以下 ignored 情形保持 `200 { ok: true }`：
 
@@ -79,13 +81,13 @@ Fastify request schema validation
 | params | 无 |
 | success | `200 { ok: true, item: AgentContextItemRecordSchema }` |
 | Worker 消费 | Worker 仍仅消费 `response.item.id`；完整返回是稳定协议与 runtime validation 的依据 |
-| token/schema | schema-first，再在 handler 内 token 断言 |
+| token/schema | 全局 `onRequest` token 鉴权 → schema validation → handler/Service |
 
 `output` 必须直接使用公共 `AgentContextItemOutputSchema`：
 
 - 当前合法 Worker output（`user_text`、`assistant_text`、`tool`、`system_text`，含 builtin、canonical MCP、canonical plugin tool 名及宽松 `args/result`）完全兼容。
 - 原 Route `Type.Any()` 接受任意非法 JSON 不是兼容承诺；例如非法 tool name 可在 Store 回读后触发 success response serializer `500`。
-- 本期有意将该非法内部输入前移为边界 validation `4xx`。这是唯一明确的 request acceptance 收紧，必须有回归测试；不得表述为“完全无行为变化”。
+- 本期有意将该非法内部输入前移为边界 schema validation `400`。这是唯一明确的 request acceptance 收紧，必须有回归测试；不得表述为“完全无行为变化”。
 - schema 未声明的 output 内字段可能被 Store normalize 或选择性持久化，稳定合同只保证 schema 声明字段，不保证未知字段回显。
 
 `prevId` 与 session 当前 head 不一致时：
@@ -105,7 +107,7 @@ Worker 对此 endpoint 使用 `conflictAsError: true`：`409` 转为 `ApiConflic
 | request body | optional context item status、optional `output:AgentContextItemOutput`、optional `updatedAt:number`；当前 update 不携带 workspace/session |
 | success | `200 { ok: true, item: AgentContextItemRecordSchema }` |
 | Worker 消费 | 仍只需 `item.id` |
-| token/schema | schema-first，再在 handler 内 token 断言 |
+| token/schema | 全局 `onRequest` token 鉴权 → schema validation → handler/Service |
 
 此接口没有 head CAS conflict。若目标 item 已 terminal：
 
@@ -126,7 +128,7 @@ Worker 对此 endpoint 使用 `conflictAsError: true`：`409` 转为 `ApiConflic
 | request body | `workspaceId:string`、`sessionId:string`、`runId:string`、`expectedHeadItemId:number|null`、`summaryText:string` |
 | params | 无 |
 | success | `200 { compacted:boolean, summaryItemId:number|null, archivedCount:number }` |
-| token/schema | schema-first，再在 handler 内 token 断言 |
+| token/schema | 全局 `onRequest` token 鉴权 → schema validation → handler/Service |
 | Worker 行为 | `conflictAsError: true`；任意 `409` 转 `ApiConflictError("context conflict")`，不 retry |
 
 存在两种都合法、必须保留的 head conflict response：

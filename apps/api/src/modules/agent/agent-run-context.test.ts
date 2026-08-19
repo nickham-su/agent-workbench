@@ -52,6 +52,7 @@ async function createContext(params?: { withWorkspace?: boolean }): Promise<{ ct
       agentWorkerSocketPath: path.join(dataDir, "agent-worker.sock"),
       agentWorkerConcurrency: 1,
       agentInternalToken: "token",
+      agentWorkerResponseValidation: "strict",
       agentApiOrigin: "http://127.0.0.1:0",
       agentStartupRecoveryMode: "recover",
       agentPluginHostEnabled: false,

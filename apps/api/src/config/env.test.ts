@@ -7,7 +7,7 @@ test("internal RPC response validation defaults to strict and accepts warn", () 
   assert.equal(
     loadEnv({
       AWB_DATA_DIR: ".tmp-env-warn",
-      AWB_INTERNAL_RPC_RESPONSE_VALIDATION: "warn"
+      AWB_INTERNAL_RPC_RESPONSE_VALIDATION: "  WaRn "
     }).agentWorkerResponseValidation,
     "warn"
   );
