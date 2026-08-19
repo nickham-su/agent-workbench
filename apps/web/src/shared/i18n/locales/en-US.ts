@@ -1004,6 +1004,7 @@ export default {
         todolist: "Todo List",
         subtask: "Subtask",
         archiveSearch: "Archive Search",
+        visualAnalyze: "Visual Analyze",
         archiveRead: "Archive Read",
         archiveTail: "Archive Tail"
       },

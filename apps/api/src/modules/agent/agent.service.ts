@@ -4537,7 +4537,7 @@ export class AgentService {
           }
           externalSkills.sort((a, b) => a.skill < b.skill ? -1 : a.skill > b.skill ? 1 : 0);
 
-          const baselineToolNames = ["read", "todolist", "archive_search", "archive_read", "skill", "visual_analyze"] as const;
+          const baselineToolNames = ["read", "archive_search", "archive_read", "skill"] as const;
           const enabledToolNames: string[] = [];
           const enabledToolNameSet = new Set<string>();
           for (const name of [...baselineToolNames, ...profile.agent.tools]) {

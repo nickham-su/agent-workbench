@@ -9,7 +9,9 @@ export const DEFAULT_AGENT_TOOLS: AgentToolName[] = [
 
 const CONFIGURABLE_AGENT_TOOLS: AgentToolName[] = [
   ...DEFAULT_AGENT_TOOLS,
-  "scratchpad"
+  "scratchpad",
+  "todolist",
+  "visual_analyze"
 ];
 
 export function normalizeAgentTools(raw: readonly AgentToolName[]) {
@@ -36,5 +38,7 @@ export function agentToolLabelKey(tool: AgentToolName) {
   if (tool === "write") return "settings.agentProfiles.tools.write";
   if (tool === "apply_patch") return "settings.agentProfiles.tools.applyPatch";
   if (tool === "scratchpad") return "settings.agentProfiles.tools.scratchpad";
+  if (tool === "todolist") return "settings.agentProfiles.tools.todolist";
+  if (tool === "visual_analyze") return "settings.agentProfiles.tools.visualAnalyze";
   return "settings.agentProfiles.tools.subtask";
 }

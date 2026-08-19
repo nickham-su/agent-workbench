@@ -394,11 +394,9 @@ export class BuiltinToolProvider implements ToolProvider {
     if (!isBuiltinToolName(toolName)) return false;
     if (
       toolName === "read"
-      || toolName === "todolist"
       || toolName === "archive_search"
       || toolName === "archive_read"
       || toolName === "skill"
-      || toolName === "visual_analyze"
     ) {
       return true;
     }
