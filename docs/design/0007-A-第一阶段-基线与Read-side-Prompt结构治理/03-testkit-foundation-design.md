@@ -112,6 +112,30 @@ Builder 必须让关键默认值可阅读、可覆盖：
 
 本阶段不迁移 `AppContext.agentTestFaults`；archive fault seam 属于后续 Compaction / Archive 阶段。
 
+## P1-P2 已冻结的最小公共面
+
+实现位于：
+
+```text
+apps/api/src/modules/agent/testkit/agent-testkit.ts
+apps/api/src/modules/agent/testkit/agent-testkit.test.ts
+```
+
+| 导出 | 默认语义 | 所有权和边界 |
+|---|---|---|
+| `createAgentTestFixture()` | 在 `<repoRoot>/.tmp-tests/agent-testkit-*` 下创建真实 SQLite 与基础 `AppContext`；`withApp` 默认 `false`，local runtime concurrency 默认 `2` | 调用方持有 fixture，必须在 `afterEach` 调用幂等的 `dispose()`；它按 app → DB → dataDir 顺序清理，并汇总清理错误。初始化中断时也继续执行全部清理：原始构建错误作为 `AggregateError.cause` 保留，清理错误列于 `errors`。默认 cwd 仅支持从 `apps/api` 上溯仓库根，其他 cwd 必须显式传 `repoRoot`。 |
+| `resolveAgentApiTestRepoRoot()` | 显式校验上述 cwd 推导的仓库根 | 仅帮助诊断 cwd；不创建资源。 |
+| `createTestWorkspace()` | 创建一个可见的 workspace 目录和真实 SQLite 记录；ID、目录名、标题、路径、时间均可显式覆盖 | 不创建 session、run、context 或 repository。目录随 fixture `dataDir` 删除。 |
+| `createTestRepository()` | 需要显式传入 workspace；创建仓库记录、workspace-repository 关联和工作区目录 | 不执行 git 初始化或网络同步，不创建 agent 实体。 |
+| `injectJson()` | 对调用方显式提供的真实 Fastify app 执行低层 inject；method、URL、payload、internal token 均显式 | 不创建 fixture/业务数据，不替调用方断言 status 或 response。 |
+| `createFakeAgentRuntime()` | 仅记录 `enqueueRun` / `cancelSession` 调用；可配置 hook 和受控错误 | 与 `AgentRuntimePort` 兼容；不模拟队列、Worker 进程、socket 或 prompt 内容。 |
+
+`appFactory` 仅是 `createAgentTestFixture({ withApp: true })` 的 testkit 自验证钩子，用于覆盖 app 初始化失败后的资源清理；普通 API 测试必须使用默认真实 `createApp()`，不得以它替代 HTTP 边界证据。
+
+P2 已以此公共面完成两类代表性迁移：`read-side.api.test.ts` 使用真实 `withApp` + workspace + `injectJson()` 覆盖三项 read-side Route 的 token/body/not-found/workspace-mismatch/success response 外壳；`agent-run-context.test.ts` 使用 fixture + `dispose()` 替换原有手工临时目录、SQLite 和 `afterEach` 删除。它们的 session/run 创建及 agent settings 准备仍为领域文件私有 helper。P1 的自验证与 P2 的迁移等价共同证明公共面本身的生命周期、真实 SQLite/Fastify 边界与 fake runtime 合同，但不替代真实 API-managed Worker 证据。
+
+明确不导出：Worker 子进程、socket、端口、HTTP LLM stub、pid-file、Plugin Host、archive/context fault injection，以及 session/run/profile/prompt 等领域 builder。它们要么是文件专属资源，要么属于后续职责域，不能被伪装成通用 fixture。自 P2 起，除非按阶段门禁重新进入 1A，本公共面不再因“完善基础设施”而扩张。
+
 ## 1A 实施范围
 
 ### 必须完成

@@ -4,6 +4,8 @@
 
 本阶段以实施前实际代码和测试结果为准。以下规模来自当前静态调研，只用于定位热点，不构成拆分阈值：
 
+P0 于 2026-04-01 复核下列路径及测试。除设计记录和本阶段状态外，没有移动生产逻辑、提取 testkit 或变更 Shared/HTTP 合同；执行命令与结果见 [`09-implementation-record.md`](./09-implementation-record.md)。
+
 | 路径 | 约行数 | 与本阶段关系 |
 |---|---:|---|
 | `apps/api/src/modules/agent/agent.service.ts` | 4970 | Read-side/Prompt 当前主要编排中心，同时混合其他职责 |
@@ -65,6 +67,22 @@ POST /api/internal/agent/messages-context
 
 ### Prompt/cache
 
+P0 已确认实施前的实现位于 `apps/api/src/modules/agent/agent.service.ts` 中，以下事实是 P3-P5 迁移的冻结对象，而非 P6 后的当前权威归属；当前职责链见 `07-code-map.md`。
+
+P2 已将 Route 鉴权/请求/资源错误基线从 `agent.integration.test.ts` 迁移到 `apps/api/src/modules/agent/read-side.api.test.ts` 的 `read-side internal routes preserve token, body validation, and missing-resource responses`。原用例与迁移等价说明见 `06-testing-review-acceptance.md` 和 `09-implementation-record.md`。
+
+| 项目 | 当前行为 |
+|---|---|
+| 身份与错误行为 | `getExecutionProfileForRun()`、`getPromptContextForRun()` 与 `getMessagesContext()` 都先读取 session：不存在为 `404 session not found`，workspace 不匹配为 `400 workspaceId mismatch`；前两者随后校验 run 归属，不存在或 session/workspace 不匹配为 `404 run not found`。对“无效 internal token + 无效 body”的组合输入，当前 Route 可观察结果为 `401`；对有效 token + 无效 body 为 `400`。P0 仅冻结这一外部行为，不把它表述为 Fastify schema 或 handler 的内部执行先后机制。 |
+| execution profile | 通过 `resolveExecutionProfile()` 按 session surface、run 固化的 agent/provider/model 和 workspace enablement 解析；响应保留 `resolved` identity、agent/provider/model、vision、compaction 与 runtime。 |
+| static cache | `runPromptStaticCache` 以 `runId` 为 key，值为 `{ expiresAt, promise }`；TTL 为 30 分钟。未过期条目复用同一个 promise，并在每次 `getPromptContextForRun()` 成功访问后将 `expiresAt` 续期为当前时间加 TTL。 |
+| static / dynamic 划分 | cache promise 内读取 global/workspace/agent instructions、builtin 与 external skills、external skill roots、profile/tool visibility 与 tool projection，并产出 `systemStatic`、tools、externalSkillRoots。`uiLocale` 在创建 cache promise 时参与 `systemStatic` 的 output-format instruction，同时每次调用参与 runtime instruction 与 compaction snippet 的动态组合；因此它横跨两侧，不能笼统归为动态。`pendingTools`、visible items、transcript/messages 和 compaction snippet 在 `await staticPromptPromise` 后按请求重新查询或组合，**不在 static cache**。 |
+| terminal clear | `clearRunPromptStaticCache(runId)` 删除对应 key；当前由 run 失败、取消及完成等 lifecycle 路径调用。P0 不改变这些调用点，P5 必须继续由 lifecycle 以相同时机驱动失效。 |
+| messages context | `buildPromptMessagesForSession()` 负责 transcript 投影；assistant reasoning 不进入 prompt。`getMessagesContext()` 根据 active run、当前 session 最近 run、全局最近 run 的顺序解析 locale，并用该 locale 构造 one-shot system；非空 `appendMessage` 只追加到本次 response messages，不落库。 |
+| prompt context | `getPromptContextForRun()` 保持 run-aware locale、tools/pendingTools、external skill roots、compaction snippet 与 structured tool-call/tool-result 消息；subtask 工具仍由 run depth 和 runtime max depth 决定是否暴露。 |
+
+现有自动测试已分别锁定上述关键边界：Route 错误优先级、cache promise reuse/terminal clear、messages 的 one-shot append 和 locale 回退、reasoning 过滤、compaction snippet 与 prompt tools/skills/locale。测试索引见实施记录，不能以本表替代自动断言。
+
 `AgentService` 当前 read-side 相关方法包括：
 
 - `getExecutionProfileForRun()`；
@@ -85,6 +103,16 @@ POST /api/internal/agent/messages-context
 若实施前发现上述事实与 0005 或本文件不一致，先更新基线，不直接迁移。
 
 ### API Route
+
+P0 已确认 Shared、Route、Service 与 Worker client 的 read-side 映射保持一一对应：
+
+| 用例 | Shared registry（均为 `POST`） | Route 委派 | Worker client |
+|---|---|---|---|
+| Execution profile | `AgentApiEndpoints.getExecutionProfile` → `/api/internal/agent/execution-profile` | `getExecutionProfileForRun(body)` | `getExecutionProfile(body)` |
+| Prompt context | `AgentApiEndpoints.getPromptContext` → `/api/internal/agent/prompt-context` | `getPromptContextForRun(body)` | `getPromptContext(body)` |
+| Messages context | `AgentApiEndpoints.getMessagesContext` → `/api/internal/agent/messages-context` | `getMessagesContext(body)` | `getMessagesContext(body)` |
+
+`agent-api-read.ts` 仍是对应 request/response TypeBox schema 与 TypeScript 类型的来源；Worker client 的 `request()` 对成功响应执行 schema validation，并保持 strict/warn 与脱敏诊断策略。`messages-context` 请求只包含 workspace/session（可选 `appendMessage`），因而仍是 session-bound；另两个请求包含 runId。真实 API-managed Worker 回归证明调用顺序为 execution profile → prompt context → messages context。
 
 `apps/api/src/modules/agent/agent.routes.ts` 已使用 Shared read-side endpoint/schema，并在 handler 中调用：
 
@@ -109,6 +137,20 @@ getMessagesContext()
 `apps/agent-worker/src/runtime/runner.ts` 使用这些方法驱动模型输入、消息上下文和自动压缩。1B 不改变 Runner 控制流，仅验证 API 侧结构迁移不影响其输入和调用顺序。
 
 ## 测试证据基线
+
+P0 已新增并执行 read-only characterization：`agent.integration.test.ts` 的 `read-side execution-profile 与 prompt-context 不修改已有 run、session 或 context` 对两个 run-bound read-side endpoint 前后的 session、run、run state 与 transcript 做快照比较；`agent messages-context 返回完整 messages 且支持 appendMessage` 同时断言 `appendMessage` 后 transcript 与 run state 不变。该证据只冻结读侧不写 run/context/session 的行为，不改变生产实现。
+
+### P0 运行环境、fixture 与测试边界
+
+| 测试位置 | 正确 cwd / 命令入口 | fixture 事实与边界 |
+|---|---|---|
+| `packages/shared/tests/internal-contracts.test.ts` | `packages/shared` / `npx tsx --test tests/internal-contracts.test.ts` | 无 API fixture；锁定 aggregate export、endpoint registry 与 read-side schema 的稳定/动态边界。 |
+| `apps/api/src/modules/agent/agent.integration.test.ts` | **`apps/api`** / `npx tsx --test src/modules/agent/agent.integration.test.ts` | 自建 dataDir、SQLite、`AppContext`、Fastify `createApp()`、workspace/repo 与 `afterEach` 清理；用 `process.cwd()` 上溯仓库根。不得从仓库根执行，否则 repoRoot 与 `.tmp-tests` 推导会偏离。 |
+| `apps/api/src/modules/agent/context-item-contract.test.ts` | **`apps/api`** / `npx tsx --test src/modules/agent/context-item-contract.test.ts` | 与综合集重复 dataDir/SQLite/AppContext/app/workspace 与清理能力，但业务断言属于 writeback/archive；P0 仅记录其作为 P1 最小公共交集的复用证据。 |
+| `apps/api/src/modules/agent/agent.worker.integration.test.ts` | **`apps/api`** / `npx tsx --test src/modules/agent/agent.worker.integration.test.ts` | 除基础 dataDir/SQLite/AppContext/app/workspace 外，拥有 HTTP LLM stub、端口、Worker 子进程/socket/pid 生命周期；这些专属能力不能预先纳入 P1 公共 fixture。 |
+| `apps/agent-worker/src/runtime/*.test.ts` | `apps/agent-worker` / `npx tsx --test src/runtime/<file>.test.ts` | API client 使用 fetch stub；Runner 使用受控 runtime/fake，均为 Worker 边界回归而不是 API testkit 的抽取对象。 |
+
+P0 对相关基线矩阵的实际执行均通过，逐项命令、用例数量和时长见 [`09-implementation-record.md`](./09-implementation-record.md)。`context-item-contract.test.ts` 未作为 read-side 回归执行：它的 P0 价值是 fixture 重复盘点，不应把 Context Writeback/Archive 行为混入本批测试范围。
 
 ### Shared
 

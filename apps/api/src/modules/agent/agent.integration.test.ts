@@ -3089,150 +3089,6 @@ async function getPromptContextInternal(params: {
   };
 }
 
-test("read-side internal routes freeze token priority, body validation, and current not-found statuses", async () => {
-  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
-  const session = await createSession(fixture.app, fixture.workspaceId);
-  const runId = newSortableId("run");
-  createRunRecord(fixture.db, {
-    runId,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    triggerItemId: 1,
-    agentId: "default",
-    providerId: "ppchat",
-    modelId: "gpt-5.2",
-    status: "running",
-    createdAt: Date.now()
-  });
-
-  const endpoints = [
-    {
-      path: "/api/internal/agent/execution-profile",
-      validBody: { workspaceId: fixture.workspaceId, sessionId: session.id, runId },
-      invalidBody: { workspaceId: "", sessionId: "", runId: "" },
-      missingBody: { workspaceId: fixture.workspaceId, sessionId: session.id, runId: "missing-run" }
-    },
-    {
-      path: "/api/internal/agent/prompt-context",
-      validBody: { workspaceId: fixture.workspaceId, sessionId: session.id, runId },
-      invalidBody: { workspaceId: "", sessionId: "", runId: "" },
-      missingBody: { workspaceId: fixture.workspaceId, sessionId: session.id, runId: "missing-run" }
-    },
-    {
-      path: "/api/internal/agent/messages-context",
-      validBody: { workspaceId: fixture.workspaceId, sessionId: session.id },
-      invalidBody: { workspaceId: "", sessionId: "" },
-      missingBody: { workspaceId: fixture.workspaceId, sessionId: "missing-session" }
-    }
-  ];
-
-  for (const endpoint of endpoints) {
-    const invalidToken = await fixture.app.inject({
-      method: "POST",
-      url: endpoint.path,
-      headers: { "x-awb-agent-internal-token": "invalid-token" },
-      payload: endpoint.invalidBody
-    });
-    assert.equal(invalidToken.statusCode, 401, `${endpoint.path} should authenticate before body validation`);
-
-    const invalidBody = await fixture.app.inject({
-      method: "POST",
-      url: endpoint.path,
-      headers: { "x-awb-agent-internal-token": fixture.internalToken },
-      payload: endpoint.invalidBody
-    });
-    assert.equal(invalidBody.statusCode, 400, `${endpoint.path} should reject an invalid body after authentication`);
-
-    const missing = await fixture.app.inject({
-      method: "POST",
-      url: endpoint.path,
-      headers: { "x-awb-agent-internal-token": fixture.internalToken },
-      payload: endpoint.missingBody
-    });
-    assert.equal(missing.statusCode, 404, `${endpoint.path} should preserve current missing-resource status`);
-
-    const workspaceMismatch = await fixture.app.inject({
-      method: "POST",
-      url: endpoint.path,
-      headers: { "x-awb-agent-internal-token": fixture.internalToken },
-      payload: {
-        ...endpoint.validBody,
-        workspaceId: "workspace-mismatch"
-      }
-    });
-    assert.equal(workspaceMismatch.statusCode, 400, `${endpoint.path} should preserve workspace mismatch status`);
-    assert.deepEqual(workspaceMismatch.json(), { message: "workspaceId mismatch" });
-  }
-
-  const messagesWithoutRunId = await fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/messages-context",
-    headers: { "x-awb-agent-internal-token": fixture.internalToken },
-    payload: { workspaceId: fixture.workspaceId, sessionId: session.id }
-  });
-  assert.equal(messagesWithoutRunId.statusCode, 200, messagesWithoutRunId.body);
-
-  const profile = await fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/execution-profile",
-    headers: { "x-awb-agent-internal-token": fixture.internalToken },
-    payload: endpoints[0]?.validBody
-  });
-  assert.equal(profile.statusCode, 200, profile.body);
-  const profileBody = profile.json() as any;
-  assert.equal(profileBody.resolved.runId, runId);
-  for (const key of ["agentId", "providerId", "modelId"]) {
-    assert.equal(typeof profileBody.resolved[key], "string");
-  }
-  assert.equal(typeof profileBody.agent?.id, "string");
-  assert.equal(typeof profileBody.provider?.id, "string");
-  assert.equal(typeof profileBody.provider?.name, "string");
-  assert.equal(typeof profileBody.provider?.npm, "string");
-  assert.equal(typeof profileBody.provider?.options, "object");
-  assert.equal(typeof profileBody.model?.id, "string");
-  assert.equal(typeof profileBody.model?.name, "string");
-  assert.equal(typeof profileBody.model?.contextWindowTokens, "number");
-  assert.equal(typeof profileBody.runtime?.modelIdleTimeoutMs, "number");
-  assert.equal(typeof profileBody.runtime?.modelTotalTimeoutMs, "number");
-  assert.equal(typeof profileBody.runtime?.modelRequestMaxRetries, "number");
-  assert.equal(typeof profileBody.runtime?.autoCompactThresholdPct, "number");
-  assert.ok(profileBody.vision === null || typeof profileBody.vision === "object");
-  assert.ok(profileBody.compaction === null || typeof profileBody.compaction === "object");
-
-  const prompt = await fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/prompt-context",
-    headers: { "x-awb-agent-internal-token": fixture.internalToken },
-    payload: endpoints[1]?.validBody
-  });
-  assert.equal(prompt.statusCode, 200, prompt.body);
-  const promptBody = prompt.json() as any;
-  assert.ok(promptBody.headItemId === null || typeof promptBody.headItemId === "number");
-  assert.equal(typeof promptBody.system, "string");
-  assert.equal(Array.isArray(promptBody.messages), true);
-  assert.equal(Array.isArray(promptBody.tools), true);
-  assert.equal(Array.isArray(promptBody.pendingTools), true);
-  assert.ok(promptBody.lastResponseTotalTokens === null || typeof promptBody.lastResponseTotalTokens === "number");
-  assert.ok(promptBody.uiLocale === null || promptBody.uiLocale === "zh-CN" || promptBody.uiLocale === "en-US");
-  assert.equal(Array.isArray(promptBody.externalSkillRoots), true);
-  for (const tool of promptBody.tools) {
-    assert.equal(typeof tool.name, "string");
-    assert.equal(typeof tool.description, "string");
-    assert.equal(typeof tool.inputSchema, "object");
-  }
-  for (const pending of promptBody.pendingTools) {
-    assert.equal(typeof pending.itemId, "number");
-    assert.equal(typeof pending.status, "string");
-    assert.equal(typeof pending.toolName, "string");
-    assert.equal(typeof pending.args, "object");
-  }
-  for (const root of promptBody.externalSkillRoots) {
-    assert.ok(root.sourceType === "workspace" || root.sourceType === "repo");
-    assert.equal(typeof root.rootDir, "string");
-    assert.equal(typeof root.rootPath, "string");
-  }
-});
-
 test("prompt-context reuses one run static promise and clears it when the run reaches a terminal status", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   await configureAgentDefaults(fixture.app);
@@ -3395,6 +3251,72 @@ test("agent 消息去重与上下文项追加", async () => {
   assert.ok(String(userItems[0]?.output?.text || "").includes("hello integration"));
 });
 
+test("read-side execution-profile 与 prompt-context 不修改已有 run、session 或 context", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    uiLocale: "zh-CN",
+    status: "running",
+    createdAt: Date.now()
+  });
+  updateRunState(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "running",
+    activeRunId: runId,
+    activeAssistantItemId: null,
+    runNoticeText: "",
+    updatedAt: Date.now(),
+    appliedItemId: 0
+  });
+  await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "read-only baseline" }
+  });
+
+  const beforeSession = getAgentSession(fixture.db, session.id);
+  const beforeRun = getRunRecord(fixture.db, runId);
+  const beforeRunState = getRunStateRow(fixture.db, fixture.workspaceId, session.id);
+  const beforeItems = getSessionTranscriptItems(fixture.db, fixture.workspaceId, session.id);
+
+  const profile = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/execution-profile",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId }
+  });
+  assert.equal(profile.statusCode, 200, `get execution-profile failed: ${profile.body}`);
+  const prompt = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/prompt-context",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId }
+  });
+  assert.equal(prompt.statusCode, 200, `get prompt-context failed: ${prompt.body}`);
+
+  assert.deepEqual(getAgentSession(fixture.db, session.id), beforeSession);
+  assert.deepEqual(getRunRecord(fixture.db, runId), beforeRun);
+  assert.deepEqual(getRunStateRow(fixture.db, fixture.workspaceId, session.id), beforeRunState);
+  assert.deepEqual(getSessionTranscriptItems(fixture.db, fixture.workspaceId, session.id), beforeItems);
+});
+
 test("agent messages-context 返回完整 messages 且支持 appendMessage", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
@@ -3449,6 +3371,9 @@ test("agent messages-context 返回完整 messages 且支持 appendMessage", asy
     output: { type: "assistant_text", text: "world" }
   });
 
+  const beforeItems = getSessionTranscriptItems(fixture.db, fixture.workspaceId, session.id);
+  const beforeRunState = getRunStateRow(fixture.db, fixture.workspaceId, session.id);
+
   const ctx = await getMessagesContextInternal({
     app: fixture.app,
     internalToken: fixture.internalToken,
@@ -3461,6 +3386,8 @@ test("agent messages-context 返回完整 messages 且支持 appendMessage", asy
   assert.equal(ctx.messages.at(-1)?.role, "user");
   assert.equal(ctx.messages.at(-1)?.content, "append");
   assert.ok(ctx.system.includes("语言要求：本轮对话请统一使用简体中文。"));
+  assert.deepEqual(getSessionTranscriptItems(fixture.db, fixture.workspaceId, session.id), beforeItems);
+  assert.deepEqual(getRunStateRow(fixture.db, fixture.workspaceId, session.id), beforeRunState);
 });
 
 test("agent messages-context system 根据 active run 的 uiLocale 返回英文语言约束", async () => {

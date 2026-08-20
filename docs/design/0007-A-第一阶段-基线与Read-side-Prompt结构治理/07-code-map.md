@@ -1,5 +1,7 @@
 # 当前代码地图
 
+> P0 于 2026-04-01 已复核本文件中的 read-side 关键符号、Shared/Route/Worker 调用链和 API fixture 边界。路径/候选组件不是最终目录承诺。
+
 > 本文件记录阶段方案初稿时的静态定位。实施前必须复核符号、规模和调用者；路径/候选组件不是最终目录承诺。
 
 ## 上位设计与行为基线
@@ -37,6 +39,22 @@ getPromptContextForRun()
 getMessagesContext()
 getSingleCallModelProfileForRun()   # 相邻 profile helper，迁移前复核调用面
 ```
+
+### P0 历史定位（实施前）
+
+P0 以下定位用于冻结迁移前的实现与依赖方向；P6 后的当前权威链见“P3-P6 Read-side / Prompt 最终职责链”，不应将此表中的 `AgentService` 旧职责误读为当前实现。
+
+| 符号/区域 | 迁移前职责 | 关键直接依赖或调用方 |
+|---|---|---|
+| `getExecutionProfileForRun()`（约 4028） | session/run 归属校验、`resolveExecutionProfile()` 与 runtime 输出组装 | Route execution-profile handler；`getAgentSession`、`getRunRecord`、workspace enablement、runtime settings |
+| `getMessagesContext()`（约 4691） | session/workspace 校验、transcript 投影、locale fallback、one-shot system 和 response-only `appendMessage` | Route messages-context handler；`buildPromptMessagesForSession()`、run state、最近 run locale |
+| `getPromptContextForRun()`（约 4774） | session/workspace/run 校验、profile、static cache、static+dynamic prompt 合成 | Route prompt-context handler；profile/settings、workspace/skills/files、tool projectors、context/run queries |
+| `runPromptStaticCache`（约 2120；使用约 4800） | `Map<runId, { expiresAt, promise }>`；30 分钟 TTL、promise reuse 与访问续期 | `getPromptContextForRun()`；由 `clearRunPromptStaticCache()` 生命周期调用删除 |
+| `clearRunPromptStaticCache()`（约 2134） | 删除单一 run 的 static cache | 失败、取消、完成等 run lifecycle 路径；P5 不能把 cache 生命周期反向交给 prompt query 触发 |
+| `buildPromptMessagesForSession()` | transcript 与结构化 tool message 投影 | `getMessagesContext()` 和 prompt context 的动态 message 组合；不写 context/head/archive |
+| `resolveUiLocaleForSessionContext()` | active run → session latest run → global latest run 的 locale fallback | messages context 与 prompt context；非法 locale 归一化为 locale-neutral fallback |
+
+迁移前，三公开方法共享完整 `AppContext` 和 `AgentService` 内部 helper；这是 P3-P5 的结构热点，不代表 P0 可以提前移动任何生产代码。
 
 相关内部/文件级职责：
 
@@ -86,6 +104,18 @@ apps/api/src/modules/agent/agent.routes.ts
 
 1B 原则上只保持/验证这些 handler；Route 全面拆分留到 0006 收尾阶段。
 
+P0 调用链（Route 未额外拼装业务规则）：
+
+```text
+AgentApiEndpoints + TypeBox schemas (packages/shared)
+  ├─ POST /execution-profile → agent.routes.ts → AgentService.getExecutionProfileForRun()
+  ├─ POST /prompt-context   → agent.routes.ts → AgentService.getPromptContextForRun()
+  └─ POST /messages-context → agent.routes.ts → AgentService.getMessagesContext()
+
+AgentApiClient (apps/agent-worker) → 同一 AgentApiEndpoints + response schemas
+runner.ts → getExecutionProfile() → getPromptContext() → getMessagesContext()
+```
+
 ### Module / Composition Root
 
 ```text
@@ -99,6 +129,83 @@ apps/api/src/modules/agent/agent.module.ts
 - 保持 local runtime 与 Worker runtime 装配。
 
 不纳入 startup recovery、orphan scan、archive reconcile 的结构治理。
+
+## P1-P2 Agent testkit 与代表性迁移
+
+```text
+apps/api/src/modules/agent/testkit/agent-testkit.ts
+apps/api/src/modules/agent/testkit/agent-testkit.test.ts
+```
+
+P1 的 testkit 只依赖现有测试基础设施与被测 API 模块，生产模块不反向导入它。代码路径为：
+
+```text
+createAgentTestFixture()
+  → resolveAgentApiTestRepoRoot()（默认从 apps/api cwd 上溯；其他 cwd 显式 repoRoot）
+  → .tmp-tests/ 下 mkdtemp + openDb()
+  → 基础 AppContext
+  → 可选 createApp() + app.ready()
+  → fixture.dispose(): app.close() → db.close() → rmrf(dataDir)
+
+createTestWorkspace()/createTestRepository()
+  → workspace/repo/workspace_repo store 写入 + 可见目录
+
+injectJson() → 调用方提供的 Fastify inject
+createFakeAgentRuntime() → AgentRuntimePort 的 enqueue/cancel 记录与受控失败
+```
+
+P2 调用位置：
+
+```text
+agent/read-side.api.test.ts
+  → createAgentTestFixture({ withApp: true }) + createTestWorkspace() + injectJson()
+  → 私有 configureReadSideDefaults()/createRun()
+
+agent/agent-run-context.test.ts
+  → createAgentTestFixture() + fixture.dispose()
+  → 保留该文件的 repo-record helper
+```
+
+它不纳入 Worker integration 的端口、子进程、socket、HTTP LLM stub、pid-file 或 Plugin Host，也不导出 session/run/prompt/archive builder。P2 后公共面冻结；后续修改必须遵守 1A 重新进入门禁。
+
+## P3-P6 Read-side / Prompt 最终职责链
+
+```text
+apps/api/src/modules/agent/read-side/read-side-application.ts
+apps/api/src/modules/agent/read-side/execution-profile-resolver.ts
+apps/api/src/modules/agent/read-side/messages-context-projector.ts
+apps/api/src/modules/agent/read-side/prompt-context-projector.ts
+apps/api/src/modules/agent/read-side/read-side-application.test.ts
+apps/api/src/modules/agent/read-side/execution-profile-resolver.test.ts
+apps/api/src/modules/agent/read-side/messages-context-projector.test.ts
+apps/api/src/modules/agent/read-side/prompt-context-projector.test.ts
+apps/api/src/modules/agent/prompt/prompt-static-assembler.ts
+apps/api/src/modules/agent/prompt/prompt-static-assembler.test.ts
+apps/api/src/modules/agent/prompt/run-prompt-static-cache.ts
+apps/api/src/modules/agent/prompt/run-prompt-static-cache.test.ts
+```
+
+当前依赖方向：
+
+```text
+Agent Routes → AgentService public facade
+  → ReadSideApplication
+      ├─ findSession/findRun callbacks → existing agent.store queries
+      ├─ ExecutionProfileResolver
+      │   → profile/runtime callbacks → AgentService private settings wrappers
+      ├─ MessagesContextProjector
+      │   → messages/run-state/locale/system callbacks → AgentService private helpers
+      └─ PromptContextProjector
+          ├─ RunPromptStaticCache → PromptStaticAssembler
+          └─ dynamic messages/run-state/locale/visible-item callbacks
+
+existing terminal lifecycle call site
+  → AgentService.clearRunPromptStaticCache()
+  → RunPromptStaticCacheInvalidator.clear()
+  → RunPromptStaticCache.clear(runId)
+```
+
+P6 后 application 负责三个 read-side use case 的归属校验和既有 `HttpError` 400/404 映射；三个 `AgentService` public entry 均为 facade 委派。`PromptStaticAssembler`、`RunPromptStaticCache` 和 `PromptContextProjector` 是 prompt-context 的单一权威链；`getPromptContextForRunLegacy()`、无调用的 `RunPromptStatic` 类型和 `readWorkspaceAgentsInstructions()` 均已删除。assembler/projector 不接收完整 `AgentService`、完整 `AppContext`、Store 或 runtime enqueue/cancel，也没有反向依赖 lifecycle/writeback/archive/subtask。`buildPromptMessagesForSession()` 与 locale helper 暂留 Service 作为窄底层 callback；`prompt/tool-projectors/` 保持原路径、原调用方和原实现。
 
 ### Store / Query
 
@@ -225,7 +332,13 @@ apps/agent-worker/src/runtime/runner.tool-output.test.ts
 
 需要保留 profile/prompt/messages 调用顺序和 auto-compaction/model input 行为。本阶段不迁移 Runner 控制流。
 
+P0 的真实 Worker 集成测试在 API server 侧记录到同一顺序；`messages-context` 不携带 `runId`，其余两个 endpoint 均保持 run-bound。
+
 ## API 测试
+
+### Read-side Route 基线（P2 后的当前位置）
+
+`apps/api/src/modules/agent/read-side.api.test.ts` 中的 `read-side internal routes preserve token, body validation, and missing-resource responses` 是 Route 鉴权/请求/资源错误行为的当前权威基线。它由 P2 从 `agent.integration.test.ts` 的同类用例迁移而来；迁移等价证据见 `06-testing-review-acceptance.md` 与 `09-implementation-record.md`。
 
 ### 综合集成
 
@@ -256,6 +369,16 @@ apps/api/src/modules/agent/context-item-contract.test.ts
 ```
 
 其 fixture 与综合测试有公共部分，但业务用例主要属于 Context Writeback/Archive。1A 可复用生命周期公共部分；1B 不迁移其合同逻辑。
+
+### P0 fixture 重复与差异
+
+| 测试文件 | 与其他 API Agent 测试重复的基础能力 | 必须保留为当前文件专属的能力 |
+|---|---|---|
+| `agent.integration.test.ts` | 临时 dataDir、SQLite `openDb()`、`AppContext`、`createApp()`、workspace/repo、fixture 集合与 `afterEach` teardown | 大量跨域数据 builder、fault injection、plugin 服务组合；不应由首批 testkit 全部吸收。 |
+| `context-item-contract.test.ts` | 临时 dataDir、SQLite、`AppContext`、`createApp()`、workspace、internal token、`afterEach` 关闭 app/DB 并删除目录 | context/compact handler body 记录和 writeback/archive 断言，属于后续职责域。 |
+| `agent.worker.integration.test.ts` | 临时 dataDir、SQLite、`AppContext`、`createApp()`、workspace/repo、teardown | HTTP LLM stub、随机端口、Worker 子进程、socket/pid-file 和进程终止；P1 不得抽为通用 fixture。 |
+
+三个文件的 API fixture 通过 `process.cwd()` 推导仓库根和 `.tmp-tests` 根，相关 API 测试统一从 `apps/api` 执行。P1 只可从表中的重复基础能力形成最小候选公共交集；具体导出、所有权和默认值仍须在 P1/P2 通过实现与审查后冻结。
 
 ## 1A 候选 Testkit 能力
 

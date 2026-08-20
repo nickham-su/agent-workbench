@@ -1,24 +1,25 @@
 import assert from "node:assert/strict";
-import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
 import type { AppContext } from "../../app/context.js";
-import { openDb, type Db } from "../../infra/db/db.js";
+import type { Db } from "../../infra/db/db.js";
 import { insertRepo } from "../repos/repo.store.js";
 import { insertWorkspace, insertWorkspaceRepo } from "../workspaces/workspace.store.js";
 import { getAgentWorkspaceRunContext } from "./agent-run-context.js";
+import { createAgentTestFixture, type AgentTestFixture } from "./testkit/agent-testkit.js";
 
-const tempDirs: string[] = [];
+const fixtures: AgentTestFixture[] = [];
 
 async function createContext(params?: { withWorkspace?: boolean }): Promise<{ ctx: AppContext; db: Db; workspacePath: string }> {
-  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "awb-agent-run-context-test-"));
-  tempDirs.push(dataDir);
-  const db = await openDb(dataDir);
-  const workspacePath = path.join(dataDir, "workspaces", "workspace-a");
+  const fixture = await createAgentTestFixture({
+    dataDirPrefix: "agent-run-context-",
+    repoRoot: path.resolve(process.cwd(), "../..")
+  });
+  fixtures.push(fixture);
+  const workspacePath = path.join(fixture.dataDir, "workspaces", "workspace-a");
 
   if (params?.withWorkspace !== false) {
-    insertWorkspace(db, {
+    insertWorkspace(fixture.db, {
       id: "ws-a",
       dirName: "workspace-a",
       title: "workspace",
@@ -30,35 +31,9 @@ async function createContext(params?: { withWorkspace?: boolean }): Promise<{ ct
   }
 
   return {
-    db,
+    db: fixture.db,
     workspacePath,
-    ctx: {
-      db,
-      repoRoot: process.cwd(),
-      dataDir,
-      fileMaxBytes: 1024 * 1024,
-      version: "test",
-      serveWeb: false,
-      webDistDir: null,
-      credentialMasterKey: Buffer.alloc(32, 7),
-      credentialMasterKeySource: "generated",
-      credentialMasterKeyId: "testkey",
-      credentialMasterKeyCreatedAt: 1,
-      authToken: null,
-      authCookieSecure: false,
-      agentWorkerEnabled: false,
-      agentWorkerHost: "127.0.0.1",
-      agentWorkerPort: 0,
-      agentWorkerSocketPath: path.join(dataDir, "agent-worker.sock"),
-      agentWorkerConcurrency: 1,
-      agentInternalToken: "token",
-      agentWorkerResponseValidation: "strict",
-      agentApiOrigin: "http://127.0.0.1:0",
-      agentStartupRecoveryMode: "recover",
-      agentPluginHostEnabled: false,
-      agentPluginHostSocketPath: path.join(dataDir, "agent-plugin-host.sock"),
-      agentPluginServicesEnabled: false
-    }
+    ctx: fixture.ctx
   };
 }
 
@@ -86,9 +61,16 @@ function addRepo(db: Db, params: { id: string; dirName: string; repoPath: string
 }
 
 afterEach(async () => {
-  for (const dir of tempDirs.splice(0)) {
-    await fs.rm(dir, { recursive: true, force: true });
+  const failures: unknown[] = [];
+  for (const fixture of fixtures.splice(0)) {
+    try {
+      await fixture.dispose();
+    } catch (error) {
+      failures.push(error);
+    }
   }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, "Agent run-context fixture cleanup failed");
 });
 
 test("getAgentWorkspaceRunContext returns null for a missing workspace", async () => {

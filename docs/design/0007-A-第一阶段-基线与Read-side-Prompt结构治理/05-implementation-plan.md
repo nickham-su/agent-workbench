@@ -114,6 +114,14 @@ P3 允许移动的“无行为纯 helper”必须同时满足：
 - 是否仍使用真实 SQLite/Fastify；
 - 是否出现万能 builder、全局状态或生产反向依赖。
 
+### P1 实施记录（2026-04-01）
+
+- 新增 `agent/testkit/agent-testkit.ts` 和独立自验证；没有迁移既有领域测试，避免提前进入 P2。
+- 公共面限于 fixture 生命周期、workspace/repository、低层 HTTP inject 与最小 fake runtime；默认 `withApp: false`，避免无意隐藏真实 Fastify 边界或让所有 DB 场景支付 app 启动成本。
+- fixture 持有者显式调用 `dispose()`；该操作幂等，按 app、DB、dataDir 的顺序清理，并在多项失败时聚合异常，不能静默吞掉泄漏。
+- 未修改生产代码、Shared contract、`AgentService`、`Runner` 或 `AppContext` 类型；无需增加生产 seam。
+- Worker 子进程/socket/端口/HTTP LLM stub/pid-file、Plugin Host 与 fault injection 均保持原测试文件私有，P1 不抽取。
+
 ## P2：代表性测试迁移与 1A 冻结
 
 ### 任务
@@ -128,6 +136,14 @@ P3 允许移动的“无行为纯 helper”必须同时满足：
 ### 1A 结束门禁
 
 P2 通过后停止 testkit 独立扩张，并在 `09-implementation-record.md` 记录已冻结公共面和复审结论。后续 testkit 变更必须按“P3-P6 新 testkit 需求处理”分类，触及冻结边界时重新进入 1A 审查门禁。
+
+### P2 实施记录（2026-04-01）
+
+- 将原 `agent.integration.test.ts` 的完整 read-side internal Route 基线用例迁至 `read-side.api.test.ts`；新文件使用 P1 fixture 的真实 SQLite、真实 `createApp()`、显式 workspace 和低层 `injectJson()`，保留 token/body/not-found/workspace mismatch/success response 与 profile/prompt 动态外壳断言。
+- 将 `agent-run-context.test.ts` 原有手工 `mkdtemp`、`openDb` 与 `afterEach rm` 迁至 fixture + `dispose()`；保留 missing workspace、空 repo 与安全目录顺序/过滤的 DB 断言。
+- agent/provider defaults、session/run 记录及每个测试文件的 fixture 集合仍为领域私有；不新增公共 session/run/settings builder。
+- API-managed Worker 的端口/进程/socket/HTTP stub fixture 完整保留在 `agent.worker.integration.test.ts`，未使用 testkit 替换。
+- P2 不修改生产代码、Shared contract、`AgentService` 或 `Runner`；1A 实施完成，待独立审查和复审后才允许 P3。
 
 ## P3：Read-side / Prompt 骨架与依赖边界
 
@@ -151,6 +167,14 @@ P2 通过后停止 testkit 独立扩张，并在 `09-implementation-record.md` �
 - 是否过度接口化；
 - 是否提前吸收后续领域。
 
+### P3 实施记录（2026-04-01）
+
+- 新增 `ReadSideApplication`，以三项显式函数依赖承接 facade 的三个 read-side 入口；P3 只转发给同一 `AgentService` 的私有 legacy 实现，不迁移任何校验、profile、messages 或 prompt 规则。
+- 新增 `RunPromptStaticCacheInvalidator`，只提供 `clear(runId)`；它通过回调触及既有 cache Map，未迁移 cache storage/read/write/TTL/Promise reuse。
+- `AgentService` 三个公开入口均变为 application 委派壳；既有业务实现改为私有 legacy 方法。原有 lifecycle clear 调用点保留，且仍不调用 runtime。
+- 没有新增 Store/settings/workspace/plugin/filesystem adapter：P3 尚无安全移动的实现需要这些能力，预建会扩大范围。`prompt/tool-projectors/` 未修改且未复制。
+- P3 未触及 Route、Shared contract、Worker Runner、writeback、archive、subtask 或 run lifecycle 语义；待独立审查后才能开始 P4。
+
 ## P4：Execution Profile 与 Messages Context
 
 ### 任务
@@ -171,6 +195,14 @@ P2 通过后停止 testkit 独立扩张，并在 `09-implementation-record.md` �
 - 迁移 archive read；
 - 改 transcript DB 查询策略或引入新分页；
 - 重写 Worker Runner。
+
+### P4 实施记录（2026-04-01）
+
+- 新增 `read-side/execution-profile-resolver.ts`：application 完成归属校验后，由 resolver 以窄 profile/runtime callback 保留 run 固定 identity、primary/subtask surface、resolved/profile/runtime/vision/compaction 输出。
+- 新增 `read-side/messages-context-projector.ts`：以窄 messages/run-state/locale/system callback 组装既有 messages-context response；`appendMessage` 仍只写入局部响应数组。
+- `ReadSideApplication` 现在拥有 execution-profile/messages-context 的 session/run 查询和既有 `HttpError` 400/404 映射；两个 `AgentService` public facade 均为纯委派。`getPromptContextForRunLegacy()`、static prompt/cache 与其共享的 prompt/messages helpers 仍留给 P5。
+- 未修改 Shared contract、Route、Worker client/Runner、transcript SQL/window/pagination、writeback、lifecycle、archive 或 subtask；未新增 testkit 公共面。
+- 已完成实现验证，待独立审查；不得据此宣称本批已审查或允许进入 P5。
 
 ## P5：Static Prompt、Cache 与 Prompt Context
 
@@ -193,6 +225,14 @@ P2 通过后停止 testkit 独立扩张，并在 `09-implementation-record.md` �
 - 迁移造成模型输入顺序、内容或动态字段变化；
 - 必须修改 Shared response schema 才能完成结构提取。
 
+### P5 实施记录（2026-04-01）
+
+- 新增 `prompt/prompt-static-assembler.ts`、`prompt/run-prompt-static-cache.ts` 的 cache storage 和 `read-side/prompt-context-projector.ts`。静态 assembler、cache、动态 projector 分别成为单一权威实现；`getPromptContextForRunLegacy()` 已删除。
+- cache 保持 runId key、30 分钟 TTL、Promise reuse、每次命中按当前访问时间续期，以及由既有 lifecycle path 通过 invalidator 的 terminal clear。projector 每次请求仍在 cache 查询前解析 profile，保持旧实现的 profile validation/read 顺序。
+- prompt-context 的 session/workspace/run 归属校验已迁入 `ReadSideApplication`；assembler/projector 只接收窄 callback，不接收完整 `AgentService`、`AppContext` 或 runtime enqueue/cancel。
+- `buildPromptMessagesForSession()`、locale fallback、tool projectors 和 terminal lifecycle 时机作为必要既有底层能力保留；未改 Shared schema、Route、Worker Runner、transcript SQL/window/pagination、writeback、archive 或 subtask。
+- 已完成实现验证，待独立审查；不得据此宣称允许进入 P6。
+
 ## P6：领域测试、装配与阶段收尾
 
 ### 任务
@@ -205,6 +245,13 @@ P2 通过后停止 testkit 独立扩张，并在 `09-implementation-record.md` �
 - 执行必要 UI 手工验收；
 - 由新审查视角做阶段全面审查，对照 0005/0006/本方案；
 - 修复后再次复审。
+
+### P6 实施记录（2026-04-01）
+
+- 删除 `AgentService` 中已无调用的 `RunPromptStatic`、`readWorkspaceAgentsInstructions()` 与 `WORKSPACE_AGENTS_FILENAME`；经符号检索确认不存在 prompt-context legacy authority、cache Map 直写或第二套 read-side 实现。
+- 三个 `AgentService` public entry 均只转发 `ReadSideApplication`；Routes 仍只做 token/body 边界并调用 facade，`agent.module.ts` 未承载 prompt 规则。
+- 未将剩余 `agent.integration.test.ts` prompt/read-side characterization 拆出：这些场景刻意保留真实 Fastify/SQLite/filesystem/settings/lifecycle 联动证据；对应局部规则已由 read-side/prompt domain tests 覆盖。该差异是减少 testkit 扩张和避免 mock 掩盖边界的有意决定。
+- 未修改 Shared schema、Worker Runner、writeback/lifecycle/archive/subtask 业务或 testkit 公共面；完成全阶段构建、typecheck、跨 API/Shared/Worker 回归和 diff check 后，待独立审查。
 
 ### 完成门禁
 

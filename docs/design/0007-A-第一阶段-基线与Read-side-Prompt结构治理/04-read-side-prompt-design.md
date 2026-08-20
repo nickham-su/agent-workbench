@@ -46,11 +46,9 @@ getMessagesContext(input)
 
 Application entry 只负责编排一个完整 read-side 用例，不负责实现内部 profile/prompt/messages 投影规则。它是以下事项的最终责任方：
 
-- 加载并校验请求对应的 workspace/session，以及 execution-profile/prompt-context 所需 run；
-- 统一决定 session/run not found、workspace mismatch 等现有 `HttpError` status/message；
-- 把已验证的上下文交给 resolver/assembler/projector，不让下游重复做 HTTP 语义归属判断；
-- 按用例调用 profile resolver、static prompt cache 和 messages projector；
-- 组合并返回现有 Shared response 外壳。
+- P5 后，application entry 统一决定三个 use case 的校验顺序和既有 `HttpError` 映射：execution-profile 校验 session/workspace ownership 后校验 run；messages-context 仅校验 session/workspace ownership；prompt-context 校验 session/workspace ownership、确认 workspace 存在后校验 run；
+- execution-profile/messages-context 的 session/workspace/run 查询与错误映射在 P4 已收敛到 application entry；prompt-context 的同类校验和 workspace existence check 在 P5 收敛到 application entry，通过窄 `ensureWorkspace` callback 复用既有 workspace 查询；
+- application entry 将已验证上下文交给 resolver/projector，不让下游重复做 HTTP 语义归属判断；它不直接调用 static cache，也不组装 static/dynamic prompt，后两项属于 `PromptContextProjector`、cache 和 assembler 的职责。
 
 它不直接展开 system prompt、skills、tools、transcript 或 cache Map 操作。除最终 response 组合外，application entry 不复制下游投影规则。
 
@@ -113,9 +111,10 @@ Messages projector 接收 application entry 已验证的 session 上下文，通
 
 | 规则 | 最终责任方 |
 |---|---|
-| workspace/session/run 归属校验与现有 400/404 映射 | application entry |
+| execution-profile/messages-context 的 workspace/session/run 归属校验与现有 400/404 映射 | application entry（P4） |
+| prompt-context 的 workspace/session/run 归属校验与现有 400/404 映射 | application entry（P5） |
 | execution profile 选择与 profile response 内部字段 | execution profile resolver |
-| prompt-context 是否调用 static cache、static/dynamic 结果组合和 response 外壳 | application entry |
+| prompt-context 的 static cache 调用、static/dynamic 结果组合和 response 外壳 | PromptContextProjector（P5）；application entry 负责已验证上下文交接 |
 | cache key/TTL/reuse/续期/实际删除 | static prompt assembler/cache |
 | terminal 时何时触发 clear | 既有 lifecycle 调用方；1B 不迁移该业务时机 |
 | transcript 顺序、appendMessage 投影、reasoning 过滤、动态 message 内容 | messages projector |
@@ -166,6 +165,25 @@ Query capability → application entry
 ```
 
 Run completion 对 cache 的清理由既有调用方通过最小 invalidation capability 触发，避免 Read-side 与 Run Lifecycle 双向注入完整 service。
+
+## P3-P5 骨架与 Read-side 用例落地（2026-04-01）
+
+P3 已新增：
+
+```text
+agent/read-side/read-side-application.ts
+agent/prompt/run-prompt-static-cache.ts
+```
+
+`ReadSideApplication` 不接收 `AgentService`/`AppContext`。P5 后，它通过 session/run query callback 和窄 `ensureWorkspace` callback 集中完成三个 read-side use case 的归属/workspace existence 校验及既有 `HttpError` 400/404 映射；prompt-context 保留历史顺序，在 session/workspace ownership 校验和 workspace existence check 后再验证 run，并委派 `PromptContextProjector`。
+
+`ExecutionProfileResolver` 只接收已验证的 session kind、run identity、profile resolver callback 与 runtime settings callback：它按 primary/subtask 映射 user/subtask surface，并返回既有 resolved、agent、provider、model、vision、compaction、runtime 外壳。`MessagesContextProjector` 只接收 messages、active run、locale 与 one-shot system callbacks；它保留原有 `compactionSnippetUiLocale: null` 输入、locale fallback 和 `appendMessage` 仅追加本地 response messages 数组的语义。两个组件均不接收完整 `AgentService`、`AppContext`、Store 或 runtime enqueue/cancel 能力。
+
+P5 新增 `PromptStaticAssembler`、`RunPromptStaticCache` 与 `PromptContextProjector`。assembler 通过窄 readers 获取 settings、instructions、skills、external roots 和静态工具定义；cache 保留 runId key、30 分钟 access-based TTL、同 run Promise reuse 与显式 clear；projector 在每次请求先解析 profile（即使 static cache 命中），再组合 static system/tools/roots 与动态 locale、runtime instruction、messages、pendingTools、token usage。静态 cache 中不存 transcript、run state 或 pending tools。
+
+`buildPromptMessagesForSession()` 与 `resolveUiLocaleForSessionContext()` 仍留在 `AgentService`，作为 P4/P5 共用的窄 callback：前者仍是既有 transcript/compaction 投影实现，后者仍是既有 locale fallback；它们不再构成 prompt-context 的权威 use-case 编排。`RunPromptStaticCacheInvalidator` 仍只负责实际 clear，`AgentService` 保留原有 failed/cancelled/completed lifecycle 调用时机；因此没有将 lifecycle 迁入 Read-side。
+
+`prompt/tool-projectors/` 未修改，P3 没有复制或重定位工具投影实现。P3 也未新建 Store/settings/workspace/plugin/filesystem adapter，因为尚未有安全移动的 read-side 实现需要它们；预建这类 adapter 会违反最小公共面的停止条件。
 
 ## 迁移策略
 
@@ -249,6 +267,14 @@ packages/shared/tests/internal-contracts.test.ts
 - `AgentApiClient` 三个方法和 validation 模式保持；
 - Worker Runner 的调用顺序、模型循环、auto-compaction 和 tool execution 不变；
 - API-managed Worker 与本地 fallback 路径保持。
+
+## P6 收尾决定（2026-04-01）
+
+P6 未继续拆分或复制大型 `agent.integration.test.ts`：其中剩余的 prompt/read-side characterization 需要在同一真实 Fastify、SQLite、workspace 文件系统、settings 与 terminal lifecycle 调用链中证明 compaction snippet、AGENTS.md/skills、安全路径、locale fallback、tool message 和 cache terminal clear 的端到端等价性。将这些场景改造成 mock Store 或通用 builder 会扩大已冻结 testkit，拆成只调用私有组件的单测又会削弱真实边界证据。它们因此保留为集成证据；可局部隔离的 application/resolver/projector/assembler/cache 规则已在 `read-side/` 和 `prompt/` 领域测试中覆盖。
+
+P6 删除了 Service 中已无调用的 `RunPromptStatic` 类型和 `readWorkspaceAgentsInstructions()` 包装；仍保留 `buildPromptMessagesForSession()`、`resolveUiLocaleForSessionContext()`、受控 instruction/skill readers 及 tool projectors，理由是它们承载既有 transcript/compaction、locale fallback、文件安全读取或动态工具投影规则，并通过窄 callback 服务新权威链，而非保留第二套 use-case 编排。
+
+`agent.module.ts` 继续只负责创建 `AgentService` 和注入 runtime/event dependencies，不组装 prompt；prompt/read-side collaborators 在 Service composition 中以窄 callback 装配，未向 module 或 Route 泄露 prompt 规则。
 
 ## 1B 退出条件
 

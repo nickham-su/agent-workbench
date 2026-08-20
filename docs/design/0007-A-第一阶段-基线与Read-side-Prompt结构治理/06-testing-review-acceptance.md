@@ -22,6 +22,21 @@
 
 1A 不需要新增覆盖所有 read-side 行为的测试；它必须证明 testkit 不会隐藏这些行为。
 
+### P1 已落盘的 testkit 自验证
+
+```text
+apps/api/src/modules/agent/testkit/agent-testkit.test.ts
+```
+
+该文件断言真实 SQLite fixture 与幂等清理、workspace/repository 的显式持久化且不隐式创建 session/run、显式 `withApp: true` 下的真实 Fastify `inject`，以及 fake runtime 的调用记录/hook/受控失败。P2 已补充 `read-side.api.test.ts` 的真实 Route 等价迁移和 `agent-run-context.test.ts` 的 fixture 生命周期等价迁移；这些仍不替代现有真实 API-managed Worker 证据。
+
+### P2 等价迁移证据
+
+| 原位置 | 迁移后位置 | 保留的关键证据 |
+|---|---|---|
+| `agent.integration.test.ts`：`read-side internal routes freeze token priority, body validation, and current not-found statuses` | `read-side.api.test.ts`：`read-side internal routes preserve token, body validation, and missing-resource responses` | 三 endpoint 的 `401/400/404`、workspace mismatch `400` body、messages 不需 runId、成功 profile/prompt response 外壳与 dynamic arrays。 |
+| `agent-run-context.test.ts` 手工 dataDir/SQLite/`afterEach rm` fixture | 同文件改用 `createAgentTestFixture()`/`dispose()` | missing workspace、空 repo、安全目录排序/过滤断言不变；真实 SQLite 与统一资源清理替代手工生命周期。 |
+
 ## 1A → 1B 验证门禁
 
 P3 开始前必须能同时提供：
@@ -32,6 +47,10 @@ P3 开始前必须能同时提供：
 - 已冻结的 testkit 公共导出、默认值、fixture 生命周期、teardown 和 fake runtime 合同清单。
 
 P3-P6 若只新增当前领域测试私有 helper，随当前批次验证。若修改公共 testkit 合同、默认语义、fixture 生命周期、资源所有权、fake runtime 合同或生产 seam，必须暂停当前批次，重新执行受影响的 1A 测试矩阵并完成独立审查、修复和复审。没有新的 1A 通过记录，不得恢复 1B。
+
+### 当前过程记录与门禁口径
+
+上文是规范性门禁，实际批次状态以 `09-implementation-record.md` 为准：P3、P5 初审通过；P0、P1、P2、P4 初审发现问题、修复后独立复审通过；P6 本轮独立审查发现记录问题，补齐后独立复审通过。新审查视角的阶段最终全面审查和最终复审也均已通过。当前 Git 状态和历史 mixed 状态均不构成按批暂存证据。
 
 ## 1B 测试分层
 
@@ -67,6 +86,18 @@ packages/shared/tests/internal-contracts.test.ts
 | 只读边界 | execution-profile/prompt/messages 不写 run/context/session，`appendMessage` 不落库 |
 
 上述最低证据可以分布在 domain、persistence 和 Route integration tests，但必须在 `09-implementation-record.md` 建立用例到测试文件的索引，不能只靠综合测试“可能覆盖”。
+
+#### P4 已落盘的领域证据
+
+| 责任面 | 测试文件 | 证据 |
+|---|---|---|
+| Application 归属校验 | `read-side/read-side-application.test.ts` | session missing、workspace mismatch、run missing 的既有 404/400 `HttpError`，以及 profile/messages 委派顺序。 |
+| Execution profile resolver | `read-side/execution-profile-resolver.test.ts` | primary/subtask surface、run identity、resolved/profile/runtime/vision/compaction response 组装。 |
+| Messages projector | `read-side/messages-context-projector.test.ts` | messages、active run、locale、one-shot system 调用链；`appendMessage` 只改变局部响应数组，空白 append 忽略。 |
+| Route / 真实 SQLite | `read-side.api.test.ts` 与 `agent.integration.test.ts` | endpoint/status/body、动态 response 外壳、只读边界、transcript/reasoning/locale/appendMessage characterization。 |
+| P5 static assembler | `prompt/prompt-static-assembler.test.ts` | static settings/instruction/skill 输入、external skill 排序、baseline/agent tool 去重、subtask depth visibility。 |
+| P5 cache / prompt composition | `prompt/run-prompt-static-cache.test.ts` 与 `read-side/prompt-context-projector.test.ts` | runId 隔离、30 分钟 TTL、access expiry、Promise reuse、显式 clear；每次 profile validation 与 static/dynamic locale/messages/pendingTools 组合。 |
+| Service facade 委派 | `agent.service.facade.test.ts` | 三个 `AgentService` read-side facade 对 `ReadSideApplication` 的参数、返回值与同步/异步错误均直接透传，不保留第二套规则。 |
 
 #### 建议覆盖
 
@@ -128,7 +159,9 @@ apps/api/src/modules/agent/agent.worker.integration.test.ts
 
 ### UI 手工验收
 
-若 1B 只做内部结构移动且 API/Worker/UI contract 完全不变，可由阶段审查决定是否缩减，但至少应说明理由。若执行完整验收，覆盖：
+P6 的 UI 手工验收暂予豁免：本阶段只重组 API 内部 read-side/prompt 职责，未改 UI、Route method/path、Shared schema 或 Worker 调用顺序；真实 Route、API-managed Worker、Shared contract、Worker client/runner 与 prompt/cache characterization 已覆盖兼容边界。独立阶段审查如发现 API/Worker 行为差异，必须重新开启手工验收。
+
+若执行完整验收，覆盖：
 
 - 多轮对话与流式输出；
 - 页面刷新和会话切换；
@@ -195,7 +228,9 @@ npx tsc --noEmit --pretty false
 - 是否保留真实 API↔Worker 证据；
 - 是否有双实现、循环依赖、重复 DB/文件读取或日志泄露。
 
-最终阶段审查必须采用新审查视角，并对照：
+### 已完成的阶段最终审查与复审（2026-04-01）
+
+新审查视角已完成阶段最终全面审查并通过；该会话的最终复审也已通过。审查对照：
 
 ```text
 0006 总体治理蓝图
@@ -204,6 +239,13 @@ npx tsc --noEmit --pretty false
 最终代码地图与测试证据
 09-implementation-record.md 中的基线、运行和门禁记录
 ```
+
+最终审查补齐并确认：
+
+- `agent.service.facade.test.ts` 直接证明三个 `AgentService` read-side facade 透传参数、返回值和同步/异步错误；
+- 当前 Git 状态与历史 mixed 状态分开记录；
+- execution-profile、messages-context、prompt-context 的 ownership/workspace 校验归属与最终实现一致；
+- 未发现需要修改 Shared schema、Worker Runner、writeback/lifecycle/archive/subtask、UI 或 contract 的问题。
 
 ## 回滚策略
 

@@ -118,6 +118,12 @@ import { projectToolCallInputForPrompt } from "./prompt/tool-projectors/index.js
 import { listPluginRuntimeSnapshots } from "../plugins/plugin.service.js";
 import { parseSkillFrontmatter, scanReadableTopLevelSkills } from "./top-level-skill.js";
 import type { AgentRunCompletedEventHub } from "./run-completed-events.js";
+import { RunPromptStaticCache, RunPromptStaticCacheInvalidator } from "./prompt/run-prompt-static-cache.js";
+import { PromptStaticAssembler } from "./prompt/prompt-static-assembler.js";
+import { ExecutionProfileResolver } from "./read-side/execution-profile-resolver.js";
+import { MessagesContextProjector } from "./read-side/messages-context-projector.js";
+import { PromptContextProjector } from "./read-side/prompt-context-projector.js";
+import { ReadSideApplication } from "./read-side/read-side-application.js";
 import { getWorkspaceEnabledAgentIds } from "../workspaces/workspace.service.js";
 
 export type AgentQueuedRun = {
@@ -1040,12 +1046,10 @@ const TERMINAL_TOOL_ITEM_STATUS = new Set<AgentContextItemStatus>([
 ]);
 const TERMINAL_RUN_RECORD_STATUS = new Set(["completed", "failed", "cancelled"] as const);
 
-const WORKSPACE_AGENTS_FILENAME = "AGENTS.md";
 const WORKSPACE_AGENTS_MAX_BYTES = 32 * 1024;
 const ARCHIVE_FILE_NAME_WIDTH = 8;
 const ARCHIVE_FILE_LINE_LIMIT = 100;
 const ARCHIVE_SEARCH_MAX_HITS_DEFAULT = 10;
-const RUN_PROMPT_STATIC_CACHE_TTL_MS = 30 * 60 * 1000;
 const BUILTIN_SKILLS_ROOT = "skills";
 const ARCHIVE_SEARCH_MAX_HITS_MAX = 100;
 const ARCHIVE_MAX_CHARS_DEFAULT = 8_000;
@@ -1923,16 +1927,6 @@ type SkillSummaryItem = {
   description?: string;
 };
 
-type RunPromptStatic = {
-  systemStatic: string;
-  tools: Array<{
-    name: string;
-    description: string;
-    inputSchema: Record<string, unknown>;
-  }>;
-  externalSkillRoots: Array<{ sourceType: "workspace" | "repo"; repoId?: string; rootDir: string; rootPath: string }>;
-};
-
 async function scanTopLevelSkillSummaries(params: {
   rootPath: string;
   idPrefix: "builtin" | "workspace" | "repo";
@@ -2037,13 +2031,6 @@ async function readAgentsInstructionFile(params: { filePath: string; displayPath
   }
 }
 
-async function readWorkspaceAgentsInstructions(workspacePath: string, logger: FastifyBaseLogger) {
-  const filePath = path.join(workspacePath, WORKSPACE_AGENTS_FILENAME);
-  const relativePath = path.relative(workspacePath, filePath);
-  const displayPath = relativePath && !relativePath.startsWith("..") ? relativePath : filePath;
-  return readAgentsInstructionFile({ filePath, displayPath, logger });
-}
-
 const GLOBAL_WORKFLOW_SYSTEM_PROMPT = getPromptText("agent/global-workflow-system-prompt.zh-CN.txt");
 
 registerGlobalSystemPromptTextProvider(() => GLOBAL_WORKFLOW_SYSTEM_PROMPT);
@@ -2117,22 +2104,114 @@ function appendRuntimeConstraintsSection(systemStatic: string, runtimeInstructio
 
 export class AgentService {
   private readonly sessionOpLocks = new Map<string, Promise<void>>();
-  private readonly runPromptStaticCache = new Map<
-    string,
-    {
-      expiresAt: number;
-      promise: Promise<RunPromptStatic>;
-    }
-  >();
+  private readonly runPromptStaticCache = new RunPromptStaticCache<Awaited<ReturnType<PromptStaticAssembler["assemble"]>>>();
+  private readonly readSideApplication: ReadSideApplication<
+    ReturnType<AgentService["resolveExecutionProfileForReadSide"]> extends infer Profile extends { agent: { id: string }; provider: { id: string }; model: { id: string }; vision: unknown; compaction: unknown }
+      ? ReturnType<ExecutionProfileResolver<Profile, ReturnType<AgentService["getAgentRuntimeSettingsForReadSide"]>>["getExecutionProfileForRun"]>
+      : never,
+    Awaited<ReturnType<MessagesContextProjector<Awaited<ReturnType<AgentService["buildPromptMessagesForSession"]>>["messages"][number]>["getMessagesContext"]>>,
+    Awaited<ReturnType<PromptContextProjector<Awaited<ReturnType<AgentService["buildPromptMessagesForSession"]>>["messages"][number]>["getPromptContextForRun"]>>
+  >;
+  private readonly executionProfileResolver: ExecutionProfileResolver<
+    ReturnType<AgentService["resolveExecutionProfileForReadSide"]>,
+    ReturnType<AgentService["getAgentRuntimeSettingsForReadSide"]>
+  >;
+  private readonly messagesContextProjector: MessagesContextProjector<Awaited<ReturnType<AgentService["buildPromptMessagesForSession"]>>["messages"][number]>;
+  private readonly promptStaticAssembler: PromptStaticAssembler;
+  private readonly promptContextProjector: PromptContextProjector<Awaited<ReturnType<AgentService["buildPromptMessagesForSession"]>>["messages"][number]>;
+  private readonly runPromptStaticCacheInvalidator: RunPromptStaticCacheInvalidator;
 
   constructor(
     private readonly ctx: AppContext,
     private readonly logger: FastifyBaseLogger,
     private readonly runCompletedEventHub?: AgentRunCompletedEventHub | null
-  ) {}
+  ) {
+    this.runPromptStaticCacheInvalidator = new RunPromptStaticCacheInvalidator({
+      clearRunStaticPrompt: (runId) => this.runPromptStaticCache.clear(runId)
+    });
+    this.executionProfileResolver = new ExecutionProfileResolver({
+      resolveProfile: (input) => this.resolveExecutionProfileForReadSide(input),
+      getRuntime: () => this.getAgentRuntimeSettingsForReadSide()
+    });
+    this.messagesContextProjector = new MessagesContextProjector({
+      buildMessages: ({ workspaceId, sessionId }) => this.buildPromptMessagesForSession({
+        workspaceId,
+        sessionId,
+        compactionSnippetUiLocale: null
+      }),
+      getActiveRunId: ({ workspaceId, sessionId }) => getRunState(this.ctx.db, workspaceId, sessionId).activeRunId,
+      resolveUiLocale: (input) => this.resolveUiLocaleForSessionContext(input),
+      buildOneShotSystem: (input) => buildOneShotSystemPrompt(input)
+    });
+    this.promptStaticAssembler = new PromptStaticAssembler({
+      getGlobalPrompts: () => getAgentGlobalPromptSettings(this.ctx),
+      listAgentsInstructionSources: (workspaceId) => listEnabledWorkspaceAgentsInstructions({ ctx: this.ctx, logger: this.logger, workspaceId }),
+      readAgentsInstruction: (source) => readAgentsInstructionFile({ ...source, logger: this.logger }),
+      scanBuiltinSkills: () => scanTopLevelSkillSummaries({
+        rootPath: path.join(this.ctx.repoRoot, BUILTIN_SKILLS_ROOT),
+        idPrefix: "builtin",
+        logger: this.logger
+      }),
+      listExternalSkillRoots: (workspaceId) => listEnabledWorkspaceExternalSkillRoots(this.ctx, this.logger, workspaceId),
+      scanExternalSkills: (root) => scanTopLevelSkillSummaries({
+        rootPath: root.rootPath,
+        idPrefix: root.sourceType === "workspace" ? "workspace" : "repo",
+        idBasePath: root.sourceType === "workspace" ? root.rootDir : `${root.repoId}/${root.rootDir}`,
+        logger: this.logger
+      }),
+      warnExternalSkillScanFailure: ({ err, workspaceId, root }) => {
+        this.logger.warn(
+          { err, workspaceId, sourceType: root.sourceType, repoId: root.sourceType === "repo" ? root.repoId : undefined },
+          "scan external skill roots failed"
+        );
+      },
+      getMaxSubtaskDepth: () => getAgentRuntimeSettings(this.ctx).maxSubtaskDepth,
+      listSubtaskAgents: () => listAvailableAgentsForSurface(this.ctx, "subtask").map((item) => ({
+        id: item.id,
+        name: item.name,
+        summary: item.summary
+      })),
+      buildSystem: (input) => buildSystemPrompt(input),
+      buildOutputFormatInstruction: (input) => buildOutputFormatInstruction(input),
+      buildSkillsInstruction: (input) => buildSkillsInstructionSection(input),
+      buildSubtaskDescription: (agents) => buildSubtaskToolDescription(agents),
+      describeTool: (name, options) => toolDescription(name as AgentContextToolName, options),
+      getToolInputSchema: (name) => toolArgsSchema(name as AgentContextToolName)
+    });
+    this.promptContextProjector = new PromptContextProjector(this.runPromptStaticCache, {
+      getRunState: ({ workspaceId, sessionId }) => getRunState(this.ctx.db, workspaceId, sessionId),
+      resolveUiLocale: (input) => this.resolveUiLocaleForSessionContext(input),
+      resolveProfile: (input) => this.resolveExecutionProfileForReadSide(input),
+      assembleStatic: (input) => this.promptStaticAssembler.assemble(input),
+      buildRuntimeInstruction: (input) => buildRuntimeInstruction(input),
+      appendRuntimeConstraints: (systemStatic, runtimeInstruction) => appendRuntimeConstraintsSection(systemStatic, runtimeInstruction),
+      listVisibleItems: ({ workspaceId, sessionId }) => getSessionVisibleItems(this.ctx.db, workspaceId, sessionId),
+      buildMessages: (input) => this.buildPromptMessagesForSession(input)
+    });
+    this.readSideApplication = new ReadSideApplication({
+      findSession: (sessionId) => getAgentSession(this.ctx.db, sessionId),
+      findRun: (runId) => getRunRecord(this.ctx.db, runId),
+      ensureWorkspace: (workspaceId) => {
+        this.ensureWorkspace(workspaceId);
+      },
+      resolveExecutionProfile: (input) => this.executionProfileResolver.getExecutionProfileForRun({
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        session: input.session,
+        run: input.run
+      }),
+      projectMessagesContext: (input) => this.messagesContextProjector.getMessagesContext({
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        headItemId: input.session.headItemId,
+        ...(input.appendMessage ? { appendMessage: input.appendMessage } : {})
+      }),
+      projectPromptContext: (input) => this.promptContextProjector.getPromptContextForRun(input)
+    });
+  }
 
   private clearRunPromptStaticCache(runId: string) {
-    this.runPromptStaticCache.delete(runId);
+    this.runPromptStaticCacheInvalidator.clear(runId);
   }
 
   private async runSessionOperationExclusive<T>(sessionId: string, action: () => Promise<T>): Promise<T> {
@@ -4026,42 +4105,27 @@ export class AgentService {
   }
 
   getExecutionProfileForRun(params: { workspaceId: string; sessionId: string; runId: string }) {
-    const session = getAgentSession(this.ctx.db, params.sessionId);
-    if (!session) throw new HttpError(404, "session not found");
-    if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
+    return this.readSideApplication.getExecutionProfileForRun(params);
+  }
 
-    const run = getRunRecord(this.ctx.db, params.runId);
-    if (!run || run.sessionId !== params.sessionId || run.workspaceId !== params.workspaceId) {
-      throw new HttpError(404, "run not found");
-    }
-
-    const profile = resolveExecutionProfile(this.ctx, {
-      surface: session.kind === "subtask" ? "subtask" : "user",
-      agentIdFromRun: run.agentId,
-      workspaceEnablement: getWorkspaceEnabledAgentIds(this.ctx, session.workspaceId),
-      providerIdFromRun: run.providerId,
-      modelIdFromRun: run.modelId
+  private resolveExecutionProfileForReadSide(input: {
+    surface: "user" | "subtask";
+    workspaceId: string;
+    agentId: string;
+    providerId: string;
+    modelId: string;
+  }) {
+    return resolveExecutionProfile(this.ctx, {
+      surface: input.surface,
+      agentIdFromRun: input.agentId,
+      workspaceEnablement: getWorkspaceEnabledAgentIds(this.ctx, input.workspaceId),
+      providerIdFromRun: input.providerId,
+      modelIdFromRun: input.modelId
     });
+  }
 
-    const runtime = getAgentRuntimeSettings(this.ctx);
-
-    return {
-      resolved: {
-        runId: params.runId,
-        sessionId: params.sessionId,
-        workspaceId: params.workspaceId,
-        agentId: profile.agent.id,
-        providerId: profile.provider.id,
-        modelId: profile.model.id
-      },
-      agent: profile.agent,
-      // profile.agent 现已包含 pluginTools，共享契约扩展不改变当前执行逻辑。
-      provider: profile.provider,
-      model: profile.model,
-      vision: profile.vision,
-      compaction: profile.compaction,
-      runtime
-    };
+  private getAgentRuntimeSettingsForReadSide() {
+    return getAgentRuntimeSettings(this.ctx);
   }
 
   getSingleCallModelProfileForRun(params: { workspaceId: string; sessionId: string; runId: string }) {
@@ -4693,24 +4757,7 @@ export class AgentService {
     sessionId: string;
     appendMessage?: { role: "system" | "user"; content: string };
   }) {
-    const session = getAgentSession(this.ctx.db, params.sessionId);
-    if (!session) throw new HttpError(404, "session not found");
-    if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
-
-    const { messages } = await this.buildPromptMessagesForSession({
-      workspaceId: params.workspaceId,
-      sessionId: params.sessionId,
-      // messages-context 是通用 messages 视图，不应隐式依赖 active run 的 uiLocale；此处固定为 null。
-      compactionSnippetUiLocale: null
-    });
-    const runState = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
-    const uiLocale = this.resolveUiLocaleForSessionContext({ workspaceId: params.workspaceId, sessionId: params.sessionId, activeRunId: runState.activeRunId });
-    const system = buildOneShotSystemPrompt({ uiLocale });
-
-    if (params.appendMessage && params.appendMessage.content.trim()) {
-      messages.push({ role: params.appendMessage.role, content: params.appendMessage.content });
-    }
-    return { headItemId: session.headItemId, messages, system };
+    return this.readSideApplication.getMessagesContext(params);
   }
 
   async archiveReadFromWorker(params: {
@@ -4772,175 +4819,7 @@ export class AgentService {
   }
 
   async getPromptContextForRun(params: { workspaceId: string; sessionId: string; runId: string }) {
-    const session = getAgentSession(this.ctx.db, params.sessionId);
-    if (!session) throw new HttpError(404, "session not found");
-    if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
-    const workspace = this.ensureWorkspace(params.workspaceId);
-
-    const run = getRunRecord(this.ctx.db, params.runId);
-    if (!run || run.sessionId !== params.sessionId || run.workspaceId !== params.workspaceId) {
-      throw new HttpError(404, "run not found");
-    }
-
-    const profile = resolveExecutionProfile(this.ctx, {
-      surface: session.kind === "subtask" ? "subtask" : "user",
-      agentIdFromRun: run.agentId,
-      workspaceEnablement: getWorkspaceEnabledAgentIds(this.ctx, session.workspaceId),
-      providerIdFromRun: run.providerId,
-      modelIdFromRun: run.modelId
-    });
-
-    const runState = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
-    const uiLocale = this.resolveUiLocaleForSessionContext({
-      workspaceId: params.workspaceId,
-      sessionId: params.sessionId,
-      activeRunId: runState.activeRunId
-    });
-
-    const now = Date.now();
-    const cachedStatic = this.runPromptStaticCache.get(params.runId);
-    const staticPromptPromise = cachedStatic && cachedStatic.expiresAt > now
-      ? cachedStatic.promise
-      : (async (): Promise<RunPromptStatic> => {
-          const [globalPrompts, enabledAgentsSources, builtinSkills, enabledExternalRoots] = await Promise.all([
-            Promise.resolve(getAgentGlobalPromptSettings(this.ctx)),
-            listEnabledWorkspaceAgentsInstructions({ ctx: this.ctx, logger: this.logger, workspaceId: workspace.id }),
-            scanTopLevelSkillSummaries({
-              rootPath: path.join(this.ctx.repoRoot, BUILTIN_SKILLS_ROOT),
-              idPrefix: "builtin",
-              logger: this.logger
-            }),
-            listEnabledWorkspaceExternalSkillRoots(this.ctx, this.logger, workspace.id)
-          ]);
-
-          const agentsInstructions = (await Promise.all(
-            enabledAgentsSources.map((it) =>
-              readAgentsInstructionFile({ filePath: it.filePath, displayPath: it.displayPath, logger: this.logger })
-            )
-          ))
-            .filter((it): it is NonNullable<typeof it> => it !== null)
-            ;
-
-          const externalSkillRoots: Array<{ sourceType: "workspace" | "repo"; repoId?: string; rootDir: string; rootPath: string }> = [];
-          const externalSkills: SkillSummaryItem[] = [];
-
-          for (const root of enabledExternalRoots) {
-            externalSkillRoots.push({
-              sourceType: root.sourceType,
-              ...(root.sourceType === "repo" ? { repoId: root.repoId } : {}),
-              rootDir: root.rootDir,
-              rootPath: root.rootPath
-            });
-            const scanned = await scanTopLevelSkillSummaries({
-              rootPath: root.rootPath,
-              idPrefix: root.sourceType === "workspace" ? "workspace" : "repo",
-              idBasePath: root.sourceType === "workspace" ? root.rootDir : `${root.repoId}/${root.rootDir}`,
-              logger: this.logger
-            }).catch((err) => {
-              this.logger.warn(
-                { err, workspaceId: workspace.id, sourceType: root.sourceType, repoId: root.sourceType === "repo" ? root.repoId : undefined },
-                "scan external skill roots failed"
-              );
-              return [] as SkillSummaryItem[];
-            });
-            externalSkills.push(...scanned);
-          }
-          externalSkills.sort((a, b) => a.skill < b.skill ? -1 : a.skill > b.skill ? 1 : 0);
-
-          const baselineToolNames = ["read", "archive_search", "archive_read", "skill"] as const;
-          const enabledToolNames: string[] = [];
-          const enabledToolNameSet = new Set<string>();
-          for (const name of [...baselineToolNames, ...profile.agent.tools]) {
-            if (!name || enabledToolNameSet.has(name)) continue;
-            enabledToolNameSet.add(name);
-            enabledToolNames.push(name);
-          }
-          const runtime = getAgentRuntimeSettings(this.ctx);
-          const canExposeSubtask = run.subtaskDepth != null && run.subtaskDepth < runtime.maxSubtaskDepth;
-          if (!canExposeSubtask) {
-            const filtered = enabledToolNames.filter((name) => name !== "subtask");
-            enabledToolNames.length = 0;
-            enabledToolNames.push(...filtered);
-          }
-
-          // Tool visibility is computed once per run; later settings changes do not hot-update this run.
-          const subtaskDescription = enabledToolNames.includes("subtask")
-            ? buildSubtaskToolDescription(
-                listAvailableAgentsForSurface(this.ctx, "subtask").map((item) => ({
-                  id: item.id,
-                  name: item.name,
-                  summary: item.summary
-                }))
-              )
-            : undefined;
-
-          return {
-            systemStatic: buildSystemPrompt({
-              agentName: profile.agent.name,
-              agentPrompt: profile.agent.prompt || "",
-              agentGlobalPromptIds: Array.isArray(profile.agent.globalPromptIds) ? profile.agent.globalPromptIds : [],
-              globalPrompts: globalPrompts.items,
-              outputFormatInstruction: buildOutputFormatInstruction({ uiLocale }),
-              agentsInstructions,
-              skillsInstruction: buildSkillsInstructionSection({ builtin: builtinSkills, external: externalSkills })
-            }),
-
-            tools: enabledToolNames.map((name) => ({
-              name,
-              description: toolDescription(name, { subtaskDescription }),
-              inputSchema: toolArgsSchema(name)
-            })),
-            externalSkillRoots
-          };
-        })();
-    this.runPromptStaticCache.set(params.runId, {
-      expiresAt: now + RUN_PROMPT_STATIC_CACHE_TTL_MS,
-      promise: staticPromptPromise
-    });
-
-    const staticPrompt = await staticPromptPromise;
-    const runtimeInstruction = buildRuntimeInstruction({ uiLocale });
-    const system = appendRuntimeConstraintsSection(staticPrompt.systemStatic, runtimeInstruction);
-
-    const visible = getSessionVisibleItems(this.ctx.db, params.workspaceId, params.sessionId);
-    const { messages } = await this.buildPromptMessagesForSession({
-      workspaceId: params.workspaceId,
-      sessionId: params.sessionId,
-      compactionSnippetUiLocale: uiLocale
-    });
-    const tools = staticPrompt.tools;
-
-    const pendingTools = visible
-      .filter((item) => item.runId === params.runId && item.kind === "tool")
-      .filter((item) => item.status === "queued" || item.status === "running")
-      .map((item) => {
-        if (item.output.type !== "tool") return null;
-        return {
-          itemId: item.id,
-          status: item.status,
-          toolName: item.output.toolName,
-          toolCallId: item.output.toolCallId,
-          args: item.output.args ?? {}
-        };
-      })
-      .filter((item): item is {
-        itemId: number;
-        status: AgentContextItemStatus;
-        toolName: AgentContextToolName;
-        toolCallId: string | undefined;
-        args: Record<string, unknown>;
-      } => item !== null);
-
-    return {
-      headItemId: session.headItemId,
-      system,
-      messages,
-      tools,
-      pendingTools,
-      lastResponseTotalTokens: runState.lastResponseTotalTokens,
-      uiLocale,
-      externalSkillRoots: staticPrompt.externalSkillRoots
-    };
+    return this.readSideApplication.getPromptContextForRun(params);
   }
 
   checkChannelSenderAllowlist(input: { pluginId: string; senderId: string }) {
