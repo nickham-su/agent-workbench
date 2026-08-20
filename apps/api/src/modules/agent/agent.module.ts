@@ -12,7 +12,10 @@ import {
   appendContextItem,
   failNonTerminalContextItemsByRunId,
   failRunRecordIfInFlight,
+  getAgentSession,
   getLatestSessionItemId,
+  getRunRecord,
+  getRunState,
   getSessionHead,
   listInFlightSessionsWithoutActiveRunId,
   listRecoverableRuns,
@@ -25,25 +28,64 @@ import { AgentPluginHostProcessManager } from "./agent.plugin-host-manager.js";
 import { nowMs } from "../../utils/time.js";
 import { AgentRunCompletedEventHub } from "./run-completed-events.js";
 
-async function enqueueRecoveringRuns(service: AgentService, runtime: AgentRuntimePort, logger: FastifyInstance["log"]) {
+type RecoverableRunCandidate = {
+  workspaceId: string;
+  sessionId: string;
+  runId: string;
+  triggerItemId: number | null;
+};
+
+function getRecoverableRunForEnqueue(service: AgentService, candidate: RecoverableRunCandidate) {
+  const db = service.getContext().db;
+  const session = getAgentSession(db, candidate.sessionId);
+  if (!session || session.workspaceId !== candidate.workspaceId) return null;
+
+  const run = getRunRecord(db, candidate.runId);
+  if (
+    !run ||
+    run.status !== "running" ||
+    run.workspaceId !== candidate.workspaceId ||
+    run.sessionId !== candidate.sessionId
+  ) {
+    return null;
+  }
+
+  const state = getRunState(db, candidate.workspaceId, candidate.sessionId);
+  if (state.status !== "running" || state.activeRunId !== candidate.runId) return null;
+
+  return run;
+}
+
+export async function enqueueRecoveringRuns(
+  service: AgentService,
+  runtime: AgentRuntimePort,
+  logger: FastifyInstance["log"],
+  options?: { beforeFinalCheck?: (candidate: RecoverableRunCandidate) => void | Promise<void> }
+) {
   const rows = listRecoverableRuns(service.getContext().db);
   for (const row of rows) {
-    const session = service.getSession(row.sessionId);
-    if (!session) continue;
+    const initialRun = getRecoverableRunForEnqueue(service, row);
+    if (!initialRun) continue;
+
     const runContext = getAgentWorkspaceRunContext(service.getContext(), row.workspaceId);
     if (!runContext) continue;
     let inputText = "";
-    if (row.triggerItemId) {
-      const trigger = service.getContextItemById(row.triggerItemId);
+    if (initialRun.triggerItemId) {
+      const trigger = service.getContextItemById(initialRun.triggerItemId);
       if (trigger?.output.type === "user_text") {
         inputText = trigger.output.text;
       }
     }
+
+    await options?.beforeFinalCheck?.(row);
+    const run = getRecoverableRunForEnqueue(service, row);
+    if (!run) continue;
+
     try {
       await runtime.enqueueRun({
-        workspaceId: row.workspaceId,
-        sessionId: row.sessionId,
-        runId: row.runId,
+        workspaceId: run.workspaceId,
+        sessionId: run.sessionId,
+        runId: run.runId,
         inputText,
         ...runContext
       });
@@ -222,6 +264,17 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
   }
 
   await registerAgentRoutes(app, { service, runtime, pluginHost: pluginHostClient, runCompletedEventHub });
+
+  try {
+    service.scanAndCleanupSubtaskOrphansBestEffort();
+  } catch (err) {
+    app.log.warn({ err }, "subtask orphan startup scan failed");
+  }
+  try {
+    await service.reconcileAllArchivePendingBestEffort();
+  } catch (err) {
+    app.log.warn({ err }, "archive pending startup reconcile failed");
+  }
 
   // 开发期默认：fail 模式直接在 listen 前完成 DB 清理，避免外部请求进入后出现竞态。
   if (ctx.agentStartupRecoveryMode === "fail") {

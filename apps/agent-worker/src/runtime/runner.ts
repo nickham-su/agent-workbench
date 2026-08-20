@@ -1875,13 +1875,17 @@ export class AgentRunner {
         },
       createdAt: this.nowMsFn()
     });
+    if (assistant.item == null) {
+      return { aborted: true as const, assistantItemId: null };
+    }
+    const assistantItem = assistant.item;
 
     await this.apiClient.updateRunState({
       workspaceId: run.workspaceId,
       sessionId: run.sessionId,
       status: "running",
       activeRunId: run.runId,
-      activeAssistantItemId: assistant.id,
+      activeAssistantItemId: assistantItem.id,
       runNoticeText: "",
       updatedAt: this.nowMsFn()
     });
@@ -1936,7 +1940,7 @@ export class AgentRunner {
       logger: this.logger,
       workspacePath: run.workspacePath,
       kind: "assistant",
-      itemId: assistant.id,
+      itemId: assistantItem.id,
       payload: {
         status: "running",
         startedAt,
@@ -1946,7 +1950,7 @@ export class AgentRunner {
           runId: run.runId,
           turnId,
           step,
-          itemId: assistant.id
+          itemId: assistantItem.id
         },
         request: requestBase,
         retryPolicy: {
@@ -1974,7 +1978,7 @@ export class AgentRunner {
         return;
       }
       await this.apiClient.updateContextItem({
-        itemId: assistant.id,
+        itemId: assistantItem.id,
         status,
         output: {
           type: "assistant_text",
@@ -2025,14 +2029,14 @@ export class AgentRunner {
 
         const message = err instanceof Error ? err.message : String(err);
         this.logger.warn(
-          `[agent-worker] reset visible output before retry failed(item=${assistant.id}, retry=${retryCount + 1}/${modelRequestMaxRetries}): ${message}`
+          `[agent-worker] reset visible output before retry failed(item=${assistantItem.id}, retry=${retryCount + 1}/${modelRequestMaxRetries}): ${message}`
         );
       }
     };
 
     while (true) {
       if (signal.aborted) {
-        return { aborted: true as const, assistantItemId: assistant.id };
+        return { aborted: true as const, assistantItemId: assistantItem.id };
       }
 
       if (retryCount > 0) {
@@ -2042,7 +2046,7 @@ export class AgentRunner {
             sessionId: run.sessionId,
               status: "running",
               activeRunId: run.runId,
-              activeAssistantItemId: assistant.id,
+              activeAssistantItemId: assistantItem.id,
               runNoticeText: "",
               updatedAt: this.nowMsFn()
             });
@@ -2154,7 +2158,7 @@ export class AgentRunner {
         }
 
         if (signal.aborted) {
-          return { aborted: true as const, assistantItemId: assistant.id };
+          return { aborted: true as const, assistantItemId: assistantItem.id };
         }
         if (totalTimedOut) {
           throw new Error(`model total timeout after ${modelTotalTimeoutMs}ms`);
@@ -2166,7 +2170,7 @@ export class AgentRunner {
         break;
       } catch (err) {
         if (signal.aborted) {
-          return { aborted: true as const, assistantItemId: assistant.id };
+          return { aborted: true as const, assistantItemId: assistantItem.id };
         }
         if (totalTimedOut) {
           err = new Error(`model total timeout after ${modelTotalTimeoutMs}ms`);
@@ -2189,7 +2193,7 @@ export class AgentRunner {
               sessionId: run.sessionId,
               status: "running",
               activeRunId: run.runId,
-              activeAssistantItemId: assistant.id,
+              activeAssistantItemId: assistantItem.id,
               runNoticeText: noticeText,
               updatedAt: this.nowMsFn()
             });
@@ -2201,7 +2205,7 @@ export class AgentRunner {
             logger: this.logger,
             workspacePath: run.workspacePath,
             kind: "assistant",
-            itemId: assistant.id,
+            itemId: assistantItem.id,
             payload: {
               status: "retrying",
               meta: {
@@ -2210,7 +2214,7 @@ export class AgentRunner {
                 runId: run.runId,
                 turnId,
                 step,
-                itemId: assistant.id,
+                itemId: assistantItem.id,
                 retryAttempt,
                 maxRetries: modelRequestMaxRetries,
                 nextRetryInMs: delayMs
@@ -2225,7 +2229,7 @@ export class AgentRunner {
           await resetVisibleOutputForRetry();
           const continueRunning = await sleepMsWithAbort(delayMs, signal);
           if (!continueRunning) {
-            return { aborted: true as const, assistantItemId: assistant.id };
+            return { aborted: true as const, assistantItemId: assistantItem.id };
           }
           continue;
         }
@@ -2240,7 +2244,7 @@ export class AgentRunner {
             sessionId: run.sessionId,
             status: "running",
             activeRunId: run.runId,
-            activeAssistantItemId: assistant.id,
+            activeAssistantItemId: assistantItem.id,
             runNoticeText: "",
             updatedAt: this.nowMsFn()
           });
@@ -2249,7 +2253,7 @@ export class AgentRunner {
         }
         try {
           await this.apiClient.updateContextItem({
-            itemId: assistant.id,
+            itemId: assistantItem.id,
             status: "failed",
             output: {
               type: "assistant_text",
@@ -2266,7 +2270,7 @@ export class AgentRunner {
           logger: this.logger,
           workspacePath: run.workspacePath,
           kind: "assistant",
-          itemId: assistant.id,
+          itemId: assistantItem.id,
           payload: {
             status: "failed",
             startedAt,
@@ -2277,7 +2281,7 @@ export class AgentRunner {
               runId: run.runId,
               turnId,
               step,
-              itemId: assistant.id,
+              itemId: assistantItem.id,
               retries: retryCount
             },
             request,
@@ -2306,7 +2310,7 @@ export class AgentRunner {
     }
 
     const recognizedCalls = toolCalls;
-      let prevId = assistant.id;
+      let prevId = assistantItem.id;
       for (const call of recognizedCalls) {
         const signature = toolSignature(call.toolName, call.args);
         const count = (repeatedToolCallCounter.get(signature) ?? 0) + 1;
@@ -2332,12 +2336,16 @@ export class AgentRunner {
           },
           createdAt: this.nowMsFn()
         });
-        prevId = toolItem.id;
+        if (toolItem.item == null) {
+          return { aborted: true as const, assistantItemId: assistantItem.id };
+        }
+        const toolContextItem = toolItem.item;
+        prevId = toolContextItem.id;
         await writeItemLog({
           logger: this.logger,
           workspacePath: run.workspacePath,
           kind: "tool",
-          itemId: toolItem.id,
+          itemId: toolContextItem.id,
           payload: {
             status: "queued",
             meta: {
@@ -2346,7 +2354,7 @@ export class AgentRunner {
               runId: run.runId,
               turnId,
               step,
-              itemId: toolItem.id
+              itemId: toolContextItem.id
             },
             request: {
               toolName: call.toolName,
@@ -2375,7 +2383,7 @@ export class AgentRunner {
         logger: this.logger,
         workspacePath: run.workspacePath,
         kind: "assistant",
-        itemId: assistant.id,
+        itemId: assistantItem.id,
         payload: {
           status: "completed",
           startedAt,
@@ -2386,7 +2394,7 @@ export class AgentRunner {
             runId: run.runId,
             turnId,
             step,
-            itemId: assistant.id
+            itemId: assistantItem.id
           },
           request: requestBase,
           response: {
@@ -2412,7 +2420,7 @@ export class AgentRunner {
       return {
         aborted: false as const,
         toolCallCount: recognizedCalls.length,
-        assistantItemId: assistant.id,
+        assistantItemId: assistantItem.id,
         hasVisibleText: hasVisibleAssistantText(text),
         availableToolNames: recognizedCalls.length > 0 ? availableToolNames : undefined
       };

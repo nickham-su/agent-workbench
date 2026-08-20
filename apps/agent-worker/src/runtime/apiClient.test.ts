@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import { afterEach, test } from "node:test";
 import type { AgentContextItemRecord } from "@agent-workbench/shared";
+import { Type } from "@sinclair/typebox";
 import {
   AgentApiEndpoints,
   buildAgentApiContextItemPath,
@@ -28,7 +29,7 @@ afterEach(async () => {
   );
 });
 
-async function startServer(handler: (request: { method?: string; url?: string; body: unknown }) => { status: number; body: unknown }) {
+async function startServer(handler: (request: { method?: string; url?: string; body: unknown; headers: Record<string, string | string[] | undefined> }) => { status: number; body: unknown }) {
   const server = createServer((req, res) => {
     let text = "";
     req.setEncoding("utf8");
@@ -36,11 +37,16 @@ async function startServer(handler: (request: { method?: string; url?: string; b
       text += chunk;
     });
     req.on("end", () => {
-      const result = handler({
+      const request = {
         method: req.method,
         url: req.url,
         body: text ? JSON.parse(text) : null
+      } as { method?: string; url?: string; body: unknown; headers: Record<string, string | string[] | undefined> };
+      Object.defineProperty(request, "headers", {
+        value: req.headers,
+        enumerable: false
       });
+      const result = handler(request);
       res.statusCode = result.status;
       res.setHeader("content-type", "application/json");
       res.end(typeof result.body === "string" ? result.body : JSON.stringify(result.body));
@@ -406,6 +412,236 @@ test("warn does not relax JSON parse or non-2xx failures", async () => {
   await assert.rejects(() => errorClient.completeRun(runCompleteInput), /request failed: 500/);
 });
 
+const validExecutionProfileResponse = {
+  resolved: {
+    runId: "RUN",
+    sessionId: "SESSION",
+    workspaceId: "WORKSPACE",
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2"
+  },
+  agent: {
+    id: "default",
+    name: "Default",
+    summary: "",
+    prompt: "system prompt",
+    tools: [],
+    pluginTools: [],
+    mcpServers: [],
+    defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" }
+  },
+  provider: {
+    id: "ppchat",
+    name: "PPChat",
+    npm: "@ai-sdk/openai",
+    options: { baseURL: "http://llm.test/v1", apiKey: "api-key" }
+  },
+  model: {
+    id: "gpt-5.2",
+    name: "GPT 5.2",
+    contextWindowTokens: 128000,
+    options: { dynamic: true }
+  },
+  runtime: {
+    modelIdleTimeoutMs: 1000,
+    modelTotalTimeoutMs: 2000,
+    modelRequestMaxRetries: 0,
+    autoCompactThresholdPct: 80,
+    maxSubtaskDepth: 1,
+    sessionTerminalSoundEnabled: true,
+    visionModel: null,
+    compactionModel: null,
+    updatedAt: 1
+  },
+  vision: null,
+  compaction: null
+};
+
+const validPromptContextResponse = {
+  headItemId: null,
+  system: "system prompt",
+  messages: [{ role: "user", content: [{ type: "text", text: "dynamic message" }] }],
+  tools: [{ name: "bash", description: "run command", inputSchema: { type: "object" } }],
+  pendingTools: [{ itemId: 7, status: "queued", toolName: "bash", args: { command: "pwd" } }],
+  lastResponseTotalTokens: null,
+  uiLocale: "zh-CN",
+  externalSkillRoots: [{ sourceType: "workspace", rootDir: ".agents", rootPath: "/workspace/.agents" }]
+};
+
+const validMessagesContextResponse = {
+  headItemId: 7,
+  system: "system prompt",
+  messages: [{ role: "user", content: "dynamic message" }]
+};
+
+test("read-side methods use shared endpoints, typed bodies, and valid strict/warn responses", async () => {
+  const requests: Array<{ method?: string; url?: string; body: unknown; token?: string | string[] }> = [];
+  const origin = await startServer((request) => {
+    requests.push({
+      method: request.method,
+      url: request.url,
+      body: request.body,
+      token: request.headers["x-awb-agent-internal-token"]
+    });
+    if (request.url === AgentApiEndpoints.getExecutionProfile.path) return { status: 200, body: validExecutionProfileResponse };
+    if (request.url === AgentApiEndpoints.getPromptContext.path) return { status: 200, body: validPromptContextResponse };
+    return { status: 200, body: validMessagesContextResponse };
+  });
+  const strictClient = new AgentApiClient({ apiOrigin: origin, internalToken: "TOKEN" });
+  const warnings: string[] = [];
+  const warnClient = new AgentApiClient({
+    apiOrigin: origin,
+    internalToken: "TOKEN",
+    responseValidation: "warn",
+    logger: { warn: (message: string) => warnings.push(message) }
+  });
+  const executionProfileInput = { workspaceId: "WORKSPACE", sessionId: "SESSION", runId: "RUN" };
+  const promptContextInput = { workspaceId: "WORKSPACE", sessionId: "SESSION", runId: "RUN" };
+  const messagesContextInput = {
+    workspaceId: "WORKSPACE",
+    sessionId: "SESSION",
+    appendMessage: { role: "user" as const, content: "read-side body" }
+  };
+
+  assert.deepEqual(await strictClient.getExecutionProfile(executionProfileInput), validExecutionProfileResponse);
+  assert.deepEqual(await strictClient.getPromptContext(promptContextInput), validPromptContextResponse);
+  assert.deepEqual(await strictClient.getMessagesContext(messagesContextInput), validMessagesContextResponse);
+  assert.deepEqual(await warnClient.getExecutionProfile(executionProfileInput), validExecutionProfileResponse);
+  assert.deepEqual(await warnClient.getPromptContext(promptContextInput), validPromptContextResponse);
+  assert.deepEqual(await warnClient.getMessagesContext(messagesContextInput), validMessagesContextResponse);
+  assert.equal(warnings.length, 0);
+  assert.deepEqual(requests.map(({ method, url, body, token }) => ({ method, url, body, token })), [
+    { method: AgentApiEndpoints.getExecutionProfile.method, url: AgentApiEndpoints.getExecutionProfile.path, body: executionProfileInput, token: "TOKEN" },
+    { method: AgentApiEndpoints.getPromptContext.method, url: AgentApiEndpoints.getPromptContext.path, body: promptContextInput, token: "TOKEN" },
+    { method: AgentApiEndpoints.getMessagesContext.method, url: AgentApiEndpoints.getMessagesContext.path, body: messagesContextInput, token: "TOKEN" },
+    { method: AgentApiEndpoints.getExecutionProfile.method, url: AgentApiEndpoints.getExecutionProfile.path, body: executionProfileInput, token: "TOKEN" },
+    { method: AgentApiEndpoints.getPromptContext.method, url: AgentApiEndpoints.getPromptContext.path, body: promptContextInput, token: "TOKEN" },
+    { method: AgentApiEndpoints.getMessagesContext.method, url: AgentApiEndpoints.getMessagesContext.path, body: messagesContextInput, token: "TOKEN" }
+  ]);
+});
+
+test("read-side methods reject strict schema mismatches and warn without leaking payloads", async () => {
+  const origin = await startServer((request) => ({
+    status: 200,
+    body: {
+      apiKey: "apiKey secret",
+      prompt: "prompt secret",
+      messages: "messages secret",
+      args: "args secret",
+      result: "result secret",
+      runId: "RUN",
+      sessionId: "SESSION",
+      endpoint: request.url
+    }
+  }));
+  const strictClient = new AgentApiClient({ apiOrigin: origin, internalToken: "TOKEN" });
+  await assert.rejects(
+    () => strictClient.getExecutionProfile({ workspaceId: "WORKSPACE", sessionId: "SESSION", runId: "RUN" }),
+    new RegExp(`response schema validation failed: ${AgentApiEndpoints.getExecutionProfile.method} ${AgentApiEndpoints.getExecutionProfile.path}`)
+  );
+  await assert.rejects(
+    () => strictClient.getPromptContext({ workspaceId: "WORKSPACE", sessionId: "SESSION", runId: "RUN" }),
+    new RegExp(`response schema validation failed: ${AgentApiEndpoints.getPromptContext.method} ${AgentApiEndpoints.getPromptContext.path}`)
+  );
+  await assert.rejects(
+    () => strictClient.getMessagesContext({ workspaceId: "WORKSPACE", sessionId: "SESSION" }),
+    new RegExp(`response schema validation failed: ${AgentApiEndpoints.getMessagesContext.method} ${AgentApiEndpoints.getMessagesContext.path}`)
+  );
+
+  const warnings: string[] = [];
+  const warnClient = new AgentApiClient({
+    apiOrigin: origin,
+    internalToken: "TOKEN",
+    responseValidation: "warn",
+    logger: { warn: (message: string) => warnings.push(message) }
+  });
+  await warnClient.getExecutionProfile({ workspaceId: "WORKSPACE", sessionId: "SESSION", runId: "RUN" });
+  await warnClient.getPromptContext({ workspaceId: "WORKSPACE", sessionId: "SESSION", runId: "RUN" });
+  await warnClient.getMessagesContext({ workspaceId: "WORKSPACE", sessionId: "SESSION" });
+  assert.equal(warnings.length, 3);
+  for (const [index, endpoint] of [
+    AgentApiEndpoints.getExecutionProfile,
+    AgentApiEndpoints.getPromptContext,
+    AgentApiEndpoints.getMessagesContext
+  ].entries()) {
+    const warning = warnings[index] || "";
+    assert.match(warning, new RegExp(`endpoint=${endpoint.path}`));
+    assert.match(warning, new RegExp(`method=${endpoint.method}`));
+    for (const sensitiveValue of ["TOKEN", "apiKey secret", "prompt secret", "messages secret", "args secret", "result secret", "RUN", "SESSION"]) {
+      assert.equal(warning.includes(sensitiveValue), false, `warning must not expose ${sensitiveValue}`);
+    }
+  }
+});
+
+test("warn redacts sensitive TypeBox error paths and never includes schema messages", async () => {
+  const warnings: string[] = [];
+  const origin = await startServer(() => ({
+    status: 200,
+    body: {
+      apiKey: 1,
+      prompt: 2,
+      messages: 3,
+      args: 4,
+      result: 5,
+      runId: 6,
+      sessionId: 7
+    }
+  }));
+  const client = new AgentApiClient({
+    apiOrigin: origin,
+    internalToken: "TOKEN",
+    responseValidation: "warn",
+    logger: { warn: (message: string) => warnings.push(message) }
+  });
+  await (client as any).request("/diagnostic", {
+    method: "POST",
+    body: {},
+    responseEndpoint: "/diagnostic",
+    responseSchema: Type.Object({
+      apiKey: Type.String(),
+      prompt: Type.String(),
+      messages: Type.String(),
+      args: Type.String(),
+      result: Type.String(),
+      runId: Type.String(),
+      sessionId: Type.String()
+    })
+  });
+  assert.equal(warnings.length, 1);
+  const warning = warnings[0] || "";
+  assert.match(warning, /endpoint=\/diagnostic method=POST/);
+  assert.match(warning, /path=<redacted> type=\d+/);
+  for (const sensitiveText of ["apiKey", "prompt", "messages", "args", "result", "runId", "sessionId", "Expected", "TOKEN"]) {
+    assert.equal(warning.includes(sensitiveText), false, `warning must not expose ${sensitiveText}`);
+  }
+});
+
+test("read-side methods preserve unified non-2xx and malformed JSON failures in warn mode", async () => {
+  const errorOrigin = await startServer((request) => ({
+    status: request.url === AgentApiEndpoints.getExecutionProfile.path ? 401 : request.url === AgentApiEndpoints.getPromptContext.path ? 404 : 500,
+    body: { message: `error for ${request.url}` }
+  }));
+  const errorClient = new AgentApiClient({ apiOrigin: errorOrigin, internalToken: "TOKEN", responseValidation: "warn" });
+
+  await assert.rejects(
+    () => errorClient.getExecutionProfile({ workspaceId: "WORKSPACE", sessionId: "SESSION", runId: "RUN" }),
+    /request failed: 401 .*execution-profile/
+  );
+  await assert.rejects(
+    () => errorClient.getPromptContext({ workspaceId: "WORKSPACE", sessionId: "SESSION", runId: "RUN" }),
+    /request failed: 404 .*prompt-context/
+  );
+  await assert.rejects(
+    () => errorClient.getMessagesContext({ workspaceId: "WORKSPACE", sessionId: "SESSION" }),
+    /request failed: 500 .*messages-context/
+  );
+
+  const malformedOrigin = await startServer(() => ({ status: 200, body: "not-json" }));
+  const malformedClient = new AgentApiClient({ apiOrigin: malformedOrigin, internalToken: "TOKEN", responseValidation: "warn" });
+  await assert.rejects(() => malformedClient.getPromptContext({ workspaceId: "WORKSPACE", sessionId: "SESSION", runId: "RUN" }));
+});
+
 test("context create/update use shared contracts and return complete records", async () => {
   const requests: Array<{ method?: string; url?: string; body: unknown }> = [];
   const origin = await startServer((request) => {
@@ -414,7 +650,7 @@ test("context create/update use shared contracts and return complete records", a
   });
   const client = new AgentApiClient({ apiOrigin: origin, internalToken: "TOKEN" });
 
-  assert.deepEqual(await client.createContextItem(contextCreateInput), contextItem);
+  assert.deepEqual(await client.createContextItem(contextCreateInput), { ok: true, item: contextItem });
   assert.deepEqual(
     await client.updateContextItem({
       itemId: contextItem.id,
@@ -436,6 +672,12 @@ test("context create/update use shared contracts and return complete records", a
     output: contextItem.output,
     updatedAt: contextItem.updatedAt
   });
+});
+
+test("context create accepts the late ignored success branch", async () => {
+  const origin = await startServer(() => ({ status: 200, body: { ok: true, item: null, ignored: true } }));
+  const client = new AgentApiClient({ apiOrigin: origin, internalToken: "TOKEN" });
+  assert.deepEqual(await client.createContextItem(contextCreateInput), { ok: true, item: null, ignored: true });
 });
 
 test("context create maps 409 to ApiConflictError while update preserves raw non-2xx", async () => {

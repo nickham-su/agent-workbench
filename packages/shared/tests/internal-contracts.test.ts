@@ -156,12 +156,15 @@ test("agent-api package export exposes the aggregate contract without root expor
   assert.equal(AgentApiExport.AgentSubtaskErrorCode.PromptRequired, "AGENT_SUBTASK_PROMPT_REQUIRED");
 });
 
-test("agent-api endpoint registry contains all nine method/path definitions", () => {
+test("agent-api endpoint registry contains all twelve method/path definitions", () => {
   const endpoints = AgentApiExport.AgentApiEndpoints;
   assert.deepEqual(Object.keys(endpoints).sort(), [
     "compactContext",
     "completeRun",
     "createContextItem",
+    "getExecutionProfile",
+    "getMessagesContext",
+    "getPromptContext",
     "getSubtaskPreforkPlan",
     "getSubtaskResult",
     "getSubtaskStatus",
@@ -180,6 +183,155 @@ test("agent-api endpoint registry contains all nine method/path definitions", ()
   assert.deepEqual(endpoints.startSubtask, { method: "POST", path: "/api/internal/agent/subtask/start" });
   assert.deepEqual(endpoints.getSubtaskResult, { method: "POST", path: "/api/internal/agent/subtask/result" });
   assert.deepEqual(endpoints.getSubtaskStatus, { method: "POST", path: "/api/internal/agent/subtask/status" });
+  assert.deepEqual(endpoints.getExecutionProfile, { method: "POST", path: "/api/internal/agent/execution-profile" });
+  assert.deepEqual(endpoints.getPromptContext, { method: "POST", path: "/api/internal/agent/prompt-context" });
+  assert.deepEqual(endpoints.getMessagesContext, { method: "POST", path: "/api/internal/agent/messages-context" });
+});
+
+test("agent-api aggregate export exposes read-side schemas with stable shells and dynamic payloads", () => {
+  const executionRequest = { workspaceId: "ws-a", sessionId: "sess-a", runId: "run-a" };
+  const provider = {
+    id: "provider-a",
+    name: "Provider A",
+    npm: "@ai-sdk/openai" as const,
+    options: { baseURL: "https://example.invalid/v1", apiKey: "secret", apiMode: "responses" as const }
+  };
+  const model = { id: "model-a", name: "Model A", contextWindowTokens: 128000 };
+  const agent = {
+    id: "agent-a",
+    name: "Agent A",
+    summary: "",
+    prompt: "prompt",
+    tools: ["bash"],
+    mcpServers: [],
+    pluginTools: [],
+    defaultModel: { providerId: "provider-a", modelId: "model-a" }
+  };
+  const executionResponse = {
+    resolved: { ...executionRequest, agentId: "agent-a", providerId: "provider-a", modelId: "model-a" },
+    agent,
+    provider,
+    model,
+    runtime: {
+      modelIdleTimeoutMs: 1000,
+      modelTotalTimeoutMs: 2000,
+      modelRequestMaxRetries: 0,
+      autoCompactThresholdPct: 80,
+      maxSubtaskDepth: 1,
+      sessionTerminalSoundEnabled: true,
+      visionModel: null,
+      compactionModel: null,
+      updatedAt: 1
+    },
+    vision: {
+      source: "agent_default_fallback" as const,
+      provider,
+      model
+    },
+    compaction: null
+  };
+  const promptResponse = {
+    headItemId: 1,
+    system: "system",
+    messages: [{ role: "assistant" as const, content: [{ type: "tool-call", deeplyDynamic: { any: ["shape"] } }] }],
+    tools: [{ name: "plugin_tool", description: "dynamic schema", inputSchema: { type: "object", arbitrary: { nested: true } } }],
+    pendingTools: [{ itemId: 1, status: "running" as const, toolName: "plugin_tool", args: ["dynamic", { payload: true }] }],
+    lastResponseTotalTokens: null,
+    uiLocale: "zh-CN" as const,
+    externalSkillRoots: [{ sourceType: "repo" as const, repoId: "repo-a", rootDir: ".skills", rootPath: "/workspace/.skills" }]
+  };
+  const messagesResponse = {
+    headItemId: null,
+    system: "system",
+    messages: [{ role: "tool" as const, content: { arbitrary: ["dynamic", "content"] } }]
+  };
+
+  assert.equal(Value.Check(AgentApiExport.AgentApiExecutionProfileRequestSchema, executionRequest), true);
+  assert.equal(Value.Check(AgentApiExport.AgentApiPromptContextRequestSchema, executionRequest), true);
+  assert.equal(Value.Check(AgentApiExport.AgentApiMessagesContextRequestSchema, {
+    workspaceId: "ws-a",
+    sessionId: "sess-a",
+    appendMessage: { role: "user", content: "one shot" }
+  }), true);
+  assert.equal(Value.Check(AgentApiExport.AgentApiExecutionProfileResponseSchema, executionResponse), true);
+  assert.equal(Value.Check(AgentApiExport.AgentApiPromptContextResponseSchema, promptResponse), true);
+  assert.equal(Value.Check(AgentApiExport.AgentApiMessagesContextResponseSchema, messagesResponse), true);
+});
+
+test("agent-api read-side schemas reject invalid stable fields without constraining dynamic payloads", () => {
+  assert.equal(Value.Check(AgentApiExport.AgentApiExecutionProfileRequestSchema, {
+    workspaceId: "ws-a",
+    sessionId: "sess-a",
+    runId: ""
+  }), false);
+  const validExecutionProfile = {
+    resolved: { runId: "run-a", sessionId: "sess-a", workspaceId: "ws-a", agentId: "agent-a", providerId: "provider-a", modelId: "model-a" },
+    agent: {
+      id: "agent-a",
+      name: "Agent A",
+      summary: "",
+      prompt: "prompt",
+      tools: ["bash"],
+      pluginTools: [],
+      mcpServers: [],
+      defaultModel: { providerId: "provider-a", modelId: "model-a" }
+    },
+    provider: {
+      id: "provider-a",
+      name: "Provider A",
+      npm: "@ai-sdk/openai",
+      options: { baseURL: "https://example.invalid/v1", apiKey: "secret" }
+    },
+    model: { id: "model-a", name: "Model A", contextWindowTokens: 128000 },
+    runtime: {
+      modelIdleTimeoutMs: 1000,
+      modelTotalTimeoutMs: 2000,
+      modelRequestMaxRetries: 0,
+      autoCompactThresholdPct: 80,
+      maxSubtaskDepth: 1,
+      sessionTerminalSoundEnabled: true,
+      visionModel: null,
+      compactionModel: null,
+      updatedAt: 1
+    },
+    vision: null,
+    compaction: null
+  };
+  const { maxSubtaskDepth: _maxSubtaskDepth, ...runtimeWithoutMaxSubtaskDepth } = validExecutionProfile.runtime;
+  assert.equal(Value.Check(AgentApiExport.AgentApiExecutionProfileResponseSchema, {
+    ...validExecutionProfile,
+    runtime: runtimeWithoutMaxSubtaskDepth
+  }), false);
+  const { sessionTerminalSoundEnabled: _sessionTerminalSoundEnabled, ...runtimeWithoutSessionTerminalSoundEnabled } = validExecutionProfile.runtime;
+  assert.equal(Value.Check(AgentApiExport.AgentApiExecutionProfileResponseSchema, {
+    ...validExecutionProfile,
+    runtime: runtimeWithoutSessionTerminalSoundEnabled
+  }), false);
+  assert.equal(Value.Check(AgentApiExport.AgentApiMessagesContextRequestSchema, {
+    workspaceId: "ws-a",
+    sessionId: "sess-a",
+    appendMessage: { role: "assistant", content: "not permitted" }
+  }), false);
+  assert.equal(Value.Check(AgentApiExport.AgentApiMessagesContextRequestSchema, {
+    workspaceId: "ws-a",
+    sessionId: "sess-a",
+    appendMessage: { role: "user", content: "" }
+  }), false);
+  assert.equal(Value.Check(AgentApiExport.AgentApiPromptContextResponseSchema, {
+    headItemId: 0,
+    system: "system",
+    messages: [],
+    tools: [],
+    pendingTools: [],
+    lastResponseTotalTokens: null,
+    uiLocale: null,
+    externalSkillRoots: []
+  }), false);
+  assert.equal(Value.Check(AgentApiExport.AgentApiMessagesContextResponseSchema, {
+    headItemId: null,
+    system: "system",
+    messages: [{ role: "developer", content: "unsupported stable role" }]
+  }), false);
 });
 
 test("agent-api run schemas preserve nullable and optional fields", () => {
@@ -263,8 +415,13 @@ test("agent-api context schemas reuse public output and complete record schemas"
   assert.equal(Value.Check(AgentApiContextItemParamsSchema, { itemId: 1 }), true);
   assert.equal(Value.Check(AgentApiContextItemParamsSchema, { itemId: 0 }), false);
   assert.equal(Value.Check(AgentApiCreateContextItemResponseSchema, { ok: true, item: validContextRecord }), true);
+  assert.equal(Value.Check(AgentApiCreateContextItemResponseSchema, { ok: true, item: null, ignored: true }), true);
   assert.equal(Value.Check(AgentApiUpdateContextItemResponseSchema, { ok: true, item: validContextRecord }), true);
   assert.equal(Value.Check(AgentApiCreateContextItemResponseSchema, { ok: true, item: { id: 1 } }), false);
+  assert.equal(Value.Check(AgentApiCreateContextItemResponseSchema, { ok: true }), false);
+  assert.equal(Value.Check(AgentApiCreateContextItemResponseSchema, { ok: true, item: null }), false);
+  assert.equal(Value.Check(AgentApiCreateContextItemResponseSchema, { ok: true, item: validContextRecord, ignored: true }), false);
+  assert.equal(Value.Check(AgentApiCreateContextItemResponseSchema, { ok: true, item: null, ignored: false }), false);
 });
 
 test("agent-api context path builder validates positive integer params", () => {

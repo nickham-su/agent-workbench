@@ -25,10 +25,21 @@ export const AgentApiCreateContextItemRequestSchema = Type.Object({
 });
 export type AgentApiCreateContextItemRequest = Static<typeof AgentApiCreateContextItemRequestSchema>;
 
-export const AgentApiCreateContextItemResponseSchema = Type.Object({
+const AgentApiCreateContextItemNormalResponseSchema = Type.Object({
   ok: Type.Literal(true),
   item: AgentContextItemRecordSchema
-});
+}, { additionalProperties: false });
+
+const AgentApiCreateContextItemIgnoredResponseSchema = Type.Object({
+  ok: Type.Literal(true),
+  item: Type.Null(),
+  ignored: Type.Literal(true)
+}, { additionalProperties: false });
+
+export const AgentApiCreateContextItemResponseSchema = Type.Union([
+  AgentApiCreateContextItemNormalResponseSchema,
+  AgentApiCreateContextItemIgnoredResponseSchema
+]);
 export type AgentApiCreateContextItemResponse = Static<typeof AgentApiCreateContextItemResponseSchema>;
 
 export const AgentApiUpdateContextItemRequestSchema = Type.Object({

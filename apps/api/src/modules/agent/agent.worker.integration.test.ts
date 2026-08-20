@@ -13,6 +13,9 @@ import { ensureDir, rmrf } from "../../infra/fs/fs.js";
 import { agentWorkerPidPath, workspaceRoot } from "../../infra/fs/paths.js";
 import { newSortableId } from "../../utils/ids.js";
 import { insertWorkspace } from "../workspaces/workspace.store.js";
+import { getRunRecord } from "./agent.store.js";
+
+type InternalRpcCall = { method: string; url: string; body: unknown; statusCode?: number };
 
 type Fixture = {
   app: FastifyInstance;
@@ -23,7 +26,7 @@ type Fixture = {
   baseUrl: string;
   workerPidFilePath: string;
   llmStub?: HttpServer;
-  internalRpcCalls: Array<{ method: string; url: string; body: unknown }>;
+  internalRpcCalls: InternalRpcCall[];
 };
 
 const fixtures = new Set<Fixture>();
@@ -76,9 +79,40 @@ async function requestJson<T>(baseUrl: string, input: { method: string; path: st
   return { response, json, text };
 }
 
-async function startLlmStubServer() {
-  const server = createHttpServer((_req, res) => {
-    // Return a deterministic JSON error so the worker fails fast without external network.
+async function startLlmStubServer(mode: "failure" | "success" = "failure") {
+  const server = createHttpServer((req, res) => {
+    if (mode === "success") {
+      let requestBody = "";
+      req.setEncoding("utf8");
+      req.on("data", (chunk) => {
+        requestBody += chunk;
+      });
+      req.on("end", () => {
+        const request = requestBody ? JSON.parse(requestBody) as { stream?: unknown } : {};
+        if (request.stream === true) {
+          const chunks = [
+            { id: "stub", created: 1, model: "gpt-5.2", choices: [{ index: 0, delta: { role: "assistant", content: "stub response" }, finish_reason: null }] },
+            { id: "stub", created: 1, model: "gpt-5.2", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }
+          ];
+          res.statusCode = 200;
+          res.setHeader("content-type", "text/event-stream; charset=utf-8");
+          res.end(`${chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("")}data: [DONE]\n\n`);
+          return;
+        }
+        res.statusCode = 200;
+        res.setHeader("content-type", "application/json; charset=utf-8");
+        res.end(JSON.stringify({
+          id: "stub",
+          object: "chat.completion",
+          created: 1,
+          model: "gpt-5.2",
+          choices: [{ index: 0, message: { role: "assistant", content: "stub summary" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
+        }));
+      });
+      return;
+    }
+    // Return a deterministic JSON error so the legacy writeback test fails fast without external network.
     const payload = JSON.stringify({ error: { message: "llm stub", type: "stub_error" } });
     res.statusCode = 500;
     res.setHeader("content-type", "application/json; charset=utf-8");
@@ -116,7 +150,8 @@ async function configureAgentDefaults(baseUrl: string, llmBaseURL: string) {
            npm: "@ai-sdk/openai",
            options: {
              baseURL: llmBaseURL,
-             apiKey: "sk-test"
+             apiKey: "sk-test",
+             apiMode: "chatCompletions"
            },
            models: [
             {
@@ -171,7 +206,7 @@ async function configureAgentDefaults(baseUrl: string, llmBaseURL: string) {
   assert.equal(runtime.response.status, 200, `configure agent runtime failed: ${runtime.text}`);
 }
 
-async function createFixture(): Promise<Fixture> {
+async function createFixture(params: { llmMode?: "failure" | "success" } = {}): Promise<Fixture> {
   const repoRoot = [
     process.cwd(),
     path.resolve(process.cwd(), ".."),
@@ -186,7 +221,7 @@ async function createFixture(): Promise<Fixture> {
   let app: FastifyInstance | null = null;
   let db: Db | null = null;
   try {
-    llmStub = await startLlmStubServer();
+    llmStub = await startLlmStubServer(params.llmMode);
     const apiPort = await getFreePort();
     const workerPort = await getFreePort();
 
@@ -237,9 +272,16 @@ async function createFixture(): Promise<Fixture> {
 
     // 真实 API-managed Worker 的 internal request recorder，必须在 app.listen 前安装。
     const internalRpcCalls: Fixture["internalRpcCalls"] = [];
+    const callsByRequest = new WeakMap<object, InternalRpcCall>();
     app.addHook("preHandler", async (request) => {
       if (!request.url.startsWith("/api/internal/agent/")) return;
-      internalRpcCalls.push({ method: request.method, url: request.url, body: request.body });
+      const call: InternalRpcCall = { method: request.method, url: request.url, body: request.body };
+      internalRpcCalls.push(call);
+      callsByRequest.set(request, call);
+    });
+    app.addHook("onResponse", async (request, reply) => {
+      const call = callsByRequest.get(request);
+      if (call) call.statusCode = reply.statusCode;
     });
     await app.listen({ host: "127.0.0.1", port: apiPort });
     const baseUrl = `http://127.0.0.1:${apiPort}`;
@@ -403,6 +445,79 @@ test("worker 模式: 发送消息后会落地 context items", async () => {
   assert.equal(typeof contextCreateBody.runId, "string");
   assert.equal(typeof runStateBody.activeRunId, "string");
   assert.equal(typeof runCompleteBody.runId, "string");
+});
+
+test("worker 模式: 手动压缩经真实 API-managed Worker 获取三项 read-side context", async () => {
+  const fixture = await createFixture({ llmMode: "success" });
+  const session = await createSession(fixture.baseUrl, fixture.workspaceId);
+
+  await sendMessage(fixture.baseUrl, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "seed context for compaction",
+    clientRequestId: newSortableId("req")
+  });
+  await waitRunIdle(fixture.baseUrl, session.id);
+  fixture.internalRpcCalls.length = 0;
+
+  const compact = await requestJson<{ runId: string }>(fixture.baseUrl, {
+    method: "POST",
+    path: `/api/agent/sessions/${session.id}/compact`,
+    body: {
+      workspaceId: fixture.workspaceId,
+      clientRequestId: newSortableId("compact")
+    }
+  });
+  assert.equal(compact.response.status, 201, `compact session failed: ${compact.text}`);
+  assert.equal(typeof compact.json.runId, "string");
+  await waitRunIdle(fixture.baseUrl, session.id);
+
+  const expected = [
+    { endpoint: "/api/internal/agent/execution-profile", runBound: true },
+    { endpoint: "/api/internal/agent/prompt-context", runBound: true },
+    { endpoint: "/api/internal/agent/messages-context", runBound: false }
+  ] as const;
+  const indices = expected.map(({ endpoint }) => {
+    const index = fixture.internalRpcCalls.findIndex((call) => call.method === "POST" && call.url === endpoint);
+    assert.notEqual(index, -1, `real API-managed Worker did not request ${endpoint}`);
+    return index;
+  });
+  assert.ok(indices[0]! < indices[1]!, "execution profile must precede prompt context");
+  assert.ok(indices[1]! < indices[2]!, "prompt context must precede messages context");
+
+  for (const [index, requirement] of expected.entries()) {
+    const call = fixture.internalRpcCalls[indices[index]!]!;
+    const body = call.body as { workspaceId?: unknown; sessionId?: unknown; runId?: unknown };
+    assert.ok((call.statusCode || 0) >= 200 && (call.statusCode || 0) < 300, `${requirement.endpoint} must return 2xx`);
+    assert.equal(body.workspaceId, fixture.workspaceId, `${requirement.endpoint} must carry workspaceId`);
+    assert.equal(body.sessionId, session.id, `${requirement.endpoint} must carry sessionId`);
+    if (requirement.runBound) {
+      assert.equal(body.runId, compact.json.runId, `${requirement.endpoint} must carry compact runId`);
+    } else {
+      assert.equal(Object.hasOwn(body, "runId"), false, "messages-context must remain session-bound");
+    }
+  }
+
+  const completedRun = getRunRecord(fixture.db, compact.json.runId);
+  assert.equal(completedRun?.status, "completed", "Worker must complete the compact run after consuming read-side responses");
+  const compactWrite = fixture.internalRpcCalls.find((call) =>
+    call.method === "POST" && call.url === "/api/internal/agent/context/compact"
+  );
+  assert.ok(compactWrite, "Worker must submit the generated compaction summary after reading context");
+  assert.ok((compactWrite?.statusCode || 0) >= 200 && (compactWrite?.statusCode || 0) < 300, "compaction write must return 2xx");
+
+  const context = await requestJson<{
+    items: Array<{ kind: string; runId: string | null; boundaryReason: string | null; output: { type?: string; text?: string } }>;
+  }>(fixture.baseUrl, {
+    method: "GET",
+    path: `/api/agent/sessions/${session.id}/context-items`
+  });
+  assert.equal(context.response.status, 200, `get compacted context failed: ${context.text}`);
+  const summary = context.json.items.find((item) => item.runId === compact.json.runId && item.boundaryReason === "compaction");
+  assert.ok(summary, "successful compaction must persist a compaction boundary item");
+  assert.equal(summary?.kind, "system");
+  assert.equal(summary?.output?.type, "system_text");
+  assert.equal(typeof summary?.output?.text, "string");
 });
 
 test("worker 模式: worker pid 文件会被写入", async () => {

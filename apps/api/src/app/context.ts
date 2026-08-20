@@ -5,6 +5,13 @@ export type AgentTestFaults = {
   archiveWrite?: {
     failAfterChunks?: number;
   } | null;
+  archiveRollback?: {
+    appendBeforeRollback?: string;
+  } | null;
+  archiveSidecar?: {
+    failWrite?: boolean;
+    failRename?: boolean;
+  } | null;
 };
 
 export type AppContext = {

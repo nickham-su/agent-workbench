@@ -185,7 +185,7 @@ not exists run(sessionId)
 not exists context item(sessionId)
 ```
 
-先输出 suspect 诊断；自动删除前额外要求两个 `forkedFrom*` 非空、createdAt 超过 24h，并在同一删除事务/原子步骤前二次读取空壳条件。删除应限制在当前 data model 已确认安全的 session 删除能力内，不级联删除有内容实体。
+Store 查询本身只返回满足上述全部条件的 suspect，scanner 对这些对象先输出 suspect/retained 诊断；不扫描或诊断 `<1h`、有 run、有 context item 或 head 非空的非-suspect session。自动删除前额外要求两个 `forkedFrom*` 非空、createdAt 超过 24h，并在同一删除事务/原子步骤前二次读取空壳条件。删除应限制在当前 data model 已确认安全的 session 删除能力内，不级联删除有内容实体。
 
 启动扫描只处理历史候选。start 局部补偿只携带本次创建的 sessionId，失败/unique race 后重新确认为空壳再清理；不得把 reuse session 当作新建 session。
 
@@ -240,13 +240,14 @@ sidecar record 必须为：
 处理：
 
 1. 读取并校验 sidecar；
-2. 解析每个受控目标文件；
-3. stat 当前大小；
-4. 所有目标都满足 `currentSize === expectedSize` 时才执行 truncate；
-5. 任一不匹配、缺失或 sidecar 不完整，整条记录保留，不做破坏性操作；
-6. 全部成功后删除 sidecar。
+2. snapshot 数量不是一个时，只记录 warning 并保留 sidecar，不执行自动 truncate；
+3. 对单文件 sidecar，解析唯一的受控目标文件；
+4. stat 当前大小；
+5. 仅当 `currentSize === expectedSize` 时才执行 truncate；
+6. 尺寸不匹配、缺失或 sidecar 不完整时保留记录，不做破坏性操作；
+7. 单文件 truncate 成功后删除 sidecar。
 
-必须避免“部分文件回滚、部分文件跳过”导致新的不一致。日志只记录 operation、workspace/session/run 标识、数量、errno/mismatch 摘要，不记录 archive 内容或敏感 payload。
+多文件 truncate 不具备跨文件原子性，因此不得自动处理多文件 sidecar，以避免“部分文件回滚、部分文件跳过”导致新的不一致。日志只记录 operation、workspace/session/run 标识、数量、errno/mismatch 摘要，不记录 archive 内容或敏感 payload。
 
 ## 数据关系
 

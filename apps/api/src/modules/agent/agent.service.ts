@@ -47,6 +47,7 @@ import { getWorkspace, listRecentWorkspaces } from "../workspaces/workspace.stor
 import { listEnabledWorkspaceAgentsInstructions, listEnabledWorkspaceExternalSkillRoots } from "../workspaces/workspace.service.js";
 import {
   agentArchiveSessionDir,
+  agentArchivePendingSidecarPath,
   applyPatchUiArtifactPath,
   compactionSnippetPath,
   tmpRoot,
@@ -55,6 +56,9 @@ import {
 import {
   AgentConflictError,
   appendContextItem,
+  appendContextItemWithRunFence,
+  getContextItemForWorkerUpdate,
+  updateContextItemWithRunFence,
   createAgentSession,
   createRunRecord,
   findClientRequestDedup,
@@ -86,6 +90,9 @@ import {
   hasNonTerminalSessionItems,
   listNonTerminalRunIdsByItemIds,
   listNonTerminalRunIdsBySession,
+  listEmptySubtaskOrphanCandidates,
+  deleteEmptySubtaskSessionIfStillEmpty,
+  listAgentSessionsForArchiveReconcile,
   listSubtaskChildSessionIdsByRunId,
   moveSessionHead,
   setContextItemsArchiveAt,
@@ -1080,6 +1087,86 @@ type ArchiveWriteSnapshot = {
   expectedSize: number;
 };
 
+type ArchivePendingRecord = {
+  version: 1;
+  operation: "compaction" | "clear";
+  workspaceId: string;
+  sessionId: string;
+  runId?: string;
+  createdAt: number;
+  snapshots: Array<{
+    fileKey: string;
+    beforeSize: number;
+    expectedSize: number;
+  }>;
+};
+
+function isNonNegativeSafeInt(value: unknown) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function archiveFileKeyFromPath(dataDir: string, workspaceId: string, sessionId: string, filePath: string) {
+  const dataRoot = path.resolve(dataDir);
+  const sessionDir = path.resolve(agentArchiveSessionDir(dataDir, workspaceId, sessionId));
+  const fileAbs = path.resolve(filePath);
+  if (!fileAbs.startsWith(sessionDir + path.sep)) return null;
+  const fileKey = path.relative(dataRoot, fileAbs);
+  const parts = fileKey.split(path.sep);
+  if (parts.length < 4 || parts[0] !== "agent" || parts[1] !== "archive" || parts.some((part) => !part || part === "." || part === "..")) {
+    return null;
+  }
+  if (!ARCHIVE_FILE_NAME_RE.test(parts[parts.length - 1] || "")) return null;
+  return fileKey;
+}
+
+function archivePathFromFileKey(dataDir: string, workspaceId: string, sessionId: string, fileKey: unknown) {
+  if (typeof fileKey !== "string" || !fileKey) return null;
+  const dataRoot = path.resolve(dataDir);
+  const sessionDir = path.resolve(agentArchiveSessionDir(dataDir, workspaceId, sessionId));
+  const fileAbs = path.resolve(dataRoot, fileKey);
+  if (!fileAbs.startsWith(sessionDir + path.sep)) return null;
+  return archiveFileKeyFromPath(dataDir, workspaceId, sessionId, fileAbs) === fileKey ? fileAbs : null;
+}
+
+function parseArchivePendingRecord(value: unknown): ArchivePendingRecord | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (
+    record.version !== 1
+    || (record.operation !== "compaction" && record.operation !== "clear")
+    || typeof record.workspaceId !== "string" || !record.workspaceId
+    || typeof record.sessionId !== "string" || !record.sessionId
+    || !isNonNegativeSafeInt(record.createdAt)
+    || !Array.isArray(record.snapshots) || record.snapshots.length === 0
+  ) {
+    return null;
+  }
+  const snapshots = record.snapshots.map((snapshot) => {
+    if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return null;
+    const row = snapshot as Record<string, unknown>;
+    const beforeSize = row.beforeSize;
+    const expectedSize = row.expectedSize;
+    if (
+      typeof row.fileKey !== "string"
+      || typeof beforeSize !== "number" || !Number.isSafeInteger(beforeSize) || beforeSize < 0
+      || typeof expectedSize !== "number" || !Number.isSafeInteger(expectedSize) || expectedSize < 0
+      || beforeSize > expectedSize
+    ) return null;
+    return { fileKey: row.fileKey, beforeSize, expectedSize };
+  });
+  if (snapshots.some((snapshot) => snapshot == null)) return null;
+  const runId = typeof record.runId === "string" && record.runId ? record.runId : undefined;
+  return {
+    version: 1,
+    operation: record.operation,
+    workspaceId: record.workspaceId,
+    sessionId: record.sessionId,
+    ...(runId ? { runId } : {}),
+    createdAt: Number(record.createdAt),
+    snapshots: snapshots as ArchivePendingRecord["snapshots"]
+  };
+}
+
 function normalizePositiveInt(raw: unknown, options: { fallback: number; min: number; max: number }) {
   if (raw === undefined || raw === null || raw === "") return options.fallback;
   const n = Number(raw);
@@ -1329,9 +1416,115 @@ async function appendArchiveLines(params: {
   return Array.from(snapshots.values());
 }
 
-async function rollbackArchiveLinesBestEffort(snapshots: ArchiveWriteSnapshot[]) {
+async function writeArchivePendingSidecarBestEffort(params: {
+  dataDir: string;
+  operation: ArchivePendingRecord["operation"];
+  workspaceId: string;
+  sessionId: string;
+  runId?: string;
+  snapshots: ArchiveWriteSnapshot[];
+  fault?: { failWrite?: boolean; failRename?: boolean } | null;
+  logger: FastifyBaseLogger;
+}) {
+  const snapshots = params.snapshots.map((snapshot) => {
+    const fileKey = archiveFileKeyFromPath(params.dataDir, params.workspaceId, params.sessionId, snapshot.filePath);
+    return fileKey && isNonNegativeSafeInt(snapshot.beforeSize) && isNonNegativeSafeInt(snapshot.expectedSize)
+      ? { fileKey, beforeSize: snapshot.beforeSize, expectedSize: snapshot.expectedSize }
+      : null;
+  });
+  if (snapshots.length === 0 || snapshots.some((snapshot) => snapshot == null)) return;
+
+  const record: ArchivePendingRecord = {
+    version: 1,
+    operation: params.operation,
+    workspaceId: params.workspaceId,
+    sessionId: params.sessionId,
+    ...(params.runId ? { runId: params.runId } : {}),
+    createdAt: nowMs(),
+    snapshots: snapshots as ArchivePendingRecord["snapshots"]
+  };
+  const sidecarPath = agentArchivePendingSidecarPath(params.dataDir, params.workspaceId, params.sessionId);
+  const tmpPath = `${sidecarPath}.${newSortableId("tmp")}.tmp`;
+  try {
+    await fs.mkdir(path.dirname(sidecarPath), { recursive: true });
+    if (params.fault?.failWrite) throw new Error("injected archive pending sidecar write failure");
+    await fs.writeFile(tmpPath, JSON.stringify(record), "utf-8");
+    if (params.fault?.failRename) throw new Error("injected archive pending sidecar rename failure");
+    await fs.rename(tmpPath, sidecarPath);
+  } catch (err) {
+    await fs.rm(tmpPath, { force: true }).catch(() => undefined);
+    params.logger.warn(
+      { err, operation: params.operation, workspaceId: params.workspaceId, sessionId: params.sessionId, snapshots: record.snapshots.length },
+      "archive pending sidecar write failed"
+    );
+  }
+}
+
+async function reconcileArchivePendingSidecarBestEffort(params: {
+  dataDir: string;
+  workspaceId: string;
+  sessionId: string;
+  logger: FastifyBaseLogger;
+}) {
+  const sidecarPath = agentArchivePendingSidecarPath(params.dataDir, params.workspaceId, params.sessionId);
+  let raw: string;
+  try {
+    raw = await fs.readFile(sidecarPath, "utf-8");
+  } catch (err: any) {
+    if (err?.code === "ENOENT") return false;
+    params.logger.warn({ err, workspaceId: params.workspaceId, sessionId: params.sessionId }, "archive pending sidecar read failed");
+    return false;
+  }
+
+  let record: ArchivePendingRecord | null = null;
+  try {
+    record = parseArchivePendingRecord(JSON.parse(raw));
+  } catch {
+    record = null;
+  }
+  if (!record || record.workspaceId !== params.workspaceId || record.sessionId !== params.sessionId) {
+    params.logger.warn({ workspaceId: params.workspaceId, sessionId: params.sessionId }, "archive pending sidecar is invalid");
+    return false;
+  }
+  if (record.snapshots.length !== 1) {
+    params.logger.warn(
+      { operation: record.operation, workspaceId: record.workspaceId, sessionId: record.sessionId, snapshots: record.snapshots.length },
+      "archive pending sidecar has multiple snapshots; automatic reconcile skipped"
+    );
+    return false;
+  }
+
+  const targets = record.snapshots.map((snapshot) => ({ ...snapshot, filePath: archivePathFromFileKey(params.dataDir, params.workspaceId, params.sessionId, snapshot.fileKey) }));
+  if (targets.some((target) => !target.filePath)) {
+    params.logger.warn({ operation: record.operation, workspaceId: record.workspaceId, sessionId: record.sessionId, snapshots: record.snapshots.length }, "archive pending sidecar has invalid file key");
+    return false;
+  }
+
+  try {
+    const stats = await Promise.all(targets.map(async (target) => fs.stat(target.filePath!)));
+    if (stats.some((stat, index) => stat.size !== targets[index]?.expectedSize)) {
+      params.logger.warn({ operation: record.operation, workspaceId: record.workspaceId, sessionId: record.sessionId, snapshots: targets.length }, "archive pending sidecar size mismatch");
+      return false;
+    }
+    for (const target of targets) {
+      await fs.truncate(target.filePath!, target.beforeSize);
+    }
+    await fs.rm(sidecarPath, { force: true });
+    return true;
+  } catch (err) {
+    params.logger.warn({ err, operation: record.operation, workspaceId: record.workspaceId, sessionId: record.sessionId, snapshots: targets.length }, "archive pending sidecar reconcile failed");
+    return false;
+  }
+}
+
+async function rollbackArchiveLinesBestEffort(
+  snapshots: ArchiveWriteSnapshot[],
+  beforeRollback?: () => Promise<void>
+) {
+  await beforeRollback?.();
   let reverted = 0;
   let skipped = 0;
+  const skippedSnapshots: ArchiveWriteSnapshot[] = [];
   for (let i = snapshots.length - 1; i >= 0; i -= 1) {
     const snapshot = snapshots[i];
     if (!snapshot) continue;
@@ -1339,17 +1532,18 @@ async function rollbackArchiveLinesBestEffort(snapshots: ArchiveWriteSnapshot[])
       const stat = await fs.stat(snapshot.filePath);
       if (stat.size !== snapshot.expectedSize) {
         skipped += 1;
+        skippedSnapshots.push(snapshot);
         continue;
       }
       await fs.truncate(snapshot.filePath, snapshot.beforeSize);
       reverted += 1;
     } catch (err: any) {
-      if (err && err.code === "ENOENT") continue;
       skipped += 1;
+      skippedSnapshots.push(snapshot);
     }
   }
 
-  return { reverted, skipped };
+  return { reverted, skipped, skippedSnapshots };
 }
 
 function toArchivePos(fileSeq: number, lineNo: number) {
@@ -1964,6 +2158,52 @@ export class AgentService {
     return this.ctx;
   }
 
+  async reconcileArchivePendingForSessionBestEffort(params: { workspaceId: string; sessionId: string }) {
+    return reconcileArchivePendingSidecarBestEffort({ ...params, dataDir: this.ctx.dataDir, logger: this.logger });
+  }
+
+  async reconcileAllArchivePendingBestEffort() {
+    for (const session of listAgentSessionsForArchiveReconcile(this.ctx.db)) {
+      try {
+        await this.reconcileArchivePendingForSessionBestEffort(session);
+      } catch (err) {
+        this.logger.warn({ err, workspaceId: session.workspaceId, sessionId: session.sessionId }, "archive pending startup reconcile failed");
+      }
+    }
+  }
+
+  scanAndCleanupSubtaskOrphansBestEffort(now = nowMs()) {
+    const suspectAfter = now - 60 * 60 * 1000;
+    const deleteAfter = now - 24 * 60 * 60 * 1000;
+    for (const candidate of listEmptySubtaskOrphanCandidates(this.ctx.db, suspectAfter)) {
+      try {
+        const eligibleForDeletion =
+          candidate.createdAt < deleteAfter
+          && candidate.forkedFromSessionId != null
+          && candidate.forkedFromItemId != null;
+        if (!eligibleForDeletion) {
+          this.logger.warn(
+            { workspaceId: candidate.workspaceId, sessionId: candidate.sessionId },
+            "subtask orphan suspect retained"
+          );
+          continue;
+        }
+        const deleted = deleteEmptySubtaskSessionIfStillEmpty(this.ctx.db, {
+          workspaceId: candidate.workspaceId,
+          sessionId: candidate.sessionId,
+          olderThan: deleteAfter,
+          requireForkLineage: true
+        });
+        this.logger.warn(
+          { workspaceId: candidate.workspaceId, sessionId: candidate.sessionId, deleted },
+          deleted ? "subtask orphan deleted" : "subtask orphan cleanup skipped after recheck"
+        );
+      } catch (err) {
+        this.logger.warn({ err, workspaceId: candidate.workspaceId, sessionId: candidate.sessionId }, "subtask orphan scan failed for session");
+      }
+    }
+  }
+
   listSessions(workspaceId: string) {
     this.ensureWorkspace(workspaceId);
     return listAgentSessions(this.ctx.db, workspaceId);
@@ -2362,6 +2602,7 @@ export class AgentService {
 
   async compactSession(params: { sessionId: string; body: AgentCompactSessionRequest }): Promise<AgentCompactSessionResponse> {
     return this.runSessionOperationExclusive(params.sessionId, async () => {
+      await this.reconcileArchivePendingForSessionBestEffort({ workspaceId: params.body.workspaceId, sessionId: params.sessionId });
       const session = getAgentSession(this.ctx.db, params.sessionId);
       if (!session) throw new HttpError(404, "session not found");
       if (session.kind === "subtask") {
@@ -2928,7 +3169,7 @@ export class AgentService {
     }
     const createdAt = params.createdAt ?? nowMs();
     try {
-      const item = appendContextItem(this.ctx.db, {
+      const append = appendContextItemWithRunFence(this.ctx.db, {
         workspaceId: params.workspaceId,
         sessionId: params.sessionId,
         runId: params.runId,
@@ -2940,6 +3181,14 @@ export class AgentService {
         output: params.output,
         createdAt
       });
+      if (append.kind === "ignored") return { ok: true as const, item: null, ignored: true as const };
+      if (append.kind === "missing-session" || append.kind === "missing-run") {
+        throw new HttpError(404, append.kind === "missing-run" ? "run not found" : "session not found");
+      }
+      if (append.kind === "workspace-mismatch" || append.kind === "run-mismatch") {
+        throw new HttpError(400, "workspaceId mismatch");
+      }
+      const item = append.item;
       if (item.kind === "tool" && item.status === "completed" && item.output.type === "tool" && item.output.toolName === "todolist") {
         const resultObj = item.output.result && typeof item.output.result === "object"
           ? item.output.result as Record<string, unknown>
@@ -2949,7 +3198,7 @@ export class AgentService {
           updateAgentSessionTitle(this.ctx.db, { sessionId: item.sessionId, title: goal, updatedAt: createdAt });
         }
       }
-      return item;
+      return { ok: true as const, item };
     } catch (err) {
       if (err instanceof AgentConflictError) {
         this.logger.warn(
@@ -2967,8 +3216,12 @@ export class AgentService {
   }
 
   async updateContextItemFromWorker(params: AgentApiUpdateContextItemRequest & { itemId: number }) {
-    const current = getContextItemById(this.ctx.db, params.itemId);
-    const nextStatus = params.status ?? current?.status;
+    const initialFence = getContextItemForWorkerUpdate(this.ctx.db, params.itemId);
+    if (initialFence.kind === "missing") throw new HttpError(404, "context item not found");
+    if (initialFence.kind === "ownership-mismatch") throw new HttpError(404, "context item ownership mismatch");
+    if (initialFence.kind === "unchanged") return initialFence.item;
+    const current = initialFence.item;
+    const nextStatus = params.status ?? current.status;
     let nextOutput = params.output;
 
     // apply_patch: 将 before/after 从 DB 中剥离,改为写入 service UI artifact.
@@ -3071,13 +3324,16 @@ export class AgentService {
     }
 
     const updatedAt = params.updatedAt ?? nowMs();
-    const item = updateContextItem(this.ctx.db, {
+    const update = updateContextItemWithRunFence(this.ctx.db, {
       itemId: params.itemId,
       status: params.status,
       output: nextOutput,
       updatedAt
     });
-    if (!item) throw new HttpError(404, "context item not found");
+    if (update.kind === "missing") throw new HttpError(404, "context item not found");
+    if (update.kind === "ownership-mismatch") throw new HttpError(404, "context item ownership mismatch");
+    if (update.kind === "unchanged") return update.item;
+    const item = update.item;
     if (
       item.kind === "tool" &&
       item.status === "completed" &&
@@ -3450,6 +3706,7 @@ export class AgentService {
     }
 
     const existingChildRun = findSubtaskRunByParentTool(this.ctx.db, {
+      workspaceId: params.workspaceId,
       parentRunId: parentRun.runId,
       parentToolItemId: anchor.id
     });
@@ -3486,6 +3743,7 @@ export class AgentService {
 
 
     let session = null as AgentSessionRecord | null;
+    let createdSessionId: string | null = null;
     if (params.session.mode === "existing") {
       const sessionId = requestedSessionId;
       if (!sessionId) {
@@ -3511,12 +3769,14 @@ export class AgentService {
           forkedFromSessionId: params.parentSessionId,
           forkedFromItemId: params.parentToolItemId
         });
+        createdSessionId = session.id;
       } else if (forkBoundaryItemId == null) {
         session = this.createSession({
           workspaceId: params.workspaceId,
           title: `${subtaskTitleBase} (fork)`,
           kind: "subtask"
         });
+        createdSessionId = session.id;
       } else {
         session = await this.forkSession({
           fromSessionId: params.parentSessionId,
@@ -3526,6 +3786,7 @@ export class AgentService {
           kind: "subtask",
           allowAnyKindBoundary: true
         });
+        createdSessionId = session.id;
       }
     } else if (params.session.mode === "new") {
       if (requestedSessionId) {
@@ -3538,10 +3799,12 @@ export class AgentService {
         forkedFromSessionId: params.parentSessionId,
         forkedFromItemId: params.parentToolItemId
       });
+      createdSessionId = session.id;
     } else {
       throw new HttpError(400, "invalid subtask session mode", AgentSubtaskErrorCode.SessionModeInvalid);
     }
 
+    try {
     const state = getRunState(this.ctx.db, session.workspaceId, session.id);
     if (state.status !== "idle") {
       throw new HttpError(409, "subtask session is running", AgentSubtaskErrorCode.SessionRunning);
@@ -3647,13 +3910,21 @@ export class AgentService {
     try {
       tx();
     } catch (err) {
-      if (!isSubtaskParentToolUniqueConstraintError(err)) throw err;
-      const existingAfterConflict = findSubtaskRunByParentTool(this.ctx.db, {
-        parentRunId: parentRun.runId,
-        parentToolItemId: anchor.id
-      });
-      if (!existingAfterConflict) throw err;
-      return this.toReusedSubtaskStartResponse(existingAfterConflict, workspace.path);
+      if (createdSessionId) {
+        deleteEmptySubtaskSessionIfStillEmpty(this.ctx.db, {
+          workspaceId: params.workspaceId,
+          sessionId: createdSessionId
+        });
+      }
+      if (isSubtaskParentToolUniqueConstraintError(err)) {
+        const existingAfterConflict = findSubtaskRunByParentTool(this.ctx.db, {
+          workspaceId: params.workspaceId,
+          parentRunId: parentRun.runId,
+          parentToolItemId: anchor.id
+        });
+        if (existingAfterConflict) return this.toReusedSubtaskStartResponse(existingAfterConflict, workspace.path);
+      }
+      throw err;
     }
 
     return {
@@ -3663,6 +3934,15 @@ export class AgentService {
       agentName: profile.agent.name,
       reused: false
     };
+    } catch (err) {
+      if (createdSessionId) {
+        deleteEmptySubtaskSessionIfStillEmpty(this.ctx.db, {
+          workspaceId: params.workspaceId,
+          sessionId: createdSessionId
+        });
+      }
+      throw err;
+    }
   }
 
   private resolveSubtaskForkBoundaryItemId(params: {
@@ -3827,6 +4107,7 @@ export class AgentService {
 
   async compactContextFromWorker(params: AgentApiCompactContextRequest) {
     return this.runSessionOperationExclusive(params.sessionId, async () => {
+      await this.reconcileArchivePendingForSessionBestEffort({ workspaceId: params.workspaceId, sessionId: params.sessionId });
       const session = getAgentSession(this.ctx.db, params.sessionId);
       if (!session) throw new HttpError(404, "session not found");
       if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
@@ -3887,8 +4168,22 @@ export class AgentService {
         summaryItemId = applied.summaryItemId;
         archivedCount = applied.archivedCount;
       } catch (err) {
-        const rollback = await rollbackArchiveLinesBestEffort(archiveSnapshots);
+        const rollback = await rollbackArchiveLinesBestEffort(archiveSnapshots, async () => {
+          const payload = this.ctx.agentTestFaults?.archiveRollback?.appendBeforeRollback;
+          const snapshot = archiveSnapshots[0];
+          if (payload && snapshot) await fs.appendFile(snapshot.filePath, payload, "utf-8");
+        });
         if (rollback.skipped > 0) {
+          await writeArchivePendingSidecarBestEffort({
+            dataDir: this.ctx.dataDir,
+            operation: "compaction",
+            workspaceId: session.workspaceId,
+            sessionId: session.id,
+            runId: params.runId,
+            snapshots: rollback.skippedSnapshots,
+            fault: this.ctx.agentTestFaults?.archiveSidecar,
+            logger: this.logger
+          });
           this.logger.warn(
             {
               sessionId: session.id,
@@ -3927,6 +4222,7 @@ export class AgentService {
 
   async clearSession(sessionId: string, body: AgentClearSessionRequest & { uiLocale?: AgentUiLocale | null }): Promise<AgentControlResult> {
     return this.runSessionOperationExclusive(sessionId, async () => {
+      await this.reconcileArchivePendingForSessionBestEffort({ workspaceId: body.workspaceId, sessionId });
       const session = getAgentSession(this.ctx.db, sessionId);
       if (!session) throw new HttpError(404, "session not found");
       if (session.kind === "subtask") {
@@ -3983,8 +4279,22 @@ export class AgentService {
           appliedItemId: getLatestSessionItemId(this.ctx.db, session.workspaceId, session.id)
         });
       } catch (err) {
-        const rollback = await rollbackArchiveLinesBestEffort(archiveSnapshots);
+        const rollback = await rollbackArchiveLinesBestEffort(archiveSnapshots, async () => {
+          const payload = this.ctx.agentTestFaults?.archiveRollback?.appendBeforeRollback;
+          const snapshot = archiveSnapshots[0];
+          if (payload && snapshot) await fs.appendFile(snapshot.filePath, payload, "utf-8");
+        });
         if (rollback.skipped > 0) {
+          await writeArchivePendingSidecarBestEffort({
+            dataDir: this.ctx.dataDir,
+            operation: "clear",
+            workspaceId: session.workspaceId,
+            sessionId: session.id,
+            runId: runState.activeRunId ?? undefined,
+            snapshots: rollback.skippedSnapshots,
+            fault: this.ctx.agentTestFaults?.archiveSidecar,
+            logger: this.logger
+          });
           this.logger.warn(
             {
               sessionId: session.id,

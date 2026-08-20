@@ -37,9 +37,22 @@ export const AgentApiEndpoints = {
   getSubtaskStatus: {
     method: "POST",
     path: "/api/internal/agent/subtask/status"
+  },
+  getExecutionProfile: {
+    method: "POST",
+    path: "/api/internal/agent/execution-profile"
+  },
+  getPromptContext: {
+    method: "POST",
+    path: "/api/internal/agent/prompt-context"
+  },
+  getMessagesContext: {
+    method: "POST",
+    path: "/api/internal/agent/messages-context"
   }
 } as const;
 
 export * from "./agent-api-run.js";
 export * from "./agent-api-context.js";
 export * from "./agent-api-subtask.js";
+export * from "./agent-api-read.js";

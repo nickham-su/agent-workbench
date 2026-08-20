@@ -693,6 +693,16 @@ export function getAgentSession(db: Db, sessionId: string): AgentSessionRecord |
   return row ? mapSession(row) : null;
 }
 
+export function listAgentSessionsForArchiveReconcile(db: Db): Array<{ workspaceId: string; sessionId: string }> {
+  return db.prepare(
+    `
+      select workspace_id as workspaceId, id as sessionId
+      from agent_session
+      order by created_at asc, id asc
+    `
+  ).all() as Array<{ workspaceId: string; sessionId: string }>;
+}
+
 export function listRecentSessionsAcrossWorkspaces(db: Db, limit: number, kind: "primary" | "subtask" | "all" = "all"): AgentRecentSessionItem[] {
   const rows = db
     .prepare(
@@ -788,7 +798,7 @@ export function getSessionHead(db: Db, workspaceId: string, sessionId: string) {
   return getHead(db, workspaceId, sessionId);
 }
 
-export function appendContextItem(db: Db, params: {
+type AppendContextItemParams = {
   workspaceId: string;
   sessionId: string;
   runId: string | null;
@@ -800,116 +810,189 @@ export function appendContextItem(db: Db, params: {
   boundaryReason?: string | null;
   output: AgentContextItemOutput;
   createdAt: number;
-}) {
+};
+
+function appendContextItemInTransaction(db: Db, params: AppendContextItemParams) {
   const stored = encodeStoredColumns({
     kind: params.kind,
     status: params.status,
     output: params.output
   });
+  const currentHead = getHead(db, params.workspaceId, params.sessionId);
+  if (currentHead !== params.prevId) {
+    throw new AgentConflictError(currentHead);
+  }
 
-  const tx = db.transaction(() => {
-    const currentHead = getHead(db, params.workspaceId, params.sessionId);
-    if (currentHead !== params.prevId) {
-      throw new AgentConflictError(currentHead);
-    }
-
-    const result = db
-      .prepare(
-        `
-          insert into agent_context_item (
-            workspace_id,
-            session_id,
-            run_id,
-            turn_id,
-            step,
-            prev_id,
-            kind,
-            status,
-            output_text,
-            assistant_reasoning_text,
-            output_text_truncated,
-            output_text_artifact_path,
-            tool_name,
-            tool_call_id,
-            tool_call_json,
-            tool_result_json,
-            error_message,
-            error_code,
-            boundary_reason,
-            output_json,
-            created_at,
-            updated_at
-          ) values (
-            @workspaceId,
-            @sessionId,
-            @runId,
-            @turnId,
-            @step,
-            @prevId,
-            @kind,
-            @status,
-            @outputText,
-            @assistantReasoningText,
-            @outputTextTruncated,
-            @outputTextArtifactPath,
-            @toolName,
-            @toolCallId,
-            @toolCallJson,
-            @toolResultJson,
-            @errorMessage,
-            @errorCode,
-            @boundaryReason,
-            @outputJson,
-            @createdAt,
-            @updatedAt
-          )
-        `
-      )
-      .run({
-        workspaceId: params.workspaceId,
-        sessionId: params.sessionId,
-        runId: params.runId,
-        turnId: params.turnId,
-        step: params.step,
-        prevId: params.prevId,
-        kind: params.kind,
-        status: params.status,
-        outputText: stored.outputText,
-        assistantReasoningText: stored.assistantReasoningText,
-        outputTextTruncated: stored.outputTextTruncated,
-        outputTextArtifactPath: stored.outputTextArtifactPath,
-        toolName: stored.toolName,
-        toolCallId: stored.toolCallId,
-        toolCallJson: stored.toolCallJson,
-        toolResultJson: stored.toolResultJson,
-        errorMessage: stored.errorMessage,
-        errorCode: stored.errorCode,
-        boundaryReason:
-          params.kind === "system" && typeof params.boundaryReason === "string" && params.boundaryReason.trim()
-            ? params.boundaryReason.trim()
-            : null,
-        outputJson: stored.outputJson,
-        createdAt: params.createdAt,
-        updatedAt: params.createdAt
-      });
-
-    const itemId = Number(result.lastInsertRowid);
-    setHead(db, {
+  const result = db
+    .prepare(
+      `
+        insert into agent_context_item (
+          workspace_id,
+          session_id,
+          run_id,
+          turn_id,
+          step,
+          prev_id,
+          kind,
+          status,
+          output_text,
+          assistant_reasoning_text,
+          output_text_truncated,
+          output_text_artifact_path,
+          tool_name,
+          tool_call_id,
+          tool_call_json,
+          tool_result_json,
+          error_message,
+          error_code,
+          boundary_reason,
+          output_json,
+          created_at,
+          updated_at
+        ) values (
+          @workspaceId,
+          @sessionId,
+          @runId,
+          @turnId,
+          @step,
+          @prevId,
+          @kind,
+          @status,
+          @outputText,
+          @assistantReasoningText,
+          @outputTextTruncated,
+          @outputTextArtifactPath,
+          @toolName,
+          @toolCallId,
+          @toolCallJson,
+          @toolResultJson,
+          @errorMessage,
+          @errorCode,
+          @boundaryReason,
+          @outputJson,
+          @createdAt,
+          @updatedAt
+        )
+      `
+    )
+    .run({
       workspaceId: params.workspaceId,
       sessionId: params.sessionId,
-      headItemId: itemId,
+      runId: params.runId,
+      turnId: params.turnId,
+      step: params.step,
+      prevId: params.prevId,
+      kind: params.kind,
+      status: params.status,
+      outputText: stored.outputText,
+      assistantReasoningText: stored.assistantReasoningText,
+      outputTextTruncated: stored.outputTextTruncated,
+      outputTextArtifactPath: stored.outputTextArtifactPath,
+      toolName: stored.toolName,
+      toolCallId: stored.toolCallId,
+      toolCallJson: stored.toolCallJson,
+      toolResultJson: stored.toolResultJson,
+      errorMessage: stored.errorMessage,
+      errorCode: stored.errorCode,
+      boundaryReason:
+        params.kind === "system" && typeof params.boundaryReason === "string" && params.boundaryReason.trim()
+          ? params.boundaryReason.trim()
+          : null,
+      outputJson: stored.outputJson,
+      createdAt: params.createdAt,
       updatedAt: params.createdAt
     });
-    touchSession(db, params.sessionId, params.createdAt);
-    return itemId;
-  });
 
-  const itemId = tx();
+  const itemId = Number(result.lastInsertRowid);
+  setHead(db, {
+    workspaceId: params.workspaceId,
+    sessionId: params.sessionId,
+    headItemId: itemId,
+    updatedAt: params.createdAt
+  });
+  touchSession(db, params.sessionId, params.createdAt);
   const row = readContextItemRowById(db, itemId);
-  if (!row) {
-    throw new Error("failed to append context item");
-  }
+  if (!row) throw new Error("failed to append context item");
   return mapContextItem(row);
+}
+
+export function appendContextItem(db: Db, params: AppendContextItemParams) {
+  return db.transaction(() => appendContextItemInTransaction(db, params))();
+}
+
+export type AgentFencedAppendResult =
+  | { kind: "appended"; item: AgentContextItemRecord }
+  | { kind: "ignored" }
+  | { kind: "missing-session" }
+  | { kind: "workspace-mismatch" }
+  | { kind: "missing-run" }
+  | { kind: "run-mismatch" };
+
+export function appendContextItemWithRunFence(db: Db, params: AppendContextItemParams): AgentFencedAppendResult {
+  const tx = db.transaction(() => {
+    const session = getAgentSession(db, params.sessionId);
+    if (!session) return { kind: "missing-session" } as const;
+    if (session.workspaceId !== params.workspaceId) return { kind: "workspace-mismatch" } as const;
+
+    if (params.runId) {
+      const run = getRunRecord(db, params.runId);
+      if (!run) return { kind: "missing-run" } as const;
+      if (run.workspaceId !== params.workspaceId || run.sessionId !== params.sessionId) {
+        return { kind: "run-mismatch" } as const;
+      }
+      const state = getRunState(db, params.workspaceId, params.sessionId);
+      if (run.status !== "running" || state.activeRunId !== params.runId) {
+        return { kind: "ignored" } as const;
+      }
+    }
+
+    return { kind: "appended", item: appendContextItemInTransaction(db, params) } as const;
+  });
+  return tx();
+}
+
+export type AgentFencedUpdateResult =
+  | { kind: "updated"; item: AgentContextItemRecord }
+  | { kind: "unchanged"; item: AgentContextItemRecord }
+  | { kind: "missing" }
+  | { kind: "ownership-mismatch" };
+
+function getContextItemForWorkerUpdateInTransaction(db: Db, itemId: number): AgentFencedUpdateResult {
+  const item = getContextItemById(db, itemId);
+  if (!item) return { kind: "missing" } as const;
+  const session = getAgentSession(db, item.sessionId);
+  if (!session || session.workspaceId !== item.workspaceId) return { kind: "ownership-mismatch" } as const;
+  if (item.runId) {
+    const run = getRunRecord(db, item.runId);
+    if (!run || run.workspaceId !== item.workspaceId || run.sessionId !== item.sessionId) {
+      return { kind: "ownership-mismatch" } as const;
+    }
+    const state = getRunState(db, item.workspaceId, item.sessionId);
+    if (run.status !== "running" || state.activeRunId !== item.runId) {
+      return { kind: "unchanged", item } as const;
+    }
+  }
+  if (TERMINAL_ITEM_STATUS.has(item.status)) return { kind: "unchanged", item } as const;
+  return { kind: "updated", item } as const;
+}
+
+export function getContextItemForWorkerUpdate(db: Db, itemId: number): AgentFencedUpdateResult {
+  return db.transaction(() => getContextItemForWorkerUpdateInTransaction(db, itemId))();
+}
+
+export function updateContextItemWithRunFence(db: Db, params: {
+  itemId: number;
+  status?: AgentContextItemStatus;
+  output?: AgentContextItemOutput;
+  updatedAt: number;
+}): AgentFencedUpdateResult {
+  return db.transaction(() => {
+    const fence = getContextItemForWorkerUpdateInTransaction(db, params.itemId);
+    if (fence.kind !== "updated") return fence;
+    const item = updateContextItem(db, params);
+    if (!item) return { kind: "missing" } as const;
+    return { kind: "updated", item } as const;
+  })();
 }
 
 export function updateContextItem(db: Db, params: {
@@ -1719,7 +1802,7 @@ export function getRunRecord(db: Db, runId: string) {
 
 export function findSubtaskRunByParentTool(
   db: Db,
-  params: { parentRunId: string; parentToolItemId: number }
+  params: { workspaceId: string; parentRunId: string; parentToolItemId: number }
 ) {
   const row = db
     .prepare(
@@ -1740,7 +1823,8 @@ export function findSubtaskRunByParentTool(
           created_at as createdAt,
           updated_at as updatedAt
         from agent_run
-        where parent_run_id = @parentRunId
+        where workspace_id = @workspaceId
+          and parent_run_id = @parentRunId
           and parent_tool_item_id = @parentToolItemId
         limit 1
       `
@@ -1892,36 +1976,94 @@ export function listSubtaskChildSessionIdsByRunId(
     .prepare(
       `
         select
-          tool_result_json as toolResultJson,
-          output_text as outputText
-        from agent_context_item
-        where workspace_id = @workspaceId
-          and session_id = @sessionId
-          and run_id = @runId
-          and kind = 'tool'
-          and status in ('queued', 'running', 'streaming')
-          and tool_name = 'subtask'
-        order by id asc
+          child.session_id as sessionId
+        from agent_run child
+        inner join agent_context_item parent_tool
+          on parent_tool.id = child.parent_tool_item_id
+        where child.workspace_id = @workspaceId
+          and child.parent_run_id = @runId
+          and parent_tool.workspace_id = @workspaceId
+          and parent_tool.session_id = @sessionId
+          and parent_tool.run_id = @runId
+          and parent_tool.kind = 'tool'
+          and parent_tool.tool_name = 'subtask'
+        order by child.created_at asc, child.run_id asc
       `
     )
-    .all(params) as SubtaskToolRefRow[];
+    .all(params) as Array<{ sessionId: string }>;
 
-  const seen = new Set<string>();
-  const childSessionIds: string[] = [];
-  for (const row of rows) {
-    const result = parseJson(row.toolResultJson) as StoredToolResult | null;
-    const resultMeta = typeof result?.meta === "object" && result.meta && !Array.isArray(result.meta)
-      ? (result.meta as Record<string, unknown>)
-      : null;
-    const rawResult = resultMeta && Object.prototype.hasOwnProperty.call(resultMeta, "result") ? resultMeta.result : undefined;
-    const resultObj = rawResult && typeof rawResult === "object" && !Array.isArray(rawResult) ? (rawResult as Record<string, unknown>) : null;
-    const fromResult = typeof resultObj?.subtaskSessionId === "string" ? resultObj.subtaskSessionId.trim() : "";
-    const childSessionId = fromResult || parseSubtaskSessionIdFromToolText(row.outputText);
-    if (!childSessionId || seen.has(childSessionId)) continue;
-    seen.add(childSessionId);
-    childSessionIds.push(childSessionId);
-  }
-  return childSessionIds;
+  return Array.from(new Set(rows.map((row) => String(row.sessionId || "").trim()).filter(Boolean)));
+}
+
+export type AgentSubtaskOrphanCandidate = {
+  workspaceId: string;
+  sessionId: string;
+  createdAt: number;
+  forkedFromSessionId: string | null;
+  forkedFromItemId: number | null;
+};
+
+export function listEmptySubtaskOrphanCandidates(db: Db, olderThan: number): AgentSubtaskOrphanCandidate[] {
+  return db.prepare(
+    `
+      select
+        s.workspace_id as workspaceId,
+        s.id as sessionId,
+        s.created_at as createdAt,
+        s.forked_from_session_id as forkedFromSessionId,
+        s.forked_from_item_id as forkedFromItemId
+      from agent_session s
+      left join agent_session_head h
+        on h.workspace_id = s.workspace_id and h.session_id = s.id
+      where s.kind = 'subtask'
+        and s.created_at < @olderThan
+        and h.head_item_id is null
+        and not exists (
+          select 1 from agent_run r
+          where r.workspace_id = s.workspace_id and r.session_id = s.id
+        )
+        and not exists (
+          select 1 from agent_context_item i
+          where i.workspace_id = s.workspace_id and i.session_id = s.id
+        )
+      order by s.created_at asc, s.id asc
+    `
+  ).all({ olderThan }) as AgentSubtaskOrphanCandidate[];
+}
+
+export function deleteEmptySubtaskSessionIfStillEmpty(db: Db, params: {
+  workspaceId: string;
+  sessionId: string;
+  olderThan?: number;
+  requireForkLineage?: boolean;
+}) {
+  const tx = db.transaction(() => db.prepare(
+    `
+      delete from agent_session
+      where id = @sessionId
+        and workspace_id = @workspaceId
+        and kind = 'subtask'
+        and (@olderThan is null or created_at < @olderThan)
+        and (@requireForkLineage = 0 or (forked_from_session_id is not null and forked_from_item_id is not null))
+        and not exists (
+          select 1 from agent_session_head h
+          where h.workspace_id = @workspaceId and h.session_id = @sessionId and h.head_item_id is not null
+        )
+        and not exists (
+          select 1 from agent_run r
+          where r.workspace_id = @workspaceId and r.session_id = @sessionId
+        )
+        and not exists (
+          select 1 from agent_context_item i
+          where i.workspace_id = @workspaceId and i.session_id = @sessionId
+        )
+    `
+  ).run({
+    ...params,
+    olderThan: params.olderThan ?? null,
+    requireForkLineage: params.requireForkLineage ? 1 : 0
+  }).changes);
+  return tx();
 }
 
 export function updateRunRecordStatus(db: Db, params: { runId: string; status: AgentRunRecord["status"]; updatedAt: number }) {

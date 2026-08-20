@@ -182,11 +182,11 @@ POST /api/internal/agent/messages-context
 | 条件 | 结果 |
 |---|---|
 | subtask、无 run、无 item、head=null、>1h | suspect 诊断 |
-| 同上但 <1h | 不标记为可处理 orphan |
-| 有 run | 只诊断，不删 |
-| 有 context item | 只诊断，不删 |
-| head 非 null | 只诊断，不删 |
-| 任一 forkedFrom 缺失 | 只诊断，不删 |
+| 同上但 <1h | 非 suspect；不进入 scanner 诊断输出 |
+| 有 run | 非 suspect；不进入 scanner 诊断输出 |
+| 有 context item | 非 suspect；不进入 scanner 诊断输出 |
+| head 非 null | 非 suspect；不进入 scanner 诊断输出 |
+| suspect 但任一 forkedFrom 缺失 | retained 诊断，不删 |
 | 双 forkedFrom 非空、>24h、删除前仍为空壳 | 允许自动删除 |
 | 删除前出现 run/item/head | 放弃删除 |
 
@@ -204,12 +204,13 @@ POST /api/internal/agent/messages-context
 1. rollback 全部成功：不生成 pending sidecar；
 2. rollback skipped：生成 sidecar，字段完整且不含 archive 内容；
 3. sidecar tmp+rename 写失败：只 warning，主流程继续；
-4. 启动 reconcile，所有 currentSize 等于 expectedSize：truncate 到 beforeSize，成功后删除 sidecar；
-5. 任一尺寸不匹配：不 truncate、不删除 sidecar；
-6. 文件缺失：不破坏处理，保留 sidecar；
-7. sidecar 不完整/非法 JSON：保留或移入明确诊断路径，不影响启动；
-8. 同 session 下一次 clear/compact 前触发 reconcile；
-9. 日志不含 archive 内容、summary、prompt、messages、tool 数据或完整绝对路径。
+4. 启动 reconcile，单文件 sidecar 的 currentSize 等于 expectedSize：truncate 到 beforeSize，成功后删除 sidecar；
+5. 多文件 sidecar：不自动 truncate、不删除 sidecar，记录 warning；
+6. 单文件尺寸不匹配：不 truncate、不删除 sidecar；
+7. 文件缺失：不破坏处理，保留 sidecar；
+8. sidecar 不完整/非法 JSON：保留或移入明确诊断路径，不影响启动；
+9. 同 session 下一次 clear/compact 前触发 reconcile；
+10. 日志不含 archive 内容、summary、prompt、messages、tool 数据或完整绝对路径。
 
 不得把“rollback skipped 后文件一定无残留”作为验收条件。
 
@@ -233,8 +234,8 @@ POST /api/internal/agent/messages-context
 - [ ] update 归属和终态规则完整；
 - [ ] cancel wins 有最终 DB 检查证据；
 - [ ] lineage 不依赖 subtaskSessionId 回填；
-- [ ] orphan 自动删除条件保守且二次确认；
-- [ ] sidecar 只处理 rollback skipped，尺寸不匹配不破坏；
+- [ ] orphan scanner 只枚举空壳 suspect，自动删除条件保守且二次确认；
+- [ ] sidecar 只处理 rollback skipped；仅单文件尺寸匹配时自动 reconcile，多文件和尺寸不匹配不破坏；
 - [ ] 未引入排除项。
 
 ## 完成定义

@@ -15,8 +15,8 @@
 | D-9 | race | cancel wins；recover enqueue 前最终检查 DB |
 | D-10 | late append | 1D 受控扩展 Context create：正常 `{ok:true,item:record}`；late no-op 固定 `{ok:true,item:null,ignored:true}` |
 | D-11 | lineage | `parentRunId + parentToolItemId` 权威；`subtaskSessionId` 仅呈现/定位 |
-| D-12 | orphan | 1h suspect；24h 且双 fork lineage 完整才可自动删；其他只诊断 |
-| D-13 | archive | 仅 rollback skipped 写 sidecar；尺寸精确匹配才 truncate |
+| D-12 | orphan | 只扫描 1h 空壳 suspect；24h 且双 fork lineage 完整才可自动删；suspect 内其余对象保留诊断 |
+| D-13 | archive | 仅 rollback skipped 写 sidecar；仅单文件 sidecar 在尺寸精确匹配时自动 truncate |
 | D-14 | 兼容 | 同仓库原子迁移，不做长期双协议 |
 
 ## 取舍说明
@@ -51,11 +51,11 @@ P3 必须把 response schema 扩展为 normal/late no-op 的可判别联合：�
 
 ### 保守 orphan 清理
 
-existing reuse 使“空壳 session”也可能具有用户未来语义。自动删除只针对有完整 fork lineage、长期为空且删除前二次确认的极小集合；其余只标记，牺牲清理彻底性换取不误删。
+existing reuse 使“空壳 session”也可能具有用户未来语义。scanner 只枚举超过 1 小时、无 run、无 context item 且 head 为空的 suspect；自动删除只针对其中有完整 fork lineage、超过 24 小时且删除前二次确认的极小集合。suspect 中其余对象只标记，非-suspect 不进入该 scanner 的诊断范围，牺牲清理彻底性换取不误删。
 
 ### Sidecar 而非全局事务
 
-当前 archive 已有 `beforeSize/expectedSize` 快照和安全 truncate 条件。sidecar 只补可发现、可重试入口，不改文件格式和 DB 事务边界；尺寸不匹配时不猜测处理。
+当前 archive 已有 `beforeSize/expectedSize` 快照和安全 truncate 条件。sidecar 只补可发现、可重试入口，不改文件格式和 DB 事务边界；尺寸不匹配时不猜测处理。由于跨多个文件的 truncate 不具备原子性，自动 reconcile 只处理单文件 sidecar；多文件记录保留并 warning。
 
 ## 已接受风险
 
@@ -63,7 +63,7 @@ existing reuse 使“空壳 session”也可能具有用户未来语义。自动
 - recover 不能保证已发出 enqueue 被强制取消；
 - Worker 重启不恢复内存 nested mapping；
 - orphan 可能长期只标记不删除；
-- archive 与 DB 仍不是全局原子，sidecar 只能处理可确定回滚的尺寸匹配情况。
+- archive 与 DB 仍不是全局原子，sidecar 只能处理可确定回滚的单文件尺寸匹配情况；多文件 pending 记录可能长期保留。
 
 ## 实施前必须暂停的冲突
 

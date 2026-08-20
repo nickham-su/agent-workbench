@@ -270,7 +270,7 @@ createdAt 早于当前时间 24 小时以上
 删除前再次确认仍无 run/context item 且 headItemId=null
 ```
 
-其他情况只记录诊断，不删除。启动扫描和即时补偿都不得删除可能被 existing reuse 使用的非空壳 session。
+启动 scanner 只枚举满足 suspect 条件的空壳 session；`<1h`、有 run、有 context item 或 head 非空的非-suspect session 不属于该 scanner 的诊断输出范围。已进入 suspect 但 fork lineage 不完整的对象只记录 retained 诊断，不删除。启动扫描和即时补偿都不得删除可能被 existing reuse 使用的非空壳 session。
 
 ## Lifecycle：archive reconciliation
 
@@ -279,6 +279,7 @@ createdAt 早于当前时间 24 小时以上
 - rollback skipped 时写最小 pending sidecar；
 - sidecar 使用 tmp + rename best-effort；
 - 服务启动、同 session 下一次 clear/compact 前尝试 reconcile；
-- 仅当 `currentSize === expectedSize` 时 truncate 到 `beforeSize`；
+- 自动 reconcile 仅处理恰有一个 snapshot 的 sidecar；多文件记录只 warning 并保留 sidecar，不做自动 truncate；
+- 对单文件 sidecar，仅当 `currentSize === expectedSize` 时 truncate 到 `beforeSize`；
 - 尺寸不符、缺失、记录不完整时保留 sidecar，不做破坏性处理；
 - sidecar 写失败只 warning，不影响 DB 或主流程。

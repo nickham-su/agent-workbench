@@ -62,6 +62,12 @@ import {
   AgentApiRunCompleteResponseSchema,
   AgentApiRunStateRequestSchema,
   AgentApiRunStateResponseSchema,
+  AgentApiExecutionProfileRequestSchema,
+  AgentApiExecutionProfileResponseSchema,
+  AgentApiMessagesContextRequestSchema,
+  AgentApiMessagesContextResponseSchema,
+  AgentApiPromptContextRequestSchema,
+  AgentApiPromptContextResponseSchema,
   type AgentApiContextItemParams,
   type AgentApiCreateContextItemRequest,
   type AgentApiUpdateContextItemRequest,
@@ -71,7 +77,10 @@ import {
   type AgentApiSubtaskResultRequest,
   type AgentApiSubtaskStatusRequest,
   type AgentApiRunCompleteRequest,
-  type AgentApiRunStateRequest
+  type AgentApiRunStateRequest,
+  type AgentApiExecutionProfileRequest,
+  type AgentApiMessagesContextRequest,
+  type AgentApiPromptContextRequest
 } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { AgentRuntimePort } from "./agent.runtime-port.js";
 import type { AgentService } from "./agent.service.js";
@@ -115,6 +124,24 @@ function assertPluginCaller(req: FastifyRequest, pluginId: string) {
   }
   if (caller !== String(pluginId || "").trim()) {
     throw new HttpError(401, "Unauthorized", "PLUGIN_CALLER_MISMATCH");
+  }
+}
+
+export async function cancelRuntimeSessionsAfterDbConvergence(params: {
+  runtime: AgentRuntimePort;
+  sessionIds: string[];
+  rootSessionId: string;
+  logger: FastifyRequest["log"];
+}) {
+  const settled = await Promise.allSettled(params.sessionIds.map((sessionId) => params.runtime.cancelSession(sessionId)));
+  for (let i = 0; i < settled.length; i += 1) {
+    const item = settled[i];
+    const targetSessionId = params.sessionIds[i];
+    if (!item || item.status !== "rejected") continue;
+    params.logger.warn(
+      { err: item.reason, rootSessionId: params.rootSessionId, targetSessionId },
+      "agent cancel runtime session failed"
+    );
   }
 }
 
@@ -457,13 +484,12 @@ export async function registerAgentRoutes(
       const p = req.params as { sessionId: string };
       const body = req.body as { workspaceId: string };
       const { result, runtimeCancelSessionIds } = params.service.cancelSessionCascade(p.sessionId, body);
-      const settled = await Promise.allSettled(runtimeCancelSessionIds.map((sessionId) => params.runtime.cancelSession(sessionId)));
-      for (let i = 0; i < settled.length; i += 1) {
-        const item = settled[i];
-        const targetSessionId = runtimeCancelSessionIds[i];
-        if (!item || item.status !== "rejected") continue;
-        req.log.warn({ err: item.reason, rootSessionId: p.sessionId, targetSessionId }, "agent cancel runtime session failed");
-      }
+      await cancelRuntimeSessionsAfterDbConvergence({
+        runtime: params.runtime,
+        sessionIds: runtimeCancelSessionIds,
+        rootSessionId: p.sessionId,
+        logger: req.log
+      });
       return result;
     }
   );
@@ -660,8 +686,7 @@ export async function registerAgentRoutes(
     handler: async (req) => {
       assertInternalToken(req, params.service);
       const body = req.body as AgentApiCreateContextItemRequest;
-      const item = params.service.appendContextItemFromWorker(body);
-      return { ok: true, item };
+      return params.service.appendContextItemFromWorker(body);
     }
   });
 
@@ -1116,243 +1141,65 @@ export async function registerAgentRoutes(
     }
   );
 
-  app.post(
-    "/api/internal/agent/prompt-context",
-    {
-      schema: {
-        tags: ["agent"],
-        body: Type.Object({
-          workspaceId: Type.String({ minLength: 1 }),
-          sessionId: Type.String({ minLength: 1 }),
-          runId: Type.String({ minLength: 1 })
-        }),
-        response: {
-          200: Type.Object({
-            headItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
-            system: Type.String(),
-            messages: Type.Array(
-              Type.Object({
-                role: Type.Union([Type.Literal("system"), Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool")]),
-                content: Type.Any()
-              })
-            ),
-            tools: Type.Array(
-              Type.Object({
-                name: AgentDynamicToolNameSchema,
-                description: Type.String(),
-                inputSchema: Type.Any()
-              })
-            ),
-            pendingTools: Type.Array(
-              Type.Object({
-                itemId: Type.Number({ minimum: 1 }),
-                status: AgentContextItemStatusSchema,
-                toolName: AgentDynamicToolNameSchema,
-                toolCallId: Type.Optional(Type.String({ minLength: 1 })),
-                args: Type.Any()
-              })
-            ),
-            lastResponseTotalTokens: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
-            uiLocale: Type.Union([AgentUiLocaleSchema, Type.Null()]),
-            externalSkillRoots: Type.Array(
-              Type.Object({
-                sourceType: Type.Union([Type.Literal("workspace"), Type.Literal("repo")]),
-                repoId: Type.Optional(Type.String({ minLength: 1 })),
-                rootDir: Type.String({ minLength: 1 }),
-                rootPath: Type.String({ minLength: 1 })
-              })
-            )
-          }),
-          400: ErrorResponseSchema,
-          401: ErrorResponseSchema,
-          404: ErrorResponseSchema
-        }
+  app.route({
+    method: AgentApiEndpoints.getPromptContext.method,
+    url: AgentApiEndpoints.getPromptContext.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiPromptContextRequestSchema,
+      response: {
+        200: AgentApiPromptContextResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+        404: ErrorResponseSchema
       }
     },
-    async (req) => {
+    handler: async (req) => {
       assertInternalToken(req, params.service);
-      const body = req.body as { workspaceId: string; sessionId: string; runId: string };
+      const body = req.body as AgentApiPromptContextRequest;
       return params.service.getPromptContextForRun(body);
     }
-  );
+  });
 
-  app.post(
-    "/api/internal/agent/messages-context",
-    {
-      schema: {
-        tags: ["agent"],
-        body: Type.Object({
-          workspaceId: Type.String({ minLength: 1 }),
-          sessionId: Type.String({ minLength: 1 }),
-          appendMessage: Type.Optional(
-            Type.Object({
-              role: Type.Union([Type.Literal("system"), Type.Literal("user")]),
-              content: Type.String({ minLength: 1 })
-            })
-          )
-        }),
-        response: {
-          200: Type.Object({
-            headItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
-            system: Type.String(),
-            messages: Type.Array(
-              Type.Object({
-                role: Type.Union([Type.Literal("system"), Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool")]),
-                content: Type.Any()
-              })
-            )
-          }),
-          400: ErrorResponseSchema,
-          401: ErrorResponseSchema,
-          404: ErrorResponseSchema
-        }
+  app.route({
+    method: AgentApiEndpoints.getMessagesContext.method,
+    url: AgentApiEndpoints.getMessagesContext.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiMessagesContextRequestSchema,
+      response: {
+        200: AgentApiMessagesContextResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+        404: ErrorResponseSchema
       }
     },
-    async (req) => {
+    handler: async (req) => {
       assertInternalToken(req, params.service);
-      const body = req.body as {
-        workspaceId: string;
-        sessionId: string;
-        appendMessage?: { role: "system" | "user"; content: string };
-      };
+      const body = req.body as AgentApiMessagesContextRequest;
       return params.service.getMessagesContext(body);
     }
-  );
+  });
 
-  app.post(
-    "/api/internal/agent/execution-profile",
-    {
-      schema: {
-        tags: ["agent"],
-        body: Type.Object({
-          workspaceId: Type.String({ minLength: 1 }),
-          sessionId: Type.String({ minLength: 1 }),
-          runId: Type.String({ minLength: 1 })
-        }),
-        response: {
-          200: Type.Object({
-            resolved: Type.Object({
-              runId: Type.String({ minLength: 1 }),
-              sessionId: Type.String({ minLength: 1 }),
-              workspaceId: Type.String({ minLength: 1 }),
-              agentId: Type.String({ minLength: 1 }),
-              providerId: Type.String({ minLength: 1 }),
-              modelId: Type.String({ minLength: 1 })
-            }),
-            agent: Type.Object({
-              id: Type.String({ minLength: 1 }),
-              name: Type.String({ minLength: 1 }),
-               summary: Type.String({ maxLength: 160 }),
-               prompt: Type.String(),
-               tools: Type.Array(AgentBuiltinToolNameSchema),
-               pluginTools: Type.Array(PluginToolCanonicalNameSchema),
-               mcpServers: Type.Array(Type.String({ minLength: 1 })),
-               defaultModel: Type.Union([
-                 Type.Object({ providerId: Type.String({ minLength: 1 }), modelId: Type.String({ minLength: 1 }) }),
-                Type.Null()
-              ])
-            }),
-            provider: Type.Object({
-              id: Type.String({ minLength: 1 }),
-              name: Type.String({ minLength: 1 }),
-              npm: AgentProviderNpmSchema,
-              options: Type.Object({
-                baseURL: Type.String({ minLength: 1 }),
-                apiKey: Type.String({ minLength: 1 }),
-                apiMode: Type.Optional(Type.Union([Type.Literal("responses"), Type.Literal("chatCompletions")]))
-              })
-            }),
-            model: Type.Object({
-              id: Type.String({ minLength: 1 }),
-              providerModelId: Type.Optional(Type.String({ minLength: 1 })),
-              name: Type.String({ minLength: 1 }),
-              contextWindowTokens: Type.Integer({ minimum: 1 }),
-              options: Type.Optional(Type.Any())
-            }),
-            runtime: Type.Object({
-              modelIdleTimeoutMs: Type.Integer({ minimum: 0 }),
-              modelTotalTimeoutMs: Type.Integer({ minimum: 0 }),
-              modelRequestMaxRetries: Type.Integer({ minimum: 0, maximum: 100 }),
-              autoCompactThresholdPct: Type.Integer({ minimum: 50, maximum: 99 }),
-              visionModel: Type.Union([
-                Type.Object({
-                  providerId: Type.String({ minLength: 1 }),
-                  modelId: Type.String({ minLength: 1 })
-                }),
-                Type.Null()
-              ]),
-              compactionModel: Type.Union([
-                Type.Object({
-                  providerId: Type.String({ minLength: 1 }),
-                  modelId: Type.String({ minLength: 1 })
-                }),
-                Type.Null()
-              ]),
-              updatedAt: Type.Number()
-            }),
-            vision: Type.Union([
-              Type.Object({
-                source: Type.Union([Type.Literal("runtime_vision"), Type.Literal("agent_default_fallback")]),
-                provider: Type.Object({
-                  id: Type.String({ minLength: 1 }),
-                  name: Type.String({ minLength: 1 }),
-                  npm: AgentProviderNpmSchema,
-                  options: Type.Object({
-                    baseURL: Type.String({ minLength: 1 }),
-                    apiKey: Type.String({ minLength: 1 }),
-                    apiMode: Type.Optional(Type.Union([Type.Literal("responses"), Type.Literal("chatCompletions")]))
-                  })
-                }),
-                model: Type.Object({
-                  id: Type.String({ minLength: 1 }),
-                  providerModelId: Type.Optional(Type.String({ minLength: 1 })),
-                  name: Type.String({ minLength: 1 }),
-                  contextWindowTokens: Type.Integer({ minimum: 1 }),
-                  options: Type.Optional(Type.Any())
-                })
-              }),
-              Type.Null()
-            ]),
-            compaction: Type.Union([
-              Type.Object({
-                source: Type.Literal("runtime_compaction"),
-                provider: Type.Object({
-                  id: Type.String({ minLength: 1 }),
-                  name: Type.String({ minLength: 1 }),
-                  npm: AgentProviderNpmSchema,
-                  options: Type.Object({
-                    baseURL: Type.String({ minLength: 1 }),
-                    apiKey: Type.String({ minLength: 1 }),
-                    apiMode: Type.Optional(Type.Union([Type.Literal("responses"), Type.Literal("chatCompletions")]))
-                  })
-                }),
-                model: Type.Object({
-                  id: Type.String({ minLength: 1 }),
-                  providerModelId: Type.Optional(Type.String({ minLength: 1 })),
-                  name: Type.String({ minLength: 1 }),
-                  contextWindowTokens: Type.Integer({ minimum: 1 }),
-                  options: Type.Optional(Type.Any())
-                })
-              }),
-              Type.Null()
-            ]),
-          }),
-          400: ErrorResponseSchema,
-          401: ErrorResponseSchema,
-          404: ErrorResponseSchema
-        }
+  app.route({
+    method: AgentApiEndpoints.getExecutionProfile.method,
+    url: AgentApiEndpoints.getExecutionProfile.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiExecutionProfileRequestSchema,
+      response: {
+        200: AgentApiExecutionProfileResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+        404: ErrorResponseSchema
       }
     },
-    async (req) => {
+    handler: async (req) => {
       assertInternalToken(req, params.service);
-      const body = req.body as {
-        workspaceId: string;
-        sessionId: string;
-        runId: string;
-      };
+      const body = req.body as AgentApiExecutionProfileRequest;
       return params.service.getExecutionProfileForRun(body);
     }
-  );
+  });
 
   app.post(
     "/api/internal/agent/single-call-model-profile",

@@ -8,7 +8,7 @@ import { createApp } from "../../app/createApp.js";
 import { openDb } from "../../infra/db/db.js";
 import type { Db } from "../../infra/db/db.js";
 import { ensureDir, rmrf } from "../../infra/fs/fs.js";
-import { agentArchiveSessionDir, compactionSnippetPath, workspaceRepoDirPath, workspaceRoot } from "../../infra/fs/paths.js";
+import { agentArchivePendingSidecarPath, agentArchiveSessionDir, compactionSnippetPath, workspaceRepoDirPath, workspaceRoot } from "../../infra/fs/paths.js";
 import { getSettingJson, setSettingJson } from "../settings/settings.store.js";
 import { insertWorkspace, insertWorkspaceRepo } from "../workspaces/workspace.store.js";
 import { insertRepo } from "../repos/repo.store.js";
@@ -27,11 +27,15 @@ import {
   getSessionTranscriptItems,
   moveSessionHead,
   setRunStateIdle,
+  deleteEmptySubtaskSessionIfStillEmpty,
   updateRunRecordStatus,
   updateRunState
 } from "./agent.store.js";
 import { AgentService, isSubtaskParentToolUniqueConstraintError } from "./agent.service.js";
 import { AgentRuntime } from "./agent.runtime.js";
+import type { AgentRuntimePort } from "./agent.runtime-port.js";
+import { enqueueRecoveringRuns } from "./agent.module.js";
+import { cancelRuntimeSessionsAfterDbConvergence } from "./agent.routes.js";
 import type { AgentApiSubtaskStartRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { normalizeMaxSubtaskDepthForUpdate } from "../settings/settings.service.js";
 import { newSortableId } from "../../utils/ids.js";
@@ -44,9 +48,11 @@ type Fixture = {
   workspacePath: string;
   internalToken: string;
   repoRoot: string;
+  ctx: AppContext;
 };
 
 const fixtures = new Set<Fixture>();
+const fixtureByApp = new WeakMap<FastifyInstance, Fixture>();
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -77,7 +83,7 @@ async function createFixture(options?: {
       options.agentGlobalPromptsUpdatedAt ?? Date.now()
     );
   }
-  const app = await createApp({
+  const ctx: AppContext = {
     db,
     repoRoot,
     dataDir,
@@ -105,7 +111,8 @@ async function createFixture(options?: {
     agentPluginHostSocketPath: path.join(dataDir, "agent-plugin-host.sock"),
     agentPluginServicesEnabled: options?.enablePluginServices === true,
     agentTestFaults: options?.agentTestFaults
-  });
+  };
+  const app = await createApp(ctx);
   const workspaceId = newSortableId("ws");
   const workspaceDirName = newSortableId("workspace");
   const workspacePath = workspaceRoot(dataDir, workspaceDirName);
@@ -127,8 +134,9 @@ async function createFixture(options?: {
   setSettingJson(db, "agent_channel_sender_allowlist_v1", {
     items: [{ channel: "feishu", senderId: "u_allowed", remark: "default test allowlist" }]
   }, Date.now());
-  const fixture: Fixture = { app, db, dataDir, workspaceId, workspacePath, internalToken, repoRoot };
+  const fixture: Fixture = { app, db, dataDir, workspaceId, workspacePath, internalToken, repoRoot, ctx };
   fixtures.add(fixture);
+  fixtureByApp.set(app, fixture);
   return fixture;
 }
 
@@ -417,6 +425,306 @@ test("agent startup recovery mode=fail 会终止 in-flight run 并回收 run-sta
   }
 });
 
+test("agent startup 会 best-effort reconcile archive pending sidecar", async () => {
+  const repoRoot = path.resolve(process.cwd(), "../..");
+  const testsRoot = path.join(repoRoot, ".tmp-tests");
+  await ensureDir(testsRoot);
+  const dataDir = await fs.mkdtemp(path.join(testsRoot, "agent-startup-pending-it-"));
+  const internalToken = "test-internal-token";
+  const db = await openDb(dataDir);
+  let app: FastifyInstance | null = null;
+  try {
+    const workspaceId = newSortableId("ws");
+    const workspaceDirName = newSortableId("workspace");
+    await ensureDir(workspaceRoot(dataDir, workspaceDirName));
+    const now = Date.now();
+    insertWorkspace(db, {
+      id: workspaceId,
+      dirName: workspaceDirName,
+      title: "startup-pending-workspace",
+      path: workspaceRoot(dataDir, workspaceDirName),
+      terminalCredentialId: null,
+      createdAt: now,
+      updatedAt: now
+    });
+    const sessionId = newSortableId("sess");
+    createAgentSession(db, {
+      id: sessionId,
+      workspaceId,
+      title: "startup-pending-session",
+      kind: "primary",
+      createdAt: now,
+      forkedFromSessionId: null,
+      forkedFromItemId: null
+    });
+    const archiveDir = agentArchiveSessionDir(dataDir, workspaceId, sessionId);
+    const archivePath = path.join(archiveDir, "00000001.log");
+    await fs.mkdir(archiveDir, { recursive: true });
+    await fs.writeFile(archivePath, "before\nafter\n", "utf-8");
+    const beforeSize = Buffer.byteLength("before\n", "utf-8");
+    const expectedSize = Buffer.byteLength("before\nafter\n", "utf-8");
+    const sidecarPath = agentArchivePendingSidecarPath(dataDir, workspaceId, sessionId);
+    await fs.writeFile(sidecarPath, JSON.stringify({
+      version: 1,
+      operation: "compaction",
+      workspaceId,
+      sessionId,
+      createdAt: now,
+      snapshots: [{ fileKey: path.join("agent", "archive", workspaceId, sessionId, "00000001.log"), beforeSize, expectedSize }]
+    }), "utf-8");
+
+    app = await createApp({
+      db, repoRoot, dataDir, fileMaxBytes: 1024 * 1024, version: "test", logLevel: "error", serveWeb: false, webDistDir: null,
+      credentialMasterKey: Buffer.alloc(32, 7), credentialMasterKeySource: "generated", credentialMasterKeyId: "testkey", credentialMasterKeyCreatedAt: now,
+      authToken: null, authCookieSecure: false, agentWorkerEnabled: false, agentWorkerHost: "127.0.0.1", agentWorkerPort: 0,
+      agentWorkerSocketPath: path.join(dataDir, "agent-worker.sock"), agentWorkerConcurrency: 0, agentInternalToken: internalToken,
+      agentWorkerResponseValidation: "strict", agentApiOrigin: "http://127.0.0.1:0", agentStartupRecoveryMode: "recover",
+      agentPluginHostEnabled: false, agentPluginHostSocketPath: path.join(dataDir, "agent-plugin-host.sock"), agentPluginServicesEnabled: false
+    });
+    await app.ready();
+    assert.equal((await fs.stat(archivePath)).size, beforeSize);
+    assert.equal(await fs.stat(sidecarPath).then(() => true, () => false), false);
+  } finally {
+    await app?.close();
+    db.close();
+    await rmrf(dataDir);
+  }
+});
+
+test("recover 在 enqueue 前最终 DB check 中让 cancel wins", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  try {
+    const session = await createSession(fixture.app, fixture.workspaceId);
+    const runId = newSortableId("run");
+    const ts = Date.now();
+    createRunRecord(fixture.db, {
+      runId,
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      triggerItemId: 0,
+      agentId: "default",
+      providerId: "ppchat",
+      modelId: "gpt-5.2",
+      subtaskDepth: null,
+      parentRunId: null,
+      parentToolItemId: null,
+      status: "running",
+      createdAt: ts
+    });
+    updateRunState(fixture.db, {
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      status: "running",
+      activeRunId: runId,
+      activeAssistantItemId: null,
+      runNoticeText: "",
+      updatedAt: ts,
+      appliedItemId: 0
+    });
+
+    const service = new AgentService(fixture.ctx, fixture.app.log);
+    const enqueueCalls: string[] = [];
+    const runtime: AgentRuntimePort = {
+      enqueueRun(run) {
+        enqueueCalls.push(run.runId);
+      },
+      cancelSession() {}
+    };
+    let cancelledDuringRecovery = false;
+
+    await enqueueRecoveringRuns(service, runtime, fixture.app.log, {
+      beforeFinalCheck(candidate) {
+        assert.equal(candidate.runId, runId, "recovery scan should have found the in-flight candidate");
+        service.cancelSessionCascade(session.id, { workspaceId: fixture.workspaceId });
+        cancelledDuringRecovery = true;
+      }
+    });
+
+    assert.equal(cancelledDuringRecovery, true);
+    assert.deepEqual(enqueueCalls, []);
+    assert.equal(getRunRecord(fixture.db, runId)?.status, "cancelled");
+    const state = getRunStateRow(fixture.db, fixture.workspaceId, session.id);
+    assert.equal(state.status, "idle");
+    assert.equal(state.activeRunId, null);
+  } finally {
+    await closeFixture(fixture);
+  }
+});
+
+test("recover enqueue 已发出后 cancel 仍以 DB cancelled 状态为准", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  try {
+    const session = await createSession(fixture.app, fixture.workspaceId);
+    const runId = newSortableId("run");
+    const ts = Date.now();
+    createRunRecord(fixture.db, {
+      runId,
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      triggerItemId: 0,
+      agentId: "default",
+      providerId: "ppchat",
+      modelId: "gpt-5.2",
+      subtaskDepth: null,
+      parentRunId: null,
+      parentToolItemId: null,
+      status: "running",
+      createdAt: ts
+    });
+    updateRunState(fixture.db, {
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      status: "running",
+      activeRunId: runId,
+      activeAssistantItemId: null,
+      runNoticeText: "",
+      updatedAt: ts,
+      appliedItemId: 0
+    });
+
+    const enqueued: string[] = [];
+    const runtime: AgentRuntimePort = {
+      enqueueRun(run) {
+        enqueued.push(run.runId);
+      },
+      cancelSession() {}
+    };
+    const service = new AgentService(fixture.ctx, fixture.app.log);
+    await enqueueRecoveringRuns(service, runtime, fixture.app.log);
+    assert.deepEqual(enqueued, [runId]);
+
+    service.cancelSessionCascade(session.id, { workspaceId: fixture.workspaceId });
+    assert.equal(getRunRecord(fixture.db, runId)?.status, "cancelled");
+    const state = getRunStateRow(fixture.db, fixture.workspaceId, session.id);
+    assert.equal(state.status, "idle");
+    assert.equal(state.activeRunId, null);
+  } finally {
+    await closeFixture(fixture);
+  }
+});
+
+test("recover enqueue failure 只记录并继续处理后续 candidate", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  try {
+    const firstSession = await createSession(fixture.app, fixture.workspaceId);
+    const secondSession = await createSession(fixture.app, fixture.workspaceId);
+    const ts = Date.now();
+    const firstRunId = newSortableId("run");
+    const secondRunId = newSortableId("run");
+    for (const [sessionId, runId] of [[firstSession.id, firstRunId], [secondSession.id, secondRunId]] as const) {
+      createRunRecord(fixture.db, {
+        runId,
+        workspaceId: fixture.workspaceId,
+        sessionId,
+        triggerItemId: 0,
+        agentId: "default",
+        providerId: "ppchat",
+        modelId: "gpt-5.2",
+        subtaskDepth: null,
+        parentRunId: null,
+        parentToolItemId: null,
+        status: "running",
+        createdAt: ts
+      });
+      updateRunState(fixture.db, {
+        workspaceId: fixture.workspaceId,
+        sessionId,
+        status: "running",
+        activeRunId: runId,
+        activeAssistantItemId: null,
+        runNoticeText: "",
+        updatedAt: ts,
+        appliedItemId: 0
+      });
+    }
+
+    const enqueued: string[] = [];
+    const runtime: AgentRuntimePort = {
+      async enqueueRun(run) {
+        enqueued.push(run.runId);
+        if (run.runId === firstRunId) throw new Error("expected enqueue failure");
+      },
+      cancelSession() {}
+    };
+    const warnings: unknown[][] = [];
+    const logger = {
+      warn(...args: unknown[]) {
+        warnings.push(args);
+      }
+    } as unknown as FastifyInstance["log"];
+
+    await enqueueRecoveringRuns(new AgentService(fixture.ctx, fixture.app.log), runtime, logger);
+
+    assert.deepEqual(enqueued, [firstRunId, secondRunId]);
+    assert.equal(warnings.length, 1);
+    assert.equal(warnings[0]?.[1], "startup recovery mode=recover: enqueue run failed");
+  } finally {
+    await closeFixture(fixture);
+  }
+});
+
+test("runtime cancel 失败仅 warning，DB cancel 保持收敛", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  try {
+    const session = await createSession(fixture.app, fixture.workspaceId);
+    const runId = newSortableId("run");
+    const ts = Date.now();
+    createRunRecord(fixture.db, {
+      runId,
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      triggerItemId: 0,
+      agentId: "default",
+      providerId: "ppchat",
+      modelId: "gpt-5.2",
+      subtaskDepth: null,
+      parentRunId: null,
+      parentToolItemId: null,
+      status: "running",
+      createdAt: ts
+    });
+    updateRunState(fixture.db, {
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      status: "running",
+      activeRunId: runId,
+      activeAssistantItemId: null,
+      runNoticeText: "",
+      updatedAt: ts,
+      appliedItemId: 0
+    });
+
+    const service = new AgentService(fixture.ctx, fixture.app.log);
+    const { result, runtimeCancelSessionIds } = service.cancelSessionCascade(session.id, { workspaceId: fixture.workspaceId });
+    assert.equal(result.runState.status, "idle");
+    assert.equal(getRunRecord(fixture.db, runId)?.status, "cancelled");
+
+    const warnings: unknown[][] = [];
+    await cancelRuntimeSessionsAfterDbConvergence({
+      runtime: {
+        enqueueRun() {},
+        async cancelSession() {
+          throw new Error("expected runtime cancellation failure");
+        }
+      },
+      sessionIds: runtimeCancelSessionIds,
+      rootSessionId: session.id,
+      logger: {
+        warn(...args: unknown[]) {
+          warnings.push(args);
+        }
+      } as never
+    });
+
+    assert.equal(warnings.length, 1);
+    assert.equal(warnings[0]?.[1], "agent cancel runtime session failed");
+    assert.equal(getRunRecord(fixture.db, runId)?.status, "cancelled");
+    assert.equal(getRunStateRow(fixture.db, fixture.workspaceId, session.id).status, "idle");
+  } finally {
+    await closeFixture(fixture);
+  }
+});
+
 test("agent run mapper 对 SQLite 弱类型 lineage 值 fail-closed", async () => {
   const fixture = await createFixture();
   try {
@@ -458,7 +766,7 @@ test("agent run mapper 对 SQLite 弱类型 lineage 值 fail-closed", async () =
 
     fixture.db.prepare(`update agent_run set parent_run_id = ?, parent_tool_item_id = ?, subtask_depth = ? where run_id = ?`)
       .run(parentRunId, 7, -2, childRunId);
-    assert.equal(findSubtaskRunByParentTool(fixture.db, { parentRunId, parentToolItemId: 7 })?.subtaskDepth, null);
+    assert.equal(findSubtaskRunByParentTool(fixture.db, { workspaceId: fixture.workspaceId, parentRunId, parentToolItemId: 7 })?.subtaskDepth, null);
   } finally {
     await closeFixture(fixture);
   }
@@ -545,11 +853,227 @@ test("agent run 会保存 subtask depth lineage，并按 parent tool 查询 chil
     assert.equal(record.parentToolItemId, 42);
 
     const byParentTool = findSubtaskRunByParentTool(fixture.db, {
+      workspaceId: fixture.workspaceId,
       parentRunId,
       parentToolItemId: 42
     });
     assert.equal(byParentTool?.runId, childRunId);
-    assert.equal(findSubtaskRunByParentTool(fixture.db, { parentRunId, parentToolItemId: 43 }), null);
+    assert.equal(findSubtaskRunByParentTool(fixture.db, { workspaceId: fixture.workspaceId, parentRunId, parentToolItemId: 43 }), null);
+  } finally {
+    await closeFixture(fixture);
+  }
+});
+
+test("subtask cascade 以 run lineage 为准，不依赖 parent tool 的 subtaskSessionId 回填", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  try {
+    const parent = await createSubtaskAnchor({ fixture, parentDepth: 0, sessionMode: "new" });
+    const started = await startSubtaskForAnchor({
+      fixture,
+      parentSessionId: parent.parentSession.id,
+      parentRunId: parent.parentRunId,
+      parentToolItemId: parent.toolItem.item.id,
+      session: { mode: "new" }
+    });
+    assert.equal(started.statusCode, 200, started.body);
+    const child = started.json() as { sessionId: string; runId: string };
+
+    fixture.db.prepare("update agent_context_item set tool_result_json = null, output_text = '' where id = ?").run(parent.toolItem.item.id);
+    updateRunState(fixture.db, {
+      workspaceId: fixture.workspaceId,
+      sessionId: parent.parentSession.id,
+      status: "running",
+      activeRunId: parent.parentRunId,
+      activeAssistantItemId: null,
+      runNoticeText: "",
+      updatedAt: Date.now(),
+      appliedItemId: parent.toolItem.item.id
+    });
+    const cancelled = await fixture.app.inject({
+      method: "POST",
+      url: `/api/agent/sessions/${parent.parentSession.id}/cancel`,
+      payload: { workspaceId: fixture.workspaceId }
+    });
+    assert.equal(cancelled.statusCode, 200, cancelled.body);
+    assert.equal(getRunRecord(fixture.db, child.runId)?.status, "cancelled");
+    assert.equal(getRunStateRow(fixture.db, fixture.workspaceId, child.sessionId).status, "idle");
+  } finally {
+    await closeFixture(fixture);
+  }
+});
+
+test("subtask orphan scanner 仅删除满足全部条件的空壳", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  try {
+    const service = new AgentService(fixture.ctx, fixture.app.log);
+    const now = Date.now();
+    const cases = [
+      { name: "young", age: 30 * 60 * 1000, forked: true, resource: "none", expected: true },
+      { name: "missing-fork", age: 25 * 60 * 60 * 1000, forked: false, resource: "none", expected: true },
+      { name: "has-run", age: 25 * 60 * 60 * 1000, forked: true, resource: "run", expected: true },
+      { name: "has-item-and-head", age: 25 * 60 * 60 * 1000, forked: true, resource: "item", expected: true },
+      { name: "eligible", age: 25 * 60 * 60 * 1000, forked: true, resource: "none", expected: false }
+    ];
+    for (const item of cases) {
+      const sessionId = `sess_orphan_${item.name}`;
+      createAgentSession(fixture.db, {
+        id: sessionId,
+        workspaceId: fixture.workspaceId,
+        title: item.name,
+        kind: "subtask",
+        createdAt: now - item.age,
+        forkedFromSessionId: item.forked ? "parent" : null,
+        forkedFromItemId: item.forked ? 1 : null
+      });
+      if (item.resource === "run") {
+        createRunRecord(fixture.db, {
+          runId: `run_orphan_${item.name}`,
+          workspaceId: fixture.workspaceId,
+          sessionId,
+          triggerItemId: 0,
+          agentId: "default",
+          providerId: "ppchat",
+          modelId: "gpt-5.2",
+          status: "completed",
+          createdAt: now - item.age
+        });
+      }
+      if (item.resource === "item") {
+        appendContextItem(fixture.db, {
+          workspaceId: fixture.workspaceId,
+          sessionId,
+          runId: null,
+          turnId: null,
+          step: null,
+          prevId: null,
+          kind: "system",
+          status: "completed",
+          output: { type: "system_text", text: "not empty" },
+          createdAt: now - item.age
+        });
+      }
+      service.scanAndCleanupSubtaskOrphansBestEffort(now);
+      assert.equal(getAgentSession(fixture.db, sessionId) != null, item.expected, item.name);
+    }
+
+    const recheckedSessionId = "sess_orphan_rechecked";
+    createAgentSession(fixture.db, {
+      id: recheckedSessionId,
+      workspaceId: fixture.workspaceId,
+      title: "rechecked",
+      kind: "subtask",
+      createdAt: now - 25 * 60 * 60 * 1000,
+      forkedFromSessionId: "parent",
+      forkedFromItemId: 1
+    });
+    createRunRecord(fixture.db, {
+      runId: "run_orphan_rechecked",
+      workspaceId: fixture.workspaceId,
+      sessionId: recheckedSessionId,
+      triggerItemId: 0,
+      agentId: "default",
+      providerId: "ppchat",
+      modelId: "gpt-5.2",
+      status: "completed",
+      createdAt: now
+    });
+    assert.equal(deleteEmptySubtaskSessionIfStillEmpty(fixture.db, {
+      workspaceId: fixture.workspaceId,
+      sessionId: recheckedSessionId,
+      olderThan: now - 24 * 60 * 60 * 1000,
+      requireForkLineage: true
+    }), 0, "deletion recheck must retain a newly non-empty candidate");
+  } finally {
+    await closeFixture(fixture);
+  }
+});
+
+test("subtask orphan scanner 的单条删除异常不会阻断后续候选", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  try {
+    const now = Date.now();
+    const blockedSessionId = "sess_orphan_blocked";
+    const deletableSessionId = "sess_orphan_deletable";
+    for (const sessionId of [blockedSessionId, deletableSessionId]) {
+      createAgentSession(fixture.db, {
+        id: sessionId,
+        workspaceId: fixture.workspaceId,
+        title: sessionId,
+        kind: "subtask",
+        createdAt: now - 25 * 60 * 60 * 1000,
+        forkedFromSessionId: "parent",
+        forkedFromItemId: 1
+      });
+    }
+    fixture.db.exec(`
+      create trigger fail_one_orphan_delete
+      before delete on agent_session
+      when old.id = '${blockedSessionId}'
+      begin
+        select raise(abort, 'injected orphan delete failure');
+      end;
+    `);
+
+    new AgentService(fixture.ctx, fixture.app.log).scanAndCleanupSubtaskOrphansBestEffort(now);
+
+    assert.ok(getAgentSession(fixture.db, blockedSessionId));
+    assert.equal(getAgentSession(fixture.db, deletableSessionId), null);
+  } finally {
+    await closeFixture(fixture);
+  }
+});
+
+test("startSubtask failure 仅补偿本次新建空壳，不删除 existing reuse", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  try {
+    const parent = await createSubtaskAnchor({ fixture, parentDepth: 0, sessionMode: "new" });
+    fixture.db.exec(`
+      create trigger fail_subtask_user_insert
+      before insert on agent_context_item
+      when new.kind = 'user' and new.session_id != '${parent.parentSession.id}'
+      begin
+        select raise(abort, 'injected subtask start failure');
+      end;
+    `);
+    const created = await startSubtaskForAnchor({
+      fixture,
+      parentSessionId: parent.parentSession.id,
+      parentRunId: parent.parentRunId,
+      parentToolItemId: parent.toolItem.item.id,
+      session: { mode: "new" }
+    });
+    assert.equal(created.statusCode, 500, created.body);
+    const emptySubtasks = fixture.db.prepare("select count(*) as count from agent_session where kind = 'subtask'").get() as { count: number };
+    assert.equal(emptySubtasks.count, 0);
+
+    fixture.db.exec("drop trigger fail_subtask_user_insert");
+    const existing = newSortableId("sess");
+    createAgentSession(fixture.db, {
+      id: existing,
+      workspaceId: fixture.workspaceId,
+      title: "existing reuse",
+      kind: "subtask",
+      createdAt: Date.now(),
+      forkedFromSessionId: null,
+      forkedFromItemId: null
+    });
+    fixture.db.exec(`
+      create trigger fail_existing_subtask_user_insert
+      before insert on agent_context_item
+      when new.kind = 'user' and new.session_id = '${existing}'
+      begin
+        select raise(abort, 'injected existing subtask failure');
+      end;
+    `);
+    const reused = await startSubtaskForAnchor({
+      fixture,
+      parentSessionId: parent.parentSession.id,
+      parentRunId: parent.parentRunId,
+      parentToolItemId: parent.toolItem.item.id,
+      session: { mode: "existing", sessionId: existing }
+    });
+    assert.equal(reused.statusCode, 500, reused.body);
+    assert.ok(getAgentSession(fixture.db, existing));
   } finally {
     await closeFixture(fixture);
   }
@@ -1309,6 +1833,7 @@ test("internal events/sse 返回 run-complete 事件 chunk", async () => {
 
 async function closeFixture(fixture: Fixture) {
   fixtures.delete(fixture);
+  fixtureByApp.delete(fixture.app);
   await fixture.app.close();
   fixture.db.close();
   await rmrf(fixture.dataDir);
@@ -2155,6 +2680,37 @@ async function createContextItemInternal(params: {
   status: "streaming" | "queued" | "running" | "completed" | "failed" | "cancelled";
   output: Record<string, unknown>;
 }) {
+  const fixture = fixtureByApp.get(params.app);
+  const existingRun = fixture && params.runId ? getRunRecord(fixture.db, params.runId) : null;
+  const previousState = fixture && params.runId ? getRunStateRow(fixture.db, params.workspaceId, params.sessionId) : null;
+  const temporaryRun = fixture && params.runId && !existingRun;
+  if (fixture && params.runId) {
+    if (temporaryRun) {
+      createRunRecord(fixture.db, {
+        runId: params.runId,
+        workspaceId: params.workspaceId,
+        sessionId: params.sessionId,
+        triggerItemId: 0,
+        agentId: "default",
+        providerId: "ppchat",
+        modelId: "gpt-5.2",
+        status: "running",
+        createdAt: Date.now()
+      });
+    } else if (existingRun) {
+      updateRunRecordStatus(fixture.db, { runId: existingRun.runId, status: "running", updatedAt: Date.now() });
+    }
+    updateRunState(fixture.db, {
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+      status: "running",
+      activeRunId: params.runId,
+      activeAssistantItemId: null,
+      updatedAt: Date.now(),
+      appliedItemId: previousState?.appliedItemId ?? 0
+    });
+  }
+
   const res = await params.app.inject({
     method: "POST",
     url: "/api/internal/agent/context-items",
@@ -2173,6 +2729,24 @@ async function createContextItemInternal(params: {
       output: params.output
     }
   });
+  if (fixture && params.runId && previousState) {
+    if (temporaryRun) {
+      fixture.db.prepare("delete from agent_run where run_id = ?").run(params.runId);
+    } else if (existingRun) {
+      updateRunRecordStatus(fixture.db, { runId: existingRun.runId, status: existingRun.status, updatedAt: Date.now() });
+    }
+    updateRunState(fixture.db, {
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+      status: previousState.status,
+      activeRunId: previousState.activeRunId,
+      activeAssistantItemId: previousState.activeAssistantItemId,
+      lastResponseTotalTokens: previousState.lastResponseTotalTokens,
+      runNoticeText: previousState.runNoticeText,
+      updatedAt: previousState.updatedAt,
+      appliedItemId: previousState.appliedItemId
+    });
+  }
   assert.equal(res.statusCode, 200, `create internal context-item failed: ${res.body}`);
   return res.json() as { item: { id: number } };
 }
@@ -2514,6 +3088,195 @@ async function getPromptContextInternal(params: {
     externalSkillRoots: Array<{ sourceType: "workspace" | "repo"; repoId?: string; rootDir: string; rootPath: string }>;
   };
 }
+
+test("read-side internal routes freeze token priority, body validation, and current not-found statuses", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+
+  const endpoints = [
+    {
+      path: "/api/internal/agent/execution-profile",
+      validBody: { workspaceId: fixture.workspaceId, sessionId: session.id, runId },
+      invalidBody: { workspaceId: "", sessionId: "", runId: "" },
+      missingBody: { workspaceId: fixture.workspaceId, sessionId: session.id, runId: "missing-run" }
+    },
+    {
+      path: "/api/internal/agent/prompt-context",
+      validBody: { workspaceId: fixture.workspaceId, sessionId: session.id, runId },
+      invalidBody: { workspaceId: "", sessionId: "", runId: "" },
+      missingBody: { workspaceId: fixture.workspaceId, sessionId: session.id, runId: "missing-run" }
+    },
+    {
+      path: "/api/internal/agent/messages-context",
+      validBody: { workspaceId: fixture.workspaceId, sessionId: session.id },
+      invalidBody: { workspaceId: "", sessionId: "" },
+      missingBody: { workspaceId: fixture.workspaceId, sessionId: "missing-session" }
+    }
+  ];
+
+  for (const endpoint of endpoints) {
+    const invalidToken = await fixture.app.inject({
+      method: "POST",
+      url: endpoint.path,
+      headers: { "x-awb-agent-internal-token": "invalid-token" },
+      payload: endpoint.invalidBody
+    });
+    assert.equal(invalidToken.statusCode, 401, `${endpoint.path} should authenticate before body validation`);
+
+    const invalidBody = await fixture.app.inject({
+      method: "POST",
+      url: endpoint.path,
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: endpoint.invalidBody
+    });
+    assert.equal(invalidBody.statusCode, 400, `${endpoint.path} should reject an invalid body after authentication`);
+
+    const missing = await fixture.app.inject({
+      method: "POST",
+      url: endpoint.path,
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: endpoint.missingBody
+    });
+    assert.equal(missing.statusCode, 404, `${endpoint.path} should preserve current missing-resource status`);
+
+    const workspaceMismatch = await fixture.app.inject({
+      method: "POST",
+      url: endpoint.path,
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: {
+        ...endpoint.validBody,
+        workspaceId: "workspace-mismatch"
+      }
+    });
+    assert.equal(workspaceMismatch.statusCode, 400, `${endpoint.path} should preserve workspace mismatch status`);
+    assert.deepEqual(workspaceMismatch.json(), { message: "workspaceId mismatch" });
+  }
+
+  const messagesWithoutRunId = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/messages-context",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { workspaceId: fixture.workspaceId, sessionId: session.id }
+  });
+  assert.equal(messagesWithoutRunId.statusCode, 200, messagesWithoutRunId.body);
+
+  const profile = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/execution-profile",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: endpoints[0]?.validBody
+  });
+  assert.equal(profile.statusCode, 200, profile.body);
+  const profileBody = profile.json() as any;
+  assert.equal(profileBody.resolved.runId, runId);
+  for (const key of ["agentId", "providerId", "modelId"]) {
+    assert.equal(typeof profileBody.resolved[key], "string");
+  }
+  assert.equal(typeof profileBody.agent?.id, "string");
+  assert.equal(typeof profileBody.provider?.id, "string");
+  assert.equal(typeof profileBody.provider?.name, "string");
+  assert.equal(typeof profileBody.provider?.npm, "string");
+  assert.equal(typeof profileBody.provider?.options, "object");
+  assert.equal(typeof profileBody.model?.id, "string");
+  assert.equal(typeof profileBody.model?.name, "string");
+  assert.equal(typeof profileBody.model?.contextWindowTokens, "number");
+  assert.equal(typeof profileBody.runtime?.modelIdleTimeoutMs, "number");
+  assert.equal(typeof profileBody.runtime?.modelTotalTimeoutMs, "number");
+  assert.equal(typeof profileBody.runtime?.modelRequestMaxRetries, "number");
+  assert.equal(typeof profileBody.runtime?.autoCompactThresholdPct, "number");
+  assert.ok(profileBody.vision === null || typeof profileBody.vision === "object");
+  assert.ok(profileBody.compaction === null || typeof profileBody.compaction === "object");
+
+  const prompt = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/prompt-context",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: endpoints[1]?.validBody
+  });
+  assert.equal(prompt.statusCode, 200, prompt.body);
+  const promptBody = prompt.json() as any;
+  assert.ok(promptBody.headItemId === null || typeof promptBody.headItemId === "number");
+  assert.equal(typeof promptBody.system, "string");
+  assert.equal(Array.isArray(promptBody.messages), true);
+  assert.equal(Array.isArray(promptBody.tools), true);
+  assert.equal(Array.isArray(promptBody.pendingTools), true);
+  assert.ok(promptBody.lastResponseTotalTokens === null || typeof promptBody.lastResponseTotalTokens === "number");
+  assert.ok(promptBody.uiLocale === null || promptBody.uiLocale === "zh-CN" || promptBody.uiLocale === "en-US");
+  assert.equal(Array.isArray(promptBody.externalSkillRoots), true);
+  for (const tool of promptBody.tools) {
+    assert.equal(typeof tool.name, "string");
+    assert.equal(typeof tool.description, "string");
+    assert.equal(typeof tool.inputSchema, "object");
+  }
+  for (const pending of promptBody.pendingTools) {
+    assert.equal(typeof pending.itemId, "number");
+    assert.equal(typeof pending.status, "string");
+    assert.equal(typeof pending.toolName, "string");
+    assert.equal(typeof pending.args, "object");
+  }
+  for (const root of promptBody.externalSkillRoots) {
+    assert.ok(root.sourceType === "workspace" || root.sourceType === "repo");
+    assert.equal(typeof root.rootDir, "string");
+    assert.equal(typeof root.rootPath, "string");
+  }
+});
+
+test("prompt-context reuses one run static promise and clears it when the run reaches a terminal status", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  await configureAgentDefaults(fixture.app);
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+  const service = createDirectAgentService(fixture) as any;
+  const request = { workspaceId: fixture.workspaceId, sessionId: session.id, runId };
+
+  await service.getPromptContextForRun(request);
+  const first = service.runPromptStaticCache.get(runId);
+  assert.ok(first, "first prompt-context call should populate the static cache");
+  const firstPromise = first.promise;
+  const firstExpiresAt = first.expiresAt;
+
+  await service.getPromptContextForRun(request);
+  const second = service.runPromptStaticCache.get(runId);
+  assert.ok(second, "second prompt-context call should retain the static cache");
+  assert.equal(second.promise, firstPromise, "same run should reuse the static prompt promise while it is fresh");
+  assert.ok(second.expiresAt >= firstExpiresAt, "same run cache access should preserve the current access-based expiry behavior");
+
+  service.completeRunFromWorker({
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    status: "completed"
+  });
+  assert.equal(service.runPromptStaticCache.has(runId), false, "terminal run completion should clear the static prompt cache");
+
+  await service.getPromptContextForRun(request);
+  const afterTerminal = service.runPromptStaticCache.get(runId);
+  assert.ok(afterTerminal, "current service still permits prompt retrieval for a terminal run");
+  assert.notEqual(afterTerminal.promise, firstPromise, "terminal cache clear should force a new static promise on the next retrieval");
+});
 
 async function compactContextInternal(params: {
   app: FastifyInstance;
@@ -3892,7 +4655,7 @@ test("agent cancel 会基于当前 active run 的 subtask 结果精确级联取�
     }
   });
 
-  await createContextItemInternal({
+  const activeSubtaskItem = await createContextItemInternal({
     app: fixture.app,
     internalToken: fixture.internalToken,
     workspaceId: fixture.workspaceId,
@@ -3912,6 +4675,9 @@ test("agent cancel 会基于当前 active run 的 subtask 结果精确级联取�
       result: { subtaskSessionId: activeChildId }
     }
   });
+  fixture.db.prepare(
+    "update agent_run set parent_run_id = ?, parent_tool_item_id = ? where run_id = ?"
+  ).run(parentRunId, activeSubtaskItem.item.id, activeChildRunId);
 
   await updateRunStateInternal({
     app: fixture.app,
@@ -8395,6 +9161,15 @@ test("agent prompt-context 对 apply_patch 保留 patchText 输入,并使用文�
     }
   });
 
+  updateRunState(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "running",
+    activeRunId: runId,
+    activeAssistantItemId: null,
+    updatedAt: Date.now(),
+    appliedItemId: 0
+  });
   await updateContextItemInternal({
     app: fixture.app,
     internalToken: fixture.internalToken,
@@ -8956,6 +9731,15 @@ test("write completed 后保留完整 args、瘦身 result 并支持 artifact �
     }
   });
 
+  updateRunState(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "running",
+    activeRunId: runId,
+    activeAssistantItemId: null,
+    updatedAt: Date.now(),
+    appliedItemId: 0
+  });
   await updateContextItemInternal({
     app: fixture.app,
     internalToken: fixture.internalToken,
@@ -9363,6 +10147,26 @@ test("write 在 failed 终态会保留完整 args.content", async () => {
   const session = await createSession(fixture.app, fixture.workspaceId);
   const runId = newSortableId("run");
   const writeContent = "失败时也必须保留完整写入意图\n".repeat(30);
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: Date.now()
+  });
+  updateRunState(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "running",
+    activeRunId: runId,
+    activeAssistantItemId: null,
+    updatedAt: Date.now(),
+    appliedItemId: 0
+  });
 
   const toolItem = await createContextItemInternal({
     app: fixture.app,

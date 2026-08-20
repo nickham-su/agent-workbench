@@ -19,6 +19,8 @@ function createProfile(tools: ExecutionProfile["agent"]["tools"]): ExecutionProf
       modelTotalTimeoutMs: 0,
       modelRequestMaxRetries: 0,
       autoCompactThresholdPct: 80,
+      maxSubtaskDepth: 1,
+      sessionTerminalSoundEnabled: true,
       visionModel: null,
       compactionModel: null,
       updatedAt: Date.now()

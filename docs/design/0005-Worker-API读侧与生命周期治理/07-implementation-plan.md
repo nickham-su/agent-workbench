@@ -198,9 +198,9 @@ apps/api/src/modules/agent/context-item-contract.test.ts
 1. 核对 run 表 parent 字段与现有查询；
 2. 让 child cascade/recovery/diagnostic 查询以 `parentRunId + parentToolItemId` 为准；
 3. 保留 `subtaskSessionId` 回填用于展示，不将其作为唯一条件；
-4. 实现启动 orphan scanner；
-5. 先标记 `>1h` 空壳 suspect；
-6. 仅对 `>24h`、双 forkedFrom 非空、删除前仍空壳的对象自动删除；
+4. 实现启动 orphan scanner，只枚举 `>1h`、head=null、无 run、无 context item 的空壳 suspect；
+5. 对 suspect 输出诊断；非-suspect 不属于 scanner 的诊断输出范围；
+6. 仅对 suspect 中 `>24h`、双 forkedFrom 非空、删除前仍空壳的对象自动删除；
 7. 在 start 失败/unique race 分支保存本次新建 session id，做局部二次确认和补偿；
 8. existing reuse 不能进入新建 session 补偿路径；
 9. 单个扫描异常不得阻塞启动。
@@ -231,17 +231,19 @@ apps/api/src/modules/agent/context-item-contract.test.ts
 3. 仅在 rollback skipped 时 tmp+rename 写 sidecar；
 4. 启动时 best-effort 扫描；
 5. 同 session clear/compact 前 best-effort reconcile；
-6. 所有目标 currentSize 精确等于 expectedSize 时才 truncate；
-7. 尺寸不符/缺失/记录不完整时保留 sidecar；
-8. 全部成功后删除 sidecar；
-9. 写 sidecar/reconcile 失败不影响 DB 主流程；
-10. 用窄测试 seam 覆盖 rollback skipped、size mismatch 和 sidecar 写失败。
+6. 仅对恰有一个 snapshot 的 sidecar，在 currentSize 精确等于 expectedSize 时 truncate；
+7. 多文件 sidecar 只 warning 并保留，不做自动 truncate；
+8. 单文件尺寸不符/缺失/记录不完整时保留 sidecar；
+9. 单文件 truncate 成功后删除 sidecar；
+10. 写 sidecar/reconcile 失败不影响 DB 主流程；
+11. 用窄测试 seam 覆盖 rollback skipped、size mismatch 和 sidecar 写失败。
 
 ### 审查重点
 
 - 是否改变 archive 文件格式；
 - 是否扩大 DB transaction；
 - 是否存在无尺寸检查 truncate；
+- 是否错误自动处理多文件 sidecar；
 - 是否日志泄露 archive 内容或绝对路径；
 - 是否把 sidecar 失败升级成主请求失败。
 

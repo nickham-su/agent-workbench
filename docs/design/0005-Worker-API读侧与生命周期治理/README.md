@@ -62,8 +62,8 @@ POST /api/internal/agent/messages-context
 - recover/cancel race 的 `cancel wins` 规则；
 - recover enqueue 前的最终 DB 检查；
 - subtask child 的 durable lineage 查询；
-- orphan subtask session 的保守双级治理；
-- compaction/clear 的 rollback skipped sidecar reconciliation。
+- 仅扫描并诊断超过 1 小时的空壳 subtask suspect，并对其中满足严格条件的对象做保守清理；
+- compaction/clear 的 rollback skipped sidecar reconciliation；自动处理仅限单文件 snapshot。
 
 ## 明确排除
 
@@ -120,7 +120,7 @@ POST /api/internal/agent/messages-context
 - 三个 read-side endpoint 的 method/path/request/response contract 已进入唯一 shared 入口；
 - API Route、Worker Client、响应校验和测试证据对齐；
 - cache、截断、错误状态、敏感字段业务语义未被无授权改变；
-- lifecycle fence、cancel wins、lineage、orphan、archive sidecar 均有实现或明确的批次验收证据；
+- lifecycle fence、cancel wins、lineage、空壳 orphan suspect、archive sidecar 均有实现或明确的批次验收证据；
 - 每个实施批次经过独立审查、问题修复、独立复审后才暂存；
 - 根 build/typecheck 与相关 Shared/API/Worker 测试通过；
 - 未引入排除项中的基础设施或状态机重构。

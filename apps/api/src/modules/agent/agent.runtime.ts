@@ -91,20 +91,23 @@ export class AgentRuntime implements AgentRuntimePort {
         },
         createdAt: ts
       });
+      if (assistant.item == null) {
+        return;
+      }
 
       this.service.updateRunStateFromWorker({
         workspaceId: run.workspaceId,
         sessionId: run.sessionId,
         status: "running",
         activeRunId: run.runId,
-        activeAssistantItemId: assistant.id,
+        activeAssistantItemId: assistant.item.id,
         updatedAt: ts
       });
 
       const latestUser = [...ctx.messages].reverse().find((item) => item.role === "user")?.content ?? "";
       const text = latestUser ? `本地回退模式已收到: ${latestUser}` : "本地回退模式已执行。";
       await this.service.updateContextItemFromWorker({
-        itemId: assistant.id,
+        itemId: assistant.item.id,
         status: "completed",
         output: {
           type: "assistant_text",

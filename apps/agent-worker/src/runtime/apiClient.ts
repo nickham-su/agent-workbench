@@ -1,8 +1,5 @@
 import type {
-  AgentToolName,
-  AgentUiLocale,
   PluginRuntimeSnapshotsResponse,
-  PluginToolCanonicalName,
   PluginToolRpcExecuteRequest,
   PluginToolRpcExecuteResponse,
   PluginToolRpcListRequest,
@@ -12,6 +9,15 @@ import { Value } from "@sinclair/typebox/value";
 import type { TSchema } from "@sinclair/typebox";
 import {
   AgentApiEndpoints,
+  type AgentApiExecutionProfileRequest,
+  type AgentApiExecutionProfileResponse,
+  AgentApiExecutionProfileResponseSchema,
+  type AgentApiMessagesContextRequest,
+  type AgentApiMessagesContextResponse,
+  AgentApiMessagesContextResponseSchema,
+  type AgentApiPromptContextRequest,
+  type AgentApiPromptContextResponse,
+  AgentApiPromptContextResponseSchema,
   type AgentApiCreateContextItemResponse,
   AgentApiCreateContextItemResponseSchema,
   type AgentApiUpdateContextItemResponse,
@@ -42,123 +48,36 @@ import {
 
 export class ApiConflictError extends Error {}
 
-type PromptTextPart = {
-  type: "text";
-  text: string;
-};
+const SENSITIVE_RESPONSE_DIAGNOSTIC_PATH_SEGMENTS = new Set([
+  "apikey",
+  "args",
+  "authorization",
+  "content",
+  "input",
+  "messages",
+  "output",
+  "prompt",
+  "result",
+  "runid",
+  "secret",
+  "sessionid",
+  "token"
+]);
 
-type PromptToolCallPart = {
-  type: "tool-call";
-  toolCallId: string;
-  toolName: string;
-  input: Record<string, unknown>;
-};
+function formatSafeResponseSchemaErrorPath(path: string) {
+  const normalized = String(path || "/");
+  const segments = normalized
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => segment.replace(/~1/g, "/").replace(/~0/g, "~").replace(/[-_]/g, "").toLowerCase());
+  if (normalized.length > 128 || segments.some((segment) => SENSITIVE_RESPONSE_DIAGNOSTIC_PATH_SEGMENTS.has(segment))) {
+    return "<redacted>";
+  }
+  return normalized;
+}
 
-type PromptToolResultPart = {
-  type: "tool-result";
-  toolCallId: string;
-  toolName: string;
-  output: unknown;
-};
-
-type PromptMessage =
-  | { role: "system"; content: string }
-  | { role: "user"; content: string | PromptTextPart[] }
-  | { role: "assistant"; content: string | Array<PromptTextPart | PromptToolCallPart> }
-  | { role: "tool"; content: PromptToolResultPart[] };
-
-export type MessagesContext = {
-  headItemId: number | null;
-  messages: PromptMessage[];
-  system: string;
-};
-
-export type ExecutionProfile = {
-  resolved: {
-    runId: string;
-    sessionId: string;
-    workspaceId: string;
-    agentId: string;
-    providerId: string;
-    modelId: string;
-  };
-  runtime: {
-    modelIdleTimeoutMs: number;
-    modelTotalTimeoutMs: number;
-    modelRequestMaxRetries: number;
-    autoCompactThresholdPct: number;
-    visionModel: { providerId: string; modelId: string } | null;
-    compactionModel: { providerId: string; modelId: string } | null;
-    updatedAt: number;
-  };
-  vision: {
-    source: "runtime_vision" | "agent_default_fallback";
-    provider: {
-      id: string;
-      name: string;
-      npm: "@ai-sdk/openai" | "@ai-sdk/openai-compatible" | "@ai-sdk/anthropic";
-      options: {
-        baseURL: string;
-        apiKey: string;
-        apiMode?: "responses" | "chatCompletions";
-      };
-    };
-    model: {
-      id: string;
-      providerModelId?: string;
-      name: string;
-      contextWindowTokens: number;
-      options?: Record<string, unknown>;
-    };
-  } | null;
-  compaction: {
-    source: "runtime_compaction";
-    provider: {
-      id: string;
-      name: string;
-      npm: "@ai-sdk/openai" | "@ai-sdk/openai-compatible" | "@ai-sdk/anthropic";
-      options: {
-        baseURL: string;
-        apiKey: string;
-        apiMode?: "responses" | "chatCompletions";
-      };
-    };
-    model: {
-      id: string;
-      providerModelId?: string;
-      name: string;
-      contextWindowTokens: number;
-      options?: Record<string, unknown>;
-    };
-  } | null;
-  agent: {
-    id: string;
-    name: string;
-    summary: string;
-    prompt: string;
-    tools: AgentToolName[];
-    mcpServers: string[];
-    pluginTools: PluginToolCanonicalName[];
-    defaultModel: { providerId: string; modelId: string } | null;
-  };
-  provider: {
-    id: string;
-    name: string;
-    npm: "@ai-sdk/openai" | "@ai-sdk/openai-compatible" | "@ai-sdk/anthropic";
-    options: {
-      baseURL: string;
-      apiKey: string;
-      apiMode?: "responses" | "chatCompletions";
-    };
-  };
-  model: {
-    id: string;
-    providerModelId?: string;
-    name: string;
-    contextWindowTokens: number;
-    options?: Record<string, unknown>;
-  };
-};
+export type MessagesContext = AgentApiMessagesContextResponse;
+export type ExecutionProfile = AgentApiExecutionProfileResponse;
 
 export type GitEnvPrepareResponse =
   | {
@@ -174,31 +93,7 @@ export type GitEnvPrepareResponse =
       error: string;
     };
 
-export type PromptContext = {
-  headItemId: number | null;
-  system: string;
-  messages: PromptMessage[];
-  tools: Array<{
-    name: string;
-    description: string;
-    inputSchema: Record<string, unknown>;
-  }>;
-  pendingTools: Array<{
-    itemId: number;
-    status: "queued" | "running" | "streaming" | "completed" | "failed" | "cancelled";
-    toolName: string;
-    toolCallId?: string;
-    args: Record<string, unknown>;
-  }>;
-  lastResponseTotalTokens: number | null;
-  uiLocale: AgentUiLocale | null;
-  externalSkillRoots: Array<{
-    sourceType: "workspace" | "repo";
-    repoId?: string;
-    rootDir: string;
-    rootPath: string;
-  }>;
-};
+export type PromptContext = AgentApiPromptContextResponse;
 
 export type AgentMcpSettingsPayload = {
   servers: Array<{
@@ -261,7 +156,7 @@ export class AgentApiClient {
     if (options.responseSchema && !Value.Check(options.responseSchema, parsed)) {
       const errors = [...Value.Errors(options.responseSchema, parsed)]
         .slice(0, 3)
-        .map((error) => `${error.path || "/"}: ${error.message}`)
+        .map((error) => `path=${formatSafeResponseSchemaErrorPath(error.path)} type=${error.type}`)
         .join("; ");
       const endpoint = options.responseEndpoint || path;
       if (this.params.responseValidation === "warn") {
@@ -283,7 +178,7 @@ export class AgentApiClient {
       responseSchema: AgentApiCreateContextItemResponseSchema,
       responseEndpoint: AgentApiEndpoints.createContextItem.path
     });
-    return res.item;
+    return res;
   }
 
   async updateContextItem(input: AgentApiUpdateContextItemRequest & {
@@ -321,57 +216,31 @@ export class AgentApiClient {
     });
   }
 
-  async getExecutionProfile(input: { workspaceId: string; sessionId: string; runId: string }) {
-    const response = await fetch(`${this.params.apiOrigin}/api/internal/agent/execution-profile`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-awb-agent-internal-token": this.params.internalToken
-      },
-      body: JSON.stringify(input)
+  async getExecutionProfile(input: AgentApiExecutionProfileRequest) {
+    return this.request<AgentApiExecutionProfileResponse>(AgentApiEndpoints.getExecutionProfile.path, {
+      method: AgentApiEndpoints.getExecutionProfile.method,
+      body: input,
+      responseSchema: AgentApiExecutionProfileResponseSchema,
+      responseEndpoint: AgentApiEndpoints.getExecutionProfile.path
     });
-
-    if (!response.ok) {
-      const txt = await response.text();
-      throw new Error(`get execution profile failed: ${response.status} ${txt}`);
-    }
-    return (await response.json()) as ExecutionProfile;
   }
 
-  async getPromptContext(input: { workspaceId: string; sessionId: string; runId: string }) {
-    const response = await fetch(`${this.params.apiOrigin}/api/internal/agent/prompt-context`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-awb-agent-internal-token": this.params.internalToken
-      },
-      body: JSON.stringify(input)
+  async getPromptContext(input: AgentApiPromptContextRequest) {
+    return this.request<AgentApiPromptContextResponse>(AgentApiEndpoints.getPromptContext.path, {
+      method: AgentApiEndpoints.getPromptContext.method,
+      body: input,
+      responseSchema: AgentApiPromptContextResponseSchema,
+      responseEndpoint: AgentApiEndpoints.getPromptContext.path
     });
-    if (!response.ok) {
-      const txt = await response.text();
-      throw new Error(`get prompt context failed: ${response.status} ${txt}`);
-    }
-    return (await response.json()) as PromptContext;
   }
 
-  async getMessagesContext(input: {
-    workspaceId: string;
-    sessionId: string;
-    appendMessage?: { role: "system" | "user"; content: string };
-  }) {
-    const response = await fetch(`${this.params.apiOrigin}/api/internal/agent/messages-context`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-awb-agent-internal-token": this.params.internalToken
-      },
-      body: JSON.stringify(input)
+  async getMessagesContext(input: AgentApiMessagesContextRequest) {
+    return this.request<AgentApiMessagesContextResponse>(AgentApiEndpoints.getMessagesContext.path, {
+      method: AgentApiEndpoints.getMessagesContext.method,
+      body: input,
+      responseSchema: AgentApiMessagesContextResponseSchema,
+      responseEndpoint: AgentApiEndpoints.getMessagesContext.path
     });
-    if (!response.ok) {
-      const txt = await response.text();
-      throw new Error(`get messages context failed: ${response.status} ${txt}`);
-    }
-    return (await response.json()) as MessagesContext;
   }
 
   async compactContext(input: AgentApiCompactContextRequest) {
