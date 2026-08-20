@@ -127,6 +127,19 @@ function assertPluginCaller(req: FastifyRequest, pluginId: string) {
   }
 }
 
+const AGENT_PRIMARY_SESSION_CREATE_BODY_KEYS = new Set(["workspaceId", "title"]);
+const AGENT_PRIMARY_SESSION_FORK_BODY_KEYS = new Set(["fromSessionId", "fromItemId", "mode", "title"]);
+
+function assertOnlyAllowedBodyKeys(req: FastifyRequest, allowedKeys: ReadonlySet<string>) {
+  const body = req.body;
+  if (body == null || typeof body !== "object" || Array.isArray(body)) return;
+  for (const key of Object.keys(body)) {
+    if (!allowedKeys.has(key)) {
+      throw new HttpError(400, "request body contains unknown field", "AGENT_REQUEST_UNKNOWN_FIELD");
+    }
+  }
+}
+
 export async function cancelRuntimeSessionsAfterDbConvergence(params: {
   runtime: AgentRuntimePort;
   sessionIds: string[];
@@ -205,11 +218,12 @@ export async function registerAgentRoutes(
         tags: ["agent"],
         body: AgentCreateSessionRequestSchema,
         response: { 201: AgentSessionRecordSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema }
-      }
+      },
+      preValidation: async (req) => assertOnlyAllowedBodyKeys(req, AGENT_PRIMARY_SESSION_CREATE_BODY_KEYS)
     },
     async (req, reply) => {
-      const body = req.body as { workspaceId: string; title?: string; kind?: "primary" | "subtask" };
-      const session = params.service.createSession(body);
+      const body = req.body as { workspaceId: string; title?: string };
+      const session = params.service.createPrimarySession(body);
       return reply.code(201).send(session);
     }
   );
@@ -226,7 +240,8 @@ export async function registerAgentRoutes(
           404: ErrorResponseSchema,
           500: ErrorResponseSchema
         }
-      }
+      },
+      preValidation: async (req) => assertOnlyAllowedBodyKeys(req, AGENT_PRIMARY_SESSION_FORK_BODY_KEYS)
     },
     async (req, reply) => {
       const body = req.body as {
@@ -234,9 +249,8 @@ export async function registerAgentRoutes(
         fromItemId: number;
         mode: "with_archive" | "visible_only";
         title?: string;
-        kind?: "primary" | "subtask";
       };
-      const session = await params.service.forkSession(body);
+      const session = await params.service.forkPrimarySession(body);
       return reply.code(201).send(session);
     }
   );
@@ -760,12 +774,13 @@ export async function registerAgentRoutes(
         tags: ["agent"],
         body: AgentInternalCreateSessionRequestSchema,
         response: { 201: AgentSessionRecordSchema, 400: ErrorResponseSchema, 401: ErrorResponseSchema, 404: ErrorResponseSchema }
-      }
+      },
+      preValidation: async (req) => assertOnlyAllowedBodyKeys(req, AGENT_PRIMARY_SESSION_CREATE_BODY_KEYS)
     },
     async (req, reply) => {
       assertInternalToken(req, params.service);
-      const body = req.body as { workspaceId: string; title?: string; kind?: "primary" | "subtask" };
-      const session = params.service.createSession(body);
+      const body = req.body as { workspaceId: string; title?: string };
+      const session = params.service.createPrimarySession(body);
       return reply.code(201).send(session);
     }
   );

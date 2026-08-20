@@ -80,3 +80,32 @@ test("PromptStaticAssembler removes subtask from static tools at the established
 
   assert.equal(result.tools.some((tool) => tool.name === "subtask"), false);
 });
+
+test("PromptStaticAssembler removes subtask when the run depth is unknown", async () => {
+  const assembler = new PromptStaticAssembler({
+    getGlobalPrompts: () => ({ items: [] }),
+    listAgentsInstructionSources: async () => [],
+    readAgentsInstruction: async () => null,
+    scanBuiltinSkills: async () => [],
+    listExternalSkillRoots: async () => [],
+    scanExternalSkills: async () => [],
+    warnExternalSkillScanFailure: () => undefined,
+    getMaxSubtaskDepth: () => 2,
+    listSubtaskAgents: () => [],
+    buildSystem: () => "",
+    buildOutputFormatInstruction: () => "",
+    buildSkillsInstruction: () => "",
+    buildSubtaskDescription: () => "",
+    describeTool: (name) => name,
+    getToolInputSchema: () => ({})
+  });
+
+  const result = await assembler.assemble({
+    workspaceId: "workspace",
+    run: { subtaskDepth: null },
+    profile: { agent: { name: "Agent", tools: ["subtask"] } },
+    uiLocale: null
+  });
+
+  assert.equal(result.tools.some((tool) => tool.name === "subtask"), false);
+});

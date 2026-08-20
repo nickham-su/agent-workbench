@@ -69,7 +69,6 @@ import {
   getLatestRunUiLocaleBySession,
   getLatestRunUiLocaleGlobal,
   getLatestTerminalAssistantTextByRunId,
-  getLatestRunRecordBySession,
   getLatestTerminalRunRecord,
   getLatestSessionItemId,
   getRunRecord,
@@ -2306,10 +2305,27 @@ export class AgentService {
     return getWorkspace(this.ctx.db, workspaceId);
   }
 
-  createSession(params: {
+  createPrimarySession(params: { workspaceId: string; title?: string }) {
+    return this.createSessionRecord({
+      workspaceId: params.workspaceId,
+      title: params.title,
+      kind: "primary"
+    });
+  }
+
+  private createSubtaskSessionInternal(params: {
     workspaceId: string;
     title?: string;
-    kind?: "primary" | "subtask";
+    forkedFromSessionId?: string | null;
+    forkedFromItemId?: number | null;
+  }) {
+    return this.createSessionRecord({ ...params, kind: "subtask" });
+  }
+
+  private createSessionRecord(params: {
+    workspaceId: string;
+    title?: string;
+    kind: "primary" | "subtask";
     forkedFromSessionId?: string | null;
     forkedFromItemId?: number | null;
   }) {
@@ -2317,13 +2333,12 @@ export class AgentService {
     const createdAt = nowMs();
     const sessionId = newSortableId("sess");
     const title = (params.title || "新会话").trim() || "新会话";
-    const kind = params.kind === "subtask" ? "subtask" : "primary";
 
     createAgentSession(this.ctx.db, {
       id: sessionId,
       workspaceId: params.workspaceId,
       title,
-      kind,
+      kind: params.kind,
       createdAt,
       forkedFromSessionId: params.forkedFromSessionId ?? null,
       forkedFromItemId: params.forkedFromItemId ?? null
@@ -2334,16 +2349,130 @@ export class AgentService {
     return session;
   }
 
-  async forkSession(params: AgentForkSessionRequest & { allowAnyKindBoundary?: boolean }) {
+  async forkPrimarySession(params: AgentForkSessionRequest) {
     const fromSession = getAgentSession(this.ctx.db, params.fromSessionId);
     if (!fromSession) throw new HttpError(404, "source session not found");
+    if (fromSession.kind !== "primary") {
+      throw new HttpError(400, "source session must be primary", "AGENT_FORK_SOURCE_KIND_INVALID");
+    }
+    return await this.cloneContextIntoNewSession({
+      fromSession,
+      fromItemId: params.fromItemId,
+      mode: params.mode,
+      title: params.title,
+      targetKind: "primary",
+      boundaryPolicy: "public-user-assistant"
+    });
+  }
+
+  private async cloneForkedSubtaskSessionInternal(params: {
+    fromSessionId: string;
+    fromItemId: number;
+    title?: string;
+  }) {
+    const fromSession = getAgentSession(this.ctx.db, params.fromSessionId);
+    if (!fromSession) throw new HttpError(404, "source session not found");
+    return await this.cloneContextIntoNewSession({
+      fromSession,
+      fromItemId: params.fromItemId,
+      mode: "visible_only",
+      title: params.title,
+      targetKind: "subtask",
+      boundaryPolicy: "internal-resolved"
+    });
+  }
+
+  /**
+   * Resolves only the session used by the internal subtask start domain.
+   * It intentionally owns subtask-session origin metadata and context-clone
+   * selection, while child Run depth/parent fields remain owned by
+   * startSubtaskRunFromWorker's Run creation transaction.
+   */
+  private async resolveSubtaskSessionForStart(params: {
+    workspaceId: string;
+    parentSessionId: string;
+    parentToolItemId: number;
+    session: AgentApiSubtaskStartRequest["session"];
+    subtaskTitleBase: string;
+    forkBoundaryItemId: number | null;
+    shouldUsePreforkSummary: boolean;
+  }) {
+    const requestedSessionId = String(params.session.sessionId || "").trim();
+    if (params.session.mode === "existing") {
+      if (!requestedSessionId) {
+        throw new HttpError(400, "existing sessionId is required", AgentSubtaskErrorCode.ExistingSessionRequired);
+      }
+      const session = getAgentSession(this.ctx.db, requestedSessionId);
+      if (!session) throw new HttpError(404, "subtask session not found", AgentSubtaskErrorCode.SessionNotFound);
+      if (session.workspaceId !== params.workspaceId) {
+        throw new HttpError(400, "subtask session workspace mismatch", AgentSubtaskErrorCode.WorkspaceMismatch);
+      }
+      if (session.kind !== "subtask") {
+        throw new HttpError(400, "existing session must be subtask", AgentSubtaskErrorCode.KindMismatch);
+      }
+      return { session, createdSessionId: null };
+    }
+
+    if (requestedSessionId) {
+      throw new HttpError(
+        400,
+        `sessionId is not allowed when mode=${params.session.mode}`,
+        AgentSubtaskErrorCode.SessionIdNotAllowed
+      );
+    }
+
+    if (params.session.mode === "new") {
+      const session = this.createSubtaskSessionInternal({
+        workspaceId: params.workspaceId,
+        title: params.subtaskTitleBase,
+        forkedFromSessionId: params.parentSessionId,
+        forkedFromItemId: params.parentToolItemId
+      });
+      return { session, createdSessionId: session.id };
+    }
+
+    if (params.shouldUsePreforkSummary) {
+      const session = this.createSubtaskSessionInternal({
+        workspaceId: params.workspaceId,
+        title: `${params.subtaskTitleBase} (fork)`,
+        forkedFromSessionId: params.parentSessionId,
+        forkedFromItemId: params.parentToolItemId
+      });
+      return { session, createdSessionId: session.id };
+    }
+
+    if (params.forkBoundaryItemId == null) {
+      const session = this.createSubtaskSessionInternal({
+        workspaceId: params.workspaceId,
+        title: `${params.subtaskTitleBase} (fork)`
+      });
+      return { session, createdSessionId: session.id };
+    }
+
+    const session = await this.cloneForkedSubtaskSessionInternal({
+      fromSessionId: params.parentSessionId,
+      fromItemId: params.forkBoundaryItemId,
+      title: `${params.subtaskTitleBase} (fork)`
+    });
+    return { session, createdSessionId: session.id };
+  }
+
+  private async cloneContextIntoNewSession(params: {
+    fromSession: AgentSessionRecord;
+    fromItemId: number;
+    mode: "with_archive" | "visible_only";
+    title?: string;
+    targetKind: "primary" | "subtask";
+    boundaryPolicy: "public-user-assistant" | "internal-resolved";
+  }) {
+    const fromSession = params.fromSession;
 
     const transcript = getSessionTranscriptItems(this.ctx.db, fromSession.workspaceId, fromSession.id);
     const targetIndex = transcript.findIndex((item) => item.id === params.fromItemId);
     if (targetIndex < 0) throw new HttpError(400, "invalid fromItemId");
     const target = transcript[targetIndex];
     if (!target) throw new HttpError(400, "invalid fromItemId");
-    if (params.allowAnyKindBoundary !== true && target.kind !== "user" && target.kind !== "assistant") {
+    if (params.boundaryPolicy === "public-user-assistant" && target.kind !== "user" && target.kind !== "assistant") {
       throw new HttpError(400, "fromItemId must be user or assistant", "AGENT_FORK_ITEM_KIND_INVALID");
     }
 
@@ -2388,7 +2517,7 @@ export class AgentService {
     const createdAt = nowMs();
     const newSessionId = newSortableId("sess");
     const title = (params.title || `${fromSession.title} (fork)`).trim() || `${fromSession.title} (fork)`;
-    const kind = params.kind === "subtask" ? "subtask" : "primary";
+    const kind = params.targetKind;
     const archiveAt = nowMs();
 
     const clonedIdMap = new Map<number, number>();
@@ -2564,7 +2693,6 @@ export class AgentService {
           createdAt
         });
 
-        const lineage = this.resolveRunLineageForSession(session);
         createRunRecord(this.ctx.db, {
           runId,
           workspaceId: session.workspaceId,
@@ -2574,9 +2702,9 @@ export class AgentService {
           providerId: profile.provider.id,
           modelId: profile.model.id,
           uiLocale,
-          subtaskDepth: lineage.subtaskDepth,
-          parentRunId: lineage.parentRunId,
-          parentToolItemId: lineage.parentToolItemId,
+          subtaskDepth: 0,
+          parentRunId: null,
+          parentToolItemId: null,
           status: "running",
           createdAt
         });
@@ -2744,7 +2872,6 @@ export class AgentService {
       const uiLocale = normalizeAgentUiLocale(params.body.uiLocale);
 
       const tx = this.ctx.db.transaction(() => {
-        const lineage = this.resolveRunLineageForSession(session);
         createRunRecord(this.ctx.db, {
           runId,
           workspaceId: session.workspaceId,
@@ -2754,7 +2881,7 @@ export class AgentService {
           providerId: profile.provider.id,
           modelId: profile.model.id,
           uiLocale,
-          subtaskDepth: lineage.subtaskDepth,
+          subtaskDepth: 0,
           parentRunId: null,
           parentToolItemId: null,
           status: "running",
@@ -3590,61 +3717,6 @@ export class AgentService {
     };
   }
 
-  /**
-   * Resolves lineage for a newly-created ordinary run.
-   * The most recent actual run is preferred; only a first run of a forked session
-   * consults the original source item. Unknown legacy lineage stays NULL.
-   */
-  private resolveRunLineageForSession(session: AgentSessionRecord) {
-    const latestRun = getLatestRunRecordBySession(this.ctx.db, {
-      workspaceId: session.workspaceId,
-      sessionId: session.id
-    });
-    if (latestRun) {
-      return {
-        subtaskDepth: latestRun.subtaskDepth,
-        parentRunId: null,
-        parentToolItemId: null
-      };
-    }
-
-    if (session.forkedFromSessionId == null || session.forkedFromItemId == null) {
-      return {
-        subtaskDepth: 0,
-        parentRunId: null,
-        parentToolItemId: null
-      };
-    }
-
-    const sourceItem = getTranscriptItemById(
-      this.ctx.db,
-      session.workspaceId,
-      session.forkedFromSessionId,
-      session.forkedFromItemId
-    );
-    if (sourceItem?.runId == null) {
-      return {
-        subtaskDepth: null,
-        parentRunId: null,
-        parentToolItemId: null
-      };
-    }
-
-    const sourceRun = getRunRecord(this.ctx.db, sourceItem.runId);
-    if (!sourceRun || sourceRun.workspaceId !== session.workspaceId) {
-      return {
-        subtaskDepth: null,
-        parentRunId: null,
-        parentToolItemId: null
-      };
-    }
-    return {
-      subtaskDepth: sourceRun.subtaskDepth,
-      parentRunId: sourceRun.runId,
-      parentToolItemId: null
-    };
-  }
-
   private toReusedSubtaskStartResponse(existingRun: ReturnType<typeof findSubtaskRunByParentTool>, workspacePath: string) {
     if (!existingRun) throw new Error("existing subtask run is required");
     const agent = getAgentSettings(this.ctx).agents.find((item) => item.id === existingRun.agentId);
@@ -3779,11 +3851,6 @@ export class AgentService {
       }
     }
 
-    const requestedSessionId = String(params.session.sessionId || "").trim();
-    if ((params.session.mode === "new" || params.session.mode === "fork") && requestedSessionId) {
-      throw new HttpError(400, `sessionId is not allowed when mode=${params.session.mode}`, AgentSubtaskErrorCode.SessionIdNotAllowed);
-    }
-
     const existingChildRun = findSubtaskRunByParentTool(this.ctx.db, {
       workspaceId: params.workspaceId,
       parentRunId: parentRun.runId,
@@ -3821,67 +3888,18 @@ export class AgentService {
     const shouldUsePreforkSummary = params.session.mode === "fork" && preforkSummaryText.length > 0;
 
 
-    let session = null as AgentSessionRecord | null;
-    let createdSessionId: string | null = null;
-    if (params.session.mode === "existing") {
-      const sessionId = requestedSessionId;
-      if (!sessionId) {
-        throw new HttpError(400, "existing sessionId is required", AgentSubtaskErrorCode.ExistingSessionRequired);
-      }
-      session = getAgentSession(this.ctx.db, sessionId);
-      if (!session) throw new HttpError(404, "subtask session not found", AgentSubtaskErrorCode.SessionNotFound);
-      if (session.workspaceId !== params.workspaceId) {
-        throw new HttpError(400, "subtask session workspace mismatch", AgentSubtaskErrorCode.WorkspaceMismatch);
-      }
-      if (session.kind !== "subtask") {
-        throw new HttpError(400, "existing session must be subtask", AgentSubtaskErrorCode.KindMismatch);
-      }
-    } else if (params.session.mode === "fork") {
-      if (requestedSessionId) {
-        throw new HttpError(400, "sessionId is not allowed when mode=fork", AgentSubtaskErrorCode.SessionIdNotAllowed);
-      }
-      if (shouldUsePreforkSummary) {
-        session = this.createSession({
-          workspaceId: params.workspaceId,
-          title: `${subtaskTitleBase} (fork)`,
-          kind: "subtask",
-          forkedFromSessionId: params.parentSessionId,
-          forkedFromItemId: params.parentToolItemId
-        });
-        createdSessionId = session.id;
-      } else if (forkBoundaryItemId == null) {
-        session = this.createSession({
-          workspaceId: params.workspaceId,
-          title: `${subtaskTitleBase} (fork)`,
-          kind: "subtask"
-        });
-        createdSessionId = session.id;
-      } else {
-        session = await this.forkSession({
-          fromSessionId: params.parentSessionId,
-          fromItemId: forkBoundaryItemId,
-          mode: "visible_only",
-          title: `${subtaskTitleBase} (fork)`,
-          kind: "subtask",
-          allowAnyKindBoundary: true
-        });
-        createdSessionId = session.id;
-      }
-    } else if (params.session.mode === "new") {
-      if (requestedSessionId) {
-        throw new HttpError(400, "sessionId is not allowed when mode=new", AgentSubtaskErrorCode.SessionIdNotAllowed);
-      }
-      session = this.createSession({
-        workspaceId: params.workspaceId,
-        title: `${subtaskTitleBase}`,
-        kind: "subtask",
-        forkedFromSessionId: params.parentSessionId,
-        forkedFromItemId: params.parentToolItemId
-      });
-      createdSessionId = session.id;
-    } else {
+    if (params.session.mode !== "new" && params.session.mode !== "fork" && params.session.mode !== "existing") {
       throw new HttpError(400, "invalid subtask session mode", AgentSubtaskErrorCode.SessionModeInvalid);
     }
+    const { session, createdSessionId } = await this.resolveSubtaskSessionForStart({
+      workspaceId: params.workspaceId,
+      parentSessionId: params.parentSessionId,
+      parentToolItemId: params.parentToolItemId,
+      session: params.session,
+      subtaskTitleBase,
+      forkBoundaryItemId,
+      shouldUsePreforkSummary
+    });
 
     try {
     const state = getRunState(this.ctx.db, session.workspaceId, session.id);

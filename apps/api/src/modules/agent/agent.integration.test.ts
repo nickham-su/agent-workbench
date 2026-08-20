@@ -4,6 +4,8 @@ import path from "node:path";
 import { afterEach, test } from "node:test";
 import Ajv from "ajv";
 import type { FastifyInstance } from "fastify";
+import { Type } from "@sinclair/typebox";
+import { HttpError } from "../../app/errors.js";
 import { createApp } from "../../app/createApp.js";
 import { openDb } from "../../infra/db/db.js";
 import type { Db } from "../../infra/db/db.js";
@@ -40,6 +42,16 @@ import type { AgentApiSubtaskStartRequest } from "@agent-workbench/shared/intern
 import { normalizeMaxSubtaskDepthForUpdate } from "../settings/settings.service.js";
 import { newSortableId } from "../../utils/ids.js";
 
+type SchemaOnlyProbe = {
+  observedBodies: unknown[];
+  handlerCalls: number;
+};
+
+type PreValidationProbe = {
+  observedBodies: unknown[];
+  handlerCalls: number;
+};
+
 type Fixture = {
   app: FastifyInstance;
   db: Db;
@@ -67,6 +79,8 @@ async function createFixture(options?: {
   enablePluginServices?: boolean;
   agentGlobalPromptsStored?: unknown;
   agentGlobalPromptsUpdatedAt?: number;
+  p0PreValidationProbe?: PreValidationProbe;
+  p0SchemaOnlyProbe?: SchemaOnlyProbe;
 }): Promise<Fixture> {
   const repoRoot = path.resolve(process.cwd(), "../..");
   const testsRoot = path.join(repoRoot, ".tmp-tests");
@@ -113,6 +127,45 @@ async function createFixture(options?: {
     agentTestFaults: options?.agentTestFaults
   };
   const app = await createApp(ctx);
+  const schemaOnlyProbe = options?.p0SchemaOnlyProbe;
+  if (schemaOnlyProbe) {
+    app.post(
+      "/__p0-schema-only-probe",
+      {
+        schema: {
+          body: Type.Object({ known: Type.String() }, { additionalProperties: false }),
+          response: { 204: Type.Null() }
+        }
+      },
+      async (req, reply) => {
+        schemaOnlyProbe.observedBodies.push(structuredClone(req.body));
+        schemaOnlyProbe.handlerCalls += 1;
+        return reply.code(204).send();
+      }
+    );
+  }
+  const probe = options?.p0PreValidationProbe;
+  if (probe) {
+    app.post(
+      "/__p0-prevalidation-probe",
+      {
+        schema: {
+          body: Type.Object({ known: Type.String() }, { additionalProperties: false }),
+          response: { 204: Type.Null() }
+        },
+        preValidation: async (req) => {
+          probe.observedBodies.push(structuredClone(req.body));
+          if (typeof req.body === "object" && req.body != null && "unexpected" in req.body) {
+            throw new HttpError(400, "unexpected body key", "P0_UNKNOWN_BODY_KEY");
+          }
+        }
+      },
+      async (_req, reply) => {
+        probe.handlerCalls += 1;
+        return reply.code(204).send();
+      }
+    );
+  }
   const workspaceId = newSortableId("ws");
   const workspaceDirName = newSortableId("workspace");
   const workspacePath = workspaceRoot(dataDir, workspaceDirName);
@@ -772,7 +825,7 @@ test("agent run mapper 对 SQLite 弱类型 lineage 值 fail-closed", async () =
   }
 });
 
-test("普通继续按最近实际 run 继承 depth，即使该 run 尚未 terminal", async () => {
+test("primary 普通继续会重置 depth 和 parent 字段，即使最近 run 尚未 terminal", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   await configureAgentDefaults(fixture.app);
   const session = await createSession(fixture.app, fixture.workspaceId);
@@ -811,7 +864,44 @@ test("普通继续按最近实际 run 继承 depth，即使该 run 尚未 termin
     text: "continue from latest run",
     clientRequestId: "latest-actual-run-depth"
   });
-  assert.equal(getRunRecord(fixture.db, next.runId)?.subtaskDepth, 2);
+  const nextRun = getRunRecord(fixture.db, next.runId);
+  assert.equal(nextRun?.subtaskDepth, 0);
+  assert.equal(nextRun?.parentRunId, null);
+  assert.equal(nextRun?.parentToolItemId, null);
+});
+
+test("primary latest Run depth 为 null 时，下一条消息自愈为独立执行根", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  await configureAgentDefaults(fixture.app);
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const createdAt = Date.now();
+  createRunRecord(fixture.db, {
+    runId: "run_latest_depth_unknown",
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    subtaskDepth: null,
+    parentRunId: "legacy_parent_run",
+    parentToolItemId: null,
+    status: "completed",
+    createdAt
+  });
+
+  const next = await sendMessage(fixture.app, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "recover from unknown latest depth",
+    clientRequestId: "latest-null-depth-recovery"
+  });
+  const nextRun = getRunRecord(fixture.db, next.runId);
+  assert.equal(nextRun?.subtaskDepth, 0);
+  assert.equal(nextRun?.parentRunId, null);
+  assert.equal(nextRun?.parentToolItemId, null);
+  assert.equal(getRunRecord(fixture.db, "run_latest_depth_unknown")?.subtaskDepth, null);
+  assert.equal(getRunRecord(fixture.db, "run_latest_depth_unknown")?.parentRunId, "legacy_parent_run");
 });
 
 test("agent run 会保存 subtask depth lineage，并按 parent tool 查询 child run", async () => {
@@ -1661,6 +1751,10 @@ test("internal runs/trigger 支持 clientRequestId 去重", async () => {
   assert.equal(secondBody.deduplicated, true);
   assert.equal(secondBody.runId, firstBody.runId);
   assert.equal(secondBody.messageItemId, firstBody.messageItemId);
+  const run = getRunRecord(fixture.db, firstBody.runId);
+  assert.equal(run?.subtaskDepth, 0);
+  assert.equal(run?.parentRunId, null);
+  assert.equal(run?.parentToolItemId, null);
 });
 
 test("internal runs/:runId/final-text 返回最终 assistant 文本", async () => {
@@ -1853,6 +1947,27 @@ async function createSession(app: FastifyInstance, workspaceId: string) {
   });
   assert.equal(res.statusCode, 201, `create session failed: ${res.body}`);
   return res.json() as { id: string };
+}
+
+function createSubtaskSessionForTest(fixture: Fixture, params?: {
+  title?: string;
+  forkedFromSessionId?: string | null;
+  forkedFromItemId?: number | null;
+}) {
+  const createdAt = Date.now();
+  const id = newSortableId("sess");
+  createAgentSession(fixture.db, {
+    id,
+    workspaceId: fixture.workspaceId,
+    title: params?.title || "it-subtask-session",
+    kind: "subtask",
+    createdAt,
+    forkedFromSessionId: params?.forkedFromSessionId ?? null,
+    forkedFromItemId: params?.forkedFromItemId ?? null
+  });
+  const session = getAgentSession(fixture.db, id);
+  assert.ok(session, "test subtask session should exist");
+  return session;
 }
 
 async function sendMessage(app: FastifyInstance, params: { sessionId: string; workspaceId: string; text: string; clientRequestId: string }) {
@@ -2217,65 +2332,38 @@ test("subtask start stable validation codes are precise at Service boundaries", 
   });
 });
 
-test("agent run depth 为 root、继续和 compaction 传播", async () => {
-  const fixture = await createFixture();
-  await configureAgentDefaults(fixture.app);
+test("primary compact Run 固定写入 depth 0 和双空 parent 字段", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 1 });
   const session = await createSession(fixture.app, fixture.workspaceId);
-  const first = await sendMessage(fixture.app, {
+  const seed = await sendMessage(fixture.app, {
     sessionId: session.id,
     workspaceId: fixture.workspaceId,
-    text: "first",
-    clientRequestId: "depth-root"
+    text: "context for compaction",
+    clientRequestId: "primary-compact-seed"
   });
-  const firstRun = getRunRecord(fixture.db, first.runId);
-  assert.equal(firstRun?.subtaskDepth, 0);
-  assert.equal(firstRun?.parentRunId, null);
-  assert.equal(firstRun?.parentToolItemId, null);
-  updateRunRecordStatus(fixture.db, { runId: first.runId, status: "completed", updatedAt: Date.now() });
-  setRunStateIdle(fixture.db, {
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    updatedAt: Date.now(),
-    appliedItemId: first.messageItemId
-  });
+  await waitRunIdle(fixture.app, session.id);
 
-  const second = await sendMessage(fixture.app, {
-    sessionId: session.id,
-    workspaceId: fixture.workspaceId,
-    text: "second",
-    clientRequestId: "depth-continue"
+  // Fixture 已在 worker-disabled 时安装本地回退 runtime；打开 service gate 以覆盖真实 compact Run 写入。
+  fixture.ctx.agentWorkerEnabled = true;
+  fixture.db.prepare("update agent_run set subtask_depth = ?, parent_run_id = ?, parent_tool_item_id = ? where run_id = ?")
+    .run(2, "legacy_parent", null, seed.runId);
+  const compactRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/compact`,
+    payload: {
+      workspaceId: fixture.workspaceId,
+      clientRequestId: "primary-compact-run"
+    }
   });
-  assert.equal(getRunRecord(fixture.db, second.runId)?.subtaskDepth, 0);
-  updateRunRecordStatus(fixture.db, { runId: second.runId, status: "completed", updatedAt: Date.now() });
-  setRunStateIdle(fixture.db, {
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    updatedAt: Date.now(),
-    appliedItemId: second.messageItemId
-  });
-
-  const compactRunId = newSortableId("run");
-  createRunRecord(fixture.db, {
-    runId: compactRunId,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    triggerItemId: second.messageItemId,
-    agentId: "default",
-    providerId: "ppchat",
-    modelId: "gpt-5.2",
-    subtaskDepth: getLatestTerminalRunRecord(fixture.db, { workspaceId: fixture.workspaceId, sessionId: session.id })?.subtaskDepth ?? null,
-    parentRunId: null,
-    parentToolItemId: null,
-    status: "running",
-    createdAt: Date.now()
-  });
-  const compactRun = getRunRecord(fixture.db, compactRunId);
-  assert.equal(compactRun?.subtaskDepth, 0);
-  assert.equal(compactRun?.parentRunId, null);
-  assert.equal(compactRun?.parentToolItemId, null);
+  assert.equal(compactRes.statusCode, 201, compactRes.body);
+  const compact = compactRes.json() as { runId: string };
+  const run = getRunRecord(fixture.db, compact.runId);
+  assert.equal(run?.subtaskDepth, 0);
+  assert.equal(run?.parentRunId, null);
+  assert.equal(run?.parentToolItemId, null);
 });
 
-test("普通 UI fork 首 run 继承来源 depth，来源不明时为 unknown", async () => {
+test("primary 上下文 fork 创建独立执行根，不携带来源的 subtask 嵌套深度", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   await configureAgentDefaults(fixture.app);
   const source = await createSession(fixture.app, fixture.workspaceId);
@@ -2318,10 +2406,38 @@ test("普通 UI fork 首 run 继承来源 depth，来源不明时为 unknown", a
     text: "fork continuation",
     clientRequestId: "fork-depth"
   });
-  const inherited = getRunRecord(fixture.db, forkRun.runId);
-  assert.equal(inherited?.subtaskDepth, 2);
-  assert.equal(inherited?.parentRunId, sourceRunId);
-  assert.equal(inherited?.parentToolItemId, null);
+  const firstForkRun = getRunRecord(fixture.db, forkRun.runId);
+  assert.equal(firstForkRun?.subtaskDepth, 0);
+  assert.equal(firstForkRun?.parentRunId, null);
+  assert.equal(firstForkRun?.parentToolItemId, null);
+
+  const sourceItems = getSessionTranscriptItems(fixture.db, fixture.workspaceId, source.id);
+  const forkedItems = getSessionTranscriptItems(fixture.db, fixture.workspaceId, forked.id);
+  assert.equal(sourceItems.length, 1);
+  assert.equal(sourceItems[0]?.runId, sourceRunId);
+  assert.equal(forkedItems.length >= 1, true);
+  assert.equal(forkedItems[0]?.kind, "user");
+  assert.equal(forkedItems[0]?.runId, null, "copied context must not claim source run ownership");
+  assert.equal(forkedItems[0]?.turnId, null);
+  assert.equal(forkedItems[0]?.step, null);
+
+  const secondForkRes = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions/fork",
+    payload: { fromSessionId: forked.id, fromItemId: forkedItems[0]?.id, mode: "visible_only" }
+  });
+  assert.equal(secondForkRes.statusCode, 201, secondForkRes.body);
+  const secondFork = secondForkRes.json() as { id: string };
+  const secondForkRun = await sendMessage(fixture.app, {
+    sessionId: secondFork.id,
+    workspaceId: fixture.workspaceId,
+    text: "second fork continuation",
+    clientRequestId: "fork-depth-second"
+  });
+  const secondForkLineage = getRunRecord(fixture.db, secondForkRun.runId);
+  assert.equal(secondForkLineage?.subtaskDepth, 0);
+  assert.equal(secondForkLineage?.parentRunId, null);
+  assert.equal(secondForkLineage?.parentToolItemId, null);
 
   const unknownSource = await createSession(fixture.app, fixture.workspaceId);
   const unknownItem = await createContextItemInternal({
@@ -2351,7 +2467,7 @@ test("普通 UI fork 首 run 继承来源 depth，来源不明时为 unknown", a
     clientRequestId: "fork-depth-unknown"
   });
   const unknownLineage = getRunRecord(fixture.db, unknownForkRun.runId);
-  assert.equal(unknownLineage?.subtaskDepth, null);
+  assert.equal(unknownLineage?.subtaskDepth, 0);
   assert.equal(unknownLineage?.parentRunId, null);
   assert.equal(unknownLineage?.parentToolItemId, null);
 
@@ -2389,9 +2505,148 @@ test("普通 UI fork 首 run 继承来源 depth，来源不明时为 unknown", a
   const nullDepthFork = nullDepthForkRes.json() as { id: string };
   const nullDepthForkRun = await sendMessage(fixture.app, { sessionId: nullDepthFork.id, workspaceId: fixture.workspaceId, text: "keep unknown lineage", clientRequestId: "fork-depth-null-source" });
   const nullDepthLineage = getRunRecord(fixture.db, nullDepthForkRun.runId);
-  assert.equal(nullDepthLineage?.subtaskDepth, null);
-  assert.equal(nullDepthLineage?.parentRunId, nullDepthRunId);
+  assert.equal(nullDepthLineage?.subtaskDepth, 0);
+  assert.equal(nullDepthLineage?.parentRunId, null);
   assert.equal(nullDepthLineage?.parentToolItemId, null);
+});
+
+test("public 和 generic internal create 固定创建 primary，并拒绝未知字段", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+
+  const publicCreate = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions",
+    payload: { workspaceId: fixture.workspaceId, title: "public-primary" }
+  });
+  assert.equal(publicCreate.statusCode, 201, publicCreate.body);
+  assert.equal((publicCreate.json() as { kind: string }).kind, "primary");
+
+  const internalCreate = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/create",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { workspaceId: fixture.workspaceId, title: "internal-primary" }
+  });
+  assert.equal(internalCreate.statusCode, 201, internalCreate.body);
+  assert.equal((internalCreate.json() as { kind: string }).kind, "primary");
+
+  const sessionCountBeforeRejected = fixture.db.prepare("select count(*) as count from agent_session").get() as { count: number };
+  const rejectedRequests = [
+    { name: "public primary kind", url: "/api/agent/sessions", headers: {}, payload: { workspaceId: fixture.workspaceId, kind: "primary" } },
+    { name: "public subtask kind", url: "/api/agent/sessions", headers: {}, payload: { workspaceId: fixture.workspaceId, kind: "subtask" } },
+    { name: "public arbitrary field", url: "/api/agent/sessions", headers: {}, payload: { workspaceId: fixture.workspaceId, unexpected: true } },
+    { name: "internal primary kind", url: "/api/internal/agent/sessions/create", headers: { "x-awb-agent-internal-token": fixture.internalToken }, payload: { workspaceId: fixture.workspaceId, kind: "primary" } },
+    { name: "internal subtask kind", url: "/api/internal/agent/sessions/create", headers: { "x-awb-agent-internal-token": fixture.internalToken }, payload: { workspaceId: fixture.workspaceId, kind: "subtask" } },
+    { name: "internal arbitrary field", url: "/api/internal/agent/sessions/create", headers: { "x-awb-agent-internal-token": fixture.internalToken }, payload: { workspaceId: fixture.workspaceId, unexpected: true } }
+  ];
+  for (const rejected of rejectedRequests) {
+    const response = await fixture.app.inject({ method: "POST", url: rejected.url, headers: rejected.headers, payload: rejected.payload });
+    assert.equal(response.statusCode, 400, `${rejected.name}: ${response.body}`);
+    assert.deepEqual(response.json(), { message: "request body contains unknown field", code: "AGENT_REQUEST_UNKNOWN_FIELD" });
+    const sessionCountAfterRejected = fixture.db.prepare("select count(*) as count from agent_session").get() as { count: number };
+    assert.equal(sessionCountAfterRejected.count, sessionCountBeforeRejected.count, `${rejected.name} must not create a session`);
+  }
+});
+
+test("public fork 固定创建 primary，并拒绝非 primary source 和未知字段", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const source = await createSession(fixture.app, fixture.workspaceId);
+  const sourceItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: source.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "primary fork source" }
+  });
+  const accepted = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions/fork",
+    payload: { fromSessionId: source.id, fromItemId: sourceItem.item.id, mode: "visible_only" }
+  });
+  assert.equal(accepted.statusCode, 201, accepted.body);
+  assert.equal((accepted.json() as { kind: string }).kind, "primary");
+
+  const sessionCountBeforeRejected = fixture.db.prepare("select count(*) as count from agent_session").get() as { count: number };
+  const rejectedRequests = [
+    { name: "fork primary kind", payload: { fromSessionId: source.id, fromItemId: sourceItem.item.id, mode: "visible_only", kind: "primary" } },
+    { name: "fork subtask kind", payload: { fromSessionId: source.id, fromItemId: sourceItem.item.id, mode: "visible_only", kind: "subtask" } },
+    { name: "fork arbitrary field", payload: { fromSessionId: source.id, fromItemId: sourceItem.item.id, mode: "visible_only", unexpected: true } }
+  ];
+  for (const rejected of rejectedRequests) {
+    const response = await fixture.app.inject({ method: "POST", url: "/api/agent/sessions/fork", payload: rejected.payload });
+    assert.equal(response.statusCode, 400, `${rejected.name}: ${response.body}`);
+    assert.deepEqual(response.json(), { message: "request body contains unknown field", code: "AGENT_REQUEST_UNKNOWN_FIELD" });
+    const count = fixture.db.prepare("select count(*) as count from agent_session").get() as { count: number };
+    assert.equal(count.count, sessionCountBeforeRejected.count, `${rejected.name} must not create a target session`);
+  }
+
+  const subtaskSource = createSubtaskSessionForTest(fixture);
+  const subtaskItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: subtaskSource.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "subtask fork source" }
+  });
+  const sourceKindRejected = await fixture.app.inject({
+    method: "POST",
+    url: "/api/agent/sessions/fork",
+    payload: { fromSessionId: subtaskSource.id, fromItemId: subtaskItem.item.id, mode: "visible_only" }
+  });
+  assert.equal(sourceKindRejected.statusCode, 400, sourceKindRejected.body);
+  assert.deepEqual(sourceKindRejected.json(), { message: "source session must be primary", code: "AGENT_FORK_SOURCE_KIND_INVALID" });
+  const countAfterSourceKindRejected = fixture.db.prepare("select count(*) as count from agent_session").get() as { count: number };
+  assert.equal(countAfterSourceKindRejected.count, sessionCountBeforeRejected.count + 1, "source-kind rejection must not create a target session");
+});
+
+test("P0 baseline: endpoint-local preValidation sees unknown keys before schema stripping", async () => {
+  const probe: PreValidationProbe = { observedBodies: [], handlerCalls: 0 };
+  const fixture = await createFixture({ agentWorkerConcurrency: 0, p0PreValidationProbe: probe });
+
+  const rejected = await fixture.app.inject({
+    method: "POST",
+    url: "/__p0-prevalidation-probe",
+    payload: { known: "value", unexpected: "value" }
+  });
+  assert.equal(rejected.statusCode, 400, rejected.body);
+  assert.deepEqual(rejected.json(), { message: "unexpected body key", code: "P0_UNKNOWN_BODY_KEY" });
+  assert.deepEqual(probe.observedBodies, [{ known: "value", unexpected: "value" }]);
+  assert.equal(probe.handlerCalls, 0);
+
+  const accepted = await fixture.app.inject({
+    method: "POST",
+    url: "/__p0-prevalidation-probe",
+    payload: { known: "value" }
+  });
+  assert.equal(accepted.statusCode, 204, accepted.body);
+  assert.equal(probe.handlerCalls, 1);
+});
+
+test("P0 baseline: schema additionalProperties:false alone strips unknown body keys and permits the request", async () => {
+  const probe: SchemaOnlyProbe = { observedBodies: [], handlerCalls: 0 };
+  const fixture = await createFixture({ agentWorkerConcurrency: 0, p0SchemaOnlyProbe: probe });
+
+  const response = await fixture.app.inject({
+    method: "POST",
+    url: "/__p0-schema-only-probe",
+    payload: { known: "value", unexpected: "value" }
+  });
+
+  assert.equal(response.statusCode, 204, response.body);
+  assert.equal(probe.handlerCalls, 1);
+  assert.deepEqual(probe.observedBodies, [{ known: "value" }]);
 });
 
 test("subtask start 按 depth 执行限制、mode 和轻量幂等", async () => {
@@ -2414,21 +2669,23 @@ test("subtask start 按 depth 执行限制、mode 和轻量幂等", async () => 
       session: { mode }
     });
     assert.equal(res.statusCode, 200, res.body);
-    const body = res.json() as { runId: string; reused: boolean };
+    const body = res.json() as { sessionId: string; runId: string; reused: boolean };
     assert.equal(body.reused, false);
     const child = getRunRecord(fixture.db, body.runId);
     assert.equal(child?.subtaskDepth, 1);
     assert.equal(child?.parentRunId, parent.parentRunId);
     assert.equal(child?.parentToolItemId, parent.toolItem.item.id);
+    const session = getAgentSession(fixture.db, body.sessionId);
+    assert.equal(session?.kind, "subtask");
+    assert.equal(session?.forkedFromSessionId, mode === "new" ? parent.parentSession.id : null);
+    assert.equal(session?.forkedFromItemId, mode === "new" ? parent.toolItem.item.id : null);
   }
 
-  const existingSessionRes = await fixture.app.inject({
-    method: "POST",
-    url: "/api/agent/sessions",
-    payload: { workspaceId: fixture.workspaceId, title: "existing", kind: "subtask" }
+  const existingSession = createSubtaskSessionForTest(fixture, {
+    title: "existing",
+    forkedFromSessionId: "original-parent",
+    forkedFromItemId: 7
   });
-  assert.equal(existingSessionRes.statusCode, 201, existingSessionRes.body);
-  const existingSession = existingSessionRes.json() as { id: string };
   const existingParent = await createSubtaskAnchor({ fixture, parentDepth: 1, sessionMode: "existing" });
   const existingRes = await startSubtaskForAnchor({
     fixture,
@@ -2439,7 +2696,13 @@ test("subtask start 按 depth 执行限制、mode 和轻量幂等", async () => 
   });
   assert.equal(existingRes.statusCode, 200, existingRes.body);
   assert.equal((existingRes.json() as { agentName: string }).agentName, "default");
-  assert.equal(getRunRecord(fixture.db, (existingRes.json() as { runId: string }).runId)?.subtaskDepth, 2);
+  const existingRun = getRunRecord(fixture.db, (existingRes.json() as { runId: string }).runId);
+  assert.equal(existingRun?.subtaskDepth, 2);
+  assert.equal(existingRun?.parentRunId, existingParent.parentRunId);
+  assert.equal(existingRun?.parentToolItemId, existingParent.toolItem.item.id);
+  const existingSessionAfter = getAgentSession(fixture.db, existingSession.id);
+  assert.equal(existingSessionAfter?.forkedFromSessionId, "original-parent");
+  assert.equal(existingSessionAfter?.forkedFromItemId, 7);
 
   const duplicate = await startSubtaskForAnchor({
     fixture,
@@ -2453,18 +2716,13 @@ test("subtask start 按 depth 执行限制、mode 和轻量幂等", async () => 
   assert.equal((duplicate.json() as { reused: boolean }).reused, true);
   assert.equal((duplicate.json() as { runId: string }).runId, (existingRes.json() as { runId: string }).runId);
 
-  const differentExistingSessionRes = await fixture.app.inject({
-    method: "POST",
-    url: "/api/agent/sessions",
-    payload: { workspaceId: fixture.workspaceId, title: "different-existing", kind: "subtask" }
-  });
-  assert.equal(differentExistingSessionRes.statusCode, 201, differentExistingSessionRes.body);
+  const differentExistingSession = createSubtaskSessionForTest(fixture, { title: "different-existing" });
   const mismatch = await startSubtaskForAnchor({
     fixture,
     parentSessionId: existingParent.parentSession.id,
     parentRunId: existingParent.parentRunId,
     parentToolItemId: existingParent.toolItem.item.id,
-    session: { mode: "existing", sessionId: (differentExistingSessionRes.json() as { id: string }).id }
+    session: { mode: "existing", sessionId: differentExistingSession.id }
   });
   assert.equal(mismatch.statusCode, 409);
   assert.equal(mismatch.json().code, "AGENT_SUBTASK_EXISTING_SESSION_MISMATCH");
@@ -2472,6 +2730,35 @@ test("subtask start 按 depth 执行限制、mode 和轻量幂等", async () => 
     mismatch.json().message,
     "existing subtask session does not match the previously created child run"
   );
+});
+
+test("subtask fork 无 boundary 时保留双空 metadata 并写入 guard→prompt", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  await configureAgentDefaults(fixture.app);
+  const parent = await createSubtaskAnchor({ fixture, parentDepth: 0, sessionMode: "fork" });
+  fixture.db.prepare("update agent_context_item set prev_id = null where id = ?").run(parent.toolItem.item.id);
+
+  const res = await startSubtaskForAnchor({
+    fixture,
+    parentSessionId: parent.parentSession.id,
+    parentRunId: parent.parentRunId,
+    parentToolItemId: parent.toolItem.item.id,
+    session: { mode: "fork" }
+  });
+  assert.equal(res.statusCode, 200, res.body);
+  const started = res.json() as { sessionId: string; runId: string };
+  const session = getAgentSession(fixture.db, started.sessionId);
+  assert.equal(session?.kind, "subtask");
+  assert.equal(session?.forkedFromSessionId, null);
+  assert.equal(session?.forkedFromItemId, null);
+
+  const items = getSessionTranscriptItems(fixture.db, fixture.workspaceId, started.sessionId);
+  assert.equal(items.length, 2);
+  assert.equal(items[0]?.kind, "system");
+  assert.equal(String((items[0]?.output as { text?: string }).text || "").includes("All history before this system message was copied"), true);
+  assert.equal(items[0]?.runId, null);
+  assert.equal(items[1]?.kind, "user");
+  assert.equal(items[1]?.runId, started.runId);
 });
 
 test("subtask start 对 unknown 和超限 parent depth 返回明确错误", async () => {
@@ -5111,13 +5398,7 @@ test("subtask session 的 execution-profile 按 subtask surface 校验", async (
   });
   assert.equal(settingsRes.statusCode, 200, `update agent settings failed: ${settingsRes.body}`);
 
-  const sessionRes = await fixture.app.inject({
-    method: "POST",
-    url: "/api/agent/sessions",
-    payload: { workspaceId: fixture.workspaceId, title: "subtask-profile", kind: "subtask" }
-  });
-  assert.equal(sessionRes.statusCode, 201, `create subtask session failed: ${sessionRes.body}`);
-  const session = sessionRes.json() as { id: string };
+  const session = createSubtaskSessionForTest(fixture, { title: "subtask-profile" });
 
   const createdAt = Date.now();
   const runId = newSortableId("run");
@@ -5643,19 +5924,34 @@ test("agent clear 在 en-US locale 下生成英文摘要，且缺省 locale 回�
   assert.ok(String(context2.items.at(-1)?.output?.text || "").includes("A new task has started."));
 });
 
-test("agent clear 对 subtask 会话返回只读错误", async () => {
+test("subtask 会话的 send、compact、clear 保持只读且不修改状态", async () => {
   const fixture = await createFixture();
-  const createSubtaskRes = await fixture.app.inject({
+  const subtaskSession = createSubtaskSessionForTest(fixture);
+  const beforeState = await getRunState(fixture.app, subtaskSession.id);
+  const beforeHead = (await getContextItems(fixture.app, subtaskSession.id)).headItemId;
+
+  const sendRes = await fixture.app.inject({
     method: "POST",
-    url: "/api/agent/sessions",
+    url: `/api/agent/sessions/${subtaskSession.id}/messages`,
     payload: {
       workspaceId: fixture.workspaceId,
-      title: "it-subtask-session",
-      kind: "subtask"
+      text: "must remain read-only",
+      clientRequestId: "subtask-readonly-send"
     }
   });
-  assert.equal(createSubtaskRes.statusCode, 201, `create subtask session failed: ${createSubtaskRes.body}`);
-  const subtaskSession = createSubtaskRes.json() as { id: string };
+  assert.equal(sendRes.statusCode, 400, `send subtask should fail: ${sendRes.body}`);
+  assert.equal(sendRes.json().code, "AGENT_SUBTASK_READONLY");
+
+  const compactRes = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${subtaskSession.id}/compact`,
+    payload: {
+      workspaceId: fixture.workspaceId,
+      clientRequestId: "subtask-readonly-compact"
+    }
+  });
+  assert.equal(compactRes.statusCode, 400, `compact subtask should fail: ${compactRes.body}`);
+  assert.equal(compactRes.json().code, "AGENT_SUBTASK_READONLY");
 
   const clearRes = await fixture.app.inject({
     method: "POST",
@@ -5666,6 +5962,10 @@ test("agent clear 对 subtask 会话返回只读错误", async () => {
   });
   assert.equal(clearRes.statusCode, 400, `clear subtask should fail: ${clearRes.body}`);
   assert.equal(clearRes.json().code, "AGENT_SUBTASK_READONLY");
+  assert.equal((await getContextItems(fixture.app, subtaskSession.id)).headItemId, beforeHead);
+  assert.deepEqual(await getRunState(fixture.app, subtaskSession.id), beforeState);
+  const runCount = fixture.db.prepare("select count(*) as count from agent_run where session_id = ?").get(subtaskSession.id) as { count: number };
+  assert.equal(runCount.count, 0);
 });
 
 test("agent prompt-context 在 depth 达到上限时隐藏 subtask 工具", async () => {
@@ -5692,17 +5992,7 @@ test("agent prompt-context 在 depth 达到上限时隐藏 subtask 工具", asyn
   });
   assert.equal(agentsRes.statusCode, 200, `configure agents with subtask failed: ${agentsRes.body}`);
 
-  const sessionRes = await fixture.app.inject({
-    method: "POST",
-    url: "/api/agent/sessions",
-    payload: {
-      workspaceId: fixture.workspaceId,
-      title: "it-subtask-session",
-      kind: "subtask"
-    }
-  });
-  assert.equal(sessionRes.statusCode, 201, `create subtask session failed: ${sessionRes.body}`);
-  const session = sessionRes.json() as { id: string };
+  const session = createSubtaskSessionForTest(fixture);
 
   const runId = newSortableId("run");
   createRunRecord(fixture.db, {
@@ -5755,9 +6045,8 @@ test("agent prompt-context 在 depth=1、max=2 的 subtask run 中保留 subtask
     }
   });
   assert.equal(agentsRes.statusCode, 200, agentsRes.body);
-  const session = await fixture.app.inject({ method: "POST", url: "/api/agent/sessions", payload: { workspaceId: fixture.workspaceId, title: "nested", kind: "subtask" } });
-  assert.equal(session.statusCode, 201, session.body);
-  const sessionId = (session.json() as { id: string }).id;
+  const session = createSubtaskSessionForTest(fixture, { title: "nested" });
+  const sessionId = session.id;
   const runId = newSortableId("run");
   createRunRecord(fixture.db, {
     runId,
@@ -6173,17 +6462,7 @@ test("subtask start should reject preforkSummaryText when mode=new/existing", as
   assert.equal(modeNewRes.statusCode, 400);
   assert.equal((modeNewRes.json() as { code?: string }).code, "AGENT_SUBTASK_PREFORK_NOT_ALLOWED");
 
-  const existingSessionRes = await fixture.app.inject({
-    method: "POST",
-    url: "/api/agent/sessions",
-    payload: {
-      workspaceId: fixture.workspaceId,
-      title: "existing-subtask",
-      kind: "subtask"
-    }
-  });
-  assert.equal(existingSessionRes.statusCode, 201, `create existing subtask session failed: ${existingSessionRes.body}`);
-  const existingSession = existingSessionRes.json() as { id: string };
+  const existingSession = createSubtaskSessionForTest(fixture, { title: "existing-subtask" });
 
   const modeExistingRes = await fixture.app.inject({
     method: "POST",
@@ -6722,17 +7001,7 @@ test("agent subtask fork 对父 run 非法 locale 做归一化回退，避免继
 
 test("subtask 失败时 getSubtaskRunResultFromWorker 仍返回 partial text", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
-  const sessionRes = await fixture.app.inject({
-    method: "POST",
-    url: "/api/agent/sessions",
-    payload: {
-      workspaceId: fixture.workspaceId,
-      title: "it-subtask-result",
-      kind: "subtask"
-    }
-  });
-  assert.equal(sessionRes.statusCode, 201, `create subtask session failed: ${sessionRes.body}`);
-  const session = sessionRes.json() as { id: string };
+  const session = createSubtaskSessionForTest(fixture, { title: "it-subtask-result" });
   const runId = newSortableId("run");
   const createdAt = Date.now();
 

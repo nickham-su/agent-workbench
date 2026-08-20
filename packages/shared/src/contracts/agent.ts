@@ -375,16 +375,14 @@ export type AgentSessionContextItemsTailResponse = Static<typeof AgentSessionCon
 
 export const AgentCreateSessionRequestSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
-  title: Type.Optional(Type.String({ minLength: 1 })),
-  kind: Type.Optional(AgentSessionKindSchema)
-});
+  title: Type.Optional(Type.String({ minLength: 1 }))
+}, { additionalProperties: false });
 export type AgentCreateSessionRequest = Static<typeof AgentCreateSessionRequestSchema>;
 
 export const AgentInternalCreateSessionRequestSchema = Type.Object(
   {
     workspaceId: Type.String({ minLength: 1 }),
-    title: Type.Optional(Type.String({ minLength: 1 })),
-    kind: Type.Optional(AgentSessionKindSchema)
+    title: Type.Optional(Type.String({ minLength: 1 }))
   },
   { additionalProperties: false }
 );
@@ -486,7 +484,6 @@ export const AgentForkSessionRequestSchema = Type.Object({
   fromSessionId: Type.String({ minLength: 1 }),
   fromItemId: Type.Number({ minimum: 1 }),
   mode: Type.Union([Type.Literal("with_archive"), Type.Literal("visible_only")]),
-  title: Type.Optional(Type.String({ minLength: 1 })),
-  kind: Type.Optional(AgentSessionKindSchema)
-});
+  title: Type.Optional(Type.String({ minLength: 1 }))
+}, { additionalProperties: false });
 export type AgentForkSessionRequest = Static<typeof AgentForkSessionRequestSchema>;
