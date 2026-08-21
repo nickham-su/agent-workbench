@@ -9,7 +9,7 @@ import type { ToolExecutionContext } from "../tools/types.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "../../../../..");
 const pluginDir = path.join(repoRoot, "test", "fixtures", "plugins", "debug-tools");
-const pluginEntryPath = path.join(pluginDir, "dist", "index.js");
+const pluginEntryPath = path.join(pluginDir, "index.js");
 
 function createApiClient(response: PluginRuntimeSnapshotsResponse) {
   return {
@@ -52,7 +52,7 @@ function createContext() {
             name: "Debug Tools",
             version: "0.1.0",
             description: "fixture",
-            entry: "dist/index.js",
+            entry: "index.js",
             capabilities: ["tools"],
             tools: [
               {

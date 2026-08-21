@@ -4,7 +4,7 @@
   "name": "Debug Tools",
   "version": "0.1.0",
   "description": "最小样板插件，用于验证本地工具插件闭环。",
-  "entry": "dist/index.js",
+  "entry": "index.js",
   "engines": {
     "agentWorkbench": "^0.1.0"
   },
