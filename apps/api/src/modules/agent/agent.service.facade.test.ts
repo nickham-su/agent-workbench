@@ -8,9 +8,18 @@ type ReadSideApplicationFacade = {
   getPromptContextForRun: (params: { workspaceId: string; sessionId: string; runId: string }) => Promise<unknown>;
 };
 
-function createFacadeService(readSideApplication: ReadSideApplicationFacade) {
+type WritebackApplicationFacade = {
+  appendContextItemFromWorker: AgentService["appendContextItemFromWorker"];
+  updateContextItemFromWorker: AgentService["updateContextItemFromWorker"];
+};
+
+function createFacadeService(params: {
+  readSideApplication?: ReadSideApplicationFacade;
+  writebackApplication?: WritebackApplicationFacade;
+}) {
   const service = Object.create(AgentService.prototype) as AgentService;
-  Object.defineProperty(service, "readSideApplication", { value: readSideApplication });
+  if (params.readSideApplication) Object.defineProperty(service, "readSideApplication", { value: params.readSideApplication });
+  if (params.writebackApplication) Object.defineProperty(service, "writebackApplication", { value: params.writebackApplication });
   return service;
 }
 
@@ -19,7 +28,7 @@ test("AgentService read-side facades delegate params and return values without l
   const profileResponse = { resolved: { runId: "run-profile" } };
   const messagesResponse = { messages: [{ role: "user", content: "message" }] };
   const promptResponse = { system: "system", messages: [] };
-  const service = createFacadeService({
+  const service = createFacadeService({ readSideApplication: {
     getExecutionProfileForRun(params) {
       calls.push(["profile", params]);
       return profileResponse;
@@ -32,7 +41,7 @@ test("AgentService read-side facades delegate params and return values without l
       calls.push(["prompt", params]);
       return promptResponse;
     }
-  });
+  } });
   const profileParams = { workspaceId: "workspace-profile", sessionId: "session-profile", runId: "run-profile" };
   const messagesParams = { workspaceId: "workspace-messages", sessionId: "session-messages", appendMessage: { role: "user" as const, content: "one-shot" } };
   const promptParams = { workspaceId: "workspace-prompt", sessionId: "session-prompt", runId: "run-prompt" };
@@ -51,7 +60,7 @@ test("AgentService read-side facades preserve application errors", async () => {
   const profileError = new Error("profile failure");
   const messagesError = new Error("messages failure");
   const promptError = new Error("prompt failure");
-  const service = createFacadeService({
+  const service = createFacadeService({ readSideApplication: {
     getExecutionProfileForRun() {
       throw profileError;
     },
@@ -61,7 +70,7 @@ test("AgentService read-side facades preserve application errors", async () => {
     async getPromptContextForRun() {
       throw promptError;
     }
-  });
+  } });
 
   assert.throws(
     () => service.getExecutionProfileForRun({ workspaceId: "workspace", sessionId: "session", runId: "run" }),
@@ -74,5 +83,49 @@ test("AgentService read-side facades preserve application errors", async () => {
   await assert.rejects(
     () => service.getPromptContextForRun({ workspaceId: "workspace", sessionId: "session", runId: "run" }),
     (error: unknown) => error === promptError
+  );
+});
+
+test("AgentService writeback facades delegate params and return values without local rules", async () => {
+  const calls: unknown[][] = [];
+  const appendResponse = { append: "response" } as unknown as ReturnType<AgentService["appendContextItemFromWorker"]>;
+  const updateResponse = { update: "response" } as unknown as Awaited<ReturnType<AgentService["updateContextItemFromWorker"]>>;
+  const service = createFacadeService({ writebackApplication: {
+    appendContextItemFromWorker(params) {
+      calls.push(["append", params]);
+      return appendResponse;
+    },
+    async updateContextItemFromWorker(params) {
+      calls.push(["update", params]);
+      return updateResponse;
+    }
+  } });
+  const appendParams = { workspaceId: "workspace-append" } as Parameters<AgentService["appendContextItemFromWorker"]>[0];
+  const updateParams = { itemId: 7 } as Parameters<AgentService["updateContextItemFromWorker"]>[0];
+
+  assert.strictEqual(service.appendContextItemFromWorker(appendParams), appendResponse);
+  assert.strictEqual(await service.updateContextItemFromWorker(updateParams), updateResponse);
+  assert.deepEqual(calls, [["append", appendParams], ["update", updateParams]]);
+});
+
+test("AgentService writeback facades preserve application errors", async () => {
+  const appendError = new Error("append failure");
+  const updateError = new Error("update failure");
+  const service = createFacadeService({ writebackApplication: {
+    appendContextItemFromWorker() {
+      throw appendError;
+    },
+    async updateContextItemFromWorker() {
+      throw updateError;
+    }
+  } });
+
+  assert.throws(
+    () => service.appendContextItemFromWorker({} as Parameters<AgentService["appendContextItemFromWorker"]>[0]),
+    (error: unknown) => error === appendError
+  );
+  await assert.rejects(
+    () => service.updateContextItemFromWorker({} as Parameters<AgentService["updateContextItemFromWorker"]>[0]),
+    (error: unknown) => error === updateError
   );
 });

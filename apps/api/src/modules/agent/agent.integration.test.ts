@@ -10,7 +10,15 @@ import { createApp } from "../../app/createApp.js";
 import { openDb } from "../../infra/db/db.js";
 import type { Db } from "../../infra/db/db.js";
 import { ensureDir, rmrf } from "../../infra/fs/fs.js";
-import { agentArchivePendingSidecarPath, agentArchiveSessionDir, compactionSnippetPath, workspaceRepoDirPath, workspaceRoot } from "../../infra/fs/paths.js";
+import {
+  agentArchivePendingSidecarPath,
+  agentArchiveSessionDir,
+  applyPatchUiArtifactPath,
+  compactionSnippetPath,
+  workspaceRepoDirPath,
+  workspaceRoot,
+  writeUiArtifactPath
+} from "../../infra/fs/paths.js";
 import { getSettingJson, setSettingJson } from "../settings/settings.store.js";
 import { insertWorkspace, insertWorkspaceRepo } from "../workspaces/workspace.store.js";
 import { insertRepo } from "../repos/repo.store.js";
@@ -9842,6 +9850,127 @@ test("apply_patch artifact 文件缺失时返回 404", async () => {
     url: `/api/agent/sessions/${session.id}/context-items/${toolItem.item.id}/apply-patch-artifact`
   });
   assert.equal(artifactRes.statusCode, 404);
+});
+
+test("artifact Query 在 workspace artifact 目录为越界 symlink 时保持当前 400", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const externalDir = path.join(fixture.dataDir, "outside-artifacts");
+  let prevId: number | null = null;
+
+  for (const entry of [
+    {
+      toolName: "apply_patch",
+      toolCallId: "call_apply_patch_symlink",
+      artifactPath: applyPatchUiArtifactPath,
+      suffix: "apply-patch-artifact"
+    },
+    {
+      toolName: "write",
+      toolCallId: "call_write_symlink",
+      artifactPath: writeUiArtifactPath,
+      suffix: "write-artifact"
+    }
+  ] as const) {
+    const item = await createContextItemInternal({
+      app: fixture.app,
+      internalToken: fixture.internalToken,
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      runId: null,
+      turnId: null,
+      step: null,
+      prevId,
+      kind: "tool",
+      status: "queued",
+      output: { type: "tool", toolName: entry.toolName, toolCallId: entry.toolCallId, text: "queued" }
+    });
+    prevId = item.item.id;
+    const artifactFile = entry.artifactPath(fixture.dataDir, fixture.workspaceId, entry.toolCallId);
+    const artifactDir = path.dirname(artifactFile);
+    await fs.mkdir(artifactDir, { recursive: true });
+    await fs.rm(artifactDir, { recursive: true, force: true });
+    await fs.mkdir(externalDir, { recursive: true });
+    await fs.writeFile(path.join(externalDir, path.basename(artifactFile)), "{}", "utf8");
+    await fs.symlink(externalDir, artifactDir, "dir");
+
+    const response = await fixture.app.inject({
+      method: "GET",
+      url: `/api/agent/sessions/${session.id}/context-items/${item.item.id}/${entry.suffix}`
+    });
+    assert.equal(response.statusCode, 400, response.body);
+    assert.match(response.body, /Invalid path/);
+    await fs.rm(artifactDir, { recursive: true, force: true });
+  }
+});
+
+test("artifact 写入目录为越界 symlink 时仍以 slim result 完成 update", async () => {
+  const fixture = await createFixture({ agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const externalDir = path.join(fixture.dataDir, "outside-artifacts");
+  const previousLogLevel = fixture.app.log.level;
+  fixture.app.log.level = "fatal";
+  try {
+  const toolCallId = "call_write_write_symlink";
+  const toolItem = await createContextItemInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "tool",
+    status: "queued",
+    output: {
+      type: "tool",
+      toolName: "write",
+      toolCallId,
+      args: { filePath: "result.txt", content: "complete content" },
+      text: "queued"
+    }
+  });
+  const artifactFile = writeUiArtifactPath(fixture.dataDir, fixture.workspaceId, toolCallId);
+  const artifactDir = path.dirname(artifactFile);
+  await fs.mkdir(artifactDir, { recursive: true });
+  await fs.rm(artifactDir, { recursive: true, force: true });
+  await fs.mkdir(externalDir, { recursive: true });
+  await fs.symlink(externalDir, artifactDir, "dir");
+
+  const response = await fixture.app.inject({
+    method: "PATCH",
+    url: `/api/internal/agent/context-items/${toolItem.item.id}`,
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: {
+      status: "completed",
+      output: {
+        type: "tool",
+        toolName: "write",
+        toolCallId,
+        args: { filePath: "result.txt", content: "complete content" },
+        result: {
+          text: "wrote result.txt",
+          filePath: "result.txt",
+          bytesWritten: 16,
+          existedBefore: false,
+          before: { available: true, text: "" },
+          after: { available: true, text: "complete content" }
+        },
+        text: "completed"
+      }
+    }
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  const output = (response.json() as { item: { output: { result: Record<string, unknown> } } }).item.output.result;
+  assert.equal(Object.hasOwn(output, "before"), false);
+  assert.equal(Object.hasOwn(output, "after"), false);
+  assert.equal(output.filePath, "result.txt");
+  assert.equal(await fs.lstat(artifactDir).then((st) => st.isSymbolicLink()), true);
+  await fs.rm(artifactDir, { recursive: true, force: true });
+  } finally {
+  fixture.app.log.level = previousLogLevel;
+  }
 });
 
 test("write completed 后保留完整 args、瘦身 result 并支持 artifact 拉取", async () => {

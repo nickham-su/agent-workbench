@@ -1,5 +1,4 @@
 import type { FastifyBaseLogger } from "fastify";
-import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -8,6 +7,7 @@ import type {
   AgentCancelSessionRequest,
   AgentContextItemRecord,
   AgentContextItemStatus,
+  AgentContextItemOutput,
   AgentContextItemsResponse,
   AgentControlResult,
   AgentForkSessionRequest,
@@ -48,10 +48,8 @@ import { listEnabledWorkspaceAgentsInstructions, listEnabledWorkspaceExternalSki
 import {
   agentArchiveSessionDir,
   agentArchivePendingSidecarPath,
-  applyPatchUiArtifactPath,
   compactionSnippetPath,
   tmpRoot,
-  writeUiArtifactPath
 } from "../../infra/fs/paths.js";
 import {
   AgentConflictError,
@@ -124,6 +122,9 @@ import { MessagesContextProjector } from "./read-side/messages-context-projector
 import { PromptContextProjector } from "./read-side/prompt-context-projector.js";
 import { ReadSideApplication } from "./read-side/read-side-application.js";
 import { getWorkspaceEnabledAgentIds } from "../workspaces/workspace.service.js";
+import { ContextWritebackApplication } from "./writeback/context-writeback-application.js";
+import { UiArtifactCapability } from "./artifact/ui-artifact-capability.js";
+import { ensureDirSafeUnderRoot, ensureRealPathUnderRoot, readFileNoFollow, writeFileNoFollow } from "./artifact/safe-file-io.js";
 
 export type AgentQueuedRun = {
   workspaceId: string;
@@ -642,200 +643,6 @@ function stringifyToolResult(raw: unknown) {
   }
 }
 
-function toRecord(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  return value as Record<string, unknown>;
-}
-
-function toNonNegativeInt(value: unknown) {
-  const raw = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(raw) || raw < 0) return 0;
-  return Math.floor(raw);
-}
-
-type ApplyPatchSlimFile = {
-  type: "add" | "update" | "delete" | "move";
-  path: string;
-  fromPath?: string;
-  additions: number;
-  deletions: number;
-};
-
-type ApplyPatchSlimResult = {
-  text: string;
-  summary: { fileCount: number; additions: number; deletions: number };
-  files: ApplyPatchSlimFile[];
-};
-
-type ApplyPatchUiArtifactV1 = {
-  schemaVersion: 1;
-  toolName: "apply_patch";
-  workspaceId: string;
-  toolCallId: string;
-  createdAt: number;
-  summary: { fileCount: number; additions: number; deletions: number };
-  files: Array<ApplyPatchSlimFile & { before: string; after: string }>;
-};
-
-type WriteSlimResult = {
-  summary: string;
-  filePath: string;
-  bytesWritten: number;
-  existedBefore: boolean;
-};
-
-type WriteUiArtifactSide = {
-  available: boolean;
-  text?: string;
-  truncated: boolean;
-  bytes: number;
-  reason?: string;
-};
-
-type WriteUiArtifactV1 = {
-  schemaVersion: 1;
-  toolName: "write";
-  workspaceId: string;
-  toolCallId: string;
-  createdAt: number;
-  filePath: string;
-  summary: {
-    bytesWritten: number;
-    existedBefore: boolean;
-  };
-  before: WriteUiArtifactSide;
-  after: WriteUiArtifactSide;
-};
-
-function splitApplyPatchResult(raw: unknown): {
-  slim: ApplyPatchSlimResult;
-  artifact: Omit<ApplyPatchUiArtifactV1, "workspaceId" | "toolCallId" | "createdAt">;
-} {
-  const src = toRecord(raw) || {};
-  const text = typeof src.text === "string" ? src.text : "";
-  const summaryRaw = toRecord(src.summary) || {};
-  const filesRaw = Array.isArray(src.files) ? src.files : [];
-
-  const filesSlim: ApplyPatchSlimFile[] = [];
-  const filesArtifact: Array<ApplyPatchSlimFile & { before: string; after: string }> = [];
-
-  for (const row of filesRaw) {
-    const file = toRecord(row);
-    if (!file) continue;
-    const typeRaw = String(file.type || "update").trim();
-    const type = (typeRaw === "add" || typeRaw === "update" || typeRaw === "delete" || typeRaw === "move")
-      ? (typeRaw as ApplyPatchSlimFile["type"])
-      : "update";
-    const p = String(file.path || file.relativePath || file.filePath || "").trim();
-    if (!p) continue;
-    const fromPath = String(file.fromPath || file.moveFromPath || "").trim();
-    const additions = toNonNegativeInt(file.additions);
-    const deletions = toNonNegativeInt(file.deletions);
-    const before = typeof file.before === "string" ? file.before : "";
-    const after = typeof file.after === "string" ? file.after : "";
-
-    const slim: ApplyPatchSlimFile = {
-      type,
-      path: p,
-      ...(fromPath ? { fromPath } : {}),
-      additions,
-      deletions
-    };
-    filesSlim.push(slim);
-    filesArtifact.push({ ...slim, before, after });
-  }
-
-  const summary = {
-    fileCount: toNonNegativeInt(summaryRaw.fileCount ?? filesSlim.length),
-    additions: toNonNegativeInt(summaryRaw.additions ?? filesSlim.reduce((sum, f) => sum + f.additions, 0)),
-    deletions: toNonNegativeInt(summaryRaw.deletions ?? filesSlim.reduce((sum, f) => sum + f.deletions, 0))
-  };
-
-  return {
-    slim: {
-      text,
-      summary,
-      files: filesSlim
-    },
-    artifact: {
-      schemaVersion: 1,
-      toolName: "apply_patch",
-      summary,
-      files: filesArtifact
-    }
-  };
-}
-
-function normalizeWriteUiSide(raw: unknown, fallbackReason: string): WriteUiArtifactSide {
-  const side = toRecord(raw);
-  if (!side) {
-    return {
-      available: false,
-      truncated: false,
-      bytes: 0,
-      reason: fallbackReason
-    };
-  }
-  const available = side.available === true;
-  const text = typeof side.text === "string" ? side.text : "";
-  const bytes = toNonNegativeInt(side.bytes ?? Buffer.byteLength(text, "utf8"));
-  const truncated = side.truncated === true;
-  const reason = typeof side.reason === "string" && side.reason.trim() ? side.reason.trim() : fallbackReason;
-
-  if (!available) {
-    return {
-      available: false,
-      truncated: false,
-      bytes,
-      reason
-    };
-  }
-
-  return {
-    available: true,
-    text,
-    truncated,
-    bytes
-  };
-}
-
-function splitWriteResult(raw: unknown): {
-  slim: WriteSlimResult;
-  artifact: Omit<WriteUiArtifactV1, "workspaceId" | "toolCallId" | "createdAt">;
-} {
-  const src = toRecord(raw) || {};
-  const filePath = String(src.filePath || src.path || "").trim();
-  const bytesWritten = toNonNegativeInt(src.bytesWritten ?? src.bytes);
-  const existedBefore = src.existedBefore === true;
-  const summary = typeof src.summary === "string" && src.summary.trim()
-    ? src.summary
-    : filePath
-      ? `Wrote file ${filePath}`
-      : "write completed";
-  const before = normalizeWriteUiSide(src.before, "missing_file");
-  const after = normalizeWriteUiSide(src.after, "missing_content");
-
-  return {
-    slim: {
-      summary,
-      filePath,
-      bytesWritten,
-      existedBefore
-    },
-    artifact: {
-      schemaVersion: 1,
-      toolName: "write",
-      filePath,
-      summary: {
-        bytesWritten,
-        existedBefore
-      },
-      before,
-      after
-    }
-  };
-}
-
 function buildToolText(params: {
   toolName: string;
   status: "running" | "completed" | "failed" | "cancelled";
@@ -894,66 +701,6 @@ function toTerminalCancelledOutput(output: AgentContextItemRecord["output"]) {
   // cancelSession: 只在终态收尾时做最小必要的输出规整。
   // - subtask: 明确 cancelled，并保留 subtask_session_id + 复用提示
   return toTerminalSubtaskCancelledOutput(output);
-}
-
-async function ensureRealPathUnderRoot(rootAbs: string, targetAbs: string) {
-  const rootReal = await fs.realpath(rootAbs);
-  const targetReal = await fs.realpath(targetAbs);
-  const withSep = rootReal.endsWith(path.sep) ? rootReal : `${rootReal}${path.sep}`;
-  if (targetReal !== rootReal && !targetReal.startsWith(withSep)) {
-    throw new HttpError(400, "Invalid path");
-  }
-}
-
-async function ensureDirSafeUnderRoot(rootAbs: string, dirAbs: string) {
-  const rootResolved = path.resolve(rootAbs);
-  const dirResolved = path.resolve(dirAbs);
-  const rel = path.relative(rootResolved, dirResolved);
-  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
-    throw new HttpError(400, "Invalid path");
-  }
-
-  let current = rootResolved;
-  await fs.mkdir(current, { recursive: true });
-  await ensureRealPathUnderRoot(rootResolved, current);
-
-  for (const segment of rel.split(path.sep)) {
-    current = path.join(current, segment);
-    const st = await fs.lstat(current).catch(() => null);
-    if (!st) {
-      try {
-        await fs.mkdir(current);
-      } catch (err: any) {
-        if (!err || err.code !== "EEXIST") throw err;
-      }
-    } else {
-      if (st.isSymbolicLink()) throw new HttpError(400, "Invalid path");
-      if (!st.isDirectory()) throw new HttpError(409, "Parent is not a directory");
-    }
-    await ensureRealPathUnderRoot(rootResolved, current);
-  }
-}
-
-async function writeFileNoFollow(fileAbs: string, content: string) {
-  const handle = await fs.open(
-    fileAbs,
-    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | (fsConstants.O_NOFOLLOW ?? 0),
-    0o644
-  );
-  try {
-    await handle.writeFile(content, { encoding: "utf8" });
-  } finally {
-    await handle.close();
-  }
-}
-
-async function readFileNoFollow(fileAbs: string) {
-  const handle = await fs.open(fileAbs, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
-  try {
-    return await handle.readFile({ encoding: "utf8" });
-  } finally {
-    await handle.close();
-  }
 }
 
 function resolveToolOutputText(output: { text?: unknown; result?: unknown }) {
@@ -2111,6 +1858,8 @@ export class AgentService {
     Awaited<ReturnType<MessagesContextProjector<Awaited<ReturnType<AgentService["buildPromptMessagesForSession"]>>["messages"][number]>["getMessagesContext"]>>,
     Awaited<ReturnType<PromptContextProjector<Awaited<ReturnType<AgentService["buildPromptMessagesForSession"]>>["messages"][number]>["getPromptContextForRun"]>>
   >;
+  private readonly writebackApplication: ContextWritebackApplication;
+  private readonly uiArtifactCapability: UiArtifactCapability;
   private readonly executionProfileResolver: ExecutionProfileResolver<
     ReturnType<AgentService["resolveExecutionProfileForReadSide"]>,
     ReturnType<AgentService["getAgentRuntimeSettingsForReadSide"]>
@@ -2206,6 +1955,35 @@ export class AgentService {
         ...(input.appendMessage ? { appendMessage: input.appendMessage } : {})
       }),
       projectPromptContext: (input) => this.promptContextProjector.getPromptContextForRun(input)
+    });
+    this.uiArtifactCapability = new UiArtifactCapability(this.ctx.dataDir);
+    this.writebackApplication = new ContextWritebackApplication({
+      appendWithRunFence: (params) => appendContextItemWithRunFence(this.ctx.db, params),
+      nowMs,
+      formatTodolistTitle: normalizeTodolistGoal,
+      updateSessionTitle: (params) => {
+        updateAgentSessionTitle(this.ctx.db, params);
+      },
+      isAppendConflict: (error): error is AgentConflictError => error instanceof AgentConflictError,
+      warnAppendConflict: (params) => {
+        this.logger.warn(
+          {
+            sessionId: params.sessionId,
+            kind: params.kind,
+            currentHeadItemId: params.currentHeadItemId
+          },
+          "agent append context item conflict"
+        );
+      },
+      inspectForWorkerUpdate: (itemId) => getContextItemForWorkerUpdate(this.ctx.db, itemId),
+      uiArtifacts: this.uiArtifactCapability,
+      logArtifactError: ({ itemId, message, filePath, err }) => {
+        this.logger.error({ ...(err ? { err } : {}), itemId, ...(filePath ? { filePath } : {}) }, message);
+      },
+      logArtifactWarning: ({ itemId, message, hasToolCallId, hasWorkspaceId }) => {
+        this.logger.warn({ itemId, hasToolCallId, hasWorkspaceId }, message);
+      },
+      updateWithRunFence: (params) => updateContextItemWithRunFence(this.ctx.db, params)
     });
   }
 
@@ -2959,31 +2737,8 @@ export class AgentService {
       throw new HttpError(404, "apply_patch artifact not found");
     }
     const toolCallId = typeof item.output.toolCallId === "string" ? item.output.toolCallId.trim() : "";
-    if (!toolCallId) {
-      throw new HttpError(404, "apply_patch artifact not found");
-    }
-    const filePath = applyPatchUiArtifactPath(this.ctx.dataDir, item.workspaceId, toolCallId);
-    const tmpAbs = path.resolve(tmpRoot(this.ctx.dataDir));
-    const fileAbs = path.resolve(filePath);
-    if (!fileAbs.startsWith(tmpAbs + path.sep) && fileAbs !== tmpAbs) {
-      throw new HttpError(404, "apply_patch artifact not found");
-    }
-    const st = await fs.lstat(fileAbs).catch(() => null);
-    if (!st || !st.isFile()) {
-      throw new HttpError(404, "apply_patch artifact not found");
-    }
-    await ensureRealPathUnderRoot(tmpAbs, fileAbs);
-    let text = "";
-    try {
-      text = await readFileNoFollow(fileAbs);
-    } catch {
-      throw new HttpError(404, "apply_patch artifact not found");
-    }
-    try {
-      return JSON.parse(text) as unknown;
-    } catch {
-      throw new HttpError(404, "apply_patch artifact not found");
-    }
+    if (!toolCallId) throw new HttpError(404, "apply_patch artifact not found");
+    return this.uiArtifactCapability.readApplyPatch({ workspaceId: item.workspaceId, toolCallId });
   }
 
   async getWriteUiArtifact(params: { sessionId: string; itemId: number }) {
@@ -2992,31 +2747,8 @@ export class AgentService {
       throw new HttpError(404, "write artifact not found");
     }
     const toolCallId = typeof item.output.toolCallId === "string" ? item.output.toolCallId.trim() : "";
-    if (!toolCallId) {
-      throw new HttpError(404, "write artifact not found");
-    }
-    const filePath = writeUiArtifactPath(this.ctx.dataDir, item.workspaceId, toolCallId);
-    const tmpAbs = path.resolve(tmpRoot(this.ctx.dataDir));
-    const fileAbs = path.resolve(filePath);
-    if (!fileAbs.startsWith(tmpAbs + path.sep) && fileAbs !== tmpAbs) {
-      throw new HttpError(404, "write artifact not found");
-    }
-    const st = await fs.lstat(fileAbs).catch(() => null);
-    if (!st || !st.isFile()) {
-      throw new HttpError(404, "write artifact not found");
-    }
-    await ensureRealPathUnderRoot(tmpAbs, fileAbs);
-    let text = "";
-    try {
-      text = await readFileNoFollow(fileAbs);
-    } catch {
-      throw new HttpError(404, "write artifact not found");
-    }
-    try {
-      return JSON.parse(text) as unknown;
-    } catch {
-      throw new HttpError(404, "write artifact not found");
-    }
+    if (!toolCallId) throw new HttpError(404, "write artifact not found");
+    return this.uiArtifactCapability.readWrite({ workspaceId: item.workspaceId, toolCallId });
   }
 
   getRunState(sessionId: string): AgentSessionRunState {
@@ -3363,203 +3095,13 @@ export class AgentService {
   }
 
   appendContextItemFromWorker(params: AgentApiCreateContextItemRequest) {
-    if (
-      params.kind === "tool" &&
-      params.status === "completed" &&
-      params.output.type === "tool" &&
-      params.output.toolName === "apply_patch" &&
-      Object.prototype.hasOwnProperty.call(params.output, "result")
-    ) {
-      // 本项目不保留 apply_patch 的 before/after 在 DB 中,必须走 update 路径写入 service artifact 后再瘦身入库。
-      throw new HttpError(400, "apply_patch completed tool item must be updated, not appended");
-    }
-    const createdAt = params.createdAt ?? nowMs();
-    try {
-      const append = appendContextItemWithRunFence(this.ctx.db, {
-        workspaceId: params.workspaceId,
-        sessionId: params.sessionId,
-        runId: params.runId,
-        turnId: params.turnId,
-        step: params.step,
-        prevId: params.prevId,
-        kind: params.kind,
-        status: params.status,
-        output: params.output,
-        createdAt
-      });
-      if (append.kind === "ignored") return { ok: true as const, item: null, ignored: true as const };
-      if (append.kind === "missing-session" || append.kind === "missing-run") {
-        throw new HttpError(404, append.kind === "missing-run" ? "run not found" : "session not found");
-      }
-      if (append.kind === "workspace-mismatch" || append.kind === "run-mismatch") {
-        throw new HttpError(400, "workspaceId mismatch");
-      }
-      const item = append.item;
-      if (item.kind === "tool" && item.status === "completed" && item.output.type === "tool" && item.output.toolName === "todolist") {
-        const resultObj = item.output.result && typeof item.output.result === "object"
-          ? item.output.result as Record<string, unknown>
-          : null;
-        const goal = normalizeTodolistGoal(resultObj?.goal);
-        if (goal) {
-          updateAgentSessionTitle(this.ctx.db, { sessionId: item.sessionId, title: goal, updatedAt: createdAt });
-        }
-      }
-      return { ok: true as const, item };
-    } catch (err) {
-      if (err instanceof AgentConflictError) {
-        this.logger.warn(
-          {
-            sessionId: params.sessionId,
-            kind: params.kind,
-            currentHeadItemId: err.currentHeadItemId
-          },
-          "agent append context item conflict"
-        );
-        throw conflictToHttpError(err);
-      }
-      throw err;
-    }
+    return this.writebackApplication.appendContextItemFromWorker(params);
   }
 
   async updateContextItemFromWorker(params: AgentApiUpdateContextItemRequest & { itemId: number }) {
-    const initialFence = getContextItemForWorkerUpdate(this.ctx.db, params.itemId);
-    if (initialFence.kind === "missing") throw new HttpError(404, "context item not found");
-    if (initialFence.kind === "ownership-mismatch") throw new HttpError(404, "context item ownership mismatch");
-    if (initialFence.kind === "unchanged") return initialFence.item;
-    const current = initialFence.item;
-    const nextStatus = params.status ?? current.status;
-    let nextOutput = params.output;
-
-    // apply_patch: 将 before/after 从 DB 中剥离,改为写入 service UI artifact.
-    if (
-      nextStatus === "completed" &&
-      nextOutput &&
-      nextOutput.type === "tool" &&
-      nextOutput.toolName === "apply_patch" &&
-      Object.prototype.hasOwnProperty.call(nextOutput, "result")
-    ) {
-      const tool = nextOutput;
-      const toolCallId = typeof tool.toolCallId === "string" ? tool.toolCallId.trim() : "";
-      const workspaceId = current?.workspaceId;
-      const { slim, artifact } = splitApplyPatchResult(tool.result);
-
-      if (toolCallId && workspaceId) {
-        const filePath = applyPatchUiArtifactPath(this.ctx.dataDir, workspaceId, toolCallId);
-        const dirPath = path.dirname(filePath);
-        const tmpAbs = path.resolve(tmpRoot(this.ctx.dataDir));
-        const dirAbs = path.resolve(dirPath);
-        if (!dirAbs.startsWith(tmpAbs + path.sep) && dirAbs !== tmpAbs) {
-          this.logger.error(
-            { itemId: params.itemId, filePath },
-            "apply_patch ui artifact path is outside tmpRoot"
-          );
-        } else {
-          try {
-            await ensureDirSafeUnderRoot(tmpAbs, dirAbs);
-            await ensureRealPathUnderRoot(tmpAbs, dirAbs);
-            const payload: ApplyPatchUiArtifactV1 = {
-              ...artifact,
-              workspaceId,
-              toolCallId,
-              createdAt: params.updatedAt ?? nowMs()
-            };
-            await writeFileNoFollow(filePath, JSON.stringify(payload));
-          } catch (err) {
-            this.logger.error({ err, itemId: params.itemId }, "failed to write apply_patch ui artifact");
-          }
-        }
-      } else {
-        this.logger.warn(
-          { itemId: params.itemId, hasToolCallId: !!toolCallId, hasWorkspaceId: !!workspaceId },
-          "apply_patch completed but missing toolCallId/workspaceId; ui artifact skipped"
-        );
-      }
-
-      nextOutput = {
-        ...nextOutput,
-        result: slim
-      };
-    }
-
-    const isWriteTerminalStatus = nextStatus === "completed" || nextStatus === "failed" || nextStatus === "cancelled";
-
-    if (nextOutput?.type === "tool" && nextOutput.toolName === "write" && isWriteTerminalStatus) {
-      const tool = nextOutput;
-      const toolCallId = typeof tool.toolCallId === "string" ? tool.toolCallId.trim() : "";
-      const workspaceId = current?.workspaceId;
-
-      if (nextStatus === "completed") {
-        const { slim, artifact } = splitWriteResult(tool.result);
-        if (toolCallId && workspaceId) {
-          const filePath = writeUiArtifactPath(this.ctx.dataDir, workspaceId, toolCallId);
-          const dirPath = path.dirname(filePath);
-          const tmpAbs = path.resolve(tmpRoot(this.ctx.dataDir));
-          const dirAbs = path.resolve(dirPath);
-          if (!dirAbs.startsWith(tmpAbs + path.sep) && dirAbs !== tmpAbs) {
-            this.logger.error(
-              { itemId: params.itemId, filePath },
-              "write ui artifact path is outside tmpRoot"
-            );
-          } else {
-            try {
-              await ensureDirSafeUnderRoot(tmpAbs, dirAbs);
-              await ensureRealPathUnderRoot(tmpAbs, dirAbs);
-              const payload: WriteUiArtifactV1 = {
-                ...artifact,
-                workspaceId,
-                toolCallId,
-                createdAt: params.updatedAt ?? nowMs()
-              };
-              await writeFileNoFollow(filePath, JSON.stringify(payload));
-            } catch (err) {
-              this.logger.error({ err, itemId: params.itemId }, "failed to write write ui artifact");
-            }
-          }
-        } else {
-          this.logger.warn(
-            { itemId: params.itemId, hasToolCallId: !!toolCallId, hasWorkspaceId: !!workspaceId },
-            "write completed but missing toolCallId/workspaceId; ui artifact skipped"
-          );
-        }
-
-        nextOutput = {
-          ...nextOutput,
-          result: slim
-        };
-      }
-    }
-
-    const updatedAt = params.updatedAt ?? nowMs();
-    const update = updateContextItemWithRunFence(this.ctx.db, {
-      itemId: params.itemId,
-      status: params.status,
-      output: nextOutput,
-      updatedAt
-    });
-    if (update.kind === "missing") throw new HttpError(404, "context item not found");
-    if (update.kind === "ownership-mismatch") throw new HttpError(404, "context item ownership mismatch");
-    if (update.kind === "unchanged") return update.item;
-    const item = update.item;
-    if (
-      item.kind === "tool" &&
-      item.status === "completed" &&
-      item.output.type === "tool" &&
-      item.output.toolName === "todolist"
-    ) {
-      const resultObj = item.output.result && typeof item.output.result === "object"
-        ? item.output.result as Record<string, unknown>
-        : null;
-      const goal = normalizeTodolistGoal(resultObj?.goal);
-      if (goal) {
-        updateAgentSessionTitle(this.ctx.db, {
-          sessionId: item.sessionId,
-          title: goal,
-          updatedAt
-        });
-      }
-    }
-    return item;
+    return this.writebackApplication.updateContextItemFromWorker(params);
   }
+
 
   updateRunStateFromWorker(params: AgentApiRunStateRequest) {
     const currentState = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
