@@ -140,24 +140,6 @@ function assertOnlyAllowedBodyKeys(req: FastifyRequest, allowedKeys: ReadonlySet
   }
 }
 
-export async function cancelRuntimeSessionsAfterDbConvergence(params: {
-  runtime: AgentRuntimePort;
-  sessionIds: string[];
-  rootSessionId: string;
-  logger: FastifyRequest["log"];
-}) {
-  const settled = await Promise.allSettled(params.sessionIds.map((sessionId) => params.runtime.cancelSession(sessionId)));
-  for (let i = 0; i < settled.length; i += 1) {
-    const item = settled[i];
-    const targetSessionId = params.sessionIds[i];
-    if (!item || item.status !== "rejected") continue;
-    params.logger.warn(
-      { err: item.reason, rootSessionId: params.rootSessionId, targetSessionId },
-      "agent cancel runtime session failed"
-    );
-  }
-}
-
 export async function registerAgentRoutes(
   app: FastifyInstance,
   params: {
@@ -376,18 +358,7 @@ export async function registerAgentRoutes(
     async (req, reply) => {
       const p = req.params as { sessionId: string };
       const body = req.body as AgentSendMessageRequest;
-      const result = await params.service.sendMessage({ sessionId: p.sessionId, body });
-      if (!result.deduplicated) {
-        const runContext = getAgentWorkspaceRunContext(params.service.getContext(), body.workspaceId);
-        if (!runContext) throw new HttpError(404, "workspace not found");
-        await params.runtime.enqueueRun({
-          workspaceId: body.workspaceId,
-          sessionId: p.sessionId,
-          runId: result.runId,
-          ...runContext,
-          inputText: body.text
-        });
-      }
+      const result = await params.service.sendMessage({ sessionId: p.sessionId, body, runtime: params.runtime });
       return reply.code(201).send(result);
     }
   );
@@ -497,14 +468,11 @@ export async function registerAgentRoutes(
     async (req) => {
       const p = req.params as { sessionId: string };
       const body = req.body as { workspaceId: string };
-      const { result, runtimeCancelSessionIds } = params.service.cancelSessionCascade(p.sessionId, body);
-      await cancelRuntimeSessionsAfterDbConvergence({
-        runtime: params.runtime,
-        sessionIds: runtimeCancelSessionIds,
-        rootSessionId: p.sessionId,
-        logger: req.log
+      return params.service.cancelSessionWithRuntime({
+        sessionId: p.sessionId,
+        workspaceId: body.workspaceId,
+        runtime: params.runtime
       });
-      return result;
     }
   );
 
@@ -825,29 +793,9 @@ export async function registerAgentRoutes(
           text: body.text,
           clientRequestId: body.clientRequestId,
           uiLocale: body.uiLocale
-        }
+        },
+        runtime: params.runtime
       });
-      if (!result.deduplicated) {
-        const runContext = getAgentWorkspaceRunContext(params.service.getContext(), body.workspaceId);
-        if (!runContext) throw new HttpError(404, "workspace not found");
-        try {
-          await params.runtime.enqueueRun({
-            workspaceId: body.workspaceId,
-            sessionId: body.sessionId,
-            runId: result.runId,
-            ...runContext,
-            inputText: body.text
-          });
-        } catch (err) {
-          params.service.failRunOnEnqueueFailure({
-            workspaceId: body.workspaceId,
-            sessionId: body.sessionId,
-            runId: result.runId,
-            updatedAt: Date.now()
-          });
-          throw err;
-        }
-      }
       return reply.code(201).send(result);
     }
   );

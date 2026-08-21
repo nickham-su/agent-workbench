@@ -44,8 +44,6 @@ import {
 import { AgentService, isSubtaskParentToolUniqueConstraintError } from "./agent.service.js";
 import { AgentRuntime } from "./agent.runtime.js";
 import type { AgentRuntimePort } from "./agent.runtime-port.js";
-import { enqueueRecoveringRuns } from "./agent.module.js";
-import { cancelRuntimeSessionsAfterDbConvergence } from "./agent.routes.js";
 import type { AgentApiSubtaskStartRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { normalizeMaxSubtaskDepthForUpdate } from "../settings/settings.service.js";
 import { newSortableId } from "../../utils/ids.js";
@@ -593,7 +591,7 @@ test("recover 在 enqueue 前最终 DB check 中让 cancel wins", async () => {
     };
     let cancelledDuringRecovery = false;
 
-    await enqueueRecoveringRuns(service, runtime, fixture.app.log, {
+    await service.recoverRunsOnStartup({ runtime,
       beforeFinalCheck(candidate) {
         assert.equal(candidate.runId, runId, "recovery scan should have found the in-flight candidate");
         service.cancelSessionCascade(session.id, { workspaceId: fixture.workspaceId });
@@ -651,7 +649,7 @@ test("recover enqueue 已发出后 cancel 仍以 DB cancelled 状态为准", asy
       cancelSession() {}
     };
     const service = new AgentService(fixture.ctx, fixture.app.log);
-    await enqueueRecoveringRuns(service, runtime, fixture.app.log);
+    await service.recoverRunsOnStartup({ runtime });
     assert.deepEqual(enqueued, [runId]);
 
     service.cancelSessionCascade(session.id, { workspaceId: fixture.workspaceId });
@@ -714,7 +712,7 @@ test("recover enqueue failure 只记录并继续处理后续 candidate", async (
       }
     } as unknown as FastifyInstance["log"];
 
-    await enqueueRecoveringRuns(new AgentService(fixture.ctx, fixture.app.log), runtime, logger);
+    await new AgentService(fixture.ctx, logger).recoverRunsOnStartup({ runtime });
 
     assert.deepEqual(enqueued, [firstRunId, secondRunId]);
     assert.equal(warnings.length, 1);
@@ -755,27 +753,25 @@ test("runtime cancel 失败仅 warning，DB cancel 保持收敛", async () => {
       appliedItemId: 0
     });
 
-    const service = new AgentService(fixture.ctx, fixture.app.log);
-    const { result, runtimeCancelSessionIds } = service.cancelSessionCascade(session.id, { workspaceId: fixture.workspaceId });
-    assert.equal(result.runState.status, "idle");
-    assert.equal(getRunRecord(fixture.db, runId)?.status, "cancelled");
-
     const warnings: unknown[][] = [];
-    await cancelRuntimeSessionsAfterDbConvergence({
+    const service = new AgentService(fixture.ctx, {
+      ...fixture.app.log,
+      warn(...args: unknown[]) {
+        warnings.push(args);
+      }
+    } as never);
+    const result = await service.cancelSessionWithRuntime({
+      sessionId: session.id,
+      workspaceId: fixture.workspaceId,
       runtime: {
         enqueueRun() {},
         async cancelSession() {
           throw new Error("expected runtime cancellation failure");
         }
-      },
-      sessionIds: runtimeCancelSessionIds,
-      rootSessionId: session.id,
-      logger: {
-        warn(...args: unknown[]) {
-          warnings.push(args);
-        }
-      } as never
+      }
     });
+    assert.equal(result.runState.status, "idle");
+    assert.equal(getRunRecord(fixture.db, runId)?.status, "cancelled");
 
     assert.equal(warnings.length, 1);
     assert.equal(warnings[0]?.[1], "agent cancel runtime session failed");

@@ -115,6 +115,9 @@ import { projectToolCallInputForPrompt } from "./prompt/tool-projectors/index.js
 import { listPluginRuntimeSnapshots } from "../plugins/plugin.service.js";
 import { parseSkillFrontmatter, scanReadableTopLevelSkills } from "./top-level-skill.js";
 import type { AgentRunCompletedEventHub } from "./run-completed-events.js";
+import { getAgentWorkspaceRunContext } from "./agent-run-context.js";
+import { RunLifecycleApplication } from "./lifecycle/run-lifecycle-application.js";
+import { SqliteRunLifecyclePersistence } from "./lifecycle/sqlite-run-lifecycle-persistence.js";
 import { RunPromptStaticCache, RunPromptStaticCacheInvalidator } from "./prompt/run-prompt-static-cache.js";
 import { PromptStaticAssembler } from "./prompt/prompt-static-assembler.js";
 import { ExecutionProfileResolver } from "./read-side/execution-profile-resolver.js";
@@ -125,12 +128,7 @@ import { getWorkspaceEnabledAgentIds } from "../workspaces/workspace.service.js"
 import { ContextWritebackApplication } from "./writeback/context-writeback-application.js";
 import { UiArtifactCapability } from "./artifact/ui-artifact-capability.js";
 import { ensureDirSafeUnderRoot, ensureRealPathUnderRoot, readFileNoFollow, writeFileNoFollow } from "./artifact/safe-file-io.js";
-
-export type AgentQueuedRun = {
-  workspaceId: string;
-  sessionId: string;
-  runId: string;
-};
+import type { AgentRuntimePort } from "./agent.runtime-port.js";
 
 type AgentCancelCascadeResult = {
   result: AgentControlResult;
@@ -1868,6 +1866,7 @@ export class AgentService {
   private readonly promptStaticAssembler: PromptStaticAssembler;
   private readonly promptContextProjector: PromptContextProjector<Awaited<ReturnType<AgentService["buildPromptMessagesForSession"]>>["messages"][number]>;
   private readonly runPromptStaticCacheInvalidator: RunPromptStaticCacheInvalidator;
+  private readonly runLifecycleApplication: RunLifecycleApplication;
 
   constructor(
     private readonly ctx: AppContext,
@@ -1876,6 +1875,39 @@ export class AgentService {
   ) {
     this.runPromptStaticCacheInvalidator = new RunPromptStaticCacheInvalidator({
       clearRunStaticPrompt: (runId) => this.runPromptStaticCache.clear(runId)
+    });
+    const sqliteLifecyclePersistence = new SqliteRunLifecyclePersistence(this.ctx.db);
+    this.runLifecycleApplication = new RunLifecycleApplication({
+      workspaceRunContextReader: {
+        get: (workspaceId) => getAgentWorkspaceRunContext(this.ctx, workspaceId)
+      },
+      runStateReader: { get: (sessionId) => this.getRunState(sessionId) },
+      activeSubtaskChildQuery: {
+        listByParentRun: (params) => listSubtaskChildSessionIdsByRunId(this.ctx.db, params)
+      },
+      promptStaticCacheInvalidator: this.runPromptStaticCacheInvalidator,
+      runCompletedEventPublisher: {
+        publishRunCompleted: (event) => {
+          this.runCompletedEventHub?.publish({
+            ...event,
+            eventType: "agent.run.completed.v1"
+          });
+        }
+      },
+      persistence: sqliteLifecyclePersistence,
+      triggerInputReader: {
+        getUserText: (itemId) => {
+          const item = getContextItemById(this.ctx.db, itemId);
+          return item?.output.type === "user_text" ? item.output.text : null;
+        }
+      },
+      isContextAppendConflict: (error) => error instanceof AgentConflictError,
+      clock: { nowMs },
+      ids: { newId: newSortableId },
+      logger: {
+        warn: (bindings, message) => this.logger.warn(bindings, message),
+        error: (bindings, message) => this.logger.error(bindings, message)
+      }
     });
     this.executionProfileResolver = new ExecutionProfileResolver({
       resolveProfile: (input) => this.resolveExecutionProfileForReadSide(input),
@@ -2389,7 +2421,7 @@ export class AgentService {
     return session;
   }
 
-  async sendMessage(params: { sessionId: string; body: AgentSendMessageRequest }): Promise<AgentSendMessageResponse> {
+  async sendMessage(params: { sessionId: string; body: AgentSendMessageRequest; runtime: AgentRuntimePort }): Promise<AgentSendMessageResponse> {
     const session = getAgentSession(this.ctx.db, params.sessionId);
     if (!session) throw new HttpError(404, "session not found");
     if (session.kind === "subtask") {
@@ -2401,7 +2433,8 @@ export class AgentService {
 
     const text = params.body.text.trim();
     if (!text) throw new HttpError(400, "text is required");
-
+    // Non-authoritative fast paths preserve existing user-facing validation
+    // order; Lifecycle repeats both checks inside its activation transaction.
     const dedup = findClientRequestDedup(this.ctx.db, {
       workspaceId: session.workspaceId,
       sessionId: session.id,
@@ -2415,101 +2448,31 @@ export class AgentService {
         deduplicated: true
       };
     }
-
-    const runState = getRunState(this.ctx.db, session.workspaceId, session.id);
-    if (runState.status !== "idle") {
+    if (getRunState(this.ctx.db, session.workspaceId, session.id).status !== "idle") {
       throw new HttpError(409, "session is running");
     }
-
     const profile = resolveExecutionProfile(this.ctx, {
       surface: "user",
       requestedAgentId: params.body.agentId,
       workspaceEnablement: getWorkspaceEnabledAgentIds(this.ctx, session.workspaceId)
     });
-
-    const createdAt = nowMs();
-    const uiLocale = normalizeAgentUiLocale(params.body.uiLocale);
-    const runId = newSortableId("run");
-    let messageItemId = 0;
-
     try {
-      const tx = this.ctx.db.transaction(() => {
-        const head = getSessionHead(this.ctx.db, session.workspaceId, session.id);
-        const isFirstUserMessage = head == null;
-        const item = appendContextItem(this.ctx.db, {
-          workspaceId: session.workspaceId,
-          sessionId: session.id,
-          runId,
-          turnId: null,
-          step: null,
-          prevId: head,
-          kind: "user",
-          status: "completed",
-          output: {
-            type: "user_text",
-            text
-          },
-          createdAt
-        });
-
-        messageItemId = item.id;
-
-        if (isFirstUserMessage) {
-          updateAgentSessionTitle(this.ctx.db, {
-            sessionId: session.id,
-            title: toSessionTitleFromFirstMessage(text),
-            updatedAt: createdAt
-          });
-        }
-
-        insertClientRequestDedup(this.ctx.db, {
-          workspaceId: session.workspaceId,
-          sessionId: session.id,
-          clientRequestId: params.body.clientRequestId,
-          messageItemId: item.id,
-          runId,
-          createdAt
-        });
-
-        createRunRecord(this.ctx.db, {
-          runId,
-          workspaceId: session.workspaceId,
-          sessionId: session.id,
-          triggerItemId: item.id,
-          agentId: profile.agent.id,
-          providerId: profile.provider.id,
-          modelId: profile.model.id,
-          uiLocale,
-          subtaskDepth: 0,
-          parentRunId: null,
-          parentToolItemId: null,
-          status: "running",
-          createdAt
-        });
-
-        updateRunState(this.ctx.db, {
-          workspaceId: session.workspaceId,
-          sessionId: session.id,
-          status: "running",
-          activeRunId: runId,
-          activeAssistantItemId: null,
-          runNoticeText: "",
-          updatedAt: createdAt,
-          appliedItemId: item.id
-        });
+      return await this.runLifecycleApplication.startUserRun({
+        workspaceId: session.workspaceId,
+        sessionId: session.id,
+        clientRequestId: params.body.clientRequestId,
+        text,
+        inputText: params.body.text,
+        agentId: profile.agent.id,
+        providerId: profile.provider.id,
+        modelId: profile.model.id,
+        uiLocale: normalizeAgentUiLocale(params.body.uiLocale),
+        runtime: params.runtime
       });
-      tx();
     } catch (err) {
       if (err instanceof AgentConflictError) throw conflictToHttpError(err);
       throw err;
     }
-
-    return {
-      sessionId: session.id,
-      messageItemId,
-      runId,
-      deduplicated: false
-    };
   }
 
   getContextItems(
@@ -2699,28 +2662,9 @@ export class AgentService {
     });
   }
 
-  // enqueue 失败时做最小回滚,避免会话卡在 running.
+  // 兼容 compact 等尚未迁移的入口；条件收敛权威位于 Lifecycle。
   failRunOnEnqueueFailure(params: { workspaceId: string; sessionId: string; runId: string; updatedAt?: number }) {
-    const ts = params.updatedAt ?? nowMs();
-    const run = getRunRecord(this.ctx.db, params.runId);
-    if (!run) return;
-    if (run.workspaceId !== params.workspaceId || run.sessionId !== params.sessionId) return;
-    if (run.status === "completed" || run.status === "failed" || run.status === "cancelled") return;
-
-    updateRunRecordStatus(this.ctx.db, {
-      runId: params.runId,
-      status: "failed",
-      updatedAt: ts
-    });
-    this.clearRunPromptStaticCache(params.runId);
-    const state = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
-    if (state.activeRunId !== params.runId) return;
-    setRunStateIdle(this.ctx.db, {
-      workspaceId: params.workspaceId,
-      sessionId: params.sessionId,
-      updatedAt: ts,
-      appliedItemId: getLatestSessionItemId(this.ctx.db, params.workspaceId, params.sessionId)
-    });
+    return this.runLifecycleApplication.failRunAfterEnqueueFailure(params);
   }
 
   getContextItem(sessionId: string, itemId: number) {
@@ -2979,119 +2923,31 @@ export class AgentService {
     return { ok: true, session: updated, runState: this.getRunState(updated.id) };
   }
 
-  private collectActiveCascadeCancelSessionIds(params: {
-    workspaceId: string;
-    rootSessionId: string;
-  }) {
-    const visited = new Set<string>();
-    const queue = [params.rootSessionId];
-    const ordered: string[] = [];
-
-    while (queue.length > 0) {
-      const sessionId = queue.shift();
-      if (!sessionId || visited.has(sessionId)) continue;
-      visited.add(sessionId);
-
-      const session = getAgentSession(this.ctx.db, sessionId);
-      if (!session || session.workspaceId !== params.workspaceId) continue;
-      ordered.push(session.id);
-
-      const state = getRunState(this.ctx.db, session.workspaceId, session.id);
-      if (state.status !== "running" || !state.activeRunId) continue;
-
-      for (const childSessionId of listSubtaskChildSessionIdsByRunId(this.ctx.db, {
-        workspaceId: session.workspaceId,
-        sessionId: session.id,
-        runId: state.activeRunId
-      })) {
-        if (visited.has(childSessionId)) continue;
-        const child = getAgentSession(this.ctx.db, childSessionId);
-        if (!child || child.workspaceId !== params.workspaceId) continue;
-        const childState = getRunState(this.ctx.db, child.workspaceId, child.id);
-        if (childState.status !== "running" || !childState.activeRunId) continue;
-        queue.push(child.id);
-      }
-    }
-
-    return ordered;
-  }
-
-  private cancelSingleSessionInTx(params: { workspaceId: string; sessionId: string; updatedAt: number }) {
-    const session = getAgentSession(this.ctx.db, params.sessionId);
-    if (!session || session.workspaceId !== params.workspaceId) return;
-
-    const state = getRunState(this.ctx.db, session.workspaceId, session.id);
-    const allItemIds = new Set<number>();
-    for (const itemId of listNonTerminalSessionItemIds(this.ctx.db, session.workspaceId, session.id)) {
-      allItemIds.add(itemId);
-    }
-
-    const relatedRunIds = new Set<string>(listNonTerminalRunIdsBySession(this.ctx.db, {
-      workspaceId: session.workspaceId,
-      sessionId: session.id
-    }));
-    for (const runId of listNonTerminalRunIdsByItemIds(this.ctx.db, {
-      workspaceId: session.workspaceId,
-      sessionId: session.id,
-      itemIds: Array.from(allItemIds)
-    })) {
-      relatedRunIds.add(runId);
-    }
-
-    for (const itemId of allItemIds) {
-      const item = getContextItemById(this.ctx.db, itemId);
-      if (!item || !NON_TERMINAL_ITEM_STATUS.has(item.status)) continue;
-      updateContextItem(this.ctx.db, {
-        itemId,
-        status: "cancelled",
-        output: toTerminalCancelledOutput(item.output),
-        updatedAt: params.updatedAt
-      });
-    }
-
-    setRunStateIdle(this.ctx.db, {
-      workspaceId: session.workspaceId,
-      sessionId: session.id,
-      updatedAt: params.updatedAt,
-      appliedItemId: getLatestSessionItemId(this.ctx.db, session.workspaceId, session.id)
-    });
-    for (const runId of relatedRunIds) {
-      updateRunRecordStatus(this.ctx.db, { runId, status: "cancelled", updatedAt: params.updatedAt });
-      this.clearRunPromptStaticCache(runId);
-    }
-    if (state.activeRunId && !relatedRunIds.has(state.activeRunId)) {
-      updateRunRecordStatus(this.ctx.db, { runId: state.activeRunId, status: "cancelled", updatedAt: params.updatedAt });
-      this.clearRunPromptStaticCache(state.activeRunId);
-    }
-  }
-
   cancelSession(sessionId: string, body: AgentCancelSessionRequest): AgentControlResult {
     return this.cancelSessionCascade(sessionId, body).result;
   }
 
   cancelSessionCascade(sessionId: string, body: AgentCancelSessionRequest): AgentCancelCascadeResult {
-    const session = getAgentSession(this.ctx.db, sessionId);
-    if (!session) throw new HttpError(404, "session not found");
-    if (session.workspaceId !== body.workspaceId) throw new HttpError(400, "workspaceId mismatch");
+    return this.runLifecycleApplication.cancelSessionCascade(sessionId, body);
+  }
 
-    const state = getRunState(this.ctx.db, session.workspaceId, session.id);
-    const createdAt = nowMs();
-
-    const tx = this.ctx.db.transaction(() => {
-      const cascadeSessionIds = this.collectActiveCascadeCancelSessionIds({ workspaceId: session.workspaceId, rootSessionId: session.id });
-      for (const targetSessionId of cascadeSessionIds) {
-        this.cancelSingleSessionInTx({ workspaceId: session.workspaceId, sessionId: targetSessionId, updatedAt: createdAt });
-      }
-      return cascadeSessionIds;
+  async cancelSessionWithRuntime(params: { sessionId: string; workspaceId: string; runtime: AgentRuntimePort }) {
+    return this.runLifecycleApplication.cancelSession({
+      sessionId: params.sessionId,
+      workspaceId: params.workspaceId,
+      runtime: params.runtime
     });
+  }
 
-    const runtimeCancelSessionIds = tx();
-    const updated = getAgentSession(this.ctx.db, session.id);
-    if (!updated) throw new HttpError(500, "session not found after cancel");
-    return {
-      result: { ok: true, session: updated, runState: this.getRunState(updated.id) },
-      runtimeCancelSessionIds
-    };
+  recoverRunsOnStartup(params: {
+    runtime: AgentRuntimePort;
+    beforeFinalCheck?: (candidate: { workspaceId: string; sessionId: string; runId: string; triggerItemId: number | null }) => void | Promise<void>;
+  }) {
+    return this.runLifecycleApplication.recoverRunsOnStartup(params);
+  }
+
+  failRunsOnStartup() {
+    return this.runLifecycleApplication.failRunsOnStartup();
   }
 
   appendContextItemFromWorker(params: AgentApiCreateContextItemRequest) {
@@ -3104,124 +2960,11 @@ export class AgentService {
 
 
   updateRunStateFromWorker(params: AgentApiRunStateRequest) {
-    const currentState = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
-    const activeRunId = typeof params.activeRunId === "string" && params.activeRunId.trim() ? params.activeRunId : null;
-    const activeRun = activeRunId ? getRunRecord(this.ctx.db, activeRunId) : null;
-
-    // 避免晚到 worker 状态覆盖已切换到其他 run 的会话状态。
-    if (activeRunId && currentState.activeRunId && currentState.activeRunId !== activeRunId) {
-      return;
-    }
-    if (activeRunId) {
-      if (activeRun) {
-        if (activeRun.workspaceId !== params.workspaceId || activeRun.sessionId !== params.sessionId) return;
-        // 终态 run 不再接受 worker 的 running/waiting 状态回写。
-        if (TERMINAL_RUN_RECORD_STATUS.has(activeRun.status as "completed" | "failed" | "cancelled")) {
-          return;
-        }
-      }
-    }
-
-    const ts = params.updatedAt ?? nowMs();
-    const appliedItemId = getLatestSessionItemId(this.ctx.db, params.workspaceId, params.sessionId);
-    const hasLastResponseTotalTokens = Object.prototype.hasOwnProperty.call(params, "lastResponseTotalTokens");
-    const hasRunNoticeText = Object.prototype.hasOwnProperty.call(params, "runNoticeText");
-    const shouldClearNoticeWhenIdle = params.status === "idle" && !hasRunNoticeText;
-    updateRunState(this.ctx.db, {
-      workspaceId: params.workspaceId,
-      sessionId: params.sessionId,
-      status: params.status,
-      activeRunId,
-      activeAssistantItemId: params.activeAssistantItemId,
-      ...(hasLastResponseTotalTokens ? { lastResponseTotalTokens: params.lastResponseTotalTokens ?? null } : {}),
-      ...(hasRunNoticeText
-        ? { runNoticeText: normalizeRunNoticeText(params.runNoticeText) }
-        : shouldClearNoticeWhenIdle
-          ? { runNoticeText: "" }
-          : {}),
-      updatedAt: ts,
-      appliedItemId
-    });
-    if (activeRunId) {
-      updateRunRecordStatus(this.ctx.db, {
-        runId: activeRunId,
-        status: "running",
-        updatedAt: ts
-      });
-    }
+    return this.runLifecycleApplication.updateRunStateFromWorker(params);
   }
 
   completeRunFromWorker(params: AgentApiRunCompleteRequest) {
-    const ts = params.updatedAt ?? nowMs();
-    const run = getRunRecord(this.ctx.db, params.runId);
-    if (!run) return;
-    if (run.workspaceId !== params.workspaceId || run.sessionId !== params.sessionId) return;
-    if (TERMINAL_RUN_RECORD_STATUS.has(run.status as "completed" | "failed" | "cancelled")) {
-      return;
-    }
-
-    const tx = this.ctx.db.transaction(() => {
-      updateRunRecordStatus(this.ctx.db, {
-        runId: params.runId,
-        status: params.status,
-        updatedAt: ts
-      });
-      this.clearRunPromptStaticCache(params.runId);
-
-      if (params.status === "cancelled") {
-        const nonTerminalItemIds = listNonTerminalSessionItemIdsByRunId(this.ctx.db, {
-          workspaceId: params.workspaceId,
-          sessionId: params.sessionId,
-          runId: params.runId
-        });
-        for (const itemId of nonTerminalItemIds) {
-          const item = getContextItemById(this.ctx.db, itemId);
-          if (!item) continue;
-          if (item.workspaceId !== params.workspaceId || item.sessionId !== params.sessionId || item.runId !== params.runId) {
-            continue;
-          }
-          // tool items: normalize output (including subtask cancelled reuse hint).
-          if (item.kind === "tool" && item.output.type === "tool") {
-            updateContextItem(this.ctx.db, {
-              itemId,
-              status: "cancelled",
-              output: toTerminalCancelledOutput(item.output),
-              updatedAt: ts
-            });
-            continue;
-          }
-          // assistant/user/system: only settle status, keep output unchanged.
-          updateContextItem(this.ctx.db, {
-            itemId,
-            status: "cancelled",
-            updatedAt: ts
-          });
-        }
-      }
-
-      const state = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
-      if (state.activeRunId !== params.runId) {
-        return;
-      }
-      setRunStateIdle(this.ctx.db, {
-        workspaceId: params.workspaceId,
-        sessionId: params.sessionId,
-        updatedAt: ts,
-        appliedItemId: getLatestSessionItemId(this.ctx.db, params.workspaceId, params.sessionId)
-      });
-    });
-
-    tx();
-
-    this.runCompletedEventHub?.publish({
-      eventId: newSortableId("evt"),
-      eventType: "agent.run.completed.v1",
-      occurredAt: ts,
-      workspaceId: params.workspaceId,
-      sessionId: params.sessionId,
-      runId: params.runId,
-      finalStatus: params.status
-    });
+    return this.runLifecycleApplication.completeRunFromWorker(params);
   }
 
   private resolveSubtaskParentContext(params: {
