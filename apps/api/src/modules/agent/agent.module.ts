@@ -80,7 +80,7 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
   await registerAgentRoutes(app, { service, runtime, pluginHost: pluginHostClient, runCompletedEventHub });
 
   try {
-    service.scanAndCleanupSubtaskOrphansBestEffort();
+    service.cleanupSubtaskOrphansOnStartup();
   } catch (err) {
     app.log.warn({ err }, "subtask orphan startup scan failed");
   }

@@ -1,5 +1,6 @@
 import type { AgentControlResult, AgentSessionRunState } from "@agent-workbench/shared";
 import type { AgentApiRunCompleteRequest, AgentApiRunStateRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
+import type { ActiveSubtaskChildQuery } from "../subtask/subtask-ports.js";
 
 export type AgentRuntimeRun = {
   workspaceId: string;
@@ -24,9 +25,7 @@ export type WorkspaceRunContextReader = {
   get(workspaceId: string): WorkspaceRunContext | null;
 };
 
-export type ActiveSubtaskChildQuery = {
-  listByParentRun(params: { workspaceId: string; sessionId: string; runId: string }): string[];
-};
+export type { ActiveSubtaskChildQuery } from "../subtask/subtask-ports.js";
 
 export type PromptStaticCacheInvalidator = {
   clear(runId: string): void;

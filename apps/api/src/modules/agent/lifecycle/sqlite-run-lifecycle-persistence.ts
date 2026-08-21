@@ -1,6 +1,7 @@
 import type { AgentContextItemOutput } from "@agent-workbench/shared";
 import type { AgentApiRunCompleteRequest, AgentApiRunStateRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { Db } from "../../../infra/db/db.js";
+import type { SubtaskChildActivationInput, SubtaskChildActivationResult, SubtaskChildRunActivator } from "../subtask/subtask-ports.js";
 import {
   appendContextItem,
   createRunRecord,
@@ -81,7 +82,7 @@ function toTerminalCancelledOutput(output: AgentContextItemOutput) {
   return { ...output, text, ...(nextResult !== output.result ? { result: nextResult } : {}) };
 }
 
-export class SqliteRunLifecyclePersistence implements AtomicLifecyclePersistence {
+export class SqliteRunLifecyclePersistence implements AtomicLifecyclePersistence, SubtaskChildRunActivator {
   constructor(private readonly db: Db) {}
 
   activateUserRun(input: UserRunActivationInput): UserRunActivationResult {
@@ -150,6 +151,63 @@ export class SqliteRunLifecyclePersistence implements AtomicLifecyclePersistence
         appliedItemId: item.id
       });
       return { kind: "activated" as const, messageItemId: item.id, runId: input.runId };
+    });
+    return transaction();
+  }
+
+  activate(input: SubtaskChildActivationInput): SubtaskChildActivationResult {
+    const transaction = this.db.transaction(() => {
+      const state = getRunState(this.db, input.workspaceId, input.sessionId);
+      if (state.status !== "idle") return { kind: "session-running" as const };
+
+      let head = getSessionHead(this.db, input.workspaceId, input.sessionId);
+      let promptItemId: number | null = null;
+      for (const seed of input.seedItems) {
+        const item = appendContextItem(this.db, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          runId: seed.attachToRun ? input.runId : null,
+          turnId: null,
+          step: null,
+          prevId: head,
+          kind: seed.kind,
+          status: "completed",
+          output: seed.kind === "system"
+            ? { type: "system_text", text: seed.text }
+            : { type: "user_text", text: seed.text },
+          createdAt: input.createdAt
+        });
+        head = item.id;
+        if (seed.attachToRun) promptItemId = item.id;
+      }
+      if (promptItemId == null) throw new Error("subtask child activation requires a prompt item");
+
+      createRunRecord(this.db, {
+        runId: input.runId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        triggerItemId: promptItemId,
+        agentId: input.agentId,
+        providerId: input.providerId,
+        modelId: input.modelId,
+        uiLocale: input.uiLocale,
+        subtaskDepth: input.subtaskDepth,
+        parentRunId: input.parentRunId,
+        parentToolItemId: input.parentToolItemId,
+        status: "running",
+        createdAt: input.createdAt
+      });
+      updateRunState(this.db, {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        status: "running",
+        activeRunId: input.runId,
+        activeAssistantItemId: null,
+        runNoticeText: "",
+        updatedAt: input.createdAt,
+        appliedItemId: promptItemId
+      });
+      return { kind: "activated" as const, promptItemId };
     });
     return transaction();
   }

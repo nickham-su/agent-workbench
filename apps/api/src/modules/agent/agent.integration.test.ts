@@ -37,11 +37,11 @@ import {
   getSessionTranscriptItems,
   moveSessionHead,
   setRunStateIdle,
-  deleteEmptySubtaskSessionIfStillEmpty,
   updateRunRecordStatus,
   updateRunState
 } from "./agent.store.js";
 import { AgentService, isSubtaskParentToolUniqueConstraintError } from "./agent.service.js";
+import { SqliteSubtaskMaintenancePersistence } from "./subtask/sqlite-subtask-maintenance-persistence.js";
 import { AgentRuntime } from "./agent.runtime.js";
 import type { AgentRuntimePort } from "./agent.runtime-port.js";
 import type { AgentApiSubtaskStartRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
@@ -1046,7 +1046,7 @@ test("subtask orphan scanner 仅删除满足全部条件的空壳", async () => 
           createdAt: now - item.age
         });
       }
-      service.scanAndCleanupSubtaskOrphansBestEffort(now);
+      service.cleanupSubtaskOrphansOnStartup({ now });
       assert.equal(getAgentSession(fixture.db, sessionId) != null, item.expected, item.name);
     }
 
@@ -1071,12 +1071,11 @@ test("subtask orphan scanner 仅删除满足全部条件的空壳", async () => 
       status: "completed",
       createdAt: now
     });
-    assert.equal(deleteEmptySubtaskSessionIfStillEmpty(fixture.db, {
+    assert.equal(new SqliteSubtaskMaintenancePersistence(fixture.db).deleteSuspectIfStillEligible({
       workspaceId: fixture.workspaceId,
       sessionId: recheckedSessionId,
-      olderThan: now - 24 * 60 * 60 * 1000,
-      requireForkLineage: true
-    }), 0, "deletion recheck must retain a newly non-empty candidate");
+      olderThan: now - 24 * 60 * 60 * 1000
+    }), false, "deletion recheck must retain a newly non-empty candidate");
   } finally {
     await closeFixture(fixture);
   }
@@ -1108,7 +1107,7 @@ test("subtask orphan scanner 的单条删除异常不会阻断后续候选", asy
       end;
     `);
 
-    new AgentService(fixture.ctx, fixture.app.log).scanAndCleanupSubtaskOrphansBestEffort(now);
+    new AgentService(fixture.ctx, fixture.app.log).cleanupSubtaskOrphansOnStartup({ now });
 
     assert.ok(getAgentSession(fixture.db, blockedSessionId));
     assert.equal(getAgentSession(fixture.db, deletableSessionId), null);

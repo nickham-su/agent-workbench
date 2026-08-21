@@ -87,10 +87,7 @@ import {
   hasNonTerminalSessionItems,
   listNonTerminalRunIdsByItemIds,
   listNonTerminalRunIdsBySession,
-  listEmptySubtaskOrphanCandidates,
-  deleteEmptySubtaskSessionIfStillEmpty,
   listAgentSessionsForArchiveReconcile,
-  listSubtaskChildSessionIdsByRunId,
   moveSessionHead,
   setContextItemsArchiveAt,
   setRunStateIdle,
@@ -128,6 +125,17 @@ import { getWorkspaceEnabledAgentIds } from "../workspaces/workspace.service.js"
 import { ContextWritebackApplication } from "./writeback/context-writeback-application.js";
 import { UiArtifactCapability } from "./artifact/ui-artifact-capability.js";
 import { ensureDirSafeUnderRoot, ensureRealPathUnderRoot, readFileNoFollow, writeFileNoFollow } from "./artifact/safe-file-io.js";
+import { SubtaskApplication } from "./subtask/subtask-application.js";
+import {
+  isSubtaskParentToolUniqueConstraintError,
+  SqliteSubtaskLineagePersistence
+} from "./subtask/sqlite-subtask-lineage-persistence.js";
+import { SqliteSubtaskMaintenancePersistence } from "./subtask/sqlite-subtask-maintenance-persistence.js";
+import { SqliteSubtaskRunQuery } from "./subtask/sqlite-subtask-run-query.js";
+import type {
+  CleanupSubtaskOrphansOnStartupCommand,
+  SubtaskApplicationDependencies,
+} from "./subtask/subtask-ports.js";
 import type { AgentRuntimePort } from "./agent.runtime-port.js";
 
 type AgentCancelCascadeResult = {
@@ -139,15 +147,7 @@ function conflictToHttpError(err: AgentConflictError): HttpError {
   return new HttpError(409, "session head conflict", `conflict_head:${String(err.currentHeadItemId ?? "null")}`);
 }
 
-export function isSubtaskParentToolUniqueConstraintError(err: unknown): boolean {
-  if (!err || typeof err !== "object") return false;
-  const candidate = err as { code?: unknown; message?: unknown };
-  // SQLite reports the indexed columns rather than the partial index name.
-  return candidate.code === "SQLITE_CONSTRAINT_UNIQUE"
-    && typeof candidate.message === "string"
-    && candidate.message.includes("agent_run.parent_run_id")
-    && candidate.message.includes("agent_run.parent_tool_item_id");
-}
+export { isSubtaskParentToolUniqueConstraintError };
 
 function toolArgsSchema(toolName: AgentContextToolName) {
   if (toolName === "bash") {
@@ -1867,6 +1867,7 @@ export class AgentService {
   private readonly promptContextProjector: PromptContextProjector<Awaited<ReturnType<AgentService["buildPromptMessagesForSession"]>>["messages"][number]>;
   private readonly runPromptStaticCacheInvalidator: RunPromptStaticCacheInvalidator;
   private readonly runLifecycleApplication: RunLifecycleApplication;
+  private readonly subtaskApplication: SubtaskApplication;
 
   constructor(
     private readonly ctx: AppContext,
@@ -1877,14 +1878,15 @@ export class AgentService {
       clearRunStaticPrompt: (runId) => this.runPromptStaticCache.clear(runId)
     });
     const sqliteLifecyclePersistence = new SqliteRunLifecyclePersistence(this.ctx.db);
+    const sqliteSubtaskLineagePersistence = new SqliteSubtaskLineagePersistence(this.ctx.db);
+    const sqliteSubtaskRunQuery = new SqliteSubtaskRunQuery(this.ctx.db);
+    const sqliteSubtaskMaintenancePersistence = new SqliteSubtaskMaintenancePersistence(this.ctx.db);
     this.runLifecycleApplication = new RunLifecycleApplication({
       workspaceRunContextReader: {
         get: (workspaceId) => getAgentWorkspaceRunContext(this.ctx, workspaceId)
       },
       runStateReader: { get: (sessionId) => this.getRunState(sessionId) },
-      activeSubtaskChildQuery: {
-        listByParentRun: (params) => listSubtaskChildSessionIdsByRunId(this.ctx.db, params)
-      },
+      activeSubtaskChildQuery: sqliteSubtaskLineagePersistence,
       promptStaticCacheInvalidator: this.runPromptStaticCacheInvalidator,
       runCompletedEventPublisher: {
         publishRunCompleted: (event) => {
@@ -1909,6 +1911,55 @@ export class AgentService {
         error: (bindings, message) => this.logger.error(bindings, message)
       }
     });
+    const subtaskDependencies: SubtaskApplicationDependencies = {
+      parentAnchorReader: {
+        resolve: (params) => this.resolveSubtaskParentContext(params)
+      },
+      lineagePersistence: sqliteSubtaskLineagePersistence,
+      sessionMaterializer: {
+        resolveForStart: (params) => this.resolveSubtaskSessionForStart(params),
+        resolveForkBoundary: (params) => this.resolveSubtaskForkBoundaryItemId(params)
+      },
+      executionProfileReader: {
+        resolve: (input) => {
+          const profile = resolveExecutionProfile(this.ctx, {
+            surface: "subtask",
+            requestedAgentId: input.requestedAgentId,
+            workspaceEnablement: getWorkspaceEnabledAgentIds(this.ctx, input.workspaceId)
+          });
+          return {
+            agentId: profile.agent.id,
+            agentName: profile.agent.name,
+            providerId: profile.provider.id,
+            modelId: profile.model.id,
+            contextWindowTokens: profile.model.contextWindowTokens
+          };
+        },
+        findAgentName: (agentId) => getAgentSettings(this.ctx).agents.find((item) => item.id === agentId)?.name || null,
+        getMaxDepth: () => getAgentRuntimeSettings(this.ctx).maxSubtaskDepth
+      },
+      workspaceReader: {
+        get: (workspaceId) => {
+          const workspace = getWorkspace(this.ctx.db, workspaceId);
+          return workspace ? { path: workspace.path } : null;
+        }
+      },
+      parentRunStateReader: {
+        get: (workspaceId, sessionId) => getRunState(this.ctx.db, workspaceId, sessionId)
+      },
+      childRunActivator: sqliteLifecyclePersistence,
+      runQuery: sqliteSubtaskRunQuery,
+      localCompensationPersistence: sqliteSubtaskMaintenancePersistence,
+      orphanPersistence: sqliteSubtaskMaintenancePersistence,
+      clock: { nowMs },
+      ids: { newId: newSortableId },
+      logger: {
+        warn: (bindings, message) => this.logger.warn(bindings, message),
+        error: (bindings, message) => this.logger.error(bindings, message)
+      },
+      forkGuardTextReader: { get: (uiLocale) => buildSubtaskForkGuardSystemText({ uiLocale }) }
+    };
+    this.subtaskApplication = new SubtaskApplication(subtaskDependencies);
     this.executionProfileResolver = new ExecutionProfileResolver({
       resolveProfile: (input) => this.resolveExecutionProfileForReadSide(input),
       getRuntime: () => this.getAgentRuntimeSettingsForReadSide()
@@ -2060,36 +2111,10 @@ export class AgentService {
     }
   }
 
-  scanAndCleanupSubtaskOrphansBestEffort(now = nowMs()) {
-    const suspectAfter = now - 60 * 60 * 1000;
-    const deleteAfter = now - 24 * 60 * 60 * 1000;
-    for (const candidate of listEmptySubtaskOrphanCandidates(this.ctx.db, suspectAfter)) {
-      try {
-        const eligibleForDeletion =
-          candidate.createdAt < deleteAfter
-          && candidate.forkedFromSessionId != null
-          && candidate.forkedFromItemId != null;
-        if (!eligibleForDeletion) {
-          this.logger.warn(
-            { workspaceId: candidate.workspaceId, sessionId: candidate.sessionId },
-            "subtask orphan suspect retained"
-          );
-          continue;
-        }
-        const deleted = deleteEmptySubtaskSessionIfStillEmpty(this.ctx.db, {
-          workspaceId: candidate.workspaceId,
-          sessionId: candidate.sessionId,
-          olderThan: deleteAfter,
-          requireForkLineage: true
-        });
-        this.logger.warn(
-          { workspaceId: candidate.workspaceId, sessionId: candidate.sessionId, deleted },
-          deleted ? "subtask orphan deleted" : "subtask orphan cleanup skipped after recheck"
-        );
-      } catch (err) {
-        this.logger.warn({ err, workspaceId: candidate.workspaceId, sessionId: candidate.sessionId }, "subtask orphan scan failed for session");
-      }
-    }
+  cleanupSubtaskOrphansOnStartup(
+    command?: CleanupSubtaskOrphansOnStartupCommand,
+  ) {
+    return this.subtaskApplication.cleanupOrphansOnStartup(command);
   }
 
   listSessions(workspaceId: string) {
@@ -3002,329 +3027,12 @@ export class AgentService {
     };
   }
 
-  private toReusedSubtaskStartResponse(existingRun: ReturnType<typeof findSubtaskRunByParentTool>, workspacePath: string) {
-    if (!existingRun) throw new Error("existing subtask run is required");
-    const agent = getAgentSettings(this.ctx).agents.find((item) => item.id === existingRun.agentId);
-    return {
-      sessionId: existingRun.sessionId,
-      runId: existingRun.runId,
-      workspacePath,
-      // A historical/removed agent must not make an otherwise idempotent retry fail.
-      agentName: agent?.name || existingRun.agentId,
-      reused: true
-    };
-  }
-
   getSubtaskPreforkPlanFromWorker(params: AgentApiSubtaskPreforkPlanRequest) {
-    this.resolveSubtaskParentContext(params);
-
-    const resolvedAgentId = String(params.agentId || "").trim();
-    if (!resolvedAgentId) {
-      throw new HttpError(400, "subtask agentId is required", AgentSubtaskErrorCode.AgentRequired);
-    }
-
-    const thresholdRaw = params.thresholdPct;
-    const thresholdPct =
-      thresholdRaw == null
-        ? 95
-        : Number.isFinite(Number(thresholdRaw))
-          ? Math.floor(Number(thresholdRaw))
-          : Number.NaN;
-    if (!Number.isFinite(thresholdPct) || thresholdPct < 50 || thresholdPct > 99) {
-      throw new HttpError(400, "thresholdPct must be between 50 and 99", AgentSubtaskErrorCode.PreforkThresholdInvalid);
-    }
-
-    const profile = resolveExecutionProfile(this.ctx, {
-      surface: "subtask",
-      requestedAgentId: resolvedAgentId,
-      workspaceEnablement: getWorkspaceEnabledAgentIds(this.ctx, params.workspaceId)
-    });
-    const childContextWindowTokens = Math.max(1, Math.floor(Number(profile.model.contextWindowTokens || 0)));
-    const thresholdTokens = Math.max(1, Math.floor(childContextWindowTokens * (thresholdPct / 100)));
-
-    const parentState = getRunState(this.ctx.db, params.workspaceId, params.parentSessionId);
-    const parentLastResponseTotalTokens = typeof parentState.lastResponseTotalTokens === "number"
-      ? Math.max(0, Math.floor(parentState.lastResponseTotalTokens))
-      : null;
-
-    return {
-      shouldPrefork: parentLastResponseTotalTokens != null && parentLastResponseTotalTokens >= thresholdTokens,
-      thresholdPct,
-      parentLastResponseTotalTokens,
-      childContextWindowTokens,
-      thresholdTokens
-    };
+    return this.subtaskApplication.getPreforkPlan(params);
   }
 
   async startSubtaskRunFromWorker(params: AgentApiSubtaskStartRequest) {
-    const {
-      parentSession,
-      parentRun,
-      parentUiLocale,
-      anchor
-    } = this.resolveSubtaskParentContext({
-      workspaceId: params.workspaceId,
-      parentSessionId: params.parentSessionId,
-      parentRunId: params.parentRunId,
-      parentToolItemId: params.parentToolItemId
-    });
-
-    const normalizedDescription = params.description.trim().slice(0, 50);
-    if (!normalizedDescription) {
-      throw new HttpError(400, "subtask description is required", AgentSubtaskErrorCode.DescriptionRequired);
-    }
-    const subtaskTitleBase = normalizedDescription;
-    const resolvedAgentId = String(params.agentId || "").trim();
-    if (!resolvedAgentId) {
-      throw new HttpError(400, "subtask agentId is required", AgentSubtaskErrorCode.AgentRequired);
-    }
-    if (
-      (params.session.mode === "new" || params.session.mode === "fork")
-      && String(params.session.sessionId || "").trim()
-    ) {
-      throw new HttpError(
-        400,
-        `sessionId is not allowed when mode=${params.session.mode}`,
-        AgentSubtaskErrorCode.SessionIdNotAllowed
-      );
-    }
-
-    const hasPreforkSummaryText = Object.prototype.hasOwnProperty.call(params, "preforkSummaryText");
-    const hasPreforkMeta = Object.prototype.hasOwnProperty.call(params, "preforkMeta") && params.preforkMeta != null;
-    if (params.session.mode !== "fork" && (hasPreforkSummaryText || hasPreforkMeta)) {
-      throw new HttpError(
-        400,
-        "preforkSummaryText/preforkMeta is only allowed when session.mode=fork",
-        AgentSubtaskErrorCode.PreforkNotAllowed
-      );
-    }
-
-    const preforkSummaryText = String(params.preforkSummaryText || "").trim();
-    if (preforkSummaryText.length > SUBTASK_PREFORK_SUMMARY_MAX_CHARS) {
-      throw new HttpError(
-        400,
-        `preforkSummaryText must be <= ${SUBTASK_PREFORK_SUMMARY_MAX_CHARS} characters`,
-        AgentSubtaskErrorCode.PreforkSummaryTooLong
-      );
-    }
-
-    if (hasPreforkMeta && !preforkSummaryText) {
-      throw new HttpError(400, "preforkMeta requires non-empty preforkSummaryText", AgentSubtaskErrorCode.PreforkMetaInvalid);
-    }
-    if (hasPreforkMeta) {
-      const preforkMeta = params.preforkMeta!;
-      const expected = this.getSubtaskPreforkPlanFromWorker({
-        workspaceId: params.workspaceId,
-        parentSessionId: params.parentSessionId,
-        parentRunId: params.parentRunId,
-        parentToolItemId: params.parentToolItemId,
-        agentId: resolvedAgentId,
-        thresholdPct: preforkMeta.thresholdPct
-      });
-      const expectedParentLast = expected.parentLastResponseTotalTokens;
-      const expectedChildWindow = expected.childContextWindowTokens;
-      if (
-        expectedParentLast == null
-        || expectedParentLast !== preforkMeta.parentLastResponseTotalTokens
-        || expectedChildWindow !== preforkMeta.childContextWindowTokens
-      ) {
-        throw new HttpError(
-          400,
-          "preforkMeta does not match current prefork plan",
-          AgentSubtaskErrorCode.PreforkMetaMismatch
-        );
-      }
-    }
-
-    const existingChildRun = findSubtaskRunByParentTool(this.ctx.db, {
-      workspaceId: params.workspaceId,
-      parentRunId: parentRun.runId,
-      parentToolItemId: anchor.id
-    });
-    if (existingChildRun) {
-      if (params.session.mode === "existing" && existingChildRun.sessionId !== String(params.session.sessionId || "").trim()) {
-        throw new HttpError(
-          409,
-          "existing subtask session does not match the previously created child run",
-          AgentSubtaskErrorCode.ExistingSessionMismatch
-        );
-      }
-      const workspace = getWorkspace(this.ctx.db, params.workspaceId);
-      if (!workspace) throw new HttpError(404, "workspace not found");
-      return this.toReusedSubtaskStartResponse(existingChildRun, workspace.path);
-    }
-
-    const runtime = getAgentRuntimeSettings(this.ctx);
-    if (parentRun.subtaskDepth == null) {
-      throw new HttpError(409, "subtask depth cannot be determined for current parent run", AgentSubtaskErrorCode.DepthUnknown);
-    }
-    const childDepth = parentRun.subtaskDepth + 1;
-    if (childDepth > runtime.maxSubtaskDepth) {
-      throw new HttpError(409, "subtask depth exceeds configured maximum", AgentSubtaskErrorCode.MaxDepthExceeded);
-    }
-
-    const forkBoundaryItemId = params.session.mode === "fork"
-      ? this.resolveSubtaskForkBoundaryItemId({
-          workspaceId: params.workspaceId,
-          sessionId: params.parentSessionId,
-          anchor
-        })
-      : null;
-    const shouldUsePreforkSummary = params.session.mode === "fork" && preforkSummaryText.length > 0;
-
-
-    if (params.session.mode !== "new" && params.session.mode !== "fork" && params.session.mode !== "existing") {
-      throw new HttpError(400, "invalid subtask session mode", AgentSubtaskErrorCode.SessionModeInvalid);
-    }
-    const { session, createdSessionId } = await this.resolveSubtaskSessionForStart({
-      workspaceId: params.workspaceId,
-      parentSessionId: params.parentSessionId,
-      parentToolItemId: params.parentToolItemId,
-      session: params.session,
-      subtaskTitleBase,
-      forkBoundaryItemId,
-      shouldUsePreforkSummary
-    });
-
-    try {
-    const state = getRunState(this.ctx.db, session.workspaceId, session.id);
-    if (state.status !== "idle") {
-      throw new HttpError(409, "subtask session is running", AgentSubtaskErrorCode.SessionRunning);
-    }
-
-    const profile = resolveExecutionProfile(this.ctx, {
-      surface: "subtask",
-      requestedAgentId: resolvedAgentId,
-      workspaceEnablement: getWorkspaceEnabledAgentIds(this.ctx, params.workspaceId)
-    });
-
-    const workspace = getWorkspace(this.ctx.db, params.workspaceId);
-    if (!workspace) throw new HttpError(404, "workspace not found");
-
-    const createdAt = nowMs();
-    const runId = newSortableId("run");
-    const text = params.prompt.trim();
-    if (!text) {
-      throw new HttpError(400, "subtask prompt is required", AgentSubtaskErrorCode.PromptRequired);
-    }
-
-    const tx = this.ctx.db.transaction(() => {
-      let head = getSessionHead(this.ctx.db, session.workspaceId, session.id);
-      if (shouldUsePreforkSummary) {
-        const summaryItem = appendContextItem(this.ctx.db, {
-          workspaceId: session.workspaceId,
-          sessionId: session.id,
-          runId: null,
-          turnId: null,
-          step: null,
-          prevId: head,
-          kind: "system",
-          status: "completed",
-          output: {
-            type: "system_text",
-            text: preforkSummaryText
-          },
-          createdAt
-        });
-        head = summaryItem.id;
-      }
-      if (params.session.mode === "fork") {
-        const systemItem = appendContextItem(this.ctx.db, {
-          workspaceId: session.workspaceId,
-          sessionId: session.id,
-          runId: null,
-          turnId: null,
-          step: null,
-          prevId: head,
-          kind: "system",
-          status: "completed",
-          output: {
-            type: "system_text",
-            text: buildSubtaskForkGuardSystemText({ uiLocale: parentUiLocale })
-          },
-          createdAt
-        });
-        head = systemItem.id;
-      }
-      const item = appendContextItem(this.ctx.db, {
-        workspaceId: session.workspaceId,
-        sessionId: session.id,
-        runId,
-        turnId: null,
-        step: null,
-        prevId: head,
-        kind: "user",
-        status: "completed",
-        output: {
-          type: "user_text",
-          text
-        },
-        createdAt
-      });
-
-      createRunRecord(this.ctx.db, {
-        runId,
-        workspaceId: session.workspaceId,
-        sessionId: session.id,
-        triggerItemId: item.id,
-        agentId: profile.agent.id,
-          providerId: profile.provider.id,
-          uiLocale: parentUiLocale,
-          modelId: profile.model.id,
-          subtaskDepth: childDepth,
-          parentRunId: parentRun.runId,
-          parentToolItemId: anchor.id,
-          status: "running",
-          createdAt
-        });
-
-      updateRunState(this.ctx.db, {
-        workspaceId: session.workspaceId,
-        sessionId: session.id,
-        status: "running",
-        activeRunId: runId,
-        activeAssistantItemId: null,
-        runNoticeText: "",
-        updatedAt: createdAt,
-        appliedItemId: item.id
-        });
-      });
-    try {
-      tx();
-    } catch (err) {
-      if (createdSessionId) {
-        deleteEmptySubtaskSessionIfStillEmpty(this.ctx.db, {
-          workspaceId: params.workspaceId,
-          sessionId: createdSessionId
-        });
-      }
-      if (isSubtaskParentToolUniqueConstraintError(err)) {
-        const existingAfterConflict = findSubtaskRunByParentTool(this.ctx.db, {
-          workspaceId: params.workspaceId,
-          parentRunId: parentRun.runId,
-          parentToolItemId: anchor.id
-        });
-        if (existingAfterConflict) return this.toReusedSubtaskStartResponse(existingAfterConflict, workspace.path);
-      }
-      throw err;
-    }
-
-    return {
-      sessionId: session.id,
-      runId,
-      workspacePath: workspace.path,
-      agentName: profile.agent.name,
-      reused: false
-    };
-    } catch (err) {
-      if (createdSessionId) {
-        deleteEmptySubtaskSessionIfStillEmpty(this.ctx.db, {
-          workspaceId: params.workspaceId,
-          sessionId: createdSessionId
-        });
-      }
-      throw err;
-    }
+    return await this.subtaskApplication.startSubtask(params);
   }
 
   private resolveSubtaskForkBoundaryItemId(params: {
@@ -3352,46 +3060,11 @@ export class AgentService {
   }
 
   getSubtaskRunResultFromWorker(params: AgentApiSubtaskResultRequest) {
-    const session = getAgentSession(this.ctx.db, params.sessionId);
-    if (!session) throw new HttpError(404, "session not found");
-    if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
-    const run = getRunRecord(this.ctx.db, params.runId);
-    if (!run || run.sessionId !== params.sessionId || run.workspaceId !== params.workspaceId) {
-      throw new HttpError(404, "run not found");
-    }
-
-    const items = getSessionVisibleItems(this.ctx.db, params.workspaceId, params.sessionId)
-      .filter((item) => item.runId === params.runId)
-      .sort((a, b) => a.id - b.id);
-
-    for (let i = items.length - 1; i >= 0; i -= 1) {
-      const item = items[i];
-      if (item?.kind === "assistant" && item.output.type === "assistant_text" && String(item.output.text || "").trim()) {
-        // 失败 assistant 在超过重试次数后也返回其 partial text,错误由 run status 承载。
-        return { resultText: item.output.text || "" };
-      }
-    }
-    for (let i = items.length - 1; i >= 0; i -= 1) {
-      const item = items[i];
-      if (item?.kind === "system" && item.output.type === "system_text" && String(item.output.text || "").trim()) {
-        return { resultText: item.output.text || "" };
-      }
-    }
-
-    return { resultText: "" };
+    return this.subtaskApplication.getResult(params);
   }
 
   getSubtaskRunStatusFromWorker(params: AgentApiSubtaskStatusRequest) {
-    const session = getAgentSession(this.ctx.db, params.sessionId);
-    if (!session) throw new HttpError(404, "session not found");
-    if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
-    const run = getRunRecord(this.ctx.db, params.runId);
-    if (!run || run.sessionId !== params.sessionId || run.workspaceId !== params.workspaceId) {
-      throw new HttpError(404, "run not found");
-    }
-    return {
-      status: run.status
-    };
+    return this.subtaskApplication.getStatus(params);
   }
 
   getRunFinalText(params: { runId: string }) {
