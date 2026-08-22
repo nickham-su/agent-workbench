@@ -280,6 +280,165 @@ test("Context compact returns the shared success shape and clears active run tok
   assert.equal(getRunState(fixture.db, fixture.workspaceId, session.id).activeRunId, runId);
 });
 
+test("Context compact token cleanup failure happens after archive and summary commit without archive rollback", async () => {
+  const fixture = await createFixture();
+  const session = createSession(fixture);
+  const runId = newSortableId("run");
+  createRun(fixture, session.id, runId);
+  updateRunState(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "running",
+    activeRunId: runId,
+    activeAssistantItemId: null,
+    lastResponseTotalTokens: 12_345,
+    updatedAt: Date.now(),
+    appliedItemId: 0
+  });
+  const item = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    turnId: "turn",
+    step: 1,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "post-commit compact token failure" },
+    createdAt: Date.now()
+  });
+  fixture.db.exec(`
+    create trigger fail_compaction_token_cleanup
+    before update on agent_session_run_state
+    when new.last_response_total_tokens is null
+    begin
+      select raise(abort, 'injected token cleanup failure');
+    end;
+  `);
+
+  const response = await compact(fixture, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    expectedHeadItemId: item.id,
+    summaryText: "summary survives token cleanup failure"
+  });
+
+  assert.equal(response.statusCode, 500, response.body);
+  assert.equal(getContextItemById(fixture.db, item.id)?.archiveAt == null, false);
+  const headItemId = getSessionHead(fixture.db, fixture.workspaceId, session.id);
+  assert.ok(headItemId != null);
+  assert.equal(getContextItemById(fixture.db, headItemId!)?.boundaryReason, "compaction");
+  assert.equal(getRunState(fixture.db, fixture.workspaceId, session.id).lastResponseTotalTokens, 12_345);
+  const archivePath = path.join(agentArchiveSessionDir(fixture.dataDir, fixture.workspaceId, session.id), "00000001.log");
+  assert.ok((await fs.readFile(archivePath, "utf-8")).includes("post-commit compact token failure"));
+  assert.equal(await fs.stat(agentArchivePendingSidecarPath(fixture.dataDir, fixture.workspaceId, session.id)).then(() => true, () => false), false);
+});
+
+test("Clear idle write failure rolls back the archive append after summary and marker commit", async () => {
+  const fixture = await createFixture();
+  const session = createSession(fixture);
+  const item = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "post-commit clear idle failure" },
+    createdAt: Date.now()
+  });
+  updateRunState(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "idle",
+    activeRunId: null,
+    activeAssistantItemId: null,
+    updatedAt: Date.now(),
+    appliedItemId: item.id
+  });
+  fixture.db.exec(`
+    create trigger fail_clear_idle_write
+    before update on agent_session_run_state
+    when new.status = 'idle' and new.active_run_id is null
+    begin
+      select raise(abort, 'injected clear idle write failure');
+    end;
+  `);
+
+  const response = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/clear`,
+    payload: { workspaceId: fixture.workspaceId, reason: "P0 characterization" }
+  });
+
+  assert.equal(response.statusCode, 500, response.body);
+  assert.equal(getContextItemById(fixture.db, item.id)?.archiveAt == null, false);
+  const headItemId = getSessionHead(fixture.db, fixture.workspaceId, session.id);
+  assert.ok(headItemId != null);
+  assert.equal(getContextItemById(fixture.db, headItemId!)?.boundaryReason, "clear");
+  const archivePath = path.join(agentArchiveSessionDir(fixture.dataDir, fixture.workspaceId, session.id), "00000001.log");
+  assert.equal(await fs.readFile(archivePath, "utf-8"), "");
+  assert.equal(await fs.stat(agentArchivePendingSidecarPath(fixture.dataDir, fixture.workspaceId, session.id)).then(() => true, () => false), false);
+});
+
+test("Clear idle write failure writes a sidecar when rollback skips an externally extended archive", async () => {
+  const fixture = await createFixture({
+    agentTestFaults: { archiveRollback: { appendBeforeRollback: "external append\n" } }
+  });
+  const session = createSession(fixture);
+  const item = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "clear idle rollback skip" },
+    createdAt: Date.now()
+  });
+  updateRunState(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "idle",
+    activeRunId: null,
+    activeAssistantItemId: null,
+    updatedAt: Date.now(),
+    appliedItemId: item.id
+  });
+  fixture.db.exec(`
+    create trigger fail_clear_idle_write_with_external_append
+    before update on agent_session_run_state
+    when new.status = 'idle' and new.active_run_id is null
+    begin
+      select raise(abort, 'injected clear idle write failure');
+    end;
+  `);
+
+  const response = await fixture.app.inject({
+    method: "POST",
+    url: `/api/agent/sessions/${session.id}/clear`,
+    payload: { workspaceId: fixture.workspaceId, reason: "P0 rollback skipped characterization" }
+  });
+
+  assert.equal(response.statusCode, 500, response.body);
+  assert.equal(getContextItemById(fixture.db, item.id)?.archiveAt == null, false);
+  const headItemId = getSessionHead(fixture.db, fixture.workspaceId, session.id);
+  assert.ok(headItemId != null);
+  assert.equal(getContextItemById(fixture.db, headItemId!)?.boundaryReason, "clear");
+  const archivePath = path.join(agentArchiveSessionDir(fixture.dataDir, fixture.workspaceId, session.id), "00000001.log");
+  const archiveText = await fs.readFile(archivePath, "utf-8");
+  assert.ok(archiveText.includes("clear idle rollback skip"));
+  assert.ok(archiveText.includes("external append"));
+  const sidecar = JSON.parse(await fs.readFile(agentArchivePendingSidecarPath(fixture.dataDir, fixture.workspaceId, session.id), "utf-8"));
+  assert.equal(sidecar.operation, "clear");
+  assert.equal(sidecar.snapshots.length, 1);
+});
+
 test("Context compact returns 200 compacted:false for empty and non-terminal visible context", async () => {
   const emptyFixture = await createFixture();
   const emptySession = createSession(emptyFixture);

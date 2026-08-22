@@ -83,20 +83,21 @@ test("P3 wiring: Lifecycle receives only the active child query while exposing i
   );
 });
 
-test("P5 structure: module only triggers the orphan facade and keeps startup policy out", async () => {
+test("P5 structure: module only triggers explicit startup use-cases and keeps startup policy out", async () => {
   const moduleSource = await fs.readFile(
     new URL("../agent.module.ts", import.meta.url),
     "utf8",
   );
   assert.match(moduleSource, /service\.cleanupSubtaskOrphansOnStartup\(\)/);
   assert.match(moduleSource, /try\s*\{\s*service\.cleanupSubtaskOrphansOnStartup\(\);\s*\}\s*catch/);
+  assert.match(moduleSource, /new ArchiveStartupReconcileApplication\(/);
+  assert.match(moduleSource, /listSessions:\s*\(\)\s*=>\s*listAgentSessionsForArchiveReconcile\(ctx\.db\)/);
   assert.doesNotMatch(moduleSource, /scanAndCleanupSubtaskOrphansBestEffort/);
-  assert.doesNotMatch(moduleSource, /agent\.store/);
   assert.doesNotMatch(moduleSource, /listSuspects|deleteSuspectIfStillEligible/);
   assert.doesNotMatch(moduleSource, /60 \* 60 \* 1000|24 \* 60 \* 60 \* 1000/);
   assert.ok(
     moduleSource.indexOf("cleanupSubtaskOrphansOnStartup")
-      < moduleSource.indexOf("reconcileAllArchivePendingBestEffort"),
+      < moduleSource.indexOf("new ArchiveStartupReconcileApplication"),
   );
 });
 

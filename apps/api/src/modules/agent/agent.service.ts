@@ -1,7 +1,6 @@
 import type { FastifyBaseLogger } from "fastify";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { spawn } from "node:child_process";
 import { TextDecoder } from "node:util";
 import type {
   AgentCancelSessionRequest,
@@ -47,9 +46,6 @@ import { getWorkspace, listRecentWorkspaces } from "../workspaces/workspace.stor
 import { listEnabledWorkspaceAgentsInstructions, listEnabledWorkspaceExternalSkillRoots } from "../workspaces/workspace.service.js";
 import {
   agentArchiveSessionDir,
-  agentArchivePendingSidecarPath,
-  compactionSnippetPath,
-  tmpRoot,
 } from "../../infra/fs/paths.js";
 import {
   AgentConflictError,
@@ -87,15 +83,13 @@ import {
   hasNonTerminalSessionItems,
   listNonTerminalRunIdsByItemIds,
   listNonTerminalRunIdsBySession,
-  listAgentSessionsForArchiveReconcile,
   moveSessionHead,
   setContextItemsArchiveAt,
   setRunStateIdle,
   updateContextItem,
   updateRunRecordStatus,
   updateAgentSessionTitle,
-  updateRunState,
-  appendSystemSummaryAndArchiveItems
+  updateRunState
 } from "./agent.store.js";
 import {
   getAgentGlobalPromptSettings,
@@ -124,7 +118,6 @@ import { ReadSideApplication } from "./read-side/read-side-application.js";
 import { getWorkspaceEnabledAgentIds } from "../workspaces/workspace.service.js";
 import { ContextWritebackApplication } from "./writeback/context-writeback-application.js";
 import { UiArtifactCapability } from "./artifact/ui-artifact-capability.js";
-import { ensureDirSafeUnderRoot, ensureRealPathUnderRoot, readFileNoFollow, writeFileNoFollow } from "./artifact/safe-file-io.js";
 import { SubtaskApplication } from "./subtask/subtask-application.js";
 import {
   isSubtaskParentToolUniqueConstraintError,
@@ -137,6 +130,14 @@ import type {
   SubtaskApplicationDependencies,
 } from "./subtask/subtask-ports.js";
 import type { AgentRuntimePort } from "./agent.runtime-port.js";
+import { ArchiveStorage } from "./archive/archive-storage.js";
+import { SqliteCompactionArchivePersistence } from "./archive/sqlite-compaction-archive-persistence.js";
+import { CompactionArchiveApplication } from "./compaction/compaction-archive-application.js";
+import { ManualCompactionApplication } from "./compaction/manual-compaction-application.js";
+import type { ManualCompactionRuntime } from "./compaction/manual-compaction-ports.js";
+import { ArchiveReadApplication } from "./archive/archive-read-application.js";
+import { ArchiveReadStorage } from "./archive/archive-read-storage.js";
+import { CompactionSnippetCache } from "./archive/compaction-snippet-cache.js";
 
 type AgentCancelCascadeResult = {
   result: AgentControlResult;
@@ -829,112 +830,13 @@ function normalizeRunNoticeText(raw: unknown) {
   return `${value.slice(0, 1000)}...`;
 }
 
-type ArchiveWriteSnapshot = {
-  filePath: string;
-  beforeSize: number;
-  expectedSize: number;
-};
-
-type ArchivePendingRecord = {
-  version: 1;
-  operation: "compaction" | "clear";
-  workspaceId: string;
-  sessionId: string;
-  runId?: string;
-  createdAt: number;
-  snapshots: Array<{
-    fileKey: string;
-    beforeSize: number;
-    expectedSize: number;
-  }>;
-};
-
-function isNonNegativeSafeInt(value: unknown) {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-
-function archiveFileKeyFromPath(dataDir: string, workspaceId: string, sessionId: string, filePath: string) {
-  const dataRoot = path.resolve(dataDir);
-  const sessionDir = path.resolve(agentArchiveSessionDir(dataDir, workspaceId, sessionId));
-  const fileAbs = path.resolve(filePath);
-  if (!fileAbs.startsWith(sessionDir + path.sep)) return null;
-  const fileKey = path.relative(dataRoot, fileAbs);
-  const parts = fileKey.split(path.sep);
-  if (parts.length < 4 || parts[0] !== "agent" || parts[1] !== "archive" || parts.some((part) => !part || part === "." || part === "..")) {
-    return null;
-  }
-  if (!ARCHIVE_FILE_NAME_RE.test(parts[parts.length - 1] || "")) return null;
-  return fileKey;
-}
-
-function archivePathFromFileKey(dataDir: string, workspaceId: string, sessionId: string, fileKey: unknown) {
-  if (typeof fileKey !== "string" || !fileKey) return null;
-  const dataRoot = path.resolve(dataDir);
-  const sessionDir = path.resolve(agentArchiveSessionDir(dataDir, workspaceId, sessionId));
-  const fileAbs = path.resolve(dataRoot, fileKey);
-  if (!fileAbs.startsWith(sessionDir + path.sep)) return null;
-  return archiveFileKeyFromPath(dataDir, workspaceId, sessionId, fileAbs) === fileKey ? fileAbs : null;
-}
-
-function parseArchivePendingRecord(value: unknown): ArchivePendingRecord | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const record = value as Record<string, unknown>;
-  if (
-    record.version !== 1
-    || (record.operation !== "compaction" && record.operation !== "clear")
-    || typeof record.workspaceId !== "string" || !record.workspaceId
-    || typeof record.sessionId !== "string" || !record.sessionId
-    || !isNonNegativeSafeInt(record.createdAt)
-    || !Array.isArray(record.snapshots) || record.snapshots.length === 0
-  ) {
-    return null;
-  }
-  const snapshots = record.snapshots.map((snapshot) => {
-    if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return null;
-    const row = snapshot as Record<string, unknown>;
-    const beforeSize = row.beforeSize;
-    const expectedSize = row.expectedSize;
-    if (
-      typeof row.fileKey !== "string"
-      || typeof beforeSize !== "number" || !Number.isSafeInteger(beforeSize) || beforeSize < 0
-      || typeof expectedSize !== "number" || !Number.isSafeInteger(expectedSize) || expectedSize < 0
-      || beforeSize > expectedSize
-    ) return null;
-    return { fileKey: row.fileKey, beforeSize, expectedSize };
-  });
-  if (snapshots.some((snapshot) => snapshot == null)) return null;
-  const runId = typeof record.runId === "string" && record.runId ? record.runId : undefined;
-  return {
-    version: 1,
-    operation: record.operation,
-    workspaceId: record.workspaceId,
-    sessionId: record.sessionId,
-    ...(runId ? { runId } : {}),
-    createdAt: Number(record.createdAt),
-    snapshots: snapshots as ArchivePendingRecord["snapshots"]
-  };
-}
-
-function normalizePositiveInt(raw: unknown, options: { fallback: number; min: number; max: number }) {
-  if (raw === undefined || raw === null || raw === "") return options.fallback;
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return options.fallback;
-  const value = Math.floor(n);
-  if (value < options.min) return options.min;
-  if (value > options.max) return options.max;
-  return value;
-}
-
 function sanitizeArchiveText(raw: string) {
   return String(raw || "").replace(/\r/g, "\\r").replace(/\n/g, "\\n");
 }
 
-function parseArchivedItemIdFromArchiveLine(line: string) {
-  const m = /^item=(\d+)\s/.exec(String(line || ""));
-  if (!m) return null;
-  const n = Number(m[1]);
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) return null;
-  return n;
+function shouldIncludeSystemTextInPrompt(text: string) {
+  const normalized = String(text || "").trim();
+  return Boolean(normalized) && !normalized.startsWith(RUN_STATUS_SYSTEM_TEXT_PREFIX);
 }
 
 function buildCompactionSnippetMessageText(params: {
@@ -944,661 +846,16 @@ function buildCompactionSnippetMessageText(params: {
 }) {
   const body = params.excerptLines.join("\n");
   if (normalizeAgentUiLocale(params.uiLocale) !== "zh-CN") {
-    return renderPromptTemplateFile("agent/compaction-snippet-message.en-US.tmpl.txt", {
-      body,
-      minPos: params.minPos
-    });
+    return renderPromptTemplateFile("agent/compaction-snippet-message.en-US.tmpl.txt", { body, minPos: params.minPos });
   }
-
-  return renderPromptTemplateFile("agent/compaction-snippet-message.zh-CN.tmpl.txt", {
-    body,
-    minPos: params.minPos
-  });
+  return renderPromptTemplateFile("agent/compaction-snippet-message.zh-CN.tmpl.txt", { body, minPos: params.minPos });
 }
 
-function formatArchiveFileName(seq: number) {
-  return `${String(seq).padStart(ARCHIVE_FILE_NAME_WIDTH, "0")}.log`;
-}
-
-function parseArchiveFileName(name: string) {
-  if (!ARCHIVE_FILE_NAME_RE.test(name)) return null;
-  const n = Number(name.slice(0, ARCHIVE_FILE_NAME_WIDTH));
-  if (!Number.isFinite(n) || n < 1) return null;
-  return n;
-}
-
-async function listArchiveFilesAsc(dirPath: string) {
-  let entries: string[] = [];
-  try {
-    entries = await fs.readdir(dirPath);
-  } catch (err: any) {
-    if (err && err.code === "ENOENT") return [];
-    throw err;
-  }
-  return entries
-    .map((name) => ({ name, seq: parseArchiveFileName(name) }))
-    .filter((item): item is { name: string; seq: number } => item.seq != null)
-    .sort((a, b) => a.seq - b.seq)
-    .map((item) => item.name);
-}
-
-async function readCompactionSnippetCacheBestEffort(params: {
-  dataDir: string;
-  workspaceId: string;
-  sessionId: string;
-  summaryItemId: number;
-}) {
-  const filePath = compactionSnippetPath(params.dataDir, params.workspaceId, params.sessionId, params.summaryItemId);
-  const tmpAbs = path.resolve(tmpRoot(params.dataDir));
-  const fileAbs = path.resolve(filePath);
-  if (!fileAbs.startsWith(tmpAbs + path.sep) && fileAbs !== tmpAbs) {
-    return "";
-  }
-  const st = await fs.lstat(fileAbs).catch(() => null);
-  if (!st || !st.isFile() || st.isSymbolicLink()) {
-    return "";
-  }
-  if (st.size > COMPACTION_SNIPPET_CACHE_MAX_BYTES) {
-    return "";
-  }
-  await ensureRealPathUnderRoot(tmpAbs, fileAbs);
-  try {
-    return await readFileNoFollow(fileAbs);
-  } catch {
-    return "";
-  }
-}
-
-async function writeCompactionSnippetCacheBestEffort(params: {
-  dataDir: string;
-  workspaceId: string;
-  sessionId: string;
-  summaryItemId: number;
-  text: string;
-  logger: FastifyBaseLogger;
-}) {
-  const filePath = compactionSnippetPath(params.dataDir, params.workspaceId, params.sessionId, params.summaryItemId);
-  const tmpAbs = path.resolve(tmpRoot(params.dataDir));
-  const fileAbs = path.resolve(filePath);
-  if (!fileAbs.startsWith(tmpAbs + path.sep) && fileAbs !== tmpAbs) {
-    params.logger.warn({ filePath }, "compaction snippet cache path is outside tmpRoot");
-    return;
-  }
-  const dirAbs = path.dirname(fileAbs);
-  try {
-    await ensureDirSafeUnderRoot(tmpAbs, dirAbs);
-    await ensureRealPathUnderRoot(tmpAbs, dirAbs);
-    await writeFileNoFollow(fileAbs, params.text);
-  } catch (err) {
-    params.logger.warn({ err, filePath }, "failed to write compaction snippet cache");
-  }
-}
-
-async function buildCompactionSnippetExcerptLines(params: {
-  dataDir: string;
-  workspaceId: string;
-  sessionId: string;
-  itemIds: number[];
-}) {
-  const need = new Set<number>(params.itemIds);
-  const resolved = new Map<number, { pos: number; line: string }>();
-  if (need.size === 0) {
-    return [] as Array<{ pos: number; line: string }>;
-  }
-
-  const dirPath = agentArchiveSessionDir(params.dataDir, params.workspaceId, params.sessionId);
-  const files = await listArchiveFilesAsc(dirPath);
-  if (files.length === 0) {
-    return [] as Array<{ pos: number; line: string }>;
-  }
-
-  outer: for (let i = files.length - 1; i >= 0; i -= 1) {
-    const fileName = files[i] || "";
-    if (!fileName) continue;
-    const fileSeq = parseArchiveFileName(fileName);
-    if (fileSeq == null) continue;
-    const filePath = path.join(dirPath, fileName);
-    const content = await fs.readFile(filePath, "utf-8").catch((err: any) => {
-      if (err && err.code === "ENOENT") return "";
-      throw err;
-    });
-    const lines = splitArchiveFileLines(content);
-    for (let lineNo = lines.length; lineNo >= 1; lineNo -= 1) {
-      if (resolved.size >= need.size) break outer;
-      const line = String(lines[lineNo - 1] || "");
-      if (!line) continue;
-      const itemId = parseArchivedItemIdFromArchiveLine(line);
-      if (itemId == null) continue;
-      if (!need.has(itemId)) continue;
-      if (resolved.has(itemId)) continue;
-      const pos = toArchivePos(fileSeq, lineNo);
-      resolved.set(itemId, { pos, line });
-    }
-  }
-
-  return params.itemIds
-    .map((id) => resolved.get(id) || null)
-    .filter((row): row is { pos: number; line: string } => row != null)
-    .sort((a, b) => a.pos - b.pos);
-}
-
-function splitArchiveFileLines(text: string) {
-  if (!text) return [];
-  const lines = text.split(/\r?\n/);
-  if (/\r?\n$/.test(text)) {
-    if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
-    return lines;
-  }
-  // 末行没有换行符时视为潜在半行,读取时忽略以避免并发写入噪声。
-  lines.pop();
-  return lines;
-}
-
-async function appendArchiveLines(params: {
-  dataDir: string;
-  workspaceId: string;
-  sessionId: string;
-  lines: string[];
-  failAfterChunks?: number;
-}) {
-  if (params.lines.length === 0) return [] as ArchiveWriteSnapshot[];
-  const dirPath = agentArchiveSessionDir(params.dataDir, params.workspaceId, params.sessionId);
-  await fs.mkdir(dirPath, { recursive: true });
-  const snapshots = new Map<string, ArchiveWriteSnapshot>();
-
-  const files = await listArchiveFilesAsc(dirPath);
-  let currentSeq = files.length > 0 ? parseArchiveFileName(files[files.length - 1] || "") ?? 1 : 1;
-  let currentName = formatArchiveFileName(currentSeq);
-  let currentPath = path.join(dirPath, currentName);
-  let currentCount = 0;
-
-  try {
-    const content = await fs.readFile(currentPath, "utf-8");
-    currentCount = splitArchiveFileLines(content).length;
-  } catch (err: any) {
-    if (!(err && err.code === "ENOENT")) throw err;
-  }
-
-  let cursor = 0;
-  let writtenChunks = 0;
-  while (cursor < params.lines.length) {
-    if (currentCount >= ARCHIVE_FILE_LINE_LIMIT) {
-      currentSeq += 1;
-      currentName = formatArchiveFileName(currentSeq);
-      currentPath = path.join(dirPath, currentName);
-      currentCount = 0;
-    }
-    const writable = Math.min(ARCHIVE_FILE_LINE_LIMIT - currentCount, params.lines.length - cursor);
-    const chunk = params.lines.slice(cursor, cursor + writable);
-    if (chunk.length > 0) {
-      let snapshot = snapshots.get(currentPath);
-      if (!snapshot) {
-        let beforeSize = 0;
-        try {
-          const stat = await fs.stat(currentPath);
-          beforeSize = stat.size;
-        } catch (err: any) {
-          if (!(err && err.code === "ENOENT")) throw err;
-        }
-        snapshot = {
-          filePath: currentPath,
-          beforeSize,
-          expectedSize: beforeSize
-        };
-        snapshots.set(currentPath, snapshot);
-      }
-      const payload = `${chunk.join("\n")}\n`;
-      await fs.appendFile(currentPath, payload, "utf-8");
-      snapshot.expectedSize += Buffer.byteLength(payload, "utf-8");
-      currentCount += chunk.length;
-      cursor += chunk.length;
-      writtenChunks += 1;
-      if (typeof params.failAfterChunks === "number" && Number.isFinite(params.failAfterChunks) && writtenChunks >= params.failAfterChunks) {
-        const err = new Error("injected archive write failure");
-        (err as Error & { code?: string }).code = "TEST_ARCHIVE_WRITE_FAIL";
-        throw err;
-      }
-    }
-  }
-
-  return Array.from(snapshots.values());
-}
-
-async function writeArchivePendingSidecarBestEffort(params: {
-  dataDir: string;
-  operation: ArchivePendingRecord["operation"];
-  workspaceId: string;
-  sessionId: string;
-  runId?: string;
-  snapshots: ArchiveWriteSnapshot[];
-  fault?: { failWrite?: boolean; failRename?: boolean } | null;
-  logger: FastifyBaseLogger;
-}) {
-  const snapshots = params.snapshots.map((snapshot) => {
-    const fileKey = archiveFileKeyFromPath(params.dataDir, params.workspaceId, params.sessionId, snapshot.filePath);
-    return fileKey && isNonNegativeSafeInt(snapshot.beforeSize) && isNonNegativeSafeInt(snapshot.expectedSize)
-      ? { fileKey, beforeSize: snapshot.beforeSize, expectedSize: snapshot.expectedSize }
-      : null;
-  });
-  if (snapshots.length === 0 || snapshots.some((snapshot) => snapshot == null)) return;
-
-  const record: ArchivePendingRecord = {
-    version: 1,
-    operation: params.operation,
-    workspaceId: params.workspaceId,
-    sessionId: params.sessionId,
-    ...(params.runId ? { runId: params.runId } : {}),
-    createdAt: nowMs(),
-    snapshots: snapshots as ArchivePendingRecord["snapshots"]
-  };
-  const sidecarPath = agentArchivePendingSidecarPath(params.dataDir, params.workspaceId, params.sessionId);
-  const tmpPath = `${sidecarPath}.${newSortableId("tmp")}.tmp`;
-  try {
-    await fs.mkdir(path.dirname(sidecarPath), { recursive: true });
-    if (params.fault?.failWrite) throw new Error("injected archive pending sidecar write failure");
-    await fs.writeFile(tmpPath, JSON.stringify(record), "utf-8");
-    if (params.fault?.failRename) throw new Error("injected archive pending sidecar rename failure");
-    await fs.rename(tmpPath, sidecarPath);
-  } catch (err) {
-    await fs.rm(tmpPath, { force: true }).catch(() => undefined);
-    params.logger.warn(
-      { err, operation: params.operation, workspaceId: params.workspaceId, sessionId: params.sessionId, snapshots: record.snapshots.length },
-      "archive pending sidecar write failed"
-    );
-  }
-}
-
-async function reconcileArchivePendingSidecarBestEffort(params: {
-  dataDir: string;
-  workspaceId: string;
-  sessionId: string;
-  logger: FastifyBaseLogger;
-}) {
-  const sidecarPath = agentArchivePendingSidecarPath(params.dataDir, params.workspaceId, params.sessionId);
-  let raw: string;
-  try {
-    raw = await fs.readFile(sidecarPath, "utf-8");
-  } catch (err: any) {
-    if (err?.code === "ENOENT") return false;
-    params.logger.warn({ err, workspaceId: params.workspaceId, sessionId: params.sessionId }, "archive pending sidecar read failed");
-    return false;
-  }
-
-  let record: ArchivePendingRecord | null = null;
-  try {
-    record = parseArchivePendingRecord(JSON.parse(raw));
-  } catch {
-    record = null;
-  }
-  if (!record || record.workspaceId !== params.workspaceId || record.sessionId !== params.sessionId) {
-    params.logger.warn({ workspaceId: params.workspaceId, sessionId: params.sessionId }, "archive pending sidecar is invalid");
-    return false;
-  }
-  if (record.snapshots.length !== 1) {
-    params.logger.warn(
-      { operation: record.operation, workspaceId: record.workspaceId, sessionId: record.sessionId, snapshots: record.snapshots.length },
-      "archive pending sidecar has multiple snapshots; automatic reconcile skipped"
-    );
-    return false;
-  }
-
-  const targets = record.snapshots.map((snapshot) => ({ ...snapshot, filePath: archivePathFromFileKey(params.dataDir, params.workspaceId, params.sessionId, snapshot.fileKey) }));
-  if (targets.some((target) => !target.filePath)) {
-    params.logger.warn({ operation: record.operation, workspaceId: record.workspaceId, sessionId: record.sessionId, snapshots: record.snapshots.length }, "archive pending sidecar has invalid file key");
-    return false;
-  }
-
-  try {
-    const stats = await Promise.all(targets.map(async (target) => fs.stat(target.filePath!)));
-    if (stats.some((stat, index) => stat.size !== targets[index]?.expectedSize)) {
-      params.logger.warn({ operation: record.operation, workspaceId: record.workspaceId, sessionId: record.sessionId, snapshots: targets.length }, "archive pending sidecar size mismatch");
-      return false;
-    }
-    for (const target of targets) {
-      await fs.truncate(target.filePath!, target.beforeSize);
-    }
-    await fs.rm(sidecarPath, { force: true });
-    return true;
-  } catch (err) {
-    params.logger.warn({ err, operation: record.operation, workspaceId: record.workspaceId, sessionId: record.sessionId, snapshots: targets.length }, "archive pending sidecar reconcile failed");
-    return false;
-  }
-}
-
-async function rollbackArchiveLinesBestEffort(
-  snapshots: ArchiveWriteSnapshot[],
-  beforeRollback?: () => Promise<void>
-) {
-  await beforeRollback?.();
-  let reverted = 0;
-  let skipped = 0;
-  const skippedSnapshots: ArchiveWriteSnapshot[] = [];
-  for (let i = snapshots.length - 1; i >= 0; i -= 1) {
-    const snapshot = snapshots[i];
-    if (!snapshot) continue;
-    try {
-      const stat = await fs.stat(snapshot.filePath);
-      if (stat.size !== snapshot.expectedSize) {
-        skipped += 1;
-        skippedSnapshots.push(snapshot);
-        continue;
-      }
-      await fs.truncate(snapshot.filePath, snapshot.beforeSize);
-      reverted += 1;
-    } catch (err: any) {
-      skipped += 1;
-      skippedSnapshots.push(snapshot);
-    }
-  }
-
-  return { reverted, skipped, skippedSnapshots };
-}
-
-function toArchivePos(fileSeq: number, lineNo: number) {
-  return (fileSeq - 1) * ARCHIVE_FILE_LINE_LIMIT + lineNo;
-}
-
-function normalizeBeforePos(raw: unknown) {
-  if (raw === undefined || raw === null || raw === "") return undefined;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 2) {
-    throw new HttpError(400, "beforePos must be an integer >= 2", "AGENT_ARCHIVE_BEFORE_POS_INVALID");
-  }
-  return parsed;
-}
-
-function fitArchiveLineWithinBudget(line: string, remainChars: number) {
-  if (remainChars <= 0) return null;
-  const lineBudget = remainChars - 1;
-  if (lineBudget <= 0) return null;
-  if (line.length <= lineBudget) return line;
-
-  const sepIndex = line.indexOf(" | ");
-  if (sepIndex >= 0) {
-    const prefix = line.slice(0, sepIndex + 3);
-    const minBudget = prefix.length + ARCHIVE_RESULT_TRUNCATED_MARKER.length;
-    if (lineBudget < minBudget) return null;
-    const body = line.slice(prefix.length);
-    const keepBody = lineBudget - minBudget;
-    return `${prefix}${body.slice(0, keepBody)}${ARCHIVE_RESULT_TRUNCATED_MARKER}`;
-  }
-
-  if (lineBudget < ARCHIVE_RESULT_TRUNCATED_MARKER.length) return null;
-  const keepPrefix = lineBudget - ARCHIVE_RESULT_TRUNCATED_MARKER.length;
-  return `${line.slice(0, keepPrefix)}${ARCHIVE_RESULT_TRUNCATED_MARKER}`;
-}
-
-function formatArchiveToolResultText(newestFirstLines: string[], maxChars: number) {
-  if (newestFirstLines.length === 0) return "";
-  const keptNewestFirst: string[] = [];
-  let chars = 0;
-
-  for (const line of newestFirstLines) {
-    const remain = maxChars - chars;
-    const fitted = fitArchiveLineWithinBudget(line, remain);
-    if (fitted == null) break;
-    keptNewestFirst.push(fitted);
-    chars += fitted.length + 1;
-    if (fitted !== line) break;
-  }
-
-  return keptNewestFirst.reverse().join("\n");
-}
-
-function shouldIncludeSystemTextInPrompt(text: string) {
-  const normalized = String(text || "").trim();
-  if (!normalized) return false;
-  return !normalized.startsWith(RUN_STATUS_SYSTEM_TEXT_PREFIX);
-}
-
-type ArchiveSearchLineMatch = {
-  line: number;
-  text: string;
-};
-
-type ArchiveSearchLineMatchWithOffsets = ArchiveSearchLineMatch & {
-  submatches: Array<{ start: number; end: number }>;
-};
-
-function trimTrailingLineEnding(text: string) {
-  if (text.endsWith("\r\n")) return text.slice(0, -2);
-  if (text.endsWith("\n")) return text.slice(0, -1);
-  return text;
-}
-
-function textFromRgJsonField(raw: unknown) {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return "";
-  const field = raw as Record<string, unknown>;
-  if (typeof field.text === "string") return field.text;
-  if (typeof field.bytes === "string") {
-    try {
-      return Buffer.from(field.bytes, "base64").toString("utf-8");
-    } catch {
-      return "";
-    }
-  }
-  return "";
-}
-
-function utf8ByteOffsetToCodeUnitIndex(text: string, byteOffset: number) {
-  const target = Math.max(0, Math.min(Buffer.byteLength(text, "utf8"), Math.floor(byteOffset)));
-  let usedBytes = 0;
-  let usedUnits = 0;
-  for (const ch of text) {
-    const size = Buffer.byteLength(ch, "utf8");
-    if (usedBytes + size > target) break;
-    usedBytes += size;
-    usedUnits += ch.length;
-  }
-  return usedUnits;
-}
-
-function mergeSnippetWindows(windows: Array<{ start: number; end: number }>) {
-  if (windows.length === 0) return [] as Array<{ start: number; end: number }>;
-  const sorted = windows.slice().sort((a, b) => a.start - b.start || a.end - b.end);
-  const merged: Array<{ start: number; end: number }> = [];
-  for (const item of sorted) {
-    const prev = merged[merged.length - 1];
-    if (!prev) {
-      merged.push({ start: item.start, end: item.end });
-      continue;
-    }
-    if (item.start <= prev.end + ARCHIVE_SEARCH_SNIPPET_MERGE_GAP_CHARS) {
-      prev.end = Math.max(prev.end, item.end);
-      continue;
-    }
-    if (merged.length >= ARCHIVE_SEARCH_SNIPPET_MAX_WINDOWS_PER_LINE) break;
-    merged.push({ start: item.start, end: item.end });
-  }
-  return merged;
-}
-
-function buildArchiveSearchSnippetLine(match: ArchiveSearchLineMatchWithOffsets) {
-  const sep = match.text.indexOf(" | ");
-  const meta = sep >= 0 ? match.text.slice(0, sep) : "";
-  const text = sep >= 0 ? match.text.slice(sep + 3) : match.text;
-  const textStartByte = sep >= 0 ? Buffer.byteLength(match.text.slice(0, sep + 3), "utf8") : 0;
-
-  if (!text) return meta;
-  const textBytes = Buffer.byteLength(text, "utf8");
-  const windows: Array<{ start: number; end: number }> = [];
-  for (const hit of match.submatches) {
-    const localStart = Math.max(0, hit.start - textStartByte);
-    const localEnd = Math.min(textBytes, hit.end - textStartByte);
-    if (!Number.isFinite(localStart) || !Number.isFinite(localEnd) || localEnd < localStart) continue;
-    let start = utf8ByteOffsetToCodeUnitIndex(text, localStart);
-    let end = utf8ByteOffsetToCodeUnitIndex(text, localEnd);
-    if (end <= start) {
-      if (text.length <= 0) continue;
-      if (start >= text.length) {
-        start = Math.max(0, text.length - 1);
-        end = text.length;
-      } else {
-        end = Math.min(text.length, start + 1);
-      }
-    }
-    if (end <= start) continue;
-    windows.push({
-      start: Math.max(0, start - ARCHIVE_SEARCH_SNIPPET_CTX_CHARS),
-      end: Math.min(text.length, end + ARCHIVE_SEARCH_SNIPPET_CTX_CHARS)
-    });
-  }
-
-  if (windows.length === 0) {
-    const fallback =
-      text.length <= ARCHIVE_SEARCH_SNIPPET_FALLBACK_CHARS
-        ? text
-        : `${text.slice(0, ARCHIVE_SEARCH_SNIPPET_FALLBACK_CHARS)}...`;
-    return meta ? `${meta} | ${fallback}` : fallback;
-  }
-
-  const merged = mergeSnippetWindows(windows);
-  const parts = merged
-    .map((window) => {
-      const center = text.slice(window.start, window.end).trim();
-      if (!center) return "";
-      const lead = window.start > 0 ? "..." : "";
-      const tail = window.end < text.length ? "..." : "";
-      return `${lead}${center}${tail}`;
-    })
-    .filter((part) => part.length > 0);
-
-  const snippet = parts.join(" ... ");
-  if (!snippet) {
-    return meta ? `${meta} | ${text.slice(0, ARCHIVE_SEARCH_SNIPPET_FALLBACK_CHARS)}` : text;
-  }
-  return meta ? `${meta} | ${snippet}` : snippet;
-}
-
-async function rgSearchInFile(params: {
-  filePath: string;
-  query: string;
-  regex: boolean;
-}) {
-  return await new Promise<ArchiveSearchLineMatch[]>((resolve, reject) => {
-    const args = [
-      "-n",
-      "--no-heading",
-      "--color",
-      "never",
-      "--max-columns",
-      "20000",
-      "--max-columns-preview",
-      "-i"
-    ];
-    if (!params.regex) args.push("-F");
-    args.push("--", params.query, params.filePath);
-
-    const child = spawn("rg", args, { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += String(chunk || "");
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += String(chunk || "");
-    });
-    child.on("error", (err) => reject(err));
-    child.on("close", (code) => {
-      if (code !== 0 && code !== 1) {
-        const message = String(stderr || "").trim() || `rg exit code ${String(code)}`;
-        reject(new Error(message));
-        return;
-      }
-      if (code === 1 || !stdout.trim()) {
-        resolve([]);
-        return;
-      }
-      const out: ArchiveSearchLineMatch[] = [];
-      for (const raw of stdout.split(/\r?\n/)) {
-        if (!raw) continue;
-        const idx = raw.indexOf(":");
-        if (idx <= 0) continue;
-        const line = Number(raw.slice(0, idx));
-        if (!Number.isFinite(line) || !Number.isInteger(line) || line < 1) continue;
-        const text = trimTrailingLineEnding(raw.slice(idx + 1));
-        if (!text) continue;
-        out.push({ line, text });
-      }
-      resolve(out);
-    });
-  });
-}
-
-async function rgSearchInFileWithOffsets(params: {
-  filePath: string;
-  query: string;
-  regex: boolean;
-}) {
-  return await new Promise<ArchiveSearchLineMatchWithOffsets[]>((resolve, reject) => {
-    const args = [
-      "--json",
-      "-n",
-      "--color",
-      "never",
-      "--max-columns",
-      "20000",
-      "--max-columns-preview",
-      "-i"
-    ];
-    if (!params.regex) args.push("-F");
-    args.push("--", params.query, params.filePath);
-
-    const child = spawn("rg", args, { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += String(chunk || "");
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += String(chunk || "");
-    });
-    child.on("error", (err) => reject(err));
-    child.on("close", (code) => {
-      if (code !== 0 && code !== 1) {
-        const message = String(stderr || "").trim() || `rg exit code ${String(code)}`;
-        reject(new Error(message));
-        return;
-      }
-      if (code === 1 || !stdout.trim()) {
-        resolve([]);
-        return;
-      }
-      const out: ArchiveSearchLineMatchWithOffsets[] = [];
-      for (const raw of stdout.split(/\r?\n/)) {
-        if (!raw) continue;
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(raw);
-        } catch {
-          continue;
-        }
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
-        const event = parsed as Record<string, unknown>;
-        if (event.type !== "match") continue;
-        const data = event.data;
-        if (!data || typeof data !== "object" || Array.isArray(data)) continue;
-        const payload = data as Record<string, unknown>;
-        const line = Number(payload.line_number);
-        if (!Number.isFinite(line) || !Number.isInteger(line) || line < 1) continue;
-        const text = trimTrailingLineEnding(textFromRgJsonField(payload.lines));
-        if (!text) continue;
-        const rawSubmatches = Array.isArray(payload.submatches) ? payload.submatches : [];
-        const submatches = rawSubmatches
-          .map((item) => {
-            if (!item || typeof item !== "object" || Array.isArray(item)) return null;
-            const obj = item as Record<string, unknown>;
-            const start = Number(obj.start);
-            const end = Number(obj.end);
-            if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start) return null;
-            return { start: Math.floor(start), end: Math.floor(end) };
-          })
-          .filter((item): item is { start: number; end: number } => item != null);
-        out.push({ line, text, submatches });
-      }
-      resolve(out);
-    });
-  });
+function parseArchivedItemIdFromArchiveLine(line: string) {
+  const m = /^item=(\d+)\s/.exec(String(line || ""));
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) && Number.isInteger(n) && n >= 1 ? n : null;
 }
 
 function buildArchiveLine(item: AgentContextItemRecord): string | null {
@@ -1868,12 +1125,92 @@ export class AgentService {
   private readonly runPromptStaticCacheInvalidator: RunPromptStaticCacheInvalidator;
   private readonly runLifecycleApplication: RunLifecycleApplication;
   private readonly subtaskApplication: SubtaskApplication;
+  private readonly archiveStorage: ArchiveStorage;
+  private readonly compactionArchivePersistence: SqliteCompactionArchivePersistence;
+  private readonly compactionArchiveApplication: CompactionArchiveApplication;
+  private readonly manualCompactionApplication: ManualCompactionApplication;
+  private readonly archiveReadApplication: ArchiveReadApplication;
+  private readonly compactionSnippetCache: CompactionSnippetCache;
 
   constructor(
     private readonly ctx: AppContext,
     private readonly logger: FastifyBaseLogger,
-    private readonly runCompletedEventHub?: AgentRunCompletedEventHub | null
+    private readonly runCompletedEventHub?: AgentRunCompletedEventHub | null,
+    dependencies?: {
+      archiveStorage?: ArchiveStorage;
+      compactionArchivePersistence?: SqliteCompactionArchivePersistence;
+    }
   ) {
+    this.archiveStorage = dependencies?.archiveStorage ?? new ArchiveStorage({ dataDir: this.ctx.dataDir, logger: this.logger });
+    this.compactionArchivePersistence = dependencies?.compactionArchivePersistence ?? new SqliteCompactionArchivePersistence(this.ctx.db);
+    this.archiveReadApplication = new ArchiveReadApplication(
+      { get: (sessionId) => getAgentSession(this.ctx.db, sessionId) },
+      new ArchiveReadStorage(this.ctx.dataDir)
+    );
+    this.compactionSnippetCache = new CompactionSnippetCache({ dataDir: this.ctx.dataDir, logger: this.logger });
+    this.compactionArchiveApplication = new CompactionArchiveApplication({
+      sessionQuery: {
+        get: (sessionId) => getAgentSession(this.ctx.db, sessionId),
+        getRun: (runId) => getRunRecord(this.ctx.db, runId),
+        getVisibleItems: (workspaceId, sessionId) => getSessionVisibleItems(this.ctx.db, workspaceId, sessionId),
+        getLatestItemId: (workspaceId, sessionId) => getLatestSessionItemId(this.ctx.db, workspaceId, sessionId)
+      },
+      persistence: this.compactionArchivePersistence,
+      archiveStorage: this.archiveStorage,
+      runState: {
+        get: (workspaceId, sessionId) => getRunState(this.ctx.db, workspaceId, sessionId),
+        clearLastResponseTokensIfActiveRun: (params) => {
+          const state = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
+          if (state.activeRunId !== params.runId) return;
+          updateRunState(this.ctx.db, {
+            workspaceId: params.workspaceId,
+            sessionId: params.sessionId,
+            status: state.status,
+            activeRunId: state.activeRunId,
+            activeAssistantItemId: state.activeAssistantItemId,
+            lastResponseTotalTokens: null,
+            updatedAt: params.updatedAt,
+            appliedItemId: params.appliedItemId
+          });
+        },
+        setIdle: (params) => setRunStateIdle(this.ctx.db, params),
+        getControlResult: (sessionId) => this.getRunState(sessionId)
+      },
+      clock: { nowMs },
+      logger: this.logger,
+      isConflict: (error) => error instanceof AgentConflictError,
+      toConflictHttpError: (error) => conflictToHttpError(error as AgentConflictError),
+      isArchivableItem: (item) => ARCHIVABLE_ITEM_STATUS.has(item.status),
+      isBoundaryMarkerItem,
+      buildArchiveLine,
+      buildClearSummaryText
+    });
+    this.manualCompactionApplication = new ManualCompactionApplication({
+      reconcilePendingForSessionBestEffort: (params) => this.compactionArchiveApplication.reconcilePendingForSessionBestEffort(params),
+      sessions: {
+        get: (sessionId) => getAgentSession(this.ctx.db, sessionId),
+        getVisibleItems: (workspaceId, sessionId) => getSessionVisibleItems(this.ctx.db, workspaceId, sessionId)
+      },
+      isWorkerEnabled: () => this.ctx.agentWorkerEnabled,
+      findDedup: (params) => findClientRequestDedup(this.ctx.db, params),
+      getRunState: (workspaceId, sessionId) => getRunState(this.ctx.db, workspaceId, sessionId),
+      getControlRunState: (sessionId) => this.getRunState(sessionId),
+      resolveProfile: ({ workspaceId, requestedAgentId }) => {
+        const profile = resolveExecutionProfile(this.ctx, { surface: "user", requestedAgentId, workspaceEnablement: getWorkspaceEnabledAgentIds(this.ctx, workspaceId) });
+        return { agentId: profile.agent.id, providerId: profile.provider.id, modelId: profile.model.id };
+      },
+      getWorkspaceRunContext: (workspaceId) => getAgentWorkspaceRunContext(this.ctx, workspaceId),
+      activate: (params) => {
+        this.ctx.db.transaction(() => {
+          createRunRecord(this.ctx.db, { runId: params.runId, workspaceId: params.workspaceId, sessionId: params.sessionId, triggerItemId: params.triggerItemId, agentId: params.profile.agentId, providerId: params.profile.providerId, modelId: params.profile.modelId, uiLocale: params.uiLocale, subtaskDepth: 0, parentRunId: null, parentToolItemId: null, status: "running", createdAt: params.createdAt });
+          insertClientRequestDedup(this.ctx.db, { workspaceId: params.workspaceId, sessionId: params.sessionId, clientRequestId: params.clientRequestId, messageItemId: params.triggerItemId, runId: params.runId, createdAt: params.createdAt });
+          updateRunState(this.ctx.db, { workspaceId: params.workspaceId, sessionId: params.sessionId, status: "running", activeRunId: params.runId, activeAssistantItemId: null, runNoticeText: "正在压缩上下文...", updatedAt: params.createdAt, appliedItemId: getLatestSessionItemId(this.ctx.db, params.workspaceId, params.sessionId) });
+        })();
+      },
+      failAfterEnqueueFailure: (params) => this.runLifecycleApplication.failRunAfterEnqueueFailure(params),
+      clock: { nowMs },
+      ids: { newRunId: () => newSortableId("run") }
+    });
     this.runPromptStaticCacheInvalidator = new RunPromptStaticCacheInvalidator({
       clearRunStaticPrompt: (runId) => this.runPromptStaticCache.clear(runId)
     });
@@ -2098,17 +1435,7 @@ export class AgentService {
   }
 
   async reconcileArchivePendingForSessionBestEffort(params: { workspaceId: string; sessionId: string }) {
-    return reconcileArchivePendingSidecarBestEffort({ ...params, dataDir: this.ctx.dataDir, logger: this.logger });
-  }
-
-  async reconcileAllArchivePendingBestEffort() {
-    for (const session of listAgentSessionsForArchiveReconcile(this.ctx.db)) {
-      try {
-        await this.reconcileArchivePendingForSessionBestEffort(session);
-      } catch (err) {
-        this.logger.warn({ err, workspaceId: session.workspaceId, sessionId: session.sessionId }, "archive pending startup reconcile failed");
-      }
-    }
+    return this.compactionArchiveApplication.reconcilePendingForSessionBestEffort(params);
   }
 
   cleanupSubtaskOrphansOnStartup(
@@ -2418,12 +1745,11 @@ export class AgentService {
         .filter((line): line is string => line != null);
       if (archiveLines.length > 0) {
         try {
-          await appendArchiveLines({
-            dataDir: this.ctx.dataDir,
+          await this.archiveStorage.appendLines({
+            operation: "fork",
             workspaceId: fromSession.workspaceId,
             sessionId: newSessionId,
-            lines: archiveLines,
-            failAfterChunks: this.ctx.agentTestFaults?.archiveWrite?.failAfterChunks
+            lines: archiveLines
           });
         } catch (err) {
           this.ctx.db.prepare(`delete from agent_session where id = @sessionId and workspace_id = @workspaceId`).run({
@@ -2573,118 +1899,12 @@ export class AgentService {
     };
   }
 
-  async compactSession(params: { sessionId: string; body: AgentCompactSessionRequest }): Promise<AgentCompactSessionResponse> {
-    return this.runSessionOperationExclusive(params.sessionId, async () => {
-      await this.reconcileArchivePendingForSessionBestEffort({ workspaceId: params.body.workspaceId, sessionId: params.sessionId });
-      const session = getAgentSession(this.ctx.db, params.sessionId);
-      if (!session) throw new HttpError(404, "session not found");
-      if (session.kind === "subtask") {
-        throw new HttpError(400, "subtask session is read-only", "AGENT_SUBTASK_READONLY");
-      }
-      if (session.workspaceId !== params.body.workspaceId) {
-        throw new HttpError(400, "workspaceId mismatch");
-      }
-      if (!this.ctx.agentWorkerEnabled) {
-        throw new HttpError(503, "agent worker unavailable", "AGENT_WORKER_UNAVAILABLE");
-      }
-
-      const clientRequestId = String(params.body.clientRequestId || "").trim();
-      if (!clientRequestId) throw new HttpError(400, "clientRequestId is required");
-
-      const dedup = findClientRequestDedup(this.ctx.db, {
-        workspaceId: session.workspaceId,
-        sessionId: session.id,
-        clientRequestId
-      });
-      if (dedup) {
-        return {
-          ok: true,
-          session,
-          runState: this.getRunState(session.id),
-          runId: dedup.runId,
-          scheduled: false,
-          skippedReason: "deduplicated"
-        };
-      }
-
-      const runState = getRunState(this.ctx.db, session.workspaceId, session.id);
-      if (runState.status !== "idle") {
-        throw new HttpError(409, "session is running");
-      }
-
-      const triggerItemId = session.headItemId;
-      if (triggerItemId == null) {
-        throw new HttpError(400, "no context to compact", "AGENT_COMPACTION_EMPTY");
-      }
-
-      const visible = getSessionVisibleItems(this.ctx.db, session.workspaceId, session.id);
-      if (
-        visible.length === 1 &&
-        visible[0]?.kind === "system" &&
-        typeof visible[0]?.boundaryReason === "string" &&
-        visible[0].boundaryReason.trim().length > 0
-      ) {
-        throw new HttpError(400, "compaction not needed", "AGENT_COMPACTION_NOT_NEEDED");
-      }
-
-      const profile = resolveExecutionProfile(this.ctx, {
-        surface: "user",
-        requestedAgentId: params.body.agentId,
-        workspaceEnablement: getWorkspaceEnabledAgentIds(this.ctx, session.workspaceId)
-      });
-
-      const createdAt = nowMs();
-      const runId = newSortableId("run");
-      const uiLocale = normalizeAgentUiLocale(params.body.uiLocale);
-
-      const tx = this.ctx.db.transaction(() => {
-        createRunRecord(this.ctx.db, {
-          runId,
-          workspaceId: session.workspaceId,
-          sessionId: session.id,
-          triggerItemId: triggerItemId,
-          agentId: profile.agent.id,
-          providerId: profile.provider.id,
-          modelId: profile.model.id,
-          uiLocale,
-          subtaskDepth: 0,
-          parentRunId: null,
-          parentToolItemId: null,
-          status: "running",
-          createdAt
-        });
-
-        insertClientRequestDedup(this.ctx.db, {
-          workspaceId: session.workspaceId,
-          sessionId: session.id,
-          clientRequestId,
-          messageItemId: triggerItemId,
-          runId,
-          createdAt
-        });
-
-        updateRunState(this.ctx.db, {
-          workspaceId: session.workspaceId,
-          sessionId: session.id,
-          status: "running",
-          activeRunId: runId,
-          activeAssistantItemId: null,
-          // 立即给 UI 一个反馈,避免等待 worker 拉取状态.
-          runNoticeText: "正在压缩上下文...",
-          updatedAt: createdAt,
-          appliedItemId: getLatestSessionItemId(this.ctx.db, session.workspaceId, session.id)
-        });
-      });
-      tx();
-
-      return {
-        ok: true,
-        session,
-        runState: this.getRunState(session.id),
-        runId,
-        scheduled: true
-      };
-    });
+  async compactSession(params: { sessionId: string; body: AgentCompactSessionRequest; runtime: ManualCompactionRuntime }): Promise<AgentCompactSessionResponse> {
+    return this.runSessionOperationExclusive(params.sessionId, () => this.manualCompactionApplication.schedule({
+      sessionId: params.sessionId,
+      body: params.body,
+      runtime: params.runtime
+    }));
   }
 
   // 兼容 compact 等尚未迁移的入口；条件收敛权威位于 Lifecycle。
@@ -3146,212 +2366,16 @@ export class AgentService {
   }
 
   async compactContextFromWorker(params: AgentApiCompactContextRequest) {
-    return this.runSessionOperationExclusive(params.sessionId, async () => {
-      await this.reconcileArchivePendingForSessionBestEffort({ workspaceId: params.workspaceId, sessionId: params.sessionId });
-      const session = getAgentSession(this.ctx.db, params.sessionId);
-      if (!session) throw new HttpError(404, "session not found");
-      if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
-      const run = getRunRecord(this.ctx.db, params.runId);
-      if (!run || run.workspaceId !== params.workspaceId || run.sessionId !== params.sessionId) {
-        throw new HttpError(404, "run not found");
-      }
-      if (session.headItemId !== params.expectedHeadItemId) {
-        throw new HttpError(409, "session head conflict");
-      }
-
-      const summaryText = String(params.summaryText || "").trim();
-      if (!summaryText) {
-        throw new HttpError(400, "summaryText is required", "AGENT_COMPACTION_SUMMARY_REQUIRED");
-      }
-
-      const visible = getSessionVisibleItems(this.ctx.db, params.workspaceId, params.sessionId);
-      if (visible.length === 0) {
-        return {
-          compacted: false,
-          summaryItemId: null,
-          archivedCount: 0
-        };
-      }
-      const nonTerminal = visible.filter((item) => !ARCHIVABLE_ITEM_STATUS.has(item.status));
-      if (nonTerminal.length > 0) {
-        return {
-          compacted: false,
-          summaryItemId: null,
-          archivedCount: 0
-        };
-      }
-
-      const createdAt = nowMs();
-      const archiveLines = visible.map((item) => buildArchiveLine(item)).filter((line): line is string => line != null);
-      const archiveSnapshots = await appendArchiveLines({
-        dataDir: this.ctx.dataDir,
-        workspaceId: params.workspaceId,
-        sessionId: session.id,
-        lines: archiveLines
-      });
-
-      const archiveAt = nowMs();
-      let summaryItemId: number | null = null;
-      let archivedCount = 0;
-      try {
-        const applied = appendSystemSummaryAndArchiveItems(this.ctx.db, {
-          workspaceId: params.workspaceId,
-          sessionId: params.sessionId,
-          runId: params.runId,
-          expectedHeadItemId: params.expectedHeadItemId,
-          summaryText,
-          boundaryReason: "compaction",
-          summaryCreatedAt: createdAt,
-          archiveItemIds: visible.map((item) => item.id),
-          archiveAt
-        });
-        summaryItemId = applied.summaryItemId;
-        archivedCount = applied.archivedCount;
-      } catch (err) {
-        const rollback = await rollbackArchiveLinesBestEffort(archiveSnapshots, async () => {
-          const payload = this.ctx.agentTestFaults?.archiveRollback?.appendBeforeRollback;
-          const snapshot = archiveSnapshots[0];
-          if (payload && snapshot) await fs.appendFile(snapshot.filePath, payload, "utf-8");
-        });
-        if (rollback.skipped > 0) {
-          await writeArchivePendingSidecarBestEffort({
-            dataDir: this.ctx.dataDir,
-            operation: "compaction",
-            workspaceId: session.workspaceId,
-            sessionId: session.id,
-            runId: params.runId,
-            snapshots: rollback.skippedSnapshots,
-            fault: this.ctx.agentTestFaults?.archiveSidecar,
-            logger: this.logger
-          });
-          this.logger.warn(
-            {
-              sessionId: session.id,
-              runId: params.runId,
-              revertedFiles: rollback.reverted,
-              skippedFiles: rollback.skipped
-            },
-            "archive rollback had skipped files after compaction db failure"
-          );
-        }
-        if (err instanceof AgentConflictError) throw conflictToHttpError(err);
-        throw err;
-      }
-
-      const state = getRunState(this.ctx.db, params.workspaceId, params.sessionId);
-      if (state.activeRunId === params.runId) {
-        updateRunState(this.ctx.db, {
-          workspaceId: params.workspaceId,
-          sessionId: params.sessionId,
-          status: state.status,
-          activeRunId: state.activeRunId,
-          activeAssistantItemId: state.activeAssistantItemId,
-          lastResponseTotalTokens: null,
-          updatedAt: archiveAt,
-          appliedItemId: getLatestSessionItemId(this.ctx.db, params.workspaceId, params.sessionId)
-        });
-      }
-
-      return {
-        compacted: true,
-        summaryItemId,
-        archivedCount
-      };
-    });
+    return this.runSessionOperationExclusive(params.sessionId, () => this.compactionArchiveApplication.applyWorkerCompaction(params));
   }
 
   async clearSession(sessionId: string, body: AgentClearSessionRequest & { uiLocale?: AgentUiLocale | null }): Promise<AgentControlResult> {
-    return this.runSessionOperationExclusive(sessionId, async () => {
-      await this.reconcileArchivePendingForSessionBestEffort({ workspaceId: body.workspaceId, sessionId });
-      const session = getAgentSession(this.ctx.db, sessionId);
-      if (!session) throw new HttpError(404, "session not found");
-      if (session.kind === "subtask") {
-        throw new HttpError(400, "subtask session is read-only", "AGENT_SUBTASK_READONLY");
-      }
-      if (session.workspaceId !== body.workspaceId) {
-        throw new HttpError(400, "workspaceId mismatch");
-      }
-
-      const runState = getRunState(this.ctx.db, session.workspaceId, session.id);
-      if (runState.status !== "idle") {
-        throw new HttpError(409, "session is running", "AGENT_CLEAR_NOT_IDLE");
-      }
-
-      const visible = getSessionVisibleItems(this.ctx.db, session.workspaceId, session.id);
-      if (visible.length === 0) {
-        throw new HttpError(400, "no context to clear", "AGENT_CLEAR_EMPTY");
-      }
-      if (visible.length === 1 && isBoundaryMarkerItem(visible[0]!)) {
-        throw new HttpError(400, "clear not needed", "AGENT_CLEAR_NOT_NEEDED");
-      }
-
-      const nonTerminal = visible.filter((item) => !ARCHIVABLE_ITEM_STATUS.has(item.status));
-      if (nonTerminal.length > 0) {
-        throw new HttpError(409, "session has non-terminal items", "AGENT_CLEAR_NOT_IDLE");
-      }
-
-      const createdAt = nowMs();
-      const archiveLines = visible.map((item) => buildArchiveLine(item)).filter((line): line is string => line != null);
-      const archiveSnapshots = await appendArchiveLines({
-        dataDir: this.ctx.dataDir,
-        workspaceId: session.workspaceId,
-        sessionId: session.id,
-        lines: archiveLines
-      });
-
-      const archiveAt = nowMs();
-      try {
-        appendSystemSummaryAndArchiveItems(this.ctx.db, {
-          workspaceId: session.workspaceId,
-          sessionId: session.id,
-          runId: null,
-          expectedHeadItemId: session.headItemId,
-          summaryText: buildClearSummaryText({ uiLocale: normalizeAgentUiLocale(body.uiLocale), reason: body.reason }),
-          boundaryReason: "clear",
-          summaryCreatedAt: createdAt,
-          archiveItemIds: visible.map((item) => item.id),
-          archiveAt
-        });
-        setRunStateIdle(this.ctx.db, {
-          workspaceId: session.workspaceId,
-          sessionId: session.id,
-          updatedAt: archiveAt,
-          appliedItemId: getLatestSessionItemId(this.ctx.db, session.workspaceId, session.id)
-        });
-      } catch (err) {
-        const rollback = await rollbackArchiveLinesBestEffort(archiveSnapshots, async () => {
-          const payload = this.ctx.agentTestFaults?.archiveRollback?.appendBeforeRollback;
-          const snapshot = archiveSnapshots[0];
-          if (payload && snapshot) await fs.appendFile(snapshot.filePath, payload, "utf-8");
-        });
-        if (rollback.skipped > 0) {
-          await writeArchivePendingSidecarBestEffort({
-            dataDir: this.ctx.dataDir,
-            operation: "clear",
-            workspaceId: session.workspaceId,
-            sessionId: session.id,
-            runId: runState.activeRunId ?? undefined,
-            snapshots: rollback.skippedSnapshots,
-            fault: this.ctx.agentTestFaults?.archiveSidecar,
-            logger: this.logger
-          });
-          this.logger.warn(
-            {
-              sessionId: session.id,
-              revertedFiles: rollback.reverted,
-              skippedFiles: rollback.skipped
-            },
-            "archive rollback had skipped files after clear db failure"
-          );
-        }
-        if (err instanceof AgentConflictError) throw conflictToHttpError(err);
-        throw err;
-      }
-
-      const updated = getAgentSession(this.ctx.db, session.id);
-      if (!updated) throw new HttpError(500, "session not found after clear");
-      return { ok: true, session: updated, runState: this.getRunState(updated.id) };
-    });
+    return this.runSessionOperationExclusive(sessionId, () => this.compactionArchiveApplication.clearSession({
+      sessionId,
+      workspaceId: body.workspaceId,
+      reason: body.reason,
+      uiLocale: normalizeAgentUiLocale(body.uiLocale)
+    }));
   }
 
   async archiveSearchFromWorker(params: {
@@ -3364,97 +2388,7 @@ export class AgentService {
     snippet?: boolean;
     regex?: boolean;
   }) {
-    const session = getAgentSession(this.ctx.db, params.sessionId);
-    if (!session) throw new HttpError(404, "session not found");
-    if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
-    const query = String(params.query || "").trim();
-    if (!query) {
-      throw new HttpError(400, "query is required", "AGENT_ARCHIVE_QUERY_REQUIRED");
-    }
-    const beforePos = normalizeBeforePos(params.beforePos);
-
-    const maxHits = normalizePositiveInt(params.maxHits, {
-      fallback: ARCHIVE_SEARCH_MAX_HITS_DEFAULT,
-      min: 1,
-      max: ARCHIVE_SEARCH_MAX_HITS_MAX
-    });
-    const maxChars = normalizePositiveInt(params.maxChars, {
-      fallback: ARCHIVE_MAX_CHARS_DEFAULT,
-      min: ARCHIVE_MAX_CHARS_MIN,
-      max: ARCHIVE_MAX_CHARS_MAX
-    });
-    const snippet = params.snippet === true;
-
-    const dirPath = agentArchiveSessionDir(this.ctx.dataDir, params.workspaceId, session.id);
-    const files = await listArchiveFilesAsc(dirPath);
-    if (files.length === 0) {
-      return { text: "", noArchive: true };
-    }
-
-    const newestFirstLines: string[] = [];
-
-    outer: for (let i = files.length - 1; i >= 0; i -= 1) {
-      const fileName = files[i] || "";
-      if (!fileName) continue;
-      const fileSeq = parseArchiveFileName(fileName);
-      if (fileSeq == null) continue;
-      const filePath = path.join(dirPath, fileName);
-      let matches: ArchiveSearchLineMatch[] = [];
-      let offsetMatches: ArchiveSearchLineMatchWithOffsets[] = [];
-      try {
-        if (snippet) {
-          offsetMatches = await rgSearchInFileWithOffsets({
-            filePath,
-            query,
-            regex: params.regex === true
-          });
-          matches = offsetMatches.map((item) => ({ line: item.line, text: item.text }));
-        } else {
-          matches = await rgSearchInFile({
-            filePath,
-            query,
-            regex: params.regex === true
-          });
-        }
-
-        if (matches.length > 0) {
-          const content = await fs.readFile(filePath, "utf-8").catch((err: any) => {
-            if (err && err.code === "ENOENT") return "";
-            throw err;
-          });
-          const stableLineCount = splitArchiveFileLines(content).length;
-          matches = matches.filter((item) => item.line <= stableLineCount);
-          if (snippet) {
-            const keep = new Set(matches.map((item) => item.line));
-            offsetMatches = offsetMatches.filter((item) => keep.has(item.line));
-          }
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        throw new HttpError(400, `archive search failed: ${message}`, "AGENT_ARCHIVE_SEARCH_FAILED");
-      }
-
-      matches.sort((a, b) => b.line - a.line);
-      const offsetsByLine = new Map<number, ArchiveSearchLineMatchWithOffsets>();
-      if (snippet) {
-        for (const item of offsetMatches) {
-          if (!offsetsByLine.has(item.line)) {
-            offsetsByLine.set(item.line, item);
-          }
-        }
-      }
-      for (const match of matches) {
-        if (newestFirstLines.length >= maxHits) break outer;
-        const pos = toArchivePos(fileSeq, match.line);
-        if (beforePos != null && pos >= beforePos) continue;
-        const outputLine = snippet
-          ? buildArchiveSearchSnippetLine(offsetsByLine.get(match.line) || { ...match, submatches: [] })
-          : match.text;
-        newestFirstLines.push(`pos=${pos} | ${String(outputLine || "")}`);
-      }
-    }
-
-    return { text: formatArchiveToolResultText(newestFirstLines, maxChars) };
+    return this.archiveReadApplication.search(params);
   }
 
   private async buildPromptMessagesForSession(params: {
@@ -3521,8 +2455,7 @@ export class AgentService {
           const summaryItemId = item.id;
           let snippetText = "";
           try {
-            snippetText = await readCompactionSnippetCacheBestEffort({
-              dataDir: this.ctx.dataDir,
+            snippetText = await this.compactionSnippetCache.readBestEffort({
               workspaceId: params.workspaceId,
               sessionId: params.sessionId,
               summaryItemId
@@ -3564,8 +2497,7 @@ export class AgentService {
                 mergedIds.push(row.id);
               }
 
-              const posLines = await buildCompactionSnippetExcerptLines({
-                dataDir: this.ctx.dataDir,
+              const posLines = await this.archiveStorage.findExcerptByItemIds({
                 workspaceId: params.workspaceId,
                 sessionId: params.sessionId,
                 itemIds: mergedIds
@@ -3587,13 +2519,11 @@ export class AgentService {
                   minPos,
                   uiLocale: params.compactionSnippetUiLocale
                 });
-                await writeCompactionSnippetCacheBestEffort({
-                  dataDir: this.ctx.dataDir,
+                await this.compactionSnippetCache.writeBestEffort({
                   workspaceId: params.workspaceId,
                   sessionId: params.sessionId,
                   summaryItemId,
-                  text: snippetText,
-                  logger: this.logger
+                  text: snippetText
                 });
               }
             } catch (err) {
@@ -3743,55 +2673,7 @@ export class AgentService {
     lineCount?: number;
     maxChars?: number;
   }) {
-    const session = getAgentSession(this.ctx.db, params.sessionId);
-    if (!session) throw new HttpError(404, "session not found");
-    if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
-    const beforePos = normalizeBeforePos(params.beforePos);
-
-    const lineCount = normalizePositiveInt(params.lineCount, {
-      fallback: ARCHIVE_READ_LINE_COUNT_DEFAULT,
-      min: 1,
-      max: ARCHIVE_READ_LINE_COUNT_MAX
-    });
-    const maxChars = normalizePositiveInt(params.maxChars, {
-      fallback: ARCHIVE_MAX_CHARS_DEFAULT,
-      min: ARCHIVE_MAX_CHARS_MIN,
-      max: ARCHIVE_MAX_CHARS_MAX
-    });
-
-    const dirPath = agentArchiveSessionDir(this.ctx.dataDir, params.workspaceId, session.id);
-    const files = await listArchiveFilesAsc(dirPath);
-    if (files.length === 0) {
-      return { text: "", noArchive: true };
-    }
-
-    const newestFirstLines: string[] = [];
-
-    outer: for (let i = files.length - 1; i >= 0; i -= 1) {
-      const fileName = files[i] || "";
-      if (!fileName) continue;
-      const fileSeq = parseArchiveFileName(fileName);
-      if (fileSeq == null) continue;
-      const filePath = path.join(dirPath, fileName);
-      const content = await fs.readFile(filePath, "utf-8").catch((err: any) => {
-        if (err && err.code === "ENOENT") return "";
-        throw err;
-      });
-      const lines = splitArchiveFileLines(content);
-      let upper = lines.length;
-      if (beforePos != null) {
-        const maxLineExclusive = beforePos - (fileSeq - 1) * ARCHIVE_FILE_LINE_LIMIT;
-        upper = Math.min(upper, Math.max(0, maxLineExclusive - 1));
-      }
-      for (let lineNo = upper; lineNo >= 1; lineNo -= 1) {
-        if (newestFirstLines.length >= lineCount) break outer;
-        const pos = toArchivePos(fileSeq, lineNo);
-        if (beforePos != null && pos >= beforePos) continue;
-        newestFirstLines.push(`pos=${pos} | ${String(lines[lineNo - 1] || "")}`);
-      }
-    }
-
-    return { text: formatArchiveToolResultText(newestFirstLines, maxChars) };
+    return this.archiveReadApplication.read(params);
   }
 
   async getPromptContextForRun(params: { workspaceId: string; sessionId: string; runId: string }) {

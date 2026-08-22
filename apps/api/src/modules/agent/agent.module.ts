@@ -10,10 +10,24 @@ import { agentWorkerPidPath } from "../../infra/fs/paths.js";
 import { AgentPluginHostClient } from "./agent.plugin-host-client.js";
 import { AgentPluginHostProcessManager } from "./agent.plugin-host-manager.js";
 import { AgentRunCompletedEventHub } from "./run-completed-events.js";
+import { ArchiveStorage } from "./archive/archive-storage.js";
+import { archiveFaultHookFromLegacyTestFaults } from "./archive/archive-fault-hook.js";
+import { SqliteCompactionArchivePersistence } from "./archive/sqlite-compaction-archive-persistence.js";
+import { ArchiveStartupReconcileApplication } from "./archive/archive-startup-reconcile-application.js";
+import { listAgentSessionsForArchiveReconcile } from "./agent.store.js";
 
 export async function registerAgentModule(app: FastifyInstance, ctx: AppContext) {
   const runCompletedEventHub = new AgentRunCompletedEventHub();
-  const service = new AgentService(ctx, app.log, runCompletedEventHub);
+  const archiveStorage = new ArchiveStorage({
+    dataDir: ctx.dataDir,
+    logger: app.log,
+    faultHook: archiveFaultHookFromLegacyTestFaults(ctx.agentTestFaults)
+  });
+  const compactionArchivePersistence = new SqliteCompactionArchivePersistence(ctx.db);
+  const service = new AgentService(ctx, app.log, runCompletedEventHub, {
+    archiveStorage,
+    compactionArchivePersistence
+  });
 
   let runtime: AgentRuntimePort;
   let workerManager: AgentWorkerProcessManager | null = null;
@@ -85,7 +99,11 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
     app.log.warn({ err }, "subtask orphan startup scan failed");
   }
   try {
-    await service.reconcileAllArchivePendingBestEffort();
+    await new ArchiveStartupReconcileApplication({
+      listSessions: () => listAgentSessionsForArchiveReconcile(ctx.db),
+      reconcilePendingBestEffort: (params) => archiveStorage.reconcilePendingBestEffort(params),
+      logger: app.log
+    }).reconcileAllPendingBestEffort();
   } catch (err) {
     app.log.warn({ err }, "archive pending startup reconcile failed");
   }

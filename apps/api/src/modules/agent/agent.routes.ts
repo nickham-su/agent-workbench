@@ -84,7 +84,6 @@ import {
 } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { AgentRuntimePort } from "./agent.runtime-port.js";
 import type { AgentService } from "./agent.service.js";
-import { getAgentWorkspaceRunContext } from "./agent-run-context.js";
 import { HttpError } from "../../app/errors.js";
 import type { AgentPluginHostClient } from "./agent.plugin-host-client.js";
 import { listAvailableAgentsForSurface } from "../settings/settings.service.js";
@@ -153,29 +152,7 @@ export async function registerAgentRoutes(
     sessionId: string,
     body: { workspaceId: string; clientRequestId: string; agentId?: string; uiLocale?: "zh-CN" | "en-US" }
   ) {
-    const result = await params.service.compactSession({ sessionId, body });
-    if (result.scheduled) {
-      const runContext = getAgentWorkspaceRunContext(params.service.getContext(), body.workspaceId);
-      if (!runContext) throw new HttpError(404, "workspace not found");
-      try {
-        await params.runtime.enqueueRun({
-          workspaceId: body.workspaceId,
-          sessionId,
-          runId: result.runId,
-          ...runContext,
-          inputText: "__awb_compact__"
-        });
-      } catch (err) {
-        params.service.failRunOnEnqueueFailure({
-          workspaceId: body.workspaceId,
-          sessionId,
-          runId: result.runId,
-          updatedAt: Date.now()
-        });
-        throw err;
-      }
-    }
-    return result;
+    return params.service.compactSession({ sessionId, body, runtime: params.runtime });
   }
 
   app.get(
