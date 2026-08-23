@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { newSortableId } from "../../utils/ids.js";
-import { AgentService } from "./agent.service.js";
+import { createAgentService } from "./agent.composition.js";
+import { SqliteRunLifecyclePersistence } from "./lifecycle/sqlite-run-lifecycle-persistence.js";
 import {
   createAgentSession,
   createRunRecord,
@@ -104,8 +105,8 @@ test("P1 real SQLite: enqueue failure settles its run but does not idle a switch
     createdAt: createdAt + 1
   });
 
-  const service = new AgentService(fixture.ctx, fixture.app.log);
-  service.failRunOnEnqueueFailure({ workspaceId: workspace.id, sessionId, runId: olderRunId });
+  const persistence = new SqliteRunLifecyclePersistence(fixture.db);
+  persistence.failRunAfterEnqueueFailureIfCurrent({ workspaceId: workspace.id, sessionId, runId: olderRunId, updatedAt: createdAt + 2 });
 
   assert.equal(getRunRecord(fixture.db, olderRunId)?.status, "failed");
   assert.equal(getRunRecord(fixture.db, activeRunId)?.status, "running");
@@ -133,11 +134,15 @@ test("P1 real SQLite: cancel wins over a late enqueue-failure settlement", async
   });
   createRunningRun({ fixture, workspaceId: workspace.id, sessionId, runId, activeRunId: runId, createdAt });
 
-  const service = new AgentService(fixture.ctx, fixture.app.log);
-  const cancelled = service.cancelSessionCascade(sessionId, { workspaceId: workspace.id });
+  const persistence = new SqliteRunLifecyclePersistence(fixture.db);
+  const cancelled = persistence.cancelSessions({
+    workspaceId: workspace.id,
+    rootSessionId: sessionId,
+    updatedAt: createdAt + 1,
+    listActiveChildSessionIds: () => []
+  });
   assert.deepEqual(cancelled.runtimeCancelSessionIds, [sessionId]);
-  assert.equal(cancelled.result.ok, true);
-  service.failRunOnEnqueueFailure({ workspaceId: workspace.id, sessionId, runId });
+  persistence.failRunAfterEnqueueFailureIfCurrent({ workspaceId: workspace.id, sessionId, runId, updatedAt: createdAt + 2 });
 
   assert.equal(getRunRecord(fixture.db, runId)?.status, "cancelled");
   assert.equal(getRunState(fixture.db, workspace.id, sessionId).status, "idle");
@@ -161,12 +166,18 @@ test("P1 real SQLite: recovery final check observes cancellation and does not en
   });
   createRunningRun({ fixture, workspaceId: workspace.id, sessionId, runId, activeRunId: runId, createdAt });
 
-  const service = new AgentService(fixture.ctx, fixture.app.log);
+  const service = createAgentService(fixture.ctx, fixture.app.log);
+  const persistence = new SqliteRunLifecyclePersistence(fixture.db);
   const runtime = createFakeAgentRuntime();
   await service.recoverRunsOnStartup({ runtime,
     beforeFinalCheck(candidate) {
       assert.equal(candidate.runId, runId);
-      service.cancelSessionCascade(sessionId, { workspaceId: workspace.id });
+      persistence.cancelSessions({
+        workspaceId: workspace.id,
+        rootSessionId: sessionId,
+        updatedAt: createdAt + 1,
+        listActiveChildSessionIds: () => []
+      });
     }
   });
 
@@ -207,7 +218,7 @@ test("P4 real SQLite: completing an old run does not idle a newer active run", a
     createdAt: createdAt + 1
   });
 
-  const service = new AgentService(fixture.ctx, fixture.app.log);
+  const service = createAgentService(fixture.ctx, fixture.app.log);
   service.completeRunFromWorker({
     workspaceId: workspace.id,
     sessionId,
@@ -254,7 +265,7 @@ test("P4 real SQLite: a late idle/null worker state does not clear a newer activ
     createdAt: createdAt + 1
   });
 
-  const service = new AgentService(fixture.ctx, fixture.app.log);
+  const service = createAgentService(fixture.ctx, fixture.app.log);
   service.updateRunStateFromWorker({
     workspaceId: workspace.id,
     sessionId,

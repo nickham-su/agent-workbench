@@ -1,3 +1,4 @@
+import { createAgentComposition, createAgentService } from "./agent.composition.js";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -41,6 +42,7 @@ import {
   updateRunState
 } from "./agent.store.js";
 import { AgentService, isSubtaskParentToolUniqueConstraintError } from "./agent.service.js";
+import { SqliteRunLifecyclePersistence } from "./lifecycle/sqlite-run-lifecycle-persistence.js";
 import { SqliteSubtaskMaintenancePersistence } from "./subtask/sqlite-subtask-maintenance-persistence.js";
 import { AgentRuntime } from "./agent.runtime.js";
 import type { AgentRuntimePort } from "./agent.runtime-port.js";
@@ -581,7 +583,8 @@ test("recover 在 enqueue 前最终 DB check 中让 cancel wins", async () => {
       appliedItemId: 0
     });
 
-    const service = new AgentService(fixture.ctx, fixture.app.log);
+    const service = createAgentService(fixture.ctx, fixture.app.log);
+    const persistence = new SqliteRunLifecyclePersistence(fixture.db);
     const enqueueCalls: string[] = [];
     const runtime: AgentRuntimePort = {
       enqueueRun(run) {
@@ -594,7 +597,13 @@ test("recover 在 enqueue 前最终 DB check 中让 cancel wins", async () => {
     await service.recoverRunsOnStartup({ runtime,
       beforeFinalCheck(candidate) {
         assert.equal(candidate.runId, runId, "recovery scan should have found the in-flight candidate");
-        service.cancelSessionCascade(session.id, { workspaceId: fixture.workspaceId });
+        const cancelled = persistence.cancelSessions({
+          workspaceId: fixture.workspaceId,
+          rootSessionId: session.id,
+          updatedAt: ts + 1,
+          listActiveChildSessionIds: () => []
+        });
+        assert.deepEqual(cancelled.runtimeCancelSessionIds, [session.id]);
         cancelledDuringRecovery = true;
       }
     });
@@ -648,11 +657,18 @@ test("recover enqueue 已发出后 cancel 仍以 DB cancelled 状态为准", asy
       },
       cancelSession() {}
     };
-    const service = new AgentService(fixture.ctx, fixture.app.log);
+    const service = createAgentService(fixture.ctx, fixture.app.log);
+    const persistence = new SqliteRunLifecyclePersistence(fixture.db);
     await service.recoverRunsOnStartup({ runtime });
     assert.deepEqual(enqueued, [runId]);
 
-    service.cancelSessionCascade(session.id, { workspaceId: fixture.workspaceId });
+    const cancelled = persistence.cancelSessions({
+      workspaceId: fixture.workspaceId,
+      rootSessionId: session.id,
+      updatedAt: ts + 1,
+      listActiveChildSessionIds: () => []
+    });
+    assert.deepEqual(cancelled.runtimeCancelSessionIds, [session.id]);
     assert.equal(getRunRecord(fixture.db, runId)?.status, "cancelled");
     const state = getRunStateRow(fixture.db, fixture.workspaceId, session.id);
     assert.equal(state.status, "idle");
@@ -712,7 +728,7 @@ test("recover enqueue failure 只记录并继续处理后续 candidate", async (
       }
     } as unknown as FastifyInstance["log"];
 
-    await new AgentService(fixture.ctx, logger).recoverRunsOnStartup({ runtime });
+    await createAgentService(fixture.ctx, logger).recoverRunsOnStartup({ runtime });
 
     assert.deepEqual(enqueued, [firstRunId, secondRunId]);
     assert.equal(warnings.length, 1);
@@ -754,7 +770,7 @@ test("runtime cancel 失败仅 warning，DB cancel 保持收敛", async () => {
     });
 
     const warnings: unknown[][] = [];
-    const service = new AgentService(fixture.ctx, {
+    const service = createAgentService(fixture.ctx, {
       ...fixture.app.log,
       warn(...args: unknown[]) {
         warnings.push(args);
@@ -999,7 +1015,7 @@ test("subtask cascade 以 run lineage 为准，不依赖 parent tool 的 subtask
 test("subtask orphan scanner 仅删除满足全部条件的空壳", async () => {
   const fixture = await createFixture({ agentWorkerConcurrency: 0 });
   try {
-    const service = new AgentService(fixture.ctx, fixture.app.log);
+    const service = createAgentService(fixture.ctx, fixture.app.log);
     const now = Date.now();
     const cases = [
       { name: "young", age: 30 * 60 * 1000, forked: true, resource: "none", expected: true },
@@ -1107,7 +1123,7 @@ test("subtask orphan scanner 的单条删除异常不会阻断后续候选", asy
       end;
     `);
 
-    new AgentService(fixture.ctx, fixture.app.log).cleanupSubtaskOrphansOnStartup({ now });
+    createAgentService(fixture.ctx, fixture.app.log).cleanupSubtaskOrphansOnStartup({ now });
 
     assert.ok(getAgentSession(fixture.db, blockedSessionId));
     assert.equal(getAgentSession(fixture.db, deletableSessionId), null);
@@ -2072,7 +2088,7 @@ async function startSubtaskForAnchor(params: {
   });
 }
 
-function createDirectAgentService(fixture: Awaited<ReturnType<typeof createFixture>>) {
+function createDirectAgentComposition(fixture: Awaited<ReturnType<typeof createFixture>>) {
   const ctx: AppContext = {
     db: fixture.db,
     repoRoot: fixture.repoRoot,
@@ -2099,7 +2115,11 @@ function createDirectAgentService(fixture: Awaited<ReturnType<typeof createFixtu
     agentPluginHostEnabled: false,
     agentPluginHostSocketPath: path.join(fixture.dataDir, "agent-plugin-host.sock")
   };
-  return new AgentService(ctx, fixture.app.log);
+  return createAgentComposition(ctx, fixture.app.log);
+}
+
+function createDirectAgentService(fixture: Awaited<ReturnType<typeof createFixture>>) {
+  return createDirectAgentComposition(fixture).service;
 }
 
 async function assertDirectSubtaskStartError(params: {
@@ -3395,17 +3415,19 @@ test("prompt-context reuses one run static promise and clears it when the run re
     status: "running",
     createdAt: Date.now()
   });
-  const service = createDirectAgentService(fixture) as any;
+  const composition = createDirectAgentComposition(fixture);
+  const { service } = composition;
+  const { runPromptStaticCache } = composition.testOnly;
   const request = { workspaceId: fixture.workspaceId, sessionId: session.id, runId };
 
   await service.getPromptContextForRun(request);
-  const first = service.runPromptStaticCache.get(runId);
+  const first = runPromptStaticCache.get(runId);
   assert.ok(first, "first prompt-context call should populate the static cache");
   const firstPromise = first.promise;
   const firstExpiresAt = first.expiresAt;
 
   await service.getPromptContextForRun(request);
-  const second = service.runPromptStaticCache.get(runId);
+  const second = runPromptStaticCache.get(runId);
   assert.ok(second, "second prompt-context call should retain the static cache");
   assert.equal(second.promise, firstPromise, "same run should reuse the static prompt promise while it is fresh");
   assert.ok(second.expiresAt >= firstExpiresAt, "same run cache access should preserve the current access-based expiry behavior");
@@ -3416,10 +3438,10 @@ test("prompt-context reuses one run static promise and clears it when the run re
     runId,
     status: "completed"
   });
-  assert.equal(service.runPromptStaticCache.has(runId), false, "terminal run completion should clear the static prompt cache");
+  assert.equal(runPromptStaticCache.has(runId), false, "terminal run completion should clear the static prompt cache");
 
   await service.getPromptContextForRun(request);
-  const afterTerminal = service.runPromptStaticCache.get(runId);
+  const afterTerminal = runPromptStaticCache.get(runId);
   assert.ok(afterTerminal, "current service still permits prompt retrieval for a terminal run");
   assert.notEqual(afterTerminal.promise, firstPromise, "terminal cache clear should force a new static promise on the next retrieval");
 });

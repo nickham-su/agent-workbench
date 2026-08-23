@@ -9,6 +9,7 @@ import { ensureDir, rmrf } from "../../infra/fs/fs.js";
 import { agentArchivePendingSidecarPath, agentArchiveSessionDir, workspaceRoot } from "../../infra/fs/paths.js";
 import { newSortableId } from "../../utils/ids.js";
 import { insertWorkspace } from "../workspaces/workspace.store.js";
+import { ArchiveStorage } from "./archive/archive-storage.js";
 import {
   AgentConflictError,
   appendContextItem,
@@ -1186,37 +1187,8 @@ test("archive pending reconcile 仅自动处理尺寸匹配的单文件 sidecar"
       const logger = Object.assign(Object.create(fixture.app.log), {
         warn: (...args: unknown[]) => warnings.push(String(args.at(-1) ?? ""))
       }) as FastifyInstance["log"];
-      const service = new (await import("./agent.service.js")).AgentService(
-        (fixture.app as unknown as { initialConfig?: never }) && ({
-          db: fixture.db,
-          repoRoot: path.resolve(process.cwd(), "../.."),
-          dataDir: fixture.dataDir,
-          fileMaxBytes: 1024 * 1024,
-          version: "test",
-          serveWeb: false,
-          webDistDir: null,
-          credentialMasterKey: Buffer.alloc(32, 7),
-          credentialMasterKeySource: "generated",
-          credentialMasterKeyId: "testkey",
-          credentialMasterKeyCreatedAt: Date.now(),
-          authToken: null,
-          authCookieSecure: false,
-          agentWorkerEnabled: false,
-          agentWorkerHost: "127.0.0.1",
-          agentWorkerPort: 0,
-          agentWorkerSocketPath: path.join(fixture.dataDir, "agent-worker.sock"),
-          agentWorkerConcurrency: 0,
-          agentInternalToken: fixture.internalToken,
-          agentWorkerResponseValidation: "strict",
-          agentApiOrigin: "http://127.0.0.1:0",
-          agentStartupRecoveryMode: "recover",
-          agentPluginHostEnabled: false,
-          agentPluginHostSocketPath: path.join(fixture.dataDir, "agent-plugin-host.sock"),
-          agentPluginServicesEnabled: false
-        }),
-        logger
-      );
-      const reconciled = await service.reconcileArchivePendingForSessionBestEffort({ workspaceId: fixture.workspaceId, sessionId: session.id });
+      const archiveStorage = new ArchiveStorage({ dataDir: fixture.dataDir, logger });
+      const reconciled = await archiveStorage.reconcilePendingBestEffort({ workspaceId: fixture.workspaceId, sessionId: session.id });
       const shouldReconcile = mode === "match";
       assert.equal(reconciled, shouldReconcile, mode);
       assert.equal(await fs.stat(sidecarPath).then(() => true, () => false), !shouldReconcile, mode);

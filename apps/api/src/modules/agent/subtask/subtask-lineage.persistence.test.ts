@@ -3,6 +3,7 @@ import { afterEach, test } from "node:test";
 import { HttpError } from "../../../app/errors.js";
 import { newSortableId } from "../../../utils/ids.js";
 import { AgentService } from "../agent.service.js";
+import { createAgentService } from "../agent.composition.js";
 import { SqliteSubtaskLineagePersistence } from "./sqlite-subtask-lineage-persistence.js";
 import { SqliteSubtaskMaintenancePersistence } from "./sqlite-subtask-maintenance-persistence.js";
 import {
@@ -421,7 +422,7 @@ test("P1 real SQLite: result and status are fenced by workspace/session ownershi
     output: { type: "assistant_text", text: "other run must not leak" },
   });
 
-  const service = new AgentService(fixture.ctx, {
+  const service = createAgentService(fixture.ctx, {
     warn() {},
     error() {},
   } as never);

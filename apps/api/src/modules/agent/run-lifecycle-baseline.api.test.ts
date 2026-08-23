@@ -5,6 +5,7 @@ import { newSortableId } from "../../utils/ids.js";
 import { AgentRunCompletedEventHub } from "./run-completed-events.js";
 import { registerAgentRoutes } from "./agent.routes.js";
 import { AgentService } from "./agent.service.js";
+import { createAgentService } from "./agent.composition.js";
 import { createAgentSession, getRunRecord, getRunState, getSessionTranscriptItems } from "./agent.store.js";
 import {
   createAgentTestFixture,
@@ -78,8 +79,8 @@ function createRouteApp(params: { fixture: AgentTestFixture; enqueueError: Error
   const app = Fastify({ logger: false });
   const runtime = createFakeAgentRuntime({ enqueueRunError: params.enqueueError });
   const eventHub = new AgentRunCompletedEventHub();
-  const service = new AgentService(params.fixture.ctx, app.log, eventHub);
-  return { app, runtime, register: registerAgentRoutes(app, { service, runtime, runCompletedEventHub: eventHub }) };
+  const service = createAgentService(params.fixture.ctx, app.log, eventHub);
+  return { app, runtime, register: registerAgentRoutes(app, { service, runtime, internalToken: params.fixture.ctx.agentInternalToken, runCompletedEventHub: eventHub }) };
 }
 
 test("P3: public send enqueue failure conditionally settles failed/idle while preserving durable dedup retry without re-enqueue", async () => {
