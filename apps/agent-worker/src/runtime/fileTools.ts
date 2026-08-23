@@ -84,6 +84,21 @@ function ensureSafeRelativePath(input: string) {
   return value;
 }
 
+function buildReadRootPathError(error: unknown, safePath: string) {
+  const code = error && typeof error === "object" ? (error as NodeJS.ErrnoException).code : undefined;
+  let message: string;
+  if (code === "ENOENT") {
+    message = `ENOENT: no such file or directory, path: ${safePath}`;
+  } else if (code === "ENOTDIR") {
+    message = `ENOTDIR: not a directory, path: ${safePath}`;
+  } else {
+    throw new Error("unsupported root path error code");
+  }
+  const normalizedError = new Error(message) as NodeJS.ErrnoException;
+  normalizedError.code = code;
+  return normalizedError;
+}
+
 function isMissingRootPathError(error: unknown) {
   const code = error && typeof error === "object" ? (error as NodeJS.ErrnoException).code : undefined;
   return code === "ENOENT" || code === "ENOTDIR";
@@ -636,14 +651,15 @@ async function runReadToolInternal(params: ReadToolParams, options: ReadToolTest
     stat = await (options.rootLstat ?? fs.lstat)(fullPath);
   } catch (rootError) {
     if (!isMissingRootPathError(rootError)) throw rootError;
+    const displayError = buildReadRootPathError(rootError, safePath);
     const matches = await (options.probeCandidates ?? probeRegisteredRepoCandidates)({
       workspacePath: params.workspacePath,
       repoDirNames: params.workspaceRepoDirNames,
       safePath,
       signal: params.signal
     });
-    if (params.signal?.aborted || matches.length === 0) throw rootError;
-    throw appendRepoPathHint(rootError, matches);
+    if (params.signal?.aborted || matches.length === 0) throw displayError;
+    throw appendRepoPathHint(displayError, matches);
   }
   if (stat.isSymbolicLink()) {
     throw new Error("symlink path is not allowed");

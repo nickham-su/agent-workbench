@@ -95,6 +95,54 @@ test("write before 预览与 read 对少量坏字节文本保持一致的宽松�
   assert.match(String(writeResult.before.text || ""), /€beta/);
 });
 
+test("write 成功输出继续使用相对 safePath", async () => {
+  const workspacePath = await createWorkspace();
+
+  const result = await runWriteTool({
+    workspacePath,
+    filePath: "nested/output.txt",
+    content: "written\n"
+  });
+
+  assert.equal(result.summary, "写入文件 nested/output.txt");
+  assert.equal(result.content, "ok: wrote 8 bytes to nested/output.txt");
+  assert.equal(result.filePath, "nested/output.txt");
+  assert.equal(await fs.readFile(path.join(workspacePath, "nested", "output.txt"), "utf8"), "written\n");
+});
+
+test("write 继续拒绝绝对路径和越界路径", async () => {
+  const workspacePath = await createWorkspace();
+
+  await assert.rejects(
+    () => runWriteTool({ workspacePath, filePath: path.join(workspacePath, "absolute.txt"), content: "x" }),
+    { message: "absolute path is not allowed" }
+  );
+  await assert.rejects(
+    () => runWriteTool({ workspacePath, filePath: "../escape.txt", content: "x" }),
+    { message: "path is outside workspace" }
+  );
+});
+
+test("write 继续拒绝 symlink 目标", async (t) => {
+  const workspacePath = await createWorkspace();
+  const outsidePath = await createWorkspace();
+  const outsideFile = path.join(outsidePath, "outside.txt");
+  const linkPath = path.join(workspacePath, "link.txt");
+  await fs.writeFile(outsideFile, "outside\n", "utf8");
+  try {
+    await fs.symlink(outsideFile, linkPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EPERM") return t.skip("symlink is unavailable on this platform");
+    throw error;
+  }
+
+  await assert.rejects(
+    () => runWriteTool({ workspacePath, filePath: "link.txt", content: "new\n" }),
+    { message: "symlink path is not allowed" }
+  );
+  assert.equal(await fs.readFile(outsideFile, "utf8"), "outside\n");
+});
+
 test("read 对以换行结尾的文件不额外多算空白尾行", async () => {
   const workspacePath = await createWorkspace();
   const filePath = path.join(workspacePath, "tail-newline.txt");
@@ -249,9 +297,9 @@ test("read 根路径缺失时仍失败并提示单个登记 repo 候选", async 
     () => runReadTool({ workspacePath, workspaceRepoDirNames: ["repo-a"], filePath: "src/a.ts" }),
     (error: unknown) => {
       assert.ok(error instanceof Error);
-      assert.match(error.message, /^ENOENT:/);
+      assert.match(error.message, /^ENOENT: no such file or directory, path: src\/a\.ts/);
       assert.match(error.message, /\n\nPath exists in registered workspace repo\(s\)\. Retry read with one of:\n- repo-a\/src\/a\.ts$/);
-      assert.equal(error.message.includes(workspacePath), true, "root error prefix remains unchanged");
+      assert.equal(error.message.includes(workspacePath), false);
       return true;
     }
   );
@@ -270,7 +318,7 @@ test("read repo 候选按 UTF-8 字节序稳定排序，且不自动读取", asy
   );
 });
 
-test("read repo 探测无候选或非法名称时保持原始错误", async () => {
+test("read repo 探测无候选或非法名称时返回规范化根错误", async () => {
   const workspacePath = await createWorkspace();
   await fs.mkdir(path.join(workspacePath, "repo-a"), { recursive: true });
 
@@ -278,7 +326,8 @@ test("read repo 探测无候选或非法名称时保持原始错误", async () =
     () => runReadTool({ workspacePath, workspaceRepoDirNames: ["..", "repo/a", "repo-a"], filePath: "src/a.ts" }),
     (error: unknown) => {
       assert.ok(error instanceof Error);
-      assert.match(error.message, /^ENOENT:/);
+      assert.equal(error.message, "ENOENT: no such file or directory, path: src/a.ts");
+      assert.equal(error.message.includes(workspacePath), false);
       assert.doesNotMatch(error.message, /Path exists in registered workspace repo/);
       return true;
     }
@@ -293,7 +342,7 @@ test("read 对 ENOTDIR 根错误提示 repo 候选", async () => {
 
   await assert.rejects(
     () => runReadTool({ workspacePath, workspaceRepoDirNames: ["repo-a"], filePath: "src/a.ts" }),
-    /ENOTDIR:.*\n\nPath exists in registered workspace repo\(s\)\. Retry read with one of:\n- repo-a\/src\/a\.ts$/s
+    /ENOTDIR: not a directory, path: src\/a\.ts\n\nPath exists in registered workspace repo\(s\)\. Retry read with one of:\n- repo-a\/src\/a\.ts$/
   );
 });
 

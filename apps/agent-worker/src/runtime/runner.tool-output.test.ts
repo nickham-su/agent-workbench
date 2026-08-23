@@ -131,12 +131,14 @@ test("read 的 repo 路径提示错误仍以 failed 工具项持久化且没有 
     assert.ok(failed, "read error should persist a failed tool item");
     const error = String(failed.output?.error || "");
     const hint = "Path exists in registered workspace repo(s). Retry read with one of:\n- repo-a/src/a.ts";
-    assert.match(error, /^ENOENT: no such file or directory/);
+    assert.match(error, /^ENOENT: no such file or directory, path: src\/a\.ts/);
+    assert.equal(error.includes(workspacePath), false);
     assert.equal(error.endsWith(`\n\n${hint}`), true);
     assert.equal(typeof failed.output?.text, "string");
     assert.equal((failed.output?.text as string).includes("tool: read"), true);
     assert.equal((failed.output?.text as string).includes("status: failed"), true);
     assert.equal((failed.output?.text as string).includes(error), true);
+    assert.equal((failed.output?.text as string).includes(workspacePath), false);
     assert.equal("result" in (failed.output ?? {}), false);
   });
 });

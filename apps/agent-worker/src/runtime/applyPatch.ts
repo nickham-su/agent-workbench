@@ -177,12 +177,10 @@ export function formatApplyPatchFailureTextFromMessage(message: string, params?:
 function buildSnapshotMismatchMessage(params: {
   reason: string;
   path: string;
-  fullPath: string;
   details: string[];
 }) {
   const lines = [`prepare/apply snapshot mismatch: ${params.reason}`];
   lines.push(`Failed file: ${params.path}`);
-  lines.push(`Path: ${params.fullPath}`);
   for (const detail of params.details) {
     lines.push(detail);
   }
@@ -401,18 +399,18 @@ function normalizeApplyPatchInput(input: string): NormalizedApplyPatchInput {
   return { text, notes };
 }
 
-async function readCurrentFileStateForValidation(fullPath: string) {
-  const stat = await fs.lstat(fullPath).catch(() => null);
+async function readCurrentFileStateForValidation(params: { fullPath: string; displayPath: string }) {
+  const stat = await fs.lstat(params.fullPath).catch(() => null);
   if (!stat) {
     return { exists: false, content: "" };
   }
   if (stat.isDirectory()) {
-    throw new Error(`Path is a directory: ${fullPath}`);
+    throw new Error(`Path is a directory: ${params.displayPath}`);
   }
   if (stat.isSymbolicLink()) {
-    throw new Error(`symlink path is not allowed: ${fullPath}`);
+    throw new Error(`symlink path is not allowed: ${params.displayPath}`);
   }
-  const content = await fs.readFile(fullPath, "utf8");
+  const content = await fs.readFile(params.fullPath, "utf8");
   return { exists: true, content };
 }
 
@@ -432,7 +430,7 @@ async function validatePreparedPatchSnapshots(params: {
       workspaceRealPath: params.workspaceRealPath,
       fullPath: snapshot.fullPath
     });
-    const current = await readCurrentFileStateForValidation(snapshot.fullPath);
+    const current = await readCurrentFileStateForValidation({ fullPath: snapshot.fullPath, displayPath: snapshot.path });
 
     if (snapshot.kind === "absent") {
       if (current.exists) {
@@ -440,7 +438,6 @@ async function validatePreparedPatchSnapshots(params: {
           buildSnapshotMismatchMessage({
             reason: "target already exists before apply",
             path: snapshot.path,
-            fullPath: snapshot.fullPath,
             details: ["Expected: file to be absent at apply time.", summarizeSnapshotContent("Actual", current.content)]
           })
         );
@@ -453,7 +450,6 @@ async function validatePreparedPatchSnapshots(params: {
         buildSnapshotMismatchMessage({
           reason: "source disappeared before apply",
           path: snapshot.path,
-          fullPath: snapshot.fullPath,
           details: ["Expected: file to still exist at apply time.", "Actual: file is missing."]
         })
       );
@@ -463,7 +459,6 @@ async function validatePreparedPatchSnapshots(params: {
         buildSnapshotMismatchMessage({
           reason: "content changed after prepare",
           path: snapshot.path,
-          fullPath: snapshot.fullPath,
           details: [summarizeSnapshotContent("Expected", snapshot.content), summarizeSnapshotContent("Actual", current.content)]
         })
       );
@@ -493,7 +488,8 @@ async function ensureExistingPathSegmentsSafeForValidation(params: {
     });
     if (!stat) return;
     if (stat.isSymbolicLink()) {
-      throw new Error(`symlink path is not allowed: ${current}`);
+      const displayPath = path.relative(params.workspaceRealPath, current);
+      throw new Error(`symlink path is not allowed: ${displayPath}`);
     }
     await ensureRealPathInsideWorkspace(params.workspaceRealPath, current);
     if (!stat.isDirectory()) return;
@@ -1051,10 +1047,10 @@ async function readVirtualFileState(params: {
     return missing;
   }
   if (stat.isDirectory()) {
-    throw new Error(`Path is a directory: ${params.fullPath}`);
+    throw new Error(`Path is a directory: ${params.relativePath}`);
   }
   if (stat.isSymbolicLink()) {
-    throw new Error(`symlink path is not allowed: ${params.fullPath}`);
+    throw new Error(`symlink path is not allowed: ${params.relativePath}`);
   }
   await ensureRealPathInsideWorkspace(params.workspaceRealPath, params.fullPath);
   const content = await fs.readFile(params.fullPath, "utf8");
@@ -1114,10 +1110,12 @@ async function ensureParentDirectorySafe(params: {
       continue;
     }
     if (stat.isSymbolicLink()) {
-      throw new Error(`symlink path is not allowed: ${currentPath}`);
+      const displayPath = path.relative(params.workspaceRealPath, currentPath);
+      throw new Error(`symlink path is not allowed: ${displayPath}`);
     }
     if (!stat.isDirectory()) {
-      throw new Error(`Path is not a directory: ${currentPath}`);
+      const displayPath = path.relative(params.workspaceRealPath, currentPath);
+      throw new Error(`Path is not a directory: ${displayPath}`);
     }
     const currentRealPath = await fs.realpath(currentPath);
     if (!isPathInside(params.workspaceRealPath, currentRealPath)) {
@@ -1126,18 +1124,23 @@ async function ensureParentDirectorySafe(params: {
   }
 }
 
-async function verifyExistingRegularFile(workspaceRealPath: string, fullPath: string, label: string) {
-  const stat = await fs.lstat(fullPath).catch(() => null);
+async function verifyExistingRegularFile(params: {
+  workspaceRealPath: string;
+  fullPath: string;
+  displayPath: string;
+  label: "delete" | "move";
+}) {
+  const stat = await fs.lstat(params.fullPath).catch(() => null);
   if (!stat) {
-    throw new Error(`Failed to read file to ${label}: ${fullPath}`);
+    throw new Error(`Failed to read file to ${params.label}: ${params.displayPath}`);
   }
   if (stat.isDirectory()) {
-    throw new Error(`Path is a directory: ${fullPath}`);
+    throw new Error(`Path is a directory: ${params.displayPath}`);
   }
   if (stat.isSymbolicLink()) {
-    throw new Error(`symlink path is not allowed: ${fullPath}`);
+    throw new Error(`symlink path is not allowed: ${params.displayPath}`);
   }
-  await ensureRealPathInsideWorkspace(workspaceRealPath, fullPath);
+  await ensureRealPathInsideWorkspace(params.workspaceRealPath, params.fullPath);
 }
 
 function buildSummaryText(files: ApplyPatchFileResult[], notes: string[]) {
@@ -1208,7 +1211,7 @@ export async function prepareApplyPatchTool(params: {
         workspaceRealPath
       });
       if (current.exists) {
-        throw new Error(`add target already exists: ${fullPath}`);
+        throw new Error(`add target already exists: ${relativePath}`);
       }
       const before = current.exists ? current.content : "";
       const after = ensureTrailingNewline(hunk.contents);
@@ -1254,17 +1257,17 @@ export async function prepareApplyPatchTool(params: {
         workspaceRealPath
       });
       if (!current.exists) {
-        throw new Error(`Failed to read file to delete: ${fullPath}`);
+        throw new Error(`Failed to read file to delete: ${relativePath}`);
       }
       const before = current.content;
       snapshots.push({ kind: "present", path: relativePath, fullPath, content: before });
       if (hunk.chunks.length === 0 && before !== "" && hunk.allowDeleteWithoutHunks !== true) {
-        throw new Error(`delete patch for non-empty file must include hunks: ${fullPath}`);
+        throw new Error(`delete patch for non-empty file must include hunks: ${relativePath}`);
       }
       if (hunk.chunks.length > 0) {
         // 仅用于内容校验,不影响最终删除语义。
         deriveNewContentFromChunks({
-          filePath: fullPath,
+          filePath: relativePath,
           originalContent: before,
           chunks: hunk.chunks
         });
@@ -1311,7 +1314,7 @@ export async function prepareApplyPatchTool(params: {
         workspaceRealPath
       });
       if (!current.exists) {
-        throw new Error(`Failed to read file to move: ${fromFullPath}`);
+        throw new Error(`Failed to read file to move: ${fromPath}`);
       }
       const before = current.content;
       snapshots.push({ kind: "present", path: fromPath, fullPath: fromFullPath, content: before });
@@ -1361,7 +1364,7 @@ export async function prepareApplyPatchTool(params: {
         workspaceRealPath
       });
       if (target.exists) {
-        throw new Error(`move target already exists: ${toFullPath}`);
+        throw new Error(`move target already exists: ${toPath}`);
       }
 
       operations.push({
@@ -1417,12 +1420,12 @@ export async function prepareApplyPatchTool(params: {
       workspaceRealPath
     });
     if (!current.exists) {
-      throw new Error(`Failed to read file to update: ${fullPath}`);
+      throw new Error(`Failed to read file to update: ${relativePath}`);
     }
     const before = current.content;
     snapshots.push({ kind: "present", path: relativePath, fullPath, content: before });
     const after = deriveNewContentFromChunks({
-      filePath: fullPath,
+      filePath: relativePath,
       originalContent: before,
       chunks: hunk.chunks
     });
@@ -1507,7 +1510,7 @@ export async function prepareApplyPatchTool(params: {
       workspaceRealPath
     });
     if (moveCurrent.exists) {
-      throw new Error(`move target already exists: ${moveFullPath}`);
+      throw new Error(`move target already exists: ${movePath}`);
     }
     snapshots.push({ kind: "absent", path: movePath, fullPath: moveFullPath });
     operations.push({
@@ -1575,22 +1578,27 @@ export async function prepareApplyPatchTool(params: {
   };
 }
 
-async function ensureWritableParent(workspacePath: string, workspaceRealPath: string, fullPath: string) {
+async function ensureWritableParent(params: {
+  workspacePath: string;
+  workspaceRealPath: string;
+  fullPath: string;
+  displayPath: string;
+}) {
   await ensureParentDirectorySafe({
-    workspacePath,
-    workspaceRealPath,
-    fullPath,
+    workspacePath: params.workspacePath,
+    workspaceRealPath: params.workspaceRealPath,
+    fullPath: params.fullPath,
     createMissing: true
   });
-  const existingStat = await fs.lstat(fullPath).catch(() => null);
+  const existingStat = await fs.lstat(params.fullPath).catch(() => null);
   if (existingStat?.isSymbolicLink()) {
-    throw new Error(`symlink path is not allowed: ${fullPath}`);
+    throw new Error(`symlink path is not allowed: ${params.displayPath}`);
   }
   if (existingStat?.isDirectory()) {
-    throw new Error(`Path is a directory: ${fullPath}`);
+    throw new Error(`Path is a directory: ${params.displayPath}`);
   }
-  const resolved = resolveWithinWorkspace(workspacePath, path.relative(workspacePath, fullPath));
-  if (resolved !== fullPath) {
+  const resolved = resolveWithinWorkspace(params.workspacePath, path.relative(params.workspacePath, params.fullPath));
+  if (resolved !== params.fullPath) {
     throw new Error("path is outside workspace");
   }
 }
@@ -1613,19 +1621,24 @@ export async function applyPreparedPatch(params: {
     throwIfAborted(params.signal);
 
     if (operation.kind === "add") {
-      await ensureWritableParent(params.workspacePath, workspaceRealPath, operation.fullPath);
+      await ensureWritableParent({
+        workspacePath: params.workspacePath,
+        workspaceRealPath,
+        fullPath: operation.fullPath,
+        displayPath: operation.path
+      });
       try {
         await fs.writeFile(operation.fullPath, operation.content, { encoding: "utf8", flag: "wx" });
       } catch (err) {
         const code = (err as { code?: string }).code;
         if (code === "EEXIST") {
-          throw new Error(`add target already exists: ${operation.fullPath}`);
+          throw new Error(`add target already exists: ${operation.path}`);
         }
         if (code === "ENOENT") {
-          throw new Error(`MISSING_PARENT_DIR: add failed for ${operation.fullPath}`);
+          throw new Error(`MISSING_PARENT_DIR: add failed for ${operation.path}`);
         }
         if (code === "EBUSY" || code === "EAGAIN" || code === "EMFILE" || code === "ENFILE" || code === "ETXTBSY") {
-          throw new Error(`IO_RETRYABLE: add failed for ${operation.fullPath} (${code})`);
+          throw new Error(`IO_RETRYABLE: add failed for ${operation.path} (${code})`);
         }
         throw err;
       }
@@ -1633,16 +1646,21 @@ export async function applyPreparedPatch(params: {
     }
 
     if (operation.kind === "update") {
-      await ensureWritableParent(params.workspacePath, workspaceRealPath, operation.fullPath);
+      await ensureWritableParent({
+        workspacePath: params.workspacePath,
+        workspaceRealPath,
+        fullPath: operation.fullPath,
+        displayPath: operation.path
+      });
       try {
         await fs.writeFile(operation.fullPath, operation.content, { encoding: "utf8" });
       } catch (err) {
         const code = (err as { code?: string }).code;
         if (code === "ENOENT") {
-          throw new Error(`MISSING_PARENT_DIR: update failed for ${operation.fullPath}`);
+          throw new Error(`MISSING_PARENT_DIR: update failed for ${operation.path}`);
         }
         if (code === "EBUSY" || code === "EAGAIN" || code === "EMFILE" || code === "ENFILE" || code === "ETXTBSY") {
-          throw new Error(`IO_RETRYABLE: update failed for ${operation.fullPath} (${code})`);
+          throw new Error(`IO_RETRYABLE: update failed for ${operation.path} (${code})`);
         }
         throw err;
       }
@@ -1650,20 +1668,30 @@ export async function applyPreparedPatch(params: {
     }
 
     if (operation.kind === "move") {
-      await verifyExistingRegularFile(workspaceRealPath, operation.fromFullPath, "move");
-      await ensureWritableParent(params.workspacePath, workspaceRealPath, operation.fullPath);
+      await verifyExistingRegularFile({
+        workspaceRealPath,
+        fullPath: operation.fromFullPath,
+        displayPath: operation.fromPath,
+        label: "move"
+      });
+      await ensureWritableParent({
+        workspacePath: params.workspacePath,
+        workspaceRealPath,
+        fullPath: operation.fullPath,
+        displayPath: operation.path
+      });
       try {
         await fs.writeFile(operation.fullPath, operation.content, { encoding: "utf8", flag: "wx" });
       } catch (err) {
         const code = (err as { code?: string }).code;
         if (code === "EEXIST") {
-          throw new Error(`move target already exists: ${operation.fullPath}`);
+          throw new Error(`move target already exists: ${operation.path}`);
         }
         if (code === "ENOENT") {
-          throw new Error(`MISSING_PARENT_DIR: move failed for ${operation.fullPath}`);
+          throw new Error(`MISSING_PARENT_DIR: move failed for ${operation.path}`);
         }
         if (code === "EBUSY" || code === "EAGAIN" || code === "EMFILE" || code === "ENFILE" || code === "ETXTBSY") {
-          throw new Error(`IO_RETRYABLE: move failed for ${operation.fullPath} (${code})`);
+          throw new Error(`IO_RETRYABLE: move failed for ${operation.path} (${code})`);
         }
         throw err;
       }
@@ -1671,7 +1699,12 @@ export async function applyPreparedPatch(params: {
       continue;
     }
 
-    await verifyExistingRegularFile(workspaceRealPath, operation.fullPath, "delete");
+    await verifyExistingRegularFile({
+      workspaceRealPath,
+      fullPath: operation.fullPath,
+      displayPath: operation.path,
+      label: "delete"
+    });
     await fs.unlink(operation.fullPath);
   }
 }
