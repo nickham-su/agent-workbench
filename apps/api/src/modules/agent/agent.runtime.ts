@@ -1,15 +1,11 @@
 import type { FastifyBaseLogger } from "fastify";
 import { nowMs } from "../../utils/time.js";
 import { newSortableId } from "../../utils/ids.js";
-import type { AgentRuntimePort } from "./agent.runtime-port.js";
-import type { AgentQueuedRun, AgentService } from "./agent.service.js";
+import type { AgentRuntimePort, AgentRuntimeRun, LocalAgentRuntimeExecutionPort } from "./agent.runtime-port.js";
 
 const DEFAULT_RUNTIME_CONCURRENCY = 2;
 
-type RuntimeQueuedRun = AgentQueuedRun & {
-  inputText?: string;
-  workspacePath: string;
-};
+type RuntimeQueuedRun = AgentRuntimeRun;
 
 export class AgentRuntime implements AgentRuntimePort {
   private readonly queue: RuntimeQueuedRun[] = [];
@@ -18,7 +14,7 @@ export class AgentRuntime implements AgentRuntimePort {
   private activeCount = 0;
 
   constructor(
-    private readonly service: AgentService,
+    private readonly execution: LocalAgentRuntimeExecutionPort,
     private readonly logger: FastifyBaseLogger,
     private readonly concurrency = DEFAULT_RUNTIME_CONCURRENCY
   ) {}
@@ -72,14 +68,14 @@ export class AgentRuntime implements AgentRuntimePort {
   private async processRun(run: RuntimeQueuedRun) {
     const ts = nowMs();
     try {
-      const ctx = await this.service.getPromptContextForRun({
+      const ctx = await this.execution.getPromptContextForRun({
         workspaceId: run.workspaceId,
         sessionId: run.sessionId,
         runId: run.runId
       });
 
       const turnId = newSortableId("turn");
-      const assistant = this.service.appendContextItemFromWorker({
+      const assistant = this.execution.appendContextItemFromWorker({
         workspaceId: run.workspaceId,
         sessionId: run.sessionId,
         runId: run.runId,
@@ -94,20 +90,23 @@ export class AgentRuntime implements AgentRuntimePort {
         },
         createdAt: ts
       });
+      if (assistant.item == null) {
+        return;
+      }
 
-      this.service.updateRunStateFromWorker({
+      this.execution.updateRunStateFromWorker({
         workspaceId: run.workspaceId,
         sessionId: run.sessionId,
         status: "running",
         activeRunId: run.runId,
-        activeAssistantItemId: assistant.id,
+        activeAssistantItemId: assistant.item.id,
         updatedAt: ts
       });
 
       const latestUser = [...ctx.messages].reverse().find((item) => item.role === "user")?.content ?? "";
       const text = latestUser ? `本地回退模式已收到: ${latestUser}` : "本地回退模式已执行。";
-      await this.service.updateContextItemFromWorker({
-        itemId: assistant.id,
+      await this.execution.updateContextItemFromWorker({
+        itemId: assistant.item.id,
         status: "completed",
         output: {
           type: "assistant_text",
@@ -115,7 +114,7 @@ export class AgentRuntime implements AgentRuntimePort {
         },
         updatedAt: nowMs()
       });
-      this.service.completeRunFromWorker({
+      this.execution.completeRunFromWorker({
         workspaceId: run.workspaceId,
         sessionId: run.sessionId,
         runId: run.runId,
@@ -124,13 +123,13 @@ export class AgentRuntime implements AgentRuntimePort {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.service.appendContextItemFromWorker({
+      this.execution.appendContextItemFromWorker({
         workspaceId: run.workspaceId,
         sessionId: run.sessionId,
         runId: run.runId,
         turnId: null,
         step: null,
-        prevId: this.service.getSession(run.sessionId)?.headItemId ?? null,
+        prevId: this.execution.getSession(run.sessionId)?.headItemId ?? null,
         kind: "system",
         status: "completed",
         output: {
@@ -139,7 +138,7 @@ export class AgentRuntime implements AgentRuntimePort {
         },
         createdAt: nowMs()
       });
-      this.service.completeRunFromWorker({
+      this.execution.completeRunFromWorker({
         workspaceId: run.workspaceId,
         sessionId: run.sessionId,
         runId: run.runId,

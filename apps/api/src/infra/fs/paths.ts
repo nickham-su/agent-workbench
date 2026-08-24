@@ -74,6 +74,10 @@ export function agentArchiveSessionDir(dataDir: string, workspaceId: string, ses
   return path.join(agentArchiveWorkspaceDir(dataDir, workspaceId), session);
 }
 
+export function agentArchivePendingSidecarPath(dataDir: string, workspaceId: string, sessionId: string) {
+  return path.join(agentArchiveSessionDir(dataDir, workspaceId, sessionId), ".pending-reconcile.json");
+}
+
 export function sshRoot(dataDir: string) {
   return path.join(dataDir, "ssh");
 }

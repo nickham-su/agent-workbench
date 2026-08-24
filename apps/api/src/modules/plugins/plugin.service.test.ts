@@ -46,7 +46,7 @@ test("plugin service discovers debug-tools fixture and exposes runtime snapshot"
     assert.equal(debugPlugin?.state, "ready");
     assert.equal(debugPlugin?.manifest?.id, "debug-tools");
     assert.equal(debugPlugin?.manifest?.version, "0.1.0");
-    assert.ok(debugPlugin?.entryPath?.endsWith(path.join("plugins", "debug-tools", "dist", "index.js")));
+    assert.ok(debugPlugin?.entryPath?.endsWith(path.join("plugins", "debug-tools", "index.js")));
     assert.ok(
       debugPlugin?.capabilities.tools?.some((tool) => tool.canonicalName === "plugin_debug-tools_echo_inspect"),
       "debug-tools should expose canonical tool name"

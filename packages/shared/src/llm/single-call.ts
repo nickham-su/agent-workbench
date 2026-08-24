@@ -27,7 +27,7 @@ const SINGLE_CALL_ALLOWED_PARAM_KEYS = new Set([
   "timeoutMs",
   "abortSignal",
   "tools",
-  "workspaceId",
+  "sessionId",
   "allowTools"
 ]);
 
@@ -56,7 +56,7 @@ type SingleCallModelParams = {
     role: string;
     content: unknown;
   }>;
-  workspaceId?: string;
+  sessionId?: string;
   temperature?: number;
   topP?: number;
   maxOutputTokens?: number;
@@ -249,13 +249,13 @@ function hasValidPromptCacheKey(providerOptions: Record<string, unknown>) {
 
 function buildProviderOptionsWithPromptCacheKey(params: {
   providerNpm: SingleCallProviderNpm;
-  workspaceId?: string;
+  sessionId?: string;
   providerOptions: Record<string, unknown>;
 }) {
   if (params.providerNpm !== "@ai-sdk/openai") return params.providerOptions;
-  if (!params.workspaceId || !params.workspaceId.trim()) return params.providerOptions;
+  if (!params.sessionId || !params.sessionId.trim()) return params.providerOptions;
   if (hasValidPromptCacheKey(params.providerOptions)) return params.providerOptions;
-  return { ...params.providerOptions, promptCacheKey: `awb:${params.workspaceId}` };
+  return { ...params.providerOptions, promptCacheKey: `awb:${params.sessionId}` };
 }
 
 function createLanguageModel(profile: SingleCallModelProfile) {
@@ -342,7 +342,7 @@ function buildSingleCallRequest(profile: SingleCallModelProfile, params: SingleC
   }
   const providerOptions = buildProviderOptionsWithPromptCacheKey({
     providerNpm: profile.provider.npm,
-    workspaceId: params.workspaceId,
+    sessionId: params.sessionId,
     providerOptions: runtimeOptions.providerOptions
   });
   if (Object.keys(providerOptions).length > 0) {

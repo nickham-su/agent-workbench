@@ -1,4 +1,5 @@
-import type { PluginToolCanonicalName } from "@agent-workbench/shared";
+import { AgentMcpToolNameSchema, type AgentContextItemOutput, type PluginToolCanonicalName } from "@agent-workbench/shared";
+import { Value } from "@sinclair/typebox/value";
 import type { AgentApiClient, ExecutionProfile, PromptContext } from "../apiClient.js";
 
 export type ToolSource = "builtin" | "mcp" | "plugin";
@@ -35,6 +36,7 @@ export type QueuedRunContext = {
   runId: string;
   inputText?: string;
   workspacePath: string;
+  workspaceRepoDirNames: string[];
 };
 
 export type NestedRunContext = {
@@ -43,6 +45,7 @@ export type NestedRunContext = {
   runId: string;
   inputText?: string;
   workspacePath: string;
+  workspaceRepoDirNames: string[];
 };
 
 export type ToolTextRenderInput = {
@@ -60,7 +63,7 @@ export type ToolExecutionContext = {
   apiClient: AgentApiClient;
   promptContext: PromptContext;
   processNestedRun: (run: NestedRunContext, signal: AbortSignal) => Promise<void>;
-  updateToolItem: (params: { status: "running" | "completed" | "failed"; output: Record<string, unknown> }) => Promise<void>;
+  updateToolItem: (params: { status: "running" | "completed" | "failed"; output: AgentContextItemOutput }) => Promise<void>;
   nowMs: () => number;
   reportRunningOutput?: (patch: { text?: string; result?: unknown }) => Promise<void>;
   renderToolText: (input: ToolTextRenderInput) => string;
@@ -94,7 +97,7 @@ export function isBuiltinToolName(toolName: string): toolName is BuiltinToolName
 }
 
 export function isMcpToolName(toolName: string) {
-  return toolName.startsWith("mcp_");
+  return Value.Check(AgentMcpToolNameSchema, toolName);
 }
 
 const PLUGIN_TOOL_NAME_RE = /^plugin_([a-z0-9][a-z0-9-]{0,63})_([A-Za-z][A-Za-z0-9_-]{0,63})$/;

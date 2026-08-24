@@ -4,6 +4,7 @@ import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { TextDecoder } from "node:util";
 import { isValidSkillRelativePath, parseSkillFrontmatter, parseStableSkillIdentifier } from "@agent-workbench/shared";
+import { normalizeWorkspaceRepoDirNames } from "./workspaceRepoDirNames.js";
 
 const DEFAULT_READ_LIMIT = 500;
 const MAX_READ_LIMIT = 2000;
@@ -17,6 +18,9 @@ const MAX_SKILL_FILES_SECTION_UTF8_BYTES = 10 * 1024;
 const MAX_ROOT_CONTENT_UTF8_BYTES = 50 * 1024;
 const MAX_SKILL_FILE_PATHS = 500;
 const ROOT_BODY_TRUNCATION_SUFFIX = "\n\nRoot skill content truncated.";
+const MAX_REPO_PROBE_CONCURRENCY = 8;
+const MAX_REPO_PATH_HINTS = 10;
+const REPO_PATH_HINT_HEADER = "Path exists in registered workspace repo(s). Retry read with one of:";
 
 const WRITE_UI_ARTIFACT_MAX_BYTES_PER_SIDE = readPositiveIntEnv("AWB_WRITE_UI_ARTIFACT_MAX_BYTES_PER_SIDE", 200 * 1024);
 
@@ -38,6 +42,30 @@ type WriteArtifactSide = {
   encoding?: SampleEncoding;
 };
 
+type RepoProbeFileSystem = {
+  lstat(targetPath: string): Promise<{ isSymbolicLink(): boolean }>;
+  realpath(targetPath: string): Promise<string>;
+};
+
+type ReadToolParams = {
+  workspacePath: string;
+  workspaceRepoDirNames: readonly string[];
+  filePath: string;
+  offset?: number;
+  limit?: number;
+  signal?: AbortSignal;
+};
+
+type ReadToolTestingOptions = {
+  rootLstat?: (targetPath: string) => Promise<Awaited<ReturnType<typeof fs.lstat>>>;
+  probeCandidates?: (params: {
+    workspacePath: string;
+    repoDirNames: readonly string[];
+    safePath: string;
+    signal?: AbortSignal;
+  }) => Promise<string[]>;
+};
+
 function readPositiveIntEnv(name: string, fallback: number) {
   const raw = Number(process.env[name]);
   if (!Number.isFinite(raw) || raw <= 0) return fallback;
@@ -54,6 +82,26 @@ function ensureSafeRelativePath(input: string) {
     throw new Error("absolute path is not allowed");
   }
   return value;
+}
+
+function buildReadRootPathError(error: unknown, safePath: string) {
+  const code = error && typeof error === "object" ? (error as NodeJS.ErrnoException).code : undefined;
+  let message: string;
+  if (code === "ENOENT") {
+    message = `ENOENT: no such file or directory, path: ${safePath}`;
+  } else if (code === "ENOTDIR") {
+    message = `ENOTDIR: not a directory, path: ${safePath}`;
+  } else {
+    throw new Error("unsupported root path error code");
+  }
+  const normalizedError = new Error(message) as NodeJS.ErrnoException;
+  normalizedError.code = code;
+  return normalizedError;
+}
+
+function isMissingRootPathError(error: unknown) {
+  const code = error && typeof error === "object" ? (error as NodeJS.ErrnoException).code : undefined;
+  return code === "ENOENT" || code === "ENOTDIR";
 }
 
 function resolveWithinWorkspace(workspacePath: string, relativePath: string) {
@@ -78,11 +126,66 @@ function throwIfAborted(signal?: AbortSignal) {
   throw new Error("operation aborted");
 }
 
-async function ensureRealPathInsideWorkspace(workspacePath: string, targetPath: string) {
-  const [workspaceRealPath, targetRealPath] = await Promise.all([fs.realpath(workspacePath), fs.realpath(targetPath)]);
+async function ensureRealPathInsideWorkspace(workspacePath: string, targetPath: string, fileSystem: Pick<RepoProbeFileSystem, "realpath"> = fs) {
+  const [workspaceRealPath, targetRealPath] = await Promise.all([fileSystem.realpath(workspacePath), fileSystem.realpath(targetPath)]);
   if (!isPathInside(workspaceRealPath, targetRealPath)) {
     throw new Error("path is outside workspace");
   }
+}
+
+function compareUtf8(left: string, right: string) {
+  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
+}
+
+async function probeRegisteredRepoCandidates(params: {
+  workspacePath: string;
+  repoDirNames: readonly string[];
+  safePath: string;
+  signal?: AbortSignal;
+}, fileSystem: RepoProbeFileSystem = fs) {
+  const repoDirNames = normalizeWorkspaceRepoDirNames(params.repoDirNames);
+  const matches: string[] = [];
+  let nextIndex = 0;
+
+  const probeOne = async (repoDirName: string) => {
+    try {
+      const repoRoot = resolveWithinWorkspace(params.workspacePath, repoDirName);
+      const repoStat = await fileSystem.lstat(repoRoot);
+      if (repoStat.isSymbolicLink()) return;
+      await ensureRealPathInsideWorkspace(params.workspacePath, repoRoot, fileSystem);
+
+      const candidate = resolveWithinWorkspace(params.workspacePath, path.join(repoDirName, params.safePath));
+      const candidateStat = await fileSystem.lstat(candidate);
+      if (candidateStat.isSymbolicLink()) return;
+      await ensureRealPathInsideWorkspace(params.workspacePath, candidate, fileSystem);
+      matches.push(`${repoDirName}/${params.safePath.replaceAll("\\", "/")}`);
+    } catch {
+      // Candidate probing is diagnostics only. Preserve the root read error.
+    }
+  };
+
+  const worker = async () => {
+    while (!params.signal?.aborted) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= repoDirNames.length) return;
+      const repoDirName = repoDirNames[index];
+      if (!repoDirName) continue;
+      await probeOne(repoDirName);
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(MAX_REPO_PROBE_CONCURRENCY, repoDirNames.length) }, () => worker()));
+  return params.signal?.aborted ? [] : matches.sort(compareUtf8);
+}
+
+function appendRepoPathHint(rootError: unknown, matches: readonly string[]) {
+  const originalMessage = rootError instanceof Error ? rootError.message : String(rootError);
+  const visible = matches.slice(0, MAX_REPO_PATH_HINTS);
+  const lines = [REPO_PATH_HINT_HEADER, ...visible.map((match) => `- ${match}`)];
+  const remaining = matches.length - visible.length;
+  if (remaining > 0) lines.push(`- ... and ${remaining} more candidate(s) not shown`);
+  return new Error(`${originalMessage}\n\n${lines.join("\n")}`);
 }
 
 function hasBinaryMagic(buffer: Buffer) {
@@ -539,17 +642,25 @@ async function readTextFileCapped(params: { fullPath: string; encoding: SampleEn
   }
 }
 
-export async function runReadTool(params: {
-  workspacePath: string;
-  filePath: string;
-  offset?: number;
-  limit?: number;
-  signal?: AbortSignal;
-}) {
+async function runReadToolInternal(params: ReadToolParams, options: ReadToolTestingOptions = {}) {
   throwIfAborted(params.signal);
   const safePath = ensureSafeRelativePath(params.filePath);
   const fullPath = resolveWithinWorkspace(params.workspacePath, safePath);
-  const stat = await fs.lstat(fullPath);
+  let stat: Awaited<ReturnType<typeof fs.lstat>>;
+  try {
+    stat = await (options.rootLstat ?? fs.lstat)(fullPath);
+  } catch (rootError) {
+    if (!isMissingRootPathError(rootError)) throw rootError;
+    const displayError = buildReadRootPathError(rootError, safePath);
+    const matches = await (options.probeCandidates ?? probeRegisteredRepoCandidates)({
+      workspacePath: params.workspacePath,
+      repoDirNames: params.workspaceRepoDirNames,
+      safePath,
+      signal: params.signal
+    });
+    if (params.signal?.aborted || matches.length === 0) throw displayError;
+    throw appendRepoPathHint(displayError, matches);
+  }
   if (stat.isSymbolicLink()) {
     throw new Error("symlink path is not allowed");
   }
@@ -725,6 +836,10 @@ export async function runReadTool(params: {
     eof: offsetOutOfRange || (!truncatedByBytes && !hasMoreLines),
     offsetOutOfRange
   };
+}
+
+export async function runReadTool(params: ReadToolParams) {
+  return runReadToolInternal(params);
 }
 
 type SafeSkillFile = {
@@ -1353,7 +1468,10 @@ export async function runSkillTool(params: RunSkillToolParams): Promise<SkillToo
 
 export const __testing = {
   runSkillTool: (params: RunSkillToolParams, options: SkillToolTestingOptions) => runSkillToolInternal(params, options),
-  buildSkillFilesSection
+  runReadTool: (params: ReadToolParams, options: ReadToolTestingOptions) => runReadToolInternal(params, options),
+  buildSkillFilesSection,
+  probeRegisteredRepoCandidates,
+  isMissingRootPathError
 };
 
 export async function runWriteTool(params: {

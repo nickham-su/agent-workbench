@@ -1,133 +1,83 @@
 import type {
-  AgentToolName,
-  AgentUiLocale,
   PluginRuntimeSnapshotsResponse,
-  PluginToolCanonicalName,
   PluginToolRpcExecuteRequest,
   PluginToolRpcExecuteResponse,
   PluginToolRpcListRequest,
   PluginToolRpcListResponse
 } from "@agent-workbench/shared";
+import { Value } from "@sinclair/typebox/value";
+import type { TSchema } from "@sinclair/typebox";
+import {
+  AgentApiEndpoints,
+  type AgentApiExecutionProfileRequest,
+  type AgentApiExecutionProfileResponse,
+  AgentApiExecutionProfileResponseSchema,
+  type AgentApiMessagesContextRequest,
+  type AgentApiMessagesContextResponse,
+  AgentApiMessagesContextResponseSchema,
+  type AgentApiPromptContextRequest,
+  type AgentApiPromptContextResponse,
+  AgentApiPromptContextResponseSchema,
+  type AgentApiCreateContextItemResponse,
+  AgentApiCreateContextItemResponseSchema,
+  type AgentApiUpdateContextItemResponse,
+  AgentApiUpdateContextItemResponseSchema,
+  type AgentApiCompactContextRequest,
+  type AgentApiCompactContextResponse,
+  AgentApiCompactContextResponseSchema,
+  AgentApiSubtaskPreforkPlanRequest,
+  AgentApiSubtaskPreforkPlanResponse,
+  AgentApiSubtaskPreforkPlanResponseSchema,
+  AgentApiSubtaskStartRequest,
+  AgentApiSubtaskStartResponse,
+  AgentApiSubtaskStartResponseSchema,
+  AgentApiSubtaskResultRequest,
+  AgentApiSubtaskResultResponse,
+  AgentApiSubtaskResultResponseSchema,
+  AgentApiSubtaskStatusRequest,
+  AgentApiSubtaskStatusResponse,
+  AgentApiSubtaskStatusResponseSchema,
+  AgentApiRunCompleteResponseSchema,
+  AgentApiRunStateResponseSchema,
+  buildAgentApiContextItemPath,
+  type AgentApiCreateContextItemRequest,
+  type AgentApiUpdateContextItemRequest,
+  type AgentApiRunCompleteRequest,
+  type AgentApiRunStateRequest
+} from "@agent-workbench/shared/internal-contracts/agent-api";
 
 export class ApiConflictError extends Error {}
 
-type PromptTextPart = {
-  type: "text";
-  text: string;
-};
+const SENSITIVE_RESPONSE_DIAGNOSTIC_PATH_SEGMENTS = new Set([
+  "apikey",
+  "args",
+  "authorization",
+  "content",
+  "input",
+  "messages",
+  "output",
+  "prompt",
+  "result",
+  "runid",
+  "secret",
+  "sessionid",
+  "token"
+]);
 
-type PromptToolCallPart = {
-  type: "tool-call";
-  toolCallId: string;
-  toolName: string;
-  input: Record<string, unknown>;
-};
+function formatSafeResponseSchemaErrorPath(path: string) {
+  const normalized = String(path || "/");
+  const segments = normalized
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => segment.replace(/~1/g, "/").replace(/~0/g, "~").replace(/[-_]/g, "").toLowerCase());
+  if (normalized.length > 128 || segments.some((segment) => SENSITIVE_RESPONSE_DIAGNOSTIC_PATH_SEGMENTS.has(segment))) {
+    return "<redacted>";
+  }
+  return normalized;
+}
 
-type PromptToolResultPart = {
-  type: "tool-result";
-  toolCallId: string;
-  toolName: string;
-  output: unknown;
-};
-
-type PromptMessage =
-  | { role: "system"; content: string }
-  | { role: "user"; content: string | PromptTextPart[] }
-  | { role: "assistant"; content: string | Array<PromptTextPart | PromptToolCallPart> }
-  | { role: "tool"; content: PromptToolResultPart[] };
-
-export type MessagesContext = {
-  headItemId: number | null;
-  messages: PromptMessage[];
-  system: string;
-};
-
-export type ExecutionProfile = {
-  resolved: {
-    runId: string;
-    sessionId: string;
-    workspaceId: string;
-    agentId: string;
-    providerId: string;
-    modelId: string;
-  };
-  runtime: {
-    modelIdleTimeoutMs: number;
-    modelTotalTimeoutMs: number;
-    modelRequestMaxRetries: number;
-    autoCompactThresholdPct: number;
-    visionModel: { providerId: string; modelId: string } | null;
-    compactionModel: { providerId: string; modelId: string } | null;
-    updatedAt: number;
-  };
-  vision: {
-    source: "runtime_vision" | "agent_default_fallback";
-    provider: {
-      id: string;
-      name: string;
-      npm: "@ai-sdk/openai" | "@ai-sdk/openai-compatible" | "@ai-sdk/anthropic";
-      options: {
-        baseURL: string;
-        apiKey: string;
-        apiMode?: "responses" | "chatCompletions";
-      };
-    };
-    model: {
-      id: string;
-      providerModelId?: string;
-      name: string;
-      contextWindowTokens: number;
-      options?: Record<string, unknown>;
-    };
-  } | null;
-  compaction: {
-    source: "runtime_compaction";
-    provider: {
-      id: string;
-      name: string;
-      npm: "@ai-sdk/openai" | "@ai-sdk/openai-compatible" | "@ai-sdk/anthropic";
-      options: {
-        baseURL: string;
-        apiKey: string;
-        apiMode?: "responses" | "chatCompletions";
-      };
-    };
-    model: {
-      id: string;
-      providerModelId?: string;
-      name: string;
-      contextWindowTokens: number;
-      options?: Record<string, unknown>;
-    };
-  } | null;
-  agent: {
-    id: string;
-    name: string;
-    summary: string;
-    prompt: string;
-    tools: AgentToolName[];
-    mcpServers: string[];
-    pluginTools: PluginToolCanonicalName[];
-    defaultModel: { providerId: string; modelId: string } | null;
-  };
-  provider: {
-    id: string;
-    name: string;
-    npm: "@ai-sdk/openai" | "@ai-sdk/openai-compatible" | "@ai-sdk/anthropic";
-    options: {
-      baseURL: string;
-      apiKey: string;
-      apiMode?: "responses" | "chatCompletions";
-    };
-  };
-  model: {
-    id: string;
-    providerModelId?: string;
-    name: string;
-    contextWindowTokens: number;
-    options?: Record<string, unknown>;
-  };
-};
+export type MessagesContext = AgentApiMessagesContextResponse;
+export type ExecutionProfile = AgentApiExecutionProfileResponse;
 
 export type GitEnvPrepareResponse =
   | {
@@ -143,31 +93,7 @@ export type GitEnvPrepareResponse =
       error: string;
     };
 
-export type PromptContext = {
-  headItemId: number | null;
-  system: string;
-  messages: PromptMessage[];
-  tools: Array<{
-    name: string;
-    description: string;
-    inputSchema: Record<string, unknown>;
-  }>;
-  pendingTools: Array<{
-    itemId: number;
-    status: "queued" | "running" | "streaming" | "completed" | "failed" | "cancelled";
-    toolName: string;
-    toolCallId?: string;
-    args: Record<string, unknown>;
-  }>;
-  lastResponseTotalTokens: number | null;
-  uiLocale: AgentUiLocale | null;
-  externalSkillRoots: Array<{
-    sourceType: "workspace" | "repo";
-    repoId?: string;
-    rootDir: string;
-    rootPath: string;
-  }>;
-};
+export type PromptContext = AgentApiPromptContextResponse;
 
 export type AgentMcpSettingsPayload = {
   servers: Array<{
@@ -179,14 +105,30 @@ export type AgentMcpSettingsPayload = {
 };
 
 export class AgentApiClient {
+  private readonly logger: Pick<Console, "warn">;
+
   constructor(
     private readonly params: {
       apiOrigin: string;
       internalToken: string;
+      responseValidation?: "strict" | "warn";
+      logger?: Pick<Console, "warn">;
     }
-  ) {}
+  ) {
+    this.params.responseValidation ??= "strict";
+    this.logger = this.params.logger ?? console;
+  }
 
-  private async request<T>(path: string, options: { method: "POST" | "PATCH"; body: unknown; conflictAsError?: boolean }) {
+  private async request<T>(
+    path: string,
+    options: {
+      method: "POST" | "PATCH";
+      body: unknown;
+      conflictAsError?: boolean;
+      responseSchema?: TSchema;
+      responseEndpoint?: string;
+    }
+  ) {
     const response = await fetch(`${this.params.apiOrigin}${path}`, {
       method: options.method,
       headers: {
@@ -210,143 +152,105 @@ export class AgentApiClient {
         throw new Error(`request failed: ${response.status} ${txt}`);
       }
     }
-    return (await response.json()) as T;
+    const parsed: unknown = await response.json();
+    if (options.responseSchema && !Value.Check(options.responseSchema, parsed)) {
+      const errors = [...Value.Errors(options.responseSchema, parsed)]
+        .slice(0, 3)
+        .map((error) => `path=${formatSafeResponseSchemaErrorPath(error.path)} type=${error.type}`)
+        .join("; ");
+      const endpoint = options.responseEndpoint || path;
+      if (this.params.responseValidation === "warn") {
+        this.logger.warn(
+          `[agent-api] response schema mismatch endpoint=${endpoint} method=${options.method}: ${errors}`
+        );
+      } else {
+        throw new Error(`response schema validation failed: ${options.method} ${endpoint}: ${errors}`);
+      }
+    }
+    return parsed as T;
   }
 
-  async createContextItem(input: {
-    workspaceId: string;
-    sessionId: string;
-    runId: string | null;
-    turnId: string | null;
-    step: number | null;
-    prevId: number | null;
-    kind: "user" | "assistant" | "tool" | "system";
-    status: "streaming" | "queued" | "running" | "completed" | "failed" | "cancelled";
-    output: unknown;
-    createdAt?: number;
-  }) {
-    const res = await this.request<{ ok: true; item: { id: number } }>("/api/internal/agent/context-items", {
-      method: "POST",
+  async createContextItem(input: AgentApiCreateContextItemRequest) {
+    const res = await this.request<AgentApiCreateContextItemResponse>(AgentApiEndpoints.createContextItem.path, {
+      method: AgentApiEndpoints.createContextItem.method,
       body: input,
-      conflictAsError: true
+      conflictAsError: true,
+      responseSchema: AgentApiCreateContextItemResponseSchema,
+      responseEndpoint: AgentApiEndpoints.createContextItem.path
     });
-    return res.item;
+    return res;
   }
 
-  async updateContextItem(input: {
+  async updateContextItem(input: AgentApiUpdateContextItemRequest & {
     itemId: number;
-    status?: "streaming" | "queued" | "running" | "completed" | "failed" | "cancelled";
-    output?: unknown;
-    updatedAt?: number;
   }) {
-    const res = await this.request<{ ok: true; item: { id: number } }>(`/api/internal/agent/context-items/${input.itemId}`, {
-      method: "PATCH",
+    const path = buildAgentApiContextItemPath(input.itemId);
+    const res = await this.request<AgentApiUpdateContextItemResponse>(path, {
+      method: AgentApiEndpoints.updateContextItem.method,
       body: {
         status: input.status,
         output: input.output,
         updatedAt: input.updatedAt
-      }
+      },
+      responseSchema: AgentApiUpdateContextItemResponseSchema,
+      responseEndpoint: path
     });
     return res.item;
   }
 
-  async updateRunState(input: {
-    workspaceId: string;
-    sessionId: string;
-    status: "idle" | "running";
-    activeRunId: string | null;
-    activeAssistantItemId: number | null;
-    lastResponseTotalTokens?: number | null;
-    runNoticeText?: string | null;
-    updatedAt?: number;
-  }) {
-    await this.request<{ ok: true }>("/api/internal/agent/run-state", {
-      method: "POST",
-      body: input
+  async updateRunState(input: AgentApiRunStateRequest) {
+    await this.request(AgentApiEndpoints.updateRunState.path, {
+      method: AgentApiEndpoints.updateRunState.method,
+      body: input,
+      responseSchema: AgentApiRunStateResponseSchema,
+      responseEndpoint: AgentApiEndpoints.updateRunState.path
     });
   }
 
-  async completeRun(input: {
-    workspaceId: string;
-    sessionId: string;
-    runId: string;
-    status: "completed" | "failed" | "cancelled";
-    updatedAt?: number;
-  }) {
-    await this.request<{ ok: true }>("/api/internal/agent/run-complete", {
-      method: "POST",
-      body: input
+  async completeRun(input: AgentApiRunCompleteRequest) {
+    await this.request(AgentApiEndpoints.completeRun.path, {
+      method: AgentApiEndpoints.completeRun.method,
+      body: input,
+      responseSchema: AgentApiRunCompleteResponseSchema,
+      responseEndpoint: AgentApiEndpoints.completeRun.path
     });
   }
 
-  async getExecutionProfile(input: { workspaceId: string; sessionId: string; runId: string }) {
-    const response = await fetch(`${this.params.apiOrigin}/api/internal/agent/execution-profile`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-awb-agent-internal-token": this.params.internalToken
-      },
-      body: JSON.stringify(input)
+  async getExecutionProfile(input: AgentApiExecutionProfileRequest) {
+    return this.request<AgentApiExecutionProfileResponse>(AgentApiEndpoints.getExecutionProfile.path, {
+      method: AgentApiEndpoints.getExecutionProfile.method,
+      body: input,
+      responseSchema: AgentApiExecutionProfileResponseSchema,
+      responseEndpoint: AgentApiEndpoints.getExecutionProfile.path
     });
-
-    if (!response.ok) {
-      const txt = await response.text();
-      throw new Error(`get execution profile failed: ${response.status} ${txt}`);
-    }
-    return (await response.json()) as ExecutionProfile;
   }
 
-  async getPromptContext(input: { workspaceId: string; sessionId: string; runId: string }) {
-    const response = await fetch(`${this.params.apiOrigin}/api/internal/agent/prompt-context`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-awb-agent-internal-token": this.params.internalToken
-      },
-      body: JSON.stringify(input)
+  async getPromptContext(input: AgentApiPromptContextRequest) {
+    return this.request<AgentApiPromptContextResponse>(AgentApiEndpoints.getPromptContext.path, {
+      method: AgentApiEndpoints.getPromptContext.method,
+      body: input,
+      responseSchema: AgentApiPromptContextResponseSchema,
+      responseEndpoint: AgentApiEndpoints.getPromptContext.path
     });
-    if (!response.ok) {
-      const txt = await response.text();
-      throw new Error(`get prompt context failed: ${response.status} ${txt}`);
-    }
-    return (await response.json()) as PromptContext;
   }
 
-  async getMessagesContext(input: {
-    workspaceId: string;
-    sessionId: string;
-    appendMessage?: { role: "system" | "user"; content: string };
-  }) {
-    const response = await fetch(`${this.params.apiOrigin}/api/internal/agent/messages-context`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-awb-agent-internal-token": this.params.internalToken
-      },
-      body: JSON.stringify(input)
+  async getMessagesContext(input: AgentApiMessagesContextRequest) {
+    return this.request<AgentApiMessagesContextResponse>(AgentApiEndpoints.getMessagesContext.path, {
+      method: AgentApiEndpoints.getMessagesContext.method,
+      body: input,
+      responseSchema: AgentApiMessagesContextResponseSchema,
+      responseEndpoint: AgentApiEndpoints.getMessagesContext.path
     });
-    if (!response.ok) {
-      const txt = await response.text();
-      throw new Error(`get messages context failed: ${response.status} ${txt}`);
-    }
-    return (await response.json()) as MessagesContext;
   }
 
-  async compactContext(input: {
-    workspaceId: string;
-    sessionId: string;
-    runId: string;
-    expectedHeadItemId: number | null;
-    summaryText: string;
-  }) {
-    return this.request<{ compacted: boolean; summaryItemId: number | null; archivedCount: number }>(
-      "/api/internal/agent/context/compact",
-      {
-        method: "POST",
-        body: input,
-        conflictAsError: true
-      }
-    );
+  async compactContext(input: AgentApiCompactContextRequest) {
+    return this.request<AgentApiCompactContextResponse>(AgentApiEndpoints.compactContext.path, {
+      method: AgentApiEndpoints.compactContext.method,
+      body: input,
+      conflictAsError: true,
+      responseSchema: AgentApiCompactContextResponseSchema,
+      responseEndpoint: AgentApiEndpoints.compactContext.path
+    });
   }
 
   async archiveSearch(input: {
@@ -378,63 +282,40 @@ export class AgentApiClient {
     });
   }
 
-  async getSubtaskPreforkPlan(input: {
-    workspaceId: string;
-    parentSessionId: string;
-    parentRunId: string;
-    parentToolItemId: number;
-    agentId: string;
-    thresholdPct?: number;
-  }) {
-    return this.request<{
-      shouldPrefork: boolean;
-      thresholdPct: number;
-      parentLastResponseTotalTokens: number | null;
-      childContextWindowTokens: number;
-      thresholdTokens: number;
-    }>("/api/internal/agent/subtask/prefork-plan", {
-      method: "POST",
-      body: input
+  async getSubtaskPreforkPlan(input: AgentApiSubtaskPreforkPlanRequest) {
+    return this.request<AgentApiSubtaskPreforkPlanResponse>(AgentApiEndpoints.getSubtaskPreforkPlan.path, {
+      method: AgentApiEndpoints.getSubtaskPreforkPlan.method,
+      body: input,
+      responseSchema: AgentApiSubtaskPreforkPlanResponseSchema,
+      responseEndpoint: AgentApiEndpoints.getSubtaskPreforkPlan.path
     });
   }
 
-  async startSubtaskRun(input: {
-    workspaceId: string;
-    parentSessionId: string;
-    parentRunId: string;
-    parentToolItemId: number;
-    description: string;
-    prompt: string;
-    agentId: string;
-    session: { mode: "new" | "existing" | "fork"; sessionId?: string };
-    preforkSummaryText?: string;
-    preforkMeta?: {
-      thresholdPct: number;
-      parentLastResponseTotalTokens: number;
-      childContextWindowTokens: number;
-    };
-  }) {
-    return this.request<{ sessionId: string; runId: string; workspacePath: string; agentName: string; reused: boolean }>("/api/internal/agent/subtask/start", {
-      method: "POST",
-      body: input
+  async startSubtaskRun(input: AgentApiSubtaskStartRequest) {
+    return this.request<AgentApiSubtaskStartResponse>(AgentApiEndpoints.startSubtask.path, {
+      method: AgentApiEndpoints.startSubtask.method,
+      body: input,
+      responseSchema: AgentApiSubtaskStartResponseSchema,
+      responseEndpoint: AgentApiEndpoints.startSubtask.path
     });
   }
 
-  async getSubtaskResult(input: { workspaceId: string; sessionId: string; runId: string }) {
-    return this.request<{ resultText: string }>("/api/internal/agent/subtask/result", {
-      method: "POST",
-      body: input
+  async getSubtaskResult(input: AgentApiSubtaskResultRequest) {
+    return this.request<AgentApiSubtaskResultResponse>(AgentApiEndpoints.getSubtaskResult.path, {
+      method: AgentApiEndpoints.getSubtaskResult.method,
+      body: input,
+      responseSchema: AgentApiSubtaskResultResponseSchema,
+      responseEndpoint: AgentApiEndpoints.getSubtaskResult.path
     });
   }
 
-  async getSubtaskStatus(input: { workspaceId: string; sessionId: string; runId: string }) {
-    return this.request<{ status: "running" | "completed" | "failed" | "cancelled" }>(
-      "/api/internal/agent/subtask/status",
-      {
-        method: "POST",
-        body: input
-      }
-    );
+  async getSubtaskStatus(input: AgentApiSubtaskStatusRequest) {
+    return this.request<AgentApiSubtaskStatusResponse>(AgentApiEndpoints.getSubtaskStatus.path, {
+      method: AgentApiEndpoints.getSubtaskStatus.method,
+      body: input,
+      responseSchema: AgentApiSubtaskStatusResponseSchema,
+      responseEndpoint: AgentApiEndpoints.getSubtaskStatus.path
+    });
   }
 
   async getAgentMcpSettings() {

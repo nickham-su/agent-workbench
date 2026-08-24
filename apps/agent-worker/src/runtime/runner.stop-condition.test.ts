@@ -34,6 +34,7 @@ function baseRun() {
     sessionId: "sess_test",
     runId: "run_test",
     workspacePath: process.cwd(),
+    workspaceRepoDirNames: [],
     inputText: "hello"
   };
 }

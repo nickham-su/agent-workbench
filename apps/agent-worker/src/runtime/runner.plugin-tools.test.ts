@@ -90,7 +90,8 @@ test("executePendingTools uses ToolRegistry snapshot so queued plugin tools are 
       workspaceId: "ws_test",
       sessionId: "sess_test",
       runId: "run_test",
-      workspacePath: process.cwd()
+      workspacePath: process.cwd(),
+      workspaceRepoDirNames: []
     },
     context: {
       pendingTools: [queuedPluginTool()],
@@ -195,6 +196,7 @@ test("processRun reuses runModelStep tool snapshot for next pending plugin tool 
     sessionId: "sess_test",
     runId: "run_test",
     workspacePath: process.cwd(),
+      workspaceRepoDirNames: [],
     inputText: "hello"
   }, new AbortController().signal);
 

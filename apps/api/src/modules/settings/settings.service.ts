@@ -733,13 +733,15 @@ function normalizeAgentTools(raw: unknown): AgentToolName[] {
       item !== "apply_patch" &&
       item !== "subtask" &&
       item !== "scratchpad" &&
+      item !== "todolist" &&
+      item !== "visual_analyze" &&
       // Legacy baseline-only tool names are intentionally ignored.
       item !== "read" &&
-      item !== "todolist" &&
       item !== "archive_search" &&
-      item !== "archive_read"
+      item !== "archive_read" &&
+      item !== "skill"
     ) continue;
-    if (item === "read" || item === "todolist" || item === "archive_search" || item === "archive_read") {
+    if (item === "read" || item === "archive_search" || item === "archive_read" || item === "skill") {
       continue;
     }
     if (seen.has(item)) continue;

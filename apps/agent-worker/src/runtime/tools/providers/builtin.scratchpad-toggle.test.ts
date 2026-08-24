@@ -19,6 +19,8 @@ function createProfile(tools: ExecutionProfile["agent"]["tools"]): ExecutionProf
       modelTotalTimeoutMs: 0,
       modelRequestMaxRetries: 0,
       autoCompactThresholdPct: 80,
+      maxSubtaskDepth: 1,
+      sessionTerminalSoundEnabled: true,
       visionModel: null,
       compactionModel: null,
       updatedAt: Date.now()
@@ -79,6 +81,32 @@ test("builtin provider 未配置 scratchpad 时不启用", () => {
 test("builtin provider 配置 scratchpad 时启用", () => {
   const provider = new BuiltinToolProvider();
   assert.equal(provider.isToolEnabled("scratchpad", createCtx(["scratchpad"])), true);
+});
+
+test("builtin provider 未配置 todolist 和 visual_analyze 时不启用", () => {
+  const provider = new BuiltinToolProvider();
+  const ctx = createCtx([]);
+
+  assert.equal(provider.isToolEnabled("todolist", ctx), false);
+  assert.equal(provider.isToolEnabled("visual_analyze", ctx), false);
+});
+
+test("builtin provider 配置 todolist 和 visual_analyze 时启用", () => {
+  const provider = new BuiltinToolProvider();
+  const ctx = createCtx(["todolist", "visual_analyze"]);
+
+  assert.equal(provider.isToolEnabled("todolist", ctx), true);
+  assert.equal(provider.isToolEnabled("visual_analyze", ctx), true);
+});
+
+test("builtin provider 保持隐藏默认工具始终启用", () => {
+  const provider = new BuiltinToolProvider();
+  const ctx = createCtx([]);
+
+  assert.equal(provider.isToolEnabled("read", ctx), true);
+  assert.equal(provider.isToolEnabled("archive_search", ctx), true);
+  assert.equal(provider.isToolEnabled("archive_read", ctx), true);
+  assert.equal(provider.isToolEnabled("skill", ctx), true);
 });
 
 test("builtin provider listTools 仅暴露 promptContext 中的 scratchpad", async () => {

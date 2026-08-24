@@ -17,6 +17,22 @@
     "./prompts": {
       "types": "./dist/prompts.d.ts",
       "default": "./dist/prompts.js"
+    },
+    "./internal-contracts/endpoints": {
+      "types": "./dist/internal-contracts/endpoints.d.ts",
+      "default": "./dist/internal-contracts/endpoints.js"
+    },
+    "./internal-contracts/errors": {
+      "types": "./dist/internal-contracts/errors.d.ts",
+      "default": "./dist/internal-contracts/errors.js"
+    },
+    "./internal-contracts/agent-worker": {
+      "types": "./dist/internal-contracts/agent-worker.d.ts",
+      "default": "./dist/internal-contracts/agent-worker.js"
+    },
+    "./internal-contracts/agent-api": {
+      "types": "./dist/internal-contracts/agent-api.d.ts",
+      "default": "./dist/internal-contracts/agent-api.js"
     }
   },
   "scripts": {

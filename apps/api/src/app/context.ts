@@ -5,6 +5,13 @@ export type AgentTestFaults = {
   archiveWrite?: {
     failAfterChunks?: number;
   } | null;
+  archiveRollback?: {
+    appendBeforeRollback?: string;
+  } | null;
+  archiveSidecar?: {
+    failWrite?: boolean;
+    failRename?: boolean;
+  } | null;
 };
 
 export type AppContext = {
@@ -28,6 +35,7 @@ export type AppContext = {
   agentWorkerSocketPath: string;
   agentWorkerConcurrency: number;
   agentInternalToken: string;
+  agentWorkerResponseValidation: "strict" | "warn";
   agentApiOrigin: string;
   agentStartupRecoveryMode: "fail" | "recover";
   agentPluginHostEnabled: boolean;

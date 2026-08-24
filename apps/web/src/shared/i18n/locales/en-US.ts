@@ -1004,6 +1004,7 @@ export default {
         todolist: "Todo List",
         subtask: "Subtask",
         archiveSearch: "Archive Search",
+        visualAnalyze: "Visual Analyze",
         archiveRead: "Archive Read",
         archiveTail: "Archive Tail"
       },
@@ -1066,7 +1067,7 @@ export default {
         },
         maxSubtaskDepth: {
           label: "Maximum subtask nesting depth",
-          help: "Limits the maximum nesting depth of the subtask call chain. An independent primary session's first run is depth 0; at 1, only a primary run can create a first-level subtask; range: 1-5. This limits nesting depth only, not sibling count, concurrency, or token usage."
+          help: "Limits only a real subtask tool-call chain, not how many times primary-session context is forked. Every primary session starts ordinary runs at depth 0; at 1, a primary run can create only a first-level subtask. Range: 1-5. This does not limit sibling count, concurrency, or token usage."
         },
         modelTotalTimeoutMs: {
           label: "Model total timeout (seconds)",

@@ -1002,6 +1002,7 @@ export default {
         todolist: "Todo List",
         subtask: "Subtask",
         archiveSearch: "Archive Search",
+        visualAnalyze: "Visual Analyze",
         archiveRead: "Archive Read",
         archiveTail: "Archive Tail"
       },
@@ -1064,7 +1065,7 @@ export default {
         },
         maxSubtaskDepth: {
           label: "Subtask 最大嵌套深度",
-          help: "限制 subtask 调用链的最大嵌套层级。独立主会话的首个运行是第 0 层；设为 1 时，仅允许主运行创建第一层 subtask；范围 1-5。仅限制嵌套深度，不限制同层数量、并发数或 token 消耗。"
+          help: "仅限制真实 subtask 工具调用链的最大嵌套层级，不限制 primary 会话上下文被 fork 的次数。每个 primary 会话的普通运行都从第 0 层开始；设为 1 时，仅允许 primary 运行创建第一层 subtask；范围 1-5。不限制同层数量、并发数或 token 消耗。"
         },
         modelTotalTimeoutMs: {
           label: "单次请求超时（秒）",

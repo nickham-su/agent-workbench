@@ -51,10 +51,7 @@ type ParsedSubtaskArgs = {
   description: string;
   prompt: string;
   agentId: string;
-  session: {
-    mode: "new" | "existing" | "fork";
-    sessionId?: string;
-  };
+  session: AgentApiSubtaskSession;
 };
 
 function toRecord(raw: unknown) {
@@ -87,6 +84,18 @@ function requireNonEmptyStringArg(raw: unknown, fieldName: string) {
     throw new Error(`${fieldName} must be a non-empty string`);
   }
   return value;
+}
+
+function isAbortLikeError(err: unknown, signal: AbortSignal) {
+  if (signal.aborted) return true;
+  if (!err || typeof err !== "object") return false;
+  const name = typeof (err as { name?: unknown }).name === "string" ? String((err as { name: string }).name) : "";
+  const code = typeof (err as { code?: unknown }).code === "string" ? String((err as { code: string }).code) : "";
+  const message = typeof (err as { message?: unknown }).message === "string" ? String((err as { message: string }).message) : "";
+  return name === "AbortError"
+    || code === "ABORT_ERR"
+    || /\babort(ed)?\b/i.test(name)
+    || /\babort(ed)?\b/i.test(message);
 }
 
 function parseSkillToolArgs(args: unknown) {
@@ -283,15 +292,12 @@ function parseSubtaskArgs(raw: Record<string, unknown>): ParsedSubtaskArgs {
     throw new Error(`subtask.session.sessionId is not allowed when mode=${mode}`);
   }
 
-  return {
-    description,
-    prompt,
-    agentId,
-    session: {
-      mode,
-      ...(sessionId ? { sessionId } : {})
-    }
-  };
+  const session: AgentApiSubtaskSession = mode === "existing"
+    ? { mode: "existing", sessionId }
+    : mode === "new"
+      ? { mode: "new", ...(sessionId ? { sessionId } : {}) }
+      : { mode: "fork", ...(sessionId ? { sessionId } : {}) };
+  return { description, prompt, agentId, session };
 }
 
 function toApplyPatchResult(prepared: Awaited<ReturnType<typeof prepareApplyPatchTool>>) {
@@ -388,11 +394,9 @@ export class BuiltinToolProvider implements ToolProvider {
     if (!isBuiltinToolName(toolName)) return false;
     if (
       toolName === "read"
-      || toolName === "todolist"
       || toolName === "archive_search"
       || toolName === "archive_read"
       || toolName === "skill"
-      || toolName === "visual_analyze"
     ) {
       return true;
     }
@@ -407,7 +411,7 @@ export class BuiltinToolProvider implements ToolProvider {
     input: {
       messages: Array<{ role: string; content: unknown }>;
       system?: string;
-      workspaceId?: string;
+      sessionId?: string;
       timeoutMs: number;
       abortSignal: AbortSignal;
     };
@@ -534,6 +538,7 @@ export class BuiltinToolProvider implements ToolProvider {
         const limit = parseOptionalPositiveIntegerArg(args.limit, "read.limit");
         return await runReadTool({
           workspacePath: ctx.run.workspacePath,
+          workspaceRepoDirNames: ctx.run.workspaceRepoDirNames,
           filePath,
           offset,
           limit,
@@ -676,7 +681,7 @@ export class BuiltinToolProvider implements ToolProvider {
                 input: {
                   // subtask prefork 是 one-shot 摘要任务，使用 messages-context 提供的通用最小 system。
                   system: messagesContext.system,
-                  workspaceId: ctx.run.workspaceId,
+                  sessionId: ctx.run.sessionId,
                   messages: messagesContext.messages,
                   timeoutMs: COMPACTION_TIMEOUT_MS,
                   abortSignal: ctx.signal
@@ -692,9 +697,18 @@ export class BuiltinToolProvider implements ToolProvider {
                 };
               }
             }
-          } catch {
-            // prefork 预压缩失败时，回退到原有 subtask 启动路径。
+          } catch (err) {
+            if (isAbortLikeError(err, ctx.signal)) {
+              throw err;
+            }
+            // 只记录固定诊断，不打印 prompt、token、完整 response 或错误 payload。
+            console.warn("[agent-worker] subtask prefork summary failed; falling back to normal fork");
           }
+        }
+        if (ctx.signal.aborted) {
+          const abortError = new Error("subtask cancelled by parent abort");
+          (abortError as Error & { name: string }).name = "AbortError";
+          throw abortError;
         }
         const started = await ctx.apiClient.startSubtaskRun({
           workspaceId: ctx.run.workspaceId,
@@ -737,7 +751,8 @@ export class BuiltinToolProvider implements ToolProvider {
               sessionId: started.sessionId,
               runId: started.runId,
               inputText: parsed.prompt,
-              workspacePath: started.workspacePath
+              workspacePath: started.workspacePath,
+              workspaceRepoDirNames: [...ctx.run.workspaceRepoDirNames]
             },
             ctx.signal
           );
@@ -844,7 +859,7 @@ export class BuiltinToolProvider implements ToolProvider {
         const timeoutMs = Math.max(30_000, Math.floor(Number(ctx.profile.runtime.modelTotalTimeoutMs || 0)) || 120_000);
         const response = await this.generateSingleCallSummary({
           profile: { provider: chosen.provider, model: chosen.model },
-          input: { workspaceId: ctx.run.workspaceId, messages: [{ role: "user", content: parts }], timeoutMs, abortSignal: ctx.signal }
+          input: { sessionId: ctx.run.sessionId, messages: [{ role: "user", content: parts }], timeoutMs, abortSignal: ctx.signal }
         });
         return {
           text: response.text,
@@ -857,3 +872,4 @@ export class BuiltinToolProvider implements ToolProvider {
     }
   }
 }
+import type { AgentApiSubtaskSession } from "@agent-workbench/shared/internal-contracts/agent-api";

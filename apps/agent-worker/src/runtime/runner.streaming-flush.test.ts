@@ -50,6 +50,7 @@ function baseRun() {
     sessionId: "sess_test",
     runId: "run_test",
     workspacePath: process.cwd(),
+    workspaceRepoDirNames: [],
     inputText: "hello"
   };
 }
@@ -200,7 +201,7 @@ function createRunnerHarness(options?: {
   const apiClient = {
     async createContextItem(input: Record<string, unknown>) {
       createdItems.push(input);
-      return { id: createdItems.length };
+      return { item: { id: createdItems.length } };
     },
     async updateContextItem(input: { itemId?: number; status?: string; output?: Record<string, unknown> }) {
       updates.push({ itemId: input.itemId, status: input.status, output: input.output });
