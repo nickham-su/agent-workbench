@@ -19,6 +19,8 @@ import { RemotePluginToolProvider, REMOTE_PLUGIN_TOOLS_ENABLED } from "./tools/p
 import { McpToolProvider } from "./tools/providers/mcp.js";
 import type { ToolExecutionContext } from "./tools/types.js";
 import { isMcpToolName, isPluginToolName } from "./tools/types.js";
+import { createToolFailureCaptureIfEnabled, extractPartialToolResults, type ToolFailureCapture } from "./toolErrorCapture.js";
+import { formatToolErrorStoreWarning } from "./toolErrorStore.js";
 
 function nowMs() {
   return Date.now();
@@ -991,6 +993,7 @@ export function buildToolSuccessTextForTest(params: { toolName: string; args: Re
 type AgentRunnerDeps = {
   streamText?: typeof streamText;
   nowMs?: () => number;
+  warningNowMs?: () => number;
 };
 
 type StreamTextResultLike = {
@@ -1011,9 +1014,11 @@ export class AgentRunner {
   private readonly nestedParentByChild = new Map<string, string>();
   private readonly toolRegistry: ToolRegistry;
   private activeCount = 0;
+  private readonly toolErrorWarningLimiter = new Map<string, { windowStartedAt: number; suppressed: number }>();
 
   private readonly streamTextFn: typeof streamText;
   private readonly nowMsFn: () => number;
+  private readonly warningNowMsFn: () => number;
 
   constructor(
     private readonly apiClient: AgentApiClient,
@@ -1024,6 +1029,7 @@ export class AgentRunner {
   ) {
     this.streamTextFn = deps.streamText ?? streamText;
     this.nowMsFn = deps.nowMs ?? nowMs;
+    this.warningNowMsFn = deps.warningNowMs ?? nowMs;
     this.pluginRuntimeManager = new PluginRuntimeManager(this.logger);
     const pluginProvider = REMOTE_PLUGIN_TOOLS_ENABLED
       ? new RemotePluginToolProvider()
@@ -1174,6 +1180,58 @@ export class AgentRunner {
     }
   }
 
+  private toolSourceForArtifact(toolName: string) {
+    if (isMcpToolName(toolName)) return "mcp" as const;
+    if (isPluginToolName(toolName)) return "plugin" as const;
+    return "builtin" as const;
+  }
+
+  private async warnToolErrorStore(
+    results: Awaited<ReturnType<NonNullable<ToolFailureCapture>["publish"]>>,
+    workspacePath: string
+  ) {
+    for (const result of results) {
+      if (result.outcome !== "failed") continue;
+      await this.warnToolErrorStoreFailure({ ...result, workspacePath });
+    }
+  }
+
+  private async warnToolErrorStoreFailure(input: {
+    operation: string;
+    error: unknown;
+    relativePath?: string;
+    workspacePath?: string;
+  }) {
+    const now = this.warningNowMsFn();
+    const windowMs = 60_000;
+    const code = input.error && typeof input.error === "object"
+      ? String((input.error as NodeJS.ErrnoException).code ?? "unknown").trim().toUpperCase()
+      : "unknown";
+    let workspaceKey = "unknown";
+    if (input.workspacePath) {
+      try {
+        workspaceKey = await fs.realpath(input.workspacePath);
+      } catch {
+        workspaceKey = path.resolve(input.workspacePath);
+      }
+    }
+    const key = `${workspaceKey}\u0000${input.relativePath ?? "unknown"}\u0000${input.operation}\u0000${code}`;
+    const current = this.toolErrorWarningLimiter.get(key);
+    if (current && now - current.windowStartedAt < windowMs) {
+      current.suppressed += 1;
+      return;
+    }
+
+    const suppressed = current?.suppressed ?? 0;
+    this.toolErrorWarningLimiter.set(key, { windowStartedAt: now, suppressed: 0 });
+    this.logger.warn(formatToolErrorStoreWarning({
+      relativePath: input.relativePath,
+      operation: input.operation,
+      error: input.error,
+      ...(suppressed > 0 ? { suppressed } : {})
+    }));
+  }
+
   private async executeTool(params: {
     profile: ExecutionProfile;
     run: QueuedRun;
@@ -1182,8 +1240,9 @@ export class AgentRunner {
     signal: AbortSignal;
     availableToolNames?: ReadonlySet<string>;
     promptContext: PromptContext;
+    capture?: ToolFailureCapture | null;
   }) {
-    const { profile, run, tool, signal } = params;
+    const { profile, run, tool, signal, capture } = params;
     if (signal.aborted) return { paused: false as const };
 
     const outputBase = {
@@ -1191,6 +1250,22 @@ export class AgentRunner {
       toolName: tool.toolName,
       toolCallId: tool.toolCallId,
       args: tool.args
+    };
+    const writeback = async (role: string, input: { status: "running" | "completed" | "failed"; output: any }) => {
+      capture?.recordWritebackAttempt(role, input.output);
+      try {
+        const response = await this.apiClient.updateContextItem({
+          itemId: tool.itemId,
+          status: input.status,
+          output: input.output,
+          updatedAt: nowMs()
+        });
+        capture?.recordWritebackSuccess(role, response);
+        return response;
+      } catch (error) {
+        capture?.recordWritebackFailure(role, error);
+        throw error;
+      }
     };
 
     const executionAvailableToolNames = params.availableToolNames ?? (() => {
@@ -1205,31 +1280,32 @@ export class AgentRunner {
       apiClient: this.apiClient,
       availableToolNames: executionAvailableToolNames
     }))) {
+      const failedOutput = {
+        ...outputBase,
+        text: buildToolErrorText({ toolName: tool.toolName, status: "failed", error: `tool is disabled for current agent: ${tool.toolName}` }),
+        error: `tool is disabled for current agent: ${tool.toolName}`
+      };
+      capture?.recordEvent("tool_disabled_execute_check", failedOutput.error, { output: failedOutput });
       const error = `tool is disabled for current agent: ${tool.toolName}`;
-      await this.apiClient.updateContextItem({
-        itemId: tool.itemId,
+      await writeback("policy_failed", {
         status: "failed",
-        output: {
-          ...outputBase,
-          text: buildToolErrorText({ toolName: tool.toolName, status: "failed", error }),
-          error
-        },
-        updatedAt: nowMs()
+        output: failedOutput
       });
       return { paused: false as const };
     }
 
-    await this.apiClient.updateContextItem({
-      itemId: tool.itemId,
-      status: "running",
-      output: {
-        ...outputBase,
-        ...(tool.toolName === "apply_patch" ? { text: buildToolText({ toolName: tool.toolName, status: "running", body: "apply_patch running" }) } : {})
-      },
-      updatedAt: nowMs()
-    });
-
+    let phase: "running_writeback" | "provider_execute" | "completed_output_build" | "completed_writeback" = "running_writeback";
+    let providerResult: unknown;
+    let providerReturned = false;
     try {
+      await writeback("initial_running", {
+        status: "running",
+        output: {
+          ...outputBase,
+          ...(tool.toolName === "apply_patch" ? { text: buildToolText({ toolName: tool.toolName, status: "running", body: "apply_patch running" }) } : {})
+        }
+      });
+      phase = "provider_execute";
       const toolCtx: ToolExecutionContext = {
         profile,
         run,
@@ -1249,28 +1325,33 @@ export class AgentRunner {
           parentSignal: nestedSignal
         }),
         updateToolItem: async ({ status, output }) => {
-          await this.apiClient.updateContextItem({ itemId: tool.itemId, status, output, updatedAt: nowMs() });
+          if (status !== "running") {
+            throw new Error("provider terminal tool writeback is not supported by tool error capture");
+          }
+          await writeback("provider_running_update", { status, output });
         },
         nowMs,
         reportRunningOutput: async (patch) => {
-          await this.apiClient.updateContextItem({
-            itemId: tool.itemId,
+          await writeback("provider_running_report", {
             status: "running",
-            output: { ...outputBase, ...(typeof patch.text === "string" ? { text: patch.text } : {}), ...(patch.result !== undefined ? { result: patch.result } : {}) },
-            updatedAt: nowMs()
+            output: { ...outputBase, ...(typeof patch.text === "string" ? { text: patch.text } : {}), ...(patch.result !== undefined ? { result: patch.result } : {}) }
           });
         },
         renderToolText: (input) => buildToolText(input)
       };
-      const result = await this.toolRegistry.execute(tool.toolName, tool.args, toolCtx);
+      capture?.recordProviderStarted();
+      providerResult = await this.toolRegistry.execute(tool.toolName, tool.args, toolCtx);
+      providerReturned = true;
+      capture?.recordProviderResult(providerResult);
 
       if (signal.aborted) return { paused: false as const };
 
+      phase = "completed_output_build";
       const rawSuccessText = buildToolSuccessText({
         toolName: tool.toolName,
         status: "completed",
         args: tool.args,
-        result
+        result: providerResult
       });
       let finalizedText: {
         text: string;
@@ -1303,38 +1384,32 @@ export class AgentRunner {
         text: finalizedText.text,
         ...(finalizedText.textTruncated ? { textTruncated: true } : {}),
         ...(finalizedText.textArtifactPath ? { textArtifactPath: finalizedText.textArtifactPath } : {}),
-        result
+        result: providerResult
       };
-      await this.apiClient.updateContextItem({
-        itemId: tool.itemId,
-        status: "completed",
-        output,
-        updatedAt: nowMs()
-      });
+      phase = "completed_writeback";
+      await writeback("completed", { status: "completed", output });
       await writeItemLog({
         logger: this.logger,
         workspacePath: run.workspacePath,
         kind: "tool",
         itemId: tool.itemId,
         payload: {
-          meta: {
-            workspaceId: run.workspaceId,
-            sessionId: run.sessionId,
-            runId: run.runId,
-            toolItemId: tool.itemId
-          },
-          request: {
-            toolName: tool.toolName,
-            toolCallId: tool.toolCallId,
-            args: tool.args
-          },
+          meta: { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, toolItemId: tool.itemId },
+          request: { toolName: tool.toolName, toolCallId: tool.toolCallId, args: tool.args },
           status: "completed",
-          response: result
+          response: providerResult
         }
       });
       return { paused: false as const };
     } catch (err) {
       if (isAbortLikeError(err, signal)) return { paused: false as const };
+      if (phase === "running_writeback") capture?.recordEvent("running_writeback_failed", err);
+      else if (phase === "provider_execute") {
+        capture?.recordEvent("provider_execute_rejected", err);
+        for (const partial of extractPartialToolResults(err, tool.toolName)) capture?.recordPartialResult(partial.source, partial.value);
+      } else if (phase === "completed_output_build") capture?.recordEvent("completed_output_build_failed", err);
+      else capture?.recordEvent("completed_writeback_failed", err);
+
       const error = err instanceof Error ? err.message : String(err);
       const subtaskSessionId = err && typeof err === "object" ? String((err as any).subtaskSessionId || "").trim() : "";
       const subtaskResultText = err && typeof err === "object" && typeof (err as any).subtaskResultText === "string"
@@ -1344,43 +1419,26 @@ export class AgentRunner {
       const errorText = isSubtaskWithResult
         ? buildSubtaskErrorText({ status: "failed", error, subtaskSessionId: subtaskSessionId || undefined, subtaskResultText })
         : buildToolErrorText({ toolName: tool.toolName, status: "failed", error });
-      await this.apiClient.updateContextItem({
-        itemId: tool.itemId,
-        status: "failed",
-        output: {
-          ...outputBase,
-          text: errorText,
-          ...(isSubtaskWithResult
-            ? {
-                result: {
-                  ...(subtaskSessionId ? { subtaskSessionId } : {}),
-                  ...(typeof subtaskResultText === "string"
-                    ? { resultText: subtaskResultText }
-                    : {})
-                }
-              }
-            : {}),
-          error
-        },
-        updatedAt: nowMs()
-      });
+      const failedOutput = {
+        ...outputBase,
+        text: errorText,
+        ...(isSubtaskWithResult ? { result: { ...(subtaskSessionId ? { subtaskSessionId } : {}), ...(typeof subtaskResultText === "string" ? { resultText: subtaskResultText } : {}) } } : {}),
+        error
+      };
+      try {
+        await writeback("inner_failed", { status: "failed", output: failedOutput });
+      } catch (writebackError) {
+        capture?.recordEvent("failed_writeback_failed", writebackError);
+        throw writebackError;
+      }
       await writeItemLog({
         logger: this.logger,
         workspacePath: run.workspacePath,
         kind: "tool",
         itemId: tool.itemId,
         payload: {
-          meta: {
-            workspaceId: run.workspaceId,
-            sessionId: run.sessionId,
-            runId: run.runId,
-            toolItemId: tool.itemId
-          },
-          request: {
-            toolName: tool.toolName,
-            toolCallId: tool.toolCallId,
-            args: tool.args
-          },
+          meta: { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, toolItemId: tool.itemId },
+          request: { toolName: tool.toolName, toolCallId: tool.toolCallId, args: tool.args },
           status: "failed",
           error
         }
@@ -1398,46 +1456,65 @@ export class AgentRunner {
     availableToolNames?: ReadonlySet<string>;
     promptContext: PromptContext;
   }) {
+    if (params.signal.aborted) return { paused: false as const };
+    const capture = createToolFailureCaptureIfEnabled({
+      workspacePath: params.run.workspacePath,
+      workspaceId: params.run.workspaceId,
+      sessionId: params.run.sessionId,
+      runId: params.run.runId,
+      itemId: params.tool.itemId,
+      toolCallId: params.tool.toolCallId,
+      toolName: params.tool.toolName,
+      toolSource: this.toolSourceForArtifact(params.tool.toolName)
+    }, params.tool.args, this.nowMsFn);
+    let aborted = false;
     try {
-      return await this.executeTool(params);
+      return await this.executeTool({ ...params, capture });
     } catch (err) {
-      if (params.signal.aborted) return { paused: false as const };
+      if (params.signal.aborted || isAbortLikeError(err, params.signal)) {
+        aborted = true;
+        return { paused: false as const };
+      }
+      capture?.recordEvent("runner_outer_unhandled", err);
       const error = err instanceof Error ? err.message : String(err);
-      await this.apiClient.updateContextItem({
-        itemId: params.tool.itemId,
-        status: "failed",
-        output: {
-          type: "tool",
-          toolName: params.tool.toolName,
-          toolCallId: params.tool.toolCallId,
-          args: params.tool.args,
-          text: buildToolErrorText({ toolName: params.tool.toolName, status: "failed", error }),
-          error
-        },
-        updatedAt: nowMs()
-      });
+      const output = {
+        type: "tool" as const,
+        toolName: params.tool.toolName,
+        toolCallId: params.tool.toolCallId,
+        args: params.tool.args,
+        text: buildToolErrorText({ toolName: params.tool.toolName, status: "failed", error }),
+        error
+      };
+      try {
+        capture?.recordWritebackAttempt("outer_failed", output);
+        const response = await this.apiClient.updateContextItem({ itemId: params.tool.itemId, status: "failed", output, updatedAt: nowMs() });
+        capture?.recordWritebackSuccess("outer_failed", response);
+      } catch (writebackError) {
+        capture?.recordWritebackFailure("outer_failed", writebackError);
+        capture?.recordEvent("outer_failed_writeback_failed", writebackError);
+      }
       await writeItemLog({
         logger: this.logger,
         workspacePath: params.run.workspacePath,
         kind: "tool",
         itemId: params.tool.itemId,
         payload: {
-          meta: {
-            workspaceId: params.run.workspaceId,
-            sessionId: params.run.sessionId,
-            runId: params.run.runId,
-            toolItemId: params.tool.itemId
-          },
-          request: {
-            toolName: params.tool.toolName,
-            toolCallId: params.tool.toolCallId,
-            args: params.tool.args
-          },
+          meta: { workspaceId: params.run.workspaceId, sessionId: params.run.sessionId, runId: params.run.runId, toolItemId: params.tool.itemId },
+          request: { toolName: params.tool.toolName, toolCallId: params.tool.toolCallId, args: params.tool.args },
           status: "failed",
           error
         }
       });
       return { paused: false as const };
+    } finally {
+      if (aborted || params.signal.aborted) capture?.discard();
+      if (capture?.hasEvents()) {
+        try {
+          await this.warnToolErrorStore(await capture.publish(), params.run.workspacePath);
+        } catch (error) {
+          await this.warnToolErrorStoreFailure({ operation: "publish", error, workspacePath: params.run.workspacePath });
+        }
+      }
     }
   }
 
@@ -1494,19 +1571,41 @@ export class AgentRunner {
       }))) {
         flushSegment();
         const error = `tool is disabled for current agent: ${item.toolName}`;
-        await this.apiClient.updateContextItem({
+        const output = {
+          type: "tool" as const,
+          toolName: item.toolName,
+          toolCallId: item.toolCallId,
+          args: item.args,
+          text: buildToolErrorText({ toolName: item.toolName, status: "failed", error }),
+          error
+        };
+        const artifactToolCallId = String(item.toolCallId || "").trim();
+        const capture = artifactToolCallId ? createToolFailureCaptureIfEnabled({
+          workspacePath: params.run.workspacePath,
+          workspaceId: params.run.workspaceId,
+          sessionId: params.run.sessionId,
+          runId: params.run.runId,
           itemId: item.itemId,
-          status: "failed",
-          output: {
-            type: "tool",
-            toolName: item.toolName,
-            toolCallId: item.toolCallId,
-            args: item.args,
-            text: buildToolErrorText({ toolName: item.toolName, status: "failed", error }),
-            error
-          },
-          updatedAt: nowMs()
-        });
+          toolCallId: artifactToolCallId,
+          toolName: item.toolName,
+          toolSource: this.toolSourceForArtifact(item.toolName)
+        }, item.args, this.nowMsFn) : null;
+        capture?.recordEvent("tool_disabled_pending_precheck", error, { output });
+        try {
+          capture?.recordWritebackAttempt("policy_failed", output);
+          const response = await this.apiClient.updateContextItem({ itemId: item.itemId, status: "failed", output, updatedAt: nowMs() });
+          capture?.recordWritebackSuccess("policy_failed", response);
+        } catch (writebackError) {
+          capture?.recordWritebackFailure("policy_failed", writebackError);
+          capture?.recordEvent("failed_writeback_failed", writebackError);
+          throw writebackError;
+        } finally {
+          if (params.signal.aborted) capture?.discard();
+          if (capture?.hasEvents()) {
+            try { await this.warnToolErrorStore(await capture.publish(), params.run.workspacePath); }
+            catch (storeError) { await this.warnToolErrorStoreFailure({ operation: "publish", error: storeError, workspacePath: params.run.workspacePath }); }
+          }
+        }
         continue;
       }
       if (item.status === "running") {
@@ -1518,16 +1617,38 @@ export class AgentRunner {
           args: item.args
         };
         const error = "tool execution interrupted, mark failed and wait next step";
-        await this.apiClient.updateContextItem({
+        const output = {
+          ...outputBase,
+          text: buildToolErrorText({ toolName: item.toolName, status: "failed", error }),
+          error
+        };
+        const artifactToolCallId = String(item.toolCallId || "").trim();
+        const capture = artifactToolCallId ? createToolFailureCaptureIfEnabled({
+          workspacePath: params.run.workspacePath,
+          workspaceId: params.run.workspaceId,
+          sessionId: params.run.sessionId,
+          runId: params.run.runId,
           itemId: item.itemId,
-          status: "failed",
-          output: {
-            ...outputBase,
-            text: buildToolErrorText({ toolName: item.toolName, status: "failed", error }),
-            error
-          },
-          updatedAt: nowMs()
-        });
+          toolCallId: artifactToolCallId,
+          toolName: item.toolName,
+          toolSource: this.toolSourceForArtifact(item.toolName)
+        }, item.args, this.nowMsFn) : null;
+        capture?.recordEvent("running_item_recovered_as_failed", error, { output });
+        try {
+          capture?.recordWritebackAttempt("recovery_failed", output);
+          const response = await this.apiClient.updateContextItem({ itemId: item.itemId, status: "failed", output, updatedAt: nowMs() });
+          capture?.recordWritebackSuccess("recovery_failed", response);
+        } catch (writebackError) {
+          capture?.recordWritebackFailure("recovery_failed", writebackError);
+          capture?.recordEvent("failed_writeback_failed", writebackError);
+          throw writebackError;
+        } finally {
+          if (params.signal.aborted) capture?.discard();
+          if (capture?.hasEvents()) {
+            try { await this.warnToolErrorStore(await capture.publish(), params.run.workspacePath); }
+            catch (storeError) { await this.warnToolErrorStoreFailure({ operation: "publish", error: storeError, workspacePath: params.run.workspacePath }); }
+          }
+        }
         await writeItemLog({
           logger: this.logger,
           workspacePath: params.run.workspacePath,
@@ -2701,6 +2822,25 @@ export async function processRunForTest(runner: AgentRunner, run: QueuedRun, sig
 
 export async function executeToolForTest(runner: AgentRunner, params: Record<string, unknown>) {
   return await (runner as any).executeTool(params);
+}
+
+export async function executeToolSafelyForTest(runner: AgentRunner, params: Record<string, unknown>) {
+  return await (runner as any).executeToolSafely(params);
+}
+
+export async function warnToolErrorStoreFailureForTest(
+  runner: AgentRunner,
+  input: { operation: string; error: unknown; relativePath?: string; workspacePath?: string }
+) {
+  await (runner as any).warnToolErrorStoreFailure(input);
+}
+
+export async function warnToolErrorStoreForTest(
+  runner: AgentRunner,
+  results: Array<{ outcome: "failed"; operation: string; error: unknown; relativePath?: string }>,
+  workspacePath: string
+) {
+  await (runner as any).warnToolErrorStore(results, workspacePath);
 }
 
 export function shouldStopForMaxStepsForTest(step: number, maxSteps: number) {
