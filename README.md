@@ -114,6 +114,7 @@ If you need to publish ports to LAN/public directly, use `AWB_PUBLISH_HOST=0.0.0
 | `AWB_AGENT_LOOP_MAX_STEPS` | Max loop steps per run (default `128`; `<=0` means unlimited). |
 | `AWB_AGENT_LOOP_REPEAT_TOOL_CALL_THRESHOLD` | Repeated tool-call threshold in loop (default `20`; `<=0` means unlimited). |
 | `AWB_AGENT_DEBUG_DUMP` | Debug dump switch (`1` to enable). Writes per-context logs under `<workspace>/.debug/agent_context_item_logs/`. |
+| `AWB_TOOL_ERROR_STORE_ENABLED` | Tool failure artifact switch (default `0`; only exact value `1` enables it). Writes complete parameters, results, and errors for non-cancelled tool failures under `<workspace>/.awb/agent/tool-errors/` for diagnostics. |
 | `AWB_AGENT_STARTUP_RECOVERY_MODE` | Startup recovery mode: `fail` (default, mark inflight runs failed) or `recover` (resume inflight runs). |
 | `AWB_AGENT_PLUGIN_HOST_ENABLED` | Plugin host process switch (default `0`, disabled). |
 | `AWB_AGENT_PLUGIN_HOST_DEV` | Plugin host dev mode switch (default `0`; `1` starts plugin host from source). |

@@ -108,6 +108,7 @@ docker compose exec agent-workbench printenv AWB_AGENT_LOOP_MAX_STEPS
 | `AWB_AGENT_LOOP_MAX_STEPS` | worker 的 step-loop 最大轮数（默认 `128`），`<=0` 表示不限制。 |
 | `AWB_AGENT_LOOP_REPEAT_TOOL_CALL_THRESHOLD` | step-loop 中连续重复工具调用阈值（默认 `20`），`<=0` 表示不限制。 |
 | `AWB_AGENT_DEBUG_DUMP` | 调试落盘开关（`1` 开启）。会在 `<workspace>/.debug/agent_context_item_logs/` 写入日志。 |
+| `AWB_TOOL_ERROR_STORE_ENABLED` | 工具失败诊断 artifact 开关（默认 `0`，仅精确值 `1` 开启）。将非取消类工具失败的完整参数、结果和错误写入 `<workspace>/.awb/agent/tool-errors/`，供排障分析。 |
 
 其他 Compose 相关变量(如 `AWB_HOST`, `AWB_DATA_DIR`, `AWB_SERVE_WEB`, `AWB_WEB_DIST_DIR`)请以 `.env.example` 为准.
 
