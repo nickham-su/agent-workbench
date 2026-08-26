@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import type { FastifyInstance } from "fastify";
 import type { AppContext } from "./context.js";
 import fastifyStatic from "@fastify/static";
+import { isMainPreviewReservedPathname } from "./webUiPaths.js";
 
 async function dirExists(dirPath: string) {
   try {
@@ -38,7 +39,8 @@ export async function registerWebUi(app: FastifyInstance, ctx: AppContext) {
 
   app.setNotFoundHandler(async (req, reply) => {
     const url = String(req.raw.url || "");
-    if (url.startsWith("/api/")) {
+    const pathname = url.split("?", 1)[0] || "";
+    if (pathname.startsWith("/api/") || isMainPreviewReservedPathname(pathname)) {
       return reply.code(404).send({ message: "Not Found" });
     }
 

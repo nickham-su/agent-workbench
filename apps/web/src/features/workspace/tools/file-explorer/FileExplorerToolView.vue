@@ -10,6 +10,7 @@
         :is-tree-empty="isTreeEmpty"
         :selected-node="selectedNode"
         :can-rename-delete="canRenameDelete"
+        :can-open-preview="canPreviewSelectedNode"
         :show-repo-path-action="showRepoPathAction"
         :show-workspace-path-action="showWorkspacePathAction"
         :refresh-root="refreshAll"
@@ -64,6 +65,7 @@ import { useI18n } from "vue-i18n";
 import type { FileEntry } from "@agent-workbench/shared";
 import FileExplorerTree from "./components/FileExplorerTree.vue";
 import type { TreeNode } from "./types";
+import { canOpenWorkspacePreview, getWorkspacePreviewTarget, openWorkspacePreview, type PreviewDocument } from "./preview";
 import {
   createWorkspaceFile,
   deleteWorkspacePath,
@@ -78,6 +80,7 @@ import { useWorkspaceHost } from "@/features/workspace/host";
 const props = defineProps<{
   workspaceId: string;
   toolId: string;
+  previewEnabled: boolean;
   workspaceDirName?: string;
   workspaceRepos?: Array<{ dirName: string }>;
 }>();
@@ -136,6 +139,9 @@ const canRenameDelete = computed(() => {
   if (!rel) return false;
   return !isProtectedRootPath(rel);
 });
+const canPreviewSelectedNode = computed(() =>
+  canOpenWorkspacePreview({ previewEnabled: props.previewEnabled, node: selectedNode.value })
+);
 const showRepoPathAction = computed(() => {
   const rel = selectedNode.value?.data.path ?? "";
   return Boolean(resolveRepoRelPath(rel));
@@ -619,10 +625,22 @@ function onContextMenuClick(info: { key: string }) {
     return;
   }
   if (key === "download") return void downloadSelected();
+  if (key === "preview") return openSelectedPreview();
   if (key === "newFile") return openCreateModal("file");
   if (key === "newFolder") return openCreateModal("dir");
   if (key === "rename") return openRenameModal();
   if (key === "delete") return confirmDeleteSelected();
+}
+
+function openSelectedPreview() {
+  const node = selectedNode.value;
+  const path = getWorkspacePreviewTarget({ previewEnabled: props.previewEnabled, node });
+  if (!path) return;
+  openWorkspacePreview({
+    workspaceId: props.workspaceId,
+    path,
+    documentRef: document as unknown as PreviewDocument
+  });
 }
 
 function onTreeSelect(keys: (string | number)[]) {

@@ -164,6 +164,7 @@ test("agent startup recovery mode=fail 会终止 in-flight run 并回收 run-sta
     logLevel: "error",
     serveWeb: false,
     webDistDir: null,
+      preview: { enabled: false, runtime: null },
     credentialMasterKey: Buffer.alloc(32, 7),
     credentialMasterKeySource: "generated",
     credentialMasterKeyId: "testkey",
@@ -265,6 +266,7 @@ test("agent startup 会 best-effort reconcile archive pending sidecar", async ()
 
     app = await createApp({
       db, repoRoot, dataDir, fileMaxBytes: 1024 * 1024, version: "test", logLevel: "error", serveWeb: false, webDistDir: null,
+      preview: { enabled: false, runtime: null },
       credentialMasterKey: Buffer.alloc(32, 7), credentialMasterKeySource: "generated", credentialMasterKeyId: "testkey", credentialMasterKeyCreatedAt: now,
       authToken: null, authCookieSecure: false, agentWorkerEnabled: false, agentWorkerHost: "127.0.0.1", agentWorkerPort: 0,
       agentWorkerSocketPath: path.join(dataDir, "agent-worker.sock"), agentWorkerConcurrency: 0, agentInternalToken: internalToken,

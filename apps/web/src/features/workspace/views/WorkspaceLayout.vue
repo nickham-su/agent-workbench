@@ -144,7 +144,7 @@ import { createCodeReviewRuntime } from "@/features/workspace/tools/code-review/
 import { createFileExplorerRuntime } from "@/features/workspace/tools/file-explorer/runtime";
 import { createEditorRuntime } from "@/features/workspace/tools/editor/runtime";
 
-const props = defineProps<{ workspaceId: string }>();
+const props = defineProps<{ workspaceId: string; previewEnabled: boolean }>();
 const { t } = useI18n();
 type PushParams = Omit<GitPushRequest, "target">;
 
@@ -998,6 +998,7 @@ function toolViewProps(toolId: ToolId) {
       workspaceId: props.workspaceId,
       toolId,
       workspaceDirName: workspace.value?.dirName ?? "",
+      previewEnabled: props.previewEnabled,
       workspaceRepos: workspace.value?.repos ?? []
     };
   }

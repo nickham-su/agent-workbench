@@ -28,7 +28,6 @@ git clone https://github.com/nickham-su/agent-workbench.git
 
 - 可选配置（推荐）
   - 复制 `.env.example` 为 `.env`（推荐），按需修改变量
-    - `.env.docker.example` 作为兼容保留，内容与 `.env.example` 一致
   - 若不创建 `.env`，Docker Compose 会使用 `docker-compose.yml` 的默认值（Compose 默认值），
     未指定的运行参数会回落到应用代码默认值
 
@@ -77,11 +76,12 @@ docker compose exec agent-workbench printenv AWB_AGENT_LOOP_MAX_STEPS
 
 **安全提示**
 
-`docker-compose.yml` 为了方便默认会对外发布端口 `4310` 与 `AWB_WORKSPACE_PORT_RANGE`（当未创建 `.env` 时）。
-推荐的 `.env.example` 模板默认仅绑定 localhost（`AWB_PUBLISH_HOST=127.0.0.1`）。如果你把服务部署在远程主机上, 建议优先按更安全的方式暴露服务:
+`docker-compose.yml` 为了方便默认会对外发布端口 `4310`、preview 端口 `AWB_PREVIEW_PORT`（默认 `4311`）与 `AWB_WORKSPACE_PORT_RANGE`（当未创建 `.env` 时）。
+推荐的 `.env.example` 模板默认仅绑定 localhost（`AWB_PUBLISH_HOST=127.0.0.1`、`AWB_PREVIEW_PUBLISH_HOST=127.0.0.1`）。如果你把服务部署在远程主机上, 建议优先按更安全的方式暴露服务:
 
 - 通过 `.env` 设置 `AWB_PUBLISH_HOST=127.0.0.1`, 仅允许本机访问
 - 在宿主机上使用 Nginx/Caddy 等做 HTTPS 反代对外提供访问
+- 启用 preview 时保持 `AWB_PREVIEW_PUBLISH_HOST=127.0.0.1`，并仅通过独立 preview 域名的专用 HTTPS 反代路由对外暴露
 - 启用 `AWB_AUTH_TOKEN` 作为最小鉴权手段, 并在 HTTPS 场景设置 `AWB_AUTH_COOKIE_SECURE=1`
 - 谨慎对外暴露 `AWB_WORKSPACE_PORT_RANGE`, 因为它会把工作区内启动的服务端口也一起发布出去(必要时缩小端口段, 或在自定义的 compose 配置中移除该段端口映射)
 
@@ -111,6 +111,18 @@ docker compose exec agent-workbench printenv AWB_AGENT_LOOP_MAX_STEPS
 | `AWB_TOOL_ERROR_STORE_ENABLED` | 工具失败诊断 artifact 开关（默认 `0`，仅精确值 `1` 开启）。将非取消类工具失败的完整参数、结果和错误写入 `<workspace>/.awb/agent/tool-errors/`，供排障分析。 |
 
 其他 Compose 相关变量(如 `AWB_HOST`, `AWB_DATA_DIR`, `AWB_SERVE_WEB`, `AWB_WEB_DIST_DIR`)请以 `.env.example` 为准.
+
+**Workspace 静态预览**
+
+预览默认关闭。启用时必须使用独立 public origin 和第二个 listener；不能复用主站 origin 或主站子路径。请阅读[部署手册](manual/workspace-static-preview-deployment.md)，其中包含本地、Compose 和生产双域名反向代理示例。
+
+| 变量 | 说明 |
+|------|------|
+| `AWB_PREVIEW_ENABLED` | 是否启用隔离的 preview listener（默认 `false`）。 |
+| `AWB_PREVIEW_ORIGIN` | 启用时必填：独立的纯 `http(s)` public origin，不能带路径、查询参数或 fragment。 |
+| `AWB_PREVIEW_HOST` / `AWB_PREVIEW_PORT` | preview listener 的监听地址与端口（默认端口 `4311`），不得与主 API 端口相同。 |
+| `AWB_PREVIEW_SESSION_TTL_SECONDS` | preview session 的绝对 TTL（秒），范围 `60..86400`，默认 `3600`。 |
+| `AWB_PREVIEW_PUBLISH_HOST` | 仅 Compose：preview 端口的宿主机绑定地址；本机反代终止 TLS 时应保持 `127.0.0.1`。 |
 
 ---
 
@@ -160,9 +172,10 @@ npm run dev
 **本地环境变量**
 
 - 复制 `.env.dev.example` 为 `.env.local`，按需修改变量
-  - `AWB_PORT`：后端监听端口（默认 `4310`）
-  - `AWB_DEV_WEB_PORT`：仅前端开发期（Vite dev server）使用：前端 dev server 端口（可选）
-  - `AWB_DEV_API_ORIGIN`：仅前端开发期使用：前端 dev proxy 的后端目标地址（可选；默认 `http://127.0.0.1:${AWB_PORT}`）
+   - `AWB_PORT`：后端监听端口（默认 `4310`）
+   - `AWB_DEV_WEB_PORT`：仅前端开发期（Vite dev server）使用：前端 dev server 端口（可选）
+   - `AWB_DEV_API_ORIGIN`：仅前端开发期使用：前端 dev proxy 的后端目标地址（可选；默认 `http://127.0.0.1:${AWB_PORT}`）
+   - 静态预览请使用[部署手册](manual/workspace-static-preview-deployment.md)中的独立 listener 配置。
 
 **飞书插件本地调试（`npm run dev`）**
 
@@ -185,6 +198,13 @@ npm run dev
 | `npm run dev:web` | 仅启动前端 |
 | `npm run build` | 构建生产版本 |
 | `npm run typecheck` | 类型检查 |
+
+---
+
+## Workspace 静态预览手册
+
+- [部署手册](manual/workspace-static-preview-deployment.md)：本地开发、Docker Compose、生产双域名反向代理、TLS、单实例与回滚。
+- [AI 页面编写指南](manual/workspace-static-preview-authoring.md)：相对路径、本地资源、支持范围与限制。
 
 ---
 

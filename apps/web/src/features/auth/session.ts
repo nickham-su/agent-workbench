@@ -4,14 +4,20 @@ export type AuthStatus = {
   loaded: boolean;
   authEnabled: boolean;
   authed: boolean;
+  previewEnabled: boolean;
   version: string;
 };
 
-let cached: AuthStatus = { loaded: false, authEnabled: false, authed: false, version: "0.0.0" };
+let cached: AuthStatus = { loaded: false, authEnabled: false, authed: false, previewEnabled: false, version: "0.0.0" };
 let inFlight: Promise<AuthStatus> | null = null;
 
+/** Returns the already-loaded health capability snapshot without issuing a request. */
+export function getCachedAuthStatus(): AuthStatus {
+  return cached;
+}
+
 export function resetAuthStatus() {
-  cached = { loaded: false, authEnabled: false, authed: false, version: cached.version || "0.0.0" };
+  cached = { loaded: false, authEnabled: false, authed: false, previewEnabled: false, version: cached.version || "0.0.0" };
   inFlight = null;
 }
 
@@ -32,6 +38,7 @@ export async function loadAuthStatus(): Promise<AuthStatus> {
       loaded: true,
       authEnabled: Boolean((res as any).authEnabled),
       authed: Boolean((res as any).authed),
+      previewEnabled: Boolean((res as any).previewEnabled),
       version: String((res as any).version || "0.0.0")
     };
     return cached;

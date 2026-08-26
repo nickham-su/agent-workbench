@@ -545,6 +545,7 @@ export default {
       copyRepoPath: "复制仓库内路径",
       copyWorkspacePath: "复制工作区路径",
       download: "下载",
+      preview: "预览",
       rename: "重命名",
       delete: "删除",
       refresh: "刷新",

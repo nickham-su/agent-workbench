@@ -7,9 +7,9 @@ export const HealthResponseSchema = Type.Object(
     name: Type.Literal("agent-workbench"),
     version: Type.String(),
     authEnabled: Type.Boolean(),
-    authed: Type.Boolean()
+    authed: Type.Boolean(),
+    previewEnabled: Type.Boolean()
   },
   { $id: "HealthResponse" }
 );
 export type HealthResponse = Static<typeof HealthResponseSchema>;
-

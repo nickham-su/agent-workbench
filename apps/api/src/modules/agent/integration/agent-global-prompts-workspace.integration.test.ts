@@ -539,6 +539,7 @@ test("agent startup seed 会修复脏的 global prompts settings", async () => {
       logLevel: "error",
       serveWeb: false,
       webDistDir: null,
+      preview: { enabled: false, runtime: null },
       credentialMasterKey: Buffer.alloc(32, 7),
       credentialMasterKeySource: "generated",
       credentialMasterKeyId: "testkey",

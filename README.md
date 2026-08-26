@@ -17,6 +17,8 @@ Agent Workbench provides: isolated workspaces, persistent terminal sessions, cen
 ## Documentation
 
 - [中文说明](docs/README.zh-CN.md)
+- [Workspace static preview deployment guide](docs/manual/workspace-static-preview-deployment.md)
+- [Workspace static preview authoring guide](docs/manual/workspace-static-preview-authoring.md)
 
 ---
 
@@ -32,7 +34,6 @@ git clone https://github.com/nickham-su/agent-workbench.git
 
 - Optional config (recommended)
   - Copy `.env.example` to `.env` and edit variables as needed (recommended)
-    - `.env.docker.example` is kept for compatibility and mirrors `.env.example`
   - If you skip this step, Docker Compose will use defaults from `docker-compose.yml` (Compose defaults),
     and any unspecified runtime parameters will fall back to application defaults.
 
@@ -80,12 +81,13 @@ Two named volumes are used by default:
 
 **Security**
 
-The Compose file publishes `AWB_PORT` and `AWB_WORKSPACE_PORT_RANGE` on all interfaces by default for convenience
-(when no `.env` is provided). The recommended `.env.example` template binds them to localhost (`AWB_PUBLISH_HOST=127.0.0.1`).
+The Compose file publishes `AWB_PORT`, `AWB_PREVIEW_PORT` (default `4311`), and `AWB_WORKSPACE_PORT_RANGE` on all interfaces by default for convenience
+(when no `.env` is provided). The recommended `.env.example` template binds main and preview ports to localhost (`AWB_PUBLISH_HOST=127.0.0.1`, `AWB_PREVIEW_PUBLISH_HOST=127.0.0.1`).
 If you deploy this on a remote host, prefer a safer exposure model:
 
 - Bind to localhost via `.env`: `AWB_PUBLISH_HOST=127.0.0.1`
 - Put Nginx/Caddy in front as an HTTPS reverse proxy
+- When preview is enabled, keep `AWB_PREVIEW_PUBLISH_HOST=127.0.0.1` and expose its independent preview domain only through a dedicated HTTPS reverse-proxy route
 - Enable `AWB_AUTH_TOKEN` as a minimal auth guard, and set `AWB_AUTH_COOKIE_SECURE=1` when served over HTTPS
 - Be cautious exposing `AWB_WORKSPACE_PORT_RANGE`, since it publishes ports for services started inside workspaces (shrink the range, or remove the mapping in your own compose setup if you don't need it)
 
@@ -120,12 +122,24 @@ If you need to publish ports to LAN/public directly, use `AWB_PUBLISH_HOST=0.0.0
 | `AWB_AGENT_PLUGIN_HOST_DEV` | Plugin host dev mode switch (default `0`; `1` starts plugin host from source). |
 | `AWB_AGENT_PLUGIN_SERVICES_ENABLED` | Plugin services registry/call switch (default `0`, disabled). |
 
+**Workspace static preview**
+
+Preview is disabled by default. Enabling it requires an independent public origin and a second listener; do not reuse the main origin or a main-site subpath. See the [deployment guide](docs/manual/workspace-static-preview-deployment.md) for local, Compose, and dual-domain reverse-proxy examples.
+
+| Variable | Description |
+|----------|-------------|
+| `AWB_PREVIEW_ENABLED` | Enables the isolated preview listener (default `false`). |
+| `AWB_PREVIEW_ORIGIN` | Required when enabled: independent pure `http(s)` public origin, without path/query/fragment. |
+| `AWB_PREVIEW_HOST` / `AWB_PREVIEW_PORT` | Preview listener host and port (default port `4311`); it must not use the main API port. |
+| `AWB_PREVIEW_SESSION_TTL_SECONDS` | Absolute preview session TTL in seconds (`60..86400`, default `3600`). |
+
 **Docker / Compose only (`.env.example`)**
 
 | Variable | Description |
 |----------|-------------|
 | `AWB_PUBLISH_HOST` | Host bind IP for published ports. Default `127.0.0.1`; use `0.0.0.0` only with firewall/auth/reverse-proxy protections. |
 | `AWB_WORKSPACE_PORT_RANGE` | Published workspace service port range (default `30000-30100`). |
+| `AWB_PREVIEW_PUBLISH_HOST` | Host bind IP for the Compose preview port. Keep `127.0.0.1` when TLS terminates at a local reverse proxy. |
 
 **Local source dev only (`.env.dev.example`)**
 
@@ -191,6 +205,7 @@ npm run dev
   - `AWB_PORT`: backend listen port (default: `4310`)
   - `AWB_DEV_WEB_PORT`: Vite dev server port (optional)
   - `AWB_DEV_API_ORIGIN`: dev proxy target (optional, default: `http://127.0.0.1:${AWB_PORT}`)
+  - For static preview, use the independent listener variables documented in the [deployment guide](docs/manual/workspace-static-preview-deployment.md).
 
 **Scripts**
 

@@ -7,6 +7,10 @@ services:
     ports:
       # Agent Workbench (Web UI + API)
       - "${AWB_PUBLISH_HOST:-0.0.0.0}:${AWB_PORT:-4310}:${AWB_PORT:-4310}"
+      # Isolated workspace static preview listener. It is mapped even when disabled;
+      # set AWB_PREVIEW_ENABLED=true and a valid AWB_PREVIEW_ORIGIN to serve it.
+      # Keep this on localhost when a reverse proxy terminates TLS.
+      - "${AWB_PREVIEW_PUBLISH_HOST:-0.0.0.0}:${AWB_PREVIEW_PORT:-4311}:${AWB_PREVIEW_PORT:-4311}"
       # Reserved port range for services started inside workspaces (dev servers, RPC, etc.)
       # If any port in this range is already in use on the host, the container may fail to start.
       - "${AWB_PUBLISH_HOST:-0.0.0.0}:${AWB_WORKSPACE_PORT_RANGE:-30000-30100}:${AWB_WORKSPACE_PORT_RANGE:-30000-30100}"
@@ -25,6 +29,12 @@ services:
       AWB_CREDENTIAL_MASTER_KEY: ${AWB_CREDENTIAL_MASTER_KEY:-}
       AWB_AUTH_TOKEN: ${AWB_AUTH_TOKEN:-}
       AWB_AUTH_COOKIE_SECURE: ${AWB_AUTH_COOKIE_SECURE:-0}
+      # Workspace preview is a second listener with an independent public origin.
+      AWB_PREVIEW_ENABLED: ${AWB_PREVIEW_ENABLED:-false}
+      AWB_PREVIEW_ORIGIN: ${AWB_PREVIEW_ORIGIN:-}
+      AWB_PREVIEW_HOST: ${AWB_PREVIEW_HOST:-0.0.0.0}
+      AWB_PREVIEW_PORT: ${AWB_PREVIEW_PORT:-4311}
+      AWB_PREVIEW_SESSION_TTL_SECONDS: ${AWB_PREVIEW_SESSION_TTL_SECONDS:-3600}
       # Agent worker / runtime (must be explicitly injected to enter container process env)
       AWB_AGENT_WORKER_ENABLED: ${AWB_AGENT_WORKER_ENABLED:-}
       AWB_AGENT_WORKER_CONCURRENCY: ${AWB_AGENT_WORKER_CONCURRENCY:-}

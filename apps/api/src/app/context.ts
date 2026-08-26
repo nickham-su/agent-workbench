@@ -1,5 +1,6 @@
 import type { Db } from "../infra/db/db.js";
 import type { CredentialMasterKeySource } from "../infra/crypto/credentialMasterKey.js";
+import type { PreviewRuntime } from "../modules/preview/preview-runtime.js";
 
 export type AgentTestFaults = {
   archiveWrite?: {
@@ -41,5 +42,8 @@ export type AppContext = {
   agentPluginHostEnabled: boolean;
   agentPluginHostSocketPath: string;
   agentPluginServicesEnabled?: boolean;
+  preview:
+    | { enabled: false; runtime: null }
+    | { enabled: true; runtime: PreviewRuntime };
   agentTestFaults?: AgentTestFaults;
 };

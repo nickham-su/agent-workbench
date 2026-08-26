@@ -81,7 +81,7 @@ COPY --from=builder /app/plugins /app/plugins
 COPY --from=builder /app/skills /app/skills
 COPY --from=builder /app/prompts /app/prompts
 
-EXPOSE 4310
+EXPOSE 4310 4311
 
 USER dev
 

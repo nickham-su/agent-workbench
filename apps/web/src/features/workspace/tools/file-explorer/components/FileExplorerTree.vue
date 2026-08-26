@@ -53,6 +53,9 @@
                 <a-menu-item v-if="selectedNode" key="download">
                   {{ t("files.actions.download") }}
                 </a-menu-item>
+                <a-menu-item v-if="canOpenPreview" key="preview">
+                  {{ t("files.actions.preview") }}
+                </a-menu-item>
                 <a-menu-divider v-if="selectedNode" />
                 <a-menu-item v-if="selectedNode" key="copyName">
                   {{ t("files.actions.copyName") }}
@@ -92,6 +95,7 @@ const props = defineProps<{
   isTreeEmpty: boolean;
   selectedNode: TreeNode | null;
   canRenameDelete: boolean;
+  canOpenPreview: boolean;
   showRepoPathAction: boolean;
   showWorkspacePathAction: boolean;
   refreshRoot: () => void;

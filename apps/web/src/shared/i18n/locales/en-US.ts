@@ -547,6 +547,7 @@ export default {
       copyRepoPath: "Copy repo path",
       copyWorkspacePath: "Copy workspace path",
       download: "Download",
+      preview: "Preview",
       rename: "Rename",
       delete: "Delete",
       refresh: "Refresh",

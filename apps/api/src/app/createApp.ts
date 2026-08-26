@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import websocket from "@fastify/websocket";
+import formbody from "@fastify/formbody";
 import multipart from "@fastify/multipart";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
@@ -20,6 +21,7 @@ import { ensureAgentGlobalSystemPromptSeeded } from "../modules/settings/setting
 import { registerAgentModule } from "../modules/agent/agent.module.js";
 import { registerPluginsModule } from "../modules/plugins/plugin.module.js";
 import { registerGitEnvModule } from "../modules/git-env/git-env.module.js";
+import { registerWorkspacePreviewRoutes } from "../modules/preview/preview-open.routes.js";
 
 export async function createApp(ctx: AppContext) {
   const app = Fastify({
@@ -33,6 +35,7 @@ export async function createApp(ctx: AppContext) {
   });
 
   await app.register(websocket);
+  await app.register(formbody);
   const TWO_GIB = 2 * 1024 * 1024 * 1024;
   await app.register(multipart, {
     limits: {
@@ -77,6 +80,9 @@ export async function createApp(ctx: AppContext) {
   await registerSettingsModule(app, ctx);
   ensureAgentGlobalSystemPromptSeeded(ctx, app.log);
   await registerWorkspacesModule(app, ctx);
+  if (ctx.preview.enabled) {
+    await registerWorkspacePreviewRoutes(app, ctx);
+  }
   await registerTerminalsModule(app, ctx);
   await registerPluginsModule(app, ctx);
   await registerGitModule(app, ctx);
