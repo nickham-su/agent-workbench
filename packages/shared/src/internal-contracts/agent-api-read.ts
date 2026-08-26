@@ -2,6 +2,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import {
   AgentContextItemStatusSchema,
   AgentContextToolNameSchema,
+  AgentImageMediaTypeSchema,
   AgentUiLocaleSchema
 } from "../contracts/agent.js";
 import {
@@ -113,10 +114,70 @@ export type AgentApiExecutionProfileResponse = Static<typeof AgentApiExecutionPr
 export const AgentApiPromptContextRequestSchema = Type.Object(AgentApiReadRunRequestFields);
 export type AgentApiPromptContextRequest = Static<typeof AgentApiPromptContextRequestSchema>;
 
-const AgentApiPromptMessageSchema = Type.Object({
-  role: Type.Union([Type.Literal("system"), Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool")]),
-  content: Type.Any()
-});
+const AgentApiPromptTextPartSchema = Type.Object({
+  type: Type.Literal("text"),
+  text: Type.String()
+}, { additionalProperties: false });
+
+export const AgentApiPromptAttachmentRefPartSchema = Type.Object({
+  type: Type.Literal("attachment_ref"),
+  workspaceId: Type.String({ minLength: 1 }),
+  attachmentId: Type.String({ minLength: 1 }),
+  mediaType: AgentImageMediaTypeSchema,
+  filename: Type.String()
+}, { additionalProperties: false });
+export type AgentApiPromptAttachmentRefPart = Static<typeof AgentApiPromptAttachmentRefPartSchema>;
+
+const AgentApiPromptToolCallPartSchema = Type.Object({
+  type: Type.Literal("tool-call"),
+  toolCallId: Type.String({ minLength: 1 }),
+  toolName: AgentContextToolNameSchema,
+  input: Type.Any()
+}, { additionalProperties: false });
+
+const AgentApiPromptToolResultOutputSchema = Type.Union([
+  Type.Object({ type: Type.Literal("text"), value: Type.String() }, { additionalProperties: false }),
+  Type.Object({ type: Type.Literal("error-text"), value: Type.String() }, { additionalProperties: false })
+]);
+
+const AgentApiPromptToolResultPartSchema = Type.Object({
+  type: Type.Literal("tool-result"),
+  toolCallId: Type.String({ minLength: 1 }),
+  toolName: AgentContextToolNameSchema,
+  output: AgentApiPromptToolResultOutputSchema
+}, { additionalProperties: false });
+
+const AgentApiPromptUserContentPartsSchema = Type.Union([
+  Type.Tuple([AgentApiPromptTextPartSchema]),
+  Type.Tuple([AgentApiPromptTextPartSchema, AgentApiPromptAttachmentRefPartSchema]),
+  Type.Tuple([AgentApiPromptTextPartSchema, AgentApiPromptAttachmentRefPartSchema, AgentApiPromptAttachmentRefPartSchema]),
+  Type.Tuple([
+    AgentApiPromptTextPartSchema,
+    AgentApiPromptAttachmentRefPartSchema,
+    AgentApiPromptAttachmentRefPartSchema,
+    AgentApiPromptAttachmentRefPartSchema
+  ]),
+  Type.Tuple([
+    AgentApiPromptTextPartSchema,
+    AgentApiPromptAttachmentRefPartSchema,
+    AgentApiPromptAttachmentRefPartSchema,
+    AgentApiPromptAttachmentRefPartSchema,
+    AgentApiPromptAttachmentRefPartSchema
+  ])
+]);
+
+const AgentApiPromptMessageSchema = Type.Union([
+  Type.Object({ role: Type.Literal("system"), content: Type.String() }, { additionalProperties: false }),
+  Type.Object({
+    role: Type.Literal("user"),
+    content: Type.Union([Type.String(), AgentApiPromptUserContentPartsSchema])
+  }, { additionalProperties: false }),
+  Type.Object({
+    role: Type.Literal("assistant"),
+    content: Type.Union([Type.String(), Type.Array(Type.Union([AgentApiPromptTextPartSchema, AgentApiPromptToolCallPartSchema]))])
+  }, { additionalProperties: false }),
+  Type.Object({ role: Type.Literal("tool"), content: Type.Array(AgentApiPromptToolResultPartSchema) }, { additionalProperties: false })
+]);
 
 export const AgentApiPromptContextResponseSchema = Type.Object({
   headItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),

@@ -21,7 +21,12 @@ export type PromptContextProjectorDependencies<Message> = {
   buildRuntimeInstruction: (input: { uiLocale: AgentUiLocale | null }) => string;
   appendRuntimeConstraints: (systemStatic: string, runtimeInstruction: string) => string;
   listVisibleItems: (input: { workspaceId: string; sessionId: string }) => AgentContextItemRecord[];
-  buildMessages: (input: { workspaceId: string; sessionId: string; compactionSnippetUiLocale: AgentUiLocale | null }) => Promise<{ messages: Message[] }>;
+  buildMessages: (input: {
+    workspaceId: string;
+    sessionId: string;
+    triggerItemId: number | null;
+    compactionSnippetUiLocale: AgentUiLocale | null;
+  }) => Promise<{ messages: Message[] }>;
 };
 
 /** Composes cached static prompt data with the run/session dynamic read-side data. */
@@ -35,7 +40,7 @@ export class PromptContextProjector<Message> {
     workspaceId: string;
     sessionId: string;
     session: { kind: "primary" | "subtask"; headItemId: number | null };
-    run: { runId: string; subtaskDepth: number | null; agentId: string; providerId: string; modelId: string };
+    run: { runId: string; subtaskDepth: number | null; agentId: string; providerId: string; modelId: string; triggerItemId: number | null };
   }) {
     // Preserve the legacy order: profile validation precedes dynamic run-state reads,
     // including when an already-built static prompt is reused from cache.
@@ -66,6 +71,7 @@ export class PromptContextProjector<Message> {
     const { messages } = await this.dependencies.buildMessages({
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
+      triggerItemId: input.run.triggerItemId,
       compactionSnippetUiLocale: uiLocale
     });
     const pendingTools = visible

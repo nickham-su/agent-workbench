@@ -233,7 +233,19 @@ test("agent-api aggregate export exposes read-side schemas with stable shells an
   const promptResponse = {
     headItemId: 1,
     system: "system",
-    messages: [{ role: "assistant" as const, content: [{ type: "tool-call", deeplyDynamic: { any: ["shape"] } }] }],
+    messages: [
+      {
+        role: "assistant" as const,
+        content: [{ type: "tool-call", toolCallId: "call-a", toolName: "bash", input: { command: "pwd" } }]
+      },
+      {
+        role: "user" as const,
+        content: [
+          { type: "text", text: "inspect this" },
+          { type: "attachment_ref", workspaceId: "ws-a", attachmentId: "att_123", mediaType: "image/png", filename: "image.png" }
+        ]
+      }
+    ],
     tools: [{ name: "plugin_tool", description: "dynamic schema", inputSchema: { type: "object", arbitrary: { nested: true } } }],
     pendingTools: [{ itemId: 1, status: "running" as const, toolName: "plugin_tool", args: ["dynamic", { payload: true }] }],
     lastResponseTotalTokens: null,
@@ -243,7 +255,7 @@ test("agent-api aggregate export exposes read-side schemas with stable shells an
   const messagesResponse = {
     headItemId: null,
     system: "system",
-    messages: [{ role: "tool" as const, content: { arbitrary: ["dynamic", "content"] } }]
+    messages: [{ role: "tool" as const, content: [{ type: "tool-result", toolCallId: "call-a", toolName: "bash", output: { type: "text", value: "done" } }] }]
   };
 
   assert.equal(Value.Check(AgentApiExport.AgentApiExecutionProfileRequestSchema, executionRequest), true);
@@ -331,6 +343,66 @@ test("agent-api read-side schemas reject invalid stable fields without constrain
     headItemId: null,
     system: "system",
     messages: [{ role: "developer", content: "unsupported stable role" }]
+  }), false);
+});
+
+test("agent-api prompt schemas permit only role-compatible content parts", () => {
+  const responseShell = {
+    headItemId: null,
+    system: "system",
+    tools: [],
+    pendingTools: [],
+    lastResponseTotalTokens: null,
+    uiLocale: null,
+    externalSkillRoots: []
+  };
+  const attachmentRef = {
+    type: "attachment_ref",
+    workspaceId: "ws-a",
+    attachmentId: "att_123",
+    mediaType: "image/webp",
+    filename: "screenshot.webp"
+  };
+
+  assert.equal(Value.Check(AgentApiExport.AgentApiPromptContextResponseSchema, {
+    ...responseShell,
+    messages: [{ role: "user", content: [{ type: "text", text: "look" }, attachmentRef] }]
+  }), true);
+  assert.equal(Value.Check(AgentApiExport.AgentApiPromptContextResponseSchema, {
+    ...responseShell,
+    messages: [{ role: "user", content: [{ type: "text", text: "text-only parts remain valid" }] }]
+  }), true);
+  assert.equal(Value.Check(AgentApiExport.AgentApiPromptContextResponseSchema, {
+    ...responseShell,
+    messages: [{ role: "user", content: "legacy text-only message" }]
+  }), true);
+  assert.equal(Value.Check(AgentApiExport.AgentApiPromptContextResponseSchema, {
+    ...responseShell,
+    messages: [{ role: "assistant", content: [attachmentRef] }]
+  }), false);
+  assert.equal(Value.Check(AgentApiExport.AgentApiPromptContextResponseSchema, {
+    ...responseShell,
+    messages: [{ role: "user", content: [{ ...attachmentRef, storageKey: "att_123" }] }]
+  }), false);
+  assert.equal(Value.Check(AgentApiExport.AgentApiPromptContextResponseSchema, {
+    ...responseShell,
+    messages: [{ role: "user", content: [] }]
+  }), false);
+  assert.equal(Value.Check(AgentApiExport.AgentApiPromptContextResponseSchema, {
+    ...responseShell,
+    messages: [{ role: "user", content: [attachmentRef] }]
+  }), false);
+  assert.equal(Value.Check(AgentApiExport.AgentApiPromptContextResponseSchema, {
+    ...responseShell,
+    messages: [{ role: "user", content: [attachmentRef, { type: "text", text: "late text" }] }]
+  }), false);
+  assert.equal(Value.Check(AgentApiExport.AgentApiPromptContextResponseSchema, {
+    ...responseShell,
+    messages: [{ role: "user", content: [{ type: "text", text: "first" }, { type: "text", text: "second" }] }]
+  }), false);
+  assert.equal(Value.Check(AgentApiExport.AgentApiPromptContextResponseSchema, {
+    ...responseShell,
+    messages: [{ role: "tool", content: [{ type: "tool-result", toolCallId: "call-a", toolName: "bash", output: { type: "binary" } }] }]
   }), false);
 });
 

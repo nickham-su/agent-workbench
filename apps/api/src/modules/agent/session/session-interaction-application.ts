@@ -1,4 +1,4 @@
-import type { AgentControlResult, AgentForkSessionRequest, AgentSendMessageRequest, AgentSendMessageResponse, AgentSessionRecord } from "@agent-workbench/shared";
+import type { AgentControlResult, AgentForkSessionRequest, AgentSendMessageResponse, AgentSessionRecord } from "@agent-workbench/shared";
 import { AgentSubtaskErrorCode } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { HttpError } from "../../../app/errors.js";
 import type { AgentRuntimePort } from "../agent.runtime-port.js";
@@ -43,7 +43,7 @@ export class SessionInteractionApplication {
     });
   }
 
-  async sendMessage(params: { sessionId: string; body: AgentSendMessageRequest; runtime: AgentRuntimePort }): Promise<AgentSendMessageResponse> {
+  async sendMessage(params: { sessionId: string; body: import("./session-interaction-ports.js").NormalizedAgentUserMessageInput; runtime: AgentRuntimePort }): Promise<AgentSendMessageResponse> {
     const session = this.dependencies.store.getSession(params.sessionId);
     if (!session) throw new HttpError(404, "session not found");
     if (session.kind === "subtask") {
@@ -52,7 +52,8 @@ export class SessionInteractionApplication {
     if (session.workspaceId !== params.body.workspaceId) throw new HttpError(400, "workspaceId mismatch");
 
     const text = params.body.text.trim();
-    if (!text) throw new HttpError(400, "text is required");
+    const images = params.body.images ?? [];
+    if (!text && images.length === 0) throw new HttpError(400, "text or image is required");
     // These fast paths are intentionally non-authoritative. Lifecycle repeats
     // them in its activation transaction after this user-facing validation order.
     const dedup = this.dependencies.store.findClientRequestDedup({
@@ -76,6 +77,7 @@ export class SessionInteractionApplication {
         clientRequestId: params.body.clientRequestId,
         text,
         inputText: params.body.text,
+        images,
         agentId: profile.agentId,
         providerId: profile.providerId,
         modelId: profile.modelId,

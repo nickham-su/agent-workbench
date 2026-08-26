@@ -12,6 +12,7 @@ import {
   getAgentSession,
   getRunRecord,
   getRunState as getRunStateRow,
+  insertContextItemAttachments,
   getSessionTranscriptItems,
   updateRunState
 } from "../agent.store.js";
@@ -110,6 +111,150 @@ async function getPromptContextInternal(params: { app: FastifyInstance; internal
   assert.equal(res.statusCode, 200, `get prompt-context failed: ${res.body}`);
   return res.json() as { system: string; messages: Array<{ role: string; content: unknown }> };
 }
+
+test("prompt-context only projects trigger image attachments while history and messages-context use the fixed placeholder", async (t: TestContext) => {
+  const fixture = await createP3Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const now = Date.now();
+  const first = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: null,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "older text" },
+    createdAt: now
+  });
+  const trigger = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: first.id,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "trigger text" },
+    createdAt: now + 1
+  });
+  const later = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: trigger.id,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "later text" },
+    createdAt: now + 2
+  });
+  insertContextItemAttachments(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    contextItemId: trigger.id,
+    createdAt: now,
+    attachments: [{
+      attachmentId: "att_trigger-image",
+      storageKey: "att_trigger-image",
+      filename: "trigger.png",
+      mediaType: "image/png",
+      byteSize: 8,
+      position: 0
+    }]
+  });
+  insertContextItemAttachments(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    contextItemId: later.id,
+    createdAt: now,
+    attachments: [{
+      attachmentId: "att_later-image",
+      storageKey: "att_later-image",
+      filename: "later.png",
+      mediaType: "image/png",
+      byteSize: 8,
+      position: 0
+    }]
+  });
+  const runId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: trigger.id,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: now + 3
+  });
+  const composition = createDirectAgentComposition(fixture);
+  const prompt = await composition.service.getPromptContextForRun({ workspaceId: fixture.workspaceId, sessionId: session.id, runId });
+  const userMessages = prompt.messages.filter((message) => message.role === "user");
+  assert.deepEqual(userMessages[0]?.content, "older text");
+  assert.deepEqual(userMessages[1]?.content, [
+    { type: "text", text: "trigger text" },
+    { type: "attachment_ref", workspaceId: fixture.workspaceId, attachmentId: "att_trigger-image", mediaType: "image/png", filename: "trigger.png" }
+  ]);
+  assert.equal(
+    userMessages[2]?.content,
+    "later text\n\n[This user message included 1 image attachment(s). Their image contents are not included in this run.]"
+  );
+
+  const messagesContext = await composition.service.getMessagesContext({ workspaceId: fixture.workspaceId, sessionId: session.id });
+  const compactUserMessages = messagesContext.messages.filter((message) => message.role === "user");
+  assert.equal(
+    compactUserMessages[1]?.content,
+    "trigger text\n\n[This user message included 1 image attachment(s). Their image contents are not included in this run.]"
+  );
+  assert.equal(Array.isArray(compactUserMessages[1]?.content), false, "messages-context must never project attachment refs");
+
+  const imageOnly = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId: null,
+    turnId: null,
+    step: null,
+    prevId: later.id,
+    kind: "user",
+    status: "completed",
+    output: { type: "user_text", text: "" },
+    createdAt: now + 4
+  });
+  insertContextItemAttachments(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    contextItemId: imageOnly.id,
+    createdAt: now,
+    attachments: [{
+      attachmentId: "att_only-image",
+      storageKey: "att_only-image",
+      filename: "only.png",
+      mediaType: "image/png",
+      byteSize: 8,
+      position: 0
+    }]
+  });
+  const imageOnlyRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: imageOnlyRunId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: imageOnly.id,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: now + 5
+  });
+  const imageOnlyPrompt = await composition.service.getPromptContextForRun({ workspaceId: fixture.workspaceId, sessionId: session.id, runId: imageOnlyRunId });
+  const imageOnlyContent = imageOnlyPrompt.messages.filter((message) => message.role === "user").at(-1)?.content;
+  assert.deepEqual(imageOnlyContent, [
+    { type: "text", text: "[The user sent 1 image attachment(s) without accompanying text.]" },
+    { type: "attachment_ref", workspaceId: fixture.workspaceId, attachmentId: "att_only-image", mediaType: "image/png", filename: "only.png" }
+  ]);
+});
 
 test("prompt-context reuses one run static promise and clears it when the run reaches a terminal status", async (t: TestContext) => {
   const fixture = await createP3Fixture(t, { agentWorkerConcurrency: 0 });

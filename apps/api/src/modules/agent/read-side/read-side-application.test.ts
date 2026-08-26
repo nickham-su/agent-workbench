@@ -11,7 +11,7 @@ test("ReadSideApplication validates ownership before delegating profile and mess
     },
     findRun(runId) {
       calls.push(`run:${runId}`);
-      return runId === "missing" ? null : { runId, workspaceId: "ws", sessionId: "session", agentId: "agent", providerId: "provider", modelId: "model", subtaskDepth: 0 };
+      return runId === "missing" ? null : { runId, workspaceId: "ws", sessionId: "session", agentId: "agent", providerId: "provider", modelId: "model", subtaskDepth: 0, triggerItemId: 9 };
     },
     resolveExecutionProfile(input) {
       calls.push(`profile:${input.run.runId}`);

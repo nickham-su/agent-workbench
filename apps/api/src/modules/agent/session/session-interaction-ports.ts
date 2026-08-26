@@ -1,4 +1,5 @@
 import type {
+  AgentImageMediaType,
   AgentContextItemRecord,
   AgentControlResult,
   AgentForkSessionRequest,
@@ -59,6 +60,7 @@ export type SessionLifecycleStarter = {
     clientRequestId: string;
     text: string;
     inputText: string;
+    images: NormalizedAgentUserImageInput[];
     agentId: string;
     providerId: string;
     modelId: string;
@@ -103,7 +105,26 @@ export type SessionInteractionApplication = {
   listSessions(workspaceId: string): AgentSessionRecord[];
   createPrimarySession(params: { workspaceId: string; title?: string }): AgentSessionRecord;
   forkPrimarySession(params: AgentForkSessionRequest): Promise<AgentSessionRecord>;
-  sendMessage(params: { sessionId: string; body: AgentSendMessageRequest; runtime: AgentRuntimePort }): Promise<AgentSendMessageResponse>;
+  sendMessage(params: { sessionId: string; body: NormalizedAgentUserMessageInput; runtime: AgentRuntimePort }): Promise<AgentSendMessageResponse>;
   revertSession(command: RevertSessionCommand): Promise<AgentControlResult>;
   resolveSubtaskSessionForStart(command: SubtaskSessionMaterializationCommand): Promise<{ session: AgentSessionRecord; createdSessionId: string | null }>;
+};
+
+export type NormalizedAgentUserImageInput = {
+  attachmentId: string;
+  storageKey: string;
+  tempId: string;
+  filename: string;
+  mediaType: AgentImageMediaType;
+  byteSize: number;
+  position: number;
+};
+
+export type NormalizedAgentUserMessageInput = {
+  workspaceId: string;
+  clientRequestId: string;
+  text: string;
+  agentId?: string;
+  uiLocale?: AgentUiLocale;
+  images?: NormalizedAgentUserImageInput[];
 };

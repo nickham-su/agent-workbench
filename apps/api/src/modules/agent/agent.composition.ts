@@ -1,6 +1,6 @@
-import type { FastifyBaseLogger } from "fastify";
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { FastifyBaseLogger } from "fastify";
 import { TextDecoder } from "node:util";
 import type {
   AgentContextItemRecord,
@@ -97,6 +97,9 @@ import type { AgentRunCompletedEventHub } from "./run-completed-events.js";
 import { getAgentWorkspaceRunContext } from "./agent-run-context.js";
 import { RunLifecycleApplication } from "./lifecycle/run-lifecycle-application.js";
 import { SqliteRunLifecyclePersistence } from "./lifecycle/sqlite-run-lifecycle-persistence.js";
+import { cleanupAgedAgentAttachmentTempFiles, commitAgentAttachmentTempFile, removeAgentAttachmentTempFile } from "./attachments/agent-attachment-storage.js";
+import { agentAttachmentFilePath, agentAttachmentWorkspaceDir, agentAttachmentsRoot, assertAgentAttachmentId } from "./attachments/agent-attachment-paths.js";
+import { getAuthorizedAttachmentById } from "./agent.store.js";
 import { RunPromptStaticCache, RunPromptStaticCacheInvalidator } from "./prompt/run-prompt-static-cache.js";
 import { PromptStaticAssembler, type RunPromptStatic } from "./prompt/prompt-static-assembler.js";
 import { ExecutionProfileResolver } from "./read-side/execution-profile-resolver.js";
@@ -850,6 +853,9 @@ function parseArchivedItemIdFromArchiveLine(line: string) {
 function buildArchiveLine(item: AgentContextItemRecord): string | null {
   let text = "";
   if (item.kind === "user" && item.output.type === "user_text") text = item.output.text || "";
+  else if (item.kind === "user" && item.output.type === "user_message") {
+    text = buildSafeUserMessageText(item.output.text || "", item.output.attachments.length);
+  }
   else if (item.kind === "assistant" && item.output.type === "assistant_text") {
     const raw = item.output.text || "";
     // assistant 仅发起 tool-call 时可能没有自然语言文本,归档空行没有价值,直接过滤。
@@ -874,7 +880,27 @@ function isBoundaryMarkerItem(item: AgentContextItemRecord) {
   return item.kind === "system" && typeof item.boundaryReason === "string" && item.boundaryReason.trim().length > 0;
 }
 
+function buildHistoricalImagePlaceholder(attachmentCount: number) {
+  return `[This user message included ${attachmentCount} image attachment(s). Their image contents are not included in this run.]`;
+}
+
+function buildImageOnlyTriggerPromptText(attachmentCount: number) {
+  return `[The user sent ${attachmentCount} image attachment(s) without accompanying text.]`;
+}
+
+function buildSafeUserMessageText(text: string, attachmentCount: number) {
+  const placeholder = buildHistoricalImagePlaceholder(attachmentCount);
+  return text ? `${text}\n\n${placeholder}` : placeholder;
+}
+
 type PromptTextPart = { type: "text"; text: string };
+type PromptAttachmentRefPart = {
+  type: "attachment_ref";
+  workspaceId: string;
+  attachmentId: string;
+  mediaType: "image/png" | "image/jpeg" | "image/webp";
+  filename: string;
+};
 type PromptToolCallPart = {
   type: "tool-call";
   toolCallId: string;
@@ -891,7 +917,7 @@ type PromptToolResultPart = {
 };
 type PromptMessage =
   | { role: "system"; content: string }
-  | { role: "user"; content: string | PromptTextPart[] }
+  | { role: "user"; content: string | Array<PromptTextPart | PromptAttachmentRefPart> }
   | { role: "assistant"; content: string | Array<PromptTextPart | PromptToolCallPart> }
   | { role: "tool"; content: PromptToolResultPart[] };
 
@@ -1130,16 +1156,16 @@ function createSessionFacadeCapabilities<T extends {
 
 function createQueryFacadeCapabilities<T extends Record<
   "listRecentSessions" | "listAvailableAgents" | "listRecentWorkspaces" | "getContextItems" | "getContextItem" |
-  "getApplyPatchUiArtifact" | "getWriteUiArtifact" | "getRunState" | "getSessionStatusSummary" | "getRunFinalText",
+  "getApplyPatchUiArtifact" | "getWriteUiArtifact" | "getRunState" | "getSessionStatusSummary" | "getRunFinalText" | "getAttachmentContent",
   (...args: any[]) => any
->>(dependencies: T): Pick<T, "listRecentSessions" | "listAvailableAgents" | "listRecentWorkspaces" | "getContextItems" | "getContextItem" | "getApplyPatchUiArtifact" | "getWriteUiArtifact" | "getRunState" | "getSessionStatusSummary" | "getRunFinalText"> {
+>>(dependencies: T): Pick<T, "listRecentSessions" | "listAvailableAgents" | "listRecentWorkspaces" | "getContextItems" | "getContextItem" | "getApplyPatchUiArtifact" | "getWriteUiArtifact" | "getRunState" | "getSessionStatusSummary" | "getRunFinalText" | "getAttachmentContent"> {
   const {
     listRecentSessions, listAvailableAgents, listRecentWorkspaces, getContextItems, getContextItem,
-    getApplyPatchUiArtifact, getWriteUiArtifact, getRunState, getSessionStatusSummary, getRunFinalText
+    getApplyPatchUiArtifact, getWriteUiArtifact, getRunState, getSessionStatusSummary, getRunFinalText, getAttachmentContent
   } = dependencies;
   return {
     listRecentSessions, listAvailableAgents, listRecentWorkspaces, getContextItems, getContextItem,
-    getApplyPatchUiArtifact, getWriteUiArtifact, getRunState, getSessionStatusSummary, getRunFinalText
+    getApplyPatchUiArtifact, getWriteUiArtifact, getRunState, getSessionStatusSummary, getRunFinalText, getAttachmentContent
   };
 }
 
@@ -1350,10 +1376,21 @@ function createLifecycleSessionSubtaskAssembly(assembly: {
         }
       },
       persistence: sqliteLifecyclePersistence,
+      attachmentCommitter: {
+        commit: async ({ workspaceId, image }) => {
+          await commitAgentAttachmentTempFile({ dataDir: assembly.environment.dataDir, workspaceId, attachmentId: image.attachmentId, tempId: image.tempId });
+        },
+        removeTemp: async ({ tempId }) => {
+          await removeAgentAttachmentTempFile({ dataDir: assembly.environment.dataDir, tempId });
+        },
+        removeFinal: async ({ workspaceId, image }) => {
+          await fs.rm(agentAttachmentFilePath(assembly.environment.dataDir, workspaceId, image.attachmentId), { force: true });
+        }
+      },
       triggerInputReader: {
         getUserText: (itemId) => {
           const item = getContextItemRecordById(assembly.environment.db, itemId);
-          return item?.output.type === "user_text" ? item.output.text : null;
+          return item?.output.type === "user_text" || item?.output.type === "user_message" ? item.output.text : null;
         }
       },
       isContextAppendConflict: (error) => error instanceof AgentConflictError,
@@ -1474,6 +1511,7 @@ function createReadQueryWritebackAssembly(assembly: {
       buildMessages: ({ workspaceId, sessionId }) => assembly.buildPromptMessagesForSession({
         workspaceId,
         sessionId,
+        triggerItemId: null,
         compactionSnippetUiLocale: null
       }),
       getActiveRunId: ({ workspaceId, sessionId }) => getStoredRunState(assembly.environment.db, workspaceId, sessionId).activeRunId,
@@ -1754,7 +1792,7 @@ function createAgentApplications(
     return await sessionInteractionApplication.forkPrimarySession(params);
   }
 
-  async function sendMessage(params: { sessionId: string; body: AgentSendMessageRequest; runtime: AgentRuntimePort }): Promise<AgentSendMessageResponse> {
+  async function sendMessage(params: { sessionId: string; body: AgentSendMessageRequest | import("./session/session-interaction-ports.js").NormalizedAgentUserMessageInput; runtime: AgentRuntimePort }): Promise<AgentSendMessageResponse> {
     return await sessionInteractionApplication.sendMessage(params);
   }
 
@@ -2006,6 +2044,7 @@ function createAgentApplications(
   async function buildPromptMessagesForSession(params: {
     workspaceId: string;
     sessionId: string;
+    triggerItemId: number | null;
     // 仅 prompt-context 需要 locale 用于 compaction snippet 文案。
     compactionSnippetUiLocale: AgentUiLocale | null;
   }) {
@@ -2052,8 +2091,30 @@ function createAgentApplications(
       if (!item) continue;
 
       if (item.kind === "user" && item.output.type === "user_text") {
-        if (!item.output.text) continue;
-        messages.push({ role: "user", content: item.output.text });
+        if (item.output.text) messages.push({ role: "user", content: item.output.text });
+        continue;
+      }
+
+      if (item.kind === "user" && item.output.type === "user_message") {
+        const attachmentCount = item.output.attachments.length;
+        if (item.id !== params.triggerItemId) {
+          messages.push({ role: "user", content: buildSafeUserMessageText(item.output.text, attachmentCount) });
+          continue;
+        }
+        const content: Array<PromptTextPart | PromptAttachmentRefPart> = [
+          {
+            type: "text",
+            text: item.output.text || buildImageOnlyTriggerPromptText(attachmentCount)
+          },
+          ...item.output.attachments.map((attachment) => ({
+            type: "attachment_ref" as const,
+            workspaceId: params.workspaceId,
+            attachmentId: attachment.attachmentId,
+            mediaType: attachment.mediaType,
+            filename: attachment.filename
+          }))
+        ];
+        messages.push({ role: "user", content });
         continue;
       }
 
@@ -2088,7 +2149,11 @@ function createAgentApplications(
               const last20 = batchArchivable.slice(-20);
               const last10UserAssistantSystem = batchArchivable
                 .filter((t) => {
-                  if (t.kind === "user" && t.output.type === "user_text") return String(t.output.text || "").trim().length > 0;
+                  if (t.kind === "user" && (t.output.type === "user_text" || t.output.type === "user_message")) {
+                    return t.output.type === "user_message"
+                      ? true
+                      : String(t.output.text || "").trim().length > 0;
+                  }
                   if (t.kind === "assistant" && t.output.type === "assistant_text") return String(t.output.text || "").trim().length > 0;
                   if (t.kind === "system" && t.output.type === "system_text") {
                     const text = String(t.output.text || "").trim();
@@ -2292,6 +2357,38 @@ function createAgentApplications(
     return readSideApplication.getPromptContextForRun(params);
   }
 
+  async function getAttachmentContent(attachmentId: string) {
+    try {
+      assertAgentAttachmentId(attachmentId);
+      const attachment = getAuthorizedAttachmentById(environment.db, attachmentId);
+      if (!attachment || attachment.storageKey !== attachment.attachmentId) return null;
+      const attachmentsRoot = agentAttachmentsRoot(environment.dataDir);
+      const byWorkspaceDir = path.join(attachmentsRoot, "by_workspace");
+      const workspaceDir = agentAttachmentWorkspaceDir(environment.dataDir, attachment.workspaceId);
+      const filePath = agentAttachmentFilePath(environment.dataDir, attachment.workspaceId, attachment.storageKey);
+      const [attachmentsRootStat, byWorkspaceStat, workspaceStat, fileStat] = await Promise.all([
+        fs.lstat(attachmentsRoot), fs.lstat(byWorkspaceDir), fs.lstat(workspaceDir), fs.lstat(filePath)
+      ]);
+      if (
+        !attachmentsRootStat.isDirectory() || attachmentsRootStat.isSymbolicLink() ||
+        !byWorkspaceStat.isDirectory() || byWorkspaceStat.isSymbolicLink() ||
+        !workspaceStat.isDirectory() || workspaceStat.isSymbolicLink() ||
+        !fileStat.isFile() || fileStat.isSymbolicLink() || fileStat.size !== attachment.byteSize
+      ) return null;
+      const [realAttachmentsRoot, realWorkspaceDir, realFilePath] = await Promise.all([
+        fs.realpath(agentAttachmentsRoot(environment.dataDir)), fs.realpath(workspaceDir), fs.realpath(filePath)
+      ]);
+      if (
+        realWorkspaceDir === realAttachmentsRoot || !realWorkspaceDir.startsWith(`${realAttachmentsRoot}${path.sep}`) ||
+        realFilePath === realWorkspaceDir || !realFilePath.startsWith(`${realWorkspaceDir}${path.sep}`)
+      ) return null;
+      return { filePath: realFilePath, mediaType: attachment.mediaType, byteSize: attachment.byteSize };
+    } catch {
+      // Deliberately hide authorization, path and filesystem distinctions.
+      return null;
+    }
+  }
+
   function checkChannelSenderAllowlist(input: { pluginId: string; senderId: string }) {
     const pluginId = String(input.pluginId || "").trim();
     const senderId = String(input.senderId || "").trim();
@@ -2338,7 +2435,8 @@ function createAgentApplications(
     getWriteUiArtifact,
     getRunState,
     getSessionStatusSummary,
-    getRunFinalText
+    getRunFinalText,
+    getAttachmentContent
   });
   const lifecycle = createLifecycleFacadeCapabilities({
     cancelSessionWithRuntime,
@@ -2411,6 +2509,7 @@ function createArchiveStartupCoordinator(params: {
   archiveStorage: ArchiveStorage;
   logger: FastifyBaseLogger;
   recoveryMode: AppContext["agentStartupRecoveryMode"];
+  dataDir: string;
   capabilities: Pick<AgentServiceCapabilities, "session" | "lifecycle">;
 }) {
   const archiveStartupSessionQuery = new SqliteArchiveStartupSessionQuery(params.db);
@@ -2422,6 +2521,7 @@ function createArchiveStartupCoordinator(params: {
   return new AgentStartupCoordinator({
     cleanupOrphans: () => { params.capabilities.session.cleanupSubtaskOrphansOnStartup(); },
     reconcileArchive: () => archiveStartupReconcile.reconcileAllPendingBestEffort(),
+    cleanupAttachmentTemps: () => cleanupAgedAgentAttachmentTempFiles({ dataDir: params.dataDir, nowMs: Date.now(), maxAgeMs: 24 * 60 * 60 * 1000 }),
     failRuns: () => params.capabilities.lifecycle.failRunsOnStartup(),
     recoverRuns: (input) => params.capabilities.lifecycle.recoverRunsOnStartup(input),
     logger: params.logger,
@@ -2457,6 +2557,7 @@ export function createAgentComposition(
     archiveStorage,
     logger,
     recoveryMode: ctx.agentStartupRecoveryMode,
+    dataDir: ctx.dataDir,
     capabilities: serviceCapabilities
   });
   return {

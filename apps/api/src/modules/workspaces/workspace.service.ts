@@ -32,6 +32,7 @@ import { withRepoLock } from "../../infra/locks/repoLock.js";
 import { cloneFromMirror } from "../../infra/git/clone.js";
 import { ensureDir, pathExists, rmrf } from "../../infra/fs/fs.js";
 import { agentArchiveWorkspaceDir, workspaceRepoDirPath, workspaceRoot } from "../../infra/fs/paths.js";
+import { removeAgentAttachmentWorkspaceDirectory } from "../agent/attachments/agent-attachment-storage.js";
 import { ensureRepoMirror } from "../../infra/git/mirror.js";
 import { buildGitEnv } from "../../infra/git/gitEnv.js";
 import {
@@ -711,7 +712,9 @@ export async function deleteWorkspace(ctx: AppContext, logger: FastifyBaseLogger
     // agent_session.workspace_id 对 workspaces 是 on delete restrict；必须先清理 workspace 下的 session。
     // agent_client_request 没有外键，需手动清理。
     ctx.db.prepare(`delete from agent_client_request where workspace_id = ?`).run(ws.id);
+    // 删除 session 会 cascade 掉 context item 及其 attachment relation；附件记录需单独删除。
     ctx.db.prepare(`delete from agent_session where workspace_id = ?`).run(ws.id);
+    ctx.db.prepare(`delete from agent_attachment where workspace_id = ?`).run(ws.id);
     deleteWorkspaceReposByWorkspace(ctx.db, ws.id);
     deleteWorkspaceRecord(ctx.db, ws.id);
   })();
@@ -735,6 +738,15 @@ export async function deleteWorkspace(ctx: AppContext, logger: FastifyBaseLogger
     } catch (err) {
       logger.warn({ workspaceId: ws.id, archivePath, err }, "remove workspace archive path failed");
     }
+  }
+
+  try {
+    const attachmentCleanup = await removeAgentAttachmentWorkspaceDirectory({ dataDir: ctx.dataDir, workspaceId: ws.id });
+    if (attachmentCleanup === "skipped_unsafe") {
+      logger.warn({ workspaceId: ws.id }, "workspace attachment directory cleanup skipped due to unsafe path");
+    }
+  } catch (err) {
+    logger.warn({ workspaceId: ws.id, err }, "remove workspace attachment directory failed");
   }
 
   logger.info({ workspaceId: ws.id }, "workspace deleted");

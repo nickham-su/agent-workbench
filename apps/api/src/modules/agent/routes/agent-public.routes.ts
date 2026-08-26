@@ -1,5 +1,7 @@
+import { createReadStream } from "node:fs";
 import { Type } from "@sinclair/typebox";
-import type { FastifyInstance } from "fastify";
+import { Value } from "@sinclair/typebox/value";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   AgentCancelSessionRequestSchema,
   AgentContextItemRecordSchema,
@@ -11,6 +13,7 @@ import {
   AgentForkSessionRequestSchema,
   AgentRevertSessionRequestSchema,
   AgentInternalCreateSessionRequestSchema,
+  AgentSendMessageMultipartPayloadSchema,
   AgentSendMessageRequestSchema,
   AgentSendMessageResponseSchema,
   AgentChannelAllowlistCheckRequestSchema,
@@ -83,14 +86,160 @@ import {
   type AgentApiPromptContextRequest
 } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { HttpError } from "../../../app/errors.js";
+import { newSortableId } from "../../../utils/ids.js";
+import { AGENT_IMAGE_MAX_COUNT, AGENT_IMAGE_MAX_TOTAL_BYTES } from "../attachments/agent-attachment-limits.js";
+import { removeAgentAttachmentTempFile, stageAgentImageUpload } from "../attachments/agent-attachment-storage.js";
 import type { AgentPublicRouteDependencies } from "./agent-route-types.js";
 import { assertInternalToken, assertOnlyAllowedBodyKeys, assertPluginCaller, AGENT_PRIMARY_SESSION_CREATE_BODY_KEYS, AGENT_PRIMARY_SESSION_FORK_BODY_KEYS } from "./agent-route-auth.js";
+
+const AGENT_MULTIPART_MAX_PARTS = 1 + AGENT_IMAGE_MAX_COUNT;
+const AGENT_MULTIPART_MAX_PAYLOAD_BYTES = 64 * 1024;
+
+type NormalizedSendMessageBody = {
+  workspaceId: string;
+  clientRequestId: string;
+  text: string;
+  agentId?: string;
+  uiLocale?: "zh-CN" | "en-US";
+  images: Array<{
+    attachmentId: string;
+    storageKey: string;
+    tempId: string;
+    filename: string;
+    mediaType: "image/png" | "image/jpeg" | "image/webp";
+    byteSize: number;
+    position: number;
+  }>;
+};
+
+function contentTypeBase(value: unknown) {
+  return String(value || "").split(";", 1)[0]?.trim().toLowerCase() || "";
+}
+
+function hasMultipartBoundary(value: unknown) {
+  return /(?:^|;)\s*boundary=(?:"[^"]+"|[^;\s]+)/i.test(String(value || ""));
+}
+
+async function drainMultipartFile(stream: AsyncIterable<unknown>) {
+  for await (const _chunk of stream) {
+    // Consume rejected parts so Busboy can finish the request safely.
+  }
+}
+
+async function parseAgentMessageMultipart(req: FastifyRequest, dataDir: string): Promise<NormalizedSendMessageBody> {
+  const images: NormalizedSendMessageBody["images"] = [];
+  let payloadRaw: string | null = null;
+  let totalBytes = 0;
+  let partCount = 0;
+  let invalid: Error | null = null;
+  try {
+    for await (const part of req.parts()) {
+      partCount += 1;
+      if (partCount > AGENT_MULTIPART_MAX_PARTS) {
+        if (part.type === "file") await drainMultipartFile(part.file);
+        invalid ??= new Error("too many multipart parts");
+        continue;
+      }
+      if (invalid) {
+        if (part.type === "file") await drainMultipartFile(part.file);
+        continue;
+      }
+      if (part.type === "field") {
+        if (part.fieldname !== "payload" || payloadRaw !== null || part.valueTruncated) {
+          invalid = new Error("invalid multipart payload field");
+          continue;
+        }
+        const value = typeof part.value === "string" ? part.value : String(part.value);
+        if (Buffer.byteLength(value, "utf8") > AGENT_MULTIPART_MAX_PAYLOAD_BYTES) {
+          invalid = new Error("multipart payload is too large");
+          continue;
+        }
+        payloadRaw = value;
+        continue;
+      }
+      if (part.fieldname !== "images" || images.length >= AGENT_IMAGE_MAX_COUNT) {
+        await drainMultipartFile(part.file);
+        invalid = new Error("invalid multipart image field");
+        continue;
+      }
+      const tempId = newSortableId("tmp");
+      try {
+        const image = await stageAgentImageUpload({
+          dataDir,
+          tempId,
+          attachmentId: newSortableId("att"),
+          filename: part.filename,
+          stream: part.file,
+          onBytes: (byteLength) => {
+            totalBytes += byteLength;
+            if (totalBytes > AGENT_IMAGE_MAX_TOTAL_BYTES) throw new Error("agent images exceed total byte size limit");
+          }
+        });
+        images.push({ ...image, position: images.length });
+      } catch (error) {
+        invalid = error instanceof Error ? error : new Error("invalid multipart image");
+      }
+    }
+    if (invalid) throw invalid;
+    if (payloadRaw === null) throw new Error("multipart payload is required");
+    if (images.length === 0) throw new Error("multipart image is required");
+    let payload: unknown;
+    try {
+      payload = JSON.parse(payloadRaw);
+    } catch {
+      throw new Error("multipart payload is not valid JSON");
+    }
+    if (!Value.Check(AgentSendMessageMultipartPayloadSchema, payload)) {
+      throw new Error("multipart payload is invalid");
+    }
+    return {
+      workspaceId: payload.workspaceId,
+      clientRequestId: payload.clientRequestId,
+      text: payload.text ?? "",
+      ...(payload.agentId ? { agentId: payload.agentId } : {}),
+      ...(payload.uiLocale ? { uiLocale: payload.uiLocale } : {}),
+      images
+    };
+  } catch (error) {
+    await Promise.all(images.map((image) => removeAgentAttachmentTempFile({ dataDir, tempId: image.tempId }).catch(() => undefined)));
+    throw new HttpError(400, error instanceof Error ? error.message : "invalid multipart request");
+  }
+}
+
+async function removeStagedAgentMessageTemps(dataDir: string, body: NormalizedSendMessageBody) {
+  await Promise.all(
+    body.images.map((image) => removeAgentAttachmentTempFile({ dataDir, tempId: image.tempId }).catch(() => undefined))
+  );
+}
 
 async function handleCompactRequest(dependencies: AgentPublicRouteDependencies, sessionId: string, body: { workspaceId: string; clientRequestId: string; agentId?: string; uiLocale?: "zh-CN" | "en-US" }) {
   return await dependencies.service.compactSession({ sessionId, body, runtime: dependencies.runtime });
 }
 
 export async function registerAgentPublicRoutes(app: FastifyInstance, dependencies: AgentPublicRouteDependencies) {
+  app.get(
+    "/api/agent/attachments/:attachmentId/content",
+    {
+      schema: {
+        tags: ["agent"],
+        params: Type.Object({ attachmentId: Type.String({ minLength: 1 }) }),
+        response: { 404: ErrorResponseSchema }
+      }
+    },
+    async (req, reply) => {
+      const attachmentId = (req.params as { attachmentId: string }).attachmentId;
+      const content = await dependencies.service.getAttachmentContent(attachmentId);
+      if (!content) throw new HttpError(404, "Not Found");
+      return reply
+        .header("Content-Type", content.mediaType)
+        .header("Content-Disposition", "inline")
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Cache-Control", "private, no-store")
+        .header("Content-Length", String(content.byteSize))
+        .send(createReadStream(content.filePath));
+    }
+  );
+
   app.get(
     "/api/agent/sessions",
     {
@@ -258,21 +407,51 @@ export async function registerAgentPublicRoutes(app: FastifyInstance, dependenci
     {
       schema: {
         tags: ["agent"],
+        description: "Accepts application/json for text-only messages. multipart/form-data is also accepted for image messages and requires one JSON `payload` field plus one to four `images` file fields.",
         params: Type.Object({ sessionId: Type.String({ minLength: 1 }) }),
-        body: AgentSendMessageRequestSchema,
+        // This is documentation-only media-type mapping. A normal Fastify
+        // `body` schema would incorrectly validate multipart streams as the
+        // JSON contract before the handler can parse their parts.
+        body: {
+          content: {
+            "application/json": {
+              schema: AgentSendMessageRequestSchema
+            }
+          }
+        },
         response: {
           201: AgentSendMessageResponseSchema,
           400: ErrorResponseSchema,
           404: ErrorResponseSchema,
-          409: ErrorResponseSchema
+          409: ErrorResponseSchema,
+          415: ErrorResponseSchema
         }
       }
     },
     async (req, reply) => {
       const p = req.params as { sessionId: string };
-      const body = req.body as AgentSendMessageRequest;
-      const result = await dependencies.service.sendMessage({ sessionId: p.sessionId, body, runtime: dependencies.runtime });
-      return reply.code(201).send(result);
+      const contentType = req.headers["content-type"];
+      const mediaType = contentTypeBase(contentType);
+      if (mediaType === "application/json") {
+        const body = req.body as AgentSendMessageRequest;
+        if (!Value.Check(AgentSendMessageRequestSchema, body)) throw new HttpError(400, "request body is invalid");
+        const result = await dependencies.service.sendMessage({ sessionId: p.sessionId, body: { ...body, images: [] }, runtime: dependencies.runtime });
+        return reply.code(201).send(result);
+      }
+      if (mediaType !== "multipart/form-data") throw new HttpError(415, "Unsupported Media Type");
+      if (!hasMultipartBoundary(contentType) || !req.isMultipart()) throw new HttpError(400, "invalid multipart boundary");
+      let body: NormalizedSendMessageBody | null = null;
+      try {
+        body = await parseAgentMessageMultipart(req, dependencies.dataDir);
+        const result = await dependencies.service.sendMessage({ sessionId: p.sessionId, body, runtime: dependencies.runtime });
+        await removeStagedAgentMessageTemps(dependencies.dataDir, body);
+        body = null;
+        return reply.code(201).send(result);
+      } finally {
+        if (body) {
+          await removeStagedAgentMessageTemps(dependencies.dataDir, body);
+        }
+      }
     }
   );
 

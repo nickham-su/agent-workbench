@@ -164,6 +164,28 @@ export function initSchema(db: Db) {
       foreign key (session_id) references agent_session(id) on delete cascade
     );
 
+    create table if not exists agent_attachment (
+      id text primary key,
+      workspace_id text not null,
+      storage_key text not null,
+      filename text not null check (length(filename) between 1 and 255),
+      media_type text not null check (media_type in ('image/png', 'image/jpeg', 'image/webp')),
+      byte_size integer not null check (byte_size between 1 and 10485760),
+      created_at integer not null,
+      unique (workspace_id, storage_key),
+      foreign key (workspace_id) references workspaces(id) on delete restrict
+    );
+
+    create table if not exists agent_context_item_attachment (
+      context_item_id integer not null,
+      attachment_id text not null,
+      position integer not null check (position between 0 and 3),
+      primary key (context_item_id, attachment_id),
+      unique (context_item_id, position),
+      foreign key (context_item_id) references agent_context_item(id) on delete cascade,
+      foreign key (attachment_id) references agent_attachment(id) on delete restrict
+    );
+
     create table if not exists agent_run (
       run_id text primary key,
       workspace_id text not null,
@@ -273,6 +295,14 @@ export function initSchema(db: Db) {
   createIndexIfNotExists(db, {
     index: "idx_agent_session_run_state_status_active_run",
     sql: "create index idx_agent_session_run_state_status_active_run on agent_session_run_state(status, active_run_id)"
+  });
+  createIndexIfNotExists(db, {
+    index: "idx_agent_attachment_workspace_created",
+    sql: "create index idx_agent_attachment_workspace_created on agent_attachment(workspace_id, created_at)"
+  });
+  createIndexIfNotExists(db, {
+    index: "idx_agent_context_item_attachment_attachment",
+    sql: "create index idx_agent_context_item_attachment_attachment on agent_context_item_attachment(attachment_id)"
   });
 
 }

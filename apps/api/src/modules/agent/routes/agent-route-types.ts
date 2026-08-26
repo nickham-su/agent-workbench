@@ -6,10 +6,11 @@ import type { AgentService } from "../agent.service.js";
 type InternalRouteDependencies = { internalToken: string };
 
 export type AgentPublicRouteDependencies = InternalRouteDependencies & {
+  dataDir: string;
   service: Pick<AgentService,
     "listSessions" | "createPrimarySession" | "forkPrimarySession" | "getContextItems" | "getContextItem" |
     "getApplyPatchUiArtifact" | "getWriteUiArtifact" | "getRunState" | "sendMessage" | "compactSession" |
-    "clearSession" | "revertSession" | "cancelSessionWithRuntime">;
+    "clearSession" | "revertSession" | "cancelSessionWithRuntime" | "getAttachmentContent">;
   runtime: AgentRuntimePort;
 };
 

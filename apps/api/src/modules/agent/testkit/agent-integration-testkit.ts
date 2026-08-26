@@ -16,7 +16,7 @@ export type AgentIntegrationFixture = AgentTestFixture & {
 
 export type CreateAgentIntegrationFixtureOptions = Pick<
   CreateAgentTestFixtureOptions,
-  "repoRoot" | "agentWorkerConcurrency"
+  "repoRoot" | "agentWorkerConcurrency" | "authToken"
 >;
 
 /**
@@ -29,6 +29,7 @@ export async function createAgentIntegrationFixture(
   const fixture = await createAgentTestFixture({
     repoRoot: options.repoRoot,
     dataDirPrefix: "agent-integration-",
+    authToken: options.authToken,
     withApp: true,
     agentWorkerConcurrency: options.agentWorkerConcurrency
   });

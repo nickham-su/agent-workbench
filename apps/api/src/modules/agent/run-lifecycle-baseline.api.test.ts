@@ -80,7 +80,7 @@ function createRouteApp(params: { fixture: AgentTestFixture; enqueueError: Error
   const runtime = createFakeAgentRuntime({ enqueueRunError: params.enqueueError });
   const eventHub = new AgentRunCompletedEventHub();
   const service = createAgentService(params.fixture.ctx, app.log, eventHub);
-  return { app, runtime, register: registerAgentRoutes(app, { service, runtime, internalToken: params.fixture.ctx.agentInternalToken, runCompletedEventHub: eventHub }) };
+  return { app, runtime, register: registerAgentRoutes(app, { service, runtime, internalToken: params.fixture.ctx.agentInternalToken, dataDir: params.fixture.ctx.dataDir, runCompletedEventHub: eventHub }) };
 }
 
 test("P3: public send enqueue failure conditionally settles failed/idle while preserving durable dedup retry without re-enqueue", async () => {

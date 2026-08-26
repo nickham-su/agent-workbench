@@ -47,8 +47,9 @@ test("PromptContextProjector composes cached static data with dynamic locale, me
         updatedAt: 1
       }
     ],
-    async buildMessages({ compactionSnippetUiLocale }) {
+    async buildMessages({ compactionSnippetUiLocale, triggerItemId }) {
       assert.equal(compactionSnippetUiLocale, "en-US");
+      assert.equal(triggerItemId, 9);
       return { messages: [{ role: "user" as const, content: "dynamic message" }] };
     }
   });
@@ -56,7 +57,7 @@ test("PromptContextProjector composes cached static data with dynamic locale, me
     workspaceId: "workspace",
     sessionId: "session",
     session: { kind: "primary" as const, headItemId: 3 },
-    run: { runId: "run", subtaskDepth: 0, agentId: "agent", providerId: "provider", modelId: "model" }
+    run: { runId: "run", subtaskDepth: 0, agentId: "agent", providerId: "provider", modelId: "model", triggerItemId: 9 }
   };
 
   const first = await projector.getPromptContextForRun(input);

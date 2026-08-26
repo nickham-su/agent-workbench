@@ -7,7 +7,8 @@ import { newSortableId } from "../../utils/ids.js";
 import { AgentRuntime } from "./agent.runtime.js";
 import { registerAgentRoutes } from "./agent.routes.js";
 import { AgentService } from "./agent.service.js";
-import { createAgentService } from "./agent.composition.js";
+import { createAgentComposition, createAgentService } from "./agent.composition.js";
+import { agentAttachmentTempDir } from "./attachments/agent-attachment-paths.js";
 import {
   AgentConflictError,
   appendContextItem,
@@ -120,6 +121,22 @@ async function expectHttpError(action: () => Promise<unknown>, expected: { statu
   });
 }
 
+test("agent composition startup wires attachment temp cleanup with its dataDir", async () => {
+  const fixture = await createAgentTestFixture();
+  fixtures.push(fixture);
+  const tempDir = agentAttachmentTempDir(fixture.dataDir);
+  const staleFile = `${tempDir}/stale.part`;
+  await fs.mkdir(tempDir, { recursive: true });
+  await fs.writeFile(staleFile, "stale");
+  const now = Date.now();
+  await fs.utimes(staleFile, new Date(now - 25 * 60 * 60 * 1000), new Date(now - 25 * 60 * 60 * 1000));
+
+  const composition = createAgentComposition(fixture.ctx, { warn() {} } as never);
+  await composition.startupCoordinator.runPreListen();
+
+  await assert.rejects(() => fs.access(staleFile));
+});
+
 test("P0 sendMessage freezes validation order, fast-path dedup, raw/trim split, profile errors, and running", async () => {
   const fixture = await createAgentTestFixture({ withApp: true, agentWorkerConcurrency: 0 });
   fixtures.push(fixture);
@@ -163,7 +180,7 @@ test("P0 sendMessage freezes validation order, fast-path dedup, raw/trim split, 
       body: { workspaceId: workspace.id, text: "  \n ", clientRequestId: "p0-empty" },
       runtime
     }),
-    { statusCode: 400, message: "text is required" }
+    { statusCode: 400, message: "text or image is required" }
   );
   await expectHttpError(
     () => service.sendMessage({
@@ -352,7 +369,7 @@ test("P0/P1 freezes revert validation and verifies runtime rejection keeps the c
   routeApps.push(route);
   const rejectingRuntime = createFakeAgentRuntime({ cancelSessionError: new Error("P0 future runtime rejection") });
   const eventHub = new AgentRunCompletedEventHub();
-  await registerAgentRoutes(route, { service, runtime: rejectingRuntime, internalToken: fixture.internalToken, runCompletedEventHub: eventHub });
+  await registerAgentRoutes(route, { service, runtime: rejectingRuntime, internalToken: fixture.internalToken, dataDir: fixture.ctx.dataDir, runCompletedEventHub: eventHub });
   await route.ready();
 
   const response = await route.inject({
@@ -391,7 +408,7 @@ test("P0 status-summary keeps application HttpError and bridges only unexpected 
   const service = createAgentService(fixture.ctx, route.log);
   const runtime = createFakeAgentRuntime();
   const eventHub = new AgentRunCompletedEventHub();
-  await registerAgentRoutes(route, { service, runtime, internalToken: fixture.internalToken, runCompletedEventHub: eventHub });
+  await registerAgentRoutes(route, { service, runtime, internalToken: fixture.internalToken, dataDir: fixture.ctx.dataDir, runCompletedEventHub: eventHub });
   await route.ready();
 
   Object.defineProperty(service, "getSessionStatusSummary", {

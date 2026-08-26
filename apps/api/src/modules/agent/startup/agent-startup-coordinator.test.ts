@@ -7,6 +7,7 @@ function createCoordinator(params: {
   recoveryMode: "fail" | "recover";
   cleanupError?: boolean;
   archiveError?: boolean;
+  attachmentCleanupError?: boolean;
 }) {
   const calls: string[] = [];
   const warnings: string[] = [];
@@ -19,6 +20,10 @@ function createCoordinator(params: {
       calls.push("archive");
       if (params.archiveError) throw new Error("archive failed");
     },
+    cleanupAttachmentTemps: async () => {
+      calls.push("attachments");
+      if (params.attachmentCleanupError) throw new Error("attachment cleanup failed");
+    },
     failRuns: async () => { calls.push("fail"); },
     recoverRuns: async () => { calls.push("recover"); },
     logger: { warn: (_bindings, message) => warnings.push(message) },
@@ -30,18 +35,19 @@ function createCoordinator(params: {
 test("AgentStartupCoordinator keeps cleanup, archive and fail ordered before listen", async () => {
   const { coordinator, calls } = createCoordinator({ recoveryMode: "fail" });
   await coordinator.runPreListen();
-  assert.deepEqual(calls, ["cleanup", "archive", "fail"]);
+  assert.deepEqual(calls, ["cleanup", "archive", "attachments", "fail"]);
 });
 
 test("AgentStartupCoordinator isolates cleanup/archive failure and registers recover only on listen", async () => {
   const { coordinator, calls, warnings } = createCoordinator({
     recoveryMode: "recover",
     cleanupError: true,
-    archiveError: true
+    archiveError: true,
+    attachmentCleanupError: true
   });
   await coordinator.runPreListen();
-  assert.deepEqual(calls, ["cleanup", "archive"]);
-  assert.deepEqual(warnings, ["subtask orphan startup scan failed", "archive pending startup reconcile failed"]);
+  assert.deepEqual(calls, ["cleanup", "archive", "attachments"]);
+  assert.deepEqual(warnings, ["subtask orphan startup scan failed", "archive pending startup reconcile failed", "agent attachment temp startup cleanup failed"]);
 
   let onListen: (() => Promise<void>) | undefined;
   const app = {
@@ -53,5 +59,5 @@ test("AgentStartupCoordinator isolates cleanup/archive failure and registers rec
   coordinator.registerRecoverOnListen(app as never, { enqueueRun() {}, cancelSession() {} } as AgentRuntimePort);
   assert.ok(onListen);
   await onListen();
-  assert.deepEqual(calls, ["cleanup", "archive", "recover"]);
+  assert.deepEqual(calls, ["cleanup", "archive", "attachments", "recover"]);
 });

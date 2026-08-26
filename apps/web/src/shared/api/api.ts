@@ -1171,6 +1171,25 @@ export async function sendAgentMessage(sessionId: string, body: AgentSendMessage
   }
 }
 
+export async function sendAgentMessageMultipart(sessionId: string, body: FormData) {
+  try {
+    // Do not set Content-Type: the browser must add the multipart boundary.
+    const res = await client.post<AgentSendMessageResponse>(`/agent/sessions/${sessionId}/messages`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getAgentAttachmentContent(attachmentId: string) {
+  try {
+    const res = await client.get<Blob>(`/agent/attachments/${attachmentId}/content`, { responseType: "blob" });
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
 export async function compactAgentSession(sessionId: string, body: AgentCompactSessionRequest) {
   try {
     const res = await client.post<AgentCompactSessionResponse>(`/agent/sessions/${sessionId}/compact`, body);

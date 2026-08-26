@@ -72,6 +72,10 @@ export class AgentService {
     return this.capabilities.query.getRunState(...args);
   }
 
+  getAttachmentContent(...args: Parameters<AgentServiceCapabilities["query"]["getAttachmentContent"]>): ReturnType<AgentServiceCapabilities["query"]["getAttachmentContent"]> {
+    return this.capabilities.query.getAttachmentContent(...args);
+  }
+
   getSessionStatusSummary(...args: Parameters<AgentServiceCapabilities["query"]["getSessionStatusSummary"]>): ReturnType<AgentServiceCapabilities["query"]["getSessionStatusSummary"]> {
     return this.capabilities.query.getSessionStatusSummary(...args);
   }

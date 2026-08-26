@@ -70,7 +70,7 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
     });
   }
 
-  await registerAgentRoutes(app, { service, runtime, internalToken: ctx.agentInternalToken, pluginHost: pluginHostClient, runCompletedEventHub });
+  await registerAgentRoutes(app, { service, runtime, internalToken: ctx.agentInternalToken, dataDir: ctx.dataDir, pluginHost: pluginHostClient, runCompletedEventHub });
 
   await startupCoordinator.runPreListen();
   startupCoordinator.registerRecoverOnListen(app, runtime);

@@ -7,6 +7,7 @@ type StartupRecoveryMode = "fail" | "recover";
 export type AgentStartupCoordinatorDependencies = {
   cleanupOrphans(): void | Promise<void>;
   reconcileArchive(): void | Promise<void>;
+  cleanupAttachmentTemps(): void | Promise<void>;
   failRuns(): void | Promise<void>;
   recoverRuns(params: { runtime: AgentRuntimePort }): void | Promise<void>;
   logger: StartupLogger;
@@ -27,6 +28,11 @@ export class AgentStartupCoordinator {
       await this.dependencies.reconcileArchive();
     } catch (err) {
       this.dependencies.logger.warn({ err }, "archive pending startup reconcile failed");
+    }
+    try {
+      await this.dependencies.cleanupAttachmentTemps();
+    } catch (err) {
+      this.dependencies.logger.warn({ err }, "agent attachment temp startup cleanup failed");
     }
     if (this.dependencies.recoveryMode === "fail") await this.dependencies.failRuns();
   }

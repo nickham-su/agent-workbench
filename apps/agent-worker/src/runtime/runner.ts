@@ -10,6 +10,7 @@ import { AgentApiClient, ApiConflictError, type ExecutionProfile, type PromptCon
 import type { AgentUiLocale } from "@agent-workbench/shared";
 import { getPromptText } from "@agent-workbench/shared/prompts";
 import { McpManager } from "./mcpManager.js";
+import type { AgentApiPromptAttachmentRefPart } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { buildRetryMessages, chunkStartsVisibleOutput, shouldRetryAfterPartialText } from "./modelRetry.js";
 import { PluginRuntimeManager } from "./plugins/runtimeManager.js";
 import { ToolRegistry } from "./tools/registry.js";
@@ -20,6 +21,7 @@ import { McpToolProvider } from "./tools/providers/mcp.js";
 import type { ToolExecutionContext } from "./tools/types.js";
 import { isMcpToolName, isPluginToolName } from "./tools/types.js";
 import { createToolFailureCaptureIfEnabled, extractPartialToolResults, type ToolFailureCapture } from "./toolErrorCapture.js";
+import type { AgentAttachmentStorage } from "./agentAttachmentStorage.js";
 import { formatToolErrorStoreWarning } from "./toolErrorStore.js";
 
 function nowMs() {
@@ -990,10 +992,56 @@ export function buildToolSuccessTextForTest(params: { toolName: string; args: Re
   });
 }
 
+function isAttachmentRefPart(value: unknown): value is AgentApiPromptAttachmentRefPart {
+  if (!value || typeof value !== "object") return false;
+  const part = value as Record<string, unknown>;
+  return part.type === "attachment_ref"
+    && typeof part.workspaceId === "string"
+    && typeof part.attachmentId === "string"
+    && (part.mediaType === "image/png" || part.mediaType === "image/jpeg" || part.mediaType === "image/webp")
+    && typeof part.filename === "string";
+}
+
+async function materializePromptAttachments(params: {
+  messages: PromptContext["messages"];
+  attachmentStorage: AgentAttachmentStorage | undefined;
+}) {
+  const messages: Array<Record<string, unknown>> = [];
+  for (const message of params.messages) {
+    if (message.role !== "user" || !Array.isArray(message.content)) {
+      messages.push(message as Record<string, unknown>);
+      continue;
+    }
+
+    const content: Array<Record<string, unknown>> = [];
+    for (const part of message.content) {
+      if (!isAttachmentRefPart(part)) {
+        content.push(part as Record<string, unknown>);
+        continue;
+      }
+      if (!params.attachmentStorage) throw new Error("attachment storage is unavailable");
+      const attachment = await params.attachmentStorage.read({
+        workspaceId: part.workspaceId,
+        attachmentId: part.attachmentId,
+        mediaType: part.mediaType
+      });
+      content.push({
+        type: "file",
+        data: attachment.bytes,
+        mediaType: attachment.mediaType,
+        filename: part.filename
+      });
+    }
+    messages.push({ ...message, content });
+  }
+  return messages;
+}
+
 type AgentRunnerDeps = {
   streamText?: typeof streamText;
   nowMs?: () => number;
   warningNowMs?: () => number;
+  attachmentStorage?: AgentAttachmentStorage;
 };
 
 type StreamTextResultLike = {
@@ -1019,6 +1067,7 @@ export class AgentRunner {
   private readonly streamTextFn: typeof streamText;
   private readonly nowMsFn: () => number;
   private readonly warningNowMsFn: () => number;
+  private readonly attachmentStorage: AgentAttachmentStorage | undefined;
 
   constructor(
     private readonly apiClient: AgentApiClient,
@@ -1030,6 +1079,7 @@ export class AgentRunner {
     this.streamTextFn = deps.streamText ?? streamText;
     this.nowMsFn = deps.nowMs ?? nowMs;
     this.warningNowMsFn = deps.warningNowMs ?? nowMs;
+    this.attachmentStorage = deps.attachmentStorage;
     this.pluginRuntimeManager = new PluginRuntimeManager(this.logger);
     const pluginProvider = REMOTE_PLUGIN_TOOLS_ENABLED
       ? new RemotePluginToolProvider()
@@ -1970,6 +2020,14 @@ export class AgentRunner {
     const model = createLanguageModel(profile);
     const runtimeOptions = buildModelRuntimeOptions(profile);
     const turnId = newSortableId("turn");
+    let materializedMessages: Array<Record<string, unknown>>;
+    try {
+      materializedMessages = await materializePromptAttachments({ messages: context.messages, attachmentStorage: this.attachmentStorage });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`[agent-worker] attachment materialization failed: ${message}`);
+      throw new Error(`attachment materialization failed: ${message}`);
+    }
 
     const modelIdleTimeoutMs =
       ENV_MODEL_IDLE_TIMEOUT_MS > 0
@@ -2030,7 +2088,7 @@ export class AgentRunner {
     const requestBase: Record<string, unknown> = {
       model,
       system: context.system || undefined,
-      messages: context.messages,
+      messages: materializedMessages,
       tools: toolSet
     };
 
@@ -2073,7 +2131,7 @@ export class AgentRunner {
           step,
           itemId: assistantItem.id
         },
-        request: requestBase,
+        request: { ...requestBase, messages: context.messages },
         retryPolicy: {
           firstBackoffMs: MODEL_RETRY_BACKOFF_BASE_MS,
           maxBackoffMs: MODEL_RETRY_BACKOFF_MAX_MS,
@@ -2217,7 +2275,7 @@ export class AgentRunner {
       }
 
       const retryMessages = buildRetryMessages({
-        baseMessages: context.messages as Array<Record<string, unknown>>,
+        baseMessages: materializedMessages,
         text,
         toolCalls: toolCalls.length,
         retryCount,
@@ -2405,7 +2463,7 @@ export class AgentRunner {
               itemId: assistantItem.id,
               retries: retryCount
             },
-            request,
+            request: { ...request, messages: context.messages },
             response: {
               text,
               reasoningText,
@@ -2517,7 +2575,7 @@ export class AgentRunner {
             step,
             itemId: assistantItem.id
           },
-          request: requestBase,
+          request: { ...requestBase, messages: context.messages },
           response: {
             text,
             reasoningText,

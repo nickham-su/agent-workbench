@@ -14,6 +14,7 @@ import {
   getRunRecord,
   getRunState,
   getSessionHead,
+  insertContextItemAttachments,
   insertClientRequestDedup,
   listInFlightSessionsWithoutActiveRunId,
   listNonTerminalRunIdsByItemIds,
@@ -107,9 +108,14 @@ export class SqliteRunLifecyclePersistence implements AtomicLifecyclePersistence
         prevId: head,
         kind: "user",
         status: "completed",
-        output: { type: "user_text", text: input.text },
+        output: input.images.length > 0
+          ? { type: "user_message", text: input.text, attachments: input.images.map((image) => ({ attachmentId: image.attachmentId, kind: "image", filename: image.filename, mediaType: image.mediaType, size: image.byteSize })) }
+          : { type: "user_text", text: input.text },
         createdAt: input.createdAt
       });
+      if (input.images.length > 0) {
+        insertContextItemAttachments(this.db, { workspaceId: input.workspaceId, contextItemId: item.id, attachments: input.images, createdAt: input.createdAt });
+      }
       if (head == null) {
         updateAgentSessionTitle(this.db, {
           sessionId: input.sessionId,

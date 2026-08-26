@@ -169,6 +169,32 @@ test("SessionInteractionApplication preserves send validation order, non-authori
   );
 });
 
+test("SessionInteractionApplication accepts an image-only normalized message", async () => {
+  const { calls, application } = createDependencies();
+  const result = await application.sendMessage({
+    sessionId: primary.id,
+    body: {
+      workspaceId: "workspace",
+      text: "   ",
+      clientRequestId: "image-only",
+      images: [{
+        attachmentId: "att_image",
+        storageKey: "att_image",
+        tempId: "tmp_image",
+        filename: "pasted-image.png",
+        mediaType: "image/png",
+        byteSize: 8,
+        position: 0
+      }]
+    },
+    runtime: { enqueueRun() {}, cancelSession() {} }
+  });
+  assert.equal(result.deduplicated, false);
+  const start = calls.find(([kind]) => kind === "start")?.[1] as Record<string, unknown>;
+  assert.equal(start.text, "");
+  assert.deepEqual(start.images, [{ attachmentId: "att_image", storageKey: "att_image", tempId: "tmp_image", filename: "pasted-image.png", mediaType: "image/png", byteSize: 8, position: 0 }]);
+});
+
 test("SessionInteractionApplication validates before its fast paths", async () => {
   const { calls, application } = createDependencies({ session: null, dedup: { messageItemId: 1, runId: "run" } });
   await assert.rejects(

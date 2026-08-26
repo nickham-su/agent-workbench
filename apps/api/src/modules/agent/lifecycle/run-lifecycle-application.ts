@@ -20,20 +20,50 @@ export class RunLifecycleApplication {
 
   async startUserRun(command: StartUserRunCommand) {
     const createdAt = this.dependencies.clock.nowMs();
-    const activation = this.dependencies.persistence.activateUserRun({
-      workspaceId: command.workspaceId,
-      sessionId: command.sessionId,
-      clientRequestId: command.clientRequestId,
-      text: command.text,
-      runId: this.dependencies.ids.newId("run"),
-      agentId: command.agentId,
-      providerId: command.providerId,
-      modelId: command.modelId,
-      uiLocale: command.uiLocale,
-      createdAt
-    });
+    const committer = this.dependencies.attachmentCommitter;
+    const images = command.images ?? [];
+    const removeFinals = async () => {
+      if (!committer) return;
+      await Promise.all(images.map(async (image) => {
+        await committer.removeFinal({ workspaceId: command.workspaceId, image }).catch(() => undefined);
+      }));
+    };
+    const removeTemps = async () => {
+      if (!committer) return;
+      await Promise.all(images.map(async (image) => {
+        await committer.removeTemp({ tempId: image.tempId }).catch(() => undefined);
+      }));
+    };
+    let activation;
+    try {
+      if (images.length > 0) {
+        if (!committer) throw new Error("agent attachment committer is not configured");
+        for (const image of images) {
+          await committer.commit({ workspaceId: command.workspaceId, image });
+        }
+      }
+      activation = this.dependencies.persistence.activateUserRun({
+        workspaceId: command.workspaceId,
+        sessionId: command.sessionId,
+        clientRequestId: command.clientRequestId,
+        text: command.text,
+        images,
+        runId: this.dependencies.ids.newId("run"),
+        agentId: command.agentId,
+        providerId: command.providerId,
+        modelId: command.modelId,
+        uiLocale: command.uiLocale,
+        createdAt
+      });
+    } catch (error) {
+      await removeFinals();
+      await removeTemps();
+      throw error;
+    }
 
     if (activation.kind === "deduplicated") {
+      await removeFinals();
+      await removeTemps();
       return {
         sessionId: command.sessionId,
         messageItemId: activation.messageItemId,
@@ -42,6 +72,8 @@ export class RunLifecycleApplication {
       };
     }
     if (activation.kind === "session-running") {
+      await removeFinals();
+      await removeTemps();
       throw new HttpError(409, "session is running");
     }
 

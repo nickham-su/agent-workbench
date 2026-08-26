@@ -146,6 +146,13 @@ export class SqliteSessionInteractionStore implements SessionInteractionStore {
         prevId = next.id;
         clonedIdMap.set(item.id, next.id);
       }
+      const insertAttachmentRelation = this.dependencies.db.prepare(
+        "insert into agent_context_item_attachment (context_item_id, attachment_id, position) select ?, attachment_id, position from agent_context_item_attachment where context_item_id = ? order by position asc"
+      );
+      for (const sourceItem of cloned) {
+        const targetItemId = clonedIdMap.get(sourceItem.id);
+        if (targetItemId != null) insertAttachmentRelation.run(targetItemId, sourceItem.id);
+      }
       if (input.mode === "with_archive" && archivedSourceItemIds.size > 0) {
         const itemIds = cloned.flatMap((item) => archivedSourceItemIds.has(item.id) ? [clonedIdMap.get(item.id)] : []).filter((id): id is number => id != null);
         if (itemIds.length > 0) {

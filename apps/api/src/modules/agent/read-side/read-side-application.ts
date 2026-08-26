@@ -19,6 +19,7 @@ export type ReadSideRun = {
   providerId: string;
   modelId: string;
   subtaskDepth: number | null;
+  triggerItemId: number | null;
 };
 
 /**

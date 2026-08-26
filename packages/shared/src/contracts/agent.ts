@@ -51,10 +51,33 @@ export const AgentContextItemStatusSchema = Type.Union([
 ]);
 export type AgentContextItemStatus = Static<typeof AgentContextItemStatusSchema>;
 
+export const AgentImageMediaTypeSchema = Type.Union([
+  Type.Literal("image/png"),
+  Type.Literal("image/jpeg"),
+  Type.Literal("image/webp")
+]);
+export type AgentImageMediaType = Static<typeof AgentImageMediaTypeSchema>;
+
 export const AgentUserTextOutputSchema = Type.Object({
   type: Type.Literal("user_text"),
   text: Type.String()
 });
+
+export const AgentMessageImageAttachmentSchema = Type.Object({
+  attachmentId: Type.String({ minLength: 1 }),
+  kind: Type.Literal("image"),
+  filename: Type.String(),
+  mediaType: AgentImageMediaTypeSchema,
+  size: Type.Integer({ minimum: 1, maximum: 10 * 1024 * 1024 })
+}, { additionalProperties: false });
+export type AgentMessageImageAttachment = Static<typeof AgentMessageImageAttachmentSchema>;
+
+export const AgentUserMessageOutputSchema = Type.Object({
+  type: Type.Literal("user_message"),
+  text: Type.String(),
+  attachments: Type.Array(AgentMessageImageAttachmentSchema, { minItems: 1, maxItems: 4 })
+}, { additionalProperties: false });
+export type AgentUserMessageOutput = Static<typeof AgentUserMessageOutputSchema>;
 
 export const AgentAssistantReasoningSchema = Type.Object({
   text: Type.String()
@@ -88,6 +111,7 @@ export const AgentSystemTextOutputSchema = Type.Object({
 
 export const AgentContextItemOutputSchema = Type.Union([
   AgentUserTextOutputSchema,
+  AgentUserMessageOutputSchema,
   AgentAssistantTextOutputSchema,
   AgentToolOutputSchema,
   AgentSystemTextOutputSchema
@@ -406,14 +430,24 @@ export const AgentChannelAllowlistCheckResponseSchema = Type.Object(
 );
 export type AgentChannelAllowlistCheckResponse = Static<typeof AgentChannelAllowlistCheckResponseSchema>;
 
-export const AgentSendMessageRequestSchema = Type.Object({
+const AgentSendMessageCommonFields = {
   workspaceId: Type.String({ minLength: 1 }),
-  text: Type.String({ minLength: 1 }),
   clientRequestId: Type.String({ minLength: 1 }),
   agentId: Type.Optional(Type.String({ minLength: 1 })),
   uiLocale: Type.Optional(AgentUiLocaleSchema)
+};
+
+export const AgentSendMessageRequestSchema = Type.Object({
+  ...AgentSendMessageCommonFields,
+  text: Type.String({ minLength: 1 }),
 }, { additionalProperties: false });
 export type AgentSendMessageRequest = Static<typeof AgentSendMessageRequestSchema>;
+
+export const AgentSendMessageMultipartPayloadSchema = Type.Object({
+  ...AgentSendMessageCommonFields,
+  text: Type.Optional(Type.String())
+}, { additionalProperties: false });
+export type AgentSendMessageMultipartPayload = Static<typeof AgentSendMessageMultipartPayloadSchema>;
 
 export const AgentSendMessageResponseSchema = Type.Object({
   sessionId: Type.String({ minLength: 1 }),

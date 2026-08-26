@@ -261,7 +261,9 @@
             <AgentUserMessage
               v-else-if="item.role === 'user'"
                 :text="item.text"
+                :attachments="item.attachments || []"
                 :tone="item.tone"
+                @preview="openAttachmentPreview(item.attachments || [])"
               />
             <AgentTextMessage
               v-else-if="isBashTextMessage(item)"
@@ -379,6 +381,14 @@
        </div>
 
        <div class="flex items-end gap-2">
+         <div v-if="pendingImages.length" class="flex flex-wrap gap-1 mb-1">
+           <a-tag v-for="image in pendingImages" :key="image.id" :closable="!sending" @close.prevent="removePendingImage(image.id)">
+             {{ formatPendingAgentImageLabel(image) }}
+           </a-tag>
+           <a-button size="small" type="link" :disabled="sending" @click="clearPendingImages">
+             {{ t("agent.client.imageRemoveAll") }}
+           </a-button>
+         </div>
          <a-textarea
           ref="inputEl"
           v-model:value="draft"
@@ -388,6 +398,7 @@
           :auto-size="{ minRows: 2, maxRows: 6 }"
           :placeholder="inputPlaceholder"
           @keydown="onInputKeydown"
+          @paste="onImagePaste"
           @keyup="onInputCursorEvent"
           @click="onInputCursorEvent"
           @focus="onInputCursorEvent"
@@ -640,12 +651,26 @@
         </div>
       </div>
     </a-modal>
+    <a-modal v-model:open="attachmentPreviewVisible" :title="t('agent.client.imagePreviewTitle')" :footer="null" @cancel="closeAttachmentPreview">
+      <div v-if="previewAttachments.length" class="space-y-3">
+        <div class="flex items-center justify-between gap-2">
+          <a-button size="small" :disabled="previewIndex === 0" @click="showPreviewAt(previewIndex - 1)">‹</a-button>
+          <span>{{ previewIndex + 1 }} / {{ previewAttachments.length }}</span>
+          <a-button size="small" :disabled="previewIndex >= previewAttachments.length - 1" @click="showPreviewAt(previewIndex + 1)">›</a-button>
+        </div>
+        <div v-if="previewLoading" class="text-center text-[color:var(--text-tertiary)]">{{ t("common.loading") }}</div>
+        <div v-else-if="previewError" class="text-red-500">{{ previewError }}</div>
+        <img v-else-if="previewUrl" :src="previewUrl" class="max-w-full max-h-[60vh] mx-auto block" alt="" />
+        <p class="text-[0.9em] text-[color:var(--text-tertiary)]">{{ t("agent.client.imagePreviewNotice") }}</p>
+      </div>
+    </a-modal>
   </div>
 </template>
 
 <script setup lang="ts">
 import type {
   AgentContextItemRecord,
+  AgentMessageImageAttachment,
   AgentDefaultModel,
   AgentGlobalPromptItem,
   AgentProvidersSettingsView,
@@ -702,6 +727,8 @@ import {
   suggestWorkspaceFilePaths,
   updateAgentSettings,
   sendAgentMessage,
+  sendAgentMessageMultipart,
+  getAgentAttachmentContent,
   updateWorkspaceExternalSkillRootsSettings
 } from "@/shared/api";
 import { getInitialLocale } from "@/shared/i18n/locale";
@@ -716,6 +743,18 @@ import {
   type SlashCommandAction,
   type SlashCommandDefinition
 } from "./agentInputCandidates";
+import {
+  AttachmentPreviewCache,
+  collectClipboardAgentImageFiles,
+  collectPastedAgentImages,
+  createAgentMessageFormData,
+  createAgentSendAttemptFingerprint,
+  resolveAgentSendAttempt,
+  formatPendingAgentImageLabel,
+  shouldBlockImageSlashCommand,
+  type PendingAgentImage,
+  type PendingAgentSendAttempt
+} from "./agentImageAttachments";
 
 
 type AgentOption = {
@@ -778,6 +817,7 @@ type DisplayItem = {
   boundaryReason: string | null;
   role: "user" | "assistant" | "system" | "tool";
   text: string;
+  attachments?: AgentMessageImageAttachment[];
   reasoningText?: string;
   status: AgentContextItemRecord["status"];
   toolName?: string;
@@ -852,6 +892,16 @@ const atTop = ref(false);
 const distanceToBottomPx = ref(Number.POSITIVE_INFINITY);
 const sending = ref(false);
 const draft = ref("");
+const pendingImages = ref<PendingAgentImage[]>([]);
+const pendingSendAttempt = ref<PendingAgentSendAttempt | null>(null);
+const attachmentPreviewVisible = ref(false);
+const previewAttachments = ref<AgentMessageImageAttachment[]>([]);
+const previewIndex = ref(0);
+const previewUrl = ref("");
+const previewLoading = ref(false);
+const previewError = ref("");
+const previewCache = new AttachmentPreviewCache();
+let previewLoadGeneration = 0;
 const runState = computed<AgentSessionRunState>(() => statusStore.runStateOf(props.sessionId));
 const runNoticeText = computed(() => String(runState.value.runNoticeText || "").trim());
 const lastKnownHeadItemId = ref<number | null>(null);
@@ -1434,6 +1484,18 @@ const displayItems = computed<DisplayItem[]>(() => {
         boundaryReason,
         role: "user",
         text: item.output.text,
+        status: item.status
+      };
+    }
+    if (item.kind === "user" && item.output.type === "user_message") {
+      return {
+        id: item.id,
+        prevId: item.prevId,
+        archiveAt,
+        boundaryReason,
+        role: "user",
+        text: item.output.text,
+        attachments: item.output.attachments,
         status: item.status
       };
     }
@@ -3308,6 +3370,80 @@ async function onSaveAgentModel() {
   }
 }
 
+function removePendingImage(id: string) {
+  if (sending.value) return;
+  pendingImages.value = pendingImages.value.filter((image) => image.id !== id);
+}
+
+function clearPendingImages() {
+  if (sending.value) return;
+  pendingImages.value = [];
+}
+
+function onImagePaste(event: ClipboardEvent) {
+  if (sending.value) return;
+  const result = collectPastedAgentImages({
+    files: collectClipboardAgentImageFiles({
+      items: event.clipboardData?.items,
+      files: event.clipboardData?.files
+    }),
+    existing: pendingImages.value,
+    hasText: Array.from(event.clipboardData?.types ?? []).includes("text/plain"),
+    makeId: () => `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  });
+  pendingImages.value = [...pendingImages.value, ...result.accepted];
+  if (result.preventDefault) event.preventDefault();
+  if (result.rejected) message.warning(t(`agent.client.imagePaste${result.rejected[0].toUpperCase()}${result.rejected.slice(1)}`));
+}
+
+async function showPreviewAt(index: number) {
+  const attachment = previewAttachments.value[index];
+  if (!attachment) return;
+  const attachmentId = attachment.attachmentId;
+  const generation = ++previewLoadGeneration;
+  previewIndex.value = index;
+  previewLoading.value = true;
+  previewError.value = "";
+  previewUrl.value = "";
+  const isCurrent = () =>
+    attachmentPreviewVisible.value &&
+    previewLoadGeneration === generation &&
+    previewIndex.value === index &&
+    previewAttachments.value[index]?.attachmentId === attachmentId;
+  try {
+    const url = await previewCache.get(attachmentId, getAgentAttachmentContent, isCurrent);
+    if (!url || !isCurrent()) return;
+    previewUrl.value = url;
+  } catch {
+    if (!isCurrent()) return;
+    previewError.value = t("agent.client.imagePreviewLoadFailed");
+  } finally {
+    if (isCurrent()) previewLoading.value = false;
+  }
+}
+
+function openAttachmentPreview(attachments: AgentMessageImageAttachment[]) {
+  if (attachments.length === 0) return;
+  previewLoadGeneration += 1;
+  previewCache.clear();
+  previewAttachments.value = [...attachments];
+  previewIndex.value = 0;
+  previewUrl.value = "";
+  previewError.value = "";
+  attachmentPreviewVisible.value = true;
+  void showPreviewAt(0);
+}
+
+function closeAttachmentPreview() {
+  previewLoadGeneration += 1;
+  attachmentPreviewVisible.value = false;
+  previewAttachments.value = [];
+  previewUrl.value = "";
+  previewLoading.value = false;
+  previewError.value = "";
+  previewCache.clear();
+}
+
 async function onSend() {
   if (isSubtaskSession.value) return;
   if (!hasAvailableAgents.value) {
@@ -3315,12 +3451,22 @@ async function onSend() {
     return;
   }
   const text = draft.value.trim();
-  if (!text || sending.value) return;
+  const images = pendingImages.value;
+  if ((!text && images.length === 0) || sending.value) return;
+  const slashCommand = resolveSlashCommand(text, slashCommandMap);
+  if (slashCommand && shouldBlockImageSlashCommand(slashCommand.action, images.length)) {
+    message.warning(t("agent.client.imageSlashCommandBlocked"));
+    return;
+  }
   const agentId = effectiveAgentId.value;
   if (!agentId) {
     message.warning(t("agent.client.noAgentHint"));
     return;
   }
+  const fingerprint = createAgentSendAttemptFingerprint({ draft: draft.value, images });
+  const attempt = resolveAgentSendAttempt({ attempt: pendingSendAttempt.value, fingerprint, makeClientRequestId: newClientRequestId });
+  pendingSendAttempt.value = attempt;
+  const clientRequestId = attempt.clientRequestId;
   sending.value = true;
   try {
     const targetSessionId = props.sessionReady
@@ -3332,8 +3478,6 @@ async function onSend() {
       throw new Error("failed to create agent session");
     }
 
-    const clientRequestId = newClientRequestId();
-    const slashCommand = resolveSlashCommand(text, slashCommandMap);
     if (slashCommand) {
       await executeSlashCommand({
         command: slashCommand,
@@ -3357,15 +3501,22 @@ async function onSend() {
           finalText = item.prompt;
         }
       }
-      await sendAgentMessage(targetSessionId, {
+      const payload = {
         workspaceId: props.workspaceId,
         text: finalText,
         clientRequestId,
         agentId,
         uiLocale: getInitialLocale()
-      });
+      };
+      if (images.length > 0) {
+        await sendAgentMessageMultipart(targetSessionId, createAgentMessageFormData(payload, images));
+      } else {
+        await sendAgentMessage(targetSessionId, payload);
+      }
     }
     draft.value = "";
+    pendingImages.value = [];
+    pendingSendAttempt.value = null;
     emit("session-title-sync-needed", targetSessionId);
 
     // 发送消息后应进入 follow-bottom 模式,便于用户继续查看运行中的最新输出。
@@ -3393,6 +3544,15 @@ async function onSend() {
     sending.value = false;
   }
 }
+
+watch(
+  () => createAgentSendAttemptFingerprint({ draft: draft.value, images: pendingImages.value }),
+  (fingerprint) => {
+    if (pendingSendAttempt.value?.fingerprint !== fingerprint) {
+      pendingSendAttempt.value = null;
+    }
+  }
+);
 
 watch(
   () => props.workspaceId,
@@ -3579,6 +3739,8 @@ onBeforeUnmount(() => {
   clearContextRefreshTimer();
   clearRunElapsedTimer();
   clearFollowBottomLock();
+  previewLoadGeneration += 1;
+  previewCache.clear();
   if (mentionFetchTimer != null) {
     window.clearTimeout(mentionFetchTimer);
     mentionFetchTimer = null;

@@ -1,4 +1,7 @@
+import path from "node:path";
+
 export type WorkerEnv = {
+  dataDir: string;
   host: string;
   port: number;
   socketPath: string | null;
@@ -18,6 +21,7 @@ function parsePositiveInt(raw: string, name: string) {
 }
 
 export function loadWorkerEnv(processEnv: NodeJS.ProcessEnv): WorkerEnv {
+  const dataDir = path.resolve((processEnv.AWB_DATA_DIR || ".data").trim() || ".data");
   const host = (processEnv.AWB_AGENT_WORKER_HOST || "127.0.0.1").trim();
   const port = parsePositiveInt((processEnv.AWB_AGENT_WORKER_PORT || "4312").trim(), "AWB_AGENT_WORKER_PORT");
   const socketPathRaw = (processEnv.AWB_AGENT_WORKER_SOCKET || "").trim();
@@ -39,6 +43,7 @@ export function loadWorkerEnv(processEnv: NodeJS.ProcessEnv): WorkerEnv {
   const pidFileRaw = (processEnv.AWB_AGENT_WORKER_PID_FILE || "").trim();
 
   return {
+    dataDir,
     host,
     port,
     socketPath: socketPathRaw || null,

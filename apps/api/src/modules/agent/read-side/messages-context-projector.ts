@@ -1,7 +1,11 @@
 import type { AgentUiLocale } from "@agent-workbench/shared";
 
 export type MessagesContextProjectorDependencies<Message> = {
-  buildMessages: (input: { workspaceId: string; sessionId: string }) => Promise<{ messages: Message[] }>;
+  buildMessages: (input: {
+    workspaceId: string;
+    sessionId: string;
+    triggerItemId: null;
+  }) => Promise<{ messages: Message[] }>;
   getActiveRunId: (input: { workspaceId: string; sessionId: string }) => string | null;
   resolveUiLocale: (input: { workspaceId: string; sessionId: string; activeRunId: string | null }) => AgentUiLocale | null;
   buildOneShotSystem: (input: { uiLocale: AgentUiLocale | null }) => string;
@@ -23,7 +27,8 @@ export class MessagesContextProjector<Message extends { role: "system" | "user" 
   }) {
     const { messages } = await this.dependencies.buildMessages({
       workspaceId: input.workspaceId,
-      sessionId: input.sessionId
+      sessionId: input.sessionId,
+      triggerItemId: null
     });
     const uiLocale = this.dependencies.resolveUiLocale({
       workspaceId: input.workspaceId,

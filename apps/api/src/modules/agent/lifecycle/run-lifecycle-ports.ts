@@ -1,4 +1,4 @@
-import type { AgentControlResult, AgentSessionRunState } from "@agent-workbench/shared";
+import type { AgentControlResult, AgentImageMediaType, AgentSessionRunState } from "@agent-workbench/shared";
 import type { AgentApiRunCompleteRequest, AgentApiRunStateRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { ActiveSubtaskChildQuery } from "../subtask/subtask-ports.js";
 
@@ -96,12 +96,23 @@ export type UserRunActivationInput = {
   sessionId: string;
   clientRequestId: string;
   text: string;
+  images: UserRunImageInput[];
   runId: string;
   agentId: string;
   providerId: string;
   modelId: string;
   uiLocale: "zh-CN" | "en-US" | null;
   createdAt: number;
+};
+
+export type UserRunImageInput = {
+  attachmentId: string;
+  storageKey: string;
+  tempId: string;
+  filename: string;
+  mediaType: AgentImageMediaType;
+  byteSize: number;
+  position: number;
 };
 
 export type UserRunActivationResult =
@@ -138,6 +149,7 @@ export type StartUserRunCommand = {
   clientRequestId: string;
   text: string;
   inputText: string;
+  images?: UserRunImageInput[];
   agentId: string;
   providerId: string;
   modelId: string;
@@ -170,6 +182,11 @@ export type RunLifecycleApplicationDependencies = {
   promptStaticCacheInvalidator: PromptStaticCacheInvalidator;
   runCompletedEventPublisher: RunCompletedEventPublisher;
   persistence: AtomicLifecyclePersistence;
+  attachmentCommitter?: {
+    commit(input: { workspaceId: string; image: UserRunImageInput }): Promise<void>;
+    removeTemp(input: Pick<UserRunImageInput, "tempId">): Promise<void>;
+    removeFinal(input: { workspaceId: string; image: Pick<UserRunImageInput, "attachmentId"> }): Promise<void>;
+  };
   triggerInputReader: TriggerInputReader;
   isContextAppendConflict(error: unknown): boolean;
   clock: LifecycleClock;

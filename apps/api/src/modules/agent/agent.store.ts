@@ -1,6 +1,7 @@
 import type {
   AgentContextItemOutput,
   AgentContextItemRecord,
+  AgentMessageImageAttachment,
   AgentUiLocale,
   AgentContextItemStatus,
   AgentRunStatus,
@@ -116,6 +117,7 @@ function parseSubtaskSessionIdFromToolText(text: unknown) {
 
 function normalizeTextOutput(kind: AgentContextItemRecord["kind"], output: AgentContextItemOutput) {
   if (kind === "user" && output.type === "user_text") return output.text;
+  if (kind === "user" && output.type === "user_message") return output.text;
   if (kind === "assistant" && output.type === "assistant_text") return output.text;
   if (kind === "system" && output.type === "system_text") return output.text;
   if (kind === "tool" && output.type === "tool") {
@@ -227,6 +229,113 @@ function encodeStoredColumns(params: {
     toolCallJson: JSON.stringify(toolCallPayload),
     toolResultJson: JSON.stringify(toolResultPayload)
   };
+}
+
+type AgentAttachmentProjectionRow = {
+  contextItemId: number;
+  attachmentId: string;
+  filename: string;
+  mediaType: AgentMessageImageAttachment["mediaType"];
+  size: number;
+};
+
+function listContextItemImageAttachments(db: Db, contextItemIds: number[]) {
+  if (contextItemIds.length === 0) return new Map<number, AgentMessageImageAttachment[]>();
+  const placeholders = contextItemIds.map(() => "?").join(", ");
+  const rows = db.prepare(
+    `
+      select
+        relation.context_item_id as contextItemId,
+        attachment.id as attachmentId,
+        attachment.filename as filename,
+        attachment.media_type as mediaType,
+        attachment.byte_size as size
+      from agent_context_item_attachment relation
+      join agent_attachment attachment on attachment.id = relation.attachment_id
+      where relation.context_item_id in (${placeholders})
+      order by relation.context_item_id asc, relation.position asc
+    `
+  ).all(...contextItemIds) as AgentAttachmentProjectionRow[];
+  const byItemId = new Map<number, AgentMessageImageAttachment[]>();
+  for (const row of rows) {
+    const attachments = byItemId.get(row.contextItemId) ?? [];
+    attachments.push({
+      attachmentId: row.attachmentId,
+      kind: "image",
+      filename: row.filename,
+      mediaType: row.mediaType,
+      size: row.size
+    });
+    byItemId.set(row.contextItemId, attachments);
+  }
+  return byItemId;
+}
+
+function hydrateContextItemAttachments(db: Db, items: AgentContextItemRecord[]) {
+  const userItemIds = items.filter((item) => item.kind === "user").map((item) => item.id);
+  const attachmentsByItemId = listContextItemImageAttachments(db, userItemIds);
+  return items.map((item) => {
+    const attachments = attachmentsByItemId.get(item.id);
+    if (!attachments || attachments.length === 0 || item.kind !== "user") return item;
+    const text = item.output.type === "user_text" || item.output.type === "user_message" ? item.output.text : "";
+    return {
+      ...item,
+      output: { type: "user_message" as const, text, attachments }
+    };
+  });
+}
+
+export type AgentAuthorizedAttachment = {
+  attachmentId: string;
+  workspaceId: string;
+  storageKey: string;
+  mediaType: AgentMessageImageAttachment["mediaType"];
+  byteSize: number;
+};
+
+/**
+ * An attachment is publicly readable only while a relation connects it to a
+ * context item in the same persisted workspace. Orphan rows are not readable.
+ */
+export function getAuthorizedAttachmentById(db: Db, attachmentId: string): AgentAuthorizedAttachment | null {
+  const row = db.prepare(
+    `
+      select attachment.id as attachmentId, attachment.workspace_id as workspaceId,
+        attachment.storage_key as storageKey, attachment.media_type as mediaType,
+        attachment.byte_size as byteSize
+      from agent_attachment attachment
+      join agent_context_item_attachment relation on relation.attachment_id = attachment.id
+      join agent_context_item item on item.id = relation.context_item_id
+      join agent_session session on session.id = item.session_id
+      where attachment.id = ?
+        and attachment.workspace_id = item.workspace_id
+        and item.workspace_id = session.workspace_id
+      limit 1
+    `
+  ).get(attachmentId) as AgentAuthorizedAttachment | undefined;
+  return row ?? null;
+}
+
+export type AgentAttachmentInsertInput = {
+  attachmentId: string;
+  storageKey: string;
+  filename: string;
+  mediaType: AgentMessageImageAttachment["mediaType"];
+  byteSize: number;
+  position: number;
+};
+
+export function insertContextItemAttachments(db: Db, params: { workspaceId: string; contextItemId: number; attachments: AgentAttachmentInsertInput[]; createdAt: number }) {
+  const insertAttachment = db.prepare(
+    "insert into agent_attachment (id, workspace_id, storage_key, filename, media_type, byte_size, created_at) values (?, ?, ?, ?, ?, ?, ?)"
+  );
+  const insertRelation = db.prepare(
+    "insert into agent_context_item_attachment (context_item_id, attachment_id, position) values (?, ?, ?)"
+  );
+  for (const attachment of params.attachments) {
+    insertAttachment.run(attachment.attachmentId, params.workspaceId, attachment.storageKey, attachment.filename, attachment.mediaType, attachment.byteSize, params.createdAt);
+    insertRelation.run(params.contextItemId, attachment.attachmentId, attachment.position);
+  }
 }
 
 function mapFromStoredColumns(row: AgentContextItemRow): AgentContextItemOutput {
@@ -1055,7 +1164,7 @@ export function updateContextItem(db: Db, params: {
 
 export function getContextItemById(db: Db, itemId: number) {
   const row = readContextItemRowById(db, itemId);
-  return row ? mapContextItem(row) : null;
+  return row ? hydrateContextItemAttachments(db, [mapContextItem(row)])[0] ?? null : null;
 }
 
 export function getLatestTerminalAssistantTextByRunId(
@@ -1154,7 +1263,7 @@ function listSessionItems(
     }
     cursor = row.prevId;
   }
-  return rows.reverse();
+  return hydrateContextItemAttachments(db, rows.reverse());
 }
 
 export function getSessionVisibleItems(db: Db, workspaceId: string, sessionId: string): AgentContextItemRecord[] {
@@ -1226,7 +1335,7 @@ function listTranscriptWindowFromCursor(db: Db, params: {
   }
   return {
     // 返回按时间从旧到新排序,与前端既有处理一致.
-    items: rows.reverse(),
+    items: hydrateContextItemAttachments(db, rows.reverse()),
     hasMoreBefore: cursor != null
   };
 }
@@ -1283,7 +1392,7 @@ export function getSessionTranscriptItemsAfterIdWindow(db: Db, params: {
     rows.push(mapContextItem(row));
     cursor = row.prevId;
   }
-  return rows.reverse();
+  return hydrateContextItemAttachments(db, rows.reverse());
 }
 
 export function setContextItemsArchiveAt(

@@ -7,6 +7,7 @@ import type { FastifyBaseLogger } from "fastify";
 import { openDb } from "../../infra/db/db.js";
 import { repoMirrorPath, workspaceRoot } from "../../infra/fs/paths.js";
 import { pathExists } from "../../infra/fs/fs.js";
+import { agentAttachmentFilePath, agentAttachmentsRoot, agentAttachmentWorkspaceDir } from "../agent/attachments/agent-attachment-paths.js";
 import type { AppContext } from "../../app/context.js";
 import { HttpError } from "../../app/errors.js";
 import { insertRepo } from "../repos/repo.store.js";
@@ -449,10 +450,53 @@ test("workspace delete: 应清理 agent_session 外键引用，避免删一半",
   });
 
   createAgentSession(fixture.ctx.db, { id: "sess_1", workspaceId: wsId, title: "t", kind: "primary", createdAt: now });
+  fixture.ctx.db.prepare("insert into agent_attachment (id, workspace_id, storage_key, filename, media_type, byte_size, created_at) values (?, ?, ?, ?, ?, ?, ?)")
+    .run("att_delete", wsId, "att_delete", "image.png", "image/png", 8, now);
+  const attachmentPath = agentAttachmentFilePath(fixture.ctx.dataDir, wsId, "att_delete");
+  await fs.mkdir(path.dirname(attachmentPath), { recursive: true });
+  await fs.writeFile(attachmentPath, "attachment");
   await deleteWorkspace(fixture.ctx, logger, wsId);
   assert.equal(getWorkspace(fixture.ctx.db, wsId), null);
   const sessions = fixture.ctx.db.prepare(`select count(*) as c from agent_session where workspace_id = ?`).get(wsId) as { c: number };
   assert.equal(sessions.c, 0);
+  const attachments = fixture.ctx.db.prepare(`select count(*) as c from agent_attachment where workspace_id = ?`).get(wsId) as { c: number };
+  assert.equal(attachments.c, 0);
+  await assert.rejects(() => fs.access(agentAttachmentWorkspaceDir(fixture.ctx.dataDir, wsId)));
+});
+
+test("workspace delete: attachment 目录清理因不安全路径跳过时会 warning 且不回滚 DB", async () => {
+  const warnings: string[] = [];
+  const logger = {
+    ...createLogger(),
+    warn: (_fields: unknown, message: string) => warnings.push(message)
+  } as unknown as FastifyBaseLogger;
+  const fixture = await createEmptyFixture();
+  const wsId = "ws_delete_attachment_warning";
+  const wsDirName = "ws_delete_attachment_warning";
+  const wsPath = workspaceRoot(fixture.ctx.dataDir, wsDirName);
+  await fs.mkdir(wsPath, { recursive: true });
+  const now = Date.now();
+  insertWorkspace(fixture.ctx.db, {
+    id: wsId,
+    dirName: wsDirName,
+    title: "ws",
+    path: wsPath,
+    terminalCredentialId: null,
+    createdAt: now,
+    updatedAt: now
+  });
+  const attachmentRoot = agentAttachmentsRoot(fixture.ctx.dataDir);
+  const byWorkspaceDir = path.join(attachmentRoot, "by_workspace");
+  const outside = path.join(fixture.ctx.dataDir, "outside-attachments");
+  await fs.mkdir(attachmentRoot, { recursive: true });
+  await fs.mkdir(outside);
+  await fs.symlink(outside, byWorkspaceDir);
+
+  await deleteWorkspace(fixture.ctx, logger, wsId);
+
+  assert.equal(getWorkspace(fixture.ctx.db, wsId), null);
+  assert.deepEqual(warnings, ["workspace attachment directory cleanup skipped due to unsafe path"]);
+  await assert.doesNotReject(() => fs.access(outside));
 });
 
 test("files/list: workspace 目录缺失应返回 410", async () => {

@@ -39,6 +39,8 @@ export type CreateAgentTestFixtureOptions = {
    * consulted only with `withApp: true`; ordinary API tests use real createApp.
    */
   appFactory?: (ctx: AppContext) => Promise<FastifyInstance>;
+  /** Enables real cookie auth before the app registers its global auth guard. */
+  authToken?: string | null;
   /** Explicitly controls the otherwise fixed local-runtime concurrency default (2). */
   agentWorkerConcurrency?: number;
 };
@@ -174,7 +176,7 @@ export async function createAgentTestFixture(options: CreateAgentTestFixtureOpti
       credentialMasterKeySource: "generated",
       credentialMasterKeyId: "testkey",
       credentialMasterKeyCreatedAt: Date.now(),
-      authToken: null,
+      authToken: options.authToken ?? null,
       authCookieSecure: false,
       agentWorkerEnabled: false,
       agentWorkerHost: "127.0.0.1",
