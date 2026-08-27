@@ -297,7 +297,7 @@ export default {
       welcome: "你好, 我可以协助你完成任务。",
       reachedTop: "已到最早",
       contextBoundary: "上下文边界",
-      inputPlaceholderIdle: "输入消息,Enter 发送,Shift+Enter 换行,Tab 切换 Agent",
+      inputPlaceholderIdle: "输入消息或粘贴图片，Enter 发送，Shift+Enter 换行，Tab 切换 Agent",
       inputPlaceholderRunning: "运行中,Esc 取消当前运行",
       inputPlaceholderNoAgent: "当前没有可用于用户会话的 Agent,请前往设置页调整范围或新增 Agent",
       imagePreviewTitle: "图片预览",

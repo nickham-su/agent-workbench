@@ -44,7 +44,7 @@ test("pending image size formatting is stable", () => {
   assert.equal(formatAgentImageSize(2 * 1024 * 1024), "2.0MB");
   assert.equal(
     formatPendingAgentImageLabel({ id: "image-a", file: image("screen.png", "image/png", 1536), filename: "screen.png" }),
-    "🖼️ screen.png · 1.5KB"
+    "1.5KB"
   );
 });
 

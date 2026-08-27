@@ -299,7 +299,7 @@ export default {
       welcome: "Hi, I can help you get tasks done.",
       reachedTop: "Reached the beginning",
       contextBoundary: "Context boundary",
-      inputPlaceholderIdle: "Type a message, Enter to send, Shift+Enter for newline, Tab to switch agent",
+      inputPlaceholderIdle: "Type a message or paste an image, Enter to send, Shift+Enter for newline, Tab to switch agent",
       inputPlaceholderRunning: "Running, Esc to cancel current run",
       inputPlaceholderNoAgent: "No agent is available for user sessions. Update scope in settings or add a new agent.",
       imagePreviewTitle: "Image preview",

@@ -377,33 +377,36 @@
            >
              {{ t("agent.client.promptCommandsLoadFailedHint") }}
            </div>
-         </div>
-       </div>
+          </div>
+        </div>
 
-       <div class="flex items-end gap-2">
-         <div v-if="pendingImages.length" class="flex flex-wrap gap-1 mb-1">
-           <a-tag v-for="image in pendingImages" :key="image.id" :closable="!sending" @close.prevent="removePendingImage(image.id)">
-             {{ formatPendingAgentImageLabel(image) }}
-           </a-tag>
-           <a-button size="small" type="link" :disabled="sending" @click="clearPendingImages">
-             {{ t("agent.client.imageRemoveAll") }}
-           </a-button>
-         </div>
-         <a-textarea
-          ref="inputEl"
-          v-model:value="draft"
-          class="agent-input-textarea"
-          :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
-          :disabled="!hasAvailableAgents"
-          :auto-size="{ minRows: 2, maxRows: 6 }"
-          :placeholder="inputPlaceholder"
-          @keydown="onInputKeydown"
-          @paste="onImagePaste"
-          @keyup="onInputCursorEvent"
-          @click="onInputCursorEvent"
-          @focus="onInputCursorEvent"
-        />
-      </div>
+        <div v-if="pendingImages.length" class="flex flex-wrap gap-1 mb-1">
+          <a-tag
+            v-for="image in pendingImages"
+            :key="image.id"
+            :closable="!sending"
+            @close.prevent="removePendingImage(image.id)"
+          >
+            <template #icon><FileImageOutlined /></template>
+            {{ formatPendingAgentImageLabel(image) }}
+          </a-tag>
+        </div>
+        <div>
+          <a-textarea
+            ref="inputEl"
+            v-model:value="draft"
+            class="agent-input-textarea"
+            :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
+            :disabled="!hasAvailableAgents"
+            :auto-size="{ minRows: 2, maxRows: 6 }"
+            :placeholder="inputPlaceholder"
+            @keydown="onInputKeydown"
+            @paste="onImagePaste"
+            @keyup="onInputCursorEvent"
+            @click="onInputCursorEvent"
+            @focus="onInputCursorEvent"
+          />
+        </div>
       <div class="pt-2">
         <div class="flex items-center gap-2">
           <div v-if="hasAvailableAgents" class="flex items-center gap-0.5 min-w-0">
@@ -686,6 +689,7 @@ import {
   DoubleRightOutlined,
   RobotOutlined,
   ExclamationCircleOutlined,
+  FileImageOutlined,
   ForkOutlined,
   LoadingOutlined,
   MinusCircleOutlined,

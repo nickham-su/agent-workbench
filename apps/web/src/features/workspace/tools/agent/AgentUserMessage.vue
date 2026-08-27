@@ -8,13 +8,15 @@
       class="!px-0 !h-auto"
       @click="emit('preview')"
     >
-      🖼️ {{ t("agent.client.imageCount", { count: props.attachments.length }) }}
+      <template #icon><FileImageOutlined /></template>
+      {{ t("agent.client.imageCount", { count: props.attachments.length }) }}
     </a-button>
   </div>
 </template>
 
 <script setup lang="ts">
 import type { AgentMessageImageAttachment } from "@agent-workbench/shared";
+import { FileImageOutlined } from "@ant-design/icons-vue";
 import { useI18n } from "vue-i18n";
 
 const props = withDefaults(defineProps<{

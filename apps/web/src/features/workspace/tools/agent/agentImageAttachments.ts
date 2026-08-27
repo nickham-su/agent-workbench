@@ -63,7 +63,7 @@ export function formatAgentImageSize(bytes: number) {
 }
 
 export function formatPendingAgentImageLabel(image: PendingAgentImage) {
-  return `🖼️ ${image.filename} · ${formatAgentImageSize(image.file.size)}`;
+  return formatAgentImageSize(image.file.size);
 }
 
 function fallbackFilename(type: string) {
