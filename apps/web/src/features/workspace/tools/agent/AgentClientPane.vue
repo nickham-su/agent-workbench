@@ -763,6 +763,7 @@ import {
   type PendingAgentImage,
   type PendingAgentSendAttempt
 } from "./agentImageAttachments";
+import { resolveAgentMessageRevertTarget } from "./agentMessageRevert";
 
 
 type AgentOption = {
@@ -3000,17 +3001,12 @@ function onRevertToMessage(itemId: number) {
     return;
   }
 
-  let toItemId: number | null = null;
-  let revertDraft = "";
-  let isUserTarget = false;
-
-  if (target.kind === "user" && target.output.type === "user_text") {
-    isUserTarget = true;
-    toItemId = target.prevId;
-    revertDraft = target.output.text;
-  } else if (target.kind === "assistant" && target.output.type === "assistant_text") {
-    toItemId = target.id;
+  const revertTarget = resolveAgentMessageRevertTarget(target);
+  if (!revertTarget) {
+    message.warning(t("agent.client.revertTargetMissing"));
+    return;
   }
+  const { toItemId, revertDraft, isUserTarget } = revertTarget;
 
   const isFirstUserMessage = isUserTarget && target.prevId == null;
   if (!isFirstUserMessage && toItemId == null) {
@@ -3051,14 +3047,14 @@ function onRevertToMessage(itemId: number) {
     async onOk() {
       actionLoading.value = "revert";
       actionTargetId.value = itemId;
-       try {
-         await revertAgentSession(props.sessionId, {
-            workspaceId: props.workspaceId,
-            itemId: confirmedToItemId,
-            reason: "manual_revert"
-          });
-          if (isUserTarget && revertDraft.trim()) {
-           draft.value = revertDraft;
+      try {
+        await revertAgentSession(props.sessionId, {
+          workspaceId: props.workspaceId,
+          itemId: confirmedToItemId,
+          reason: "manual_revert"
+        });
+        if (isUserTarget) {
+          draft.value = revertDraft;
         }
         message.success(t("agent.client.reverted"));
         statusStore.bumpPollHint(props.sessionId, { immediate: true, warmup: true });
