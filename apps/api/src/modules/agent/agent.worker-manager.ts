@@ -17,6 +17,7 @@ async function fileExists(filePath: string) {
 export function buildAgentWorkerSpawnEnv(params: {
   parentEnv: NodeJS.ProcessEnv;
   repoRoot: string;
+  dataDir: string;
   workerHost: string;
   workerPort: number;
   socketPath: string;
@@ -28,6 +29,7 @@ export function buildAgentWorkerSpawnEnv(params: {
 }): NodeJS.ProcessEnv {
   return {
     ...params.parentEnv,
+    AWB_DATA_DIR: params.dataDir,
     AWB_AGENT_WORKER_HOST: params.workerHost,
     AWB_AGENT_WORKER_PORT: String(params.workerPort),
     AWB_AGENT_WORKER_SOCKET: params.socketPath,
@@ -50,6 +52,7 @@ export class AgentWorkerProcessManager {
   constructor(
     private readonly params: {
       repoRoot: string;
+      dataDir: string;
       workerHost: string;
       workerPort: number;
       socketPath: string;
@@ -89,6 +92,7 @@ export class AgentWorkerProcessManager {
       env: buildAgentWorkerSpawnEnv({
         parentEnv: process.env,
         repoRoot: this.params.repoRoot,
+        dataDir: this.params.dataDir,
         workerHost: this.params.workerHost,
         workerPort: this.params.workerPort,
         socketPath: this.params.socketPath,

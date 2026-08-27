@@ -30,6 +30,7 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
     });
     workerManager = new AgentWorkerProcessManager({
       repoRoot: ctx.repoRoot,
+      dataDir: ctx.dataDir,
       workerHost: ctx.agentWorkerHost,
       workerPort: ctx.agentWorkerPort,
       socketPath: ctx.agentWorkerSocketPath,
