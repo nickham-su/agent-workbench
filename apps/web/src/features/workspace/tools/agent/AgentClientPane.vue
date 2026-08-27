@@ -391,6 +391,9 @@
             {{ formatPendingAgentImageLabel(image) }}
           </a-tag>
         </div>
+        <div v-if="processingPastedImages > 0" class="mb-1 text-[0.85em] text-[color:var(--text-tertiary)]">
+          {{ t("agent.client.imagePasteProcessing") }}
+        </div>
         <div>
           <a-textarea
             ref="inputEl"
@@ -753,6 +756,7 @@ import {
   collectPastedAgentImages,
   createAgentMessageFormData,
   createAgentSendAttemptFingerprint,
+  preparePastedAgentImages,
   resolveAgentSendAttempt,
   formatPendingAgentImageLabel,
   shouldBlockImageSlashCommand,
@@ -898,6 +902,7 @@ const sending = ref(false);
 const draft = ref("");
 const pendingImages = ref<PendingAgentImage[]>([]);
 const pendingSendAttempt = ref<PendingAgentSendAttempt | null>(null);
+const processingPastedImages = ref(0);
 const attachmentPreviewVisible = ref(false);
 const previewAttachments = ref<AgentMessageImageAttachment[]>([]);
 const previewIndex = ref(0);
@@ -3384,20 +3389,31 @@ function clearPendingImages() {
   pendingImages.value = [];
 }
 
-function onImagePaste(event: ClipboardEvent) {
+async function onImagePaste(event: ClipboardEvent) {
   if (sending.value) return;
-  const result = collectPastedAgentImages({
-    files: collectClipboardAgentImageFiles({
-      items: event.clipboardData?.items,
-      files: event.clipboardData?.files
-    }),
-    existing: pendingImages.value,
-    hasText: Array.from(event.clipboardData?.types ?? []).includes("text/plain"),
-    makeId: () => `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  const files = collectClipboardAgentImageFiles({
+    items: event.clipboardData?.items,
+    files: event.clipboardData?.files
   });
-  pendingImages.value = [...pendingImages.value, ...result.accepted];
-  if (result.preventDefault) event.preventDefault();
-  if (result.rejected) message.warning(t(`agent.client.imagePaste${result.rejected[0].toUpperCase()}${result.rejected.slice(1)}`));
+  const hasText = Array.from(event.clipboardData?.types ?? []).includes("text/plain");
+  const hasImages = files.some((file) => file.type.startsWith("image/"));
+  if (!hasImages) return;
+  if (!hasText) event.preventDefault();
+
+  processingPastedImages.value += 1;
+  try {
+    const compressedFiles = await preparePastedAgentImages(files);
+    const result = collectPastedAgentImages({
+      files: compressedFiles,
+      existing: pendingImages.value,
+      hasText,
+      makeId: () => `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    });
+    pendingImages.value = [...pendingImages.value, ...result.accepted];
+    if (result.rejected) message.warning(t(`agent.client.imagePaste${result.rejected[0].toUpperCase()}${result.rejected.slice(1)}`));
+  } finally {
+    processingPastedImages.value -= 1;
+  }
 }
 
 async function showPreviewAt(index: number) {
@@ -3456,7 +3472,7 @@ async function onSend() {
   }
   const text = draft.value.trim();
   const images = pendingImages.value;
-  if ((!text && images.length === 0) || sending.value) return;
+  if ((!text && images.length === 0) || sending.value || processingPastedImages.value > 0) return;
   const slashCommand = resolveSlashCommand(text, slashCommandMap);
   if (slashCommand && shouldBlockImageSlashCommand(slashCommand.action, images.length)) {
     message.warning(t("agent.client.imageSlashCommandBlocked"));

@@ -312,6 +312,7 @@ export default {
       imagePasteType: "Only PNG, JPEG, and WebP images are supported.",
       imagePasteEmpty: "An empty image cannot be attached.",
       imagePasteSize: "Each image must be 10 MiB or smaller.",
+      imagePasteProcessing: "Optimizing pasted images…",
       imagePasteTotal: "Attached images must not exceed 20 MiB in total.",
       noAgentHint: "No agent is available for user sessions. Update scope in settings or add a new agent.",
       goCreateAgent: "Create agent",

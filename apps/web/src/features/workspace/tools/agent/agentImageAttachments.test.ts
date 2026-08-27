@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  AGENT_IMAGE_COMPRESSION_THRESHOLD_BYTES,
   AGENT_IMAGE_MAX_BYTES,
   AttachmentPreviewCache,
   collectClipboardAgentImageFiles,
@@ -9,6 +10,8 @@ import {
   createAgentSendAttemptFingerprint,
   formatAgentImageSize,
   formatPendingAgentImageLabel,
+  maybeCompressAgentImage,
+  preparePastedAgentImages,
   resolveAgentSendAttempt,
   shouldBlockImageSlashCommand
 } from "./agentImageAttachments.js";
@@ -46,6 +49,94 @@ test("pending image size formatting is stable", () => {
     formatPendingAgentImageLabel({ id: "image-a", file: image("screen.png", "image/png", 1536), filename: "screen.png" }),
     "1.5KB"
   );
+});
+
+test("images at or below 1 MiB skip compression", async () => {
+  const source = image("small.png", "image/png", AGENT_IMAGE_COMPRESSION_THRESHOLD_BYTES);
+  let calls = 0;
+  const result = await maybeCompressAgentImage(source, async () => {
+    calls += 1;
+    return new Blob(["compressed"], { type: "image/webp" });
+  });
+  assert.equal(result, source);
+  assert.equal(calls, 0);
+});
+
+test("large pasted images use a materially smaller WebP result and rename the file", async () => {
+  const source = image("screenshot.PNG", "image/png", AGENT_IMAGE_COMPRESSION_THRESHOLD_BYTES + 1);
+  let encoded: File | null = null;
+  const result = await maybeCompressAgentImage(source, async (file) => {
+    encoded = file;
+    return new Blob([new Uint8Array(256)], { type: "image/webp" });
+  });
+  assert.equal(encoded, source);
+  assert.notEqual(result, source);
+  assert.equal(result.type, "image/webp");
+  assert.equal(result.name, "screenshot.webp");
+  assert.equal(result.size, 256);
+});
+
+test("large pasted images retain the original when WebP savings are insufficient or encoding fails", async () => {
+  const source = image("screenshot.png", "image/png", AGENT_IMAGE_COMPRESSION_THRESHOLD_BYTES + 100);
+  const insufficient = await maybeCompressAgentImage(source, async (file) => (
+    new Blob([new Uint8Array(Math.ceil(file.size * 0.95))], { type: "image/webp" })
+  ));
+  assert.equal(insufficient, source);
+  const failed = await maybeCompressAgentImage(source, async () => { throw new Error("encode failed"); });
+  assert.equal(failed, source);
+});
+
+test("over-limit source images are compressed before final pasted-image validation", async () => {
+  const source = image("large-source.png", "image/png", AGENT_IMAGE_MAX_BYTES + 2 * 1024 * 1024);
+  let calls = 0;
+  const prepared = await preparePastedAgentImages([source], async () => {
+    calls += 1;
+    return new Blob([new Uint8Array(AGENT_IMAGE_COMPRESSION_THRESHOLD_BYTES)], { type: "image/webp" });
+  });
+  const accepted = collectPastedAgentImages({
+    files: prepared,
+    existing: [],
+    makeId: () => "compressed-large-source"
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(prepared[0]?.name, "large-source.webp");
+  assert.equal(accepted.rejected, null);
+  assert.equal(accepted.accepted.length, 1);
+
+  const stillOversized = await preparePastedAgentImages([source], async () => (
+    new Blob([new Uint8Array(AGENT_IMAGE_MAX_BYTES + 1)], { type: "image/webp" })
+  ));
+  const rejected = collectPastedAgentImages({
+    files: stillOversized,
+    existing: [],
+    makeId: () => "still-oversized"
+  });
+  assert.equal(rejected.rejected, "size");
+  assert.equal(rejected.accepted.length, 0);
+});
+
+test("clipboard items and files fallback both flow through pasted-image preparation", async () => {
+  const fromItem = image("item.png", "image/png", AGENT_IMAGE_COMPRESSION_THRESHOLD_BYTES + 1);
+  const fromFiles = image("fallback.png", "image/png", AGENT_IMAGE_COMPRESSION_THRESHOLD_BYTES + 1);
+  const item = { kind: "file", type: "image/png", getAsFile: () => fromItem };
+  const compressedFromItems = await preparePastedAgentImages(
+    collectClipboardAgentImageFiles({ items: [item], files: [fromFiles] }),
+    async () => new Blob([new Uint8Array(64)], { type: "image/webp" })
+  );
+  const compressedFromFiles = await preparePastedAgentImages(
+    collectClipboardAgentImageFiles({ items: [], files: [fromFiles] }),
+    async () => new Blob([new Uint8Array(64)], { type: "image/webp" })
+  );
+  assert.deepEqual(compressedFromItems.map((file) => file.name), ["item.webp"]);
+  assert.deepEqual(compressedFromFiles.map((file) => file.name), ["fallback.webp"]);
+  const pending = collectPastedAgentImages({
+    files: compressedFromItems,
+    existing: [],
+    makeId: () => "prepared-item"
+  });
+  assert.equal(pending.rejected, null);
+  assert.equal(pending.accepted[0]?.filename, "item.webp");
 });
 
 test("paste keeps text default behavior and stores valid images locally", () => {

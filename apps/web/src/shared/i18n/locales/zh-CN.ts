@@ -310,6 +310,7 @@ export default {
       imagePasteType: "只支持 PNG、JPEG 或 WebP 图片。",
       imagePasteEmpty: "不能添加空图片。",
       imagePasteSize: "单张图片不能超过 10 MiB。",
+      imagePasteProcessing: "正在优化粘贴的图片…",
       imagePasteTotal: "图片总大小不能超过 20 MiB。",
       noAgentHint: "当前没有可用于用户会话的 Agent,请前往设置页调整范围或新增 Agent",
       goCreateAgent: "前往创建",

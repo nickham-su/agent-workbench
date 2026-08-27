@@ -2,6 +2,9 @@ export const AGENT_IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "imag
 export const AGENT_IMAGE_MAX_COUNT = 4;
 export const AGENT_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 export const AGENT_IMAGE_MAX_TOTAL_BYTES = 20 * 1024 * 1024;
+export const AGENT_IMAGE_COMPRESSION_THRESHOLD_BYTES = 1024 * 1024;
+export const AGENT_IMAGE_WEBP_QUALITY = 0.92;
+export const AGENT_IMAGE_COMPRESSION_MIN_SAVINGS_RATIO = 0.1;
 
 export type PendingAgentImage = {
   id: string;
@@ -36,6 +39,69 @@ export type ImagePasteResult = {
   accepted: PendingAgentImage[];
   rejected: "count" | "type" | "empty" | "size" | "total" | null;
 };
+
+export type AgentImageWebpEncoder = (file: File) => Promise<Blob | null>;
+
+function toWebpFilename(filename: string) {
+  const stem = filename.trim().replace(/\.[^.]+$/, "") || "pasted-image";
+  return `${stem}.webp`;
+}
+
+/** Encodes at the original dimensions so screenshot text remains legible. */
+export async function compressAgentImageToWebp(file: File): Promise<Blob | null> {
+  const bitmap = await createImageBitmap(file);
+  try {
+    if (typeof OffscreenCanvas !== "undefined") {
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+      const context = canvas.getContext("2d");
+      if (!context) return null;
+      context.drawImage(bitmap, 0, 0);
+      return await canvas.convertToBlob({ type: "image/webp", quality: AGENT_IMAGE_WEBP_QUALITY });
+    }
+    if (typeof document === "undefined") return null;
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+    context.drawImage(bitmap, 0, 0);
+    return await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/webp", AGENT_IMAGE_WEBP_QUALITY));
+  } finally {
+    bitmap.close();
+  }
+}
+
+/** Returns the original when compression is unavailable, fails, or has no material size benefit. */
+export async function maybeCompressAgentImage(
+  file: File,
+  encodeToWebp: AgentImageWebpEncoder = compressAgentImageToWebp
+): Promise<File> {
+  if (
+    file.size <= AGENT_IMAGE_COMPRESSION_THRESHOLD_BYTES ||
+    !AGENT_IMAGE_MEDIA_TYPES.has(file.type)
+  ) return file;
+  try {
+    const compressed = await encodeToWebp(file);
+    if (
+      !compressed ||
+      compressed.type !== "image/webp" ||
+      compressed.size >= file.size * (1 - AGENT_IMAGE_COMPRESSION_MIN_SAVINGS_RATIO)
+    ) return file;
+    return new File([compressed], toWebpFilename(file.name), {
+      type: "image/webp",
+      lastModified: file.lastModified
+    });
+  } catch {
+    return file;
+  }
+}
+
+export async function preparePastedAgentImages(
+  files: Iterable<File>,
+  encodeToWebp?: AgentImageWebpEncoder
+) {
+  return await Promise.all([...files].map((file) => maybeCompressAgentImage(file, encodeToWebp)));
+}
 
 type ClipboardImageItem = {
   kind: string;
