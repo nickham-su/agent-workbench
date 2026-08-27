@@ -347,7 +347,7 @@
       :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
     >
       <div
-        v-if="activeInputHint.visible"
+        v-if="!sending && activeInputHint.visible"
         class="mb-2"
       >
         <div class="flex flex-col gap-0.5">
@@ -389,6 +389,14 @@
           </div>
         </div>
 
+        <div
+          v-if="sending"
+          class="mb-1 flex items-center gap-1.5 text-[0.85em] text-[color:var(--text-tertiary)]"
+          role="status"
+          aria-live="polite"
+        >
+          <a-spin size="small" /> {{ sendingStatusText }}
+        </div>
         <div v-if="pendingImages.length" class="flex flex-wrap gap-1 mb-1">
           <a-tag
             v-for="image in pendingImages"
@@ -410,6 +418,7 @@
             class="agent-input-textarea"
             :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
             :disabled="!hasAvailableAgents"
+            :readonly="sending"
             :auto-size="{ minRows: 2, maxRows: 6 }"
             :placeholder="inputPlaceholder"
             @keydown="onInputKeydown"
@@ -933,6 +942,19 @@ const previewError = ref("");
 const previewCache = new AttachmentPreviewCache();
 let previewLoadGeneration = 0;
 const runState = computed<AgentSessionRunState>(() => statusStore.runStateOf(props.sessionId));
+const sendingStatusText = computed(() => {
+  const imageCount = pendingImages.value.length;
+  const hasText = !!draft.value.trim();
+  if (imageCount === 0) return t("agent.client.sendingMessage");
+  if (!hasText) {
+    return imageCount === 1
+      ? t("agent.client.sendingOneImage")
+      : t("agent.client.sendingImages", { count: imageCount });
+  }
+  return imageCount === 1
+    ? t("agent.client.sendingMessageAndOneImage")
+    : t("agent.client.sendingMessageAndImages", { count: imageCount });
+});
 const runNoticeText = computed(() => String(runState.value.runNoticeText || "").trim());
 const lastKnownHeadItemId = ref<number | null>(null);
 const items = ref<AgentContextItemRecord[]>([]);
@@ -2889,6 +2911,7 @@ async function refreshMentionCandidates() {
 }
 
 function onInputKeydown(event: KeyboardEvent) {
+  if (sending.value) return;
   if (event.isComposing) return;
 
   if (event.key === "Escape") {
