@@ -1,6 +1,6 @@
 import { test, type TestContext } from "node:test";
 import type { FastifyInstance } from "fastify";
-import { createRunRecord, getAgentSession, updateRunState } from "../agent.store.js";
+import { appendContextItem, createRunRecord, getAgentSession, updateRunState } from "../agent.store.js";
 import { newSortableId } from "../../../utils/ids.js";
 import { createP4Fixture } from "./p4-fixture.helpers.js";
 import { createSession, createContextItemInternal, updateRunStateInternal } from "./context-writeback.helpers.js";
@@ -541,6 +541,37 @@ test("internal sessions/context-items-tail 返回尾部上下文项", async (t: 
   assert.equal(body.items.length, 2);
   assert.equal(body.items[0]?.id, assistant2.item.id);
   assert.equal(body.items[1]?.id, tool3.item.id);
+});
+
+test("internal sessions/context-items-tail 序列化 subtask child run 摘要", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const now = Date.now();
+  const parentRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: parentRunId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: 0,
+    agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", status: "running", createdAt: now
+  });
+  const parentTool = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: parentRunId, turnId: null, step: null, prevId: null,
+    kind: "tool", status: "completed", output: { type: "tool", toolName: "subtask" }, createdAt: now + 1
+  });
+  const childRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: childRunId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: parentTool.id,
+    agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", parentRunId, parentToolItemId: parentTool.id,
+    status: "completed", createdAt: now + 2
+  });
+  fixture.db.prepare("update agent_run set updated_at = ? where run_id = ?").run(now + 5, childRunId);
+
+  const res = await fixture.app.inject({
+    method: "POST", url: "/api/internal/agent/sessions/context-items-tail",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
+    payload: { pluginId: "feishu", sessionId: session.id, tailLimit: 10 }
+  });
+  assert.equal(res.statusCode, 200, res.body);
+  const projected = (res.json() as { items: Array<{ id: number; subtaskRun?: unknown }> }).items.find((item) => item.id === parentTool.id);
+  assert.deepEqual(projected?.subtaskRun, { runId: childRunId, status: "completed", startedAt: now + 2, endedAt: now + 5, durationMs: 3 });
 });
 
 test("internal sessions/context-items-tail sessionId 为空白时返回 400 + SESSION_ID_REQUIRED", async (t: TestContext) => {

@@ -7,6 +7,7 @@ import type {
 } from "@agent-workbench/shared";
 import type { UiArtifactCapabilityPort } from "../artifact/ui-artifact-capability.js";
 import type { AgentRunRecord, AgentRunStateRow } from "../agent.store.js";
+import type { SubtaskParentKey, SubtaskRunProjectionRecord } from "./context-query-read-model.js";
 
 export type ContextItemsQuery = {
   afterId?: number;
@@ -27,6 +28,10 @@ export type ContextQueryStore = {
   getRunState(workspaceId: string, sessionId: string): AgentRunStateRow;
   getRun(runId: string): AgentRunRecord | null;
   getLatestTerminalRun(input: { workspaceId: string; sessionId: string }): (AgentRunRecord & { status: "completed" | "failed" | "cancelled" }) | null;
+  listSubtaskRunProjectionsByParentTools(input: {
+    workspaceId: string;
+    parents: SubtaskParentKey[];
+  }): SubtaskRunProjectionRecord[];
   listNonTerminalVisibleItemIds(workspaceId: string, sessionId: string): number[];
 };
 
@@ -44,7 +49,8 @@ export type ContextQueryApplicationDependencies = {
     run: AgentRunRecord;
   }): number | null;
   clock: { nowMs(): number };
-  logger: { warn(bindings: Record<string, unknown>, message: string): void };
+  logger: { warn(bindings: Record<string, unknown>, message: string): void;
+    error(bindings: Record<string, unknown>, message: string): void };
 };
 
 export type ContextQueryApplicationPort = {

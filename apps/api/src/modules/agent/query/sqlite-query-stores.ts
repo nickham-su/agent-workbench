@@ -7,6 +7,7 @@ import {
   getRunRecord,
   getRunState,
   getSessionTranscriptBeforeWindow,
+  listSubtaskRunProjectionsByParentTools,
   getSessionTranscriptItems,
   getSessionTranscriptItemsAfterIdWindow,
   getSessionTranscriptTailWindow,
@@ -33,6 +34,7 @@ export class SqliteContextQueryStore implements ContextQueryStore {
   getRunState(workspaceId: string, sessionId: string) { return getRunState(this.db, workspaceId, sessionId); }
   getRun(runId: string) { return getRunRecord(this.db, runId); }
   getLatestTerminalRun(input: { workspaceId: string; sessionId: string }) { return getLatestTerminalRunRecord(this.db, input); }
+  listSubtaskRunProjectionsByParentTools(input: { workspaceId: string; parents: Array<{ parentRunId: string; parentToolItemId: number }> }) { return listSubtaskRunProjectionsByParentTools(this.db, input); }
   listNonTerminalVisibleItemIds(workspaceId: string, sessionId: string) { return listNonTerminalVisibleItemIds(this.db, workspaceId, sessionId); }
 }
 

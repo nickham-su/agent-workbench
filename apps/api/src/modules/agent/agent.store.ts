@@ -9,6 +9,7 @@ import type {
   AgentRecentSessionItem
 } from "@agent-workbench/shared";
 import type { Db } from "../../infra/db/db.js";
+import type { SubtaskParentKey, SubtaskRunProjectionRecord } from "./query/context-query-read-model.js";
 
 const TERMINAL_ITEM_STATUS = new Set<AgentContextItemStatus>(["completed", "failed", "cancelled"]);
 
@@ -1940,6 +1941,74 @@ export function findSubtaskRunByParentTool(
     )
     .get(params) as AgentRunRow | undefined;
   return row ? mapRunRecord(row) : null;
+}
+
+export function listSubtaskRunProjectionsByParentTools(
+  db: Db,
+  params: { workspaceId: string; parents: SubtaskParentKey[] }
+): SubtaskRunProjectionRecord[] {
+  const parents: SubtaskParentKey[] = [];
+  const seen = new Set<string>();
+  for (const parent of params.parents) {
+    if (typeof parent.parentRunId !== "string" || !parent.parentRunId.trim()) continue;
+    if (!Number.isSafeInteger(parent.parentToolItemId) || parent.parentToolItemId <= 0) continue;
+    // `trim()` is only an empty-value guard. The original run id is the lineage key.
+    const key = JSON.stringify([parent.parentRunId, parent.parentToolItemId]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    parents.push(parent);
+  }
+  if (parents.length === 0) return [];
+
+  const rows = db.prepare(
+    `
+      with requested as (
+        select
+          json_extract(value, '$.parentRunId') as parentRunId,
+          cast(json_extract(value, '$.parentToolItemId') as integer) as parentToolItemId
+        from json_each(@parentsJson)
+      )
+      select
+        child.run_id as runId,
+        child.parent_run_id as parentRunId,
+        child.parent_tool_item_id as parentToolItemId,
+        child.status,
+        child.created_at as createdAt,
+        child.updated_at as updatedAt
+      from requested
+      inner join agent_run child
+        on child.parent_run_id = requested.parentRunId
+       and child.parent_tool_item_id = requested.parentToolItemId
+      where child.workspace_id = @workspaceId
+    `
+  ).all({
+    workspaceId: params.workspaceId,
+    parentsJson: JSON.stringify(parents)
+  }) as Array<{
+    runId: unknown;
+    parentRunId: unknown;
+    parentToolItemId: unknown;
+    status: unknown;
+    createdAt: unknown;
+    updatedAt: unknown;
+  }>;
+
+  return rows.flatMap((row) => {
+    const runId = toNonEmptyString(row.runId);
+    const parentRunId = toNonEmptyString(row.parentRunId);
+    const parentToolItemId = toPositiveSafeInteger(row.parentToolItemId);
+    const status = row.status;
+    if (!runId || !parentRunId || parentToolItemId == null) return [];
+    if (status !== "running" && status !== "completed" && status !== "failed" && status !== "cancelled") return [];
+    return [{
+      runId,
+      parentRunId,
+      parentToolItemId,
+      status,
+      createdAt: typeof row.createdAt === "number" ? row.createdAt : Number.NaN,
+      updatedAt: typeof row.updatedAt === "number" ? row.updatedAt : Number.NaN
+    }];
+  });
 }
 
 export function getLatestRunUiLocaleBySession(db: Db, params: { workspaceId: string; sessionId: string }): AgentUiLocale | null {

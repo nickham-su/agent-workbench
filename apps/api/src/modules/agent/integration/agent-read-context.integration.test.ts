@@ -8,12 +8,14 @@ import type { AppContext } from "../../../app/context.js";
 import { agentArchiveSessionDir } from "../../../infra/fs/paths.js";
 import {
   appendContextItem,
+  createAgentSession,
   createRunRecord,
   getAgentSession,
   getRunRecord,
   getRunState as getRunStateRow,
   insertContextItemAttachments,
   getSessionTranscriptItems,
+  updateRunRecordStatus,
   updateRunState
 } from "../agent.store.js";
 import { newSortableId } from "../../../utils/ids.js";
@@ -89,17 +91,22 @@ async function getMessagesContextInternal(params: {
   return res.json() as { headItemId: number | null; system: string; messages: Array<{ role: string; content: unknown }> };
 }
 
-async function getContextItems(app: FastifyInstance, sessionId: string, afterId?: number) {
-  const url = afterId ? `/api/agent/sessions/${sessionId}/context-items?afterId=${afterId}` : `/api/agent/sessions/${sessionId}/context-items`;
+async function getContextItems(app: FastifyInstance, sessionId: string, query?: number | { afterId?: number; beforeId?: number; limit?: number }) {
+  const normalizedQuery = typeof query === "number" ? { afterId: query } : query;
+  const params = new URLSearchParams();
+  if (normalizedQuery?.afterId) params.set("afterId", String(normalizedQuery.afterId));
+  if (normalizedQuery?.beforeId) params.set("beforeId", String(normalizedQuery.beforeId));
+  if (normalizedQuery?.limit) params.set("limit", String(normalizedQuery.limit));
+  const url = `/api/agent/sessions/${sessionId}/context-items${params.size > 0 ? `?${params}` : ""}`;
   const res = await app.inject({ method: "GET", url });
   assert.equal(res.statusCode, 200, `get context-items failed: ${res.body}`);
-  return res.json() as { headItemId: number | null; items: Array<{ id: number; kind: string; status: string; output: Record<string, any>; prevId: number | null; archiveAt: number | null; boundaryReason: string | null }> };
+  return res.json() as { headItemId: number | null; items: Array<{ id: number; kind: string; status: string; output: Record<string, any>; prevId: number | null; archiveAt: number | null; boundaryReason: string | null; subtaskRun?: unknown }> };
 }
 
 async function getContextItem(app: FastifyInstance, sessionId: string, itemId: number) {
   const res = await app.inject({ method: "GET", url: `/api/agent/sessions/${sessionId}/context-items/${itemId}` });
   assert.equal(res.statusCode, 200, `get context-item failed: ${res.body}`);
-  return res.json() as { id: number; status: string; output: Record<string, unknown> };
+  return res.json() as { id: number; status: string; output: Record<string, unknown>; subtaskRun?: unknown };
 }
 
 async function getPromptContextInternal(params: { app: FastifyInstance; internalToken: string; workspaceId: string; sessionId: string; runId: string }) {
@@ -962,4 +969,167 @@ test("非 system item 写入 boundaryReason 会被忽略", async (t: TestContext
   const context = await getContextItems(fixture.app, session.id);
   assert.equal(context.items[0]?.kind, "user");
   assert.equal(context.items[0]?.boundaryReason, null);
+});
+
+test("subtask context item projects its exact child run for list and single reads", async (t: TestContext) => {
+  const fixture = await createP3Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const parentRunId = newSortableId("run");
+  const now = Date.now();
+  createRunRecord(fixture.db, {
+    runId: parentRunId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: 0,
+    agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", status: "running", createdAt: now
+  });
+  const parentTool = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: parentRunId, turnId: "turn-subtask", step: 1, prevId: null,
+    kind: "tool", status: "completed", output: { type: "tool", toolName: "subtask", args: { description: "inspect" } }, createdAt: now + 1
+  });
+  const childRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: childRunId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: parentTool.id,
+    agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", parentRunId, parentToolItemId: parentTool.id,
+    status: "running", createdAt: now + 10
+  });
+
+  const running = await getContextItem(fixture.app, session.id, parentTool.id);
+  assert.deepEqual(running.subtaskRun, { runId: childRunId, status: "running", startedAt: now + 10, endedAt: null, durationMs: null });
+
+  updateRunRecordStatus(fixture.db, { runId: childRunId, status: "failed", updatedAt: now + 35 });
+  const listed = await getContextItems(fixture.app, session.id);
+  const projected = listed.items.find((entry) => entry.id === parentTool.id);
+  assert.deepEqual(projected?.subtaskRun, { runId: childRunId, status: "failed", startedAt: now + 10, endedAt: now + 35, durationMs: 25 });
+});
+
+test("subtask projection omits missing child runs and does not infer copied item lineage", async (t: TestContext) => {
+  const fixture = await createP3Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const parentRunId = newSortableId("run");
+  const now = Date.now();
+  const missing = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: parentRunId, turnId: null, step: null, prevId: null,
+    kind: "tool", status: "completed", output: { type: "tool", toolName: "subtask" }, createdAt: now
+  });
+  const copied = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: null, turnId: null, step: null, prevId: missing.id,
+    kind: "tool", status: "completed", output: { type: "tool", toolName: "subtask" }, createdAt: now + 1
+  });
+  const childRunId = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: childRunId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: missing.id,
+    agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", parentRunId, parentToolItemId: missing.id,
+    status: "completed", createdAt: now + 2
+  });
+  updateRunRecordStatus(fixture.db, { runId: childRunId, status: "completed", updatedAt: now + 4 });
+
+  const items = await getContextItems(fixture.app, session.id);
+  assert.deepEqual(items.items.find((entry) => entry.id === missing.id)?.subtaskRun, { runId: childRunId, status: "completed", startedAt: now + 2, endedAt: now + 4, durationMs: 2 });
+  assert.equal(items.items.find((entry) => entry.id === copied.id)?.subtaskRun, undefined);
+});
+
+test("existing subtask session runs remain bound to their individual parent tool cards", async (t: TestContext) => {
+  const fixture = await createP3Fixture(t, { agentWorkerConcurrency: 0 });
+  const parent = await createSession(fixture.app, fixture.workspaceId);
+  const child = { id: newSortableId("sess") };
+  createAgentSession(fixture.db, {
+    id: child.id, workspaceId: fixture.workspaceId, title: "existing child", kind: "subtask",
+    forkedFromSessionId: null, forkedFromItemId: null, createdAt: Date.now()
+  });
+  const now = Date.now();
+  const parentRunA = newSortableId("run");
+  const parentRunB = newSortableId("run");
+  for (const runId of [parentRunA, parentRunB]) {
+    createRunRecord(fixture.db, {
+      runId, workspaceId: fixture.workspaceId, sessionId: parent.id, triggerItemId: 0,
+      agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", status: "running", createdAt: now
+    });
+  }
+  const toolA = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId, sessionId: parent.id, runId: parentRunA, turnId: null, step: null, prevId: null,
+    kind: "tool", status: "completed", output: { type: "tool", toolName: "subtask", result: { subtaskSessionId: child.id } }, createdAt: now + 1
+  });
+  const toolB = appendContextItem(fixture.db, {
+    workspaceId: fixture.workspaceId, sessionId: parent.id, runId: parentRunB, turnId: null, step: null, prevId: toolA.id,
+    kind: "tool", status: "completed", output: { type: "tool", toolName: "subtask", result: { subtaskSessionId: child.id } }, createdAt: now + 2
+  });
+  const childA = newSortableId("run");
+  const childB = newSortableId("run");
+  createRunRecord(fixture.db, {
+    runId: childA, workspaceId: fixture.workspaceId, sessionId: child.id, triggerItemId: 1,
+    agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", parentRunId: parentRunA, parentToolItemId: toolA.id,
+    status: "completed", createdAt: now + 10
+  });
+  createRunRecord(fixture.db, {
+    runId: childB, workspaceId: fixture.workspaceId, sessionId: child.id, triggerItemId: 2,
+    agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", parentRunId: parentRunB, parentToolItemId: toolB.id,
+    status: "completed", createdAt: now + 20
+  });
+  updateRunRecordStatus(fixture.db, { runId: childA, status: "completed", updatedAt: now + 15 });
+  updateRunRecordStatus(fixture.db, { runId: childB, status: "completed", updatedAt: now + 35 });
+
+  const listed = await getContextItems(fixture.app, parent.id);
+  assert.deepEqual(listed.items.find((entry) => entry.id === toolA.id)?.subtaskRun, { runId: childA, status: "completed", startedAt: now + 10, endedAt: now + 15, durationMs: 5 });
+  assert.deepEqual(listed.items.find((entry) => entry.id === toolB.id)?.subtaskRun, { runId: childB, status: "completed", startedAt: now + 20, endedAt: now + 35, durationMs: 15 });
+  assert.deepEqual((await getContextItem(fixture.app, parent.id, toolA.id)).subtaskRun, { runId: childA, status: "completed", startedAt: now + 10, endedAt: now + 15, durationMs: 5 });
+  assert.deepEqual((await getContextItem(fixture.app, parent.id, toolB.id)).subtaskRun, { runId: childB, status: "completed", startedAt: now + 20, endedAt: now + 35, durationMs: 15 });
+});
+
+test("subtask child-run conflicts fail open on the public list while other cards project", async (t: TestContext) => {
+  const fixture = await createP3Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const now = Date.now();
+  const parentRunId = newSortableId("run");
+  createRunRecord(fixture.db, { runId: parentRunId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: 0, agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", status: "running", createdAt: now });
+  const conflictTool = appendContextItem(fixture.db, { workspaceId: fixture.workspaceId, sessionId: session.id, runId: parentRunId, turnId: null, step: null, prevId: null, kind: "tool", status: "completed", output: { type: "tool", toolName: "subtask" }, createdAt: now + 1 });
+  const validTool = appendContextItem(fixture.db, { workspaceId: fixture.workspaceId, sessionId: session.id, runId: parentRunId, turnId: null, step: null, prevId: conflictTool.id, kind: "tool", status: "completed", output: { type: "tool", toolName: "subtask" }, createdAt: now + 2 });
+  fixture.db.exec("drop index idx_agent_run_parent_tool_unique");
+  for (const runId of ["conflict-a", "conflict-b"]) {
+    createRunRecord(fixture.db, { runId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: conflictTool.id, agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", parentRunId, parentToolItemId: conflictTool.id, status: "completed", createdAt: now + 3 });
+  }
+  createRunRecord(fixture.db, { runId: "valid-child", workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: validTool.id, agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", parentRunId, parentToolItemId: validTool.id, status: "completed", createdAt: now + 4 });
+
+  const res = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${session.id}/context-items` });
+  assert.equal(res.statusCode, 200, res.body);
+  const items = (res.json() as { items: Array<{ id: number; subtaskRun?: unknown }> }).items;
+  assert.equal(items.find((item) => item.id === conflictTool.id)?.subtaskRun, undefined);
+  assert.deepEqual(items.find((item) => item.id === validTool.id)?.subtaskRun, { runId: "valid-child", status: "completed", startedAt: now + 4, endedAt: now + 4, durationMs: 0 });
+});
+
+test("cancelled child runs project terminal timing through the public context API", async (t: TestContext) => {
+  const fixture = await createP3Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const now = Date.now();
+  const parentRunId = newSortableId("run");
+  createRunRecord(fixture.db, { runId: parentRunId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: 0, agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", status: "running", createdAt: now });
+  const tool = appendContextItem(fixture.db, { workspaceId: fixture.workspaceId, sessionId: session.id, runId: parentRunId, turnId: null, step: null, prevId: null, kind: "tool", status: "completed", output: { type: "tool", toolName: "subtask" }, createdAt: now + 1 });
+  const childRunId = newSortableId("run");
+  createRunRecord(fixture.db, { runId: childRunId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: tool.id, agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", parentRunId, parentToolItemId: tool.id, status: "running", createdAt: now + 10 });
+  updateRunRecordStatus(fixture.db, { runId: childRunId, status: "cancelled", updatedAt: now + 40 });
+
+  const expected = { runId: childRunId, status: "cancelled", startedAt: now + 10, endedAt: now + 40, durationMs: 30 };
+  assert.deepEqual((await getContextItems(fixture.app, session.id)).items.find((item) => item.id === tool.id)?.subtaskRun, expected);
+  assert.deepEqual((await getContextItem(fixture.app, session.id, tool.id)).subtaskRun, expected);
+});
+
+test("subtask summaries remain identical in beforeId and afterId context windows", async (t: TestContext) => {
+  const fixture = await createP3Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const now = Date.now();
+  const parentRunId = newSortableId("run");
+  createRunRecord(fixture.db, { runId: parentRunId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: 0, agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", status: "running", createdAt: now });
+  const earlier = appendContextItem(fixture.db, { workspaceId: fixture.workspaceId, sessionId: session.id, runId: null, turnId: null, step: null, prevId: null, kind: "user", status: "completed", output: { type: "user_text", text: "earlier" }, createdAt: now + 1 });
+  const tool = appendContextItem(fixture.db, { workspaceId: fixture.workspaceId, sessionId: session.id, runId: parentRunId, turnId: null, step: null, prevId: earlier.id, kind: "tool", status: "completed", output: { type: "tool", toolName: "subtask" }, createdAt: now + 2 });
+  const later = appendContextItem(fixture.db, { workspaceId: fixture.workspaceId, sessionId: session.id, runId: null, turnId: null, step: null, prevId: tool.id, kind: "assistant", status: "completed", output: { type: "assistant_text", text: "later" }, createdAt: now + 3 });
+  const childRunId = newSortableId("run");
+  createRunRecord(fixture.db, { runId: childRunId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: tool.id, agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", parentRunId, parentToolItemId: tool.id, status: "completed", createdAt: now + 10 });
+  updateRunRecordStatus(fixture.db, { runId: childRunId, status: "completed", updatedAt: now + 25 });
+
+  const expected = { runId: childRunId, status: "completed", startedAt: now + 10, endedAt: now + 25, durationMs: 15 };
+  const full = await getContextItems(fixture.app, session.id);
+  const after = await getContextItems(fixture.app, session.id, { afterId: earlier.id });
+  const before = await getContextItems(fixture.app, session.id, { beforeId: later.id, limit: 5 });
+  const pick = (items: Array<{ id: number; subtaskRun?: unknown }>) => items.find((item) => item.id === tool.id)?.subtaskRun;
+  assert.deepEqual(pick(full.items), expected);
+  assert.deepEqual(pick(after.items), expected);
+  assert.deepEqual(pick(before.items), expected);
+  assert.deepEqual((await getContextItem(fixture.app, session.id, tool.id)).subtaskRun, expected);
 });

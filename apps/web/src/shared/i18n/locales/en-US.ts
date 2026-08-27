@@ -338,6 +338,8 @@ export default {
       subtaskModeExisting: "Reuse session",
       subtaskAgent: "Agent",
       subtaskSessionId: "Session ID",
+      subtaskStartedAt: "Started",
+      subtaskDuration: "Duration",
       todoListCardTitle: "Todo list",
       todoListSummary: "Total {total}, in progress {inProgress}, pending {pending}, completed {completed}, cancelled {cancelled}",
       todoListGoal: "Goal",

@@ -173,16 +173,25 @@
                   {{ t("agent.client.subtaskCardTitle") }}: {{ item.subtaskDescription || "-" }}
                 </div>
                 <component
-                  :is="subtaskStatusIcon(item.status)"
+                  :is="subtaskStatusIcon(subtaskDisplayStatus(item))"
                   class="shrink-0"
-                  :class="subtaskStatusIconClass(item.status)"
-                  :spin="subtaskStatusSpin(item.status)"
+                  :class="subtaskStatusIconClass(subtaskDisplayStatus(item))"
+                  :spin="subtaskStatusSpin(subtaskDisplayStatus(item))"
                 />
               </div>
-              <div class="pt-0.5 text-[color:var(--text-secondary)]">
-                {{ t("agent.client.subtaskAgent") }}: {{ item.subtaskAgentName || item.subtaskAgentId || "-" }}
-                <span class="inline-block w-3" />
-                {{ t("agent.client.subtaskMode") }}: {{ formatSubtaskMode(item.subtaskMode) }}
+              <div class="pt-0.5 text-[color:var(--text-secondary)] flex flex-wrap items-center gap-x-3 gap-y-0.5">
+                <span>
+                  {{ t("agent.client.subtaskAgent") }}: {{ item.subtaskAgentName || item.subtaskAgentId || "-" }}
+                </span>
+                <span>
+                  {{ t("agent.client.subtaskMode") }}: {{ formatSubtaskMode(item.subtaskMode) }}
+                </span>
+                <span v-if="item.subtaskRun && subtaskStartedAtText(item.subtaskRun.startedAt)">
+                  {{ t("agent.client.subtaskStartedAt") }}: {{ subtaskStartedAtText(item.subtaskRun.startedAt) }}
+                </span>
+                <span v-if="item.subtaskRun && subtaskDurationText(item.subtaskRun.durationMs)">
+                  {{ t("agent.client.subtaskDuration") }}: {{ subtaskDurationText(item.subtaskRun.durationMs) }}
+                </span>
               </div>
               <div class="pt-0.5 text-[color:var(--text-secondary)] flex items-center gap-1 min-w-0">
                 {{ t("agent.client.subtaskSessionId") }}: {{ item.subtaskSessionId || "-" }}
@@ -679,6 +688,7 @@ import type {
   AgentMessageImageAttachment,
   AgentDefaultModel,
   AgentGlobalPromptItem,
+  AgentSubtaskRunSummary,
   AgentProvidersSettingsView,
   AgentSessionRunState,
   UpdateAgentSettingsRequest
@@ -712,6 +722,15 @@ import AgentScratchpadCard from "./AgentScratchpadCard.vue";
 import AgentWriteCard from "./AgentWriteCard.vue";
 import { useAgentSessionStatusStore } from "./useAgentSessionStatusStore";
 import { resolveSubtaskSessionIdForDisplay } from "./subtaskSessionId";
+import {
+  formatElapsedDuration,
+  formatSubtaskDuration,
+  formatSubtaskStartedAt,
+  hasSubtaskRunChanged,
+  resolveSubtaskDisplayStatus,
+  subtaskRunForDisplay,
+  upsertAgentContextItem
+} from "./subtaskRunDisplay";
 import {
   ApiError,
   cancelAgentSession,
@@ -837,6 +856,7 @@ type DisplayItem = {
   subtaskMode?: "new" | "existing" | "fork" | string;
   subtaskAgentId?: string;
   subtaskAgentName?: string;
+  subtaskRun?: AgentSubtaskRunSummary;
   todoList?: TodoListDisplay;
   applyPatch?: ApplyPatchDisplay;
   writeResult?: WriteDisplay;
@@ -1431,20 +1451,6 @@ const inputPlaceholder = computed(() => {
   return t("agent.client.inputPlaceholderIdle");
 });
 
-function formatElapsedDuration(ms: number) {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours > 0) {
-    return `${hours}h ${minutes}min ${seconds}s`;
-  }
-  if (minutes > 0) {
-    return `${minutes}min ${seconds}s`;
-  }
-  return `${seconds}s`;
-}
-
 const currentRunElapsedText = computed(() => {
   const state = runState.value;
   if (state.status === "running") {
@@ -1647,6 +1653,7 @@ const displayItems = computed<DisplayItem[]>(() => {
         };
       }
       if (item.output.toolName === "subtask") {
+        const subtaskRun = subtaskRunForDisplay(item);
         const argsObj = toRecord(item.output.args);
         const description = typeof argsObj?.description === "string" ? argsObj.description.trim() : "";
         const session = toRecord(argsObj?.session);
@@ -1675,7 +1682,8 @@ const displayItems = computed<DisplayItem[]>(() => {
           ...(mode ? { subtaskMode: mode } : {}),
           ...(stableAgentId ? { subtaskAgentId: stableAgentId } : {}),
           ...(agentName ? { subtaskAgentName: agentName } : {}),
-            tone: item.status === "failed" ? "error" : "normal"
+          ...(subtaskRun ? { subtaskRun } : {}),
+          tone: item.status === "failed" ? "error" : "normal"
         };
       }
       if (item.output.toolName === "scratchpad") {
@@ -1978,6 +1986,18 @@ function formatSubtaskMode(mode?: string) {
   if (mode === "fork") return t("agent.client.subtaskModeFork");
   if (mode === "existing") return t("agent.client.subtaskModeExisting");
   return mode || "-";
+}
+
+function subtaskDisplayStatus(item: DisplayItem) {
+  return resolveSubtaskDisplayStatus(item.status, item.subtaskRun);
+}
+
+function subtaskStartedAtText(startedAt: number) {
+  return formatSubtaskStartedAt(startedAt);
+}
+
+function subtaskDurationText(durationMs: number | null) {
+  return formatSubtaskDuration(durationMs);
 }
 
 function subtaskStatusIcon(status: AgentContextItemRecord["status"]) {
@@ -2460,14 +2480,7 @@ async function focusInputIfNeeded() {
 }
 
 function upsertItem(next: AgentContextItemRecord) {
-  const idx = items.value.findIndex((item) => item.id === next.id);
-  if (idx < 0) {
-    items.value = [...items.value, next].sort((a, b) => a.id - b.id);
-    return;
-  }
-  const copy = [...items.value];
-  copy[idx] = next;
-  items.value = copy;
+  items.value = upsertAgentContextItem(items.value, next);
 }
 
 function itemById(itemId: number) {
@@ -2482,6 +2495,7 @@ function hasItemChanged(current: AgentContextItemRecord | null, latest: AgentCon
   const latestArchiveAt = typeof latest.archiveAt === "number" ? latest.archiveAt : null;
   if (currentArchiveAt !== latestArchiveAt) return true;
   if (String(current.boundaryReason || "") !== String(latest.boundaryReason || "")) return true;
+  if (hasSubtaskRunChanged(current.subtaskRun, latest.subtaskRun)) return true;
   return JSON.stringify(current.output) !== JSON.stringify(latest.output);
 }
 

@@ -1612,7 +1612,10 @@ function createReadQueryWritebackAssembly(assembly: {
         return profile.model.contextWindowTokens;
       },
       clock: { nowMs },
-      logger: { warn: (bindings, message) => assembly.logger.warn(bindings, message) }
+      logger: {
+        warn: (bindings, message) => assembly.logger.warn(bindings, message),
+        error: (bindings, message) => assembly.logger.error(bindings, message)
+      }
     });
     const peripheralAgentQueryApplication = new PeripheralAgentQueryApplication({
       store: peripheralQueryStore,

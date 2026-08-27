@@ -336,6 +336,8 @@ export default {
       subtaskModeExisting: "续用会话",
       subtaskAgent: "Agent",
       subtaskSessionId: "Session ID",
+      subtaskStartedAt: "开始时间",
+      subtaskDuration: "持续时间",
       todoListCardTitle: "任务清单",
       todoListSummary: "总计 {total}, 进行中 {inProgress}, 待办 {pending}, 已完成 {completed}, 已取消 {cancelled}",
       todoListGoal: "目标",

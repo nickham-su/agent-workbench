@@ -118,6 +118,31 @@ export const AgentContextItemOutputSchema = Type.Union([
 ]);
 export type AgentContextItemOutput = Static<typeof AgentContextItemOutputSchema>;
 
+export const AgentSubtaskRunTerminalStatusSchema = Type.Union([
+  Type.Literal("completed"),
+  Type.Literal("failed"),
+  Type.Literal("cancelled")
+]);
+export type AgentSubtaskRunTerminalStatus = Static<typeof AgentSubtaskRunTerminalStatusSchema>;
+
+export const AgentSubtaskRunSummarySchema = Type.Union([
+  Type.Object({
+    runId: Type.String({ minLength: 1 }),
+    status: Type.Literal("running"),
+    startedAt: Type.Number({ exclusiveMinimum: 0 }),
+    endedAt: Type.Null(),
+    durationMs: Type.Null()
+  }, { additionalProperties: false }),
+  Type.Object({
+    runId: Type.String({ minLength: 1 }),
+    status: AgentSubtaskRunTerminalStatusSchema,
+    startedAt: Type.Number({ exclusiveMinimum: 0 }),
+    endedAt: Type.Number({ exclusiveMinimum: 0 }),
+    durationMs: Type.Number({ minimum: 0 })
+  }, { additionalProperties: false })
+]);
+export type AgentSubtaskRunSummary = Static<typeof AgentSubtaskRunSummarySchema>;
+
 export const AgentSessionRecordSchema = Type.Object({
   id: Type.String({ minLength: 1 }),
   workspaceId: Type.String({ minLength: 1 }),
@@ -145,6 +170,7 @@ export const AgentContextItemRecordSchema = Type.Object({
   boundaryReason: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
   output: AgentContextItemOutputSchema,
   createdAt: Type.Number(),
+  subtaskRun: Type.Optional(AgentSubtaskRunSummarySchema),
   updatedAt: Type.Number()
 });
 export type AgentContextItemRecord = Static<typeof AgentContextItemRecordSchema>;
