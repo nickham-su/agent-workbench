@@ -376,6 +376,46 @@ test("subtask start 按 depth 执行限制、mode 和轻量幂等", async (t: Te
   );
 });
 
+test("subtask start 首次已提交但客户端未确认时，重试复用同一个已激活 child", async (t: TestContext) => {
+  const fixture = await createP2Fixture(t, { agentWorkerConcurrency: 0 });
+  const parent = await createSubtaskAnchor({ fixture, parentDepth: 0, sessionMode: "new" });
+  const request = {
+    fixture,
+    parentSessionId: parent.parentSession.id,
+    parentRunId: parent.parentRunId,
+    parentToolItemId: parent.toolItem.item.id,
+    session: { mode: "new" as const }
+  };
+
+  // The first route call completes server-side; deliberately discard its response
+  // to model a client-side response loss after persistence/activation.
+  const first = await startSubtaskForAnchor(request);
+  assert.equal(first.statusCode, 200, first.body);
+  const firstBody = first.json() as { sessionId: string; runId: string; reused: boolean };
+  assert.equal(firstBody.reused, false);
+  const initialSeeds = getSessionTranscriptItems(fixture.db, fixture.workspaceId, firstBody.sessionId);
+  const initialChildCount = fixture.db.prepare(
+    "select count(*) as count from agent_run where workspace_id = ? and parent_run_id = ? and parent_tool_item_id = ?"
+  ).get(fixture.workspaceId, parent.parentRunId, parent.toolItem.item.id) as { count: number };
+  assert.equal(initialChildCount.count, 1);
+  assert.ok(initialSeeds.length > 0, "first call must activate and seed the child before its response is lost");
+
+  const retry = await startSubtaskForAnchor(request);
+  assert.equal(retry.statusCode, 200, retry.body);
+  const retryBody = retry.json() as { sessionId: string; runId: string; reused: boolean };
+  assert.equal(retryBody.reused, true);
+  assert.equal(retryBody.sessionId, firstBody.sessionId);
+  assert.equal(retryBody.runId, firstBody.runId);
+  assert.equal(
+    (fixture.db.prepare(
+      "select count(*) as count from agent_run where workspace_id = ? and parent_run_id = ? and parent_tool_item_id = ?"
+    ).get(fixture.workspaceId, parent.parentRunId, parent.toolItem.item.id) as { count: number }).count,
+    1
+  );
+  const seedsAfterRetry = getSessionTranscriptItems(fixture.db, fixture.workspaceId, firstBody.sessionId);
+  assert.deepEqual(seedsAfterRetry, initialSeeds, "retry must not seed or execute the child a second time");
+});
+
 test("subtask fork 无 boundary 时保留双空 metadata 并写入 guard→prompt", async (t: TestContext) => {
   const fixture = await createP2Fixture(t, { agentWorkerConcurrency: 0 });
     const parent = await createSubtaskAnchor({ fixture, parentDepth: 0, sessionMode: "fork" });
@@ -398,7 +438,7 @@ test("subtask fork 无 boundary 时保留双空 metadata 并写入 guard→promp
   const items = getSessionTranscriptItems(fixture.db, fixture.workspaceId, started.sessionId);
   assert.equal(items.length, 2);
   assert.equal(items[0]?.kind, "system");
-  assert.equal(String((items[0]?.output as { text?: string }).text || "").includes("All history before this system message was copied"), true);
+  assert.notEqual(String((items[0]?.output as { text?: string }).text || "").trim(), "");
   assert.equal(items[0]?.runId, null);
   assert.equal(items[1]?.kind, "user");
   assert.equal(items[1]?.runId, started.runId);

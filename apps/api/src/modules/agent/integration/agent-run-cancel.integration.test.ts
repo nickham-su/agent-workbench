@@ -341,6 +341,63 @@ test("run-complete(cancelled) 会收敛该 run 下的非终态 context items", a
   assert.equal(toolText.includes("tool: subtask"), true);
   assert.equal(toolText.includes("status: cancelled"), true);
 });
+
+test("run-complete 首次已提交但客户端未确认时，重放保持 terminal 和 idle", async (t: TestContext) => {
+  const fixture = await createP3Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  const updatedAt = Date.now();
+  createRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    triggerItemId: 1,
+    agentId: "agent-default",
+    providerId: "openai",
+    modelId: "gpt-4.1",
+    status: "running",
+    createdAt: updatedAt
+  });
+  await updateRunStateInternal({
+    fixture,
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    status: "running",
+    activeRunId: runId,
+    activeAssistantItemId: null
+  });
+  const payload = {
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    runId,
+    status: "completed" as const,
+    updatedAt
+  };
+  const request = () => fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/run-complete",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload
+  });
+
+  // The first completed response is intentionally discarded, modelling a
+  // client timeout/response loss after the lifecycle mutation committed.
+  const first = await request();
+  assert.equal(first.statusCode, 200, first.body);
+  assert.equal(getRunRecord(fixture.db, runId)?.status, "completed");
+  const firstState = await getRunState(fixture.app, session.id);
+  assert.equal(firstState.status, "idle");
+  assert.equal(firstState.activeRunId, null);
+
+  const replay = await request();
+  assert.equal(replay.statusCode, 200, replay.body);
+  assert.equal(getRunRecord(fixture.db, runId)?.status, "completed");
+  const replayState = await getRunState(fixture.app, session.id);
+  assert.deepEqual(replayState, firstState);
+});
+
 test("agent cancel 会收敛隐藏链上的未终态 items 与关联 run", async (t: TestContext) => {
   const fixture = await createP3Fixture(t, { agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);

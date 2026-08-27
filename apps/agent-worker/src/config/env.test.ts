@@ -33,3 +33,54 @@ test("worker response validation rejects unsupported values", () => {
     /Invalid AWB_INTERNAL_RPC_RESPONSE_VALIDATION: relaxed\. Expected "strict" or "warn"\./
   );
 });
+
+test("worker internal RPC timeout configuration uses parser-owned defaults", () => {
+  const env = loadWorkerEnv(baseEnv);
+  assert.equal(env.internalRpcTimeoutMs, 15_000);
+  assert.equal(env.completeRunTimeoutMs, 5_000);
+});
+
+test("worker internal RPC timeout configuration reads explicit positive integers", () => {
+  const env = loadWorkerEnv({
+    ...baseEnv,
+    AWB_AGENT_INTERNAL_RPC_TIMEOUT_MS: " 250 ",
+    AWB_AGENT_COMPLETE_RUN_TIMEOUT_MS: "750"
+  });
+  assert.equal(env.internalRpcTimeoutMs, 250);
+  assert.equal(env.completeRunTimeoutMs, 750);
+});
+
+test("worker internal RPC timeout configuration treats empty strings as unset", () => {
+  const env = loadWorkerEnv({
+    ...baseEnv,
+    AWB_AGENT_INTERNAL_RPC_TIMEOUT_MS: "  ",
+    AWB_AGENT_COMPLETE_RUN_TIMEOUT_MS: ""
+  });
+  assert.equal(env.internalRpcTimeoutMs, 15_000);
+  assert.equal(env.completeRunTimeoutMs, 5_000);
+});
+
+test("worker internal RPC timeout configuration rejects non-positive and non-numeric values", () => {
+  const cases = [
+    ["AWB_AGENT_INTERNAL_RPC_TIMEOUT_MS", "0"],
+    ["AWB_AGENT_INTERNAL_RPC_TIMEOUT_MS", "-1"],
+    ["AWB_AGENT_INTERNAL_RPC_TIMEOUT_MS", "12ms"],
+    ["AWB_AGENT_COMPLETE_RUN_TIMEOUT_MS", "0"],
+    ["AWB_AGENT_COMPLETE_RUN_TIMEOUT_MS", "-1"],
+    ["AWB_AGENT_COMPLETE_RUN_TIMEOUT_MS", "NaN"]
+  ] as const;
+
+  for (const [name, value] of cases) {
+    assert.throws(() => loadWorkerEnv({ ...baseEnv, [name]: value }), new RegExp(`invalid ${name}:`));
+  }
+});
+
+test("worker internal RPC timeout configuration keeps the two values independent", () => {
+  const internalOnly = loadWorkerEnv({ ...baseEnv, AWB_AGENT_INTERNAL_RPC_TIMEOUT_MS: "321" });
+  assert.equal(internalOnly.internalRpcTimeoutMs, 321);
+  assert.equal(internalOnly.completeRunTimeoutMs, 5_000);
+
+  const completeOnly = loadWorkerEnv({ ...baseEnv, AWB_AGENT_COMPLETE_RUN_TIMEOUT_MS: "654" });
+  assert.equal(completeOnly.internalRpcTimeoutMs, 15_000);
+  assert.equal(completeOnly.completeRunTimeoutMs, 654);
+});

@@ -161,6 +161,31 @@ test("RunLifecycleApplication P4 publishes and clears only an effective worker c
   assert.deepEqual(events, [{ eventId: "evt-created", occurredAt: 123, workspaceId: "workspace", sessionId: "session", runId: "run", finalStatus: "completed" }]);
 });
 
+test("RunLifecycleApplication completeRun 响应丢失后的重放不会重复清 cache 或发布事件", () => {
+  const { calls, dependencies } = createDependencies();
+  const events: unknown[] = [];
+  let terminal = false;
+  dependencies.persistence.completeRunFromWorker = (input) => {
+    calls.push(["complete", input]);
+    if (terminal) return false;
+    terminal = true;
+    return true;
+  };
+  dependencies.runCompletedEventPublisher = { publishRunCompleted: (event) => events.push(event) };
+  const application = new RunLifecycleApplication(dependencies);
+  const request = { workspaceId: "workspace", sessionId: "session", runId: "run", status: "completed" as const };
+
+  application.completeRunFromWorker(request); // persisted, then response is presumed lost to the worker
+  application.completeRunFromWorker(request); // retry/fallback replay
+
+  assert.deepEqual(calls, [
+    ["complete", { ...request, updatedAt: 123 }],
+    ["cache", "run"],
+    ["complete", { ...request, updatedAt: 123 }]
+  ]);
+  assert.equal(events.length, 1);
+});
+
 test("RunLifecycleApplication P4 cancel cascades durable state before best-effort runtime cancellation", async () => {
   const { calls, dependencies } = createDependencies();
   const warnings: unknown[] = [];

@@ -14,19 +14,27 @@ const apiClient = new AgentApiClient({
   apiOrigin: env.apiOrigin,
   internalToken: env.internalToken,
   responseValidation: env.responseValidation,
-  logger: console
+  internalRpcTimeoutMs: env.internalRpcTimeoutMs,
+  completeRunTimeoutMs: env.completeRunTimeoutMs,
+  logger: console,
 });
 
 const mcpManager = new McpManager(apiClient, console);
 const attachmentStorage = createAgentAttachmentStorage(env.dataDir);
-const runner = new AgentRunner(apiClient, mcpManager, console, env.concurrency, { attachmentStorage });
+const runner = new AgentRunner(
+  apiClient,
+  mcpManager,
+  console,
+  env.concurrency,
+  { attachmentStorage },
+);
 startBashToolProbe(console);
 const server = createWorkerServer({
   host: env.host,
   port: env.port,
   socketPath: env.socketPath,
   internalToken: env.internalToken,
-  runner
+  runner,
 });
 
 await server.listen();

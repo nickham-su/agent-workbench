@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import type { Socket } from "node:net";
 import test from "node:test";
 import {
   AgentRunner,
@@ -9,6 +11,7 @@ import {
   processNestedRunWithControllerForTest,
   processRunForTest
 } from "./runner.js";
+import { AgentApiClient, InternalRpcTimeoutError } from "./apiClient.js";
 
 function baseProfile() {
   return {
@@ -290,6 +293,161 @@ test("processRun completed 首次 completeRun 失败后不会错误降级为 fai
   await processRunForTest(runner, makeRun("sess_test", "run_test"), new AbortController().signal);
 
   assert.deepEqual(completed, ["completed", "completed"]);
+});
+
+test("completeRun client 两次失败后，runner fallback 再次调用且完整链路不超过四次", async () => {
+  const completed: string[] = [];
+  const apiClient = {
+    async getExecutionProfile() {
+      return baseProfile();
+    },
+    async updateRunState() {
+      return;
+    },
+    async getPromptContext() {
+      return baseContext();
+    },
+    async completeRun(input: { status: string }) {
+      completed.push(input.status);
+      // Each client call represents its already-bounded two HTTP attempts.
+      throw new Error("client exhausted two bounded completeRun attempts");
+    }
+  };
+  const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+  (runner as any).runModelStep = async () => {
+    return { aborted: false as const, toolCallCount: 0, assistantItemId: 1, hasVisibleText: true };
+  };
+
+  await processRunForTest(runner, makeRun("sess_test", "run_test"), new AbortController().signal);
+
+  assert.deepEqual(completed, ["completed", "completed"]);
+  assert.equal(completed.length * 2, 4, "two client calls with max two attempts each cap the full chain at four attempts");
+});
+
+test("completeRun client retry 与 runner fallback 的缩放总等待不超过两轮预算", async () => {
+  const sockets = new Set<Socket>();
+  const server = createServer((_request, _response) => {
+    // Keep every attempt pending until the client's own timeout aborts it.
+  });
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+
+  const attemptTimeoutMs = 15;
+  const scaledBackoffMs = 2;
+  const productionDelays: number[] = [];
+  const warnings: string[] = [];
+  const completeClient = new AgentApiClient({
+    apiOrigin: `http://127.0.0.1:${address.port}`,
+    internalToken: "test-token",
+    internalRpcTimeoutMs: 50,
+    completeRunTimeoutMs: attemptTimeoutMs,
+    logger: { warn(message: unknown) { warnings.push(String(message)); } },
+    sleepFn: async (delayMs) => {
+      productionDelays.push(delayMs);
+      await new Promise<void>((resolve) => setTimeout(resolve, scaledBackoffMs));
+    }
+  });
+  const apiClient = {
+    async getExecutionProfile() {
+      return baseProfile();
+    },
+    async updateRunState() {
+      return;
+    },
+    async getPromptContext() {
+      return baseContext();
+    },
+    completeRun: completeClient.completeRun.bind(completeClient)
+  };
+  const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+  (runner as any).runModelStep = async () => {
+    return { aborted: false as const, toolCallCount: 0, assistantItemId: 1, hasVisibleText: true };
+  };
+  const expectedBudgetMs = 2 * (attemptTimeoutMs + scaledBackoffMs + attemptTimeoutMs);
+  const schedulerAllowanceMs = 120;
+  const startedAt = Date.now();
+  try {
+    await processRunForTest(runner, makeRun("sess_budget", "run_budget"), new AbortController().signal);
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+  const elapsedMs = Date.now() - startedAt;
+
+  const timeoutAttempts = warnings.filter((warning) =>
+    warning.includes("[agent-api] timeout") && warning.includes("policy=runComplete")
+  );
+  assert.equal(timeoutAttempts.length, 4, "two client attempts followed by one runner fallback make four logical attempts");
+  assert.deepEqual(productionDelays, [300, 300], "each bounded client call retains the production 300ms backoff policy");
+  assert.ok(
+    elapsedMs <= expectedBudgetMs + schedulerAllowanceMs,
+    `elapsed ${elapsedMs}ms exceeded scaled budget ${expectedBudgetMs}ms plus ${schedulerAllowanceMs}ms scheduler allowance`
+  );
+});
+
+test("completeRun timeout 在 outer signal 未取消时收敛为 failed 而非 cancelled", async () => {
+  const completed: string[] = [];
+  const apiClient = {
+    async getExecutionProfile() {
+      throw new InternalRpcTimeoutError({
+        method: "POST",
+        endpoint: "/api/internal/agent/execution-profile",
+        timeoutMs: 1
+      });
+    },
+    async completeRun(input: { status: string }) {
+      completed.push(input.status);
+      return;
+    }
+  };
+  const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+
+  await processRunForTest(runner, makeRun("sess_test", "run_test"), new AbortController().signal);
+
+  assert.deepEqual(completed, ["failed"]);
+});
+
+test("enqueueRun 的 finally 在 completeRun 全失败后释放槽位和 session", async () => {
+  let completeCalls = 0;
+  const apiClient = {
+    async getExecutionProfile() {
+      return baseProfile();
+    },
+    async updateRunState() {
+      return;
+    },
+    async getPromptContext() {
+      return baseContext();
+    },
+    async completeRun() {
+      completeCalls += 1;
+      throw new Error("client exhausted completeRun attempts");
+    }
+  };
+  const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+  (runner as any).runModelStep = async () => {
+    return { aborted: false as const, toolCallCount: 0, assistantItemId: 1, hasVisibleText: true };
+  };
+
+  runner.enqueueRun(makeRun("sess_slot", "run_slot"));
+  for (let i = 0; i < 40 && (runner as any).activeCount !== 0; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+
+  assert.equal(completeCalls, 2, "runner fallback gets one additional bounded client call");
+  assert.equal((runner as any).activeCount, 0);
+  assert.equal((runner as any).runningSessions.has("sess_slot"), false);
+  assert.equal(getRegisteredControllerForTest(runner, "sess_slot"), undefined);
 });
 
 test("processRun 遇到 abort-like error 时只提交一次 cancelled", async () => {
