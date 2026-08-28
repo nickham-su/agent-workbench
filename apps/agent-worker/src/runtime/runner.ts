@@ -6,7 +6,7 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call";
-import { AgentApiClient, ApiConflictError, type ExecutionProfile, type PromptContext } from "./apiClient.js";
+import { AgentApiClient, ApiConflictError, InternalRpcHttpError, type ExecutionProfile, type PromptContext } from "./apiClient.js";
 import type { AgentUiLocale } from "@agent-workbench/shared";
 import { getPromptText } from "@agent-workbench/shared/prompts";
 import { McpManager } from "./mcpManager.js";
@@ -235,6 +235,18 @@ function buildSubtaskErrorText(params: {
     headers: [["subtask_session_id", params.subtaskSessionId]],
     body: typeof params.subtaskResultText === "string" ? `${params.error}\n\n${params.subtaskResultText}` : params.error
   });
+}
+
+function formatSubtaskStartError(error: unknown, args: Record<string, unknown>) {
+  const session = toRecordObject(args.session);
+  if (
+    error instanceof InternalRpcHttpError
+    && error.apiCode === "AGENT_SUBTASK_SESSION_NOT_FOUND"
+    && session?.mode === "existing"
+  ) {
+    return "指定的 existing 子任务会话不存在或已失效。请改用 session.mode=\"new\" 或 \"fork\"，或者提供当前工作区中有效的 subtask sessionId。\n\n错误码：AGENT_SUBTASK_SESSION_NOT_FOUND\nHTTP 状态：404";
+  }
+  return error instanceof Error ? error.message : String(error);
 }
 
 function normalizeToolText(raw: string) {
@@ -1460,7 +1472,9 @@ export class AgentRunner {
       } else if (phase === "completed_output_build") capture?.recordEvent("completed_output_build_failed", err);
       else capture?.recordEvent("completed_writeback_failed", err);
 
-      const error = err instanceof Error ? err.message : String(err);
+      const error = tool.toolName === "subtask"
+        ? formatSubtaskStartError(err, tool.args)
+        : err instanceof Error ? err.message : String(err);
       const subtaskSessionId = err && typeof err === "object" ? String((err as any).subtaskSessionId || "").trim() : "";
       const subtaskResultText = err && typeof err === "object" && typeof (err as any).subtaskResultText === "string"
         ? (err as any).subtaskResultText as string

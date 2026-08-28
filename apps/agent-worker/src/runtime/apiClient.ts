@@ -63,6 +63,11 @@ type InternalRpcRetryReason =
   "timeout" | "network" | "http_502" | "http_503" | "http_504";
 
 const RETRY_DELAY_MS = 300;
+const INTERNAL_RPC_ERROR_BODY_MAX_BYTES = 4 * 1024;
+const INTERNAL_RPC_ERROR_CODE_MAX_CHARS = 128;
+const INTERNAL_RPC_ERROR_MESSAGE_MAX_CHARS = 512;
+const INTERNAL_RPC_ERROR_MESSAGE_UNSAFE_CHARS = /[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
+const INTERNAL_RPC_ERROR_CODE_PATTERN = /^[A-Za-z0-9_.:-]+$/;
 
 const EXCLUDED_POLICY: AgentApiClientPolicy = {
   name: "excluded",
@@ -73,6 +78,11 @@ const EXCLUDED_POLICY: AgentApiClientPolicy = {
 type InternalRpcSafeErrorDetails = {
   method: InternalRpcMethod;
   endpoint: string;
+};
+
+type InternalRpcSafeBusinessErrorDetails = {
+  apiCode?: string;
+  safeMessage?: string;
 };
 
 export class InternalRpcTimeoutError extends Error {
@@ -97,15 +107,23 @@ export class InternalRpcHttpError extends Error {
   readonly method: InternalRpcMethod;
   readonly endpoint: string;
   readonly status: number;
+  readonly apiCode?: string;
+  readonly safeMessage?: string;
 
-  constructor(details: InternalRpcSafeErrorDetails & { status: number }) {
+  constructor(details: InternalRpcSafeErrorDetails & { status: number } & InternalRpcSafeBusinessErrorDetails) {
+    const diagnostics = [
+      details.apiCode ? `code=${details.apiCode}` : "",
+      details.safeMessage ? `message=${details.safeMessage}` : "",
+    ].filter(Boolean);
     super(
-      `internal rpc failed: ${details.method} ${details.endpoint} status=${details.status}`,
+      `internal rpc failed: ${details.method} ${details.endpoint} status=${details.status}${diagnostics.length ? ` ${diagnostics.join(" ")}` : ""}`,
     );
     this.name = "InternalRpcHttpError";
     this.method = details.method;
     this.endpoint = details.endpoint;
     this.status = details.status;
+    this.apiCode = details.apiCode;
+    this.safeMessage = details.safeMessage;
   }
 }
 
@@ -180,6 +198,73 @@ function formatSafeResponseSchemaErrorPath(path: string) {
     return "<redacted>";
   }
   return normalized;
+}
+
+function normalizeSafeErrorCode(raw: unknown) {
+  if (typeof raw !== "string") return undefined;
+  const value = raw.trim();
+  if (!value || value.length > INTERNAL_RPC_ERROR_CODE_MAX_CHARS) return undefined;
+  return INTERNAL_RPC_ERROR_CODE_PATTERN.test(value) ? value : undefined;
+}
+
+function normalizeSafeErrorMessage(raw: unknown) {
+  if (typeof raw !== "string") return undefined;
+  const value = raw
+    .replace(INTERNAL_RPC_ERROR_MESSAGE_UNSAFE_CHARS, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!value) return undefined;
+  return value.slice(0, INTERNAL_RPC_ERROR_MESSAGE_MAX_CHARS);
+}
+
+async function readSafeBusinessErrorDetails(response: Response): Promise<InternalRpcSafeBusinessErrorDetails> {
+  const contentLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > INTERNAL_RPC_ERROR_BODY_MAX_BYTES) {
+    await response.body?.cancel().catch(() => undefined);
+    return {};
+  }
+  if (!response.body) return {};
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > INTERNAL_RPC_ERROR_BODY_MAX_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        return {};
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return {};
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    return {};
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  const body = parsed as Record<string, unknown>;
+  const apiCode = normalizeSafeErrorCode(body.code);
+  const safeMessage = normalizeSafeErrorMessage(body.message);
+  return {
+    ...(apiCode ? { apiCode } : {}),
+    ...(safeMessage ? { safeMessage } : {}),
+  };
 }
 
 export type MessagesContext = AgentApiMessagesContextResponse;
@@ -419,6 +504,7 @@ export class AgentApiClient {
     const controller = timeoutMs == null ? null : new AbortController();
     let localTimedOut = false;
     let knownHttpStatus: number | null = null;
+    let knownBusinessError: InternalRpcSafeBusinessErrorDetails = {};
     let receivedSuccessResponse = false;
     const timeout =
       timeoutMs == null
@@ -441,11 +527,7 @@ export class AgentApiClient {
 
       if (!response.ok) {
         knownHttpStatus = response.status;
-        try {
-          await response.text();
-        } catch {
-          // Status is authoritative once received; an error body is always discarded.
-        }
+        knownBusinessError = await readSafeBusinessErrorDetails(response);
         if (options.conflictAsError && knownHttpStatus === 409) {
           throw new ApiConflictError("context conflict");
         }
@@ -453,6 +535,7 @@ export class AgentApiClient {
           method,
           endpoint,
           status: knownHttpStatus,
+          ...knownBusinessError,
         });
       }
 
@@ -491,6 +574,7 @@ export class AgentApiClient {
           method,
           endpoint,
           status: knownHttpStatus,
+          ...knownBusinessError,
         });
       }
       if (localTimedOut) {

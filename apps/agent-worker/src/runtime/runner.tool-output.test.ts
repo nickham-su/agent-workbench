@@ -17,6 +17,7 @@ import {
 } from "./runner.js";
 import { getBashToolAppendix, startBashToolProbe } from "./bashTools.js";
 import { runReadTool } from "./fileTools.js";
+import { InternalRpcHttpError } from "./apiClient.js";
 
 const execFileAsync = promisify(execFile);
 const runnerModuleUrl = new URL("./runner.ts", import.meta.url).href;
@@ -285,6 +286,64 @@ test("普通 Provider reject 会保留 failed output 的调用身份、参数、
     assert.equal(failed.output?.text, "tool: bash\nstatus: failed\n\nfixture provider rejected");
     assert.equal("result" in (failed.output ?? {}), false);
     await assert.rejects(fs.access(path.join(workspacePath, ".awb", "agent", "tool-errors")));
+  });
+});
+
+test("subtask existing 会话缺失会为模型和用户持久化可行动的业务错误", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const updates: Array<{ itemId?: number; status?: string; output?: Record<string, unknown> }> = [];
+    const runner = new AgentRunner(
+      {
+        async updateContextItem(input: { itemId?: number; status?: string; output?: Record<string, unknown> }) {
+          updates.push(input);
+          return { id: input.itemId };
+        },
+      } as any,
+      {} as any,
+      { info() {}, warn() {}, error() {} },
+      1,
+    );
+    (runner as any).toolRegistry = {
+      async isToolEnabled() {
+        return true;
+      },
+      async execute() {
+        throw new InternalRpcHttpError({
+          method: "POST",
+          endpoint: "/api/internal/agent/subtask/start",
+          status: 404,
+          apiCode: "AGENT_SUBTASK_SESSION_NOT_FOUND",
+          safeMessage: "subtask session not found",
+        });
+      },
+    };
+    await executeToolForTest(runner, {
+      profile: testProfile("subtask"),
+      run: testRun(workspacePath),
+      tool: pendingTool({
+        itemId: 1104,
+        toolName: "subtask",
+        args: {
+          agentId: "agent_test",
+          description: "child",
+          prompt: "do it",
+          session: { mode: "existing", sessionId: "sess_missing" },
+        },
+      }),
+      parentSessionId: "sess_baseline",
+      signal: new AbortController().signal,
+      promptContext: testPromptContext(),
+    });
+
+    const failed = latestUpdate(updates, "failed");
+    assert.ok(failed);
+    const error = String(failed.output?.error || "");
+    assert.match(error, /指定的 existing 子任务会话不存在或已失效/);
+    assert.match(error, /session\.mode="new" 或 "fork"/);
+    assert.match(error, /AGENT_SUBTASK_SESSION_NOT_FOUND/);
+    assert.match(error, /HTTP 状态：404/);
+    assert.equal(failed.output?.text, `tool: subtask\nstatus: failed\n\n${error}`);
+    assert.equal(error.includes("internal rpc failed:"), false);
   });
 });
 

@@ -354,8 +354,6 @@ function assertSafeError(
   const text = `${error.message}\n${serialized}\n${JSON.stringify(Object.entries(error))}`;
   for (const secret of [
     "RESPONSE_SECRET",
-    "SERVER_MESSAGE",
-    "SERVER_CODE",
     "WORKSPACE_SECRET",
     "SESSION_SECRET",
     "RUN_SECRET",
@@ -447,6 +445,116 @@ test("known non-2xx status remains authoritative when its body is pending", asyn
   }
 });
 
+test("non-2xx responses retain only bounded structured business-error diagnostics", async () => {
+  const fixture = await startTestServer(() => ({
+    status: 404,
+    body: {
+      code: "AGENT_SUBTASK_SESSION_NOT_FOUND",
+      message: "subtask session not found",
+      secret: "RESPONSE_SECRET",
+      prompt: "PROMPT_SECRET",
+      nested: { token: "TOKEN_SECRET" },
+    },
+  }));
+  const client = createShortTimeoutClient(fixture.origin);
+  await assert.rejects(
+    () => client.startSubtaskRun({
+      ...subtaskStartInput,
+      session: { mode: "existing", sessionId: "MISSING_SESSION" },
+    }),
+    (error: unknown) => {
+      assert(error instanceof InternalRpcHttpError);
+      assert.equal(error.method, "POST");
+      assert.equal(error.endpoint, AgentApiEndpoints.startSubtask.path);
+      assert.equal(error.status, 404);
+      assert.equal(error.apiCode, "AGENT_SUBTASK_SESSION_NOT_FOUND");
+      assert.equal(error.safeMessage, "subtask session not found");
+      assert.match(error.message, /code=AGENT_SUBTASK_SESSION_NOT_FOUND/);
+      assert.match(error.message, /message=subtask session not found/);
+      const text = `${error.message}\n${JSON.stringify(error)}\n${JSON.stringify(Object.entries(error))}`;
+      for (const secret of ["RESPONSE_SECRET", "PROMPT_SECRET", "TOKEN_SECRET", "MISSING_SESSION", "TOKEN"]) {
+        assert.equal(text.includes(secret), false, `safe error must not expose ${secret}`);
+      }
+      return true;
+    },
+  );
+  assert.equal(fixture.attempts.length, 1);
+});
+
+test("non-2xx empty, malformed, non-object, and oversized bodies safely fall back to status diagnostics", async () => {
+  const cases: Array<{ name: string; body?: unknown; headers?: Record<string, string> }> = [
+    { name: "empty" },
+    { name: "non-json", body: "not json RESPONSE_SECRET" },
+    { name: "array", body: [{ code: "SERVER_CODE", message: "SERVER_MESSAGE" }] },
+    { name: "oversized", body: { code: "SERVER_CODE", message: "x".repeat(5_000), secret: "RESPONSE_SECRET" } },
+    { name: "oversized content-length", body: { code: "SERVER_CODE", message: "SERVER_MESSAGE" }, headers: { "content-length": "5000" } },
+  ];
+  for (const entry of cases) {
+    const fixture = await startTestServer(() => ({ status: 400, body: entry.body, headers: entry.headers }));
+    const client = createShortTimeoutClient(fixture.origin);
+    await assert.rejects(
+      () => client.getPromptContext({ workspaceId: "WORKSPACE_SECRET", sessionId: "SESSION_SECRET", runId: "RUN_SECRET" }),
+      (error: unknown) => {
+        assert(error instanceof InternalRpcHttpError);
+        assert.equal(error.status, 400, entry.name);
+        assert.equal(error.apiCode, undefined, entry.name);
+        assert.equal(error.safeMessage, undefined, entry.name);
+        const text = `${error.message}\n${JSON.stringify(error)}\n${JSON.stringify(Object.entries(error))}`;
+        for (const secret of ["RESPONSE_SECRET", "SERVER_CODE", "SERVER_MESSAGE", "WORKSPACE_SECRET", "SESSION_SECRET", "RUN_SECRET", "TOKEN"]) {
+          assert.equal(text.includes(secret), false, `${entry.name} must not expose ${secret}`);
+        }
+        return true;
+      },
+    );
+  }
+});
+
+test("structured error fields are normalized and bounded before exposure", async () => {
+  const fixture = await startTestServer(() => ({
+    status: 400,
+    body: {
+      code: "INVALID CODE WITH SPACES",
+      message: `  ${"safe message ".repeat(80)}\n`,
+      secret: "RESPONSE_SECRET",
+    },
+  }));
+  const client = createShortTimeoutClient(fixture.origin);
+  await assert.rejects(
+    () => client.getPromptContext({ workspaceId: "WORKSPACE", sessionId: "SESSION", runId: "RUN" }),
+    (error: unknown) => {
+      assert(error instanceof InternalRpcHttpError);
+      assert.equal(error.apiCode, undefined);
+      assert.equal(error.safeMessage?.length, 512);
+      assert.equal(error.safeMessage?.includes("\n"), false);
+      assert.equal(error.message.includes("RESPONSE_SECRET"), false);
+      return true;
+    },
+  );
+});
+
+test("structured error messages remove control, ANSI, and bidi characters before exposure", async () => {
+  const fixture = await startTestServer(() => ({
+    status: 400,
+    body: {
+      code: "SAFE_CODE",
+      message: "正常\u001b[31m文本\u001b[0m\u0007\u009b[2K\u061c\u200e\u200f\u202e方向\u2066隔离\u2069结束",
+    },
+  }));
+  const client = createShortTimeoutClient(fixture.origin);
+  await assert.rejects(
+    () => client.getPromptContext({ workspaceId: "WORKSPACE", sessionId: "SESSION", runId: "RUN" }),
+    (error: unknown) => {
+      assert(error instanceof InternalRpcHttpError);
+      const unsafeCharacters = /[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/;
+      assert.equal(error.safeMessage, "正常 [31m文本 [0m [2K 方向 隔离 结束");
+      assert.equal(unsafeCharacters.test(error.safeMessage ?? ""), false);
+      assert.equal(unsafeCharacters.test(error.message), false);
+      assert.match(error.message, /正常 \[31m文本 \[0m \[2K 方向 隔离 结束/);
+      return true;
+    },
+  );
+});
+
 test("all public client methods are explicitly classified", () => {
   assert.deepEqual(AgentApiClient.publicMethodPolicies, {
     createContextItem: "controlWrite",
@@ -493,6 +601,7 @@ test("controlRead retry boundaries and normal success diagnostics are bounded", 
     const recorder = createWarningRecorder();
     const client = createShortTimeoutClient(fixture.origin, {
       logger: recorder.logger,
+      timing: { internalRpcTimeoutMs: 100 },
     });
     await assert.rejects(() =>
       client.getPromptContext({
