@@ -1,4 +1,5 @@
 import type { Db } from "../infra/db/db.js";
+import type { AppLogLevel } from "../config/env.js";
 import type { CredentialMasterKeySource } from "../infra/crypto/credentialMasterKey.js";
 import type { PreviewRuntime } from "../modules/preview/preview-runtime.js";
 
@@ -21,7 +22,7 @@ export type AppContext = {
   dataDir: string;
   fileMaxBytes: number;
   version: string;
-  logLevel?: string;
+  logLevel?: AppLogLevel;
   serveWeb: boolean;
   webDistDir: string | null;
   credentialMasterKey: Buffer;

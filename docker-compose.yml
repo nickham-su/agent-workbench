@@ -23,6 +23,7 @@ services:
       AWB_PORT: ${AWB_PORT:-4310}
       AWB_DATA_DIR: ${AWB_DATA_DIR:-/data}
       AWB_FILE_MAX_BYTES: ${AWB_FILE_MAX_BYTES:-}
+      AWB_LOG_LEVEL: ${AWB_LOG_LEVEL:-info}
       AWB_APP_VERSION: ${AWB_APP_VERSION:-}
       AWB_SERVE_WEB: ${AWB_SERVE_WEB:-1}
       AWB_WEB_DIST_DIR: ${AWB_WEB_DIST_DIR:-/app/apps/web/dist}

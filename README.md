@@ -105,6 +105,7 @@ If you need to publish ports to LAN/public directly, use `AWB_PUBLISH_HOST=0.0.0
 | `AWB_HOST` | `.env.example`: `0.0.0.0`; `.env.dev.example`: `127.0.0.1`. API listen host (Docker usually binds all interfaces in-container; local dev defaults to loopback). |
 | `AWB_PORT` | `.env.example`: `4310`; `.env.dev.example`: `4310`. Web UI + API port. |
 | `AWB_FILE_MAX_BYTES` | `.env.example`: `1048576`; `.env.dev.example`: `1048576`. Max bytes for file preview/compare. |
+| `AWB_LOG_LEVEL` | API log level. One of `trace`, `debug`, `info` (default), `warn`, `error`, or `fatal`; restart the API after changing it. |
 | `AWB_APP_VERSION` | Optional override for `/api/health` version (empty by default). |
 | `AWB_SERVE_WEB` | `.env.example`: `1`; `.env.dev.example`: `0`. `1` = API serves built web assets (single-port mode); `0` = local dev usually uses Vite dev server. |
 | `AWB_WEB_DIST_DIR` | `.env.example`: `/app/apps/web/dist`; `.env.dev.example`: `apps/web/dist`. Web static asset directory when `AWB_SERVE_WEB=1`. |

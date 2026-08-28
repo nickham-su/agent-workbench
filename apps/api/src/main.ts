@@ -35,7 +35,7 @@ if (env.preview.enabled) {
     previewApp = await createPreviewApp({ runtime, fileService: createWorkspacePreviewFileService({ db }) });
     const app = await createApp({
       db, repoRoot, dataDir: env.dataDir, fileMaxBytes: env.fileMaxBytes, version,
-      logLevel: process.env.AWB_LOG_LEVEL?.trim() || "info", serveWeb: env.serveWeb, webDistDir: env.webDistDir,
+      logLevel: env.logLevel, serveWeb: env.serveWeb, webDistDir: env.webDistDir,
       credentialMasterKey: credentialMasterKey.key, credentialMasterKeySource: credentialMasterKey.source,
       credentialMasterKeyId: credentialMasterKey.keyId, credentialMasterKeyCreatedAt: credentialMasterKey.createdAt,
       authToken: env.authToken, authCookieSecure: env.authCookieSecure,
@@ -74,7 +74,7 @@ if (env.preview.enabled) {
     dataDir: env.dataDir,
     fileMaxBytes: env.fileMaxBytes,
     version,
-    logLevel: process.env.AWB_LOG_LEVEL?.trim() || "info",
+    logLevel: env.logLevel,
     serveWeb: env.serveWeb,
     webDistDir: env.webDistDir,
     credentialMasterKey: credentialMasterKey.key,

@@ -4,6 +4,10 @@ import { isIP } from "node:net";
 
 export const PREVIEW_BOOTSTRAP_TTL_MS = 60_000;
 
+export const APP_LOG_LEVELS = ["trace", "debug", "info", "warn", "error", "fatal"] as const;
+
+export type AppLogLevel = typeof APP_LOG_LEVELS[number];
+
 export type PreviewConfig =
   | Readonly<{ enabled: false }>
   | Readonly<{
@@ -21,6 +25,7 @@ export type Env = {
   host: string;
   port: number;
   fileMaxBytes: number;
+  logLevel: AppLogLevel;
   serveWeb: boolean;
   webDistDir: string | null;
   authToken: string | null;
@@ -51,6 +56,16 @@ function parsePositiveInt(raw: string, name: string) {
 function parseBool(raw: string, fallback: boolean) {
   if (!raw) return fallback;
   return ["1", "true", "yes", "on"].includes(raw.toLowerCase());
+}
+
+function parseLogLevel(raw: string) {
+  const level = raw.trim().toLowerCase() || "info";
+  if (!(APP_LOG_LEVELS as readonly string[]).includes(level)) {
+    throw new Error(
+      `Invalid AWB_LOG_LEVEL: ${level}. Expected one of: ${APP_LOG_LEVELS.join(", ")}.`
+    );
+  }
+  return level as AppLogLevel;
 }
 
 function normalizeApiOriginHost(host: string) {
@@ -135,6 +150,7 @@ export function loadEnv(processEnv: NodeJS.ProcessEnv): Env {
   const host = processEnv.AWB_HOST?.trim() || "127.0.0.1";
   const portRaw = processEnv.AWB_PORT?.trim() || "4310";
   const fileMaxBytesRaw = processEnv.AWB_FILE_MAX_BYTES?.trim() || "1048576";
+  const logLevelRaw = processEnv.AWB_LOG_LEVEL || "";
   const serveWebRaw = processEnv.AWB_SERVE_WEB?.trim() || "";
   const webDistDirRaw = processEnv.AWB_WEB_DIST_DIR?.trim() || "";
   const authTokenRaw = processEnv.AWB_AUTH_TOKEN?.trim() || "";
@@ -162,6 +178,7 @@ export function loadEnv(processEnv: NodeJS.ProcessEnv): Env {
   const agentWorkerPort = parsePositiveInt(workerPortRaw, "AWB_AGENT_WORKER_PORT");
   const agentWorkerConcurrency = parsePositiveInt(workerConcurrencyRaw, "AWB_AGENT_WORKER_CONCURRENCY");
 
+  const logLevel = parseLogLevel(logLevelRaw);
   const serveWeb = parseBool(serveWebRaw, false);
   const webDistDir = webDistDirRaw ? path.resolve(webDistDirRaw) : null;
   const authToken = authTokenRaw ? authTokenRaw : null;
@@ -206,6 +223,7 @@ export function loadEnv(processEnv: NodeJS.ProcessEnv): Env {
     host,
     port: mainPort,
     fileMaxBytes,
+    logLevel,
     serveWeb,
     webDistDir,
     authToken,

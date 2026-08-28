@@ -1,6 +1,34 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { loadEnv } from "./env.js";
+import { APP_LOG_LEVELS, loadEnv } from "./env.js";
+
+test("log level defaults to info and normalizes whitespace and casing", () => {
+  assert.equal(loadEnv({ AWB_DATA_DIR: ".tmp-env-log-level-default" }).logLevel, "info");
+  assert.equal(
+    loadEnv({ AWB_DATA_DIR: ".tmp-env-log-level-normalized", AWB_LOG_LEVEL: "  WaRn " }).logLevel,
+    "warn"
+  );
+  assert.equal(
+    loadEnv({ AWB_DATA_DIR: ".tmp-env-log-level-whitespace", AWB_LOG_LEVEL: "   " }).logLevel,
+    "info"
+  );
+});
+
+test("log level accepts all supported values", () => {
+  for (const logLevel of APP_LOG_LEVELS) {
+    assert.equal(
+      loadEnv({ AWB_DATA_DIR: `.tmp-env-log-level-${logLevel}`, AWB_LOG_LEVEL: logLevel }).logLevel,
+      logLevel
+    );
+  }
+});
+
+test("log level rejects unsupported values during environment parsing", () => {
+  assert.throws(
+    () => loadEnv({ AWB_DATA_DIR: ".tmp-env-log-level-invalid", AWB_LOG_LEVEL: "verbose" }),
+    /Invalid AWB_LOG_LEVEL: verbose\. Expected one of: trace, debug, info, warn, error, fatal\./
+  );
+});
 
 test("internal RPC response validation defaults to strict and accepts warn", () => {
   assert.equal(loadEnv({ AWB_DATA_DIR: ".tmp-env-default" }).agentWorkerResponseValidation, "strict");
