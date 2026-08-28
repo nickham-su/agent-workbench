@@ -661,6 +661,10 @@ async function ensureSessionCreated(sessionId: string) {
       (a, b) => b.updatedAt - a.updatedAt
     );
 
+    // 草稿切换为真实 Session 后，立即开始加载权威模型状态。loadSessionModelStates
+    // 会同步标记 loading，避免新 Pane 在首次发送期间把“尚未加载”误显示为“不可用”。
+    void loadSessionModelStates(created.id).catch(() => undefined);
+
     const picked = selectedAgentBySession[sessionId] ?? null;
     selectedAgentBySession[created.id] = picked;
     delete selectedAgentBySession[sessionId];
