@@ -44,6 +44,18 @@ export class AgentService {
     return this.capabilities.session.forkPrimarySession(...args);
   }
 
+  listSessionModelOverrides(...args: Parameters<AgentServiceCapabilities["session"]["listSessionModelOverrides"]>): ReturnType<AgentServiceCapabilities["session"]["listSessionModelOverrides"]> {
+    return this.capabilities.session.listSessionModelOverrides(...args);
+  }
+
+  setSessionModelOverride(...args: Parameters<AgentServiceCapabilities["session"]["setSessionModelOverride"]>): ReturnType<AgentServiceCapabilities["session"]["setSessionModelOverride"]> {
+    return this.capabilities.session.setSessionModelOverride(...args);
+  }
+
+  resetSessionModelOverride(...args: Parameters<AgentServiceCapabilities["session"]["resetSessionModelOverride"]>): ReturnType<AgentServiceCapabilities["session"]["resetSessionModelOverride"]> {
+    return this.capabilities.session.resetSessionModelOverride(...args);
+  }
+
   sendMessage(...args: Parameters<AgentServiceCapabilities["session"]["sendMessage"]>): ReturnType<AgentServiceCapabilities["session"]["sendMessage"]> {
     return this.capabilities.session.sendMessage(...args);
   }

@@ -100,6 +100,9 @@ import type {
   AgentContextItemRecord,
   AgentSessionRecord,
   AgentSessionRunState,
+  AgentSessionAgentModelState,
+  AgentSessionModelOverridesResponse,
+  UpdateAgentSessionModelOverrideRequest,
   AgentControlResult,
   AgentCancelSessionRequest,
   AgentProvidersSettingsView,
@@ -1099,6 +1102,44 @@ export async function updateAgentSettings(body: UpdateAgentSettingsRequest) {
 export async function listAgentSessions(workspaceId: string) {
   try {
     const res = await client.get<AgentSessionRecord[]>("/agent/sessions", {
+      params: { workspaceId }
+    });
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+/** Returns the persisted effective primary-model state for every editable Agent in one Session. */
+export async function listAgentSessionModelOverrides(sessionId: string, workspaceId: string) {
+  try {
+    const res = await client.get<AgentSessionModelOverridesResponse>(`/agent/sessions/${sessionId}/model-overrides`, {
+      params: { workspaceId }
+    });
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+/** Sets one Agent's primary-model override for the current Session only. */
+export async function updateAgentSessionModelOverride(
+  sessionId: string,
+  agentId: string,
+  body: UpdateAgentSessionModelOverrideRequest
+) {
+  try {
+    const res = await client.put<AgentSessionAgentModelState>(`/agent/sessions/${sessionId}/agents/${agentId}/model-override`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+/** Clears one Agent's current-Session override and returns the resulting default-layer state. */
+export async function resetAgentSessionModelOverride(sessionId: string, agentId: string, workspaceId: string) {
+  try {
+    const res = await client.delete<AgentSessionAgentModelState>(`/agent/sessions/${sessionId}/agents/${agentId}/model-override`, {
       params: { workspaceId }
     });
     return res.data;

@@ -68,6 +68,7 @@ export class SessionInteractionApplication {
 
     const profile = this.dependencies.profileReader.resolveUser({
       workspaceId: session.workspaceId,
+      sessionId: session.id,
       requestedAgentId: params.body.agentId
     });
     try {

@@ -156,6 +156,79 @@ export const AgentSessionRecordSchema = Type.Object({
 });
 export type AgentSessionRecord = Static<typeof AgentSessionRecordSchema>;
 
+/** Configuration source for a session's effective Agent primary model. */
+export const AgentSessionModelSourceSchema = Type.Union([
+  Type.Literal("session_override"),
+  Type.Literal("agent_default")
+]);
+export type AgentSessionModelSource = Static<typeof AgentSessionModelSourceSchema>;
+
+export const AgentSessionModelStatusSchema = Type.Union([
+  Type.Literal("ready"),
+  Type.Literal("invalid"),
+  Type.Literal("missing")
+]);
+export type AgentSessionModelStatus = Static<typeof AgentSessionModelStatusSchema>;
+
+export const AgentSessionModelRefSchema = Type.Object({
+  providerId: Type.String({ minLength: 1 }),
+  modelId: Type.String({ minLength: 1 })
+}, { additionalProperties: false });
+export type AgentSessionModelRef = Static<typeof AgentSessionModelRefSchema>;
+
+export const AgentSessionModelOverrideSchema = Type.Object({
+  ...AgentSessionModelRefSchema.properties,
+  updatedAt: Type.Number({ exclusiveMinimum: 0 })
+}, { additionalProperties: false });
+export type AgentSessionModelOverride = Static<typeof AgentSessionModelOverrideSchema>;
+
+export const AgentSessionEffectiveModelSchema = Type.Object({
+  ...AgentSessionModelRefSchema.properties,
+  providerName: Type.String({ minLength: 1 }),
+  modelName: Type.String({ minLength: 1 }),
+  contextWindowTokens: Type.Number({ minimum: 1 })
+}, { additionalProperties: false });
+export type AgentSessionEffectiveModel = Static<typeof AgentSessionEffectiveModelSchema>;
+
+/**
+ * Read-side projection for one (sessionId, agentId) primary-model setting.
+ * `source` describes the configuration layer only; consumers must use
+ * `status` and `reasonCode` to determine whether the model is executable.
+ */
+export const AgentSessionAgentModelStateSchema = Type.Object({
+  sessionId: Type.String({ minLength: 1 }),
+  agentId: Type.String({ minLength: 1 }),
+  agentName: Type.String({ minLength: 1 }),
+  editable: Type.Boolean(),
+  agentDefaultModel: Type.Union([AgentSessionModelRefSchema, Type.Null()]),
+  override: Type.Union([AgentSessionModelOverrideSchema, Type.Null()]),
+  effectiveModel: Type.Union([AgentSessionEffectiveModelSchema, Type.Null()]),
+  source: AgentSessionModelSourceSchema,
+  status: AgentSessionModelStatusSchema,
+  reasonCode: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+  message: Type.Union([Type.String({ minLength: 1 }), Type.Null()])
+}, { additionalProperties: false });
+export type AgentSessionAgentModelState = Static<typeof AgentSessionAgentModelStateSchema>;
+
+export const AgentSessionModelOverridesResponseSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
+  sessionId: Type.String({ minLength: 1 }),
+  items: Type.Array(AgentSessionAgentModelStateSchema)
+}, { additionalProperties: false });
+export type AgentSessionModelOverridesResponse = Static<typeof AgentSessionModelOverridesResponseSchema>;
+
+export const UpdateAgentSessionModelOverrideRequestSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
+  providerId: Type.String({ minLength: 1 }),
+  modelId: Type.String({ minLength: 1 })
+}, { additionalProperties: false });
+export type UpdateAgentSessionModelOverrideRequest = Static<typeof UpdateAgentSessionModelOverrideRequestSchema>;
+
+export const AgentSessionModelWorkspaceQuerySchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 })
+}, { additionalProperties: false });
+export type AgentSessionModelWorkspaceQuery = Static<typeof AgentSessionModelWorkspaceQuerySchema>;
+
 export const AgentContextItemRecordSchema = Type.Object({
   id: Type.Number({ minimum: 1 }),
   workspaceId: Type.String({ minLength: 1 }),

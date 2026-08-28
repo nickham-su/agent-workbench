@@ -157,6 +157,7 @@ test("SessionInteractionApplication preserves send validation order, non-authori
   });
   assert.equal(result.deduplicated, false);
   assert.deepEqual(active.calls.map(([kind]) => kind), ["dedup", "run-state", "profile", "start"]);
+  assert.deepEqual(active.calls[2], ["profile", { workspaceId: "workspace", sessionId: primary.id, requestedAgentId: undefined }]);
   const start = active.calls[3]?.[1] as Record<string, unknown>;
   assert.equal(start.text, "raw text");
   assert.equal(start.inputText, "  raw text  ");

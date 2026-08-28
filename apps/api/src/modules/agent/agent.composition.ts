@@ -68,6 +68,10 @@ import {
   getSessionTranscriptItems,
   getSessionVisibleItems,
   insertClientRequestDedup,
+  getSessionAgentModelOverride,
+  listSessionAgentModelOverrides,
+  upsertSessionAgentModelOverride,
+  deleteSessionAgentModelOverride,
   listNonTerminalSessionItemIds,
   listNonTerminalSessionItemIdsByRunId,
   hasNonTerminalSessionItems,
@@ -86,6 +90,7 @@ import {
   getAgentRuntimeSettings,
   registerGlobalSystemPromptTextProvider,
   getAgentSettings,
+  getAgentProvidersSettingsInternal,
   listAvailableAgentsForSurface,
   getAgentChannelSenderAllowlistSettings,
   resolveExecutionProfile
@@ -123,6 +128,7 @@ import type {
 import type { AgentRuntimePort } from "./agent.runtime-port.js";
 import { SessionInteractionApplication } from "./session/session-interaction-application.js";
 import { SqliteSessionInteractionStore } from "./session/sqlite-session-interaction-store.js";
+import { SessionAgentModelApplication } from "./session/session-agent-model-application.js";
 import { ContextQueryApplication } from "./query/context-query-application.js";
 import { PeripheralAgentQueryApplication } from "./query/peripheral-agent-query-application.js";
 import { SqliteContextQueryStore, SqlitePeripheralAgentQueryStore } from "./query/sqlite-query-stores.js";
@@ -1129,7 +1135,10 @@ function createSessionFacadeCapabilities<T extends {
   sendMessage: (...args: any[]) => any;
   compactSession: (...args: any[]) => any;
   revertSession: (...args: any[]) => any;
-}>(dependencies: T): Pick<T, "cleanupSubtaskOrphansOnStartup" | "listSessions" | "getSession" | "getWorkspace" | "createPrimarySession" | "forkPrimarySession" | "sendMessage" | "compactSession" | "revertSession"> {
+  listSessionModelOverrides: (...args: any[]) => any;
+  setSessionModelOverride: (...args: any[]) => any;
+  resetSessionModelOverride: (...args: any[]) => any;
+}>(dependencies: T): Pick<T, "cleanupSubtaskOrphansOnStartup" | "listSessions" | "getSession" | "getWorkspace" | "createPrimarySession" | "forkPrimarySession" | "sendMessage" | "compactSession" | "revertSession" | "listSessionModelOverrides" | "setSessionModelOverride" | "resetSessionModelOverride"> {
   const {
     cleanupSubtaskOrphansOnStartup,
     listSessions,
@@ -1139,7 +1148,10 @@ function createSessionFacadeCapabilities<T extends {
     forkPrimarySession,
     sendMessage,
     compactSession,
-    revertSession
+    revertSession,
+    listSessionModelOverrides,
+    setSessionModelOverride,
+    resetSessionModelOverride
   } = dependencies;
   return {
     cleanupSubtaskOrphansOnStartup,
@@ -1150,7 +1162,10 @@ function createSessionFacadeCapabilities<T extends {
     forkPrimarySession,
     sendMessage,
     compactSession,
-    revertSession
+    revertSession,
+    listSessionModelOverrides,
+    setSessionModelOverride,
+    resetSessionModelOverride
   };
 }
 
@@ -1220,6 +1235,7 @@ type AgentCompositionEnvironment = {
   getWorkspaceEnabledAgentIds: (workspaceId: string) => ReturnType<typeof getWorkspaceEnabledAgentIds>;
   getWorkspaceRunContext: (workspaceId: string) => ReturnType<typeof getAgentWorkspaceRunContext>;
   getAgentSettings: () => ReturnType<typeof getAgentSettings>;
+  getAgentProvidersSettings: () => ReturnType<typeof getAgentProvidersSettingsInternal>;
   getAgentRuntimeSettings: () => ReturnType<typeof getAgentRuntimeSettings>;
   getAgentGlobalPromptSettings: () => ReturnType<typeof getAgentGlobalPromptSettings>;
   getAgentMcpSettings: () => ReturnType<typeof getAgentMcpSettings>;
@@ -1240,6 +1256,7 @@ function createAgentCompositionEnvironment(ctx: AppContext, logger: FastifyBaseL
     getWorkspaceEnabledAgentIds: (workspaceId) => getWorkspaceEnabledAgentIds(ctx, workspaceId),
     getWorkspaceRunContext: (workspaceId) => getAgentWorkspaceRunContext(ctx, workspaceId),
     getAgentSettings: () => getAgentSettings(ctx),
+    getAgentProvidersSettings: () => getAgentProvidersSettingsInternal(ctx),
     getAgentRuntimeSettings: () => getAgentRuntimeSettings(ctx),
     getAgentGlobalPromptSettings: () => getAgentGlobalPromptSettings(ctx),
     getAgentMcpSettings: () => getAgentMcpSettings(ctx),
@@ -1259,6 +1276,7 @@ function createArchiveCompactionAssembly(assembly: {
   runPromptStaticCache: RunPromptStaticCache<RunPromptStatic>;
   failAfterEnqueueFailure: (input: any) => unknown;
   getControlRunState: (sessionId: string) => AgentSessionRunState;
+  resolvePrimarySessionModel: (input: { workspaceId: string; sessionId: string; requestedAgentId?: string | null }) => { agentId: string; providerId: string; modelId: string };
 }) {
     const archiveStorage = assembly.dependencies?.archiveStorage ?? new ArchiveStorage({ dataDir: assembly.environment.dataDir, logger: assembly.logger });
     const compactionArchivePersistence = assembly.dependencies?.compactionArchivePersistence ?? new SqliteCompactionArchivePersistence(assembly.environment.db);
@@ -1314,9 +1332,8 @@ function createArchiveCompactionAssembly(assembly: {
       findDedup: (params) => findClientRequestDedup(assembly.environment.db, params),
       getRunState: (workspaceId, sessionId) => getStoredRunState(assembly.environment.db, workspaceId, sessionId),
       getControlRunState: (sessionId) => assembly.getControlRunState(sessionId),
-      resolveProfile: ({ workspaceId, requestedAgentId }) => {
-        const profile = assembly.environment.resolveExecutionProfile( { surface: "user", requestedAgentId, workspaceEnablement: assembly.environment.getWorkspaceEnabledAgentIds( workspaceId) });
-        return { agentId: profile.agent.id, providerId: profile.provider.id, modelId: profile.model.id };
+      resolveProfile: ({ workspaceId, sessionId, requestedAgentId }) => {
+        return assembly.resolvePrimarySessionModel({ workspaceId, sessionId, requestedAgentId });
       },
       getWorkspaceRunContext: (workspaceId) => assembly.environment.getWorkspaceRunContext( workspaceId),
       activate: (params) => {
@@ -1355,6 +1372,7 @@ function createLifecycleSessionSubtaskAssembly(assembly: {
   getControlRunState: (sessionId: string) => AgentSessionRunState;
   resolveSubtaskParentContext: (input: any) => any;
   resolveSubtaskForkBoundaryItemId: (input: any) => any;
+  resolvePrimarySessionModel: (input: { workspaceId: string; sessionId: string; requestedAgentId?: string | null }) => { agentId: string; providerId: string; modelId: string };
 }) {
     const sqliteLifecyclePersistence = new SqliteRunLifecyclePersistence(assembly.environment.db);
     const sqliteSubtaskLineagePersistence = new SqliteSubtaskLineagePersistence(assembly.environment.db);
@@ -1413,13 +1431,8 @@ function createLifecycleSessionSubtaskAssembly(assembly: {
     const sessionInteractionApplication = new SessionInteractionApplication({
       store: sessionStore,
       profileReader: {
-        resolveUser: ({ workspaceId, requestedAgentId }) => {
-          const profile = assembly.environment.resolveExecutionProfile( {
-            surface: "user",
-            requestedAgentId,
-            workspaceEnablement: assembly.environment.getWorkspaceEnabledAgentIds( workspaceId)
-          });
-          return { agentId: profile.agent.id, providerId: profile.provider.id, modelId: profile.model.id };
+        resolveUser: ({ workspaceId, sessionId, requestedAgentId }) => {
+          return assembly.resolvePrimarySessionModel({ workspaceId, sessionId, requestedAgentId });
         }
       },
       lifecycleStarter: runLifecycleApplication,
@@ -1677,13 +1690,36 @@ function createAgentApplications(
   const sessionOpLocks = new Map<string, Promise<void>>();
   const runPromptStaticCache = new RunPromptStaticCache<Awaited<ReturnType<PromptStaticAssembler["assemble"]>>>();
 
+  const sessionAgentModelApplication = new SessionAgentModelApplication({
+    sessions: { get: (sessionId) => getAgentSession(environment.db, sessionId) },
+    overrides: {
+      get: (params) => getSessionAgentModelOverride(environment.db, params),
+      list: (params) => listSessionAgentModelOverrides(environment.db, params),
+      upsert: (record) => upsertSessionAgentModelOverride(environment.db, record),
+      delete: (params) => deleteSessionAgentModelOverride(environment.db, params)
+    },
+    settings: {
+      getAgents: () => environment.getAgentSettings().agents,
+      getProviders: () => environment.getAgentProvidersSettings(),
+      getWorkspaceEnablement: (workspaceId) => environment.getWorkspaceEnabledAgentIds(workspaceId)
+    },
+    clock: { nowMs }
+  });
+  const resolvePrimarySessionModel = (input: { workspaceId: string; sessionId: string; requestedAgentId?: string | null }) => {
+    const agentId = input.requestedAgentId?.trim() || environment.resolveExecutionProfile({ surface: "user", requestedAgentId: input.requestedAgentId, workspaceEnablement: environment.getWorkspaceEnabledAgentIds(input.workspaceId) }).agent.id;
+    const resolved = sessionAgentModelApplication.resolveForNewRun({ workspaceId: input.workspaceId, sessionId: input.sessionId, agentId });
+    const profile = environment.resolveExecutionProfile({ surface: "user", requestedAgentId: agentId, workspaceEnablement: environment.getWorkspaceEnabledAgentIds(input.workspaceId), modelOverride: { providerId: resolved.providerId, modelId: resolved.modelId } });
+    return { agentId: profile.agent.id, providerId: profile.provider.id, modelId: profile.model.id };
+  };
+
   const archiveAssembly = createArchiveCompactionAssembly({
     environment,
     logger,
     dependencies,
     runPromptStaticCache,
     getControlRunState: (sessionId) => getRunState(sessionId),
-    failAfterEnqueueFailure: (input) => runLifecycleApplication.failRunAfterEnqueueFailure(input)
+    failAfterEnqueueFailure: (input) => runLifecycleApplication.failRunAfterEnqueueFailure(input),
+    resolvePrimarySessionModel
   });
   const {
     archiveStorage,
@@ -1702,7 +1738,8 @@ function createAgentApplications(
     runCompletedEventHub,
     getControlRunState: (sessionId) => getRunState(sessionId),
     resolveSubtaskParentContext,
-    resolveSubtaskForkBoundaryItemId
+    resolveSubtaskForkBoundaryItemId,
+    resolvePrimarySessionModel
   });
   const {
     sqliteLifecyclePersistence,
@@ -2003,7 +2040,7 @@ function createAgentApplications(
         agentId: profile.agent.id,
         providerId: profile.provider.id,
         modelId: profile.model.id,
-        source: "agent_default" as const
+        source: "run_snapshot" as const
       },
       provider: profile.provider,
       model: profile.model
@@ -2426,7 +2463,10 @@ function createAgentApplications(
     forkPrimarySession,
     sendMessage,
     compactSession,
-    revertSession
+    revertSession,
+    listSessionModelOverrides: (params) => sessionAgentModelApplication.list(params),
+    setSessionModelOverride: (params) => sessionAgentModelApplication.put(params),
+    resetSessionModelOverride: (params) => sessionAgentModelApplication.delete(params)
   });
   const query = createQueryFacadeCapabilities({
     listRecentSessions,

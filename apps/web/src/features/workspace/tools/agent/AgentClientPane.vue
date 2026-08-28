@@ -417,8 +417,8 @@
             v-model:value="draft"
             class="agent-input-textarea"
             :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
-            :disabled="!hasAvailableAgents"
-            :readonly="sending"
+            :disabled="!hasAvailableAgents || sessionModelMutationPending"
+            :readonly="sending || sessionModelMutationPending"
             :auto-size="{ minRows: 2, maxRows: 6 }"
             :placeholder="inputPlaceholder"
             @keydown="onInputKeydown"
@@ -435,19 +435,23 @@
               :value="effectiveAgentId"
               :options="props.agentOptions"
               size="small"
+              :disabled="sessionModelMutationPending"
               style="min-width: 180px; max-width: 320px"
               @update:value="onAgentChange"
             />
             <div v-if="hasAvailableAgents" class="min-w-0 max-w-[360px] flex items-center ml-1 mr-2">
-              <a-tooltip :title="t('agent.client.modelEditTooltip')" placement="top" :mouse-enter-delay="0.45">
+              <a-tooltip :title="sessionModelTooltip" placement="top" :mouse-enter-delay="0.45">
                 <a-button
                   type="text"
                   size="small"
-                  class="!px-0.5 max-w-full"
-                  :title="effectiveModelLabel || t('agent.client.modelEditUnavailable')"
+                  class="!px-0.5 max-w-full min-w-0"
+                  :loading="sessionModelStateLoading"
+                  :disabled="sessionModelMutationPending"
+                  :title="sessionModelLabel"
+                  :aria-label="t('agent.client.modelEditTooltip')"
                   @click="onOpenAgentModelModal"
                 >
-                 {{ effectiveModelLabel || t("agent.client.modelEditUnavailable") }}
+                  <span class="block max-w-full truncate">{{ sessionModelLabel }}</span>
                 </a-button>
               </a-tooltip>
             </div>
@@ -575,9 +579,10 @@
       :ok-text="t('common.save')"
       :cancel-text="t('common.cancel')"
       :confirm-loading="agentModelSaving"
-      :ok-button-props="{ disabled: agentModelLoading || !!agentModelError }"
+      :ok-button-props="{ disabled: agentModelLoading || !!agentModelError || !agentModelCanSave || agentModelSaving || agentModelResetting }"
+      :cancel-button-props="{ disabled: agentModelSaving || agentModelResetting }"
       @ok="onSaveAgentModel"
-      @cancel="agentModelModalVisible = false"
+      @cancel="onCloseAgentModelModal"
     >
       <div class="text-[0.9em] text-[color:var(--text-tertiary)] mb-3">
         {{ t("agent.client.modelEditHint") }}
@@ -600,6 +605,23 @@
             />
           </a-form-item>
         </a-form>
+        <div class="text-[0.9em] text-[color:var(--text-tertiary)] flex flex-col gap-1">
+          <div>{{ t("agent.client.modelEditDefault", { model: agentModelDefaultLabel }) }}</div>
+          <div>{{ t("agent.client.modelEditEffective", { model: sessionModelLabel }) }}</div>
+        </div>
+        <div v-if="sessionModelState?.status !== 'ready'" class="mt-3 text-red-500 whitespace-pre-wrap break-words">
+          {{ sessionModelState?.message || t("agent.client.modelEditUnavailable") }}
+        </div>
+        <div class="mt-4">
+          <a-button
+            danger
+            :loading="agentModelResetting"
+            :disabled="!sessionModelState?.override || agentModelSaving || agentModelResetting"
+            @click="onResetAgentModel"
+          >
+            {{ t("agent.client.modelEditReset") }}
+          </a-button>
+        </div>
       </div>
     </a-modal>
 
@@ -695,12 +717,11 @@
 import type {
   AgentContextItemRecord,
   AgentMessageImageAttachment,
-  AgentDefaultModel,
   AgentGlobalPromptItem,
   AgentSubtaskRunSummary,
   AgentProvidersSettingsView,
-  AgentSessionRunState,
-  UpdateAgentSettingsRequest
+  AgentSessionAgentModelState,
+  AgentSessionRunState
 } from "@agent-workbench/shared";
 import {
   CheckCircleOutlined,
@@ -741,6 +762,11 @@ import {
   upsertAgentContextItem
 } from "./subtaskRunDisplay";
 import {
+  canRequestSessionModelOpen,
+  isSessionModelSendBlocked,
+  resolveSessionModelPresentation
+} from "./agentSessionModelPresentation";
+import {
   ApiError,
   cancelAgentSession,
   clearAgentSession,
@@ -758,9 +784,9 @@ import {
   getAgentGlobalPromptSettings,
   listWorkspaceTopLevelSkills,
   getAgentProvidersSettings,
-  getAgentSettings,
   suggestWorkspaceFilePaths,
-  updateAgentSettings,
+  resetAgentSessionModelOverride,
+  updateAgentSessionModelOverride,
   sendAgentMessage,
   sendAgentMessageMultipart,
   getAgentAttachmentContent,
@@ -902,6 +928,10 @@ const props = defineProps<{
   active: boolean;
   modelValue?: string | null;
   agentOptions: AgentOption[];
+  sessionModelStates: Record<string, AgentSessionAgentModelState>;
+  sessionModelStateLoading: boolean;
+  sessionModelMutationPending: boolean;
+  modelOpenIntent: { agentId: string; requestId: number; ready: boolean } | null;
 }>();
 
 const emit = defineEmits<{
@@ -913,6 +943,10 @@ const emit = defineEmits<{
   "session-title-sync-needed": [sessionId: string];
   "agent-settings-updated": [];
   "reset-to-draft": [payload: { sessionId: string; draftText: string }];
+  "request-session-model-open": [params: { sessionId: string; agentId: string }];
+  "session-model-open-consumed": [params: { sessionId: string; requestId: number }];
+  "session-model-state-updated": [state: AgentSessionAgentModelState];
+  "session-model-mutation-pending": [params: { sessionId: string; pending: boolean }];
 }>();
 
 const { t } = useI18n();
@@ -993,9 +1027,9 @@ const agentEnablementSelectedIds = ref<string[]>([]);
 const agentModelModalVisible = ref(false);
 const agentModelLoading = ref(false);
 const agentModelSaving = ref(false);
+const agentModelResetting = ref(false);
 const agentModelError = ref("");
 const agentModelFormPath = ref<string[]>([]);
-const agentModelInitialPath = ref<string[]>([]);
 const agentModelTargetAgentId = ref("");
 const agentModelProvidersSettings = ref<AgentProvidersSettingsView | null>(null);
 
@@ -1399,13 +1433,49 @@ const effectiveAgentId = computed(() => {
   return fallbackAgentId.value;
 });
 
-const effectiveModelLabel = computed(() => {
-  const agentId = effectiveAgentId.value;
-  const option = props.agentOptions.find((item) => item.value === agentId);
-  const resolved = option?.resolvedModel;
-  if (!resolved) return "";
-  return `${resolved.providerName} / ${resolved.modelName}`;
+const sessionModelState = computed(() => props.sessionModelStates[effectiveAgentId.value] ?? null);
+const draftDefaultModelLabel = computed(() => {
+  if (props.sessionReady) return null;
+  const resolvedModel = props.agentOptions.find((item) => item.value === effectiveAgentId.value)?.resolvedModel;
+  if (!resolvedModel) return null;
+  return `${resolvedModel.providerName} / ${resolvedModel.modelName}`;
 });
+const sessionModelPresentation = computed(() => {
+  return resolveSessionModelPresentation(
+    sessionModelState.value,
+    props.sessionModelStateLoading,
+    draftDefaultModelLabel.value
+  );
+});
+const sessionModelLabel = computed(() => {
+  const presentation = sessionModelPresentation.value;
+  if (presentation.kind === "ready") return presentation.modelLabel!;
+  if (presentation.kind === "override_unavailable") return t("agent.client.modelEditOverrideUnavailable");
+  if (presentation.kind === "default_unavailable") return t("agent.client.modelEditDefaultUnavailable");
+  if (presentation.kind === "loading") return t("common.loading");
+  return t("agent.client.modelEditUnavailable");
+});
+const sessionModelSourceLabel = computed(() => {
+  const source = sessionModelPresentation.value.source;
+  if (!source) return t("agent.client.modelEditSourceUnavailable");
+  return source === "session_override"
+    ? t("agent.client.modelEditSourceOverride")
+    : t("agent.client.modelEditSourceDefault");
+});
+const sessionModelTooltip = computed(() => `${t("agent.client.modelEditTooltip")} · ${sessionModelSourceLabel.value}`);
+const agentModelDefaultLabel = computed(() => {
+  const fallback = sessionModelState.value?.agentDefaultModel;
+  if (!fallback) return t("agent.client.modelEditDefaultUnavailable");
+  const pair = findAgentProviderModel(fallback.providerId, fallback.modelId);
+  return pair ? `${pair.provider.name} / ${pair.model.name}` : `${fallback.providerId} / ${fallback.modelId}`;
+});
+const agentModelCanSave = computed(() => {
+  const next = toAgentModelRefFromPath(agentModelFormPath.value);
+  if (!next) return false;
+  const current = sessionModelState.value?.effectiveModel;
+  return !current || current.providerId !== next.providerId || current.modelId !== next.modelId;
+});
+const sessionModelStateLoading = computed(() => props.sessionModelStateLoading && !sessionModelState.value);
 
 const agentModelCascaderOptions = computed(() => {
   const providers = agentModelProvidersSettings.value?.providers ?? [];
@@ -1431,18 +1501,12 @@ function findAgentProviderModel(providerId: string, modelId: string) {
   return { provider, model };
 }
 
-function toAgentDefaultModelFromPath(pathRaw: unknown): AgentDefaultModel | undefined {
+function toAgentModelRefFromPath(pathRaw: unknown): { providerId: string; modelId: string } | null {
   const path = Array.isArray(pathRaw) ? pathRaw.map((item) => String(item || "").trim()).filter((item) => item.length > 0) : [];
-  if (path.length !== 2) return undefined;
+  if (path.length !== 2) return null;
   const [providerId, modelId] = path;
-  if (!providerId || !modelId) return undefined;
-  if (!findAgentProviderModel(providerId, modelId)) return undefined;
+  if (!providerId || !modelId || !findAgentProviderModel(providerId, modelId)) return null;
   return { providerId, modelId };
-}
-
-function isSameAgentDefaultModel(left: AgentDefaultModel, right: AgentDefaultModel) {
-  if (left === null || right === null) return left === right;
-  return left.providerId === right.providerId && left.modelId === right.modelId;
 }
 
 const headerTokensNumberFormatter = new Intl.NumberFormat();
@@ -2911,7 +2975,7 @@ async function refreshMentionCandidates() {
 }
 
 function onInputKeydown(event: KeyboardEvent) {
-  if (sending.value) return;
+  if (sending.value || isSessionModelSendBlocked({ mutationPending: props.sessionModelMutationPending })) return;
   if (event.isComposing) return;
 
   if (event.key === "Escape") {
@@ -3321,27 +3385,36 @@ async function onSaveAgentEnablementSettings() {
   }
 }
 
-async function onOpenAgentModelModal() {
+function onOpenAgentModelModal() {
   const agentId = String(effectiveAgentId.value || "").trim();
-  if (!agentId) return;
+  if (!canRequestSessionModelOpen({
+    hasAvailableAgents: hasAvailableAgents.value,
+    isSubtaskSession: isSubtaskSession.value,
+    mutationPending: props.sessionModelMutationPending,
+    agentId
+  })) {
+    return;
+  }
+  emit("request-session-model-open", { sessionId: props.sessionId, agentId });
+}
+
+async function openAgentModelModalFromIntent() {
+  const agentId = String(effectiveAgentId.value || "").trim();
+  if (!agentId || !props.sessionReady || isSubtaskSession.value) return;
   agentModelModalVisible.value = true;
   agentModelLoading.value = true;
   agentModelSaving.value = false;
+  agentModelResetting.value = false;
   agentModelError.value = "";
   agentModelTargetAgentId.value = agentId;
   try {
-    const [providersRes, settingsRes] = await Promise.all([getAgentProvidersSettings(), getAgentSettings()]);
+    const providersRes = await getAgentProvidersSettings();
     agentModelProvidersSettings.value = providersRes;
-    const target = settingsRes.agents.find((item) => item.id === agentId);
-    if (!target) {
-      agentModelError.value = t("agent.client.modelEditAgentMissing");
-      return;
-    }
-    const initialPath = target.defaultModel
-      ? [target.defaultModel.providerId, target.defaultModel.modelId]
+    const effective = sessionModelState.value?.effectiveModel;
+    const initialPath = effective
+      ? [effective.providerId, effective.modelId]
       : [];
     agentModelFormPath.value = [...initialPath];
-    agentModelInitialPath.value = [...initialPath];
   } catch (err) {
     agentModelError.value = err instanceof Error ? err.message : String(err);
   } finally {
@@ -3349,66 +3422,55 @@ async function onOpenAgentModelModal() {
   }
 }
 
+function onCloseAgentModelModal() {
+  if (agentModelSaving.value || agentModelResetting.value) return;
+  agentModelModalVisible.value = false;
+}
+
 async function onSaveAgentModel() {
-  if (agentModelLoading.value || agentModelError.value) return;
-  if (agentModelSaving.value) return;
+  if (agentModelLoading.value || agentModelError.value || agentModelSaving.value || agentModelResetting.value) return;
   const targetId = String(agentModelTargetAgentId.value || "").trim();
-  if (!targetId) return;
-  const defaultModel = toAgentDefaultModelFromPath(agentModelFormPath.value);
-  const initialDefaultModel = toAgentDefaultModelFromPath(agentModelInitialPath.value);
-  if (defaultModel === undefined) {
+  const model = toAgentModelRefFromPath(agentModelFormPath.value);
+  if (!targetId || !model || !props.sessionReady) {
     message.error(t("settings.agentProfiles.errors.defaultModelRequired"));
     return;
   }
-
-  // 历史非法配置（initialDefaultModel === undefined）允许保存修复；
-  // 仅在初始值可解析且确实未变更时直接关闭弹窗。
-  if (initialDefaultModel !== undefined && isSameAgentDefaultModel(defaultModel, initialDefaultModel)) {
-    agentModelModalVisible.value = false;
-    return;
-  }
-
   agentModelSaving.value = true;
   agentModelError.value = "";
+  emit("session-model-mutation-pending", { sessionId: props.sessionId, pending: true });
   try {
-    const settingsRes = await getAgentSettings();
-    const targetExists = settingsRes.agents.some((item) => item.id === targetId);
-    if (!targetExists) {
-      agentModelError.value = t("agent.client.modelEditAgentMissing");
-      return;
-    }
-    const requestAgents: UpdateAgentSettingsRequest["agents"] = [];
-    for (const agent of settingsRes.agents) {
-      const nextDefaultModel = agent.id === targetId ? defaultModel : agent.defaultModel;
-      if (!nextDefaultModel) {
-        message.error(t("settings.agentProfiles.errors.defaultModelRequired"));
-        return;
-      }
-      requestAgents.push({
-        id: agent.id,
-        name: agent.name,
-        summary: agent.summary,
-        prompt: agent.prompt,
-        globalPromptIds: agent.globalPromptIds,
-        tools: agent.tools,
-        mcpServers: agent.mcpServers,
-        pluginTools: agent.pluginTools,
-        defaultModel: nextDefaultModel,
-        scope: agent.scope,
-        order: agent.order
-      });
-    }
-    const payload = {
-      agents: requestAgents
-    } satisfies UpdateAgentSettingsRequest;
-    await updateAgentSettings(payload);
+    const state = await updateAgentSessionModelOverride(props.sessionId, targetId, {
+      workspaceId: props.workspaceId,
+      providerId: model.providerId,
+      modelId: model.modelId
+    });
+    emit("session-model-state-updated", state);
     message.success(t("agent.client.modelEditSaved"));
     agentModelModalVisible.value = false;
-    emit("agent-settings-updated");
   } catch (err) {
     agentModelError.value = err instanceof Error ? err.message : String(err);
   } finally {
     agentModelSaving.value = false;
+    emit("session-model-mutation-pending", { sessionId: props.sessionId, pending: false });
+  }
+}
+
+async function onResetAgentModel() {
+  const targetId = String(agentModelTargetAgentId.value || "").trim();
+  if (!targetId || !props.sessionReady || !sessionModelState.value?.override || agentModelSaving.value || agentModelResetting.value) return;
+  agentModelResetting.value = true;
+  agentModelError.value = "";
+  emit("session-model-mutation-pending", { sessionId: props.sessionId, pending: true });
+  try {
+    const state = await resetAgentSessionModelOverride(props.sessionId, targetId, props.workspaceId);
+    emit("session-model-state-updated", state);
+    message.success(t("agent.client.modelEditResetSaved"));
+    agentModelModalVisible.value = false;
+  } catch (err) {
+    agentModelError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    agentModelResetting.value = false;
+    emit("session-model-mutation-pending", { sessionId: props.sessionId, pending: false });
   }
 }
 
@@ -3499,6 +3561,7 @@ function closeAttachmentPreview() {
 
 async function onSend() {
   if (isSubtaskSession.value) return;
+  if (isSessionModelSendBlocked({ mutationPending: props.sessionModelMutationPending })) return;
   if (!hasAvailableAgents.value) {
     message.warning(t("agent.client.noAgentHint"));
     return;
@@ -3687,6 +3750,16 @@ watch(
       });
       void focusInputIfNeeded();
     }
+  },
+  { immediate: true }
+);
+
+watch(
+  () => props.modelOpenIntent,
+  (intent) => {
+    if (!intent?.ready || intent.agentId !== effectiveAgentId.value || !props.sessionReady || isSubtaskSession.value) return;
+    emit("session-model-open-consumed", { sessionId: props.sessionId, requestId: intent.requestId });
+    void openAgentModelModalFromIntent();
   },
   { immediate: true }
 );

@@ -61,6 +61,14 @@ type AgentContextItemRow = {
   updatedAt: number;
 };
 
+export type SessionAgentModelOverrideRecord = {
+  sessionId: string;
+  agentId: string;
+  providerId: string;
+  modelId: string;
+  updatedAt: number;
+};
+
 type StoredToolCall = {
   toolName?: unknown;
   toolCallId?: unknown;
@@ -801,6 +809,67 @@ export function getAgentSession(db: Db, sessionId: string): AgentSessionRecord |
     )
     .get(sessionId) as AgentSessionRow | undefined;
   return row ? mapSession(row) : null;
+}
+
+export function getSessionAgentModelOverride(db: Db, params: {
+  sessionId: string;
+  agentId: string;
+}): SessionAgentModelOverrideRecord | null {
+  const row = db.prepare(
+    `
+      select
+        session_id as sessionId,
+        agent_id as agentId,
+        provider_id as providerId,
+        model_id as modelId,
+        updated_at as updatedAt
+      from agent_session_agent_model_override
+      where session_id = @sessionId and agent_id = @agentId
+    `
+  ).get(params) as SessionAgentModelOverrideRecord | undefined;
+  return row ?? null;
+}
+
+export function listSessionAgentModelOverrides(db: Db, params: {
+  sessionId: string;
+}): SessionAgentModelOverrideRecord[] {
+  return db.prepare(
+    `
+      select
+        session_id as sessionId,
+        agent_id as agentId,
+        provider_id as providerId,
+        model_id as modelId,
+        updated_at as updatedAt
+      from agent_session_agent_model_override
+      where session_id = @sessionId
+      order by agent_id asc
+    `
+  ).all(params) as SessionAgentModelOverrideRecord[];
+}
+
+export function upsertSessionAgentModelOverride(db: Db, record: SessionAgentModelOverrideRecord): void {
+  db.prepare(
+    `
+      insert into agent_session_agent_model_override (
+        session_id, agent_id, provider_id, model_id, updated_at
+      ) values (
+        @sessionId, @agentId, @providerId, @modelId, @updatedAt
+      ) on conflict(session_id, agent_id) do update set
+        provider_id = excluded.provider_id,
+        model_id = excluded.model_id,
+        updated_at = excluded.updated_at
+    `
+  ).run(record);
+}
+
+export function deleteSessionAgentModelOverride(db: Db, params: {
+  sessionId: string;
+  agentId: string;
+}): boolean {
+  return db.prepare(
+    "delete from agent_session_agent_model_override where session_id = @sessionId and agent_id = @agentId"
+  ).run(params).changes > 0;
 }
 
 export function listAgentSessionsForArchiveReconcile(db: Db): Array<{ workspaceId: string; sessionId: string }> {

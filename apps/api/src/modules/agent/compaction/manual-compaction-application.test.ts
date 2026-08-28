@@ -4,6 +4,7 @@ import { ManualCompactionApplication } from "./manual-compaction-application.js"
 import type { ManualCompactionApplicationDependencies } from "./manual-compaction-ports.js";
 
 function create(overrides: Partial<ManualCompactionApplicationDependencies> = {}) {
+  const resolveProfileCalls: Array<{ workspaceId: string; sessionId: string; requestedAgentId?: string }> = [];
   const calls: string[] = [];
   const deps: ManualCompactionApplicationDependencies = {
     reconcilePendingForSessionBestEffort: async () => { calls.push("reconcile"); return false; },
@@ -12,13 +13,16 @@ function create(overrides: Partial<ManualCompactionApplicationDependencies> = {}
     findDedup: () => null,
     getRunState: () => ({ status: "idle" }),
     getControlRunState: () => ({}) as any,
-    resolveProfile: () => ({ agentId: "agent", providerId: "provider", modelId: "model" }),
+    resolveProfile: (params) => {
+      resolveProfileCalls.push(params);
+      return { agentId: "agent", providerId: "provider", modelId: "model" };
+    },
     getWorkspaceRunContext: () => ({ workspacePath: "/workspace", workspaceRepoDirNames: ["repo"] }),
     activate: () => calls.push("activate"),
     failAfterEnqueueFailure: () => calls.push("settle"),
     clock: { nowMs: () => 100 }, ids: { newRunId: () => "run" }, ...overrides
   };
-  return { app: new ManualCompactionApplication(deps), calls };
+  return { app: new ManualCompactionApplication(deps), calls, resolveProfileCalls };
 }
 const command = (runtime: any) => ({ sessionId: "session", body: { workspaceId: "workspace", clientRequestId: "request" }, runtime });
 
@@ -27,6 +31,12 @@ test("ManualCompactionApplication keeps reconcile, activation, sentinel enqueue 
   const result = await app.schedule(command({ enqueueRun: async (input: any) => { calls.push(`enqueue:${input.inputText}`); } }));
   assert.equal(result.scheduled, true);
   assert.deepEqual(calls, ["reconcile", "activate", "enqueue:__awb_compact__"]);
+});
+
+test("ManualCompactionApplication resolves a new Run profile with the target session", async () => {
+  const { app, resolveProfileCalls } = create();
+  await app.schedule(command({ enqueueRun: () => undefined }));
+  assert.deepEqual(resolveProfileCalls, [{ workspaceId: "workspace", sessionId: "session", requestedAgentId: undefined }]);
 });
 
 test("ManualCompactionApplication preserves dedup without activation or enqueue", async () => {

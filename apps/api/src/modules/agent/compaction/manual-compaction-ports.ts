@@ -24,7 +24,7 @@ export type ManualCompactionApplicationDependencies = {
   findDedup(params: { workspaceId: string; sessionId: string; clientRequestId: string }): { runId: string } | null;
   getRunState(workspaceId: string, sessionId: string): ManualCompactionRunState;
   getControlRunState(sessionId: string): AgentCompactSessionResponse["runState"];
-  resolveProfile(params: { workspaceId: string; requestedAgentId?: string }): ManualCompactionProfile;
+  resolveProfile(params: { workspaceId: string; sessionId: string; requestedAgentId?: string }): ManualCompactionProfile;
   getWorkspaceRunContext(workspaceId: string): { workspacePath: string; workspaceRepoDirNames: string[] } | null;
   activate(params: {
     workspaceId: string;

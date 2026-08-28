@@ -74,6 +74,44 @@ test("agent attachment tables preserve the documented constraints and indexes", 
   db.close();
 });
 
+test("session agent model overrides are isolated by session and agent and cascade with their session", () => {
+  const db = createDb();
+  insertWorkspace(db);
+  insertWorkspace(db, "ws-b");
+  db.prepare("insert into agent_session (id, workspace_id, title, kind, created_at, updated_at) values (?, ?, ?, ?, ?, ?)")
+    .run("sess-a", "ws-a", "A", "primary", 1, 1);
+  db.prepare("insert into agent_session (id, workspace_id, title, kind, created_at, updated_at) values (?, ?, ?, ?, ?, ?)")
+    .run("sess-b", "ws-b", "B", "primary", 1, 1);
+
+  const upsert = db.prepare(
+    `insert into agent_session_agent_model_override (session_id, agent_id, provider_id, model_id, updated_at)
+     values (?, ?, ?, ?, ?)
+     on conflict(session_id, agent_id) do update set provider_id = excluded.provider_id, model_id = excluded.model_id, updated_at = excluded.updated_at`
+  );
+  upsert.run("sess-a", "agent-a", "provider-a", "model-a", 1);
+  upsert.run("sess-a", "agent-a", "provider-new", "model-new", 2);
+  upsert.run("sess-a", "agent-b", "provider-b", "model-b", 1);
+  upsert.run("sess-b", "agent-a", "provider-c", "model-c", 1);
+
+  const rows = db.prepare(
+    "select session_id as sessionId, agent_id as agentId, provider_id as providerId, model_id as modelId, updated_at as updatedAt from agent_session_agent_model_override order by session_id, agent_id"
+  ).all() as Array<{ sessionId: string; agentId: string; providerId: string; modelId: string; updatedAt: number }>;
+  assert.deepEqual(rows, [
+    { sessionId: "sess-a", agentId: "agent-a", providerId: "provider-new", modelId: "model-new", updatedAt: 2 },
+    { sessionId: "sess-a", agentId: "agent-b", providerId: "provider-b", modelId: "model-b", updatedAt: 1 },
+    { sessionId: "sess-b", agentId: "agent-a", providerId: "provider-c", modelId: "model-c", updatedAt: 1 }
+  ]);
+  assert.throws(
+    () => db.prepare("insert into agent_session_agent_model_override (session_id, agent_id, provider_id, model_id, updated_at) values (?, ?, ?, ?, ?)").run("missing", "agent", "provider", "model", 1),
+    /FOREIGN KEY constraint failed/
+  );
+
+  db.prepare("delete from agent_session where id = ?").run("sess-a");
+  const remaining = db.prepare("select session_id as sessionId, agent_id as agentId from agent_session_agent_model_override").all();
+  assert.deepEqual(remaining, [{ sessionId: "sess-b", agentId: "agent-a" }]);
+  db.close();
+});
+
 test("agent attachment schema accepts valid relations and enforces metadata constraints", () => {
   const db = createDb();
   insertWorkspace(db);

@@ -36,6 +36,10 @@ import {
   AgentRecentWorkspacesRequestSchema,
   AgentRecentWorkspacesResponseSchema,
   AgentSessionStatusSummaryResponseSchema,
+  AgentSessionModelWorkspaceQuerySchema,
+  AgentSessionModelOverridesResponseSchema,
+  AgentSessionAgentModelStateSchema,
+  UpdateAgentSessionModelOverrideRequestSchema,
   PluginToolCanonicalNameSchema,
   PluginRuntimeSnapshotsResponseSchema,
   PluginToolRpcExecuteRequestSchema,
@@ -252,6 +256,80 @@ export async function registerAgentPublicRoutes(app: FastifyInstance, dependenci
     async (req) => {
       const query = req.query as { workspaceId: string };
       return dependencies.service.listSessions(query.workspaceId);
+    }
+  );
+
+  app.get(
+    "/api/agent/sessions/:sessionId/model-overrides",
+    {
+      schema: {
+        tags: ["agent"],
+        params: Type.Object({ sessionId: Type.String({ minLength: 1 }) }),
+        querystring: AgentSessionModelWorkspaceQuerySchema,
+        response: {
+          200: AgentSessionModelOverridesResponseSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      const params = req.params as { sessionId: string };
+      const query = req.query as { workspaceId: string };
+      return dependencies.service.listSessionModelOverrides({ sessionId: params.sessionId, workspaceId: query.workspaceId });
+    }
+  );
+
+  app.put(
+    "/api/agent/sessions/:sessionId/agents/:agentId/model-override",
+    {
+      schema: {
+        tags: ["agent"],
+        params: Type.Object({
+          sessionId: Type.String({ minLength: 1 }),
+          agentId: Type.String({ minLength: 1 })
+        }),
+        body: UpdateAgentSessionModelOverrideRequestSchema,
+        response: {
+          200: AgentSessionAgentModelStateSchema,
+          400: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      const params = req.params as { sessionId: string; agentId: string };
+      const body = req.body as { workspaceId: string; providerId: string; modelId: string };
+      return dependencies.service.setSessionModelOverride({ sessionId: params.sessionId, agentId: params.agentId, body });
+    }
+  );
+
+  app.delete(
+    "/api/agent/sessions/:sessionId/agents/:agentId/model-override",
+    {
+      schema: {
+        tags: ["agent"],
+        params: Type.Object({
+          sessionId: Type.String({ minLength: 1 }),
+          agentId: Type.String({ minLength: 1 })
+        }),
+        querystring: AgentSessionModelWorkspaceQuerySchema,
+        response: {
+          200: AgentSessionAgentModelStateSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      const params = req.params as { sessionId: string; agentId: string };
+      const query = req.query as { workspaceId: string };
+      return dependencies.service.resetSessionModelOverride({
+        sessionId: params.sessionId,
+        agentId: params.agentId,
+        workspaceId: query.workspaceId
+      });
     }
   );
 

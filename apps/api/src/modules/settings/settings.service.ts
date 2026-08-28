@@ -131,7 +131,7 @@ export type AgentViewWithResolvedModel = AgentItem & {
   resolvedModel: AgentResolvedModel | null;
 };
 
-type WorkspaceAgentEnablementInput = {
+export type WorkspaceAgentEnablementInput = {
   mode: "all" | "subset";
   enabledAgentIds: string[];
 };
@@ -1963,6 +1963,8 @@ export function resolveExecutionProfile(ctx: AppContext, input: {
   surface: AgentExecutionSurface;
   requestedAgentId?: string | null;
   workspaceEnablement?: WorkspaceAgentEnablementInput | null;
+  /** Complete pair chosen for a new primary-session Run. */
+  modelOverride?: { providerId: string; modelId: string } | null;
   agentIdFromRun?: string | null;
   providerIdFromRun?: string | null;
   modelIdFromRun?: string | null;
@@ -1986,24 +1988,20 @@ export function resolveExecutionProfile(ctx: AppContext, input: {
     : resolveAgentForSurface(ctx, input.surface, input.requestedAgentId, input.workspaceEnablement);
 
   const agentDefault = agent.defaultModel;
-  const defaultProviderId = typeof agentDefault?.providerId === "string" ? agentDefault.providerId.trim() : "";
-  const defaultModelId = typeof agentDefault?.modelId === "string" ? agentDefault.modelId.trim() : "";
-  if (!defaultProviderId || !defaultModelId) {
+  const normalizePair = (value: { providerId?: string | null; modelId?: string | null } | null | undefined) => {
+    const providerId = typeof value?.providerId === "string" ? value.providerId.trim() : "";
+    const modelId = typeof value?.modelId === "string" ? value.modelId.trim() : "";
+    return providerId && modelId ? { providerId, modelId } : null;
+  };
+  const runSnapshot = normalizePair({ providerId: input.providerIdFromRun, modelId: input.modelIdFromRun });
+  const sessionOverride = normalizePair(input.modelOverride);
+  const defaultPair = normalizePair(agentDefault);
+  const selected = runSnapshot ?? sessionOverride ?? defaultPair;
+  if (!selected) {
     throw new HttpError(400, "Agent model is not configured", "AGENT_MODEL_NOT_CONFIGURED");
   }
 
-  const resolvedProviderId = [input.providerIdFromRun, defaultProviderId]
-    .map((item) => (typeof item === "string" ? item.trim() : ""))
-    .find((item) => item.length > 0);
-  const resolvedModelId = [input.modelIdFromRun, defaultModelId]
-    .map((item) => (typeof item === "string" ? item.trim() : ""))
-    .find((item) => item.length > 0);
-
-  if (!resolvedProviderId || !resolvedModelId) {
-    throw new HttpError(400, "Agent model is not configured", "AGENT_MODEL_NOT_CONFIGURED");
-  }
-
-  const { provider, model } = resolveProviderModelOrThrow(providersSettings, resolvedProviderId, resolvedModelId);
+  const { provider, model } = resolveProviderModelOrThrow(providersSettings, selected.providerId, selected.modelId);
   if (!provider.options.apiKey) {
     throw new HttpError(400, `Provider '${provider.id}' apiKey is missing`, "AGENT_PROVIDER_API_KEY_MISSING");
   }

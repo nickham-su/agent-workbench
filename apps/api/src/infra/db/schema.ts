@@ -103,6 +103,16 @@ export function initSchema(db: Db) {
       foreign key (workspace_id) references workspaces(id) on delete restrict
     );
 
+    create table if not exists agent_session_agent_model_override (
+      session_id text not null,
+      agent_id text not null,
+      provider_id text not null,
+      model_id text not null,
+      updated_at integer not null,
+      primary key (session_id, agent_id),
+      foreign key (session_id) references agent_session(id) on delete cascade
+    );
+
     create table if not exists agent_session_head (
       workspace_id text not null,
       session_id text not null,
@@ -279,6 +289,10 @@ export function initSchema(db: Db) {
   createIndexIfNotExists(db, {
     index: "idx_agent_context_item_session_archive_id",
     sql: "create index idx_agent_context_item_session_archive_id on agent_context_item(session_id, archive_at, id)"
+  });
+  createIndexIfNotExists(db, {
+    index: "idx_agent_session_model_override_agent",
+    sql: "create index idx_agent_session_model_override_agent on agent_session_agent_model_override(agent_id)"
   });
   createIndexIfNotExists(db, {
     index: "idx_agent_run_session_status",

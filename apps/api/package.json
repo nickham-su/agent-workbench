@@ -7,7 +7,9 @@
     "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:integration": "tsx --test src/modules/agent/integration/*.test.ts",
+    "test": "npm run test:session-model",
+    "test:session-model": "tsx --test src/infra/db/schema.test.ts src/modules/agent/agent-session-model-override.integration.test.ts src/modules/agent/integration/agent-session-model-runtime.integration.test.ts src/modules/agent/session/session-agent-model-application.test.ts src/modules/agent/session/session-interaction-application.test.ts src/modules/agent/compaction/manual-compaction-application.test.ts src/modules/agent/read-side/execution-profile-resolver.test.ts",
+    "test:integration": "tsx --test src/modules/agent/agent-session-model-override.integration.test.ts src/modules/agent/integration/*.test.ts",
     "test:integration:worker": "tsx --test src/modules/agent/agent.worker.integration.test.ts"
   },
   "dependencies": {

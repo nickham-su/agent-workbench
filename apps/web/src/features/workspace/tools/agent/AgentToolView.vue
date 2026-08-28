@@ -54,6 +54,10 @@
             :model-value="selectedAgentBySession[session.id] ?? null"
             :tool-id="toolId"
             :agent-options="agentOptions"
+            :session-model-states="sessionModelStates[session.id] ?? {}"
+            :session-model-state-loading="!!sessionModelStateLoads[session.id]"
+            :session-model-mutation-pending="!!sessionModelMutationPending[session.id]"
+            :model-open-intent="pendingModelOpenIntentBySession[session.id] ?? null"
             @update:model-value="(value) => setSessionAgent(session.id, value)"
             @forked="onSessionForked"
             @open-subtask="onOpenSubtask"
@@ -61,6 +65,10 @@
             @session-title-sync-needed="requestSessionTitleSync"
             @choose-session="openChooseSessionModal(session.id)"
             @agent-settings-updated="onAgentSettingsUpdated"
+            @request-session-model-open="onRequestSessionModelOpen"
+            @session-model-open-consumed="onSessionModelOpenConsumed"
+            @session-model-state-updated="onSessionModelStateUpdated"
+            @session-model-mutation-pending="onSessionModelMutationPending"
             @reset-to-draft="(payload) => replaceSessionTabWithDraft(payload)"
               />
             </div>
@@ -111,14 +119,26 @@ export default {
 </script>
 
 <script setup lang="ts">
-import type { AgentSessionRecord } from "@agent-workbench/shared";
+import type { AgentSessionAgentModelState, AgentSessionRecord } from "@agent-workbench/shared";
 import { CloseOutlined, MinusOutlined, PlusOutlined } from "@ant-design/icons-vue";
 import { message } from "ant-design-vue";
 import { computed, onActivated, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { createAgentSession, listAgentSessions, listWorkspaceAvailableAgents } from "@/shared/api";
+import { createAgentSession, listAgentSessionModelOverrides, listAgentSessions, listWorkspaceAvailableAgents } from "@/shared/api";
 import { useWorkspaceHost } from "@/features/workspace/host";
 import AgentClientPane from "./AgentClientPane.vue";
+import {
+  clearSessionModelStates,
+  replaceSessionModelStates,
+  setSessionAgentModelState,
+  type SessionModelStateCache
+} from "./agentSessionModelState";
+import {
+  consumeSessionModelOpenIntent,
+  migrateSessionModelOpenIntent,
+  type SessionModelOpenIntentCache
+} from "./agentSessionModelIntent";
+import { requestSessionModelOpen } from "./agentSessionModelOpenFlow";
 import { agentSessionStatusStoreKey, createAgentSessionStatusStore } from "./useAgentSessionStatusStore";
 
 type AgentOption = {
@@ -180,6 +200,12 @@ const sessionsInitialized = ref(false);
 const serverSessionsLoaded = ref(false);
 const pendingSessionTitleSyncUpdatedAt = reactive<Record<string, number>>({});
 const draftCreatePromises = new Map<string, Promise<string>>();
+const sessionModelStates = reactive<SessionModelStateCache>({});
+const sessionModelStateLoads = reactive<Record<string, true>>({});
+const sessionModelStateLoadPromises = new Map<string, Promise<void>>();
+const sessionModelMutationPending = reactive<Record<string, true>>({});
+const pendingModelOpenIntentBySession = reactive<SessionModelOpenIntentCache>({});
+let nextModelOpenIntentId = 0;
 let openParentIntentId = 0;
 
 function invalidateOpenParentIntent() {
@@ -447,7 +473,74 @@ async function refreshAgents() {
 }
 
 function onAgentSettingsUpdated() {
-  void refreshAgents();
+  void refreshAgents().then(() => refreshVisibleSessionModelStates(true));
+}
+
+function isPrimaryServerSessionId(sessionId: string) {
+  return serverSessions.value.some((session) => session.id === sessionId && session.kind === "primary");
+}
+
+async function loadSessionModelStates(sessionId: string, force = false) {
+  if (!isPrimaryServerSessionId(sessionId)) return;
+  if (!force && sessionModelStates[sessionId]) return;
+  const pending = sessionModelStateLoadPromises.get(sessionId);
+  if (pending) return pending;
+
+  sessionModelStateLoads[sessionId] = true;
+  const job = listAgentSessionModelOverrides(sessionId, props.workspaceId)
+    .then((response) => {
+      replaceSessionModelStates(sessionModelStates, response);
+    })
+    .finally(() => {
+      delete sessionModelStateLoads[sessionId];
+      sessionModelStateLoadPromises.delete(sessionId);
+    });
+  sessionModelStateLoadPromises.set(sessionId, job);
+  return job;
+}
+
+async function refreshVisibleSessionModelStates(force = false) {
+  await Promise.all(
+    visibleSessions.value
+      .filter((session) => session.kind === "primary")
+      .map((session) => loadSessionModelStates(session.id, force).catch(() => undefined))
+  );
+}
+
+async function onRequestSessionModelOpen(params: { sessionId: string; agentId: string }) {
+  const agentId = String(params.agentId || "").trim();
+  if (!agentId || !agentOptions.value.some((agent) => agent.value === agentId)) return;
+  const sourceSessionId = params.sessionId;
+  const requestId = ++nextModelOpenIntentId;
+  // A draft must retain the intent across its Pane replacement. A real Pane
+  // must not consume it until the authoritative GET has completed. Replacing
+  // the prior intent also makes a double click resolve to one modal opening.
+  try {
+    await requestSessionModelOpen({
+      intents: pendingModelOpenIntentBySession,
+      sourceSessionId,
+      agentId,
+      requestId,
+      isPrimaryServerSessionId,
+      ensureSessionCreated,
+      loadSessionModelStates: (sessionId) => loadSessionModelStates(sessionId, true)
+    });
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
+  }
+}
+
+function onSessionModelOpenConsumed(params: { sessionId: string; requestId: number }) {
+  consumeSessionModelOpenIntent(pendingModelOpenIntentBySession, params.sessionId, params.requestId);
+}
+
+function onSessionModelStateUpdated(state: AgentSessionAgentModelState) {
+  setSessionAgentModelState(sessionModelStates, state);
+}
+
+function onSessionModelMutationPending(params: { sessionId: string; pending: boolean }) {
+  if (params.pending) sessionModelMutationPending[params.sessionId] = true;
+  else delete sessionModelMutationPending[params.sessionId];
 }
 
 function pruneOpenedSubtaskSessions() {
@@ -472,6 +565,7 @@ async function refreshSessions() {
   try {
     const list = await listAgentSessions(props.workspaceId);
     serverSessions.value = [...list].sort((a, b) => b.updatedAt - a.updatedAt);
+    void refreshVisibleSessionModelStates();
     pruneOpenedSubtaskSessions();
     // 先根据可见 tabs 做 prune/分配,避免隐藏 tab 让编号一路增长。
     serverSessionsLoaded.value = true;
@@ -571,6 +665,8 @@ async function ensureSessionCreated(sessionId: string) {
     selectedAgentBySession[created.id] = picked;
     delete selectedAgentBySession[sessionId];
     persistAgentPick();
+    clearSessionModelStates(sessionModelStates, sessionId);
+    migrateSessionModelOpenIntent(pendingModelOpenIntentBySession, sessionId, created.id);
 
     if (closedSessionIds[sessionId]) {
       closedSessionIds[created.id] = true;
@@ -610,6 +706,8 @@ function closeSessionTab(sessionId: string) {
   if (!sessionId) return;
   closedSessionIds[sessionId] = true;
   persistClosedSessions();
+  clearSessionModelStates(sessionModelStates, sessionId);
+  delete pendingModelOpenIntentBySession[sessionId];
 
   // close 语义是“关闭本地 tab”,因此编号映射也应随之移除,让编号可复用。
   if (tabNoMap.value[sessionId]) {
@@ -884,6 +982,11 @@ watch(
     for (const key of Object.keys(pendingSessionTitleSyncUpdatedAt)) {
       delete pendingSessionTitleSyncUpdatedAt[key];
     }
+    for (const key of Object.keys(sessionModelStates)) clearSessionModelStates(sessionModelStates, key);
+    for (const key of Object.keys(sessionModelStateLoads)) delete sessionModelStateLoads[key];
+    sessionModelStateLoadPromises.clear();
+    for (const key of Object.keys(sessionModelMutationPending)) delete sessionModelMutationPending[key];
+    for (const key of Object.keys(pendingModelOpenIntentBySession)) delete pendingModelOpenIntentBySession[key];
     restorePersistedState();
     await refreshAll();
     statusStore.bindWorkspace(props.workspaceId);

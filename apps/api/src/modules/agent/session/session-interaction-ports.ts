@@ -50,7 +50,7 @@ export type SessionInteractionStore = {
 };
 
 export type SessionProfileReader = {
-  resolveUser(input: { workspaceId: string; requestedAgentId?: string | null }): { agentId: string; providerId: string; modelId: string };
+  resolveUser(input: { workspaceId: string; sessionId: string; requestedAgentId?: string | null }): { agentId: string; providerId: string; modelId: string };
 };
 
 export type SessionLifecycleStarter = {

@@ -9,7 +9,8 @@ export type AgentPublicRouteDependencies = InternalRouteDependencies & {
   dataDir: string;
   service: Pick<AgentService,
     "listSessions" | "createPrimarySession" | "forkPrimarySession" | "getContextItems" | "getContextItem" |
-    "getApplyPatchUiArtifact" | "getWriteUiArtifact" | "getRunState" | "sendMessage" | "compactSession" |
+    "getApplyPatchUiArtifact" | "getWriteUiArtifact" | "getRunState" | "listSessionModelOverrides" |
+    "setSessionModelOverride" | "resetSessionModelOverride" | "sendMessage" | "compactSession" |
     "clearSession" | "revertSession" | "cancelSessionWithRuntime" | "getAttachmentContent">;
   runtime: AgentRuntimePort;
 };

@@ -29,7 +29,7 @@ export class ManualCompactionApplication {
       throw new HttpError(400, "compaction not needed", "AGENT_COMPACTION_NOT_NEEDED");
     }
 
-    const profile = this.dependencies.resolveProfile({ workspaceId, requestedAgentId: command.body.agentId });
+    const profile = this.dependencies.resolveProfile({ workspaceId, sessionId: session.id, requestedAgentId: command.body.agentId });
     const createdAt = this.dependencies.clock.nowMs();
     const runId = this.dependencies.ids.newRunId();
     const uiLocale = command.body.uiLocale === "zh-CN" || command.body.uiLocale === "en-US" ? command.body.uiLocale : null;
