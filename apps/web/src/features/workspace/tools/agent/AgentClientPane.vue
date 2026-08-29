@@ -451,7 +451,12 @@
                   :aria-label="t('agent.client.modelEditTooltip')"
                   @click="onOpenAgentModelModal"
                 >
-                  <span class="block max-w-full truncate">{{ sessionModelLabel }}</span>
+                  <span
+                    class="block max-w-full truncate"
+                    :class="sessionModelPresentation.kind === 'ready' && sessionModelPresentation.source === 'session_override'
+                      ? 'text-[color:var(--info-color)]'
+                      : ''"
+                  >{{ sessionModelLabel }}</span>
                 </a-button>
               </a-tooltip>
             </div>
