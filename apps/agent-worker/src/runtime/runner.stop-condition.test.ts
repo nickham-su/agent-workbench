@@ -310,7 +310,7 @@ test("processRun: 下一轮无 pendingTools 时会丢弃旧快照，后续恢复
   assert.deepEqual(completed, ["completed"]);
 });
 
-test("processRun: reasoning-only 且无 tool call 时会 retry，并在第 6 次后 completed", async () => {
+test("processRun: reasoning-only 且无 tool call 时会继续空响应 step，并在第 6 次后 completed", async () => {
   const completed: string[] = [];
   const apiClient = {
     async getExecutionProfile() {

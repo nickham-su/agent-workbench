@@ -190,7 +190,9 @@ function createControlledStream() {
 }
 
 function createRunnerHarness(options?: {
-  stream: ReturnType<typeof createControlledStream>;
+  stream?: ReturnType<typeof createControlledStream>;
+  streams?: Array<ReturnType<typeof createControlledStream>>;
+  maxRetries?: number;
   nowMs?: () => number;
   listTools?: Array<{ name: string; description: string; inputSchema: Record<string, unknown>; source: string }>;
 }) {
@@ -218,7 +220,10 @@ function createRunnerHarness(options?: {
     logger,
     1,
     {
-      streamText: ((() => options?.stream.stream) as unknown) as typeof streamText,
+      streamText: ((() => {
+        const stream = options?.streams?.shift() ?? options?.stream;
+        return stream?.stream;
+      }) as unknown) as typeof streamText,
       nowMs: options?.nowMs
     }
   );
@@ -229,12 +234,19 @@ function createRunnerHarness(options?: {
 }
 
 function startRunModelStep(params: {
-  stream: ReturnType<typeof createControlledStream>;
+  stream?: ReturnType<typeof createControlledStream>;
+  streams?: Array<ReturnType<typeof createControlledStream>>;
+  maxRetries?: number;
   nowMs?: () => number;
 }) {
-  const harness = createRunnerHarness({ stream: params.stream, nowMs: params.nowMs });
+  const harness = createRunnerHarness({
+    stream: params.stream,
+    streams: params.streams,
+    maxRetries: params.maxRetries,
+    nowMs: params.nowMs
+  });
   const promise = (harness.runner as any).runModelStep({
-    profile: baseProfile(),
+    profile: { ...baseProfile(), runtime: { modelRequestMaxRetries: params.maxRetries ?? 0 } },
     run: baseRun(),
     context: baseContext(),
     step: 1,
@@ -327,6 +339,102 @@ test("runModelStep: tool-call step 前未达阈值文本会在 completed 中保�
   assert.equal(completed.length, 1);
   assert.equal(completed[0]?.output?.text, "preface");
   assert.equal(started.createdItems.some((item) => item.kind === "tool" && (item.output as Record<string, unknown>)?.toolCallId === "call_read_1"), true);
+});
+
+test("runModelStep: 无文本、无 tool call 的正常结束响应失败", async () => {
+  const stream = createControlledStream();
+  const started = await startRunModelStep({ stream });
+
+  await stream.finish();
+  await assert.rejects(started.promise, /model stream completed without visible text or tool calls/);
+
+  assert.equal(started.updates.filter((item) => item.status === "completed").length, 0);
+  assert.equal(started.updates.filter((item) => item.status === "failed").length, 1);
+});
+
+test("runModelStep: 纯空白文本和 reasoning-only 响应按空响应处理", async () => {
+  for (const chunks of [
+    [{ type: "text-delta", text: "  \n\t" }],
+    [{ type: "reasoning-delta", text: "internal reasoning only" }]
+  ] as const) {
+    const stream = createControlledStream();
+    const started = await startRunModelStep({ stream });
+
+    for (const chunk of chunks) {
+      await stream.push(chunk);
+    }
+    await stream.finish();
+    await assert.rejects(started.promise, /model stream completed without visible text or tool calls/);
+  }
+});
+
+test("runModelStep: 空响应重试后复用同一 step，并清理上一轮 usage", async () => {
+  const emptyStream = createControlledStream();
+  const successfulStream = createControlledStream();
+  const started = await startRunModelStep({ streams: [emptyStream, successfulStream], maxRetries: 1 });
+
+  await emptyStream.push({ type: "finish", usage: { inputTokens: 90, outputTokens: 10 } });
+  await emptyStream.finish();
+  await successfulStream.push({ type: "text-delta", text: "ok" });
+  await successfulStream.finish({ usage: { inputTokens: 3, outputTokens: 4 } });
+  const result = await started.promise;
+
+  assert.equal(result.hasVisibleText, true);
+  assert.equal(started.createdItems.filter((item) => item.kind === "assistant").length, 1);
+  assert.equal(started.runStateUpdates.at(-1)?.lastResponseTotalTokens, 7);
+});
+
+test("runModelStep: 连续空响应的 retryAttempt 连续递增且不重置", async () => {
+  const streams = [createControlledStream(), createControlledStream(), createControlledStream()];
+  const started = await startRunModelStep({ streams, maxRetries: 2 });
+
+  for (const stream of streams) {
+    void stream.finish();
+  }
+
+  await assert.rejects(started.promise, /failed after 2 retries: model stream completed without visible text or tool calls/);
+
+  const retryNotices = started.runStateUpdates
+    .map((update) => String(update.runNoticeText ?? ""))
+    .filter((notice) => notice.includes("Request failed, retrying"));
+  assert.equal(retryNotices.length, 2);
+  assert.match(retryNotices[0] ?? "", /\(1\/2\)/);
+  assert.match(retryNotices[1] ?? "", /\(2\/2\)/);
+});
+
+test("runModelStep: 空响应耗尽共享重试上限后失败且不创建新 step 或 item", async () => {
+  const streams = [createControlledStream(), createControlledStream(), createControlledStream()];
+  const started = await startRunModelStep({ streams, maxRetries: 2 });
+
+  for (const stream of streams) {
+    void stream.finish();
+  }
+
+  await assert.rejects(started.promise, /failed after 2 retries/);
+
+  assert.equal(started.createdItems.filter((item) => item.kind === "assistant").length, 1);
+  assert.equal(started.createdItems.filter((item) => item.kind === "tool").length, 0);
+  assert.equal(started.updates.filter((item) => item.status === "completed").length, 0);
+  assert.equal(started.updates.filter((item) => item.status === "failed").length, 1);
+  assert.equal(new Set(started.updates.map((item) => item.itemId)).size, 1);
+});
+
+test("runModelStep: reasoning-only 响应在真实模型步骤内重试后成功", async () => {
+  const reasoningStream = createControlledStream();
+  const successfulStream = createControlledStream();
+  const started = await startRunModelStep({ streams: [reasoningStream, successfulStream], maxRetries: 1 });
+
+  void reasoningStream.push({ type: "reasoning-delta", text: "internal reasoning only" });
+  void reasoningStream.finish();
+  void successfulStream.push({ type: "text-delta", text: "visible answer" });
+  void successfulStream.finish();
+
+  const result = await started.promise;
+
+  assert.equal(result.hasVisibleText, true);
+  assert.equal(result.toolCallCount, 0);
+  assert.equal(started.createdItems.filter((item) => item.kind === "assistant").length, 1);
+  assert.deepEqual(started.updates.filter((item) => item.status === "completed")[0]?.output?.text, "visible answer");
 });
 
 test("runModelStep: 失败路径会保存未达阈值文本", async () => {

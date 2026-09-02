@@ -2203,6 +2203,7 @@ export class AgentRunner {
     const resetVisibleOutputForRetry = async () => {
       const prevText = text;
       const prevReasoningText = reasoningText;
+      const prevResponseTotalTokens = responseTotalTokens;
       const prevLastFlushedText = lastFlushedText;
       const prevLastFlushedReasoningText = lastFlushedReasoningText;
       const prevLastFlushAt = lastFlushAt;
@@ -2210,11 +2211,13 @@ export class AgentRunner {
 
       text = "";
       reasoningText = "";
+      responseTotalTokens = null;
       try {
         await flushAssistant("streaming", true);
       } catch (err) {
         text = prevText;
         reasoningText = prevReasoningText;
+        responseTotalTokens = prevResponseTotalTokens;
         lastFlushedText = prevLastFlushedText;
         lastFlushedReasoningText = prevLastFlushedReasoningText;
         lastFlushAt = prevLastFlushAt;
@@ -2257,6 +2260,7 @@ export class AgentRunner {
       // 只要本次请求已经开始产生可见输出(文本/tool-call),就不再自动重试。
       // 这样可以避免重试导致的重复内容,以及工具重复执行带来的副作用。
       let attemptStartedVisibleOutput = false;
+      let completedWithoutVisibleOutput = false;
 
       const onOuterAbort = () => {
         requestController.abort();
@@ -2359,6 +2363,10 @@ export class AgentRunner {
         if (idleTimedOut) {
           throw new Error(`model idle timeout after ${modelIdleTimeoutMs}ms`);
         }
+        if (!hasVisibleAssistantText(text) && toolCalls.length === 0) {
+          completedWithoutVisibleOutput = true;
+          throw new Error("model stream completed without visible text or tool calls");
+        }
 
         break;
       } catch (err) {
@@ -2374,6 +2382,7 @@ export class AgentRunner {
 
         const canRetry =
           (!attemptStartedVisibleOutput && retryCount < modelRequestMaxRetries)
+          || (completedWithoutVisibleOutput && retryCount < modelRequestMaxRetries)
           || shouldRetryAfterPartialText({ text, toolCalls: toolCalls.length, retryCount, maxRetries: modelRequestMaxRetries });
 
         if (canRetry) {
