@@ -350,11 +350,20 @@
         v-if="!sending && activeInputHint.visible"
         class="mb-2"
       >
-        <div class="flex flex-col gap-0.5">
+        <div
+          ref="inputCandidateListEl"
+          :id="inputCandidateListId"
+          role="listbox"
+          class="input-candidate-list max-h-60 overflow-y-auto overscroll-contain"
+        >
           <button
-            v-for="candidate in activeInputHint.items"
+            v-for="(candidate, candidateIndex) in activeInputHint.items"
             :key="candidate.id"
             type="button"
+            :id="inputCandidateDomId(candidateIndex)"
+            role="option"
+            :aria-selected="candidate.id === activeInputHint.activeId"
+            :data-input-candidate-id="candidate.id"
             class="input-candidate-item w-full rounded px-2 py-0.5 text-left text-[color:var(--text-secondary)] opacity-70"
             :class="candidate.id === activeInputHint.activeId ? 'is-active bg-blue-500/10 text-white opacity-100' : ''"
             @click="onPickInputCandidate(candidate)"
@@ -375,19 +384,19 @@
                 {{ candidate.description }}
               </span>
             </div>
-           </button>
-           <div v-if="!activeInputHint.loading && activeInputHint.items.length === 0 && !(activeInputHint.kind === 'slash' && promptCommandError)" class="px-2 py-0.5 text-[0.9em] text-[color:var(--text-tertiary)]">
-             {{ activeInputHint.emptyText }}
-           </div>
-           <div
-             v-if="activeInputHint.kind === 'slash' && !activeInputHint.loading && promptCommandError"
-             class="px-2 py-0.5 text-[0.9em] text-[color:var(--text-tertiary)]"
-             :title="promptCommandError"
-           >
-             {{ t("agent.client.promptCommandsLoadFailedHint") }}
-           </div>
+          </button>
+          <div v-if="!activeInputHint.loading && activeInputHint.items.length === 0 && !(activeInputHint.kind === 'slash' && promptCommandError)" class="px-2 py-0.5 text-[0.9em] text-[color:var(--text-tertiary)]">
+            {{ activeInputHint.emptyText }}
+          </div>
+          <div
+            v-if="activeInputHint.kind === 'slash' && !activeInputHint.loading && promptCommandError"
+            class="px-2 py-0.5 text-[0.9em] text-[color:var(--text-tertiary)]"
+            :title="promptCommandError"
+          >
+            {{ t("agent.client.promptCommandsLoadFailedHint") }}
           </div>
         </div>
+      </div>
 
         <div
           v-if="sending"
@@ -416,6 +425,11 @@
             ref="inputEl"
             v-model:value="draft"
             class="agent-input-textarea"
+            role="combobox"
+            aria-autocomplete="list"
+            :aria-expanded="activeInputHint.visible"
+            :aria-controls="activeInputHint.visible ? inputCandidateListId : undefined"
+            :aria-activedescendant="activeInputHint.visible && activeInputHint.activeId ? inputCandidateDomId(activeInputHint.items.findIndex((candidate) => candidate.id === activeInputHint.activeId)) : undefined"
             :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
             :disabled="!hasAvailableAgents || sessionModelMutationPending"
             :readonly="sending || sessionModelMutationPending"
@@ -799,13 +813,21 @@ import {
 } from "@/shared/api";
 import { getInitialLocale } from "@/shared/i18n/locale";
 import {
+  buildPromptCommandMap,
   buildSlashCommandHint,
+  buildSlashInputCandidates,
+  createInputCandidateDomId,
+  createInputCandidateListId,
   findMentionTarget,
   isSlashMode,
+  limitMentionCandidates,
   promptCommandInsertCaret,
   promptCommandInsertText,
   resolveSlashCommand,
   shouldConvertLeadingIdeographicCommaToSlash,
+  type MentionCandidateItem,
+  type PromptCommandCandidateItem,
+  type SlashCandidateItem,
   type SlashCommandAction,
   type SlashCommandDefinition
 } from "./agentInputCandidates";
@@ -1001,6 +1023,8 @@ const expandedTextMessageIds = ref<Set<number>>(new Set());
 const clampedTextMessageIds = ref<Set<number>>(new Set());
 const collapsedTodoItemIds = ref<Set<number>>(new Set());
 const scrollEl = ref<HTMLElement | null>(null);
+const inputCandidateListEl = ref<HTMLElement | null>(null);
+const inputCandidateListId = createInputCandidateListId(props.sessionId);
 const inputEl = ref<{ focus?: () => void } | null>(null);
 const stickToBottom = ref(true);
 const userUnfollowed = ref(false);
@@ -1087,29 +1111,6 @@ watch(
   { flush: "sync" }
 );
 
-type SlashCandidateItem = {
-  id: string;
-  kind: "slash";
-  label: string;
-  command: SlashCommandDefinition;
-};
-
-type PromptCommandCandidateItem = {
-  id: string;
-  kind: "prompt_command";
-  label: string; // /<command>
-  description?: string; // prompt title
-  command: string; // <command>
-};
-
-type MentionCandidateItem = {
-  id: string;
-  kind: "skill" | "file";
-  label: string;
-  description?: string;
-  insertText: string;
-};
-
 type InputCandidateItem = SlashCandidateItem | PromptCommandCandidateItem | MentionCandidateItem;
 
 const MAX_INPUT_CANDIDATES = 10;
@@ -1145,16 +1146,7 @@ const promptCommandLoading = ref(false);
 const promptCommandError = ref("");
 
 const promptCommandMap = computed(() => {
-  const map = new Map<string, AgentGlobalPromptItem>();
-  for (const item of promptCommandItems.value) {
-    if (!item || item.id === "global_system_prompt") continue;
-    const cmd = typeof item.command === "string" ? item.command.trim().toLowerCase() : "";
-    if (!cmd) continue;
-    // 内置命令优先：即使命令冲突，前端也不显示/不执行 prompt command。
-    if (slashCommandMap.has(cmd)) continue;
-    if (!map.has(cmd)) map.set(cmd, item);
-  }
-  return map;
+  return buildPromptCommandMap(promptCommandItems.value, slashCommands);
 });
 
 async function refreshPromptCommandItems() {
@@ -1236,22 +1228,11 @@ const activeInputHint = computed(() => {
     };
   }
   if (slashCommandHint.value.visible && !exactPromptCommandName.value) {
-    const slashItems: InputCandidateItem[] = slashCommandHint.value.commands.map((cmd) => ({
-      id: `slash:${cmd.name}`,
-      kind: "slash",
-      label: cmd.usage,
-      command: cmd
-    }));
-    const promptItems: InputCandidateItem[] = [...promptCommandMap.value.entries()]
-      .filter(([name]) => !slashCommandHint.value.query || name.startsWith(slashCommandHint.value.query))
-      .map(([name, item]) => ({
-        id: `prompt_command:${name}`,
-        kind: "prompt_command",
-        label: `/${name}`,
-        description: item.title,
-        command: name
-      }));
-    const items = [...slashItems, ...promptItems].slice(0, MAX_INPUT_CANDIDATES);
+    const items = buildSlashInputCandidates({
+      commands: slashCommandHint.value.commands,
+      promptCommands: promptCommandMap.value,
+      query: slashCommandHint.value.query
+    });
     const activeId = items.some((it) => it.id === inputCandidateSelection.value)
       ? inputCandidateSelection.value
       : (items[0]?.id || "");
@@ -2833,6 +2814,10 @@ function newClientRequestId() {
   return `req_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 10)}`;
 }
 
+function inputCandidateDomId(candidateIndex: number) {
+  return createInputCandidateDomId(inputCandidateListId, candidateIndex);
+}
+
 function onPickSlashCommand(name: string) {
   const cmd = slashCommandMap.get(name);
   if (!cmd) return;
@@ -2840,6 +2825,19 @@ function onPickSlashCommand(name: string) {
   draft.value = cmd.usage;
   nextTick(() => syncInputCaretFromNative());
   void focusInputIfNeeded();
+}
+
+function scrollActiveInputCandidateIntoView() {
+  const listEl = inputCandidateListEl.value;
+  if (!listEl) return;
+  const activeId = activeInputHint.value.activeId;
+  if (!activeId) return;
+  const activeEl = Array.from(listEl.querySelectorAll<HTMLElement>("[data-input-candidate-id]")).find((element) => {
+    return element.dataset.inputCandidateId === activeId;
+  });
+  if (activeEl) {
+    activeEl.scrollIntoView({ block: "nearest" });
+  }
 }
 
 function moveInputCandidateSelection(step: 1 | -1) {
@@ -2967,7 +2965,7 @@ async function refreshMentionCandidates() {
       loadFileMentionCandidates(target.query)
     ]);
     if (seq !== mentionFetchSeq.value) return;
-    mentionCandidates.value = [...skills, ...files].slice(0, MAX_INPUT_CANDIDATES);
+    mentionCandidates.value = limitMentionCandidates([...skills, ...files], MAX_INPUT_CANDIDATES);
     if (!mentionCandidates.value.some((it) => it.id === inputCandidateSelection.value)) {
       inputCandidateSelection.value = mentionCandidates.value[0]?.id || "";
     }
@@ -3031,6 +3029,13 @@ function onInputKeydown(event: KeyboardEvent) {
     void onSend();
   }
 }
+
+watch(
+  () => [activeInputHint.value.visible, activeInputHint.value.activeId, activeInputHint.value.items.length],
+  () => {
+    void nextTick().then(() => scrollActiveInputCandidateIntoView());
+  }
+);
 
 async function executeSlashCommand(params: {
   command: SlashCommandDefinition;
