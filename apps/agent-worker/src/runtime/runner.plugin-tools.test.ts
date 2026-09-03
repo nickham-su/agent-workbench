@@ -145,7 +145,7 @@ test("processRun reuses runModelStep tool snapshot for next pending plugin tool 
           pluginTools: ["plugin_debug-tools_echo_inspect"],
           mcpServers: []
         },
-        runtime: {}
+        runtime: { modelRequestRetryBackoffMaxMs: 60_000 }
       };
     },
     async updateRunState() {

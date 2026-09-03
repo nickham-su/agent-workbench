@@ -207,6 +207,8 @@ export const AgentRuntimeSettingsSchema = Type.Object({
   modelTotalTimeoutMs: Type.Integer({ minimum: 0 }),
   // 模型请求首包前失败时的最大重试次数(0 表示不重试)。
   modelRequestMaxRetries: Type.Integer({ minimum: 0, maximum: 100 }),
+  // 模型请求重试的指数退避最大等待时间,单位毫秒。
+  modelRequestRetryBackoffMaxMs: Type.Integer({ minimum: 2_000, maximum: 3_600_000 }),
   // 自动压缩阈值百分比,达到 model.contextWindowTokens * pct/100 触发压缩。
   autoCompactThresholdPct: Type.Integer({ minimum: 50, maximum: 99 }),
   maxSubtaskDepth: Type.Integer({ minimum: 1, maximum: 5 }),
@@ -222,6 +224,7 @@ export const UpdateAgentRuntimeSettingsRequestSchema = Type.Object({
   modelIdleTimeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
   modelTotalTimeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
   modelRequestMaxRetries: Type.Optional(Type.Integer({ minimum: 0, maximum: 100 })),
+  modelRequestRetryBackoffMaxMs: Type.Optional(Type.Integer({ minimum: 2_000, maximum: 3_600_000 })),
   autoCompactThresholdPct: Type.Optional(Type.Integer({ minimum: 50, maximum: 99 })),
   maxSubtaskDepth: Type.Optional(Type.Integer({ minimum: 1, maximum: 5 })),
   visionModel: Type.Optional(Type.Union([AgentProvidersDefaultSchema, Type.Null()])),

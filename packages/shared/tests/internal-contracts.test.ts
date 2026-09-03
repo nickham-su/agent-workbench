@@ -216,6 +216,7 @@ test("agent-api aggregate export exposes read-side schemas with stable shells an
       modelIdleTimeoutMs: 1000,
       modelTotalTimeoutMs: 2000,
       modelRequestMaxRetries: 0,
+      modelRequestRetryBackoffMaxMs: 60_000,
       autoCompactThresholdPct: 80,
       maxSubtaskDepth: 1,
       sessionTerminalSoundEnabled: true,
@@ -299,6 +300,7 @@ test("agent-api read-side schemas reject invalid stable fields without constrain
       modelIdleTimeoutMs: 1000,
       modelTotalTimeoutMs: 2000,
       modelRequestMaxRetries: 0,
+      modelRequestRetryBackoffMaxMs: 60_000,
       autoCompactThresholdPct: 80,
       maxSubtaskDepth: 1,
       sessionTerminalSoundEnabled: true,
@@ -309,10 +311,16 @@ test("agent-api read-side schemas reject invalid stable fields without constrain
     vision: null,
     compaction: null
   };
+  assert.equal(Value.Check(AgentApiExport.AgentApiExecutionProfileResponseSchema, validExecutionProfile), true);
   const { maxSubtaskDepth: _maxSubtaskDepth, ...runtimeWithoutMaxSubtaskDepth } = validExecutionProfile.runtime;
   assert.equal(Value.Check(AgentApiExport.AgentApiExecutionProfileResponseSchema, {
     ...validExecutionProfile,
     runtime: runtimeWithoutMaxSubtaskDepth
+  }), false);
+  const { modelRequestRetryBackoffMaxMs: _modelRequestRetryBackoffMaxMs, ...runtimeWithoutRetryBackoffMax } = validExecutionProfile.runtime;
+  assert.equal(Value.Check(AgentApiExport.AgentApiExecutionProfileResponseSchema, {
+    ...validExecutionProfile,
+    runtime: runtimeWithoutRetryBackoffMax
   }), false);
   const { sessionTerminalSoundEnabled: _sessionTerminalSoundEnabled, ...runtimeWithoutSessionTerminalSoundEnabled } = validExecutionProfile.runtime;
   assert.equal(Value.Check(AgentApiExport.AgentApiExecutionProfileResponseSchema, {

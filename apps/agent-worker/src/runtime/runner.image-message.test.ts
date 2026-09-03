@@ -8,7 +8,7 @@ function baseProfile() {
     model: { id: "gpt-4o-mini" },
     provider: { npm: "@ai-sdk/openai", options: { apiKey: "test-key" } },
     agent: { tools: [], pluginTools: [], mcpServers: [] },
-    runtime: {}
+    runtime: { modelRequestRetryBackoffMaxMs: 60_000 }
   };
 }
 

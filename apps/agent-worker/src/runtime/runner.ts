@@ -50,7 +50,8 @@ const ENV_MODEL_TOTAL_TIMEOUT_MS = Math.min(
   Math.max(0, parseIntOrDefault(process.env.AWB_AGENT_MODEL_TOTAL_TIMEOUT_MS, 0))
 );
 const MODEL_RETRY_BACKOFF_BASE_MS = 2_000;
-const MODEL_RETRY_BACKOFF_MAX_MS = 60_000;
+const MODEL_RETRY_BACKOFF_DEFAULT_MAX_MS = 60_000;
+const MODEL_RETRY_BACKOFF_MAX_ALLOWED_MS = 3_600_000;
 const EMPTY_RESPONSE_COMPLETE_THRESHOLD = 6;
 const TOOL_OUTPUT_TEXT_MAX_CHARS = Math.max(1_000, parseIntOrDefault(process.env.AWB_TOOL_OUTPUT_TEXT_MAX_CHARS, 8_000));
 const TOOL_OUTPUT_TEXT_PREVIEW_CHARS = Math.max(
@@ -88,11 +89,18 @@ function shouldStopForMaxSteps(step: number, maxSteps: number) {
   return maxSteps > 0 && step >= Math.max(maxSteps, EMPTY_RESPONSE_COMPLETE_THRESHOLD);
 }
 
-function computeRetryBackoffMs(attemptIndex: number) {
+export function normalizeRetryBackoffMaxMs(raw: unknown) {
+  if (typeof raw !== "number" || !Number.isFinite(raw) || !Number.isInteger(raw)) {
+    return MODEL_RETRY_BACKOFF_DEFAULT_MAX_MS;
+  }
+  return Math.min(MODEL_RETRY_BACKOFF_MAX_ALLOWED_MS, Math.max(MODEL_RETRY_BACKOFF_BASE_MS, raw));
+}
+
+export function computeRetryBackoffMs(attemptIndex: number, rawMaxBackoffMs: unknown = MODEL_RETRY_BACKOFF_DEFAULT_MAX_MS) {
   if (!Number.isFinite(attemptIndex) || attemptIndex < 0) return MODEL_RETRY_BACKOFF_BASE_MS;
   const factor = 2 ** Math.floor(attemptIndex);
   const delay = MODEL_RETRY_BACKOFF_BASE_MS * factor;
-  return Math.min(MODEL_RETRY_BACKOFF_MAX_MS, Math.max(MODEL_RETRY_BACKOFF_BASE_MS, delay));
+  return Math.min(normalizeRetryBackoffMaxMs(rawMaxBackoffMs), Math.max(MODEL_RETRY_BACKOFF_BASE_MS, delay));
 }
 
 function toErrorRecord(value: unknown) {
@@ -1912,6 +1920,7 @@ export class AgentRunner {
     const { profile, run, context, signal } = params;
 
     const modelRequestMaxRetries = Math.max(0, Math.floor((profile as any).runtime?.modelRequestMaxRetries ?? 0));
+    const modelRequestRetryBackoffMaxMs = normalizeRetryBackoffMaxMs((profile as any).runtime?.modelRequestRetryBackoffMaxMs);
     const clearCompactionNotice = async () => {
       try {
         await this.apiClient.updateRunState({
@@ -1989,7 +1998,7 @@ export class AgentRunner {
           throw err;
         }
 
-        const delayMs = computeRetryBackoffMs(retryCount);
+        const delayMs = computeRetryBackoffMs(retryCount, modelRequestRetryBackoffMaxMs);
         const retryAttempt = retryCount + 1;
         const message = err instanceof Error ? err.message : String(err);
         const noticeText = `Compaction failed, retrying in ${Math.floor(delayMs / 1000)}s (${retryAttempt}/${modelRequestMaxRetries}): ${message}`;
@@ -2052,6 +2061,7 @@ export class AgentRunner {
         ? ENV_MODEL_TOTAL_TIMEOUT_MS
         : Math.max(0, Math.floor((profile as any).runtime?.modelTotalTimeoutMs ?? 0));
     const modelRequestMaxRetries = Math.max(0, Math.floor((profile as any).runtime?.modelRequestMaxRetries ?? 0));
+    const modelRequestRetryBackoffMaxMs = normalizeRetryBackoffMaxMs((profile as any).runtime?.modelRequestRetryBackoffMaxMs);
 
     const assistant = await this.apiClient.createContextItem({
       workspaceId: run.workspaceId,
@@ -2148,7 +2158,7 @@ export class AgentRunner {
         request: { ...requestBase, messages: context.messages },
         retryPolicy: {
           firstBackoffMs: MODEL_RETRY_BACKOFF_BASE_MS,
-          maxBackoffMs: MODEL_RETRY_BACKOFF_MAX_MS,
+          maxBackoffMs: modelRequestRetryBackoffMaxMs,
           maxRetries: modelRequestMaxRetries
         }
       }
@@ -2386,7 +2396,7 @@ export class AgentRunner {
           || shouldRetryAfterPartialText({ text, toolCalls: toolCalls.length, retryCount, maxRetries: modelRequestMaxRetries });
 
         if (canRetry) {
-          const delayMs = computeRetryBackoffMs(retryCount);
+          const delayMs = computeRetryBackoffMs(retryCount, modelRequestRetryBackoffMaxMs);
           const retryAttempt = retryCount + 1;
           const noticeText = `Request failed, retrying in ${Math.floor(delayMs / 1000)}s (${retryAttempt}/${modelRequestMaxRetries}): ${message}`;
           try {

@@ -76,6 +76,9 @@ const RESERVED_BUILTIN_SLASH_COMMANDS = new Set(["clear", "compact"]);
 const RUNTIME_TIMEOUT_MS_MAX = 2_147_483_647;
 const RUNTIME_MODEL_REQUEST_MAX_RETRIES_DEFAULT = 5;
 const RUNTIME_MODEL_REQUEST_MAX_RETRIES_MAX = 100;
+const RUNTIME_MODEL_REQUEST_RETRY_BACKOFF_MAX_DEFAULT = 60_000;
+const RUNTIME_MODEL_REQUEST_RETRY_BACKOFF_MAX_MIN = 2_000;
+const RUNTIME_MODEL_REQUEST_RETRY_BACKOFF_MAX_MAX = 3_600_000;
 const MODEL_CONTEXT_WINDOW_TOKENS_MAX = 10_000_000;
 const RUNTIME_AUTO_COMPACT_THRESHOLD_DEFAULT = 80;
 const RUNTIME_AUTO_COMPACT_THRESHOLD_MIN = 50;
@@ -357,6 +360,35 @@ function normalizeRuntimeTimeoutMsFromStored(raw: unknown) {
   const v = Math.floor(n);
   if (v < 0) return 0;
   if (v > RUNTIME_TIMEOUT_MS_MAX) return 0;
+  return v;
+}
+
+function normalizeModelRequestRetryBackoffMaxFromStored(raw: unknown) {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n)) return RUNTIME_MODEL_REQUEST_RETRY_BACKOFF_MAX_DEFAULT;
+  const v = Math.floor(n);
+  if (v !== n || v < RUNTIME_MODEL_REQUEST_RETRY_BACKOFF_MAX_MIN || v > RUNTIME_MODEL_REQUEST_RETRY_BACKOFF_MAX_MAX) {
+    return RUNTIME_MODEL_REQUEST_RETRY_BACKOFF_MAX_DEFAULT;
+  }
+  return v;
+}
+
+function normalizeModelRequestRetryBackoffMaxForUpdate(raw: unknown, field: string) {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n)) {
+    throw new HttpError(400, `${field} must be a finite number`, "AGENT_RUNTIME_RETRY_BACKOFF_MAX_INVALID");
+  }
+  const v = Math.floor(n);
+  if (v !== n) {
+    throw new HttpError(400, `${field} must be an integer`, "AGENT_RUNTIME_RETRY_BACKOFF_MAX_INVALID");
+  }
+  if (v < RUNTIME_MODEL_REQUEST_RETRY_BACKOFF_MAX_MIN || v > RUNTIME_MODEL_REQUEST_RETRY_BACKOFF_MAX_MAX) {
+    throw new HttpError(
+      400,
+      `${field} must be between ${RUNTIME_MODEL_REQUEST_RETRY_BACKOFF_MAX_MIN} and ${RUNTIME_MODEL_REQUEST_RETRY_BACKOFF_MAX_MAX}`,
+      "AGENT_RUNTIME_RETRY_BACKOFF_MAX_INVALID"
+    );
+  }
   return v;
 }
 
@@ -1171,6 +1203,7 @@ function getAgentRuntimeSettingsStored(ctx: AppContext) {
   const modelIdleTimeoutMs = normalizeRuntimeTimeoutMsFromStored(value?.modelIdleTimeoutMs);
   const modelTotalTimeoutMs = normalizeRuntimeTimeoutMsFromStored(value?.modelTotalTimeoutMs);
   const modelRequestMaxRetries = normalizeModelRequestMaxRetriesFromStored(value?.modelRequestMaxRetries);
+  const modelRequestRetryBackoffMaxMs = normalizeModelRequestRetryBackoffMaxFromStored(value?.modelRequestRetryBackoffMaxMs);
   const autoCompactThresholdPct = normalizeAutoCompactThresholdPctFromStored(value?.autoCompactThresholdPct);
   const maxSubtaskDepth = normalizeMaxSubtaskDepthFromStored(value?.maxSubtaskDepth);
   const sessionTerminalSoundEnabled = normalizeSessionTerminalSoundEnabledFromStored(value?.sessionTerminalSoundEnabled);
@@ -1194,6 +1227,7 @@ function getAgentRuntimeSettingsStored(ctx: AppContext) {
       modelIdleTimeoutMs,
       modelTotalTimeoutMs,
       modelRequestMaxRetries,
+      modelRequestRetryBackoffMaxMs,
       autoCompactThresholdPct,
       maxSubtaskDepth,
       sessionTerminalSoundEnabled,
@@ -1339,6 +1373,7 @@ export function getAgentRuntimeSettings(ctx: AppContext): AgentRuntimeSettings {
     modelIdleTimeoutMs: loaded.settings.modelIdleTimeoutMs,
     modelTotalTimeoutMs: loaded.settings.modelTotalTimeoutMs,
     modelRequestMaxRetries: loaded.settings.modelRequestMaxRetries,
+    modelRequestRetryBackoffMaxMs: loaded.settings.modelRequestRetryBackoffMaxMs,
     autoCompactThresholdPct: loaded.settings.autoCompactThresholdPct,
     maxSubtaskDepth: loaded.settings.maxSubtaskDepth,
     sessionTerminalSoundEnabled: loaded.settings.sessionTerminalSoundEnabled,
@@ -1458,6 +1493,10 @@ export function updateAgentRuntimeSettings(
     (body as any).modelRequestMaxRetries !== undefined
       ? normalizeModelRequestMaxRetriesForUpdate((body as any).modelRequestMaxRetries, "modelRequestMaxRetries")
       : current.modelRequestMaxRetries;
+  const modelRequestRetryBackoffMaxMs =
+    (body as any).modelRequestRetryBackoffMaxMs !== undefined
+      ? normalizeModelRequestRetryBackoffMaxForUpdate((body as any).modelRequestRetryBackoffMaxMs, "modelRequestRetryBackoffMaxMs")
+      : current.modelRequestRetryBackoffMaxMs;
   const autoCompactThresholdPct =
     (body as any).autoCompactThresholdPct !== undefined
       ? normalizeAutoCompactThresholdPctForUpdate((body as any).autoCompactThresholdPct, "autoCompactThresholdPct")
@@ -1509,6 +1548,7 @@ export function updateAgentRuntimeSettings(
       modelIdleTimeoutMs,
       modelTotalTimeoutMs,
       modelRequestMaxRetries,
+      modelRequestRetryBackoffMaxMs,
       autoCompactThresholdPct,
       maxSubtaskDepth,
       sessionTerminalSoundEnabled,
@@ -1519,13 +1559,14 @@ export function updateAgentRuntimeSettings(
   );
 
   logger.info(
-    { modelIdleTimeoutMs, modelTotalTimeoutMs, modelRequestMaxRetries, autoCompactThresholdPct, maxSubtaskDepth, sessionTerminalSoundEnabled, visionModel, compactionModel, updatedAt },
+    { modelIdleTimeoutMs, modelTotalTimeoutMs, modelRequestMaxRetries, modelRequestRetryBackoffMaxMs, autoCompactThresholdPct, maxSubtaskDepth, sessionTerminalSoundEnabled, visionModel, compactionModel, updatedAt },
     "agent runtime settings updated"
   );
   return {
     modelIdleTimeoutMs,
     modelTotalTimeoutMs,
     modelRequestMaxRetries,
+    modelRequestRetryBackoffMaxMs,
     autoCompactThresholdPct,
     maxSubtaskDepth,
     sessionTerminalSoundEnabled,

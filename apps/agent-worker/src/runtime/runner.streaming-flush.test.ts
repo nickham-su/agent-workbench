@@ -27,7 +27,7 @@ function baseProfile() {
       pluginTools: [],
       mcpServers: []
     },
-    runtime: {}
+    runtime: { modelRequestRetryBackoffMaxMs: 60_000 }
   };
 }
 
@@ -237,6 +237,7 @@ function startRunModelStep(params: {
   stream?: ReturnType<typeof createControlledStream>;
   streams?: Array<ReturnType<typeof createControlledStream>>;
   maxRetries?: number;
+  backoffMaxMs?: number;
   nowMs?: () => number;
 }) {
   const harness = createRunnerHarness({
@@ -246,7 +247,7 @@ function startRunModelStep(params: {
     nowMs: params.nowMs
   });
   const promise = (harness.runner as any).runModelStep({
-    profile: { ...baseProfile(), runtime: { modelRequestMaxRetries: params.maxRetries ?? 0 } },
+    profile: { ...baseProfile(), runtime: { modelRequestMaxRetries: params.maxRetries ?? 0, modelRequestRetryBackoffMaxMs: params.backoffMaxMs ?? 60_000 } },
     run: baseRun(),
     context: baseContext(),
     step: 1,
@@ -402,6 +403,33 @@ test("runModelStep: 连续空响应的 retryAttempt 连续递增且不重置", a
   assert.match(retryNotices[1] ?? "", /\(2\/2\)/);
 });
 
+test("runModelStep: 使用 profile 的较小退避上限更新普通请求通知", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => {
+    return originalSetTimeout(handler, 0, ...args);
+  }) as typeof setTimeout;
+
+  try {
+    const emptyStream = createControlledStream();
+    const successfulStream = createControlledStream();
+    const started = await startRunModelStep({
+      streams: [emptyStream, successfulStream],
+      maxRetries: 1,
+      backoffMaxMs: 2_000
+    });
+
+    void emptyStream.finish();
+    void successfulStream.push({ type: "text-delta", text: "ok" });
+    void successfulStream.finish();
+    await started.promise;
+
+    const retryNotice = started.runStateUpdates.find((update) => String(update.runNoticeText ?? "").includes("Request failed, retrying"));
+    assert.match(String(retryNotice?.runNoticeText ?? ""), /retrying in 2s \(1\/1\)/);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
 test("runModelStep: 空响应耗尽共享重试上限后失败且不创建新 step 或 item", async () => {
   const streams = [createControlledStream(), createControlledStream(), createControlledStream()];
   const started = await startRunModelStep({ streams, maxRetries: 2 });
@@ -457,4 +485,60 @@ test("runModelStep: 失败路径会保存未达阈值文本", async () => {
   const failed = started.updates.filter((item) => item.status === "failed");
   assert.equal(failed.length, 1);
   assert.equal(failed[0]?.output?.text, "partial output");
+});
+
+test("runModelStep 使用 Profile 的 120s 退避上限并在第六次重试等待 64000ms", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const observedDelays: number[] = [];
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, ms?: number, ...args: any[]) => {
+    if (typeof ms === "number" && ms > 0) observedDelays.push(ms);
+    return originalSetTimeout(handler, 0, ...args);
+  }) as typeof setTimeout;
+
+  try {
+    const streams = Array.from({ length: 7 }, (_, index) => ({
+      fullStream: (async function* () {
+        if (index === 6) yield { type: "text-delta", text: "ok" };
+        yield { type: "finish" };
+      })(),
+      reasoningText: Promise.resolve(""),
+      usage: Promise.resolve({ inputTokens: 1, outputTokens: 1 })
+    }));
+    const runStateUpdates: Array<Record<string, unknown>> = [];
+    const streamRequests: unknown[] = [];
+    let streamCalls = 0;
+    const runner = new AgentRunner(
+      {
+        async createContextItem() { return { item: { id: 1 } }; },
+        async updateContextItem() { return { id: 1 }; },
+        async updateRunState(input: Record<string, unknown>) { runStateUpdates.push(input); }
+      } as any,
+      {} as any,
+      { info() {}, warn() {}, error() {} },
+      1,
+      {
+        streamText: ((input: unknown) => {
+          streamRequests.push(input);
+          return streams[streamCalls++];
+        }) as unknown as typeof streamText
+      }
+    );
+    (runner as any).toolRegistry.listTools = async () => [];
+
+    const result = await (runner as any).runModelStep({
+      profile: { ...baseProfile(), runtime: { modelRequestMaxRetries: 6, modelRequestRetryBackoffMaxMs: 120_000 } },
+      run: baseRun(),
+      context: baseContext(),
+      step: 1,
+      signal: new AbortController().signal,
+      repeatedToolCallCounter: new Map()
+    });
+
+    assert.equal(result.aborted, false);
+    assert.equal(streamRequests.length, 7);
+    assert.deepEqual(observedDelays.slice(-6), [2_000, 4_000, 8_000, 16_000, 32_000, 64_000]);
+    assert.ok(runStateUpdates.some((update) => String(update.runNoticeText || "").includes("64s")));
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
 });

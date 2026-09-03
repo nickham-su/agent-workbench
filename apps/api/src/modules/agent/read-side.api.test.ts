@@ -192,6 +192,7 @@ test("read-side internal routes preserve token, body validation, and missing-res
   assert.equal(typeof profileBody.runtime?.modelIdleTimeoutMs, "number");
   assert.equal(typeof profileBody.runtime?.modelTotalTimeoutMs, "number");
   assert.equal(typeof profileBody.runtime?.modelRequestMaxRetries, "number");
+  assert.equal(typeof profileBody.runtime?.modelRequestRetryBackoffMaxMs, "number");
   assert.equal(typeof profileBody.runtime?.autoCompactThresholdPct, "number");
   assert.ok(profileBody.vision === null || typeof profileBody.vision === "object");
   assert.ok(profileBody.compaction === null || typeof profileBody.compaction === "object");

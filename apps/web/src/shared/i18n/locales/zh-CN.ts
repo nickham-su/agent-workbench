@@ -1107,6 +1107,10 @@ export default {
           label: "模型重试最大次数",
           help: "仅在首包前失败时自动重试。0 表示不重试。"
         },
+        modelRequestRetryBackoffMaxMs: {
+          label: "模型重试退避上限（秒）",
+          help: "模型请求及上下文压缩摘要重试时，指数退避等待时间的最大值。基础等待时间为 2 秒，范围 2-3600 秒；数值过大可能使失败任务长时间保持运行状态。"
+        },
         visionModel: {
           label: "视觉模型",
           placeholder: "请选择视觉模型（可选）",

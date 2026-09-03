@@ -528,7 +528,9 @@ test("generateCompactionSummary 使用 messages-context 追加压缩提示词", 
 
 test("compactContext 在可恢复失败时按 modelRequestMaxRetries 重试", async () => {
   const originalSetTimeout = globalThis.setTimeout;
-  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => {
+  let observedDelayMs: number | undefined;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, ms?: number, ...args: any[]) => {
+    observedDelayMs = ms;
     return originalSetTimeout(handler, 0, ...args);
   }) as typeof setTimeout;
 
@@ -560,7 +562,7 @@ test("compactContext 在可恢复失败时按 modelRequestMaxRetries 重试", as
 
     const result = await (runner as any).compactContext({
       profile: {
-        runtime: { modelRequestMaxRetries: 1 },
+        runtime: { modelRequestMaxRetries: 1, modelRequestRetryBackoffMaxMs: 2_000 },
         model: {},
         provider: {}
       },
@@ -578,6 +580,7 @@ test("compactContext 在可恢复失败时按 modelRequestMaxRetries 重试", as
 
     assert.equal(result, true);
     assert.equal(compactCalls, 2);
+    assert.equal(observedDelayMs, 2_000);
     assert.ok(runStateUpdates.some((it) => String(it.runNoticeText || "").includes("Compaction failed, retrying")));
   } finally {
     globalThis.setTimeout = originalSetTimeout;
@@ -852,6 +855,58 @@ test("compactContext 重试后 summary 为空会清理 retry notice", async () =
     assert.equal(result, false);
     assert.ok(runStateUpdates.some((it) => String(it.runNoticeText || "").includes("Compaction failed, retrying")));
     assert.equal(runStateUpdates.at(-1)?.runNoticeText, "");
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("compactContext 使用 Profile 的 120s 退避上限并在第六次重试等待 64000ms", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const observedDelays: number[] = [];
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, ms?: number, ...args: any[]) => {
+    if (typeof ms === "number" && ms > 0) observedDelays.push(ms);
+    return originalSetTimeout(handler, 0, ...args);
+  }) as typeof setTimeout;
+
+  try {
+    let compactCalls = 0;
+    const runStateUpdates: Array<{ runNoticeText?: string }> = [];
+    class TestRunner extends AgentRunner {
+      protected override async generateCompactionSummary() {
+        return "summary-ok";
+      }
+    }
+    const runner = new TestRunner(
+      {
+        async compactContext() {
+          compactCalls += 1;
+          if (compactCalls <= 6) throw new Error("request failed: 500 upstream unavailable");
+          return { compacted: true, summaryItemId: 10, archivedCount: 4 };
+        },
+        async updateRunState(input: { runNoticeText?: string }) {
+          runStateUpdates.push(input);
+        }
+      } as any,
+      {} as any,
+      { info() {}, warn() {}, error() {} },
+      1
+    );
+
+    const result = await (runner as any).compactContext({
+      profile: {
+        runtime: { modelRequestMaxRetries: 6, modelRequestRetryBackoffMaxMs: 120_000 },
+        model: {},
+        provider: {}
+      },
+      run: { workspaceId: "ws", sessionId: "sess", runId: "run" },
+      context: { headItemId: 1, uiLocale: "zh-CN" },
+      signal: AbortSignal.timeout(1_000)
+    });
+
+    assert.equal(result, true);
+    assert.equal(compactCalls, 7);
+    assert.deepEqual(observedDelays.slice(-6), [2_000, 4_000, 8_000, 16_000, 32_000, 64_000]);
+    assert.ok(runStateUpdates.some((update) => String(update.runNoticeText || "").includes("64s")));
   } finally {
     globalThis.setTimeout = originalSetTimeout;
   }

@@ -22,7 +22,7 @@ function baseProfile() {
       pluginTools: [],
       mcpServers: []
     },
-    runtime: {}
+    runtime: { modelRequestRetryBackoffMaxMs: 60_000 }
   };
 }
 

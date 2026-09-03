@@ -18,6 +18,7 @@ function createProfile(tools: ExecutionProfile["agent"]["tools"]): ExecutionProf
       modelIdleTimeoutMs: 0,
       modelTotalTimeoutMs: 0,
       modelRequestMaxRetries: 0,
+      modelRequestRetryBackoffMaxMs: 60_000,
       autoCompactThresholdPct: 80,
       maxSubtaskDepth: 1,
       sessionTerminalSoundEnabled: true,

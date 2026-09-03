@@ -312,6 +312,45 @@ test("agent runtime settings maxSubtaskDepth 默认值、边界和非法更新",
   }
 });
 
+test("agent runtime settings modelRequestRetryBackoffMaxMs 默认值、边界和旧数据兼容", async (t: TestContext) => {
+  const fixture = await createIntegrationFixtureForTest(t);
+
+  const defaultRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/runtime" });
+  assert.equal(defaultRes.statusCode, 200);
+  assert.equal(defaultRes.json().modelRequestRetryBackoffMaxMs, 60_000);
+
+  for (const value of [2_000, 3_600_000]) {
+    const res = await fixture.app.inject({
+      method: "PUT",
+      url: "/api/settings/agent/runtime",
+      payload: { modelRequestRetryBackoffMaxMs: value }
+    });
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(res.json().modelRequestRetryBackoffMaxMs, value);
+  }
+
+  for (const invalid of [1_999, 3_600_001, 2_000.5, "not-a-number", null]) {
+    const res = await fixture.app.inject({
+      method: "PUT",
+      url: "/api/settings/agent/runtime",
+      payload: { modelRequestRetryBackoffMaxMs: invalid }
+    });
+    assert.equal(res.statusCode, 400, res.body);
+  }
+
+  setSettingJson(fixture.db, "agent_runtime_v1", { modelRequestMaxRetries: 5 }, Date.now());
+  const legacyRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/runtime" });
+  assert.equal(legacyRes.statusCode, 200);
+  assert.equal(legacyRes.json().modelRequestRetryBackoffMaxMs, 60_000);
+
+  for (const corrupt of [1_999, 3_600_001, 2_000.5, "not-a-number", null]) {
+    setSettingJson(fixture.db, "agent_runtime_v1", { modelRequestRetryBackoffMaxMs: corrupt }, Date.now());
+    const res = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/runtime" });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.json().modelRequestRetryBackoffMaxMs, 60_000, `stored ${String(corrupt)} should fall back to default`);
+  }
+});
+
 test("agent runtime settings 可通过 execution-profile 下发", async (t: TestContext) => {
   const fixture = await createIntegrationFixtureForTest(t);
 
@@ -321,7 +360,8 @@ test("agent runtime settings 可通过 execution-profile 下发", async (t: Test
     payload: {
       modelIdleTimeoutMs: 1234,
       modelTotalTimeoutMs: 5678,
-      modelRequestMaxRetries: 4
+      modelRequestMaxRetries: 4,
+      modelRequestRetryBackoffMaxMs: 120_000
     }
   });
   assert.equal(runtimeRes.statusCode, 200, `update agent runtime settings failed: ${runtimeRes.body}`);
@@ -354,10 +394,35 @@ test("agent runtime settings 可通过 execution-profile 下发", async (t: Test
   assert.equal(profile.runtime?.modelIdleTimeoutMs, 1234);
   assert.equal(profile.runtime?.modelTotalTimeoutMs, 5678);
   assert.equal(profile.runtime?.modelRequestMaxRetries, 4);
+  assert.equal(profile.runtime?.modelRequestRetryBackoffMaxMs, 120_000);
   assert.equal(typeof profile.runtime?.autoCompactThresholdPct, "number");
   assert.equal(typeof profile.model?.contextWindowTokens, "number");
   assert.equal(profile.provider?.options?.apiMode, "responses");
   assert.equal(profile.compaction, null);
+});
+
+test("agent runtime settings 部分更新时保留 modelRequestRetryBackoffMaxMs", async (t: TestContext) => {
+  const fixture = await createIntegrationFixtureForTest(t);
+
+  const initialRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/runtime",
+    payload: { modelRequestRetryBackoffMaxMs: 120_000 }
+  });
+  assert.equal(initialRes.statusCode, 200, initialRes.body);
+
+  const partialRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/runtime",
+    payload: { modelRequestMaxRetries: 7 }
+  });
+  assert.equal(partialRes.statusCode, 200, partialRes.body);
+  assert.equal(partialRes.json().modelRequestMaxRetries, 7);
+  assert.equal(partialRes.json().modelRequestRetryBackoffMaxMs, 120_000);
+
+  const getRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/runtime" });
+  assert.equal(getRes.statusCode, 200, getRes.body);
+  assert.equal(getRes.json().modelRequestRetryBackoffMaxMs, 120_000);
 });
 
 test("agent runtime compactionModel 支持保存、下发、清空和引用保护", async (t: TestContext) => {

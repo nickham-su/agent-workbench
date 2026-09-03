@@ -87,6 +87,7 @@ export const AgentApiExecutionProfileResponseSchema = Type.Object({
     modelIdleTimeoutMs: Type.Integer({ minimum: 0 }),
     modelTotalTimeoutMs: Type.Integer({ minimum: 0 }),
     modelRequestMaxRetries: Type.Integer({ minimum: 0, maximum: 100 }),
+    modelRequestRetryBackoffMaxMs: Type.Integer({ minimum: 2_000, maximum: 3_600_000 }),
     autoCompactThresholdPct: Type.Integer({ minimum: 50, maximum: 99 }),
     maxSubtaskDepth: Type.Integer({ minimum: 1, maximum: 5 }),
     sessionTerminalSoundEnabled: Type.Boolean(),

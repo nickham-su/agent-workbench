@@ -1416,6 +1416,7 @@ const validExecutionProfileResponse = {
     modelIdleTimeoutMs: 1000,
     modelTotalTimeoutMs: 2000,
     modelRequestMaxRetries: 0,
+    modelRequestRetryBackoffMaxMs: 60_000,
     autoCompactThresholdPct: 80,
     maxSubtaskDepth: 1,
     sessionTerminalSoundEnabled: true,

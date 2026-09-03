@@ -1109,6 +1109,10 @@ export default {
           label: "Model max retries",
           help: "Automatically retries only when a request fails before receiving the first chunk. 0 disables retries."
         },
+        modelRequestRetryBackoffMaxMs: {
+          label: "Model retry backoff maximum (seconds)",
+          help: "Maximum exponential backoff delay for model requests and context-compaction summary retries. The base delay is 2 seconds; range: 2-3600 seconds. Large values may keep failed runs active for a long time."
+        },
         visionModel: {
           label: "Vision model",
           placeholder: "Select a vision model (optional)",
