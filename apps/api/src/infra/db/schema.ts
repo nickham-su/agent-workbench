@@ -95,6 +95,7 @@ export function initSchema(db: Db) {
       id text primary key,
       workspace_id text not null,
       title text not null,
+      title_manually_set integer not null default 0 check (title_manually_set in (0, 1)),
       kind text not null,
       created_at integer not null,
       updated_at integer not null,
@@ -222,6 +223,7 @@ export function initSchema(db: Db) {
   ensureColumn(db, { table: "workspaces", column: "last_used_at", ddl: "last_used_at integer" });
   ensureColumn(db, { table: "agent_session", column: "forked_from_item_id", ddl: "forked_from_item_id integer" });
   ensureColumn(db, { table: "agent_session", column: "forked_from_session_id", ddl: "forked_from_session_id text" });
+  ensureColumn(db, { table: "agent_session", column: "title_manually_set", ddl: "title_manually_set integer not null default 0 check (title_manually_set in (0, 1))" });
   ensureColumn(db, { table: "agent_session_head", column: "head_item_id", ddl: "head_item_id integer" });
   ensureColumn(db, { table: "agent_client_request", column: "message_item_id", ddl: "message_item_id integer" });
   ensureColumn(db, { table: "agent_session_run_state", column: "active_assistant_item_id", ddl: "active_assistant_item_id integer" });

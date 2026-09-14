@@ -287,7 +287,21 @@ export default {
       creating: "Creating...",
       refresh: "Refresh",
       minimize: "Minimize",
-      closeClient: "Close session"
+      closeClient: "Close session",
+      setSessionTitle: "Set session title"
+    },
+    titleSetting: {
+      modalTitle: "Set session title",
+      inputLabel: "Session title",
+      inputPlaceholder: "Enter a new session title",
+      permanentNotice: "After saving, this title will be kept permanently and no longer update automatically.",
+      save: "Save",
+      cancel: "Cancel",
+      rawTooLong: "Input is too long, please shorten it.",
+      empty: "Title must not be empty.",
+      tooLong: "Title must not exceed 50 characters.",
+      invalidCharacters: "Title contains disallowed control characters.",
+      saveFailed: "Failed to save title"
     },
     client: {
       tabLabel: "Session {index}",

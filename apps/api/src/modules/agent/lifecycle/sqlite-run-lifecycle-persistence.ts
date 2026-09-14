@@ -2,6 +2,7 @@ import type { AgentContextItemOutput } from "@agent-workbench/shared";
 import type { AgentApiRunCompleteRequest, AgentApiRunStateRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { Db } from "../../../infra/db/db.js";
 import type { SubtaskChildActivationInput, SubtaskChildActivationResult, SubtaskChildRunActivator } from "../subtask/subtask-ports.js";
+import { toAutomaticSessionTitle } from "../session/session-title.js";
 import {
   appendContextItem,
   createRunRecord,
@@ -27,7 +28,7 @@ import {
   setRunStateIdle,
   updateContextItem,
   updateRunRecordStatus,
-  updateAgentSessionTitle,
+  updateAutoAgentSessionTitle,
   updateRunState
 } from "../agent.store.js";
 import type {
@@ -45,10 +46,7 @@ const NON_TERMINAL_ITEM_STATUS = new Set(["streaming", "queued", "running"] as c
 const TERMINAL_RUN_RECORD_STATUS = new Set(["completed", "failed", "cancelled"] as const);
 
 function toSessionTitleFromFirstMessage(text: string) {
-  const compact = text.replace(/\s+/g, " ").trim();
-  if (!compact) return "新会话";
-  if (compact.length <= 50) return compact;
-  return `${compact.slice(0, 49)}…`;
+  return toAutomaticSessionTitle(text, "新会话");
 }
 
 function normalizeRunNoticeText(raw: unknown) {
@@ -117,7 +115,7 @@ export class SqliteRunLifecyclePersistence implements AtomicLifecyclePersistence
         insertContextItemAttachments(this.db, { workspaceId: input.workspaceId, contextItemId: item.id, attachments: input.images, createdAt: input.createdAt });
       }
       if (head == null) {
-        updateAgentSessionTitle(this.db, {
+        updateAutoAgentSessionTitle(this.db, {
           sessionId: input.sessionId,
           title: toSessionTitleFromFirstMessage(input.text),
           updatedAt: input.createdAt

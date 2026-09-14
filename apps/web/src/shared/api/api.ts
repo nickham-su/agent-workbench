@@ -93,6 +93,7 @@ import type {
   AgentRevertSessionRequest,
   AgentClearSessionRequest,
   AgentCompactSessionRequest,
+  AgentUpdateSessionTitleRequest,
   AgentCompactSessionResponse,
   AgentSendMessageRequest,
   AgentSendMessageResponse,
@@ -1151,6 +1152,16 @@ export async function resetAgentSessionModelOverride(sessionId: string, agentId:
 export async function createAgentSession(body: AgentCreateSessionRequest) {
   try {
     const res = await client.post<AgentSessionRecord>("/agent/sessions", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+/** 手动设置 Session 标题；保存成功后该 Session 永久停止自动标题更新。 */
+export async function updateAgentSessionTitle(sessionId: string, body: AgentUpdateSessionTitleRequest) {
+  try {
+    const res = await client.put<AgentSessionRecord>(`/agent/sessions/${sessionId}/title`, body);
     return res.data;
   } catch (err) {
     throw toApiError(err);

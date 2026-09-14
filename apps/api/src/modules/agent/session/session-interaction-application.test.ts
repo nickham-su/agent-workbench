@@ -56,6 +56,13 @@ function createDependencies(params?: {
         calls.push(["clone", input]);
         return { ...primary, id: input.id, kind: input.targetKind, headItemId: input.fromItemId };
       },
+      setManualTitle: (input) => {
+        calls.push(["set-manual-title", input]);
+        const existing = sessions.get(input.sessionId);
+        if (!existing || existing.workspaceId !== input.workspaceId) return false;
+        sessions.set(input.sessionId, { ...existing, title: input.title });
+        return true;
+      },
       findClientRequestDedup: (input) => {
         calls.push(["dedup", input]);
         return params?.dedup ?? null;
@@ -121,7 +128,7 @@ function createDependencies(params?: {
     isConflict: (error) => error instanceof AgentConflictError,
     toConflictHttpError: (error) => new HttpError(409, "session head conflict", `conflict_head:${String((error as AgentConflictError).currentHeadItemId)}`)
   };
-  return { calls, application: new SessionInteractionApplication(dependencies) };
+  return { calls, sessions, application: new SessionInteractionApplication(dependencies) };
 }
 
 test("SessionInteractionApplication creates primary sessions and delegates public forks through the narrow store", async () => {
@@ -218,4 +225,130 @@ test("SessionInteractionApplication reverts before best-effort runtime cancellat
   assert.deepEqual(calls.map(([kind]) => kind), ["run-state", "move-head", "cancel", "warn"]);
   assert.deepEqual(calls[1], ["move-head", { workspaceId: "workspace", sessionId: primary.id, expectedHeadItemId: 5, nextHeadItemId: 3, updatedAt: 123 }]);
   assert.equal(calls[3]?.[2], "cancel session runtime after revert failed");
+});
+
+test("updateSessionTitle succeeds for primary and subtask sessions and normalizes whitespace", () => {
+  const { calls, application } = createDependencies();
+  const record = application.updateSessionTitle({
+    sessionId: primary.id,
+    body: { workspaceId: "workspace", title: "  修复   登录问题  " }
+  });
+  assert.equal(record.title, "修复 登录问题");
+  const setCall = calls.find(([kind]) => kind === "set-manual-title");
+  assert.ok(setCall);
+  assert.deepEqual(setCall[1], { sessionId: primary.id, workspaceId: "workspace", title: "修复 登录问题" });
+
+  // subtask session 允许更新标题
+  const subtask = { ...primary, id: "session-subtask", kind: "subtask" as const };
+  const subtaskDeps = createDependencies();
+  subtaskDeps.sessions.set(subtask.id, subtask);
+  const subtaskRecord = subtaskDeps.application.updateSessionTitle({
+    sessionId: subtask.id,
+    body: { workspaceId: "workspace", title: "Subtask 标题" }
+  });
+  assert.equal(subtaskRecord.title, "Subtask 标题");
+});
+
+test("updateSessionTitle accepts a 50-character title and rejects 51 characters", () => {
+  const { application } = createDependencies();
+  const fifty = "a".repeat(50);
+  const ok = application.updateSessionTitle({ sessionId: primary.id, body: { workspaceId: "workspace", title: fifty } });
+  assert.equal(ok.title, fifty);
+  assert.throws(
+    () => application.updateSessionTitle({ sessionId: primary.id, body: { workspaceId: "workspace", title: "a".repeat(51) } }),
+    (error: unknown) => error instanceof HttpError && error.statusCode === 400 && (error as HttpError & { code?: string }).code === "AGENT_SESSION_TITLE_TOO_LONG"
+  );
+});
+
+test("updateSessionTitle rejects blank titles with AGENT_SESSION_TITLE_EMPTY", () => {
+  const { application } = createDependencies();
+  assert.throws(
+    () => application.updateSessionTitle({ sessionId: primary.id, body: { workspaceId: "workspace", title: "   " } }),
+    (error: unknown) => error instanceof HttpError && error.statusCode === 400 && (error as HttpError & { code?: string }).code === "AGENT_SESSION_TITLE_EMPTY"
+  );
+});
+
+test("updateSessionTitle rejects control characters with AGENT_SESSION_TITLE_INVALID_CHARACTERS", () => {
+  const { application } = createDependencies();
+  assert.throws(
+    () => application.updateSessionTitle({ sessionId: primary.id, body: { workspaceId: "workspace", title: "bad\u0007title" } }),
+    (error: unknown) => error instanceof HttpError && error.statusCode === 400 && (error as HttpError & { code?: string }).code === "AGENT_SESSION_TITLE_INVALID_CHARACTERS"
+  );
+  // \n 被空白压缩消除后合法
+  const ok = application.updateSessionTitle({ sessionId: primary.id, body: { workspaceId: "workspace", title: "a\nb" } });
+  assert.equal(ok.title, "a b");
+});
+
+test("updateSessionTitle treats saving the identical valid title as manual takeover and stays idempotent", () => {
+  const { calls, application } = createDependencies();
+  const first = application.updateSessionTitle({ sessionId: primary.id, body: { workspaceId: "workspace", title: "Same" } });
+  assert.equal(first.title, "Same");
+  const second = application.updateSessionTitle({ sessionId: primary.id, body: { workspaceId: "workspace", title: "Same" } });
+  assert.equal(second.title, "Same");
+  assert.equal(calls.filter(([kind]) => kind === "set-manual-title").length, 2);
+});
+
+test("updateSessionTitle returns 404 for missing session and 400 for workspace mismatch before store mutation", () => {
+  const { calls, application } = createDependencies({ session: null });
+  assert.throws(
+    () => application.updateSessionTitle({ sessionId: "missing", body: { workspaceId: "workspace", title: "x" } }),
+    (error: unknown) => error instanceof HttpError && error.statusCode === 404
+  );
+  assert.equal(calls.filter(([kind]) => kind === "set-manual-title").length, 0);
+
+  const mismatch = createDependencies();
+  assert.throws(
+    () => mismatch.application.updateSessionTitle({ sessionId: primary.id, body: { workspaceId: "other", title: "x" } }),
+    (error: unknown) => error instanceof HttpError && error.statusCode === 400 && (error as HttpError & { code?: string }).code === undefined
+  );
+  assert.equal(mismatch.calls.filter(([kind]) => kind === "set-manual-title").length, 0);
+});
+
+test("updateSessionTitle returns 404 when the store mutation misses", () => {
+  const first = createDependencies();
+  const baseStoreCalls = first.calls;
+  void baseStoreCalls;
+  const disappearingStore: SessionInteractionApplicationDependencies["store"] = {
+    workspaceExists: () => true,
+    getSession: (id) => (id === "session-primary" ? { ...primary } : null),
+    listSessions: () => [],
+    createSession: () => undefined,
+    cloneSession: async () => { throw new Error("unused"); },
+    setManualTitle: () => false,
+    findClientRequestDedup: () => null,
+    getRunState: () => ({ status: "idle" }),
+    getControlRunState: () => ({
+      sessionId: primary.id,
+      status: "idle",
+      activeRunId: null,
+      activeAssistantItemId: null,
+      lastResponseTotalTokens: null,
+      nonTerminalItemIds: [],
+      runNoticeText: "",
+      updatedAt: 8,
+      appliedItemId: 0,
+      lastTerminalStatus: null,
+      lastRun: null,
+      contextWindowTokens: null,
+      contextTokenRatio: null
+    }),
+    getTranscriptItem: () => null,
+    hasNonTerminalItems: () => false,
+    moveHead: () => undefined
+  };
+  const application = new SessionInteractionApplication({
+    store: disappearingStore,
+    profileReader: { resolveUser: () => ({ agentId: "a", providerId: "p", modelId: "m" }) },
+    lifecycleStarter: { startUserRun: async () => ({ sessionId: primary.id, messageItemId: 1, runId: "r", deduplicated: false }) },
+    clock: { nowMs: () => 1 },
+    ids: { newSessionId: () => "x" },
+    logger: { warn: () => undefined },
+    normalizeUiLocale: () => null,
+    isConflict: () => false,
+    toConflictHttpError: (error) => error as Error
+  });
+  assert.throws(
+    () => application.updateSessionTitle({ sessionId: primary.id, body: { workspaceId: "workspace", title: "x" } }),
+    (error: unknown) => error instanceof HttpError && error.statusCode === 404
+  );
 });

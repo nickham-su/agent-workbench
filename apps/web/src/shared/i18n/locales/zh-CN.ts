@@ -285,7 +285,21 @@ export default {
       creating: "创建中...",
       refresh: "刷新",
       minimize: "最小化",
-      closeClient: "关闭会话"
+      closeClient: "关闭会话",
+      setSessionTitle: "设置会话标题"
+    },
+    titleSetting: {
+      modalTitle: "设置会话标题",
+      inputLabel: "会话标题",
+      inputPlaceholder: "输入新的会话标题",
+      permanentNotice: "保存后将永久使用此标题，不再自动更新。",
+      save: "保存",
+      cancel: "取消",
+      rawTooLong: "输入过长，请缩短后再试。",
+      empty: "标题不能为空。",
+      tooLong: "标题长度不能超过 50 个字符。",
+      invalidCharacters: "标题包含不允许的控制字符。",
+      saveFailed: "保存标题失败"
     },
     client: {
       tabLabel: "会话 {index}",

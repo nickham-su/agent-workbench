@@ -15,7 +15,8 @@ import {
   hasNonTerminalSessionItems,
   listAgentSessions,
   moveSessionHead,
-  setContextItemsArchiveAt
+  setContextItemsArchiveAt,
+  setManualAgentSessionTitle
 } from "../agent.store.js";
 import type { ArchiveStorage } from "../archive/archive-storage.js";
 import type { SessionCloneInput, SessionCreateInput, SessionInteractionStore } from "./session-interaction-ports.js";
@@ -45,6 +46,10 @@ export class SqliteSessionInteractionStore implements SessionInteractionStore {
 
   createSession(input: SessionCreateInput): void {
     createAgentSession(this.dependencies.db, input);
+  }
+
+  setManualTitle(input: { sessionId: string; workspaceId: string; title: string }): boolean {
+    return setManualAgentSessionTitle(this.dependencies.db, input);
   }
 
   findClientRequestDedup(input: { workspaceId: string; sessionId: string; clientRequestId: string }) {

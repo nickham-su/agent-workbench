@@ -162,3 +162,75 @@ test("agent attachment relations enforce position uniqueness and foreign key del
 
   db.close();
 });
+
+test("agent_session title_manually_set column exists with default 0 and enforces check constraint", () => {
+  const db = createDb();
+  insertWorkspace(db);
+
+  const columns = db.prepare("pragma table_info(agent_session)").all() as Array<{ name: string; dflt_value: unknown; notnull: number }>;
+  const column = columns.find((c) => c.name === "title_manually_set");
+  assert.ok(column, "title_manually_set column must exist");
+  assert.equal(column.notnull, 1);
+  assert.equal(String(column.dflt_value), "0");
+
+  db.prepare("insert into agent_session (id, workspace_id, title, kind, created_at, updated_at) values (?, ?, ?, ?, ?, ?)")
+    .run("sess-a", "ws-a", "A", "primary", 1, 1);
+  const row = db.prepare("select title_manually_set as flag from agent_session where id = ?").get("sess-a") as { flag: number };
+  assert.equal(row.flag, 0);
+
+  assert.throws(
+    () => db.prepare("insert into agent_session (id, workspace_id, title, title_manually_set, kind, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?)")
+      .run("sess-bad", "ws-a", "B", 2, "primary", 1, 1),
+    /CHECK constraint failed/
+  );
+  assert.throws(
+    () => db.prepare("insert into agent_session (id, workspace_id, title, title_manually_set, kind, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?)")
+      .run("sess-null", "ws-a", "C", null as unknown as number, "primary", 1, 1),
+    /NOT NULL constraint failed/
+  );
+
+  db.close();
+});
+
+test("ensureColumn upgrades legacy agent_session schema with title_manually_set defaulting existing rows to 0", () => {
+  const db = new Database(":memory:");
+  db.pragma("foreign_keys = ON");
+  db.exec(`
+    create table workspaces (
+      id text primary key,
+      dir_name text,
+      title text not null,
+      path text not null,
+      created_at integer not null,
+      updated_at integer not null
+    );
+    create table agent_session (
+      id text primary key,
+      workspace_id text not null,
+      title text not null,
+      kind text not null,
+      created_at integer not null,
+      updated_at integer not null,
+      foreign key (workspace_id) references workspaces(id) on delete restrict
+    );
+  `);
+  db.prepare("insert into workspaces (id, dir_name, title, path, created_at, updated_at) values (?, ?, ?, ?, ?, ?)")
+    .run("ws-a", "ws-a-dir", "Workspace", "/workspaces/ws-a", 1, 1);
+  db.prepare("insert into agent_session (id, workspace_id, title, kind, created_at, updated_at) values (?, ?, ?, ?, ?, ?)")
+    .run("sess-legacy", "ws-a", "Legacy", "primary", 1, 1);
+
+  initSchema(db);
+
+  const columns = db.prepare("pragma table_info(agent_session)").all() as Array<{ name: string }>;
+  assert.ok(columns.some((c) => c.name === "title_manually_set"));
+  const row = db.prepare("select title as title, title_manually_set as flag, updated_at as updatedAt from agent_session where id = ?")
+    .get("sess-legacy") as { title: string; flag: number; updatedAt: number };
+  assert.equal(row.title, "Legacy");
+  assert.equal(row.flag, 0);
+  assert.equal(row.updatedAt, 1);
+
+  // 幂等：重复执行不得报错
+  initSchema(db);
+
+  db.close();
+});

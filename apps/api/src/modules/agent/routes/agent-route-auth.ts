@@ -3,6 +3,7 @@ import { HttpError } from "../../../app/errors.js";
 
 export const AGENT_PRIMARY_SESSION_CREATE_BODY_KEYS = new Set(["workspaceId", "title"]);
 export const AGENT_PRIMARY_SESSION_FORK_BODY_KEYS = new Set(["fromSessionId", "fromItemId", "mode", "title"]);
+export const AGENT_SESSION_TITLE_UPDATE_BODY_KEYS = new Set(["workspaceId", "title"]);
 
 export function assertInternalToken(req: FastifyRequest, internalToken: string) {
   const token = String(req.headers["x-awb-agent-internal-token"] || "");

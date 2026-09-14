@@ -55,7 +55,7 @@ function createApplication(overrides: Partial<ApplicationDependencies> = {}) {
       calls.push(["format-title", value]);
       return typeof value === "string" ? value.trim() : "";
     },
-    updateSessionTitle(params) {
+    updateAutoSessionTitle(params) {
       calls.push(["update-title", params]);
     },
     isAppendConflict(error): error is { currentHeadItemId: number | null } {

@@ -3,6 +3,7 @@ import path from "node:path";
 import type { FastifyBaseLogger } from "fastify";
 import { TextDecoder } from "node:util";
 import type {
+  AgentUpdateSessionTitleRequest,
   AgentContextItemRecord,
   AgentContextItemStatus,
   AgentContextItemOutput,
@@ -80,7 +81,8 @@ import {
   setRunStateIdle,
   updateContextItem,
   updateRunRecordStatus,
-  updateAgentSessionTitle,
+  updateAutoAgentSessionTitle,
+  setManualAgentSessionTitle,
   updateRunState
 } from "./agent.store.js";
 import {
@@ -127,6 +129,7 @@ import type {
 } from "./subtask/subtask-ports.js";
 import type { AgentRuntimePort } from "./agent.runtime-port.js";
 import { SessionInteractionApplication } from "./session/session-interaction-application.js";
+import { toAutomaticSessionTitle } from "./session/session-title.js";
 import { SqliteSessionInteractionStore } from "./session/sqlite-session-interaction-store.js";
 import { SessionAgentModelApplication } from "./session/session-agent-model-application.js";
 import { ContextQueryApplication } from "./query/context-query-application.js";
@@ -705,13 +708,6 @@ function resolveToolOutputText(output: { text?: unknown; result?: unknown }) {
   return stringifyToolResult(output.result);
 }
 
-function toSessionTitleFromFirstMessage(text: string) {
-  const compact = text.replace(/\s+/g, " ").trim();
-  if (!compact) return "新会话";
-  if (compact.length <= 50) return compact;
-  return `${compact.slice(0, 49)}…`;
-}
-
 function normalizeAgentUiLocale(value: unknown): AgentUiLocale | null {
   const raw = String(value || "").trim();
   if (raw === "zh-CN" || raw === "en-US") return raw;
@@ -754,9 +750,7 @@ function buildRuntimeInstruction(input: { uiLocale: AgentUiLocale | null }) {
 
 function normalizeTodolistGoal(value: unknown) {
   if (typeof value !== "string") return "";
-  const compact = value.replace(/\s+/g, " ").trim();
-  if (!compact) return "";
-  return toSessionTitleFromFirstMessage(compact);
+  return toAutomaticSessionTitle(value, "");
 }
 
 function buildClearSummaryText(input: { uiLocale: AgentUiLocale | null; reason?: string }) {
@@ -1132,13 +1126,14 @@ function createSessionFacadeCapabilities<T extends {
   getWorkspace: (...args: any[]) => any;
   createPrimarySession: (...args: any[]) => any;
   forkPrimarySession: (...args: any[]) => any;
+  updateSessionTitle: (...args: any[]) => any;
   sendMessage: (...args: any[]) => any;
   compactSession: (...args: any[]) => any;
   revertSession: (...args: any[]) => any;
   listSessionModelOverrides: (...args: any[]) => any;
   setSessionModelOverride: (...args: any[]) => any;
   resetSessionModelOverride: (...args: any[]) => any;
-}>(dependencies: T): Pick<T, "cleanupSubtaskOrphansOnStartup" | "listSessions" | "getSession" | "getWorkspace" | "createPrimarySession" | "forkPrimarySession" | "sendMessage" | "compactSession" | "revertSession" | "listSessionModelOverrides" | "setSessionModelOverride" | "resetSessionModelOverride"> {
+}>(dependencies: T): Pick<T, "cleanupSubtaskOrphansOnStartup" | "listSessions" | "getSession" | "getWorkspace" | "createPrimarySession" | "forkPrimarySession" | "updateSessionTitle" | "sendMessage" | "compactSession" | "revertSession" | "listSessionModelOverrides" | "setSessionModelOverride" | "resetSessionModelOverride"> {
   const {
     cleanupSubtaskOrphansOnStartup,
     listSessions,
@@ -1146,6 +1141,7 @@ function createSessionFacadeCapabilities<T extends {
     getWorkspace,
     createPrimarySession,
     forkPrimarySession,
+    updateSessionTitle,
     sendMessage,
     compactSession,
     revertSession,
@@ -1160,6 +1156,7 @@ function createSessionFacadeCapabilities<T extends {
     getWorkspace,
     createPrimarySession,
     forkPrimarySession,
+    updateSessionTitle,
     sendMessage,
     compactSession,
     revertSession,
@@ -1638,8 +1635,8 @@ function createReadQueryWritebackAssembly(assembly: {
       appendWithRunFence: (params) => appendContextItemWithRunFence(assembly.environment.db, params),
       nowMs,
       formatTodolistTitle: normalizeTodolistGoal,
-      updateSessionTitle: (params) => {
-        updateAgentSessionTitle(assembly.environment.db, params);
+      updateAutoSessionTitle: (params) => {
+        updateAutoAgentSessionTitle(assembly.environment.db, params);
       },
       isAppendConflict: (error): error is AgentConflictError => error instanceof AgentConflictError,
       warnAppendConflict: (params) => {
@@ -1830,6 +1827,10 @@ function createAgentApplications(
 
   async function forkPrimarySession(params: AgentForkSessionRequest) {
     return await sessionInteractionApplication.forkPrimarySession(params);
+  }
+
+  function updateSessionTitle(params: { sessionId: string; body: AgentUpdateSessionTitleRequest }) {
+    return sessionInteractionApplication.updateSessionTitle(params);
   }
 
   async function sendMessage(params: { sessionId: string; body: AgentSendMessageRequest | import("./session/session-interaction-ports.js").NormalizedAgentUserMessageInput; runtime: AgentRuntimePort }): Promise<AgentSendMessageResponse> {
@@ -2461,6 +2462,7 @@ function createAgentApplications(
     getWorkspace,
     createPrimarySession,
     forkPrimarySession,
+    updateSessionTitle,
     sendMessage,
     compactSession,
     revertSession,

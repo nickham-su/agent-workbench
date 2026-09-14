@@ -10,6 +10,7 @@ import {
   AgentContextItemsResponseSchema,
   AgentControlResultSchema,
   AgentCreateSessionRequestSchema,
+  AgentUpdateSessionTitleRequestSchema,
   AgentForkSessionRequestSchema,
   AgentRevertSessionRequestSchema,
   AgentInternalCreateSessionRequestSchema,
@@ -19,6 +20,7 @@ import {
   AgentChannelAllowlistCheckRequestSchema,
   AgentChannelAllowlistCheckResponseSchema,
   type AgentSendMessageRequest,
+  type AgentUpdateSessionTitleRequest,
   AgentClearSessionRequestSchema,
   AgentCompactSessionRequestSchema,
   AgentCompactSessionResponseSchema,
@@ -94,7 +96,7 @@ import { newSortableId } from "../../../utils/ids.js";
 import { AGENT_IMAGE_MAX_COUNT, AGENT_IMAGE_MAX_TOTAL_BYTES } from "../attachments/agent-attachment-limits.js";
 import { removeAgentAttachmentTempFile, stageAgentImageUpload } from "../attachments/agent-attachment-storage.js";
 import type { AgentPublicRouteDependencies } from "./agent-route-types.js";
-import { assertInternalToken, assertOnlyAllowedBodyKeys, assertPluginCaller, AGENT_PRIMARY_SESSION_CREATE_BODY_KEYS, AGENT_PRIMARY_SESSION_FORK_BODY_KEYS } from "./agent-route-auth.js";
+import { assertInternalToken, assertOnlyAllowedBodyKeys, assertPluginCaller, AGENT_PRIMARY_SESSION_CREATE_BODY_KEYS, AGENT_PRIMARY_SESSION_FORK_BODY_KEYS, AGENT_SESSION_TITLE_UPDATE_BODY_KEYS } from "./agent-route-auth.js";
 
 const AGENT_MULTIPART_MAX_PARTS = 1 + AGENT_IMAGE_MAX_COUNT;
 const AGENT_MULTIPART_MAX_PAYLOAD_BYTES = 64 * 1024;
@@ -347,6 +349,40 @@ export async function registerAgentPublicRoutes(app: FastifyInstance, dependenci
       const body = req.body as { workspaceId: string; title?: string };
       const session = dependencies.service.createPrimarySession(body);
       return reply.code(201).send(session);
+    }
+  );
+
+  app.put(
+    "/api/agent/sessions/:sessionId/title",
+    {
+      schema: {
+        tags: ["agent"],
+        params: Type.Object({ sessionId: Type.String({ minLength: 1 }) }),
+        body: AgentUpdateSessionTitleRequestSchema,
+        response: {
+          200: AgentSessionRecordSchema,
+          400: ErrorResponseSchema,
+          404: ErrorResponseSchema
+        }
+      },
+      preValidation: async (req) => {
+        assertOnlyAllowedBodyKeys(req, AGENT_SESSION_TITLE_UPDATE_BODY_KEYS);
+        // Fastify/Ajv 的 maxLength 按 code point 计数，与文档约定的 JavaScript
+        // string.length（UTF-16 code unit）不一致；此处按 JS length 做权威结构校验。
+        // 仅在 body 为普通对象且 title 为 string 时检查，其余结构问题交给 Fastify Schema 返回 400。
+        const body = req.body;
+        if (body && typeof body === "object" && !Array.isArray(body)) {
+          const title = (body as { title?: unknown }).title;
+          if (typeof title === "string" && title.length > 1000) {
+            throw new HttpError(400, "title is too long");
+          }
+        }
+      }
+    },
+    async (req) => {
+      const params = req.params as { sessionId: string };
+      const body = req.body as AgentUpdateSessionTitleRequest;
+      return dependencies.service.updateSessionTitle({ sessionId: params.sessionId, body });
     }
   );
 

@@ -1,6 +1,7 @@
-import type { AgentControlResult, AgentForkSessionRequest, AgentSendMessageResponse, AgentSessionRecord } from "@agent-workbench/shared";
+import type { AgentControlResult, AgentForkSessionRequest, AgentSendMessageResponse, AgentSessionRecord, AgentUpdateSessionTitleRequest } from "@agent-workbench/shared";
 import { AgentSubtaskErrorCode } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { HttpError } from "../../../app/errors.js";
+import { normalizeManualSessionTitle } from "./session-title.js";
 import type { AgentRuntimePort } from "../agent.runtime-port.js";
 import type {
   RevertSessionCommand,
@@ -22,6 +23,37 @@ export class SessionInteractionApplication {
 
   createPrimarySession(params: { workspaceId: string; title?: string }): AgentSessionRecord {
     return this.createSession({ workspaceId: params.workspaceId, title: params.title, kind: "primary" });
+  }
+
+  updateSessionTitle(params: { sessionId: string; body: AgentUpdateSessionTitleRequest }): AgentSessionRecord {
+    const session = this.dependencies.store.getSession(params.sessionId);
+    if (!session) throw new HttpError(404, "session not found");
+    if (session.workspaceId !== params.body.workspaceId) throw new HttpError(400, "workspaceId mismatch");
+
+    const normalized = normalizeManualSessionTitle(params.body.title);
+    if (!normalized.ok) {
+      const code = normalized.reason === "empty"
+        ? "AGENT_SESSION_TITLE_EMPTY"
+        : normalized.reason === "too_long"
+          ? "AGENT_SESSION_TITLE_TOO_LONG"
+          : "AGENT_SESSION_TITLE_INVALID_CHARACTERS";
+      throw new HttpError(400, code === "AGENT_SESSION_TITLE_EMPTY"
+        ? "title must not be empty"
+        : code === "AGENT_SESSION_TITLE_TOO_LONG"
+          ? "title must not exceed 50 characters"
+          : "title contains disallowed control characters", code);
+    }
+
+    const updated = this.dependencies.store.setManualTitle({
+      sessionId: params.sessionId,
+      workspaceId: params.body.workspaceId,
+      title: normalized.title
+    });
+    if (!updated) throw new HttpError(404, "session not found");
+
+    const next = this.dependencies.store.getSession(params.sessionId);
+    if (!next) throw new HttpError(404, "session not found");
+    return next;
   }
 
   async forkPrimarySession(params: AgentForkSessionRequest): Promise<AgentSessionRecord> {

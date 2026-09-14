@@ -22,7 +22,7 @@ export type ContextWritebackApplicationDependencies = {
     | { kind: "run-mismatch" };
   nowMs: () => number;
   formatTodolistTitle: (value: unknown) => string;
-  updateSessionTitle: (params: { sessionId: string; title: string; updatedAt: number }) => void;
+  updateAutoSessionTitle: (params: { sessionId: string; title: string; updatedAt: number }) => void;
   isAppendConflict: (error: unknown) => error is { currentHeadItemId: number | null };
   warnAppendConflict: (params: { sessionId: string; kind: AgentContextItemKind; currentHeadItemId: number | null }) => void;
   inspectForWorkerUpdate: (itemId: number) =>
@@ -92,7 +92,7 @@ export class ContextWritebackApplication {
           ? item.output.result as Record<string, unknown>
           : null;
         const title = this.dependencies.formatTodolistTitle(result?.goal);
-        if (title) this.dependencies.updateSessionTitle({ sessionId: item.sessionId, title, updatedAt: createdAt });
+        if (title) this.dependencies.updateAutoSessionTitle({ sessionId: item.sessionId, title, updatedAt: createdAt });
       }
       return { ok: true, item };
     } catch (error) {
@@ -135,7 +135,7 @@ export class ContextWritebackApplication {
         ? item.output.result as Record<string, unknown>
         : null;
       const title = this.dependencies.formatTodolistTitle(result?.goal);
-      if (title) this.dependencies.updateSessionTitle({ sessionId: item.sessionId, title, updatedAt });
+      if (title) this.dependencies.updateAutoSessionTitle({ sessionId: item.sessionId, title, updatedAt });
     }
     return item;
   }

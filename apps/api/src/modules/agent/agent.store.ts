@@ -639,15 +639,30 @@ function touchSession(db: Db, sessionId: string, updatedAt: number) {
   db.prepare(`update agent_session set updated_at = @updatedAt where id = @sessionId`).run({ sessionId, updatedAt });
 }
 
-export function updateAgentSessionTitle(db: Db, params: { sessionId: string; title: string; updatedAt: number }) {
-  db.prepare(
+export function updateAutoAgentSessionTitle(db: Db, params: { sessionId: string; title: string; updatedAt: number }) {
+  const result = db.prepare(
     `
       update agent_session
       set title = @title,
           updated_at = @updatedAt
       where id = @sessionId
+        and title_manually_set = 0
     `
   ).run(params);
+  return result.changes > 0;
+}
+
+export function setManualAgentSessionTitle(db: Db, params: { sessionId: string; workspaceId: string; title: string }) {
+  const result = db.prepare(
+    `
+      update agent_session
+      set title = @title,
+          title_manually_set = 1
+      where id = @sessionId
+        and workspace_id = @workspaceId
+    `
+  ).run(params);
+  return result.changes > 0;
 }
 
 function isReachable(db: Db, params: { sessionId: string; fromHead: number | null; target: number }) {
@@ -928,6 +943,7 @@ export function createAgentSession(db: Db, params: {
           id,
           workspace_id,
           title,
+          title_manually_set,
           kind,
           created_at,
           updated_at,
@@ -937,6 +953,7 @@ export function createAgentSession(db: Db, params: {
           @id,
           @workspaceId,
           @title,
+          0,
           @kind,
           @createdAt,
           @updatedAt,

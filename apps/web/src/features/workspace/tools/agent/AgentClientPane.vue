@@ -17,6 +17,17 @@
           </a-button>
           <div class="min-w-0 flex items-center gap-2">
             <span class="text-[14px] leading-none truncate text-[color:var(--text-secondary)]">{{ sessionTitleText }}</span>
+            <a-tooltip v-if="props.sessionReady" :title="t('agent.actions.setSessionTitle')">
+              <a-button
+                size="small"
+                type="text"
+                class="!px-1 shrink-0 !text-[color:var(--text-tertiary)] hover:!text-[color:var(--text-secondary)]"
+                :aria-label="t('agent.actions.setSessionTitle')"
+                @click.stop="onOpenTitleSetting"
+              >
+                <template #icon><EditOutlined class="text-[12px]" /></template>
+              </a-button>
+            </a-tooltip>
             <template v-if="headerTokensText">
               <span class="leading-none whitespace-nowrap">·</span>
               <span class="leading-none whitespace-nowrap tabular-nums">{{ headerTokensText }}</span>
@@ -32,6 +43,17 @@
           class="min-w-0 flex-1 flex items-center gap-2"
         >
           <div class="text-[14px] leading-none truncate text-[color:var(--text-secondary)]">{{ sessionTitleText }}</div>
+          <a-tooltip v-if="props.sessionReady" :title="t('agent.actions.setSessionTitle')">
+            <a-button
+              size="small"
+              type="text"
+              class="!px-1 shrink-0 !text-[color:var(--text-tertiary)] hover:!text-[color:var(--text-secondary)]"
+              :aria-label="t('agent.actions.setSessionTitle')"
+              @click.stop="onOpenTitleSetting"
+            >
+              <template #icon><EditOutlined class="text-[12px]" /></template>
+            </a-button>
+          </a-tooltip>
           <template v-if="headerTokensText">
             <span class="leading-none whitespace-nowrap">·</span>
             <span class="leading-none whitespace-nowrap tabular-nums">{{ headerTokensText }}</span>
@@ -748,6 +770,7 @@ import {
   CloseCircleOutlined,
   CopyOutlined,
   AppstoreOutlined,
+  EditOutlined,
   DoubleRightOutlined,
   RobotOutlined,
   ExclamationCircleOutlined,
@@ -785,6 +808,7 @@ import {
   isSessionModelSendBlocked,
   resolveSessionModelPresentation
 } from "./agentSessionModelPresentation";
+import { resolveTitleSettingTrigger } from "./agentSessionTitle";
 import {
   ApiError,
   cancelAgentSession,
@@ -965,6 +989,7 @@ const emit = defineEmits<{
   "update:modelValue": [value: string | null];
   forked: [sessionId: string];
   "open-subtask": [sessionId: string];
+  "open-title-setting": [];
   "open-parent": [sessionId: string];
   "choose-session": [];
   "session-title-sync-needed": [sessionId: string];
@@ -2753,6 +2778,11 @@ function onOpenSubtask(sessionId?: string) {
 
 function onChooseSession() {
   emit("choose-session");
+}
+
+function onOpenTitleSetting() {
+  if (resolveTitleSettingTrigger(props.sessionReady) !== "emit") return;
+  emit("open-title-setting");
 }
 
 function onOpenParent() {

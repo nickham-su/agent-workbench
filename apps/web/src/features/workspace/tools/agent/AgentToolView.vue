@@ -61,6 +61,7 @@
             @update:model-value="(value) => setSessionAgent(session.id, value)"
             @forked="onSessionForked"
             @open-subtask="onOpenSubtask"
+            @open-title-setting="openTitleModal(session)"
             @open-parent="(parentSessionId) => onOpenParent(session.id, parentSessionId)"
             @session-title-sync-needed="requestSessionTitleSync"
             @choose-session="openChooseSessionModal(session.id)"
@@ -109,6 +110,34 @@
         </a-list>
       </div>
     </a-modal>
+
+    <a-modal
+      :open="titleModalOpen"
+      :title="t('agent.titleSetting.modalTitle')"
+      :ok-text="t('agent.titleSetting.save')"
+      :cancel-text="t('agent.titleSetting.cancel')"
+      :confirm-loading="titleSaving"
+      :closable="!titleSaving"
+      :mask-closable="!titleSaving"
+      :keyboard="!titleSaving"
+      :ok-button-props="{ disabled: !canSaveTitle }"
+      :cancel-button-props="{ disabled: titleSaving }"
+      @ok="saveTitle"
+      @update:open="onTitleModalUpdateOpen"
+      @cancel="closeTitleModal"
+    >
+      <div class="flex flex-col gap-2" :style="{ fontSize: 'var(--agent-font-size, 13px)' }">
+        <div class="text-[0.9em] text-[color:var(--text-tertiary)]">{{ t("agent.titleSetting.permanentNotice") }}</div>
+        <a-input
+          v-model:value="titleInput"
+          :placeholder="t('agent.titleSetting.inputPlaceholder')"
+          :aria-label="t('agent.titleSetting.inputLabel')"
+          :status="titleFieldError ? 'error' : ''"
+          @press-enter="canSaveTitle && !titleSaving ? saveTitle() : undefined"
+        />
+        <div v-if="titleFieldError" class="text-[0.85em] text-[color:var(--danger-color)]">{{ titleFieldErrorText }}</div>
+      </div>
+    </a-modal>
   </div>
 </template>
 
@@ -124,7 +153,14 @@ import { CloseOutlined, MinusOutlined, PlusOutlined } from "@ant-design/icons-vu
 import { message } from "ant-design-vue";
 import { computed, onActivated, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { createAgentSession, listAgentSessionModelOverrides, listAgentSessions, listWorkspaceAvailableAgents } from "@/shared/api";
+import {
+  ApiError,
+  createAgentSession,
+  listAgentSessionModelOverrides,
+  listAgentSessions,
+  listWorkspaceAvailableAgents,
+  updateAgentSessionTitle
+} from "@/shared/api";
 import { useWorkspaceHost } from "@/features/workspace/host";
 import AgentClientPane from "./AgentClientPane.vue";
 import {
@@ -140,6 +176,24 @@ import {
 } from "./agentSessionModelIntent";
 import { requestSessionModelOpen } from "./agentSessionModelOpenFlow";
 import { agentSessionStatusStoreKey, createAgentSessionStatusStore } from "./useAgentSessionStatusStore";
+import {
+  isRequestResponseWritable,
+  mergeStaleProtectedSessionList,
+  resolveTitleSaveResponseAction,
+  shouldAllowTitleModalClose,
+  shouldReleaseTitleSavingByToken,
+  titleErrorCodeToFieldError,
+  validateManualTitleInput,
+  type ManualTitleValidationError,
+  type TitleSaveToken
+} from "./agentSessionTitle";
+import {
+  canScheduleRetryRefresh,
+  canStartRefresh,
+  convergeMutationCache,
+  createTitleMutationCache,
+  type TitleMutationCacheState
+} from "./agentSessionRefreshCoordination";
 
 type AgentOption = {
   value: string;
@@ -206,6 +260,27 @@ const sessionModelStateLoadPromises = new Map<string, Promise<void>>();
 const sessionModelMutationPending = reactive<Record<string, true>>({});
 const pendingModelOpenIntentBySession = reactive<SessionModelOpenIntentCache>({});
 let nextModelOpenIntentId = 0;
+const titleModalOpen = ref(false);
+const titleEditingSessionId = ref("");
+const titleInput = ref("");
+const titleSaving = ref(false);
+const titleServerError = ref<ManualTitleValidationError | null>(null);
+
+// 标题手动接管并发防护：
+// - 每次成功手动保存提升全局 revision 并缓存完整 API record；
+// - 旧列表响应不得用旧字段覆盖 mutation 后的完整 record；
+// - workspaceGeneration/disposed 使在途请求在 Workspace 切换或卸载后失效。
+const titleMutationCache: TitleMutationCacheState = createTitleMutationCache();
+let workspaceGeneration = 0;
+let disposed = false;
+type SessionRefreshToken = { generation: number; workspaceId: string };
+let activeSessionRefresh: SessionRefreshToken | null = null;
+let sessionRefreshRetry: SessionRefreshToken | null = null;
+let activeTitleSave: TitleSaveToken | null = null;
+let nextTitleSaveRequestId = 0;
+// 当前编辑上下文版本：每次打开弹窗递增，forceReset 再次递增。
+// 在途保存响应只能作用于它自己捕获的 token，不能关闭后续重新打开的编辑上下文。
+let titleEditingEpoch = 0;
 let openParentIntentId = 0;
 
 function invalidateOpenParentIntent() {
@@ -447,6 +522,156 @@ function closeChooseSessionModal() {
   chooseSessionItems.value = [];
 }
 
+function openTitleModal(session: AgentSessionTab) {
+  if (isDraftSession(session)) return;
+  // 进入新的编辑上下文：旧请求捕获的 token 因 epoch 不匹配而失效，
+  // 其响应不能关闭/改动这个新弹窗。
+  titleEditingEpoch += 1;
+  titleEditingSessionId.value = session.id;
+  // 完整回填当前标题：不规范化、不截断、不替换禁止字符，历史不合规值直接展示。
+  titleInput.value = session.title;
+  titleServerError.value = null;
+  titleModalOpen.value = true;
+}
+
+/** 单向绑定下的统一关闭守卫：保存中拒绝一切用户关闭途径。 */
+function onTitleModalUpdateOpen(nextOpen: boolean) {
+  if (nextOpen) {
+    if (!titleModalOpen.value) titleModalOpen.value = true;
+    return;
+  }
+  if (!shouldAllowTitleModalClose({ saving: titleSaving.value, forceReset: false })) return;
+  closeTitleModal();
+}
+
+function closeTitleModal() {
+  if (titleSaving.value) return;
+  resetTitleModal();
+}
+
+/** 强制清空弹窗状态，供 Workspace 切换/组件卸载使用（不受保存中限制）。 */
+function forceResetTitleModal() {
+  titleEditingEpoch += 1;
+  activeTitleSave = null;
+  titleSaving.value = false;
+  resetTitleModal();
+}
+
+function resetTitleModal() {
+  titleModalOpen.value = false;
+  titleEditingSessionId.value = "";
+  titleInput.value = "";
+  titleServerError.value = null;
+}
+
+// 用户修改输入后清除服务端返回的字段错误，避免“有错误又可保存”的矛盾状态。
+watch(titleInput, () => {
+  if (titleServerError.value) titleServerError.value = null;
+});
+
+const titleValidationError = computed<ManualTitleValidationError | null>(() => {
+  if (titleServerError.value) return titleServerError.value;
+  const result = validateManualTitleInput(titleInput.value);
+  return result.ok ? null : result.error;
+});
+
+const titleFieldError = computed(() => titleModalOpen.value && titleValidationError.value);
+
+const titleFieldErrorText = computed(() => {
+  const error = titleValidationError.value;
+  if (!error) return "";
+  if (error === "raw_too_long") return t("agent.titleSetting.rawTooLong");
+  if (error === "empty") return t("agent.titleSetting.empty");
+  if (error === "too_long") return t("agent.titleSetting.tooLong");
+  return t("agent.titleSetting.invalidCharacters");
+});
+
+const canSaveTitle = computed(() => titleModalOpen.value && validateManualTitleInput(titleInput.value).ok);
+
+async function saveTitle() {
+  if (!canSaveTitle.value || titleSaving.value) return;
+  const validation = validateManualTitleInput(titleInput.value);
+  if (!validation.ok) return;
+  const sessionId = titleEditingSessionId.value;
+  if (!sessionId) return;
+  // 重新确认目标仍是真实 Session。
+  const target = serverSessions.value.find((item) => item.id === sessionId);
+  if (!target) {
+    forceResetTitleModal();
+    return;
+  }
+  const requestGeneration = workspaceGeneration;
+  const requestWorkspaceId = props.workspaceId;
+  const normalizedTitle = validation.title;
+  // 组件级保存 token：同时捕获编辑上下文 epoch 与请求 id，
+  // 旧请求（重新打开弹窗/切换 Workspace 后）的任何路径都不得作用于新上下文。
+  const saveToken: TitleSaveToken = {
+    generation: requestGeneration,
+    workspaceId: requestWorkspaceId,
+    sessionId,
+    requestId: ++nextTitleSaveRequestId,
+    epoch: titleEditingEpoch
+  };
+  activeTitleSave = saveToken;
+  titleSaving.value = true;
+  try {
+    const record = await updateAgentSessionTitle(sessionId, { workspaceId: requestWorkspaceId, title: normalizedTitle });
+    const action = resolveTitleSaveResponseAction({
+      requestToken: saveToken,
+      activeToken: activeTitleSave,
+      currentEditingEpoch: titleEditingEpoch,
+      editingSessionId: titleEditingSessionId.value,
+      responseWritable: isRequestResponseWritable({
+        disposed,
+        currentGeneration: workspaceGeneration,
+        requestGeneration,
+        currentWorkspaceId: props.workspaceId,
+        requestWorkspaceId
+      }),
+      succeeded: true
+    });
+    if (action === "ignore") return;
+    // 这里 action === "apply-close"：当前编辑上下文就是本请求的目标。
+    titleMutationCache.revision += 1;
+    titleMutationCache.revisionBySession.set(sessionId, titleMutationCache.revision);
+    titleMutationCache.recordBySession.set(sessionId, record);
+    serverSessions.value = serverSessions.value.map((item) => (item.id === sessionId ? record : item));
+    // 成功关闭后结束当前编辑上下文：若仍有迟到的在途响应（理论上极小窗口），
+    // 不得作用于之后重新打开的弹窗。
+    titleEditingEpoch += 1;
+    resetTitleModal();
+  } catch (err) {
+    const action = resolveTitleSaveResponseAction({
+      requestToken: saveToken,
+      activeToken: activeTitleSave,
+      currentEditingEpoch: titleEditingEpoch,
+      editingSessionId: titleEditingSessionId.value,
+      responseWritable: isRequestResponseWritable({
+        disposed,
+        currentGeneration: workspaceGeneration,
+        requestGeneration,
+        currentWorkspaceId: props.workspaceId,
+        requestWorkspaceId
+      }),
+      succeeded: false
+    });
+    if (action === "ignore") return;
+    // 这里 action === "apply-keep-open"：保留弹窗，向当前编辑上下文展示服务端字段错误/通用错误。
+    const fieldError = err instanceof ApiError ? titleErrorCodeToFieldError(err.code) : null;
+    if (fieldError) {
+      titleServerError.value = fieldError;
+    } else {
+      message.error(t("agent.titleSetting.saveFailed") + (err instanceof Error ? `: ${err.message}` : ""));
+    }
+  } finally {
+    // 仅当仍是当前活动保存 token 时清理 saving；旧请求的 finally 不得影响新请求。
+    if (shouldReleaseTitleSavingByToken({ activeToken: activeTitleSave, requestToken: saveToken })) {
+      activeTitleSave = null;
+      titleSaving.value = false;
+    }
+  }
+}
+
 function truncatePreview(text: string, maxLen = 50) {
   const value = text.trim();
   if (value.length <= maxLen) return value;
@@ -459,8 +684,19 @@ function setSessionAgent(sessionId: string, value: string | null) {
 }
 
 async function refreshAgents() {
+  const requestGeneration = workspaceGeneration;
+  const requestWorkspaceId = props.workspaceId;
   try {
-    const res = await listWorkspaceAvailableAgents(props.workspaceId, "user");
+    const res = await listWorkspaceAvailableAgents(requestWorkspaceId, "user");
+    if (!isRequestResponseWritable({
+      disposed,
+      currentGeneration: workspaceGeneration,
+      requestGeneration,
+      currentWorkspaceId: props.workspaceId,
+      requestWorkspaceId
+    })) {
+      return;
+    }
     agentOptions.value = res.agents
       .map((agent) => ({
         value: agent.id,
@@ -468,7 +704,15 @@ async function refreshAgents() {
         resolvedModel: agent.resolvedModel ?? null
       }));
   } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err));
+    if (isRequestResponseWritable({
+      disposed,
+      currentGeneration: workspaceGeneration,
+      requestGeneration,
+      currentWorkspaceId: props.workspaceId,
+      requestWorkspaceId
+    })) {
+      message.error(err instanceof Error ? err.message : String(err));
+    }
   }
 }
 
@@ -559,12 +803,43 @@ function pruneOpenedSubtaskSessions() {
 }
 
 async function refreshSessions() {
-  if (loadingSessions.value) return false;
+  // 按 generation/workspace 隔离并发占用：旧 Workspace 的在途请求不得阻止新 Workspace 发起刷新。
+  const requestGeneration = workspaceGeneration;
+  const requestWorkspaceId = props.workspaceId;
+  const token: SessionRefreshToken = { generation: requestGeneration, workspaceId: requestWorkspaceId };
+  if (!canStartRefresh(activeSessionRefresh, requestGeneration, requestWorkspaceId)) {
+    return false;
+  }
+  activeSessionRefresh = token;
   loadingSessions.value = true;
+  const requestRevision = titleMutationCache.revision;
   let ok = false;
+  let usedRecordProtection = false;
   try {
-    const list = await listAgentSessions(props.workspaceId);
-    serverSessions.value = [...list].sort((a, b) => b.updatedAt - a.updatedAt);
+    const list = await listAgentSessions(requestWorkspaceId);
+    if (!isRequestResponseWritable({
+      disposed,
+      currentGeneration: workspaceGeneration,
+      requestGeneration,
+      currentWorkspaceId: props.workspaceId,
+      requestWorkspaceId
+    })) {
+      return false;
+    }
+    let merged = list;
+    if (titleMutationCache.revision > requestRevision) {
+      // 本次请求开始后有成功的手动标题 mutation：对命中的 Session 完整保留 API record，不拼接字段。
+      const result = mergeStaleProtectedSessionList(list, {
+        requestRevision,
+        mutationRevisionBySession: titleMutationCache.revisionBySession,
+        mutationRecordBySession: titleMutationCache.recordBySession
+      }, (record) => record.id);
+      merged = result.merged;
+      usedRecordProtection = result.protectedSessionIds.length > 0;
+    }
+    // 本次请求不晚于任何成功 mutation 时，服务端 record 为权威：清理已收敛缓存。
+    convergeMutationCache(titleMutationCache, requestRevision, new Set(merged.map((record) => record.id)));
+    serverSessions.value = [...merged].sort((a, b) => b.updatedAt - a.updatedAt);
     void refreshVisibleSessionModelStates();
     pruneOpenedSubtaskSessions();
     // 先根据可见 tabs 做 prune/分配,避免隐藏 tab 让编号一路增长。
@@ -585,15 +860,40 @@ async function refreshSessions() {
     }
     ok = true;
   } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err));
+    if (isRequestResponseWritable({
+      disposed,
+      currentGeneration: workspaceGeneration,
+      requestGeneration,
+      currentWorkspaceId: props.workspaceId,
+      requestWorkspaceId
+    })) {
+      message.error(err instanceof Error ? err.message : String(err));
+    }
   } finally {
-    loadingSessions.value = false;
+    if (activeSessionRefresh === token) {
+      activeSessionRefresh = null;
+      loadingSessions.value = false;
+    }
+  }
+  if (usedRecordProtection && ok) {
+    // 旧响应使用过完整 record 保护：mutation 后去重调度一次 R2，收敛到服务端权威记录。
+    // token 按 generation/workspace 隔离：旧 Workspace 的 R2 不得阻塞新 Workspace 的收敛调度。
+    if (canScheduleRetryRefresh(sessionRefreshRetry, requestGeneration, requestWorkspaceId) && !disposed) {
+      const retryToken: SessionRefreshToken = { generation: requestGeneration, workspaceId: requestWorkspaceId };
+      sessionRefreshRetry = retryToken;
+      void refreshSessions()
+        .catch(() => undefined)
+        .finally(() => {
+          if (sessionRefreshRetry === retryToken) sessionRefreshRetry = null;
+        });
+    }
   }
   return ok;
 }
 
-async function refreshAll() {
-  await Promise.all([refreshAgents(), refreshSessions()]);
+async function refreshAll(): Promise<boolean> {
+  const results = await Promise.all([refreshAgents(), refreshSessions()]);
+  return results[1];
 }
 
 function setDraftInitialText(sessionId: string, text: string) {
@@ -967,6 +1267,16 @@ function minimizeSelf() {
 watch(
   () => props.workspaceId,
   async () => {
+    // 使旧 Workspace 的所有在途响应失效，并允许新 Workspace 立即发起刷新。
+    workspaceGeneration += 1;
+    const requestGeneration = workspaceGeneration;
+    const requestWorkspaceId = props.workspaceId;
+    activeSessionRefresh = null;
+    sessionRefreshRetry = null;
+    titleMutationCache.revisionBySession.clear();
+    titleMutationCache.recordBySession.clear();
+    titleMutationCache.revision = 0;
+    forceResetTitleModal();
     sessionsInitialized.value = false;
     invalidateOpenParentIntent();
     activeKey.value = "";
@@ -992,10 +1302,16 @@ watch(
     for (const key of Object.keys(sessionModelMutationPending)) delete sessionModelMutationPending[key];
     for (const key of Object.keys(pendingModelOpenIntentBySession)) delete pendingModelOpenIntentBySession[key];
     restorePersistedState();
-    await refreshAll();
+    const sessionsLoadedOk = await refreshAll();
+    // 只有仍是当前 generation 的 watcher 才能继续写入初始化状态，避免旧 watcher 污染新 Workspace。
+    if (disposed || requestGeneration !== workspaceGeneration || requestWorkspaceId !== props.workspaceId) return;
     statusStore.bindWorkspace(props.workspaceId);
+    // 只有当前 generation 的列表请求真正成功且为空时才创建 draft；
+    // 请求失败时保留 loading 释放与后续重试能力，不误建 draft、不标记完整初始化。
+    if (!sessionsLoadedOk) return;
     if (visibleSessions.value.length === 0) {
       await createOneSession();
+      if (disposed || requestGeneration !== workspaceGeneration || requestWorkspaceId !== props.workspaceId) return;
     }
     sessionsInitialized.value = true;
   },
@@ -1003,8 +1319,33 @@ watch(
 );
 
 onActivated(() => {
-  if (!sessionsInitialized.value) return;
-  if (loadingSessions.value || creating.value) return;
+  if (creating.value) return;
+  if (!sessionsInitialized.value) {
+    // 初始化未完成（例如首次列表请求失败）：重试当前 generation 的列表刷新，
+    // 只有权威列表成功且为空时才补建 draft；失败保持可重试，不误建。
+    if (loadingSessions.value) return;
+    // 捕获发起时的 generation/workspace：回调执行间隙切换 Workspace 时不得写新状态。
+    const requestGeneration = workspaceGeneration;
+    const requestWorkspaceId = props.workspaceId;
+    void refreshSessions().then((ok) => {
+      if (!ok) return;
+      if (!isRequestResponseWritable({
+        disposed,
+        currentGeneration: workspaceGeneration,
+        requestGeneration,
+        currentWorkspaceId: props.workspaceId,
+        requestWorkspaceId
+      })) {
+        return;
+      }
+      // 权威列表已成功：标记初始化；仅当列表为空时补建 draft。
+      sessionsInitialized.value = true;
+      if (visibleSessions.value.length > 0) return;
+      void createOneSession();
+    });
+    return;
+  }
+  if (loadingSessions.value) return;
   if (visibleSessions.value.length > 0) return;
   statusStore.syncSessions({
     activeSessionId: effectiveActiveKey.value || null,
@@ -1046,9 +1387,21 @@ watch(
     const nextUpdatedAt = typeof updatedAt === "number" && Number.isFinite(updatedAt) ? updatedAt : 0;
     if (nextUpdatedAt <= baselineUpdatedAt) return;
     const retryBaseline = pendingSessionTitleSyncUpdatedAt[sessionId];
+    const requestGeneration = workspaceGeneration;
+    const requestWorkspaceId = props.workspaceId;
     delete pendingSessionTitleSyncUpdatedAt[sessionId];
     void refreshSessions().then((ok) => {
       if (ok) return;
+      // 失败恢复前校验 generation：Workspace 已切换或组件卸载时不得恢复旧 baseline。
+      if (!isRequestResponseWritable({
+        disposed,
+        currentGeneration: workspaceGeneration,
+        requestGeneration,
+        currentWorkspaceId: props.workspaceId,
+        requestWorkspaceId
+      })) {
+        return;
+      }
       pendingSessionTitleSyncUpdatedAt[sessionId] = retryBaseline ?? baselineUpdatedAt;
     });
   },
@@ -1056,6 +1409,17 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  disposed = true;
+  workspaceGeneration += 1;
+  activeSessionRefresh = null;
+  sessionRefreshRetry = null;
+  forceResetTitleModal();
+  titleMutationCache.revisionBySession.clear();
+  titleMutationCache.recordBySession.clear();
+  titleMutationCache.revision = 0;
+  for (const key of Object.keys(pendingSessionTitleSyncUpdatedAt)) {
+    delete pendingSessionTitleSyncUpdatedAt[key];
+  }
   statusStore.dispose();
 });
 </script>

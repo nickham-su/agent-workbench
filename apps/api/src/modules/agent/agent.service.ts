@@ -44,6 +44,10 @@ export class AgentService {
     return this.capabilities.session.forkPrimarySession(...args);
   }
 
+  updateSessionTitle(...args: Parameters<AgentServiceCapabilities["session"]["updateSessionTitle"]>): ReturnType<AgentServiceCapabilities["session"]["updateSessionTitle"]> {
+    return this.capabilities.session.updateSessionTitle(...args);
+  }
+
   listSessionModelOverrides(...args: Parameters<AgentServiceCapabilities["session"]["listSessionModelOverrides"]>): ReturnType<AgentServiceCapabilities["session"]["listSessionModelOverrides"]> {
     return this.capabilities.session.listSessionModelOverrides(...args);
   }

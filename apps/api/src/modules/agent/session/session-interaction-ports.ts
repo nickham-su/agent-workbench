@@ -8,7 +8,8 @@ import type {
   AgentSendMessageResponse,
   AgentSessionRecord,
   AgentSessionRunState,
-  AgentUiLocale
+  AgentUiLocale,
+  AgentUpdateSessionTitleRequest
 } from "@agent-workbench/shared";
 import type { AgentApiSubtaskStartRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { AgentRuntimePort } from "../agent.runtime-port.js";
@@ -40,6 +41,7 @@ export type SessionInteractionStore = {
   getSession(sessionId: string): AgentSessionRecord | null;
   listSessions(workspaceId: string): AgentSessionRecord[];
   createSession(input: SessionCreateInput): void;
+  setManualTitle(input: { sessionId: string; workspaceId: string; title: string }): boolean;
   cloneSession(input: SessionCloneInput): Promise<AgentSessionRecord>;
   findClientRequestDedup(input: { workspaceId: string; sessionId: string; clientRequestId: string }): { messageItemId: number; runId: string } | null;
   getRunState(workspaceId: string, sessionId: string): Pick<AgentSessionRunState, "status">;
@@ -105,6 +107,7 @@ export type SessionInteractionApplication = {
   listSessions(workspaceId: string): AgentSessionRecord[];
   createPrimarySession(params: { workspaceId: string; title?: string }): AgentSessionRecord;
   forkPrimarySession(params: AgentForkSessionRequest): Promise<AgentSessionRecord>;
+  updateSessionTitle(params: { sessionId: string; body: AgentUpdateSessionTitleRequest }): AgentSessionRecord;
   sendMessage(params: { sessionId: string; body: NormalizedAgentUserMessageInput; runtime: AgentRuntimePort }): Promise<AgentSendMessageResponse>;
   revertSession(command: RevertSessionCommand): Promise<AgentControlResult>;
   resolveSubtaskSessionForStart(command: SubtaskSessionMaterializationCommand): Promise<{ session: AgentSessionRecord; createdSessionId: string | null }>;

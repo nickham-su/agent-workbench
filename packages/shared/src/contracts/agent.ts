@@ -502,6 +502,12 @@ export const AgentCreateSessionRequestSchema = Type.Object({
 }, { additionalProperties: false });
 export type AgentCreateSessionRequest = Static<typeof AgentCreateSessionRequestSchema>;
 
+export const AgentUpdateSessionTitleRequestSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
+  title: Type.String({ minLength: 1, maxLength: 1000 })
+}, { additionalProperties: false });
+export type AgentUpdateSessionTitleRequest = Static<typeof AgentUpdateSessionTitleRequestSchema>;
+
 export const AgentInternalCreateSessionRequestSchema = Type.Object(
   {
     workspaceId: Type.String({ minLength: 1 }),
