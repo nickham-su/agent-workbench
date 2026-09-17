@@ -70,7 +70,7 @@ const AGENT_GLOBAL_PROMPT_MAX_BYTES = 32 * 1024;
 const AGENT_GLOBAL_PROMPT_COMMAND_MAX_LENGTH = 64;
 
 const GLOBAL_PROMPT_COMMAND_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
-const RESERVED_BUILTIN_SLASH_COMMANDS = new Set(["clear", "compact"]);
+const RESERVED_BUILTIN_SLASH_COMMANDS = new Set(["compact"]);
 
 // Node.js setTimeout 上限接近 2^31-1,超过后会出现不符合预期的行为。
 const RUNTIME_TIMEOUT_MS_MAX = 2_147_483_647;
@@ -766,14 +766,14 @@ function normalizeAgentTools(raw: unknown): AgentToolName[] {
       item !== "subtask" &&
       item !== "scratchpad" &&
       item !== "todolist" &&
+      item !== "archive_read" &&
+      item !== "archive_search" &&
       item !== "visual_analyze" &&
       // Legacy baseline-only tool names are intentionally ignored.
       item !== "read" &&
-      item !== "archive_search" &&
-      item !== "archive_read" &&
       item !== "skill"
     ) continue;
-    if (item === "read" || item === "archive_search" || item === "archive_read" || item === "skill") {
+    if (item === "read" || item === "skill") {
       continue;
     }
     if (seen.has(item)) continue;

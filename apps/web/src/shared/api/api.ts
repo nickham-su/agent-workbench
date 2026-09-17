@@ -88,23 +88,27 @@ import type {
   SearchSettings,
   FileSearchRequest,
   FileSearchResponse,
+} from "@agent-workbench/shared";
+import type {
+  AgentCompactSessionRequest,
+  AgentCompactSessionResponse,
+  AgentMessage,
+  AgentMessageSessionRunState,
+  AgentTimelineDeltaResponse,
+  AgentToolExecutionDetail,
+  AgentMessageControlResult,
+} from "@agent-workbench/shared";
+import type {
   AgentCreateSessionRequest,
   AgentForkSessionRequest,
   AgentRevertSessionRequest,
-  AgentClearSessionRequest,
-  AgentCompactSessionRequest,
   AgentUpdateSessionTitleRequest,
-  AgentCompactSessionResponse,
   AgentSendMessageRequest,
   AgentSendMessageResponse,
-  AgentContextItemsResponse,
-  AgentContextItemRecord,
   AgentSessionRecord,
-  AgentSessionRunState,
   AgentSessionAgentModelState,
   AgentSessionModelOverridesResponse,
   UpdateAgentSessionModelOverrideRequest,
-  AgentControlResult,
   AgentCancelSessionRequest,
   AgentProvidersSettingsView,
   AgentGlobalPromptSettings,
@@ -125,7 +129,7 @@ import type {
   AgentSettings,
   AgentSettingsView,
   UpdateAgentSettingsRequest
-} from "@agent-workbench/shared";
+} from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { emitUnauthorized } from "@/features/auth/unauthorized";
 import { resetAuthStatus, setAuthed } from "@/features/auth/session";
 
@@ -1168,46 +1172,46 @@ export async function updateAgentSessionTitle(sessionId: string, body: AgentUpda
   }
 }
 
-export async function getAgentContextItems(
+export async function getAgentTimeline(
   sessionId: string,
-  query?:
-    | number
-    | {
-        afterId?: number;
-        tailLimit?: number;
-        beforeId?: number;
-        limit?: number;
-        expectedHeadItemId?: number;
-      }
-) {
+  query: { workspaceId: string; mode?: "snapshot" | "delta" | "before"; sinceRevision?: number; beforeMessageId?: string; limit?: number },
+  options?: { signal?: AbortSignal },
+): Promise<AgentTimelineDeltaResponse> {
   try {
-    const params =
-      typeof query === "number"
-        ? { afterId: query }
-        : query && typeof query === "object"
-          ? query
-          : undefined;
-    const res = await client.get<AgentContextItemsResponse>(`/agent/sessions/${sessionId}/context-items`, {
-      params
+    const res = await client.get<AgentTimelineDeltaResponse>(
+      `/agent/sessions/${encodeURIComponent(sessionId)}/timeline`,
+      {
+        params: query,
+        ...(options?.signal ? { signal: options.signal } : {}),
+      },
+    );
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getAgentToolExecutionDetail(
+  sessionId: string,
+  toolExecutionId: string,
+  workspaceId: string,
+): Promise<AgentToolExecutionDetail> {
+  try {
+    const res = await client.get<AgentToolExecutionDetail>(
+      `/agent/sessions/${encodeURIComponent(sessionId)}/tool-executions/${encodeURIComponent(toolExecutionId)}`,
+      { params: { workspaceId } },
+    );
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getAgentRunState(sessionId: string, workspaceId?: string) {
+  try {
+    const res = await client.get<AgentMessageSessionRunState>(`/agent/sessions/${sessionId}/run-state`, {
+      params: workspaceId ? { workspaceId } : undefined,
     });
-    return res.data;
-  } catch (err) {
-    throw toApiError(err);
-  }
-}
-
-export async function getAgentContextItem(sessionId: string, itemId: number) {
-  try {
-    const res = await client.get<AgentContextItemRecord>(`/agent/sessions/${sessionId}/context-items/${itemId}`);
-    return res.data;
-  } catch (err) {
-    throw toApiError(err);
-  }
-}
-
-export async function getAgentRunState(sessionId: string) {
-  try {
-    const res = await client.get<AgentSessionRunState>(`/agent/sessions/${sessionId}/run-state`);
     return res.data;
   } catch (err) {
     throw toApiError(err);
@@ -1233,9 +1237,9 @@ export async function sendAgentMessageMultipart(sessionId: string, body: FormDat
   }
 }
 
-export async function getAgentAttachmentContent(attachmentId: string) {
+export async function getAgentAttachmentContent(sessionId: string, attachmentId: string, workspaceId: string) {
   try {
-    const res = await client.get<Blob>(`/agent/attachments/${attachmentId}/content`, { responseType: "blob" });
+    const res = await client.get<Blob>(`/agent/sessions/${sessionId}/attachments/${attachmentId}/content`, { params: { workspaceId }, responseType: "blob" });
     return res.data;
   } catch (err) {
     throw toApiError(err);
@@ -1251,18 +1255,9 @@ export async function compactAgentSession(sessionId: string, body: AgentCompactS
   }
 }
 
-export async function clearAgentSession(sessionId: string, body: AgentClearSessionRequest) {
-  try {
-    const res = await client.post<AgentControlResult>(`/agent/sessions/${sessionId}/clear`, body);
-    return res.data;
-  } catch (err) {
-    throw toApiError(err);
-  }
-}
-
 export async function cancelAgentSession(sessionId: string, body: AgentCancelSessionRequest) {
   try {
-    const res = await client.post<AgentControlResult>(`/agent/sessions/${sessionId}/cancel`, body);
+    const res = await client.post<AgentMessageControlResult>(`/agent/sessions/${sessionId}/cancel`, body);
     return res.data;
   } catch (err) {
     throw toApiError(err);
@@ -1280,7 +1275,7 @@ export async function forkAgentSession(body: AgentForkSessionRequest) {
 
 export async function revertAgentSession(sessionId: string, body: AgentRevertSessionRequest) {
   try {
-    const res = await client.post<AgentControlResult>(`/agent/sessions/${sessionId}/revert`, body);
+    const res = await client.post<AgentMessageControlResult>(`/agent/sessions/${sessionId}/revert`, body);
     return res.data;
   } catch (err) {
     throw toApiError(err);

@@ -261,10 +261,10 @@ export const AgentToolNameSchema = Type.Union([
   Type.Literal("scratchpad"),
   Type.Literal("todolist"),
   Type.Literal("subtask"),
-  Type.Literal("archive_search"),
   Type.Literal("skill"),
+  Type.Literal("visual_analyze"),
   Type.Literal("archive_read"),
-  Type.Literal("visual_analyze")
+  Type.Literal("archive_search")
 ]);
 export type AgentToolName = Static<typeof AgentToolNameSchema>;
 

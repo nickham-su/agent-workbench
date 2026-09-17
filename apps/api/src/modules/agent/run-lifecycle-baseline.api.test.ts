@@ -6,7 +6,7 @@ import { AgentRunCompletedEventHub } from "./run-completed-events.js";
 import { registerAgentRoutes } from "./agent.routes.js";
 import { AgentService } from "./agent.service.js";
 import { createAgentService } from "./agent.composition.js";
-import { createAgentSession, getRunRecord, getRunState, getSessionTranscriptItems } from "./agent.store.js";
+import { createMessageSession, getMessageRunState, getRunRecord } from "./agent-message.store.js";
 import {
   createAgentTestFixture,
   createFakeAgentRuntime,
@@ -83,7 +83,7 @@ function createRouteApp(params: { fixture: AgentTestFixture; enqueueError: Error
   return { app, runtime, register: registerAgentRoutes(app, { service, runtime, internalToken: params.fixture.ctx.agentInternalToken, dataDir: params.fixture.ctx.dataDir, runCompletedEventHub: eventHub }) };
 }
 
-test("P3: public send enqueue failure conditionally settles failed/idle while preserving durable dedup retry without re-enqueue", async () => {
+test("P3: public enqueue outcome unknown 保持 durable running 并以同一 Run reconciliation", async () => {
   const fixture = await createAgentTestFixture({ withApp: true, agentWorkerConcurrency: 0 });
   fixtures.push(fixture);
   assert.ok(fixture.app);
@@ -91,7 +91,7 @@ test("P3: public send enqueue failure conditionally settles failed/idle while pr
 
   const workspace = await createTestWorkspace(fixture, { title: "P0 enqueue failure workspace" });
   const sessionId = newSortableId("sess");
-  createAgentSession(fixture.db, {
+  createMessageSession(fixture.db, {
     id: sessionId,
     workspaceId: workspace.id,
     title: "P0 enqueue failure session",
@@ -118,17 +118,22 @@ test("P3: public send enqueue failure conditionally settles failed/idle while pr
   assert.notEqual(first.statusCode, 201, first.body);
   assert.equal(route.runtime.enqueueRunCalls.length, 1);
 
-  const [userItem] = getSessionTranscriptItems(fixture.db, workspace.id, sessionId);
-  assert.ok(userItem);
-  assert.equal(userItem.kind, "user");
-  assert.equal(userItem.status, "completed");
-  assert.equal(userItem.output.type, "user_text");
-  const stateAfterFailure = getRunState(fixture.db, workspace.id, sessionId);
-  assert.equal(stateAfterFailure.status, "idle");
-  assert.equal(stateAfterFailure.activeRunId, null);
-  const failedEnqueueRun = getRunRecord(fixture.db, route.runtime.enqueueRunCalls[0]?.runId ?? "");
-  assert.equal(failedEnqueueRun?.status, "failed");
-  assert.equal(failedEnqueueRun?.triggerItemId, userItem.id);
+  const userMessage = fixture.db.prepare(`
+    select message.id, message.type, message.status, part.type as partType
+    from agent_message message join agent_message_part part on part.message_id = message.id
+    where message.workspace_id = ? and message.origin_session_id = ?
+    order by message.created_at asc, part.position asc limit 1
+  `).get(workspace.id, sessionId) as { id: string; type: string; status: string; partType: string } | undefined;
+  assert.ok(userMessage);
+  assert.equal(userMessage.type, "user");
+  assert.equal(userMessage.status, "completed");
+  assert.equal(userMessage.partType, "text");
+  const stateAfterFailure = getMessageRunState(fixture.db, workspace.id, sessionId)!;
+  assert.equal(stateAfterFailure.status, "running");
+  const activeRun = getRunRecord(fixture.db, route.runtime.enqueueRunCalls[0]?.runId ?? "");
+  assert.equal(activeRun?.status, "running");
+  assert.equal(stateAfterFailure.activeRunId, activeRun?.runId);
+  assert.equal(activeRun?.triggerMessageId, `message-${activeRun?.runId}`);
 
   const retry = await route.app.inject({
     method: "POST",
@@ -138,17 +143,22 @@ test("P3: public send enqueue failure conditionally settles failed/idle while pr
   assert.equal(retry.statusCode, 201, retry.body);
   assert.deepEqual(retry.json(), {
     sessionId,
-    messageItemId: userItem.id,
-    runId: failedEnqueueRun?.runId,
+    messageId: userMessage!.id,
+    runId: activeRun?.runId,
     deduplicated: true
   });
   assert.equal(route.runtime.enqueueRunCalls.length, 1, "deduplicated retry must not enqueue again");
-  assert.equal(getSessionTranscriptItems(fixture.db, workspace.id, sessionId).length, 1);
-  assert.equal(getRunRecord(fixture.db, failedEnqueueRun?.runId ?? "")?.status, "failed");
-  assert.equal(getRunState(fixture.db, workspace.id, sessionId).activeRunId, null);
+  assert.equal(fixture.db.prepare(`
+    select message.id, message.type, message.status, part.type as partType
+    from agent_message message join agent_message_part part on part.message_id = message.id
+    where message.workspace_id = ? and message.origin_session_id = ?
+    order by message.created_at asc, part.position asc
+  `).all(workspace.id, sessionId).length, 1);
+  assert.equal(getRunRecord(fixture.db, activeRun?.runId ?? "")?.status, "running");
+  assert.equal(getMessageRunState(fixture.db, workspace.id, sessionId)!.activeRunId, activeRun?.runId);
 });
 
-test("P3: internal trigger shares Lifecycle enqueue-failure settlement and dedup behavior", async () => {
+test("P3: internal trigger shares Lifecycle unknown-enqueue reconciliation and dedup behavior", async () => {
   const fixture = await createAgentTestFixture({ withApp: true, agentWorkerConcurrency: 0 });
   fixtures.push(fixture);
   assert.ok(fixture.app);
@@ -156,7 +166,7 @@ test("P3: internal trigger shares Lifecycle enqueue-failure settlement and dedup
 
   const workspace = await createTestWorkspace(fixture, { title: "P3 internal enqueue failure workspace" });
   const sessionId = newSortableId("sess");
-  createAgentSession(fixture.db, {
+  createMessageSession(fixture.db, {
     id: sessionId,
     workspaceId: workspace.id,
     title: "P3 internal enqueue failure session",
@@ -186,12 +196,17 @@ test("P3: internal trigger shares Lifecycle enqueue-failure settlement and dedup
   assert.notEqual(first.statusCode, 201, first.body);
   assert.equal(route.runtime.enqueueRunCalls.length, 1);
 
-  const [userItem] = getSessionTranscriptItems(fixture.db, workspace.id, sessionId);
-  assert.ok(userItem);
-  const failedRunId = route.runtime.enqueueRunCalls[0]?.runId ?? "";
-  assert.equal(getRunRecord(fixture.db, failedRunId)?.status, "failed");
-  assert.equal(getRunState(fixture.db, workspace.id, sessionId).status, "idle");
-  assert.equal(getRunState(fixture.db, workspace.id, sessionId).activeRunId, null);
+  const userMessage = fixture.db.prepare(`
+    select message.id, message.type, message.status, part.type as partType
+    from agent_message message join agent_message_part part on part.message_id = message.id
+    where message.workspace_id = ? and message.origin_session_id = ?
+    order by message.created_at asc, part.position asc limit 1
+  `).get(workspace.id, sessionId) as { id: string; type: string; status: string; partType: string } | undefined;
+  assert.ok(userMessage);
+  const activeRunId = route.runtime.enqueueRunCalls[0]?.runId ?? "";
+  assert.equal(getRunRecord(fixture.db, activeRunId)?.status, "running");
+  assert.equal(getMessageRunState(fixture.db, workspace.id, sessionId)!.status, "running");
+  assert.equal(getMessageRunState(fixture.db, workspace.id, sessionId)!.activeRunId, activeRunId);
 
   const retry = await route.app.inject({
     method: "POST",
@@ -202,8 +217,8 @@ test("P3: internal trigger shares Lifecycle enqueue-failure settlement and dedup
   assert.equal(retry.statusCode, 201, retry.body);
   assert.deepEqual(retry.json(), {
     sessionId,
-    messageItemId: userItem.id,
-    runId: failedRunId,
+    messageId: userMessage.id,
+    runId: activeRunId,
     deduplicated: true
   });
   assert.equal(route.runtime.enqueueRunCalls.length, 1, "deduplicated internal retry must not enqueue again");

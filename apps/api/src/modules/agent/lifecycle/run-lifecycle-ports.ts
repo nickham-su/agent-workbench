@@ -1,12 +1,16 @@
-import type { AgentControlResult, AgentImageMediaType, AgentSessionRunState } from "@agent-workbench/shared";
-import type { AgentApiRunCompleteRequest, AgentApiRunStateRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
+import type { AgentImageMediaType } from "@agent-workbench/shared/internal-contracts/agent-api-session";
+import type { AgentMessageControlResult, AgentMessageSessionRunState } from "@agent-workbench/shared";
+import type { AgentApiRunCompleteRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
+import type { AgentRunKind } from "@agent-workbench/shared";
 import type { ActiveSubtaskChildQuery } from "../subtask/subtask-ports.js";
 
 export type AgentRuntimeRun = {
   workspaceId: string;
   sessionId: string;
   runId: string;
+  runKind?: AgentRunKind;
   inputText?: string;
+  resumeAssistantMessageId?: string | null;
   workspacePath: string;
   workspaceRepoDirNames: string[];
 };
@@ -14,6 +18,11 @@ export type AgentRuntimeRun = {
 export type RuntimeControlPort = {
   enqueueRun(run: AgentRuntimeRun): void | Promise<void>;
   cancelSession(sessionId: string): void | Promise<void>;
+  /** 删除工作区时使用的窄 drain 能力；普通用户取消不需要等待。 */
+  cancelSessionAndWait?(input: {
+    sessionId: string;
+    timeoutMs: number;
+  }): Promise<boolean>;
 };
 
 export type WorkspaceRunContext = {
@@ -47,30 +56,30 @@ export type RunCompletedEventPublisher = {
  * lifecycle outcomes rather than exposing Store or AppContext operations.
  */
 export type AtomicLifecyclePersistence = {
+  listActiveSessionIdsForCancel(input: CancelSessionsInput): string[];
   activateUserRun(input: UserRunActivationInput): UserRunActivationResult;
+  canEnqueueUserRunIfCurrent(input: { workspaceId: string; sessionId: string; runId: string }): boolean;
   failRunAfterEnqueueFailureIfCurrent(input: EnqueueFailureInput): EnqueueFailureSettlement;
   getCancelSessionSnapshot(sessionId: string): CancelSessionSnapshot | null;
   cancelSessions(input: CancelSessionsInput): CancelSessionsResult;
-  updateRunStateFromWorker(input: AgentApiRunStateRequest): void;
   completeRunFromWorker(input: AgentApiRunCompleteRequest): boolean;
   listRecoverableRunCandidates(): RecoveryCandidate[];
   isRecoverableRunCandidate(candidate: RecoveryCandidate): boolean;
-  failNonTerminalContextItemsForRecovery(input: RecoveryCandidate & { updatedAt: number }): number;
-  failRunRecordForRecovery(input: RecoveryCandidate & { updatedAt: number }): number;
-  reclaimRunStateForRecovery(input: RecoveryCandidate & { updatedAt: number }): number;
-  appendRecoveryFailureNotice(input: RecoveryCandidate & { text: string; createdAt: number }): void;
-  listInFlightSessionsWithoutActiveRunId(): RecoveryDirtySession[];
-  reclaimDirtyRunStateForRecovery(input: RecoveryDirtySession & { updatedAt: number }): number;
+  prepareRunForStartupRecovery(input: RecoveryCandidate & { replacementMessageId: string; updatedAt: number }): StartupRecoveryPreparation;
 };
 
-export type RecoveryCandidate = { workspaceId: string; sessionId: string; runId: string; triggerItemId: number | null };
-export type RecoveryDirtySession = { workspaceId: string; sessionId: string };
+export type RecoveryCandidate = { workspaceId: string; sessionId: string; runId: string; runKind: AgentRunKind; triggerMessageId: string | null };
+
+export type StartupRecoveryPreparation = {
+  prepared: boolean;
+  resumeAssistantMessageId: string | null;
+};
 
 export type CancelSessionSnapshot = {
   sessionId: string;
   workspaceId: string;
-  session: AgentControlResult["session"];
-  runState: Pick<AgentSessionRunState, "status" | "activeRunId">;
+  session: AgentMessageControlResult["session"];
+  runState: Pick<AgentMessageSessionRunState, "status" | "activeRunId">;
 };
 
 export type CancelSessionsInput = {
@@ -87,7 +96,7 @@ export type CancelSessionsResult = {
 };
 
 export type CancelSessionCascadeResult = {
-  result: AgentControlResult;
+  result: AgentMessageControlResult;
   runtimeCancelSessionIds: string[];
 };
 
@@ -118,7 +127,7 @@ export type UserRunImageInput = {
 export type UserRunActivationResult =
   | {
       kind: "deduplicated";
-      messageItemId: number;
+      messageId: string;
       runId: string;
     }
   | {
@@ -126,7 +135,7 @@ export type UserRunActivationResult =
     }
   | {
       kind: "activated";
-      messageItemId: number;
+      messageId: string;
       runId: string;
     };
 
@@ -166,7 +175,7 @@ export type LifecycleIdGenerator = {
 };
 
 export type TriggerInputReader = {
-  getUserText(itemId: number): string | null;
+  getUserText(messageId: string): string | null;
 };
 
 export type LifecycleLogger = {
@@ -175,9 +184,14 @@ export type LifecycleLogger = {
   debug?(bindings: Record<string, unknown>, message: string): void;
 };
 
+export type SessionRuntimeHandoffCoordinatorPort = {
+  runExclusive<T>(sessionId: string, operation: () => Promise<T>): Promise<T>;
+  runExclusiveMany<T>(sessionIds: readonly string[], operation: () => Promise<T>): Promise<T>;
+};
+
 export type RunLifecycleApplicationDependencies = {
   workspaceRunContextReader: WorkspaceRunContextReader;
-  runStateReader: { get(sessionId: string): AgentSessionRunState };
+  runStateReader: { get(sessionId: string): AgentMessageSessionRunState };
   activeSubtaskChildQuery: ActiveSubtaskChildQuery;
   promptStaticCacheInvalidator: PromptStaticCacheInvalidator;
   runCompletedEventPublisher: RunCompletedEventPublisher;
@@ -189,6 +203,7 @@ export type RunLifecycleApplicationDependencies = {
   };
   triggerInputReader: TriggerInputReader;
   isContextAppendConflict(error: unknown): boolean;
+  runtimeHandoffCoordinator: SessionRuntimeHandoffCoordinatorPort;
   clock: LifecycleClock;
   ids: LifecycleIdGenerator;
   logger: LifecycleLogger;

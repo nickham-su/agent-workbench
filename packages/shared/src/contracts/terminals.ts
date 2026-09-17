@@ -2,7 +2,7 @@ import { Type } from "@sinclair/typebox";
 import type { Static } from "@sinclair/typebox";
 
 export const TerminalStatusSchema = Type.Union(
-  [Type.Literal("active"), Type.Literal("closed"), Type.Literal("errored")]
+  [Type.Literal("creating"), Type.Literal("active"), Type.Literal("closed"), Type.Literal("errored")]
 );
 export type TerminalStatus = Static<typeof TerminalStatusSchema>;
 

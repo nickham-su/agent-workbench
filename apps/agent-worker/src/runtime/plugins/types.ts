@@ -1,4 +1,4 @@
-import type { PluginRuntimeSnapshot } from "@agent-workbench/shared";
+import type { PluginRuntimeSnapshot } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 
 export type JsonSerializable =
   | null

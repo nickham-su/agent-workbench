@@ -3,18 +3,6 @@ import type { AppLogLevel } from "../config/env.js";
 import type { CredentialMasterKeySource } from "../infra/crypto/credentialMasterKey.js";
 import type { PreviewRuntime } from "../modules/preview/preview-runtime.js";
 
-export type AgentTestFaults = {
-  archiveWrite?: {
-    failAfterChunks?: number;
-  } | null;
-  archiveRollback?: {
-    appendBeforeRollback?: string;
-  } | null;
-  archiveSidecar?: {
-    failWrite?: boolean;
-    failRename?: boolean;
-  } | null;
-};
 
 export type AppContext = {
   db: Db;
@@ -39,12 +27,10 @@ export type AppContext = {
   agentInternalToken: string;
   agentWorkerResponseValidation: "strict" | "warn";
   agentApiOrigin: string;
-  agentStartupRecoveryMode: "fail" | "recover";
   agentPluginHostEnabled: boolean;
   agentPluginHostSocketPath: string;
   agentPluginServicesEnabled?: boolean;
   preview:
     | { enabled: false; runtime: null }
     | { enabled: true; runtime: PreviewRuntime };
-  agentTestFaults?: AgentTestFaults;
 };

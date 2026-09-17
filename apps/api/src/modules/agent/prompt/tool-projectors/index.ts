@@ -1,4 +1,5 @@
-import type { AgentContextItemStatus, AgentContextToolName } from "@agent-workbench/shared";
+import type { AgentContextToolName } from "@agent-workbench/shared/internal-contracts/agent-api-session";
+import type { AgentToolExecutionStatus } from "@agent-workbench/shared";
 import { defaultToolPromptProjector } from "./default.js";
 import { applyPatchToolPromptProjector } from "./apply-patch.js";
 import { writeToolPromptProjector } from "./write.js";
@@ -14,7 +15,7 @@ function resolveToolPromptProjector(toolName: AgentContextToolName) {
 
 export function projectToolCallInputForPrompt(params: {
   toolName: AgentContextToolName;
-  status: AgentContextItemStatus;
+  status: AgentToolExecutionStatus;
   args: Record<string, unknown>;
 }) {
   return resolveToolPromptProjector(params.toolName).projectCallInput(params.args, {
@@ -25,7 +26,7 @@ export function projectToolCallInputForPrompt(params: {
 
 export function projectToolResultForPrompt(params: {
   toolName: AgentContextToolName;
-  status: AgentContextItemStatus;
+  status: AgentToolExecutionStatus;
   result: unknown;
 }) {
   return resolveToolPromptProjector(params.toolName).projectResult(params.result, {

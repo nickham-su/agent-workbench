@@ -26,11 +26,32 @@ function baseProfile() {
   };
 }
 
+test("cancelSessionAndWait 取消队列并等待运行 Session 退出", async () => {
+  const runner = new AgentRunner({} as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+  const runningController = new AbortController();
+  (runner as any).queue.push(makeRun("sess_queued", "run_queued"));
+  (runner as any).queuedRunIds.add("run_queued");
+  (runner as any).runningSessions.add("sess_running");
+  (runner as any).controllers.set("sess_running", runningController);
+
+  assert.equal(await runner.cancelSessionAndWait({ sessionId: "sess_queued", timeoutMs: 10 }), true);
+  assert.equal((runner as any).queue.length, 0);
+
+  const waiting = runner.cancelSessionAndWait({ sessionId: "sess_running", timeoutMs: 100 });
+  assert.equal(runningController.signal.aborted, true);
+  setTimeout(() => {
+    (runner as any).runningSessions.delete("sess_running");
+    (runner as any).controllers.delete("sess_running");
+  }, 10);
+  assert.equal(await waiting, true);
+});
+
 function baseContext() {
   return {
     pendingTools: [],
     tools: [],
-    headItemId: null,
+    headMessageId: null,
+    sessionRevision: 0,
     system: "",
     messages: [],
     lastResponseTotalTokens: null,
@@ -55,7 +76,7 @@ test("nested child controller 注册并在完成后清理", async () => {
     async getExecutionProfile() {
       return baseProfile();
     },
-    async updateRunState() {
+    async updateRunNotice() {
       return;
     },
     async getPromptContext() {
@@ -69,7 +90,7 @@ test("nested child controller 注册并在完成后清理", async () => {
   let seenControllerDuringRun = false;
   (runner as any).runModelStep = async () => {
     seenControllerDuringRun = Boolean(getRegisteredControllerForTest(runner, "sess_child"));
-    return { aborted: false as const, toolCallCount: 0, assistantItemId: 1, hasVisibleText: true };
+    return { aborted: false as const, toolCallCount: 0, assistantMessageId: 1, hasVisibleText: true };
   };
 
   await processNestedRunWithControllerForTest(runner, {
@@ -89,7 +110,7 @@ test("父 signal abort 会桥接到 child controller", async () => {
     async getExecutionProfile() {
       return baseProfile();
     },
-    async updateRunState() {
+    async updateRunNotice() {
       return;
     },
     async getPromptContext() {
@@ -108,7 +129,7 @@ test("父 signal abort 会桥接到 child controller", async () => {
   (runner as any).runModelStep = async ({ signal }: { signal: AbortSignal }) => {
     childSignal = signal;
     await stepGate;
-    return { aborted: true as const, assistantItemId: 1 };
+    return { aborted: true as const, assistantMessageId: 1 };
   };
   const parentController = new AbortController();
   const nestedPromise = processNestedRunWithControllerForTest(runner, {
@@ -129,7 +150,7 @@ test("直接 cancel childSessionId 能命中 nested child controller", async () 
     async getExecutionProfile() {
       return baseProfile();
     },
-    async updateRunState() {
+    async updateRunNotice() {
       return;
     },
     async getPromptContext() {
@@ -148,7 +169,7 @@ test("直接 cancel childSessionId 能命中 nested child controller", async () 
   (runner as any).runModelStep = async ({ signal }: { signal: AbortSignal }) => {
     childSignal = signal;
     await stepGate;
-    return { aborted: true as const, assistantItemId: 1 };
+    return { aborted: true as const, assistantMessageId: 1 };
   };
 
   const nestedPromise = processNestedRunWithControllerForTest(runner, {
@@ -169,7 +190,7 @@ test("取消父 session 会本地级联 abort 当前 nested child", async () => 
     async getExecutionProfile() {
       return baseProfile();
     },
-    async updateRunState() {
+    async updateRunNotice() {
       return;
     },
     async getPromptContext() {
@@ -188,7 +209,7 @@ test("取消父 session 会本地级联 abort 当前 nested child", async () => 
   (runner as any).runModelStep = async ({ signal }: { signal: AbortSignal }) => {
     childSignal = signal;
     await stepGate;
-    return { aborted: true as const, assistantItemId: 1 };
+    return { aborted: true as const, assistantMessageId: 1 };
   };
 
   const nestedPromise = processNestedRunWithControllerForTest(runner, {
@@ -210,7 +231,7 @@ test("processRun 因 signal.aborted 退出时 completeRun(cancelled) 恰好一�
     async getExecutionProfile() {
       return baseProfile();
     },
-    async updateRunState() {
+    async updateRunNotice() {
       return;
     },
     async getPromptContext() {
@@ -225,7 +246,7 @@ test("processRun 因 signal.aborted 退出时 completeRun(cancelled) 恰好一�
   const controller = new AbortController();
   (runner as any).runModelStep = async () => {
     controller.abort();
-    return { aborted: true as const, assistantItemId: 1 };
+    return { aborted: true as const, assistantMessageId: 1 };
   };
 
   await processRunForTest(runner, makeRun("sess_test", "run_test"), controller.signal);
@@ -240,7 +261,7 @@ test("processRun cancelled 首次 completeRun 失败后会按原终态重试成�
     async getExecutionProfile() {
       return baseProfile();
     },
-    async updateRunState() {
+    async updateRunNotice() {
       return;
     },
     async getPromptContext() {
@@ -257,7 +278,7 @@ test("processRun cancelled 首次 completeRun 失败后会按原终态重试成�
   const controller = new AbortController();
   (runner as any).runModelStep = async () => {
     controller.abort();
-    return { aborted: true as const, assistantItemId: 1 };
+    return { aborted: true as const, assistantMessageId: 1 };
   };
 
   await processRunForTest(runner, makeRun("sess_test", "run_test"), controller.signal);
@@ -272,7 +293,7 @@ test("processRun completed 首次 completeRun 失败后不会错误降级为 fai
     async getExecutionProfile() {
       return baseProfile();
     },
-    async updateRunState() {
+    async updateRunNotice() {
       return;
     },
     async getPromptContext() {
@@ -287,7 +308,7 @@ test("processRun completed 首次 completeRun 失败后不会错误降级为 fai
   };
   const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
   (runner as any).runModelStep = async () => {
-    return { aborted: false as const, toolCallCount: 0, assistantItemId: 1, hasVisibleText: true };
+    return { aborted: false as const, toolCallCount: 0, assistantMessageId: 1, hasVisibleText: true };
   };
 
   await processRunForTest(runner, makeRun("sess_test", "run_test"), new AbortController().signal);
@@ -301,7 +322,7 @@ test("completeRun client 两次失败后，runner fallback 再次调用且完整
     async getExecutionProfile() {
       return baseProfile();
     },
-    async updateRunState() {
+    async updateRunNotice() {
       return;
     },
     async getPromptContext() {
@@ -315,7 +336,7 @@ test("completeRun client 两次失败后，runner fallback 再次调用且完整
   };
   const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
   (runner as any).runModelStep = async () => {
-    return { aborted: false as const, toolCallCount: 0, assistantItemId: 1, hasVisibleText: true };
+    return { aborted: false as const, toolCallCount: 0, assistantMessageId: 1, hasVisibleText: true };
   };
 
   await processRunForTest(runner, makeRun("sess_test", "run_test"), new AbortController().signal);
@@ -359,7 +380,7 @@ test("completeRun client retry 与 runner fallback 的缩放总等待不超过�
     async getExecutionProfile() {
       return baseProfile();
     },
-    async updateRunState() {
+    async updateRunNotice() {
       return;
     },
     async getPromptContext() {
@@ -369,7 +390,7 @@ test("completeRun client retry 与 runner fallback 的缩放总等待不超过�
   };
   const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
   (runner as any).runModelStep = async () => {
-    return { aborted: false as const, toolCallCount: 0, assistantItemId: 1, hasVisibleText: true };
+    return { aborted: false as const, toolCallCount: 0, assistantMessageId: 1, hasVisibleText: true };
   };
   const expectedBudgetMs = 2 * (attemptTimeoutMs + scaledBackoffMs + attemptTimeoutMs);
   const schedulerAllowanceMs = 120;
@@ -423,7 +444,7 @@ test("enqueueRun 的 finally 在 completeRun 全失败后释放槽位和 session
     async getExecutionProfile() {
       return baseProfile();
     },
-    async updateRunState() {
+    async updateRunNotice() {
       return;
     },
     async getPromptContext() {
@@ -436,7 +457,7 @@ test("enqueueRun 的 finally 在 completeRun 全失败后释放槽位和 session
   };
   const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
   (runner as any).runModelStep = async () => {
-    return { aborted: false as const, toolCallCount: 0, assistantItemId: 1, hasVisibleText: true };
+    return { aborted: false as const, toolCallCount: 0, assistantMessageId: 1, hasVisibleText: true };
   };
 
   runner.enqueueRun(makeRun("sess_slot", "run_slot"));
@@ -450,13 +471,47 @@ test("enqueueRun 的 finally 在 completeRun 全失败后释放槽位和 session
   assert.equal(getRegisteredControllerForTest(runner, "sess_slot"), undefined);
 });
 
+test("同一 runId 在运行期间重复 enqueue 不创建第二个 Worker 实例", async () => {
+  let modelCalls = 0;
+  let release!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const apiClient = {
+    async getExecutionProfile() { return baseProfile(); },
+    async updateRunNotice() { return; },
+    async getPromptContext() { return baseContext(); },
+    async completeRun() { return; },
+  };
+  const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+  (runner as any).runModelStep = async () => {
+    modelCalls += 1;
+    await entered;
+    return { aborted: false as const, toolCallCount: 0, assistantMessageId: "message", hasVisibleText: true };
+  };
+
+  const run = makeRun("sess_dedup", "run_dedup");
+  runner.enqueueRun(run);
+  for (let index = 0; index < 40 && modelCalls === 0; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  runner.enqueueRun(run);
+  assert.equal(modelCalls, 1);
+  assert.equal((runner as any).activeRunIds.has("run_dedup"), true);
+  release();
+  for (let index = 0; index < 40 && (runner as any).activeCount !== 0; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal((runner as any).activeRunIds.has("run_dedup"), false);
+});
+
 test("processRun 遇到 abort-like error 时只提交一次 cancelled", async () => {
   const completed: string[] = [];
   const apiClient = {
     async getExecutionProfile() {
       return baseProfile();
     },
-    async updateRunState() {
+    async updateRunNotice() {
       return;
     },
     async getPromptContext() {
@@ -482,7 +537,7 @@ test("processRun 遇到 abort-like error 时只提交一次 cancelled", async ()
 test("executeTool 遇到 AbortError 不会把工具项更新为 failed", async () => {
   const statuses: string[] = [];
   const apiClient = {
-    async updateContextItem(input: { status: string }) {
+    async updateToolExecution(input: { status: string }) {
       statuses.push(input.status);
       return;
     }
@@ -503,7 +558,9 @@ test("executeTool 遇到 AbortError 不会把工具项更新为 failed", async (
     profile: baseProfile(),
     run: makeRun("sess_parent", "run_parent"),
     tool: {
-      itemId: 1,
+      toolExecutionId: "execution-1",
+      callPartId: "part-call-1",
+      assistantMessageId: "message-assistant-1",
       status: "queued",
       toolName: "bash",
       toolCallId: "call_abort_tool",
@@ -522,7 +579,7 @@ test("read probe 期间 signal abort 时不会把根路径错误写成 failed", 
   const statuses: string[] = [];
   const controller = new AbortController();
   const apiClient = {
-    async updateContextItem(input: { status: string }) {
+    async updateToolExecution(input: { status: string }) {
       statuses.push(input.status);
       return;
     }
@@ -542,7 +599,9 @@ test("read probe 期间 signal abort 时不会把根路径错误写成 failed", 
     profile: baseProfile(),
     run: makeRun("sess_parent", "run_parent"),
     tool: {
-      itemId: 2,
+      toolExecutionId: "execution-2",
+      callPartId: "part-call-2",
+      assistantMessageId: "message-assistant-2",
       status: "queued",
       toolName: "read",
       toolCallId: "call_abort_read",

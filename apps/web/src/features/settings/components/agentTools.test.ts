@@ -10,8 +10,6 @@ test("normalizeAgentTools 保留可配置工具、去重并过滤隐藏默认工
       "read",
       "visual_analyze",
       "todolist",
-      "archive_search",
-      "archive_read",
       "skill"
     ]),
     ["bash", "todolist", "visual_analyze"]
@@ -29,11 +27,15 @@ test("DEFAULT_AGENT_TOOLS 默认不包含 todolist 和 visual_analyze", () => {
 
 test("toAgentToolOptions 包含可配置工具并复用标签 key", () => {
   const options = toAgentToolOptions((key) => key);
-  assert.deepEqual(options.map((item) => item.value), ["bash", "write", "apply_patch", "subtask", "scratchpad", "todolist", "visual_analyze"]);
+  assert.deepEqual(options.map((item) => item.value), ["bash", "write", "apply_patch", "subtask", "scratchpad", "todolist", "visual_analyze", "archive_read", "archive_search"]);
   const scratchpad = options.find((item) => item.value === "scratchpad");
   const todolist = options.find((item) => item.value === "todolist");
   const visualAnalyze = options.find((item) => item.value === "visual_analyze");
+  const archiveRead = options.find((item) => item.value === "archive_read");
+  const archiveSearch = options.find((item) => item.value === "archive_search");
   assert.equal(scratchpad?.label, agentToolLabelKey("scratchpad"));
   assert.equal(todolist?.label, agentToolLabelKey("todolist"));
   assert.equal(visualAnalyze?.label, agentToolLabelKey("visual_analyze"));
+  assert.equal(archiveRead?.label, agentToolLabelKey("archive_read"));
+  assert.equal(archiveSearch?.label, agentToolLabelKey("archive_search"));
 });

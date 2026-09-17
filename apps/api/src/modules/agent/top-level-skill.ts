@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { FastifyBaseLogger } from "fastify";
-export { parseSkillFrontmatter } from "@agent-workbench/shared";
+export { parseSkillFrontmatter } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 
 export type ReadableTopLevelSkillNode = {
   entryName: string;

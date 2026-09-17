@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { HttpError } from "../../../app/errors.js";
-import { AgentConflictError } from "../agent.store.js";
+import { AgentMessageConflictError, AgentMessageDomainError } from "../agent-message.store.js";
 import { SessionInteractionApplication } from "./session-interaction-application.js";
 import type { SessionInteractionApplicationDependencies } from "./session-interaction-ports.js";
 
@@ -13,8 +13,10 @@ type TestSession = {
   createdAt: number;
   updatedAt: number;
   forkedFromSessionId: string | null;
-  forkedFromItemId: number | null;
-  headItemId: number | null;
+  forkedFromMessageId: string | null;
+  headMessageId: string | null;
+  contextRootMessageId: string | null;
+  revision: number;
 };
 
 const primary: TestSession = {
@@ -25,15 +27,18 @@ const primary: TestSession = {
   createdAt: 1,
   updatedAt: 1,
   forkedFromSessionId: null,
-  forkedFromItemId: null,
-  headItemId: 5
+  forkedFromMessageId: null,
+  headMessageId: "message-5",
+  contextRootMessageId: "message-1",
+  revision: 5
 };
 
 function createDependencies(params?: {
   session?: typeof primary | null;
   workspaceExists?: boolean;
-  dedup?: { messageItemId: number; runId: string } | null;
+  dedup?: { messageId: string; runId: string } | null;
   runStatus?: "idle" | "running";
+  cloneError?: unknown;
   lifecycleError?: unknown;
   moveError?: unknown;
   cancelError?: unknown;
@@ -50,11 +55,12 @@ function createDependencies(params?: {
       },
       createSession: (input) => {
         calls.push(["create", input]);
-        sessions.set(input.id, { ...primary, ...input, updatedAt: input.createdAt, headItemId: null });
+        sessions.set(input.id, { ...primary, ...input, updatedAt: input.createdAt, headMessageId: null, contextRootMessageId: null, revision: 0 });
       },
       cloneSession: async (input) => {
         calls.push(["clone", input]);
-        return { ...primary, id: input.id, kind: input.targetKind, headItemId: input.fromItemId };
+        if (params?.cloneError) throw params.cloneError;
+        return { ...primary, id: input.id, kind: input.targetKind, headMessageId: input.fromMessageId, contextRootMessageId: input.fromMessageId, revision: 0 };
       },
       setManualTitle: (input) => {
         calls.push(["set-manual-title", input]);
@@ -72,35 +78,17 @@ function createDependencies(params?: {
         return { status: params?.runStatus ?? "idle" };
       },
       getControlRunState: () => ({
+        workspaceId: primary.workspaceId,
         sessionId: primary.id,
         status: "idle",
         activeRunId: null,
-        activeAssistantItemId: null,
-        lastResponseTotalTokens: null,
-        nonTerminalItemIds: [],
         runNoticeText: "",
-        updatedAt: 8,
-        appliedItemId: 0,
-        lastTerminalStatus: null,
-        lastRun: null,
-        contextWindowTokens: null,
-        contextTokenRatio: null
-      }),
-      getTranscriptItem: (_sessionId, _workspaceId, itemId) => ({
-        id: itemId,
-        workspaceId: primary.workspaceId,
-        sessionId: primary.id,
-        runId: null,
-        turnId: null,
-        step: null,
-        prevId: null,
-        kind: "user" as const,
-        status: "completed" as const,
-        output: { type: "user_text" as const, text: "target" },
-        boundaryReason: null,
-        archiveAt: null,
-        createdAt: 1,
-        updatedAt: 1
+        retryCount: 0,
+        nextRetryAt: null,
+        activeAssistantMessageId: null,
+        nonTerminalMessageIds: [],
+        nonTerminalToolExecutionIds: [],
+        updatedAt: 8
       }),
       hasNonTerminalItems: () => false,
       moveHead: (input) => {
@@ -118,15 +106,15 @@ function createDependencies(params?: {
       startUserRun: async (input) => {
         calls.push(["start", input]);
         if (params?.lifecycleError) throw params.lifecycleError;
-        return { sessionId: input.sessionId, messageItemId: 7, runId: "run", deduplicated: false };
+        return { sessionId: input.sessionId, messageId: "message-7", runId: "run", deduplicated: false };
       }
     },
     clock: { nowMs: () => 123 },
     ids: { newSessionId: () => "session-created" },
     logger: { warn: (bindings, message) => calls.push(["warn", bindings, message]) },
     normalizeUiLocale: (value) => value === "zh-CN" || value === "en-US" ? value : null,
-    isConflict: (error) => error instanceof AgentConflictError,
-    toConflictHttpError: (error) => new HttpError(409, "session head conflict", `conflict_head:${String((error as AgentConflictError).currentHeadItemId)}`)
+    isConflict: (error) => error instanceof AgentMessageConflictError,
+    toConflictHttpError: (error) => new HttpError(409, "session head conflict", (error as AgentMessageConflictError).code)
   };
   return { calls, sessions, application: new SessionInteractionApplication(dependencies) };
 }
@@ -136,24 +124,34 @@ test("SessionInteractionApplication creates primary sessions and delegates publi
   const created = application.createPrimarySession({ workspaceId: "workspace", title: "  named  " });
   assert.equal(created.id, "session-created");
   assert.deepEqual(calls[0], ["create", {
-    id: "session-created", workspaceId: "workspace", title: "named", kind: "primary", createdAt: 123, forkedFromSessionId: null, forkedFromItemId: null
+    id: "session-created", workspaceId: "workspace", title: "named", kind: "primary", createdAt: 123, forkedFromSessionId: null, forkedFromMessageId: null
   }]);
 
-  const forked = await application.forkPrimarySession({ fromSessionId: primary.id, fromItemId: 5, mode: "visible_only", title: "fork" });
+  const forked = await application.forkPrimarySession({ fromSessionId: primary.id, fromMessageId: "message-5", title: "fork" });
   assert.equal(forked.id, "session-created");
   assert.deepEqual(calls[1], ["clone", {
-    id: "session-created", createdAt: 123, archiveAt: 123, fromSession: primary, fromItemId: 5, mode: "visible_only", title: "fork", targetKind: "primary", boundaryPolicy: "public-user-assistant"
+    id: "session-created", createdAt: 123, fromSession: primary, fromMessageId: "message-5", title: "fork", targetKind: "primary", boundaryPolicy: "public-user-assistant"
   }]);
 });
 
+test("SessionInteractionApplication maps typed fork session disappearance to HTTP 404", async () => {
+  const { application } = createDependencies({
+    cloneError: new AgentMessageDomainError("SESSION_NOT_FOUND")
+  });
+  await assert.rejects(
+    () => application.forkPrimarySession({ fromSessionId: primary.id, fromMessageId: "message-5" }),
+    (error: unknown) => error instanceof HttpError && error.statusCode === 404 && error.code === "SESSION_NOT_FOUND"
+  );
+});
+
 test("SessionInteractionApplication preserves send validation order, non-authoritative dedup, raw/trim text, and lifecycle conflict mapping", async () => {
-  const { calls, application } = createDependencies({ dedup: { messageItemId: 4, runId: "run-existing" } });
+  const { calls, application } = createDependencies({ dedup: { messageId: "message-4", runId: "run-existing" } });
   const dedup = await application.sendMessage({
     sessionId: primary.id,
     body: { workspaceId: "workspace", text: " ignored ", clientRequestId: "request" },
     runtime: { enqueueRun() {}, cancelSession() {} }
   });
-  assert.deepEqual(dedup, { sessionId: primary.id, messageItemId: 4, runId: "run-existing", deduplicated: true });
+  assert.deepEqual(dedup, { sessionId: primary.id, messageId: "message-4", runId: "run-existing", deduplicated: true });
   assert.deepEqual(calls.map(([kind]) => kind), ["dedup"]);
 
   const active = createDependencies();
@@ -170,10 +168,10 @@ test("SessionInteractionApplication preserves send validation order, non-authori
   assert.equal(start.inputText, "  raw text  ");
   assert.equal(start.uiLocale, "zh-CN");
 
-  const conflict = createDependencies({ lifecycleError: new AgentConflictError(9) });
+  const conflict = createDependencies({ lifecycleError: new AgentMessageConflictError("message-9", 9) });
   await assert.rejects(
     () => conflict.application.sendMessage({ sessionId: primary.id, body: { workspaceId: "workspace", text: "text", clientRequestId: "request" }, runtime: { enqueueRun() {}, cancelSession() {} } }),
-    (error: unknown) => error instanceof HttpError && error.statusCode === 409 && error.code === "conflict_head:9"
+    (error: unknown) => error instanceof HttpError && error.statusCode === 409 && error.code === "SESSION_HEAD_CONFLICT"
   );
 });
 
@@ -204,7 +202,7 @@ test("SessionInteractionApplication accepts an image-only normalized message", a
 });
 
 test("SessionInteractionApplication validates before its fast paths", async () => {
-  const { calls, application } = createDependencies({ session: null, dedup: { messageItemId: 1, runId: "run" } });
+  const { calls, application } = createDependencies({ session: null, dedup: { messageId: "message-1", runId: "run" } });
   await assert.rejects(
     () => application.sendMessage({ sessionId: "missing", body: { workspaceId: "workspace", text: "text", clientRequestId: "request" }, runtime: { enqueueRun() {}, cancelSession() {} } }),
     (error: unknown) => error instanceof HttpError && error.statusCode === 404
@@ -220,11 +218,25 @@ test("SessionInteractionApplication reverts before best-effort runtime cancellat
       throw new Error("future runtime failure");
     }
   };
-  const result = await application.revertSession({ sessionId: primary.id, body: { workspaceId: "workspace", itemId: 3 }, runtime });
+  const result = await application.revertSession({ sessionId: primary.id, body: { workspaceId: "workspace", messageId: "message-3" }, runtime });
   assert.equal(result.ok, true);
   assert.deepEqual(calls.map(([kind]) => kind), ["run-state", "move-head", "cancel", "warn"]);
-  assert.deepEqual(calls[1], ["move-head", { workspaceId: "workspace", sessionId: primary.id, expectedHeadItemId: 5, nextHeadItemId: 3, updatedAt: 123 }]);
+  assert.deepEqual(calls[1], ["move-head", { workspaceId: "workspace", sessionId: primary.id, expectedHeadMessageId: "message-5", expectedRevision: 5, nextHeadMessageId: "message-3", updatedAt: 123 }]);
   assert.equal(calls[3]?.[2], "cancel session runtime after revert failed");
+});
+
+test("SessionInteractionApplication maps typed revert race disappearance to HTTP 404", async () => {
+  const { application } = createDependencies({
+    moveError: new AgentMessageDomainError("SESSION_NOT_FOUND")
+  });
+  await assert.rejects(
+    () => application.revertSession({
+      sessionId: primary.id,
+      body: { workspaceId: "workspace", messageId: "message-3" },
+      runtime: { cancelSession: async () => undefined }
+    }),
+    (error: unknown) => error instanceof HttpError && error.statusCode === 404 && error.code === "SESSION_NOT_FOUND"
+  );
 });
 
 test("updateSessionTitle succeeds for primary and subtask sessions and normalizes whitespace", () => {
@@ -318,28 +330,25 @@ test("updateSessionTitle returns 404 when the store mutation misses", () => {
     findClientRequestDedup: () => null,
     getRunState: () => ({ status: "idle" }),
     getControlRunState: () => ({
+      workspaceId: primary.workspaceId,
       sessionId: primary.id,
       status: "idle",
       activeRunId: null,
-      activeAssistantItemId: null,
-      lastResponseTotalTokens: null,
-      nonTerminalItemIds: [],
       runNoticeText: "",
+      retryCount: 0,
+      nextRetryAt: null,
+      activeAssistantMessageId: null,
+      nonTerminalMessageIds: [],
+      nonTerminalToolExecutionIds: [],
       updatedAt: 8,
-      appliedItemId: 0,
-      lastTerminalStatus: null,
-      lastRun: null,
-      contextWindowTokens: null,
-      contextTokenRatio: null
     }),
-    getTranscriptItem: () => null,
     hasNonTerminalItems: () => false,
     moveHead: () => undefined
   };
   const application = new SessionInteractionApplication({
     store: disappearingStore,
     profileReader: { resolveUser: () => ({ agentId: "a", providerId: "p", modelId: "m" }) },
-    lifecycleStarter: { startUserRun: async () => ({ sessionId: primary.id, messageItemId: 1, runId: "r", deduplicated: false }) },
+    lifecycleStarter: { startUserRun: async () => ({ sessionId: primary.id, messageId: "message-1", runId: "r", deduplicated: false }) },
     clock: { nowMs: () => 1 },
     ids: { newSessionId: () => "x" },
     logger: { warn: () => undefined },

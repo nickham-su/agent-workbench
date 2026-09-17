@@ -19,7 +19,7 @@ import { computed, nextTick, onMounted, ref, watch } from "vue";
 
 const props = defineProps<{
   text: string;
-  messageId: number;
+  messageId: string;
   expanded?: boolean;
   maxHeightPx?: number;
   tone?: "normal" | "error";
@@ -27,7 +27,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   toggle: [expanded: boolean];
-  requestMeasure: [messageId: number];
+  requestMeasure: [messageId: string];
   clampChange: [clamped: boolean];
 }>();
 

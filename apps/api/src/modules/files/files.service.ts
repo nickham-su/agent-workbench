@@ -29,6 +29,7 @@ import { HttpError } from "../../app/errors.js";
 import { getWorkspace, getWorkspaceRepoByDirName } from "../workspaces/workspace.store.js";
 import { getRepo } from "../repos/repo.store.js";
 import { withWorkspaceRepoLock } from "../../infra/locks/workspaceRepoLock.js";
+import { workspaceLifecycleCoordinator } from "../../infra/locks/workspace-lifecycle-coordinator.js";
 import { getSearchSettings } from "../settings/settings.service.js";
 import { SEARCH_FORCED_EXCLUDES, runFileSearch } from "./file-search.js";
 
@@ -411,7 +412,8 @@ export class FileConflictError extends Error {
 export async function writeFileText(ctx: AppContext, bodyRaw: unknown): Promise<FileWriteResponse> {
   const body = (bodyRaw ?? {}) as FileWriteRequest;
   const target = parseTarget((body as any).target);
-  return withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
+  return workspaceLifecycleCoordinator.withMutation(target.workspaceId, () =>
+    withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
     const { wsRepo } = getTargetInfoOrThrow(ctx, target);
     const rel = typeof (body as any).path === "string" ? (body as any).path.trim() : "";
     if (!rel || !isValidRelativePath(rel)) throw new HttpError(400, "Invalid path");
@@ -467,13 +469,15 @@ export async function writeFileText(ctx: AppContext, bodyRaw: unknown): Promise<
     const statAfter = await fs.stat(absPath);
     const version = toVersion({ mtimeMs: statAfter.mtimeMs, size: statAfter.size }, hashBuffer(buf));
     return { path: rel, version };
-  });
+    })
+  );
 }
 
 export async function createFile(ctx: AppContext, bodyRaw: unknown): Promise<FileCreateResponse> {
   const body = (bodyRaw ?? {}) as FileCreateRequest;
   const target = parseTarget((body as any).target);
-  return withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
+  return workspaceLifecycleCoordinator.withMutation(target.workspaceId, () =>
+    withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
     const { wsRepo } = getTargetInfoOrThrow(ctx, target);
     const rel = typeof (body as any).path === "string" ? (body as any).path.trim() : "";
     if (!rel || !isValidRelativePath(rel)) throw new HttpError(400, "Invalid path");
@@ -500,13 +504,15 @@ export async function createFile(ctx: AppContext, bodyRaw: unknown): Promise<Fil
     await fs.writeFile(absPath, buf, { flag: "wx" });
     const st = await fs.stat(absPath);
     return { path: rel, version: toVersion({ mtimeMs: st.mtimeMs, size: st.size }, hashBuffer(buf)) };
-  });
+    })
+  );
 }
 
 export async function mkdirPath(ctx: AppContext, bodyRaw: unknown): Promise<FileMkdirResponse> {
   const body = (bodyRaw ?? {}) as FileMkdirRequest;
   const target = parseTarget((body as any).target);
-  return withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
+  return workspaceLifecycleCoordinator.withMutation(target.workspaceId, () =>
+    withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
     const { wsRepo } = getTargetInfoOrThrow(ctx, target);
     const rel = typeof (body as any).path === "string" ? (body as any).path.trim() : "";
     if (!rel || !isValidRelativePath(rel)) throw new HttpError(400, "Invalid path");
@@ -528,13 +534,15 @@ export async function mkdirPath(ctx: AppContext, bodyRaw: unknown): Promise<File
       throw err;
     }
     return { path: rel };
-  });
+    })
+  );
 }
 
 export async function renamePath(ctx: AppContext, bodyRaw: unknown): Promise<FileRenameResponse> {
   const body = (bodyRaw ?? {}) as FileRenameRequest;
   const target = parseTarget((body as any).target);
-  return withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
+  return workspaceLifecycleCoordinator.withMutation(target.workspaceId, () =>
+    withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
     const { wsRepo } = getTargetInfoOrThrow(ctx, target);
     const from = typeof (body as any).from === "string" ? (body as any).from.trim() : "";
     const to = typeof (body as any).to === "string" ? (body as any).to.trim() : "";
@@ -571,13 +579,15 @@ export async function renamePath(ctx: AppContext, bodyRaw: unknown): Promise<Fil
 
     await fs.rename(absFrom, absTo);
     return { from, to };
-  });
+    })
+  );
 }
 
 export async function deletePath(ctx: AppContext, bodyRaw: unknown): Promise<FileDeleteResponse> {
   const body = (bodyRaw ?? {}) as FileDeleteRequest;
   const target = parseTarget((body as any).target);
-  return withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
+  return workspaceLifecycleCoordinator.withMutation(target.workspaceId, () =>
+    withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
     const { wsRepo } = getTargetInfoOrThrow(ctx, target);
     const rel = typeof (body as any).path === "string" ? (body as any).path.trim() : "";
     if (!rel || !isValidRelativePath(rel)) throw new HttpError(400, "Invalid path");
@@ -602,7 +612,8 @@ export async function deletePath(ctx: AppContext, bodyRaw: unknown): Promise<Fil
     const recursive = parseBool((body as any).recursive, true);
     await fs.rm(absPath, { recursive, force: false });
     return { path: rel };
-  });
+    })
+  );
 }
 
 export async function searchFiles(ctx: AppContext, bodyRaw: unknown): Promise<FileSearchResponse> {

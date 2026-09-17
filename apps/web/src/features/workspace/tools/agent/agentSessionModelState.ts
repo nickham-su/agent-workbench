@@ -1,4 +1,4 @@
-import type { AgentSessionAgentModelState, AgentSessionModelOverridesResponse } from "@agent-workbench/shared";
+import type { AgentSessionAgentModelState, AgentSessionModelOverridesResponse } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 
 export type SessionModelStateByAgent = Record<string, AgentSessionAgentModelState>;
 export type SessionModelStateCache = Record<string, SessionModelStateByAgent>;

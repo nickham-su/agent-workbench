@@ -18,11 +18,6 @@ export type CreateAgentIntegrationFixtureOptions = Pick<
   CreateAgentTestFixtureOptions,
   "repoRoot" | "agentWorkerConcurrency" | "authToken"
 >;
-
-/**
- * Creates one fully initialized HTTP integration fixture. The caller owns the
- * returned fixture and must dispose it from the individual test teardown.
- */
 export async function createAgentIntegrationFixture(
   options: CreateAgentIntegrationFixtureOptions = {}
 ): Promise<AgentIntegrationFixture> {
@@ -41,7 +36,13 @@ export async function createAgentIntegrationFixture(
 
   try {
     const workspace = await createTestWorkspace(fixture, { title: "it-workspace" });
-    await configureDefaultAgentSettings(app);
+    const headers: Record<string, string> = {};
+    if (options.authToken) {
+      const login = await app.inject({ method: "POST", url: "/api/auth/login", payload: { token: options.authToken } });
+      assert.equal(login.statusCode, 200, `integration fixture login failed: ${login.body}`);
+      headers.cookie = String(login.headers["set-cookie"]);
+    }
+    await configureDefaultAgentSettings(app, 128000, headers);
     setSettingJson(fixture.db, "agent_channel_sender_allowlist_v1", {
       items: [{ channel: "feishu", senderId: "u_allowed", remark: "default test allowlist" }]
     }, Date.now());
@@ -65,10 +66,11 @@ export async function createAgentIntegrationFixture(
   }
 }
 
-async function configureDefaultAgentSettings(app: FastifyInstance, contextWindowTokens = 128000) {
+async function configureDefaultAgentSettings(app: FastifyInstance, contextWindowTokens = 128000, headers: Record<string, string> = {}) {
   const providersRes = await app.inject({
     method: "PUT",
     url: "/api/settings/agent/providers",
+    headers,
     payload: {
       default: { providerId: "ppchat", modelId: "gpt-5.2" },
       providers: [
@@ -87,6 +89,7 @@ async function configureDefaultAgentSettings(app: FastifyInstance, contextWindow
   const agentsRes = await app.inject({
     method: "PUT",
     url: "/api/settings/agent/agents",
+    headers,
     payload: {
       agents: [
         {
@@ -108,10 +111,11 @@ async function configureDefaultAgentSettings(app: FastifyInstance, contextWindow
 }
 
 /** Creates a primary session through the public HTTP route. */
-export async function createPrimarySession(fixture: Pick<AgentIntegrationFixture, "app" | "workspaceId">) {
+export async function createPrimarySession(fixture: Pick<AgentIntegrationFixture, "app" | "workspaceId">, headers?: Record<string, string>) {
   const res = await fixture.app.inject({
     method: "POST",
     url: "/api/agent/sessions",
+    headers,
     payload: { workspaceId: fixture.workspaceId, title: "it-session" }
   });
   assert.equal(res.statusCode, 201, `create session failed: ${res.body}`);
@@ -133,5 +137,5 @@ export async function sendAgentMessage(
     }
   });
   assert.equal(res.statusCode, 201, `send message failed: ${res.body}`);
-  return res.json() as { messageItemId: number; runId: string; deduplicated: boolean };
+  return res.json() as { messageId: string; runId: string; deduplicated: boolean };
 }

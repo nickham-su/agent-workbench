@@ -59,7 +59,6 @@ async function createFixture() {
     agentInternalToken: "token",
     agentWorkerResponseValidation: "strict",
     agentApiOrigin: "http://127.0.0.1:0",
-    agentStartupRecoveryMode: "recover",
     agentPluginHostEnabled: false,
     agentPluginHostSocketPath: path.join(dataDir, "agent-plugin-host.sock"),
     agentPluginServicesEnabled: false
@@ -91,7 +90,7 @@ afterEach(async () => {
   }
 });
 
-test("agent settings persist todolist and visual_analyze while filtering hidden default tools", async () => {
+test("agent settings persist archive tools while filtering hidden baseline tools", async () => {
   const { ctx, db } = await createFixture();
 
   const updated = updateAgentSettings(ctx, createLogger(), {
@@ -105,9 +104,9 @@ test("agent settings persist todolist and visual_analyze while filtering hidden 
         "bash",
         "todolist",
         "visual_analyze",
-        "read",
-        "archive_search",
         "archive_read",
+        "archive_search",
+        "read",
         "skill",
         "todolist"
       ],
@@ -119,10 +118,10 @@ test("agent settings persist todolist and visual_analyze while filtering hidden 
     }]
   });
 
-  assert.deepEqual(updated.agents[0]?.tools, ["bash", "todolist", "visual_analyze"]);
-  assert.deepEqual(getAgentSettings(ctx).agents[0]?.tools, ["bash", "todolist", "visual_analyze"]);
+  assert.deepEqual(updated.agents[0]?.tools, ["bash", "todolist", "visual_analyze", "archive_read", "archive_search"]);
+  assert.deepEqual(getAgentSettings(ctx).agents[0]?.tools, ["bash", "todolist", "visual_analyze", "archive_read", "archive_search"]);
   assert.deepEqual(
     (getSettingJson(db, AGENT_SETTINGS_KEY)?.value as { agents: Array<{ tools: string[] }> }).agents[0]?.tools,
-    ["bash", "todolist", "visual_analyze"]
+    ["bash", "todolist", "visual_analyze", "archive_read", "archive_search"]
   );
 });

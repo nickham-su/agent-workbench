@@ -3,19 +3,25 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { PluginRuntimeManager } from "./runtimeManager.js";
-import type { PluginRuntimeSnapshotsResponse } from "@agent-workbench/shared";
+import type { PluginRuntimeSnapshotsResponse } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import type { ToolExecutionContext } from "../tools/types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "../../../../..");
-const pluginDir = path.join(repoRoot, "test", "fixtures", "plugins", "debug-tools");
+const pluginDir = path.join(
+  repoRoot,
+  "test",
+  "fixtures",
+  "plugins",
+  "debug-tools",
+);
 const pluginEntryPath = path.join(pluginDir, "index.js");
 
 function createApiClient(response: PluginRuntimeSnapshotsResponse) {
   return {
     async getPluginRuntimeSnapshots() {
       return response;
-    }
+    },
   } as any;
 }
 
@@ -24,8 +30,8 @@ function createProfile() {
     agent: {
       tools: ["read", "write", "bash"],
       pluginTools: ["plugin_debug-tools_echo_inspect"],
-      mcpServers: []
-    }
+      mcpServers: [],
+    },
   } as any;
 }
 
@@ -33,13 +39,14 @@ function createContext() {
   return {
     profile: createProfile(),
     promptContext: {
-      headItemId: null,
+      headMessageId: null,
+      sessionRevision: 0,
       system: "",
       messages: [],
       tools: [],
       pendingTools: [],
       lastResponseTotalTokens: null,
-      uiLocale: null
+      uiLocale: null,
     },
     apiClient: createApiClient({
       plugins: [
@@ -59,9 +66,9 @@ function createContext() {
                 name: "echo_inspect",
                 description: "fixture echo",
                 outputMode: "text+raw",
-                riskLevel: "low"
-              }
-            ]
+                riskLevel: "low",
+              },
+            ],
           },
           entryPath: pluginEntryPath,
           enabled: true,
@@ -73,18 +80,21 @@ function createContext() {
                 canonicalName: "plugin_debug-tools_echo_inspect",
                 shortName: "echo_inspect",
                 description: "fixture echo",
-                riskLevel: "low"
-              }
-            ]
-          }
-        }
+                riskLevel: "low",
+              },
+            ],
+          },
+        },
       ],
-      updatedAt: Date.now()
-    })
+      updatedAt: Date.now(),
+    }),
   } as const;
 }
 
-function createExecutionContext(mode: "ok" | "throw" | "long_text", includeRaw = true): ToolExecutionContext {
+function createExecutionContext(
+  mode: "ok" | "throw" | "long_text",
+  includeRaw = true,
+): ToolExecutionContext {
   return {
     profile: createProfile(),
     run: {
@@ -93,10 +103,12 @@ function createExecutionContext(mode: "ok" | "throw" | "long_text", includeRaw =
       runId: "run_test",
       workspacePath: repoRoot,
       workspaceRepoDirNames: [],
-      inputText: undefined
+      inputText: undefined,
     },
     pendingTool: {
-      itemId: 1,
+      toolExecutionId: "execution-1",
+      callPartId: "part-1",
+      assistantMessageId: "message-1",
       status: "queued",
       toolName: "plugin_debug-tools_echo_inspect",
       toolCallId: "call_test",
@@ -104,30 +116,35 @@ function createExecutionContext(mode: "ok" | "throw" | "long_text", includeRaw =
         message: "hello",
         tags: ["a", "b"],
         includeRaw,
-        mode
-      }
+        mode,
+      },
     },
     signal: new AbortController().signal,
     apiClient: createApiClient({ plugins: [], updatedAt: Date.now() }),
     promptContext: {
-      headItemId: null,
+      headMessageId: null,
+      sessionRevision: 0,
       system: "",
       messages: [],
       tools: [],
       pendingTools: [],
       lastResponseTotalTokens: null,
       uiLocale: null,
-      externalSkillRoots: []
+      externalSkillRoots: [],
     },
     processNestedRun: async () => {},
-    updateToolItem: async () => {},
+    updateToolExecution: async () => {},
     nowMs: () => Date.now(),
-    renderToolText: () => ""
+    renderToolText: () => "",
   };
 }
 
 test("PluginRuntimeManager lists debug-tools fixture tool", async () => {
-  const manager = new PluginRuntimeManager({ info() {}, warn() {}, error() {} });
+  const manager = new PluginRuntimeManager({
+    info() {},
+    warn() {},
+    error() {},
+  });
   const tools = await manager.listTools(createContext() as any);
   assert.equal(tools.length, 1);
   assert.equal(tools[0]?.name, "plugin_debug-tools_echo_inspect");
@@ -135,14 +152,18 @@ test("PluginRuntimeManager lists debug-tools fixture tool", async () => {
 });
 
 test("PluginRuntimeManager executes debug-tools fixture ok branch", async () => {
-  const manager = new PluginRuntimeManager({ info() {}, warn() {}, error() {} });
+  const manager = new PluginRuntimeManager({
+    info() {},
+    warn() {},
+    error() {},
+  });
   const result = await manager.execute(
     "plugin_debug-tools_echo_inspect",
     { message: "hello", tags: ["a", "b"], includeRaw: true, mode: "ok" },
     {
       ...createExecutionContext("ok", true),
-      apiClient: createContext().apiClient
-    }
+      apiClient: createContext().apiClient,
+    },
   );
   assert.equal(typeof result.text, "string");
   assert.match(result.text, /tool: plugin_debug-tools_echo_inspect/);
@@ -150,14 +171,18 @@ test("PluginRuntimeManager executes debug-tools fixture ok branch", async () => 
 });
 
 test("PluginRuntimeManager executes debug-tools fixture long_text branch", async () => {
-  const manager = new PluginRuntimeManager({ info() {}, warn() {}, error() {} });
+  const manager = new PluginRuntimeManager({
+    info() {},
+    warn() {},
+    error() {},
+  });
   const result = await manager.execute(
     "plugin_debug-tools_echo_inspect",
     { message: "hello", includeRaw: false, mode: "long_text" },
     {
       ...createExecutionContext("long_text", false),
-      apiClient: createContext().apiClient
-    }
+      apiClient: createContext().apiClient,
+    },
   );
   assert.equal(typeof result.text, "string");
   assert.ok(result.text.includes("debug-tools long_text: hello"));
@@ -166,16 +191,21 @@ test("PluginRuntimeManager executes debug-tools fixture long_text branch", async
 });
 
 test("PluginRuntimeManager propagates debug-tools fixture throw branch", async () => {
-  const manager = new PluginRuntimeManager({ info() {}, warn() {}, error() {} });
+  const manager = new PluginRuntimeManager({
+    info() {},
+    warn() {},
+    error() {},
+  });
   await assert.rejects(
-    () => manager.execute(
-      "plugin_debug-tools_echo_inspect",
-      { message: "boom", includeRaw: true, mode: "throw" },
-      {
-        ...createExecutionContext("throw", true),
-        apiClient: createContext().apiClient
-      }
-    ),
-    /debug-tools requested failure/
+    () =>
+      manager.execute(
+        "plugin_debug-tools_echo_inspect",
+        { message: "boom", includeRaw: true, mode: "throw" },
+        {
+          ...createExecutionContext("throw", true),
+          apiClient: createContext().apiClient,
+        },
+      ),
+    /debug-tools requested failure/,
   );
 });

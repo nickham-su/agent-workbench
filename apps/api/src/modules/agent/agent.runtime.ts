@@ -11,6 +11,7 @@ export class AgentRuntime implements AgentRuntimePort {
   private readonly queue: RuntimeQueuedRun[] = [];
   private readonly queuedRunIds = new Set<string>();
   private readonly runningSessions = new Set<string>();
+  private readonly activeRunIds = new Set<string>();
   private activeCount = 0;
 
   constructor(
@@ -24,7 +25,7 @@ export class AgentRuntime implements AgentRuntimePort {
   }
 
   enqueueRun(run: RuntimeQueuedRun) {
-    if (this.queuedRunIds.has(run.runId)) return;
+    if (this.queuedRunIds.has(run.runId) || this.activeRunIds.has(run.runId)) return;
     this.queue.push(run);
     this.queuedRunIds.add(run.runId);
     this.pump();
@@ -37,6 +38,16 @@ export class AgentRuntime implements AgentRuntimePort {
       this.queuedRunIds.delete(item.runId);
       this.queue.splice(i, 1);
     }
+  }
+
+  async cancelSessionAndWait(input: { sessionId: string; timeoutMs: number }): Promise<boolean> {
+    this.cancelSession(input.sessionId);
+    const deadline = Date.now() + input.timeoutMs;
+    while (this.queue.some((run) => run.sessionId === input.sessionId) || this.runningSessions.has(input.sessionId)) {
+      if (Date.now() >= deadline) return false;
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.min(10, Math.max(1, deadline - Date.now()))));
+    }
+    return true;
   }
 
   private pump() {
@@ -52,6 +63,7 @@ export class AgentRuntime implements AgentRuntimePort {
 
   private startRun(run: RuntimeQueuedRun) {
     this.activeCount += 1;
+    this.activeRunIds.add(run.runId);
     this.runningSessions.add(run.sessionId);
 
     void this.processRun(run)
@@ -60,6 +72,7 @@ export class AgentRuntime implements AgentRuntimePort {
       })
       .finally(() => {
         this.runningSessions.delete(run.sessionId);
+        this.activeRunIds.delete(run.runId);
         this.activeCount -= 1;
         this.pump();
       });
@@ -73,45 +86,44 @@ export class AgentRuntime implements AgentRuntimePort {
         sessionId: run.sessionId,
         runId: run.runId
       });
-
-      const turnId = newSortableId("turn");
-      const assistant = this.execution.appendContextItemFromWorker({
-        workspaceId: run.workspaceId,
-        sessionId: run.sessionId,
-        runId: run.runId,
-        turnId,
-        step: 1,
-        prevId: ctx.headItemId,
-        kind: "assistant",
-        status: "streaming",
-        output: {
-          type: "assistant_text",
-          text: ""
-        },
-        createdAt: ts
-      });
-      if (assistant.item == null) {
-        return;
+      // 本地回退运行时不具备 ToolExecution provider；恢复 continuation 不得越过 queued 工具。
+      // 真实 API-managed Worker 会先执行 queued 工具，随后才在模型 step 中消费 continuation。
+      if (ctx.pendingTools.length > 0) {
+        throw new Error("local fallback cannot recover pending ToolExecution");
       }
-
-      this.execution.updateRunStateFromWorker({
-        workspaceId: run.workspaceId,
-        sessionId: run.sessionId,
-        status: "running",
-        activeRunId: run.runId,
-        activeAssistantItemId: assistant.item.id,
-        updatedAt: ts
-      });
+      let assistantMessageId = run.resumeAssistantMessageId ?? null;
+      if (assistantMessageId) {
+        const claim = this.execution.resumeStreamingAssistantFromWorker({
+          workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, messageId: assistantMessageId
+        });
+        if (claim.result !== "updated") return;
+      } else {
+        assistantMessageId = newSortableId("message");
+        this.execution.createStreamingAssistantFromWorker({
+          workspaceId: run.workspaceId,
+          sessionId: run.sessionId,
+          runId: run.runId,
+          messageId: assistantMessageId,
+          createdAt: ts
+        });
+      }
 
       const latestUser = [...ctx.messages].reverse().find((item) => item.role === "user")?.content ?? "";
       const text = latestUser ? `本地回退模式已收到: ${latestUser}` : "本地回退模式已执行。";
-      await this.execution.updateContextItemFromWorker({
-        itemId: assistant.item.id,
-        status: "completed",
-        output: {
-          type: "assistant_text",
-          text
-        },
+      this.execution.flushAssistantPartsFromWorker({
+        workspaceId: run.workspaceId,
+        sessionId: run.sessionId,
+        runId: run.runId,
+        messageId: assistantMessageId,
+        parts: [{ id: newSortableId("part"), position: 0, type: "text", text }],
+        updatedAt: nowMs()
+      });
+      this.execution.completeAssistantFromWorker({
+        workspaceId: run.workspaceId,
+        sessionId: run.sessionId,
+        runId: run.runId,
+        messageId: assistantMessageId,
+        executions: [],
         updatedAt: nowMs()
       });
       this.execution.completeRunFromWorker({
@@ -121,23 +133,7 @@ export class AgentRuntime implements AgentRuntimePort {
         status: "completed",
         updatedAt: nowMs()
       });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.execution.appendContextItemFromWorker({
-        workspaceId: run.workspaceId,
-        sessionId: run.sessionId,
-        runId: run.runId,
-        turnId: null,
-        step: null,
-        prevId: this.execution.getSession(run.sessionId)?.headItemId ?? null,
-        kind: "system",
-        status: "completed",
-        output: {
-          type: "system_text",
-          text: `[run] ${message}`
-        },
-        createdAt: nowMs()
-      });
+    } catch {
       this.execution.completeRunFromWorker({
         workspaceId: run.workspaceId,
         sessionId: run.sessionId,

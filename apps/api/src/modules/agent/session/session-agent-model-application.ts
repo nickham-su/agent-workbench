@@ -2,12 +2,12 @@ import type {
   AgentSessionAgentModelState,
   AgentSessionModelOverridesResponse,
   UpdateAgentSessionModelOverrideRequest
-} from "@agent-workbench/shared";
+} from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { HttpError } from "../../../app/errors.js";
-import type { AgentSessionRecord } from "@agent-workbench/shared";
-import type { AgentItem, AgentProvidersSettings } from "@agent-workbench/shared";
+import type { AgentSessionRecord } from "@agent-workbench/shared/internal-contracts/agent-api-session";
+import type { AgentItem, AgentProvidersSettings } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import type { WorkspaceAgentEnablementInput } from "../../settings/settings.service.js";
-import type { SessionAgentModelOverrideRecord } from "../agent.store.js";
+import type { SessionAgentModelOverrideRecord } from "../agent-message.store.js";
 
 const NOT_EDITABLE_CODE = "AGENT_SESSION_MODEL_OVERRIDE_NOT_EDITABLE";
 

@@ -8,19 +8,22 @@ type InternalRouteDependencies = { internalToken: string };
 export type AgentPublicRouteDependencies = InternalRouteDependencies & {
   dataDir: string;
   service: Pick<AgentService,
-    "listSessions" | "createPrimarySession" | "forkPrimarySession" | "updateSessionTitle" | "getContextItems" | "getContextItem" |
-    "getApplyPatchUiArtifact" | "getWriteUiArtifact" | "getRunState" | "listSessionModelOverrides" |
-    "setSessionModelOverride" | "resetSessionModelOverride" | "sendMessage" | "compactSession" |
-    "clearSession" | "revertSession" | "cancelSessionWithRuntime" | "getAttachmentContent">;
+    "listSessions" | "createPrimarySession" | "forkPrimarySession" | "updateSessionTitle" | "getMessageTimeline" | "getMessageDetail" |
+    "getToolExecutionDetail" | "getApplyPatchUiArtifact" | "getWriteUiArtifact" | "getMessageRunState" | "listSessionModelOverrides" |
+    "setSessionModelOverride" | "resetSessionModelOverride" | "sendMessage" | "compactSession" | "revertSession" |
+    "cancelSessionWithRuntime" | "getAttachmentContent">;
   runtime: AgentRuntimePort;
 };
 
 export type AgentWorkerRouteDependencies = InternalRouteDependencies & {
   service: Pick<AgentService,
     "getSubtaskPreforkPlanFromWorker" | "getSubtaskRunResultFromWorker" |
-    "getSubtaskRunStatusFromWorker" | "startSubtaskRunFromWorker" | "appendContextItemFromWorker" | "updateContextItemFromWorker" |
-    "updateRunStateFromWorker" | "completeRunFromWorker" | "compactContextFromWorker" |
-    "archiveSearchFromWorker" | "archiveReadFromWorker" | "getPromptContextForRun" |
+    "getSubtaskRunStatusFromWorker" | "startSubtaskRunFromWorker" | "createStreamingAssistantFromWorker" |
+    "flushAssistantPartsFromWorker" | "resumeStreamingAssistantFromWorker" | "replaceStreamingAssistantFromWorker" |
+    "completeAssistantFromWorker" | "updateToolExecutionFromWorker" |
+    "updateRunNoticeFromWorker" | "completeRunFromWorker" | "commitCompactionFromWorker" |
+    "archiveReadFromWorker" | "archiveSearchFromWorker" |
+    "getPromptContextForRun" |
     "getMessagesContext" | "getExecutionProfileForRun" | "getSingleCallModelProfileForRun">;
 };
 
@@ -28,12 +31,13 @@ export type AgentPeripheralRouteDependencies = InternalRouteDependencies & {
   service: Pick<AgentService,
     "getAgentMcpSettingsFromWorker" | "getPluginRuntimeSnapshotsFromWorker" | "checkChannelSenderAllowlist" |
     "createPrimarySession" | "sendMessage" | "listRecentSessions" | "listRecentWorkspaces" |
-    "getRunFinalText" | "listAvailableAgents">;
+    "getRunFinalText" | "listAvailableAgents" | "getLastAssistantText" |
+    "getLatestTodolistToolExecution" | "getMessageRunState">;
   runtime: AgentRuntimePort;
   pluginHost?: AgentPluginHostClient | null;
 };
 
 export type AgentStatusSseRouteDependencies = InternalRouteDependencies & {
-  service: Pick<AgentService, "getSessionStatusSummary" | "getContextItems">;
+  service: Pick<AgentService, "getMessageTimelineSnapshot">;
   runCompletedEventHub: AgentRunCompletedEventHub;
 };

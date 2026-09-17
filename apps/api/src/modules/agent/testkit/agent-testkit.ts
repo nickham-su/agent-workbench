@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { FastifyInstance } from "fastify";
-import type { RepoRecord, WorkspaceRecord } from "@agent-workbench/shared";
+import type { RepoRecord, WorkspaceRecord } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { createApp as createDefaultApp } from "../../../app/createApp.js";
 import type { AppContext } from "../../../app/context.js";
 import { openDb, type Db } from "../../../infra/db/db.js";
@@ -186,7 +186,6 @@ export async function createAgentTestFixture(options: CreateAgentTestFixtureOpti
       agentInternalToken: internalToken,
       agentWorkerResponseValidation: "strict",
       agentApiOrigin: "http://127.0.0.1:0",
-      agentStartupRecoveryMode: "recover",
       agentPluginHostEnabled: false,
       agentPluginHostSocketPath: path.join(dataDir, "agent-plugin-host.sock"),
       agentPluginServicesEnabled: false

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import { createAgentIntegrationFixture } from "./testkit/agent-integration-testkit.js";
-import { createAgentSession, getSessionAgentModelOverride } from "./agent.store.js";
+import { createMessageSession, getSessionAgentModelOverride } from "./agent-message.store.js";
 import { setSettingJson } from "../settings/settings.store.js";
 
 async function createFixture(t: TestContext) {
@@ -53,7 +53,7 @@ test("session model override DELETE clears stale records and session deletion ca
   assert.equal(getSessionAgentModelOverride(fixture.db, { sessionId: session.id, agentId: "default" }), null);
 
   const cascadeId = "sess_model_cascade";
-  createAgentSession(fixture.db, { id: cascadeId, workspaceId: fixture.workspaceId, title: "cascade", kind: "primary", createdAt: 10 });
+  createMessageSession(fixture.db, { id: cascadeId, workspaceId: fixture.workspaceId, title: "cascade", kind: "primary", createdAt: 10 });
   fixture.db.prepare(`insert into agent_session_agent_model_override (session_id, agent_id, provider_id, model_id, updated_at) values (?, ?, ?, ?, ?)`)
     .run(cascadeId, "default", "ppchat", "gpt-5.2", 1);
   fixture.db.prepare("delete from agent_session where id = ?").run(cascadeId);
@@ -115,7 +115,7 @@ test("session model state projects disabled and non-user-scope agents as invalid
 
 test("session model override API rejects subtask and hides cross-workspace session", async (t) => {
   const fixture = await createFixture(t);
-  createAgentSession(fixture.db, { id: "sess_subtask_model", workspaceId: fixture.workspaceId, title: "subtask", kind: "subtask", createdAt: 1 });
+  createMessageSession(fixture.db, { id: "sess_subtask_model", workspaceId: fixture.workspaceId, title: "subtask", kind: "subtask", createdAt: 1 });
   const subtask = await fixture.app.inject({
     method: "PUT",
     url: "/api/agent/sessions/sess_subtask_model/agents/default/model-override",

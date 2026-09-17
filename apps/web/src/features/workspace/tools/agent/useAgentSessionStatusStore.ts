@@ -1,4 +1,5 @@
-import type { AgentRuntimeSettings, AgentSessionRunState } from "@agent-workbench/shared";
+import type { AgentRuntimeSettings } from "@agent-workbench/shared/internal-contracts/agent-api-session";
+import type { AgentMessageSessionRunState } from "@agent-workbench/shared";
 import { LoadingOutlined } from "@ant-design/icons-vue";
 import { computed, inject, reactive, readonly, watchEffect, type App, type ComputedRef, type InjectionKey } from "vue";
 import { getAgentRunState, getAgentRuntimeSettings } from "@/shared/api";
@@ -12,17 +13,18 @@ const ERROR_RETRY_MS = 1600;
 const SETTINGS_RELOAD_MS = 30_000;
 const PERSIST_STORAGE_PREFIX = "agent-workbench.workspace.agent.sessionIndicators.v1";
 
-const DEFAULT_RUN_STATE = (sessionId = ""): AgentSessionRunState => ({
+const DEFAULT_RUN_STATE = (sessionId = ""): AgentMessageSessionRunState => ({
+  workspaceId: "",
   sessionId,
   status: "idle",
   activeRunId: null,
-  activeAssistantItemId: null,
-  lastResponseTotalTokens: null,
   runNoticeText: "",
-  nonTerminalItemIds: [],
+  retryCount: 0,
+  nextRetryAt: null,
+  activeAssistantMessageId: null,
+  nonTerminalMessageIds: [],
+  nonTerminalToolExecutionIds: [],
   updatedAt: 0,
-  lastTerminalStatus: null,
-  appliedItemId: 0
 });
 
 export type SessionIndicatorIcon = "running" | null;
@@ -35,7 +37,7 @@ type SessionUiPolicy = {
 
 type SessionStatusEntry = {
   sessionId: string;
-  runState: AgentSessionRunState;
+  runState: AgentMessageSessionRunState;
   fetchedAt: number;
   inFlight: boolean;
   nextPollAt: number;
@@ -43,7 +45,7 @@ type SessionStatusEntry = {
   warmupRemaining: number;
   lastTerminalAt: number | null;
   lastSeenTerminalAt: number | null;
-  prevRunStatus: AgentSessionRunState["status"] | null;
+  prevRunStatus: AgentMessageSessionRunState["status"] | null;
   lastSoundPlayedAt: number | null;
   lastSoundPlayFailedAt: number | null;
   indicatorIcon: SessionIndicatorIcon;
@@ -76,11 +78,11 @@ function nowMs() {
   return Date.now();
 }
 
-function isNonIdle(status: AgentSessionRunState["status"]) {
+function isNonIdle(status: AgentMessageSessionRunState["status"]) {
   return status === "running";
 }
 
-function indicatorIconOf(status: AgentSessionRunState["status"]): SessionIndicatorIcon {
+function indicatorIconOf(status: AgentMessageSessionRunState["status"]): SessionIndicatorIcon {
   if (status === "running") return "running";
   return null;
 }
@@ -109,7 +111,6 @@ function shouldShowDot(entry: SessionStatusEntry, activeSessionId: string | null
   if (!entry.uiPolicy.terminalDotEnabled) return false;
   if (activeSessionId && activeSessionId === entry.sessionId) return false;
   if (entry.lastTerminalAt == null) return false;
-  if (entry.runState.lastTerminalStatus !== "completed" && entry.runState.lastTerminalStatus !== "failed") return false;
   return entry.lastSeenTerminalAt == null || entry.lastTerminalAt > entry.lastSeenTerminalAt;
 }
 
@@ -312,13 +313,13 @@ export function createAgentSessionStatusStore() {
     }
   }
 
-  function onRunStateTransition(entry: SessionStatusEntry, next: AgentSessionRunState) {
+  function onRunStateTransition(entry: SessionStatusEntry, next: AgentMessageSessionRunState) {
     const prev = entry.prevRunStatus ?? entry.runState.status;
     const nextStatus = next.status;
     updateEntryIndicator(entry);
     if (prev !== "idle" && nextStatus === "idle") {
       const terminalAt = typeof next.updatedAt === "number" && next.updatedAt > 0 ? next.updatedAt : nowMs();
-      const isReminderTerminal = next.lastTerminalStatus === "completed" || next.lastTerminalStatus === "failed";
+      const isReminderTerminal = true;
       if (entry.uiPolicy.terminalDotEnabled && isReminderTerminal) {
         entry.lastTerminalAt = terminalAt;
         if (state.activeSessionId === entry.sessionId) {
@@ -373,7 +374,7 @@ export function createAgentSessionStatusStore() {
     if (!state.registeredSessionIds.has(sessionId)) return;
     entry.inFlight = true;
     try {
-      const next = await getAgentRunState(sessionId);
+      const next = await getAgentRunState(sessionId, state.workspaceId);
       entry.errorRetryAt = null;
       entry.fetchedAt = nowMs();
       entry.runState = next;
@@ -527,7 +528,7 @@ export function createAgentSessionStatusStore() {
     } as SessionStatusEntry);
   }
 
-  function getRunState(sessionId: string): ComputedRef<AgentSessionRunState> {
+  function getRunState(sessionId: string): ComputedRef<AgentMessageSessionRunState> {
     return computed(() => getEntry(sessionId).runState);
   }
 
@@ -555,7 +556,7 @@ export function createAgentSessionStatusStore() {
     return created;
   }
 
-  function runStateOf(sessionId: string): AgentSessionRunState {
+  function runStateOf(sessionId: string): AgentMessageSessionRunState {
     return getEntry(sessionId).runState;
   }
 

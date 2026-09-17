@@ -13,8 +13,7 @@ import {
 } from "./agentInputCandidates";
 
 const builtInCommands: SlashCommandDefinition[] = [
-  { name: "compact", usage: "/compact", summaryKey: "compact", strictOnly: true, action: "compact" },
-  { name: "clear", usage: "/clear", summaryKey: "clear", strictOnly: true, action: "clear" }
+  { name: "compact", usage: "/compact", summaryKey: "compact", strictOnly: true, action: "compact" }
 ];
 
 test("shouldConvertLeadingIdeographicCommaToSlash 仅在空输入以顿号开始时转换", () => {
@@ -44,7 +43,7 @@ test("buildSlashInputCandidates 保留超过 10 条 slash 指令", () => {
     return [command, { id: command, title: command, prompt: "", command }];
   }));
   const candidates = buildSlashInputCandidates({ commands: builtInCommands, promptCommands, query: "" });
-  assert.equal(candidates.length, 13);
+  assert.equal(candidates.length, 12);
   assert.equal(candidates.at(-1)?.id, "prompt_command:command-10");
 });
 

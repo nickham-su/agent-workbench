@@ -1,6 +1,5 @@
 import { Type, type Static } from "@sinclair/typebox";
 import {
-  AgentContextItemStatusSchema,
   AgentContextToolNameSchema,
   AgentImageMediaTypeSchema,
   AgentUiLocaleSchema
@@ -181,7 +180,8 @@ const AgentApiPromptMessageSchema = Type.Union([
 ]);
 
 export const AgentApiPromptContextResponseSchema = Type.Object({
-  headItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
+  headMessageId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+  sessionRevision: Type.Integer({ minimum: 0 }),
   system: Type.String(),
   messages: Type.Array(AgentApiPromptMessageSchema),
   tools: Type.Array(Type.Object({
@@ -190,8 +190,10 @@ export const AgentApiPromptContextResponseSchema = Type.Object({
     inputSchema: Type.Any()
   })),
   pendingTools: Type.Array(Type.Object({
-    itemId: Type.Number({ minimum: 1 }),
-    status: AgentContextItemStatusSchema,
+    toolExecutionId: Type.String({ minLength: 1 }),
+    callPartId: Type.String({ minLength: 1 }),
+    assistantMessageId: Type.String({ minLength: 1 }),
+    status: Type.Union([Type.Literal("queued"), Type.Literal("running")]),
     toolName: Type.String({ minLength: 1 }),
     toolCallId: Type.Optional(Type.String({ minLength: 1 })),
     args: Type.Any()
@@ -218,8 +220,39 @@ export const AgentApiMessagesContextRequestSchema = Type.Object({
 export type AgentApiMessagesContextRequest = Static<typeof AgentApiMessagesContextRequestSchema>;
 
 export const AgentApiMessagesContextResponseSchema = Type.Object({
-  headItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
+  headMessageId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
   system: Type.String(),
   messages: Type.Array(AgentApiPromptMessageSchema)
 });
 export type AgentApiMessagesContextResponse = Static<typeof AgentApiMessagesContextResponseSchema>;
+
+const AgentArchiveRequestFields = {
+  workspaceId: Type.String({ minLength: 1 }),
+  sessionId: Type.String({ minLength: 1 }),
+  cursor: Type.Optional(Type.String({ minLength: 1 })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
+};
+
+export const AgentApiArchiveReadRequestSchema = Type.Object(AgentArchiveRequestFields, { additionalProperties: false });
+export type AgentApiArchiveReadRequest = Static<typeof AgentApiArchiveReadRequestSchema>;
+
+export const AgentApiArchiveSearchRequestSchema = Type.Object({
+  ...AgentArchiveRequestFields,
+  query: Type.String({ minLength: 1 }),
+}, { additionalProperties: false });
+export type AgentApiArchiveSearchRequest = Static<typeof AgentApiArchiveSearchRequestSchema>;
+
+export const AgentApiArchiveEntrySchema = Type.Object({
+  partId: Type.String({ minLength: 1 }),
+  messageId: Type.String({ minLength: 1 }),
+  messageDepth: Type.Integer({ minimum: 0 }),
+  partPosition: Type.Integer({ minimum: 0 }),
+  text: Type.String(),
+  excerpt: Type.Optional(Type.String()),
+}, { additionalProperties: false });
+
+export const AgentApiArchivePageResponseSchema = Type.Object({
+  items: Type.Array(AgentApiArchiveEntrySchema),
+  nextCursor: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+}, { additionalProperties: false });
+export type AgentApiArchivePageResponse = Static<typeof AgentApiArchivePageResponseSchema>;

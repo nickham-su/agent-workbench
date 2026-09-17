@@ -7,7 +7,8 @@ import { workspaceRepoDirPath } from "../../../infra/fs/paths.js";
 import { getSettingJson, setSettingJson } from "../../settings/settings.store.js";
 import { insertWorkspaceRepo } from "../../workspaces/workspace.store.js";
 import { insertRepo } from "../../repos/repo.store.js";
-import { createRunRecord } from "../agent.store.js";
+import { createMessageRunRecord } from "../agent-message.store.js";
+import { appendMessage, getMessageSessionHead } from "../agent-message.store.js";
 import { newSortableId } from "../../../utils/ids.js";
 import { createP4Fixture } from "./p4-fixture.helpers.js";
 import { createSession } from "./context-writeback.helpers.js";
@@ -45,6 +46,26 @@ import path from "node:path";
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** 为每个 Run 建立真实的 user Message 触发器，避免已移除的数字 ID 模型。 */
+function appendRunTrigger(fixture: Awaited<ReturnType<typeof createP4Fixture>>, sessionId: string, createdAt: number) {
+  const head = getMessageSessionHead(fixture.db, { workspaceId: fixture.workspaceId, sessionId });
+  assert.ok(head, "run trigger session should exist");
+  const messageId = newSortableId("msg");
+  appendMessage(fixture.db, {
+    id: messageId,
+    workspaceId: fixture.workspaceId,
+    sessionId,
+    expectedHeadMessageId: head.headMessageId,
+    expectedRevision: head.revision,
+    type: "user",
+    status: "completed",
+    originRunId: null,
+    parts: [{ id: newSortableId("part"), position: 0, type: "text", text: "prompt-context trigger" }],
+    createdAt
+  });
+  return messageId;
 }
 
 async function getPromptContextInternal(params: {
@@ -168,6 +189,23 @@ test("agent global prompts 保存选择指令后展开提示词内容配置", as
   }).items;
   assert.equal(getItems.find((item) => item.id === "gp_expand")?.expandOnSelect, true);
   assert.equal(getItems.find((item) => item.id === "gp_disabled")?.expandOnSelect, undefined);
+});
+
+test("agent global prompts 不再将 clear 作为内建保留命令", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t);
+  const res = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/global-prompts",
+    payload: {
+      items: [
+        { id: "global_system_prompt", title: "ignored", prompt: "SYSTEM" },
+        { id: "gp_clear", title: "Clear", prompt: "custom prompt", command: "clear" }
+      ]
+    }
+  });
+  assert.equal(res.statusCode, 200, `clear must no longer be reserved: ${res.body}`);
+  const items = (res.json() as { items: Array<{ id: string; command?: string }> }).items;
+  assert.equal(items.find((item) => item.id === "gp_clear")?.command, "clear");
 });
 
 test("agent global prompts 拒绝非布尔的选择展开配置", async (t: TestContext) => {
@@ -324,11 +362,11 @@ test("agent prompt-context 全局提示词按列表顺序注入(方案A)", async
   });
   assert.equal(agentsRes.statusCode, 200, `update agents failed: ${agentsRes.body}`);
 
-  createRunRecord(fixture.db, {
+  createMessageRunRecord(fixture.db, {
     runId,
     workspaceId: fixture.workspaceId,
     sessionId: session.id,
-    triggerItemId: 1,
+    triggerMessageId: appendRunTrigger(fixture, session.id, createdAt),
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
@@ -408,11 +446,11 @@ test("agent prompt-context 同时存在 global/workspace/agent 时按既定顺�
   });
   assert.equal(agentsRes.statusCode, 200, `update agents failed: ${agentsRes.body}`);
 
-  createRunRecord(fixture.db, {
+  createMessageRunRecord(fixture.db, {
     runId,
     workspaceId: fixture.workspaceId,
     sessionId: session.id,
-    triggerItemId: 1,
+    triggerMessageId: appendRunTrigger(fixture, session.id, createdAt),
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
@@ -474,11 +512,11 @@ test("agent prompt-context 在 workspace 根 AGENTS.md 缺失时忽略", async (
   const runId = newSortableId("run");
   const createdAt = Date.now();
 
-  createRunRecord(fixture.db, {
+  createMessageRunRecord(fixture.db, {
     runId,
     workspaceId: fixture.workspaceId,
     sessionId: session.id,
-    triggerItemId: 1,
+    triggerMessageId: appendRunTrigger(fixture, session.id, createdAt),
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
@@ -554,7 +592,6 @@ test("agent startup seed 会修复脏的 global prompts settings", async () => {
         agentInternalToken: internalToken,
         agentWorkerResponseValidation: "strict",
         agentApiOrigin: "http://127.0.0.1:0",
-        agentStartupRecoveryMode: "recover",
         agentPluginHostEnabled: false,
         agentPluginHostSocketPath: path.join(dataDir, "agent-plugin-host.sock")
       });
@@ -601,11 +638,11 @@ test("agent prompt-context 在 agent prompt 为空且无 workspace/global 时仅
   });
   assert.equal(agentsRes.statusCode, 200, `update agents failed: ${agentsRes.body}`);
 
-  createRunRecord(fixture.db, {
+  createMessageRunRecord(fixture.db, {
     runId,
     workspaceId: fixture.workspaceId,
     sessionId: session.id,
-    triggerItemId: 1,
+    triggerMessageId: appendRunTrigger(fixture, session.id, createdAt),
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
@@ -654,11 +691,11 @@ test("agent prompt-context 对 workspace AGENTS.md 做 32KB 截断并追加标�
     }
   }, Date.now());
 
-  createRunRecord(fixture.db, {
+  createMessageRunRecord(fixture.db, {
     runId,
     workspaceId: fixture.workspaceId,
     sessionId: session.id,
-    triggerItemId: 1,
+    triggerMessageId: appendRunTrigger(fixture, session.id, createdAt),
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
@@ -767,14 +804,13 @@ test("agent prompt-context 注入 skills 摘要并在同 run 缓存静态部分"
     }, Date.now());
     await fs.writeFile(path.join(fixture.workspacePath, "AGENTS.md"), "RULE_V1", "utf8");
 
-    createRunRecord(fixture.db, {
+    createMessageRunRecord(fixture.db, {
       runId,
       workspaceId: fixture.workspaceId,
       sessionId: session.id,
-      triggerItemId: 1,
+      triggerMessageId: appendRunTrigger(fixture, session.id, Date.now()),
       agentId: "default",
       providerId: "ppchat",
-      uiLocale: "en-US",
       modelId: "gpt-5.2",
       status: "running",
       createdAt: Date.now()
@@ -828,14 +864,13 @@ test("agent prompt-context 注入 skills 摘要并在同 run 缓存静态部分"
     assert.equal(second.system.includes("repo-desc-v2"), false, "same run should not see updated repo skill summary");
 
     const runId2 = newSortableId("run");
-    createRunRecord(fixture.db, {
+    createMessageRunRecord(fixture.db, {
       runId: runId2,
       workspaceId: fixture.workspaceId,
       sessionId: session.id,
-      triggerItemId: 1,
+      triggerMessageId: appendRunTrigger(fixture, session.id, Date.now()),
       agentId: "default",
       providerId: "ppchat",
-      uiLocale: "en-US",
       modelId: "gpt-5.2",
       status: "running",
       createdAt: Date.now()
@@ -891,14 +926,13 @@ test("agent prompt-context 对 repo 根 symlink/路径失配安全跳过", async
     }
   }, ts);
 
-  createRunRecord(fixture.db, {
+  createMessageRunRecord(fixture.db, {
     runId,
     workspaceId: fixture.workspaceId,
     sessionId: session.id,
-    triggerItemId: 1,
+    triggerMessageId: appendRunTrigger(fixture, session.id, ts),
     agentId: "default",
     providerId: "ppchat",
-    uiLocale: "en-US",
     modelId: "gpt-5.2",
     status: "running",
     createdAt: ts
@@ -919,14 +953,13 @@ test("agent prompt-context 对 repo 根 symlink/路径失配安全跳过", async
   fixture.db.prepare("update workspace_repos set path = ? where workspace_id = ? and repo_id = ?").run(symlinkPath, fixture.workspaceId, repoId);
 
   const runId2 = newSortableId("run");
-  createRunRecord(fixture.db, {
+  createMessageRunRecord(fixture.db, {
     runId: runId2,
     workspaceId: fixture.workspaceId,
     sessionId: session.id,
-    triggerItemId: 1,
+    triggerMessageId: appendRunTrigger(fixture, session.id, Date.now()),
     agentId: "default",
     providerId: "ppchat",
-    uiLocale: "en-US",
     modelId: "gpt-5.2",
     status: "running",
     createdAt: Date.now()

@@ -1,41 +1,39 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { FastifyBaseLogger } from "fastify";
+import type { AgentCompactSessionRequest, AgentCompactSessionResponse, AgentMessageControlResult, AgentMessageSessionRunState } from "@agent-workbench/shared";
 import { TextDecoder } from "node:util";
 import type {
   AgentUpdateSessionTitleRequest,
-  AgentContextItemRecord,
-  AgentContextItemStatus,
-  AgentContextItemOutput,
-  AgentContextItemsResponse,
-  AgentControlResult,
   AgentForkSessionRequest,
-  AgentClearSessionRequest,
-  AgentCompactSessionRequest,
-  AgentCompactSessionResponse,
   AgentRevertSessionRequest,
   AgentUiLocale,
   AgentSendMessageRequest,
   AgentSendMessageResponse,
   AgentSessionRecord,
-  AgentSessionRunState,
   AgentContextToolName,
   AgentRecentSessionsResponse,
   AgentRecentWorkspacesResponse,
-} from "@agent-workbench/shared";
-import { isValidSkillPathSegment } from "@agent-workbench/shared";
-import { getPromptText, renderPromptTemplateFile } from "@agent-workbench/shared/prompts";
+} from "@agent-workbench/shared/internal-contracts/agent-api-session";
+import { isValidSkillPathSegment } from "@agent-workbench/shared/internal-contracts/agent-api-session";
+import { getPromptText } from "@agent-workbench/shared/prompts";
 import { AgentSubtaskErrorCode } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type {
-  AgentApiCreateContextItemRequest,
-  AgentApiUpdateContextItemRequest,
-  AgentApiCompactContextRequest,
+  AgentApiCompleteAssistantRequest,
+  AgentApiCreateStreamingAssistantRequest,
+  AgentApiFlushAssistantPartsRequest,
+  AgentApiResumeStreamingAssistantRequest,
+  AgentApiReplaceStreamingAssistantRequest,
+  AgentApiCommitCompactionRequest,
   AgentApiSubtaskPreforkPlanRequest,
   AgentApiSubtaskStartRequest,
   AgentApiSubtaskResultRequest,
   AgentApiSubtaskStatusRequest,
   AgentApiRunCompleteRequest,
-  AgentApiRunStateRequest
+  AgentApiUpdateRunNoticeRequest,
+  AgentApiUpdateToolExecutionRequest,
+  AgentApiArchiveReadRequest,
+  AgentApiArchiveSearchRequest,
 } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { HttpError } from "../../app/errors.js";
 
@@ -44,47 +42,28 @@ import { nowMs } from "../../utils/time.js";
 import { newSortableId } from "../../utils/ids.js";
 import { AgentService } from "./agent.service.js";
 import type { LocalAgentRuntimeExecutionPort } from "./agent.runtime-port.js";
-import { ArchiveStartupReconcileApplication } from "./archive/archive-startup-reconcile-application.js";
-import { SqliteArchiveStartupSessionQuery } from "./archive/sqlite-archive-startup-session-query.js";
 import { AgentStartupCoordinator } from "./startup/agent-startup-coordinator.js";
 import { getWorkspace as getWorkspaceRecord } from "../workspaces/workspace.store.js";
-import { listEnabledWorkspaceAgentsInstructions, listEnabledWorkspaceExternalSkillRoots } from "../workspaces/workspace.service.js";
 import {
-  AgentConflictError,
-  appendContextItem,
-  appendContextItemWithRunFence,
-  getContextItemForWorkerUpdate,
-  updateContextItemWithRunFence,
-  createRunRecord,
-  findClientRequestDedup,
-  findSubtaskRunByParentTool,
-  getAgentSession,
-  getContextItemById as getContextItemRecordById,
-  getLatestRunUiLocaleBySession,
-  getLatestRunUiLocaleGlobal,
-  getLatestSessionItemId,
+  listEnabledWorkspaceAgentsInstructions,
+  listEnabledWorkspaceExternalSkillRoots,
+} from "../workspaces/workspace.service.js";
+import {
+  createMessageRunRecord,
+  findMessageClientRequestDedup,
+  insertMessageClientRequestDedup,
   getRunRecord,
-  getRunState as getStoredRunState,
-  getSessionHead,
-  getSessionTranscriptItems,
-  getSessionVisibleItems,
-  insertClientRequestDedup,
+  getMessageSessionById,
+  getMessageRunState,
   getSessionAgentModelOverride,
   listSessionAgentModelOverrides,
   upsertSessionAgentModelOverride,
   deleteSessionAgentModelOverride,
-  listNonTerminalSessionItemIds,
-  listNonTerminalSessionItemIdsByRunId,
-  hasNonTerminalSessionItems,
-  listNonTerminalRunIdsByItemIds,
-  listNonTerminalRunIdsBySession,
-  setRunStateIdle,
-  updateContextItem,
   updateRunRecordStatus,
-  updateAutoAgentSessionTitle,
-  setManualAgentSessionTitle,
-  updateRunState
-} from "./agent.store.js";
+  updateAutoMessageSessionTitle,
+  setManualMessageSessionTitle,
+  AgentStreamingAssistantReplayMismatchError,
+} from "./agent-message.store.js";
 import {
   getAgentGlobalPromptSettings,
   getAgentMcpSettings,
@@ -95,32 +74,50 @@ import {
   getAgentProvidersSettingsInternal,
   listAvailableAgentsForSurface,
   getAgentChannelSenderAllowlistSettings,
-  resolveExecutionProfile
+  resolveExecutionProfile,
 } from "../settings/settings.service.js";
-import { projectToolCallInputForPrompt } from "./prompt/tool-projectors/index.js";
 import { listPluginRuntimeSnapshots } from "../plugins/plugin.service.js";
-import { parseSkillFrontmatter, scanReadableTopLevelSkills } from "./top-level-skill.js";
+import {
+  parseSkillFrontmatter,
+  scanReadableTopLevelSkills,
+} from "./top-level-skill.js";
 import type { AgentRunCompletedEventHub } from "./run-completed-events.js";
 import { getAgentWorkspaceRunContext } from "./agent-run-context.js";
 import { RunLifecycleApplication } from "./lifecycle/run-lifecycle-application.js";
 import { SqliteRunLifecyclePersistence } from "./lifecycle/sqlite-run-lifecycle-persistence.js";
-import { cleanupAgedAgentAttachmentTempFiles, commitAgentAttachmentTempFile, removeAgentAttachmentTempFile } from "./attachments/agent-attachment-storage.js";
-import { agentAttachmentFilePath, agentAttachmentWorkspaceDir, agentAttachmentsRoot, assertAgentAttachmentId } from "./attachments/agent-attachment-paths.js";
-import { getAuthorizedAttachmentById } from "./agent.store.js";
-import { RunPromptStaticCache, RunPromptStaticCacheInvalidator } from "./prompt/run-prompt-static-cache.js";
-import { PromptStaticAssembler, type RunPromptStatic } from "./prompt/prompt-static-assembler.js";
+import { SessionRuntimeHandoffCoordinator } from "./lifecycle/session-runtime-handoff-coordinator.js";
+import { workspaceDeletingFence } from "./lifecycle/workspace-deleting-fence.js";
+import {
+  cleanupAgedAgentAttachmentTempFiles,
+  commitAgentAttachmentTempFile,
+  removeAgentAttachmentTempFile,
+  removeAgentAttachmentFinalFile,
+  resolveSafeAgentAttachmentContentPath,
+} from "./attachments/agent-attachment-storage.js";
+import {
+  agentAttachmentFilePath,
+  agentAttachmentWorkspaceDir,
+  agentAttachmentsRoot,
+  assertAgentAttachmentId,
+} from "./attachments/agent-attachment-paths.js";
+import {
+  RunPromptStaticCache,
+  RunPromptStaticCacheInvalidator,
+} from "./prompt/run-prompt-static-cache.js";
+import {
+  PromptStaticAssembler,
+  type RunPromptStatic,
+} from "./prompt/prompt-static-assembler.js";
 import { ExecutionProfileResolver } from "./read-side/execution-profile-resolver.js";
 import { MessagesContextProjector } from "./read-side/messages-context-projector.js";
 import { PromptContextProjector } from "./read-side/prompt-context-projector.js";
+import { RuntimeTranscriptProjector } from "./read-side/runtime-transcript-projector.js";
+import { SqliteMessageQuery } from "./read-side/sqlite-message-query.js";
 import { ReadSideApplication } from "./read-side/read-side-application.js";
 import { getWorkspaceEnabledAgentIds } from "../workspaces/workspace.service.js";
-import { ContextWritebackApplication } from "./writeback/context-writeback-application.js";
 import { UiArtifactCapability } from "./artifact/ui-artifact-capability.js";
 import { SubtaskApplication } from "./subtask/subtask-application.js";
-import {
-  isSubtaskParentToolUniqueConstraintError,
-  SqliteSubtaskLineagePersistence
-} from "./subtask/sqlite-subtask-lineage-persistence.js";
+import { SqliteSubtaskLineagePersistence } from "./subtask/sqlite-subtask-lineage-persistence.js";
 import { SqliteSubtaskMaintenancePersistence } from "./subtask/sqlite-subtask-maintenance-persistence.js";
 import { SqliteSubtaskRunQuery } from "./subtask/sqlite-subtask-run-query.js";
 import type {
@@ -132,24 +129,34 @@ import { SessionInteractionApplication } from "./session/session-interaction-app
 import { toAutomaticSessionTitle } from "./session/session-title.js";
 import { SqliteSessionInteractionStore } from "./session/sqlite-session-interaction-store.js";
 import { SessionAgentModelApplication } from "./session/session-agent-model-application.js";
-import { ContextQueryApplication } from "./query/context-query-application.js";
+import {
+  appendStreamingAssistant,
+  commitCompactionMessage,
+  commitCompactionMessageWithRunFence,
+  getMessage,
+  completeAssistantWithExecutions,
+  resumeStreamingAssistant,
+  flushStreamingParts,
+  AgentMessageConflictError,
+  replaceStreamingAssistant,
+  getMessageRunState as getStoredMessageRunState,
+  getMessageSession,
+  getMessageSessionHead,
+  startMessageRun,
+  updateMessageRunNotice,
+  updateToolExecution,
+} from "./agent-message.store.js";
+import { archiveRead, archiveSearch } from "./archive/agent-archive-store.js";
 import { PeripheralAgentQueryApplication } from "./query/peripheral-agent-query-application.js";
-import { SqliteContextQueryStore, SqlitePeripheralAgentQueryStore } from "./query/sqlite-query-stores.js";
-import { ArchiveStorage } from "./archive/archive-storage.js";
-import { SqliteCompactionArchivePersistence } from "./archive/sqlite-compaction-archive-persistence.js";
-import { CompactionArchiveApplication } from "./compaction/compaction-archive-application.js";
+import {
+  SqlitePeripheralAgentQueryStore,
+} from "./query/sqlite-query-stores.js";
 import { ManualCompactionApplication } from "./compaction/manual-compaction-application.js";
-import { archiveFaultHookFromLegacyTestFaults } from "./archive/archive-fault-hook.js";
 import type { ManualCompactionRuntime } from "./compaction/manual-compaction-ports.js";
-import { ArchiveReadApplication } from "./archive/archive-read-application.js";
-import { ArchiveReadStorage } from "./archive/archive-read-storage.js";
-import { CompactionSnippetCache } from "./archive/compaction-snippet-cache.js";
 
-function conflictToHttpError(err: AgentConflictError): HttpError {
-  return new HttpError(409, "session head conflict", `conflict_head:${String(err.currentHeadItemId ?? "null")}`);
+function conflictToHttpError(err: AgentMessageConflictError): HttpError {
+  return new HttpError(409, "session head conflict", err.code);
 }
-
-export { isSubtaskParentToolUniqueConstraintError };
 
 function toolArgsSchema(toolName: AgentContextToolName) {
   if (toolName === "bash") {
@@ -164,9 +171,10 @@ function toolArgsSchema(toolName: AgentContextToolName) {
           type: "integer",
           minimum: 1,
           default: 120,
-          description: "Timeout in seconds (integer). Default is 120. Note: the unit is seconds, not milliseconds."
-        }
-      }
+          description:
+            "Timeout in seconds (integer). Default is 120. Note: the unit is seconds, not milliseconds.",
+        },
+      },
     };
   }
   if (toolName === "read") {
@@ -182,9 +190,32 @@ function toolArgsSchema(toolName: AgentContextToolName) {
           minimum: 1,
           maximum: 2000,
           default: 500,
-          description: "Maximum lines (file) or entries (directory) to return. Default: 500. Maximum: 2000."
-        }
-      }
+          description:
+            "Maximum lines (file) or entries (directory) to return. Default: 500. Maximum: 2000.",
+        },
+      },
+    };
+  }
+  if (toolName === "archive_read") {
+    return {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        cursor: { type: "string", minLength: 1 },
+        limit: { type: "integer", minimum: 1, maximum: 200, default: 50 },
+      },
+    };
+  }
+  if (toolName === "archive_search") {
+    return {
+      type: "object",
+      required: ["query"],
+      additionalProperties: false,
+      properties: {
+        query: { type: "string", minLength: 3 },
+        cursor: { type: "string", minLength: 1 },
+        limit: { type: "integer", minimum: 1, maximum: 200, default: 50 },
+      },
     };
   }
   if (toolName === "apply_patch") {
@@ -201,10 +232,10 @@ function toolArgsSchema(toolName: AgentContextToolName) {
             "Supported: modify/add/delete text files, multi-file diffs, multiple @@ hunks in one file, and rename/move operations (including rename-only).",
             "Not supported: binary patches (GIT binary patch), submodules, copy from/to, or other advanced metadata.",
             "Constraints: text only; paths must stay inside the current directory and symlink/out-of-workspace paths are rejected; new files must not overwrite existing paths.",
-            "Failure hint: if the patch fails to apply due to context mismatch, regenerate the diff from the current directory or include more context lines (for example, git diff -U5)."
-          ].join("\n")
-        }
-      }
+            "Failure hint: if the patch fails to apply due to context mismatch, regenerate the diff from the current directory or include more context lines (for example, git diff -U5).",
+          ].join("\n"),
+        },
+      },
     };
   }
   if (toolName === "todolist") {
@@ -224,12 +255,12 @@ function toolArgsSchema(toolName: AgentContextToolName) {
               content: { type: "string", minLength: 1, pattern: "\\S" },
               status: {
                 type: "string",
-                enum: ["pending", "in_progress", "completed", "cancelled"]
-              }
-            }
-          }
-        }
-      }
+                enum: ["pending", "in_progress", "completed", "cancelled"],
+              },
+            },
+          },
+        },
+      },
     };
   }
   if (toolName === "scratchpad") {
@@ -241,36 +272,10 @@ function toolArgsSchema(toolName: AgentContextToolName) {
         content: {
           type: "string",
           maxLength: 200,
-          description: "A short scratchpad entry to record. Suggested <= 200 characters."
-        }
-      }
-    };
-  }
-  if (toolName === "archive_search") {
-    return {
-      type: "object",
-      required: ["query"],
-      additionalProperties: false,
-      properties: {
-        query: { type: "string", minLength: 1 },
-        beforePos: { type: "integer", minimum: 2 },
-        maxHits: { type: "integer", minimum: 1, maximum: 100 },
-        maxChars: { type: "integer", minimum: 1000, maximum: 10000 },
-        snippet: { type: "boolean" },
-        regex: { type: "boolean" }
-      }
-    };
-  }
-  if (toolName === "archive_read") {
-    return {
-      type: "object",
-      required: [],
-      additionalProperties: false,
-      properties: {
-        beforePos: { type: "integer", minimum: 2 },
-        lineCount: { type: "integer", minimum: 1, maximum: 200 },
-        maxChars: { type: "integer", minimum: 1000, maximum: 10000 }
-      }
+          description:
+            "A short scratchpad entry to record. Suggested <= 200 characters.",
+        },
+      },
     };
   }
   if (toolName === "visual_analyze") {
@@ -282,12 +287,12 @@ function toolArgsSchema(toolName: AgentContextToolName) {
         paths: {
           type: "array",
           minItems: 1,
-          items: { type: "string", minLength: 1 }
+          items: { type: "string", minLength: 1 },
         },
         prompt: {
-          type: "string"
-        }
-      }
+          type: "string",
+        },
+      },
     };
   }
   if (toolName === "skill") {
@@ -298,13 +303,15 @@ function toolArgsSchema(toolName: AgentContextToolName) {
       properties: {
         skillId: {
           type: "string",
-          description: "Stable logical skill identifier shown in the available skills list, such as builtin/skill-authoring."
+          description:
+            "Stable logical skill identifier shown in the available skills list, such as builtin/skill-authoring.",
         },
         filePath: {
           type: "string",
-          description: "Optional file path relative to the skill root. Omit filePath, pass an empty string or a string containing only spaces/tabs, or pass exactly SKILL.md to read root instructions and available file paths."
-        }
-      }
+          description:
+            "Optional file path relative to the skill root. Omit filePath, pass an empty string or a string containing only spaces/tabs, or pass exactly SKILL.md to read root instructions and available file paths.",
+        },
+      },
     };
   }
 
@@ -317,29 +324,34 @@ function toolArgsSchema(toolName: AgentContextToolName) {
         description: {
           type: "string",
           minLength: 1,
-          description: "Briefly describe the task goal in 50 characters or fewer. Longer values will be truncated to 50 characters."
+          description:
+            "Briefly describe the task goal in 50 characters or fewer. Longer values will be truncated to 50 characters.",
         },
         prompt: {
           type: "string",
           minLength: 1,
-          description: "Task instructions for the subtask. Clearly define the goal, scope or constraints, and deliverable boundary so the assignee knows exactly what to do and what not to do."
+          description:
+            "Task instructions for the subtask. Clearly define the goal, scope or constraints, and deliverable boundary so the assignee knows exactly what to do and what not to do.",
         },
         agentId: {
           type: "string",
           minLength: 1,
-          description: "The agent ID of the assignee role template, not a specific assignee instance. The same agentId may be reused across multiple subtasks. It defines the assignee's capabilities, working style, and deliverable requirements."
+          description:
+            "The agent ID of the assignee role template, not a specific assignee instance. The same agentId may be reused across multiple subtasks. It defines the assignee's capabilities, working style, and deliverable requirements.",
         },
         session: {
-          description: "Controls whether the subtask receives background context or reuses prior session memory for the assignee role.",
+          description:
+            "Controls whether the subtask receives background context or reuses prior session memory for the assignee role.",
           oneOf: [
             {
               type: "object",
               required: ["mode"],
               additionalProperties: false,
               properties: {
-                mode: { const: "new" }
+                mode: { const: "new" },
               },
-              description: "new: start a brand-new task with no parent-session or prior subtask background; give instructions only through the prompt."
+              description:
+                "new: start a brand-new task with no parent-session or prior subtask background; give instructions only through the prompt.",
             },
             {
               type: "object",
@@ -350,23 +362,26 @@ function toolArgsSchema(toolName: AgentContextToolName) {
                 sessionId: {
                   type: "string",
                   minLength: 1,
-                  description: "The existing subtask session ID whose content and memory should be resumed."
-                }
+                  description:
+                    "The existing subtask session ID whose content and memory should be resumed.",
+                },
               },
-              description: "existing: continue a specified subtask session to reuse its content and memory. Best for follow-up research, post-fix review, and other work where repeating context gathering would be wasteful."
+              description:
+                "existing: continue a specified subtask session to reuse its content and memory. Best for follow-up research, post-fix review, and other work where repeating context gathering would be wasteful.",
             },
             {
               type: "object",
               required: ["mode"],
               additionalProperties: false,
               properties: {
-                mode: { const: "fork" }
+                mode: { const: "fork" },
               },
-              description: "fork: provide the subtask with the full current parent-session history as background context. Use this when the user's intent must be passed through without loss."
-            }
-          ]
-        }
-      }
+              description:
+                "fork: provide the subtask with the full current parent-session history as background context. Use this when the user's intent must be passed through without loss.",
+            },
+          ],
+        },
+      },
     };
   }
   if (toolName === "write") {
@@ -376,8 +391,8 @@ function toolArgsSchema(toolName: AgentContextToolName) {
       additionalProperties: false,
       properties: {
         filePath: { type: "string", minLength: 1 },
-        content: { type: "string" }
-      }
+        content: { type: "string" },
+      },
     };
   }
   return {
@@ -386,12 +401,14 @@ function toolArgsSchema(toolName: AgentContextToolName) {
     additionalProperties: false,
     properties: {
       filePath: { type: "string", minLength: 1 },
-      content: { type: "string" }
-    }
+      content: { type: "string" },
+    },
   };
 }
 
-function buildSubtaskToolDescription(agentItems: Array<{ id: string; name: string; summary: string }>) {
+function buildSubtaskToolDescription(
+  agentItems: Array<{ id: string; name: string; summary: string }>,
+) {
   const header = [
     "Run the task in a subtask session and bring the result back to the parent session.",
     "Recommended use cases:",
@@ -413,14 +430,14 @@ function buildSubtaskToolDescription(agentItems: Array<{ id: string; name: strin
     "- fork: send the full parent-session context to the subtask when the prompt alone cannot capture the user's intent or constraints.",
     "- existing: resume an earlier subtask session to reuse memory, continue unfinished work, or avoid repeating research and review setup.",
     "",
-    "Result: on success, returns subtaskSessionId and the subtask result text."
+    "Result: on success, returns subtaskSessionId and the subtask result text.",
   ];
 
   const normalizedAgents = agentItems
     .map((item) => ({
       id: String(item.id || "").trim(),
       name: String(item.name || "").trim(),
-      summary: String(item.summary || "").trim()
+      summary: String(item.summary || "").trim(),
     }))
     .filter((item) => item.id.length > 0 && item.name.length > 0);
 
@@ -429,12 +446,17 @@ function buildSubtaskToolDescription(agentItems: Array<{ id: string; name: strin
   }
 
   const lines = normalizedAgents.map((item) =>
-    item.summary ? `- ${item.id}: ${item.name} - ${item.summary}` : `- ${item.id}: ${item.name}`
+    item.summary
+      ? `- ${item.id}: ${item.name} - ${item.summary}`
+      : `- ${item.id}: ${item.name}`,
   );
   return `${header.join("\n")}\n\nAvailable agents:\n${lines.join("\n")}`;
 }
 
-function toolDescription(toolName: AgentContextToolName, options?: { subtaskDescription?: string }) {
+function toolDescription(
+  toolName: AgentContextToolName,
+  options?: { subtaskDescription?: string },
+) {
   if (toolName === "bash") {
     return [
       "Run a bash command and return stdout/stderr.",
@@ -450,9 +472,9 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
       "- Prefer operating inside the current directory, and prefer relative paths when possible.",
       "",
       "Examples:",
-      "- {\"command\":\"pwd\"}",
-      "- {\"command\":\"pwd && ls -la\"}",
-      "- {\"command\":\"rg -n \\\"TODO\\\" .\",\"workdir\":\"apps/api\"}"
+      '- {"command":"pwd"}',
+      '- {"command":"pwd && ls -la"}',
+      '- {"command":"rg -n \\"TODO\\" .","workdir":"apps/api"}',
     ].join("\n");
   }
   if (toolName === "read") {
@@ -461,7 +483,21 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
       "When reading a file, offset is the starting line number. When reading a directory, offset is the starting entry number. Both are 1-based.",
       "When continuing to read the same file or directory, use the offset explicitly returned by the previous read result instead of guessing the next offset yourself.",
       "If the result says End of file, the file has no more content to read. Do not continue paging the same file unless it changes.",
-      "If the requested offset exceeds the file length, the tool returns an end-of-file notice instead of failing."
+      "If the requested offset exceeds the file length, the tool returns an end-of-file notice instead of failing.",
+    ].join(" ");
+  }
+  if (toolName === "archive_read") {
+    return [
+      "Read completed high-value text outside the current compacted context.",
+      "Only this Session's archived ancestor range is returned, ordered oldest to newest.",
+      "Use cursor only as returned by the previous call; never construct one.",
+    ].join(" ");
+  }
+  if (toolName === "archive_search") {
+    return [
+      "Search completed high-value text outside the current compacted context.",
+      "query requires at least three characters; results are newest to oldest.",
+      "Use cursor only as returned by the previous call; never construct one.",
     ].join(" ");
   }
   if (toolName === "skill") {
@@ -470,7 +506,7 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
       "Input: skillId (string) is one of the identifiers in the available skills list, using builtin/... or workspace/... or repo/... prefixes.",
       "filePath is optional and is relative to the selected skill root.",
       "Omit filePath, pass an empty string or a string containing only spaces/tabs, or pass exactly SKILL.md to read root instructions and a flat list of available file paths.",
-      "Any other valid filePath reads that text file with the Worker text reader's normalized content."
+      "Any other valid filePath reads that text file with the Worker text reader's normalized content.",
     ].join(" ");
   }
   if (toolName === "visual_analyze") {
@@ -479,7 +515,7 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
       "Supported file types: PNG, JPG/JPEG, WEBP, GIF, PDF.",
       "Accepts multiple files and interprets them in input order.",
       "Input paths must be relative paths inside the workspace.",
-      "If model/provider/SDK/service does not support the given files, the tool returns an error result."
+      "If model/provider/SDK/service does not support the given files, the tool returns an error result.",
     ].join(" ");
   }
 
@@ -498,84 +534,84 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
       "- rename/move: rename from / rename to (supports rename-only and rename+modify)",
       "",
       "Constraints:",
-       "- Text only; binary patches (GIT binary patch) and submodules are not supported.",
-       "- Paths must stay inside the current directory; symlink and out-of-workspace paths are rejected.",
-       "- New files must not overwrite existing paths.",
-       "- To reduce the risk of a batch failure caused by syntax errors or context mismatches, prefer splitting unrelated edits into multiple smaller apply_patch calls. If those calls are independent, they may be executed in parallel. If changes are tightly coupled or need atomicity, keep them in a single patch.",
-       "",
-       "Example (minimal update):",
-       "diff --git a/src/foo.txt b/src/foo.txt",
-       "index 1111111..2222222 100644",
-       "--- a/src/foo.txt",
-       "+++ b/src/foo.txt",
-       "@@ -1,1 +1,1 @@",
-       "-old",
-       "+new",
-       "",
-       "Example (multiple hunks in one file):",
-       "diff --git a/src/foo.txt b/src/foo.txt",
-       "index 1111111..3333333 100644",
-       "--- a/src/foo.txt",
-       "+++ b/src/foo.txt",
-       "@@ -1,2 +1,2 @@",
-       "-alpha",
-       "+alpha-1",
-       " beta",
-       "@@ -5,2 +5,2 @@",
-       "-gamma",
-       "+gamma-1",
-       " delta",
-       "",
-       "Example (add file):",
-       "diff --git a/src/new-file.txt b/src/new-file.txt",
-       "new file mode 100644",
-       "--- /dev/null",
-       "+++ b/src/new-file.txt",
-       "@@ -0,0 +1,2 @@",
-       "+hello",
-       "+world",
-       "",
-       "Example (multi-file diff):",
-       "diff --git a/src/a.txt b/src/a.txt",
-       "index 1111111..2222222 100644",
-       "--- a/src/a.txt",
-       "+++ b/src/a.txt",
-       "@@ -1,1 +1,1 @@",
-       "-old-a",
-       "+new-a",
-       "diff --git a/src/b.txt b/src/b.txt",
-       "index 3333333..4444444 100644",
-       "--- a/src/b.txt",
-       "+++ b/src/b.txt",
-       "@@ -1,1 +1,1 @@",
-       "-old-b",
-       "+new-b",
-       "",
-       "Example (rename/move):",
-       "diff --git a/src/old-name.txt b/src/new-name.txt",
-       "similarity index 100%",
-       "rename from src/old-name.txt",
-       "rename to src/new-name.txt"
-     ].join("\n");
-    }
-    if (toolName === "todolist") {
-     return [
-       "Use this management tool to maintain a task list and execution progress. It is shown to the user and also helps enforce planned execution.",
-       "",
-        "Quick self-check (skip todolist if any condition is met):",
-        "- If your planned work has 3 steps or fewer; or",
-        "- If you expect to need 10 tool calls or fewer to complete the request;",
-        "you may skip todolist and proceed directly.",
-       "Otherwise, for longer, more complex, or uncertain work, you must use todolist: first present the task list, then begin execution.",
-        "",
-        "Usage rules:",
-       "- Express the overall objective with goal; goal is required and states what the current task list is serving.",
-       "- Keep goal short; 50 characters or fewer is recommended. Longer values may be truncated at runtime.",
-       "- Submit the full todos array on every call; the semantics are full replacement, not an incremental patch.",
-       "- If goal or the task list changes, submit the full goal + todos as the latest state.",
-       "- Todos are ordered by priority from top to bottom: plan first, then execute, and prioritize earlier items.",
-       "- Allowed task statuses are: pending | in_progress | completed | cancelled.",
-       "- Multiple in_progress items are allowed, but keep the number of active tasks realistic and manageable.",
+      "- Text only; binary patches (GIT binary patch) and submodules are not supported.",
+      "- Paths must stay inside the current directory; symlink and out-of-workspace paths are rejected.",
+      "- New files must not overwrite existing paths.",
+      "- To reduce the risk of a batch failure caused by syntax errors or context mismatches, prefer splitting unrelated edits into multiple smaller apply_patch calls. If those calls are independent, they may be executed in parallel. If changes are tightly coupled or need atomicity, keep them in a single patch.",
+      "",
+      "Example (minimal update):",
+      "diff --git a/src/foo.txt b/src/foo.txt",
+      "index 1111111..2222222 100644",
+      "--- a/src/foo.txt",
+      "+++ b/src/foo.txt",
+      "@@ -1,1 +1,1 @@",
+      "-old",
+      "+new",
+      "",
+      "Example (multiple hunks in one file):",
+      "diff --git a/src/foo.txt b/src/foo.txt",
+      "index 1111111..3333333 100644",
+      "--- a/src/foo.txt",
+      "+++ b/src/foo.txt",
+      "@@ -1,2 +1,2 @@",
+      "-alpha",
+      "+alpha-1",
+      " beta",
+      "@@ -5,2 +5,2 @@",
+      "-gamma",
+      "+gamma-1",
+      " delta",
+      "",
+      "Example (add file):",
+      "diff --git a/src/new-file.txt b/src/new-file.txt",
+      "new file mode 100644",
+      "--- /dev/null",
+      "+++ b/src/new-file.txt",
+      "@@ -0,0 +1,2 @@",
+      "+hello",
+      "+world",
+      "",
+      "Example (multi-file diff):",
+      "diff --git a/src/a.txt b/src/a.txt",
+      "index 1111111..2222222 100644",
+      "--- a/src/a.txt",
+      "+++ b/src/a.txt",
+      "@@ -1,1 +1,1 @@",
+      "-old-a",
+      "+new-a",
+      "diff --git a/src/b.txt b/src/b.txt",
+      "index 3333333..4444444 100644",
+      "--- a/src/b.txt",
+      "+++ b/src/b.txt",
+      "@@ -1,1 +1,1 @@",
+      "-old-b",
+      "+new-b",
+      "",
+      "Example (rename/move):",
+      "diff --git a/src/old-name.txt b/src/new-name.txt",
+      "similarity index 100%",
+      "rename from src/old-name.txt",
+      "rename to src/new-name.txt",
+    ].join("\n");
+  }
+  if (toolName === "todolist") {
+    return [
+      "Use this management tool to maintain a task list and execution progress. It is shown to the user and also helps enforce planned execution.",
+      "",
+      "Quick self-check (skip todolist if any condition is met):",
+      "- If your planned work has 3 steps or fewer; or",
+      "- If you expect to need 10 tool calls or fewer to complete the request;",
+      "you may skip todolist and proceed directly.",
+      "Otherwise, for longer, more complex, or uncertain work, you must use todolist: first present the task list, then begin execution.",
+      "",
+      "Usage rules:",
+      "- Express the overall objective with goal; goal is required and states what the current task list is serving.",
+      "- Keep goal short; 50 characters or fewer is recommended. Longer values may be truncated at runtime.",
+      "- Submit the full todos array on every call; the semantics are full replacement, not an incremental patch.",
+      "- If goal or the task list changes, submit the full goal + todos as the latest state.",
+      "- Todos are ordered by priority from top to bottom: plan first, then execute, and prioritize earlier items.",
+      "- Allowed task statuses are: pending | in_progress | completed | cancelled.",
+      "- Multiple in_progress items are allowed, but keep the number of active tasks realistic and manageable.",
       "- Each todo must include:",
       "  - content: a non-empty string (it must remain non-empty after trim)",
       "  - status: one of the allowed enum values above",
@@ -584,37 +620,27 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
       "  - Completing a task (-> completed)",
       "  - Cancelling / no longer needing a task (-> cancelled)",
       "  - Discovering omissions, splitting, merging, rolling back, or adding tasks (structural changes also require an update)",
-       "- Goal: keep the user seeing a clear, trustworthy, real-time progress view, and enforce traceable, priority-driven execution instead of unplanned expansion.",
-        "",
-        "Example input:",
-        "{\"goal\":\"Complete the todolist goal enhancement\",\"todos\":[{\"content\":\"Review requirements and constraints\",\"status\":\"completed\"},{\"content\":\"Implement core logic\",\"status\":\"in_progress\"},{\"content\":\"Add tests and verification\",\"status\":\"pending\"}]}"
-      ].join("\n");
-    }
-    if (toolName === "scratchpad") {
-      return [
-        "Record a short scratchpad entry into the runtime session state as persistent working memory.",
-        "",
-        "Arguments:",
-        "- content: Required string. Suggested <= 200 characters.",
-        "",
-        "Example input:",
-        "{\"content\":\"Plan: read agent.service.ts to find tool registry\"}"
-      ].join("\n");
-    }
-  if (toolName === "archive_search") {
+      "- Goal: keep the user seeing a clear, trustworthy, real-time progress view, and enforce traceable, priority-driven execution instead of unplanned expansion.",
+      "",
+      "Example input:",
+      '{"goal":"Complete the todolist goal enhancement","todos":[{"content":"Review requirements and constraints","status":"completed"},{"content":"Implement core logic","status":"in_progress"},{"content":"Add tests and verification","status":"pending"}]}',
+    ].join("\n");
+  }
+  if (toolName === "scratchpad") {
+    return [
+      "Record a short scratchpad entry into the runtime session state as persistent working memory.",
+      "",
+      "Arguments:",
+      "- content: Required string. Suggested <= 200 characters.",
+      "",
+      "Example input:",
+      '{"content":"Plan: read agent.service.ts to find tool registry"}',
+    ].join("\n");
+  }
+  if (toolName === "subtask")
     return (
-      "Search the current session archive log for keywords and return plain-text lines sorted from oldest to newest, each prefixed with pos." +
-      " By default, full lines are returned; if snippet=true, matched windows are returned instead." +
-      " Use beforePos to continue reading older hits." +
-      " Hint: you can also search archive metadata fields directly, such as kind/status/tool/item/ts." +
-      " Example (full lines, find the latest 5 user or assistant messages): {\"query\":\"kind=(user|assistant)\",\"regex\":true,\"maxHits\":5}" +
-      " Example (too many hits, limit first and then page): {\"query\":\"timeout\",\"snippet\":true,\"maxHits\":10,\"maxChars\":3000} Then page with beforePos=<pos>."
+      options?.subtaskDescription || "Execute a task in a subtask session."
     );
-  }
-  if (toolName === "archive_read") {
-    return "Read the most recent lines from the archive log and return plain-text lines sorted from oldest to newest, each prefixed with pos. Use beforePos to restrict the read to older content only.";
-  }
-  if (toolName === "subtask") return options?.subtaskDescription || "Execute a task in a subtask session.";
   if (toolName === "write") {
     return [
       "Write and fully overwrite a workspace-relative file.",
@@ -625,87 +651,11 @@ function toolDescription(toolName: AgentContextToolName, options?: { subtaskDesc
       "",
       "The content field must contain the complete intended file text.",
       "contentBytes, contentPreview, and contentTruncated are not valid write arguments.",
-      "For localized changes to an existing file, prefer apply_patch."
+      "For localized changes to an existing file, prefer apply_patch.",
     ].join("\n");
   }
   if (toolName.startsWith("mcp_")) return `Call MCP tool ${toolName}`;
   return "Write and fully overwrite a file inside the current directory. Use this as a deterministic fallback when you need to rewrite the whole file or when patch matching is unstable.";
-}
-
-function stringifyToolResult(raw: unknown) {
-  if (typeof raw === "string") return raw;
-  try {
-    const serialized = JSON.stringify(raw, null, 2);
-    if (typeof serialized === "string") return serialized;
-    return "";
-  } catch {
-    return raw == null ? "" : String(raw);
-  }
-}
-
-function buildToolText(params: {
-  toolName: string;
-  status: "running" | "completed" | "failed" | "cancelled";
-  headers?: Array<[string, string | undefined]>;
-  body?: string;
-}) {
-  const lines: string[] = [`tool: ${params.toolName}`, `status: ${params.status}`];
-  for (const [key, value] of params.headers ?? []) {
-    if (value == null || !String(value).trim()) continue;
-    lines.push(`${key}: ${String(value).trim()}`);
-  }
-  lines.push("");
-  const body = typeof params.body === "string" ? params.body : "";
-  if (body) lines.push(body);
-  return lines.join("\n");
-}
-
-function parseSubtaskSessionIdFromToolText(text: unknown) {
-  if (typeof text !== "string") return "";
-  const match = text.match(/(?:^|\n)subtask_session_id:\s*([^\s]+)/);
-  return match ? String(match[1] || "").trim() : "";
-}
-
-function toTerminalSubtaskCancelledOutput(output: AgentContextItemRecord["output"]) {
-  if (!output || output.type !== "tool" || output.toolName !== "subtask") return output;
-
-  const resultObj = output.result && typeof output.result === "object" ? (output.result as Record<string, unknown>) : null;
-  const fromResult = typeof resultObj?.subtaskSessionId === "string" ? resultObj.subtaskSessionId.trim() : "";
-  const fromText = parseSubtaskSessionIdFromToolText((output as { text?: unknown }).text);
-  const subtaskSessionId = fromResult || fromText;
-
-  const body = subtaskSessionId
-    ? `Subtask was cancelled. To continue it later, call subtask with session: { mode: "existing", sessionId: "${subtaskSessionId}" }.`
-    : "Subtask was cancelled.";
-
-  const nextResult = resultObj
-    ? {
-        ...resultObj,
-        ...(subtaskSessionId && !fromResult ? { subtaskSessionId } : {})
-      }
-    : output.result;
-
-  return {
-    ...output,
-    text: buildToolText({
-      toolName: "subtask",
-      status: "cancelled",
-      headers: [["subtask_session_id", subtaskSessionId || undefined]],
-      body
-    }),
-    ...(nextResult !== output.result ? { result: nextResult } : {})
-  } as AgentContextItemRecord["output"];
-}
-
-function toTerminalCancelledOutput(output: AgentContextItemRecord["output"]) {
-  // cancelSession: 只在终态收尾时做最小必要的输出规整。
-  // - subtask: 明确 cancelled，并保留 subtask_session_id + 复用提示
-  return toTerminalSubtaskCancelledOutput(output);
-}
-
-function resolveToolOutputText(output: { text?: unknown; result?: unknown }) {
-  if (typeof output.text === "string") return output.text;
-  return stringifyToolResult(output.result);
 }
 
 function normalizeAgentUiLocale(value: unknown): AgentUiLocale | null {
@@ -714,7 +664,9 @@ function normalizeAgentUiLocale(value: unknown): AgentUiLocale | null {
   return null;
 }
 
-function buildOutputFormatInstruction(input: { uiLocale: AgentUiLocale | null }) {
+function buildOutputFormatInstruction(input: {
+  uiLocale: AgentUiLocale | null;
+}) {
   if (input.uiLocale === "zh-CN") {
     return getPromptText("agent/output-format-instruction.zh-CN.txt");
   }
@@ -743,7 +695,9 @@ function buildRuntimeInstruction(input: { uiLocale: AgentUiLocale | null }) {
     lines.push(...group);
   };
 
-  const languageInstruction = buildLanguageInstruction({ uiLocale: input.uiLocale });
+  const languageInstruction = buildLanguageInstruction({
+    uiLocale: input.uiLocale,
+  });
   if (languageInstruction) pushGroup(languageInstruction.split("\n"));
   return lines.join("\n");
 }
@@ -753,58 +707,26 @@ function normalizeTodolistGoal(value: unknown) {
   return toAutomaticSessionTitle(value, "");
 }
 
-function buildClearSummaryText(input: { uiLocale: AgentUiLocale | null; reason?: string }) {
-  const uiLocale = normalizeAgentUiLocale(input.uiLocale);
-  const rawReason = typeof input.reason === "string" ? input.reason.trim() : "";
-  const normalizedReason = rawReason.length > 200 ? `${rawReason.slice(0, 200)}...` : rawReason;
-  if (uiLocale !== "zh-CN") {
-    if (!normalizedReason) {
-      return getPromptText("agent/clear-summary.en-US.txt");
-    }
-    return renderPromptTemplateFile("agent/clear-summary-with-reason.en-US.tmpl.txt", { reason: normalizedReason });
-  }
-
-  if (!normalizedReason) {
-    return getPromptText("agent/clear-summary.zh-CN.txt");
-  }
-  return renderPromptTemplateFile("agent/clear-summary-with-reason.zh-CN.tmpl.txt", { reason: normalizedReason });
-}
-
-const NON_TERMINAL_ITEM_STATUS = new Set<AgentContextItemStatus>([
-  "streaming",
-  "queued",
-  "running",
-]);
-
-const TERMINAL_TOOL_ITEM_STATUS = new Set<AgentContextItemStatus>([
+const TERMINAL_RUN_RECORD_STATUS = new Set([
   "completed",
   "failed",
-  "cancelled"
-]);
-const TERMINAL_RUN_RECORD_STATUS = new Set(["completed", "failed", "cancelled"] as const);
+  "cancelled",
+] as const);
 
-const WORKSPACE_AGENTS_MAX_BYTES = 32 * 1024;
-const ARCHIVE_FILE_NAME_WIDTH = 8;
-const ARCHIVE_FILE_LINE_LIMIT = 100;
-const ARCHIVE_SEARCH_MAX_HITS_DEFAULT = 10;
 const BUILTIN_SKILLS_ROOT = "skills";
-const ARCHIVE_SEARCH_MAX_HITS_MAX = 100;
-const ARCHIVE_MAX_CHARS_DEFAULT = 8_000;
-const ARCHIVE_MAX_CHARS_MIN = 1_000;
-const ARCHIVE_MAX_CHARS_MAX = 10_000;
-const ARCHIVE_SEARCH_SNIPPET_CTX_CHARS = 40;
-const ARCHIVE_SEARCH_SNIPPET_MERGE_GAP_CHARS = 12;
-const ARCHIVE_SEARCH_SNIPPET_MAX_WINDOWS_PER_LINE = 5;
-const ARCHIVE_SEARCH_SNIPPET_FALLBACK_CHARS = 100;
-const ARCHIVE_READ_LINE_COUNT_DEFAULT = 40;
-const ARCHIVE_READ_LINE_COUNT_MAX = 200;
-const ARCHIVE_FILE_NAME_RE = /^\d{8}\.log$/;
-const ARCHIVE_RESULT_TRUNCATED_MARKER = "[超过最大字符数限制,从此处截断内容]";
-const ARCHIVABLE_ITEM_STATUS = new Set<AgentContextItemStatus>(["completed", "failed", "cancelled"]);
-const RUN_STATUS_SYSTEM_TEXT_PREFIX = "[run] ";
+const WORKSPACE_AGENTS_MAX_BYTES = 32 * 1024;
 const COMPACTION_SNIPPET_CACHE_MAX_BYTES = 256 * 1024;
 const SUBTASK_PREFORK_SUMMARY_MAX_CHARS = 20_000;
-function buildSubtaskForkGuardSystemText(input: { uiLocale: AgentUiLocale | null }) {
+const STRUCTURED_RESULT_TOOL_NAMES = new Set([
+  "apply_patch",
+  "todolist",
+  "subtask",
+  "write",
+  "scratchpad",
+]);
+function buildSubtaskForkGuardSystemText(input: {
+  uiLocale: AgentUiLocale | null;
+}) {
   if (normalizeAgentUiLocale(input.uiLocale) === "zh-CN") {
     return getPromptText("agent/subtask-fork-guard-system-text.zh-CN.txt");
   }
@@ -813,71 +735,10 @@ function buildSubtaskForkGuardSystemText(input: { uiLocale: AgentUiLocale | null
 
 function normalizeRunNoticeText(raw: unknown) {
   if (raw == null) return "";
-  const value = String(raw)
-    .replace(/\r\n/g, "\n")
-    .replace(/\0/g, "")
-    .trim();
+  const value = String(raw).replace(/\r\n/g, "\n").replace(/\0/g, "").trim();
   if (!value) return "";
   if (value.length <= 1000) return value;
   return `${value.slice(0, 1000)}...`;
-}
-
-function sanitizeArchiveText(raw: string) {
-  return String(raw || "").replace(/\r/g, "\\r").replace(/\n/g, "\\n");
-}
-
-function shouldIncludeSystemTextInPrompt(text: string) {
-  const normalized = String(text || "").trim();
-  return Boolean(normalized) && !normalized.startsWith(RUN_STATUS_SYSTEM_TEXT_PREFIX);
-}
-
-function buildCompactionSnippetMessageText(params: {
-  excerptLines: string[];
-  minPos: number;
-  uiLocale: AgentUiLocale | null;
-}) {
-  const body = params.excerptLines.join("\n");
-  if (normalizeAgentUiLocale(params.uiLocale) !== "zh-CN") {
-    return renderPromptTemplateFile("agent/compaction-snippet-message.en-US.tmpl.txt", { body, minPos: params.minPos });
-  }
-  return renderPromptTemplateFile("agent/compaction-snippet-message.zh-CN.tmpl.txt", { body, minPos: params.minPos });
-}
-
-function parseArchivedItemIdFromArchiveLine(line: string) {
-  const m = /^item=(\d+)\s/.exec(String(line || ""));
-  if (!m) return null;
-  const n = Number(m[1]);
-  return Number.isFinite(n) && Number.isInteger(n) && n >= 1 ? n : null;
-}
-
-function buildArchiveLine(item: AgentContextItemRecord): string | null {
-  let text = "";
-  if (item.kind === "user" && item.output.type === "user_text") text = item.output.text || "";
-  else if (item.kind === "user" && item.output.type === "user_message") {
-    text = buildSafeUserMessageText(item.output.text || "", item.output.attachments.length);
-  }
-  else if (item.kind === "assistant" && item.output.type === "assistant_text") {
-    const raw = item.output.text || "";
-    // assistant 仅发起 tool-call 时可能没有自然语言文本,归档空行没有价值,直接过滤。
-    if (!String(raw).trim()) return null;
-    text = raw;
-  }
-  else if (item.kind === "system" && item.output.type === "system_text") text = item.output.text || "";
-  else if (item.kind === "tool" && item.output.type === "tool") {
-    if (typeof item.output.text === "string" && item.output.text.trim()) {
-      text = item.output.text;
-    } else if (typeof item.output.error === "string" && item.output.error.trim()) {
-      text = `[error] ${item.output.error}`;
-    } else {
-      text = resolveToolOutputText(item.output);
-    }
-  }
-  const toolName = item.kind === "tool" && item.output.type === "tool" ? String(item.output.toolName || "-") : "-";
-  return `item=${item.id} ts=${item.createdAt} kind=${item.kind} status=${item.status} tool=${toolName} | ${sanitizeArchiveText(text)}`;
-}
-
-function isBoundaryMarkerItem(item: AgentContextItemRecord) {
-  return item.kind === "system" && typeof item.boundaryReason === "string" && item.boundaryReason.trim().length > 0;
 }
 
 function buildHistoricalImagePlaceholder(attachmentCount: number) {
@@ -892,34 +753,6 @@ function buildSafeUserMessageText(text: string, attachmentCount: number) {
   const placeholder = buildHistoricalImagePlaceholder(attachmentCount);
   return text ? `${text}\n\n${placeholder}` : placeholder;
 }
-
-type PromptTextPart = { type: "text"; text: string };
-type PromptAttachmentRefPart = {
-  type: "attachment_ref";
-  workspaceId: string;
-  attachmentId: string;
-  mediaType: "image/png" | "image/jpeg" | "image/webp";
-  filename: string;
-};
-type PromptToolCallPart = {
-  type: "tool-call";
-  toolCallId: string;
-  toolName: AgentContextToolName;
-  input: Record<string, unknown>;
-};
-type PromptToolResultPart = {
-  type: "tool-result";
-  toolCallId: string;
-  toolName: AgentContextToolName;
-  output:
-    | { type: "text"; value: string }
-    | { type: "error-text"; value: string };
-};
-type PromptMessage =
-  | { role: "system"; content: string }
-  | { role: "user"; content: string | Array<PromptTextPart | PromptAttachmentRefPart> }
-  | { role: "assistant"; content: string | Array<PromptTextPart | PromptToolCallPart> }
-  | { role: "tool"; content: PromptToolResultPart[] };
 
 function decodeUtf8Prefix(bytes: Buffer, maxBytes: number) {
   const truncated = bytes.length > maxBytes;
@@ -952,23 +785,30 @@ async function scanTopLevelSkillSummaries(params: {
   const readableItems = await scanReadableTopLevelSkills({
     rootPath: params.rootPath,
     logger: params.logger,
-    logMessage: "failed to read top-level skill summary"
+    logMessage: "failed to read top-level skill summary",
   });
 
   const items: SkillSummaryItem[] = [];
   for (const item of readableItems) {
     const parsed = parseSkillFrontmatter(item.text);
     const base = params.idBasePath ? `${params.idBasePath}/` : "";
-    const identifierSegments = [params.idPrefix, ...base.split("/").filter(Boolean), item.entryName];
+    const identifierSegments = [
+      params.idPrefix,
+      ...base.split("/").filter(Boolean),
+      item.entryName,
+    ];
     if (!identifierSegments.every(isValidSkillPathSegment)) {
-      params.logger.warn({ skillNamespace: params.idPrefix }, "skip top-level skill with non-callable identifier");
+      params.logger.warn(
+        { skillNamespace: params.idPrefix },
+        "skip top-level skill with non-callable identifier",
+      );
       continue;
     }
     const description = parsed.description.trim();
     items.push({
       skill: `${params.idPrefix}/${base}${item.entryName}`,
       name: parsed.name.trim() || item.entryName,
-      ...(description ? { description } : {})
+      ...(description ? { description } : {}),
     });
   }
   return items;
@@ -979,14 +819,21 @@ function buildSkillsInstructionSection(input: {
   external: SkillSummaryItem[];
 }) {
   const lines: string[] = [];
-  lines.push("Use the builtin skill tool to load details on demand by stable logical skill identifier.");
-  lines.push('If the user mentions anything related to skills, use the "skill" tool with the corresponding skill entry, then proceed with the action. First read the root: omit filePath, pass an empty string or spaces/tabs only, or pass exactly SKILL.md. Root content includes a flat (not tree-shaped) Skill files list; copy one complete path line verbatim into filePath to read that auxiliary text file.');
+  lines.push(
+    "Use the builtin skill tool to load details on demand by stable logical skill identifier.",
+  );
+  lines.push(
+    'If the user mentions anything related to skills, use the "skill" tool with the corresponding skill entry, then proceed with the action. First read the root: omit filePath, pass an empty string or spaces/tabs only, or pass exactly SKILL.md. Root content includes a flat (not tree-shaped) Skill files list; copy one complete path line verbatim into filePath to read that auxiliary text file.',
+  );
   lines.push("");
   lines.push("builtin skills:");
   if (input.builtin.length === 0) {
     lines.push("- (none)");
   } else {
-    for (const item of input.builtin) lines.push(`- skillId: ${item.skill}; name: ${item.name}${item.description ? `; description: ${item.description}` : ""}`);
+    for (const item of input.builtin)
+      lines.push(
+        `- skillId: ${item.skill}; name: ${item.name}${item.description ? `; description: ${item.description}` : ""}`,
+      );
   }
   lines.push("");
   lines.push("external skills:");
@@ -994,13 +841,19 @@ function buildSkillsInstructionSection(input: {
     lines.push("- (none)");
   } else {
     for (const item of input.external) {
-      lines.push(`- skillId: ${item.skill}; name: ${item.name}${item.description ? `; description: ${item.description}` : ""}`);
+      lines.push(
+        `- skillId: ${item.skill}; name: ${item.name}${item.description ? `; description: ${item.description}` : ""}`,
+      );
     }
   }
   return lines.join("\n");
 }
 
-async function readAgentsInstructionFile(params: { filePath: string; displayPath: string; logger: FastifyBaseLogger }) {
+async function readAgentsInstructionFile(params: {
+  filePath: string;
+  displayPath: string;
+  logger: FastifyBaseLogger;
+}) {
   const filePath = params.filePath;
   const displayPath = params.displayPath;
   let stat: Awaited<ReturnType<typeof fs.lstat>>;
@@ -1020,7 +873,12 @@ async function readAgentsInstructionFile(params: { filePath: string; displayPath
     const buf = Buffer.alloc(WORKSPACE_AGENTS_MAX_BYTES + 1);
     let totalRead = 0;
     while (totalRead < buf.length) {
-      const { bytesRead } = await fd.read(buf, totalRead, buf.length - totalRead, totalRead);
+      const { bytesRead } = await fd.read(
+        buf,
+        totalRead,
+        buf.length - totalRead,
+        totalRead,
+      );
       if (!bytesRead) break;
       totalRead += bytesRead;
     }
@@ -1033,11 +891,13 @@ async function readAgentsInstructionFile(params: { filePath: string; displayPath
     const decoded = decodeUtf8Prefix(chunk, WORKSPACE_AGENTS_MAX_BYTES);
     if (!decoded.text.trim()) return null;
 
-    const extra = decoded.truncated ? "\n\n[AGENTS.md truncated: first 32KB]" : "";
+    const extra = decoded.truncated
+      ? "\n\n[AGENTS.md truncated: first 32KB]"
+      : "";
     return {
       filePath,
       displayPath,
-      content: `${decoded.text}${extra}`
+      content: `${decoded.text}${extra}`,
     };
   } catch (err) {
     params.logger.warn({ err, filePath }, "read AGENTS.md failed");
@@ -1047,7 +907,9 @@ async function readAgentsInstructionFile(params: { filePath: string; displayPath
   }
 }
 
-const GLOBAL_WORKFLOW_SYSTEM_PROMPT = getPromptText("agent/global-workflow-system-prompt.zh-CN.txt");
+const GLOBAL_WORKFLOW_SYSTEM_PROMPT = getPromptText(
+  "agent/global-workflow-system-prompt.zh-CN.txt",
+);
 
 registerGlobalSystemPromptTextProvider(() => GLOBAL_WORKFLOW_SYSTEM_PROMPT);
 
@@ -1058,24 +920,35 @@ function buildSystemPrompt(input: {
   outputFormatInstruction?: string;
   globalPrompts: Array<{ id: string; title: string; prompt: string }>;
   runtimeInstruction?: string;
-  agentsInstructions: Array<{ filePath: string; displayPath: string; content: string }>;
+  agentsInstructions: Array<{
+    filePath: string;
+    displayPath: string;
+    content: string;
+  }>;
   skillsInstruction?: string;
 }) {
   const agentPrompt = input.agentPrompt || "";
   const selectedGlobalIds = new Set(input.agentGlobalPromptIds);
-  const outputFormatInstruction = String(input.outputFormatInstruction || "").trim();
+  const outputFormatInstruction = String(
+    input.outputFormatInstruction || "",
+  ).trim();
   const runtimeInstruction = String(input.runtimeInstruction || "").trim();
 
   const formatSection = (kind: string, body: string, label?: string) => {
     const normalizedBody = String(body || "").trim();
     if (!normalizedBody) return "";
     const normalizedLabel = typeof label === "string" ? label.trim() : "";
-    const prefix = normalizedLabel ? `[${kind}] ${normalizedLabel}` : `[${kind}]`;
+    const prefix = normalizedLabel
+      ? `[${kind}] ${normalizedLabel}`
+      : `[${kind}]`;
     return `${prefix}\n\n${normalizedBody}`;
   };
 
   const sections: string[] = [];
-  const systemBase = input.globalPrompts.find((item) => item.id === AGENT_GLOBAL_SYSTEM_PROMPT_ID)?.prompt?.trim() || GLOBAL_WORKFLOW_SYSTEM_PROMPT.trim();
+  const systemBase =
+    input.globalPrompts
+      .find((item) => item.id === AGENT_GLOBAL_SYSTEM_PROMPT_ID)
+      ?.prompt?.trim() || GLOBAL_WORKFLOW_SYSTEM_PROMPT.trim();
   sections.push(formatSection("system_base", systemBase));
 
   for (const item of input.globalPrompts) {
@@ -1087,7 +960,9 @@ function buildSystemPrompt(input: {
 
   for (const item of input.agentsInstructions || []) {
     if (!item?.content?.trim()) continue;
-    sections.push(formatSection("agents_instructions", item.content, item.displayPath));
+    sections.push(
+      formatSection("agents_instructions", item.content, item.displayPath),
+    );
   }
 
   if (agentPrompt.trim()) {
@@ -1095,11 +970,15 @@ function buildSystemPrompt(input: {
   }
 
   if (String(input.skillsInstruction || "").trim()) {
-    sections.push(formatSection("skills", String(input.skillsInstruction || "")));
+    sections.push(
+      formatSection("skills", String(input.skillsInstruction || "")),
+    );
   }
 
   if (outputFormatInstruction) {
-    sections.push(formatSection("output_format_instructions", outputFormatInstruction));
+    sections.push(
+      formatSection("output_format_instructions", outputFormatInstruction),
+    );
   }
 
   if (runtimeInstruction) {
@@ -1109,7 +988,10 @@ function buildSystemPrompt(input: {
   return sections.filter(Boolean).join("\n\n---\n");
 }
 
-function appendRuntimeConstraintsSection(systemStatic: string, runtimeInstruction: string) {
+function appendRuntimeConstraintsSection(
+  systemStatic: string,
+  runtimeInstruction: string,
+) {
   const runtime = String(runtimeInstruction || "").trim();
   if (!runtime) return systemStatic;
   const runtimeSection = `[runtime_constraints]\n\n${runtime}`;
@@ -1119,21 +1001,40 @@ function appendRuntimeConstraintsSection(systemStatic: string, runtimeInstructio
 }
 
 /** Named facade capability groups keep the compatibility surface partitioned by owner. */
-function createSessionFacadeCapabilities<T extends {
-  cleanupSubtaskOrphansOnStartup: (...args: any[]) => any;
-  listSessions: (...args: any[]) => any;
-  getSession: (...args: any[]) => any;
-  getWorkspace: (...args: any[]) => any;
-  createPrimarySession: (...args: any[]) => any;
-  forkPrimarySession: (...args: any[]) => any;
-  updateSessionTitle: (...args: any[]) => any;
-  sendMessage: (...args: any[]) => any;
-  compactSession: (...args: any[]) => any;
-  revertSession: (...args: any[]) => any;
-  listSessionModelOverrides: (...args: any[]) => any;
-  setSessionModelOverride: (...args: any[]) => any;
-  resetSessionModelOverride: (...args: any[]) => any;
-}>(dependencies: T): Pick<T, "cleanupSubtaskOrphansOnStartup" | "listSessions" | "getSession" | "getWorkspace" | "createPrimarySession" | "forkPrimarySession" | "updateSessionTitle" | "sendMessage" | "compactSession" | "revertSession" | "listSessionModelOverrides" | "setSessionModelOverride" | "resetSessionModelOverride"> {
+function createSessionFacadeCapabilities<
+  T extends {
+    cleanupSubtaskOrphansOnStartup: (...args: any[]) => any;
+    listSessions: (...args: any[]) => any;
+    getSession: (...args: any[]) => any;
+    getWorkspace: (...args: any[]) => any;
+    createPrimarySession: (...args: any[]) => any;
+    forkPrimarySession: (...args: any[]) => any;
+    updateSessionTitle: (...args: any[]) => any;
+    sendMessage: (...args: any[]) => any;
+    compactSession: (...args: any[]) => any;
+    revertSession: (...args: any[]) => any;
+    listSessionModelOverrides: (...args: any[]) => any;
+    setSessionModelOverride: (...args: any[]) => any;
+    resetSessionModelOverride: (...args: any[]) => any;
+  },
+>(
+  dependencies: T,
+): Pick<
+  T,
+  | "cleanupSubtaskOrphansOnStartup"
+  | "listSessions"
+  | "getSession"
+  | "getWorkspace"
+  | "createPrimarySession"
+  | "forkPrimarySession"
+  | "updateSessionTitle"
+  | "sendMessage"
+  | "compactSession"
+  | "revertSession"
+  | "listSessionModelOverrides"
+  | "setSessionModelOverride"
+  | "resetSessionModelOverride"
+> {
   const {
     cleanupSubtaskOrphansOnStartup,
     listSessions,
@@ -1147,7 +1048,7 @@ function createSessionFacadeCapabilities<T extends {
     revertSession,
     listSessionModelOverrides,
     setSessionModelOverride,
-    resetSessionModelOverride
+    resetSessionModelOverride,
   } = dependencies;
   return {
     cleanupSubtaskOrphansOnStartup,
@@ -1162,64 +1063,204 @@ function createSessionFacadeCapabilities<T extends {
     revertSession,
     listSessionModelOverrides,
     setSessionModelOverride,
-    resetSessionModelOverride
+    resetSessionModelOverride,
   };
 }
 
-function createQueryFacadeCapabilities<T extends Record<
-  "listRecentSessions" | "listAvailableAgents" | "listRecentWorkspaces" | "getContextItems" | "getContextItem" |
-  "getApplyPatchUiArtifact" | "getWriteUiArtifact" | "getRunState" | "getSessionStatusSummary" | "getRunFinalText" | "getAttachmentContent",
-  (...args: any[]) => any
->>(dependencies: T): Pick<T, "listRecentSessions" | "listAvailableAgents" | "listRecentWorkspaces" | "getContextItems" | "getContextItem" | "getApplyPatchUiArtifact" | "getWriteUiArtifact" | "getRunState" | "getSessionStatusSummary" | "getRunFinalText" | "getAttachmentContent"> {
+function createQueryFacadeCapabilities<
+  T extends Record<
+    | "listRecentSessions"
+    | "listAvailableAgents"
+    | "listRecentWorkspaces"
+    | "getMessageTimeline"
+    | "getMessageDetail"
+    | "getToolExecutionDetail"
+    | "getLastAssistantText"
+    | "getLatestTodolistToolExecution"
+    | "getMessageTimelineSnapshot"
+    | "getMessageRunState"
+    | "getApplyPatchUiArtifact"
+    | "getWriteUiArtifact"
+    | "getRunFinalText"
+    | "getAttachmentContent",
+    (...args: any[]) => any
+  >,
+>(
+  dependencies: T,
+): Pick<
+  T,
+  | "listRecentSessions"
+  | "listAvailableAgents"
+  | "listRecentWorkspaces"
+  | "getMessageTimeline"
+  | "getMessageDetail"
+  | "getToolExecutionDetail"
+  | "getLastAssistantText"
+  | "getLatestTodolistToolExecution"
+  | "getMessageTimelineSnapshot"
+  | "getMessageRunState"
+  | "getApplyPatchUiArtifact"
+  | "getWriteUiArtifact"
+  | "getRunFinalText"
+  | "getAttachmentContent"
+> {
   const {
-    listRecentSessions, listAvailableAgents, listRecentWorkspaces, getContextItems, getContextItem,
-    getApplyPatchUiArtifact, getWriteUiArtifact, getRunState, getSessionStatusSummary, getRunFinalText, getAttachmentContent
+    listRecentSessions,
+    listAvailableAgents,
+    listRecentWorkspaces,
+    getMessageTimeline,
+    getMessageDetail,
+    getToolExecutionDetail,
+    getLastAssistantText,
+    getLatestTodolistToolExecution,
+    getMessageTimelineSnapshot,
+    getMessageRunState,
+    getApplyPatchUiArtifact,
+    getWriteUiArtifact,
+    getRunFinalText,
+    getAttachmentContent,
   } = dependencies;
   return {
-    listRecentSessions, listAvailableAgents, listRecentWorkspaces, getContextItems, getContextItem,
-    getApplyPatchUiArtifact, getWriteUiArtifact, getRunState, getSessionStatusSummary, getRunFinalText, getAttachmentContent
+    listRecentSessions,
+    listAvailableAgents,
+    listRecentWorkspaces,
+    getMessageTimeline,
+    getMessageDetail,
+    getToolExecutionDetail,
+    getLastAssistantText,
+    getLatestTodolistToolExecution,
+    getMessageTimelineSnapshot,
+    getMessageRunState,
+    getApplyPatchUiArtifact,
+    getWriteUiArtifact,
+    getRunFinalText,
+    getAttachmentContent,
   };
 }
 
-function createLifecycleFacadeCapabilities<T extends Record<
-  "cancelSessionWithRuntime" |
-  "recoverRunsOnStartup" | "failRunsOnStartup" | "appendContextItemFromWorker" | "updateContextItemFromWorker" |
-  "updateRunStateFromWorker" | "completeRunFromWorker",
-  (...args: any[]) => any
->>(dependencies: T): Pick<T, "cancelSessionWithRuntime" | "recoverRunsOnStartup" | "failRunsOnStartup" | "appendContextItemFromWorker" | "updateContextItemFromWorker" | "updateRunStateFromWorker" | "completeRunFromWorker"> {
+function createLifecycleFacadeCapabilities<
+  T extends Record<
+    | "cancelSessionWithRuntime"
+    | "recoverRunsOnStartup"
+    | "createStreamingAssistantFromWorker"
+    | "flushAssistantPartsFromWorker"
+    | "resumeStreamingAssistantFromWorker"
+    | "replaceStreamingAssistantFromWorker"
+    | "completeAssistantFromWorker"
+    | "updateToolExecutionFromWorker"
+    | "updateRunNoticeFromWorker"
+    | "completeRunFromWorker",
+    (...args: any[]) => any
+  >,
+>(
+  dependencies: T,
+): Pick<
+  T,
+  | "cancelSessionWithRuntime"
+  | "recoverRunsOnStartup"
+  | "createStreamingAssistantFromWorker"
+  | "flushAssistantPartsFromWorker"
+  | "resumeStreamingAssistantFromWorker"
+  | "replaceStreamingAssistantFromWorker"
+  | "completeAssistantFromWorker"
+  | "updateToolExecutionFromWorker"
+  | "updateRunNoticeFromWorker"
+  | "completeRunFromWorker"
+> {
   const {
     cancelSessionWithRuntime,
-    recoverRunsOnStartup, failRunsOnStartup, appendContextItemFromWorker, updateContextItemFromWorker,
-    updateRunStateFromWorker, completeRunFromWorker
+    recoverRunsOnStartup,
+    createStreamingAssistantFromWorker,
+    flushAssistantPartsFromWorker,
+    resumeStreamingAssistantFromWorker,
+    replaceStreamingAssistantFromWorker,
+    completeAssistantFromWorker,
+    updateToolExecutionFromWorker,
+    updateRunNoticeFromWorker,
+    completeRunFromWorker,
   } = dependencies;
   return {
     cancelSessionWithRuntime,
-    recoverRunsOnStartup, failRunsOnStartup, appendContextItemFromWorker, updateContextItemFromWorker,
-    updateRunStateFromWorker, completeRunFromWorker
+    recoverRunsOnStartup,
+    createStreamingAssistantFromWorker,
+    flushAssistantPartsFromWorker,
+    resumeStreamingAssistantFromWorker,
+    replaceStreamingAssistantFromWorker,
+    completeAssistantFromWorker,
+    updateToolExecutionFromWorker,
+    updateRunNoticeFromWorker,
+    completeRunFromWorker,
   };
 }
 
-function createWorkerFacadeCapabilities<T extends Record<
-  "getSubtaskPreforkPlanFromWorker" | "startSubtaskRunFromWorker" | "getSubtaskRunResultFromWorker" |
-  "getSubtaskRunStatusFromWorker" | "getExecutionProfileForRun" | "getSingleCallModelProfileForRun" |
-  "getAgentMcpSettingsFromWorker" | "getPluginRuntimeSnapshotsFromWorker" | "compactContextFromWorker" |
-  "clearSession" | "archiveSearchFromWorker" | "getMessagesContext" | "archiveReadFromWorker" |
-  "getPromptContextForRun" | "checkChannelSenderAllowlist",
-  (...args: any[]) => any
->>(dependencies: T): Pick<T, "getSubtaskPreforkPlanFromWorker" | "startSubtaskRunFromWorker" | "getSubtaskRunResultFromWorker" | "getSubtaskRunStatusFromWorker" | "getExecutionProfileForRun" | "getSingleCallModelProfileForRun" | "getAgentMcpSettingsFromWorker" | "getPluginRuntimeSnapshotsFromWorker" | "compactContextFromWorker" | "clearSession" | "archiveSearchFromWorker" | "getMessagesContext" | "archiveReadFromWorker" | "getPromptContextForRun" | "checkChannelSenderAllowlist"> {
+function createWorkerFacadeCapabilities<
+  T extends Record<
+    | "getSubtaskPreforkPlanFromWorker"
+    | "startSubtaskRunFromWorker"
+    | "getSubtaskRunResultFromWorker"
+    | "getSubtaskRunStatusFromWorker"
+    | "getExecutionProfileForRun"
+    | "getSingleCallModelProfileForRun"
+    | "getAgentMcpSettingsFromWorker"
+    | "getPluginRuntimeSnapshotsFromWorker"
+    | "commitCompactionFromWorker"
+    | "getMessagesContext"
+    | "getPromptContextForRun"
+    | "archiveReadFromWorker"
+    | "archiveSearchFromWorker"
+    | "checkChannelSenderAllowlist",
+    (...args: any[]) => any
+  >,
+>(
+  dependencies: T,
+): Pick<
+  T,
+  | "getSubtaskPreforkPlanFromWorker"
+  | "startSubtaskRunFromWorker"
+  | "getSubtaskRunResultFromWorker"
+  | "getSubtaskRunStatusFromWorker"
+  | "getExecutionProfileForRun"
+  | "getSingleCallModelProfileForRun"
+  | "getAgentMcpSettingsFromWorker"
+  | "getPluginRuntimeSnapshotsFromWorker"
+  | "commitCompactionFromWorker"
+  | "getMessagesContext"
+  | "getPromptContextForRun"
+  | "archiveReadFromWorker"
+  | "archiveSearchFromWorker"
+  | "checkChannelSenderAllowlist"
+> {
   const {
-    getSubtaskPreforkPlanFromWorker, startSubtaskRunFromWorker, getSubtaskRunResultFromWorker,
-    getSubtaskRunStatusFromWorker, getExecutionProfileForRun, getSingleCallModelProfileForRun,
-    getAgentMcpSettingsFromWorker, getPluginRuntimeSnapshotsFromWorker, compactContextFromWorker,
-    clearSession, archiveSearchFromWorker, getMessagesContext, archiveReadFromWorker,
-    getPromptContextForRun, checkChannelSenderAllowlist
+    getSubtaskPreforkPlanFromWorker,
+    startSubtaskRunFromWorker,
+    getSubtaskRunResultFromWorker,
+    getSubtaskRunStatusFromWorker,
+    getExecutionProfileForRun,
+    getSingleCallModelProfileForRun,
+    getAgentMcpSettingsFromWorker,
+    getPluginRuntimeSnapshotsFromWorker,
+    commitCompactionFromWorker,
+    getMessagesContext,
+    getPromptContextForRun,
+    archiveReadFromWorker,
+    archiveSearchFromWorker,
+    checkChannelSenderAllowlist,
   } = dependencies;
   return {
-    getSubtaskPreforkPlanFromWorker, startSubtaskRunFromWorker, getSubtaskRunResultFromWorker,
-    getSubtaskRunStatusFromWorker, getExecutionProfileForRun, getSingleCallModelProfileForRun,
-    getAgentMcpSettingsFromWorker, getPluginRuntimeSnapshotsFromWorker, compactContextFromWorker,
-    clearSession, archiveSearchFromWorker, getMessagesContext, archiveReadFromWorker,
-    getPromptContextForRun, checkChannelSenderAllowlist
+    getSubtaskPreforkPlanFromWorker,
+    startSubtaskRunFromWorker,
+    getSubtaskRunResultFromWorker,
+    getSubtaskRunStatusFromWorker,
+    getExecutionProfileForRun,
+    getSingleCallModelProfileForRun,
+    getAgentMcpSettingsFromWorker,
+    getPluginRuntimeSnapshotsFromWorker,
+    commitCompactionFromWorker,
+    getMessagesContext,
+    getPromptContextForRun,
+    archiveReadFromWorker,
+    archiveSearchFromWorker,
+    checkChannelSenderAllowlist,
   };
 }
 
@@ -1228,267 +1269,332 @@ type AgentCompositionEnvironment = {
   dataDir: string;
   repoRoot: string;
   isAgentWorkerEnabled(): boolean;
-  resolveExecutionProfile: (input: Parameters<typeof resolveExecutionProfile>[1]) => ReturnType<typeof resolveExecutionProfile>;
-  getWorkspaceEnabledAgentIds: (workspaceId: string) => ReturnType<typeof getWorkspaceEnabledAgentIds>;
-  getWorkspaceRunContext: (workspaceId: string) => ReturnType<typeof getAgentWorkspaceRunContext>;
+  resolveExecutionProfile: (
+    input: Parameters<typeof resolveExecutionProfile>[1],
+  ) => ReturnType<typeof resolveExecutionProfile>;
+  getWorkspaceEnabledAgentIds: (
+    workspaceId: string,
+  ) => ReturnType<typeof getWorkspaceEnabledAgentIds>;
+  getWorkspaceRunContext: (
+    workspaceId: string,
+  ) => ReturnType<typeof getAgentWorkspaceRunContext>;
   getAgentSettings: () => ReturnType<typeof getAgentSettings>;
-  getAgentProvidersSettings: () => ReturnType<typeof getAgentProvidersSettingsInternal>;
+  getAgentProvidersSettings: () => ReturnType<
+    typeof getAgentProvidersSettingsInternal
+  >;
   getAgentRuntimeSettings: () => ReturnType<typeof getAgentRuntimeSettings>;
-  getAgentGlobalPromptSettings: () => ReturnType<typeof getAgentGlobalPromptSettings>;
+  getAgentGlobalPromptSettings: () => ReturnType<
+    typeof getAgentGlobalPromptSettings
+  >;
   getAgentMcpSettings: () => ReturnType<typeof getAgentMcpSettings>;
-  getChannelSenderAllowlistSettings: () => ReturnType<typeof getAgentChannelSenderAllowlistSettings>;
-  listAgentsInstructionSources: (workspaceId: string) => ReturnType<typeof listEnabledWorkspaceAgentsInstructions>;
-  listExternalSkillRoots: (workspaceId: string) => ReturnType<typeof listEnabledWorkspaceExternalSkillRoots>;
-  listAvailableAgentsForSurface: (surface: Parameters<typeof listAvailableAgentsForSurface>[1], options?: Parameters<typeof listAvailableAgentsForSurface>[2]) => ReturnType<typeof listAvailableAgentsForSurface>;
-  listPluginRuntimeSnapshots: () => ReturnType<typeof listPluginRuntimeSnapshots>;
+  getChannelSenderAllowlistSettings: () => ReturnType<
+    typeof getAgentChannelSenderAllowlistSettings
+  >;
+  listAgentsInstructionSources: (
+    workspaceId: string,
+  ) => ReturnType<typeof listEnabledWorkspaceAgentsInstructions>;
+  listExternalSkillRoots: (
+    workspaceId: string,
+  ) => ReturnType<typeof listEnabledWorkspaceExternalSkillRoots>;
+  listAvailableAgentsForSurface: (
+    surface: Parameters<typeof listAvailableAgentsForSurface>[1],
+    options?: Parameters<typeof listAvailableAgentsForSurface>[2],
+  ) => ReturnType<typeof listAvailableAgentsForSurface>;
+  listPluginRuntimeSnapshots: () => ReturnType<
+    typeof listPluginRuntimeSnapshots
+  >;
 };
 
-function createAgentCompositionEnvironment(ctx: AppContext, logger: FastifyBaseLogger): AgentCompositionEnvironment {
+function createAgentCompositionEnvironment(
+  ctx: AppContext,
+  logger: FastifyBaseLogger,
+): AgentCompositionEnvironment {
   return {
     db: ctx.db,
     dataDir: ctx.dataDir,
     repoRoot: ctx.repoRoot,
     isAgentWorkerEnabled: () => ctx.agentWorkerEnabled,
     resolveExecutionProfile: (input) => resolveExecutionProfile(ctx, input),
-    getWorkspaceEnabledAgentIds: (workspaceId) => getWorkspaceEnabledAgentIds(ctx, workspaceId),
-    getWorkspaceRunContext: (workspaceId) => getAgentWorkspaceRunContext(ctx, workspaceId),
+    getWorkspaceEnabledAgentIds: (workspaceId) =>
+      getWorkspaceEnabledAgentIds(ctx, workspaceId),
+    getWorkspaceRunContext: (workspaceId) =>
+      getAgentWorkspaceRunContext(ctx, workspaceId),
     getAgentSettings: () => getAgentSettings(ctx),
     getAgentProvidersSettings: () => getAgentProvidersSettingsInternal(ctx),
     getAgentRuntimeSettings: () => getAgentRuntimeSettings(ctx),
     getAgentGlobalPromptSettings: () => getAgentGlobalPromptSettings(ctx),
     getAgentMcpSettings: () => getAgentMcpSettings(ctx),
-    getChannelSenderAllowlistSettings: () => getAgentChannelSenderAllowlistSettings(ctx),
-    listAgentsInstructionSources: (workspaceId) => listEnabledWorkspaceAgentsInstructions({ ctx, logger, workspaceId }),
-    listExternalSkillRoots: (workspaceId) => listEnabledWorkspaceExternalSkillRoots(ctx, logger, workspaceId),
-    listAvailableAgentsForSurface: (surface, options) => listAvailableAgentsForSurface(ctx, surface, options),
-    listPluginRuntimeSnapshots: () => listPluginRuntimeSnapshots(ctx)
+    getChannelSenderAllowlistSettings: () =>
+      getAgentChannelSenderAllowlistSettings(ctx),
+    listAgentsInstructionSources: (workspaceId) =>
+      listEnabledWorkspaceAgentsInstructions({ ctx, logger, workspaceId }),
+    listExternalSkillRoots: (workspaceId) =>
+      listEnabledWorkspaceExternalSkillRoots(ctx, logger, workspaceId),
+    listAvailableAgentsForSurface: (surface, options) =>
+      listAvailableAgentsForSurface(ctx, surface, options),
+    listPluginRuntimeSnapshots: () => listPluginRuntimeSnapshots(ctx),
   };
 }
 
-/** Constructs archive, compaction, and cache collaborators from their explicit inputs. */
-function createArchiveCompactionAssembly(assembly: {
+/** Constructs the Worker-owned compaction scheduler from Message-model inputs. */
+function createManualCompactionAssembly(assembly: {
   environment: AgentCompositionEnvironment;
-  logger: FastifyBaseLogger;
-  dependencies?: AgentCompositionDependencies;
-  runPromptStaticCache: RunPromptStaticCache<RunPromptStatic>;
-  failAfterEnqueueFailure: (input: any) => unknown;
-  getControlRunState: (sessionId: string) => AgentSessionRunState;
-  resolvePrimarySessionModel: (input: { workspaceId: string; sessionId: string; requestedAgentId?: string | null }) => { agentId: string; providerId: string; modelId: string };
+  enqueueActivatedRunOrReconcile: RunLifecycleApplication["enqueueActivatedRunOrReconcile"];
+  getControlRunState: (sessionId: string) => AgentMessageSessionRunState;
+  resolvePrimarySessionModel: (input: {
+    workspaceId: string;
+    sessionId: string;
+    requestedAgentId?: string | null;
+  }) => { agentId: string; providerId: string; modelId: string };
 }) {
-    const archiveStorage = assembly.dependencies?.archiveStorage ?? new ArchiveStorage({ dataDir: assembly.environment.dataDir, logger: assembly.logger });
-    const compactionArchivePersistence = assembly.dependencies?.compactionArchivePersistence ?? new SqliteCompactionArchivePersistence(assembly.environment.db);
-    const archiveReadApplication = new ArchiveReadApplication(
-      { get: (sessionId) => getAgentSession(assembly.environment.db, sessionId) },
-      new ArchiveReadStorage(assembly.environment.dataDir)
-    );
-    const compactionSnippetCache = new CompactionSnippetCache({ dataDir: assembly.environment.dataDir, logger: assembly.logger });
-    const compactionArchiveApplication = new CompactionArchiveApplication({
-      sessionQuery: {
-        get: (sessionId) => getAgentSession(assembly.environment.db, sessionId),
-        getRun: (runId) => getRunRecord(assembly.environment.db, runId),
-        getVisibleItems: (workspaceId, sessionId) => getSessionVisibleItems(assembly.environment.db, workspaceId, sessionId),
-        getLatestItemId: (workspaceId, sessionId) => getLatestSessionItemId(assembly.environment.db, workspaceId, sessionId)
-      },
-      persistence: compactionArchivePersistence,
-      archiveStorage: archiveStorage,
-      runState: {
-        get: (workspaceId, sessionId) => getStoredRunState(assembly.environment.db, workspaceId, sessionId),
-        clearLastResponseTokensIfActiveRun: (params) => {
-          const state = getStoredRunState(assembly.environment.db, params.workspaceId, params.sessionId);
-          if (state.activeRunId !== params.runId) return;
-          updateRunState(assembly.environment.db, {
-            workspaceId: params.workspaceId,
-            sessionId: params.sessionId,
-            status: state.status,
-            activeRunId: state.activeRunId,
-            activeAssistantItemId: state.activeAssistantItemId,
-            lastResponseTotalTokens: null,
-            updatedAt: params.updatedAt,
-            appliedItemId: params.appliedItemId
-          });
-        },
-        setIdle: (params) => setRunStateIdle(assembly.environment.db, params),
-        getControlResult: (sessionId) => assembly.getControlRunState(sessionId)
-      },
-      clock: { nowMs },
-      logger: assembly.logger,
-      isConflict: (error) => error instanceof AgentConflictError,
-      toConflictHttpError: (error) => conflictToHttpError(error as AgentConflictError),
-      isArchivableItem: (item) => ARCHIVABLE_ITEM_STATUS.has(item.status),
-      isBoundaryMarkerItem,
-      buildArchiveLine,
-      buildClearSummaryText
-    });
-    const manualCompactionApplication = new ManualCompactionApplication({
-      reconcilePendingForSessionBestEffort: (params) => compactionArchiveApplication.reconcilePendingForSessionBestEffort(params),
-      sessions: {
-        get: (sessionId) => getAgentSession(assembly.environment.db, sessionId),
-        getVisibleItems: (workspaceId, sessionId) => getSessionVisibleItems(assembly.environment.db, workspaceId, sessionId)
-      },
-      isWorkerEnabled: () => assembly.environment.isAgentWorkerEnabled(),
-      findDedup: (params) => findClientRequestDedup(assembly.environment.db, params),
-      getRunState: (workspaceId, sessionId) => getStoredRunState(assembly.environment.db, workspaceId, sessionId),
-      getControlRunState: (sessionId) => assembly.getControlRunState(sessionId),
-      resolveProfile: ({ workspaceId, sessionId, requestedAgentId }) => {
-        return assembly.resolvePrimarySessionModel({ workspaceId, sessionId, requestedAgentId });
-      },
-      getWorkspaceRunContext: (workspaceId) => assembly.environment.getWorkspaceRunContext( workspaceId),
-      activate: (params) => {
-        assembly.environment.db.transaction(() => {
-          createRunRecord(assembly.environment.db, { runId: params.runId, workspaceId: params.workspaceId, sessionId: params.sessionId, triggerItemId: params.triggerItemId, agentId: params.profile.agentId, providerId: params.profile.providerId, modelId: params.profile.modelId, uiLocale: params.uiLocale, subtaskDepth: 0, parentRunId: null, parentToolItemId: null, status: "running", createdAt: params.createdAt });
-          insertClientRequestDedup(assembly.environment.db, { workspaceId: params.workspaceId, sessionId: params.sessionId, clientRequestId: params.clientRequestId, messageItemId: params.triggerItemId, runId: params.runId, createdAt: params.createdAt });
-          updateRunState(assembly.environment.db, { workspaceId: params.workspaceId, sessionId: params.sessionId, status: "running", activeRunId: params.runId, activeAssistantItemId: null, runNoticeText: "正在压缩上下文...", updatedAt: params.createdAt, appliedItemId: getLatestSessionItemId(assembly.environment.db, params.workspaceId, params.sessionId) });
-        })();
-      },
-      failAfterEnqueueFailure: (params) => assembly.failAfterEnqueueFailure(params),
-      clock: { nowMs },
-      ids: { newRunId: () => newSortableId("run") }
-    });
-    const runPromptStaticCacheInvalidator = new RunPromptStaticCacheInvalidator({
-      clearRunStaticPrompt: (runId) => assembly.runPromptStaticCache.clear(runId)
-    });
-
-  return {
-    archiveStorage,
-    compactionArchivePersistence,
-    archiveReadApplication,
-    compactionSnippetCache,
-    compactionArchiveApplication,
-    manualCompactionApplication,
-    runPromptStaticCacheInvalidator,
-  };
+  const manualCompactionApplication = new ManualCompactionApplication({
+    sessions: {
+      get: (sessionId) => getMessageSessionById(assembly.environment.db, sessionId),
+    },
+    isWorkerEnabled: () => assembly.environment.isAgentWorkerEnabled(),
+    findDedup: (params) =>
+      findMessageClientRequestDedup(assembly.environment.db, params),
+    getRunState: (workspaceId, sessionId) =>
+      getMessageRunState(assembly.environment.db, workspaceId, sessionId) ?? { status: "idle" },
+    getControlRunState: (sessionId) => assembly.getControlRunState(sessionId),
+    resolveProfile: ({ workspaceId, sessionId, requestedAgentId }) => {
+      return assembly.resolvePrimarySessionModel({
+        workspaceId,
+        sessionId,
+        requestedAgentId,
+      });
+    },
+    getWorkspaceRunContext: (workspaceId) =>
+      assembly.environment.getWorkspaceRunContext(workspaceId),
+    activate: (params) => {
+      assembly.environment.db.transaction(() => {
+        createMessageRunRecord(assembly.environment.db, {
+          runId: params.runId,
+          workspaceId: params.workspaceId,
+          sessionId: params.sessionId,
+          triggerMessageId: params.triggerMessageId,
+          agentId: params.profile.agentId,
+          providerId: params.profile.providerId,
+          modelId: params.profile.modelId,
+          runKind: "manual_compaction",
+          subtaskDepth: 0,
+          parentRunId: null,
+          parentToolExecutionId: null,
+          status: "running",
+          createdAt: params.createdAt,
+        });
+        insertMessageClientRequestDedup(assembly.environment.db, {
+          workspaceId: params.workspaceId,
+          sessionId: params.sessionId,
+          clientRequestId: params.clientRequestId,
+          messageId: params.triggerMessageId,
+          runId: params.runId,
+          createdAt: params.createdAt,
+        });
+        startMessageRun(assembly.environment.db, {
+          workspaceId: params.workspaceId,
+          sessionId: params.sessionId,
+          runId: params.runId,
+          updatedAt: params.createdAt,
+          noticeText: "正在压缩上下文...",
+        });
+      })();
+    },
+    enqueueActivatedRunOrReconcile: (params) => assembly.enqueueActivatedRunOrReconcile(params),
+    clock: { nowMs },
+    ids: { newRunId: () => newSortableId("run") },
+  });
+  return { manualCompactionApplication };
 }
 
 /** Constructs lifecycle, session, and subtask applications without a shared registry. */
 function createLifecycleSessionSubtaskAssembly(assembly: {
   environment: AgentCompositionEnvironment;
   logger: FastifyBaseLogger;
-  archiveStorage: ArchiveStorage;
   runPromptStaticCacheInvalidator: RunPromptStaticCacheInvalidator;
+  runtimeHandoffCoordinator: SessionRuntimeHandoffCoordinator;
   runCompletedEventHub?: AgentRunCompletedEventHub | null;
-  getControlRunState: (sessionId: string) => AgentSessionRunState;
+  getControlRunState: (sessionId: string) => AgentMessageSessionRunState;
   resolveSubtaskParentContext: (input: any) => any;
-  resolveSubtaskForkBoundaryItemId: (input: any) => any;
-  resolvePrimarySessionModel: (input: { workspaceId: string; sessionId: string; requestedAgentId?: string | null }) => { agentId: string; providerId: string; modelId: string };
+  resolveSubtaskForkBoundaryMessageId: (input: any) => any;
+  resolvePrimarySessionModel: (input: {
+    workspaceId: string;
+    sessionId: string;
+    requestedAgentId?: string | null;
+  }) => { agentId: string; providerId: string; modelId: string };
 }) {
-    const sqliteLifecyclePersistence = new SqliteRunLifecyclePersistence(assembly.environment.db);
-    const sqliteSubtaskLineagePersistence = new SqliteSubtaskLineagePersistence(assembly.environment.db);
-    const sqliteSubtaskRunQuery = new SqliteSubtaskRunQuery(assembly.environment.db);
-    const sqliteSubtaskMaintenancePersistence = new SqliteSubtaskMaintenancePersistence(assembly.environment.db);
-    const runLifecycleApplication = new RunLifecycleApplication({
-      workspaceRunContextReader: {
-        get: (workspaceId) => assembly.environment.getWorkspaceRunContext( workspaceId)
+  const sqliteLifecyclePersistence = new SqliteRunLifecyclePersistence(
+    assembly.environment.db,
+  );
+  const sqliteSubtaskLineagePersistence = new SqliteSubtaskLineagePersistence(
+    assembly.environment.db,
+  );
+  const sqliteSubtaskRunQuery = new SqliteSubtaskRunQuery(
+    assembly.environment.db,
+  );
+  const sqliteSubtaskMaintenancePersistence =
+    new SqliteSubtaskMaintenancePersistence(assembly.environment.db);
+  const runLifecycleApplication = new RunLifecycleApplication({
+    workspaceRunContextReader: {
+      get: (workspaceId) =>
+        assembly.environment.getWorkspaceRunContext(workspaceId),
+    },
+    runStateReader: {
+      get: (sessionId) => assembly.getControlRunState(sessionId),
+    },
+    activeSubtaskChildQuery: sqliteSubtaskLineagePersistence,
+    promptStaticCacheInvalidator: assembly.runPromptStaticCacheInvalidator,
+    runCompletedEventPublisher: {
+      publishRunCompleted: (event) => {
+        assembly.runCompletedEventHub?.publish({
+          ...event,
+          eventType: "agent.run.completed.v1",
+        });
       },
-      runStateReader: { get: (sessionId) => assembly.getControlRunState(sessionId) },
-      activeSubtaskChildQuery: sqliteSubtaskLineagePersistence,
-      promptStaticCacheInvalidator: assembly.runPromptStaticCacheInvalidator,
-      runCompletedEventPublisher: {
-        publishRunCompleted: (event) => {
-          assembly.runCompletedEventHub?.publish({
-            ...event,
-            eventType: "agent.run.completed.v1"
-          });
-        }
+    },
+    persistence: sqliteLifecyclePersistence,
+    attachmentCommitter: {
+      commit: async ({ workspaceId, image }) => {
+        await commitAgentAttachmentTempFile({
+          dataDir: assembly.environment.dataDir,
+          workspaceId,
+          attachmentId: image.attachmentId,
+          tempId: image.tempId,
+        });
       },
-      persistence: sqliteLifecyclePersistence,
-      attachmentCommitter: {
-        commit: async ({ workspaceId, image }) => {
-          await commitAgentAttachmentTempFile({ dataDir: assembly.environment.dataDir, workspaceId, attachmentId: image.attachmentId, tempId: image.tempId });
-        },
-        removeTemp: async ({ tempId }) => {
-          await removeAgentAttachmentTempFile({ dataDir: assembly.environment.dataDir, tempId });
-        },
-        removeFinal: async ({ workspaceId, image }) => {
-          await fs.rm(agentAttachmentFilePath(assembly.environment.dataDir, workspaceId, image.attachmentId), { force: true });
-        }
+      removeTemp: async ({ tempId }) => {
+        await removeAgentAttachmentTempFile({
+          dataDir: assembly.environment.dataDir,
+          tempId,
+        });
       },
-      triggerInputReader: {
-        getUserText: (itemId) => {
-          const item = getContextItemRecordById(assembly.environment.db, itemId);
-          return item?.output.type === "user_text" || item?.output.type === "user_message" ? item.output.text : null;
-        }
+      removeFinal: async ({ workspaceId, image }) => {
+        await removeAgentAttachmentFinalFile({
+          dataDir: assembly.environment.dataDir,
+          workspaceId,
+          attachmentId: image.attachmentId,
+        });
       },
-      isContextAppendConflict: (error) => error instanceof AgentConflictError,
-      clock: { nowMs },
-      ids: { newId: newSortableId },
-      logger: {
-        warn: (bindings, message) => assembly.logger.warn(bindings, message),
-        error: (bindings, message) => assembly.logger.error(bindings, message)
-      }
-    });
-    const sessionStore = new SqliteSessionInteractionStore({
-      db: assembly.environment.db,
-      dataDir: assembly.environment.dataDir,
-      archiveStorage: assembly.archiveStorage,
-      isBoundaryMarkerItem,
-      buildArchiveLine,
-      getControlRunState: (sessionId) => assembly.getControlRunState(sessionId),
-      workspaceExists: (workspaceId) => Boolean(getWorkspaceRecord(assembly.environment.db, workspaceId))
-    });
-    const sessionInteractionApplication = new SessionInteractionApplication({
-      store: sessionStore,
-      profileReader: {
-        resolveUser: ({ workspaceId, sessionId, requestedAgentId }) => {
-          return assembly.resolvePrimarySessionModel({ workspaceId, sessionId, requestedAgentId });
-        }
+    },
+    triggerInputReader: {
+      getUserText: (messageId) => {
+        const row = assembly.environment.db
+          .prepare(
+            `
+            select part.text as text
+            from agent_message message
+            join agent_message_part part on part.message_id = message.id
+            where message.id = ? and message.type = 'user' and part.type = 'text'
+            order by part.position asc limit 1
+          `,
+          )
+          .get(messageId) as { text: string | null } | undefined;
+        return row?.text ?? null;
       },
-      lifecycleStarter: runLifecycleApplication,
-      clock: { nowMs },
-      ids: { newSessionId: () => newSortableId("sess") },
-      logger: { warn: (bindings, message) => assembly.logger.warn(bindings, message) },
-      normalizeUiLocale: normalizeAgentUiLocale,
-      isConflict: (error) => error instanceof AgentConflictError,
-      toConflictHttpError: (error) => conflictToHttpError(error as AgentConflictError)
-    });
-    const subtaskDependencies: SubtaskApplicationDependencies = {
-      parentAnchorReader: {
-        resolve: (params) => assembly.resolveSubtaskParentContext(params)
+    },
+    isContextAppendConflict: (error) => error instanceof AgentMessageConflictError,
+    runtimeHandoffCoordinator: assembly.runtimeHandoffCoordinator,
+    clock: { nowMs },
+    ids: { newId: newSortableId },
+    logger: {
+      warn: (bindings, message) => assembly.logger.warn(bindings, message),
+      error: (bindings, message) => assembly.logger.error(bindings, message),
+    },
+  });
+  const sessionStore = new SqliteSessionInteractionStore({
+    db: assembly.environment.db,
+    getControlRunState: (sessionId) => assembly.getControlRunState(sessionId),
+    workspaceExists: (workspaceId) =>
+      Boolean(getWorkspaceRecord(assembly.environment.db, workspaceId)),
+  });
+  const sessionInteractionApplication = new SessionInteractionApplication({
+    store: sessionStore,
+    profileReader: {
+      resolveUser: ({ workspaceId, sessionId, requestedAgentId }) => {
+        return assembly.resolvePrimarySessionModel({
+          workspaceId,
+          sessionId,
+          requestedAgentId,
+        });
       },
-      lineagePersistence: sqliteSubtaskLineagePersistence,
-      sessionMaterializer: {
-        resolveForStart: (params) => sessionInteractionApplication.resolveSubtaskSessionForStart(params),
-        resolveForkBoundary: (params) => assembly.resolveSubtaskForkBoundaryItemId(params)
+    },
+    lifecycleStarter: runLifecycleApplication,
+    clock: { nowMs },
+    ids: { newSessionId: () => newSortableId("sess") },
+    logger: {
+      warn: (bindings, message) => assembly.logger.warn(bindings, message),
+    },
+    normalizeUiLocale: normalizeAgentUiLocale,
+    isConflict: (error) => error instanceof AgentMessageConflictError,
+    toConflictHttpError: (error) =>
+      conflictToHttpError(error as AgentMessageConflictError),
+  });
+  const subtaskDependencies: SubtaskApplicationDependencies = {
+    parentAnchorReader: {
+      resolve: (params) => assembly.resolveSubtaskParentContext(params),
+    },
+    lineagePersistence: sqliteSubtaskLineagePersistence,
+    sessionMaterializer: {
+      resolveForStart: (params) =>
+        sessionInteractionApplication.resolveSubtaskSessionForStart(params),
+      resolveForkBoundary: (params) =>
+        assembly.resolveSubtaskForkBoundaryMessageId(params),
+    },
+    executionProfileReader: {
+      resolve: (input) => {
+        const profile = assembly.environment.resolveExecutionProfile({
+          surface: "subtask",
+          requestedAgentId: input.requestedAgentId,
+          workspaceEnablement: assembly.environment.getWorkspaceEnabledAgentIds(
+            input.workspaceId,
+          ),
+        });
+        return {
+          agentId: profile.agent.id,
+          agentName: profile.agent.name,
+          providerId: profile.provider.id,
+          modelId: profile.model.id,
+          contextWindowTokens: profile.model.contextWindowTokens,
+        };
       },
-      executionProfileReader: {
-        resolve: (input) => {
-          const profile = assembly.environment.resolveExecutionProfile( {
-            surface: "subtask",
-            requestedAgentId: input.requestedAgentId,
-            workspaceEnablement: assembly.environment.getWorkspaceEnabledAgentIds( input.workspaceId)
-          });
-          return {
-            agentId: profile.agent.id,
-            agentName: profile.agent.name,
-            providerId: profile.provider.id,
-            modelId: profile.model.id,
-            contextWindowTokens: profile.model.contextWindowTokens
-          };
-        },
-        findAgentName: (agentId) => assembly.environment.getAgentSettings().agents.find((item) => item.id === agentId)?.name || null,
-        getMaxDepth: () => assembly.environment.getAgentRuntimeSettings().maxSubtaskDepth
+      findAgentName: (agentId) =>
+        assembly.environment
+          .getAgentSettings()
+          .agents.find((item) => item.id === agentId)?.name || null,
+      getMaxDepth: () =>
+        assembly.environment.getAgentRuntimeSettings().maxSubtaskDepth,
+    },
+    workspaceReader: {
+      get: (workspaceId) => {
+        const workspace = getWorkspaceRecord(
+          assembly.environment.db,
+          workspaceId,
+        );
+        return workspace ? { path: workspace.path } : null;
       },
-      workspaceReader: {
-        get: (workspaceId) => {
-          const workspace = getWorkspaceRecord(assembly.environment.db, workspaceId);
-          return workspace ? { path: workspace.path } : null;
-        }
-      },
-      parentRunStateReader: {
-        get: (workspaceId, sessionId) => getStoredRunState(assembly.environment.db, workspaceId, sessionId)
-      },
-      childRunActivator: sqliteLifecyclePersistence,
-      runQuery: sqliteSubtaskRunQuery,
-      localCompensationPersistence: sqliteSubtaskMaintenancePersistence,
-      orphanPersistence: sqliteSubtaskMaintenancePersistence,
-      clock: { nowMs },
-      ids: { newId: newSortableId },
-      logger: {
-        warn: (bindings, message) => assembly.logger.warn(bindings, message),
-        error: (bindings, message) => assembly.logger.error(bindings, message)
-      },
-      forkGuardTextReader: { get: (uiLocale) => buildSubtaskForkGuardSystemText({ uiLocale }) }
-    };
-    const subtaskApplication = new SubtaskApplication(subtaskDependencies);
+    },
+    parentRunStateReader: {
+      get: (workspaceId, sessionId) =>
+        (() => {
+          const state = getMessageRunState(assembly.environment.db, workspaceId, sessionId);
+          return { status: state?.status ?? "idle", lastResponseTotalTokens: null };
+        })(),
+    },
+    childRunActivator: sqliteLifecyclePersistence,
+    runQuery: sqliteSubtaskRunQuery,
+    localCompensationPersistence: sqliteSubtaskMaintenancePersistence,
+    orphanPersistence: sqliteSubtaskMaintenancePersistence,
+    clock: { nowMs },
+    ids: { newId: newSortableId },
+    logger: {
+      warn: (bindings, message) => assembly.logger.warn(bindings, message),
+      error: (bindings, message) => assembly.logger.error(bindings, message),
+    },
+    forkGuardTextReader: {
+      get: (uiLocale) => buildSubtaskForkGuardSystemText({ uiLocale }),
+    },
+  };
+  const subtaskApplication = new SubtaskApplication(subtaskDependencies);
 
   return {
     sqliteLifecyclePersistence,
@@ -1507,165 +1613,247 @@ function createReadQueryWritebackAssembly(assembly: {
   resolveExecutionProfileForReadSide: (input: any) => any;
   getAgentRuntimeSettingsForReadSide: () => any;
   buildPromptMessagesForSession: (input: any) => Promise<{
-    messages: Array<{ role: "system" | "user" | "assistant" | "tool"; content: any }>;
+    messages: Array<{
+      role: "system" | "user" | "assistant" | "tool";
+      content: any;
+    }>;
   }>;
   resolveUiLocaleForSessionContext: (input: any) => any;
   buildOneShotSystemPrompt: (input: any) => any;
   ensureWorkspace: (workspaceId: string) => unknown;
 }) {
-    const executionProfileResolver = new ExecutionProfileResolver({
-      resolveProfile: (input) => assembly.resolveExecutionProfileForReadSide(input),
-      getRuntime: () => assembly.getAgentRuntimeSettingsForReadSide()
-    });
-    const messagesContextProjector = new MessagesContextProjector({
-      buildMessages: ({ workspaceId, sessionId }) => assembly.buildPromptMessagesForSession({
+  const executionProfileResolver = new ExecutionProfileResolver({
+    resolveProfile: (input) =>
+      assembly.resolveExecutionProfileForReadSide(input),
+    getRuntime: () => assembly.getAgentRuntimeSettingsForReadSide(),
+  });
+  const messagesContextProjector = new MessagesContextProjector({
+    buildMessages: ({ workspaceId, sessionId }) =>
+      assembly.buildPromptMessagesForSession({
         workspaceId,
         sessionId,
-        triggerItemId: null,
-        compactionSnippetUiLocale: null
+        triggerMessageId: null,
+        compactionSnippetUiLocale: null,
       }),
-      getActiveRunId: ({ workspaceId, sessionId }) => getStoredRunState(assembly.environment.db, workspaceId, sessionId).activeRunId,
-      resolveUiLocale: (input) => assembly.resolveUiLocaleForSessionContext(input),
-      buildOneShotSystem: (input) => assembly.buildOneShotSystemPrompt(input)
-    });
-    const promptStaticAssembler = new PromptStaticAssembler({
-      getGlobalPrompts: () => assembly.environment.getAgentGlobalPromptSettings(),
-      listAgentsInstructionSources: (workspaceId) => assembly.environment.listAgentsInstructionSources(workspaceId),
-      readAgentsInstruction: (source) => readAgentsInstructionFile({ ...source, logger: assembly.logger }),
-      scanBuiltinSkills: () => scanTopLevelSkillSummaries({
+    getActiveRunId: ({ workspaceId, sessionId }) =>
+      getMessageRunState(assembly.environment.db, workspaceId, sessionId)
+        ?.activeRunId ?? null,
+    resolveUiLocale: (input) =>
+      assembly.resolveUiLocaleForSessionContext(input),
+    buildOneShotSystem: (input) => assembly.buildOneShotSystemPrompt(input),
+  });
+  const promptStaticAssembler = new PromptStaticAssembler({
+    getGlobalPrompts: () => assembly.environment.getAgentGlobalPromptSettings(),
+    listAgentsInstructionSources: (workspaceId) =>
+      assembly.environment.listAgentsInstructionSources(workspaceId),
+    readAgentsInstruction: (source) =>
+      readAgentsInstructionFile({ ...source, logger: assembly.logger }),
+    scanBuiltinSkills: () =>
+      scanTopLevelSkillSummaries({
         rootPath: path.join(assembly.environment.repoRoot, BUILTIN_SKILLS_ROOT),
         idPrefix: "builtin",
-        logger: assembly.logger
+        logger: assembly.logger,
       }),
-      listExternalSkillRoots: (workspaceId) => assembly.environment.listExternalSkillRoots(workspaceId),
-      scanExternalSkills: (root) => scanTopLevelSkillSummaries({
+    listExternalSkillRoots: (workspaceId) =>
+      assembly.environment.listExternalSkillRoots(workspaceId),
+    scanExternalSkills: (root) =>
+      scanTopLevelSkillSummaries({
         rootPath: root.rootPath,
         idPrefix: root.sourceType === "workspace" ? "workspace" : "repo",
-        idBasePath: root.sourceType === "workspace" ? root.rootDir : `${root.repoId}/${root.rootDir}`,
-        logger: assembly.logger
+        idBasePath:
+          root.sourceType === "workspace"
+            ? root.rootDir
+            : `${root.repoId}/${root.rootDir}`,
+        logger: assembly.logger,
       }),
-      warnExternalSkillScanFailure: ({ err, workspaceId, root }) => {
-        assembly.logger.warn(
-          { err, workspaceId, sourceType: root.sourceType, repoId: root.sourceType === "repo" ? root.repoId : undefined },
-          "scan external skill roots failed"
-        );
-      },
-      getMaxSubtaskDepth: () => assembly.environment.getAgentRuntimeSettings().maxSubtaskDepth,
-      listSubtaskAgents: () => assembly.environment.listAvailableAgentsForSurface("subtask").map((item) => ({
-        id: item.id,
-        name: item.name,
-        summary: item.summary
-      })),
-      buildSystem: (input) => buildSystemPrompt(input),
-      buildOutputFormatInstruction: (input) => buildOutputFormatInstruction(input),
-      buildSkillsInstruction: (input) => buildSkillsInstructionSection(input),
-      buildSubtaskDescription: (agents) => buildSubtaskToolDescription(agents),
-      describeTool: (name, options) => toolDescription(name as AgentContextToolName, options),
-      getToolInputSchema: (name) => toolArgsSchema(name as AgentContextToolName)
-    });
-    const promptContextProjector = new PromptContextProjector(assembly.runPromptStaticCache, {
-      getRunState: ({ workspaceId, sessionId }) => getStoredRunState(assembly.environment.db, workspaceId, sessionId),
-      resolveUiLocale: (input) => assembly.resolveUiLocaleForSessionContext(input),
-      resolveProfile: (input) => assembly.resolveExecutionProfileForReadSide(input),
+    warnExternalSkillScanFailure: ({ err, workspaceId, root }) => {
+      assembly.logger.warn(
+        {
+          err,
+          workspaceId,
+          sourceType: root.sourceType,
+          repoId: root.sourceType === "repo" ? root.repoId : undefined,
+        },
+        "scan external skill roots failed",
+      );
+    },
+    getMaxSubtaskDepth: () =>
+      assembly.environment.getAgentRuntimeSettings().maxSubtaskDepth,
+    listSubtaskAgents: () =>
+      assembly.environment
+        .listAvailableAgentsForSurface("subtask")
+        .map((item) => ({
+          id: item.id,
+          name: item.name,
+          summary: item.summary,
+        })),
+    buildSystem: (input) => buildSystemPrompt(input),
+    buildOutputFormatInstruction: (input) =>
+      buildOutputFormatInstruction(input),
+    buildSkillsInstruction: (input) => buildSkillsInstructionSection(input),
+    buildSubtaskDescription: (agents) => buildSubtaskToolDescription(agents),
+    describeTool: (name, options) =>
+      toolDescription(name as AgentContextToolName, options),
+    getToolInputSchema: (name) => toolArgsSchema(name as AgentContextToolName),
+  });
+  const promptContextProjector = new PromptContextProjector(
+    assembly.runPromptStaticCache,
+    {
+      getRunState: ({ workspaceId, sessionId }) =>
+        (() => { const state = getMessageRunState(assembly.environment.db, workspaceId, sessionId); return { activeRunId: state?.activeRunId ?? null, lastResponseTotalTokens: null }; })(),
+      resolveUiLocale: (input) =>
+        assembly.resolveUiLocaleForSessionContext(input),
+      resolveProfile: (input) =>
+        assembly.resolveExecutionProfileForReadSide(input),
       assembleStatic: (input) => promptStaticAssembler.assemble(input),
       buildRuntimeInstruction: (input) => buildRuntimeInstruction(input),
-      appendRuntimeConstraints: (systemStatic, runtimeInstruction) => appendRuntimeConstraintsSection(systemStatic, runtimeInstruction),
-      listVisibleItems: ({ workspaceId, sessionId }) => getSessionVisibleItems(assembly.environment.db, workspaceId, sessionId),
-      buildMessages: (input) => assembly.buildPromptMessagesForSession(input)
-    });
-    const readSideApplication = new ReadSideApplication({
-      findSession: (sessionId) => getAgentSession(assembly.environment.db, sessionId),
-      findRun: (runId) => getRunRecord(assembly.environment.db, runId),
-      ensureWorkspace: (workspaceId) => {
-        assembly.ensureWorkspace(workspaceId);
+      appendRuntimeConstraints: (systemStatic, runtimeInstruction) =>
+        appendRuntimeConstraintsSection(systemStatic, runtimeInstruction),
+      listPendingTools: ({ workspaceId, sessionId, runId }) => {
+        const rows = assembly.environment.db
+          .prepare(
+            `
+          select execution.id as toolExecutionId, execution.call_part_id as callPartId,
+                 part.message_id as assistantMessageId, execution.status,
+                 part.tool_name as toolName, part.provider_tool_call_id as toolCallId,
+                 part.tool_input_json as toolInputJson
+          from agent_tool_execution execution
+          join agent_message_part part on part.id = execution.call_part_id
+          where execution.origin_session_id = @sessionId
+            and execution.origin_run_id = @runId
+            and execution.status in ('queued', 'running')
+          order by execution.created_at asc, execution.id asc
+        `,
+          )
+          .all({ sessionId, runId }) as Array<{
+          toolExecutionId: string;
+          callPartId: string;
+          assistantMessageId: string;
+          status: "queued" | "running";
+          toolName: string;
+          toolCallId: string | null;
+          toolInputJson: string;
+        }>;
+        return rows.map((row) => ({
+          toolExecutionId: row.toolExecutionId,
+          callPartId: row.callPartId,
+          assistantMessageId: row.assistantMessageId,
+          status: row.status,
+          toolName: row.toolName,
+          ...(row.toolCallId ? { toolCallId: row.toolCallId } : {}),
+          args: JSON.parse(row.toolInputJson) as Record<string, unknown>,
+        }));
       },
-      resolveExecutionProfile: (input) => executionProfileResolver.getExecutionProfileForRun({
+      buildMessages: (input) => assembly.buildPromptMessagesForSession(input),
+    },
+  );
+  const readSideApplication = new ReadSideApplication({
+    findSession: (sessionId) => {
+      const session = assembly.environment.db
+        .prepare(
+          `
+          select workspace_id as workspaceId, kind, head_message_id as headMessageId, revision
+          from agent_session where id = ?
+        `,
+        )
+        .get(sessionId) as
+        | {
+            workspaceId: string;
+            kind: "primary" | "subtask";
+            headMessageId: string | null;
+            revision: number;
+          }
+        | undefined;
+      if (!session) return null;
+      return {
+        workspaceId: session.workspaceId,
+        kind: session.kind,
+        headMessageId: session.headMessageId,
+        revision: Number(session.revision),
+      };
+    },
+    findRun: (runId) =>
+      (assembly.environment.db
+        .prepare(
+          `
+        select run_id as runId, workspace_id as workspaceId, session_id as sessionId,
+               agent_id as agentId, provider_id as providerId, model_id as modelId,
+               subtask_depth as subtaskDepth, trigger_message_id as triggerMessageId
+        from agent_run where run_id = ?
+      `,
+        )
+        .get(runId) as
+        | {
+            runId: string;
+            workspaceId: string;
+            sessionId: string;
+            agentId: string;
+            providerId: string;
+            modelId: string;
+            subtaskDepth: number | null;
+            triggerMessageId: string | null;
+          }
+        | undefined) ?? null,
+    ensureWorkspace: (workspaceId) => {
+      assembly.ensureWorkspace(workspaceId);
+    },
+    resolveExecutionProfile: (input) =>
+      executionProfileResolver.getExecutionProfileForRun({
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
         session: input.session,
-        run: input.run
+        run: input.run,
       }),
-      projectMessagesContext: (input) => messagesContextProjector.getMessagesContext({
+    projectMessagesContext: (input) =>
+      messagesContextProjector.getMessagesContext({
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
-        headItemId: input.session.headItemId,
-        ...(input.appendMessage ? { appendMessage: input.appendMessage } : {})
+        headMessageId: input.session.headMessageId,
+        ...(input.appendMessage ? { appendMessage: input.appendMessage } : {}),
       }),
-      projectPromptContext: (input) => promptContextProjector.getPromptContextForRun(input)
-    });
-    const uiArtifactCapability = new UiArtifactCapability(assembly.environment.dataDir);
-    const contextQueryStore = new SqliteContextQueryStore(assembly.environment.db);
-    const peripheralQueryStore = new SqlitePeripheralAgentQueryStore(assembly.environment.db);
-    const availableAgentsQuery = {
-      listUserAgents: (workspaceId: string) => assembly.environment.listAvailableAgentsForSurface("user", {
-        workspaceEnablement: assembly.environment.getWorkspaceEnabledAgentIds( workspaceId)
+    projectPromptContext: (input) =>
+      promptContextProjector.getPromptContextForRun(input),
+  });
+  const uiArtifactCapability = new UiArtifactCapability(
+    assembly.environment.dataDir,
+  );
+  const peripheralQueryStore = new SqlitePeripheralAgentQueryStore(
+    assembly.environment.db,
+  );
+  const availableAgentsQuery = {
+    listUserAgents: (workspaceId: string) =>
+      assembly.environment.listAvailableAgentsForSurface("user", {
+        workspaceEnablement:
+          assembly.environment.getWorkspaceEnabledAgentIds(workspaceId),
       }),
-      findUserDisplayAgent: ({ workspaceId, agentId }: { workspaceId: string; agentId: string }) => {
-        const agent = assembly.environment.listAvailableAgentsForSurface("user", {
-          workspaceEnablement: assembly.environment.getWorkspaceEnabledAgentIds( workspaceId)
-        }).find((item) => item.id === agentId);
-        return agent ? { id: agent.id, name: agent.name } : null;
-      }
-    };
-    const contextQueryApplication = new ContextQueryApplication({
-      store: contextQueryStore,
-      uiArtifacts: uiArtifactCapability,
-      availableAgentQuery: availableAgentsQuery,
-      resolveContextWindowTokens: ({ workspaceId, sessionKind, run }) => {
-        const profile = assembly.environment.resolveExecutionProfile( {
-          surface: sessionKind === "subtask" ? "subtask" : "user",
-          agentIdFromRun: run.agentId,
-          workspaceEnablement: assembly.environment.getWorkspaceEnabledAgentIds( workspaceId),
-          providerIdFromRun: run.providerId,
-          modelIdFromRun: run.modelId
-        });
-        return profile.model.contextWindowTokens;
-      },
-      clock: { nowMs },
-      logger: {
-        warn: (bindings, message) => assembly.logger.warn(bindings, message),
-        error: (bindings, message) => assembly.logger.error(bindings, message)
-      }
-    });
-    const peripheralAgentQueryApplication = new PeripheralAgentQueryApplication({
-      store: peripheralQueryStore,
-      availableAgentsQuery
-    });
-    const writebackApplication = new ContextWritebackApplication({
-      appendWithRunFence: (params) => appendContextItemWithRunFence(assembly.environment.db, params),
-      nowMs,
-      formatTodolistTitle: normalizeTodolistGoal,
-      updateAutoSessionTitle: (params) => {
-        updateAutoAgentSessionTitle(assembly.environment.db, params);
-      },
-      isAppendConflict: (error): error is AgentConflictError => error instanceof AgentConflictError,
-      warnAppendConflict: (params) => {
-        assembly.logger.warn(
-          {
-            sessionId: params.sessionId,
-            kind: params.kind,
-            currentHeadItemId: params.currentHeadItemId
-          },
-          "agent append context item conflict"
-        );
-      },
-      inspectForWorkerUpdate: (itemId) => getContextItemForWorkerUpdate(assembly.environment.db, itemId),
-      uiArtifacts: uiArtifactCapability,
-      logArtifactError: ({ itemId, message, filePath, err }) => {
-        assembly.logger.error({ ...(err ? { err } : {}), itemId, ...(filePath ? { filePath } : {}) }, message);
-      },
-      logArtifactWarning: ({ itemId, message, hasToolCallId, hasWorkspaceId }) => {
-        assembly.logger.warn({ itemId, hasToolCallId, hasWorkspaceId }, message);
-      },
-      updateWithRunFence: (params) => updateContextItemWithRunFence(assembly.environment.db, params)
-    });
-
+    findUserDisplayAgent: ({
+      workspaceId,
+      agentId,
+    }: {
+      workspaceId: string;
+      agentId: string;
+    }) => {
+      const agent = assembly.environment
+        .listAvailableAgentsForSurface("user", {
+          workspaceEnablement:
+            assembly.environment.getWorkspaceEnabledAgentIds(workspaceId),
+        })
+        .find((item) => item.id === agentId);
+      return agent ? { id: agent.id, name: agent.name } : null;
+    },
+  };
+  const peripheralAgentQueryApplication = new PeripheralAgentQueryApplication({
+    store: peripheralQueryStore,
+    availableAgentsQuery,
+  });
+  const messageQuery = new SqliteMessageQuery(assembly.environment.db);
+  const runtimeTranscriptProjector = new RuntimeTranscriptProjector();
   return {
     readSideApplication,
-    writebackApplication,
     uiArtifactCapability,
-    contextQueryApplication,
     peripheralAgentQueryApplication,
+    messageQuery,
+    runtimeTranscriptProjector,
     executionProfileResolver,
     messagesContextProjector,
     promptStaticAssembler,
@@ -1682,69 +1870,111 @@ function createAgentApplications(
   environment: AgentCompositionEnvironment,
   logger: FastifyBaseLogger,
   runCompletedEventHub?: AgentRunCompletedEventHub | null,
-  dependencies?: AgentCompositionDependencies
+  dependencies?: AgentCompositionDependencies,
 ) {
   const sessionOpLocks = new Map<string, Promise<void>>();
-  const runPromptStaticCache = new RunPromptStaticCache<Awaited<ReturnType<PromptStaticAssembler["assemble"]>>>();
+  const runPromptStaticCache = new RunPromptStaticCache<
+    Awaited<ReturnType<PromptStaticAssembler["assemble"]>>
+  >();
 
   const sessionAgentModelApplication = new SessionAgentModelApplication({
-    sessions: { get: (sessionId) => getAgentSession(environment.db, sessionId) },
+    sessions: {
+      get: (sessionId) => getMessageSessionById(environment.db, sessionId),
+    },
     overrides: {
       get: (params) => getSessionAgentModelOverride(environment.db, params),
       list: (params) => listSessionAgentModelOverrides(environment.db, params),
-      upsert: (record) => upsertSessionAgentModelOverride(environment.db, record),
-      delete: (params) => deleteSessionAgentModelOverride(environment.db, params)
+      upsert: (record) =>
+        upsertSessionAgentModelOverride(environment.db, record),
+      delete: (params) =>
+        deleteSessionAgentModelOverride(environment.db, params),
     },
     settings: {
       getAgents: () => environment.getAgentSettings().agents,
       getProviders: () => environment.getAgentProvidersSettings(),
-      getWorkspaceEnablement: (workspaceId) => environment.getWorkspaceEnabledAgentIds(workspaceId)
+      getWorkspaceEnablement: (workspaceId) =>
+        environment.getWorkspaceEnabledAgentIds(workspaceId),
     },
-    clock: { nowMs }
+    clock: { nowMs },
   });
-  const resolvePrimarySessionModel = (input: { workspaceId: string; sessionId: string; requestedAgentId?: string | null }) => {
-    const agentId = input.requestedAgentId?.trim() || environment.resolveExecutionProfile({ surface: "user", requestedAgentId: input.requestedAgentId, workspaceEnablement: environment.getWorkspaceEnabledAgentIds(input.workspaceId) }).agent.id;
-    const resolved = sessionAgentModelApplication.resolveForNewRun({ workspaceId: input.workspaceId, sessionId: input.sessionId, agentId });
-    const profile = environment.resolveExecutionProfile({ surface: "user", requestedAgentId: agentId, workspaceEnablement: environment.getWorkspaceEnabledAgentIds(input.workspaceId), modelOverride: { providerId: resolved.providerId, modelId: resolved.modelId } });
-    return { agentId: profile.agent.id, providerId: profile.provider.id, modelId: profile.model.id };
+  const resolvePrimarySessionModel = (input: {
+    workspaceId: string;
+    sessionId: string;
+    requestedAgentId?: string | null;
+  }) => {
+    const agentId =
+      input.requestedAgentId?.trim() ||
+      environment.resolveExecutionProfile({
+        surface: "user",
+        requestedAgentId: input.requestedAgentId,
+        workspaceEnablement: environment.getWorkspaceEnabledAgentIds(
+          input.workspaceId,
+        ),
+      }).agent.id;
+    const resolved = sessionAgentModelApplication.resolveForNewRun({
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      agentId,
+    });
+    const profile = environment.resolveExecutionProfile({
+      surface: "user",
+      requestedAgentId: agentId,
+      workspaceEnablement: environment.getWorkspaceEnabledAgentIds(
+        input.workspaceId,
+      ),
+      modelOverride: {
+        providerId: resolved.providerId,
+        modelId: resolved.modelId,
+      },
+    });
+    return {
+      agentId: profile.agent.id,
+      providerId: profile.provider.id,
+      modelId: profile.model.id,
+    };
   };
 
-  const archiveAssembly = createArchiveCompactionAssembly({
-    environment,
-    logger,
-    dependencies,
-    runPromptStaticCache,
-    getControlRunState: (sessionId) => getRunState(sessionId),
-    failAfterEnqueueFailure: (input) => runLifecycleApplication.failRunAfterEnqueueFailure(input),
-    resolvePrimarySessionModel
+  const getMessageControlRunState = (sessionId: string): AgentMessageSessionRunState => {
+    const session = getMessageSessionById(environment.db, sessionId);
+    if (!session) throw new HttpError(404, "session not found");
+    const state = getStoredMessageRunState(environment.db, session.workspaceId, sessionId);
+    if (!state) throw new HttpError(404, "session run state not found");
+    return state;
+  };
+
+
+
+  const runtimeHandoffCoordinator = new SessionRuntimeHandoffCoordinator();
+  const runPromptStaticCacheInvalidator = new RunPromptStaticCacheInvalidator({
+    clearRunStaticPrompt: (runId) => runPromptStaticCache.clear(runId),
   });
-  const {
-    archiveStorage,
-    compactionArchivePersistence,
-    archiveReadApplication,
-    compactionSnippetCache,
-    compactionArchiveApplication,
-    manualCompactionApplication,
-    runPromptStaticCacheInvalidator
-  } = archiveAssembly;
-  const lifecycleSessionSubtaskAssembly = createLifecycleSessionSubtaskAssembly({
-    environment,
-    logger,
-    archiveStorage,
-    runPromptStaticCacheInvalidator,
-    runCompletedEventHub,
-    getControlRunState: (sessionId) => getRunState(sessionId),
-    resolveSubtaskParentContext,
-    resolveSubtaskForkBoundaryItemId,
-    resolvePrimarySessionModel
-  });
+  const lifecycleSessionSubtaskAssembly = createLifecycleSessionSubtaskAssembly(
+    {
+      environment,
+      logger,
+      runPromptStaticCacheInvalidator,
+      runtimeHandoffCoordinator,
+      runCompletedEventHub,
+      getControlRunState: getMessageControlRunState,
+      resolveSubtaskParentContext,
+      resolveSubtaskForkBoundaryMessageId,
+      resolvePrimarySessionModel,
+    },
+  );
   const {
     sqliteLifecyclePersistence,
     sqliteSubtaskLineagePersistence,
     runLifecycleApplication,
     sessionInteractionApplication,
-    subtaskApplication
+    subtaskApplication,
   } = lifecycleSessionSubtaskAssembly;
+  const { manualCompactionApplication } = createManualCompactionAssembly({
+    environment,
+    getControlRunState: getMessageControlRunState,
+    enqueueActivatedRunOrReconcile: (params) =>
+      runLifecycleApplication.enqueueActivatedRunOrReconcile(params),
+    resolvePrimarySessionModel,
+  });
   const readQueryWritebackAssembly = createReadQueryWritebackAssembly({
     environment,
     logger,
@@ -1754,25 +1984,28 @@ function createAgentApplications(
     buildPromptMessagesForSession,
     resolveUiLocaleForSessionContext,
     buildOneShotSystemPrompt,
-    ensureWorkspace
+    ensureWorkspace,
   });
   const {
     readSideApplication,
-    writebackApplication,
     uiArtifactCapability,
-    contextQueryApplication,
     peripheralAgentQueryApplication,
+    messageQuery,
+    runtimeTranscriptProjector,
     executionProfileResolver,
     messagesContextProjector,
     promptStaticAssembler,
-    promptContextProjector
+    promptContextProjector,
   } = readQueryWritebackAssembly;
 
   function clearRunPromptStaticCache(runId: string) {
     runPromptStaticCacheInvalidator.clear(runId);
   }
 
-  async function runSessionOperationExclusive<T>(sessionId: string, action: () => Promise<T>): Promise<T> {
+  async function runSessionOperationExclusive<T>(
+    sessionId: string,
+    action: () => Promise<T>,
+  ): Promise<T> {
     const previous = sessionOpLocks.get(sessionId) ?? Promise.resolve();
     let releaseCurrent!: () => void;
     const current = new Promise<void>((resolve) => {
@@ -1801,19 +2034,27 @@ function createAgentApplications(
     return sessionInteractionApplication.listSessions(workspaceId);
   }
 
-  function listRecentSessions(params: { limit?: number; kind?: "primary" | "subtask" | "all" }): AgentRecentSessionsResponse {
+  function listRecentSessions(params: {
+    limit?: number;
+    kind?: "primary" | "subtask" | "all";
+  }): AgentRecentSessionsResponse {
     return peripheralAgentQueryApplication.listRecentSessions(params);
   }
 
   function getSession(sessionId: string) {
-    return getAgentSession(environment.db, sessionId);
+    return getMessageSessionById(environment.db, sessionId);
   }
 
-  function listAvailableAgents(params: { workspaceId: string; surface?: string }) {
+  function listAvailableAgents(params: {
+    workspaceId: string;
+    surface?: string;
+  }) {
     return peripheralAgentQueryApplication.listAvailableAgents(params);
   }
 
-  function listRecentWorkspaces(params: { limit?: number }): AgentRecentWorkspacesResponse {
+  function listRecentWorkspaces(params: {
+    limit?: number;
+  }): AgentRecentWorkspacesResponse {
     return peripheralAgentQueryApplication.listRecentWorkspaces(params);
   }
 
@@ -1821,7 +2062,10 @@ function createAgentApplications(
     return getWorkspaceRecord(environment.db, workspaceId);
   }
 
-  function createPrimarySession(params: { workspaceId: string; title?: string }) {
+  function createPrimarySession(params: {
+    workspaceId: string;
+    title?: string;
+  }) {
     return sessionInteractionApplication.createPrimarySession(params);
   }
 
@@ -1829,86 +2073,235 @@ function createAgentApplications(
     return await sessionInteractionApplication.forkPrimarySession(params);
   }
 
-  function updateSessionTitle(params: { sessionId: string; body: AgentUpdateSessionTitleRequest }) {
+  function updateSessionTitle(params: {
+    sessionId: string;
+    body: AgentUpdateSessionTitleRequest;
+  }) {
     return sessionInteractionApplication.updateSessionTitle(params);
   }
 
-  async function sendMessage(params: { sessionId: string; body: AgentSendMessageRequest | import("./session/session-interaction-ports.js").NormalizedAgentUserMessageInput; runtime: AgentRuntimePort }): Promise<AgentSendMessageResponse> {
+  async function sendMessage(params: {
+    sessionId: string;
+    body:
+      | AgentSendMessageRequest
+      | import("./session/session-interaction-ports.js").NormalizedAgentUserMessageInput;
+    runtime: AgentRuntimePort;
+  }): Promise<AgentSendMessageResponse> {
     return await sessionInteractionApplication.sendMessage(params);
   }
 
-  function getContextItems(
-    sessionId: string,
-    query?: { afterId?: number; tailLimit?: number; beforeId?: number; limit?: number; expectedHeadItemId?: number }
-  ): AgentContextItemsResponse {
-    return contextQueryApplication.getContextItems(sessionId, query);
+  function getMessageTimeline(params: Parameters<typeof messageQuery.getTimeline>[0]) {
+    return messageQuery.getTimeline(params);
   }
 
-  async function compactSession(params: { sessionId: string; body: AgentCompactSessionRequest; runtime: ManualCompactionRuntime }): Promise<AgentCompactSessionResponse> {
-    return runSessionOperationExclusive(params.sessionId, () => manualCompactionApplication.schedule({
-      sessionId: params.sessionId,
-      body: params.body,
-      runtime: params.runtime
-    }));
+  function getMessageDetail(params: { workspaceId: string; sessionId: string; messageId: string }) {
+    return messageQuery.getMessage(params);
   }
 
-  function getContextItem(sessionId: string, itemId: number) {
-    return contextQueryApplication.getContextItem(sessionId, itemId);
+  function getToolExecutionDetail(params: { workspaceId: string; sessionId: string; toolExecutionId: string }) {
+    return messageQuery.getToolExecutionDetail(params);
   }
 
-  async function getApplyPatchUiArtifact(params: { sessionId: string; itemId: number }) {
-    return await contextQueryApplication.getApplyPatchUiArtifact(params);
+  function getLastAssistantText(params: { workspaceId: string; sessionId: string }) {
+    return messageQuery.getLastAssistantText(params);
   }
 
-  async function getWriteUiArtifact(params: { sessionId: string; itemId: number }) {
-    return await contextQueryApplication.getWriteUiArtifact(params);
+  function getLatestTodolistToolExecution(params: { workspaceId: string; sessionId: string }) {
+    return messageQuery.getLatestTodolistToolExecution(params);
   }
 
-  function getRunState(sessionId: string): AgentSessionRunState {
-    return contextQueryApplication.getRunState(sessionId);
+  async function compactSession(params: {
+    sessionId: string;
+    body: AgentCompactSessionRequest;
+    runtime: ManualCompactionRuntime;
+  }): Promise<AgentCompactSessionResponse> {
+    workspaceDeletingFence.assertWritable(params.body.workspaceId);
+    return runSessionOperationExclusive(params.sessionId, () => {
+      // 前一个同 Session 操作释放后，删除可能已经开始；在调度前复检。
+      workspaceDeletingFence.assertWritable(params.body.workspaceId);
+      return manualCompactionApplication.schedule({
+        sessionId: params.sessionId,
+        body: params.body,
+        runtime: params.runtime,
+      });
+    });
   }
 
-  function getSessionStatusSummary(params: { sessionId: string; agentId?: string | null; selectedAgentId?: string | null }) {
-    return contextQueryApplication.getSessionStatusSummary(params);
+  function getMessageTimelineSnapshot(params: { workspaceId: string; sessionId: string; sinceRevision?: number }) {
+    return messageQuery.getSnapshot(params);
   }
 
-  async function revertSession(params: { sessionId: string; body: AgentRevertSessionRequest; runtime: Pick<AgentRuntimePort, "cancelSession"> }): Promise<AgentControlResult> {
+  async function getApplyPatchUiArtifact(params: {
+    sessionId: string;
+    workspaceId: string;
+    toolExecutionId: string;
+  }) {
+    const tool = messageQuery.getArtifactToolExecution({ ...params, toolName: "apply_patch" });
+    return await uiArtifactCapability.readApplyPatch(tool);
+  }
+
+  async function getWriteUiArtifact(params: {
+    sessionId: string;
+    workspaceId: string;
+    toolExecutionId: string;
+  }) {
+    const tool = messageQuery.getArtifactToolExecution({ ...params, toolName: "write" });
+    return await uiArtifactCapability.readWrite(tool);
+  }
+
+  function getMessageRunState(params: { workspaceId: string; sessionId: string }) {
+    return messageQuery.getRunState(params);
+  }
+
+  async function revertSession(params: {
+    sessionId: string;
+    body: AgentRevertSessionRequest;
+    runtime: Pick<AgentRuntimePort, "cancelSession">;
+  }): Promise<AgentMessageControlResult> {
     return await sessionInteractionApplication.revertSession(params);
   }
 
-  async function cancelSessionWithRuntime(params: { sessionId: string; workspaceId: string; runtime: AgentRuntimePort }) {
+  async function cancelSessionWithRuntime(params: {
+    sessionId: string;
+    workspaceId: string;
+    runtime: AgentRuntimePort;
+  }) {
     return runLifecycleApplication.cancelSession({
       sessionId: params.sessionId,
       workspaceId: params.workspaceId,
-      runtime: params.runtime
+      runtime: params.runtime,
     });
   }
 
   function recoverRunsOnStartup(params: {
     runtime: AgentRuntimePort;
-    beforeFinalCheck?: (candidate: { workspaceId: string; sessionId: string; runId: string; triggerItemId: number | null }) => void | Promise<void>;
+    beforeFinalCheck?: (candidate: {
+      workspaceId: string;
+      sessionId: string;
+      runId: string;
+      triggerMessageId: string | null;
+    }) => void | Promise<void>;
   }) {
     return runLifecycleApplication.recoverRunsOnStartup(params);
   }
 
-  function failRunsOnStartup() {
-    return runLifecycleApplication.failRunsOnStartup();
+  function createStreamingAssistantFromWorker(
+    params: AgentApiCreateStreamingAssistantRequest,
+  ) {
+    workspaceDeletingFence.assertWritable(params.workspaceId);
+    // A response-loss replay already has a durable Message and must not read
+    // the moved Session head or perform a new CAS calculation first.
+    const existing = getMessage(environment.db, params.messageId);
+    try {
+      if (existing) {
+        return {
+          message: appendStreamingAssistant(environment.db, {
+            ...params,
+            expectedHeadMessageId: existing.previousMessageId,
+            expectedRevision: 0,
+            id: params.messageId, originRunId: params.runId, replacesMessageId: null,
+          }),
+        };
+      }
+      const head = getMessageSessionHead(environment.db, params);
+      if (!head) throw new HttpError(404, "session not found");
+      return {
+        message: appendStreamingAssistant(environment.db, {
+          ...params,
+          expectedHeadMessageId: head.headMessageId,
+          expectedRevision: head.revision,
+          id: params.messageId, originRunId: params.runId, replacesMessageId: null,
+        }),
+      };
+    } catch (err) {
+      if (err instanceof AgentStreamingAssistantReplayMismatchError) {
+        throw new HttpError(409, err.message, err.code);
+      }
+      throw err;
+    }
   }
 
-  function appendContextItemFromWorker(params: AgentApiCreateContextItemRequest) {
-    return writebackApplication.appendContextItemFromWorker(params);
+  function flushAssistantPartsFromWorker(
+    params: AgentApiFlushAssistantPartsRequest,
+  ) {
+    workspaceDeletingFence.assertWritable(params.workspaceId);
+    return { result: flushStreamingParts(environment.db, params) };
   }
 
-  async function updateContextItemFromWorker(params: AgentApiUpdateContextItemRequest & { itemId: number }) {
-    return writebackApplication.updateContextItemFromWorker(params);
+  function archiveReadFromWorker(params: AgentApiArchiveReadRequest) {
+    return archiveRead(environment.db, params);
   }
 
+  function archiveSearchFromWorker(params: AgentApiArchiveSearchRequest) {
+    return archiveSearch(environment.db, params);
+  }
 
-  function updateRunStateFromWorker(params: AgentApiRunStateRequest) {
-    return runLifecycleApplication.updateRunStateFromWorker(params);
+  function resumeStreamingAssistantFromWorker(
+    params: AgentApiResumeStreamingAssistantRequest,
+  ) {
+    workspaceDeletingFence.assertWritable(params.workspaceId);
+    return { result: resumeStreamingAssistant(environment.db, params) };
+  }
+
+  function replaceStreamingAssistantFromWorker(
+    params: AgentApiReplaceStreamingAssistantRequest,
+  ) {
+    workspaceDeletingFence.assertWritable(params.workspaceId);
+    const head = getMessageSessionHead(environment.db, params);
+    if (!head) throw new HttpError(404, "session not found");
+    return replaceStreamingAssistant(environment.db, {
+      ...params,
+      expectedHeadMessageId: head.headMessageId,
+      expectedRevision: head.revision,
+    });
+  }
+
+  function completeAssistantFromWorker(
+    params: AgentApiCompleteAssistantRequest,
+  ) {
+    workspaceDeletingFence.assertWritable(params.workspaceId);
+    return { result: completeAssistantWithExecutions(environment.db, params) };
+  }
+
+  function updateToolExecutionFromWorker(
+    params: AgentApiUpdateToolExecutionRequest,
+  ) {
+    workspaceDeletingFence.assertWritable(params.workspaceId);
+    const tool = environment.db
+      .prepare(`select part.tool_name as toolName from agent_tool_execution execution join agent_message_part part on part.id = execution.call_part_id where execution.id = ?`)
+      .get(params.toolExecutionId) as { toolName: string | null } | undefined;
+    const structuredResult = tool && STRUCTURED_RESULT_TOOL_NAMES.has(tool.toolName ?? "")
+      ? params.structuredResult
+      : undefined;
+    const result = updateToolExecution(environment.db, {
+      ...params,
+      structuredResult,
+      executionId: params.toolExecutionId,
+    });
+    if (result === "updated" && params.status === "completed") {
+      const goal =
+        structuredResult && typeof structuredResult === "object"
+          ? (structuredResult as { goal?: unknown }).goal
+          : undefined;
+      const title =
+        tool?.toolName === "todolist" ? normalizeTodolistGoal(goal) : "";
+      if (title)
+        updateAutoMessageSessionTitle(environment.db, {
+          sessionId: params.sessionId,
+          title,
+          updatedAt: params.updatedAt,
+        });
+    }
+    return { result };
+  }
+
+  function updateRunNoticeFromWorker(params: AgentApiUpdateRunNoticeRequest) {
+    workspaceDeletingFence.assertWritable(params.workspaceId);
+    return { result: updateMessageRunNotice(environment.db, params) };
   }
 
   function completeRunFromWorker(params: AgentApiRunCompleteRequest) {
+    workspaceDeletingFence.assertWritable(params.workspaceId);
     return runLifecycleApplication.completeRunFromWorker(params);
   }
 
@@ -1916,67 +2309,137 @@ function createAgentApplications(
     workspaceId: string;
     parentSessionId: string;
     parentRunId: string;
-    parentToolItemId: number;
+    parentToolExecutionId: string;
   }) {
-    const parentSession = getAgentSession(environment.db, params.parentSessionId);
+    const parentSession = environment.db
+      .prepare(
+        `
+      select id, workspace_id as workspaceId, title, kind,
+             head_message_id as headMessageId, revision
+      from agent_session where id = ?
+    `,
+      )
+      .get(params.parentSessionId) as
+      | {
+          id: string;
+          workspaceId: string;
+          title: string;
+          kind: "primary" | "subtask";
+          headMessageId: string | null;
+          revision: number;
+        }
+      | undefined;
     if (!parentSession) throw new HttpError(404, "parent session not found");
-    if (parentSession.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
+    if (parentSession.workspaceId !== params.workspaceId)
+      throw new HttpError(400, "workspaceId mismatch");
 
-    const parentRun = getRunRecord(environment.db, params.parentRunId);
-    if (!parentRun || parentRun.sessionId !== params.parentSessionId || parentRun.workspaceId !== params.workspaceId) {
+    const parentRun = environment.db
+      .prepare(
+        `
+      select run_id as runId, workspace_id as workspaceId, session_id as sessionId,
+             trigger_message_id as triggerMessageId, agent_id as agentId, provider_id as providerId,
+             model_id as modelId, subtask_depth as subtaskDepth, parent_run_id as parentRunId,
+             parent_tool_execution_id as parentToolExecutionId, status,
+             created_at as createdAt, updated_at as updatedAt
+      from agent_run where run_id = ?
+    `,
+      )
+      .get(params.parentRunId) as
+      import("./subtask/subtask-ports.js").SubtaskRunRecord | undefined;
+    if (
+      !parentRun ||
+      parentRun.sessionId !== params.parentSessionId ||
+      parentRun.workspaceId !== params.workspaceId
+    ) {
       throw new HttpError(404, "parent run not found");
     }
-    const parentUiLocale = normalizeAgentUiLocale(parentRun.uiLocale);
-
-    const anchor = getContextItemRecordById(environment.db, params.parentToolItemId);
-    if (!anchor || anchor.sessionId !== params.parentSessionId || anchor.workspaceId !== params.workspaceId || anchor.kind !== "tool") {
-      throw new HttpError(400, "invalid subtask anchor");
+    const anchor = environment.db
+      .prepare(
+        `
+      select execution.id as toolExecutionId, execution.origin_session_id as originSessionId,
+             execution.origin_run_id as originRunId, part.message_id as assistantMessageId,
+             part.tool_name as toolName
+      from agent_tool_execution execution
+      join agent_message_part part on part.id = execution.call_part_id
+      where execution.id = ?
+    `,
+      )
+      .get(params.parentToolExecutionId) as
+      | {
+          toolExecutionId: string;
+          originSessionId: string | null;
+          originRunId: string | null;
+          assistantMessageId: string;
+          toolName: string | null;
+        }
+      | undefined;
+    if (
+      !anchor ||
+      anchor.originSessionId !== params.parentSessionId ||
+      anchor.originRunId !== params.parentRunId
+    ) {
+      throw new HttpError(
+        400,
+        "invalid subtask anchor run",
+        AgentSubtaskErrorCode.AnchorRunMismatch,
+      );
     }
-    if (anchor.runId !== params.parentRunId) {
-      throw new HttpError(400, "invalid subtask anchor run", AgentSubtaskErrorCode.AnchorRunMismatch);
-    }
-    if (anchor.output.type !== "tool" || anchor.output.toolName !== "subtask") {
-      throw new HttpError(400, "invalid subtask anchor", AgentSubtaskErrorCode.AnchorInvalid);
+    if (anchor.toolName !== "subtask") {
+      throw new HttpError(
+        400,
+        "invalid subtask anchor",
+        AgentSubtaskErrorCode.AnchorInvalid,
+      );
     }
 
     return {
       parentSession,
       parentRun,
-      parentUiLocale,
-      anchor
+      parentUiLocale: null,
+      anchor: {
+        toolExecutionId: anchor.toolExecutionId,
+        assistantMessageId: anchor.assistantMessageId,
+      },
     };
   }
 
-  function getSubtaskPreforkPlanFromWorker(params: AgentApiSubtaskPreforkPlanRequest) {
+  function getSubtaskPreforkPlanFromWorker(
+    params: AgentApiSubtaskPreforkPlanRequest,
+  ) {
     return subtaskApplication.getPreforkPlan(params);
   }
 
-  async function startSubtaskRunFromWorker(params: AgentApiSubtaskStartRequest) {
+  async function startSubtaskRunFromWorker(
+    params: AgentApiSubtaskStartRequest,
+  ) {
+    workspaceDeletingFence.assertWritable(params.workspaceId);
     return await subtaskApplication.startSubtask(params);
   }
 
-  function resolveSubtaskForkBoundaryItemId(params: {
+  function resolveSubtaskForkBoundaryMessageId(params: {
     workspaceId: string;
     sessionId: string;
-    anchor: AgentContextItemRecord;
+    assistantMessageId: string;
   }) {
-    let cursorId = params.anchor.prevId;
-    while (cursorId != null) {
-      const item = getContextItemRecordById(environment.db, cursorId);
-      if (!item || item.workspaceId !== params.workspaceId || item.sessionId !== params.sessionId) {
-        throw new HttpError(400, "invalid subtask fork boundary", AgentSubtaskErrorCode.ForkBoundaryInvalid);
-      }
-      if (
-        item.kind === "assistant"
-        && item.runId === params.anchor.runId
-        && item.turnId === params.anchor.turnId
-        && item.step === params.anchor.step
-      ) {
-        return item.prevId;
-      }
-      cursorId = item.prevId;
-    }
-    return null;
+    const row = environment.db
+      .prepare(
+        `
+      select previous_message_id as previousMessageId
+      from agent_message
+      where id = @assistantMessageId
+        and workspace_id = @workspaceId
+        and origin_session_id = @sessionId
+        and type = 'assistant'
+    `,
+      )
+      .get(params) as { previousMessageId: string | null } | undefined;
+    if (!row)
+      throw new HttpError(
+        400,
+        "invalid subtask fork boundary",
+        AgentSubtaskErrorCode.ForkBoundaryInvalid,
+      );
+    return row.previousMessageId;
   }
 
   function getSubtaskRunResultFromWorker(params: AgentApiSubtaskResultRequest) {
@@ -1988,10 +2451,14 @@ function createAgentApplications(
   }
 
   function getRunFinalText(params: { runId: string }) {
-    return peripheralAgentQueryApplication.getRunFinalText(params);
+    return messageQuery.getRunFinalText(params.runId);
   }
 
-  function getExecutionProfileForRun(params: { workspaceId: string; sessionId: string; runId: string }) {
+  function getExecutionProfileForRun(params: {
+    workspaceId: string;
+    sessionId: string;
+    runId: string;
+  }) {
     return readSideApplication.getExecutionProfileForRun(params);
   }
 
@@ -2002,12 +2469,14 @@ function createAgentApplications(
     providerId: string;
     modelId: string;
   }) {
-    return environment.resolveExecutionProfile( {
+    return environment.resolveExecutionProfile({
       surface: input.surface,
       agentIdFromRun: input.agentId,
-      workspaceEnablement: environment.getWorkspaceEnabledAgentIds( input.workspaceId),
+      workspaceEnablement: environment.getWorkspaceEnabledAgentIds(
+        input.workspaceId,
+      ),
       providerIdFromRun: input.providerId,
-      modelIdFromRun: input.modelId
+      modelIdFromRun: input.modelId,
     });
   }
 
@@ -2015,22 +2484,33 @@ function createAgentApplications(
     return environment.getAgentRuntimeSettings();
   }
 
-  function getSingleCallModelProfileForRun(params: { workspaceId: string; sessionId: string; runId: string }) {
-    const session = getAgentSession(environment.db, params.sessionId);
+  function getSingleCallModelProfileForRun(params: {
+    workspaceId: string;
+    sessionId: string;
+    runId: string;
+  }) {
+    const session = getMessageSessionById(environment.db, params.sessionId);
     if (!session) throw new HttpError(404, "session not found");
-    if (session.workspaceId !== params.workspaceId) throw new HttpError(400, "workspaceId mismatch");
+    if (session.workspaceId !== params.workspaceId)
+      throw new HttpError(400, "workspaceId mismatch");
 
     const run = getRunRecord(environment.db, params.runId);
-    if (!run || run.sessionId !== params.sessionId || run.workspaceId !== params.workspaceId) {
+    if (
+      !run ||
+      run.sessionId !== params.sessionId ||
+      run.workspaceId !== params.workspaceId
+    ) {
       throw new HttpError(404, "run not found");
     }
 
-    const profile = environment.resolveExecutionProfile( {
+    const profile = environment.resolveExecutionProfile({
       surface: session.kind === "subtask" ? "subtask" : "user",
       agentIdFromRun: run.agentId,
-      workspaceEnablement: environment.getWorkspaceEnabledAgentIds( session.workspaceId),
+      workspaceEnablement: environment.getWorkspaceEnabledAgentIds(
+        session.workspaceId,
+      ),
       providerIdFromRun: run.providerId,
-      modelIdFromRun: run.modelId
+      modelIdFromRun: run.modelId,
     });
 
     return {
@@ -2041,10 +2521,10 @@ function createAgentApplications(
         agentId: profile.agent.id,
         providerId: profile.provider.id,
         modelId: profile.model.id,
-        source: "run_snapshot" as const
+        source: "run_snapshot" as const,
       },
       provider: profile.provider,
-      model: profile.model
+      model: profile.model,
     };
   }
 
@@ -2056,306 +2536,50 @@ function createAgentApplications(
     return environment.listPluginRuntimeSnapshots();
   }
 
-  async function compactContextFromWorker(params: AgentApiCompactContextRequest) {
-    return runSessionOperationExclusive(params.sessionId, () => compactionArchiveApplication.applyWorkerCompaction(params));
-  }
-
-  async function clearSession(sessionId: string, body: AgentClearSessionRequest & { uiLocale?: AgentUiLocale | null }): Promise<AgentControlResult> {
-    return runSessionOperationExclusive(sessionId, () => compactionArchiveApplication.clearSession({
-      sessionId,
-      workspaceId: body.workspaceId,
-      reason: body.reason,
-      uiLocale: normalizeAgentUiLocale(body.uiLocale)
-    }));
-  }
-
-  async function archiveSearchFromWorker(params: {
-    workspaceId: string;
-    sessionId: string;
-    query: string;
-    beforePos?: number;
-    maxHits?: number;
-    maxChars?: number;
-    snippet?: boolean;
-    regex?: boolean;
-  }) {
-    return archiveReadApplication.search(params);
+  async function commitCompactionFromWorker(params: AgentApiCommitCompactionRequest) {
+    try {
+      const message = commitCompactionMessageWithRunFence(environment.db, {
+        id: params.messageId,
+        workspaceId: params.workspaceId,
+        sessionId: params.sessionId,
+        runId: params.runId,
+        expectedHeadMessageId: params.expectedHeadMessageId,
+        expectedRevision: params.expectedRevision,
+        textPartId: params.textPartId,
+        text: params.summaryText.trim(),
+        createdAt: params.createdAt,
+      });
+      if (!message) {
+        return { result: "ignored" as const, summaryMessageId: null };
+      }
+      return { result: "updated" as const, summaryMessageId: message.id };
+    } catch (error) {
+      if (error instanceof AgentMessageConflictError)
+        throw conflictToHttpError(error);
+      throw error;
+    }
   }
 
   async function buildPromptMessagesForSession(params: {
     workspaceId: string;
     sessionId: string;
-    triggerItemId: number | null;
-    // 仅 prompt-context 需要 locale 用于 compaction snippet 文案。
+    triggerMessageId: string | null;
     compactionSnippetUiLocale: AgentUiLocale | null;
+    pendingAssistantMessageIds?: ReadonlySet<string>;
   }) {
-    const visible = getSessionVisibleItems(environment.db, params.workspaceId, params.sessionId);
-    const hasCompactionBoundaryMarker = visible.some((item) => {
-      if (!item) return false;
-      if (item.kind !== "system" || item.status !== "completed") return false;
-      if (item.output.type !== "system_text") return false;
-      const boundary = typeof item.boundaryReason === "string" ? item.boundaryReason.trim() : "";
-      if (boundary !== "compaction") return false;
-      return shouldIncludeSystemTextInPrompt(item.output.text);
+    void params.compactionSnippetUiLocale;
+    const source = messageQuery.getRuntimeTranscriptSource({
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
     });
-    const transcript = hasCompactionBoundaryMarker
-      ? getSessionTranscriptItems(environment.db, params.workspaceId, params.sessionId)
-      : ([] as AgentContextItemRecord[]);
-    const latestArchiveAt = hasCompactionBoundaryMarker
-      ? transcript.reduce((max, item) => {
-          if (typeof item.archiveAt !== "number" || !Number.isFinite(item.archiveAt)) return max;
-          return Math.max(max, item.archiveAt);
-        }, 0)
-      : 0;
-    const messages: PromptMessage[] = [];
-    let mostRecentFailedAssistantId: number | null = null;
-    const assistantHasToolItems = new Set<number>();
-    for (let i = visible.length - 1; i >= 0; i -= 1) {
-      const item = visible[i];
-      if (!item) continue;
-      if (mostRecentFailedAssistantId == null && item.kind === "assistant" && item.output.type === "assistant_text" && item.status === "failed") {
-        mostRecentFailedAssistantId = item.id;
-      }
-      if (item.kind !== "tool") continue;
-      for (let j = i - 1; j >= 0; j -= 1) {
-        const prev = visible[j];
-        if (!prev) continue;
-        if (prev.kind !== "assistant") continue;
-        if (prev.runId === item.runId && prev.turnId === item.turnId && prev.step === item.step) {
-          assistantHasToolItems.add(prev.id);
-          break;
-        }
-      }
-    }
-    for (let i = 0; i < visible.length; i += 1) {
-      const item = visible[i];
-      if (!item) continue;
-
-      if (item.kind === "user" && item.output.type === "user_text") {
-        if (item.output.text) messages.push({ role: "user", content: item.output.text });
-        continue;
-      }
-
-      if (item.kind === "user" && item.output.type === "user_message") {
-        const attachmentCount = item.output.attachments.length;
-        if (item.id !== params.triggerItemId) {
-          messages.push({ role: "user", content: buildSafeUserMessageText(item.output.text, attachmentCount) });
-          continue;
-        }
-        const content: Array<PromptTextPart | PromptAttachmentRefPart> = [
-          {
-            type: "text",
-            text: item.output.text || buildImageOnlyTriggerPromptText(attachmentCount)
-          },
-          ...item.output.attachments.map((attachment) => ({
-            type: "attachment_ref" as const,
-            workspaceId: params.workspaceId,
-            attachmentId: attachment.attachmentId,
-            mediaType: attachment.mediaType,
-            filename: attachment.filename
-          }))
-        ];
-        messages.push({ role: "user", content });
-        continue;
-      }
-
-      if (item.kind === "system" && item.output.type === "system_text" && item.status === "completed") {
-        if (!shouldIncludeSystemTextInPrompt(item.output.text)) continue;
-        messages.push({ role: "system", content: item.output.text });
-
-        // compaction: 在摘要后注入“压缩前尾部摘录”(归档原文 + archive 工具提示).
-        const boundary = typeof item.boundaryReason === "string" ? item.boundaryReason.trim() : "";
-        if (boundary === "compaction") {
-          const summaryItemId = item.id;
-          let snippetText = "";
-          try {
-            snippetText = await compactionSnippetCache.readBestEffort({
-              workspaceId: params.workspaceId,
-              sessionId: params.sessionId,
-              summaryItemId
-            });
-          } catch {
-            snippetText = "";
-          }
-
-          if (!snippetText.trim()) {
-            try {
-              if (latestArchiveAt <= 0) {
-                throw new Error("archive batch not found");
-              }
-              const batch = transcript.filter((t) => t.archiveAt === latestArchiveAt);
-              // 归档会过滤“空 assistant(仅 tool-call)”,若直接按 item 取 tail 会导致最终 pos 行数偏少。
-              // 这里先按“可归档行”过滤,确保 tail 的 20 条能映射到归档文件中的实际行。
-              const batchArchivable = batch.filter((t) => buildArchiveLine(t) != null);
-              const last20 = batchArchivable.slice(-20);
-              const last10UserAssistantSystem = batchArchivable
-                .filter((t) => {
-                  if (t.kind === "user" && (t.output.type === "user_text" || t.output.type === "user_message")) {
-                    return t.output.type === "user_message"
-                      ? true
-                      : String(t.output.text || "").trim().length > 0;
-                  }
-                  if (t.kind === "assistant" && t.output.type === "assistant_text") return String(t.output.text || "").trim().length > 0;
-                  if (t.kind === "system" && t.output.type === "system_text") {
-                    const text = String(t.output.text || "").trim();
-                    if (!text) return false;
-                    // 与 prompt 构造保持一致: 排除 [run] 开头的运行状态系统消息。
-                    return shouldIncludeSystemTextInPrompt(text);
-                  }
-                  return false;
-                })
-                .slice(-10);
-
-              const mergedIds: number[] = [];
-              const seen = new Set<number>();
-              for (const row of [...last10UserAssistantSystem, ...last20]) {
-                if (!row) continue;
-                if (seen.has(row.id)) continue;
-                seen.add(row.id);
-                mergedIds.push(row.id);
-              }
-
-              const posLines = await archiveStorage.findExcerptByItemIds({
-                workspaceId: params.workspaceId,
-                sessionId: params.sessionId,
-                itemIds: mergedIds
-              });
-
-              if (posLines.length > 0) {
-                const excerptLines: string[] = [];
-                let prevPos = 0;
-                for (const row of posLines) {
-                  if (prevPos > 0 && row.pos !== prevPos + 1) {
-                    excerptLines.push("...");
-                  }
-                  excerptLines.push(`pos=${row.pos} | ${row.line}`);
-                  prevPos = row.pos;
-                }
-                const minPos = Math.min(...posLines.map((r: { pos: number }) => r.pos));
-                snippetText = buildCompactionSnippetMessageText({
-                  excerptLines,
-                  minPos,
-                  uiLocale: params.compactionSnippetUiLocale
-                });
-                await compactionSnippetCache.writeBestEffort({
-                  workspaceId: params.workspaceId,
-                  sessionId: params.sessionId,
-                  summaryItemId,
-                  text: snippetText
-                });
-              }
-            } catch (err) {
-              logger.warn({ err, sessionId: params.sessionId }, "failed to build compaction snippet");
-              snippetText = "";
-            }
-          }
-
-          if (snippetText.trim()) {
-            messages.push({ role: "system", content: snippetText });
-          }
-        }
-        continue;
-      }
-
-      const includeFailedAssistant =
-        item.kind === "assistant" &&
-        item.output.type === "assistant_text" &&
-        item.status === "failed" &&
-        item.id === mostRecentFailedAssistantId &&
-        !assistantHasToolItems.has(item.id) &&
-        String(item.output.text || "").trim().length > 0;
-
-      if (item.kind !== "assistant" || item.output.type !== "assistant_text" || (item.status !== "completed" && !includeFailedAssistant)) {
-        continue;
-      }
-
-      const assistantParts: Array<PromptTextPart | PromptToolCallPart> = [];
-      if (item.output.text) {
-        assistantParts.push({ type: "text", text: item.output.text });
-      }
-
-      const toolResultParts: PromptToolResultPart[] = [];
-      let cursor = i + 1;
-      while (cursor < visible.length) {
-        const toolItem = visible[cursor];
-        if (!toolItem || toolItem.kind !== "tool") break;
-        if (toolItem.runId !== item.runId || toolItem.turnId !== item.turnId || toolItem.step !== item.step) break;
-        if (toolItem.output.type !== "tool" || !TERMINAL_TOOL_ITEM_STATUS.has(toolItem.status)) {
-          cursor += 1;
-          continue;
-        }
-
-        const toolCallId = typeof toolItem.output.toolCallId === "string" ? toolItem.output.toolCallId.trim() : "";
-        if (!toolCallId) {
-          cursor += 1;
-          continue;
-        }
-        const toolInput =
-          toolItem.output.args && typeof toolItem.output.args === "object" && !Array.isArray(toolItem.output.args)
-            ? (toolItem.output.args as Record<string, unknown>)
-            : {};
-        const isWriteTool = toolItem.output.toolName === "write";
-        const hasCompleteWriteInput =
-          typeof toolInput.filePath === "string" &&
-          toolInput.filePath.trim().length > 0 &&
-          typeof toolInput.content === "string";
-        if (isWriteTool && !hasCompleteWriteInput) {
-          const filePath = typeof toolInput.filePath === "string" ? toolInput.filePath.trim() : "";
-          const resultText = (typeof toolItem.output.error === "string" && toolItem.output.error.trim()
-            ? toolItem.output.error
-            : resolveToolOutputText(toolItem.output).trim()) || `status=${toolItem.status}`;
-          assistantParts.push({
-            type: "text",
-            text: filePath
-              ? `[Historical write input unavailable: ${filePath}; status=${toolItem.status}; result=${resultText}]`
-              : `[Historical write input unavailable; status=${toolItem.status}; result=${resultText}]`
-          });
-          cursor += 1;
-          continue;
-        }
-        const promptInput = projectToolCallInputForPrompt({
-          toolName: toolItem.output.toolName,
-          status: toolItem.status,
-          args: toolInput
-        });
-        assistantParts.push({
-          type: "tool-call",
-          toolCallId,
-          toolName: toolItem.output.toolName,
-          input: promptInput
-        });
-
-        const promptToolText = resolveToolOutputText(toolItem.output).trim() || `status=${toolItem.status}`;
-        const toolErrorText =
-          typeof toolItem.output.error === "string" && toolItem.output.error.trim()
-            ? toolItem.output.error
-            : resolveToolOutputText(toolItem.output).trim() || `status=${toolItem.status}`;
-        const toolOutput = toolItem.output.error
-          ? { type: "error-text" as const, value: toolErrorText }
-          : { type: "text" as const, value: promptToolText };
-        toolResultParts.push({
-          type: "tool-result",
-          toolCallId,
-          toolName: toolItem.output.toolName,
-          output: toolOutput
-        });
-        cursor += 1;
-      }
-
-      if (assistantParts.length === 1 && assistantParts[0].type === "text") {
-        messages.push({ role: "assistant", content: assistantParts[0].text });
-      } else if (assistantParts.length > 0) {
-        messages.push({ role: "assistant", content: assistantParts });
-      }
-
-      if (!includeFailedAssistant && toolResultParts.length > 0) {
-        messages.push({ role: "tool", content: toolResultParts });
-      }
-
-      i = cursor - 1;
-    }
-
-    return { messages, visible };
+    return {
+      messages: runtimeTranscriptProjector.project({
+        workspaceId: params.workspaceId,
+        triggerMessageId: params.triggerMessageId,
+        stopBeforeAssistantMessageIds: params.pendingAssistantMessageIds,
+        ...source,
+      }),
+    };
   }
 
   function resolveUiLocaleForSessionContext(params: {
@@ -2363,17 +2587,11 @@ function createAgentApplications(
     sessionId: string;
     activeRunId: string | null;
   }): AgentUiLocale | null {
-    const activeRunUiLocale = params.activeRunId
-      ? normalizeAgentUiLocale(getRunRecord(environment.db, params.activeRunId)?.uiLocale ?? null)
-      : null;
-    if (activeRunUiLocale) return activeRunUiLocale;
-
-    const sessionLatestRunUiLocale = getLatestRunUiLocaleBySession(environment.db, {
-      workspaceId: params.workspaceId,
-      sessionId: params.sessionId
-    });
-    if (sessionLatestRunUiLocale) return sessionLatestRunUiLocale;
-    return getLatestRunUiLocaleGlobal(environment.db);
+    // Message-model agent_run no longer persists ui_locale. Do not query the
+    // removed column or infer locale from unrelated runs; callers explicitly
+    // support a locale-neutral prompt until locale gains a new authority.
+    void params;
+    return null;
   }
 
   async function getMessagesContext(params: {
@@ -2384,53 +2602,86 @@ function createAgentApplications(
     return readSideApplication.getMessagesContext(params);
   }
 
-  async function archiveReadFromWorker(params: {
+  async function getPromptContextForRun(params: {
     workspaceId: string;
     sessionId: string;
-    beforePos?: number;
-    lineCount?: number;
-    maxChars?: number;
+    runId: string;
   }) {
-    return archiveReadApplication.read(params);
-  }
-
-  async function getPromptContextForRun(params: { workspaceId: string; sessionId: string; runId: string }) {
     return readSideApplication.getPromptContextForRun(params);
   }
 
-  async function getAttachmentContent(attachmentId: string) {
+  async function getAttachmentContent(params: {
+    workspaceId: string;
+    sessionId: string;
+    attachmentId: string;
+  }) {
     try {
-      assertAgentAttachmentId(attachmentId);
-      const attachment = getAuthorizedAttachmentById(environment.db, attachmentId);
-      if (!attachment || attachment.storageKey !== attachment.attachmentId) return null;
-      const attachmentsRoot = agentAttachmentsRoot(environment.dataDir);
-      const byWorkspaceDir = path.join(attachmentsRoot, "by_workspace");
-      const workspaceDir = agentAttachmentWorkspaceDir(environment.dataDir, attachment.workspaceId);
-      const filePath = agentAttachmentFilePath(environment.dataDir, attachment.workspaceId, attachment.storageKey);
-      const [attachmentsRootStat, byWorkspaceStat, workspaceStat, fileStat] = await Promise.all([
-        fs.lstat(attachmentsRoot), fs.lstat(byWorkspaceDir), fs.lstat(workspaceDir), fs.lstat(filePath)
-      ]);
-      if (
-        !attachmentsRootStat.isDirectory() || attachmentsRootStat.isSymbolicLink() ||
-        !byWorkspaceStat.isDirectory() || byWorkspaceStat.isSymbolicLink() ||
-        !workspaceStat.isDirectory() || workspaceStat.isSymbolicLink() ||
-        !fileStat.isFile() || fileStat.isSymbolicLink() || fileStat.size !== attachment.byteSize
-      ) return null;
-      const [realAttachmentsRoot, realWorkspaceDir, realFilePath] = await Promise.all([
-        fs.realpath(agentAttachmentsRoot(environment.dataDir)), fs.realpath(workspaceDir), fs.realpath(filePath)
-      ]);
-      if (
-        realWorkspaceDir === realAttachmentsRoot || !realWorkspaceDir.startsWith(`${realAttachmentsRoot}${path.sep}`) ||
-        realFilePath === realWorkspaceDir || !realFilePath.startsWith(`${realWorkspaceDir}${path.sep}`)
-      ) return null;
-      return { filePath: realFilePath, mediaType: attachment.mediaType, byteSize: attachment.byteSize };
+      assertAgentAttachmentId(params.attachmentId);
+      const attachment = environment.db.prepare(
+        `
+          with recursive visible(message_id) as (
+            select head_message_id
+            from agent_session
+            where id = @sessionId
+              and workspace_id = @workspaceId
+              and head_message_id is not null
+            union all
+            select message.previous_message_id
+            from agent_message message
+            join visible on visible.message_id = message.id
+            join agent_session session
+              on session.id = @sessionId and session.workspace_id = @workspaceId
+            where visible.message_id <> session.context_root_message_id
+              and message.previous_message_id is not null
+          )
+          select attachment.id as attachmentId,
+            attachment.workspace_id as workspaceId,
+            attachment.storage_key as storageKey,
+            attachment.media_type as mediaType,
+            attachment.byte_size as byteSize
+          from agent_attachment attachment
+          join agent_message_part part
+            on part.attachment_id = attachment.id and part.type = 'image'
+          join agent_message message
+            on message.id = part.message_id
+          join visible on visible.message_id = message.id
+          where attachment.id = @attachmentId
+            and attachment.workspace_id = @workspaceId
+            and message.workspace_id = attachment.workspace_id
+          limit 1
+        `,
+      ).get(params) as {
+        attachmentId: string;
+        workspaceId: string;
+        storageKey: string;
+        mediaType: "image/png" | "image/jpeg" | "image/webp";
+        byteSize: number;
+      } | undefined;
+      if (!attachment || attachment.storageKey !== attachment.attachmentId)
+        return null;
+      const resolved = await resolveSafeAgentAttachmentContentPath({
+        dataDir: environment.dataDir,
+        workspaceId: attachment.workspaceId,
+        storageKey: attachment.storageKey,
+        expectedByteSize: attachment.byteSize,
+      });
+      if (!resolved) return null;
+      return {
+        handle: resolved.handle,
+        filePath: resolved.filePath,
+        mediaType: attachment.mediaType,
+        byteSize: attachment.byteSize,
+      };
     } catch {
       // Deliberately hide authorization, path and filesystem distinctions.
       return null;
     }
   }
 
-  function checkChannelSenderAllowlist(input: { pluginId: string; senderId: string }) {
+  function checkChannelSenderAllowlist(input: {
+    pluginId: string;
+    senderId: string;
+  }) {
     const pluginId = String(input.pluginId || "").trim();
     const senderId = String(input.senderId || "").trim();
 
@@ -2440,12 +2691,18 @@ function createAgentApplications(
       const channel = String(it.channel || "").trim();
       const itemSenderId = String(it.senderId || "").trim();
       if (!channel || !itemSenderId) continue;
-      const role = String((it as any).role || "").trim() === "admin" ? "admin" : "user";
+      const role =
+        String((it as any).role || "").trim() === "admin" ? "admin" : "user";
       bySettings.set(`${channel}\u0000${itemSenderId}`, role);
     }
-    if (bySettings.size === 0) return { allowed: false, reason: "channel sender allowlist is empty" as const };
+    if (bySettings.size === 0)
+      return {
+        allowed: false,
+        reason: "channel sender allowlist is empty" as const,
+      };
     const role = bySettings.get(`${pluginId}\u0000${senderId}`);
-    if (!role) return { allowed: false, reason: "sender is not allowed" as const };
+    if (!role)
+      return { allowed: false, reason: "sender is not allowed" as const };
     return { allowed: true, role };
   }
 
@@ -2466,31 +2723,40 @@ function createAgentApplications(
     sendMessage,
     compactSession,
     revertSession,
-    listSessionModelOverrides: (params) => sessionAgentModelApplication.list(params),
-    setSessionModelOverride: (params) => sessionAgentModelApplication.put(params),
-    resetSessionModelOverride: (params) => sessionAgentModelApplication.delete(params)
+    listSessionModelOverrides: (params) =>
+      sessionAgentModelApplication.list(params),
+    setSessionModelOverride: (params) =>
+      sessionAgentModelApplication.put(params),
+    resetSessionModelOverride: (params) =>
+      sessionAgentModelApplication.delete(params),
   });
   const query = createQueryFacadeCapabilities({
     listRecentSessions,
     listAvailableAgents,
     listRecentWorkspaces,
-    getContextItems,
-    getContextItem,
+      getMessageTimeline,
+      getMessageDetail,
+      getToolExecutionDetail,
+      getLastAssistantText,
+      getLatestTodolistToolExecution,
+      getMessageTimelineSnapshot,
+    getMessageRunState,
     getApplyPatchUiArtifact,
     getWriteUiArtifact,
-    getRunState,
-    getSessionStatusSummary,
     getRunFinalText,
-    getAttachmentContent
+    getAttachmentContent,
   });
   const lifecycle = createLifecycleFacadeCapabilities({
     cancelSessionWithRuntime,
     recoverRunsOnStartup,
-    failRunsOnStartup,
-    appendContextItemFromWorker,
-    updateContextItemFromWorker,
-    updateRunStateFromWorker,
-    completeRunFromWorker
+    createStreamingAssistantFromWorker,
+    flushAssistantPartsFromWorker,
+    resumeStreamingAssistantFromWorker,
+    replaceStreamingAssistantFromWorker,
+    completeAssistantFromWorker,
+    updateToolExecutionFromWorker,
+    updateRunNoticeFromWorker,
+    completeRunFromWorker,
   });
   const worker = createWorkerFacadeCapabilities({
     getSubtaskPreforkPlanFromWorker,
@@ -2501,13 +2767,12 @@ function createAgentApplications(
     getSingleCallModelProfileForRun,
     getAgentMcpSettingsFromWorker,
     getPluginRuntimeSnapshotsFromWorker,
-    compactContextFromWorker,
-    clearSession,
-    archiveSearchFromWorker,
+    commitCompactionFromWorker,
     getMessagesContext,
-    archiveReadFromWorker,
     getPromptContextForRun,
-    checkChannelSenderAllowlist
+    archiveReadFromWorker,
+    archiveSearchFromWorker,
+    checkChannelSenderAllowlist,
   });
 
   const serviceCapabilities = { session, query, lifecycle, worker };
@@ -2517,99 +2782,119 @@ function createAgentApplications(
     lifecycleActiveSubtaskChildQuery: sqliteSubtaskLineagePersistence,
     subtaskLineagePersistence: sqliteSubtaskLineagePersistence,
     subtaskChildRunActivator: sqliteLifecyclePersistence,
-    runPromptStaticCache
+    runPromptStaticCache,
   });
 
   return {
     serviceCapabilities,
-    testOnly
+    testOnly,
+    runtimeHandoffCoordinator,
+    dispose: () => runLifecycleApplication.dispose(),
   };
 }
 
-export type AgentServiceCapabilities = ReturnType<typeof createAgentApplications>["serviceCapabilities"];
+export type AgentServiceCapabilities = ReturnType<
+  typeof createAgentApplications
+>["serviceCapabilities"];
 
-function createCompositionTestReferences<T extends {
-  lifecyclePersistence: SqliteRunLifecyclePersistence;
-  lifecycleActiveSubtaskChildQuery: SqliteSubtaskLineagePersistence;
-  subtaskLineagePersistence: SqliteSubtaskLineagePersistence;
-  subtaskChildRunActivator: SqliteRunLifecyclePersistence;
-  runPromptStaticCache: RunPromptStaticCache<unknown>;
-}>(references: T) {
+function createCompositionTestReferences<
+  T extends {
+    lifecyclePersistence: SqliteRunLifecyclePersistence;
+    lifecycleActiveSubtaskChildQuery: SqliteSubtaskLineagePersistence;
+    subtaskLineagePersistence: SqliteSubtaskLineagePersistence;
+    subtaskChildRunActivator: SqliteRunLifecyclePersistence;
+    runPromptStaticCache: RunPromptStaticCache<unknown>;
+  },
+>(references: T) {
   return references;
 }
 
-function createLocalRuntimeExecutionPort(capabilities: Pick<AgentServiceCapabilities, "session" | "lifecycle" | "worker">): LocalAgentRuntimeExecutionPort {
+function createLocalRuntimeExecutionPort(
+  capabilities: Pick<
+    AgentServiceCapabilities,
+    "session" | "lifecycle" | "worker"
+  >,
+): LocalAgentRuntimeExecutionPort {
   return {
-    getPromptContextForRun: (params) => capabilities.worker.getPromptContextForRun(params),
-    appendContextItemFromWorker: (params) => capabilities.lifecycle.appendContextItemFromWorker(params),
-    updateContextItemFromWorker: (params) => capabilities.lifecycle.updateContextItemFromWorker(params),
-    updateRunStateFromWorker: (params) => capabilities.lifecycle.updateRunStateFromWorker(params),
-    completeRunFromWorker: (params) => capabilities.lifecycle.completeRunFromWorker(params),
-    getSession: (sessionId) => capabilities.session.getSession(sessionId)
+    getPromptContextForRun: (params) =>
+      capabilities.worker.getPromptContextForRun(params),
+    archiveReadFromWorker: (params) =>
+      capabilities.worker.archiveReadFromWorker(params),
+    archiveSearchFromWorker: (params) =>
+      capabilities.worker.archiveSearchFromWorker(params),
+    createStreamingAssistantFromWorker: (params) =>
+      capabilities.lifecycle.createStreamingAssistantFromWorker(params),
+    flushAssistantPartsFromWorker: (params) =>
+      capabilities.lifecycle.flushAssistantPartsFromWorker(params),
+    resumeStreamingAssistantFromWorker: (params) =>
+      capabilities.lifecycle.resumeStreamingAssistantFromWorker(params),
+    replaceStreamingAssistantFromWorker: (params) =>
+      capabilities.lifecycle.replaceStreamingAssistantFromWorker(params),
+    completeAssistantFromWorker: (params) =>
+      capabilities.lifecycle.completeAssistantFromWorker(params),
+    updateToolExecutionFromWorker: (params) =>
+      capabilities.lifecycle.updateToolExecutionFromWorker(params),
+    updateRunNoticeFromWorker: (params) =>
+      capabilities.lifecycle.updateRunNoticeFromWorker(params),
+    completeRunFromWorker: (params) =>
+      capabilities.lifecycle.completeRunFromWorker(params),
+    getSession: (sessionId) => {
+      const session = capabilities.session.getSession(sessionId);
+      return session ? { headMessageId: session.headMessageId } : null;
+    },
   };
 }
 
-function createArchiveStartupCoordinator(params: {
-  db: AppContext["db"];
-  archiveStorage: ArchiveStorage;
+function createStartupCoordinator(params: {
   logger: FastifyBaseLogger;
-  recoveryMode: AppContext["agentStartupRecoveryMode"];
   dataDir: string;
   capabilities: Pick<AgentServiceCapabilities, "session" | "lifecycle">;
 }) {
-  const archiveStartupSessionQuery = new SqliteArchiveStartupSessionQuery(params.db);
-  const archiveStartupReconcile = new ArchiveStartupReconcileApplication({
-    listSessions: () => archiveStartupSessionQuery.listForReconcile(),
-    reconcilePendingBestEffort: (input) => params.archiveStorage.reconcilePendingBestEffort(input),
-    logger: params.logger
-  });
   return new AgentStartupCoordinator({
-    cleanupOrphans: () => { params.capabilities.session.cleanupSubtaskOrphansOnStartup(); },
-    reconcileArchive: () => archiveStartupReconcile.reconcileAllPendingBestEffort(),
-    cleanupAttachmentTemps: () => cleanupAgedAgentAttachmentTempFiles({ dataDir: params.dataDir, nowMs: Date.now(), maxAgeMs: 24 * 60 * 60 * 1000 }),
-    failRuns: () => params.capabilities.lifecycle.failRunsOnStartup(),
-    recoverRuns: (input) => params.capabilities.lifecycle.recoverRunsOnStartup(input),
+    cleanupOrphans: () => {
+      params.capabilities.session.cleanupSubtaskOrphansOnStartup();
+    },
+    cleanupAttachmentTemps: () =>
+      cleanupAgedAgentAttachmentTempFiles({
+        dataDir: params.dataDir,
+        nowMs: Date.now(),
+        maxAgeMs: 24 * 60 * 60 * 1000,
+      }),
+    recoverRuns: (input) =>
+      params.capabilities.lifecycle.recoverRunsOnStartup(input),
     logger: params.logger,
-    recoveryMode: params.recoveryMode
   });
 }
 
-export type AgentCompositionDependencies = {
-  archiveStorage?: ArchiveStorage;
-  compactionArchivePersistence?: SqliteCompactionArchivePersistence;
-};
+export type AgentCompositionDependencies = {};
 
 export function createAgentComposition(
   ctx: AppContext,
   logger: FastifyBaseLogger,
   runCompletedEventHub?: AgentRunCompletedEventHub | null,
-  dependencies?: AgentCompositionDependencies
+  dependencies?: AgentCompositionDependencies,
 ) {
-  const archiveStorage = dependencies?.archiveStorage ?? new ArchiveStorage({
-    dataDir: ctx.dataDir,
-    logger,
-    faultHook: archiveFaultHookFromLegacyTestFaults(ctx.agentTestFaults)
-  });
-  const compactionArchivePersistence = dependencies?.compactionArchivePersistence ?? new SqliteCompactionArchivePersistence(ctx.db);
   const environment = createAgentCompositionEnvironment(ctx, logger);
-  const { serviceCapabilities, testOnly } = createAgentApplications(environment, logger, runCompletedEventHub, {
-    archiveStorage,
-    compactionArchivePersistence
-  });
-  const localRuntimeExecution = createLocalRuntimeExecutionPort(serviceCapabilities);
-  const startupCoordinator = createArchiveStartupCoordinator({
-    db: ctx.db,
-    archiveStorage,
+  const { serviceCapabilities, testOnly, runtimeHandoffCoordinator, dispose } = createAgentApplications(
+    environment,
     logger,
-    recoveryMode: ctx.agentStartupRecoveryMode,
+    runCompletedEventHub,
+    dependencies,
+  );
+  const localRuntimeExecution =
+    createLocalRuntimeExecutionPort(serviceCapabilities);
+  const startupCoordinator = createStartupCoordinator({
+    logger,
     dataDir: ctx.dataDir,
-    capabilities: serviceCapabilities
+    capabilities: serviceCapabilities,
   });
   return {
     service: new AgentService(serviceCapabilities),
     localRuntimeExecution,
     startupCoordinator,
-    testOnly
+    testOnly,
+    runtimeHandoffCoordinator,
+    dispose,
   };
 }
 
@@ -2617,7 +2902,8 @@ export function createAgentService(
   ctx: AppContext,
   logger: FastifyBaseLogger,
   runCompletedEventHub?: AgentRunCompletedEventHub | null,
-  dependencies?: AgentCompositionDependencies
+  dependencies?: AgentCompositionDependencies,
 ) {
-  return createAgentComposition(ctx, logger, runCompletedEventHub, dependencies).service;
+  return createAgentComposition(ctx, logger, runCompletedEventHub, dependencies)
+    .service;
 }

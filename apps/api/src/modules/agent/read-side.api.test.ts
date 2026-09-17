@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { createAgentSession, createRunRecord } from "./agent.store.js";
+import { Value } from "@sinclair/typebox/value";
+import { AgentApiPromptContextResponseSchema } from "@agent-workbench/shared/internal-contracts/agent-api";
+import { createMessageRunRecord } from "./agent-message.store.js";
+import {
+  appendMessage,
+  appendStreamingAssistant,
+  completeAssistantWithExecutions,
+  createMessageSession,
+  flushStreamingParts,
+  getMessageSessionHead,
+  startMessageRun
+} from "./agent-message.store.js";
 import { newSortableId } from "../../utils/ids.js";
 import {
   createAgentTestFixture,
@@ -74,26 +85,91 @@ function createRun(fixture: AgentTestFixture, workspaceId: string) {
   const sessionId = newSortableId("sess");
   const runId = newSortableId("run");
   const createdAt = Date.now();
-  createAgentSession(fixture.db, {
+  createMessageSession(fixture.db, {
     id: sessionId,
     workspaceId,
     title: "read-side API test session",
     kind: "primary",
     createdAt
   });
-  createRunRecord(fixture.db, {
+  const head = getMessageSessionHead(fixture.db, { workspaceId, sessionId });
+  assert.ok(head);
+  const triggerMessageId = newSortableId("msg");
+  appendMessage(fixture.db, {
+    id: triggerMessageId,
+    workspaceId,
+    sessionId,
+    expectedHeadMessageId: head.headMessageId,
+    expectedRevision: head.revision,
+    type: "user",
+    status: "completed",
+    originRunId: null,
+    parts: [{ id: newSortableId("part"), position: 0, type: "text", text: "read-side trigger" }],
+    createdAt
+  });
+  createMessageRunRecord(fixture.db, {
     runId,
     workspaceId,
     sessionId,
-    triggerItemId: 1,
+    triggerMessageId,
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
     status: "running",
     createdAt
   });
+  startMessageRun(fixture.db, { workspaceId, sessionId, runId, updatedAt: createdAt });
   return { sessionId, runId };
 }
+
+function createCompletedToolExecution(fixture: AgentTestFixture, input: { workspaceId: string; sessionId: string; runId: string; result: unknown }) {
+  const now = Date.now();
+  const assistantId = newSortableId("msg");
+  const callPartId = newSortableId("part");
+  const executionId = newSortableId("exec");
+  assert.equal(appendStreamingAssistant(fixture.db, {
+    id: assistantId, workspaceId: input.workspaceId, sessionId: input.sessionId, runId: input.runId,
+    expectedHeadMessageId: getMessageSessionHead(fixture.db, { workspaceId: input.workspaceId, sessionId: input.sessionId })?.headMessageId ?? null,
+    expectedRevision: getMessageSessionHead(fixture.db, { workspaceId: input.workspaceId, sessionId: input.sessionId })?.revision ?? 0,
+    createdAt: now,
+  }).id, assistantId);
+  assert.equal(flushStreamingParts(fixture.db, {
+    workspaceId: input.workspaceId, sessionId: input.sessionId, runId: input.runId, messageId: assistantId, updatedAt: now + 1,
+    parts: [{ id: callPartId, position: 0, type: "tool_call", toolName: "todolist", input: { goal: "test" } }],
+  }), "updated");
+  assert.equal(completeAssistantWithExecutions(fixture.db, {
+    workspaceId: input.workspaceId, sessionId: input.sessionId, runId: input.runId, messageId: assistantId, updatedAt: now + 2,
+    executions: [{ id: executionId, callPartId, originSessionId: input.sessionId, originRunId: input.runId, status: "queued" }],
+  }), "updated");
+  fixture.db.prepare(`update agent_tool_execution set status='completed', result_preview=?, result_truncated=1, result_artifact_path=?, structured_result_json=?, updated_revision=(select revision from agent_session where id=?), updated_at=? where id=?`)
+    .run("brief result", "tool-results/private.json", JSON.stringify(input.result), input.sessionId, now + 3, executionId);
+  return { assistantId, executionId };
+}
+
+test("ToolExecution detail 仅暴露当前 Session 可见链，timeline 保持轻量", async () => {
+  const { fixture, workspace } = await createReadSideFixture();
+  assert.ok(fixture.app);
+  const { sessionId, runId } = createRun(fixture, workspace.id);
+  const { executionId } = createCompletedToolExecution(fixture, { workspaceId: workspace.id, sessionId, runId, result: { goal: "detail", todos: [{ content: "x", status: "completed" }] } });
+
+  const timeline = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${sessionId}/timeline?workspaceId=${workspace.id}` });
+  assert.equal(timeline.statusCode, 200, timeline.body);
+  const timelineExecution = (timeline.json() as any).toolExecutions.find((item: any) => item.id === executionId);
+  assert.equal(timelineExecution.resultPreview, "brief result");
+  assert.equal(Object.hasOwn(timelineExecution, "structuredResult"), false);
+  assert.equal(Object.hasOwn(timelineExecution, "resultArtifactPath"), false);
+
+  const detail = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${sessionId}/tool-executions/${executionId}?workspaceId=${workspace.id}` });
+  assert.equal(detail.statusCode, 200, detail.body);
+  const detailBody = detail.json() as any;
+  assert.deepEqual(detailBody.structuredResult, { goal: "detail", todos: [{ content: "x", status: "completed" }] });
+  assert.equal(detailBody.resultArtifactPath, "tool-results/private.json");
+
+  const other = createRun(fixture, workspace.id);
+  const hidden = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${other.sessionId}/tool-executions/${executionId}?workspaceId=${workspace.id}` });
+  assert.equal(hidden.statusCode, 404, hidden.body);
+  assert.equal((hidden.json() as any).code, "TOOL_EXECUTION_NOT_FOUND");
+});
 
 test("read-side internal routes preserve token, body validation, and missing-resource responses", async () => {
   const { fixture, workspace } = await createReadSideFixture();
@@ -205,7 +281,8 @@ test("read-side internal routes preserve token, body validation, and missing-res
   });
   assert.equal(prompt.statusCode, 200, prompt.body);
   const promptBody = prompt.json() as any;
-  assert.ok(promptBody.headItemId === null || typeof promptBody.headItemId === "number");
+  assert.ok(promptBody.headMessageId === null || typeof promptBody.headMessageId === "string");
+  assert.equal(typeof promptBody.sessionRevision, "number");
   assert.equal(typeof promptBody.system, "string");
   assert.equal(Array.isArray(promptBody.messages), true);
   assert.equal(Array.isArray(promptBody.tools), true);
@@ -219,8 +296,10 @@ test("read-side internal routes preserve token, body validation, and missing-res
     assert.equal(typeof tool.inputSchema, "object");
   }
   for (const pending of promptBody.pendingTools) {
-    assert.equal(typeof pending.itemId, "number");
-    assert.equal(typeof pending.status, "string");
+    assert.equal(typeof pending.toolExecutionId, "string");
+    assert.equal(typeof pending.callPartId, "string");
+    assert.equal(typeof pending.assistantMessageId, "string");
+    assert.ok(pending.status === "queued" || pending.status === "running");
     assert.equal(typeof pending.toolName, "string");
     assert.equal(typeof pending.args, "object");
   }
@@ -229,4 +308,42 @@ test("read-side internal routes preserve token, body validation, and missing-res
     assert.equal(typeof root.rootDir, "string");
     assert.equal(typeof root.rootPath, "string");
   }
+});
+
+test("prompt-context returns queued/running tools with a transcript boundary, then emits complete envelopes after terminal state", async () => {
+  const { fixture, workspace } = await createReadSideFixture();
+  assert.ok(fixture.app);
+  const { sessionId, runId } = createRun(fixture, workspace.id);
+  const createdAt = Date.now();
+  const head = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId });
+  assert.ok(head);
+  const assistantId = newSortableId("msg");
+  const callPartId = newSortableId("part");
+  const executionId = newSortableId("exec");
+  const { appendStreamingAssistant, flushStreamingParts, completeAssistantWithExecutions, updateToolExecution } = await import("./agent-message.store.js");
+  appendStreamingAssistant(fixture.db, { id: assistantId, workspaceId: workspace.id, sessionId, runId, expectedHeadMessageId: head.headMessageId, expectedRevision: head.revision, createdAt });
+  flushStreamingParts(fixture.db, { workspaceId: workspace.id, sessionId, runId, messageId: assistantId, updatedAt: createdAt + 1, parts: [{ id: callPartId, position: 0, type: "tool_call", toolName: "bash", input: { command: "pwd" }, providerToolCallId: "provider-call" }] });
+  completeAssistantWithExecutions(fixture.db, { workspaceId: workspace.id, sessionId, runId, messageId: assistantId, updatedAt: createdAt + 2, executions: [{ id: executionId, callPartId, originSessionId: sessionId, originRunId: runId, status: "queued" }] });
+  const request = { workspaceId: workspace.id, sessionId, runId };
+  const queued = await injectJson(fixture.app, { method: "POST", url: "/api/internal/agent/prompt-context", internalToken: fixture.internalToken, payload: request });
+  assert.equal(queued.statusCode, 200, queued.body);
+  assert.equal(Value.Check(AgentApiPromptContextResponseSchema, queued.json()), true);
+  const queuedBody = queued.json() as { messages: Array<{ role: string }>; pendingTools: Array<{ toolExecutionId: string; callPartId: string; assistantMessageId: string; status: string }> };
+  assert.deepEqual(queuedBody.pendingTools, [{ toolExecutionId: executionId, callPartId, assistantMessageId: assistantId, status: "queued", toolName: "bash", toolCallId: "provider-call", args: { command: "pwd" } }]);
+  assert.equal(queuedBody.messages.some((message) => message.role === "assistant" || message.role === "tool"), false);
+  updateToolExecution(fixture.db, { workspaceId: workspace.id, sessionId, runId, executionId, status: "running", updatedAt: createdAt + 3 });
+  const running = await injectJson(fixture.app, { method: "POST", url: "/api/internal/agent/prompt-context", internalToken: fixture.internalToken, payload: request });
+  assert.equal(running.statusCode, 200, running.body);
+  assert.equal(Value.Check(AgentApiPromptContextResponseSchema, running.json()), true);
+  assert.equal((running.json() as { pendingTools: Array<{ status: string }> }).pendingTools[0]?.status, "running");
+  updateToolExecution(fixture.db, { workspaceId: workspace.id, sessionId, runId, executionId, status: "completed", resultPreview: "workspace path", updatedAt: createdAt + 4 });
+  const completed = await injectJson(fixture.app, { method: "POST", url: "/api/internal/agent/prompt-context", internalToken: fixture.internalToken, payload: request });
+  assert.equal(completed.statusCode, 200, completed.body);
+  assert.equal(Value.Check(AgentApiPromptContextResponseSchema, completed.json()), true);
+  const completedBody = completed.json() as { pendingTools: unknown[]; messages: Array<{ role: string; content: unknown }> };
+  assert.deepEqual(completedBody.pendingTools, []);
+  assert.deepEqual(completedBody.messages.slice(-2), [
+    { role: "assistant", content: [{ type: "tool-call", toolCallId: "provider-call", toolName: "bash", input: { command: "pwd" } }] },
+    { role: "tool", content: [{ type: "tool-result", toolCallId: "provider-call", toolName: "bash", output: { type: "text", value: "workspace path" } }] }
+  ]);
 });

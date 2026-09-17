@@ -29,7 +29,7 @@ export const AgentApiSubtaskPreforkPlanRequestSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
   parentSessionId: Type.String({ minLength: 1 }),
   parentRunId: Type.String({ minLength: 1 }),
-  parentToolItemId: Type.Number({ minimum: 1 }),
+  parentToolExecutionId: Type.String({ minLength: 1 }),
   agentId: Type.String({ minLength: 1 }),
   thresholdPct: Type.Optional(Type.Number())
 });
@@ -48,7 +48,7 @@ export const AgentApiSubtaskStartRequestSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
   parentSessionId: Type.String({ minLength: 1 }),
   parentRunId: Type.String({ minLength: 1 }),
-  parentToolItemId: Type.Number({ minimum: 1 }),
+  parentToolExecutionId: Type.String({ minLength: 1 }),
   description: Type.String({ minLength: 1 }),
   prompt: Type.String({ minLength: 1 }),
   agentId: Type.String({ minLength: 1 }),
@@ -117,6 +117,7 @@ export const AgentSubtaskErrorCode = {
   SessionIdNotAllowed: "AGENT_SUBTASK_SESSION_ID_NOT_ALLOWED",
   SessionModeInvalid: "AGENT_SUBTASK_SESSION_MODE_INVALID",
   SessionRunning: "AGENT_SUBTASK_SESSION_RUNNING",
+  ParentNotActive: "AGENT_SUBTASK_PARENT_NOT_ACTIVE",
   PromptRequired: "AGENT_SUBTASK_PROMPT_REQUIRED",
   ForkBoundaryInvalid: "AGENT_SUBTASK_FORK_BOUNDARY_INVALID"
 } as const;

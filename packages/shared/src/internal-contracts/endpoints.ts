@@ -10,5 +10,9 @@ export const AgentWorkerEndpoints = {
   cancelSession: {
     method: "POST",
     path: "/internal/runs/cancel-session"
+  },
+  cancelSessionAndWait: {
+    method: "POST",
+    path: "/internal/runs/cancel-session-and-wait"
   }
 } as const;

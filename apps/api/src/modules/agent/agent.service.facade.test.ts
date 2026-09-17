@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type {
+  AgentMessage,
+  AgentMessageSessionRunState,
+  AgentMessageTimelineSnapshot,
+  AgentSessionMessageState,
+  AgentTimelineDeltaResponse
+} from "@agent-workbench/shared";
 import type { AgentServiceCapabilities } from "./agent.composition.js";
 import { AgentService } from "./agent.service.js";
 
@@ -10,8 +17,11 @@ type ReadSideApplicationFacade = {
 };
 
 type WritebackApplicationFacade = {
-  appendContextItemFromWorker: AgentService["appendContextItemFromWorker"];
-  updateContextItemFromWorker: AgentService["updateContextItemFromWorker"];
+  createStreamingAssistantFromWorker: AgentService["createStreamingAssistantFromWorker"];
+  flushAssistantPartsFromWorker: AgentService["flushAssistantPartsFromWorker"];
+  completeAssistantFromWorker?: AgentService["completeAssistantFromWorker"];
+  updateToolExecutionFromWorker?: AgentService["updateToolExecutionFromWorker"];
+  updateRunNoticeFromWorker?: AgentService["updateRunNoticeFromWorker"];
 };
 
 type SessionInteractionApplicationFacade = {
@@ -22,13 +32,13 @@ type SessionInteractionApplicationFacade = {
   revertSession: AgentService["revertSession"];
 };
 
-type ContextQueryApplicationFacade = {
-  getContextItems: AgentService["getContextItems"];
-  getContextItem: AgentService["getContextItem"];
+type MessageQueryFacade = {
+  getMessageTimeline: AgentService["getMessageTimeline"];
+  getMessageDetail: AgentService["getMessageDetail"];
+  getMessageTimelineSnapshot: AgentService["getMessageTimelineSnapshot"];
+  getMessageRunState: AgentService["getMessageRunState"];
   getApplyPatchUiArtifact: AgentService["getApplyPatchUiArtifact"];
   getWriteUiArtifact: AgentService["getWriteUiArtifact"];
-  getRunState: AgentService["getRunState"];
-  getSessionStatusSummary: AgentService["getSessionStatusSummary"];
 };
 
 type PeripheralAgentQueryApplicationFacade = {
@@ -42,7 +52,7 @@ function createFacadeService(params: {
   readSideApplication?: ReadSideApplicationFacade;
   writebackApplication?: WritebackApplicationFacade;
   sessionInteractionApplication?: SessionInteractionApplicationFacade;
-  contextQueryApplication?: ContextQueryApplicationFacade;
+  messageQuery?: MessageQueryFacade;
   peripheralAgentQueryApplication?: PeripheralAgentQueryApplicationFacade;
 }) {
   const applications = Object.values(params) as Array<Record<string, unknown> | undefined>;
@@ -138,9 +148,9 @@ test("AgentService Session facades delegate without local rules", async () => {
   };
   const service = createFacadeService({ sessionInteractionApplication: application });
   const create = { workspaceId: "workspace", title: "title" };
-  const fork = { fromSessionId: "session", fromItemId: 1, mode: "visible_only" as const };
+  const fork = { fromSessionId: "session", fromMessageId: "message-1" };
   const send = { sessionId: "session", body: { workspaceId: "workspace", text: "text", clientRequestId: "request" }, runtime: {} as any };
-  const revert = { sessionId: "session", body: { workspaceId: "workspace", itemId: 1 }, runtime: {} as any };
+  const revert = { sessionId: "session", body: { workspaceId: "workspace", messageId: "message-1" }, runtime: {} as any };
 
   assert.deepEqual(service.listSessions("workspace"), [{ id: "session" }]);
   assert.deepEqual(service.createPrimarySession(create), { id: "created" });
@@ -150,27 +160,61 @@ test("AgentService Session facades delegate without local rules", async () => {
   assert.deepEqual(calls, [["list", "workspace"], ["create", create], ["fork", fork], ["send", send], ["revert", revert]]);
 });
 
-test("AgentService Context Query facades delegate without local rules", async () => {
+test("AgentService Message Query facades delegate without local rules", async () => {
   const calls: unknown[][] = [];
-  const application: ContextQueryApplicationFacade = {
-    getContextItems(sessionId, query) { calls.push(["items", sessionId, query]); return { items: [] } as any; },
-    getContextItem(sessionId, itemId) { calls.push(["item", sessionId, itemId]); return { id: itemId } as any; },
-    async getApplyPatchUiArtifact(params) { calls.push(["apply", params]); return { kind: "apply" }; },
-    async getWriteUiArtifact(params) { calls.push(["write", params]); return { kind: "write" }; },
-    getRunState(sessionId) { calls.push(["state", sessionId]); return { sessionId } as any; },
-    getSessionStatusSummary(params) { calls.push(["summary", params]); return { session: {} } as any; }
+  const session: AgentSessionMessageState = {
+    id: "session", workspaceId: "workspace", title: "Session", kind: "primary",
+    headMessageId: "message", contextRootMessageId: "message", revision: 3,
+    forkedFromSessionId: null, forkedFromMessageId: null, createdAt: 1, updatedAt: 1
   };
-  const service = createFacadeService({ contextQueryApplication: application });
-  const query = { tailLimit: 3 };
-  const artifact = { sessionId: "session", itemId: 1 };
-  const summary = { sessionId: "session", selectedAgentId: "agent" };
-  assert.deepEqual(service.getContextItems("session", query), { items: [] });
-  assert.deepEqual(service.getContextItem("session", 1), { id: 1 });
+  const message: AgentMessage = {
+    id: "message", workspaceId: "workspace", previousMessageId: null, replacesMessageId: null,
+    depth: 0, type: "user", status: "completed", originSessionId: "session", originRunId: null,
+    updatedRevision: 3, createdAt: 1, updatedAt: 1, parts: []
+  };
+  const timelineResponse: AgentTimelineDeltaResponse & { hasMore: boolean; nextBeforeMessageId: string | null } = {
+    session, timelineReset: false, messages: [], toolExecutions: [], hasMore: false, nextBeforeMessageId: null
+  };
+  const runState: AgentMessageSessionRunState = {
+    workspaceId: "workspace", sessionId: "session", status: "idle", activeRunId: null,
+    runNoticeText: "", retryCount: 0, nextRetryAt: null, activeAssistantMessageId: null,
+    nonTerminalMessageIds: [], nonTerminalToolExecutionIds: [], updatedAt: 1
+  };
+  const snapshotResponse: AgentMessageTimelineSnapshot & { hasMore: boolean; nextBeforeMessageId: string | null } = { ...timelineResponse, runState };
+  const application: MessageQueryFacade = {
+    getMessageTimeline(params) {
+      calls.push(["timeline", params]);
+      return timelineResponse;
+    },
+    getMessageDetail(params) {
+      calls.push(["message", params]);
+      return message;
+    },
+    getMessageTimelineSnapshot(params) {
+      calls.push(["snapshot", params]);
+      return snapshotResponse;
+    },
+    getMessageRunState(params) {
+      calls.push(["state", params]);
+      return runState;
+    },
+    async getApplyPatchUiArtifact(params) { calls.push(["apply", params]); return { kind: "apply" }; },
+    async getWriteUiArtifact(params) { calls.push(["write", params]); return { kind: "write" }; }
+  };
+  const service = createFacadeService({ messageQuery: application });
+  const timeline = { workspaceId: "workspace", sessionId: "session", sinceRevision: 3 };
+  const detail = { workspaceId: "workspace", sessionId: "session", messageId: "message" };
+  const artifact = { workspaceId: "workspace", sessionId: "session", toolExecutionId: "execution" };
+  assert.strictEqual(service.getMessageTimeline(timeline), timelineResponse);
+  assert.strictEqual(service.getMessageDetail(detail), message);
+  assert.strictEqual(service.getMessageTimelineSnapshot(timeline), snapshotResponse);
+  assert.strictEqual(service.getMessageRunState({ workspaceId: "workspace", sessionId: "session" }), runState);
   assert.deepEqual(await service.getApplyPatchUiArtifact(artifact), { kind: "apply" });
   assert.deepEqual(await service.getWriteUiArtifact(artifact), { kind: "write" });
-  assert.deepEqual(service.getRunState("session"), { sessionId: "session" });
-  assert.deepEqual(service.getSessionStatusSummary(summary), { session: {} });
-  assert.deepEqual(calls, [["items", "session", query], ["item", "session", 1], ["apply", artifact], ["write", artifact], ["state", "session"], ["summary", summary]]);
+  assert.deepEqual(calls, [
+    ["timeline", timeline], ["message", detail], ["snapshot", timeline],
+    ["state", { workspaceId: "workspace", sessionId: "session" }], ["apply", artifact], ["write", artifact]
+  ]);
 });
 
 test("AgentService Peripheral Agent Query facades delegate without local rules", () => {
@@ -195,23 +239,23 @@ test("AgentService Peripheral Agent Query facades delegate without local rules",
 
 test("AgentService writeback facades delegate params and return values without local rules", async () => {
   const calls: unknown[][] = [];
-  const appendResponse = { append: "response" } as unknown as ReturnType<AgentService["appendContextItemFromWorker"]>;
-  const updateResponse = { update: "response" } as unknown as Awaited<ReturnType<AgentService["updateContextItemFromWorker"]>>;
+  const appendResponse = { append: "response" } as unknown as ReturnType<AgentService["createStreamingAssistantFromWorker"]>;
+  const updateResponse = { update: "response" } as unknown as Awaited<ReturnType<AgentService["flushAssistantPartsFromWorker"]>>;
   const service = createFacadeService({ writebackApplication: {
-    appendContextItemFromWorker(params) {
+    createStreamingAssistantFromWorker(params) {
       calls.push(["append", params]);
       return appendResponse;
     },
-    async updateContextItemFromWorker(params) {
+    flushAssistantPartsFromWorker(params) {
       calls.push(["update", params]);
       return updateResponse;
     }
   } });
-  const appendParams = { workspaceId: "workspace-append" } as Parameters<AgentService["appendContextItemFromWorker"]>[0];
-  const updateParams = { itemId: 7 } as Parameters<AgentService["updateContextItemFromWorker"]>[0];
+  const appendParams = { workspaceId: "workspace", sessionId: "session", runId: "run", messageId: "message", createdAt: 1 };
+  const updateParams = { workspaceId: "workspace", sessionId: "session", runId: "run", messageId: "message", parts: [], updatedAt: 1 };
 
-  assert.strictEqual(service.appendContextItemFromWorker(appendParams), appendResponse);
-  assert.strictEqual(await service.updateContextItemFromWorker(updateParams), updateResponse);
+  assert.strictEqual(service.createStreamingAssistantFromWorker(appendParams), appendResponse);
+  assert.strictEqual(await service.flushAssistantPartsFromWorker(updateParams), updateResponse);
   assert.deepEqual(calls, [["append", appendParams], ["update", updateParams]]);
 });
 
@@ -219,20 +263,20 @@ test("AgentService writeback facades preserve application errors", async () => {
   const appendError = new Error("append failure");
   const updateError = new Error("update failure");
   const service = createFacadeService({ writebackApplication: {
-    appendContextItemFromWorker() {
+    createStreamingAssistantFromWorker() {
       throw appendError;
     },
-    async updateContextItemFromWorker() {
+    flushAssistantPartsFromWorker() {
       throw updateError;
     }
   } });
 
   assert.throws(
-    () => service.appendContextItemFromWorker({} as Parameters<AgentService["appendContextItemFromWorker"]>[0]),
+    () => service.createStreamingAssistantFromWorker({} as Parameters<AgentService["createStreamingAssistantFromWorker"]>[0]),
     (error: unknown) => error === appendError
   );
-  await assert.rejects(
-    () => service.updateContextItemFromWorker({} as Parameters<AgentService["updateContextItemFromWorker"]>[0]),
+  assert.throws(
+    () => service.flushAssistantPartsFromWorker({} as Parameters<AgentService["flushAssistantPartsFromWorker"]>[0]),
     (error: unknown) => error === updateError
   );
 });

@@ -392,12 +392,7 @@ export class BuiltinToolProvider implements ToolProvider {
 
   isToolEnabled(toolName: string, ctx: AvailableToolContext | ToolExecutionContext) {
     if (!isBuiltinToolName(toolName)) return false;
-    if (
-      toolName === "read"
-      || toolName === "archive_search"
-      || toolName === "archive_read"
-      || toolName === "skill"
-    ) {
+    if (toolName === "read" || toolName === "skill") {
       return true;
     }
     return ctx.profile.agent.tools.includes(toolName as BuiltinToolName);
@@ -545,6 +540,29 @@ export class BuiltinToolProvider implements ToolProvider {
           signal: ctx.signal
         });
       }
+      case "archive_read": {
+        const cursor = typeof args.cursor === "string" ? args.cursor : undefined;
+        const limit = args.limit == null ? undefined : parseOptionalPositiveIntegerArg(args.limit, "archive_read.limit");
+        return await ctx.apiClient.archiveRead({
+          workspaceId: ctx.run.workspaceId,
+          sessionId: ctx.run.sessionId,
+          ...(cursor ? { cursor } : {}),
+          ...(limit ? { limit } : {}),
+        });
+      }
+      case "archive_search": {
+        const query = requireNonEmptyStringArg(args.query, "archive_search.query");
+        if ([...query.trim()].length < 3) throw new Error("archive_search.query must contain at least 3 characters");
+        const cursor = typeof args.cursor === "string" ? args.cursor : undefined;
+        const limit = args.limit == null ? undefined : parseOptionalPositiveIntegerArg(args.limit, "archive_search.limit");
+        return await ctx.apiClient.archiveSearch({
+          workspaceId: ctx.run.workspaceId,
+          sessionId: ctx.run.sessionId,
+          query: query.trim(),
+          ...(cursor ? { cursor } : {}),
+          ...(limit ? { limit } : {}),
+        });
+      }
       case "skill": {
         const skillArgs = parseSkillToolArgs(args);
         const repoRoot = String(process.env.AWB_AGENT_REPO_ROOT || "").trim() || process.cwd();
@@ -591,55 +609,6 @@ export class BuiltinToolProvider implements ToolProvider {
         const parsed = parseScratchpadArgs(args);
         return toScratchpadResult(parsed);
       }
-      case "archive_search": {
-        const query = requireNonEmptyStringArg(args.query, "archive_search.query");
-        const beforePos = parseOptionalPositiveIntegerArg(args.beforePos, "archive_search.beforePos");
-        if (beforePos != null && beforePos < 2) {
-          throw new Error("archive_search.beforePos must be an integer >= 2");
-        }
-        const maxHits = parseOptionalPositiveIntegerArg(args.maxHits, "archive_search.maxHits");
-        if (maxHits != null && maxHits > 100) {
-          throw new Error("archive_search.maxHits must be an integer between 1 and 100");
-        }
-        const maxChars = parseOptionalPositiveIntegerArg(args.maxChars, "archive_search.maxChars");
-        if (maxChars != null && (maxChars < 1000 || maxChars > 10000)) {
-          throw new Error("archive_search.maxChars must be an integer between 1000 and 10000");
-        }
-        if (args.snippet != null && typeof args.snippet !== "boolean") {
-          throw new Error("archive_search.snippet must be a boolean");
-        }
-        return await ctx.apiClient.archiveSearch({
-          workspaceId: ctx.run.workspaceId,
-          sessionId: ctx.run.sessionId,
-          query,
-          beforePos,
-          maxHits,
-          maxChars,
-          snippet: args.snippet === true,
-          regex: args.regex === true
-        });
-      }
-      case "archive_read": {
-        const beforePos = parseOptionalPositiveIntegerArg(args.beforePos, "archive_read.beforePos");
-        if (beforePos != null && beforePos < 2) {
-          throw new Error("archive_read.beforePos must be an integer >= 2");
-        }
-        const lineCount = parseOptionalPositiveIntegerArg(args.lineCount, "archive_read.lineCount");
-        if (lineCount != null && lineCount > 200) {
-          throw new Error("archive_read.lineCount must be an integer between 1 and 200");
-        }
-        const maxChars = parseOptionalPositiveIntegerArg(args.maxChars, "archive_read.maxChars");
-        if (maxChars != null && (maxChars < 1000 || maxChars > 10000)) {
-          throw new Error("archive_read.maxChars must be an integer between 1000 and 10000");
-        }
-        return await ctx.apiClient.archiveRead({
-          workspaceId: ctx.run.workspaceId,
-          sessionId: ctx.run.sessionId,
-          beforePos,
-          lineCount,
-          maxChars
-        });
-      }
       case "subtask": {
         const parsed = parseSubtaskArgs(args);
         const thresholdPct = 95;
@@ -656,7 +625,7 @@ export class BuiltinToolProvider implements ToolProvider {
               workspaceId: ctx.run.workspaceId,
               parentSessionId: ctx.run.sessionId,
               parentRunId: ctx.run.runId,
-              parentToolItemId: ctx.pendingTool.itemId,
+              parentToolExecutionId: ctx.pendingTool.toolExecutionId,
               agentId: parsed.agentId,
               thresholdPct
             });
@@ -714,7 +683,7 @@ export class BuiltinToolProvider implements ToolProvider {
           workspaceId: ctx.run.workspaceId,
           parentSessionId: ctx.run.sessionId,
           parentRunId: ctx.run.runId,
-          parentToolItemId: ctx.pendingTool.itemId,
+          parentToolExecutionId: ctx.pendingTool.toolExecutionId,
           description: parsed.description,
           prompt: parsed.prompt,
           agentId: parsed.agentId,
@@ -723,24 +692,18 @@ export class BuiltinToolProvider implements ToolProvider {
           ...(preforkMeta ? { preforkMeta } : {})
         });
 
-        await ctx.updateToolItem({
+        await ctx.updateToolExecution({
           status: "running",
-          output: {
-            type: "tool",
+          resultPreview: ctx.renderToolText({
             toolName,
-            toolCallId: ctx.pendingTool.toolCallId,
-            args,
-            text: ctx.renderToolText({
-              toolName,
-              status: "running",
-              headers: [["subtask_session_id", started.sessionId]],
-              body: "Subtask started."
-            }),
-            result: {
-              subtaskSessionId: started.sessionId,
-              subtaskAgentId: parsed.agentId,
-              subtaskAgentName: started.agentName
-            }
+            status: "running",
+            headers: [["subtask_session_id", started.sessionId]],
+            body: "Subtask started."
+          }),
+          structuredResult: {
+            subtaskSessionId: started.sessionId,
+            subtaskAgentId: parsed.agentId,
+            subtaskAgentName: started.agentName
           }
         });
 

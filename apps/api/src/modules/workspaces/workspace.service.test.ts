@@ -11,8 +11,14 @@ import { agentAttachmentFilePath, agentAttachmentsRoot, agentAttachmentWorkspace
 import type { AppContext } from "../../app/context.js";
 import { HttpError } from "../../app/errors.js";
 import { insertRepo } from "../repos/repo.store.js";
-import { createAgentSession } from "../agent/agent.store.js";
-import { listWorkspaceFiles } from "./workspace-files.service.js";
+import {
+  createWorkspaceFile,
+  deleteWorkspacePath,
+  listWorkspaceFiles,
+  mkdirWorkspacePath,
+  renameWorkspacePath,
+  writeWorkspaceFileText,
+} from "./workspace-files.service.js";
 import { getWorkspace, insertWorkspace, insertWorkspaceRepo, listWorkspaces } from "./workspace.store.js";
 import {
   createWorkspace,
@@ -26,6 +32,12 @@ import {
 } from "./workspace.service.js";
 import { setSettingJson } from "../settings/settings.store.js";
 import { registerGlobalSystemPromptTextProvider } from "../settings/settings.service.js";
+import { workspaceDeletingFence } from "../agent/lifecycle/workspace-deleting-fence.js";
+import { registerWorkspaceRuntime, unregisterWorkspaceRuntime } from "../agent/lifecycle/workspace-runtime-registry.js";
+import { SessionRuntimeHandoffCoordinator } from "../agent/lifecycle/session-runtime-handoff-coordinator.js";
+import { insertTerminal } from "../terminals/terminal.store.js";
+import { terminalAskpassPath, terminalAskpassTokenPath, terminalSshKeyPath } from "../terminals/terminal.gitAuth.js";
+import { armTerminalAuthCleanupIntent, updateTerminalAuthCleanupIntent } from "../terminals/terminal-auth-cleanup-intent.store.js";
 
 const tempDirs: string[] = [];
 const AGENT_SETTINGS_KEY = "agent_agents_v1";
@@ -87,7 +99,6 @@ async function createFixture() {
     agentInternalToken: "token",
     agentWorkerResponseValidation: "strict",
     agentApiOrigin: "http://127.0.0.1:0",
-    agentStartupRecoveryMode: "recover",
     agentPluginHostEnabled: false,
     agentPluginHostSocketPath: path.join(dataDir, "agent-plugin-host.sock"),
     agentPluginServicesEnabled: false
@@ -126,7 +137,6 @@ async function createEmptyFixture() {
     agentInternalToken: "token",
     agentWorkerResponseValidation: "strict",
     agentApiOrigin: "http://127.0.0.1:0",
-    agentStartupRecoveryMode: "recover",
     agentPluginHostEnabled: false,
     agentPluginHostSocketPath: path.join(dataDir, "agent-plugin-host.sock"),
     agentPluginServicesEnabled: false
@@ -165,9 +175,72 @@ async function addWorkspaceRepo(params: {
   });
 }
 
+async function createRecoverableTerminalAuthArtifact(params: {
+  ctx: AppContext;
+  terminalId: string;
+  artifactKind: "ssh-key" | "askpass" | "askpass-token";
+  artifactPath: string;
+  content: string;
+  updatedAt: number;
+}) {
+  const artifactName = path.basename(params.artifactPath);
+  const root = await fs.stat(params.ctx.dataDir);
+  armTerminalAuthCleanupIntent(params.ctx.db, {
+    terminalId: params.terminalId,
+    artifactKind: params.artifactKind,
+    artifactName,
+    rootDev: root.dev,
+    rootIno: root.ino,
+    updatedAt: params.updatedAt,
+  });
+  await fs.writeFile(params.artifactPath, params.content, { mode: params.artifactKind === "askpass" ? 0o700 : 0o600 });
+  const stat = await fs.stat(params.artifactPath);
+  updateTerminalAuthCleanupIntent(params.ctx.db, {
+    terminalId: params.terminalId, artifactKind: params.artifactKind, phase: "recoverable", artifactName,
+    expectedDev: stat.dev, expectedIno: stat.ino, rootDev: root.dev, rootIno: root.ino,
+    diagnostic: "test root live artifact", updatedAt: params.updatedAt + 1,
+  });
+}
+
 afterEach(async () => {
   for (const dir of tempDirs.splice(0)) {
     await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("workspace delete 与同 Session handoff 串行，cancel 不会被晚到 enqueue 越过", async () => {
+  const fixture = await createFixture();
+  const logger = createLogger();
+  const now = Date.now();
+  const { db } = fixture.ctx;
+  db.prepare("insert into agent_session (id,workspace_id,title,kind,created_at,updated_at) values ('race-session', ?, 'Running', 'primary', ?, ?)").run(fixture.workspaceId, now, now);
+  db.prepare("insert into agent_run (run_id,workspace_id,session_id,trigger_message_id,agent_id,provider_id,model_id,status,created_at,updated_at) values ('race-run', ?, 'race-session', null, 'agent', 'provider', 'model', 'running', ?, ?)").run(fixture.workspaceId, now, now);
+  db.prepare("insert into session_run_state (workspace_id,session_id,status,active_run_id,run_notice_text,retry_count,next_retry_at,active_assistant_message_id,non_terminal_message_ids_json,non_terminal_tool_execution_ids_json,updated_at) values (?, 'race-session', 'running', 'race-run', '', 0, null, null, '[]', '[]', ?)").run(fixture.workspaceId, now);
+  const coordinator = new SessionRuntimeHandoffCoordinator();
+  let releaseEnqueue!: () => void;
+  const enqueueGate = new Promise<void>((resolve) => { releaseEnqueue = resolve; });
+  const events: string[] = [];
+  const enqueuing = coordinator.runExclusive("race-session", async () => {
+    events.push("enqueue-start");
+    await enqueueGate;
+    events.push("enqueue-end");
+  });
+  const runtime = {
+    enqueueRun() {},
+    async cancelSessionAndWait() { events.push("cancel"); return true; },
+  };
+  const registration = { runtime, handoffCoordinator: coordinator };
+  registerWorkspaceRuntime(registration);
+  try {
+    const deleting = deleteWorkspace(fixture.ctx, logger, fixture.workspaceId);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.deepEqual(events, ["enqueue-start"], "删除必须等待已在 handoff 中的 enqueue");
+    releaseEnqueue();
+    await enqueuing;
+    await deleting;
+    assert.deepEqual(events, ["enqueue-start", "enqueue-end", "cancel"]);
+  } finally {
+    unregisterWorkspaceRuntime(registration);
   }
 });
 
@@ -449,9 +522,41 @@ test("workspace delete: 应清理 agent_session 外键引用，避免删一半",
     updatedAt: now
   });
 
-  createAgentSession(fixture.ctx.db, { id: "sess_1", workspaceId: wsId, title: "t", kind: "primary", createdAt: now });
+  fixture.ctx.db.prepare("insert into agent_session (id, workspace_id, title, kind, created_at, updated_at) values (?, ?, ?, ?, ?, ?)")
+    .run("sess_1", wsId, "t", "primary", now, now);
   fixture.ctx.db.prepare("insert into agent_attachment (id, workspace_id, storage_key, filename, media_type, byte_size, created_at) values (?, ?, ?, ?, ?, ?, ?)")
     .run("att_delete", wsId, "att_delete", "image.png", "image/png", 8, now);
+  const db = fixture.ctx.db;
+  db.prepare(`insert into agent_message (id, workspace_id, previous_message_id, replaces_message_id, depth, type, status, origin_session_id, origin_run_id, updated_revision, created_at, updated_at)
+    values ('message_a', ?, null, null, 0, 'assistant', 'completed', 'sess_1', null, 1, ?, ?)`)
+    .run(wsId, now, now);
+  db.prepare(`insert into agent_message (id, workspace_id, previous_message_id, replaces_message_id, depth, type, status, origin_session_id, origin_run_id, updated_revision, created_at, updated_at)
+    values ('message_b', ?, 'message_a', 'message_a', 1, 'assistant', 'completed', 'sess_1', null, 2, ?, ?)`)
+    .run(wsId, now, now);
+  db.prepare(`insert into agent_run (run_id, workspace_id, session_id, trigger_message_id, agent_id, provider_id, model_id, status, created_at, updated_at)
+    values ('run_delete', ?, 'sess_1', 'message_a', 'agent', 'provider', 'model', 'completed', ?, ?)`)
+    .run(wsId, now, now);
+  db.prepare(`insert into agent_client_request (workspace_id, session_id, client_request_id, message_id, run_id, created_at)
+    values (?, 'sess_1', 'request_delete', 'message_a', 'run_delete', ?)`)
+    .run(wsId, now);
+  db.prepare(`update agent_session set head_message_id = 'message_b', context_root_message_id = 'message_a', revision = 2 where id = 'sess_1'`).run();
+  db.prepare(`insert into agent_message_part (id, message_id, position, type, text, updated_revision, created_at, updated_at)
+    values ('text_part', 'message_a', 0, 'text', 'archived content', 1, ?, ?)`)
+    .run(now, now);
+  db.prepare(`insert into agent_message_part (id, message_id, position, type, attachment_id, media_type, filename, updated_revision, created_at, updated_at)
+    values ('image_part', 'message_a', 1, 'image', 'att_delete', 'image/png', 'image.png', 1, ?, ?)`)
+    .run(now, now);
+  db.prepare(`insert into agent_message_part (id, message_id, position, type, tool_name, tool_input_json, updated_revision, created_at, updated_at)
+    values ('call_part', 'message_b', 0, 'tool_call', 'bash', '{}', 2, ?, ?)`)
+    .run(now, now);
+  db.prepare(`insert into agent_tool_execution (id, call_part_id, origin_session_id, status, result_preview, updated_revision, created_at, updated_at)
+    values ('execution_a', 'call_part', 'sess_1', 'completed', 'done', 2, ?, ?)`)
+    .run(now, now);
+  db.prepare(`insert into session_run_state (workspace_id, session_id, status, active_assistant_message_id, non_terminal_message_ids_json, non_terminal_tool_execution_ids_json, updated_at)
+    values (?, 'sess_1', 'idle', null, '[]', '[]', ?)`)
+    .run(wsId, now);
+  db.prepare("insert into agent_archived_text_fts (rowid, text, message_depth, part_position) values (501, 'archived content', 0, 0)").run();
+  db.prepare("insert into agent_text_part_fts_map (part_id, fts_rowid, created_at) values ('text_part', 501, ?)").run(now);
   const attachmentPath = agentAttachmentFilePath(fixture.ctx.dataDir, wsId, "att_delete");
   await fs.mkdir(path.dirname(attachmentPath), { recursive: true });
   await fs.writeFile(attachmentPath, "attachment");
@@ -461,10 +566,111 @@ test("workspace delete: 应清理 agent_session 外键引用，避免删一半",
   assert.equal(sessions.c, 0);
   const attachments = fixture.ctx.db.prepare(`select count(*) as c from agent_attachment where workspace_id = ?`).get(wsId) as { c: number };
   assert.equal(attachments.c, 0);
+  for (const table of ["agent_message", "agent_message_part", "agent_tool_execution", "session_run_state", "agent_client_request", "agent_run", "agent_text_part_fts_map"]) {
+    const row = fixture.ctx.db.prepare(`select count(*) as c from ${table}`).get() as { c: number };
+    assert.equal(row.c, 0, `${table} should be removed with its workspace`);
+  }
+  const ftsCount = fixture.ctx.db.prepare("select count(*) as c from agent_archived_text_fts").get() as { c: number };
+  assert.equal(ftsCount.c, 0);
   await assert.rejects(() => fs.access(agentAttachmentWorkspaceDir(fixture.ctx.dataDir, wsId)));
 });
 
-test("workspace delete: attachment 目录清理因不安全路径跳过时会 warning 且不回滚 DB", async () => {
+test("workspace delete: 仅清理目标 Workspace 的 Agent 图与 FTS 数据", async () => {
+  const fixture = await createEmptyFixture();
+  const logger = createLogger();
+  const now = Date.now();
+  const db = fixture.ctx.db;
+
+  for (const workspaceId of ["ws-delete-a", "ws-delete-b"]) {
+    const dirName = workspaceId;
+    const workspacePath = workspaceRoot(fixture.ctx.dataDir, dirName);
+    await fs.mkdir(workspacePath, { recursive: true });
+    insertWorkspace(db, {
+      id: workspaceId,
+      dirName,
+      title: workspaceId,
+      path: workspacePath,
+      terminalCredentialId: null,
+      createdAt: now,
+      updatedAt: now
+    });
+    db.prepare("insert into agent_session (id, workspace_id, title, kind, created_at, updated_at) values (?, ?, ?, 'primary', ?, ?)")
+      .run(`session-${workspaceId}`, workspaceId, "Session", now, now);
+    db.prepare(`insert into agent_message (id, workspace_id, depth, type, status, updated_revision, created_at, updated_at)
+      values (?, ?, 0, 'assistant', 'completed', 1, ?, ?)`)
+      .run(`message-${workspaceId}`, workspaceId, now, now);
+    db.prepare(`insert into agent_message_part (id, message_id, position, type, text, updated_revision, created_at, updated_at)
+      values (?, ?, 0, 'text', ?, 1, ?, ?)`)
+      .run(`part-${workspaceId}`, `message-${workspaceId}`, `archive ${workspaceId === "ws-delete-a" ? "workspacea" : "workspaceb"}`, now, now);
+    db.prepare("insert into agent_archived_text_fts (rowid, text, message_depth, part_position) values (?, ?, 0, 0)")
+      .run(workspaceId === "ws-delete-a" ? 601 : 602, `archive ${workspaceId === "ws-delete-a" ? "workspacea" : "workspaceb"}`);
+    db.prepare("insert into agent_text_part_fts_map (part_id, fts_rowid, created_at) values (?, ?, ?)")
+      .run(`part-${workspaceId}`, workspaceId === "ws-delete-a" ? 601 : 602, now);
+  }
+
+  await deleteWorkspace(fixture.ctx, logger, "ws-delete-a");
+
+  assert.equal(getWorkspace(db, "ws-delete-a"), null);
+  assert.equal((db.prepare("select count(*) as c from agent_message where workspace_id = 'ws-delete-a'").get() as { c: number }).c, 0);
+  assert.equal((db.prepare("select count(*) as c from agent_message_part where id = 'part-ws-delete-a'").get() as { c: number }).c, 0);
+  assert.equal((db.prepare("select count(*) as c from agent_text_part_fts_map where part_id = 'part-ws-delete-a'").get() as { c: number }).c, 0);
+  assert.equal((db.prepare("select count(*) as c from agent_archived_text_fts where rowid = 601").get() as { c: number }).c, 0);
+  assert.equal((db.prepare("select count(*) as c from agent_message where workspace_id = 'ws-delete-b'").get() as { c: number }).c, 1);
+  assert.equal((db.prepare("select count(*) as c from agent_message_part where id = 'part-ws-delete-b'").get() as { c: number }).c, 1);
+  assert.equal((db.prepare("select count(*) as c from agent_text_part_fts_map where part_id = 'part-ws-delete-b'").get() as { c: number }).c, 1);
+  assert.equal((db.prepare("select count(*) as c from agent_archived_text_fts where agent_archived_text_fts match 'workspaceb'").get() as { c: number }).c, 1);
+  assert.deepEqual(db.pragma("foreign_key_check"), []);
+});
+
+test("workspace delete: Agent 清理失败时整个删除事务回滚", async () => {
+  const fixture = await createEmptyFixture();
+  const logger = createLogger();
+  const workspaceId = "ws-delete-rollback";
+  const workspacePath = workspaceRoot(fixture.ctx.dataDir, workspaceId);
+  const now = Date.now();
+  await fs.mkdir(workspacePath, { recursive: true });
+  insertWorkspace(fixture.ctx.db, {
+    id: workspaceId,
+    dirName: workspaceId,
+    title: "rollback",
+    path: workspacePath,
+    terminalCredentialId: null,
+    createdAt: now,
+    updatedAt: now
+  });
+  const db = fixture.ctx.db;
+  db.prepare("insert into agent_session (id, workspace_id, title, kind, created_at, updated_at) values ('session-rollback', ?, 'Session', 'primary', ?, ?)")
+    .run(workspaceId, now, now);
+  db.prepare(`insert into agent_message (id, workspace_id, depth, type, status, updated_revision, created_at, updated_at)
+    values ('message-rollback', ?, 0, 'assistant', 'completed', 1, ?, ?)`)
+    .run(workspaceId, now, now);
+  db.prepare(`insert into agent_message_part (id, message_id, position, type, text, updated_revision, created_at, updated_at)
+    values ('part-rollback', 'message-rollback', 0, 'text', 'rollback content', 1, ?, ?)`)
+    .run(now, now);
+  db.prepare("insert into agent_archived_text_fts (rowid, text, message_depth, part_position) values (701, 'rollback content', 0, 0)").run();
+  db.prepare("insert into agent_text_part_fts_map (part_id, fts_rowid, created_at) values ('part-rollback', 701, ?)").run(now);
+  db.exec(`
+    create trigger reject_workspace_agent_message_delete
+    before delete on agent_message
+    when old.workspace_id = 'ws-delete-rollback'
+    begin
+      select raise(abort, 'injected agent cleanup failure');
+    end;
+  `);
+
+  await assert.rejects(() => deleteWorkspace(fixture.ctx, logger, workspaceId), (error: unknown) => error instanceof HttpError && error.code === "WORKSPACE_DELETION_PENDING");
+
+  assert.notEqual(getWorkspace(db, workspaceId), null);
+  assert.notEqual(db.prepare("select workspace_id from workspace_deletion where workspace_id = ?").get(workspaceId), undefined);
+  assert.equal((db.prepare("select count(*) as c from agent_session where workspace_id = ?").get(workspaceId) as { c: number }).c, 1);
+  assert.equal((db.prepare("select count(*) as c from agent_message where workspace_id = ?").get(workspaceId) as { c: number }).c, 1);
+  assert.equal((db.prepare("select count(*) as c from agent_message_part where id = 'part-rollback'").get() as { c: number }).c, 1);
+  assert.equal((db.prepare("select count(*) as c from agent_text_part_fts_map where part_id = 'part-rollback'").get() as { c: number }).c, 1);
+  assert.equal((db.prepare("select count(*) as c from agent_archived_text_fts where rowid = 701").get() as { c: number }).c, 1);
+  assert.deepEqual(db.pragma("foreign_key_check"), []);
+});
+
+test("workspace delete: attachment 目录清理遇不安全路径会保留 tombstone 与 Workspace", async () => {
   const warnings: string[] = [];
   const logger = {
     ...createLogger(),
@@ -492,11 +698,432 @@ test("workspace delete: attachment 目录清理因不安全路径跳过时会 wa
   await fs.mkdir(outside);
   await fs.symlink(outside, byWorkspaceDir);
 
-  await deleteWorkspace(fixture.ctx, logger, wsId);
+  await assert.rejects(() => deleteWorkspace(fixture.ctx, logger, wsId), (error: unknown) => error instanceof HttpError && error.code === "WORKSPACE_DELETION_PENDING");
 
-  assert.equal(getWorkspace(fixture.ctx.db, wsId), null);
-  assert.deepEqual(warnings, ["workspace attachment directory cleanup skipped due to unsafe path"]);
+  assert.notEqual(getWorkspace(fixture.ctx.db, wsId), null);
+  assert.notEqual(fixture.ctx.db.prepare("select workspace_id from workspace_deletion where workspace_id = ?").get(wsId), undefined);
+  assert.deepEqual(warnings, []);
   await assert.doesNotReject(() => fs.access(outside));
+});
+
+test("workspace delete DB-first cancel 后等待 runtime drain，期间不持 SQLite 写锁", async () => {
+  const fixture = await createFixture();
+  const logger = createLogger();
+  const now = Date.now();
+  const { db } = fixture.ctx;
+  db.prepare(`insert into agent_session (id,workspace_id,title,kind,created_at,updated_at)
+    values ('delete-running-session', ?, 'Running', 'primary', ?, ?)`).run(fixture.workspaceId, now, now);
+  db.prepare(`insert into agent_run (run_id,workspace_id,session_id,trigger_message_id,agent_id,provider_id,model_id,status,created_at,updated_at)
+    values ('delete-running-run', ?, 'delete-running-session', null, 'agent', 'provider', 'model', 'running', ?, ?)`).run(fixture.workspaceId, now, now);
+  db.prepare(`insert into session_run_state (workspace_id,session_id,status,active_run_id,run_notice_text,retry_count,next_retry_at,active_assistant_message_id,non_terminal_message_ids_json,non_terminal_tool_execution_ids_json,updated_at)
+    values (?, 'delete-running-session', 'running', 'delete-running-run', '', 0, null, null, '[]', '[]', ?)`).run(fixture.workspaceId, now);
+
+  let resolveCancel!: () => void;
+  const cancelGate = new Promise<void>((resolve) => { resolveCancel = resolve; });
+  let notifyCancellation!: () => void;
+  const cancellationStarted = new Promise<void>((resolve) => { notifyCancellation = resolve; });
+  const runtime = {
+    enqueueRun() {},
+    cancelSession(sessionId: string) {
+      assert.equal(sessionId, "delete-running-session");
+      const state = db.prepare("select status, active_run_id as activeRunId from session_run_state where workspace_id = ? and session_id = ?").get(fixture.workspaceId, sessionId) as { status: string; activeRunId: string | null };
+      assert.deepEqual(state, { status: "idle", activeRunId: null });
+    },
+    async cancelSessionAndWait({ sessionId }: { sessionId: string; timeoutMs: number }) {
+      assert.equal(sessionId, "delete-running-session");
+      notifyCancellation();
+      await cancelGate;
+      return true;
+    }
+  };
+  const registration = { runtime, handoffCoordinator: new SessionRuntimeHandoffCoordinator() };
+  registerWorkspaceRuntime(registration);
+  try {
+    const deleting = deleteWorkspace(fixture.ctx, logger, fixture.workspaceId);
+    await cancellationStarted;
+    const otherWorkspacePath = workspaceRoot(fixture.ctx.dataDir, "workspace_other");
+    await fs.mkdir(otherWorkspacePath, { recursive: true });
+    insertWorkspace(db, {
+      id: "ws-other", dirName: "workspace_other", title: "other", path: otherWorkspacePath,
+      terminalCredentialId: null, createdAt: now, updatedAt: now,
+    });
+    assert.notEqual(getWorkspace(db, fixture.workspaceId), null, "runtime 未 drain 前不得物理删除");
+    resolveCancel();
+    await deleting;
+    assert.equal(getWorkspace(db, fixture.workspaceId), null);
+    assert.notEqual(getWorkspace(db, "ws-other"), null, "等待不应阻塞其他 Workspace 的 DB 写入");
+  } finally {
+    unregisterWorkspaceRuntime(registration);
+  }
+});
+
+test("workspace delete 在 worker drain 超时或不可达时保留数据并释放 fence", async () => {
+  const fixture = await createFixture();
+  const logger = createLogger();
+  const now = Date.now();
+  const { db } = fixture.ctx;
+  db.prepare("insert into agent_session (id,workspace_id,title,kind,created_at,updated_at) values ('timeout-session', ?, 'Running', 'primary', ?, ?)").run(fixture.workspaceId, now, now);
+  db.prepare("insert into agent_run (run_id,workspace_id,session_id,trigger_message_id,agent_id,provider_id,model_id,status,created_at,updated_at) values ('timeout-run', ?, 'timeout-session', null, 'agent', 'provider', 'model', 'running', ?, ?)").run(fixture.workspaceId, now, now);
+  db.prepare("insert into session_run_state (workspace_id,session_id,status,active_run_id,run_notice_text,retry_count,next_retry_at,active_assistant_message_id,non_terminal_message_ids_json,non_terminal_tool_execution_ids_json,updated_at) values (?, 'timeout-session', 'running', 'timeout-run', '', 0, null, null, '[]', '[]', ?)").run(fixture.workspaceId, now);
+  let workerIdle = false;
+  const runtime = { enqueueRun() {}, async cancelSessionAndWait() { return workerIdle; } };
+  const registration = { runtime, handoffCoordinator: new SessionRuntimeHandoffCoordinator() };
+  registerWorkspaceRuntime(registration);
+  try {
+    await assert.rejects(() => deleteWorkspace(fixture.ctx, logger, fixture.workspaceId), (error: unknown) => error instanceof HttpError && error.code === "WORKSPACE_AGENT_WORKER_DRAIN_TIMEOUT");
+    assert.notEqual(getWorkspace(db, fixture.workspaceId), null);
+    assert.equal(workspaceDeletingFence.isDeleting(fixture.workspaceId), true);
+    assert.notEqual(db.prepare("select workspace_id from workspace_deletion where workspace_id = ?").get(fixture.workspaceId), undefined);
+    workerIdle = true;
+    await deleteWorkspace(fixture.ctx, logger, fixture.workspaceId);
+    assert.equal(getWorkspace(db, fixture.workspaceId), null, "重试成功才物理删除并释放 fence");
+    assert.equal(workspaceDeletingFence.isDeleting(fixture.workspaceId), false);
+  } finally {
+    unregisterWorkspaceRuntime(registration);
+  }
+});
+
+test("workspace delete 在 worker 不可达时不物理删除", async () => {
+  const fixture = await createFixture();
+  const logger = createLogger();
+  const now = Date.now();
+  fixture.ctx.db.prepare("insert into agent_session (id,workspace_id,title,kind,created_at,updated_at) values ('unavailable-session', ?, 'Running', 'primary', ?, ?)").run(fixture.workspaceId, now, now);
+  fixture.ctx.db.prepare("insert into agent_run (run_id,workspace_id,session_id,trigger_message_id,agent_id,provider_id,model_id,status,created_at,updated_at) values ('unavailable-run', ?, 'unavailable-session', null, 'agent', 'provider', 'model', 'running', ?, ?)").run(fixture.workspaceId, now, now);
+  fixture.ctx.db.prepare("insert into session_run_state (workspace_id,session_id,status,active_run_id,run_notice_text,retry_count,next_retry_at,active_assistant_message_id,non_terminal_message_ids_json,non_terminal_tool_execution_ids_json,updated_at) values (?, 'unavailable-session', 'running', 'unavailable-run', '', 0, null, null, '[]', '[]', ?)").run(fixture.workspaceId, now);
+  const runtime = { enqueueRun() {}, async cancelSessionAndWait() { throw new Error("unreachable"); } };
+  const registration = { runtime, handoffCoordinator: new SessionRuntimeHandoffCoordinator() };
+  registerWorkspaceRuntime(registration);
+  try {
+    await assert.rejects(() => deleteWorkspace(fixture.ctx, logger, fixture.workspaceId), (error: unknown) => error instanceof HttpError && error.code === "WORKSPACE_AGENT_WORKER_UNAVAILABLE");
+    assert.notEqual(getWorkspace(fixture.ctx.db, fixture.workspaceId), null);
+  } finally {
+    unregisterWorkspaceRuntime(registration);
+  }
+});
+
+test("workspace delete 对 tmux 未知错误保留 tombstone/fence，部分 kill 后重试才统一删除记录", async () => {
+  const fixture = await createFixture();
+  const logger = createLogger();
+  const now = Date.now();
+  insertTerminal(fixture.ctx.db, { id: "term_first", workspaceId: fixture.workspaceId, sessionName: "term_first", status: "active", createdAt: now, updatedAt: now });
+  insertTerminal(fixture.ctx.db, { id: "term_second", workspaceId: fixture.workspaceId, sessionName: "term_second", status: "active", createdAt: now, updatedAt: now });
+  const killed: string[] = [];
+  try {
+    await assert.rejects(
+      () => deleteWorkspace(fixture.ctx, logger, fixture.workspaceId, {
+        hasSession: async ({ sessionName }) => sessionName === "term_second" ? Promise.reject(new Error("tmux timeout")) : "exists",
+        killSession: async ({ sessionName }) => { killed.push(sessionName); },
+      }),
+      (error: unknown) => error instanceof HttpError && error.code === "TERMINAL_KILL_FAILED",
+    );
+    assert.deepEqual(killed, ["term_first"]);
+    assert.ok(getWorkspace(fixture.ctx.db, fixture.workspaceId));
+    assert.equal(workspaceDeletingFence.isDeleting(fixture.workspaceId), true);
+    assert.equal((fixture.ctx.db.prepare("select count(*) as count from terminals where workspace_id=?").get(fixture.workspaceId) as { count: number }).count, 2);
+    assert.notEqual(fixture.ctx.db.prepare("select workspace_id from workspace_deletion where workspace_id=?").get(fixture.workspaceId), undefined);
+
+    await deleteWorkspace(fixture.ctx, logger, fixture.workspaceId, {
+      hasSession: async () => "not_found",
+      killSession: async () => { throw new Error("must not kill absent session"); },
+    });
+    assert.equal(getWorkspace(fixture.ctx.db, fixture.workspaceId), null);
+    assert.equal(workspaceDeletingFence.isDeleting(fixture.workspaceId), false);
+  } finally {
+    workspaceDeletingFence.end(fixture.workspaceId);
+  }
+});
+
+test("workspace delete 在删除 terminal records 前清理所有状态的 Git auth artifacts", async () => {
+  const fixture = await createFixture();
+  const logger = createLogger();
+  const now = Date.now();
+  const terminals = [
+    { id: "term_active", status: "active" as const },
+    { id: "term_creating", status: "creating" as const },
+    { id: "term_errored", status: "errored" as const },
+    { id: "term_closed", status: "closed" as const },
+  ];
+  for (const term of terminals) {
+    insertTerminal(fixture.ctx.db, { ...term, workspaceId: fixture.workspaceId, sessionName: term.id, createdAt: now, updatedAt: now });
+    for (const [artifactKind, artifactPath] of [
+      ["ssh-key", terminalSshKeyPath(fixture.ctx.dataDir, term.id)],
+      ["askpass", terminalAskpassPath(fixture.ctx.dataDir, term.id)],
+      ["askpass-token", terminalAskpassTokenPath(fixture.ctx.dataDir, term.id)],
+    ] as const) await createRecoverableTerminalAuthArtifact({
+      ctx: fixture.ctx, terminalId: term.id, artifactKind, artifactPath, content: term.id, updatedAt: now,
+    });
+  }
+  await deleteWorkspace(fixture.ctx, logger, fixture.workspaceId, {
+    hasSession: async () => "not_found",
+    killSession: async () => { throw new Error("must not kill absent session"); },
+  });
+  for (const term of terminals) {
+    await assert.rejects(() => fs.access(terminalSshKeyPath(fixture.ctx.dataDir, term.id)));
+    await assert.rejects(() => fs.access(terminalAskpassPath(fixture.ctx.dataDir, term.id)));
+    await assert.rejects(() => fs.access(terminalAskpassTokenPath(fixture.ctx.dataDir, term.id)));
+  }
+  assert.equal((fixture.ctx.db.prepare("select count(*) as count from terminals where workspace_id=?").get(fixture.workspaceId) as { count: number }).count, 0);
+});
+
+test("workspace delete 对没有 authority intent 的 root live 文件 fail-closed", async () => {
+  const fixture = await createFixture();
+  const logger = createLogger();
+  const now = Date.now();
+  const terminalId = "term_no_authority";
+  const sshKey = terminalSshKeyPath(fixture.ctx.dataDir, terminalId);
+  try {
+    insertTerminal(fixture.ctx.db, { id: terminalId, workspaceId: fixture.workspaceId, sessionName: terminalId, status: "errored", createdAt: now, updatedAt: now });
+    await fs.writeFile(sshKey, "victim");
+    await assert.rejects(
+      () => deleteWorkspace(fixture.ctx, logger, fixture.workspaceId, {
+        hasSession: async () => "not_found",
+        killSession: async () => undefined,
+      }),
+      (error: unknown) => error instanceof HttpError && error.code === "TERMINAL_AUTH_CLEANUP_FAILED",
+    );
+    await assert.doesNotReject(() => fs.access(sshKey));
+    assert.ok(getWorkspace(fixture.ctx.db, fixture.workspaceId));
+    assert.equal(workspaceDeletingFence.isDeleting(fixture.workspaceId), true);
+  } finally { workspaceDeletingFence.end(fixture.workspaceId); }
+});
+
+test("workspace delete 在 dataDir root anchor 路径替换时保留 tombstone，恢复后收敛", async () => {
+  const fixture = await createFixture();
+  const logger = createLogger();
+  const now = Date.now();
+  const terminalId = "term_workspace_root_move";
+  const moved = `${fixture.ctx.dataDir}-moved`;
+  try {
+    insertTerminal(fixture.ctx.db, { id: terminalId, workspaceId: fixture.workspaceId, sessionName: terminalId, status: "errored", createdAt: now, updatedAt: now });
+    await createRecoverableTerminalAuthArtifact({
+      ctx: fixture.ctx, terminalId, artifactKind: "ssh-key", artifactPath: terminalSshKeyPath(fixture.ctx.dataDir, terminalId), content: "secret", updatedAt: now,
+    });
+    await fs.rename(fixture.ctx.dataDir, moved);
+    await fs.mkdir(fixture.ctx.dataDir);
+    await assert.rejects(
+      () => deleteWorkspace(fixture.ctx, logger, fixture.workspaceId, { hasSession: async () => "not_found", killSession: async () => undefined }),
+      (error: unknown) => error instanceof HttpError && error.code === "TERMINAL_AUTH_CLEANUP_FAILED",
+    );
+    assert.ok(getWorkspace(fixture.ctx.db, fixture.workspaceId));
+    assert.equal(workspaceDeletingFence.isDeleting(fixture.workspaceId), true);
+    await assert.doesNotReject(() => fs.access(terminalSshKeyPath(moved, terminalId)));
+    await fs.rm(fixture.ctx.dataDir, { recursive: true, force: true });
+    await fs.rename(moved, fixture.ctx.dataDir);
+    await deleteWorkspace(fixture.ctx, logger, fixture.workspaceId, { hasSession: async () => "not_found", killSession: async () => undefined });
+    assert.equal(getWorkspace(fixture.ctx.db, fixture.workspaceId), null);
+  } finally {
+    await fs.rm(moved, { recursive: true, force: true });
+    workspaceDeletingFence.end(fixture.workspaceId);
+  }
+});
+
+test("workspace delete auth cleanup 失败时保留 records、tombstone 与 fence，重试可收敛", async () => {
+  const fixture = await createFixture();
+  const logger = createLogger();
+  const now = Date.now();
+  insertTerminal(fixture.ctx.db, { id: "term_auth", workspaceId: fixture.workspaceId, sessionName: "term_auth", status: "errored", createdAt: now, updatedAt: now });
+  const sshKey = terminalSshKeyPath(fixture.ctx.dataDir, "term_auth");
+  await fs.mkdir(path.dirname(sshKey), { recursive: true });
+  await createRecoverableTerminalAuthArtifact({
+    ctx: fixture.ctx, terminalId: "term_auth", artifactKind: "ssh-key", artifactPath: sshKey, content: "private-key", updatedAt: now,
+  });
+  try {
+    await assert.rejects(
+      () => deleteWorkspace(fixture.ctx, logger, fixture.workspaceId, {
+        hasSession: async () => "not_found",
+        killSession: async () => undefined,
+        cleanupAuthArtifacts: async () => { throw new Error("disk failure"); },
+      }),
+      (error: unknown) => error instanceof HttpError && error.code === "TERMINAL_AUTH_CLEANUP_FAILED",
+    );
+    assert.ok(getWorkspace(fixture.ctx.db, fixture.workspaceId));
+    assert.equal(workspaceDeletingFence.isDeleting(fixture.workspaceId), true);
+    assert.notEqual(fixture.ctx.db.prepare("select workspace_id from workspace_deletion where workspace_id=?").get(fixture.workspaceId), undefined);
+    assert.equal((fixture.ctx.db.prepare("select count(*) as count from terminals where workspace_id=?").get(fixture.workspaceId) as { count: number }).count, 1);
+    await assert.doesNotReject(() => fs.access(sshKey));
+
+    await deleteWorkspace(fixture.ctx, logger, fixture.workspaceId, {
+      hasSession: async () => "not_found",
+      killSession: async () => undefined,
+    });
+    assert.equal(getWorkspace(fixture.ctx.db, fixture.workspaceId), null);
+    await assert.rejects(() => fs.access(sshKey));
+  } finally {
+    workspaceDeletingFence.end(fixture.workspaceId);
+  }
+});
+
+test("workspace delete 遇到 auth cleanup locator unresolved 时保留 record、tombstone 与 fence", async () => {
+  const fixture = await createFixture();
+  const logger = createLogger();
+  const now = Date.now();
+  let cleanupCalls = 0;
+  insertTerminal(fixture.ctx.db, { id: "term_auth_unresolved", workspaceId: fixture.workspaceId, sessionName: "term_auth_unresolved", status: "errored", createdAt: now, updatedAt: now });
+  const root = await fs.stat(fixture.ctx.dataDir);
+  armTerminalAuthCleanupIntent(fixture.ctx.db, { terminalId: "term_auth_unresolved", rootDev: root.dev, rootIno: root.ino, updatedAt: now });
+  updateTerminalAuthCleanupIntent(fixture.ctx.db, {
+    terminalId: "term_auth_unresolved",
+    phase: "unresolved",
+    artifactName: "term-ssh-key-term_auth_unresolved",
+    diagnostic: "auth cleanup locator unresolved: injected migration EIO",
+    updatedAt: now + 1,
+  });
+  try {
+    await assert.rejects(
+      () => deleteWorkspace(fixture.ctx, logger, fixture.workspaceId, {
+        hasSession: async () => "not_found",
+        killSession: async () => undefined,
+        cleanupAuthArtifacts: async () => { cleanupCalls += 1; },
+      }),
+      (error: unknown) => error instanceof HttpError && error.code === "TERMINAL_AUTH_CLEANUP_FAILED",
+    );
+    assert.equal(cleanupCalls, 0, "unresolved locator 必须在 cleanup callback 前 fail-closed");
+    assert.ok(getWorkspace(fixture.ctx.db, fixture.workspaceId));
+    assert.equal((fixture.ctx.db.prepare("select count(*) as count from terminals where workspace_id=?").get(fixture.workspaceId) as { count: number }).count, 1);
+    assert.equal(workspaceDeletingFence.isDeleting(fixture.workspaceId), true);
+    assert.notEqual(fixture.ctx.db.prepare("select workspace_id from workspace_deletion where workspace_id=?").get(fixture.workspaceId), undefined);
+  } finally {
+    workspaceDeletingFence.end(fixture.workspaceId);
+  }
+});
+
+for (const phase of ["armed", "unresolved"] as const) {
+  test(`workspace delete 遇到 auth cleanup ${phase} 时跨重试保持 record、tombstone 与 fence`, async () => {
+    const fixture = await createFixture();
+    const logger = createLogger();
+    const now = Date.now();
+    let cleanupCalls = 0;
+    const terminalId = `term_auth_${phase}`;
+    insertTerminal(fixture.ctx.db, { id: terminalId, workspaceId: fixture.workspaceId, sessionName: terminalId, status: "errored", createdAt: now, updatedAt: now });
+    const root = await fs.stat(fixture.ctx.dataDir);
+    armTerminalAuthCleanupIntent(fixture.ctx.db, { terminalId, rootDev: root.dev, rootIno: root.ino, updatedAt: now });
+    if (phase === "unresolved") {
+      updateTerminalAuthCleanupIntent(fixture.ctx.db, { terminalId, phase, artifactName: "unknown", diagnostic: "auth cleanup locator unresolved", updatedAt: now + 1 });
+    }
+    try {
+      await assert.rejects(() => deleteWorkspace(fixture.ctx, logger, fixture.workspaceId, {
+        hasSession: async () => "not_found",
+        killSession: async () => undefined,
+        cleanupAuthArtifacts: async () => { cleanupCalls += 1; },
+      }), (error: unknown) => error instanceof HttpError && error.code === "TERMINAL_AUTH_CLEANUP_FAILED");
+      assert.equal(cleanupCalls, 0);
+      assert.ok(getWorkspace(fixture.ctx.db, fixture.workspaceId));
+      assert.equal(workspaceDeletingFence.isDeleting(fixture.workspaceId), true);
+      assert.notEqual(fixture.ctx.db.prepare("select workspace_id from workspace_deletion where workspace_id=?").get(fixture.workspaceId), undefined);
+    } finally {
+      workspaceDeletingFence.end(fixture.workspaceId);
+    }
+  });
+}
+
+test("workspace delete 对 recoverable auth intent 先清理并在最终事务删除记录", async () => {
+  const fixture = await createFixture();
+  const logger = createLogger();
+  const now = Date.now();
+  const terminalId = "term_auth_recoverable";
+  let cleanupCalls = 0;
+  insertTerminal(fixture.ctx.db, { id: terminalId, workspaceId: fixture.workspaceId, sessionName: terminalId, status: "errored", createdAt: now, updatedAt: now });
+  const root = await fs.stat(fixture.ctx.dataDir);
+  const artifactName = path.basename(terminalSshKeyPath(fixture.ctx.dataDir, terminalId));
+  armTerminalAuthCleanupIntent(fixture.ctx.db, {
+    terminalId, artifactKind: "ssh-key", artifactName, rootDev: root.dev, rootIno: root.ino, updatedAt: now,
+  });
+  updateTerminalAuthCleanupIntent(fixture.ctx.db, {
+    terminalId, artifactKind: "ssh-key", phase: "recoverable", artifactName, rootDev: root.dev, rootIno: root.ino,
+    diagnostic: "auth cleanup recoverable in dataDir root slot", updatedAt: now + 1,
+  });
+  try {
+    await deleteWorkspace(fixture.ctx, logger, fixture.workspaceId, {
+      hasSession: async () => "not_found",
+      killSession: async () => undefined,
+      cleanupAuthArtifacts: async () => { cleanupCalls += 1; },
+    });
+    assert.equal(cleanupCalls, 1);
+    assert.equal(getWorkspace(fixture.ctx.db, fixture.workspaceId), null);
+    assert.equal((fixture.ctx.db.prepare("select count(*) as count from terminal_auth_cleanup_intents where terminal_id = ?").get(terminalId) as { count: number }).count, 0);
+  } finally {
+    workspaceDeletingFence.end(fixture.workspaceId);
+  }
+});
+
+test("workspace delete 的 recoverable clear DELETE IGNORE 时保留 records、tombstone 与 fence", async () => {
+  const fixture = await createFixture();
+  const logger = createLogger();
+  const now = Date.now();
+  const terminalId = "term_auth_recoverable_clear_ignore";
+  insertTerminal(fixture.ctx.db, { id: terminalId, workspaceId: fixture.workspaceId, sessionName: terminalId, status: "errored", createdAt: now, updatedAt: now });
+  const root = await fs.stat(fixture.ctx.dataDir);
+  const artifactName = path.basename(terminalSshKeyPath(fixture.ctx.dataDir, terminalId));
+  armTerminalAuthCleanupIntent(fixture.ctx.db, {
+    terminalId, artifactKind: "ssh-key", artifactName, rootDev: root.dev, rootIno: root.ino, updatedAt: now,
+  });
+  updateTerminalAuthCleanupIntent(fixture.ctx.db, {
+    terminalId, artifactKind: "ssh-key", phase: "recoverable", artifactName, rootDev: root.dev, rootIno: root.ino,
+    diagnostic: "recoverable", updatedAt: now + 1,
+  });
+  fixture.ctx.db.exec(`create trigger ignore_auth_latch_clear before delete on terminal_auth_cleanup_intents
+    begin select raise(ignore); end;`);
+  try {
+    await assert.rejects(() => deleteWorkspace(fixture.ctx, logger, fixture.workspaceId, {
+      hasSession: async () => "not_found",
+      killSession: async () => undefined,
+      cleanupAuthArtifacts: async () => undefined,
+    }), /deletion remains pending/);
+    assert.ok(getWorkspace(fixture.ctx.db, fixture.workspaceId));
+    assert.equal((fixture.ctx.db.prepare("select count(*) as count from terminals where id = ?").get(terminalId) as { count: number }).count, 1);
+    assert.equal(getWorkspace(fixture.ctx.db, fixture.workspaceId)?.id, fixture.workspaceId);
+    assert.equal(workspaceDeletingFence.isDeleting(fixture.workspaceId), true);
+    assert.notEqual(fixture.ctx.db.prepare("select workspace_id from workspace_deletion where workspace_id = ?").get(fixture.workspaceId), undefined);
+  } finally {
+    workspaceDeletingFence.end(fixture.workspaceId);
+  }
+});
+
+test("workspace delete 在 replacement marker 仍存在时保留 tombstone 与 fence", async () => {
+  const fixture = await createFixture();
+  const logger = createLogger();
+  try {
+    await fs.mkdir(path.join(fixture.ctx.dataDir, ".workspace-delete-quarantine"), { recursive: true });
+    await fs.writeFile(path.join(fixture.ctx.dataDir, ".workspace-delete-quarantine", ".delete-replacement-pending-victim"), "victim");
+    await assert.rejects(
+      () => deleteWorkspace(fixture.ctx, logger, fixture.workspaceId, {
+        hasSession: async () => "not_found",
+        killSession: async () => undefined,
+      }),
+      (error: unknown) => error instanceof HttpError && error.code === "WORKSPACE_FILE_CLEANUP_REPLACEMENT_PENDING",
+    );
+    assert.ok(getWorkspace(fixture.ctx.db, fixture.workspaceId));
+    assert.equal(workspaceDeletingFence.isDeleting(fixture.workspaceId), true);
+    assert.notEqual(fixture.ctx.db.prepare("select workspace_id from workspace_deletion where workspace_id=?").get(fixture.workspaceId), undefined);
+    await assert.rejects(
+      () => deleteWorkspace(fixture.ctx, logger, fixture.workspaceId, {
+        hasSession: async () => "not_found",
+        killSession: async () => undefined,
+      }),
+      (error: unknown) => error instanceof HttpError && error.code === "WORKSPACE_FILE_CLEANUP_REPLACEMENT_PENDING",
+    );
+  } finally {
+    workspaceDeletingFence.end(fixture.workspaceId);
+  }
+});
+
+test("restored tombstone 拒绝 workspace-files 的所有生产写入口", async () => {
+  const fixture = await createFixture();
+  workspaceDeletingFence.restore(fixture.workspaceId);
+  const assertDeleting = async (fn: () => Promise<unknown>) => {
+    await assert.rejects(fn, (error: unknown) => error instanceof HttpError && error.code === "WORKSPACE_DELETING");
+  };
+  try {
+    await assertDeleting(() => writeWorkspaceFileText(fixture.ctx, fixture.workspaceId, { path: "a.txt", content: "x", force: true }));
+    await assertDeleting(() => createWorkspaceFile(fixture.ctx, fixture.workspaceId, { path: "b.txt", content: "x" }));
+    await assertDeleting(() => mkdirWorkspacePath(fixture.ctx, fixture.workspaceId, { path: "dir" }));
+    await assertDeleting(() => renameWorkspacePath(fixture.ctx, fixture.workspaceId, { from: "a.txt", to: "c.txt" }));
+    await assertDeleting(() => deleteWorkspacePath(fixture.ctx, fixture.workspaceId, { path: "a.txt", recursive: false }));
+    await assert.rejects(() => fs.access(path.join(fixture.workspacePath, "a.txt")));
+    await assert.rejects(() => fs.access(path.join(fixture.workspacePath, "b.txt")));
+  } finally {
+    workspaceDeletingFence.end(fixture.workspaceId);
+  }
 });
 
 test("files/list: workspace 目录缺失应返回 410", async () => {

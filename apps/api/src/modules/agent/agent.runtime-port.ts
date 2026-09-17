@@ -1,12 +1,21 @@
-import type { AgentContextItemRecord, AgentSessionRecord } from "@agent-workbench/shared";
+import type { AgentSessionRecord } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import type {
-  AgentApiCreateContextItemRequest,
-  AgentApiCreateContextItemResponse,
+  AgentApiCompleteAssistantRequest,
+  AgentApiCreateStreamingAssistantRequest,
+  AgentApiCreateStreamingAssistantResponse,
+  AgentApiFlushAssistantPartsRequest,
+  AgentApiReplaceStreamingAssistantRequest,
+  AgentApiReplaceStreamingAssistantResponse,
   AgentApiPromptContextRequest,
+  AgentApiResumeStreamingAssistantRequest,
   AgentApiPromptContextResponse,
+  AgentApiArchiveReadRequest,
+  AgentApiArchiveSearchRequest,
+  AgentApiArchivePageResponse,
   AgentApiRunCompleteRequest,
-  AgentApiRunStateRequest,
-  AgentApiUpdateContextItemRequest
+  AgentApiUpdateRunNoticeRequest,
+  AgentApiUpdateToolExecutionRequest,
+  AgentApiFencedWriteResponse
 } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { AgentRuntimeRun, RuntimeControlPort } from "./lifecycle/run-lifecycle-ports.js";
 
@@ -20,9 +29,15 @@ export type AgentRuntimePort = RuntimeControlPort;
  */
 export type LocalAgentRuntimeExecutionPort = {
   getPromptContextForRun(params: AgentApiPromptContextRequest): Promise<AgentApiPromptContextResponse>;
-  appendContextItemFromWorker(params: AgentApiCreateContextItemRequest): AgentApiCreateContextItemResponse;
-  updateContextItemFromWorker(params: AgentApiUpdateContextItemRequest & { itemId: number }): Promise<AgentContextItemRecord>;
-  updateRunStateFromWorker(params: AgentApiRunStateRequest): void;
+  archiveReadFromWorker(params: AgentApiArchiveReadRequest): AgentApiArchivePageResponse;
+  archiveSearchFromWorker(params: AgentApiArchiveSearchRequest): AgentApiArchivePageResponse;
+  createStreamingAssistantFromWorker(params: AgentApiCreateStreamingAssistantRequest): AgentApiCreateStreamingAssistantResponse;
+  flushAssistantPartsFromWorker(params: AgentApiFlushAssistantPartsRequest): AgentApiFencedWriteResponse;
+  resumeStreamingAssistantFromWorker(params: AgentApiResumeStreamingAssistantRequest): AgentApiFencedWriteResponse;
+  replaceStreamingAssistantFromWorker(params: AgentApiReplaceStreamingAssistantRequest): AgentApiReplaceStreamingAssistantResponse;
+  completeAssistantFromWorker(params: AgentApiCompleteAssistantRequest): AgentApiFencedWriteResponse;
+  updateToolExecutionFromWorker(params: AgentApiUpdateToolExecutionRequest): AgentApiFencedWriteResponse;
+  updateRunNoticeFromWorker(params: AgentApiUpdateRunNoticeRequest): AgentApiFencedWriteResponse;
   completeRunFromWorker(params: AgentApiRunCompleteRequest): void;
-  getSession(sessionId: string): Pick<AgentSessionRecord, "headItemId"> | null;
+  getSession(sessionId: string): Pick<AgentSessionRecord, "headMessageId"> | null;
 };

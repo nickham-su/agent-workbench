@@ -44,7 +44,7 @@ test("PromptStaticAssembler preserves static prompt inputs, external skill order
     skillsInstruction: "builtin/skill|repo/repo/z,workspace/a"
   }]);
   assert.equal(result.systemStatic, "static system");
-  assert.deepEqual(result.tools.map((tool) => tool.name), ["read", "archive_search", "archive_read", "skill", "bash", "subtask"]);
+  assert.deepEqual(result.tools.map((tool) => tool.name), ["read", "skill", "bash", "subtask"]);
   assert.equal(result.tools.at(-1)?.description, "subtask:subtasks:subtask-agent");
   assert.deepEqual(result.externalSkillRoots, [
     { sourceType: "repo", repoId: "repo", rootDir: "z", rootPath: "/repo/z" },

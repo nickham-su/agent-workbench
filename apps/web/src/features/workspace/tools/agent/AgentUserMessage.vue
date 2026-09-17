@@ -15,9 +15,11 @@
 </template>
 
 <script setup lang="ts">
-import type { AgentMessageImageAttachment } from "@agent-workbench/shared";
+import type { AgentImagePart } from "@agent-workbench/shared";
 import { FileImageOutlined } from "@ant-design/icons-vue";
 import { useI18n } from "vue-i18n";
+
+export type AgentMessageImageAttachment = Pick<AgentImagePart, "attachmentId" | "mediaType" | "filename">;
 
 const props = withDefaults(defineProps<{
   text: string;

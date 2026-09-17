@@ -27,7 +27,8 @@ function imageContext() {
   return {
     pendingTools: [],
     tools: [],
-    headItemId: null,
+    headMessageId: null,
+    sessionRevision: 0,
     system: "",
     messages: [{
       role: "user" as const,
@@ -51,9 +52,10 @@ function createApiClient(context = imageContext()) {
     client: {
       async getExecutionProfile() { return baseProfile(); },
       async getPromptContext() { return context; },
-      async createContextItem(input: Record<string, unknown>) { created.push(input); return { item: { id: created.length } }; },
-      async updateContextItem() { return { item: { id: 1 } }; },
-      async updateRunState() {},
+      async createStreamingAssistant(input: Record<string, unknown>) { created.push(input); return { result: "updated" }; },
+      async flushAssistantParts() { return { result: "updated" }; },
+      async completeAssistant() { return { result: "updated" }; },
+      async updateRunNotice() { return { result: "updated" }; },
       async completeRun(input: { status: string }) { completed.push(input.status); }
     }
   };
@@ -75,7 +77,7 @@ test("AgentRunner materializes only attachment_ref parts into AI SDK file parts"
     },
     streamText: ((input: Record<string, unknown>) => {
       requests.push(input);
-      return { fullStream: (async function* () { yield { type: "finish" }; })() };
+      return { fullStream: (async function* () { yield { type: "text-delta", text: "image described" }; yield { type: "finish" }; })() };
     }) as unknown as typeof streamText
   });
   (runner as any).toolRegistry.listTools = async () => [];

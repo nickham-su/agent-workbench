@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { TextDecoder } from "node:util";
-import { isValidSkillRelativePath, parseSkillFrontmatter, parseStableSkillIdentifier } from "@agent-workbench/shared";
+import { isValidSkillRelativePath, parseSkillFrontmatter, parseStableSkillIdentifier } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { normalizeWorkspaceRepoDirNames } from "./workspaceRepoDirNames.js";
 
 const DEFAULT_READ_LIMIT = 500;

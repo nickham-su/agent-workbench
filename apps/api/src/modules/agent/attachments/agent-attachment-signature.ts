@@ -1,4 +1,4 @@
-import type { AgentImageMediaType } from "@agent-workbench/shared";
+import type { AgentImageMediaType } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 
 function hasPrefix(bytes: Uint8Array, prefix: readonly number[]) {
   return bytes.length >= prefix.length && prefix.every((value, index) => bytes[index] === value);

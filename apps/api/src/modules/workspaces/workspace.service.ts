@@ -31,8 +31,12 @@ import { getOriginDefaultBranch, listHeadsBranches } from "../../infra/git/refs.
 import { withRepoLock } from "../../infra/locks/repoLock.js";
 import { cloneFromMirror } from "../../infra/git/clone.js";
 import { ensureDir, pathExists, rmrf } from "../../infra/fs/fs.js";
-import { agentArchiveWorkspaceDir, workspaceRepoDirPath, workspaceRoot } from "../../infra/fs/paths.js";
-import { removeAgentAttachmentWorkspaceDirectory } from "../agent/attachments/agent-attachment-storage.js";
+import { closeSecureDirectories, openSecureRootDirectory, removeSecureDirectoryTree } from "../../infra/fs/secure-directory.js";
+import { deleteWorkspaceAgentData } from "../../infra/db/workspace-agent-data-cleanup.js";
+import { applyPatchUiArtifactsWorkspaceDir, workspaceRepoDirPath, workspaceRoot, writeUiArtifactsWorkspaceDir } from "../../infra/fs/paths.js";
+import { workspaceDeletingFence } from "../agent/lifecycle/workspace-deleting-fence.js";
+import { getWorkspaceRuntime } from "../agent/lifecycle/workspace-runtime-registry.js";
+import { cancelWorkspaceRunsAndConverge } from "../agent/agent-message.store.js";
 import { ensureRepoMirror } from "../../infra/git/mirror.js";
 import { buildGitEnv } from "../../infra/git/gitEnv.js";
 import {
@@ -50,21 +54,42 @@ import {
   updateWorkspaceTitle
 } from "./workspace.store.js";
 import {
+  getWorkspaceDeletionIntent,
+  listWorkspaceDeletionIntents,
+  recordWorkspaceDeletionFailure,
+  upsertWorkspaceDeletionIntent,
+} from "./workspace-deletion.store.js";
+import {
   countActiveTerminalsByWorkspace,
   countActiveTerminalsByWorkspaceIds,
-  deleteTerminalRecord,
+  deleteTerminalRecordsByWorkspace,
   listTerminalsByWorkspace
 } from "../terminals/terminal.store.js";
 import { tmuxHasSession, tmuxKillSession } from "../../infra/tmux/session.js";
+import { assertTerminalGitAuthCleanupRootAnchors, cleanupTerminalGitAuthArtifacts } from "../terminals/terminal.gitAuth.js";
+import { clearTerminalAuthCleanupIntent, listTerminalAuthCleanupIntents } from "../terminals/terminal-auth-cleanup-intent.store.js";
 import { withWorkspaceRepoLock } from "../../infra/locks/workspaceRepoLock.js";
 import { parseSkillFrontmatter, scanReadableTopLevelSkills } from "../agent/top-level-skill.js";
 import { withWorkspaceLock } from "../../infra/locks/workspaceLock.js";
+import { workspaceLifecycleCoordinator } from "../../infra/locks/workspace-lifecycle-coordinator.js";
 
 const WORKSPACE_EXTERNAL_SKILL_ROOTS_SETTINGS_KEY = "workspace_external_skill_roots_v1";
 const WORKSPACE_AGENTS_INSTRUCTIONS_SETTINGS_KEY = "workspace_agents_instructions_v1";
 const WORKSPACE_AGENT_ENABLEMENT_SETTINGS_KEY = "workspace_agent_enablement_v1";
 const BUILTIN_SKILLS_ROOT = "skills";
 const WORKSPACE_AGENTS_FILENAME = "AGENTS.md";
+
+export type WorkspaceDeletionTerminalOperations = {
+  hasSession: (params: { sessionName: string; cwd: string }) => Promise<"exists" | "not_found">;
+  killSession: (params: { sessionName: string; cwd: string }) => Promise<void>;
+  cleanupAuthArtifacts?: (dataDir: string, terminalId: string, intents?: import("../terminals/terminal-auth-cleanup-intent.store.js").TerminalAuthCleanupIntent[]) => Promise<void>;
+};
+
+const defaultWorkspaceDeletionTerminalOperations: WorkspaceDeletionTerminalOperations = {
+  hasSession: tmuxHasSession,
+  killSession: tmuxKillSession,
+  cleanupAuthArtifacts: cleanupTerminalGitAuthArtifacts,
+};
 
 function formatRepoDisplayName(rawUrl: string) {
   let s = String(rawUrl || "").trim();
@@ -251,7 +276,10 @@ export async function updateWorkspaceAgentsInstructionsSettings(
   workspaceId: string,
   payload: UpdateWorkspaceAgentsInstructionsSettingsRequest
 ): Promise<WorkspaceAgentsInstructionsSettingsResponse> {
+  return workspaceLifecycleCoordinator.withMutation(workspaceId, async () => {
+    return withWorkspaceLock({ workspaceId }, async () => {
   const ws = await getWorkspaceById(ctx, workspaceId);
+  workspaceDeletingFence.assertWritable(ws.id);
   const candidates = await listWorkspaceAgentsInstructionsCandidates(ctx, logger, ws);
   const candidateMap = new Map(
     candidates.map((it) => [getAgentsSourceIdentityKey({ sourceType: it.sourceType, repoId: it.repoId }), it] as const)
@@ -314,6 +342,8 @@ export async function updateWorkspaceAgentsInstructionsSettings(
     }));
 
   return { workspaceId: ws.id, enabledSources, updatedAt: now };
+    });
+  });
 }
 
 export async function listEnabledWorkspaceAgentsInstructions(params: {
@@ -503,7 +533,10 @@ export async function updateWorkspaceById(
   workspaceId: string,
   params: { title?: string; useTerminalCredential?: boolean }
 ) {
+  return workspaceLifecycleCoordinator.withMutation(workspaceId, async () => {
+    return withWorkspaceLock({ workspaceId }, async () => {
   const ws = await getWorkspaceById(ctx, workspaceId);
+  workspaceDeletingFence.assertWritable(ws.id);
   const wantsTitleUpdate = params.title !== undefined;
   const wantsTerminalCredentialUpdate = params.useTerminalCredential !== undefined;
   if (!wantsTitleUpdate && !wantsTerminalCredentialUpdate) throw new HttpError(400, "No fields to update");
@@ -535,6 +568,8 @@ export async function updateWorkspaceById(
     "workspace updated"
   );
   return getWorkspaceDetailById(ctx, ws.id);
+    });
+  });
 }
 
 export async function attachRepoToWorkspace(
@@ -543,7 +578,9 @@ export async function attachRepoToWorkspace(
   workspaceId: string,
   params: { repoId: string; branch?: string }
 ) {
+  return workspaceLifecycleCoordinator.withMutation(workspaceId, async () => {
   const ws = await getWorkspaceById(ctx, workspaceId);
+  workspaceDeletingFence.assertWritable(ws.id);
 
   return withWorkspaceLock({ workspaceId: ws.id }, async () => {
     const repoId = String(params.repoId || "").trim();
@@ -625,6 +662,7 @@ export async function attachRepoToWorkspace(
       await gitEnv.cleanup();
     }
   });
+  });
 }
 
 export async function detachRepoFromWorkspace(
@@ -633,7 +671,9 @@ export async function detachRepoFromWorkspace(
   workspaceId: string,
   repoId: string
 ) {
+  return workspaceLifecycleCoordinator.withMutation(workspaceId, async () => {
   const ws = await getWorkspaceById(ctx, workspaceId);
+  workspaceDeletingFence.assertWritable(ws.id);
 
   return withWorkspaceLock({ workspaceId: ws.id }, async () => {
     const id = String(repoId || "").trim();
@@ -665,92 +705,194 @@ export async function detachRepoFromWorkspace(
     logger.info({ workspaceId: ws.id, repoId: id }, "repo detached from workspace");
     return getWorkspaceDetailById(ctx, ws.id);
   });
+  });
 }
 
-export async function deleteWorkspace(ctx: AppContext, logger: FastifyBaseLogger, workspaceId: string) {
-  const ws = await getWorkspaceById(ctx, workspaceId);
+const WORKSPACE_AGENT_DRAIN_TIMEOUT_MS = 10_000;
+const WORKSPACE_DELETION_NOTICE = "任务已因工作区删除而终止";
+
+function listWorkspaceSessionIds(ctx: AppContext, workspaceId: string) {
+  return (ctx.db.prepare(`
+    select id as sessionId from agent_session where workspace_id = ? order by id
+  `).all(workspaceId) as Array<{ sessionId: string }>).map((row) => row.sessionId);
+}
+
+function listWorkspaceDrainSessionIds(ctx: AppContext, workspaceId: string) {
+  return (ctx.db.prepare(`
+    select state.session_id as sessionId
+    from session_run_state state
+    where state.workspace_id = @workspaceId
+      and (
+        state.status = 'running'
+        or state.run_notice_text = @deletionNotice
+      )
+    order by state.session_id
+  `).all({ workspaceId, deletionNotice: WORKSPACE_DELETION_NOTICE }) as Array<{ sessionId: string }>).map((row) => row.sessionId);
+}
+
+async function removeWorkspaceFileDomains(ctx: AppContext, ws: WorkspaceRecord) {
+  const dataRoot = await openSecureRootDirectory(ctx.dataDir);
+  try {
+    const domains = [
+      ["workspaces", ws.dirName],
+      ["agent", "attachments", "by_workspace", ws.id],
+      ["tmp", "agent", "ui-artifacts", "apply_patch", path.basename(applyPatchUiArtifactsWorkspaceDir(ctx.dataDir, ws.id))],
+      ["tmp", "agent", "ui-artifacts", "write", path.basename(writeUiArtifactsWorkspaceDir(ctx.dataDir, ws.id))],
+    ];
+    for (const relativeSegments of domains) {
+      const result = await removeSecureDirectoryTree({
+        root: dataRoot,
+        relativeSegments,
+        quarantineDirectory: ".workspace-delete-quarantine",
+      });
+      if (result === "replacement_pending") {
+        throw new HttpError(409, "Workspace file cleanup has a replacement pending; deletion remains pending.", "WORKSPACE_FILE_CLEANUP_REPLACEMENT_PENDING");
+      }
+    }
+  } finally {
+    await closeSecureDirectories(dataRoot);
+  }
+}
+
+function deletionFailureCode(error: unknown) {
+  return error instanceof HttpError ? error.code ?? "WORKSPACE_DELETION_PENDING" : "WORKSPACE_DELETION_PENDING";
+}
+
+function deletionFailureMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.slice(0, 500);
+}
+
+/**
+ * 删除从 durable intent 开始。任一步失败都保留 tombstone 与 fence；重试或启动续作
+ * 将从当前可达步骤继续。只有文件域全部安全清理且最终 SQLite 事务成功后才释放 fence。
+ */
+export async function deleteWorkspace(
+  ctx: AppContext,
+  logger: FastifyBaseLogger,
+  workspaceId: string,
+  terminalOperations = defaultWorkspaceDeletionTerminalOperations,
+) {
+  const ws = await workspaceLifecycleCoordinator.withAdmission(workspaceId, async () =>
+    withWorkspaceLock({ workspaceId }, async () => {
+      const ws = await getWorkspaceById(ctx, workspaceId);
+      if (!/^[A-Za-z0-9._-]{1,160}$/.test(ws.dirName) || ws.dirName === "." || ws.dirName === "..") throw new HttpError(409, "Workspace path is invalid; aborting delete.", "WORKSPACE_PATH_INVALID");
+      const expectedPath = workspaceRoot(ctx.dataDir, ws.dirName);
+      if (path.resolve(ws.path) !== path.resolve(expectedPath)) {
+        logger.error({ workspaceId: ws.id, wsPath: ws.path, expectedPath }, "workspace path mismatch; abort delete");
+        throw new HttpError(409, "Workspace path is invalid; aborting delete.", "WORKSPACE_PATH_INVALID");
+      }
+      const existingIntent = getWorkspaceDeletionIntent(ctx.db, ws.id);
+      if (!existingIntent) {
+        ctx.db.transaction(() => {
+          upsertWorkspaceDeletionIntent(ctx.db, { workspaceId: ws.id, dirName: ws.dirName, now: nowMs() });
+        })();
+      }
+      if (!workspaceDeletingFence.isDeleting(ws.id)) workspaceDeletingFence.begin(ws.id);
+      return ws;
+    })
+  );
 
   const expectedPath = workspaceRoot(ctx.dataDir, ws.dirName);
-  // 删除前做强校验：即使 DB/path 字段出现脏数据，也不允许越界递归删除。
-  // 同时前置校验，避免 ws.path 异常时先执行 tmux 等副作用操作。
-  if (path.resolve(ws.path) !== path.resolve(expectedPath)) {
-    logger.error({ workspaceId: ws.id, wsPath: ws.path, expectedPath }, "workspace path mismatch; abort delete");
-    throw new HttpError(409, "Workspace path is invalid; aborting delete.", "WORKSPACE_PATH_INVALID");
-  }
+  try {
+    const workspaceSessionIds = listWorkspaceSessionIds(ctx, ws.id);
+    if (workspaceSessionIds.length > 0) {
+      const registration = getWorkspaceRuntime();
+      if (!registration) {
+        if (listWorkspaceDrainSessionIds(ctx, ws.id).length > 0) {
+          throw new HttpError(503, "agent worker unavailable", "WORKSPACE_AGENT_WORKER_UNAVAILABLE");
+        }
+      } else await registration.handoffCoordinator.runExclusiveMany(workspaceSessionIds, async () => {
+        const drainSessionIds = listWorkspaceDrainSessionIds(ctx, ws.id);
+        if (drainSessionIds.length > 0 && !registration.runtime.cancelSessionAndWait) {
+          throw new HttpError(503, "agent worker unavailable", "WORKSPACE_AGENT_WORKER_UNAVAILABLE");
+        }
+        cancelWorkspaceRunsAndConverge(ctx.db, {
+          workspaceId: ws.id,
+          updatedAt: nowMs(),
+          noticeText: WORKSPACE_DELETION_NOTICE,
+        });
+        for (const sessionId of drainSessionIds) {
+          let idle: boolean;
+          try {
+            idle = await registration.runtime.cancelSessionAndWait!({ sessionId, timeoutMs: WORKSPACE_AGENT_DRAIN_TIMEOUT_MS });
+          } catch (err) {
+            logger.warn({ workspaceId: ws.id, sessionId, err }, "agent worker unavailable during workspace deletion");
+            throw new HttpError(503, "agent worker unavailable", "WORKSPACE_AGENT_WORKER_UNAVAILABLE");
+          }
+          if (!idle) throw new HttpError(409, "agent worker did not stop in time", "WORKSPACE_AGENT_WORKER_DRAIN_TIMEOUT");
+        }
+      });
+    }
 
-  // 杀掉该 workspace 下所有 tmux 会话并删除 terminal 记录
-  const terms = listTerminalsByWorkspace(ctx.db, ws.id);
-  let killFailed = false;
-  for (const term of terms) {
-    let killedOrMissing = false;
-    try {
-      const exists = await tmuxHasSession({ sessionName: term.sessionName, cwd: ws.path });
-      if (!exists) {
-        killedOrMissing = true;
-      } else {
-        await tmuxKillSession({ sessionName: term.sessionName, cwd: ws.path });
-        killedOrMissing = true;
+    const terms = listTerminalsByWorkspace(ctx.db, ws.id);
+    for (const term of terms) {
+      try {
+        const presence = await terminalOperations.hasSession({ sessionName: term.sessionName, cwd: ctx.dataDir });
+        if (presence === "exists") {
+          await terminalOperations.killSession({ sessionName: term.sessionName, cwd: ctx.dataDir });
+        }
+      } catch (err) {
+        logger.warn({ workspaceId: ws.id, terminalId: term.id, sessionName: term.sessionName, err }, "tmux kill-session failed");
+        throw new HttpError(409, "Failed to kill one or more terminal sessions; deletion remains pending.", "TERMINAL_KILL_FAILED");
       }
-    } catch (err) {
-      // kill 失败不应中断整体流程，但也不能无条件删除 terminal 记录，避免产生新不一致
-      killFailed = true;
-      logger.warn({ workspaceId: ws.id, terminalId: term.id, sessionName: term.sessionName, err }, "tmux kill-session failed");
     }
 
-    if (killedOrMissing) {
-      deleteTerminalRecord(ctx.db, term.id);
+    for (const term of terms) {
+      try {
+        const intents = listTerminalAuthCleanupIntents(ctx.db, term.id);
+        if (intents.some((intent) => intent.phase !== "recoverable")) {
+          throw new Error("auth cleanup locator is not recoverable");
+        }
+        await assertTerminalGitAuthCleanupRootAnchors(ctx.dataDir, intents);
+        await (terminalOperations.cleanupAuthArtifacts ?? cleanupTerminalGitAuthArtifacts)(ctx.dataDir, term.id, intents);
+        // 仅 recoverable 经过实际 root-slot cleanup 后可移除 latch；同时和最终
+        // terminal/Workspace record 删除位于下面同一 SQLite transaction。
+        const current = listTerminalAuthCleanupIntents(ctx.db, term.id);
+        if (current.some((intent) => intent.phase !== "recoverable")) throw new Error("auth cleanup locator is not recoverable");
+      } catch (err) {
+        logger.warn({ workspaceId: ws.id, terminalId: term.id, err }, "terminal Git auth artifact cleanup failed");
+        throw new HttpError(409, "Failed to clean terminal Git authentication artifacts; deletion remains pending.", "TERMINAL_AUTH_CLEANUP_FAILED");
+      }
     }
+
+    await removeWorkspaceFileDomains(ctx, ws);
+    ctx.db.transaction(() => {
+      for (const term of terms) {
+        const intents = listTerminalAuthCleanupIntents(ctx.db, term.id);
+        if (intents.some((intent) => intent.phase !== "recoverable")) throw new Error("auth cleanup locator is not recoverable");
+        for (const intent of intents) clearTerminalAuthCleanupIntent(ctx.db, term.id, intent.artifactKind);
+      }
+      deleteWorkspaceAgentData(ctx.db, ws.id);
+      deleteWorkspaceReposByWorkspace(ctx.db, ws.id);
+      deleteTerminalRecordsByWorkspace(ctx.db, ws.id);
+      deleteWorkspaceRecord(ctx.db, ws.id);
+    })();
+    workspaceDeletingFence.end(ws.id);
+    logger.info({ workspaceId: ws.id }, "workspace deleted");
+  } catch (error) {
+    const code = deletionFailureCode(error);
+    const message = deletionFailureMessage(error);
+    recordWorkspaceDeletionFailure(ctx.db, { workspaceId: ws.id, now: nowMs(), code, message });
+    throw error instanceof HttpError
+      ? error
+      : new HttpError(409, "Workspace deletion remains pending; retry later.", "WORKSPACE_DELETION_PENDING");
   }
-
-  if (killFailed) {
-    // 保留 workspace 记录与未清理的 terminal，便于用户重试或手工处理；避免“删一半”。
-    throw new HttpError(409, "Failed to kill one or more terminal sessions; aborting delete.", "TERMINAL_KILL_FAILED");
-  }
-
-  // 先删 DB（事务），避免外键 restrict 导致“删一半”；目录与归档清理改为 best-effort。
-  ctx.db.transaction(() => {
-    // agent_session.workspace_id 对 workspaces 是 on delete restrict；必须先清理 workspace 下的 session。
-    // agent_client_request 没有外键，需手动清理。
-    ctx.db.prepare(`delete from agent_client_request where workspace_id = ?`).run(ws.id);
-    // 删除 session 会 cascade 掉 context item 及其 attachment relation；附件记录需单独删除。
-    ctx.db.prepare(`delete from agent_session where workspace_id = ?`).run(ws.id);
-    ctx.db.prepare(`delete from agent_attachment where workspace_id = ?`).run(ws.id);
-    deleteWorkspaceReposByWorkspace(ctx.db, ws.id);
-    deleteWorkspaceRecord(ctx.db, ws.id);
-  })();
-
-  try {
-    await rmrf(expectedPath);
-  } catch (err) {
-    logger.warn({ workspaceId: ws.id, path: expectedPath, err }, "remove workspace path failed");
-  }
-
-  const archivePath = agentArchiveWorkspaceDir(ctx.dataDir, ws.id);
-  const dataDirAbs = path.resolve(ctx.dataDir);
-  const archiveAbs = path.resolve(archivePath);
-  const archiveRel = path.relative(dataDirAbs, archiveAbs);
-  const isArchiveInsideDataDir = archiveRel.length > 0 && !archiveRel.startsWith("..") && !path.isAbsolute(archiveRel);
-  if (!isArchiveInsideDataDir) {
-    logger.error({ workspaceId: ws.id, archivePath }, "agent archive path is invalid; skip archive cleanup");
-  } else {
-    try {
-      await rmrf(archivePath);
-    } catch (err) {
-      logger.warn({ workspaceId: ws.id, archivePath, err }, "remove workspace archive path failed");
-    }
-  }
-
-  try {
-    const attachmentCleanup = await removeAgentAttachmentWorkspaceDirectory({ dataDir: ctx.dataDir, workspaceId: ws.id });
-    if (attachmentCleanup === "skipped_unsafe") {
-      logger.warn({ workspaceId: ws.id }, "workspace attachment directory cleanup skipped due to unsafe path");
-    }
-  } catch (err) {
-    logger.warn({ workspaceId: ws.id, err }, "remove workspace attachment directory failed");
-  }
-
-  logger.info({ workspaceId: ws.id }, "workspace deleted");
 }
+
+/** 进程重启后恢复 durable fence，并在运行时可用时尝试续作。 */
+export async function resumePendingWorkspaceDeletions(ctx: AppContext, logger: FastifyBaseLogger) {
+  const intents = listWorkspaceDeletionIntents(ctx.db);
+  for (const intent of intents) workspaceDeletingFence.restore(intent.workspaceId);
+  for (const intent of intents) {
+    try {
+      await deleteWorkspace(ctx, logger, intent.workspaceId);
+    } catch (error) {
+      logger.warn({ workspaceId: intent.workspaceId, err: error }, "workspace deletion remains pending during startup resume");
+    }
+  }
+}
+
 
 type ExternalSkillEnabledRoot = {
   sourceType: "workspace" | "repo";
@@ -1246,7 +1388,10 @@ export async function updateWorkspaceAgentEnablementSettings(
   workspaceId: string,
   payload: UpdateWorkspaceAgentEnablementSettingsRequest
 ): Promise<WorkspaceAgentEnablementSettingsResponse> {
+  return workspaceLifecycleCoordinator.withMutation(workspaceId, async () => {
+    return withWorkspaceLock({ workspaceId }, async () => {
   const ws = await getWorkspaceById(ctx, workspaceId);
+  workspaceDeletingFence.assertWritable(ws.id);
   const mode: WorkspaceAgentEnablementMode = String((payload as any)?.mode || "").trim() === "subset" ? "subset" : "all";
   const now = nowMs();
 
@@ -1271,6 +1416,8 @@ export async function updateWorkspaceAgentEnablementSettings(
     enabledAgentIds,
     updatedAt: now
   };
+    });
+  });
 }
 
 export async function detectWorkspaceExternalSkillRoots(
@@ -1338,7 +1485,10 @@ export async function updateWorkspaceExternalSkillRootsSettings(
   workspaceId: string,
   payload: UpdateWorkspaceExternalSkillRootsSettingsRequest
 ): Promise<WorkspaceExternalSkillRootsSettingsResponse> {
+  return workspaceLifecycleCoordinator.withMutation(workspaceId, async () => {
+    return withWorkspaceLock({ workspaceId }, async () => {
   const ws = await getWorkspaceById(ctx, workspaceId);
+  workspaceDeletingFence.assertWritable(ws.id);
   const candidates = await listWorkspaceExternalSkillsCandidates(ctx, logger, ws);
   const candidateMap = new Map(candidates.map((it) => [
     getExternalRootIdentityKey({ sourceType: it.sourceType, repoId: it.repoId, rootDir: it.rootDir }),
@@ -1425,6 +1575,8 @@ export async function updateWorkspaceExternalSkillRootsSettings(
     }));
 
   return { workspaceId: ws.id, enabledRoots, updatedAt: now };
+    });
+  });
 }
 
 export async function listWorkspaceTopLevelSkills(

@@ -32,7 +32,7 @@ test("P3 wiring: Lifecycle and Subtask share only the lineage query and child-ru
     testOnly.subtaskChildRunActivator,
   );
   assert.equal(
-    typeof testOnly.subtaskLineagePersistence.findChildByParentTool,
+    typeof testOnly.subtaskLineagePersistence.findChildByParentToolExecution,
     "function",
   );
   assert.equal(
@@ -71,7 +71,7 @@ test("P4 composition exposes only narrow Subtask collaborators and not capabilit
   assert.equal("getRunLifecycleDependencies" in testOnly, false);
   assert.equal("getSubtaskDependencies" in testOnly, false);
   assert.equal("subtaskApplication" in (service as object), false);
-  assert.equal(typeof testOnly.subtaskLineagePersistence.findChildByParentTool, "function");
+  assert.equal(typeof testOnly.subtaskLineagePersistence.findChildByParentToolExecution, "function");
   assert.equal(typeof testOnly.subtaskChildRunActivator.activate, "function");
   assert.equal(typeof service.startSubtaskRunFromWorker, "function");
   assert.equal(typeof service.getSubtaskPreforkPlanFromWorker, "function");
@@ -83,18 +83,22 @@ test("P4 composition exposes only narrow Subtask collaborators and not capabilit
 test("P2 structure: local fallback execution port has no Subtask or nested-runtime capability", () => {
   const localPortKeys = [
     "getPromptContextForRun",
-    "appendContextItemFromWorker",
-    "updateContextItemFromWorker",
-    "updateRunStateFromWorker",
+    "createStreamingAssistantFromWorker",
+    "flushAssistantPartsFromWorker",
+    "completeAssistantFromWorker",
+    "updateToolExecutionFromWorker",
+    "updateRunNoticeFromWorker",
     "completeRunFromWorker",
     "getSession",
   ] satisfies Array<keyof LocalAgentRuntimeExecutionPort>;
 
   assert.deepEqual(localPortKeys, [
     "getPromptContextForRun",
-    "appendContextItemFromWorker",
-    "updateContextItemFromWorker",
-    "updateRunStateFromWorker",
+    "createStreamingAssistantFromWorker",
+    "flushAssistantPartsFromWorker",
+    "completeAssistantFromWorker",
+    "updateToolExecutionFromWorker",
+    "updateRunNoticeFromWorker",
     "completeRunFromWorker",
     "getSession",
   ]);

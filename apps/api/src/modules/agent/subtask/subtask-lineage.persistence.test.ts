@@ -2,18 +2,11 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { HttpError } from "../../../app/errors.js";
 import { newSortableId } from "../../../utils/ids.js";
-import { AgentService } from "../agent.service.js";
-import { createAgentService } from "../agent.composition.js";
+import { createMessageRunRecord } from "../agent-message.store.js";
+import { appendMessage, appendStreamingAssistant, completeAssistantWithExecutions, createMessageSession, flushStreamingParts, getMessageRunState, getMessageSession, startMessageRun } from "../agent-message.store.js";
 import { SqliteSubtaskLineagePersistence } from "./sqlite-subtask-lineage-persistence.js";
 import { SqliteSubtaskMaintenancePersistence } from "./sqlite-subtask-maintenance-persistence.js";
-import {
-  appendContextItem,
-  createAgentSession,
-  createRunRecord,
-  findSubtaskRunByParentTool,
-  getAgentSession,
-  listSubtaskChildSessionIdsByRunId,
-} from "../agent.store.js";
+import { SqliteSubtaskRunQuery } from "./sqlite-subtask-run-query.js";
 import {
   createAgentTestFixture,
   createTestWorkspace,
@@ -23,432 +16,328 @@ import {
 const fixtures: AgentTestFixture[] = [];
 
 afterEach(async () => {
-  const failures: unknown[] = [];
-  for (const fixture of fixtures.splice(0)) {
-    try {
-      await fixture.dispose();
-    } catch (error) {
-      failures.push(error);
-    }
-  }
-  if (failures.length === 1) throw failures[0];
-  if (failures.length > 1)
-    throw new AggregateError(
-      failures,
-      "Subtask persistence fixture cleanup failed",
-    );
+  for (const fixture of fixtures.splice(0)) await fixture.dispose();
 });
 
 async function createFixture() {
   const fixture = await createAgentTestFixture({ agentWorkerConcurrency: 0 });
   fixtures.push(fixture);
-  const workspace = await createTestWorkspace(fixture, {
-    title: "P1 subtask persistence",
-  });
+  const workspace = await createTestWorkspace(fixture, { title: "P1 subtask persistence" });
   return { fixture, workspace };
 }
 
-function createSession(params: {
+function createSession(input: {
   fixture: AgentTestFixture;
   workspaceId: string;
   id?: string;
   kind: "primary" | "subtask";
   createdAt?: number;
   forkedFromSessionId?: string | null;
-  forkedFromItemId?: number | null;
+  forkedFromMessageId?: string | null;
 }) {
-  const id = params.id ?? newSortableId("sess");
-  createAgentSession(params.fixture.db, {
+  const id = input.id ?? newSortableId("sess");
+  createMessageSession(input.fixture.db, {
     id,
-    workspaceId: params.workspaceId,
-    title: `P1 ${params.kind} ${id}`,
-    kind: params.kind,
-    createdAt: params.createdAt ?? Date.now(),
-    forkedFromSessionId: params.forkedFromSessionId ?? null,
-    forkedFromItemId: params.forkedFromItemId ?? null,
+    workspaceId: input.workspaceId,
+    title: `P1 ${input.kind} ${id}`,
+    kind: input.kind,
+    createdAt: input.createdAt ?? Date.now(),
+    forkedFromSessionId: input.forkedFromSessionId ?? null,
+    forkedFromMessageId: input.forkedFromMessageId ?? null,
   });
   return id;
 }
 
-function createRun(params: {
+function appendText(input: {
+  fixture: AgentTestFixture;
+  workspaceId: string;
+  sessionId: string;
+  id?: string;
+  type: "user" | "system" | "assistant";
+  text: string;
+  originRunId?: string | null;
+  createdAt?: number;
+}) {
+  const id = input.id ?? newSortableId("msg");
+  const session = getMessageSession(input.fixture.db, input.workspaceId, input.sessionId);
+  if (!session) throw new Error("test session missing");
+  return appendMessage(input.fixture.db, {
+    id,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    expectedHeadMessageId: session.headMessageId,
+    expectedRevision: session.revision,
+    type: input.type,
+    status: "completed",
+    originRunId: input.originRunId ?? null,
+    parts: [{ id: `${id}-part`, position: 0, type: "text", text: input.text }],
+    createdAt: input.createdAt ?? Date.now(),
+  });
+}
+
+function createRun(input: {
   fixture: AgentTestFixture;
   workspaceId: string;
   sessionId: string;
   runId?: string;
   parentRunId?: string | null;
-  parentToolItemId?: number | null;
+  parentToolExecutionId?: string | null;
   status?: "running" | "completed" | "failed" | "cancelled";
 }) {
-  const runId = params.runId ?? newSortableId("run");
-  createRunRecord(params.fixture.db, {
+  const runId = input.runId ?? newSortableId("run");
+  const trigger = appendText({
+    fixture: input.fixture,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    type: "user",
+    text: `trigger ${runId}`,
+  });
+  createMessageRunRecord(input.fixture.db, {
     runId,
-    workspaceId: params.workspaceId,
-    sessionId: params.sessionId,
-    triggerItemId: 0,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    triggerMessageId: trigger.id,
     agentId: "default",
     providerId: "p1-provider",
     modelId: "p1-model",
-    subtaskDepth: params.parentRunId ? 1 : 0,
-    parentRunId: params.parentRunId ?? null,
-    parentToolItemId: params.parentToolItemId ?? null,
-    status: params.status ?? "running",
+    subtaskDepth: input.parentRunId ? 1 : 0,
+    parentRunId: input.parentRunId ?? null,
+    parentToolExecutionId: input.parentToolExecutionId ?? null,
+    status: input.status ?? "running",
     createdAt: Date.now(),
   });
-  return runId;
+  return { runId, triggerMessageId: trigger.id };
 }
 
-function appendItem(params: {
+function createParentSubtaskExecution(input: {
   fixture: AgentTestFixture;
   workspaceId: string;
   sessionId: string;
-  runId: string | null;
-  prevId: number | null;
-  kind: "user" | "assistant" | "tool" | "system";
-  output: Parameters<typeof appendContextItem>[1]["output"];
+  runId: string;
 }) {
-  return appendContextItem(params.fixture.db, {
-    workspaceId: params.workspaceId,
-    sessionId: params.sessionId,
-    runId: params.runId,
-    turnId: null,
-    step: null,
-    prevId: params.prevId,
-    kind: params.kind,
-    status: "completed",
-    output: params.output,
-    createdAt: Date.now(),
+  const session = getMessageSession(input.fixture.db, input.workspaceId, input.sessionId);
+  if (!session) throw new Error("parent session missing");
+  startMessageRun(input.fixture.db, { workspaceId: input.workspaceId, sessionId: input.sessionId, runId: input.runId, updatedAt: Date.now() });
+  const assistant = appendStreamingAssistant(input.fixture.db, {
+    id: newSortableId("assistant"), workspaceId: input.workspaceId, sessionId: input.sessionId,
+    runId: input.runId, expectedHeadMessageId: session.headMessageId, expectedRevision: session.revision, createdAt: Date.now(),
   });
+  const callPartId = newSortableId("part");
+  const executionId = newSortableId("execution");
+  flushStreamingParts(input.fixture.db, {
+    workspaceId: input.workspaceId, sessionId: input.sessionId, runId: input.runId, messageId: assistant.id,
+    parts: [{ id: callPartId, position: 0, type: "tool_call", toolName: "subtask", input: {} }], updatedAt: Date.now(),
+  });
+  completeAssistantWithExecutions(input.fixture.db, {
+    workspaceId: input.workspaceId, sessionId: input.sessionId, runId: input.runId, messageId: assistant.id,
+    executions: [{ id: executionId, callPartId, originSessionId: input.sessionId, originRunId: input.runId, status: "queued" }], updatedAt: Date.now(),
+  });
+  return executionId;
 }
 
-test("P1 real SQLite: durable child lookup and cancel query use the actual subtask parent tool", async () => {
+test("P1 real SQLite: durable child lookup and active-child query use Message-model parent execution lineage", async () => {
   const { fixture, workspace } = await createFixture();
-  const parentSessionId = createSession({
-    fixture,
-    workspaceId: workspace.id,
-    kind: "primary",
+  const parentSessionId = createSession({ fixture, workspaceId: workspace.id, kind: "primary" });
+  const { runId: parentRunId } = createRun({ fixture, workspaceId: workspace.id, sessionId: parentSessionId });
+  const executionId = createParentSubtaskExecution({ fixture, workspaceId: workspace.id, sessionId: parentSessionId, runId: parentRunId });
+  const childSessionId = createSession({ fixture, workspaceId: workspace.id, kind: "subtask" });
+  const { runId: childRunId } = createRun({
+    fixture, workspaceId: workspace.id, sessionId: childSessionId, parentRunId,
+    parentToolExecutionId: executionId, status: "running",
   });
-  const parentRunId = createRun({
-    fixture,
-    workspaceId: workspace.id,
-    sessionId: parentSessionId,
-  });
-  const user = appendItem({
-    fixture,
-    workspaceId: workspace.id,
-    sessionId: parentSessionId,
-    runId: parentRunId,
-    prevId: null,
-    kind: "user",
-    output: { type: "user_text", text: "parent" },
-  });
-  const validTool = appendItem({
-    fixture,
-    workspaceId: workspace.id,
-    sessionId: parentSessionId,
-    runId: parentRunId,
-    prevId: user.id,
-    kind: "tool",
-    output: {
-      type: "tool",
-      toolName: "subtask",
-      args: { description: "child" },
-    },
-  });
-  const nonSubtaskTool = appendItem({
-    fixture,
-    workspaceId: workspace.id,
-    sessionId: parentSessionId,
-    runId: parentRunId,
-    prevId: validTool.id,
-    kind: "tool",
-    output: { type: "tool", toolName: "bash", args: { command: "pwd" } },
-  });
-
-  const validChildSessionId = createSession({
-    fixture,
-    workspaceId: workspace.id,
-    kind: "subtask",
-  });
-  const invalidChildSessionId = createSession({
-    fixture,
-    workspaceId: workspace.id,
-    kind: "subtask",
-  });
-  const validChildRunId = createRun({
-    fixture,
-    workspaceId: workspace.id,
-    sessionId: validChildSessionId,
-    parentRunId,
-    parentToolItemId: validTool.id,
-  });
+  const otherChildSessionId = createSession({ fixture, workspaceId: workspace.id, kind: "subtask" });
   createRun({
-    fixture,
-    workspaceId: workspace.id,
-    sessionId: invalidChildSessionId,
-    parentRunId,
-    parentToolItemId: nonSubtaskTool.id,
+    fixture, workspaceId: workspace.id, sessionId: otherChildSessionId, parentRunId,
+    parentToolExecutionId: null, status: "completed",
   });
 
+  const lineage = new SqliteSubtaskLineagePersistence(fixture.db);
   assert.equal(
-    findSubtaskRunByParentTool(fixture.db, {
-      workspaceId: workspace.id,
-      parentRunId,
-      parentToolItemId: validTool.id,
+    lineage.findChildByParentToolExecution({
+      workspaceId: workspace.id, parentRunId, parentToolExecutionId: executionId,
     })?.runId,
-    validChildRunId,
+    childRunId,
   );
   assert.deepEqual(
-    listSubtaskChildSessionIdsByRunId(fixture.db, {
-      workspaceId: workspace.id,
-      sessionId: parentSessionId,
-      runId: parentRunId,
-    }),
-    [validChildSessionId],
+    lineage.listByParentRun({ workspaceId: workspace.id, sessionId: parentSessionId, runId: parentRunId }),
+    [childSessionId],
   );
 });
 
-test("P1 real SQLite: partial unique index is the parent-tool arbiter and classifier stays narrow", async () => {
+test("P1 real SQLite: partial unique index is the parent execution arbiter and exact lookup finds the winner", async () => {
   const { fixture, workspace } = await createFixture();
-  const parentRunId = newSortableId("run-parent");
-  const childOneSessionId = createSession({
-    fixture,
-    workspaceId: workspace.id,
-    kind: "subtask",
-  });
-  const childTwoSessionId = createSession({
-    fixture,
-    workspaceId: workspace.id,
-    kind: "subtask",
-  });
+  const parentSessionId = createSession({ fixture, workspaceId: workspace.id, kind: "primary" });
+  const { runId: parentRunId } = createRun({ fixture, workspaceId: workspace.id, sessionId: parentSessionId });
+  const executionId = createParentSubtaskExecution({ fixture, workspaceId: workspace.id, sessionId: parentSessionId, runId: parentRunId });
+  const winnerSessionId = createSession({ fixture, workspaceId: workspace.id, kind: "subtask" });
+  const loserSessionId = createSession({ fixture, workspaceId: workspace.id, kind: "subtask" });
   createRun({
-    fixture,
-    workspaceId: workspace.id,
-    sessionId: childOneSessionId,
-    parentRunId,
-    parentToolItemId: 41,
+    fixture, workspaceId: workspace.id, sessionId: winnerSessionId, parentRunId,
+    parentToolExecutionId: executionId,
   });
-
-  let conflict: unknown;
-  try {
-    createRun({
-      fixture,
-      workspaceId: workspace.id,
-      sessionId: childTwoSessionId,
-      parentRunId,
-      parentToolItemId: 41,
-    });
-  } catch (error) {
-    conflict = error;
-  }
-  assert.ok(
-    conflict,
-    "the real SQLite partial unique index must reject a second parent-tool child",
-  );
+  assert.throws(() => createRun({
+    fixture, workspaceId: workspace.id, sessionId: loserSessionId, parentRunId,
+    parentToolExecutionId: executionId,
+  }));
   assert.equal(
-    new SqliteSubtaskLineagePersistence(fixture.db).isParentToolUniqueConflict(
-      conflict,
-    ),
-    true,
-  );
-  assert.equal(
-    new SqliteSubtaskLineagePersistence(fixture.db).isParentToolUniqueConflict({
-      code: "SQLITE_CONSTRAINT_UNIQUE",
-      message: "UNIQUE constraint failed: other_table.value",
-    }),
-    false,
-  );
-
-  createRun({
-    fixture,
-    workspaceId: workspace.id,
-    sessionId: childTwoSessionId,
-    parentRunId,
-    parentToolItemId: null,
-  });
-  assert.equal(
-    findSubtaskRunByParentTool(fixture.db, {
-      workspaceId: workspace.id,
-      parentRunId,
-      parentToolItemId: 42,
-    }),
-    null,
+    new SqliteSubtaskLineagePersistence(fixture.db).findChildByParentToolExecution({
+      workspaceId: workspace.id, parentRunId, parentToolExecutionId: executionId,
+    })?.sessionId,
+    winnerSessionId,
   );
 });
 
-test("P5 real SQLite: maintenance adapter keeps orphan candidates and final delete fences conservative", async () => {
+test("P5 real SQLite: maintenance adapter keeps Message-populated and orphan fences conservative", async () => {
   const { fixture, workspace } = await createFixture();
   const now = Date.now();
   const olderThan = now - 24 * 60 * 60 * 1000;
   const maintenance = new SqliteSubtaskMaintenancePersistence(fixture.db);
-
-  const emptyLocalSessionId = createSession({
-    fixture,
-    workspaceId: workspace.id,
-    kind: "subtask",
-  });
-  assert.equal(
-    maintenance.deleteNewSessionIfStillEmpty({ workspaceId: workspace.id, sessionId: emptyLocalSessionId }),
-    true,
-  );
-  assert.equal(getAgentSession(fixture.db, emptyLocalSessionId), null);
-
-  const populatedLocalSessionId = createSession({
-    fixture,
-    workspaceId: workspace.id,
-    kind: "subtask",
-  });
-  appendItem({
-    fixture,
-    workspaceId: workspace.id,
-    sessionId: populatedLocalSessionId,
-    runId: null,
-    prevId: null,
-    kind: "system",
-    output: { type: "system_text", text: "must retain" },
-  });
-  assert.equal(
-    maintenance.deleteNewSessionIfStillEmpty({ workspaceId: workspace.id, sessionId: populatedLocalSessionId }),
-    false,
-  );
-  assert.ok(getAgentSession(fixture.db, populatedLocalSessionId));
-
-  const oldForkSessionId = createSession({
-    fixture,
-    workspaceId: workspace.id,
-    kind: "subtask",
-    createdAt: olderThan - 1,
-    forkedFromSessionId: "parent-session",
-    forkedFromItemId: 7,
-  });
-  const oldNoForkSessionId = createSession({
-    fixture,
-    workspaceId: workspace.id,
-    kind: "subtask",
-    createdAt: olderThan - 1,
-  });
-  const youngForkSessionId = createSession({
-    fixture,
-    workspaceId: workspace.id,
-    kind: "subtask",
-    createdAt: olderThan + 1,
-    forkedFromSessionId: "parent-session",
-    forkedFromItemId: 8,
-  });
-  const oldPrimarySessionId = createSession({
+  const compensationParentSessionId = createSession({
     fixture,
     workspaceId: workspace.id,
     kind: "primary",
-    createdAt: olderThan - 1,
-    forkedFromSessionId: "parent-session",
-    forkedFromItemId: 9,
+  });
+  const emptySessionId = createSession({ fixture, workspaceId: workspace.id, kind: "subtask" });
+  assert.equal(maintenance.deleteCreatedSessionIfStillSafe({
+    workspaceId: workspace.id,
+    createdSessionId: emptySessionId,
+    expectedParentSessionId: compensationParentSessionId,
+    expectedForkedFromSessionId: null,
+    expectedForkedFromMessageId: null,
+  }), true);
+
+  const populatedSessionId = createSession({ fixture, workspaceId: workspace.id, kind: "subtask" });
+  appendText({ fixture, workspaceId: workspace.id, sessionId: populatedSessionId, type: "system", text: "must retain" });
+  assert.equal(maintenance.deleteCreatedSessionIfStillSafe({
+    workspaceId: workspace.id,
+    createdSessionId: populatedSessionId,
+    expectedParentSessionId: compensationParentSessionId,
+    expectedForkedFromSessionId: null,
+    expectedForkedFromMessageId: null,
+  }), false);
+
+  const parentSessionId = createSession({ fixture, workspaceId: workspace.id, kind: "primary" });
+  const parentMessage = appendText({ fixture, workspaceId: workspace.id, sessionId: parentSessionId, type: "user", text: "parent" });
+  const oldForkSessionId = createSession({
+    fixture, workspaceId: workspace.id, kind: "subtask", createdAt: olderThan - 1,
+    forkedFromSessionId: parentSessionId, forkedFromMessageId: parentMessage.id,
+  });
+  const oldNoForkSessionId = createSession({ fixture, workspaceId: workspace.id, kind: "subtask", createdAt: olderThan - 1 });
+  const youngForkSessionId = createSession({
+    fixture, workspaceId: workspace.id, kind: "subtask", createdAt: olderThan + 1,
+    forkedFromSessionId: parentSessionId, forkedFromMessageId: parentMessage.id,
   });
 
   assert.deepEqual(
-    maintenance.listSuspects({ olderThan }).map(
-      (candidate) => candidate.sessionId,
-    ),
+    maintenance.listSuspects({ olderThan }).map((candidate) => candidate.sessionId),
     [oldForkSessionId, oldNoForkSessionId],
   );
-  assert.ok(getAgentSession(fixture.db, oldPrimarySessionId));
-  assert.equal(
-    maintenance.deleteSuspectIfStillEligible({
-      workspaceId: workspace.id,
-      sessionId: oldNoForkSessionId,
-      olderThan,
-    }),
-    false,
-  );
-  assert.equal(
-    maintenance.deleteSuspectIfStillEligible({
-      workspaceId: workspace.id,
-      sessionId: youngForkSessionId,
-      olderThan,
-    }),
-    false,
-  );
-  assert.equal(
-    maintenance.deleteSuspectIfStillEligible({
-      workspaceId: workspace.id,
-      sessionId: oldForkSessionId,
-      olderThan,
-    }),
-    true,
-  );
-  assert.equal(
-    maintenance.deleteSuspectIfStillEligible({
-      workspaceId: workspace.id,
-      sessionId: oldForkSessionId,
-      olderThan,
-    }),
-    false,
-  );
+  assert.equal(maintenance.deleteSuspectIfStillEligible({ workspaceId: workspace.id, sessionId: oldNoForkSessionId, olderThan }), false);
+  assert.equal(maintenance.deleteSuspectIfStillEligible({ workspaceId: workspace.id, sessionId: youngForkSessionId, olderThan }), false);
+  assert.equal(maintenance.deleteSuspectIfStillEligible({ workspaceId: workspace.id, sessionId: oldForkSessionId, olderThan }), true);
 });
 
-test("P1 real SQLite: result and status are fenced by workspace/session ownership and result only projects the requested run", async () => {
+test("M9 real SQLite: compensation deletes a request-owned fork with a shared head but preserves the shared graph", async () => {
   const { fixture, workspace } = await createFixture();
-  const sessionId = createSession({
+  const maintenance = new SqliteSubtaskMaintenancePersistence(fixture.db);
+  const parentSessionId = createSession({ fixture, workspaceId: workspace.id, kind: "primary" });
+  const sharedMessage = appendText({
+    fixture,
+    workspaceId: workspace.id,
+    sessionId: parentSessionId,
+    type: "user",
+    text: "shared parent history",
+  });
+  const { runId: parentRunId } = createRun({
+    fixture,
+    workspaceId: workspace.id,
+    sessionId: parentSessionId,
+  });
+  createParentSubtaskExecution({
+    fixture,
+    workspaceId: workspace.id,
+    sessionId: parentSessionId,
+    runId: parentRunId,
+  });
+  const childSessionId = createSession({
     fixture,
     workspaceId: workspace.id,
     kind: "subtask",
+    forkedFromSessionId: parentSessionId,
+    forkedFromMessageId: sharedMessage.id,
   });
-  const targetRunId = createRun({
-    fixture,
+  fixture.db.prepare(`
+    update agent_session
+    set head_message_id = ?, context_root_message_id = ?
+    where id = ? and workspace_id = ?
+  `).run(sharedMessage.id, sharedMessage.id, childSessionId, workspace.id);
+  const before = fixture.db.prepare(`
+    select
+      (select count(*) from agent_message where workspace_id = ? and origin_session_id = ?) as messages,
+      (select count(*) from agent_message_part part join agent_message message on message.id = part.message_id where message.workspace_id = ? and message.origin_session_id = ?) as parts,
+      (select count(*) from agent_tool_execution where origin_session_id = ?) as executions
+  `).get(workspace.id, parentSessionId, workspace.id, parentSessionId, parentSessionId) as {
+    messages: number;
+    parts: number;
+    executions: number;
+  };
+
+  assert.equal(maintenance.deleteCreatedSessionIfStillSafe({
     workspaceId: workspace.id,
-    sessionId,
-    status: "failed",
+    createdSessionId: childSessionId,
+    expectedParentSessionId: "wrong-parent",
+    expectedForkedFromSessionId: parentSessionId,
+    expectedForkedFromMessageId: sharedMessage.id,
+  }), false);
+  assert.ok(getMessageSession(fixture.db, workspace.id, childSessionId));
+  assert.equal(maintenance.deleteCreatedSessionIfStillSafe({
+    workspaceId: workspace.id,
+    createdSessionId: childSessionId,
+    expectedParentSessionId: parentSessionId,
+    expectedForkedFromSessionId: parentSessionId,
+    expectedForkedFromMessageId: sharedMessage.id,
+  }), true);
+  assert.equal(getMessageSession(fixture.db, workspace.id, childSessionId), null);
+  assert.equal(getMessageRunState(fixture.db, workspace.id, childSessionId), null);
+  assert.deepEqual(
+    fixture.db.prepare(`
+      select
+        (select count(*) from agent_message where workspace_id = ? and origin_session_id = ?) as messages,
+        (select count(*) from agent_message_part part join agent_message message on message.id = part.message_id where message.workspace_id = ? and message.origin_session_id = ?) as parts,
+        (select count(*) from agent_tool_execution where origin_session_id = ?) as executions
+    `).get(workspace.id, parentSessionId, workspace.id, parentSessionId, parentSessionId),
+    before,
+  );
+  assert.ok(fixture.db.prepare("select 1 from agent_message where id = ?").get(sharedMessage.id));
+});
+
+test("P1 real SQLite: result/status are ownership-fenced and result only projects the requested Message Run", async () => {
+  const { fixture, workspace } = await createFixture();
+  const sessionId = createSession({ fixture, workspaceId: workspace.id, kind: "subtask" });
+  const target = createRun({ fixture, workspaceId: workspace.id, sessionId, status: "failed" });
+  appendText({
+    fixture, workspaceId: workspace.id, sessionId, type: "assistant", text: "target partial",
+    originRunId: target.runId,
   });
-  const otherRunId = createRun({
-    fixture,
-    workspaceId: workspace.id,
-    sessionId,
-    status: "completed",
-  });
-  const targetAssistant = appendItem({
-    fixture,
-    workspaceId: workspace.id,
-    sessionId,
-    runId: targetRunId,
-    prevId: null,
-    kind: "assistant",
-    output: { type: "assistant_text", text: "target partial" },
-  });
-  appendItem({
-    fixture,
-    workspaceId: workspace.id,
-    sessionId,
-    runId: otherRunId,
-    prevId: targetAssistant.id,
-    kind: "assistant",
-    output: { type: "assistant_text", text: "other run must not leak" },
+  const other = createRun({ fixture, workspaceId: workspace.id, sessionId, status: "completed" });
+  appendText({
+    fixture, workspaceId: workspace.id, sessionId, type: "assistant", text: "other run must not leak",
+    originRunId: other.runId,
   });
 
-  const service = createAgentService(fixture.ctx, {
-    warn() {},
-    error() {},
-  } as never);
-  assert.deepEqual(
-    service.getSubtaskRunStatusFromWorker({
-      workspaceId: workspace.id,
-      sessionId,
-      runId: targetRunId,
-    }),
-    { status: "failed" },
+  const query = new SqliteSubtaskRunQuery(fixture.db);
+  assert.equal(
+    query.findRunInSession({ workspaceId: workspace.id, sessionId, runId: target.runId })?.status,
+    "failed",
   );
   assert.deepEqual(
-    service.getSubtaskRunResultFromWorker({
-      workspaceId: workspace.id,
-      sessionId,
-      runId: targetRunId,
-    }),
-    { resultText: "target partial" },
+    query.listMessageTextsByRun({ workspaceId: workspace.id, sessionId, runId: target.runId }),
+    [{ type: "assistant", text: "target partial" }],
   );
-  assert.throws(
-    () =>
-      service.getSubtaskRunStatusFromWorker({
-        workspaceId: workspace.id,
-        sessionId: "wrong-session",
-        runId: targetRunId,
-      }),
-    (error: unknown) => error instanceof HttpError && error.statusCode === 404,
-  );
+  assert.equal(query.findRunInSession({ workspaceId: workspace.id, sessionId: "wrong-session", runId: target.runId }), null);
+  assert.throws(() => {
+    if (!query.findRunInSession({ workspaceId: workspace.id, sessionId: "wrong-session", runId: target.runId })) {
+      throw new HttpError(404, "run not found");
+    }
+  }, (error: unknown) => error instanceof HttpError && error.statusCode === 404);
 });

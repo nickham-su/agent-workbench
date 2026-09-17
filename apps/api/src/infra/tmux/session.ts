@@ -1,8 +1,20 @@
 import { runTmux } from "./tmuxExec.js";
 
+export type TmuxSessionPresence = "exists" | "not_found";
+
+export function classifyTmuxHasSessionResult(result: { ok: boolean; code: number | null; stdout: string; stderr: string; timedOut: boolean }): TmuxSessionPresence {
+  if (result.ok) return "exists";
+  const output = `${result.stderr}\n${result.stdout}`.toLowerCase();
+  // tmux 对不存在 session 的已定义结果；其它非零（spawn、timeout、server 异常）不可伪装为不存在。
+  if (!result.timedOut && result.code === 1 && /can't find session|no server running|no sessions/.test(output)) {
+    return "not_found";
+  }
+  throw new Error(`tmux has-session indeterminate: ${result.timedOut ? "timeout" : output.trim() || `exit ${result.code}`}`);
+}
+
 export async function tmuxHasSession(params: { sessionName: string; cwd: string }) {
   const res = await runTmux(["has-session", "-t", params.sessionName], { cwd: params.cwd });
-  return res.ok;
+  return classifyTmuxHasSessionResult(res);
 }
 
 export async function tmuxCountClients(params: { sessionName: string; cwd: string }) {

@@ -7,7 +7,7 @@
     "build": "vue-tsc -p tsconfig.json --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "vue-tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test src/features/settings/components/agentGlobalPrompts.test.ts src/features/settings/components/agentProfilesPersist.test.ts src/features/settings/components/agentPluginsPanel.test.ts src/features/settings/components/agentTools.test.ts src/features/settings/components/agentRuntimeSettings.test.ts src/features/workspace/tools/agent/agentInputCandidates.test.ts src/features/workspace/tools/agent/agentSessionModelIntent.test.ts src/features/workspace/tools/agent/agentSessionModelOpenFlow.test.ts src/features/workspace/tools/agent/agentSessionModelPresentation.test.ts src/features/workspace/tools/agent/agentSessionModelState.test.ts src/features/workspace/tools/agent/subtaskRunDisplay.test.ts src/features/workspace/tools/agent/subtaskSessionId.test.ts src/features/workspace/tools/agent/agentSessionTitle.test.ts src/features/workspace/tools/agent/agentSessionRefreshCoordination.test.ts src/features/workspace/tools/agent/agentSessionRefreshTimeline.test.ts src/features/workspace/tools/file-explorer/preview.test.ts"
+    "test": "node scripts/run-tests.mjs"
   },
   "dependencies": {
     "@agent-workbench/shared": "*",
@@ -26,11 +26,14 @@
   "devDependencies": {
     "@types/markdown-it": "^14.1.2",
     "@vitejs/plugin-vue": "^5.2.1",
+    "@vue/test-utils": "^2.4.6",
     "autoprefixer": "^10.4.23",
+    "happy-dom": "^20.14.5",
     "postcss": "^8.5.6",
     "tailwindcss": "^3.4.19",
     "typescript": "^5.7.3",
     "vite": "^6.0.6",
+    "vite-node": "^3.2.4",
     "vue-tsc": "^2.1.10"
   }
 }

@@ -42,7 +42,7 @@ if (env.preview.enabled) {
       agentWorkerEnabled: env.agentWorkerEnabled, agentWorkerHost: env.agentWorkerHost, agentWorkerPort: env.agentWorkerPort,
       agentWorkerSocketPath: env.agentWorkerSocketPath, agentWorkerConcurrency: env.agentWorkerConcurrency,
       agentInternalToken: env.agentInternalToken, agentWorkerResponseValidation: env.agentWorkerResponseValidation,
-      agentApiOrigin: env.agentApiOrigin, agentStartupRecoveryMode: env.agentStartupRecoveryMode,
+      agentApiOrigin: env.agentApiOrigin,
       agentPluginHostEnabled: env.agentPluginHostEnabled, agentPluginHostSocketPath: env.agentPluginHostSocketPath,
       agentPluginServicesEnabled: env.agentPluginServicesEnabled, preview: { enabled: true, runtime }
     });
@@ -91,7 +91,6 @@ if (env.preview.enabled) {
     agentInternalToken: env.agentInternalToken,
     agentWorkerResponseValidation: env.agentWorkerResponseValidation,
     agentApiOrigin: env.agentApiOrigin,
-    agentStartupRecoveryMode: env.agentStartupRecoveryMode,
     agentPluginHostEnabled: env.agentPluginHostEnabled,
     agentPluginHostSocketPath: env.agentPluginHostSocketPath,
     agentPluginServicesEnabled: env.agentPluginServicesEnabled,

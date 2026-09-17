@@ -1,9 +1,17 @@
 import { test, type TestContext } from "node:test";
 import type { FastifyInstance } from "fastify";
-import { appendContextItem, createRunRecord, getAgentSession, updateRunState } from "../agent.store.js";
+import { createMessageRunRecord, getMessageSessionById, getRunRecord } from "../agent-message.store.js";
 import { newSortableId } from "../../../utils/ids.js";
+import { createMessageSession } from "../agent-message.store.js";
 import { createP4Fixture } from "./p4-fixture.helpers.js";
-import { createSession, createContextItemInternal, updateRunStateInternal } from "./context-writeback.helpers.js";
+import {
+  appendMessageFixture,
+  createAssistantFixture,
+  createMessageRunFixture,
+  completeToolExecutionFixture,
+  createSession,
+  setRunNoticeFixture
+} from "./context-writeback.helpers.js";
 import assert from "node:assert/strict";
 
 
@@ -38,51 +46,147 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function getRunState(app: FastifyInstance, sessionId: string) {
-  const res = await app.inject({ method: "GET", url: `/api/agent/sessions/${sessionId}/run-state` });
+async function getRunState(app: FastifyInstance, workspaceId: string, sessionId: string) {
+  const res = await app.inject({ method: "GET", url: `/api/agent/sessions/${sessionId}/run-state?workspaceId=${encodeURIComponent(workspaceId)}` });
   assert.equal(res.statusCode, 200, `get run-state failed: ${res.body}`);
   return res.json() as {
     status: "idle" | "running";
     activeRunId: string | null;
     runNoticeText: string;
-    lastTerminalStatus: "completed" | "failed" | "cancelled" | null;
-    contextWindowTokens?: number | null;
-    contextTokenRatio?: number | null;
+    activeAssistantMessageId: string | null;
+    nonTerminalMessageIds: string[];
+    nonTerminalToolExecutionIds: string[];
   };
 }
+
+async function getMessageTimelineSnapshot(app: FastifyInstance, internalToken: string, workspaceId: string, sessionId: string) {
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/internal/agent/sessions/message-timeline-snapshot",
+    headers: { "x-awb-agent-internal-token": internalToken },
+    payload: { workspaceId, sessionId }
+  });
+  return res;
+}
+
+function getFeishuSessionRead(
+  app: FastifyInstance,
+  input: { path: "last-assistant-text" | "latest-todolist"; workspaceId: string; sessionId: string; token?: string; pluginId?: string }
+) {
+  return app.inject({
+    method: "GET",
+    url: `/api/internal/agent/sessions/${encodeURIComponent(input.sessionId)}/${input.path}?workspaceId=${encodeURIComponent(input.workspaceId)}`,
+    headers: {
+      ...(input.token ? { "x-awb-agent-internal-token": input.token } : {}),
+      ...(input.pluginId ? { "x-awb-plugin-id": input.pluginId } : {})
+    }
+  });
+}
+
+test("Feishu 窄化读侧返回当前可见链最后 completed Assistant 文本", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const run = createMessageRunFixture({ fixture, sessionId: session.id });
+  createAssistantFixture({
+    fixture,
+    sessionId: session.id,
+    runId: run.runId,
+    parts: [
+      { id: newSortableId("part"), position: 0, type: "reasoning", text: "not returned" },
+      { id: newSortableId("part"), position: 1, type: "text", text: "last " },
+      { id: newSortableId("part"), position: 2, type: "text", text: "assistant" }
+    ],
+    executions: []
+  });
+
+  const result = await getFeishuSessionRead(fixture.app, {
+    path: "last-assistant-text",
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    token: fixture.internalToken,
+    pluginId: "feishu"
+  });
+  assert.equal(result.statusCode, 200, result.body);
+  assert.deepEqual(result.json(), { found: true, text: "last assistant" });
+});
+
+test("Feishu 窄化 todolist 读侧返回最新 ToolCall 的权威 execution detail", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const run = createMessageRunFixture({ fixture, sessionId: session.id });
+  const bashPartId = newSortableId("part");
+  const todoPartId = newSortableId("part");
+  const bashExecutionId = newSortableId("exec");
+  const todoExecutionId = newSortableId("exec");
+  createAssistantFixture({
+    fixture,
+    sessionId: session.id,
+    runId: run.runId,
+    parts: [
+      { id: bashPartId, position: 0, type: "tool_call", toolName: "bash", input: {} },
+      { id: todoPartId, position: 1, type: "tool_call", toolName: "todolist", input: { goal: "ship" } }
+    ],
+    executions: [
+      { id: bashExecutionId, callPartId: bashPartId, originSessionId: session.id, originRunId: run.runId, status: "queued" },
+      { id: todoExecutionId, callPartId: todoPartId, originSessionId: session.id, originRunId: run.runId, status: "queued" }
+    ]
+  });
+  completeToolExecutionFixture({ fixture, sessionId: session.id, runId: run.runId, toolExecutionId: bashExecutionId, resultPreview: "bash result" });
+  completeToolExecutionFixture({
+    fixture,
+    sessionId: session.id,
+    runId: run.runId,
+    toolExecutionId: todoExecutionId,
+    resultPreview: "todo preview",
+    structuredResult: { goal: "ship", todos: [{ content: "verify", status: "pending" }] }
+  });
+
+  const result = await getFeishuSessionRead(fixture.app, {
+    path: "latest-todolist",
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    token: fixture.internalToken,
+    pluginId: "feishu"
+  });
+  assert.equal(result.statusCode, 200, result.body);
+  assert.deepEqual(result.json(), {
+    isRunning: true,
+    execution: {
+      resultPreview: "todo preview",
+      structuredResult: { goal: "ship", todos: [{ content: "verify", status: "pending" }] }
+    }
+  });
+});
+
+test("Feishu 窄化读侧在无 todolist 时返回空结果，并验证 workspace 与调用方边界", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const valid = { path: "latest-todolist" as const, workspaceId: fixture.workspaceId, sessionId: session.id, token: fixture.internalToken, pluginId: "feishu" };
+  const empty = await getFeishuSessionRead(fixture.app, valid);
+  assert.equal(empty.statusCode, 200, empty.body);
+  assert.deepEqual(empty.json(), { isRunning: false, execution: null });
+
+  assert.equal((await getFeishuSessionRead(fixture.app, { ...valid, token: undefined })).statusCode, 401);
+  assert.equal((await getFeishuSessionRead(fixture.app, { ...valid, pluginId: undefined })).statusCode, 401);
+  assert.equal((await getFeishuSessionRead(fixture.app, { ...valid, pluginId: "other-plugin" })).statusCode, 401);
+  const mismatch = await getFeishuSessionRead(fixture.app, { ...valid, path: "last-assistant-text", workspaceId: "workspace-other" });
+  assert.equal(mismatch.statusCode, 404);
+  assert.equal(mismatch.json().code, "SESSION_NOT_FOUND");
+});
 
 test("internal runs/:runId/final-text 返回最终 assistant 文本", async (t: TestContext) => {
   const fixture = await createP4Fixture(t);
   const session = await createSession(fixture.app, fixture.workspaceId);
   const runId = newSortableId("run");
-
-  createRunRecord(fixture.db, {
-    runId,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    triggerItemId: 1,
-    agentId: "default",
-    providerId: "ppchat",
-    modelId: "gpt-5.2",
-    subtaskDepth: 0,
-    status: "running",
-    createdAt: Date.now()
-  });
-
-  const assistantItem = await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
+  createMessageRunFixture({ fixture, sessionId: session.id, runId });
+  const assistant = createAssistantFixture({
+    fixture,
     sessionId: session.id,
     runId,
-    turnId: newSortableId("turn"),
-    step: 1,
-    prevId: null,
-    kind: "assistant",
-    status: "completed",
-    output: { type: "assistant_text", text: "final answer from integration test" }
+    parts: [{ id: newSortableId("part"), position: 0, type: "text", text: "final answer from integration test" }],
+    executions: []
   });
-  assert.ok(assistantItem.item.id > 0);
+  assert.ok(assistant.assistantMessageId);
   const runComplete = await fixture.app.inject({
     method: "POST",
     url: "/api/internal/agent/run-complete",
@@ -107,219 +211,173 @@ test("internal runs/:runId/final-text 返回最终 assistant 文本", async (t: 
   assert.equal(finalBody.text, "final answer from integration test");
 });
 
+test("queued/running ToolExecution 阻止 Run completed；terminal 后允许完成及重放", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  createMessageRunFixture({ fixture, sessionId: session.id, runId });
+  const callPartId = newSortableId("part");
+  const toolExecutionId = newSortableId("exec");
+  createAssistantFixture({
+    fixture,
+    sessionId: session.id,
+    runId,
+    parts: [{ id: callPartId, position: 0, type: "tool_call", toolName: "bash", input: {} }],
+    executions: [{
+      id: toolExecutionId,
+      callPartId,
+      originSessionId: session.id,
+      originRunId: runId,
+      status: "queued",
+    }],
+  });
+  const headers = { "x-awb-agent-internal-token": fixture.internalToken };
+  const complete = () => fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/run-complete",
+    headers,
+    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId, status: "completed" },
+  });
+
+  let response = await complete();
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(getRunRecord(fixture.db, runId)?.status, "running");
+  assert.equal((await getRunState(fixture.app, fixture.workspaceId, session.id)).status, "running");
+
+  const running = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/tool-executions/update",
+    headers,
+    payload: {
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      runId,
+      toolExecutionId,
+      status: "running",
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+    },
+  });
+  assert.equal(running.statusCode, 200, running.body);
+  response = await complete();
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(getRunRecord(fixture.db, runId)?.status, "running");
+
+  completeToolExecutionFixture({ fixture, sessionId: session.id, runId, toolExecutionId });
+  response = await complete();
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(getRunRecord(fixture.db, runId)?.status, "completed");
+  assert.equal((await getRunState(fixture.app, fixture.workspaceId, session.id)).status, "idle");
+
+  response = await complete();
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(getRunRecord(fixture.db, runId)?.status, "completed");
+});
+
 test("run-state 支持 runNoticeText 更新与 idle 自动清空", async (t: TestContext) => {
   const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
   const runId = newSortableId("run");
-
-  await updateRunStateInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
+  createMessageRunFixture({ fixture, sessionId: session.id, runId });
+  assert.equal(setRunNoticeFixture({
+    fixture,
     sessionId: session.id,
-    status: "running",
-    activeRunId: runId,
-    activeAssistantItemId: null,
+    runId,
     runNoticeText: "Request failed, retrying in 2s (1/3): timeout"
-  });
+  }), "updated");
 
-  const runningState = await getRunState(fixture.app, session.id);
+  const runningState = await getRunState(fixture.app, fixture.workspaceId, session.id);
   assert.equal(runningState.status, "running");
   assert.equal(runningState.runNoticeText, "Request failed, retrying in 2s (1/3): timeout");
 
-  await updateRunStateInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    status: "idle",
-    activeRunId: null,
-    activeAssistantItemId: null,
+  const completed = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/run-complete",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId, status: "completed" }
   });
+  assert.equal(completed.statusCode, 200, completed.body);
 
-  const idleState = await getRunState(fixture.app, session.id);
+  const idleState = await getRunState(fixture.app, fixture.workspaceId, session.id);
   assert.equal(idleState.status, "idle");
   assert.equal(idleState.runNoticeText, "");
-  assert.equal(idleState.lastTerminalStatus, null);
+  assert.equal(idleState.activeRunId, null);
+  assert.equal(idleState.activeAssistantMessageId, null);
 });
 
 test("run-state 返回最近一次终态 run 结果", async (t: TestContext) => {
   const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
 
   const created = await createSession(fixture.app, fixture.workspaceId);
-  const session = getAgentSession(fixture.db, created.id)!;
+  const session = getMessageSessionById(fixture.db, created.id)!;
   const createdAt = Date.now();
   const runId = newSortableId("run");
-  createRunRecord(fixture.db, {
-    runId,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    triggerItemId: 1,
-    agentId: "agent-default",
-    providerId: "openai",
-    modelId: "gpt-4.1",
-    status: "completed",
-    createdAt
+  createMessageRunFixture({ fixture, sessionId: session.id, runId, agentId: "agent-default", providerId: "openai", modelId: "gpt-4.1", createdAt });
+  const completed = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/run-complete",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId, status: "completed" }
   });
-  await updateRunStateInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    status: "idle",
-    activeRunId: null,
-    activeAssistantItemId: null,
-    updatedAt: createdAt
-  });
+  assert.equal(completed.statusCode, 200, completed.body);
 
-  const runState = await getRunState(fixture.app, session.id);
+  const runState = await getRunState(fixture.app, fixture.workspaceId, session.id);
   assert.equal(runState.status, "idle");
-  assert.equal(runState.lastTerminalStatus, "completed");
+  assert.equal(getRunRecord(fixture.db, runId)?.status, "completed");
 });
 
 test("run-state 不应把旧 terminal run 误认为当前这次 idle 的终态", async (t: TestContext) => {
   const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
 
   const created = await createSession(fixture.app, fixture.workspaceId);
-  const session = getAgentSession(fixture.db, created.id)!;
+  const session = getMessageSessionById(fixture.db, created.id)!;
   const createdAt = Date.now();
   const runId = newSortableId("run");
-  createRunRecord(fixture.db, {
-    runId,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    triggerItemId: 1,
-    agentId: "agent-default",
-    providerId: "openai",
-    modelId: "gpt-4.1",
-    status: "completed",
-    createdAt
+  createMessageRunFixture({ fixture, sessionId: session.id, runId, agentId: "agent-default", providerId: "openai", modelId: "gpt-4.1", createdAt });
+  const completed = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/run-complete",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId, status: "completed" }
   });
+  assert.equal(completed.statusCode, 200, completed.body);
 
-  await updateRunStateInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    status: "idle",
-    activeRunId: null,
-    activeAssistantItemId: null,
-    updatedAt: createdAt + 1000
-  });
-
-  const runState = await getRunState(fixture.app, session.id);
+  const runState = await getRunState(fixture.app, fixture.workspaceId, session.id);
   assert.equal(runState.status, "idle");
-  assert.equal(runState.lastTerminalStatus, null);
+  assert.equal(getRunRecord(fixture.db, runId)?.status, "completed");
 });
 
-test("internal sessions/status-summary 返回 run 摘要（elapsed/contextWindowTokens/ratio）", async (t: TestContext) => {
+test("internal message-timeline-snapshot 返回运行会话、消息与状态摘要", async (t: TestContext) => {
   const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
-
-  const created = await createSession(fixture.app, fixture.workspaceId);
-  const session = getAgentSession(fixture.db, created.id)!;
-
+  const session = await createSession(fixture.app, fixture.workspaceId);
   const runId = newSortableId("run");
   const createdAt = Date.now() - 1500;
-  const updatedAt = Date.now();
-
-  createRunRecord(fixture.db, {
-    runId,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    triggerItemId: 1,
-    agentId: "default",
-    providerId: "ppchat",
-    modelId: "gpt-5.2",
-    status: "running",
-    createdAt
-  });
-  updateRunState(fixture.db, {
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    status: "running",
-    activeRunId: runId,
-    activeAssistantItemId: null,
-    lastResponseTotalTokens: 64000,
-    runNoticeText: "",
-    updatedAt,
-    appliedItemId: 0
+  const run = createMessageRunFixture({ fixture, sessionId: session.id, runId, createdAt });
+  const assistant = createAssistantFixture({
+    fixture, sessionId: session.id, runId,
+    parts: [{ id: newSortableId("part"), position: 0, type: "text", text: "snapshot assistant" }],
+    executions: []
   });
 
-  const res = await fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/sessions/status-summary",
-    headers: {
-      "x-awb-agent-internal-token": fixture.internalToken
-    },
-    payload: {
-      sessionId: session.id,
-      // Compatibility: use `agentId` as documented.
-      agentId: "default"
-    }
-  });
-  assert.equal(res.statusCode, 200, `status-summary failed: ${res.body}`);
-  const body = res.json() as any;
-  assert.equal(body.session?.id, session.id);
-  assert.equal(body.session?.workspaceId, fixture.workspaceId);
-  assert.equal(body.agent?.id, "default");
-  assert.equal(body.agent?.name, "default");
-  assert.equal(body.runState?.status, "running");
-  assert.equal(body.runState?.activeRunId, runId);
-  assert.equal(body.runState?.lastResponseTotalTokens, 64000);
-  // Compatibility: runState.terminalStatus alias
-  assert.equal(body.runState?.contextWindowTokens, 128000);
-  assert.ok(Math.abs((body.runState?.contextTokenRatio ?? 0) - 0.5) < 1e-9);
-  assert.equal(body.runState?.terminalStatus, body.runState?.lastTerminalStatus);
-  assert.equal(body.startedAt, createdAt);
-  assert.equal(body.contextWindowTokens, 128000);
-  assert.equal(body.contextWindowTokens, body.runState?.contextWindowTokens);
-  assert.ok(Math.abs(body.contextTokenRatio - 0.5) < 1e-9);
-  assert.equal(body.contextTokenRatio, body.runState?.contextTokenRatio);
-  assert.ok(typeof body.elapsedMs === "number" && body.elapsedMs >= 0);
-
-  {
-    // Precedence: selectedAgentId wins when both are provided.
-    const resPreferSelected = await fixture.app.inject({
-      method: "POST",
-      url: "/api/internal/agent/sessions/status-summary",
-      headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
-      payload: { sessionId: session.id, agentId: "missing", selectedAgentId: "default" }
-    });
-    assert.equal(resPreferSelected.statusCode, 200);
-    const prefer = resPreferSelected.json() as any;
-    assert.equal(prefer.agent?.id, "default");
-  }
-
-  // updatedAt should be stable across calls (generatedAt changes)
-  const updatedAt1 = body.updatedAt;
-  const generatedAt1 = body.generatedAt;
-  await sleep(10);
-  const res2 = await fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/sessions/status-summary",
-    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
-    payload: { sessionId: session.id, agentId: "default" }
-  });
-  assert.equal(res2.statusCode, 200);
-  const body2 = res2.json() as any;
-  assert.equal(body2.updatedAt, updatedAt1);
-  assert.ok(typeof body2.generatedAt === "number" && body2.generatedAt >= generatedAt1);
-
-  const resNoAgent = await fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/sessions/status-summary",
-    headers: {
-      "x-awb-agent-internal-token": fixture.internalToken
-    },
-    payload: {
-      sessionId: session.id
-    }
-  });
-  assert.equal(resNoAgent.statusCode, 200, `status-summary(no agent) failed: ${resNoAgent.body}`);
-  const bodyNoAgent = resNoAgent.json() as any;
-  assert.equal(bodyNoAgent.agent, null);
-  assert.equal(bodyNoAgent.contextWindowTokens, bodyNoAgent.runState?.contextWindowTokens ?? null);
-  assert.equal(bodyNoAgent.contextTokenRatio, bodyNoAgent.runState?.contextTokenRatio ?? null);
+  const res = await getMessageTimelineSnapshot(fixture.app, fixture.internalToken, fixture.workspaceId, session.id);
+  assert.equal(res.statusCode, 200, `message-timeline-snapshot failed: ${res.body}`);
+  const body = res.json() as {
+    session: { id: string; workspaceId: string; headMessageId: string | null };
+    messages: Array<{ id: string }>;
+    toolExecutions: unknown[];
+    runState: { status: string; activeRunId: string | null; activeAssistantMessageId: string | null };
+    timelineReset: boolean;
+  };
+  assert.equal(body.session.id, session.id);
+  assert.equal(body.session.workspaceId, fixture.workspaceId);
+  assert.equal(body.session.headMessageId, assistant.assistantMessageId);
+  assert.deepEqual(body.messages.map((message) => message.id), [run.triggerMessageId, assistant.assistantMessageId]);
+  assert.deepEqual(body.toolExecutions, []);
+  assert.equal(body.runState.status, "running");
+  assert.equal(body.runState.activeRunId, runId);
+  assert.equal(body.runState.activeAssistantMessageId, null);
+  assert.equal(body.timelineReset, false);
+  assert.equal(getRunRecord(fixture.db, runId)?.createdAt, createdAt);
 });
 
 test("internal channels/allowlist/check 命中 allowlist 时返回 allowed=true 与 role", async (t: TestContext) => {
@@ -416,60 +474,37 @@ test("internal channels/allowlist/check plugin caller mismatch 返回 401", asyn
   assert.equal(res.json().code, "PLUGIN_CALLER_MISMATCH");
 });
 
-test("internal sessions/status-summary 需要 internal token 且 sessionId 必须存在", async (t: TestContext) => {
+test("internal message-timeline-snapshot 需要 internal token 且 session 必须存在", async (t: TestContext) => {
   const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
-
-  const noTokenRes = await fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/sessions/status-summary",
-    payload: { sessionId: "sess_missing" }
+  const noToken = await fixture.app.inject({
+    method: "POST", url: "/api/internal/agent/sessions/message-timeline-snapshot",
+    payload: { workspaceId: fixture.workspaceId, sessionId: "sess_missing" }
   });
-  assert.equal(noTokenRes.statusCode, 401);
-
-  const notFoundRes = await fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/sessions/status-summary",
-    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
-    payload: { sessionId: "sess_missing" }
-  });
-  assert.equal(notFoundRes.statusCode, 404);
-  assert.equal(notFoundRes.json().code, "SESSION_NOT_FOUND");
-
-  const agentNotFoundRes = await fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/sessions/status-summary",
-    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
-    payload: { sessionId: "sess_missing", selectedAgentId: "agent_missing" }
-  });
-  // sessionId missing still dominates; ensure agent not found is covered in another test
-  assert.equal(agentNotFoundRes.statusCode, 404);
+  assert.equal(noToken.statusCode, 401);
+  const missing = await getMessageTimelineSnapshot(fixture.app, fixture.internalToken, fixture.workspaceId, "sess_missing");
+  assert.equal(missing.statusCode, 404);
+  assert.equal(missing.json().code, "SESSION_NOT_FOUND");
 });
 
-test("internal sessions/status-summary sessionId 为空白时返回 400 + SESSION_ID_REQUIRED", async (t: TestContext) => {
+test("internal message-timeline-snapshot sessionId 为空白时返回请求校验错误", async (t: TestContext) => {
   const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
-
   const res = await fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/sessions/status-summary",
-    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
-    payload: { sessionId: "   " }
+    method: "POST", url: "/api/internal/agent/sessions/message-timeline-snapshot",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { workspaceId: fixture.workspaceId, sessionId: "   " }
   });
   assert.equal(res.statusCode, 400);
-  assert.equal(res.json().code, "SESSION_ID_REQUIRED");
 });
 
-test("internal sessions/status-summary agent 不存在时返回 400 + AGENT_NOT_FOUND", async (t: TestContext) => {
+test("internal message-timeline-snapshot 缺少 workspaceId 时返回请求校验错误", async (t: TestContext) => {
   const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
-  const created = await createSession(fixture.app, fixture.workspaceId);
-  const session = getAgentSession(fixture.db, created.id)!;
+  const session = await createSession(fixture.app, fixture.workspaceId);
   const res = await fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/sessions/status-summary",
-    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
-    payload: { sessionId: session.id, agentId: "agent_missing" }
+    method: "POST", url: "/api/internal/agent/sessions/message-timeline-snapshot",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { sessionId: session.id }
   });
   assert.equal(res.statusCode, 400);
-  assert.equal(res.json().code, "AGENT_NOT_FOUND");
 });
 
 test("internal agents/list 传入非法 surface 返回 400", async (t: TestContext) => {
@@ -484,144 +519,90 @@ test("internal agents/list 传入非法 surface 返回 400", async (t: TestConte
   assert.equal(String((res.json() as { message?: string }).message || "").toLowerCase().includes("surface"), true);
 });
 
-test("internal sessions/context-items-tail 返回尾部上下文项", async (t: TestContext) => {
+test("internal message-timeline-snapshot 返回当前链上的消息与轻量 ToolExecution", async (t: TestContext) => {
   const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
-
-  const user1 = await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId: null,
-    turnId: "turn_tail_1",
-    step: 1,
-    prevId: null,
-    kind: "user",
-    status: "completed",
-    output: { type: "user_text", text: "hello 1" }
+  const user = appendMessageFixture({ fixture, sessionId: session.id, type: "user", text: "hello 1" });
+  const run = createMessageRunFixture({ fixture, sessionId: session.id });
+  const callPartId = newSortableId("part");
+  const toolExecutionId = newSortableId("exec");
+  const assistant = createAssistantFixture({
+    fixture, sessionId: session.id, runId: run.runId,
+    parts: [{ id: callPartId, position: 0, type: "tool_call", toolName: "todolist", input: {} }],
+    executions: [{ id: toolExecutionId, callPartId, originSessionId: session.id, originRunId: run.runId, status: "queued" }]
   });
-  const assistant2 = await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId: null,
-    turnId: "turn_tail_1",
-    step: 2,
-    prevId: user1.item.id,
-    kind: "assistant",
-    status: "completed",
-    output: { type: "assistant_text", text: "hello 2" }
-  });
-  const tool3 = await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId: null,
-    turnId: "turn_tail_1",
-    step: 3,
-    prevId: assistant2.item.id,
-    kind: "tool",
-    status: "completed",
-    output: { type: "tool", toolName: "todolist", result: { goal: "x", todos: [] } }
-  });
-
-  const res = await fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/sessions/context-items-tail",
-    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
-    payload: { pluginId: "feishu", sessionId: session.id, tailLimit: 2 }
-  });
-  assert.equal(res.statusCode, 200, `context-items-tail failed: ${res.body}`);
-  const body = res.json() as any;
-  assert.equal(body.sessionId, session.id);
-  assert.equal(Array.isArray(body.items), true);
-  assert.equal(body.items.length, 2);
-  assert.equal(body.items[0]?.id, assistant2.item.id);
-  assert.equal(body.items[1]?.id, tool3.item.id);
-});
-
-test("internal sessions/context-items-tail 序列化 subtask child run 摘要", async (t: TestContext) => {
-  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
-  const session = await createSession(fixture.app, fixture.workspaceId);
-  const now = Date.now();
-  const parentRunId = newSortableId("run");
-  createRunRecord(fixture.db, {
-    runId: parentRunId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: 0,
-    agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", status: "running", createdAt: now
-  });
-  const parentTool = appendContextItem(fixture.db, {
-    workspaceId: fixture.workspaceId, sessionId: session.id, runId: parentRunId, turnId: null, step: null, prevId: null,
-    kind: "tool", status: "completed", output: { type: "tool", toolName: "subtask" }, createdAt: now + 1
-  });
-  const childRunId = newSortableId("run");
-  createRunRecord(fixture.db, {
-    runId: childRunId, workspaceId: fixture.workspaceId, sessionId: session.id, triggerItemId: parentTool.id,
-    agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", parentRunId, parentToolItemId: parentTool.id,
-    status: "completed", createdAt: now + 2
-  });
-  fixture.db.prepare("update agent_run set updated_at = ? where run_id = ?").run(now + 5, childRunId);
-
-  const res = await fixture.app.inject({
-    method: "POST", url: "/api/internal/agent/sessions/context-items-tail",
-    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
-    payload: { pluginId: "feishu", sessionId: session.id, tailLimit: 10 }
-  });
+  const res = await getMessageTimelineSnapshot(fixture.app, fixture.internalToken, fixture.workspaceId, session.id);
   assert.equal(res.statusCode, 200, res.body);
-  const projected = (res.json() as { items: Array<{ id: number; subtaskRun?: unknown }> }).items.find((item) => item.id === parentTool.id);
-  assert.deepEqual(projected?.subtaskRun, { runId: childRunId, status: "completed", startedAt: now + 2, endedAt: now + 5, durationMs: 3 });
+  const body = res.json() as { session: { id: string }; messages: Array<{ id: string }>; toolExecutions: Array<{ id: string; callPartId: string; status: string; resultPreview: string | null; resultTruncated: boolean; error: string | null; updatedRevision: number; startedAt: number | null; completedAt: number | null }> };
+  assert.equal(body.session.id, session.id);
+  assert.deepEqual(body.messages.map((message) => message.id), [user.messageId, run.triggerMessageId, assistant.assistantMessageId]);
+  assert.deepEqual(body.toolExecutions.map((execution) => ({
+    id: execution.id,
+    callPartId: execution.callPartId,
+    status: execution.status,
+    resultPreview: execution.resultPreview,
+    resultTruncated: execution.resultTruncated,
+    error: execution.error,
+    startedAt: execution.startedAt,
+    completedAt: execution.completedAt
+  })), [{ id: toolExecutionId, callPartId, status: "queued", resultPreview: null, resultTruncated: false, error: null, startedAt: null, completedAt: null }]);
 });
 
-test("internal sessions/context-items-tail sessionId 为空白时返回 400 + SESSION_ID_REQUIRED", async (t: TestContext) => {
+test("internal message-timeline-snapshot 以 ToolExecution 锚定 child Run lineage", async (t: TestContext) => {
   const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
-  const res = await fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/sessions/context-items-tail",
-    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
-    payload: { pluginId: "feishu", sessionId: "   ", tailLimit: 1 }
+  const parent = await createSession(fixture.app, fixture.workspaceId);
+  const now = Date.now();
+  const parentRun = createMessageRunFixture({ fixture, sessionId: parent.id, createdAt: now });
+  const callPartId = newSortableId("part");
+  const toolExecutionId = newSortableId("exec");
+  const assistant = createAssistantFixture({
+    fixture, sessionId: parent.id, runId: parentRun.runId,
+    parts: [{ id: callPartId, position: 0, type: "tool_call", toolName: "subtask", input: {} }],
+    executions: [{ id: toolExecutionId, callPartId, originSessionId: parent.id, originRunId: parentRun.runId, status: "queued" }], createdAt: now + 1
   });
-  assert.equal(res.statusCode, 400);
-  assert.equal(res.json().code, "SESSION_ID_REQUIRED");
+  const childSessionId = newSortableId("sess");
+  createMessageSession(fixture.db, { id: childSessionId, workspaceId: fixture.workspaceId, title: "child", kind: "subtask", createdAt: now + 2 });
+  const childTrigger = appendMessageFixture({ fixture, sessionId: childSessionId, type: "user", text: "child trigger", createdAt: now + 2 });
+  const childRunId = newSortableId("run");
+  createMessageRunRecord(fixture.db, {
+    runId: childRunId, workspaceId: fixture.workspaceId, sessionId: childSessionId,
+    triggerMessageId: childTrigger.messageId, agentId: "default", providerId: "ppchat", modelId: "gpt-5.2",
+    parentRunId: parentRun.runId, parentToolExecutionId: toolExecutionId, status: "completed", createdAt: now + 2
+  });
+  const snapshot = await getMessageTimelineSnapshot(fixture.app, fixture.internalToken, fixture.workspaceId, parent.id);
+  assert.equal(snapshot.statusCode, 200, snapshot.body);
+  const body = snapshot.json() as { messages: Array<{ id: string }>; toolExecutions: Array<{ id: string; callPartId: string }> };
+  assert.ok(body.messages.some((message) => message.id === assistant.assistantMessageId));
+  assert.deepEqual(body.toolExecutions.map((execution) => ({ id: execution.id, callPartId: execution.callPartId })), [{ id: toolExecutionId, callPartId }]);
+  const child = getRunRecord(fixture.db, childRunId);
+  assert.equal(child?.parentRunId, parentRun.runId);
+  assert.equal(child?.parentToolExecutionId, toolExecutionId);
 });
 
-test("internal sessions/context-items-tail 缺少 x-awb-plugin-id 时返回 400 + PLUGIN_ID_REQUIRED", async (t: TestContext) => {
+test("internal message-timeline-snapshot sessionId 为空白时返回 400", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const res = await getMessageTimelineSnapshot(fixture.app, fixture.internalToken, fixture.workspaceId, "   ");
+  assert.equal(res.statusCode, 400);
+});
+
+test("internal message-timeline-snapshot 缺少 internal token 时返回 401", async (t: TestContext) => {
   const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
-  const res = await fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/sessions/context-items-tail",
-    headers: { "x-awb-agent-internal-token": fixture.internalToken },
-    payload: { pluginId: "feishu", sessionId: session.id, tailLimit: 1 }
-  });
-  assert.equal(res.statusCode, 400);
-  assert.equal(res.json().code, "PLUGIN_ID_REQUIRED");
-});
-
-test("internal sessions/context-items-tail 缺少 body.pluginId 时返回 400 + PLUGIN_ID_REQUIRED", async (t: TestContext) => {
-  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
-  const session = await createSession(fixture.app, fixture.workspaceId);
-  const res = await fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/sessions/context-items-tail",
-    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
-    payload: { sessionId: session.id, tailLimit: 1 }
-  });
-
-  assert.equal(res.statusCode, 400);
-  assert.ok(typeof res.json().message === "string" && res.json().message.length > 0);
-});
-
-test("internal sessions/context-items-tail header/body pluginId 不一致时返回 401 + PLUGIN_ID_MISMATCH", async (t: TestContext) => {
-  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
-  const session = await createSession(fixture.app, fixture.workspaceId);
-  const res = await fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/sessions/context-items-tail",
-    headers: { "x-awb-agent-internal-token": fixture.internalToken, "x-awb-plugin-id": "feishu" },
-    payload: { pluginId: "slack", sessionId: session.id, tailLimit: 1 }
-  });
+  const res = await fixture.app.inject({ method: "POST", url: "/api/internal/agent/sessions/message-timeline-snapshot", payload: { workspaceId: fixture.workspaceId, sessionId: session.id } });
   assert.equal(res.statusCode, 401);
-  assert.equal(res.json().code, "PLUGIN_ID_MISMATCH");
+});
+
+test("internal message-timeline-snapshot 缺少 body.workspaceId 时返回 400", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const res = await fixture.app.inject({ method: "POST", url: "/api/internal/agent/sessions/message-timeline-snapshot", headers: { "x-awb-agent-internal-token": fixture.internalToken }, payload: { sessionId: session.id } });
+  assert.equal(res.statusCode, 400);
+});
+
+test("internal message-timeline-snapshot 拒绝 workspace 与 session 不匹配", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const res = await getMessageTimelineSnapshot(fixture.app, fixture.internalToken, "ws_other", session.id);
+  assert.equal(res.statusCode, 404);
+  assert.equal(res.json().code, "SESSION_NOT_FOUND");
 });

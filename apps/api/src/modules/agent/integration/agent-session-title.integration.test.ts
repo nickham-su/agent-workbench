@@ -1,7 +1,71 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
+import { createMessageRunRecord } from "../agent-message.store.js";
+import { appendMessage, getMessageSessionHead, startMessageRun } from "../agent-message.store.js";
+import { newSortableId } from "../../../utils/ids.js";
 import { createAgentIntegrationFixture } from "../testkit/agent-integration-testkit.js";
-import { createContextItemInternal, createSession } from "./subtask.helpers.js";
+import { createMessageToolAnchor, createSession } from "./subtask.helpers.js";
+
+async function completeTodolistForTitle(
+  fixture: Awaited<ReturnType<typeof createAgentIntegrationFixture>>,
+  sessionId: string,
+  goal: string
+) {
+  const now = Date.now();
+  const head = getMessageSessionHead(fixture.db, { workspaceId: fixture.workspaceId, sessionId });
+  assert.ok(head, "session must exist");
+  const triggerMessageId = newSortableId("msg");
+  const runId = newSortableId("run");
+  appendMessage(fixture.db, {
+    id: triggerMessageId,
+    workspaceId: fixture.workspaceId,
+    sessionId,
+    expectedHeadMessageId: head.headMessageId,
+    expectedRevision: head.revision,
+    type: "user",
+    status: "completed",
+    originRunId: null,
+    parts: [{ id: newSortableId("part"), position: 0, type: "text", text: "update task list" }],
+    createdAt: now
+  });
+  createMessageRunRecord(fixture.db, {
+    runId,
+    workspaceId: fixture.workspaceId,
+    sessionId,
+    triggerMessageId,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
+    status: "running",
+    createdAt: now
+  });
+  startMessageRun(fixture.db, { workspaceId: fixture.workspaceId, sessionId, runId, updatedAt: now });
+  const tool = createMessageToolAnchor({ fixture, sessionId, runId, toolName: "todolist", input: {} });
+  const headers = { "x-awb-agent-internal-token": fixture.internalToken };
+  const running = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/tool-executions/update",
+    headers,
+    payload: { workspaceId: fixture.workspaceId, sessionId, runId, toolExecutionId: tool.toolExecutionId, status: "running", startedAt: now + 1, updatedAt: now + 1 }
+  });
+  assert.equal(running.statusCode, 200, running.body);
+  const completed = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/tool-executions/update",
+    headers,
+    payload: {
+      workspaceId: fixture.workspaceId,
+      sessionId,
+      runId,
+      toolExecutionId: tool.toolExecutionId,
+      status: "completed",
+      structuredResult: { goal, todos: [] },
+      completedAt: now + 2,
+      updatedAt: now + 2
+    }
+  });
+  assert.equal(completed.statusCode, 200, completed.body);
+}
 
 async function putTitle(
   fixture: { app: import("fastify").FastifyInstance },
@@ -24,7 +88,10 @@ async function cancelSessionAndWaitIdle(fixture: { app: import("fastify").Fastif
   assert.equal(res.statusCode, 200, res.body);
   const deadline = Date.now() + 10000;
   for (;;) {
-    const state = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${sessionId}/run-state` });
+    const state = await fixture.app.inject({
+      method: "GET",
+      url: `/api/agent/sessions/${sessionId}/run-state?workspaceId=${workspaceId}`,
+    });
     assert.equal(state.statusCode, 200, state.body);
     const body = state.json() as { status: string };
     if (body.status === "idle") {
@@ -86,61 +153,11 @@ test("manual 状态下 todolist update-to-completed 不覆盖标题，auto 对�
   const manual = await createSession(fixture.app, fixture.workspaceId);
   await putTitle(fixture, manual.id, { workspaceId: fixture.workspaceId, title: "update 锁定" });
 
-  const manualCreate = await createContextItemInternal(fixture, {
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: manual.id,
-    runId: null,
-    turnId: null,
-    step: null,
-    prevId: null,
-    kind: "tool",
-    status: "running",
-    output: { type: "tool", toolName: "todolist", text: "todolist running" }
-  });
-  const manualItemId = (manualCreate as { item: { id: number } | null }).item?.id;
-  assert.ok(manualItemId);
-
-  const manualPatch = await fixture.app.inject({
-    method: "PATCH",
-    url: `/api/internal/agent/context-items/${manualItemId}`,
-    headers: { "x-awb-agent-internal-token": fixture.internalToken },
-    payload: {
-      status: "completed",
-      output: { type: "tool", toolName: "todolist", text: "todolist", result: { goal: "update 后的目标" } }
-    }
-  });
-  assert.equal(manualPatch.statusCode, 200, manualPatch.body);
+  await completeTodolistForTitle(fixture, manual.id, "update 后的目标");
 
   // auto 对照组：同样先 running 再 update-to-completed
   const control = await createSession(fixture.app, fixture.workspaceId);
-  const controlCreate = await createContextItemInternal(fixture, {
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: control.id,
-    runId: null,
-    turnId: null,
-    step: null,
-    prevId: null,
-    kind: "tool",
-    status: "running",
-    output: { type: "tool", toolName: "todolist", text: "todolist running" }
-  });
-  const controlItemId = (controlCreate as { item: { id: number } | null }).item?.id;
-  assert.ok(controlItemId);
-
-  const controlPatch = await fixture.app.inject({
-    method: "PATCH",
-    url: `/api/internal/agent/context-items/${controlItemId}`,
-    headers: { "x-awb-agent-internal-token": fixture.internalToken },
-    payload: {
-      status: "completed",
-      output: { type: "tool", toolName: "todolist", text: "todolist", result: { goal: "update 自动目标" } }
-    }
-  });
-  assert.equal(controlPatch.statusCode, 200, controlPatch.body);
+  await completeTodolistForTitle(fixture, control.id, "update 自动目标");
 
   const list = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions?workspaceId=${fixture.workspaceId}` });
   const records = list.json() as Array<{ id: string; title: string }>;
@@ -296,19 +313,7 @@ test("未手动接管的 Session 仍由首条消息自动命名，manual 后 tod
   const manual = await createSession(fixture.app, fixture.workspaceId);
   await putTitle(fixture, manual.id, { workspaceId: fixture.workspaceId, title: "锁定标题" });
 
-  await createContextItemInternal(fixture, {
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: manual.id,
-    runId: null,
-    turnId: null,
-    step: null,
-    prevId: null,
-    kind: "tool",
-    status: "completed",
-    output: { type: "tool", toolName: "todolist", text: "todolist", result: { goal: "新的任务目标标题" } }
-  });
+  await completeTodolistForTitle(fixture, manual.id, "新的任务目标标题");
 
   const list = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions?workspaceId=${fixture.workspaceId}` });
   const manualRecord = (list.json() as Array<{ id: string; title: string }>).find((s) => s.id === manual.id);
@@ -316,19 +321,7 @@ test("未手动接管的 Session 仍由首条消息自动命名，manual 后 tod
 
   // 对照：未接管的 Session 上同样的 todolist 会更新标题
   const control = await createSession(fixture.app, fixture.workspaceId);
-  await createContextItemInternal(fixture, {
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: control.id,
-    runId: null,
-    turnId: null,
-    step: null,
-    prevId: null,
-    kind: "tool",
-    status: "completed",
-    output: { type: "tool", toolName: "todolist", text: "todolist", result: { goal: "自动任务目标" } }
-  });
+  await completeTodolistForTitle(fixture, control.id, "自动任务目标");
   const controlList = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions?workspaceId=${fixture.workspaceId}` });
   const controlRecord = (controlList.json() as Array<{ id: string; title: string }>).find((s) => s.id === control.id);
   assert.equal(controlRecord?.title, "自动任务目标");
@@ -388,74 +381,27 @@ test("Fork 不继承手动接管标记：manual 源 Session Fork 后新 Session 
     payload: { workspaceId: fixture.workspaceId, text: "fork 边界消息", clientRequestId: "fork-boundary" }
   });
   assert.equal(send.statusCode, 201, send.body);
+  await cancelSessionAndWaitIdle(fixture, source.id, fixture.workspaceId);
 
   const list = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions?workspaceId=${fixture.workspaceId}` });
   const sourceRecord = (list.json() as Array<{ id: string; title: string }>).find((s) => s.id === source.id);
   assert.equal(sourceRecord?.title, "源手动标题");
 
   // Fork：从边界消息创建新 Session
-  const boundaryItem = await fixture.app.inject({
-    method: "GET",
-    url: `/api/agent/sessions/${source.id}/context-items?workspaceId=${fixture.workspaceId}`
-  });
-  assert.equal(boundaryItem.statusCode, 200, boundaryItem.body);
-  const items = boundaryItem.json() as { items: Array<{ id: number; kind: string }> };
-  const userItem = items.items.find((item) => item.kind === "user");
-  assert.ok(userItem, "fork boundary user item must exist");
+  const sourceMessage = send.json() as { messageId: string };
 
   const fork = await fixture.app.inject({
     method: "POST",
     url: "/api/agent/sessions/fork",
-    payload: { fromSessionId: source.id, fromItemId: userItem.id, mode: "visible_only" }
+    payload: { fromSessionId: source.id, fromMessageId: sourceMessage.messageId }
   });
   assert.equal(fork.statusCode, 201, fork.body);
   const forked = fork.json() as { id: string; title: string };
   assert.equal(forked.title, "源手动标题 (fork)");
 
-  // 新 Session 恢复自动可命名：后续 completed todolist 必须能覆盖其标题。
-  // 与既有 worker 写回路径一致（见上方 manual/auto 对照用例）：先追加 running 的
-  // todolist item，再 update-to-completed（goal 在 update 成功时才触发标题写回）。
-  // 注意：fork 新 Session 的 head 在克隆时已被边界 item 推进，追加的 prevId 必须与
-  // 克隆 head 对齐（conflict_head:<head> 会给出当前值），不能复用“空 Session 从 null 开始”的假设。
-  let forkedPrevId: number | null = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const createRes: import("fastify").LightMyRequestResponse = await fixture.app.inject({
-      method: "POST",
-      url: "/api/internal/agent/context-items",
-      headers: { "x-awb-agent-internal-token": fixture.internalToken },
-      payload: {
-        workspaceId: fixture.workspaceId,
-        sessionId: forked.id,
-        runId: null,
-        turnId: null,
-        step: null,
-        prevId: forkedPrevId,
-        kind: "tool",
-        status: "running",
-        output: { type: "tool", toolName: "todolist", text: "todolist running" }
-      }
-    });
-    if (createRes.statusCode === 200) {
-      forkedPrevId = (createRes.json() as { item: { id: number } }).item.id;
-      break;
-    }
-    const conflict = createRes.json() as { code?: string };
-    const match = /conflict_head:(\d+)/.exec(conflict.code ?? "");
-    if (createRes.statusCode !== 409 || !match) assert.fail(`create todolist item failed: ${createRes.body}`);
-    forkedPrevId = Number(match[1]);
-  }
-  assert.ok(forkedPrevId, "todolist item must be appended to forked session");
-
-  const forkedPatch = await fixture.app.inject({
-    method: "PATCH",
-    url: `/api/internal/agent/context-items/${forkedPrevId}`,
-    headers: { "x-awb-agent-internal-token": fixture.internalToken },
-    payload: {
-      status: "completed",
-      output: { type: "tool", toolName: "todolist", text: "todolist", result: { goal: "Fork 后的自动标题" } }
-    }
-  });
-  assert.equal(forkedPatch.statusCode, 200, forkedPatch.body);
+  // Fork 新 Session 的 head 指向共享的 Message boundary；新 todolist Execution
+  // 从该 head 继续追加，并通过新的写回端点更新自动标题。
+  await completeTodolistForTitle(fixture, forked.id, "Fork 后的自动标题");
 
   const after = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions?workspaceId=${fixture.workspaceId}` });
   const records = after.json() as Array<{ id: string; title: string }>;

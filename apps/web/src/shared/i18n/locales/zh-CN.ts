@@ -319,7 +319,7 @@ export default {
       imageRemoveAll: "移除全部",
       imagePreviewNotice: "图片仅在发送该消息时提供给模型，后续对话不会自动重新附带。如需模型再次查看，请重新发送图片。",
       imagePreviewLoadFailed: "图片加载失败，当前不可用。",
-      imageSlashCommandBlocked: "带图片时不能使用 /compact 或 /clear，请先移除图片。",
+      imageSlashCommandBlocked: "带图片时不能使用 /compact，请先移除图片。",
       imagePasteCount: "最多可添加 4 张图片。",
       imagePasteType: "只支持 PNG、JPEG 或 WebP 图片。",
       imagePasteEmpty: "不能添加空图片。",
@@ -379,6 +379,11 @@ export default {
       revertConfirmTitleAssistant: "确认回退到这条 AI 消息？",
       revertConfirmContentAssistant: "将回退到该条 AI 消息并保留该消息。回退后,后续对话分支将暂时不可见。",
       reverted: "已回退到选中消息",
+      reasoning: "推理过程",
+      resultPreviewTruncated: "工具结果预览已截断",
+      showDetails: "显示详情",
+      hideDetails: "收起详情",
+      openSubtask: "打开子任务",
       roles: {
         user: "我",
         assistant: "AI",
@@ -433,9 +438,6 @@ export default {
       slashCommands: {
         compact: {
           summary: "手动压缩当前会话上下文"
-        },
-        clear: {
-          summary: "开始新任务并归档当前可见上下文"
         }
       }
     }

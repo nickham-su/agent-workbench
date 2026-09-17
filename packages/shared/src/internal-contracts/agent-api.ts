@@ -1,58 +1,79 @@
-import { AgentApiContextItemPathTemplate, buildAgentApiContextItemPath } from "./agent-api-context.js";
-
 export const AgentApiEndpoints = {
-  updateRunState: {
+  createStreamingAssistant: {
     method: "POST",
-    path: "/api/internal/agent/run-state"
+    path: "/api/internal/agent/messages/assistant",
+  },
+  flushAssistantParts: {
+    method: "POST",
+    path: "/api/internal/agent/messages/assistant/parts",
+  },
+  resumeStreamingAssistant: {
+    method: "POST",
+    path: "/api/internal/agent/messages/assistant/resume",
+  },
+  replaceStreamingAssistant: {
+    method: "POST",
+    path: "/api/internal/agent/messages/assistant/replace",
+  },
+  completeAssistant: {
+    method: "POST",
+    path: "/api/internal/agent/messages/assistant/complete",
+  },
+  updateToolExecution: {
+    method: "POST",
+    path: "/api/internal/agent/tool-executions/update",
+  },
+  updateRunNotice: {
+    method: "POST",
+    path: "/api/internal/agent/run-notice",
+  },
+  commitCompaction: {
+    method: "POST",
+    path: "/api/internal/agent/messages/compaction",
   },
   completeRun: {
     method: "POST",
-    path: "/api/internal/agent/run-complete"
-  },
-  createContextItem: {
-    method: "POST",
-    path: "/api/internal/agent/context-items"
-  },
-  updateContextItem: {
-    method: "PATCH",
-    path: buildAgentApiContextItemPath,
-    routeTemplate: AgentApiContextItemPathTemplate
-  },
-  compactContext: {
-    method: "POST",
-    path: "/api/internal/agent/context/compact"
+    path: "/api/internal/agent/run-complete",
   },
   getSubtaskPreforkPlan: {
     method: "POST",
-    path: "/api/internal/agent/subtask/prefork-plan"
+    path: "/api/internal/agent/subtask/prefork-plan",
   },
   startSubtask: {
     method: "POST",
-    path: "/api/internal/agent/subtask/start"
+    path: "/api/internal/agent/subtask/start",
   },
   getSubtaskResult: {
     method: "POST",
-    path: "/api/internal/agent/subtask/result"
+    path: "/api/internal/agent/subtask/result",
   },
   getSubtaskStatus: {
     method: "POST",
-    path: "/api/internal/agent/subtask/status"
+    path: "/api/internal/agent/subtask/status",
   },
   getExecutionProfile: {
     method: "POST",
-    path: "/api/internal/agent/execution-profile"
+    path: "/api/internal/agent/execution-profile",
   },
   getPromptContext: {
     method: "POST",
-    path: "/api/internal/agent/prompt-context"
+    path: "/api/internal/agent/prompt-context",
   },
   getMessagesContext: {
     method: "POST",
-    path: "/api/internal/agent/messages-context"
-  }
+    path: "/api/internal/agent/messages-context",
+  },
+  archiveRead: {
+    method: "POST",
+    path: "/api/internal/agent/archive/read",
+  },
+  archiveSearch: {
+    method: "POST",
+    path: "/api/internal/agent/archive/search",
+  },
 } as const;
 
 export * from "./agent-api-run.js";
-export * from "./agent-api-context.js";
+export * from "./agent-api-message.js";
 export * from "./agent-api-subtask.js";
 export * from "./agent-api-read.js";

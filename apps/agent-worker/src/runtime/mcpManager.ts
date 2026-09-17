@@ -1,4 +1,4 @@
-import { AgentMcpToolNameSchema } from "@agent-workbench/shared";
+import { AgentMcpToolNameSchema } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { Value } from "@sinclair/typebox/value";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";

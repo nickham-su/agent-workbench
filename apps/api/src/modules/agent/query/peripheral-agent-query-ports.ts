@@ -2,14 +2,14 @@ import type {
   AgentListAvailableAgentsResponse,
   AgentRecentSessionsResponse,
   AgentRecentWorkspacesResponse
-} from "@agent-workbench/shared";
+} from "@agent-workbench/shared/internal-contracts/agent-api-session";
 
 export type PeripheralAgentQueryStore = {
   workspaceExists(workspaceId: string): boolean;
   listRecentSessions(limit: number, kind: "primary" | "subtask" | "all"): AgentRecentSessionsResponse["items"];
   listRecentWorkspaces(limit: number): AgentRecentWorkspacesResponse["items"];
   getRun(runId: string): { runId: string } | null;
-  getLatestTerminalAssistantText(runId: string): { itemId: number | null; text: string };
+  getLatestTerminalAssistantText(runId: string): { messageId: string | null; text: string };
 };
 
 /** Narrow capability shared with Context status projection; neither application references the other. */

@@ -8,7 +8,8 @@ import { HttpError } from "../../../app/errors.js";
 export type ReadSideSession = {
   workspaceId: string;
   kind: "primary" | "subtask";
-  headItemId: number | null;
+  headMessageId: string | null;
+  revision: number;
 };
 
 export type ReadSideRun = {
@@ -19,7 +20,7 @@ export type ReadSideRun = {
   providerId: string;
   modelId: string;
   subtaskDepth: number | null;
-  triggerItemId: number | null;
+  triggerMessageId: string | null;
 };
 
 /**

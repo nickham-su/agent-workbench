@@ -321,7 +321,7 @@ export default {
       imageRemoveAll: "Remove all",
       imagePreviewNotice: "Images are provided to the model only when this message is sent. They are not automatically attached to later turns. Send the images again if the model needs to view them.",
       imagePreviewLoadFailed: "The image could not be loaded.",
-      imageSlashCommandBlocked: "You cannot use /compact or /clear while images are attached. Remove the images first.",
+      imageSlashCommandBlocked: "You cannot use /compact while images are attached. Remove the images first.",
       imagePasteCount: "You can attach at most 4 images.",
       imagePasteType: "Only PNG, JPEG, and WebP images are supported.",
       imagePasteEmpty: "An empty image cannot be attached.",
@@ -381,6 +381,11 @@ export default {
       revertConfirmTitleAssistant: "Revert to this assistant message?",
       revertConfirmContentAssistant: "This will revert to this assistant message and keep it in the timeline. Messages after this point will become hidden from current timeline.",
       reverted: "Reverted to selected message",
+      reasoning: "Reasoning",
+      resultPreviewTruncated: "Tool result preview truncated",
+      showDetails: "Show details",
+      hideDetails: "Hide details",
+      openSubtask: "Open subtask",
       roles: {
         user: "You",
         assistant: "Assistant",
@@ -435,9 +440,6 @@ export default {
       slashCommands: {
         compact: {
           summary: "Compact the current session context"
-        },
-        clear: {
-          summary: "Start a new task and archive current visible context"
         }
       }
     }

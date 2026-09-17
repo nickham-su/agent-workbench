@@ -8,6 +8,7 @@ import {
   UpdateWorkspaceRequestSchema,
   WorkspaceDetailSchema
 } from "@agent-workbench/shared";
+import { AgentListAvailableAgentsResponseSchema } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import {
   attachRepoToWorkspace,
   createWorkspace,
@@ -36,7 +37,6 @@ import {
   UpdateWorkspaceExternalSkillRootsSettingsRequestSchema,
   WorkspaceExternalSkillRootsDetectResponseSchema,
   WorkspaceExternalSkillRootsSettingsResponseSchema,
-  AgentListAvailableAgentsResponseSchema,
   WorkspaceAgentsInstructionsDetectResponseSchema,
   WorkspaceAgentsInstructionsSettingsResponseSchema,
   UpdateWorkspaceAgentsInstructionsSettingsRequestSchema,
@@ -44,6 +44,7 @@ import {
 } from "@agent-workbench/shared";
 import { nowMs } from "../../utils/time.js";
 import { touchWorkspaceLastUsedAt } from "./workspace.store.js";
+import { workspaceLifecycleCoordinator } from "../../infra/locks/workspace-lifecycle-coordinator.js";
 export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppContext) {
   const WorkspaceIdParamsSchema = Type.Object({ workspaceId: Type.String({ minLength: 1 }) });
 
@@ -86,9 +87,11 @@ export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppCon
       const detail = await getWorkspaceDetailById(ctx, params.workspaceId);
       // “最近使用”以用户进入 workspace 页并拉取详情为准（不要求强一致）。
       try {
-        touchWorkspaceLastUsedAt(ctx.db, params.workspaceId, nowMs());
+        await workspaceLifecycleCoordinator.withMutation(params.workspaceId, async () => {
+          touchWorkspaceLastUsedAt(ctx.db, params.workspaceId, nowMs());
+        });
       } catch {
-        // ignore
+        // 详情读取不因 best-effort 元数据写失败而失败；deleting fence 仍阻止该写入。
       }
       return detail;
     }

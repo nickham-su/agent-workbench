@@ -8,8 +8,10 @@ const primarySession = {
   title: "primary",
   kind: "primary" as const,
   forkedFromSessionId: null,
-  forkedFromItemId: null,
-  headItemId: null,
+  forkedFromMessageId: null,
+  headMessageId: null,
+  contextRootMessageId: null,
+  revision: 0,
   createdAt: 1,
   updatedAt: 1
 };

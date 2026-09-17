@@ -1,4 +1,4 @@
-import type { AgentSessionAgentModelState } from "@agent-workbench/shared";
+import type { AgentSessionAgentModelState } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 
 export type SessionModelPresentation = {
   kind: "ready" | "override_unavailable" | "default_unavailable" | "loading" | "unavailable";

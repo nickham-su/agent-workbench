@@ -125,7 +125,7 @@ export function createToolFailureCaptureIfEnabled(identity: ToolErrorCaptureIden
     workspaceId: identity.workspaceId,
     sessionId: identity.sessionId,
     runId: identity.runId,
-    itemId: identity.itemId,
+    toolExecutionId: identity.toolExecutionId,
     toolCallId: identity.toolCallId
   };
   const eventsByKind = new Map<FailureKind, CapturedEvent[]>();
@@ -196,7 +196,7 @@ export function createToolFailureCaptureIfEnabled(identity: ToolErrorCaptureIden
         const artifact: ToolErrorArtifact = {
           schemaVersion: 1,
           kind: "tool_error",
-          captureId: `${identity.runId}:${identity.itemId}:${createdAt}:${failureKind}`,
+          captureId: `${identity.runId}:${identity.toolExecutionId}:${createdAt}:${failureKind}`,
           recordedAt: createdAt,
           failureKind,
           identity: baseIdentity,

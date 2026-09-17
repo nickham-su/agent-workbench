@@ -14,11 +14,68 @@ export class SqliteSubtaskMaintenancePersistence
 {
   constructor(private readonly db: Db) {}
 
-  deleteNewSessionIfStillEmpty(input: {
+  /**
+   * Removes only the Session created by the failing materialization request.
+   * A fork may point its head at shared parent Messages, which are intentionally
+   * not a deletion precondition and are never removed here.
+   */
+  deleteCreatedSessionIfStillSafe(input: {
     workspaceId: string;
-    sessionId: string;
+    createdSessionId: string;
+    expectedParentSessionId: string;
+    expectedForkedFromSessionId: string | null;
+    expectedForkedFromMessageId: string | null;
   }) {
-    return this.deleteEmptySubtaskSessionIfStillEligible({ ...input, olderThan: null, requireForkLineage: false });
+    const transaction = this.db.transaction(() =>
+      this.db.prepare(`
+        delete from agent_session
+        where id = @createdSessionId
+          and workspace_id = @workspaceId
+          and kind = 'subtask'
+          and forked_from_session_id is @expectedForkedFromSessionId
+          and forked_from_message_id is @expectedForkedFromMessageId
+          and (
+            @expectedForkedFromSessionId is null
+            or forked_from_session_id = @expectedParentSessionId
+          )
+          and exists (
+            select 1 from session_run_state state
+            where state.workspace_id = @workspaceId
+              and state.session_id = @createdSessionId
+              and state.status = 'idle'
+              and state.active_run_id is null
+          )
+          and not exists (
+            select 1 from agent_run run
+            where run.workspace_id = @workspaceId
+              and run.session_id = @createdSessionId
+          )
+          and not exists (
+            select 1 from agent_message message
+            where message.workspace_id = @workspaceId
+              and message.origin_session_id = @createdSessionId
+          )
+          and not exists (
+            select 1 from agent_tool_execution execution
+            where execution.origin_session_id = @createdSessionId
+          )
+          and not exists (
+            select 1 from agent_client_request request
+            where request.workspace_id = @workspaceId
+              and request.session_id = @createdSessionId
+          )
+          and not exists (
+            select 1 from agent_session_agent_model_override override
+            where override.session_id = @createdSessionId
+          )
+          and not exists (
+            select 1 from agent_session descendant
+            where descendant.workspace_id = @workspaceId
+              and descendant.forked_from_session_id = @createdSessionId
+          )
+      `).run(input).changes,
+    );
+    return transaction() > 0;
   }
 
   listSuspects(input: { olderThan: number }): SubtaskOrphanCandidate[] {
@@ -30,20 +87,14 @@ export class SqliteSubtaskMaintenancePersistence
             s.id as sessionId,
             s.created_at as createdAt,
             s.forked_from_session_id as forkedFromSessionId,
-            s.forked_from_item_id as forkedFromItemId
+            s.forked_from_message_id as forkedFromMessageId
           from agent_session s
-          left join agent_session_head h
-            on h.workspace_id = s.workspace_id and h.session_id = s.id
           where s.kind = 'subtask'
             and s.created_at < @olderThan
-            and h.head_item_id is null
+            and s.head_message_id is null
             and not exists (
               select 1 from agent_run r
               where r.workspace_id = s.workspace_id and r.session_id = s.id
-            )
-            and not exists (
-              select 1 from agent_context_item i
-              where i.workspace_id = s.workspace_id and i.session_id = s.id
             )
           order by s.created_at asc, s.id asc
         `,
@@ -75,18 +126,11 @@ export class SqliteSubtaskMaintenancePersistence
               and workspace_id = @workspaceId
               and kind = 'subtask'
               and (@olderThan is null or created_at < @olderThan)
-              and (@requireForkLineage = 0 or (forked_from_session_id is not null and forked_from_item_id is not null))
-              and not exists (
-                select 1 from agent_session_head h
-                where h.workspace_id = @workspaceId and h.session_id = @sessionId and h.head_item_id is not null
-              )
+              and (@requireForkLineage = 0 or (forked_from_session_id is not null and forked_from_message_id is not null))
+              and head_message_id is null
               and not exists (
                 select 1 from agent_run r
                 where r.workspace_id = @workspaceId and r.session_id = @sessionId
-              )
-              and not exists (
-                select 1 from agent_context_item i
-                where i.workspace_id = @workspaceId and i.session_id = @sessionId
               )
           `,
         )

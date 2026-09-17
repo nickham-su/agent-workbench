@@ -9,22 +9,9 @@ test("getPromptText 可读取内置 prompts 文件", () => {
   assert.ok(text.includes("Language requirement: use English consistently for this run."));
 });
 
-test("renderPromptTemplateFile 可替换模板占位符", () => {
-  const text = renderPromptTemplateFile("agent/clear-summary-with-reason.en-US.tmpl.txt", {
-    reason: "switch-task"
-  });
-  assert.equal(
-    text,
-    "A new task has started (switch-task). Previous context has been archived; use archive_search or archive_read if you need to recall earlier decisions."
-  );
-});
-
 test("关键 locale 与模板替换行为正确（zh-CN）", () => {
   const zh = getPromptText("agent/language-instruction.zh-CN.txt");
   assert.ok(zh.includes("语言要求：本轮对话请统一使用简体中文。"));
-  const snippet = renderPromptTemplateFile("agent/compaction-snippet-message.zh-CN.tmpl.txt", { body: "L1", minPos: 123 });
-  assert.ok(snippet.includes("L1"));
-  assert.ok(snippet.includes("beforePos=123"));
 });
 
 test("renderPromptTemplate 变量值包含 {{}} 时按字面量保留", () => {

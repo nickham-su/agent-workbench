@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import { setSettingJson } from "../../settings/settings.store.js";
 import { normalizeMaxSubtaskDepthForUpdate } from "../../settings/settings.service.js";
-import { createAgentSession, createRunRecord, getRunRecord } from "../agent.store.js";
+import { createMessageRunRecord, getRunRecord } from "../agent-message.store.js";
+import { appendMessage, createMessageSession, getMessageSessionHead } from "../agent-message.store.js";
 import { newSortableId } from "../../../utils/ids.js";
 import {
   createAgentIntegrationFixture,
@@ -114,18 +115,18 @@ async function createIntegrationFixtureForTest(
 function createSubtaskSessionForSettingsTest(fixture: AgentIntegrationFixture, params?: {
   title?: string;
   forkedFromSessionId?: string | null;
-  forkedFromItemId?: number | null;
+  forkedFromMessageId?: string | null;
 }) {
   const createdAt = Date.now();
   const id = newSortableId("sess");
-  createAgentSession(fixture.db, {
+  createMessageSession(fixture.db, {
     id,
     workspaceId: fixture.workspaceId,
     title: params?.title || "it-subtask-session",
     kind: "subtask",
     createdAt,
     forkedFromSessionId: params?.forkedFromSessionId ?? null,
-    forkedFromItemId: params?.forkedFromItemId ?? null
+    forkedFromMessageId: params?.forkedFromMessageId ?? null
   });
   return { id };
 }
@@ -375,7 +376,6 @@ test("agent runtime settings 可通过 execution-profile 下发", async (t: Test
 
   const runRecord = getRunRecord(fixture.db, msg.runId);
   assert.ok(runRecord, "run record should exist");
-  assert.equal(runRecord?.uiLocale, null, "missing uiLocale should be stored as null");
 
   const profileRes = await fixture.app.inject({
     method: "POST",
@@ -771,15 +771,29 @@ test("subtask session 的 execution-profile 按 subtask surface 校验", async (
 
   const createdAt = Date.now();
   const runId = newSortableId("run");
-  createRunRecord(fixture.db, {
+  const head = getMessageSessionHead(fixture.db, { workspaceId: fixture.workspaceId, sessionId: session.id });
+  assert.ok(head);
+  const triggerMessageId = newSortableId("msg");
+  appendMessage(fixture.db, {
+    id: triggerMessageId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    expectedHeadMessageId: head.headMessageId,
+    expectedRevision: head.revision,
+    type: "user",
+    status: "completed",
+    originRunId: null,
+    parts: [{ id: newSortableId("part"), position: 0, type: "text", text: "subtask profile trigger" }],
+    createdAt
+  });
+  createMessageRunRecord(fixture.db, {
     runId,
     workspaceId: fixture.workspaceId,
     sessionId: session.id,
-    triggerItemId: 1,
+    triggerMessageId,
     agentId: "subtask-agent",
     providerId: "ppchat",
     modelId: "gpt-5.2",
-    uiLocale: null,
     status: "running",
     createdAt
   });

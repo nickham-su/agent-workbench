@@ -1,4 +1,4 @@
-import { AgentMcpToolNameSchema, type AgentContextItemOutput, type PluginToolCanonicalName } from "@agent-workbench/shared";
+import { AgentMcpToolNameSchema, type PluginToolCanonicalName } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { Value } from "@sinclair/typebox/value";
 import type { AgentApiClient, ExecutionProfile, PromptContext } from "../apiClient.js";
 
@@ -23,8 +23,10 @@ export type AvailableToolContext = ToolListContext & {
 };
 
 export type PendingToolExecution = {
-  itemId: number;
-  status: "queued" | "running" | "streaming" | "completed" | "failed" | "cancelled";
+  toolExecutionId: string;
+  callPartId: string;
+  assistantMessageId: string;
+  status: "queued" | "running";
   toolName: string;
   toolCallId: string;
   args: Record<string, unknown>;
@@ -63,7 +65,7 @@ export type ToolExecutionContext = {
   apiClient: AgentApiClient;
   promptContext: PromptContext;
   processNestedRun: (run: NestedRunContext, signal: AbortSignal) => Promise<void>;
-  updateToolItem: (params: { status: "running" | "completed" | "failed"; output: AgentContextItemOutput }) => Promise<void>;
+  updateToolExecution: (params: { status: "running"; resultPreview?: string; structuredResult?: unknown }) => Promise<void>;
   nowMs: () => number;
   reportRunningOutput?: (patch: { text?: string; result?: unknown }) => Promise<void>;
   renderToolText: (input: ToolTextRenderInput) => string;
@@ -84,10 +86,10 @@ export const BUILTIN_TOOL_NAMES = [
   "scratchpad",
   "todolist",
   "subtask",
-  "archive_search",
   "skill",
+  "visual_analyze",
   "archive_read",
-  "visual_analyze"
+  "archive_search"
 ] as const;
 
 export type BuiltinToolName = (typeof BUILTIN_TOOL_NAMES)[number];

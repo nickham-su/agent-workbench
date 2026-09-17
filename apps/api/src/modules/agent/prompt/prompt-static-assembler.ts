@@ -84,7 +84,7 @@ export class PromptStaticAssembler {
     }
     externalSkills.sort((a, b) => a.skill < b.skill ? -1 : a.skill > b.skill ? 1 : 0);
 
-    const baselineToolNames = ["read", "archive_search", "archive_read", "skill"];
+    const baselineToolNames = ["read", "skill"];
     const enabledToolNames: string[] = [];
     const enabledToolNameSet = new Set<string>();
     for (const name of [...baselineToolNames, ...profile.agent.tools]) {

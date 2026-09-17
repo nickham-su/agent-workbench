@@ -6,20 +6,23 @@ import { ensureDir } from "../../../infra/fs/fs.js";
 import { workspaceRoot } from "../../../infra/fs/paths.js";
 import { insertWorkspace } from "../../workspaces/workspace.store.js";
 import {
-  createAgentSession,
-  createRunRecord,
-  getAgentSession,
+  createMessageRunRecord,
+  getMessageSessionById,
   getRunRecord,
-  getSessionTranscriptItems,
-  updateRunState
-} from "../agent.store.js";
+} from "../agent-message.store.js";
+import {
+  appendMessage,
+  createMessageSession,
+  getMessageSessionHead,
+  startMessageRun
+} from "../agent-message.store.js";
 import type { AppContext } from "../../../app/context.js";
 import type { AgentService } from "../agent.service.js";
 import type { AgentApiSubtaskStartRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { newSortableId } from "../../../utils/ids.js";
 import type { AgentIntegrationFixture } from "../testkit/agent-integration-testkit.js";
 import {
-  createContextItemInternal,
+  createMessageToolAnchor,
   createP2Fixture,
   createSession,
   createSubtaskAnchor,
@@ -52,7 +55,6 @@ function createDirectAgentComposition(fixture: AgentIntegrationFixture) {
     agentInternalToken: fixture.internalToken,
     agentWorkerResponseValidation: "strict",
     agentApiOrigin: "http://127.0.0.1:0",
-    agentStartupRecoveryMode: "recover",
     agentPluginHostEnabled: false,
     agentPluginHostSocketPath: path.join(fixture.dataDir, "agent-plugin-host.sock")
   };
@@ -85,11 +87,11 @@ test("subtask start reports anchor validation codes at the Route", async (t: Tes
     const anchor = await createSubtaskAnchor({ fixture, parentDepth: 0, sessionMode: "new" });
 
   const otherRunId = newSortableId("run");
-  createRunRecord(fixture.db, {
+  createMessageRunRecord(fixture.db, {
     runId: otherRunId,
     workspaceId: fixture.workspaceId,
     sessionId: anchor.parentSession.id,
-    triggerItemId: anchor.toolItem.item.id,
+    triggerMessageId: anchor.userMessageId,
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
@@ -101,36 +103,24 @@ test("subtask start reports anchor validation codes at the Route", async (t: Tes
     fixture,
     parentSessionId: anchor.parentSession.id,
     parentRunId: otherRunId,
-    parentToolItemId: anchor.toolItem.item.id,
+    parentToolExecutionId: anchor.toolExecutionId,
     session: { mode: "new" }
   });
   assert.equal(anchorRunMismatch.statusCode, 400, anchorRunMismatch.body);
   assert.equal(anchorRunMismatch.json().code, "AGENT_SUBTASK_ANCHOR_RUN_MISMATCH");
 
-  const nonSubtaskTool = await createContextItemInternal(fixture, {
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
+  const nonSubtaskTool = createMessageToolAnchor({
+    fixture,
     sessionId: anchor.parentSession.id,
     runId: anchor.parentRunId,
-    turnId: "turn_subtask_depth",
-    step: 2,
-    prevId: anchor.toolItem.item.id,
-    kind: "tool",
-    status: "queued",
-    output: {
-      type: "tool",
-      toolName: "bash",
-      toolCallId: "call_not_subtask",
-      args: { command: "true" },
-      result: null
-    }
+    toolName: "bash",
+    input: { command: "true" }
   });
   const invalidAnchor = await startSubtaskForAnchor({
     fixture,
     parentSessionId: anchor.parentSession.id,
     parentRunId: anchor.parentRunId,
-    parentToolItemId: nonSubtaskTool.item.id,
+    parentToolExecutionId: nonSubtaskTool.toolExecutionId,
     session: { mode: "new" }
   });
   assert.equal(invalidAnchor.statusCode, 400, invalidAnchor.body);
@@ -145,7 +135,7 @@ test("subtask start stable validation codes are precise at Service boundaries", 
     workspaceId: fixture.workspaceId,
     parentSessionId: anchor.parentSession.id,
     parentRunId: anchor.parentRunId,
-    parentToolItemId: anchor.toolItem.item.id,
+    parentToolExecutionId: anchor.toolExecutionId,
     description: "child",
     prompt: "complete child",
     agentId: "default",
@@ -220,7 +210,7 @@ test("subtask start stable validation codes are precise at Service boundaries", 
     updatedAt: Date.now()
   });
   const foreignSessionId = newSortableId("sess");
-  createAgentSession(fixture.db, {
+  createMessageSession(fixture.db, {
     id: foreignSessionId,
     workspaceId: foreignWorkspaceId,
     title: "foreign-subtask",
@@ -243,21 +233,43 @@ test("subtask start stable validation codes are precise at Service boundaries", 
   });
 
   const runningSessionId = newSortableId("sess");
-  createAgentSession(fixture.db, {
+  const runningAt = Date.now();
+  createMessageSession(fixture.db, {
     id: runningSessionId,
     workspaceId: fixture.workspaceId,
     title: "running-subtask",
     kind: "subtask",
-    createdAt: Date.now()
+    createdAt: runningAt
   });
-  updateRunState(fixture.db, {
+  const runningTriggerMessageId = newSortableId("msg");
+  appendMessage(fixture.db, {
+    id: runningTriggerMessageId,
     workspaceId: fixture.workspaceId,
     sessionId: runningSessionId,
+    expectedHeadMessageId: null,
+    expectedRevision: 0,
+    type: "user",
+    status: "completed",
+    originRunId: null,
+    parts: [{ id: newSortableId("part"), position: 0, type: "text", text: "running child" }],
+    createdAt: runningAt
+  });
+  createMessageRunRecord(fixture.db, {
+    runId: "run-running-subtask",
+    workspaceId: fixture.workspaceId,
+    sessionId: runningSessionId,
+    triggerMessageId: runningTriggerMessageId,
+    agentId: "default",
+    providerId: "ppchat",
+    modelId: "gpt-5.2",
     status: "running",
-    activeRunId: "run-running-subtask",
-    activeAssistantItemId: null,
-    updatedAt: Date.now(),
-    appliedItemId: 0
+    createdAt: runningAt
+  });
+  startMessageRun(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: runningSessionId,
+    runId: "run-running-subtask",
+    updatedAt: runningAt
   });
   await assertDirectSubtaskStartError({
     service,
@@ -266,29 +278,17 @@ test("subtask start stable validation codes are precise at Service boundaries", 
     code: "AGENT_SUBTASK_SESSION_RUNNING"
   });
 
-  const invalidBoundaryAnchor = await createContextItemInternal(fixture, {
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
+  const invalidBoundaryAnchor = createMessageToolAnchor({
+    fixture,
     sessionId: anchor.parentSession.id,
     runId: anchor.parentRunId,
-    turnId: "turn_invalid_boundary",
-    step: 3,
-    prevId: anchor.toolItem.item.id,
-    kind: "tool",
-    status: "queued",
-    output: {
-      type: "tool",
-      toolName: "subtask",
-      toolCallId: "call_invalid_boundary",
-      args: { description: "child", prompt: "complete child", agentId: "default", session: { mode: "fork" } },
-      result: null
-    }
+    toolName: "subtask",
+    input: { description: "child", prompt: "complete child", agentId: "default", session: { mode: "fork" } }
   });
-  fixture.db.prepare("update agent_context_item set prev_id = ? where id = ?").run(999999999, invalidBoundaryAnchor.item.id);
+  fixture.db.prepare("update agent_message set type = 'user' where id = ?").run(invalidBoundaryAnchor.assistantMessageId);
   await assertDirectSubtaskStartError({
     service,
-    request: { ...baseRequest, parentToolItemId: invalidBoundaryAnchor.item.id, session: { mode: "fork" } },
+    request: { ...baseRequest, parentToolExecutionId: invalidBoundaryAnchor.toolExecutionId, session: { mode: "fork" } },
     statusCode: 400,
     code: "AGENT_SUBTASK_FORK_BOUNDARY_INVALID"
   });
@@ -309,7 +309,7 @@ test("subtask start 按 depth 执行限制、mode 和轻量幂等", async (t: Te
       fixture,
       parentSessionId: parent.parentSession.id,
       parentRunId: parent.parentRunId,
-      parentToolItemId: parent.toolItem.item.id,
+      parentToolExecutionId: parent.toolExecutionId,
       session: { mode }
     });
     assert.equal(res.statusCode, 200, res.body);
@@ -318,24 +318,24 @@ test("subtask start 按 depth 执行限制、mode 和轻量幂等", async (t: Te
     const child = getRunRecord(fixture.db, body.runId);
     assert.equal(child?.subtaskDepth, 1);
     assert.equal(child?.parentRunId, parent.parentRunId);
-    assert.equal(child?.parentToolItemId, parent.toolItem.item.id);
-    const session = getAgentSession(fixture.db, body.sessionId);
+    assert.equal(child?.parentToolExecutionId, parent.toolExecutionId);
+    const session = getMessageSessionById(fixture.db, body.sessionId);
     assert.equal(session?.kind, "subtask");
-    assert.equal(session?.forkedFromSessionId, mode === "new" ? parent.parentSession.id : null);
-    assert.equal(session?.forkedFromItemId, mode === "new" ? parent.toolItem.item.id : null);
+    assert.equal(session?.forkedFromSessionId, parent.parentSession.id);
+    assert.equal(session?.forkedFromMessageId, mode === "fork" ? parent.userMessageId : null);
   }
 
   const existingSession = createSubtaskSessionForTest(fixture, {
     title: "existing",
     forkedFromSessionId: "original-parent",
-    forkedFromItemId: 7
+    forkedFromMessageId: null
   });
   const existingParent = await createSubtaskAnchor({ fixture, parentDepth: 1, sessionMode: "existing" });
   const existingRes = await startSubtaskForAnchor({
     fixture,
     parentSessionId: existingParent.parentSession.id,
     parentRunId: existingParent.parentRunId,
-    parentToolItemId: existingParent.toolItem.item.id,
+    parentToolExecutionId: existingParent.toolExecutionId,
     session: { mode: "existing", sessionId: existingSession.id }
   });
   assert.equal(existingRes.statusCode, 200, existingRes.body);
@@ -343,16 +343,16 @@ test("subtask start 按 depth 执行限制、mode 和轻量幂等", async (t: Te
   const existingRun = getRunRecord(fixture.db, (existingRes.json() as { runId: string }).runId);
   assert.equal(existingRun?.subtaskDepth, 2);
   assert.equal(existingRun?.parentRunId, existingParent.parentRunId);
-  assert.equal(existingRun?.parentToolItemId, existingParent.toolItem.item.id);
-  const existingSessionAfter = getAgentSession(fixture.db, existingSession.id);
+  assert.equal(existingRun?.parentToolExecutionId, existingParent.toolExecutionId);
+  const existingSessionAfter = getMessageSessionById(fixture.db, existingSession.id);
   assert.equal(existingSessionAfter?.forkedFromSessionId, "original-parent");
-  assert.equal(existingSessionAfter?.forkedFromItemId, 7);
+  assert.equal(existingSessionAfter?.forkedFromMessageId, null);
 
   const duplicate = await startSubtaskForAnchor({
     fixture,
     parentSessionId: existingParent.parentSession.id,
     parentRunId: existingParent.parentRunId,
-    parentToolItemId: existingParent.toolItem.item.id,
+    parentToolExecutionId: existingParent.toolExecutionId,
     session: { mode: "existing", sessionId: existingSession.id }
   });
   assert.equal(duplicate.statusCode, 200, duplicate.body);
@@ -365,7 +365,7 @@ test("subtask start 按 depth 执行限制、mode 和轻量幂等", async (t: Te
     fixture,
     parentSessionId: existingParent.parentSession.id,
     parentRunId: existingParent.parentRunId,
-    parentToolItemId: existingParent.toolItem.item.id,
+    parentToolExecutionId: existingParent.toolExecutionId,
     session: { mode: "existing", sessionId: differentExistingSession.id }
   });
   assert.equal(mismatch.statusCode, 409);
@@ -383,7 +383,7 @@ test("subtask start 首次已提交但客户端未确认时，重试复用同一
     fixture,
     parentSessionId: parent.parentSession.id,
     parentRunId: parent.parentRunId,
-    parentToolItemId: parent.toolItem.item.id,
+    parentToolExecutionId: parent.toolExecutionId,
     session: { mode: "new" as const }
   };
 
@@ -393,10 +393,10 @@ test("subtask start 首次已提交但客户端未确认时，重试复用同一
   assert.equal(first.statusCode, 200, first.body);
   const firstBody = first.json() as { sessionId: string; runId: string; reused: boolean };
   assert.equal(firstBody.reused, false);
-  const initialSeeds = getSessionTranscriptItems(fixture.db, fixture.workspaceId, firstBody.sessionId);
+  const initialSeeds = fixture.db.prepare("select id from agent_message where origin_session_id = ? order by depth").all(firstBody.sessionId) as Array<{ id: string }>;
   const initialChildCount = fixture.db.prepare(
-    "select count(*) as count from agent_run where workspace_id = ? and parent_run_id = ? and parent_tool_item_id = ?"
-  ).get(fixture.workspaceId, parent.parentRunId, parent.toolItem.item.id) as { count: number };
+    "select count(*) as count from agent_run where workspace_id = ? and parent_run_id = ? and parent_tool_execution_id = ?"
+  ).get(fixture.workspaceId, parent.parentRunId, parent.toolExecutionId) as { count: number };
   assert.equal(initialChildCount.count, 1);
   assert.ok(initialSeeds.length > 0, "first call must activate and seed the child before its response is lost");
 
@@ -408,40 +408,45 @@ test("subtask start 首次已提交但客户端未确认时，重试复用同一
   assert.equal(retryBody.runId, firstBody.runId);
   assert.equal(
     (fixture.db.prepare(
-      "select count(*) as count from agent_run where workspace_id = ? and parent_run_id = ? and parent_tool_item_id = ?"
-    ).get(fixture.workspaceId, parent.parentRunId, parent.toolItem.item.id) as { count: number }).count,
+      "select count(*) as count from agent_run where workspace_id = ? and parent_run_id = ? and parent_tool_execution_id = ?"
+    ).get(fixture.workspaceId, parent.parentRunId, parent.toolExecutionId) as { count: number }).count,
     1
   );
-  const seedsAfterRetry = getSessionTranscriptItems(fixture.db, fixture.workspaceId, firstBody.sessionId);
+  const seedsAfterRetry = fixture.db.prepare("select id from agent_message where origin_session_id = ? order by depth").all(firstBody.sessionId) as Array<{ id: string }>;
   assert.deepEqual(seedsAfterRetry, initialSeeds, "retry must not seed or execute the child a second time");
 });
 
 test("subtask fork 无 boundary 时保留双空 metadata 并写入 guard→prompt", async (t: TestContext) => {
   const fixture = await createP2Fixture(t, { agentWorkerConcurrency: 0 });
     const parent = await createSubtaskAnchor({ fixture, parentDepth: 0, sessionMode: "fork" });
-  fixture.db.prepare("update agent_context_item set prev_id = null where id = ?").run(parent.toolItem.item.id);
+  fixture.db.prepare("update agent_message set previous_message_id = null where id = ?").run(parent.assistantMessageId);
 
   const res = await startSubtaskForAnchor({
     fixture,
     parentSessionId: parent.parentSession.id,
     parentRunId: parent.parentRunId,
-    parentToolItemId: parent.toolItem.item.id,
+    parentToolExecutionId: parent.toolExecutionId,
     session: { mode: "fork" }
   });
   assert.equal(res.statusCode, 200, res.body);
   const started = res.json() as { sessionId: string; runId: string };
-  const session = getAgentSession(fixture.db, started.sessionId);
+  const session = getMessageSessionById(fixture.db, started.sessionId);
   assert.equal(session?.kind, "subtask");
   assert.equal(session?.forkedFromSessionId, null);
-  assert.equal(session?.forkedFromItemId, null);
+  assert.equal(session?.forkedFromMessageId, null);
 
-  const items = getSessionTranscriptItems(fixture.db, fixture.workspaceId, started.sessionId);
+  const items = fixture.db.prepare(`
+    select message.id, message.type as kind, part.text
+    from agent_message message
+    left join agent_message_part part on part.message_id = message.id and part.type = 'text'
+    where message.origin_session_id = ?
+    order by message.depth, part.position
+  `).all(started.sessionId) as Array<{ id: string; kind: string; text: string | null }>;
   assert.equal(items.length, 2);
   assert.equal(items[0]?.kind, "system");
-  assert.notEqual(String((items[0]?.output as { text?: string }).text || "").trim(), "");
-  assert.equal(items[0]?.runId, null);
+  assert.notEqual(String(items[0]?.text || "").trim(), "");
   assert.equal(items[1]?.kind, "user");
-  assert.equal(items[1]?.runId, started.runId);
+  assert.equal(items[1]?.text, "complete child");
 });
 
 test("subtask start 对 unknown 和超限 parent depth 返回明确错误", async (t: TestContext) => {
@@ -451,7 +456,7 @@ test("subtask start 对 unknown 和超限 parent depth 返回明确错误", asyn
     fixture,
     parentSessionId: unknown.parentSession.id,
     parentRunId: unknown.parentRunId,
-    parentToolItemId: unknown.toolItem.item.id,
+    parentToolExecutionId: unknown.toolExecutionId,
     session: { mode: "new" }
   });
   assert.equal(unknownRes.statusCode, 409);
@@ -464,7 +469,7 @@ test("subtask start 对 unknown 和超限 parent depth 返回明确错误", asyn
     fixture,
     parentSessionId: exceeded.parentSession.id,
     parentRunId: exceeded.parentRunId,
-    parentToolItemId: exceeded.toolItem.item.id,
+    parentToolExecutionId: exceeded.toolExecutionId,
     session: { mode: "new" }
   });
   assert.equal(exceededRes.statusCode, 409);
@@ -479,7 +484,7 @@ test("已有 child 可在配置下调后复用，而新的同层调用按最新�
     fixture,
     parentSessionId: existing.parentSession.id,
     parentRunId: existing.parentRunId,
-    parentToolItemId: existing.toolItem.item.id,
+    parentToolExecutionId: existing.toolExecutionId,
     session: { mode: "new" }
   });
   assert.equal(started.statusCode, 200, started.body);
@@ -492,7 +497,7 @@ test("已有 child 可在配置下调后复用，而新的同层调用按最新�
     fixture,
     parentSessionId: existing.parentSession.id,
     parentRunId: existing.parentRunId,
-    parentToolItemId: existing.toolItem.item.id,
+    parentToolExecutionId: existing.toolExecutionId,
     session: { mode: "new" }
   });
   assert.equal(retried.statusCode, 200, retried.body);
@@ -504,7 +509,7 @@ test("已有 child 可在配置下调后复用，而新的同层调用按最新�
     fixture,
     parentSessionId: nextTool.parentSession.id,
     parentRunId: nextTool.parentRunId,
-    parentToolItemId: nextTool.toolItem.item.id,
+    parentToolExecutionId: nextTool.toolExecutionId,
     session: { mode: "new" }
   });
   assert.equal(rejected.statusCode, 409);
@@ -514,14 +519,14 @@ test("已有 child 可在配置下调后复用，而新的同层调用按最新�
 test("subtask start preserves session union boundaries at the Route", async (t: TestContext) => {
   const fixture = await createP2Fixture(t, { agentWorkerConcurrency: 0 });
     const anchor = await createSubtaskAnchor({ fixture, parentDepth: 0, sessionMode: "fork" });
-  const initial = await startSubtaskForAnchor({ fixture, parentSessionId: anchor.parentSession.id, parentRunId: anchor.parentRunId, parentToolItemId: anchor.toolItem.item.id, session: { mode: "fork" } });
+  const initial = await startSubtaskForAnchor({ fixture, parentSessionId: anchor.parentSession.id, parentRunId: anchor.parentRunId, parentToolExecutionId: anchor.toolExecutionId, session: { mode: "fork" } });
   assert.equal(initial.statusCode, 200, initial.body);
 
   const forbiddenSessionId = await startSubtaskForAnchor({
     fixture,
     parentSessionId: anchor.parentSession.id,
     parentRunId: anchor.parentRunId,
-    parentToolItemId: anchor.toolItem.item.id,
+    parentToolExecutionId: anchor.toolExecutionId,
     session: { mode: "fork", sessionId: "SHOULD_REJECT" }
   });
   assert.equal(forbiddenSessionId.statusCode, 400);
@@ -535,7 +540,7 @@ test("subtask start preserves session union boundaries at the Route", async (t: 
       workspaceId: fixture.workspaceId,
       parentSessionId: anchor.parentSession.id,
       parentRunId: anchor.parentRunId,
-      parentToolItemId: anchor.toolItem.item.id,
+      parentToolExecutionId: anchor.toolExecutionId,
       description: "child",
       prompt: "complete child",
       agentId: "default",

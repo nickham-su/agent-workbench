@@ -148,7 +148,7 @@ export default {
 </script>
 
 <script setup lang="ts">
-import type { AgentSessionAgentModelState, AgentSessionRecord } from "@agent-workbench/shared";
+import type { AgentSessionAgentModelState, AgentSessionRecord } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { CloseOutlined, MinusOutlined, PlusOutlined } from "@ant-design/icons-vue";
 import { message } from "ant-design-vue";
 import { computed, onActivated, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from "vue";
@@ -1217,7 +1217,7 @@ async function openChooseSessionModal(fromSessionId: string) {
       (item) =>
         item.kind === "primary" &&
         item.id !== fromSessionId &&
-        item.headItemId !== null &&
+        item.headMessageId !== null &&
         String(item.title || "").trim().length > 0 &&
         String(item.title || "").trim() !== "新会话"
     )

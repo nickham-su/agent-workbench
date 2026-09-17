@@ -139,3 +139,7 @@ export function updateTerminalStatus(db: Db, terminalId: string, status: Termina
 export function deleteTerminalRecord(db: Db, terminalId: string) {
   db.prepare(`delete from terminals where id = ?`).run(terminalId);
 }
+
+export function deleteTerminalRecordsByWorkspace(db: Db, workspaceId: string) {
+  db.prepare(`delete from terminals where workspace_id = ?`).run(workspaceId);
+}

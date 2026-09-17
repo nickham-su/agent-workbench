@@ -1,8 +1,9 @@
-import type { AgentContextItemStatus, AgentContextToolName } from "@agent-workbench/shared";
+import type { AgentContextToolName } from "@agent-workbench/shared/internal-contracts/agent-api-session";
+import type { AgentToolExecutionStatus } from "@agent-workbench/shared";
 
 export type ToolPromptProjectorContext = {
   toolName: AgentContextToolName;
-  status: AgentContextItemStatus;
+  status: AgentToolExecutionStatus;
 };
 
 export type ToolPromptProjector = {

@@ -1,1 +1,0 @@
-A new task has started. Previous context has been archived; use archive_search or archive_read if you need to recall earlier decisions.

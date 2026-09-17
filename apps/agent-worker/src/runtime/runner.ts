@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { APICallError, jsonSchema, streamText, tool } from "ai";
@@ -6,12 +7,11 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call";
-import { AgentApiClient, ApiConflictError, InternalRpcHttpError, type ExecutionProfile, type PromptContext } from "./apiClient.js";
-import type { AgentUiLocale } from "@agent-workbench/shared";
+import { AgentApiClient, ApiConflictError, InternalRpcHttpError, InternalRpcNetworkError, InternalRpcTimeoutError, type ExecutionProfile, type PromptContext } from "./apiClient.js";
+import type { AgentUiLocale } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { getPromptText } from "@agent-workbench/shared/prompts";
 import { McpManager } from "./mcpManager.js";
 import type { AgentApiPromptAttachmentRefPart } from "@agent-workbench/shared/internal-contracts/agent-api";
-import { buildRetryMessages, chunkStartsVisibleOutput, shouldRetryAfterPartialText } from "./modelRetry.js";
 import { PluginRuntimeManager } from "./plugins/runtimeManager.js";
 import { ToolRegistry } from "./tools/registry.js";
 import { BuiltinToolProvider } from "./tools/providers/builtin.js";
@@ -35,7 +35,7 @@ function parseIntOrDefault(raw: string | undefined, fallback: number) {
 }
 
 const DEBUG_DUMP_ENABLED = process.env.AWB_AGENT_DEBUG_DUMP === "1";
-const DEBUG_DUMP_RELATIVE_DIR = path.join(".debug", "agent_context_item_logs");
+const DEBUG_DUMP_RELATIVE_DIR = path.join(".debug", "agent_message_logs");
 const LOOP_MAX_STEPS = parseIntOrDefault(process.env.AWB_AGENT_LOOP_MAX_STEPS, 128);
 const LOOP_REPEAT_TOOL_CALL_THRESHOLD = parseIntOrDefault(process.env.AWB_AGENT_LOOP_REPEAT_TOOL_CALL_THRESHOLD, 20);
 // 运行参数优先从后端 Settings 下发;这里的 env 仅作为全局覆盖开关,方便临时排障。
@@ -50,6 +50,7 @@ const ENV_MODEL_TOTAL_TIMEOUT_MS = Math.min(
   Math.max(0, parseIntOrDefault(process.env.AWB_AGENT_MODEL_TOTAL_TIMEOUT_MS, 0))
 );
 const MODEL_RETRY_BACKOFF_BASE_MS = 2_000;
+const CONTROL_WRITE_RETRY_DELAY_MS = 100;
 const MODEL_RETRY_BACKOFF_DEFAULT_MAX_MS = 60_000;
 const MODEL_RETRY_BACKOFF_MAX_ALLOWED_MS = 3_600_000;
 const EMPTY_RESPONSE_COMPLETE_THRESHOLD = 6;
@@ -71,9 +72,10 @@ export function buildCompactionUserPrompt(input: { uiLocale: AgentUiLocale | nul
   }
   return getPromptText("agent/compaction-user-prompt.en-US.txt");
 }
+
+const COMPACTION_INPUT_MAX_BLOCKS = 8;
 const COMPACTION_TIMEOUT_MS = 600_000;
 
-const MANUAL_COMPACT_SENTINEL = "__awb_compact__";
 
 function newSortableId(prefix: string) {
   const ts = Date.now().toString(36).padStart(10, "0");
@@ -194,24 +196,6 @@ function isContextLengthExceededError(err: unknown) {
     ...collectErrorText(apiCallError?.data),
     ...collectErrorText(err)
   ].some(hasContextLimitText);
-}
-
-function parseHttpStatusFromError(err: unknown) {
-  const message = err instanceof Error ? err.message : String(err || "");
-  const match = /^request failed:\s*(\d{3})\b/.exec(message);
-  if (!match) return null;
-  const status = Number(match[1]);
-  return Number.isFinite(status) ? status : null;
-}
-
-function isRetryableCompactionError(err: unknown) {
-  if (isContextLengthExceededError(err)) return false;
-  if (err instanceof ApiConflictError) return false;
-  const status = parseHttpStatusFromError(err);
-  if (status == null) return true;
-  if (status === 408 || status === 429) return true;
-  if (status >= 500 && status <= 599) return true;
-  return false;
 }
 
 async function sleepMsWithAbort(ms: number, signal: AbortSignal) {
@@ -434,20 +418,6 @@ function buildToolSuccessText(params: {
     });
   }
 
-  if (params.toolName === "archive_search" || params.toolName === "archive_read") {
-    const noArchive = resultObj?.noArchive === true;
-    const body = noArchive
-      ? "No archive yet."
-      : typeof resultObj?.text === "string"
-        ? resultObj.text
-        : stringifyResult(params.result);
-    return buildToolText({
-      toolName: params.toolName,
-      status: params.status,
-      body
-    });
-  }
-
   if (params.toolName === "write") {
     const target = typeof params.args.filePath === "string" ? params.args.filePath : undefined;
     const body = typeof resultObj?.content === "string"
@@ -532,10 +502,13 @@ function safePathSegment(input: string) {
 
 async function finalizeToolText(params: {
   workspacePath: string;
-  itemId: number;
+  toolExecutionId: string;
   toolName: string;
-  toolCallId?: string;
   text: string;
+  /** 兼容既有对抗测试：在 rename 前注入路径替换。 */
+  beforeArtifactCommit?: () => Promise<void> | void;
+  /** 仅供对抗测试覆盖目录/目标在发布各阶段被替换的路径。 */
+  onArtifactWritePhase?: (phase: "before_rename" | "after_rename") => Promise<void> | void;
 }) {
   const normalized = normalizeToolText(params.text).trimEnd();
   if (TOOL_OUTPUT_TEXT_UNTRUNCATED_NAMES.has(params.toolName)) {
@@ -553,27 +526,15 @@ async function finalizeToolText(params: {
     };
   }
 
-  const toolSegment = safePathSegment(params.toolName);
-  const callSegment = typeof params.toolCallId === "string" && params.toolCallId.trim()
-    ? safePathSegment(params.toolCallId)
-    : "";
-  if (!callSegment) {
-    const preview = normalized.slice(0, TOOL_OUTPUT_TEXT_PREVIEW_CHARS).trimEnd();
-    const text = `${preview}\n\n[truncated]\nartifact: unavailable`.trim();
-    return {
-      text,
-      textTruncated: true as const,
-      textArtifactPath: undefined as string | undefined
-    };
-  }
+  if (!/^[A-Za-z0-9._-]{1,120}$/.test(params.toolExecutionId)) throw new Error("invalid tool execution id for artifact");
+  const executionSegment = params.toolExecutionId;
 
   const relativePath = path.join(
     ".awb",
     "agent",
     "artifacts",
-    "by_tool_call",
-    toolSegment,
-    `${callSegment}.txt`
+    "by_tool_execution",
+    `${executionSegment}.txt`
   );
   const workspaceResolvedPath = path.resolve(params.workspacePath);
   const fullPath = path.resolve(workspaceResolvedPath, relativePath);
@@ -583,7 +544,7 @@ async function finalizeToolText(params: {
 
   const workspaceRealPath = await fs.realpath(workspaceResolvedPath);
   let parentDirPath = workspaceResolvedPath;
-  for (const segment of [".awb", "agent", "artifacts", "by_tool_call", toolSegment]) {
+  for (const segment of [".awb", "agent", "artifacts", "by_tool_execution"]) {
     parentDirPath = path.join(parentDirPath, segment);
     const stat = await fs.lstat(parentDirPath).catch(() => null);
     if (!stat) {
@@ -617,7 +578,160 @@ async function finalizeToolText(params: {
     normalized.length <= TOOL_ARTIFACT_MAX_CHARS
       ? normalized
       : `${normalized.slice(0, TOOL_ARTIFACT_MAX_CHARS)}\n\n[truncated]`;
-  await fs.writeFile(fullPath, artifactBody, { encoding: "utf8" });
+  // 以已打开目录的 fd 路径创建临时文件、写入和 rename。所有检查均围绕
+  // 同一个目录 inode 与仍打开的文件 inode，防止 pathname/symlink 竞态导致
+  // 跟随外部目标或错误报告成功。平台无法提供安全 dirfd 路径时 fail-closed。
+  const parentDirectoryHandle = await fs.open(parentDirPath, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY);
+  let tempHandle: fs.FileHandle | null = null;
+  let tempPath: string | null = null;
+  let finalPath: string | null = null;
+  let published = false;
+  try {
+    const fdDirectoryPath = process.platform === "linux"
+      ? `/proc/self/fd/${parentDirectoryHandle.fd}`
+      : process.platform === "darwin"
+        ? `/dev/fd/${parentDirectoryHandle.fd}`
+        : null;
+    if (!fdDirectoryPath) {
+      throw new Error("secure artifact writes require directory fd path support");
+    }
+    const pinnedParentRealPath = await fs.realpath(fdDirectoryPath);
+    if (!isPathInside(workspaceRealPath, pinnedParentRealPath)) {
+      throw new Error("artifact parent directory is outside workspace");
+    }
+    const pinnedParentStat = await fs.stat(fdDirectoryPath);
+    const assertCurrentArtifactDirectory = async (phase: string) => {
+      const currentParentStat = await fs.stat(parentDirPath);
+      const currentParentRealPath = await fs.realpath(parentDirPath);
+      if (
+        currentParentStat.dev !== pinnedParentStat.dev
+        || currentParentStat.ino !== pinnedParentStat.ino
+        || !isPathInside(workspaceRealPath, currentParentRealPath)
+      ) {
+        throw new Error(`artifact parent directory changed during ${phase}`);
+      }
+    };
+
+    const tempName = `.${executionSegment}.${randomBytes(12).toString("hex")}.tmp`;
+    tempPath = path.join(fdDirectoryPath, tempName);
+    finalPath = path.join(fdDirectoryPath, `${executionSegment}.txt`);
+    tempHandle = await fs.open(
+      tempPath,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
+      0o600,
+    );
+    await tempHandle.writeFile(artifactBody, { encoding: "utf8" });
+    await tempHandle.sync();
+
+    const tempStat = await tempHandle.stat();
+    if (!tempStat.isFile()) throw new Error("artifact temp path must be a regular file");
+    const tempPathStat = await fs.lstat(tempPath);
+    if (
+      tempPathStat.isSymbolicLink()
+      || !tempPathStat.isFile()
+      || tempPathStat.dev !== tempStat.dev
+      || tempPathStat.ino !== tempStat.ino
+    ) {
+      throw new Error("artifact temp path changed during write");
+    }
+    const assertTempPathStillOwned = async () => {
+      const stat = await fs.lstat(tempPath!);
+      if (
+        stat.isSymbolicLink()
+        || !stat.isFile()
+        || stat.dev !== tempStat.dev
+        || stat.ino !== tempStat.ino
+      ) {
+        throw new Error("artifact temp path changed before rename");
+      }
+    };
+    const removeOwnedPath = async (candidatePath: string, expected: { dev: number; ino: number }) => {
+      const stat = await fs.lstat(candidatePath).catch(() => null);
+      if (
+        !stat
+        || stat.isSymbolicLink()
+        || !stat.isFile()
+        || stat.dev !== expected.dev
+        || stat.ino !== expected.ino
+      ) {
+        return;
+      }
+      // unlink 不会解析 symlink；此前还已确认该目录项仍是本次 fd 创建的 inode。
+      await fs.unlink(candidatePath).catch(() => undefined);
+    };
+
+    await params.beforeArtifactCommit?.();
+    await params.onArtifactWritePhase?.("before_rename");
+    await assertTempPathStillOwned();
+    await assertCurrentArtifactDirectory("pre-rename verification");
+
+    // tempHandle 保持打开直到发布、inode、正文和正式读取路径均验证完成。
+    await fs.rename(tempPath, finalPath);
+    tempPath = null;
+    published = true;
+    try {
+      await params.onArtifactWritePhase?.("after_rename");
+      const finalFdStat = await fs.lstat(finalPath);
+      if (
+        finalFdStat.isSymbolicLink()
+        || !finalFdStat.isFile()
+        || finalFdStat.dev !== tempStat.dev
+        || finalFdStat.ino !== tempStat.ino
+      ) {
+        throw new Error("artifact final path changed during publish");
+      }
+      const formalReadHandle = await fs.open(finalPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      try {
+        const formalReadStat = await formalReadHandle.stat();
+        if (
+          !formalReadStat.isFile()
+          || formalReadStat.dev !== tempStat.dev
+          || formalReadStat.ino !== tempStat.ino
+          || formalReadStat.size !== Buffer.byteLength(artifactBody, "utf8")
+        ) {
+          throw new Error("artifact final file does not match published inode");
+        }
+        const formalBody = await formalReadHandle.readFile({ encoding: "utf8" });
+        if (formalBody !== artifactBody) throw new Error("artifact final file content does not match publish body");
+      } finally {
+        await formalReadHandle.close();
+      }
+      await assertCurrentArtifactDirectory("post-publish verification");
+      const formalPathStat = await fs.lstat(fullPath);
+      if (
+        formalPathStat.isSymbolicLink()
+        || !formalPathStat.isFile()
+        || formalPathStat.dev !== tempStat.dev
+        || formalPathStat.ino !== tempStat.ino
+      ) {
+        throw new Error("artifact formal read path does not match published inode");
+      }
+    } catch (error) {
+      // fdDirectoryPath 仍锚定原目录。仅移除仍等于本次 temp fd 的目录项，绝不删除
+      // 被并发进程替换的未知文件；父目录移动/替换时绝不报告成功。
+      await removeOwnedPath(finalPath, tempStat);
+      published = false;
+      throw error;
+    }
+  } finally {
+    if (tempPath && tempHandle) {
+      const tempStat = await tempHandle.stat().catch(() => null);
+      if (tempStat) {
+        const current = await fs.lstat(tempPath).catch(() => null);
+        if (current?.isFile() && !current.isSymbolicLink() && current.dev === tempStat.dev && current.ino === tempStat.ino) {
+          await fs.unlink(tempPath).catch(() => undefined);
+        }
+      }
+    }
+    if (published && finalPath) {
+      // 成功路径保留 artifact；此分支只为明确 final 由本函数负责发布。
+    }
+    if (tempHandle) await tempHandle.close().catch(() => undefined);
+    await parentDirectoryHandle.close();
+  }
+  // 成功返回后，同 UID 的其他进程仍可任意修改 Workspace 文件；这是常规文件系统
+  // 权限模型无法在返回后继续防御的边界。返回前已验证正式读取路径指向本 Worker inode。
+
 
   const preview = normalized.slice(0, TOOL_OUTPUT_TEXT_PREVIEW_CHARS).trimEnd();
   const text = `${preview}\n\n[truncated]\nartifact: ${relativePath}`.trim();
@@ -632,14 +746,22 @@ type QueuedRun = {
   workspaceId: string;
   sessionId: string;
   runId: string;
+  runKind?: "user" | "manual_compaction" | "subtask";
   inputText?: string;
+  resumeAssistantMessageId?: string | null;
+  /** 恢复 continuation 只能在首次真实模型调用前消费一次。 */
+  recoveryContinuation?: { messageId: string | null };
   workspacePath: string;
   workspaceRepoDirNames: string[];
 };
 
+const STRUCTURED_RESULT_TOOL_NAMES = new Set(["apply_patch", "todolist", "subtask", "write", "scratchpad"]);
+
 type PendingTool = {
-  itemId: number;
-  status: "queued" | "running" | "streaming" | "completed" | "failed" | "cancelled";
+  toolExecutionId: string;
+  callPartId: string;
+  assistantMessageId: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled" | "unknown";
   toolName: string;
   toolCallId: string;
   args: Record<string, unknown>;
@@ -649,7 +771,17 @@ type ToolCall = {
   toolName: string;
   toolCallId: string;
   args: Record<string, unknown>;
+  callPartId: string;
 };
+
+/** Provider stream 的有序转录状态；已切换类型的文本不可回填到早期 Part。 */
+type StreamingAssistantPart =
+  | { id: string; position: number; type: "text"; text: string }
+  | { id: string; position: number; type: "reasoning"; text: string }
+  | {
+    id: string; position: number; type: "tool_call"; toolName: string;
+    input: Record<string, unknown>; providerToolCallId: string | null; toolCall: ToolCall;
+  };
 
 type ToolExecutionBatch = {
   mode: "parallel" | "serial";
@@ -668,8 +800,61 @@ function isAbortLikeError(err: unknown, signal?: AbortSignal) {
     || /\babort(ed)?\b/i.test(name);
 }
 
+export class FencedWriteIgnoredError extends Error {
+  constructor(operation: string) {
+    super(`fenced write ignored: ${operation}`);
+    this.name = "FencedWriteIgnoredError";
+  }
+}
+
+export class FencedWriteMissingError extends Error {
+  constructor(operation: string) {
+    super(`fenced write missing: ${operation}`);
+    this.name = "FencedWriteMissingError";
+  }
+}
+
+export class ControlWritePermanentError extends Error {
+  constructor(readonly operation: string, cause: unknown) {
+    super(`control write permanently failed: ${operation}`);
+    this.name = "ControlWritePermanentError";
+    (this as Error & { cause?: unknown }).cause = cause;
+  }
+}
+
+export class ControlReadPermanentError extends Error {
+  constructor(readonly operation: string, cause: unknown) {
+    super(`control read permanently failed: ${operation}`);
+    this.name = "ControlReadPermanentError";
+    (this as Error & { cause?: unknown }).cause = cause;
+  }
+}
+
+class CompactionInputLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CompactionInputLimitError";
+  }
+}
+
+function isRetryableControlWriteError(error: unknown) {
+  if (error instanceof InternalRpcTimeoutError || error instanceof InternalRpcNetworkError) return true;
+  if (!(error instanceof InternalRpcHttpError)) return false;
+  return error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500;
+}
+
+function assertFencedWriteUpdated(operation: string, response: { result: "updated" | "ignored" | "missing" } | undefined) {
+  // 真实 AgentApiClient 对 fenced response 做 schema 校验，生产路径只会得到三种合法结果。
+  // 兼容尚未迁移的测试替身：它们返回旧 writeback payload，但不代表真实 fenced 成功。
+  if (!response || typeof response.result !== "string") return;
+  if (response.result === "updated") return;
+  if (response.result === "ignored") throw new FencedWriteIgnoredError(operation);
+  throw new FencedWriteMissingError(operation);
+}
+
 const EMPTY_PROMPT_CONTEXT: PromptContext = {
-  headItemId: null,
+  headMessageId: null,
+  sessionRevision: 0,
   system: "",
   messages: [],
   tools: [],
@@ -861,12 +1046,12 @@ async function writeItemLog(params: {
   logger: Pick<Console, "warn">;
   workspacePath: string;
   kind: "assistant" | "tool";
-  itemId: number;
+  recordId?: string;
   payload: unknown;
 }) {
   if (!DEBUG_DUMP_ENABLED) return;
   const dirPath = path.join(params.workspacePath, DEBUG_DUMP_RELATIVE_DIR, params.kind);
-  const filePath = path.join(dirPath, `${params.itemId}.log`);
+  const filePath = path.join(dirPath, `${safePathSegment(params.recordId ?? "unknown")}.log`);
   try {
     await fs.mkdir(dirPath, { recursive: true });
     await fs.writeFile(filePath, JSON.stringify(sanitizeForDebugDump(params.payload), null, 2), "utf8");
@@ -1062,6 +1247,8 @@ type AgentRunnerDeps = {
   nowMs?: () => number;
   warningNowMs?: () => number;
   attachmentStorage?: AgentAttachmentStorage;
+  /** 仅用于测试控制面固定短间隔重试，不影响 Provider 退避。 */
+  controlWriteSleep?: (ms: number, signal: AbortSignal) => Promise<boolean>;
 };
 
 type StreamTextResultLike = {
@@ -1075,6 +1262,7 @@ type StreamTextResultLike = {
 export class AgentRunner {
   private readonly queue: QueuedRun[] = [];
   private readonly queuedRunIds = new Set<string>();
+  private readonly activeRunIds = new Set<string>();
   private readonly runningSessions = new Set<string>();
   private readonly controllers = new Map<string, AbortController>();
   private readonly pluginRuntimeManager: PluginRuntimeManager;
@@ -1088,6 +1276,7 @@ export class AgentRunner {
   private readonly nowMsFn: () => number;
   private readonly warningNowMsFn: () => number;
   private readonly attachmentStorage: AgentAttachmentStorage | undefined;
+  private readonly controlWriteSleepFn: (ms: number, signal: AbortSignal) => Promise<boolean>;
 
   constructor(
     private readonly apiClient: AgentApiClient,
@@ -1100,6 +1289,7 @@ export class AgentRunner {
     this.nowMsFn = deps.nowMs ?? nowMs;
     this.warningNowMsFn = deps.warningNowMs ?? nowMs;
     this.attachmentStorage = deps.attachmentStorage;
+    this.controlWriteSleepFn = deps.controlWriteSleep ?? sleepMsWithAbort;
     this.pluginRuntimeManager = new PluginRuntimeManager(this.logger);
     const pluginProvider = REMOTE_PLUGIN_TOOLS_ENABLED
       ? new RemotePluginToolProvider()
@@ -1107,8 +1297,73 @@ export class AgentRunner {
     this.toolRegistry = new ToolRegistry([new BuiltinToolProvider(), new McpToolProvider(this.mcpManager), pluginProvider]);
   }
 
+  private async retryControlRead<T>(
+    operation: string,
+    signal: AbortSignal,
+    read: () => Promise<T>,
+  ): Promise<T> {
+    while (true) {
+      if (signal.aborted) throw new FencedWriteIgnoredError(operation);
+      try {
+        return await read();
+      } catch (error) {
+        if (signal.aborted) throw error;
+        if (!isRetryableControlWriteError(error)) {
+          if (error instanceof ControlReadPermanentError) throw error;
+          throw new ControlReadPermanentError(operation, error);
+        }
+        const retry = await this.controlWriteSleepFn(CONTROL_WRITE_RETRY_DELAY_MS, signal);
+        if (!retry) throw new FencedWriteIgnoredError(operation);
+      }
+    }
+  }
+
+  private async retryControlWrite<T extends { result: "updated" | "ignored" | "missing" } | undefined>(
+    operation: string,
+    signal: AbortSignal,
+    write: () => Promise<T>,
+  ): Promise<T> {
+    while (true) {
+      if (signal.aborted) throw new FencedWriteIgnoredError(operation);
+      try {
+        const response = await write();
+        assertFencedWriteUpdated(operation, response);
+        return response;
+      } catch (error) {
+        if (signal.aborted) throw error;
+        if (!isRetryableControlWriteError(error)) {
+          if (error instanceof FencedWriteIgnoredError || error instanceof FencedWriteMissingError || error instanceof ControlWritePermanentError) throw error;
+          throw new ControlWritePermanentError(operation, error);
+        }
+        const retry = await this.controlWriteSleepFn(CONTROL_WRITE_RETRY_DELAY_MS, signal);
+        if (!retry) throw new FencedWriteIgnoredError(operation);
+      }
+    }
+  }
+
+  /** Retries an API operation whose request has an immutable idempotency key. */
+  private async retryIdempotentControlWrite<T>(
+    operation: string,
+    signal: AbortSignal,
+    write: () => Promise<T>,
+  ): Promise<T> {
+    while (true) {
+      if (signal.aborted) throw new FencedWriteIgnoredError(operation);
+      try {
+        return await write();
+      } catch (error) {
+        if (signal.aborted) throw error;
+        if (!isRetryableControlWriteError(error)) {
+          throw new ControlWritePermanentError(operation, error);
+        }
+        const retry = await this.controlWriteSleepFn(CONTROL_WRITE_RETRY_DELAY_MS, signal);
+        if (!retry) throw new FencedWriteIgnoredError(operation);
+      }
+    }
+  }
+
   enqueueRun(run: QueuedRun) {
-    if (this.queuedRunIds.has(run.runId)) return;
+    if (this.queuedRunIds.has(run.runId) || this.activeRunIds.has(run.runId)) return;
     this.queue.push(run);
     this.queuedRunIds.add(run.runId);
     this.pump();
@@ -1182,6 +1437,32 @@ export class AgentRunner {
     this.abortSessionTree(sessionId);
   }
 
+  private collectSessionTree(sessionId: string, collected = new Set<string>()) {
+    if (collected.has(sessionId)) return collected;
+    collected.add(sessionId);
+    for (const childSessionId of this.nestedChildrenByParent.get(sessionId) ?? []) {
+      this.collectSessionTree(childSessionId, collected);
+    }
+    return collected;
+  }
+
+  private isSessionTreeIdle(sessionIds: ReadonlySet<string>) {
+    return !this.queue.some((run) => sessionIds.has(run.sessionId))
+      && ![...this.runningSessions].some((sessionId) => sessionIds.has(sessionId))
+      && ![...this.controllers.keys()].some((sessionId) => sessionIds.has(sessionId));
+  }
+
+  async cancelSessionAndWait(input: { sessionId: string; timeoutMs: number }): Promise<boolean> {
+    const sessionIds = this.collectSessionTree(input.sessionId);
+    this.cancelSession(input.sessionId);
+    const deadline = Date.now() + input.timeoutMs;
+    while (!this.isSessionTreeIdle(sessionIds)) {
+      if (Date.now() >= deadline) return false;
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.min(10, Math.max(1, deadline - Date.now()))));
+    }
+    return true;
+  }
+
   private pump() {
     while (this.activeCount < this.concurrency) {
       const index = this.queue.findIndex((item) => !this.runningSessions.has(item.sessionId));
@@ -1195,6 +1476,7 @@ export class AgentRunner {
 
   private startRun(run: QueuedRun) {
     this.activeCount += 1;
+    this.activeRunIds.add(run.runId);
     this.runningSessions.add(run.sessionId);
     let controller: AbortController;
     try {
@@ -1202,6 +1484,7 @@ export class AgentRunner {
       this.registerController(run.sessionId, controller);
     } catch (err) {
       this.runningSessions.delete(run.sessionId);
+      this.activeRunIds.delete(run.runId);
       this.activeCount -= 1;
       this.logger.error("worker startRun failed", err);
       this.pump();
@@ -1216,6 +1499,7 @@ export class AgentRunner {
         this.deleteControllerIfSame(run.sessionId, controller);
         this.unlinkNestedChild(run.sessionId);
         this.runningSessions.delete(run.sessionId);
+        this.activeRunIds.delete(run.runId);
         this.activeCount -= 1;
         this.pump();
       });
@@ -1321,15 +1605,29 @@ export class AgentRunner {
       toolCallId: tool.toolCallId,
       args: tool.args
     };
-    const writeback = async (role: string, input: { status: "running" | "completed" | "failed"; output: any }) => {
+    const writeback = async (role: string, input: {
+      status: "running" | "completed" | "failed";
+      output: { text?: string; result?: unknown; error?: string; textTruncated?: boolean; textArtifactPath?: string };
+    }) => {
       capture?.recordWritebackAttempt(role, input.output);
       try {
-        const response = await this.apiClient.updateContextItem({
-          itemId: tool.itemId,
+        const request = {
+          workspaceId: run.workspaceId,
+          sessionId: run.sessionId,
+          runId: run.runId,
+          toolExecutionId: tool.toolExecutionId,
           status: input.status,
-          output: input.output,
+          resultPreview: input.output.text,
+          structuredResult: STRUCTURED_RESULT_TOOL_NAMES.has(tool.toolName) ? input.output.result : undefined,
+          error: input.output.error,
+          resultTruncated: input.output.textTruncated,
+          resultArtifactPath: input.output.textArtifactPath,
+          ...(input.status === "running" ? { startedAt: nowMs() } : { completedAt: nowMs() }),
           updatedAt: nowMs()
-        });
+        };
+        const response = await this.retryControlWrite(`tool execution ${input.status}`, signal, async () =>
+          await this.apiClient.updateToolExecution(request)
+        );
         capture?.recordWritebackSuccess(role, response);
         return response;
       } catch (error) {
@@ -1380,8 +1678,10 @@ export class AgentRunner {
         profile,
         run,
         pendingTool: {
-          itemId: tool.itemId,
-          status: tool.status,
+          toolExecutionId: tool.toolExecutionId,
+          callPartId: tool.callPartId,
+          assistantMessageId: tool.assistantMessageId,
+          status: tool.status === "running" ? "running" : "queued",
           toolName: tool.toolName,
           toolCallId: tool.toolCallId,
           args: tool.args
@@ -1394,11 +1694,11 @@ export class AgentRunner {
           run: nestedRun,
           parentSignal: nestedSignal
         }),
-        updateToolItem: async ({ status, output }) => {
+        updateToolExecution: async ({ status, resultPreview, structuredResult }) => {
           if (status !== "running") {
             throw new Error("provider terminal tool writeback is not supported by tool error capture");
           }
-          await writeback("provider_running_update", { status, output });
+          await writeback("provider_running_update", { status, output: { text: resultPreview, result: structuredResult } });
         },
         nowMs,
         reportRunningOutput: async (patch) => {
@@ -1431,14 +1731,13 @@ export class AgentRunner {
       try {
         finalizedText = await finalizeToolText({
           workspacePath: run.workspacePath,
-          itemId: tool.itemId,
+          toolExecutionId: tool.toolExecutionId,
           toolName: tool.toolName,
-          toolCallId: tool.toolCallId,
           text: rawSuccessText
         });
       } catch (artifactErr) {
         const message = artifactErr instanceof Error ? artifactErr.message : String(artifactErr);
-        this.logger.warn(`[agent-worker] persist tool artifact failed(item=${tool.itemId}, tool=${tool.toolName}): ${message}`);
+        this.logger.warn(`[agent-worker] persist tool artifact failed(execution=${tool.toolExecutionId}, tool=${tool.toolName}): ${message}`);
         const needsTruncate = rawSuccessText.length > TOOL_OUTPUT_TEXT_MAX_CHARS;
         const preview = rawSuccessText.slice(0, TOOL_OUTPUT_TEXT_PREVIEW_CHARS).trimEnd();
         finalizedText = {
@@ -1462,9 +1761,9 @@ export class AgentRunner {
         logger: this.logger,
         workspacePath: run.workspacePath,
         kind: "tool",
-        itemId: tool.itemId,
+        recordId: tool.toolExecutionId,
         payload: {
-          meta: { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, toolItemId: tool.itemId },
+          meta: { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, toolExecutionId: tool.toolExecutionId },
           request: { toolName: tool.toolName, toolCallId: tool.toolCallId, args: tool.args },
           status: "completed",
           response: providerResult
@@ -1473,6 +1772,13 @@ export class AgentRunner {
       return { paused: false as const };
     } catch (err) {
       if (isAbortLikeError(err, signal)) return { paused: false as const };
+      if (err instanceof FencedWriteIgnoredError || err instanceof FencedWriteMissingError) throw err;
+      if (err instanceof ControlWritePermanentError) {
+        if (phase === "running_writeback") capture?.recordEvent("running_writeback_failed", err);
+        else if (phase === "completed_output_build") capture?.recordEvent("completed_output_build_failed", err);
+        else capture?.recordEvent("completed_writeback_failed", err);
+        throw err;
+      }
       if (phase === "running_writeback") capture?.recordEvent("running_writeback_failed", err);
       else if (phase === "provider_execute") {
         capture?.recordEvent("provider_execute_rejected", err);
@@ -1507,9 +1813,9 @@ export class AgentRunner {
         logger: this.logger,
         workspacePath: run.workspacePath,
         kind: "tool",
-        itemId: tool.itemId,
+        recordId: tool.toolExecutionId,
         payload: {
-          meta: { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, toolItemId: tool.itemId },
+          meta: { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, toolExecutionId: tool.toolExecutionId },
           request: { toolName: tool.toolName, toolCallId: tool.toolCallId, args: tool.args },
           status: "failed",
           error
@@ -1534,7 +1840,7 @@ export class AgentRunner {
       workspaceId: params.run.workspaceId,
       sessionId: params.run.sessionId,
       runId: params.run.runId,
-      itemId: params.tool.itemId,
+      toolExecutionId: params.tool.toolExecutionId,
       toolCallId: params.tool.toolCallId,
       toolName: params.tool.toolName,
       toolSource: this.toolSourceForArtifact(params.tool.toolName)
@@ -1547,6 +1853,7 @@ export class AgentRunner {
         aborted = true;
         return { paused: false as const };
       }
+      if (err instanceof FencedWriteIgnoredError || err instanceof FencedWriteMissingError || err instanceof ControlWritePermanentError) throw err;
       capture?.recordEvent("runner_outer_unhandled", err);
       const error = err instanceof Error ? err.message : String(err);
       const output = {
@@ -1559,19 +1866,33 @@ export class AgentRunner {
       };
       try {
         capture?.recordWritebackAttempt("outer_failed", output);
-        const response = await this.apiClient.updateContextItem({ itemId: params.tool.itemId, status: "failed", output, updatedAt: nowMs() });
+        const request = {
+          workspaceId: params.run.workspaceId,
+          sessionId: params.run.sessionId,
+          runId: params.run.runId,
+          toolExecutionId: params.tool.toolExecutionId,
+          status: "failed" as const,
+          resultPreview: output.text,
+          error: output.error,
+          completedAt: nowMs(),
+          updatedAt: nowMs()
+        };
+        const response = await this.retryControlWrite("outer failed tool execution", params.signal, async () =>
+          await this.apiClient.updateToolExecution(request)
+        );
         capture?.recordWritebackSuccess("outer_failed", response);
       } catch (writebackError) {
         capture?.recordWritebackFailure("outer_failed", writebackError);
         capture?.recordEvent("outer_failed_writeback_failed", writebackError);
+        if (writebackError instanceof FencedWriteIgnoredError || writebackError instanceof FencedWriteMissingError || writebackError instanceof ControlWritePermanentError) throw writebackError;
       }
       await writeItemLog({
         logger: this.logger,
         workspacePath: params.run.workspacePath,
         kind: "tool",
-        itemId: params.tool.itemId,
+        recordId: params.tool.toolExecutionId,
         payload: {
-          meta: { workspaceId: params.run.workspaceId, sessionId: params.run.sessionId, runId: params.run.runId, toolItemId: params.tool.itemId },
+          meta: { workspaceId: params.run.workspaceId, sessionId: params.run.sessionId, runId: params.run.runId, toolExecutionId: params.tool.toolExecutionId },
           request: { toolName: params.tool.toolName, toolCallId: params.tool.toolCallId, args: params.tool.args },
           status: "failed",
           error
@@ -1606,6 +1927,10 @@ export class AgentRunner {
     const settled = await Promise.allSettled(
       params.batch.tools.map((tool) => this.executeToolSafely({ ...params, tool, availableToolNames: params.availableToolNames, parentSessionId: params.run.sessionId }))
     );
+    const rejected = settled.find((item): item is PromiseRejectedResult => item.status === "rejected");
+    if (rejected) {
+      throw rejected.reason;
+    }
     return { paused: settled.some((item) => item.status === "fulfilled" && item.value.paused) } as const;
   }
 
@@ -1657,7 +1982,7 @@ export class AgentRunner {
           workspaceId: params.run.workspaceId,
           sessionId: params.run.sessionId,
           runId: params.run.runId,
-          itemId: item.itemId,
+          toolExecutionId: item.toolExecutionId,
           toolCallId: artifactToolCallId,
           toolName: item.toolName,
           toolSource: this.toolSourceForArtifact(item.toolName)
@@ -1665,7 +1990,20 @@ export class AgentRunner {
         capture?.recordEvent("tool_disabled_pending_precheck", error, { output });
         try {
           capture?.recordWritebackAttempt("policy_failed", output);
-          const response = await this.apiClient.updateContextItem({ itemId: item.itemId, status: "failed", output, updatedAt: nowMs() });
+          const request = {
+            workspaceId: params.run.workspaceId,
+            sessionId: params.run.sessionId,
+            runId: params.run.runId,
+            toolExecutionId: item.toolExecutionId,
+            status: "failed" as const,
+            resultPreview: output.text,
+            error: output.error,
+            completedAt: nowMs(),
+            updatedAt: nowMs()
+          };
+          const response = await this.retryControlWrite("disabled pending tool execution", params.signal, async () =>
+            await this.apiClient.updateToolExecution(request)
+          );
           capture?.recordWritebackSuccess("policy_failed", response);
         } catch (writebackError) {
           capture?.recordWritebackFailure("policy_failed", writebackError);
@@ -1680,70 +2018,6 @@ export class AgentRunner {
         }
         continue;
       }
-      if (item.status === "running") {
-        flushSegment();
-        const outputBase = {
-          type: "tool" as const,
-          toolName: item.toolName,
-          toolCallId: item.toolCallId,
-          args: item.args
-        };
-        const error = "tool execution interrupted, mark failed and wait next step";
-        const output = {
-          ...outputBase,
-          text: buildToolErrorText({ toolName: item.toolName, status: "failed", error }),
-          error
-        };
-        const artifactToolCallId = String(item.toolCallId || "").trim();
-        const capture = artifactToolCallId ? createToolFailureCaptureIfEnabled({
-          workspacePath: params.run.workspacePath,
-          workspaceId: params.run.workspaceId,
-          sessionId: params.run.sessionId,
-          runId: params.run.runId,
-          itemId: item.itemId,
-          toolCallId: artifactToolCallId,
-          toolName: item.toolName,
-          toolSource: this.toolSourceForArtifact(item.toolName)
-        }, item.args, this.nowMsFn) : null;
-        capture?.recordEvent("running_item_recovered_as_failed", error, { output });
-        try {
-          capture?.recordWritebackAttempt("recovery_failed", output);
-          const response = await this.apiClient.updateContextItem({ itemId: item.itemId, status: "failed", output, updatedAt: nowMs() });
-          capture?.recordWritebackSuccess("recovery_failed", response);
-        } catch (writebackError) {
-          capture?.recordWritebackFailure("recovery_failed", writebackError);
-          capture?.recordEvent("failed_writeback_failed", writebackError);
-          throw writebackError;
-        } finally {
-          if (params.signal.aborted) capture?.discard();
-          if (capture?.hasEvents()) {
-            try { await this.warnToolErrorStore(await capture.publish(), params.run.workspacePath); }
-            catch (storeError) { await this.warnToolErrorStoreFailure({ operation: "publish", error: storeError, workspacePath: params.run.workspacePath }); }
-          }
-        }
-        await writeItemLog({
-          logger: this.logger,
-          workspacePath: params.run.workspacePath,
-          kind: "tool",
-          itemId: item.itemId,
-          payload: {
-            meta: {
-              workspaceId: params.run.workspaceId,
-              sessionId: params.run.sessionId,
-              runId: params.run.runId,
-              toolItemId: item.itemId
-            },
-            request: {
-              toolName: item.toolName,
-              toolCallId: item.toolCallId,
-              args: item.args
-            },
-            status: "failed",
-            error
-          }
-        });
-        continue;
-      }
       if (item.status !== "queued") {
         flushSegment();
         continue;
@@ -1754,7 +2028,9 @@ export class AgentRunner {
         continue;
       }
       segment.push({
-        itemId: item.itemId,
+        toolExecutionId: item.toolExecutionId,
+        callPartId: item.callPartId,
+        assistantMessageId: item.assistantMessageId,
         status: item.status,
         toolName: item.toolName,
         toolCallId,
@@ -1780,14 +2056,17 @@ export class AgentRunner {
       }
     }
 
-    await this.apiClient.updateRunState({
+    if (params.signal.aborted) return { paused: false as const };
+    const request = {
       workspaceId: params.run.workspaceId,
       sessionId: params.run.sessionId,
-      status: "running",
-      activeRunId: params.run.runId,
-      activeAssistantItemId: null,
+      runId: params.run.runId,
+      runNoticeText: "",
       updatedAt: nowMs()
-    });
+    };
+    await this.retryControlWrite("clear tool notice", params.signal, async () =>
+      await this.apiClient.updateRunNotice(request)
+    );
     return { paused: false as const };
   }
 
@@ -1862,14 +2141,21 @@ export class AgentRunner {
     context: PromptContext;
     signal: AbortSignal;
   }) {
-    const messagesContext = await this.apiClient.getMessagesContext({
-      workspaceId: params.profile.resolved.workspaceId,
-      sessionId: params.profile.resolved.sessionId,
-      appendMessage: {
-        role: "user",
-        content: buildCompactionUserPrompt({ uiLocale: params.context.uiLocale })
-      }
-    });
+    const messagesContext = await this.retryControlRead("read compaction messages", params.signal, async () =>
+      await this.apiClient.getMessagesContext({
+        workspaceId: params.profile.resolved.workspaceId,
+        sessionId: params.profile.resolved.sessionId,
+        appendMessage: {
+          role: "user",
+          content: buildCompactionUserPrompt({ uiLocale: params.context.uiLocale })
+        }
+      }, { abortSignal: params.signal }),
+    );
+    const compactionPrompt = buildCompactionUserPrompt({ uiLocale: params.context.uiLocale });
+    const sourceMessages = messagesContext.messages.at(-1)?.role === "user"
+      && messagesContext.messages.at(-1)?.content === compactionPrompt
+      ? messagesContext.messages.slice(0, -1)
+      : messagesContext.messages;
     const primary = {
       provider: params.profile.provider,
       model: params.profile.model
@@ -1878,37 +2164,63 @@ export class AgentRunner {
       profile: params.profile,
       context: params.context
     });
-    const generateSummary = async (profile: typeof primary) => await this.generateSingleCallSummary({
-      profile: {
-        provider: profile.provider,
-        model: profile.model
-      },
-      input: {
-        // compaction 是内部摘要任务，不继承执行态完整 system prompt；使用 messages-context 提供的 one-shot system。
-        system: messagesContext.system,
-        sessionId: params.profile.resolved.sessionId,
-        messages: messagesContext.messages,
-        timeoutMs: COMPACTION_TIMEOUT_MS,
-        abortSignal: params.signal
-      }
-    });
-
-    let response;
-    try {
-      response = await generateSummary(selected.profile);
-    } catch (err) {
-      if (
-        selected.isCandidate
-        && !params.signal.aborted
-        && !this.isSameCompactionModelProfile(selected.profile, primary)
-        && isContextLengthExceededError(err)
-      ) {
-        response = await generateSummary(primary);
-      } else {
+    const generateSummary = async (
+      profile: typeof primary,
+      messages: Array<{ role: string; content: unknown }>
+    ) => await this.generateSingleCallSummary({
+        profile: {
+          provider: profile.provider,
+          model: profile.model
+        },
+        input: {
+          // compaction 是内部摘要任务，不继承执行态完整 system prompt；使用 messages-context 提供的 one-shot system。
+          system: messagesContext.system,
+          sessionId: params.profile.resolved.sessionId,
+          messages: [...messages, { role: "user", content: compactionPrompt }],
+          timeoutMs: COMPACTION_TIMEOUT_MS,
+          abortSignal: params.signal
+        }
+      });
+    const summarize = async (messages: Array<{ role: string; content: unknown }>) => {
+      try {
+        return await generateSummary(selected.profile, messages);
+      } catch (err) {
+        if (
+          selected.isCandidate
+          && !params.signal.aborted
+          && !this.isSameCompactionModelProfile(selected.profile, primary)
+          && isContextLengthExceededError(err)
+        ) {
+          return await generateSummary(primary, messages);
+        }
         throw err;
       }
-    }
-    return String(response.text || "").trim();
+    };
+
+    let blockCount = 1;
+    const summarizeWithMessageBoundarySplit = async (
+      messages: Array<{ role: string; content: unknown }>
+    ): Promise<string[]> => {
+      try {
+        const response = await summarize(messages);
+        return [String(response.text || "").trim()];
+      } catch (err) {
+        if (!isContextLengthExceededError(err)) throw err;
+        if (messages.length < 2) {
+          throw new CompactionInputLimitError("compaction input cannot be split further on Message boundaries");
+        }
+        blockCount += 1;
+        if (blockCount > COMPACTION_INPUT_MAX_BLOCKS) {
+          throw new CompactionInputLimitError(`compaction input exceeds ${COMPACTION_INPUT_MAX_BLOCKS} Message blocks`);
+        }
+        const splitAt = Math.floor(messages.length / 2);
+        const left = await summarizeWithMessageBoundarySplit(messages.slice(0, splitAt));
+        const right = await summarizeWithMessageBoundarySplit(messages.slice(splitAt));
+        return [...left, ...right];
+      }
+    };
+
+    return (await summarizeWithMessageBoundarySplit(sourceMessages)).filter(Boolean).join("\n\n---\n\n");
   }
 
   private async compactContext(params: {
@@ -1918,114 +2230,74 @@ export class AgentRunner {
     signal: AbortSignal;
   }) {
     const { profile, run, context, signal } = params;
-
-    const modelRequestMaxRetries = Math.max(0, Math.floor((profile as any).runtime?.modelRequestMaxRetries ?? 0));
-    const modelRequestRetryBackoffMaxMs = normalizeRetryBackoffMaxMs((profile as any).runtime?.modelRequestRetryBackoffMaxMs);
-    const clearCompactionNotice = async () => {
-      try {
-        await this.apiClient.updateRunState({
-          workspaceId: run.workspaceId,
-          sessionId: run.sessionId,
-          status: "running",
-          activeRunId: run.runId,
-          activeAssistantItemId: null,
-          runNoticeText: "",
-          updatedAt: nowMs()
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        this.logger.warn(
-          `[agent-worker] clear compaction notice failed(session=${run.sessionId}, run=${run.runId}): ${message}`
-        );
-      }
-    };
-
-    const updateCompactionSuccessState = async () => {
-      try {
-        await this.apiClient.updateRunState({
-          workspaceId: run.workspaceId,
-          sessionId: run.sessionId,
-          status: "running",
-          activeRunId: run.runId,
-          activeAssistantItemId: null,
-          runNoticeText: "",
-          lastResponseTotalTokens: null,
-          updatedAt: nowMs()
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        this.logger.warn(
-          `[agent-worker] update run state after compaction success failed(session=${run.sessionId}, run=${run.runId}): ${message}`
-        );
-      }
-    };
-
     let retryCount = 0;
 
     while (!signal.aborted) {
-      const expectedHeadItemId = context.headItemId;
-      if (expectedHeadItemId == null) return false;
+      const expectedHeadMessageId = context.headMessageId;
+      if (expectedHeadMessageId == null) return false;
 
+      let summaryText: string;
       try {
-        const summaryText = await this.generateCompactionSummary({
+        summaryText = await this.generateCompactionSummary({
           profile,
           context,
           signal
         });
-        if (!summaryText) {
-          await clearCompactionNotice();
-          return false;
-        }
-
-        const compacted = await this.apiClient.compactContext({
-          workspaceId: run.workspaceId,
-          sessionId: run.sessionId,
-          runId: run.runId,
-          expectedHeadItemId,
-          summaryText
-        });
-        if (!compacted.compacted) {
-          await clearCompactionNotice();
-          return false;
-        }
-
-        await updateCompactionSuccessState();
-        return true;
+        if (!summaryText.trim()) throw new Error("compaction provider returned empty summary");
       } catch (err) {
-        if (signal.aborted) return false;
-        const canRetry = retryCount < modelRequestMaxRetries && isRetryableCompactionError(err);
-        if (!canRetry) {
+        if (err instanceof ControlReadPermanentError || err instanceof CompactionInputLimitError) {
           throw err;
         }
-
-        const delayMs = computeRetryBackoffMs(retryCount, modelRequestRetryBackoffMaxMs);
+        if (signal.aborted) return false;
+        const delayMs = computeRetryBackoffMs(retryCount);
         const retryAttempt = retryCount + 1;
         const message = err instanceof Error ? err.message : String(err);
-        const noticeText = `Compaction failed, retrying in ${Math.floor(delayMs / 1000)}s (${retryAttempt}/${modelRequestMaxRetries}): ${message}`;
+        const noticeText = `Compaction failed, retrying in ${Math.floor(delayMs / 1000)}s (attempt ${retryAttempt}): ${message}`;
         this.logger.warn(
-          `[agent-worker] compaction retry scheduled(session=${run.sessionId}, run=${run.runId}, retry=${retryAttempt}/${modelRequestMaxRetries}): ${message}`
+          `[agent-worker] compaction retry scheduled(session=${run.sessionId}, run=${run.runId}, retry=${retryAttempt}): ${message}`
         );
-        try {
-          await this.apiClient.updateRunState({
+        await this.retryControlWrite("update compaction retry notice", signal, async () =>
+          await this.apiClient.updateRunNotice({
             workspaceId: run.workspaceId,
             sessionId: run.sessionId,
-            status: "running",
-            activeRunId: run.runId,
-            activeAssistantItemId: null,
+            runId: run.runId,
             runNoticeText: noticeText,
             updatedAt: nowMs()
-          });
-        } catch (noticeErr) {
-          const noticeMessage = noticeErr instanceof Error ? noticeErr.message : String(noticeErr);
-          this.logger.warn(
-            `[agent-worker] update compaction retry notice failed(session=${run.sessionId}, run=${run.runId}, retry=${retryAttempt}/${modelRequestMaxRetries}): ${noticeMessage}`
-          );
-        }
+          })
+        );
 
         retryCount = retryAttempt;
         const continueRunning = await sleepMsWithAbort(delayMs, signal);
         if (!continueRunning) return false;
+        continue;
       }
+
+      const request = {
+        workspaceId: run.workspaceId,
+        sessionId: run.sessionId,
+        runId: run.runId,
+        messageId: newSortableId("msg"),
+        textPartId: newSortableId("part"),
+        expectedHeadMessageId,
+        expectedRevision: context.sessionRevision,
+        summaryText,
+        createdAt: nowMs(),
+      };
+      const compacted = await this.retryControlWrite("commit compaction", signal, async () =>
+        await this.apiClient.commitCompaction(request)
+      );
+      if (compacted?.result !== "updated") return false;
+
+      await this.retryControlWrite("clear compaction notice", signal, async () =>
+        await this.apiClient.updateRunNotice({
+          workspaceId: run.workspaceId,
+          sessionId: run.sessionId,
+          runId: run.runId,
+          runNoticeText: "",
+          updatedAt: nowMs()
+        })
+      );
+      return true;
     }
 
     return false;
@@ -2037,9 +2309,13 @@ export class AgentRunner {
     context: PromptContext;
     step: number;
     signal: AbortSignal;
+    recoveryContinuation?: { messageId: string | null };
     repeatedToolCallCounter: Map<string, number>;
   }) {
-    const { profile, run, context, step, signal, repeatedToolCallCounter } = params;
+    const { profile, run, context, step, signal, recoveryContinuation = { messageId: null }, repeatedToolCallCounter } = params;
+    if (context.pendingTools.length > 0) {
+      throw new Error("cannot invoke model while ToolExecution remains queued or running");
+    }
     const model = createLanguageModel(profile);
     const runtimeOptions = buildModelRuntimeOptions(profile);
     const turnId = newSortableId("turn");
@@ -2060,38 +2336,7 @@ export class AgentRunner {
       ENV_MODEL_TOTAL_TIMEOUT_MS > 0
         ? ENV_MODEL_TOTAL_TIMEOUT_MS
         : Math.max(0, Math.floor((profile as any).runtime?.modelTotalTimeoutMs ?? 0));
-    const modelRequestMaxRetries = Math.max(0, Math.floor((profile as any).runtime?.modelRequestMaxRetries ?? 0));
     const modelRequestRetryBackoffMaxMs = normalizeRetryBackoffMaxMs((profile as any).runtime?.modelRequestRetryBackoffMaxMs);
-
-    const assistant = await this.apiClient.createContextItem({
-      workspaceId: run.workspaceId,
-      sessionId: run.sessionId,
-      runId: run.runId,
-      turnId,
-      step,
-      prevId: context.headItemId,
-      kind: "assistant",
-      status: "streaming",
-        output: {
-          type: "assistant_text",
-          text: ""
-        },
-      createdAt: this.nowMsFn()
-    });
-    if (assistant.item == null) {
-      return { aborted: true as const, assistantItemId: null };
-    }
-    const assistantItem = assistant.item;
-
-    await this.apiClient.updateRunState({
-      workspaceId: run.workspaceId,
-      sessionId: run.sessionId,
-      status: "running",
-      activeRunId: run.runId,
-      activeAssistantItemId: assistantItem.id,
-      runNoticeText: "",
-      updatedAt: this.nowMsFn()
-    });
 
     const toolDefinitions = await this.toolRegistry.listTools({
       profile,
@@ -2131,11 +2376,78 @@ export class AgentRunner {
     // 自定义重试策略由本文件控制,禁用 AI SDK 内建重试避免双重重试。
     requestBase.maxRetries = 0;
 
+    let assistantMessageId: string;
+    if (recoveryContinuation.messageId) {
+      const resumedMessageId = recoveryContinuation.messageId;
+      const claim = await this.apiClient.resumeStreamingAssistant({
+        workspaceId: run.workspaceId,
+        sessionId: run.sessionId,
+        runId: run.runId,
+        messageId: resumedMessageId,
+      });
+      assertFencedWriteUpdated("resume streaming assistant", claim);
+      // 成功 claim 后该 continuation 已与本次模型 step 绑定，不能供后续 step 重复使用。
+      recoveryContinuation.messageId = null;
+      assistantMessageId = resumedMessageId;
+    } else {
+      assistantMessageId = newSortableId("message");
+      const request = {
+        workspaceId: run.workspaceId,
+        sessionId: run.sessionId,
+        runId: run.runId,
+        messageId: assistantMessageId,
+        createdAt: this.nowMsFn(),
+      };
+      await this.retryIdempotentControlWrite("create streaming assistant", signal, async () =>
+        await this.apiClient.createStreamingAssistant(request),
+      );
+    }
+
     const assistantStreamFlushIntervalMs = 1_000;
     const assistantStreamFlushCharsThreshold = 160;
-    let text = "";
-    let reasoningText = "";
-    const toolCalls: ToolCall[] = [];
+    let orderedParts: StreamingAssistantPart[] = [];
+    let streamPartVersion = 0;
+    let streamedCharsSinceLastFlush = 0;
+    const textFromParts = () => orderedParts
+      .filter((part): part is Extract<StreamingAssistantPart, { type: "text" }> => part.type === "text")
+      .map((part) => part.text)
+      .join("");
+    const reasoningFromParts = () => orderedParts
+      .filter((part): part is Extract<StreamingAssistantPart, { type: "reasoning" }> => part.type === "reasoning")
+      .map((part) => part.text)
+      .join("");
+    const toolCallsFromParts = () => orderedParts
+      .filter((part): part is Extract<StreamingAssistantPart, { type: "tool_call" }> => part.type === "tool_call")
+      .map((part) => part.toolCall);
+    const appendStreamText = (type: "text" | "reasoning", delta: string) => {
+      const last = orderedParts.at(-1);
+      if (last?.type === type) {
+        last.text += delta;
+      } else {
+        orderedParts.push({
+          id: `${assistantMessageId}:part:${orderedParts.length}`,
+          position: orderedParts.length,
+          type,
+          text: delta,
+        });
+      }
+      streamPartVersion += 1;
+      streamedCharsSinceLastFlush += delta.length;
+    };
+    const appendToolCall = (toolName: string, toolCallId: string, args: Record<string, unknown>) => {
+      const callPartId = `${assistantMessageId}:part:${orderedParts.length}`;
+      const toolCall: ToolCall = { toolName, toolCallId, args, callPartId };
+      orderedParts.push({
+        id: callPartId,
+        position: orderedParts.length,
+        type: "tool_call",
+        toolName,
+        input: args,
+        providerToolCallId: toolCallId || null,
+        toolCall,
+      });
+      streamPartVersion += 1;
+    };
     const startedAt = this.nowMsFn();
     let responseTotalTokens: number | null = null;
 
@@ -2143,7 +2455,7 @@ export class AgentRunner {
       logger: this.logger,
       workspacePath: run.workspacePath,
       kind: "assistant",
-      itemId: assistantItem.id,
+      recordId: assistantMessageId,
       payload: {
         status: "running",
         startedAt,
@@ -2153,112 +2465,109 @@ export class AgentRunner {
           runId: run.runId,
           turnId,
           step,
-          itemId: assistantItem.id
+          messageId: assistantMessageId
         },
         request: { ...requestBase, messages: context.messages },
         retryPolicy: {
           firstBackoffMs: MODEL_RETRY_BACKOFF_BASE_MS,
           maxBackoffMs: modelRequestRetryBackoffMaxMs,
-          maxRetries: modelRequestMaxRetries
         }
       }
     });
 
     let retryCount = 0;
     let successfulStream: any = null;
-    let lastFlushedText = "";
-    let lastFlushedReasoningText = "";
+    let lastFlushedPartVersion = 0;
     let lastFlushAt = this.nowMsFn();
     let pendingFlush = false;
+    let retryNoticePendingClear = false;
 
-    const flushAssistant = async (status: "streaming" | "completed" | "failed", force = false) => {
-      if (
-        !force
-        && text === lastFlushedText
-        && reasoningText === lastFlushedReasoningText
-        && status === "streaming"
-      ) {
-        return;
-      }
-      await this.apiClient.updateContextItem({
-        itemId: assistantItem.id,
-        status,
-        output: {
-          type: "assistant_text",
-          text,
-          ...(reasoningText ? { reasoning: { text: reasoningText } } : {})
-        },
-        updatedAt: this.nowMsFn()
+    const clearRetryNoticeAfterSuccess = async () => {
+      if (!retryNoticePendingClear) return;
+      const request = {
+        workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+        runNoticeText: "", retryCount: 0, nextRetryAt: null, updatedAt: this.nowMsFn()
+      };
+      await this.retryControlWrite("clear retry notice", signal, async () =>
+        await this.apiClient.updateRunNotice(request)
+      );
+      retryNoticePendingClear = false;
+    };
+
+    const flushAssistant = async (force = false, clearRetryNotice = true) => {
+      if (!force && streamPartVersion === lastFlushedPartVersion) return;
+      const parts = orderedParts.map((part) => {
+        if (part.type === "text" || part.type === "reasoning") {
+          return { id: part.id, position: part.position, type: part.type, text: part.text };
+        }
+        return {
+          id: part.id,
+          position: part.position,
+          type: "tool_call" as const,
+          toolName: part.toolName,
+          input: part.input,
+          providerToolCallId: part.providerToolCallId,
+        };
       });
-      lastFlushedText = text;
-      lastFlushedReasoningText = reasoningText;
+      const request = {
+        workspaceId: run.workspaceId,
+        sessionId: run.sessionId,
+        runId: run.runId,
+        messageId: assistantMessageId,
+        parts,
+        updatedAt: this.nowMsFn()
+      };
+      await this.retryControlWrite("flush assistant parts", signal, async () =>
+        await this.apiClient.flushAssistantParts(request)
+      );
+      lastFlushedPartVersion = streamPartVersion;
+      streamedCharsSinceLastFlush = 0;
       lastFlushAt = this.nowMsFn();
       pendingFlush = false;
+      if (clearRetryNotice && (hasVisibleAssistantText(textFromParts()) || reasoningFromParts().length > 0 || toolCallsFromParts().length > 0)) {
+        await clearRetryNoticeAfterSuccess();
+      }
     };
 
     const maybeFlushAssistantStreaming = async (force = false) => {
       const now = this.nowMsFn();
-      const deltaChars = (text.length - lastFlushedText.length) + (reasoningText.length - lastFlushedReasoningText.length);
+      const deltaChars = streamedCharsSinceLastFlush;
       if (
         force
         || deltaChars >= assistantStreamFlushCharsThreshold
         || now - lastFlushAt >= assistantStreamFlushIntervalMs
       ) {
-        await flushAssistant("streaming", true);
+        await flushAssistant(true);
         return;
       }
       pendingFlush = true;
     };
 
-    const resetVisibleOutputForRetry = async () => {
-      const prevText = text;
-      const prevReasoningText = reasoningText;
-      const prevResponseTotalTokens = responseTotalTokens;
-      const prevLastFlushedText = lastFlushedText;
-      const prevLastFlushedReasoningText = lastFlushedReasoningText;
-      const prevLastFlushAt = lastFlushAt;
-      const prevPendingFlush = pendingFlush;
-
-      text = "";
-      reasoningText = "";
+    const replaceAssistantForRetry = async (notice: { runNoticeText: string; retryCount: number; nextRetryAt: number | null }) => {
+      const oldMessageId = assistantMessageId;
+      const newMessageId = newSortableId("message");
+      const request = {
+        workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+        oldMessageId, newMessageId, runNoticeText: notice.runNoticeText,
+        retryCount: notice.retryCount, nextRetryAt: notice.nextRetryAt, createdAt: this.nowMsFn()
+      };
+      await this.retryControlWrite("replace streaming assistant", signal, async () =>
+        await this.apiClient.replaceStreamingAssistant(request)
+      );
+      assistantMessageId = newMessageId;
+      orderedParts = [];
+      streamPartVersion = 0;
+      streamedCharsSinceLastFlush = 0;
       responseTotalTokens = null;
-      try {
-        await flushAssistant("streaming", true);
-      } catch (err) {
-        text = prevText;
-        reasoningText = prevReasoningText;
-        responseTotalTokens = prevResponseTotalTokens;
-        lastFlushedText = prevLastFlushedText;
-        lastFlushedReasoningText = prevLastFlushedReasoningText;
-        lastFlushAt = prevLastFlushAt;
-        pendingFlush = prevPendingFlush;
-
-        const message = err instanceof Error ? err.message : String(err);
-        this.logger.warn(
-          `[agent-worker] reset visible output before retry failed(item=${assistantItem.id}, retry=${retryCount + 1}/${modelRequestMaxRetries}): ${message}`
-        );
-      }
+      lastFlushedPartVersion = 0;
+      lastFlushAt = this.nowMsFn();
+      pendingFlush = false;
+      retryNoticePendingClear = true;
     };
 
     while (true) {
       if (signal.aborted) {
-        return { aborted: true as const, assistantItemId: assistantItem.id };
-      }
-
-      if (retryCount > 0) {
-        try {
-          await this.apiClient.updateRunState({
-            workspaceId: run.workspaceId,
-            sessionId: run.sessionId,
-              status: "running",
-              activeRunId: run.runId,
-              activeAssistantItemId: assistantItem.id,
-              runNoticeText: "",
-              updatedAt: this.nowMsFn()
-            });
-          } catch {
-            // ignore notice clear failure
-        }
+        return { aborted: true as const, assistantMessageId };
       }
 
       // 用独立 controller 承载“用户取消”和“空闲/总超时”中止。
@@ -2267,10 +2576,7 @@ export class AgentRunner {
       let idleTimedOut = false;
       let totalTimedOut = false;
       let lastChunkAt = this.nowMsFn();
-      // 只要本次请求已经开始产生可见输出(文本/tool-call),就不再自动重试。
-      // 这样可以避免重试导致的重复内容,以及工具重复执行带来的副作用。
       let attemptStartedVisibleOutput = false;
-      let completedWithoutVisibleOutput = false;
 
       const onOuterAbort = () => {
         requestController.abort();
@@ -2302,17 +2608,10 @@ export class AgentRunner {
         }, modelTotalTimeoutMs);
       }
 
-      const retryMessages = buildRetryMessages({
-        baseMessages: materializedMessages,
-        text,
-        toolCalls: toolCalls.length,
-        retryCount,
-        maxRetries: modelRequestMaxRetries
-      });
       const request: Record<string, unknown> = {
         ...requestBase,
         abortSignal: requestController.signal,
-        messages: retryMessages
+        messages: materializedMessages
       };
 
       try {
@@ -2320,22 +2619,21 @@ export class AgentRunner {
         successfulStream = stream;
         for await (const chunk of stream.fullStream as AsyncIterable<any>) {
           if (requestController.signal.aborted) break;
-          if (!attemptStartedVisibleOutput && chunkStartsVisibleOutput(chunk, availableToolNames)) {
-            attemptStartedVisibleOutput = true;
-          }
           lastChunkAt = this.nowMsFn();
           if (!chunk || typeof chunk !== "object") continue;
           if (chunk.type === "text-delta") {
             const delta = String(chunk.text || "");
             if (!delta) continue;
-            text += delta;
+            appendStreamText("text", delta);
+            attemptStartedVisibleOutput = true;
             await maybeFlushAssistantStreaming();
             continue;
           }
           if (chunk.type === "reasoning-delta") {
             const delta = String(chunk.text || chunk.delta || "");
             if (!delta) continue;
-            reasoningText += delta;
+            appendStreamText("reasoning", delta);
+            attemptStartedVisibleOutput = true;
             await maybeFlushAssistantStreaming();
             continue;
           }
@@ -2343,9 +2641,11 @@ export class AgentRunner {
             const toolName = normalizeToolName(chunk.toolName, availableToolNames);
             if (!toolName) continue;
             const rawToolCallId = String(chunk.toolCallId || "").trim();
-            const toolCallId = rawToolCallId || `${turnId}_call_${toolCalls.length + 1}`;
+            const toolCallId = rawToolCallId || `${turnId}_call_${toolCallsFromParts().length + 1}`;
             const args = normalizeToolArgs(chunk.input);
-            toolCalls.push({ toolName, toolCallId, args });
+            appendToolCall(toolName, toolCallId, args);
+            attemptStartedVisibleOutput = true;
+            await maybeFlushAssistantStreaming();
             continue;
           }
           if (chunk.type === "finish") {
@@ -2356,16 +2656,15 @@ export class AgentRunner {
             continue;
           }
           if (chunk.type === "error") {
-            const message = chunk.error instanceof Error ? chunk.error.message : String(chunk.error || "stream error");
-            throw new Error(message);
+            throw chunk.error instanceof Error ? chunk.error : new Error(String(chunk.error || "stream error"));
           }
         }
         if (pendingFlush) {
-          await flushAssistant("streaming", true);
+          await flushAssistant(true);
         }
 
         if (signal.aborted) {
-          return { aborted: true as const, assistantItemId: assistantItem.id };
+          return { aborted: true as const, assistantMessageId };
         }
         if (totalTimedOut) {
           throw new Error(`model total timeout after ${modelTotalTimeoutMs}ms`);
@@ -2373,16 +2672,27 @@ export class AgentRunner {
         if (idleTimedOut) {
           throw new Error(`model idle timeout after ${modelIdleTimeoutMs}ms`);
         }
-        if (!hasVisibleAssistantText(text) && toolCalls.length === 0) {
-          completedWithoutVisibleOutput = true;
+        try {
+          const finalReasoning = await successfulStream.reasoningText;
+          const finalReasoningText = typeof finalReasoning === "string"
+            ? finalReasoning
+            : "";
+          if (finalReasoningText && reasoningFromParts().length === 0) {
+            appendStreamText("reasoning", finalReasoningText);
+          }
+        } catch {
+          // 保留流式阶段已经获取的 reasoning；收尾读取失败不应覆盖有效输出。
+        }
+        if (!hasVisibleAssistantText(textFromParts()) && reasoningFromParts().length === 0 && toolCallsFromParts().length === 0) {
           throw new Error("model stream completed without visible text or tool calls");
         }
 
         break;
       } catch (err) {
         if (signal.aborted) {
-          return { aborted: true as const, assistantItemId: assistantItem.id };
+          return { aborted: true as const, assistantMessageId };
         }
+        if (err instanceof FencedWriteIgnoredError || err instanceof FencedWriteMissingError || err instanceof ControlWritePermanentError) throw err;
         if (totalTimedOut) {
           err = new Error(`model total timeout after ${modelTotalTimeoutMs}ms`);
         } else if (idleTimedOut) {
@@ -2390,34 +2700,35 @@ export class AgentRunner {
         }
         const message = err instanceof Error ? err.message : String(err);
 
-        const canRetry =
-          (!attemptStartedVisibleOutput && retryCount < modelRequestMaxRetries)
-          || (completedWithoutVisibleOutput && retryCount < modelRequestMaxRetries)
-          || shouldRetryAfterPartialText({ text, toolCalls: toolCalls.length, retryCount, maxRetries: modelRequestMaxRetries });
-
-        if (canRetry) {
+        {
           const delayMs = computeRetryBackoffMs(retryCount, modelRequestRetryBackoffMaxMs);
           const retryAttempt = retryCount + 1;
-          const noticeText = `Request failed, retrying in ${Math.floor(delayMs / 1000)}s (${retryAttempt}/${modelRequestMaxRetries}): ${message}`;
-          try {
-            await this.apiClient.updateRunState({
-              workspaceId: run.workspaceId,
-              sessionId: run.sessionId,
-              status: "running",
-              activeRunId: run.runId,
-              activeAssistantItemId: assistantItem.id,
+          const noticeText = `Request failed, retrying in ${Math.floor(delayMs / 1000)}s (attempt ${retryAttempt}): ${message}`;
+          const nextRetryAt = this.nowMsFn() + delayMs;
+          retryCount = retryAttempt;
+          if (attemptStartedVisibleOutput) {
+            await flushAssistant(true, false);
+            await replaceAssistantForRetry({
               runNoticeText: noticeText,
-              updatedAt: this.nowMsFn()
+              retryCount: retryAttempt,
+              nextRetryAt
             });
-          } catch {
-            // ignore notice update failure
+          } else {
+            const request = {
+              workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+              runNoticeText: noticeText, retryCount: retryAttempt, nextRetryAt, updatedAt: this.nowMsFn()
+            };
+            await this.retryControlWrite("update retry notice", signal, async () =>
+              await this.apiClient.updateRunNotice(request)
+            );
+            retryNoticePendingClear = true;
           }
 
           await writeItemLog({
             logger: this.logger,
             workspacePath: run.workspacePath,
             kind: "assistant",
-            itemId: assistantItem.id,
+            recordId: assistantMessageId,
             payload: {
               status: "retrying",
               meta: {
@@ -2426,9 +2737,8 @@ export class AgentRunner {
                 runId: run.runId,
                 turnId,
                 step,
-                itemId: assistantItem.id,
+                messageId: assistantMessageId,
                 retryAttempt,
-                maxRetries: modelRequestMaxRetries,
                 nextRetryInMs: delayMs
               },
               response: {
@@ -2437,75 +2747,12 @@ export class AgentRunner {
             }
           });
 
-          retryCount = retryAttempt;
-          await resetVisibleOutputForRetry();
           const continueRunning = await sleepMsWithAbort(delayMs, signal);
           if (!continueRunning) {
-            return { aborted: true as const, assistantItemId: assistantItem.id };
+            return { aborted: true as const, assistantMessageId };
           }
           continue;
         }
-
-        const finalMessage = retryCount > 0 ? `failed after ${retryCount} retries: ${message}` : message;
-        try {
-          if (pendingFlush) {
-            await flushAssistant("streaming", true);
-          }
-          await this.apiClient.updateRunState({
-            workspaceId: run.workspaceId,
-            sessionId: run.sessionId,
-            status: "running",
-            activeRunId: run.runId,
-            activeAssistantItemId: assistantItem.id,
-            runNoticeText: "",
-            updatedAt: this.nowMsFn()
-          });
-        } catch {
-          // ignore notice clear failure
-        }
-        try {
-          await this.apiClient.updateContextItem({
-            itemId: assistantItem.id,
-            status: "failed",
-            output: {
-              type: "assistant_text",
-              text,
-              ...(reasoningText ? { reasoning: { text: reasoningText } } : {}),
-              error: finalMessage
-            },
-            updatedAt: this.nowMsFn()
-          });
-        } catch {
-          // 忽略更新失败，保持原始异常抛出
-        }
-        await writeItemLog({
-          logger: this.logger,
-          workspacePath: run.workspacePath,
-          kind: "assistant",
-          itemId: assistantItem.id,
-          payload: {
-            status: "failed",
-            startedAt,
-            finishedAt: this.nowMsFn(),
-            meta: {
-              workspaceId: run.workspaceId,
-              sessionId: run.sessionId,
-              runId: run.runId,
-              turnId,
-              step,
-              itemId: assistantItem.id,
-              retries: retryCount
-            },
-            request: { ...request, messages: context.messages },
-            response: {
-              text,
-              reasoningText,
-              toolCalls,
-              error: finalMessage
-            }
-          }
-        });
-        throw new Error(finalMessage);
       } finally {
         if (idleTimer) clearInterval(idleTimer);
         if (totalTimer) clearTimeout(totalTimer);
@@ -2521,8 +2768,8 @@ export class AgentRunner {
       responseTotalTokens = await readStreamTotalTokens(successfulStream);
     }
 
-    const recognizedCalls = toolCalls;
-      let prevId = assistantItem.id;
+    const recognizedCalls = toolCallsFromParts();
+      const executions: Array<{ id: string; callPartId: string; originSessionId: string; originRunId: string; status: "queued" }> = [];
       for (const call of recognizedCalls) {
         const signature = toolSignature(call.toolName, call.args);
         const count = (repeatedToolCallCounter.get(signature) ?? 0) + 1;
@@ -2531,71 +2778,23 @@ export class AgentRunner {
           throw new Error(`repeated tool call threshold exceeded: ${call.toolName}`);
         }
 
-        const toolItem = await this.apiClient.createContextItem({
-          workspaceId: run.workspaceId,
-          sessionId: run.sessionId,
-          runId: run.runId,
-          turnId,
-          step,
-          prevId,
-          kind: "tool",
-          status: "queued",
-          output: {
-            type: "tool",
-            toolName: call.toolName,
-            toolCallId: call.toolCallId,
-            args: call.args
-          },
-          createdAt: this.nowMsFn()
-        });
-        if (toolItem.item == null) {
-          return { aborted: true as const, assistantItemId: assistantItem.id };
-        }
-        const toolContextItem = toolItem.item;
-        prevId = toolContextItem.id;
-        await writeItemLog({
-          logger: this.logger,
-          workspacePath: run.workspacePath,
-          kind: "tool",
-          itemId: toolContextItem.id,
-          payload: {
-            status: "queued",
-            meta: {
-              workspaceId: run.workspaceId,
-              sessionId: run.sessionId,
-              runId: run.runId,
-              turnId,
-              step,
-              itemId: toolContextItem.id
-            },
-            request: {
-              toolName: call.toolName,
-              toolCallId: call.toolCallId,
-              args: call.args
-            }
-          }
+        executions.push({
+          id: newSortableId("tool-execution"),
+          callPartId: call.callPartId,
+          originSessionId: run.sessionId,
+          originRunId: run.runId,
+          status: "queued"
         });
       }
 
-      if (successfulStream) {
-        try {
-          const finalReasoning = await successfulStream.reasoningText;
-          const finalReasoningText = typeof finalReasoning === "string"
-            ? String(finalReasoning)
-            : "";
-          reasoningText = finalReasoningText || reasoningText;
-        } catch {
-          // best-effort: 保留流式阶段已累计的 reasoningText,不要因收尾读取失败打断整轮成功结果
-        }
-      }
-
-      await flushAssistant("completed", true);
+      // 已在有效输出校验前读取收尾 reasoning，确保 reasoning-only 响应可正常完成。
+      await flushAssistant(true);
 
       await writeItemLog({
         logger: this.logger,
         workspacePath: run.workspacePath,
         kind: "assistant",
-        itemId: assistantItem.id,
+        recordId: assistantMessageId,
         payload: {
           status: "completed",
           startedAt,
@@ -2606,34 +2805,32 @@ export class AgentRunner {
             runId: run.runId,
             turnId,
             step,
-            itemId: assistantItem.id
+            messageId: assistantMessageId
           },
           request: { ...requestBase, messages: context.messages },
           response: {
-            text,
-            reasoningText,
+            text: textFromParts(),
+            reasoningText: reasoningFromParts(),
             toolCalls: recognizedCalls,
             usage: responseTotalTokens == null ? null : { totalTokens: responseTotalTokens }
           }
         }
       });
 
-      await this.apiClient.updateRunState({
-        workspaceId: run.workspaceId,
-        sessionId: run.sessionId,
-        status: "running",
-        activeRunId: run.runId,
-        activeAssistantItemId: null,
-        lastResponseTotalTokens: responseTotalTokens,
-        runNoticeText: "",
-        updatedAt: this.nowMsFn()
-      });
+      const completeRequest = {
+        workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+        messageId: assistantMessageId, executions, updatedAt: this.nowMsFn()
+      };
+      await this.retryControlWrite("complete assistant", signal, async () =>
+        await this.apiClient.completeAssistant(completeRequest)
+      );
+      await clearRetryNoticeAfterSuccess();
 
       return {
         aborted: false as const,
         toolCallCount: recognizedCalls.length,
-        assistantItemId: assistantItem.id,
-        hasVisibleText: hasVisibleAssistantText(text),
+        assistantMessageId,
+        hasVisibleText: hasVisibleAssistantText(textFromParts()) || reasoningFromParts().length > 0,
         availableToolNames: recognizedCalls.length > 0 ? availableToolNames : undefined
       };
   }
@@ -2694,22 +2891,13 @@ export class AgentRunner {
         runId: run.runId
       });
 
-      await this.apiClient.updateRunState({
-        workspaceId: run.workspaceId,
-        sessionId: run.sessionId,
-        status: "running",
-        activeRunId: run.runId,
-        activeAssistantItemId: null,
-          runNoticeText: "",
-        updatedAt: nowMs()
-      });
-
       let step = 0;
       const repeatedToolCallCounter = new Map<string, number>();
+      const recoveryContinuation = run.recoveryContinuation ?? { messageId: run.resumeAssistantMessageId ?? null };
       let emptyResponseCount = 0;
 
       // 手动压缩: 仅执行一次 compaction,不进入正常 step 循环.
-      if (run.inputText === MANUAL_COMPACT_SENTINEL) {
+      if (run.runKind === "manual_compaction") {
         const context = await this.apiClient.getPromptContext({
           workspaceId: run.workspaceId,
           sessionId: run.sessionId,
@@ -2720,17 +2908,16 @@ export class AgentRunner {
           return;
         }
 
-        await this.apiClient.updateRunState({
+        const notice = await this.apiClient.updateRunNotice({
           workspaceId: run.workspaceId,
           sessionId: run.sessionId,
-          status: "running",
-          activeRunId: run.runId,
-          activeAssistantItemId: null,
-              runNoticeText: "正在压缩上下文...",
+          runId: run.runId,
+          runNoticeText: "正在压缩上下文...",
           updatedAt: nowMs()
         });
+        assertFencedWriteUpdated("start compaction notice", notice);
 
-        await this.compactContext({
+        const compacted = await this.compactContext({
           profile,
           run,
           context,
@@ -2740,7 +2927,7 @@ export class AgentRunner {
           await finishOnce("cancelled");
           return;
         }
-        await finishOnce("completed");
+        await finishOnce(compacted ? "completed" : "failed");
         return;
       }
 
@@ -2770,7 +2957,7 @@ export class AgentRunner {
           continue;
         }
 
-        if (this.shouldAutoCompact({ context, model: profile.model, runtime: profile.runtime })) {
+        if (recoveryContinuation.messageId == null && this.shouldAutoCompact({ context, model: profile.model, runtime: profile.runtime })) {
           const compacted = await this.compactContext({
             profile,
             run,
@@ -2784,24 +2971,6 @@ export class AgentRunner {
         }
 
         if (shouldStopForMaxSteps(step, LOOP_MAX_STEPS)) {
-          const head = context.headItemId;
-          if (head != null) {
-            await this.apiClient.createContextItem({
-              workspaceId: run.workspaceId,
-              sessionId: run.sessionId,
-              runId: run.runId,
-              turnId: null,
-              step: null,
-              prevId: head,
-              kind: "system",
-              status: "completed",
-              output: {
-                type: "system_text",
-                text: "[run] max steps exceeded"
-              },
-              createdAt: nowMs()
-            });
-          }
           await finishOnce("failed");
           return;
         }
@@ -2813,6 +2982,7 @@ export class AgentRunner {
           context,
           step,
           signal,
+          recoveryContinuation,
           repeatedToolCallCounter
         });
         if (result.aborted || signal.aborted) {
@@ -2844,6 +3014,10 @@ export class AgentRunner {
         await tryFinishOnce("cancelled");
         return;
       }
+      if (err instanceof FencedWriteIgnoredError) {
+        this.logger.info(`run fenced write ignored, stop run: ${run.sessionId} ${run.runId}`);
+        return;
+      }
       if (err instanceof ApiConflictError) {
         this.logger.warn(`run append conflict, stop run: ${run.sessionId} ${run.runId}`);
         return;
@@ -2866,6 +3040,7 @@ export type EnqueuePayload = {
   workspaceId: string;
   sessionId: string;
   runId: string;
+  runKind?: "user" | "manual_compaction" | "subtask";
   inputText?: string;
   workspacePath: string;
   workspaceRepoDirNames?: string[];
@@ -2940,10 +3115,11 @@ export function shouldStopForMaxStepsForTest(step: number, maxSteps: number) {
 
 export async function finalizeToolTextForTest(params: {
   workspacePath: string;
-  itemId: number;
+  toolExecutionId: string;
   toolName: string;
-  toolCallId?: string;
   text: string;
+  beforeArtifactCommit?: () => Promise<void> | void;
+  onArtifactWritePhase?: (phase: "before_rename" | "after_rename") => Promise<void> | void;
 }) {
   return finalizeToolText(params);
 }

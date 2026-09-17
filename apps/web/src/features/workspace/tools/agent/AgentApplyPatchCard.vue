@@ -26,8 +26,11 @@
 
 <script setup lang="ts">
 import { message } from "ant-design-vue";
+import { onBeforeUnmount, onBeforeUpdate, watch } from "vue";
 import { useWorkspaceHost } from "@/features/workspace/host";
 import { inferLanguageFromPath } from "@/shared/monaco/languageUtils";
+import { runAgentArtifactOpenRequest } from "./agentArtifactOpenController";
+import { createAgentArtifactRequestGuard } from "./agentArtifactRequestGuard";
 
 type ApplyPatchFileMeta = {
   type: "add" | "update" | "delete" | "move";
@@ -62,8 +65,7 @@ const props = defineProps<{
   workspaceId: string;
   toolId: string;
   sessionId: string;
-  itemId: number;
-  toolCallId?: string;
+  toolExecutionId: string;
   summary: ApplyPatchSummary;
   files: ApplyPatchFileMeta[];
   omittedFiles: number;
@@ -72,18 +74,39 @@ const props = defineProps<{
 
 const host = useWorkspaceHost(props.toolId);
 const artifactCache = new Map<string, Promise<ApplyPatchUiArtifact>>();
+const requestGuard = createAgentArtifactRequestGuard({
+  workspaceId: props.workspaceId,
+  sessionId: props.sessionId,
+  executionId: props.toolExecutionId,
+});
+watch(
+  () => [props.workspaceId, props.sessionId, props.toolExecutionId] as const,
+  ([workspaceId, sessionId, executionId]) =>
+    requestGuard.update({ workspaceId, sessionId, executionId }),
+  { flush: "sync" },
+);
+onBeforeUpdate(() => requestGuard.update({
+  workspaceId: props.workspaceId, sessionId: props.sessionId, executionId: props.toolExecutionId,
+}));
+onBeforeUnmount(() => requestGuard.dispose());
 
 function cacheKey() {
-  return `${props.workspaceId}:${props.toolCallId || props.itemId}`;
+  return `${props.workspaceId}:${props.sessionId}:${props.toolExecutionId}`;
 }
 
-async function fetchArtifact() {
+async function fetchArtifact(request: ReturnType<typeof requestGuard.begin>) {
   const key = cacheKey();
   const existing = artifactCache.get(key);
-  if (existing) return existing;
+  if (existing) {
+    try {
+      return await existing;
+    } finally {
+      request.finish();
+    }
+  }
   const promise = (async () => {
-    const url = `/api/agent/sessions/${encodeURIComponent(props.sessionId)}/context-items/${props.itemId}/apply-patch-artifact`;
-    const response = await fetch(url);
+    const url = `/api/agent/sessions/${encodeURIComponent(props.sessionId)}/tool-executions/${encodeURIComponent(props.toolExecutionId)}/apply-patch-artifact?workspaceId=${encodeURIComponent(props.workspaceId)}`;
+    const response = await fetch(url, { signal: request.signal });
     if (!response.ok) {
       const text = await response.text().catch(() => "");
       throw new Error(text || `http ${response.status}`);
@@ -96,37 +119,33 @@ async function fetchArtifact() {
   } catch (err) {
     artifactCache.delete(key);
     throw err;
+  } finally {
+    request.finish();
   }
 }
 
 async function openFileDiff(pathValue: string) {
   const p = String(pathValue || "").trim();
   if (!p) return;
-  if (!props.toolCallId) {
-    message.error("missing toolCallId");
-    return;
-  }
-  try {
-    const artifact = await fetchArtifact();
-    const file = artifact.files.find((item) => item.path === p);
-    if (!file) {
-      message.error(`diff unavailable: ${p}`);
-      return;
-    }
-    host.call("editor", {
-      type: "editor.openDiff",
-      payload: {
-        original: file.before || "",
-        modified: file.after || "",
-        path: p,
-        language: inferLanguageFromPath(p),
-        title: p,
-        tabKey: `agent:applyPatch:${props.toolCallId}:${p}`,
-        source: "agent.applyPatch"
+  await runAgentArtifactOpenRequest({
+    guard: requestGuard,
+    fetchArtifact,
+    onArtifact: (artifact) => {
+      const file = artifact.files.find((item) => item.path === p);
+      if (!file) {
+        message.error(`diff unavailable: ${p}`);
+        return;
       }
-    });
-  } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err));
-  }
+      host.call("editor", {
+        type: "editor.openDiff",
+        payload: {
+          original: file.before || "", modified: file.after || "", path: p,
+          language: inferLanguageFromPath(p), title: p,
+          tabKey: `agent:applyPatch:${props.toolExecutionId}:${p}`, source: "agent.applyPatch"
+        }
+      });
+    },
+    onError: (error) => message.error(error instanceof Error ? error.message : String(error)),
+  });
 }
 </script>

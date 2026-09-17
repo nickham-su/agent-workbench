@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { ToolRegistry } from "./registry.js";
-import type { ResolvedToolDefinition, ToolExecutionContext, ToolListContext, ToolProvider } from "./types.js";
+import type {
+  ResolvedToolDefinition,
+  ToolExecutionContext,
+  ToolListContext,
+  ToolProvider,
+} from "./types.js";
 import { toMcpToolNameForTest } from "../mcpManager.js";
 import { isMcpToolName } from "./types.js";
 
@@ -13,22 +18,23 @@ function createToolListContext(): ToolListContext {
         tools: ["read"],
         pluginTools: [
           "plugin_debug-tools_echo_inspect",
-          "plugin_debug-tools_foo_bar"
+          "plugin_debug-tools_foo_bar",
         ],
-        mcpServers: []
-      }
+        mcpServers: [],
+      },
     } as any,
     promptContext: {
-      headItemId: null,
+      headMessageId: null,
+      sessionRevision: 0,
       system: "",
       messages: [],
       tools: [],
       pendingTools: [],
       lastResponseTotalTokens: null,
       uiLocale: null,
-      externalSkillRoots: []
+      externalSkillRoots: [],
     },
-    apiClient: {} as any
+    apiClient: {} as any,
   };
 }
 
@@ -40,22 +46,24 @@ function createExecutionContext(): ToolExecutionContext {
       sessionId: "sess_test",
       runId: "run_test",
       workspacePath: process.cwd(),
-      workspaceRepoDirNames: []
+      workspaceRepoDirNames: [],
     },
     pendingTool: {
-      itemId: 1,
+      toolExecutionId: "execution-1",
+      callPartId: "part-1",
+      assistantMessageId: "message-1",
       status: "queued",
       toolName: "read",
       toolCallId: "call_test",
-      args: {}
+      args: {},
     },
     signal: new AbortController().signal,
     apiClient: {} as any,
     promptContext: createToolListContext().promptContext,
     processNestedRun: async () => {},
-    updateToolItem: async () => {},
+    updateToolExecution: async () => {},
     nowMs: () => Date.now(),
-    renderToolText: () => ""
+    renderToolText: () => "",
   };
 }
 
@@ -65,7 +73,10 @@ test("isMcpToolName matches the shared canonical MCP name contract", () => {
   assert.equal(isMcpToolName("mcp_x"), false);
   assert.equal(isMcpToolName("mcp__tool"), false);
   assert.equal(isMcpToolName("mcp_server_tool!"), false);
-  assert.equal(toMcpToolNameForTest("demo server", "read.file"), "mcp_demo_server_read_file");
+  assert.equal(
+    toMcpToolNameForTest("demo server", "read.file"),
+    "mcp_demo_server_read_file",
+  );
   assert.equal(toMcpToolNameForTest("demo", ""), null);
 });
 
@@ -78,20 +89,20 @@ test("ToolRegistry dedupes tools by name", async () => {
           name: "read",
           description: "read",
           inputSchema: { type: "object" },
-          source: "builtin"
+          source: "builtin",
         },
         {
           name: "plugin_debug-tools_echo_inspect",
           description: "echo",
           inputSchema: { type: "object" },
-          source: "plugin"
-        }
+          source: "plugin",
+        },
       ];
     },
     isToolEnabled: () => true,
     async execute() {
       return {};
-    }
+    },
   };
 
   const registry = new ToolRegistry([provider]);
@@ -111,20 +122,20 @@ test("ToolRegistry overwrites previous tool on same name (last provider wins)", 
           name: "plugin_debug-tools_foo_bar",
           description: "a",
           inputSchema: { type: "object" },
-          source: "plugin"
+          source: "plugin",
         },
         {
           name: "plugin_debug-tools_foo_bar",
           description: "b (wins)",
           inputSchema: { type: "object" },
-          source: "plugin"
-        }
+          source: "plugin",
+        },
       ];
     },
     isToolEnabled: () => true,
     async execute() {
       return {};
-    }
+    },
   };
 
   const registry = new ToolRegistry([provider]);

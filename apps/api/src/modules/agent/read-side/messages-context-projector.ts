@@ -1,10 +1,10 @@
-import type { AgentUiLocale } from "@agent-workbench/shared";
+import type { AgentUiLocale } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 
 export type MessagesContextProjectorDependencies<Message> = {
   buildMessages: (input: {
     workspaceId: string;
     sessionId: string;
-    triggerItemId: null;
+    triggerMessageId: null;
   }) => Promise<{ messages: Message[] }>;
   getActiveRunId: (input: { workspaceId: string; sessionId: string }) => string | null;
   resolveUiLocale: (input: { workspaceId: string; sessionId: string; activeRunId: string | null }) => AgentUiLocale | null;
@@ -22,13 +22,13 @@ export class MessagesContextProjector<Message extends { role: "system" | "user" 
   async getMessagesContext(input: {
     workspaceId: string;
     sessionId: string;
-    headItemId: number | null;
+    headMessageId: string | null;
     appendMessage?: { role: "system" | "user"; content: string };
   }) {
     const { messages } = await this.dependencies.buildMessages({
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
-      triggerItemId: null
+      triggerMessageId: null
     });
     const uiLocale = this.dependencies.resolveUiLocale({
       workspaceId: input.workspaceId,
@@ -39,7 +39,7 @@ export class MessagesContextProjector<Message extends { role: "system" | "user" 
       messages.push({ role: input.appendMessage.role, content: input.appendMessage.content } as Message);
     }
     return {
-      headItemId: input.headItemId,
+      headMessageId: input.headMessageId,
       messages,
       system: this.dependencies.buildOneShotSystem({ uiLocale })
     };

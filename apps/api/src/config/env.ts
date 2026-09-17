@@ -38,7 +38,6 @@ export type Env = {
   agentInternalToken: string;
   agentWorkerResponseValidation: "strict" | "warn";
   agentApiOrigin: string;
-  agentStartupRecoveryMode: "fail" | "recover";
   agentPluginHostEnabled: boolean;
   agentPluginHostSocketPath: string;
   agentPluginServicesEnabled: boolean;
@@ -163,7 +162,6 @@ export function loadEnv(processEnv: NodeJS.ProcessEnv): Env {
   const internalTokenRaw = processEnv.AWB_AGENT_INTERNAL_TOKEN?.trim() || "";
   const responseValidationRaw = processEnv.AWB_INTERNAL_RPC_RESPONSE_VALIDATION?.trim().toLowerCase() || "strict";
   const apiOriginRaw = processEnv.AWB_AGENT_API_ORIGIN?.trim() || "";
-  const startupRecoveryModeRaw = processEnv.AWB_AGENT_STARTUP_RECOVERY_MODE?.trim() || "";
   const pluginHostEnabledRaw = processEnv.AWB_AGENT_PLUGIN_HOST_ENABLED?.trim() || "";
   const pluginHostSocketRaw = processEnv.AWB_AGENT_PLUGIN_HOST_SOCKET?.trim() || "";
   const pluginServicesEnabledRaw = processEnv.AWB_AGENT_PLUGIN_SERVICES_ENABLED?.trim() || "";
@@ -211,13 +209,6 @@ export function loadEnv(processEnv: NodeJS.ProcessEnv): Env {
         return { enabled: true, origin, originUrl, host, port, sessionTtlMs: sessionTtlSeconds * 1000, bootstrapTtlMs: PREVIEW_BOOTSTRAP_TTL_MS };
       })();
 
-  const agentStartupRecoveryMode = (startupRecoveryModeRaw || "fail").toLowerCase();
-  if (agentStartupRecoveryMode !== "fail" && agentStartupRecoveryMode !== "recover") {
-    throw new Error(
-      `Invalid AWB_AGENT_STARTUP_RECOVERY_MODE: ${startupRecoveryModeRaw}. Expected "fail" or "recover".`
-    );
-  }
-
   return {
     dataDir: resolvedDataDir,
     host,
@@ -236,7 +227,6 @@ export function loadEnv(processEnv: NodeJS.ProcessEnv): Env {
     agentInternalToken,
     agentWorkerResponseValidation: responseValidationRaw,
     agentApiOrigin,
-    agentStartupRecoveryMode: agentStartupRecoveryMode as "fail" | "recover",
     agentPluginHostEnabled,
     agentPluginHostSocketPath,
     agentPluginServicesEnabled,

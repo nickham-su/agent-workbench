@@ -33,12 +33,17 @@
     "./internal-contracts/agent-api": {
       "types": "./dist/internal-contracts/agent-api.d.ts",
       "default": "./dist/internal-contracts/agent-api.js"
+    },
+    "./internal-contracts/agent-api-session": {
+      "types": "./dist/internal-contracts/agent-api-session.d.ts",
+      "default": "./dist/internal-contracts/agent-api-session.js"
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test tests/*.test.ts"
+    "test:clean-build": "node scripts/verify-clean-build.mjs",
+    "test": "npm run test:clean-build && tsx --test tests/*.test.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^2.0.67",

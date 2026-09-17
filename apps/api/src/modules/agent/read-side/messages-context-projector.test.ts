@@ -29,7 +29,7 @@ test("MessagesContextProjector preserves dynamic context inputs and appends only
   const result = await projector.getMessagesContext({
     workspaceId: "workspace",
     sessionId: "session",
-    headItemId: 12,
+    headMessageId: "message-12",
     appendMessage: { role: "user", content: "one-shot" }
   });
 
@@ -39,7 +39,7 @@ test("MessagesContextProjector preserves dynamic context inputs and appends only
     "locale:workspace:session:active-run",
     "system:zh-CN"
   ]);
-  assert.equal(result.headItemId, 12);
+  assert.equal(result.headMessageId, "message-12");
   assert.equal(result.system, "一次性系统消息");
   assert.deepEqual(result.messages, [
     { role: "user", content: "persisted" },
@@ -69,14 +69,14 @@ test("MessagesContextProjector ignores blank append messages while retaining loc
   const result = await projector.getMessagesContext({
     workspaceId: "workspace",
     sessionId: "session",
-    headItemId: null,
+    headMessageId: null,
     appendMessage: { role: "system", content: "   " }
   });
 
   assert.equal(activeRunId, null);
   assert.equal(locale, null);
   assert.deepEqual(result, {
-    headItemId: null,
+    headMessageId: null,
     messages: [{ role: "assistant", content: "reply" }],
     system: ""
   });

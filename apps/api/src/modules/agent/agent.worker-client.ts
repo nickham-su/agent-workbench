@@ -4,9 +4,13 @@ import { Value } from "@sinclair/typebox/value";
 import type { TSchema } from "@sinclair/typebox";
 import { AgentWorkerEndpoints } from "@agent-workbench/shared/internal-contracts/endpoints";
 import {
+  AgentWorkerCancelSessionAndWaitRequestSchema,
+  AgentWorkerCancelSessionAndWaitResponseSchema,
   AgentWorkerCancelSessionRequestSchema,
   AgentWorkerCancelSessionResponseSchema,
   AgentWorkerEnqueueResponseSchema,
+  type AgentWorkerCancelSessionAndWaitRequest,
+  type AgentWorkerCancelSessionAndWaitResponse,
   type AgentWorkerCancelSessionRequest,
   type AgentWorkerEnqueueRequest
 } from "@agent-workbench/shared/internal-contracts/agent-worker";
@@ -19,6 +23,16 @@ type WorkerResponse = {
   statusCode: number;
   body: string;
 };
+
+class WorkerHttpError extends Error {
+  constructor(
+    readonly statusCode: number,
+    readonly responseBody: string,
+  ) {
+    super(`worker request failed ${statusCode}: ${responseBody}`);
+    this.name = "WorkerHttpError";
+  }
+}
 
 export class AgentWorkerClient implements AgentRuntimePort {
   constructor(
@@ -69,6 +83,7 @@ export class AgentWorkerClient implements AgentRuntimePort {
   private methodFor(pathname: string) {
     if (pathname === AgentWorkerEndpoints.enqueueRun.path) return AgentWorkerEndpoints.enqueueRun.method;
     if (pathname === AgentWorkerEndpoints.cancelSession.path) return AgentWorkerEndpoints.cancelSession.method;
+    if (pathname === AgentWorkerEndpoints.cancelSessionAndWait.path) return AgentWorkerEndpoints.cancelSessionAndWait.method;
     throw new Error(`unknown agent worker endpoint: ${pathname}`);
   }
 
@@ -99,7 +114,7 @@ export class AgentWorkerClient implements AgentRuntimePort {
     }
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw new Error(`worker request failed ${response.statusCode}: ${response.body}`);
+      throw new WorkerHttpError(response.statusCode, response.body);
     }
 
     try {
@@ -141,7 +156,13 @@ export class AgentWorkerClient implements AgentRuntimePort {
       });
     } catch (err) {
       this.params.logger.error({ err, runId: run.runId, sessionId: run.sessionId }, "enqueue run to worker failed");
-      throw new HttpError(503, "agent worker unavailable");
+      if (err instanceof WorkerHttpError && err.statusCode >= 400 && err.statusCode < 500) {
+        // Validation/auth rejections prove the Worker did not accept this run.
+        throw new HttpError(400, "agent worker rejected enqueue", "AGENT_WORKER_ENQUEUE_REJECTED");
+      }
+      // Timeouts and transport failures are ambiguous: the Worker may have
+      // queued this idempotent runId before its acknowledgement was lost.
+      throw new HttpError(503, "agent worker enqueue status is unknown", "AGENT_WORKER_ENQUEUE_UNKNOWN");
     }
   }
 
@@ -156,6 +177,22 @@ export class AgentWorkerClient implements AgentRuntimePort {
       });
     } catch (err) {
       this.params.logger.warn({ err, sessionId }, "cancel session in worker failed");
+    }
+  }
+
+  async cancelSessionAndWait(input: { sessionId: string; timeoutMs: number }): Promise<boolean> {
+    try {
+      const payload: AgentWorkerCancelSessionAndWaitRequest = input;
+      const response = await this.postAndValidate({
+        endpoint: AgentWorkerEndpoints.cancelSessionAndWait.path,
+        body: payload,
+        timeoutMs: input.timeoutMs + 1_000,
+        responseSchema: AgentWorkerCancelSessionAndWaitResponseSchema,
+      }) as AgentWorkerCancelSessionAndWaitResponse;
+      return response.idle;
+    } catch (err) {
+      this.params.logger.warn({ err, sessionId: input.sessionId }, "cancel and wait for worker session failed");
+      throw new HttpError(503, "agent worker unavailable");
     }
   }
 }

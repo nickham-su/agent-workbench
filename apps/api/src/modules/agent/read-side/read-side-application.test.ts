@@ -7,15 +7,15 @@ test("ReadSideApplication validates ownership before delegating profile and mess
   const application = new ReadSideApplication({
     findSession(sessionId) {
       calls.push(`session:${sessionId}`);
-      return sessionId === "missing" ? null : { workspaceId: "ws", kind: "primary", headItemId: 7 };
+      return sessionId === "missing" ? null : { workspaceId: "ws", kind: "primary", headMessageId: "message-7", revision: 1 };
     },
     findRun(runId) {
       calls.push(`run:${runId}`);
-      return runId === "missing" ? null : { runId, workspaceId: "ws", sessionId: "session", agentId: "agent", providerId: "provider", modelId: "model", subtaskDepth: 0, triggerItemId: 9 };
+      return runId === "missing" ? null : { runId, workspaceId: "ws", sessionId: "session", agentId: "agent", providerId: "provider", modelId: "model", subtaskDepth: 0, triggerMessageId: "message-9" };
     },
     resolveExecutionProfile(input) {
       calls.push(`profile:${input.run.runId}`);
-      return { kind: "profile" as const, headItemId: input.session.headItemId };
+      return { kind: "profile" as const, headMessageId: input.session.headMessageId };
     },
     async projectMessagesContext(input) {
       calls.push(`messages:${input.sessionId}`);
@@ -30,7 +30,7 @@ test("ReadSideApplication validates ownership before delegating profile and mess
     }
   });
 
-  assert.deepEqual(application.getExecutionProfileForRun({ workspaceId: "ws", sessionId: "session", runId: "run" }), { kind: "profile", headItemId: 7 });
+  assert.deepEqual(application.getExecutionProfileForRun({ workspaceId: "ws", sessionId: "session", runId: "run" }), { kind: "profile", headMessageId: "message-7" });
   assert.deepEqual(await application.getMessagesContext({ workspaceId: "ws", sessionId: "session", appendMessage: { role: "user", content: "one-shot" } }), { kind: "messages", appendMessage: { role: "user", content: "one-shot" } });
   assert.deepEqual(await application.getPromptContextForRun({ workspaceId: "ws", sessionId: "session", runId: "run" }), { kind: "prompt" });
   assert.throws(

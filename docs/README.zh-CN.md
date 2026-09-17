@@ -102,14 +102,13 @@ docker compose exec agent-workbench printenv AWB_AGENT_LOOP_MAX_STEPS
 | `AWB_AUTH_TOKEN` | 访问 token 保护（可选）。设置后需要在首页输入 token 登录（会话 Cookie）才能访问 Web UI/API。 |
 | `AWB_AUTH_COOKIE_SECURE` | HTTPS 场景建议设为 `1`(为会话 Cookie 添加 `Secure`), 本地 HTTP 开发保持 `0`. |
 | `AWB_PUBLISH_HOST` | 端口发布的宿主机绑定地址(Docker Compose). 设为 `127.0.0.1` 可仅允许本机访问. |
-| `AWB_AGENT_STARTUP_RECOVERY_MODE` | Agent 启动恢复策略：`fail`（默认，终止未完成 run）或 `recover`（尝试恢复未完成 run）。 |
 | `AWB_AGENT_WORKER_ENABLED` | 是否启用 agent worker 进程（默认 `true`）。设为 `0` 会回退到 API 进程内 runtime（一般仅用于排障）。 |
 | `AWB_AGENT_WORKER_CONCURRENCY` | worker 并发执行 run 的上限（默认 `2`）。注意：同一个 sessionId 的 run 仍会串行。 |
 | `AWB_AGENT_LOOP_MAX_STEPS` | worker 的 step-loop 最大轮数（默认 `128`），`<=0` 表示不限制。 |
 | `AWB_AGENT_LOOP_REPEAT_TOOL_CALL_THRESHOLD` | step-loop 中连续重复工具调用阈值（默认 `20`），`<=0` 表示不限制。 |
 | `AWB_AGENT_INTERNAL_RPC_TIMEOUT_MS` | Worker → API 控制面 RPC 的单次 attempt timeout（毫秒）。默认 `15000`，必须为正整数；不影响模型/Provider timeout。运行时默认值仅由 Worker 的 `loadWorkerEnv()` 定义。 |
 | `AWB_AGENT_COMPLETE_RUN_TIMEOUT_MS` | Worker 提交 `completeRun` 控制面 RPC 的单次 attempt timeout（毫秒）。默认 `5000`，必须为正整数；不影响模型/Provider timeout。运行时默认值仅由 Worker 的 `loadWorkerEnv()` 定义。 |
-| `AWB_AGENT_DEBUG_DUMP` | 调试落盘开关（`1` 开启）。会在 `<workspace>/.debug/agent_context_item_logs/` 写入日志。 |
+| `AWB_AGENT_DEBUG_DUMP` | 调试落盘开关（`1` 开启）。会在 `<workspace>/.debug/agent_message_logs/` 为每条 Agent Message 写入记录。 |
 | `AWB_TOOL_ERROR_STORE_ENABLED` | 工具失败诊断 artifact 开关（默认 `0`，仅精确值 `1` 开启）。将非取消类工具失败的完整参数、结果和错误写入 `<workspace>/.awb/agent/tool-errors/`，供排障分析。 |
 
 其他 Compose 相关变量(如 `AWB_HOST`, `AWB_DATA_DIR`, `AWB_SERVE_WEB`, `AWB_WEB_DIST_DIR`)请以 `.env.example` 为准.

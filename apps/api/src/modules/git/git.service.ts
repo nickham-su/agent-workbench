@@ -30,6 +30,7 @@ import { buildGitEnv } from "../../infra/git/gitEnv.js";
 import { gitConfigGet, gitConfigSet, validateAndNormalizeGitIdentity } from "../../infra/git/gitIdentity.js";
 import { getOriginDefaultBranchFromRepo, listOriginBranchesFromRepo } from "../../infra/git/refs.js";
 import { withWorkspaceRepoLock } from "../../infra/locks/workspaceRepoLock.js";
+import { workspaceLifecycleCoordinator } from "../../infra/locks/workspace-lifecycle-coordinator.js";
 
 function parseMode(modeRaw: unknown): ChangeMode {
   if (modeRaw === "staged" || modeRaw === "unstaged") return modeRaw;
@@ -453,7 +454,8 @@ export async function gitCheckout(ctx: AppContext, bodyRaw: unknown): Promise<Gi
   const target = parseTarget((body as any).target);
   const branch = normalizeGitRefLike((body as any).branch);
   if (!branch) throw new HttpError(400, "branch is required");
-  return withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
+  return workspaceLifecycleCoordinator.withMutation(target.workspaceId, () =>
+    withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
     const { wsRepo, repo } = getTargetInfoOrThrow(ctx, target);
 
     const res = await runGit(["-C", wsRepo.path, "switch", branch], { cwd: ctx.dataDir });
@@ -489,7 +491,8 @@ export async function gitCheckout(ctx: AppContext, bodyRaw: unknown): Promise<Gi
       throw new HttpError(409, `Checkout failed: ${(create.stderr || create.stdout || out).trim().replace(/\\s+/g, " ")}`);
     }
     return { branch };
-  });
+    })
+  );
 }
 
 export async function gitBranches(ctx: AppContext, bodyRaw: unknown): Promise<GitBranchesResponse> {
@@ -644,7 +647,8 @@ function collectPathspecs(params: { repoPath: string; items: { path: string; old
 export async function stageWorkspace(ctx: AppContext, bodyRaw: unknown): Promise<void> {
   const body = (bodyRaw ?? {}) as GitStageRequest;
   const target = parseTarget((body as any).target);
-  return withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
+  return workspaceLifecycleCoordinator.withMutation(target.workspaceId, () =>
+    withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
     const { wsRepo } = getTargetInfoOrThrow(ctx, target);
 
     const all = parseGitBool((body as any).all);
@@ -665,13 +669,15 @@ export async function stageWorkspace(ctx: AppContext, bodyRaw: unknown): Promise
     }
 
     throw new HttpError(400, "Either all or items must be provided");
-  });
+    })
+  );
 }
 
 export async function unstageWorkspace(ctx: AppContext, bodyRaw: unknown): Promise<void> {
   const body = (bodyRaw ?? {}) as GitUnstageRequest;
   const target = parseTarget((body as any).target);
-  return withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
+  return workspaceLifecycleCoordinator.withMutation(target.workspaceId, () =>
+    withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
     const { wsRepo } = getTargetInfoOrThrow(ctx, target);
 
     const all = parseGitBool((body as any).all);
@@ -712,13 +718,15 @@ export async function unstageWorkspace(ctx: AppContext, bodyRaw: unknown): Promi
     }
 
     throw new HttpError(400, "Either all or items must be provided");
-  });
+    })
+  );
 }
 
 export async function discardWorkspace(ctx: AppContext, bodyRaw: unknown): Promise<void> {
   const body = (bodyRaw ?? {}) as GitDiscardRequest;
   const target = parseTarget((body as any).target);
-  return withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
+  return workspaceLifecycleCoordinator.withMutation(target.workspaceId, () =>
+    withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
     const { wsRepo } = getTargetInfoOrThrow(ctx, target);
 
     const all = parseGitBool((body as any).all);
@@ -764,7 +772,8 @@ export async function discardWorkspace(ctx: AppContext, bodyRaw: unknown): Promi
     }
 
     throw new HttpError(400, "Either all or items must be provided");
-  });
+  })
+  );
 }
 
 function parseGitIdentityScope(raw: unknown): GitIdentityScope | null {
@@ -820,20 +829,23 @@ export async function getWorkspaceGitIdentity(ctx: AppContext, bodyRaw: unknown)
 export async function setWorkspaceGitIdentity(ctx: AppContext, bodyRaw: unknown) {
   const body = (bodyRaw ?? {}) as any;
   const target = parseTarget(body.target);
-  return withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
+  return workspaceLifecycleCoordinator.withMutation(target.workspaceId, () =>
+    withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
     const { wsRepo } = getTargetInfoOrThrow(ctx, target);
     const v = validateAndNormalizeGitIdentity(bodyRaw);
     if (!v) throw new HttpError(400, "Invalid identity. Expected {name,email}.", "GIT_IDENTITY_INVALID");
 
     const ok = await setRepoGitIdentity(ctx, wsRepo.path, v);
     if (!ok) throw new HttpError(409, "Failed to set repo git identity.", "GIT_IDENTITY_SET_FAILED");
-  });
+    })
+  );
 }
 
 export async function commitWorkspace(ctx: AppContext, bodyRaw: unknown): Promise<GitCommitResponse> {
   const body = (bodyRaw ?? {}) as any;
   const target = parseTarget(body.target);
-  return withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
+  return workspaceLifecycleCoordinator.withMutation(target.workspaceId, () =>
+    withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
     const { wsRepo } = getTargetInfoOrThrow(ctx, target);
 
     const message = normalizeGitMessage(body.message);
@@ -887,13 +899,15 @@ export async function commitWorkspace(ctx: AppContext, bodyRaw: unknown): Promis
     const branchRes = await runGit(["-C", wsRepo.path, "rev-parse", "--abbrev-ref", "HEAD"], { cwd: ctx.dataDir });
     const branch = branchRes.ok ? branchRes.stdout.trim() : "";
     return { sha, branch };
-  });
+    })
+  );
 }
 
 export async function pushWorkspace(ctx: AppContext, bodyRaw: unknown): Promise<GitPushResponse> {
   const body = (bodyRaw ?? {}) as any;
   const target = parseTarget(body.target);
-  return withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
+  return workspaceLifecycleCoordinator.withMutation(target.workspaceId, () =>
+    withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
     const { wsRepo, repo } = getTargetInfoOrThrow(ctx, target);
 
     const gitEnv = await buildGitEnv({ ctx, repoUrl: repo.url, credentialId: repo.credentialId });
@@ -950,13 +964,15 @@ export async function pushWorkspace(ctx: AppContext, bodyRaw: unknown): Promise<
     } finally {
       await gitEnv.cleanup();
     }
-  });
+    })
+  );
 }
 
 export async function pullWorkspace(ctx: AppContext, bodyRaw: unknown): Promise<GitPullResponse> {
   const body = (bodyRaw ?? {}) as any;
   const target = parseTarget(body.target);
-  return withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
+  return workspaceLifecycleCoordinator.withMutation(target.workspaceId, () =>
+    withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
     const { wsRepo, repo } = getTargetInfoOrThrow(ctx, target);
 
     const gitEnv = await buildGitEnv({ ctx, repoUrl: repo.url, credentialId: repo.credentialId });
@@ -1001,5 +1017,6 @@ export async function pullWorkspace(ctx: AppContext, bodyRaw: unknown): Promise<
     } finally {
       await gitEnv.cleanup();
     }
-  });
+  })
+  );
 }

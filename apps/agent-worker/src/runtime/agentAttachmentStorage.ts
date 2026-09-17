@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { AgentImageMediaType } from "@agent-workbench/shared";
+import type { AgentImageMediaType } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const SAFE_WORKSPACE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;

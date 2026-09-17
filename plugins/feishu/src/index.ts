@@ -134,29 +134,87 @@ export function formatTodolistResult(result: any): string | null {
   return lines.join("\n");
 }
 
-export function formatTodolistToolOutput(toolOutput: any): string {
-  const formatted = formatTodolistResult(toolOutput?.result);
+export function formatTodolistExecution(execution: { structuredResult?: unknown; resultPreview?: unknown } | null): string {
+  const formatted = formatTodolistResult(execution?.structuredResult);
   if (formatted) return formatted;
-  const text = normalizeText(toolOutput?.text);
+  const text = normalizeText(execution?.resultPreview);
   if (text) return text;
   return "(empty)";
 }
 
-export function findLatestTodolistToolItem(items: any[]): any | null {
-  if (!Array.isArray(items) || items.length === 0) return null;
-  for (let i = items.length - 1; i >= 0; i -= 1) {
-    const it = items[i];
-    // 兼容：若 kind 存在，则必须是 tool
-    const kind = normalizeText(it?.kind).toLowerCase();
-    if (kind && kind !== "tool") continue;
+type InternalReadClient = {
+  get: (path: string, options?: { pluginId?: string }) => Promise<any>;
+};
 
-    const out = it?.output;
-    if (!out || typeof out !== "object") continue;
-    if (normalizeText(out.type).toLowerCase() !== "tool") continue;
-    if (normalizeText(out.toolName).toLowerCase() !== "todolist") continue;
-    return it;
+/** 飞书命令的窄化 Session 读侧；只访问 Message/ToolExecution 专用接口。 */
+export function createFeishuSessionReadClient(client: InternalReadClient) {
+  return {
+    async getLastAssistantText(input: { workspaceId: string; sessionId: string }) {
+      const res = await client.get(
+        `/api/internal/agent/sessions/${encodeURIComponent(input.sessionId)}/last-assistant-text?workspaceId=${encodeURIComponent(input.workspaceId)}`,
+        { pluginId: "feishu" },
+      );
+      return { found: Boolean(res?.found), text: normalizeText(res?.text) };
+    },
+    async getLatestTodolist(input: { workspaceId: string; sessionId: string }) {
+      const res = await client.get(
+        `/api/internal/agent/sessions/${encodeURIComponent(input.sessionId)}/latest-todolist?workspaceId=${encodeURIComponent(input.workspaceId)}`,
+        { pluginId: "feishu" },
+      );
+      return {
+        isRunning: Boolean(res?.isRunning),
+        execution: res?.execution && typeof res.execution === "object" && !Array.isArray(res.execution)
+          ? { structuredResult: res.execution.structuredResult, resultPreview: res.execution.resultPreview }
+          : null,
+      };
+    },
+  };
+}
+
+type FeishuSessionReadCommandDependencies = {
+  command: string;
+  binding: Pick<ChatBinding, "workspaceId" | "sessionId"> | null;
+  sessionReads: ReturnType<typeof createFeishuSessionReadClient>;
+  replyText: (text: string) => Promise<void>;
+};
+
+/**
+ * `/l`、`/t` 的可注入命令分发单元。
+ * 返回 true 表示命令已处理，调用方不得继续进入其他命令分支。
+ */
+export async function dispatchFeishuSessionReadCommand(dependencies: FeishuSessionReadCommandDependencies): Promise<boolean> {
+  const command = dependencies.command;
+  if (command !== "/l" && command !== "/t") return false;
+
+  const sessionId = normalizeText(dependencies.binding?.sessionId);
+  const workspaceId = normalizeText(dependencies.binding?.workspaceId);
+  if (!sessionId || !workspaceId) {
+    await dependencies.replyText("请先使用 /ss 绑定会话");
+    return true;
   }
-  return null;
+
+  try {
+    if (command === "/l") {
+      const latest = await dependencies.sessionReads.getLastAssistantText({ workspaceId, sessionId });
+      await dependencies.replyText(latest.found ? latest.text : "当前会话暂无 assistant 消息");
+      return true;
+    }
+
+    const latest = await dependencies.sessionReads.getLatestTodolist({ workspaceId, sessionId });
+    if (!latest.execution) {
+      await dependencies.replyText("当前会话未找到 todolist 记录");
+      return true;
+    }
+    await dependencies.replyText(buildTodoReplyText({
+      isRunning: latest.isRunning,
+      todolistText: formatTodolistExecution(latest.execution)
+    }));
+  } catch {
+    await dependencies.replyText(command === "/l"
+      ? "读取最后一条 assistant 消息失败，请稍后重试"
+      : "读取 todolist 失败，请稍后重试");
+  }
+  return true;
 }
 
 export function buildTodoReplyText(params: { isRunning: boolean; todolistText: string }): string {
@@ -488,6 +546,7 @@ function createGateway(params: GatewayStartParams): FeishuGateway {
   const baseDomain = normalizeText(domain) === "https://open.larksuite.com" ? "https://open.larksuite.com" : "https://open.feishu.cn";
   const store = createFeishuStore({ dataDir });
   const client = createInternalClient({ apiOrigin, internalToken });
+  const sessionReads = createFeishuSessionReadClient(client);
 
   let ws: WebSocket | null = null;
   let stopped = false;
@@ -577,15 +636,6 @@ function createGateway(params: GatewayStartParams): FeishuGateway {
     } catch {
       return { role: "none", allowed: false };
     }
-  }
-
-  async function fetchContextItemsTail(sessionId: string, tailLimit: number) {
-    const res = await client.post("/api/internal/agent/sessions/context-items-tail", {
-      pluginId: "feishu",
-      sessionId,
-      tailLimit
-    }, { pluginId: "feishu" });
-    return Array.isArray(res?.items) ? res.items : [];
   }
 
   async function listWorkspaces() {
@@ -906,110 +956,12 @@ function createGateway(params: GatewayStartParams): FeishuGateway {
       return;
     }
 
-    if (cmd.cmd === "/l") {
-      const sessionId = normalizeText(binding?.sessionId);
-      const workspaceId = normalizeText(binding?.workspaceId);
-      if (!sessionId || !workspaceId) {
-        await replyText(ctx.chatId, ctx.messageId, "请先使用 /ss 绑定会话");
-        return;
-      }
-
-      const agents = await listAgents(workspaceId);
-      if (agents.length === 0) {
-        await replyText(ctx.chatId, ctx.messageId, "当前 workspace 未启用任何可用 agent，请先在 Web 端工作区中启用后再试 /a");
-        return;
-      }
-      const selectedAgentId = normalizeText(binding?.agentId);
-      if (selectedAgentId && !agents.some((a: any) => normalizeText(a.id) === selectedAgentId)) {
-        await replyText(ctx.chatId, ctx.messageId, "当前 workspace 已禁用已绑定 agent，请重新执行 /a 选择可用 agent");
-        return;
-      }
-
-      let summary: any;
-      try {
-        summary = await client.post("/api/internal/agent/sessions/status-summary", {
-          sessionId,
-          selectedAgentId: selectedAgentId || undefined
-        });
-      } catch (err) {
-        const errCode = normalizeText((err as any)?.code).toUpperCase();
-        if (errCode === "AGENT_DISABLED_IN_WORKSPACE") {
-          await replyText(ctx.chatId, ctx.messageId, "当前 workspace 已禁用已绑定 agent，请重新执行 /a 选择可用 agent");
-          return;
-        }
-        if (errCode === "AGENT_NO_AVAILABLE_IN_WORKSPACE") {
-          await replyText(ctx.chatId, ctx.messageId, "当前 workspace 未启用任何可用 agent，请先在 Web 端工作区中启用后再试 /a");
-          return;
-        }
-        throw err;
-      }
-
-      if (normalizeText(summary?.runState?.status).toLowerCase() === "running") {
-        await replyText(ctx.chatId, ctx.messageId, "正在运行中，请稍后再试");
-        return;
-      }
-      const items = await fetchContextItemsTail(sessionId, 1);
-      const item = items[items.length - 1];
-      const text = normalizeText(item?.output?.text);
-      await replyText(ctx.chatId, ctx.messageId, text || "当前会话暂无消息");
-      return;
-    }
-
-    if (cmd.cmd === "/t") {
-      const sessionId = normalizeText(binding?.sessionId);
-      const workspaceId = normalizeText(binding?.workspaceId);
-      if (!sessionId || !workspaceId) {
-        await replyText(ctx.chatId, ctx.messageId, "请先使用 /ss 绑定会话");
-        return;
-      }
-
-      const agents = await listAgents(workspaceId);
-      if (agents.length === 0) {
-        await replyText(ctx.chatId, ctx.messageId, "当前 workspace 未启用任何可用 agent，请先在 Web 端工作区中启用后再试 /a");
-        return;
-      }
-      const selectedAgentId = normalizeText(binding?.agentId);
-      if (selectedAgentId && !agents.some((a: any) => normalizeText(a.id) === selectedAgentId)) {
-        await replyText(ctx.chatId, ctx.messageId, "当前 workspace 已禁用已绑定 agent，请重新执行 /a 选择可用 agent");
-        return;
-      }
-
-      let summary: any;
-      try {
-        summary = await client.post("/api/internal/agent/sessions/status-summary", {
-          sessionId,
-          selectedAgentId: selectedAgentId || undefined
-        });
-      } catch (err) {
-        const errCode = normalizeText((err as any)?.code).toUpperCase();
-        if (errCode === "AGENT_DISABLED_IN_WORKSPACE") {
-          await replyText(ctx.chatId, ctx.messageId, "当前 workspace 已禁用已绑定 agent，请重新执行 /a 选择可用 agent");
-          return;
-        }
-        if (errCode === "AGENT_NO_AVAILABLE_IN_WORKSPACE") {
-          await replyText(ctx.chatId, ctx.messageId, "当前 workspace 未启用任何可用 agent，请先在 Web 端工作区中启用后再试 /a");
-          return;
-        }
-         throw err;
-       }
-
-      const isRunning = normalizeText(summary?.runState?.status).toLowerCase() === "running";
-
-      // 只取尾部一段上下文：优先用较小窗口；找不到再扩大窗口。
-      // 经验值：todolist 往往靠近会话尾部，但也可能因长对话而被推远。
-      let toolItem: any | null = null;
-      for (const tailLimit of [200, 500]) {
-        const items = await fetchContextItemsTail(sessionId, tailLimit);
-        toolItem = findLatestTodolistToolItem(items);
-        if (toolItem) break;
-      }
-      if (!toolItem) {
-         await replyText(ctx.chatId, ctx.messageId, "当前会话未找到 todolist 记录（仅扫描最近 500 条上下文）");
-         return;
-       }
-      const text = formatTodolistToolOutput(toolItem.output);
-      const reply = buildTodoReplyText({ isRunning, todolistText: text });
-      await replyText(ctx.chatId, ctx.messageId, reply);
+    if (await dispatchFeishuSessionReadCommand({
+      command: cmd.cmd,
+      binding,
+      sessionReads,
+      replyText: (text) => replyText(ctx.chatId, ctx.messageId, text)
+    })) {
       return;
     }
 

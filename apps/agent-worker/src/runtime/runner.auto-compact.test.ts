@@ -2,7 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { APICallError } from "ai";
 import { AgentRunner, buildCompactionUserPrompt } from "./runner.js";
-import { ApiConflictError } from "./apiClient.js";
+import {
+  ApiConflictError,
+  InternalRpcHttpError,
+  InternalRpcInvalidResponseError,
+  InternalRpcNetworkError,
+  InternalRpcTimeoutError,
+} from "./apiClient.js";
 
 function createCompactionProfile(input?: {
   candidate?: { providerId?: string; modelId?: string; contextWindowTokens?: number } | null;
@@ -54,17 +60,18 @@ function createCompactionContext(lastResponseTotalTokens: number | null) {
 
 function createMessagesContext() {
   return {
-    headItemId: 1,
+    headMessageId: "message-head",
     system: "Compaction system",
     messages: [{ role: "user", content: "Summarize this session." }]
   };
 }
 
-function createProcessRunPromptContext(lastResponseTotalTokens: number | null, headItemId: number) {
+function createProcessRunPromptContext(lastResponseTotalTokens: number | null, headMessageId: string) {
   return {
     pendingTools: [],
     tools: [],
-    headItemId,
+    headMessageId,
+    sessionRevision: 0,
     system: "",
     messages: [],
     lastResponseTotalTokens,
@@ -76,7 +83,7 @@ function createProcessRunPromptContext(lastResponseTotalTokens: number | null, h
 async function runProcessRunAutoCompactionTest(input: { candidateContextLimitError: boolean }) {
   const profile = createCompactionProfile({ candidate: { contextWindowTokens: 110_000 } });
   const summaryCalls: string[] = [];
-  const compactCalls: Array<{ expectedHeadItemId: number | null }> = [];
+  const compactCalls: Array<{ expectedHeadMessageId: string | null; expectedRevision: number }> = [];
   const terminalStatuses: string[] = [];
   let promptContextCallCount = 0;
   const controller = new AbortController();
@@ -99,20 +106,20 @@ async function runProcessRunAutoCompactionTest(input: { candidateContextLimitErr
       async getExecutionProfile() {
         return profile;
       },
-      async updateRunState() {},
+      async updateRunNotice() {},
       async getPromptContext() {
         promptContextCallCount += 1;
         return promptContextCallCount === 1
-          ? createProcessRunPromptContext(110_000, 1)
-          : createProcessRunPromptContext(null, 2);
+          ? createProcessRunPromptContext(110_000, "message-head")
+          : createProcessRunPromptContext(null, "message-next");
       },
       async getMessagesContext() {
         return createMessagesContext();
       },
-      async compactContext(input: { expectedHeadItemId: number | null }) {
-        compactCalls.push({ expectedHeadItemId: input.expectedHeadItemId });
+      async commitCompaction(input: { expectedHeadMessageId: string | null; expectedRevision: number }) {
+        compactCalls.push({ expectedHeadMessageId: input.expectedHeadMessageId, expectedRevision: input.expectedRevision });
         controller.abort();
-        return { compacted: true, summaryItemId: 2, archivedCount: 1 };
+        return { result: "updated", summaryMessageId: "message-compaction" };
       },
       async completeRun(input: { status: string }) {
         terminalStatuses.push(input.status);
@@ -422,7 +429,7 @@ test("generateCompactionSummary 候选与主模型相同时不重复回退", asy
       context: createCompactionContext(null),
       signal: AbortSignal.timeout(1_000)
     }),
-    /context length exceeded/
+    /cannot be split further on Message boundaries/
   );
   assert.deepEqual(calls, ["primary-provider/primary-model"]);
 });
@@ -431,7 +438,7 @@ test("processRun 自动压缩真实入口使用候选模型", async () => {
   const result = await runProcessRunAutoCompactionTest({ candidateContextLimitError: false });
 
   assert.deepEqual(result.summaryCalls, ["compaction-provider/compaction-model"]);
-  assert.deepEqual(result.compactCalls, [{ expectedHeadItemId: 1 }]);
+  assert.deepEqual(result.compactCalls, [{ expectedHeadMessageId: "message-head", expectedRevision: 0 }]);
   assert.deepEqual(result.terminalStatuses, ["cancelled"]);
 });
 
@@ -442,7 +449,7 @@ test("processRun 自动压缩真实入口在候选超限时回退主模型", asy
     "compaction-provider/compaction-model",
     "primary-provider/primary-model"
   ]);
-  assert.deepEqual(result.compactCalls, [{ expectedHeadItemId: 1 }]);
+  assert.deepEqual(result.compactCalls, [{ expectedHeadMessageId: "message-head", expectedRevision: 0 }]);
   assert.deepEqual(result.terminalStatuses, ["cancelled"]);
 });
 
@@ -476,7 +483,7 @@ test("generateCompactionSummary 透传 messages-context.system 到单次调用",
     {
       async getMessagesContext(input: { appendMessage?: { role: string; content: string } }) {
         return {
-          headItemId: 1,
+          headMessageId: "message-head",
           system: "LANG-SYSTEM",
           messages: [{ role: "user", content: "hello" }, ...(input.appendMessage ? [input.appendMessage] : [])]
         };
@@ -501,7 +508,7 @@ test("generateCompactionSummary 使用 messages-context 追加压缩提示词", 
     {
       async getMessagesContext(input: { appendMessage?: { role: string; content: string } }) {
         return {
-          headItemId: 1,
+          headMessageId: "message-head",
           system: "",
           messages: [
             { role: "user", content: "hello" },
@@ -526,387 +533,304 @@ test("generateCompactionSummary 使用 messages-context 追加压缩提示词", 
   assert.ok(String(resZh.messages.at(-1)?.content || "").includes("请基于当前会话内容输出一份结构化总结"));
 });
 
-test("compactContext 在可恢复失败时按 modelRequestMaxRetries 重试", async () => {
+test("compactContext 对任意 Provider 错误持续重试，不受 profile 次数限制", async () => {
   const originalSetTimeout = globalThis.setTimeout;
-  let observedDelayMs: number | undefined;
+  const observedDelays: number[] = [];
   (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, ms?: number, ...args: any[]) => {
-    observedDelayMs = ms;
+    observedDelays.push(Number(ms));
     return originalSetTimeout(handler, 0, ...args);
   }) as typeof setTimeout;
 
   try {
-    let compactCalls = 0;
-    const runStateUpdates: Array<{ runNoticeText?: string }> = [];
+    let summaryCalls = 0;
+    let commitCalls = 0;
+    const notices: string[] = [];
     class TestRunner extends AgentRunner {
       protected override async generateCompactionSummary() {
+        summaryCalls += 1;
+        if (summaryCalls < 3) throw new Error("request failed: 401 provider rejected request");
         return "summary-ok";
       }
     }
-    const runner = new TestRunner(
-      {
-        async compactContext() {
-          compactCalls += 1;
-          if (compactCalls === 1) {
-            throw new Error("request failed: 500 upstream unavailable");
-          }
-          return { compacted: true, summaryItemId: 10, archivedCount: 4 };
-        },
-        async updateRunState(input: { runNoticeText?: string }) {
-          runStateUpdates.push(input);
-        }
-      } as any,
-      {} as any,
-      { info() {}, warn() {}, error() {} },
-      1
-    );
+    const runner = new TestRunner({
+      async commitCompaction() {
+        commitCalls += 1;
+        return { result: "updated", summaryMessageId: "message-compaction" };
+      },
+      async updateRunNotice(input: { runNoticeText?: string }) {
+        notices.push(String(input.runNoticeText || ""));
+      }
+    } as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
 
     const result = await (runner as any).compactContext({
-      profile: {
-        runtime: { modelRequestMaxRetries: 1, modelRequestRetryBackoffMaxMs: 2_000 },
-        model: {},
-        provider: {}
-      },
-      run: {
-        workspaceId: "ws",
-        sessionId: "sess",
-        runId: "run"
-      },
-      context: {
-        headItemId: 1,
-        uiLocale: "zh-CN"
-      },
+      profile: { runtime: { modelRequestMaxRetries: 0 }, model: {}, provider: {} },
+      run: { workspaceId: "ws", sessionId: "sess", runId: "run" },
+      context: { headMessageId: "message-head", sessionRevision: 0, uiLocale: "zh-CN" },
       signal: AbortSignal.timeout(1_000)
     });
 
     assert.equal(result, true);
-    assert.equal(compactCalls, 2);
-    assert.equal(observedDelayMs, 2_000);
-    assert.ok(runStateUpdates.some((it) => String(it.runNoticeText || "").includes("Compaction failed, retrying")));
+    assert.equal(summaryCalls, 3);
+    assert.equal(commitCalls, 1);
+    assert.deepEqual(observedDelays.slice(0, 2), [2_000, 4_000]);
+    assert.ok(notices.some((notice) => notice.includes("attempt 2")));
   } finally {
     globalThis.setTimeout = originalSetTimeout;
   }
 });
 
-test("compactContext 候选和主模型都上下文超限时不重复 candidate->primary 流程", async () => {
+test("manual compaction 的永久 control-read 不调用 Provider 且收敛失败", async () => {
+  for (const error of [
+    new InternalRpcHttpError({ method: "POST", endpoint: "/messages", status: 400 }),
+    new InternalRpcInvalidResponseError({ method: "POST", endpoint: "/messages", stage: "schema" }),
+    new Error("program error"),
+  ]) {
+    let providerCalls = 0;
+    const terminalStatuses: string[] = [];
+    class TestRunner extends AgentRunner {
+      protected override async generateSingleCallSummary() { providerCalls += 1; return { text: "summary", totalTokens: null }; }
+    }
+    const runner = new TestRunner({
+      async getExecutionProfile() { return createCompactionProfile(); },
+      async getPromptContext() { return createProcessRunPromptContext(null, "message-head"); },
+      async getMessagesContext() { throw error; },
+      async completeRun(input: { status: string }) { terminalStatuses.push(input.status); },
+    } as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+    await (runner as any).processRun({ workspaceId: "ws", sessionId: "sess", runId: "run", runKind: "manual_compaction", workspacePath: ".", workspaceRepoDirNames: [] }, new AbortController().signal);
+    assert.equal(providerCalls, 0);
+    assert.deepEqual(terminalStatuses, ["failed"]);
+  }
+});
+
+test("manual compaction 的 transient control-read 重试成功后才调用 Provider", async () => {
+  for (const error of [
+    new InternalRpcNetworkError({ method: "POST", endpoint: "/messages" }),
+    new InternalRpcTimeoutError({ method: "POST", endpoint: "/messages", timeoutMs: 1 }),
+    new InternalRpcHttpError({ method: "POST", endpoint: "/messages", status: 500 }),
+  ]) {
+    let reads = 0;
+    let providerCalls = 0;
+    const terminalStatuses: string[] = [];
+    class TestRunner extends AgentRunner {
+      protected override async generateSingleCallSummary() { providerCalls += 1; return { text: "summary", totalTokens: null }; }
+    }
+    const runner = new TestRunner({
+      async getExecutionProfile() { return createCompactionProfile(); },
+      async getPromptContext() { return createProcessRunPromptContext(null, "message-head"); },
+      async getMessagesContext() { if (reads++ === 0) throw error; return createMessagesContext(); },
+      async commitCompaction() { return { result: "updated", summaryMessageId: "summary" }; },
+      async completeRun(input: { status: string }) { terminalStatuses.push(input.status); },
+      async updateRunNotice() { return { result: "updated" }; },
+    } as any, {} as any, { info() {}, warn() {}, error() {} }, 1, { controlWriteSleep: async () => true });
+    await (runner as any).processRun({ workspaceId: "ws", sessionId: "sess", runId: "run", runKind: "manual_compaction", workspacePath: ".", workspaceRepoDirNames: [] }, new AbortController().signal);
+    assert.equal(reads, 2);
+    assert.equal(providerCalls, 1);
+    assert.deepEqual(terminalStatuses, ["completed"]);
+  }
+});
+
+test("control-read retry sleep 被取消时不调用 Provider 并收敛 cancelled", async () => {
+  const controller = new AbortController();
+  let providerCalls = 0;
+  const terminalStatuses: string[] = [];
+  class TestRunner extends AgentRunner {
+    protected override async generateSingleCallSummary() { providerCalls += 1; return { text: "summary", totalTokens: null }; }
+  }
+  const runner = new TestRunner({
+    async getExecutionProfile() { return createCompactionProfile(); },
+    async getPromptContext() { return createProcessRunPromptContext(null, "message-head"); },
+    async getMessagesContext() { throw new InternalRpcNetworkError({ method: "POST", endpoint: "/messages" }); },
+    async updateRunNotice() { return { result: "updated" }; },
+    async completeRun(input: { status: string }) { terminalStatuses.push(input.status); },
+  } as any, {} as any, { info() {}, warn() {}, error() {} }, 1, { controlWriteSleep: async () => { controller.abort(); return false; } });
+  await (runner as any).processRun({ workspaceId: "ws", sessionId: "sess", runId: "run", runKind: "manual_compaction", workspacePath: ".", workspaceRepoDirNames: [] }, controller.signal);
+  assert.equal(providerCalls, 0);
+  assert.deepEqual(terminalStatuses, ["cancelled"]);
+});
+
+test("empty compaction summary 作为 Provider 错误重试后完成", async () => {
+  let summaries = 0;
+  const terminalStatuses: string[] = [];
+  class TestRunner extends AgentRunner {
+    protected override async generateSingleCallSummary() { summaries += 1; return { text: summaries === 1 ? "" : "summary", totalTokens: null }; }
+  }
+  const runner = new TestRunner({
+    async getExecutionProfile() { return createCompactionProfile(); },
+    async getPromptContext() { return createProcessRunPromptContext(null, "message-head"); },
+    async getMessagesContext() { return createMessagesContext(); },
+    async updateRunNotice() { return { result: "updated" }; },
+    async commitCompaction() { return { result: "updated", summaryMessageId: "summary" }; },
+    async completeRun(input: { status: string }) { terminalStatuses.push(input.status); },
+  } as any, {} as any, { info() {}, warn() {}, error() {} }, 1, { controlWriteSleep: async () => true });
+  await (runner as any).processRun({ workspaceId: "ws", sessionId: "sess", runId: "run", runKind: "manual_compaction", workspacePath: ".", workspaceRepoDirNames: [] }, new AbortController().signal);
+  assert.equal(summaries, 2);
+  assert.deepEqual(terminalStatuses, ["completed"]);
+});
+
+test("commit response-loss 重放同一个不可变 Compaction 请求并完成", async () => {
+  const requests: any[] = [];
+  const terminalStatuses: string[] = [];
+  class TestRunner extends AgentRunner {
+    protected override async generateSingleCallSummary() { return { text: "summary", totalTokens: null }; }
+  }
+  const runner = new TestRunner({
+    async getExecutionProfile() { return createCompactionProfile(); },
+    async getPromptContext() { return createProcessRunPromptContext(null, "message-head"); },
+    async getMessagesContext() { return createMessagesContext(); },
+    async updateRunNotice() { return { result: "updated" }; },
+    async commitCompaction(input: unknown) {
+      requests.push(input);
+      if (requests.length === 1) throw new InternalRpcNetworkError({ method: "POST", endpoint: "/compaction" });
+      return { result: "updated", summaryMessageId: (input as { messageId: string }).messageId };
+    },
+    async completeRun(input: { status: string }) { terminalStatuses.push(input.status); },
+  } as any, {} as any, { info() {}, warn() {}, error() {} }, 1, { controlWriteSleep: async () => true, nowMs: () => 123 });
+  await (runner as any).processRun({ workspaceId: "ws", sessionId: "sess", runId: "run", runKind: "manual_compaction", workspacePath: ".", workspaceRepoDirNames: [] }, new AbortController().signal);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[1], requests[0]);
+  assert.deepEqual(terminalStatuses, ["completed"]);
+});
+
+test("未消费 recovery continuation 时优先进入恢复模型步骤并跳过自动压缩", async () => {
+  const controller = new AbortController();
+  let compactCalls = 0;
+  let resumedMessageId: string | null = null;
+  const runner = new AgentRunner({
+    async getExecutionProfile() { return createCompactionProfile({ candidate: null }); },
+    async getPromptContext() { return createProcessRunPromptContext(110_000, "message-head"); },
+    async completeRun() {},
+  } as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+  (runner as any).compactContext = async () => { compactCalls += 1; return true; };
+  (runner as any).runModelStep = async (params: { recoveryContinuation: { messageId: string | null } }) => {
+    resumedMessageId = params.recoveryContinuation.messageId;
+    controller.abort();
+    return { toolCallNames: new Set<string>() };
+  };
+
+  await (runner as any).processRun({
+    workspaceId: "ws",
+    sessionId: "sess",
+    runId: "run",
+    workspacePath: ".",
+    resumeAssistantMessageId: "assistant-recovery"
+  }, controller.signal);
+
+  assert.equal(resumedMessageId, "assistant-recovery");
+  assert.equal(compactCalls, 0);
+});
+
+test("compactContext 在 Provider 重试退避期间响应用户取消", async () => {
   const originalSetTimeout = globalThis.setTimeout;
+  const controller = new AbortController();
   (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => {
+    controller.abort();
     return originalSetTimeout(handler, 0, ...args);
   }) as typeof setTimeout;
 
   try {
-    const summaryCalls: string[] = [];
+    let summaryCalls = 0;
+    class TestRunner extends AgentRunner {
+      protected override async generateCompactionSummary(): Promise<string> {
+        summaryCalls += 1;
+        throw new Error("request failed: 400 invalid provider request");
+      }
+    }
+    const runner = new TestRunner({ async updateRunNotice() {} } as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+    const result = await (runner as any).compactContext({
+      profile: { runtime: {}, model: {}, provider: {} },
+      run: { workspaceId: "ws", sessionId: "sess", runId: "run" },
+      context: { headMessageId: "message-head", sessionRevision: 0, uiLocale: "en-US" },
+      signal: controller.signal
+    });
+    assert.equal(result, false);
+    assert.equal(summaryCalls, 1);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("generateCompactionSummary 为单次 Provider 调用固定 600 秒超时", async () => {
+  let timeoutMs: number | null = null;
+  class TestRunner extends AgentRunner {
+    protected override async generateSingleCallSummary(params: any) {
+      timeoutMs = params.input.timeoutMs;
+      return { text: "summary", totalTokens: null };
+    }
+  }
+  const runner = new TestRunner({
+    async getMessagesContext() { return createMessagesContext(); }
+  } as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+  await (runner as any).generateCompactionSummary({
+    profile: createCompactionProfile({ candidate: null }),
+    context: createCompactionContext(null),
+    signal: AbortSignal.timeout(1_000)
+  });
+  assert.equal(timeoutMs, 600_000);
+});
+
+test("generateCompactionSummary 按 Message 边界分块且中间摘要不写入控制面", async () => {
+  const callSizes: number[] = [];
+  class TestRunner extends AgentRunner {
+    protected override async generateSingleCallSummary(params: any) {
+      const sourceCount = params.input.messages.length - 1;
+      callSizes.push(sourceCount);
+      if (sourceCount > 2) {
+        const error = new Error("context length exceeded") as Error & { statusCode: number };
+        error.statusCode = 400;
+        throw error;
+      }
+      return { text: `summary-${sourceCount}`, totalTokens: null };
+    }
+  }
+  const runner = new TestRunner({
+    async getMessagesContext() {
+      return {
+        headMessageId: "message-head",
+        system: "",
+        messages: [
+          { role: "user", content: "one" }, { role: "assistant", content: "two" },
+          { role: "user", content: "three" }, { role: "assistant", content: "four" }
+        ]
+      };
+    }
+  } as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+  const text = await (runner as any).generateCompactionSummary({
+    profile: createCompactionProfile({ candidate: null }), context: createCompactionContext(null), signal: AbortSignal.timeout(1_000)
+  });
+  assert.deepEqual(callSizes, [4, 2, 2]);
+  assert.equal(text, "summary-2\n\n---\n\nsummary-2");
+});
+
+test("超过八个 Compaction 输入块稳定失败，且不提交 Compaction Message", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    let commits = 0;
     class TestRunner extends AgentRunner {
       protected override async generateSingleCallSummary(params: any): Promise<{ text: string; totalTokens: number | null }> {
-        const profile = `${params.profile.provider.id}/${params.profile.model.id}`;
-        summaryCalls.push(profile);
+        if (params.input.messages.length <= 2) return { text: "leaf", totalTokens: null };
         const error = new Error("context length exceeded") as Error & { statusCode: number };
         error.statusCode = 400;
         throw error;
       }
     }
-    const runner = new TestRunner(
-      { async getMessagesContext() { return createMessagesContext(); }, async updateRunState() {} } as any,
-      {} as any,
-      { info() {}, warn() {}, error() {} },
-      1
-    );
-
+    const runner = new TestRunner({
+      async getMessagesContext() {
+        return { headMessageId: "message-head", system: "", messages: Array.from({ length: 16 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", content: String(index) })) };
+      },
+      async commitCompaction() { commits += 1; return { result: "updated", summaryMessageId: "unexpected" }; },
+      async updateRunNotice() { throw new Error("input limit must not enter Provider retry notice"); }
+    } as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
     await assert.rejects(
       () => (runner as any).compactContext({
-        profile: {
-          ...createCompactionProfile(),
-          runtime: { modelRequestMaxRetries: 3 }
-        },
+        profile: createCompactionProfile({ candidate: null }),
         run: { workspaceId: "ws", sessionId: "sess", runId: "run" },
-        context: { ...createCompactionContext(null), headItemId: 1 },
+        context: { headMessageId: "message-head", sessionRevision: 0, uiLocale: "en-US" },
         signal: AbortSignal.timeout(1_000)
       }),
-      /context length exceeded/
+      /exceeds 8 Message blocks/
     );
-
-    assert.deepEqual(summaryCalls, [
-      "compaction-provider/compaction-model",
-      "primary-provider/primary-model"
-    ]);
-  } finally {
-    globalThis.setTimeout = originalSetTimeout;
-  }
-});
-
-test("compactContext 已重试后遇到 ApiConflictError 保留错误语义", async () => {
-  const originalSetTimeout = globalThis.setTimeout;
-  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => {
-    return originalSetTimeout(handler, 0, ...args);
-  }) as typeof setTimeout;
-
-  try {
-  let compactCalls = 0;
-  class TestRunner extends AgentRunner {
-    protected override async generateCompactionSummary() {
-      return "summary-ok";
-    }
-  }
-  const runner = new TestRunner(
-    {
-      async compactContext() {
-        compactCalls += 1;
-        if (compactCalls === 1) throw new Error("request failed: 500 upstream unavailable");
-        throw new ApiConflictError("context conflict");
-      },
-      async updateRunState() {}
-    } as any,
-    {} as any,
-    { info() {}, warn() {}, error() {} },
-    1
-  );
-
-  await assert.rejects(
-    () =>
-      (runner as any).compactContext({
-        profile: {
-          runtime: { modelRequestMaxRetries: 3 },
-          model: {},
-          provider: {}
-        },
-        run: {
-          workspaceId: "ws",
-          sessionId: "sess",
-          runId: "run"
-        },
-        context: {
-          headItemId: 1,
-          uiLocale: "zh-CN"
-        },
-        signal: AbortSignal.timeout(1_000)
-      }),
-    ApiConflictError
-  );
-    assert.equal(compactCalls, 2);
-  } finally {
-    globalThis.setTimeout = originalSetTimeout;
-  }
-});
-
-test("compactContext 首次遇到 ApiConflictError 不安排重试并立即向上抛出", async () => {
-  let compactCalls = 0;
-  class TestRunner extends AgentRunner {
-    protected override async generateCompactionSummary() {
-      return "summary-ok";
-    }
-  }
-  const runner = new TestRunner(
-    {
-      async compactContext() {
-        compactCalls += 1;
-        throw new ApiConflictError("context conflict");
-      },
-      async updateRunState() {
-        throw new Error("run state should not be updated for a conflict");
-      }
-    } as any,
-    {} as any,
-    { info() {}, warn() {}, error() {} },
-    1
-  );
-
-  await assert.rejects(
-    () => (runner as any).compactContext({
-      profile: {
-        runtime: { modelRequestMaxRetries: 3 },
-        model: {},
-        provider: {}
-      },
-      run: { workspaceId: "ws", sessionId: "sess", runId: "run" },
-      context: { headItemId: 1, uiLocale: "zh-CN" },
-      signal: AbortSignal.timeout(1_000)
-    }),
-    ApiConflictError
-  );
-  assert.equal(compactCalls, 1);
-});
-
-test("compactContext 返回 compacted:false 时不重试并清理 notice", async () => {
-  let compactCalls = 0;
-  class TestRunner extends AgentRunner {
-    protected override async generateCompactionSummary() {
-      return "summary-ok";
-    }
-  }
-  const runner = new TestRunner(
-    {
-      async compactContext() {
-        compactCalls += 1;
-        return { compacted: false, summaryItemId: null, archivedCount: 0 };
-      },
-      async updateRunState() {}
-    } as any,
-    {} as any,
-    { info() {}, warn() {}, error() {} },
-    1
-  );
-
-  const result = await (runner as any).compactContext({
-    profile: {
-      runtime: { modelRequestMaxRetries: 3 },
-      model: {},
-      provider: {}
-    },
-    run: {
-      workspaceId: "ws",
-      sessionId: "sess",
-      runId: "run"
-    },
-    context: {
-      headItemId: 1,
-      uiLocale: "zh-CN"
-    },
-    signal: AbortSignal.timeout(1_000)
-  });
-
-  assert.equal(result, false);
-  assert.equal(compactCalls, 1);
-});
-
-test("compactContext 压缩成功后 updateRunState 失败不应触发重试", async () => {
-  let compactCalls = 0;
-  let runStateCalls = 0;
-  class TestRunner extends AgentRunner {
-    protected override async generateCompactionSummary() {
-      return "summary-ok";
-    }
-  }
-  const runner = new TestRunner(
-    {
-      async compactContext() {
-        compactCalls += 1;
-        return { compacted: true, summaryItemId: 8, archivedCount: 2 };
-      },
-      async updateRunState() {
-        runStateCalls += 1;
-        throw new Error("request failed: 500 update failed");
-      }
-    } as any,
-    {} as any,
-    { info() {}, warn() {}, error() {} },
-    1
-  );
-
-  const result = await (runner as any).compactContext({
-    profile: {
-      runtime: { modelRequestMaxRetries: 3 },
-      model: {},
-      provider: {}
-    },
-    run: {
-      workspaceId: "ws",
-      sessionId: "sess",
-      runId: "run"
-    },
-    context: {
-      headItemId: 1,
-      uiLocale: "zh-CN"
-    },
-    signal: AbortSignal.timeout(1_000)
-  });
-
-  assert.equal(result, true);
-  assert.equal(compactCalls, 1);
-  assert.equal(runStateCalls, 1);
-});
-
-test("compactContext 重试后 summary 为空会清理 retry notice", async () => {
-  const originalSetTimeout = globalThis.setTimeout;
-  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => {
-    return originalSetTimeout(handler, 0, ...args);
-  }) as typeof setTimeout;
-  try {
-    let summaryCalls = 0;
-    const runStateUpdates: Array<{ runNoticeText?: string }> = [];
-    class TestRunner extends AgentRunner {
-      protected override async generateCompactionSummary() {
-        summaryCalls += 1;
-        if (summaryCalls === 1) {
-          throw new Error("request failed: 500 summary unavailable");
-        }
-        return "";
-      }
-    }
-    const runner = new TestRunner(
-      {
-        async compactContext() {
-          throw new Error("compactContext should not be called when summary is empty");
-        },
-        async updateRunState(input: { runNoticeText?: string }) {
-          runStateUpdates.push(input);
-        }
-      } as any,
-      {} as any,
-      { info() {}, warn() {}, error() {} },
-      1
-    );
-
-    const result = await (runner as any).compactContext({
-      profile: { runtime: { modelRequestMaxRetries: 1 }, model: {}, provider: {} },
-      run: { workspaceId: "ws", sessionId: "sess", runId: "run" },
-      context: { headItemId: 1, uiLocale: "zh-CN" },
-      signal: AbortSignal.timeout(1_000)
-    });
-
-    assert.equal(result, false);
-    assert.ok(runStateUpdates.some((it) => String(it.runNoticeText || "").includes("Compaction failed, retrying")));
-    assert.equal(runStateUpdates.at(-1)?.runNoticeText, "");
-  } finally {
-    globalThis.setTimeout = originalSetTimeout;
-  }
-});
-
-test("compactContext 使用 Profile 的 120s 退避上限并在第六次重试等待 64000ms", async () => {
-  const originalSetTimeout = globalThis.setTimeout;
-  const observedDelays: number[] = [];
-  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, ms?: number, ...args: any[]) => {
-    if (typeof ms === "number" && ms > 0) observedDelays.push(ms);
-    return originalSetTimeout(handler, 0, ...args);
-  }) as typeof setTimeout;
-
-  try {
-    let compactCalls = 0;
-    const runStateUpdates: Array<{ runNoticeText?: string }> = [];
-    class TestRunner extends AgentRunner {
-      protected override async generateCompactionSummary() {
-        return "summary-ok";
-      }
-    }
-    const runner = new TestRunner(
-      {
-        async compactContext() {
-          compactCalls += 1;
-          if (compactCalls <= 6) throw new Error("request failed: 500 upstream unavailable");
-          return { compacted: true, summaryItemId: 10, archivedCount: 4 };
-        },
-        async updateRunState(input: { runNoticeText?: string }) {
-          runStateUpdates.push(input);
-        }
-      } as any,
-      {} as any,
-      { info() {}, warn() {}, error() {} },
-      1
-    );
-
-    const result = await (runner as any).compactContext({
-      profile: {
-        runtime: { modelRequestMaxRetries: 6, modelRequestRetryBackoffMaxMs: 120_000 },
-        model: {},
-        provider: {}
-      },
-      run: { workspaceId: "ws", sessionId: "sess", runId: "run" },
-      context: { headItemId: 1, uiLocale: "zh-CN" },
-      signal: AbortSignal.timeout(1_000)
-    });
-
-    assert.equal(result, true);
-    assert.equal(compactCalls, 7);
-    assert.deepEqual(observedDelays.slice(-6), [2_000, 4_000, 8_000, 16_000, 32_000, 64_000]);
-    assert.ok(runStateUpdates.some((update) => String(update.runNoticeText || "").includes("64s")));
+    assert.equal(commits, 0);
   } finally {
     globalThis.setTimeout = originalSetTimeout;
   }

@@ -42,12 +42,23 @@ export function buildAgentWorkerSpawnEnv(params: {
   };
 }
 
+/** Keep restart history until health *and* ready orchestration both succeed. */
+export async function completeAgentWorkerReady(params: {
+  generation: number;
+  onReady?: (generation: number) => void | Promise<void>;
+  resetRestartState(): void;
+}) {
+  await params.onReady?.(params.generation);
+  params.resetRestartState();
+}
+
 export class AgentWorkerProcessManager {
   private child: ChildProcess | null = null;
   private stopping = false;
   private restartTimer: NodeJS.Timeout | null = null;
   private restartAttempt = 0;
   private recentFailureTs: number[] = [];
+  private readyGeneration = 0;
 
   constructor(
     private readonly params: {
@@ -62,6 +73,7 @@ export class AgentWorkerProcessManager {
       responseValidation: "strict" | "warn";
       pidFilePath: string;
       logger: FastifyBaseLogger;
+      onReady?: (generation: number) => void | Promise<void>;
     }
   ) {}
 
@@ -121,8 +133,16 @@ export class AgentWorkerProcessManager {
 
     try {
       await this.waitUntilReady();
-      this.restartAttempt = 0;
-      this.recentFailureTs = [];
+      await completeAgentWorkerReady({
+        generation: ++this.readyGeneration,
+        onReady: this.params.onReady,
+        // A health endpoint alone is insufficient: a failed ready hook means
+        // this generation never became operational, so preserve restart backoff.
+        resetRestartState: () => {
+          this.restartAttempt = 0;
+          this.recentFailureTs = [];
+        },
+      });
     } catch (err) {
       this.params.logger.error({ err }, "agent-worker failed to become ready");
       this.child = null;

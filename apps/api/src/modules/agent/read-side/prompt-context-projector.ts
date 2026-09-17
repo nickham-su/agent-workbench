@@ -1,4 +1,4 @@
-import type { AgentContextItemRecord, AgentContextItemStatus, AgentContextToolName, AgentUiLocale } from "@agent-workbench/shared";
+import type { AgentUiLocale } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import type { PromptStaticProfile, RunPromptStatic } from "../prompt/prompt-static-assembler.js";
 import { RunPromptStaticCache } from "../prompt/run-prompt-static-cache.js";
 
@@ -20,12 +20,21 @@ export type PromptContextProjectorDependencies<Message> = {
   }) => Promise<RunPromptStatic>;
   buildRuntimeInstruction: (input: { uiLocale: AgentUiLocale | null }) => string;
   appendRuntimeConstraints: (systemStatic: string, runtimeInstruction: string) => string;
-  listVisibleItems: (input: { workspaceId: string; sessionId: string }) => AgentContextItemRecord[];
+  listPendingTools: (input: { workspaceId: string; sessionId: string; runId: string }) => Array<{
+    toolExecutionId: string;
+    callPartId: string;
+    assistantMessageId: string;
+    status: "queued" | "running";
+    toolName: string;
+    toolCallId?: string;
+    args: Record<string, unknown>;
+  }>;
   buildMessages: (input: {
     workspaceId: string;
     sessionId: string;
-    triggerItemId: number | null;
+    triggerMessageId: string | null;
     compactionSnippetUiLocale: AgentUiLocale | null;
+    pendingAssistantMessageIds: ReadonlySet<string>;
   }) => Promise<{ messages: Message[] }>;
 };
 
@@ -39,8 +48,8 @@ export class PromptContextProjector<Message> {
   async getPromptContextForRun(input: {
     workspaceId: string;
     sessionId: string;
-    session: { kind: "primary" | "subtask"; headItemId: number | null };
-    run: { runId: string; subtaskDepth: number | null; agentId: string; providerId: string; modelId: string; triggerItemId: number | null };
+    session: { kind: "primary" | "subtask"; headMessageId: string | null; revision: number };
+    run: { runId: string; subtaskDepth: number | null; agentId: string; providerId: string; modelId: string; triggerMessageId: string | null };
   }) {
     // Preserve the legacy order: profile validation precedes dynamic run-state reads,
     // including when an already-built static prompt is reused from cache.
@@ -67,35 +76,19 @@ export class PromptContextProjector<Message> {
       staticPrompt.systemStatic,
       this.dependencies.buildRuntimeInstruction({ uiLocale })
     );
-    const visible = this.dependencies.listVisibleItems({ workspaceId: input.workspaceId, sessionId: input.sessionId });
+    // Pending work is read before transcript construction. The Worker will execute it
+    // and continue; it must never send an incomplete tool-call turn to a model.
+    const pendingTools = this.dependencies.listPendingTools({ workspaceId: input.workspaceId, sessionId: input.sessionId, runId: input.run.runId });
     const { messages } = await this.dependencies.buildMessages({
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
-      triggerItemId: input.run.triggerItemId,
-      compactionSnippetUiLocale: uiLocale
+      triggerMessageId: input.run.triggerMessageId,
+      compactionSnippetUiLocale: uiLocale,
+      pendingAssistantMessageIds: new Set(pendingTools.map((tool) => tool.assistantMessageId))
     });
-    const pendingTools = visible
-      .filter((item) => item.runId === input.run.runId && item.kind === "tool")
-      .filter((item) => item.status === "queued" || item.status === "running")
-      .map((item) => {
-        if (item.output.type !== "tool") return null;
-        return {
-          itemId: item.id,
-          status: item.status,
-          toolName: item.output.toolName,
-          toolCallId: item.output.toolCallId,
-          args: item.output.args ?? {}
-        };
-      })
-      .filter((item): item is {
-        itemId: number;
-        status: AgentContextItemStatus;
-        toolName: AgentContextToolName;
-        toolCallId: string | undefined;
-        args: Record<string, unknown>;
-      } => item !== null);
     return {
-      headItemId: input.session.headItemId,
+      headMessageId: input.session.headMessageId,
+      sessionRevision: input.session.revision,
       system,
       messages,
       tools: staticPrompt.tools,

@@ -1,754 +1,356 @@
 <template>
   <div class="h-full min-h-0 flex flex-col">
-    <div
+    <header
       class="px-3 py-2 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] text-[0.9em] text-[color:var(--text-tertiary)]"
-      :title="sessionTitleText"
     >
-      <div class="flex items-center justify-between gap-2 min-w-0">
-        <div v-if="isSubtaskSession" class="flex items-center gap-2 min-w-0 flex-1">
-          <a-button
-            v-if="props.parentSessionId"
-            type="link"
-            size="small"
-            class="!px-0 shrink-0"
-            @click="onOpenParent"
-          >
-            {{ t("agent.client.backToParent") }}
-          </a-button>
-          <div class="min-w-0 flex items-center gap-2">
-            <span class="text-[14px] leading-none truncate text-[color:var(--text-secondary)]">{{ sessionTitleText }}</span>
-            <a-tooltip v-if="props.sessionReady" :title="t('agent.actions.setSessionTitle')">
-              <a-button
-                size="small"
-                type="text"
-                class="!px-1 shrink-0 !text-[color:var(--text-tertiary)] hover:!text-[color:var(--text-secondary)]"
-                :aria-label="t('agent.actions.setSessionTitle')"
-                @click.stop="onOpenTitleSetting"
-              >
-                <template #icon><EditOutlined class="text-[12px]" /></template>
-              </a-button>
-            </a-tooltip>
-            <template v-if="headerTokensText">
-              <span class="leading-none whitespace-nowrap">·</span>
-              <span class="leading-none whitespace-nowrap tabular-nums">{{ headerTokensText }}</span>
-            </template>
-            <template v-if="currentRunElapsedText">
-              <span class="leading-none whitespace-nowrap">·</span>
-              <span class="leading-none whitespace-nowrap tabular-nums">{{ currentRunElapsedText }}</span>
-            </template>
-          </div>
-        </div>
-        <div
-          v-else
-          class="min-w-0 flex-1 flex items-center gap-2"
+      <div class="flex items-center gap-2 min-w-0">
+        <a-button
+          v-if="isSubtaskSession && props.parentSessionId"
+          type="link"
+          size="small"
+          class="!px-0 shrink-0"
+          @click="emit('open-parent', props.parentSessionId)"
+          >{{ t("agent.client.backToParent") }}</a-button
         >
-          <div class="text-[14px] leading-none truncate text-[color:var(--text-secondary)]">{{ sessionTitleText }}</div>
-          <a-tooltip v-if="props.sessionReady" :title="t('agent.actions.setSessionTitle')">
-            <a-button
-              size="small"
-              type="text"
-              class="!px-1 shrink-0 !text-[color:var(--text-tertiary)] hover:!text-[color:var(--text-secondary)]"
-              :aria-label="t('agent.actions.setSessionTitle')"
-              @click.stop="onOpenTitleSetting"
-            >
-              <template #icon><EditOutlined class="text-[12px]" /></template>
-            </a-button>
-          </a-tooltip>
-          <template v-if="headerTokensText">
-            <span class="leading-none whitespace-nowrap">·</span>
-            <span class="leading-none whitespace-nowrap tabular-nums">{{ headerTokensText }}</span>
-          </template>
-          <template v-if="currentRunElapsedText">
-            <span class="leading-none whitespace-nowrap">·</span>
-            <span class="leading-none whitespace-nowrap tabular-nums">{{ currentRunElapsedText }}</span>
-          </template>
+        <div class="min-w-0 flex-1 truncate text-[color:var(--text-secondary)]">
+          {{ sessionTitleText }}
         </div>
-        <div class="shrink-0 flex items-center gap-1">
-          <span class="leading-none whitespace-nowrap font-mono text-[12px] text-[color:var(--text-tertiary)]">
-            {{ props.sessionId }}
-          </span>
+        <span v-if="runElapsedText" class="whitespace-nowrap tabular-nums"
+          >· {{ runElapsedText }}</span
+        >
+        <a-tooltip v-if="sessionModelLabel" :title="sessionModelLabel">
           <a-button
+            v-if="!isSubtaskSession"
             size="small"
             type="text"
-            class="!px-1 !text-[color:var(--text-tertiary)] hover:!text-[color:var(--text-tertiary)]"
-            :aria-label="t('agent.client.copySessionId')"
-            @click="onCopySessionId"
-          >
-            <template #icon><CopyOutlined class="text-[12px]" /></template>
-          </a-button>
-        </div>
+            :disabled="props.sessionModelMutationPending"
+            @click="openModelModal"
+            ><template #icon><RobotOutlined /></template
+          ></a-button>
+        </a-tooltip>
+        <a-tooltip :title="t('agent.client.contextManagerTitle')"
+          ><a-button size="small" type="text" @click="openContextManager"
+            ><template #icon><SettingOutlined /></template></a-button
+        ></a-tooltip>
+        <a-tooltip
+          v-if="!isSubtaskSession"
+          :title="t('agent.client.agentEnablementTitle')"
+          ><a-button size="small" type="text" @click="openAgentEnablement"
+            ><template #icon><TeamOutlined /></template></a-button
+        ></a-tooltip>
+        <a-button
+          v-if="props.sessionReady"
+          type="text"
+          size="small"
+          :aria-label="t('agent.actions.setSessionTitle')"
+          @click="emit('open-title-setting')"
+          ><template #icon><EditOutlined /></template
+        ></a-button>
       </div>
-    </div>
+    </header>
 
-    <div class="agent-message-region relative flex-1 min-h-0">
-      <div
+    <section class="relative flex-1 min-h-0">
+      <main
         ref="scrollEl"
-        class="agent-message-list h-full min-h-0 overflow-auto p-3 bg-[var(--panel-bg)]"
+        class="h-full min-h-0 overflow-auto p-3 bg-[var(--panel-bg)]"
         :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
-        @scroll.passive="onMessageListScroll"
-        @wheel.passive="onMessageListWheel"
-      >
-      <!--
-        顶部提示条固定占位高度,避免 loadingEarlier/reachedTop 在插入/移除时改变滚动内容高度,
-        导致 prepend 历史消息时出现额外的 scrollTop 跳动.
-      -->
-      <div v-if="displayItems.length > 0" class="pt-1 pb-1 flex items-center gap-2" style="height: 1.7em;">
-        <template v-if="loadingEarlier || showReachedTopNotice">
-          <div class="h-px flex-1 bg-[color:var(--border-color-secondary)]" />
-          <div class="text-[0.9em] text-[color:var(--text-tertiary)] whitespace-nowrap">
-            {{ loadingEarlier ? t("common.loading") : t("agent.client.reachedTop") }}
-          </div>
-          <div class="h-px flex-1 bg-[color:var(--border-color-secondary)]" />
-        </template>
-      </div>
-      <div v-if="displayItems.length === 0" class="h-full flex flex-col items-center justify-center gap-3 text-[color:var(--text-tertiary)]">
-        <div>{{ t("agent.client.welcome") }}</div>
-        <a-button v-if="props.canChooseSession" type="link" size="small" class="!px-0" @click="onChooseSession">
-          {{ t("agent.client.chooseSession") }}
-        </a-button>
-      </div>
-      <div v-else class="agent-message-list-content">
-        <div
-          v-for="(item, index) in displayItems"
-          :key="item.id"
-          :class="[
-            'agent-message-row',
-            item.role === 'user' && !isSubtaskSession ? 'has-external-message-controls pt-4' : ''
-          ]"
-          :data-msg-id="item.id"
-          :style="{ marginTop: `${messageGapTopAt(index)}px` }"
-        >
-          <div v-if="item.boundaryReason" class="pb-1 flex items-center gap-2">
-            <div class="h-px flex-1 bg-blue-500/40" />
-            <div class="text-[0.9em] text-blue-600 whitespace-nowrap">{{ t("agent.client.contextBoundary") }}</div>
-            <div class="h-px flex-1 bg-blue-500/40" />
-          </div>
-
-          <div
-            class="agent-message-item relative rounded p-2"
-            :class="[
-              item.role === 'tool'
-                ? isRichToolCard(item)
-                  ? 'is-tool-message border-0 bg-transparent px-0 py-0'
-                  : 'is-tool-message border-0 bg-transparent pl-2 pr-0 py-0.5'
-                : '',
-              item.role === 'user' ? 'is-user-message border border-blue-500/60 bg-blue-500/20' : 'border-0',
-              item.role === 'assistant' ? 'is-assistant-message bg-[var(--panel-bg)]' : '',
-              item.role === 'system' ? 'is-system-message bg-[var(--panel-bg)]' : '',
-              item.role === 'user' && item.tone === 'error' ? '!border-red-500/70 !bg-red-500/10' : '',
-              item.role !== 'user' && item.role !== 'tool' && item.tone === 'error' ? 'bg-red-500/5' : '',
-              isTextMessageClamped(item.id)
-                ? 'is-text-clamped border border-[var(--border-color-secondary)] bg-transparent'
-                : ''
-            ]"
-          >
-            <div
-              v-if="
-                (item.role === 'user'
-                  || (item.role === 'assistant' && isTerminalStatus(item.status) && item.text.trim().length > 0))
-                && !isSubtaskSession
-              "
-              class="message-controls absolute z-10 flex items-center gap-0.5"
-              :class="
-                item.role === 'user'
-                  ? 'message-controls-outside right-2 -top-4'
-                  : 'message-controls-inside right-2 top-0.5'
-              "
-            >
-              <span class="message-id">#{{ item.id }}</span>
-              <a-tooltip :title="t('agent.client.fork')" placement="top">
-                <a-button
-                  size="small"
-                  type="text"
-                  :loading="actionLoading === 'fork' && actionTargetId === item.id"
-                  :aria-label="t('agent.client.fork')"
-                  @click="onForkFromMessage(item.id)"
-                >
-                  <template #icon><ForkOutlined /></template>
-                </a-button>
-              </a-tooltip>
-              <a-tooltip v-if="item.archiveAt == null" :title="t('agent.client.revert')" placement="top">
-                <a-button
-                  size="small"
-                  type="text"
-                  :loading="actionLoading === 'revert' && actionTargetId === item.id"
-                  :aria-label="t('agent.client.revert')"
-                  @click="onRevertToMessage(item.id)"
-                >
-                  <template #icon><RollbackOutlined /></template>
-                </a-button>
-              </a-tooltip>
-            </div>
-
-            <div
-              v-if="isSubtaskCard(item)"
-              class="subtask-card rounded border border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] p-2"
-              :class="[
-                item.subtaskSessionId ? 'is-clickable' : 'is-disabled',
-                item.tone === 'error' ? 'border-red-500/40 bg-red-500/5' : ''
-              ]"
-              @click="onOpenSubtask(item.subtaskSessionId)"
-            >
-              <div class="flex items-center gap-2">
-                <div class="font-semibold">
-                  <DoubleRightOutlined class="subtask-title-icon mr-0.5 text-blue-500" />
-                  {{ t("agent.client.subtaskCardTitle") }}: {{ item.subtaskDescription || "-" }}
-                </div>
-                <component
-                  :is="subtaskStatusIcon(subtaskDisplayStatus(item))"
-                  class="shrink-0"
-                  :class="subtaskStatusIconClass(subtaskDisplayStatus(item))"
-                  :spin="subtaskStatusSpin(subtaskDisplayStatus(item))"
-                />
-              </div>
-              <div class="pt-0.5 text-[color:var(--text-secondary)] flex flex-wrap items-center gap-x-3 gap-y-0.5">
-                <span>
-                  {{ t("agent.client.subtaskAgent") }}: {{ item.subtaskAgentName || item.subtaskAgentId || "-" }}
-                </span>
-                <span>
-                  {{ t("agent.client.subtaskMode") }}: {{ formatSubtaskMode(item.subtaskMode) }}
-                </span>
-                <span v-if="item.subtaskRun && subtaskStartedAtText(item.subtaskRun.startedAt)">
-                  {{ t("agent.client.subtaskStartedAt") }}: {{ subtaskStartedAtText(item.subtaskRun.startedAt) }}
-                </span>
-                <span v-if="item.subtaskRun && subtaskDurationText(item.subtaskRun.durationMs)">
-                  {{ t("agent.client.subtaskDuration") }}: {{ subtaskDurationText(item.subtaskRun.durationMs) }}
-                </span>
-              </div>
-              <div class="pt-0.5 text-[color:var(--text-secondary)] flex items-center gap-1 min-w-0">
-                {{ t("agent.client.subtaskSessionId") }}: {{ item.subtaskSessionId || "-" }}
-                <a-button
-                  v-if="item.subtaskSessionId"
-                  size="small"
-                  type="text"
-                  class="!px-1 !text-[color:var(--text-tertiary)] hover:!text-[color:var(--text-tertiary)] shrink-0"
-                  :aria-label="t('agent.client.copySessionId')"
-                  @click="onCopySubtaskSessionId(item.subtaskSessionId, $event)"
-                >
-                  <template #icon><CopyOutlined class="text-[12px]" /></template>
-                </a-button>
-              </div>
-              <div v-if="item.toolError" class="pt-1 text-red-500">
-                Error: {{ item.toolError }}
-              </div>
-            </div>
-            <AgentTodoListCard
-              v-else-if="isTodolistCard(item) && item.todoList"
-              :collapsed="isTodoCollapsed(item.id)"
-              :goal="item.todoList.goal"
-              :summary="item.todoList.summary"
-              :todos="item.todoList.todos"
-              :error-text="item.toolError"
-              @toggle-collapse="onToggleTodoCollapse(item.id)"
-            />
-            <AgentApplyPatchCard
-              v-else-if="isApplyPatchCard(item) && item.applyPatch"
-              :workspace-id="props.workspaceId"
-              :tool-id="props.toolId"
-              :session-id="props.sessionId"
-              :item-id="item.id"
-              :tool-call-id="item.toolCallId"
-              :summary="item.applyPatch.summary"
-              :files="item.applyPatch.files"
-              :omitted-files="item.applyPatch.omittedFiles"
-              :error-text="item.toolError"
-              @request-measure="onRequestVirtualMeasure(item.id)"
-            />
-            <AgentWriteCard
-              v-else-if="isWriteCard(item) && item.writeResult"
-              :workspace-id="props.workspaceId"
-              :tool-id="props.toolId"
-              :session-id="props.sessionId"
-              :item-id="item.id"
-              :tool-call-id="item.toolCallId"
-              :summary="item.writeResult"
-              :error-text="item.toolError"
-              @request-measure="onRequestVirtualMeasure(item.id)"
-            />
-            <AgentScratchpadCard
-              v-else-if="isScratchpadCard(item)"
-              :content="item.scratchpadContent || ''"
-              :error-text="item.toolError"
-            />
-            <div v-else-if="item.role === 'assistant'" class="flex flex-col gap-1">
-              <div v-if="item.reasoningText && item.reasoningText.trim().length > 0" class="assistant-reasoning-block">
-                <AssistantMarkdownMessage :text="item.reasoningText" :message-id="item.id" :streaming="!isTerminalStatus(item.status)" class="assistant-reasoning-markdown" section-key="reasoning" />
-              </div>
-              <div v-if="item.toolError" class="text-red-500 text-[0.92em]">
-                Error: {{ item.toolError }}
-              </div>
-              <AssistantMarkdownMessage
-                v-if="item.text.trim().length > 0"
-                :text="item.text"
-                :message-id="item.id"
-                :streaming="!isTerminalStatus(item.status)"
-                :tone="item.tone"
-                section-key="body"
-              />
-              <div v-if="!isTerminalStatus(item.status)" class="flex items-center gap-2 text-[0.9em] text-[color:var(--text-tertiary)]">
-                <LoadingOutlined spin />
-              </div>
-            </div>
-            <AgentUserMessage
-              v-else-if="item.role === 'user'"
-                :text="item.text"
-                :attachments="item.attachments || []"
-                :tone="item.tone"
-                @preview="openAttachmentPreview(item.attachments || [])"
-              />
-            <AgentTextMessage
-              v-else-if="isBashTextMessage(item)"
-              :text="item.text"
-              :message-id="item.id"
-              :expanded="isTextMessageExpanded(item.id)"
-              :max-height-px="100"
-              :tone="item.tone"
-              :class="bashTextClass(item.status)"
-              @toggle="(expanded) => onToggleTextMessageExpanded(item.id, expanded)"
-              @request-measure="(messageId) => onRequestVirtualMeasure(messageId)"
-              @clamp-change="(clamped) => onTextMessageClampChange(item.id, clamped)"
-            >
-              <template v-if="bashStatusIcon(item.status)" #suffix>
-                <component
-                  :is="bashStatusIcon(item.status)"
-                  class="inline-block align-text-bottom ml-1"
-                  :class="bashStatusIconClass(item.status)"
-                  :spin="bashStatusSpin(item.status)"
-                />
-              </template>
-            </AgentTextMessage>
-            <AgentTextMessage
-              v-else-if="item.role === 'tool' || item.role === 'system'"
-              :text="item.text"
-              :message-id="item.id"
-              :expanded="isTextMessageExpanded(item.id)"
-              :max-height-px="100"
-              :tone="item.tone"
-              @toggle="(expanded) => onToggleTextMessageExpanded(item.id, expanded)"
-              @request-measure="(messageId) => onRequestVirtualMeasure(messageId)"
-              @clamp-change="(clamped) => onTextMessageClampChange(item.id, clamped)"
-            />
-            <div
-              v-else
-              class="whitespace-pre-wrap break-words"
-              :class="[item.tone === 'error' ? 'text-red-500' : '']"
-            >
-              {{ item.text }}
-            </div>
-          </div>
-        </div>
-        <div class="agent-message-bottom-spacer" :style="{ height: `${MESSAGE_LIST_BOTTOM_SPACER_PX}px` }" />
-      </div>
-
-      </div>
-      <button
-        v-if="showScrollToBottomButton"
-        type="button"
-        class="agent-scroll-to-bottom-button"
-        :aria-label="t('agent.client.scrollToBottom')"
-        @click="onScrollToBottomClick"
-      >
-        ↓
-      </button>
-    </div>
-
-    <div v-if="runNoticeText" class="px-3 py-2 border-t border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
-      <div :style="{ fontSize: 'var(--agent-font-size, 13px)' }">
-        <div
-          class="text-[0.9em] text-amber-600 whitespace-nowrap overflow-hidden text-ellipsis"
-          :title="runNoticeText"
-        >
-          {{ runNoticeText }}
-        </div>
-      </div>
-    </div>
-
-    <div
-      v-if="!isSubtaskSession"
-      class="p-2 border-t border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]"
-      :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
-    >
-      <div
-        v-if="!sending && activeInputHint.visible"
-        class="mb-2"
+        @scroll.passive="onScroll"
       >
         <div
-          ref="inputCandidateListEl"
-          :id="inputCandidateListId"
-          role="listbox"
-          class="input-candidate-list max-h-60 overflow-y-auto overscroll-contain"
+          v-if="conversation.length === 0"
+          class="h-full flex flex-col items-center justify-center gap-3 text-[color:var(--text-tertiary)]"
         >
-          <button
-            v-for="(candidate, candidateIndex) in activeInputHint.items"
-            :key="candidate.id"
-            type="button"
-            :id="inputCandidateDomId(candidateIndex)"
-            role="option"
-            :aria-selected="candidate.id === activeInputHint.activeId"
-            :data-input-candidate-id="candidate.id"
-            class="input-candidate-item w-full rounded px-2 py-0.5 text-left text-[color:var(--text-secondary)] opacity-70"
-            :class="candidate.id === activeInputHint.activeId ? 'is-active bg-blue-500/10 text-white opacity-100' : ''"
-            @click="onPickInputCandidate(candidate)"
-          >
-            <div v-if="candidate.kind === 'slash' && candidate.command" class="flex items-center gap-2 min-w-0">
-              <span class="font-mono text-[0.9em] whitespace-nowrap">{{ candidate.command.usage }}</span>
-              <span class="text-[0.85em] min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{{ t(candidate.command.summaryKey) }}</span>
-              <span v-if="candidate.command.strictOnly" class="text-[0.8em] whitespace-nowrap">
-                {{ t("agent.client.slashCommandHintStrictOnly") }}
-              </span>
-            </div>
-            <div v-else class="flex items-center gap-2 min-w-0">
-              <span class="font-mono text-[0.9em] min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{{ candidate.label }}</span>
-              <span
-                v-if="candidate.kind !== 'slash' && candidate.description"
-                class="text-[0.85em] min-w-0 overflow-hidden text-ellipsis whitespace-nowrap"
-              >
-                {{ candidate.description }}
-              </span>
-            </div>
-          </button>
-          <div v-if="!activeInputHint.loading && activeInputHint.items.length === 0 && !(activeInputHint.kind === 'slash' && promptCommandError)" class="px-2 py-0.5 text-[0.9em] text-[color:var(--text-tertiary)]">
-            {{ activeInputHint.emptyText }}
-          </div>
-          <div
-            v-if="activeInputHint.kind === 'slash' && !activeInputHint.loading && promptCommandError"
-            class="px-2 py-0.5 text-[0.9em] text-[color:var(--text-tertiary)]"
-            :title="promptCommandError"
-          >
-            {{ t("agent.client.promptCommandsLoadFailedHint") }}
-          </div>
-        </div>
-      </div>
-
-        <div
-          v-if="sending"
-          class="mb-1 flex items-center gap-1.5 text-[0.85em] text-[color:var(--text-tertiary)]"
-          role="status"
-          aria-live="polite"
-        >
-          <a-spin size="small" /> {{ sendingStatusText }}
-        </div>
-        <div v-if="pendingImages.length" class="flex flex-wrap gap-1 mb-1">
-          <a-tag
-            v-for="image in pendingImages"
-            :key="image.id"
-            :closable="!sending"
-            @close.prevent="removePendingImage(image.id)"
-          >
-            <template #icon><FileImageOutlined /></template>
-            {{ formatPendingAgentImageLabel(image) }}
-          </a-tag>
-        </div>
-        <div v-if="processingPastedImages > 0" class="mb-1 text-[0.85em] text-[color:var(--text-tertiary)]">
-          {{ t("agent.client.imagePasteProcessing") }}
-        </div>
-        <div>
-          <a-textarea
-            ref="inputEl"
-            v-model:value="draft"
-            class="agent-input-textarea"
-            role="combobox"
-            aria-autocomplete="list"
-            :aria-expanded="activeInputHint.visible"
-            :aria-controls="activeInputHint.visible ? inputCandidateListId : undefined"
-            :aria-activedescendant="activeInputHint.visible && activeInputHint.activeId ? inputCandidateDomId(activeInputHint.items.findIndex((candidate) => candidate.id === activeInputHint.activeId)) : undefined"
-            :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
-            :disabled="!hasAvailableAgents || sessionModelMutationPending"
-            :readonly="sending || sessionModelMutationPending"
-            :auto-size="{ minRows: 2, maxRows: 6 }"
-            :placeholder="inputPlaceholder"
-            @keydown="onInputKeydown"
-            @paste="onImagePaste"
-            @keyup="onInputCursorEvent"
-            @click="onInputCursorEvent"
-            @focus="onInputCursorEvent"
-          />
-        </div>
-      <div class="pt-2">
-        <div class="flex items-center gap-2">
-          <div v-if="hasAvailableAgents" class="flex items-center gap-0.5 min-w-0">
-            <a-select
-              :value="effectiveAgentId"
-              :options="props.agentOptions"
-              size="small"
-              :disabled="sessionModelMutationPending"
-              style="min-width: 180px; max-width: 320px"
-              @update:value="onAgentChange"
-            />
-            <div v-if="hasAvailableAgents" class="min-w-0 max-w-[360px] flex items-center ml-1 mr-2">
-              <a-tooltip :title="sessionModelTooltip" placement="top" :mouse-enter-delay="0.45">
-                <a-button
-                  type="text"
-                  size="small"
-                  class="!px-0.5 max-w-full min-w-0"
-                  :loading="sessionModelStateLoading"
-                  :disabled="sessionModelMutationPending"
-                  :title="sessionModelLabel"
-                  :aria-label="t('agent.client.modelEditTooltip')"
-                  @click="onOpenAgentModelModal"
-                >
-                  <span
-                    class="block max-w-full truncate"
-                    :class="sessionModelPresentation.kind === 'ready' && sessionModelPresentation.source === 'session_override'
-                      ? 'text-[color:var(--info-color)]'
-                      : ''"
-                  >{{ sessionModelLabel }}</span>
-                </a-button>
-              </a-tooltip>
-            </div>
-            <div class="flex items-center gap-1">
-              <a-tooltip :title="t('agent.client.agentEnablementTooltip')" placement="top" :mouse-enter-delay="0.45">
-                <a-button
-                  size="small"
-                  type="text"
-                  class="!px-1"
-                  :aria-label="t('agent.client.agentEnablementTitle')"
-                  @click="onOpenAgentEnablementModal"
-                >
-                  <template #icon><RobotOutlined /></template>
-                </a-button>
-              </a-tooltip>
-              <a-tooltip :title="t('agent.client.contextManagerTooltip')" placement="top" :mouse-enter-delay="0.45">
-                <a-button
-                  size="small"
-                  type="text"
-                  class="!px-1"
-                  :aria-label="t('agent.client.contextManagerTitle')"
-                  @click="onOpenContextManagerModal"
-                >
-                  <template #icon><AppstoreOutlined /></template>
-                </a-button>
-              </a-tooltip>
-            </div>
-          </div>
-          <div v-else class="flex items-center gap-2 text-[0.9em] text-[color:var(--text-tertiary)]">
-            <span>{{ t("agent.client.noAgentHint") }}</span>
-            <a-button type="link" size="small" class="!px-0" @click="goAgentProfiles">
-              {{ t("agent.client.goCreateAgent") }}
-            </a-button>
-            <div class="flex items-center gap-1">
-              <a-tooltip :title="t('agent.client.agentEnablementTooltip')" placement="top" :mouse-enter-delay="0.45">
-                <a-button
-                  size="small"
-                  type="text"
-                  class="!px-1"
-                  :aria-label="t('agent.client.agentEnablementTitle')"
-                  @click="onOpenAgentEnablementModal"
-                >
-                  <template #icon><RobotOutlined /></template>
-                </a-button>
-              </a-tooltip>
-              <a-tooltip :title="t('agent.client.contextManagerTooltip')" placement="top" :mouse-enter-delay="0.45">
-                <a-button
-                  size="small"
-                  type="text"
-                  class="!px-1"
-                  :aria-label="t('agent.client.contextManagerTitle')"
-                  @click="onOpenContextManagerModal"
-                >
-                  <template #icon><AppstoreOutlined /></template>
-                </a-button>
-              </a-tooltip>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <a-modal
-      :open="agentEnablementModalVisible"
-      :title="t('agent.client.agentEnablementTitle')"
-      :ok-text="t('common.save')"
-      :cancel-text="t('common.cancel')"
-      :confirm-loading="agentEnablementSaving"
-      :ok-button-props="{ disabled: agentEnablementLoading || !!agentEnablementError }"
-      @ok="onSaveAgentEnablementSettings"
-      @cancel="agentEnablementModalVisible = false"
-    >
-      <div class="flex items-center justify-between gap-2 mb-3">
-        <div class="text-[0.9em] text-[color:var(--text-tertiary)]">
-          {{ t("agent.client.agentEnablementHint") }}
-        </div>
-        <div class="flex items-center gap-2">
-          <a-button type="link" size="small" class="!px-0" @click="onSelectAllAgents">
-            {{ t("agent.client.selectAll") }}
-          </a-button>
+          <div>{{ t("agent.client.welcome") }}</div>
           <a-button
+            v-if="props.canChooseSession"
             type="link"
             size="small"
-            class="!px-0"
-            @click="onSelectNoAgents"
+            @click="emit('choose-session')"
+            >{{ t("agent.client.chooseSession") }}</a-button
           >
-            {{ t("agent.client.selectNone") }}
-          </a-button>
         </div>
-      </div>
-      <div v-if="agentEnablementLoading" class="py-6 text-center text-[color:var(--text-tertiary)]">
-        {{ t("common.loading") }}
-      </div>
-      <div v-else-if="agentEnablementError" class="py-3 text-red-500 whitespace-pre-wrap break-words">
-        {{ agentEnablementError }}
-      </div>
-      <div v-else-if="agentEnablementCandidates.length === 0" class="py-6 text-center text-[color:var(--text-tertiary)]">
-        {{ t("agent.client.agentEnablementEmpty") }}
-      </div>
-      <div v-else class="max-h-[50vh] overflow-auto">
-        <a-checkbox-group v-model:value="agentEnablementSelectedIds" class="w-full">
-          <div class="flex flex-col gap-2">
-            <label
-              v-for="item in agentEnablementCandidates"
-              :key="item.id"
-              class="external-skill-root-item block w-full border border-[var(--border-color-secondary)] rounded px-2 py-1.5"
+        <div v-else class="flex flex-col gap-3">
+          <article
+            v-for="row in conversation"
+            :key="row.id"
+            class="relative rounded p-2"
+            :class="messageClass(row)"
+          >
+            <AgentMessageActions
+              v-if="showMessageControls(row)"
+              :disabled="isSessionMessageMutationPending"
+              :fork-label="t('agent.client.fork')"
+              :revert-label="t('agent.client.revert')"
+              @fork="onFork(row.message.id)"
+              @revert="onRevert(row.message.id)"
+            />
+            <AssistantMarkdownMessage
+              v-if="
+                row.part?.type === 'text' && row.message.type === 'assistant'
+              "
+              :text="row.part.text"
+              :message-id="row.message.id"
+              :streaming="row.message.status === 'streaming'"
+              :tone="row.message.status === 'failed' ? 'error' : 'normal'"
+            />
+            <template v-else-if="row.part?.type === 'reasoning'">
+              <div class="mb-1 text-[0.85em] text-[color:var(--text-tertiary)]">
+                {{ t("agent.client.reasoning") }}
+              </div>
+              <AssistantMarkdownMessage
+                :text="row.part.text"
+                :message-id="row.message.id"
+                :streaming="row.message.status === 'streaming'"
+                class="assistant-reasoning-markdown"
+                section-key="reasoning"
+              />
+            </template>
+            <AgentUserMessage
+              v-else-if="
+                row.part?.type === 'text' && row.message.type === 'user'
+              "
+              :text="row.part.text"
+            />
+            <a-button
+              v-else-if="row.part?.type === 'image'"
+              type="link"
+              size="small"
+              class="!px-0"
+              @click="
+                openAttachmentPreview([
+                  {
+                    attachmentId: row.part.attachmentId,
+                    filename: row.part.filename,
+                    mediaType: row.part.mediaType,
+                  },
+                ])
+              "
+              ><template #icon><FileImageOutlined /></template
+              >{{ row.part.filename }}</a-button
             >
-              <a-checkbox :value="item.id" class="external-skill-root-checkbox w-full">
-                <span class="external-skill-root-content">
-                  <span class="external-skill-root-name text-[color:var(--text-primary)]" :title="item.name">{{ item.name }}</span>
-                  <span class="external-skill-root-count text-[0.85em] text-[color:var(--text-tertiary)]">
-                    {{ agentScopeLabel(item.scope) }}
-                  </span>
-                </span>
-              </a-checkbox>
-            </label>
-          </div>
-        </a-checkbox-group>
+            <AgentConversationToolCall
+              v-else-if="row.part?.type === 'tool_call'"
+              :workspace-id="props.workspaceId"
+              :tool-id="props.toolId"
+              :session-id="props.sessionId"
+              :part="row.part"
+              :execution="row.execution"
+              :detail="
+                row.execution
+                  ? detailByExecutionId[row.execution.id]
+                  : undefined
+              "
+              :loading="
+                row.execution ? detailLoading.has(row.execution.id) : false
+              "
+              @toggle-detail="toggleToolDetail"
+              @open-subtask="emit('open-subtask', $event)"
+            />
+            <div
+              v-else-if="row.message.status === 'streaming'"
+              class="text-[color:var(--text-tertiary)]"
+            >
+              <LoadingOutlined spin />
+            </div>
+          </article>
+        </div>
+      </main>
+      <a-button
+        v-if="showScrollToBottom"
+        class="absolute bottom-3 right-5"
+        shape="circle"
+        @click="scrollToBottom(true)"
+        ><template #icon><DownOutlined /></template
+      ></a-button>
+    </section>
+
+    <footer
+      class="relative border-t border-[var(--border-color-secondary)] p-2"
+    >
+      <div
+        v-if="runState.runNoticeText"
+        class="mb-1 text-[0.85em] text-[color:var(--text-tertiary)]"
+      >
+        {{ runState.runNoticeText }}
       </div>
+      <div v-if="pendingImages.length" class="mb-2 flex flex-wrap gap-2">
+        <a-tag
+          v-for="image in pendingImages"
+          :key="image.id"
+          closable
+          @close="removePendingImage(image.id)"
+          ><FileImageOutlined /> {{ image.filename }} ·
+          {{ formatPendingAgentImageLabel(image) }}</a-tag
+        >
+      </div>
+      <a-textarea
+        ref="inputEl"
+        v-model:value="draft"
+        :disabled="!props.sessionReady || sending || isSubtaskSession"
+        :placeholder="inputPlaceholder"
+        :auto-size="{ minRows: 2, maxRows: 6 }"
+        @input="onInputChanged"
+        @click="syncInputCaret"
+        @keyup="syncInputCaret"
+        @paste="onImagePaste"
+        @keydown="onInputKeydown"
+      />
+      <div
+        v-if="inputCandidates.length"
+        class="absolute left-2 right-2 bottom-[calc(100%+2px)] rounded border border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] shadow-lg overflow-hidden"
+        role="listbox"
+        :id="inputCandidateListId"
+      >
+        <button
+          v-for="(item, index) in inputCandidates"
+          :id="createInputCandidateDomId(inputCandidateListId, index)"
+          :key="item.id"
+          class="block w-full px-3 py-2 text-left hover:bg-[var(--hover-bg)]"
+          :class="{ 'bg-[var(--hover-bg)]': item.id === selectedCandidateId }"
+          @mousedown.prevent="pickCandidate(item)"
+        >
+          <span>{{ item.label }}</span
+          ><span
+            v-if="item.description"
+            class="ml-2 text-[0.85em] text-[color:var(--text-tertiary)]"
+            >{{ item.description }}</span
+          >
+        </button>
+      </div>
+      <div class="mt-2 flex items-center gap-2">
+        <a-select
+          v-if="!isSubtaskSession"
+          :value="effectiveAgentId || undefined"
+          class="min-w-32 max-w-52"
+          size="small"
+          :options="props.agentOptions"
+          @update:value="
+            (value: string | undefined) =>
+              emit('update:modelValue', value || null)
+          "
+        />
+        <span
+          v-if="processingPastedImages"
+          class="text-[0.85em] text-[color:var(--text-tertiary)]"
+          >{{ t("common.loading") }}</span
+        >
+        <div class="flex-1" />
+        <a-button
+          v-if="runState.status === 'running'"
+          size="small"
+          :loading="cancelling"
+          @click="onCancel"
+          >{{ t("agent.client.cancel") }}</a-button
+        >
+        <a-button
+          type="primary"
+          size="small"
+          :loading="sending"
+          :disabled="
+            (!draft.trim() && pendingImages.length === 0) ||
+            !props.sessionReady ||
+            isSubtaskSession
+          "
+          @click="onSend"
+          >{{ t("agent.client.send") }}</a-button
+        >
+      </div>
+    </footer>
+
+    <AgentAttachmentPreviewModal
+      :open="attachmentPreviewVisible"
+      :loading="previewLoading"
+      :error="previewError"
+      :url="previewUrl"
+      :index="previewIndex"
+      :count="previewAttachments.length"
+      @select="showPreviewAt"
+      @close="closeAttachmentPreview"
+    />
+
+    <a-modal
+      v-model:open="modelModalVisible"
+      :title="t('agent.client.modelEditTitle')"
+      :confirm-loading="modelSaving"
+      @ok="saveModelOverride"
+    >
+      <a-select
+        v-model:value="modelPath"
+        class="w-full"
+        :options="modelOptions"
+        :loading="modelLoading"
+      />
+      <div v-if="modelError" class="mt-2 text-red-500">{{ modelError }}</div>
+      <a-button
+        class="mt-3"
+        danger
+        size="small"
+        :disabled="!sessionModelState?.override"
+        :loading="modelResetting"
+        @click="resetModelOverride"
+        >{{ t("agent.client.modelEditReset") }}</a-button
+      >
     </a-modal>
 
     <a-modal
-      :open="agentModelModalVisible"
-      :title="t('agent.client.modelEditTitle')"
-      :ok-text="t('common.save')"
-      :cancel-text="t('common.cancel')"
-      :confirm-loading="agentModelSaving"
-      :ok-button-props="{ disabled: agentModelLoading || !!agentModelError || !agentModelCanSave || agentModelSaving || agentModelResetting }"
-      :cancel-button-props="{ disabled: agentModelSaving || agentModelResetting }"
-      @ok="onSaveAgentModel"
-      @cancel="onCloseAgentModelModal"
+      v-model:open="contextModalVisible"
+      :title="t('agent.client.contextManagerTitle')"
+      :confirm-loading="contextSaving"
+      @ok="saveContextSettings"
     >
-      <div class="text-[0.9em] text-[color:var(--text-tertiary)] mb-3">
-        {{ t("agent.client.modelEditHint") }}
-      </div>
-      <div v-if="agentModelLoading" class="py-6 text-center text-[color:var(--text-tertiary)]">
-        {{ t("common.loading") }}
-      </div>
-      <div v-else-if="agentModelError" class="py-3 text-red-500 whitespace-pre-wrap break-words">
-        {{ agentModelError }}
+      <div v-if="contextLoading" class="py-5 text-center">
+        <LoadingOutlined spin />
       </div>
       <div v-else>
-        <a-form layout="vertical">
-          <a-form-item :label="t('settings.agentProfiles.fields.defaultModel')">
-            <a-cascader
-              v-model:value="agentModelFormPath"
-              :options="agentModelCascaderOptions"
-              :placeholder="t('settings.agentProfiles.agentForm.defaultModelCascaderPlaceholder')"
-              :show-search="true"
-              expand-trigger="hover"
-            />
-          </a-form-item>
-        </a-form>
-        <div class="text-[0.9em] text-[color:var(--text-tertiary)] flex flex-col gap-1">
-          <div>{{ t("agent.client.modelEditDefault", { model: agentModelDefaultLabel }) }}</div>
-          <div>{{ t("agent.client.modelEditEffective", { model: sessionModelLabel }) }}</div>
+        <div v-if="contextError" class="text-red-500">{{ contextError }}</div>
+        <div class="mb-2">{{ t("agent.client.contextAgentsGroupTitle") }}</div>
+        <a-checkbox-group
+          v-model:value="instructionKeys"
+          class="flex flex-col gap-1"
+          ><a-checkbox
+            v-for="item in instructionCandidates"
+            :key="instructionKey(item)"
+            :value="instructionKey(item)"
+            >{{ item.displayPath }}</a-checkbox
+          ></a-checkbox-group
+        >
+        <div class="mt-4 mb-2">
+          {{ t("agent.client.contextSkillsGroupTitle") }}
         </div>
-        <div v-if="sessionModelState?.status !== 'ready'" class="mt-3 text-red-500 whitespace-pre-wrap break-words">
-          {{ sessionModelState?.message || t("agent.client.modelEditUnavailable") }}
-        </div>
-        <div class="mt-4">
-          <a-button
-            danger
-            :loading="agentModelResetting"
-            :disabled="!sessionModelState?.override || agentModelSaving || agentModelResetting"
-            @click="onResetAgentModel"
-          >
-            {{ t("agent.client.modelEditReset") }}
-          </a-button>
-        </div>
+        <a-checkbox-group v-model:value="skillKeys" class="flex flex-col gap-1"
+          ><a-checkbox
+            v-for="item in skillCandidates"
+            :key="skillKey(item)"
+            :value="skillKey(item)"
+            >{{ item.displayName }} · {{ item.topLevelSkillCount }}</a-checkbox
+          ></a-checkbox-group
+        >
       </div>
     </a-modal>
 
     <a-modal
-      :open="contextManagerModalVisible"
-      :title="t('agent.client.contextManagerTitle')"
-      :ok-text="t('common.save')"
-      :cancel-text="t('common.cancel')"
-      :confirm-loading="contextManagerSaving"
-      :ok-button-props="{ disabled: contextManagerLoading || !!contextManagerError }"
-      @ok="onSaveContextManagerSettings"
-      @cancel="contextManagerModalVisible = false"
+      v-model:open="enablementModalVisible"
+      :title="t('agent.client.agentEnablementTitle')"
+      :confirm-loading="enablementSaving"
+      @ok="saveAgentEnablement"
     >
-      <div class="text-[0.9em] text-[color:var(--text-tertiary)] mb-3">
-        {{ t("agent.client.contextManagerHint") }}
+      <div v-if="enablementLoading" class="py-5 text-center">
+        <LoadingOutlined spin />
       </div>
-      <div v-if="contextManagerLoading" class="py-6 text-center text-[color:var(--text-tertiary)]">
-        {{ t("common.loading") }}
-      </div>
-      <div v-else-if="contextManagerError" class="py-3 text-red-500 whitespace-pre-wrap break-words">
-        {{ contextManagerError }}
-      </div>
-      <div v-else class="max-h-[60vh] overflow-auto">
-        <div class="text-[0.9em] font-medium text-[color:var(--text-secondary)] mb-2">
-          {{ t("agent.client.contextAgentsGroupTitle") }}
+      <div v-else>
+        <div v-if="enablementError" class="text-red-500">
+          {{ enablementError }}
         </div>
-        <div v-if="agentsInstructionsCandidates.length === 0" class="py-3 text-[color:var(--text-tertiary)]">
-          {{ t("agent.client.contextAgentsEmpty") }}
-        </div>
-        <div v-else class="mb-5">
-          <a-checkbox-group v-model:value="agentsInstructionsSelectedKeys" class="w-full">
-            <div class="flex flex-col gap-2">
-              <label
-                v-for="item in agentsInstructionsCandidates"
-                :key="agentsInstructionsKey(item)"
-                class="external-skill-root-item block w-full border border-[var(--border-color-secondary)] rounded px-2 py-1.5"
-              >
-                <a-checkbox :value="agentsInstructionsKey(item)" class="external-skill-root-checkbox w-full">
-                  <span class="external-skill-root-content">
-                    <span class="external-skill-root-name text-[color:var(--text-primary)]" :title="item.displayPath">{{ item.displayPath }}</span>
-                  </span>
-                </a-checkbox>
-              </label>
-            </div>
-          </a-checkbox-group>
-        </div>
-
-        <div class="text-[0.9em] font-medium text-[color:var(--text-secondary)] mb-2">
-          {{ t("agent.client.contextSkillsGroupTitle") }}
-        </div>
-        <div v-if="externalSkillRootsCandidates.length === 0" class="py-3 text-[color:var(--text-tertiary)]">
-          {{ t("agent.client.externalSkillRootsEmpty") }}
-        </div>
-        <div v-else>
-          <a-checkbox-group v-model:value="externalSkillRootsSelectedKeys" class="w-full">
-            <div class="flex flex-col gap-2">
-              <label
-                v-for="item in externalSkillRootsCandidates"
-                :key="externalSkillRootsKey(item)"
-                class="external-skill-root-item block w-full border border-[var(--border-color-secondary)] rounded px-2 py-1.5"
-              >
-                <a-checkbox :value="externalSkillRootsKey(item)" class="external-skill-root-checkbox w-full">
-                  <span class="external-skill-root-content">
-                    <span class="external-skill-root-name text-[color:var(--text-primary)]" :title="item.displayName">{{ item.displayName }}</span>
-                    <span class="external-skill-root-count text-[0.85em] text-[color:var(--text-tertiary)]">
-                      {{ t("agent.client.externalSkillRootsMeta", { count: item.topLevelSkillCount }) }}
-                    </span>
-                  </span>
-                </a-checkbox>
-              </label>
-            </div>
-          </a-checkbox-group>
-        </div>
-      </div>
-    </a-modal>
-    <a-modal v-model:open="attachmentPreviewVisible" :title="t('agent.client.imagePreviewTitle')" :footer="null" @cancel="closeAttachmentPreview">
-      <div v-if="previewAttachments.length" class="space-y-3">
-        <div class="flex items-center justify-between gap-2">
-          <a-button size="small" :disabled="previewIndex === 0" @click="showPreviewAt(previewIndex - 1)">‹</a-button>
-          <span>{{ previewIndex + 1 }} / {{ previewAttachments.length }}</span>
-          <a-button size="small" :disabled="previewIndex >= previewAttachments.length - 1" @click="showPreviewAt(previewIndex + 1)">›</a-button>
-        </div>
-        <div v-if="previewLoading" class="text-center text-[color:var(--text-tertiary)]">{{ t("common.loading") }}</div>
-        <div v-else-if="previewError" class="text-red-500">{{ previewError }}</div>
-        <img v-else-if="previewUrl" :src="previewUrl" class="max-w-full max-h-[60vh] mx-auto block" alt="" />
-        <p class="text-[0.9em] text-[color:var(--text-tertiary)]">{{ t("agent.client.imagePreviewNotice") }}</p>
+        <a-checkbox-group
+          v-model:value="enabledAgentIds"
+          class="flex flex-col gap-1"
+          ><a-checkbox
+            v-for="item in enablementCandidates"
+            :key="item.id"
+            :value="item.id"
+            >{{ item.name }}</a-checkbox
+          ></a-checkbox-group
+        >
       </div>
     </a-modal>
   </div>
@@ -756,104 +358,55 @@
 
 <script setup lang="ts">
 import type {
-  AgentContextItemRecord,
-  AgentMessageImageAttachment,
-  AgentGlobalPromptItem,
-  AgentSubtaskRunSummary,
-  AgentProvidersSettingsView,
-  AgentSessionAgentModelState,
-  AgentSessionRunState
+  AgentImagePart,
+  AgentMessage,
+  AgentMessageSessionRunState,
+  AgentTimelineToolExecution,
+  AgentToolExecution,
 } from "@agent-workbench/shared";
+import type { AgentSessionAgentModelState } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import {
-  CheckCircleOutlined,
-  ClockCircleOutlined,
-  CloseCircleOutlined,
-  CopyOutlined,
-  AppstoreOutlined,
+  DownOutlined,
   EditOutlined,
-  DoubleRightOutlined,
-  RobotOutlined,
-  ExclamationCircleOutlined,
   FileImageOutlined,
-  ForkOutlined,
   LoadingOutlined,
-  MinusCircleOutlined,
-  QuestionCircleOutlined,
-  RollbackOutlined
+  RobotOutlined,
+  SettingOutlined,
+  TeamOutlined,
 } from "@ant-design/icons-vue";
-import { Modal, message } from "ant-design-vue";
-import { computed, nextTick, onActivated, onBeforeUnmount, ref, watch } from "vue";
+import { message } from "ant-design-vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { useRouter } from "vue-router";
-import AgentApplyPatchCard from "./AgentApplyPatchCard.vue";
-import AgentTextMessage from "./AgentTextMessage.vue";
+import AgentAttachmentPreviewModal from "./AgentAttachmentPreviewModal.vue";
+import AgentConversationToolCall from "./AgentConversationToolCall.vue";
+import AgentMessageActions from "./AgentMessageActions.vue";
 import AgentUserMessage from "./AgentUserMessage.vue";
 import AssistantMarkdownMessage from "./AssistantMarkdownMessage.vue";
-import AgentTodoListCard from "./AgentTodoListCard.vue";
-import AgentScratchpadCard from "./AgentScratchpadCard.vue";
-import AgentWriteCard from "./AgentWriteCard.vue";
-import { useAgentSessionStatusStore } from "./useAgentSessionStatusStore";
-import { resolveSubtaskSessionIdForDisplay } from "./subtaskSessionId";
 import {
-  formatElapsedDuration,
-  formatSubtaskDuration,
-  formatSubtaskStartedAt,
-  hasSubtaskRunChanged,
-  resolveSubtaskDisplayStatus,
-  subtaskRunForDisplay,
-  upsertAgentContextItem
-} from "./subtaskRunDisplay";
+  buildConversationParts,
+  type ConversationPart,
+} from "./agentMessageTimeline";
 import {
-  canRequestSessionModelOpen,
-  isSessionModelSendBlocked,
-  resolveSessionModelPresentation
-} from "./agentSessionModelPresentation";
-import { resolveTitleSettingTrigger } from "./agentSessionTitle";
+  applyTimelineResponse,
+  advanceAgentRequestScope,
+  buildTimelineRequest,
+  createAgentRequestScope,
+  createAgentTimelineControllerState,
+  isCurrentAgentRequestScope,
+  type AgentRequestScope,
+} from "./agentTimelineController";
+import { resolveAgentSlashSendAction } from "./agentSlashPayload";
 import {
-  ApiError,
-  cancelAgentSession,
-  clearAgentSession,
-  compactAgentSession,
-  forkAgentSession,
-  getAgentContextItem,
-  getAgentContextItems,
-  revertAgentSession,
-  detectWorkspaceAgentsInstructions,
-  detectWorkspaceExternalSkillRoots,
-  detectWorkspaceAgentEnablement,
-  updateWorkspaceAgentsInstructionsSettings,
-  updateWorkspaceAgentEnablementSettings,
-  getWorkspaceAgentEnablementSettings,
-  getAgentGlobalPromptSettings,
-  listWorkspaceTopLevelSkills,
-  getAgentProvidersSettings,
-  suggestWorkspaceFilePaths,
-  resetAgentSessionModelOverride,
-  updateAgentSessionModelOverride,
-  sendAgentMessage,
-  sendAgentMessageMultipart,
-  getAgentAttachmentContent,
-  updateWorkspaceExternalSkillRootsSettings
-} from "@/shared/api";
-import { getInitialLocale } from "@/shared/i18n/locale";
-import {
-  buildPromptCommandMap,
-  buildSlashCommandHint,
-  buildSlashInputCandidates,
   createInputCandidateDomId,
   createInputCandidateListId,
+  buildPromptCommandMap,
+  buildSlashInputCandidates,
   findMentionTarget,
   isSlashMode,
   limitMentionCandidates,
-  promptCommandInsertCaret,
   promptCommandInsertText,
-  resolveSlashCommand,
   shouldConvertLeadingIdeographicCommaToSlash,
   type MentionCandidateItem,
-  type PromptCommandCandidateItem,
-  type SlashCandidateItem,
-  type SlashCommandAction,
-  type SlashCommandDefinition
 } from "./agentInputCandidates";
 import {
   AttachmentPreviewCache,
@@ -861,110 +414,75 @@ import {
   collectPastedAgentImages,
   createAgentMessageFormData,
   createAgentSendAttemptFingerprint,
+  formatPendingAgentImageLabel,
   preparePastedAgentImages,
   resolveAgentSendAttempt,
-  formatPendingAgentImageLabel,
   shouldBlockImageSlashCommand,
   type PendingAgentImage,
-  type PendingAgentSendAttempt
+  type PendingAgentSendAttempt,
 } from "./agentImageAttachments";
-import { resolveAgentMessageRevertTarget } from "./agentMessageRevert";
-
+import { runAgentSessionMessageMutation } from "./agentMessageMutationAction";
+import {
+  createAgentCompactAttemptFingerprint,
+  resolveAgentCompactAttempt,
+  type PendingAgentCompactAttempt,
+  shouldClearPendingAgentCompactAttempt,
+} from "./agentCompactAttempt";
+import { createAgentMessageMutationState } from "./agentMessageMutationState";
+import {
+  canRequestSessionModelOpen,
+  isSessionModelSendBlocked,
+  resolveSessionModelPresentation,
+} from "./agentSessionModelPresentation";
+import { createAgentTimelineRefreshScheduler } from "./agentTimelineRefreshScheduler";
+import { createAgentToolDetailCache } from "./agentToolDetailCache";
+import { formatElapsedDuration } from "./subtaskRunDisplay";
+import { useAgentSessionStatusStore } from "./useAgentSessionStatusStore";
+import {
+  ApiError,
+  cancelAgentSession,
+  compactAgentSession,
+  detectWorkspaceAgentEnablement,
+  detectWorkspaceAgentsInstructions,
+  detectWorkspaceExternalSkillRoots,
+  forkAgentSession,
+  getAgentAttachmentContent,
+  getAgentGlobalPromptSettings,
+  getAgentProvidersSettings,
+  getAgentTimeline,
+  getAgentToolExecutionDetail,
+  listWorkspaceTopLevelSkills,
+  resetAgentSessionModelOverride,
+  revertAgentSession,
+  sendAgentMessage,
+  sendAgentMessageMultipart,
+  suggestWorkspaceFilePaths,
+  updateAgentSessionModelOverride,
+  updateWorkspaceAgentEnablementSettings,
+  updateWorkspaceAgentsInstructionsSettings,
+  updateWorkspaceExternalSkillRootsSettings,
+} from "@/shared/api";
+import { getInitialLocale } from "@/shared/i18n/locale";
 
 type AgentOption = {
   value: string;
-  label: string;
+  label?: string;
   resolvedModel?: {
     providerId: string;
-    contextWindowTokens: number;
-    providerName: string;
     modelId: string;
+    providerName: string;
     modelName: string;
   } | null;
 };
-
-type ApplyPatchDisplayFile = {
-  type: "add" | "update" | "delete" | "move";
-  path: string;
-  fromPath?: string;
-  additions: number;
-  deletions: number;
+type Candidate = {
+  id: string;
+  label: string;
+  description?: string;
+  kind: "slash" | "prompt_command" | "skill" | "file";
+  command?: any;
+  insertText?: string;
 };
-
-type ApplyPatchDisplay = {
-  text: string;
-  summary: {
-    fileCount: number;
-    additions: number;
-    deletions: number;
-  };
-  files: ApplyPatchDisplayFile[];
-  omittedFiles: number;
-};
-
-type TodoListDisplay = {
-  goal?: string;
-  summary: {
-    total: number;
-    pending: number;
-    inProgress: number;
-    completed: number;
-    cancelled: number;
-  };
-  todos: Array<{
-    content: string;
-    status: "pending" | "in_progress" | "completed" | "cancelled";
-  }>;
-};
-
-type WriteDisplay = {
-  summary: string;
-  filePath: string;
-  bytesWritten: number;
-  existedBefore: boolean;
-};
-
-type DisplayItem = {
-  id: number;
-  prevId: number | null;
-  archiveAt: number | null;
-  boundaryReason: string | null;
-  role: "user" | "assistant" | "system" | "tool";
-  text: string;
-  attachments?: AgentMessageImageAttachment[];
-  reasoningText?: string;
-  status: AgentContextItemRecord["status"];
-  toolName?: string;
-  toolCallId?: string;
-  toolError?: string;
-  subtaskSessionId?: string;
-  subtaskDescription?: string;
-  subtaskMode?: "new" | "existing" | "fork" | string;
-  subtaskAgentId?: string;
-  subtaskAgentName?: string;
-  subtaskRun?: AgentSubtaskRunSummary;
-  todoList?: TodoListDisplay;
-  applyPatch?: ApplyPatchDisplay;
-  writeResult?: WriteDisplay;
-  scratchpadContent?: string;
-  tone?: "normal" | "error";
-};
-
-const MESSAGE_GAP_DEFAULT = 12;
-const MESSAGE_GAP_PREV_TOOL = 8;
-const MESSAGE_GAP_CUR_TOOL = 6;
-const MESSAGE_GAP_TOOL_TOOL = 2;
-const BOTTOM_FOLLOW_THRESHOLD_PX = 120;
-const MESSAGE_LIST_BOTTOM_SPACER_PX = 16;
-const LAST_MESSAGE_VISIBLE_THRESHOLD_PX = 4;
-const INITIAL_TAIL_LIMIT = 100;
-const REACHED_TOP_NOTICE_MIN_ITEMS = 50;
-const HISTORY_PAGE_LIMIT = 100;
-const TOP_LOAD_THRESHOLD_PX = 80;
-const POLL_RUNNING_MS = 850;
-const POLL_LOCAL_NON_TERMINAL_MS = 700;
-const SCROLL_TO_BOTTOM_BUTTON_THRESHOLD_PX = 240;
-
+type Source = { sourceType: "workspace" | "repo"; repoId?: string };
 const props = defineProps<{
   workspaceId: string;
   toolId: string;
@@ -982,9 +500,12 @@ const props = defineProps<{
   sessionModelStates: Record<string, AgentSessionAgentModelState>;
   sessionModelStateLoading: boolean;
   sessionModelMutationPending: boolean;
-  modelOpenIntent: { agentId: string; requestId: number; ready: boolean } | null;
+  modelOpenIntent: {
+    agentId: string;
+    requestId: number;
+    ready: boolean;
+  } | null;
 }>();
-
 const emit = defineEmits<{
   "update:modelValue": [value: string | null];
   forked: [sessionId: string];
@@ -995,3160 +516,992 @@ const emit = defineEmits<{
   "session-title-sync-needed": [sessionId: string];
   "agent-settings-updated": [];
   "reset-to-draft": [payload: { sessionId: string; draftText: string }];
-  "request-session-model-open": [params: { sessionId: string; agentId: string }];
-  "session-model-open-consumed": [params: { sessionId: string; requestId: number }];
+  "request-session-model-open": [
+    params: { sessionId: string; agentId: string },
+  ];
+  "session-model-open-consumed": [
+    params: { sessionId: string; requestId: number },
+  ];
   "session-model-state-updated": [state: AgentSessionAgentModelState];
-  "session-model-mutation-pending": [params: { sessionId: string; pending: boolean }];
+  "session-model-mutation-pending": [
+    params: { sessionId: string; pending: boolean },
+  ];
 }>();
-
 const { t } = useI18n();
-const router = useRouter();
 const statusStore = useAgentSessionStatusStore();
-
-function agentScopeLabel(scope: "user" | "subtask" | "both") {
-  return t(`settings.agentProfiles.scope.${scope}`);
-}
-
-const loading = ref(false);
-const loadingEarlier = ref(false);
-const reachedTop = ref(false);
-const atTop = ref(false);
-const distanceToBottomPx = ref(Number.POSITIVE_INFINITY);
-const sending = ref(false);
-const draft = ref("");
-const pendingImages = ref<PendingAgentImage[]>([]);
-const pendingSendAttempt = ref<PendingAgentSendAttempt | null>(null);
-const processingPastedImages = ref(0);
-const attachmentPreviewVisible = ref(false);
-const previewAttachments = ref<AgentMessageImageAttachment[]>([]);
-const previewIndex = ref(0);
-const previewUrl = ref("");
-const previewLoading = ref(false);
-const previewError = ref("");
-const previewCache = new AttachmentPreviewCache();
-let previewLoadGeneration = 0;
-const runState = computed<AgentSessionRunState>(() => statusStore.runStateOf(props.sessionId));
-const sendingStatusText = computed(() => {
-  const imageCount = pendingImages.value.length;
-  const hasText = !!draft.value.trim();
-  if (imageCount === 0) return t("agent.client.sendingMessage");
-  if (!hasText) {
-    return imageCount === 1
-      ? t("agent.client.sendingOneImage")
-      : t("agent.client.sendingImages", { count: imageCount });
-  }
-  return imageCount === 1
-    ? t("agent.client.sendingMessageAndOneImage")
-    : t("agent.client.sendingMessageAndImages", { count: imageCount });
-});
-const runNoticeText = computed(() => String(runState.value.runNoticeText || "").trim());
-const lastKnownHeadItemId = ref<number | null>(null);
-const items = ref<AgentContextItemRecord[]>([]);
-const expandedTextMessageIds = ref<Set<number>>(new Set());
-const clampedTextMessageIds = ref<Set<number>>(new Set());
-const collapsedTodoItemIds = ref<Set<number>>(new Set());
-const scrollEl = ref<HTMLElement | null>(null);
-const inputCandidateListEl = ref<HTMLElement | null>(null);
-const inputCandidateListId = createInputCandidateListId(props.sessionId);
-const inputEl = ref<{ focus?: () => void } | null>(null);
-const stickToBottom = ref(true);
-const userUnfollowed = ref(false);
-const forcedBottomOnFirstActive = ref(false);
-const nowTickMs = ref(Date.now());
-const externalSkillRootsModalVisible = ref(false);
-const externalSkillRootsLoading = ref(false);
-const externalSkillRootsSaving = ref(false);
-const externalSkillRootsError = ref("");
-const externalSkillRootsCandidates = ref<Array<{ sourceType: "workspace" | "repo"; repoId?: string; rootDir: string; displayName: string; topLevelSkillCount: number; enabled: boolean }>>([]);
-const externalSkillRootsSelectedKeys = ref<string[]>([]);
-
-// v1: 统一上下文管理弹窗（AGENTS + Skills）
-const contextManagerModalVisible = externalSkillRootsModalVisible;
-const contextManagerLoading = externalSkillRootsLoading;
-const contextManagerSaving = externalSkillRootsSaving;
-const contextManagerError = externalSkillRootsError;
-
-const agentsInstructionsCandidates = ref<Array<{ sourceType: "workspace" | "repo"; repoId?: string; displayPath: string; enabled: boolean }>>([]);
-const agentsInstructionsSelectedKeys = ref<string[]>([]);
-
-const agentEnablementModalVisible = ref(false);
-const agentEnablementLoading = ref(false);
-const agentEnablementSaving = ref(false);
-const agentEnablementError = ref("");
-const agentEnablementCandidates = ref<Array<{ id: string; name: string; scope: "user" | "subtask" | "both"; enabled: boolean }>>([]);
-const agentEnablementSelectedIds = ref<string[]>([]);
-
-const agentModelModalVisible = ref(false);
-const agentModelLoading = ref(false);
-const agentModelSaving = ref(false);
-const agentModelResetting = ref(false);
-const agentModelError = ref("");
-const agentModelFormPath = ref<string[]>([]);
-const agentModelTargetAgentId = ref("");
-const agentModelProvidersSettings = ref<AgentProvidersSettingsView | null>(null);
-
-
-type SavedScrollState = {
-  scrollTop: number;
-  wasNearBottom: boolean;
-};
-
-// KeepAlive/工具切换时按 session 记忆滚动位置与是否贴底,恢复用户离开前的阅读上下文。
-const savedScrollStateBySessionId = new Map<string, SavedScrollState>();
-
-let scrollToBottomSeq = 0;
-let loadEarlierSeq = 0;
-
-// 吸底稳定锁: 用于处理“单次大段输出”导致的虚拟列表高度延迟测量。
-// 典型场景: 压缩(compaction)结果一次性写入一大段文本,首次 scrollToBottom 基于估高执行,
-// 随后真实高度测量完成后 scrollHeight 突增,若不补滚动会表现为吸底失效。
-const followBottomLockRemaining = ref(0);
-let followBottomLockSeq = 0;
-let followBottomLockInFlight = false;
-let followBottomLockTimer: number | null = null;
-const FOLLOW_BOTTOM_LOCK_MAX_ATTEMPTS = 6;
-const FOLLOW_BOTTOM_LOCK_TIMEOUT_MS = 1400;
-
-// 仅用于判断用户是否在主动向上滚动(一旦向上滚,立刻取消吸底,避免被自动 scrollToBottom 抢回去)。
-let lastKnownScrollTop = 0;
-
-const actionLoading = ref<"cancel" | "fork" | "revert" | null>(null);
-const actionTargetId = ref<number | null>(null);
-let contextRefreshTimer: number | null = null;
-
-let settlePollRemaining = 0;
-const terminalStatuses = new Set<AgentContextItemRecord["status"]>(["completed", "failed", "cancelled"]);
-const isSubtaskSession = computed(() => props.sessionKind === "subtask");
-
-function isFirstUserDisplayItem(item: DisplayItem) {
-  return item.role === "user" && item.prevId == null;
-}
-
-let runElapsedTimer: number | null = null;
-
-// 兼容中文输入法习惯: 仅从空输入以“、”开始时,自动替换为“/”。
-watch(
-  draft,
-  (next, previous) => {
-    if (!shouldConvertLeadingIdeographicCommaToSlash(previous || "", next || "")) return;
-    draft.value = `/${next.slice(1)}`;
-  },
-  { flush: "sync" }
+const runState = computed<AgentMessageSessionRunState>(() =>
+  statusStore.runStateOf(props.sessionId),
 );
+const isSubtaskSession = computed(() => props.sessionKind === "subtask");
+const sessionTitleText = computed(
+  () => String(props.sessionTitle || "").trim() || props.sessionId,
+);
+const effectiveAgentId = computed(() =>
+  props.agentOptions.some((item) => item.value === props.modelValue)
+    ? props.modelValue || ""
+    : props.agentOptions[0]?.value || "",
+);
+const sessionModelState = computed(
+  () => props.sessionModelStates[effectiveAgentId.value] ?? null,
+);
+const sessionModelLabel = computed(
+  () =>
+    resolveSessionModelPresentation(
+      sessionModelState.value,
+      props.sessionModelStateLoading,
+      props.agentOptions.find((item) => item.value === effectiveAgentId.value)
+        ?.resolvedModel
+        ? `${props.agentOptions.find((item) => item.value === effectiveAgentId.value)?.resolvedModel?.providerName} / ${props.agentOptions.find((item) => item.value === effectiveAgentId.value)?.resolvedModel?.modelName}`
+        : null,
+    ).modelLabel || "",
+);
+const inputPlaceholder = computed(() =>
+  runState.value.status === "running"
+    ? t("agent.client.inputPlaceholderRunning")
+    : t("agent.client.inputPlaceholderIdle"),
+);
+const draft = ref("");
+const sending = ref(false);
+const cancelling = ref(false);
+const pendingImages = ref<PendingAgentImage[]>([]);
+const processingPastedImages = ref(0);
+const pendingAttempt = ref<PendingAgentSendAttempt | null>(null);
+const pendingCompactAttempt = ref<PendingAgentCompactAttempt | null>(null);
+const scrollEl = ref<HTMLElement | null>(null);
+const inputEl = ref<any>(null);
+const stickToBottom = ref(true);
+const distanceToBottom = ref(0);
+const timelineState = ref(createAgentTimelineControllerState());
+const revision = computed(() => timelineState.value.revision);
+const messages = computed(() => timelineState.value.messages);
+const toolExecutions = computed(() => timelineState.value.toolExecutions);
+const detailByExecutionId = ref<Record<string, AgentToolExecution>>({});
+const detailLoading = ref(new Set<string>());
+let refreshTimer: number | null = null;
+let timelineRequestSequence = 0;
+let disposed = false;
+let requestScope = createAgentRequestScope(props.workspaceId, props.sessionId);
+let loadingPreviousPageScope: AgentRequestScope | null = null;
+const detailLoadingScopeByExecutionId = new Map<string, AgentRequestScope>();
+let timelineRefreshScheduler = createAgentTimelineRefreshScheduler();
+const detailCache = createAgentToolDetailCache();
+const messageMutationState = createAgentMessageMutationState();
+let previousRunStatus = runState.value.status;
+const isSessionMessageMutationPending = computed(() => messageMutationState.isPending(props.sessionId));
+const conversation = computed(() =>
+  buildConversationParts({
+    revision: revision.value,
+    messages: messages.value,
+    toolExecutions: toolExecutions.value,
+  }).map((row) => ({
+    ...row,
+    id: `${row.message.id}:${row.part?.id ?? "message"}`,
+  })),
+);
+const showScrollToBottom = computed(
+  () => conversation.value.length > 0 && distanceToBottom.value > 240,
+);
+const now = ref(Date.now());
+let elapsedTimer: number | null = null;
+const runElapsedText = computed(() =>
+  runState.value.status === "running"
+    ? formatElapsedDuration(Math.max(0, now.value - runState.value.updatedAt))
+    : "",
+);
+function messageClass(row: ConversationPart) {
+  return row.message.type === "user"
+    ? "border border-blue-500/60 bg-blue-500/20"
+    : row.part?.type === "tool_call"
+      ? "bg-[var(--panel-bg-elevated)]"
+      : "";
+}
+function showMessageControls(row: ConversationPart) {
+  return (
+    !isSubtaskSession.value &&
+    (row.message.type === "user" || row.message.type === "assistant") &&
+    row.part?.position === 0
+  );
+}
 
-type InputCandidateItem = SlashCandidateItem | PromptCommandCandidateItem | MentionCandidateItem;
+function clearRefreshTimer() {
+  if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+  refreshTimer = null;
+}
+function scheduleRefresh() {
+  clearRefreshTimer();
+  const pending =
+    messages.value.some((item) => item.status === "streaming") ||
+    toolExecutions.value.some(
+      (item) => item.status === "queued" || item.status === "running",
+    );
+  if (
+    props.active &&
+    props.sessionReady &&
+    (pending || runState.value.status === "running")
+  )
+    refreshTimer = window.setTimeout(() => void refreshTimeline(false).catch(() => undefined), 800);
+}
+async function loadTimeline(
+  mode: "snapshot" | "delta" | "before",
+  epoch: number,
+  signal: AbortSignal,
+) {
+  if (
+    disposed ||
+    !props.sessionReady ||
+    (mode === "before" &&
+      (!timelineState.value.hasMore ||
+        !timelineState.value.nextBeforeMessageId))
+  )
+    return mode === "before" ? { paginationExhausted: true } : undefined;
+  const scope = requestScope;
+  const sequence = ++timelineRequestSequence;
+  const anchorElement =
+    mode === "before"
+      ? (scrollEl.value?.querySelector("article") as HTMLElement | null)
+      : null;
+  const anchor = anchorElement?.getBoundingClientRect().top ?? null;
+  try {
+    const response = await getAgentTimeline(
+      scope.sessionId,
+      buildTimelineRequest(timelineState.value, scope.workspaceId, mode),
+      { signal },
+    );
+    if (
+      disposed ||
+      !isCurrentAgentRequestScope(requestScope, scope) ||
+      timelineRefreshScheduler.currentEpoch() !== epoch
+    )
+      return;
+    const result = applyTimelineResponse(
+      timelineState.value,
+      response,
+      mode,
+      sequence,
+    );
+    if (result.state === timelineState.value) return;
+    timelineState.value = result.state;
+    const invalidatedDetailIds = detailCache.syncTimeline(
+      result.state.toolExecutions,
+    );
+    if (result.clearDetailCache) {
+      detailByExecutionId.value = {};
+      detailCache.markTimelineReset(result.state.toolExecutions);
+    } else if (invalidatedDetailIds.size) {
+      const next = { ...detailByExecutionId.value };
+      for (const id of invalidatedDetailIds) delete next[id];
+      detailByExecutionId.value = next;
+    }
+    await nextTick();
+    if (mode === "before" && anchor !== null && anchorElement?.isConnected) {
+      scrollEl.value!.scrollTop +=
+        anchorElement.getBoundingClientRect().top - anchor;
+    } else if (
+      mode === "snapshot" ||
+      response.timelineReset ||
+      stickToBottom.value
+    )
+      scrollToBottom(true);
+    return mode === "before"
+      ? {
+          paginationExhausted:
+            !result.state.hasMore || !result.state.nextBeforeMessageId,
+        }
+      : undefined;
+  } catch (error) {
+    if (
+      mode === "before" &&
+      error instanceof ApiError &&
+      (error.status === 404 || error.code === "TIMELINE_CURSOR_NOT_FOUND")
+    ) {
+      return { requestSnapshot: true };
+    }
+    if (!signal.aborted && isCurrentAgentRequestScope(requestScope, scope)) {
+      message.error(error instanceof Error ? error.message : String(error));
+    }
+    throw error;
+  } finally {
+    if (isCurrentAgentRequestScope(requestScope, scope)) scheduleRefresh();
+  }
+}
+async function refreshTimeline(forceFull: boolean) {
+  const mode = forceFull || revision.value === 0 ? "snapshot" : "delta";
+  if (!disposed) await timelineRefreshScheduler.request(mode, loadTimeline);
+}
+async function refreshStructuralTimeline() {
+  if (!disposed) await timelineRefreshScheduler.requestStructuralSnapshot(loadTimeline);
+}
+async function loadPreviousTimelinePage() {
+  await timelineRefreshScheduler.request("before", loadTimeline);
+}
+function invalidateTimelineForStructuralMutation() {
+  timelineRefreshScheduler.invalidate();
+  timelineRequestSequence += 1;
+}
+async function toggleToolDetail(executionId: string) {
+  if (detailByExecutionId.value[executionId]) {
+    const { [executionId]: _, ...rest } = detailByExecutionId.value;
+    detailByExecutionId.value = rest;
+    return;
+  }
+  if (detailLoading.value.has(executionId)) return;
+  const scope = requestScope;
+  const token = detailCache.begin(executionId);
+  if (!token) return;
+  detailLoadingScopeByExecutionId.set(executionId, scope);
+  detailLoading.value = new Set(detailLoading.value).add(executionId);
+  try {
+    const result = await getAgentToolExecutionDetail(
+      scope.sessionId,
+      executionId,
+      scope.workspaceId,
+    );
+    if (
+      disposed ||
+      !isCurrentAgentRequestScope(requestScope, scope) ||
+      !detailCache.accepts(token, result)
+    )
+      return;
+    detailByExecutionId.value = {
+      ...detailByExecutionId.value,
+      [executionId]: result,
+    };
+  } catch (error) {
+    if (isCurrentAgentRequestScope(requestScope, scope)) {
+      message.error(error instanceof Error ? error.message : String(error));
+    }
+  } finally {
+    if (
+      isCurrentAgentRequestScope(requestScope, scope) &&
+      detailLoadingScopeByExecutionId.get(executionId) === scope
+    ) {
+      detailLoadingScopeByExecutionId.delete(executionId);
+      const next = new Set(detailLoading.value);
+      next.delete(executionId);
+      detailLoading.value = next;
+    }
+  }
+}
+function onScroll() {
+  const el = scrollEl.value;
+  if (!el) return;
+  distanceToBottom.value = Math.max(
+    0,
+    el.scrollHeight - el.clientHeight - el.scrollTop,
+  );
+  stickToBottom.value = distanceToBottom.value <= 120;
+  if (el.scrollTop < 100 && loadingPreviousPageScope !== requestScope) {
+    const scope = requestScope;
+    loadingPreviousPageScope = scope;
+    void loadPreviousTimelinePage().finally(() => {
+      if (
+        isCurrentAgentRequestScope(requestScope, scope) &&
+        loadingPreviousPageScope === scope
+      ) {
+        loadingPreviousPageScope = null;
+      }
+    }).catch(() => undefined);
+  }
+}
+function scrollToBottom(force = false) {
+  const el = scrollEl.value;
+  if (!el || (!force && !stickToBottom.value)) return;
+  el.scrollTop = el.scrollHeight;
+  distanceToBottom.value = 0;
+  stickToBottom.value = true;
+}
+async function onFork(messageId: string) {
+  await runAgentSessionMessageMutation({
+    state: messageMutationState,
+    sessionId: props.sessionId,
+    mutate: async () => {
+      const result = await forkAgentSession({
+        fromSessionId: props.sessionId,
+        fromMessageId: messageId,
+      });
+      emit("forked", result.id);
+    },
+    onError: (error) => message.error(error instanceof Error ? error.message : String(error)),
+  });
+}
+async function onRevert(messageId: string) {
+  await runAgentSessionMessageMutation({
+    state: messageMutationState,
+    sessionId: props.sessionId,
+    mutate: async () => {
+      await revertAgentSession(props.sessionId, {
+        workspaceId: props.workspaceId,
+        messageId,
+      });
+      invalidateTimelineForStructuralMutation();
+      await refreshStructuralTimeline();
+    },
+    onError: (error) => message.error(error instanceof Error ? error.message : String(error)),
+  });
+}
+async function onCancel() {
+  cancelling.value = true;
+  try {
+    await cancelAgentSession(props.sessionId, {
+      workspaceId: props.workspaceId,
+    });
+    await refreshTimeline(true);
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : String(error));
+  } finally {
+    cancelling.value = false;
+  }
+}
 
-const MAX_INPUT_CANDIDATES = 10;
-const MENTION_FETCH_DEBOUNCE_MS = 120;
-
-const mentionCandidates = ref<MentionCandidateItem[]>([]);
-const mentionCandidatesLoading = ref(false);
-const mentionFetchSeq = ref(0);
-let mentionFetchTimer: number | null = null;
-const skillMentionCache = ref<{ workspaceId: string; items: Awaited<ReturnType<typeof listWorkspaceTopLevelSkills>>["items"] } | null>(null);
-
-const slashCommands: SlashCommandDefinition[] = [
+const slashCommands = [
   {
     name: "compact",
     usage: "/compact",
-    summaryKey: "agent.client.slashCommands.compact.summary",
+    summaryKey: "agent.client.compact",
     strictOnly: true,
-    action: "compact"
+    action: "compact" as const,
   },
-  {
-    name: "clear",
-    usage: "/clear",
-    summaryKey: "agent.client.slashCommands.clear.summary",
-    strictOnly: true,
-    action: "clear"
-  }
 ];
-
-const slashCommandMap = new Map(slashCommands.map((item) => [item.name, item] as const));
-
-const promptCommandItems = ref<AgentGlobalPromptItem[]>([]);
-const promptCommandLoading = ref(false);
-const promptCommandError = ref("");
-
-const promptCommandMap = computed(() => {
-  return buildPromptCommandMap(promptCommandItems.value, slashCommands);
-});
-
-async function refreshPromptCommandItems() {
-  if (promptCommandLoading.value) return;
-  promptCommandLoading.value = true;
-  promptCommandError.value = "";
-  try {
-    const res = await getAgentGlobalPromptSettings();
-    const list = Array.isArray(res.items) ? res.items : [];
-    promptCommandItems.value = list as AgentGlobalPromptItem[];
-  } catch (err) {
-    promptCommandError.value = err instanceof Error ? err.message : String(err);
-    promptCommandItems.value = [];
-  } finally {
-    promptCommandLoading.value = false;
-  }
-}
-
-const inputCandidateSelection = ref("");
-const inputCaretIndex = ref(0);
-const inputHintDismissed = ref(false);
-
-const slashCommandHint = computed(() => {
-  return buildSlashCommandHint({
-    text: draft.value,
-    commands: slashCommands,
-    selectedName: inputCandidateSelection.value.startsWith("slash:") ? inputCandidateSelection.value.slice(6) : inputCandidateSelection.value
-  });
-});
-
-const mentionTarget = computed(() => {
-  if (isSlashMode(draft.value)) return null;
-  return findMentionTarget(draft.value, inputCaretIndex.value);
-});
-
-const mentionHint = computed(() => {
-  const target = mentionTarget.value;
-  if (!target) {
-    return {
-      visible: false,
-      query: "",
-      items: [] as MentionCandidateItem[],
-      activeId: "",
-      loading: false
-    };
-  }
-  const activeId = mentionCandidates.value.some((it) => it.id === inputCandidateSelection.value)
-    ? inputCandidateSelection.value
-    : (mentionCandidates.value[0]?.id || "");
-  return {
-    visible: true,
-    query: target.query,
-    items: mentionCandidates.value,
-    activeId,
-    loading: mentionCandidatesLoading.value
-  };
-});
-
-const exactPromptCommandName = computed(() => {
-  const normalized = draft.value.trim().toLowerCase();
-  const m = normalized.match(/^\/([A-Za-z0-9][A-Za-z0-9_-]*)$/);
-  if (!m) return "";
-  const cmd = m[1] || "";
-  if (!cmd) return "";
-  if (slashCommandMap.has(cmd)) return "";
-  return promptCommandMap.value.has(cmd) ? cmd : "";
-});
-
-const activeInputHint = computed(() => {
-  if (inputHintDismissed.value) {
-    return {
-      visible: false,
-      kind: "mention" as const,
-      query: "",
-      items: [] as InputCandidateItem[],
-      activeId: "",
-      loading: false,
-      emptyText: ""
-    };
-  }
-  if (slashCommandHint.value.visible && !exactPromptCommandName.value) {
-    const items = buildSlashInputCandidates({
-      commands: slashCommandHint.value.commands,
-      promptCommands: promptCommandMap.value,
-      query: slashCommandHint.value.query
-    });
-    const activeId = items.some((it) => it.id === inputCandidateSelection.value)
-      ? inputCandidateSelection.value
-      : (items[0]?.id || "");
-    return {
-      visible: true,
-      kind: "slash" as const,
-      query: slashCommandHint.value.query,
-      items,
-      activeId,
-      loading: promptCommandLoading.value,
-      emptyText: t("agent.client.slashCommandHintNoMatch", { query: slashCommandHint.value.query })
-    };
-  }
-  if (!mentionHint.value.visible) {
-    return {
-      visible: false,
-      kind: "mention" as const,
-      query: "",
-      items: [] as InputCandidateItem[],
-      activeId: "",
-      loading: false,
-      emptyText: ""
-    };
-  }
-  const q = mentionHint.value.query;
-  return {
-    visible: true,
-    kind: "mention" as const,
-    query: q,
-    items: mentionHint.value.items,
-    activeId: mentionHint.value.activeId,
-    loading: mentionHint.value.loading,
-    emptyText: t("agent.client.inputCandidateNoMatch", { query: `@${q}` })
-  };
-});
-
-function syncInputCaretFromNative() {
-  const raw = (inputEl.value as any)?.resizableTextArea?.textArea as HTMLTextAreaElement | undefined;
-  if (!raw) return;
-  const next = typeof raw.selectionStart === "number" ? raw.selectionStart : draft.value.length;
-  inputCaretIndex.value = Math.max(0, Math.min(draft.value.length, next));
-}
-
-function onInputCursorEvent() {
-  syncInputCaretFromNative();
-}
-
-function toRecord(value: unknown) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  return value as Record<string, unknown>;
-}
-
-function toNonNegativeInt(value: unknown) {
-  const raw = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(raw) || raw < 0) return 0;
-  return Math.floor(raw);
-}
-
-function toFileType(value: unknown): ApplyPatchDisplayFile["type"] {
-  if (value === "add" || value === "update" || value === "delete" || value === "move") {
-    return value;
-  }
-  return "update";
-}
-
-function parseApplyPatchDisplay(value: unknown): ApplyPatchDisplay | null {
-  const source = toRecord(value);
-  if (!source) return null;
-  const filesRaw = Array.isArray(source.files) ? source.files : [];
-  const files: ApplyPatchDisplayFile[] = [];
-
-  for (const item of filesRaw) {
-    const file = toRecord(item);
-    if (!file) continue;
-    const path = String(file.path || file.relativePath || file.filePath || "").trim();
-    if (!path) continue;
-    const fromPath = String(file.fromPath || file.moveFromPath || "").trim();
-    files.push({
-      type: toFileType(file.type),
-      path,
-      ...(fromPath ? { fromPath } : {}),
-      additions: toNonNegativeInt(file.additions),
-      deletions: toNonNegativeInt(file.deletions)
-    });
-  }
-
-  const summaryRaw = toRecord(source.summary);
-  const fileCount = toNonNegativeInt(summaryRaw?.fileCount ?? files.length);
-  const additions = toNonNegativeInt(summaryRaw?.additions ?? files.reduce((sum, file) => sum + file.additions, 0));
-  const deletions = toNonNegativeInt(summaryRaw?.deletions ?? files.reduce((sum, file) => sum + file.deletions, 0));
-  const omittedFiles = Math.max(0, fileCount - files.length);
-
-  return {
-    text: typeof source.text === "string" ? source.text : "",
-    summary: {
-      fileCount,
-      additions,
-      deletions
-    },
-    files,
-    omittedFiles
-  };
-}
-
-function toTodoStatus(value: unknown): "pending" | "in_progress" | "completed" | "cancelled" | null {
-  if (value === "pending" || value === "in_progress" || value === "completed" || value === "cancelled") {
-    return value;
-  }
-  return null;
-}
-
-function parseTodoListDisplay(value: unknown): TodoListDisplay | null {
-  const source = toRecord(value);
-  if (!source) return null;
-  const todosRaw = Array.isArray(source.todos) ? source.todos : [];
-  const todos: TodoListDisplay["todos"] = [];
-  for (const item of todosRaw) {
-    const row = toRecord(item);
-    if (!row) continue;
-    const content = typeof row.content === "string" ? row.content.trim() : "";
-    if (!content) continue;
-    const status = toTodoStatus(row.status);
-    if (!status) continue;
-    todos.push({ content, status });
-  }
-
-  const goal = typeof source.goal === "string" ? source.goal.trim() : "";
-  const summaryRaw = toRecord(source.summary);
-  return {
-    ...(goal ? { goal } : {}),
-    summary: {
-      total: toNonNegativeInt(summaryRaw?.total ?? todos.length),
-      pending: toNonNegativeInt(summaryRaw?.pending ?? todos.filter((item) => item.status === "pending").length),
-      inProgress: toNonNegativeInt(
-        summaryRaw?.inProgress ?? summaryRaw?.in_progress ?? todos.filter((item) => item.status === "in_progress").length
-      ),
-      completed: toNonNegativeInt(summaryRaw?.completed ?? todos.filter((item) => item.status === "completed").length),
-      cancelled: toNonNegativeInt(summaryRaw?.cancelled ?? todos.filter((item) => item.status === "cancelled").length)
-    },
-    todos
-  };
-}
-
-function parseWriteDisplay(value: unknown): WriteDisplay | null {
-  const source = toRecord(value);
-  if (!source) return null;
-  const filePath = typeof source.filePath === "string"
-    ? source.filePath.trim()
-    : typeof source.path === "string"
-      ? source.path.trim()
-      : "";
-  if (!filePath) return null;
-  const summary = typeof source.summary === "string" && source.summary.trim()
-    ? source.summary
-    : `写入文件 ${filePath}`;
-  return {
-    summary,
-    filePath,
-    bytesWritten: toNonNegativeInt(source.bytesWritten ?? source.bytes),
-    existedBefore: source.existedBefore === true
-  };
-}
-
-function resolveAgentName(agentId: string) {
-  const target = props.agentOptions.find((item) => item.value === agentId);
-  return target?.label || "";
-}
-
-const hasAvailableAgents = computed(() => props.agentOptions.length > 0);
-
-const sessionTitleText = computed(() => {
-  return String(props.sessionTitle || "").trim() || props.sessionId;
-});
-
-const fallbackAgentId = computed(() => {
-  return props.agentOptions[0]?.value ?? "";
-});
-
-const effectiveAgentId = computed(() => {
-  const raw = String(props.modelValue || "").trim();
-  if (raw && props.agentOptions.some((item) => item.value === raw)) {
-    return raw;
-  }
-  return fallbackAgentId.value;
-});
-
-const sessionModelState = computed(() => props.sessionModelStates[effectiveAgentId.value] ?? null);
-const draftDefaultModelLabel = computed(() => {
-  if (props.sessionReady) return null;
-  const resolvedModel = props.agentOptions.find((item) => item.value === effectiveAgentId.value)?.resolvedModel;
-  if (!resolvedModel) return null;
-  return `${resolvedModel.providerName} / ${resolvedModel.modelName}`;
-});
-const sessionModelPresentation = computed(() => {
-  return resolveSessionModelPresentation(
-    sessionModelState.value,
-    props.sessionModelStateLoading,
-    draftDefaultModelLabel.value
-  );
-});
-const sessionModelLabel = computed(() => {
-  const presentation = sessionModelPresentation.value;
-  if (presentation.kind === "ready") return presentation.modelLabel!;
-  if (presentation.kind === "override_unavailable") return t("agent.client.modelEditOverrideUnavailable");
-  if (presentation.kind === "default_unavailable") return t("agent.client.modelEditDefaultUnavailable");
-  if (presentation.kind === "loading") return t("common.loading");
-  return t("agent.client.modelEditUnavailable");
-});
-const sessionModelSourceLabel = computed(() => {
-  const source = sessionModelPresentation.value.source;
-  if (!source) return t("agent.client.modelEditSourceUnavailable");
-  return source === "session_override"
-    ? t("agent.client.modelEditSourceOverride")
-    : t("agent.client.modelEditSourceDefault");
-});
-const sessionModelTooltip = computed(() => `${t("agent.client.modelEditTooltip")} · ${sessionModelSourceLabel.value}`);
-const agentModelDefaultLabel = computed(() => {
-  const fallback = sessionModelState.value?.agentDefaultModel;
-  if (!fallback) return t("agent.client.modelEditDefaultUnavailable");
-  const pair = findAgentProviderModel(fallback.providerId, fallback.modelId);
-  return pair ? `${pair.provider.name} / ${pair.model.name}` : `${fallback.providerId} / ${fallback.modelId}`;
-});
-const agentModelCanSave = computed(() => {
-  const next = toAgentModelRefFromPath(agentModelFormPath.value);
-  if (!next) return false;
-  const current = sessionModelState.value?.effectiveModel;
-  return !current || current.providerId !== next.providerId || current.modelId !== next.modelId;
-});
-const sessionModelStateLoading = computed(() => props.sessionModelStateLoading && !sessionModelState.value);
-
-const agentModelCascaderOptions = computed(() => {
-  const providers = agentModelProvidersSettings.value?.providers ?? [];
-  return providers
-      .filter((provider) => provider.models.length > 0)
-      .map((provider) => ({
-        label: provider.name,
-        value: provider.id,
-        children: provider.models.map((model) => ({
-          label: model.name,
-          value: model.id
-        }))
-      }))
-  ;
-});
-
-function findAgentProviderModel(providerId: string, modelId: string) {
-  const providers = agentModelProvidersSettings.value?.providers ?? [];
-  const provider = providers.find((item) => item.id === providerId);
-  if (!provider) return null;
-  const model = provider.models.find((item) => item.id === modelId);
-  if (!model) return null;
-  return { provider, model };
-}
-
-function toAgentModelRefFromPath(pathRaw: unknown): { providerId: string; modelId: string } | null {
-  const path = Array.isArray(pathRaw) ? pathRaw.map((item) => String(item || "").trim()).filter((item) => item.length > 0) : [];
-  if (path.length !== 2) return null;
-  const [providerId, modelId] = path;
-  if (!providerId || !modelId || !findAgentProviderModel(providerId, modelId)) return null;
-  return { providerId, modelId };
-}
-
-const headerTokensNumberFormatter = new Intl.NumberFormat();
-const headerTokensPercentFormatter = new Intl.NumberFormat(undefined, {
-  style: "percent",
-  maximumFractionDigits: 1
-});
-
-const headerTokensText = computed(() => {
-  const value = runState.value.lastResponseTotalTokens;
-  // 需求：null/0 不展示 tokens 段
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return "";
-  const formattedTokens = headerTokensNumberFormatter.format(Math.floor(value));
-  const ratioFromRunState = runState.value.contextTokenRatio;
-  if (typeof ratioFromRunState !== "number" || !Number.isFinite(ratioFromRunState) || ratioFromRunState < 0) {
-    return `${formattedTokens} tokens`;
-  }
-  const formattedRatio = headerTokensPercentFormatter.format(ratioFromRunState);
-  return `${formattedTokens} tokens (${formattedRatio})`;
-});
-const inputPlaceholder = computed(() => {
-  if (!hasAvailableAgents.value) {
-    return t("agent.client.inputPlaceholderNoAgent");
-  }
-  if (runState.value.status !== "idle") {
-    return t("agent.client.inputPlaceholderRunning");
-  }
-  return t("agent.client.inputPlaceholderIdle");
-});
-
-const currentRunElapsedText = computed(() => {
-  const state = runState.value;
-  if (state.status === "running") {
-    const startedAt = state.activeRun?.startedAt;
-    if (typeof startedAt !== "number" || !Number.isFinite(startedAt) || startedAt <= 0) return "";
-    return formatElapsedDuration(nowTickMs.value - startedAt);
-  }
-  const durationMs = state.lastRun?.durationMs;
-  if (typeof durationMs !== "number" || !Number.isFinite(durationMs) || durationMs < 0) return "";
-  return formatElapsedDuration(durationMs);
-});
-
-function clearRunElapsedTimer() {
-  if (runElapsedTimer === null) return;
-  window.clearInterval(runElapsedTimer);
-  runElapsedTimer = null;
-}
-
-function ensureRunElapsedTimer() {
-  if (runElapsedTimer !== null) return;
-  runElapsedTimer = window.setInterval(() => {
-    nowTickMs.value = Date.now();
-  }, 1000);
-}
-
-const showReachedTopNotice = computed(() => {
-  return reachedTop.value && displayItems.value.length >= REACHED_TOP_NOTICE_MIN_ITEMS;
-});
-
-const showScrollToBottomButton = computed(() => {
-  return (
-    displayItems.value.length > 0
-    && Number.isFinite(distanceToBottomPx.value)
-    && distanceToBottomPx.value > SCROLL_TO_BOTTOM_BUTTON_THRESHOLD_PX
-  );
-});
-const displayItems = computed<DisplayItem[]>(() => {
-  const mapped = items.value.map<DisplayItem>((item) => {
-    const archiveAt = typeof item.archiveAt === "number" && Number.isFinite(item.archiveAt) ? item.archiveAt : null;
-    const boundaryReason =
-      typeof item.boundaryReason === "string" && item.boundaryReason.trim() ? item.boundaryReason.trim() : null;
-    if (item.kind === "user" && item.output.type === "user_text") {
-      return {
-        id: item.id,
-        prevId: item.prevId,
-        archiveAt,
-        boundaryReason,
-        role: "user",
-        text: item.output.text,
-        status: item.status
-      };
-    }
-    if (item.kind === "user" && item.output.type === "user_message") {
-      return {
-        id: item.id,
-        prevId: item.prevId,
-        archiveAt,
-        boundaryReason,
-        role: "user",
-        text: item.output.text,
-        attachments: item.output.attachments,
-        status: item.status
-      };
-    }
-    if (item.kind === "assistant" && item.output.type === "assistant_text") {
-      return {
-        id: item.id,
-        prevId: item.prevId,
-        archiveAt,
-        boundaryReason,
-        role: "assistant",
-        text: item.output.text,
-        status: item.status,
-        ...(typeof item.output.reasoning?.text === "string" && item.output.reasoning.text
-          ? { reasoningText: item.output.reasoning.text } : {}),
-        ...(typeof item.output.error === "string" && item.output.error.trim() ? { toolError: truncateText(item.output.error, 220) } : {}),
-        tone: item.status === "failed" ? "error" : "normal"
-      };
-    }
-    if (item.kind === "tool" && item.output.type === "tool") {
-      const argsText = formatToolArgs(item.output.args);
-      const callText = `${item.output.toolName}(${argsText})`;
-      // 文本型工具消息默认不展示 [completed],仅在失败/拒绝/取消等异常状态时展示状态。
-      const showStatus = item.status === "failed" || item.status === "cancelled";
-      const statusText = showStatus ? `[${item.status}]` : "";
-      const headText = statusText ? `${callText} ${statusText}` : callText;
-      const toolCallId = typeof item.output.toolCallId === "string" && item.output.toolCallId.trim()
-        ? item.output.toolCallId.trim()
-        : undefined;
-      const resultObj = toRecord(item.output.result);
-      const subtaskSessionId = resolveSubtaskSessionIdForDisplay({
-        resultSubtaskSessionId: resultObj?.subtaskSessionId,
-        outputText: item.output.text,
-        fallbackText: headText
-      }) || undefined;
-      const errorText = item.output.error ? truncateText(item.output.error, 220) : undefined;
-      if (item.output.toolName === "apply_patch") {
-        const applyPatch = parseApplyPatchDisplay(item.output.result);
-        if (!applyPatch) {
-          let line = headText;
-          if (errorText) {
-            line += `\nerror: ${errorText}`;
-          }
-          return {
-            id: item.id,
-            prevId: item.prevId,
-            archiveAt,
-            boundaryReason,
-            role: "tool",
-            text: line,
-            status: item.status,
-            toolName: item.output.toolName,
-            ...(toolCallId ? { toolCallId } : {}),
-            tone: item.status === "failed" ? "error" : "normal"
-          };
-        }
-        return {
-          id: item.id,
-          prevId: item.prevId,
-          archiveAt,
-          boundaryReason,
-          role: "tool",
-          text: headText,
-          status: item.status,
-          toolName: item.output.toolName,
-          ...(toolCallId ? { toolCallId } : {}),
-          ...(errorText ? { toolError: errorText } : {}),
-          ...(applyPatch ? { applyPatch } : {}),
-          tone: item.status === "failed" ? "error" : "normal"
-        };
-      }
-      if (item.output.toolName === "todolist") {
-        const todoList = parseTodoListDisplay(item.output.result) || parseTodoListDisplay(item.output.args);
-        if (!todoList) {
-          let line = headText;
-          if (errorText) {
-            line += `\nerror: ${errorText}`;
-          }
-          return {
-            id: item.id,
-            prevId: item.prevId,
-            archiveAt,
-            boundaryReason,
-            role: "tool",
-            text: line,
-            status: item.status,
-            toolName: item.output.toolName,
-            ...(toolCallId ? { toolCallId } : {}),
-            tone: item.status === "failed" ? "error" : "normal"
-          };
-        }
-        return {
-          id: item.id,
-          prevId: item.prevId,
-          archiveAt,
-          boundaryReason,
-          role: "tool",
-          text: headText,
-          status: item.status,
-          toolName: item.output.toolName,
-          ...(toolCallId ? { toolCallId } : {}),
-          ...(errorText ? { toolError: errorText } : {}),
-          todoList,
-          tone: item.status === "failed" ? "error" : "normal"
-        };
-      }
-      if (item.output.toolName === "write") {
-        const writeResult = parseWriteDisplay(item.output.result);
-        if (!writeResult) {
-          let line = headText;
-          if (errorText) {
-            line += `\nerror: ${errorText}`;
-          }
-          return {
-            id: item.id,
-            prevId: item.prevId,
-            archiveAt,
-            boundaryReason,
-            role: "tool",
-            text: line,
-            status: item.status,
-            toolName: item.output.toolName,
-            ...(toolCallId ? { toolCallId } : {}),
-            tone: item.status === "failed" ? "error" : "normal"
-          };
-        }
-        return {
-          id: item.id,
-          prevId: item.prevId,
-          archiveAt,
-          boundaryReason,
-          role: "tool",
-          text: headText,
-          status: item.status,
-          toolName: item.output.toolName,
-          ...(toolCallId ? { toolCallId } : {}),
-          ...(errorText ? { toolError: errorText } : {}),
-          writeResult,
-          tone: item.status === "failed" ? "error" : "normal"
-        };
-      }
-      if (item.output.toolName === "subtask") {
-        const subtaskRun = subtaskRunForDisplay(item);
-        const argsObj = toRecord(item.output.args);
-        const description = typeof argsObj?.description === "string" ? argsObj.description.trim() : "";
-        const session = toRecord(argsObj?.session);
-        const modeRaw = typeof session?.mode === "string" ? session.mode.trim() : "";
-        const mode = modeRaw === "new" || modeRaw === "existing" || modeRaw === "fork" ? modeRaw : "";
-        const agentId = typeof argsObj?.agentId === "string" ? argsObj.agentId.trim() : "";
-        const resultAgentName = typeof resultObj?.subtaskAgentName === "string" ? resultObj.subtaskAgentName.trim() : "";
-        const resultAgentId = typeof resultObj?.subtaskAgentId === "string" ? resultObj.subtaskAgentId.trim() : "";
-        const stableAgentId = agentId || resultAgentId;
-        const fallbackAgentName = stableAgentId ? resolveAgentName(stableAgentId) : "";
-        const agentName = resultAgentName || fallbackAgentName;
-
-        return {
-          id: item.id,
-          prevId: item.prevId,
-          archiveAt,
-          boundaryReason,
-          role: "tool",
-          text: headText,
-          status: item.status,
-          toolName: item.output.toolName,
-          ...(toolCallId ? { toolCallId } : {}),
-          ...(subtaskSessionId ? { subtaskSessionId } : {}),
-          ...(errorText ? { toolError: errorText } : {}),
-          ...(description ? { subtaskDescription: description } : {}),
-          ...(mode ? { subtaskMode: mode } : {}),
-          ...(stableAgentId ? { subtaskAgentId: stableAgentId } : {}),
-          ...(agentName ? { subtaskAgentName: agentName } : {}),
-          ...(subtaskRun ? { subtaskRun } : {}),
-          tone: item.status === "failed" ? "error" : "normal"
-        };
-      }
-      if (item.output.toolName === "scratchpad") {
-        const contentRaw = typeof resultObj?.content === "string" ? resultObj.content : undefined;
-        const argsObj = toRecord(item.output.args);
-        const argsContent = typeof argsObj?.content === "string" ? argsObj.content : undefined;
-        const scratchpadContent = contentRaw ?? argsContent;
-        if (scratchpadContent === undefined) {
-          let line = headText;
-          if (errorText) {
-            line += `\nerror: ${errorText}`;
-          }
-          return {
-            id: item.id,
-            prevId: item.prevId,
-            archiveAt,
-            boundaryReason,
-            role: "tool",
-            text: line,
-            status: item.status,
-            toolName: item.output.toolName,
-            ...(toolCallId ? { toolCallId } : {}),
-            tone: item.status === "failed" ? "error" : "normal"
-          };
-        }
-        return {
-          id: item.id,
-          prevId: item.prevId,
-          archiveAt,
-          boundaryReason,
-          role: "tool",
-          text: headText,
-          status: item.status,
-          toolName: item.output.toolName,
-          ...(toolCallId ? { toolCallId } : {}),
-          ...(errorText ? { toolError: errorText } : {}),
-          scratchpadContent,
-          tone: item.status === "failed" ? "error" : "normal"
-        };
-      }
-      let line = headText;
-      if (errorText) {
-        line += `\nerror: ${errorText}`;
-      }
-      return {
-        id: item.id,
-        prevId: item.prevId,
-        archiveAt,
-        boundaryReason,
-        role: "tool",
-        text: line,
-        status: item.status,
-        toolName: item.output.toolName,
-        ...(toolCallId ? { toolCallId } : {}),
-        ...(subtaskSessionId ? { subtaskSessionId } : {}),
-        tone: item.status === "failed" ? "error" : "normal"
-      };
-    }
-    if (item.kind === "system" && item.output.type === "system_text") {
-      return {
-        id: item.id,
-        prevId: item.prevId,
-        archiveAt,
-        boundaryReason,
-        role: "system",
-        text: item.output.text,
-        status: item.status
-      };
-    }
-    return {
-      id: item.id,
-      prevId: item.prevId,
-      archiveAt,
-      boundaryReason,
-      role: "system",
-      text: JSON.stringify(item.output),
-      status: item.status
-    };
-  });
-
-  // assistant 消息展示规则:
-  // - 非终态: 即使 text 为空也保留(用于展示 loading 行)
-  // - 终态: text 为空则隐藏
-  return mapped.filter((item) => {
-    if (item.role !== "assistant") return true;
-    if (!isTerminalStatus(item.status)) return true;
-    return item.text.trim().length > 0;
-  });
-});
-
-const latestTodoListItemId = computed<number | null>(() => {
-  for (let i = displayItems.value.length - 1; i >= 0; i -= 1) {
-    const item = displayItems.value[i];
-    if (item?.todoList) return item.id;
-  }
-  return null;
-});
-
-function isTodoCollapsed(itemId: number) {
-  return collapsedTodoItemIds.value.has(itemId);
-}
-
-function isTextMessageExpanded(itemId: number) {
-  return expandedTextMessageIds.value.has(itemId);
-}
-
-function isTextMessageClamped(itemId: number) {
-  return clampedTextMessageIds.value.has(itemId);
-}
-
-function onToggleTextMessageExpanded(itemId: number, expanded: boolean) {
-  const next = new Set(expandedTextMessageIds.value);
-  if (expanded) next.add(itemId);
-  else next.delete(itemId);
-  expandedTextMessageIds.value = next;
-  onRequestVirtualMeasure(itemId);
-}
-
-function onTextMessageClampChange(itemId: number, clamped: boolean) {
-  const next = new Set(clampedTextMessageIds.value);
-  if (clamped) next.add(itemId);
-  else next.delete(itemId);
-  clampedTextMessageIds.value = next;
-}
-
-function onToggleTodoCollapse(itemId: number) {
-  const next = new Set(collapsedTodoItemIds.value);
-  if (next.has(itemId)) {
-    next.delete(itemId);
-  } else {
-    next.add(itemId);
-  }
-  collapsedTodoItemIds.value = next;
-  onRequestVirtualMeasure(itemId);
-}
-
-watch(
-  latestTodoListItemId,
-  (latestId, prevLatestId) => {
-    if (latestId == null) {
-      if (collapsedTodoItemIds.value.size > 0) {
-        collapsedTodoItemIds.value = new Set();
-      }
-      return;
-    }
-    if (latestId === prevLatestId) return;
-    const next = new Set<number>();
-    for (const item of displayItems.value) {
-      if (!item.todoList) continue;
-      if (item.id === latestId) continue;
-      next.add(item.id);
-    }
-    collapsedTodoItemIds.value = next;
-    onRequestVirtualMeasure(latestId);
-  },
-  { immediate: true }
+const promptItems = ref<any[]>([]);
+const promptSettingsLoaded = ref(false);
+const mentionCandidates = ref<MentionCandidateItem[]>([]);
+const selectedCandidateId = ref("");
+const caret = ref(0);
+const inputCandidateListId = createInputCandidateListId(props.sessionId);
+let mentionTimer: number | null = null;
+const promptCommandMap = computed(() =>
+  buildPromptCommandMap(promptItems.value, slashCommands),
 );
-
-function messageGapTopAt(index: number) {
-  if (index <= 0) return 0;
-  const prev = displayItems.value[index - 1];
-  const current = displayItems.value[index];
-  if (!prev || !current) return MESSAGE_GAP_DEFAULT;
-
-  const prevIsTool = prev.role === "tool";
-  const currentIsTool = current.role === "tool";
-
-  if (prevIsTool && currentIsTool) return MESSAGE_GAP_TOOL_TOOL;
-  if (prevIsTool) return MESSAGE_GAP_PREV_TOOL;
-  if (currentIsTool) return MESSAGE_GAP_CUR_TOOL;
-  return MESSAGE_GAP_DEFAULT;
+const slashMap = new Map(slashCommands.map((item) => [item.name, item]));
+const inputCandidates = computed<Candidate[]>(() => {
+  const text = draft.value;
+  if (isSlashMode(text))
+    return buildSlashInputCandidates({
+      commands: slashCommands,
+      promptCommands: promptCommandMap.value,
+      query: text.trimStart().slice(1).toLowerCase(),
+    }) as Candidate[];
+  const target = findMentionTarget(text, caret.value);
+  return target ? mentionCandidates.value : [];
+});
+function syncInputCaret() {
+  const raw = inputEl.value?.resizableTextArea?.textArea as
+    HTMLTextAreaElement | undefined;
+  caret.value = raw?.selectionStart ?? draft.value.length;
 }
-
-function estimateTextBlockHeight(text: string, options?: {
-  charsPerLine?: number;
-  lineHeight?: number;
-  minLines?: number;
-  maxLines?: number;
-}) {
-  const raw = String(text || "");
-  const charsPerLine = Math.max(16, Math.floor(options?.charsPerLine ?? 52));
-  const lineHeight = Math.max(12, Math.floor(options?.lineHeight ?? 20));
-  const minLines = Math.max(1, Math.floor(options?.minLines ?? 1));
-  const maxLines = Math.max(minLines, Math.floor(options?.maxLines ?? 80));
-
-  const explicitLines = raw.length > 0 ? raw.split("\n").length : 1;
-  const wrappedLines = Math.max(1, Math.ceil(raw.length / charsPerLine));
-  const lines = Math.min(maxLines, Math.max(minLines, explicitLines, wrappedLines));
-  return lines * lineHeight;
+function onInputChanged(event: Event) {
+  const next = (event.target as HTMLTextAreaElement).value;
+  if (shouldConvertLeadingIdeographicCommaToSlash(draft.value, next))
+    draft.value = `/${next.slice(1)}`;
+  syncInputCaret();
+  void scheduleMentionRefresh();
 }
-
-function estimateRowHeight(index: number) {
-  const item = displayItems.value[index];
-  if (!item) return 88;
-  const gap = messageGapTopAt(index);
-  if (item.role === "user") {
-    return 44 + estimateTextBlockHeight(item.text, { charsPerLine: 56, lineHeight: 20, minLines: 2, maxLines: 24 }) + gap;
+async function scheduleMentionRefresh() {
+  if (mentionTimer !== null) window.clearTimeout(mentionTimer);
+  mentionTimer = window.setTimeout(() => void refreshMentionCandidates(), 120);
+}
+async function refreshMentionCandidates() {
+  const target = findMentionTarget(draft.value, caret.value);
+  if (!target || isSlashMode(draft.value)) {
+    mentionCandidates.value = [];
+    return;
   }
-  if (item.role === "assistant") {
-    const terminal = isTerminalStatus(item.status);
-    // 非终态 assistant 底部会额外渲染一行 loading 提示。
-    const loadingRow = terminal ? 0 : 24;
-    const base = terminal ? 52 : 44;
-    const minLines = terminal ? 2 : 1;
-    return base + estimateTextBlockHeight(item.text, { charsPerLine: 50, lineHeight: 20, minLines, maxLines: 80 }) + loadingRow + gap;
-  }
-  if (item.role === "system") {
-    return 34 + estimateTextBlockHeight(item.text, { charsPerLine: 70, lineHeight: 18, minLines: 1, maxLines: 16 }) + gap;
-  }
-
-  if (item.applyPatch) {
-    const fileCount = item.applyPatch.files.length;
-    const rows = Math.min(fileCount, 6);
-    // apply_patch 收起态: 近似按“每个文件一行 tool 文本”的高度估算,并用 tool-tool 间距作为行间距。
-    return 18 + rows * 20 + Math.max(0, rows - 1) * MESSAGE_GAP_TOOL_TOOL + gap;
-  }
-  if (item.todoList) {
-    if (isTodoCollapsed(item.id)) {
-      return 52 + gap;
-    }
-    const rows = Math.min(item.todoList.todos.length, 4);
-    return 96 + rows * 28 + gap;
-  }
-  if (item.writeResult) {
-    return 116 + gap;
-  }
-  if (item.toolName === "subtask") return 136 + gap;
-  return 32 + estimateTextBlockHeight(item.text, { charsPerLine: 72, lineHeight: 18, minLines: 1, maxLines: 20 }) + gap;
-}
-
-let measureReqSeq = 0;
-
-function onRequestVirtualMeasure(_targetMsgId?: number) {
-  const el = scrollEl.value;
-  if (!el) return;
-
-  const dist = distanceToBottom();
-  const followBottom = stickToBottom.value && dist <= 4;
-  const anchor = captureScrollAnchor(el);
-
-  if (!followBottom) {
-    stickToBottom.value = false;
-    userUnfollowed.value = true;
-  }
-
-  const seq = ++measureReqSeq;
-  void nextTick().then(async () => {
-    if (seq !== measureReqSeq) return;
-    await nextTick();
-    if (seq !== measureReqSeq) return;
-
-    if (followBottom) {
-      await scrollToBottom();
-      return;
-    }
-
-    if (!anchor) return;
-    restoreScrollAnchor(el, anchor);
-    lastKnownScrollTop = el.scrollTop;
-  });
-}
-
-function roleLabel(role: DisplayItem["role"]) {
-  if (role === "user") return t("agent.client.roles.user");
-  if (role === "assistant") return t("agent.client.roles.assistant");
-  if (role === "tool") return t("agent.client.roles.tool");
-  return t("agent.client.roles.system");
-}
-
-function isSubtaskCard(item: DisplayItem) {
-  return item.role === "tool" && item.toolName === "subtask";
-}
-
-function isApplyPatchCard(item: DisplayItem) {
-  return item.role === "tool" && item.toolName === "apply_patch" && !!item.applyPatch;
-}
-
-function isTodolistCard(item: DisplayItem) {
-  return item.role === "tool" && item.toolName === "todolist" && !!item.todoList;
-}
-
-function isWriteCard(item: DisplayItem) {
-  return item.role === "tool" && item.toolName === "write" && !!item.writeResult;
-}
-
-function isScratchpadCard(item: DisplayItem) {
-  return item.role === "tool" && item.toolName === "scratchpad" && typeof item.scratchpadContent === "string";
-}
-
-function isBashTextMessage(item: DisplayItem) {
-  return item.role === "tool" && item.toolName === "bash";
-}
-
-function isRichToolCard(item: DisplayItem) {
-  return isSubtaskCard(item) || isTodolistCard(item) || isApplyPatchCard(item) || isWriteCard(item) || isScratchpadCard(item);
-}
-
-function formatSubtaskMode(mode?: string) {
-  if (mode === "new") return t("agent.client.subtaskModeNew");
-  if (mode === "fork") return t("agent.client.subtaskModeFork");
-  if (mode === "existing") return t("agent.client.subtaskModeExisting");
-  return mode || "-";
-}
-
-function subtaskDisplayStatus(item: DisplayItem) {
-  return resolveSubtaskDisplayStatus(item.status, item.subtaskRun);
-}
-
-function subtaskStartedAtText(startedAt: number) {
-  return formatSubtaskStartedAt(startedAt);
-}
-
-function subtaskDurationText(durationMs: number | null) {
-  return formatSubtaskDuration(durationMs);
-}
-
-function subtaskStatusIcon(status: AgentContextItemRecord["status"]) {
-  if (status === "completed") return CheckCircleOutlined;
-  if (status === "failed") return ExclamationCircleOutlined;
-  if (status === "cancelled") return CloseCircleOutlined;
-  if (status === "queued") return ClockCircleOutlined;
-  if (status === "running" || status === "streaming") return LoadingOutlined;
-  return QuestionCircleOutlined;
-}
-
-function subtaskStatusSpin(status: AgentContextItemRecord["status"]) {
-  return status === "running" || status === "streaming";
-}
-
-function subtaskStatusIconClass(status: AgentContextItemRecord["status"]) {
-  if (status === "completed") return "text-emerald-500";
-  if (status === "failed") return "text-red-500";
-  if (status === "cancelled") return "text-[color:var(--text-tertiary)]";
-  if (status === "queued") return "text-[color:var(--text-tertiary)]";
-  if (status === "running" || status === "streaming") return "text-blue-500";
-  return "text-[color:var(--text-tertiary)]";
-}
-
-function bashStatusIcon(status: AgentContextItemRecord["status"]) {
-  if (status === "failed") return ExclamationCircleOutlined;
-  if (status === "running" || status === "streaming") return LoadingOutlined;
-  return null;
-}
-
-function bashStatusSpin(status: AgentContextItemRecord["status"]) {
-  return status === "running" || status === "streaming";
-}
-
-function bashStatusIconClass(status: AgentContextItemRecord["status"]) {
-  if (status === "failed") return "text-red-500";
-  if (status === "running" || status === "streaming") return "text-blue-500";
-  return "text-[color:var(--text-tertiary)]";
-}
-
-function bashTextClass(status: AgentContextItemRecord["status"]) {
-  if (status === "running" || status === "streaming") return "!text-blue-500";
-  return "";
-}
-
-function truncateText(input: string, maxLen: number) {
-  const value = String(input || "");
-  if (value.length <= maxLen) return value;
-  return `${value.slice(0, Math.max(0, maxLen - 3))}...`;
-}
-
-function toCompactText(value: unknown) {
-  if (typeof value === "string") return value;
   try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
-
-function formatToolArgs(args: unknown) {
-  if (typeof args === "undefined") return "";
-  return truncateText(toCompactText(args), 120);
-}
-
-function clearContextRefreshTimer() {
-  if (contextRefreshTimer === null) return;
-  window.clearTimeout(contextRefreshTimer);
-  contextRefreshTimer = null;
-}
-
-function scheduleContextRefresh(delayMs: number) {
-  clearContextRefreshTimer();
-  if (!props.active || !props.sessionId || !props.sessionReady) return;
-  contextRefreshTimer = window.setTimeout(() => {
-    contextRefreshTimer = null;
-    void refreshAll(false);
-  }, Math.max(0, delayMs));
-}
-
-type ScrollAnchor = {
-  msgId: number;
-  offsetPx: number;
-};
-
-function captureScrollAnchor(el: HTMLElement): ScrollAnchor | null {
-  const containerRect = el.getBoundingClientRect();
-  const nodes = Array.from(el.querySelectorAll<HTMLElement>(".agent-message-row[data-msg-id]"));
-  const firstVisible = nodes
-    .map((node) => ({
-      node,
-      rect: node.getBoundingClientRect(),
-      msgId: Number(node.dataset.msgId || 0)
-    }))
-    .filter((item) => item.msgId > 0 && item.rect.bottom > containerRect.top)
-    .sort((a, b) => a.rect.top - b.rect.top)[0];
-
-  const msgId = firstVisible?.msgId ?? 0;
-  if (!msgId) return null;
-  return {
-    msgId,
-    offsetPx: firstVisible ? firstVisible.rect.top - containerRect.top : 0
-  };
-}
-
-function sessionScrollKey(sessionId?: string | null) {
-  const value = String(sessionId ?? props.sessionId ?? "").trim();
-  return value || "";
-}
-
-function saveCurrentScrollPosition(sessionId?: string | null) {
-  const key = sessionScrollKey(sessionId);
-  const el = scrollEl.value;
-  if (!key || !el) return;
-  savedScrollStateBySessionId.set(key, {
-    scrollTop: Math.max(0, el.scrollTop),
-    wasNearBottom: distanceToBottom() <= BOTTOM_FOLLOW_THRESHOLD_PX
-  });
-}
-
-function hasSavedScrollPosition(sessionId?: string | null) {
-  const key = sessionScrollKey(sessionId);
-  return !!key && savedScrollStateBySessionId.has(key);
-}
-
-function shouldRestoreBottomOnActivate(sessionId?: string | null) {
-  const key = sessionScrollKey(sessionId);
-  if (!key) return false;
-  return savedScrollStateBySessionId.get(key)?.wasNearBottom === true;
-}
-
-async function restoreSavedScrollPosition(sessionId?: string | null) {
-  const key = sessionScrollKey(sessionId);
-  if (!key) return false;
-  const saved = savedScrollStateBySessionId.get(key);
-  if (!saved) return false;
-
-  if (saved.wasNearBottom) {
-    await scrollToBottomStable({ force: true });
-    return true;
-  }
-
-  if (typeof saved.scrollTop !== "number" || !Number.isFinite(saved.scrollTop)) return false;
-
-  await nextTick();
-  const el = scrollEl.value;
-  if (!el) return false;
-
-  const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
-  el.scrollTop = Math.max(0, Math.min(maxScrollTop, saved.scrollTop));
-  lastKnownScrollTop = el.scrollTop;
-  atTop.value = el.scrollTop <= TOP_LOAD_THRESHOLD_PX;
-
-  const dist = distanceToBottom();
-  if (dist <= BOTTOM_FOLLOW_THRESHOLD_PX) {
-    stickToBottom.value = true;
-    userUnfollowed.value = false;
-  } else {
-    stickToBottom.value = false;
-    userUnfollowed.value = true;
-  }
-  return true;
-}
-
-async function refreshVisibleSession(options: { forceFull: boolean; forceFollowBottom: boolean }) {
-  const sessionId = props.sessionId;
-  if (!sessionId) return;
-
-  const shouldRestoreSavedScroll = hasSavedScrollPosition(sessionId) && !shouldRestoreBottomOnActivate(sessionId);
-  const shouldRestoreBottom = shouldRestoreBottomOnActivate(sessionId);
-  if (shouldRestoreSavedScroll) {
-    stickToBottom.value = false;
-    userUnfollowed.value = true;
-  }
-
-  await refreshAll(options.forceFull, shouldRestoreSavedScroll ? false : (shouldRestoreBottom ? true : options.forceFollowBottom));
-  if (props.sessionId !== sessionId || !props.active) return;
-
-  if (shouldRestoreBottom) {
-    await scrollToBottomStable({ force: true });
-    saveCurrentScrollPosition(sessionId);
-    return;
-  }
-
-  if (shouldRestoreSavedScroll) {
-    await restoreSavedScrollPosition(sessionId);
-  }
-}
-
-function restoreScrollAnchor(el: HTMLElement, anchor: ScrollAnchor) {
-  const containerRect = el.getBoundingClientRect();
-  const anchorEl = el.querySelector<HTMLElement>(`.agent-message-row[data-msg-id='${anchor.msgId}']`);
-  if (!anchorEl) return;
-  const nextOffset = anchorEl.getBoundingClientRect().top - containerRect.top;
-  const delta = nextOffset - anchor.offsetPx;
-  if (!Number.isFinite(delta) || Math.abs(delta) < 0.5) return;
-  el.scrollTop = Math.max(0, el.scrollTop + delta);
-}
-
-function distanceToBottom() {
-  const el = scrollEl.value;
-  if (!el) return Number.POSITIVE_INFINITY;
-  return Math.max(0, el.scrollHeight - (el.scrollTop + el.clientHeight));
-}
-
-function syncDistanceToBottom() {
-  distanceToBottomPx.value = distanceToBottom();
-}
-
-function updateStickToBottomState() {
-  if (displayItems.value.length === 0) {
-    distanceToBottomPx.value = 0;
-    stickToBottom.value = true;
-    userUnfollowed.value = false;
-    return;
-  }
-  const dist = distanceToBottom();
-  distanceToBottomPx.value = dist;
-  if (userUnfollowed.value) {
-    stickToBottom.value = dist <= 4;
-    if (stickToBottom.value) {
-      userUnfollowed.value = false;
-    }
-    return;
-  }
-  stickToBottom.value = dist <= BOTTOM_FOLLOW_THRESHOLD_PX;
-}
-
-async function loadEarlierHistoryPage() {
-  if (!props.active) return;
-  if (!props.sessionReady) return;
-  if (loadingEarlier.value) return;
-  if (reachedTop.value) return;
-  const el = scrollEl.value;
-  if (!el) return;
-  if (items.value.length === 0) return;
-  if (el.scrollTop > TOP_LOAD_THRESHOLD_PX) return;
-
-  const beforeId = items.value[0]?.id;
-  if (typeof beforeId !== "number" || !Number.isFinite(beforeId) || beforeId <= 0) return;
-
-  const seq = ++loadEarlierSeq;
-  const sessionId = props.sessionId;
-  loadingEarlier.value = true;
-  try {
-    const expectedHeadItemId = typeof lastKnownHeadItemId.value === "number" ? lastKnownHeadItemId.value : undefined;
-    const page = await getAgentContextItems(sessionId, {
-      beforeId,
-      limit: HISTORY_PAGE_LIMIT,
-      ...(expectedHeadItemId ? { expectedHeadItemId } : {})
-    });
-
-    if (seq !== loadEarlierSeq) return;
-    if (props.sessionId !== sessionId) return;
-
-    lastKnownHeadItemId.value = page.headItemId;
-
-    if (page.items.length === 0) {
-      reachedTop.value = true;
-      return;
-    }
-
-    const existing = new Set(items.value.map((item) => item.id));
-    const prepend = page.items.filter((item) => !existing.has(item.id));
-    if (prepend.length === 0) {
-      // 理论上不应发生;为避免滚动到顶重复触发,将其视为已到最早.
-      reachedTop.value = true;
-      return;
-    }
-
-    // prepend 前记录首屏锚点,用于在普通 DOM 列表里保持当前可见内容的位置不变。
-    const anchor = captureScrollAnchor(el);
-
-    items.value = [...prepend, ...items.value];
-    syncBoundaryMarkerCursor(prepend);
-    // 若后端明确告知已无更多历史,避免再触发一次无效请求.
-    if (page.hasMoreBefore === false) {
-      reachedTop.value = true;
-    }
-
-    await nextTick();
-    if (anchor) restoreScrollAnchor(el, anchor);
-
-    // 同步滚动基线,避免后续 scroll 事件把程序滚动误判为用户滚动。
-    lastKnownScrollTop = el.scrollTop;
-    syncDistanceToBottom();
-    atTop.value = el.scrollTop <= TOP_LOAD_THRESHOLD_PX;
-  } catch (err) {
-    if (err instanceof ApiError && err.code === "AGENT_CONTEXT_ITEMS_HEAD_MOVED") {
-      // head 回退时,继续沿旧 beforeId 翻页会混入不再可见的分支;给出提示即可。
-      message.info(err.message || "session head moved");
-      // 重新拉取 tail window,让 UI 回到当前 head 对应的时间线。
-      await refreshAll(true);
-      return;
-    }
-    message.error(err instanceof Error ? err.message : String(err));
-  } finally {
-    if (seq === loadEarlierSeq) {
-      loadingEarlier.value = false;
-    }
-  }
-}
-
-function onMessageListScroll() {
-  const el = scrollEl.value;
-  if (!el) return;
-  const nextTop = el.scrollTop;
-  const delta = nextTop - lastKnownScrollTop;
-  lastKnownScrollTop = nextTop;
-  syncDistanceToBottom();
-  saveCurrentScrollPosition();
-  atTop.value = nextTop <= TOP_LOAD_THRESHOLD_PX;
-
-  // 用户主动向上滚动时,即使仍在“离底部阈值”内也不应继续吸附.
-  if (delta < 0) {
-    stickToBottom.value = false;
-    userUnfollowed.value = true;
-    clearFollowBottomLock();
-    if (atTop.value) {
-      void loadEarlierHistoryPage();
-    }
-    return;
-  }
-
-  updateStickToBottomState();
-}
-
-function onMessageListWheel(event: WheelEvent) {
-  // wheel 事件触发早于 scroll,用于提前取消吸底。
-  // 否则在“贴底状态微微向上滚动”时,可能被 totalSize 变化触发的 scrollToBottom 抢回并产生跳动。
-  if (event.deltaY < 0) {
-    stickToBottom.value = false;
-    userUnfollowed.value = true;
-    clearFollowBottomLock();
-  }
-}
-
-function clearFollowBottomLock() {
-  followBottomLockSeq += 1;
-  followBottomLockRemaining.value = 0;
-  followBottomLockInFlight = false;
-  if (followBottomLockTimer != null) {
-    window.clearTimeout(followBottomLockTimer);
-    followBottomLockTimer = null;
-  }
-}
-
-function startFollowBottomLock(options?: { force?: boolean }) {
-  const force = options?.force === true;
-  if (!props.active) return;
-  if (userUnfollowed.value) return;
-  if (!force && !stickToBottom.value) return;
-  followBottomLockSeq += 1;
-  const seq = followBottomLockSeq;
-  followBottomLockRemaining.value = Math.max(followBottomLockRemaining.value, FOLLOW_BOTTOM_LOCK_MAX_ATTEMPTS);
-  if (followBottomLockTimer != null) {
-    window.clearTimeout(followBottomLockTimer);
-  }
-  followBottomLockTimer = window.setTimeout(() => {
-    if (seq !== followBottomLockSeq) return;
-    followBottomLockRemaining.value = 0;
-    followBottomLockTimer = null;
-  }, FOLLOW_BOTTOM_LOCK_TIMEOUT_MS);
-  void runFollowBottomLock(seq);
-}
-
-async function runFollowBottomLock(seq: number) {
-  if (followBottomLockInFlight) return;
-  followBottomLockInFlight = true;
-  try {
-    while (seq === followBottomLockSeq && followBottomLockRemaining.value > 0) {
-      if (!props.active) break;
-      if (!stickToBottom.value) break;
-      if (userUnfollowed.value) break;
-      if (distanceToBottom() <= LAST_MESSAGE_VISIBLE_THRESHOLD_PX && lastMessageOverflowBottomPx() <= LAST_MESSAGE_VISIBLE_THRESHOLD_PX) break;
-
-      followBottomLockRemaining.value = Math.max(0, followBottomLockRemaining.value - 1);
-      await scrollToBottom({ force: true });
-      await ensureLastMessageFullyVisible({ force: true });
-
-      // 让 DOM 渲染/测量有机会推进,再判断是否仍需要补滚动。
-      await nextTick();
-      await new Promise<void>((resolve) => {
-        window.requestAnimationFrame(() => resolve());
-      });
-    }
-  } finally {
-    followBottomLockInFlight = false;
-    if (
-      seq === followBottomLockSeq
-      && distanceToBottom() <= LAST_MESSAGE_VISIBLE_THRESHOLD_PX
-      && lastMessageOverflowBottomPx() <= LAST_MESSAGE_VISIBLE_THRESHOLD_PX
-    ) {
-      followBottomLockRemaining.value = 0;
-    }
-  }
-}
-
-function lastMessageOverflowBottomPx() {
-  const el = scrollEl.value;
-  if (!el) return Number.POSITIVE_INFINITY;
-
-  const rows = Array.from(el.querySelectorAll<HTMLElement>(".agent-message-row[data-msg-id]"));
-  const lastRow = rows[rows.length - 1];
-  if (!lastRow) return 0;
-
-  const containerRect = el.getBoundingClientRect();
-  const rowRect = lastRow.getBoundingClientRect();
-  const desiredBottom = containerRect.bottom - MESSAGE_LIST_BOTTOM_SPACER_PX;
-  const overflow = rowRect.bottom - desiredBottom;
-  if (!Number.isFinite(overflow)) return Number.POSITIVE_INFINITY;
-  return Math.max(0, overflow);
-}
-
-async function ensureLastMessageFullyVisible(options?: { force?: boolean }) {
-  const force = options?.force === true;
-  if (!force && !stickToBottom.value) return;
-  const el = scrollEl.value;
-  if (!el || displayItems.value.length === 0) return;
-
-  await nextTick();
-  const overflow = lastMessageOverflowBottomPx();
-  if (!Number.isFinite(overflow) || overflow <= 0.5) return;
-  const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
-  el.scrollTop = Math.max(0, Math.min(maxScrollTop, el.scrollTop + overflow));
-  await nextTick();
-}
-
-async function scrollToBottom(options?: { force?: boolean }) {
-  const force = options?.force === true;
-  if (!force && !stickToBottom.value) return;
-  if (displayItems.value.length === 0) return;
-
-  const seq = ++scrollToBottomSeq;
-  await nextTick();
-  if (seq !== scrollToBottomSeq) return;
-
-  const el = scrollEl.value;
-  if (!el) return;
-  el.scrollTop = el.scrollHeight;
-  await ensureLastMessageFullyVisible({ force: true });
-  await nextTick();
-  if (seq !== scrollToBottomSeq) return;
-  updateStickToBottomState();
-  if (force || stickToBottom.value) {
-    userUnfollowed.value = false;
-  }
-
-  // 同步滚动基线,避免后续 scroll 事件把程序滚动误判为“用户向上滚动”。
-  lastKnownScrollTop = el.scrollTop;
-  syncDistanceToBottom();
-  saveCurrentScrollPosition();
-}
-
-async function scrollToBottomStable(options?: { force?: boolean }) {
-  await scrollToBottom(options);
-  const force = options?.force === true;
-  if (force) {
-    // forceFollowBottom 场景下,即使高度估算导致 dist>阈值,也应继续视为“吸底模式”。
-    stickToBottom.value = true;
-    userUnfollowed.value = false;
-  }
-  if (force || (stickToBottom.value && !userUnfollowed.value)) {
-    startFollowBottomLock({ force });
-  }
-}
-
-function onScrollToBottomClick() {
-  stickToBottom.value = true;
-  userUnfollowed.value = false;
-  clearFollowBottomLock();
-  void scrollToBottomStable({ force: true });
-}
-
-async function focusInputIfNeeded() {
-  if (!props.active) return;
-  if (isSubtaskSession.value) return;
-  await nextTick();
-  inputEl.value?.focus?.();
-}
-
-function upsertItem(next: AgentContextItemRecord) {
-  items.value = upsertAgentContextItem(items.value, next);
-}
-
-function itemById(itemId: number) {
-  return items.value.find((item) => item.id === itemId) ?? null;
-}
-
-function hasItemChanged(current: AgentContextItemRecord | null, latest: AgentContextItemRecord) {
-  if (!current) return true;
-  if (current.updatedAt !== latest.updatedAt) return true;
-  if (current.status !== latest.status) return true;
-  const currentArchiveAt = typeof current.archiveAt === "number" ? current.archiveAt : null;
-  const latestArchiveAt = typeof latest.archiveAt === "number" ? latest.archiveAt : null;
-  if (currentArchiveAt !== latestArchiveAt) return true;
-  if (String(current.boundaryReason || "") !== String(latest.boundaryReason || "")) return true;
-  if (hasSubtaskRunChanged(current.subtaskRun, latest.subtaskRun)) return true;
-  return JSON.stringify(current.output) !== JSON.stringify(latest.output);
-}
-
-function isTerminalStatus(status: AgentContextItemRecord["status"]) {
-  return terminalStatuses.has(status);
-}
-
-const handledBoundaryMarkerId = ref(0);
-
-function isBoundaryMarkerItem(item: AgentContextItemRecord) {
-  return item.kind === "system" && String(item.boundaryReason || "").trim().length > 0;
-}
-
-function maxBoundaryMarkerId(list: AgentContextItemRecord[]) {
-  let maxId = 0;
-  for (const item of list) {
-    if (!isBoundaryMarkerItem(item)) continue;
-    maxId = Math.max(maxId, item.id);
-  }
-  return maxId;
-}
-
-function syncBoundaryMarkerCursor(list: AgentContextItemRecord[]) {
-  handledBoundaryMarkerId.value = Math.max(handledBoundaryMarkerId.value, maxBoundaryMarkerId(list));
-}
-
-function shouldForceFullRefreshForBoundaryMarker(list: AgentContextItemRecord[]) {
-  for (const item of list) {
-    if (!isBoundaryMarkerItem(item)) continue;
-    if (item.id > handledBoundaryMarkerId.value) return true;
-  }
-  return false;
-}
-
-async function refreshAll(forceFull: boolean, forceFollowBottom = false, prevRunStatusOverride?: AgentSessionRunState["status"] | null) {
-  if (!props.sessionReady) {
-    loadEarlierSeq += 1;
-    handledBoundaryMarkerId.value = 0;
-    items.value = [];
-    expandedTextMessageIds.value = new Set();
-    clampedTextMessageIds.value = new Set();
-    lastKnownHeadItemId.value = null;
-    loadingEarlier.value = false;
-    reachedTop.value = false;
-    atTop.value = false;
-    return;
-  }
-  if (loading.value) return;
-  loading.value = true;
-  try {
-    const prevRunStatus = prevRunStatusOverride ?? runState.value.status;
-    const state = runState.value;
-
-    if (state.status !== "idle") {
-      settlePollRemaining = 0;
-    } else if (prevRunStatus !== "idle") {
-      // 运行结束后继续短暂补轮询,避免最终输出写入稍晚导致 UI 停在半截。
-      settlePollRemaining = 2;
-    }
-
-    if (forceFull || items.value.length === 0) {
-      // full reload 会替换 items,需取消可能 in-flight 的向上分页请求。
-      loadEarlierSeq += 1;
-      loadingEarlier.value = false;
-      const full = await getAgentContextItems(props.sessionId, { tailLimit: INITIAL_TAIL_LIMIT });
-      items.value = [...full.items].sort((a, b) => a.id - b.id);
-      syncBoundaryMarkerCursor(items.value);
-      lastKnownHeadItemId.value = full.headItemId;
-      reachedTop.value = full.hasMoreBefore === false;
-      await scrollToBottomStable({ force: forceFollowBottom });
-    } else {
-      const lastId = items.value.length > 0 ? items.value[items.value.length - 1]!.id : 0;
-      const delta = await getAgentContextItems(props.sessionId, { afterId: lastId });
-      lastKnownHeadItemId.value = delta.headItemId;
-      const headMovedBackward = delta.headItemId == null ? lastId > 0 : delta.headItemId < lastId;
-      const firstDelta = delta.items[0];
-      const chainBroken = !!firstDelta && firstDelta.prevId !== lastId;
-      const hasBoundaryMarker = shouldForceFullRefreshForBoundaryMarker(delta.items);
-      if (headMovedBackward || chainBroken || hasBoundaryMarker) {
-        loadEarlierSeq += 1;
-        loadingEarlier.value = false;
-        const full = await getAgentContextItems(props.sessionId, { tailLimit: INITIAL_TAIL_LIMIT });
-        items.value = [...full.items].sort((a, b) => a.id - b.id);
-        syncBoundaryMarkerCursor(items.value);
-        lastKnownHeadItemId.value = full.headItemId;
-        reachedTop.value = full.hasMoreBefore === false;
-        await scrollToBottomStable({ force: forceFollowBottom });
-      } else if (delta.items.length > 0) {
-        for (const item of delta.items) {
-          upsertItem(item);
-        }
-        syncBoundaryMarkerCursor(delta.items);
-        await scrollToBottomStable({ force: forceFollowBottom });
-      }
-    }
-
-    const nonTerminalIds = new Set<number>(runState.value.nonTerminalItemIds || []);
-    if (runState.value.activeAssistantItemId) {
-      nonTerminalIds.add(runState.value.activeAssistantItemId);
-    }
-    // 兜底: 本地若仍有非终态项,继续主动拉取,避免服务端 runState 已 idle 时状态停留在 queued。
-    for (const localItem of items.value) {
-      if (!isTerminalStatus(localItem.status)) {
-        nonTerminalIds.add(localItem.id);
-      }
-    }
-    let nonTerminalChanged = false;
-    for (const itemId of nonTerminalIds) {
-      const current = itemById(itemId);
-      if (current && isTerminalStatus(current.status)) {
-        continue;
-      }
-      const latest = await getAgentContextItem(props.sessionId, itemId);
-      if (hasItemChanged(current, latest)) {
-        nonTerminalChanged = true;
-      }
-      upsertItem(latest);
-    }
-
-    if (state.status === "idle" && settlePollRemaining > 0) {
-      const tailId = items.value[items.value.length - 1]?.id;
-      if (typeof tailId === "number") {
-        const currentTail = itemById(tailId);
-        const latestTail = await getAgentContextItem(props.sessionId, tailId);
-        if (hasItemChanged(currentTail, latestTail)) {
-          nonTerminalChanged = true;
-        }
-        upsertItem(latestTail);
-      }
-    }
-
-    if (nonTerminalChanged) {
-      await scrollToBottomStable({ force: forceFollowBottom });
-    }
-
-    const hasLocalNonTerminal = items.value.some((item) => !isTerminalStatus(item.status));
-    if (state.status !== "idle") settlePollRemaining = 0;
-    else if (prevRunStatus !== "idle") settlePollRemaining = 2;
-
-    if (state.status !== "idle") {
-      scheduleContextRefresh(POLL_RUNNING_MS);
-    } else if (hasLocalNonTerminal) {
-      scheduleContextRefresh(POLL_LOCAL_NON_TERMINAL_MS);
-    } else if (settlePollRemaining > 0) {
-      settlePollRemaining -= 1;
-      scheduleContextRefresh(520);
-    }
-  } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err));
-  } finally {
-    loading.value = false;
-  }
-}
-
-function onAgentChange(value: string) {
-  const next = String(value || "").trim();
-  if (!next) return;
-  emit("update:modelValue", next);
-}
-
-function onCycleAgent(step: 1 | -1) {
-  if (!hasAvailableAgents.value) return;
-  const options = props.agentOptions;
-  if (options.length === 0) return;
-  const current = effectiveAgentId.value;
-  let index = options.findIndex((item) => item.value === current);
-  if (index < 0) index = 0;
-  const nextIndex = (index + step + options.length) % options.length;
-  const nextId = options[nextIndex]?.value;
-  if (!nextId || nextId === current) return;
-  emit("update:modelValue", nextId);
-}
-
-function goAgentProfiles() {
-  void router.push("/settings/agent/profiles");
-}
-
-function onOpenSubtask(sessionId?: string) {
-  const id = String(sessionId || "").trim();
-  if (!id) return;
-  emit("open-subtask", id);
-}
-
-function onChooseSession() {
-  emit("choose-session");
-}
-
-function onOpenTitleSetting() {
-  if (resolveTitleSettingTrigger(props.sessionReady) !== "emit") return;
-  emit("open-title-setting");
-}
-
-function onOpenParent() {
-  const sessionId = String(props.parentSessionId || "").trim();
-  if (!sessionId) return;
-  emit("open-parent", sessionId);
-}
-
-async function copySessionId(sessionId: string) {
-  const content = String(sessionId ?? "").trim();
-  if (!content) return;
-  try {
-    const writeText = navigator.clipboard?.writeText;
-    if (typeof writeText === "function") {
-      await writeText.call(navigator.clipboard, content);
-      message.success(t("agent.client.sessionIdCopied"));
-      return;
-    }
-  } catch {
-    // ignore and fallback below
-  }
-
-  let ta: HTMLTextAreaElement | null = null;
-  try {
-    ta = document.createElement("textarea");
-    ta.value = content;
-    ta.setAttribute("readonly", "");
-    ta.style.position = "fixed";
-    ta.style.left = "-9999px";
-    ta.style.top = "0";
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    const copied = document.execCommand("copy");
-    if (!copied) {
-      throw new Error("document.execCommand('copy') returned false");
-    }
-    message.success(t("agent.client.sessionIdCopied"));
-  } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err || "unknown error");
-    message.error(t("common.copyFailed", { reason }));
-  } finally {
-    ta?.remove();
-  }
-}
-
-async function onCopySessionId() {
-  await copySessionId(props.sessionId);
-}
-
-async function onCopySubtaskSessionId(sessionId?: string, event?: MouseEvent) {
-  event?.stopPropagation();
-  const normalizedSessionId = String(sessionId || "").trim();
-  if (!normalizedSessionId) return;
-  await copySessionId(normalizedSessionId);
-}
-
-function newClientRequestId() {
-  return `req_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 10)}`;
-}
-
-function inputCandidateDomId(candidateIndex: number) {
-  return createInputCandidateDomId(inputCandidateListId, candidateIndex);
-}
-
-function onPickSlashCommand(name: string) {
-  const cmd = slashCommandMap.get(name);
-  if (!cmd) return;
-  inputCandidateSelection.value = `slash:${cmd.name}`;
-  draft.value = cmd.usage;
-  nextTick(() => syncInputCaretFromNative());
-  void focusInputIfNeeded();
-}
-
-function scrollActiveInputCandidateIntoView() {
-  const listEl = inputCandidateListEl.value;
-  if (!listEl) return;
-  const activeId = activeInputHint.value.activeId;
-  if (!activeId) return;
-  const activeEl = Array.from(listEl.querySelectorAll<HTMLElement>("[data-input-candidate-id]")).find((element) => {
-    return element.dataset.inputCandidateId === activeId;
-  });
-  if (activeEl) {
-    activeEl.scrollIntoView({ block: "nearest" });
-  }
-}
-
-function moveInputCandidateSelection(step: 1 | -1) {
-  const hint = activeInputHint.value;
-  if (!hint.visible || hint.items.length === 0) return;
-  const currentIdx = Math.max(0, hint.items.findIndex((item) => item.id === hint.activeId));
-  const nextIdx = (currentIdx + step + hint.items.length) % hint.items.length;
-  inputCandidateSelection.value = hint.items[nextIdx]?.id || "";
-}
-
-function applyMentionCandidate(candidate: MentionCandidateItem) {
-  const target = mentionTarget.value;
-  if (!target || !candidate.insertText) return false;
-  const before = draft.value.slice(0, target.replaceFrom);
-  const after = draft.value.slice(target.replaceTo);
-  const inserted = `@${candidate.insertText} `;
-  const nextText = `${before}${inserted}${after}`;
-  const caretPos = before.length + inserted.length;
-  draft.value = nextText;
-  inputCandidateSelection.value = "";
-  mentionCandidates.value = [];
-  mentionCandidatesLoading.value = false;
-  void nextTick(() => {
-    const raw = (inputEl.value as any)?.resizableTextArea?.textArea as HTMLTextAreaElement | undefined;
-    if (!raw) return;
-    raw.focus();
-    raw.setSelectionRange(caretPos, caretPos);
-    inputCaretIndex.value = caretPos;
-  });
-  return true;
-}
-
-function onPickInputCandidate(candidate: InputCandidateItem) {
-  if (candidate.kind === "slash" && candidate.command) {
-    onPickSlashCommand(candidate.command.name);
-    return;
-  }
-  if (candidate.kind === "prompt_command") {
-    const item = promptCommandMap.value.get(candidate.command);
-    const insertText = item ? promptCommandInsertText(item, candidate.command) : candidate.label;
-    const caretPos = item ? promptCommandInsertCaret(item, candidate.command) : insertText.length;
-    inputCandidateSelection.value = candidate.id;
-    draft.value = insertText;
-    void nextTick(() => {
-      const raw = (inputEl.value as any)?.resizableTextArea?.textArea as HTMLTextAreaElement | undefined;
-      if (raw) {
-        raw.focus();
-        raw.setSelectionRange(caretPos, caretPos);
-        inputCaretIndex.value = caretPos;
-        return;
-      }
-      void focusInputIfNeeded();
-      syncInputCaretFromNative();
-    });
-    return;
-  }
-  if (candidate.kind === "skill" || candidate.kind === "file") {
-    applyMentionCandidate(candidate);
-  }
-}
-
-function pickActiveInputCandidate() {
-  const hint = activeInputHint.value;
-  if (!hint.visible || hint.items.length === 0) return false;
-  const target = hint.items.find((item) => item.id === hint.activeId) || hint.items[0];
-  if (!target) return false;
-  onPickInputCandidate(target);
-  return true;
-}
-
-async function loadSkillMentionCandidates(query: string) {
-  const q = query.trim().toLowerCase();
-  let rows = skillMentionCache.value?.workspaceId === props.workspaceId
-    ? skillMentionCache.value.items
-    : null;
-  if (!rows) {
-    const res = await listWorkspaceTopLevelSkills(props.workspaceId);
-    rows = res.items || [];
-    skillMentionCache.value = { workspaceId: props.workspaceId, items: rows };
-  }
-  return rows
-    .map<MentionCandidateItem>((item) => ({
-      id: `skill:${item.id}`,
-      kind: "skill",
-      label: `skill:${item.id}`,
-      description: [item.name, item.description].filter(Boolean).join(" + "),
-      insertText: `skill:${item.id}`
-    }))
-    .filter((item) => {
-      if (!q) return true;
-      return item.label.toLowerCase().includes(q) || item.description?.toLowerCase().includes(q);
-    });
-}
-
-async function loadFileMentionCandidates(query: string) {
-  const q = query.trim();
-  const res = await suggestWorkspaceFilePaths({
-    workspaceId: props.workspaceId,
-    query: q,
-    limit: MAX_INPUT_CANDIDATES
-  });
-  return (res.items || [])
-    .map((path: string) => path.trim())
-    .filter(Boolean)
-    .map<MentionCandidateItem>((path: string) => ({
+    const [skills, files] = await Promise.all([
+      listWorkspaceTopLevelSkills(props.workspaceId),
+      suggestWorkspaceFilePaths({
+        workspaceId: props.workspaceId,
+        query: target.query,
+        limit: 10,
+      }),
+    ]);
+    const skillRows: MentionCandidateItem[] = skills.items
+      .filter(
+        (item) =>
+          !target.query ||
+          `${item.id} ${item.name} ${item.description}`
+            .toLowerCase()
+            .includes(target.query.toLowerCase()),
+      )
+      .map((item) => ({
+        id: `skill:${item.id}`,
+        kind: "skill",
+        label: `skill:${item.id}`,
+        description: [item.name, item.description].filter(Boolean).join(" · "),
+        insertText: `skill:${item.id}`,
+      }));
+    const fileRows: MentionCandidateItem[] = files.items.map((path) => ({
       id: `file:${path}`,
       kind: "file",
       label: path,
-      insertText: path
+      insertText: path,
     }));
-}
-
-async function refreshMentionCandidates() {
-  const target = mentionTarget.value;
-  if (!target || isSlashMode(draft.value)) {
-    mentionCandidatesLoading.value = false;
-    mentionCandidates.value = [];
-    return;
-  }
-  mentionCandidatesLoading.value = true;
-  const seq = ++mentionFetchSeq.value;
-  try {
-    const [skills, files] = await Promise.all([
-      loadSkillMentionCandidates(target.query),
-      loadFileMentionCandidates(target.query)
-    ]);
-    if (seq !== mentionFetchSeq.value) return;
-    mentionCandidates.value = limitMentionCandidates([...skills, ...files], MAX_INPUT_CANDIDATES);
-    if (!mentionCandidates.value.some((it) => it.id === inputCandidateSelection.value)) {
-      inputCandidateSelection.value = mentionCandidates.value[0]?.id || "";
-    }
+    mentionCandidates.value = limitMentionCandidates(
+      [...skillRows, ...fileRows],
+      10,
+    );
+    selectedCandidateId.value = mentionCandidates.value[0]?.id || "";
   } catch {
-    if (seq !== mentionFetchSeq.value) return;
     mentionCandidates.value = [];
-  } finally {
-    if (seq === mentionFetchSeq.value) mentionCandidatesLoading.value = false;
   }
 }
-
+function pickCandidate(item: Candidate) {
+  if (item.kind === "slash") {
+    draft.value = item.command?.usage || "/compact";
+  } else if (item.kind === "prompt_command") {
+    const prompt = promptCommandMap.value.get(item.command || "");
+    if (prompt)
+      draft.value = promptCommandInsertText(prompt, item.command || "");
+  } else {
+    const target = findMentionTarget(draft.value, caret.value);
+    if (target)
+      draft.value = `${draft.value.slice(0, target.replaceFrom)}@${item.insertText}${draft.value.slice(target.replaceTo)}`;
+  }
+  selectedCandidateId.value = "";
+  mentionCandidates.value = [];
+  nextTick(syncInputCaret);
+}
 function onInputKeydown(event: KeyboardEvent) {
-  if (sending.value || isSessionModelSendBlocked({ mutationPending: props.sessionModelMutationPending })) return;
   if (event.isComposing) return;
-
-  if (event.key === "Escape") {
+  if (
+    inputCandidates.value.length &&
+    (event.key === "ArrowDown" || event.key === "ArrowUp")
+  ) {
     event.preventDefault();
-    if (activeInputHint.value.visible) {
-      inputHintDismissed.value = true;
-      inputCandidateSelection.value = "";
-      mentionCandidates.value = [];
-      mentionCandidatesLoading.value = false;
-      if (mentionFetchTimer != null) {
-        window.clearTimeout(mentionFetchTimer);
-        mentionFetchTimer = null;
-      }
-      return;
-    }
-    void onCancelRun();
+    const items = inputCandidates.value;
+    const index = Math.max(
+      0,
+      items.findIndex((item) => item.id === selectedCandidateId.value),
+    );
+    selectedCandidateId.value =
+      items[
+        (index + (event.key === "ArrowDown" ? 1 : -1) + items.length) %
+          items.length
+      ]?.id || "";
     return;
   }
-
-  if (event.key === "Tab") {
-    if (activeInputHint.value.visible) {
-      event.preventDefault();
-      void pickActiveInputCandidate();
-      return;
-    }
+  if (
+    inputCandidates.value.length &&
+    (event.key === "Enter" || event.key === "Tab")
+  ) {
     event.preventDefault();
-    onCycleAgent(event.shiftKey ? -1 : 1);
+    const item =
+      inputCandidates.value.find(
+        (candidate) => candidate.id === selectedCandidateId.value,
+      ) || inputCandidates.value[0];
+    if (item) pickCandidate(item);
     return;
   }
-
-  if (activeInputHint.value.visible && event.key === "ArrowDown") {
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
     event.preventDefault();
-    moveInputCandidateSelection(1);
-    return;
-  }
-
-  if (activeInputHint.value.visible && event.key === "ArrowUp") {
-    event.preventDefault();
-    moveInputCandidateSelection(-1);
-    return;
-  }
-
-  if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
-    event.preventDefault();
-    if (pickActiveInputCandidate()) {
-      return;
-    }
     void onSend();
   }
+  if (event.key === "Escape" && runState.value.status === "running") {
+    event.preventDefault();
+    void onCancel();
+  }
 }
-
-watch(
-  () => [activeInputHint.value.visible, activeInputHint.value.activeId, activeInputHint.value.items.length],
-  () => {
-    void nextTick().then(() => scrollActiveInputCandidateIntoView());
-  }
-);
-
-async function executeSlashCommand(params: {
-  command: SlashCommandDefinition;
-  sessionId: string;
-  workspaceId: string;
-  clientRequestId: string;
-  agentId: string;
-}) {
-  if (params.command.action === "compact") {
-    await compactAgentSession(params.sessionId, {
-      workspaceId: params.workspaceId,
-      clientRequestId: params.clientRequestId,
-      agentId: params.agentId,
-      uiLocale: getInitialLocale()
-    });
-    return;
-  }
-  if (params.command.action === "clear") {
-    await clearAgentSession(params.sessionId, {
-      workspaceId: params.workspaceId,
-      uiLocale: getInitialLocale()
-    });
-    return;
-  }
-  throw new Error(`unsupported slash command: ${params.command.name}`);
-}
-
-async function onCancelRun() {
-  if (!props.sessionId) return;
-  if (actionLoading.value === "cancel") return;
-  if (runState.value.status === "idle") return;
-
-  actionLoading.value = "cancel";
-  actionTargetId.value = null;
+async function refreshPromptItems() {
   try {
-    await cancelAgentSession(props.sessionId, {
-      workspaceId: props.workspaceId
-    });
-    // No confirmation for cancel; keep it snappy and predictable.
-    message.success(t("agent.client.cancelled"));
-    statusStore.bumpPollHint(props.sessionId, { immediate: true, warmup: true });
-    await refreshAll(true);
-  } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err));
-  } finally {
-    actionLoading.value = null;
-    actionTargetId.value = null;
+    promptItems.value = (await getAgentGlobalPromptSettings()).items || [];
+    promptSettingsLoaded.value = true;
+  } catch {
+    promptItems.value = [];
   }
 }
-
-async function onForkFromMessage(itemId: number) {
-  actionLoading.value = "fork";
-  actionTargetId.value = itemId;
-  try {
-    const session = await forkAgentSession({
-      fromSessionId: props.sessionId,
-      fromItemId: itemId,
-      mode: "with_archive"
-    });
-    message.success(t("agent.client.forked"));
-    emit("forked", session.id);
-  } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err));
-  } finally {
-    actionLoading.value = null;
-    actionTargetId.value = null;
-  }
-}
-
-function onRevertToMessage(itemId: number) {
-  const target = itemById(itemId);
-  if (!target) {
-    message.warning(t("agent.client.revertTargetMissing"));
-    return;
-  }
-
-  const revertTarget = resolveAgentMessageRevertTarget(target);
-  if (!revertTarget) {
-    message.warning(t("agent.client.revertTargetMissing"));
-    return;
-  }
-  const { toItemId, revertDraft, isUserTarget } = revertTarget;
-
-  const isFirstUserMessage = isUserTarget && target.prevId == null;
-  if (!isFirstUserMessage && toItemId == null) {
-    message.warning(t("agent.client.revertTargetMissing"));
-    return;
-  }
-
-  if (isFirstUserMessage) {
-    if (runState.value.status !== "idle") {
-      message.warning(t("agent.client.resetDraftWhileRunning"));
-      return;
-    }
-    Modal.confirm({
-      title: t("agent.client.revertConfirmTitle"),
-      content: t("agent.client.revertConfirmContent"),
-      okText: t("agent.client.revert"),
-      cancelText: t("common.cancel"),
-      async onOk() {
-        if (runState.value.status !== "idle") {
-          message.warning(t("agent.client.resetDraftWhileRunning"));
-          throw new Error("agent_session_not_idle");
-        }
-        emit("reset-to-draft", {
-          sessionId: props.sessionId,
-          draftText: revertDraft
-        });
-      }
-    });
-    return;
-  }
-  const confirmedToItemId = toItemId as number;
-
-  Modal.confirm({
-    title: isUserTarget ? t("agent.client.revertConfirmTitle") : t("agent.client.revertConfirmTitleAssistant"),
-    content: isUserTarget ? t("agent.client.revertConfirmContent") : t("agent.client.revertConfirmContentAssistant"),
-    okText: t("agent.client.revert"),
-    cancelText: t("common.cancel"),
-    async onOk() {
-      actionLoading.value = "revert";
-      actionTargetId.value = itemId;
-      try {
-        await revertAgentSession(props.sessionId, {
-          workspaceId: props.workspaceId,
-          itemId: confirmedToItemId,
-          reason: "manual_revert"
-        });
-        if (isUserTarget) {
-          draft.value = revertDraft;
-        }
-        message.success(t("agent.client.reverted"));
-        statusStore.bumpPollHint(props.sessionId, { immediate: true, warmup: true });
-        await refreshAll(true);
-      } catch (err) {
-        message.error(err instanceof Error ? err.message : String(err));
-      } finally {
-        actionLoading.value = null;
-        actionTargetId.value = null;
-      }
-    }
-  });
-}
-
-function externalSkillRootsKey(item: { sourceType: "workspace" | "repo"; repoId?: string; rootDir: string }) {
-  return item.sourceType === "workspace" ? `workspace\u0000${item.rootDir}` : `repo\u0000${String(item.repoId || "")}\u0000${item.rootDir}`;
-}
-
-function agentsInstructionsKey(item: { sourceType: "workspace" | "repo"; repoId?: string }) {
-  return item.sourceType === "workspace" ? "workspace" : `repo\u0000${String(item.repoId || "")}`;
-}
-
-async function onOpenContextManagerModal() {
-  contextManagerModalVisible.value = true;
-  contextManagerLoading.value = true;
-  contextManagerError.value = "";
-  try {
-    const [agents, skills] = await Promise.all([
-      detectWorkspaceAgentsInstructions(props.workspaceId),
-      detectWorkspaceExternalSkillRoots(props.workspaceId)
-    ]);
-
-    const agentItems = (agents.items || [])
-      .map((it) => ({
-        sourceType: it.sourceType === "workspace" ? ("workspace" as const) : ("repo" as const),
-        repoId: String(it.repoId || "").trim() || undefined,
-        displayPath: String(it.displayPath || "").trim(),
-        enabled: it.enabled === true
-      }))
-      .filter((it) => it.displayPath && (it.sourceType === "workspace" || !!it.repoId));
-    agentsInstructionsCandidates.value = agentItems;
-    agentsInstructionsSelectedKeys.value = agentItems.filter((it) => it.enabled).map((it) => agentsInstructionsKey(it));
-
-    const skillItems = (skills.items || [])
-      .map((it) => ({
-        sourceType: it.sourceType === "workspace" ? ("workspace" as const) : ("repo" as const),
-        repoId: String(it.repoId || "").trim() || undefined,
-        rootDir: String(it.rootDir || "").trim(),
-        displayName: String(it.displayName || "").trim(),
-        topLevelSkillCount: Number.isFinite(Number(it.topLevelSkillCount)) ? Math.max(0, Math.floor(Number(it.topLevelSkillCount))) : 0,
-        enabled: it.enabled === true
-      }))
-      .filter((it) => it.rootDir && (it.sourceType === "workspace" || !!it.repoId));
-    externalSkillRootsCandidates.value = skillItems;
-    externalSkillRootsSelectedKeys.value = skillItems.filter((it) => it.enabled).map((it) => externalSkillRootsKey(it));
-  } catch (err) {
-    agentsInstructionsCandidates.value = [];
-    agentsInstructionsSelectedKeys.value = [];
-    externalSkillRootsCandidates.value = [];
-    externalSkillRootsSelectedKeys.value = [];
-    contextManagerError.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    contextManagerLoading.value = false;
-  }
-}
-
-async function onSaveContextManagerSettings() {
-  if (contextManagerLoading.value || contextManagerError.value) return;
-  if (contextManagerSaving.value) return;
-  contextManagerSaving.value = true;
-  contextManagerError.value = "";
-  try {
-    const selectedAgents = new Set(agentsInstructionsSelectedKeys.value);
-    const enabledSources = agentsInstructionsCandidates.value
-      .map((it) => ({ sourceType: it.sourceType, repoId: it.repoId, enabled: selectedAgents.has(agentsInstructionsKey(it)) }))
-      .filter((it) => it.enabled)
-      .map((it) => (it.sourceType === "workspace" ? ({ sourceType: "workspace" as const }) : ({ sourceType: "repo" as const, repoId: String(it.repoId || "").trim() })))
-      .filter((it) => it.sourceType === "workspace" || (it.sourceType === "repo" && it.repoId));
-
-    const selectedSkills = new Set(externalSkillRootsSelectedKeys.value);
-    const enabledRoots = externalSkillRootsCandidates.value
-      .map((it) => ({
-        sourceType: it.sourceType,
-        repoId: it.repoId,
-        rootDir: it.rootDir,
-        enabled: selectedSkills.has(externalSkillRootsKey(it))
-      }))
-      .filter((it) => it.enabled)
-      .map((it) => ({ sourceType: it.sourceType, repoId: it.repoId, rootDir: it.rootDir }));
-
-    const [agentsRes, skillsRes] = await Promise.allSettled([
-      updateWorkspaceAgentsInstructionsSettings(props.workspaceId, { enabledSources }),
-      updateWorkspaceExternalSkillRootsSettings(props.workspaceId, { enabledRoots })
-    ]);
-
-    const agentOk = agentsRes.status === "fulfilled";
-    const skillOk = skillsRes.status === "fulfilled";
-    if (!agentOk || !skillOk) {
-      // 失败时重新拉取真实状态，避免“部分成功但用户以为全失败”造成勾选状态错乱
-      await onOpenContextManagerModal();
-
-      const agentErr = agentOk ? "" : (agentsRes as PromiseRejectedResult).reason instanceof Error ? (agentsRes as PromiseRejectedResult).reason.message : String((agentsRes as PromiseRejectedResult).reason);
-      const skillErr = skillOk ? "" : (skillsRes as PromiseRejectedResult).reason instanceof Error ? (skillsRes as PromiseRejectedResult).reason.message : String((skillsRes as PromiseRejectedResult).reason);
-
-      if (agentOk && !skillOk) {
-        contextManagerError.value = `Skills 保存失败：${skillErr}`;
-      } else if (!agentOk && skillOk) {
-        contextManagerError.value = `AGENTS 保存失败：${agentErr}`;
-      } else {
-        contextManagerError.value = `AGENTS 保存失败：${agentErr}\nSkills 保存失败：${skillErr}`;
-      }
-      return;
-    }
-
-    skillMentionCache.value = null;
-    message.success(t("agent.client.contextManagerSaved"));
-    contextManagerModalVisible.value = false;
-  } catch (err) {
-    contextManagerError.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    contextManagerSaving.value = false;
-  }
-}
-
-async function onOpenExternalSkillRootsModal() {
-  externalSkillRootsModalVisible.value = true;
-  externalSkillRootsLoading.value = true;
-  externalSkillRootsError.value = "";
-  try {
-    const data = await detectWorkspaceExternalSkillRoots(props.workspaceId);
-    const items = (data.items || []).map((it) => ({
-      sourceType: it.sourceType === "workspace" ? "workspace" as const : "repo" as const,
-      repoId: String(it.repoId || "").trim() || undefined,
-      rootDir: String(it.rootDir || "").trim(),
-      displayName: String(it.displayName || "").trim(),
-      topLevelSkillCount: Number.isFinite(Number(it.topLevelSkillCount)) ? Math.max(0, Math.floor(Number(it.topLevelSkillCount))) : 0,
-      enabled: it.enabled === true
-    })).filter((it) => it.rootDir && (it.sourceType === "workspace" || !!it.repoId));
-    externalSkillRootsCandidates.value = items;
-    externalSkillRootsSelectedKeys.value = items.filter((it) => it.enabled).map((it) => externalSkillRootsKey(it));
-  } catch (err) {
-    externalSkillRootsCandidates.value = [];
-    externalSkillRootsSelectedKeys.value = [];
-    externalSkillRootsError.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    externalSkillRootsLoading.value = false;
-  }
-}
-
-async function onSaveExternalSkillRootsSettings() {
-  if (externalSkillRootsLoading.value || externalSkillRootsError.value) return;
-  if (externalSkillRootsSaving.value) return;
-  externalSkillRootsSaving.value = true;
-  externalSkillRootsError.value = "";
-  try {
-    const selected = new Set(externalSkillRootsSelectedKeys.value);
-    const enabledRoots = externalSkillRootsCandidates.value
-      .map((it) => ({
-        sourceType: it.sourceType,
-        repoId: it.repoId,
-        rootDir: it.rootDir,
-        enabled: selected.has(externalSkillRootsKey(it))
-      }))
-      .filter((it) => it.enabled)
-      .map((it) => ({ sourceType: it.sourceType, repoId: it.repoId, rootDir: it.rootDir }));
-    await updateWorkspaceExternalSkillRootsSettings(props.workspaceId, { enabledRoots });
-    skillMentionCache.value = null;
-    message.success(t("agent.client.externalSkillRootsSaved"));
-    externalSkillRootsModalVisible.value = false;
-  } catch (err) {
-    externalSkillRootsError.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    externalSkillRootsSaving.value = false;
-  }
-}
-
-async function onOpenAgentEnablementModal() {
-  agentEnablementModalVisible.value = true;
-  agentEnablementLoading.value = true;
-  agentEnablementError.value = "";
-  try {
-    const [detect, settings] = await Promise.all([
-      detectWorkspaceAgentEnablement(props.workspaceId),
-      getWorkspaceAgentEnablementSettings(props.workspaceId)
-    ]);
-    agentEnablementCandidates.value = detect.items;
-    if (settings.mode === "all") {
-      agentEnablementSelectedIds.value = detect.items.map((it) => it.id);
-    } else {
-      const set = new Set(settings.enabledAgentIds || []);
-      agentEnablementSelectedIds.value = detect.items.map((it) => it.id).filter((id) => set.has(id));
-    }
-  } catch (err) {
-    agentEnablementError.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    agentEnablementLoading.value = false;
-  }
-}
-
-function onSelectAllAgents() {
-  agentEnablementSelectedIds.value = agentEnablementCandidates.value.map((it) => it.id);
-}
-
-function onSelectNoAgents() {
-  agentEnablementSelectedIds.value = [];
-}
-
-async function onSaveAgentEnablementSettings() {
-  if (agentEnablementSaving.value) return;
-  agentEnablementSaving.value = true;
-  agentEnablementError.value = "";
-  try {
-    const allIds = agentEnablementCandidates.value.map((it) => it.id);
-    const selected = new Set(agentEnablementSelectedIds.value);
-    const mode = selected.size === allIds.length ? "all" : "subset";
-    await updateWorkspaceAgentEnablementSettings(props.workspaceId, {
-      mode,
-      ...(mode === "subset" ? { enabledAgentIds: allIds.filter((id) => selected.has(id)) } : {})
-    });
-    message.success(t("agent.client.agentEnablementSaved"));
-    agentEnablementModalVisible.value = false;
-    emit("agent-settings-updated");
-  } catch (err) {
-    agentEnablementError.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    agentEnablementSaving.value = false;
-  }
-}
-
-function onOpenAgentModelModal() {
-  const agentId = String(effectiveAgentId.value || "").trim();
-  if (!canRequestSessionModelOpen({
-    hasAvailableAgents: hasAvailableAgents.value,
-    isSubtaskSession: isSubtaskSession.value,
-    mutationPending: props.sessionModelMutationPending,
-    agentId
-  })) {
-    return;
-  }
-  emit("request-session-model-open", { sessionId: props.sessionId, agentId });
-}
-
-async function openAgentModelModalFromIntent() {
-  const agentId = String(effectiveAgentId.value || "").trim();
-  if (!agentId || !props.sessionReady || isSubtaskSession.value) return;
-  agentModelModalVisible.value = true;
-  agentModelLoading.value = true;
-  agentModelSaving.value = false;
-  agentModelResetting.value = false;
-  agentModelError.value = "";
-  agentModelTargetAgentId.value = agentId;
-  try {
-    const providersRes = await getAgentProvidersSettings();
-    agentModelProvidersSettings.value = providersRes;
-    const effective = sessionModelState.value?.effectiveModel;
-    const initialPath = effective
-      ? [effective.providerId, effective.modelId]
-      : [];
-    agentModelFormPath.value = [...initialPath];
-  } catch (err) {
-    agentModelError.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    agentModelLoading.value = false;
-  }
-}
-
-function onCloseAgentModelModal() {
-  if (agentModelSaving.value || agentModelResetting.value) return;
-  agentModelModalVisible.value = false;
-}
-
-async function onSaveAgentModel() {
-  if (agentModelLoading.value || agentModelError.value || agentModelSaving.value || agentModelResetting.value) return;
-  const targetId = String(agentModelTargetAgentId.value || "").trim();
-  const model = toAgentModelRefFromPath(agentModelFormPath.value);
-  if (!targetId || !model || !props.sessionReady) {
-    message.error(t("settings.agentProfiles.errors.defaultModelRequired"));
-    return;
-  }
-  agentModelSaving.value = true;
-  agentModelError.value = "";
-  emit("session-model-mutation-pending", { sessionId: props.sessionId, pending: true });
-  try {
-    const state = await updateAgentSessionModelOverride(props.sessionId, targetId, {
-      workspaceId: props.workspaceId,
-      providerId: model.providerId,
-      modelId: model.modelId
-    });
-    emit("session-model-state-updated", state);
-    message.success(t("agent.client.modelEditSaved"));
-    agentModelModalVisible.value = false;
-  } catch (err) {
-    agentModelError.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    agentModelSaving.value = false;
-    emit("session-model-mutation-pending", { sessionId: props.sessionId, pending: false });
-  }
-}
-
-async function onResetAgentModel() {
-  const targetId = String(agentModelTargetAgentId.value || "").trim();
-  if (!targetId || !props.sessionReady || !sessionModelState.value?.override || agentModelSaving.value || agentModelResetting.value) return;
-  agentModelResetting.value = true;
-  agentModelError.value = "";
-  emit("session-model-mutation-pending", { sessionId: props.sessionId, pending: true });
-  try {
-    const state = await resetAgentSessionModelOverride(props.sessionId, targetId, props.workspaceId);
-    emit("session-model-state-updated", state);
-    message.success(t("agent.client.modelEditResetSaved"));
-    agentModelModalVisible.value = false;
-  } catch (err) {
-    agentModelError.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    agentModelResetting.value = false;
-    emit("session-model-mutation-pending", { sessionId: props.sessionId, pending: false });
-  }
-}
-
-function removePendingImage(id: string) {
-  if (sending.value) return;
-  pendingImages.value = pendingImages.value.filter((image) => image.id !== id);
-}
-
-function clearPendingImages() {
-  if (sending.value) return;
-  pendingImages.value = [];
-}
-
 async function onImagePaste(event: ClipboardEvent) {
-  if (sending.value) return;
   const files = collectClipboardAgentImageFiles({
     items: event.clipboardData?.items,
-    files: event.clipboardData?.files
+    files: event.clipboardData?.files,
   });
-  const hasText = Array.from(event.clipboardData?.types ?? []).includes("text/plain");
-  const hasImages = files.some((file) => file.type.startsWith("image/"));
-  if (!hasImages) return;
+  if (!files.some((file) => file.type.startsWith("image/"))) return;
+  const hasText = Array.from(event.clipboardData?.types || []).includes(
+    "text/plain",
+  );
   if (!hasText) event.preventDefault();
-
   processingPastedImages.value += 1;
   try {
-    const compressedFiles = await preparePastedAgentImages(files);
     const result = collectPastedAgentImages({
-      files: compressedFiles,
+      files: await preparePastedAgentImages(files),
       existing: pendingImages.value,
       hasText,
-      makeId: () => `${Date.now()}-${Math.random().toString(36).slice(2)}`
+      makeId: () => `${Date.now()}-${Math.random().toString(36).slice(2)}`,
     });
     pendingImages.value = [...pendingImages.value, ...result.accepted];
-    if (result.rejected) message.warning(t(`agent.client.imagePaste${result.rejected[0].toUpperCase()}${result.rejected.slice(1)}`));
+    if (result.rejected)
+      message.warning(
+        t(
+          `agent.client.imagePaste${result.rejected[0].toUpperCase()}${result.rejected.slice(1)}`,
+        ),
+      );
   } finally {
     processingPastedImages.value -= 1;
   }
 }
-
-async function showPreviewAt(index: number) {
-  const attachment = previewAttachments.value[index];
-  if (!attachment) return;
-  const attachmentId = attachment.attachmentId;
-  const generation = ++previewLoadGeneration;
-  previewIndex.value = index;
-  previewLoading.value = true;
-  previewError.value = "";
-  previewUrl.value = "";
-  const isCurrent = () =>
-    attachmentPreviewVisible.value &&
-    previewLoadGeneration === generation &&
-    previewIndex.value === index &&
-    previewAttachments.value[index]?.attachmentId === attachmentId;
-  try {
-    const url = await previewCache.get(attachmentId, getAgentAttachmentContent, isCurrent);
-    if (!url || !isCurrent()) return;
-    previewUrl.value = url;
-  } catch {
-    if (!isCurrent()) return;
-    previewError.value = t("agent.client.imagePreviewLoadFailed");
-  } finally {
-    if (isCurrent()) previewLoading.value = false;
-  }
+function removePendingImage(id: string) {
+  pendingImages.value = pendingImages.value.filter((image) => image.id !== id);
 }
-
-function openAttachmentPreview(attachments: AgentMessageImageAttachment[]) {
-  if (attachments.length === 0) return;
-  previewLoadGeneration += 1;
-  previewCache.clear();
-  previewAttachments.value = [...attachments];
-  previewIndex.value = 0;
-  previewUrl.value = "";
-  previewError.value = "";
-  attachmentPreviewVisible.value = true;
-  void showPreviewAt(0);
-}
-
-function closeAttachmentPreview() {
-  previewLoadGeneration += 1;
-  attachmentPreviewVisible.value = false;
-  previewAttachments.value = [];
-  previewUrl.value = "";
-  previewLoading.value = false;
-  previewError.value = "";
-  previewCache.clear();
-}
-
 async function onSend() {
-  if (isSubtaskSession.value) return;
-  if (isSessionModelSendBlocked({ mutationPending: props.sessionModelMutationPending })) return;
-  if (!hasAvailableAgents.value) {
-    message.warning(t("agent.client.noAgentHint"));
+  if (
+    isSubtaskSession.value ||
+    sending.value ||
+    processingPastedImages.value ||
+    isSessionModelSendBlocked({
+      mutationPending: props.sessionModelMutationPending,
+    })
+  )
     return;
-  }
   const text = draft.value.trim();
-  const images = pendingImages.value;
-  if ((!text && images.length === 0) || sending.value || processingPastedImages.value > 0) return;
-  const slashCommand = resolveSlashCommand(text, slashCommandMap);
-  if (slashCommand && shouldBlockImageSlashCommand(slashCommand.action, images.length)) {
+  if (!text && pendingImages.value.length === 0) return;
+  if (isSlashMode(text) && !promptSettingsLoaded.value)
+    await refreshPromptItems();
+  const action = resolveAgentSlashSendAction({
+    text,
+    promptCommands: promptCommandMap.value,
+  });
+  if (
+    action.kind === "compact" &&
+    shouldBlockImageSlashCommand("compact", pendingImages.value.length)
+  ) {
     message.warning(t("agent.client.imageSlashCommandBlocked"));
     return;
   }
-  const agentId = effectiveAgentId.value;
-  if (!agentId) {
-    message.warning(t("agent.client.noAgentHint"));
-    return;
-  }
-  const fingerprint = createAgentSendAttemptFingerprint({ draft: draft.value, images });
-  const attempt = resolveAgentSendAttempt({ attempt: pendingSendAttempt.value, fingerprint, makeClientRequestId: newClientRequestId });
-  pendingSendAttempt.value = attempt;
-  const clientRequestId = attempt.clientRequestId;
   sending.value = true;
   try {
-    const targetSessionId = props.sessionReady
-      ? props.sessionId
-      : props.ensureSession
-        ? await props.ensureSession(props.sessionId)
-        : "";
-    if (!targetSessionId) {
-      throw new Error("failed to create agent session");
-    }
-
-    if (slashCommand) {
-      await executeSlashCommand({
-        command: slashCommand,
-        sessionId: targetSessionId,
+    const ensuredId = props.ensureSession
+      ? await props.ensureSession(props.sessionId)
+      : props.sessionId;
+    if (action.kind === "compact") {
+      const fingerprint = createAgentCompactAttemptFingerprint({
+        sessionId: ensuredId,
         workspaceId: props.workspaceId,
-        clientRequestId,
-        agentId
+        agentId: effectiveAgentId.value || undefined,
+        locale: getInitialLocale(),
       });
+      const attempt = resolveAgentCompactAttempt({
+        attempt: pendingCompactAttempt.value,
+        fingerprint,
+        makeClientRequestId: () => crypto.randomUUID(),
+      });
+      pendingCompactAttempt.value = attempt;
+      await compactAgentSession(ensuredId, {
+        workspaceId: props.workspaceId,
+        clientRequestId: attempt.clientRequestId,
+        agentId: effectiveAgentId.value || undefined,
+        uiLocale: getInitialLocale(),
+      });
+      draft.value = "";
+      pendingCompactAttempt.value = null;
     } else {
-      let finalText = text;
-      const m = finalText.match(/^\/([A-Za-z0-9][A-Za-z0-9_-]*)$/);
-      if (m) {
-        const cmd = m[1]?.toLowerCase() || "";
-        let item = cmd ? promptCommandMap.value.get(cmd) : undefined;
-        // 兜底：首次进入 Agent 面板时可能还没拉到 settings，此处按需刷新一次。
-        if (!item && cmd && !promptCommandLoading.value && promptCommandItems.value.length === 0) {
-          await refreshPromptCommandItems();
-          item = promptCommandMap.value.get(cmd);
-        }
-        if (item && typeof item.prompt === "string" && item.prompt.trim()) {
-          finalText = item.prompt;
-        }
-      }
+      const sendText = action.text;
+      const fingerprint = createAgentSendAttemptFingerprint({
+        draft: sendText,
+        images: pendingImages.value,
+      });
+      const attempt = resolveAgentSendAttempt({
+        attempt: pendingAttempt.value,
+        fingerprint,
+        makeClientRequestId: () => crypto.randomUUID(),
+      });
+      pendingAttempt.value = attempt;
       const payload = {
         workspaceId: props.workspaceId,
-        text: finalText,
-        clientRequestId,
-        agentId,
-        uiLocale: getInitialLocale()
+        clientRequestId: attempt.clientRequestId,
+        agentId: effectiveAgentId.value || undefined,
+        uiLocale: getInitialLocale(),
+        ...(sendText ? { text: sendText } : {}),
       };
-      if (images.length > 0) {
-        await sendAgentMessageMultipart(targetSessionId, createAgentMessageFormData(payload, images));
-      } else {
-        await sendAgentMessage(targetSessionId, payload);
-      }
+      if (pendingImages.value.length)
+        await sendAgentMessageMultipart(
+          ensuredId,
+          createAgentMessageFormData(payload, pendingImages.value),
+        );
+      else
+        await sendAgentMessage(
+          ensuredId,
+          payload as {
+            workspaceId: string;
+            clientRequestId: string;
+            agentId?: string;
+            uiLocale?: "zh-CN" | "en-US";
+            text: string;
+          },
+        );
+      draft.value = "";
+      pendingImages.value = [];
+      pendingAttempt.value = null;
     }
-    draft.value = "";
-    pendingImages.value = [];
-    pendingSendAttempt.value = null;
-    emit("session-title-sync-needed", targetSessionId);
-
-    // 发送消息后应进入 follow-bottom 模式,便于用户继续查看运行中的最新输出。
-    stickToBottom.value = true;
-    userUnfollowed.value = false;
-
-    if (targetSessionId === props.sessionId) {
-      await refreshAll(false, true);
-      await scrollToBottomStable({ force: true });
-      saveCurrentScrollPosition(targetSessionId);
-    } else {
-      savedScrollStateBySessionId.set(targetSessionId, { scrollTop: 0, wasNearBottom: true });
-    }
-    statusStore.bumpPollHint(targetSessionId, { immediate: true, warmup: true });
-  } catch (err) {
-    if (err instanceof ApiError && err.code === "AGENT_DISABLED_IN_WORKSPACE") {
-      message.warning(t("agent.client.agentDisabledInWorkspace"));
-    } else if (err instanceof ApiError && err.code === "AGENT_NO_AVAILABLE_IN_WORKSPACE") {
-      message.warning(t("agent.client.agentNoAvailableInWorkspace"));
-    } else {
-      message.error(err instanceof Error ? err.message : String(err));
-    }
-    emit("agent-settings-updated");
+    if (action.kind === "compact") invalidateTimelineForStructuralMutation();
+    await (action.kind === "compact" ? refreshStructuralTimeline() : refreshTimeline(true));
+    scrollToBottom(true);
+  } catch (error) {
+    if (action.kind === "compact" && shouldClearPendingAgentCompactAttempt(error)) pendingCompactAttempt.value = null;
+    message.error(error instanceof Error ? error.message : String(error));
   } finally {
     sending.value = false;
   }
 }
 
-watch(
-  () => createAgentSendAttemptFingerprint({ draft: draft.value, images: pendingImages.value }),
-  (fingerprint) => {
-    if (pendingSendAttempt.value?.fingerprint !== fingerprint) {
-      pendingSendAttempt.value = null;
-    }
+const attachmentPreviewVisible = ref(false);
+type AttachmentPreviewPart = Pick<AgentImagePart, "attachmentId" | "filename" | "mediaType">;
+const previewAttachments = ref<AttachmentPreviewPart[]>([]);
+const previewIndex = ref(0);
+const previewUrl = ref("");
+const previewLoading = ref(false);
+const previewError = ref("");
+const previewCache = new AttachmentPreviewCache();
+let previewGeneration = 0;
+async function showPreviewAt(index: number) {
+  const attachment = previewAttachments.value[index];
+  if (!attachment) return;
+  const generation = ++previewGeneration;
+  previewIndex.value = index;
+  previewLoading.value = true;
+  previewError.value = "";
+  try {
+    const url = await previewCache.get(
+      attachment.attachmentId,
+      (id) => getAgentAttachmentContent(props.sessionId, id, props.workspaceId),
+      () => generation === previewGeneration && attachmentPreviewVisible.value,
+    );
+    if (generation === previewGeneration && url) previewUrl.value = url;
+  } catch {
+    if (generation === previewGeneration)
+      previewError.value = t("agent.client.imagePreviewLoadFailed");
+  } finally {
+    if (generation === previewGeneration) previewLoading.value = false;
   }
-);
+}
+function openAttachmentPreview(attachments: AttachmentPreviewPart[]) {
+  if (!attachments.length) return;
+  previewCache.clear();
+  previewAttachments.value = attachments;
+  previewIndex.value = 0;
+  previewUrl.value = "";
+  attachmentPreviewVisible.value = true;
+  void showPreviewAt(0);
+}
+function closeAttachmentPreview() {
+  previewGeneration += 1;
+  attachmentPreviewVisible.value = false;
+  previewAttachments.value = [];
+  previewUrl.value = "";
+  previewCache.clear();
+}
 
-watch(
-  () => props.workspaceId,
-  () => {
-    skillMentionCache.value = null;
-    mentionCandidates.value = [];
-    mentionCandidatesLoading.value = false;
-    void refreshPromptCommandItems();
+const modelModalVisible = ref(false);
+const modelLoading = ref(false);
+const modelSaving = ref(false);
+const modelResetting = ref(false);
+const modelError = ref("");
+const modelPath = ref("");
+const modelOptions = ref<Array<{ value: string; label: string }>>([]);
+async function openModelModal() {
+  if (
+    !canRequestSessionModelOpen({
+      hasAvailableAgents: !!effectiveAgentId.value,
+      isSubtaskSession: isSubtaskSession.value,
+      mutationPending: props.sessionModelMutationPending,
+      agentId: effectiveAgentId.value,
+    })
+  )
+    return;
+  modelModalVisible.value = true;
+  modelLoading.value = true;
+  modelError.value = "";
+  try {
+    const settings = await getAgentProvidersSettings();
+    modelOptions.value = settings.providers.flatMap((provider) =>
+      provider.models.map((model) => ({
+        value: `${provider.id}\u0000${model.id}`,
+        label: `${provider.name} / ${model.name}`,
+      })),
+    );
+    const effective = sessionModelState.value?.effectiveModel;
+    modelPath.value = effective
+      ? `${effective.providerId}\u0000${effective.modelId}`
+      : "";
+  } catch (error) {
+    modelError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    modelLoading.value = false;
   }
-);
-
-watch(
-  () => [draft.value, mentionTarget.value?.triggerIndex, mentionTarget.value?.replaceTo, mentionTarget.value?.query, props.workspaceId],
-  () => {
-    inputHintDismissed.value = false;
-    nextTick(() => syncInputCaretFromNative());
-    if (mentionFetchTimer != null) {
-      window.clearTimeout(mentionFetchTimer);
-      mentionFetchTimer = null;
-    }
-    if (!mentionTarget.value || isSlashMode(draft.value)) {
-      mentionCandidates.value = [];
-      mentionCandidatesLoading.value = false;
-      return;
-    }
-    mentionFetchTimer = window.setTimeout(() => {
-      mentionFetchTimer = null;
-      void refreshMentionCandidates();
-    }, MENTION_FETCH_DEBOUNCE_MS);
+}
+async function saveModelOverride() {
+  const [providerId, modelId] = modelPath.value.split("\u0000");
+  if (!providerId || !modelId || !effectiveAgentId.value) return;
+  modelSaving.value = true;
+  emit("session-model-mutation-pending", {
+    sessionId: props.sessionId,
+    pending: true,
+  });
+  try {
+    emit(
+      "session-model-state-updated",
+      await updateAgentSessionModelOverride(
+        props.sessionId,
+        effectiveAgentId.value,
+        { workspaceId: props.workspaceId, providerId, modelId },
+      ),
+    );
+    modelModalVisible.value = false;
+  } catch (error) {
+    modelError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    modelSaving.value = false;
+    emit("session-model-mutation-pending", {
+      sessionId: props.sessionId,
+      pending: false,
+    });
   }
-);
+}
+async function resetModelOverride() {
+  if (!effectiveAgentId.value) return;
+  modelResetting.value = true;
+  emit("session-model-mutation-pending", {
+    sessionId: props.sessionId,
+    pending: true,
+  });
+  try {
+    emit(
+      "session-model-state-updated",
+      await resetAgentSessionModelOverride(
+        props.sessionId,
+        effectiveAgentId.value,
+        props.workspaceId,
+      ),
+    );
+  } catch (error) {
+    modelError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    modelResetting.value = false;
+    emit("session-model-mutation-pending", {
+      sessionId: props.sessionId,
+      pending: false,
+    });
+  }
+}
 
+const contextModalVisible = ref(false);
+const contextLoading = ref(false);
+const contextSaving = ref(false);
+const contextError = ref("");
+const instructionCandidates = ref<
+  Array<Source & { displayPath: string; enabled: boolean }>
+>([]);
+const skillCandidates = ref<
+  Array<
+    Source & {
+      rootDir: string;
+      displayName: string;
+      topLevelSkillCount: number;
+      enabled: boolean;
+    }
+  >
+>([]);
+const instructionKeys = ref<string[]>([]);
+const skillKeys = ref<string[]>([]);
+const instructionKey = (item: Source) =>
+  item.sourceType === "workspace"
+    ? "workspace"
+    : `repo\u0000${item.repoId || ""}`;
+const skillKey = (item: Source & { rootDir: string }) =>
+  `${instructionKey(item)}\u0000${item.rootDir}`;
+async function openContextManager() {
+  contextModalVisible.value = true;
+  contextLoading.value = true;
+  contextError.value = "";
+  try {
+    const [instructions, skills] = await Promise.all([
+      detectWorkspaceAgentsInstructions(props.workspaceId),
+      detectWorkspaceExternalSkillRoots(props.workspaceId),
+    ]);
+    instructionCandidates.value = instructions.items.map((item) => ({
+      sourceType: item.sourceType,
+      ...(item.repoId ? { repoId: item.repoId } : {}),
+      displayPath: item.displayPath,
+      enabled: item.enabled,
+    }));
+    skillCandidates.value = skills.items.map((item) => ({
+      sourceType: item.sourceType,
+      ...(item.repoId ? { repoId: item.repoId } : {}),
+      rootDir: item.rootDir,
+      displayName: item.displayName,
+      topLevelSkillCount: item.topLevelSkillCount,
+      enabled: item.enabled,
+    }));
+    instructionKeys.value = instructionCandidates.value
+      .filter((item) => item.enabled)
+      .map(instructionKey);
+    skillKeys.value = skillCandidates.value
+      .filter((item) => item.enabled)
+      .map(skillKey);
+  } catch (error) {
+    contextError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    contextLoading.value = false;
+  }
+}
+async function saveContextSettings() {
+  contextSaving.value = true;
+  try {
+    const selectedInstructions = new Set(instructionKeys.value);
+    const selectedSkills = new Set(skillKeys.value);
+    await Promise.all([
+      updateWorkspaceAgentsInstructionsSettings(props.workspaceId, {
+        enabledSources: instructionCandidates.value
+          .filter((item) => selectedInstructions.has(instructionKey(item)))
+          .map((item) =>
+            item.sourceType === "workspace"
+              ? { sourceType: "workspace" }
+              : { sourceType: "repo", repoId: item.repoId! },
+          ),
+      }),
+      updateWorkspaceExternalSkillRootsSettings(props.workspaceId, {
+        enabledRoots: skillCandidates.value
+          .filter((item) => selectedSkills.has(skillKey(item)))
+          .map((item) =>
+            item.sourceType === "workspace"
+              ? { sourceType: "workspace", rootDir: item.rootDir }
+              : {
+                  sourceType: "repo",
+                  repoId: item.repoId!,
+                  rootDir: item.rootDir,
+                },
+          ),
+      }),
+    ]);
+    contextModalVisible.value = false;
+    emit("agent-settings-updated");
+  } catch (error) {
+    contextError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    contextSaving.value = false;
+  }
+}
+const enablementModalVisible = ref(false);
+const enablementLoading = ref(false);
+const enablementSaving = ref(false);
+const enablementError = ref("");
+const enablementCandidates = ref<
+  Array<{ id: string; name: string; enabled: boolean }>
+>([]);
+const enabledAgentIds = ref<string[]>([]);
+async function openAgentEnablement() {
+  enablementModalVisible.value = true;
+  enablementLoading.value = true;
+  enablementError.value = "";
+  try {
+    const result = await detectWorkspaceAgentEnablement(props.workspaceId);
+    enablementCandidates.value = result.items;
+    enabledAgentIds.value = result.items
+      .filter((item) => item.enabled)
+      .map((item) => item.id);
+  } catch (error) {
+    enablementError.value =
+      error instanceof Error ? error.message : String(error);
+  } finally {
+    enablementLoading.value = false;
+  }
+}
+async function saveAgentEnablement() {
+  enablementSaving.value = true;
+  try {
+    await updateWorkspaceAgentEnablementSettings(props.workspaceId, {
+      mode: "subset",
+      enabledAgentIds: enabledAgentIds.value,
+    });
+    enablementModalVisible.value = false;
+    emit("agent-settings-updated");
+  } catch (error) {
+    enablementError.value =
+      error instanceof Error ? error.message : String(error);
+  } finally {
+    enablementSaving.value = false;
+  }
+}
 watch(
-  () => [String(props.modelValue || ""), props.agentOptions.map((item) => item.value).join("|")],
-  () => {
-    if (!hasAvailableAgents.value) {
-      if (props.modelValue != null) {
-        emit("update:modelValue", null);
-      }
-      return;
+  () =>
+    [
+      props.workspaceId,
+      props.sessionId,
+      props.active,
+      props.sessionReady,
+    ] as const,
+  ([workspaceId, sessionId, active, ready]) => {
+    if (disposed) return;
+    if (
+      workspaceId !== requestScope.workspaceId ||
+      sessionId !== requestScope.sessionId
+    ) {
+      requestScope = advanceAgentRequestScope(
+        requestScope,
+        workspaceId,
+        sessionId,
+      );
+      timelineState.value = createAgentTimelineControllerState();
+      detailByExecutionId.value = {};
+      detailLoading.value = new Set();
+      detailLoadingScopeByExecutionId.clear();
+      detailCache.reset();
+      timelineRefreshScheduler.dispose();
+      timelineRefreshScheduler = createAgentTimelineRefreshScheduler();
+      loadingPreviousPageScope = null;
+      timelineRequestSequence = 0;
+      pendingCompactAttempt.value = null;
+      messageMutationState.clear();
+      distanceToBottom.value = 0;
+      stickToBottom.value = true;
     }
-    const current = String(props.modelValue || "").trim();
-    const next = effectiveAgentId.value;
-    if (next && next !== current) {
-      emit("update:modelValue", next);
-    }
+    if (active && ready) {
+      void refreshTimeline(true).catch(() => undefined);
+      void refreshPromptItems();
+    } else clearRefreshTimer();
   },
-  { immediate: true }
+  { immediate: true },
 );
-
 watch(
-  () => [props.sessionId, props.workspaceId],
-  () => {
-    clearContextRefreshTimer();
-    saveCurrentScrollPosition();
-    clearFollowBottomLock();
-    loadEarlierSeq += 1;
-    handledBoundaryMarkerId.value = 0;
-    scrollToBottomSeq += 1;
-    items.value = [];
-    expandedTextMessageIds.value = new Set();
-    clampedTextMessageIds.value = new Set();
-    lastKnownHeadItemId.value = null;
-    loadingEarlier.value = false;
-    reachedTop.value = false;
-    atTop.value = false;
-    stickToBottom.value = true;
-    userUnfollowed.value = false;
-    forcedBottomOnFirstActive.value = false;
-    // 重置滚动方向判断基线,避免切换会话后首次 scroll 误判为“用户向上滚动”。
-    lastKnownScrollTop = 0;
-    distanceToBottomPx.value = Number.POSITIVE_INFINITY;
-    if (props.sessionId && props.active) {
-      const hasSaved = hasSavedScrollPosition(props.sessionId);
-      forcedBottomOnFirstActive.value = !hasSaved;
-      void refreshVisibleSession({
-        forceFull: true,
-        forceFollowBottom: true
-      });
-      void focusInputIfNeeded();
-    }
+  () => props.initialDraft,
+  (value) => {
+    if (value) draft.value = value;
   },
-  { immediate: true }
+  { immediate: true },
 );
-
+watch(
+  () => runState.value.status,
+  (nextStatus) => {
+    const becameIdle = previousRunStatus === "running" && nextStatus !== "running";
+    previousRunStatus = nextStatus;
+    if (becameIdle && props.active && props.sessionReady) {
+      // run 收敛后无条件再读一次，避免最后一次 delta 在执行结束前完成。
+      void refreshStructuralTimeline().catch(() => undefined);
+    } else scheduleRefresh();
+  },
+);
 watch(
   () => props.modelOpenIntent,
   (intent) => {
-    if (!intent?.ready || intent.agentId !== effectiveAgentId.value || !props.sessionReady || isSubtaskSession.value) return;
-    emit("session-model-open-consumed", { sessionId: props.sessionId, requestId: intent.requestId });
-    void openAgentModelModalFromIntent();
-  },
-  { immediate: true }
-);
-
-watch(
-  () => [props.sessionReady, props.initialDraft, props.sessionId] as const,
-  ([sessionReady, initialDraft]) => {
-    if (sessionReady) return;
-    const next = typeof initialDraft === "string" ? initialDraft : "";
-    if (draft.value === next) return;
-    draft.value = next;
-  },
-  { immediate: true }
-);
-
-watch(
-  () => [props.sessionId, props.active, runState.value.status, runState.value.updatedAt] as const,
-  ([sessionId, active, status], prev) => {
-    if (!sessionId || !active || !props.sessionReady) return;
-    const prevStatus = prev?.[2];
-    const statusChanged = status !== prevStatus;
-    if (status === "running") {
-      void refreshAll(false, false, prevStatus ?? null);
-      return;
-    }
-    if (statusChanged && prevStatus && prevStatus !== "idle" && status === "idle") {
-      void refreshAll(false, false, prevStatus);
+    if (intent?.ready && intent.agentId === effectiveAgentId.value) {
+      void openModelModal();
+      emit("session-model-open-consumed", {
+        sessionId: props.sessionId,
+        requestId: intent.requestId,
+      });
     }
   },
-  { immediate: true }
+  { immediate: true },
 );
-
-watch(
-  () => [props.active, runState.value.status, runState.value.activeRun?.startedAt ?? 0] as const,
-  ([active, status, startedAt]) => {
-    if (!active) {
-      clearRunElapsedTimer();
-      return;
-    }
-    if (
-      status === "running"
-      && typeof startedAt === "number"
-      && Number.isFinite(startedAt)
-      && startedAt > 0
-    ) {
-      nowTickMs.value = Date.now();
-      ensureRunElapsedTimer();
-      return;
-    }
-    clearRunElapsedTimer();
-  },
-  { immediate: true }
-);
-
-watch(
-  () => props.active,
-  (active) => {
-    if (!active) {
-      saveCurrentScrollPosition();
-      clearContextRefreshTimer();
-      clearRunElapsedTimer();
-      clearFollowBottomLock();
-      return;
-    }
-
-    statusStore.markSessionSeen(props.sessionId);
-    void refreshPromptCommandItems();
-
-    const forceFollowBottom = !forcedBottomOnFirstActive.value;
-    if (forceFollowBottom && !hasSavedScrollPosition(props.sessionId)) {
-      forcedBottomOnFirstActive.value = true;
-      stickToBottom.value = true;
-      userUnfollowed.value = false;
-    }
-
-    const forceFull = items.value.length === 0;
-    void refreshVisibleSession({ forceFull, forceFollowBottom });
-    void focusInputIfNeeded();
-  },
-  { immediate: true }
-);
-
-// Workspace 内切换工具时,AgentToolView 被 KeepAlive 缓存,组件不会重新挂载。
-// activated 时主动 refresh,避免回到 Agent 后列表为空且不触发拉取。
-onActivated(() => {
-  if (!props.active) return;
-  void refreshPromptCommandItems();
-  if (!props.sessionId) return;
-  if (!props.sessionReady) return;
-  // KeepAlive 恢复时优先恢复上次离开的位置;仅在列表为空时再兜底刷新。
-  void nextTick().then(() => {
-    if (items.value.length === 0) {
-      void refreshVisibleSession({ forceFull: true, forceFollowBottom: true });
-    } else {
-      void restoreSavedScrollPosition(props.sessionId);
-    }
-  });
-});
-
-
+elapsedTimer = window.setInterval(() => {
+  now.value = Date.now();
+}, 1000);
 onBeforeUnmount(() => {
-  saveCurrentScrollPosition();
-  clearContextRefreshTimer();
-  clearRunElapsedTimer();
-  clearFollowBottomLock();
-  previewLoadGeneration += 1;
+  disposed = true;
+  clearRefreshTimer();
+  if (elapsedTimer !== null) window.clearInterval(elapsedTimer);
+  if (mentionTimer !== null) window.clearTimeout(mentionTimer);
   previewCache.clear();
-  if (mentionFetchTimer != null) {
-    window.clearTimeout(mentionFetchTimer);
-    mentionFetchTimer = null;
-  }
-  scrollToBottomSeq += 1;
+  timelineRefreshScheduler.dispose();
+  detailCache.reset();
+  messageMutationState.clear();
 });
 </script>
-
-<style scoped>
-.agent-message-list {
-  display: flex;
-  flex-direction: column;
-  /*
-   * 虚拟列表会频繁修正行高并导致 scrollHeight 变化.
-   * 浏览器 scroll anchoring 在这种场景下可能产生“固定位置的大跳动”.
-   */
-  overflow-anchor: none;
-}
-
-.agent-message-region {
-  position: relative;
-  min-height: 0;
-}
-
-/*
- * Agent 字号策略:
- * - user/assistant: 使用消息列表容器 font-size (var(--agent-font-size))
- * - tool/system: 略小一档
- */
-.agent-message-item.is-tool-message,
-.agent-message-item.is-system-message {
-  font-size: 0.85em;
-}
-
-.agent-message-list-content {
-  width: 100%;
-}
-
-.agent-message-row {
-  width: 100%;
-  box-sizing: border-box;
-  overflow-anchor: none;
-}
-
-.agent-message-bottom-spacer {
-  width: 100%;
-}
-
-.agent-scroll-to-bottom-button {
-  position: absolute;
-  right: 16px;
-  bottom: 16px;
-  z-index: 40;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  border: 1px solid var(--border-color-secondary);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--panel-bg-elevated) 92%, white 8%);
-  color: var(--text-secondary);
-  font-size: 18px;
-  line-height: 1;
-  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.18);
-  cursor: pointer !important;
-  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .agent-scroll-to-bottom-button:hover {
-    border-color: rgb(59 130 246);
-    background: rgb(30 58 138);
-    color: rgba(255, 255, 255, 0.96);
-    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.22);
-    cursor: pointer !important;
-  }
-
-  .agent-message-item.is-text-clamped:hover {
-    border-color: rgba(148, 163, 184, 0.55);
-    background: rgba(148, 163, 184, 0.06);
-  }
-}
-
-.agent-message-row.has-external-message-controls {
-  padding-top: 0.125rem;
-}
-
-.message-controls {
-  color: var(--text-secondary);
-  opacity: 0;
-  pointer-events: none;
-  line-height: 1;
-  transition: opacity 0.15s ease;
-}
-
-.message-controls-inside {
-  top: 0.125rem;
-}
-
-.message-controls-outside {
-  top: -0.95rem;
-}
-
-.message-id {
-  font-size: 11px;
-  line-height: 1;
-  color: inherit;
-}
-
-.message-controls :deep(.ant-btn) {
-  min-width: 18px;
-  height: 18px;
-  padding: 0 2px !important;
-  line-height: 18px;
-}
-
-.message-controls :deep(.ant-btn .anticon) {
-  font-size: 11px;
-}
-
-.message-controls :deep(.ant-btn .ant-btn-loading-icon) {
-  margin-inline-end: 0 !important;
-}
-
-.agent-message-item:hover .message-controls {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.agent-message-item:focus-within .message-controls {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.assistant-reasoning-block {
-  margin-bottom: 0.35rem;
-  font-size: 0.85em;
-  color: var(--text-secondary);
-  opacity: 0.88;
-}
-
-.assistant-reasoning-markdown {
-  color: var(--text-secondary) !important;
-}
-
-.subtask-card.is-clickable {
-  cursor: pointer;
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .subtask-card.is-clickable:hover {
-    box-shadow: inset 0 0 0 999px rgba(255, 255, 255, 0.04);
-  }
-}
-
-.subtask-card.is-disabled {
-  opacity: 0.8;
-}
-
-.subtask-title-icon {
-  display: inline-block;
-  font-size: 1.05em;
-}
-
-.input-candidate-item {
-  appearance: none;
-  background: transparent;
-  color: inherit;
-  transition: background-color 0.15s ease, border-color 0.15s ease;
-}
-
-.input-candidate-item.is-active {
-  border-color: rgba(59, 130, 246, 0.4);
-  background: rgba(59, 130, 246, 0.12);
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .input-candidate-item:hover {
-    border-color: rgba(59, 130, 246, 0.28);
-    background: rgba(59, 130, 246, 0.08);
-  }
-}
-
-.agent-scroll-to-bottom-button:focus-visible {
-  outline: 2px solid rgba(59, 130, 246, 0.42);
-  outline-offset: 2px;
-}
-
-.agent-scroll-to-bottom-button:active {
-  transform: translateY(1px);
-}
-
-:deep(.agent-input-textarea) {
-  border-radius: 4px;
-}
-
-.external-skill-root-item {
-  cursor: pointer;
-  transition: background-color 0.15s ease, border-color 0.15s ease;
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .external-skill-root-item:hover {
-    background: rgba(255, 255, 255, 0.03);
-    border-color: rgba(59, 130, 246, 0.28);
-  }
-}
-
-.external-skill-root-checkbox :deep(.ant-checkbox-wrapper) {
-  display: flex !important;
-  align-items: center;
-  width: 100%;
-  margin-inline-end: 0;
-}
-
-.external-skill-root-checkbox :deep(.ant-checkbox + span) {
-  display: block;
-  flex: 1;
-  min-width: 0;
-  padding-inline-start: 8px;
-}
-
-.external-skill-root-content {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  width: 100%;
-  min-width: 0;
-}
-
-.external-skill-root-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.external-skill-root-count {
-  flex: none;
-  white-space: nowrap;
-}
-</style>

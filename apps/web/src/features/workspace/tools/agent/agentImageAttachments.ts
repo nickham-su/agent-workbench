@@ -162,8 +162,8 @@ export function collectPastedAgentImages(input: {
   return { preventDefault: !input.hasText, accepted, rejected: null };
 }
 
-export function shouldBlockImageSlashCommand(command: "compact" | "clear" | "prompt" | null, imageCount: number) {
-  return imageCount > 0 && (command === "compact" || command === "clear");
+export function shouldBlockImageSlashCommand(command: "compact" | "prompt" | null, imageCount: number) {
+  return imageCount > 0 && command === "compact";
 }
 
 export function createAgentMessageFormData(payload: Record<string, unknown>, images: readonly PendingAgentImage[]) {

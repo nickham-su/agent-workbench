@@ -1,6 +1,18 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
-import { appendContextItem, getRunRecord, updateRunRecordStatus, updateRunState } from "../agent.store.js";
+import { createMessageRunRecord, getRunRecord, updateRunRecordStatus } from "../agent-message.store.js";
+import {
+  appendMessage,
+  appendStreamingAssistant,
+  completeAssistantWithExecutions,
+  createMessageSession,
+  getMessage,
+  getMessageRunState,
+  getMessageSession,
+  settleMessageRunIfCurrent,
+  startMessageRun,
+  updateToolExecution
+} from "../agent-message.store.js";
 import { createAgentService } from "../agent.composition.js";
 import {
   createAgentIntegrationFixture,
@@ -8,7 +20,6 @@ import {
   sendAgentMessage,
   type AgentIntegrationFixture
 } from "../testkit/agent-integration-testkit.js";
-import { createSubtaskAnchor, startSubtaskForAnchor } from "./subtask.helpers.js";
 
 async function createFixture(t: TestContext) {
   const fixture = await createAgentIntegrationFixture({ agentWorkerConcurrency: 0 });
@@ -57,6 +68,11 @@ async function setOverride(fixture: AgentIntegrationFixture, sessionId: string, 
   assert.equal(response.statusCode, 200, response.body);
 }
 
+function pickModel(run: ReturnType<typeof getRunRecord>) {
+  if (!run) return null;
+  return { agentId: run.agentId, providerId: run.providerId, modelId: run.modelId };
+}
+
 function runtime() {
   return { enqueueRun() {}, cancelSession() {} };
 }
@@ -64,16 +80,7 @@ function runtime() {
 function settleRun(fixture: AgentIntegrationFixture, sessionId: string, runId: string) {
   const now = Date.now();
   updateRunRecordStatus(fixture.db, { runId, status: "completed", updatedAt: now });
-  updateRunState(fixture.db, {
-    workspaceId: fixture.workspaceId,
-    sessionId,
-    status: "idle",
-    activeRunId: null,
-    activeAssistantItemId: null,
-    runNoticeText: "",
-    updatedAt: now,
-    appliedItemId: 0
-  });
+  settleMessageRunIfCurrent(fixture.db, { workspaceId: fixture.workspaceId, sessionId, runId, updatedAt: now });
 }
 
 test("普通消息的新 Run 以完整 session override pair 写入快照，且覆盖仅影响对应 session", async (t) => {
@@ -163,6 +170,7 @@ test("已创建 Run 的 execution profile 保持 run snapshot，fork 不继承�
     text: "source session override",
     clientRequestId: "source-run"
   });
+  settleRun(fixture, source.id, sourceMessage.runId);
 
   await setOverride(fixture, source.id, "ppchat", "gpt-5.2");
   const profile = await fixture.app.inject({
@@ -178,15 +186,25 @@ test("已创建 Run 的 execution profile 保持 run snapshot，fork 不继承�
   const fork = await fixture.app.inject({
     method: "POST",
     url: "/api/agent/sessions/fork",
-    payload: { fromSessionId: source.id, fromItemId: sourceMessage.messageItemId, mode: "visible_only", title: "forked" }
+    payload: { fromSessionId: source.id, fromMessageId: sourceMessage.messageId, title: "forked" }
   });
   assert.equal(fork.statusCode, 201, fork.body);
   const forked = fork.json() as { id: string };
+  const countsBefore = {
+    messages: Number((fixture.db.prepare("select count(*) as count from agent_message").get() as { count: number }).count),
+    parts: Number((fixture.db.prepare("select count(*) as count from agent_message_part").get() as { count: number }).count),
+    executions: Number((fixture.db.prepare("select count(*) as count from agent_tool_execution").get() as { count: number }).count)
+  };
   const forkedMessage = await sendAgentMessage(fixture, {
     sessionId: forked.id,
     text: "fork must use agent default",
     clientRequestId: "fork-run"
   });
+  assert.deepEqual({
+    messages: Number((fixture.db.prepare("select count(*) as count from agent_message where id <> ?").get(forkedMessage.messageId) as { count: number }).count),
+    parts: Number((fixture.db.prepare("select count(*) as count from agent_message_part where message_id <> ?").get(forkedMessage.messageId) as { count: number }).count),
+    executions: Number((fixture.db.prepare("select count(*) as count from agent_tool_execution").get() as { count: number }).count)
+  }, countsBefore);
   assert.deepEqual(
     pickModel(getRunRecord(fixture.db, forkedMessage.runId)),
     { agentId: "default", providerId: "ppchat", modelId: "gpt-5.2" }
@@ -195,21 +213,43 @@ test("已创建 Run 的 execution profile 保持 run snapshot，fork 不继承�
 
 test("subtask 新 Run 不继承父 primary session 的模型覆盖", async (t) => {
   const fixture = await createFixture(t);
-  const anchor = await createSubtaskAnchor({ fixture, parentDepth: 0, sessionMode: "new" });
-  await setOverride(fixture, anchor.parentSession.id);
-
-  const started = await startSubtaskForAnchor({
-    fixture,
-    parentSessionId: anchor.parentSession.id,
-    parentRunId: anchor.parentRunId,
-    parentToolItemId: anchor.toolItem.item.id,
-    session: { mode: "new" }
+  const parent = await createPrimarySession(fixture);
+  await setOverride(fixture, parent.id);
+  const now = Date.now();
+  const parentTrigger = appendMessage(fixture.db, {
+    id: "parent-trigger", workspaceId: fixture.workspaceId, sessionId: parent.id,
+    expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", originRunId: null,
+    parts: [{ id: "parent-trigger-text", position: 0, type: "text", text: "delegate" }], createdAt: now
   });
-  assert.equal(started.statusCode, 200, started.body);
-  const body = started.json() as { sessionId: string; runId: string; reused: boolean };
-  assert.equal(body.reused, false);
+  createMessageRunRecord(fixture.db, {
+    runId: "parent-run", workspaceId: fixture.workspaceId, sessionId: parent.id, triggerMessageId: parentTrigger.id,
+    agentId: "default", providerId: "session-provider", modelId: "session-model", status: "running", createdAt: now
+  });
+  startMessageRun(fixture.db, { workspaceId: fixture.workspaceId, sessionId: parent.id, runId: "parent-run", updatedAt: now });
+  const parentMessage = appendMessage(fixture.db, {
+    id: "assistant-parent", workspaceId: fixture.workspaceId, sessionId: parent.id,
+    expectedHeadMessageId: parentTrigger.id, expectedRevision: 1, type: "assistant", status: "streaming",
+    originRunId: "parent-run", parts: [{ id: "call-parent", position: 0, type: "tool_call", toolName: "subtask", input: {} }], createdAt: now
+  });
+  completeAssistantWithExecutions(fixture.db, {
+    workspaceId: fixture.workspaceId, sessionId: parent.id, runId: "parent-run",
+    messageId: parentMessage.id, updatedAt: now + 1,
+    executions: [{ id: "execution-parent", callPartId: "call-parent", originSessionId: parent.id, originRunId: "parent-run", status: "queued" }]
+  });
+  fixture.db.prepare("update agent_tool_execution set status='completed', completed_at=?, updated_at=? where id='execution-parent'").run(now + 2, now + 2);
+  const childSessionId = "subtask-session";
+  createMessageSession(fixture.db, { id: childSessionId, workspaceId: fixture.workspaceId, title: "subtask", kind: "subtask", createdAt: now + 3, forkedFromSessionId: parent.id, forkedFromMessageId: parentMessage.id });
+  const childMessage = appendMessage(fixture.db, {
+    id: "subtask-prompt", workspaceId: fixture.workspaceId, sessionId: childSessionId,
+    expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", originRunId: null,
+    parts: [{ id: "subtask-prompt-text", position: 0, type: "text", text: "work" }], createdAt: now + 3
+  });
+  createMessageRunRecord(fixture.db, {
+    runId: "subtask-run", workspaceId: fixture.workspaceId, sessionId: childSessionId, triggerMessageId: childMessage.id,
+    agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", parentRunId: null, parentToolExecutionId: "execution-parent", status: "running", createdAt: now + 4
+  });
   assert.deepEqual(
-    pickModel(getRunRecord(fixture.db, body.runId)),
+    pickModel(getRunRecord(fixture.db, "subtask-run")),
     { agentId: "default", providerId: "ppchat", modelId: "gpt-5.2" }
   );
 });
@@ -224,17 +264,10 @@ test("手动压缩的新 Run 使用 session override 作为主模型，不改变
     payload: { compactionModel: { providerId: "compaction-provider", modelId: "compaction-model" } }
   });
   assert.equal(runtimeSettings.statusCode, 200, runtimeSettings.body);
-  const item = appendContextItem(fixture.db, {
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId: null,
-    turnId: null,
-    step: null,
-    prevId: null,
-    kind: "user",
-    status: "completed",
-    output: { type: "user_text", text: "context to compact" },
-    createdAt: Date.now()
+  const message = appendMessage(fixture.db, {
+    id: "compaction-context", workspaceId: fixture.workspaceId, sessionId: session.id,
+    expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", originRunId: null,
+    parts: [{ id: "compaction-context-text", position: 0, type: "text", text: "context to compact" }], createdAt: Date.now()
   });
 
   // Manual compaction only schedules when the worker capability is enabled.
@@ -246,7 +279,7 @@ test("手动压缩的新 Run 使用 session override 作为主模型，不改变
     runtime: runtime()
   });
   assert.equal(result.scheduled, true);
-  assert.equal(item.id > 0, true);
+  assert.equal(message.id, "compaction-context");
   assert.deepEqual(
     pickModel(getRunRecord(fixture.db, result.runId)),
     { agentId: "default", providerId: "session-provider", modelId: "session-model" }
@@ -264,8 +297,3 @@ test("手动压缩的新 Run 使用 session override 作为主模型，不改变
   assert.equal(profile.json().compaction.provider.id, "compaction-provider");
   assert.equal(profile.json().compaction.model.id, "compaction-model");
 });
-
-function pickModel(run: ReturnType<typeof getRunRecord>) {
-  assert.ok(run, "run should have been persisted");
-  return { agentId: run.agentId, providerId: run.providerId, modelId: run.modelId };
-}

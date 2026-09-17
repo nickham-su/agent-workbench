@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { TextDecoder } from "node:util";
 import { afterEach, test } from "node:test";
-import { parseSkillFrontmatter, parseStableSkillIdentifier } from "@agent-workbench/shared";
+import { parseSkillFrontmatter, parseStableSkillIdentifier } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { __testing, runReadTool, runSkillTool, runWriteTool } from "./fileTools.js";
 
 const workspaces: string[] = [];

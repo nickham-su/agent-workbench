@@ -1,6 +1,6 @@
-import type { AgentGlobalPromptItem } from "@agent-workbench/shared";
+import type { AgentGlobalPromptItem } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 
-export type SlashCommandAction = "compact" | "clear";
+export type SlashCommandAction = "compact";
 
 export type SlashCommandDefinition = {
   name: string;

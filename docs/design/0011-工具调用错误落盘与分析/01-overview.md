@@ -7,7 +7,7 @@ Agent Worker 已经能够执行 builtin、MCP、本地插件和远端插件工�
 - context item 主要服务会话语义，不区分 Provider 根因、运行时阶段和 writeback 次生错误；
 - 普通失败只稳定保留错误消息，缺少完整 Error、执行阶段和已取得的中间结果；
 - Provider 已成功返回但 completed writeback 失败时，完整 `result` 只存在于 `executeTool()` 局部变量，当前失败路径会丢失该结果；
-- `AWB_AGENT_DEBUG_DUMP=1` 才会写 `.debug/agent_context_item_logs`，且现有 `sanitizeForDebugDump()` 会脱敏，也没有本方案需要的多阶段实体和幂等合同；
+- `AWB_AGENT_DEBUG_DUMP=1` 才会写 `.debug/agent_message_logs`，且现有 `sanitizeForDebugDump()` 会脱敏，也没有本方案需要的多阶段实体和幂等合同；
 - `.awb/agent/artifacts/by_tool_call` 只保存部分成功工具的超长展示文本，不是失败诊断存储。
 
 用户希望在明确启用时，把失败工具调用的完整可用输入、输出、写回候选与异常信息留在工作区 `.awb`，供以后人工复盘、离线聚类和运行时优化。该能力必须是旁路诊断，不能反过来降低 Agent 可用性。

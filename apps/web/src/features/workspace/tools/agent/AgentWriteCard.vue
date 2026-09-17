@@ -23,8 +23,11 @@
 
 <script setup lang="ts">
 import { message } from "ant-design-vue";
+import { onBeforeUnmount, onBeforeUpdate, watch } from "vue";
 import { useWorkspaceHost } from "@/features/workspace/host";
 import { inferLanguageFromPath } from "@/shared/monaco/languageUtils";
+import { runAgentArtifactOpenRequest } from "./agentArtifactOpenController";
+import { createAgentArtifactRequestGuard } from "./agentArtifactRequestGuard";
 
 type WriteDisplay = {
   summary: string;
@@ -60,26 +63,46 @@ const props = defineProps<{
   workspaceId: string;
   toolId: string;
   sessionId: string;
-  itemId: number;
-  toolCallId?: string;
+  toolExecutionId: string;
   summary: WriteDisplay;
   errorText?: string;
 }>();
 
 const host = useWorkspaceHost(props.toolId);
 const artifactCache = new Map<string, Promise<WriteUiArtifact>>();
+const requestGuard = createAgentArtifactRequestGuard({
+  workspaceId: props.workspaceId,
+  sessionId: props.sessionId,
+  executionId: props.toolExecutionId,
+});
+watch(
+  () => [props.workspaceId, props.sessionId, props.toolExecutionId] as const,
+  ([workspaceId, sessionId, executionId]) =>
+    requestGuard.update({ workspaceId, sessionId, executionId }),
+  { flush: "sync" },
+);
+onBeforeUpdate(() => requestGuard.update({
+  workspaceId: props.workspaceId, sessionId: props.sessionId, executionId: props.toolExecutionId,
+}));
+onBeforeUnmount(() => requestGuard.dispose());
 
 function cacheKey() {
-  return `${props.workspaceId}:${props.toolCallId || props.itemId}`;
+  return `${props.workspaceId}:${props.sessionId}:${props.toolExecutionId}`;
 }
 
-async function fetchArtifact() {
+async function fetchArtifact(request: ReturnType<typeof requestGuard.begin>) {
   const key = cacheKey();
   const existing = artifactCache.get(key);
-  if (existing) return existing;
+  if (existing) {
+    try {
+      return await existing;
+    } finally {
+      request.finish();
+    }
+  }
   const promise = (async () => {
-    const url = `/api/agent/sessions/${encodeURIComponent(props.sessionId)}/context-items/${props.itemId}/write-artifact`;
-    const response = await fetch(url);
+    const url = `/api/agent/sessions/${encodeURIComponent(props.sessionId)}/tool-executions/${encodeURIComponent(props.toolExecutionId)}/write-artifact?workspaceId=${encodeURIComponent(props.workspaceId)}`;
+    const response = await fetch(url, { signal: request.signal });
     if (!response.ok) {
       const text = await response.text().catch(() => "");
       throw new Error(text || `http ${response.status}`);
@@ -92,6 +115,8 @@ async function fetchArtifact() {
   } catch (err) {
     artifactCache.delete(key);
     throw err;
+  } finally {
+    request.finish();
   }
 }
 
@@ -102,16 +127,14 @@ function explainUnavailable(side: WriteUiArtifactSide | undefined, label: string
 }
 
 async function openInEditor() {
-  if (!props.toolCallId) {
-    message.error("missing toolCallId");
-    return;
-  }
-  try {
-    const artifact = await fetchArtifact();
+  await runAgentArtifactOpenRequest({
+    guard: requestGuard,
+    fetchArtifact,
+    onArtifact: (artifact) => {
     const language = inferLanguageFromPath(props.summary.filePath);
     const beforeAvailable = artifact.before?.available === true;
     const afterAvailable = artifact.after?.available === true;
-    const tabKey = `agent:write:${props.toolCallId}`;
+    const tabKey = `agent:write:${props.toolExecutionId}`;
     if (!beforeAvailable && afterAvailable) {
       host.call("editor", {
         type: "editor.openPreview",
@@ -146,8 +169,8 @@ async function openInEditor() {
       explainUnavailable(artifact.after, "after")
     ].filter(Boolean);
     message.error(reasons[0] || "diff unavailable");
-  } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err));
-  }
+    },
+    onError: (error) => message.error(error instanceof Error ? error.message : String(error)),
+  });
 }
 </script>

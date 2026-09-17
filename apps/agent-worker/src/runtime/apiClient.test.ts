@@ -2,14 +2,16 @@ import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import type { Socket } from "node:net";
 import { afterEach, test } from "node:test";
-import type { AgentContextItemRecord } from "@agent-workbench/shared";
 import { Type } from "@sinclair/typebox";
 import {
   AgentApiEndpoints,
-  buildAgentApiContextItemPath,
-  type AgentApiCompactContextRequest,
-  type AgentApiCompactContextResponse,
-  type AgentApiCreateContextItemRequest,
+  type AgentApiCommitCompactionRequest,
+  type AgentApiCommitCompactionResponse,
+  type AgentApiCreateStreamingAssistantRequest,
+  type AgentApiResumeStreamingAssistantRequest,
+  type AgentApiReplaceStreamingAssistantRequest,
+  type AgentApiUpdateRunNoticeRequest,
+  type AgentApiUpdateToolExecutionRequest,
   type AgentApiSubtaskPreforkPlanRequest,
   type AgentApiSubtaskStartRequest,
   type AgentApiSubtaskResultRequest,
@@ -229,10 +231,10 @@ test("test server fixture supports attempts, warning logs, and safely abortable 
 const runStateInput = {
   workspaceId: "WORKSPACE",
   sessionId: "SESSION",
-  status: "running" as const,
-  activeRunId: "RUN",
-  activeAssistantItemId: null,
-};
+  runId: "RUN",
+  runNoticeText: "运行中",
+  updatedAt: 100,
+} satisfies AgentApiUpdateRunNoticeRequest;
 
 const runCompleteInput = {
   workspaceId: "WORKSPACE",
@@ -241,72 +243,89 @@ const runCompleteInput = {
   status: "completed" as const,
 };
 
-const contextItem: AgentContextItemRecord = {
-  id: 17,
+const assistantMessage = {
+  id: "MESSAGE",
+  workspaceId: "WORKSPACE",
+  previousMessageId: null,
+  replacesMessageId: null,
+  depth: 0,
+  type: "assistant" as const,
+  status: "streaming" as const,
+  originSessionId: "SESSION",
+  originRunId: "RUN",
+  updatedRevision: 1,
+  createdAt: 100,
+  updatedAt: 100,
+  parts: [],
+};
+
+const createAssistantInput: AgentApiCreateStreamingAssistantRequest = {
   workspaceId: "WORKSPACE",
   sessionId: "SESSION",
   runId: "RUN",
-  turnId: "TURN",
-  step: 1,
-  prevId: 16,
-  kind: "tool",
-  status: "completed",
-  archiveAt: null,
-  boundaryReason: null,
-  output: {
-    type: "tool",
-    toolName: "bash",
-    toolCallId: "CALL",
-    args: { command: "echo ok" },
-    result: { stdout: "ok" },
-  },
+  messageId: "MESSAGE",
   createdAt: 100,
+};
+
+const resumeAssistantInput: AgentApiResumeStreamingAssistantRequest = {
+  workspaceId: "WORKSPACE",
+  sessionId: "SESSION",
+  runId: "RUN",
+  messageId: "MESSAGE",
+};
+
+const replaceAssistantInput: AgentApiReplaceStreamingAssistantRequest = {
+  workspaceId: "WORKSPACE",
+  sessionId: "SESSION",
+  runId: "RUN",
+  oldMessageId: "MESSAGE",
+  newMessageId: "REPLACEMENT",
+  runNoticeText: "retrying",
+  retryCount: 1,
+  nextRetryAt: 2_000,
+  createdAt: 101,
+};
+
+const toolExecutionInput: AgentApiUpdateToolExecutionRequest = {
+  workspaceId: "WORKSPACE",
+  sessionId: "SESSION",
+  runId: "RUN",
+  toolExecutionId: "EXECUTION",
+  status: "completed",
+  resultPreview: "完成",
+  completedAt: 200,
   updatedAt: 200,
 };
 
-const contextCreateInput: AgentApiCreateContextItemRequest = {
+const compactInput: AgentApiCommitCompactionRequest = {
   workspaceId: "WORKSPACE",
   sessionId: "SESSION",
   runId: "RUN",
-  turnId: "TURN",
-  step: 1,
-  prevId: 16,
-  kind: "tool",
-  status: "queued",
-  output: {
-    type: "tool",
-    toolName: "bash",
-    toolCallId: "CALL",
-    args: { command: "echo ok" },
-  },
-};
-
-const compactInput: AgentApiCompactContextRequest = {
-  workspaceId: "WORKSPACE",
-  sessionId: "SESSION",
-  runId: "RUN",
-  expectedHeadItemId: 17,
+  messageId: "COMPACTION_MESSAGE",
+  textPartId: "COMPACTION_TEXT",
+  expectedHeadMessageId: "MESSAGE",
+  expectedRevision: 1,
   summaryText: "SUMMARY",
+  createdAt: 300,
 };
 
-const compactResponse: AgentApiCompactContextResponse = {
-  compacted: true,
-  summaryItemId: 18,
-  archivedCount: 2,
+const compactResponse: AgentApiCommitCompactionResponse = {
+  result: "updated",
+  summaryMessageId: "COMPACTION_MESSAGE",
 };
 
 const subtaskPreforkInput: AgentApiSubtaskPreforkPlanRequest = {
   workspaceId: "WORKSPACE",
   parentSessionId: "PARENT_SESSION",
   parentRunId: "PARENT_RUN",
-  parentToolItemId: 9,
+  parentToolExecutionId: "PARENT_EXECUTION",
   agentId: "AGENT",
 };
 const subtaskStartInput: AgentApiSubtaskStartRequest = {
   workspaceId: "WORKSPACE",
   parentSessionId: "PARENT_SESSION",
   parentRunId: "PARENT_RUN",
-  parentToolItemId: 9,
+  parentToolExecutionId: "PARENT_EXECUTION",
   description: "child task",
   prompt: "do the child task",
   agentId: "AGENT",
@@ -458,10 +477,11 @@ test("non-2xx responses retain only bounded structured business-error diagnostic
   }));
   const client = createShortTimeoutClient(fixture.origin);
   await assert.rejects(
-    () => client.startSubtaskRun({
-      ...subtaskStartInput,
-      session: { mode: "existing", sessionId: "MISSING_SESSION" },
-    }),
+    () =>
+      client.startSubtaskRun({
+        ...subtaskStartInput,
+        session: { mode: "existing", sessionId: "MISSING_SESSION" },
+      }),
     (error: unknown) => {
       assert(error instanceof InternalRpcHttpError);
       assert.equal(error.method, "POST");
@@ -472,8 +492,18 @@ test("non-2xx responses retain only bounded structured business-error diagnostic
       assert.match(error.message, /code=AGENT_SUBTASK_SESSION_NOT_FOUND/);
       assert.match(error.message, /message=subtask session not found/);
       const text = `${error.message}\n${JSON.stringify(error)}\n${JSON.stringify(Object.entries(error))}`;
-      for (const secret of ["RESPONSE_SECRET", "PROMPT_SECRET", "TOKEN_SECRET", "MISSING_SESSION", "TOKEN"]) {
-        assert.equal(text.includes(secret), false, `safe error must not expose ${secret}`);
+      for (const secret of [
+        "RESPONSE_SECRET",
+        "PROMPT_SECRET",
+        "TOKEN_SECRET",
+        "MISSING_SESSION",
+        "TOKEN",
+      ]) {
+        assert.equal(
+          text.includes(secret),
+          false,
+          `safe error must not expose ${secret}`,
+        );
       }
       return true;
     },
@@ -482,26 +512,65 @@ test("non-2xx responses retain only bounded structured business-error diagnostic
 });
 
 test("non-2xx empty, malformed, non-object, and oversized bodies safely fall back to status diagnostics", async () => {
-  const cases: Array<{ name: string; body?: unknown; headers?: Record<string, string> }> = [
+  const cases: Array<{
+    name: string;
+    body?: unknown;
+    headers?: Record<string, string>;
+  }> = [
     { name: "empty" },
     { name: "non-json", body: "not json RESPONSE_SECRET" },
-    { name: "array", body: [{ code: "SERVER_CODE", message: "SERVER_MESSAGE" }] },
-    { name: "oversized", body: { code: "SERVER_CODE", message: "x".repeat(5_000), secret: "RESPONSE_SECRET" } },
-    { name: "oversized content-length", body: { code: "SERVER_CODE", message: "SERVER_MESSAGE" }, headers: { "content-length": "5000" } },
+    {
+      name: "array",
+      body: [{ code: "SERVER_CODE", message: "SERVER_MESSAGE" }],
+    },
+    {
+      name: "oversized",
+      body: {
+        code: "SERVER_CODE",
+        message: "x".repeat(5_000),
+        secret: "RESPONSE_SECRET",
+      },
+    },
+    {
+      name: "oversized content-length",
+      body: { code: "SERVER_CODE", message: "SERVER_MESSAGE" },
+      headers: { "content-length": "5000" },
+    },
   ];
   for (const entry of cases) {
-    const fixture = await startTestServer(() => ({ status: 400, body: entry.body, headers: entry.headers }));
+    const fixture = await startTestServer(() => ({
+      status: 400,
+      body: entry.body,
+      headers: entry.headers,
+    }));
     const client = createShortTimeoutClient(fixture.origin);
     await assert.rejects(
-      () => client.getPromptContext({ workspaceId: "WORKSPACE_SECRET", sessionId: "SESSION_SECRET", runId: "RUN_SECRET" }),
+      () =>
+        client.getPromptContext({
+          workspaceId: "WORKSPACE_SECRET",
+          sessionId: "SESSION_SECRET",
+          runId: "RUN_SECRET",
+        }),
       (error: unknown) => {
         assert(error instanceof InternalRpcHttpError);
         assert.equal(error.status, 400, entry.name);
         assert.equal(error.apiCode, undefined, entry.name);
         assert.equal(error.safeMessage, undefined, entry.name);
         const text = `${error.message}\n${JSON.stringify(error)}\n${JSON.stringify(Object.entries(error))}`;
-        for (const secret of ["RESPONSE_SECRET", "SERVER_CODE", "SERVER_MESSAGE", "WORKSPACE_SECRET", "SESSION_SECRET", "RUN_SECRET", "TOKEN"]) {
-          assert.equal(text.includes(secret), false, `${entry.name} must not expose ${secret}`);
+        for (const secret of [
+          "RESPONSE_SECRET",
+          "SERVER_CODE",
+          "SERVER_MESSAGE",
+          "WORKSPACE_SECRET",
+          "SESSION_SECRET",
+          "RUN_SECRET",
+          "TOKEN",
+        ]) {
+          assert.equal(
+            text.includes(secret),
+            false,
+            `${entry.name} must not expose ${secret}`,
+          );
         }
         return true;
       },
@@ -520,7 +589,12 @@ test("structured error fields are normalized and bounded before exposure", async
   }));
   const client = createShortTimeoutClient(fixture.origin);
   await assert.rejects(
-    () => client.getPromptContext({ workspaceId: "WORKSPACE", sessionId: "SESSION", runId: "RUN" }),
+    () =>
+      client.getPromptContext({
+        workspaceId: "WORKSPACE",
+        sessionId: "SESSION",
+        runId: "RUN",
+      }),
     (error: unknown) => {
       assert(error instanceof InternalRpcHttpError);
       assert.equal(error.apiCode, undefined);
@@ -537,15 +611,22 @@ test("structured error messages remove control, ANSI, and bidi characters before
     status: 400,
     body: {
       code: "SAFE_CODE",
-      message: "正常\u001b[31m文本\u001b[0m\u0007\u009b[2K\u061c\u200e\u200f\u202e方向\u2066隔离\u2069结束",
+      message:
+        "正常\u001b[31m文本\u001b[0m\u0007\u009b[2K\u061c\u200e\u200f\u202e方向\u2066隔离\u2069结束",
     },
   }));
   const client = createShortTimeoutClient(fixture.origin);
   await assert.rejects(
-    () => client.getPromptContext({ workspaceId: "WORKSPACE", sessionId: "SESSION", runId: "RUN" }),
+    () =>
+      client.getPromptContext({
+        workspaceId: "WORKSPACE",
+        sessionId: "SESSION",
+        runId: "RUN",
+      }),
     (error: unknown) => {
       assert(error instanceof InternalRpcHttpError);
-      const unsafeCharacters = /[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/;
+      const unsafeCharacters =
+        /[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/;
       assert.equal(error.safeMessage, "正常 [31m文本 [0m [2K 方向 隔离 结束");
       assert.equal(unsafeCharacters.test(error.safeMessage ?? ""), false);
       assert.equal(unsafeCharacters.test(error.message), false);
@@ -557,16 +638,20 @@ test("structured error messages remove control, ANSI, and bidi characters before
 
 test("all public client methods are explicitly classified", () => {
   assert.deepEqual(AgentApiClient.publicMethodPolicies, {
-    createContextItem: "controlWrite",
-    updateContextItem: "controlWrite",
-    updateRunState: "controlWrite",
+    createStreamingAssistant: "idempotentControlWrite",
+    flushAssistantParts: "controlWrite",
+    resumeStreamingAssistant: "controlWrite",
+    replaceStreamingAssistant: "controlWrite",
+    completeAssistant: "controlWrite",
+    updateToolExecution: "controlWrite",
+    updateRunNotice: "controlWrite",
     completeRun: "runComplete",
     getExecutionProfile: "controlRead",
     getPromptContext: "controlRead",
     getMessagesContext: "controlRead",
-    compactContext: "controlWrite",
-    archiveSearch: "excluded",
-    archiveRead: "excluded",
+    archiveRead: "controlRead",
+    archiveSearch: "controlRead",
+    commitCompaction: "controlWrite",
     getSubtaskPreforkPlan: "controlRead",
     startSubtaskRun: "subtaskStart",
     getSubtaskResult: "controlRead",
@@ -640,7 +725,7 @@ test("controlWrite never retries timeout or 503", async () => {
   );
   const timeoutClient = createShortTimeoutClient(timeoutFixture.origin);
   await assert.rejects(
-    () => timeoutClient.updateRunState(runStateInput),
+    () => timeoutClient.updateRunNotice(runStateInput),
     InternalRpcTimeoutError,
   );
   assert.equal(timeoutFixture.attempts.length, 1);
@@ -651,7 +736,7 @@ test("controlWrite never retries timeout or 503", async () => {
   }));
   const unavailableClient = createShortTimeoutClient(unavailableFixture.origin);
   await assert.rejects(
-    () => unavailableClient.compactContext(compactInput),
+    () => unavailableClient.commitCompaction(compactInput),
     InternalRpcHttpError,
   );
   assert.equal(unavailableFixture.attempts.length, 1);
@@ -890,7 +975,7 @@ test("409 conflict remains ApiConflictError even if its response body is pending
   const client = createShortTimeoutClient(fixture.origin);
   await assert.rejects(
     () =>
-      client.compactContext({
+      client.commitCompaction({
         ...compactInput,
         workspaceId: "WORKSPACE_SECRET",
         sessionId: "SESSION_SECRET",
@@ -925,7 +1010,13 @@ test("run methods use shared endpoint method/path and validate literal success",
   const requests: Array<{ method?: string; url?: string; body: unknown }> = [];
   const origin = await startServer((request) => {
     requests.push(request);
-    return { status: 200, body: { ok: true } };
+    return {
+      status: 200,
+      body:
+        request.url === AgentApiEndpoints.updateRunNotice.path
+          ? { result: "updated" }
+          : { ok: true },
+    };
   });
   const client = new AgentApiClient({
     apiOrigin: origin,
@@ -934,15 +1025,15 @@ test("run methods use shared endpoint method/path and validate literal success",
     completeRunTimeoutMs: 5_000,
   });
 
-  await client.updateRunState(runStateInput);
+  await client.updateRunNotice(runStateInput);
   await client.completeRun(runCompleteInput);
 
   assert.deepEqual(
     requests.map((request) => ({ method: request.method, url: request.url })),
     [
       {
-        method: AgentApiEndpoints.updateRunState.method,
-        url: AgentApiEndpoints.updateRunState.path,
+        method: AgentApiEndpoints.updateRunNotice.method,
+        url: AgentApiEndpoints.updateRunNotice.path,
       },
       {
         method: AgentApiEndpoints.completeRun.method,
@@ -965,7 +1056,7 @@ test("strict rejects a successful response schema mismatch", async () => {
   });
 
   await assert.rejects(
-    () => client.updateRunState(runStateInput),
+    () => client.updateRunNotice(runStateInput),
     (error: unknown) =>
       error instanceof InternalRpcInvalidResponseError &&
       error.stage === "schema",
@@ -1013,15 +1104,15 @@ test("warn without an injected logger emits a warning", async () => {
       completeRunTimeoutMs: 5_000,
       responseValidation: "warn",
     });
-    await client.updateRunState(runStateInput);
+    await client.updateRunNotice(runStateInput);
   } finally {
     console.warn = originalWarn;
   }
   assert.equal(warnings.length, 1);
-  assert.match(String(warnings[0]?.[0] || ""), /endpoint=.*run-state/);
+  assert.match(String(warnings[0]?.[0] || ""), /endpoint=.*run-notice/);
 });
 
-test("compact uses shared endpoint/method/body and validates the unwrapped success response", async () => {
+test("Message compaction uses shared endpoint/method/body and validates the success response", async () => {
   const requests: Array<{ method?: string; url?: string; body: unknown }> = [];
   const origin = await startServer((request) => {
     requests.push(request);
@@ -1034,17 +1125,17 @@ test("compact uses shared endpoint/method/body and validates the unwrapped succe
     completeRunTimeoutMs: 5_000,
   });
 
-  const result = await client.compactContext(compactInput);
+  const result = await client.commitCompaction(compactInput);
 
   assert.deepEqual(result, compactResponse);
   assert.deepEqual(requests, [
     {
-      method: AgentApiEndpoints.compactContext.method,
-      url: AgentApiEndpoints.compactContext.path,
+      method: AgentApiEndpoints.commitCompaction.method,
+      url: AgentApiEndpoints.commitCompaction.path,
       body: compactInput,
     },
   ]);
-  assert.equal(Object.prototype.hasOwnProperty.call(result, "ok"), false);
+  assert.equal(result.summaryMessageId, "COMPACTION_MESSAGE");
 });
 
 test("compact strict and warn preserve the success schema boundary", async () => {
@@ -1060,7 +1151,7 @@ test("compact strict and warn preserve the success schema boundary", async () =>
     completeRunTimeoutMs: 5_000,
   });
   await assert.rejects(
-    () => strictClient.compactContext(compactInput),
+    () => strictClient.commitCompaction(compactInput),
     (error: unknown) =>
       error instanceof InternalRpcInvalidResponseError &&
       error.stage === "schema",
@@ -1079,10 +1170,10 @@ test("compact strict and warn preserve the success schema boundary", async () =>
     responseValidation: "warn",
     logger: { warn: (message: string) => warnings.push(message) },
   });
-  const parsed = await warnClient.compactContext(compactInput);
+  const parsed = await warnClient.commitCompaction(compactInput);
   assert.deepEqual(parsed, invalidResponse);
   assert.equal(warnings.length, 1);
-  assert.match(warnings[0] || "", /endpoint=.*context\/compact/);
+  assert.match(warnings[0] || "", /endpoint=.*messages\/compaction/);
   assert.equal(warnings[0]?.includes("TOKEN"), false);
   assert.equal(warnings[0]?.includes("SUMMARY"), false);
 
@@ -1098,7 +1189,7 @@ test("compact strict and warn preserve the success schema boundary", async () =>
     responseValidation: "warn",
   });
   await assert.rejects(
-    () => malformedClient.compactContext(compactInput),
+    () => malformedClient.commitCompaction(compactInput),
     (error: unknown) =>
       error instanceof InternalRpcInvalidResponseError &&
       error.stage === "body-or-json",
@@ -1116,7 +1207,7 @@ test("compact strict and warn preserve the success schema boundary", async () =>
     responseValidation: "warn",
   });
   await assert.rejects(
-    () => non2xxClient.compactContext(compactInput),
+    () => non2xxClient.commitCompaction(compactInput),
     (error: unknown) => {
       assertSafeError(error, {
         code: "AGENT_INTERNAL_RPC_HTTP_ERROR",
@@ -1140,7 +1231,7 @@ test("compact maps both 409 response bodies to ApiConflictError without inspecti
       completeRunTimeoutMs: 5_000,
     });
     await assert.rejects(
-      () => client.compactContext(compactInput),
+      () => client.commitCompaction(compactInput),
       ApiConflictError,
     );
   }
@@ -1361,7 +1452,7 @@ test("warn does not relax JSON parse or non-2xx failures", async () => {
     completeRunTimeoutMs: 5_000,
     responseValidation: "warn",
   });
-  await assert.rejects(() => malformedClient.updateRunState(runStateInput));
+  await assert.rejects(() => malformedClient.updateRunNotice(runStateInput));
 
   const errorOrigin = await startServer(() => ({
     status: 500,
@@ -1429,7 +1520,8 @@ const validExecutionProfileResponse = {
 };
 
 const validPromptContextResponse = {
-  headItemId: null,
+  headMessageId: null,
+  sessionRevision: 0,
   system: "system prompt",
   messages: [
     { role: "user", content: [{ type: "text", text: "dynamic message" }] },
@@ -1442,7 +1534,14 @@ const validPromptContextResponse = {
     },
   ],
   pendingTools: [
-    { itemId: 7, status: "queued", toolName: "bash", args: { command: "pwd" } },
+    {
+      toolExecutionId: "EXECUTION",
+      callPartId: "CALL_PART",
+      assistantMessageId: "MESSAGE",
+      status: "queued",
+      toolName: "bash",
+      args: { command: "pwd" },
+    },
   ],
   lastResponseTotalTokens: null,
   uiLocale: "zh-CN",
@@ -1456,7 +1555,7 @@ const validPromptContextResponse = {
 };
 
 const validMessagesContextResponse = {
-  headItemId: 7,
+  headMessageId: "MESSAGE",
   system: "system prompt",
   messages: [{ role: "user", content: "dynamic message" }],
 };
@@ -1819,11 +1918,17 @@ test("read-side methods preserve unified non-2xx and malformed JSON failures in 
   );
 });
 
-test("context create/update use shared contracts and return complete records", async () => {
+test("Message assistant creation and ToolExecution update use shared contracts", async () => {
   const requests: Array<{ method?: string; url?: string; body: unknown }> = [];
   const origin = await startServer((request) => {
     requests.push(request);
-    return { status: 200, body: { ok: true, item: contextItem } };
+    if (
+      request.url === AgentApiEndpoints.createStreamingAssistant.path
+      || request.url === AgentApiEndpoints.replaceStreamingAssistant.path
+    ) {
+      return { status: 200, body: request.url === AgentApiEndpoints.replaceStreamingAssistant.path ? { result: "updated", message: assistantMessage } : { message: assistantMessage } };
+    }
+    return { status: 200, body: { result: "updated" } };
   });
   const client = new AgentApiClient({
     apiOrigin: origin,
@@ -1832,43 +1937,52 @@ test("context create/update use shared contracts and return complete records", a
     completeRunTimeoutMs: 5_000,
   });
 
-  assert.deepEqual(await client.createContextItem(contextCreateInput), {
-    ok: true,
-    item: contextItem,
+  assert.deepEqual(
+    await client.createStreamingAssistant(createAssistantInput),
+    {
+      message: assistantMessage,
+    },
+  );
+  assert.deepEqual(await client.resumeStreamingAssistant(resumeAssistantInput), {
+    result: "updated",
   });
   assert.deepEqual(
-    await client.updateContextItem({
-      itemId: contextItem.id,
-      status: "completed",
-      output: contextItem.output,
-      updatedAt: contextItem.updatedAt,
-    }),
-    contextItem,
+    await client.replaceStreamingAssistant(replaceAssistantInput),
+    { result: "updated", message: assistantMessage },
   );
+  assert.deepEqual(await client.updateToolExecution(toolExecutionInput), {
+    result: "updated",
+  });
   assert.deepEqual(
     requests.map((request) => ({ method: request.method, url: request.url })),
     [
       {
-        method: AgentApiEndpoints.createContextItem.method,
-        url: AgentApiEndpoints.createContextItem.path,
+        method: AgentApiEndpoints.createStreamingAssistant.method,
+        url: AgentApiEndpoints.createStreamingAssistant.path,
       },
       {
-        method: AgentApiEndpoints.updateContextItem.method,
-        url: buildAgentApiContextItemPath(contextItem.id),
+        method: AgentApiEndpoints.resumeStreamingAssistant.method,
+        url: AgentApiEndpoints.resumeStreamingAssistant.path,
+      },
+      {
+        method: AgentApiEndpoints.replaceStreamingAssistant.method,
+        url: AgentApiEndpoints.replaceStreamingAssistant.path,
+      },
+      {
+        method: AgentApiEndpoints.updateToolExecution.method,
+        url: AgentApiEndpoints.updateToolExecution.path,
       },
     ],
   );
-  assert.deepEqual(requests[1]?.body, {
-    status: "completed",
-    output: contextItem.output,
-    updatedAt: contextItem.updatedAt,
-  });
+  assert.deepEqual(requests[1]?.body, resumeAssistantInput);
+  assert.deepEqual(requests[2]?.body, replaceAssistantInput);
+  assert.deepEqual(requests[3]?.body, toolExecutionInput);
 });
 
-test("context create accepts the late ignored success branch", async () => {
+test("Message ToolExecution writeback accepts the late ignored fenced branch", async () => {
   const origin = await startServer(() => ({
     status: 200,
-    body: { ok: true, item: null, ignored: true },
+    body: { result: "ignored" },
   }));
   const client = new AgentApiClient({
     apiOrigin: origin,
@@ -1876,17 +1990,15 @@ test("context create accepts the late ignored success branch", async () => {
     internalRpcTimeoutMs: 15_000,
     completeRunTimeoutMs: 5_000,
   });
-  assert.deepEqual(await client.createContextItem(contextCreateInput), {
-    ok: true,
-    item: null,
-    ignored: true,
+  assert.deepEqual(await client.updateToolExecution(toolExecutionInput), {
+    result: "ignored",
   });
 });
 
-test("context create maps 409 to ApiConflictError while update preserves raw non-2xx", async () => {
+test("Message assistant creation maps 409 to ApiConflictError while execution update preserves raw non-2xx", async () => {
   const createOrigin = await startServer(() => ({
     status: 409,
-    body: { code: "conflict_head:17" },
+    body: { code: "SESSION_HEAD_CONFLICT" },
   }));
   const createClient = new AgentApiClient({
     apiOrigin: createOrigin,
@@ -1895,13 +2007,13 @@ test("context create maps 409 to ApiConflictError while update preserves raw non
     completeRunTimeoutMs: 5_000,
   });
   await assert.rejects(
-    () => createClient.createContextItem(contextCreateInput),
+    () => createClient.createStreamingAssistant(createAssistantInput),
     ApiConflictError,
   );
 
   const updateOrigin = await startServer(() => ({
     status: 409,
-    body: { code: "conflict_head:17" },
+    body: { code: "SESSION_HEAD_CONFLICT" },
   }));
   const updateClient = new AgentApiClient({
     apiOrigin: updateOrigin,
@@ -1910,21 +2022,16 @@ test("context create maps 409 to ApiConflictError while update preserves raw non
     completeRunTimeoutMs: 5_000,
   });
   await assert.rejects(
-    () =>
-      updateClient.updateContextItem({
-        itemId: 17,
-        status: "completed",
-        output: contextItem.output,
-      }),
+    () => updateClient.updateToolExecution(toolExecutionInput),
     (error: unknown) =>
       error instanceof InternalRpcHttpError && error.status === 409,
   );
 });
 
-test("context response validation observes strict/warn boundaries and path builder rejects invalid ids", async () => {
+test("Message writeback response validation observes strict/warn boundaries", async () => {
   const strictOrigin = await startServer(() => ({
     status: 200,
-    body: { ok: true, item: { id: 17 } },
+    body: { message: { id: "MESSAGE" } },
   }));
   const strictClient = new AgentApiClient({
     apiOrigin: strictOrigin,
@@ -1933,7 +2040,7 @@ test("context response validation observes strict/warn boundaries and path build
     completeRunTimeoutMs: 5_000,
   });
   await assert.rejects(
-    () => strictClient.createContextItem(contextCreateInput),
+    () => strictClient.createStreamingAssistant(createAssistantInput),
     (error: unknown) =>
       error instanceof InternalRpcInvalidResponseError &&
       error.stage === "schema",
@@ -1943,11 +2050,10 @@ test("context response validation observes strict/warn boundaries and path build
   const warnOrigin = await startServer(() => ({
     status: 200,
     body: {
-      ok: true,
-      item: { id: 17 },
+      result: "updated",
       token: "TOKEN",
       prompt: "PROMPT",
-      result: "TOOL_RESULT",
+      toolResult: "TOOL_RESULT",
     },
   }));
   const warnClient = new AgentApiClient({
@@ -1958,26 +2064,15 @@ test("context response validation observes strict/warn boundaries and path build
     responseValidation: "warn",
     logger: { warn: (message: string) => warnings.push(message) },
   });
-  const item = await warnClient.updateContextItem({
-    itemId: 17,
-    status: "completed",
-    output: contextItem.output,
+  const result = await warnClient.updateToolExecution(toolExecutionInput);
+  assert.deepEqual(result, {
+    result: "updated",
+    token: "TOKEN",
+    prompt: "PROMPT",
+    toolResult: "TOOL_RESULT",
   });
-  assert.deepEqual(item, { id: 17 });
   assert.equal(warnings.length, 1);
   assert.equal(warnings[0]?.includes("TOKEN"), false);
   assert.equal(warnings[0]?.includes("PROMPT"), false);
   assert.equal(warnings[0]?.includes("TOOL_RESULT"), false);
-
-  for (const itemId of [0, -1, 1.5, Number.NaN]) {
-    await assert.rejects(
-      () =>
-        warnClient.updateContextItem({
-          itemId,
-          status: "completed",
-          output: contextItem.output,
-        }),
-      RangeError,
-    );
-  }
 });

@@ -1,9 +1,4 @@
-import type {
-  AgentContextItemRecord,
-  AgentSessionRecord,
-  AgentSessionRunState,
-  AgentUiLocale,
-} from "@agent-workbench/shared";
+import type { AgentUiLocale } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import type {
   AgentApiSubtaskPreforkPlanRequest,
   AgentApiSubtaskPreforkPlanResponse,
@@ -12,40 +7,50 @@ import type {
   AgentApiSubtaskStartRequest,
   AgentApiSubtaskStartResponse,
   AgentApiSubtaskStatusRequest,
-  AgentApiSubtaskStatusResponse,
+  AgentApiSubtaskStatusResponse
 } from "@agent-workbench/shared/internal-contracts/agent-api";
 
 export type SubtaskRunRecord = {
   runId: string;
   workspaceId: string;
   sessionId: string;
-  triggerItemId: number;
+  triggerMessageId: string | null;
   agentId: string;
   providerId: string;
   modelId: string;
   uiLocale: AgentUiLocale | null;
   subtaskDepth: number | null;
   parentRunId: string | null;
-  parentToolItemId: number | null;
+  parentToolExecutionId: string | null;
   status: "running" | "completed" | "failed" | "cancelled";
   createdAt: number;
   updatedAt: number;
 };
 
+export type SubtaskSession = {
+  id: string;
+  workspaceId: string;
+  title: string;
+  kind: "primary" | "subtask";
+  headMessageId: string | null;
+  forkedFromSessionId: string | null;
+  forkedFromMessageId: string | null;
+  revision: number;
+};
+
 /** The only Subtask capability consumed by Run Lifecycle. */
 export type ActiveSubtaskChildQuery = {
-  listByParentRun(input: {
-    workspaceId: string;
-    sessionId: string;
-    runId: string;
-  }): string[];
+  listByParentRun(input: { workspaceId: string; sessionId: string; runId: string }): string[];
 };
 
 export type SubtaskParentAnchor = {
-  parentSession: AgentSessionRecord;
+  parentSession: SubtaskSession;
   parentRun: SubtaskRunRecord;
   parentUiLocale: AgentUiLocale | null;
-  anchor: AgentContextItemRecord;
+  anchor: {
+    toolExecutionId: string;
+    assistantMessageId: string;
+  };
 };
 
 export type SubtaskParentAnchorReader = {
@@ -53,34 +58,33 @@ export type SubtaskParentAnchorReader = {
     workspaceId: string;
     parentSessionId: string;
     parentRunId: string;
-    parentToolItemId: number;
+    parentToolExecutionId: string;
   }): SubtaskParentAnchor;
 };
 
 export type SubtaskLineagePersistence = {
-  findChildByParentTool(input: {
+  findChildByParentToolExecution(input: {
     workspaceId: string;
     parentRunId: string;
-    parentToolItemId: number;
+    parentToolExecutionId: string;
   }): SubtaskRunRecord | null;
-  isParentToolUniqueConflict(error: unknown): boolean;
 };
 
 export type SubtaskSessionMaterializer = {
   resolveForStart(input: {
     workspaceId: string;
     parentSessionId: string;
-    parentToolItemId: number;
+    parentToolExecutionId: string;
     session: AgentApiSubtaskStartRequest["session"];
     subtaskTitleBase: string;
-    forkBoundaryItemId: number | null;
+    forkBoundaryMessageId: string | null;
     shouldUsePreforkSummary: boolean;
-  }): Promise<{ session: AgentSessionRecord; createdSessionId: string | null }>;
+  }): Promise<{ session: SubtaskSession; createdSessionId: string | null }>;
   resolveForkBoundary(input: {
     workspaceId: string;
     sessionId: string;
-    anchor: AgentContextItemRecord;
-  }): number | null;
+    assistantMessageId: string;
+  }): string | null;
 };
 
 export type SubtaskExecutionProfile = {
@@ -92,23 +96,14 @@ export type SubtaskExecutionProfile = {
 };
 
 export type SubtaskExecutionProfileReader = {
-  resolve(input: {
-    workspaceId: string;
-    requestedAgentId: string;
-  }): SubtaskExecutionProfile;
+  resolve(input: { workspaceId: string; requestedAgentId: string }): SubtaskExecutionProfile;
   findAgentName(agentId: string): string | null;
   getMaxDepth(): number;
 };
 
-export type SubtaskWorkspaceReader = {
-  get(workspaceId: string): { path: string } | null;
-};
-
+export type SubtaskWorkspaceReader = { get(workspaceId: string): { path: string } | null };
 export type ParentRunStateReader = {
-  get(
-    workspaceId: string,
-    sessionId: string,
-  ): Pick<AgentSessionRunState, "status" | "lastResponseTotalTokens">;
+  get(workspaceId: string, sessionId: string): { status: "idle" | "running"; lastResponseTotalTokens: number | null };
 };
 
 export type SubtaskChildActivationInput = {
@@ -116,91 +111,59 @@ export type SubtaskChildActivationInput = {
   sessionId: string;
   runId: string;
   parentRunId: string;
-  parentToolItemId: number;
+  parentToolExecutionId: string;
   subtaskDepth: number;
   agentId: string;
   providerId: string;
   modelId: string;
   uiLocale: AgentUiLocale | null;
   createdAt: number;
-  seedItems: Array<
-    | { kind: "system"; text: string; attachToRun: false }
-    | { kind: "user"; text: string; attachToRun: true }
-  >;
+  systemTexts: string[];
+  prompt: string;
 };
-
 export type SubtaskChildActivationResult =
-  { kind: "activated"; promptItemId: number } | { kind: "session-running" };
+  | { kind: "activated"; promptMessageId: string }
+  | { kind: "session-running" }
+  | { kind: "parent-not-active" };
+export type SubtaskChildRunActivator = { activate(input: SubtaskChildActivationInput): SubtaskChildActivationResult };
 
-/** Implemented by Lifecycle-owned SQLite persistence; never enqueues runtime work. */
-export type SubtaskChildRunActivator = {
-  activate(input: SubtaskChildActivationInput): SubtaskChildActivationResult;
+/** Owns ownership-fenced durable run and Message reads for subtask result/status. */
+export type SubtaskRunMessageText = {
+  type: "assistant" | "system";
+  text: string;
 };
-
-/** Owns ownership-fenced durable run and visible-item reads for P4 queries. */
 export type SubtaskRunQuery = {
-  findSession(sessionId: string): AgentSessionRecord | null;
-  findRunInSession(input: {
-    workspaceId: string;
-    sessionId: string;
-    runId: string;
-  }): SubtaskRunRecord | null;
-  listVisibleItemsByRun(input: {
-    workspaceId: string;
-    sessionId: string;
-    runId: string;
-  }): AgentContextItemRecord[];
+  findSession(sessionId: string): SubtaskSession | null;
+  findRunInSession(input: { workspaceId: string; sessionId: string; runId: string }): SubtaskRunRecord | null;
+  listMessageTextsByRun(input: { workspaceId: string; sessionId: string; runId: string }): SubtaskRunMessageText[];
 };
 
-/** P3 owns the invocation condition; P4 only refines adapter naming/export boundaries. */
 export type SubtaskLocalCompensationPersistence = {
-  deleteNewSessionIfStillEmpty(input: {
+  deleteCreatedSessionIfStillSafe(input: {
     workspaceId: string;
-    sessionId: string;
+    createdSessionId: string;
+    expectedParentSessionId: string;
+    expectedForkedFromSessionId: string | null;
+    expectedForkedFromMessageId: string | null;
   }): boolean;
 };
-
 export type SubtaskOrphanCandidate = {
   workspaceId: string;
   sessionId: string;
   createdAt: number;
   forkedFromSessionId: string | null;
-  forkedFromItemId: number | null;
+  forkedFromMessageId: string | null;
 };
-
-/** P5 owns the orphan startup policy and invocation. */
 export type SubtaskOrphanPersistence = {
   listSuspects(input: { olderThan: number }): SubtaskOrphanCandidate[];
-  deleteSuspectIfStillEligible(input: {
-    workspaceId: string;
-    sessionId: string;
-    olderThan: number;
-  }): boolean;
+  deleteSuspectIfStillEligible(input: { workspaceId: string; sessionId: string; olderThan: number }): boolean;
 };
-
-export type CleanupSubtaskOrphansOnStartupCommand = {
-  /** Test-only time override; production callers use the injected clock. */
-  now?: number;
-};
-
-export type CleanupSubtaskOrphansOnStartupResult = {
-  scanned: number;
-  retained: number;
-  deleted: number;
-  skippedAfterRecheck: number;
-  failed: number;
-};
-
+export type CleanupSubtaskOrphansOnStartupCommand = { now?: number };
+export type CleanupSubtaskOrphansOnStartupResult = { scanned: number; retained: number; deleted: number; skippedAfterRecheck: number; failed: number };
 export type SubtaskClock = { nowMs(): number };
 export type SubtaskIdGenerator = { newId(prefix: string): string };
-export type SubtaskLogger = {
-  warn(bindings: Record<string, unknown>, message: string): void;
-  error(bindings: Record<string, unknown>, message: string): void;
-};
-
-export type SubtaskForkGuardTextReader = {
-  get(uiLocale: AgentUiLocale | null): string;
-};
+export type SubtaskLogger = { warn(bindings: Record<string, unknown>, message: string): void; error(bindings: Record<string, unknown>, message: string): void };
+export type SubtaskForkGuardTextReader = { get(uiLocale: AgentUiLocale | null): string };
 
 export type SubtaskApplicationDependencies = {
   parentAnchorReader: SubtaskParentAnchorReader;
@@ -220,15 +183,9 @@ export type SubtaskApplicationDependencies = {
 };
 
 export type SubtaskApplicationPort = {
-  getPreforkPlan(
-    request: AgentApiSubtaskPreforkPlanRequest,
-  ): AgentApiSubtaskPreforkPlanResponse;
-  startSubtask(
-    request: AgentApiSubtaskStartRequest,
-  ): Promise<AgentApiSubtaskStartResponse>;
+  getPreforkPlan(request: AgentApiSubtaskPreforkPlanRequest): AgentApiSubtaskPreforkPlanResponse;
+  startSubtask(request: AgentApiSubtaskStartRequest): Promise<AgentApiSubtaskStartResponse>;
   getResult(request: AgentApiSubtaskResultRequest): AgentApiSubtaskResultResponse;
   getStatus(request: AgentApiSubtaskStatusRequest): AgentApiSubtaskStatusResponse;
-  cleanupOrphansOnStartup(
-    command?: CleanupSubtaskOrphansOnStartupCommand,
-  ): CleanupSubtaskOrphansOnStartupResult;
+  cleanupOrphansOnStartup(command?: CleanupSubtaskOrphansOnStartupCommand): CleanupSubtaskOrphansOnStartupResult;
 };

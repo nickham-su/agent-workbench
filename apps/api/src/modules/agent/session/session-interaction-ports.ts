@@ -1,17 +1,15 @@
 import type {
   AgentImageMediaType,
-  AgentContextItemRecord,
-  AgentControlResult,
   AgentForkSessionRequest,
   AgentRevertSessionRequest,
   AgentSendMessageRequest,
   AgentSendMessageResponse,
   AgentSessionRecord,
-  AgentSessionRunState,
   AgentUiLocale,
   AgentUpdateSessionTitleRequest
-} from "@agent-workbench/shared";
+} from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import type { AgentApiSubtaskStartRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
+import type { AgentMessageControlResult, AgentMessageSessionRunState } from "@agent-workbench/shared";
 import type { AgentRuntimePort } from "../agent.runtime-port.js";
 
 export type SessionCreateInput = {
@@ -21,19 +19,18 @@ export type SessionCreateInput = {
   kind: "primary" | "subtask";
   createdAt: number;
   forkedFromSessionId?: string | null;
-  forkedFromItemId?: number | null;
+  forkedFromMessageId?: string | null;
 };
 
 export type SessionCloneInput = {
   id: string;
   createdAt: number;
-  archiveAt: number;
   fromSession: AgentSessionRecord;
-  fromItemId: number;
-  mode: "with_archive" | "visible_only";
+  fromMessageId: string;
   title?: string;
   targetKind: "primary" | "subtask";
   boundaryPolicy: "public-user-assistant" | "internal-resolved";
+  allowSourceWithActiveRun?: boolean;
 };
 
 export type SessionInteractionStore = {
@@ -43,12 +40,11 @@ export type SessionInteractionStore = {
   createSession(input: SessionCreateInput): void;
   setManualTitle(input: { sessionId: string; workspaceId: string; title: string }): boolean;
   cloneSession(input: SessionCloneInput): Promise<AgentSessionRecord>;
-  findClientRequestDedup(input: { workspaceId: string; sessionId: string; clientRequestId: string }): { messageItemId: number; runId: string } | null;
-  getRunState(workspaceId: string, sessionId: string): Pick<AgentSessionRunState, "status">;
-  getControlRunState(sessionId: string): AgentSessionRunState;
-  getTranscriptItem(sessionId: string, workspaceId: string, itemId: number): AgentContextItemRecord | null;
+  findClientRequestDedup(input: { workspaceId: string; sessionId: string; clientRequestId: string }): { messageId: string; runId: string } | null;
+  getRunState(workspaceId: string, sessionId: string): Pick<AgentMessageSessionRunState, "status">;
+  getControlRunState(sessionId: string): AgentMessageSessionRunState;
   hasNonTerminalItems(workspaceId: string, sessionId: string): boolean;
-  moveHead(input: { workspaceId: string; sessionId: string; expectedHeadItemId: number | null; nextHeadItemId: number; updatedAt: number }): void;
+  moveHead(input: { workspaceId: string; sessionId: string; expectedHeadMessageId: string | null; expectedRevision: number; nextHeadMessageId: string; updatedAt: number }): void;
 };
 
 export type SessionProfileReader = {
@@ -96,10 +92,10 @@ export type RevertSessionCommand = {
 export type SubtaskSessionMaterializationCommand = {
   workspaceId: string;
   parentSessionId: string;
-  parentToolItemId: number;
+  parentToolExecutionId: string;
   session: AgentApiSubtaskStartRequest["session"];
   subtaskTitleBase: string;
-  forkBoundaryItemId: number | null;
+  forkBoundaryMessageId: string | null;
   shouldUsePreforkSummary: boolean;
 };
 
@@ -109,7 +105,7 @@ export type SessionInteractionApplication = {
   forkPrimarySession(params: AgentForkSessionRequest): Promise<AgentSessionRecord>;
   updateSessionTitle(params: { sessionId: string; body: AgentUpdateSessionTitleRequest }): AgentSessionRecord;
   sendMessage(params: { sessionId: string; body: NormalizedAgentUserMessageInput; runtime: AgentRuntimePort }): Promise<AgentSendMessageResponse>;
-  revertSession(command: RevertSessionCommand): Promise<AgentControlResult>;
+  revertSession(command: RevertSessionCommand): Promise<AgentMessageControlResult>;
   resolveSubtaskSessionForStart(command: SubtaskSessionMaterializationCommand): Promise<{ session: AgentSessionRecord; createdSessionId: string | null }>;
 };
 

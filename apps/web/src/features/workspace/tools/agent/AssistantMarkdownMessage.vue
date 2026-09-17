@@ -12,7 +12,7 @@ import { useI18n } from "vue-i18n";
 
 const props = defineProps<{
   text: string;
-  messageId: number;
+  messageId: string;
   streaming?: boolean;
   tone?: "normal" | "error";
   sectionKey?: string;

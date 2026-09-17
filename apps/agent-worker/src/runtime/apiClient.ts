@@ -4,7 +4,7 @@ import type {
   PluginToolRpcExecuteResponse,
   PluginToolRpcListRequest,
   PluginToolRpcListResponse,
-} from "@agent-workbench/shared";
+} from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { Value } from "@sinclair/typebox/value";
 import type { TSchema } from "@sinclair/typebox";
 import {
@@ -15,16 +15,29 @@ import {
   type AgentApiMessagesContextRequest,
   type AgentApiMessagesContextResponse,
   AgentApiMessagesContextResponseSchema,
+  type AgentApiArchiveReadRequest,
+  type AgentApiArchiveSearchRequest,
+  type AgentApiArchivePageResponse,
+  AgentApiArchivePageResponseSchema,
   type AgentApiPromptContextRequest,
   type AgentApiPromptContextResponse,
   AgentApiPromptContextResponseSchema,
-  type AgentApiCreateContextItemResponse,
-  AgentApiCreateContextItemResponseSchema,
-  type AgentApiUpdateContextItemResponse,
-  AgentApiUpdateContextItemResponseSchema,
-  type AgentApiCompactContextRequest,
-  type AgentApiCompactContextResponse,
-  AgentApiCompactContextResponseSchema,
+  type AgentApiCreateStreamingAssistantRequest,
+  type AgentApiCreateStreamingAssistantResponse,
+  AgentApiCreateStreamingAssistantResponseSchema,
+  type AgentApiFlushAssistantPartsRequest,
+  type AgentApiResumeStreamingAssistantRequest,
+  type AgentApiReplaceStreamingAssistantRequest,
+  type AgentApiReplaceStreamingAssistantResponse,
+  AgentApiReplaceStreamingAssistantResponseSchema,
+  type AgentApiCompleteAssistantRequest,
+  type AgentApiUpdateToolExecutionRequest,
+  type AgentApiUpdateRunNoticeRequest,
+  type AgentApiFencedWriteResponse,
+  AgentApiFencedWriteResponseSchema,
+  type AgentApiCommitCompactionRequest,
+  type AgentApiCommitCompactionResponse,
+  AgentApiCommitCompactionResponseSchema,
   AgentApiSubtaskPreforkPlanRequest,
   AgentApiSubtaskPreforkPlanResponse,
   AgentApiSubtaskPreforkPlanResponseSchema,
@@ -38,12 +51,7 @@ import {
   AgentApiSubtaskStatusResponse,
   AgentApiSubtaskStatusResponseSchema,
   AgentApiRunCompleteResponseSchema,
-  AgentApiRunStateResponseSchema,
-  buildAgentApiContextItemPath,
-  type AgentApiCreateContextItemRequest,
-  type AgentApiUpdateContextItemRequest,
   type AgentApiRunCompleteRequest,
-  type AgentApiRunStateRequest,
 } from "@agent-workbench/shared/internal-contracts/agent-api";
 
 export class ApiConflictError extends Error {}
@@ -51,7 +59,7 @@ export class ApiConflictError extends Error {}
 type InternalRpcMethod = "POST" | "PATCH";
 
 export type AgentApiClientPolicyName =
-  "controlRead" | "controlWrite" | "subtaskStart" | "runComplete" | "excluded";
+  "controlRead" | "controlWrite" | "idempotentControlWrite" | "subtaskStart" | "runComplete" | "excluded";
 
 export type AgentApiClientPolicy = {
   name: AgentApiClientPolicyName;
@@ -315,16 +323,20 @@ export class AgentApiClient {
   }
 
   static readonly publicMethodPolicies = {
-    createContextItem: "controlWrite",
-    updateContextItem: "controlWrite",
-    updateRunState: "controlWrite",
+    createStreamingAssistant: "idempotentControlWrite",
+    flushAssistantParts: "controlWrite",
+    resumeStreamingAssistant: "controlWrite",
+    replaceStreamingAssistant: "controlWrite",
+    completeAssistant: "controlWrite",
+    updateToolExecution: "controlWrite",
+    updateRunNotice: "controlWrite",
     completeRun: "runComplete",
     getExecutionProfile: "controlRead",
     getPromptContext: "controlRead",
     getMessagesContext: "controlRead",
-    compactContext: "controlWrite",
-    archiveSearch: "excluded",
-    archiveRead: "excluded",
+    archiveRead: "controlRead",
+    archiveSearch: "controlRead",
+    commitCompaction: "controlWrite",
     getSubtaskPreforkPlan: "controlRead",
     startSubtaskRun: "subtaskStart",
     getSubtaskResult: "controlRead",
@@ -349,6 +361,14 @@ export class AgentApiClient {
         return {
           name,
           timeoutMs: this.params.internalRpcTimeoutMs,
+          maxRetries: 0,
+        };
+      case "idempotentControlWrite":
+        return {
+          name,
+          timeoutMs: this.params.internalRpcTimeoutMs,
+          // Runner owns retries so its AbortSignal can make cancel win.
+          // The API still accepts exact response-loss replay of this request.
           maxRetries: 0,
         };
       case "subtaskStart":
@@ -417,6 +437,7 @@ export class AgentApiClient {
       responseSchema?: TSchema;
       responseEndpoint?: string;
       policy: AgentApiClientPolicyName;
+      abortSignal?: AbortSignal;
     },
   ) {
     const method = options.method;
@@ -496,12 +517,15 @@ export class AgentApiClient {
       responseSchema?: TSchema;
       responseEndpoint?: string;
       policy: AgentApiClientPolicyName;
+      abortSignal?: AbortSignal;
     },
     method: InternalRpcMethod,
     endpoint: string,
     timeoutMs: number | null,
   ) {
-    const controller = timeoutMs == null ? null : new AbortController();
+    const controller = timeoutMs == null && !options.abortSignal ? null : new AbortController();
+    const abortFromCaller = () => controller?.abort();
+    options.abortSignal?.addEventListener("abort", abortFromCaller, { once: true });
     let localTimedOut = false;
     let knownHttpStatus: number | null = null;
     let knownBusinessError: InternalRpcSafeBusinessErrorDetails = {};
@@ -600,52 +624,86 @@ export class AgentApiClient {
       }
       throw new InternalRpcNetworkError({ method, endpoint });
     } finally {
+      options.abortSignal?.removeEventListener("abort", abortFromCaller);
       if (timeout != null) clearTimeout(timeout);
     }
   }
 
-  async createContextItem(input: AgentApiCreateContextItemRequest) {
-    const res = await this.request<AgentApiCreateContextItemResponse>(
-      AgentApiEndpoints.createContextItem.path,
+  async createStreamingAssistant(input: AgentApiCreateStreamingAssistantRequest) {
+    return await this.request<AgentApiCreateStreamingAssistantResponse>(
+      AgentApiEndpoints.createStreamingAssistant.path,
       {
-        method: AgentApiEndpoints.createContextItem.method,
+        method: AgentApiEndpoints.createStreamingAssistant.method,
         body: input,
         conflictAsError: true,
-        responseSchema: AgentApiCreateContextItemResponseSchema,
-        responseEndpoint: AgentApiEndpoints.createContextItem.path,
-        policy: AgentApiClient.publicMethodPolicies.createContextItem,
+        responseSchema: AgentApiCreateStreamingAssistantResponseSchema,
+        responseEndpoint: AgentApiEndpoints.createStreamingAssistant.path,
+        policy: AgentApiClient.publicMethodPolicies.createStreamingAssistant,
       },
     );
-    return res;
   }
 
-  async updateContextItem(
-    input: AgentApiUpdateContextItemRequest & {
-      itemId: number;
-    },
-  ) {
-    const path = buildAgentApiContextItemPath(input.itemId);
-    const res = await this.request<AgentApiUpdateContextItemResponse>(path, {
-      method: AgentApiEndpoints.updateContextItem.method,
-      body: {
-        status: input.status,
-        output: input.output,
-        updatedAt: input.updatedAt,
-      },
-      responseSchema: AgentApiUpdateContextItemResponseSchema,
-      responseEndpoint: AgentApiEndpoints.updateContextItem.routeTemplate,
-      policy: AgentApiClient.publicMethodPolicies.updateContextItem,
-    });
-    return res.item;
-  }
-
-  async updateRunState(input: AgentApiRunStateRequest) {
-    await this.request(AgentApiEndpoints.updateRunState.path, {
-      method: AgentApiEndpoints.updateRunState.method,
+  async flushAssistantParts(input: AgentApiFlushAssistantPartsRequest) {
+    return await this.request<AgentApiFencedWriteResponse>(AgentApiEndpoints.flushAssistantParts.path, {
+      method: AgentApiEndpoints.flushAssistantParts.method,
       body: input,
-      responseSchema: AgentApiRunStateResponseSchema,
-      responseEndpoint: AgentApiEndpoints.updateRunState.path,
-      policy: AgentApiClient.publicMethodPolicies.updateRunState,
+      responseSchema: AgentApiFencedWriteResponseSchema,
+      responseEndpoint: AgentApiEndpoints.flushAssistantParts.path,
+      policy: AgentApiClient.publicMethodPolicies.flushAssistantParts,
+    });
+  }
+
+  async resumeStreamingAssistant(input: AgentApiResumeStreamingAssistantRequest) {
+    return await this.request<AgentApiFencedWriteResponse>(AgentApiEndpoints.resumeStreamingAssistant.path, {
+      method: AgentApiEndpoints.resumeStreamingAssistant.method,
+      body: input,
+      responseSchema: AgentApiFencedWriteResponseSchema,
+      responseEndpoint: AgentApiEndpoints.resumeStreamingAssistant.path,
+      policy: AgentApiClient.publicMethodPolicies.resumeStreamingAssistant,
+    });
+  }
+
+  async replaceStreamingAssistant(input: AgentApiReplaceStreamingAssistantRequest) {
+    return await this.request<AgentApiReplaceStreamingAssistantResponse>(
+      AgentApiEndpoints.replaceStreamingAssistant.path,
+      {
+        method: AgentApiEndpoints.replaceStreamingAssistant.method,
+        body: input,
+        conflictAsError: true,
+        responseSchema: AgentApiReplaceStreamingAssistantResponseSchema,
+        responseEndpoint: AgentApiEndpoints.replaceStreamingAssistant.path,
+        policy: AgentApiClient.publicMethodPolicies.replaceStreamingAssistant,
+      },
+    );
+  }
+
+  async completeAssistant(input: AgentApiCompleteAssistantRequest) {
+    return await this.request<AgentApiFencedWriteResponse>(AgentApiEndpoints.completeAssistant.path, {
+      method: AgentApiEndpoints.completeAssistant.method,
+      body: input,
+      responseSchema: AgentApiFencedWriteResponseSchema,
+      responseEndpoint: AgentApiEndpoints.completeAssistant.path,
+      policy: AgentApiClient.publicMethodPolicies.completeAssistant,
+    });
+  }
+
+  async updateToolExecution(input: AgentApiUpdateToolExecutionRequest) {
+    return await this.request<AgentApiFencedWriteResponse>(AgentApiEndpoints.updateToolExecution.path, {
+      method: AgentApiEndpoints.updateToolExecution.method,
+      body: input,
+      responseSchema: AgentApiFencedWriteResponseSchema,
+      responseEndpoint: AgentApiEndpoints.updateToolExecution.path,
+      policy: AgentApiClient.publicMethodPolicies.updateToolExecution,
+    });
+  }
+
+  async updateRunNotice(input: AgentApiUpdateRunNoticeRequest) {
+    return await this.request<AgentApiFencedWriteResponse>(AgentApiEndpoints.updateRunNotice.path, {
+      method: AgentApiEndpoints.updateRunNotice.method,
+      body: input,
+      responseSchema: AgentApiFencedWriteResponseSchema,
+      responseEndpoint: AgentApiEndpoints.updateRunNotice.path,
+      policy: AgentApiClient.publicMethodPolicies.updateRunNotice,
     });
   }
 
@@ -685,7 +743,33 @@ export class AgentApiClient {
     );
   }
 
-  async getMessagesContext(input: AgentApiMessagesContextRequest) {
+  async archiveRead(input: AgentApiArchiveReadRequest) {
+    return this.request<AgentApiArchivePageResponse>(
+      AgentApiEndpoints.archiveRead.path,
+      {
+        method: AgentApiEndpoints.archiveRead.method,
+        body: input,
+        responseSchema: AgentApiArchivePageResponseSchema,
+        responseEndpoint: AgentApiEndpoints.archiveRead.path,
+        policy: AgentApiClient.publicMethodPolicies.archiveRead,
+      },
+    );
+  }
+
+  async archiveSearch(input: AgentApiArchiveSearchRequest) {
+    return this.request<AgentApiArchivePageResponse>(
+      AgentApiEndpoints.archiveSearch.path,
+      {
+        method: AgentApiEndpoints.archiveSearch.method,
+        body: input,
+        responseSchema: AgentApiArchivePageResponseSchema,
+        responseEndpoint: AgentApiEndpoints.archiveSearch.path,
+        policy: AgentApiClient.publicMethodPolicies.archiveSearch,
+      },
+    );
+  }
+
+  async getMessagesContext(input: AgentApiMessagesContextRequest, options?: { abortSignal?: AbortSignal }) {
     return this.request<AgentApiMessagesContextResponse>(
       AgentApiEndpoints.getMessagesContext.path,
       {
@@ -694,57 +778,21 @@ export class AgentApiClient {
         responseSchema: AgentApiMessagesContextResponseSchema,
         responseEndpoint: AgentApiEndpoints.getMessagesContext.path,
         policy: AgentApiClient.publicMethodPolicies.getMessagesContext,
+        abortSignal: options?.abortSignal,
       },
     );
   }
 
-  async compactContext(input: AgentApiCompactContextRequest) {
-    return this.request<AgentApiCompactContextResponse>(
-      AgentApiEndpoints.compactContext.path,
+  async commitCompaction(input: AgentApiCommitCompactionRequest) {
+    return this.request<AgentApiCommitCompactionResponse>(
+      AgentApiEndpoints.commitCompaction.path,
       {
-        method: AgentApiEndpoints.compactContext.method,
+        method: AgentApiEndpoints.commitCompaction.method,
         body: input,
         conflictAsError: true,
-        responseSchema: AgentApiCompactContextResponseSchema,
-        responseEndpoint: AgentApiEndpoints.compactContext.path,
-        policy: AgentApiClient.publicMethodPolicies.compactContext,
-      },
-    );
-  }
-
-  async archiveSearch(input: {
-    workspaceId: string;
-    sessionId: string;
-    query: string;
-    beforePos?: number;
-    maxHits?: number;
-    maxChars?: number;
-    snippet?: boolean;
-    regex?: boolean;
-  }) {
-    return await this.request<{ text: string; noArchive?: boolean }>(
-      "/api/internal/agent/archive/search",
-      {
-        method: "POST",
-        body: input,
-        policy: AgentApiClient.publicMethodPolicies.archiveSearch,
-      },
-    );
-  }
-
-  async archiveRead(input: {
-    workspaceId: string;
-    sessionId: string;
-    beforePos?: number;
-    lineCount?: number;
-    maxChars?: number;
-  }) {
-    return await this.request<{ text: string; noArchive?: boolean }>(
-      "/api/internal/agent/archive/read",
-      {
-        method: "POST",
-        body: input,
-        policy: AgentApiClient.publicMethodPolicies.archiveRead,
+        responseSchema: AgentApiCommitCompactionResponseSchema,
+        responseEndpoint: AgentApiEndpoints.commitCompaction.path,
+        policy: AgentApiClient.publicMethodPolicies.commitCompaction,
       },
     );
   }

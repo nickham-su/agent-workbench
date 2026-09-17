@@ -10,10 +10,14 @@ import { agentWorkerPidPath } from "../../infra/fs/paths.js";
 import { AgentPluginHostClient } from "./agent.plugin-host-client.js";
 import { AgentPluginHostProcessManager } from "./agent.plugin-host-manager.js";
 import { AgentRunCompletedEventHub } from "./run-completed-events.js";
+import { registerWorkspaceRuntime, unregisterWorkspaceRuntime } from "./lifecycle/workspace-runtime-registry.js";
+import { resumePendingWorkspaceDeletions } from "../workspaces/workspace.service.js";
+import { reconcilePendingTerminals } from "../terminals/terminal.service.js";
+import { recoverAfterAgentRuntimeReady } from "./agent-runtime-ready.js";
 
 export async function registerAgentModule(app: FastifyInstance, ctx: AppContext) {
   const runCompletedEventHub = new AgentRunCompletedEventHub();
-  const { service, localRuntimeExecution, startupCoordinator } = createAgentComposition(ctx, app.log, runCompletedEventHub);
+  const { service, localRuntimeExecution, startupCoordinator, runtimeHandoffCoordinator, dispose } = createAgentComposition(ctx, app.log, runCompletedEventHub);
 
   let runtime: AgentRuntimePort;
   let workerManager: AgentWorkerProcessManager | null = null;
@@ -39,7 +43,18 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
       internalToken: ctx.agentInternalToken,
       responseValidation: ctx.agentWorkerResponseValidation,
       pidFilePath: agentWorkerPidPath(ctx.dataDir),
-      logger: app.log
+      logger: app.log,
+      onReady: async (generation) => {
+        await recoverAfterAgentRuntimeReady({
+          runtime,
+          generation,
+          resumeWorkspaceDeletions: () => resumePendingWorkspaceDeletions(ctx, app.log),
+          recoverRuns: ({ runtime: readyRuntime, generation: readyGeneration }) =>
+            startupCoordinator.recoverWhenRuntimeReady(readyRuntime, readyGeneration),
+          reconcileTerminals: () => reconcilePendingTerminals(ctx, app.log),
+          logger: app.log,
+        });
+      },
     });
   } else {
     const localRuntime = new AgentRuntime(localRuntimeExecution, app.log, ctx.agentWorkerConcurrency);
@@ -72,13 +87,28 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
   }
 
   await registerAgentRoutes(app, { service, runtime, internalToken: ctx.agentInternalToken, dataDir: ctx.dataDir, pluginHost: pluginHostClient, runCompletedEventHub });
+  const workspaceRuntimeRegistration = { runtime, handoffCoordinator: runtimeHandoffCoordinator };
+  registerWorkspaceRuntime(workspaceRuntimeRegistration);
+  if (!ctx.agentWorkerEnabled) {
+    await resumePendingWorkspaceDeletions(ctx, app.log);
+    await reconcilePendingTerminals(ctx, app.log);
+  }
+  app.addHook("onClose", async () => {
+    // Stop reconciliation before Worker/SQLite shutdown can turn a stale
+    // timer into a late runtime RPC or database access.
+    dispose();
+    unregisterWorkspaceRuntime(workspaceRuntimeRegistration);
+  });
 
   await startupCoordinator.runPreListen();
-  startupCoordinator.registerRecoverOnListen(app, runtime);
+  // A managed Worker performs recovery after its own ready barrier. The local
+  // fallback has no independent generation, so API onListen remains its hook.
+  if (!workerManager) startupCoordinator.registerRecoverOnListen(app, runtime);
 
   if (!workerManager) return;
   await workerManager.start();
   app.addHook("onClose", async () => {
+    dispose();
     await workerManager?.stop();
   });
 }

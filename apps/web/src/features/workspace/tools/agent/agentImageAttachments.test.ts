@@ -194,7 +194,6 @@ test("send attempt reuses its ID after failure and changes when the draft image 
 
 test("image slash controls are blocked and preview URLs are reused then revoked", async () => {
   assert.equal(shouldBlockImageSlashCommand("compact", 1), true);
-  assert.equal(shouldBlockImageSlashCommand("clear", 1), true);
   assert.equal(shouldBlockImageSlashCommand("prompt", 1), false);
   const originalCreate = URL.createObjectURL;
   const originalRevoke = URL.revokeObjectURL;

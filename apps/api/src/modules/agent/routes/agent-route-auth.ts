@@ -2,7 +2,7 @@ import type { FastifyRequest } from "fastify";
 import { HttpError } from "../../../app/errors.js";
 
 export const AGENT_PRIMARY_SESSION_CREATE_BODY_KEYS = new Set(["workspaceId", "title"]);
-export const AGENT_PRIMARY_SESSION_FORK_BODY_KEYS = new Set(["fromSessionId", "fromItemId", "mode", "title"]);
+export const AGENT_PRIMARY_SESSION_FORK_BODY_KEYS = new Set(["fromSessionId", "fromMessageId", "mode", "title"]);
 export const AGENT_SESSION_TITLE_UPDATE_BODY_KEYS = new Set(["workspaceId", "title"]);
 
 export function assertInternalToken(req: FastifyRequest, internalToken: string) {

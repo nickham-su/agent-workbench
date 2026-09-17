@@ -2,24 +2,27 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { AgentRunner } from "./runner.js";
 
-function queuedPluginTool(input?: Partial<{ itemId: number; toolName: string; toolCallId: string }>) {
+function queuedPluginTool(input?: Partial<{ toolExecutionId: string; callPartId: string; assistantMessageId: string; toolName: string; toolCallId: string }>) {
+  const toolExecutionId = input?.toolExecutionId ?? "execution-plugin-1";
   return {
-    itemId: input?.itemId ?? 1,
+    toolExecutionId,
+    callPartId: input?.callPartId ?? "part-plugin-call-1",
+    assistantMessageId: input?.assistantMessageId ?? "message-plugin-assistant-1",
     status: "queued" as const,
     toolName: input?.toolName ?? "plugin_debug-tools_echo_inspect",
-    toolCallId: input?.toolCallId ?? `call_${input?.itemId ?? 1}`,
+    toolCallId: input?.toolCallId ?? `call_${toolExecutionId}`,
     args: { message: "hello", includeRaw: false, mode: "ok" }
   };
 }
 
 test("executePendingTools uses ToolRegistry snapshot so queued plugin tools are not misclassified as disabled", async () => {
-  const updates: Array<{ status?: string; output?: unknown }> = [];
+  const updates: Array<{ status?: string; resultPreview?: string | null; structuredResult?: unknown }> = [];
   const apiClient = {
-    async updateContextItem(input: { status?: string; output?: unknown }) {
-      updates.push({ status: input.status, output: input.output });
-      return { id: 1 };
+    async updateToolExecution(input: { status?: string; resultPreview?: string | null; structuredResult?: unknown }) {
+      updates.push({ status: input.status, resultPreview: input.resultPreview, structuredResult: input.structuredResult });
+      return { result: "updated" };
     },
-    async updateRunState() {
+    async updateRunNotice() {
       return;
     },
     async getPluginRuntimeSnapshots() {
@@ -96,7 +99,8 @@ test("executePendingTools uses ToolRegistry snapshot so queued plugin tools are 
     context: {
       pendingTools: [queuedPluginTool()],
       tools: [],
-      headItemId: null,
+      headMessageId: null,
+      sessionRevision: 0,
       system: "",
       messages: [],
       lastResponseTotalTokens: null,
@@ -116,7 +120,8 @@ test("processRun reuses runModelStep tool snapshot for next pending plugin tool 
     {
       pendingTools: [],
       tools: [],
-      headItemId: null,
+      headMessageId: null,
+      sessionRevision: 0,
       system: "",
       messages: [],
       lastResponseTotalTokens: null,
@@ -126,7 +131,8 @@ test("processRun reuses runModelStep tool snapshot for next pending plugin tool 
     {
       pendingTools: [queuedPluginTool()],
       tools: [],
-      headItemId: null,
+      headMessageId: null,
+      sessionRevision: 0,
       system: "",
       messages: [],
       lastResponseTotalTokens: null,
@@ -148,14 +154,15 @@ test("processRun reuses runModelStep tool snapshot for next pending plugin tool 
         runtime: { modelRequestRetryBackoffMaxMs: 60_000 }
       };
     },
-    async updateRunState() {
+    async updateRunNotice() {
       return;
     },
     async getPromptContext() {
       return contexts.shift() ?? {
         pendingTools: [],
         tools: [],
-        headItemId: null,
+        headMessageId: null,
+      sessionRevision: 0,
         system: "",
         messages: [],
         lastResponseTotalTokens: null,
@@ -179,12 +186,12 @@ test("processRun reuses runModelStep tool snapshot for next pending plugin tool 
       return {
         aborted: false as const,
         toolCallCount: 1,
-        assistantItemId: 1,
+        assistantMessageId: 1,
         hasVisibleText: false,
         availableToolNames: stepSnapshot
       };
     }
-    return { aborted: false as const, toolCallCount: 0, assistantItemId: 2, hasVisibleText: true };
+    return { aborted: false as const, toolCallCount: 0, assistantMessageId: 2, hasVisibleText: true };
   };
   (runner as any).executePendingTools = async (params: { availableToolNames?: ReadonlySet<string> }) => {
     capturedAvailableToolNames = params.availableToolNames;

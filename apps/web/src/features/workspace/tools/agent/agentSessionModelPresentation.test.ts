@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { AgentSessionAgentModelState } from "@agent-workbench/shared";
+import type { AgentSessionAgentModelState } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import {
   canRequestSessionModelOpen,
   isSessionModelSendBlocked,
