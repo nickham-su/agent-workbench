@@ -637,7 +637,7 @@ export class BuiltinToolProvider implements ToolProvider {
                 appendMessage: {
                   role: "user",
                   content: buildSubtaskPreforkSummaryPrompt({
-                    uiLocale: null,
+                    uiLocale: ctx.promptContext.uiLocale,
                     subtaskPrompt: parsed.prompt
                   })
                 }

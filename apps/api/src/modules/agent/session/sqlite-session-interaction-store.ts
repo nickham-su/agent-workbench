@@ -9,7 +9,7 @@ import {
   getMessageSession,
   getMessageSessionById,
   hasNonTerminalVisibleMessageWork,
-  moveMessageHead
+  revertBeforeUserMessage
 } from "../agent-message.store.js";
 import { findMessageClientRequestDedup, listMessageSessions, setManualMessageSessionTitle } from "../agent-message.store.js";
 import type { SessionCloneInput, SessionCreateInput, SessionInteractionStore } from "./session-interaction-ports.js";
@@ -46,8 +46,8 @@ export class SqliteSessionInteractionStore implements SessionInteractionStore {
     const state = getMessageRunState(this.dependencies.db, workspaceId, sessionId);
     return !!state && (state.nonTerminalMessageIds.length > 0 || state.nonTerminalToolExecutionIds.length > 0 || hasNonTerminalVisibleMessageWork(this.dependencies.db, { workspaceId, sessionId }));
   }
-  moveHead(input: { workspaceId: string; sessionId: string; expectedHeadMessageId: string | null; expectedRevision: number; nextHeadMessageId: string; updatedAt: number }): void {
-    moveMessageHead(this.dependencies.db, input);
+  revertBeforeUser(input: { workspaceId: string; sessionId: string; expectedHeadMessageId: string | null; expectedRevision: number; targetMessageId: string; updatedAt: number }): void {
+    revertBeforeUserMessage(this.dependencies.db, input);
   }
 
   async cloneSession(input: SessionCloneInput): Promise<AgentSessionRecord> {

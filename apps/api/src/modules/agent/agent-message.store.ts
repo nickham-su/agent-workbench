@@ -84,6 +84,7 @@ export type AgentRunRecord = {
   triggerMessageId: string | null;
   agentId: string;
   providerId: string;
+  uiLocale: "zh-CN" | "en-US" | null;
   modelId: string;
   subtaskDepth: number | null;
   parentRunId: string | null;
@@ -849,6 +850,25 @@ export function moveMessageHead(db: Db, input: { workspaceId: string; sessionId:
   })();
 }
 
+export function revertBeforeUserMessage(db: Db, input: { workspaceId: string; sessionId: string; expectedHeadMessageId: string | null; expectedRevision: number; targetMessageId: string; updatedAt: number }) {
+  db.transaction(() => {
+    const session = assertCurrent(db, input);
+    if (!isAncestor(db, input.workspaceId, input.expectedHeadMessageId, input.targetMessageId)) throw new AgentMessageDomainError("MESSAGE_TARGET_INVALID");
+    if (session.contextRootMessageId && !isAncestor(db, input.workspaceId, input.targetMessageId, session.contextRootMessageId)) throw new AgentMessageDomainError("MESSAGE_TARGET_BEFORE_CONTEXT_ROOT");
+    const target = messageRow(db, input.targetMessageId);
+    if (!target || !messageTerminal(target.status) || target.type !== "user") throw new AgentMessageDomainError("MESSAGE_TARGET_INVALID");
+    const removesContextRoot = target.id === session.contextRootMessageId;
+    updateSessionPointer(db, {
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      headMessageId: target.previousMessageId,
+      contextRootMessageId: removesContextRoot ? null : session.contextRootMessageId,
+      revision: session.revision + 1,
+      now: input.updatedAt
+    });
+  })();
+}
+
 function commitCompactionMessageCurrent(db: Db, input: { id: string; workspaceId: string; sessionId: string; runId?: string | null; expectedHeadMessageId: string | null; expectedRevision: number; textPartId: string; text: string; createdAt: number }): AgentMessage {
   const session = assertCurrent(db, input);
   const depth = assertPrevious(db, input.workspaceId, input.expectedHeadMessageId) + 1;
@@ -1009,6 +1029,7 @@ function toRunRecord(row: Record<string, unknown>): AgentRunRecord {
     triggerMessageId: typeof row.triggerMessageId === "string" ? row.triggerMessageId : null,
     agentId: String(row.agentId ?? ""),
     providerId: String(row.providerId ?? ""),
+    uiLocale: row.uiLocale === "zh-CN" || row.uiLocale === "en-US" ? row.uiLocale : null,
     modelId: String(row.modelId ?? ""),
     subtaskDepth: typeof row.subtaskDepth === "number" ? row.subtaskDepth : null,
     parentRunId: typeof row.parentRunId === "string" ? row.parentRunId : null,
@@ -1023,6 +1044,7 @@ function toRunRecord(row: Record<string, unknown>): AgentRunRecord {
 export type CreateMessageRunRecordInput = {
   runId: string; workspaceId: string; sessionId: string; triggerMessageId: string;
   agentId: string; providerId: string; modelId: string;
+  uiLocale?: "zh-CN" | "en-US" | null;
   runKind?: AgentRunKind; subtaskDepth?: number | null;
   parentRunId?: string | null; parentToolExecutionId?: string | null;
   status: AgentRunRecord["status"]; createdAt: number;
@@ -1032,15 +1054,16 @@ export function createMessageRunRecord(db: Db, params: CreateMessageRunRecordInp
   db.prepare(`
     insert into agent_run (
       run_id, workspace_id, session_id, trigger_message_id, agent_id, provider_id,
-      model_id, subtask_depth, parent_run_id, parent_tool_execution_id, status,
+      ui_locale, model_id, subtask_depth, parent_run_id, parent_tool_execution_id, status,
       created_at, updated_at, run_kind
     ) values (
       @runId, @workspaceId, @sessionId, @triggerMessageId, @agentId, @providerId,
-      @modelId, @subtaskDepth, @parentRunId, @parentToolExecutionId, @status,
+      @uiLocale, @modelId, @subtaskDepth, @parentRunId, @parentToolExecutionId, @status,
       @createdAt, @createdAt, @runKind
     )
   `).run({
     ...params,
+    uiLocale: params.uiLocale ?? null,
     subtaskDepth: params.subtaskDepth ?? null,
     parentRunId: params.parentRunId ?? null,
     parentToolExecutionId: params.parentToolExecutionId ?? null,
@@ -1052,7 +1075,7 @@ export function getRunRecord(db: Db, runId: string): AgentRunRecord | null {
   const row = db.prepare(`
     select run_id as runId, workspace_id as workspaceId, session_id as sessionId,
       trigger_message_id as triggerMessageId, agent_id as agentId, provider_id as providerId,
-      model_id as modelId, subtask_depth as subtaskDepth, parent_run_id as parentRunId,
+      ui_locale as uiLocale, model_id as modelId, subtask_depth as subtaskDepth, parent_run_id as parentRunId,
       parent_tool_execution_id as parentToolExecutionId, status, run_kind as runKind,
       created_at as createdAt, updated_at as updatedAt
     from agent_run where run_id = ?
@@ -1064,7 +1087,7 @@ export function getLatestMessageRunRecordBySession(db: Db, params: { workspaceId
   const row = db.prepare(`
     select run_id as runId, workspace_id as workspaceId, session_id as sessionId,
       trigger_message_id as triggerMessageId, agent_id as agentId, provider_id as providerId,
-      model_id as modelId, subtask_depth as subtaskDepth, parent_run_id as parentRunId,
+      ui_locale as uiLocale, model_id as modelId, subtask_depth as subtaskDepth, parent_run_id as parentRunId,
       parent_tool_execution_id as parentToolExecutionId, status, run_kind as runKind,
       created_at as createdAt, updated_at as updatedAt
     from agent_run where workspace_id = @workspaceId and session_id = @sessionId
@@ -1077,7 +1100,7 @@ export function getLatestTerminalMessageRunRecord(db: Db, params: { workspaceId:
   const row = db.prepare(`
     select run_id as runId, workspace_id as workspaceId, session_id as sessionId,
       trigger_message_id as triggerMessageId, agent_id as agentId, provider_id as providerId,
-      model_id as modelId, subtask_depth as subtaskDepth, parent_run_id as parentRunId,
+      ui_locale as uiLocale, model_id as modelId, subtask_depth as subtaskDepth, parent_run_id as parentRunId,
       parent_tool_execution_id as parentToolExecutionId, status, run_kind as runKind,
       created_at as createdAt, updated_at as updatedAt
     from agent_run where workspace_id = @workspaceId and session_id = @sessionId
@@ -1091,7 +1114,7 @@ export function findMessageSubtaskRunByParentToolExecution(db: Db, params: { wor
   const row = db.prepare(`
     select run_id as runId, workspace_id as workspaceId, session_id as sessionId,
       trigger_message_id as triggerMessageId, agent_id as agentId, provider_id as providerId,
-      model_id as modelId, subtask_depth as subtaskDepth, parent_run_id as parentRunId,
+      ui_locale as uiLocale, model_id as modelId, subtask_depth as subtaskDepth, parent_run_id as parentRunId,
       parent_tool_execution_id as parentToolExecutionId, status, run_kind as runKind,
       created_at as createdAt, updated_at as updatedAt
     from agent_run where workspace_id = @workspaceId and parent_run_id = @parentRunId

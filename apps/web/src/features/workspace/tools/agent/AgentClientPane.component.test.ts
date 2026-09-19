@@ -76,6 +76,7 @@ function mountPane(options?: {
   sessionReady?: boolean;
   modelValue?: string;
   initialDraft?: string;
+  ensureSession?: (sessionId: string) => Promise<string>;
 }) {
   const runState = options?.runState ?? baseRunState();
   const statusStore = { runStateOf: () => runState };
@@ -100,6 +101,7 @@ function mountPane(options?: {
       sessionModelMutationPending: false,
       modelOpenIntent: null,
       initialDraft: options?.initialDraft,
+      ensureSession: options?.ensureSession,
     },
     global: createMountGlobal(statusStore),
   });
@@ -109,6 +111,18 @@ function mountPane(options?: {
     setRunState: (next: Partial<AgentMessageSessionRunState>) => Object.assign(runState, next),
   };
 }
+
+test("真实 AgentClientPane：输入框字号跟随 AI Agent 字号变量", () => {
+  const { wrapper } = mountPane({ sessionReady: false });
+  try {
+    assert.equal(
+      wrapper.get("a-textarea").attributes("style"),
+      "font-size: var(--agent-font-size, 13px);",
+    );
+  } finally {
+    wrapper.unmount();
+  }
+});
 
 test("真实 AgentClientPane：草稿 Session 无候选项时 Tab/Shift+Tab 循环切换 Agent", async () => {
   const { wrapper } = mountPane({ sessionReady: false, modelValue: "agent-b" });
@@ -143,6 +157,32 @@ test("真实 AgentClientPane：存在 slash 候选时 Tab 选择候选而不切�
     assert.equal(tabEvent.defaultPrevented, true);
     assert.equal((wrapper.vm as unknown as { draft: string }).draft, "/compact");
     assert.equal(wrapper.emitted("update:modelValue"), undefined);
+  } finally {
+    wrapper.unmount();
+  }
+});
+
+test("真实 AgentClientPane：精确匹配 slash 指令时隐藏候选且 Enter 直接发送", async () => {
+  const ensuredSessionIds: string[] = [];
+  const ensureSession = async (sessionId: string) => {
+    ensuredSessionIds.push(sessionId);
+    return await new Promise<string>(() => undefined);
+  };
+  const { wrapper } = mountPane({
+    sessionReady: false,
+    initialDraft: "/compact",
+    ensureSession,
+  });
+  try {
+    await nextTick();
+    assert.equal(wrapper.find('[role="listbox"]').exists(), false);
+    (wrapper.vm as unknown as { promptSettingsLoaded: boolean }).promptSettingsLoaded = true;
+
+    const enterEvent = createKeyboardEvent("Enter");
+    wrapper.get("a-textarea").element.dispatchEvent(enterEvent);
+    await nextTick();
+    assert.equal(enterEvent.defaultPrevented, true);
+    assert.deepEqual(ensuredSessionIds, ["session-a"]);
   } finally {
     wrapper.unmount();
   }

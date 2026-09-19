@@ -23,6 +23,7 @@ import {
   isAncestor,
   moveMessageHead,
   forkMessageSession,
+  revertBeforeUserMessage,
   replaceStreamingAssistant,
   settleMessageRunIfCurrent,
   updateMessageRunNotice,
@@ -349,6 +350,48 @@ test("replacement, ancestor pointer CAS and compaction preserve graph immutabili
   const compacted = commitCompactionMessage(db, { id: "c", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: "u", expectedRevision: afterMove.revision, textPartId: "cp", text: "summary", createdAt: 6 });
   assert.equal(compacted.type, "compaction"); assert.equal(getMessageSession(db, "ws-a", "s-a")!.contextRootMessageId, "c");
   assert.equal(getMessageRunState(db, "ws-a", "s-a")?.lastResponseTotalTokens, null);
+});
+
+test("revertBeforeUserMessage removes the selected User and all following messages from the visible chain", () => {
+  const db = createDb(); session(db);
+  appendMessage(db, { id: "user-1", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", parts: [], createdAt: 2 });
+  appendMessage(db, { id: "assistant-1", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: "user-1", expectedRevision: 1, type: "assistant", status: "completed", parts: [], createdAt: 3 });
+  appendMessage(db, { id: "user-2", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: "assistant-1", expectedRevision: 2, type: "user", status: "completed", parts: [], createdAt: 4 });
+  appendMessage(db, { id: "assistant-2", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: "user-2", expectedRevision: 3, type: "assistant", status: "completed", parts: [], createdAt: 5 });
+  const current = getMessageSession(db, "ws-a", "s-a")!;
+
+  revertBeforeUserMessage(db, {
+    workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: current.headMessageId,
+    expectedRevision: current.revision, targetMessageId: "user-2", updatedAt: 6
+  });
+
+  const reverted = getMessageSession(db, "ws-a", "s-a")!;
+  assert.equal(reverted.headMessageId, "assistant-1");
+  assert.equal(reverted.contextRootMessageId, "user-1");
+  assert.equal(reverted.revision, 5);
+});
+
+test("revertBeforeUserMessage can remove the first User and reset an uncompacted Session to an empty chain", () => {
+  const db = createDb(); session(db);
+  appendMessage(db, { id: "user", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", parts: [], createdAt: 2 });
+  const current = getMessageSession(db, "ws-a", "s-a")!;
+  revertBeforeUserMessage(db, { workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: "user", expectedRevision: current.revision, targetMessageId: "user", updatedAt: 3 });
+  const reverted = getMessageSession(db, "ws-a", "s-a")!;
+  assert.equal(reverted.headMessageId, null);
+  assert.equal(reverted.contextRootMessageId, null);
+  assert.equal(reverted.revision, 2);
+});
+
+test("revertBeforeUserMessage rejects Assistant targets without changing the Session", () => {
+  const db = createDb(); session(db);
+  appendMessage(db, { id: "user", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", parts: [], createdAt: 2 });
+  appendMessage(db, { id: "assistant", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: "user", expectedRevision: 1, type: "assistant", status: "completed", parts: [], createdAt: 3 });
+  const current = getMessageSession(db, "ws-a", "s-a")!;
+  assert.throws(
+    () => revertBeforeUserMessage(db, { workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: "assistant", expectedRevision: current.revision, targetMessageId: "assistant", updatedAt: 4 }),
+    (error: unknown) => error instanceof AgentMessageDomainError && error.code === "MESSAGE_TARGET_INVALID"
+  );
+  assert.deepEqual(getMessageSession(db, "ws-a", "s-a"), current);
 });
 
 test("fenced compaction rejects stale Run without mutating the Message graph", () => {

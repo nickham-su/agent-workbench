@@ -5,7 +5,7 @@ import type { Db } from "./db.js";
  *
  * 该版本是破坏性升级：旧 ContextItem 数据不会迁移，也不能和此版本共存。
  */
-export const AGENT_SCHEMA_VERSION = 21;
+export const AGENT_SCHEMA_VERSION = 22;
 
 export type AgentSchemaInitResult = {
   /** 旧 Agent 数据已被清理，仍需要由 openDb 清理对应的文件系统数据。 */
@@ -396,7 +396,7 @@ const TARGET_AGENT_TABLE_COLUMNS: Record<string, readonly string[]> = {
   agent_session: ["id", "workspace_id", "title", "title_manually_set", "kind", "head_message_id", "context_root_message_id", "revision", "forked_from_session_id", "forked_from_message_id", "created_at", "updated_at"],
   agent_session_agent_model_override: ["session_id", "agent_id", "provider_id", "model_id", "updated_at"],
   agent_attachment: ["id", "workspace_id", "storage_key", "filename", "media_type", "byte_size", "created_at"],
-  agent_run: ["run_id", "workspace_id", "session_id", "trigger_message_id", "agent_id", "provider_id", "model_id", "subtask_depth", "parent_run_id", "parent_tool_execution_id", "status", "created_at", "updated_at", "run_kind"],
+  agent_run: ["run_id", "workspace_id", "session_id", "trigger_message_id", "agent_id", "provider_id", "model_id", "subtask_depth", "parent_run_id", "parent_tool_execution_id", "status", "created_at", "updated_at", "run_kind", "ui_locale"],
   agent_message: ["id", "workspace_id", "previous_message_id", "replaces_message_id", "depth", "type", "status", "origin_session_id", "origin_run_id", "updated_revision", "created_at", "updated_at"],
   agent_message_part: ["id", "message_id", "position", "type", "text", "attachment_id", "media_type", "filename", "tool_name", "tool_input_json", "provider_tool_call_id", "updated_revision", "created_at", "updated_at", "provider_replay_json"],
   agent_tool_execution: ["id", "call_part_id", "origin_session_id", "origin_run_id", "status", "result_preview", "result_truncated", "result_artifact_path", "structured_result_json", "error", "updated_revision", "created_at", "updated_at", "started_at", "completed_at"],
@@ -407,6 +407,7 @@ const TARGET_AGENT_TABLE_COLUMNS: Record<string, readonly string[]> = {
 };
 
 const PRE_RUN_KIND_AGENT_RUN_COLUMNS = ["run_id", "workspace_id", "session_id", "trigger_message_id", "agent_id", "provider_id", "model_id", "subtask_depth", "parent_run_id", "parent_tool_execution_id", "status", "created_at", "updated_at"] as const;
+const PRE_UI_LOCALE_AGENT_RUN_COLUMNS = TARGET_AGENT_TABLE_COLUMNS.agent_run.filter((column) => column !== "ui_locale");
 const PRE_PROVIDER_REPLAY_AGENT_MESSAGE_PART_COLUMNS = TARGET_AGENT_TABLE_COLUMNS.agent_message_part.filter((column) => column !== "provider_replay_json");
 const PRE_RUN_TOKEN_SESSION_STATE_COLUMNS = TARGET_AGENT_TABLE_COLUMNS.session_run_state.filter((column) => column !== "last_response_total_tokens");
 
@@ -518,8 +519,11 @@ function classifyAgentSchema(db: Db): AgentSchemaClassification {
     const version = rows[0]?.version;
     const expectedColumns = [...TARGET_AGENT_TABLES].every((table) => {
       if (table === "agent_run") {
-        return version === 18
-          ? hasExactColumns(db, table, PRE_RUN_KIND_AGENT_RUN_COLUMNS)
+        if (version === 18) {
+          return hasExactColumns(db, table, PRE_RUN_KIND_AGENT_RUN_COLUMNS);
+        }
+        return version === 19 || version === 20 || version === 21
+          ? hasExactColumns(db, table, PRE_UI_LOCALE_AGENT_RUN_COLUMNS)
           : hasExactColumns(db, table, TARGET_AGENT_TABLE_COLUMNS[table]!);
       }
       if (table === "agent_message_part") {
@@ -538,7 +542,7 @@ function classifyAgentSchema(db: Db): AgentSchemaClassification {
     const fts = objects.find((object) => object.name === "agent_archived_text_fts");
     if (!hasCurrentSchemaSemantics(db, fts?.sql ?? null)) return "unsupported";
     if (version === AGENT_SCHEMA_VERSION) return "current";
-    if (version === 18 || version === 19 || version === 20) return "upgradeable";
+    if (version === 18 || version === 19 || version === 20 || version === 21) return "upgradeable";
     return "unsupported";
   }
 
@@ -654,6 +658,7 @@ function createAgentSchema(db: Db, fileCleanupPending: boolean) {
       created_at integer not null,
       updated_at integer not null,
       run_kind text not null default 'user' check (run_kind in ('user', 'manual_compaction', 'subtask')),
+      ui_locale text check (ui_locale is null or ui_locale in ('zh-CN', 'en-US')),
       foreign key (workspace_id) references workspaces(id) on delete restrict,
       foreign key (session_id) references agent_session(id) on delete cascade,
       foreign key (trigger_message_id) references agent_message(id) on delete restrict,
@@ -900,6 +905,15 @@ export function initSchema(db: Db): AgentSchemaInitResult {
           table: "session_run_state",
           column: "last_response_total_tokens",
           ddl: "last_response_total_tokens integer check (last_response_total_tokens is null or last_response_total_tokens >= 0)",
+        });
+        db.prepare("update agent_schema_meta set version = 21, updated_at = ? where id = 1").run(Date.now());
+      }
+      const withRunTokens = db.prepare("select version from agent_schema_meta where id = 1").get() as { version: number };
+      if (withRunTokens.version === 21) {
+        ensureColumn(db, {
+          table: "agent_run",
+          column: "ui_locale",
+          ddl: "ui_locale text check (ui_locale is null or ui_locale in ('zh-CN', 'en-US'))",
         });
         db.prepare("update agent_schema_meta set version = ?, updated_at = ? where id = 1").run(AGENT_SCHEMA_VERSION, Date.now());
       }

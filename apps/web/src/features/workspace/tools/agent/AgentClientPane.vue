@@ -74,11 +74,11 @@
             >{{ t("agent.client.chooseSession") }}</a-button
           >
         </div>
-        <div v-else class="flex flex-col gap-3">
+        <div v-else class="flex flex-col">
           <article
             v-for="row in conversation"
             :key="row.id"
-            class="group relative rounded p-2"
+            class="group relative rounded"
             :class="messageClass(row)"
           >
             <AgentMessageActions
@@ -86,9 +86,10 @@
               :disabled="isSessionMessageMutationPending"
               :fork-label="t('agent.client.fork')"
               :revert-label="t('agent.client.revert')"
+              :show-revert="row.message.type === 'user'"
               :outside="row.message.type === 'user'"
               @fork="onFork(row.message.id)"
-              @revert="onRevert(row.message.id)"
+              @revert="onRevert(row.message)"
             />
             <AssistantMarkdownMessage
               v-if="
@@ -99,18 +100,25 @@
               :streaming="row.message.status === 'streaming'"
               :tone="row.message.status === 'failed' ? 'error' : 'normal'"
             />
-            <template v-else-if="row.part?.type === 'reasoning'">
-              <div class="mb-1 text-[0.85em] text-[color:var(--text-tertiary)]">
-                {{ t("agent.client.reasoning") }}
-              </div>
-              <AssistantMarkdownMessage
-                :text="row.part.text"
-                :message-id="row.message.id"
-                :streaming="row.message.status === 'streaming'"
-                class="assistant-reasoning-markdown"
-                section-key="reasoning"
-              />
-            </template>
+            <AgentSystemMessage
+              v-else-if="
+                row.part?.type === 'text' && row.message.type === 'system'
+              "
+              :text="row.part.text"
+              :message-id="row.message.id"
+            />
+            <AssistantMarkdownMessage
+              v-else-if="row.part?.type === 'reasoning'"
+              :text="row.part.text"
+              :message-id="row.message.id"
+              :streaming="row.message.status === 'streaming'"
+              class="assistant-reasoning-markdown italic"
+              :style="{
+                fontSize: 'calc(var(--agent-font-size, 13px) - 3px)',
+                color: 'var(--text-tertiary)',
+              }"
+              section-key="reasoning"
+            />
             <AgentUserMessage
               v-else-if="
                 row.part?.type === 'text' && row.message.type === 'user'
@@ -149,8 +157,12 @@
               :loading="
                 row.execution ? detailLoading.has(row.execution.id) : false
               "
-              @toggle-detail="toggleToolDetail"
+              :todo-collapsed="collapsedTodoPartIds.has(row.part.id)"
+              :agent-options="props.agentOptions"
+              :now="now"
+              @request-detail="ensureToolDetail"
               @open-subtask="emit('open-subtask', $event)"
+              @toggle-todo="toggleTodoCollapse(row.part.id)"
             />
             <div
               v-else-if="row.message.status === 'streaming'"
@@ -196,6 +208,7 @@
         :disabled="!hasAvailableAgents || props.sessionModelMutationPending"
         :readonly="sending || props.sessionModelMutationPending"
         :placeholder="inputPlaceholder"
+        :style="{ fontSize: 'var(--agent-font-size, 13px)' }"
         :auto-size="{ minRows: 2, maxRows: 6 }"
         @input="onInputChanged"
         @click="syncInputCaret"
@@ -415,16 +428,19 @@ import {
   LoadingOutlined,
   RobotOutlined,
 } from "@ant-design/icons-vue";
-import { message } from "ant-design-vue";
+import { Modal, message } from "ant-design-vue";
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import AgentAttachmentPreviewModal from "./AgentAttachmentPreviewModal.vue";
 import AgentConversationToolCall from "./AgentConversationToolCall.vue";
 import AgentMessageActions from "./AgentMessageActions.vue";
+import AgentSystemMessage from "./AgentSystemMessage.vue";
 import AgentUserMessage from "./AgentUserMessage.vue";
 import AssistantMarkdownMessage from "./AssistantMarkdownMessage.vue";
 import {
+  agentUserMessageDraftText,
   buildConversationParts,
+  hasAgentMessageTextPart,
   type ConversationPart,
 } from "./agentMessageTimeline";
 import {
@@ -563,7 +579,6 @@ const emit = defineEmits<{
   "choose-session": [];
   "session-title-sync-needed": [sessionId: string];
   "agent-settings-updated": [];
-  "reset-to-draft": [payload: { sessionId: string; draftText: string }];
   "request-session-model-open": [
     params: { sessionId: string; agentId: string },
   ];
@@ -629,6 +644,7 @@ const messages = computed(() => timelineState.value.messages);
 const toolExecutions = computed(() => timelineState.value.toolExecutions);
 const detailByExecutionId = ref<Record<string, AgentToolExecution>>({});
 const detailLoading = ref(new Set<string>());
+const collapsedTodoPartIds = ref(new Set<string>());
 let refreshTimer: number | null = null;
 let timelineRequestSequence = 0;
 let disposed = false;
@@ -653,6 +669,17 @@ const conversation = computed(() =>
 const showScrollToBottom = computed(
   () => conversation.value.length > 0 && distanceToBottom.value > 240,
 );
+const todoPartIds = computed(() =>
+  conversation.value
+    .filter((row) => row.part?.type === "tool_call" && row.part.toolName === "todolist")
+    .map((row) => row.part!.id),
+);
+function toggleTodoCollapse(partId: string) {
+  const next = new Set(collapsedTodoPartIds.value);
+  if (next.has(partId)) next.delete(partId);
+  else next.add(partId);
+  collapsedTodoPartIds.value = next;
+}
 const now = ref(Date.now());
 let elapsedTimer: number | null = null;
 const runElapsedText = computed(() => {
@@ -672,16 +699,28 @@ const headerTokensText = computed(() => formatAgentHeaderTokens(
   runState.value.contextTokenRatio,
 ));
 function messageClass(row: ConversationPart) {
+  const assistantWithoutText = row.message.type === "assistant" && !hasAgentMessageTextPart(row.message);
   return row.message.type === "user"
-    ? "border border-blue-500/60 bg-blue-500/20"
+    ? "border border-blue-500/60 bg-blue-500/20 p-2"
     : row.part?.type === "tool_call"
-      ? "bg-[var(--panel-bg-elevated)]"
-      : "";
+      ? row.part.toolName === "todolist" || row.part.toolName === "subtask"
+        ? "p-0"
+        : (row.part.toolName === "write" ||
+            row.part.toolName === "apply_patch") &&
+          row.execution?.status === "completed"
+          ? "px-2 py-0 transition-colors duration-100 hover:bg-[var(--hover-bg)]"
+          : "px-2 py-0"
+      : row.message.type === "system"
+        ? "p-2 bg-[var(--panel-bg)]"
+      : assistantWithoutText
+        ? "px-2 py-0"
+        : "p-2";
 }
 function showMessageControls(row: ConversationPart) {
   return (
     !isSubtaskSession.value &&
-    (row.message.type === "user" || row.message.type === "assistant") &&
+    (row.message.type === "user" ||
+      (row.message.type === "assistant" && hasAgentMessageTextPart(row.message))) &&
     row.part?.position === 0
   );
 }
@@ -747,10 +786,7 @@ async function loadTimeline(
     const invalidatedDetailIds = detailCache.syncTimeline(
       result.state.toolExecutions,
     );
-    if (result.clearDetailCache) {
-      detailByExecutionId.value = {};
-      detailCache.markTimelineReset(result.state.toolExecutions);
-    } else if (invalidatedDetailIds.size) {
+    if (invalidatedDetailIds.size) {
       const next = { ...detailByExecutionId.value };
       for (const id of invalidatedDetailIds) delete next[id];
       detailByExecutionId.value = next;
@@ -801,12 +837,8 @@ function invalidateTimelineForStructuralMutation() {
   timelineRefreshScheduler.invalidate();
   timelineRequestSequence += 1;
 }
-async function toggleToolDetail(executionId: string) {
-  if (detailByExecutionId.value[executionId]) {
-    const { [executionId]: _, ...rest } = detailByExecutionId.value;
-    detailByExecutionId.value = rest;
-    return;
-  }
+async function ensureToolDetail(executionId: string) {
+  if (detailByExecutionId.value[executionId]) return;
   if (detailLoading.value.has(executionId)) return;
   const scope = requestScope;
   const token = detailCache.begin(executionId);
@@ -887,19 +919,40 @@ async function onFork(messageId: string) {
     onError: (error) => message.error(error instanceof Error ? error.message : String(error)),
   });
 }
-async function onRevert(messageId: string) {
-  await runAgentSessionMessageMutation({
-    state: messageMutationState,
-    sessionId: props.sessionId,
-    mutate: async () => {
-      await revertAgentSession(props.sessionId, {
-        workspaceId: props.workspaceId,
-        messageId,
+function onRevert(targetMessage: AgentMessage) {
+  const revertDraft = agentUserMessageDraftText(targetMessage);
+  if (revertDraft === null) return;
+  Modal.confirm({
+    title: t("agent.client.revertConfirmTitle"),
+    content: t("agent.client.revertConfirmContent"),
+    okText: t("agent.client.revert"),
+    cancelText: t("common.cancel"),
+    async onOk() {
+      const reverted = await runAgentSessionMessageMutation({
+        state: messageMutationState,
+        sessionId: props.sessionId,
+        mutate: async () => {
+          await revertAgentSession(props.sessionId, {
+            workspaceId: props.workspaceId,
+            messageId: targetMessage.id,
+          });
+        },
+        onError: (error) => message.error(error instanceof Error ? error.message : String(error)),
       });
+      if (!reverted) return;
+      draft.value = revertDraft;
+      pendingImages.value = [];
+      pendingAttempt.value = null;
+      selectedCandidateId.value = "";
+      caret.value = revertDraft.length;
+      message.success(t("agent.client.reverted"));
       invalidateTimelineForStructuralMutation();
-      await refreshStructuralTimeline();
+      await nextTick();
+      const input = inputEl.value?.resizableTextArea?.textArea as HTMLTextAreaElement | undefined;
+      input?.focus();
+      input?.setSelectionRange(revertDraft.length, revertDraft.length);
+      await refreshStructuralTimeline().catch(() => undefined);
     },
-    onError: (error) => message.error(error instanceof Error ? error.message : String(error)),
   });
 }
 async function onCancel() {
@@ -1559,6 +1612,7 @@ watch(
       timelineState.value = createAgentTimelineControllerState();
       detailByExecutionId.value = {};
       detailLoading.value = new Set();
+      collapsedTodoPartIds.value = new Set();
       detailLoadingScopeByExecutionId.clear();
       detailCache.reset();
       timelineRefreshScheduler.dispose();
@@ -1581,6 +1635,20 @@ watch(
   () => props.initialDraft,
   (value) => {
     if (value) draft.value = value;
+  },
+  { immediate: true },
+);
+watch(
+  todoPartIds,
+  (ids, previousIds) => {
+    if (ids.length === 0) {
+      collapsedTodoPartIds.value = new Set();
+      return;
+    }
+    const latestId = ids.at(-1)!;
+    const previousLatestId = previousIds?.at(-1);
+    if (latestId === previousLatestId) return;
+    collapsedTodoPartIds.value = new Set(ids.filter((id) => id !== latestId));
   },
   { immediate: true },
 );

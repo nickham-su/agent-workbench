@@ -53,8 +53,26 @@ test("buildSlashInputCandidates 按 slash 前缀过滤自定义指令", () => {
     ["testing", { id: "testing", title: "Testing", prompt: "", command: "testing" }],
     ["other", { id: "other", title: "Other", prompt: "", command: "other" }]
   ]);
-  const candidates = buildSlashInputCandidates({ commands: builtInCommands, promptCommands, query: "test" });
+  const candidates = buildSlashInputCandidates({ commands: builtInCommands, promptCommands, query: "tes" });
   assert.deepEqual(candidates.map((item) => item.id), ["prompt_command:test", "prompt_command:testing"]);
+});
+
+test("buildSlashInputCandidates 在内置指令精确匹配时隐藏候选", () => {
+  const candidates = buildSlashInputCandidates({
+    commands: builtInCommands,
+    promptCommands: new Map(),
+    query: "compact"
+  });
+  assert.deepEqual(candidates, []);
+});
+
+test("buildSlashInputCandidates 在自定义指令精确匹配时隐藏全部前缀候选", () => {
+  const promptCommands = new Map([
+    ["test", { id: "test", title: "Test", prompt: "", command: "test" }],
+    ["testing", { id: "testing", title: "Testing", prompt: "", command: "testing" }]
+  ]);
+  const candidates = buildSlashInputCandidates({ commands: builtInCommands, promptCommands, query: "test" });
+  assert.deepEqual(candidates, []);
 });
 
 test("buildPromptCommandMap 保持内置命令优先并排除冲突", () => {

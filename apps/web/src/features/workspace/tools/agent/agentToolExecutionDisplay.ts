@@ -1,3 +1,6 @@
+import type { AgentTimelineToolExecution } from "@agent-workbench/shared";
+import { formatElapsedDuration } from "./subtaskRunDisplay";
+
 export type TodoDisplay = {
   goal?: string;
   todos: Array<{
@@ -11,25 +14,6 @@ export type TodoDisplay = {
     completed: number;
     cancelled: number;
   };
-};
-
-export type ApplyPatchDisplay = {
-  summary: { fileCount: number; additions: number; deletions: number };
-  files: Array<{
-    type: "add" | "update" | "delete" | "move";
-    path: string;
-    fromPath?: string;
-    additions: number;
-    deletions: number;
-  }>;
-  omittedFiles: number;
-};
-
-export type WriteDisplay = {
-  summary: string;
-  filePath: string;
-  bytesWritten: number;
-  existedBefore: boolean;
 };
 
 export type SubtaskDisplay = {
@@ -57,6 +41,37 @@ export function formatToolInput(value: unknown) {
   } catch {
     return String(value);
   }
+}
+
+export function formatToolInputPreview(value: unknown, maxLength = 500) {
+  const formatted = formatToolInput(value).replace(/\s+/g, " ").trim();
+  const limit = Math.max(1, Math.floor(maxLength));
+  return formatted.length > limit
+    ? `${formatted.slice(0, Math.max(1, limit - 1))}…`
+    : formatted;
+}
+
+export function formatToolExecutionText(
+  execution: AgentTimelineToolExecution | null,
+  now: number,
+) {
+  if (!execution) return "";
+  const startedAt = execution.startedAt;
+  const endedAt = execution.completedAt
+    ?? (execution.status === "running" ? now : null);
+  const duration =
+    startedAt !== null && endedAt !== null
+      ? formatElapsedDuration(Math.max(0, endedAt - startedAt))
+      : "";
+  if (execution.status === "completed") return duration;
+  if (execution.status === "running")
+    return duration ? `running · ${duration}` : "running";
+  if (execution.status === "queued") return "queued";
+  if (execution.status === "failed")
+    return duration ? `failed · ${duration}` : "failed";
+  if (execution.status === "cancelled")
+    return duration ? `cancelled · ${duration}` : "cancelled";
+  return duration ? `unknown · ${duration}` : "unknown";
 }
 
 /** Detail 的 structuredResult 是唯一富卡数据来源；绝不解析 timeline preview。 */
@@ -108,87 +123,6 @@ export function parseTodoDisplay(value: unknown): TodoDisplay | null {
       ),
     },
   };
-}
-
-export function parseApplyPatchDisplay(
-  value: unknown,
-): ApplyPatchDisplay | null {
-  const source = record(value);
-  if (!source) return null;
-  const files = (Array.isArray(source.files) ? source.files : []).flatMap(
-    (item) => {
-      const file = record(item);
-      const path = String(
-        file?.path ?? file?.relativePath ?? file?.filePath ?? "",
-      ).trim();
-      if (!path) return [];
-      const type: ApplyPatchDisplay["files"][number]["type"] =
-        file?.type === "add" || file?.type === "delete" || file?.type === "move"
-          ? file.type
-          : "update";
-      const fromPath = String(
-        file?.fromPath ?? file?.moveFromPath ?? "",
-      ).trim();
-      return [
-        {
-          type,
-          path,
-          ...(fromPath ? { fromPath } : {}),
-          additions: nonNegativeInt(file?.additions),
-          deletions: nonNegativeInt(file?.deletions),
-        },
-      ];
-    },
-  );
-  const summary = record(source.summary);
-  const fileCount = nonNegativeInt(summary?.fileCount ?? files.length);
-  return {
-    summary: {
-      fileCount,
-      additions: nonNegativeInt(
-        summary?.additions ??
-          files.reduce((total, file) => total + file.additions, 0),
-      ),
-      deletions: nonNegativeInt(
-        summary?.deletions ??
-          files.reduce((total, file) => total + file.deletions, 0),
-      ),
-    },
-    files,
-    omittedFiles: Math.max(0, fileCount - files.length),
-  };
-}
-
-export function parseWriteDisplay(value: unknown): WriteDisplay | null {
-  const source = record(value);
-  if (!source) return null;
-  const filePath = String(source.filePath ?? source.path ?? "").trim();
-  if (!filePath) return null;
-  const summary = record(source.summary);
-  return {
-    summary:
-      typeof source.summary === "string" && source.summary.trim()
-        ? source.summary
-        : `write ${filePath}`,
-    filePath,
-    bytesWritten: nonNegativeInt(
-      summary?.bytesWritten ?? source.bytesWritten ?? source.bytes,
-    ),
-    existedBefore:
-      summary?.existedBefore === true || source.existedBefore === true,
-  };
-}
-
-export function parseScratchpadContent(value: unknown): string | null {
-  const source = record(value);
-  if (!source) return null;
-  const content =
-    typeof source.content === "string"
-      ? source.content
-      : typeof source.text === "string"
-        ? source.text
-        : "";
-  return content.trim() ? content : null;
 }
 
 /** input 只提供请求描述；详情 structuredResult 才能提供 result/session 等执行结果。 */

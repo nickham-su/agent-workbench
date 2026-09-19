@@ -1,106 +1,79 @@
 <template>
-  <section>
-    <div class="font-mono text-[0.9em] text-[color:var(--text-secondary)]">
-      {{ part.toolName }}({{ formatToolInput(part.input) }})
-      <span v-if="execution && execution.status !== 'completed'"
-        >[{{ execution.status }}]</span
-      >
-    </div>
-    <div
-      v-if="execution?.resultPreview"
-      class="mt-1 whitespace-pre-wrap text-[color:var(--text-secondary)]"
-    >
-      {{ execution.resultPreview }}
-    </div>
-    <div
-      v-if="execution?.resultTruncated"
-      class="mt-1 text-[0.85em] text-[color:var(--text-tertiary)]"
-    >
-      {{ t("agent.client.resultPreviewTruncated") }}
-    </div>
-    <div v-if="execution?.error" class="mt-1 whitespace-pre-wrap text-red-500">
-      {{ execution.error }}
-    </div>
-    <a-button
-      v-if="execution && supportsDetail(part.toolName)"
-      size="small"
-      type="link"
-      class="!px-0 mt-1"
-      :loading="loading"
-      @click="emit('toggle-detail', execution.id)"
-    >
-      {{
-        detail ? t("agent.client.hideDetails") : t("agent.client.showDetails")
-      }}
-    </a-button>
-    <template v-if="execution && detail">
+  <section :style="compactToolStyle">
+    <template v-if="part.toolName === 'todolist'">
       <AgentTodoListCard
-        v-if="part.toolName === 'todolist' && todo"
+        v-if="todo"
+        :collapsed="todoCollapsed"
         :goal="todo.goal"
         :todos="todo.todos"
         :summary="todo.summary"
-        :error-text="execution.error || undefined"
+        :error-text="execution?.error || undefined"
+        @toggle-collapse="emit('toggle-todo')"
       />
+      <div
+        v-else
+        class="my-1 flex items-center gap-2 rounded border border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] p-2"
+      >
+        <span class="font-semibold">todolist</span>
+        <LoadingOutlined v-if="loading" spin class="text-blue-500" />
+        <span v-else-if="execution?.error" class="text-red-500">{{ execution.error }}</span>
+      </div>
+    </template>
+    <AgentSubtaskCard
+      v-else-if="part.toolName === 'subtask' && execution"
+      :input="part.input"
+      :execution="execution"
+      :detail="detail"
+      :agent-name="subtaskAgentName"
+      :now="now"
+      @open-subtask="emit('open-subtask', $event)"
+    />
+    <div v-else>
       <AgentApplyPatchCard
-        v-else-if="part.toolName === 'apply_patch' && applyPatch"
+        v-if="part.toolName === 'apply_patch'"
         :workspace-id="workspaceId"
         :tool-id="toolId"
         :session-id="sessionId"
-        :tool-execution-id="execution.id"
-        :summary="applyPatch.summary"
-        :files="applyPatch.files"
-        :omitted-files="applyPatch.omittedFiles"
-        :error-text="execution.error || undefined"
-      />
-      <AgentWriteCard
-        v-else-if="part.toolName === 'write' && write"
-        :workspace-id="workspaceId"
-        :tool-id="toolId"
-        :session-id="sessionId"
-        :tool-execution-id="execution.id"
-        :summary="write"
-        :error-text="execution.error || undefined"
-      />
-      <AgentScratchpadCard
-        v-else-if="part.toolName === 'scratchpad' && scratchpad"
-        :content="scratchpad"
-        :error-text="execution.error || undefined"
-      />
-      <AgentSubtaskCard
-        v-else-if="part.toolName === 'subtask'"
+        :tool-execution-id="execution?.id"
         :input="part.input"
         :execution="execution"
-        :detail="detail"
-        @open-subtask="emit('open-subtask', $event)"
+        :now="now"
       />
-      <pre
-        v-else-if="detail.structuredResult != null"
-        class="mt-1 max-h-64 overflow-auto whitespace-pre-wrap text-[0.85em]"
-        >{{ structuredResult }}</pre>
-    </template>
+      <AgentWriteCard
+        v-else-if="part.toolName === 'write'"
+        :workspace-id="workspaceId"
+        :tool-id="toolId"
+        :session-id="sessionId"
+        :tool-execution-id="execution?.id"
+        :input="part.input"
+        :execution="execution"
+        :now="now"
+      />
+      <AgentToolCallRow
+        v-else
+        :tool-name="part.toolName"
+        :input="part.input"
+        :execution="execution"
+        :now="now"
+      />
+    </div>
   </section>
 </template>
 
 <script setup lang="ts">
+import { LoadingOutlined } from "@ant-design/icons-vue";
 import type {
   AgentTimelineToolExecution,
   AgentToolCallPart,
   AgentToolExecution,
 } from "@agent-workbench/shared";
-import { computed } from "vue";
-import { useI18n } from "vue-i18n";
+import { computed, watch } from "vue";
 import AgentApplyPatchCard from "./AgentApplyPatchCard.vue";
-import AgentScratchpadCard from "./AgentScratchpadCard.vue";
 import AgentSubtaskCard from "./AgentSubtaskCard.vue";
 import AgentTodoListCard from "./AgentTodoListCard.vue";
+import AgentToolCallRow from "./AgentToolCallRow.vue";
 import AgentWriteCard from "./AgentWriteCard.vue";
-import {
-  formatToolInput as formatToolCallInput,
-  parseApplyPatchDisplay,
-  parseScratchpadContent,
-  parseTodoDisplay,
-  parseWriteDisplay,
-} from "./agentToolExecutionDisplay";
+import { parseTodoDisplay } from "./agentToolExecutionDisplay";
 
 const props = defineProps<{
   workspaceId: string;
@@ -110,33 +83,39 @@ const props = defineProps<{
   execution: AgentTimelineToolExecution | null;
   detail?: AgentToolExecution;
   loading: boolean;
+  now: number;
+  todoCollapsed?: boolean;
+  agentOptions?: Array<{ value: string; label?: string }>;
 }>();
 const emit = defineEmits<{
-  "toggle-detail": [executionId: string];
+  "request-detail": [executionId: string];
   "open-subtask": [sessionId: string];
+  "toggle-todo": [];
 }>();
-const { t } = useI18n();
 const todo = computed(() => parseTodoDisplay(props.detail?.structuredResult));
-const applyPatch = computed(() =>
-  parseApplyPatchDisplay(props.detail?.structuredResult),
+const compactToolStyle = {
+  fontSize: "calc(var(--agent-font-size, 13px) - 3px)",
+};
+const detailRequestKey = computed(() =>
+  props.execution &&
+  (props.part.toolName === "todolist" || props.part.toolName === "subtask")
+    ? `${props.execution.id}:${props.execution.updatedRevision}`
+    : null,
 );
-const write = computed(() => parseWriteDisplay(props.detail?.structuredResult));
-const scratchpad = computed(() =>
-  parseScratchpadContent(props.detail?.structuredResult),
-);
-const structuredResult = computed(() => {
-  try {
-    return JSON.stringify(props.detail?.structuredResult, null, 2);
-  } catch {
-    return String(props.detail?.structuredResult);
-  }
+const subtaskAgentName = computed(() => {
+  const agentId = typeof props.part.input.agentId === "string"
+    ? props.part.input.agentId.trim()
+    : "";
+  return props.agentOptions?.find((item) => item.value === agentId)?.label?.trim() || agentId;
 });
-function supportsDetail(name: string) {
-  return ["todolist", "apply_patch", "write", "scratchpad", "subtask"].includes(
-    name,
-  );
-}
-function formatToolInput(value: unknown) {
-  return formatToolCallInput(value);
-}
+
+watch(
+  [detailRequestKey, () => props.detail, () => props.loading] as const,
+  ([key, detail, loading]) => {
+    if (key && props.execution && !detail && !loading) {
+      emit("request-detail", props.execution.id);
+    }
+  },
+  { immediate: true },
+);
 </script>

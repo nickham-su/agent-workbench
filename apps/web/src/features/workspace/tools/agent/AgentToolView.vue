@@ -70,7 +70,6 @@
             @session-model-open-consumed="onSessionModelOpenConsumed"
             @session-model-state-updated="onSessionModelStateUpdated"
             @session-model-mutation-pending="onSessionModelMutationPending"
-            @reset-to-draft="(payload) => replaceSessionTabWithDraft(payload)"
               />
             </div>
         </a-tab-pane>
@@ -1143,63 +1142,6 @@ function replaceDraftWithSession(params: { fromSessionId: string; targetSessionI
   activeKey.value = target.id;
   statusStore.markSessionSeen(target.id);
   persistActiveKey(target.id);
-
-  reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
-}
-
-function replaceSessionTabWithDraft(payload: { sessionId: string; draftText: string }) {
-  const sourceSessionId = String(payload.sessionId || "").trim();
-  if (!sourceSessionId) return;
-  const sourceSession = serverSessions.value.find((item) => item.id === sourceSessionId);
-  if (!sourceSession || sourceSession.kind !== "primary") return;
-
-  const now = Date.now();
-  const draftId = newDraftSessionId();
-  const draft: DraftAgentSession = {
-    id: draftId,
-    workspaceId: props.workspaceId,
-    title: t("agent.client.newTitle"),
-    kind: "primary",
-    createdAt: now,
-    updatedAt: now,
-    isDraft: true
-  };
-
-  const nextDrafts = [...draftSessions.value, draft];
-  const sourceTabNo = tabNoMap.value[sourceSessionId];
-  const sourceAgent = selectedAgentBySession[sourceSessionId] ?? null;
-  const sourceWasClosed = !!closedSessionIds[sourceSessionId];
-  const hadPendingTitleSync = Object.prototype.hasOwnProperty.call(pendingSessionTitleSyncUpdatedAt, sourceSessionId);
-
-  draftSessions.value = nextDrafts;
-  setDraftInitialText(draftId, payload.draftText);
-  delete draftInitialTextBySession[sourceSessionId];
-  selectedAgentBySession[draftId] = sourceAgent;
-  persistAgentPick();
-
-  const nextMap = { ...tabNoMap.value };
-  if (typeof sourceTabNo === "number" && Number.isFinite(sourceTabNo) && sourceTabNo > 0) {
-    nextMap[draftId] = sourceTabNo;
-  }
-  delete nextMap[sourceSessionId];
-  tabNoMap.value = nextMap;
-
-  // 首条消息“回退到此处”本质上是把当前窗口切成 draft。
-  // 这里继续隐藏原 session，避免它作为额外 tab 留在可见列表里；
-  // 但它仍保留在 serverSessions 中，可通过当前 draft 的“选择会话”入口重新找到。
-  if (!sourceWasClosed) {
-    closedSessionIds[sourceSessionId] = true;
-    persistClosedSessions();
-  }
-
-  if (hadPendingTitleSync) {
-    delete pendingSessionTitleSyncUpdatedAt[sourceSessionId];
-  }
-
-  invalidateOpenParentIntent();
-  activeKey.value = draftId;
-  persistActiveKey(draftId);
-  statusStore.markSessionSeen(draftId);
 
   reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
 }

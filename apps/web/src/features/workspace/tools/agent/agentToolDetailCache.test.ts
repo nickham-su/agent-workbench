@@ -10,6 +10,16 @@ function detail(updatedRevision: number): AgentToolExecution {
   return { ...timeline(updatedRevision), originSessionId: "session", originRunId: null, resultArtifactPath: null, structuredResult: null, createdAt: 1, updatedAt: 1 };
 }
 
+test("同 revision 的 snapshot 不会让已加载详情或进行中请求失效", () => {
+  const cache = createAgentToolDetailCache();
+  cache.syncTimeline([timeline(2)]);
+  const request = cache.begin("execution");
+  assert.ok(request);
+  const invalidated = cache.syncTimeline([timeline(2)]);
+  assert.deepEqual([...invalidated], []);
+  assert.equal(cache.accepts(request!, detail(2)), true);
+});
+
 test("completion delta 先到时，旧 detail 晚到不可覆盖当前 execution", () => {
   const cache = createAgentToolDetailCache();
   cache.syncTimeline([timeline(1)]);

@@ -63,3 +63,17 @@ test("真实 AgentMessageActions：点击 Fork 后同 Session DOM disabled，异
   assert.equal((buttons[1].element as HTMLButtonElement).disabled, false);
   wrapper.unmount();
 });
+
+test("真实 AgentMessageActions：Assistant 消息可隐藏回退按钮，仅保留 Fork", () => {
+  const wrapper = mount(component.default, {
+    props: {
+      disabled: false,
+      forkLabel: "fork",
+      revertLabel: "revert",
+      showRevert: false,
+    },
+  });
+  assert.equal(wrapper.findAll("button").length, 1);
+  assert.equal(wrapper.get("button").attributes("aria-label"), "fork");
+  wrapper.unmount();
+});

@@ -78,6 +78,20 @@ export type ConversationPart = {
   execution: AgentTimelineToolExecution | null;
 };
 
+export function hasAgentMessageTextPart(message: AgentMessage) {
+  return message.parts.some((part) => part.type === "text");
+}
+
+/** 回退 User 消息时，将其按 Part 顺序还原为输入框文本。 */
+export function agentUserMessageDraftText(message: AgentMessage) {
+  if (message.type !== "user") return null;
+  return [...message.parts]
+    .sort((left, right) => left.position - right.position)
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join("");
+}
+
 /** 以 Message 的 Part.position 为唯一显示顺序；ToolCall 通过 callPartId 显式关联 execution。 */
 export function buildConversationParts(state: AgentMessageTimelineState): ConversationPart[] {
   const executionByCallPartId = new Map(state.toolExecutions.map((execution) => [execution.callPartId, execution]));

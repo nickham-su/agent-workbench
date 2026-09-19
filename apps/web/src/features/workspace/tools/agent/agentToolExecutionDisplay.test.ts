@@ -1,12 +1,49 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  parseApplyPatchDisplay,
+  formatToolExecutionText,
+  formatToolInputPreview,
   parseSubtaskDisplay,
   parseSubtaskSessionId,
   parseTodoDisplay,
-  parseWriteDisplay,
 } from "./agentToolExecutionDisplay.js";
+
+test("formatToolInputPreview 将参数压成单行并限制长度", () => {
+  assert.equal(
+    formatToolInputPreview({ command: "printf 'a\\nb'" }),
+    '{"command":"printf \'a\\\\nb\'"}',
+  );
+  assert.equal(formatToolInputPreview({ content: "abcdefgh" }, 10), '{"content…');
+});
+
+test("formatToolExecutionText 展示完成、运行和失败耗时", () => {
+  const execution = {
+    id: "execution",
+    callPartId: "call",
+    status: "completed",
+    resultPreview: null,
+    resultTruncated: false,
+    error: null,
+    updatedRevision: 1,
+    startedAt: 1_000,
+    completedAt: 3_500,
+  } as const;
+  assert.equal(formatToolExecutionText(execution, 9_000), "2s");
+  assert.equal(
+    formatToolExecutionText(
+      { ...execution, status: "running", completedAt: null },
+      4_500,
+    ),
+    "running · 3s",
+  );
+  assert.equal(
+    formatToolExecutionText(
+      { ...execution, status: "failed", completedAt: 2_000 },
+      9_000,
+    ),
+    "failed · 1s",
+  );
+});
 
 test("富卡只接受 detail structuredResult 的结构化字段", () => {
   assert.deepEqual(
@@ -21,18 +58,6 @@ test("富卡只接受 detail structuredResult 的结构化字段", () => {
       completed: 0,
       cancelled: 0,
     },
-  );
-  assert.equal(
-    parseApplyPatchDisplay({
-      summary: { fileCount: 1 },
-      files: [{ path: "a.ts", type: "add", additions: 2, deletions: 0 }],
-    })?.files[0]?.path,
-    "a.ts",
-  );
-  assert.equal(
-    parseWriteDisplay({ filePath: "a.ts", summary: { bytesWritten: 4 } })
-      ?.bytesWritten,
-    4,
   );
 });
 

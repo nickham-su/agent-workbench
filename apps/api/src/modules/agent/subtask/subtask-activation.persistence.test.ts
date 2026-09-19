@@ -128,6 +128,10 @@ test("P3 real SQLite: Lifecycle child activator atomically persists ordered Mess
     getRunRecord(fixture.db, child.runId)?.subtaskDepth,
     child.subtaskDepth,
   );
+  assert.equal(
+    getRunRecord(fixture.db, child.runId)?.uiLocale,
+    child.uiLocale,
+  );
   const state = getMessageRunState(fixture.db, workspace.id, sessionId);
   assert.equal(state?.status, "running");
   assert.equal(state?.activeRunId, child.runId);

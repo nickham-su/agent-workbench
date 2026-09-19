@@ -42,6 +42,7 @@ type SummaryResult = { text: string; totalTokens: number | null };
 function createPreforkContext(
   apiClient: PreforkApiClient,
   signal = new AbortController().signal,
+  uiLocale: PromptContext["uiLocale"] = null,
 ) {
   const context: ToolExecutionContext = {
     profile: {} as ExecutionProfile,
@@ -63,7 +64,10 @@ function createPreforkContext(
     },
     signal,
     apiClient: apiClient as unknown as AgentApiClient,
-    promptContext: {} as PromptContext,
+    promptContext: {
+      headMessageId: null, sessionRevision: 0, system: "", messages: [], tools: [],
+      pendingTools: [], lastResponseTotalTokens: null, uiLocale, externalSkillRoots: [],
+    },
     processNestedRun: async () => undefined,
     updateToolExecution: async () => undefined,
     nowMs: () => Date.now(),
@@ -169,6 +173,10 @@ test("subtask prefork summary 透传 messages-context.system 到 one-shot 调用
       async getSubtaskResult() {
         return { resultText: "done" };
       },
+    },
+    promptContext: {
+      headMessageId: null, sessionRevision: 0, system: "", messages: [], tools: [],
+      pendingTools: [], lastResponseTotalTokens: null, uiLocale: null, externalSkillRoots: [],
     },
     processNestedRun: async () => {},
     updateToolExecution: async (params: {
@@ -475,6 +483,57 @@ test("subtask prefork 成功时透传固定 threshold 与一致 preforkMeta", as
     childContextWindowTokens: 456,
   });
   assert.equal(capturedStartInput.preforkSummaryText, "summary");
+});
+
+test("subtask prefork 使用当前 PromptContext locale 构建中文摘要提示", async () => {
+  let appendedContent = "";
+  const apiClient = {
+    async getSubtaskPreforkPlan() {
+      return {
+        shouldPrefork: true,
+        thresholdPct: 95,
+        parentLastResponseTotalTokens: 123,
+        childContextWindowTokens: 456,
+        thresholdTokens: 433,
+      };
+    },
+    async getMessagesContext(input: {
+      appendMessage?: { role: string; content: string };
+    }) {
+      appendedContent = input.appendMessage?.content ?? "";
+      return { headMessageId: "message-1", system: "system", messages: [] };
+    },
+    async startSubtaskRun() {
+      return successfulStart();
+    },
+    async getSubtaskStatus() {
+      return completedChild();
+    },
+    async getSubtaskResult() {
+      return childResult();
+    },
+  } as PreforkApiClient;
+  class SummaryProvider extends BuiltinToolProvider {
+    protected override async generateSingleCallSummary(
+      _params: SummaryParams,
+    ): Promise<SummaryResult> {
+      return { text: "summary", totalTokens: 7 };
+    }
+  }
+
+  await new SummaryProvider().execute(
+    "subtask",
+    preforkArgs,
+    createPreforkContext(
+      apiClient,
+      new AbortController().signal,
+      "zh-CN",
+    ),
+  );
+
+  assert.match(appendedContent, /请基于父会话生成一份精简结构化总结/);
+  assert.match(appendedContent, /prompt/);
+  assert.doesNotMatch(appendedContent, /Produce a concise structured summary/);
 });
 
 test("subtask prefork 摘要成功后立即 abort 不启动 child", async () => {

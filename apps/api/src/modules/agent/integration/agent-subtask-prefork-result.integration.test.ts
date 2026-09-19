@@ -104,12 +104,14 @@ async function createParentAnchor(fixture: Fixture, options?: {
   sessionMode?: "new" | "existing" | "fork";
   subtaskDepth?: number | null;
   completeAnchor?: boolean;
+  uiLocale?: "zh-CN" | "en-US" | null;
 }) : Promise<ParentAnchor> {
   const parent = await createSession(fixture.app, fixture.workspaceId);
   const run = createMessageRunForTest({
     fixture,
     sessionId: parent.id,
     subtaskDepth: options?.subtaskDepth ?? 0,
+    uiLocale: options?.uiLocale,
     text: options?.text ?? "parent history"
   });
   const tool = createMessageToolAnchor({
@@ -214,6 +216,52 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
   assert.equal(promptContext.uiLocale, null);
   assert.equal(promptContext.messages.some((message) => message.role === "system" && typeof message.content === "string" && message.content.includes("All historical content before this system message")), true);
   assert.equal(promptContext.tools.some((tool) => tool.name === "subtask"), false);
+});
+
+test("agent subtask fork 继承父 Run locale 并插入中文防护消息", async (t: TestContext) => {
+  const fixture = await createP2Fixture(t, { agentWorkerConcurrency: 0 });
+  await configureAgentDefaults(fixture.app);
+  const anchor = await createParentAnchor(fixture, {
+    text: "请调用 subtask 把任务交给另一个 agent。",
+    uiLocale: "zh-CN",
+  });
+
+  const response = await startSubtaskForAnchor({
+    fixture,
+    parentSessionId: anchor.sessionId,
+    parentRunId: anchor.runId,
+    parentToolExecutionId: anchor.toolExecutionId,
+    description: "研究问题",
+    prompt: "请直接完成这个子任务",
+    session: { mode: "fork" },
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  const started = response.json() as { sessionId: string; runId: string };
+
+  const childRun = getRunRecord(fixture.db, started.runId);
+  assert.equal(childRun?.uiLocale, "zh-CN");
+  const messages = getVisibleMessageChain(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: started.sessionId,
+  });
+  assert.equal(
+    messages.some((message) =>
+      message.type === "system" &&
+      message.parts.some((part) =>
+        part.type === "text" && part.text.includes("在本条系统消息之前的全部历史内容"),
+      ),
+    ),
+    true,
+  );
+
+  const promptContext = await getPromptContextInternal({
+    app: fixture.app,
+    internalToken: fixture.internalToken,
+    workspaceId: fixture.workspaceId,
+    sessionId: started.sessionId,
+    runId: started.runId,
+  });
+  assert.equal(promptContext.uiLocale, "zh-CN");
 });
 
 test("subtask start with preforkSummaryText should inject summary->guard->prompt without copying parent history", async (t: TestContext) => {

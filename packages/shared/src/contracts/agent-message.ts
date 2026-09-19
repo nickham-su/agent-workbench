@@ -1,6 +1,8 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { AgentContextToolNameSchema, AgentImageMediaTypeSchema, AgentSessionKindSchema } from "./agent-primitives.js";
 
+export const AGENT_TIMELINE_TEXT_MAX_LENGTH = 3_000;
+
 const IdSchema = Type.String({ minLength: 1 });
 const NullableIdSchema = Type.Union([IdSchema, Type.Null()]);
 
@@ -130,9 +132,9 @@ export const AgentTimelineToolExecutionSchema = Type.Object({
   id: IdSchema,
   callPartId: IdSchema,
   status: AgentToolExecutionStatusSchema,
-  resultPreview: Type.Union([Type.String({ maxLength: 3_000 }), Type.Null()]),
+  resultPreview: Type.Union([Type.String({ maxLength: AGENT_TIMELINE_TEXT_MAX_LENGTH }), Type.Null()]),
   resultTruncated: Type.Boolean(),
-  error: Type.Union([Type.String({ maxLength: 3_000 }), Type.Null()]),
+  error: Type.Union([Type.String({ maxLength: AGENT_TIMELINE_TEXT_MAX_LENGTH }), Type.Null()]),
   updatedRevision: Type.Integer({ minimum: 0 }),
   startedAt: Type.Union([Type.Number(), Type.Null()]),
   completedAt: Type.Union([Type.Number(), Type.Null()])

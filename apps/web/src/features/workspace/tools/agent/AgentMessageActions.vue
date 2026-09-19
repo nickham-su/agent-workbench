@@ -19,6 +19,7 @@
       </svg>
     </button>
     <button
+      v-if="showRevert"
       type="button"
       class="flex h-5 w-5 items-center justify-center border-0 bg-transparent p-0 text-[12px] text-[color:var(--text-tertiary)] hover:text-[color:var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
       :title="revertLabel"
@@ -42,8 +43,9 @@ withDefaults(
     forkLabel: string;
     revertLabel: string;
     outside?: boolean;
+    showRevert?: boolean;
   }>(),
-  { outside: false },
+  { outside: false, showRevert: true },
 );
 const emit = defineEmits<{
   fork: [];

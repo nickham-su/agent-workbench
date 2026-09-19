@@ -40,7 +40,7 @@ function createDependencies(params?: {
   runStatus?: "idle" | "running";
   cloneError?: unknown;
   lifecycleError?: unknown;
-  moveError?: unknown;
+  revertError?: unknown;
   cancelError?: unknown;
 }) {
   const calls: unknown[][] = [];
@@ -91,9 +91,9 @@ function createDependencies(params?: {
         updatedAt: 8
       }),
       hasNonTerminalItems: () => false,
-      moveHead: (input) => {
-        calls.push(["move-head", input]);
-        if (params?.moveError) throw params.moveError;
+      revertBeforeUser: (input) => {
+        calls.push(["revert-before-user", input]);
+        if (params?.revertError) throw params.revertError;
       }
     },
     profileReader: {
@@ -220,14 +220,14 @@ test("SessionInteractionApplication reverts before best-effort runtime cancellat
   };
   const result = await application.revertSession({ sessionId: primary.id, body: { workspaceId: "workspace", messageId: "message-3" }, runtime });
   assert.equal(result.ok, true);
-  assert.deepEqual(calls.map(([kind]) => kind), ["run-state", "move-head", "cancel", "warn"]);
-  assert.deepEqual(calls[1], ["move-head", { workspaceId: "workspace", sessionId: primary.id, expectedHeadMessageId: "message-5", expectedRevision: 5, nextHeadMessageId: "message-3", updatedAt: 123 }]);
+  assert.deepEqual(calls.map(([kind]) => kind), ["run-state", "revert-before-user", "cancel", "warn"]);
+  assert.deepEqual(calls[1], ["revert-before-user", { workspaceId: "workspace", sessionId: primary.id, expectedHeadMessageId: "message-5", expectedRevision: 5, targetMessageId: "message-3", updatedAt: 123 }]);
   assert.equal(calls[3]?.[2], "cancel session runtime after revert failed");
 });
 
 test("SessionInteractionApplication maps typed revert race disappearance to HTTP 404", async () => {
   const { application } = createDependencies({
-    moveError: new AgentMessageDomainError("SESSION_NOT_FOUND")
+    revertError: new AgentMessageDomainError("SESSION_NOT_FOUND")
   });
   await assert.rejects(
     () => application.revertSession({
@@ -343,7 +343,7 @@ test("updateSessionTitle returns 404 when the store mutation misses", () => {
       updatedAt: 8,
     }),
     hasNonTerminalItems: () => false,
-    moveHead: () => undefined
+    revertBeforeUser: () => undefined
   };
   const application = new SessionInteractionApplication({
     store: disappearingStore,

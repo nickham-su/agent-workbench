@@ -1381,6 +1381,7 @@ function createManualCompactionAssembly(assembly: {
           triggerMessageId: params.triggerMessageId,
           agentId: params.profile.agentId,
           providerId: params.profile.providerId,
+          uiLocale: params.uiLocale,
           modelId: params.profile.modelId,
           runKind: "manual_compaction",
           subtaskDepth: 0,
@@ -2393,7 +2394,7 @@ function createAgentApplications(
       .prepare(
         `
       select run_id as runId, workspace_id as workspaceId, session_id as sessionId,
-             trigger_message_id as triggerMessageId, agent_id as agentId, provider_id as providerId,
+             trigger_message_id as triggerMessageId, agent_id as agentId, provider_id as providerId, ui_locale as uiLocale,
              model_id as modelId, subtask_depth as subtaskDepth, parent_run_id as parentRunId,
              parent_tool_execution_id as parentToolExecutionId, status,
              created_at as createdAt, updated_at as updatedAt
@@ -2451,7 +2452,7 @@ function createAgentApplications(
     return {
       parentSession,
       parentRun,
-      parentUiLocale: null,
+      parentUiLocale: parentRun.uiLocale,
       anchor: {
         toolExecutionId: anchor.toolExecutionId,
         assistantMessageId: anchor.assistantMessageId,
@@ -2705,11 +2706,16 @@ function createAgentApplications(
     sessionId: string;
     activeRunId: string | null;
   }): AgentUiLocale | null {
-    // Message-model agent_run no longer persists ui_locale. Do not query the
-    // removed column or infer locale from unrelated runs; callers explicitly
-    // support a locale-neutral prompt until locale gains a new authority.
-    void params;
-    return null;
+    if (!params.activeRunId) return null;
+    const row = environment.db.prepare(`
+      select ui_locale as uiLocale
+      from agent_run
+      where run_id = @activeRunId
+        and workspace_id = @workspaceId
+        and session_id = @sessionId
+      limit 1
+    `).get(params) as { uiLocale: unknown } | undefined;
+    return normalizeAgentUiLocale(row?.uiLocale);
   }
 
   async function getMessagesContext(params: {

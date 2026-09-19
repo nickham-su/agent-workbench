@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import Database from "better-sqlite3";
 import { test } from "node:test";
+import { AGENT_TIMELINE_TEXT_MAX_LENGTH } from "@agent-workbench/shared";
 import { initSchema } from "../../../infra/db/schema.js";
 import {
   appendMessage,
@@ -68,6 +69,41 @@ test("Message timeline follows current Session ancestry and projects lightweight
     () => query.getMessage({ workspaceId: "ws", sessionId: "session", messageId: "not-on-chain" }),
     (error: unknown) => error instanceof HttpError && error.statusCode === 404
   );
+});
+
+test("timeline 对历史超长工具预览和错误做契约内截断", () => {
+  const { db, query } = createFixture();
+  appendMessage(db, {
+    id: "user-1", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: null, expectedRevision: 0,
+    type: "user", status: "completed", parts: [{ id: "user-1-text", position: 0, type: "text", text: "first" }], createdAt: 2
+  });
+  db.prepare(`insert into agent_message (id,workspace_id,previous_message_id,replaces_message_id,depth,type,status,origin_session_id,origin_run_id,updated_revision,created_at,updated_at)
+    values ('assistant-1','ws','user-1',null,1,'assistant','completed',null,null,2,3,3)`).run();
+  db.prepare(`insert into agent_message_part (id,message_id,position,type,tool_name,tool_input_json,updated_revision,created_at,updated_at)
+    values ('call-1','assistant-1',0,'tool_call','skill','{}',2,3,3)`).run();
+  const longPreview = "p".repeat(AGENT_TIMELINE_TEXT_MAX_LENGTH + 683);
+  const longError = "e".repeat(AGENT_TIMELINE_TEXT_MAX_LENGTH + 17);
+  db.prepare(`insert into agent_tool_execution
+    (id,call_part_id,origin_session_id,origin_run_id,status,result_preview,result_truncated,error,updated_revision,created_at,updated_at)
+    values ('execution-1','call-1',null,null,'failed',?,0,?,2,3,3)`)
+    .run(longPreview, longError);
+  db.prepare("update agent_session set head_message_id='assistant-1',revision=2,updated_at=3 where id='session'").run();
+
+  const snapshot = query.getTimeline({ workspaceId: "ws", sessionId: "session", mode: "snapshot" });
+  assert.equal(snapshot.toolExecutions[0]?.resultPreview?.length, AGENT_TIMELINE_TEXT_MAX_LENGTH);
+  assert.equal(snapshot.toolExecutions[0]?.error?.length, AGENT_TIMELINE_TEXT_MAX_LENGTH);
+  assert.equal(snapshot.toolExecutions[0]?.resultTruncated, true);
+
+  const delta = query.getTimeline({
+    workspaceId: "ws",
+    sessionId: "session",
+    mode: "delta",
+    sinceRevision: 0,
+    knownHeadMessageId: "assistant-1",
+  });
+  assert.equal(delta.toolExecutions[0]?.resultPreview?.length, AGENT_TIMELINE_TEXT_MAX_LENGTH);
+  assert.equal(delta.toolExecutions[0]?.error?.length, AGENT_TIMELINE_TEXT_MAX_LENGTH);
+  assert.equal(delta.toolExecutions[0]?.resultTruncated, true);
 });
 
 test("Message timeline resets for stale root cursor and final text joins terminal assistant TextParts", () => {

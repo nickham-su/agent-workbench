@@ -59,6 +59,9 @@ export function buildSlashInputCandidates(params: {
   promptCommands: Map<string, AgentGlobalPromptItem>;
   query: string;
 }) {
+  const hasExactMatch = params.commands.some((command) => command.name === params.query)
+    || params.promptCommands.has(params.query);
+  if (hasExactMatch) return [];
   const slashItems: SlashCandidateItem[] = params.commands.filter((command) => !params.query || command.name.startsWith(params.query)).map((command) => ({
     id: `slash:${command.name}`,
     kind: "slash",

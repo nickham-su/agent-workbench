@@ -34,7 +34,7 @@ export class SqliteSubtaskLineagePersistence implements SubtaskLineagePersistenc
     const row = this.db.prepare(`
       select run_id as runId, workspace_id as workspaceId, session_id as sessionId,
              trigger_message_id as triggerMessageId, agent_id as agentId, provider_id as providerId,
-             model_id as modelId, subtask_depth as subtaskDepth, parent_run_id as parentRunId,
+             ui_locale as uiLocale, model_id as modelId, subtask_depth as subtaskDepth, parent_run_id as parentRunId,
              parent_tool_execution_id as parentToolExecutionId, status,
              created_at as createdAt, updated_at as updatedAt
       from agent_run

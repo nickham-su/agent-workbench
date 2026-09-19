@@ -81,6 +81,7 @@ export function createMessageRunForTest(params: {
   subtaskDepth?: number | null;
   parentRunId?: string | null;
   parentToolExecutionId?: string | null;
+  uiLocale?: "zh-CN" | "en-US" | null;
   text?: string;
 }) {
   const createdAt = Date.now();
@@ -110,6 +111,7 @@ export function createMessageRunForTest(params: {
     triggerMessageId,
     agentId: "default",
     providerId: "ppchat",
+    uiLocale: params.uiLocale,
     modelId: "gpt-5.2",
     subtaskDepth: params.subtaskDepth,
     parentRunId: params.parentRunId,

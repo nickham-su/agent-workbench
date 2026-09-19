@@ -44,7 +44,7 @@ export type SessionInteractionStore = {
   getRunState(workspaceId: string, sessionId: string): Pick<AgentMessageSessionRunState, "status">;
   getControlRunState(sessionId: string): AgentMessageSessionRunState;
   hasNonTerminalItems(workspaceId: string, sessionId: string): boolean;
-  moveHead(input: { workspaceId: string; sessionId: string; expectedHeadMessageId: string | null; expectedRevision: number; nextHeadMessageId: string; updatedAt: number }): void;
+  revertBeforeUser(input: { workspaceId: string; sessionId: string; expectedHeadMessageId: string | null; expectedRevision: number; targetMessageId: string; updatedAt: number }): void;
 };
 
 export type SessionProfileReader = {

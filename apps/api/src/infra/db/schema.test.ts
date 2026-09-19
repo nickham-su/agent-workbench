@@ -912,6 +912,7 @@ test("v19 原地升级到最新版本保留数据、补充 replay 与 token 列�
   db.prepare(`insert into agent_message_part (id,message_id,position,type,text,updated_revision,created_at,updated_at)
     values ('part-v19','message-v19',0,'reasoning','summary',7,10,11)`).run();
   db.prepare("update agent_schema_meta set version = 19, file_cleanup_pending = 1 where id = 1").run();
+  db.exec("alter table agent_run drop column ui_locale");
   db.exec("alter table agent_message_part drop column provider_replay_json");
   db.exec("alter table session_run_state drop column last_response_total_tokens");
 
@@ -938,13 +939,14 @@ test("v19 原地升级到最新版本保留数据、补充 replay 与 token 列�
   db.close();
 });
 
-test("v20 原地升级到最新版本保留 Session 与运行状态并补充 token 列", () => {
+test("v20 原地升级到最新版本保留 Session 与运行状态并补充 token 与 locale 列", () => {
   const db = createDb();
   insertWorkspace(db);
   insertSession(db);
   db.prepare(`insert into session_run_state (workspace_id, session_id, status, run_notice_text, retry_count, updated_at)
     values ('ws-a', 'session-a', 'idle', 'preserved', 2, 9)`).run();
   db.prepare("update agent_schema_meta set version = 20 where id = 1").run();
+  db.exec("alter table agent_run drop column ui_locale");
   db.exec("alter table session_run_state drop column last_response_total_tokens");
 
   initSchema(db);
@@ -954,17 +956,38 @@ test("v20 原地升级到最新版本保留 Session 与运行状态并补充 tok
     db.prepare("select status, run_notice_text, retry_count, updated_at, last_response_total_tokens from session_run_state where session_id = 'session-a'").get(),
     { status: "idle", run_notice_text: "preserved", retry_count: 2, updated_at: 9, last_response_total_tokens: null },
   );
+  const runColumns = db.prepare("pragma table_info(agent_run)").all() as Array<{ name: string }>;
+  assert.equal(runColumns.filter((column) => column.name === "ui_locale").length, 1);
   assert.equal((db.prepare("select count(*) as count from agent_session where id = 'session-a'").get() as { count: number }).count, 1);
 
   initSchema(db);
   const columns = db.prepare("pragma table_info(session_run_state)").all() as Array<{ name: string }>;
   assert.equal(columns.filter((column) => column.name === "last_response_total_tokens").length, 1);
+  const runColumnsAfterSecond = db.prepare("pragma table_info(agent_run)").all() as Array<{ name: string }>;
+  assert.equal(runColumnsAfterSecond.filter((column) => column.name === "ui_locale").length, 1);
+  db.close();
+});
+
+test("v21 原地升级到最新版本保留 Run 并补充 nullable ui_locale", () => {
+  const db = createDb();
+  insertWorkspace(db);
+  insertSession(db);
+  db.prepare(`insert into agent_run (run_id, workspace_id, session_id, trigger_message_id, agent_id, provider_id, ui_locale, model_id, subtask_depth, parent_run_id, parent_tool_execution_id, status, created_at, updated_at, run_kind)
+    values ('run-v21', 'ws-a', 'session-a', null, 'agent', 'provider', 'zh-CN', 'model', 0, null, null, 'completed', 10, 11, 'user')`).run();
+  db.prepare("update agent_schema_meta set version = 21 where id = 1").run();
+  db.exec("alter table agent_run drop column ui_locale");
+
+  initSchema(db);
+
+  assert.deepEqual(db.prepare("select run_id, ui_locale, status from agent_run where run_id = 'run-v21'").get(), { run_id: "run-v21", ui_locale: null, status: "completed" });
+  assert.equal((db.prepare("select version from agent_schema_meta where id = 1").get() as { version: number }).version, AGENT_SCHEMA_VERSION);
   db.close();
 });
 
 test("agent_run run_kind 在目标 schema 升级时保留数据并回填 user", () => {
   const db = createDb();
   db.prepare("update agent_schema_meta set version = 18 where id = 1").run();
+  db.exec("alter table agent_run drop column ui_locale");
   db.exec("alter table agent_run drop column run_kind");
   db.exec("alter table agent_message_part drop column provider_replay_json");
   db.exec("alter table session_run_state drop column last_response_total_tokens");
@@ -992,6 +1015,7 @@ test("v18 Message 数据图原地升级保留关系、状态与 file cleanup pen
   db.prepare(`insert into session_run_state (workspace_id, session_id, status, active_run_id, run_notice_text, retry_count, next_retry_at, active_assistant_message_id, non_terminal_message_ids_json, non_terminal_tool_execution_ids_json, updated_at)
     values ('ws-a', 'session-a', 'running', 'run-v18', 'recovering', 2, 99, null, '[]', '[]', 17)`).run();
   db.prepare("update agent_schema_meta set version = 18, file_cleanup_pending = 1 where id = 1").run();
+  db.exec("alter table agent_run drop column ui_locale");
   db.exec("alter table agent_run drop column run_kind");
   db.exec("alter table agent_message_part drop column provider_replay_json");
   db.exec("alter table session_run_state drop column last_response_total_tokens");

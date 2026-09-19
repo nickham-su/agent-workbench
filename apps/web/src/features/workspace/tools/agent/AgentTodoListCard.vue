@@ -3,7 +3,7 @@
     :class="
       collapsed
         ? 'w-full pl-2 pr-0 py-0.5 rounded cursor-pointer hover:bg-[var(--hover-bg)] transition-colors duration-100 font-mono text-[color:var(--text-secondary)]'
-        : 'w-full todo-card rounded border border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] p-2 cursor-pointer hover:bg-[var(--hover-bg)] hover:border-[var(--border-color)] transition-colors duration-100'
+        : 'my-1 w-full todo-card rounded border border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] p-2 cursor-pointer hover:bg-[var(--hover-bg)] hover:border-[var(--border-color)] transition-colors duration-100'
     "
     @click="emit('toggle-collapse')"
   >

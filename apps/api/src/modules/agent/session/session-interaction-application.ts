@@ -151,12 +151,12 @@ export class SessionInteractionApplication {
     }
 
     try {
-      this.dependencies.store.moveHead({
+      this.dependencies.store.revertBeforeUser({
         workspaceId: session.workspaceId,
         sessionId: session.id,
         expectedHeadMessageId: session.headMessageId,
         expectedRevision: session.revision,
-        nextHeadMessageId: command.body.messageId,
+        targetMessageId: command.body.messageId,
         updatedAt: this.dependencies.clock.nowMs()
       });
     } catch (error) {

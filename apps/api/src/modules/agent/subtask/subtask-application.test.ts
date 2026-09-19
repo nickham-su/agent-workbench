@@ -212,7 +212,14 @@ test("P3 application: prefork keeps anchor validation, threshold floor/default, 
 
 test("P3 application: start materializes and activates fork seeds in summary, guard, prompt order", async () => {
   const captured: SubtaskChildActivationInput[] = [];
+  const guardLocales: Array<"zh-CN" | "en-US" | null> = [];
   const base = dependencies();
+  base.result.forkGuardTextReader = {
+    get(uiLocale) {
+      guardLocales.push(uiLocale);
+      return "fork guard";
+    },
+  };
   base.result.childRunActivator = {
     activate(input) {
       captured.push(input);
@@ -239,6 +246,8 @@ test("P3 application: start materializes and activates fork seeds in summary, gu
     reused: false,
   });
   assert.deepEqual(captured[0]?.systemTexts, ["summary", "fork guard"]);
+  assert.equal(captured[0]?.uiLocale, "zh-CN");
+  assert.deepEqual(guardLocales, ["zh-CN"]);
   assert.equal(captured[0]?.prompt, "complete child task");
   assert.deepEqual(base.calls, [
     "anchor",

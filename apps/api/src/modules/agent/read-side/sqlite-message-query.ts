@@ -11,6 +11,7 @@ import type {
   AgentToolExecution,
   AgentToolExecutionStatus
 } from "@agent-workbench/shared";
+import { AGENT_TIMELINE_TEXT_MAX_LENGTH } from "@agent-workbench/shared";
 import {
   parseAgentProviderReplay,
   type AgentProviderReplayEnvelope,
@@ -70,6 +71,12 @@ function parseIdArray(value: string): string[] {
   } catch {
     return [];
   }
+}
+
+function timelineText(value: string | null) {
+  return value !== null && value.length > AGENT_TIMELINE_TEXT_MAX_LENGTH
+    ? value.slice(0, AGENT_TIMELINE_TEXT_MAX_LENGTH)
+    : value;
 }
 
 function parseToolInput(value: string | null): Record<string, unknown> {
@@ -499,9 +506,9 @@ export class SqliteMessageQuery {
       id: row.id,
       callPartId: row.callPartId,
       status: row.status as AgentToolExecutionStatus,
-      resultPreview: row.resultPreview,
-      resultTruncated: Number(row.resultTruncated) === 1,
-      error: row.error,
+      resultPreview: timelineText(row.resultPreview),
+      resultTruncated: Number(row.resultTruncated) === 1 || (row.resultPreview?.length ?? 0) > AGENT_TIMELINE_TEXT_MAX_LENGTH,
+      error: timelineText(row.error),
       updatedRevision: Number(row.updatedRevision),
       startedAt: row.startedAt,
       completedAt: row.completedAt
@@ -521,9 +528,9 @@ export class SqliteMessageQuery {
       id: row.id,
       callPartId: row.callPartId,
       status: row.status as AgentToolExecutionStatus,
-      resultPreview: row.resultPreview,
-      resultTruncated: Number(row.resultTruncated) === 1,
-      error: row.error,
+      resultPreview: timelineText(row.resultPreview),
+      resultTruncated: Number(row.resultTruncated) === 1 || (row.resultPreview?.length ?? 0) > AGENT_TIMELINE_TEXT_MAX_LENGTH,
+      error: timelineText(row.error),
       updatedRevision: Number(row.updatedRevision),
       startedAt: row.startedAt,
       completedAt: row.completedAt,

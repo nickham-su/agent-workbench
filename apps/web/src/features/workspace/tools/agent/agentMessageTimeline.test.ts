@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentMessage, AgentTimelineDeltaResponse, AgentTimelineToolExecution } from "@agent-workbench/shared";
-import { applyAgentTimelineDelta, buildConversationParts, replaceAgentTimelineSnapshot } from "./agentMessageTimeline.js";
+import {
+  agentUserMessageDraftText,
+  applyAgentTimelineDelta,
+  buildConversationParts,
+  hasAgentMessageTextPart,
+  replaceAgentTimelineSnapshot,
+} from "./agentMessageTimeline.js";
 
 function message(overrides: Partial<AgentMessage> & Pick<AgentMessage, "id">): AgentMessage {
   return {
@@ -97,6 +103,36 @@ test("snapshot 显式替换旧分支 Message 与 ToolExecution", () => {
   );
   assert.deepEqual(next.messages.map((item) => item.id), ["new"]);
   assert.deepEqual(next.toolExecutions.map((item) => item.id), ["new-execution"]);
+});
+
+test("hasAgentMessageTextPart 仅按 Message 是否包含 TextPart 判断", () => {
+  const withoutText = message({
+    id: "without-text",
+    parts: [
+      { id: "reason", messageId: "without-text", position: 0, type: "reasoning", text: "think", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+      { id: "call", messageId: "without-text", position: 1, type: "tool_call", toolName: "read", input: { filePath: "a.ts" }, providerToolCallId: null, updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+    ],
+  });
+  const withText = message({
+    id: "with-text",
+    parts: [...withoutText.parts, { id: "text", messageId: "with-text", position: 2, type: "text", text: "done", updatedRevision: 1, createdAt: 1, updatedAt: 1 }],
+  });
+  assert.equal(hasAgentMessageTextPart(withoutText), false);
+  assert.equal(hasAgentMessageTextPart(withText), true);
+});
+
+test("agentUserMessageDraftText 仅还原 User 的 TextPart，并保持 Part 顺序", () => {
+  const user = message({
+    id: "user",
+    type: "user",
+    parts: [
+      { id: "text-2", messageId: "user", position: 2, type: "text", text: "world", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+      { id: "image", messageId: "user", position: 1, type: "image", attachmentId: "attachment", mediaType: "image/png", filename: "image.png", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+      { id: "text-1", messageId: "user", position: 0, type: "text", text: "hello ", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+    ],
+  });
+  assert.equal(agentUserMessageDraftText(user), "hello world");
+  assert.equal(agentUserMessageDraftText(message({ id: "assistant" })), null);
 });
 
 test("Conversation 保持 Part.position 且 ToolCall 用 callPartId 显式关联 ToolExecution", () => {
