@@ -6,6 +6,7 @@ import { createMessageRunRecord } from "./agent-message.store.js";
 import {
   appendMessage,
   appendStreamingAssistant,
+  commitCompactionMessage,
   completeAssistantWithExecutions,
   createMessageSession,
   flushStreamingParts,
@@ -346,4 +347,230 @@ test("prompt-context returns queued/running tools with a transcript boundary, th
     { role: "assistant", content: [{ type: "tool-call", toolCallId: "provider-call", toolName: "bash", input: { command: "pwd" } }] },
     { role: "tool", content: [{ type: "tool-result", toolCallId: "provider-call", toolName: "bash", output: { type: "text", value: "workspace path" } }] }
   ]);
+});
+
+test("timeline、messages-context 与 archive 不暴露私有 replay，受保护 PromptContext 可读取", async () => {
+  const { fixture, workspace } = await createReadSideFixture();
+  assert.ok(fixture.app);
+  const { sessionId, runId } = createRun(fixture, workspace.id);
+  const head = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId });
+  assert.ok(head);
+  const assistantId = newSortableId("msg");
+  const secret = "opaque-private-replay-sentinel";
+  appendStreamingAssistant(fixture.db, {
+    id: assistantId, workspaceId: workspace.id, sessionId, runId,
+    expectedHeadMessageId: head.headMessageId, expectedRevision: head.revision, createdAt: Date.now(),
+  });
+  flushStreamingParts(fixture.db, {
+    workspaceId: workspace.id, sessionId, runId, messageId: assistantId, updatedAt: Date.now() + 1,
+    parts: [{
+      id: newSortableId("part"), position: 0, type: "reasoning", text: "visible summary",
+      providerReplay: {
+        version: 1,
+        provider: { npm: "@ai-sdk/openai", api: "responses", providerId: "ppchat", model: "gpt-5.2" },
+        item: { type: "reasoning", itemId: "rs_private", encryptedContent: secret },
+      },
+    }, { id: newSortableId("part"), position: 1, type: "text", text: "public answer" }],
+  });
+  completeAssistantWithExecutions(fixture.db, { workspaceId: workspace.id, sessionId, runId, messageId: assistantId, executions: [], updatedAt: Date.now() + 2 });
+
+  const timeline = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${sessionId}/timeline?workspaceId=${workspace.id}` });
+  assert.equal(timeline.statusCode, 200, timeline.body);
+  assert.doesNotMatch(timeline.body, new RegExp(secret));
+  assert.doesNotMatch(timeline.body, /providerReplay|provider_replay_json/);
+
+  const prompt = await injectJson(fixture.app, {
+    method: "POST", url: "/api/internal/agent/prompt-context", internalToken: fixture.internalToken,
+    payload: { workspaceId: workspace.id, sessionId, runId },
+  });
+  assert.equal(prompt.statusCode, 200, prompt.body);
+  const promptBody = prompt.json() as { providerReplay?: Array<{ parts: Array<{ providerReplay: { item: { encryptedContent?: string } } }> }> };
+  assert.equal(promptBody.providerReplay?.[0]?.parts[0]?.providerReplay.item.encryptedContent, secret, prompt.body);
+  assert.doesNotMatch(prompt.body, /provider_replay_json/);
+
+  const messages = await injectJson(fixture.app, {
+    method: "POST", url: "/api/internal/agent/messages-context", internalToken: fixture.internalToken,
+    payload: { workspaceId: workspace.id, sessionId },
+  });
+  assert.equal(messages.statusCode, 200, messages.body);
+  assert.doesNotMatch(messages.body, new RegExp(secret));
+  assert.doesNotMatch(messages.body, /providerReplay|provider_replay_json/);
+
+  const archiveRows = fixture.db.prepare("select text from agent_archived_text_fts").all();
+  assert.doesNotMatch(JSON.stringify(archiveRows), new RegExp(secret));
+});
+
+test("replay-only completed Assistant 仅在受保护 PromptContext 保留原始 ordinal", async () => {
+  const { fixture, workspace } = await createReadSideFixture();
+  assert.ok(fixture.app);
+  const { sessionId, runId } = createRun(fixture, workspace.id);
+  const initial = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId });
+  assert.ok(initial);
+  appendMessage(fixture.db, {
+    id: "replay-only-user", workspaceId: workspace.id, sessionId,
+    expectedHeadMessageId: initial.headMessageId, expectedRevision: initial.revision,
+    type: "user", status: "completed",
+    parts: [{ id: "replay-only-user-text", position: 0, type: "text", text: "before" }],
+    createdAt: 1,
+  });
+  const afterUser = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId });
+  assert.ok(afterUser);
+  const secret = "replay-only-private-cipher";
+  appendMessage(fixture.db, {
+    id: "replay-only-assistant", workspaceId: workspace.id, sessionId,
+    expectedHeadMessageId: afterUser.headMessageId, expectedRevision: afterUser.revision,
+    type: "assistant", status: "completed", originRunId: runId,
+    parts: [{
+      id: "replay-only-reasoning", position: 0, type: "reasoning", text: "",
+      providerReplay: {
+        version: 1,
+        provider: { npm: "@ai-sdk/openai", api: "responses", providerId: "ppchat", model: "gpt-5.2" },
+        item: { type: "reasoning", itemId: "replay-only-item", encryptedContent: secret },
+      },
+    }],
+    createdAt: 2,
+  });
+  const afterAssistant = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId });
+  assert.ok(afterAssistant);
+  appendMessage(fixture.db, {
+    id: "replay-only-next-user", workspaceId: workspace.id, sessionId,
+    expectedHeadMessageId: afterAssistant.headMessageId, expectedRevision: afterAssistant.revision,
+    type: "user", status: "completed",
+    parts: [{ id: "replay-only-next-text", position: 0, type: "text", text: "after" }],
+    createdAt: 3,
+  });
+
+  const prompt = await injectJson(fixture.app, {
+    method: "POST", url: "/api/internal/agent/prompt-context", internalToken: fixture.internalToken,
+    payload: { workspaceId: workspace.id, sessionId, runId },
+  });
+  assert.equal(prompt.statusCode, 200, prompt.body);
+  const promptBody = prompt.json() as {
+    messages: Array<{ role: string; content: unknown }>;
+    providerReplay?: Array<{ assistantOrdinal: number; parts: Array<{ providerReplay: { item: { encryptedContent?: string } } }> }>;
+  };
+  assert.deepEqual(promptBody.messages, [
+    { role: "user", content: "read-side trigger" },
+    { role: "user", content: "before" },
+    { role: "assistant", content: [] },
+    { role: "user", content: "after" },
+  ]);
+  assert.equal(promptBody.providerReplay?.[0]?.assistantOrdinal, 2);
+  assert.equal(promptBody.providerReplay?.[0]?.parts[0]?.providerReplay.item.encryptedContent, secret);
+
+  const messages = await injectJson(fixture.app, {
+    method: "POST", url: "/api/internal/agent/messages-context", internalToken: fixture.internalToken,
+    payload: { workspaceId: workspace.id, sessionId },
+  });
+  assert.equal(messages.statusCode, 200, messages.body);
+  assert.deepEqual((messages.json() as { messages: unknown[] }).messages, [
+    { role: "user", content: "read-side trigger" },
+    { role: "user", content: "before" },
+    { role: "user", content: "after" },
+  ]);
+  assert.doesNotMatch(messages.body, new RegExp(secret));
+});
+
+test("PromptContext 私有 replay 服从当前 contextRoot..head completed 有效链", async () => {
+  const { fixture, workspace } = await createReadSideFixture();
+  assert.ok(fixture.app);
+  const { sessionId, runId } = createRun(fixture, workspace.id);
+  const appendReplayAssistant = (status: "completed" | "failed", encryptedContent: string) => {
+    const head = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId });
+    assert.ok(head);
+    const messageId = newSortableId("msg");
+    appendStreamingAssistant(fixture.db, { id: messageId, workspaceId: workspace.id, sessionId, runId, expectedHeadMessageId: head.headMessageId, expectedRevision: head.revision, createdAt: Date.now() });
+    flushStreamingParts(fixture.db, {
+      workspaceId: workspace.id, sessionId, runId, messageId, updatedAt: Date.now() + 1,
+      parts: [{
+        id: newSortableId("part"), position: 0, type: "reasoning", text: "summary",
+        providerReplay: {
+          version: 1,
+          provider: { npm: "@ai-sdk/openai", api: "responses", providerId: "ppchat", model: "gpt-5.2" },
+          item: { type: "reasoning", itemId: `rs_${encryptedContent}`, encryptedContent },
+        },
+      }, { id: newSortableId("part"), position: 1, type: "text", text: "answer" }],
+    });
+    if (status === "completed") {
+      completeAssistantWithExecutions(fixture.db, { workspaceId: workspace.id, sessionId, runId, messageId, executions: [], updatedAt: Date.now() + 2 });
+    } else {
+      fixture.db.prepare("update agent_message set status='failed' where id=?").run(messageId);
+    }
+    return messageId;
+  };
+  appendReplayAssistant("completed", "valid-cipher");
+  appendReplayAssistant("failed", "failed-cipher");
+  const response = await injectJson(fixture.app, {
+    method: "POST", url: "/api/internal/agent/prompt-context", internalToken: fixture.internalToken,
+    payload: { workspaceId: workspace.id, sessionId, runId },
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.match(response.body, /valid-cipher/);
+  assert.doesNotMatch(response.body, /failed-cipher/);
+});
+
+test("compaction 替换旧上下文后不额外回放被摘要替换的 reasoning", async () => {
+  const { fixture, workspace } = await createReadSideFixture();
+  assert.ok(fixture.app);
+  const { sessionId, runId } = createRun(fixture, workspace.id);
+  const beforeAssistant = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId });
+  assert.ok(beforeAssistant);
+  const assistantId = newSortableId("msg");
+  const oldCipher = "compacted-reasoning-must-not-replay";
+  const now = Date.now();
+  appendStreamingAssistant(fixture.db, {
+    id: assistantId,
+    workspaceId: workspace.id,
+    sessionId,
+    runId,
+    expectedHeadMessageId: beforeAssistant.headMessageId,
+    expectedRevision: beforeAssistant.revision,
+    createdAt: now,
+  });
+  flushStreamingParts(fixture.db, {
+    workspaceId: workspace.id,
+    sessionId,
+    runId,
+    messageId: assistantId,
+    updatedAt: now + 1,
+    parts: [{
+      id: newSortableId("part"),
+      position: 0,
+      type: "reasoning",
+      text: "old visible summary",
+      providerReplay: {
+        version: 1,
+        provider: { npm: "@ai-sdk/openai", api: "responses", providerId: "ppchat", model: "gpt-5.2" },
+        item: { type: "reasoning", itemId: "rs-compacted", encryptedContent: oldCipher },
+      },
+    }, {
+      id: newSortableId("part"), position: 1, type: "text", text: "old answer",
+    }],
+  });
+  completeAssistantWithExecutions(fixture.db, {
+    workspaceId: workspace.id, sessionId, runId, messageId: assistantId, executions: [], updatedAt: now + 2,
+  });
+  const beforeCompaction = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId });
+  assert.ok(beforeCompaction);
+  const compactedId = newSortableId("msg");
+  commitCompactionMessage(fixture.db, {
+    id: compactedId,
+    workspaceId: workspace.id,
+    sessionId,
+    expectedHeadMessageId: beforeCompaction.headMessageId,
+    expectedRevision: beforeCompaction.revision,
+    textPartId: newSortableId("part"),
+    text: "summary replaces older messages",
+    createdAt: now + 3,
+  });
+
+  const response = await injectJson(fixture.app, {
+    method: "POST", url: "/api/internal/agent/prompt-context", internalToken: fixture.internalToken,
+    payload: { workspaceId: workspace.id, sessionId, runId },
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.doesNotMatch(response.body, /old visible summary|old answer|compacted-reasoning-must-not-replay/);
+  const prompt = response.json() as { messages: Array<{ role: string; content: unknown }>; providerReplay?: unknown[] };
+  assert.deepEqual(prompt.messages, [{ role: "system", content: "summary replaces older messages" }]);
+  assert.deepEqual(prompt.providerReplay, []);
 });

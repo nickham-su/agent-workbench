@@ -1,22 +1,11 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
-import { generateText, streamText, type ToolSet } from "ai";
+import { streamText, type JSONValue, type ModelMessage, type StreamTextResult, type TextStreamPart, type ToolSet } from "ai";
+import { parseAiSdkCallSettings } from "./ai-sdk-call-settings.js";
 
 const MODEL_TIMEOUT_MS_DEFAULT = 60_000;
 const MODEL_TIMEOUT_MS_MAX = 2_147_483_647;
-
-const RESERVED_MODEL_OPTION_KEYS = new Set([
-  "model",
-  "system",
-  "prompt",
-  "messages",
-  "input",
-  "abortSignal",
-  "providerOptions",
-  "tools",
-  "toolChoice"
-]);
 
 const SINGLE_CALL_ALLOWED_PARAM_KEYS = new Set([
   "system",
@@ -40,7 +29,6 @@ export type SingleCallModelProfile = {
     options: {
       baseURL: string;
       apiKey: string;
-      apiMode?: "responses" | "chatCompletions";
     };
   };
   model: {
@@ -52,10 +40,7 @@ export type SingleCallModelProfile = {
 
 type SingleCallModelParams = {
   system?: string;
-  messages: Array<{
-    role: string;
-    content: unknown;
-  }>;
+  messages: ModelMessage[];
   sessionId?: string;
   temperature?: number;
   topP?: number;
@@ -75,14 +60,31 @@ export type SingleCallStreamEvent =
   | { type: "text-delta"; text: string }
   | { type: "finish"; totalTokens: number | null };
 
-function isSafeObjectKey(raw: string) {
-  if (!raw) return false;
-  return raw !== "__proto__" && raw !== "prototype" && raw !== "constructor";
-}
-
 function toRecordObject(raw: unknown) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   return raw as Record<string, unknown>;
+}
+
+function toJsonValue(raw: unknown): JSONValue | undefined {
+  if (raw === null || typeof raw === "string" || typeof raw === "boolean") return raw;
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : undefined;
+  if (Array.isArray(raw)) {
+    const result: JSONValue[] = [];
+    for (const item of raw) {
+      const value = toJsonValue(item);
+      if (value === undefined) return undefined;
+      result.push(value);
+    }
+    return result;
+  }
+  const source = toRecordObject(raw);
+  if (!source) return undefined;
+  const result: Record<string, JSONValue> = {};
+  for (const [key, item] of Object.entries(source)) {
+    const value = toJsonValue(item);
+    if (value !== undefined) result[key] = value;
+  }
+  return result;
 }
 
 function toNonNegativeInt(raw: unknown) {
@@ -180,17 +182,10 @@ function providerOptionsKeyByNpm(npm: SingleCallProviderNpm) {
 
 function buildModelRuntimeOptions(profile: SingleCallModelProfile) {
   const source = toRecordObject(profile.model.options) ?? {};
-  const aiSdkSource = toRecordObject(source.aiSdk) ?? {};
-  const aiSdk: Record<string, unknown> = {};
-  for (const [rawKey, value] of Object.entries(aiSdkSource)) {
-    const key = rawKey.trim();
-    if (!isSafeObjectKey(key)) continue;
-    if (RESERVED_MODEL_OPTION_KEYS.has(key)) continue;
-    aiSdk[key] = value;
-  }
+  const aiSdk = parseAiSdkCallSettings(source.aiSdk);
 
   if (aiSdk.maxOutputTokens === undefined && source.maxOutputTokens !== undefined) {
-    aiSdk.maxOutputTokens = source.maxOutputTokens;
+    aiSdk.maxOutputTokens = parseAiSdkCallSettings({ maxOutputTokens: source.maxOutputTokens }).maxOutputTokens;
   }
 
   const providerOptionsByKey = toRecordObject(source.providerOptionsByKey) ?? {};
@@ -200,7 +195,7 @@ function buildModelRuntimeOptions(profile: SingleCallModelProfile) {
   if (providerFromMap) {
     for (const [rawKey, value] of Object.entries(providerFromMap)) {
       const key = rawKey.trim();
-      if (!isSafeObjectKey(key)) continue;
+      if (!key || key === "__proto__" || key === "prototype" || key === "constructor") continue;
       providerOptions[key] = value;
     }
   }
@@ -208,7 +203,7 @@ function buildModelRuntimeOptions(profile: SingleCallModelProfile) {
   if (Object.keys(providerOptions).length === 0) {
     for (const [rawKey, value] of Object.entries(source)) {
       const key = rawKey.trim();
-      if (!isSafeObjectKey(key)) continue;
+      if (!key || key === "__proto__" || key === "prototype" || key === "constructor") continue;
       if (key === "aiSdk" || key === "providerOptionsByKey" || key === "maxOutputTokens") continue;
       providerOptions[key] = value;
     }
@@ -219,27 +214,6 @@ function buildModelRuntimeOptions(profile: SingleCallModelProfile) {
     providerOptions,
     providerKey
   };
-}
-
-function resolveOpenAiModelFactory(sdk: Record<string, unknown>, apiMode: "responses" | "chatCompletions") {
-  const responses = typeof sdk.responses === "function" ? (sdk.responses as (modelId: string) => unknown) : null;
-  const chat = typeof sdk.chat === "function" ? (sdk.chat as (modelId: string) => unknown) : null;
-  const chatCompletions =
-    typeof sdk.chatCompletions === "function" ? (sdk.chatCompletions as (modelId: string) => unknown) : null;
-
-  if (apiMode === "chatCompletions") {
-    if (chat) return chat;
-    if (chatCompletions) return chatCompletions;
-    throw new Error(`openai sdk does not expose chat/chatCompletions model factories for apiMode=${apiMode}`);
-  }
-
-  if (responses) return responses;
-  throw new Error(`openai sdk does not expose responses model factory for apiMode=${apiMode}`);
-}
-
-function normalizeOpenAiApiMode(raw: unknown): "responses" | "chatCompletions" {
-  if (raw === "responses" || raw === "chatCompletions") return raw;
-  return "responses";
 }
 
 function hasValidPromptCacheKey(providerOptions: Record<string, unknown>) {
@@ -269,9 +243,7 @@ function createLanguageModel(profile: SingleCallModelProfile) {
       apiKey: profile.provider.options.apiKey,
       baseURL: profile.provider.options.baseURL
     });
-    const apiMode = normalizeOpenAiApiMode(profile.provider.options.apiMode);
-    const createModel = resolveOpenAiModelFactory(sdk as unknown as Record<string, unknown>, apiMode);
-    return createModel(providerModelId);
+    return sdk.responses(providerModelId);
   }
 
   if (profile.provider.npm === "@ai-sdk/openai-compatible") {
@@ -324,21 +296,22 @@ function createTimedAbortSignal(params: { timeoutMs: number; abortSignal?: Abort
   };
 }
 
+type SingleCallStreamChunk = TextStreamPart<ToolSet>;
+type SingleCallStreamResult = Pick<StreamTextResult<ToolSet, never>, "fullStream" | "usage" | "totalUsage">;
+type SingleCallRequest = Parameters<typeof streamText<ToolSet>>[0];
+
 function buildSingleCallRequest(profile: SingleCallModelProfile, params: SingleCallModelParams, abortSignal: AbortSignal) {
   assertAllowedParamKeys(params);
   const runtimeOptions = buildModelRuntimeOptions(profile);
-  const request: Record<string, unknown> = {
+  const request: SingleCallRequest = {
     model: createLanguageModel(profile),
     messages: params.messages,
-    abortSignal
+    abortSignal,
+    ...runtimeOptions.aiSdk,
   };
 
   if (typeof params.system === "string" && params.system.trim()) {
     request.system = params.system;
-  }
-
-  if (Object.keys(runtimeOptions.aiSdk).length > 0) {
-    Object.assign(request, runtimeOptions.aiSdk);
   }
   const providerOptions = buildProviderOptionsWithPromptCacheKey({
     providerNpm: profile.provider.npm,
@@ -346,8 +319,13 @@ function buildSingleCallRequest(profile: SingleCallModelProfile, params: SingleC
     providerOptions: runtimeOptions.providerOptions
   });
   if (Object.keys(providerOptions).length > 0) {
+    const jsonProviderOptions: Record<string, JSONValue> = {};
+    for (const [key, value] of Object.entries(providerOptions)) {
+      const jsonValue = toJsonValue(value);
+      if (jsonValue !== undefined) jsonProviderOptions[key] = jsonValue;
+    }
     request.providerOptions = {
-      [runtimeOptions.providerKey]: providerOptions
+      [runtimeOptions.providerKey]: jsonProviderOptions
     };
   }
 
@@ -397,23 +375,21 @@ export function streamSingleCallText(profile: SingleCallModelProfile, params: Si
         timeoutMs,
         abortSignal: params.abortSignal
       });
-      let stream: unknown = null;
+      let stream: SingleCallStreamResult | null = null;
       let finishEmitted = false;
       try {
         const request = buildSingleCallRequest(profile, params, timed.signal);
-        stream = streamText(request as any);
-        for await (const chunk of (stream as any).fullStream as AsyncIterable<any>) {
-          if (!chunk || typeof chunk !== "object") continue;
+        stream = streamText(request);
+        for await (const chunk of stream.fullStream as AsyncIterable<SingleCallStreamChunk>) {
           if (chunk.type === "text-delta") {
-            const text = String(chunk.text || "");
+            const text = chunk.text;
             if (!text) continue;
             yield { type: "text-delta", text };
             continue;
           }
           if (chunk.type === "finish") {
             let totalTokens =
-              extractTotalTokens((chunk as Record<string, unknown>).usage) ??
-              extractTotalTokens((chunk as Record<string, unknown>).totalUsage) ??
+              extractTotalTokens(chunk.totalUsage) ??
               null;
             if (totalTokens == null) {
               totalTokens = await readStreamTotalTokens(stream);
@@ -423,10 +399,7 @@ export function streamSingleCallText(profile: SingleCallModelProfile, params: Si
             continue;
           }
           if (chunk.type === "error") {
-            if ((chunk as Record<string, unknown>).error !== undefined) {
-              throw (chunk as Record<string, unknown>).error;
-            }
-            throw new Error("stream error");
+            throw chunk.error;
           }
         }
 

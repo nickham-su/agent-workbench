@@ -9,6 +9,12 @@ import type {
   AgentToolExecution,
   AgentToolExecutionStatus
 } from "@agent-workbench/shared";
+import {
+  assertAgentProviderReplayUpdateCompatible,
+  parseAgentProviderReplay,
+  serializeAgentProviderReplay,
+  type AgentProviderReplayEnvelope,
+} from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { Db } from "../../infra/db/db.js";
 import { indexEligibleCompletedTextParts } from "./archive/agent-archive-store.js";
 
@@ -52,9 +58,9 @@ export class AgentStreamingAssistantReplayMismatchError extends Error {
 }
 
 export type AgentMessagePartInput =
-  | { id: string; position: number; type: "text" | "reasoning"; text: string }
+  | { id: string; position: number; type: "text" | "reasoning"; text: string; providerReplay?: AgentProviderReplayEnvelope }
   | { id: string; position: number; type: "image"; attachmentId: string; mediaType: "image/png" | "image/jpeg" | "image/webp"; filename: string }
-  | { id: string; position: number; type: "tool_call"; toolName: string; input: Record<string, unknown>; providerToolCallId?: string | null };
+  | { id: string; position: number; type: "tool_call"; toolName: string; input: Record<string, unknown>; providerToolCallId?: string | null; providerReplay?: AgentProviderReplayEnvelope };
 
 export type AgentToolExecutionInput = {
   id: string;
@@ -233,23 +239,54 @@ function replacementReplayMatches(db: Db, oldMessage: MessageRow, input: { works
     && state.runNoticeText === input.runNoticeText && state.retryCount === input.retryCount && state.nextRetryAt === input.nextRetryAt && state.updatedAt === input.createdAt;
 }
 
+function discardReplayMatches(db: Db, message: MessageRow, input: {
+  workspaceId: string; sessionId: string; runId: string; messageId: string; updatedAt: number;
+}) {
+  const session = sessionRow(db, input.workspaceId, input.sessionId);
+  const state = getMessageRunState(db, input.workspaceId, input.sessionId);
+  return assertFence(db, input)
+    && message.id === input.messageId && message.workspaceId === input.workspaceId
+    && message.originSessionId === input.sessionId && message.originRunId === input.runId
+    && message.status === "superseded" && message.updatedAt === input.updatedAt
+    && session?.headMessageId === message.previousMessageId
+    && session.revision === message.updatedRevision && session.updatedAt === input.updatedAt
+    && state?.activeAssistantMessageId === null
+    && !state.nonTerminalMessageIds.includes(input.messageId)
+    && state.updatedAt === input.updatedAt;
+}
+
 function assertPrevious(db: Db, workspaceId: string, previousMessageId: string | null) {
   if (previousMessageId == null) return -1;
   const previous = messageRow(db, previousMessageId);
   if (!previous || previous.workspaceId !== workspaceId) throw new Error("invalid previous message");
   return previous.depth;
 }
+
+function serializePartProviderReplay(part: AgentMessagePartInput): string | null {
+  if (part.type === "image" || part.providerReplay == null) return null;
+  const replayType = part.providerReplay.item.type;
+  const matchesPart = (part.type === "reasoning" && replayType === "reasoning")
+    || (part.type === "text" && replayType === "text")
+    || (part.type === "tool_call" && replayType === "function_call");
+  if (!matchesPart) throw new Error("provider replay item type does not match message part type");
+  return serializeAgentProviderReplay(part.providerReplay);
+}
+
 function insertParts(db: Db, messageId: string, parts: AgentMessagePartInput[], revision: number, now: number) {
   const sorted = [...parts].sort((a, b) => a.position - b.position);
   if (new Set(sorted.map((part) => part.position)).size !== sorted.length) throw new Error("duplicate message part position");
   for (const part of sorted) {
     const base = { id: part.id, messageId, position: part.position, updatedRevision: revision, now };
     if (part.type === "text" || part.type === "reasoning") {
-      db.prepare(`insert into agent_message_part (id,message_id,position,type,text,updated_revision,created_at,updated_at) values (@id,@messageId,@position,@type,@text,@updatedRevision,@now,@now)`).run({ ...base, type: part.type, text: part.text });
+      db.prepare(`insert into agent_message_part (id,message_id,position,type,text,provider_replay_json,updated_revision,created_at,updated_at)
+        values (@id,@messageId,@position,@type,@text,@providerReplayJson,@updatedRevision,@now,@now)`)
+        .run({ ...base, type: part.type, text: part.text, providerReplayJson: serializePartProviderReplay(part) });
     } else if (part.type === "image") {
       db.prepare(`insert into agent_message_part (id,message_id,position,type,attachment_id,media_type,filename,updated_revision,created_at,updated_at) values (@id,@messageId,@position,'image',@attachmentId,@mediaType,@filename,@updatedRevision,@now,@now)`).run({ ...base, ...part });
     } else if (part.type === "tool_call") {
-      db.prepare(`insert into agent_message_part (id,message_id,position,type,tool_name,tool_input_json,provider_tool_call_id,updated_revision,created_at,updated_at) values (@id,@messageId,@position,'tool_call',@toolName,@toolInputJson,@providerToolCallId,@updatedRevision,@now,@now)`).run({ ...base, toolName: part.toolName, toolInputJson: JSON.stringify(part.input), providerToolCallId: part.providerToolCallId ?? null });
+      db.prepare(`insert into agent_message_part (id,message_id,position,type,tool_name,tool_input_json,provider_tool_call_id,provider_replay_json,updated_revision,created_at,updated_at)
+        values (@id,@messageId,@position,'tool_call',@toolName,@toolInputJson,@providerToolCallId,@providerReplayJson,@updatedRevision,@now,@now)`)
+        .run({ ...base, toolName: part.toolName, toolInputJson: JSON.stringify(part.input), providerToolCallId: part.providerToolCallId ?? null, providerReplayJson: serializePartProviderReplay(part) });
     }
   }
 }
@@ -424,11 +461,27 @@ export function flushStreamingParts(db: Db, input: { workspaceId: string; sessio
     const revision = session.revision + 1;
     let changed = false;
     for (const part of input.parts) {
-      const existing = db.prepare("select id,position,type,text,tool_name as toolName,tool_input_json as toolInputJson,provider_tool_call_id as providerToolCallId from agent_message_part where id = ? and message_id = ?").get(part.id, input.messageId) as { id: string; position: number; type: string; text: string | null; toolName: string | null; toolInputJson: string | null; providerToolCallId: string | null } | undefined;
+      const incomingProviderReplayJson = serializePartProviderReplay(part);
+      const existing = db.prepare(`select id,position,type,text,tool_name as toolName,tool_input_json as toolInputJson,
+        provider_tool_call_id as providerToolCallId,provider_replay_json as providerReplayJson
+        from agent_message_part where id = ? and message_id = ?`).get(part.id, input.messageId) as {
+          id: string; position: number; type: string; text: string | null; toolName: string | null;
+          toolInputJson: string | null; providerToolCallId: string | null; providerReplayJson: string | null;
+        } | undefined;
       if (!existing) {
         insertParts(db, input.messageId, [part], revision, input.updatedAt);
         changed = true;
         continue;
+      }
+      let providerReplayChanged = false;
+      if (incomingProviderReplayJson != null && incomingProviderReplayJson !== existing.providerReplayJson) {
+        const incomingReplay = parseAgentProviderReplay(incomingProviderReplayJson)!;
+        const existingReplay = parseAgentProviderReplay(existing.providerReplayJson);
+        if (existing.providerReplayJson != null && !existingReplay) {
+          throw new Error("stored streaming part provider replay is invalid");
+        }
+        if (existingReplay) assertAgentProviderReplayUpdateCompatible(existingReplay, incomingReplay);
+        providerReplayChanged = true;
       }
       if (existing.type === "tool_call" && part.type === "tool_call") {
         const sameCall = existing.position === part.position
@@ -436,6 +489,11 @@ export function flushStreamingParts(db: Db, input: { workspaceId: string; sessio
           && existing.toolInputJson === JSON.stringify(part.input)
           && existing.providerToolCallId === (part.providerToolCallId ?? null);
         if (!sameCall) throw new Error("streaming ToolCall part replay does not match existing part");
+        if (providerReplayChanged) {
+          db.prepare("update agent_message_part set provider_replay_json=?,updated_revision=?,updated_at=? where id=? and message_id=?")
+            .run(incomingProviderReplayJson, revision, input.updatedAt, part.id, input.messageId);
+          changed = true;
+        }
         continue;
       }
       if (existing.type !== part.type || (part.type !== "text" && part.type !== "reasoning")) {
@@ -444,11 +502,12 @@ export function flushStreamingParts(db: Db, input: { workspaceId: string; sessio
       if (existing.position !== part.position) {
         throw new Error("streaming text part replay position does not match existing part");
       }
-      if (existing.text === part.text) continue;
+      if (existing.text === part.text && !providerReplayChanged) continue;
       if (!part.text.startsWith(existing.text ?? "")) {
         throw new Error("streaming text part must extend the existing cumulative text");
       }
-      db.prepare("update agent_message_part set text=?,updated_revision=?,updated_at=? where id=? and message_id=?").run(part.text, revision, input.updatedAt, part.id, input.messageId);
+      db.prepare("update agent_message_part set text=?,provider_replay_json=coalesce(?,provider_replay_json),updated_revision=?,updated_at=? where id=? and message_id=?")
+        .run(part.text, incomingProviderReplayJson, revision, input.updatedAt, part.id, input.messageId);
       changed = true;
     }
     if (!changed) return "updated";
@@ -563,7 +622,8 @@ export function prepareRunForStartupRecovery(db: Db, input: {
       const validPart = db.prepare(`
         select 1 from agent_message_part
         where message_id=? and (
-          type='tool_call' or (type in ('text','reasoning') and length(trim(coalesce(text, ''))) > 0)
+          type='tool_call' or provider_replay_json is not null
+          or (type in ('text','reasoning') and length(trim(coalesce(text, ''))) > 0)
         ) limit 1
       `).get(active.id);
       if (validPart) {
@@ -708,6 +768,38 @@ export function replaceStreamingAssistant(db: Db, input: { workspaceId: string; 
     });
     updateSessionPointer(db, { workspaceId: input.workspaceId, sessionId: input.sessionId, headMessageId: input.newMessageId, contextRootMessageId: session.contextRootMessageId, revision, now: input.createdAt });
     return { result: "updated", message: getMessage(db, input.newMessageId)! };
+  })();
+}
+
+/** 作废当前模型尝试，并回退到尝试前的有效 head。私有 replay 留在 superseded 消息中但不会进入有效链。 */
+export function discardStreamingAssistant(db: Db, input: {
+  workspaceId: string; sessionId: string; runId: string; messageId: string; updatedAt: number;
+}): FencedWriteResult {
+  return db.transaction(() => {
+    const message = messageRow(db, input.messageId);
+    if (!message) return "missing";
+    if (message.status === "superseded") {
+      return discardReplayMatches(db, message, input) ? "updated" : "ignored";
+    }
+    if (!assertFence(db, input)) return "ignored";
+    const session = sessionRow(db, input.workspaceId, input.sessionId)!;
+    const state = getMessageRunState(db, input.workspaceId, input.sessionId)!;
+    if (message.workspaceId !== input.workspaceId
+      || message.originSessionId !== input.sessionId
+      || message.originRunId !== input.runId
+      || message.status !== "streaming"
+      || session.headMessageId !== input.messageId
+      || state.activeAssistantMessageId !== input.messageId) return "ignored";
+    const revision = session.revision + 1;
+    db.prepare("update agent_message set status='superseded',updated_revision=?,updated_at=? where id=?")
+      .run(revision, input.updatedAt, input.messageId);
+    writeRunState(db, {
+      workspaceId: input.workspaceId, sessionId: input.sessionId, updatedAt: input.updatedAt,
+      activeAssistantMessageId: null,
+      nonTerminalMessageIds: state.nonTerminalMessageIds.filter((id) => id !== input.messageId),
+    });
+    updateSessionPointer(db, { workspaceId: input.workspaceId, sessionId: input.sessionId, headMessageId: message.previousMessageId, contextRootMessageId: session.contextRootMessageId, revision, now: input.updatedAt });
+    return "updated";
   })();
 }
 

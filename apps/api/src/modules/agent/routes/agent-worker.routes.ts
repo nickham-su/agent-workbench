@@ -36,6 +36,7 @@ import {
   AgentApiResumeStreamingAssistantRequestSchema,
   AgentApiReplaceStreamingAssistantRequestSchema,
   AgentApiReplaceStreamingAssistantResponseSchema,
+  AgentApiDiscardStreamingAssistantRequestSchema,
   AgentApiCompleteAssistantRequestSchema,
   AgentApiUpdateToolExecutionRequestSchema,
   AgentApiUpdateRunNoticeRequestSchema,
@@ -65,6 +66,7 @@ import {
   type AgentApiFlushAssistantPartsRequest,
   type AgentApiResumeStreamingAssistantRequest,
   type AgentApiReplaceStreamingAssistantRequest,
+  type AgentApiDiscardStreamingAssistantRequest,
   type AgentApiCompleteAssistantRequest,
   type AgentApiUpdateToolExecutionRequest,
   type AgentApiUpdateRunNoticeRequest,
@@ -128,6 +130,26 @@ export async function registerAgentWorkerRoutes(
       assertInternalToken(req, dependencies.internalToken);
       const body = req.body as AgentApiSubtaskPreforkPlanRequest;
       return dependencies.service.getSubtaskPreforkPlanFromWorker(body);
+    },
+  });
+
+  app.route({
+    method: AgentApiEndpoints.discardStreamingAssistant.method,
+    url: AgentApiEndpoints.discardStreamingAssistant.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiDiscardStreamingAssistantRequestSchema,
+      response: {
+        200: AgentApiFencedWriteResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+      },
+    },
+    handler: async (req) => {
+      assertInternalToken(req, dependencies.internalToken);
+      return dependencies.service.discardStreamingAssistantFromWorker(
+        req.body as AgentApiDiscardStreamingAssistantRequest,
+      );
     },
   });
 
@@ -493,12 +515,6 @@ export async function registerAgentWorkerRoutes(
               options: Type.Object({
                 baseURL: Type.String({ minLength: 1 }),
                 apiKey: Type.String({ minLength: 1 }),
-                apiMode: Type.Optional(
-                  Type.Union([
-                    Type.Literal("responses"),
-                    Type.Literal("chatCompletions"),
-                  ]),
-                ),
               }),
             }),
             model: Type.Object({

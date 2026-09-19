@@ -45,6 +45,106 @@ const validSubtaskStartRequest = {
   session: { mode: "new" as const },
 };
 
+const reasoningReplay = {
+  version: 1,
+  provider: {
+    npm: "@ai-sdk/openai",
+    api: "responses",
+    providerId: "provider-a",
+    model: "gpt-5",
+  },
+  item: {
+    type: "reasoning",
+    itemId: "rs_1",
+    encryptedContent: "opaque-ciphertext",
+    summaryIndex: 0,
+  },
+} as const;
+
+test("provider replay envelope 与内部 flush 契约严格限制白名单和 part 类型", () => {
+  assert.equal(Value.Check(AgentApiExport.AgentProviderReplayEnvelopeSchema, reasoningReplay), true);
+  assert.equal(Value.Check(AgentApiExport.AgentApiFlushAssistantPartsRequestSchema, {
+    workspaceId: "ws-a",
+    sessionId: "session-a",
+    runId: "run-a",
+    messageId: "message-a",
+    updatedAt: 1,
+    parts: [{ id: "part-a", position: 0, type: "reasoning", text: "", providerReplay: reasoningReplay }],
+  }), true);
+
+  assert.equal(Value.Check(AgentApiExport.AgentProviderReplayEnvelopeSchema, {
+    ...reasoningReplay,
+    provider: { ...reasoningReplay.provider, baseURL: "https://should-not-persist.example" },
+  }), false);
+  assert.equal(Value.Check(AgentApiExport.AgentProviderReplayEnvelopeSchema, {
+    ...reasoningReplay,
+    item: { ...reasoningReplay.item, providerMetadata: { arbitrary: true } },
+  }), false);
+  assert.equal(Value.Check(AgentApiExport.AgentProviderReplayEnvelopeSchema, {
+    ...reasoningReplay,
+    version: 2,
+  }), false);
+  assert.equal(Value.Check(AgentApiExport.AgentApiFlushAssistantPartsRequestSchema, {
+    workspaceId: "ws-a",
+    sessionId: "session-a",
+    runId: "run-a",
+    messageId: "message-a",
+    updatedAt: 1,
+    parts: [{ id: "part-a", position: 0, type: "text", text: "visible", providerReplay: reasoningReplay }],
+  }), false);
+});
+
+test("provider replay 严格序列化并安全跳过损坏或未来版本数据", () => {
+  const serialized = AgentApiExport.serializeAgentProviderReplay(reasoningReplay);
+  assert.deepEqual(AgentApiExport.parseAgentProviderReplay(serialized), reasoningReplay);
+  assert.equal(AgentApiExport.parseAgentProviderReplay("not-json"), null);
+  assert.equal(AgentApiExport.parseAgentProviderReplay('{"version":2}'), null);
+  assert.throws(() => AgentApiExport.serializeAgentProviderReplay({ ...reasoningReplay, apiKey: "secret" }), /invalid agent provider replay envelope/);
+});
+
+test("provider replay 更新保护 summaryIndex 与 phase，同时允许 reasoning 密文终态补齐", () => {
+  const reasoningWithoutIndex = {
+    ...reasoningReplay,
+    item: { type: "reasoning" as const, itemId: "rs_1", encryptedContent: "cipher-initial" },
+  };
+  const reasoningWithIndex = {
+    ...reasoningReplay,
+    item: { type: "reasoning" as const, itemId: "rs_1", encryptedContent: "cipher-final", summaryIndex: 0 },
+  };
+  assert.doesNotThrow(() => AgentApiExport.assertAgentProviderReplayUpdateCompatible(reasoningWithoutIndex, reasoningWithIndex));
+  assert.doesNotThrow(() => AgentApiExport.assertAgentProviderReplayUpdateCompatible(reasoningWithIndex, {
+    ...reasoningWithIndex,
+    item: { ...reasoningWithIndex.item, encryptedContent: "cipher-newer" },
+  }));
+  assert.throws(() => AgentApiExport.assertAgentProviderReplayUpdateCompatible(reasoningWithIndex, {
+    ...reasoningWithIndex,
+    item: { ...reasoningWithIndex.item, summaryIndex: 1 },
+  }), /summaryIndex is immutable once known/);
+  assert.throws(() => AgentApiExport.assertAgentProviderReplayUpdateCompatible(reasoningWithIndex, reasoningWithoutIndex), /summaryIndex is immutable once known/);
+
+  const textWithoutPhase = {
+    version: 1 as const,
+    provider: reasoningReplay.provider,
+    item: { type: "text" as const, itemId: "msg_1" },
+  };
+  const textWithPhase = {
+    ...textWithoutPhase,
+    item: { type: "text" as const, itemId: "msg_1", phase: "commentary" as const },
+  };
+  assert.doesNotThrow(() => AgentApiExport.assertAgentProviderReplayUpdateCompatible(textWithoutPhase, textWithPhase));
+  assert.doesNotThrow(() => AgentApiExport.assertAgentProviderReplayUpdateCompatible(textWithPhase, textWithPhase));
+  assert.throws(() => AgentApiExport.assertAgentProviderReplayUpdateCompatible(textWithPhase, {
+    ...textWithPhase,
+    item: { ...textWithPhase.item, phase: "final_answer" as const },
+  }), /phase is immutable once known/);
+  assert.throws(() => AgentApiExport.assertAgentProviderReplayUpdateCompatible(textWithPhase, textWithoutPhase), /phase is immutable once known/);
+
+  assert.throws(() => AgentApiExport.assertAgentProviderReplayUpdateCompatible(reasoningWithIndex, {
+    ...reasoningWithIndex,
+    item: { ...reasoningWithIndex.item, itemId: "rs_other" },
+  }), /item identity is immutable/);
+});
+
 test("agent-worker health response schema accepts only ok:true", () => {
   assert.equal(
     Value.Check(AgentWorkerHealthResponseSchema, { ok: true }),
@@ -193,6 +293,7 @@ test("agent-api endpoint registry exposes Message/Run and read-side operations",
       "completeAssistant",
       "completeRun",
       "createStreamingAssistant",
+      "discardStreamingAssistant",
       "flushAssistantParts",
       "replaceStreamingAssistant",
       "resumeStreamingAssistant",
@@ -226,7 +327,6 @@ test("agent-api aggregate export exposes read-side schemas with stable shells an
     options: {
       baseURL: "https://example.invalid/v1",
       apiKey: "secret",
-      apiMode: "responses" as const,
     },
   };
   const model = { id: "model-a", name: "Model A", contextWindowTokens: 128000 };

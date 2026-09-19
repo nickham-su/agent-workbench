@@ -77,7 +77,13 @@ test("AgentRunner materializes only attachment_ref parts into AI SDK file parts"
     },
     streamText: ((input: Record<string, unknown>) => {
       requests.push(input);
-      return { fullStream: (async function* () { yield { type: "text-delta", text: "image described" }; yield { type: "finish" }; })() };
+      return {
+        fullStream: (async function* () {
+          yield { type: "text-delta", text: "image described" };
+          yield { type: "raw", rawValue: { type: "response.completed", response: { output: [] } } };
+          yield { type: "finish" };
+        })()
+      };
     }) as unknown as typeof streamText
   });
   (runner as any).toolRegistry.listTools = async () => [];

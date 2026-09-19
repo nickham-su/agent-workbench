@@ -20,7 +20,7 @@ export type AgentWorkerRouteDependencies = InternalRouteDependencies & {
     "getSubtaskPreforkPlanFromWorker" | "getSubtaskRunResultFromWorker" |
     "getSubtaskRunStatusFromWorker" | "startSubtaskRunFromWorker" | "createStreamingAssistantFromWorker" |
     "flushAssistantPartsFromWorker" | "resumeStreamingAssistantFromWorker" | "replaceStreamingAssistantFromWorker" |
-    "completeAssistantFromWorker" | "updateToolExecutionFromWorker" |
+    "discardStreamingAssistantFromWorker" | "completeAssistantFromWorker" | "updateToolExecutionFromWorker" |
     "updateRunNoticeFromWorker" | "completeRunFromWorker" | "commitCompactionFromWorker" |
     "archiveReadFromWorker" | "archiveSearchFromWorker" |
     "getPromptContextForRun" |

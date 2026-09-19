@@ -8,6 +8,7 @@ import {
   AgentProviderNpmSchema
 } from "../contracts/settings.js";
 import { PluginToolCanonicalNameSchema } from "../contracts/plugin.js";
+import { AgentProviderReplayEnvelopeSchema } from "./agent-provider-replay.js";
 
 const AgentApiProviderSchema = Type.Object({
   id: Type.String({ minLength: 1 }),
@@ -15,8 +16,7 @@ const AgentApiProviderSchema = Type.Object({
   npm: AgentProviderNpmSchema,
   options: Type.Object({
     baseURL: Type.String({ minLength: 1 }),
-    apiKey: Type.String({ minLength: 1 }),
-    apiMode: Type.Optional(Type.Union([Type.Literal("responses"), Type.Literal("chatCompletions")]))
+    apiKey: Type.String({ minLength: 1 })
   })
 });
 
@@ -179,11 +179,36 @@ const AgentApiPromptMessageSchema = Type.Union([
   Type.Object({ role: Type.Literal("tool"), content: Type.Array(AgentApiPromptToolResultPartSchema) }, { additionalProperties: false })
 ]);
 
+const AgentApiPromptProviderReplayPartSchema = Type.Union([
+  Type.Object({
+    visibleIndex: Type.Integer({ minimum: 0 }),
+    type: Type.Literal("reasoning"),
+    text: Type.String(),
+    providerReplay: AgentProviderReplayEnvelopeSchema
+  }, { additionalProperties: false }),
+  Type.Object({
+    visibleIndex: Type.Integer({ minimum: 0 }),
+    type: Type.Literal("text"),
+    providerReplay: AgentProviderReplayEnvelopeSchema
+  }, { additionalProperties: false }),
+  Type.Object({
+    visibleIndex: Type.Integer({ minimum: 0 }),
+    type: Type.Literal("tool_call"),
+    providerReplay: AgentProviderReplayEnvelopeSchema
+  }, { additionalProperties: false })
+]);
+
+const AgentApiPromptProviderReplaySourceSchema = Type.Object({
+  assistantOrdinal: Type.Integer({ minimum: 0 }),
+  parts: Type.Array(AgentApiPromptProviderReplayPartSchema)
+}, { additionalProperties: false });
+
 export const AgentApiPromptContextResponseSchema = Type.Object({
   headMessageId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
   sessionRevision: Type.Integer({ minimum: 0 }),
   system: Type.String(),
   messages: Type.Array(AgentApiPromptMessageSchema),
+  providerReplay: Type.Optional(Type.Array(AgentApiPromptProviderReplaySourceSchema)),
   tools: Type.Array(Type.Object({
     name: Type.String({ minLength: 1 }),
     description: Type.String(),

@@ -15,6 +15,7 @@ import type {
   AgentRecentSessionsResponse,
   AgentRecentWorkspacesResponse,
 } from "@agent-workbench/shared/internal-contracts/agent-api-session";
+import type { AgentApiPromptContextResponse, AgentProviderReplayEnvelope } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { isValidSkillPathSegment } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { getPromptText } from "@agent-workbench/shared/prompts";
 import { AgentSubtaskErrorCode } from "@agent-workbench/shared/internal-contracts/agent-api";
@@ -139,6 +140,7 @@ import {
   flushStreamingParts,
   AgentMessageConflictError,
   replaceStreamingAssistant,
+  discardStreamingAssistant,
   getMessageRunState as getStoredMessageRunState,
   getMessageSession,
   getMessageSessionHead,
@@ -1146,6 +1148,7 @@ function createLifecycleFacadeCapabilities<
     | "flushAssistantPartsFromWorker"
     | "resumeStreamingAssistantFromWorker"
     | "replaceStreamingAssistantFromWorker"
+    | "discardStreamingAssistantFromWorker"
     | "completeAssistantFromWorker"
     | "updateToolExecutionFromWorker"
     | "updateRunNoticeFromWorker"
@@ -1162,6 +1165,7 @@ function createLifecycleFacadeCapabilities<
   | "flushAssistantPartsFromWorker"
   | "resumeStreamingAssistantFromWorker"
   | "replaceStreamingAssistantFromWorker"
+  | "discardStreamingAssistantFromWorker"
   | "completeAssistantFromWorker"
   | "updateToolExecutionFromWorker"
   | "updateRunNoticeFromWorker"
@@ -1174,6 +1178,7 @@ function createLifecycleFacadeCapabilities<
     flushAssistantPartsFromWorker,
     resumeStreamingAssistantFromWorker,
     replaceStreamingAssistantFromWorker,
+    discardStreamingAssistantFromWorker,
     completeAssistantFromWorker,
     updateToolExecutionFromWorker,
     updateRunNoticeFromWorker,
@@ -1186,6 +1191,7 @@ function createLifecycleFacadeCapabilities<
     flushAssistantPartsFromWorker,
     resumeStreamingAssistantFromWorker,
     replaceStreamingAssistantFromWorker,
+    discardStreamingAssistantFromWorker,
     completeAssistantFromWorker,
     updateToolExecutionFromWorker,
     updateRunNoticeFromWorker,
@@ -1618,6 +1624,10 @@ function createReadQueryWritebackAssembly(assembly: {
       content: any;
     }>;
   }>;
+  buildPromptContextMessagesForSession: (input: any) => Promise<{
+    messages: any[];
+    providerReplay: NonNullable<AgentApiPromptContextResponse["providerReplay"]>;
+  }>;
   resolveUiLocaleForSessionContext: (input: any) => any;
   buildOneShotSystemPrompt: (input: any) => any;
   ensureWorkspace: (workspaceId: string) => unknown;
@@ -1744,7 +1754,7 @@ function createReadQueryWritebackAssembly(assembly: {
           args: JSON.parse(row.toolInputJson) as Record<string, unknown>,
         }));
       },
-      buildMessages: (input) => assembly.buildPromptMessagesForSession(input),
+      buildMessages: (input) => assembly.buildPromptContextMessagesForSession(input),
     },
   );
   const readSideApplication = new ReadSideApplication({
@@ -1982,6 +1992,7 @@ function createAgentApplications(
     resolveExecutionProfileForReadSide,
     getAgentRuntimeSettingsForReadSide,
     buildPromptMessagesForSession,
+    buildPromptContextMessagesForSession,
     resolveUiLocaleForSessionContext,
     buildOneShotSystemPrompt,
     ensureWorkspace,
@@ -2254,6 +2265,11 @@ function createAgentApplications(
       expectedHeadMessageId: head.headMessageId,
       expectedRevision: head.revision,
     });
+  }
+
+  function discardStreamingAssistantFromWorker(params: import("@agent-workbench/shared/internal-contracts/agent-api").AgentApiDiscardStreamingAssistantRequest) {
+    workspaceDeletingFence.assertWritable(params.workspaceId);
+    return { result: discardStreamingAssistant(environment.db, params) };
   }
 
   function completeAssistantFromWorker(
@@ -2560,6 +2576,68 @@ function createAgentApplications(
     }
   }
 
+  async function buildPromptContextMessagesForSession(params: {
+    workspaceId: string;
+    sessionId: string;
+    triggerMessageId: string | null;
+    compactionSnippetUiLocale: AgentUiLocale | null;
+    pendingAssistantMessageIds?: ReadonlySet<string>;
+  }) {
+    void params.compactionSnippetUiLocale;
+    const source = messageQuery.getRuntimeTranscriptSource({
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+    });
+    const replayByPartId = messageQuery.getRuntimeProviderReplaySource({
+      workspaceId: params.workspaceId,
+      sessionId: params.sessionId,
+    });
+    const replayOnlyAssistantMessageIds = new Set(source.messages.flatMap((message) => {
+      if (message.type !== "assistant" || message.status !== "completed") return [];
+      const hasVisiblePart = message.parts.some((part) =>
+        part.type === "tool_call" || (part.type === "text" && part.text.length > 0));
+      const hasReasoningReplay = message.parts.some((part) =>
+        part.type === "reasoning"
+        && replayByPartId.get(part.id)?.item.type === "reasoning");
+      return !hasVisiblePart && hasReasoningReplay ? [message.id] : [];
+    }));
+    const projected = runtimeTranscriptProjector.projectDetailed({
+      workspaceId: params.workspaceId,
+      triggerMessageId: params.triggerMessageId,
+      stopBeforeAssistantMessageIds: params.pendingAssistantMessageIds,
+      includeEmptyAssistantMessageIds: replayOnlyAssistantMessageIds,
+      ...source,
+    });
+    const providerReplay = source.messages.flatMap((message) => {
+      const assistantOrdinal = projected.assistantMessageIndexes.get(message.id);
+      if (assistantOrdinal == null || message.type !== "assistant" || message.status !== "completed") return [];
+      let visibleIndex = 0;
+      const parts: Array<
+        | { visibleIndex: number; type: "reasoning"; text: string; providerReplay: AgentProviderReplayEnvelope }
+        | { visibleIndex: number; type: "text"; providerReplay: AgentProviderReplayEnvelope }
+        | { visibleIndex: number; type: "tool_call"; providerReplay: AgentProviderReplayEnvelope }
+      > = [];
+      for (const part of [...message.parts].sort((left, right) => left.position - right.position)) {
+        if (part.type !== "text" && part.type !== "tool_call" && part.type !== "reasoning") continue;
+        const replay = replayByPartId.get(part.id);
+        const currentVisibleIndex = visibleIndex;
+        if (part.type !== "reasoning") visibleIndex += 1;
+        if (!replay) continue;
+        if (part.type === "reasoning" && replay.item.type === "reasoning") {
+          parts.push({ visibleIndex: currentVisibleIndex, type: "reasoning", text: part.text, providerReplay: replay });
+        }
+        if (part.type === "text" && replay.item.type === "text") {
+          parts.push({ visibleIndex: currentVisibleIndex, type: "text", providerReplay: replay });
+        }
+        if (part.type === "tool_call" && replay.item.type === "function_call") {
+          parts.push({ visibleIndex: currentVisibleIndex, type: "tool_call", providerReplay: replay });
+        }
+      }
+      return parts.length > 0 ? [{ assistantOrdinal, parts }] : [];
+    });
+    return { messages: projected.messages, providerReplay };
+  }
+
   async function buildPromptMessagesForSession(params: {
     workspaceId: string;
     sessionId: string;
@@ -2753,6 +2831,7 @@ function createAgentApplications(
     flushAssistantPartsFromWorker,
     resumeStreamingAssistantFromWorker,
     replaceStreamingAssistantFromWorker,
+    discardStreamingAssistantFromWorker,
     completeAssistantFromWorker,
     updateToolExecutionFromWorker,
     updateRunNoticeFromWorker,
@@ -2830,6 +2909,8 @@ function createLocalRuntimeExecutionPort(
       capabilities.lifecycle.resumeStreamingAssistantFromWorker(params),
     replaceStreamingAssistantFromWorker: (params) =>
       capabilities.lifecycle.replaceStreamingAssistantFromWorker(params),
+    discardStreamingAssistantFromWorker: (params) =>
+      capabilities.lifecycle.discardStreamingAssistantFromWorker(params),
     completeAssistantFromWorker: (params) =>
       capabilities.lifecycle.completeAssistantFromWorker(params),
     updateToolExecutionFromWorker: (params) =>

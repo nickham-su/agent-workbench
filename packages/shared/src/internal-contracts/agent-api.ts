@@ -15,6 +15,10 @@ export const AgentApiEndpoints = {
     method: "POST",
     path: "/api/internal/agent/messages/assistant/replace",
   },
+  discardStreamingAssistant: {
+    method: "POST",
+    path: "/api/internal/agent/messages/assistant/discard",
+  },
   completeAssistant: {
     method: "POST",
     path: "/api/internal/agent/messages/assistant/complete",
@@ -77,3 +81,4 @@ export * from "./agent-api-run.js";
 export * from "./agent-api-message.js";
 export * from "./agent-api-subtask.js";
 export * from "./agent-api-read.js";
+export * from "./agent-provider-replay.js";

@@ -255,6 +255,49 @@ test("startup recovery 将 running 工具标记为 unknown、保留 queued，并
   }
 });
 
+test("startup recovery 将仅有私有 replay 的空 reasoning Assistant 隔离并替换", async (t: TestContext) => {
+  const fixture = await createStartupFixture(t);
+  try {
+    const session = await createPrimarySession(fixture);
+    const runId = newSortableId("run");
+    const ts = Date.now();
+    createRunningMessageRun(fixture, session.id, runId, ts);
+    const head = getMessageSession(fixture.db, fixture.workspaceId, session.id)!;
+    const assistantId = newSortableId("msg");
+    appendStreamingAssistant(fixture.db, {
+      id: assistantId, workspaceId: fixture.workspaceId, sessionId: session.id,
+      expectedHeadMessageId: head.headMessageId, expectedRevision: head.revision,
+      runId, createdAt: ts + 1,
+    });
+    assert.equal(flushStreamingParts(fixture.db, {
+      workspaceId: fixture.workspaceId, sessionId: session.id, runId, messageId: assistantId,
+      parts: [{
+        id: newSortableId("part"), position: 0, type: "reasoning", text: "",
+        providerReplay: {
+          version: 1,
+          provider: { npm: "@ai-sdk/openai", api: "responses", providerId: "provider", model: "gpt-5" },
+          item: { type: "reasoning", itemId: "rs_recovery", encryptedContent: "opaque-recovery" },
+        },
+      }],
+      updatedAt: ts + 2,
+    }), "updated");
+
+    const persistence = new SqliteRunLifecyclePersistence(fixture.db);
+    const result = persistence.prepareRunForStartupRecovery({
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      runId,
+      replacementMessageId: "msg_replay_recovered",
+      updatedAt: ts + 3,
+    });
+    assert.deepEqual(result, { prepared: true, resumeAssistantMessageId: "msg_replay_recovered" });
+    assert.equal(getMessage(fixture.db, assistantId)?.status, "superseded");
+    assert.equal(getMessage(fixture.db, "msg_replay_recovered")?.status, "streaming");
+  } finally {
+    await fixture.dispose();
+  }
+});
+
 test("runtime ready 先续作 tombstone，并跳过 deleting Run 后恢复其他 Workspace", async (t: TestContext) => {
   const fixture = await createStartupFixture(t);
   const deletingWorkspaceId = fixture.workspaceId;

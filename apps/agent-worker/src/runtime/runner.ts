@@ -2,16 +2,35 @@ import { randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { APICallError, jsonSchema, streamText, tool } from "ai";
+import {
+  APICallError,
+  jsonSchema,
+  streamText,
+  tool,
+  type LanguageModel,
+  type JSONValue,
+  type ModelMessage,
+  type StreamTextResult,
+  type TextStreamPart,
+  type ToolSet,
+} from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call";
+import { parseAiSdkCallSettings } from "@agent-workbench/shared/llm-ai-sdk-call-settings";
 import { AgentApiClient, ApiConflictError, InternalRpcHttpError, InternalRpcNetworkError, InternalRpcTimeoutError, type ExecutionProfile, type PromptContext } from "./apiClient.js";
 import type { AgentUiLocale } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { getPromptText } from "@agent-workbench/shared/prompts";
 import { McpManager } from "./mcpManager.js";
-import type { AgentApiPromptAttachmentRefPart } from "@agent-workbench/shared/internal-contracts/agent-api";
+import {
+  AgentProviderReplayUpdateError,
+  assertAgentProviderReplayUpdateCompatible,
+  serializeAgentProviderReplay,
+  type AgentProviderReplayEnvelope,
+  type AgentApiFlushAssistantPartsRequest,
+  type AgentApiPromptAttachmentRefPart,
+} from "@agent-workbench/shared/internal-contracts/agent-api";
 import { PluginRuntimeManager } from "./plugins/runtimeManager.js";
 import { ToolRegistry } from "./tools/registry.js";
 import { BuiltinToolProvider } from "./tools/providers/builtin.js";
@@ -53,6 +72,7 @@ const MODEL_RETRY_BACKOFF_BASE_MS = 2_000;
 const CONTROL_WRITE_RETRY_DELAY_MS = 100;
 const MODEL_RETRY_BACKOFF_DEFAULT_MAX_MS = 60_000;
 const MODEL_RETRY_BACKOFF_MAX_ALLOWED_MS = 3_600_000;
+const CONTEXT_LIMIT_COMPACTION_MAX_ATTEMPTS = 2;
 const EMPTY_RESPONSE_COMPLETE_THRESHOLD = 6;
 const TOOL_OUTPUT_TEXT_MAX_CHARS = Math.max(1_000, parseIntOrDefault(process.env.AWB_TOOL_OUTPUT_TEXT_MAX_CHARS, 8_000));
 const TOOL_OUTPUT_TEXT_PREVIEW_CHARS = Math.max(
@@ -198,6 +218,45 @@ function isContextLengthExceededError(err: unknown) {
   ].some(hasContextLimitText);
 }
 
+function safeErrorSummary(error: unknown) {
+  const source = toErrorRecord(error);
+  const apiCallError = APICallError.isInstance(error) ? error : null;
+  const name = error instanceof Error && error.name ? error.name : "Error";
+  const status = apiCallError?.statusCode
+    ?? (typeof source?.statusCode === "number" ? source.statusCode : null)
+    ?? (typeof source?.status === "number" ? source.status : null);
+  const codes = [
+    ...collectErrorCodes(apiCallError?.data),
+    ...collectErrorCodes(source),
+  ].filter(Boolean);
+  const details = [
+    status == null ? null : `status=${status}`,
+    codes[0] ? `code=${codes[0]}` : null,
+  ].filter((value): value is string => value != null);
+  return details.length > 0 ? `${name} (${details.join(", ")})` : name;
+}
+
+function toolErrorMessage(error: unknown) {
+  if (error instanceof Error) return error.message || error.name || "Error";
+  return String(error || "Error");
+}
+
+export class ModelContextLengthExceededError extends Error {
+  constructor(readonly assistantMessageId: string, cause: unknown) {
+    super("model context length exceeded");
+    this.name = "ModelContextLengthExceededError";
+    (this as Error & { cause?: unknown }).cause = cause;
+  }
+}
+
+class ContextLimitCompactionError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = "ContextLimitCompactionError";
+    if (cause !== undefined) (this as Error & { cause?: unknown }).cause = cause;
+  }
+}
+
 async function sleepMsWithAbort(ms: number, signal: AbortSignal) {
   if (ms <= 0) return !signal.aborted;
   if (signal.aborted) return false;
@@ -238,7 +297,7 @@ function formatSubtaskStartError(error: unknown, args: Record<string, unknown>) 
   ) {
     return "指定的 existing 子任务会话不存在或已失效。请改用 session.mode=\"new\" 或 \"fork\"，或者提供当前工作区中有效的 subtask sessionId。\n\n错误码：AGENT_SUBTASK_SESSION_NOT_FOUND\nHTTP 状态：404";
   }
-  return error instanceof Error ? error.message : String(error);
+  return toolErrorMessage(error);
 }
 
 function normalizeToolText(raw: string) {
@@ -774,14 +833,30 @@ type ToolCall = {
   callPartId: string;
 };
 
+type ProviderReplayFor<T extends AgentProviderReplayEnvelope["item"]["type"]> = AgentProviderReplayEnvelope & {
+  item: Extract<AgentProviderReplayEnvelope["item"], { type: T }>;
+};
+
 /** Provider stream 的有序转录状态；已切换类型的文本不可回填到早期 Part。 */
 type StreamingAssistantPart =
-  | { id: string; position: number; type: "text"; text: string }
-  | { id: string; position: number; type: "reasoning"; text: string }
+  | { id: string; position: number; type: "text"; text: string; providerReplay?: ProviderReplayFor<"text"> }
+  | { id: string; position: number; type: "reasoning"; text: string; providerReplay?: ProviderReplayFor<"reasoning"> }
   | {
     id: string; position: number; type: "tool_call"; toolName: string;
     input: Record<string, unknown>; providerToolCallId: string | null; toolCall: ToolCall;
+    providerReplay?: ProviderReplayFor<"function_call">;
   };
+
+type ProviderReplayPartUpdate = OpenAiResponsesReplayPartUpdate;
+
+type RuntimeToolSet = ToolSet;
+type RuntimeStreamChunk = TextStreamPart<RuntimeToolSet>;
+type RuntimeStreamResult = Pick<StreamTextResult<RuntimeToolSet, never>,
+  "fullStream" | "reasoningText" | "usage" | "totalUsage" | "response">;
+type RuntimeStreamRequest = Parameters<typeof streamText<RuntimeToolSet>>[0];
+type RuntimeStreamText = (request: RuntimeStreamRequest) => RuntimeStreamResult;
+
+type ProviderToolCallReplay = OpenAiResponsesToolCallReplay;
 
 type ToolExecutionBatch = {
   mode: "parallel" | "serial";
@@ -790,10 +865,11 @@ type ToolExecutionBatch = {
 
 function isAbortLikeError(err: unknown, signal?: AbortSignal) {
   if (signal?.aborted) return true;
-  if (!err || typeof err !== "object") return false;
-  const name = typeof (err as any).name === "string" ? (err as any).name : "";
-  const code = typeof (err as any).code === "string" ? (err as any).code : "";
-  const message = typeof (err as any).message === "string" ? (err as any).message : "";
+  const record = toErrorRecord(err);
+  if (!record) return false;
+  const name = typeof record.name === "string" ? record.name : "";
+  const code = typeof record.code === "string" ? record.code : "";
+  const message = typeof record.message === "string" ? record.message : "";
   return name === "AbortError"
     || code === "ABORT_ERR"
     || /\babort(ed)?\b/i.test(message)
@@ -864,18 +940,6 @@ const EMPTY_PROMPT_CONTEXT: PromptContext = {
   externalSkillRoots: []
 };
 
-const RESERVED_MODEL_OPTION_KEYS = new Set([
-  "model",
-  "system",
-  "prompt",
-  "messages",
-  "input",
-  "abortSignal",
-  "providerOptions",
-  "tools",
-  "toolChoice"
-]);
-
 function isSafeObjectKey(raw: string) {
   if (!raw) return false;
   return raw !== "__proto__" && raw !== "prototype" && raw !== "constructor";
@@ -886,6 +950,28 @@ function toRecordObject(raw: unknown) {
   return raw as Record<string, unknown>;
 }
 
+function toJsonValue(raw: unknown): JSONValue | undefined {
+  if (raw === null || typeof raw === "string" || typeof raw === "boolean") return raw;
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : undefined;
+  if (Array.isArray(raw)) {
+    const values: JSONValue[] = [];
+    for (const item of raw) {
+      const value = toJsonValue(item);
+      if (value === undefined) return undefined;
+      values.push(value);
+    }
+    return values;
+  }
+  const source = toRecordObject(raw);
+  if (!source) return undefined;
+  const result: Record<string, JSONValue> = {};
+  for (const [key, item] of Object.entries(source)) {
+    const value = toJsonValue(item);
+    if (value !== undefined) result[key] = value;
+  }
+  return result;
+}
+
 function providerOptionsKeyByNpm(npm: ExecutionProfile["provider"]["npm"]) {
   if (npm === "@ai-sdk/openai-compatible") return "openaiCompatible";
   return npm === "@ai-sdk/anthropic" ? "anthropic" : "openai";
@@ -893,17 +979,10 @@ function providerOptionsKeyByNpm(npm: ExecutionProfile["provider"]["npm"]) {
 
 function buildModelRuntimeOptions(profile: ExecutionProfile) {
   const source = toRecordObject(profile.model.options) ?? {};
-  const aiSdkSource = toRecordObject(source.aiSdk) ?? {};
-  const aiSdk: Record<string, unknown> = {};
-  for (const [rawKey, value] of Object.entries(aiSdkSource)) {
-    const key = rawKey.trim();
-    if (!isSafeObjectKey(key)) continue;
-    if (RESERVED_MODEL_OPTION_KEYS.has(key)) continue;
-    aiSdk[key] = value;
-  }
+  const aiSdk = parseAiSdkCallSettings(source.aiSdk);
 
   if (aiSdk.maxOutputTokens === undefined && source.maxOutputTokens !== undefined) {
-    aiSdk.maxOutputTokens = source.maxOutputTokens;
+    aiSdk.maxOutputTokens = parseAiSdkCallSettings({ maxOutputTokens: source.maxOutputTokens }).maxOutputTokens;
   }
 
   const providerOptionsByKey = toRecordObject(source.providerOptionsByKey) ?? {};
@@ -953,27 +1032,6 @@ function buildProviderOptionsWithPromptCacheKey(params: {
   };
 }
 
-function resolveOpenAiModelFactory(sdk: Record<string, unknown>, apiMode: "responses" | "chatCompletions") {
-  const responses = typeof sdk.responses === "function" ? (sdk.responses as (modelId: string) => unknown) : null;
-  const chat = typeof sdk.chat === "function" ? (sdk.chat as (modelId: string) => unknown) : null;
-  const chatCompletions =
-    typeof sdk.chatCompletions === "function" ? (sdk.chatCompletions as (modelId: string) => unknown) : null;
-
-  if (apiMode === "chatCompletions") {
-    if (chat) return chat;
-    if (chatCompletions) return chatCompletions;
-    throw new Error(`openai sdk does not expose chat/chatCompletions model factories for apiMode=${apiMode}`);
-  }
-
-  if (responses) return responses;
-  throw new Error(`openai sdk does not expose responses model factory for apiMode=${apiMode}`);
-}
-
-function normalizeOpenAiApiMode(raw: unknown): "responses" | "chatCompletions" {
-  if (raw === "responses" || raw === "chatCompletions") return raw;
-  return "responses";
-}
-
 function createLanguageModel(profile: ExecutionProfile) {
   const providerModelId =
     typeof profile.model.providerModelId === "string" && profile.model.providerModelId.trim()
@@ -985,9 +1043,7 @@ function createLanguageModel(profile: ExecutionProfile) {
       apiKey: profile.provider.options.apiKey,
       baseURL: profile.provider.options.baseURL
     });
-    const apiMode = normalizeOpenAiApiMode(profile.provider.options.apiMode);
-    const createModel = resolveOpenAiModelFactory(sdk as unknown as Record<string, unknown>, apiMode);
-    return createModel(providerModelId);
+    return sdk.responses(providerModelId);
   }
 
   if (profile.provider.npm === "@ai-sdk/openai-compatible") {
@@ -1011,11 +1067,14 @@ function createLanguageModel(profile: ExecutionProfile) {
 }
 
 function isSensitiveKey(rawKey: string) {
-  const key = rawKey.toLowerCase();
+  const key = rawKey.replace(/[_-]/g, "").toLowerCase();
   return (
     key === "authorization" ||
-    key === "api_key" ||
     key === "apikey" ||
+    key === "encryptedcontent" ||
+    key === "reasoningencryptedcontent" ||
+    key === "providerreplay" ||
+    key === "providerreplayjson" ||
     key.includes("token") ||
     key.includes("secret") ||
     key.includes("password")
@@ -1026,8 +1085,19 @@ function sanitizeForDebugDump(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map((item) => sanitizeForDebugDump(item));
   }
+  if (typeof value === "string") {
+    const parsed = parseJsonErrorValue(value);
+    if (parsed != null) return JSON.stringify(sanitizeForDebugDump(parsed));
+    return value
+      .replace(/("?(?:encrypted_content|encryptedContent|reasoningEncryptedContent|provider_replay_json|providerReplay)"?\s*[:=]\s*)"[^"\r\n]*"/gi, "$1\"***\"")
+      .replace(/((?:encrypted_content|encryptedContent|reasoningEncryptedContent|provider_replay_json|providerReplay)\s*[:=]\s*)[^,}\]\s]+/gi, "$1***");
+  }
   if (!value || typeof value !== "object") {
     return value;
+  }
+
+  if (value instanceof Error) {
+    return { name: value.name || "Error", summary: safeErrorSummary(value) };
   }
 
   const source = value as Record<string, unknown>;
@@ -1048,16 +1118,16 @@ async function writeItemLog(params: {
   kind: "assistant" | "tool";
   recordId?: string;
   payload: unknown;
+  force?: boolean;
 }) {
-  if (!DEBUG_DUMP_ENABLED) return;
+  if (!DEBUG_DUMP_ENABLED && !params.force) return;
   const dirPath = path.join(params.workspacePath, DEBUG_DUMP_RELATIVE_DIR, params.kind);
   const filePath = path.join(dirPath, `${safePathSegment(params.recordId ?? "unknown")}.log`);
   try {
     await fs.mkdir(dirPath, { recursive: true });
     await fs.writeFile(filePath, JSON.stringify(sanitizeForDebugDump(params.payload), null, 2), "utf8");
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    params.logger.warn(`[agent-worker] write item log failed: ${message}`);
+    params.logger.warn(`[agent-worker] write item log failed: ${safeErrorSummary(err)}`);
   }
 }
 
@@ -1210,18 +1280,18 @@ function isAttachmentRefPart(value: unknown): value is AgentApiPromptAttachmentR
 async function materializePromptAttachments(params: {
   messages: PromptContext["messages"];
   attachmentStorage: AgentAttachmentStorage | undefined;
-}) {
-  const messages: Array<Record<string, unknown>> = [];
+}): Promise<ModelMessage[]> {
+  const messages: ModelMessage[] = [];
   for (const message of params.messages) {
     if (message.role !== "user" || !Array.isArray(message.content)) {
-      messages.push(message as Record<string, unknown>);
+      messages.push(message as ModelMessage);
       continue;
     }
 
-    const content: Array<Record<string, unknown>> = [];
+    const content: Extract<ModelMessage, { role: "user" }>["content"] = [];
     for (const part of message.content) {
       if (!isAttachmentRefPart(part)) {
-        content.push(part as Record<string, unknown>);
+        content.push(part);
         continue;
       }
       if (!params.attachmentStorage) throw new Error("attachment storage is unavailable");
@@ -1237,26 +1307,22 @@ async function materializePromptAttachments(params: {
         filename: part.filename
       });
     }
-    messages.push({ ...message, content });
+    messages.push({ role: "user", content });
   }
   return messages;
 }
 
 type AgentRunnerDeps = {
-  streamText?: typeof streamText;
+  streamText?: RuntimeStreamText;
   nowMs?: () => number;
   warningNowMs?: () => number;
   attachmentStorage?: AgentAttachmentStorage;
   /** 仅用于测试控制面固定短间隔重试，不影响 Provider 退避。 */
   controlWriteSleep?: (ms: number, signal: AbortSignal) => Promise<boolean>;
-};
-
-type StreamTextResultLike = {
-  fullStream: AsyncIterable<unknown>;
-  reasoningText?: PromiseLike<unknown>;
-  usage?: PromiseLike<unknown> | unknown;
-  totalUsage?: PromiseLike<unknown> | unknown;
-  response?: PromiseLike<unknown> | unknown;
+  /** Provider 专属适配器扩展点：reasoning/text metadata-only 更新。 */
+  providerReplayPartFromChunk?: (chunk: unknown) => ProviderReplayPartUpdate | null;
+  /** Provider 专属适配器扩展点：从真实 tool-call chunk 提取 function item metadata。 */
+  providerToolCallReplayFromChunk?: (chunk: unknown) => ProviderToolCallReplay | null;
 };
 
 export class AgentRunner {
@@ -1272,11 +1338,13 @@ export class AgentRunner {
   private activeCount = 0;
   private readonly toolErrorWarningLimiter = new Map<string, { windowStartedAt: number; suppressed: number }>();
 
-  private readonly streamTextFn: typeof streamText;
+  private readonly streamTextFn: RuntimeStreamText;
   private readonly nowMsFn: () => number;
   private readonly warningNowMsFn: () => number;
   private readonly attachmentStorage: AgentAttachmentStorage | undefined;
   private readonly controlWriteSleepFn: (ms: number, signal: AbortSignal) => Promise<boolean>;
+  private readonly providerReplayPartFromChunkFn: ((chunk: unknown) => ProviderReplayPartUpdate | null) | undefined;
+  private readonly providerToolCallReplayFromChunkFn: ((chunk: unknown) => ProviderToolCallReplay | null) | undefined;
 
   constructor(
     private readonly apiClient: AgentApiClient,
@@ -1285,11 +1353,13 @@ export class AgentRunner {
     private readonly concurrency: number,
     deps: AgentRunnerDeps = {}
   ) {
-    this.streamTextFn = deps.streamText ?? streamText;
+    this.streamTextFn = deps.streamText ?? streamText<RuntimeToolSet>;
     this.nowMsFn = deps.nowMs ?? nowMs;
     this.warningNowMsFn = deps.warningNowMs ?? nowMs;
     this.attachmentStorage = deps.attachmentStorage;
     this.controlWriteSleepFn = deps.controlWriteSleep ?? sleepMsWithAbort;
+    this.providerReplayPartFromChunkFn = deps.providerReplayPartFromChunk;
+    this.providerToolCallReplayFromChunkFn = deps.providerToolCallReplayFromChunk;
     this.pluginRuntimeManager = new PluginRuntimeManager(this.logger);
     const pluginProvider = REMOTE_PLUGIN_TOOLS_ENABLED
       ? new RemotePluginToolProvider()
@@ -1486,14 +1556,14 @@ export class AgentRunner {
       this.runningSessions.delete(run.sessionId);
       this.activeRunIds.delete(run.runId);
       this.activeCount -= 1;
-      this.logger.error("worker startRun failed", err);
+      this.logger.error(`worker startRun failed: ${safeErrorSummary(err)}`);
       this.pump();
       return;
     }
 
     void this.processRun(run, controller.signal)
       .catch((err) => {
-        this.logger.error("worker run failed", err);
+        this.logger.error(`worker run failed: ${safeErrorSummary(err)}`);
       })
       .finally(() => {
         this.deleteControllerIfSame(run.sessionId, controller);
@@ -1736,8 +1806,7 @@ export class AgentRunner {
           text: rawSuccessText
         });
       } catch (artifactErr) {
-        const message = artifactErr instanceof Error ? artifactErr.message : String(artifactErr);
-        this.logger.warn(`[agent-worker] persist tool artifact failed(execution=${tool.toolExecutionId}, tool=${tool.toolName}): ${message}`);
+        this.logger.warn(`[agent-worker] persist tool artifact failed(execution=${tool.toolExecutionId}, tool=${tool.toolName}): ${safeErrorSummary(artifactErr)}`);
         const needsTruncate = rawSuccessText.length > TOOL_OUTPUT_TEXT_MAX_CHARS;
         const preview = rawSuccessText.slice(0, TOOL_OUTPUT_TEXT_PREVIEW_CHARS).trimEnd();
         finalizedText = {
@@ -1788,10 +1857,11 @@ export class AgentRunner {
 
       const error = tool.toolName === "subtask"
         ? formatSubtaskStartError(err, tool.args)
-        : err instanceof Error ? err.message : String(err);
-      const subtaskSessionId = err && typeof err === "object" ? String((err as any).subtaskSessionId || "").trim() : "";
-      const subtaskResultText = err && typeof err === "object" && typeof (err as any).subtaskResultText === "string"
-        ? (err as any).subtaskResultText as string
+        : toolErrorMessage(err);
+      const errorRecord = toErrorRecord(err);
+      const subtaskSessionId = String(errorRecord?.subtaskSessionId || "").trim();
+      const subtaskResultText = typeof errorRecord?.subtaskResultText === "string"
+        ? errorRecord.subtaskResultText
         : undefined;
       const isSubtaskWithResult = tool.toolName === "subtask" && (subtaskSessionId || typeof subtaskResultText === "string");
       const errorText = isSubtaskWithResult
@@ -1855,7 +1925,7 @@ export class AgentRunner {
       }
       if (err instanceof FencedWriteIgnoredError || err instanceof FencedWriteMissingError || err instanceof ControlWritePermanentError) throw err;
       capture?.recordEvent("runner_outer_unhandled", err);
-      const error = err instanceof Error ? err.message : String(err);
+      const error = toolErrorMessage(err);
       const output = {
         type: "tool" as const,
         toolName: params.tool.toolName,
@@ -2125,7 +2195,7 @@ export class AgentRunner {
       model: ExecutionProfile["model"];
     };
     input: {
-      messages: Array<{ role: string; content: unknown }>;
+      messages: ModelMessage[];
       system?: string;
       sessionId?: string;
       timeoutMs: number;
@@ -2166,7 +2236,7 @@ export class AgentRunner {
     });
     const generateSummary = async (
       profile: typeof primary,
-      messages: Array<{ role: string; content: unknown }>
+      messages: ModelMessage[]
     ) => await this.generateSingleCallSummary({
         profile: {
           provider: profile.provider,
@@ -2181,7 +2251,7 @@ export class AgentRunner {
           abortSignal: params.signal
         }
       });
-    const summarize = async (messages: Array<{ role: string; content: unknown }>) => {
+    const summarize = async (messages: ModelMessage[]) => {
       try {
         return await generateSummary(selected.profile, messages);
       } catch (err) {
@@ -2199,7 +2269,7 @@ export class AgentRunner {
 
     let blockCount = 1;
     const summarizeWithMessageBoundarySplit = async (
-      messages: Array<{ role: string; content: unknown }>
+      messages: ModelMessage[]
     ): Promise<string[]> => {
       try {
         const response = await summarize(messages);
@@ -2220,7 +2290,7 @@ export class AgentRunner {
       }
     };
 
-    return (await summarizeWithMessageBoundarySplit(sourceMessages)).filter(Boolean).join("\n\n---\n\n");
+    return (await summarizeWithMessageBoundarySplit(sourceMessages as ModelMessage[])).filter(Boolean).join("\n\n---\n\n");
   }
 
   private async compactContext(params: {
@@ -2228,8 +2298,9 @@ export class AgentRunner {
     run: QueuedRun;
     context: PromptContext;
     signal: AbortSignal;
+    maxProviderRetries?: number;
   }) {
-    const { profile, run, context, signal } = params;
+    const { profile, run, context, signal, maxProviderRetries } = params;
     let retryCount = 0;
 
     while (!signal.aborted) {
@@ -2249,9 +2320,12 @@ export class AgentRunner {
           throw err;
         }
         if (signal.aborted) return false;
+        if (maxProviderRetries != null && retryCount >= maxProviderRetries) {
+          throw new ContextLimitCompactionError("context-limit compaction provider failed", err);
+        }
         const delayMs = computeRetryBackoffMs(retryCount);
         const retryAttempt = retryCount + 1;
-        const message = err instanceof Error ? err.message : String(err);
+        const message = safeErrorSummary(err);
         const noticeText = `Compaction failed, retrying in ${Math.floor(delayMs / 1000)}s (attempt ${retryAttempt}): ${message}`;
         this.logger.warn(
           `[agent-worker] compaction retry scheduled(session=${run.sessionId}, run=${run.runId}, retry=${retryAttempt}): ${message}`
@@ -2319,11 +2393,16 @@ export class AgentRunner {
     const model = createLanguageModel(profile);
     const runtimeOptions = buildModelRuntimeOptions(profile);
     const turnId = newSortableId("turn");
-    let materializedMessages: Array<Record<string, unknown>>;
+    let materializedMessages: ModelMessage[];
     try {
-      materializedMessages = await materializePromptAttachments({ messages: context.messages, attachmentStorage: this.attachmentStorage });
+      const replayedMessages = applyOpenAiResponsesReplay({
+        profile,
+        messages: context.messages as Parameters<typeof applyOpenAiResponsesReplay>[0]["messages"],
+        source: context.providerReplay,
+      });
+      materializedMessages = await materializePromptAttachments({ messages: replayedMessages as PromptContext["messages"], attachmentStorage: this.attachmentStorage });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = safeErrorSummary(err);
       this.logger.warn(`[agent-worker] attachment materialization failed: ${message}`);
       throw new Error(`attachment materialization failed: ${message}`);
     }
@@ -2331,19 +2410,19 @@ export class AgentRunner {
     const modelIdleTimeoutMs =
       ENV_MODEL_IDLE_TIMEOUT_MS > 0
         ? ENV_MODEL_IDLE_TIMEOUT_MS
-        : Math.max(0, Math.floor((profile as any).runtime?.modelIdleTimeoutMs ?? 0));
+        : Math.max(0, Math.floor(profile.runtime.modelIdleTimeoutMs));
     const modelTotalTimeoutMs =
       ENV_MODEL_TOTAL_TIMEOUT_MS > 0
         ? ENV_MODEL_TOTAL_TIMEOUT_MS
-        : Math.max(0, Math.floor((profile as any).runtime?.modelTotalTimeoutMs ?? 0));
-    const modelRequestRetryBackoffMaxMs = normalizeRetryBackoffMaxMs((profile as any).runtime?.modelRequestRetryBackoffMaxMs);
+        : Math.max(0, Math.floor(profile.runtime.modelTotalTimeoutMs));
+    const modelRequestRetryBackoffMaxMs = normalizeRetryBackoffMaxMs(profile.runtime.modelRequestRetryBackoffMaxMs);
 
     const toolDefinitions = await this.toolRegistry.listTools({
       profile,
       promptContext: context,
       apiClient: this.apiClient
     });
-    const toolSet: Record<string, any> = {};
+    const toolSet: RuntimeToolSet = {};
     for (const item of toolDefinitions) {
       toolSet[item.name] = tool({
         description: item.description,
@@ -2354,27 +2433,34 @@ export class AgentRunner {
     // TODO(plugin-phase2): 若后续 provider 引入缓存/热更新，需要把该快照显式透传到执行阶段，而不是仅从 promptContext 重新推导。
     const availableToolNames = new Set<string>(Object.keys(toolSet));
 
-    const requestBase: Record<string, unknown> = {
+    const requestBase: RuntimeStreamRequest = {
       model,
       system: context.system || undefined,
       messages: materializedMessages,
-      tools: toolSet
+      tools: toolSet,
+      ...runtimeOptions.aiSdk,
+      maxRetries: 0,
     };
-
-    if (Object.keys(runtimeOptions.aiSdk).length > 0) {
-      Object.assign(requestBase, runtimeOptions.aiSdk);
-    }
     if (Object.keys(runtimeOptions.providerOptions).length > 0 || profile.provider.npm === "@ai-sdk/openai") {
-      requestBase.providerOptions = {
-        [runtimeOptions.providerKey]: buildProviderOptionsWithPromptCacheKey({
+      const providerOptions = buildProviderOptionsWithPromptCacheKey({
           providerNpm: profile.provider.npm,
           sessionId: run.sessionId,
           providerOptions: runtimeOptions.providerOptions
-        })
+        });
+      const selectedProviderOptions = profile.provider.npm === "@ai-sdk/openai"
+        ? buildOpenAiResponsesProviderOptions(providerOptions)
+        : providerOptions;
+      const jsonProviderOptions: Record<string, JSONValue> = {};
+      for (const [key, value] of Object.entries(selectedProviderOptions)) {
+        const jsonValue = toJsonValue(value);
+        if (jsonValue !== undefined) jsonProviderOptions[key] = jsonValue;
+      }
+      requestBase.providerOptions = {
+        [runtimeOptions.providerKey]: jsonProviderOptions,
       };
     }
     // 自定义重试策略由本文件控制,禁用 AI SDK 内建重试避免双重重试。
-    requestBase.maxRetries = 0;
+    if (isOfficialOpenAiResponsesProfile(profile)) requestBase.includeRawChunks = true;
 
     let assistantMessageId: string;
     if (recoveryContinuation.messageId) {
@@ -2419,22 +2505,104 @@ export class AgentRunner {
     const toolCallsFromParts = () => orderedParts
       .filter((part): part is Extract<StreamingAssistantPart, { type: "tool_call" }> => part.type === "tool_call")
       .map((part) => part.toolCall);
-    const appendStreamText = (type: "text" | "reasoning", delta: string) => {
-      const last = orderedParts.at(-1);
-      if (last?.type === type) {
-        last.text += delta;
-      } else {
-        orderedParts.push({
-          id: `${assistantMessageId}:part:${orderedParts.length}`,
-          position: orderedParts.length,
-          type,
-          text: delta,
-        });
+    const ensureStreamTextPart = (type: "text" | "reasoning", id: string) => {
+      const existing = orderedParts.find((part) => part.id === id);
+      if (existing) {
+        if (existing.type !== type) throw new AgentProviderReplayUpdateError("provider stream part id changed type");
+        return existing;
       }
+      const part: Extract<StreamingAssistantPart, { type: typeof type }> = {
+        id,
+        position: orderedParts.length,
+        type,
+        text: "",
+      } as Extract<StreamingAssistantPart, { type: typeof type }>;
+      orderedParts.push(part);
       streamPartVersion += 1;
-      streamedCharsSinceLastFlush += delta.length;
+      return part;
     };
-    const appendToolCall = (toolName: string, toolCallId: string, args: Record<string, unknown>) => {
+    const appendStreamText = (type: "text" | "reasoning", delta: string, streamId?: string) => {
+      const last = orderedParts.at(-1);
+      const id = streamId || (last?.type === type ? last.id : `${assistantMessageId}:part:${orderedParts.length}`);
+      const part = ensureStreamTextPart(type, id);
+      if (orderedParts.at(-1)?.id !== part.id && delta) {
+        throw new AgentProviderReplayUpdateError("provider stream attempted to append text to an earlier part");
+      }
+      if (delta) {
+        part.text += delta;
+        streamPartVersion += 1;
+        streamedCharsSinceLastFlush += delta.length;
+      }
+    };
+    const upsertProviderReplayPart = (update: ProviderReplayPartUpdate) => {
+      const existing = update.type === "function_call"
+        ? orderedParts.find((part) => part.type === "tool_call" && part.providerToolCallId === update.providerToolCallId)
+        : orderedParts.find((part) => part.id === update.id);
+      if (existing) {
+        if (existing.type === "text" && update.type === "text") {
+          const replayChanged = existing.providerReplay == null
+            || serializeAgentProviderReplay(existing.providerReplay) !== serializeAgentProviderReplay(update.providerReplay);
+          if (existing.providerReplay && replayChanged) assertAgentProviderReplayUpdateCompatible(existing.providerReplay, update.providerReplay);
+          if (update.text != null && !update.text.startsWith(existing.text)) {
+            throw new Error("provider replay text must extend the existing cumulative text");
+          }
+          const textChanged = update.text != null && update.text !== existing.text;
+          if (!replayChanged && !textChanged) return;
+          if (update.text != null) existing.text = update.text;
+          existing.providerReplay = update.providerReplay;
+        } else if (existing.type === "reasoning" && update.type === "reasoning") {
+          const replayChanged = existing.providerReplay == null
+            || serializeAgentProviderReplay(existing.providerReplay) !== serializeAgentProviderReplay(update.providerReplay);
+          if (existing.providerReplay && replayChanged) assertAgentProviderReplayUpdateCompatible(existing.providerReplay, update.providerReplay);
+          if (update.text != null && !update.text.startsWith(existing.text)) {
+            throw new Error("provider replay text must extend the existing cumulative text");
+          }
+          const textChanged = update.text != null && update.text !== existing.text;
+          if (!replayChanged && !textChanged) return;
+          if (update.text != null) existing.text = update.text;
+          existing.providerReplay = update.providerReplay;
+        } else if (existing.type === "tool_call" && update.type === "function_call") {
+          if (existing.providerReplay) {
+            if (serializeAgentProviderReplay(existing.providerReplay) === serializeAgentProviderReplay(update.providerReplay)) return;
+            assertAgentProviderReplayUpdateCompatible(existing.providerReplay, update.providerReplay);
+          }
+          existing.providerReplay = update.providerReplay;
+        } else {
+          throw new Error("provider replay update does not match streaming part type");
+        }
+      } else if (update.type === "text") {
+        orderedParts.push({ id: update.id, position: orderedParts.length, type: "text", text: update.text ?? "", providerReplay: update.providerReplay });
+      } else if (update.type === "reasoning") {
+        orderedParts.push({ id: update.id, position: orderedParts.length, type: "reasoning", text: update.text ?? "", providerReplay: update.providerReplay });
+      } else {
+        throw new AgentProviderReplayUpdateError("function_call replay requires a matching tool_call call_id");
+      }
+      // metadata-only 也是原生 Provider 输出。版本推进使 flush 与 retry replacement
+      // 不再依赖可见文本长度。
+      streamPartVersion += 1;
+    };
+    const appendToolCall = (
+      toolName: string,
+      toolCallId: string,
+      args: Record<string, unknown>,
+      providerReplay?: ProviderReplayFor<"function_call">,
+    ) => {
+      const existing = orderedParts.find((part) => part.type === "tool_call" && part.providerToolCallId === toolCallId);
+      if (existing?.type === "tool_call") {
+        const sameCall = existing.toolName === toolName && JSON.stringify(existing.input) === JSON.stringify(args);
+        if (!sameCall) {
+          throw new AgentProviderReplayUpdateError("tool-call call_id was reused with different name or input");
+        }
+        if (providerReplay) {
+          if (existing.providerReplay) {
+            if (serializeAgentProviderReplay(existing.providerReplay) === serializeAgentProviderReplay(providerReplay)) return;
+            assertAgentProviderReplayUpdateCompatible(existing.providerReplay, providerReplay);
+          }
+          existing.providerReplay = providerReplay;
+          streamPartVersion += 1;
+        }
+        return;
+      }
       const callPartId = `${assistantMessageId}:part:${orderedParts.length}`;
       const toolCall: ToolCall = { toolName, toolCallId, args, callPartId };
       orderedParts.push({
@@ -2445,6 +2613,7 @@ export class AgentRunner {
         input: args,
         providerToolCallId: toolCallId || null,
         toolCall,
+        ...(providerReplay == null ? {} : { providerReplay }),
       });
       streamPartVersion += 1;
     };
@@ -2496,9 +2665,18 @@ export class AgentRunner {
 
     const flushAssistant = async (force = false, clearRetryNotice = true) => {
       if (!force && streamPartVersion === lastFlushedPartVersion) return;
-      const parts = orderedParts.map((part) => {
-        if (part.type === "text" || part.type === "reasoning") {
-          return { id: part.id, position: part.position, type: part.type, text: part.text };
+      const parts: AgentApiFlushAssistantPartsRequest["parts"] = orderedParts.map((part) => {
+        if (part.type === "text") {
+          return {
+            id: part.id, position: part.position, type: "text" as const, text: part.text,
+            ...(part.providerReplay == null ? {} : { providerReplay: part.providerReplay }),
+          };
+        }
+        if (part.type === "reasoning") {
+          return {
+            id: part.id, position: part.position, type: "reasoning" as const, text: part.text,
+            ...(part.providerReplay == null ? {} : { providerReplay: part.providerReplay }),
+          };
         }
         return {
           id: part.id,
@@ -2507,6 +2685,7 @@ export class AgentRunner {
           toolName: part.toolName,
           input: part.input,
           providerToolCallId: part.providerToolCallId,
+          ...(part.providerReplay == null ? {} : { providerReplay: part.providerReplay }),
         };
       });
       const request = {
@@ -2576,7 +2755,14 @@ export class AgentRunner {
       let idleTimedOut = false;
       let totalTimedOut = false;
       let lastChunkAt = this.nowMsFn();
-      let attemptStartedVisibleOutput = false;
+      const attemptStartPartVersion = streamPartVersion;
+      const attemptProducedOutput = () => streamPartVersion > attemptStartPartVersion;
+      const reasoningPartIdsByItem = new Map<string, string[]>();
+      let sawOpenAiCompleted = false;
+      let sawOpenAiTerminalFailure = false;
+      let sawUnknownFinishReason = false;
+      let providerFailure: unknown = null;
+      let attemptStream: RuntimeStreamResult | null = null;
 
       const onOuterAbort = () => {
         requestController.abort();
@@ -2608,55 +2794,99 @@ export class AgentRunner {
         }, modelTotalTimeoutMs);
       }
 
-      const request: Record<string, unknown> = {
+      const request = {
         ...requestBase,
         abortSignal: requestController.signal,
         messages: materializedMessages
-      };
+      } satisfies RuntimeStreamRequest;
 
       try {
-        const stream = this.streamTextFn(request as any) as StreamTextResultLike;
-        successfulStream = stream;
-        for await (const chunk of stream.fullStream as AsyncIterable<any>) {
+        const stream = this.streamTextFn(request);
+        attemptStream = stream;
+        successfulStream = attemptStream;
+        for await (const chunk of stream.fullStream) {
           if (requestController.signal.aborted) break;
           lastChunkAt = this.nowMsFn();
           if (!chunk || typeof chunk !== "object") continue;
+          const reasoningIdentity = isOfficialOpenAiResponsesProfile(profile)
+            ? openAiReasoningItemIdFromChunk(chunk)
+            : null;
+          if (reasoningIdentity) {
+            const ids = reasoningPartIdsByItem.get(reasoningIdentity.itemId) ?? [];
+            if (!ids.includes(reasoningIdentity.id)) ids.push(reasoningIdentity.id);
+            reasoningPartIdsByItem.set(reasoningIdentity.itemId, ids);
+          }
+          const providerReplayUpdate = this.providerReplayPartFromChunkFn?.(chunk)
+            ?? (isOfficialOpenAiResponsesProfile(profile) ? collectOpenAiResponsesReplayChunk({ profile, chunk }) : null);
+          if (providerReplayUpdate && providerReplayUpdate.type !== "function_call") {
+            ensureStreamTextPart(providerReplayUpdate.type, providerReplayUpdate.id);
+            upsertProviderReplayPart(providerReplayUpdate);
+            await maybeFlushAssistantStreaming();
+          }
+          if (chunk.type === "text-start" || chunk.type === "reasoning-start") {
+            ensureStreamTextPart(chunk.type === "text-start" ? "text" : "reasoning", chunk.id);
+            await maybeFlushAssistantStreaming();
+            continue;
+          }
           if (chunk.type === "text-delta") {
-            const delta = String(chunk.text || "");
+            const delta = chunk.text;
             if (!delta) continue;
-            appendStreamText("text", delta);
-            attemptStartedVisibleOutput = true;
+            appendStreamText("text", delta, chunk.id);
             await maybeFlushAssistantStreaming();
             continue;
           }
           if (chunk.type === "reasoning-delta") {
-            const delta = String(chunk.text || chunk.delta || "");
+            const delta = chunk.text;
             if (!delta) continue;
-            appendStreamText("reasoning", delta);
-            attemptStartedVisibleOutput = true;
+            appendStreamText("reasoning", delta, chunk.id);
             await maybeFlushAssistantStreaming();
             continue;
           }
+          if (chunk.type === "text-end" || chunk.type === "reasoning-end") continue;
           if (chunk.type === "tool-call") {
+            const toolCallReplay = this.providerToolCallReplayFromChunkFn?.(chunk)
+              ?? (isOfficialOpenAiResponsesProfile(profile) ? collectOpenAiResponsesToolCallReplay({ profile, chunk }) : null);
             const toolName = normalizeToolName(chunk.toolName, availableToolNames);
             if (!toolName) continue;
             const rawToolCallId = String(chunk.toolCallId || "").trim();
             const toolCallId = rawToolCallId || `${turnId}_call_${toolCallsFromParts().length + 1}`;
+            if (toolCallReplay && toolCallReplay.providerToolCallId !== toolCallId) {
+              throw new AgentProviderReplayUpdateError("function_call replay call_id does not match tool-call chunk");
+            }
             const args = normalizeToolArgs(chunk.input);
-            appendToolCall(toolName, toolCallId, args);
-            attemptStartedVisibleOutput = true;
+            appendToolCall(toolName, toolCallId, args, toolCallReplay?.providerReplay);
             await maybeFlushAssistantStreaming();
             continue;
           }
+          if (providerReplayUpdate?.type === "function_call") {
+            upsertProviderReplayPart(providerReplayUpdate);
+            await maybeFlushAssistantStreaming();
+            continue;
+          }
+          if (chunk.type === "raw" && isOfficialOpenAiResponsesProfile(profile)) {
+            const terminalUpdates = collectOpenAiResponsesTerminalReplay({ profile, rawValue: chunk.rawValue, reasoningPartIdsByItem });
+            for (const update of terminalUpdates) upsertProviderReplayPart(update);
+            if (terminalUpdates.length > 0) await maybeFlushAssistantStreaming();
+            const terminalStatus = openAiResponsesTerminalStatus(chunk.rawValue);
+            if (terminalStatus === "completed") sawOpenAiCompleted = true;
+            if (terminalStatus === "incomplete" || terminalStatus === "failed") {
+              sawOpenAiTerminalFailure = true;
+            }
+            continue;
+          }
           if (chunk.type === "finish") {
-            responseTotalTokens =
-              extractTotalTokens((chunk as Record<string, unknown>).usage) ??
-              extractTotalTokens((chunk as Record<string, unknown>).totalUsage) ??
-              responseTotalTokens;
+            if (isOfficialOpenAiResponsesProfile(profile) && chunk.finishReason === "unknown") {
+              sawUnknownFinishReason = true;
+            }
+            responseTotalTokens = extractTotalTokens(chunk.totalUsage) ?? responseTotalTokens;
             continue;
           }
           if (chunk.type === "error") {
+            providerFailure = chunk.error;
             throw chunk.error instanceof Error ? chunk.error : new Error(String(chunk.error || "stream error"));
+          }
+          if (chunk.type === "abort") {
+            throw new Error("model stream aborted");
           }
         }
         if (pendingFlush) {
@@ -2671,6 +2901,14 @@ export class AgentRunner {
         }
         if (idleTimedOut) {
           throw new Error(`model idle timeout after ${modelIdleTimeoutMs}ms`);
+        }
+        if (isOfficialOpenAiResponsesProfile(profile) && (!sawOpenAiCompleted || sawOpenAiTerminalFailure)) {
+          throw new Error(!sawOpenAiCompleted
+            ? "OpenAI Responses stream ended without response.completed"
+            : "OpenAI Responses stream contained a failed or incomplete terminal event");
+        }
+        if (isOfficialOpenAiResponsesProfile(profile) && sawUnknownFinishReason) {
+          throw new Error("OpenAI Responses finish reason was unknown");
         }
         try {
           const finalReasoning = await successfulStream.reasoningText;
@@ -2692,13 +2930,25 @@ export class AgentRunner {
         if (signal.aborted) {
           return { aborted: true as const, assistantMessageId };
         }
-        if (err instanceof FencedWriteIgnoredError || err instanceof FencedWriteMissingError || err instanceof ControlWritePermanentError) throw err;
+        if (err instanceof FencedWriteIgnoredError || err instanceof FencedWriteMissingError || err instanceof ControlWritePermanentError || err instanceof AgentProviderReplayUpdateError) throw err;
+        const contextLimitError = providerFailure ?? (attemptStream == null ? err : null);
+        if (contextLimitError != null && isContextLengthExceededError(contextLimitError)) {
+          if (attemptProducedOutput()) await flushAssistant(true, false);
+          const discardRequest = {
+            workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+            messageId: assistantMessageId, updatedAt: this.nowMsFn(),
+          };
+          await this.retryControlWrite("discard context-limit assistant", signal, async () =>
+            await this.apiClient.discardStreamingAssistant(discardRequest)
+          );
+          throw new ModelContextLengthExceededError(assistantMessageId, contextLimitError);
+        }
         if (totalTimedOut) {
           err = new Error(`model total timeout after ${modelTotalTimeoutMs}ms`);
         } else if (idleTimedOut) {
           err = new Error(`model idle timeout after ${modelIdleTimeoutMs}ms`);
         }
-        const message = err instanceof Error ? err.message : String(err);
+        const message = safeErrorSummary(err);
 
         {
           const delayMs = computeRetryBackoffMs(retryCount, modelRequestRetryBackoffMaxMs);
@@ -2706,7 +2956,7 @@ export class AgentRunner {
           const noticeText = `Request failed, retrying in ${Math.floor(delayMs / 1000)}s (attempt ${retryAttempt}): ${message}`;
           const nextRetryAt = this.nowMsFn() + delayMs;
           retryCount = retryAttempt;
-          if (attemptStartedVisibleOutput) {
+          if (attemptProducedOutput()) {
             await flushAssistant(true, false);
             await replaceAssistantForRetry({
               runNoticeText: noticeText,
@@ -2790,6 +3040,14 @@ export class AgentRunner {
       // 已在有效输出校验前读取收尾 reasoning，确保 reasoning-only 响应可正常完成。
       await flushAssistant(true);
 
+      const completeRequest = {
+        workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+        messageId: assistantMessageId, executions, updatedAt: this.nowMsFn()
+      };
+      await this.retryControlWrite("complete assistant", signal, async () =>
+        await this.apiClient.completeAssistant(completeRequest)
+      );
+
       await writeItemLog({
         logger: this.logger,
         workspacePath: run.workspacePath,
@@ -2816,14 +3074,6 @@ export class AgentRunner {
           }
         }
       });
-
-      const completeRequest = {
-        workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
-        messageId: assistantMessageId, executions, updatedAt: this.nowMsFn()
-      };
-      await this.retryControlWrite("complete assistant", signal, async () =>
-        await this.apiClient.completeAssistant(completeRequest)
-      );
       await clearRetryNoticeAfterSuccess();
 
       return {
@@ -2895,6 +3145,7 @@ export class AgentRunner {
       const repeatedToolCallCounter = new Map<string, number>();
       const recoveryContinuation = run.recoveryContinuation ?? { messageId: run.resumeAssistantMessageId ?? null };
       let emptyResponseCount = 0;
+      let contextLimitCompactionAttempts = 0;
 
       // 手动压缩: 仅执行一次 compaction,不进入正常 step 循环.
       if (run.runKind === "manual_compaction") {
@@ -2976,15 +3227,45 @@ export class AgentRunner {
         }
 
         step += 1;
-        const result = await this.runModelStep({
-          profile,
-          run,
-          context,
-          step,
-          signal,
-          recoveryContinuation,
-          repeatedToolCallCounter
-        });
+        let result;
+        try {
+          result = await this.runModelStep({
+            profile,
+            run,
+            context,
+            step,
+            signal,
+            recoveryContinuation,
+            repeatedToolCallCounter
+          });
+        } catch (err) {
+          if (!(err instanceof ModelContextLengthExceededError)) throw err;
+          step -= 1;
+          if (contextLimitCompactionAttempts >= CONTEXT_LIMIT_COMPACTION_MAX_ATTEMPTS) {
+            throw new ContextLimitCompactionError("model context limit persisted after bounded compaction attempts", err);
+          }
+          await this.retryControlWrite("start context-limit compaction notice", signal, async () =>
+            await this.apiClient.updateRunNotice({
+              workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+              runNoticeText: "上下文超限，正在压缩后重试...", updatedAt: this.nowMsFn(),
+            })
+          );
+          const compactionContext = await this.apiClient.getPromptContext({
+            workspaceId: run.workspaceId,
+            sessionId: run.sessionId,
+            runId: run.runId,
+          });
+          const compacted = await this.compactContext({
+            profile, run, context: compactionContext, signal, maxProviderRetries: 0,
+          });
+          if (!compacted) throw new ContextLimitCompactionError("context-limit compaction made no progress");
+          contextLimitCompactionAttempts += 1;
+          if (signal.aborted) {
+            await finishOnce("cancelled");
+            return;
+          }
+          continue;
+        }
         if (result.aborted || signal.aborted) {
           await finishOnce("cancelled");
           return;
@@ -3026,11 +3307,10 @@ export class AgentRunner {
       const terminalSubmitError = err instanceof TerminalStatusSubmitError ? err : null;
       const fallbackStatus = terminalSubmitError?.status ?? "failed";
       const cause = terminalSubmitError?.cause ?? err;
-      const message = cause instanceof Error ? cause.message : String(cause);
       try {
         await tryFinishOnce(fallbackStatus);
       } catch {
-        this.logger.error(`run failed and fallback append failed: ${run.sessionId} ${run.runId} ${message}`);
+        this.logger.error(`run failed and fallback append failed: ${run.sessionId} ${run.runId} ${safeErrorSummary(cause)}`);
       }
     }
   }
@@ -3113,6 +3393,25 @@ export function shouldStopForMaxStepsForTest(step: number, maxSteps: number) {
   return shouldStopForMaxSteps(step, maxSteps);
 }
 
+export function sanitizeForDebugDumpForTest(value: unknown) {
+  return sanitizeForDebugDump(value);
+}
+
+export function safeErrorSummaryForTest(value: unknown) {
+  return safeErrorSummary(value);
+}
+
+export async function writeItemLogForTest(params: {
+  logger: Pick<Console, "warn">;
+  workspacePath: string;
+  kind: "assistant" | "tool";
+  recordId?: string;
+  payload: unknown;
+  force?: boolean;
+}) {
+  await writeItemLog({ ...params, force: true });
+}
+
 export async function finalizeToolTextForTest(params: {
   workspacePath: string;
   toolExecutionId: string;
@@ -3123,3 +3422,15 @@ export async function finalizeToolTextForTest(params: {
 }) {
   return finalizeToolText(params);
 }
+import {
+  applyOpenAiResponsesReplay,
+  buildOpenAiResponsesProviderOptions,
+  collectOpenAiResponsesReplayChunk,
+  collectOpenAiResponsesTerminalReplay,
+  collectOpenAiResponsesToolCallReplay,
+  isOfficialOpenAiResponsesProfile,
+  openAiResponsesTerminalStatus,
+  openAiReasoningItemIdFromChunk,
+  type OpenAiResponsesReplayPartUpdate,
+  type OpenAiResponsesToolCallReplay,
+} from "./providers/openai-responses-replay.js";

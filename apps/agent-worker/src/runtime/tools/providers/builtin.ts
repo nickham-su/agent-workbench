@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { ModelMessage } from "ai";
 import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call";
 import { renderPromptTemplateFile } from "@agent-workbench/shared/prompts";
 import { runBashCommand } from "../../bash.js";
@@ -404,7 +405,7 @@ export class BuiltinToolProvider implements ToolProvider {
       model: ToolExecutionContext["profile"]["model"];
     };
     input: {
-      messages: Array<{ role: string; content: unknown }>;
+      messages: ModelMessage[];
       system?: string;
       sessionId?: string;
       timeoutMs: number;
@@ -651,7 +652,7 @@ export class BuiltinToolProvider implements ToolProvider {
                   // subtask prefork 是 one-shot 摘要任务，使用 messages-context 提供的通用最小 system。
                   system: messagesContext.system,
                   sessionId: ctx.run.sessionId,
-                  messages: messagesContext.messages,
+                  messages: messagesContext.messages as ModelMessage[],
                   timeoutMs: COMPACTION_TIMEOUT_MS,
                   abortSignal: ctx.signal
                 }
@@ -799,7 +800,7 @@ export class BuiltinToolProvider implements ToolProvider {
           "Use the input order as sequence and refer to them as 文件1, 文件2, ... in your response.",
           "Return plain natural language only."
         ];
-        const parts: Array<Record<string, unknown>> = [
+        const parts: Extract<ModelMessage, { role: "user" }>["content"] = [
           {
             type: "text",
             text: `${lines.join("\n")}\n\nUser request:\n${userInstruction}`

@@ -34,6 +34,8 @@ type LlmStub = {
   server: HttpServer;
   baseURL: string;
   requests: Array<Record<string, unknown>>;
+  requestHeaders: Array<Record<string, string | string[] | undefined>>;
+  requestPaths: string[];
 };
 
 type Fixture = {
@@ -102,6 +104,8 @@ async function requestJson<T>(baseUrl: string, input: { method: string; path: st
 
 async function startLlmStubServer(mode: "failure" | "success" | "tool-cycle" = "failure") {
   const requests: Array<Record<string, unknown>> = [];
+  const requestHeaders: Array<Record<string, string | string[] | undefined>> = [];
+  const requestPaths: string[] = [];
   let toolCycleStreamRequestCount = 0;
   const server = createHttpServer((req, res) => {
     if (mode === "success" || mode === "tool-cycle") {
@@ -113,50 +117,130 @@ async function startLlmStubServer(mode: "failure" | "success" | "tool-cycle" = "
       req.on("end", () => {
         const request = requestBody ? JSON.parse(requestBody) as Record<string, unknown> : {};
         requests.push(request);
+        requestHeaders.push({ ...req.headers });
+        requestPaths.push(req.url || "");
+        const isChatCompletions = req.url === "/v1/chat/completions";
         if (request.stream === true) {
+          if (isChatCompletions) {
+            const chunks = [
+              { id: "stub", created: 1, model: "gpt-5.2", choices: [{ index: 0, delta: { role: "assistant", content: "stub response" }, finish_reason: null }] },
+              { id: "stub", created: 1, model: "gpt-5.2", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }
+            ];
+            res.statusCode = 200;
+            res.setHeader("content-type", "text/event-stream; charset=utf-8");
+            res.end(`${chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("")}data: [DONE]\n\n`);
+            return;
+          }
           const chunks = mode === "tool-cycle" && toolCycleStreamRequestCount++ === 0
             ? [
                 {
-                  id: "stub-tool-cycle-1",
-                  created: 1,
-                  model: "gpt-5.2",
-                  choices: [{
-                    index: 0,
-                    delta: {
-                      role: "assistant",
-                      // OpenAI chat completion adapters ignore this vendor extension;
-                      // the following request must not carry it into model history.
-                      reasoning_content: "private M3 reasoning",
-                      tool_calls: [{
-                        index: 0,
-                        id: "stub-tool-call-1",
-                        type: "function",
-                        function: { name: "bash", arguments: JSON.stringify({ command: "printf tool-cycle-output" }) }
-                      }]
-                    },
-                    finish_reason: null
-                  }]
+                  type: "response.created",
+                  response: { id: "stub-tool-cycle-1", created_at: 1, model: "gpt-5.2" }
                 },
-                { id: "stub-tool-cycle-1", created: 1, model: "gpt-5.2", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }
+                {
+                  type: "response.output_item.added",
+                  output_index: 0,
+                  item: {
+                    type: "reasoning",
+                    id: "stub-reasoning-item-1",
+                    encrypted_content: null
+                  }
+                },
+                {
+                  type: "response.reasoning_summary_text.delta",
+                  item_id: "stub-reasoning-item-1",
+                  summary_index: 0,
+                  delta: "inspect with bash"
+                },
+                {
+                  type: "response.output_item.done",
+                  output_index: 0,
+                  item: {
+                    type: "reasoning",
+                    id: "stub-reasoning-item-1",
+                    encrypted_content: null
+                  }
+                },
+                {
+                  type: "response.output_item.added",
+                  output_index: 1,
+                  item: {
+                    type: "function_call",
+                    id: "stub-function-item-1",
+                    call_id: "stub-tool-call-1",
+                    name: "bash",
+                    arguments: ""
+                  }
+                },
+                {
+                  type: "response.function_call_arguments.delta",
+                  item_id: "stub-function-item-1",
+                  output_index: 1,
+                  delta: JSON.stringify({ command: "printf tool-cycle-output" })
+                },
+                {
+                  type: "response.output_item.done",
+                  output_index: 1,
+                  item: {
+                    type: "function_call",
+                    id: "stub-function-item-1",
+                    call_id: "stub-tool-call-1",
+                    name: "bash",
+                    arguments: JSON.stringify({ command: "printf tool-cycle-output" }),
+                    status: "completed"
+                  }
+                },
+                {
+                  type: "response.completed",
+                  response: {
+                    output: [{
+                      type: "reasoning",
+                      id: "stub-reasoning-item-1",
+                      encrypted_content: "stub-encrypted-reasoning"
+                    }],
+                    usage: { input_tokens: 1, output_tokens: 1 },
+                    service_tier: null
+                  }
+                }
               ]
             : [
-                { id: "stub", created: 1, model: "gpt-5.2", choices: [{ index: 0, delta: { role: "assistant", content: mode === "tool-cycle" ? "tool cycle complete" : "stub response" }, finish_reason: null }] },
-                { id: "stub", created: 1, model: "gpt-5.2", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }
+                { type: "response.created", response: { id: "stub", created_at: 1, model: "gpt-5.2" } },
+                { type: "response.output_item.added", output_index: 0, item: { type: "message", id: "stub-message", phase: "final_answer" } },
+                { type: "response.output_text.delta", item_id: "stub-message", delta: mode === "tool-cycle" ? "tool cycle complete" : "stub response" },
+                { type: "response.output_item.done", output_index: 0, item: { type: "message", id: "stub-message", phase: "final_answer" } },
+                { type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1 }, service_tier: null } }
               ];
           res.statusCode = 200;
           res.setHeader("content-type", "text/event-stream; charset=utf-8");
-          res.end(`${chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("")}data: [DONE]\n\n`);
+          res.end(chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join(""));
           return;
         }
         res.statusCode = 200;
+        if (isChatCompletions) {
+          res.setHeader("content-type", "application/json; charset=utf-8");
+          res.end(JSON.stringify({
+            id: "stub",
+            object: "chat.completion",
+            created: 1,
+            model: "gpt-5.2",
+            choices: [{ index: 0, message: { role: "assistant", content: "stub summary" }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
+          }));
+          return;
+        }
         res.setHeader("content-type", "application/json; charset=utf-8");
         res.end(JSON.stringify({
           id: "stub",
-          object: "chat.completion",
-          created: 1,
+          created_at: 1,
           model: "gpt-5.2",
-          choices: [{ index: 0, message: { role: "assistant", content: "stub summary" }, finish_reason: "stop" }],
-          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
+          output: [{
+            type: "message",
+            role: "assistant",
+            id: "stub-summary-message",
+            phase: "final_answer",
+            content: [{ type: "output_text", text: "stub summary", annotations: [] }]
+          }],
+          usage: { input_tokens: 1, output_tokens: 1 }
         }));
       });
       return;
@@ -180,11 +264,18 @@ async function startLlmStubServer(mode: "failure" | "success" | "tool-cycle" = "
   return {
     server,
     baseURL: `http://127.0.0.1:${addr.port}/v1`,
-    requests
+    requests,
+    requestHeaders,
+    requestPaths
   };
 }
 
-async function configureAgentDefaults(baseUrl: string, llmBaseURL: string) {
+async function configureAgentDefaults(
+  baseUrl: string,
+  llmBaseURL: string,
+  providerNpm = "@ai-sdk/openai",
+  modelOptions?: Record<string, unknown>,
+) {
   const providers = await requestJson(baseUrl, {
     method: "PUT",
     path: "/api/settings/agent/providers",
@@ -194,20 +285,20 @@ async function configureAgentDefaults(baseUrl: string, llmBaseURL: string) {
         modelId: "gpt-5.2"
       },
       providers: [
-        {
-           id: "ppchat",
-           name: "ppchat",
-           npm: "@ai-sdk/openai",
+         {
+            id: "ppchat",
+            name: "ppchat",
+            npm: providerNpm,
            options: {
              baseURL: llmBaseURL,
-             apiKey: "sk-test",
-             apiMode: "chatCompletions"
+             apiKey: "sk-test"
            },
            models: [
             {
               id: "gpt-5.2",
               name: "gpt-5.2",
-              contextWindowTokens: 128000
+              contextWindowTokens: 128000,
+              ...(modelOptions ? { options: modelOptions } : {}),
             }
           ]
         }
@@ -256,7 +347,11 @@ async function configureAgentDefaults(baseUrl: string, llmBaseURL: string) {
   assert.equal(runtime.response.status, 200, `configure agent runtime failed: ${runtime.text}`);
 }
 
-async function createFixture(params: { llmMode?: "failure" | "success" | "tool-cycle" } = {}): Promise<Fixture> {
+async function createFixture(params: {
+  llmMode?: "failure" | "success" | "tool-cycle";
+  providerNpm?: "@ai-sdk/openai" | "@ai-sdk/openai-compatible";
+  modelOptions?: Record<string, unknown>;
+} = {}): Promise<Fixture> {
   const repoRoot = [
     process.cwd(),
     path.resolve(process.cwd(), ".."),
@@ -346,7 +441,7 @@ async function createFixture(params: { llmMode?: "failure" | "success" | "tool-c
     });
     await app.listen({ host: "127.0.0.1", port: apiPort });
     const baseUrl = `http://127.0.0.1:${apiPort}`;
-    await configureAgentDefaults(baseUrl, llmStub.baseURL);
+    await configureAgentDefaults(baseUrl, llmStub.baseURL, params.providerNpm, params.modelOptions);
 
     const fixture: Fixture = {
       app,
@@ -554,6 +649,46 @@ test("startup recovery: 空 streaming Assistant 由真实 Worker 复用并完成
   assert.equal(fixture.internalRpcCalls.filter((call) => call.url === AgentApiEndpoints.resumeStreamingAssistant.path).length, 1);
   assert.equal(fixture.internalRpcCalls.filter((call) => call.url === AgentApiEndpoints.createStreamingAssistant.path).length, 0);
   assertRecoveredRunTerminal(fixture, { sessionId: session.id, runId });
+  assert.deepEqual(fixture.llmStub?.requestPaths, ["/v1/responses"]);
+});
+
+test("worker 模式: openai-compatible 保持使用 Chat Completions", async () => {
+  const fixture = await createFixture({ llmMode: "success", providerNpm: "@ai-sdk/openai-compatible" });
+  const session = await createSession(fixture.baseUrl, fixture.workspaceId);
+  const sent = await sendMessage(fixture.baseUrl, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "use the compatible provider",
+    clientRequestId: newSortableId("req")
+  });
+
+  await waitRunIdle(fixture.baseUrl, session.id, fixture.workspaceId);
+
+  assert.equal(getRunRecord(fixture.db, sent.runId)?.status, "completed");
+  assert.deepEqual(fixture.llmStub?.requestPaths, ["/v1/chat/completions"]);
+});
+
+test("Agent 主请求将模型 aiSdk headers 传入真实 mock fetch", async () => {
+  const fixture = await createFixture({
+    llmMode: "success",
+    modelOptions: {
+      aiSdk: {
+        headers: { "x-model-config": "agent-main" },
+        allowSystemInMessages: true,
+      },
+    },
+  });
+  const session = await createSession(fixture.baseUrl, fixture.workspaceId);
+  await sendMessage(fixture.baseUrl, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "verify configured header",
+    clientRequestId: "req_ai_sdk_headers",
+  });
+  await waitRunIdle(fixture.baseUrl, session.id, fixture.workspaceId);
+
+  assert.equal(fixture.llmStub?.requestHeaders[0]?.["x-model-config"], "agent-main");
+  assert.deepEqual(fixture.llmStub?.requestPaths, ["/v1/responses"]);
 });
 
 test("startup recovery: manual_compaction 由真实 API-managed Worker 提交唯一 Compaction", async () => {
@@ -748,6 +883,56 @@ test("worker 内部 replacement 端点要求令牌，并原子替代当前 strea
   assert.deepEqual(JSON.parse(changed.body), { result: "ignored", message: null });
 });
 
+test("worker 内部 discard 端点要求令牌，作废 replay-only Assistant 且响应不泄漏密文", async () => {
+  const fixture = await createFixture();
+  const session = await createSession(fixture.baseUrl, fixture.workspaceId);
+  const runId = "discard-run";
+  const assistantId = "discard-assistant";
+  const sentinel = "opaque-encrypted-replay-SENTINEL-discard-route-718b";
+  fixture.db.prepare("insert into agent_run (run_id,workspace_id,session_id,trigger_message_id,agent_id,provider_id,model_id,status,created_at,updated_at) values (?,?,?,null,'agent','provider','model','running',1,1)")
+    .run(runId, fixture.workspaceId, session.id);
+  fixture.db.prepare("update session_run_state set status='running',active_run_id=? where workspace_id=? and session_id=?")
+    .run(runId, fixture.workspaceId, session.id);
+  const headers = { "x-awb-agent-internal-token": "worker-integration-token" };
+  assert.equal((await fixture.app.inject({
+    method: AgentApiEndpoints.createStreamingAssistant.method,
+    url: AgentApiEndpoints.createStreamingAssistant.path,
+    headers,
+    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId, messageId: assistantId, createdAt: 2 },
+  })).statusCode, 200);
+  assert.equal((await fixture.app.inject({
+    method: AgentApiEndpoints.flushAssistantParts.method,
+    url: AgentApiEndpoints.flushAssistantParts.path,
+    headers,
+    payload: {
+      workspaceId: fixture.workspaceId, sessionId: session.id, runId, messageId: assistantId, updatedAt: 3,
+      parts: [{
+        id: "discard-reasoning", position: 0, type: "reasoning", text: "",
+        providerReplay: {
+          version: 1,
+          provider: { npm: "@ai-sdk/openai", api: "responses", providerId: "provider", model: "gpt-5" },
+          item: { type: "reasoning", itemId: "discard-item", encryptedContent: sentinel },
+        },
+      }],
+    },
+  })).statusCode, 200);
+  const payload = { workspaceId: fixture.workspaceId, sessionId: session.id, runId, messageId: assistantId, updatedAt: 4 };
+  const unauthorized = await fixture.app.inject({ method: AgentApiEndpoints.discardStreamingAssistant.method, url: AgentApiEndpoints.discardStreamingAssistant.path, payload });
+  assert.equal(unauthorized.statusCode, 401);
+  const discarded = await fixture.app.inject({ method: AgentApiEndpoints.discardStreamingAssistant.method, url: AgentApiEndpoints.discardStreamingAssistant.path, headers, payload });
+  assert.equal(discarded.statusCode, 200);
+  assert.deepEqual(JSON.parse(discarded.body), { result: "updated" });
+  assert.doesNotMatch(discarded.body, new RegExp(sentinel));
+  assert.deepEqual(fixture.db.prepare("select status from agent_message where id=?").get(assistantId), { status: "superseded" });
+  const sessionAfterDiscard = fixture.db.prepare("select head_message_id as headMessageId,revision from agent_session where id=?").get(session.id) as { headMessageId: string | null; revision: number };
+  assert.equal(sessionAfterDiscard.headMessageId, null);
+  const replayed = await fixture.app.inject({ method: AgentApiEndpoints.discardStreamingAssistant.method, url: AgentApiEndpoints.discardStreamingAssistant.path, headers, payload });
+  assert.deepEqual(JSON.parse(replayed.body), { result: "updated" });
+  assert.deepEqual(fixture.db.prepare("select head_message_id as headMessageId,revision from agent_session where id=?").get(session.id), sessionAfterDiscard);
+  const changed = await fixture.app.inject({ method: AgentApiEndpoints.discardStreamingAssistant.method, url: AgentApiEndpoints.discardStreamingAssistant.path, headers, payload: { ...payload, updatedAt: 5 } });
+  assert.deepEqual(JSON.parse(changed.body), { result: "ignored" });
+});
+
 test("Worker API 通用 ToolExecution writeback 按真实 DB 工具白名单持久化 structuredResult", async () => {
   const fixture = await createFixture();
   const session = await createSession(fixture.baseUrl, fixture.workspaceId);
@@ -867,6 +1052,49 @@ test("Worker 写回路由对丢失响应后的 complete 与 ToolExecution 精确
   assert.equal(execution.structuredResultJson, null, "非白名单 read 工具不得持久化结构化结果");
 });
 
+test("Worker 首次处理新 Run 时从 replay-only completed DB 历史重建 OpenAI replay", async () => {
+  const fixture = await createFixture({ llmMode: "success" });
+  const session = await createSession(fixture.baseUrl, fixture.workspaceId);
+  const initial = getMessageSession(fixture.db, fixture.workspaceId, session.id)!;
+  const createdAt = Date.now();
+  appendMessage(fixture.db, {
+    id: "restart-history-user", workspaceId: fixture.workspaceId, sessionId: session.id,
+    expectedHeadMessageId: initial.headMessageId, expectedRevision: initial.revision,
+    type: "user", status: "completed",
+    parts: [{ id: "restart-history-user-text", position: 0, type: "text", text: "persisted question" }],
+    createdAt,
+  });
+  const afterUser = getMessageSession(fixture.db, fixture.workspaceId, session.id)!;
+  appendMessage(fixture.db, {
+    id: "restart-history-assistant", workspaceId: fixture.workspaceId, sessionId: session.id,
+    expectedHeadMessageId: afterUser.headMessageId, expectedRevision: afterUser.revision,
+    type: "assistant", status: "completed",
+    parts: [{
+      id: "restart-history-reasoning", position: 0, type: "reasoning", text: "",
+      providerReplay: {
+        version: 1,
+        provider: { npm: "@ai-sdk/openai", api: "responses", providerId: "ppchat", model: "gpt-5.2" },
+        item: { type: "reasoning", itemId: "restart-reasoning-item", encryptedContent: "restart-encrypted-reasoning" },
+      },
+    }],
+    createdAt: createdAt + 1,
+  });
+
+  await sendMessage(fixture.baseUrl, {
+    sessionId: session.id,
+    workspaceId: fixture.workspaceId,
+    text: "continue after restart",
+    clientRequestId: "restart-replay-request",
+  });
+  await waitRunIdle(fixture.baseUrl, session.id, fixture.workspaceId);
+  assert.equal(fixture.llmStub?.requests.length, 1);
+  const input = fixture.llmStub?.requests[0]?.input as Array<Record<string, unknown>>;
+  assert.ok(Array.isArray(input));
+  assert.ok(input.some((item) => item.type === "reasoning"
+    && item.id === "restart-reasoning-item"
+    && item.encrypted_content === "restart-encrypted-reasoning"));
+});
+
 test("worker 模式: ToolCall 经真实 PromptContext pending 与工具写回后进入第二轮模型", async () => {
   const fixture = await createFixture({ llmMode: "tool-cycle" });
   const session = await createSession(fixture.baseUrl, fixture.workspaceId);
@@ -891,17 +1119,24 @@ test("worker 模式: ToolCall 经真实 PromptContext pending 与工具写回后
   assert.deepEqual(assistant.map((message) => message.status), ["completed", "completed"]);
 
   const firstAssistantParts = fixture.db.prepare(`
-    select id, position, type, text, tool_name as toolName, tool_input_json as toolInputJson, provider_tool_call_id as providerToolCallId
+    select id, position, type, text, tool_name as toolName, tool_input_json as toolInputJson,
+      provider_tool_call_id as providerToolCallId, provider_replay_json as providerReplayJson
     from agent_message_part
     where message_id = ?
     order by position asc
-  `).all(assistant[0]!.id) as Array<{ id: string; position: number; type: string; text: string | null; toolName: string | null; toolInputJson: string | null; providerToolCallId: string | null }>;
+  `).all(assistant[0]!.id) as Array<{ id: string; position: number; type: string; text: string | null; toolName: string | null; toolInputJson: string | null; providerToolCallId: string | null; providerReplayJson: string | null }>;
+  const reasoning = firstAssistantParts.find((part) => part.type === "reasoning");
+  assert.ok(reasoning);
+  assert.equal(reasoning.text, "inspect with bash");
+  assert.match(reasoning.providerReplayJson ?? "", /stub-reasoning-item-1/);
+  assert.match(reasoning.providerReplayJson ?? "", /stub-encrypted-reasoning/);
   const toolCall = firstAssistantParts.find((part) => part.type === "tool_call");
   assert.ok(toolCall);
   assert.equal(toolCall.providerToolCallId, "stub-tool-call-1");
   assert.equal(toolCall.toolName, "bash");
   assert.deepEqual(JSON.parse(toolCall.toolInputJson ?? "null"), { command: "printf tool-cycle-output" });
-  assert.equal(firstAssistantParts.some((part) => part.type === "reasoning"), false, "OpenAI stub reasoning extension must not become model-visible history");
+  assert.match(toolCall.providerReplayJson ?? "", /stub-function-item-1/);
+  assert.doesNotMatch(toolCall.providerReplayJson ?? "", /stub-tool-call-1/);
 
   const execution = fixture.db.prepare(`
     select id, call_part_id as callPartId, status, result_preview as resultPreview
@@ -963,9 +1198,34 @@ test("worker 模式: ToolCall 经真实 PromptContext pending 与工具写回后
 
   const modelRequests = fixture.llmStub?.requests ?? [];
   assert.equal(modelRequests.length, 2);
-  const secondMessages = modelRequests[1]?.messages as Array<{ role?: string; content?: unknown }>;
-  assert.ok(Array.isArray(secondMessages));
-  assert.equal(JSON.stringify(secondMessages).includes("private M3 reasoning"), false);
+  const secondRequest = modelRequests[1] ?? {};
+  const secondInput = secondRequest.input as Array<Record<string, unknown>>;
+  assert.ok(Array.isArray(secondInput));
+  const replayedReasoningIndex = secondInput.findIndex((item) => item.type === "reasoning" && item.id === "stub-reasoning-item-1");
+  const replayedFunctionIndex = secondInput.findIndex((item) => item.type === "function_call" && item.id === "stub-function-item-1");
+  const functionOutputIndex = secondInput.findIndex((item) => item.type === "function_call_output" && item.call_id === "stub-tool-call-1");
+  assert.ok(replayedReasoningIndex >= 0);
+  assert.deepEqual(secondInput[replayedReasoningIndex], {
+    type: "reasoning",
+    id: "stub-reasoning-item-1",
+    encrypted_content: "stub-encrypted-reasoning",
+    summary: [{ type: "summary_text", text: "inspect with bash" }]
+  });
+  assert.ok(replayedFunctionIndex > replayedReasoningIndex);
+  assert.deepEqual(secondInput[replayedFunctionIndex], {
+    type: "function_call",
+    call_id: "stub-tool-call-1",
+    name: "bash",
+    arguments: JSON.stringify({ command: "printf tool-cycle-output" }),
+    id: "stub-function-item-1"
+  });
+  assert.ok(functionOutputIndex > replayedFunctionIndex);
+  assert.ok(secondInput.some((item) => item.type === "function_call_output" && item.call_id === "stub-tool-call-1"));
+  assert.equal(secondRequest.store, false);
+  assert.deepEqual(secondRequest.include, ["reasoning.encrypted_content"]);
+  const serializedSecondRequest = JSON.stringify(secondRequest);
+  assert.doesNotMatch(serializedSecondRequest, /previous_response_id|previousResponseId|conversation|reasoningContext|reasoning_context/);
+  assert.deepEqual(fixture.llmStub?.requestPaths, ["/v1/responses", "/v1/responses"]);
 });
 
 test("worker 模式: 手动压缩经真实 API-managed Worker 获取三项 read-side context", async () => {

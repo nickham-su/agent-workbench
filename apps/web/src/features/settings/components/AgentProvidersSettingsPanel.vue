@@ -150,16 +150,6 @@
         <a-form-item :label="t('settings.agentProviders.providerForm.baseUrlLabel')" :required="true">
           <a-input v-model:value="providerFormBaseURL" />
         </a-form-item>
-        <a-form-item
-          v-if="providerFormNpm === '@ai-sdk/openai'"
-          :label="t('settings.agentProviders.providerForm.apiModeLabel')"
-          :required="true"
-        >
-          <a-select
-            v-model:value="providerFormApiMode"
-            :options="providerApiModeOptions"
-          />
-        </a-form-item>
         <a-form-item :label="t('settings.agentProviders.providerForm.apiKeyLabel')">
           <a-input-password
             v-model:value="providerFormApiKey"
@@ -288,7 +278,6 @@ import type {
   AgentProviderNpm,
   AgentProviderModelsListItem,
   AgentProvidersSettingsView,
-  AgentProviderOpenAiApiMode,
   AgentSettingsView,
   UpdateAgentProvidersSettingsRequest
 } from "@agent-workbench/shared";
@@ -325,7 +314,6 @@ type EditingProvider = {
   baseURL: string;
   apiKeyInput: string;
   apiKeyState: ApiKeyState;
-  apiMode: AgentProviderOpenAiApiMode;
   apiKeyMasked: string | null;
   models: EditingModel[];
 };
@@ -334,7 +322,6 @@ const DEFAULT_PROVIDER_NPM: AgentProviderNpm = "@ai-sdk/openai";
 const MODEL_EDITOR_Z_INDEX = 1100;
 
 const AI_SDK_SETTINGS_DOC_URL = "https://ai-sdk.dev/docs/ai-sdk-core/settings";
-const DEFAULT_OPENAI_API_MODE: AgentProviderOpenAiApiMode = "responses";
 
 const providerNpmOptions: Array<{ value: AgentProviderNpm; label: string }> = [
   { value: "@ai-sdk/openai", label: "OpenAI (@ai-sdk/openai)" },
@@ -343,10 +330,6 @@ const providerNpmOptions: Array<{ value: AgentProviderNpm; label: string }> = [
 ];
 
 const loading = ref(false);
-const providerApiModeOptions: Array<{ value: AgentProviderOpenAiApiMode; label: string }> = [
-  { value: "responses", label: "Responses API (/v1/responses)" },
-  { value: "chatCompletions", label: "Chat Completions API (/v1/chat/completions)" }
-];
 
 const saving = ref(false);
 const providers = ref<EditingProvider[]>([]);
@@ -361,7 +344,6 @@ const providerFormNpm = ref<AgentProviderNpm>(DEFAULT_PROVIDER_NPM);
 const providerFormBaseURL = ref("");
 const providerFormApiKey = ref("");
 const providerFormClearApiKey = ref(false);
-const providerFormApiMode = ref<AgentProviderOpenAiApiMode>(DEFAULT_OPENAI_API_MODE);
 const providerFormHasApiKey = ref(false);
 
 const modelModalOpen = ref(false);
@@ -474,7 +456,6 @@ function mapFromSettings(view: AgentProvidersSettingsView) {
     baseURL: provider.options.baseURL,
     apiKeyInput: "",
     apiKeyState: "keep" as const,
-    apiMode: provider.options.apiMode ?? DEFAULT_OPENAI_API_MODE,
     apiKeyMasked: provider.options.apiKeyMasked,
     models: provider.models.map((model) => ({
       id: model.id,
@@ -565,9 +546,6 @@ function defaultBaseURLForNpm(npm: AgentProviderNpm) {
 function onProviderNpmChange(nextNpm: AgentProviderNpm) {
   if (providerModalMode.value !== "create") return;
   providerFormBaseURL.value = defaultBaseURLForNpm(nextNpm);
-  if (nextNpm !== "@ai-sdk/openai") {
-    providerFormApiMode.value = DEFAULT_OPENAI_API_MODE;
-  }
 }
 
 function openCreateProvider() {
@@ -578,7 +556,6 @@ function openCreateProvider() {
   providerFormBaseURL.value = defaultBaseURLForNpm(DEFAULT_PROVIDER_NPM);
   providerFormApiKey.value = "";
   providerFormClearApiKey.value = false;
-  providerFormApiMode.value = DEFAULT_OPENAI_API_MODE;
   providerFormHasApiKey.value = false;
   providerModalOpen.value = true;
 }
@@ -593,7 +570,6 @@ function openEditProvider(providerId: string) {
   providerFormBaseURL.value = provider.baseURL;
   providerFormApiKey.value = "";
   providerFormClearApiKey.value = false;
-  providerFormApiMode.value = provider.apiMode ?? DEFAULT_OPENAI_API_MODE;
   providerFormHasApiKey.value = Boolean(provider.apiKeyMasked);
   providerModalOpen.value = true;
 }
@@ -607,7 +583,6 @@ function closeProviderModal() {
   providerFormBaseURL.value = "";
   providerFormApiKey.value = "";
   providerFormClearApiKey.value = false;
-  providerFormApiMode.value = DEFAULT_OPENAI_API_MODE;
   providerFormHasApiKey.value = false;
 }
 
@@ -624,7 +599,6 @@ function submitProvider() {
   const nextNpm = providerFormNpm.value;
   const nextBaseURL = providerFormBaseURL.value.trim();
   const nextApiKey = providerFormApiKey.value.trim();
-  const nextApiMode = nextNpm === "@ai-sdk/openai" ? providerFormApiMode.value : DEFAULT_OPENAI_API_MODE;
 
   if (providerModalMode.value === "create") {
     if (providers.value.some((item) => item.id === nextId)) {
@@ -638,7 +612,6 @@ function submitProvider() {
       baseURL: nextBaseURL,
       apiKeyInput: nextApiKey,
       apiKeyState: nextApiKey ? "set" : "clear",
-      apiMode: nextApiMode,
       apiKeyMasked: maskApiKey(nextApiKey),
       models: []
     });
@@ -654,7 +627,6 @@ function submitProvider() {
     provider.baseURL = nextBaseURL;
     provider.apiKeyInput = nextApiKey;
     provider.apiKeyState = nextApiKey ? "set" : providerFormClearApiKey.value ? "clear" : "keep";
-    provider.apiMode = nextApiMode;
     if (provider.apiKeyState === "set") {
       provider.apiKeyMasked = nextApiKey ? maskApiKey(nextApiKey) : provider.apiKeyMasked;
     } else if (provider.apiKeyState === "clear") {
@@ -951,14 +923,11 @@ function toDraft() {
     providers: providers.value.map((provider) => {
       const options = {
         baseURL: provider.baseURL.trim()
-      } as { baseURL: string; apiKey?: string | null; apiMode?: AgentProviderOpenAiApiMode };
+      } as { baseURL: string; apiKey?: string | null };
 
       if (provider.apiKeyState === "set") {
         const next = provider.apiKeyInput.trim();
         options.apiKey = next ? next : null;
-      }
-      if (provider.npm === "@ai-sdk/openai") {
-        options.apiMode = provider.apiMode ?? DEFAULT_OPENAI_API_MODE;
       }
       if (provider.apiKeyState === "clear") {
         options.apiKey = null;

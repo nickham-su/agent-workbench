@@ -14,7 +14,6 @@ import type {
   AgentProviderNpm,
   AgentScope,
   AgentProvidersSettings,
-  AgentProviderOpenAiApiMode,
   AgentResolvedModel,
   AgentProvidersSettingsView,
   AgentPluginTools,
@@ -38,6 +37,11 @@ import type {
   UpdateNetworkSettingsRequest,
   UpdateSearchSettingsRequest
 } from "@agent-workbench/shared";
+import {
+  AiSdkCallSettingsError,
+  parseAiSdkCallSettings,
+  redactUnsafeAiSdkHeadersForRead,
+} from "@agent-workbench/shared/llm-ai-sdk-call-settings";
 import type { AppContext } from "../../app/context.js";
 import { HttpError } from "../../app/errors.js";
 import { ensureDir, pathExists } from "../../infra/fs/fs.js";
@@ -234,20 +238,6 @@ function normalizeApiKeyInput(raw: unknown) {
 
 const DEFAULT_PROVIDER_NPM: AgentProviderNpm = "@ai-sdk/openai";
 
-const RESERVED_MODEL_OPTION_KEYS = new Set([
-  "model",
-  "system",
-  "prompt",
-  "messages",
-  "input",
-  "abortSignal",
-  "providerOptions",
-  "tools",
-  "toolChoice"
-]);
-
-const DEFAULT_OPENAI_API_MODE: AgentProviderOpenAiApiMode = "responses";
-
 function isSafeObjectKey(raw: string) {
   if (!raw) return false;
   return raw !== "__proto__" && raw !== "prototype" && raw !== "constructor";
@@ -274,29 +264,15 @@ function providerOptionsKeyByNpm(npm: AgentProviderNpm) {
   return npm === "@ai-sdk/anthropic" ? "anthropic" : "openai";
 }
 
-function normalizeOpenAiApiModeStored(raw: unknown): AgentProviderOpenAiApiMode {
-  if (raw === "chatCompletions") return raw;
-  return DEFAULT_OPENAI_API_MODE;
-}
-
-function normalizeOpenAiApiModeInput(raw: unknown): AgentProviderOpenAiApiMode {
-  if (raw === undefined) return DEFAULT_OPENAI_API_MODE;
-  if (raw == null || raw === "") return DEFAULT_OPENAI_API_MODE;
-  if (raw === "responses" || raw === "chatCompletions") return raw;
-  throw new HttpError(400, "OpenAI provider apiMode is invalid", "AGENT_PROVIDER_OPENAI_API_MODE_INVALID");
-}
-
-function normalizeAiSdkOptions(raw: unknown) {
-  const source = toRecordObject(raw);
-  if (!source) return {};
-  const out: Record<string, unknown> = {};
-  for (const [rawKey, value] of Object.entries(source)) {
-    const key = rawKey.trim();
-    if (!isSafeObjectKey(key)) continue;
-    if (RESERVED_MODEL_OPTION_KEYS.has(key)) continue;
-    out[key] = value;
+function normalizeAiSdkOptionsForUpdate(raw: unknown, field: string) {
+  try {
+    return parseAiSdkCallSettings(raw);
+  } catch (error) {
+    if (error instanceof AiSdkCallSettingsError) {
+      throw new HttpError(400, `${field}: ${error.message}`, "AGENT_PROVIDER_AI_SDK_OPTIONS_INVALID");
+    }
+    throw error;
   }
-  return out;
 }
 
 function normalizeProviderOptionsByKey(raw: unknown) {
@@ -319,11 +295,23 @@ function normalizeProviderOptionsByKey(raw: unknown) {
   return out;
 }
 
-function normalizeProviderModelOptions(raw: unknown, providerNpm: AgentProviderNpm) {
+function normalizeAiSdkOptionsFromStored(raw: unknown) {
+  const source = toRecordObject(raw);
+  if (!source) return {};
+  const aiSdk: Record<string, unknown> = { ...source };
+  if (Object.hasOwn(source, "headers")) {
+    aiSdk.headers = redactUnsafeAiSdkHeadersForRead(source.headers);
+  }
+  return aiSdk;
+}
+
+function normalizeProviderModelOptions(raw: unknown, providerNpm: AgentProviderNpm, mode: "stored" | "update", field = "model.options.aiSdk") {
   const source = toRecordObject(raw);
   if (!source) return {};
 
-  const aiSdk = normalizeAiSdkOptions(source.aiSdk);
+  const aiSdk: Record<string, unknown> = mode === "update"
+    ? { ...normalizeAiSdkOptionsForUpdate(source.aiSdk, field) }
+    : normalizeAiSdkOptionsFromStored(source.aiSdk);
   const providerOptionsByKey = normalizeProviderOptionsByKey(source.providerOptionsByKey);
   const providerKey = providerOptionsKeyByNpm(providerNpm);
 
@@ -334,7 +322,8 @@ function normalizeProviderModelOptions(raw: unknown, providerNpm: AgentProviderN
     if (key === "aiSdk" || key === "providerOptionsByKey") continue;
     if (key === "maxOutputTokens") {
       if (aiSdk.maxOutputTokens === undefined) {
-        aiSdk.maxOutputTokens = value;
+        const parsed = mode === "update" ? normalizeAiSdkOptionsForUpdate({ maxOutputTokens: value }, `${field}.maxOutputTokens`) : { maxOutputTokens: value };
+        Object.assign(aiSdk, parsed);
       }
       continue;
     }
@@ -563,7 +552,7 @@ function getAgentProvidersSettingsStored(ctx: AppContext) {
             providerModelId,
             name,
             contextWindowTokens: normalizeContextWindowTokensFromStored(model.contextWindowTokens),
-            options: normalizeProviderModelOptions(model.options, npm)
+            options: normalizeProviderModelOptions(model.options, npm, "stored")
           };
         })
         .filter((x): x is NonNullable<typeof x> => Boolean(x));
@@ -575,8 +564,7 @@ function getAgentProvidersSettingsStored(ctx: AppContext) {
           npm,
           options: {
             baseURL: normalizeBaseURL(optionsRaw.baseURL),
-            apiKey: normalizeApiKeyInput(optionsRaw.apiKey) ?? null,
-            ...(npm === "@ai-sdk/openai" ? { apiMode: normalizeOpenAiApiModeStored(optionsRaw.apiMode) } : {})
+            apiKey: normalizeApiKeyInput(optionsRaw.apiKey) ?? null
           },
           models
         };
@@ -611,8 +599,7 @@ function toAgentProvidersSettingsView(settings: AgentProvidersSettingsStored, up
       options: {
         baseURL: provider.options.baseURL,
         hasApiKey: Boolean(provider.options.apiKey),
-        apiKeyMasked: maskApiKey(provider.options.apiKey ?? null),
-        ...(provider.npm === "@ai-sdk/openai" ? { apiMode: normalizeOpenAiApiModeStored((provider.options as any).apiMode) } : {})
+        apiKeyMasked: maskApiKey(provider.options.apiKey ?? null)
       },
       models: provider.models
     })),
@@ -1738,18 +1725,6 @@ export function updateAgentProvidersSettings(
     const optionsRaw = (provider.options ?? {}) as Record<string, unknown>;
     const apiKeyInput = normalizeApiKeyInput(optionsRaw.apiKey);
     const previous = currentById.get(id);
-    const previousApiModeRaw = previous?.npm === "@ai-sdk/openai"
-      ? (previous.options as Record<string, unknown>).apiMode
-      : undefined;
-    const openAiApiMode =
-      npm === "@ai-sdk/openai"
-        ? optionsRaw.apiMode === undefined
-          ? previousApiModeRaw === undefined
-            ? DEFAULT_OPENAI_API_MODE
-            : normalizeOpenAiApiModeStored(previousApiModeRaw)
-          : normalizeOpenAiApiModeInput(optionsRaw.apiMode)
-        : undefined;
-
     const apiKey = apiKeyInput === undefined ? previous?.options.apiKey ?? null : apiKeyInput;
 
     const modelsRaw = Array.isArray(provider.models) ? provider.models : [];
@@ -1768,7 +1743,7 @@ export function updateAgentProvidersSettings(
           providerModelId,
           name: modelName,
           contextWindowTokens,
-          options: normalizeProviderModelOptions(model.options, npm)
+          options: normalizeProviderModelOptions(model.options, npm, "update", `providers[${id}].models[${modelId}].options.aiSdk`)
         };
       });
 
@@ -1784,8 +1759,7 @@ export function updateAgentProvidersSettings(
       npm,
       options: {
         baseURL: normalizeBaseURL(optionsRaw.baseURL),
-        apiKey,
-        ...(npm === "@ai-sdk/openai" ? { apiMode: openAiApiMode } : {})
+        apiKey
       },
       models
 

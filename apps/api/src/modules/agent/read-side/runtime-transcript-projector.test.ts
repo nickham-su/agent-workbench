@@ -132,6 +132,32 @@ test("RuntimeTranscriptProjector excludes superseded, failed, cancelled assistan
   assert.deepEqual(result, []);
 });
 
+test("RuntimeTranscriptProjector 仅在 detailed 私有调用显式要求时保留空 Assistant ordinal", () => {
+  const assistant = message({
+    id: "replay-only",
+    type: "assistant",
+    status: "completed",
+    parts: [],
+  });
+
+  assert.deepEqual(projector.project({
+    workspaceId: "ws",
+    triggerMessageId: null,
+    executions: [],
+    messages: [assistant],
+  }), []);
+
+  const detailed = projector.projectDetailed({
+    workspaceId: "ws",
+    triggerMessageId: null,
+    executions: [],
+    messages: [assistant],
+    includeEmptyAssistantMessageIds: new Set([assistant.id]),
+  });
+  assert.deepEqual(detailed.messages, [{ role: "assistant", content: [] }]);
+  assert.equal(detailed.assistantMessageIndexes.get(assistant.id), 0);
+});
+
 
 test("RuntimeTranscriptProjector excludes the incomplete Assistant turn at an explicit pending boundary", () => {
   const result = projector.project({

@@ -11,6 +11,10 @@ import type {
   AgentToolExecution,
   AgentToolExecutionStatus
 } from "@agent-workbench/shared";
+import {
+  parseAgentProviderReplay,
+  type AgentProviderReplayEnvelope,
+} from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { Db } from "../../../infra/db/db.js";
 import { HttpError } from "../../../app/errors.js";
 import type { RuntimeTranscriptExecution } from "./runtime-transcript-projector.js";
@@ -280,6 +284,28 @@ export class SqliteMessageQuery {
           where call_part_id in (${callPartIds.map(() => "?").join(",")})
         `).all(...callPartIds) as RuntimeTranscriptExecution[];
     return { messages, executions };
+  }
+
+  /** 私有 Provider 回放数据只供受保护的 PromptContext 读取，不进入公开 Message 映射。 */
+  getRuntimeProviderReplaySource(input: { workspaceId: string; sessionId: string }) {
+    const session = this.requireSession(input.workspaceId, input.sessionId);
+    const chain = this.listChain(session);
+    if (chain.length === 0) return new Map<string, AgentProviderReplayEnvelope>();
+    const rows = this.db.prepare(`
+      select part.id, part.provider_replay_json as providerReplayJson
+      from agent_message_part part
+      where part.message_id in (${chain.map(() => "?").join(",")})
+        and part.provider_replay_json is not null
+    `).all(...chain.map((message) => message.id)) as Array<{
+      id: string;
+      providerReplayJson: string;
+    }>;
+    const result = new Map<string, AgentProviderReplayEnvelope>();
+    for (const row of rows) {
+      const replay = parseAgentProviderReplay(row.providerReplayJson);
+      if (replay) result.set(row.id, replay);
+    }
+    return result;
   }
 
   getRunState(input: { workspaceId: string; sessionId: string }): AgentMessageSessionRunState {

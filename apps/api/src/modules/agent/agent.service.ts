@@ -135,6 +135,10 @@ export class AgentService {
     return this.capabilities.lifecycle.replaceStreamingAssistantFromWorker(...args);
   }
 
+  discardStreamingAssistantFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["discardStreamingAssistantFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["discardStreamingAssistantFromWorker"]> {
+    return this.capabilities.lifecycle.discardStreamingAssistantFromWorker(...args);
+  }
+
   completeAssistantFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["completeAssistantFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["completeAssistantFromWorker"]> {
     return this.capabilities.lifecycle.completeAssistantFromWorker(...args);
   }

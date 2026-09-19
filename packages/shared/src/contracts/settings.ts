@@ -32,8 +32,22 @@ export const UpdateSearchSettingsRequestSchema = Type.Object({
 });
 export type UpdateSearchSettingsRequest = Static<typeof UpdateSearchSettingsRequestSchema>;
 
+export const AgentAiSdkCallSettingsSchema = Type.Object({
+  maxOutputTokens: Type.Optional(Type.Integer({ minimum: 1 })),
+  temperature: Type.Optional(Type.Number()),
+  topP: Type.Optional(Type.Number()),
+  topK: Type.Optional(Type.Number()),
+  presencePenalty: Type.Optional(Type.Number()),
+  frequencyPenalty: Type.Optional(Type.Number()),
+  stopSequences: Type.Optional(Type.Array(Type.String())),
+  seed: Type.Optional(Type.Integer()),
+  headers: Type.Optional(Type.Record(Type.String({ minLength: 1 }), Type.String())),
+  allowSystemInMessages: Type.Optional(Type.Boolean())
+}, { additionalProperties: true });
+export type AgentAiSdkCallSettings = Static<typeof AgentAiSdkCallSettingsSchema>;
+
 export const AgentProviderModelOptionsSchema = Type.Object({
-  aiSdk: Type.Optional(Type.Record(Type.String({ minLength: 1 }), Type.Any())),
+  aiSdk: Type.Optional(AgentAiSdkCallSettingsSchema),
   providerOptionsByKey: Type.Optional(
     Type.Record(Type.String({ minLength: 1 }), Type.Record(Type.String({ minLength: 1 }), Type.Any()))
   )
@@ -57,16 +71,9 @@ export const AgentProviderNpmSchema = Type.Union([
 ]);
 export type AgentProviderNpm = Static<typeof AgentProviderNpmSchema>;
 
-export const AgentProviderOpenAiApiModeSchema = Type.Union([
-  Type.Literal("responses"),
-  Type.Literal("chatCompletions")
-]);
-export type AgentProviderOpenAiApiMode = Static<typeof AgentProviderOpenAiApiModeSchema>;
-
 export const AgentProviderOptionsInputSchema = Type.Object({
   baseURL: Type.String({ minLength: 1 }),
-  apiKey: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-  apiMode: Type.Optional(AgentProviderOpenAiApiModeSchema)
+  apiKey: Type.Optional(Type.Union([Type.String(), Type.Null()]))
 });
 export type AgentProviderOptionsInput = Static<typeof AgentProviderOptionsInputSchema>;
 
@@ -101,8 +108,7 @@ export type UpdateAgentProvidersSettingsRequest = Static<typeof UpdateAgentProvi
 export const AgentProviderOptionsViewSchema = Type.Object({
   baseURL: Type.String({ minLength: 1 }),
   hasApiKey: Type.Boolean(),
-  apiKeyMasked: Type.Union([Type.String(), Type.Null()]),
-  apiMode: Type.Optional(AgentProviderOpenAiApiModeSchema)
+  apiKeyMasked: Type.Union([Type.String(), Type.Null()])
 });
 export type AgentProviderOptionsView = Static<typeof AgentProviderOptionsViewSchema>;
 

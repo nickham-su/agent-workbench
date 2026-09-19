@@ -18,6 +18,12 @@ function createDb() {
   return db;
 }
 
+function tableExistsForTest(db: Database.Database, name: string) {
+  return Boolean(
+    db.prepare("select 1 from sqlite_master where type in ('table', 'view') and name = ?").get(name)
+  );
+}
+
 function insertWorkspace(db: Database.Database, id = "ws-a") {
   db.prepare(
     "insert into workspaces (id, dir_name, title, path, created_at, updated_at) values (?, ?, ?, ?, ?, ?)"
@@ -425,6 +431,19 @@ function createLegacyContextItemTable(db: Database.Database) {
   `);
 }
 
+function createLegacyContextItemAttachmentTable(db: Database.Database) {
+  db.exec(`
+    create table agent_context_item_attachment (
+      context_item_id integer not null,
+      attachment_id text not null,
+      position integer not null,
+      primary key (context_item_id, attachment_id),
+      foreign key (context_item_id) references agent_context_item(id) on delete cascade,
+      foreign key (attachment_id) references agent_attachment(id) on delete restrict
+    );
+  `);
+}
+
 test("Agent schema classifier accepts a clean database before first initialization", () => {
   const db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
@@ -529,6 +548,99 @@ test("Agent schema classifier accepts a real unversioned ContextItem schema and 
     values (1, 'ws-a', 'session-a', 'user', 'completed', 'legacy', 0, '{}', 1, 1)`).run();
   assert.equal(initSchema(db).fileCleanupPending, true);
   assert.equal((db.prepare("select count(*) as count from agent_schema_meta").get() as { count: number }).count, 1);
+  db.close();
+});
+
+test("legacy Agent rebuild tolerates a relation whose foreign key parent table is missing", () => {
+  const db = new Database(":memory:");
+  db.pragma("foreign_keys = ON");
+  db.exec("create table schema_test_sentinel (id integer primary key, value text not null);");
+  db.prepare("insert into schema_test_sentinel values (1, 'keep')").run();
+  createLegacyContextItemTable(db);
+  createLegacyContextItemAttachmentTable(db);
+
+  const result = initSchema(db);
+
+  assert.equal(result.fileCleanupPending, true);
+  assert.equal(db.pragma("foreign_keys", { simple: true }), 1);
+  assert.equal((db.prepare("select version from agent_schema_meta where id = 1").get() as { version: number }).version, AGENT_SCHEMA_VERSION);
+  assert.deepEqual(db.prepare("select * from schema_test_sentinel").all(), [{ id: 1, value: "keep" }]);
+  assert.deepEqual(db.pragma("foreign_key_check"), []);
+  assert.equal(tableExistsForTest(db, "agent_context_item"), false);
+  assert.equal(tableExistsForTest(db, "agent_context_item_attachment"), false);
+  db.close();
+});
+
+test("legacy Agent rebuild tolerates dangling relation rows", () => {
+  const db = new Database(":memory:");
+  db.pragma("foreign_keys = OFF");
+  createLegacyContextItemTable(db);
+  createLegacyContextItemAttachmentTable(db);
+  db.prepare(`insert into agent_context_item (
+    id, workspace_id, session_id, kind, status, output_text, output_text_truncated,
+    output_json, created_at, updated_at
+  ) values (1, 'ws-a', 'session-a', 'user', 'completed', 'legacy', 0, '{}', 1, 1)`).run();
+  db.prepare("insert into agent_context_item_attachment values (1, 'missing-attachment', 0)").run();
+
+  const result = initSchema(db);
+
+  assert.equal(result.fileCleanupPending, true);
+  assert.equal(db.pragma("foreign_keys", { simple: true }), 0);
+  assert.deepEqual(db.pragma("foreign_key_check"), []);
+  assert.equal((db.prepare("select count(*) as count from agent_schema_meta").get() as { count: number }).count, 1);
+  db.close();
+});
+
+test("failed legacy Agent rebuild rolls back dropped data and restores foreign_keys", () => {
+  const db = new Database(":memory:");
+  db.pragma("foreign_keys = OFF");
+  db.exec("create table schema_test_sentinel (id integer primary key, value text not null);");
+  db.prepare("insert into schema_test_sentinel values (1, 'keep')").run();
+  createLegacyContextItemTable(db);
+  createLegacyContextItemAttachmentTable(db);
+  db.prepare(`insert into agent_context_item (
+    id, workspace_id, session_id, kind, status, output_text, output_text_truncated,
+    output_json, created_at, updated_at
+  ) values (1, 'ws-a', 'session-a', 'user', 'completed', 'legacy', 0, '{}', 1, 1)`).run();
+  db.prepare("insert into agent_context_item_attachment values (1, 'missing-attachment', 0)").run();
+  db.exec(`
+    create trigger agent_message_previous_workspace_insert
+    before insert on schema_test_sentinel
+    begin
+      select 1;
+    end;
+  `);
+  db.pragma("foreign_keys = ON");
+
+  assert.throws(() => initSchema(db), /trigger agent_message_previous_workspace_insert already exists/);
+
+  assert.equal(db.pragma("foreign_keys", { simple: true }), 1);
+  assert.deepEqual(db.prepare("select id, output_text from agent_context_item").all(), [{ id: 1, output_text: "legacy" }]);
+  assert.deepEqual(db.prepare("select * from agent_context_item_attachment").all(), [{ context_item_id: 1, attachment_id: "missing-attachment", position: 0 }]);
+  assert.deepEqual(db.prepare("select * from schema_test_sentinel").all(), [{ id: 1, value: "keep" }]);
+  assert.equal(tableExistsForTest(db, "agent_schema_meta"), false);
+  assert.equal(tableExistsForTest(db, "agent_message"), false);
+  db.close();
+});
+
+test("legacy Agent rebuild refuses an outer transaction without changing foreign_keys or data", () => {
+  const db = new Database(":memory:");
+  db.pragma("foreign_keys = ON");
+  createLegacyContextItemTable(db);
+  db.prepare(`insert into agent_context_item (
+    id, workspace_id, session_id, kind, status, output_text, output_text_truncated,
+    output_json, created_at, updated_at
+  ) values (1, 'ws-a', 'session-a', 'user', 'completed', 'legacy', 0, '{}', 1, 1)`).run();
+
+  db.exec("begin");
+  try {
+    assert.throws(() => initSchema(db), /must run outside an active transaction/);
+    assert.equal(db.pragma("foreign_keys", { simple: true }), 1);
+    assert.deepEqual(db.prepare("select id, output_text from agent_context_item").all(), [{ id: 1, output_text: "legacy" }]);
+    assert.equal(tableExistsForTest(db, "agent_schema_meta"), false);
+  } finally {
+    if (db.inTransaction) db.exec("rollback");
+  }
   db.close();
 });
 
@@ -792,10 +904,40 @@ test("destructive file cleanup rejects a symbolic link in the artifact parent pa
   second.close();
 });
 
+test("v19 原地升级到 v20 保留数据、补充私有 replay 列且重复初始化幂等", () => {
+  const db = createDb();
+  insertWorkspace(db);
+  insertSession(db);
+  insertMessage(db, { id: "message-v19", originSessionId: "session-a", type: "assistant", status: "completed" });
+  db.prepare(`insert into agent_message_part (id,message_id,position,type,text,updated_revision,created_at,updated_at)
+    values ('part-v19','message-v19',0,'reasoning','summary',7,10,11)`).run();
+  db.prepare("update agent_schema_meta set version = 19, file_cleanup_pending = 1 where id = 1").run();
+  db.exec("alter table agent_message_part drop column provider_replay_json");
+
+  const first = initSchema(db);
+  assert.equal(first.fileCleanupPending, true);
+  assert.equal((db.prepare("select version from agent_schema_meta where id = 1").get() as { version: number }).version, 20);
+  assert.deepEqual(
+    db.prepare("select id,message_id,type,text,updated_revision,provider_replay_json from agent_message_part where id='part-v19'").get(),
+    { id: "part-v19", message_id: "message-v19", type: "reasoning", text: "summary", updated_revision: 7, provider_replay_json: null },
+  );
+  const columnsAfterFirst = db.prepare("pragma table_info(agent_message_part)").all() as Array<{ name: string }>;
+  assert.equal(columnsAfterFirst.filter((column) => column.name === "provider_replay_json").length, 1);
+
+  const second = initSchema(db);
+  assert.equal(second.fileCleanupPending, true);
+  const columnsAfterSecond = db.prepare("pragma table_info(agent_message_part)").all() as Array<{ name: string }>;
+  assert.equal(columnsAfterSecond.filter((column) => column.name === "provider_replay_json").length, 1);
+  assert.equal((db.prepare("select count(*) as count from agent_message").get() as { count: number }).count, 1);
+  assert.equal((db.prepare("select count(*) as count from agent_message_part").get() as { count: number }).count, 1);
+  db.close();
+});
+
 test("agent_run run_kind 在目标 schema 升级时保留数据并回填 user", () => {
   const db = createDb();
   db.prepare("update agent_schema_meta set version = 18 where id = 1").run();
   db.exec("alter table agent_run drop column run_kind");
+  db.exec("alter table agent_message_part drop column provider_replay_json");
   initSchema(db);
   const columns = db.prepare("pragma table_info(agent_run)").all() as Array<{ name: string }>;
   assert.ok(columns.some((column) => column.name === "run_kind"));
@@ -821,14 +963,15 @@ test("v18 Message 数据图原地升级保留关系、状态与 file cleanup pen
     values ('ws-a', 'session-a', 'running', 'run-v18', 'recovering', 2, 99, null, '[]', '[]', 17)`).run();
   db.prepare("update agent_schema_meta set version = 18, file_cleanup_pending = 1 where id = 1").run();
   db.exec("alter table agent_run drop column run_kind");
+  db.exec("alter table agent_message_part drop column provider_replay_json");
 
   initSchema(db);
 
   assert.deepEqual(db.prepare("select run_kind, status, created_at, updated_at from agent_run where run_id = 'run-v18'").get(), { run_kind: "user", status: "running", created_at: 10, updated_at: 11 });
   assert.deepEqual(db.prepare("select head_message_id, context_root_message_id, revision from agent_session where id = 'session-a'").get(), { head_message_id: "assistant-v18", context_root_message_id: "user-v18", revision: 6 });
-  assert.deepEqual(db.prepare("select id, message_id, type, text, tool_name, tool_input_json, updated_revision from agent_message_part order by id").all(), [
-    { id: "call-v18", message_id: "assistant-v18", type: "tool_call", text: null, tool_name: "bash", tool_input_json: "{}", updated_revision: 5 },
-    { id: "text-v18", message_id: "user-v18", type: "text", text: "input", tool_name: null, tool_input_json: null, updated_revision: 4 }
+  assert.deepEqual(db.prepare("select id, message_id, type, text, tool_name, tool_input_json, provider_replay_json, updated_revision from agent_message_part order by id").all(), [
+    { id: "call-v18", message_id: "assistant-v18", type: "tool_call", text: null, tool_name: "bash", tool_input_json: "{}", provider_replay_json: null, updated_revision: 5 },
+    { id: "text-v18", message_id: "user-v18", type: "text", text: "input", tool_name: null, tool_input_json: null, provider_replay_json: null, updated_revision: 4 }
   ]);
   assert.deepEqual(db.prepare("select id, call_part_id, origin_run_id, status, result_preview, updated_revision from agent_tool_execution").get(), { id: "execution-v18", call_part_id: "call-v18", origin_run_id: "run-v18", status: "completed", result_preview: "done", updated_revision: 6 });
   assert.deepEqual(db.prepare("select status, active_run_id, run_notice_text, retry_count, next_retry_at from session_run_state where session_id = 'session-a'").get(), { status: "running", active_run_id: "run-v18", run_notice_text: "recovering", retry_count: 2, next_retry_at: 99 });

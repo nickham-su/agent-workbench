@@ -7,15 +7,15 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "cd ../.. && env -u AWB_TOOL_ERROR_STORE_ENABLED tsx --test --test-concurrency=1 apps/agent-worker/src/*.test.ts apps/agent-worker/src/config/*.test.ts apps/agent-worker/src/runtime/*.test.ts apps/agent-worker/src/runtime/plugins/*.test.ts apps/agent-worker/src/runtime/tools/*.test.ts apps/agent-worker/src/runtime/tools/providers/*.test.ts"
+    "test": "cd ../.. && env -u AWB_TOOL_ERROR_STORE_ENABLED tsx --test --test-concurrency=1 apps/agent-worker/src/*.test.ts apps/agent-worker/src/config/*.test.ts apps/agent-worker/src/runtime/*.test.ts apps/agent-worker/src/runtime/providers/*.test.ts apps/agent-worker/src/runtime/plugins/*.test.ts apps/agent-worker/src/runtime/tools/*.test.ts apps/agent-worker/src/runtime/tools/providers/*.test.ts"
   },
   "dependencies": {
     "@agent-workbench/shared": "*",
-    "@ai-sdk/anthropic": "^2.0.67",
-    "@ai-sdk/openai": "^2.0.23",
-    "@ai-sdk/openai-compatible": "^1.0.39",
+    "@ai-sdk/anthropic": "^2.0.102",
+    "@ai-sdk/openai": "^2.0.127",
+    "@ai-sdk/openai-compatible": "^1.0.54",
     "@modelcontextprotocol/sdk": "^1.18.2",
-    "ai": "^5.0.22"
+    "ai": "^5.0.260"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

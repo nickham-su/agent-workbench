@@ -70,7 +70,7 @@ async function createFixture() {
       id: "provider_1",
       name: "Provider",
       npm: "@ai-sdk/openai",
-      options: { baseURL: "https://api.example.test", apiKey: null, apiMode: "responses" },
+      options: { baseURL: "https://api.example.test", apiKey: null },
       models: [{
         id: "model_1",
         providerModelId: "model-1",

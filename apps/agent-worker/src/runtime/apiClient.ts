@@ -30,6 +30,7 @@ import {
   type AgentApiReplaceStreamingAssistantRequest,
   type AgentApiReplaceStreamingAssistantResponse,
   AgentApiReplaceStreamingAssistantResponseSchema,
+  type AgentApiDiscardStreamingAssistantRequest,
   type AgentApiCompleteAssistantRequest,
   type AgentApiUpdateToolExecutionRequest,
   type AgentApiUpdateRunNoticeRequest,
@@ -73,8 +74,6 @@ type InternalRpcRetryReason =
 const RETRY_DELAY_MS = 300;
 const INTERNAL_RPC_ERROR_BODY_MAX_BYTES = 4 * 1024;
 const INTERNAL_RPC_ERROR_CODE_MAX_CHARS = 128;
-const INTERNAL_RPC_ERROR_MESSAGE_MAX_CHARS = 512;
-const INTERNAL_RPC_ERROR_MESSAGE_UNSAFE_CHARS = /[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
 const INTERNAL_RPC_ERROR_CODE_PATTERN = /^[A-Za-z0-9_.:-]+$/;
 
 const EXCLUDED_POLICY: AgentApiClientPolicy = {
@@ -215,16 +214,6 @@ function normalizeSafeErrorCode(raw: unknown) {
   return INTERNAL_RPC_ERROR_CODE_PATTERN.test(value) ? value : undefined;
 }
 
-function normalizeSafeErrorMessage(raw: unknown) {
-  if (typeof raw !== "string") return undefined;
-  const value = raw
-    .replace(INTERNAL_RPC_ERROR_MESSAGE_UNSAFE_CHARS, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!value) return undefined;
-  return value.slice(0, INTERNAL_RPC_ERROR_MESSAGE_MAX_CHARS);
-}
-
 async function readSafeBusinessErrorDetails(response: Response): Promise<InternalRpcSafeBusinessErrorDetails> {
   const contentLength = Number(response.headers.get("content-length"));
   if (Number.isFinite(contentLength) && contentLength > INTERNAL_RPC_ERROR_BODY_MAX_BYTES) {
@@ -268,10 +257,10 @@ async function readSafeBusinessErrorDetails(response: Response): Promise<Interna
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
   const body = parsed as Record<string, unknown>;
   const apiCode = normalizeSafeErrorCode(body.code);
-  const safeMessage = normalizeSafeErrorMessage(body.message);
+  // Response message 属于不可信正文，可能回显请求、私有 replay 或 Provider raw payload。
+  // 仅保留严格格式的业务码；诊断文本由调用方根据业务码本地生成。
   return {
     ...(apiCode ? { apiCode } : {}),
-    ...(safeMessage ? { safeMessage } : {}),
   };
 }
 
@@ -327,6 +316,7 @@ export class AgentApiClient {
     flushAssistantParts: "controlWrite",
     resumeStreamingAssistant: "controlWrite",
     replaceStreamingAssistant: "controlWrite",
+    discardStreamingAssistant: "controlWrite",
     completeAssistant: "controlWrite",
     updateToolExecution: "controlWrite",
     updateRunNotice: "controlWrite",
@@ -675,6 +665,16 @@ export class AgentApiClient {
         policy: AgentApiClient.publicMethodPolicies.replaceStreamingAssistant,
       },
     );
+  }
+
+  async discardStreamingAssistant(input: AgentApiDiscardStreamingAssistantRequest) {
+    return await this.request<AgentApiFencedWriteResponse>(AgentApiEndpoints.discardStreamingAssistant.path, {
+      method: AgentApiEndpoints.discardStreamingAssistant.method,
+      body: input,
+      responseSchema: AgentApiFencedWriteResponseSchema,
+      responseEndpoint: AgentApiEndpoints.discardStreamingAssistant.path,
+      policy: AgentApiClient.publicMethodPolicies.discardStreamingAssistant,
+    });
   }
 
   async completeAssistant(input: AgentApiCompleteAssistantRequest) {

@@ -5,7 +5,7 @@ import type { Db } from "./db.js";
  *
  * 该版本是破坏性升级：旧 ContextItem 数据不会迁移，也不能和此版本共存。
  */
-export const AGENT_SCHEMA_VERSION = 19;
+export const AGENT_SCHEMA_VERSION = 20;
 
 export type AgentSchemaInitResult = {
   /** 旧 Agent 数据已被清理，仍需要由 openDb 清理对应的文件系统数据。 */
@@ -398,7 +398,7 @@ const TARGET_AGENT_TABLE_COLUMNS: Record<string, readonly string[]> = {
   agent_attachment: ["id", "workspace_id", "storage_key", "filename", "media_type", "byte_size", "created_at"],
   agent_run: ["run_id", "workspace_id", "session_id", "trigger_message_id", "agent_id", "provider_id", "model_id", "subtask_depth", "parent_run_id", "parent_tool_execution_id", "status", "created_at", "updated_at", "run_kind"],
   agent_message: ["id", "workspace_id", "previous_message_id", "replaces_message_id", "depth", "type", "status", "origin_session_id", "origin_run_id", "updated_revision", "created_at", "updated_at"],
-  agent_message_part: ["id", "message_id", "position", "type", "text", "attachment_id", "media_type", "filename", "tool_name", "tool_input_json", "provider_tool_call_id", "updated_revision", "created_at", "updated_at"],
+  agent_message_part: ["id", "message_id", "position", "type", "text", "attachment_id", "media_type", "filename", "tool_name", "tool_input_json", "provider_tool_call_id", "updated_revision", "created_at", "updated_at", "provider_replay_json"],
   agent_tool_execution: ["id", "call_part_id", "origin_session_id", "origin_run_id", "status", "result_preview", "result_truncated", "result_artifact_path", "structured_result_json", "error", "updated_revision", "created_at", "updated_at", "started_at", "completed_at"],
   agent_client_request: ["workspace_id", "session_id", "client_request_id", "message_id", "run_id", "created_at"],
   session_run_state: ["workspace_id", "session_id", "status", "active_run_id", "run_notice_text", "retry_count", "next_retry_at", "active_assistant_message_id", "non_terminal_message_ids_json", "non_terminal_tool_execution_ids_json", "updated_at"],
@@ -407,6 +407,7 @@ const TARGET_AGENT_TABLE_COLUMNS: Record<string, readonly string[]> = {
 };
 
 const PRE_RUN_KIND_AGENT_RUN_COLUMNS = ["run_id", "workspace_id", "session_id", "trigger_message_id", "agent_id", "provider_id", "model_id", "subtask_depth", "parent_run_id", "parent_tool_execution_id", "status", "created_at", "updated_at"] as const;
+const PRE_PROVIDER_REPLAY_AGENT_MESSAGE_PART_COLUMNS = TARGET_AGENT_TABLE_COLUMNS.agent_message_part.filter((column) => column !== "provider_replay_json");
 
 type AgentSchemaClassification = "clean" | "legacy-unversioned" | "current" | "upgradeable" | "unsupported";
 
@@ -511,18 +512,27 @@ function classifyAgentSchema(db: Db): AgentSchemaClassification {
     if (objects.some((object) => object.type !== "table") || names.size !== TARGET_AGENT_TABLES.size || [...names].some((name) => !TARGET_AGENT_TABLES.has(name))) {
       return "unsupported";
     }
-    const hasTargetColumns = [...TARGET_AGENT_TABLES].every((table) =>
-      table === "agent_run"
-        ? hasExactColumns(db, table, TARGET_AGENT_TABLE_COLUMNS[table]!) || hasExactColumns(db, table, PRE_RUN_KIND_AGENT_RUN_COLUMNS)
-        : hasExactColumns(db, table, TARGET_AGENT_TABLE_COLUMNS[table]!),
-    );
-    if (!hasTargetColumns) return "unsupported";
-    const fts = objects.find((object) => object.name === "agent_archived_text_fts");
-    if (!hasCurrentSchemaSemantics(db, fts?.sql ?? null)) return "unsupported";
     const rows = db.prepare("select id, version from agent_schema_meta").all() as Array<{ id: unknown; version: unknown }>;
     if (rows.length !== 1 || rows[0]?.id !== 1) return "unsupported";
-    if (rows[0]?.version === AGENT_SCHEMA_VERSION && hasExactColumns(db, "agent_run", TARGET_AGENT_TABLE_COLUMNS.agent_run)) return "current";
-    if (rows[0]?.version === 18 && hasExactColumns(db, "agent_run", PRE_RUN_KIND_AGENT_RUN_COLUMNS)) return "upgradeable";
+    const version = rows[0]?.version;
+    const expectedColumns = [...TARGET_AGENT_TABLES].every((table) => {
+      if (table === "agent_run") {
+        return version === 18
+          ? hasExactColumns(db, table, PRE_RUN_KIND_AGENT_RUN_COLUMNS)
+          : hasExactColumns(db, table, TARGET_AGENT_TABLE_COLUMNS[table]!);
+      }
+      if (table === "agent_message_part") {
+        return version === 18 || version === 19
+          ? hasExactColumns(db, table, PRE_PROVIDER_REPLAY_AGENT_MESSAGE_PART_COLUMNS)
+          : hasExactColumns(db, table, TARGET_AGENT_TABLE_COLUMNS[table]!);
+      }
+      return hasExactColumns(db, table, TARGET_AGENT_TABLE_COLUMNS[table]!);
+    });
+    if (!expectedColumns) return "unsupported";
+    const fts = objects.find((object) => object.name === "agent_archived_text_fts");
+    if (!hasCurrentSchemaSemantics(db, fts?.sql ?? null)) return "unsupported";
+    if (version === AGENT_SCHEMA_VERSION) return "current";
+    if (version === 18 || version === 19) return "upgradeable";
     return "unsupported";
   }
 
@@ -534,36 +544,41 @@ function classifyAgentSchema(db: Db): AgentSchemaClassification {
 }
 
 function clearAndDropAgentDomain(db: Db) {
-  // foreign_keys=ON 时先解除所有跨表引用，再删除表。列表同时覆盖旧模型和
-  // 可能由一次中断升级留下的目标模型，因而升级可安全重试且幂等。
-  const deleteOrder = [
-    "agent_text_part_fts_map",
-    "agent_tool_execution",
-    "agent_message_part",
-    "agent_client_request",
-    "session_run_state",
-    "agent_session_run_state",
-    "agent_session_head",
-    "agent_context_item_attachment",
-    "agent_context_item",
-    "agent_run",
-    "agent_session_agent_model_override",
-    "agent_attachment",
-    "agent_session"
-  ];
-
-  for (const table of deleteOrder) {
-    if (tableExists(db, table)) db.exec(`delete from ${table};`);
-  }
-  if (tableExists(db, "agent_message")) {
-    // 自引用必须先解除；此时 ToolExecution/Part 已删除，满足 foreign_keys=ON。
-    db.exec("update agent_message set previous_message_id = null, replaces_message_id = null;");
-    db.exec("delete from agent_message;");
-  }
-  if (tableExists(db, "agent_archived_text_fts")) db.exec("delete from agent_archived_text_fts;");
-
+  // 该分支会完整放弃旧 Agent 域，无需先逐行 DELETE。旧版本或中断升级可能
+  // 留下引用已缺失父表的外键；调用方会在事务外暂时关闭 foreign_keys，使这里
+  // 只依赖已知对象名，而不依赖旧外键图仍然完整。
   for (const table of [...AGENT_DOMAIN_TABLES].reverse()) {
     if (tableExists(db, table)) db.exec(`drop table ${table};`);
+  }
+}
+
+function assertAgentForeignKeysValid(db: Db) {
+  for (const table of TARGET_AGENT_TABLES) {
+    if (table === "agent_archived_text_fts") continue;
+    const violations = db.prepare(`pragma foreign_key_check("${table}")`).all() as unknown[];
+    if (violations.length > 0) {
+      throw new Error(`Agent schema foreign key check failed for ${table}.`);
+    }
+  }
+}
+
+function rebuildAgentDomain(db: Db, fileCleanupPending: boolean) {
+  if (db.inTransaction) {
+    throw new Error("Agent domain rebuild must run outside an active transaction.");
+  }
+  const foreignKeysEnabled = Number(db.pragma("foreign_keys", { simple: true })) === 1;
+  db.pragma("foreign_keys = OFF");
+  if (Number(db.pragma("foreign_keys", { simple: true })) !== 0) {
+    throw new Error("Agent domain rebuild must run outside an active transaction.");
+  }
+  try {
+    db.transaction(() => {
+      clearAndDropAgentDomain(db);
+      createAgentSchema(db, fileCleanupPending);
+      assertAgentForeignKeysValid(db);
+    })();
+  } finally {
+    db.pragma(`foreign_keys = ${foreignKeysEnabled ? "ON" : "OFF"}`);
   }
 }
 
@@ -679,6 +694,7 @@ function createAgentSchema(db: Db, fileCleanupPending: boolean) {
       updated_revision integer not null check (updated_revision >= 0),
       created_at integer not null,
       updated_at integer not null,
+      provider_replay_json text,
       unique (message_id, position),
       check (
         (type in ('text', 'reasoning') and text is not null and attachment_id is null and media_type is null and filename is null and tool_name is null and tool_input_json is null and provider_tool_call_id is null)
@@ -853,23 +869,31 @@ export function initSchema(db: Db): AgentSchemaInitResult {
 
   if (classification === "upgradeable") {
     db.transaction(() => {
-      ensureColumn(db, {
-        table: "agent_run",
-        column: "run_kind",
-        ddl: "run_kind text not null default 'user' check (run_kind in ('user', 'manual_compaction', 'subtask'))",
-      });
-      db.prepare("update agent_schema_meta set version = ?, updated_at = ? where id = 1").run(AGENT_SCHEMA_VERSION, Date.now());
+      const row = db.prepare("select version from agent_schema_meta where id = 1").get() as { version: number };
+      if (row.version === 18) {
+        ensureColumn(db, {
+          table: "agent_run",
+          column: "run_kind",
+          ddl: "run_kind text not null default 'user' check (run_kind in ('user', 'manual_compaction', 'subtask'))",
+        });
+        db.prepare("update agent_schema_meta set version = 19, updated_at = ? where id = 1").run(Date.now());
+      }
+      const current = db.prepare("select version from agent_schema_meta where id = 1").get() as { version: number };
+      if (current.version === 19) {
+        ensureColumn(db, {
+          table: "agent_message_part",
+          column: "provider_replay_json",
+          ddl: "provider_replay_json text",
+        });
+        db.prepare("update agent_schema_meta set version = ?, updated_at = ? where id = 1").run(AGENT_SCHEMA_VERSION, Date.now());
+      }
     })();
     const row = db.prepare("select file_cleanup_pending as fileCleanupPending from agent_schema_meta where id = 1").get() as { fileCleanupPending: number };
     return { fileCleanupPending: row.fileCleanupPending === 1 };
   }
 
   const hadAgentDomain = classification === "legacy-unversioned";
-  db.transaction(() => {
-    clearAndDropAgentDomain(db);
-    createAgentSchema(db, hadAgentDomain);
-  })();
-
+  rebuildAgentDomain(db, hadAgentDomain);
   return { fileCleanupPending: hadAgentDomain };
 }
 

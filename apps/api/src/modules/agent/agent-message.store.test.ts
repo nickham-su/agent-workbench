@@ -13,6 +13,7 @@ import {
   commitCompactionMessageWithRunFence,
   completeAssistantWithExecutions,
   createMessageSession,
+  discardStreamingAssistant,
   failMessageRunAndConverge,
   flushStreamingParts,
   getMessage,
@@ -41,6 +42,21 @@ function session(db: Database.Database, id = "s-a", workspaceId = "ws-a") { crea
 function activate(db: Database.Database, sessionId = "s-a", workspaceId = "ws-a", runId = "run-a") {
   db.prepare("insert into agent_run (run_id,workspace_id,session_id,trigger_message_id,agent_id,provider_id,model_id,status,created_at,updated_at) values (?,?,?,null,'agent','provider','model','running',1,1)").run(runId, workspaceId, sessionId);
   db.prepare("update session_run_state set status='running',active_run_id=? where workspace_id=? and session_id=?").run(runId, workspaceId, sessionId);
+}
+
+function replay(item: { type: "reasoning"; itemId: string; encryptedContent: string; summaryIndex?: number }
+  | { type: "text"; itemId: string; phase?: "commentary" | "final_answer" }
+  | { type: "function_call"; itemId: string }) {
+  return {
+    version: 1 as const,
+    provider: {
+      npm: "@ai-sdk/openai" as const,
+      api: "responses" as const,
+      providerId: "provider",
+      model: "gpt-5",
+    },
+    item,
+  };
 }
 
 test("workspace cancel converges every active run before runtime cancellation and preserves other workspaces", () => {
@@ -73,6 +89,49 @@ test("workspace cancel converges every active run before runtime cancellation an
   assert.equal(getMessageRunState(db, "ws-b", "s-b")?.status, "running");
   assert.equal((db.prepare("select status from agent_run where run_id = 'run-a'").get() as { status: string }).status, "cancelled");
   assert.equal((db.prepare("select status from agent_run where run_id = 'run-b'").get() as { status: string }).status, "running");
+  db.close();
+});
+
+test("discardStreamingAssistant supersedes replay-only attempt and restores previous head", () => {
+  const db = createDb();
+  createMessageSession(db, { id: "s-discard", workspaceId: "ws-a", title: "discard", kind: "primary", createdAt: 1 });
+  appendMessage(db, { id: "u-discard", workspaceId: "ws-a", sessionId: "s-discard", expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", parts: [{ id: "up-discard", position: 0, type: "text", text: "hello" }], createdAt: 2 });
+  activate(db, "s-discard", "ws-a", "r-discard");
+  appendStreamingAssistant(db, { id: "a-discard", workspaceId: "ws-a", sessionId: "s-discard", expectedHeadMessageId: "u-discard", expectedRevision: 1, runId: "r-discard", createdAt: 4 });
+  flushStreamingParts(db, {
+    workspaceId: "ws-a", sessionId: "s-discard", runId: "r-discard", messageId: "a-discard", updatedAt: 5,
+    parts: [{
+      id: "rp-discard", position: 0, type: "reasoning", text: "",
+      providerReplay: {
+        version: 1,
+        provider: { npm: "@ai-sdk/openai", api: "responses", providerId: "provider", model: "gpt-5" },
+        item: { type: "reasoning", itemId: "rs-discard", encryptedContent: "cipher-discard" },
+      },
+    }],
+  });
+
+  const request = { workspaceId: "ws-a", sessionId: "s-discard", runId: "r-discard", messageId: "a-discard", updatedAt: 6 };
+  assert.equal(discardStreamingAssistant(db, request), "updated");
+  assert.equal(getMessage(db, "a-discard")?.status, "superseded");
+  assert.equal(getMessageSession(db, "ws-a", "s-discard")?.headMessageId, "u-discard");
+  const revisionAfterDiscard = getMessageSession(db, "ws-a", "s-discard")?.revision;
+  const state = getMessageRunState(db, "ws-a", "s-discard");
+  assert.equal(state?.activeAssistantMessageId, null);
+  assert.deepEqual(state?.nonTerminalMessageIds, []);
+  assert.equal(discardStreamingAssistant(db, request), "updated");
+  assert.equal(getMessageSession(db, "ws-a", "s-discard")?.revision, revisionAfterDiscard);
+  assert.equal(discardStreamingAssistant(db, { workspaceId: "ws-a", sessionId: "s-discard", runId: "r-discard", messageId: "a-discard", updatedAt: 7 }), "ignored");
+
+  appendMessage(db, {
+    id: "u-after-discard", workspaceId: "ws-a", sessionId: "s-discard",
+    expectedHeadMessageId: "u-discard", expectedRevision: revisionAfterDiscard!,
+    type: "user", status: "completed", parts: [{ id: "up-after-discard", position: 0, type: "text", text: "continued" }], createdAt: 8,
+  });
+  assert.equal(discardStreamingAssistant(db, request), "ignored");
+
+  db.prepare("update agent_run set status='failed' where run_id='r-discard'").run();
+  db.prepare("update session_run_state set status='idle',active_run_id=null where workspace_id='ws-a' and session_id='s-discard'").run();
+  assert.equal(discardStreamingAssistant(db, request), "ignored");
   db.close();
 });
 
@@ -190,6 +249,73 @@ test("Text/Reasoning flush 重放不推进 revision，position 或非前缀变�
   assert.equal(flushStreamingParts(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "assistant", parts: [{ ...part, text: "hello world" }], updatedAt: 6 }), "updated");
   assert.throws(() => flushStreamingParts(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "assistant", parts: [{ ...part, position: 1, text: "hello world" }], updatedAt: 7 }), /position/);
   assert.throws(() => flushStreamingParts(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "assistant", parts: [{ ...part, text: "different" }], updatedAt: 8 }), /must extend/);
+});
+
+test("空 reasoning 可插入私有 replay，metadata-only 更新推进 revision且重放幂等", () => {
+  const db = createDb(); session(db); activate(db);
+  appendMessage(db, { id: "user", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", parts: [], createdAt: 2 });
+  appendStreamingAssistant(db, { id: "assistant", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: "user", expectedRevision: 1, runId: "run-a", createdAt: 3 });
+  const initial = { id: "reasoning", position: 0, type: "reasoning" as const, text: "" };
+  assert.equal(flushStreamingParts(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "assistant", parts: [initial], updatedAt: 4 }), "updated");
+  const beforeMetadata = getMessageSession(db, "ws-a", "s-a")!.revision;
+  const withReplay = { ...initial, providerReplay: replay({ type: "reasoning", itemId: "rs_1", encryptedContent: "cipher-1", summaryIndex: 0 }) };
+  assert.equal(flushStreamingParts(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "assistant", parts: [withReplay], updatedAt: 5 }), "updated");
+  const afterMetadata = getMessageSession(db, "ws-a", "s-a")!.revision;
+  assert.equal(afterMetadata, beforeMetadata + 1);
+  assert.equal((db.prepare("select provider_replay_json as replay, updated_revision as revision from agent_message_part where id='reasoning'").get() as { replay: string; revision: number }).revision, afterMetadata);
+
+  assert.equal(flushStreamingParts(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "assistant", parts: [withReplay], updatedAt: 6 }), "updated");
+  assert.equal(getMessageSession(db, "ws-a", "s-a")!.revision, afterMetadata);
+
+  const enrichedReplay = { ...initial, providerReplay: replay({ type: "reasoning", itemId: "rs_1", encryptedContent: "cipher-final", summaryIndex: 0 }) };
+  assert.equal(flushStreamingParts(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "assistant", parts: [enrichedReplay], updatedAt: 7 }), "updated");
+  assert.equal(getMessageSession(db, "ws-a", "s-a")!.revision, afterMetadata + 1);
+  const stored = db.prepare("select provider_replay_json as replay from agent_message_part where id='reasoning'").get() as { replay: string };
+  assert.match(stored.replay, /cipher-final/);
+  assert.doesNotMatch(JSON.stringify(getMessage(db, "assistant")), /cipher-final|providerReplay|provider_replay/);
+
+  const withoutIndex = { ...initial, providerReplay: replay({ type: "reasoning", itemId: "rs_2", encryptedContent: "cipher-2" }) };
+  assert.equal(flushStreamingParts(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "assistant", parts: [{ ...withoutIndex, id: "reasoning-2", position: 1 }], updatedAt: 8 }), "updated");
+  const withIndex = { ...withoutIndex, id: "reasoning-2", position: 1, providerReplay: replay({ type: "reasoning", itemId: "rs_2", encryptedContent: "cipher-2-final", summaryIndex: 1 }) };
+  assert.equal(flushStreamingParts(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "assistant", parts: [withIndex], updatedAt: 9 }), "updated");
+  assert.throws(() => flushStreamingParts(db, {
+    workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "assistant", updatedAt: 10,
+    parts: [{ ...withIndex, providerReplay: replay({ type: "reasoning", itemId: "rs_2", encryptedContent: "cipher", summaryIndex: 2 }) }],
+  }), /summaryIndex is immutable/);
+  assert.throws(() => flushStreamingParts(db, {
+    workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "assistant", updatedAt: 11,
+    parts: [{ ...withIndex, providerReplay: replay({ type: "reasoning", itemId: "rs_2", encryptedContent: "cipher" }) }],
+  }), /summaryIndex is immutable/);
+
+  assert.throws(() => flushStreamingParts(db, {
+    workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "assistant", updatedAt: 12,
+    parts: [{ ...initial, providerReplay: replay({ type: "reasoning", itemId: "rs_other", encryptedContent: "cipher-other" }) }],
+  }), /item identity is immutable/);
+});
+
+test("text 与 tool_call replay 分别持久化 item metadata，call_id 保持独立", () => {
+  const db = createDb(); session(db); activate(db);
+  appendMessage(db, { id: "user", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", parts: [], createdAt: 2 });
+  appendStreamingAssistant(db, { id: "assistant", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: "user", expectedRevision: 1, runId: "run-a", createdAt: 3 });
+  flushStreamingParts(db, {
+    workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "assistant", updatedAt: 4,
+    parts: [
+      { id: "text", position: 0, type: "text", text: "hello", providerReplay: replay({ type: "text", itemId: "msg_1", phase: "final_answer" }) },
+      { id: "call", position: 1, type: "tool_call", toolName: "bash", input: { command: "pwd" }, providerToolCallId: "call_1", providerReplay: replay({ type: "function_call", itemId: "fc_1" }) },
+    ],
+  });
+  assert.deepEqual(db.prepare("select id,provider_tool_call_id as callId,json_extract(provider_replay_json,'$.item.itemId') as itemId from agent_message_part order by position").all(), [
+    { id: "text", callId: null, itemId: "msg_1" },
+    { id: "call", callId: "call_1", itemId: "fc_1" },
+  ]);
+  assert.throws(() => flushStreamingParts(db, {
+    workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "assistant", updatedAt: 5,
+    parts: [{ id: "text", position: 0, type: "text", text: "hello", providerReplay: replay({ type: "text", itemId: "msg_1", phase: "commentary" }) }],
+  }), /phase is immutable/);
+  assert.throws(() => flushStreamingParts(db, {
+    workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "assistant", updatedAt: 6,
+    parts: [{ id: "text", position: 0, type: "text", text: "hello", providerReplay: replay({ type: "text", itemId: "msg_1" }) }],
+  }), /phase is immutable/);
 });
 
 test("ToolCall part flush retries are idempotent and mismatched replays fail closed", () => {

@@ -6,6 +6,7 @@ import type {
   AgentApiFlushAssistantPartsRequest,
   AgentApiReplaceStreamingAssistantRequest,
   AgentApiReplaceStreamingAssistantResponse,
+  AgentApiDiscardStreamingAssistantRequest,
   AgentApiPromptContextRequest,
   AgentApiResumeStreamingAssistantRequest,
   AgentApiPromptContextResponse,
@@ -35,6 +36,7 @@ export type LocalAgentRuntimeExecutionPort = {
   flushAssistantPartsFromWorker(params: AgentApiFlushAssistantPartsRequest): AgentApiFencedWriteResponse;
   resumeStreamingAssistantFromWorker(params: AgentApiResumeStreamingAssistantRequest): AgentApiFencedWriteResponse;
   replaceStreamingAssistantFromWorker(params: AgentApiReplaceStreamingAssistantRequest): AgentApiReplaceStreamingAssistantResponse;
+  discardStreamingAssistantFromWorker(params: AgentApiDiscardStreamingAssistantRequest): AgentApiFencedWriteResponse;
   completeAssistantFromWorker(params: AgentApiCompleteAssistantRequest): AgentApiFencedWriteResponse;
   updateToolExecutionFromWorker(params: AgentApiUpdateToolExecutionRequest): AgentApiFencedWriteResponse;
   updateRunNoticeFromWorker(params: AgentApiUpdateRunNoticeRequest): AgentApiFencedWriteResponse;

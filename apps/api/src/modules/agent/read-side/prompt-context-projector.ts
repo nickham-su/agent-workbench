@@ -1,4 +1,5 @@
 import type { AgentUiLocale } from "@agent-workbench/shared/internal-contracts/agent-api-session";
+import type { AgentApiPromptContextResponse } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { PromptStaticProfile, RunPromptStatic } from "../prompt/prompt-static-assembler.js";
 import { RunPromptStaticCache } from "../prompt/run-prompt-static-cache.js";
 
@@ -35,7 +36,10 @@ export type PromptContextProjectorDependencies<Message> = {
     triggerMessageId: string | null;
     compactionSnippetUiLocale: AgentUiLocale | null;
     pendingAssistantMessageIds: ReadonlySet<string>;
-  }) => Promise<{ messages: Message[] }>;
+  }) => Promise<{
+    messages: Message[];
+    providerReplay?: AgentApiPromptContextResponse["providerReplay"];
+  }>;
 };
 
 /** Composes cached static prompt data with the run/session dynamic read-side data. */
@@ -79,7 +83,7 @@ export class PromptContextProjector<Message> {
     // Pending work is read before transcript construction. The Worker will execute it
     // and continue; it must never send an incomplete tool-call turn to a model.
     const pendingTools = this.dependencies.listPendingTools({ workspaceId: input.workspaceId, sessionId: input.sessionId, runId: input.run.runId });
-    const { messages } = await this.dependencies.buildMessages({
+    const { messages, providerReplay } = await this.dependencies.buildMessages({
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       triggerMessageId: input.run.triggerMessageId,
@@ -91,6 +95,7 @@ export class PromptContextProjector<Message> {
       sessionRevision: input.session.revision,
       system,
       messages,
+      ...(providerReplay == null ? {} : { providerReplay }),
       tools: staticPrompt.tools,
       pendingTools,
       lastResponseTotalTokens: runState.lastResponseTotalTokens,

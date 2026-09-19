@@ -8,6 +8,7 @@ import {
   AgentToolExecutionStatusSchema,
   AgentToolExecutionDetailSchema
 } from "../contracts/agent-message.js";
+import { AgentProviderReplayEnvelopeSchema } from "./agent-provider-replay.js";
 
 const IdSchema = Type.String({ minLength: 1 });
 
@@ -26,9 +27,29 @@ export const AgentApiCreateStreamingAssistantResponseSchema = Type.Object({
 export type AgentApiCreateStreamingAssistantResponse = Static<typeof AgentApiCreateStreamingAssistantResponseSchema>;
 
 const AgentApiStreamingPartInputSchema = Type.Union([
-  Type.Object({ id: IdSchema, position: Type.Integer({ minimum: 0 }), type: Type.Literal("text"), text: Type.String() }, { additionalProperties: false }),
-  Type.Object({ id: IdSchema, position: Type.Integer({ minimum: 0 }), type: Type.Literal("reasoning"), text: Type.String() }, { additionalProperties: false }),
-  Type.Object({ id: IdSchema, position: Type.Integer({ minimum: 0 }), type: Type.Literal("tool_call"), toolName: Type.String({ minLength: 1 }), input: Type.Record(Type.String(), Type.Unknown()), providerToolCallId: Type.Union([IdSchema, Type.Null()]) }, { additionalProperties: false })
+  Type.Object({
+    id: IdSchema, position: Type.Integer({ minimum: 0 }), type: Type.Literal("text"), text: Type.String(),
+    providerReplay: Type.Optional(Type.Intersect([
+      AgentProviderReplayEnvelopeSchema,
+      Type.Object({ item: Type.Object({ type: Type.Literal("text") }) }),
+    ])),
+  }, { additionalProperties: false }),
+  Type.Object({
+    id: IdSchema, position: Type.Integer({ minimum: 0 }), type: Type.Literal("reasoning"), text: Type.String(),
+    providerReplay: Type.Optional(Type.Intersect([
+      AgentProviderReplayEnvelopeSchema,
+      Type.Object({ item: Type.Object({ type: Type.Literal("reasoning") }) }),
+    ])),
+  }, { additionalProperties: false }),
+  Type.Object({
+    id: IdSchema, position: Type.Integer({ minimum: 0 }), type: Type.Literal("tool_call"),
+    toolName: Type.String({ minLength: 1 }), input: Type.Record(Type.String(), Type.Unknown()),
+    providerToolCallId: Type.Union([IdSchema, Type.Null()]),
+    providerReplay: Type.Optional(Type.Intersect([
+      AgentProviderReplayEnvelopeSchema,
+      Type.Object({ item: Type.Object({ type: Type.Literal("function_call") }) }),
+    ])),
+  }, { additionalProperties: false })
 ]);
 
 export const AgentApiFlushAssistantPartsRequestSchema = Type.Object({
@@ -74,6 +95,16 @@ export const AgentApiReplaceStreamingAssistantResponseSchema = Type.Object({
   message: Type.Union([AgentMessageSchema, Type.Null()])
 }, { additionalProperties: false });
 export type AgentApiReplaceStreamingAssistantResponse = Static<typeof AgentApiReplaceStreamingAssistantResponseSchema>;
+
+/** 作废当前 streaming Assistant 并将 Session head 回退到其前驱，供外层 compaction 重建上下文。 */
+export const AgentApiDiscardStreamingAssistantRequestSchema = Type.Object({
+  workspaceId: IdSchema,
+  sessionId: IdSchema,
+  runId: IdSchema,
+  messageId: IdSchema,
+  updatedAt: Type.Number()
+}, { additionalProperties: false });
+export type AgentApiDiscardStreamingAssistantRequest = Static<typeof AgentApiDiscardStreamingAssistantRequestSchema>;
 
 const AgentApiQueuedToolExecutionSchema = Type.Object({
   id: IdSchema,

@@ -70,16 +70,19 @@ function reliableText(value: string | null) {
  * provider-neutral transcript. It never reads artifacts or structured output.
  */
 export class RuntimeTranscriptProjector {
-  project(input: {
+  projectDetailed(input: {
     workspaceId: string;
     triggerMessageId: string | null;
     messages: AgentMessage[];
     executions: RuntimeTranscriptExecution[];
     /** Exclude the Assistant that owns any of these non-terminal calls. */
     stopBeforeAssistantMessageIds?: ReadonlySet<string>;
-  }): RuntimePromptMessage[] {
+    /** Protected PromptContext only: preserve the ordinal of replay-only Assistants. */
+    includeEmptyAssistantMessageIds?: ReadonlySet<string>;
+  }): { messages: RuntimePromptMessage[]; assistantMessageIndexes: Map<string, number> } {
     const executionByCallPartId = new Map(input.executions.map((execution) => [execution.callPartId, execution]));
     const messages: RuntimePromptMessage[] = [];
+    const assistantMessageIndexes = new Map<string, number>();
 
     for (const message of input.messages) {
       if (input.stopBeforeAssistantMessageIds?.has(message.id)) break;
@@ -128,7 +131,7 @@ export class RuntimeTranscriptProjector {
           if (part.text) assistantParts.push({ type: "text", text: part.text });
           continue;
         }
-        // ReasoningPart is intentionally persisted for UI only and never reaches a provider.
+        // 通用 transcript 不携带 reasoning；官方 OpenAI 回放由受保护 PromptContext 的私有 source 单独注入。
         if (part.type !== "tool_call") continue;
         const toolCallId = part.providerToolCallId ?? part.id;
         assistantParts.push({
@@ -149,14 +152,29 @@ export class RuntimeTranscriptProjector {
         });
       }
       if (assistantParts.length === 1 && assistantParts[0]?.type === "text") {
+        assistantMessageIndexes.set(message.id, messages.length);
         messages.push({ role: "assistant", content: assistantParts[0].text });
       } else if (assistantParts.length > 0) {
+        assistantMessageIndexes.set(message.id, messages.length);
         messages.push({ role: "assistant", content: assistantParts });
+      } else if (input.includeEmptyAssistantMessageIds?.has(message.id)) {
+        assistantMessageIndexes.set(message.id, messages.length);
+        messages.push({ role: "assistant", content: [] });
       }
       // Tool calls and their result envelopes always retain Part.position order.
       if (toolResults.length > 0) messages.push({ role: "tool", content: toolResults });
     }
-    return messages;
+    return { messages, assistantMessageIndexes };
+  }
+
+  project(input: {
+    workspaceId: string;
+    triggerMessageId: string | null;
+    messages: AgentMessage[];
+    executions: RuntimeTranscriptExecution[];
+    stopBeforeAssistantMessageIds?: ReadonlySet<string>;
+  }): RuntimePromptMessage[] {
+    return this.projectDetailed(input).messages;
   }
 }
 

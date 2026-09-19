@@ -440,7 +440,9 @@ test("known non-2xx status remains authoritative when its body is pending", asyn
       },
       end: false,
     }));
-    const client = createShortTimeoutClient(fixture.origin);
+    const client = createShortTimeoutClient(fixture.origin, {
+      timing: { internalRpcTimeoutMs: 100 },
+    });
     await assert.rejects(
       () =>
         client.getPromptContext({
@@ -464,7 +466,7 @@ test("known non-2xx status remains authoritative when its body is pending", asyn
   }
 });
 
-test("non-2xx responses retain only bounded structured business-error diagnostics", async () => {
+test("non-2xx responses retain only a bounded business code and never expose response messages", async () => {
   const fixture = await startTestServer(() => ({
     status: 404,
     body: {
@@ -488,9 +490,9 @@ test("non-2xx responses retain only bounded structured business-error diagnostic
       assert.equal(error.endpoint, AgentApiEndpoints.startSubtask.path);
       assert.equal(error.status, 404);
       assert.equal(error.apiCode, "AGENT_SUBTASK_SESSION_NOT_FOUND");
-      assert.equal(error.safeMessage, "subtask session not found");
+      assert.equal(error.safeMessage, undefined);
       assert.match(error.message, /code=AGENT_SUBTASK_SESSION_NOT_FOUND/);
-      assert.match(error.message, /message=subtask session not found/);
+      assert.doesNotMatch(error.message, /subtask session not found/);
       const text = `${error.message}\n${JSON.stringify(error)}\n${JSON.stringify(Object.entries(error))}`;
       for (const secret of [
         "RESPONSE_SECRET",
@@ -509,6 +511,36 @@ test("non-2xx responses retain only bounded structured business-error diagnostic
     },
   );
   assert.equal(fixture.attempts.length, 1);
+});
+
+test("non-2xx response message containing replay, raw, and provider metadata never enters errors or warnings", async () => {
+  const sentinel = "opaque-encrypted-replay-SENTINEL-api-client-43d1";
+  const recorder = createWarningRecorder();
+  const fixture = await startTestServer(() => ({
+    status: 400,
+    body: {
+      code: "REPLAY_REJECTED",
+      message: JSON.stringify({
+        encrypted_content: sentinel,
+        rawValue: { response: { output: [sentinel] } },
+        providerMetadata: { openai: { reasoningEncryptedContent: sentinel } },
+      }),
+    },
+  }));
+  const client = createShortTimeoutClient(fixture.origin, { logger: recorder.logger });
+  await assert.rejects(
+    () => client.getPromptContext({ workspaceId: "WORKSPACE", sessionId: "SESSION", runId: "RUN" }),
+    (error: unknown) => {
+      assert(error instanceof InternalRpcHttpError);
+      assert.equal(error.apiCode, "REPLAY_REJECTED");
+      assert.equal(error.safeMessage, undefined);
+      const diagnostics = `${error.message}\n${JSON.stringify(error)}\n${JSON.stringify(Object.entries(error))}\n${recorder.warnings.join("\n")}`;
+      assert.doesNotMatch(diagnostics, new RegExp(sentinel));
+      assert.doesNotMatch(diagnostics, /encrypted_content|reasoningEncryptedContent|providerMetadata|rawValue/);
+      assert.match(diagnostics, /REPLAY_REJECTED/);
+      return true;
+    },
+  );
 });
 
 test("non-2xx empty, malformed, non-object, and oversized bodies safely fall back to status diagnostics", async () => {
@@ -578,7 +610,7 @@ test("non-2xx empty, malformed, non-object, and oversized bodies safely fall bac
   }
 });
 
-test("structured error fields are normalized and bounded before exposure", async () => {
+test("invalid business codes and arbitrary response messages are not exposed", async () => {
   const fixture = await startTestServer(() => ({
     status: 400,
     body: {
@@ -598,15 +630,15 @@ test("structured error fields are normalized and bounded before exposure", async
     (error: unknown) => {
       assert(error instanceof InternalRpcHttpError);
       assert.equal(error.apiCode, undefined);
-      assert.equal(error.safeMessage?.length, 512);
-      assert.equal(error.safeMessage?.includes("\n"), false);
+      assert.equal(error.safeMessage, undefined);
+      assert.equal(error.message.includes("safe message"), false);
       assert.equal(error.message.includes("RESPONSE_SECRET"), false);
       return true;
     },
   );
 });
 
-test("structured error messages remove control, ANSI, and bidi characters before exposure", async () => {
+test("structured error messages with control, ANSI, and bidi characters are discarded", async () => {
   const fixture = await startTestServer(() => ({
     status: 400,
     body: {
@@ -625,12 +657,9 @@ test("structured error messages remove control, ANSI, and bidi characters before
       }),
     (error: unknown) => {
       assert(error instanceof InternalRpcHttpError);
-      const unsafeCharacters =
-        /[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/;
-      assert.equal(error.safeMessage, "正常 [31m文本 [0m [2K 方向 隔离 结束");
-      assert.equal(unsafeCharacters.test(error.safeMessage ?? ""), false);
-      assert.equal(unsafeCharacters.test(error.message), false);
-      assert.match(error.message, /正常 \[31m文本 \[0m \[2K 方向 隔离 结束/);
+      assert.equal(error.apiCode, "SAFE_CODE");
+      assert.equal(error.safeMessage, undefined);
+      assert.doesNotMatch(error.message, /正常|方向|隔离|结束/);
       return true;
     },
   );
@@ -642,6 +671,7 @@ test("all public client methods are explicitly classified", () => {
     flushAssistantParts: "controlWrite",
     resumeStreamingAssistant: "controlWrite",
     replaceStreamingAssistant: "controlWrite",
+    discardStreamingAssistant: "controlWrite",
     completeAssistant: "controlWrite",
     updateToolExecution: "controlWrite",
     updateRunNotice: "controlWrite",

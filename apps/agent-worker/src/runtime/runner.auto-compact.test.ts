@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { APICallError } from "ai";
-import { AgentRunner, buildCompactionUserPrompt } from "./runner.js";
+import { AgentRunner, ControlWritePermanentError, ModelContextLengthExceededError, buildCompactionUserPrompt } from "./runner.js";
 import {
   ApiConflictError,
   InternalRpcHttpError,
@@ -646,6 +646,121 @@ test("control-read retry sleep 被取消时不调用 Provider 并收敛 cancelle
   await (runner as any).processRun({ workspaceId: "ws", sessionId: "sess", runId: "run", runKind: "manual_compaction", workspacePath: ".", workspaceRepoDirNames: [] }, controller.signal);
   assert.equal(providerCalls, 0);
   assert.deepEqual(terminalStatuses, ["cancelled"]);
+});
+
+function createContextLimitProcessRunner(input: {
+  modelOutcomes: Array<"context-limit" | "success">;
+  compactOutcomes?: Array<true | false | Error>;
+  noticeOutcomes?: Array<"success" | Error>;
+}) {
+  const contexts = [
+    createProcessRunPromptContext(null, "head-before"),
+    createProcessRunPromptContext(null, "head-after-discard"),
+    createProcessRunPromptContext(null, "head-after-compact-1"),
+    createProcessRunPromptContext(null, "head-after-compact-2"),
+  ];
+  const promptHeads: Array<string | null> = [];
+  const modelHeads: Array<string | null> = [];
+  const compactHeads: Array<string | null> = [];
+  const terminalStatuses: string[] = [];
+  let noticeAttempts = 0;
+  let promptIndex = 0;
+  const runner = new AgentRunner({
+    async getExecutionProfile() { return createCompactionProfile(); },
+    async getPromptContext() {
+      const context = contexts[Math.min(promptIndex, contexts.length - 1)]!;
+      promptIndex += 1;
+      promptHeads.push(context.headMessageId);
+      return context;
+    },
+    async updateRunNotice() {
+      noticeAttempts += 1;
+      const outcome = input.noticeOutcomes?.shift() ?? "success";
+      if (outcome instanceof Error) throw outcome;
+      return { result: "updated" };
+    },
+    async completeRun(value: { status: string }) { terminalStatuses.push(value.status); },
+  } as any, {} as any, { info() {}, warn() {}, error() {} }, 1, { controlWriteSleep: async () => true });
+
+  (runner as any).runModelStep = async ({ context }: { context: { headMessageId: string | null } }) => {
+    modelHeads.push(context.headMessageId);
+    const outcome = input.modelOutcomes.shift() ?? "success";
+    if (outcome === "context-limit") throw new ModelContextLengthExceededError("assistant", new Error("context length exceeded"));
+    return { aborted: false, toolCallCount: 0, hasVisibleText: true, assistantMessageId: "assistant" };
+  };
+  (runner as any).compactContext = async ({ context }: { context: { headMessageId: string | null } }) => {
+    compactHeads.push(context.headMessageId);
+    const outcome = input.compactOutcomes?.shift() ?? true;
+    if (outcome instanceof Error) throw outcome;
+    return outcome;
+  };
+
+  return { runner, promptHeads, modelHeads, compactHeads, terminalStatuses, noticeAttempts: () => noticeAttempts };
+}
+
+test("context-limit 由 processRun 外层压缩、重读 PromptContext 后成功", async () => {
+  const fixture = createContextLimitProcessRunner({ modelOutcomes: ["context-limit", "success"] });
+  await (fixture.runner as any).processRun({ workspaceId: "ws", sessionId: "sess", runId: "run", workspacePath: ".", workspaceRepoDirNames: [] }, new AbortController().signal);
+  assert.deepEqual(fixture.modelHeads, ["head-before", "head-after-compact-1"]);
+  assert.deepEqual(fixture.compactHeads, ["head-after-discard"]);
+  assert.deepEqual(fixture.terminalStatuses, ["completed"]);
+});
+
+test("context-limit compaction notice 的瞬时控制写失败会重试后继续压缩", async () => {
+  const fixture = createContextLimitProcessRunner({
+    modelOutcomes: ["context-limit", "success"],
+    noticeOutcomes: [new InternalRpcNetworkError({ method: "POST", endpoint: "/run-notice" }), "success"],
+  });
+  await (fixture.runner as any).processRun({ workspaceId: "ws", sessionId: "sess", runId: "run", workspacePath: ".", workspaceRepoDirNames: [] }, new AbortController().signal);
+  assert.equal(fixture.noticeAttempts(), 2);
+  assert.equal(fixture.compactHeads.length, 1);
+  assert.deepEqual(fixture.terminalStatuses, ["completed"]);
+});
+
+test("永久控制错误 cause 含 input_too_long 时 processRun 不进入 compaction", async () => {
+  const compactHeads: Array<string | null> = [];
+  const terminalStatuses: string[] = [];
+  const runner = new AgentRunner({
+    async getExecutionProfile() { return createCompactionProfile(); },
+    async getPromptContext() { return createProcessRunPromptContext(null, "head-before"); },
+    async completeRun(value: { status: string }) { terminalStatuses.push(value.status); },
+  } as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+  (runner as any).runModelStep = async () => {
+    throw new ControlWritePermanentError("flush assistant parts", Object.assign(
+      new Error("input too long"),
+      { code: "input_too_long" },
+    ));
+  };
+  (runner as any).compactContext = async ({ context }: { context: { headMessageId: string | null } }) => {
+    compactHeads.push(context.headMessageId);
+    return true;
+  };
+
+  await (runner as any).processRun({ workspaceId: "ws", sessionId: "sess", runId: "run", workspacePath: ".", workspaceRepoDirNames: [] }, new AbortController().signal);
+  assert.deepEqual(compactHeads, []);
+  assert.deepEqual(terminalStatuses, ["failed"]);
+});
+
+test("context-limit 重复超限最多执行两次外层压缩后失败", async () => {
+  const fixture = createContextLimitProcessRunner({ modelOutcomes: ["context-limit", "context-limit", "context-limit"] });
+  await (fixture.runner as any).processRun({ workspaceId: "ws", sessionId: "sess", runId: "run", workspacePath: ".", workspaceRepoDirNames: [] }, new AbortController().signal);
+  assert.equal(fixture.compactHeads.length, 2);
+  assert.equal(fixture.modelHeads.length, 3);
+  assert.deepEqual(fixture.terminalStatuses, ["failed"]);
+});
+
+test("context-limit compaction 无进展时有限失败", async () => {
+  const fixture = createContextLimitProcessRunner({ modelOutcomes: ["context-limit"], compactOutcomes: [false] });
+  await (fixture.runner as any).processRun({ workspaceId: "ws", sessionId: "sess", runId: "run", workspacePath: ".", workspaceRepoDirNames: [] }, new AbortController().signal);
+  assert.equal(fixture.compactHeads.length, 1);
+  assert.deepEqual(fixture.terminalStatuses, ["failed"]);
+});
+
+test("context-limit compaction provider 失败时有限失败", async () => {
+  const fixture = createContextLimitProcessRunner({ modelOutcomes: ["context-limit"], compactOutcomes: [new Error("compaction failed")] });
+  await (fixture.runner as any).processRun({ workspaceId: "ws", sessionId: "sess", runId: "run", workspacePath: ".", workspaceRepoDirNames: [] }, new AbortController().signal);
+  assert.equal(fixture.compactHeads.length, 1);
+  assert.deepEqual(fixture.terminalStatuses, ["failed"]);
 });
 
 test("empty compaction summary 作为 Provider 错误重试后完成", async () => {
