@@ -16,8 +16,8 @@
 - DeepSeek 回放范围固定为当前有效链中最后一条 User 消息之后、当前请求之前的兼容 reasoning；Phase D 真实服务联调是升为 stable 的硬门禁。
 - 调试日志应记录脱敏后的最终 AI SDK 入参投影，而不是原始 transcript、未脱敏对象或 HTTP body。
 - Provider 协议选择必须是最终模型级的显式 `protocolAdapter`；禁止从 `baseURL`、显示名或模型前缀猜测 DeepSeek 等特殊协议。
-- DeepSeek 的强完整性保证以 Assistant Message 的 v22 不可变协议快照和 `complete-v1` terminal metadata 为前提；两者的存储、回放和旧历史边界见 08。
-- v21→v22 是非破坏性的**前向** schema 迁移，不是旧二进制可直接读取 v22 数据库的承诺；默认回滚是保持 v22 应用并关闭 DeepSeek feature flag、UI 入口和协议行为。
+- DeepSeek 的强完整性保证以 Assistant Message 的不可变协议快照和 `complete-v1` terminal metadata 为前提；两者的存储、回放和完整性边界见 08。
+- 本项目当前不保留旧 Agent 数据兼容；Phase C 直接把协议快照纳入目标 schema，并通过现有不兼容 schema 收敛/重建机制应用，不设计旧版本数据库升级或旧二进制回滚。
 
 ## 阅读导航
 
@@ -30,7 +30,7 @@
 | [05-失败矩阵日志与安全.md](./05-失败矩阵日志与安全.md) | 失败策略、重试、日志与敏感数据边界 |
 | [06-实施测试验收.md](./06-实施测试验收.md) | 分阶段任务、测试策略、审查标准、验收与回滚 |
 | [07-代码索引与证据.md](./07-代码索引与证据.md) | 当前实现的路径、符号、测试与外部资料索引 |
-| [08-PhaseC协议快照与完整性闭环.md](./08-PhaseC协议快照与完整性闭环.md) | v22 Assistant 协议快照、DeepSeek terminal metadata、完整性诊断与回滚边界 |
+| [08-PhaseC协议快照与完整性闭环.md](./08-PhaseC协议快照与完整性闭环.md) | Assistant 协议快照、DeepSeek terminal metadata 与完整性诊断 |
 
 ## 使用约定
 
@@ -42,13 +42,14 @@
 ## 范围与版本关系
 
 - 本设计以 [0019 OpenAI Responses 加密 Reasoning 回放](../0019-OpenAI-Responses加密Reasoning回放/01-OpenAI-Responses加密Reasoning回放核查.md) 已落地实现为行为基线。
+- 目标 schema 版本号由实施时基于仓库当前版本顺延，不在设计中写死；不得复用已被其他变更占用的版本号。
 - 本设计不要求修改既有数据库字段 `provider_replay_json` 或内部 API 字段 `providerReplay` 的名称。
 - DeepSeek Chat Completions Thinking 的参数、scope、产品可见性和失败策略已在本文档中作出第一版 experimental 裁决；真实服务联调若推翻协议假设，必须按 Phase D 同步修订实现、fixture、验收标准和本文档后才能升级稳定性。
 
 ## 阶段门禁
 
 - Phase A（OpenAI 等价提取）与 Phase B（debug 投影）可独立进入开发、审查和回滚；两者不得夹带 DeepSeek 行为或 schema 变更。
-- Phase C 只能在以下事项全部实现并有自动化证据时标记为 **experimental 完成**：v22 Assistant 协议快照、`complete-v1` 完整性 metadata 与强制 flush、experimental UI/产品告知、真实 AI SDK mock HTTP 与 SSE 证据。
+- Phase C 只能在以下事项全部实现并有自动化证据时标记为 **experimental 完成**：Assistant 协议快照、`complete-v1` 完整性 metadata 与强制 flush、experimental UI/产品告知、真实 AI SDK mock HTTP 与 SSE 证据。
 - Phase C 缺少任何一项时，不得开放或宣称 DeepSeek Thinking 已完成。
 - 只有完成 Phase D 真实 DeepSeek 服务最小联调，并确认 scope、工具回放和参数行为后，才可将该协议标为 **stable**。
-- Phase C 开启后如需停止功能，默认必须继续运行支持 v22 的应用二进制，仅关闭 DeepSeek feature flag、设置/UI 入口和协议消费；不得降写 schema version、删列或重建表。旧 v21 二进制对 v22 数据库的兼容不在本方案承诺范围。
+- Phase C 开启后如需停止功能，可回滚协议接线或关闭 DeepSeek feature flag、设置/UI 入口；本项目不承诺保留既有 Agent 数据或旧二进制直接读取新 schema。

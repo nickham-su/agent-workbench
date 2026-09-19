@@ -178,16 +178,16 @@ DeepSeek `reasoning_content` 是明文，第一版作为可见 reasoning 保存�
 
 - 如果不能证明，Phase C 必须停止，另立“独立私有状态实体/私有锚点”设计；不得静默降级为回放可见摘要或部分文本。
 - 本方案不提供隐藏 DeepSeek reasoning 的半实现；未来隐藏属于独立产品和数据模型变更。
-- Phase C 同时必须完成 v21 → v22 Assistant Message 协议快照迁移和 `completion: "complete-v1"` terminal metadata 闭环；仅扩展 Envelope 不足以满足完整性保证。
-- 快照、terminal finish allowlist、EOF/unknown/error/abort/timeout 失败语义与旧历史兼容策略见 [08-PhaseC协议快照与完整性闭环.md](./08-PhaseC协议快照与完整性闭环.md)。
+- Phase C 同时必须把 Assistant Message 协议快照纳入目标 schema，并完成 `completion: "complete-v1"` terminal metadata 闭环；仅扩展 Envelope 不足以满足完整性保证。
+- 快照、terminal finish allowlist、EOF/unknown/error/abort/timeout 失败语义见 [08-PhaseC协议快照与完整性闭环.md](./08-PhaseC协议快照与完整性闭环.md)。
 
 ### DeepSeek 回放 scope 与 toolsDisposition
 
-唯一暂行 scope：当前有效消息链中，最后一条 User 消息之后、当前请求之前的全部兼容 Assistant reasoning Parts。
+唯一暂行 scope：ModelContext Resolver 当前有效上下文中，最后一条 User 消息之后、当前请求之前的全部兼容 Assistant reasoning Parts。
 
 - 首轮没有回放。
 - 工具循环后续请求回放上述全部 reasoning；Provider ID、最终模型、协议必须匹配。
-- 新 User 消息切断旧 reasoning 回放；compaction 后仍服从当前有效消息链。
+- 新 User 消息切断旧 reasoning 回放；compaction 后仍服从 ModelContext Resolver，retained tail 中满足 scope 的 reasoning 可回放，resolver 外旧历史不补回。
 - 本次请求是否回放还取决于 `toolsDisposition`：
   - `"present-non-empty"`：最终 streamText 请求实际发送非空 tools，按 scope 回放。
   - `"omitted"`：最终请求省略 tools（空工具集合也必须归此类），不得注入 DeepSeek reasoning。

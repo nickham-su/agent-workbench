@@ -41,7 +41,7 @@
 - 新增公共 Run 状态接口；manual 与普通 user send 的 runId 共用当前标签页 pending-run registry，刷新恢复并按 code 每 tab 消费一次。
 - pending-run记录带schemaVersion；只轮询当前workspace/session，并定义损坏、stale、网络错误、删除清理和并发3条FIFO策略。
 - fingerprint 使用 `providerModelId ?? model.id` 和真实 adapter identity；CAS 后 fingerprint 变化时 proactive skip，manual/recovery 为 `compaction_conflict`。
-- retained tail 只改变模型私有上下文，不改变普通 timeline、archive、revert 和 fork 边界。
+- timeline 展示当前分支从最早可达祖先到 head 的完整物理历史并显示 compaction；context root 之前的消息只读。retained tail 只改变模型私有上下文，不放开 revert/fork 等结构操作边界。
 - Workspace清理固定为FTS行→FTS map→client request→session_run_state→session model override→ToolExecution→MessagePart→Run→Session→Message逆拓扑→Attachment；不得修改三类Message图边。
 - Workspace删除使用`convergeWorkspaceRunsForDeletion`编排，而非独立artifact写入：持久deletion intent并设fence后，按稳定Session锁和稳定Run顺序逐Run复用intent+完整convergence；全部数据库收敛后才drain runtime，drain成功后才执行物理清理。失败保留deletion intent以便重试。
 
@@ -82,7 +82,7 @@
 - 持久化逐消息 token；
 - 精确复现 Provider 计费 token；
 - 在原子块内部截断；
-- 扩大 timeline、revert 或 fork 范围；
+- 放开 context root 之前历史消息的 revert、fork 或其他结构操作权限；
 - 修改普通主模型步骤的非 context-limit 重试策略；本次只定义压缩摘要调用重试；
 - 移除当前 trigger 媒体后继续让模型推理；
 - 扩展实时事件协议传送 terminal result；
