@@ -371,6 +371,7 @@ export default {
       applyPatchOmittedFiles: "还有 {count} 个文件未展示",
       fork: "从此处分叉",
       forked: "已从该消息创建新 client",
+      compactionSummary: "上下文已压缩",
       revert: "回退到此处",
       revertConfirmTitle: "确认回退到这条消息？",
       revertConfirmContent: "将回退到该消息之前,并把该条消息填入输入框。回退后,后续对话分支将暂时不可见。",

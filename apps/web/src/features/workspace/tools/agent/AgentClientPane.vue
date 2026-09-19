@@ -102,10 +102,12 @@
             />
             <AgentSystemMessage
               v-else-if="
-                row.part?.type === 'text' && row.message.type === 'system'
+                row.part?.type === 'text' &&
+                (row.message.type === 'system' || row.message.type === 'compaction')
               "
               :text="row.part.text"
               :message-id="row.message.id"
+              :label="row.message.type === 'compaction' ? t('agent.client.compactionSummary') : undefined"
             />
             <AssistantMarkdownMessage
               v-else-if="row.part?.type === 'reasoning'"
@@ -440,6 +442,7 @@ import AssistantMarkdownMessage from "./AssistantMarkdownMessage.vue";
 import {
   agentUserMessageDraftText,
   buildConversationParts,
+  canMutateAgentTimelineMessage,
   hasAgentMessageTextPart,
   type ConversationPart,
 } from "./agentMessageTimeline";
@@ -710,17 +713,16 @@ function messageClass(row: ConversationPart) {
           row.execution?.status === "completed"
           ? "px-2 py-0 transition-colors duration-100 hover:bg-[var(--hover-bg)]"
           : "px-2 py-0"
-      : row.message.type === "system"
+      : row.message.type === "system" || row.message.type === "compaction"
         ? "p-2 bg-[var(--panel-bg)]"
-      : assistantWithoutText
-        ? "px-2 py-0"
-        : "p-2";
+        : assistantWithoutText
+          ? "px-2 py-0"
+          : "p-2";
 }
 function showMessageControls(row: ConversationPart) {
   return (
     !isSubtaskSession.value &&
-    (row.message.type === "user" ||
-      (row.message.type === "assistant" && hasAgentMessageTextPart(row.message))) &&
+    canMutateAgentTimelineMessage(row.message) &&
     row.part?.position === 0
   );
 }

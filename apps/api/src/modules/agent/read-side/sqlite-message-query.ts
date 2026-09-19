@@ -20,6 +20,8 @@ import type { Db } from "../../../infra/db/db.js";
 import { HttpError } from "../../../app/errors.js";
 import type { RuntimeTranscriptExecution } from "./runtime-transcript-projector.js";
 
+const MESSAGE_PART_QUERY_CHUNK_SIZE = 500;
+
 type SessionRow = AgentSessionMessageState;
 type RunStateRow = {
   workspaceId: string;
@@ -156,8 +158,10 @@ function toRunState(row: RunStateRow): AgentMessageSessionRunState {
 
 /**
  * Read-only Message graph query. It deliberately starts from the Session head,
- * so shared historical Messages from another fork are never exposed unless they
- * are on the requesting Session's current context chain.
+ * so Messages are exposed only when they are ancestors of the requesting
+ * Session's current head. The display chain may cross contextRoot to preserve
+ * browsable compacted history; runtime-only readers explicitly retain the
+ * contextRoot boundary.
  */
 export class SqliteMessageQuery {
   constructor(private readonly db: Db) {}
@@ -173,11 +177,9 @@ export class SqliteMessageQuery {
     limit?: number;
   }): AgentTimelineDeltaResponse & { hasMore: boolean; nextBeforeMessageId: string | null } {
     const session = this.requireSession(input.workspaceId, input.sessionId);
-    const chain = this.listChain(session);
     const mode = input.mode ?? (input.sinceRevision === undefined ? "snapshot" : "delta");
     const limit = Math.max(1, Math.min(500, input.limit ?? 100));
-    const chainIds = chain.map((message) => message.id);
-    const knownHeadStillVisible = !input.knownHeadMessageId || chainIds.includes(input.knownHeadMessageId);
+    const knownHeadStillVisible = !input.knownHeadMessageId || this.isDisplayChainMessage(session, input.knownHeadMessageId);
     const rootUnchanged = input.knownContextRootMessageId === undefined || input.knownContextRootMessageId === session.contextRootMessageId;
     const lacksLegacySafeAnchor = input.knownHeadMessageId === undefined && session.contextRootMessageId !== null;
     const timelineReset = mode === "delta" && (
@@ -187,44 +189,34 @@ export class SqliteMessageQuery {
     let page: MessageRow[];
     let hasMore = false;
     if (mode === "before") {
-      const beforeIndex = chain.findIndex((message) => message.id === input.beforeMessageId);
-      if (beforeIndex < 0) throw new HttpError(404, "timeline cursor is not in current session chain", "TIMELINE_CURSOR_NOT_FOUND");
-      const start = Math.max(0, beforeIndex - limit);
-      page = chain.slice(start, beforeIndex);
-      hasMore = start > 0;
+      if (!input.beforeMessageId || !this.isDisplayChainMessage(session, input.beforeMessageId)) {
+        throw new HttpError(404, "timeline cursor is not in current session chain", "TIMELINE_CURSOR_NOT_FOUND");
+      }
+      ({ page, hasMore } = this.listDisplayPageBefore(session, input.beforeMessageId, limit));
     } else if (mode === "delta" && !timelineReset) {
-      page = chain.filter((message) => Number(message.updatedRevision) > input.sinceRevision!);
+      page = this.listDisplayChainUpdates(session, input.sinceRevision!);
     } else {
-      const start = Math.max(0, chain.length - limit);
-      page = chain.slice(start);
-      hasMore = start > 0;
+      ({ page, hasMore } = this.listDisplayTailPage(session, limit));
     }
-    const messages = this.attachParts(page);
-    const pageCallPartIds = messages.flatMap((message) => message.parts)
-      .filter((part) => part.type === "tool_call")
-      .map((part) => part.id);
+    const messages = this.attachParts(page, this.contextRootDepth(session));
     const toolExecutions = mode === "delta" && !timelineReset
-      ? this.listTimelineExecutions(chainIds, input.sinceRevision)
-      : this.listTimelineExecutionsForCallParts(pageCallPartIds);
+      ? this.listTimelineExecutions(session, input.sinceRevision)
+      : this.listTimelineExecutionsForMessages(page.map((message) => message.id));
     return { session, timelineReset, messages, toolExecutions, hasMore, nextBeforeMessageId: page[0]?.id ?? null };
   }
 
   getMessage(input: { workspaceId: string; sessionId: string; messageId: string }): AgentMessage {
     const session = this.requireSession(input.workspaceId, input.sessionId);
-    const message = this.listChain(session).find((candidate) => candidate.id === input.messageId);
+    const message = this.getDisplayChainMessage(session, input.messageId);
     if (!message) throw new HttpError(404, "message not found in session timeline", "MESSAGE_NOT_FOUND");
-    return this.attachParts([message])[0]!;
+    return this.attachParts([message], this.contextRootDepth(session))[0]!;
   }
 
-  /** timeline 保持轻量，详情只允许读取当前 Session 可见链上的 execution。 */
+  /** timeline 保持轻量，详情只允许读取当前 Session 展示链上的 execution。 */
   getToolExecutionDetail(input: { workspaceId: string; sessionId: string; toolExecutionId: string }): AgentToolExecution {
     const session = this.requireSession(input.workspaceId, input.sessionId);
-    const chainIds = this.listChain(session).map((message) => message.id);
-    if (chainIds.length === 0) {
-      throw new HttpError(404, "tool execution not found in session timeline", "TOOL_EXECUTION_NOT_FOUND");
-    }
-    const placeholders = chainIds.map(() => "?").join(",");
     const row = this.db.prepare(`
+      ${this.displayChainCte()}
       select execution.id, execution.call_part_id as callPartId,
              execution.origin_session_id as originSessionId, execution.origin_run_id as originRunId,
              execution.status, execution.result_preview as resultPreview,
@@ -233,11 +225,12 @@ export class SqliteMessageQuery {
              execution.structured_result_json as structuredResultJson,
              execution.error, execution.updated_revision as updatedRevision,
              execution.created_at as createdAt, execution.updated_at as updatedAt,
-             execution.started_at as startedAt, execution.completed_at as completedAt
+              execution.started_at as startedAt, execution.completed_at as completedAt
       from agent_tool_execution execution
       join agent_message_part part on part.id = execution.call_part_id
-      where execution.id = ? and part.message_id in (${placeholders})
-    `).get(input.toolExecutionId, ...chainIds) as DetailExecutionRow | undefined;
+      join display_chain chain on chain.id = part.message_id
+      where execution.id = @toolExecutionId
+    `).get({ ...this.displayChainParams(session), toolExecutionId: input.toolExecutionId }) as DetailExecutionRow | undefined;
     if (!row) {
       throw new HttpError(404, "tool execution not found in session timeline", "TOOL_EXECUTION_NOT_FOUND");
     }
@@ -247,7 +240,7 @@ export class SqliteMessageQuery {
   /** 当前可见链上最后一个完成 Assistant 的完整文本，仅供窄化渠道读取。 */
   getLastAssistantText(input: { workspaceId: string; sessionId: string }): { found: boolean; text: string } {
     const session = this.requireSession(input.workspaceId, input.sessionId);
-    const message = [...this.listChain(session)].reverse().find((candidate) => candidate.type === "assistant" && candidate.status === "completed");
+    const message = [...this.listActiveContextChain(session)].reverse().find((candidate) => candidate.type === "assistant" && candidate.status === "completed");
     if (!message) return { found: false, text: "" };
     const text = this.attachParts([message])[0]!.parts
       .filter((part) => part.type === "text")
@@ -259,7 +252,7 @@ export class SqliteMessageQuery {
   /** 当前可见链上最新 todolist ToolCall 的权威 ToolExecution 详情。 */
   getLatestTodolistToolExecution(input: { workspaceId: string; sessionId: string }): AgentSessionLatestTodolistExecution | null {
     const session = this.requireSession(input.workspaceId, input.sessionId);
-    const messages = this.attachParts(this.listChain(session));
+    const messages = this.attachParts(this.listActiveContextChain(session));
     const callPart = [...messages].reverse().flatMap((message) => [...message.parts].reverse())
     .find((part) => part.type === "tool_call" && part.toolName === "todolist");
     if (!callPart) return null;
@@ -285,7 +278,7 @@ export class SqliteMessageQuery {
   /** Returns only the current contextRoot..head previous-message lineage. */
   getRuntimeTranscriptSource(input: { workspaceId: string; sessionId: string }) {
     const session = this.requireSession(input.workspaceId, input.sessionId);
-    const messages = this.attachParts(this.listChain(session));
+    const messages = this.attachParts(this.listActiveContextChain(session));
     const callPartIds = messages.flatMap((message) => message.parts)
       .filter((part) => part.type === "tool_call")
       .map((part) => part.id);
@@ -302,7 +295,7 @@ export class SqliteMessageQuery {
   /** 私有 Provider 回放数据只供受保护的 PromptContext 读取，不进入公开 Message 映射。 */
   getRuntimeProviderReplaySource(input: { workspaceId: string; sessionId: string }) {
     const session = this.requireSession(input.workspaceId, input.sessionId);
-    const chain = this.listChain(session);
+    const chain = this.listActiveContextChain(session);
     if (chain.length === 0) return new Map<string, AgentProviderReplayEnvelope>();
     const rows = this.db.prepare(`
       select part.id, part.provider_replay_json as providerReplayJson
@@ -335,15 +328,15 @@ export class SqliteMessageQuery {
     toolName: "apply_patch" | "write";
   }): { workspaceId: string; toolExecutionId: string } {
     const session = this.requireSession(input.workspaceId, input.sessionId);
-    const chainIds = this.listChain(session).map((message) => message.id);
-    if (chainIds.length === 0) throw new HttpError(404, `${input.toolName} artifact not found`, "ARTIFACT_NOT_FOUND");
     const execution = this.db.prepare(`
+      ${this.displayChainCte()}
       select execution.id
       from agent_tool_execution execution
       join agent_message_part part on part.id = execution.call_part_id
-      where execution.id = ? and part.message_id in (${chainIds.map(() => "?").join(",")})
-        and part.type = 'tool_call' and part.tool_name = ?
-    `).get(input.toolExecutionId, ...chainIds, input.toolName) as { id: string } | undefined;
+      join display_chain chain on chain.id = part.message_id
+      where execution.id = @toolExecutionId
+        and part.type = 'tool_call' and part.tool_name = @toolName
+    `).get({ ...this.displayChainParams(session), toolExecutionId: input.toolExecutionId, toolName: input.toolName }) as { id: string } | undefined;
     if (!execution) throw new HttpError(404, `${input.toolName} artifact not found`, "ARTIFACT_NOT_FOUND");
     return { workspaceId: input.workspaceId, toolExecutionId: execution.id };
   }
@@ -429,7 +422,137 @@ export class SqliteMessageQuery {
     `).get(workspaceId, sessionId) as RunStateRow | undefined;
   }
 
-  private listChain(session: AgentSessionMessageState): MessageRow[] {
+  private displayChainCte() {
+    return `
+      with recursive display_chain(id, workspace_id, previous_message_id, replaces_message_id, depth, type, status,
+                                   origin_session_id, origin_run_id, updated_revision, created_at, updated_at) as (
+        select id, workspace_id, previous_message_id, replaces_message_id, depth, type, status,
+               origin_session_id, origin_run_id, updated_revision, created_at, updated_at
+        from agent_message
+        where id = @headMessageId and workspace_id = @workspaceId
+        union all
+        select message.id, message.workspace_id, message.previous_message_id, message.replaces_message_id,
+               message.depth, message.type, message.status, message.origin_session_id, message.origin_run_id,
+               message.updated_revision, message.created_at, message.updated_at
+        from agent_message message
+        join display_chain chain on chain.previous_message_id = message.id
+        where message.workspace_id = @workspaceId
+      )
+    `;
+  }
+
+  private displayChainParams(session: AgentSessionMessageState) {
+    return { workspaceId: session.workspaceId, headMessageId: session.headMessageId };
+  }
+
+  private isDisplayChainMessage(session: AgentSessionMessageState, messageId: string) {
+    if (!session.headMessageId) return false;
+    const row = this.db.prepare(`
+      with recursive ancestors(id, previous_message_id) as (
+        select id, previous_message_id from agent_message where id = @headMessageId and workspace_id = @workspaceId
+        union all
+        select message.id, message.previous_message_id
+        from agent_message message join ancestors on ancestors.previous_message_id = message.id
+        where message.workspace_id = @workspaceId and ancestors.id <> @messageId
+      )
+      select 1 as found from ancestors where id = @messageId limit 1
+    `).get({ ...this.displayChainParams(session), messageId }) as { found: number } | undefined;
+    return Boolean(row);
+  }
+
+  private getDisplayChainMessage(session: AgentSessionMessageState, messageId: string): MessageRow | undefined {
+    if (!session.headMessageId) return undefined;
+    return this.db.prepare(`
+      ${this.displayChainCte()}
+      select id, workspace_id as workspaceId, previous_message_id as previousMessageId,
+             replaces_message_id as replacesMessageId, depth, type, status,
+             origin_session_id as originSessionId, origin_run_id as originRunId,
+             updated_revision as updatedRevision, created_at as createdAt, updated_at as updatedAt
+      from display_chain where id = @messageId limit 1
+    `).get({ ...this.displayChainParams(session), messageId }) as MessageRow | undefined;
+  }
+
+  private listDisplayTailPage(session: AgentSessionMessageState, limit: number) {
+    if (!session.headMessageId) return { page: [] as MessageRow[], hasMore: false };
+    const rows = this.db.prepare(`
+      with recursive page_chain(id, workspace_id, previous_message_id, replaces_message_id, depth, type, status,
+                                origin_session_id, origin_run_id, updated_revision, created_at, updated_at, steps) as (
+        select id, workspace_id, previous_message_id, replaces_message_id, depth, type, status,
+               origin_session_id, origin_run_id, updated_revision, created_at, updated_at, 1
+        from agent_message where id = @headMessageId and workspace_id = @workspaceId
+        union all
+        select message.id, message.workspace_id, message.previous_message_id, message.replaces_message_id,
+               message.depth, message.type, message.status, message.origin_session_id, message.origin_run_id,
+               message.updated_revision, message.created_at, message.updated_at, chain.steps + 1
+        from agent_message message join page_chain chain on chain.previous_message_id = message.id
+        where message.workspace_id = @workspaceId and chain.steps < @take
+      )
+      select id, workspace_id as workspaceId, previous_message_id as previousMessageId,
+             replaces_message_id as replacesMessageId, depth, type, status,
+             origin_session_id as originSessionId, origin_run_id as originRunId,
+             updated_revision as updatedRevision, created_at as createdAt, updated_at as updatedAt
+      from page_chain order by depth asc
+    `).all({ ...this.displayChainParams(session), take: limit + 1 }) as MessageRow[];
+    return this.trimDisplayPage(rows, limit);
+  }
+
+  private listDisplayPageBefore(session: AgentSessionMessageState, beforeMessageId: string, limit: number) {
+    const rows = this.db.prepare(`
+      with recursive page_chain(id, workspace_id, previous_message_id, replaces_message_id, depth, type, status,
+                                origin_session_id, origin_run_id, updated_revision, created_at, updated_at, steps) as (
+        select message.id, message.workspace_id, message.previous_message_id, message.replaces_message_id,
+               message.depth, message.type, message.status, message.origin_session_id, message.origin_run_id,
+               message.updated_revision, message.created_at, message.updated_at, 1
+        from agent_message message
+        join agent_message cursor on cursor.previous_message_id = message.id
+        where cursor.id = @beforeMessageId and cursor.workspace_id = @workspaceId and message.workspace_id = @workspaceId
+        union all
+        select message.id, message.workspace_id, message.previous_message_id, message.replaces_message_id,
+               message.depth, message.type, message.status, message.origin_session_id, message.origin_run_id,
+               message.updated_revision, message.created_at, message.updated_at, chain.steps + 1
+        from agent_message message join page_chain chain on chain.previous_message_id = message.id
+        where message.workspace_id = @workspaceId and chain.steps < @take
+      )
+      select id, workspace_id as workspaceId, previous_message_id as previousMessageId,
+             replaces_message_id as replacesMessageId, depth, type, status,
+             origin_session_id as originSessionId, origin_run_id as originRunId,
+             updated_revision as updatedRevision, created_at as createdAt, updated_at as updatedAt
+      from page_chain order by depth asc
+    `).all({ workspaceId: session.workspaceId, beforeMessageId, take: limit + 1 }) as MessageRow[];
+    return this.trimDisplayPage(rows, limit);
+  }
+
+  private trimDisplayPage(rows: MessageRow[], limit: number) {
+    const hasMore = rows.length > limit;
+    return { page: hasMore ? rows.slice(1) : rows, hasMore };
+  }
+
+  private listDisplayChainUpdates(session: AgentSessionMessageState, sinceRevision: number): MessageRow[] {
+    if (!session.headMessageId) return [];
+    return this.db.prepare(`
+      ${this.displayChainCte()}
+      select id, workspace_id as workspaceId, previous_message_id as previousMessageId,
+             replaces_message_id as replacesMessageId, depth, type, status,
+             origin_session_id as originSessionId, origin_run_id as originRunId,
+             updated_revision as updatedRevision, created_at as createdAt, updated_at as updatedAt
+      from display_chain where updated_revision > @sinceRevision order by depth asc
+    `).all({ ...this.displayChainParams(session), sinceRevision }) as MessageRow[];
+  }
+
+  private contextRootDepth(session: AgentSessionMessageState): number | null {
+    if (!session.contextRootMessageId) return null;
+    const row = this.db.prepare(`
+      select depth from agent_message where id = ? and workspace_id = ?
+    `).get(session.contextRootMessageId, session.workspaceId) as { depth: number } | undefined;
+    return row ? Number(row.depth) : null;
+  }
+
+  /** 当前模型上下文链；从最近 compaction/context root 开始，供运行时专用。 */
+  private listActiveContextChain(session: AgentSessionMessageState): MessageRow[] {
+    return this.listChain(session, session.contextRootMessageId);
+  }
+
+  private listChain(session: AgentSessionMessageState, stopAtMessageId: string | null): MessageRow[] {
     if (!session.headMessageId) return [];
     return this.db.prepare(`
       with recursive chain(id, workspace_id, previous_message_id, replaces_message_id, depth, type, status,
@@ -439,10 +562,10 @@ export class SqliteMessageQuery {
         from agent_message where id = @headMessageId
         union all
         select message.id, message.workspace_id, message.previous_message_id, message.replaces_message_id,
-               message.depth, message.type, message.status, message.origin_session_id, message.origin_run_id,
-               message.updated_revision, message.created_at, message.updated_at
+                message.depth, message.type, message.status, message.origin_session_id, message.origin_run_id,
+                message.updated_revision, message.created_at, message.updated_at
         from agent_message message join chain on chain.previous_message_id = message.id
-        where @contextRootMessageId is null or chain.id != @contextRootMessageId
+        where @stopAtMessageId is null or chain.id != @stopAtMessageId
       )
       select id, workspace_id as workspaceId, previous_message_id as previousMessageId,
              replaces_message_id as replacesMessageId, depth, type, status,
@@ -451,27 +574,29 @@ export class SqliteMessageQuery {
       from chain order by depth asc
     `).all({
       headMessageId: session.headMessageId,
-      contextRootMessageId: session.contextRootMessageId
+      stopAtMessageId
     }) as MessageRow[];
   }
 
-  private attachParts(rows: MessageRow[]): AgentMessage[] {
+  private attachParts(rows: MessageRow[], activeContextRootDepth?: number | null): AgentMessage[] {
     if (rows.length === 0) return [];
     const partsByMessageId = new Map<string, AgentMessagePart[]>();
-    const placeholders = rows.map(() => "?").join(",");
-    const parts = this.db.prepare(`
-      select id, message_id as messageId, position, type, text,
-             attachment_id as attachmentId, media_type as mediaType, filename,
-             tool_name as toolName, tool_input_json as toolInputJson,
-             provider_tool_call_id as providerToolCallId, updated_revision as updatedRevision,
-             created_at as createdAt, updated_at as updatedAt
-      from agent_message_part where message_id in (${placeholders})
-      order by message_id asc, position asc
-    `).all(...rows.map((row) => row.id)) as PartRow[];
-    for (const part of parts) {
-      const current = partsByMessageId.get(part.messageId) ?? [];
-      current.push(toPart(part));
-      partsByMessageId.set(part.messageId, current);
+    for (let offset = 0; offset < rows.length; offset += MESSAGE_PART_QUERY_CHUNK_SIZE) {
+      const messageIds = rows.slice(offset, offset + MESSAGE_PART_QUERY_CHUNK_SIZE).map((row) => row.id);
+      const parts = this.db.prepare(`
+        select id, message_id as messageId, position, type, text,
+               attachment_id as attachmentId, media_type as mediaType, filename,
+               tool_name as toolName, tool_input_json as toolInputJson,
+               provider_tool_call_id as providerToolCallId, updated_revision as updatedRevision,
+               created_at as createdAt, updated_at as updatedAt
+        from agent_message_part where message_id in (${messageIds.map(() => "?").join(",")})
+        order by message_id asc, position asc
+      `).all(...messageIds) as PartRow[];
+      for (const part of parts) {
+        const current = partsByMessageId.get(part.messageId) ?? [];
+        current.push(toPart(part));
+        partsByMessageId.set(part.messageId, current);
+      }
     }
     return rows.map((row) => ({
       ...row,
@@ -481,17 +606,18 @@ export class SqliteMessageQuery {
       updatedRevision: Number(row.updatedRevision),
       createdAt: Number(row.createdAt),
       updatedAt: Number(row.updatedAt),
+      ...(activeContextRootDepth !== undefined
+        ? { inActiveContext: activeContextRootDepth === null || Number(row.depth) >= activeContextRootDepth }
+        : {}),
       parts: partsByMessageId.get(row.id) ?? []
     }));
   }
 
-  private listTimelineExecutions(chainIds: string[], sinceRevision: number | undefined): AgentTimelineToolExecution[] {
-    if (chainIds.length === 0) return [];
-    const placeholders = chainIds.map(() => "?").join(",");
-    const revisionClause = sinceRevision === undefined ? "" : "and execution.updated_revision > ?";
-    const values: Array<string | number> = [...chainIds];
-    if (sinceRevision !== undefined) values.push(sinceRevision);
+  private listTimelineExecutions(session: AgentSessionMessageState, sinceRevision: number | undefined): AgentTimelineToolExecution[] {
+    if (!session.headMessageId) return [];
+    const revisionClause = sinceRevision === undefined ? "" : "and execution.updated_revision > @sinceRevision";
     const rows = this.db.prepare(`
+      ${this.displayChainCte()}
       select execution.id, execution.call_part_id as callPartId,
              execution.status, execution.result_preview as resultPreview,
              execution.result_truncated as resultTruncated, execution.error,
@@ -499,9 +625,10 @@ export class SqliteMessageQuery {
              execution.completed_at as completedAt
       from agent_tool_execution execution
       join agent_message_part part on part.id = execution.call_part_id
-      where part.message_id in (${placeholders}) ${revisionClause}
+      join display_chain chain on chain.id = part.message_id
+      where 1 = 1 ${revisionClause}
       order by execution.created_at asc, execution.id asc
-    `).all(...values) as TimelineExecutionRow[];
+    `).all({ ...this.displayChainParams(session), sinceRevision }) as TimelineExecutionRow[];
     return rows.map((row) => ({
       id: row.id,
       callPartId: row.callPartId,
@@ -515,15 +642,17 @@ export class SqliteMessageQuery {
     }));
   }
 
-  private listTimelineExecutionsForCallParts(callPartIds: string[]): AgentTimelineToolExecution[] {
-    if (callPartIds.length === 0) return [];
+  private listTimelineExecutionsForMessages(messageIds: string[]): AgentTimelineToolExecution[] {
+    if (messageIds.length === 0) return [];
     const rows = this.db.prepare(`
-      select id, call_part_id as callPartId, status, result_preview as resultPreview,
-             result_truncated as resultTruncated, error, updated_revision as updatedRevision,
-             started_at as startedAt, completed_at as completedAt
-      from agent_tool_execution where call_part_id in (${callPartIds.map(() => "?").join(",")})
-      order by created_at asc, id asc
-    `).all(...callPartIds) as TimelineExecutionRow[];
+      select execution.id, execution.call_part_id as callPartId, execution.status, execution.result_preview as resultPreview,
+             execution.result_truncated as resultTruncated, execution.error, execution.updated_revision as updatedRevision,
+             execution.started_at as startedAt, execution.completed_at as completedAt
+      from agent_tool_execution execution
+      join agent_message_part part on part.id = execution.call_part_id
+      where part.message_id in (${messageIds.map(() => "?").join(",")})
+      order by execution.created_at asc, execution.id asc
+    `).all(...messageIds) as TimelineExecutionRow[];
     return rows.map((row) => ({
       id: row.id,
       callPartId: row.callPartId,

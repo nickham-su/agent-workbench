@@ -5,6 +5,7 @@ import {
   agentUserMessageDraftText,
   applyAgentTimelineDelta,
   buildConversationParts,
+  canMutateAgentTimelineMessage,
   hasAgentMessageTextPart,
   replaceAgentTimelineSnapshot,
 } from "./agentMessageTimeline.js";
@@ -133,6 +134,28 @@ test("agentUserMessageDraftText 仅还原 User 的 TextPart，并保持 Part 顺
   });
   assert.equal(agentUserMessageDraftText(user), "hello world");
   assert.equal(agentUserMessageDraftText(message({ id: "assistant" })), null);
+});
+
+test("压缩前历史消息不提供 Fork 或回退等结构操作", () => {
+  const textPart = {
+    id: "part", messageId: "assistant", position: 0, type: "text" as const,
+    text: "answer", updatedRevision: 1, createdAt: 1, updatedAt: 1,
+  };
+  assert.equal(canMutateAgentTimelineMessage(message({
+    id: "old-user", type: "user", inActiveContext: false,
+  })), false);
+  assert.equal(canMutateAgentTimelineMessage(message({
+    id: "old-assistant", type: "assistant", inActiveContext: false, parts: [textPart],
+  })), false);
+  assert.equal(canMutateAgentTimelineMessage(message({
+    id: "current-user", type: "user", inActiveContext: true,
+  })), true);
+  assert.equal(canMutateAgentTimelineMessage(message({
+    id: "current-assistant", type: "assistant", inActiveContext: true, parts: [textPart],
+  })), true);
+  assert.equal(canMutateAgentTimelineMessage(message({
+    id: "compaction", type: "compaction", inActiveContext: true,
+  })), false);
 });
 
 test("Conversation 保持 Part.position 且 ToolCall 用 callPartId 显式关联 ToolExecution", () => {

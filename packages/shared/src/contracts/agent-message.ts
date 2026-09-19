@@ -101,6 +101,8 @@ export const AgentMessageSchema = Type.Object({
   status: AgentMessageStatusSchema,
   originSessionId: NullableIdSchema,
   originRunId: NullableIdSchema,
+  /** Timeline 读侧标记：false 表示该消息仅供历史浏览，不会进入当前运行时上下文。 */
+  inActiveContext: Type.Optional(Type.Boolean()),
   updatedRevision: Type.Integer({ minimum: 0 }),
   createdAt: Type.Number(),
   updatedAt: Type.Number(),
@@ -206,7 +208,7 @@ export const AgentTimelineDeltaResponseSchema = Type.Object({
   messages: Type.Array(AgentMessageSchema),
   toolExecutions: Type.Array(AgentTimelineToolExecutionSchema),
   hasMore: Type.Optional(Type.Boolean()),
-  /** 下一页 before 参数；null 表示已到 contextRoot。 */
+  /** 下一页 before 参数；null 表示已到当前展示分支链首。 */
   nextBeforeMessageId: Type.Optional(NullableIdSchema)
 }, { additionalProperties: false });
 export type AgentTimelineDeltaResponse = Static<typeof AgentTimelineDeltaResponseSchema>;

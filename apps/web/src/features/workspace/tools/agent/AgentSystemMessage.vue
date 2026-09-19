@@ -1,4 +1,7 @@
 <template>
+  <div v-if="label" class="mb-1 font-medium text-[color:var(--text-tertiary)]">
+    {{ label }}
+  </div>
   <AgentTextMessage
     class="agent-system-message"
     :style="{ fontSize: 'calc(var(--agent-font-size, 13px) - 3px)' }"
@@ -17,6 +20,7 @@ import AgentTextMessage from "./AgentTextMessage.vue";
 const props = defineProps<{
   text: string;
   messageId: string;
+  label?: string;
 }>();
 
 const expanded = ref(false);

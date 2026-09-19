@@ -264,11 +264,36 @@ test("Session 绑定附件读取拒绝 detached branch、错误关系和不安�
   });
   assert.equal(fork.statusCode, 201, fork.body);
   const detached = fork.json() as { id: string };
+
+  const currentHead = getMessageSessionHead(fixture.db, { workspaceId: fixture.workspaceId, sessionId: session.id })!;
+  commitCompactionMessage(fixture.db, {
+    id: "attachment-compaction",
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    expectedHeadMessageId: currentHead.headMessageId!,
+    expectedRevision: currentHead.revision,
+    textPartId: "attachment-compaction-text",
+    text: "summary",
+    createdAt: Date.now(),
+  });
+  const compactedCurrentRead = await fixture.app.inject({
+    method: "GET",
+    url: `/api/agent/sessions/${session.id}/attachments/${attachment.attachmentId}/content?workspaceId=${encodeURIComponent(fixture.workspaceId)}`,
+  });
+  assert.equal(compactedCurrentRead.statusCode, 200, compactedCurrentRead.body);
+
   const detachedRead = await fixture.app.inject({
     method: "GET",
     url: `/api/agent/sessions/${detached.id}/attachments/${attachment.attachmentId}/content?workspaceId=${encodeURIComponent(fixture.workspaceId)}`,
   });
   assert.equal(detachedRead.statusCode, 404);
+
+  fixture.db.prepare("insert into workspaces (id,dir_name,title,path,created_at,updated_at) values ('ws-other','ws-other','Other','/workspace/other',1,1)").run();
+  const otherWorkspaceRead = await fixture.app.inject({
+    method: "GET",
+    url: `/api/agent/sessions/${session.id}/attachments/${attachment.attachmentId}/content?workspaceId=ws-other`,
+  });
+  assert.equal(otherWorkspaceRead.statusCode, 404);
 
   const missingRelation = await fixture.app.inject({
     method: "GET",
@@ -391,7 +416,7 @@ test("M6 multipart dedup 保留首次 final 并清理重复请求的新暂存文
   await completeRun({ ...fixture, sessionId: session.id, runId: firstBody.runId });
 });
 
-test("Session 附件读取在 compaction contextRoot 之前返回 404", async (t: TestContext) => {
+test("Session 附件读取允许 compaction contextRoot 之前的当前分支图片", async (t: TestContext) => {
   const fixture = await createIntegrationFixture(t, { agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
   const uploaded = await fixture.app.inject({ method: "POST", url: `/api/agent/sessions/${session.id}/messages`, ...multipartMessage({ workspaceId: fixture.workspaceId, clientRequestId: "before-compaction", images: [{ filename: "one.png", bytes: PNG_BYTES }] }) });
@@ -403,7 +428,7 @@ test("Session 附件读取在 compaction contextRoot 之前返回 404", async (t
   assert.ok(head);
   commitCompactionMessage(fixture.db, { id: "msg_compacted", workspaceId: fixture.workspaceId, sessionId: session.id, expectedHeadMessageId: head.headMessageId, expectedRevision: head.revision, textPartId: "part_compacted", text: "摘要", createdAt: Date.now() });
   const response = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${session.id}/attachments/${attachment.attachmentId}/content?workspaceId=${encodeURIComponent(fixture.workspaceId)}` });
-  assert.equal(response.statusCode, 404);
+  assert.equal(response.statusCode, 200, response.body);
 });
 
 test("Session 附件读取拒绝 root、by_workspace、工作区与目标层 symlink、缺失和目录", async (t: TestContext) => {

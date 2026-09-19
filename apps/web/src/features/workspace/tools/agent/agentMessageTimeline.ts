@@ -92,6 +92,13 @@ export function agentUserMessageDraftText(message: AgentMessage) {
     .join("");
 }
 
+/** 压缩前历史仅供浏览，不能触发受当前模型上下文边界保护的结构操作。 */
+export function canMutateAgentTimelineMessage(message: AgentMessage) {
+  return message.inActiveContext !== false && (
+    message.type === "user" || (message.type === "assistant" && hasAgentMessageTextPart(message))
+  );
+}
+
 /** 以 Message 的 Part.position 为唯一显示顺序；ToolCall 通过 callPartId 显式关联 execution。 */
 export function buildConversationParts(state: AgentMessageTimelineState): ConversationPart[] {
   const executionByCallPartId = new Map(state.toolExecutions.map((execution) => [execution.callPartId, execution]));

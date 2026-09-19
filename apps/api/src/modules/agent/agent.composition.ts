@@ -2750,14 +2750,12 @@ function createAgentApplications(
               and workspace_id = @workspaceId
               and head_message_id is not null
             union all
-            select message.previous_message_id
-            from agent_message message
-            join visible on visible.message_id = message.id
-            join agent_session session
-              on session.id = @sessionId and session.workspace_id = @workspaceId
-            where visible.message_id <> session.context_root_message_id
-              and message.previous_message_id is not null
-          )
+             select message.previous_message_id
+             from agent_message message
+             join visible on visible.message_id = message.id
+             where message.workspace_id = @workspaceId
+               and message.previous_message_id is not null
+           )
           select attachment.id as attachmentId,
             attachment.workspace_id as workspaceId,
             attachment.storage_key as storageKey,

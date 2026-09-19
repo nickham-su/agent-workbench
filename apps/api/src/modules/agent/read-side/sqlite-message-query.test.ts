@@ -6,6 +6,7 @@ import { initSchema } from "../../../infra/db/schema.js";
 import {
   appendMessage,
   appendStreamingAssistant,
+  commitCompactionMessage,
   completeAssistantWithExecutions,
   createMessageSession,
   flushStreamingParts,
@@ -173,6 +174,172 @@ test("timeline delta 在 head 或 contextRoot 前提失效时返回尾部 reset 
   assert.equal(reset.timelineReset, true);
   assert.deepEqual(reset.messages.map((message) => message.id), ["head"]);
   assert.equal(reset.toolExecutions.length, 0);
+});
+
+test("压缩后 Timeline 保留完整展示历史，运行时上下文仅从最新 compaction 开始", () => {
+  const { db, query } = createFixture();
+  appendMessage(db, {
+    id: "user-1", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: null, expectedRevision: 0,
+    type: "user", status: "completed", parts: [{ id: "user-1-text", position: 0, type: "text", text: "old request" }], createdAt: 2,
+  });
+  appendMessage(db, {
+    id: "assistant-1", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "user-1", expectedRevision: 1,
+    type: "assistant", status: "completed", parts: [{ id: "assistant-1-text", position: 0, type: "text", text: "old answer" }], createdAt: 3,
+  });
+  commitCompactionMessage(db, {
+    id: "compaction-1", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "assistant-1", expectedRevision: 2,
+    textPartId: "compaction-1-text", text: "summary one", createdAt: 4,
+  });
+  appendMessage(db, {
+    id: "user-2", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "compaction-1", expectedRevision: 3,
+    type: "user", status: "completed", parts: [{ id: "user-2-text", position: 0, type: "text", text: "new request" }], createdAt: 5,
+  });
+  commitCompactionMessage(db, {
+    id: "compaction-2", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "user-2", expectedRevision: 4,
+    textPartId: "compaction-2-text", text: "summary two", createdAt: 6,
+  });
+
+  const timeline = query.getTimeline({ workspaceId: "ws", sessionId: "session", mode: "snapshot", limit: 10 });
+  assert.deepEqual(timeline.messages.map((message) => message.id), ["user-1", "assistant-1", "compaction-1", "user-2", "compaction-2"]);
+  assert.deepEqual(timeline.messages.map((message) => message.inActiveContext), [false, false, false, false, true]);
+  assert.equal(timeline.messages.at(-1)?.type, "compaction");
+  assert.equal(timeline.messages.at(-1)?.parts[0]?.type, "text");
+  assert.equal(timeline.messages.at(-1)?.parts[0] && (timeline.messages.at(-1)?.parts[0] as { text: string }).text, "summary two");
+
+  const runtime = query.getRuntimeTranscriptSource({ workspaceId: "ws", sessionId: "session" });
+  assert.deepEqual(runtime.messages.map((message) => message.id), ["compaction-2"]);
+  assert.equal(runtime.messages[0]?.inActiveContext, undefined);
+  assert.equal(runtime.messages[0]?.parts[0] && (runtime.messages[0]?.parts[0] as { text: string }).text, "summary two");
+  db.close();
+});
+
+test("压缩后 Timeline 的 snapshot 与 before 分页可继续读取压缩前历史", () => {
+  const { db, query } = createFixture();
+  let head: string | null = null;
+  for (let index = 1; index <= 3; index += 1) {
+    const id = `user-${index}`;
+    appendMessage(db, {
+      id, workspaceId: "ws", sessionId: "session", expectedHeadMessageId: head, expectedRevision: index - 1,
+      type: "user", status: "completed", parts: [], createdAt: index + 1,
+    });
+    head = id;
+  }
+  commitCompactionMessage(db, {
+    id: "compaction", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: head, expectedRevision: 3,
+    textPartId: "compaction-text", text: "summary", createdAt: 6,
+  });
+  const tail = query.getTimeline({ workspaceId: "ws", sessionId: "session", mode: "snapshot", limit: 2 });
+  assert.deepEqual(tail.messages.map((message) => message.id), ["user-3", "compaction"]);
+  assert.equal(tail.hasMore, true);
+  const previous = query.getTimeline({ workspaceId: "ws", sessionId: "session", mode: "before", beforeMessageId: tail.nextBeforeMessageId!, limit: 2 });
+  assert.deepEqual(previous.messages.map((message) => message.id), ["user-1", "user-2"]);
+  assert.equal(previous.hasMore, false);
+  db.close();
+});
+
+test("超长展示链的 Timeline 分页保持有界，并可跨越压缩边界", () => {
+  const { db, query } = createFixture();
+  let head: string | null = null;
+  for (let index = 1; index <= 1_100; index += 1) {
+    const id = `message-${index}`;
+    appendMessage(db, {
+      id, workspaceId: "ws", sessionId: "session", expectedHeadMessageId: head, expectedRevision: index - 1,
+      type: "user", status: "completed", parts: [
+        { id: `${id}-text-1`, position: 0, type: "text", text: `first ${index}` },
+        { id: `${id}-text-2`, position: 1, type: "text", text: `second ${index}` },
+      ], createdAt: index + 1,
+    });
+    head = id;
+  }
+  appendMessage(db, {
+    id: "tool-message", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: head, expectedRevision: 1_100,
+    type: "assistant", status: "completed", parts: [{ id: "tool-call", position: 0, type: "tool_call", toolName: "write", input: {} }], createdAt: 1_102,
+  });
+  db.prepare(`
+    insert into agent_tool_execution (id,call_part_id,origin_session_id,origin_run_id,status,result_preview,result_truncated,updated_revision,created_at,updated_at)
+    values ('tool-execution','tool-call','session',null,'completed',null,0,1101,1102,1102)
+  `).run();
+  head = "tool-message";
+  commitCompactionMessage(db, {
+    id: "compaction", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: head, expectedRevision: 1_101,
+    textPartId: "compaction-text", text: "summary", createdAt: 1_103,
+  });
+
+  const tail = query.getTimeline({ workspaceId: "ws", sessionId: "session", mode: "snapshot", limit: 2 });
+  assert.deepEqual(tail.messages.map((message) => message.id), ["tool-message", "compaction"]);
+  assert.equal(tail.hasMore, true);
+  const previous = query.getTimeline({
+    workspaceId: "ws", sessionId: "session", mode: "before", beforeMessageId: tail.nextBeforeMessageId!, limit: 2,
+  });
+  assert.deepEqual(previous.messages.map((message) => message.id), ["message-1099", "message-1100"]);
+  assert.equal(previous.hasMore, true);
+  assert.deepEqual(
+    query.getTimeline({ workspaceId: "ws", sessionId: "session", mode: "delta", sinceRevision: 0, knownHeadMessageId: "compaction", knownContextRootMessageId: "compaction" })
+      .toolExecutions.map((execution) => execution.id),
+    ["tool-execution"],
+  );
+  assert.equal(query.getToolExecutionDetail({ workspaceId: "ws", sessionId: "session", toolExecutionId: "tool-execution" }).id, "tool-execution");
+  assert.deepEqual(
+    query.getArtifactToolExecution({ workspaceId: "ws", sessionId: "session", toolExecutionId: "tool-execution", toolName: "write" }),
+    { workspaceId: "ws", toolExecutionId: "tool-execution" },
+  );
+
+  const delta = query.getTimeline({
+    workspaceId: "ws", sessionId: "session", mode: "delta", sinceRevision: 0,
+    knownHeadMessageId: "compaction", knownContextRootMessageId: "compaction",
+  });
+  assert.equal(delta.messages.length, 1_102);
+  assert.deepEqual(
+    delta.messages.find((message) => message.id === "message-1")?.parts.map((part) => [part.id, part.position, part.type]),
+    [["message-1-text-1", 0, "text"], ["message-1-text-2", 1, "text"]],
+  );
+  assert.deepEqual(
+    delta.messages.find((message) => message.id === "message-500")?.parts.map((part) => [part.id, part.position, part.type]),
+    [["message-500-text-1", 0, "text"], ["message-500-text-2", 1, "text"]],
+  );
+  assert.deepEqual(
+    delta.messages.find((message) => message.id === "message-501")?.parts.map((part) => [part.id, part.position, part.type]),
+    [["message-501-text-1", 0, "text"], ["message-501-text-2", 1, "text"]],
+  );
+  db.close();
+});
+
+test("Provider replay 不会跨越 compaction 进入运行时上下文", () => {
+  const { db, query } = createFixture();
+  appendMessage(db, {
+    id: "user", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: null, expectedRevision: 0,
+    type: "user", status: "completed", parts: [], createdAt: 2,
+  });
+  createMessageRunRecord(db, {
+    runId: "run", workspaceId: "ws", sessionId: "session", triggerMessageId: "user",
+    agentId: "agent", providerId: "provider", modelId: "model", status: "running", createdAt: 3,
+  });
+  startMessageRun(db, { workspaceId: "ws", sessionId: "session", runId: "run", updatedAt: 3 });
+  appendStreamingAssistant(db, {
+    id: "assistant", workspaceId: "ws", sessionId: "session", runId: "run",
+    expectedHeadMessageId: "user", expectedRevision: 1, createdAt: 4,
+  });
+  flushStreamingParts(db, {
+    workspaceId: "ws", sessionId: "session", runId: "run", messageId: "assistant", updatedAt: 5,
+    parts: [{
+      id: "replay-part", position: 0, type: "reasoning", text: "",
+      providerReplay: {
+        version: 1,
+        provider: { npm: "@ai-sdk/openai", api: "responses", providerId: "provider", model: "gpt-5" },
+        item: { type: "reasoning", itemId: "reasoning-1", encryptedContent: "ciphertext" },
+      },
+    }],
+  });
+  completeAssistantWithExecutions(db, {
+    workspaceId: "ws", sessionId: "session", runId: "run", messageId: "assistant", executions: [], updatedAt: 6,
+  });
+  assert.deepEqual([...query.getRuntimeProviderReplaySource({ workspaceId: "ws", sessionId: "session" }).keys()], ["replay-part"]);
+  commitCompactionMessage(db, {
+    id: "compaction", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "assistant", expectedRevision: 4,
+    textPartId: "compaction-text", text: "summary", createdAt: 7,
+  });
+  assert.deepEqual([...query.getRuntimeProviderReplaySource({ workspaceId: "ws", sessionId: "session" }).keys()], []);
+  db.close();
 });
 
 test("run state 投影最近响应 Token、当前 Run 起点与最近终态 Run 耗时", () => {

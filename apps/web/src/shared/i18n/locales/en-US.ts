@@ -373,6 +373,7 @@ export default {
       applyPatchOmittedFiles: "{count} more files are not shown",
       fork: "Fork from here",
       forked: "Created a new client from this message",
+      compactionSummary: "Context compacted",
       revert: "Revert to here",
       revertConfirmTitle: "Revert to this message?",
       revertConfirmContent: "This will revert to before this message and put it back into the input box. Messages after this point will become hidden from current timeline.",
