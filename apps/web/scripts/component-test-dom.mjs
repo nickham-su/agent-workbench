@@ -7,6 +7,7 @@ Object.defineProperties(globalThis, Object.fromEntries(Object.entries({
   navigator: window.navigator,
   Element: window.Element,
   HTMLElement: window.HTMLElement,
+  ShadowRoot: window.ShadowRoot,
   SVGElement: window.SVGElement,
   Node: window.Node,
   Event: window.Event,

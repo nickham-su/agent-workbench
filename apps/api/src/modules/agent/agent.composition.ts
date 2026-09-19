@@ -1583,7 +1583,7 @@ function createLifecycleSessionSubtaskAssembly(assembly: {
       get: (workspaceId, sessionId) =>
         (() => {
           const state = getMessageRunState(assembly.environment.db, workspaceId, sessionId);
-          return { status: state?.status ?? "idle", lastResponseTotalTokens: null };
+          return { status: state?.status ?? "idle", lastResponseTotalTokens: state?.lastResponseTotalTokens ?? null };
         })(),
     },
     childRunActivator: sqliteLifecyclePersistence,
@@ -1710,7 +1710,7 @@ function createReadQueryWritebackAssembly(assembly: {
     assembly.runPromptStaticCache,
     {
       getRunState: ({ workspaceId, sessionId }) =>
-        (() => { const state = getMessageRunState(assembly.environment.db, workspaceId, sessionId); return { activeRunId: state?.activeRunId ?? null, lastResponseTotalTokens: null }; })(),
+        (() => { const state = getMessageRunState(assembly.environment.db, workspaceId, sessionId); return { activeRunId: state?.activeRunId ?? null, lastResponseTotalTokens: state?.lastResponseTotalTokens ?? null }; })(),
       resolveUiLocale: (input) =>
         assembly.resolveUiLocaleForSessionContext(input),
       resolveProfile: (input) =>
@@ -2138,8 +2138,48 @@ function createAgentApplications(
     });
   }
 
+  function projectMessageRunState(params: { workspaceId: string; sessionId: string }): AgentMessageSessionRunState {
+    const state = messageQuery.getRunState(params);
+    let contextTokenRatio: number | null = null;
+    if (typeof state.lastResponseTotalTokens === "number") {
+      const session = getMessageSessionById(environment.db, params.sessionId);
+      const run = environment.db.prepare(`
+        select run_id as runId, agent_id as agentId, provider_id as providerId, model_id as modelId
+        from agent_run
+        where workspace_id = @workspaceId and session_id = @sessionId
+          and (
+            run_id = @activeRunId
+            or (@activeRunId is null and status in ('completed','failed','cancelled'))
+          )
+        order by case when run_id = @activeRunId then 0 else 1 end, updated_at desc, run_id desc
+        limit 1
+      `).get({ ...params, activeRunId: state.activeRunId }) as {
+        runId: string; agentId: string; providerId: string; modelId: string;
+      } | undefined;
+      if (session && session.workspaceId === params.workspaceId && run) {
+        try {
+          const profile = environment.resolveExecutionProfile({
+            surface: session.kind === "subtask" ? "subtask" : "user",
+            agentIdFromRun: run.agentId,
+            workspaceEnablement: environment.getWorkspaceEnabledAgentIds(params.workspaceId),
+            providerIdFromRun: run.providerId,
+            modelIdFromRun: run.modelId,
+          });
+          const contextWindowTokens = Number(profile.model.contextWindowTokens);
+          if (Number.isFinite(contextWindowTokens) && contextWindowTokens >= 1) {
+            contextTokenRatio = state.lastResponseTotalTokens / Math.floor(contextWindowTokens);
+          }
+        } catch (error) {
+          logger.warn({ err: error, workspaceId: params.workspaceId, sessionId: params.sessionId, runId: run.runId }, "resolve context-window tokens failed for message run-state");
+        }
+      }
+    }
+    return { ...state, contextTokenRatio };
+  }
+
   function getMessageTimelineSnapshot(params: { workspaceId: string; sessionId: string; sinceRevision?: number }) {
-    return messageQuery.getSnapshot(params);
+    const snapshot = messageQuery.getSnapshot(params);
+    return { ...snapshot, runState: projectMessageRunState(params) };
   }
 
   async function getApplyPatchUiArtifact(params: {
@@ -2161,7 +2201,7 @@ function createAgentApplications(
   }
 
   function getMessageRunState(params: { workspaceId: string; sessionId: string }) {
-    return messageQuery.getRunState(params);
+    return projectMessageRunState(params);
   }
 
   async function revertSession(params: {

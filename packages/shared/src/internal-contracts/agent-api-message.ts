@@ -127,6 +127,7 @@ export const AgentApiCompleteAssistantRequestSchema = Type.Object({
   runId: IdSchema,
   messageId: IdSchema,
   executions: Type.Array(AgentApiQueuedToolExecutionSchema),
+  responseTotalTokens: Type.Optional(Type.Union([Type.Number({ minimum: 0 }), Type.Null()])),
   updatedAt: Type.Number()
 }, { additionalProperties: false });
 export type AgentApiCompleteAssistantRequest = Static<typeof AgentApiCompleteAssistantRequestSchema>;

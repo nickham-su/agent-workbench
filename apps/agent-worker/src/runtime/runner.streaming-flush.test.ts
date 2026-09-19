@@ -14,7 +14,7 @@ type StreamChunk =
   | { type: "raw"; rawValue: unknown }
   | { type: "reasoning-delta"; text?: string; delta?: string }
   | { type: "tool-call"; toolName: string; toolCallId?: string; input?: unknown; functionItemId?: string; replayCallId?: string }
-  | { type: "finish"; usage?: Record<string, unknown>; finishReason?: string }
+  | { type: "finish"; totalUsage?: Record<string, unknown>; finishReason?: string }
   | { type: "provider-replay"; partType: "reasoning"; partId: string; itemId: string; encryptedContent: string; summaryIndex?: number }
   | { type: "provider-replay"; partType: "text"; partId: string; itemId: string; phase?: "commentary" | "final_answer" }
   | { type: "provider-function-replay"; toolCallId: string; itemId: string }
@@ -732,6 +732,7 @@ test("runModelStep: 100 chars 且 <1s 时不发生阈值驱动的中途 streamin
   assert.equal(result.aborted, false);
   assert.equal(started.flushes.length, 2);
   assert.equal(started.completions.length, 1);
+  assert.equal(started.completions[0]?.responseTotalTokens, 3);
   assert.equal(started.flushes[0]?.parts.find((part) => part.type === "text")?.text, "x".repeat(100));
   assert.deepEqual(({ text: started.flushes[1]?.parts.find((part) => part.type === "reasoning")?.text }), { text: "final reasoning" });
 });
@@ -884,6 +885,47 @@ test("runModelStep: 空输出重试复用同一 streaming Assistant，并清除�
     assert.equal(retryNotice?.retryCount, 1);
     assert.equal(typeof retryNotice?.nextRetryAt, "number");
     assert.ok(started.runNoticeUpdates.some((update) => update.runNoticeText === "" && update.nextRetryAt === null));
+    assert.equal(started.completions[0]?.responseTotalTokens, 7);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("runModelStep: 失败 attempt 的 usage 不会污染无 usage 的成功 attempt", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const failed = createControlledStream();
+    const successful = createControlledStream();
+    const started = await startRunModelStep({ streams: [failed, successful] });
+
+    void failed.push({ type: "finish", totalUsage: { inputTokens: 90, outputTokens: 10 } });
+    void failed.push({ type: "error", error: new Error("retry after usage") }).catch(() => undefined);
+    void successful.push({ type: "text-delta", text: "ok" });
+    void successful.finish({ usage: {} });
+    await started.promise;
+
+    assert.equal(started.completions[0]?.responseTotalTokens, null);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("runModelStep: 重试成功后只上报最终 attempt 的 usage", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const failed = createControlledStream();
+    const successful = createControlledStream();
+    const started = await startRunModelStep({ streams: [failed, successful] });
+
+    void failed.push({ type: "finish", totalUsage: { totalTokens: 100 } });
+    void failed.push({ type: "error", error: new Error("retry after usage") }).catch(() => undefined);
+    void successful.push({ type: "text-delta", text: "ok" });
+    void successful.finish({ usage: { totalTokens: 7 } });
+    await started.promise;
+
+    assert.equal(started.completions[0]?.responseTotalTokens, 7);
   } finally {
     globalThis.setTimeout = originalSetTimeout;
   }

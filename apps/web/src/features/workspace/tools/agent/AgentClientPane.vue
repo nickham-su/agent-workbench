@@ -2,50 +2,55 @@
   <div class="h-full min-h-0 flex flex-col">
     <header
       class="px-3 py-2 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] text-[0.9em] text-[color:var(--text-tertiary)]"
+      :title="sessionTitleText"
     >
-      <div class="flex items-center gap-2 min-w-0">
-        <a-button
-          v-if="isSubtaskSession && props.parentSessionId"
-          type="link"
-          size="small"
-          class="!px-0 shrink-0"
-          @click="emit('open-parent', props.parentSessionId)"
-          >{{ t("agent.client.backToParent") }}</a-button
-        >
-        <div class="min-w-0 flex-1 truncate text-[color:var(--text-secondary)]">
-          {{ sessionTitleText }}
-        </div>
-        <span v-if="runElapsedText" class="whitespace-nowrap tabular-nums"
-          >· {{ runElapsedText }}</span
-        >
-        <a-tooltip v-if="sessionModelLabel" :title="sessionModelLabel">
+      <div class="flex items-center justify-between gap-2 min-w-0">
+        <div class="min-w-0 flex-1 flex items-center gap-2">
           <a-button
-            v-if="!isSubtaskSession"
+            v-if="isSubtaskSession && props.parentSessionId"
+            type="link"
+            size="small"
+            class="!px-0 shrink-0"
+            @click="emit('open-parent', props.parentSessionId)"
+            >{{ t("agent.client.backToParent") }}</a-button
+          >
+          <span class="min-w-0 truncate text-[14px] leading-none text-[color:var(--text-secondary)]">
+            {{ sessionTitleText }}
+          </span>
+          <a-tooltip v-if="props.sessionReady" :title="t('agent.actions.setSessionTitle')">
+            <a-button
+              type="text"
+              size="small"
+              class="!px-1 shrink-0 !text-[color:var(--text-tertiary)] hover:!text-[color:var(--text-secondary)]"
+              :aria-label="t('agent.actions.setSessionTitle')"
+              @click.stop="emit('open-title-setting')"
+            >
+              <template #icon><EditOutlined class="text-[12px]" /></template>
+            </a-button>
+          </a-tooltip>
+          <template v-if="headerTokensText">
+            <span class="leading-none whitespace-nowrap">·</span>
+            <span class="leading-none whitespace-nowrap tabular-nums">{{ headerTokensText }}</span>
+          </template>
+          <template v-if="runElapsedText">
+            <span class="leading-none whitespace-nowrap">·</span>
+            <span class="leading-none whitespace-nowrap tabular-nums">{{ runElapsedText }}</span>
+          </template>
+        </div>
+        <div v-if="props.sessionReady" class="shrink-0 flex items-center gap-1">
+          <span class="leading-none whitespace-nowrap font-mono text-[12px] text-[color:var(--text-tertiary)]">
+            {{ props.sessionId }}
+          </span>
+          <a-button
             size="small"
             type="text"
-            :disabled="props.sessionModelMutationPending"
-            @click="openModelModal"
-            ><template #icon><RobotOutlined /></template
-          ></a-button>
-        </a-tooltip>
-        <a-tooltip :title="t('agent.client.contextManagerTitle')"
-          ><a-button size="small" type="text" @click="openContextManager"
-            ><template #icon><SettingOutlined /></template></a-button
-        ></a-tooltip>
-        <a-tooltip
-          v-if="!isSubtaskSession"
-          :title="t('agent.client.agentEnablementTitle')"
-          ><a-button size="small" type="text" @click="openAgentEnablement"
-            ><template #icon><TeamOutlined /></template></a-button
-        ></a-tooltip>
-        <a-button
-          v-if="props.sessionReady"
-          type="text"
-          size="small"
-          :aria-label="t('agent.actions.setSessionTitle')"
-          @click="emit('open-title-setting')"
-          ><template #icon><EditOutlined /></template
-        ></a-button>
+            class="!px-1 !text-[color:var(--text-tertiary)] hover:!text-[color:var(--text-secondary)]"
+            :aria-label="t('agent.client.copySessionId')"
+            @click="copySessionId"
+          >
+            <template #icon><CopyOutlined class="text-[12px]" /></template>
+          </a-button>
+        </div>
       </div>
     </header>
 
@@ -73,7 +78,7 @@
           <article
             v-for="row in conversation"
             :key="row.id"
-            class="relative rounded p-2"
+            class="group relative rounded p-2"
             :class="messageClass(row)"
           >
             <AgentMessageActions
@@ -81,6 +86,7 @@
               :disabled="isSessionMessageMutationPending"
               :fork-label="t('agent.client.fork')"
               :revert-label="t('agent.client.revert')"
+              :outside="row.message.type === 'user'"
               @fork="onFork(row.message.id)"
               @revert="onRevert(row.message.id)"
             />
@@ -165,7 +171,8 @@
     </section>
 
     <footer
-      class="relative border-t border-[var(--border-color-secondary)] p-2"
+      v-if="!isSubtaskSession"
+      class="relative border-t border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] p-2"
     >
       <div
         v-if="runState.runNoticeText"
@@ -186,7 +193,8 @@
       <a-textarea
         ref="inputEl"
         v-model:value="draft"
-        :disabled="!props.sessionReady || sending || isSubtaskSession"
+        :disabled="!hasAvailableAgents || props.sessionModelMutationPending"
+        :readonly="sending || props.sessionModelMutationPending"
         :placeholder="inputPlaceholder"
         :auto-size="{ minRows: 2, maxRows: 6 }"
         @input="onInputChanged"
@@ -219,16 +227,61 @@
       </div>
       <div class="mt-2 flex items-center gap-2">
         <a-select
-          v-if="!isSubtaskSession"
           :value="effectiveAgentId || undefined"
           class="min-w-32 max-w-52"
           size="small"
           :options="props.agentOptions"
+          :disabled="props.sessionModelMutationPending"
           @update:value="
             (value: string | undefined) =>
               emit('update:modelValue', value || null)
           "
         />
+        <a-tooltip
+          v-if="sessionModelLabel"
+          :title="sessionModelLabel"
+          placement="top"
+          :mouse-enter-delay="0.45"
+        >
+          <a-button
+            size="small"
+            type="text"
+            class="!px-1 max-w-60 min-w-0"
+            :disabled="props.sessionModelMutationPending"
+            :aria-label="t('agent.client.modelEditTooltip')"
+            @click="requestModelModal"
+          >
+            <span class="block truncate">{{ sessionModelLabel }}</span>
+          </a-button>
+        </a-tooltip>
+        <div class="flex items-center gap-1">
+          <a-tooltip
+            :title="t('agent.client.agentEnablementTooltip')"
+            placement="top"
+            :mouse-enter-delay="0.45"
+          >
+            <a-button
+              size="small"
+              type="text"
+              class="!px-1"
+              :aria-label="t('agent.client.agentEnablementTitle')"
+              @click="openAgentEnablement"
+              ><template #icon><RobotOutlined /></template></a-button
+          ></a-tooltip>
+          <a-tooltip
+            :title="t('agent.client.contextManagerTooltip')"
+            placement="top"
+            :mouse-enter-delay="0.45"
+          >
+            <a-button
+              size="small"
+              type="text"
+              class="!px-1"
+              :aria-label="t('agent.client.contextManagerTitle')"
+              @click="openContextManager"
+              ><template #icon><AppstoreOutlined /></template></a-button
+          ></a-tooltip>
+        </div>
         <span
           v-if="processingPastedImages"
           class="text-[0.85em] text-[color:var(--text-tertiary)]"
@@ -241,18 +294,6 @@
           :loading="cancelling"
           @click="onCancel"
           >{{ t("agent.client.cancel") }}</a-button
-        >
-        <a-button
-          type="primary"
-          size="small"
-          :loading="sending"
-          :disabled="
-            (!draft.trim() && pendingImages.length === 0) ||
-            !props.sessionReady ||
-            isSubtaskSession
-          "
-          @click="onSend"
-          >{{ t("agent.client.send") }}</a-button
         >
       </div>
     </footer>
@@ -366,13 +407,13 @@ import type {
 } from "@agent-workbench/shared";
 import type { AgentSessionAgentModelState } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import {
+  AppstoreOutlined,
+  CopyOutlined,
   DownOutlined,
   EditOutlined,
   FileImageOutlined,
   LoadingOutlined,
   RobotOutlined,
-  SettingOutlined,
-  TeamOutlined,
 } from "@ant-design/icons-vue";
 import { message } from "ant-design-vue";
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
@@ -421,6 +462,13 @@ import {
   type PendingAgentImage,
   type PendingAgentSendAttempt,
 } from "./agentImageAttachments";
+import { createAgentClientRequestId } from "./agentClientRequestId";
+import {
+  copyTextWithExecCommand,
+  formatAgentHeaderTokens,
+  resolveCycledAgentId,
+  shouldRunAgentElapsedTimer,
+} from "./agentClientHeader";
 import { runAgentSessionMessageMutation } from "./agentMessageMutationAction";
 import {
   createAgentCompactAttemptFingerprint,
@@ -536,6 +584,7 @@ const isSubtaskSession = computed(() => props.sessionKind === "subtask");
 const sessionTitleText = computed(
   () => String(props.sessionTitle || "").trim() || props.sessionId,
 );
+const hasAvailableAgents = computed(() => props.agentOptions.length > 0);
 const effectiveAgentId = computed(() =>
   props.agentOptions.some((item) => item.value === props.modelValue)
     ? props.modelValue || ""
@@ -555,11 +604,14 @@ const sessionModelLabel = computed(
         : null,
     ).modelLabel || "",
 );
-const inputPlaceholder = computed(() =>
-  runState.value.status === "running"
+const inputPlaceholder = computed(() => {
+  if (!hasAvailableAgents.value) {
+    return t("agent.client.inputPlaceholderNoAgent");
+  }
+  return runState.value.status === "running"
     ? t("agent.client.inputPlaceholderRunning")
-    : t("agent.client.inputPlaceholderIdle"),
-);
+    : t("agent.client.inputPlaceholderIdle");
+});
 const draft = ref("");
 const sending = ref(false);
 const cancelling = ref(false);
@@ -603,11 +655,22 @@ const showScrollToBottom = computed(
 );
 const now = ref(Date.now());
 let elapsedTimer: number | null = null;
-const runElapsedText = computed(() =>
-  runState.value.status === "running"
-    ? formatElapsedDuration(Math.max(0, now.value - runState.value.updatedAt))
-    : "",
-);
+const runElapsedText = computed(() => {
+  if (runState.value.status === "running") {
+    const startedAt = runState.value.activeRunStartedAt;
+    return typeof startedAt === "number" && Number.isFinite(startedAt)
+      ? formatElapsedDuration(Math.max(0, now.value - startedAt))
+      : "";
+  }
+  const durationMs = runState.value.lastRunDurationMs;
+  return typeof durationMs === "number" && Number.isFinite(durationMs)
+    ? formatElapsedDuration(Math.max(0, durationMs))
+    : "";
+});
+const headerTokensText = computed(() => formatAgentHeaderTokens(
+  runState.value.lastResponseTotalTokens,
+  runState.value.contextTokenRatio,
+));
 function messageClass(row: ConversationPart) {
   return row.message.type === "user"
     ? "border border-blue-500/60 bg-blue-500/20"
@@ -961,6 +1024,10 @@ function pickCandidate(item: Candidate) {
   mentionCandidates.value = [];
   nextTick(syncInputCaret);
 }
+function onCycleAgent(step: 1 | -1) {
+  const nextId = resolveCycledAgentId(props.agentOptions, effectiveAgentId.value, step);
+  if (nextId) emit("update:modelValue", nextId);
+}
 function onInputKeydown(event: KeyboardEvent) {
   if (event.isComposing) return;
   if (
@@ -992,9 +1059,21 @@ function onInputKeydown(event: KeyboardEvent) {
     if (item) pickCandidate(item);
     return;
   }
-  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+  if (event.key === "Tab") {
+    event.preventDefault();
+    onCycleAgent(event.shiftKey ? -1 : 1);
+    return;
+  }
+  if (
+    event.key === "Enter" &&
+    !event.shiftKey &&
+    !event.ctrlKey &&
+    !event.altKey &&
+    !event.metaKey
+  ) {
     event.preventDefault();
     void onSend();
+    return;
   }
   if (event.key === "Escape" && runState.value.status === "running") {
     event.preventDefault();
@@ -1043,6 +1122,7 @@ function removePendingImage(id: string) {
 }
 async function onSend() {
   if (
+    !hasAvailableAgents.value ||
     isSubtaskSession.value ||
     sending.value ||
     processingPastedImages.value ||
@@ -1081,7 +1161,7 @@ async function onSend() {
       const attempt = resolveAgentCompactAttempt({
         attempt: pendingCompactAttempt.value,
         fingerprint,
-        makeClientRequestId: () => crypto.randomUUID(),
+        makeClientRequestId: createAgentClientRequestId,
       });
       pendingCompactAttempt.value = attempt;
       await compactAgentSession(ensuredId, {
@@ -1101,7 +1181,7 @@ async function onSend() {
       const attempt = resolveAgentSendAttempt({
         attempt: pendingAttempt.value,
         fingerprint,
-        makeClientRequestId: () => crypto.randomUUID(),
+        makeClientRequestId: createAgentClientRequestId,
       });
       pendingAttempt.value = attempt;
       const payload = {
@@ -1189,6 +1269,30 @@ function closeAttachmentPreview() {
   previewCache.clear();
 }
 
+async function copySessionId() {
+  const content = props.sessionId.trim();
+  if (!content) return;
+  try {
+    if (typeof navigator.clipboard?.writeText === "function") {
+      await navigator.clipboard.writeText(content);
+      message.success(t("agent.client.sessionIdCopied"));
+      return;
+    }
+  } catch {
+    // Clipboard API 不可用时继续使用兼容回退。
+  }
+  try {
+    if (!copyTextWithExecCommand(content)) throw new Error("copy command failed");
+    message.success(t("agent.client.sessionIdCopied"));
+  } catch (error) {
+    message.error(
+      t("common.copyFailed", {
+        reason: error instanceof Error ? error.message : String(error),
+      }),
+    );
+  }
+}
+
 const modelModalVisible = ref(false);
 const modelLoading = ref(false);
 const modelSaving = ref(false);
@@ -1196,6 +1300,19 @@ const modelResetting = ref(false);
 const modelError = ref("");
 const modelPath = ref("");
 const modelOptions = ref<Array<{ value: string; label: string }>>([]);
+function requestModelModal() {
+  const agentId = String(effectiveAgentId.value || "").trim();
+  if (
+    !canRequestSessionModelOpen({
+      hasAvailableAgents: hasAvailableAgents.value,
+      isSubtaskSession: isSubtaskSession.value,
+      mutationPending: props.sessionModelMutationPending,
+      agentId,
+    })
+  )
+    return;
+  emit("request-session-model-open", { sessionId: props.sessionId, agentId });
+}
 async function openModelModal() {
   if (
     !canRequestSessionModelOpen({
@@ -1491,9 +1608,26 @@ watch(
   },
   { immediate: true },
 );
-elapsedTimer = window.setInterval(() => {
+function syncElapsedTimer() {
+  if (elapsedTimer !== null) {
+    window.clearInterval(elapsedTimer);
+    elapsedTimer = null;
+  }
+  if (!shouldRunAgentElapsedTimer({
+    active: props.active,
+    status: runState.value.status,
+    activeRunStartedAt: runState.value.activeRunStartedAt,
+  })) return;
   now.value = Date.now();
-}, 1000);
+  elapsedTimer = window.setInterval(() => {
+    now.value = Date.now();
+  }, 1000);
+}
+watch(
+  [() => props.active, () => runState.value.status, () => runState.value.activeRunStartedAt],
+  syncElapsedTimer,
+  { immediate: true },
+);
 onBeforeUnmount(() => {
   disposed = true;
   clearRefreshTimer();

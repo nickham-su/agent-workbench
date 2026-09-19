@@ -345,13 +345,16 @@ test("replacement, ancestor pointer CAS and compaction preserve graph immutabili
   const current = getMessageSession(db, "ws-a", "s-a")!;
   moveMessageHead(db, { workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: "new", expectedRevision: current.revision, nextHeadMessageId: "u", updatedAt: 5 });
   const afterMove = getMessageSession(db, "ws-a", "s-a")!;
+  db.prepare("update session_run_state set last_response_total_tokens=64000 where workspace_id='ws-a' and session_id='s-a'").run();
   const compacted = commitCompactionMessage(db, { id: "c", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: "u", expectedRevision: afterMove.revision, textPartId: "cp", text: "summary", createdAt: 6 });
   assert.equal(compacted.type, "compaction"); assert.equal(getMessageSession(db, "ws-a", "s-a")!.contextRootMessageId, "c");
+  assert.equal(getMessageRunState(db, "ws-a", "s-a")?.lastResponseTotalTokens, null);
 });
 
 test("fenced compaction rejects stale Run without mutating the Message graph", () => {
   const db = createDb(); session(db); activate(db);
   appendMessage(db, { id: "u", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", parts: [], createdAt: 2 });
+  db.prepare("update session_run_state set last_response_total_tokens=32000 where workspace_id='ws-a' and session_id='s-a'").run();
   db.prepare("update session_run_state set status='idle',active_run_id=null where workspace_id='ws-a' and session_id='s-a'").run();
 
   const result = commitCompactionMessageWithRunFence(db, {
@@ -366,6 +369,7 @@ test("fenced compaction rejects stale Run without mutating the Message graph", (
     contextRootMessageId: getMessageSession(db, "ws-a", "s-a")!.contextRootMessageId,
     revision: getMessageSession(db, "ws-a", "s-a")!.revision
   }, { headMessageId: "u", contextRootMessageId: "u", revision: 1 });
+  assert.equal(getMessageRunState(db, "ws-a", "s-a")?.lastResponseTotalTokens, 32000);
 });
 
 test("cancel convergence cancels queued, marks running unknown, idles state and fences late writeback", () => {
@@ -380,7 +384,7 @@ test("cancel convergence cancels queued, marks running unknown, idles state and 
   appendStreamingAssistant(db, { id: "later", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: current.headMessageId, expectedRevision: current.revision, runId: "run-a", createdAt: 7 });
   assert.equal(cancelRunAndConverge(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", updatedAt: 8, noticeText: "用户已终止任务" }), true);
   assert.equal(getMessage(db, "later")!.status, "cancelled"); assert.equal(getToolExecution(db, "q")!.status, "cancelled"); assert.equal(getToolExecution(db, "r")!.status, "unknown");
-  assert.deepEqual(getMessageRunState(db, "ws-a", "s-a"), { workspaceId: "ws-a", sessionId: "s-a", status: "idle", activeRunId: null, runNoticeText: "用户已终止任务", retryCount: 0, nextRetryAt: null, activeAssistantMessageId: null, nonTerminalMessageIds: [], nonTerminalToolExecutionIds: [], updatedAt: 8 });
+  assert.deepEqual(getMessageRunState(db, "ws-a", "s-a"), { workspaceId: "ws-a", sessionId: "s-a", status: "idle", activeRunId: null, runNoticeText: "用户已终止任务", retryCount: 0, nextRetryAt: null, lastResponseTotalTokens: null, activeRunStartedAt: null, lastRunDurationMs: 7, activeAssistantMessageId: null, nonTerminalMessageIds: [], nonTerminalToolExecutionIds: [], updatedAt: 8 });
   assert.equal(flushStreamingParts(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "later", parts: [{ id: "late", position: 0, type: "text", text: "no" }], updatedAt: 9 }), "ignored");
   assert.equal(updateMessageRunNotice(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", runNoticeText: "late retry", retryCount: 99, nextRetryAt: 99, updatedAt: 9 }), "ignored");
   assert.equal(completeAssistantWithExecutions(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "later", executions: [], updatedAt: 9 }), "ignored");
@@ -410,7 +414,8 @@ test("run start and settlement are fenced against an active or late Run", () => 
   startMessageRun(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-1", updatedAt: 2, noticeText: "running" });
   assert.deepEqual(getMessageRunState(db, "ws-a", "s-a"), {
     workspaceId: "ws-a", sessionId: "s-a", status: "running", activeRunId: "run-1", runNoticeText: "running",
-    retryCount: 0, nextRetryAt: null, activeAssistantMessageId: null, nonTerminalMessageIds: [], nonTerminalToolExecutionIds: [], updatedAt: 2
+    retryCount: 0, nextRetryAt: null, lastResponseTotalTokens: null, activeRunStartedAt: 1, lastRunDurationMs: null,
+    activeAssistantMessageId: null, nonTerminalMessageIds: [], nonTerminalToolExecutionIds: [], updatedAt: 2
   });
   assert.throws(() => startMessageRun(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-2", updatedAt: 3 }), /not idle/);
   assert.equal(settleMessageRunIfCurrent(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "late", updatedAt: 4 }), false);
@@ -498,7 +503,8 @@ test("failure recovery fences the active Run and atomically settles streaming Me
   assert.equal((db.prepare("select status from agent_run where run_id='run-a'").get() as { status: string }).status, "failed");
   assert.deepEqual(getMessageRunState(db, "ws-a", "s-a"), {
     workspaceId: "ws-a", sessionId: "s-a", status: "idle", activeRunId: null, runNoticeText: "",
-    retryCount: 0, nextRetryAt: null, activeAssistantMessageId: null, nonTerminalMessageIds: [], nonTerminalToolExecutionIds: [], updatedAt: 8
+    retryCount: 0, nextRetryAt: null, lastResponseTotalTokens: null, activeRunStartedAt: null, lastRunDurationMs: 7,
+    activeAssistantMessageId: null, nonTerminalMessageIds: [], nonTerminalToolExecutionIds: [], updatedAt: 8
   });
   assert.equal(failMessageRunAndConverge(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", updatedAt: 9 }), false);
 });
@@ -510,9 +516,14 @@ test("Compaction fenced commit 对同一不可变请求精确重放，差异请�
   const current = getMessageSession(db, "ws-a", "s-a")!;
   assert.equal(getMessageRunState(db, "ws-a", "s-a")!.activeRunId, "run-a");
   const request = { id: "c-replay", workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", expectedHeadMessageId: "u-replay", expectedRevision: current.revision, textPartId: "cp-replay", text: "summary", createdAt: 3 };
+  db.prepare("update session_run_state set last_response_total_tokens=100 where workspace_id='ws-a' and session_id='s-a'").run();
   assert.equal(commitCompactionMessageWithRunFence(db, request)?.id, "c-replay");
+  assert.equal(getMessageRunState(db, "ws-a", "s-a")?.lastResponseTotalTokens, null);
+  db.prepare("update session_run_state set last_response_total_tokens=25 where workspace_id='ws-a' and session_id='s-a'").run();
   assert.equal(commitCompactionMessageWithRunFence(db, request)?.id, "c-replay");
+  assert.equal(getMessageRunState(db, "ws-a", "s-a")?.lastResponseTotalTokens, 25);
   assert.equal(commitCompactionMessageWithRunFence(db, { ...request, text: "different" }), null);
+  assert.equal(getMessageRunState(db, "ws-a", "s-a")?.lastResponseTotalTokens, 25);
   db.prepare(`insert into agent_message (id, workspace_id, previous_message_id, replaces_message_id, depth, type, status, origin_session_id, origin_run_id, updated_revision, created_at, updated_at)
     values ('other-message', 'ws-a', null, null, 0, 'runtime', 'completed', 's-a', null, 0, 3, 3)`).run();
   db.prepare(`insert into agent_message_part (id, message_id, position, type, text, updated_revision, created_at, updated_at)

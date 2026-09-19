@@ -31,6 +31,9 @@ type RunStateRow = {
   activeAssistantMessageId: string | null;
   nonTerminalMessageIdsJson: string;
   nonTerminalToolExecutionIdsJson: string;
+  lastResponseTotalTokens: number | null;
+  activeRunStartedAt: number | null;
+  lastRunDurationMs: number | null;
   updatedAt: number;
 };
 type MessageRow = Omit<AgentMessage, "parts">;
@@ -133,6 +136,9 @@ function toRunState(row: RunStateRow): AgentMessageSessionRunState {
     activeRunId: row.activeRunId,
     runNoticeText: row.runNoticeText,
     retryCount: Number(row.retryCount),
+    lastResponseTotalTokens: row.lastResponseTotalTokens == null ? null : Number(row.lastResponseTotalTokens),
+    activeRunStartedAt: row.activeRunStartedAt == null ? null : Number(row.activeRunStartedAt),
+    lastRunDurationMs: row.lastRunDurationMs == null ? null : Number(row.lastRunDurationMs),
     nextRetryAt: row.nextRetryAt,
     activeAssistantMessageId: row.activeAssistantMessageId,
     nonTerminalMessageIds: parseIdArray(row.nonTerminalMessageIdsJson),
@@ -393,14 +399,26 @@ export class SqliteMessageQuery {
 
   private runStateRow(workspaceId: string, sessionId: string): RunStateRow | undefined {
     return this.db.prepare(`
-      select workspace_id as workspaceId, session_id as sessionId, status,
-             active_run_id as activeRunId, run_notice_text as runNoticeText,
-             retry_count as retryCount, next_retry_at as nextRetryAt,
-             active_assistant_message_id as activeAssistantMessageId,
-             non_terminal_message_ids_json as nonTerminalMessageIdsJson,
-             non_terminal_tool_execution_ids_json as nonTerminalToolExecutionIdsJson,
-             updated_at as updatedAt
-      from session_run_state where workspace_id = ? and session_id = ?
+      select state.workspace_id as workspaceId, state.session_id as sessionId, state.status,
+             state.active_run_id as activeRunId, state.run_notice_text as runNoticeText,
+             state.retry_count as retryCount, state.next_retry_at as nextRetryAt,
+             state.active_assistant_message_id as activeAssistantMessageId,
+             state.non_terminal_message_ids_json as nonTerminalMessageIdsJson,
+             state.non_terminal_tool_execution_ids_json as nonTerminalToolExecutionIdsJson,
+             state.last_response_total_tokens as lastResponseTotalTokens,
+             active.created_at as activeRunStartedAt,
+             case when latest.run_id is null then null
+               else max(0, latest.updated_at - latest.created_at) end as lastRunDurationMs,
+             state.updated_at as updatedAt
+      from session_run_state state
+      left join agent_run active on active.run_id = state.active_run_id
+      left join agent_run latest on latest.run_id = (
+        select run.run_id from agent_run run
+        where run.workspace_id = state.workspace_id and run.session_id = state.session_id
+          and run.status in ('completed','failed','cancelled')
+        order by run.updated_at desc, run.run_id desc limit 1
+      )
+      where state.workspace_id = ? and state.session_id = ?
     `).get(workspaceId, sessionId) as RunStateRow | undefined;
   }
 

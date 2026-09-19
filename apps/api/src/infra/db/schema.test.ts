@@ -904,7 +904,7 @@ test("destructive file cleanup rejects a symbolic link in the artifact parent pa
   second.close();
 });
 
-test("v19 原地升级到 v20 保留数据、补充私有 replay 列且重复初始化幂等", () => {
+test("v19 原地升级到最新版本保留数据、补充 replay 与 token 列且重复初始化幂等", () => {
   const db = createDb();
   insertWorkspace(db);
   insertSession(db);
@@ -913,23 +913,52 @@ test("v19 原地升级到 v20 保留数据、补充私有 replay 列且重复初
     values ('part-v19','message-v19',0,'reasoning','summary',7,10,11)`).run();
   db.prepare("update agent_schema_meta set version = 19, file_cleanup_pending = 1 where id = 1").run();
   db.exec("alter table agent_message_part drop column provider_replay_json");
+  db.exec("alter table session_run_state drop column last_response_total_tokens");
 
   const first = initSchema(db);
   assert.equal(first.fileCleanupPending, true);
-  assert.equal((db.prepare("select version from agent_schema_meta where id = 1").get() as { version: number }).version, 20);
+  assert.equal((db.prepare("select version from agent_schema_meta where id = 1").get() as { version: number }).version, AGENT_SCHEMA_VERSION);
   assert.deepEqual(
     db.prepare("select id,message_id,type,text,updated_revision,provider_replay_json from agent_message_part where id='part-v19'").get(),
     { id: "part-v19", message_id: "message-v19", type: "reasoning", text: "summary", updated_revision: 7, provider_replay_json: null },
   );
-  const columnsAfterFirst = db.prepare("pragma table_info(agent_message_part)").all() as Array<{ name: string }>;
-  assert.equal(columnsAfterFirst.filter((column) => column.name === "provider_replay_json").length, 1);
+  const messagePartColumnsAfterFirst = db.prepare("pragma table_info(agent_message_part)").all() as Array<{ name: string }>;
+  const runStateColumnsAfterFirst = db.prepare("pragma table_info(session_run_state)").all() as Array<{ name: string }>;
+  assert.equal(messagePartColumnsAfterFirst.filter((column) => column.name === "provider_replay_json").length, 1);
+  assert.equal(runStateColumnsAfterFirst.filter((column) => column.name === "last_response_total_tokens").length, 1);
 
   const second = initSchema(db);
   assert.equal(second.fileCleanupPending, true);
-  const columnsAfterSecond = db.prepare("pragma table_info(agent_message_part)").all() as Array<{ name: string }>;
-  assert.equal(columnsAfterSecond.filter((column) => column.name === "provider_replay_json").length, 1);
+  const messagePartColumnsAfterSecond = db.prepare("pragma table_info(agent_message_part)").all() as Array<{ name: string }>;
+  const runStateColumnsAfterSecond = db.prepare("pragma table_info(session_run_state)").all() as Array<{ name: string }>;
+  assert.equal(messagePartColumnsAfterSecond.filter((column) => column.name === "provider_replay_json").length, 1);
+  assert.equal(runStateColumnsAfterSecond.filter((column) => column.name === "last_response_total_tokens").length, 1);
   assert.equal((db.prepare("select count(*) as count from agent_message").get() as { count: number }).count, 1);
   assert.equal((db.prepare("select count(*) as count from agent_message_part").get() as { count: number }).count, 1);
+  db.close();
+});
+
+test("v20 原地升级到最新版本保留 Session 与运行状态并补充 token 列", () => {
+  const db = createDb();
+  insertWorkspace(db);
+  insertSession(db);
+  db.prepare(`insert into session_run_state (workspace_id, session_id, status, run_notice_text, retry_count, updated_at)
+    values ('ws-a', 'session-a', 'idle', 'preserved', 2, 9)`).run();
+  db.prepare("update agent_schema_meta set version = 20 where id = 1").run();
+  db.exec("alter table session_run_state drop column last_response_total_tokens");
+
+  initSchema(db);
+
+  assert.equal((db.prepare("select version from agent_schema_meta where id = 1").get() as { version: number }).version, AGENT_SCHEMA_VERSION);
+  assert.deepEqual(
+    db.prepare("select status, run_notice_text, retry_count, updated_at, last_response_total_tokens from session_run_state where session_id = 'session-a'").get(),
+    { status: "idle", run_notice_text: "preserved", retry_count: 2, updated_at: 9, last_response_total_tokens: null },
+  );
+  assert.equal((db.prepare("select count(*) as count from agent_session where id = 'session-a'").get() as { count: number }).count, 1);
+
+  initSchema(db);
+  const columns = db.prepare("pragma table_info(session_run_state)").all() as Array<{ name: string }>;
+  assert.equal(columns.filter((column) => column.name === "last_response_total_tokens").length, 1);
   db.close();
 });
 
@@ -938,6 +967,7 @@ test("agent_run run_kind 在目标 schema 升级时保留数据并回填 user", 
   db.prepare("update agent_schema_meta set version = 18 where id = 1").run();
   db.exec("alter table agent_run drop column run_kind");
   db.exec("alter table agent_message_part drop column provider_replay_json");
+  db.exec("alter table session_run_state drop column last_response_total_tokens");
   initSchema(db);
   const columns = db.prepare("pragma table_info(agent_run)").all() as Array<{ name: string }>;
   assert.ok(columns.some((column) => column.name === "run_kind"));
@@ -964,6 +994,7 @@ test("v18 Message 数据图原地升级保留关系、状态与 file cleanup pen
   db.prepare("update agent_schema_meta set version = 18, file_cleanup_pending = 1 where id = 1").run();
   db.exec("alter table agent_run drop column run_kind");
   db.exec("alter table agent_message_part drop column provider_replay_json");
+  db.exec("alter table session_run_state drop column last_response_total_tokens");
 
   initSchema(db);
 

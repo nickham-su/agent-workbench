@@ -9,6 +9,7 @@ import {
   createMessageSession,
   flushStreamingParts,
   startMessageRun,
+  settleMessageRunIfCurrent,
   updateToolExecution
 } from "../agent-message.store.js";
 import { createMessageRunRecord } from "../agent-message.store.js";
@@ -136,4 +137,50 @@ test("timeline delta 在 head 或 contextRoot 前提失效时返回尾部 reset 
   assert.equal(reset.timelineReset, true);
   assert.deepEqual(reset.messages.map((message) => message.id), ["head"]);
   assert.equal(reset.toolExecutions.length, 0);
+});
+
+test("run state 投影最近响应 Token、当前 Run 起点与最近终态 Run 耗时", () => {
+  const { db, query } = createFixture();
+  appendMessage(db, {
+    id: "user", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: null, expectedRevision: 0,
+    type: "user", status: "completed", parts: [], createdAt: 2,
+  });
+  createMessageRunRecord(db, {
+    runId: "run-completed", workspaceId: "ws", sessionId: "session", triggerMessageId: "user",
+    agentId: "agent", providerId: "provider", modelId: "model", status: "completed", createdAt: 10,
+  });
+  db.prepare("update agent_run set updated_at = 70 where run_id = 'run-completed'").run();
+  createMessageRunRecord(db, {
+    runId: "run-active", workspaceId: "ws", sessionId: "session", triggerMessageId: "user",
+    agentId: "agent", providerId: "provider", modelId: "model", status: "running", createdAt: 100,
+  });
+  startMessageRun(db, { workspaceId: "ws", sessionId: "session", runId: "run-active", updatedAt: 100 });
+  appendStreamingAssistant(db, {
+    id: "assistant", workspaceId: "ws", sessionId: "session", runId: "run-active",
+    expectedHeadMessageId: "user", expectedRevision: 1, createdAt: 101,
+  });
+
+  assert.equal(completeAssistantWithExecutions(db, {
+    workspaceId: "ws", sessionId: "session", runId: "run-active", messageId: "assistant",
+    executions: [], responseTotalTokens: 1234, updatedAt: 102,
+  }), "updated");
+
+  assert.deepEqual(
+    (({ lastResponseTotalTokens, activeRunStartedAt, lastRunDurationMs }) => ({ lastResponseTotalTokens, activeRunStartedAt, lastRunDurationMs }))(
+      query.getRunState({ workspaceId: "ws", sessionId: "session" }),
+    ),
+    { lastResponseTotalTokens: 1234, activeRunStartedAt: 100, lastRunDurationMs: 60 },
+  );
+
+  assert.equal(completeAssistantWithExecutions(db, {
+    workspaceId: "ws", sessionId: "session", runId: "run-active", messageId: "assistant",
+    executions: [], responseTotalTokens: null, updatedAt: 102,
+  }), "updated");
+  assert.equal(query.getRunState({ workspaceId: "ws", sessionId: "session" }).lastResponseTotalTokens, 1234);
+
+  settleMessageRunIfCurrent(db, { workspaceId: "ws", sessionId: "session", runId: "run-active", updatedAt: 103 });
+  const idleState = query.getRunState({ workspaceId: "ws", sessionId: "session" });
+  assert.equal(idleState.activeRunStartedAt, null);
+  assert.equal(idleState.lastRunDurationMs, 60);
+  db.close();
 });

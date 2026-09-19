@@ -2763,6 +2763,7 @@ export class AgentRunner {
       let sawUnknownFinishReason = false;
       let providerFailure: unknown = null;
       let attemptStream: RuntimeStreamResult | null = null;
+      let attemptResponseTotalTokens: number | null = null;
 
       const onOuterAbort = () => {
         requestController.abort();
@@ -2878,7 +2879,7 @@ export class AgentRunner {
             if (isOfficialOpenAiResponsesProfile(profile) && chunk.finishReason === "unknown") {
               sawUnknownFinishReason = true;
             }
-            responseTotalTokens = extractTotalTokens(chunk.totalUsage) ?? responseTotalTokens;
+            attemptResponseTotalTokens = extractTotalTokens(chunk.totalUsage) ?? attemptResponseTotalTokens;
             continue;
           }
           if (chunk.type === "error") {
@@ -2924,6 +2925,10 @@ export class AgentRunner {
         if (!hasVisibleAssistantText(textFromParts()) && reasoningFromParts().length === 0 && toolCallsFromParts().length === 0) {
           throw new Error("model stream completed without visible text or tool calls");
         }
+        if (attemptResponseTotalTokens == null && attemptStream) {
+          attemptResponseTotalTokens = await readStreamTotalTokens(attemptStream);
+        }
+        responseTotalTokens = attemptResponseTotalTokens;
 
         break;
       } catch (err) {
@@ -3014,10 +3019,6 @@ export class AgentRunner {
       }
     }
 
-    if (responseTotalTokens == null && successfulStream) {
-      responseTotalTokens = await readStreamTotalTokens(successfulStream);
-    }
-
     const recognizedCalls = toolCallsFromParts();
       const executions: Array<{ id: string; callPartId: string; originSessionId: string; originRunId: string; status: "queued" }> = [];
       for (const call of recognizedCalls) {
@@ -3042,7 +3043,8 @@ export class AgentRunner {
 
       const completeRequest = {
         workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
-        messageId: assistantMessageId, executions, updatedAt: this.nowMsFn()
+        messageId: assistantMessageId, executions,
+        responseTotalTokens, updatedAt: this.nowMsFn()
       };
       await this.retryControlWrite("complete assistant", signal, async () =>
         await this.apiClient.completeAssistant(completeRequest)

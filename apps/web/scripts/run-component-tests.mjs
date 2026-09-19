@@ -6,11 +6,12 @@ const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const domBootstrap = resolve(webRoot, "scripts/component-test-dom.mjs");
 const tests = [
   "src/features/workspace/tools/agent/agentArtifactCards.component.test.ts",
+  "src/features/workspace/tools/agent/AgentClientPane.component.test.ts",
   "src/features/workspace/tools/agent/AgentMessageActions.component.test.ts",
 ];
 
 for (const test of tests) {
-  execFileSync("npx", ["vite-node", "--config", "vite.component-test.config.ts", "--script", test], {
+  execFileSync("npx", ["vite-node", "--config", "vite.component-test.config.ts", test], {
     cwd: webRoot,
     stdio: "inherit",
     env: {

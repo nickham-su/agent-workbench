@@ -5,7 +5,7 @@ import type { Db } from "./db.js";
  *
  * 该版本是破坏性升级：旧 ContextItem 数据不会迁移，也不能和此版本共存。
  */
-export const AGENT_SCHEMA_VERSION = 20;
+export const AGENT_SCHEMA_VERSION = 21;
 
 export type AgentSchemaInitResult = {
   /** 旧 Agent 数据已被清理，仍需要由 openDb 清理对应的文件系统数据。 */
@@ -401,13 +401,14 @@ const TARGET_AGENT_TABLE_COLUMNS: Record<string, readonly string[]> = {
   agent_message_part: ["id", "message_id", "position", "type", "text", "attachment_id", "media_type", "filename", "tool_name", "tool_input_json", "provider_tool_call_id", "updated_revision", "created_at", "updated_at", "provider_replay_json"],
   agent_tool_execution: ["id", "call_part_id", "origin_session_id", "origin_run_id", "status", "result_preview", "result_truncated", "result_artifact_path", "structured_result_json", "error", "updated_revision", "created_at", "updated_at", "started_at", "completed_at"],
   agent_client_request: ["workspace_id", "session_id", "client_request_id", "message_id", "run_id", "created_at"],
-  session_run_state: ["workspace_id", "session_id", "status", "active_run_id", "run_notice_text", "retry_count", "next_retry_at", "active_assistant_message_id", "non_terminal_message_ids_json", "non_terminal_tool_execution_ids_json", "updated_at"],
+  session_run_state: ["workspace_id", "session_id", "status", "active_run_id", "run_notice_text", "retry_count", "next_retry_at", "active_assistant_message_id", "non_terminal_message_ids_json", "non_terminal_tool_execution_ids_json", "updated_at", "last_response_total_tokens"],
   agent_text_part_fts_map: ["part_id", "fts_rowid", "created_at"],
   agent_archived_text_fts: ["text", "message_depth", "part_position"]
 };
 
 const PRE_RUN_KIND_AGENT_RUN_COLUMNS = ["run_id", "workspace_id", "session_id", "trigger_message_id", "agent_id", "provider_id", "model_id", "subtask_depth", "parent_run_id", "parent_tool_execution_id", "status", "created_at", "updated_at"] as const;
 const PRE_PROVIDER_REPLAY_AGENT_MESSAGE_PART_COLUMNS = TARGET_AGENT_TABLE_COLUMNS.agent_message_part.filter((column) => column !== "provider_replay_json");
+const PRE_RUN_TOKEN_SESSION_STATE_COLUMNS = TARGET_AGENT_TABLE_COLUMNS.session_run_state.filter((column) => column !== "last_response_total_tokens");
 
 type AgentSchemaClassification = "clean" | "legacy-unversioned" | "current" | "upgradeable" | "unsupported";
 
@@ -526,13 +527,18 @@ function classifyAgentSchema(db: Db): AgentSchemaClassification {
           ? hasExactColumns(db, table, PRE_PROVIDER_REPLAY_AGENT_MESSAGE_PART_COLUMNS)
           : hasExactColumns(db, table, TARGET_AGENT_TABLE_COLUMNS[table]!);
       }
+      if (table === "session_run_state") {
+        return version === 18 || version === 19 || version === 20
+          ? hasExactColumns(db, table, PRE_RUN_TOKEN_SESSION_STATE_COLUMNS)
+          : hasExactColumns(db, table, TARGET_AGENT_TABLE_COLUMNS[table]!);
+      }
       return hasExactColumns(db, table, TARGET_AGENT_TABLE_COLUMNS[table]!);
     });
     if (!expectedColumns) return "unsupported";
     const fts = objects.find((object) => object.name === "agent_archived_text_fts");
     if (!hasCurrentSchemaSemantics(db, fts?.sql ?? null)) return "unsupported";
     if (version === AGENT_SCHEMA_VERSION) return "current";
-    if (version === 18 || version === 19) return "upgradeable";
+    if (version === 18 || version === 19 || version === 20) return "upgradeable";
     return "unsupported";
   }
 
@@ -754,6 +760,7 @@ function createAgentSchema(db: Db, fileCleanupPending: boolean) {
       non_terminal_message_ids_json text not null default '[]',
       non_terminal_tool_execution_ids_json text not null default '[]',
       updated_at integer not null,
+      last_response_total_tokens integer check (last_response_total_tokens is null or last_response_total_tokens >= 0),
       primary key (workspace_id, session_id),
       foreign key (session_id) references agent_session(id) on delete cascade,
       foreign key (active_run_id) references agent_run(run_id) on delete set null,
@@ -884,6 +891,15 @@ export function initSchema(db: Db): AgentSchemaInitResult {
           table: "agent_message_part",
           column: "provider_replay_json",
           ddl: "provider_replay_json text",
+        });
+        db.prepare("update agent_schema_meta set version = 20, updated_at = ? where id = 1").run(Date.now());
+      }
+      const withProviderReplay = db.prepare("select version from agent_schema_meta where id = 1").get() as { version: number };
+      if (withProviderReplay.version === 20) {
+        ensureColumn(db, {
+          table: "session_run_state",
+          column: "last_response_total_tokens",
+          ddl: "last_response_total_tokens integer check (last_response_total_tokens is null or last_response_total_tokens >= 0)",
         });
         db.prepare("update agent_schema_meta set version = ?, updated_at = ? where id = 1").run(AGENT_SCHEMA_VERSION, Date.now());
       }

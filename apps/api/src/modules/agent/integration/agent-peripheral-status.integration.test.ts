@@ -53,6 +53,8 @@ async function getRunState(app: FastifyInstance, workspaceId: string, sessionId:
     status: "idle" | "running";
     activeRunId: string | null;
     runNoticeText: string;
+    lastResponseTotalTokens?: number | null;
+    contextTokenRatio?: number | null;
     activeAssistantMessageId: string | null;
     nonTerminalMessageIds: string[];
     nonTerminalToolExecutionIds: string[];
@@ -324,6 +326,102 @@ test("run-state 返回最近一次终态 run 结果", async (t: TestContext) => 
   const runState = await getRunState(fixture.app, fixture.workspaceId, session.id);
   assert.equal(runState.status, "idle");
   assert.equal(getRunRecord(fixture.db, runId)?.status, "completed");
+});
+
+test("run-state 与 timeline snapshot 按实际 Run 模型投影 Token 比例，解析失败时降级为 null", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const runId = newSortableId("run");
+  createMessageRunFixture({ fixture, sessionId: session.id, runId, createdAt: Date.now() });
+  fixture.db.prepare("update session_run_state set last_response_total_tokens = 32000 where workspace_id = ? and session_id = ?")
+    .run(fixture.workspaceId, session.id);
+
+  const state = await getRunState(fixture.app, fixture.workspaceId, session.id);
+  assert.equal(state.lastResponseTotalTokens, 32000);
+  assert.equal(state.contextTokenRatio, 0.25);
+
+  const snapshotResponse = await getMessageTimelineSnapshot(fixture.app, fixture.internalToken, fixture.workspaceId, session.id);
+  assert.equal(snapshotResponse.statusCode, 200, snapshotResponse.body);
+  const snapshot = snapshotResponse.json() as { runState: { contextTokenRatio?: number | null } };
+  assert.equal(snapshot.runState.contextTokenRatio, 0.25);
+
+  fixture.db.prepare("update agent_run set provider_id = 'missing-provider', model_id = 'missing-model' where run_id = ?").run(runId);
+  const unresolvedState = await getRunState(fixture.app, fixture.workspaceId, session.id);
+  assert.equal(unresolvedState.lastResponseTotalTokens, 32000);
+  assert.equal(unresolvedState.contextTokenRatio, null);
+
+  const unresolvedSnapshotResponse = await getMessageTimelineSnapshot(fixture.app, fixture.internalToken, fixture.workspaceId, session.id);
+  assert.equal(unresolvedSnapshotResponse.statusCode, 200, unresolvedSnapshotResponse.body);
+  const unresolvedSnapshot = unresolvedSnapshotResponse.json() as { runState: { contextTokenRatio?: number | null } };
+  assert.equal(unresolvedSnapshot.runState.contextTokenRatio, null);
+});
+
+test("run-state 与 timeline snapshot 在 idle 时使用最新 terminal Run，active Run 存在时优先使用 active 模型", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const providersResponse = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: {
+      default: { providerId: "ppchat", modelId: "gpt-5.2" },
+      providers: [{
+        id: "ppchat",
+        name: "ppchat",
+        npm: "@ai-sdk/openai",
+        options: { baseURL: "https://code.ppchat.vip/v1", apiKey: "sk-test" },
+        models: [
+          { id: "gpt-5.2", name: "gpt-5.2", contextWindowTokens: 128000 },
+          { id: "terminal-old", name: "terminal-old", contextWindowTokens: 64000 },
+          { id: "terminal-new", name: "terminal-new", contextWindowTokens: 128000 },
+          { id: "active-model", name: "active-model", contextWindowTokens: 32000 },
+        ],
+      }],
+    },
+  });
+  assert.equal(providersResponse.statusCode, 200, providersResponse.body);
+
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const completeRun = async (runId: string, modelId: string, createdAt: number, updatedAt: number) => {
+    createMessageRunFixture({ fixture, sessionId: session.id, runId, providerId: "ppchat", modelId, createdAt });
+    const response = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/run-complete",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId, status: "completed" },
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    fixture.db.prepare("update agent_run set updated_at = ? where run_id = ?").run(updatedAt, runId);
+  };
+
+  const base = Date.now() - 10_000;
+  await completeRun(newSortableId("run"), "terminal-old", base, base + 100);
+  await completeRun(newSortableId("run"), "terminal-new", base + 200, base + 400);
+  fixture.db.prepare("update session_run_state set last_response_total_tokens = 16000 where workspace_id = ? and session_id = ?")
+    .run(fixture.workspaceId, session.id);
+
+  const idleState = await getRunState(fixture.app, fixture.workspaceId, session.id);
+  assert.equal(idleState.status, "idle");
+  assert.equal(idleState.activeRunId, null);
+  assert.equal(idleState.contextTokenRatio, 0.125);
+  const idleSnapshotResponse = await getMessageTimelineSnapshot(fixture.app, fixture.internalToken, fixture.workspaceId, session.id);
+  assert.equal(idleSnapshotResponse.statusCode, 200, idleSnapshotResponse.body);
+  assert.equal((idleSnapshotResponse.json() as { runState: { contextTokenRatio: number | null } }).runState.contextTokenRatio, 0.125);
+
+  const activeRunId = newSortableId("run");
+  createMessageRunFixture({
+    fixture,
+    sessionId: session.id,
+    runId: activeRunId,
+    providerId: "ppchat",
+    modelId: "active-model",
+    createdAt: base + 600,
+  });
+  const activeState = await getRunState(fixture.app, fixture.workspaceId, session.id);
+  assert.equal(activeState.status, "running");
+  assert.equal(activeState.activeRunId, activeRunId);
+  assert.equal(activeState.contextTokenRatio, 0.5);
+  const activeSnapshotResponse = await getMessageTimelineSnapshot(fixture.app, fixture.internalToken, fixture.workspaceId, session.id);
+  assert.equal(activeSnapshotResponse.statusCode, 200, activeSnapshotResponse.body);
+  assert.equal((activeSnapshotResponse.json() as { runState: { contextTokenRatio: number | null } }).runState.contextTokenRatio, 0.5);
 });
 
 test("run-state 不应把旧 terminal run 误认为当前这次 idle 的终态", async (t: TestContext) => {
