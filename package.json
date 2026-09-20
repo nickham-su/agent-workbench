@@ -11,7 +11,9 @@
     "dev:api": "npm run build -w packages/shared && npm run dev -w apps/api",
     "dev:web": "npm run dev -w apps/web",
     "build": "npm run build -w packages/shared && npm run build -w apps/agent-worker && npm run build -w apps/api && npm run build -w plugins/feishu && cross-env NODE_OPTIONS=--max-old-space-size=4096 npm run build -w apps/web",
-    "typecheck": "npm run build -w packages/shared && npm run typecheck -w apps/agent-worker && npm run typecheck -w apps/api && npm run typecheck -w plugins/feishu && npm run typecheck -w apps/web"
+    "typecheck": "npm run build -w packages/shared && npm run typecheck -w apps/agent-worker && npm run typecheck -w apps/api && npm run typecheck -w plugins/feishu && npm run typecheck -w apps/web",
+    "test": "npm run build -w packages/shared && npm run test:parallel",
+    "test:parallel": "concurrently --max-processes 2 --kill-others-on-fail --timings -n api,worker,web,shared,feishu -c green,blue,magenta,cyan,yellow \"npm test -w apps/api\" \"npm test -w apps/agent-worker\" \"npm test -w apps/web\" \"npm test -w packages/shared\" \"npm test -w plugins/feishu\""
   },
   "devDependencies": {
     "concurrently": "^9.0.0",

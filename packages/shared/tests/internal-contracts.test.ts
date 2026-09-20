@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Value } from "@sinclair/typebox/value";
-import * as AgentApiExport from "@agent-workbench/shared/internal-contracts/agent-api";
+import * as AgentApiExport from "../src/internal-contracts/agent-api.js";
 import {
   AgentWorkerCancelSessionAndWaitRequestSchema,
   AgentWorkerCancelSessionAndWaitResponseSchema,

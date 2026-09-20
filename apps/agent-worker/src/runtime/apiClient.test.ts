@@ -84,7 +84,7 @@ function createTestRpcTiming(
   overrides: Partial<TestRpcTiming> = {},
 ): TestRpcTiming {
   return {
-    internalRpcTimeoutMs: overrides.internalRpcTimeoutMs ?? 20,
+    internalRpcTimeoutMs: overrides.internalRpcTimeoutMs ?? 100,
     retryDelayMs: overrides.retryDelayMs ?? 1,
   };
 }
