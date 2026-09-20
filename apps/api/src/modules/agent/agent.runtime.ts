@@ -118,29 +118,31 @@ export class AgentRuntime implements AgentRuntimePort {
         parts: [{ id: newSortableId("part"), position: 0, type: "text", text }],
         updatedAt: nowMs()
       });
-      this.execution.completeAssistantFromWorker({
+      const completionCode = run.runKind === "subtask" ? "subtask_completed" : "run_completed";
+      this.execution.completeTerminalAssistantFromWorker({
         workspaceId: run.workspaceId,
         sessionId: run.sessionId,
         runId: run.runId,
         messageId: assistantMessageId,
-        executions: [],
+        responseTotalTokens: null,
+        intent: { status: "completed", code: completionCode, detail: null },
         updatedAt: nowMs()
       });
-      this.execution.completeRunFromWorker({
-        workspaceId: run.workspaceId,
-        sessionId: run.sessionId,
-        runId: run.runId,
-        status: "completed",
-        updatedAt: nowMs()
-      });
+      this.execution.convergeRunTerminalFromWorker({ workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, updatedAt: nowMs() });
     } catch {
-      this.execution.completeRunFromWorker({
+      const failedCode = run.runKind === "manual_compaction"
+        ? "compaction_failed"
+        : run.runKind === "subtask"
+          ? "subtask_failed"
+          : "run_failed";
+      this.execution.persistRunTerminalIntentFromWorker({
         workspaceId: run.workspaceId,
         sessionId: run.sessionId,
         runId: run.runId,
-        status: "failed",
+        status: "failed", code: failedCode, detail: null,
         updatedAt: nowMs()
       });
+      this.execution.convergeRunTerminalFromWorker({ workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, updatedAt: nowMs() });
     }
   }
 }

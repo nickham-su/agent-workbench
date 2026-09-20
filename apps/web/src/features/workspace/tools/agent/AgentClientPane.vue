@@ -503,6 +503,10 @@ import {
 } from "./agentSessionModelPresentation";
 import { createAgentTimelineRefreshScheduler } from "./agentTimelineRefreshScheduler";
 import { createAgentToolDetailCache } from "./agentToolDetailCache";
+import { createAgentPendingRunRegistry } from "./agentPendingRunRegistry";
+import { createAgentPendingRunController } from "./agentPendingRunController";
+import { registerPendingAgentRun } from "./agentPendingRunRegistration";
+import { agentRunTerminalMessageKey, isSilentAgentRunTerminal } from "./agentRunTerminalPresentation";
 import { formatElapsedDuration } from "./subtaskRunDisplay";
 import { useAgentSessionStatusStore } from "./useAgentSessionStatusStore";
 import {
@@ -516,6 +520,7 @@ import {
   getAgentAttachmentContent,
   getAgentGlobalPromptSettings,
   getAgentProvidersSettings,
+  getAgentRunStatus,
   getAgentTimeline,
   getAgentToolExecutionDetail,
   listWorkspaceTopLevelSkills,
@@ -657,6 +662,27 @@ const detailLoadingScopeByExecutionId = new Map<string, AgentRequestScope>();
 let timelineRefreshScheduler = createAgentTimelineRefreshScheduler();
 const detailCache = createAgentToolDetailCache();
 const messageMutationState = createAgentMessageMutationState();
+const pendingRunRegistry = createAgentPendingRunRegistry(
+  typeof window === "undefined" ? null : window.sessionStorage,
+);
+const pendingRunController = createAgentPendingRunController({
+  registry: pendingRunRegistry,
+  fetchRun: ({ workspaceId, sessionId, runId }) => getAgentRunStatus({ workspaceId, sessionId, runId }),
+  onTerminal: (run) => {
+    if (!isSilentAgentRunTerminal(run)) {
+      const text = t(agentRunTerminalMessageKey(run.code));
+      if (run.status === "completed") message.success(text);
+      else if (run.status === "cancelled") message.warning(text);
+      else message.error(text);
+    }
+    if (!disposed && props.active && props.sessionReady) void refreshStructuralTimeline().catch(() => undefined);
+  },
+  onStale: () => {
+    if (!disposed && props.active && props.sessionReady) {
+      message.warning(t("agent.runTerminal.run_status_unavailable"));
+    }
+  },
+});
 let previousRunStatus = runState.value.status;
 const isSessionMessageMutationPending = computed(() => messageMutationState.isPending(props.sessionId));
 const conversation = computed(() =>
@@ -829,6 +855,7 @@ async function refreshTimeline(forceFull: boolean) {
   const mode = forceFull || revision.value === 0 ? "snapshot" : "delta";
   if (!disposed) await timelineRefreshScheduler.request(mode, loadTimeline);
 }
+
 async function refreshStructuralTimeline() {
   if (!disposed) await timelineRefreshScheduler.requestStructuralSnapshot(loadTimeline);
 }
@@ -1219,7 +1246,7 @@ async function onSend() {
         makeClientRequestId: createAgentClientRequestId,
       });
       pendingCompactAttempt.value = attempt;
-      await compactAgentSession(ensuredId, {
+      const result = await compactAgentSession(ensuredId, {
         workspaceId: props.workspaceId,
         clientRequestId: attempt.clientRequestId,
         agentId: effectiveAgentId.value || undefined,
@@ -1227,6 +1254,8 @@ async function onSend() {
       });
       draft.value = "";
       pendingCompactAttempt.value = null;
+      registerPendingAgentRun(pendingRunController, { workspaceId: props.workspaceId, sessionId: ensuredId, runKind: "manual_compaction", runId: result.runId });
+      void pendingRunController.pollNow();
     } else {
       const sendText = action.text;
       const fingerprint = createAgentSendAttemptFingerprint({
@@ -1246,13 +1275,12 @@ async function onSend() {
         uiLocale: getInitialLocale(),
         ...(sendText ? { text: sendText } : {}),
       };
-      if (pendingImages.value.length)
-        await sendAgentMessageMultipart(
+      const result = pendingImages.value.length
+        ? await sendAgentMessageMultipart(
           ensuredId,
           createAgentMessageFormData(payload, pendingImages.value),
-        );
-      else
-        await sendAgentMessage(
+        )
+        : await sendAgentMessage(
           ensuredId,
           payload as {
             workspaceId: string;
@@ -1262,6 +1290,8 @@ async function onSend() {
             text: string;
           },
         );
+      registerPendingAgentRun(pendingRunController, { workspaceId: props.workspaceId, sessionId: ensuredId, runKind: "user", runId: result.runId });
+      void pendingRunController.pollNow();
       draft.value = "";
       pendingImages.value = [];
       pendingAttempt.value = null;
@@ -1621,6 +1651,7 @@ watch(
       timelineRefreshScheduler = createAgentTimelineRefreshScheduler();
       loadingPreviousPageScope = null;
       timelineRequestSequence = 0;
+      pendingRunController.stop();
       pendingCompactAttempt.value = null;
       messageMutationState.clear();
       distanceToBottom.value = 0;
@@ -1629,7 +1660,11 @@ watch(
     if (active && ready) {
       void refreshTimeline(true).catch(() => undefined);
       void refreshPromptItems();
-    } else clearRefreshTimer();
+      pendingRunController.start({ workspaceId, sessionId });
+    } else {
+      clearRefreshTimer();
+      pendingRunController.stop();
+    }
   },
   { immediate: true },
 );
@@ -1701,6 +1736,7 @@ watch(
 onBeforeUnmount(() => {
   disposed = true;
   clearRefreshTimer();
+  pendingRunController.stop();
   if (elapsedTimer !== null) window.clearInterval(elapsedTimer);
   if (mentionTimer !== null) window.clearTimeout(mentionTimer);
   previewCache.clear();

@@ -88,7 +88,9 @@ test("P2 structure: local fallback execution port has no Subtask or nested-runti
     "completeAssistantFromWorker",
     "updateToolExecutionFromWorker",
     "updateRunNoticeFromWorker",
-    "completeRunFromWorker",
+    "markRunWorkInProgressFromWorker",
+    "persistRunTerminalIntentFromWorker",
+    "convergeRunTerminalFromWorker",
     "getSession",
   ] satisfies Array<keyof LocalAgentRuntimeExecutionPort>;
 
@@ -99,7 +101,9 @@ test("P2 structure: local fallback execution port has no Subtask or nested-runti
     "completeAssistantFromWorker",
     "updateToolExecutionFromWorker",
     "updateRunNoticeFromWorker",
-    "completeRunFromWorker",
+    "markRunWorkInProgressFromWorker",
+    "persistRunTerminalIntentFromWorker",
+    "convergeRunTerminalFromWorker",
     "getSession",
   ]);
 });

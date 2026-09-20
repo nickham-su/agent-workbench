@@ -92,9 +92,9 @@ export function agentUserMessageDraftText(message: AgentMessage) {
     .join("");
 }
 
-/** 压缩前历史仅供浏览，不能触发受当前模型上下文边界保护的结构操作。 */
+/** root 之前的历史仅供浏览，不能触发当前结构操作区间之外的操作。 */
 export function canMutateAgentTimelineMessage(message: AgentMessage) {
-  return message.inActiveContext !== false && (
+  return message.inCurrentOperationRange === true && (
     message.type === "user" || (message.type === "assistant" && hasAgentMessageTextPart(message))
   );
 }

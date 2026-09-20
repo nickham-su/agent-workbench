@@ -2,11 +2,13 @@ import { Type, type Static } from "@sinclair/typebox";
 import {
   AgentContextToolNameSchema,
   AgentImageMediaTypeSchema,
+  AgentRunKindSchema,
   AgentUiLocaleSchema
 } from "../contracts/agent.js";
 import {
   AgentProviderNpmSchema
 } from "../contracts/settings.js";
+import { AgentMessageSchema } from "../contracts/agent-message.js";
 import { PluginToolCanonicalNameSchema } from "../contracts/plugin.js";
 import { AgentProviderReplayEnvelopeSchema } from "./agent-provider-replay.js";
 
@@ -113,6 +115,76 @@ export type AgentApiExecutionProfileResponse = Static<typeof AgentApiExecutionPr
 
 export const AgentApiPromptContextRequestSchema = Type.Object(AgentApiReadRunRequestFields);
 export type AgentApiPromptContextRequest = Static<typeof AgentApiPromptContextRequestSchema>;
+
+/** Provider-neutral, single-snapshot logical source for compaction work. */
+export const AGENT_API_COMPACTION_SOURCE_REQUEST_KEYS = ["workspaceId", "sessionId", "runId"] as const;
+export const AgentApiCompactionSourceRequestSchema = Type.Object(AgentApiReadRunRequestFields, { additionalProperties: false });
+export type AgentApiCompactionSourceRequest = Static<typeof AgentApiCompactionSourceRequestSchema>;
+
+/** Compaction source never exposes artifact paths or unbounded structured tool results. */
+const AgentApiContextToolExecutionSchema = Type.Object({
+  id: Type.String({ minLength: 1 }),
+  callPartId: Type.String({ minLength: 1 }),
+  status: Type.Union([
+    Type.Literal("completed"), Type.Literal("failed"), Type.Literal("cancelled"), Type.Literal("unknown"),
+  ]),
+  resultPreview: Type.Union([Type.String(), Type.Null()]),
+  error: Type.Union([Type.String(), Type.Null()]),
+  startedAt: Type.Union([Type.Number(), Type.Null()]),
+  completedAt: Type.Union([Type.Number(), Type.Null()]),
+}, { additionalProperties: false });
+
+const AgentApiResolvedContextBlockSchema = Type.Object({
+  sourceMessageId: Type.String({ minLength: 1 }),
+  physical: Type.Object({
+    previousMessageId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+    depth: Type.Integer({ minimum: 0 }),
+    originSessionId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+    originRunId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+    updatedRevision: Type.Integer({ minimum: 0 }),
+  }, { additionalProperties: false }),
+  message: AgentMessageSchema,
+  toolExecutions: Type.Array(AgentApiContextToolExecutionSchema),
+  attachments: Type.Array(Type.Object({
+    partId: Type.String({ minLength: 1 }),
+    attachmentId: Type.String({ minLength: 1 }),
+    mediaType: AgentImageMediaTypeSchema,
+    filename: Type.String({ minLength: 1 }),
+  }, { additionalProperties: false })),
+  providerReplay: Type.Array(Type.Object({
+    partId: Type.String({ minLength: 1 }),
+    envelope: AgentProviderReplayEnvelopeSchema,
+  }, { additionalProperties: false })),
+}, { additionalProperties: false });
+
+const AgentApiCompactionPendingBoundarySchema = Type.Union([
+  Type.Null(),
+  Type.Object({
+    reason: Type.Literal("pending_tool_execution"),
+    assistantMessageId: Type.String({ minLength: 1 }),
+    toolExecutionIds: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
+  }, { additionalProperties: false }),
+]);
+
+export const AgentApiCompactionSourceResponseSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
+  sessionId: Type.String({ minLength: 1 }),
+  runId: Type.String({ minLength: 1 }),
+  runKind: AgentRunKindSchema,
+  triggerMessageId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+  agentId: Type.String({ minLength: 1 }),
+  providerId: Type.String({ minLength: 1 }),
+  modelId: Type.String({ minLength: 1 }),
+  subtaskDepth: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]),
+  headMessageId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+  contextRootMessageId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+  sessionRevision: Type.Integer({ minimum: 0 }),
+  uiLocale: Type.Null(),
+  oneShotSystem: Type.String(),
+  blocks: Type.Array(AgentApiResolvedContextBlockSchema),
+  pendingBoundary: AgentApiCompactionPendingBoundarySchema,
+}, { additionalProperties: false });
+export type AgentApiCompactionSourceResponse = Static<typeof AgentApiCompactionSourceResponseSchema>;
 
 const AgentApiPromptTextPartSchema = Type.Object({
   type: Type.Literal("text"),

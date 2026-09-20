@@ -95,6 +95,10 @@ export class AgentService {
     return this.capabilities.query.getMessageRunState(...args);
   }
 
+  getRunStatus(...args: Parameters<AgentServiceCapabilities["query"]["getRunStatus"]>): ReturnType<AgentServiceCapabilities["query"]["getRunStatus"]> {
+    return this.capabilities.query.getRunStatus(...args);
+  }
+
   getApplyPatchUiArtifact(...args: Parameters<AgentServiceCapabilities["query"]["getApplyPatchUiArtifact"]>): ReturnType<AgentServiceCapabilities["query"]["getApplyPatchUiArtifact"]> {
     return this.capabilities.query.getApplyPatchUiArtifact(...args);
   }
@@ -117,6 +121,10 @@ export class AgentService {
 
   recoverRunsOnStartup(...args: Parameters<AgentServiceCapabilities["lifecycle"]["recoverRunsOnStartup"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["recoverRunsOnStartup"]> {
     return this.capabilities.lifecycle.recoverRunsOnStartup(...args);
+  }
+
+  settleWorkspaceRunsForDeletion(...args: Parameters<AgentServiceCapabilities["lifecycle"]["settleWorkspaceRunsForDeletion"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["settleWorkspaceRunsForDeletion"]> {
+    return this.capabilities.lifecycle.settleWorkspaceRunsForDeletion(...args);
   }
 
   createStreamingAssistantFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["createStreamingAssistantFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["createStreamingAssistantFromWorker"]> {
@@ -143,6 +151,10 @@ export class AgentService {
     return this.capabilities.lifecycle.completeAssistantFromWorker(...args);
   }
 
+  completeTerminalAssistantFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["completeTerminalAssistantFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["completeTerminalAssistantFromWorker"]> {
+    return this.capabilities.lifecycle.completeTerminalAssistantFromWorker(...args);
+  }
+
   archiveReadFromWorker(...args: Parameters<AgentServiceCapabilities["worker"]["archiveReadFromWorker"]>): ReturnType<AgentServiceCapabilities["worker"]["archiveReadFromWorker"]> {
     return this.capabilities.worker.archiveReadFromWorker(...args);
   }
@@ -159,8 +171,16 @@ export class AgentService {
     return this.capabilities.lifecycle.updateRunNoticeFromWorker(...args);
   }
 
-  completeRunFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["completeRunFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["completeRunFromWorker"]> {
-    return this.capabilities.lifecycle.completeRunFromWorker(...args);
+  markRunWorkInProgressFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["markRunWorkInProgressFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["markRunWorkInProgressFromWorker"]> {
+    return this.capabilities.lifecycle.markRunWorkInProgressFromWorker(...args);
+  }
+
+  persistRunTerminalIntentFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["persistRunTerminalIntentFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["persistRunTerminalIntentFromWorker"]> {
+    return this.capabilities.lifecycle.persistRunTerminalIntentFromWorker(...args);
+  }
+
+  convergeRunTerminalFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["convergeRunTerminalFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["convergeRunTerminalFromWorker"]> {
+    return this.capabilities.lifecycle.convergeRunTerminalFromWorker(...args);
   }
 
   getSubtaskPreforkPlanFromWorker(...args: Parameters<AgentServiceCapabilities["worker"]["getSubtaskPreforkPlanFromWorker"]>): ReturnType<AgentServiceCapabilities["worker"]["getSubtaskPreforkPlanFromWorker"]> {
@@ -199,8 +219,12 @@ export class AgentService {
     return this.capabilities.worker.getPluginRuntimeSnapshotsFromWorker(...args);
   }
 
-  commitCompactionFromWorker(...args: Parameters<AgentServiceCapabilities["worker"]["commitCompactionFromWorker"]>): ReturnType<AgentServiceCapabilities["worker"]["commitCompactionFromWorker"]> {
-    return this.capabilities.worker.commitCompactionFromWorker(...args);
+  commitCompactionWithTerminalIntentFromWorker(...args: Parameters<AgentServiceCapabilities["worker"]["commitCompactionWithTerminalIntentFromWorker"]>): ReturnType<AgentServiceCapabilities["worker"]["commitCompactionWithTerminalIntentFromWorker"]> {
+    return this.capabilities.worker.commitCompactionWithTerminalIntentFromWorker(...args);
+  }
+
+  confirmCompactionCommitFromWorker(...args: Parameters<AgentServiceCapabilities["worker"]["confirmCompactionCommitFromWorker"]>): ReturnType<AgentServiceCapabilities["worker"]["confirmCompactionCommitFromWorker"]> {
+    return this.capabilities.worker.confirmCompactionCommitFromWorker(...args);
   }
 
   getMessagesContext(...args: Parameters<AgentServiceCapabilities["worker"]["getMessagesContext"]>): ReturnType<AgentServiceCapabilities["worker"]["getMessagesContext"]> {
@@ -209,6 +233,10 @@ export class AgentService {
 
   getPromptContextForRun(...args: Parameters<AgentServiceCapabilities["worker"]["getPromptContextForRun"]>): ReturnType<AgentServiceCapabilities["worker"]["getPromptContextForRun"]> {
     return this.capabilities.worker.getPromptContextForRun(...args);
+  }
+
+  getCompactionSourceFromWorker(...args: Parameters<AgentServiceCapabilities["worker"]["getCompactionSourceFromWorker"]>): ReturnType<AgentServiceCapabilities["worker"]["getCompactionSourceFromWorker"]> {
+    return this.capabilities.worker.getCompactionSourceFromWorker(...args);
   }
 
   checkChannelSenderAllowlist(...args: Parameters<AgentServiceCapabilities["worker"]["checkChannelSenderAllowlist"]>): ReturnType<AgentServiceCapabilities["worker"]["checkChannelSenderAllowlist"]> {

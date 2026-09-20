@@ -359,7 +359,14 @@ test("M9 fork materialization 后 parent durable cancel 会补偿 Session 且保
         and new.forked_from_session_id = '${parent.parentSession.id}'
       begin
         update agent_run
-        set status = 'cancelled', updated_at = ${Date.now()}
+        set status = 'cancelled',
+            execution_phase = 'terminal',
+            intended_terminal_status = null,
+            intended_terminal_code = null,
+            intended_terminal_detail = null,
+            terminal_result_code = 'run_cancelled',
+            terminal_result_detail = null,
+            updated_at = ${Date.now()}
         where workspace_id = '${fixture.workspaceId}' and run_id = '${parent.parentRunId}';
         update session_run_state
         set status = 'idle', active_run_id = null, updated_at = ${Date.now()}

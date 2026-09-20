@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type {
-  AgentMessage,
   AgentMessageSessionRunState,
   AgentMessageTimelineSnapshot,
+  AgentOrdinaryMessage,
   AgentSessionMessageState,
   AgentTimelineDeltaResponse
 } from "@agent-workbench/shared";
@@ -167,7 +167,7 @@ test("AgentService Message Query facades delegate without local rules", async ()
     headMessageId: "message", contextRootMessageId: "message", revision: 3,
     forkedFromSessionId: null, forkedFromMessageId: null, createdAt: 1, updatedAt: 1
   };
-  const message: AgentMessage = {
+  const message: AgentOrdinaryMessage = {
     id: "message", workspaceId: "workspace", previousMessageId: null, replacesMessageId: null,
     depth: 0, type: "user", status: "completed", originSessionId: "session", originRunId: null,
     updatedRevision: 3, createdAt: 1, updatedAt: 1, parts: []

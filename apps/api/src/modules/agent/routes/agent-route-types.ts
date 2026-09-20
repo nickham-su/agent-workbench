@@ -9,7 +9,7 @@ export type AgentPublicRouteDependencies = InternalRouteDependencies & {
   dataDir: string;
   service: Pick<AgentService,
     "listSessions" | "createPrimarySession" | "forkPrimarySession" | "updateSessionTitle" | "getMessageTimeline" | "getMessageDetail" |
-    "getToolExecutionDetail" | "getApplyPatchUiArtifact" | "getWriteUiArtifact" | "getMessageRunState" | "listSessionModelOverrides" |
+    "getToolExecutionDetail" | "getApplyPatchUiArtifact" | "getWriteUiArtifact" | "getMessageRunState" | "getRunStatus" | "listSessionModelOverrides" |
     "setSessionModelOverride" | "resetSessionModelOverride" | "sendMessage" | "compactSession" | "revertSession" |
     "cancelSessionWithRuntime" | "getAttachmentContent">;
   runtime: AgentRuntimePort;
@@ -20,10 +20,11 @@ export type AgentWorkerRouteDependencies = InternalRouteDependencies & {
     "getSubtaskPreforkPlanFromWorker" | "getSubtaskRunResultFromWorker" |
     "getSubtaskRunStatusFromWorker" | "startSubtaskRunFromWorker" | "createStreamingAssistantFromWorker" |
     "flushAssistantPartsFromWorker" | "resumeStreamingAssistantFromWorker" | "replaceStreamingAssistantFromWorker" |
-    "discardStreamingAssistantFromWorker" | "completeAssistantFromWorker" | "updateToolExecutionFromWorker" |
-    "updateRunNoticeFromWorker" | "completeRunFromWorker" | "commitCompactionFromWorker" |
+    "discardStreamingAssistantFromWorker" | "completeAssistantFromWorker" | "completeTerminalAssistantFromWorker" | "updateToolExecutionFromWorker" |
+    "updateRunNoticeFromWorker" | "markRunWorkInProgressFromWorker" |
+    "persistRunTerminalIntentFromWorker" | "convergeRunTerminalFromWorker" | "commitCompactionWithTerminalIntentFromWorker" | "confirmCompactionCommitFromWorker" |
     "archiveReadFromWorker" | "archiveSearchFromWorker" |
-    "getPromptContextForRun" |
+    "getPromptContextForRun" | "getCompactionSourceFromWorker" |
     "getMessagesContext" | "getExecutionProfileForRun" | "getSingleCallModelProfileForRun">;
 };
 

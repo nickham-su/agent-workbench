@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
-import { createMessageRunRecord, getRunRecord, updateRunRecordStatus } from "../agent-message.store.js";
+import { createMessageRunRecord, getRunRecord } from "../agent-message.store.js";
 import {
   appendMessage,
   appendStreamingAssistant,
   completeAssistantWithExecutions,
+  convergeRunTerminal,
   createMessageSession,
   getMessage,
   getMessageRunState,
   getMessageSession,
-  settleMessageRunIfCurrent,
+  persistRunTerminalIntent,
   startMessageRun,
   updateToolExecution
 } from "../agent-message.store.js";
@@ -79,8 +80,13 @@ function runtime() {
 
 function settleRun(fixture: AgentIntegrationFixture, sessionId: string, runId: string) {
   const now = Date.now();
-  updateRunRecordStatus(fixture.db, { runId, status: "completed", updatedAt: now });
-  settleMessageRunIfCurrent(fixture.db, { workspaceId: fixture.workspaceId, sessionId, runId, updatedAt: now });
+  persistRunTerminalIntent(fixture.db, {
+    workspaceId: fixture.workspaceId, sessionId, runId, status: "completed",
+    code: "run_completed", detail: null, updatedAt: now,
+  });
+  convergeRunTerminal(fixture.db, {
+    workspaceId: fixture.workspaceId, sessionId, runId, updatedAt: now,
+  });
 }
 
 test("普通消息的新 Run 以完整 session override pair 写入快照，且覆盖仅影响对应 session", async (t) => {

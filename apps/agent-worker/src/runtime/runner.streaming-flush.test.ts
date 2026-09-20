@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import type { streamText } from "ai";
 import { AI_SDK_REDACTED_HEADER_VALUE } from "@agent-workbench/shared/llm-ai-sdk-call-settings";
@@ -295,6 +298,7 @@ function createRunnerHarness(options?: {
   providerReplayPartFromChunk?: (chunk: unknown) => TestProviderReplayPartUpdate | null;
   providerToolCallReplayFromChunk?: typeof providerToolCallReplayFromTestChunk;
   profile?: ReturnType<typeof baseProfile>;
+  workspacePath?: string;
 }) {
   const flushes: Array<{ messageId: string; parts: Array<Record<string, unknown>> }> = [];
   const completions: Array<Record<string, unknown>> = [];
@@ -343,6 +347,12 @@ function createRunnerHarness(options?: {
       if (result instanceof Error) throw result;
       return result;
     },
+    async completeTerminalAssistant(input: Record<string, unknown>) {
+      completions.push(input);
+      const result = options?.completeResults?.shift() ?? { result: "updated" as const };
+      if (result instanceof Error) throw result;
+      return result;
+    },
     async updateRunNotice(input: Record<string, unknown>) {
       runNoticeUpdates.push(input);
       options?.onRunNotice?.(input);
@@ -350,9 +360,12 @@ function createRunnerHarness(options?: {
       if (result instanceof Error) throw result;
       return result;
     },
-    async completeRun(input: Record<string, unknown>) {
+    async markRunWorkInProgress() { return { result: "updated" as const }; },
+    async persistRunTerminalIntent(input: Record<string, unknown>) {
       terminalCompletions.push(input);
-    }
+      return { result: "updated" as const };
+    },
+    async convergeRunTerminal() { return { kind: "transitioned" as const, finalStatus: "completed" as const }; }
   };
   const runner = new AgentRunner(
     apiClient as any,
@@ -395,6 +408,7 @@ function startRunModelStep(params: {
   providerReplayPartFromChunk?: (chunk: unknown) => TestProviderReplayPartUpdate | null;
   providerToolCallReplayFromChunk?: typeof providerToolCallReplayFromTestChunk;
   profile?: ReturnType<typeof baseProfile>;
+  workspacePath?: string;
 }) {
   const harness = createRunnerHarness({
     stream: params.stream,
@@ -416,7 +430,7 @@ function startRunModelStep(params: {
   const profile = params.profile ?? baseProfile();
   const promise = (harness.runner as any).runModelStep({
     profile: { ...profile, runtime: { ...profile.runtime, modelRequestRetryBackoffMaxMs: params.backoffMaxMs ?? 60_000 } },
-    run: baseRun(),
+    run: { ...baseRun(), ...(params.workspacePath === undefined ? {} : { workspacePath: params.workspacePath }) },
     context: baseContext(),
     step: 1,
     signal: params.signal ?? new AbortController().signal,
@@ -425,6 +439,158 @@ function startRunModelStep(params: {
   });
   return { ...harness, promise };
 }
+
+test("runModelStep: running、completed、failed debug 都记录最终 request 且不泄漏敏感正文", async () => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "awb-assistant-debug-"));
+  const previous = process.env.AWB_AGENT_DEBUG_DUMP;
+  process.env.AWB_AGENT_DEBUG_DUMP = "1";
+  try {
+    const successStream = createControlledStream();
+    const success = startRunModelStep({ stream: successStream, workspacePath });
+    await new Promise((resolve) => setImmediate(resolve));
+    successStream.push({ type: "text-delta", text: "final-materialized-request" });
+    await successStream.finish();
+    await success.promise;
+
+    const failedStream = createControlledStream();
+    const abortController = new AbortController();
+    const failed = startRunModelStep({ stream: failedStream, workspacePath, signal: abortController.signal });
+    await new Promise((resolve) => setImmediate(resolve));
+    // 真实 Provider terminal protocol failure 会写入 failed，然后在既有退避期间取消，避免改变 retry 策略。
+    await failedStream.finish({ terminal: "incomplete" });
+    await new Promise((resolve) => setImmediate(resolve));
+    abortController.abort();
+    await failed.promise;
+
+    const debugDirectory = path.join(workspacePath, ".debug", "agent_message_logs", "assistant");
+    const entries = await fs.readdir(debugDirectory);
+    assert.ok(entries.length >= 2);
+    const contents = await Promise.all(entries.map(async (entry) => await fs.readFile(path.join(debugDirectory, entry), "utf8")));
+    const output = contents.join("\n");
+    assert.match(output, /"status": "completed"/);
+    assert.match(output, /"status": "failed"/);
+    assert.match(output, /"request"/);
+    assert.match(output, /"messages"/);
+    assert.doesNotMatch(output, /ERROR-SENTINEL|token-SENTINEL|encrypted-SENTINEL/);
+  } finally {
+    if (previous === undefined) delete process.env.AWB_AGENT_DEBUG_DUMP;
+    else process.env.AWB_AGENT_DEBUG_DUMP = previous;
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
+});
+
+async function readAssistantDebugFiles(workspacePath: string) {
+  const directory = path.join(workspacePath, ".debug", "agent_message_logs", "assistant");
+  const entries = await fs.readdir(directory);
+  return await Promise.all(entries.map(async (entry) => await fs.readFile(path.join(directory, entry), "utf8")));
+}
+
+test("runModelStep: assistant 收尾失败只记录一次 failed debug，保留最终 request 与安全响应摘要", async () => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "awb-assistant-finalize-debug-"));
+  const previous = process.env.AWB_AGENT_DEBUG_DUMP;
+  process.env.AWB_AGENT_DEBUG_DUMP = "1";
+  try {
+    const stream = createControlledStream();
+    const started = startRunModelStep({ stream, workspacePath, completeResults: [{ result: "ignored" }] });
+    await new Promise((resolve) => setImmediate(resolve));
+    await stream.push({ type: "tool-call", toolName: "read", toolCallId: "call-finalize", input: { token: "TOOL-SENTINEL" } });
+    await stream.finish();
+    await assert.rejects(started.promise, /fenced write ignored: complete assistant/);
+
+    const logs = await readAssistantDebugFiles(workspacePath);
+    assert.equal(logs.length, 1);
+    const log = logs[0]!;
+    assert.match(log, /"status": "failed"/);
+    assert.match(log, /assistant-finalization/);
+    assert.match(log, /"request"/);
+    assert.match(log, /tool-content-not-logged/);
+    assert.doesNotMatch(log, /TOOL-SENTINEL/);
+  } finally {
+    if (previous === undefined) delete process.env.AWB_AGENT_DEBUG_DUMP;
+    else process.env.AWB_AGENT_DEBUG_DUMP = previous;
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
+});
+
+test("runModelStep: repeated tool threshold 收尾失败记录一次 failed debug 且不改变完成调用", async () => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "awb-assistant-threshold-debug-"));
+  const previous = process.env.AWB_AGENT_DEBUG_DUMP;
+  process.env.AWB_AGENT_DEBUG_DUMP = "1";
+  try {
+    const stream = createControlledStream();
+    const repeated = new Map<string, number>();
+    repeated.set("read:" + JSON.stringify({ filePath: "README.md" }), Number.MAX_SAFE_INTEGER);
+    const harness = createRunnerHarness({ stream });
+    (harness.runner as any).toolRegistry.listTools = async () => [{ name: "read", description: "read", inputSchema: { type: "object" }, source: "builtin" }];
+    const promise = (harness.runner as any).runModelStep({
+      profile: baseProfile(),
+      run: { ...baseRun(), workspacePath },
+      context: baseContext(),
+      step: 1,
+      signal: new AbortController().signal,
+      recoveryContinuation: { messageId: null },
+      repeatedToolCallCounter: repeated,
+    });
+    await stream.push({ type: "tool-call", toolName: "read", toolCallId: "repeat-call", input: { filePath: "README.md" } });
+    await stream.finish();
+    await assert.rejects(promise, /repeated tool call threshold exceeded/);
+    assert.equal(harness.completions.length, 0);
+    const logs = await readAssistantDebugFiles(workspacePath);
+    assert.equal(logs.length, 1);
+    assert.match(logs[0]!, /assistant-finalization/);
+  } finally {
+    if (previous === undefined) delete process.env.AWB_AGENT_DEBUG_DUMP;
+    else process.env.AWB_AGENT_DEBUG_DUMP = previous;
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
+});
+
+test("runModelStep: ToolExecution 构造失败不重试且写唯一安全 failed debug", async () => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "awb-tool-execution-build-debug-"));
+  const previous = process.env.AWB_AGENT_DEBUG_DUMP;
+  process.env.AWB_AGENT_DEBUG_DUMP = "1";
+  try {
+    const stream = createControlledStream();
+    const harness = createRunnerHarness({ stream });
+    (harness.runner as any).toolRegistry.listTools = async () => [{ name: "read", description: "read", inputSchema: { type: "object" }, source: "builtin" }];
+    const originalPush = Array.prototype.push;
+    try {
+      Array.prototype.push = function (...items: unknown[]) {
+        if (items.some((item) => item && typeof item === "object" && (item as Record<string, unknown>).originRunId === "run_test" && (item as Record<string, unknown>).status === "queued")) {
+          throw new Error("TOOL_EXECUTION_BUILD_SENTINEL");
+        }
+        return originalPush.apply(this, items);
+      };
+      const promise = (harness.runner as any).runModelStep({
+        profile: baseProfile(),
+        run: { ...baseRun(), workspacePath },
+        context: baseContext(),
+        step: 1,
+        signal: new AbortController().signal,
+        recoveryContinuation: { messageId: null },
+        repeatedToolCallCounter: new Map(),
+      });
+      await stream.push({ type: "tool-call", toolName: "read", toolCallId: "build-call", input: { token: "TOOL-INPUT-SENTINEL" } });
+      await stream.finish();
+      await assert.rejects(promise, /TOOL_EXECUTION_BUILD_SENTINEL/);
+    } finally {
+      Array.prototype.push = originalPush;
+    }
+    assert.equal(harness.streamRequests.length, 1);
+    assert.equal(harness.replacements.length, 0);
+    assert.equal(harness.completions.length, 0);
+    const logs = await readAssistantDebugFiles(workspacePath);
+    assert.equal(logs.length, 1);
+    assert.match(logs[0]!, /"status": "failed"/);
+    assert.match(logs[0]!, /"request"/);
+    assert.match(logs[0]!, /assistant-finalization/);
+    assert.doesNotMatch(logs[0]!, /TOOL_EXECUTION_BUILD_SENTINEL|TOOL-INPUT-SENTINEL/);
+  } finally {
+    if (previous === undefined) delete process.env.AWB_AGENT_DEBUG_DUMP;
+    else process.env.AWB_AGENT_DEBUG_DUMP = previous;
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
+});
 
 test("runModelStep: 共享 aiSdk settings 进入 Agent 主调用请求", async () => {
   const stream = createControlledStream();
@@ -576,7 +742,7 @@ test("runModelStep: discard 响应丢失时使用同一不可变请求重放", a
   assert.deepEqual(started.discardRequests[1], started.discardRequests[0]);
 });
 
-test("processRun: discard 响应丢失重放成功后继续外层 compaction 并完成", async () => {
+test("processRun: discard 响应丢失重放成功后执行 recovery-standard 并完成", { timeout: 3_000 }, async () => {
   const first = createControlledStream();
   const second = createControlledStream();
   let now = 200;
@@ -585,7 +751,6 @@ test("processRun: discard 响应丢失重放成功后继续外层 compaction 并
     nowMs: () => now++,
     promptContexts: [
       { ...baseContext(), headMessageId: "head-before" },
-      { ...baseContext(), headMessageId: "head-after-discard" },
       { ...baseContext(), headMessageId: "head-after-compact" },
     ],
     discardResults: [
@@ -594,10 +759,10 @@ test("processRun: discard 响应丢失重放成功后继续外层 compaction 并
     ],
     controlWriteSleep: async () => true,
   });
-  const compactHeads: Array<string | null> = [];
-  (harness.runner as any).compactContext = async ({ context }: { context: { headMessageId: string | null } }) => {
-    compactHeads.push(context.headMessageId);
-    return true;
+  const compactionModes: string[] = [];
+  (harness.runner as any).executeCompaction = async ({ mode }: { mode: string }) => {
+    compactionModes.push(mode);
+    return { kind: "committed", summaryMessageId: "summary-recovery", plan: {} };
   };
 
   const processing = (harness.runner as any).processRun(baseRun(), new AbortController().signal);
@@ -605,16 +770,27 @@ test("processRun: discard 响应丢失重放成功后继续外层 compaction 并
     type: "error",
     error: Object.assign(new Error("prompt too long"), { statusCode: 400, code: "context_length_exceeded" }),
   }).catch(() => undefined);
-  while (harness.streamRequests.length < 2) await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const secondRequestDeadline = Date.now() + 1_000;
+  while (harness.streamRequests.length < 2 && Date.now() < secondRequestDeadline) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.equal(
+    harness.streamRequests.length,
+    2,
+    "recovery-standard committed 后应重新读取上下文并发起第二次模型请求",
+  );
+
   await second.push({ type: "text-delta", text: "recovered after compaction" });
   await second.finish();
   await processing;
 
   assert.equal(harness.discardRequests.length, 2);
   assert.deepEqual(harness.discardRequests[1], harness.discardRequests[0]);
-  assert.deepEqual(compactHeads, ["head-after-discard"]);
+  assert.deepEqual(compactionModes, ["recovery-standard"]);
   assert.equal(harness.streamRequests.length, 2);
-  assert.deepEqual(harness.terminalCompletions.map((input) => input.status), ["completed"]);
+  assert.equal(harness.completions.length, 1);
+  assert.equal(harness.completions[0]?.intent && (harness.completions[0]?.intent as { status: string }).status, "completed");
 });
 
 test("runModelStep: context-limit 空 attempt 直接 discard 且不退避", async () => {
@@ -640,6 +816,35 @@ test("runModelStep: final flush 失败不会调用 completeAssistant", async () 
 
   await assert.rejects(started.promise, ControlWritePermanentError);
   assert.equal(started.completions.length, 0);
+});
+
+test("runModelStep: final flush 收尾失败写唯一 failed debug，保留最终 request 且原异常不变", async () => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "awb-final-flush-debug-"));
+  const previous = process.env.AWB_AGENT_DEBUG_DUMP;
+  process.env.AWB_AGENT_DEBUG_DUMP = "1";
+  try {
+    const stream = createControlledStream();
+    const started = await startRunModelStep({
+      stream,
+      workspacePath,
+      flushResults: [new InternalRpcHttpError({ method: "POST", endpoint: "/flush", status: 400, apiCode: "BAD_FLUSH" })],
+    });
+    await stream.push({ type: "text-delta", text: "final answer" });
+    await stream.finish();
+
+    await assert.rejects(started.promise, (error: unknown) => error instanceof ControlWritePermanentError && error.operation === "flush assistant parts");
+    assert.equal(started.completions.length, 0);
+    assert.equal(started.replacements.length, 0);
+    const logs = await readAssistantDebugFiles(workspacePath);
+    assert.equal(logs.length, 1);
+    assert.match(logs[0]!, /"status": "failed"/);
+    assert.match(logs[0]!, /assistant-finalization/);
+    assert.match(logs[0]!, /"request"/);
+  } finally {
+    if (previous === undefined) delete process.env.AWB_AGENT_DEBUG_DUMP;
+    else process.env.AWB_AGENT_DEBUG_DUMP = previous;
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
 });
 
 test("runModelStep: complete 失败不会写 completed assistant item log 或返回成功", async () => {
@@ -1185,7 +1390,7 @@ for (const result of ["ignored", "missing"] as const) {
     const started = startRunModelStep({ stream, completeResults: [{ result }] });
     await stream.push({ type: "text-delta", text: "done" });
     await stream.finish();
-    await assert.rejects(started.promise, new RegExp(`fenced write ${result}: complete assistant`));
+    await assert.rejects(started.promise, new RegExp(`fenced write ${result}: complete terminal assistant`));
     assert.equal(started.completions.length, 1);
     assert.equal(started.streamRequests.length, 1);
   });
@@ -1296,10 +1501,10 @@ test("flush 与 complete 的控制面网络异常重试同一请求快照", asyn
         if (flushAttempt === 1) throw new InternalRpcNetworkError({ method: "POST", endpoint: "/flush" });
         return { result: "updated" };
       },
-      async completeAssistant(input: Record<string, unknown>) {
+      async completeTerminalAssistant(input: Record<string, unknown>) {
         completePayloads.push(input);
         completeAttempt += 1;
-        if (completeAttempt === 1) throw new InternalRpcHttpError({ method: "POST", endpoint: "/complete", status: 503 });
+        if (completeAttempt === 1) throw new InternalRpcHttpError({ method: "POST", endpoint: "/complete-terminal", status: 503 });
         return { result: "updated" };
       },
       async updateRunNotice() { return { result: "updated" }; }
@@ -1418,6 +1623,7 @@ for (const mode of ["idle", "total"] as const) {
       async flushAssistantParts() { return { result: "updated" }; },
       async replaceStreamingAssistant() { return { result: "updated", message: {} }; },
       async completeAssistant() { return { result: "updated" }; },
+      async completeTerminalAssistant() { return { result: "updated" }; },
       async updateRunNotice() { return { result: "updated" }; }
     } as any, {} as any, { info() {}, warn() {}, error() {} }, 1, {
       streamText: ((request: { abortSignal: AbortSignal }) => {
@@ -1620,6 +1826,7 @@ test("runModelStep 使用 Profile 的 120s 退避上限并在第六次重试等�
       {
         async createStreamingAssistant() { return { result: "updated" }; },
         async flushAssistantParts() { return { result: "updated" }; },
+        async completeTerminalAssistant() { return { result: "updated" }; },
         async completeAssistant() { return { result: "updated" }; },
         async updateRunNotice(input: Record<string, unknown>) { runNoticeUpdates.push(input); return { result: "updated" }; }
       } as any,
@@ -1673,6 +1880,112 @@ test("runModelStep: OpenAI final-only 密文形成空 reasoning part 并启用�
   const reasoning = finalParts.find((part) => part.type === "reasoning");
   assert.equal(reasoning?.text, "");
   assert.equal(((reasoning?.providerReplay as Record<string, unknown>).item as Record<string, unknown>).encryptedContent, "final-cipher");
+});
+
+test("runModelStep: OpenAI replay-only Assistant 在终态 metadata flush 后完成", async () => {
+  const stream = createControlledStream();
+  const started = startRunModelStep({ stream });
+  await stream.push({
+    type: "reasoning-start",
+    id: "rs-only:0",
+    providerMetadata: { openai: { itemId: "rs-only", reasoningEncryptedContent: "cipher" } },
+  });
+  await stream.push({
+    type: "raw",
+    rawValue: {
+      type: "response.completed",
+      response: { output: [{ type: "reasoning", id: "rs-only", encrypted_content: "cipher" }] },
+    },
+  });
+  await stream.finish();
+  await started.promise;
+
+  const finalParts = started.flushes.at(-1)?.parts as Array<Record<string, unknown>>;
+  assert.ok(started.flushes.length >= 1);
+  assert.equal(finalParts[0]?.type, "reasoning");
+  assert.equal(finalParts[0]?.text, "");
+  assert.equal(((finalParts[0]?.providerReplay as Record<string, unknown>)?.item as Record<string, unknown>)?.encryptedContent, "cipher");
+  assert.equal(started.completions.length, 1);
+});
+
+test("runModelStep: 非 OpenAI 空输出仍被拒绝", async () => {
+  const stream = createControlledStream();
+  const controller = new AbortController();
+  const profile = baseProfile();
+  profile.provider.npm = "@ai-sdk/openai-compatible";
+  const started = startRunModelStep({ stream, profile, signal: controller.signal });
+  await stream.finish();
+  while (started.runNoticeUpdates.length === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+  controller.abort();
+  const result = await started.promise;
+  assert.equal(result.aborted, true);
+  assert.equal(started.completions.length, 0);
+});
+
+test("runModelStep: 仅 OpenAI text identity 不允许 replay-only Assistant", async () => {
+  const stream = createControlledStream();
+  const controller = new AbortController();
+  const started = startRunModelStep({ stream, signal: controller.signal });
+  await stream.push({
+    type: "text-start",
+    id: "msg-empty",
+    providerMetadata: { openai: { itemId: "msg-empty", phase: "final_answer" } },
+  });
+  await stream.push({ type: "raw", rawValue: { type: "response.completed", response: { output: [] } } });
+  await stream.finish();
+  while (started.runNoticeUpdates.length === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+  controller.abort();
+  const result = await started.promise;
+  assert.equal(result.aborted, true);
+  assert.equal(started.completions.length, 0);
+});
+
+test("runModelStep: 未知工具的 function identity 不允许 replay-only Assistant", async () => {
+  const stream = createControlledStream();
+  const controller = new AbortController();
+  const started = startRunModelStep({ stream, signal: controller.signal });
+  await stream.push({
+    type: "tool-call",
+    toolName: "not-available",
+    toolCallId: "call-unknown",
+    input: {},
+    providerMetadata: { openai: { itemId: "fc-unknown" } },
+  } as StreamChunk);
+  await stream.push({ type: "raw", rawValue: { type: "response.completed", response: { output: [] } } });
+  await stream.finish();
+  while (started.runNoticeUpdates.length === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+  controller.abort();
+  const result = await started.promise;
+  assert.equal(result.aborted, true);
+  assert.equal(started.completions.length, 0);
+});
+
+test("runModelStep: replacement 不继承旧 Attempt 的 replay-only 完成权限", async () => {
+  const controller = new AbortController();
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as unknown as { setTimeout: typeof setTimeout }).setTimeout = ((handler: (...args: unknown[]) => void, _ms?: number, ...args: unknown[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const first = createControlledStream();
+    const second = createControlledStream();
+    const started = startRunModelStep({ streams: [first, second], signal: controller.signal });
+    await first.push({
+      type: "reasoning-start",
+      id: "rs-old:0",
+      providerMetadata: { openai: { itemId: "rs-old", reasoningEncryptedContent: "cipher" } },
+    });
+    await first.push({ type: "raw", rawValue: { type: "response.failed", response: {} } });
+    await first.finish();
+    while (started.replacements.length === 0) await new Promise<void>((resolve) => originalSetTimeout(resolve, 0));
+    await second.push({ type: "raw", rawValue: { type: "response.completed", response: { output: [] } } });
+    await second.finish();
+    while (started.runNoticeUpdates.length === 0) await new Promise<void>((resolve) => originalSetTimeout(resolve, 0));
+    controller.abort();
+    const result = await started.promise;
+    assert.equal(result.aborted, true);
+    assert.equal(started.completions.length, 0);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
 });
 
 test("runModelStep: OpenAI 原生流 ID 保留 reasoning、text、function item metadata", async () => {

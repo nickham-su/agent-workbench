@@ -9,6 +9,7 @@ import type { SessionRuntimeHandoffCoordinatorPort } from "./run-lifecycle-ports
 export type WorkspaceRuntimeRegistration = {
   runtime: Pick<AgentRuntimePort, "cancelSessionAndWait">;
   handoffCoordinator: SessionRuntimeHandoffCoordinatorPort;
+  settleWorkspaceRunsForDeletion(workspaceId: string): string[];
 };
 
 let registration: WorkspaceRuntimeRegistration | null = null;

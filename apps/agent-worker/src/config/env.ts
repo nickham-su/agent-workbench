@@ -10,7 +10,6 @@ export type WorkerEnv = {
   responseValidation: "strict" | "warn";
   concurrency: number;
   internalRpcTimeoutMs: number;
-  completeRunTimeoutMs: number;
   pidFilePath: string | null;
 };
 
@@ -53,10 +52,6 @@ export function loadWorkerEnv(processEnv: NodeJS.ProcessEnv): WorkerEnv {
     processEnv.AWB_AGENT_INTERNAL_RPC_TIMEOUT_MS?.trim() || "15000",
     "AWB_AGENT_INTERNAL_RPC_TIMEOUT_MS"
   );
-  const completeRunTimeoutMs = parseStrictPositiveInt(
-    processEnv.AWB_AGENT_COMPLETE_RUN_TIMEOUT_MS?.trim() || "5000",
-    "AWB_AGENT_COMPLETE_RUN_TIMEOUT_MS"
-  );
   const pidFileRaw = (processEnv.AWB_AGENT_WORKER_PID_FILE || "").trim();
 
   return {
@@ -69,7 +64,6 @@ export function loadWorkerEnv(processEnv: NodeJS.ProcessEnv): WorkerEnv {
     responseValidation,
     concurrency,
     internalRpcTimeoutMs,
-    completeRunTimeoutMs,
     pidFilePath: pidFileRaw || null
   };
 }

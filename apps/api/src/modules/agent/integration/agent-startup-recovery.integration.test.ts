@@ -27,8 +27,7 @@ import {
   getMessageRunState,
   getMessageSession,
   getToolExecution,
-  startMessageRun,
-  cancelRunAndConverge
+  startMessageRun
 } from "../agent-message.store.js";
 import { SqliteRunLifecyclePersistence } from "../lifecycle/sqlite-run-lifecycle-persistence.js";
 import type { AgentRuntimePort } from "../agent.runtime-port.js";
@@ -192,111 +191,7 @@ test("agent startup pre-listen 保持 in-flight run，fenced recovery 在 onList
   }
 });
 
-test("startup recovery 将 running 工具标记为 unknown、保留 queued，并只替换一次 partial Assistant", async (t: TestContext) => {
-  const fixture = await createStartupFixture(t);
-  try {
-    const session = await createPrimarySession(fixture);
-    const runId = newSortableId("run");
-    const ts = Date.now();
-    createRunningMessageRun(fixture, session.id, runId, ts);
-    const head = getMessageSession(fixture.db, fixture.workspaceId, session.id)!;
-    const assistantId = newSortableId("msg");
-    appendStreamingAssistant(fixture.db, {
-      id: assistantId, workspaceId: fixture.workspaceId, sessionId: session.id,
-      expectedHeadMessageId: head.headMessageId, expectedRevision: head.revision,
-      runId, createdAt: ts + 1,
-    });
-    const partialPartId = newSortableId("part");
-    assert.equal(flushStreamingParts(fixture.db, {
-      workspaceId: fixture.workspaceId, sessionId: session.id, runId, messageId: assistantId,
-      parts: [{ id: partialPartId, position: 0, type: "text", text: "partial output" }], updatedAt: ts + 2,
-    }), "updated");
 
-    const callPartId = newSortableId("part");
-    const runningCallPartId = newSortableId("part");
-    fixture.db.prepare(`insert into agent_message_part (id,message_id,position,type,tool_name,tool_input_json,provider_tool_call_id,updated_revision,created_at,updated_at) values (?, ?, 1, 'tool_call', 'bash', '{"command":"true"}', 'call_recovery', 0, ?, ?), (?, ?, 2, 'tool_call', 'read', '{}', 'call_running_recovery', 0, ?, ?)`)
-      .run(callPartId, assistantId, ts + 3, ts + 3, runningCallPartId, assistantId, ts + 3, ts + 3);
-    const queuedId = newSortableId("exec");
-    const runningId = newSortableId("exec");
-    fixture.db.prepare(`
-      insert into agent_tool_execution (id,call_part_id,origin_session_id,origin_run_id,status,result_truncated,updated_revision,created_at,updated_at)
-      values (?, ?, ?, ?, 'queued', 0, 0, ?, ?), (?, ?, ?, ?, 'running', 0, 0, ?, ?)
-    `).run(queuedId, callPartId, session.id, runId, ts + 3, ts + 3, runningId, runningCallPartId, session.id, runId, ts + 3, ts + 3);
-    fixture.db.prepare("update session_run_state set non_terminal_tool_execution_ids_json=? where workspace_id=? and session_id=?")
-      .run(JSON.stringify([queuedId, runningId]), fixture.workspaceId, session.id);
-
-    const persistence = new SqliteRunLifecyclePersistence(fixture.db);
-    const candidate = { workspaceId: fixture.workspaceId, sessionId: session.id, runId, triggerMessageId: null };
-    assert.deepEqual(
-      persistence.prepareRunForStartupRecovery({ ...candidate, replacementMessageId: "msg_recovered", updatedAt: ts + 4 }),
-      { prepared: true, resumeAssistantMessageId: "msg_recovered" },
-    );
-    assert.equal(getToolExecution(fixture.db, queuedId)?.status, "queued");
-    assert.equal(getToolExecution(fixture.db, runningId)?.status, "unknown");
-    assert.equal(getMessage(fixture.db, assistantId)?.status, "superseded");
-    const replacement = getMessage(fixture.db, "msg_recovered");
-    assert.equal(replacement?.status, "streaming");
-    assert.equal(replacement?.previousMessageId, getMessage(fixture.db, assistantId)?.previousMessageId);
-    assert.equal(replacement?.replacesMessageId, assistantId);
-    const recoveredState = getMessageRunState(fixture.db, fixture.workspaceId, session.id);
-    assert.equal(recoveredState?.activeAssistantMessageId, "msg_recovered");
-    assert.equal(recoveredState?.runNoticeText, "任务正在自动恢复");
-    assert.equal(recoveredState?.retryCount, 0);
-    assert.equal(recoveredState?.nextRetryAt, null);
-
-    assert.deepEqual(
-      persistence.prepareRunForStartupRecovery({ ...candidate, replacementMessageId: "msg_should_not_exist", updatedAt: ts + 5 }),
-      { prepared: true, resumeAssistantMessageId: "msg_recovered" },
-    );
-    assert.equal(getMessage(fixture.db, "msg_should_not_exist"), null);
-    assert.equal(getMessageRunState(fixture.db, fixture.workspaceId, session.id)?.activeAssistantMessageId, "msg_recovered");
-  } finally {
-    await fixture.dispose();
-  }
-});
-
-test("startup recovery 将仅有私有 replay 的空 reasoning Assistant 隔离并替换", async (t: TestContext) => {
-  const fixture = await createStartupFixture(t);
-  try {
-    const session = await createPrimarySession(fixture);
-    const runId = newSortableId("run");
-    const ts = Date.now();
-    createRunningMessageRun(fixture, session.id, runId, ts);
-    const head = getMessageSession(fixture.db, fixture.workspaceId, session.id)!;
-    const assistantId = newSortableId("msg");
-    appendStreamingAssistant(fixture.db, {
-      id: assistantId, workspaceId: fixture.workspaceId, sessionId: session.id,
-      expectedHeadMessageId: head.headMessageId, expectedRevision: head.revision,
-      runId, createdAt: ts + 1,
-    });
-    assert.equal(flushStreamingParts(fixture.db, {
-      workspaceId: fixture.workspaceId, sessionId: session.id, runId, messageId: assistantId,
-      parts: [{
-        id: newSortableId("part"), position: 0, type: "reasoning", text: "",
-        providerReplay: {
-          version: 1,
-          provider: { npm: "@ai-sdk/openai", api: "responses", providerId: "provider", model: "gpt-5" },
-          item: { type: "reasoning", itemId: "rs_recovery", encryptedContent: "opaque-recovery" },
-        },
-      }],
-      updatedAt: ts + 2,
-    }), "updated");
-
-    const persistence = new SqliteRunLifecyclePersistence(fixture.db);
-    const result = persistence.prepareRunForStartupRecovery({
-      workspaceId: fixture.workspaceId,
-      sessionId: session.id,
-      runId,
-      replacementMessageId: "msg_replay_recovered",
-      updatedAt: ts + 3,
-    });
-    assert.deepEqual(result, { prepared: true, resumeAssistantMessageId: "msg_replay_recovered" });
-    assert.equal(getMessage(fixture.db, assistantId)?.status, "superseded");
-    assert.equal(getMessage(fixture.db, "msg_replay_recovered")?.status, "streaming");
-  } finally {
-    await fixture.dispose();
-  }
-});
 
 test("runtime ready 先续作 tombstone，并跳过 deleting Run 后恢复其他 Workspace", async (t: TestContext) => {
   const fixture = await createStartupFixture(t);
@@ -357,8 +252,11 @@ test("runtime ready 先续作 tombstone，并跳过 deleting Run 后恢复其他
   }
 
   assert.equal(getWorkspace(fixture.db, deletingWorkspaceId), null, "tombstone Workspace must resume before Run recovery");
-  assert.equal(getRunRecord(fixture.db, deletingRunId), null, "deleting Run must not be enqueued");
-  assert.deepEqual(enqueued, [healthyRunId], "other Workspace recovery must continue");
+  assert.equal(getRunRecord(fixture.db, deletingRunId), null, "deleting Run must not be recovered");
+  assert.deepEqual(enqueued, [], "startup recovery must not re-enqueue business work");
+  const healthyRun = getRunRecord(fixture.db, healthyRunId);
+  assert.equal(healthyRun?.status, "failed");
+  assert.equal(healthyRun?.terminalResultCode, "run_startup_recovery_failed");
 });
 
 test("recover 在 enqueue 前最终 DB check 中让 cancel wins", async (t: TestContext) => {
@@ -390,6 +288,9 @@ test("recover 在 enqueue 前最终 DB check 中让 cancel wins", async (t: Test
           listActiveChildSessionIds: () => []
         });
         assert.deepEqual(cancelled.runtimeCancelSessionIds, [session.id]);
+        for (const intent of cancelled.terminalIntents ?? []) {
+          persistence.convergeRunTerminal({ ...intent, updatedAt: ts + 1 });
+        }
         cancelledDuringRecovery = true;
       }
     });
@@ -406,7 +307,7 @@ test("recover 在 enqueue 前最终 DB check 中让 cancel wins", async (t: Test
   }
 });
 
-test("recover enqueue 已发出后 cancel 仍以 DB cancelled 状态为准", async (t: TestContext) => {
+test("startup recovery 不入队并将 work run 收敛为 failed terminal", async (t: TestContext) => {
   const fixture = await createStartupFixture(t);
   try {
     const session = await createPrimarySession(fixture);
@@ -421,19 +322,13 @@ test("recover enqueue 已发出后 cancel 仍以 DB cancelled 状态为准", asy
       },
       cancelSession() {}
     };
-    const service = createAgentService(fixture.ctx, fixture.app.log);
-    const persistence = new SqliteRunLifecyclePersistence(fixture.db);
-    await service.recoverRunsOnStartup({ runtime });
-    assert.deepEqual(enqueued, [runId]);
 
-    const cancelled = persistence.cancelSessions({
-      workspaceId: fixture.workspaceId,
-      rootSessionId: session.id,
-      updatedAt: ts + 1,
-      listActiveChildSessionIds: () => []
-    });
-    assert.deepEqual(cancelled.runtimeCancelSessionIds, [session.id]);
-    assert.equal(getRunRecord(fixture.db, runId)?.status, "cancelled");
+    await createAgentService(fixture.ctx, fixture.app.log).recoverRunsOnStartup({ runtime });
+
+    assert.deepEqual(enqueued, []);
+    const run = getRunRecord(fixture.db, runId);
+    assert.equal(run?.status, "failed");
+    assert.equal(run?.terminalResultCode, "run_startup_recovery_failed");
     const state = getMessageRunState(fixture.db, fixture.workspaceId, session.id);
     assert.ok(state);
     assert.equal(state.status, "idle");
@@ -443,7 +338,7 @@ test("recover enqueue 已发出后 cancel 仍以 DB cancelled 状态为准", asy
   }
 });
 
-test("recover enqueue transient failure 持久保持 running、同一 runId 自愈并继续处理后续 candidate", async (t: TestContext) => {
+test("startup recovery 将多个 work candidate 分别收敛，且从不调用 runtime enqueue", async (t: TestContext) => {
   const fixture = await createStartupFixture(t);
   try {
     const firstSession = await createPrimarySession(fixture);
@@ -456,35 +351,23 @@ test("recover enqueue transient failure 持久保持 running、同一 runId 自�
     }
 
     const enqueued: string[] = [];
-    let firstAttempt = true;
     const runtime: AgentRuntimePort = {
-      async enqueueRun(run) {
+      enqueueRun(run) {
         enqueued.push(run.runId);
-        if (run.runId === firstRunId && firstAttempt) {
-          firstAttempt = false;
-          throw new Error("response lost after worker accepted run");
-        }
       },
       cancelSession() {}
     };
-    const warnings: unknown[][] = [];
-    const logger = {
-      warn(...args: unknown[]) {
-        warnings.push(args);
-      }
-    } as unknown as FastifyInstance["log"];
 
-    await createAgentService(fixture.ctx, logger).recoverRunsOnStartup({ runtime });
+    await createAgentService(fixture.ctx, fixture.app.log).recoverRunsOnStartup({ runtime });
 
-    assert.deepEqual(enqueued, [firstRunId, secondRunId]);
-    assert.equal(getRunRecord(fixture.db, firstRunId)?.status, "running");
-    assert.equal(getMessageRunState(fixture.db, fixture.workspaceId, firstSession.id)?.status, "running");
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    assert.deepEqual(enqueued, [firstRunId, secondRunId, firstRunId]);
-    assert.equal(getRunRecord(fixture.db, firstRunId)?.status, "running");
-    assert.equal(getMessageRunState(fixture.db, fixture.workspaceId, firstSession.id)?.activeRunId, firstRunId);
-    assert.equal(warnings.length, 1);
-    assert.equal(warnings[0]?.[1], "startup recovery handoff was deferred or rejected");
+    assert.deepEqual(enqueued, []);
+    for (const runId of [firstRunId, secondRunId]) {
+      const run = getRunRecord(fixture.db, runId);
+      assert.equal(run?.status, "failed");
+      assert.equal(run?.terminalResultCode, "run_startup_recovery_failed");
+    }
+    assert.equal(getMessageRunState(fixture.db, fixture.workspaceId, firstSession.id)?.status, "idle");
+    assert.equal(getMessageRunState(fixture.db, fixture.workspaceId, secondSession.id)?.status, "idle");
   } finally {
     await fixture.dispose();
   }

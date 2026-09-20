@@ -1,6 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 import {
   AgentMessageSchema,
+  AgentOrdinaryMessageSchema,
   AgentMessagePartSchema,
   AgentSessionMessageStateSchema,
   AgentTimelineToolExecutionSchema,
@@ -9,6 +10,10 @@ import {
   AgentToolExecutionDetailSchema
 } from "../contracts/agent-message.js";
 import { AgentProviderReplayEnvelopeSchema } from "./agent-provider-replay.js";
+import {
+  AgentTerminalResultCodeSchema,
+  AgentTerminalRunStatusSchema,
+} from "../contracts/agent.js";
 
 const IdSchema = Type.String({ minLength: 1 });
 
@@ -22,7 +27,7 @@ export const AgentApiCreateStreamingAssistantRequestSchema = Type.Object({
 export type AgentApiCreateStreamingAssistantRequest = Static<typeof AgentApiCreateStreamingAssistantRequestSchema>;
 
 export const AgentApiCreateStreamingAssistantResponseSchema = Type.Object({
-  message: AgentMessageSchema
+  message: AgentOrdinaryMessageSchema
 }, { additionalProperties: false });
 export type AgentApiCreateStreamingAssistantResponse = Static<typeof AgentApiCreateStreamingAssistantResponseSchema>;
 
@@ -92,7 +97,7 @@ export type AgentApiReplaceStreamingAssistantRequest = Static<typeof AgentApiRep
 
 export const AgentApiReplaceStreamingAssistantResponseSchema = Type.Object({
   result: Type.Union([Type.Literal("updated"), Type.Literal("ignored"), Type.Literal("missing")]),
-  message: Type.Union([AgentMessageSchema, Type.Null()])
+  message: Type.Union([AgentOrdinaryMessageSchema, Type.Null()])
 }, { additionalProperties: false });
 export type AgentApiReplaceStreamingAssistantResponse = Static<typeof AgentApiReplaceStreamingAssistantResponseSchema>;
 
@@ -160,8 +165,16 @@ export const AgentApiUpdateRunNoticeRequestSchema = Type.Object({
 }, { additionalProperties: false });
 export type AgentApiUpdateRunNoticeRequest = Static<typeof AgentApiUpdateRunNoticeRequestSchema>;
 
-/** Worker compaction commits a new Message boundary with an explicit Session CAS. */
-export const AgentApiCommitCompactionRequestSchema = Type.Object({
+export const AgentApiCommitCompactionResponseSchema = Type.Object({
+  result: Type.Union([Type.Literal("updated"), Type.Literal("ignored")]),
+  summaryMessageId: Type.Union([IdSchema, Type.Null()])
+}, { additionalProperties: false });
+export type AgentApiCommitCompactionResponse = Static<typeof AgentApiCommitCompactionResponseSchema>;
+
+/**
+ * Worker compaction commit; manual requests atomically include terminal intent.
+ */
+export const AgentApiCommitCompactionWithTerminalIntentRequestSchema = Type.Object({
   workspaceId: IdSchema,
   sessionId: IdSchema,
   runId: IdSchema,
@@ -169,16 +182,47 @@ export const AgentApiCommitCompactionRequestSchema = Type.Object({
   textPartId: IdSchema,
   expectedHeadMessageId: Type.Union([IdSchema, Type.Null()]),
   expectedRevision: Type.Integer({ minimum: 0 }),
+  retainedFromMessageId: Type.Union([IdSchema, Type.Null()]),
   summaryText: Type.String({ minLength: 1 }),
+  intent: Type.Optional(Type.Object({
+    status: Type.Literal("completed"),
+    code: Type.Literal("compaction_completed"),
+    detail: Type.Null(),
+  }, { additionalProperties: false })),
   createdAt: Type.Number()
 }, { additionalProperties: false });
-export type AgentApiCommitCompactionRequest = Static<typeof AgentApiCommitCompactionRequestSchema>;
+export type AgentApiCommitCompactionWithTerminalIntentRequest = Static<
+  typeof AgentApiCommitCompactionWithTerminalIntentRequestSchema
+>;
 
-export const AgentApiCommitCompactionResponseSchema = Type.Object({
-  result: Type.Union([Type.Literal("updated"), Type.Literal("ignored")]),
-  summaryMessageId: Type.Union([IdSchema, Type.Null()])
+/** Read-only confirmation for a commit whose HTTP response was lost. */
+export const AgentApiConfirmCompactionCommitRequestSchema = Type.Object({
+  workspaceId: IdSchema,
+  sessionId: IdSchema,
+  runId: IdSchema,
+  messageId: IdSchema,
 }, { additionalProperties: false });
-export type AgentApiCommitCompactionResponse = Static<typeof AgentApiCommitCompactionResponseSchema>;
+export type AgentApiConfirmCompactionCommitRequest = Static<typeof AgentApiConfirmCompactionCommitRequestSchema>;
+
+export const AgentApiConfirmCompactionCommitResponseSchema = Type.Object({
+  outcome: Type.Union([Type.Literal("committed"), Type.Literal("not_committed")]),
+}, { additionalProperties: false });
+export type AgentApiConfirmCompactionCommitResponse = Static<typeof AgentApiConfirmCompactionCommitResponseSchema>;
+
+export const AgentApiCompleteTerminalAssistantRequestSchema = Type.Object({
+  workspaceId: IdSchema,
+  sessionId: IdSchema,
+  runId: IdSchema,
+  messageId: IdSchema,
+  responseTotalTokens: Type.Optional(Type.Union([Type.Number({ minimum: 0 }), Type.Null()])),
+  intent: Type.Object({
+    status: Type.Literal("completed"),
+    code: Type.Union([Type.Literal("run_completed"), Type.Literal("subtask_completed")]),
+    detail: Type.Null(),
+  }, { additionalProperties: false }),
+  updatedAt: Type.Number()
+}, { additionalProperties: false });
+export type AgentApiCompleteTerminalAssistantRequest = Static<typeof AgentApiCompleteTerminalAssistantRequestSchema>;
 
 /**
  * Message Timeline 的内部读取契约。路由会在后续持久化阶段启用；此处先冻结

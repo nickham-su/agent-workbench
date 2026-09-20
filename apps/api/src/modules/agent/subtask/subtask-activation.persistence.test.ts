@@ -150,6 +150,9 @@ test("H4 real SQLite: parent cancellation before child activation returns typed 
     listActiveChildSessionIds: () => [],
   });
   assert.deepEqual(cancelled.runtimeCancelSessionIds, ["parent-session"]);
+  for (const intent of cancelled.terminalIntents ?? []) {
+    activation.convergeRunTerminal({ ...intent, updatedAt: 150 });
+  }
 
   const result = activation.activate(input(workspace.id, sessionId, "run-h4-cancelled-parent"));
   assert.deepEqual(result, { kind: "parent-not-active" });
@@ -175,6 +178,9 @@ test("H4 real SQLite: child committed before parent cancel is discovered through
     },
   });
   assert.deepEqual(new Set(cancelled.runtimeCancelSessionIds), new Set(["parent-session", sessionId]));
+  for (const intent of cancelled.terminalIntents ?? []) {
+    activation.convergeRunTerminal({ ...intent, updatedAt: 210 });
+  }
   assert.equal(getRunRecord(fixture.db, child.runId)?.status, "cancelled");
   assert.equal(getMessageRunState(fixture.db, workspace.id, sessionId)?.status, "idle");
   assert.deepEqual(activation.listRecoverableRunCandidates().filter((candidate) => candidate.sessionId === sessionId), []);

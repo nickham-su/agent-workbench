@@ -224,7 +224,10 @@ test("H1 real SQLite/FS: cancel before final fence keeps Message、attachment an
   const persistence = new SqliteRunLifecyclePersistence(fixture.db);
   const runtime = createFakeAgentRuntime();
   const application = createApplicationWithStorage({ fixture, persistence, onContextRead: () => {
-    persistence.cancelSessions({ workspaceId: workspace.id, rootSessionId: sessionId, updatedAt: Date.now(), listActiveChildSessionIds: () => [] });
+    const cancelled = persistence.cancelSessions({ workspaceId: workspace.id, rootSessionId: sessionId, updatedAt: Date.now(), listActiveChildSessionIds: () => [] });
+    for (const intent of cancelled.terminalIntents ?? []) {
+      persistence.convergeRunTerminal({ ...intent, updatedAt: Date.now() });
+    }
   } });
   await assert.rejects(() => application.startUserRun({ workspaceId: workspace.id, sessionId, clientRequestId: "h1-cancel-fence", text: "image", inputText: "image", images: [image], agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", uiLocale: null, runtime }), (error: unknown) => error instanceof Error && "code" in error && error.code === "RUN_NOT_ACTIVE");
   assert.deepEqual(runtime.enqueueRunCalls, []);
@@ -233,13 +236,14 @@ test("H1 real SQLite/FS: cancel before final fence keeps Message、attachment an
   await assert.doesNotReject(() => fs.access(agentAttachmentFilePath(fixture.dataDir, workspace.id, image.attachmentId)));
 });
 
-test("M2 real SQLite: activation 后 state read 失败可 fenced 收敛为 failed/idle", async () => {
+test("M2 real SQLite: activation 后 state read 失败持久化失败 intent，随后可收敛为 failed/idle", async () => {
   const { fixture, workspace, sessionId, createdAt } = await createMessageLifecycleFixture("M2 state read failure");
   const runId = newSortableId("run");
   createAndActivateRun({ fixture, workspaceId: workspace.id, sessionId, runId, createdAt });
   const persistence = new SqliteRunLifecyclePersistence(fixture.db);
 
-  assert.equal(persistence.failRunAfterEnqueueFailureIfCurrent({ workspaceId: workspace.id, sessionId, runId, updatedAt: createdAt + 1 }), "failed-and-idled");
+  assert.equal(persistence.failRunAfterEnqueueFailureIfCurrent({ workspaceId: workspace.id, sessionId, runId, updatedAt: createdAt + 1 }), "intent-persisted");
+  persistence.convergeRunTerminal({ workspaceId: workspace.id, sessionId, runId, updatedAt: createdAt + 1 });
   assert.equal(getRunRecord(fixture.db, runId)?.status, "failed");
   const state = getMessageRunState(fixture.db, workspace.id, sessionId);
   assert.equal(state?.status, "idle");
@@ -251,9 +255,11 @@ test("P1 real SQLite: enqueue failure settles its old Run but does not idle a ne
   const olderRunId = newSortableId("run");
   const activeRunId = newSortableId("run");
   createAndActivateRun({ fixture, workspaceId: workspace.id, sessionId, runId: olderRunId, createdAt });
-  assert.equal(new SqliteRunLifecyclePersistence(fixture.db).completeRunFromWorker({
-    workspaceId: workspace.id, sessionId, runId: olderRunId, status: "completed", updatedAt: createdAt + 1,
-  }), true);
+  const completedPersistence = new SqliteRunLifecyclePersistence(fixture.db);
+  assert.equal(completedPersistence.persistRunTerminalIntent({
+    workspaceId: workspace.id, sessionId, runId: olderRunId, status: "completed", code: "run_completed", detail: null, updatedAt: createdAt + 1,
+  }), "updated");
+  assert.equal(completedPersistence.convergeRunTerminal({ workspaceId: workspace.id, sessionId, runId: olderRunId, updatedAt: createdAt + 1 }).kind, "transitioned");
   createAndActivateRun({ fixture, workspaceId: workspace.id, sessionId, runId: activeRunId, createdAt: createdAt + 2 });
 
   new SqliteRunLifecyclePersistence(fixture.db).failRunAfterEnqueueFailureIfCurrent({ workspaceId: workspace.id, sessionId, runId: olderRunId, updatedAt: createdAt + 3 });
@@ -269,7 +275,11 @@ test("P1 real SQLite: cancel wins over a late enqueue-failure settlement", async
   const runId = newSortableId("run");
   createAndActivateRun({ fixture, workspaceId: workspace.id, sessionId, runId, createdAt });
   const persistence = new SqliteRunLifecyclePersistence(fixture.db);
-  assert.deepEqual(persistence.cancelSessions({ workspaceId: workspace.id, rootSessionId: sessionId, updatedAt: createdAt + 1, listActiveChildSessionIds: () => [] }).runtimeCancelSessionIds, [sessionId]);
+  const cancelled = persistence.cancelSessions({ workspaceId: workspace.id, rootSessionId: sessionId, updatedAt: createdAt + 1, listActiveChildSessionIds: () => [] });
+  assert.deepEqual(cancelled.runtimeCancelSessionIds, [sessionId]);
+  for (const intent of cancelled.terminalIntents ?? []) {
+    persistence.convergeRunTerminal({ ...intent, updatedAt: createdAt + 1 });
+  }
   persistence.failRunAfterEnqueueFailureIfCurrent({ workspaceId: workspace.id, sessionId, runId, updatedAt: createdAt + 2 });
   assert.equal(getRunRecord(fixture.db, runId)?.status, "cancelled");
   assert.equal(getMessageRunState(fixture.db, workspace.id, sessionId)?.status, "idle");
@@ -286,7 +296,10 @@ test("P1 real SQLite: recovery final fence observes cancellation and does not en
     runtime,
     beforeFinalCheck(candidate) {
       assert.equal(candidate.runId, runId);
-      persistence.cancelSessions({ workspaceId: workspace.id, rootSessionId: sessionId, updatedAt: createdAt + 1, listActiveChildSessionIds: () => [] });
+      const cancelled = persistence.cancelSessions({ workspaceId: workspace.id, rootSessionId: sessionId, updatedAt: createdAt + 1, listActiveChildSessionIds: () => [] });
+      for (const intent of cancelled.terminalIntents ?? []) {
+        persistence.convergeRunTerminal({ ...intent, updatedAt: createdAt + 1 });
+      }
     },
   });
   assert.deepEqual(runtime.enqueueRunCalls, []);
@@ -299,12 +312,14 @@ test("P4 real SQLite: completing an old Run does not idle a newer active Run", a
   const oldRunId = newSortableId("run");
   const activeRunId = newSortableId("run");
   createAndActivateRun({ fixture, workspaceId: workspace.id, sessionId, runId: oldRunId, createdAt });
-  assert.equal(new SqliteRunLifecyclePersistence(fixture.db).completeRunFromWorker({
-    workspaceId: workspace.id, sessionId, runId: oldRunId, status: "completed", updatedAt: createdAt + 1,
-  }), true);
+  const completedPersistence = new SqliteRunLifecyclePersistence(fixture.db);
+  assert.equal(completedPersistence.persistRunTerminalIntent({
+    workspaceId: workspace.id, sessionId, runId: oldRunId, status: "completed", code: "run_completed", detail: null, updatedAt: createdAt + 1,
+  }), "updated");
+  assert.equal(completedPersistence.convergeRunTerminal({ workspaceId: workspace.id, sessionId, runId: oldRunId, updatedAt: createdAt + 1 }).kind, "transitioned");
   createAndActivateRun({ fixture, workspaceId: workspace.id, sessionId, runId: activeRunId, createdAt: createdAt + 2 });
 
-  createAgentService(fixture.ctx, fixture.app!.log).completeRunFromWorker({ workspaceId: workspace.id, sessionId, runId: oldRunId, status: "completed", updatedAt: createdAt + 3 });
+  createAgentService(fixture.ctx, fixture.app!.log).convergeRunTerminalFromWorker({ workspaceId: workspace.id, sessionId, runId: oldRunId, updatedAt: createdAt + 3 });
   assert.equal(getRunRecord(fixture.db, oldRunId)?.status, "completed");
   assert.equal(getRunRecord(fixture.db, activeRunId)?.status, "running");
   assert.equal(getMessageRunState(fixture.db, workspace.id, sessionId)?.status, "running");

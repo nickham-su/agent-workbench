@@ -1,5 +1,8 @@
 import type {
+  AgentCompactionMessage,
   AgentMessage,
+  AgentMessageRow,
+  AgentOrdinaryMessage,
   AgentMessagePart,
   AgentMessageSessionRunState,
   AgentMessageStatus,
@@ -11,16 +14,27 @@ import type {
   AgentToolExecution,
   AgentToolExecutionStatus
 } from "@agent-workbench/shared";
-import { AGENT_TIMELINE_TEXT_MAX_LENGTH } from "@agent-workbench/shared";
-import {
-  parseAgentProviderReplay,
-  type AgentProviderReplayEnvelope,
-} from "@agent-workbench/shared/internal-contracts/agent-api";
+import { AGENT_TIMELINE_TEXT_MAX_LENGTH, AgentMessageSchema } from "@agent-workbench/shared";
+import { Value } from "@sinclair/typebox/value";
 import type { Db } from "../../../infra/db/db.js";
 import { HttpError } from "../../../app/errors.js";
-import type { RuntimeTranscriptExecution } from "./runtime-transcript-projector.js";
 
 const MESSAGE_PART_QUERY_CHUNK_SIZE = 500;
+
+type HydratedMessage = AgentMessageRow & { inCurrentOperationRange?: boolean; parts: AgentMessagePart[] };
+
+function asStrictMessage(message: HydratedMessage): AgentCompactionMessage | AgentOrdinaryMessage {
+  const normalized = message.type === "compaction"
+    ? message
+    : (() => {
+      const { retainedFromMessageId: _retainedFromMessageId, ...ordinaryMessage } = message;
+      return ordinaryMessage;
+    })();
+  if (!Value.Check(AgentMessageSchema, normalized)) {
+    throw new Error(`stored message ${message.id} violates the strict shared contract`);
+  }
+  return normalized;
+}
 
 type SessionRow = AgentSessionMessageState;
 type RunStateRow = {
@@ -39,7 +53,7 @@ type RunStateRow = {
   lastRunDurationMs: number | null;
   updatedAt: number;
 };
-type MessageRow = Omit<AgentMessage, "parts">;
+type MessageRow = AgentMessageRow;
 type PartRow = {
   id: string;
   messageId: string;
@@ -172,7 +186,7 @@ export class SqliteMessageQuery {
     mode?: "snapshot" | "delta" | "before";
     sinceRevision?: number;
     knownHeadMessageId?: string;
-    knownContextRootMessageId?: string;
+    knownContextRootMessageId?: string | null;
     beforeMessageId?: string;
     limit?: number;
   }): AgentTimelineDeltaResponse & { hasMore: boolean; nextBeforeMessageId: string | null } {
@@ -198,18 +212,18 @@ export class SqliteMessageQuery {
     } else {
       ({ page, hasMore } = this.listDisplayTailPage(session, limit));
     }
-    const messages = this.attachParts(page, this.contextRootDepth(session));
+    const messages = this.attachParts(page, this.contextRootDepth(session)).map(asStrictMessage);
     const toolExecutions = mode === "delta" && !timelineReset
       ? this.listTimelineExecutions(session, input.sinceRevision)
       : this.listTimelineExecutionsForMessages(page.map((message) => message.id));
     return { session, timelineReset, messages, toolExecutions, hasMore, nextBeforeMessageId: page[0]?.id ?? null };
   }
 
-  getMessage(input: { workspaceId: string; sessionId: string; messageId: string }): AgentMessage {
+  getMessage(input: { workspaceId: string; sessionId: string; messageId: string }): AgentCompactionMessage | AgentOrdinaryMessage {
     const session = this.requireSession(input.workspaceId, input.sessionId);
     const message = this.getDisplayChainMessage(session, input.messageId);
     if (!message) throw new HttpError(404, "message not found in session timeline", "MESSAGE_NOT_FOUND");
-    return this.attachParts([message], this.contextRootDepth(session))[0]!;
+    return asStrictMessage(this.attachParts([message], this.contextRootDepth(session))[0]!);
   }
 
   /** timeline 保持轻量，详情只允许读取当前 Session 展示链上的 execution。 */
@@ -252,7 +266,7 @@ export class SqliteMessageQuery {
   /** 当前可见链上最新 todolist ToolCall 的权威 ToolExecution 详情。 */
   getLatestTodolistToolExecution(input: { workspaceId: string; sessionId: string }): AgentSessionLatestTodolistExecution | null {
     const session = this.requireSession(input.workspaceId, input.sessionId);
-    const messages = this.attachParts(this.listActiveContextChain(session));
+    const messages = this.attachParts(this.listActiveContextChain(session)).map(asStrictMessage);
     const callPart = [...messages].reverse().flatMap((message) => [...message.parts].reverse())
     .find((part) => part.type === "tool_call" && part.toolName === "todolist");
     if (!callPart) return null;
@@ -273,45 +287,6 @@ export class SqliteMessageQuery {
     const row = this.runStateRow(input.workspaceId, input.sessionId);
     if (!row) throw new HttpError(404, "session run state not found", "SESSION_NOT_FOUND");
     return { ...timeline, runState: toRunState(row) };
-  }
-
-  /** Returns only the current contextRoot..head previous-message lineage. */
-  getRuntimeTranscriptSource(input: { workspaceId: string; sessionId: string }) {
-    const session = this.requireSession(input.workspaceId, input.sessionId);
-    const messages = this.attachParts(this.listActiveContextChain(session));
-    const callPartIds = messages.flatMap((message) => message.parts)
-      .filter((part) => part.type === "tool_call")
-      .map((part) => part.id);
-    const executions = callPartIds.length === 0
-      ? []
-      : this.db.prepare(`
-          select call_part_id as callPartId, status, result_preview as resultPreview, error
-          from agent_tool_execution
-          where call_part_id in (${callPartIds.map(() => "?").join(",")})
-        `).all(...callPartIds) as RuntimeTranscriptExecution[];
-    return { messages, executions };
-  }
-
-  /** 私有 Provider 回放数据只供受保护的 PromptContext 读取，不进入公开 Message 映射。 */
-  getRuntimeProviderReplaySource(input: { workspaceId: string; sessionId: string }) {
-    const session = this.requireSession(input.workspaceId, input.sessionId);
-    const chain = this.listActiveContextChain(session);
-    if (chain.length === 0) return new Map<string, AgentProviderReplayEnvelope>();
-    const rows = this.db.prepare(`
-      select part.id, part.provider_replay_json as providerReplayJson
-      from agent_message_part part
-      where part.message_id in (${chain.map(() => "?").join(",")})
-        and part.provider_replay_json is not null
-    `).all(...chain.map((message) => message.id)) as Array<{
-      id: string;
-      providerReplayJson: string;
-    }>;
-    const result = new Map<string, AgentProviderReplayEnvelope>();
-    for (const row of rows) {
-      const replay = parseAgentProviderReplay(row.providerReplayJson);
-      if (replay) result.set(row.id, replay);
-    }
-    return result;
   }
 
   getRunState(input: { workspaceId: string; sessionId: string }): AgentMessageSessionRunState {
@@ -424,14 +399,14 @@ export class SqliteMessageQuery {
 
   private displayChainCte() {
     return `
-      with recursive display_chain(id, workspace_id, previous_message_id, replaces_message_id, depth, type, status,
+      with recursive display_chain(id, workspace_id, previous_message_id, replaces_message_id, retained_from_message_id, depth, type, status,
                                    origin_session_id, origin_run_id, updated_revision, created_at, updated_at) as (
-        select id, workspace_id, previous_message_id, replaces_message_id, depth, type, status,
+        select id, workspace_id, previous_message_id, replaces_message_id, retained_from_message_id, depth, type, status,
                origin_session_id, origin_run_id, updated_revision, created_at, updated_at
         from agent_message
         where id = @headMessageId and workspace_id = @workspaceId
         union all
-        select message.id, message.workspace_id, message.previous_message_id, message.replaces_message_id,
+        select message.id, message.workspace_id, message.previous_message_id, message.replaces_message_id, message.retained_from_message_id,
                message.depth, message.type, message.status, message.origin_session_id, message.origin_run_id,
                message.updated_revision, message.created_at, message.updated_at
         from agent_message message
@@ -465,7 +440,7 @@ export class SqliteMessageQuery {
     return this.db.prepare(`
       ${this.displayChainCte()}
       select id, workspace_id as workspaceId, previous_message_id as previousMessageId,
-             replaces_message_id as replacesMessageId, depth, type, status,
+             replaces_message_id as replacesMessageId, retained_from_message_id as retainedFromMessageId, depth, type, status,
              origin_session_id as originSessionId, origin_run_id as originRunId,
              updated_revision as updatedRevision, created_at as createdAt, updated_at as updatedAt
       from display_chain where id = @messageId limit 1
@@ -475,20 +450,20 @@ export class SqliteMessageQuery {
   private listDisplayTailPage(session: AgentSessionMessageState, limit: number) {
     if (!session.headMessageId) return { page: [] as MessageRow[], hasMore: false };
     const rows = this.db.prepare(`
-      with recursive page_chain(id, workspace_id, previous_message_id, replaces_message_id, depth, type, status,
+      with recursive page_chain(id, workspace_id, previous_message_id, replaces_message_id, retained_from_message_id, depth, type, status,
                                 origin_session_id, origin_run_id, updated_revision, created_at, updated_at, steps) as (
-        select id, workspace_id, previous_message_id, replaces_message_id, depth, type, status,
+        select id, workspace_id, previous_message_id, replaces_message_id, retained_from_message_id, depth, type, status,
                origin_session_id, origin_run_id, updated_revision, created_at, updated_at, 1
         from agent_message where id = @headMessageId and workspace_id = @workspaceId
         union all
-        select message.id, message.workspace_id, message.previous_message_id, message.replaces_message_id,
+        select message.id, message.workspace_id, message.previous_message_id, message.replaces_message_id, message.retained_from_message_id,
                message.depth, message.type, message.status, message.origin_session_id, message.origin_run_id,
                message.updated_revision, message.created_at, message.updated_at, chain.steps + 1
         from agent_message message join page_chain chain on chain.previous_message_id = message.id
         where message.workspace_id = @workspaceId and chain.steps < @take
       )
       select id, workspace_id as workspaceId, previous_message_id as previousMessageId,
-             replaces_message_id as replacesMessageId, depth, type, status,
+             replaces_message_id as replacesMessageId, retained_from_message_id as retainedFromMessageId, depth, type, status,
              origin_session_id as originSessionId, origin_run_id as originRunId,
              updated_revision as updatedRevision, created_at as createdAt, updated_at as updatedAt
       from page_chain order by depth asc
@@ -532,7 +507,7 @@ export class SqliteMessageQuery {
     return this.db.prepare(`
       ${this.displayChainCte()}
       select id, workspace_id as workspaceId, previous_message_id as previousMessageId,
-             replaces_message_id as replacesMessageId, depth, type, status,
+             replaces_message_id as replacesMessageId, retained_from_message_id as retainedFromMessageId, depth, type, status,
              origin_session_id as originSessionId, origin_run_id as originRunId,
              updated_revision as updatedRevision, created_at as createdAt, updated_at as updatedAt
       from display_chain where updated_revision > @sinceRevision order by depth asc
@@ -555,20 +530,20 @@ export class SqliteMessageQuery {
   private listChain(session: AgentSessionMessageState, stopAtMessageId: string | null): MessageRow[] {
     if (!session.headMessageId) return [];
     return this.db.prepare(`
-      with recursive chain(id, workspace_id, previous_message_id, replaces_message_id, depth, type, status,
+      with recursive chain(id, workspace_id, previous_message_id, replaces_message_id, retained_from_message_id, depth, type, status,
                            origin_session_id, origin_run_id, updated_revision, created_at, updated_at) as (
-        select id, workspace_id, previous_message_id, replaces_message_id, depth, type, status,
+        select id, workspace_id, previous_message_id, replaces_message_id, retained_from_message_id, depth, type, status,
                origin_session_id, origin_run_id, updated_revision, created_at, updated_at
         from agent_message where id = @headMessageId
         union all
-        select message.id, message.workspace_id, message.previous_message_id, message.replaces_message_id,
+        select message.id, message.workspace_id, message.previous_message_id, message.replaces_message_id, message.retained_from_message_id,
                 message.depth, message.type, message.status, message.origin_session_id, message.origin_run_id,
                 message.updated_revision, message.created_at, message.updated_at
         from agent_message message join chain on chain.previous_message_id = message.id
         where @stopAtMessageId is null or chain.id != @stopAtMessageId
       )
       select id, workspace_id as workspaceId, previous_message_id as previousMessageId,
-             replaces_message_id as replacesMessageId, depth, type, status,
+             replaces_message_id as replacesMessageId, retained_from_message_id as retainedFromMessageId, depth, type, status,
              origin_session_id as originSessionId, origin_run_id as originRunId,
              updated_revision as updatedRevision, created_at as createdAt, updated_at as updatedAt
       from chain order by depth asc
@@ -578,7 +553,7 @@ export class SqliteMessageQuery {
     }) as MessageRow[];
   }
 
-  private attachParts(rows: MessageRow[], activeContextRootDepth?: number | null): AgentMessage[] {
+  private attachParts(rows: MessageRow[], operationRangeStartDepth?: number | null): HydratedMessage[] {
     if (rows.length === 0) return [];
     const partsByMessageId = new Map<string, AgentMessagePart[]>();
     for (let offset = 0; offset < rows.length; offset += MESSAGE_PART_QUERY_CHUNK_SIZE) {
@@ -606,8 +581,8 @@ export class SqliteMessageQuery {
       updatedRevision: Number(row.updatedRevision),
       createdAt: Number(row.createdAt),
       updatedAt: Number(row.updatedAt),
-      ...(activeContextRootDepth !== undefined
-        ? { inActiveContext: activeContextRootDepth === null || Number(row.depth) >= activeContextRootDepth }
+      ...(operationRangeStartDepth !== undefined
+        ? { inCurrentOperationRange: operationRangeStartDepth === null || Number(row.depth) >= operationRangeStartDepth }
         : {}),
       parts: partsByMessageId.get(row.id) ?? []
     }));

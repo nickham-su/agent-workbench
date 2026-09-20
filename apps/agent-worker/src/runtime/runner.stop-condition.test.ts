@@ -97,6 +97,8 @@ test("runModelStep: 存在 pending ToolExecution 时 fail-closed 且不调用模
 test("processRun: 无 tool call 且有正常文本时 completed", async () => {
   const completed: string[] = [];
   const apiClient = {
+    async markRunWorkInProgress() { return { result: "updated" as const }; },
+    async convergeRunTerminal() { return { kind: "transitioned" as const, finalStatus: "completed" as const }; },
     async getExecutionProfile() {
       return baseProfile();
     },
@@ -106,7 +108,7 @@ test("processRun: 无 tool call 且有正常文本时 completed", async () => {
     async getPromptContext() {
       return baseContext();
     },
-    async completeRun(input: { status: string }) {
+    async persistRunTerminalIntent(input: { status: string }) {
       completed.push(input.status);
       return;
     }
@@ -133,6 +135,8 @@ test("processRun: 无 tool call 且有正常文本时 completed", async () => {
 test("processRun: tool call 会重置空回答计数，并在后续第 6 次空回答时 completed", async () => {
   const completed: string[] = [];
   const apiClient = {
+    async markRunWorkInProgress() { return { result: "updated" as const }; },
+    async convergeRunTerminal() { return { kind: "transitioned" as const, finalStatus: "completed" as const }; },
     async getExecutionProfile() {
       return baseProfile();
     },
@@ -142,7 +146,7 @@ test("processRun: tool call 会重置空回答计数，并在后续第 6 次空�
     async getPromptContext() {
       return baseContext();
     },
-    async completeRun(input: { status: string }) {
+    async persistRunTerminalIntent(input: { status: string }) {
       completed.push(input.status);
       return;
     }
@@ -181,6 +185,8 @@ test("processRun: tool call 会重置空回答计数，并在后续第 6 次空�
 test("processRun: 正常文本会重置空回答计数并立即 completed", async () => {
   const completed: string[] = [];
   const apiClient = {
+    async markRunWorkInProgress() { return { result: "updated" as const }; },
+    async convergeRunTerminal() { return { kind: "transitioned" as const, finalStatus: "completed" as const }; },
     async getExecutionProfile() {
       return baseProfile();
     },
@@ -190,7 +196,7 @@ test("processRun: 正常文本会重置空回答计数并立即 completed", asyn
     async getPromptContext() {
       return baseContext();
     },
-    async completeRun(input: { status: string }) {
+    async persistRunTerminalIntent(input: { status: string }) {
       completed.push(input.status);
       return;
     }
@@ -225,6 +231,8 @@ test("processRun: 有 tool call 时继续执行 pending tools，不会因已有�
   const completed: string[] = [];
   let promptCalls = 0;
   const apiClient = {
+    async markRunWorkInProgress() { return { result: "updated" as const }; },
+    async convergeRunTerminal() { return { kind: "transitioned" as const, finalStatus: "completed" as const }; },
     async getExecutionProfile() {
       return baseProfile();
     },
@@ -239,7 +247,7 @@ test("processRun: 有 tool call 时继续执行 pending tools，不会因已有�
         pendingTools: [{ toolExecutionId: "execution-1", callPartId: "part-call-1", assistantMessageId: "message-assistant-1", status: "queued" as const, toolName: "read", toolCallId: "call_1", args: {} }]
       };
     },
-    async completeRun(input: { status: string }) {
+    async persistRunTerminalIntent(input: { status: string }) {
       completed.push(input.status);
       return;
     }
@@ -276,6 +284,8 @@ test("processRun: 下一轮无 pendingTools 时会丢弃旧快照，后续恢复
     }
   ];
   const apiClient = {
+    async markRunWorkInProgress() { return { result: "updated" as const }; },
+    async convergeRunTerminal() { return { kind: "transitioned" as const, finalStatus: "completed" as const }; },
     async getExecutionProfile() {
       return {
         ...baseProfile(),
@@ -292,7 +302,7 @@ test("processRun: 下一轮无 pendingTools 时会丢弃旧快照，后续恢复
     async getPromptContext() {
       return contexts.shift() ?? baseContext();
     },
-    async completeRun(input: { status: string }) {
+    async persistRunTerminalIntent(input: { status: string }) {
       completed.push(input.status);
       return;
     }
@@ -352,6 +362,8 @@ test("processRun: 下一轮无 pendingTools 时会丢弃旧快照，后续恢复
 test("processRun: reasoning-only 且无 tool call 时会继续空响应 step，并在第 6 次后 completed", async () => {
   const completed: string[] = [];
   const apiClient = {
+    async markRunWorkInProgress() { return { result: "updated" as const }; },
+    async convergeRunTerminal() { return { kind: "transitioned" as const, finalStatus: "completed" as const }; },
     async getExecutionProfile() {
       return baseProfile();
     },
@@ -361,7 +373,7 @@ test("processRun: reasoning-only 且无 tool call 时会继续空响应 step，�
     async getPromptContext() {
       return baseContext();
     },
-    async completeRun(input: { status: string }) {
+    async persistRunTerminalIntent(input: { status: string }) {
       completed.push(input.status);
       return;
     }
@@ -387,12 +399,14 @@ test("processRun: reasoning-only 且无 tool call 时会继续空响应 step，�
 });
 
 
-test("processRun: model step fenced ignored 时静默停止且不 completeRun", async () => {
+test("processRun: model step fenced ignored 时静默停止且不 persistRunTerminalIntent", async () => {
   const completed: string[] = [];
   const apiClient = {
+    async markRunWorkInProgress() { return { result: "updated" as const }; },
+    async convergeRunTerminal() { return { kind: "transitioned" as const, finalStatus: "completed" as const }; },
     async getExecutionProfile() { return baseProfile(); },
     async getPromptContext() { return baseContext(); },
-    async completeRun(input: { status: string }) { completed.push(input.status); }
+    async persistRunTerminalIntent(input: { status: string }) { completed.push(input.status); }
   };
   const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
   (runner as any).runModelStep = async () => { throw new FencedWriteIgnoredError("flush assistant parts"); };
@@ -402,9 +416,11 @@ test("processRun: model step fenced ignored 时静默停止且不 completeRun", 
   assert.deepEqual(completed, []);
 });
 
-test("processRun: ToolExecution 写回 fenced ignored 时静默停止且不 completeRun", async () => {
+test("processRun: ToolExecution 写回 fenced ignored 时静默停止且不 persistRunTerminalIntent", async () => {
   const completed: string[] = [];
   const apiClient = {
+    async markRunWorkInProgress() { return { result: "updated" as const }; },
+    async convergeRunTerminal() { return { kind: "transitioned" as const, finalStatus: "completed" as const }; },
     async getExecutionProfile() { return baseProfile(); },
     async getPromptContext() {
       return {
@@ -415,7 +431,7 @@ test("processRun: ToolExecution 写回 fenced ignored 时静默停止且不 comp
         }]
       };
     },
-    async completeRun(input: { status: string }) { completed.push(input.status); }
+    async persistRunTerminalIntent(input: { status: string }) { completed.push(input.status); }
   };
   const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
   (runner as any).executePendingTools = async () => { throw new FencedWriteIgnoredError("tool execution running"); };
@@ -425,12 +441,14 @@ test("processRun: ToolExecution 写回 fenced ignored 时静默停止且不 comp
   assert.deepEqual(completed, []);
 });
 
-test("processRun: fenced missing 时 failed completeRun 恰好一次", async () => {
+test("processRun: fenced missing 时 failed persistRunTerminalIntent 恰好一次", async () => {
   const completed: string[] = [];
   const apiClient = {
+    async markRunWorkInProgress() { return { result: "updated" as const }; },
+    async convergeRunTerminal() { return { kind: "transitioned" as const, finalStatus: "completed" as const }; },
     async getExecutionProfile() { return baseProfile(); },
     async getPromptContext() { return baseContext(); },
-    async completeRun(input: { status: string }) { completed.push(input.status); }
+    async persistRunTerminalIntent(input: { status: string }) { completed.push(input.status); }
   };
   const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
   (runner as any).runModelStep = async () => { throw new FencedWriteMissingError("complete assistant"); };
@@ -441,12 +459,14 @@ test("processRun: fenced missing 时 failed completeRun 恰好一次", async () 
 });
 
 
-test("processRun: 永久控制面错误仅 failed completeRun 一次", async () => {
+test("processRun: 永久控制面错误仅 failed persistRunTerminalIntent 一次", async () => {
   const completed: string[] = [];
   const apiClient = {
+    async markRunWorkInProgress() { return { result: "updated" as const }; },
+    async convergeRunTerminal() { return { kind: "transitioned" as const, finalStatus: "completed" as const }; },
     async getExecutionProfile() { return baseProfile(); },
     async getPromptContext() { return baseContext(); },
-    async completeRun(input: { status: string }) { completed.push(input.status); }
+    async persistRunTerminalIntent(input: { status: string }) { completed.push(input.status); }
   };
   const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
   (runner as any).runModelStep = async () => { throw new ControlWritePermanentError("complete assistant", new Error("bad request")); };

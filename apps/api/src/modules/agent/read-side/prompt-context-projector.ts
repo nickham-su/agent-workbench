@@ -2,10 +2,9 @@ import type { AgentUiLocale } from "@agent-workbench/shared/internal-contracts/a
 import type { AgentApiPromptContextResponse } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { PromptStaticProfile, RunPromptStatic } from "../prompt/prompt-static-assembler.js";
 import { RunPromptStaticCache } from "../prompt/run-prompt-static-cache.js";
+import type { ResolvedPendingTool, ResolvedRunSnapshot } from "./model-context-resolver.js";
 
 export type PromptContextProjectorDependencies<Message> = {
-  getRunState: (input: { workspaceId: string; sessionId: string }) => { activeRunId: string | null; lastResponseTotalTokens: number | null };
-  resolveUiLocale: (input: { workspaceId: string; sessionId: string; activeRunId: string | null }) => AgentUiLocale | null;
   resolveProfile: (input: {
     surface: "user" | "subtask";
     workspaceId: string;
@@ -21,22 +20,17 @@ export type PromptContextProjectorDependencies<Message> = {
   }) => Promise<RunPromptStatic>;
   buildRuntimeInstruction: (input: { uiLocale: AgentUiLocale | null }) => string;
   appendRuntimeConstraints: (systemStatic: string, runtimeInstruction: string) => string;
-  listPendingTools: (input: { workspaceId: string; sessionId: string; runId: string }) => Array<{
-    toolExecutionId: string;
-    callPartId: string;
-    assistantMessageId: string;
-    status: "queued" | "running";
-    toolName: string;
-    toolCallId?: string;
-    args: Record<string, unknown>;
-  }>;
-  buildMessages: (input: {
+  resolveDynamicContext: (input: {
     workspaceId: string;
     sessionId: string;
-    triggerMessageId: string | null;
-    compactionSnippetUiLocale: AgentUiLocale | null;
-    pendingAssistantMessageIds: ReadonlySet<string>;
+    runId: string;
   }) => Promise<{
+    headMessageId: string | null;
+    sessionRevision: number;
+    run: ResolvedRunSnapshot;
+    pendingTools: ResolvedPendingTool[];
+    lastResponseTotalTokens: number | null;
+    uiLocale: AgentUiLocale | null;
     messages: Message[];
     providerReplay?: AgentApiPromptContextResponse["providerReplay"];
   }>;
@@ -55,51 +49,40 @@ export class PromptContextProjector<Message> {
     session: { kind: "primary" | "subtask"; headMessageId: string | null; revision: number };
     run: { runId: string; subtaskDepth: number | null; agentId: string; providerId: string; modelId: string; triggerMessageId: string | null };
   }) {
-    // Preserve the legacy order: profile validation precedes dynamic run-state reads,
-    // including when an already-built static prompt is reused from cache.
+    const cacheGeneration = this.cache.generation(input.run.runId);
+    const dynamic = await this.dependencies.resolveDynamicContext({
+      workspaceId: input.workspaceId, sessionId: input.sessionId, runId: input.run.runId,
+    });
     const profile = this.dependencies.resolveProfile({
       surface: input.session.kind === "subtask" ? "subtask" : "user",
       workspaceId: input.workspaceId,
-      agentId: input.run.agentId,
-      providerId: input.run.providerId,
-      modelId: input.run.modelId
+      agentId: dynamic.run.agentId,
+      providerId: dynamic.run.providerId,
+      modelId: dynamic.run.modelId
     });
-    const runState = this.dependencies.getRunState({ workspaceId: input.workspaceId, sessionId: input.sessionId });
-    const uiLocale = this.dependencies.resolveUiLocale({
+    const staticPrompt = await this.cache.getOrCreate(dynamic.run.runId, Date.now(), () => this.dependencies.assembleStatic({
       workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      activeRunId: runState.activeRunId
-    });
-    const staticPrompt = await this.cache.getOrCreate(input.run.runId, Date.now(), () => this.dependencies.assembleStatic({
-      workspaceId: input.workspaceId,
-      run: input.run,
+      run: dynamic.run,
       profile,
-      uiLocale
-    }));
+      uiLocale: dynamic.uiLocale
+    }), cacheGeneration);
+    if (!this.cache.isCurrent(dynamic.run.runId, cacheGeneration)) {
+      throw new Error("prompt static cache was invalidated while assembling context");
+    }
     const system = this.dependencies.appendRuntimeConstraints(
       staticPrompt.systemStatic,
-      this.dependencies.buildRuntimeInstruction({ uiLocale })
+      this.dependencies.buildRuntimeInstruction({ uiLocale: dynamic.uiLocale })
     );
-    // Pending work is read before transcript construction. The Worker will execute it
-    // and continue; it must never send an incomplete tool-call turn to a model.
-    const pendingTools = this.dependencies.listPendingTools({ workspaceId: input.workspaceId, sessionId: input.sessionId, runId: input.run.runId });
-    const { messages, providerReplay } = await this.dependencies.buildMessages({
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      triggerMessageId: input.run.triggerMessageId,
-      compactionSnippetUiLocale: uiLocale,
-      pendingAssistantMessageIds: new Set(pendingTools.map((tool) => tool.assistantMessageId))
-    });
     return {
-      headMessageId: input.session.headMessageId,
-      sessionRevision: input.session.revision,
+      headMessageId: dynamic.headMessageId,
+      sessionRevision: dynamic.sessionRevision,
       system,
-      messages,
-      ...(providerReplay == null ? {} : { providerReplay }),
+      messages: dynamic.messages,
+      ...(dynamic.providerReplay == null ? {} : { providerReplay: dynamic.providerReplay }),
       tools: staticPrompt.tools,
-      pendingTools,
-      lastResponseTotalTokens: runState.lastResponseTotalTokens,
-      uiLocale,
+      pendingTools: dynamic.pendingTools,
+      lastResponseTotalTokens: dynamic.lastResponseTotalTokens,
+      uiLocale: dynamic.uiLocale,
       externalSkillRoots: staticPrompt.externalSkillRoots
     };
   }

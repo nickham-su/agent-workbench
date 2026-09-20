@@ -44,7 +44,7 @@ function imageContext() {
 }
 
 function createApiClient(context = imageContext()) {
-  const completed: string[] = [];
+  const completed: Array<{ status: string; code: string }> = [];
   const created: Array<Record<string, unknown>> = [];
   return {
     completed,
@@ -55,8 +55,11 @@ function createApiClient(context = imageContext()) {
       async createStreamingAssistant(input: Record<string, unknown>) { created.push(input); return { result: "updated" }; },
       async flushAssistantParts() { return { result: "updated" }; },
       async completeAssistant() { return { result: "updated" }; },
+      async completeTerminalAssistant() { return { result: "updated" as const }; },
       async updateRunNotice() { return { result: "updated" }; },
-      async completeRun(input: { status: string }) { completed.push(input.status); }
+      async markRunWorkInProgress() { return { result: "updated" as const }; },
+      async persistRunTerminalIntent(input: { status: string; code: string }) { completed.push({ status: input.status, code: input.code }); return { result: "updated" as const }; },
+      async convergeRunTerminal() { return { kind: "transitioned" as const, finalStatus: "completed" as const }; }
     }
   };
 }
@@ -119,6 +122,6 @@ test("AgentRunner attachment read failure does not call streamText or enter mode
   await processRunForTest(runner, baseRun(), new AbortController().signal);
 
   assert.equal(streamCalls, 0);
-  assert.deepEqual(api.completed, ["failed"]);
+  assert.deepEqual(api.completed, [{ status: "failed", code: "run_failed" }]);
   assert.equal(api.created.length, 0, "local materialization fails before creating an assistant item");
 });

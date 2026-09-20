@@ -22,6 +22,100 @@ export const AgentRunKindSchema = Type.Union([
 ]);
 export type AgentRunKind = Static<typeof AgentRunKindSchema>;
 
+export const AgentRunExecutionPhaseSchema = Type.Union([
+  Type.Literal("work_pending"),
+  Type.Literal("work_in_progress"),
+  Type.Literal("terminal_intent_persisted"),
+  Type.Literal("terminal")
+]);
+export type AgentRunExecutionPhase = Static<typeof AgentRunExecutionPhaseSchema>;
+
+export const AgentTerminalRunStatusSchema = Type.Union([
+  Type.Literal("completed"),
+  Type.Literal("failed"),
+  Type.Literal("cancelled")
+]);
+export type AgentTerminalRunStatus = Static<typeof AgentTerminalRunStatusSchema>;
+
+export const AgentTerminalResultCodeSchema = Type.Union([
+  Type.Literal("run_completed"),
+  Type.Literal("subtask_completed"),
+  Type.Literal("compaction_completed"),
+  Type.Literal("compaction_not_needed"),
+  Type.Literal("compaction_no_progress"),
+  Type.Literal("compaction_oversized_tail"),
+  Type.Literal("compaction_media_requires_resend"),
+  Type.Literal("compaction_pending_tools"),
+  Type.Literal("compaction_failed"),
+  Type.Literal("compaction_provider_unavailable"),
+  Type.Literal("compaction_conflict"),
+  Type.Literal("context_limit_recovery_exhausted"),
+  Type.Literal("context_limit_media_requires_resend"),
+  Type.Literal("run_cancelled"),
+  Type.Literal("run_enqueue_failed"),
+  Type.Literal("run_failed"),
+  Type.Literal("run_startup_recovery_failed"),
+  Type.Literal("subtask_failed")
+]);
+export type AgentTerminalResultCode = Static<typeof AgentTerminalResultCodeSchema>;
+
+/** 终态码的唯一业务登记表；持久化与内部控制面均应复用此处校验组合。 */
+export const AGENT_TERMINAL_CODE_REGISTRY = {
+  user: {
+    completed: ["run_completed"],
+    failed: ["context_limit_recovery_exhausted", "context_limit_media_requires_resend", "compaction_conflict", "run_enqueue_failed", "run_failed", "run_startup_recovery_failed"],
+    cancelled: ["run_cancelled"]
+  },
+  subtask: {
+    completed: ["subtask_completed"],
+    failed: ["subtask_failed", "run_enqueue_failed", "run_startup_recovery_failed"],
+    cancelled: ["run_cancelled"]
+  },
+  manual_compaction: {
+    completed: ["compaction_completed", "compaction_not_needed", "compaction_no_progress", "compaction_oversized_tail", "compaction_media_requires_resend"],
+    failed: ["compaction_pending_tools", "compaction_failed", "compaction_provider_unavailable", "compaction_conflict", "run_enqueue_failed", "run_startup_recovery_failed"],
+    cancelled: ["run_cancelled"]
+  }
+} as const satisfies Record<AgentRunKind, Record<AgentTerminalRunStatus, readonly AgentTerminalResultCode[]>>;
+
+export function isAgentTerminalCodeAllowed(
+  runKind: AgentRunKind,
+  status: AgentTerminalRunStatus,
+  code: AgentTerminalResultCode
+) {
+  return (AGENT_TERMINAL_CODE_REGISTRY[runKind][status] as readonly string[]).includes(code);
+}
+
+/** 浏览器刷新恢复所需的最小公开 Run 投影，不包含 prompt、provider 或 artifact。 */
+const AgentRunStatusRecordFields = {
+  workspaceId: Type.String({ minLength: 1 }),
+  sessionId: Type.String({ minLength: 1 }),
+  runId: Type.String({ minLength: 1 }),
+  runKind: AgentRunKindSchema,
+  updatedAt: Type.Number(),
+};
+
+export const AgentRunStatusResponseSchema = Type.Union([
+  Type.Object({
+    ...AgentRunStatusRecordFields,
+    status: Type.Literal("running"),
+    code: Type.Null(),
+    detail: Type.Null(),
+  }, { additionalProperties: false }),
+  Type.Object({
+    ...AgentRunStatusRecordFields,
+    status: AgentTerminalRunStatusSchema,
+    code: AgentTerminalResultCodeSchema,
+    detail: Type.Null(),
+  }, { additionalProperties: false }),
+], { $id: "AgentRunStatusResponse" });
+export type AgentRunStatusResponse = Static<typeof AgentRunStatusResponseSchema>;
+
+export const AgentRunStatusQuerySchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
+}, { additionalProperties: false });
+export type AgentRunStatusQuery = Static<typeof AgentRunStatusQuerySchema>;
+
 export const AgentSessionRecordSchema = Type.Object({
   id: Type.String({ minLength: 1 }),
   workspaceId: Type.String({ minLength: 1 }),

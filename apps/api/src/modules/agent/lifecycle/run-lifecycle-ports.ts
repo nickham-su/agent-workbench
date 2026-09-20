@@ -1,7 +1,6 @@
 import type { AgentImageMediaType } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import type { AgentMessageControlResult, AgentMessageSessionRunState } from "@agent-workbench/shared";
-import type { AgentApiRunCompleteRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
-import type { AgentRunKind } from "@agent-workbench/shared";
+import type { AgentRunExecutionPhase, AgentRunKind, AgentTerminalResultCode, AgentTerminalRunStatus } from "@agent-workbench/shared";
 import type { ActiveSubtaskChildQuery } from "../subtask/subtask-ports.js";
 
 export type AgentRuntimeRun = {
@@ -62,17 +61,41 @@ export type AtomicLifecyclePersistence = {
   failRunAfterEnqueueFailureIfCurrent(input: EnqueueFailureInput): EnqueueFailureSettlement;
   getCancelSessionSnapshot(sessionId: string): CancelSessionSnapshot | null;
   cancelSessions(input: CancelSessionsInput): CancelSessionsResult;
-  completeRunFromWorker(input: AgentApiRunCompleteRequest): boolean;
+  markRunWorkInProgress(input: TerminalControlInput): "updated" | "already_in_progress";
+  persistRunTerminalIntent(input: TerminalIntentControlInput): "updated" | "already_persisted";
+  convergeRunTerminal(input: TerminalControlInput): { kind: "transitioned" | "already_converged"; finalStatus: AgentTerminalRunStatus };
+  listWorkspaceRunningRunCandidates(workspaceId: string): WorkspaceRunningRunCandidate[];
   listRecoverableRunCandidates(): RecoveryCandidate[];
   isRecoverableRunCandidate(candidate: RecoveryCandidate): boolean;
-  prepareRunForStartupRecovery(input: RecoveryCandidate & { replacementMessageId: string; updatedAt: number }): StartupRecoveryPreparation;
 };
 
-export type RecoveryCandidate = { workspaceId: string; sessionId: string; runId: string; runKind: AgentRunKind; triggerMessageId: string | null };
+export type TerminalControlInput = {
+  workspaceId: string;
+  sessionId: string;
+  runId: string;
+  updatedAt: number;
+};
 
-export type StartupRecoveryPreparation = {
-  prepared: boolean;
-  resumeAssistantMessageId: string | null;
+export type TerminalIntentControlInput = TerminalControlInput & {
+  status: AgentTerminalRunStatus;
+  code: AgentTerminalResultCode;
+  detail: null;
+};
+
+export type WorkspaceRunningRunCandidate = {
+  workspaceId: string;
+  sessionId: string;
+  runId: string;
+  executionPhase: AgentRunExecutionPhase;
+};
+
+export type RecoveryCandidate = {
+  workspaceId: string;
+  sessionId: string;
+  runId: string;
+  runKind: AgentRunKind;
+  triggerMessageId: string | null;
+  executionPhase: AgentRunExecutionPhase;
 };
 
 export type CancelSessionSnapshot = {
@@ -93,6 +116,7 @@ export type CancelSessionsResult = {
   rootSessionId: string;
   runtimeCancelSessionIds: string[];
   cancelledRunIds: string[];
+  terminalIntents?: Array<{ workspaceId: string; sessionId: string; runId: string }>;
 };
 
 export type CancelSessionCascadeResult = {
@@ -147,6 +171,7 @@ export type EnqueueFailureInput = {
 };
 
 export type EnqueueFailureSettlement =
+  | "intent-persisted"
   | "failed-and-idled"
   | "run-failed-state-not-current"
   | "already-terminal"

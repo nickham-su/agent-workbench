@@ -94,6 +94,7 @@ import type {
   AgentCompactSessionResponse,
   AgentMessage,
   AgentMessageSessionRunState,
+  AgentRunStatusResponse,
   AgentTimelineDeltaResponse,
   AgentToolExecutionDetail,
   AgentMessageControlResult,
@@ -131,6 +132,7 @@ import type {
   UpdateAgentSettingsRequest
 } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { emitUnauthorized } from "@/features/auth/unauthorized";
+import { serializeAgentTimelineQuery, type AgentTimelineQuery } from "./agentTimelineQuery.js";
 import { resetAuthStatus, setAuthed } from "@/features/auth/session";
 
 const client = axios.create({ baseURL: "/api" });
@@ -1174,7 +1176,7 @@ export async function updateAgentSessionTitle(sessionId: string, body: AgentUpda
 
 export async function getAgentTimeline(
   sessionId: string,
-  query: { workspaceId: string; mode?: "snapshot" | "delta" | "before"; sinceRevision?: number; beforeMessageId?: string; limit?: number },
+  query: AgentTimelineQuery,
   options?: { signal?: AbortSignal },
 ): Promise<AgentTimelineDeltaResponse> {
   try {
@@ -1182,6 +1184,7 @@ export async function getAgentTimeline(
       `/agent/sessions/${encodeURIComponent(sessionId)}/timeline`,
       {
         params: query,
+        paramsSerializer: { serialize: serializeAgentTimelineQuery },
         ...(options?.signal ? { signal: options.signal } : {}),
       },
     );
@@ -1212,6 +1215,22 @@ export async function getAgentRunState(sessionId: string, workspaceId?: string) 
     const res = await client.get<AgentMessageSessionRunState>(`/agent/sessions/${sessionId}/run-state`, {
       params: workspaceId ? { workspaceId } : undefined,
     });
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getAgentRunStatus(params: {
+  workspaceId: string;
+  sessionId: string;
+  runId: string;
+}) {
+  try {
+    const res = await client.get<AgentRunStatusResponse>(
+      `/agent/sessions/${encodeURIComponent(params.sessionId)}/runs/${encodeURIComponent(params.runId)}`,
+      { params: { workspaceId: params.workspaceId } },
+    );
     return res.data;
   } catch (err) {
     throw toApiError(err);

@@ -87,7 +87,11 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
   }
 
   await registerAgentRoutes(app, { service, runtime, internalToken: ctx.agentInternalToken, dataDir: ctx.dataDir, pluginHost: pluginHostClient, runCompletedEventHub });
-  const workspaceRuntimeRegistration = { runtime, handoffCoordinator: runtimeHandoffCoordinator };
+  const workspaceRuntimeRegistration = {
+    runtime,
+    handoffCoordinator: runtimeHandoffCoordinator,
+    settleWorkspaceRunsForDeletion: (workspaceId: string) => service.settleWorkspaceRunsForDeletion(workspaceId),
+  };
   registerWorkspaceRuntime(workspaceRuntimeRegistration);
   if (!ctx.agentWorkerEnabled) {
     await resumePendingWorkspaceDeletions(ctx, app.log);

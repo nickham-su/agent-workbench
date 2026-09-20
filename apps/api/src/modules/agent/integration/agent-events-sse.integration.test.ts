@@ -91,18 +91,29 @@ test("internal events/sse 返回 run-complete 事件 chunk", async (t) => {
   }
 
   try {
-    const complete = await fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/run-complete",
-    headers: { "x-awb-agent-internal-token": fixture.internalToken },
-    payload: {
-      workspaceId: fixture.workspaceId,
-      sessionId: session.id,
-      runId,
-      status: "completed"
-    }
-  });
-    assert.equal(complete.statusCode, 200, `run-complete for sse failed: ${complete.body}`);
+    const updatedAt = Date.now();
+    const intent = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/runs/terminal-intent",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: {
+        workspaceId: fixture.workspaceId,
+        sessionId: session.id,
+        runId,
+        status: "completed",
+        code: "run_completed",
+        detail: null,
+        updatedAt,
+      },
+    });
+    assert.equal(intent.statusCode, 200, `terminal intent for sse failed: ${intent.body}`);
+    const converge = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/runs/converge-terminal",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId, updatedAt },
+    });
+    assert.equal(converge.statusCode, 200, `terminal convergence for sse failed: ${converge.body}`);
 
     const sseText = await ssePromise;
 

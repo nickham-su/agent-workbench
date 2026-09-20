@@ -75,7 +75,6 @@ type SubtaskApiClient = Pick<
   | "startSubtaskRun"
   | "getSubtaskStatus"
   | "getSubtaskResult"
-  | "completeRun"
   | "getMessagesContext"
 >;
 
@@ -105,7 +104,6 @@ test("subtask provider 父 abort 后不再额外 complete child cancelled", asyn
     | "startSubtaskRun"
     | "getSubtaskStatus"
     | "getSubtaskResult"
-    | "completeRun"
     | "getMessagesContext"
   > = {
     async startSubtaskRun() {
@@ -124,14 +122,6 @@ test("subtask provider 父 abort 后不再额外 complete child cancelled", asyn
     async getSubtaskResult(input: { sessionId: string; runId: string }) {
       getResultCalls.push(input);
       return { resultText: "cancelled" };
-    },
-    async completeRun(input: {
-      status: string;
-      sessionId: string;
-      runId: string;
-    }) {
-      completeCalls.push(input);
-      return;
     },
     async getMessagesContext() {
       return {
@@ -219,9 +209,6 @@ test("subtask provider 复用 running child 时轮询而不重复执行", async 
       getResultCalls += 1;
       return { resultText: "reused result" };
     },
-    async completeRun() {
-      return;
-    },
     async getMessagesContext() {
       return {
         headMessageId: null,
@@ -297,9 +284,6 @@ test("subtask provider 复用 terminal child 时直接读取结果", async () =>
     },
     async getSubtaskResult() {
       return { resultText: "terminal result" };
-    },
-    async completeRun() {
-      return;
     },
     async getMessagesContext() {
       return {
@@ -383,9 +367,6 @@ test("subtask provider reused child 等待超时只结束当前等待，不修�
         getResultCalls += 1;
         return { resultText: "unexpected" };
       },
-      async completeRun() {
-        throw new Error("reused child must not be modified");
-      },
       async getMessagesContext() {
         return {
           headMessageId: null,
@@ -465,9 +446,6 @@ test("subtask provider 保留 API 深度拒绝的 409 错误文本", async () =>
       },
       async getSubtaskResult() {
         return { resultText: "" };
-      },
-      async completeRun() {
-        return;
       },
       async getMessagesContext() {
         return {

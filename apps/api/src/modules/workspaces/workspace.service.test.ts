@@ -34,6 +34,8 @@ import { setSettingJson } from "../settings/settings.store.js";
 import { registerGlobalSystemPromptTextProvider } from "../settings/settings.service.js";
 import { workspaceDeletingFence } from "../agent/lifecycle/workspace-deleting-fence.js";
 import { registerWorkspaceRuntime, unregisterWorkspaceRuntime } from "../agent/lifecycle/workspace-runtime-registry.js";
+import { RunLifecycleApplication } from "../agent/lifecycle/run-lifecycle-application.js";
+import { SqliteRunLifecyclePersistence } from "../agent/lifecycle/sqlite-run-lifecycle-persistence.js";
 import { SessionRuntimeHandoffCoordinator } from "../agent/lifecycle/session-runtime-handoff-coordinator.js";
 import { insertTerminal } from "../terminals/terminal.store.js";
 import { terminalAskpassPath, terminalAskpassTokenPath, terminalSshKeyPath } from "../terminals/terminal.gitAuth.js";
@@ -229,7 +231,14 @@ test("workspace delete 与同 Session handoff 串行，cancel 不会被晚到 en
     enqueueRun() {},
     async cancelSessionAndWait() { events.push("cancel"); return true; },
   };
-  const registration = { runtime, handoffCoordinator: coordinator };
+  const registration = {
+    runtime,
+    handoffCoordinator: coordinator,
+    settleWorkspaceRunsForDeletion() {
+      events.push("settle");
+      return ["race-session"];
+    },
+  };
   registerWorkspaceRuntime(registration);
   try {
     const deleting = deleteWorkspace(fixture.ctx, logger, fixture.workspaceId);
@@ -238,7 +247,7 @@ test("workspace delete 与同 Session handoff 串行，cancel 不会被晚到 en
     releaseEnqueue();
     await enqueuing;
     await deleting;
-    assert.deepEqual(events, ["enqueue-start", "enqueue-end", "cancel"]);
+    assert.deepEqual(events, ["enqueue-start", "enqueue-end", "settle", "cancel"]);
   } finally {
     unregisterWorkspaceRuntime(registration);
   }
@@ -533,8 +542,10 @@ test("workspace delete: 应清理 agent_session 外键引用，避免删一半",
   db.prepare(`insert into agent_message (id, workspace_id, previous_message_id, replaces_message_id, depth, type, status, origin_session_id, origin_run_id, updated_revision, created_at, updated_at)
     values ('message_b', ?, 'message_a', 'message_a', 1, 'assistant', 'completed', 'sess_1', null, 2, ?, ?)`)
     .run(wsId, now, now);
-  db.prepare(`insert into agent_run (run_id, workspace_id, session_id, trigger_message_id, agent_id, provider_id, model_id, status, created_at, updated_at)
-    values ('run_delete', ?, 'sess_1', 'message_a', 'agent', 'provider', 'model', 'completed', ?, ?)`)
+  db.prepare(`insert into agent_run (run_id, workspace_id, session_id, trigger_message_id, agent_id, provider_id, model_id, status,
+    execution_phase, terminal_result_code, created_at, updated_at)
+    values ('run_delete', ?, 'sess_1', 'message_a', 'agent', 'provider', 'model', 'completed',
+    'terminal', 'run_completed', ?, ?)`)
     .run(wsId, now, now);
   db.prepare(`insert into agent_client_request (workspace_id, session_id, client_request_id, message_id, run_id, created_at)
     values (?, 'sess_1', 'request_delete', 'message_a', 'run_delete', ?)`)
@@ -560,19 +571,25 @@ test("workspace delete: 应清理 agent_session 外键引用，避免删一半",
   const attachmentPath = agentAttachmentFilePath(fixture.ctx.dataDir, wsId, "att_delete");
   await fs.mkdir(path.dirname(attachmentPath), { recursive: true });
   await fs.writeFile(attachmentPath, "attachment");
-  await deleteWorkspace(fixture.ctx, logger, wsId);
-  assert.equal(getWorkspace(fixture.ctx.db, wsId), null);
-  const sessions = fixture.ctx.db.prepare(`select count(*) as c from agent_session where workspace_id = ?`).get(wsId) as { c: number };
-  assert.equal(sessions.c, 0);
-  const attachments = fixture.ctx.db.prepare(`select count(*) as c from agent_attachment where workspace_id = ?`).get(wsId) as { c: number };
-  assert.equal(attachments.c, 0);
-  for (const table of ["agent_message", "agent_message_part", "agent_tool_execution", "session_run_state", "agent_client_request", "agent_run", "agent_text_part_fts_map"]) {
-    const row = fixture.ctx.db.prepare(`select count(*) as c from ${table}`).get() as { c: number };
-    assert.equal(row.c, 0, `${table} should be removed with its workspace`);
+  const registration = { runtime: { async cancelSessionAndWait() { return true; } }, handoffCoordinator: new SessionRuntimeHandoffCoordinator(), settleWorkspaceRunsForDeletion: () => [] };
+  registerWorkspaceRuntime(registration);
+  try {
+    await deleteWorkspace(fixture.ctx, logger, wsId);
+    assert.equal(getWorkspace(fixture.ctx.db, wsId), null);
+    const sessions = fixture.ctx.db.prepare(`select count(*) as c from agent_session where workspace_id = ?`).get(wsId) as { c: number };
+    assert.equal(sessions.c, 0);
+    const attachments = fixture.ctx.db.prepare(`select count(*) as c from agent_attachment where workspace_id = ?`).get(wsId) as { c: number };
+    assert.equal(attachments.c, 0);
+    for (const table of ["agent_message", "agent_message_part", "agent_tool_execution", "session_run_state", "agent_client_request", "agent_run", "agent_text_part_fts_map"]) {
+      const row = fixture.ctx.db.prepare(`select count(*) as c from ${table}`).get() as { c: number };
+      assert.equal(row.c, 0, `${table} should be removed with its workspace`);
+    }
+    const ftsCount = fixture.ctx.db.prepare("select count(*) as c from agent_archived_text_fts").get() as { c: number };
+    assert.equal(ftsCount.c, 0);
+    await assert.rejects(() => fs.access(agentAttachmentWorkspaceDir(fixture.ctx.dataDir, wsId)));
+  } finally {
+    unregisterWorkspaceRuntime(registration);
   }
-  const ftsCount = fixture.ctx.db.prepare("select count(*) as c from agent_archived_text_fts").get() as { c: number };
-  assert.equal(ftsCount.c, 0);
-  await assert.rejects(() => fs.access(agentAttachmentWorkspaceDir(fixture.ctx.dataDir, wsId)));
 });
 
 test("workspace delete: 仅清理目标 Workspace 的 Agent 图与 FTS 数据", async () => {
@@ -608,18 +625,23 @@ test("workspace delete: 仅清理目标 Workspace 的 Agent 图与 FTS 数据", 
       .run(`part-${workspaceId}`, workspaceId === "ws-delete-a" ? 601 : 602, now);
   }
 
-  await deleteWorkspace(fixture.ctx, logger, "ws-delete-a");
-
-  assert.equal(getWorkspace(db, "ws-delete-a"), null);
-  assert.equal((db.prepare("select count(*) as c from agent_message where workspace_id = 'ws-delete-a'").get() as { c: number }).c, 0);
-  assert.equal((db.prepare("select count(*) as c from agent_message_part where id = 'part-ws-delete-a'").get() as { c: number }).c, 0);
-  assert.equal((db.prepare("select count(*) as c from agent_text_part_fts_map where part_id = 'part-ws-delete-a'").get() as { c: number }).c, 0);
-  assert.equal((db.prepare("select count(*) as c from agent_archived_text_fts where rowid = 601").get() as { c: number }).c, 0);
-  assert.equal((db.prepare("select count(*) as c from agent_message where workspace_id = 'ws-delete-b'").get() as { c: number }).c, 1);
-  assert.equal((db.prepare("select count(*) as c from agent_message_part where id = 'part-ws-delete-b'").get() as { c: number }).c, 1);
-  assert.equal((db.prepare("select count(*) as c from agent_text_part_fts_map where part_id = 'part-ws-delete-b'").get() as { c: number }).c, 1);
-  assert.equal((db.prepare("select count(*) as c from agent_archived_text_fts where agent_archived_text_fts match 'workspaceb'").get() as { c: number }).c, 1);
-  assert.deepEqual(db.pragma("foreign_key_check"), []);
+  const registration = { runtime: { async cancelSessionAndWait() { return true; } }, handoffCoordinator: new SessionRuntimeHandoffCoordinator(), settleWorkspaceRunsForDeletion: () => [] };
+  registerWorkspaceRuntime(registration);
+  try {
+    await deleteWorkspace(fixture.ctx, logger, "ws-delete-a");
+    assert.equal(getWorkspace(db, "ws-delete-a"), null);
+    assert.equal((db.prepare("select count(*) as c from agent_message where workspace_id = 'ws-delete-a'").get() as { c: number }).c, 0);
+    assert.equal((db.prepare("select count(*) as c from agent_message_part where id = 'part-ws-delete-a'").get() as { c: number }).c, 0);
+    assert.equal((db.prepare("select count(*) as c from agent_text_part_fts_map where part_id = 'part-ws-delete-a'").get() as { c: number }).c, 0);
+    assert.equal((db.prepare("select count(*) as c from agent_archived_text_fts where rowid = 601").get() as { c: number }).c, 0);
+    assert.equal((db.prepare("select count(*) as c from agent_message where workspace_id = 'ws-delete-b'").get() as { c: number }).c, 1);
+    assert.equal((db.prepare("select count(*) as c from agent_message_part where id = 'part-ws-delete-b'").get() as { c: number }).c, 1);
+    assert.equal((db.prepare("select count(*) as c from agent_text_part_fts_map where part_id = 'part-ws-delete-b'").get() as { c: number }).c, 1);
+    assert.equal((db.prepare("select count(*) as c from agent_archived_text_fts where agent_archived_text_fts match 'workspaceb'").get() as { c: number }).c, 1);
+    assert.deepEqual(db.pragma("foreign_key_check"), []);
+  } finally {
+    unregisterWorkspaceRuntime(registration);
+  }
 });
 
 test("workspace delete: Agent 清理失败时整个删除事务回滚", async () => {
@@ -658,16 +680,21 @@ test("workspace delete: Agent 清理失败时整个删除事务回滚", async ()
     end;
   `);
 
-  await assert.rejects(() => deleteWorkspace(fixture.ctx, logger, workspaceId), (error: unknown) => error instanceof HttpError && error.code === "WORKSPACE_DELETION_PENDING");
-
-  assert.notEqual(getWorkspace(db, workspaceId), null);
-  assert.notEqual(db.prepare("select workspace_id from workspace_deletion where workspace_id = ?").get(workspaceId), undefined);
-  assert.equal((db.prepare("select count(*) as c from agent_session where workspace_id = ?").get(workspaceId) as { c: number }).c, 1);
-  assert.equal((db.prepare("select count(*) as c from agent_message where workspace_id = ?").get(workspaceId) as { c: number }).c, 1);
-  assert.equal((db.prepare("select count(*) as c from agent_message_part where id = 'part-rollback'").get() as { c: number }).c, 1);
-  assert.equal((db.prepare("select count(*) as c from agent_text_part_fts_map where part_id = 'part-rollback'").get() as { c: number }).c, 1);
-  assert.equal((db.prepare("select count(*) as c from agent_archived_text_fts where rowid = 701").get() as { c: number }).c, 1);
-  assert.deepEqual(db.pragma("foreign_key_check"), []);
+  const registration = { runtime: { async cancelSessionAndWait() { return true; } }, handoffCoordinator: new SessionRuntimeHandoffCoordinator(), settleWorkspaceRunsForDeletion: () => [] };
+  registerWorkspaceRuntime(registration);
+  try {
+    await assert.rejects(() => deleteWorkspace(fixture.ctx, logger, workspaceId), (error: unknown) => error instanceof HttpError && error.code === "WORKSPACE_DELETION_PENDING");
+    assert.notEqual(getWorkspace(db, workspaceId), null);
+    assert.notEqual(db.prepare("select workspace_id from workspace_deletion where workspace_id = ?").get(workspaceId), undefined);
+    assert.equal((db.prepare("select count(*) as c from agent_session where workspace_id = ?").get(workspaceId) as { c: number }).c, 1);
+    assert.equal((db.prepare("select count(*) as c from agent_message where workspace_id = ?").get(workspaceId) as { c: number }).c, 1);
+    assert.equal((db.prepare("select count(*) as c from agent_message_part where id = 'part-rollback'").get() as { c: number }).c, 1);
+    assert.equal((db.prepare("select count(*) as c from agent_text_part_fts_map where part_id = 'part-rollback'").get() as { c: number }).c, 1);
+    assert.equal((db.prepare("select count(*) as c from agent_archived_text_fts where rowid = 701").get() as { c: number }).c, 1);
+    assert.deepEqual(db.pragma("foreign_key_check"), []);
+  } finally {
+    unregisterWorkspaceRuntime(registration);
+  }
 });
 
 test("workspace delete: attachment 目录清理遇不安全路径会保留 tombstone 与 Workspace", async () => {
@@ -718,6 +745,23 @@ test("workspace delete DB-first cancel 后等待 runtime drain，期间不持 SQ
   db.prepare(`insert into session_run_state (workspace_id,session_id,status,active_run_id,run_notice_text,retry_count,next_retry_at,active_assistant_message_id,non_terminal_message_ids_json,non_terminal_tool_execution_ids_json,updated_at)
     values (?, 'delete-running-session', 'running', 'delete-running-run', '', 0, null, null, '[]', '[]', ?)`).run(fixture.workspaceId, now);
 
+  const completedEvents: string[] = [];
+  const lifecycle = new RunLifecycleApplication({
+    persistence: new SqliteRunLifecyclePersistence(db),
+    clock: { nowMs: () => now + 1 },
+    ids: { newId: () => "evt-delete" },
+    promptStaticCacheInvalidator: { clear() {} },
+    runCompletedEventPublisher: { publishRunCompleted(event) { completedEvents.push(event.runId); } },
+    logger,
+    runtimeHandoffCoordinator: new SessionRuntimeHandoffCoordinator(),
+    workspaceRunContextReader: { get() { return null; } },
+    runStateReader: { get(sessionId) {
+      return { workspaceId: fixture.workspaceId, sessionId, status: "idle", activeRunId: null, runNoticeText: "", retryCount: 0, nextRetryAt: null, activeAssistantMessageId: null, nonTerminalMessageIds: [], nonTerminalToolExecutionIds: [], updatedAt: now };
+    } },
+    activeSubtaskChildQuery: { listByParentRun() { return []; } },
+    triggerInputReader: { getUserText() { return null; } },
+    isContextAppendConflict() { return false; },
+  });
   let resolveCancel!: () => void;
   const cancelGate = new Promise<void>((resolve) => { resolveCancel = resolve; });
   let notifyCancellation!: () => void;
@@ -731,12 +775,29 @@ test("workspace delete DB-first cancel 后等待 runtime drain，期间不持 SQ
     },
     async cancelSessionAndWait({ sessionId }: { sessionId: string; timeoutMs: number }) {
       assert.equal(sessionId, "delete-running-session");
+      const run = db.prepare(`select status, execution_phase as executionPhase,
+        terminal_result_code as terminalResultCode
+        from agent_run where run_id = 'delete-running-run'`).get() as {
+          status: string; executionPhase: string; terminalResultCode: string | null;
+        };
+      assert.deepEqual(run, {
+        status: "cancelled", executionPhase: "terminal", terminalResultCode: "run_cancelled",
+      });
+      const state = db.prepare("select status, active_run_id as activeRunId from session_run_state where workspace_id = ? and session_id = ?").get(fixture.workspaceId, sessionId);
+      assert.deepEqual(state, { status: "idle", activeRunId: null });
       notifyCancellation();
       await cancelGate;
       return true;
     }
   };
-  const registration = { runtime, handoffCoordinator: new SessionRuntimeHandoffCoordinator() };
+  const registration = {
+    runtime,
+    handoffCoordinator: new SessionRuntimeHandoffCoordinator(),
+    settleWorkspaceRunsForDeletion(workspaceId: string) {
+      assert.equal(workspaceId, fixture.workspaceId);
+      return lifecycle.settleWorkspaceRunsForDeletion(workspaceId);
+    },
+  };
   registerWorkspaceRuntime(registration);
   try {
     const deleting = deleteWorkspace(fixture.ctx, logger, fixture.workspaceId);
@@ -752,12 +813,84 @@ test("workspace delete DB-first cancel 后等待 runtime drain，期间不持 SQ
     await deleting;
     assert.equal(getWorkspace(db, fixture.workspaceId), null);
     assert.notEqual(getWorkspace(db, "ws-other"), null, "等待不应阻塞其他 Workspace 的 DB 写入");
+    assert.deepEqual(completedEvents, ["delete-running-run"]);
   } finally {
+    lifecycle.dispose();
     unregisterWorkspaceRuntime(registration);
   }
 });
 
-test("workspace delete 在 worker drain 超时或不可达时保留数据并释放 fence", async () => {
+test("workspace delete 收敛部分失败时不 drain，重试会 drain 已终态和新收敛的全部 Session", async () => {
+  const fixture = await createFixture();
+  const logger = createLogger();
+  const now = Date.now();
+  const { db } = fixture.ctx;
+  for (const [sessionId, runId] of [["delete-a-session", "delete-a-run"], ["delete-b-session", "delete-b-run"]] as const) {
+    db.prepare(`insert into agent_session (id,workspace_id,title,kind,created_at,updated_at)
+      values (?, ?, ?, 'primary', ?, ?)`).run(sessionId, fixture.workspaceId, sessionId, now, now);
+    db.prepare(`insert into agent_run (run_id,workspace_id,session_id,trigger_message_id,agent_id,provider_id,model_id,status,created_at,updated_at)
+      values (?, ?, ?, null, 'agent', 'provider', 'model', 'running', ?, ?)`).run(runId, fixture.workspaceId, sessionId, now, now);
+    db.prepare(`insert into session_run_state (workspace_id,session_id,status,active_run_id,run_notice_text,retry_count,next_retry_at,active_assistant_message_id,non_terminal_message_ids_json,non_terminal_tool_execution_ids_json,updated_at)
+      values (?, ?, 'running', ?, '', 0, null, null, '[]', '[]', ?)`).run(fixture.workspaceId, sessionId, runId, now);
+  }
+
+  const events: string[] = [];
+  const cacheClears: string[] = [];
+  const sqlitePersistence = new SqliteRunLifecyclePersistence(db);
+  let failSecondConvergence = true;
+  const persistence = new Proxy(sqlitePersistence, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (property === "convergeRunTerminal") {
+        return (input: { runId: string }) => {
+          if (failSecondConvergence && input.runId === "delete-b-run") throw new Error("injected convergence failure");
+          return target.convergeRunTerminal(input as any);
+        };
+      }
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const lifecycle = new RunLifecycleApplication({
+    persistence: persistence as any,
+    clock: { nowMs: () => now + 1 },
+    ids: { newId: () => "evt-delete" },
+    promptStaticCacheInvalidator: { clear(runId) { cacheClears.push(runId); } },
+    runCompletedEventPublisher: { publishRunCompleted(event) { events.push(event.runId); } },
+    logger,
+    runtimeHandoffCoordinator: new SessionRuntimeHandoffCoordinator(),
+    workspaceRunContextReader: { get() { return null; } },
+    runStateReader: { get(sessionId) {
+      return { workspaceId: fixture.workspaceId, sessionId, status: "idle", activeRunId: null, runNoticeText: "", retryCount: 0, nextRetryAt: null, activeAssistantMessageId: null, nonTerminalMessageIds: [], nonTerminalToolExecutionIds: [], updatedAt: now };
+    } },
+    activeSubtaskChildQuery: { listByParentRun() { return []; } },
+    triggerInputReader: { getUserText() { return null; } },
+    isContextAppendConflict() { return false; },
+  });
+  const drained: string[] = [];
+  const registration = {
+    runtime: { enqueueRun() {}, async cancelSessionAndWait({ sessionId }: { sessionId: string }) { drained.push(sessionId); return true; } },
+    handoffCoordinator: new SessionRuntimeHandoffCoordinator(),
+    settleWorkspaceRunsForDeletion: (workspaceId: string) => lifecycle.settleWorkspaceRunsForDeletion(workspaceId),
+  };
+  registerWorkspaceRuntime(registration);
+  try {
+    await assert.rejects(() => deleteWorkspace(fixture.ctx, logger, fixture.workspaceId), /Workspace deletion remains pending/);
+    assert.deepEqual(drained, [], "任一 DB convergence 失败前不得开始 runtime drain");
+    assert.deepEqual(events, ["delete-a-run"]);
+    assert.deepEqual(cacheClears, ["delete-a-run"]);
+
+    failSecondConvergence = false;
+    await deleteWorkspace(fixture.ctx, logger, fixture.workspaceId);
+    assert.deepEqual(drained, ["delete-a-session", "delete-b-session"]);
+    assert.deepEqual(events, ["delete-a-run", "delete-b-run"], "已终态 Run replay 不得重复事件");
+    assert.deepEqual(cacheClears, ["delete-a-run", "delete-b-run"]);
+  } finally {
+    lifecycle.dispose();
+    unregisterWorkspaceRuntime(registration);
+  }
+});
+
+test("workspace delete drain 失败后 runtime 缺失仍 fail closed，重新注册后才物理删除", async () => {
   const fixture = await createFixture();
   const logger = createLogger();
   const now = Date.now();
@@ -765,21 +898,54 @@ test("workspace delete 在 worker drain 超时或不可达时保留数据并释�
   db.prepare("insert into agent_session (id,workspace_id,title,kind,created_at,updated_at) values ('timeout-session', ?, 'Running', 'primary', ?, ?)").run(fixture.workspaceId, now, now);
   db.prepare("insert into agent_run (run_id,workspace_id,session_id,trigger_message_id,agent_id,provider_id,model_id,status,created_at,updated_at) values ('timeout-run', ?, 'timeout-session', null, 'agent', 'provider', 'model', 'running', ?, ?)").run(fixture.workspaceId, now, now);
   db.prepare("insert into session_run_state (workspace_id,session_id,status,active_run_id,run_notice_text,retry_count,next_retry_at,active_assistant_message_id,non_terminal_message_ids_json,non_terminal_tool_execution_ids_json,updated_at) values (?, 'timeout-session', 'running', 'timeout-run', '', 0, null, null, '[]', '[]', ?)").run(fixture.workspaceId, now);
+
+  const lifecycle = new RunLifecycleApplication({
+    persistence: new SqliteRunLifecyclePersistence(db),
+    clock: { nowMs: () => now + 1 },
+    ids: { newId: () => "evt-timeout" },
+    promptStaticCacheInvalidator: { clear() {} },
+    runCompletedEventPublisher: { publishRunCompleted() {} },
+    logger,
+    runtimeHandoffCoordinator: new SessionRuntimeHandoffCoordinator(),
+    workspaceRunContextReader: { get() { return null; } },
+    runStateReader: { get(sessionId) {
+      return { workspaceId: fixture.workspaceId, sessionId, status: "idle", activeRunId: null, runNoticeText: "", retryCount: 0, nextRetryAt: null, activeAssistantMessageId: null, nonTerminalMessageIds: [], nonTerminalToolExecutionIds: [], updatedAt: now };
+    } },
+    activeSubtaskChildQuery: { listByParentRun() { return []; } },
+    triggerInputReader: { getUserText() { return null; } },
+    isContextAppendConflict() { return false; },
+  });
   let workerIdle = false;
   const runtime = { enqueueRun() {}, async cancelSessionAndWait() { return workerIdle; } };
-  const registration = { runtime, handoffCoordinator: new SessionRuntimeHandoffCoordinator() };
+  const registration = {
+    runtime,
+    handoffCoordinator: new SessionRuntimeHandoffCoordinator(),
+    settleWorkspaceRunsForDeletion: (workspaceId: string) => lifecycle.settleWorkspaceRunsForDeletion(workspaceId),
+  };
   registerWorkspaceRuntime(registration);
   try {
     await assert.rejects(() => deleteWorkspace(fixture.ctx, logger, fixture.workspaceId), (error: unknown) => error instanceof HttpError && error.code === "WORKSPACE_AGENT_WORKER_DRAIN_TIMEOUT");
     assert.notEqual(getWorkspace(db, fixture.workspaceId), null);
     assert.equal(workspaceDeletingFence.isDeleting(fixture.workspaceId), true);
     assert.notEqual(db.prepare("select workspace_id from workspace_deletion where workspace_id = ?").get(fixture.workspaceId), undefined);
+    assert.deepEqual(db.prepare("select status, execution_phase as executionPhase from agent_run where run_id = 'timeout-run'").get(), { status: "cancelled", executionPhase: "terminal" });
+    assert.deepEqual(db.prepare("select status, active_run_id as activeRunId from session_run_state where workspace_id = ? and session_id = 'timeout-session'").get(fixture.workspaceId), { status: "idle", activeRunId: null });
+
+    unregisterWorkspaceRuntime(registration);
+    await assert.rejects(() => deleteWorkspace(fixture.ctx, logger, fixture.workspaceId), (error: unknown) => error instanceof HttpError && error.code === "WORKSPACE_AGENT_WORKER_UNAVAILABLE");
+    assert.notEqual(getWorkspace(db, fixture.workspaceId), null, "未确认 runtime drain 时不得删除 Workspace");
+    assert.notEqual(db.prepare("select workspace_id from workspace_deletion where workspace_id = ?").get(fixture.workspaceId), undefined);
+    assert.equal((db.prepare("select count(*) as count from agent_session where workspace_id = ?").get(fixture.workspaceId) as { count: number }).count, 1);
+    assert.equal((db.prepare("select count(*) as count from agent_run where workspace_id = ?").get(fixture.workspaceId) as { count: number }).count, 1);
+
     workerIdle = true;
+    registerWorkspaceRuntime(registration);
     await deleteWorkspace(fixture.ctx, logger, fixture.workspaceId);
     assert.equal(getWorkspace(db, fixture.workspaceId), null, "重试成功才物理删除并释放 fence");
     assert.equal(workspaceDeletingFence.isDeleting(fixture.workspaceId), false);
   } finally {
     unregisterWorkspaceRuntime(registration);
+    lifecycle.dispose();
   }
 });
 
@@ -791,7 +957,7 @@ test("workspace delete 在 worker 不可达时不物理删除", async () => {
   fixture.ctx.db.prepare("insert into agent_run (run_id,workspace_id,session_id,trigger_message_id,agent_id,provider_id,model_id,status,created_at,updated_at) values ('unavailable-run', ?, 'unavailable-session', null, 'agent', 'provider', 'model', 'running', ?, ?)").run(fixture.workspaceId, now, now);
   fixture.ctx.db.prepare("insert into session_run_state (workspace_id,session_id,status,active_run_id,run_notice_text,retry_count,next_retry_at,active_assistant_message_id,non_terminal_message_ids_json,non_terminal_tool_execution_ids_json,updated_at) values (?, 'unavailable-session', 'running', 'unavailable-run', '', 0, null, null, '[]', '[]', ?)").run(fixture.workspaceId, now);
   const runtime = { enqueueRun() {}, async cancelSessionAndWait() { throw new Error("unreachable"); } };
-  const registration = { runtime, handoffCoordinator: new SessionRuntimeHandoffCoordinator() };
+  const registration = { runtime, handoffCoordinator: new SessionRuntimeHandoffCoordinator(), settleWorkspaceRunsForDeletion: () => ["unavailable-session"] };
   registerWorkspaceRuntime(registration);
   try {
     await assert.rejects(() => deleteWorkspace(fixture.ctx, logger, fixture.workspaceId), (error: unknown) => error instanceof HttpError && error.code === "WORKSPACE_AGENT_WORKER_UNAVAILABLE");

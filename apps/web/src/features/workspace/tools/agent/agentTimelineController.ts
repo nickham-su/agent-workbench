@@ -84,7 +84,9 @@ export function buildTimelineRequest(
     mode,
     sinceRevision: state.revision,
     knownHeadMessageId: state.headMessageId ?? undefined,
-    knownContextRootMessageId: state.contextRootMessageId ?? undefined,
+    ...(state.contextRootMessageId === null
+      ? { knownContextRootIsNull: true }
+      : { knownContextRootMessageId: state.contextRootMessageId }),
   };
 }
 

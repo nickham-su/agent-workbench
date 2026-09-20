@@ -15,7 +15,6 @@ const apiClient = new AgentApiClient({
   internalToken: env.internalToken,
   responseValidation: env.responseValidation,
   internalRpcTimeoutMs: env.internalRpcTimeoutMs,
-  completeRunTimeoutMs: env.completeRunTimeoutMs,
   logger: console,
 });
 

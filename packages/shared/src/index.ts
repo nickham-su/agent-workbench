@@ -12,6 +12,7 @@ export * from "./contracts/plugin.js";
 export * from "./contracts/settings.js";
 export * from "./contracts/auth.js";
 export * from "./contracts/agent-message.js";
-export { AgentRunKindSchema, type AgentRunKind } from "./contracts/agent.js";
+export * from "./contracts/agent.js";
 export * from "./contracts/agent-primitives.js";
+export * from "./agent-primary-projection.js";
 export * from "./skills-protocol.js";

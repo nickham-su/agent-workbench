@@ -3,7 +3,7 @@ import Database from "better-sqlite3";
 import { test } from "node:test";
 import { HttpError } from "../../../app/errors.js";
 import { initSchema } from "../../../infra/db/schema.js";
-import { appendMessage, commitCompactionMessage, createMessageSession } from "../agent-message.store.js";
+import { appendMessage, commitCompactionMessageForTest, createMessageSession } from "../agent-message.store.js";
 import { archiveRead, archiveSearch, rebuildArchivedTextFts } from "./agent-archive-store.js";
 
 function fixture() {
@@ -53,7 +53,7 @@ test("archive read/search are bounded by context root, paginate stably, and vali
   append(db, { id: "one", previous: null, revision: 0, text: "alpha searchable archive" });
   append(db, { id: "two", previous: "one", revision: 1, text: "beta searchable archive" });
   append(db, { id: "three", previous: "two", revision: 2, text: "current context" });
-  commitCompactionMessage(db, { id: "compact", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "three", expectedRevision: 3, textPartId: "compact-part", text: "summary", createdAt: 20 });
+  commitCompactionMessageForTest(db, { id: "compact", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "three", expectedRevision: 3, textPartId: "compact-part", text: "summary", createdAt: 20 });
   const first = archiveRead(db, { workspaceId: "ws", sessionId: "session", limit: 1 });
   assert.deepEqual(first.items.map((item) => item.messageId), ["three"]);
   assert.ok(first.nextCursor);
@@ -72,7 +72,7 @@ test("archive 分页仅在确有后续项时返回 cursor", () => {
   append(db, { id: "one", previous: null, revision: 0, text: "search page one" });
   append(db, { id: "two", previous: "one", revision: 1, text: "search page two" });
   append(db, { id: "current", previous: "two", revision: 2, text: "current" });
-  commitCompactionMessage(db, { id: "compact", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "current", expectedRevision: 3, textPartId: "compact-part", text: "summary", createdAt: 20 });
+  commitCompactionMessageForTest(db, { id: "compact", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "current", expectedRevision: 3, textPartId: "compact-part", text: "summary", createdAt: 20 });
   const readFirst = archiveRead(db, { workspaceId: "ws", sessionId: "session", limit: 3 });
   assert.equal(readFirst.nextCursor, null, "刚好等于 limit 但无后续项时不可返回 cursor");
   const searchFirst = archiveSearch(db, { workspaceId: "ws", sessionId: "session", query: "search page", limit: 1 });
@@ -86,7 +86,7 @@ test("archive search 将特殊字符作为普通文本且不泄露 FTS 错误", 
   const db = fixture();
   append(db, { id: "one", previous: null, revision: 0, text: "literal foo* alpha OR beta 中文\"词" });
   append(db, { id: "current", previous: "one", revision: 1, text: "current" });
-  commitCompactionMessage(db, { id: "compact", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "current", expectedRevision: 2, textPartId: "compact-part", text: "summary", createdAt: 20 });
+  commitCompactionMessageForTest(db, { id: "compact", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "current", expectedRevision: 2, textPartId: "compact-part", text: "summary", createdAt: 20 });
   assert.deepEqual(archiveSearch(db, { workspaceId: "ws", sessionId: "session", query: "foo*" }).items.map((item) => item.messageId), ["one"]);
   assert.deepEqual(archiveSearch(db, { workspaceId: "ws", sessionId: "session", query: "OR beta" }).items.map((item) => item.messageId), ["one"]);
   assert.deepEqual(archiveSearch(db, { workspaceId: "ws", sessionId: "session", query: "中文\"词" }).items.map((item) => item.messageId), ["one"]);
@@ -108,7 +108,7 @@ test("archive search 不将 FTS/map schema 故障伪装为 query 参数错误", 
     const db = fixture();
     append(db, { id: "one", previous: null, revision: 0, text: "search schema failure" });
     append(db, { id: "current", previous: "one", revision: 1, text: "current" });
-    commitCompactionMessage(db, { id: "compact", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "current", expectedRevision: 2, textPartId: "compact-part", text: "summary", createdAt: 20 });
+    commitCompactionMessageForTest(db, { id: "compact", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "current", expectedRevision: 2, textPartId: "compact-part", text: "summary", createdAt: 20 });
     db.exec(`drop table ${tableName}`);
     assert.throws(
       () => archiveSearch(db, { workspaceId: "ws", sessionId: "session", query: "schema failure" }),
@@ -129,7 +129,7 @@ test("archive pagination is complete, Chinese trigram matches, and shared histor
     id: "uncompacted", workspaceId: "ws", title: "Uncompacted", kind: "primary",
     headMessageId: "four", contextRootMessageId: "one", createdAt: 20,
   });
-  commitCompactionMessage(db, {
+  commitCompactionMessageForTest(db, {
     id: "compact", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "four", expectedRevision: 4,
     textPartId: "compact-part", text: "summary", createdAt: 21,
   });
@@ -177,7 +177,7 @@ test("archive cursor rejects a real TextPart outside the eligible archive scope"
   append(db, { id: "one", previous: null, revision: 0, text: "eligible archived text" });
   append(db, { id: "failed", previous: "one", revision: 1, type: "assistant", status: "failed", text: "failed text" });
   append(db, { id: "current", previous: "failed", revision: 2, text: "current text" });
-  commitCompactionMessage(db, {
+  commitCompactionMessageForTest(db, {
     id: "compact", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "current", expectedRevision: 3,
     textPartId: "compact-part", text: "summary", createdAt: 20,
   });
@@ -197,9 +197,9 @@ test("archive cursor is invalidated when context root changes", () => {
   append(db, { id: "one", previous: null, revision: 0, text: "first archived text" });
   append(db, { id: "two", previous: "one", revision: 1, text: "second archived text" });
   append(db, { id: "three", previous: "two", revision: 2, text: "current" });
-  commitCompactionMessage(db, { id: "compact-one", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "three", expectedRevision: 3, textPartId: "compact-one-part", text: "summary", createdAt: 20 });
+  commitCompactionMessageForTest(db, { id: "compact-one", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "three", expectedRevision: 3, textPartId: "compact-one-part", text: "summary", createdAt: 20 });
   const page = archiveRead(db, { workspaceId: "ws", sessionId: "session", limit: 1 });
-  commitCompactionMessage(db, { id: "compact-two", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "compact-one", expectedRevision: 4, textPartId: "compact-two-part", text: "summary two", createdAt: 21 });
+  commitCompactionMessageForTest(db, { id: "compact-two", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "compact-one", expectedRevision: 4, textPartId: "compact-two-part", text: "summary two", createdAt: 21 });
   assert.throws(() => archiveRead(db, { workspaceId: "ws", sessionId: "session", cursor: page.nextCursor! }), (error: unknown) => error instanceof HttpError && error.code === "AGENT_ARCHIVE_CURSOR_INVALID");
   db.close();
 });

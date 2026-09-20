@@ -5,8 +5,10 @@ import { afterEach, test } from "node:test";
 import { Type } from "@sinclair/typebox";
 import {
   AgentApiEndpoints,
-  type AgentApiCommitCompactionRequest,
+  type AgentApiCommitCompactionWithTerminalIntentRequest,
   type AgentApiCommitCompactionResponse,
+  type AgentApiCompactionSourceRequest,
+  type AgentApiCompactionSourceResponse,
   type AgentApiCreateStreamingAssistantRequest,
   type AgentApiResumeStreamingAssistantRequest,
   type AgentApiReplaceStreamingAssistantRequest,
@@ -52,7 +54,6 @@ type TestServerFixture = {
 
 type TestRpcTiming = {
   internalRpcTimeoutMs: number;
-  completeRunTimeoutMs: number;
   retryDelayMs: number;
 };
 
@@ -84,7 +85,6 @@ function createTestRpcTiming(
 ): TestRpcTiming {
   return {
     internalRpcTimeoutMs: overrides.internalRpcTimeoutMs ?? 20,
-    completeRunTimeoutMs: overrides.completeRunTimeoutMs ?? 10,
     retryDelayMs: overrides.retryDelayMs ?? 1,
   };
 }
@@ -236,11 +236,14 @@ const runStateInput = {
   updatedAt: 100,
 } satisfies AgentApiUpdateRunNoticeRequest;
 
-const runCompleteInput = {
+const terminalControlInput = {
   workspaceId: "WORKSPACE",
   sessionId: "SESSION",
   runId: "RUN",
   status: "completed" as const,
+  code: "run_completed" as const,
+  detail: null,
+  updatedAt: 100,
 };
 
 const assistantMessage = {
@@ -297,7 +300,7 @@ const toolExecutionInput: AgentApiUpdateToolExecutionRequest = {
   updatedAt: 200,
 };
 
-const compactInput: AgentApiCommitCompactionRequest = {
+const compactInput: AgentApiCommitCompactionWithTerminalIntentRequest = {
   workspaceId: "WORKSPACE",
   sessionId: "SESSION",
   runId: "RUN",
@@ -306,12 +309,36 @@ const compactInput: AgentApiCommitCompactionRequest = {
   expectedHeadMessageId: "MESSAGE",
   expectedRevision: 1,
   summaryText: "SUMMARY",
+  retainedFromMessageId: null,
   createdAt: 300,
 };
 
 const compactResponse: AgentApiCommitCompactionResponse = {
   result: "updated",
   summaryMessageId: "COMPACTION_MESSAGE",
+};
+
+const compactionSourceInput: AgentApiCompactionSourceRequest = {
+  workspaceId: "WORKSPACE",
+  sessionId: "SESSION",
+  runId: "RUN",
+};
+
+const compactionSourceResponse: AgentApiCompactionSourceResponse = {
+  ...compactionSourceInput,
+  runKind: "manual_compaction",
+  triggerMessageId: null,
+  agentId: "AGENT",
+  providerId: "PROVIDER",
+  modelId: "MODEL",
+  subtaskDepth: null,
+  headMessageId: "MESSAGE",
+  contextRootMessageId: "COMPACTION_MESSAGE",
+  sessionRevision: 2,
+  uiLocale: null,
+  oneShotSystem: "",
+  pendingBoundary: null,
+  blocks: [],
 };
 
 const subtaskPreforkInput: AgentApiSubtaskPreforkPlanRequest = {
@@ -351,7 +378,6 @@ function createShortTimeoutClient(
     apiOrigin: origin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: timing.internalRpcTimeoutMs,
-    completeRunTimeoutMs: timing.completeRunTimeoutMs,
     logger: options.logger ?? { warn() {} },
     sleepFn: options.sleepFn ?? (async () => {}),
   });
@@ -673,15 +699,20 @@ test("all public client methods are explicitly classified", () => {
     replaceStreamingAssistant: "controlWrite",
     discardStreamingAssistant: "controlWrite",
     completeAssistant: "controlWrite",
+    completeTerminalAssistant: "idempotentControlWrite",
     updateToolExecution: "controlWrite",
     updateRunNotice: "controlWrite",
-    completeRun: "runComplete",
+    markRunWorkInProgress: "terminalControl",
+    persistRunTerminalIntent: "terminalControl",
+    convergeRunTerminal: "terminalControl",
     getExecutionProfile: "controlRead",
     getPromptContext: "controlRead",
     getMessagesContext: "controlRead",
+    getCompactionSource: "controlRead",
     archiveRead: "controlRead",
     archiveSearch: "controlRead",
-    commitCompaction: "controlWrite",
+    commitCompactionWithTerminalIntent: "idempotentControlWrite",
+    confirmCompactionCommit: "controlRead",
     getSubtaskPreforkPlan: "controlRead",
     startSubtaskRun: "subtaskStart",
     getSubtaskResult: "controlRead",
@@ -766,13 +797,13 @@ test("controlWrite never retries timeout or 503", async () => {
   }));
   const unavailableClient = createShortTimeoutClient(unavailableFixture.origin);
   await assert.rejects(
-    () => unavailableClient.commitCompaction(compactInput),
+    () => unavailableClient.commitCompactionWithTerminalIntent(compactInput),
     InternalRpcHttpError,
   );
   assert.equal(unavailableFixture.attempts.length, 1);
 });
 
-test("subtaskStart and runComplete retry once with their own timeout policies", async () => {
+test("subtaskStart retries once while terminalControl leaves retries to Runner", async () => {
   const startFixture = await startTestServer((request) =>
     request.attempt === 1
       ? { status: 503, body: { message: "SERVER_MESSAGE" } }
@@ -800,7 +831,7 @@ test("subtaskStart and runComplete retry once with their own timeout policies", 
   const completeFixture = await startTestServer((request) =>
     request.attempt === 1
       ? { status: 503, body: { message: "SERVER_MESSAGE" } }
-      : { status: 200, body: { ok: true } },
+      : { status: 200, body: { result: "updated" } },
   );
   const completeDelays: number[] = [];
   const recorder = createWarningRecorder();
@@ -809,16 +840,39 @@ test("subtaskStart and runComplete retry once with their own timeout policies", 
     sleepFn: async (ms) => {
       completeDelays.push(ms);
     },
-    timing: { internalRpcTimeoutMs: 37, completeRunTimeoutMs: 11 },
+    timing: { internalRpcTimeoutMs: 100 },
   });
-  await completeClient.completeRun(runCompleteInput);
-  assert.equal(completeFixture.attempts.length, 2);
-  assert.deepEqual(completeDelays, [300]);
+  await assert.rejects(
+    () => completeClient.persistRunTerminalIntent(terminalControlInput, { timeoutMs: 50 }),
+    InternalRpcHttpError,
+  );
+  assert.equal(completeFixture.attempts.length, 1);
+  assert.deepEqual(completeDelays, []);
   assert.equal(
     recorder.warnings.some(
       (warning) =>
-        warning.includes("policy=runComplete") &&
-        warning.includes("timeoutMs=11"),
+        warning.includes("policy=terminalControl") &&
+        warning.includes("timeoutMs=50"),
+    ),
+    true,
+  );
+});
+
+test("terminal-control 单次 timeout 不得超过内部 RPC 配置", async () => {
+  const fixture = await startTestServer(() => ({ status: 503, body: { message: "SERVER_MESSAGE" } }));
+  const recorder = createWarningRecorder();
+  const client = createShortTimeoutClient(fixture.origin, {
+    logger: recorder.logger,
+    timing: { internalRpcTimeoutMs: 11 },
+  });
+  await assert.rejects(
+    () => client.persistRunTerminalIntent(terminalControlInput, { timeoutMs: 99 }),
+    InternalRpcHttpError,
+  );
+  assert.equal(fixture.attempts.length, 1);
+  assert.equal(
+    recorder.warnings.some((warning) =>
+      warning.includes("policy=terminalControl") && warning.includes("timeoutMs=11"),
     ),
     true,
   );
@@ -1005,7 +1059,7 @@ test("409 conflict remains ApiConflictError even if its response body is pending
   const client = createShortTimeoutClient(fixture.origin);
   await assert.rejects(
     () =>
-      client.commitCompaction({
+      client.commitCompactionWithTerminalIntent({
         ...compactInput,
         workspaceId: "WORKSPACE_SECRET",
         sessionId: "SESSION_SECRET",
@@ -1043,20 +1097,23 @@ test("run methods use shared endpoint method/path and validate literal success",
     return {
       status: 200,
       body:
-        request.url === AgentApiEndpoints.updateRunNotice.path
+        request.url === AgentApiEndpoints.convergeRunTerminal.path
+          ? { kind: "transitioned", finalStatus: "completed" }
+          : request.url === AgentApiEndpoints.updateRunNotice.path
           ? { result: "updated" }
-          : { ok: true },
+          : { result: "updated" },
     };
   });
   const client = new AgentApiClient({
     apiOrigin: origin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
   });
 
   await client.updateRunNotice(runStateInput);
-  await client.completeRun(runCompleteInput);
+  await client.markRunWorkInProgress({ workspaceId: "WORKSPACE", sessionId: "SESSION", runId: "RUN", updatedAt: 100 });
+  await client.persistRunTerminalIntent(terminalControlInput);
+  await client.convergeRunTerminal({ workspaceId: "WORKSPACE", sessionId: "SESSION", runId: "RUN", updatedAt: 100 });
 
   assert.deepEqual(
     requests.map((request) => ({ method: request.method, url: request.url })),
@@ -1066,8 +1123,16 @@ test("run methods use shared endpoint method/path and validate literal success",
         url: AgentApiEndpoints.updateRunNotice.path,
       },
       {
-        method: AgentApiEndpoints.completeRun.method,
-        url: AgentApiEndpoints.completeRun.path,
+        method: AgentApiEndpoints.markRunWorkInProgress.method,
+        url: AgentApiEndpoints.markRunWorkInProgress.path,
+      },
+      {
+        method: AgentApiEndpoints.persistRunTerminalIntent.method,
+        url: AgentApiEndpoints.persistRunTerminalIntent.path,
+      },
+      {
+        method: AgentApiEndpoints.convergeRunTerminal.method,
+        url: AgentApiEndpoints.convergeRunTerminal.path,
       },
     ],
   );
@@ -1082,7 +1147,6 @@ test("strict rejects a successful response schema mismatch", async () => {
     apiOrigin: origin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
   });
 
   await assert.rejects(
@@ -1103,14 +1167,13 @@ test("warn logs a bounded schema warning and continues", async () => {
     apiOrigin: origin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
     responseValidation: "warn",
     logger: { warn: (message: string) => warnings.push(message) },
   });
 
-  await client.completeRun(runCompleteInput);
+  await client.persistRunTerminalIntent(terminalControlInput);
   assert.equal(warnings.length, 1);
-  assert.match(warnings[0] || "", /endpoint=.*run-complete/);
+  assert.match(warnings[0] || "", /endpoint=.*runs\/terminal-intent/);
   assert.match(warnings[0] || "", /method=POST/);
   assert.equal(warnings[0]?.includes("TOKEN"), false);
   assert.equal(warnings[0]?.includes("RUN"), false);
@@ -1131,8 +1194,7 @@ test("warn without an injected logger emits a warning", async () => {
       apiOrigin: origin,
       internalToken: "TOKEN",
       internalRpcTimeoutMs: 15_000,
-      completeRunTimeoutMs: 5_000,
-      responseValidation: "warn",
+        responseValidation: "warn",
     });
     await client.updateRunNotice(runStateInput);
   } finally {
@@ -1152,20 +1214,52 @@ test("Message compaction uses shared endpoint/method/body and validates the succ
     apiOrigin: origin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
   });
 
-  const result = await client.commitCompaction(compactInput);
+  const result = await client.commitCompactionWithTerminalIntent(compactInput);
 
   assert.deepEqual(result, compactResponse);
   assert.deepEqual(requests, [
     {
-      method: AgentApiEndpoints.commitCompaction.method,
-      url: AgentApiEndpoints.commitCompaction.path,
+      method: AgentApiEndpoints.commitCompactionWithTerminalIntent.method,
+      url: AgentApiEndpoints.commitCompactionWithTerminalIntent.path,
       body: compactInput,
     },
   ]);
   assert.equal(result.summaryMessageId, "COMPACTION_MESSAGE");
+});
+
+test("Compaction source uses its fixed read endpoint and rejects non-schema responses", async () => {
+  const requests: Array<{ method?: string; url?: string; body: unknown }> = [];
+  const origin = await startServer((request) => {
+    requests.push(request);
+    return { status: 200, body: compactionSourceResponse };
+  });
+  const client = new AgentApiClient({
+    apiOrigin: origin,
+    internalToken: "TOKEN",
+    internalRpcTimeoutMs: 15_000,
+  });
+  assert.deepEqual(await client.getCompactionSource(compactionSourceInput), compactionSourceResponse);
+  assert.deepEqual(requests, [{
+    method: AgentApiEndpoints.getCompactionSource.method,
+    url: AgentApiEndpoints.getCompactionSource.path,
+    body: compactionSourceInput,
+  }]);
+
+  const invalidOrigin = await startServer(() => ({
+    status: 200,
+    body: { ...compactionSourceResponse, uiLocale: "en-US" },
+  }));
+  const invalidClient = new AgentApiClient({
+    apiOrigin: invalidOrigin,
+    internalToken: "TOKEN",
+    internalRpcTimeoutMs: 15_000,
+  });
+  await assert.rejects(
+    () => invalidClient.getCompactionSource(compactionSourceInput),
+    (error: unknown) => error instanceof InternalRpcInvalidResponseError && error.stage === "schema",
+  );
 });
 
 test("compact strict and warn preserve the success schema boundary", async () => {
@@ -1178,10 +1272,9 @@ test("compact strict and warn preserve the success schema boundary", async () =>
     apiOrigin: strictOrigin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
   });
   await assert.rejects(
-    () => strictClient.commitCompaction(compactInput),
+    () => strictClient.commitCompactionWithTerminalIntent(compactInput),
     (error: unknown) =>
       error instanceof InternalRpcInvalidResponseError &&
       error.stage === "schema",
@@ -1196,11 +1289,10 @@ test("compact strict and warn preserve the success schema boundary", async () =>
     apiOrigin: warnOrigin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
     responseValidation: "warn",
     logger: { warn: (message: string) => warnings.push(message) },
   });
-  const parsed = await warnClient.commitCompaction(compactInput);
+  const parsed = await warnClient.commitCompactionWithTerminalIntent(compactInput);
   assert.deepEqual(parsed, invalidResponse);
   assert.equal(warnings.length, 1);
   assert.match(warnings[0] || "", /endpoint=.*messages\/compaction/);
@@ -1215,11 +1307,10 @@ test("compact strict and warn preserve the success schema boundary", async () =>
     apiOrigin: malformedOrigin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
     responseValidation: "warn",
   });
   await assert.rejects(
-    () => malformedClient.commitCompaction(compactInput),
+    () => malformedClient.commitCompactionWithTerminalIntent(compactInput),
     (error: unknown) =>
       error instanceof InternalRpcInvalidResponseError &&
       error.stage === "body-or-json",
@@ -1233,11 +1324,10 @@ test("compact strict and warn preserve the success schema boundary", async () =>
     apiOrigin: non2xxOrigin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
     responseValidation: "warn",
   });
   await assert.rejects(
-    () => non2xxClient.commitCompaction(compactInput),
+    () => non2xxClient.commitCompactionWithTerminalIntent(compactInput),
     (error: unknown) => {
       assertSafeError(error, {
         code: "AGENT_INTERNAL_RPC_HTTP_ERROR",
@@ -1258,10 +1348,9 @@ test("compact maps both 409 response bodies to ApiConflictError without inspecti
       apiOrigin: origin,
       internalToken: "TOKEN",
       internalRpcTimeoutMs: 15_000,
-      completeRunTimeoutMs: 5_000,
-    });
+      });
     await assert.rejects(
-      () => client.commitCompaction(compactInput),
+      () => client.commitCompactionWithTerminalIntent(compactInput),
       ApiConflictError,
     );
   }
@@ -1304,7 +1393,6 @@ test("subtask methods use shared endpoints, forward typed bodies, and validate e
     apiOrigin: origin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
   });
 
   await client.getSubtaskPreforkPlan(subtaskPreforkInput);
@@ -1363,8 +1451,7 @@ test("subtask strict/warn validation applies to all success responses without ex
       apiOrigin: origin,
       internalToken: "TOKEN",
       internalRpcTimeoutMs: 15_000,
-      completeRunTimeoutMs: 5_000,
-    });
+      });
     await assert.rejects(
       () => client[methods[i]](inputs[i] as never),
       (error: unknown) =>
@@ -1390,7 +1477,6 @@ test("subtask strict/warn validation applies to all success responses without ex
     apiOrigin: origin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
     responseValidation: "warn",
     logger: { warn: (message: string) => warnings.push(message) },
   });
@@ -1416,7 +1502,6 @@ test("subtask warn does not relax malformed JSON or non-2xx responses", async ()
     apiOrigin: malformedOrigin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
     responseValidation: "warn",
   });
   await assert.rejects(() =>
@@ -1431,7 +1516,6 @@ test("subtask warn does not relax malformed JSON or non-2xx responses", async ()
     apiOrigin: errorOrigin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
     responseValidation: "warn",
   });
   await assert.rejects(
@@ -1460,8 +1544,7 @@ test("subtask 409 remains a safe typed HTTP failure for every endpoint", async (
       apiOrigin: origin,
       internalToken: "TOKEN",
       internalRpcTimeoutMs: 15_000,
-      completeRunTimeoutMs: 5_000,
-    });
+      });
     await assert.rejects(
       () => client[method](input as never),
       (error: unknown) =>
@@ -1479,7 +1562,6 @@ test("warn does not relax JSON parse or non-2xx failures", async () => {
     apiOrigin: malformedOrigin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
     responseValidation: "warn",
   });
   await assert.rejects(() => malformedClient.updateRunNotice(runStateInput));
@@ -1492,11 +1574,10 @@ test("warn does not relax JSON parse or non-2xx failures", async () => {
     apiOrigin: errorOrigin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
     responseValidation: "warn",
   });
   await assert.rejects(
-    () => errorClient.completeRun(runCompleteInput),
+    () => errorClient.persistRunTerminalIntent(terminalControlInput),
     (error: unknown) =>
       error instanceof InternalRpcHttpError && error.status === 500,
   );
@@ -1614,14 +1695,12 @@ test("read-side methods use shared endpoints, typed bodies, and valid strict/war
     apiOrigin: origin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
   });
   const warnings: string[] = [];
   const warnClient = new AgentApiClient({
     apiOrigin: origin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
     responseValidation: "warn",
     logger: { warn: (message: string) => warnings.push(message) },
   });
@@ -1732,7 +1811,6 @@ test("read-side methods reject strict schema mismatches and warn without leaking
     apiOrigin: origin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
   });
   await assert.rejects(
     () =>
@@ -1772,7 +1850,6 @@ test("read-side methods reject strict schema mismatches and warn without leaking
     apiOrigin: origin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
     responseValidation: "warn",
     logger: { warn: (message: string) => warnings.push(message) },
   });
@@ -1836,7 +1913,6 @@ test("warn redacts sensitive TypeBox error paths and never includes schema messa
     apiOrigin: origin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
     responseValidation: "warn",
     logger: { warn: (message: string) => warnings.push(message) },
   });
@@ -1892,7 +1968,6 @@ test("read-side methods preserve unified non-2xx and malformed JSON failures in 
     apiOrigin: errorOrigin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
     responseValidation: "warn",
   });
 
@@ -1934,7 +2009,6 @@ test("read-side methods preserve unified non-2xx and malformed JSON failures in 
     apiOrigin: malformedOrigin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
     responseValidation: "warn",
   });
   await assert.rejects(
@@ -1964,7 +2038,6 @@ test("Message assistant creation and ToolExecution update use shared contracts",
     apiOrigin: origin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
   });
 
   assert.deepEqual(
@@ -2018,7 +2091,6 @@ test("Message ToolExecution writeback accepts the late ignored fenced branch", a
     apiOrigin: origin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
   });
   assert.deepEqual(await client.updateToolExecution(toolExecutionInput), {
     result: "ignored",
@@ -2034,7 +2106,6 @@ test("Message assistant creation maps 409 to ApiConflictError while execution up
     apiOrigin: createOrigin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
   });
   await assert.rejects(
     () => createClient.createStreamingAssistant(createAssistantInput),
@@ -2049,7 +2120,6 @@ test("Message assistant creation maps 409 to ApiConflictError while execution up
     apiOrigin: updateOrigin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
   });
   await assert.rejects(
     () => updateClient.updateToolExecution(toolExecutionInput),
@@ -2067,7 +2137,6 @@ test("Message writeback response validation observes strict/warn boundaries", as
     apiOrigin: strictOrigin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
   });
   await assert.rejects(
     () => strictClient.createStreamingAssistant(createAssistantInput),
@@ -2090,7 +2159,6 @@ test("Message writeback response validation observes strict/warn boundaries", as
     apiOrigin: warnOrigin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
-    completeRunTimeoutMs: 5_000,
     responseValidation: "warn",
     logger: { warn: (message: string) => warnings.push(message) },
   });

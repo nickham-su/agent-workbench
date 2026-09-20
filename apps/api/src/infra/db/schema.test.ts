@@ -63,6 +63,58 @@ function insertMessage(db: Database.Database, input: {
   );
 }
 
+test("v23 retained anchor enforces compaction-only, same-workspace and immutable semantics", () => {
+  const db = createDb();
+  insertWorkspace(db, "ws-a"); insertWorkspace(db, "ws-b");
+  insertSession(db, "session-a", "ws-a"); insertSession(db, "session-b", "ws-b");
+  insertMessage(db, { id: "a", workspaceId: "ws-a", originSessionId: "session-a", type: "user" });
+  insertMessage(db, { id: "b", workspaceId: "ws-b", originSessionId: "session-b", type: "user" });
+  assert.throws(() => db.prepare("update agent_message set retained_from_message_id='a' where id='a'").run(), /immutable/);
+  assert.throws(() => db.prepare(`insert into agent_message (id,workspace_id,previous_message_id,replaces_message_id,retained_from_message_id,depth,type,status,origin_session_id,origin_run_id,updated_revision,created_at,updated_at)
+    values ('ordinary','ws-a','a',null,'a',1,'assistant','completed','session-a',null,0,2,2)`).run(), /CHECK/);
+  assert.throws(() => db.prepare(`insert into agent_message (id,workspace_id,previous_message_id,replaces_message_id,retained_from_message_id,depth,type,status,origin_session_id,origin_run_id,updated_revision,created_at,updated_at)
+    values ('cross','ws-a','a',null,'b',1,'compaction','completed','session-a',null,0,2,2)`).run(), /same workspace/);
+  db.prepare(`insert into agent_message (id,workspace_id,previous_message_id,replaces_message_id,retained_from_message_id,depth,type,status,origin_session_id,origin_run_id,updated_revision,created_at,updated_at)
+    values ('compaction','ws-a','a',null,'a',1,'compaction','completed','session-a',null,0,2,2)`).run();
+  assert.throws(() => db.prepare("update agent_message set retained_from_message_id=null where id='compaction'").run(), /immutable/);
+  assert.ok(db.prepare("select 1 from sqlite_master where type='index' and name='idx_agent_message_retained_from'").get());
+  db.close();
+});
+
+test("v23 Run phase check enforces intended and actual terminal-result nullability", () => {
+  const db = createDb(); insertWorkspace(db); insertSession(db);
+  const insertRun = db.prepare(`insert into agent_run (run_id,workspace_id,session_id,trigger_message_id,agent_id,provider_id,model_id,status,created_at,updated_at)
+    values (?, 'ws-a', 'session-a', null, 'agent', 'provider', 'model', ?, 1, 1)`);
+  insertRun.run("pending", "running");
+  assert.deepEqual(db.prepare("select status,execution_phase,intended_terminal_code,terminal_result_code from agent_run where run_id='pending'").get(), {
+    status: "running", execution_phase: "work_pending", intended_terminal_code: null, terminal_result_code: null,
+  });
+  assert.throws(() => db.prepare("update agent_run set intended_terminal_code='run_completed' where run_id='pending'").run(), /CHECK/);
+  db.prepare(`update agent_run set execution_phase='terminal_intent_persisted', intended_terminal_status='completed', intended_terminal_code='run_completed' where run_id='pending'`).run();
+  assert.throws(() => db.prepare("update agent_run set terminal_result_code='run_completed' where run_id='pending'").run(), /CHECK/);
+  db.prepare(`update agent_run set status='completed', execution_phase='terminal', intended_terminal_status=null, intended_terminal_code=null, terminal_result_code='run_completed' where run_id='pending'`).run();
+  assert.throws(() => insertRun.run("bad-terminal", "completed"), /CHECK/);
+  assert.throws(() => db.prepare(`update agent_run set terminal_result_detail=? where run_id='pending'`).run("x".repeat(241)), /CHECK/);
+  assert.ok(db.prepare("select 1 from sqlite_master where type='index' and name='idx_agent_run_terminal_recovery'").get());
+  db.close();
+});
+
+test("v23 current-schema semantic damage fails closed without rebuilding", () => {
+  for (const statement of [
+    "drop trigger agent_message_retained_immutable_update",
+    "drop trigger agent_message_retained_workspace_insert",
+    "drop index idx_agent_message_retained_from",
+    "drop index idx_agent_run_terminal_recovery",
+  ]) {
+    const db = createDb();
+    const before = db.prepare("select version, file_cleanup_pending from agent_schema_meta where id=1").get();
+    db.exec(statement);
+    assert.throws(() => initSchema(db), /Unsupported Agent schema/);
+    assert.deepEqual(db.prepare("select version, file_cleanup_pending from agent_schema_meta where id=1").get(), before);
+    db.close();
+  }
+});
+
 function insertToolCallPart(db: Database.Database, id: string, messageId: string) {
   db.prepare(`
     insert into agent_message_part (
@@ -375,6 +427,20 @@ function assertDamagedCurrentSchemaIsRejected(damage: (db: Database.Database) =>
   db.close();
 }
 
+function damageTableSqlFragment(db: Database.Database, table: "agent_run" | "agent_message", fragment: string, damagedFragment: string) {
+  const tableSql = (db.prepare("select sql from sqlite_master where type='table' and name=?").get(table) as { sql: string }).sql;
+  const indexSql = db.prepare("select sql from sqlite_master where type='index' and tbl_name=? and sql is not null").all(table) as Array<{ sql: string }>;
+  const columns = (db.prepare(`pragma table_info(${table})`).all() as Array<{ name: string }>).map(({ name }) => name).join(", ");
+  const damagedTable = `${table}_damaged`;
+  db.pragma("foreign_keys = OFF");
+  db.pragma("legacy_alter_table = ON");
+  db.exec(tableSql.replace(new RegExp(`create\\s+table\\s+${table}`, "i"), `create table ${damagedTable}`).replace(fragment, damagedFragment));
+  db.exec(`insert into ${damagedTable} (${columns}) select ${columns} from ${table}; alter table ${table} rename to ${table}_old; alter table ${damagedTable} rename to ${table}; drop table ${table}_old;`);
+  db.pragma("legacy_alter_table = OFF");
+  for (const { sql } of indexSql) db.exec(sql);
+  db.pragma("foreign_keys = ON");
+}
+
 async function createUnsupportedFileDatabase(dataDir: string) {
   await fs.mkdir(dataDir, { recursive: true });
   const db = new Database(dbPath(dataDir));
@@ -487,6 +553,63 @@ test("current Agent schema semantic damage fails closed without writes", () => {
       drop table agent_tool_execution;
       alter table agent_tool_execution_rebuilt rename to agent_tool_execution;
     `);
+  });
+  for (const [fragment, damagedFragment] of [
+    ["run_kind text not null default 'user' check (run_kind in ('user', 'manual_compaction', 'subtask'))", "run_kind text"],
+    ["execution_phase text not null default 'work_pending' check (execution_phase in ('work_pending', 'work_in_progress', 'terminal_intent_persisted', 'terminal'))", "execution_phase text"],
+    ["intended_terminal_status text check (intended_terminal_status is null or intended_terminal_status in ('completed', 'failed', 'cancelled'))", "intended_terminal_status text"],
+    ["intended_terminal_code text check (intended_terminal_code is null or length(intended_terminal_code) between 1 and 80)", "intended_terminal_code text"],
+    ["terminal_result_code text check (terminal_result_code is null or length(terminal_result_code) between 1 and 80)", "terminal_result_code text"],
+    ["status = 'running' and execution_phase in ('work_pending', 'work_in_progress')", "1=1"],
+    ["status = 'running' and execution_phase = 'terminal_intent_persisted'", "1=1"],
+    ["status in ('completed', 'failed', 'cancelled') and execution_phase = 'terminal'", "1=1"],
+    ["terminal_result_code is not null", "1=1"],
+  ]) {
+    assertDamagedCurrentSchemaIsRejected((db) => {
+      damageTableSqlFragment(db, "agent_run", fragment, damagedFragment);
+    });
+  }
+  // 保留片段且只放宽 running/terminal 分支；完整字段的 running/terminal probe 必须捕获。
+  assertDamagedCurrentSchemaIsRejected((db) => {
+    damageTableSqlFragment(
+      db, "agent_run", "status = 'running' and execution_phase in ('work_pending', 'work_in_progress')",
+      "status = 'running' and execution_phase in ('work_pending', 'work_in_progress', 'terminal')",
+    );
+  });
+  // 额外收紧 run kind，必须由 manual_compaction/subtask 的合法 probe 捕获。
+  assertDamagedCurrentSchemaIsRejected((db) => {
+    damageTableSqlFragment(
+      db, "agent_run", "run_kind text not null default 'user' check (run_kind in ('user', 'manual_compaction', 'subtask'))",
+      "run_kind text not null default 'user' check (run_kind = 'user')",
+    );
+  });
+  // 保留所有 fragment：仅局部放宽 terminal result 的非空条件，必须由行为探针拒绝。
+  assertDamagedCurrentSchemaIsRejected((db) => {
+    damageTableSqlFragment(
+      db, "agent_run", "and terminal_result_code is not null)",
+      "and (terminal_result_code is not null or terminal_result_code is null))",
+    );
+  });
+  // 同样保留所有 fragment：额外约束会令合法 user terminal Run 失败，也必须 fail-closed。
+  assertDamagedCurrentSchemaIsRejected((db) => {
+    damageTableSqlFragment(
+      db, "agent_run", "and terminal_result_code is not null)",
+      "and terminal_result_code is not null and run_kind <> 'user')",
+    );
+  });
+  assertDamagedCurrentSchemaIsRejected((db) => {
+    damageTableSqlFragment(
+      db, "agent_run", "and terminal_result_code is not null)\n      )",
+      "and terminal_result_code is not null) or 1=1\n      )",
+    );
+  });
+  assertDamagedCurrentSchemaIsRejected((db) => {
+    damageTableSqlFragment(
+      db,
+      "agent_message",
+      "check (type = 'compaction' or retained_from_message_id is null)",
+      "check (retained_from_message_id is null or retained_from_message_id is not null)",
+    );
   });
   assertDamagedCurrentSchemaIsRejected((db) => {
     db.exec(`
@@ -904,7 +1027,7 @@ test("destructive file cleanup rejects a symbolic link in the artifact parent pa
   second.close();
 });
 
-test("v19 原地升级到最新版本保留数据、补充 replay 与 token 列且重复初始化幂等", () => {
+test("v19 通过破坏性重建收敛到目标 schema", () => {
   const db = createDb();
   insertWorkspace(db);
   insertSession(db);
@@ -919,27 +1042,14 @@ test("v19 原地升级到最新版本保留数据、补充 replay 与 token 列�
   const first = initSchema(db);
   assert.equal(first.fileCleanupPending, true);
   assert.equal((db.prepare("select version from agent_schema_meta where id = 1").get() as { version: number }).version, AGENT_SCHEMA_VERSION);
-  assert.deepEqual(
-    db.prepare("select id,message_id,type,text,updated_revision,provider_replay_json from agent_message_part where id='part-v19'").get(),
-    { id: "part-v19", message_id: "message-v19", type: "reasoning", text: "summary", updated_revision: 7, provider_replay_json: null },
-  );
-  const messagePartColumnsAfterFirst = db.prepare("pragma table_info(agent_message_part)").all() as Array<{ name: string }>;
-  const runStateColumnsAfterFirst = db.prepare("pragma table_info(session_run_state)").all() as Array<{ name: string }>;
-  assert.equal(messagePartColumnsAfterFirst.filter((column) => column.name === "provider_replay_json").length, 1);
-  assert.equal(runStateColumnsAfterFirst.filter((column) => column.name === "last_response_total_tokens").length, 1);
-
+  assert.equal((db.prepare("select count(*) as count from agent_message").get() as { count: number }).count, 0);
+  assert.equal((db.prepare("select count(*) as count from agent_message_part").get() as { count: number }).count, 0);
   const second = initSchema(db);
   assert.equal(second.fileCleanupPending, true);
-  const messagePartColumnsAfterSecond = db.prepare("pragma table_info(agent_message_part)").all() as Array<{ name: string }>;
-  const runStateColumnsAfterSecond = db.prepare("pragma table_info(session_run_state)").all() as Array<{ name: string }>;
-  assert.equal(messagePartColumnsAfterSecond.filter((column) => column.name === "provider_replay_json").length, 1);
-  assert.equal(runStateColumnsAfterSecond.filter((column) => column.name === "last_response_total_tokens").length, 1);
-  assert.equal((db.prepare("select count(*) as count from agent_message").get() as { count: number }).count, 1);
-  assert.equal((db.prepare("select count(*) as count from agent_message_part").get() as { count: number }).count, 1);
   db.close();
 });
 
-test("v20 原地升级到最新版本保留 Session 与运行状态并补充 token 与 locale 列", () => {
+test("v20 通过破坏性重建收敛到目标 schema", () => {
   const db = createDb();
   insertWorkspace(db);
   insertSession(db);
@@ -952,34 +1062,24 @@ test("v20 原地升级到最新版本保留 Session 与运行状态并补充 tok
   initSchema(db);
 
   assert.equal((db.prepare("select version from agent_schema_meta where id = 1").get() as { version: number }).version, AGENT_SCHEMA_VERSION);
-  assert.deepEqual(
-    db.prepare("select status, run_notice_text, retry_count, updated_at, last_response_total_tokens from session_run_state where session_id = 'session-a'").get(),
-    { status: "idle", run_notice_text: "preserved", retry_count: 2, updated_at: 9, last_response_total_tokens: null },
-  );
-  const runColumns = db.prepare("pragma table_info(agent_run)").all() as Array<{ name: string }>;
-  assert.equal(runColumns.filter((column) => column.name === "ui_locale").length, 1);
-  assert.equal((db.prepare("select count(*) as count from agent_session where id = 'session-a'").get() as { count: number }).count, 1);
-
-  initSchema(db);
-  const columns = db.prepare("pragma table_info(session_run_state)").all() as Array<{ name: string }>;
-  assert.equal(columns.filter((column) => column.name === "last_response_total_tokens").length, 1);
-  const runColumnsAfterSecond = db.prepare("pragma table_info(agent_run)").all() as Array<{ name: string }>;
-  assert.equal(runColumnsAfterSecond.filter((column) => column.name === "ui_locale").length, 1);
+  assert.equal((db.prepare("select count(*) as count from agent_session").get() as { count: number }).count, 0);
+  assert.equal((db.prepare("select count(*) as count from session_run_state").get() as { count: number }).count, 0);
   db.close();
 });
 
-test("v21 原地升级到最新版本保留 Run 并补充 nullable ui_locale", () => {
+test("v21 通过破坏性重建收敛到目标 schema", () => {
   const db = createDb();
   insertWorkspace(db);
   insertSession(db);
   db.prepare(`insert into agent_run (run_id, workspace_id, session_id, trigger_message_id, agent_id, provider_id, ui_locale, model_id, subtask_depth, parent_run_id, parent_tool_execution_id, status, created_at, updated_at, run_kind)
-    values ('run-v21', 'ws-a', 'session-a', null, 'agent', 'provider', 'zh-CN', 'model', 0, null, null, 'completed', 10, 11, 'user')`).run();
+    values ('run-v21', 'ws-a', 'session-a', null, 'agent', 'provider', 'zh-CN', 'model', 0, null, null, 'running', 10, 11, 'user')`).run();
   db.prepare("update agent_schema_meta set version = 21 where id = 1").run();
   db.exec("alter table agent_run drop column ui_locale");
 
   initSchema(db);
 
-  assert.deepEqual(db.prepare("select run_id, ui_locale, status from agent_run where run_id = 'run-v21'").get(), { run_id: "run-v21", ui_locale: null, status: "completed" });
+  assert.equal((db.prepare("select count(*) as count from agent_run").get() as { count: number }).count, 0);
+  assert.equal(isAgentFileCleanupPending(db), true);
   assert.equal((db.prepare("select version from agent_schema_meta where id = 1").get() as { version: number }).version, AGENT_SCHEMA_VERSION);
   db.close();
 });
@@ -997,7 +1097,24 @@ test("agent_run run_kind 在目标 schema 升级时保留数据并回填 user", 
   assert.equal((db.prepare("select version from agent_schema_meta where id = 1").get() as { version: number }).version, AGENT_SCHEMA_VERSION);
 });
 
-test("v18 Message 数据图原地升级保留关系、状态与 file cleanup pending", () => {
+test("v22 通过破坏性重建收敛到目标 schema 并保留非 Agent 数据", () => {
+  const db = createDb();
+  db.exec("create table schema_v22_sentinel (id integer primary key, value text not null);");
+  db.prepare("insert into schema_v22_sentinel values (1, 'keep')").run();
+  insertWorkspace(db); insertSession(db);
+  insertMessage(db, { id: "message-v22", originSessionId: "session-a", type: "assistant", status: "completed" });
+  db.prepare("update agent_schema_meta set version = 22, file_cleanup_pending = 1 where id = 1").run();
+
+  const result = initSchema(db);
+
+  assert.equal(result.fileCleanupPending, true);
+  assert.equal((db.prepare("select version from agent_schema_meta where id = 1").get() as { version: number }).version, AGENT_SCHEMA_VERSION);
+  assert.equal((db.prepare("select count(*) as count from agent_message").get() as { count: number }).count, 0);
+  assert.deepEqual(db.prepare("select * from schema_v22_sentinel").all(), [{ id: 1, value: "keep" }]);
+  db.close();
+});
+
+test("v18 Message 数据图通过破坏性重建并保留 file cleanup pending", () => {
   const db = createDb();
   insertWorkspace(db);
   insertSession(db);
@@ -1022,14 +1139,8 @@ test("v18 Message 数据图原地升级保留关系、状态与 file cleanup pen
 
   initSchema(db);
 
-  assert.deepEqual(db.prepare("select run_kind, status, created_at, updated_at from agent_run where run_id = 'run-v18'").get(), { run_kind: "user", status: "running", created_at: 10, updated_at: 11 });
-  assert.deepEqual(db.prepare("select head_message_id, context_root_message_id, revision from agent_session where id = 'session-a'").get(), { head_message_id: "assistant-v18", context_root_message_id: "user-v18", revision: 6 });
-  assert.deepEqual(db.prepare("select id, message_id, type, text, tool_name, tool_input_json, provider_replay_json, updated_revision from agent_message_part order by id").all(), [
-    { id: "call-v18", message_id: "assistant-v18", type: "tool_call", text: null, tool_name: "bash", tool_input_json: "{}", provider_replay_json: null, updated_revision: 5 },
-    { id: "text-v18", message_id: "user-v18", type: "text", text: "input", tool_name: null, tool_input_json: null, provider_replay_json: null, updated_revision: 4 }
-  ]);
-  assert.deepEqual(db.prepare("select id, call_part_id, origin_run_id, status, result_preview, updated_revision from agent_tool_execution").get(), { id: "execution-v18", call_part_id: "call-v18", origin_run_id: "run-v18", status: "completed", result_preview: "done", updated_revision: 6 });
-  assert.deepEqual(db.prepare("select status, active_run_id, run_notice_text, retry_count, next_retry_at from session_run_state where session_id = 'session-a'").get(), { status: "running", active_run_id: "run-v18", run_notice_text: "recovering", retry_count: 2, next_retry_at: 99 });
+  assert.equal((db.prepare("select count(*) as count from agent_run").get() as { count: number }).count, 0);
+  assert.equal((db.prepare("select count(*) as count from agent_message").get() as { count: number }).count, 0);
   assert.equal(isAgentFileCleanupPending(db), true);
   assert.equal((db.prepare("select version from agent_schema_meta where id = 1").get() as { version: number }).version, AGENT_SCHEMA_VERSION);
   db.close();

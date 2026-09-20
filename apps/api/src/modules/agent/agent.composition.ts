@@ -1,7 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { FastifyBaseLogger } from "fastify";
-import type { AgentCompactSessionRequest, AgentCompactSessionResponse, AgentMessageControlResult, AgentMessageSessionRunState } from "@agent-workbench/shared";
+import {
+  isAgentTerminalCodeAllowed,
+  type AgentCompactSessionRequest, type AgentCompactSessionResponse,
+  type AgentMessageControlResult, type AgentMessageSessionRunState,
+  type AgentRunStatusResponse, type PrimaryProjectionProfile,
+} from "@agent-workbench/shared";
 import { TextDecoder } from "node:util";
 import type {
   AgentUpdateSessionTitleRequest,
@@ -15,22 +20,26 @@ import type {
   AgentRecentSessionsResponse,
   AgentRecentWorkspacesResponse,
 } from "@agent-workbench/shared/internal-contracts/agent-api-session";
-import type { AgentApiPromptContextResponse, AgentProviderReplayEnvelope } from "@agent-workbench/shared/internal-contracts/agent-api";
+import type { AgentApiPromptContextResponse } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { isValidSkillPathSegment } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { getPromptText } from "@agent-workbench/shared/prompts";
 import { AgentSubtaskErrorCode } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type {
   AgentApiCompleteAssistantRequest,
+  AgentApiCompleteTerminalAssistantRequest,
   AgentApiCreateStreamingAssistantRequest,
   AgentApiFlushAssistantPartsRequest,
   AgentApiResumeStreamingAssistantRequest,
   AgentApiReplaceStreamingAssistantRequest,
-  AgentApiCommitCompactionRequest,
+  AgentApiCommitCompactionWithTerminalIntentRequest,
+  AgentApiConfirmCompactionCommitRequest,
   AgentApiSubtaskPreforkPlanRequest,
   AgentApiSubtaskStartRequest,
   AgentApiSubtaskResultRequest,
   AgentApiSubtaskStatusRequest,
-  AgentApiRunCompleteRequest,
+  AgentApiMarkRunWorkInProgressRequest,
+  AgentApiPersistTerminalIntentRequest,
+  AgentApiConvergeRunTerminalRequest,
   AgentApiUpdateRunNoticeRequest,
   AgentApiUpdateToolExecutionRequest,
   AgentApiArchiveReadRequest,
@@ -60,7 +69,6 @@ import {
   listSessionAgentModelOverrides,
   upsertSessionAgentModelOverride,
   deleteSessionAgentModelOverride,
-  updateRunRecordStatus,
   updateAutoMessageSessionTitle,
   setManualMessageSessionTitle,
   AgentStreamingAssistantReplayMismatchError,
@@ -113,6 +121,11 @@ import { ExecutionProfileResolver } from "./read-side/execution-profile-resolver
 import { MessagesContextProjector } from "./read-side/messages-context-projector.js";
 import { PromptContextProjector } from "./read-side/prompt-context-projector.js";
 import { RuntimeTranscriptProjector } from "./read-side/runtime-transcript-projector.js";
+import {
+  ModelContextResolver,
+  RetainedAnchorValidationError,
+  projectModelContextToPrompt,
+} from "./read-side/model-context-resolver.js";
 import { SqliteMessageQuery } from "./read-side/sqlite-message-query.js";
 import { ReadSideApplication } from "./read-side/read-side-application.js";
 import { getWorkspaceEnabledAgentIds } from "../workspaces/workspace.service.js";
@@ -132,10 +145,12 @@ import { SqliteSessionInteractionStore } from "./session/sqlite-session-interact
 import { SessionAgentModelApplication } from "./session/session-agent-model-application.js";
 import {
   appendStreamingAssistant,
-  commitCompactionMessage,
   commitCompactionMessageWithRunFence,
+  commitCompactionWithTerminalIntent,
+  hasCommittedCompactionArtifact,
   getMessage,
   completeAssistantWithExecutions,
+  completeTerminalAssistantWithIntent,
   resumeStreamingAssistant,
   flushStreamingParts,
   AgentMessageConflictError,
@@ -1081,6 +1096,7 @@ function createQueryFacadeCapabilities<
     | "getLatestTodolistToolExecution"
     | "getMessageTimelineSnapshot"
     | "getMessageRunState"
+    | "getRunStatus"
     | "getApplyPatchUiArtifact"
     | "getWriteUiArtifact"
     | "getRunFinalText"
@@ -1101,6 +1117,7 @@ function createQueryFacadeCapabilities<
   | "getLatestTodolistToolExecution"
   | "getMessageTimelineSnapshot"
   | "getMessageRunState"
+  | "getRunStatus"
   | "getApplyPatchUiArtifact"
   | "getWriteUiArtifact"
   | "getRunFinalText"
@@ -1117,6 +1134,7 @@ function createQueryFacadeCapabilities<
     getLatestTodolistToolExecution,
     getMessageTimelineSnapshot,
     getMessageRunState,
+    getRunStatus,
     getApplyPatchUiArtifact,
     getWriteUiArtifact,
     getRunFinalText,
@@ -1133,6 +1151,7 @@ function createQueryFacadeCapabilities<
     getLatestTodolistToolExecution,
     getMessageTimelineSnapshot,
     getMessageRunState,
+    getRunStatus,
     getApplyPatchUiArtifact,
     getWriteUiArtifact,
     getRunFinalText,
@@ -1144,15 +1163,19 @@ function createLifecycleFacadeCapabilities<
   T extends Record<
     | "cancelSessionWithRuntime"
     | "recoverRunsOnStartup"
+    | "settleWorkspaceRunsForDeletion"
     | "createStreamingAssistantFromWorker"
     | "flushAssistantPartsFromWorker"
     | "resumeStreamingAssistantFromWorker"
     | "replaceStreamingAssistantFromWorker"
     | "discardStreamingAssistantFromWorker"
     | "completeAssistantFromWorker"
+    | "completeTerminalAssistantFromWorker"
     | "updateToolExecutionFromWorker"
     | "updateRunNoticeFromWorker"
-    | "completeRunFromWorker",
+    | "markRunWorkInProgressFromWorker"
+    | "persistRunTerminalIntentFromWorker"
+    | "convergeRunTerminalFromWorker",
     (...args: any[]) => any
   >,
 >(
@@ -1161,41 +1184,53 @@ function createLifecycleFacadeCapabilities<
   T,
   | "cancelSessionWithRuntime"
   | "recoverRunsOnStartup"
+  | "settleWorkspaceRunsForDeletion"
   | "createStreamingAssistantFromWorker"
   | "flushAssistantPartsFromWorker"
   | "resumeStreamingAssistantFromWorker"
   | "replaceStreamingAssistantFromWorker"
   | "discardStreamingAssistantFromWorker"
   | "completeAssistantFromWorker"
+  | "completeTerminalAssistantFromWorker"
   | "updateToolExecutionFromWorker"
   | "updateRunNoticeFromWorker"
-  | "completeRunFromWorker"
+  | "markRunWorkInProgressFromWorker"
+  | "persistRunTerminalIntentFromWorker"
+  | "convergeRunTerminalFromWorker"
 > {
   const {
     cancelSessionWithRuntime,
     recoverRunsOnStartup,
+    settleWorkspaceRunsForDeletion,
     createStreamingAssistantFromWorker,
     flushAssistantPartsFromWorker,
     resumeStreamingAssistantFromWorker,
     replaceStreamingAssistantFromWorker,
     discardStreamingAssistantFromWorker,
     completeAssistantFromWorker,
+    completeTerminalAssistantFromWorker,
     updateToolExecutionFromWorker,
     updateRunNoticeFromWorker,
-    completeRunFromWorker,
+    markRunWorkInProgressFromWorker,
+    persistRunTerminalIntentFromWorker,
+    convergeRunTerminalFromWorker,
   } = dependencies;
   return {
     cancelSessionWithRuntime,
     recoverRunsOnStartup,
+    settleWorkspaceRunsForDeletion,
     createStreamingAssistantFromWorker,
     flushAssistantPartsFromWorker,
     resumeStreamingAssistantFromWorker,
     replaceStreamingAssistantFromWorker,
     discardStreamingAssistantFromWorker,
     completeAssistantFromWorker,
+    completeTerminalAssistantFromWorker,
     updateToolExecutionFromWorker,
     updateRunNoticeFromWorker,
-    completeRunFromWorker,
+    markRunWorkInProgressFromWorker,
+    persistRunTerminalIntentFromWorker,
+    convergeRunTerminalFromWorker,
   };
 }
 
@@ -1209,9 +1244,11 @@ function createWorkerFacadeCapabilities<
     | "getSingleCallModelProfileForRun"
     | "getAgentMcpSettingsFromWorker"
     | "getPluginRuntimeSnapshotsFromWorker"
-    | "commitCompactionFromWorker"
+    | "commitCompactionWithTerminalIntentFromWorker"
+    | "confirmCompactionCommitFromWorker"
     | "getMessagesContext"
     | "getPromptContextForRun"
+    | "getCompactionSourceFromWorker"
     | "archiveReadFromWorker"
     | "archiveSearchFromWorker"
     | "checkChannelSenderAllowlist",
@@ -1229,9 +1266,11 @@ function createWorkerFacadeCapabilities<
   | "getSingleCallModelProfileForRun"
   | "getAgentMcpSettingsFromWorker"
   | "getPluginRuntimeSnapshotsFromWorker"
-  | "commitCompactionFromWorker"
+  | "commitCompactionWithTerminalIntentFromWorker"
+  | "confirmCompactionCommitFromWorker"
   | "getMessagesContext"
   | "getPromptContextForRun"
+  | "getCompactionSourceFromWorker"
   | "archiveReadFromWorker"
   | "archiveSearchFromWorker"
   | "checkChannelSenderAllowlist"
@@ -1245,9 +1284,11 @@ function createWorkerFacadeCapabilities<
     getSingleCallModelProfileForRun,
     getAgentMcpSettingsFromWorker,
     getPluginRuntimeSnapshotsFromWorker,
-    commitCompactionFromWorker,
+    commitCompactionWithTerminalIntentFromWorker,
+    confirmCompactionCommitFromWorker,
     getMessagesContext,
     getPromptContextForRun,
+    getCompactionSourceFromWorker,
     archiveReadFromWorker,
     archiveSearchFromWorker,
     checkChannelSenderAllowlist,
@@ -1261,9 +1302,11 @@ function createWorkerFacadeCapabilities<
     getSingleCallModelProfileForRun,
     getAgentMcpSettingsFromWorker,
     getPluginRuntimeSnapshotsFromWorker,
-    commitCompactionFromWorker,
+    commitCompactionWithTerminalIntentFromWorker,
+    confirmCompactionCommitFromWorker,
     getMessagesContext,
     getPromptContextForRun,
+    getCompactionSourceFromWorker,
     archiveReadFromWorker,
     archiveSearchFromWorker,
     checkChannelSenderAllowlist,
@@ -1625,10 +1668,8 @@ function createReadQueryWritebackAssembly(assembly: {
       content: any;
     }>;
   }>;
-  buildPromptContextMessagesForSession: (input: any) => Promise<{
-    messages: any[];
-    providerReplay: NonNullable<AgentApiPromptContextResponse["providerReplay"]>;
-  }>;
+  buildPromptContextMessagesForSession: (input: any) => Promise<any>;
+  getCompactionSource: (input: { workspaceId: string; sessionId: string; runId: string }) => unknown;
   resolveUiLocaleForSessionContext: (input: any) => any;
   buildOneShotSystemPrompt: (input: any) => any;
   ensureWorkspace: (workspaceId: string) => unknown;
@@ -1707,55 +1748,16 @@ function createReadQueryWritebackAssembly(assembly: {
       toolDescription(name as AgentContextToolName, options),
     getToolInputSchema: (name) => toolArgsSchema(name as AgentContextToolName),
   });
-  const promptContextProjector = new PromptContextProjector(
+  const promptContextProjector = new PromptContextProjector<any>(
     assembly.runPromptStaticCache,
     {
-      getRunState: ({ workspaceId, sessionId }) =>
-        (() => { const state = getMessageRunState(assembly.environment.db, workspaceId, sessionId); return { activeRunId: state?.activeRunId ?? null, lastResponseTotalTokens: state?.lastResponseTotalTokens ?? null }; })(),
-      resolveUiLocale: (input) =>
-        assembly.resolveUiLocaleForSessionContext(input),
       resolveProfile: (input) =>
         assembly.resolveExecutionProfileForReadSide(input),
       assembleStatic: (input) => promptStaticAssembler.assemble(input),
       buildRuntimeInstruction: (input) => buildRuntimeInstruction(input),
       appendRuntimeConstraints: (systemStatic, runtimeInstruction) =>
         appendRuntimeConstraintsSection(systemStatic, runtimeInstruction),
-      listPendingTools: ({ workspaceId, sessionId, runId }) => {
-        const rows = assembly.environment.db
-          .prepare(
-            `
-          select execution.id as toolExecutionId, execution.call_part_id as callPartId,
-                 part.message_id as assistantMessageId, execution.status,
-                 part.tool_name as toolName, part.provider_tool_call_id as toolCallId,
-                 part.tool_input_json as toolInputJson
-          from agent_tool_execution execution
-          join agent_message_part part on part.id = execution.call_part_id
-          where execution.origin_session_id = @sessionId
-            and execution.origin_run_id = @runId
-            and execution.status in ('queued', 'running')
-          order by execution.created_at asc, execution.id asc
-        `,
-          )
-          .all({ sessionId, runId }) as Array<{
-          toolExecutionId: string;
-          callPartId: string;
-          assistantMessageId: string;
-          status: "queued" | "running";
-          toolName: string;
-          toolCallId: string | null;
-          toolInputJson: string;
-        }>;
-        return rows.map((row) => ({
-          toolExecutionId: row.toolExecutionId,
-          callPartId: row.callPartId,
-          assistantMessageId: row.assistantMessageId,
-          status: row.status,
-          toolName: row.toolName,
-          ...(row.toolCallId ? { toolCallId: row.toolCallId } : {}),
-          args: JSON.parse(row.toolInputJson) as Record<string, unknown>,
-        }));
-      },
-      buildMessages: (input) => assembly.buildPromptContextMessagesForSession(input),
+      resolveDynamicContext: (input) => assembly.buildPromptContextMessagesForSession(input),
     },
   );
   const readSideApplication = new ReadSideApplication({
@@ -1824,6 +1826,7 @@ function createReadQueryWritebackAssembly(assembly: {
       }),
     projectPromptContext: (input) =>
       promptContextProjector.getPromptContextForRun(input),
+    projectCompactionSource: (input) => assembly.getCompactionSource(input),
   });
   const uiArtifactCapability = new UiArtifactCapability(
     assembly.environment.dataDir,
@@ -1986,6 +1989,7 @@ function createAgentApplications(
       runLifecycleApplication.enqueueActivatedRunOrReconcile(params),
     resolvePrimarySessionModel,
   });
+  const modelContextResolver = new ModelContextResolver(environment.db);
   const readQueryWritebackAssembly = createReadQueryWritebackAssembly({
     environment,
     logger,
@@ -1994,6 +1998,7 @@ function createAgentApplications(
     getAgentRuntimeSettingsForReadSide,
     buildPromptMessagesForSession,
     buildPromptContextMessagesForSession,
+    getCompactionSource,
     resolveUiLocaleForSessionContext,
     buildOneShotSystemPrompt,
     ensureWorkspace,
@@ -2205,6 +2210,44 @@ function createAgentApplications(
     return projectMessageRunState(params);
   }
 
+  /** 跨 workspace/session 的 Run 统一按不存在处理，避免暴露归属信息。 */
+  function getRunStatus(params: {
+    workspaceId: string;
+    sessionId: string;
+    runId: string;
+  }): AgentRunStatusResponse {
+    const run = getRunRecord(environment.db, params.runId);
+    if (!run || run.workspaceId !== params.workspaceId || run.sessionId !== params.sessionId) {
+      throw new HttpError(404, "run not found");
+    }
+    const record = {
+      workspaceId: run.workspaceId,
+      sessionId: run.sessionId,
+      runId: run.runId,
+      runKind: run.runKind,
+      updatedAt: run.updatedAt,
+    };
+    // Intended terminal tuple is an internal crash-recovery state. Only a fully converged
+    // actual result is observable to the browser; all earlier phases remain running.
+    if (run.executionPhase !== "terminal") {
+      return { ...record, status: "running", code: null, detail: null };
+    }
+    if (
+      (run.status !== "completed" && run.status !== "failed" && run.status !== "cancelled")
+      || run.terminalResultCode === null
+      || run.terminalResultDetail !== null
+      || !isAgentTerminalCodeAllowed(run.runKind, run.status, run.terminalResultCode)
+    ) {
+      throw new HttpError(409, "run terminal state is inconsistent", "AGENT_RUN_TERMINAL_INVARIANT");
+    }
+    return {
+      ...record,
+      status: run.status,
+      code: run.terminalResultCode,
+      detail: null,
+    };
+  }
+
   async function revertSession(params: {
     sessionId: string;
     body: AgentRevertSessionRequest;
@@ -2320,6 +2363,20 @@ function createAgentApplications(
     return { result: completeAssistantWithExecutions(environment.db, params) };
   }
 
+  function completeTerminalAssistantFromWorker(
+    params: AgentApiCompleteTerminalAssistantRequest,
+  ) {
+    workspaceDeletingFence.assertWritable(params.workspaceId);
+    return {
+      result: completeTerminalAssistantWithIntent(environment.db, {
+        ...params,
+        status: params.intent.status,
+        code: params.intent.code,
+        detail: params.intent.detail,
+      }),
+    };
+  }
+
   function updateToolExecutionFromWorker(
     params: AgentApiUpdateToolExecutionRequest,
   ) {
@@ -2357,9 +2414,19 @@ function createAgentApplications(
     return { result: updateMessageRunNotice(environment.db, params) };
   }
 
-  function completeRunFromWorker(params: AgentApiRunCompleteRequest) {
+  function markRunWorkInProgressFromWorker(params: AgentApiMarkRunWorkInProgressRequest) {
     workspaceDeletingFence.assertWritable(params.workspaceId);
-    return runLifecycleApplication.completeRunFromWorker(params);
+    return { result: runLifecycleApplication.markRunWorkInProgress(params) };
+  }
+
+  function persistRunTerminalIntentFromWorker(params: AgentApiPersistTerminalIntentRequest) {
+    workspaceDeletingFence.assertWritable(params.workspaceId);
+    return { result: runLifecycleApplication.persistRunTerminalIntent(params) };
+  }
+
+  function convergeRunTerminalFromWorker(params: AgentApiConvergeRunTerminalRequest) {
+    workspaceDeletingFence.assertWritable(params.workspaceId);
+    return runLifecycleApplication.convergeRunTerminal(params);
   }
 
   function resolveSubtaskParentContext(params: {
@@ -2593,90 +2660,149 @@ function createAgentApplications(
     return environment.listPluginRuntimeSnapshots();
   }
 
-  async function commitCompactionFromWorker(params: AgentApiCommitCompactionRequest) {
+  async function commitCompactionWithTerminalIntentFromWorker(params: AgentApiCommitCompactionWithTerminalIntentRequest) {
     try {
-      const message = commitCompactionMessageWithRunFence(environment.db, {
+      const run = getRunRecord(environment.db, params.runId);
+      const session = getMessageSessionById(environment.db, params.sessionId);
+      if (!run || !session || run.workspaceId !== params.workspaceId || run.sessionId !== params.sessionId) {
+        throw new HttpError(404, "run not found");
+      }
+      if (run.runKind === "manual_compaction") {
+        if (!params.intent
+          || params.intent.status !== "completed"
+          || params.intent.code !== "compaction_completed"
+          || params.intent.detail !== null) {
+          throw new HttpError(400, "manual compaction requires a terminal intent");
+        }
+      } else if (run.runKind === "user" || run.runKind === "subtask") {
+        if (params.intent) throw new HttpError(400, "artifact-only compaction must not include a terminal intent");
+      } else {
+        throw new HttpError(400, "run kind is not eligible to commit compaction");
+      }
+      const primaryProfile = params.retainedFromMessageId == null ? undefined : (() => {
+        const resolvedProfile = environment.resolveExecutionProfile({
+          surface: session.kind === "subtask" ? "subtask" : "user",
+          agentIdFromRun: run.agentId,
+          workspaceEnablement: environment.getWorkspaceEnabledAgentIds(params.workspaceId),
+          providerIdFromRun: run.providerId,
+          modelIdFromRun: run.modelId,
+        });
+        return {
+          provider: { id: resolvedProfile.provider.id, npm: resolvedProfile.provider.npm },
+          model: {
+            id: resolvedProfile.model.id,
+            ...(resolvedProfile.model.providerModelId == null ? {} : { providerModelId: resolvedProfile.model.providerModelId }),
+          },
+        } satisfies PrimaryProjectionProfile;
+      })();
+      const input = {
         id: params.messageId,
         workspaceId: params.workspaceId,
         sessionId: params.sessionId,
         runId: params.runId,
         expectedHeadMessageId: params.expectedHeadMessageId,
         expectedRevision: params.expectedRevision,
+        retainedFromMessageId: params.retainedFromMessageId,
         textPartId: params.textPartId,
         text: params.summaryText.trim(),
         createdAt: params.createdAt,
-      });
-      if (!message) {
-        return { result: "ignored" as const, summaryMessageId: null };
+        ...(primaryProfile == null ? {} : { primaryProfile }),
+      };
+      if (run.runKind === "manual_compaction") {
+        const message = commitCompactionWithTerminalIntent(environment.db, input);
+        return { result: "updated" as const, summaryMessageId: message.id };
       }
-      return { result: "updated" as const, summaryMessageId: message.id };
+      const message = commitCompactionMessageWithRunFence(environment.db, input);
+      return message
+        ? { result: "updated" as const, summaryMessageId: message.id }
+        : { result: "ignored" as const, summaryMessageId: null };
     } catch (error) {
-      if (error instanceof AgentMessageConflictError)
-        throw conflictToHttpError(error);
+      if (error instanceof AgentMessageConflictError) throw conflictToHttpError(error);
+      if (error instanceof Error && error.message === "compaction replay conflicts with persisted result") {
+        throw new HttpError(409, "compaction replay conflicts with persisted result", "compaction_conflict");
+      }
+      if (error instanceof RetainedAnchorValidationError) {
+        throw new HttpError(409, "retained compaction anchor is no longer valid", "retained_anchor_invalid");
+      }
       throw error;
     }
+  }
+
+  async function confirmCompactionCommitFromWorker(params: AgentApiConfirmCompactionCommitRequest) {
+    return {
+      outcome: hasCommittedCompactionArtifact(environment.db, params) ? "committed" as const : "not_committed" as const,
+    };
+  }
+
+  function toCompactionSourceResponse(resolved: ReturnType<ModelContextResolver["resolve"]>) {
+    if (!resolved.run) throw new Error("compaction source run snapshot is missing");
+    const boundaryIndex = resolved.blocks.findIndex((block) => block.message.type === "assistant"
+      && block.toolExecutions.some((execution) => execution.status === "queued" || execution.status === "running"));
+    const blocksBeforePending = boundaryIndex < 0
+      ? resolved.blocks
+      : resolved.blocks.slice(0, boundaryIndex);
+    const boundaryAssistantMessageId = boundaryIndex < 0 ? null : resolved.blocks[boundaryIndex]?.message.id ?? null;
+    const pendingBoundary = boundaryAssistantMessageId == null
+      ? null
+      : {
+        reason: "pending_tool_execution" as const,
+        assistantMessageId: boundaryAssistantMessageId,
+        toolExecutionIds: resolved.blocks[boundaryIndex]!.toolExecutions
+          .filter((execution) => execution.status === "queued" || execution.status === "running")
+          .map((execution) => execution.id),
+      };
+    return {
+      workspaceId: resolved.workspaceId,
+      sessionId: resolved.sessionId,
+      runId: resolved.run.runId,
+      runKind: resolved.run.runKind,
+      triggerMessageId: resolved.run.triggerMessageId,
+      agentId: resolved.run.agentId,
+      providerId: resolved.run.providerId,
+      modelId: resolved.run.modelId,
+      subtaskDepth: resolved.run.subtaskDepth,
+      headMessageId: resolved.headMessageId,
+      contextRootMessageId: resolved.contextRootMessageId,
+      sessionRevision: resolved.sessionRevision,
+      uiLocale: null,
+      oneShotSystem: buildOneShotSystemPrompt({ uiLocale: null }),
+      pendingBoundary,
+      blocks: blocksBeforePending.map((block) => ({
+        ...block,
+        toolExecutions: block.toolExecutions
+          .filter((execution) => execution.status !== "queued" && execution.status !== "running")
+          .map(({ id, callPartId, status, resultPreview, error, startedAt, completedAt }) => ({
+            id, callPartId, status, resultPreview, error, startedAt, completedAt,
+          })),
+      })),
+    };
   }
 
   async function buildPromptContextMessagesForSession(params: {
     workspaceId: string;
     sessionId: string;
-    triggerMessageId: string | null;
-    compactionSnippetUiLocale: AgentUiLocale | null;
-    pendingAssistantMessageIds?: ReadonlySet<string>;
+    runId: string;
   }) {
-    void params.compactionSnippetUiLocale;
-    const source = messageQuery.getRuntimeTranscriptSource({
+    const source = modelContextResolver.resolve(params);
+    if (!source.run) throw new Error("prompt context run snapshot is missing");
+    const projected = projectModelContextToPrompt({
       workspaceId: params.workspaceId,
-      sessionId: params.sessionId,
+      triggerMessageId: source.run.triggerMessageId,
+      resolved: source,
+      projector: runtimeTranscriptProjector,
+      stopBeforeAssistantMessageIds: source.pendingAssistantMessageIds,
+      includeReplayOnlyAssistants: true,
     });
-    const replayByPartId = messageQuery.getRuntimeProviderReplaySource({
-      workspaceId: params.workspaceId,
-      sessionId: params.sessionId,
-    });
-    const replayOnlyAssistantMessageIds = new Set(source.messages.flatMap((message) => {
-      if (message.type !== "assistant" || message.status !== "completed") return [];
-      const hasVisiblePart = message.parts.some((part) =>
-        part.type === "tool_call" || (part.type === "text" && part.text.length > 0));
-      const hasReasoningReplay = message.parts.some((part) =>
-        part.type === "reasoning"
-        && replayByPartId.get(part.id)?.item.type === "reasoning");
-      return !hasVisiblePart && hasReasoningReplay ? [message.id] : [];
-    }));
-    const projected = runtimeTranscriptProjector.projectDetailed({
-      workspaceId: params.workspaceId,
-      triggerMessageId: params.triggerMessageId,
-      stopBeforeAssistantMessageIds: params.pendingAssistantMessageIds,
-      includeEmptyAssistantMessageIds: replayOnlyAssistantMessageIds,
-      ...source,
-    });
-    const providerReplay = source.messages.flatMap((message) => {
-      const assistantOrdinal = projected.assistantMessageIndexes.get(message.id);
-      if (assistantOrdinal == null || message.type !== "assistant" || message.status !== "completed") return [];
-      let visibleIndex = 0;
-      const parts: Array<
-        | { visibleIndex: number; type: "reasoning"; text: string; providerReplay: AgentProviderReplayEnvelope }
-        | { visibleIndex: number; type: "text"; providerReplay: AgentProviderReplayEnvelope }
-        | { visibleIndex: number; type: "tool_call"; providerReplay: AgentProviderReplayEnvelope }
-      > = [];
-      for (const part of [...message.parts].sort((left, right) => left.position - right.position)) {
-        if (part.type !== "text" && part.type !== "tool_call" && part.type !== "reasoning") continue;
-        const replay = replayByPartId.get(part.id);
-        const currentVisibleIndex = visibleIndex;
-        if (part.type !== "reasoning") visibleIndex += 1;
-        if (!replay) continue;
-        if (part.type === "reasoning" && replay.item.type === "reasoning") {
-          parts.push({ visibleIndex: currentVisibleIndex, type: "reasoning", text: part.text, providerReplay: replay });
-        }
-        if (part.type === "text" && replay.item.type === "text") {
-          parts.push({ visibleIndex: currentVisibleIndex, type: "text", providerReplay: replay });
-        }
-        if (part.type === "tool_call" && replay.item.type === "function_call") {
-          parts.push({ visibleIndex: currentVisibleIndex, type: "tool_call", providerReplay: replay });
-        }
-      }
-      return parts.length > 0 ? [{ assistantOrdinal, parts }] : [];
-    });
-    return { messages: projected.messages, providerReplay };
+    return {
+      headMessageId: source.headMessageId,
+      sessionRevision: source.sessionRevision,
+      run: source.run,
+      pendingTools: source.pendingTools,
+      lastResponseTotalTokens: source.lastResponseTotalTokens,
+      uiLocale: source.run.uiLocale,
+      messages: projected.messages,
+      providerReplay: projected.providerReplay,
+    };
   }
 
   async function buildPromptMessagesForSession(params: {
@@ -2687,18 +2813,22 @@ function createAgentApplications(
     pendingAssistantMessageIds?: ReadonlySet<string>;
   }) {
     void params.compactionSnippetUiLocale;
-    const source = messageQuery.getRuntimeTranscriptSource({
+    const source = modelContextResolver.resolve({ workspaceId: params.workspaceId, sessionId: params.sessionId });
+    const projected = projectModelContextToPrompt({
       workspaceId: params.workspaceId,
-      sessionId: params.sessionId,
+      triggerMessageId: params.triggerMessageId,
+      resolved: source,
+      projector: runtimeTranscriptProjector,
+      stopBeforeAssistantMessageIds: params.pendingAssistantMessageIds,
+      includeReplayOnlyAssistants: false,
     });
     return {
-      messages: runtimeTranscriptProjector.project({
-        workspaceId: params.workspaceId,
-        triggerMessageId: params.triggerMessageId,
-        stopBeforeAssistantMessageIds: params.pendingAssistantMessageIds,
-        ...source,
-      }),
+      messages: projected.messages,
     };
+  }
+
+  function getCompactionSource(params: { workspaceId: string; sessionId: string; runId: string }) {
+    return toCompactionSourceResponse(modelContextResolver.resolve(params));
   }
 
   function resolveUiLocaleForSessionContext(params: {
@@ -2863,6 +2993,7 @@ function createAgentApplications(
       getLatestTodolistToolExecution,
       getMessageTimelineSnapshot,
     getMessageRunState,
+    getRunStatus,
     getApplyPatchUiArtifact,
     getWriteUiArtifact,
     getRunFinalText,
@@ -2871,15 +3002,19 @@ function createAgentApplications(
   const lifecycle = createLifecycleFacadeCapabilities({
     cancelSessionWithRuntime,
     recoverRunsOnStartup,
+    settleWorkspaceRunsForDeletion: (workspaceId: string) => runLifecycleApplication.settleWorkspaceRunsForDeletion(workspaceId),
     createStreamingAssistantFromWorker,
     flushAssistantPartsFromWorker,
     resumeStreamingAssistantFromWorker,
     replaceStreamingAssistantFromWorker,
     discardStreamingAssistantFromWorker,
     completeAssistantFromWorker,
+    completeTerminalAssistantFromWorker,
     updateToolExecutionFromWorker,
     updateRunNoticeFromWorker,
-    completeRunFromWorker,
+    markRunWorkInProgressFromWorker,
+    persistRunTerminalIntentFromWorker,
+    convergeRunTerminalFromWorker,
   });
   const worker = createWorkerFacadeCapabilities({
     getSubtaskPreforkPlanFromWorker,
@@ -2890,9 +3025,11 @@ function createAgentApplications(
     getSingleCallModelProfileForRun,
     getAgentMcpSettingsFromWorker,
     getPluginRuntimeSnapshotsFromWorker,
-    commitCompactionFromWorker,
+    commitCompactionWithTerminalIntentFromWorker,
+    confirmCompactionCommitFromWorker,
     getMessagesContext,
     getPromptContextForRun,
+    getCompactionSourceFromWorker: getCompactionSource,
     archiveReadFromWorker,
     archiveSearchFromWorker,
     checkChannelSenderAllowlist,
@@ -2957,12 +3094,18 @@ function createLocalRuntimeExecutionPort(
       capabilities.lifecycle.discardStreamingAssistantFromWorker(params),
     completeAssistantFromWorker: (params) =>
       capabilities.lifecycle.completeAssistantFromWorker(params),
+    completeTerminalAssistantFromWorker: (params) =>
+      capabilities.lifecycle.completeTerminalAssistantFromWorker(params),
     updateToolExecutionFromWorker: (params) =>
       capabilities.lifecycle.updateToolExecutionFromWorker(params),
     updateRunNoticeFromWorker: (params) =>
       capabilities.lifecycle.updateRunNoticeFromWorker(params),
-    completeRunFromWorker: (params) =>
-      capabilities.lifecycle.completeRunFromWorker(params),
+    markRunWorkInProgressFromWorker: (params) =>
+      capabilities.lifecycle.markRunWorkInProgressFromWorker(params),
+    persistRunTerminalIntentFromWorker: (params) =>
+      capabilities.lifecycle.persistRunTerminalIntentFromWorker(params),
+    convergeRunTerminalFromWorker: (params) =>
+      capabilities.lifecycle.convergeRunTerminalFromWorker(params),
     getSession: (sessionId) => {
       const session = capabilities.session.getSession(sessionId);
       return session ? { headMessageId: session.headMessageId } : null;

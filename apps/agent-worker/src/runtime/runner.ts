@@ -20,12 +20,11 @@ import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call";
 import { parseAiSdkCallSettings } from "@agent-workbench/shared/llm-ai-sdk-call-settings";
 import { AgentApiClient, ApiConflictError, InternalRpcHttpError, InternalRpcNetworkError, InternalRpcTimeoutError, type ExecutionProfile, type PromptContext } from "./apiClient.js";
-import type { AgentUiLocale } from "@agent-workbench/shared/internal-contracts/agent-api-session";
-import { getPromptText } from "@agent-workbench/shared/prompts";
 import { McpManager } from "./mcpManager.js";
 import {
   AgentProviderReplayUpdateError,
   assertAgentProviderReplayUpdateCompatible,
+  parseAgentProviderReplay,
   serializeAgentProviderReplay,
   type AgentProviderReplayEnvelope,
   type AgentApiFlushAssistantPartsRequest,
@@ -42,6 +41,28 @@ import { isMcpToolName, isPluginToolName } from "./tools/types.js";
 import { createToolFailureCaptureIfEnabled, extractPartialToolResults, type ToolFailureCapture } from "./toolErrorCapture.js";
 import type { AgentAttachmentStorage } from "./agentAttachmentStorage.js";
 import { formatToolErrorStoreWarning } from "./toolErrorStore.js";
+import {
+  DefaultProviderConversationStateAdapterRegistry,
+} from "./providers/conversation-state/registry.js";
+import { finalOpenAiModel } from "./providers/openai-responses-replay.js";
+import type {
+  ProviderConversationStateAdapterRegistry,
+  ProviderConversationStatePartUpdate,
+  ProviderConversationStateToolCallReplay,
+} from "./providers/conversation-state/types.js";
+import {
+  projectAssistantDebugRecord,
+  serializeAssistantDebugRecord,
+} from "./debug/project-assistant-debug-record.js";
+import { CompactionExecutor } from "./compaction/executor.js";
+import type { CompactionCasState, CompactionMode } from "./compaction/types.js";
+import {
+  beginContextLimitRecovery,
+  completeContextLimitRecovery,
+  isStandardBusinessNoProgress,
+  nextContextLimitRecoveryMode,
+  type ContextLimitRecoveryState,
+} from "./compaction/recovery-state.js";
 
 function nowMs() {
   return Date.now();
@@ -53,7 +74,6 @@ function parseIntOrDefault(raw: string | undefined, fallback: number) {
   return parsed;
 }
 
-const DEBUG_DUMP_ENABLED = process.env.AWB_AGENT_DEBUG_DUMP === "1";
 const DEBUG_DUMP_RELATIVE_DIR = path.join(".debug", "agent_message_logs");
 const LOOP_MAX_STEPS = parseIntOrDefault(process.env.AWB_AGENT_LOOP_MAX_STEPS, 128);
 const LOOP_REPEAT_TOOL_CALL_THRESHOLD = parseIntOrDefault(process.env.AWB_AGENT_LOOP_REPEAT_TOOL_CALL_THRESHOLD, 20);
@@ -85,18 +105,6 @@ const TOOL_ARTIFACT_MAX_CHARS = Math.max(
 );
 const TOOL_OUTPUT_TEXT_UNTRUNCATED_NAMES = new Set(["subtask"]);
 const TOOL_PARALLEL_BATCH_LIMIT = 3;
-
-export function buildCompactionUserPrompt(input: { uiLocale: AgentUiLocale | null }) {
-  if (input.uiLocale === "zh-CN") {
-    return getPromptText("agent/compaction-user-prompt.zh-CN.txt");
-  }
-  return getPromptText("agent/compaction-user-prompt.en-US.txt");
-}
-
-const COMPACTION_INPUT_MAX_BLOCKS = 8;
-const COMPACTION_TIMEOUT_MS = 600_000;
-
-
 function newSortableId(prefix: string) {
   const ts = Date.now().toString(36).padStart(10, "0");
   const random = randomBytes(6).toString("hex");
@@ -253,6 +261,21 @@ class ContextLimitCompactionError extends Error {
   constructor(message: string, cause?: unknown) {
     super(message);
     this.name = "ContextLimitCompactionError";
+    if (cause !== undefined) (this as Error & { cause?: unknown }).cause = cause;
+  }
+}
+
+class ContextLimitMediaRequiresResendError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ContextLimitMediaRequiresResendError";
+  }
+}
+
+class CompactionConflictError extends Error {
+  constructor(cause?: unknown) {
+    super("compaction conflicts with the current run state");
+    this.name = "CompactionConflictError";
     if (cause !== undefined) (this as Error & { cause?: unknown }).cause = cause;
   }
 }
@@ -847,7 +870,7 @@ type StreamingAssistantPart =
     providerReplay?: ProviderReplayFor<"function_call">;
   };
 
-type ProviderReplayPartUpdate = OpenAiResponsesReplayPartUpdate;
+type ProviderReplayPartUpdate = ProviderConversationStatePartUpdate;
 
 type RuntimeToolSet = ToolSet;
 type RuntimeStreamChunk = TextStreamPart<RuntimeToolSet>;
@@ -856,7 +879,7 @@ type RuntimeStreamResult = Pick<StreamTextResult<RuntimeToolSet, never>,
 type RuntimeStreamRequest = Parameters<typeof streamText<RuntimeToolSet>>[0];
 type RuntimeStreamText = (request: RuntimeStreamRequest) => RuntimeStreamResult;
 
-type ProviderToolCallReplay = OpenAiResponsesToolCallReplay;
+type ProviderToolCallReplay = ProviderConversationStateToolCallReplay;
 
 type ToolExecutionBatch = {
   mode: "parallel" | "serial";
@@ -866,10 +889,12 @@ type ToolExecutionBatch = {
 function isAbortLikeError(err: unknown, signal?: AbortSignal) {
   if (signal?.aborted) return true;
   const record = toErrorRecord(err);
-  if (!record) return false;
-  const name = typeof record.name === "string" ? record.name : "";
-  const code = typeof record.code === "string" ? record.code : "";
-  const message = typeof record.message === "string" ? record.message : "";
+  const error = err instanceof Error ? err : null;
+  const name = error?.name
+    || (typeof record?.name === "string" ? record.name : "");
+  const code = typeof record?.code === "string" ? record.code : "";
+  const message = error?.message
+    || (typeof record?.message === "string" ? record.message : "");
   return name === "AbortError"
     || code === "ABORT_ERR"
     || /\babort(ed)?\b/i.test(message)
@@ -917,6 +942,12 @@ function isRetryableControlWriteError(error: unknown) {
   if (error instanceof InternalRpcTimeoutError || error instanceof InternalRpcNetworkError) return true;
   if (!(error instanceof InternalRpcHttpError)) return false;
   return error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500;
+}
+
+function isRetryableTerminalControlError(error: unknown) {
+  return error instanceof InternalRpcTimeoutError
+    || error instanceof InternalRpcNetworkError
+    || (error instanceof InternalRpcHttpError && [502, 503, 504].includes(error.status));
 }
 
 function assertFencedWriteUpdated(operation: string, response: { result: "updated" | "ignored" | "missing" } | undefined) {
@@ -1120,15 +1151,36 @@ async function writeItemLog(params: {
   payload: unknown;
   force?: boolean;
 }) {
-  if (!DEBUG_DUMP_ENABLED && !params.force) return;
+  if (process.env.AWB_AGENT_DEBUG_DUMP !== "1" && !params.force) return;
   const dirPath = path.join(params.workspacePath, DEBUG_DUMP_RELATIVE_DIR, params.kind);
   const filePath = path.join(dirPath, `${safePathSegment(params.recordId ?? "unknown")}.log`);
   try {
     await fs.mkdir(dirPath, { recursive: true });
-    await fs.writeFile(filePath, JSON.stringify(sanitizeForDebugDump(params.payload), null, 2), "utf8");
+    const payload = params.kind === "assistant"
+      ? serializeAssistantDebugRecord(params.payload)
+      : JSON.stringify(sanitizeForDebugDump(params.payload), null, 2);
+    await fs.writeFile(filePath, payload, "utf8");
   } catch (err) {
     params.logger.warn(`[agent-worker] write item log failed: ${safeErrorSummary(err)}`);
   }
+}
+
+async function writeAssistantDebugRecord(params: {
+  logger: Pick<Console, "warn">;
+  workspacePath: string;
+  recordId?: string;
+  input: Parameters<typeof projectAssistantDebugRecord>[0];
+  force?: boolean;
+}) {
+  await writeItemLog({
+    logger: params.logger,
+    workspacePath: params.workspacePath,
+    kind: "assistant",
+    recordId: params.recordId,
+    payload: projectAssistantDebugRecord(params.input),
+    // 投影或写盘失败只能影响本地调试信息，绝不能改变 Provider 请求、flush 或完成语义。
+    force: params.force,
+  });
 }
 
 function normalizeToolName(raw: unknown, available: Set<string>): string | null {
@@ -1323,6 +1375,8 @@ type AgentRunnerDeps = {
   providerReplayPartFromChunk?: (chunk: unknown) => ProviderReplayPartUpdate | null;
   /** Provider 专属适配器扩展点：从真实 tool-call chunk 提取 function item metadata。 */
   providerToolCallReplayFromChunk?: (chunk: unknown) => ProviderToolCallReplay | null;
+  /** 仅负责 Provider 私有状态协议解释；不参与工具、重试或控制面写入。 */
+  providerConversationStateAdapterRegistry?: ProviderConversationStateAdapterRegistry;
 };
 
 export class AgentRunner {
@@ -1345,6 +1399,7 @@ export class AgentRunner {
   private readonly controlWriteSleepFn: (ms: number, signal: AbortSignal) => Promise<boolean>;
   private readonly providerReplayPartFromChunkFn: ((chunk: unknown) => ProviderReplayPartUpdate | null) | undefined;
   private readonly providerToolCallReplayFromChunkFn: ((chunk: unknown) => ProviderToolCallReplay | null) | undefined;
+  private readonly providerConversationStateAdapterRegistry: ProviderConversationStateAdapterRegistry;
 
   constructor(
     private readonly apiClient: AgentApiClient,
@@ -1360,6 +1415,8 @@ export class AgentRunner {
     this.controlWriteSleepFn = deps.controlWriteSleep ?? sleepMsWithAbort;
     this.providerReplayPartFromChunkFn = deps.providerReplayPartFromChunk;
     this.providerToolCallReplayFromChunkFn = deps.providerToolCallReplayFromChunk;
+    this.providerConversationStateAdapterRegistry = deps.providerConversationStateAdapterRegistry
+      ?? new DefaultProviderConversationStateAdapterRegistry();
     this.pluginRuntimeManager = new PluginRuntimeManager(this.logger);
     const pluginProvider = REMOTE_PLUGIN_TOOLS_ENABLED
       ? new RemotePluginToolProvider()
@@ -2155,38 +2212,39 @@ export class AgentRunner {
     return lastTotalTokens >= threshold;
   }
 
-  private selectCompactionModel(params: {
+  private async executeCompaction(params: {
+    mode: CompactionMode;
     profile: ExecutionProfile;
-    context: PromptContext;
+    run: QueuedRun;
+    signal: AbortSignal;
+    casState?: CompactionCasState;
   }) {
-    const primary = {
-      provider: params.profile.provider,
-      model: params.profile.model
-    };
-    const candidate = params.profile.compaction
-      ? {
-          provider: params.profile.compaction.provider,
-          model: params.profile.compaction.model
-        }
-      : null;
-    if (!candidate) return { profile: primary, isCandidate: false };
-
-    const lastTotalTokens = typeof params.context.lastResponseTotalTokens === "number"
-      && Number.isFinite(params.context.lastResponseTotalTokens)
-      ? Math.max(0, Math.floor(params.context.lastResponseTotalTokens))
-      : null;
-    const candidateContextWindow = Math.max(1, Math.floor(Number(candidate.model.contextWindowTokens || 0)));
-    if (lastTotalTokens == null || lastTotalTokens <= candidateContextWindow) {
-      return { profile: candidate, isCandidate: true };
-    }
-    return { profile: primary, isCandidate: false };
-  }
-
-  private isSameCompactionModelProfile(
-    left: { provider: ExecutionProfile["provider"]; model: ExecutionProfile["model"] },
-    right: { provider: ExecutionProfile["provider"]; model: ExecutionProfile["model"] }
-  ) {
-    return left.provider.id === right.provider.id && left.model.id === right.model.id;
+    const executor = new CompactionExecutor({
+      apiClient: this.apiClient,
+      nowMs: this.nowMsFn,
+      newId: newSortableId,
+      isContextLimitError: isContextLengthExceededError,
+      generateSummary: async (input) => await this.generateSingleCallSummary({
+        profile: input.profile,
+        input: {
+          system: input.system,
+          // Summary requests intentionally have no sessionId: they must not inherit
+          // OpenAI Responses replay or main-turn prompt-cache state.
+          messages: input.messages,
+          timeoutMs: input.timeoutMs,
+          abortSignal: input.abortSignal,
+        },
+      }),
+    });
+    return await executor.execute({
+      mode: params.mode,
+      profile: params.profile,
+      workspaceId: params.run.workspaceId,
+      sessionId: params.run.sessionId,
+      runId: params.run.runId,
+      abortSignal: params.signal,
+      casState: params.casState,
+    });
   }
 
   protected async generateSingleCallSummary(params: {
@@ -2206,177 +2264,6 @@ export class AgentRunner {
     return generateSingleCallText(params.profile, params.input);
   }
 
-  protected async generateCompactionSummary(params: {
-    profile: ExecutionProfile;
-    context: PromptContext;
-    signal: AbortSignal;
-  }) {
-    const messagesContext = await this.retryControlRead("read compaction messages", params.signal, async () =>
-      await this.apiClient.getMessagesContext({
-        workspaceId: params.profile.resolved.workspaceId,
-        sessionId: params.profile.resolved.sessionId,
-        appendMessage: {
-          role: "user",
-          content: buildCompactionUserPrompt({ uiLocale: params.context.uiLocale })
-        }
-      }, { abortSignal: params.signal }),
-    );
-    const compactionPrompt = buildCompactionUserPrompt({ uiLocale: params.context.uiLocale });
-    const sourceMessages = messagesContext.messages.at(-1)?.role === "user"
-      && messagesContext.messages.at(-1)?.content === compactionPrompt
-      ? messagesContext.messages.slice(0, -1)
-      : messagesContext.messages;
-    const primary = {
-      provider: params.profile.provider,
-      model: params.profile.model
-    };
-    const selected = this.selectCompactionModel({
-      profile: params.profile,
-      context: params.context
-    });
-    const generateSummary = async (
-      profile: typeof primary,
-      messages: ModelMessage[]
-    ) => await this.generateSingleCallSummary({
-        profile: {
-          provider: profile.provider,
-          model: profile.model
-        },
-        input: {
-          // compaction 是内部摘要任务，不继承执行态完整 system prompt；使用 messages-context 提供的 one-shot system。
-          system: messagesContext.system,
-          sessionId: params.profile.resolved.sessionId,
-          messages: [...messages, { role: "user", content: compactionPrompt }],
-          timeoutMs: COMPACTION_TIMEOUT_MS,
-          abortSignal: params.signal
-        }
-      });
-    const summarize = async (messages: ModelMessage[]) => {
-      try {
-        return await generateSummary(selected.profile, messages);
-      } catch (err) {
-        if (
-          selected.isCandidate
-          && !params.signal.aborted
-          && !this.isSameCompactionModelProfile(selected.profile, primary)
-          && isContextLengthExceededError(err)
-        ) {
-          return await generateSummary(primary, messages);
-        }
-        throw err;
-      }
-    };
-
-    let blockCount = 1;
-    const summarizeWithMessageBoundarySplit = async (
-      messages: ModelMessage[]
-    ): Promise<string[]> => {
-      try {
-        const response = await summarize(messages);
-        return [String(response.text || "").trim()];
-      } catch (err) {
-        if (!isContextLengthExceededError(err)) throw err;
-        if (messages.length < 2) {
-          throw new CompactionInputLimitError("compaction input cannot be split further on Message boundaries");
-        }
-        blockCount += 1;
-        if (blockCount > COMPACTION_INPUT_MAX_BLOCKS) {
-          throw new CompactionInputLimitError(`compaction input exceeds ${COMPACTION_INPUT_MAX_BLOCKS} Message blocks`);
-        }
-        const splitAt = Math.floor(messages.length / 2);
-        const left = await summarizeWithMessageBoundarySplit(messages.slice(0, splitAt));
-        const right = await summarizeWithMessageBoundarySplit(messages.slice(splitAt));
-        return [...left, ...right];
-      }
-    };
-
-    return (await summarizeWithMessageBoundarySplit(sourceMessages as ModelMessage[])).filter(Boolean).join("\n\n---\n\n");
-  }
-
-  private async compactContext(params: {
-    profile: ExecutionProfile;
-    run: QueuedRun;
-    context: PromptContext;
-    signal: AbortSignal;
-    maxProviderRetries?: number;
-  }) {
-    const { profile, run, context, signal, maxProviderRetries } = params;
-    let retryCount = 0;
-
-    while (!signal.aborted) {
-      const expectedHeadMessageId = context.headMessageId;
-      if (expectedHeadMessageId == null) return false;
-
-      let summaryText: string;
-      try {
-        summaryText = await this.generateCompactionSummary({
-          profile,
-          context,
-          signal
-        });
-        if (!summaryText.trim()) throw new Error("compaction provider returned empty summary");
-      } catch (err) {
-        if (err instanceof ControlReadPermanentError || err instanceof CompactionInputLimitError) {
-          throw err;
-        }
-        if (signal.aborted) return false;
-        if (maxProviderRetries != null && retryCount >= maxProviderRetries) {
-          throw new ContextLimitCompactionError("context-limit compaction provider failed", err);
-        }
-        const delayMs = computeRetryBackoffMs(retryCount);
-        const retryAttempt = retryCount + 1;
-        const message = safeErrorSummary(err);
-        const noticeText = `Compaction failed, retrying in ${Math.floor(delayMs / 1000)}s (attempt ${retryAttempt}): ${message}`;
-        this.logger.warn(
-          `[agent-worker] compaction retry scheduled(session=${run.sessionId}, run=${run.runId}, retry=${retryAttempt}): ${message}`
-        );
-        await this.retryControlWrite("update compaction retry notice", signal, async () =>
-          await this.apiClient.updateRunNotice({
-            workspaceId: run.workspaceId,
-            sessionId: run.sessionId,
-            runId: run.runId,
-            runNoticeText: noticeText,
-            updatedAt: nowMs()
-          })
-        );
-
-        retryCount = retryAttempt;
-        const continueRunning = await sleepMsWithAbort(delayMs, signal);
-        if (!continueRunning) return false;
-        continue;
-      }
-
-      const request = {
-        workspaceId: run.workspaceId,
-        sessionId: run.sessionId,
-        runId: run.runId,
-        messageId: newSortableId("msg"),
-        textPartId: newSortableId("part"),
-        expectedHeadMessageId,
-        expectedRevision: context.sessionRevision,
-        summaryText,
-        createdAt: nowMs(),
-      };
-      const compacted = await this.retryControlWrite("commit compaction", signal, async () =>
-        await this.apiClient.commitCompaction(request)
-      );
-      if (compacted?.result !== "updated") return false;
-
-      await this.retryControlWrite("clear compaction notice", signal, async () =>
-        await this.apiClient.updateRunNotice({
-          workspaceId: run.workspaceId,
-          sessionId: run.sessionId,
-          runId: run.runId,
-          runNoticeText: "",
-          updatedAt: nowMs()
-        })
-      );
-      return true;
-    }
-
-    return false;
-  }
-
   private async runModelStep(params: {
     profile: ExecutionProfile;
     run: QueuedRun;
@@ -2390,22 +2277,23 @@ export class AgentRunner {
     if (context.pendingTools.length > 0) {
       throw new Error("cannot invoke model while ToolExecution remains queued or running");
     }
+    const conversationStateAdapter = this.providerConversationStateAdapterRegistry.resolve(profile);
     const model = createLanguageModel(profile);
     const runtimeOptions = buildModelRuntimeOptions(profile);
     const turnId = newSortableId("turn");
     let materializedMessages: ModelMessage[];
-    try {
-      const replayedMessages = applyOpenAiResponsesReplay({
-        profile,
-        messages: context.messages as Parameters<typeof applyOpenAiResponsesReplay>[0]["messages"],
-        source: context.providerReplay,
-      });
-      materializedMessages = await materializePromptAttachments({ messages: replayedMessages as PromptContext["messages"], attachmentStorage: this.attachmentStorage });
-    } catch (err) {
-      const message = safeErrorSummary(err);
-      this.logger.warn(`[agent-worker] attachment materialization failed: ${message}`);
-      throw new Error(`attachment materialization failed: ${message}`);
-    }
+    const preparedInvocation = conversationStateAdapter?.prepareInvocation({
+      profile,
+      messages: context.messages as ModelMessage[],
+      history: context.providerReplay,
+      providerOptions: runtimeOptions.providerOptions,
+    }) ?? {
+      messages: context.messages as ModelMessage[],
+      providerOptions: runtimeOptions.providerOptions,
+    };
+    const preparedProviderOptions = preparedInvocation.providerOptions;
+    const includeRawChunks = preparedInvocation.includeRawChunks === true;
+    materializedMessages = await materializePromptAttachments({ messages: preparedInvocation.messages as PromptContext["messages"], attachmentStorage: this.attachmentStorage });
 
     const modelIdleTimeoutMs =
       ENV_MODEL_IDLE_TIMEOUT_MS > 0
@@ -2445,13 +2333,10 @@ export class AgentRunner {
       const providerOptions = buildProviderOptionsWithPromptCacheKey({
           providerNpm: profile.provider.npm,
           sessionId: run.sessionId,
-          providerOptions: runtimeOptions.providerOptions
+          providerOptions: preparedProviderOptions
         });
-      const selectedProviderOptions = profile.provider.npm === "@ai-sdk/openai"
-        ? buildOpenAiResponsesProviderOptions(providerOptions)
-        : providerOptions;
       const jsonProviderOptions: Record<string, JSONValue> = {};
-      for (const [key, value] of Object.entries(selectedProviderOptions)) {
+      for (const [key, value] of Object.entries(providerOptions)) {
         const jsonValue = toJsonValue(value);
         if (jsonValue !== undefined) jsonProviderOptions[key] = jsonValue;
       }
@@ -2460,7 +2345,7 @@ export class AgentRunner {
       };
     }
     // 自定义重试策略由本文件控制,禁用 AI SDK 内建重试避免双重重试。
-    if (isOfficialOpenAiResponsesProfile(profile)) requestBase.includeRawChunks = true;
+    if (includeRawChunks) requestBase.includeRawChunks = true;
 
     let assistantMessageId: string;
     if (recoveryContinuation.messageId) {
@@ -2620,12 +2505,11 @@ export class AgentRunner {
     const startedAt = this.nowMsFn();
     let responseTotalTokens: number | null = null;
 
-    await writeItemLog({
+    await writeAssistantDebugRecord({
       logger: this.logger,
       workspacePath: run.workspacePath,
-      kind: "assistant",
       recordId: assistantMessageId,
-      payload: {
+      input: {
         status: "running",
         startedAt,
         meta: {
@@ -2636,7 +2520,7 @@ export class AgentRunner {
           step,
           messageId: assistantMessageId
         },
-        request: { ...requestBase, messages: context.messages },
+        request: requestBase,
         retryPolicy: {
           firstBackoffMs: MODEL_RETRY_BACKOFF_BASE_MS,
           maxBackoffMs: modelRequestRetryBackoffMaxMs,
@@ -2757,13 +2641,11 @@ export class AgentRunner {
       let lastChunkAt = this.nowMsFn();
       const attemptStartPartVersion = streamPartVersion;
       const attemptProducedOutput = () => streamPartVersion > attemptStartPartVersion;
-      const reasoningPartIdsByItem = new Map<string, string[]>();
-      let sawOpenAiCompleted = false;
-      let sawOpenAiTerminalFailure = false;
-      let sawUnknownFinishReason = false;
+      const conversationStateAttempt = conversationStateAdapter?.createAttempt();
       let providerFailure: unknown = null;
       let attemptStream: RuntimeStreamResult | null = null;
       let attemptResponseTotalTokens: number | null = null;
+      let attemptReachedTerminal = false;
 
       const onOuterAbort = () => {
         requestController.abort();
@@ -2809,19 +2691,18 @@ export class AgentRunner {
           if (requestController.signal.aborted) break;
           lastChunkAt = this.nowMsFn();
           if (!chunk || typeof chunk !== "object") continue;
-          const reasoningIdentity = isOfficialOpenAiResponsesProfile(profile)
-            ? openAiReasoningItemIdFromChunk(chunk)
-            : null;
-          if (reasoningIdentity) {
-            const ids = reasoningPartIdsByItem.get(reasoningIdentity.itemId) ?? [];
-            if (!ids.includes(reasoningIdentity.id)) ids.push(reasoningIdentity.id);
-            reasoningPartIdsByItem.set(reasoningIdentity.itemId, ids);
-          }
+          const observedProtocolChunk = conversationStateAttempt?.observeChunk(chunk);
           const providerReplayUpdate = this.providerReplayPartFromChunkFn?.(chunk)
-            ?? (isOfficialOpenAiResponsesProfile(profile) ? collectOpenAiResponsesReplayChunk({ profile, chunk }) : null);
+            ?? observedProtocolChunk?.partUpdate;
           if (providerReplayUpdate && providerReplayUpdate.type !== "function_call") {
             ensureStreamTextPart(providerReplayUpdate.type, providerReplayUpdate.id);
             upsertProviderReplayPart(providerReplayUpdate);
+            await maybeFlushAssistantStreaming();
+          }
+          for (const terminalUpdate of observedProtocolChunk?.terminalPartUpdates ?? []) {
+            upsertProviderReplayPart(terminalUpdate);
+          }
+          if ((observedProtocolChunk?.terminalPartUpdates?.length ?? 0) > 0) {
             await maybeFlushAssistantStreaming();
           }
           if (chunk.type === "text-start" || chunk.type === "reasoning-start") {
@@ -2846,7 +2727,7 @@ export class AgentRunner {
           if (chunk.type === "text-end" || chunk.type === "reasoning-end") continue;
           if (chunk.type === "tool-call") {
             const toolCallReplay = this.providerToolCallReplayFromChunkFn?.(chunk)
-              ?? (isOfficialOpenAiResponsesProfile(profile) ? collectOpenAiResponsesToolCallReplay({ profile, chunk }) : null);
+              ?? observedProtocolChunk?.toolCallReplay;
             const toolName = normalizeToolName(chunk.toolName, availableToolNames);
             if (!toolName) continue;
             const rawToolCallId = String(chunk.toolCallId || "").trim();
@@ -2864,21 +2745,7 @@ export class AgentRunner {
             await maybeFlushAssistantStreaming();
             continue;
           }
-          if (chunk.type === "raw" && isOfficialOpenAiResponsesProfile(profile)) {
-            const terminalUpdates = collectOpenAiResponsesTerminalReplay({ profile, rawValue: chunk.rawValue, reasoningPartIdsByItem });
-            for (const update of terminalUpdates) upsertProviderReplayPart(update);
-            if (terminalUpdates.length > 0) await maybeFlushAssistantStreaming();
-            const terminalStatus = openAiResponsesTerminalStatus(chunk.rawValue);
-            if (terminalStatus === "completed") sawOpenAiCompleted = true;
-            if (terminalStatus === "incomplete" || terminalStatus === "failed") {
-              sawOpenAiTerminalFailure = true;
-            }
-            continue;
-          }
           if (chunk.type === "finish") {
-            if (isOfficialOpenAiResponsesProfile(profile) && chunk.finishReason === "unknown") {
-              sawUnknownFinishReason = true;
-            }
             attemptResponseTotalTokens = extractTotalTokens(chunk.totalUsage) ?? attemptResponseTotalTokens;
             continue;
           }
@@ -2890,6 +2757,7 @@ export class AgentRunner {
             throw new Error("model stream aborted");
           }
         }
+        attemptReachedTerminal = true;
         if (pendingFlush) {
           await flushAssistant(true);
         }
@@ -2903,14 +2771,29 @@ export class AgentRunner {
         if (idleTimedOut) {
           throw new Error(`model idle timeout after ${modelIdleTimeoutMs}ms`);
         }
-        if (isOfficialOpenAiResponsesProfile(profile) && (!sawOpenAiCompleted || sawOpenAiTerminalFailure)) {
-          throw new Error(!sawOpenAiCompleted
-            ? "OpenAI Responses stream ended without response.completed"
-            : "OpenAI Responses stream contained a failed or incomplete terminal event");
+        const protocolValidation = conversationStateAttempt?.finalizeAttempt();
+        if (protocolValidation && !protocolValidation.ok) {
+          throw new Error(protocolValidation.message);
         }
-        if (isOfficialOpenAiResponsesProfile(profile) && sawUnknownFinishReason) {
-          throw new Error("OpenAI Responses finish reason was unknown");
-        }
+        // replay-only 必须基于本次 Assistant 已实际落地的 reasoning Part，而非 Attempt 观察到的原始 chunk。
+        // 严格 round-trip 校验避免 text/function identity 或未知工具 metadata 意外放开空 Assistant。
+        const hasPersistedOpenAiReasoningReplay = orderedParts.some((part) => {
+          if (part.type !== "reasoning" || part.providerReplay == null) return false;
+          try {
+            const replay = parseAgentProviderReplay(serializeAgentProviderReplay(part.providerReplay));
+            return replay?.item.type === "reasoning"
+              && replay.provider.npm === "@ai-sdk/openai"
+              && replay.provider.api === "responses"
+              && replay.provider.providerId === profile.provider.id
+              && replay.provider.model === finalOpenAiModel(profile);
+          } catch {
+            return false;
+          }
+        });
+        // 仅已通过当前协议终态校验且存在已落地兼容 reasoning replay 的 Adapter 可让空可见内容完成。
+        // terminal metadata 在此之前已进入 orderedParts 并经上方 flush 持久化。
+        const allowsReplayOnlyAssistant = protocolValidation?.ok === true
+          && hasPersistedOpenAiReasoningReplay;
         try {
           const finalReasoning = await successfulStream.reasoningText;
           const finalReasoningText = typeof finalReasoning === "string"
@@ -2922,7 +2805,7 @@ export class AgentRunner {
         } catch {
           // 保留流式阶段已经获取的 reasoning；收尾读取失败不应覆盖有效输出。
         }
-        if (!hasVisibleAssistantText(textFromParts()) && reasoningFromParts().length === 0 && toolCallsFromParts().length === 0) {
+        if (!hasVisibleAssistantText(textFromParts()) && reasoningFromParts().length === 0 && toolCallsFromParts().length === 0 && !allowsReplayOnlyAssistant) {
           throw new Error("model stream completed without visible text or tool calls");
         }
         if (attemptResponseTotalTokens == null && attemptStream) {
@@ -2933,11 +2816,49 @@ export class AgentRunner {
         break;
       } catch (err) {
         if (signal.aborted) {
+          await writeAssistantDebugRecord({
+            logger: this.logger,
+            workspacePath: run.workspacePath,
+            recordId: assistantMessageId,
+            input: {
+              status: "failed",
+              startedAt,
+              meta: { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, turnId, step, messageId: assistantMessageId, failureKind: "aborted" },
+              request: requestBase,
+              error: err,
+            },
+          });
           return { aborted: true as const, assistantMessageId };
         }
-        if (err instanceof FencedWriteIgnoredError || err instanceof FencedWriteMissingError || err instanceof ControlWritePermanentError || err instanceof AgentProviderReplayUpdateError) throw err;
+        if (err instanceof FencedWriteIgnoredError || err instanceof FencedWriteMissingError || err instanceof ControlWritePermanentError || err instanceof AgentProviderReplayUpdateError) {
+          await writeAssistantDebugRecord({
+            logger: this.logger,
+            workspacePath: run.workspacePath,
+            recordId: assistantMessageId,
+            input: {
+              status: "failed",
+              startedAt,
+              meta: { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, turnId, step, messageId: assistantMessageId, failureKind: attemptReachedTerminal ? "assistant-finalization" : "invariant-or-control" },
+              request: requestBase,
+              error: err,
+            },
+          });
+          throw err;
+        }
         const contextLimitError = providerFailure ?? (attemptStream == null ? err : null);
         if (contextLimitError != null && isContextLengthExceededError(contextLimitError)) {
+          await writeAssistantDebugRecord({
+            logger: this.logger,
+            workspacePath: run.workspacePath,
+            recordId: assistantMessageId,
+            input: {
+              status: "failed",
+              startedAt,
+              meta: { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, turnId, step, messageId: assistantMessageId, failureKind: "context-limit" },
+              request: requestBase,
+              error: contextLimitError,
+            },
+          });
           if (attemptProducedOutput()) await flushAssistant(true, false);
           const discardRequest = {
             workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
@@ -2979,13 +2900,12 @@ export class AgentRunner {
             retryNoticePendingClear = true;
           }
 
-          await writeItemLog({
+          await writeAssistantDebugRecord({
             logger: this.logger,
             workspacePath: run.workspacePath,
-            kind: "assistant",
             recordId: assistantMessageId,
-            payload: {
-              status: "retrying",
+            input: {
+              status: "failed",
               meta: {
                 workspaceId: run.workspaceId,
                 sessionId: run.sessionId,
@@ -2996,9 +2916,8 @@ export class AgentRunner {
                 retryAttempt,
                 nextRetryInMs: delayMs
               },
-              response: {
-                error: message
-              }
+              request: requestBase,
+              error: err,
             }
           });
 
@@ -3020,6 +2939,37 @@ export class AgentRunner {
     }
 
     const recognizedCalls = toolCallsFromParts();
+    let terminalFailureLogged = false;
+    const writeTerminalFailure = async (failureKind: string, error: unknown) => {
+      if (terminalFailureLogged) return;
+      terminalFailureLogged = true;
+      await writeAssistantDebugRecord({
+        logger: this.logger,
+        workspacePath: run.workspacePath,
+        recordId: assistantMessageId,
+        input: {
+          status: "failed",
+          startedAt,
+          meta: {
+            workspaceId: run.workspaceId,
+            sessionId: run.sessionId,
+            runId: run.runId,
+            turnId,
+            step,
+            messageId: assistantMessageId,
+            failureKind,
+          },
+          request: requestBase,
+          response: {
+            text: textFromParts(),
+            reasoningText: reasoningFromParts(),
+            toolCalls: recognizedCalls,
+          },
+          error,
+        },
+      });
+    };
+    try {
       const executions: Array<{ id: string; callPartId: string; originSessionId: string; originRunId: string; status: "queued" }> = [];
       for (const call of recognizedCalls) {
         const signature = toolSignature(call.toolName, call.args);
@@ -3046,16 +2996,32 @@ export class AgentRunner {
         messageId: assistantMessageId, executions,
         responseTotalTokens, updatedAt: this.nowMsFn()
       };
-      await this.retryControlWrite("complete assistant", signal, async () =>
-        await this.apiClient.completeAssistant(completeRequest)
-      );
+      const terminalAssistant = executions.length === 0;
+      if (terminalAssistant) {
+        const code: "run_completed" | "subtask_completed" = run.runKind === "subtask" ? "subtask_completed" : "run_completed";
+        const terminalRequest = {
+          workspaceId: completeRequest.workspaceId,
+          sessionId: completeRequest.sessionId,
+          runId: completeRequest.runId,
+          messageId: completeRequest.messageId,
+          responseTotalTokens: completeRequest.responseTotalTokens,
+          intent: { status: "completed" as const, code, detail: null },
+          updatedAt: completeRequest.updatedAt,
+        };
+        await this.retryControlWrite("complete terminal assistant", signal, async () =>
+          await this.apiClient.completeTerminalAssistant(terminalRequest)
+        );
+      } else {
+        await this.retryControlWrite("complete assistant", signal, async () =>
+          await this.apiClient.completeAssistant(completeRequest)
+        );
+      }
 
-      await writeItemLog({
+      await writeAssistantDebugRecord({
         logger: this.logger,
         workspacePath: run.workspacePath,
-        kind: "assistant",
         recordId: assistantMessageId,
-        payload: {
+        input: {
           status: "completed",
           startedAt,
           finishedAt: this.nowMsFn(),
@@ -3067,7 +3033,7 @@ export class AgentRunner {
             step,
             messageId: assistantMessageId
           },
-          request: { ...requestBase, messages: context.messages },
+          request: requestBase,
           response: {
             text: textFromParts(),
             reasoningText: reasoningFromParts(),
@@ -3082,54 +3048,87 @@ export class AgentRunner {
         aborted: false as const,
         toolCallCount: recognizedCalls.length,
         assistantMessageId,
+        terminalIntentPersisted: terminalAssistant,
         hasVisibleText: hasVisibleAssistantText(textFromParts()) || reasoningFromParts().length > 0,
         availableToolNames: recognizedCalls.length > 0 ? availableToolNames : undefined
       };
+    } catch (err) {
+      await writeTerminalFailure("assistant-finalization", err);
+      throw err;
+    }
   }
 
   private async processRun(run: QueuedRun, signal: AbortSignal) {
-    let committedTerminalStatus: "completed" | "failed" | "cancelled" | null = null;
-    let terminalSubmission: Promise<void> | null = null;
-    let terminalSubmittingStatus: "completed" | "failed" | "cancelled" | null = null;
-    class TerminalStatusSubmitError extends Error {
-      constructor(
-        readonly status: "completed" | "failed" | "cancelled",
-        cause: unknown
-      ) {
-        super(`submit terminal status failed: ${status}`);
-        this.name = "TerminalStatusSubmitError";
-        (this as Error & { cause?: unknown }).cause = cause;
-      }
-    }
-    const finishOnce = async (status: "completed" | "failed" | "cancelled") => {
-      if (committedTerminalStatus) return;
-      if (terminalSubmission) return await terminalSubmission;
-      terminalSubmittingStatus = status;
-      terminalSubmission = (async () => {
-        try {
-          await this.apiClient.completeRun({
-            workspaceId: run.workspaceId,
-            sessionId: run.sessionId,
-            runId: run.runId,
-            status,
-            updatedAt: nowMs()
-          });
-          committedTerminalStatus = status;
-        } catch (err) {
-          throw new TerminalStatusSubmitError(status, err);
-        } finally {
-          terminalSubmission = null;
-          terminalSubmittingStatus = null;
-        }
-      })();
-      return await terminalSubmission;
+    type TerminalStatus = "completed" | "failed" | "cancelled";
+    type TerminalTuple = { status: TerminalStatus; code: import("@agent-workbench/shared").AgentTerminalResultCode; detail: null };
+    let terminalTuple: TerminalTuple | null = null;
+    let terminalIntentPersisted = false;
+    let terminalConverged = false;
+    let terminalDeadline: number | null = null;
+    let terminalIntentAttempts = 0;
+    let terminalConvergenceAttempts = 0;
+    const terminalCode = (status: TerminalStatus) => {
+      if (status === "cancelled") return "run_cancelled" as const;
+      if (run.runKind === "manual_compaction") return status === "completed" ? "compaction_completed" as const : "compaction_failed" as const;
+      if (run.runKind === "subtask") return status === "completed" ? "subtask_completed" as const : "subtask_failed" as const;
+      return status === "completed" ? "run_completed" as const : "run_failed" as const;
     };
-    const tryFinishOnce = async (status: "completed" | "failed" | "cancelled") => {
+    const finishOnce = async (requested: TerminalStatus | TerminalTuple, options: { intentAlreadyPersisted?: boolean } = {}) => {
+      if (terminalConverged) return;
+      const tuple = typeof requested === "string"
+        ? { status: requested, code: terminalCode(requested), detail: null } as TerminalTuple
+        : requested;
+      if (terminalTuple && (terminalTuple.status !== tuple.status || terminalTuple.code !== tuple.code || terminalTuple.detail !== tuple.detail)) {
+        throw new Error("terminal result conflicts with an already selected tuple");
+      }
+      terminalTuple ??= tuple;
+      terminalIntentPersisted ||= options.intentAlreadyPersisted === true;
+      terminalDeadline ??= this.nowMsFn() + 10_000;
+      const request = { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId };
+      const retryPhase = async (phase: "intent" | "convergence") => {
+        const attempts = () => phase === "intent" ? terminalIntentAttempts : terminalConvergenceAttempts;
+        const incrementAttempts = () => {
+          if (phase === "intent") terminalIntentAttempts += 1;
+          else terminalConvergenceAttempts += 1;
+        };
+        while (attempts() < 3) {
+          const remaining = terminalDeadline! - this.nowMsFn();
+          if (remaining <= 0) break;
+          try {
+            incrementAttempts();
+            if (phase === "intent") {
+              await this.apiClient.persistRunTerminalIntent({
+                ...request,
+                ...terminalTuple!,
+                updatedAt: this.nowMsFn(),
+              }, { timeoutMs: remaining });
+            } else {
+              await this.apiClient.convergeRunTerminal({
+                ...request,
+                updatedAt: this.nowMsFn(),
+              }, { timeoutMs: remaining });
+            }
+            return;
+          } catch (err) {
+            if (!isRetryableTerminalControlError(err)) throw err;
+            if (attempts() >= 3 || terminalDeadline! - this.nowMsFn() <= 250) throw err;
+            await new Promise<void>((resolve) => setTimeout(resolve, 250));
+          }
+        }
+        throw new Error(`terminal ${phase} control budget exhausted`);
+      };
+      if (!terminalIntentPersisted) {
+        await retryPhase("intent");
+        terminalIntentPersisted = true;
+      }
+      await retryPhase("convergence");
+      terminalConverged = true;
+    };
+    const tryFinishOnce = async (status: TerminalStatus | TerminalTuple, options?: { intentAlreadyPersisted?: boolean }) => {
       try {
-        await finishOnce(status);
+        await finishOnce(status, options);
       } catch (err) {
-        const cause = err instanceof TerminalStatusSubmitError ? err.cause : err;
-        if (cause instanceof ApiConflictError) {
+        if (err instanceof ApiConflictError) {
           this.logger.warn(`run append conflict, stop run: ${run.sessionId} ${run.runId}`);
           return;
         }
@@ -3137,6 +3136,12 @@ export class AgentRunner {
       }
     };
     try {
+      await this.apiClient.markRunWorkInProgress({
+        workspaceId: run.workspaceId,
+        sessionId: run.sessionId,
+        runId: run.runId,
+        updatedAt: nowMs(),
+      });
       const profile = await this.apiClient.getExecutionProfile({
         workspaceId: run.workspaceId,
         sessionId: run.sessionId,
@@ -3148,19 +3153,11 @@ export class AgentRunner {
       const recoveryContinuation = run.recoveryContinuation ?? { messageId: run.resumeAssistantMessageId ?? null };
       let emptyResponseCount = 0;
       let contextLimitCompactionAttempts = 0;
+      let recoveryState: ContextLimitRecoveryState = "none";
+      const recoveryCasState: CompactionCasState = { remaining: 1 };
 
       // 手动压缩: 仅执行一次 compaction,不进入正常 step 循环.
       if (run.runKind === "manual_compaction") {
-        const context = await this.apiClient.getPromptContext({
-          workspaceId: run.workspaceId,
-          sessionId: run.sessionId,
-          runId: run.runId
-        });
-        if (context.pendingTools.length > 0) {
-          await finishOnce("failed");
-          return;
-        }
-
         const notice = await this.apiClient.updateRunNotice({
           workspaceId: run.workspaceId,
           sessionId: run.sessionId,
@@ -3170,17 +3167,39 @@ export class AgentRunner {
         });
         assertFencedWriteUpdated("start compaction notice", notice);
 
-        const compacted = await this.compactContext({
-          profile,
-          run,
-          context,
-          signal
-        });
+        const compacted = await this.executeCompaction({ mode: "manual", profile, run, signal });
         if (signal.aborted) {
           await finishOnce("cancelled");
           return;
         }
-        await finishOnce(compacted ? "completed" : "failed");
+        if (compacted.kind === "committed") {
+          await finishOnce("completed", { intentAlreadyPersisted: true });
+          return;
+        }
+        if (compacted.kind === "skipped" && compacted.reason === "cas_conflict") throw new CompactionConflictError();
+        if (compacted.kind === "unavailable") {
+          await finishOnce({ status: "failed", code: "compaction_provider_unavailable", detail: null });
+          return;
+        }
+        if (compacted.kind === "skipped") {
+          await finishOnce({
+            status: "completed",
+            code: compacted.reason === "no_prefix" ? "compaction_not_needed"
+              : compacted.reason === "oversized_tail" ? "compaction_oversized_tail"
+              : "compaction_no_progress",
+            detail: null,
+          });
+          return;
+        }
+        if (compacted.kind === "blocked") {
+          await finishOnce({ status: "failed", code: "compaction_pending_tools", detail: null });
+          return;
+        }
+        if (compacted.kind === "media_requires_resend") {
+          await finishOnce({ status: "completed", code: "compaction_media_requires_resend", detail: null });
+          return;
+        }
+        await finishOnce({ status: "failed", code: "compaction_failed", detail: null });
         return;
       }
 
@@ -3211,13 +3230,11 @@ export class AgentRunner {
         }
 
         if (recoveryContinuation.messageId == null && this.shouldAutoCompact({ context, model: profile.model, runtime: profile.runtime })) {
-          const compacted = await this.compactContext({
-            profile,
-            run,
-            context,
-            signal
-          });
-          if (compacted || signal.aborted) {
+          const compacted = await this.executeCompaction({ mode: "proactive", profile, run, signal });
+          if (compacted.kind === "failed" && compacted.reason !== "cancelled") {
+            throw new Error(`proactive compaction failed: ${compacted.reason}`);
+          }
+          if (compacted.kind === "committed" || signal.aborted) {
             if (signal.aborted) await finishOnce("cancelled");
             continue;
           }
@@ -3243,6 +3260,10 @@ export class AgentRunner {
         } catch (err) {
           if (!(err instanceof ModelContextLengthExceededError)) throw err;
           step -= 1;
+          const mode = nextContextLimitRecoveryMode(recoveryState);
+          if (mode == null) {
+            throw new ContextLimitCompactionError("model context limit persisted after full recovery", err);
+          }
           if (contextLimitCompactionAttempts >= CONTEXT_LIMIT_COMPACTION_MAX_ATTEMPTS) {
             throw new ContextLimitCompactionError("model context limit persisted after bounded compaction attempts", err);
           }
@@ -3252,21 +3273,50 @@ export class AgentRunner {
               runNoticeText: "上下文超限，正在压缩后重试...", updatedAt: this.nowMsFn(),
             })
           );
-          const compactionContext = await this.apiClient.getPromptContext({
-            workspaceId: run.workspaceId,
-            sessionId: run.sessionId,
-            runId: run.runId,
-          });
-          const compacted = await this.compactContext({
-            profile, run, context: compactionContext, signal, maxProviderRetries: 0,
-          });
-          if (!compacted) throw new ContextLimitCompactionError("context-limit compaction made no progress");
-          contextLimitCompactionAttempts += 1;
+          recoveryState = beginContextLimitRecovery(recoveryState, mode);
+          const compacted = await this.executeCompaction({ mode, profile, run, signal, casState: recoveryCasState });
           if (signal.aborted) {
             await finishOnce("cancelled");
             return;
           }
-          continue;
+          if (compacted.kind === "media_requires_resend") {
+            throw new ContextLimitMediaRequiresResendError("full context recovery cannot retain trigger media");
+          }
+          if (compacted.kind === "committed") {
+            recoveryState = completeContextLimitRecovery(mode);
+            contextLimitCompactionAttempts += 1;
+            if (signal.aborted) {
+              await finishOnce("cancelled");
+              return;
+            }
+            continue;
+          }
+          // Provider/control/data/input failures are already classified by Executor.
+          // They are not evidence that compaction made ordinary business no progress.
+          if (compacted.kind === "failed" || compacted.kind === "summary_input_limit" || compacted.kind === "blocked") {
+            const reason = compacted.kind === "failed" ? compacted.reason : compacted.kind;
+            throw new Error(`context-limit recovery compaction failed: ${reason}`);
+          }
+          if (compacted.kind === "skipped" && compacted.reason === "cas_conflict") throw new CompactionConflictError();
+          const businessNoProgress = isStandardBusinessNoProgress(compacted);
+          if (mode === "recovery-standard" && businessNoProgress) {
+            recoveryState = "full_attempted";
+            const full = await this.executeCompaction({ mode: "recovery-full", profile, run, signal, casState: recoveryCasState });
+            if (full.kind === "media_requires_resend") {
+              throw new ContextLimitMediaRequiresResendError("full context recovery cannot retain trigger media");
+            }
+            if (full.kind === "skipped" && full.reason === "cas_conflict") throw new CompactionConflictError();
+            if (full.kind === "committed") {
+              recoveryState = "full_committed";
+              contextLimitCompactionAttempts += 1;
+              continue;
+            }
+            if (full.kind === "failed" || full.kind === "summary_input_limit" || full.kind === "blocked") {
+              const reason = full.kind === "failed" ? full.reason : full.kind;
+              throw new Error(`context-limit recovery compaction failed: ${reason}`);
+            }
+          }
+          throw new ContextLimitCompactionError("context-limit recovery compaction made no progress");
         }
         if (result.aborted || signal.aborted) {
           await finishOnce("cancelled");
@@ -3279,12 +3329,12 @@ export class AgentRunner {
         }
         if (result.hasVisibleText) {
           emptyResponseCount = 0;
-          await finishOnce("completed");
+          await finishOnce("completed", { intentAlreadyPersisted: result.terminalIntentPersisted === true });
           return;
         }
         emptyResponseCount += 1;
         if (emptyResponseCount >= EMPTY_RESPONSE_COMPLETE_THRESHOLD) {
-          await finishOnce("completed");
+          await finishOnce("completed", { intentAlreadyPersisted: result.terminalIntentPersisted === true });
           return;
         }
       }
@@ -3292,6 +3342,10 @@ export class AgentRunner {
         await finishOnce("cancelled");
       }
     } catch (err) {
+      if (terminalTuple) {
+        this.logger.error(`terminal control failed after tuple selection: ${run.sessionId} ${run.runId}`);
+        return;
+      }
       if (isAbortLikeError(err, signal)) {
         this.logger.info(`run aborted: ${run.sessionId} ${run.runId}`);
         await tryFinishOnce("cancelled");
@@ -3306,11 +3360,16 @@ export class AgentRunner {
         return;
       }
 
-      const terminalSubmitError = err instanceof TerminalStatusSubmitError ? err : null;
-      const fallbackStatus = terminalSubmitError?.status ?? "failed";
-      const cause = terminalSubmitError?.cause ?? err;
+      const cause = err;
+      const failedTuple: TerminalTuple = err instanceof ContextLimitMediaRequiresResendError
+        ? { status: "failed", code: run.runKind === "user" ? "context_limit_media_requires_resend" : terminalCode("failed"), detail: null }
+        : err instanceof ContextLimitCompactionError
+        ? { status: "failed", code: run.runKind === "user" ? "context_limit_recovery_exhausted" : terminalCode("failed"), detail: null }
+        : err instanceof CompactionConflictError && (run.runKind === "user" || run.runKind === "manual_compaction")
+          ? { status: "failed", code: "compaction_conflict", detail: null }
+          : { status: "failed", code: terminalCode("failed"), detail: null };
       try {
-        await tryFinishOnce(fallbackStatus);
+        await tryFinishOnce(failedTuple);
       } catch {
         this.logger.error(`run failed and fallback append failed: ${run.sessionId} ${run.runId} ${safeErrorSummary(cause)}`);
       }
@@ -3399,6 +3458,23 @@ export function sanitizeForDebugDumpForTest(value: unknown) {
   return sanitizeForDebugDump(value);
 }
 
+export function projectAssistantDebugRecordForTest(input: Parameters<typeof projectAssistantDebugRecord>[0]) {
+  return projectAssistantDebugRecord(input);
+}
+
+export function serializeAssistantDebugRecordForTest(input: Parameters<typeof projectAssistantDebugRecord>[0]) {
+  return serializeAssistantDebugRecord(projectAssistantDebugRecord(input));
+}
+
+export async function writeAssistantDebugRecordForTest(params: {
+  logger: Pick<Console, "warn">;
+  workspacePath: string;
+  recordId?: string;
+  input: Parameters<typeof projectAssistantDebugRecord>[0];
+}) {
+  await writeAssistantDebugRecord({ ...params, force: true });
+}
+
 export function safeErrorSummaryForTest(value: unknown) {
   return safeErrorSummary(value);
 }
@@ -3424,15 +3500,3 @@ export async function finalizeToolTextForTest(params: {
 }) {
   return finalizeToolText(params);
 }
-import {
-  applyOpenAiResponsesReplay,
-  buildOpenAiResponsesProviderOptions,
-  collectOpenAiResponsesReplayChunk,
-  collectOpenAiResponsesTerminalReplay,
-  collectOpenAiResponsesToolCallReplay,
-  isOfficialOpenAiResponsesProfile,
-  openAiResponsesTerminalStatus,
-  openAiReasoningItemIdFromChunk,
-  type OpenAiResponsesReplayPartUpdate,
-  type OpenAiResponsesToolCallReplay,
-} from "./providers/openai-responses-replay.js";

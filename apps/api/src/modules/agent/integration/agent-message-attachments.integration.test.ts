@@ -8,7 +8,7 @@ import {
   agentAttachmentWorkspaceDir,
   agentAttachmentsRoot,
 } from "../attachments/agent-attachment-paths.js";
-import { commitCompactionMessage, getMessageSessionHead } from "../agent-message.store.js";
+import { commitCompactionMessageForTest, getMessageSessionHead } from "../agent-message.store.js";
 import { createIntegrationFixture, createSession } from "./context-writeback.helpers.js";
 
 const PNG_BYTES = Buffer.from([
@@ -71,25 +71,41 @@ async function assertNoAttachmentTemps(dataDir: string) {
   }
 }
 
-async function completeRun(input: {
+async function convergeCompletedRun(input: {
   app: Awaited<ReturnType<typeof createIntegrationFixture>>["app"];
   internalToken: string;
   workspaceId: string;
   sessionId: string;
   runId: string;
 }) {
-  const response = await input.app.inject({
+  const updatedAt = Date.now();
+  const intent = await input.app.inject({
     method: "POST",
-    url: "/api/internal/agent/run-complete",
+    url: "/api/internal/agent/runs/terminal-intent",
     headers: { "x-awb-agent-internal-token": input.internalToken },
     payload: {
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       runId: input.runId,
       status: "completed",
+      code: "run_completed",
+      detail: null,
+      updatedAt,
     },
   });
-  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(intent.statusCode, 200, intent.body);
+  const convergence = await input.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/runs/converge-terminal",
+    headers: { "x-awb-agent-internal-token": input.internalToken },
+    payload: {
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      runId: input.runId,
+      updatedAt,
+    },
+  });
+  assert.equal(convergence.statusCode, 200, convergence.body);
 }
 
 async function sendText(input: {
@@ -210,7 +226,7 @@ test("Message multipart 原子创建 attachment、ImagePart、Run、dedup 和 ru
     body.runId,
   );
 
-  await completeRun({ ...fixture, sessionId: session.id, runId: body.runId });
+  await convergeCompletedRun({ ...fixture, sessionId: session.id, runId: body.runId });
   const content = await fixture.app.inject({
     method: "GET",
     url: `/api/agent/sessions/${session.id}/attachments/${parts[0]!.attachmentId}/content?workspaceId=${encodeURIComponent(fixture.workspaceId)}`,
@@ -234,7 +250,7 @@ test("Session 绑定附件读取拒绝 detached branch、错误关系和不安�
     clientRequestId: "attachment-seed",
     text: "seed",
   });
-  await completeRun({ ...fixture, sessionId: session.id, runId: seed.runId });
+  await convergeCompletedRun({ ...fixture, sessionId: session.id, runId: seed.runId });
 
   const uploaded = await fixture.app.inject({
     method: "POST",
@@ -251,7 +267,7 @@ test("Session 绑定附件读取拒绝 detached branch、错误关系和不安�
     `select attachment_id as attachmentId from agent_message_part
      where message_id = ? and type = 'image'`,
   ).get(uploadedBody.messageId) as { attachmentId: string };
-  await completeRun({ ...fixture, sessionId: session.id, runId: uploadedBody.runId });
+  await convergeCompletedRun({ ...fixture, sessionId: session.id, runId: uploadedBody.runId });
 
   const fork = await fixture.app.inject({
     method: "POST",
@@ -266,7 +282,7 @@ test("Session 绑定附件读取拒绝 detached branch、错误关系和不安�
   const detached = fork.json() as { id: string };
 
   const currentHead = getMessageSessionHead(fixture.db, { workspaceId: fixture.workspaceId, sessionId: session.id })!;
-  commitCompactionMessage(fixture.db, {
+  commitCompactionMessageForTest(fixture.db, {
     id: "attachment-compaction",
     workspaceId: fixture.workspaceId,
     sessionId: session.id,
@@ -368,7 +384,7 @@ test("Message multipart 接受 payload 位于图片前、中、后", async (t: T
     const request = `multipart-order-${name}`;
     const response = await fixture.app.inject({ method: "POST", url: `/api/agent/sessions/${session.id}/messages`, ...multipartMessage({ workspaceId: fixture.workspaceId, clientRequestId: request, parts: parts(request) }) });
     assert.equal(response.statusCode, 201, response.body);
-    await completeRun({ ...fixture, sessionId: session.id, runId: (response.json() as { runId: string }).runId });
+    await convergeCompletedRun({ ...fixture, sessionId: session.id, runId: (response.json() as { runId: string }).runId });
   }
 });
 
@@ -413,7 +429,7 @@ test("M6 multipart dedup 保留首次 final 并清理重复请求的新暂存文
   assert.deepEqual(await fs.readFile(firstFinal), PNG_BYTES);
   assert.equal((fixture.db.prepare("select count(*) as count from agent_attachment").get() as { count: number }).count, 1);
   await assertNoAttachmentTemps(fixture.dataDir);
-  await completeRun({ ...fixture, sessionId: session.id, runId: firstBody.runId });
+  await convergeCompletedRun({ ...fixture, sessionId: session.id, runId: firstBody.runId });
 });
 
 test("Session 附件读取允许 compaction contextRoot 之前的当前分支图片", async (t: TestContext) => {
@@ -422,11 +438,11 @@ test("Session 附件读取允许 compaction contextRoot 之前的当前分支图
   const uploaded = await fixture.app.inject({ method: "POST", url: `/api/agent/sessions/${session.id}/messages`, ...multipartMessage({ workspaceId: fixture.workspaceId, clientRequestId: "before-compaction", images: [{ filename: "one.png", bytes: PNG_BYTES }] }) });
   assert.equal(uploaded.statusCode, 201, uploaded.body);
   const body = uploaded.json() as { messageId: string; runId: string };
-  await completeRun({ ...fixture, sessionId: session.id, runId: body.runId });
+  await convergeCompletedRun({ ...fixture, sessionId: session.id, runId: body.runId });
   const attachment = fixture.db.prepare("select attachment_id as attachmentId from agent_message_part where message_id = ? and type = 'image'").get(body.messageId) as { attachmentId: string };
   const head = getMessageSessionHead(fixture.db, { workspaceId: fixture.workspaceId, sessionId: session.id });
   assert.ok(head);
-  commitCompactionMessage(fixture.db, { id: "msg_compacted", workspaceId: fixture.workspaceId, sessionId: session.id, expectedHeadMessageId: head.headMessageId, expectedRevision: head.revision, textPartId: "part_compacted", text: "摘要", createdAt: Date.now() });
+  commitCompactionMessageForTest(fixture.db, { id: "msg_compacted", workspaceId: fixture.workspaceId, sessionId: session.id, expectedHeadMessageId: head.headMessageId, expectedRevision: head.revision, textPartId: "part_compacted", text: "摘要", createdAt: Date.now() });
   const response = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${session.id}/attachments/${attachment.attachmentId}/content?workspaceId=${encodeURIComponent(fixture.workspaceId)}` });
   assert.equal(response.statusCode, 200, response.body);
 });
@@ -437,7 +453,7 @@ test("Session 附件读取拒绝 root、by_workspace、工作区与目标层 sym
   const uploaded = await fixture.app.inject({ method: "POST", url: `/api/agent/sessions/${session.id}/messages`, ...multipartMessage({ workspaceId: fixture.workspaceId, clientRequestId: "unsafe-path", images: [{ filename: "one.png", bytes: PNG_BYTES }] }) });
   assert.equal(uploaded.statusCode, 201, uploaded.body);
   const body = uploaded.json() as { messageId: string; runId: string };
-  await completeRun({ ...fixture, sessionId: session.id, runId: body.runId });
+  await convergeCompletedRun({ ...fixture, sessionId: session.id, runId: body.runId });
   const attachment = fixture.db.prepare("select attachment_id as attachmentId from agent_message_part where message_id = ? and type = 'image'").get(body.messageId) as { attachmentId: string };
   const finalPath = agentAttachmentFilePath(fixture.dataDir, fixture.workspaceId, attachment.attachmentId);
   const url = `/api/agent/sessions/${session.id}/attachments/${attachment.attachmentId}/content?workspaceId=${encodeURIComponent(fixture.workspaceId)}`;
@@ -485,7 +501,7 @@ test("未认证附件请求优先返回 401，不探测可见性或不安全文�
   const uploaded = await fixture.app.inject({ method: "POST", url: `/api/agent/sessions/${session.id}/messages`, headers: { ...multipart.headers, cookie }, payload: multipart.payload });
   assert.equal(uploaded.statusCode, 201, uploaded.body);
   const body = uploaded.json() as { messageId: string; runId: string };
-  await completeRun({ ...fixture, sessionId: session.id, runId: body.runId });
+  await convergeCompletedRun({ ...fixture, sessionId: session.id, runId: body.runId });
   const attachment = fixture.db.prepare("select attachment_id as attachmentId from agent_message_part where message_id = ? and type = 'image'").get(body.messageId) as { attachmentId: string };
   const finalPath = agentAttachmentFilePath(fixture.dataDir, fixture.workspaceId, attachment.attachmentId);
   await fs.unlink(finalPath);

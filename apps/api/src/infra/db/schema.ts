@@ -5,7 +5,7 @@ import type { Db } from "./db.js";
  *
  * 该版本是破坏性升级：旧 ContextItem 数据不会迁移，也不能和此版本共存。
  */
-export const AGENT_SCHEMA_VERSION = 22;
+export const AGENT_SCHEMA_VERSION = 23;
 
 export type AgentSchemaInitResult = {
   /** 旧 Agent 数据已被清理，仍需要由 openDb 清理对应的文件系统数据。 */
@@ -396,8 +396,8 @@ const TARGET_AGENT_TABLE_COLUMNS: Record<string, readonly string[]> = {
   agent_session: ["id", "workspace_id", "title", "title_manually_set", "kind", "head_message_id", "context_root_message_id", "revision", "forked_from_session_id", "forked_from_message_id", "created_at", "updated_at"],
   agent_session_agent_model_override: ["session_id", "agent_id", "provider_id", "model_id", "updated_at"],
   agent_attachment: ["id", "workspace_id", "storage_key", "filename", "media_type", "byte_size", "created_at"],
-  agent_run: ["run_id", "workspace_id", "session_id", "trigger_message_id", "agent_id", "provider_id", "model_id", "subtask_depth", "parent_run_id", "parent_tool_execution_id", "status", "created_at", "updated_at", "run_kind", "ui_locale"],
-  agent_message: ["id", "workspace_id", "previous_message_id", "replaces_message_id", "depth", "type", "status", "origin_session_id", "origin_run_id", "updated_revision", "created_at", "updated_at"],
+  agent_run: ["run_id", "workspace_id", "session_id", "trigger_message_id", "agent_id", "provider_id", "model_id", "subtask_depth", "parent_run_id", "parent_tool_execution_id", "status", "created_at", "updated_at", "run_kind", "ui_locale", "execution_phase", "intended_terminal_status", "intended_terminal_code", "intended_terminal_detail", "terminal_result_code", "terminal_result_detail"],
+  agent_message: ["id", "workspace_id", "previous_message_id", "replaces_message_id", "retained_from_message_id", "depth", "type", "status", "origin_session_id", "origin_run_id", "updated_revision", "created_at", "updated_at"],
   agent_message_part: ["id", "message_id", "position", "type", "text", "attachment_id", "media_type", "filename", "tool_name", "tool_input_json", "provider_tool_call_id", "updated_revision", "created_at", "updated_at", "provider_replay_json"],
   agent_tool_execution: ["id", "call_part_id", "origin_session_id", "origin_run_id", "status", "result_preview", "result_truncated", "result_artifact_path", "structured_result_json", "error", "updated_revision", "created_at", "updated_at", "started_at", "completed_at"],
   agent_client_request: ["workspace_id", "session_id", "client_request_id", "message_id", "run_id", "created_at"],
@@ -406,12 +406,7 @@ const TARGET_AGENT_TABLE_COLUMNS: Record<string, readonly string[]> = {
   agent_archived_text_fts: ["text", "message_depth", "part_position"]
 };
 
-const PRE_RUN_KIND_AGENT_RUN_COLUMNS = ["run_id", "workspace_id", "session_id", "trigger_message_id", "agent_id", "provider_id", "model_id", "subtask_depth", "parent_run_id", "parent_tool_execution_id", "status", "created_at", "updated_at"] as const;
-const PRE_UI_LOCALE_AGENT_RUN_COLUMNS = TARGET_AGENT_TABLE_COLUMNS.agent_run.filter((column) => column !== "ui_locale");
-const PRE_PROVIDER_REPLAY_AGENT_MESSAGE_PART_COLUMNS = TARGET_AGENT_TABLE_COLUMNS.agent_message_part.filter((column) => column !== "provider_replay_json");
-const PRE_RUN_TOKEN_SESSION_STATE_COLUMNS = TARGET_AGENT_TABLE_COLUMNS.session_run_state.filter((column) => column !== "last_response_total_tokens");
-
-type AgentSchemaClassification = "clean" | "legacy-unversioned" | "current" | "upgradeable" | "unsupported";
+type AgentSchemaClassification = "clean" | "legacy-unversioned" | "current" | "rebuildable" | "unsupported";
 
 function listAgentSchemaObjects(db: Db) {
   return (db.prepare(`
@@ -453,10 +448,123 @@ function hasForeignKey(db: Db, table: string, params: { from: string; table: str
   ));
 }
 
+function normalizedSql(sql: string) {
+  return sql.toLowerCase().replace(/\s+/g, "");
+}
+
+function hasTableSqlFragments(db: Db, table: string, fragments: readonly string[]) {
+  const row = db.prepare("select sql from sqlite_master where type = 'table' and name = ?").get(table) as { sql: string | null } | undefined;
+  const sql = row?.sql ? normalizedSql(row.sql) : "";
+  return fragments.every((fragment) => sql.includes(normalizedSql(fragment)));
+}
+
+function hasIndex(db: Db, table: string, columns: readonly string[], whereFragment?: string) {
+  const indexes = db.prepare(`pragma index_list(${table})`).all() as Array<{ name: string }>;
+  return indexes.some((index) => {
+    const indexedColumns = (db.prepare(`pragma index_info(${index.name})`).all() as Array<{ name: string }>).map((row) => row.name);
+    if (indexedColumns.length !== columns.length || !indexedColumns.every((column, position) => column === columns[position])) return false;
+    if (!whereFragment) return true;
+    const row = db.prepare("select sql from sqlite_master where type = 'index' and name = ?").get(index.name) as { sql: string | null } | undefined;
+    return Boolean(row?.sql && normalizedSql(row.sql).includes(normalizedSql(whereFragment)));
+  });
+}
+
 function hasTriggerSemantics(db: Db, name: string, fragments: readonly string[]) {
   const row = db.prepare("select sql from sqlite_master where type = 'trigger' and name = ?").get(name) as { sql: string | null } | undefined;
   const sql = row?.sql?.toLowerCase();
   return Boolean(sql && fragments.every((fragment) => sql.includes(fragment.toLowerCase())));
+}
+
+/** DDL 片段不足以证明复合 CHECK 未被 `or 1=1` 绕过；探针始终在 savepoint 内回滚。 */
+function hasCurrentAgentRunConstraintSemantics(db: Db) {
+  const suffix = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const workspaceId = `__agent_schema_probe_workspace_${suffix}`;
+  const sessionId = `__agent_schema_probe_session_${suffix}`;
+  const insert = db.prepare(`
+    insert into agent_run (
+      run_id,workspace_id,session_id,trigger_message_id,agent_id,provider_id,model_id,
+      subtask_depth,parent_run_id,parent_tool_execution_id,status,created_at,updated_at,
+      run_kind,execution_phase,intended_terminal_status,intended_terminal_code,
+      intended_terminal_detail,terminal_result_code,terminal_result_detail
+    ) values (
+      @runId,@workspaceId,@sessionId,null,'probe','probe','probe',null,null,null,
+      @status,1,1,@runKind,@executionPhase,@intendedStatus,@intendedCode,@intendedDetail,
+      @resultCode,@resultDetail
+    )
+  `);
+  const attempts = (input: Record<string, unknown>) => {
+    try {
+      insert.run({ runId: `__agent_schema_probe_run_${suffix}_${input.case}`, workspaceId, sessionId, ...input });
+      return true;
+    } catch (error) {
+      return error;
+    }
+  };
+  const accepts = (input: Record<string, unknown>) => attempts(input) === true;
+  const rejects = (input: Record<string, unknown>) => {
+    const result = attempts(input);
+    return result instanceof Error && /check constraint failed/i.test(result.message);
+  };
+  const running = (executionPhase: "work_pending" | "work_in_progress") => ({
+    status: "running", runKind: "user", executionPhase, intendedStatus: null,
+    intendedCode: null, intendedDetail: null, resultCode: null, resultDetail: null,
+  });
+  const terminal = (status: "completed" | "failed" | "cancelled", resultCode: string) => ({
+    status, runKind: "user", executionPhase: "terminal", intendedStatus: null,
+    intendedCode: null, intendedDetail: null, resultCode, resultDetail: null,
+  });
+  db.exec("savepoint agent_run_constraint_probe");
+  try {
+    db.prepare("insert into workspaces (id,dir_name,title,path,created_at,updated_at) values (?,?,? ,?,1,1)")
+      .run(workspaceId, workspaceId, "Agent schema probe", `/agent-schema-probe/${suffix}`);
+    db.prepare("insert into agent_session (id,workspace_id,title,kind,created_at,updated_at) values (?,?,?,'primary',1,1)")
+      .run(sessionId, workspaceId, "Agent schema probe");
+    const valid = [
+      { case: "running-pending", ...running("work_pending") },
+      { case: "running-in-progress", ...running("work_in_progress") },
+      { case: "manual-compaction-pending", ...running("work_pending"), runKind: "manual_compaction" },
+      { case: "subtask-pending", ...running("work_pending"), runKind: "subtask" },
+      { case: "subtask-in-progress", ...running("work_in_progress"), runKind: "subtask" },
+      { case: "running-persisted", status: "running", runKind: "user", executionPhase: "terminal_intent_persisted", intendedStatus: "completed", intendedCode: "run_completed", intendedDetail: null, resultCode: null, resultDetail: null },
+      { case: "completed-terminal", ...terminal("completed", "run_completed") },
+      { case: "failed-terminal", ...terminal("failed", "run_failed") },
+      { case: "cancelled-terminal", ...terminal("cancelled", "run_cancelled") },
+    ].every(accepts);
+    const rejected = [
+      { case: "kind", ...running("work_pending"), runKind: "invalid" },
+      { case: "phase", ...running("work_pending"), executionPhase: "invalid" },
+      { case: "intended-status", status: "running", runKind: "user", executionPhase: "terminal_intent_persisted", intendedStatus: "invalid", intendedCode: "code", intendedDetail: null, resultCode: null, resultDetail: null },
+      { case: "intended-code-length", status: "running", runKind: "user", executionPhase: "terminal_intent_persisted", intendedStatus: "completed", intendedCode: "c".repeat(81), intendedDetail: null, resultCode: null, resultDetail: null },
+      { case: "intended-detail-length", status: "running", runKind: "user", executionPhase: "terminal_intent_persisted", intendedStatus: "completed", intendedCode: "code", intendedDetail: "d".repeat(241), resultCode: null, resultDetail: null },
+      { case: "result-code-length", ...terminal("completed", "c".repeat(81)) },
+      { case: "result-detail-length", ...terminal("completed", "code"), resultDetail: "d".repeat(241) },
+      ...(["work_pending", "work_in_progress"] as const).flatMap((executionPhase) => [
+        { case: `${executionPhase}-intended-status`, ...running(executionPhase), intendedStatus: "completed" },
+        { case: `${executionPhase}-intended-code`, ...running(executionPhase), intendedCode: "code" },
+        { case: `${executionPhase}-intended-detail`, ...running(executionPhase), intendedDetail: "detail" },
+        { case: `${executionPhase}-result-code`, ...running(executionPhase), resultCode: "code" },
+        { case: `${executionPhase}-result-detail`, ...running(executionPhase), resultDetail: "detail" },
+      ]),
+      { case: "persisted-missing-status", status: "running", runKind: "user", executionPhase: "terminal_intent_persisted", intendedStatus: null, intendedCode: "code", intendedDetail: null, resultCode: null, resultDetail: null },
+      { case: "persisted-missing-code", status: "running", runKind: "user", executionPhase: "terminal_intent_persisted", intendedStatus: "completed", intendedCode: null, intendedDetail: null, resultCode: null, resultDetail: null },
+      { case: "persisted-result-code", status: "running", runKind: "user", executionPhase: "terminal_intent_persisted", intendedStatus: "completed", intendedCode: "code", intendedDetail: null, resultCode: "code", resultDetail: null },
+      { case: "persisted-result-detail", status: "running", runKind: "user", executionPhase: "terminal_intent_persisted", intendedStatus: "completed", intendedCode: "code", intendedDetail: null, resultCode: null, resultDetail: "detail" },
+      { case: "terminal-intended-status", ...terminal("completed", "code"), intendedStatus: "completed" },
+      { case: "terminal-intended-code", ...terminal("completed", "code"), intendedCode: "code" },
+      { case: "terminal-intended-detail", ...terminal("completed", "code"), intendedDetail: "detail" },
+      { case: "terminal-missing-result", ...terminal("completed", ""), resultCode: null },
+      { case: "terminal-detail-without-code", ...terminal("completed", ""), resultCode: null, resultDetail: "detail" },
+      { case: "running-terminal", status: "running", runKind: "user", executionPhase: "terminal", intendedStatus: null, intendedCode: null, intendedDetail: null, resultCode: "run_completed", resultDetail: null },
+      ...(["completed", "failed", "cancelled"] as const).flatMap((status) => [
+        { case: `${status}-pending`, ...terminal(status, "code"), executionPhase: "work_pending", resultCode: null },
+        { case: `${status}-in-progress`, ...terminal(status, "code"), executionPhase: "work_in_progress", resultCode: null },
+        { case: `${status}-persisted`, status, runKind: "user", executionPhase: "terminal_intent_persisted", intendedStatus: "completed", intendedCode: "code", intendedDetail: null, resultCode: null, resultDetail: null },
+      ]),
+    ].every(rejects);
+    return valid && rejected;
+  } finally {
+    db.exec("rollback to agent_run_constraint_probe; release agent_run_constraint_probe");
+  }
 }
 
 function hasCurrentSchemaSemantics(db: Db, ftsSql: string | null) {
@@ -480,13 +588,39 @@ function hasCurrentSchemaSemantics(db: Db, ftsSql: string | null) {
     ["agent_text_part_fts_map", { from: "part_id", table: "agent_message_part", to: "id", onDelete: "restrict" }],
     ["agent_message", { from: "origin_session_id", table: "agent_session", to: "id", onDelete: "set null" }],
     ["agent_message", { from: "origin_run_id", table: "agent_run", to: "run_id", onDelete: "set null" }],
+    ["agent_message", { from: "retained_from_message_id", table: "agent_message", to: "id", onDelete: "restrict" }],
     ["agent_session", { from: "head_message_id", table: "agent_message", to: "id", onDelete: "restrict" }],
     ["agent_session", { from: "context_root_message_id", table: "agent_message", to: "id", onDelete: "restrict" }]
   ] as const;
   if (foreignKeys.some(([table, params]) => !hasForeignKey(db, table, params))) return false;
 
+  if (!hasIndex(db, "agent_message", ["retained_from_message_id"], "where retained_from_message_id is not null")) return false;
+  if (!hasIndex(db, "agent_run", ["workspace_id", "session_id", "execution_phase"], "where execution_phase = 'terminal_intent_persisted'")) return false;
+  if (!hasTableSqlFragments(db, "agent_message", [
+    "check (type = 'compaction' or retained_from_message_id is null)",
+  ])) return false;
+  if (!hasTableSqlFragments(db, "agent_run", [
+    "run_kind text not null default 'user' check (run_kind in ('user', 'manual_compaction', 'subtask'))",
+    "execution_phase text not null default 'work_pending' check (execution_phase in ('work_pending', 'work_in_progress', 'terminal_intent_persisted', 'terminal'))",
+    "intended_terminal_status text check (intended_terminal_status is null or intended_terminal_status in ('completed', 'failed', 'cancelled'))",
+    "intended_terminal_code text check (intended_terminal_code is null or length(intended_terminal_code) between 1 and 80)",
+    "intended_terminal_detail text check (intended_terminal_detail is null or length(intended_terminal_detail) between 1 and 240)",
+    "terminal_result_code text check (terminal_result_code is null or length(terminal_result_code) between 1 and 80)",
+    "terminal_result_detail text check (terminal_result_detail is null or length(terminal_result_detail) between 1 and 240)",
+    "status = 'running' and execution_phase in ('work_pending', 'work_in_progress')",
+    "intended_terminal_status is null and intended_terminal_code is null and intended_terminal_detail is null",
+    "terminal_result_code is null and terminal_result_detail is null",
+    "status = 'running' and execution_phase = 'terminal_intent_persisted'",
+    "status in ('completed', 'failed', 'cancelled') and execution_phase = 'terminal'",
+    "terminal_result_code is not null",
+  ])) return false;
+  if (!hasCurrentAgentRunConstraintSemantics(db)) return false;
+
   return hasTriggerSemantics(db, "agent_message_previous_workspace_insert", ["before insert on agent_message", "new.previous_message_id", "workspace_id = new.workspace_id"])
     && hasTriggerSemantics(db, "agent_message_replaces_workspace_insert", ["before insert on agent_message", "new.replaces_message_id", "workspace_id = new.workspace_id"])
+    && hasTriggerSemantics(db, "agent_message_retained_workspace_insert", ["before insert on agent_message", "new.retained_from_message_id", "workspace_id = new.workspace_id"])
+    && hasTriggerSemantics(db, "agent_message_retained_workspace_update", ["before update of retained_from_message_id on agent_message", "new.retained_from_message_id", "workspace_id = new.workspace_id"])
+    && hasTriggerSemantics(db, "agent_message_retained_immutable_update", ["before update of retained_from_message_id on agent_message", "old.retained_from_message_id is not new.retained_from_message_id"])
     && hasTriggerSemantics(db, "agent_tool_execution_call_part_insert", ["before insert on agent_tool_execution", "part.type = 'tool_call'", "message.workspace_id", "session.workspace_id = message.workspace_id", "run.workspace_id = message.workspace_id"])
     && hasTriggerSemantics(db, "agent_tool_execution_call_part_update", ["before update of call_part_id, origin_session_id, origin_run_id on agent_tool_execution", "part.type = 'tool_call'", "message.workspace_id"])
     && hasTriggerSemantics(db, "agent_message_session_head_workspace_update", ["before update of head_message_id, context_root_message_id on agent_session", "workspace_id = new.workspace_id"])
@@ -517,33 +651,15 @@ function classifyAgentSchema(db: Db): AgentSchemaClassification {
     const rows = db.prepare("select id, version from agent_schema_meta").all() as Array<{ id: unknown; version: unknown }>;
     if (rows.length !== 1 || rows[0]?.id !== 1) return "unsupported";
     const version = rows[0]?.version;
-    const expectedColumns = [...TARGET_AGENT_TABLES].every((table) => {
-      if (table === "agent_run") {
-        if (version === 18) {
-          return hasExactColumns(db, table, PRE_RUN_KIND_AGENT_RUN_COLUMNS);
-        }
-        return version === 19 || version === 20 || version === 21
-          ? hasExactColumns(db, table, PRE_UI_LOCALE_AGENT_RUN_COLUMNS)
-          : hasExactColumns(db, table, TARGET_AGENT_TABLE_COLUMNS[table]!);
-      }
-      if (table === "agent_message_part") {
-        return version === 18 || version === 19
-          ? hasExactColumns(db, table, PRE_PROVIDER_REPLAY_AGENT_MESSAGE_PART_COLUMNS)
-          : hasExactColumns(db, table, TARGET_AGENT_TABLE_COLUMNS[table]!);
-      }
-      if (table === "session_run_state") {
-        return version === 18 || version === 19 || version === 20
-          ? hasExactColumns(db, table, PRE_RUN_TOKEN_SESSION_STATE_COLUMNS)
-          : hasExactColumns(db, table, TARGET_AGENT_TABLE_COLUMNS[table]!);
-      }
-      return hasExactColumns(db, table, TARGET_AGENT_TABLE_COLUMNS[table]!);
-    });
+    if (![18, 19, 20, 21, 22, AGENT_SCHEMA_VERSION].includes(version as number)) return "unsupported";
+    if (version !== AGENT_SCHEMA_VERSION) return "rebuildable";
+    const expectedColumns = [...TARGET_AGENT_TABLES].every((table) =>
+      hasExactColumns(db, table, TARGET_AGENT_TABLE_COLUMNS[table]!)
+    );
     if (!expectedColumns) return "unsupported";
     const fts = objects.find((object) => object.name === "agent_archived_text_fts");
     if (!hasCurrentSchemaSemantics(db, fts?.sql ?? null)) return "unsupported";
-    if (version === AGENT_SCHEMA_VERSION) return "current";
-    if (version === 18 || version === 19 || version === 20 || version === 21) return "upgradeable";
-    return "unsupported";
+    return "current";
   }
 
   if (objects.length === 0) return "clean";
@@ -659,6 +775,23 @@ function createAgentSchema(db: Db, fileCleanupPending: boolean) {
       updated_at integer not null,
       run_kind text not null default 'user' check (run_kind in ('user', 'manual_compaction', 'subtask')),
       ui_locale text check (ui_locale is null or ui_locale in ('zh-CN', 'en-US')),
+      execution_phase text not null default 'work_pending' check (execution_phase in ('work_pending', 'work_in_progress', 'terminal_intent_persisted', 'terminal')),
+      intended_terminal_status text check (intended_terminal_status is null or intended_terminal_status in ('completed', 'failed', 'cancelled')),
+      intended_terminal_code text check (intended_terminal_code is null or length(intended_terminal_code) between 1 and 80),
+      intended_terminal_detail text check (intended_terminal_detail is null or length(intended_terminal_detail) between 1 and 240),
+      terminal_result_code text check (terminal_result_code is null or length(terminal_result_code) between 1 and 80),
+      terminal_result_detail text check (terminal_result_detail is null or length(terminal_result_detail) between 1 and 240),
+      check (
+        (status = 'running' and execution_phase in ('work_pending', 'work_in_progress')
+          and intended_terminal_status is null and intended_terminal_code is null and intended_terminal_detail is null
+          and terminal_result_code is null and terminal_result_detail is null)
+        or (status = 'running' and execution_phase = 'terminal_intent_persisted'
+          and intended_terminal_status is not null and intended_terminal_code is not null
+          and terminal_result_code is null and terminal_result_detail is null)
+        or (status in ('completed', 'failed', 'cancelled') and execution_phase = 'terminal'
+          and intended_terminal_status is null and intended_terminal_code is null and intended_terminal_detail is null
+          and terminal_result_code is not null)
+      ),
       foreign key (workspace_id) references workspaces(id) on delete restrict,
       foreign key (session_id) references agent_session(id) on delete cascade,
       foreign key (trigger_message_id) references agent_message(id) on delete restrict,
@@ -667,12 +800,14 @@ function createAgentSchema(db: Db, fileCleanupPending: boolean) {
     );
     create unique index idx_agent_run_parent_tool_execution_unique on agent_run(parent_run_id, parent_tool_execution_id) where parent_run_id is not null and parent_tool_execution_id is not null;
     create index idx_agent_run_session_status on agent_run(session_id, status);
+    create index idx_agent_run_terminal_recovery on agent_run(workspace_id, session_id, execution_phase) where execution_phase = 'terminal_intent_persisted';
 
     create table agent_message (
       id text primary key,
       workspace_id text not null,
       previous_message_id text,
       replaces_message_id text,
+      retained_from_message_id text,
       depth integer not null check (depth >= 0),
       type text not null check (type in ('user', 'assistant', 'system', 'compaction', 'runtime')),
       status text not null check (status in ('streaming', 'completed', 'failed', 'cancelled', 'superseded')),
@@ -681,14 +816,17 @@ function createAgentSchema(db: Db, fileCleanupPending: boolean) {
       updated_revision integer not null check (updated_revision >= 0),
       created_at integer not null,
       updated_at integer not null,
+      check (type = 'compaction' or retained_from_message_id is null),
       foreign key (workspace_id) references workspaces(id) on delete restrict,
       foreign key (previous_message_id) references agent_message(id) on delete restrict,
       foreign key (replaces_message_id) references agent_message(id) on delete restrict,
+      foreign key (retained_from_message_id) references agent_message(id) on delete restrict,
       foreign key (origin_session_id) references agent_session(id) on delete set null,
       foreign key (origin_run_id) references agent_run(run_id) on delete set null
     );
     create index idx_agent_message_workspace_depth on agent_message(workspace_id, depth);
     create index idx_agent_message_origin_revision on agent_message(origin_session_id, updated_revision);
+    create index idx_agent_message_retained_from on agent_message(retained_from_message_id) where retained_from_message_id is not null;
 
     create table agent_message_part (
       id text primary key,
@@ -802,6 +940,29 @@ function createAgentSchema(db: Db, fileCleanupPending: boolean) {
       select raise(abort, 'agent_message.replaces_message_id must reference the same workspace');
     end;
 
+    create trigger agent_message_retained_workspace_insert
+    before insert on agent_message
+    when new.retained_from_message_id is not null
+      and not exists (select 1 from agent_message where id = new.retained_from_message_id and workspace_id = new.workspace_id)
+    begin
+      select raise(abort, 'agent_message.retained_from_message_id must reference the same workspace');
+    end;
+
+    create trigger agent_message_retained_workspace_update
+    before update of retained_from_message_id on agent_message
+    when new.retained_from_message_id is not null
+      and not exists (select 1 from agent_message where id = new.retained_from_message_id and workspace_id = new.workspace_id)
+    begin
+      select raise(abort, 'agent_message.retained_from_message_id must reference the same workspace');
+    end;
+
+    create trigger agent_message_retained_immutable_update
+    before update of retained_from_message_id on agent_message
+    when old.retained_from_message_id is not new.retained_from_message_id
+    begin
+      select raise(abort, 'agent_message.retained_from_message_id is immutable');
+    end;
+
     create trigger agent_tool_execution_call_part_insert
     before insert on agent_tool_execution
     when not exists (
@@ -879,50 +1040,7 @@ export function initSchema(db: Db): AgentSchemaInitResult {
     return { fileCleanupPending: row.fileCleanupPending === 1 };
   }
 
-  if (classification === "upgradeable") {
-    db.transaction(() => {
-      const row = db.prepare("select version from agent_schema_meta where id = 1").get() as { version: number };
-      if (row.version === 18) {
-        ensureColumn(db, {
-          table: "agent_run",
-          column: "run_kind",
-          ddl: "run_kind text not null default 'user' check (run_kind in ('user', 'manual_compaction', 'subtask'))",
-        });
-        db.prepare("update agent_schema_meta set version = 19, updated_at = ? where id = 1").run(Date.now());
-      }
-      const current = db.prepare("select version from agent_schema_meta where id = 1").get() as { version: number };
-      if (current.version === 19) {
-        ensureColumn(db, {
-          table: "agent_message_part",
-          column: "provider_replay_json",
-          ddl: "provider_replay_json text",
-        });
-        db.prepare("update agent_schema_meta set version = 20, updated_at = ? where id = 1").run(Date.now());
-      }
-      const withProviderReplay = db.prepare("select version from agent_schema_meta where id = 1").get() as { version: number };
-      if (withProviderReplay.version === 20) {
-        ensureColumn(db, {
-          table: "session_run_state",
-          column: "last_response_total_tokens",
-          ddl: "last_response_total_tokens integer check (last_response_total_tokens is null or last_response_total_tokens >= 0)",
-        });
-        db.prepare("update agent_schema_meta set version = 21, updated_at = ? where id = 1").run(Date.now());
-      }
-      const withRunTokens = db.prepare("select version from agent_schema_meta where id = 1").get() as { version: number };
-      if (withRunTokens.version === 21) {
-        ensureColumn(db, {
-          table: "agent_run",
-          column: "ui_locale",
-          ddl: "ui_locale text check (ui_locale is null or ui_locale in ('zh-CN', 'en-US'))",
-        });
-        db.prepare("update agent_schema_meta set version = ?, updated_at = ? where id = 1").run(AGENT_SCHEMA_VERSION, Date.now());
-      }
-    })();
-    const row = db.prepare("select file_cleanup_pending as fileCleanupPending from agent_schema_meta where id = 1").get() as { fileCleanupPending: number };
-    return { fileCleanupPending: row.fileCleanupPending === 1 };
-  }
-
-  const hadAgentDomain = classification === "legacy-unversioned";
+  const hadAgentDomain = classification === "legacy-unversioned" || classification === "rebuildable";
   rebuildAgentDomain(db, hadAgentDomain);
   return { fileCleanupPending: hadAgentDomain };
 }

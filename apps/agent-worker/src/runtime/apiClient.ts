@@ -15,6 +15,9 @@ import {
   type AgentApiMessagesContextRequest,
   type AgentApiMessagesContextResponse,
   AgentApiMessagesContextResponseSchema,
+  type AgentApiCompactionSourceRequest,
+  type AgentApiCompactionSourceResponse,
+  AgentApiCompactionSourceResponseSchema,
   type AgentApiArchiveReadRequest,
   type AgentApiArchiveSearchRequest,
   type AgentApiArchivePageResponse,
@@ -32,13 +35,17 @@ import {
   AgentApiReplaceStreamingAssistantResponseSchema,
   type AgentApiDiscardStreamingAssistantRequest,
   type AgentApiCompleteAssistantRequest,
+  type AgentApiCompleteTerminalAssistantRequest,
   type AgentApiUpdateToolExecutionRequest,
   type AgentApiUpdateRunNoticeRequest,
   type AgentApiFencedWriteResponse,
   AgentApiFencedWriteResponseSchema,
-  type AgentApiCommitCompactionRequest,
   type AgentApiCommitCompactionResponse,
   AgentApiCommitCompactionResponseSchema,
+  type AgentApiCommitCompactionWithTerminalIntentRequest,
+  type AgentApiConfirmCompactionCommitRequest,
+  type AgentApiConfirmCompactionCommitResponse,
+  AgentApiConfirmCompactionCommitResponseSchema,
   AgentApiSubtaskPreforkPlanRequest,
   AgentApiSubtaskPreforkPlanResponse,
   AgentApiSubtaskPreforkPlanResponseSchema,
@@ -51,8 +58,15 @@ import {
   AgentApiSubtaskStatusRequest,
   AgentApiSubtaskStatusResponse,
   AgentApiSubtaskStatusResponseSchema,
-  AgentApiRunCompleteResponseSchema,
-  type AgentApiRunCompleteRequest,
+  AgentApiMarkRunWorkInProgressResponseSchema,
+  type AgentApiMarkRunWorkInProgressRequest,
+  type AgentApiMarkRunWorkInProgressResponse,
+  AgentApiPersistTerminalIntentResponseSchema,
+  type AgentApiPersistTerminalIntentRequest,
+  type AgentApiPersistTerminalIntentResponse,
+  AgentApiConvergeRunTerminalResponseSchema,
+  type AgentApiConvergeRunTerminalRequest,
+  type AgentApiConvergeRunTerminalResponse,
 } from "@agent-workbench/shared/internal-contracts/agent-api";
 
 export class ApiConflictError extends Error {}
@@ -60,7 +74,7 @@ export class ApiConflictError extends Error {}
 type InternalRpcMethod = "POST" | "PATCH";
 
 export type AgentApiClientPolicyName =
-  "controlRead" | "controlWrite" | "idempotentControlWrite" | "subtaskStart" | "runComplete" | "excluded";
+  "controlRead" | "controlWrite" | "idempotentControlWrite" | "subtaskStart" | "terminalControl" | "excluded";
 
 export type AgentApiClientPolicy = {
   name: AgentApiClientPolicyName;
@@ -301,7 +315,6 @@ export class AgentApiClient {
       internalToken: string;
       responseValidation?: "strict" | "warn";
       internalRpcTimeoutMs: number;
-      completeRunTimeoutMs: number;
       logger?: Pick<Console, "warn">;
       /** @internal Test-only seam for retry delay verification. */
       sleepFn?: (ms: number) => Promise<void>;
@@ -318,15 +331,20 @@ export class AgentApiClient {
     replaceStreamingAssistant: "controlWrite",
     discardStreamingAssistant: "controlWrite",
     completeAssistant: "controlWrite",
+    completeTerminalAssistant: "idempotentControlWrite",
     updateToolExecution: "controlWrite",
     updateRunNotice: "controlWrite",
-    completeRun: "runComplete",
+    markRunWorkInProgress: "terminalControl",
+    persistRunTerminalIntent: "terminalControl",
+    convergeRunTerminal: "terminalControl",
     getExecutionProfile: "controlRead",
     getPromptContext: "controlRead",
     getMessagesContext: "controlRead",
+    getCompactionSource: "controlRead",
     archiveRead: "controlRead",
     archiveSearch: "controlRead",
-    commitCompaction: "controlWrite",
+    commitCompactionWithTerminalIntent: "idempotentControlWrite",
+    confirmCompactionCommit: "controlRead",
     getSubtaskPreforkPlan: "controlRead",
     startSubtaskRun: "subtaskStart",
     getSubtaskResult: "controlRead",
@@ -367,11 +385,11 @@ export class AgentApiClient {
           timeoutMs: this.params.internalRpcTimeoutMs,
           maxRetries: 1,
         };
-      case "runComplete":
+      case "terminalControl":
         return {
           name,
-          timeoutMs: this.params.completeRunTimeoutMs,
-          maxRetries: 1,
+          timeoutMs: this.params.internalRpcTimeoutMs,
+          maxRetries: 0,
         };
       case "excluded":
         return EXCLUDED_POLICY;
@@ -428,11 +446,19 @@ export class AgentApiClient {
       responseEndpoint?: string;
       policy: AgentApiClientPolicyName;
       abortSignal?: AbortSignal;
+      timeoutMs?: number;
     },
   ) {
     const method = options.method;
     const endpoint = options.responseEndpoint || path;
-    const policy = this.resolvePolicy(options.policy);
+    const configuredPolicy = this.resolvePolicy(options.policy);
+    const requestedTimeoutMs = options.timeoutMs;
+    const timeoutMs = requestedTimeoutMs == null
+      ? configuredPolicy.timeoutMs
+      : configuredPolicy.timeoutMs == null
+        ? requestedTimeoutMs
+        : Math.min(configuredPolicy.timeoutMs, requestedTimeoutMs);
+    const policy = { ...configuredPolicy, timeoutMs };
     const startedAt = Date.now();
     for (let attempt = 1; attempt <= policy.maxRetries + 1; attempt += 1) {
       try {
@@ -477,10 +503,8 @@ export class AgentApiClient {
             reason: retryReason,
             status,
           });
-          await (
-            this.params.sleepFn ??
-            ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
-          )(RETRY_DELAY_MS);
+          const retryDelayCompleted = await this.sleepWithAbort(RETRY_DELAY_MS, options.abortSignal);
+          if (!retryDelayCompleted) throw error;
           continue;
         }
         this.logFailure("failed", {
@@ -496,6 +520,28 @@ export class AgentApiClient {
       }
     }
     throw new InternalRpcNetworkError({ method, endpoint });
+  }
+
+  private async sleepWithAbort(ms: number, signal?: AbortSignal) {
+    if (signal?.aborted) return false;
+    if (!signal) {
+      await this.sleep(ms);
+      return true;
+    }
+    return await new Promise<boolean>((resolve) => {
+      void this.sleep(ms).then(() => finish(true));
+      const onAbort = () => finish(false);
+      const finish = (completed: boolean) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(completed);
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) finish(false);
+    });
+  }
+
+  private async sleep(ms: number) {
+    await (this.params.sleepFn ?? ((delay) => new Promise<void>((resolve) => setTimeout(resolve, delay))))(ms);
   }
 
   private async executeAttempt<T>(
@@ -687,6 +733,16 @@ export class AgentApiClient {
     });
   }
 
+  async completeTerminalAssistant(input: AgentApiCompleteTerminalAssistantRequest) {
+    return await this.request<AgentApiFencedWriteResponse>(AgentApiEndpoints.completeTerminalAssistant.path, {
+      method: AgentApiEndpoints.completeTerminalAssistant.method,
+      body: input,
+      responseSchema: AgentApiFencedWriteResponseSchema,
+      responseEndpoint: AgentApiEndpoints.completeTerminalAssistant.path,
+      policy: AgentApiClient.publicMethodPolicies.completeTerminalAssistant,
+    });
+  }
+
   async updateToolExecution(input: AgentApiUpdateToolExecutionRequest) {
     return await this.request<AgentApiFencedWriteResponse>(AgentApiEndpoints.updateToolExecution.path, {
       method: AgentApiEndpoints.updateToolExecution.method,
@@ -707,17 +763,44 @@ export class AgentApiClient {
     });
   }
 
-  async completeRun(input: AgentApiRunCompleteRequest) {
-    await this.request(AgentApiEndpoints.completeRun.path, {
-      method: AgentApiEndpoints.completeRun.method,
+  async markRunWorkInProgress(input: AgentApiMarkRunWorkInProgressRequest) {
+    return await this.request<AgentApiMarkRunWorkInProgressResponse>(AgentApiEndpoints.markRunWorkInProgress.path, {
+      method: AgentApiEndpoints.markRunWorkInProgress.method,
       body: input,
-      responseSchema: AgentApiRunCompleteResponseSchema,
-      responseEndpoint: AgentApiEndpoints.completeRun.path,
-      policy: AgentApiClient.publicMethodPolicies.completeRun,
+      responseSchema: AgentApiMarkRunWorkInProgressResponseSchema,
+      responseEndpoint: AgentApiEndpoints.markRunWorkInProgress.path,
+      policy: AgentApiClient.publicMethodPolicies.markRunWorkInProgress,
     });
   }
 
-  async getExecutionProfile(input: AgentApiExecutionProfileRequest) {
+  async persistRunTerminalIntent(input: AgentApiPersistTerminalIntentRequest, options?: { timeoutMs: number }) {
+    return await this.request<AgentApiPersistTerminalIntentResponse>(AgentApiEndpoints.persistRunTerminalIntent.path, {
+      method: AgentApiEndpoints.persistRunTerminalIntent.method,
+      body: input,
+      conflictAsError: true,
+      responseSchema: AgentApiPersistTerminalIntentResponseSchema,
+      responseEndpoint: AgentApiEndpoints.persistRunTerminalIntent.path,
+      policy: AgentApiClient.publicMethodPolicies.persistRunTerminalIntent,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  async convergeRunTerminal(input: AgentApiConvergeRunTerminalRequest, options?: { timeoutMs: number }) {
+    return await this.request<AgentApiConvergeRunTerminalResponse>(AgentApiEndpoints.convergeRunTerminal.path, {
+      method: AgentApiEndpoints.convergeRunTerminal.method,
+      body: input,
+      conflictAsError: true,
+      responseSchema: AgentApiConvergeRunTerminalResponseSchema,
+      responseEndpoint: AgentApiEndpoints.convergeRunTerminal.path,
+      policy: AgentApiClient.publicMethodPolicies.convergeRunTerminal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  async getExecutionProfile(
+    input: AgentApiExecutionProfileRequest,
+    options?: { abortSignal?: AbortSignal; timeoutMs?: number },
+  ) {
     return this.request<AgentApiExecutionProfileResponse>(
       AgentApiEndpoints.getExecutionProfile.path,
       {
@@ -726,6 +809,8 @@ export class AgentApiClient {
         responseSchema: AgentApiExecutionProfileResponseSchema,
         responseEndpoint: AgentApiEndpoints.getExecutionProfile.path,
         policy: AgentApiClient.publicMethodPolicies.getExecutionProfile,
+        abortSignal: options?.abortSignal,
+        timeoutMs: options?.timeoutMs,
       },
     );
   }
@@ -783,16 +868,57 @@ export class AgentApiClient {
     );
   }
 
-  async commitCompaction(input: AgentApiCommitCompactionRequest) {
-    return this.request<AgentApiCommitCompactionResponse>(
-      AgentApiEndpoints.commitCompaction.path,
+  async getCompactionSource(
+    input: AgentApiCompactionSourceRequest,
+    options?: { abortSignal?: AbortSignal; timeoutMs?: number },
+  ) {
+    return this.request<AgentApiCompactionSourceResponse>(
+      AgentApiEndpoints.getCompactionSource.path,
       {
-        method: AgentApiEndpoints.commitCompaction.method,
+        method: AgentApiEndpoints.getCompactionSource.method,
+        body: input,
+        responseSchema: AgentApiCompactionSourceResponseSchema,
+        responseEndpoint: AgentApiEndpoints.getCompactionSource.path,
+        policy: AgentApiClient.publicMethodPolicies.getCompactionSource,
+        abortSignal: options?.abortSignal,
+        timeoutMs: options?.timeoutMs,
+      },
+    );
+  }
+
+  async commitCompactionWithTerminalIntent(
+    input: AgentApiCommitCompactionWithTerminalIntentRequest,
+    options?: { abortSignal?: AbortSignal; timeoutMs?: number },
+  ) {
+    return this.request<AgentApiCommitCompactionResponse>(
+      AgentApiEndpoints.commitCompactionWithTerminalIntent.path,
+      {
+        method: AgentApiEndpoints.commitCompactionWithTerminalIntent.method,
         body: input,
         conflictAsError: true,
         responseSchema: AgentApiCommitCompactionResponseSchema,
-        responseEndpoint: AgentApiEndpoints.commitCompaction.path,
-        policy: AgentApiClient.publicMethodPolicies.commitCompaction,
+        responseEndpoint: AgentApiEndpoints.commitCompactionWithTerminalIntent.path,
+        policy: AgentApiClient.publicMethodPolicies.commitCompactionWithTerminalIntent,
+        abortSignal: options?.abortSignal,
+        timeoutMs: options?.timeoutMs,
+      },
+    );
+  }
+
+  async confirmCompactionCommit(
+    input: AgentApiConfirmCompactionCommitRequest,
+    options?: { abortSignal?: AbortSignal; timeoutMs?: number },
+  ) {
+    return this.request<AgentApiConfirmCompactionCommitResponse>(
+      AgentApiEndpoints.confirmCompactionCommit.path,
+      {
+        method: AgentApiEndpoints.confirmCompactionCommit.method,
+        body: input,
+        responseSchema: AgentApiConfirmCompactionCommitResponseSchema,
+        responseEndpoint: AgentApiEndpoints.confirmCompactionCommit.path,
+        policy: AgentApiClient.publicMethodPolicies.confirmCompactionCommit,
+        abortSignal: options?.abortSignal,
+        timeoutMs: options?.timeoutMs,
       },
     );
   }

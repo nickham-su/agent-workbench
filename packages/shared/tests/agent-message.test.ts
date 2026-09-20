@@ -9,6 +9,7 @@ import {
   AgentToolExecutionSchema
 } from "../src/contracts/agent-message.js";
 import {
+  AgentRunStatusResponseSchema,
   AgentSendMessageMultipartPayloadSchema,
   AgentSendMessageRequestSchema
 } from "../src/contracts/agent.js";
@@ -23,6 +24,59 @@ test("Agent Message Part schema limits persisted content to four supported Part 
   assert.equal(Value.Check(AgentMessagePartSchema, { ...partBase, type: "tool_result", text: "not supported" }), false);
   assert.equal(Value.Check(AgentMessagePartSchema, { ...partBase, type: "tool_call", toolName: "bash", input: ["not", "an", "object"], providerToolCallId: null }), false);
   assert.equal(Value.Check(AgentMessagePartSchema, { ...partBase, type: "tool_call", toolName: "bash", input: null, providerToolCallId: null }), false);
+});
+
+test("公开 Run 状态 DTO 严格限制为恢复所需字段", () => {
+  const value = {
+    workspaceId: "workspace-1", sessionId: "session-1", runId: "run-1",
+    runKind: "manual_compaction", status: "completed",
+    code: "compaction_completed", detail: null, updatedAt: 2,
+  };
+  assert.equal(Value.Check(AgentRunStatusResponseSchema, value), true);
+  assert.equal(Value.Check(AgentRunStatusResponseSchema, { ...value, createdAt: 1 }), false);
+  assert.equal(Value.Check(AgentRunStatusResponseSchema, { ...value, providerId: "private" }), false);
+  assert.equal(Value.Check(AgentRunStatusResponseSchema, { ...value, executionPhase: "terminal" }), false);
+  assert.equal(Value.Check(AgentRunStatusResponseSchema, { ...value, status: "idle" }), false);
+  assert.equal(Value.Check(AgentRunStatusResponseSchema, { ...value, code: null }), false);
+  assert.equal(Value.Check(AgentRunStatusResponseSchema, { ...value, detail: "private detail" }), false);
+  assert.equal(Value.Check(AgentRunStatusResponseSchema, {
+    ...value, status: "running", code: null,
+  }), true);
+  assert.equal(Value.Check(AgentRunStatusResponseSchema, {
+    ...value, status: "running", code: "compaction_completed",
+  }), false);
+});
+
+test("Compaction Message is a strict completed one-text-part branch with an explicit retained anchor", () => {
+  const base = {
+    id: "compaction-1", workspaceId: "workspace-1", previousMessageId: "previous-1", replacesMessageId: null,
+    depth: 1, type: "compaction", status: "completed", originSessionId: "session-1", originRunId: "run-1",
+    updatedRevision: 2, createdAt: 1, updatedAt: 2,
+  };
+  const textPart = { ...partBase, type: "text", text: "summary" };
+  assert.equal(Value.Check(AgentMessageSchema, { ...base, retainedFromMessageId: "tail-1", parts: [textPart] }), true);
+  assert.equal(Value.Check(AgentMessageSchema, { ...base, retainedFromMessageId: null, parts: [textPart] }), true);
+  assert.equal(Value.Check(AgentMessageSchema, { ...base, previousMessageId: null, retainedFromMessageId: null, parts: [textPart] }), false);
+  assert.equal(Value.Check(AgentMessageSchema, { ...base, replacesMessageId: "replaced-1", retainedFromMessageId: null, parts: [textPart] }), false);
+  assert.equal(Value.Check(AgentMessageSchema, { ...base, parts: [textPart] }), false);
+  assert.equal(Value.Check(AgentMessageSchema, { ...base, retainedFromMessageId: null, parts: [{ ...textPart, text: "" }] }), false);
+  assert.equal(Value.Check(AgentMessageSchema, { ...base, retainedFromMessageId: null, status: "streaming", parts: [textPart] }), false);
+  assert.equal(Value.Check(AgentMessageSchema, { ...base, retainedFromMessageId: null, parts: [] }), false);
+  assert.equal(Value.Check(AgentMessageSchema, { ...base, retainedFromMessageId: null, parts: [textPart, { ...partBase, id: "part-2", position: 1, type: "text", text: "extra" }] }), false);
+  assert.equal(Value.Check(AgentMessageSchema, { ...base, retainedFromMessageId: null, parts: [{ ...textPart, position: 1, updatedRevision: 1 }] }), false);
+  assert.equal(Value.Check(AgentMessageSchema, { ...base, retainedFromMessageId: null, parts: [{ ...partBase, type: "reasoning", text: "private" }] }), false);
+  assert.equal(Value.Check(AgentMessageSchema, { ...base, retainedFromMessageId: null, parts: [textPart], unexpected: true }), false);
+});
+
+test("ordinary Message rejects a retained anchor while preserving Timeline operation-range projection", () => {
+  const base = {
+    id: "message-1", workspaceId: "workspace-1", previousMessageId: null, replacesMessageId: null,
+    depth: 0, type: "assistant", status: "completed", originSessionId: "session-1", originRunId: "run-1",
+    updatedRevision: 2, createdAt: 1, updatedAt: 2, inCurrentOperationRange: true,
+    parts: [{ ...partBase, type: "text", text: "hello" }]
+  };
+  assert.equal(Value.Check(AgentMessageSchema, base), true);
+  assert.equal(Value.Check(AgentMessageSchema, { ...base, retainedFromMessageId: null }), false);
 });
 
 test("Message and ToolExecution schemas expose stable graph and execution references", () => {

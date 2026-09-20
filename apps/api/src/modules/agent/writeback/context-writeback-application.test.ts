@@ -4,7 +4,8 @@ import { test } from "node:test";
 import { initSchema } from "../../../infra/db/schema.js";
 import {
   appendStreamingAssistant,
-  cancelRunAndConverge,
+  convergeRunTerminal,
+  persistRunTerminalIntent,
   completeAssistantWithExecutions,
   createMessageSession,
   flushStreamingParts,
@@ -125,23 +126,20 @@ test("Message cancellation converges queued ToolExecution through ToolExecution 
   const db = createDb();
   createQueuedExecution(db);
 
-  assert.equal(
-    cancelRunAndConverge(db, {
-      workspaceId: "ws-a",
-      sessionId: "session-a",
-      runId: "run-a",
-      updatedAt: 5,
-      noticeText: "任务已由用户终止",
-    }),
-    true,
-  );
+  assert.equal(persistRunTerminalIntent(db, {
+    workspaceId: "ws-a", sessionId: "session-a", runId: "run-a",
+    status: "cancelled", code: "run_cancelled", detail: null, updatedAt: 5,
+  }), "updated");
+  assert.deepEqual(convergeRunTerminal(db, {
+    workspaceId: "ws-a", sessionId: "session-a", runId: "run-a", updatedAt: 5,
+  }), { kind: "transitioned", finalStatus: "cancelled" });
   assert.equal(getToolExecution(db, "execution-a")?.status, "cancelled");
   assert.deepEqual(getMessageRunState(db, "ws-a", "session-a"), {
     workspaceId: "ws-a",
     sessionId: "session-a",
     status: "idle",
     activeRunId: null,
-    runNoticeText: "任务已由用户终止",
+    runNoticeText: "",
     retryCount: 0,
     nextRetryAt: null,
     lastResponseTotalTokens: null,

@@ -12,8 +12,23 @@ export type RunPromptStaticCacheEntry<Value> = {
  */
 export class RunPromptStaticCache<Value> {
   private readonly entries = new Map<string, RunPromptStaticCacheEntry<Value>>();
+  private readonly generations = new Map<string, number>();
 
-  getOrCreate(runId: string, now: number, create: () => Promise<Value>): Promise<Value> {
+  generation(runId: string) {
+    return this.generations.get(runId) ?? 0;
+  }
+
+  isCurrent(runId: string, generation: number) {
+    return this.generation(runId) === generation;
+  }
+
+  getOrCreate(
+    runId: string,
+    now: number,
+    create: () => Promise<Value>,
+    expectedGeneration = this.generation(runId),
+  ): Promise<Value> {
+    if (!this.isCurrent(runId, expectedGeneration)) return create();
     const cached = this.entries.get(runId);
     const promise = cached && cached.expiresAt > now ? cached.promise : create();
     this.entries.set(runId, {
@@ -24,6 +39,7 @@ export class RunPromptStaticCache<Value> {
   }
 
   clear(runId: string) {
+    this.generations.set(runId, this.generation(runId) + 1);
     this.entries.delete(runId);
   }
 

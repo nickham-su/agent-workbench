@@ -36,7 +36,6 @@ import { deleteWorkspaceAgentData } from "../../infra/db/workspace-agent-data-cl
 import { applyPatchUiArtifactsWorkspaceDir, workspaceRepoDirPath, workspaceRoot, writeUiArtifactsWorkspaceDir } from "../../infra/fs/paths.js";
 import { workspaceDeletingFence } from "../agent/lifecycle/workspace-deleting-fence.js";
 import { getWorkspaceRuntime } from "../agent/lifecycle/workspace-runtime-registry.js";
-import { cancelWorkspaceRunsAndConverge } from "../agent/agent-message.store.js";
 import { ensureRepoMirror } from "../../infra/git/mirror.js";
 import { buildGitEnv } from "../../infra/git/gitEnv.js";
 import {
@@ -709,25 +708,11 @@ export async function detachRepoFromWorkspace(
 }
 
 const WORKSPACE_AGENT_DRAIN_TIMEOUT_MS = 10_000;
-const WORKSPACE_DELETION_NOTICE = "任务已因工作区删除而终止";
 
 function listWorkspaceSessionIds(ctx: AppContext, workspaceId: string) {
   return (ctx.db.prepare(`
     select id as sessionId from agent_session where workspace_id = ? order by id
   `).all(workspaceId) as Array<{ sessionId: string }>).map((row) => row.sessionId);
-}
-
-function listWorkspaceDrainSessionIds(ctx: AppContext, workspaceId: string) {
-  return (ctx.db.prepare(`
-    select state.session_id as sessionId
-    from session_run_state state
-    where state.workspace_id = @workspaceId
-      and (
-        state.status = 'running'
-        or state.run_notice_text = @deletionNotice
-      )
-    order by state.session_id
-  `).all({ workspaceId, deletionNotice: WORKSPACE_DELETION_NOTICE }) as Array<{ sessionId: string }>).map((row) => row.sessionId);
 }
 
 async function removeWorkspaceFileDomains(ctx: AppContext, ws: WorkspaceRecord) {
@@ -799,20 +784,14 @@ export async function deleteWorkspace(
     if (workspaceSessionIds.length > 0) {
       const registration = getWorkspaceRuntime();
       if (!registration) {
-        if (listWorkspaceDrainSessionIds(ctx, ws.id).length > 0) {
+        throw new HttpError(503, "agent worker unavailable", "WORKSPACE_AGENT_WORKER_UNAVAILABLE");
+      }
+      await registration.handoffCoordinator.runExclusiveMany(workspaceSessionIds, async () => {
+        registration.settleWorkspaceRunsForDeletion(ws.id);
+        if (!registration.runtime.cancelSessionAndWait) {
           throw new HttpError(503, "agent worker unavailable", "WORKSPACE_AGENT_WORKER_UNAVAILABLE");
         }
-      } else await registration.handoffCoordinator.runExclusiveMany(workspaceSessionIds, async () => {
-        const drainSessionIds = listWorkspaceDrainSessionIds(ctx, ws.id);
-        if (drainSessionIds.length > 0 && !registration.runtime.cancelSessionAndWait) {
-          throw new HttpError(503, "agent worker unavailable", "WORKSPACE_AGENT_WORKER_UNAVAILABLE");
-        }
-        cancelWorkspaceRunsAndConverge(ctx.db, {
-          workspaceId: ws.id,
-          updatedAt: nowMs(),
-          noticeText: WORKSPACE_DELETION_NOTICE,
-        });
-        for (const sessionId of drainSessionIds) {
+        for (const sessionId of workspaceSessionIds) {
           let idle: boolean;
           try {
             idle = await registration.runtime.cancelSessionAndWait!({ sessionId, timeoutMs: WORKSPACE_AGENT_DRAIN_TIMEOUT_MS });

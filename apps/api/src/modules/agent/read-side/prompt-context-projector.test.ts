@@ -12,8 +12,15 @@ test("PromptContextProjector composes cached static data with dynamic locale, me
   let assembled = 0;
   let resolvedProfiles = 0;
   const projector = new PromptContextProjector(cache, {
-    getRunState: () => ({ activeRunId: "active-run", lastResponseTotalTokens: 42 }),
-    resolveUiLocale: ({ activeRunId }) => activeRunId === "active-run" ? "en-US" : null,
+    async resolveDynamicContext() {
+      return {
+        headMessageId: "resolver-head", sessionRevision: 8,
+        run: { runId: "run", subtaskDepth: 0, agentId: "agent", providerId: "provider", modelId: "model", triggerMessageId: "message-9", runKind: "user", executionPhase: "work_in_progress", uiLocale: "en-US" },
+        pendingTools: [{ toolExecutionId: "execution-7", callPartId: "part-7", assistantMessageId: "message-7", status: "running" as const, toolName: "bash", toolCallId: "call", args: { command: "pwd" } }],
+        lastResponseTotalTokens: 42, uiLocale: "en-US" as const,
+        messages: [{ role: "user" as const, content: "dynamic message" }],
+      };
+    },
     resolveProfile: () => {
       resolvedProfiles += 1;
       return { agent: { name: "Agent", tools: [] } };
@@ -29,23 +36,6 @@ test("PromptContextProjector composes cached static data with dynamic locale, me
     },
     buildRuntimeInstruction: ({ uiLocale }) => `runtime:${uiLocale}`,
     appendRuntimeConstraints: (system, runtime) => `${system}|${runtime}`,
-    listPendingTools: () => [
-      {
-        toolExecutionId: "execution-7",
-        callPartId: "part-7",
-        assistantMessageId: "message-7",
-        status: "running",
-        toolName: "bash",
-        toolCallId: "call",
-        args: { command: "pwd" }
-      }
-    ],
-    async buildMessages({ compactionSnippetUiLocale, triggerMessageId, pendingAssistantMessageIds }) {
-      assert.equal(compactionSnippetUiLocale, "en-US");
-      assert.equal(triggerMessageId, "message-9");
-      assert.deepEqual([...pendingAssistantMessageIds], ["message-7"]);
-      return { messages: [{ role: "user" as const, content: "dynamic message" }] };
-    }
   });
   const input = {
     workspaceId: "workspace",
@@ -60,8 +50,8 @@ test("PromptContextProjector composes cached static data with dynamic locale, me
   assert.equal(assembled, 1, "same run must reuse cached static assembly");
   assert.equal(resolvedProfiles, 2, "profile validation must remain dynamic when static prompt data is cached");
   assert.deepEqual(first, {
-    headMessageId: "message-3",
-    sessionRevision: 3,
+    headMessageId: "resolver-head",
+    sessionRevision: 8,
     system: "static|runtime:en-US",
     messages: [{ role: "user", content: "dynamic message" }],
     tools: [{ name: "read", description: "Read", inputSchema: {} }],
@@ -74,7 +64,6 @@ test("PromptContextProjector composes cached static data with dynamic locale, me
 });
 
 test("PromptContextProjector passes every pending Assistant ID so transcript projection can choose the earliest chain boundary", async () => {
-  const observedPendingAssistantMessageIds: string[][] = [];
   const pendingTools = [
     {
       toolExecutionId: "execution-later",
@@ -105,19 +94,20 @@ test("PromptContextProjector passes every pending Assistant ID so transcript pro
     }
   ];
   const projector = new PromptContextProjector(new RunPromptStaticCache(), {
-    getRunState: () => ({ activeRunId: "run", lastResponseTotalTokens: null }),
-    resolveUiLocale: () => null,
+    async resolveDynamicContext() {
+      return {
+        headMessageId: "head", sessionRevision: 4,
+        run: { runId: "run", subtaskDepth: null, agentId: "agent", providerId: "provider", modelId: "model", triggerMessageId: "trigger", runKind: "user", executionPhase: "work_pending", uiLocale: null },
+        pendingTools, lastResponseTotalTokens: null, uiLocale: null,
+        messages: [{ role: "user" as const, content: "history through earliest boundary" }],
+      };
+    },
     resolveProfile: () => ({ agent: { name: "Agent", tools: [] } }),
     async assembleStatic() {
       return { systemStatic: "static", tools: [], externalSkillRoots: [] };
     },
     buildRuntimeInstruction: () => "runtime",
     appendRuntimeConstraints: (system, runtime) => `${system}|${runtime}`,
-    listPendingTools: () => pendingTools,
-    async buildMessages({ pendingAssistantMessageIds }) {
-      observedPendingAssistantMessageIds.push([...pendingAssistantMessageIds]);
-      return { messages: [{ role: "user" as const, content: "history through earliest boundary" }] };
-    }
   });
 
   const result = await projector.getPromptContextForRun({
@@ -127,7 +117,36 @@ test("PromptContextProjector passes every pending Assistant ID so transcript pro
     run: { runId: "run", subtaskDepth: null, agentId: "agent", providerId: "provider", modelId: "model", triggerMessageId: "trigger" }
   });
 
-  assert.deepEqual(observedPendingAssistantMessageIds, [["assistant-later", "assistant-earlier"]]);
   assert.deepEqual(result.pendingTools, pendingTools);
   assert.deepEqual(result.messages, [{ role: "user", content: "history through earliest boundary" }]);
+});
+
+test("PromptContextProjector refuses a response when terminal invalidation races static assembly", async () => {
+  const cache = new RunPromptStaticCache<{ systemStatic: string; tools: []; externalSkillRoots: [] }>();
+  let releaseAssembly!: () => void;
+  const projector = new PromptContextProjector(cache, {
+    async resolveDynamicContext() {
+      return {
+        headMessageId: "head", sessionRevision: 1,
+        run: { runId: "run", subtaskDepth: null, agentId: "agent", providerId: "provider", modelId: "model", triggerMessageId: null, runKind: "user", executionPhase: "work_pending", uiLocale: null },
+        pendingTools: [], lastResponseTotalTokens: null, uiLocale: null, messages: [],
+      };
+    },
+    resolveProfile: () => ({ agent: { name: "Agent", tools: [] } }),
+    async assembleStatic() {
+      await new Promise<void>((done) => { releaseAssembly = done; });
+      return { systemStatic: "static", tools: [], externalSkillRoots: [] };
+    },
+    buildRuntimeInstruction: () => "runtime",
+    appendRuntimeConstraints: (system, runtime) => `${system}|${runtime}`,
+  });
+  const request = projector.getPromptContextForRun({
+    workspaceId: "workspace", sessionId: "session", session: { kind: "primary", headMessageId: "head", revision: 1 },
+    run: { runId: "run", subtaskDepth: null, agentId: "agent", providerId: "provider", modelId: "model", triggerMessageId: null },
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  cache.clear("run");
+  releaseAssembly();
+  await assert.rejects(request, /invalidated while assembling context/);
+  assert.equal(cache.has("run"), false);
 });

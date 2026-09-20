@@ -115,10 +115,9 @@ test("M8 manual compaction enqueue acknowledgment blocks shared cancel until it 
         cancelEntered.resolve();
         return { rootSessionId: "session", runtimeCancelSessionIds: ["session"], cancelledRunIds: ["run"] };
       },
-      completeRunFromWorker: () => false,
+      markRunWorkInProgress: () => "updated", persistRunTerminalIntent: () => "updated", convergeRunTerminal: () => ({ kind: "already_converged", finalStatus: "cancelled" }), listWorkspaceRunningRunCandidates: () => [],
       listRecoverableRunCandidates: () => [],
       isRecoverableRunCandidate: () => false,
-      prepareRunForStartupRecovery: () => ({ prepared: false, resumeAssistantMessageId: null }),
     },
     triggerInputReader: { getUserText: () => null },
     isContextAppendConflict: () => false,
@@ -159,7 +158,7 @@ test("M8 cancel holding shared coordinator makes manual compaction final fence f
   let enqueueCalls = 0;
   const lifecycleDependencies: RunLifecycleApplicationDependencies = {
     workspaceRunContextReader: { get: () => ({ workspacePath: "/workspace", workspaceRepoDirNames: [] }) }, runStateReader: { get: () => controlRunState }, activeSubtaskChildQuery: { listByParentRun: () => [] }, promptStaticCacheInvalidator: { clear: () => undefined }, runCompletedEventPublisher: { publishRunCompleted: () => undefined },
-    persistence: { listActiveSessionIdsForCancel: () => ["session"], activateUserRun: () => ({ kind: "session-running" }), canEnqueueUserRunIfCurrent: () => active, failRunAfterEnqueueFailureIfCurrent: () => "already-terminal", getCancelSessionSnapshot: () => ({ sessionId: "session", workspaceId: "workspace", session, runState: { status: "running", activeRunId: "run" } }), cancelSessions: () => { active = false; return { rootSessionId: "session", runtimeCancelSessionIds: ["session"], cancelledRunIds: ["run"] }; }, completeRunFromWorker: () => false, listRecoverableRunCandidates: () => [], isRecoverableRunCandidate: () => false, prepareRunForStartupRecovery: () => ({ prepared: false, resumeAssistantMessageId: null }) },
+    persistence: { listActiveSessionIdsForCancel: () => ["session"], activateUserRun: () => ({ kind: "session-running" }), canEnqueueUserRunIfCurrent: () => active, failRunAfterEnqueueFailureIfCurrent: () => "already-terminal", getCancelSessionSnapshot: () => ({ sessionId: "session", workspaceId: "workspace", session, runState: { status: "running", activeRunId: "run" } }), cancelSessions: () => { active = false; return { rootSessionId: "session", runtimeCancelSessionIds: ["session"], cancelledRunIds: ["run"] }; }, markRunWorkInProgress: () => "updated", persistRunTerminalIntent: () => "updated", convergeRunTerminal: () => ({ kind: "already_converged", finalStatus: "cancelled" }), listWorkspaceRunningRunCandidates: () => [], listRecoverableRunCandidates: () => [], isRecoverableRunCandidate: () => false },
     triggerInputReader: { getUserText: () => null }, isContextAppendConflict: () => false, runtimeHandoffCoordinator: coordinator, clock: { nowMs: () => 100 }, ids: { newId: (prefix) => `${prefix}-id` }, logger: { warn: () => undefined, error: () => undefined },
   };
   const lifecycle = new RunLifecycleApplication(lifecycleDependencies);
@@ -191,10 +190,9 @@ test("manual compaction 激活后 deletion fence 在最终 handoff 获胜时确�
       failRunAfterEnqueueFailureIfCurrent: () => "already-terminal",
       getCancelSessionSnapshot: () => null,
       cancelSessions: () => ({ rootSessionId: "session", runtimeCancelSessionIds: [], cancelledRunIds: [] }),
-      completeRunFromWorker: () => false,
+      markRunWorkInProgress: () => "updated", persistRunTerminalIntent: () => "updated", convergeRunTerminal: () => ({ kind: "already_converged", finalStatus: "cancelled" }), listWorkspaceRunningRunCandidates: () => [],
       listRecoverableRunCandidates: () => [],
       isRecoverableRunCandidate: () => false,
-      prepareRunForStartupRecovery: () => ({ prepared: false, resumeAssistantMessageId: null }),
     },
     triggerInputReader: { getUserText: () => null },
     isContextAppendConflict: () => false,

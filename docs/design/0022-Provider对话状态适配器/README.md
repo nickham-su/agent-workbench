@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：待开发设计基线。
+- 状态：部分实施；本轮仅完成 Phase A/B，Phase C/D 未实施。
 - 目标：在不改变普通 transcript 与 Provider 私有状态隔离边界的前提下，将现有 OpenAI Responses 专用的 replay 逻辑演进为轻量 `ProviderConversationStateAdapter`，为 DeepSeek Thinking 及后续有对话续接状态要求的 Provider 提供可审查、可验证的扩展点。
 - 读者：负责 shared contract、API、Worker、Provider 接入、测试和代码审查的开发者。
 - 本文档是实施、代码审查与验收的共同标准；未在本文档中明确放开的行为，默认不得扩大。
@@ -48,7 +48,10 @@
 
 ## 阶段门禁
 
-- Phase A（OpenAI 等价提取）与 Phase B（debug 投影）可独立进入开发、审查和回滚；两者不得夹带 DeepSeek 行为或 schema 变更。
+- Phase A（OpenAI 等价提取）已完成：`ProviderConversationStateAdapter` 已等价承接 OpenAI Responses 的 replay 注入、chunk metadata、Attempt 终态协议校验与诊断；不接管 Runner 的持久化、工具、重试或生命周期。
+- Phase B（debug 投影）已完成：Assistant debug record 已改为记录最终 AI SDK 入参的安全投影，私有 replay、加密 reasoning、附件、凭证与原始 HTTP/SSE 内容均 fail-closed 脱敏或省略。
+- Phase C（DeepSeek Thinking experimental）与 Phase D（真实 DeepSeek 联调）尚未实施。DeepSeek 当前不可用，绝不得标记为 experimental 完成或 stable。
+- Phase A（OpenAI 等价提取）与 Phase B（debug 投影）可独立审查和回滚；两者不得夹带 DeepSeek 行为或 schema 变更。
 - Phase C 只能在以下事项全部实现并有自动化证据时标记为 **experimental 完成**：Assistant 协议快照、`complete-v1` 完整性 metadata 与强制 flush、experimental UI/产品告知、真实 AI SDK mock HTTP 与 SSE 证据。
 - Phase C 缺少任何一项时，不得开放或宣称 DeepSeek Thinking 已完成。
 - 只有完成 Phase D 真实 DeepSeek 服务最小联调，并确认 scope、工具回放和参数行为后，才可将该协议标为 **stable**。

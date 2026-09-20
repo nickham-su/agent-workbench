@@ -1,5 +1,9 @@
 import type {
+  PrimaryProjectionProfile,
+  AgentCompactionMessage,
+  AgentOrdinaryMessage,
   AgentMessage,
+  AgentMessageRow,
   AgentMessagePart,
   AgentMessageStatus,
   AgentRunKind,
@@ -7,8 +11,13 @@ import type {
   AgentSessionMessageState,
   AgentMessageSessionRunState,
   AgentToolExecution,
+  AgentRunExecutionPhase,
+  AgentTerminalResultCode,
+  AgentTerminalRunStatus,
   AgentToolExecutionStatus
 } from "@agent-workbench/shared";
+import { AgentCompactionMessageSchema, AgentOrdinaryMessageSchema, isAgentTerminalCodeAllowed } from "@agent-workbench/shared";
+import { Value } from "@sinclair/typebox/value";
 import {
   assertAgentProviderReplayUpdateCompatible,
   parseAgentProviderReplay,
@@ -16,6 +25,7 @@ import {
   type AgentProviderReplayEnvelope,
 } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { Db } from "../../infra/db/db.js";
+import { assertRetainedAnchorOnPreviousChain, ModelContextResolver } from "./read-side/model-context-resolver.js";
 import { indexEligibleCompletedTextParts } from "./archive/agent-archive-store.js";
 
 const TERMINAL_MESSAGE_STATUSES = new Set<AgentMessageStatus>(["completed", "failed", "cancelled", "superseded"]);
@@ -45,6 +55,16 @@ export class AgentMessageConflictError extends Error {
     readonly currentRevision: number
   ) {
     super("SESSION_HEAD_CONFLICT");
+  }
+}
+
+/** 已终态 Run 的重放发现持久化状态彼此矛盾时 fail closed，绝不尝试修复。 */
+export class AgentRunTerminalInvariantError extends Error {
+  readonly code = "AGENT_RUN_TERMINAL_INVARIANT" as const;
+
+  constructor(reason: string) {
+    super(`terminal convergence invariant violated: ${reason}`);
+    this.name = "AgentRunTerminalInvariantError";
   }
 }
 
@@ -91,6 +111,12 @@ export type AgentRunRecord = {
   parentToolExecutionId: string | null;
   status: "running" | "completed" | "failed" | "cancelled";
   runKind: AgentRunKind;
+  executionPhase: AgentRunExecutionPhase;
+  intendedTerminalStatus: AgentTerminalRunStatus | null;
+  intendedTerminalCode: AgentTerminalResultCode | null;
+  intendedTerminalDetail: string | null;
+  terminalResultCode: AgentTerminalResultCode | null;
+  terminalResultDetail: string | null;
   createdAt: number;
   updatedAt: number;
 };
@@ -115,7 +141,8 @@ type RunStateRow = {
   lastResponseTotalTokens: number | null; activeRunStartedAt: number | null;
   lastRunDurationMs: number | null;
 };
-type MessageRow = Omit<AgentMessage, "parts">;
+type MessageRow = AgentMessageRow;
+type HydratedMessage = MessageRow & { inCurrentOperationRange?: boolean; parts: AgentMessagePart[] };
 type PartRow = {
   id: string; messageId: string; position: number; type: AgentMessagePart["type"]; text: string | null;
   attachmentId: string | null; mediaType: "image/png" | "image/jpeg" | "image/webp" | null; filename: string | null;
@@ -152,7 +179,11 @@ function toPart(row: PartRow): AgentMessagePart {
   if (row.type === "image") return { ...common, type: "image", attachmentId: row.attachmentId!, mediaType: row.mediaType!, filename: row.filename! };
   return { ...common, type: "tool_call", toolName: row.toolName!, input: (jsonValue(row.toolInputJson) ?? {}) as Record<string, unknown>, providerToolCallId: row.providerToolCallId };
 }
-function toMessage(row: MessageRow, parts: AgentMessagePart[]): AgentMessage { return { ...row, depth: Number(row.depth), updatedRevision: Number(row.updatedRevision), createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt), parts }; }
+function toMessage(row: MessageRow, parts: AgentMessagePart[]): AgentMessage {
+  const stored = { ...row, depth: Number(row.depth), updatedRevision: Number(row.updatedRevision), createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt), parts };
+  if (stored.type === "compaction") return asCompactionMessage(stored);
+  return asOrdinaryMessage(stored);
+}
 function toExecution(row: ExecutionRow): AgentToolExecution {
   return { ...row, resultTruncated: row.resultTruncated === 1, structuredResult: jsonValue(row.structuredResultJson), updatedRevision: Number(row.updatedRevision), createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt), startedAt: row.startedAt, completedAt: row.completedAt };
 }
@@ -161,7 +192,11 @@ function sessionRow(db: Db, workspaceId: string, sessionId: string): SessionRow 
   return db.prepare(`select id, workspace_id as workspaceId, title, kind, head_message_id as headMessageId, context_root_message_id as contextRootMessageId, revision, forked_from_session_id as forkedFromSessionId, forked_from_message_id as forkedFromMessageId, created_at as createdAt, updated_at as updatedAt from agent_session where id = ? and workspace_id = ?`).get(sessionId, workspaceId) as SessionRow | undefined ?? null;
 }
 function messageRow(db: Db, messageId: string): MessageRow | null {
-  return db.prepare(`select id, workspace_id as workspaceId, previous_message_id as previousMessageId, replaces_message_id as replacesMessageId, depth, type, status, origin_session_id as originSessionId, origin_run_id as originRunId, updated_revision as updatedRevision, created_at as createdAt, updated_at as updatedAt from agent_message where id = ?`).get(messageId) as MessageRow | undefined ?? null;
+  return db.prepare(`select id, workspace_id as workspaceId, previous_message_id as previousMessageId,
+    replaces_message_id as replacesMessageId, retained_from_message_id as retainedFromMessageId,
+    depth, type, status, origin_session_id as originSessionId, origin_run_id as originRunId,
+    updated_revision as updatedRevision, created_at as createdAt, updated_at as updatedAt
+    from agent_message where id = ?`).get(messageId) as MessageRow | undefined ?? null;
 }
 function messageParts(db: Db, messageId: string): AgentMessagePart[] {
   const rows = db.prepare(`select id, message_id as messageId, position, type, text, attachment_id as attachmentId, media_type as mediaType, filename, tool_name as toolName, tool_input_json as toolInputJson, provider_tool_call_id as providerToolCallId, updated_revision as updatedRevision, created_at as createdAt, updated_at as updatedAt from agent_message_part where message_id = ? order by position`).all(messageId) as PartRow[];
@@ -177,6 +212,10 @@ function assertFence(db: Db, params: { workspaceId: string; sessionId: string; r
   const run = db.prepare("select workspace_id as workspaceId, session_id as sessionId, status from agent_run where run_id = ?").get(params.runId) as { workspaceId: string; sessionId: string; status: string } | undefined;
   const state = db.prepare("select status, active_run_id as activeRunId from session_run_state where workspace_id = ? and session_id = ?").get(params.workspaceId, params.sessionId) as { status: string; activeRunId: string | null } | undefined;
   return !!run && run.workspaceId === params.workspaceId && run.sessionId === params.sessionId && run.status === "running" && state?.status === "running" && state.activeRunId === params.runId;
+}
+function normalizedResponseTotalTokens(value: number | null | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+  return Math.floor(value);
 }
 function stableJson(value: unknown) {
   return value == null ? null : JSON.stringify(value);
@@ -320,6 +359,14 @@ function updateSessionPointer(db: Db, params: { workspaceId: string; sessionId: 
 function messageTerminal(status: AgentMessageStatus) { return TERMINAL_MESSAGE_STATUSES.has(status); }
 function executionTerminal(status: AgentToolExecutionStatus) { return TERMINAL_EXECUTION_STATUSES.has(status); }
 
+function assertPrimaryProfileMatchesRun(run: AgentRunRecord | null, profile: PrimaryProjectionProfile) {
+  if (!run
+    || profile.provider.id !== run.providerId
+    || profile.model.id !== run.modelId) {
+    throw new Error("primary profile does not match the retained compaction run");
+  }
+}
+
 export function createMessageSession(db: Db, input: { id: string; workspaceId: string; title: string; kind: "primary" | "subtask"; createdAt: number; forkedFromSessionId?: string | null; forkedFromMessageId?: string | null; headMessageId?: string | null; contextRootMessageId?: string | null }) {
   db.transaction(() => {
     if (input.forkedFromMessageId) {
@@ -414,6 +461,26 @@ export function getToolExecution(db: Db, executionId: string): AgentToolExecutio
   return row ? toExecution(row) : null;
 }
 
+/**
+ * Confirms only a fully persisted compaction artifact owned by this Run. The
+ * check intentionally does not reveal other messages or permit cross-run IDs.
+ */
+export function hasCommittedCompactionArtifact(db: Db, input: {
+  workspaceId: string; sessionId: string; runId: string; messageId: string;
+}) {
+  const message = getMessage(db, input.messageId);
+  if (!message || message.workspaceId !== input.workspaceId || message.type !== "compaction"
+    || message.status !== "completed" || message.originSessionId !== input.sessionId
+    || message.originRunId !== input.runId) return false;
+  const session = getMessageSession(db, input.workspaceId, input.sessionId);
+  if (!session || session.headMessageId !== input.messageId || session.contextRootMessageId !== input.messageId) return false;
+  const run = getRunRecord(db, input.runId);
+  if (!run || run.workspaceId !== input.workspaceId || run.sessionId !== input.sessionId) return false;
+  if (run.runKind !== "manual_compaction") return true;
+  const intent = getPersistedRunTerminalIntent(db, input);
+  return intent?.status === "completed" && intent.code === "compaction_completed" && intent.detail === null;
+}
+
 export function getMessageSessionHead(db: Db, input: { workspaceId: string; sessionId: string }): { headMessageId: string | null; revision: number } | null {
   const session = sessionRow(db, input.workspaceId, input.sessionId);
   if (!session) return null;
@@ -464,7 +531,7 @@ export function appendStreamingAssistant(db: Db, input: Omit<Parameters<typeof a
         && state?.activeAssistantMessageId === input.id
         && state.nonTerminalMessageIds.includes(input.id);
       if (!matches) throw new AgentStreamingAssistantReplayMismatchError();
-      return getMessage(db, input.id)!;
+      return asOrdinaryMessage(getMessage(db, input.id)!);
     }
     if (!assertFence(db, input)) throw new Error("run fence rejected streaming assistant creation");
     const message = appendMessage(db, { ...input, type: "assistant", status: "streaming", originRunId: input.runId, parts: [] });
@@ -474,7 +541,7 @@ export function appendStreamingAssistant(db: Db, input: Omit<Parameters<typeof a
       activeAssistantMessageId: message.id,
       nonTerminalMessageIds: [...new Set([...state.nonTerminalMessageIds, message.id])]
     });
-    return message;
+    return asOrdinaryMessage(message);
   })();
 }
 
@@ -590,10 +657,8 @@ export function completeAssistantWithExecutions(db: Db, input: { workspaceId: st
       nonTerminalMessageIds: state.nonTerminalMessageIds.filter((id) => id !== input.messageId),
       nonTerminalToolExecutionIds: [...new Set([...state.nonTerminalToolExecutionIds, ...input.executions.map((execution) => execution.id)])]
     });
-    if (typeof input.responseTotalTokens === "number" && Number.isFinite(input.responseTotalTokens) && input.responseTotalTokens >= 0) {
-      db.prepare("update session_run_state set last_response_total_tokens=? where workspace_id=? and session_id=?")
-        .run(Math.floor(input.responseTotalTokens), input.workspaceId, input.sessionId);
-    }
+    db.prepare("update session_run_state set last_response_total_tokens=? where workspace_id=? and session_id=?")
+      .run(normalizedResponseTotalTokens(input.responseTotalTokens), input.workspaceId, input.sessionId);
     return "updated";
   })();
 }
@@ -621,135 +686,6 @@ export function updateToolExecution(db: Db, input: { workspaceId: string; sessio
   })();
 }
 
-/**
- * 在启动恢复时收敛上一进程遗留的运行中对象。整个转换与 Run fence 处于同一
- * SQLite 事务：已开始的工具永不重跑，已有有效流式输出则只创建一次替代消息。
- */
-export function prepareRunForStartupRecovery(db: Db, input: {
-  workspaceId: string;
-  sessionId: string;
-  runId: string;
-  replacementMessageId: string;
-  updatedAt: number;
-}) {
-  return db.transaction(() => {
-    if (!assertFence(db, input)) return { prepared: false, resumeAssistantMessageId: null };
-    const state = getMessageRunState(db, input.workspaceId, input.sessionId)!;
-    const session = sessionRow(db, input.workspaceId, input.sessionId)!;
-    const activeMessageId = state.activeAssistantMessageId;
-    const active = activeMessageId ? messageRow(db, activeMessageId) : null;
-
-    // `running` 代表工具副作用可能已经发生。恢复时只能如实标记为 unknown。
-    const runningExecutionIds = db.prepare(`
-      select id from agent_tool_execution
-      where origin_session_id=? and origin_run_id=? and status='running'
-    `).all(input.sessionId, input.runId) as Array<{ id: string }>;
-
-    const activeIsCurrentStreamingAssistant = active?.status === "streaming"
-      && active.workspaceId === input.workspaceId
-      && active.originSessionId === input.sessionId
-      && active.originRunId === input.runId;
-    let replacementId: string | null = null;
-    if (activeIsCurrentStreamingAssistant) {
-      const validPart = db.prepare(`
-        select 1 from agent_message_part
-        where message_id=? and (
-          type='tool_call' or provider_replay_json is not null
-          or (type in ('text','reasoning') and length(trim(coalesce(text, ''))) > 0)
-        ) limit 1
-      `).get(active.id);
-      if (validPart) {
-        const revision = session.revision + 1;
-        db.prepare(`
-          update agent_message set status='superseded',updated_revision=?,updated_at=?
-          where id=? and status='streaming'
-        `).run(revision, input.updatedAt, active.id);
-        db.prepare(`
-          insert into agent_message
-            (id,workspace_id,previous_message_id,replaces_message_id,depth,type,status,origin_session_id,origin_run_id,updated_revision,created_at,updated_at)
-          values (?, ?, ?, ?, ?, 'assistant', 'streaming', ?, ?, ?, ?, ?)
-        `).run(
-          input.replacementMessageId,
-          input.workspaceId,
-          active.previousMessageId,
-          active.id,
-          active.depth,
-          input.sessionId,
-          input.runId,
-          revision,
-          input.updatedAt,
-          input.updatedAt,
-        );
-        updateSessionPointer(db, {
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          headMessageId: input.replacementMessageId,
-          contextRootMessageId: session.contextRootMessageId ?? input.replacementMessageId,
-          revision,
-          now: input.updatedAt,
-        });
-        replacementId = input.replacementMessageId;
-      }
-    }
-
-    if (runningExecutionIds.length > 0) {
-      const revision = replacementId ? session.revision + 1 : session.revision + 1;
-      db.prepare(`
-        update agent_tool_execution set status='unknown',completed_at=?,updated_revision=?,updated_at=?
-        where origin_session_id=? and origin_run_id=? and status='running'
-      `).run(input.updatedAt, revision, input.updatedAt, input.sessionId, input.runId);
-      if (!replacementId) {
-        updateSessionPointer(db, {
-          workspaceId: input.workspaceId, sessionId: input.sessionId,
-          headMessageId: session.headMessageId, contextRootMessageId: session.contextRootMessageId,
-          revision, now: input.updatedAt,
-        });
-      }
-    }
-
-    const current = getMessageRunState(db, input.workspaceId, input.sessionId)!;
-    writeRunState(db, {
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      updatedAt: input.updatedAt,
-      runNoticeText: "任务正在自动恢复",
-      retryCount: 0,
-      nextRetryAt: null,
-      activeAssistantMessageId: replacementId ?? current.activeAssistantMessageId,
-      nonTerminalMessageIds: replacementId
-        ? current.nonTerminalMessageIds.filter((id) => id !== active!.id).concat(replacementId)
-        : current.nonTerminalMessageIds,
-      nonTerminalToolExecutionIds: current.nonTerminalToolExecutionIds.filter((id) => !runningExecutionIds.some((item) => item.id === id)),
-    });
-    return { prepared: true, resumeAssistantMessageId: replacementId ?? (activeIsCurrentStreamingAssistant ? active!.id : null) };
-  })();
-}
-
-/** 启动失败恢复：仅当前 fenced Run 可将遗留流式对象收敛到终态。 */
-export function failMessageRunAndConverge(db: Db, input: { workspaceId: string; sessionId: string; runId: string; updatedAt: number; noticeText?: string }) {
-  return db.transaction(() => {
-    if (!assertFence(db, input)) return false;
-    const state = getMessageRunState(db, input.workspaceId, input.sessionId)!;
-    const revision = sessionRow(db, input.workspaceId, input.sessionId)!.revision + 1;
-    const messageIds = state.nonTerminalMessageIds;
-    const executionIds = state.nonTerminalToolExecutionIds;
-    if (messageIds.length > 0) {
-      const placeholders = messageIds.map(() => "?").join(",");
-      db.prepare(`update agent_message set status='failed', updated_revision=?, updated_at=? where id in (${placeholders}) and workspace_id=? and origin_session_id=? and origin_run_id=? and status='streaming'`).run(revision, input.updatedAt, ...messageIds, input.workspaceId, input.sessionId, input.runId);
-    }
-    if (executionIds.length > 0) {
-      const placeholders = executionIds.map(() => "?").join(",");
-      db.prepare(`update agent_tool_execution set status=case when status='running' then 'unknown' else 'cancelled' end, completed_at=?, updated_revision=?, updated_at=? where id in (${placeholders}) and origin_session_id=? and origin_run_id=? and status in ('queued','running')`).run(input.updatedAt, revision, input.updatedAt, ...executionIds, input.sessionId, input.runId);
-    }
-    db.prepare("update agent_run set status='failed', updated_at=? where run_id=? and workspace_id=? and session_id=? and status='running'").run(input.updatedAt, input.runId, input.workspaceId, input.sessionId);
-    if (!settleMessageRunIfCurrent(db, input)) throw new Error("active message run unexpectedly changed during recovery");
-    if (messageIds.length > 0 || executionIds.length > 0) {
-      db.prepare("update agent_session set revision=?, updated_at=? where id=? and workspace_id=?").run(revision, input.updatedAt, input.sessionId, input.workspaceId);
-    }
-    return true;
-  })();
-}
-
 export function updateMessageRunNotice(db: Db, input: { workspaceId: string; sessionId: string; runId: string; runNoticeText: string; retryCount?: number; nextRetryAt?: number | null; updatedAt: number }): FencedWriteResult {
   return db.transaction(() => {
     if (!assertFence(db, input)) return "ignored";
@@ -773,13 +709,13 @@ export function updateMessageRunNotice(db: Db, input: { workspaceId: string; ses
   })();
 }
 
-export function replaceStreamingAssistant(db: Db, input: { workspaceId: string; sessionId: string; runId: string; oldMessageId: string; newMessageId: string; expectedHeadMessageId: string | null; expectedRevision: number; runNoticeText: string; retryCount: number; nextRetryAt: number | null; createdAt: number }): { result: FencedWriteResult; message: AgentMessage | null } {
-  return db.transaction((): { result: FencedWriteResult; message: AgentMessage | null } => {
+export function replaceStreamingAssistant(db: Db, input: { workspaceId: string; sessionId: string; runId: string; oldMessageId: string; newMessageId: string; expectedHeadMessageId: string | null; expectedRevision: number; runNoticeText: string; retryCount: number; nextRetryAt: number | null; createdAt: number }): { result: FencedWriteResult; message: AgentOrdinaryMessage | null } {
+  return db.transaction((): { result: FencedWriteResult; message: AgentOrdinaryMessage | null } => {
     const old = messageRow(db, input.oldMessageId);
     if (!old) return { result: "missing", message: null };
     if (old.status === "superseded") {
       const replayed = replacementReplayMatches(db, old, input);
-      return { result: replayed ? "updated" : "ignored", message: replayed ? getMessage(db, input.newMessageId) : null };
+      return { result: replayed ? "updated" : "ignored", message: replayed ? asOrdinaryMessage(getMessage(db, input.newMessageId)!) : null };
     }
     if (!assertFence(db, input)) return { result: "ignored", message: null };
     const session = assertCurrent(db, input);
@@ -799,7 +735,7 @@ export function replaceStreamingAssistant(db: Db, input: { workspaceId: string; 
       nextRetryAt: input.nextRetryAt
     });
     updateSessionPointer(db, { workspaceId: input.workspaceId, sessionId: input.sessionId, headMessageId: input.newMessageId, contextRootMessageId: session.contextRootMessageId, revision, now: input.createdAt });
-    return { result: "updated", message: getMessage(db, input.newMessageId)! };
+    return { result: "updated", message: asOrdinaryMessage(getMessage(db, input.newMessageId)!) };
   })();
 }
 
@@ -869,20 +805,54 @@ export function revertBeforeUserMessage(db: Db, input: { workspaceId: string; se
   })();
 }
 
-function commitCompactionMessageCurrent(db: Db, input: { id: string; workspaceId: string; sessionId: string; runId?: string | null; expectedHeadMessageId: string | null; expectedRevision: number; textPartId: string; text: string; createdAt: number }): AgentMessage {
+function asCompactionMessage(message: AgentMessage | HydratedMessage): AgentCompactionMessage {
+  if (!Value.Check(AgentCompactionMessageSchema, message)) {
+    throw new Error("stored compaction message violates the strict shared contract");
+  }
+  return message;
+}
+
+function asOrdinaryMessage(message: AgentMessage | HydratedMessage): AgentOrdinaryMessage {
+  const ordinaryMessage = "retainedFromMessageId" in message
+    ? (() => { const { retainedFromMessageId: _retainedFromMessageId, ...normalized } = message; return normalized; })()
+    : message;
+  if (!Value.Check(AgentOrdinaryMessageSchema, ordinaryMessage)) {
+    throw new Error("stored ordinary message violates the strict shared contract");
+  }
+  return ordinaryMessage;
+}
+
+/**
+ * Internal compaction write primitive. Production callers must use a Run-fenced
+ * artifact-only entrypoint or the manual artifact-plus-intent atomic entrypoint.
+ */
+function commitCompactionMessageCurrent(db: Db, input: { id: string; workspaceId: string; sessionId: string; runId?: string | null; expectedHeadMessageId: string | null; expectedRevision: number; textPartId: string; text: string; retainedFromMessageId?: string | null; createdAt: number; effectiveRetainedAnchorAlreadyValidated?: boolean }): AgentCompactionMessage {
   const session = assertCurrent(db, input);
+  if (!input.expectedHeadMessageId) throw new Error("cannot compact an empty session");
+  if (!input.text.trim()) throw new Error("compaction summary must not be blank");
+  if (!input.effectiveRetainedAnchorAlreadyValidated) {
+    assertRetainedAnchorOnPreviousChain(db, {
+      workspaceId: input.workspaceId,
+      previousMessageId: input.expectedHeadMessageId,
+      retainedFromMessageId: input.retainedFromMessageId ?? null,
+    });
+  }
   const depth = assertPrevious(db, input.workspaceId, input.expectedHeadMessageId) + 1;
   const revision = session.revision + 1;
-  db.prepare(`insert into agent_message (id,workspace_id,previous_message_id,replaces_message_id,depth,type,status,origin_session_id,origin_run_id,updated_revision,created_at,updated_at) values (?,?,?,?,?,'compaction','completed',?,?,?,?,?)`).run(input.id, input.workspaceId, input.expectedHeadMessageId, null, depth, input.sessionId, input.runId ?? null, revision, input.createdAt, input.createdAt);
+  db.prepare(`insert into agent_message (id,workspace_id,previous_message_id,replaces_message_id,retained_from_message_id,depth,type,status,origin_session_id,origin_run_id,updated_revision,created_at,updated_at) values (?,?,?,?,?,?,'compaction','completed',?,?,?,?,?)`).run(input.id, input.workspaceId, input.expectedHeadMessageId, null, input.retainedFromMessageId ?? null, depth, input.sessionId, input.runId ?? null, revision, input.createdAt, input.createdAt);
   insertParts(db, input.id, [{ id: input.textPartId, position: 0, type: "text", text: input.text }], revision, input.createdAt);
   indexEligibleCompletedTextParts(db, input.id, input.createdAt);
   updateSessionPointer(db, { workspaceId: input.workspaceId, sessionId: input.sessionId, headMessageId: input.id, contextRootMessageId: input.id, revision, now: input.createdAt });
   db.prepare("update session_run_state set last_response_total_tokens=null where workspace_id=? and session_id=?")
     .run(input.workspaceId, input.sessionId);
-  return getMessage(db, input.id)!;
+  return asCompactionMessage(getMessage(db, input.id)!);
 }
 
-export function commitCompactionMessage(db: Db, input: { id: string; workspaceId: string; sessionId: string; expectedHeadMessageId: string | null; expectedRevision: number; textPartId: string; text: string; createdAt: number }): AgentMessage {
+/**
+ * Test fixture helper for constructing historical compaction chains without a Run.
+ * Production code must not use this unfenced write path.
+ */
+export function commitCompactionMessageForTest(db: Db, input: { id: string; workspaceId: string; sessionId: string; expectedHeadMessageId: string | null; expectedRevision: number; textPartId: string; text: string; retainedFromMessageId?: string | null; createdAt: number }): AgentCompactionMessage {
   return db.transaction(() => {
     return commitCompactionMessageCurrent(db, input);
   })();
@@ -892,9 +862,14 @@ export function commitCompactionMessage(db: Db, input: { id: string; workspaceId
 export function commitCompactionMessageWithRunFence(db: Db, input: {
   id: string; workspaceId: string; sessionId: string; runId: string;
   expectedHeadMessageId: string | null; expectedRevision: number;
-  textPartId: string; text: string; createdAt: number;
-}): AgentMessage | null {
+  textPartId: string; text: string; retainedFromMessageId?: string | null; createdAt: number; primaryProfile?: PrimaryProjectionProfile;
+}): AgentCompactionMessage | null {
   return db.transaction(() => {
+    const run = getRunRecord(db, input.runId);
+    if (run?.workspaceId === input.workspaceId && run.sessionId === input.sessionId
+      && run.runKind === "manual_compaction") {
+      throw new Error("manual compaction requires an atomic terminal intent");
+    }
     const existing = messageRow(db, input.id);
     if (existing) {
       const part = db.prepare(`select id, position, type, text, created_at as createdAt, updated_at as updatedAt from agent_message_part where id = ? and message_id = ?`).get(input.textPartId, input.id) as {
@@ -909,6 +884,7 @@ export function commitCompactionMessageWithRunFence(db: Db, input: {
         && existing.status === "completed"
         && existing.previousMessageId === input.expectedHeadMessageId
         && existing.replacesMessageId === null
+        && (existing.retainedFromMessageId ?? null) === (input.retainedFromMessageId ?? null)
         && existing.originSessionId === input.sessionId
         && existing.originRunId === input.runId
         && existing.createdAt === input.createdAt
@@ -922,9 +898,21 @@ export function commitCompactionMessageWithRunFence(db: Db, input: {
         && session?.headMessageId === input.id
         && session.contextRootMessageId === input.id
         && session.revision === input.expectedRevision + 1;
-      return exactReplay ? getMessage(db, input.id)! : null;
+      return exactReplay ? asCompactionMessage(getMessage(db, input.id)!) : null;
     }
     if (!assertFence(db, input)) return null;
+    if (input.retainedFromMessageId != null) {
+      if (!input.primaryProfile) throw new Error("primary profile is required for a retained compaction anchor");
+      assertPrimaryProfileMatchesRun(getRunRecord(db, input.runId), input.primaryProfile);
+      new ModelContextResolver(db).assertRetainedAnchorInEffectiveOriginalBlocks({
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        expectedHeadMessageId: input.expectedHeadMessageId,
+        expectedRevision: input.expectedRevision,
+        retainedFromMessageId: input.retainedFromMessageId,
+        primaryProfile: input.primaryProfile,
+      });
+    }
     return commitCompactionMessageCurrent(db, input);
   })();
 }
@@ -960,52 +948,6 @@ export function forkMessageSession(db: Db, input: {
   })();
 }
 
-type CancelRunInput = { workspaceId: string; sessionId: string; runId: string; updatedAt: number; noticeText: string };
-
-function cancelRunAndConvergeInTransaction(db: Db, input: CancelRunInput) {
-  if (!assertFence(db, input)) return false;
-  const session = sessionRow(db, input.workspaceId, input.sessionId)!;
-  const revision = session.revision + 1;
-  db.prepare(`update agent_message set status='cancelled',updated_revision=?,updated_at=? where workspace_id=? and origin_session_id=? and origin_run_id=? and status='streaming'`).run(revision, input.updatedAt, input.workspaceId, input.sessionId, input.runId);
-  db.prepare(`update agent_tool_execution set status=case when status='queued' then 'cancelled' else 'unknown' end,completed_at=?,updated_revision=?,updated_at=? where origin_session_id=? and origin_run_id=? and status in ('queued','running')`).run(input.updatedAt, revision, input.updatedAt, input.sessionId, input.runId);
-  db.prepare("update agent_run set status='cancelled',updated_at=? where run_id=? and workspace_id=? and session_id=? and status='running'").run(input.updatedAt, input.runId, input.workspaceId, input.sessionId);
-  db.prepare(`update session_run_state set status='idle',active_run_id=null,active_assistant_message_id=null,retry_count=0,next_retry_at=null,non_terminal_message_ids_json='[]',non_terminal_tool_execution_ids_json='[]',run_notice_text=?,updated_at=? where workspace_id=? and session_id=?`).run(input.noticeText, input.updatedAt, input.workspaceId, input.sessionId);
-  db.prepare("update agent_session set revision=?,updated_at=? where id=? and workspace_id=?").run(revision, input.updatedAt, input.sessionId, input.workspaceId);
-  return true;
-}
-
-export function cancelRunAndConverge(db: Db, input: CancelRunInput) {
-  return db.transaction(() => cancelRunAndConvergeInTransaction(db, input))();
-}
-
-/**
- * Workspace 删除前的数据库优先收敛。调用方必须先设置 deleting fence，
- * 并在本方法返回后才与 Worker 交互，避免 SQLite 写事务跨越网络等待。
- */
-export function cancelWorkspaceRunsAndConverge(db: Db, input: { workspaceId: string; updatedAt: number; noticeText: string }) {
-  return db.transaction(() => {
-    const activeRuns = db.prepare(`
-      select state.session_id as sessionId, state.active_run_id as runId
-      from session_run_state state
-      join agent_run run
-        on run.workspace_id = state.workspace_id
-        and run.session_id = state.session_id
-        and run.run_id = state.active_run_id
-      where state.workspace_id = ?
-        and state.status = 'running'
-        and run.status = 'running'
-      order by state.session_id
-    `).all(input.workspaceId) as Array<{ sessionId: string; runId: string }>;
-    const runtimeCancelSessionIds: string[] = [];
-    for (const active of activeRuns) {
-      if (cancelRunAndConvergeInTransaction(db, { ...input, sessionId: active.sessionId, runId: active.runId })) {
-        runtimeCancelSessionIds.push(active.sessionId);
-      }
-    }
-    return runtimeCancelSessionIds;
-  })();
-}
-
 export function isAncestor(db: Db, workspaceId: string, headMessageId: string | null, targetMessageId: string): boolean {
   let current = headMessageId;
   const seen = new Set<string>();
@@ -1036,13 +978,29 @@ function toRunRecord(row: Record<string, unknown>): AgentRunRecord {
     parentToolExecutionId: typeof row.parentToolExecutionId === "string" ? row.parentToolExecutionId : null,
     status: status === "completed" || status === "failed" || status === "cancelled" ? status : "running",
     runKind: row.runKind === "manual_compaction" || row.runKind === "subtask" ? row.runKind : "user",
+    executionPhase: row.executionPhase === "work_in_progress" || row.executionPhase === "terminal_intent_persisted" || row.executionPhase === "terminal"
+      ? row.executionPhase : "work_pending",
+    intendedTerminalStatus: row.intendedTerminalStatus === "completed" || row.intendedTerminalStatus === "failed" || row.intendedTerminalStatus === "cancelled"
+      ? row.intendedTerminalStatus : null,
+    intendedTerminalCode: typeof row.intendedTerminalCode === "string" ? row.intendedTerminalCode as AgentTerminalResultCode : null,
+    intendedTerminalDetail: typeof row.intendedTerminalDetail === "string" ? row.intendedTerminalDetail : null,
+    terminalResultCode: typeof row.terminalResultCode === "string" ? row.terminalResultCode as AgentTerminalResultCode : null,
+    terminalResultDetail: typeof row.terminalResultDetail === "string" ? row.terminalResultDetail : null,
     createdAt: Number(row.createdAt ?? 0),
     updatedAt: Number(row.updatedAt ?? 0),
   };
 }
 
+function terminalResultCodeFor(runKind: AgentRunKind, status: AgentTerminalRunStatus): AgentTerminalResultCode {
+  if (status === "cancelled") return "run_cancelled";
+  if (status === "completed") {
+    return runKind === "subtask" ? "subtask_completed" : runKind === "manual_compaction" ? "compaction_completed" : "run_completed";
+  }
+  return runKind === "subtask" ? "subtask_failed" : runKind === "manual_compaction" ? "compaction_failed" : "run_failed";
+}
+
 export type CreateMessageRunRecordInput = {
-  runId: string; workspaceId: string; sessionId: string; triggerMessageId: string;
+  runId: string; workspaceId: string; sessionId: string; triggerMessageId: string | null;
   agentId: string; providerId: string; modelId: string;
   uiLocale?: "zh-CN" | "en-US" | null;
   runKind?: AgentRunKind; subtaskDepth?: number | null;
@@ -1055,11 +1013,11 @@ export function createMessageRunRecord(db: Db, params: CreateMessageRunRecordInp
     insert into agent_run (
       run_id, workspace_id, session_id, trigger_message_id, agent_id, provider_id,
       ui_locale, model_id, subtask_depth, parent_run_id, parent_tool_execution_id, status,
-      created_at, updated_at, run_kind
+      created_at, updated_at, run_kind, execution_phase, terminal_result_code
     ) values (
       @runId, @workspaceId, @sessionId, @triggerMessageId, @agentId, @providerId,
       @uiLocale, @modelId, @subtaskDepth, @parentRunId, @parentToolExecutionId, @status,
-      @createdAt, @createdAt, @runKind
+      @createdAt, @createdAt, @runKind, @executionPhase, @terminalResultCode
     )
   `).run({
     ...params,
@@ -1068,6 +1026,10 @@ export function createMessageRunRecord(db: Db, params: CreateMessageRunRecordInp
     parentRunId: params.parentRunId ?? null,
     parentToolExecutionId: params.parentToolExecutionId ?? null,
     runKind: params.runKind ?? "user",
+    executionPhase: params.status === "running" ? "work_pending" : "terminal",
+    terminalResultCode: params.status === "running"
+      ? null
+      : terminalResultCodeFor(params.runKind ?? "user", params.status),
   });
 }
 
@@ -1077,6 +1039,9 @@ export function getRunRecord(db: Db, runId: string): AgentRunRecord | null {
       trigger_message_id as triggerMessageId, agent_id as agentId, provider_id as providerId,
       ui_locale as uiLocale, model_id as modelId, subtask_depth as subtaskDepth, parent_run_id as parentRunId,
       parent_tool_execution_id as parentToolExecutionId, status, run_kind as runKind,
+      execution_phase as executionPhase, intended_terminal_status as intendedTerminalStatus,
+      intended_terminal_code as intendedTerminalCode, intended_terminal_detail as intendedTerminalDetail,
+      terminal_result_code as terminalResultCode, terminal_result_detail as terminalResultDetail,
       created_at as createdAt, updated_at as updatedAt
     from agent_run where run_id = ?
   `).get(runId) as Record<string, unknown> | undefined;
@@ -1089,6 +1054,9 @@ export function getLatestMessageRunRecordBySession(db: Db, params: { workspaceId
       trigger_message_id as triggerMessageId, agent_id as agentId, provider_id as providerId,
       ui_locale as uiLocale, model_id as modelId, subtask_depth as subtaskDepth, parent_run_id as parentRunId,
       parent_tool_execution_id as parentToolExecutionId, status, run_kind as runKind,
+      execution_phase as executionPhase, intended_terminal_status as intendedTerminalStatus,
+      intended_terminal_code as intendedTerminalCode, intended_terminal_detail as intendedTerminalDetail,
+      terminal_result_code as terminalResultCode, terminal_result_detail as terminalResultDetail,
       created_at as createdAt, updated_at as updatedAt
     from agent_run where workspace_id = @workspaceId and session_id = @sessionId
     order by created_at desc, run_id desc limit 1
@@ -1102,6 +1070,9 @@ export function getLatestTerminalMessageRunRecord(db: Db, params: { workspaceId:
       trigger_message_id as triggerMessageId, agent_id as agentId, provider_id as providerId,
       ui_locale as uiLocale, model_id as modelId, subtask_depth as subtaskDepth, parent_run_id as parentRunId,
       parent_tool_execution_id as parentToolExecutionId, status, run_kind as runKind,
+      execution_phase as executionPhase, intended_terminal_status as intendedTerminalStatus,
+      intended_terminal_code as intendedTerminalCode, intended_terminal_detail as intendedTerminalDetail,
+      terminal_result_code as terminalResultCode, terminal_result_detail as terminalResultDetail,
       created_at as createdAt, updated_at as updatedAt
     from agent_run where workspace_id = @workspaceId and session_id = @sessionId
       and status in ('completed', 'failed', 'cancelled')
@@ -1116,6 +1087,9 @@ export function findMessageSubtaskRunByParentToolExecution(db: Db, params: { wor
       trigger_message_id as triggerMessageId, agent_id as agentId, provider_id as providerId,
       ui_locale as uiLocale, model_id as modelId, subtask_depth as subtaskDepth, parent_run_id as parentRunId,
       parent_tool_execution_id as parentToolExecutionId, status, run_kind as runKind,
+      execution_phase as executionPhase, intended_terminal_status as intendedTerminalStatus,
+      intended_terminal_code as intendedTerminalCode, intended_terminal_detail as intendedTerminalDetail,
+      terminal_result_code as terminalResultCode, terminal_result_detail as terminalResultDetail,
       created_at as createdAt, updated_at as updatedAt
     from agent_run where workspace_id = @workspaceId and parent_run_id = @parentRunId
       and parent_tool_execution_id = @parentToolExecutionId limit 1
@@ -1123,8 +1097,348 @@ export function findMessageSubtaskRunByParentToolExecution(db: Db, params: { wor
   return row ? toRunRecord(row) : null;
 }
 
-export function updateRunRecordStatus(db: Db, params: { runId: string; status: AgentRunRecord["status"]; updatedAt: number }) {
-  return db.prepare(`update agent_run set status = @status, updated_at = @updatedAt where run_id = @runId`).run(params).changes > 0;
+export type TerminalIntentInput = {
+  workspaceId: string;
+  sessionId: string;
+  runId: string;
+  status: AgentTerminalRunStatus;
+  code: AgentTerminalResultCode;
+  detail: string | null;
+  updatedAt: number;
+};
+
+/** Worker 取得执行权的幂等基础写入。 */
+export function markRunWorkInProgress(db: Db, input: {
+  workspaceId: string; sessionId: string; runId: string; updatedAt: number;
+}): "updated" | "already_in_progress" {
+  const result = db.prepare(`
+    update agent_run set execution_phase='work_in_progress', updated_at=@updatedAt
+    where run_id=@runId and workspace_id=@workspaceId and session_id=@sessionId
+      and status='running' and execution_phase='work_pending'
+  `).run(input);
+  if (result.changes === 1) return "updated";
+  const current = getRunRecord(db, input.runId);
+  if (current?.workspaceId === input.workspaceId && current.sessionId === input.sessionId
+    && current.status === "running" && current.executionPhase === "work_in_progress") {
+    return "already_in_progress";
+  }
+  throw new Error("run is not eligible to start work");
+}
+
+/**
+ * 仅持久化 intent，不改变 Run 的公开终态、不处理 artifact。相同三元组重放幂等，
+ * 不同三元组或非法 phase 均拒绝；公开终态由 convergeRunTerminal 统一收敛。
+ */
+export function persistRunTerminalIntent(db: Db, input: TerminalIntentInput): "updated" | "already_persisted" {
+  const run = getRunRecord(db, input.runId);
+  if (!run || run.workspaceId !== input.workspaceId || run.sessionId !== input.sessionId) {
+    throw new Error("terminal intent run is not eligible");
+  }
+  assertTerminalTuple(run, input.status, input.code, input.detail);
+  const result = db.prepare(`
+    update agent_run
+    set execution_phase='terminal_intent_persisted', intended_terminal_status=@status,
+      intended_terminal_code=@code, intended_terminal_detail=@detail, updated_at=@updatedAt
+    where run_id=@runId and workspace_id=@workspaceId and session_id=@sessionId
+      and status='running' and execution_phase in ('work_pending','work_in_progress')
+  `).run(input);
+  if (result.changes === 1) return "updated";
+  const current = getRunRecord(db, input.runId);
+  if (current?.workspaceId === input.workspaceId && current.sessionId === input.sessionId
+    && current.executionPhase === "terminal_intent_persisted"
+    && current.intendedTerminalStatus === input.status
+    && current.intendedTerminalCode === input.code
+    && current.intendedTerminalDetail === input.detail) {
+    return "already_persisted";
+  }
+  throw new Error("terminal intent conflicts with current run state");
+}
+
+/** 读取已持久化的 terminal intent，供幂等重放与终态收敛验证使用。 */
+export function getPersistedRunTerminalIntent(db: Db, input: {
+  workspaceId: string; sessionId: string; runId: string;
+}): Pick<TerminalIntentInput, "status" | "code" | "detail"> | null {
+  const run = getRunRecord(db, input.runId);
+  if (!run || run.workspaceId !== input.workspaceId || run.sessionId !== input.sessionId
+    || run.executionPhase !== "terminal_intent_persisted"
+    || run.intendedTerminalStatus == null || run.intendedTerminalCode == null) return null;
+  return { status: run.intendedTerminalStatus, code: run.intendedTerminalCode, detail: run.intendedTerminalDetail };
+}
+
+function assertTerminalTuple(run: AgentRunRecord, status: AgentTerminalRunStatus, code: AgentTerminalResultCode, detail: string | null) {
+  if (detail !== null || !isAgentTerminalCodeAllowed(run.runKind, status, code)) {
+    throw new Error("terminal tuple is not allowed for run kind");
+  }
+}
+
+function assertAlreadyConvergedTerminalInvariant(db: Db, input: {
+  workspaceId: string; sessionId: string; runId: string;
+}, run: AgentRunRecord) {
+  if (run.status === "running") throw new AgentRunTerminalInvariantError("terminal run has running status");
+  if (run.terminalResultCode == null || run.terminalResultDetail !== null) {
+    throw new AgentRunTerminalInvariantError("actual terminal tuple is incomplete");
+  }
+  if (!isAgentTerminalCodeAllowed(run.runKind, run.status, run.terminalResultCode)) {
+    throw new AgentRunTerminalInvariantError("actual terminal tuple is not allowed for run kind");
+  }
+  if (run.intendedTerminalStatus !== null || run.intendedTerminalCode !== null || run.intendedTerminalDetail !== null) {
+    throw new AgentRunTerminalInvariantError("terminal run retains terminal intent");
+  }
+
+  const session = sessionRow(db, input.workspaceId, input.sessionId);
+  const state = getMessageRunState(db, input.workspaceId, input.sessionId);
+  if (!session || !state) throw new AgentRunTerminalInvariantError("session or run state is missing");
+  // 新 Run 可以已经占据 active fence；重放旧 Run 时绝不能动它。
+  if (state.activeRunId === input.runId) {
+    throw new AgentRunTerminalInvariantError("terminal run still occupies active fence");
+  }
+
+  const messages = db.prepare(`
+    select id, status, updated_revision as updatedRevision, updated_at as updatedAt
+    from agent_message
+    where workspace_id=@workspaceId and origin_session_id=@sessionId and origin_run_id=@runId
+  `).all(input) as Array<{ id: string; status: AgentMessageStatus; updatedRevision: number; updatedAt: number }>;
+  const executions = db.prepare(`
+    select id, status, updated_revision as updatedRevision, updated_at as updatedAt,
+      completed_at as completedAt
+    from agent_tool_execution
+    where origin_session_id=@sessionId and origin_run_id=@runId
+  `).all(input) as Array<{
+    id: string; status: AgentToolExecutionStatus; updatedRevision: number; updatedAt: number; completedAt: number | null;
+  }>;
+
+  if (messages.some((message) => !TERMINAL_MESSAGE_STATUSES.has(message.status))) {
+    throw new AgentRunTerminalInvariantError("terminal run has non-terminal message");
+  }
+  if (executions.some((execution) => !TERMINAL_EXECUTION_STATUSES.has(execution.status))) {
+    throw new AgentRunTerminalInvariantError("terminal run has non-terminal tool execution");
+  }
+  if (messages.some((message) => message.updatedRevision > session.revision || message.updatedAt > session.updatedAt)) {
+    throw new AgentRunTerminalInvariantError("message revision or timestamp exceeds session");
+  }
+  if (executions.some((execution) => execution.updatedRevision > session.revision || execution.updatedAt > session.updatedAt)) {
+    throw new AgentRunTerminalInvariantError("tool execution revision or timestamp exceeds session");
+  }
+  if (run.updatedAt > session.updatedAt) {
+    throw new AgentRunTerminalInvariantError("terminal run timestamp exceeds session");
+  }
+}
+
+export type ConvergeRunTerminalResult = {
+  kind: "transitioned" | "already_converged";
+  finalStatus: AgentTerminalRunStatus;
+};
+
+/**
+ * 唯一的 Run 终态物化入口。它只相信已持久化的 intent，不接受调用方传入的
+ * 终态结果，避免 Worker、取消和启动恢复形成彼此不同的收敛规则。
+ */
+export function convergeRunTerminal(db: Db, input: {
+  workspaceId: string; sessionId: string; runId: string; updatedAt: number;
+}): ConvergeRunTerminalResult {
+  return db.transaction(() => {
+    const run = getRunRecord(db, input.runId);
+    if (!run || run.workspaceId !== input.workspaceId || run.sessionId !== input.sessionId) {
+      throw new Error("terminal convergence run is not eligible");
+    }
+    if (run.executionPhase === "terminal") {
+      assertAlreadyConvergedTerminalInvariant(db, input, run);
+      return {
+        kind: "already_converged" as const,
+        finalStatus: run.status as AgentTerminalRunStatus,
+      };
+    }
+    if (
+      run.executionPhase !== "terminal_intent_persisted" ||
+      run.intendedTerminalStatus == null ||
+      run.intendedTerminalCode == null
+    ) {
+      throw new Error("terminal intent is not persisted");
+    }
+    const intent = {
+      status: run.intendedTerminalStatus,
+      code: run.intendedTerminalCode,
+      detail: run.intendedTerminalDetail,
+    };
+    assertTerminalTuple(run, intent.status, intent.code, intent.detail);
+    if (!assertFence(db, input)) throw new Error("terminal convergence run fence is not current");
+
+    const session = sessionRow(db, input.workspaceId, input.sessionId);
+    const state = getMessageRunState(db, input.workspaceId, input.sessionId);
+    if (!session || !state) throw new Error("terminal convergence session state is missing");
+    const messages = db.prepare(`
+      select id, status from agent_message
+      where workspace_id=@workspaceId and origin_session_id=@sessionId and origin_run_id=@runId
+    `).all(input) as Array<{ id: string; status: AgentMessageStatus }>;
+    const executions = db.prepare(`
+      select id, status from agent_tool_execution
+      where origin_session_id=@sessionId and origin_run_id=@runId
+    `).all(input) as Array<{ id: string; status: AgentToolExecutionStatus }>;
+
+    if (intent.status === "completed") {
+      if (messages.some((message) => message.status === "streaming")) {
+        throw new Error("completed terminal intent has streaming message");
+      }
+      if (executions.some((execution) => !TERMINAL_EXECUTION_STATUSES.has(execution.status))) {
+        throw new Error("completed terminal intent has non-terminal tool execution");
+      }
+    }
+
+    const revision = session.revision + 1;
+    if (intent.status !== "completed") {
+      const messageStatus = intent.status === "cancelled" ? "cancelled" : "failed";
+      db.prepare(`
+        update agent_message set status=@messageStatus, updated_revision=@revision, updated_at=@updatedAt
+        where workspace_id=@workspaceId and origin_session_id=@sessionId and origin_run_id=@runId
+          and status='streaming'
+      `).run({ ...input, messageStatus, revision });
+      db.prepare(`
+        update agent_tool_execution
+        set status=case when status='running' then 'unknown' else 'cancelled' end,
+            completed_at=@updatedAt, updated_revision=@revision, updated_at=@updatedAt
+        where origin_session_id=@sessionId and origin_run_id=@runId and status in ('queued','running')
+      `).run({ ...input, revision });
+    }
+
+    updateSessionPointer(db, {
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      headMessageId: session.headMessageId,
+      contextRootMessageId: session.contextRootMessageId,
+      revision,
+      now: input.updatedAt,
+    });
+    db.prepare(`
+      update agent_run
+      set status=@status, execution_phase='terminal',
+          intended_terminal_status=null, intended_terminal_code=null, intended_terminal_detail=null,
+          terminal_result_code=@code, terminal_result_detail=@detail, updated_at=@updatedAt
+      where run_id=@runId and workspace_id=@workspaceId and session_id=@sessionId
+        and status='running' and execution_phase='terminal_intent_persisted'
+    `).run({ ...input, ...intent });
+    const terminalRun = getRunRecord(db, input.runId);
+    if (terminalRun?.status !== intent.status || terminalRun.executionPhase !== "terminal") {
+      throw new Error("terminal convergence run transition failed");
+    }
+    if (!settleMessageRunIfCurrent(db, input)) {
+      throw new Error("terminal convergence active run unexpectedly changed");
+    }
+    return { kind: "transitioned" as const, finalStatus: intent.status };
+  })();
+}
+
+function terminalAssistantIntentFor(run: AgentRunRecord) {
+  if (run.runKind === "user") return { status: "completed" as const, code: "run_completed" as const, detail: null };
+  if (run.runKind === "subtask") return { status: "completed" as const, code: "subtask_completed" as const, detail: null };
+  throw new Error("manual compaction run cannot complete a terminal assistant");
+}
+
+/** 终态 Assistant 仅允许 user/subtask 成功结果；产物和 intent 必须精确幂等重放。 */
+export function completeTerminalAssistantWithIntent(db: Db, input: {
+  workspaceId: string; sessionId: string; runId: string; messageId: string;
+  responseTotalTokens?: number | null;
+  status: "completed"; code: "run_completed" | "subtask_completed"; detail: null; updatedAt: number;
+}): FencedWriteResult {
+  return db.transaction(() => {
+    const run = getRunRecord(db, input.runId);
+    if (!run || run.workspaceId !== input.workspaceId || run.sessionId !== input.sessionId) throw new Error("terminal assistant run is not eligible");
+    const expectedIntent = terminalAssistantIntentFor(run);
+    if (input.status !== expectedIntent.status || input.code !== expectedIntent.code || input.detail !== expectedIntent.detail) {
+      throw new Error("terminal assistant intent conflicts with run kind");
+    }
+    assertTerminalTuple(run, input.status, input.code, input.detail);
+    const message = messageRow(db, input.messageId);
+    if (!message || message.workspaceId !== input.workspaceId || message.originSessionId !== input.sessionId
+      || message.originRunId !== input.runId || message.type !== "assistant") {
+      throw new Error("terminal assistant is not eligible to complete");
+    }
+    if (message.status === "completed") {
+      const replay = completeAssistantReplayMatches(db, message, { ...input, executions: [] });
+      const state = getMessageRunState(db, input.workspaceId, input.sessionId);
+      const responseTokensMatch = state?.lastResponseTotalTokens === normalizedResponseTotalTokens(input.responseTotalTokens);
+      const persisted = getPersistedRunTerminalIntent(db, input);
+      if (replay && responseTokensMatch && persisted?.status === input.status && persisted.code === input.code && persisted.detail === input.detail) return "updated";
+      throw new Error("terminal assistant replay conflicts with persisted result");
+    }
+    if (message.status !== "streaming" || !assertFence(db, input)) throw new Error("terminal assistant is not eligible to complete");
+    const toolCall = db.prepare("select 1 from agent_message_part where message_id = ? and type = 'tool_call' limit 1").get(input.messageId);
+    const nonTerminalExecution = db.prepare(
+      "select 1 from agent_tool_execution where origin_run_id = ? and status in ('queued', 'running') limit 1",
+    ).get(input.runId);
+    if (toolCall || nonTerminalExecution) throw new Error("terminal assistant cannot contain tool calls or non-terminal executions");
+    const completed = completeAssistantWithExecutions(db, {
+      workspaceId: input.workspaceId, sessionId: input.sessionId, runId: input.runId,
+      messageId: input.messageId, executions: [], responseTotalTokens: input.responseTotalTokens,
+      updatedAt: input.updatedAt,
+    });
+    if (completed !== "updated") return completed;
+    persistRunTerminalIntent(db, {
+      workspaceId: input.workspaceId, sessionId: input.sessionId, runId: input.runId,
+      status: input.status, code: input.code, detail: input.detail, updatedAt: input.updatedAt,
+    });
+    return completed;
+  })();
+}
+
+/**
+ * Atomically persists a manual compaction artifact and its completed terminal
+ * intent. Exact replay is accepted only when both artifact and intent match.
+ */
+export function commitCompactionWithTerminalIntent(db: Db, input: {
+  id: string; workspaceId: string; sessionId: string; runId: string; text: string;
+  expectedHeadMessageId: string | null; expectedRevision: number;
+  textPartId: string; retainedFromMessageId: string | null; createdAt: number;
+  primaryProfile?: PrimaryProjectionProfile;
+}) {
+  return db.transaction(() => {
+    const run = getRunRecord(db, input.runId);
+    if (!run || run.workspaceId !== input.workspaceId || run.sessionId !== input.sessionId
+      || run.runKind !== "manual_compaction" || run.status !== "running") {
+      throw new Error("run is not eligible to commit compaction");
+    }
+    const existing = messageRow(db, input.id);
+    if (existing) {
+      const existingMessage = getMessage(db, input.id);
+      const compaction = existingMessage ? asCompactionMessage(existingMessage) : null;
+      const part = compaction?.parts[0];
+      const session = getMessageSession(db, input.workspaceId, input.sessionId);
+      const replay = existing.workspaceId === input.workspaceId && existing.originSessionId === input.sessionId
+        && existing.originRunId === input.runId && existing.type === "compaction" && existing.status === "completed"
+        && existing.previousMessageId === input.expectedHeadMessageId && existing.replacesMessageId === null
+        && existing.retainedFromMessageId === input.retainedFromMessageId && existing.createdAt === input.createdAt
+        && existing.updatedAt === input.createdAt && existing.updatedRevision === input.expectedRevision + 1
+        && session?.headMessageId === input.id && session.contextRootMessageId === input.id
+        && session.revision === input.expectedRevision + 1
+        && part?.id === input.textPartId && part.messageId === input.id && part.position === 0
+        && part.text === input.text && part.createdAt === input.createdAt && part.updatedAt === input.createdAt
+        && part.updatedRevision === input.expectedRevision + 1;
+      const persisted = getPersistedRunTerminalIntent(db, input);
+      if (replay && persisted?.status === "completed" && persisted.code === "compaction_completed" && persisted.detail === null) return compaction!;
+      throw new Error("compaction replay conflicts with persisted result");
+    }
+    if (!(["work_pending", "work_in_progress"] as string[]).includes(run.executionPhase) || !assertFence(db, input)) {
+      throw new Error("run is not eligible to commit compaction");
+    }
+    assertTerminalTuple(run, "completed", "compaction_completed", null);
+    if (input.retainedFromMessageId != null && !input.primaryProfile) {
+      throw new Error("primary profile is required for a retained compaction anchor");
+    }
+    if (input.retainedFromMessageId != null) assertPrimaryProfileMatchesRun(run, input.primaryProfile!);
+    new ModelContextResolver(db).assertRetainedAnchorInEffectiveOriginalBlocks({
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      expectedHeadMessageId: input.expectedHeadMessageId,
+      expectedRevision: input.expectedRevision,
+      retainedFromMessageId: input.retainedFromMessageId,
+      primaryProfile: input.primaryProfile!,
+    });
+    const message = commitCompactionMessageCurrent(db, { ...input, effectiveRetainedAnchorAlreadyValidated: true });
+    persistRunTerminalIntent(db, {
+      workspaceId: input.workspaceId, sessionId: input.sessionId, runId: input.runId,
+      status: "completed", code: "compaction_completed", detail: null, updatedAt: input.createdAt,
+    });
+    return message;
+  })();
 }
 
 export function listRecentMessageSessionsAcrossWorkspaces(db: Db, limit: number, kind: "primary" | "subtask" | "all") {

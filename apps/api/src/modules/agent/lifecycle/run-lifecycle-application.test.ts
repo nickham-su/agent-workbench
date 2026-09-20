@@ -25,7 +25,7 @@ const image = (suffix: string, position: number) => ({
 function createDependencies(params?: {
   activation?: UserRunActivationResult;
   runContext?: { workspacePath: string; workspaceRepoDirNames: string[] } | null;
-  settlement?: "failed-and-idled" | "run-failed-state-not-current" | "already-terminal" | "missing-or-mismatch";
+  settlement?: "intent-persisted" | "failed-and-idled" | "run-failed-state-not-current" | "already-terminal" | "missing-or-mismatch";
   canEnqueue?: boolean;
 }) {
   const calls: unknown[][] = [];
@@ -41,11 +41,13 @@ function createDependencies(params?: {
       failRunAfterEnqueueFailureIfCurrent(input: EnqueueFailureInput) { calls.push(["settle", input]); return params?.settlement ?? "failed-and-idled"; },
       listActiveSessionIdsForCancel: () => [],
       getCancelSessionSnapshot: () => null,
-      cancelSessions: () => ({ rootSessionId: "session", runtimeCancelSessionIds: [], cancelledRunIds: [] }),
-      completeRunFromWorker: () => false,
+      cancelSessions: () => ({ rootSessionId: "session", runtimeCancelSessionIds: [], cancelledRunIds: [], terminalIntents: [] }),
+      markRunWorkInProgress: () => "updated",
+      persistRunTerminalIntent: () => "updated",
+      convergeRunTerminal: () => ({ kind: "transitioned", finalStatus: "completed" }),
+      listWorkspaceRunningRunCandidates: () => [],
       listRecoverableRunCandidates: () => [],
       isRecoverableRunCandidate: () => false,
-      prepareRunForStartupRecovery: () => ({ prepared: false, resumeAssistantMessageId: null }),
     },
     triggerInputReader: { getUserText: () => null },
     isContextAppendConflict: () => false,
@@ -95,7 +97,7 @@ test("runtime handoff: send enqueue acknowledgement 期间 cancel 等待，随�
   dependencies.persistence.cancelSessions = () => {
     cancelled = true;
     cancelEntered.resolve();
-    return { rootSessionId: "session", runtimeCancelSessionIds: ["session"], cancelledRunIds: ["run-created"] };
+    return { rootSessionId: "session", runtimeCancelSessionIds: ["session"], cancelledRunIds: ["run-created"], terminalIntents: [] };
   };
   dependencies.runStateReader = { get: () => ({ workspaceId: "workspace", sessionId: "session", status: "idle", activeRunId: null, runNoticeText: "", retryCount: 0, nextRetryAt: null, activeAssistantMessageId: null, nonTerminalMessageIds: [], nonTerminalToolExecutionIds: [], updatedAt: 0 }) };
   const application = new RunLifecycleApplication(dependencies);
@@ -129,7 +131,7 @@ test("runtime handoff: cancel 先收敛时，已激活 send 的最终 fence 阻�
   dependencies.persistence.listActiveSessionIdsForCancel = () => ["session"];
   dependencies.persistence.cancelSessions = () => {
     cancelEntered.resolve();
-    return { rootSessionId: "session", runtimeCancelSessionIds: ["session"], cancelledRunIds: ["run-created"] };
+    return { rootSessionId: "session", runtimeCancelSessionIds: ["session"], cancelledRunIds: ["run-created"], terminalIntents: [] };
   };
   dependencies.persistence.canEnqueueUserRunIfCurrent = () => active;
   const originalCancel = dependencies.persistence.cancelSessions;
@@ -147,43 +149,6 @@ test("runtime handoff: cancel 先收敛时，已激活 send 的最终 fence 阻�
   await cancel;
   await assert.rejects(send, (error: unknown) => error instanceof Error && "code" in error && error.code === "RUN_NOT_ACTIVE");
   assert.equal(enqueueCalls, 0);
-});
-
-test("runtime handoff: startup recovery enqueue acknowledgement 期间 cancel 等待", async () => {
-  const { dependencies } = createDependencies();
-  const enteredEnqueue = deferred();
-  const releaseEnqueue = deferred();
-  let cancelled = false;
-  dependencies.persistence.listRecoverableRunCandidates = () => [{ workspaceId: "workspace", sessionId: "session", runId: "run-recovered", runKind: "user" as const, triggerMessageId: null }];
-  dependencies.persistence.isRecoverableRunCandidate = () => true;
-  dependencies.persistence.prepareRunForStartupRecovery = () => ({ prepared: true, resumeAssistantMessageId: null });
-  dependencies.persistence.getCancelSessionSnapshot = () => ({
-    sessionId: "session", workspaceId: "workspace", session: {
-      id: "session", workspaceId: "workspace", title: "session", kind: "primary", forkedFromSessionId: null, forkedFromMessageId: null,
-      headMessageId: null, contextRootMessageId: null, revision: 0, createdAt: 1, updatedAt: 1,
-    }, runState: { status: "running", activeRunId: "run-recovered" },
-  });
-  dependencies.persistence.listActiveSessionIdsForCancel = () => ["session"];
-  dependencies.persistence.cancelSessions = () => {
-    cancelled = true;
-    return { rootSessionId: "session", runtimeCancelSessionIds: ["session"], cancelledRunIds: ["run-recovered"] };
-  };
-  const application = new RunLifecycleApplication(dependencies);
-  const recovery = application.recoverRunsOnStartup({ runtime: {
-    enqueueRun: async () => {
-      enteredEnqueue.resolve();
-      await releaseEnqueue.promise;
-    },
-    cancelSession: () => undefined,
-  } });
-  await enteredEnqueue.promise;
-  const cancellation = application.cancelSession({ workspaceId: "workspace", sessionId: "session", runtime: { enqueueRun: () => undefined, cancelSession: () => undefined } });
-  await Promise.resolve();
-  assert.equal(cancelled, false);
-  releaseEnqueue.resolve();
-  await recovery;
-  await cancellation;
-  assert.equal(cancelled, true);
 });
 
 test("RunLifecycleApplication 不读取上下文或入队重复请求", async () => {
@@ -293,11 +258,15 @@ test("RunLifecycleApplication 在 ACK 丢失后以同一 runId 协调重试，�
 });
 
 test("RunLifecycleApplication only settles an explicit permanent enqueue rejection", async () => {
-  const { calls, dependencies } = createDependencies();
+  const { calls, dependencies } = createDependencies({ settlement: "intent-persisted" });
+  dependencies.persistence.convergeRunTerminal = (input) => {
+    calls.push(["converge", input]);
+    return { kind: "transitioned", finalStatus: "failed" };
+  };
   const application = new RunLifecycleApplication(dependencies);
   const rejection = new (await import("../../../app/errors.js")).HttpError(400, "invalid enqueue", "AGENT_WORKER_ENQUEUE_REJECTED");
   await assert.rejects(() => application.startUserRun(command({ enqueueRun: () => { throw rejection; } })), (error: unknown) => error === rejection);
-  assert.deepEqual(calls.map(([kind]) => kind), ["activate", "context", "fence", "settle", "cache"]);
+  assert.deepEqual(calls.map(([kind]) => kind), ["activate", "context", "fence", "settle", "converge", "cache"]);
 });
 
 test("RunLifecycleApplication reconciliation 永久拒绝 settlement 后清除 retry attempt", async () => {
@@ -387,45 +356,66 @@ test("RunLifecycleApplication P3 leaves cache intact when a late enqueue settlem
   assert.deepEqual(calls.map(([kind]) => kind), ["settle"]);
 });
 
-test("RunLifecycleApplication P4 publishes and clears only an effective worker completion", () => {
+test("RunLifecycleApplication terminal convergence always clears cache and only publishes transition", () => {
   const { calls, dependencies } = createDependencies();
   const events: unknown[] = [];
-  dependencies.persistence.completeRunFromWorker = (input) => {
-    calls.push(["complete", input]);
-    return true;
+  dependencies.persistence.convergeRunTerminal = (input) => {
+    calls.push(["converge", input]);
+    return { kind: "transitioned", finalStatus: "completed" };
   };
   dependencies.runCompletedEventPublisher = { publishRunCompleted: (event) => events.push(event) };
   const application = new RunLifecycleApplication(dependencies);
 
-  application.completeRunFromWorker({ workspaceId: "workspace", sessionId: "session", runId: "run", status: "completed" });
+  application.convergeRunTerminal({ workspaceId: "workspace", sessionId: "session", runId: "run", updatedAt: 123 });
 
-  assert.deepEqual(calls, [["complete", { workspaceId: "workspace", sessionId: "session", runId: "run", status: "completed", updatedAt: 123 }], ["cache", "run"]]);
+  assert.deepEqual(calls, [["converge", { workspaceId: "workspace", sessionId: "session", runId: "run", updatedAt: 123 }], ["cache", "run"]]);
   assert.deepEqual(events, [{ eventId: "evt-created", occurredAt: 123, workspaceId: "workspace", sessionId: "session", runId: "run", finalStatus: "completed" }]);
 });
 
-test("RunLifecycleApplication completeRun 响应丢失后的重放不会重复清 cache 或发布事件", () => {
+test("RunLifecycleApplication convergence replay clears cache without duplicate event", () => {
   const { calls, dependencies } = createDependencies();
   const events: unknown[] = [];
-  let terminal = false;
-  dependencies.persistence.completeRunFromWorker = (input) => {
-    calls.push(["complete", input]);
-    if (terminal) return false;
-    terminal = true;
-    return true;
+  let transitioned = true;
+  dependencies.persistence.convergeRunTerminal = (input) => {
+    calls.push(["converge", input]);
+    const result = transitioned ? { kind: "transitioned" as const, finalStatus: "completed" as const } : { kind: "already_converged" as const, finalStatus: "completed" as const };
+    transitioned = false;
+    return result;
   };
   dependencies.runCompletedEventPublisher = { publishRunCompleted: (event) => events.push(event) };
   const application = new RunLifecycleApplication(dependencies);
-  const request = { workspaceId: "workspace", sessionId: "session", runId: "run", status: "completed" as const };
+  const request = { workspaceId: "workspace", sessionId: "session", runId: "run", updatedAt: 123 };
 
-  application.completeRunFromWorker(request); // persisted, then response is presumed lost to the worker
-  application.completeRunFromWorker(request); // retry/fallback replay
+  application.convergeRunTerminal(request);
+  application.convergeRunTerminal(request);
 
-  assert.deepEqual(calls, [
-    ["complete", { ...request, updatedAt: 123 }],
-    ["cache", "run"],
-    ["complete", { ...request, updatedAt: 123 }]
-  ]);
+  assert.equal(calls.filter(([kind]) => kind === "cache").length, 2);
   assert.equal(events.length, 1);
+});
+
+test("Workspace 删除按稳定顺序经同一终态收敛路径后才允许 drain", () => {
+  const { calls, dependencies } = createDependencies();
+  const events: unknown[] = [];
+  dependencies.persistence.listWorkspaceRunningRunCandidates = () => [
+    { workspaceId: "workspace", sessionId: "session-a", runId: "run-a", executionPhase: "terminal_intent_persisted" },
+    { workspaceId: "workspace", sessionId: "session-b", runId: "run-b", executionPhase: "work_in_progress" },
+  ];
+  dependencies.persistence.persistRunTerminalIntent = (input) => {
+    calls.push(["intent", input]);
+    return "updated";
+  };
+  dependencies.persistence.convergeRunTerminal = (input) => {
+    calls.push(["converge", input]);
+    return { kind: "transitioned", finalStatus: "cancelled" };
+  };
+  dependencies.runCompletedEventPublisher = { publishRunCompleted: (event) => events.push(event) };
+  const application = new RunLifecycleApplication(dependencies);
+
+  assert.deepEqual(application.settleWorkspaceRunsForDeletion("workspace"), ["session-a", "session-b"]);
+  assert.deepEqual(calls.map(([kind, input]) => [kind, (input as { runId?: string }).runId]), [
+    ["converge", "run-a"], ["cache", undefined], ["intent", "run-b"], ["converge", "run-b"], ["cache", undefined],
+  ]);
+  assert.equal(events.length, 2);
 });
 
 test("RunLifecycleApplication P4 cancel cascades durable state before best-effort runtime cancellation", async () => {
@@ -454,7 +444,14 @@ test("RunLifecycleApplication P4 cancel cascades durable state before best-effor
   };
   dependencies.persistence.cancelSessions = (input) => {
     calls.push(["cancel-db", input]);
-    return { rootSessionId: "root", runtimeCancelSessionIds: ["root", "child"], cancelledRunIds: ["run-root", "run-child"] };
+    return { rootSessionId: "root", runtimeCancelSessionIds: ["root", "child"], cancelledRunIds: ["run-root", "run-child"], terminalIntents: [
+      { workspaceId: "workspace", sessionId: "root", runId: "run-root" },
+      { workspaceId: "workspace", sessionId: "child", runId: "run-child" },
+    ] };
+  };
+  dependencies.persistence.convergeRunTerminal = (input) => {
+    calls.push(["converge", input]);
+    return { kind: "transitioned", finalStatus: "cancelled" };
   };
   dependencies.logger = { warn: (bindings, message) => warnings.push([bindings, message]), error: () => undefined };
   const application = new RunLifecycleApplication(dependencies);
@@ -473,158 +470,34 @@ test("RunLifecycleApplication P4 cancel cascades durable state before best-effor
   });
 
   assert.equal(result.ok, true);
-  assert.deepEqual(calls.map(([kind]) => kind), ["cancel-db", "cache", "cache"]);
+  assert.deepEqual(calls.map(([kind]) => kind), ["cancel-db", "converge", "cache", "converge", "cache"]);
   assert.deepEqual(runtimeCalls, ["root", "child"]);
   assert.equal(warnings.length, 1);
   assert.equal((warnings[0] as unknown[])[1], "agent cancel runtime session failed");
 });
 
 
-test("startup recovery 按 runKind 入队 manual compaction，不读取 sentinel 输入", async () => {
-  const { dependencies } = createDependencies();
-  const candidate = { workspaceId: "workspace", sessionId: "session", runId: "run-compact", runKind: "manual_compaction" as const, triggerMessageId: null };
+test("startup recovery persists a stable failure intent then converges without re-enqueue", async () => {
+  const { calls, dependencies } = createDependencies();
+  const candidate = { workspaceId: "workspace", sessionId: "session", runId: "run-startup", runKind: "user" as const, triggerMessageId: null, executionPhase: "work_in_progress" as const };
   dependencies.persistence.listRecoverableRunCandidates = () => [candidate];
   dependencies.persistence.isRecoverableRunCandidate = () => true;
-  dependencies.persistence.prepareRunForStartupRecovery = () => ({ prepared: true, resumeAssistantMessageId: null });
-  const enqueued: unknown[] = [];
-  await new RunLifecycleApplication(dependencies).recoverRunsOnStartup({
-    runtime: { enqueueRun: (run) => { enqueued.push(run); }, cancelSession: () => undefined },
-  });
-  assert.deepEqual(enqueued, [{ workspaceId: "workspace", sessionId: "session", runId: "run-compact", runKind: "manual_compaction", inputText: "", resumeAssistantMessageId: null, workspacePath: "/workspace", workspaceRepoDirNames: ["repo"] }]);
+  dependencies.persistence.persistRunTerminalIntent = (input) => { calls.push(["intent", input]); return "updated"; };
+  dependencies.persistence.convergeRunTerminal = (input) => { calls.push(["converge", input]); return { kind: "transitioned", finalStatus: "failed" }; };
+  await new RunLifecycleApplication(dependencies).recoverRunsOnStartup({ runtime: { enqueueRun: () => assert.fail("startup must not re-enqueue work"), cancelSession: () => undefined } });
+  assert.deepEqual(calls.map(([kind]) => kind), ["intent", "converge", "cache"]);
+  assert.equal((calls[0]?.[1] as { code: string }).code, "run_startup_recovery_failed");
 });
 
-test("RunLifecycleApplication P5 rechecks candidates after context reads and isolates enqueue failures", async () => {
+test("startup recovery converges persisted intent without replacing it", async () => {
   const { calls, dependencies } = createDependencies();
-  const first = { workspaceId: "workspace", sessionId: "first", runId: "run-first", runKind: "user" as const, triggerMessageId: "message-10" };
-  const second = { workspaceId: "workspace", sessionId: "second", runId: "run-second", runKind: "manual_compaction" as const, triggerMessageId: null };
-  const eligible = new Set([first.runId, second.runId]);
-  const warnings: unknown[] = [];
-  const enqueued: string[] = [];
-  dependencies.persistence.listRecoverableRunCandidates = () => [first, second];
-  dependencies.persistence.isRecoverableRunCandidate = (candidate) => {
-    calls.push(["eligible", candidate.runId]);
-    return eligible.has(candidate.runId);
-  };
-  dependencies.persistence.prepareRunForStartupRecovery = (candidate) => {
-    calls.push(["prepare", candidate.runId]);
-    return { prepared: eligible.has(candidate.runId), resumeAssistantMessageId: null };
-  };
-  dependencies.triggerInputReader = { getUserText: (messageId) => messageId === "message-10" ? "recovered input" : null };
-  dependencies.logger = { warn: (bindings, message) => warnings.push([bindings, message]), error: () => undefined };
-  const application = new RunLifecycleApplication(dependencies);
-
-  await application.recoverRunsOnStartup({
-    runtime: {
-      enqueueRun: async (run) => {
-        enqueued.push(`${run.runId}:${run.inputText}`);
-        if (run.runId === first.runId) throw new Error("expected enqueue failure");
-      },
-      cancelSession: () => undefined
-    },
-    beforeFinalCheck: (candidate) => {
-      if (candidate.runId === second.runId) eligible.delete(second.runId);
-    }
-  });
-
-  assert.deepEqual(enqueued, ["run-first:recovered input"]);
-  assert.deepEqual(calls.map(([kind]) => kind), ["eligible", "context", "prepare", "fence", "eligible", "context", "prepare"]);
-  assert.equal(warnings.length, 1);
-  assert.equal((warnings[0] as unknown[])[1], "startup recovery handoff was deferred or rejected");
-});
-
-test("startup recovery 跳过 deleting Workspace 的 candidate，并继续恢复其他 Workspace", async () => {
-  const { calls, dependencies } = createDependencies();
-  const deleting = { workspaceId: "workspace-deleting", sessionId: "session-deleting", runId: "run-deleting", runKind: "user" as const, triggerMessageId: "message-deleting" };
-  const healthy = { workspaceId: "workspace-healthy", sessionId: "session-healthy", runId: "run-healthy", runKind: "manual_compaction" as const, triggerMessageId: null };
-  const enqueued: string[] = [];
-  const debug: unknown[] = [];
-  dependencies.persistence.listRecoverableRunCandidates = () => [deleting, healthy];
+  const candidate = { workspaceId: "workspace", sessionId: "session", runId: "run-intent", runKind: "subtask" as const, triggerMessageId: null, executionPhase: "terminal_intent_persisted" as const };
+  dependencies.persistence.listRecoverableRunCandidates = () => [candidate];
   dependencies.persistence.isRecoverableRunCandidate = () => true;
-  dependencies.persistence.prepareRunForStartupRecovery = (candidate) => {
-    calls.push(["prepare", candidate.runId]);
-    return { prepared: true, resumeAssistantMessageId: null };
-  };
-  dependencies.logger = { warn: () => undefined, error: () => undefined, debug: (bindings) => debug.push(bindings) };
-  workspaceDeletingFence.begin(deleting.workspaceId);
-  try {
-    await new RunLifecycleApplication(dependencies).recoverRunsOnStartup({
-      runtime: {
-        enqueueRun: (run) => { enqueued.push(run.runId); },
-        cancelSession: () => undefined,
-      },
-    });
-  } finally {
-    workspaceDeletingFence.end(deleting.workspaceId);
-  }
-  assert.deepEqual(enqueued, [healthy.runId]);
-  assert.deepEqual(calls.filter(([kind]) => kind === "prepare").map(([, runId]) => runId), [healthy.runId]);
-  assert.equal(debug.length, 1);
-});
-
-test("startup recovery 在 handoff lock 内发现 deletion fence 时跳过 candidate", async () => {
-  const { calls, dependencies } = createDependencies();
-  const candidate = { workspaceId: "workspace-race", sessionId: "session-race", runId: "run-race", runKind: "user" as const, triggerMessageId: "message-race" };
-  const following = { workspaceId: "workspace-following", sessionId: "session-following", runId: "run-following", runKind: "manual_compaction" as const, triggerMessageId: null };
-  const enqueued: string[] = [];
-  dependencies.persistence.listRecoverableRunCandidates = () => [candidate, following];
-  dependencies.persistence.isRecoverableRunCandidate = () => true;
-  dependencies.persistence.prepareRunForStartupRecovery = (input) => {
-    calls.push(["prepare", input.runId]);
-    return { prepared: true, resumeAssistantMessageId: null };
-  };
-  try {
-    await new RunLifecycleApplication(dependencies).recoverRunsOnStartup({
-      runtime: {
-        enqueueRun: (run) => { enqueued.push(run.runId); },
-        cancelSession: () => undefined,
-      },
-      beforeFinalCheck: (input) => {
-        if (input.runId === candidate.runId) workspaceDeletingFence.begin(candidate.workspaceId);
-      },
-    });
-  } finally {
-    workspaceDeletingFence.end(candidate.workspaceId);
-  }
-  assert.deepEqual(enqueued, [following.runId]);
-  assert.deepEqual(calls.filter(([kind]) => kind === "prepare").map(([, runId]) => runId), [following.runId]);
-});
-
-test("startup recovery prepare 后 deletion fence 在第二次 handoff 获胜时不转 unknown，并继续后续 candidate", async () => {
-  const { calls, dependencies } = createDependencies();
-  const deleting = { workspaceId: "workspace-second-lock", sessionId: "session-second-lock", runId: "run-second-lock", runKind: "user" as const, triggerMessageId: "message-second-lock" };
-  const following = { workspaceId: "workspace-after-second-lock", sessionId: "session-after-second-lock", runId: "run-after-second-lock", runKind: "manual_compaction" as const, triggerMessageId: null };
-  const enqueued: string[] = [];
-  const warnings: unknown[] = [];
-  let locks = 0;
-  dependencies.persistence.listRecoverableRunCandidates = () => [deleting, following];
-  dependencies.persistence.isRecoverableRunCandidate = () => true;
-  dependencies.persistence.prepareRunForStartupRecovery = (input) => {
-    calls.push(["prepare", input.runId]);
-    return { prepared: true, resumeAssistantMessageId: null };
-  };
-  dependencies.runtimeHandoffCoordinator = {
-    async runExclusive(_sessionId, operation) {
-      locks += 1;
-      if (locks === 2) workspaceDeletingFence.begin(deleting.workspaceId);
-      return await operation();
-    },
-    async runExclusiveMany(_sessionIds, operation) { return await operation(); },
-  };
-  dependencies.logger = { warn: (bindings) => warnings.push(bindings), error: () => undefined };
-  try {
-    await new RunLifecycleApplication(dependencies).recoverRunsOnStartup({
-      runtime: {
-        enqueueRun: (run) => { enqueued.push(run.runId); },
-        cancelSession: () => undefined,
-      },
-    });
-    await new Promise((resolve) => setTimeout(resolve, 300));
-  } finally {
-    workspaceDeletingFence.end(deleting.workspaceId);
-  }
-  assert.deepEqual(calls.filter(([kind]) => kind === "prepare").map(([, runId]) => runId), [deleting.runId, following.runId]);
-  assert.deepEqual(enqueued, [following.runId]);
-  assert.equal(warnings.length, 0, "deletion fence must not be reported as unknown recovery handoff");
+  dependencies.persistence.persistRunTerminalIntent = () => assert.fail("persisted intent must remain authoritative");
+  dependencies.persistence.convergeRunTerminal = (input) => { calls.push(["converge", input]); return { kind: "transitioned", finalStatus: "cancelled" }; };
+  await new RunLifecycleApplication(dependencies).recoverRunsOnStartup({ runtime: { enqueueRun: () => assert.fail("startup must not re-enqueue work"), cancelSession: () => undefined } });
+  assert.deepEqual(calls.map(([kind]) => kind), ["converge", "cache"]);
 });
 
 test("user activation 后 enqueue handoff 被 deletion fence 阻止时不建立 reconciliation", async () => {

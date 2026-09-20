@@ -123,7 +123,7 @@ test("两次 API 生命周期 hydrate deletion fence 后，ready 删除目标 Ru
   let secondDb: Awaited<ReturnType<typeof openDb>> | null = null;
   let firstApp: Awaited<ReturnType<typeof createApp>> | null = null;
   let secondApp: Awaited<ReturnType<typeof createApp>> | null = null;
-  let registration: { runtime: Pick<AgentRuntimePort, "cancelSessionAndWait">; handoffCoordinator: SessionRuntimeHandoffCoordinator } | null = null;
+  let registration: { runtime: Pick<AgentRuntimePort, "cancelSessionAndWait">; handoffCoordinator: SessionRuntimeHandoffCoordinator; settleWorkspaceRunsForDeletion(workspaceId: string): string[] } | null = null;
   try {
     firstDb = await openDb(dataDir);
     firstApp = await createApp(context(dataDir, firstDb));
@@ -164,7 +164,7 @@ test("两次 API 生命周期 hydrate deletion fence 后，ready 删除目标 Ru
       cancelSession: () => undefined,
       cancelSessionAndWait: async () => true,
     };
-    registration = { runtime, handoffCoordinator: new SessionRuntimeHandoffCoordinator() };
+    registration = { runtime, handoffCoordinator: new SessionRuntimeHandoffCoordinator(), settleWorkspaceRunsForDeletion: () => [] };
     registerWorkspaceRuntime(registration);
     assert.equal(workspaceDeletingFence.isDeleting(deletingId), true, "Workspaces module must hydrate durable deletion fence before ready");
     await recoverAfterAgentRuntimeReady({
@@ -176,8 +176,11 @@ test("两次 API 生命周期 hydrate deletion fence 后，ready 删除目标 Ru
       logger: secondApp.log,
     });
     assert.equal(getWorkspace(secondDb, deletingId), null);
-    assert.equal(getRunRecord(secondDb, deletingRunId), null, "deleting Workspace Run must converge through deletion, never enqueue");
-    assert.deepEqual(enqueued, [healthyRunId]);
+    assert.equal(getRunRecord(secondDb, deletingRunId), null, "deleting Workspace Run must converge through deletion, never recover");
+    assert.deepEqual(enqueued, [], "startup recovery must not re-enqueue business work");
+    const healthyRun = getRunRecord(secondDb, healthyRunId);
+    assert.equal(healthyRun?.status, "failed");
+    assert.equal(healthyRun?.terminalResultCode, "run_startup_recovery_failed");
     assert.ok(getWorkspace(secondDb, healthyId));
   } finally {
     if (registration) unregisterWorkspaceRuntime(registration);

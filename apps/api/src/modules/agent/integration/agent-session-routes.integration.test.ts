@@ -48,13 +48,19 @@ async function createRouteProbeFixture(t: TestContext, kind: "prevalidation" | "
 }
 
 async function runComplete(fixture: Awaited<ReturnType<typeof createIntegrationFixture>>, sessionId: string, runId: string, status: "completed" | "failed" | "cancelled") {
-  const res = await fixture.app.inject({
-    method: "POST", url: "/api/internal/agent/run-complete",
-    headers: { "x-awb-agent-internal-token": fixture.internalToken },
-    payload: { workspaceId: fixture.workspaceId, sessionId, runId, status },
+  const updatedAt = Date.now();
+  const code = status === "completed" ? "run_completed" : status === "failed" ? "run_failed" : "run_cancelled";
+  const headers = { "x-awb-agent-internal-token": fixture.internalToken };
+  const intent = await fixture.app.inject({
+    method: "POST", url: "/api/internal/agent/runs/terminal-intent", headers,
+    payload: { workspaceId: fixture.workspaceId, sessionId, runId, status, code, detail: null, updatedAt },
   });
-  assert.equal(res.statusCode, 200, res.body);
-  assert.deepEqual(res.json(), { ok: true });
+  if (intent.statusCode !== 200) return;
+  const convergence = await fixture.app.inject({
+    method: "POST", url: "/api/internal/agent/runs/converge-terminal", headers,
+    payload: { workspaceId: fixture.workspaceId, sessionId, runId, updatedAt },
+  });
+  assert.equal(convergence.statusCode, 200, convergence.body);
 }
 
 async function runNotice(fixture: Awaited<ReturnType<typeof createIntegrationFixture>>, sessionId: string, runId: string, runNoticeText: string) {
@@ -162,11 +168,11 @@ test("P0 baseline: schema additionalProperties:false alone strips unknown body k
   assert.deepEqual(probe.observedBodies, [{ known: "ok" }]);
 });
 
-test("Run Routes: invalid token + invalid body is 401; valid token + invalid body is 400", async (t: TestContext) => {
+test("Run terminal intent route: invalid token + invalid body is 401; valid token + invalid body is 400", async (t: TestContext) => {
   const fixture = await createIntegrationFixture(t, { agentWorkerConcurrency: 0 });
-  const unauthorized = await fixture.app.inject({ method: "POST", url: "/api/internal/agent/run-complete", payload: {} });
+  const unauthorized = await fixture.app.inject({ method: "POST", url: "/api/internal/agent/runs/terminal-intent", payload: {} });
   assert.equal(unauthorized.statusCode, 401);
-  const invalid = await fixture.app.inject({ method: "POST", url: "/api/internal/agent/run-complete", headers: { "x-awb-agent-internal-token": fixture.internalToken }, payload: {} });
+  const invalid = await fixture.app.inject({ method: "POST", url: "/api/internal/agent/runs/terminal-intent", headers: { "x-awb-agent-internal-token": fixture.internalToken }, payload: {} });
   assert.equal(invalid.statusCode, 400);
 });
 
@@ -178,12 +184,16 @@ test("Subtask Routes: invalid token wins over invalid body and valid token reach
   assert.equal(invalid.statusCode, 400);
 });
 
-test("Run Route: unknown top-level fields preserve the current accepted request behavior", async (t: TestContext) => {
+test("Run terminal intent route: unknown top-level fields preserve the current accepted request behavior", async (t: TestContext) => {
   const fixture = await createIntegrationFixture(t, { agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
   const run = createMessageRunFixture({ fixture, sessionId: session.id });
-  const res = await fixture.app.inject({ method: "POST", url: "/api/internal/agent/run-complete", headers: { "x-awb-agent-internal-token": fixture.internalToken }, payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId: run.runId, status: "completed", unknown: true } });
-  assert.equal(res.statusCode, 200, res.body);
+  const updatedAt = Date.now();
+  const headers = { "x-awb-agent-internal-token": fixture.internalToken };
+  const intent = await fixture.app.inject({ method: "POST", url: "/api/internal/agent/runs/terminal-intent", headers, payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId: run.runId, status: "completed", code: "run_completed", detail: null, updatedAt, unknown: true } });
+  assert.equal(intent.statusCode, 200, intent.body);
+  const convergence = await fixture.app.inject({ method: "POST", url: "/api/internal/agent/runs/converge-terminal", headers, payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId: run.runId, updatedAt } });
+  assert.equal(convergence.statusCode, 200, convergence.body);
   assert.equal(getRunRecord(fixture.db, run.runId)?.status, "completed");
 });
 

@@ -58,6 +58,17 @@ export const AgentTextPartSchema = Type.Object({
 }, { additionalProperties: false });
 export type AgentTextPart = Static<typeof AgentTextPartSchema>;
 
+const AgentCompactionTextPartSchema = Type.Object({
+  id: IdSchema,
+  messageId: IdSchema,
+  position: Type.Literal(0),
+  updatedRevision: Type.Integer({ minimum: 0 }),
+  createdAt: Type.Number(),
+  updatedAt: Type.Number(),
+  type: Type.Literal("text"),
+  text: Type.String({ minLength: 1 })
+}, { additionalProperties: false });
+
 export const AgentReasoningPartSchema = Type.Object({
   ...AgentPartRecordFields,
   type: Type.Literal("reasoning"),
@@ -91,7 +102,7 @@ export const AgentMessagePartSchema = Type.Union([
 ]);
 export type AgentMessagePart = Static<typeof AgentMessagePartSchema>;
 
-export const AgentMessageSchema = Type.Object({
+const AgentMessageBaseFields = {
   id: IdSchema,
   workspaceId: IdSchema,
   previousMessageId: NullableIdSchema,
@@ -101,14 +112,63 @@ export const AgentMessageSchema = Type.Object({
   status: AgentMessageStatusSchema,
   originSessionId: NullableIdSchema,
   originRunId: NullableIdSchema,
-  /** Timeline 读侧标记：false 表示该消息仅供历史浏览，不会进入当前运行时上下文。 */
-  inActiveContext: Type.Optional(Type.Boolean()),
+  /**
+   * Timeline 读侧派生标记：是否位于 `contextRoot..head` 的当前结构操作区间。
+   * 此值不表达模型可见性；root 之前的历史即使被未来上下文解析器保留，也必须为 false。
+   */
+  inCurrentOperationRange: Type.Optional(Type.Boolean()),
   updatedRevision: Type.Integer({ minimum: 0 }),
   createdAt: Type.Number(),
-  updatedAt: Type.Number(),
+  updatedAt: Type.Number()
+};
+
+/**
+ * Compaction 是已物化的摘要边界，而不是普通系统消息。其 retained 指针仅可在
+ * 该严格分支中出现，避免 Timeline 投影意外将其混入其他消息类型。
+ */
+export const AgentCompactionMessageSchema = Type.Object({
+  ...AgentMessageBaseFields,
+  type: Type.Literal("compaction"),
+  status: Type.Literal("completed"),
+  previousMessageId: IdSchema,
+  replacesMessageId: Type.Null(),
+  retainedFromMessageId: NullableIdSchema,
+  parts: Type.Tuple([AgentCompactionTextPartSchema])
+}, { additionalProperties: false });
+export type AgentCompactionMessage = Static<typeof AgentCompactionMessageSchema>;
+
+export const AgentOrdinaryMessageSchema = Type.Object({
+  ...AgentMessageBaseFields,
+  type: Type.Union([
+    Type.Literal("user"),
+    Type.Literal("assistant"),
+    Type.Literal("system"),
+    Type.Literal("runtime")
+  ]),
+  status: AgentMessageStatusSchema,
   parts: Type.Array(AgentMessagePartSchema)
 }, { additionalProperties: false });
+export type AgentOrdinaryMessage = Static<typeof AgentOrdinaryMessageSchema>;
+
+export const AgentMessageSchema = Type.Union([
+  AgentCompactionMessageSchema,
+  AgentOrdinaryMessageSchema
+]);
+
+/** 所有跨模块 Message 值均须满足 TypeBox 严格联合。 */
 export type AgentMessage = Static<typeof AgentMessageSchema>;
+
+/**
+ * SQLite 行投影尚未附加 Part，普通消息也会携带 retained 的 null 列；它不是 DTO，
+ * 不得直接穿透到网络或运行时上下文边界。
+ */
+export type AgentMessageRow = {
+  id: string; workspaceId: string; previousMessageId: string | null; replacesMessageId: string | null;
+  retainedFromMessageId: string | null;
+  depth: number; type: AgentMessageType; status: AgentMessageStatus;
+  originSessionId: string | null; originRunId: string | null;
+  updatedRevision: number; createdAt: number; updatedAt: number;
+};
 
 export const AgentToolExecutionSchema = Type.Object({
   id: IdSchema,
@@ -194,7 +254,10 @@ export const AgentTimelineDeltaRequestSchema = Type.Object({
   sinceRevision: Type.Optional(Type.Integer({ minimum: 0 })),
   /** delta 仅当旧 head 仍为当前链祖先时才允许增量，避免 retry/revert/compaction 的旧分支残留。 */
   knownHeadMessageId: Type.Optional(IdSchema),
+  /** 客户端已知的非空 root；省略时结合 knownContextRootIsNull 判断是否提供 root 前提。 */
   knownContextRootMessageId: Type.Optional(IdSchema),
+  /** URL 查询无法可靠传输 null 时，true 表示客户端已知当前无 root。 */
+  knownContextRootIsNull: Type.Optional(Type.Literal(true)),
   /** before 模式中早于此 Message 的一页；snapshot/delta 的全量结果都受 limit 约束。 */
   beforeMessageId: Type.Optional(IdSchema),
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 }))

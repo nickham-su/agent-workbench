@@ -6,7 +6,7 @@ import test from "node:test";
 import {
   safeErrorSummaryForTest,
   sanitizeForDebugDumpForTest,
-  writeItemLogForTest,
+  writeAssistantDebugRecordForTest,
 } from "./runner.js";
 
 const SENTINEL = "opaque-encrypted-replay-SENTINEL-9e71";
@@ -49,13 +49,12 @@ test("Error 安全摘要不包含 response body、raw 或密文", () => {
 test("assistant item debug log 保留诊断结构但不泄漏 replay 或 raw payload", async () => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "awb-replay-log-"));
   try {
-    await writeItemLogForTest({
+    await writeAssistantDebugRecordForTest({
       logger: { warn() {} },
       workspacePath,
-      kind: "assistant",
       recordId: "assistant-security",
-      payload: {
-        status: "retrying",
+      input: {
+        status: "failed",
         request: {
           providerOptions: { openai: { reasoningEncryptedContent: SENTINEL } },
           messages: [{ role: "assistant", providerReplay: { item: { encryptedContent: SENTINEL } } }],
@@ -71,8 +70,8 @@ test("assistant item debug log 保留诊断结构但不泄漏 replay 或 raw pay
     const file = path.join(workspacePath, ".debug", "agent_message_logs", "assistant", "assistant-security.log");
     const text = await fs.readFile(file, "utf8");
     assert.doesNotMatch(text, new RegExp(SENTINEL));
-    assert.match(text, /retrying/);
-    assert.match(text, /context_length_exceeded/);
+    assert.match(text, /failed/);
+    assert.match(text, /error-content-not-logged/);
   } finally {
     await fs.rm(workspacePath, { recursive: true, force: true });
   }

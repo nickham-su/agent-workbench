@@ -1,6 +1,7 @@
 import type { AgentSessionRecord } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import type {
   AgentApiCompleteAssistantRequest,
+  AgentApiCompleteTerminalAssistantRequest,
   AgentApiCreateStreamingAssistantRequest,
   AgentApiCreateStreamingAssistantResponse,
   AgentApiFlushAssistantPartsRequest,
@@ -13,7 +14,9 @@ import type {
   AgentApiArchiveReadRequest,
   AgentApiArchiveSearchRequest,
   AgentApiArchivePageResponse,
-  AgentApiRunCompleteRequest,
+  AgentApiMarkRunWorkInProgressRequest,
+  AgentApiPersistTerminalIntentRequest,
+  AgentApiConvergeRunTerminalRequest,
   AgentApiUpdateRunNoticeRequest,
   AgentApiUpdateToolExecutionRequest,
   AgentApiFencedWriteResponse
@@ -38,8 +41,11 @@ export type LocalAgentRuntimeExecutionPort = {
   replaceStreamingAssistantFromWorker(params: AgentApiReplaceStreamingAssistantRequest): AgentApiReplaceStreamingAssistantResponse;
   discardStreamingAssistantFromWorker(params: AgentApiDiscardStreamingAssistantRequest): AgentApiFencedWriteResponse;
   completeAssistantFromWorker(params: AgentApiCompleteAssistantRequest): AgentApiFencedWriteResponse;
+  completeTerminalAssistantFromWorker(params: AgentApiCompleteTerminalAssistantRequest): AgentApiFencedWriteResponse;
   updateToolExecutionFromWorker(params: AgentApiUpdateToolExecutionRequest): AgentApiFencedWriteResponse;
   updateRunNoticeFromWorker(params: AgentApiUpdateRunNoticeRequest): AgentApiFencedWriteResponse;
-  completeRunFromWorker(params: AgentApiRunCompleteRequest): void;
+  markRunWorkInProgressFromWorker(params: AgentApiMarkRunWorkInProgressRequest): unknown;
+  persistRunTerminalIntentFromWorker(params: AgentApiPersistTerminalIntentRequest): unknown;
+  convergeRunTerminalFromWorker(params: AgentApiConvergeRunTerminalRequest): unknown;
   getSession(sessionId: string): Pick<AgentSessionRecord, "headMessageId"> | null;
 };

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { AgentMessage } from "@agent-workbench/shared";
+import type { AgentMessage, AgentOrdinaryMessage } from "@agent-workbench/shared";
 import {
   CANCELLED_TOOL_EXECUTION_RESULT,
   EMPTY_COMPLETED_TOOL_EXECUTION_RESULT,
@@ -9,7 +9,7 @@ import {
   UNKNOWN_TOOL_EXECUTION_RESULT
 } from "./runtime-transcript-projector.js";
 
-function message(input: Partial<AgentMessage> & Pick<AgentMessage, "id" | "type" | "status" | "parts">): AgentMessage {
+function message(input: Partial<AgentOrdinaryMessage> & Pick<AgentOrdinaryMessage, "id" | "type" | "status" | "parts">): AgentMessage {
   return {
     workspaceId: "ws", previousMessageId: null, replacesMessageId: null, depth: 0,
     originSessionId: "session", originRunId: "run", updatedRevision: 1, createdAt: 1, updatedAt: 1,

@@ -46,6 +46,36 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function convergeCompletedRun(input: {
+  app: FastifyInstance;
+  internalToken: string;
+  workspaceId: string;
+  sessionId: string;
+  runId: string;
+  persistIntent?: boolean;
+}) {
+  const updatedAt = Date.now();
+  const headers = { "x-awb-agent-internal-token": input.internalToken };
+  if (input.persistIntent !== false) {
+    const intent = await input.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/runs/terminal-intent",
+      headers,
+      payload: {
+        workspaceId: input.workspaceId, sessionId: input.sessionId, runId: input.runId,
+        status: "completed", code: "run_completed", detail: null, updatedAt,
+      },
+    });
+    assert.equal(intent.statusCode, 200, intent.body);
+  }
+  return await input.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/runs/converge-terminal",
+    headers,
+    payload: { workspaceId: input.workspaceId, sessionId: input.sessionId, runId: input.runId, updatedAt },
+  });
+}
+
 async function getRunState(app: FastifyInstance, workspaceId: string, sessionId: string) {
   const res = await app.inject({ method: "GET", url: `/api/agent/sessions/${sessionId}/run-state?workspaceId=${encodeURIComponent(workspaceId)}` });
   assert.equal(res.statusCode, 200, `get run-state failed: ${res.body}`);
@@ -189,17 +219,7 @@ test("internal runs/:runId/final-text 返回最终 assistant 文本", async (t: 
     executions: []
   });
   assert.ok(assistant.assistantMessageId);
-  const runComplete = await fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/run-complete",
-    headers: { "x-awb-agent-internal-token": fixture.internalToken },
-    payload: {
-      workspaceId: fixture.workspaceId,
-      sessionId: session.id,
-      runId,
-      status: "completed"
-    }
-  });
+  const runComplete = await convergeCompletedRun({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId });
   assert.equal(runComplete.statusCode, 200, `run complete failed: ${runComplete.body}`);
 
   const finalText = await fixture.app.inject({
@@ -234,15 +254,12 @@ test("queued/running ToolExecution 阻止 Run completed；terminal 后允许完�
     }],
   });
   const headers = { "x-awb-agent-internal-token": fixture.internalToken };
-  const complete = () => fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/run-complete",
-    headers,
-    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId, status: "completed" },
-  });
+  let intentPersisted = false;
+  const complete = async () => await convergeCompletedRun({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId, persistIntent: !intentPersisted });
 
   let response = await complete();
-  assert.equal(response.statusCode, 200, response.body);
+  intentPersisted = true;
+  assert.equal(response.statusCode, 500, response.body);
   assert.equal(getRunRecord(fixture.db, runId)?.status, "running");
   assert.equal((await getRunState(fixture.app, fixture.workspaceId, session.id)).status, "running");
 
@@ -262,7 +279,7 @@ test("queued/running ToolExecution 阻止 Run completed；terminal 后允许完�
   });
   assert.equal(running.statusCode, 200, running.body);
   response = await complete();
-  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(response.statusCode, 500, response.body);
   assert.equal(getRunRecord(fixture.db, runId)?.status, "running");
 
   completeToolExecutionFixture({ fixture, sessionId: session.id, runId, toolExecutionId });
@@ -292,12 +309,7 @@ test("run-state 支持 runNoticeText 更新与 idle 自动清空", async (t: Tes
   assert.equal(runningState.status, "running");
   assert.equal(runningState.runNoticeText, "Request failed, retrying in 2s (1/3): timeout");
 
-  const completed = await fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/run-complete",
-    headers: { "x-awb-agent-internal-token": fixture.internalToken },
-    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId, status: "completed" }
-  });
+  const completed = await convergeCompletedRun({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId });
   assert.equal(completed.statusCode, 200, completed.body);
 
   const idleState = await getRunState(fixture.app, fixture.workspaceId, session.id);
@@ -315,12 +327,7 @@ test("run-state 返回最近一次终态 run 结果", async (t: TestContext) => 
   const createdAt = Date.now();
   const runId = newSortableId("run");
   createMessageRunFixture({ fixture, sessionId: session.id, runId, agentId: "agent-default", providerId: "openai", modelId: "gpt-4.1", createdAt });
-  const completed = await fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/run-complete",
-    headers: { "x-awb-agent-internal-token": fixture.internalToken },
-    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId, status: "completed" }
-  });
+  const completed = await convergeCompletedRun({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId });
   assert.equal(completed.statusCode, 200, completed.body);
 
   const runState = await getRunState(fixture.app, fixture.workspaceId, session.id);
@@ -382,12 +389,7 @@ test("run-state 与 timeline snapshot 在 idle 时使用最新 terminal Run，ac
   const session = await createSession(fixture.app, fixture.workspaceId);
   const completeRun = async (runId: string, modelId: string, createdAt: number, updatedAt: number) => {
     createMessageRunFixture({ fixture, sessionId: session.id, runId, providerId: "ppchat", modelId, createdAt });
-    const response = await fixture.app.inject({
-      method: "POST",
-      url: "/api/internal/agent/run-complete",
-      headers: { "x-awb-agent-internal-token": fixture.internalToken },
-      payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId, status: "completed" },
-    });
+    const response = await convergeCompletedRun({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId });
     assert.equal(response.statusCode, 200, response.body);
     fixture.db.prepare("update agent_run set updated_at = ? where run_id = ?").run(updatedAt, runId);
   };
@@ -432,12 +434,7 @@ test("run-state 不应把旧 terminal run 误认为当前这次 idle 的终态",
   const createdAt = Date.now();
   const runId = newSortableId("run");
   createMessageRunFixture({ fixture, sessionId: session.id, runId, agentId: "agent-default", providerId: "openai", modelId: "gpt-4.1", createdAt });
-  const completed = await fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/run-complete",
-    headers: { "x-awb-agent-internal-token": fixture.internalToken },
-    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId, status: "completed" }
-  });
+  const completed = await convergeCompletedRun({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId });
   assert.equal(completed.statusCode, 200, completed.body);
 
   const runState = await getRunState(fixture.app, fixture.workspaceId, session.id);

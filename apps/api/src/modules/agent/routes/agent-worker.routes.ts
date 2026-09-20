@@ -38,11 +38,14 @@ import {
   AgentApiReplaceStreamingAssistantResponseSchema,
   AgentApiDiscardStreamingAssistantRequestSchema,
   AgentApiCompleteAssistantRequestSchema,
+  AgentApiCompleteTerminalAssistantRequestSchema,
   AgentApiUpdateToolExecutionRequestSchema,
   AgentApiUpdateRunNoticeRequestSchema,
   AgentApiFencedWriteResponseSchema,
-  AgentApiCommitCompactionRequestSchema,
   AgentApiCommitCompactionResponseSchema,
+  AgentApiCommitCompactionWithTerminalIntentRequestSchema,
+  AgentApiConfirmCompactionCommitRequestSchema,
+  AgentApiConfirmCompactionCommitResponseSchema,
   AgentApiSubtaskPreforkPlanRequestSchema,
   AgentApiSubtaskPreforkPlanResponseSchema,
   AgentApiSubtaskStartRequestSchema,
@@ -51,12 +54,19 @@ import {
   AgentApiSubtaskResultResponseSchema,
   AgentApiSubtaskStatusRequestSchema,
   AgentApiSubtaskStatusResponseSchema,
-  AgentApiRunCompleteRequestSchema,
-  AgentApiRunCompleteResponseSchema,
+  AgentApiMarkRunWorkInProgressRequestSchema,
+  AgentApiMarkRunWorkInProgressResponseSchema,
+  AgentApiPersistTerminalIntentRequestSchema,
+  AgentApiPersistTerminalIntentResponseSchema,
+  AgentApiConvergeRunTerminalRequestSchema,
+  AgentApiConvergeRunTerminalResponseSchema,
   AgentApiExecutionProfileRequestSchema,
   AgentApiExecutionProfileResponseSchema,
   AgentApiMessagesContextRequestSchema,
   AgentApiMessagesContextResponseSchema,
+  AgentApiCompactionSourceRequestSchema,
+  AgentApiCompactionSourceResponseSchema,
+  AGENT_API_COMPACTION_SOURCE_REQUEST_KEYS,
   AgentApiPromptContextRequestSchema,
   AgentApiPromptContextResponseSchema,
   AgentApiArchiveReadRequestSchema,
@@ -68,16 +78,21 @@ import {
   type AgentApiReplaceStreamingAssistantRequest,
   type AgentApiDiscardStreamingAssistantRequest,
   type AgentApiCompleteAssistantRequest,
+  type AgentApiCompleteTerminalAssistantRequest,
   type AgentApiUpdateToolExecutionRequest,
   type AgentApiUpdateRunNoticeRequest,
-  type AgentApiCommitCompactionRequest,
+  type AgentApiCommitCompactionWithTerminalIntentRequest,
+  type AgentApiConfirmCompactionCommitRequest,
   type AgentApiSubtaskPreforkPlanRequest,
   type AgentApiSubtaskStartRequest,
   type AgentApiSubtaskResultRequest,
   type AgentApiSubtaskStatusRequest,
-  type AgentApiRunCompleteRequest,
+  type AgentApiMarkRunWorkInProgressRequest,
+  type AgentApiPersistTerminalIntentRequest,
+  type AgentApiConvergeRunTerminalRequest,
   type AgentApiExecutionProfileRequest,
   type AgentApiMessagesContextRequest,
+  type AgentApiCompactionSourceRequest,
   type AgentApiPromptContextRequest,
   type AgentApiArchiveReadRequest,
   type AgentApiArchiveSearchRequest,
@@ -91,6 +106,21 @@ import {
   AGENT_PRIMARY_SESSION_CREATE_BODY_KEYS,
   AGENT_PRIMARY_SESSION_FORK_BODY_KEYS,
 } from "./agent-route-auth.js";
+
+const AGENT_API_COMPACTION_WITH_TERMINAL_INTENT_REQUEST_KEYS = new Set([
+  "workspaceId",
+  "sessionId",
+  "runId",
+  "messageId",
+  "textPartId",
+  "expectedHeadMessageId",
+  "expectedRevision",
+  "retainedFromMessageId",
+  "summaryText",
+  "intent",
+  "createdAt",
+]);
+const AGENT_API_CONFIRM_COMPACTION_COMMIT_REQUEST_KEYS = new Set(["workspaceId", "sessionId", "runId", "messageId"]);
 
 const AgentBuiltinToolNameSchema = Type.Union([
   Type.Literal("bash"),
@@ -130,6 +160,95 @@ export async function registerAgentWorkerRoutes(
       assertInternalToken(req, dependencies.internalToken);
       const body = req.body as AgentApiSubtaskPreforkPlanRequest;
       return dependencies.service.getSubtaskPreforkPlanFromWorker(body);
+    },
+  });
+
+  app.route({
+    method: AgentApiEndpoints.commitCompactionWithTerminalIntent.method,
+    url: AgentApiEndpoints.commitCompactionWithTerminalIntent.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiCommitCompactionWithTerminalIntentRequestSchema,
+      response: {
+        200: AgentApiCommitCompactionResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+        404: ErrorResponseSchema,
+        409: ErrorResponseSchema,
+      },
+    },
+    preValidation: (req, _reply, done) => {
+      assertOnlyAllowedBodyKeys(req, AGENT_API_COMPACTION_WITH_TERMINAL_INTENT_REQUEST_KEYS);
+      done();
+    },
+    handler: async (req) => {
+      assertInternalToken(req, dependencies.internalToken);
+      return dependencies.service.commitCompactionWithTerminalIntentFromWorker(
+        req.body as AgentApiCommitCompactionWithTerminalIntentRequest,
+      );
+    },
+  });
+
+  app.route({
+    method: AgentApiEndpoints.confirmCompactionCommit.method,
+    url: AgentApiEndpoints.confirmCompactionCommit.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiConfirmCompactionCommitRequestSchema,
+      response: { 200: AgentApiConfirmCompactionCommitResponseSchema, 400: ErrorResponseSchema, 401: ErrorResponseSchema },
+    },
+    preValidation: (req, _reply, done) => {
+      assertOnlyAllowedBodyKeys(req, AGENT_API_CONFIRM_COMPACTION_COMMIT_REQUEST_KEYS);
+      done();
+    },
+    handler: async (req) => {
+      assertInternalToken(req, dependencies.internalToken);
+      return dependencies.service.confirmCompactionCommitFromWorker(req.body as AgentApiConfirmCompactionCommitRequest);
+    },
+  });
+
+  app.route({
+    method: AgentApiEndpoints.getCompactionSource.method,
+    url: AgentApiEndpoints.getCompactionSource.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiCompactionSourceRequestSchema,
+      response: {
+        200: AgentApiCompactionSourceResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+        404: ErrorResponseSchema,
+      },
+    },
+    preValidation: (req, _reply, done) => {
+      assertOnlyAllowedBodyKeys(req, new Set(AGENT_API_COMPACTION_SOURCE_REQUEST_KEYS));
+      done();
+    },
+    handler: async (req) => {
+      assertInternalToken(req, dependencies.internalToken);
+      return dependencies.service.getCompactionSourceFromWorker(
+        req.body as AgentApiCompactionSourceRequest,
+      );
+    },
+  });
+
+  app.route({
+    method: AgentApiEndpoints.completeTerminalAssistant.method,
+    url: AgentApiEndpoints.completeTerminalAssistant.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiCompleteTerminalAssistantRequestSchema,
+      response: {
+        200: AgentApiFencedWriteResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+      },
+    },
+    handler: async (req) => {
+      assertInternalToken(req, dependencies.internalToken);
+      return dependencies.service.completeTerminalAssistantFromWorker(
+        req.body as AgentApiCompleteTerminalAssistantRequest,
+      );
     },
   });
 
@@ -359,43 +478,62 @@ export async function registerAgentWorkerRoutes(
   });
 
   app.route({
-    method: AgentApiEndpoints.completeRun.method,
-    url: AgentApiEndpoints.completeRun.path,
+    method: AgentApiEndpoints.markRunWorkInProgress.method,
+    url: AgentApiEndpoints.markRunWorkInProgress.path,
     schema: {
       tags: ["agent"],
-      body: AgentApiRunCompleteRequestSchema,
+      body: AgentApiMarkRunWorkInProgressRequestSchema,
       response: {
-        200: AgentApiRunCompleteResponseSchema,
+        200: AgentApiMarkRunWorkInProgressResponseSchema,
         400: ErrorResponseSchema,
         401: ErrorResponseSchema,
       },
     },
     handler: async (req) => {
       assertInternalToken(req, dependencies.internalToken);
-      const body = req.body as AgentApiRunCompleteRequest;
-      dependencies.service.completeRunFromWorker(body);
-      return { ok: true };
+      return dependencies.service.markRunWorkInProgressFromWorker(
+        req.body as AgentApiMarkRunWorkInProgressRequest,
+      );
     },
   });
 
   app.route({
-    method: AgentApiEndpoints.commitCompaction.method,
-    url: AgentApiEndpoints.commitCompaction.path,
+    method: AgentApiEndpoints.persistRunTerminalIntent.method,
+    url: AgentApiEndpoints.persistRunTerminalIntent.path,
     schema: {
       tags: ["agent"],
-      body: AgentApiCommitCompactionRequestSchema,
+      body: AgentApiPersistTerminalIntentRequestSchema,
       response: {
-        200: AgentApiCommitCompactionResponseSchema,
+        200: AgentApiPersistTerminalIntentResponseSchema,
         400: ErrorResponseSchema,
         401: ErrorResponseSchema,
-        404: ErrorResponseSchema,
-        409: ErrorResponseSchema,
       },
     },
     handler: async (req) => {
       assertInternalToken(req, dependencies.internalToken);
-      const body = req.body as AgentApiCommitCompactionRequest;
-      return dependencies.service.commitCompactionFromWorker(body);
+      return dependencies.service.persistRunTerminalIntentFromWorker(
+        req.body as AgentApiPersistTerminalIntentRequest,
+      );
+    },
+  });
+
+  app.route({
+    method: AgentApiEndpoints.convergeRunTerminal.method,
+    url: AgentApiEndpoints.convergeRunTerminal.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiConvergeRunTerminalRequestSchema,
+      response: {
+        200: AgentApiConvergeRunTerminalResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+      },
+    },
+    handler: async (req) => {
+      assertInternalToken(req, dependencies.internalToken);
+      return dependencies.service.convergeRunTerminalFromWorker(
+        req.body as AgentApiConvergeRunTerminalRequest,
+      );
     },
   });
 

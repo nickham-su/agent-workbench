@@ -2,7 +2,11 @@ import { HttpError } from "../../../app/errors.js";
 import { AgentAttachmentCommitError } from "../attachments/agent-attachment-storage.js";
 import { workspaceDeletingFence } from "./workspace-deleting-fence.js";
 import type { AgentCancelSessionRequest } from "@agent-workbench/shared/internal-contracts/agent-api-session";
-import type { AgentApiRunCompleteRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
+import type {
+  AgentApiConvergeRunTerminalRequest,
+  AgentApiMarkRunWorkInProgressRequest,
+  AgentApiPersistTerminalIntentRequest,
+} from "@agent-workbench/shared/internal-contracts/agent-api";
 import type {
   CancelSessionCascadeResult,
   CancelSessionCommand,
@@ -259,30 +263,79 @@ export class RunLifecycleApplication {
   }
 
   failRunAfterEnqueueFailure(params: { workspaceId: string; sessionId: string; runId: string; updatedAt?: number }): EnqueueFailureSettlement {
+    const updatedAt = params.updatedAt ?? this.dependencies.clock.nowMs();
     const settlement = this.dependencies.persistence.failRunAfterEnqueueFailureIfCurrent({
       ...params,
-      updatedAt: params.updatedAt ?? this.dependencies.clock.nowMs()
+      updatedAt,
     });
-    if (settlement === "failed-and-idled" || settlement === "run-failed-state-not-current") {
-      this.dependencies.promptStaticCacheInvalidator.clear(params.runId);
+    if (settlement === "intent-persisted") {
+      this.convergeRunTerminal({
+        workspaceId: params.workspaceId,
+        sessionId: params.sessionId,
+        runId: params.runId,
+        updatedAt,
+      });
+      return "failed-and-idled";
     }
     return settlement;
   }
 
-  completeRunFromWorker(params: AgentApiRunCompleteRequest) {
-    const updatedAt = params.updatedAt ?? this.dependencies.clock.nowMs();
-    const completed = this.dependencies.persistence.completeRunFromWorker({ ...params, updatedAt });
-    if (!completed) return;
+  markRunWorkInProgress(params: AgentApiMarkRunWorkInProgressRequest) {
+    return this.dependencies.persistence.markRunWorkInProgress(params);
+  }
 
+  persistRunTerminalIntent(params: AgentApiPersistTerminalIntentRequest) {
+    return this.dependencies.persistence.persistRunTerminalIntent(params);
+  }
+
+  /** Workspace deletion reuses the ordinary terminal intent/convergence authority. */
+  settleWorkspaceRunsForDeletion(workspaceId: string) {
+    const settledSessionIds: string[] = [];
+    for (const candidate of this.dependencies.persistence.listWorkspaceRunningRunCandidates(workspaceId)) {
+      const updatedAt = this.dependencies.clock.nowMs();
+      if (candidate.executionPhase !== "terminal_intent_persisted") {
+        this.persistRunTerminalIntent({
+          workspaceId: candidate.workspaceId,
+          sessionId: candidate.sessionId,
+          runId: candidate.runId,
+          status: "cancelled",
+          code: "run_cancelled",
+          detail: null,
+          updatedAt,
+        });
+      }
+      this.convergeRunTerminal({
+        workspaceId: candidate.workspaceId,
+        sessionId: candidate.sessionId,
+        runId: candidate.runId,
+        updatedAt,
+      });
+      if (!settledSessionIds.includes(candidate.sessionId)) settledSessionIds.push(candidate.sessionId);
+    }
+    return settledSessionIds;
+  }
+
+  convergeRunTerminal(params: AgentApiConvergeRunTerminalRequest) {
+    const result = this.dependencies.persistence.convergeRunTerminal(params);
     this.dependencies.promptStaticCacheInvalidator.clear(params.runId);
-    this.dependencies.runCompletedEventPublisher.publishRunCompleted({
-      eventId: this.dependencies.ids.newId("evt"),
-      occurredAt: updatedAt,
-      workspaceId: params.workspaceId,
-      sessionId: params.sessionId,
-      runId: params.runId,
-      finalStatus: params.status
-    });
+    if (result.kind === "transitioned") {
+      try {
+        this.dependencies.runCompletedEventPublisher.publishRunCompleted({
+          eventId: this.dependencies.ids.newId("evt"),
+          occurredAt: params.updatedAt,
+          workspaceId: params.workspaceId,
+          sessionId: params.sessionId,
+          runId: params.runId,
+          finalStatus: result.finalStatus,
+        });
+      } catch (err) {
+        this.dependencies.logger.error(
+          { err, workspaceId: params.workspaceId, sessionId: params.sessionId, runId: params.runId },
+          "agent terminal convergence event publish failed",
+        );
+      }
+    }
+    return result;
   }
 
   cancelSessionCascade(sessionId: string, body: AgentCancelSessionRequest): CancelSessionCascadeResult {
@@ -296,7 +349,13 @@ export class RunLifecycleApplication {
       updatedAt: this.dependencies.clock.nowMs(),
       listActiveChildSessionIds: (params) => this.dependencies.activeSubtaskChildQuery.listByParentRun(params)
     });
-    for (const runId of result.cancelledRunIds) this.dependencies.promptStaticCacheInvalidator.clear(runId);
+    const updatedAt = this.dependencies.clock.nowMs();
+    for (const terminalIntent of result.terminalIntents ?? []) {
+      this.convergeRunTerminal({
+        ...terminalIntent,
+        updatedAt,
+      });
+    }
     return {
       result: { ok: true, session: root.session, runState: this.dependencies.runStateReader.get(result.rootSessionId) },
       runtimeCancelSessionIds: result.runtimeCancelSessionIds
@@ -335,8 +394,6 @@ export class RunLifecycleApplication {
 
   async recoverRunsOnStartup(command: RecoverRunsOnStartupCommand) {
     for (const candidate of this.dependencies.persistence.listRecoverableRunCandidates()) {
-      // A durable Workspace deletion owns convergence for its Runs. It is not
-      // a startup recovery failure: never prepare, enqueue or reconcile it.
       if (workspaceDeletingFence.isDeleting(candidate.workspaceId)) {
         this.dependencies.logger.debug?.(
           { workspaceId: candidate.workspaceId, sessionId: candidate.sessionId, runId: candidate.runId },
@@ -345,60 +402,37 @@ export class RunLifecycleApplication {
         continue;
       }
       if (!this.dependencies.persistence.isRecoverableRunCandidate(candidate)) continue;
-      const runContext = this.dependencies.workspaceRunContextReader.get(candidate.workspaceId);
-      if (!runContext) continue;
-      const inputText = candidate.runKind === "user" && candidate.triggerMessageId != null
-        ? this.dependencies.triggerInputReader.getUserText(candidate.triggerMessageId) ?? ""
-        : "";
-
       await command.beforeFinalCheck?.(candidate);
-      let preparedRun;
+      // Cancellation may have converged while the caller held the final-check
+      // seam. Re-read so an already-terminal Run never receives a new tuple.
+      if (!this.dependencies.persistence.isRecoverableRunCandidate(candidate)) continue;
       try {
-        preparedRun = await this.dependencies.runtimeHandoffCoordinator.runExclusive(candidate.sessionId, async () => {
-          // Recheck under the handoff lock. A deletion intent can be written
-          // after the precheck while this candidate waits for its Session.
+        await this.dependencies.runtimeHandoffCoordinator.runExclusive(candidate.sessionId, async () => {
           workspaceDeletingFence.assertWritable(candidate.workspaceId);
-          const preparation = this.dependencies.persistence.prepareRunForStartupRecovery({
-            ...candidate,
-            replacementMessageId: this.dependencies.ids.newId("msg"),
-            updatedAt: this.dependencies.clock.nowMs(),
-          });
-          if (!preparation.prepared) return null;
-          return {
+          const updatedAt = this.dependencies.clock.nowMs();
+          if (candidate.executionPhase !== "terminal_intent_persisted") {
+            this.persistRunTerminalIntent({
+              workspaceId: candidate.workspaceId,
+              sessionId: candidate.sessionId,
+              runId: candidate.runId,
+              status: "failed",
+              code: "run_startup_recovery_failed",
+              detail: null,
+              updatedAt,
+            });
+          }
+          this.convergeRunTerminal({
             workspaceId: candidate.workspaceId,
             sessionId: candidate.sessionId,
             runId: candidate.runId,
-            runKind: candidate.runKind,
-            inputText,
-            resumeAssistantMessageId: preparation.resumeAssistantMessageId,
-            ...runContext,
-          };
+            updatedAt,
+          });
         });
       } catch (error) {
         if (!this.isWorkspaceDeletingError(error)) throw error;
         this.dependencies.logger.debug?.(
           { workspaceId: candidate.workspaceId, sessionId: candidate.sessionId, runId: candidate.runId },
           "startup recovery skipped run after deletion fence won",
-        );
-        continue;
-      }
-      if (!preparedRun) continue;
-      // Do not retry the network request while holding the preparation lock.
-      // The durable preparation is idempotent; the same runId is reconciled
-      // after the critical section has released.
-      try {
-        await this.enqueueActivatedRunOrReconcile({ runtime: command.runtime, run: preparedRun });
-      } catch (err) {
-        if (this.isWorkspaceDeletingError(err)) {
-          this.dependencies.logger.debug?.(
-            { workspaceId: candidate.workspaceId, sessionId: candidate.sessionId, runId: candidate.runId },
-            "startup recovery skipped run after deletion fence won during enqueue",
-          );
-          continue;
-        }
-        this.dependencies.logger.warn(
-          { err, sessionId: candidate.sessionId, runId: candidate.runId },
-          "startup recovery handoff was deferred or rejected",
         );
       }
     }

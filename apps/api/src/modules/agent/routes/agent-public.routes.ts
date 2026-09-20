@@ -46,6 +46,8 @@ import {
   AgentMessageDetailResponseSchema,
   AgentTimelineDeltaRequestSchema,
   AgentTimelineDeltaResponseSchema,
+  AgentRunStatusQuerySchema,
+  AgentRunStatusResponseSchema,
   AgentToolExecutionDetailSchema
 } from "@agent-workbench/shared";
 import {
@@ -57,8 +59,6 @@ import {
   AgentApiSubtaskResultResponseSchema,
   AgentApiSubtaskStatusRequestSchema,
   AgentApiSubtaskStatusResponseSchema,
-  AgentApiRunCompleteRequestSchema,
-  AgentApiRunCompleteResponseSchema,
   AgentApiExecutionProfileRequestSchema,
   AgentApiExecutionProfileResponseSchema,
   AgentApiMessagesContextRequestSchema,
@@ -69,7 +69,6 @@ import {
   type AgentApiSubtaskStartRequest,
   type AgentApiSubtaskResultRequest,
   type AgentApiSubtaskStatusRequest,
-  type AgentApiRunCompleteRequest,
   type AgentApiExecutionProfileRequest,
   type AgentApiMessagesContextRequest,
   type AgentApiPromptContextRequest,
@@ -269,6 +268,25 @@ async function handleCompactRequest(
     body,
     runtime: dependencies.runtime,
   });
+}
+
+function assertStrictRunStatusRequest(req: FastifyRequest) {
+  const rawQuery = req.raw.url?.split("?", 2)[1] ?? "";
+  const query = new URLSearchParams(rawQuery);
+  if (
+    [...query.keys()].some((key) => key !== "workspaceId")
+    || query.getAll("workspaceId").length !== 1
+    || !query.get("workspaceId")?.trim()
+  ) {
+    throw new HttpError(400, "invalid run status query", "AGENT_RUN_STATUS_QUERY_INVALID");
+  }
+  const { sessionId, runId } = req.params as { sessionId?: unknown; runId?: unknown };
+  if (
+    typeof sessionId !== "string" || sessionId.trim().length === 0
+    || typeof runId !== "string" || runId.trim().length === 0
+  ) {
+    throw new HttpError(400, "invalid run status path", "AGENT_RUN_STATUS_PATH_INVALID");
+  }
 }
 
 export async function registerAgentPublicRoutes(
@@ -526,12 +544,18 @@ export async function registerAgentPublicRoutes(
     },
     async (req) => {
       const params = req.params as { sessionId: string };
-      const query = req.query as { workspaceId: string; mode?: "snapshot" | "delta" | "before"; sinceRevision?: number; knownHeadMessageId?: string; knownContextRootMessageId?: string; beforeMessageId?: string; limit?: number };
+      const query = req.query as { workspaceId: string; mode?: "snapshot" | "delta" | "before"; sinceRevision?: number; knownHeadMessageId?: string; knownContextRootMessageId?: string; knownContextRootIsNull?: true; beforeMessageId?: string; limit?: number };
+      if (query.knownContextRootMessageId !== undefined && query.knownContextRootIsNull === true) {
+        throw new HttpError(400, "known context root preconditions conflict", "TIMELINE_ROOT_PRECONDITION_CONFLICT");
+      }
+      const knownContextRootMessageId = query.knownContextRootIsNull === true
+        ? null
+        : query.knownContextRootMessageId;
       return dependencies.service.getMessageTimeline({
         workspaceId: query.workspaceId,
         sessionId: params.sessionId,
         ...(query.mode === undefined ? {} : { mode: query.mode }), ...(query.sinceRevision === undefined ? {} : { sinceRevision: query.sinceRevision }),
-        ...(query.knownHeadMessageId === undefined ? {} : { knownHeadMessageId: query.knownHeadMessageId }), ...(query.knownContextRootMessageId === undefined ? {} : { knownContextRootMessageId: query.knownContextRootMessageId }),
+        ...(query.knownHeadMessageId === undefined ? {} : { knownHeadMessageId: query.knownHeadMessageId }), ...(knownContextRootMessageId === undefined ? {} : { knownContextRootMessageId }),
         ...(query.beforeMessageId === undefined ? {} : { beforeMessageId: query.beforeMessageId }), ...(query.limit === undefined ? {} : { limit: query.limit }),
       });
     },
@@ -655,6 +679,31 @@ export async function registerAgentPublicRoutes(
       return dependencies.service.getMessageRunState({
         workspaceId: query.workspaceId,
         sessionId: params.sessionId,
+      });
+    },
+  );
+
+  app.get(
+    "/api/agent/sessions/:sessionId/runs/:runId",
+    {
+      schema: {
+        tags: ["agent"],
+        params: Type.Object({
+          sessionId: Type.String({ minLength: 1 }),
+          runId: Type.String({ minLength: 1 }),
+        }, { additionalProperties: false }),
+        querystring: AgentRunStatusQuerySchema,
+        response: { 200: AgentRunStatusResponseSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema, 409: ErrorResponseSchema },
+      },
+      preValidation: async (req) => assertStrictRunStatusRequest(req),
+    },
+    async (req) => {
+      const params = req.params as { sessionId: string; runId: string };
+      const query = req.query as { workspaceId: string };
+      return dependencies.service.getRunStatus({
+        workspaceId: query.workspaceId,
+        sessionId: params.sessionId,
+        runId: params.runId,
       });
     },
   );

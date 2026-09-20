@@ -48,6 +48,24 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function createActiveMessageRunRecord(
+  fixture: Awaited<ReturnType<typeof createP4Fixture>>,
+  params: Parameters<typeof createMessageRunRecord>[1],
+) {
+  createMessageRunRecord(fixture.db, params);
+  const result = fixture.db.prepare(`
+    update session_run_state
+    set status = 'running', active_run_id = @runId, updated_at = @updatedAt
+    where workspace_id = @workspaceId and session_id = @sessionId
+  `).run({
+    workspaceId: params.workspaceId,
+    sessionId: params.sessionId,
+    runId: params.runId,
+    updatedAt: params.createdAt,
+  });
+  assert.equal(result.changes, 1, "prompt-context fixture session run state must exist");
+}
+
 /** 为每个 Run 建立真实的 user Message 触发器，避免已移除的数字 ID 模型。 */
 function appendRunTrigger(fixture: Awaited<ReturnType<typeof createP4Fixture>>, sessionId: string, createdAt: number) {
   const head = getMessageSessionHead(fixture.db, { workspaceId: fixture.workspaceId, sessionId });
@@ -362,7 +380,7 @@ test("agent prompt-context 全局提示词按列表顺序注入(方案A)", async
   });
   assert.equal(agentsRes.statusCode, 200, `update agents failed: ${agentsRes.body}`);
 
-  createMessageRunRecord(fixture.db, {
+  createActiveMessageRunRecord(fixture, {
     runId,
     workspaceId: fixture.workspaceId,
     sessionId: session.id,
@@ -446,7 +464,7 @@ test("agent prompt-context 同时存在 global/workspace/agent 时按既定顺�
   });
   assert.equal(agentsRes.statusCode, 200, `update agents failed: ${agentsRes.body}`);
 
-  createMessageRunRecord(fixture.db, {
+  createActiveMessageRunRecord(fixture, {
     runId,
     workspaceId: fixture.workspaceId,
     sessionId: session.id,
@@ -512,7 +530,7 @@ test("agent prompt-context 在 workspace 根 AGENTS.md 缺失时忽略", async (
   const runId = newSortableId("run");
   const createdAt = Date.now();
 
-  createMessageRunRecord(fixture.db, {
+  createActiveMessageRunRecord(fixture, {
     runId,
     workspaceId: fixture.workspaceId,
     sessionId: session.id,
@@ -638,7 +656,7 @@ test("agent prompt-context 在 agent prompt 为空且无 workspace/global 时仅
   });
   assert.equal(agentsRes.statusCode, 200, `update agents failed: ${agentsRes.body}`);
 
-  createMessageRunRecord(fixture.db, {
+  createActiveMessageRunRecord(fixture, {
     runId,
     workspaceId: fixture.workspaceId,
     sessionId: session.id,
@@ -691,7 +709,7 @@ test("agent prompt-context 对 workspace AGENTS.md 做 32KB 截断并追加标�
     }
   }, Date.now());
 
-  createMessageRunRecord(fixture.db, {
+  createActiveMessageRunRecord(fixture, {
     runId,
     workspaceId: fixture.workspaceId,
     sessionId: session.id,
@@ -804,7 +822,7 @@ test("agent prompt-context 注入 skills 摘要并在同 run 缓存静态部分"
     }, Date.now());
     await fs.writeFile(path.join(fixture.workspacePath, "AGENTS.md"), "RULE_V1", "utf8");
 
-    createMessageRunRecord(fixture.db, {
+    createActiveMessageRunRecord(fixture, {
       runId,
       workspaceId: fixture.workspaceId,
       sessionId: session.id,
@@ -864,7 +882,7 @@ test("agent prompt-context 注入 skills 摘要并在同 run 缓存静态部分"
     assert.equal(second.system.includes("repo-desc-v2"), false, "same run should not see updated repo skill summary");
 
     const runId2 = newSortableId("run");
-    createMessageRunRecord(fixture.db, {
+    createActiveMessageRunRecord(fixture, {
       runId: runId2,
       workspaceId: fixture.workspaceId,
       sessionId: session.id,
@@ -926,7 +944,7 @@ test("agent prompt-context 对 repo 根 symlink/路径失配安全跳过", async
     }
   }, ts);
 
-  createMessageRunRecord(fixture.db, {
+  createActiveMessageRunRecord(fixture, {
     runId,
     workspaceId: fixture.workspaceId,
     sessionId: session.id,
@@ -953,7 +971,7 @@ test("agent prompt-context 对 repo 根 symlink/路径失配安全跳过", async
   fixture.db.prepare("update workspace_repos set path = ? where workspace_id = ? and repo_id = ?").run(symlinkPath, fixture.workspaceId, repoId);
 
   const runId2 = newSortableId("run");
-  createMessageRunRecord(fixture.db, {
+  createActiveMessageRunRecord(fixture, {
     runId: runId2,
     workspaceId: fixture.workspaceId,
     sessionId: session.id,

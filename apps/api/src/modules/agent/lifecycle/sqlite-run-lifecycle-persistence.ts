@@ -1,16 +1,15 @@
-import type { AgentApiRunCompleteRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { Db } from "../../../infra/db/db.js";
 import { assertAgentImageByteSize } from "../attachments/agent-attachment-storage.js";
 import { assertAgentAttachmentId, assertAgentAttachmentTempId } from "../attachments/agent-attachment-paths.js";
 import {
   appendMessage,
-  cancelRunAndConverge,
-  failMessageRunAndConverge,
   getMessageSessionHead,
   getMessageRunState,
   getMessageSession,
   getMessageSessionById,
-  prepareRunForStartupRecovery,
+  convergeRunTerminal,
+  markRunWorkInProgress,
+  persistRunTerminalIntent,
   settleMessageRunIfCurrent,
   startMessageRun,
 } from "../agent-message.store.js";
@@ -26,7 +25,6 @@ import {
   getRunRecord,
   insertMessageClientRequestDedup,
   updateAutoMessageSessionTitle,
-  updateRunRecordStatus,
 } from "../agent-message.store.js";
 import type {
   AtomicLifecyclePersistence,
@@ -38,12 +36,6 @@ import type {
   UserRunActivationInput,
   UserRunActivationResult,
 } from "./run-lifecycle-ports.js";
-
-const TERMINAL_RUN_RECORD_STATUS = new Set([
-  "completed",
-  "failed",
-  "cancelled",
-] as const);
 
 function toSessionTitleFromFirstMessage(text: string) {
   return toAutomaticSessionTitle(text, "新会话");
@@ -317,15 +309,14 @@ export class SqliteRunLifecyclePersistence
         run.sessionId !== input.sessionId
       )
         return "missing-or-mismatch" as const;
-      if (
-        TERMINAL_RUN_RECORD_STATUS.has(
-          run.status as "completed" | "failed" | "cancelled",
-        )
-      )
-        return "already-terminal" as const;
-      return failMessageRunAndConverge(this.db, input)
-        ? ("failed-and-idled" as const)
-        : ("run-failed-state-not-current" as const);
+      if (run.executionPhase === "terminal") return "already-terminal" as const;
+      if (run.executionPhase !== "work_pending" && run.executionPhase !== "work_in_progress") {
+        // Cancellation or another terminal authority has already persisted its
+        // immutable tuple. An enqueue failure must not replace that intent.
+        return "run-failed-state-not-current" as const;
+      }
+      persistRunTerminalIntent(this.db, { ...input, status: "failed", code: "run_enqueue_failed", detail: null });
+      return "intent-persisted" as const;
     });
     return transaction();
   }
@@ -376,23 +367,28 @@ export class SqliteRunLifecyclePersistence
   cancelSessions(input: CancelSessionsInput): CancelSessionsResult {
     const transaction = this.db.transaction(() => {
       const cancelledRunIds = new Set<string>();
+      const terminalIntents: Array<{ workspaceId: string; sessionId: string; runId: string }> = [];
       const sessionIds = this.listActiveSessionIdsForCancel(input);
       for (const sessionId of sessionIds) {
         const session = getMessageSessionById(this.db, sessionId);
         if (!session) continue;
         const messageState = getMessageRunState(this.db, session.workspaceId, session.id);
         if (!messageState?.activeRunId || messageState.status !== "running") continue;
-        if (
-          cancelRunAndConverge(this.db, {
-            workspaceId: session.workspaceId,
-            sessionId: session.id,
-            runId: messageState.activeRunId,
-            updatedAt: input.updatedAt,
-            noticeText: "任务已由用户终止",
-          })
-        ) {
-          cancelledRunIds.add(messageState.activeRunId);
-        }
+        persistRunTerminalIntent(this.db, {
+          workspaceId: session.workspaceId,
+          sessionId: session.id,
+          runId: messageState.activeRunId,
+          status: "cancelled",
+          code: "run_cancelled",
+          detail: null,
+          updatedAt: input.updatedAt,
+        });
+        cancelledRunIds.add(messageState.activeRunId);
+        terminalIntents.push({
+          workspaceId: session.workspaceId,
+          sessionId: session.id,
+          runId: messageState.activeRunId,
+        });
       }
       const root = getMessageSessionById(this.db, input.rootSessionId);
       if (!root) throw new Error("cancel root session not found after cancel");
@@ -400,86 +396,48 @@ export class SqliteRunLifecyclePersistence
         rootSessionId: root.id,
         runtimeCancelSessionIds: sessionIds,
         cancelledRunIds: [...cancelledRunIds],
+        terminalIntents,
       };
     });
     return transaction();
   }
 
-  completeRunFromWorker(params: AgentApiRunCompleteRequest) {
-    const transaction = this.db.transaction(() => {
-      const run = getRunRecord(this.db, params.runId);
-      if (
-        !run ||
-        run.workspaceId !== params.workspaceId ||
-        run.sessionId !== params.sessionId
-      )
-        return false;
-      if (
-        TERMINAL_RUN_RECORD_STATUS.has(
-          run.status as "completed" | "failed" | "cancelled",
-        )
-      )
-        return false;
-      const messageState = getMessageRunState(
-        this.db,
-        params.workspaceId,
-        params.sessionId,
-      );
-      if (
-        !messageState ||
-        messageState.status !== "running" ||
-        messageState.activeRunId !== params.runId
-      )
-        return false;
-      if (params.status === "cancelled") {
-        cancelRunAndConverge(this.db, {
-          workspaceId: params.workspaceId,
-          sessionId: params.sessionId,
-          runId: params.runId,
-          updatedAt: params.updatedAt ?? 0,
-          noticeText: "任务已由用户终止",
-        });
-        return true;
-      }
-      if (params.status === "failed") {
-        return failMessageRunAndConverge(this.db, {
-          workspaceId: params.workspaceId,
-          sessionId: params.sessionId,
-          runId: params.runId,
-          updatedAt: params.updatedAt ?? 0,
-        });
-      }
-      if (
-        messageState.activeAssistantMessageId ||
-        messageState.nonTerminalMessageIds.length ||
-        messageState.nonTerminalToolExecutionIds.length
-      )
-        return false;
-      updateRunRecordStatus(this.db, {
-        runId: params.runId,
-        status: params.status,
-        updatedAt: params.updatedAt ?? 0,
-      });
-      return settleMessageRunIfCurrent(this.db, {
-        workspaceId: params.workspaceId,
-        sessionId: params.sessionId,
-        runId: params.runId,
-        updatedAt: params.updatedAt ?? 0,
-      });
-    });
-    return transaction();
+  markRunWorkInProgress(input: import("./run-lifecycle-ports.js").TerminalControlInput) {
+    return markRunWorkInProgress(this.db, input);
+  }
+
+  persistRunTerminalIntent(input: import("./run-lifecycle-ports.js").TerminalIntentControlInput) {
+    return persistRunTerminalIntent(this.db, input);
+  }
+
+  convergeRunTerminal(input: import("./run-lifecycle-ports.js").TerminalControlInput) {
+    return convergeRunTerminal(this.db, input);
+  }
+
+  listWorkspaceRunningRunCandidates(workspaceId: string) {
+    return this.db.prepare(`
+      select workspace_id as workspaceId, session_id as sessionId, run_id as runId,
+        execution_phase as executionPhase
+      from agent_run
+      where workspace_id = @workspaceId and status = 'running'
+      order by session_id asc, run_id asc
+    `).all({ workspaceId }) as Array<{
+      workspaceId: string;
+      sessionId: string;
+      runId: string;
+      executionPhase: import("@agent-workbench/shared").AgentRunExecutionPhase;
+    }>;
   }
 
   listRecoverableRunCandidates() {
     return this.db
       .prepare(
         `
-      select state.workspace_id as workspaceId, state.session_id as sessionId,
-        state.active_run_id as runId, run.run_kind as runKind,
-        run.trigger_message_id as triggerMessageId
-      from session_run_state state
-      join agent_run run on run.run_id = state.active_run_id
-      where state.status = 'running' and state.active_run_id is not null
+      select run.workspace_id as workspaceId, run.session_id as sessionId,
+        run.run_id as runId, run.run_kind as runKind,
+        run.trigger_message_id as triggerMessageId, run.execution_phase as executionPhase
+      from agent_run run
+      where run.status = 'running'
     `,
       )
       .all() as Array<{
@@ -488,23 +446,15 @@ export class SqliteRunLifecyclePersistence
       runId: string;
       runKind: "user" | "manual_compaction" | "subtask";
       triggerMessageId: string | null;
+      executionPhase: import("@agent-workbench/shared").AgentRunExecutionPhase;
     }>;
-  }
-
-  prepareRunForStartupRecovery(input: {
-    workspaceId: string;
-    sessionId: string;
-    runId: string;
-    replacementMessageId: string;
-    updatedAt: number;
-  }) {
-    return prepareRunForStartupRecovery(this.db, input);
   }
 
   isRecoverableRunCandidate(candidate: {
     workspaceId: string;
     sessionId: string;
     runId: string;
+    executionPhase: import("@agent-workbench/shared").AgentRunExecutionPhase;
   }) {
     const transaction = this.db.transaction(() => {
       const session = getMessageSessionById(this.db, candidate.sessionId);
@@ -518,6 +468,7 @@ export class SqliteRunLifecyclePersistence
         run.sessionId !== candidate.sessionId
       )
         return false;
+      if (run.executionPhase === "terminal_intent_persisted") return true;
       const state = getMessageRunState(
         this.db,
         candidate.workspaceId,
@@ -525,6 +476,7 @@ export class SqliteRunLifecyclePersistence
       );
       return (
         state?.status === "running" && state.activeRunId === candidate.runId
+        && run.executionPhase === candidate.executionPhase
       );
     });
     return transaction();

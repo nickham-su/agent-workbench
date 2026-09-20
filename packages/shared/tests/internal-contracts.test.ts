@@ -12,9 +12,15 @@ import {
   AgentWorkerHealthResponseSchema,
 } from "../src/internal-contracts/agent-worker.js";
 import {
-  AgentApiRunCompleteRequestSchema,
-  AgentApiRunCompleteResponseSchema,
+  AgentApiConvergeRunTerminalRequestSchema,
+  AgentApiConvergeRunTerminalResponseSchema,
+  AgentApiMarkRunWorkInProgressRequestSchema,
+  AgentApiMarkRunWorkInProgressResponseSchema,
+  AgentApiPersistTerminalIntentRequestSchema,
+  AgentApiPersistTerminalIntentResponseSchema,
 } from "../src/internal-contracts/agent-api-run.js";
+import { AgentApiCompleteTerminalAssistantRequestSchema } from "../src/internal-contracts/agent-api-message.js";
+import { AGENT_TERMINAL_CODE_REGISTRY, isAgentTerminalCodeAllowed } from "../src/contracts/agent.js";
 import {
   AgentApiSubtaskPreforkPlanRequestSchema,
   AgentApiSubtaskPreforkPlanResponseSchema,
@@ -157,6 +163,83 @@ test("agent-worker health response schema accepts only ok:true", () => {
   assert.equal(Value.Check(AgentWorkerHealthResponseSchema, {}), false);
 });
 
+test("Run terminal registry only accepts registered run-kind/status/code combinations", () => {
+  assert.deepEqual(AGENT_TERMINAL_CODE_REGISTRY, {
+    user: {
+      completed: ["run_completed"],
+      failed: ["context_limit_recovery_exhausted", "context_limit_media_requires_resend", "compaction_conflict", "run_enqueue_failed", "run_failed", "run_startup_recovery_failed"],
+      cancelled: ["run_cancelled"]
+    },
+    subtask: {
+      completed: ["subtask_completed"],
+      failed: ["subtask_failed", "run_enqueue_failed", "run_startup_recovery_failed"],
+      cancelled: ["run_cancelled"]
+    },
+    manual_compaction: {
+      completed: ["compaction_completed", "compaction_not_needed", "compaction_no_progress", "compaction_oversized_tail", "compaction_media_requires_resend"],
+      failed: ["compaction_pending_tools", "compaction_failed", "compaction_provider_unavailable", "compaction_conflict", "run_enqueue_failed", "run_startup_recovery_failed"],
+      cancelled: ["run_cancelled"]
+    }
+  });
+  for (const [runKind, statuses] of Object.entries(AGENT_TERMINAL_CODE_REGISTRY)) {
+    for (const [status, codes] of Object.entries(statuses)) {
+      for (const code of codes) {
+        assert.equal(isAgentTerminalCodeAllowed(runKind as never, status as never, code as never), true);
+      }
+    }
+  }
+  assert.equal(isAgentTerminalCodeAllowed("user", "completed", "subtask_completed"), false);
+  assert.equal(isAgentTerminalCodeAllowed("subtask", "completed", "run_failed"), false);
+  assert.equal(isAgentTerminalCodeAllowed("subtask", "failed", "run_failed"), false);
+  assert.equal(isAgentTerminalCodeAllowed("manual_compaction", "completed", "run_cancelled"), false);
+  assert.equal(isAgentTerminalCodeAllowed("user", "completed", "unknown_code" as never), false);
+});
+
+test("Run phase internal DTOs strictly validate request, response, detail and terminal codes", () => {
+  const base = { workspaceId: "ws-a", sessionId: "session-a", runId: "run-a", updatedAt: 1 };
+  assert.equal(Value.Check(AgentApiMarkRunWorkInProgressRequestSchema, base), true);
+  assert.equal(Value.Check(AgentApiMarkRunWorkInProgressRequestSchema, { ...base, unexpected: true }), false);
+  assert.equal(Value.Check(AgentApiMarkRunWorkInProgressResponseSchema, { result: "updated" }), true);
+  assert.equal(Value.Check(AgentApiMarkRunWorkInProgressResponseSchema, { result: "already_in_progress" }), true);
+  assert.equal(Value.Check(AgentApiMarkRunWorkInProgressResponseSchema, { result: "ignored" }), false);
+
+  const intent = { ...base, status: "completed", code: "run_completed", detail: null };
+  assert.equal(Value.Check(AgentApiPersistTerminalIntentRequestSchema, intent), true);
+  assert.equal(Value.Check(AgentApiPersistTerminalIntentRequestSchema, { ...intent, detail: "diagnostic" }), false);
+  assert.equal(Value.Check(AgentApiPersistTerminalIntentRequestSchema, { ...intent, code: "unknown" }), false);
+  assert.equal(Value.Check(AgentApiPersistTerminalIntentResponseSchema, { result: "updated" }), true);
+  assert.equal(Value.Check(AgentApiPersistTerminalIntentResponseSchema, { result: "already_persisted" }), true);
+  assert.equal(Value.Check(AgentApiPersistTerminalIntentResponseSchema, { result: "conflict" }), false);
+
+  assert.equal(Value.Check(AgentApiConvergeRunTerminalRequestSchema, base), true);
+  assert.equal(Value.Check(AgentApiConvergeRunTerminalResponseSchema, { kind: "transitioned", finalStatus: "completed" }), true);
+  assert.equal(Value.Check(AgentApiConvergeRunTerminalResponseSchema, { kind: "already_converged", finalStatus: "cancelled" }), true);
+  assert.equal(Value.Check(AgentApiConvergeRunTerminalResponseSchema, { kind: "transitioned", finalStatus: "running" }), false);
+});
+
+test("terminal Assistant internal DTO only accepts successful user or subtask intent with null detail", () => {
+  const base = { workspaceId: "ws-a", sessionId: "session-a", runId: "run-a", messageId: "message-a", updatedAt: 1 };
+  assert.equal(Value.Check(AgentApiCompleteTerminalAssistantRequestSchema, {
+    ...base, intent: { status: "completed", code: "run_completed", detail: null },
+  }), true);
+  assert.equal(Value.Check(AgentApiCompleteTerminalAssistantRequestSchema, {
+    ...base, intent: { status: "completed", code: "subtask_completed", detail: null },
+  }), true);
+  assert.equal(Value.Check(AgentApiCompleteTerminalAssistantRequestSchema, {
+    ...base, responseTotalTokens: 1.5, intent: { status: "completed", code: "run_completed", detail: null },
+  }), true);
+  assert.equal(Value.Check(AgentApiCompleteTerminalAssistantRequestSchema, {
+    ...base, responseTotalTokens: -1, intent: { status: "completed", code: "run_completed", detail: null },
+  }), false);
+  for (const intent of [
+    { status: "failed", code: "run_failed", detail: null },
+    { status: "cancelled", code: "run_cancelled", detail: null },
+    { status: "completed", code: "compaction_completed", detail: null },
+    { status: "completed", code: "run_completed", detail: "diagnostic" },
+    { status: "completed", code: "unknown", detail: null },
+  ]) assert.equal(Value.Check(AgentApiCompleteTerminalAssistantRequestSchema, { ...base, intent }), false);
+});
+
 test("agent-worker enqueue request schema preserves legacy workspaceRepoDirNames compatibility", () => {
   const compatibleValues = [undefined, ["repo-a", 1], null, "legacy"];
   for (const workspaceRepoDirNames of compatibleValues) {
@@ -272,10 +355,6 @@ test("agent-api package export exposes only Message-model write contracts", () =
     method: "POST",
     path: "/api/internal/agent/messages/assistant/replace",
   });
-  assert.deepEqual(endpoints.commitCompaction, {
-    method: "POST",
-    path: "/api/internal/agent/messages/compaction",
-  });
   assert.equal(
     AgentApiExport.AgentSubtaskErrorCode.PromptRequired,
     "AGENT_SUBTASK_PROMPT_REQUIRED",
@@ -289,29 +368,60 @@ test("agent-api endpoint registry exposes Message/Run and read-side operations",
     [
       "archiveRead",
       "archiveSearch",
-      "commitCompaction",
+      "commitCompactionWithTerminalIntent",
+      "confirmCompactionCommit",
       "completeAssistant",
-      "completeRun",
+      "completeTerminalAssistant",
+      "convergeRunTerminal",
       "createStreamingAssistant",
       "discardStreamingAssistant",
       "flushAssistantParts",
       "replaceStreamingAssistant",
       "resumeStreamingAssistant",
+      "getCompactionSource",
       "getExecutionProfile",
       "getMessagesContext",
       "getPromptContext",
       "getSubtaskPreforkPlan",
       "getSubtaskResult",
       "getSubtaskStatus",
+      "markRunWorkInProgress",
+      "persistRunTerminalIntent",
       "startSubtask",
       "updateRunNotice",
       "updateToolExecution",
     ].sort(),
   );
-  assert.deepEqual(endpoints.completeRun, {
+  assert.deepEqual(endpoints.markRunWorkInProgress, {
     method: "POST",
-    path: "/api/internal/agent/run-complete",
+    path: "/api/internal/agent/runs/work-in-progress",
   });
+  assert.deepEqual(endpoints.persistRunTerminalIntent, {
+    method: "POST",
+    path: "/api/internal/agent/runs/terminal-intent",
+  });
+  assert.deepEqual(endpoints.convergeRunTerminal, {
+    method: "POST",
+    path: "/api/internal/agent/runs/converge-terminal",
+  });
+  assert.deepEqual(endpoints.completeTerminalAssistant, {
+    method: "POST",
+    path: "/api/internal/agent/messages/assistant/complete-terminal",
+  });
+  assert.deepEqual(endpoints.getCompactionSource, {
+    method: "POST",
+    path: "/api/internal/agent/compaction-source",
+  });
+  assert.deepEqual(endpoints.commitCompactionWithTerminalIntent, {
+    method: "POST",
+    path: "/api/internal/agent/messages/compaction/complete",
+  });
+  assert.deepEqual(endpoints.confirmCompactionCommit, {
+    method: "POST",
+    path: "/api/internal/agent/messages/compaction/confirm",
+  });
+  assert.equal(Object.hasOwn(endpoints, "completeRun"), false);
+  assert.equal(Object.hasOwn(AgentApiExport, "AgentApiRunCompleteRequestSchema"), false);
 });
 
 test("agent-api aggregate export exposes read-side schemas with stable shells and dynamic payloads", () => {

@@ -75,6 +75,37 @@ test("snapshot 与 reset 替换旧链并清理详情缓存", () => {
   assert.equal(result.clearDetailCache, true);
 });
 
+test("contextRoot 改变的 reset 用新的尾页替换旧操作区间，并从服务端继续加载完整历史", () => {
+  let state = createAgentTimelineControllerState();
+  ({ state } = applyTimelineResponse(
+    state,
+    response({ revision: 2, ids: ["history", "old-root", "old-head"], cursor: "history" }),
+    "snapshot",
+    1,
+  ));
+  const result = applyTimelineResponse(
+    state,
+    response({ revision: 3, ids: ["new-head"], reset: true, hasMore: true, cursor: "new-head" }),
+    "delta",
+    2,
+  );
+  assert.deepEqual(result.state.messages.map((item) => item.id), ["new-head"]);
+  assert.equal(result.state.hasMore, true);
+  assert.equal(result.state.nextBeforeMessageId, "new-head");
+  assert.equal(result.clearDetailCache, true);
+});
+
+test("初始无 root 的 delta 显式携带 null 前提", () => {
+  const state = createAgentTimelineControllerState();
+  assert.deepEqual(buildTimelineRequest(state, "workspace", "delta"), {
+    workspaceId: "workspace",
+    mode: "delta",
+    sinceRevision: 0,
+    knownHeadMessageId: undefined,
+    knownContextRootIsNull: true,
+  });
+});
+
 test("delta 带上 head/root 前提，before 页保留已有尾页", () => {
   let state = createAgentTimelineControllerState();
   ({ state } = applyTimelineResponse(

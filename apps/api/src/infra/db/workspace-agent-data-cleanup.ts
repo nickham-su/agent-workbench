@@ -31,11 +31,9 @@ export function deleteWorkspaceAgentData(db: Db, workspaceId: string) {
   db.prepare("delete from agent_client_request where workspace_id = ?").run(workspaceId);
   db.prepare("delete from session_run_state where workspace_id = ?").run(workspaceId);
 
-  // 来源外键为 SET NULL；先删除 Run 解除自身/Message/Execution 来源引用。
-  db.prepare("delete from agent_run where workspace_id = ?").run(workspaceId);
   db.prepare("delete from agent_session_agent_model_override where session_id in (select id from agent_session where workspace_id = ?)").run(workspaceId);
-  db.prepare("delete from agent_session where workspace_id = ?").run(workspaceId);
 
+  // ToolExecution 的 call_part_id 为 RESTRICT，必须先于 MessagePart 删除。
   db.prepare(`
     delete from agent_tool_execution
     where call_part_id in (
@@ -51,13 +49,35 @@ export function deleteWorkspaceAgentData(db: Db, workspaceId: string) {
     where message_id in (select id from agent_message where workspace_id = ?)
   `).run(workspaceId);
 
-  // 清除同 Workspace 图内自引用后再删 Message，foreign_keys=ON 下仍保持原子性。
-  db.prepare(`
-    update agent_message
-    set previous_message_id = null, replaces_message_id = null
-    where workspace_id = ?
-  `).run(workspaceId);
-  db.prepare("delete from agent_message where workspace_id = ?").run(workspaceId);
+  // Run/Session 对 Message 的外键均为 RESTRICT；按设计固定顺序显式解除。
+  // 删除 Run/Session 会分别以 SET NULL 解除 Message/Execution 的 origin 引用。
+  db.prepare("delete from agent_run where workspace_id = ?").run(workspaceId);
+  db.prepare("delete from agent_session where workspace_id = ?").run(workspaceId);
+
+  // Message 三条边均不可改写；按“引用者先于被引用者”的逆拓扑批量删除。
+  const selectLeaves = db.prepare(`
+    select message.id
+    from agent_message message
+    where message.workspace_id = @workspaceId
+      and not exists (
+        select 1 from agent_message ref
+        where ref.workspace_id = @workspaceId and (
+          ref.previous_message_id = message.id
+          or ref.replaces_message_id = message.id
+          or ref.retained_from_message_id = message.id
+        )
+      )
+    order by message.depth desc, message.id asc
+    limit 200
+  `);
+  const deleteMessage = db.prepare("delete from agent_message where id = ? and workspace_id = ?");
+  while (true) {
+    const ids = (selectLeaves.all({ workspaceId }) as Array<{ id: string }>).map((row) => row.id);
+    if (ids.length === 0) break;
+    for (const id of ids) deleteMessage.run(id, workspaceId);
+  }
+  const remaining = db.prepare("select count(*) as count from agent_message where workspace_id = ?").get(workspaceId) as { count: number };
+  if (remaining.count !== 0) throw new Error("agent message graph contains a cycle during workspace cleanup");
 
   // 不删除其他 Workspace 使用的附件；附件实体本身按 Workspace 拥有。
   db.prepare("delete from agent_attachment where workspace_id = ?").run(workspaceId);

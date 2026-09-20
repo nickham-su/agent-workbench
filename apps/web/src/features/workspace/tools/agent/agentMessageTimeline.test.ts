@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { AgentMessage, AgentTimelineDeltaResponse, AgentTimelineToolExecution } from "@agent-workbench/shared";
+import type { AgentCompactionMessage, AgentOrdinaryMessage, AgentMessage, AgentTimelineDeltaResponse, AgentTimelineToolExecution } from "@agent-workbench/shared";
 import {
   agentUserMessageDraftText,
   applyAgentTimelineDelta,
@@ -10,7 +10,7 @@ import {
   replaceAgentTimelineSnapshot,
 } from "./agentMessageTimeline.js";
 
-function message(overrides: Partial<AgentMessage> & Pick<AgentMessage, "id">): AgentMessage {
+function message(overrides: Partial<AgentOrdinaryMessage> & Pick<AgentOrdinaryMessage, "id">): AgentOrdinaryMessage {
   return {
     workspaceId: "workspace-a",
     previousMessageId: null,
@@ -24,6 +24,16 @@ function message(overrides: Partial<AgentMessage> & Pick<AgentMessage, "id">): A
     createdAt: 1,
     updatedAt: 1,
     parts: [],
+    ...overrides,
+  };
+}
+
+function compactionMessage({ id, ...overrides }: Partial<AgentCompactionMessage> & Pick<AgentCompactionMessage, "id">): AgentCompactionMessage {
+  return {
+    id, workspaceId: "workspace-a", previousMessageId: "previous", replacesMessageId: null,
+    retainedFromMessageId: null, depth: 1, type: "compaction", status: "completed",
+    originSessionId: null, originRunId: null, updatedRevision: 1, createdAt: 1, updatedAt: 1,
+    parts: [{ id: "compaction-text", messageId: id, position: 0, type: "text", text: "summary", updatedRevision: 1, createdAt: 1, updatedAt: 1 }],
     ...overrides,
   };
 }
@@ -136,25 +146,28 @@ test("agentUserMessageDraftText 仅还原 User 的 TextPart，并保持 Part 顺
   assert.equal(agentUserMessageDraftText(message({ id: "assistant" })), null);
 });
 
-test("压缩前历史消息不提供 Fork 或回退等结构操作", () => {
+test("当前结构操作区间之前的 Timeline 历史不提供 Fork 或回退等操作", () => {
   const textPart = {
     id: "part", messageId: "assistant", position: 0, type: "text" as const,
     text: "answer", updatedRevision: 1, createdAt: 1, updatedAt: 1,
   };
   assert.equal(canMutateAgentTimelineMessage(message({
-    id: "old-user", type: "user", inActiveContext: false,
+    id: "old-user", type: "user", inCurrentOperationRange: false,
   })), false);
   assert.equal(canMutateAgentTimelineMessage(message({
-    id: "old-assistant", type: "assistant", inActiveContext: false, parts: [textPart],
+    id: "old-assistant", type: "assistant", inCurrentOperationRange: false, parts: [textPart],
   })), false);
   assert.equal(canMutateAgentTimelineMessage(message({
-    id: "current-user", type: "user", inActiveContext: true,
+    id: "unmarked-user", type: "user",
+  })), false);
+  assert.equal(canMutateAgentTimelineMessage(message({
+    id: "current-user", type: "user", inCurrentOperationRange: true,
   })), true);
   assert.equal(canMutateAgentTimelineMessage(message({
-    id: "current-assistant", type: "assistant", inActiveContext: true, parts: [textPart],
+    id: "current-assistant", type: "assistant", inCurrentOperationRange: true, parts: [textPart],
   })), true);
-  assert.equal(canMutateAgentTimelineMessage(message({
-    id: "compaction", type: "compaction", inActiveContext: true,
+  assert.equal(canMutateAgentTimelineMessage(compactionMessage({
+    id: "compaction", type: "compaction", inCurrentOperationRange: true,
   })), false);
 });
 

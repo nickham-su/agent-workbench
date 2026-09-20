@@ -23,6 +23,10 @@ export const AgentApiEndpoints = {
     method: "POST",
     path: "/api/internal/agent/messages/assistant/complete",
   },
+  completeTerminalAssistant: {
+    method: "POST",
+    path: "/api/internal/agent/messages/assistant/complete-terminal",
+  },
   updateToolExecution: {
     method: "POST",
     path: "/api/internal/agent/tool-executions/update",
@@ -31,13 +35,25 @@ export const AgentApiEndpoints = {
     method: "POST",
     path: "/api/internal/agent/run-notice",
   },
-  commitCompaction: {
+  commitCompactionWithTerminalIntent: {
     method: "POST",
-    path: "/api/internal/agent/messages/compaction",
+    path: "/api/internal/agent/messages/compaction/complete",
   },
-  completeRun: {
+  confirmCompactionCommit: {
     method: "POST",
-    path: "/api/internal/agent/run-complete",
+    path: "/api/internal/agent/messages/compaction/confirm",
+  },
+  markRunWorkInProgress: {
+    method: "POST",
+    path: "/api/internal/agent/runs/work-in-progress",
+  },
+  persistRunTerminalIntent: {
+    method: "POST",
+    path: "/api/internal/agent/runs/terminal-intent",
+  },
+  convergeRunTerminal: {
+    method: "POST",
+    path: "/api/internal/agent/runs/converge-terminal",
   },
   getSubtaskPreforkPlan: {
     method: "POST",
@@ -66,6 +82,10 @@ export const AgentApiEndpoints = {
   getMessagesContext: {
     method: "POST",
     path: "/api/internal/agent/messages-context",
+  },
+  getCompactionSource: {
+    method: "POST",
+    path: "/api/internal/agent/compaction-source",
   },
   archiveRead: {
     method: "POST",

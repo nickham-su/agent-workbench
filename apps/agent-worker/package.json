@@ -7,7 +7,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "cd ../.. && env -u AWB_TOOL_ERROR_STORE_ENABLED tsx --test --test-concurrency=1 apps/agent-worker/src/*.test.ts apps/agent-worker/src/config/*.test.ts apps/agent-worker/src/runtime/*.test.ts apps/agent-worker/src/runtime/providers/*.test.ts apps/agent-worker/src/runtime/plugins/*.test.ts apps/agent-worker/src/runtime/tools/*.test.ts apps/agent-worker/src/runtime/tools/providers/*.test.ts"
+    "test": "cd ../.. && env -u AWB_TOOL_ERROR_STORE_ENABLED tsx --test --test-concurrency=1 apps/agent-worker/src/*.test.ts apps/agent-worker/src/config/*.test.ts apps/agent-worker/src/runtime/*.test.ts apps/agent-worker/src/runtime/compaction/*.test.ts apps/agent-worker/src/runtime/debug/*.test.ts apps/agent-worker/src/runtime/providers/*.test.ts apps/agent-worker/src/runtime/providers/conversation-state/*.test.ts apps/agent-worker/src/runtime/plugins/*.test.ts apps/agent-worker/src/runtime/tools/*.test.ts apps/agent-worker/src/runtime/tools/providers/*.test.ts"
   },
   "dependencies": {
     "@agent-workbench/shared": "*",

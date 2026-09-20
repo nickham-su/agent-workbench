@@ -578,24 +578,24 @@ async function recoverFixtureRun(fixture: Fixture) {
   await createAgentService(fixture.ctx, fixture.app.log).recoverRunsOnStartup({ runtime });
 }
 
-function assertRecoveryNotice(fixture: Fixture, sessionId: string) {
-  const state = getMessageRunState(fixture.db, fixture.workspaceId, sessionId);
-  assert.equal(state?.runNoticeText, "任务正在自动恢复");
-  assert.equal(state?.retryCount, 0);
-  assert.equal(state?.nextRetryAt, null);
-}
-
-function assertRecoveredRunTerminal(fixture: Fixture, params: { sessionId: string; runId: string }) {
-  assert.equal(getRunRecord(fixture.db, params.runId)?.status, "completed");
+function assertStartupRecoveryFailed(fixture: Fixture, params: { sessionId: string; runId: string; assistantId?: string; executionId?: string; executionStatus?: "cancelled" | "unknown" }) {
+  const run = getRunRecord(fixture.db, params.runId);
+  assert.equal(run?.status, "failed");
+  assert.equal(run?.terminalResultCode, "run_startup_recovery_failed");
   const state = getMessageRunState(fixture.db, fixture.workspaceId, params.sessionId);
   assert.equal(state?.status, "idle");
   assert.equal(state?.activeRunId, null);
-  assert.equal(state?.activeAssistantMessageId, null);
-  assert.deepEqual(state?.nonTerminalMessageIds, []);
-  assert.deepEqual(state?.nonTerminalToolExecutionIds, []);
   assert.equal(state?.runNoticeText, "");
-  assert.equal(state?.retryCount, 0);
-  assert.equal(state?.nextRetryAt, null);
+  if (params.assistantId) assert.equal(fixture.db.prepare("select status from agent_message where id=?").get(params.assistantId) && (fixture.db.prepare("select status from agent_message where id=?").get(params.assistantId) as { status: string }).status, "failed");
+  if (params.executionId) assert.equal((fixture.db.prepare("select status from agent_tool_execution where id=?").get(params.executionId) as { status: string } | undefined)?.status, params.executionStatus);
+}
+
+function assertNoStartupBusinessExecution(fixture: Fixture) {
+  assert.equal(fixture.internalRpcCalls.some((call) => call.url === "/api/internal/agent/run/enqueue"), false);
+  assert.equal(fixture.internalRpcCalls.some((call) => call.url === AgentApiEndpoints.resumeStreamingAssistant.path), false);
+  assert.equal(fixture.internalRpcCalls.some((call) => call.url === AgentApiEndpoints.createStreamingAssistant.path), false);
+  assert.equal(fixture.internalRpcCalls.some((call) => call.url === AgentApiEndpoints.updateToolExecution.path), false);
+  assert.deepEqual(fixture.llmStub?.requestPaths, []);
 }
 
 function createCompletedAssistantWithExecution(fixture: Fixture, params: {
@@ -627,7 +627,7 @@ function createCompletedAssistantWithExecution(fixture: Fixture, params: {
   return { assistantId, executionId };
 }
 
-test("startup recovery: 空 streaming Assistant 由真实 Worker 复用并完成", async () => {
+test("startup recovery: streaming Assistant 收敛为失败且不重启 Worker 业务", async () => {
   const fixture = await createFixture({ llmMode: "success" });
   const session = await createSession(fixture.baseUrl, fixture.workspaceId);
   const runId = newSortableId("run");
@@ -641,15 +641,9 @@ test("startup recovery: 空 streaming Assistant 由真实 Worker 复用并完成
   });
 
   await recoverFixtureRun(fixture);
-  assertRecoveryNotice(fixture, session.id);
-  await waitRunIdle(fixture.baseUrl, session.id, fixture.workspaceId);
 
-  const assistants = fixture.db.prepare("select id, status from agent_message where origin_run_id=? and type='assistant' order by created_at").all(runId) as Array<{ id: string; status: string }>;
-  assert.deepEqual(assistants, [{ id: assistantId, status: "completed" }]);
-  assert.equal(fixture.internalRpcCalls.filter((call) => call.url === AgentApiEndpoints.resumeStreamingAssistant.path).length, 1);
-  assert.equal(fixture.internalRpcCalls.filter((call) => call.url === AgentApiEndpoints.createStreamingAssistant.path).length, 0);
-  assertRecoveredRunTerminal(fixture, { sessionId: session.id, runId });
-  assert.deepEqual(fixture.llmStub?.requestPaths, ["/v1/responses"]);
+  assertStartupRecoveryFailed(fixture, { sessionId: session.id, runId, assistantId });
+  assertNoStartupBusinessExecution(fixture);
 });
 
 test("worker 模式: openai-compatible 保持使用 Chat Completions", async () => {
@@ -691,7 +685,7 @@ test("Agent 主请求将模型 aiSdk headers 传入真实 mock fetch", async () 
   assert.deepEqual(fixture.llmStub?.requestPaths, ["/v1/responses"]);
 });
 
-test("startup recovery: manual_compaction 由真实 API-managed Worker 提交唯一 Compaction", async () => {
+test("startup recovery: manual_compaction 收敛为失败且不提交 Compaction", async () => {
   const fixture = await createFixture({ llmMode: "success" });
   const session = await createSession(fixture.baseUrl, fixture.workspaceId);
   const runId = newSortableId("run");
@@ -710,58 +704,31 @@ test("startup recovery: manual_compaction 由真实 API-managed Worker 提交唯
   startMessageRun(fixture.db, { workspaceId: fixture.workspaceId, sessionId: session.id, runId, updatedAt: createdAt });
 
   await recoverFixtureRun(fixture);
-  await waitRunIdle(fixture.baseUrl, session.id, fixture.workspaceId);
 
-  assert.equal(getRunRecord(fixture.db, runId)?.status, "completed");
-  const compactions = fixture.db.prepare(`select id, origin_run_id as originRunId, previous_message_id as previousMessageId
-    from agent_message where type = 'compaction' and origin_run_id = ?`).all(runId) as Array<{ id: string; originRunId: string; previousMessageId: string }>;
-  assert.equal(compactions.length, 1);
-  assert.equal(compactions[0]!.originRunId, runId);
-  assert.equal(compactions[0]!.previousMessageId, userMessageId);
-  assert.equal((fixture.db.prepare("select count(*) as count from agent_message where type = 'assistant' and origin_run_id = ?").get(runId) as { count: number }).count, 0);
-  const recoveredSession = getMessageSession(fixture.db, fixture.workspaceId, session.id)!;
-  assert.equal(recoveredSession.headMessageId, compactions[0]!.id);
-  assert.equal(recoveredSession.contextRootMessageId, compactions[0]!.id);
-  const compactionCall = fixture.internalRpcCalls.find((call) => call.url === "/api/internal/agent/messages/compaction");
-  assert.ok(compactionCall);
-  const recoveryEnqueue = fixture.internalRpcCalls.find((call) => call.url === "/api/internal/agent/run/enqueue");
-  if (recoveryEnqueue) assert.equal((recoveryEnqueue.body as { runKind?: string }).runKind, "manual_compaction");
+  assertStartupRecoveryFailed(fixture, { sessionId: session.id, runId });
+  assert.equal((fixture.db.prepare("select count(*) as count from agent_message where type = 'compaction' and origin_run_id = ?").get(runId) as { count: number }).count, 0);
+  assertNoStartupBusinessExecution(fixture);
 });
 
-test("startup recovery: partial streaming Assistant 仅替代一次，Worker 复用 replacement", async () => {
+test("startup recovery: partial streaming Assistant 收敛失败，不创建 replacement", async () => {
   const fixture = await createFixture({ llmMode: "success" });
   const session = await createSession(fixture.baseUrl, fixture.workspaceId);
   const runId = newSortableId("run");
   const createdAt = createRecoveryRun(fixture, session.id, runId);
   const head = getMessageSession(fixture.db, fixture.workspaceId, session.id)!;
-  const oldAssistantId = newSortableId("msg");
-  appendStreamingAssistant(fixture.db, {
-    id: oldAssistantId, workspaceId: fixture.workspaceId, sessionId: session.id,
-    expectedHeadMessageId: head.headMessageId, expectedRevision: head.revision,
-    runId, createdAt: createdAt + 1,
-  });
-  assert.equal(flushStreamingParts(fixture.db, {
-    workspaceId: fixture.workspaceId, sessionId: session.id, runId, messageId: oldAssistantId,
-    parts: [{ id: newSortableId("part"), position: 0, type: "text", text: "partial" }], updatedAt: createdAt + 2,
-  }), "updated");
+  const assistantId = newSortableId("msg");
+  appendStreamingAssistant(fixture.db, { id: assistantId, workspaceId: fixture.workspaceId, sessionId: session.id, expectedHeadMessageId: head.headMessageId, expectedRevision: head.revision, runId, createdAt: createdAt + 1 });
+  assert.equal(flushStreamingParts(fixture.db, { workspaceId: fixture.workspaceId, sessionId: session.id, runId, messageId: assistantId, parts: [{ id: newSortableId("part"), position: 0, type: "text", text: "partial" }], updatedAt: createdAt + 2 }), "updated");
 
   await recoverFixtureRun(fixture);
   await recoverFixtureRun(fixture);
-  await waitRunIdle(fixture.baseUrl, session.id, fixture.workspaceId);
 
-  const assistants = fixture.db.prepare("select id, status, replaces_message_id as replacesMessageId from agent_message where origin_run_id=? and type='assistant' order by created_at").all(runId) as Array<{ id: string; status: string; replacesMessageId: string | null }>;
-  assert.equal(assistants.length, 2);
-  assert.deepEqual(assistants[0], { id: oldAssistantId, status: "superseded", replacesMessageId: null });
-  assert.equal(assistants[1]?.status, "completed");
-  assert.equal(assistants[1]?.replacesMessageId, oldAssistantId);
-  const resumed = fixture.internalRpcCalls.filter((call) => call.url === AgentApiEndpoints.resumeStreamingAssistant.path);
-  assert.equal(resumed.length, 1);
-  assert.equal((resumed[0]?.body as { messageId?: string }).messageId, assistants[1]?.id);
-  assert.equal(fixture.internalRpcCalls.filter((call) => call.url === AgentApiEndpoints.createStreamingAssistant.path).length, 0);
-  assertRecoveredRunTerminal(fixture, { sessionId: session.id, runId });
+  assertStartupRecoveryFailed(fixture, { sessionId: session.id, runId, assistantId });
+  assert.equal((fixture.db.prepare("select count(*) as count from agent_message where origin_run_id=? and type='assistant'").get(runId) as { count: number }).count, 1);
+  assertNoStartupBusinessExecution(fixture);
 });
 
-test("startup recovery: running ToolExecution 转 unknown，不调用工具且模型接收 unknown 结果", async () => {
+test("startup recovery: running ToolExecution 转 unknown，不调用工具或模型", async () => {
   const fixture = await createFixture({ llmMode: "success" });
   const session = await createSession(fixture.baseUrl, fixture.workspaceId);
   const runId = newSortableId("run");
@@ -769,18 +736,12 @@ test("startup recovery: running ToolExecution 转 unknown，不调用工具且�
   const { executionId } = createCompletedAssistantWithExecution(fixture, { sessionId: session.id, runId, createdAt, status: "running" });
 
   await recoverFixtureRun(fixture);
-  assertRecoveryNotice(fixture, session.id);
-  await waitRunIdle(fixture.baseUrl, session.id, fixture.workspaceId);
 
-  const execution = fixture.db.prepare("select status from agent_tool_execution where id=?").get(executionId) as { status: string } | undefined;
-  assert.equal(execution?.status, "unknown");
-  assert.equal(fixture.llmStub?.requests.length, 1);
-  assert.match(JSON.stringify(fixture.llmStub?.requests[0]), /unknown/i);
-  assert.equal(fixture.internalRpcCalls.filter((call) => call.url === AgentApiEndpoints.updateToolExecution.path).length, 0);
-  assertRecoveredRunTerminal(fixture, { sessionId: session.id, runId });
+  assertStartupRecoveryFailed(fixture, { sessionId: session.id, runId, executionId, executionStatus: "unknown" });
+  assertNoStartupBusinessExecution(fixture);
 });
 
-test("startup recovery: queued ToolExecution 原 ID 只执行一次，重复 recovery/enqueue 不重复", async () => {
+test("startup recovery: queued ToolExecution 转 cancelled，不调用工具或模型", async () => {
   const fixture = await createFixture({ llmMode: "success" });
   const session = await createSession(fixture.baseUrl, fixture.workspaceId);
   const runId = newSortableId("run");
@@ -789,16 +750,9 @@ test("startup recovery: queued ToolExecution 原 ID 只执行一次，重复 rec
 
   await recoverFixtureRun(fixture);
   await recoverFixtureRun(fixture);
-  await waitRunIdle(fixture.baseUrl, session.id, fixture.workspaceId);
 
-  const execution = fixture.db.prepare("select id, status, result_preview as resultPreview from agent_tool_execution where id=?").get(executionId) as { id: string; status: string; resultPreview: string | null } | undefined;
-  assert.deepEqual(execution && { id: execution.id, status: execution.status }, { id: executionId, status: "completed" });
-  assert.match(execution?.resultPreview ?? "", /recovered-tool/);
-  const toolUpdates = fixture.internalRpcCalls.filter((call) => call.url === AgentApiEndpoints.updateToolExecution.path && (call.body as { toolExecutionId?: string }).toolExecutionId === executionId);
-  assert.equal(toolUpdates.filter((call) => (call.body as { status?: string }).status === "running").length, 1);
-  assert.equal(toolUpdates.filter((call) => (call.body as { status?: string }).status === "completed").length, 1);
-  assert.equal(fixture.llmStub?.requests.length, 1);
-  assertRecoveredRunTerminal(fixture, { sessionId: session.id, runId });
+  assertStartupRecoveryFailed(fixture, { sessionId: session.id, runId, executionId, executionStatus: "cancelled" });
+  assertNoStartupBusinessExecution(fixture);
 });
 
 test("worker 模式: 模型错误写入 retry notice，用户取消后通过新写回端点收敛 Run", async () => {
@@ -1251,11 +1205,13 @@ test("worker 模式: 手动压缩经真实 API-managed Worker 获取三项 read-
   });
   assert.equal(compact.response.status, 201, `compact session failed: ${compact.text}`);
   assert.equal(typeof compact.json.runId, "string");
-  await waitRunIdle(fixture.baseUrl, session.id, fixture.workspaceId);
+  await waitUntil(async () => fixture.internalRpcCalls.some((call) =>
+    call.method === "POST" && call.url === "/api/internal/agent/compaction-source" && (call.statusCode || 0) >= 200 && (call.statusCode || 0) < 300
+  ), 10_000);
 
   const expected = [
     { endpoint: "/api/internal/agent/execution-profile", runBound: true },
-    { endpoint: "/api/internal/agent/prompt-context", runBound: true }
+    { endpoint: "/api/internal/agent/compaction-source", runBound: true }
   ] as const;
   const indices = expected.map(({ endpoint }) => {
     const index = fixture.internalRpcCalls.findIndex((call) => call.method === "POST" && call.url === endpoint);
@@ -1273,14 +1229,11 @@ test("worker 模式: 手动压缩经真实 API-managed Worker 获取三项 read-
     assert.equal(body.runId, compact.json.runId, `${requirement.endpoint} must carry compact runId`);
   }
 
-  const completedRun = getRunRecord(fixture.db, compact.json.runId);
-  assert.equal(completedRun?.status, "completed", "Worker must complete the compact run after consuming read-side responses");
-  const compactWrite = fixture.internalRpcCalls.find((call) =>
-    call.method === "POST" && call.url === "/api/internal/agent/messages/compaction"
-  );
-  assert.ok(compactWrite, "Worker must submit the generated compaction summary after reading context");
-  assert.ok((compactWrite?.statusCode || 0) >= 200 && (compactWrite?.statusCode || 0) < 300, "compaction write must return 2xx");
-
+  await waitRunIdle(fixture.baseUrl, session.id, fixture.workspaceId);
+  const compactRun = getRunRecord(fixture.db, compact.json.runId);
+  assert.equal(compactRun?.status, "completed");
+  assert.equal(compactRun?.executionPhase, "terminal");
+  assert.equal(compactRun?.terminalResultCode, "compaction_not_needed");
   const summary = fixture.db.prepare(`
     select message.id, message.previous_message_id as previousMessageId,
            part.text, session.head_message_id as headMessageId,
@@ -1295,11 +1248,7 @@ test("worker 模式: 手动压缩经真实 API-managed Worker 获取三项 read-
     id: string; previousMessageId: string | null; text: string;
     headMessageId: string | null; contextRootMessageId: string | null;
   } | undefined;
-  assert.ok(summary, "successful compaction must persist a completed compaction Message");
-  assert.equal(summary?.headMessageId, summary?.id, "compaction must advance the session head");
-  assert.equal(summary?.contextRootMessageId, summary?.id, "compaction must advance the context root boundary");
-  assert.equal(typeof summary?.text, "string");
-  assert.ok(summary!.text.length > 0);
+  assert.equal(summary, undefined, "no-effect source must not persist a compaction Message");
 });
 
 test("Worker Compaction internal route 对 response-loss 重放精确请求并拒绝差异请求", async () => {
@@ -1322,16 +1271,102 @@ test("Worker Compaction internal route 对 response-loss 重放精确请求并�
   const request = {
     workspaceId: fixture.workspaceId, sessionId: session.id, runId,
     messageId: newSortableId("msg"), textPartId: newSortableId("part"),
-    expectedHeadMessageId: userMessageId, expectedRevision: 1, summaryText: "exact summary", createdAt: createdAt + 1,
+    expectedHeadMessageId: userMessageId, expectedRevision: 1, retainedFromMessageId: null,
+    summaryText: "exact summary", intent: { status: "completed" as const, code: "compaction_completed" as const, detail: null }, createdAt: createdAt + 1,
   };
   const internal = { "x-awb-agent-internal-token": fixture.ctx.agentInternalToken };
-  const first = await requestJson<{ result: string; summaryMessageId: string | null }>(fixture.baseUrl, { method: "POST", path: AgentApiEndpoints.commitCompaction.path, body: request, headers: internal });
-  const replay = await requestJson<{ result: string; summaryMessageId: string | null }>(fixture.baseUrl, { method: "POST", path: AgentApiEndpoints.commitCompaction.path, body: request, headers: internal });
-  const different = await requestJson<{ result: string; summaryMessageId: string | null }>(fixture.baseUrl, { method: "POST", path: AgentApiEndpoints.commitCompaction.path, body: { ...request, summaryText: "different" }, headers: internal });
+  const path = AgentApiEndpoints.commitCompactionWithTerminalIntent.path;
+  const first = await requestJson<{ result: string; summaryMessageId: string | null }>(fixture.baseUrl, { method: "POST", path, body: request, headers: internal });
+  const replay = await requestJson<{ result: string; summaryMessageId: string | null }>(fixture.baseUrl, { method: "POST", path, body: request, headers: internal });
+  const different = await requestJson<{ result: string; summaryMessageId: string | null }>(fixture.baseUrl, { method: "POST", path, body: { ...request, summaryText: "different" }, headers: internal });
   assert.equal(first.response.status, 200);
   assert.deepEqual(replay.json, first.json);
-  assert.deepEqual(different.json, { result: "ignored", summaryMessageId: null });
+  assert.equal(different.response.status, 409);
   assert.equal((fixture.db.prepare("select count(*) as count from agent_message where type = 'compaction'").get() as { count: number }).count, 1);
+});
+
+test("Worker Compaction internal route enforces persistent Run kind intent semantics without partial writes", async () => {
+  const fixture = await createFixture({ llmMode: "success" });
+  const session = await createSession(fixture.baseUrl, fixture.workspaceId);
+  const userSession = await createSession(fixture.baseUrl, fixture.workspaceId);
+  const subtaskSession = await createSession(fixture.baseUrl, fixture.workspaceId);
+  const internal = { "x-awb-agent-internal-token": fixture.ctx.agentInternalToken };
+  const path = AgentApiEndpoints.commitCompactionWithTerminalIntent.path;
+  const createRun = (sessionId: string, runId: string, runKind: "manual_compaction" | "user" | "subtask", createdAt: number) => {
+    const userMessageId = newSortableId("msg");
+    appendMessage(fixture.db, {
+      id: userMessageId, workspaceId: fixture.workspaceId, sessionId,
+      expectedHeadMessageId: getMessageSession(fixture.db, fixture.workspaceId, sessionId)!.headMessageId,
+      expectedRevision: getMessageSession(fixture.db, fixture.workspaceId, sessionId)!.revision,
+      type: "user", status: "completed", originRunId: null,
+      parts: [{ id: newSortableId("part"), position: 0, type: "text", text: `${runKind} context` }], createdAt,
+    });
+    createMessageRunRecord(fixture.db, {
+      runId, workspaceId: fixture.workspaceId, sessionId, triggerMessageId: userMessageId,
+      agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", runKind,
+      subtaskDepth: null, parentRunId: null, parentToolExecutionId: null, status: "running", createdAt,
+    });
+    startMessageRun(fixture.db, { workspaceId: fixture.workspaceId, sessionId, runId, updatedAt: createdAt });
+    const state = getMessageSession(fixture.db, fixture.workspaceId, sessionId)!;
+    return { userMessageId, expectedRevision: state.revision };
+  };
+  const requestFor = (sessionId: string, runId: string, head: string, expectedRevision: number, createdAt: number) => ({
+    workspaceId: fixture.workspaceId, sessionId, runId,
+    messageId: newSortableId("msg"), textPartId: newSortableId("part"),
+    expectedHeadMessageId: head, expectedRevision, retainedFromMessageId: null,
+    summaryText: "summary", createdAt,
+  });
+
+  const manualRunId = newSortableId("run");
+  const manual = createRun(session.id, manualRunId, "manual_compaction", 100);
+  const beforeManual = getMessageSession(fixture.db, fixture.workspaceId, session.id)!;
+  const missingIntent = await requestJson<{ message: string }>(fixture.baseUrl, {
+    method: "POST", path, headers: internal,
+    body: requestFor(session.id, manualRunId, manual.userMessageId, manual.expectedRevision, 101),
+  });
+  assert.equal(missingIntent.response.status, 400);
+  assert.equal(getMessageSession(fixture.db, fixture.workspaceId, session.id)?.headMessageId, beforeManual.headMessageId);
+  assert.equal(getMessageSession(fixture.db, fixture.workspaceId, session.id)?.contextRootMessageId, beforeManual.contextRootMessageId);
+  assert.equal(getMessageSession(fixture.db, fixture.workspaceId, session.id)?.revision, beforeManual.revision);
+  assert.equal(getRunRecord(fixture.db, manualRunId)?.executionPhase, "work_pending");
+  assert.equal(getRunRecord(fixture.db, manualRunId)?.intendedTerminalCode, null);
+  assert.equal((fixture.db.prepare("select count(*) as count from agent_message where origin_run_id = ? and type = 'compaction'").get(manualRunId) as { count: number }).count, 0);
+
+  const userRunId = newSortableId("run");
+  const user = createRun(userSession.id, userRunId, "user", 200);
+  const userIntent = await requestJson<{ message: string }>(fixture.baseUrl, {
+    method: "POST", path, headers: internal,
+    body: { ...requestFor(userSession.id, userRunId, user.userMessageId, user.expectedRevision, 201), intent: { status: "completed", code: "compaction_completed", detail: null } },
+  });
+  assert.equal(userIntent.response.status, 400);
+  assert.equal(getRunRecord(fixture.db, userRunId)?.executionPhase, "work_pending");
+  assert.equal((fixture.db.prepare("select count(*) as count from agent_message where origin_run_id = ? and type = 'compaction'").get(userRunId) as { count: number }).count, 0);
+  const userArtifact = await requestJson<{ result: string }>(fixture.baseUrl, {
+    method: "POST", path, headers: internal,
+    body: requestFor(userSession.id, userRunId, user.userMessageId, user.expectedRevision, 202),
+  });
+  assert.equal(userArtifact.response.status, 200, userArtifact.text);
+  assert.equal(userArtifact.json.result, "updated");
+  assert.equal(getRunRecord(fixture.db, userRunId)?.executionPhase, "work_pending");
+  assert.equal(getRunRecord(fixture.db, userRunId)?.intendedTerminalCode, null);
+
+  const subtaskRunId = newSortableId("run");
+  const subtask = createRun(subtaskSession.id, subtaskRunId, "subtask", 300);
+  const subtaskIntent = await requestJson<{ message: string }>(fixture.baseUrl, {
+    method: "POST", path, headers: internal,
+    body: { ...requestFor(subtaskSession.id, subtaskRunId, subtask.userMessageId, subtask.expectedRevision, 301), intent: { status: "completed", code: "compaction_completed", detail: null } },
+  });
+  assert.equal(subtaskIntent.response.status, 400);
+  assert.equal(getRunRecord(fixture.db, subtaskRunId)?.executionPhase, "work_pending");
+  assert.equal((fixture.db.prepare("select count(*) as count from agent_message where origin_run_id = ? and type = 'compaction'").get(subtaskRunId) as { count: number }).count, 0);
+  const subtaskArtifact = await requestJson<{ result: string }>(fixture.baseUrl, {
+    method: "POST", path, headers: internal,
+    body: requestFor(subtaskSession.id, subtaskRunId, subtask.userMessageId, subtask.expectedRevision, 302),
+  });
+  assert.equal(subtaskArtifact.response.status, 200, subtaskArtifact.text);
+  assert.equal(subtaskArtifact.json.result, "updated");
+  assert.equal(getRunRecord(fixture.db, subtaskRunId)?.executionPhase, "work_pending");
+  assert.equal(getRunRecord(fixture.db, subtaskRunId)?.intendedTerminalCode, null);
 });
 
 test("worker 模式: worker pid 文件会被写入", async () => {

@@ -18,6 +18,8 @@ function queuedPluginTool(input?: Partial<{ toolExecutionId: string; callPartId:
 test("executePendingTools uses ToolRegistry snapshot so queued plugin tools are not misclassified as disabled", async () => {
   const updates: Array<{ status?: string; resultPreview?: string | null; structuredResult?: unknown }> = [];
   const apiClient = {
+    async markRunWorkInProgress() { return { result: "updated" as const }; },
+    async convergeRunTerminal() { return { kind: "transitioned" as const, finalStatus: "completed" as const }; },
     async updateToolExecution(input: { status?: string; resultPreview?: string | null; structuredResult?: unknown }) {
       updates.push({ status: input.status, resultPreview: input.resultPreview, structuredResult: input.structuredResult });
       return { result: "updated" };
@@ -142,6 +144,8 @@ test("processRun reuses runModelStep tool snapshot for next pending plugin tool 
   ];
   const completed: string[] = [];
   const apiClient = {
+    async markRunWorkInProgress() { return { result: "updated" as const }; },
+    async convergeRunTerminal() { return { kind: "transitioned" as const, finalStatus: "completed" as const }; },
     async getExecutionProfile() {
       return {
         model: "openai:gpt-4o-mini",
@@ -170,7 +174,7 @@ test("processRun reuses runModelStep tool snapshot for next pending plugin tool 
         externalSkillRoots: []
       };
     },
-    async completeRun(input: { status: string }) {
+    async persistRunTerminalIntent(input: { status: string }) {
       completed.push(input.status);
       return;
     }
