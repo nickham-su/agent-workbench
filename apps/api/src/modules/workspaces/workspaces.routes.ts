@@ -29,7 +29,7 @@ import {
   updateWorkspaceAgentEnablementSettings,
   updateWorkspaceById
 } from "./workspace.service.js";
-import { listAvailableAgentsForSurface } from "../settings/settings.service.js";
+import { listAvailableAgentsForListSurface, type AgentListSurface } from "../settings/settings.service.js";
 import {
   WorkspaceAgentEnablementDetectResponseSchema,
   WorkspaceAgentEnablementSettingsResponseSchema,
@@ -317,16 +317,16 @@ export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppCon
       schema: {
         tags: ["workspaces"],
         params: WorkspaceIdParamsSchema,
-        querystring: Type.Object({ surface: Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("subtask")])) }),
+        querystring: Type.Object({ surface: Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("subtask"), Type.Literal("all")])) }),
         response: { 200: AgentListAvailableAgentsResponseSchema, 404: ErrorResponseSchema }
       }
     },
     async (req) => {
       const params = req.params as { workspaceId: string };
       await getWorkspaceDetailById(ctx, params.workspaceId);
-      const query = req.query as { surface?: "user" | "subtask" };
-      const surface = query.surface === "subtask" ? "subtask" : "user";
-      const all = listAvailableAgentsForSurface(ctx, surface);
+      const query = req.query as { surface?: AgentListSurface };
+      const surface = query.surface ?? "user";
+      const all = listAvailableAgentsForListSurface(ctx, surface);
       const enabled = await getWorkspaceAgentEnablementSettings(ctx, params.workspaceId);
       const filtered = filterAgentsByWorkspaceEnablement({
         agents: all,

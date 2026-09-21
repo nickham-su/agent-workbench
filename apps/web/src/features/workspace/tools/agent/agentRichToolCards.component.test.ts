@@ -165,6 +165,55 @@ test("subtask 完成态显示完成图标，运行态显示 loading 图标", () 
   running.unmount();
 });
 
+test("subtask 卡片从完整 Agent 名称映射显示 subtask 专属角色，并在未匹配时回退 ID", () => {
+  const part = {
+    id: "call-subtask",
+    messageId: "message-a",
+    position: 0,
+    updatedRevision: 1,
+    createdAt: 1,
+    updatedAt: 1,
+    type: "tool_call" as const,
+    toolName: "subtask",
+    input: {
+      description: "检查实现",
+      agentId: "subtask-only",
+      session: { mode: "fork" },
+    },
+    providerToolCallId: null,
+  };
+  const baseProps = {
+    workspaceId: "ws-a",
+    toolId: "agent-tool",
+    sessionId: "session-a",
+    part,
+    execution: timelineExecution("completed"),
+    detail: detail({ subtaskSessionId: "sess_child", resultText: "done" }),
+    loading: false,
+    now: 3_000,
+  };
+
+  const resolved = mount(conversationToolCall.default, {
+    props: {
+      ...baseProps,
+      subtaskAgentLabels: { "subtask-only": "子任务审查专家" },
+    },
+    global: mountGlobal,
+  });
+  assert.match(resolved.text(), /Agent: 子任务审查专家/);
+  resolved.unmount();
+
+  const unmatched = mount(conversationToolCall.default, {
+    props: {
+      ...baseProps,
+      subtaskAgentLabels: {},
+    },
+    global: mountGlobal,
+  });
+  assert.match(unmatched.text(), /Agent: subtask-only/);
+  unmatched.unmount();
+});
+
 test("普通工具完成态不显示图标，弱化为浅灰耗时文本", () => {
   const wrapper = mount(toolCallRow.default, {
     props: {

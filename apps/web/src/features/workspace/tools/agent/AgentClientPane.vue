@@ -158,7 +158,7 @@
                 row.execution ? detailLoading.has(row.execution.id) : false
               "
               :todo-collapsed="collapsedTodoPartIds.has(row.part.id)"
-              :agent-options="props.agentOptions"
+              :subtask-agent-labels="props.subtaskAgentLabels"
               :now="now"
               @request-detail="ensureToolDetail"
               @open-subtask="emit('open-subtask', $event)"
@@ -570,6 +570,7 @@ const props = defineProps<{
   active: boolean;
   modelValue?: string | null;
   agentOptions: AgentOption[];
+  subtaskAgentLabels?: Record<string, string>;
   sessionModelStates: Record<string, AgentSessionAgentModelState>;
   sessionModelStateLoading: boolean;
   sessionModelMutationPending: boolean;

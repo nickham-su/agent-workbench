@@ -54,6 +54,7 @@
             :model-value="selectedAgentBySession[session.id] ?? null"
             :tool-id="toolId"
             :agent-options="agentOptions"
+            :subtask-agent-labels="subtaskAgentLabels"
             :session-model-states="sessionModelStates[session.id] ?? {}"
             :session-model-state-loading="!!sessionModelStateLoads[session.id]"
             :session-model-mutation-pending="!!sessionModelMutationPending[session.id]"
@@ -164,6 +165,11 @@ import {
 import { useWorkspaceHost } from "@/features/workspace/host";
 import AgentClientPane from "./AgentClientPane.vue";
 import {
+  createEmptyAgentPresentation,
+  splitAvailableAgents,
+  type AgentSelectionOption,
+} from "./agentAvailableAgentPresentation";
+import {
   clearSessionModelStates,
   replaceSessionModelStates,
   setSessionAgentModelState,
@@ -195,18 +201,6 @@ import {
   createTitleMutationCache,
   type TitleMutationCacheState
 } from "./agentSessionRefreshCoordination";
-
-type AgentOption = {
-  value: string;
-  label: string;
-  resolvedModel?: {
-    providerId: string;
-    contextWindowTokens: number;
-    providerName: string;
-    modelId: string;
-    modelName: string;
-  } | null;
-};
 
 type DraftAgentSession = {
   id: string;
@@ -242,7 +236,8 @@ const serverSessions = ref<AgentSessionRecord[]>([]);
 const draftSessions = ref<DraftAgentSession[]>([]);
 const activeKey = ref<string>("");
 const selectedAgentBySession = reactive<Record<string, string | null>>({});
-const agentOptions = ref<AgentOption[]>([]);
+const agentOptions = ref<AgentSelectionOption[]>([]);
+const subtaskAgentLabels = ref<Record<string, string>>({});
 const closedSessionIds = reactive<Record<string, true>>({});
 const openedSubtaskSessionIds = reactive<Record<string, true>>({});
 const tabNoMap = ref<Record<string, number>>({});
@@ -688,7 +683,7 @@ async function refreshAgents() {
   const requestGeneration = workspaceGeneration;
   const requestWorkspaceId = props.workspaceId;
   try {
-    const res = await listWorkspaceAvailableAgents(requestWorkspaceId, "user");
+    const res = await listWorkspaceAvailableAgents(requestWorkspaceId, "all");
     if (!isRequestResponseWritable({
       disposed,
       currentGeneration: workspaceGeneration,
@@ -698,12 +693,9 @@ async function refreshAgents() {
     })) {
       return;
     }
-    agentOptions.value = res.agents
-      .map((agent) => ({
-        value: agent.id,
-        label: agent.name,
-        resolvedModel: agent.resolvedModel ?? null
-      }));
+    const presentation = splitAvailableAgents(res.agents);
+    agentOptions.value = presentation.agentOptions;
+    subtaskAgentLabels.value = presentation.subtaskAgentLabels;
   } catch (err) {
     if (isRequestResponseWritable({
       disposed,
@@ -1237,6 +1229,9 @@ watch(
     serverSessions.value = [];
     serverSessionsLoaded.value = false;
     draftSessions.value = [];
+    const emptyAgentPresentation = createEmptyAgentPresentation();
+    agentOptions.value = emptyAgentPresentation.agentOptions;
+    subtaskAgentLabels.value = emptyAgentPresentation.subtaskAgentLabels;
     for (const key of Object.keys(closedSessionIds)) {
       delete closedSessionIds[key];
     }

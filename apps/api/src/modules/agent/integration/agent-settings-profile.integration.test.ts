@@ -238,6 +238,60 @@ test("agent settings 保存并回读 scratchpad，默认工具列表仍不包含
   assert.deepEqual(fallbackBody.agents[0]?.tools, ["bash", "write", "apply_patch", "subtask"]);
 });
 
+test("workspace available agents 按 surface 过滤，并支持 all 且保留工作区启用限制", async (t: TestContext) => {
+  const fixture = await createIntegrationFixtureForTest(t);
+  const createAgent = (id: string, name: string, scope: "user" | "subtask" | "both", order: number) => ({
+    id,
+    name,
+    summary: "",
+    prompt: "",
+    tools: ["read"],
+    pluginTools: [],
+    mcpServers: [],
+    defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
+    scope,
+    order
+  });
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      agents: [
+        createAgent("user-only", "User Only", "user", 0),
+        createAgent("subtask-only", "Subtask Only", "subtask", 1),
+        createAgent("both", "Both", "both", 2),
+        createAgent("disabled-user", "Disabled User", "user", 3),
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `configure agents failed: ${agentsRes.body}`);
+
+  const enablementRes = await fixture.app.inject({
+    method: "PUT",
+    url: `/api/workspaces/${fixture.workspaceId}/agent-enablement/settings`,
+    payload: {
+      mode: "subset",
+      enabledAgentIds: ["user-only", "subtask-only", "both"]
+    }
+  });
+  assert.equal(enablementRes.statusCode, 200, `update workspace enablement failed: ${enablementRes.body}`);
+
+  async function listAvailable(surface?: "user" | "subtask" | "all") {
+    const suffix = surface ? `?surface=${surface}` : "";
+    const response = await fixture.app.inject({
+      method: "GET",
+      url: `/api/workspaces/${fixture.workspaceId}/agents/available${suffix}`
+    });
+    assert.equal(response.statusCode, 200, `list available agents failed: ${response.body}`);
+    return (response.json() as { agents: Array<{ id: string }> }).agents.map((agent) => agent.id);
+  }
+
+  assert.deepEqual(await listAvailable(), ["user-only", "both"]);
+  assert.deepEqual(await listAvailable("user"), ["user-only", "both"]);
+  assert.deepEqual(await listAvailable("subtask"), ["subtask-only", "both"]);
+  assert.deepEqual(await listAvailable("all"), ["user-only", "subtask-only", "both"]);
+});
+
 test("agent scope 校验会拒绝错误场景的 agent 并在无可用 agent 时返回明确错误", async (t: TestContext) => {
   const fixture = await createIntegrationFixtureForTest(t);
   const agentsRes = await fixture.app.inject({

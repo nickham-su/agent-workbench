@@ -552,7 +552,7 @@ export async function updateWorkspaceAgentEnablementSettings(
   }
 }
 
-export async function listWorkspaceAvailableAgents(workspaceId: string, surface: "user" | "subtask" = "user") {
+export async function listWorkspaceAvailableAgents(workspaceId: string, surface: "user" | "subtask" | "all" = "user") {
   try {
     const res = await client.get<WorkspaceAvailableAgentsResponse>(`/workspaces/${workspaceId}/agents/available`, { params: { surface } });
     return res.data;

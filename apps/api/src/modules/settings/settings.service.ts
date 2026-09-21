@@ -134,6 +134,7 @@ function fingerprintSecret(value: string | null | undefined) {
 }
 
 export type AgentExecutionSurface = "user" | "subtask";
+export type AgentListSurface = AgentExecutionSurface | "all";
 export type AgentViewWithResolvedModel = AgentItem & {
   resolvedModel: AgentResolvedModel | null;
 };
@@ -1942,6 +1943,18 @@ export function listAvailableAgentsForSurface(
 ): AgentViewWithResolvedModel[] {
   const scoped = getAgentSettings(ctx).agents.filter((agent) => isAgentScopeAllowed(agent.scope, surface));
   return filterAgentsByWorkspaceEnablement({ agents: scoped, workspaceEnablement: options?.workspaceEnablement });
+}
+
+export function listAvailableAgentsForListSurface(
+  ctx: AppContext,
+  surface: AgentListSurface,
+  options?: { workspaceEnablement?: WorkspaceAgentEnablementInput | null }
+): AgentViewWithResolvedModel[] {
+  if (surface !== "all") return listAvailableAgentsForSurface(ctx, surface, options);
+  return filterAgentsByWorkspaceEnablement({
+    agents: getAgentSettings(ctx).agents,
+    workspaceEnablement: options?.workspaceEnablement
+  });
 }
 
 function resolveAgentForSurface(

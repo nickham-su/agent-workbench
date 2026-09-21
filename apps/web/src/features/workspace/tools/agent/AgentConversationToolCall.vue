@@ -85,7 +85,7 @@ const props = defineProps<{
   loading: boolean;
   now: number;
   todoCollapsed?: boolean;
-  agentOptions?: Array<{ value: string; label?: string }>;
+  subtaskAgentLabels?: Record<string, string>;
 }>();
 const emit = defineEmits<{
   "request-detail": [executionId: string];
@@ -106,7 +106,7 @@ const subtaskAgentName = computed(() => {
   const agentId = typeof props.part.input.agentId === "string"
     ? props.part.input.agentId.trim()
     : "";
-  return props.agentOptions?.find((item) => item.value === agentId)?.label?.trim() || agentId;
+  return props.subtaskAgentLabels?.[agentId]?.trim() || agentId;
 });
 
 watch(
