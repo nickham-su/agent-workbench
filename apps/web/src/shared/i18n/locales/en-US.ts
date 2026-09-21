@@ -589,6 +589,8 @@ export default {
       blockedLine2: "Click “Take over” to force takeover (disconnecting the other connection).",
       unauthorizedLine0: "[Unauthorized] Session expired. Please sign in again.",
       unauthorizedLine1: "Details: code={code} reason={reason} wasClean={wasClean}",
+      unavailableLine0: "[Terminal unavailable] Its session has exited or no longer exists. Refreshing the terminal list.",
+      unavailableLine1: "Details: code={code} reason={reason} wasClean={wasClean}",
       disconnectedLine0: "[Connection closed] Connection lost. Will retry automatically.",
       disconnectedLine1: "Details: code={code} reason={reason} wasClean={wasClean}",
       disconnectedLine2: "If occupied, click “Take over”.",

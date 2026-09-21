@@ -57,7 +57,7 @@
           </template>
           <div class="h-full flex flex-col min-h-0">
             <div class="flex-1 min-h-0">
-              <TerminalView :terminal="term" :active="effectiveActiveKey === term.id" @exited="onTerminalExited"/>
+              <TerminalView :terminal="term" :active="effectiveActiveKey === term.id" @exited="onTerminalExited" @invalidated="onTerminalInvalidated"/>
             </div>
           </div>
         </a-tab-pane>
@@ -98,6 +98,7 @@ const emit = defineEmits<{
   deleted: [];
   minimize: [];
   terminalExited: [terminalId: string];
+  terminalInvalidated: [terminalId: string];
 }>();
 
 const { t } = useI18n();
@@ -277,6 +278,10 @@ function confirmDelete(terminalId: string) {
 
 function onTerminalExited(payload: { terminalId: string; exitCode: number }) {
   emit("terminalExited", payload.terminalId);
+}
+
+function onTerminalInvalidated(terminalId: string) {
+  emit("terminalInvalidated", terminalId);
 }
 </script>
 

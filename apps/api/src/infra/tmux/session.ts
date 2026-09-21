@@ -6,7 +6,10 @@ export function classifyTmuxHasSessionResult(result: { ok: boolean; code: number
   if (result.ok) return "exists";
   const output = `${result.stderr}\n${result.stdout}`.toLowerCase();
   // tmux 对不存在 session 的已定义结果；其它非零（spawn、timeout、server 异常）不可伪装为不存在。
-  if (!result.timedOut && result.code === 1 && /can't find session|no server running|no sessions/.test(output)) {
+  const isMissingSocket = /error connecting to\s+\S+\s+\(no such file or directory\)/.test(output);
+  if (!result.timedOut && result.code === 1 && (
+    /can't find session|no server running|no sessions/.test(output) || isMissingSocket
+  )) {
     return "not_found";
   }
   throw new Error(`tmux has-session indeterminate: ${result.timedOut ? "timeout" : output.trim() || `exit ${result.code}`}`);

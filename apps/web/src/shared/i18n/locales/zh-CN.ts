@@ -587,6 +587,8 @@ export default {
       blockedLine2: "可点击“接管连接”尝试强制接管（会踢掉旧连接）。",
       unauthorizedLine0: "[未授权] 当前会话已失效，请重新登录。",
       unauthorizedLine1: "详情：code={code} reason={reason} wasClean={wasClean}",
+      unavailableLine0: "[终端不可用] 该终端会话已结束或不存在，正在刷新终端列表。",
+      unavailableLine1: "详情：code={code} reason={reason} wasClean={wasClean}",
       disconnectedLine0: "[连接已断开] 连接已断开，将自动尝试重连。",
       disconnectedLine1: "详情：code={code} reason={reason} wasClean={wasClean}",
       disconnectedLine2: "若提示被占用，可点击“接管连接”。",
