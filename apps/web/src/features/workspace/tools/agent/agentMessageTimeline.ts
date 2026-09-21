@@ -1,4 +1,5 @@
 import type {
+  AgentImagePart,
   AgentMessage,
   AgentMessagePart,
   AgentTimelineDeltaResponse,
@@ -76,6 +77,10 @@ export type ConversationPart = {
   message: AgentMessage;
   part: AgentMessagePart | null;
   execution: AgentTimelineToolExecution | null;
+  /** 同一消息中的图片只生成一个展示行，并由该行统一打开预览。 */
+  imageParts: AgentImagePart[];
+  /** 同一消息中连续相邻的 ReasoningPart 合并后的展示文本。 */
+  reasoningText: string;
   /** 每条消息只在一个 Conversation row 渲染结构操作。 */
   isFirstRowForMessage: boolean;
 };
@@ -109,11 +114,42 @@ export function buildConversationParts(state: AgentMessageTimelineState): Conver
   const executionByCallPartId = new Map(state.toolExecutions.map((execution) => [execution.callPartId, execution]));
   return state.messages.flatMap<ConversationPart>((message) => {
     const parts = [...message.parts].sort((left, right) => left.position - right.position);
-    if (parts.length === 0) return [{ message, part: null, execution: null, isFirstRowForMessage: true }];
-    return parts.map((part, index) => ({
+    if (parts.length === 0) {
+      return [{ message, part: null, execution: null, imageParts: [], reasoningText: "", isFirstRowForMessage: true }];
+    }
+
+    const imageParts = parts.filter((part): part is AgentImagePart => part.type === "image");
+    let imageRowAdded = false;
+    let previousPartWasReasoning = false;
+    const displayParts: Array<{ part: AgentMessagePart; reasoningText: string }> = [];
+
+    for (const part of parts) {
+      if (part.type === "reasoning" && previousPartWasReasoning) {
+        const previous = displayParts.at(-1);
+        if (previous?.part.type === "reasoning") {
+          previous.reasoningText = `${previous.reasoningText}\n\n${part.text}`;
+          continue;
+        }
+      }
+
+      previousPartWasReasoning = part.type === "reasoning";
+      if (part.type === "image") {
+        if (imageRowAdded) continue;
+        imageRowAdded = true;
+      }
+
+      displayParts.push({
+        part,
+        reasoningText: part.type === "reasoning" ? part.text : "",
+      });
+    }
+
+    return displayParts.map(({ part, reasoningText }, index) => ({
       message,
       part,
       execution: part.type === "tool_call" ? executionByCallPartId.get(part.id) ?? null : null,
+      imageParts: part.type === "image" ? imageParts : [],
+      reasoningText,
       isFirstRowForMessage: index === 0,
     }));
   });

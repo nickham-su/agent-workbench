@@ -118,7 +118,7 @@
             />
             <AssistantMarkdownMessage
               v-else-if="row.part?.type === 'reasoning'"
-              :text="row.part.text"
+              :text="row.reasoningText"
               :message-id="row.message.id"
               :streaming="row.message.status === 'streaming'"
               class="assistant-reasoning-markdown italic"
@@ -134,23 +134,14 @@
               "
               :text="row.part.text"
             />
-            <a-button
+            <button
               v-else-if="row.part?.type === 'image'"
-              type="link"
-              size="small"
-              class="!px-0"
-              @click="
-                openAttachmentPreview([
-                  {
-                    attachmentId: row.part.attachmentId,
-                    filename: row.part.filename,
-                    mediaType: row.part.mediaType,
-                  },
-                ])
-              "
-              ><template #icon><FileImageOutlined /></template
-              >{{ row.part.filename }}</a-button
+              type="button"
+              class="m-0 appearance-none border-0 bg-transparent px-0 py-0.5 text-left text-blue-500 hover:underline cursor-pointer"
+              @click="openAttachmentPreview(row.imageParts)"
             >
+              {{ t("agent.client.imageCount", { count: row.imageParts.length }) }}
+            </button>
             <AgentConversationToolCall
               v-else-if="row.part?.type === 'tool_call'"
               :workspace-id="props.workspaceId"
@@ -737,6 +728,8 @@ const headerTokensText = computed(() => formatAgentHeaderTokens(
   runState.value.contextTokenRatio,
 ));
 function messageClass(row: ConversationPart) {
+  if (row.part?.type === "image") return "px-2 py-0";
+
   const assistantWithoutText = row.message.type === "assistant" && !hasAgentMessageTextPart(row.message);
   return row.message.type === "user"
     ? "border border-blue-500/60 bg-blue-500/20 p-2"

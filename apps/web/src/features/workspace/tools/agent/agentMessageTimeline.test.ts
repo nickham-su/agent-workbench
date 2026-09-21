@@ -200,6 +200,52 @@ test("Conversation 保持 Part.position、标记唯一操作锚点，并关联 T
   assert.equal(rows[1]?.execution, null);
 });
 
+test("Conversation 合并连续 ReasoningPart，并在其他 Part 处断开", () => {
+  const assistant = message({
+    id: "assistant-reasoning",
+    parts: [
+      { id: "reason-1", messageId: "assistant-reasoning", position: 0, type: "reasoning", text: "first", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+      { id: "reason-2", messageId: "assistant-reasoning", position: 1, type: "reasoning", text: "second", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+      { id: "call", messageId: "assistant-reasoning", position: 2, type: "tool_call", toolName: "read", input: {}, providerToolCallId: null, updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+      { id: "reason-3", messageId: "assistant-reasoning", position: 3, type: "reasoning", text: "third", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+      { id: "reason-4", messageId: "assistant-reasoning", position: 4, type: "reasoning", text: "fourth", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+      { id: "text", messageId: "assistant-reasoning", position: 5, type: "text", text: "done", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+      { id: "reason-5", messageId: "assistant-reasoning", position: 6, type: "reasoning", text: "fifth", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+    ],
+  });
+
+  const rows = buildConversationParts({ revision: 1, messages: [assistant], toolExecutions: [] });
+
+  assert.deepEqual(rows.map((row) => row.part?.id), ["reason-1", "call", "reason-3", "text", "reason-5"]);
+  assert.deepEqual(rows.map((row) => row.reasoningText), [
+    "first\n\nsecond",
+    "",
+    "third\n\nfourth",
+    "",
+    "fifth",
+  ]);
+  assert.deepEqual(rows.map((row) => row.isFirstRowForMessage), [true, false, false, false, false]);
+});
+
+test("Conversation 将同一消息的多个 ImagePart 汇总为一个展示行", () => {
+  const user = message({
+    id: "user-images",
+    type: "user",
+    parts: [
+      { id: "text", messageId: "user-images", position: 0, type: "text", text: "查看图片", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+      { id: "image-a", messageId: "user-images", position: 1, type: "image", attachmentId: "attachment-a", mediaType: "image/png", filename: "a.png", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+      { id: "image-b", messageId: "user-images", position: 2, type: "image", attachmentId: "attachment-b", mediaType: "image/jpeg", filename: "b.jpg", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+    ],
+  });
+
+  const rows = buildConversationParts({ revision: 1, messages: [user], toolExecutions: [] });
+
+  assert.deepEqual(rows.map((row) => row.part?.id), ["text", "image-a"]);
+  assert.deepEqual(rows.map((row) => row.isFirstRowForMessage), [true, false]);
+  assert.deepEqual(rows[0]?.imageParts, []);
+  assert.deepEqual(rows[1]?.imageParts.map((part) => part.id), ["image-a", "image-b"]);
+});
+
 test("Conversation 为无 Part 和非 Text Assistant 提供唯一操作锚点", () => {
   const assistants = [
     message({ id: "empty", parts: [] }),

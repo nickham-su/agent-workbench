@@ -108,7 +108,7 @@ function timelineSnapshot(messages: AgentMessage[]) {
 }
 
 function createMountGlobal(statusStore: { getRunState: () => ComputedRef<AgentMessageSessionRunState> }) {
-  const i18n = createI18n({ legacy: false, locale: "zh-CN", messages: { "zh-CN": {} } });
+  const i18n = createI18n({ legacy: false, locale: "zh-CN", messages: { "zh-CN": { agent: { client: { imageCount: "{count} 张图片" } } } } });
   return {
     plugins: [i18n],
     provide: { [agentSessionStatusStoreKey as symbol]: statusStore },
@@ -207,6 +207,66 @@ test("真实 AgentClientPane：无内容 Assistant 保留单个 Fork 的可交�
     const action = row.getComponent({ name: "AgentMessageActions" });
     assert.equal(action.props("showFork"), true);
     assert.equal(action.props("showRevert"), false);
+  } finally {
+    wrapper.unmount();
+  }
+});
+
+test("真实 AgentClientPane：同一消息的图片以无边框纯文字汇总张数", async () => {
+  const { wrapper } = mountPane({ sessionReady: false });
+  try {
+    await setTimeline(wrapper, [
+      agentMessage({
+        id: "user-images",
+        type: "user",
+        parts: [
+          { id: "text", messageId: "user-images", position: 0, type: "text", text: "查看图片", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+          { id: "image-a", messageId: "user-images", position: 1, type: "image", attachmentId: "attachment-a", mediaType: "image/png", filename: "a.png", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+          { id: "image-b", messageId: "user-images", position: 2, type: "image", attachmentId: "attachment-b", mediaType: "image/jpeg", filename: "b.jpg", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+        ],
+      }),
+    ]);
+
+    const rows = wrapper.findAll('article[data-message-id="user-images"]');
+    assert.equal(rows.length, 2);
+    assert.match(rows[0]!.classes().join(" "), /border-blue-500\/60/);
+    assert.equal(rows[1]!.classes().includes("border"), false);
+
+    const imageText = rows[1]!.get("button");
+    assert.equal(imageText.text(), "2 张图片");
+    assert.equal(imageText.findAllComponents({ name: "FileImageOutlined" }).length, 0);
+    await imageText.trigger("click");
+    assert.equal(wrapper.getComponent({ name: "AgentAttachmentPreviewModal" }).props("count"), 2);
+  } finally {
+    wrapper.unmount();
+  }
+});
+
+test("真实 AgentClientPane：连续思考链合并展示，工具调用会断开分组", async () => {
+  const { wrapper } = mountPane({ sessionReady: false });
+  try {
+    await setTimeline(wrapper, [
+      agentMessage({
+        id: "reasoning-assistant",
+        parts: [
+          { id: "reason-1", messageId: "reasoning-assistant", position: 0, type: "reasoning", text: "first", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+          { id: "reason-2", messageId: "reasoning-assistant", position: 1, type: "reasoning", text: "second", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+          { id: "call", messageId: "reasoning-assistant", position: 2, type: "tool_call", toolName: "read", input: {}, providerToolCallId: null, updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+          { id: "reason-3", messageId: "reasoning-assistant", position: 3, type: "reasoning", text: "third", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+          { id: "reason-4", messageId: "reasoning-assistant", position: 4, type: "reasoning", text: "fourth", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+        ],
+      }),
+    ]);
+
+    const rows = wrapper.findAll('article[data-message-id="reasoning-assistant"]');
+    assert.equal(rows.length, 3);
+
+    const reasoningMessages = wrapper.findAllComponents({ name: "AssistantMarkdownMessage" });
+    assert.equal(reasoningMessages.length, 2);
+    assert.deepEqual(reasoningMessages.map((component) => component.props("text")), [
+      "first\n\nsecond",
+      "third\n\nfourth",
+    ]);
   } finally {
     wrapper.unmount();
   }
