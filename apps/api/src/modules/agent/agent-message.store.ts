@@ -25,7 +25,11 @@ import {
   type AgentProviderReplayEnvelope,
 } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { Db } from "../../infra/db/db.js";
-import { assertRetainedAnchorOnPreviousChain, ModelContextResolver } from "./read-side/model-context-resolver.js";
+import {
+  assertRetainedAnchorOnPreviousChain,
+  ModelContextInvariantError,
+  ModelContextResolver,
+} from "./read-side/model-context-resolver.js";
 import { indexEligibleCompletedTextParts } from "./archive/agent-archive-store.js";
 
 const TERMINAL_MESSAGE_STATUSES = new Set<AgentMessageStatus>(["completed", "failed", "cancelled", "superseded"]);
@@ -55,6 +59,16 @@ export class AgentMessageConflictError extends Error {
     readonly currentRevision: number
   ) {
     super("SESSION_HEAD_CONFLICT");
+  }
+}
+
+/** 消息祖先图违背持久化不变量时 fail closed，避免从不完整历史创建 Fork。 */
+export class AgentMessageGraphInvariantError extends Error {
+  readonly code = "AGENT_MESSAGE_GRAPH_INVARIANT" as const;
+
+  constructor(reason: string) {
+    super(`message graph invariant violated: ${reason}`);
+    this.name = "AgentMessageGraphInvariantError";
   }
 }
 
@@ -450,7 +464,12 @@ export function appendMessage(db: Db, input: { id: string; workspaceId: string; 
     db.prepare(`insert into agent_message (id,workspace_id,previous_message_id,replaces_message_id,depth,type,status,origin_session_id,origin_run_id,updated_revision,created_at,updated_at) values (@id,@workspaceId,@previousMessageId,@replacesMessageId,@depth,@type,@status,@sessionId,@originRunId,@revision,@createdAt,@createdAt)`).run({ ...input, previousMessageId: input.expectedHeadMessageId, replacesMessageId: input.replacesMessageId ?? null, originRunId: input.originRunId ?? null, depth, revision });
     insertParts(db, input.id, input.parts, revision, input.createdAt);
     if (input.status === "completed") indexEligibleCompletedTextParts(db, input.id, input.createdAt);
-    updateSessionPointer(db, { workspaceId: input.workspaceId, sessionId: input.sessionId, headMessageId: input.id, contextRootMessageId: input.contextRootMessageId ?? session.contextRootMessageId ?? input.id, revision, now: input.createdAt });
+    updateSessionPointer(db, {
+      workspaceId: input.workspaceId, sessionId: input.sessionId, headMessageId: input.id,
+      contextRootMessageId: input.contextRootMessageId ?? session.contextRootMessageId
+        ?? (session.headMessageId === null ? input.id : null),
+      revision, now: input.createdAt,
+    });
     return getMessage(db, input.id)!;
   })();
 }
@@ -934,18 +953,154 @@ export function forkMessageSession(db: Db, input: {
     ) {
       throw new AgentMessageDomainError("SESSION_NOT_IDLE");
     }
-    if (!isAncestor(db, input.workspaceId, source.headMessageId, input.targetMessageId)) throw new AgentMessageDomainError("FORK_TARGET_INVALID");
-    if (source.contextRootMessageId && !isAncestor(db, input.workspaceId, input.targetMessageId, source.contextRootMessageId)) throw new AgentMessageDomainError("FORK_TARGET_BEFORE_CONTEXT_ROOT");
-    const target = messageRow(db, input.targetMessageId);
-    if (!target || !messageTerminal(target.status) || (target.type !== "user" && target.type !== "assistant")) throw new AgentMessageDomainError("FORK_TARGET_INVALID");
+    if (source.headMessageId == null) throw new AgentMessageDomainError("FORK_TARGET_INVALID");
+    const ancestry = resolveForkAncestryAtTarget(db, {
+      workspaceId: input.workspaceId,
+      sourceHeadMessageId: source.headMessageId,
+      targetMessageId: input.targetMessageId,
+    });
+    const target = ancestry.target;
+    if (ancestry.contextRootMessageId) assertForkContextRoot(db, input.workspaceId, ancestry.contextRootMessageId);
+    if (!messageTerminal(target.status) || (target.type !== "user" && target.type !== "assistant")) throw new AgentMessageDomainError("FORK_TARGET_INVALID");
     if (target.type === "assistant") {
       const pending = db.prepare(`select 1 from agent_tool_execution execution join agent_message_part part on part.id = execution.call_part_id where part.message_id = ? and execution.status in ('queued','running') limit 1`).get(target.id);
       if (pending) throw new AgentMessageDomainError("FORK_TARGET_HAS_NON_TERMINAL_EXECUTIONS");
     }
-    db.prepare(`insert into agent_session (id,workspace_id,title,kind,head_message_id,context_root_message_id,revision,forked_from_session_id,forked_from_message_id,created_at,updated_at) values (@id,@workspaceId,@title,@kind,@targetMessageId,@contextRootMessageId,0,@sourceSessionId,@targetMessageId,@createdAt,@createdAt)`).run({ ...input, contextRootMessageId: source.contextRootMessageId ?? input.targetMessageId });
+    db.prepare(`insert into agent_session (id,workspace_id,title,kind,head_message_id,context_root_message_id,revision,forked_from_session_id,forked_from_message_id,created_at,updated_at) values (@id,@workspaceId,@title,@kind,@targetMessageId,@contextRootMessageId,0,@sourceSessionId,@targetMessageId,@createdAt,@createdAt)`).run({ ...input, contextRootMessageId: ancestry.contextRootMessageId });
     db.prepare(`insert into session_run_state (workspace_id,session_id,status,active_run_id,run_notice_text,retry_count,next_retry_at,active_assistant_message_id,non_terminal_message_ids_json,non_terminal_tool_execution_ids_json,updated_at) values (@workspaceId,@id,'idle',null,'',0,null,null,'[]','[]',@createdAt)`).run(input);
     return getMessageSession(db, input.workspaceId, input.id)!;
   })();
+}
+
+const MAX_FORK_CONTEXT_ANCESTRY_DEPTH = 10_000;
+
+type ForkAncestryRow = {
+  id: string | null;
+  previousMessageId: string | null;
+  workspaceId: string | null;
+  type: AgentMessageType | null;
+  status: AgentMessageStatus | null;
+  depth: number;
+  missing: number;
+  crossWorkspace: number;
+  cycle: number;
+};
+
+/**
+ * Fork 仅验证会影响 child 的两个区间：source head 到 target，以及 target 到首个
+ * 严格祖先 compaction（或物理起点）。不能让更早、无关的历史损坏阻塞 Fork。
+ */
+function resolveForkAncestryAtTarget(db: Db, input: {
+  workspaceId: string;
+  sourceHeadMessageId: string;
+  targetMessageId: string;
+}): { target: ForkAncestryRow & { id: string; type: AgentMessageType; status: AgentMessageStatus }; contextRootMessageId: string | null } {
+  const sourceToTarget = db.prepare(`
+    with recursive ancestry(id, previous_message_id, workspace_id, type, status, depth, path, missing, cross_workspace, cycle) as (
+      select id, previous_message_id, workspace_id, type, status, 0, '|' || id || '|', 0, 0, 0
+      from agent_message where id = @sourceHeadMessageId and workspace_id = @workspaceId
+      union all
+      select predecessor.id, predecessor.previous_message_id, predecessor.workspace_id, predecessor.type, predecessor.status,
+        ancestry.depth + 1, ancestry.path || coalesce(predecessor.id, '<missing>') || '|',
+        case when predecessor.id is null then 1 else 0 end,
+        case when predecessor.id is not null and predecessor.workspace_id <> @workspaceId then 1 else 0 end,
+        case when predecessor.id is not null and instr(ancestry.path, '|' || predecessor.id || '|') > 0 then 1 else 0 end
+      from ancestry left join agent_message predecessor on predecessor.id = ancestry.previous_message_id
+      where ancestry.previous_message_id is not null and ancestry.missing = 0 and ancestry.cross_workspace = 0 and ancestry.cycle = 0
+        and ancestry.id <> @targetMessageId
+        and ancestry.depth < @maxDepth
+    )
+    select id, previous_message_id as previousMessageId, workspace_id as workspaceId, type, status, depth,
+      missing, cross_workspace as crossWorkspace, cycle
+    from ancestry order by depth asc
+  `).all({ ...input, maxDepth: MAX_FORK_CONTEXT_ANCESTRY_DEPTH }) as ForkAncestryRow[];
+  if (!sourceToTarget.length) throw new AgentMessageGraphInvariantError("source head is missing from its workspace");
+  assertValidForkAncestryRows(sourceToTarget);
+  const target = sourceToTarget.find((row) => row.id === input.targetMessageId);
+  if (!target) {
+    if (sourceToTarget.at(-1)!.previousMessageId !== null) {
+      throw new AgentMessageGraphInvariantError(`ancestor chain exceeds ${MAX_FORK_CONTEXT_ANCESTRY_DEPTH} messages`);
+    }
+    throw new AgentMessageDomainError("FORK_TARGET_INVALID");
+  }
+  if (target.id == null || target.type == null || target.status == null) {
+    throw new AgentMessageGraphInvariantError("target row is incomplete");
+  }
+  if (target.previousMessageId == null) {
+    return { target: target as ForkAncestryRow & { id: string; type: AgentMessageType; status: AgentMessageStatus }, contextRootMessageId: null };
+  }
+  const targetToRoot = db.prepare(`
+    with recursive ancestry(id, previous_message_id, workspace_id, type, status, depth, path, missing, cross_workspace, cycle) as (
+      select predecessor.id, predecessor.previous_message_id, predecessor.workspace_id, predecessor.type, predecessor.status,
+        1, '|' || @targetMessageId || '|' || coalesce(predecessor.id, '<missing>') || '|',
+        case when predecessor.id is null then 1 else 0 end,
+        case when predecessor.id is not null and predecessor.workspace_id <> @workspaceId then 1 else 0 end,
+        case when predecessor.id is not null and predecessor.id = @targetMessageId then 1 else 0 end
+      from agent_message target left join agent_message predecessor on predecessor.id = target.previous_message_id
+      where target.id = @targetMessageId and target.workspace_id = @workspaceId
+      union all
+      select predecessor.id, predecessor.previous_message_id, predecessor.workspace_id, predecessor.type, predecessor.status,
+        ancestry.depth + 1, ancestry.path || coalesce(predecessor.id, '<missing>') || '|',
+        case when predecessor.id is null then 1 else 0 end,
+        case when predecessor.id is not null and predecessor.workspace_id <> @workspaceId then 1 else 0 end,
+        case when predecessor.id is not null and instr(ancestry.path, '|' || predecessor.id || '|') > 0 then 1 else 0 end
+      from ancestry left join agent_message predecessor on predecessor.id = ancestry.previous_message_id
+      where ancestry.previous_message_id is not null and ancestry.missing = 0 and ancestry.cross_workspace = 0 and ancestry.cycle = 0
+        and ancestry.type <> 'compaction' and ancestry.depth < @maxDepth
+    )
+    select id, previous_message_id as previousMessageId, workspace_id as workspaceId, type, status, depth,
+      missing, cross_workspace as crossWorkspace, cycle
+    from ancestry order by depth asc
+  `).all({ ...input, maxDepth: MAX_FORK_CONTEXT_ANCESTRY_DEPTH }) as ForkAncestryRow[];
+  if (!targetToRoot.length) throw new AgentMessageGraphInvariantError("target predecessor is missing from its workspace");
+  assertValidForkAncestryRows(targetToRoot);
+  const root = targetToRoot.find((row) => row.type === "compaction");
+  if (!root && targetToRoot.at(-1)!.previousMessageId !== null) {
+    throw new AgentMessageGraphInvariantError(`ancestor chain exceeds ${MAX_FORK_CONTEXT_ANCESTRY_DEPTH} messages`);
+  }
+  return {
+    target: target as ForkAncestryRow & { id: string; type: AgentMessageType; status: AgentMessageStatus },
+    contextRootMessageId: root?.id ?? null,
+  };
+}
+
+function assertValidForkAncestryRows(rows: ForkAncestryRow[]) {
+  const invalid = rows.find((row) => row.missing || row.crossWorkspace || row.cycle);
+  if (!invalid) return;
+  throw new AgentMessageGraphInvariantError(
+    invalid.missing ? "ancestor is missing" : invalid.crossWorkspace ? "ancestor belongs to another workspace" : "ancestor chain contains a cycle",
+  );
+}
+
+class ForkContextRootStructureError extends Error {}
+
+function assertForkContextRoot(db: Db, workspaceId: string, rootMessageId: string) {
+  try {
+    const root = messageRow(db, rootMessageId);
+    if (!root
+      || root.workspaceId !== workspaceId
+      || root.type !== "compaction"
+      || root.status !== "completed"
+      || root.previousMessageId == null) {
+      throw new ForkContextRootStructureError("invalid compaction root structure");
+    }
+    const predecessor = messageRow(db, root.previousMessageId);
+    if (!predecessor || predecessor.workspaceId !== workspaceId) {
+      throw new ForkContextRootStructureError("compaction root predecessor is invalid");
+    }
+    if (root.retainedFromMessageId != null) {
+      assertRetainedAnchorOnPreviousChain(db, {
+        workspaceId,
+        previousMessageId: root.previousMessageId,
+        retainedFromMessageId: root.retainedFromMessageId,
+      });
+    }
+  } catch (error) {
+    if (error instanceof ForkContextRootStructureError || error instanceof ModelContextInvariantError) {
+      throw new AgentMessageGraphInvariantError("selected compaction root is invalid");
+    }
+    throw error;
+  }
 }
 
 export function isAncestor(db: Db, workspaceId: string, headMessageId: string | null, targetMessageId: string): boolean {

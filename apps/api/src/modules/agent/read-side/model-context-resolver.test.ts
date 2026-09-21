@@ -90,6 +90,30 @@ function clearContextRoot(db: Database.Database) {
   db.prepare("update agent_session set context_root_message_id = null where id='session'").run();
 }
 
+function withForeignKeysDisabled(db: Database.Database, mutate: () => void) {
+  db.pragma("foreign_keys = OFF");
+  try {
+    mutate();
+  } finally {
+    db.pragma("foreign_keys = ON");
+  }
+}
+
+function withRetainedAnchorMutationEnabled(db: Database.Database, mutate: () => void) {
+  const triggerNames = ["agent_message_retained_workspace_update", "agent_message_retained_immutable_update"];
+  const triggers = triggerNames.map((name) => {
+    const trigger = db.prepare("select sql from sqlite_master where type='trigger' and name=?").get(name) as { sql: string } | undefined;
+    assert.ok(trigger?.sql, `${name} trigger must exist`);
+    return { name, sql: trigger.sql };
+  });
+  for (const { name } of triggers) db.exec(`drop trigger ${name}`);
+  try {
+    mutate();
+  } finally {
+    for (const { sql } of triggers) db.exec(sql);
+  }
+}
+
 test("Resolver separates the full Timeline chain from model context and preserves retained-tail replay metadata", () => {
   const { db, resolver } = createFixture();
   append(db, { id: "old-user", text: "old" });
@@ -337,6 +361,47 @@ test("Provider replay visibleIndex follows actual transcript visibility", () => 
     ["reasoning", 0], ["text", 0], ["tool_call", 1],
   ]);
   db.close();
+});
+
+test("Resolver preserves the historical compaction summary and retained tail for a Fork", () => {
+  const { db, resolver } = createFixture();
+  append(db, { id: "old", text: "old" });
+  append(db, { id: "retained", text: "retained" });
+  let current = head(db);
+  commitCompactionMessageForTest(db, { id: "c1", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: current.headMessageId, expectedRevision: current.revision, textPartId: "c1-text", text: "summary one", retainedFromMessageId: "retained", createdAt: 10 });
+  append(db, { id: "between", type: "assistant", text: "between" });
+  current = head(db);
+  commitCompactionMessageForTest(db, { id: "c2", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: current.headMessageId, expectedRevision: current.revision, textPartId: "c2-text", text: "summary two", retainedFromMessageId: "retained", createdAt: 12 });
+  append(db, { id: "after", text: "after" });
+  const source = head(db);
+  const child = forkMessageSession(db, { id: "child", workspaceId: "ws", sourceSessionId: "session", expectedHeadMessageId: source.headMessageId, expectedRevision: source.revision, targetMessageId: "between", title: "child", kind: "primary", createdAt: 14 });
+  assert.equal(child.contextRootMessageId, "c1");
+  const resolved = resolver.resolve({ workspaceId: "ws", sessionId: "child" });
+  assert.deepEqual(resolved.blocks.map((block) => block.sourceMessageId), ["c1", "retained", "between"]);
+  assert.equal(resolved.blocks.some((block) => block.sourceMessageId === "c2"), false);
+  assert.equal(resolved.blocks.some((block) => block.sourceMessageId === "after"), false);
+  const childHead = db.prepare("select head_message_id as headMessageId, revision from agent_session where id='child'").get() as { headMessageId: string; revision: number };
+  appendMessage(db, { id: "child-prompt", workspaceId: "ws", sessionId: "child", expectedHeadMessageId: childHead.headMessageId, expectedRevision: childHead.revision, type: "user", status: "completed", parts: [{ id: "child-prompt-text", position: 0, type: "text", text: "continue" }], createdAt: 15 });
+  assert.deepEqual(resolver.resolve({ workspaceId: "ws", sessionId: "child" }).blocks.map((block) => block.sourceMessageId), ["c1", "retained", "between", "child-prompt"]);
+});
+
+test("Resolver fails closed when a compaction retained anchor is corrupt", () => {
+  const { db, resolver } = createFixture();
+  append(db, { id: "old", text: "old" });
+  append(db, { id: "retained", text: "retained" });
+  const current = head(db);
+  commitCompactionMessageForTest(db, {
+    id: "summary", workspaceId: "ws", sessionId: "session",
+    expectedHeadMessageId: current.headMessageId, expectedRevision: current.revision,
+    textPartId: "summary-text", text: "summary", retainedFromMessageId: "retained", createdAt: 5,
+  });
+  withRetainedAnchorMutationEnabled(db, () => withForeignKeysDisabled(db, () => {
+    db.prepare("update agent_message set retained_from_message_id='missing' where id='summary'").run();
+  }));
+  assert.throws(
+    () => resolver.resolve({ workspaceId: "ws", sessionId: "session" }),
+    ModelContextInvariantError,
+  );
 });
 
 test("Resolver accepts a shared fork ancestor in the same workspace", () => {

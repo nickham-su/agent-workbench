@@ -1,17 +1,19 @@
 import assert from "node:assert/strict";
 import type { FastifyInstance } from "fastify";
 import { test, type TestContext } from "node:test";
+import type Database from "better-sqlite3";
 import { Type } from "@sinclair/typebox";
 import { HttpError } from "../../../app/errors.js";
 import { createApp } from "../../../app/createApp.js";
 import { getRunRecord } from "../agent-message.store.js";
-import { getMessageRunState, getMessageSession } from "../agent-message.store.js";
+import { commitCompactionMessageForTest, getMessageRunState, getMessageSession } from "../agent-message.store.js";
 import { newSortableId } from "../../../utils/ids.js";
 import {
   appendMessageFixture,
   createMessageRunFixture,
   createIntegrationFixture,
   createSession,
+  sendMessage,
 } from "./context-writeback.helpers.js";
 import { createAgentTestFixture } from "../testkit/agent-testkit.js";
 
@@ -69,6 +71,15 @@ async function runNotice(fixture: Awaited<ReturnType<typeof createIntegrationFix
     headers: { "x-awb-agent-internal-token": fixture.internalToken },
     payload: { workspaceId: fixture.workspaceId, sessionId, runId, runNoticeText, updatedAt: Date.now() },
   });
+}
+
+function withForeignKeysDisabled(db: Database.Database, mutate: () => void) {
+  db.pragma("foreign_keys = OFF");
+  try {
+    mutate();
+  } finally {
+    db.pragma("foreign_keys = ON");
+  }
 }
 
 test("internal runs/trigger 支持 clientRequestId 去重", async (t: TestContext) => {
@@ -129,6 +140,46 @@ test("public 和 generic internal create 固定创建 primary，并拒绝未知�
   assert.equal(removedInternalCreate.statusCode, 404, removedInternalCreate.body);
   const invalid = await fixture.app.inject({ method: "POST", url: "/api/agent/sessions", payload: { workspaceId: fixture.workspaceId, title: "bad", kind: "subtask" } });
   assert.equal(invalid.statusCode, 400);
+});
+
+test("public Fork accepts a pre-compaction message and starts a child Run", async (t: TestContext) => {
+  const fixture = await createIntegrationFixture(t, { agentWorkerConcurrency: 0 });
+  const source = await createSession(fixture.app, fixture.workspaceId);
+  const historical = appendMessageFixture({ fixture, sessionId: source.id, type: "user", text: "historical" });
+  const beforeCompaction = getMessageSession(fixture.db, fixture.workspaceId, source.id)!;
+  commitCompactionMessageForTest(fixture.db, {
+    id: newSortableId("msg"), workspaceId: fixture.workspaceId, sessionId: source.id,
+    expectedHeadMessageId: beforeCompaction.headMessageId, expectedRevision: beforeCompaction.revision,
+    textPartId: newSortableId("part"), text: "summary", createdAt: Date.now(),
+  });
+  appendMessageFixture({ fixture, sessionId: source.id, type: "user", text: "current" });
+  const fork = await fixture.app.inject({ method: "POST", url: "/api/agent/sessions/fork", payload: { fromSessionId: source.id, fromMessageId: historical.messageId } });
+  assert.equal(fork.statusCode, 201, fork.body);
+  const child = fork.json() as { id: string; headMessageId: string | null; contextRootMessageId: string | null };
+  assert.equal(child.headMessageId, historical.messageId);
+  assert.equal(child.contextRootMessageId, null);
+  const started = await sendMessage(fixture.app, { workspaceId: fixture.workspaceId, sessionId: child.id, text: "continue", clientRequestId: "historical-fork" });
+  assert.equal(started.deduplicated, false);
+  assert.equal(getRunRecord(fixture.db, started.runId)?.sessionId, child.id);
+});
+
+test("public Fork fails closed for a corrupt source graph without exposing its reason", async (t: TestContext) => {
+  const fixture = await createIntegrationFixture(t, { agentWorkerConcurrency: 0 });
+  const source = await createSession(fixture.app, fixture.workspaceId);
+  const target = appendMessageFixture({ fixture, sessionId: source.id, type: "user", text: "target" });
+  appendMessageFixture({ fixture, sessionId: source.id, type: "user", text: "head" });
+  withForeignKeysDisabled(fixture.db, () => {
+    fixture.db.prepare("update agent_message set previous_message_id='missing' where origin_session_id=? and id <> ?").run(source.id, target.messageId);
+  });
+  const before = (fixture.db.prepare("select count(*) as count from agent_session").get() as { count: number }).count;
+  const fork = await fixture.app.inject({
+    method: "POST", url: "/api/agent/sessions/fork",
+    payload: { fromSessionId: source.id, fromMessageId: target.messageId },
+  });
+  assert.equal(fork.statusCode, 500);
+  assert.equal(fork.body.includes("ancestor is missing"), false);
+  assert.equal(fork.body.includes("AgentMessageGraphInvariantError"), false);
+  assert.equal((fixture.db.prepare("select count(*) as count from agent_session").get() as { count: number }).count, before);
 });
 
 test("public fork 固定创建 primary，并拒绝非 primary source 和未知字段", async (t: TestContext) => {

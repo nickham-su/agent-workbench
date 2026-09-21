@@ -5,7 +5,8 @@ import {
   agentUserMessageDraftText,
   applyAgentTimelineDelta,
   buildConversationParts,
-  canMutateAgentTimelineMessage,
+  canForkAgentTimelineMessage,
+  canRevertAgentTimelineMessage,
   hasAgentMessageTextPart,
   replaceAgentTimelineSnapshot,
 } from "./agentMessageTimeline.js";
@@ -146,41 +147,68 @@ test("agentUserMessageDraftText 仅还原 User 的 TextPart，并保持 Part 顺
   assert.equal(agentUserMessageDraftText(message({ id: "assistant" })), null);
 });
 
-test("当前结构操作区间之前的 Timeline 历史不提供 Fork 或回退等操作", () => {
-  const textPart = {
-    id: "part", messageId: "assistant", position: 0, type: "text" as const,
-    text: "answer", updatedRevision: 1, createdAt: 1, updatedAt: 1,
-  };
-  assert.equal(canMutateAgentTimelineMessage(message({
+test("Fork 与 Revert 分别按历史和当前操作区间判断资格", () => {
+  const historicalUser = message({
     id: "old-user", type: "user", inCurrentOperationRange: false,
-  })), false);
-  assert.equal(canMutateAgentTimelineMessage(message({
-    id: "old-assistant", type: "assistant", inCurrentOperationRange: false, parts: [textPart],
-  })), false);
-  assert.equal(canMutateAgentTimelineMessage(message({
-    id: "unmarked-user", type: "user",
-  })), false);
-  assert.equal(canMutateAgentTimelineMessage(message({
+  });
+  const historicalAssistant = message({
+    id: "old-assistant", type: "assistant", inCurrentOperationRange: false,
+  });
+  const currentUser = message({
     id: "current-user", type: "user", inCurrentOperationRange: true,
-  })), true);
-  assert.equal(canMutateAgentTimelineMessage(message({
-    id: "current-assistant", type: "assistant", inCurrentOperationRange: true, parts: [textPart],
-  })), true);
-  assert.equal(canMutateAgentTimelineMessage(compactionMessage({
+  });
+  const currentAssistant = message({
+    id: "current-assistant", type: "assistant", inCurrentOperationRange: true,
+  });
+  const unmarkedUser = message({
+    id: "unmarked-user", type: "user",
+  });
+  const system = message({ id: "system", type: "system", inCurrentOperationRange: true });
+  const runtime = message({ id: "runtime", type: "runtime", inCurrentOperationRange: true });
+  const compaction = compactionMessage({
     id: "compaction", type: "compaction", inCurrentOperationRange: true,
-  })), false);
+  });
+
+  assert.equal(canForkAgentTimelineMessage(historicalUser), true);
+  assert.equal(canRevertAgentTimelineMessage(historicalUser), false);
+  assert.equal(canForkAgentTimelineMessage(historicalAssistant), true);
+  assert.equal(canRevertAgentTimelineMessage(historicalAssistant), false);
+  assert.equal(canForkAgentTimelineMessage(currentUser), true);
+  assert.equal(canRevertAgentTimelineMessage(currentUser), true);
+  assert.equal(canForkAgentTimelineMessage(currentAssistant), true);
+  assert.equal(canRevertAgentTimelineMessage(currentAssistant), false);
+  assert.equal(canForkAgentTimelineMessage(unmarkedUser), true);
+  assert.equal(canRevertAgentTimelineMessage(unmarkedUser), false);
+  for (const unsupported of [system, runtime, compaction]) {
+    assert.equal(canForkAgentTimelineMessage(unsupported), false);
+    assert.equal(canRevertAgentTimelineMessage(unsupported), false);
+  }
 });
 
-test("Conversation 保持 Part.position 且 ToolCall 用 callPartId 显式关联 ToolExecution", () => {
+test("Conversation 保持 Part.position、标记唯一操作锚点，并关联 ToolExecution", () => {
   const assistant = message({
     id: "assistant", parts: [
       { id: "text", messageId: "assistant", position: 2, type: "text", text: "after", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
       { id: "call", messageId: "assistant", position: 1, type: "tool_call", toolName: "bash", input: { command: "pwd" }, providerToolCallId: null, updatedRevision: 1, createdAt: 1, updatedAt: 1 },
-      { id: "reason", messageId: "assistant", position: 0, type: "reasoning", text: "think", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+      { id: "reason", messageId: "assistant", position: 4, type: "reasoning", text: "think", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
     ],
   });
   const rows = buildConversationParts({ revision: 1, messages: [assistant], toolExecutions: [execution({ id: "execution", callPartId: "call", resultPreview: "ok" })] });
-  assert.deepEqual(rows.map((row) => row.part?.id), ["reason", "call", "text"]);
-  assert.equal(rows[1]?.execution?.id, "execution");
-  assert.equal(rows[0]?.execution, null);
+  assert.deepEqual(rows.map((row) => row.part?.id), ["call", "text", "reason"]);
+  assert.deepEqual(rows.map((row) => row.isFirstRowForMessage), [true, false, false]);
+  assert.equal(rows[0]?.execution?.id, "execution");
+  assert.equal(rows[1]?.execution, null);
+});
+
+test("Conversation 为无 Part 和非 Text Assistant 提供唯一操作锚点", () => {
+  const assistants = [
+    message({ id: "empty", parts: [] }),
+    message({ id: "tool", parts: [{ id: "tool-call", messageId: "tool", position: 3, type: "tool_call", toolName: "read", input: {}, providerToolCallId: null, updatedRevision: 1, createdAt: 1, updatedAt: 1 }] }),
+    message({ id: "reasoning", parts: [{ id: "reasoning-part", messageId: "reasoning", position: 3, type: "reasoning", text: "think", updatedRevision: 1, createdAt: 1, updatedAt: 1 }] }),
+    message({ id: "image", parts: [{ id: "image-part", messageId: "image", position: 3, type: "image", attachmentId: "attachment", mediaType: "image/png", filename: "image.png", updatedRevision: 1, createdAt: 1, updatedAt: 1 }] }),
+  ];
+  const rows = buildConversationParts({ revision: 1, messages: assistants, toolExecutions: [] });
+  assert.deepEqual(rows.map((row) => row.isFirstRowForMessage), [true, true, true, true]);
+  assert.equal(rows[0]?.part, null);
+  assert.equal(rows.filter((row) => row.isFirstRowForMessage).length, assistants.length);
 });

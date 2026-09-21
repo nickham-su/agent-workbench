@@ -1,10 +1,12 @@
 <template>
   <div
+    v-if="showFork || showRevert"
     class="pointer-events-none absolute right-1 z-10 flex items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100"
     :class="outside ? '-top-5' : 'top-0.5'"
     data-testid="agent-message-actions"
   >
     <button
+      v-if="showFork"
       type="button"
       class="flex h-5 w-5 items-center justify-center border-0 bg-transparent p-0 text-[12px] text-[color:var(--text-tertiary)] hover:text-[color:var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
       :title="forkLabel"
@@ -43,9 +45,10 @@ withDefaults(
     forkLabel: string;
     revertLabel: string;
     outside?: boolean;
+    showFork?: boolean;
     showRevert?: boolean;
   }>(),
-  { outside: false, showRevert: true },
+  { outside: false, showFork: true, showRevert: true },
 );
 const emit = defineEmits<{
   fork: [];

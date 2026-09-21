@@ -80,13 +80,16 @@
             :key="row.id"
             class="group relative rounded"
             :class="messageClass(row)"
+            :style="messageActionAnchorStyle(row)"
+            :data-message-id="row.message.id"
           >
             <AgentMessageActions
-              v-if="showMessageControls(row)"
+              v-if="isMessageActionAnchor(row) && (showFork(row.message) || showRevert(row.message))"
               :disabled="isSessionMessageMutationPending"
               :fork-label="t('agent.client.fork')"
               :revert-label="t('agent.client.revert')"
-              :show-revert="row.message.type === 'user'"
+              :show-fork="showFork(row.message)"
+              :show-revert="showRevert(row.message)"
               :outside="row.message.type === 'user'"
               @fork="onFork(row.message.id)"
               @revert="onRevert(row.message)"
@@ -442,7 +445,8 @@ import AssistantMarkdownMessage from "./AssistantMarkdownMessage.vue";
 import {
   agentUserMessageDraftText,
   buildConversationParts,
-  canMutateAgentTimelineMessage,
+  canForkAgentTimelineMessage,
+  canRevertAgentTimelineMessage,
   hasAgentMessageTextPart,
   type ConversationPart,
 } from "./agentMessageTimeline";
@@ -489,6 +493,7 @@ import {
   shouldRunAgentElapsedTimer,
 } from "./agentClientHeader";
 import { runAgentSessionMessageMutation } from "./agentMessageMutationAction";
+import { runAgentSessionForkAction } from "./agentForkSessionAction";
 import {
   createAgentCompactAttemptFingerprint,
   resolveAgentCompactAttempt,
@@ -565,6 +570,7 @@ const props = defineProps<{
   sessionReady: boolean;
   initialDraft?: string;
   ensureSession?: (sessionId: string) => Promise<string>;
+  forkSession?: typeof forkAgentSession;
   canChooseSession?: boolean;
   active: boolean;
   modelValue?: string | null;
@@ -743,14 +749,27 @@ function messageClass(row: ConversationPart) {
         ? "p-2 bg-[var(--panel-bg)]"
         : assistantWithoutText
           ? "px-2 py-0"
-          : "p-2";
+        : "p-2";
 }
-function showMessageControls(row: ConversationPart) {
-  return (
-    !isSubtaskSession.value &&
-    canMutateAgentTimelineMessage(row.message) &&
-    row.part?.position === 0
-  );
+function isMessageActionAnchor(row: ConversationPart) {
+  return row.isFirstRowForMessage;
+}
+function messageActionAnchorStyle(row: ConversationPart) {
+  if (
+    isMessageActionAnchor(row) &&
+    row.message.type === "assistant" &&
+    row.part === null &&
+    showFork(row.message)
+  ) {
+    return { minHeight: "1.75rem" };
+  }
+  return undefined;
+}
+function showFork(targetMessage: AgentMessage) {
+  return !isSubtaskSession.value && canForkAgentTimelineMessage(targetMessage);
+}
+function showRevert(targetMessage: AgentMessage) {
+  return !isSubtaskSession.value && canRevertAgentTimelineMessage(targetMessage);
 }
 
 function clearRefreshTimer() {
@@ -939,11 +958,12 @@ async function onFork(messageId: string) {
     state: messageMutationState,
     sessionId: props.sessionId,
     mutate: async () => {
-      const result = await forkAgentSession({
-        fromSessionId: props.sessionId,
-        fromMessageId: messageId,
+      await runAgentSessionForkAction({
+        sourceSessionId: props.sessionId,
+        sourceMessageId: messageId,
+        fork: props.forkSession ?? forkAgentSession,
+        onForked: (sessionId) => emit("forked", sessionId),
       });
-      emit("forked", result.id);
     },
     onError: (error) => message.error(error instanceof Error ? error.message : String(error)),
   });

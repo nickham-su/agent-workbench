@@ -64,16 +64,24 @@ test("真实 AgentMessageActions：点击 Fork 后同 Session DOM disabled，异
   wrapper.unmount();
 });
 
-test("真实 AgentMessageActions：Assistant 消息可隐藏回退按钮，仅保留 Fork", () => {
+test("真实 AgentMessageActions：独立控制 Fork 与 Revert 按钮组合", async () => {
   const wrapper = mount(component.default, {
     props: {
       disabled: false,
       forkLabel: "fork",
       revertLabel: "revert",
+      showFork: true,
       showRevert: false,
     },
   });
   assert.equal(wrapper.findAll("button").length, 1);
   assert.equal(wrapper.get("button").attributes("aria-label"), "fork");
+  await wrapper.setProps({ showFork: false, showRevert: true });
+  assert.equal(wrapper.findAll("button").length, 1);
+  assert.equal(wrapper.get("button").attributes("aria-label"), "revert");
+  await wrapper.setProps({ showFork: true, showRevert: true });
+  assert.deepEqual(wrapper.findAll("button").map((button) => button.attributes("aria-label")), ["fork", "revert"]);
+  await wrapper.setProps({ showFork: false, showRevert: false });
+  assert.equal(wrapper.find('[data-testid="agent-message-actions"]').exists(), false);
   wrapper.unmount();
 });

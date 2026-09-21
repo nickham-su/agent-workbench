@@ -153,6 +153,7 @@ type RunStateRow = {
 };
 
 const SQLITE_IN_BATCH_SIZE = 400;
+const MAX_RETAINED_ANCHOR_ANCESTRY_DEPTH = 10_000;
 const TERMINAL_TOOL_EXECUTION_STATUSES = new Set<AgentToolExecutionStatus>([
   "completed", "failed", "cancelled", "unknown",
 ]);
@@ -386,18 +387,37 @@ export function assertRetainedAnchorOnPreviousChain(db: Db, input: {
 }) {
   if (input.retainedFromMessageId == null) return;
   const rows = db.prepare(`
-    with recursive legal_source_sequence(id, previous_message_id, workspace_id, type, status) as (
-      select id, previous_message_id, workspace_id, type, status
+    with recursive legal_source_sequence(id, previous_message_id, workspace_id, type, status, depth, path, missing, cross_workspace, cycle) as (
+      select id, previous_message_id, workspace_id, type, status, 0, '|' || id || '|', 0, 0, 0
       from agent_message where id = @previousMessageId and workspace_id = @workspaceId
       union all
-       select message.id, message.previous_message_id, message.workspace_id, message.type, message.status
-       from agent_message message join legal_source_sequence on legal_source_sequence.previous_message_id = message.id
-       where message.workspace_id = @workspaceId
+      select message.id, message.previous_message_id, message.workspace_id, message.type, message.status,
+        legal_source_sequence.depth + 1, legal_source_sequence.path || coalesce(message.id, '<missing>') || '|',
+        case when message.id is null then 1 else 0 end,
+        case when message.id is not null and message.workspace_id <> @workspaceId then 1 else 0 end,
+        case when message.id is not null and instr(legal_source_sequence.path, '|' || message.id || '|') > 0 then 1 else 0 end
+      from legal_source_sequence left join agent_message message on legal_source_sequence.previous_message_id = message.id
+      where legal_source_sequence.previous_message_id is not null
+        and legal_source_sequence.id <> @retainedFromMessageId
+        and legal_source_sequence.missing = 0
+        and legal_source_sequence.cross_workspace = 0
+        and legal_source_sequence.cycle = 0
+        and legal_source_sequence.depth < @maxDepth
     )
-    select id, workspace_id as workspaceId, type, status
-    from legal_source_sequence where id = @retainedFromMessageId limit 1
-  `).get(input) as RetainedAnchorCandidate | undefined;
-  if (!isLegalRetainedOriginalAnchor(rows, input.workspaceId)) {
+    select id, workspace_id as workspaceId, type, status, previous_message_id as previousMessageId,
+      depth, missing, cross_workspace as crossWorkspace, cycle
+    from legal_source_sequence order by depth asc
+  `).all({ ...input, maxDepth: MAX_RETAINED_ANCHOR_ANCESTRY_DEPTH }) as Array<RetainedAnchorCandidate & {
+    previousMessageId: string | null; depth: number; missing: number; crossWorkspace: number; cycle: number;
+  }>;
+  const invalid = rows.find((row) => row.missing || row.crossWorkspace || row.cycle);
+  if (invalid
+    || (!rows.some((row) => row.id === input.retainedFromMessageId)
+      && (!rows.length || rows.at(-1)!.previousMessageId !== null))) {
+    throw new ModelContextInvariantError("retained anchor ancestry is invalid");
+  }
+  const anchor = rows.find((row) => row.id === input.retainedFromMessageId);
+  if (!isLegalRetainedOriginalAnchor(anchor, input.workspaceId)) {
     throw new ModelContextInvariantError("retained anchor is not a completed non-compaction ancestor");
   }
 }

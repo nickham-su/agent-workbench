@@ -76,6 +76,8 @@ export type ConversationPart = {
   message: AgentMessage;
   part: AgentMessagePart | null;
   execution: AgentTimelineToolExecution | null;
+  /** 每条消息只在一个 Conversation row 渲染结构操作。 */
+  isFirstRowForMessage: boolean;
 };
 
 export function hasAgentMessageTextPart(message: AgentMessage) {
@@ -92,11 +94,14 @@ export function agentUserMessageDraftText(message: AgentMessage) {
     .join("");
 }
 
-/** root 之前的历史仅供浏览，不能触发当前结构操作区间之外的操作。 */
-export function canMutateAgentTimelineMessage(message: AgentMessage) {
-  return message.inCurrentOperationRange === true && (
-    message.type === "user" || (message.type === "assistant" && hasAgentMessageTextPart(message))
-  );
+/** Fork 可从当前物理消息链的历史 User/Assistant 分支继续。 */
+export function canForkAgentTimelineMessage(message: AgentMessage) {
+  return message.type === "user" || message.type === "assistant";
+}
+
+/** Revert 仍只允许作用于当前有效操作范围内的 User 消息。 */
+export function canRevertAgentTimelineMessage(message: AgentMessage) {
+  return message.inCurrentOperationRange === true && message.type === "user";
 }
 
 /** 以 Message 的 Part.position 为唯一显示顺序；ToolCall 通过 callPartId 显式关联 execution。 */
@@ -104,11 +109,12 @@ export function buildConversationParts(state: AgentMessageTimelineState): Conver
   const executionByCallPartId = new Map(state.toolExecutions.map((execution) => [execution.callPartId, execution]));
   return state.messages.flatMap<ConversationPart>((message) => {
     const parts = [...message.parts].sort((left, right) => left.position - right.position);
-    if (parts.length === 0) return [{ message, part: null, execution: null }];
-    return parts.map((part) => ({
+    if (parts.length === 0) return [{ message, part: null, execution: null, isFirstRowForMessage: true }];
+    return parts.map((part, index) => ({
       message,
       part,
       execution: part.type === "tool_call" ? executionByCallPartId.get(part.id) ?? null : null,
+      isFirstRowForMessage: index === 0,
     }));
   });
 }

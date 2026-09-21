@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { initSchema } from "../../infra/db/schema.js";
 import {
   AgentMessageDomainError,
+  AgentMessageGraphInvariantError,
   AgentRunTerminalInvariantError,
   AgentMessageConflictError,
   appendMessage,
@@ -50,6 +51,30 @@ function session(db: Database.Database, id = "s-a", workspaceId = "ws-a") { crea
 function activate(db: Database.Database, sessionId = "s-a", workspaceId = "ws-a", runId = "run-a") {
   createMessageRunRecord(db, { runId, workspaceId, sessionId, triggerMessageId: null, agentId: "agent", providerId: "provider", modelId: "model", status: "running", createdAt: 1 });
   db.prepare("update session_run_state set status='running',active_run_id=? where workspace_id=? and session_id=?").run(runId, workspaceId, sessionId);
+}
+
+function withForeignKeysDisabled(db: Database.Database, mutate: () => void) {
+  db.pragma("foreign_keys = OFF");
+  try {
+    mutate();
+  } finally {
+    db.pragma("foreign_keys = ON");
+  }
+}
+
+function withRetainedAnchorMutationEnabled(db: Database.Database, mutate: () => void) {
+  const triggerNames = ["agent_message_retained_workspace_update", "agent_message_retained_immutable_update"];
+  const triggers = triggerNames.map((name) => {
+    const trigger = db.prepare("select sql from sqlite_master where type='trigger' and name=?").get(name) as { sql: string } | undefined;
+    assert.ok(trigger?.sql, `${name} trigger must exist`);
+    return { name, sql: trigger.sql };
+  });
+  for (const { name } of triggers) db.exec(`drop trigger ${name}`);
+  try {
+    mutate();
+  } finally {
+    for (const { sql } of triggers) db.exec(sql);
+  }
 }
 
 function primaryProfile(modelId = "model", providerModelId?: string) {
@@ -714,6 +739,139 @@ test("head and fork reject context-root violations and unsettled execution witho
     (error) => error instanceof AgentMessageDomainError && error.code === "SESSION_NOT_IDLE"
   );
   assert.equal((db.prepare("select count(*) as count from agent_session where id='fork'").get() as { count: number }).count, 0);
+});
+
+test("Fork restores target-time roots across historical compactions and preserves Revert boundaries", () => {
+  const db = createDb(); session(db);
+  const append = (id: string, type: "user" | "assistant", createdAt: number) => {
+    const current = getMessageSession(db, "ws-a", "s-a")!;
+    appendMessage(db, { id, workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: current.headMessageId, expectedRevision: current.revision, type, status: "completed", parts: [], createdAt });
+  };
+  append("m1", "user", 2); append("m2", "assistant", 3);
+  let current = getMessageSession(db, "ws-a", "s-a")!;
+  commitCompactionMessageForTest(db, { id: "c1", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: current.headMessageId, expectedRevision: current.revision, textPartId: "c1-part", text: "summary 1", createdAt: 4 });
+  append("m3", "user", 5); append("m4", "assistant", 6);
+  current = getMessageSession(db, "ws-a", "s-a")!;
+  commitCompactionMessageForTest(db, { id: "c2", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: current.headMessageId, expectedRevision: current.revision, textPartId: "c2-part", text: "summary 2", createdAt: 7 });
+  append("m5", "user", 8);
+  const before = {
+    messages: (db.prepare("select count(*) as count from agent_message").get() as { count: number }).count,
+    parts: (db.prepare("select count(*) as count from agent_message_part").get() as { count: number }).count,
+    executions: (db.prepare("select count(*) as count from agent_tool_execution").get() as { count: number }).count,
+  };
+  for (const [targetMessageId, root] of Object.entries({ m1: null, m2: null, m3: "c1", m4: "c1", m5: "c2" })) {
+    const source = getMessageSession(db, "ws-a", "s-a")!;
+    const child = forkMessageSession(db, { id: `child-${targetMessageId}`, workspaceId: "ws-a", sourceSessionId: "s-a", expectedHeadMessageId: source.headMessageId, expectedRevision: source.revision, targetMessageId, title: targetMessageId, kind: "primary", createdAt: 9 });
+    assert.equal(child.headMessageId, targetMessageId);
+    assert.equal(child.contextRootMessageId, root);
+  }
+  assert.equal((db.prepare("select count(*) as count from agent_message").get() as { count: number }).count, before.messages);
+  assert.equal((db.prepare("select count(*) as count from agent_message_part").get() as { count: number }).count, before.parts);
+  assert.equal((db.prepare("select count(*) as count from agent_tool_execution").get() as { count: number }).count, before.executions);
+  assert.equal((db.prepare("select count(*) as count from session_run_state where session_id like 'child-%'").get() as { count: number }).count, 5);
+  const source = getMessageSession(db, "ws-a", "s-a")!;
+  assert.throws(() => forkMessageSession(db, { id: "bad-compaction", workspaceId: "ws-a", sourceSessionId: "s-a", expectedHeadMessageId: source.headMessageId, expectedRevision: source.revision, targetMessageId: "c1", title: "bad", kind: "primary", createdAt: 10 }), (error) => error instanceof AgentMessageDomainError && error.code === "FORK_TARGET_INVALID");
+  assert.throws(() => moveMessageHead(db, { workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: source.headMessageId, expectedRevision: source.revision, nextHeadMessageId: "m1", updatedAt: 10 }), (error) => error instanceof AgentMessageDomainError && error.code === "MESSAGE_TARGET_BEFORE_CONTEXT_ROOT");
+  assert.throws(() => revertBeforeUserMessage(db, { workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: source.headMessageId, expectedRevision: source.revision, targetMessageId: "m1", updatedAt: 10 }), (error) => error instanceof AgentMessageDomainError && error.code === "MESSAGE_TARGET_BEFORE_CONTEXT_ROOT");
+});
+
+test("Fork keeps target-time roots unchanged for an allowed active source", () => {
+  const db = createDb(); session(db);
+  appendMessage(db, { id: "before", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", parts: [], createdAt: 2 });
+  activate(db);
+  let source = getMessageSession(db, "ws-a", "s-a")!;
+  assert.throws(
+    () => forkMessageSession(db, { id: "public-rejected", workspaceId: "ws-a", sourceSessionId: "s-a", expectedHeadMessageId: source.headMessageId, expectedRevision: source.revision, targetMessageId: "before", title: "public", kind: "primary", createdAt: 3 }),
+    (error) => error instanceof AgentMessageDomainError && error.code === "SESSION_NOT_IDLE",
+  );
+  const noCompaction = forkMessageSession(db, { id: "active-no-compaction", workspaceId: "ws-a", sourceSessionId: "s-a", expectedHeadMessageId: source.headMessageId, expectedRevision: source.revision, targetMessageId: "before", title: "subtask", kind: "subtask", createdAt: 3, allowSourceWithActiveRun: true });
+  assert.equal(noCompaction.headMessageId, "before");
+  assert.equal(noCompaction.contextRootMessageId, null);
+
+  const second = createDb(); session(second);
+  appendMessage(second, { id: "old", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", parts: [], createdAt: 2 });
+  let current = getMessageSession(second, "ws-a", "s-a")!;
+  commitCompactionMessageForTest(second, { id: "summary", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: current.headMessageId, expectedRevision: current.revision, textPartId: "summary-part", text: "summary", createdAt: 3 });
+  current = getMessageSession(second, "ws-a", "s-a")!;
+  appendMessage(second, { id: "after", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: current.headMessageId, expectedRevision: current.revision, type: "assistant", status: "completed", parts: [], createdAt: 4 });
+  activate(second);
+  source = getMessageSession(second, "ws-a", "s-a")!;
+  const withCompaction = forkMessageSession(second, { id: "active-with-compaction", workspaceId: "ws-a", sourceSessionId: "s-a", expectedHeadMessageId: source.headMessageId, expectedRevision: source.revision, targetMessageId: "after", title: "subtask", kind: "subtask", createdAt: 5, allowSourceWithActiveRun: true });
+  assert.equal(withCompaction.headMessageId, "after");
+  assert.equal(withCompaction.contextRootMessageId, "summary");
+});
+
+test("Fork validates the selected compaction root and rolls back on corruption", () => {
+  const createSourceWithRoot = (retainedFromMessageId: string | null) => {
+    const db = createDb(); session(db);
+    appendMessage(db, { id: "old", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", parts: [], createdAt: 2 });
+    const beforeRoot = getMessageSession(db, "ws-a", "s-a")!;
+    commitCompactionMessageForTest(db, {
+      id: "root", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: beforeRoot.headMessageId,
+      expectedRevision: beforeRoot.revision, textPartId: "root-part", text: "summary", retainedFromMessageId, createdAt: 3,
+    });
+    const afterRoot = getMessageSession(db, "ws-a", "s-a")!;
+    appendMessage(db, { id: "target", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: afterRoot.headMessageId, expectedRevision: afterRoot.revision, type: "user", status: "completed", parts: [], createdAt: 4 });
+    return db;
+  };
+  const cases: Array<{ name: string; retainedFromMessageId: string | null; corrupt: (db: Database.Database) => void }> = [
+    { name: "non-completed status", retainedFromMessageId: null, corrupt: (db) => db.prepare("update agent_message set status='failed' where id='root'").run() },
+    { name: "missing predecessor", retainedFromMessageId: null, corrupt: (db) => withForeignKeysDisabled(db, () => db.prepare("update agent_message set previous_message_id=null where id='root'").run()) },
+    { name: "missing predecessor row", retainedFromMessageId: null, corrupt: (db) => withForeignKeysDisabled(db, () => db.prepare("update agent_message set previous_message_id='missing' where id='root'").run()) },
+    { name: "cross-workspace predecessor", retainedFromMessageId: null, corrupt: (db) => { db.prepare("insert into agent_message (id,workspace_id,previous_message_id,depth,type,status,origin_session_id,origin_run_id,updated_revision,created_at,updated_at) values ('foreign','ws-b',null,0,'user','completed','s-a',null,0,1,1)").run(); withForeignKeysDisabled(db, () => db.prepare("update agent_message set previous_message_id='foreign' where id='root'").run()); } },
+    { name: "invalid retained anchor", retainedFromMessageId: "old", corrupt: (db) => withRetainedAnchorMutationEnabled(db, () => withForeignKeysDisabled(db, () => db.prepare("update agent_message set retained_from_message_id='missing' where id='root'").run())) },
+  ];
+  for (const scenario of cases) {
+    const db = createSourceWithRoot(scenario.retainedFromMessageId);
+    scenario.corrupt(db);
+    const source = getMessageSession(db, "ws-a", "s-a")!;
+    const sourceBefore = { headMessageId: source.headMessageId, contextRootMessageId: source.contextRootMessageId, revision: source.revision };
+    assert.throws(
+      () => forkMessageSession(db, { id: "child", workspaceId: "ws-a", sourceSessionId: "s-a", expectedHeadMessageId: source.headMessageId, expectedRevision: source.revision, targetMessageId: "target", title: scenario.name, kind: "primary", createdAt: 5 }),
+      AgentMessageGraphInvariantError,
+    );
+    assert.equal(getMessageSession(db, "ws-a", "child"), null);
+    assert.equal((db.prepare("select count(*) as count from session_run_state where session_id='child'").get() as { count: number }).count, 0);
+    const sourceAfter = getMessageSession(db, "ws-a", "s-a")!;
+    assert.deepEqual(
+      { headMessageId: sourceAfter.headMessageId, contextRootMessageId: sourceAfter.contextRootMessageId, revision: sourceAfter.revision },
+      sourceBefore,
+    );
+  }
+});
+
+test("Fork ignores corruption before a selected compaction unless its retained anchor requires it", () => {
+  const db = createDb(); session(db);
+  appendMessage(db, { id: "old", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", parts: [], createdAt: 2 });
+  const beforeRoot = getMessageSession(db, "ws-a", "s-a")!;
+  commitCompactionMessageForTest(db, { id: "root", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: beforeRoot.headMessageId, expectedRevision: beforeRoot.revision, textPartId: "root-part", text: "summary", createdAt: 3 });
+  const afterRoot = getMessageSession(db, "ws-a", "s-a")!;
+  appendMessage(db, { id: "target", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: afterRoot.headMessageId, expectedRevision: afterRoot.revision, type: "user", status: "completed", parts: [], createdAt: 4 });
+  withForeignKeysDisabled(db, () => db.prepare("update agent_message set previous_message_id='missing' where id='old'").run());
+  const source = getMessageSession(db, "ws-a", "s-a")!;
+  const child = forkMessageSession(db, { id: "child", workspaceId: "ws-a", sourceSessionId: "s-a", expectedHeadMessageId: source.headMessageId, expectedRevision: source.revision, targetMessageId: "target", title: "child", kind: "primary", createdAt: 5 });
+  assert.equal(child.contextRootMessageId, "root");
+});
+
+test("Fork fails closed and rolls back on broken source ancestry", () => {
+  const cases: Array<{ name: string; corrupt: (db: Database.Database) => void }> = [
+    { name: "missing before target", corrupt: (db) => withForeignKeysDisabled(db, () => db.prepare("update agent_message set previous_message_id='missing' where id='head'").run()) },
+    { name: "cross-workspace before target", corrupt: (db) => { db.prepare("insert into agent_message (id,workspace_id,previous_message_id,depth,type,status,origin_session_id,origin_run_id,updated_revision,created_at,updated_at) values ('other','ws-b',null,0,'user','completed','s-a',null,0,1,1)").run(); withForeignKeysDisabled(db, () => db.prepare("update agent_message set previous_message_id='other' where id='head'").run()); } },
+    { name: "cycle before target", corrupt: (db) => withForeignKeysDisabled(db, () => db.prepare("update agent_message set previous_message_id='head' where id='head'").run()) },
+    { name: "missing after target", corrupt: (db) => withForeignKeysDisabled(db, () => db.prepare("update agent_message set previous_message_id='missing' where id='target'").run()) },
+    { name: "cross-workspace after target", corrupt: (db) => { db.prepare("insert into agent_message (id,workspace_id,previous_message_id,depth,type,status,origin_session_id,origin_run_id,updated_revision,created_at,updated_at) values ('other','ws-b',null,0,'user','completed','s-a',null,0,1,1)").run(); withForeignKeysDisabled(db, () => db.prepare("update agent_message set previous_message_id='other' where id='target'").run()); } },
+    { name: "cycle after target", corrupt: (db) => withForeignKeysDisabled(db, () => db.prepare("update agent_message set previous_message_id='head' where id='target'").run()) },
+  ];
+  for (const scenario of cases) {
+    const db = createDb(); session(db);
+    appendMessage(db, { id: "target", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", parts: [], createdAt: 2 });
+    appendMessage(db, { id: "head", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: "target", expectedRevision: 1, type: "assistant", status: "completed", parts: [], createdAt: 3 });
+    scenario.corrupt(db);
+    const source = getMessageSession(db, "ws-a", "s-a")!;
+    assert.throws(() => forkMessageSession(db, { id: "child", workspaceId: "ws-a", sourceSessionId: "s-a", expectedHeadMessageId: source.headMessageId, expectedRevision: source.revision, targetMessageId: "target", title: scenario.name, kind: "primary", createdAt: 4 }), AgentMessageGraphInvariantError);
+    assert.equal(getMessageSession(db, "ws-a", "child"), null);
+    assert.equal((db.prepare("select count(*) as count from session_run_state where session_id='child'").get() as { count: number }).count, 0);
+  }
 });
 
 test("failure recovery fences the active Run and atomically settles streaming Messages and Executions", () => {

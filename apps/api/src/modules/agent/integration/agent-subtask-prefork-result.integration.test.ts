@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import type { FastifyInstance } from "fastify";
 import { test, type TestContext } from "node:test";
 import { setSettingJson } from "../../settings/settings.store.js";
-import { getRunRecord } from "../agent-message.store.js";
+import { commitCompactionMessageForTest, getRunRecord } from "../agent-message.store.js";
 import {
   appendMessage,
   getMessageSession,
@@ -196,6 +196,8 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
   const started = response.json() as { sessionId: string; runId: string; agentName: string };
   assert.equal(started.agentName, "default");
 
+  const child = getMessageSession(fixture.db, fixture.workspaceId, started.sessionId)!;
+  assert.equal(child.contextRootMessageId, null);
   const messages = getVisibleMessageChain(fixture.db, { workspaceId: fixture.workspaceId, sessionId: started.sessionId });
   assert.equal(messages.some((message) => message.type === "assistant" && message.id === anchor.assistantMessageId), false);
   assert.equal(messages[0]?.type, "user");
@@ -216,6 +218,51 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
   assert.equal(promptContext.uiLocale, null);
   assert.equal(promptContext.messages.some((message) => message.role === "system" && typeof message.content === "string" && message.content.includes("All historical content before this system message")), true);
   assert.equal(promptContext.tools.some((tool) => tool.name === "subtask"), false);
+});
+
+test("agent subtask fork 从 active parent 恢复 target-time compaction root", async (t: TestContext) => {
+  const fixture = await createP2Fixture(t, { agentWorkerConcurrency: 0 });
+  await configureAgentDefaults(fixture.app);
+  const parent = await createSession(fixture.app, fixture.workspaceId);
+  appendMessage(fixture.db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: parent.id,
+    id: "old-history",
+    expectedHeadMessageId: null,
+    expectedRevision: 0,
+    type: "user",
+    status: "completed",
+    parts: [{ id: "old-history-part", position: 0, type: "text", text: "old history" }],
+    createdAt: 1,
+  });
+  const beforeRoot = getMessageSession(fixture.db, fixture.workspaceId, parent.id)!;
+  const root = commitCompactionMessageForTest(fixture.db, {
+    id: "root-summary", workspaceId: fixture.workspaceId, sessionId: parent.id,
+    expectedHeadMessageId: beforeRoot.headMessageId, expectedRevision: beforeRoot.revision,
+    textPartId: "root-summary-part", text: "summary history", createdAt: 2,
+  });
+  const run = createMessageRunForTest({ fixture, sessionId: parent.id, subtaskDepth: 0, text: "boundary history" });
+  const tool = createMessageToolAnchor({
+    fixture, sessionId: parent.id, runId: run.runId, toolName: "subtask",
+    input: { description: "研究问题", prompt: "continue from summary", agentId: "default", session: { mode: "fork" } },
+  });
+  startToolExecutionForTest({ fixture, sessionId: parent.id, runId: run.runId, toolExecutionId: tool.toolExecutionId });
+  const response = await startSubtaskForAnchor({
+    fixture, parentSessionId: parent.id, parentRunId: run.runId, parentToolExecutionId: tool.toolExecutionId,
+    description: "研究问题", prompt: "continue from summary", session: { mode: "fork" },
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  const started = response.json() as { sessionId: string; runId: string };
+  const child = getMessageSession(fixture.db, fixture.workspaceId, started.sessionId)!;
+  assert.equal(child.forkedFromMessageId, run.triggerMessageId);
+  assert.equal(child.headMessageId, `${started.runId}-user`);
+  assert.equal(child.contextRootMessageId, root.id);
+  const messages = getVisibleMessageChain(fixture.db, { workspaceId: fixture.workspaceId, sessionId: started.sessionId });
+  assert.deepEqual(messages.map((message) => message.id), [root.id, run.triggerMessageId, `${started.runId}-system-0`, `${started.runId}-user`]);
+  assert.equal(messages[0]?.parts[0]?.type, "text");
+  assert.equal(messages[0]?.parts[0]?.type === "text" && messages[0].parts[0].text, "summary history");
+  assert.equal(messages[2]?.type, "system");
+  assert.equal(messages[3]?.type, "user");
 });
 
 test("agent subtask fork 继承父 Run locale 并插入中文防护消息", async (t: TestContext) => {

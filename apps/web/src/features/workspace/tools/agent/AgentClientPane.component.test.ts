@@ -1,15 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { AgentMessageSessionRunState } from "@agent-workbench/shared";
+import type { AgentMessage, AgentMessageSessionRunState } from "@agent-workbench/shared";
+import { defineComponent, h } from "vue";
 
-const [{ mount }, component, { createI18n }, { nextTick, reactive }, { agentSessionStatusStoreKey }, { message }] = await Promise.all([
+const [{ mount }, component, { createI18n }, { nextTick, reactive }, { agentSessionStatusStoreKey }, { message, Modal }, { replaceAgentTimelineSnapshot }] = await Promise.all([
   import("@vue/test-utils"),
   import("./AgentClientPane.vue"),
   import("vue-i18n"),
   import("vue"),
   import("./useAgentSessionStatusStore"),
   import("ant-design-vue"),
+  import("./agentMessageTimeline"),
 ]);
+
+const AgentClientPane = component.default.__vccOpts ?? component.default;
 
 const baseRunState = (overrides: Partial<AgentMessageSessionRunState> = {}): AgentMessageSessionRunState => reactive({
   workspaceId: "ws-a",
@@ -39,6 +43,16 @@ function createKeyboardEvent(key: string, shiftKey = false) {
   return event;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 const componentStubs = {
   "a-select": true,
   "a-modal": true,
@@ -61,6 +75,38 @@ const componentStubs = {
   AssistantMarkdownMessage: true,
 };
 
+function agentMessage(overrides: Partial<AgentMessage> & Pick<AgentMessage, "id">): AgentMessage {
+  return {
+    workspaceId: "ws-a",
+    previousMessageId: null,
+    replacesMessageId: null,
+    depth: 0,
+    type: "assistant",
+    status: "completed",
+    originSessionId: null,
+    originRunId: null,
+    inCurrentOperationRange: undefined,
+    updatedRevision: 1,
+    createdAt: 1,
+    updatedAt: 1,
+    parts: [],
+    ...overrides,
+  } as AgentMessage;
+}
+
+function timelineSnapshot(messages: AgentMessage[]) {
+  return {
+    session: {
+      id: "session-a", workspaceId: "ws-a", title: "Session A", kind: "primary" as const,
+      headMessageId: messages.at(-1)?.id ?? null, contextRootMessageId: null, revision: 1,
+      forkedFromSessionId: null, forkedFromMessageId: null, createdAt: 1, updatedAt: 1,
+    },
+    timelineReset: false,
+    messages,
+    toolExecutions: [],
+  };
+}
+
 function createMountGlobal(statusStore: { runStateOf: () => AgentMessageSessionRunState }) {
   const i18n = createI18n({ legacy: false, locale: "zh-CN", messages: { "zh-CN": {} } });
   return {
@@ -77,10 +123,11 @@ function mountPane(options?: {
   modelValue?: string;
   initialDraft?: string;
   ensureSession?: (sessionId: string) => Promise<string>;
+  forkSession?: (request: { fromSessionId: string; fromMessageId: string }) => Promise<{ id: string }>;
 }) {
   const runState = options?.runState ?? baseRunState();
   const statusStore = { runStateOf: () => runState };
-  const wrapper = mount(component.default.__vccOpts ?? component.default, {
+  const wrapper = mount(AgentClientPane, {
     attachTo: document.body,
     props: {
       workspaceId: "ws-a",
@@ -102,6 +149,7 @@ function mountPane(options?: {
       modelOpenIntent: null,
       initialDraft: options?.initialDraft,
       ensureSession: options?.ensureSession,
+      forkSession: options?.forkSession,
     },
     global: createMountGlobal(statusStore),
   });
@@ -111,6 +159,205 @@ function mountPane(options?: {
     setRunState: (next: Partial<AgentMessageSessionRunState>) => Object.assign(runState, next),
   };
 }
+
+async function setTimeline(wrapper: ReturnType<typeof mount>, messages: AgentMessage[]) {
+  const vm = wrapper.vm as unknown as { timelineState: unknown };
+  const state = replaceAgentTimelineSnapshot({ revision: 0, messages: [], toolExecutions: [] }, timelineSnapshot(messages));
+  const exposed = vm.timelineState as { value?: unknown };
+  if ("value" in exposed) exposed.value = state;
+  else (vm as { timelineState: unknown }).timelineState = state;
+  await nextTick();
+}
+
+test("真实 AgentClientPane：历史与当前消息分别渲染 Fork/Revert 操作", async () => {
+  const { wrapper } = mountPane({ sessionReady: false });
+  try {
+    const timelineMessages = [
+      agentMessage({ id: "old-user", type: "user", inCurrentOperationRange: false }),
+      agentMessage({ id: "old-assistant", type: "assistant", inCurrentOperationRange: false }),
+      agentMessage({ id: "current-user", type: "user", inCurrentOperationRange: true }),
+      agentMessage({ id: "current-assistant", type: "assistant", inCurrentOperationRange: true }),
+      agentMessage({ id: "summary", type: "compaction", inCurrentOperationRange: true }),
+    ];
+    await setTimeline(wrapper, timelineMessages);
+    assert.deepEqual((wrapper.vm as unknown as { timelineState: { messages: AgentMessage[] } }).timelineState.messages.map((item) => [item.id, item.inCurrentOperationRange]), [...timelineMessages].sort((left, right) => left.id.localeCompare(right.id)).map((item) => [item.id, item.inCurrentOperationRange]));
+    const actionByMessageId = new Map(
+      wrapper.findAllComponents({ name: "AgentMessageActions" }).map((action) => [
+        action.element.parentElement?.getAttribute("data-message-id"),
+        { showFork: action.props("showFork"), showRevert: action.props("showRevert") },
+      ]),
+    );
+    assert.deepEqual(actionByMessageId.get("old-user"), { showFork: true, showRevert: false });
+    assert.deepEqual(actionByMessageId.get("old-assistant"), { showFork: true, showRevert: false });
+    assert.deepEqual(actionByMessageId.get("current-user"), { showFork: true, showRevert: true });
+    assert.deepEqual(actionByMessageId.get("current-assistant"), { showFork: true, showRevert: false });
+    assert.equal(actionByMessageId.has("summary"), false);
+  } finally {
+    wrapper.unmount();
+  }
+});
+
+test("真实 AgentClientPane：无内容 Assistant 保留单个 Fork 的可交互锚点", async () => {
+  const { wrapper } = mountPane({ sessionReady: false });
+  try {
+    await setTimeline(wrapper, [agentMessage({ id: "empty-assistant", type: "assistant", parts: [] })]);
+    const row = wrapper.get('article[data-message-id="empty-assistant"]');
+    assert.equal(row.attributes("style"), "min-height: 1.75rem;");
+    assert.equal(row.findAllComponents({ name: "AgentMessageActions" }).length, 1);
+    const action = row.getComponent({ name: "AgentMessageActions" });
+    assert.equal(action.props("showFork"), true);
+    assert.equal(action.props("showRevert"), false);
+  } finally {
+    wrapper.unmount();
+  }
+});
+
+test("真实 AgentClientPane：多 Part 消息只在排序首行渲染一个操作锚点", async () => {
+  const { wrapper } = mountPane({ sessionReady: false });
+  try {
+    const toolParts = [
+      { id: "tool-late", messageId: "tool-assistant", position: 9, type: "tool_call" as const, toolName: "read", input: {}, providerToolCallId: null, updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+      { id: "reason-early", messageId: "tool-assistant", position: 4, type: "reasoning" as const, text: "think", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+    ];
+    await setTimeline(wrapper, [
+      agentMessage({ id: "tool-assistant", type: "assistant", parts: toolParts }),
+      agentMessage({ id: "image-assistant", type: "assistant", parts: [{ id: "image", messageId: "image-assistant", position: 5, type: "image", attachmentId: "attachment", mediaType: "image/png", filename: "image.png", updatedRevision: 1, createdAt: 1, updatedAt: 1 }] }),
+    ]);
+    for (const messageId of ["tool-assistant", "image-assistant"]) {
+      const rows = wrapper.findAll(`article[data-message-id="${messageId}"]`);
+      assert.equal(rows.length, messageId === "tool-assistant" ? 2 : 1);
+      assert.equal(rows.flatMap((row) => row.findAllComponents({ name: "AgentMessageActions" })).length, 1);
+      assert.equal(rows[0]!.findAllComponents({ name: "AgentMessageActions" }).length, 1);
+      assert.equal(rows.slice(1).flatMap((row) => row.findAllComponents({ name: "AgentMessageActions" })).length, 0);
+    }
+  } finally {
+    wrapper.unmount();
+  }
+});
+
+test("真实 AgentClientPane：Subtask Session 不显示任何结构操作", async () => {
+  const subtask = mountPane({ sessionReady: false });
+  try {
+    await subtask.wrapper.setProps({ sessionKind: "subtask" });
+    await setTimeline(subtask.wrapper, [
+      agentMessage({ id: "subtask-user", type: "user", inCurrentOperationRange: true }),
+      agentMessage({ id: "subtask-assistant", type: "assistant", inCurrentOperationRange: true }),
+    ]);
+    assert.equal(subtask.wrapper.findAllComponents({ name: "AgentMessageActions" }).length, 0);
+  } finally {
+    subtask.wrapper.unmount();
+  }
+});
+
+const ForkActionsStub = defineComponent({
+  name: "AgentMessageActions",
+  props: { disabled: Boolean, showFork: Boolean, showRevert: Boolean },
+  emits: ["fork", "revert"],
+  setup(props, { emit }) {
+    return () => h("div", [
+      props.showFork
+        ? h("button", {
+          "data-testid": "fork-action",
+          disabled: props.disabled,
+          onClick: () => emit("fork"),
+        })
+        : null,
+      props.showRevert
+        ? h("button", {
+          "data-testid": "revert-action",
+          disabled: props.disabled,
+          onClick: () => emit("revert"),
+        })
+        : null,
+    ]);
+  },
+});
+
+function mountForkPane(forkSession: NonNullable<Parameters<typeof mountPane>[0]>["forkSession"]) {
+  return mount(AgentClientPane, {
+    attachTo: document.body,
+    props: {
+      workspaceId: "ws-a", toolId: "agent-tool", sessionId: "session-a", sessionKind: "primary", sessionTitle: "Session A",
+      sessionReady: false, active: true, agentOptions: [], sessionModelStates: {}, sessionModelStateLoading: false,
+      sessionModelMutationPending: false, modelOpenIntent: null, forkSession,
+    },
+    global: {
+      ...createMountGlobal({ runStateOf: () => baseRunState() }),
+      stubs: { ...componentStubs, AgentMessageActions: ForkActionsStub },
+    },
+  });
+}
+
+test("真实 AgentClientPane：点击历史 Fork 构造请求、pending 禁用并 emit 新 Session，且不调用确认", async () => {
+  const completion = deferred<{ id: string }>();
+  const requests: unknown[] = [];
+  const originalConfirm = Modal.confirm;
+  let confirmCalls = 0;
+  const modal = Modal as unknown as { confirm: typeof Modal.confirm };
+  modal.confirm = (() => { confirmCalls += 1; return { destroy() {}, update() {} }; }) as typeof Modal.confirm;
+  const wrapper = mountForkPane(async (request) => { requests.push(request); return await completion.promise; });
+  try {
+    await setTimeline(wrapper, [agentMessage({ id: "historical-user", type: "user", inCurrentOperationRange: false })]);
+    const action = wrapper.get('[data-testid="fork-action"]');
+    await action.trigger("click");
+    await nextTick();
+    assert.deepEqual(requests, [{ fromSessionId: "session-a", fromMessageId: "historical-user" }]);
+    assert.equal((action.element as HTMLButtonElement).disabled, true);
+    assert.equal(confirmCalls, 0);
+    completion.resolve({ id: "forked-session" });
+    await new Promise((resolve) => setImmediate(resolve));
+    await nextTick();
+    assert.equal((action.element as HTMLButtonElement).disabled, false);
+    assert.deepEqual(wrapper.emitted("forked"), [["forked-session"]]);
+  } finally {
+    modal.confirm = originalConfirm;
+    wrapper.unmount();
+  }
+});
+
+test("真实 AgentClientPane：Fork 失败不 emit、恢复 pending 且不改写来源 timeline", async () => {
+  const completion = deferred<{ id: string }>();
+  const wrapper = mountForkPane(async () => await completion.promise);
+  try {
+    await setTimeline(wrapper, [agentMessage({ id: "historical-assistant", type: "assistant", inCurrentOperationRange: false })]);
+    const action = wrapper.get('[data-testid="fork-action"]');
+    await action.trigger("click");
+    await nextTick();
+    assert.equal((action.element as HTMLButtonElement).disabled, true);
+    completion.reject(new Error("fork failed"));
+    await new Promise((resolve) => setImmediate(resolve));
+    await nextTick();
+    assert.equal((action.element as HTMLButtonElement).disabled, false);
+    assert.equal(wrapper.emitted("forked"), undefined);
+    assert.deepEqual((wrapper.vm as unknown as { timelineState: { messages: AgentMessage[] } }).timelineState.messages.map((item) => item.id), ["historical-assistant"]);
+  } finally {
+    wrapper.unmount();
+  }
+});
+
+test("真实 AgentClientPane：点击 Revert 仍打开确认框", async () => {
+  const originalConfirm = Modal.confirm;
+  let confirmCalls = 0;
+  const modal = Modal as unknown as { confirm: typeof Modal.confirm };
+  modal.confirm = (() => {
+    confirmCalls += 1;
+    return { destroy() {}, update() {} };
+  }) as unknown as typeof Modal.confirm;
+  const wrapper = mountForkPane(async () => ({ id: "unused" }));
+  try {
+    await setTimeline(wrapper, [agentMessage({
+      id: "current-user",
+      type: "user",
+      inCurrentOperationRange: true,
+      parts: [{ id: "draft", messageId: "current-user", position: 3, type: "text", text: "draft", updatedRevision: 1, createdAt: 1, updatedAt: 1 }],
+    })]);
+    await wrapper.get('[data-testid="revert-action"]').trigger("click");
+    assert.equal(confirmCalls, 1);
+  } finally {
+    modal.confirm = originalConfirm;
+    wrapper.unmount();
+  }
+});
 
 test("真实 AgentClientPane：输入框字号跟随 AI Agent 字号变量", () => {
   const { wrapper } = mountPane({ sessionReady: false });
