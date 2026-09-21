@@ -103,7 +103,7 @@ export type CompactionProfileFingerprint = string;
 
 export type CompactionModePolicy = {
   mode: CompactionMode;
-  workDeadlineMs: number;
+  workDeadlineMs?: number;
   casReplanAllowance: number;
   casReplanScope: "attempt" | "run" | "recovery";
   maxNetworkRequestsPerLogicalCall: 1 | 2;
@@ -111,8 +111,8 @@ export type CompactionModePolicy = {
 };
 
 export const COMPACTION_MODE_POLICIES: Readonly<Record<CompactionMode, CompactionModePolicy>> = {
-  proactive: { mode: "proactive", workDeadlineMs: 15_000, casReplanAllowance: 0, casReplanScope: "attempt", maxNetworkRequestsPerLogicalCall: 1, maxNetworkRequestCount: 30 },
-  manual: { mode: "manual", workDeadlineMs: 120_000, casReplanAllowance: 1, casReplanScope: "run", maxNetworkRequestsPerLogicalCall: 2, maxNetworkRequestCount: 60 },
+  proactive: { mode: "proactive", casReplanAllowance: 0, casReplanScope: "attempt", maxNetworkRequestsPerLogicalCall: 1, maxNetworkRequestCount: 30 },
+  manual: { mode: "manual", casReplanAllowance: 1, casReplanScope: "run", maxNetworkRequestsPerLogicalCall: 2, maxNetworkRequestCount: 60 },
   "recovery-standard": { mode: "recovery-standard", workDeadlineMs: 45_000, casReplanAllowance: 1, casReplanScope: "recovery", maxNetworkRequestsPerLogicalCall: 2, maxNetworkRequestCount: 60 },
   "recovery-full": { mode: "recovery-full", workDeadlineMs: 45_000, casReplanAllowance: 1, casReplanScope: "recovery", maxNetworkRequestsPerLogicalCall: 2, maxNetworkRequestCount: 60 },
 };

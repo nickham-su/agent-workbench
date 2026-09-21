@@ -74,6 +74,30 @@ test("generateSingleCallText 校验 timeoutMs", async () => {
   );
 });
 
+test("generateSingleCallText 允许 null 关闭单次调用超时", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  let timerCount = 0;
+  globalThis.setTimeout = ((handler: (...args: any[]) => void, delay?: number, ...args: any[]) => {
+    timerCount += 1;
+    return originalSetTimeout(handler, delay, ...args);
+  }) as typeof setTimeout;
+  const profile = createMockProfile();
+  try {
+    await assert.rejects(
+      () =>
+        generateSingleCallText(profile, {
+          messages: [{ role: "user", content: "hello" }],
+          timeoutMs: null,
+          tools: {} as any,
+        }),
+      /tools are disabled by default/,
+    );
+    assert.equal(timerCount, 0);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
 test("single-call 传递共享 headers 与 allowSystemInMessages", async () => {
   const profile = createMockProfile();
   profile.model.options = {

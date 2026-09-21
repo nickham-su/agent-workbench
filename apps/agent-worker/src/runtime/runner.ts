@@ -2256,7 +2256,7 @@ export class AgentRunner {
       messages: ModelMessage[];
       system?: string;
       sessionId?: string;
-      timeoutMs: number;
+      timeoutMs: number | null;
       abortSignal: AbortSignal;
     };
   }) {

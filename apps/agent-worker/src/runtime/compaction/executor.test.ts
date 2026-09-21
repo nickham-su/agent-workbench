@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ApiConflictError, InternalRpcHttpError, InternalRpcInvalidResponseError, InternalRpcNetworkError } from "../apiClient.js";
+import type { ExecutionProfile } from "../apiClient.js";
 import { CompactionExecutor, CompactionWorkDeadlineExceededError } from "./executor.js";
 import { testProfile, testSource } from "./test-fixtures.js";
 
@@ -9,6 +10,9 @@ function createExecutor(input?: {
   summary?: string;
   generateSummary?: (request: Record<string, unknown>) => Promise<{ text: string }>;
   nowMs?: () => number;
+  profile?: ExecutionProfile;
+  onGetExecutionProfile?: (options: Record<string, unknown>) => void;
+  onGetCompactionSource?: (options: Record<string, unknown>) => void;
   workDeadlineMsByMode?: { manual?: number; proactive?: number; "recovery-standard"?: number; "recovery-full"?: number };
   confirm?: () => Promise<{ outcome: "committed" | "not_committed" }>;
   commit?: (request: Record<string, unknown>) => Promise<{ result: "updated" | "ignored"; summaryMessageId: string | null }>;
@@ -17,8 +21,14 @@ function createExecutor(input?: {
   const summaries: Array<Record<string, unknown>> = [];
   const executor = new CompactionExecutor({
     apiClient: {
-      async getExecutionProfile() { return testProfile; },
-      async getCompactionSource() { return input?.source ?? testSource(); },
+      async getExecutionProfile(_request: unknown, options: Record<string, unknown>) {
+        input?.onGetExecutionProfile?.(options);
+        return input?.profile ?? testProfile;
+      },
+      async getCompactionSource(_request: unknown, options: Record<string, unknown>) {
+        input?.onGetCompactionSource?.(options);
+        return input?.source ?? testSource();
+      },
       async commitCompactionWithTerminalIntent(request: Record<string, unknown>) {
         requests.push(request as unknown as Record<string, unknown>);
         return input?.commit
@@ -179,13 +189,59 @@ test("executor blocks pending tools and full recovery rejects trigger media befo
   assert.equal(media.summaries.length, 0);
 });
 
-test("executor enforces an absolute work deadline before source work", async () => {
+test("proactive 与 manual 的总 deadline 使用单次请求超时配置", async () => {
+  for (const [mode, modelTotalTimeoutMs] of [["proactive", 61_000], ["manual", 3_000]] as const) {
+    let now = 0;
+    const observedTimeouts: unknown[] = [];
+    const profile: ExecutionProfile = {
+      ...testProfile,
+      runtime: { ...testProfile.runtime, modelTotalTimeoutMs },
+    };
+    const { executor } = createExecutor({
+      profile,
+      nowMs: () => now,
+      source: testSource({ texts: ["x".repeat(100_000), "recent"] }),
+      onGetExecutionProfile: (options) => observedTimeouts.push(options.timeoutMs),
+      onGetCompactionSource: (options) => {
+        observedTimeouts.push(options.timeoutMs);
+        now = modelTotalTimeoutMs;
+      },
+    });
+
+    assert.deepEqual(
+      await executor.execute({ ...args, profile, mode }),
+      { kind: "unavailable", reason: "deadline" },
+    );
+    assert.deepEqual(observedTimeouts, [modelTotalTimeoutMs, modelTotalTimeoutMs]);
+  }
+});
+
+test("proactive 与 manual 在单次请求超时关闭时不设置总 deadline", async () => {
+  for (const mode of ["proactive", "manual"] as const) {
+    const observedTimeouts: unknown[] = [];
+    const { executor } = createExecutor({
+      source: testSource({ texts: ["x".repeat(100_000), "recent"] }),
+      onGetExecutionProfile: (options) => observedTimeouts.push(options.timeoutMs),
+      onGetCompactionSource: (options) => observedTimeouts.push(options.timeoutMs),
+    });
+
+    assert.equal((await executor.execute({ ...args, mode })).kind, "committed");
+    assert.deepEqual(observedTimeouts, [undefined, undefined]);
+  }
+});
+
+test("executor enforces an absolute configured work deadline before source work", async () => {
   let reads = 0;
+  const profile: ExecutionProfile = {
+    ...testProfile,
+    runtime: { ...testProfile.runtime, modelTotalTimeoutMs: 15_000 },
+  };
   const { executor } = createExecutor({
     nowMs: () => reads++ === 0 ? 0 : 15_000,
+    profile,
   });
   assert.deepEqual(
-    await executor.execute({ ...args, mode: "proactive" }),
+    await executor.execute({ ...args, profile, mode: "proactive" }),
     { kind: "unavailable", reason: "deadline" },
   );
 });
@@ -250,6 +306,7 @@ test("首次 commit 前 deadline 仍是 unavailable，但首次请求后退避�
   const { executor } = createExecutor({
     source: testSource({ texts: ["x".repeat(100_000), "recent"] }),
     nowMs: () => now,
+    workDeadlineMsByMode: { proactive: 15_000 },
     commit: async () => {
       commitCalls += 1;
       now = 15_000;

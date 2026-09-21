@@ -45,7 +45,7 @@ type SingleCallModelParams = {
   temperature?: number;
   topP?: number;
   maxOutputTokens?: number;
-  timeoutMs?: number;
+  timeoutMs?: number | null;
   abortSignal?: AbortSignal;
   tools?: ToolSet;
   allowTools?: boolean;
@@ -146,7 +146,8 @@ async function readStreamTotalTokens(stream: unknown): Promise<number | null> {
   return null;
 }
 
-function normalizeTimeoutMs(raw: number | undefined) {
+function normalizeTimeoutMs(raw: number | null | undefined) {
+  if (raw === null) return null;
   if (raw === undefined) return MODEL_TIMEOUT_MS_DEFAULT;
   const value = Number(raw);
   if (!Number.isFinite(value)) throw new Error("timeoutMs must be a finite number");
@@ -262,11 +263,13 @@ function createLanguageModel(profile: SingleCallModelProfile) {
   return sdk(providerModelId);
 }
 
-function createTimedAbortSignal(params: { timeoutMs: number; abortSignal?: AbortSignal }) {
+function createTimedAbortSignal(params: { timeoutMs: number | null; abortSignal?: AbortSignal }) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => {
-    controller.abort(new Error(`single-call model timeout after ${params.timeoutMs}ms`));
-  }, params.timeoutMs);
+  const timeout = params.timeoutMs == null
+    ? null
+    : setTimeout(() => {
+        controller.abort(new Error(`single-call model timeout after ${params.timeoutMs}ms`));
+      }, params.timeoutMs);
 
   const parent = params.abortSignal;
   const onParentAbort = () => {
@@ -279,7 +282,7 @@ function createTimedAbortSignal(params: { timeoutMs: number; abortSignal?: Abort
   }
 
   const cleanup = () => {
-    clearTimeout(timeout);
+    if (timeout) clearTimeout(timeout);
     if (parent) {
       try {
         parent.removeEventListener("abort", onParentAbort);

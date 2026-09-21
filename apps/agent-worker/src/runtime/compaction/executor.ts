@@ -36,14 +36,14 @@ export class CompactionWorkDeadlineExceededError extends Error {
 export type CompactionExecutorDependencies = {
   apiClient: Pick<AgentApiClient, "getExecutionProfile" | "getCompactionSource" | "commitCompactionWithTerminalIntent" | "confirmCompactionCommit">;
   nowMs?: () => number;
-  /** Test seam only; production uses the fixed policy values. */
+  /** Test seam only; overrides the mode-resolved compaction deadline. */
   workDeadlineMsByMode?: Partial<Record<CompactionMode, number>>;
   newId: (prefix: string) => string;
   generateSummary: (params: {
     profile: SummaryProfile;
     system: string;
     messages: ModelMessage[];
-    timeoutMs: number;
+    timeoutMs: number | null;
     abortSignal: AbortSignal;
   }) => Promise<{ text: string }>;
   isContextLimitError: (error: unknown) => boolean;
@@ -93,8 +93,8 @@ export class CompactionExecutor {
     casState?: CompactionCasState;
   }): Promise<CompactionExecutionResult> {
     const policy = COMPACTION_MODE_POLICIES[params.mode];
-    const workDeadlineMs = this.dependencies.workDeadlineMsByMode?.[params.mode] ?? policy.workDeadlineMs;
-    const deadline = this.nowMs() + workDeadlineMs;
+    const workDeadlineMs = this.workDeadlineMs(params.mode, params.profile, policy.workDeadlineMs);
+    const deadline = workDeadlineMs == null ? null : this.nowMs() + workDeadlineMs;
     const casState = params.casState ?? { remaining: policy.casReplanAllowance };
     const messageId = this.dependencies.newId("message");
     const textPartId = this.dependencies.newId("part");
@@ -102,7 +102,7 @@ export class CompactionExecutor {
     const deadlineController = new AbortController();
     const abortForCallerCancellation = () => deadlineController.abort();
     params.abortSignal.addEventListener("abort", abortForCallerCancellation, { once: true });
-    const deadlineTimer = setTimeout(() => deadlineController.abort(), workDeadlineMs);
+    const deadlineTimer = workDeadlineMs == null ? null : setTimeout(() => deadlineController.abort(), workDeadlineMs);
     let initialFingerprint: string | null = null;
 
     try {
@@ -116,7 +116,7 @@ export class CompactionExecutor {
         const remaining = this.remaining(deadline, deadlineController.signal, params.abortSignal);
         const profile = await this.dependencies.apiClient.getExecutionProfile({
           workspaceId: params.workspaceId, sessionId: params.sessionId, runId: params.runId,
-        }, { abortSignal: deadlineController.signal, timeoutMs: remaining });
+        }, { abortSignal: deadlineController.signal, ...this.remainingTimeoutOption(remaining) });
         const fingerprint = computeCompactionProfileFingerprint(profile);
         if (initialFingerprint == null) initialFingerprint = fingerprint;
         else if (fingerprint !== initialFingerprint) {
@@ -126,7 +126,7 @@ export class CompactionExecutor {
         }
         const source = await this.dependencies.apiClient.getCompactionSource({
           workspaceId: params.workspaceId, sessionId: params.sessionId, runId: params.runId,
-        }, { abortSignal: deadlineController.signal, timeoutMs: remaining });
+        }, { abortSignal: deadlineController.signal, ...this.remainingTimeoutOption(remaining) });
         const planned = planCompaction({ source, profile, mode: params.mode });
         if (planned.kind === "blocked") return { kind: "blocked", reason: planned.reason };
         if (planned.kind === "media_requires_resend") return { kind: "media_requires_resend" };
@@ -162,7 +162,7 @@ export class CompactionExecutor {
           }
           if (params.abortSignal.aborted) return { kind: "failed", reason: "cancelled" };
           if (error instanceof CompactionWorkDeadlineExceededError) return { kind: "unavailable", reason: "deadline" };
-          if (deadlineController.signal.aborted || this.nowMs() >= deadline) return { kind: "unavailable", reason: "deadline" };
+          if (deadlineController.signal.aborted || (deadline != null && this.nowMs() >= deadline)) return { kind: "unavailable", reason: "deadline" };
           const failure = this.classifyProviderFailure(error, deadlineController.signal);
           return failure === "transient"
             ? { kind: "unavailable", reason: "transient" }
@@ -203,7 +203,7 @@ export class CompactionExecutor {
               try {
                 const confirmed = await this.dependencies.apiClient.confirmCompactionCommit({
                   workspaceId: params.workspaceId, sessionId: params.sessionId, runId: params.runId, messageId,
-                }, { abortSignal: deadlineController.signal, timeoutMs: this.remaining(deadline, deadlineController.signal, params.abortSignal) });
+                }, { abortSignal: deadlineController.signal, ...this.remainingTimeoutOption(this.remaining(deadline, deadlineController.signal, params.abortSignal)) });
                 if (confirmed.outcome === "committed") return { kind: "committed", summaryMessageId: messageId, plan };
                 return params.mode === "proactive"
                   ? { kind: "skipped", reason: "commit_not_committed" }
@@ -230,20 +230,36 @@ export class CompactionExecutor {
       if (this.isTransientControlError(error)) return { kind: "unavailable", reason: "transient" };
       return { kind: "failed", reason: this.isControlError(error) ? "control" : "data_invariant" };
     } finally {
-      clearTimeout(deadlineTimer);
+      if (deadlineTimer) clearTimeout(deadlineTimer);
       params.abortSignal.removeEventListener("abort", abortForCallerCancellation);
     }
   }
 
-  private remaining(deadline: number, signal: AbortSignal, callerSignal?: AbortSignal) {
+  private workDeadlineMs(mode: CompactionMode, profile: ExecutionProfile, policyDeadlineMs: number | undefined) {
+    const testDeadlineMs = this.dependencies.workDeadlineMsByMode?.[mode];
+    if (testDeadlineMs !== undefined) return testDeadlineMs;
+    if (mode === "proactive" || mode === "manual") {
+      const configured = Math.max(0, Math.floor(Number(profile.runtime.modelTotalTimeoutMs)));
+      return configured > 0 ? configured : null;
+    }
+    if (policyDeadlineMs == null) throw new Error(`missing compaction deadline policy for ${mode}`);
+    return policyDeadlineMs;
+  }
+
+  private remaining(deadline: number | null, signal: AbortSignal, callerSignal?: AbortSignal) {
     if (callerSignal?.aborted) {
       const error = new Error("compaction cancelled");
       error.name = "AbortError";
       throw error;
     }
+    if (deadline == null) return null;
     const remaining = deadline - this.nowMs();
     if (signal.aborted || remaining < MIN_REMAINING_MS) throw new CompactionWorkDeadlineExceededError();
     return remaining;
+  }
+
+  private remainingTimeoutOption(remaining: number | null) {
+    return remaining == null ? {} : { timeoutMs: remaining };
   }
 
   private async sleepWithAbort(ms: number, signal: AbortSignal) {
@@ -262,17 +278,17 @@ export class CompactionExecutor {
 
   private async commitExactReplay(params: {
     request: Parameters<AgentApiClient["commitCompactionWithTerminalIntent"]>[0];
-    deadline: number;
+    deadline: number | null;
     abortSignal: AbortSignal;
     callerSignal: AbortSignal;
     onAttempt: () => void;
   }) {
     const commit = async () => {
-      const timeoutMs = this.remaining(params.deadline, params.abortSignal, params.callerSignal);
+      const remaining = this.remaining(params.deadline, params.abortSignal, params.callerSignal);
       params.onAttempt();
       return await this.dependencies.apiClient.commitCompactionWithTerminalIntent(
         params.request,
-        { abortSignal: params.abortSignal, timeoutMs },
+        { abortSignal: params.abortSignal, ...this.remainingTimeoutOption(remaining) },
       );
     };
     try {
@@ -337,7 +353,7 @@ export class CompactionExecutor {
     blocks: readonly SummaryInputBlock[];
     profile: ExecutionProfile;
     system: string;
-    deadline: number;
+    deadline: number | null;
     abortSignal: AbortSignal;
     maxNetworkRequestsPerLogicalCall: 1 | 2;
     maxNetworkRequestCount: 30 | 60;
