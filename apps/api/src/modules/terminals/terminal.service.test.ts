@@ -11,8 +11,8 @@ import { workspaceDeletingFence } from "../agent/lifecycle/workspace-deleting-fe
 import { encryptUtf8 } from "../../infra/crypto/secretBox.js";
 import { insertCredential } from "../credentials/credentials.store.js";
 import { insertWorkspace, updateWorkspaceTerminalCredentialId } from "../workspaces/workspace.store.js";
-import { createTerminal, deleteTerminal, reconcilePendingTerminals, type TerminalRuntimeOperations } from "./terminal.service.js";
-import { getTerminal, insertTerminal, listTerminalsByWorkspace, updateTerminalStatus } from "./terminal.store.js";
+import { createTerminal, deleteTerminal, reconcilePendingTerminals, reconcileWorkspaceActiveTerminals, settleTerminalAfterSessionStopped, type TerminalRuntimeOperations } from "./terminal.service.js";
+import { getTerminal, insertTerminal, listActiveTerminalsByWorkspace, listTerminalsByWorkspace, updateTerminalStatus } from "./terminal.store.js";
 import {
   assertTerminalGitAuthTerminalId,
   cleanupTerminalGitAuthArtifacts,
@@ -204,6 +204,78 @@ test("HTTPS askpass 与 token 分别持有 recoverable intent，删除时一并�
   } finally { fixture.ctx.db.close(); }
 });
 
+test("active terminal 的 tmux 已不存在且 cleanup pending 时转为 errored 并保留 intent", async () => {
+  const fixture = await createFixture();
+  try {
+    const now = Date.now();
+    insertCredential(fixture.ctx.db, { id: "cred_stale_active", host: "example.test", kind: "ssh", label: null, username: null,
+      secretEnc: encryptUtf8({ key: fixture.ctx.credentialMasterKey, plaintext: "key" }), isDefault: false, createdAt: now, updatedAt: now });
+    updateWorkspaceTerminalCredentialId(fixture.ctx.db, fixture.workspaceId, "cred_stale_active", now);
+    const term = await createTerminal(fixture.ctx, createLogger(), { workspaceId: fixture.workspaceId, shell: "sh", runtimeOperations: operations() });
+    const intents = listTerminalAuthCleanupIntents(fixture.ctx.db, term.id);
+
+    await reconcileWorkspaceActiveTerminals(fixture.ctx, createLogger(), fixture.workspaceId, {
+      hasSession: async () => "not_found",
+      cleanupAuthArtifacts: async () => { throw new TerminalGitAuthCleanupPendingError("injected cleanup pending"); },
+    });
+
+    assert.equal(getTerminal(fixture.ctx.db, term.id)?.status, "errored");
+    assert.deepEqual(listActiveTerminalsByWorkspace(fixture.ctx.db, fixture.workspaceId), []);
+    assert.deepEqual(listTerminalAuthCleanupIntents(fixture.ctx.db, term.id), intents);
+  } finally { fixture.ctx.db.close(); }
+});
+
+test("已确认 tmux 停止后的 cleanup pending 可供 WS 映射为 session not found", async () => {
+  const fixture = await createFixture();
+  try {
+    const term = await createTerminal(fixture.ctx, createLogger(), { workspaceId: fixture.workspaceId, shell: "sh", runtimeOperations: operations() });
+    const settlement = await settleTerminalAfterSessionStopped(fixture.ctx, createLogger(), term.id, {
+      cleanupAuthArtifacts: async () => { throw new TerminalGitAuthCleanupPendingError("injected cleanup pending"); },
+    });
+
+    assert.equal(settlement, "cleanup_pending");
+    assert.equal(getTerminal(fixture.ctx.db, term.id)?.status, "errored");
+  } finally { fixture.ctx.db.close(); }
+});
+
+test("用户删除在 tmux kill 成功但 cleanup pending 时逻辑成功并保留 errored intent", async () => {
+  const fixture = await createFixture();
+  try {
+    const now = Date.now();
+    const killed: string[] = [];
+    insertCredential(fixture.ctx.db, { id: "cred_delete_pending", host: "example.test", kind: "ssh", label: null, username: null,
+      secretEnc: encryptUtf8({ key: fixture.ctx.credentialMasterKey, plaintext: "key" }), isDefault: false, createdAt: now, updatedAt: now });
+    updateWorkspaceTerminalCredentialId(fixture.ctx.db, fixture.workspaceId, "cred_delete_pending", now);
+    const term = await createTerminal(fixture.ctx, createLogger(), { workspaceId: fixture.workspaceId, shell: "sh", runtimeOperations: operations() });
+    const intents = listTerminalAuthCleanupIntents(fixture.ctx.db, term.id);
+
+    await assert.doesNotReject(() => deleteTerminal(fixture.ctx, createLogger(), term.id, operations({
+      hasSession: async () => "exists",
+      killSession: async ({ sessionName }) => { killed.push(sessionName); },
+      cleanupAuthArtifacts: async () => { throw new TerminalGitAuthCleanupPendingError("injected cleanup pending"); },
+    })));
+
+    assert.deepEqual(killed, [term.sessionName]);
+    assert.equal(getTerminal(fixture.ctx.db, term.id)?.status, "errored");
+    assert.deepEqual(listTerminalAuthCleanupIntents(fixture.ctx.db, term.id), intents);
+    await assert.doesNotReject(() => fs.access(terminalSshKeyPath(fixture.ctx.dataDir, term.id)));
+  } finally { fixture.ctx.db.close(); }
+});
+
+test("tmux probe 或 kill 失败时删除不谎称终端已关闭", async () => {
+  const fixture = await createFixture();
+  try {
+    for (const runtimeOperations of [
+      operations({ hasSession: async () => { throw new Error("tmux probe indeterminate"); } }),
+      operations({ hasSession: async () => "exists", killSession: async () => { throw new Error("tmux kill failed"); } }),
+    ]) {
+      const term = await createTerminal(fixture.ctx, createLogger(), { workspaceId: fixture.workspaceId, shell: "sh", runtimeOperations: operations() });
+      await assert.rejects(() => deleteTerminal(fixture.ctx, createLogger(), term.id, runtimeOperations), /tmux (probe indeterminate|kill failed)/);
+      assert.equal(getTerminal(fixture.ctx.db, term.id)?.status, "active");
+    }
+  } finally { fixture.ctx.db.close(); }
+});
+
 test("root live unlink EIO 保留 intent，restart reconcile 后收敛", async () => {
   const fixture = await createFixture();
   try {
@@ -250,7 +322,7 @@ test("writer EEXIST 无 authority 时保留 hardlink witness，不写新 secret"
   } finally { fixture.ctx.db.close(); }
 });
 
-test("SSH root anchor 路径替换阻断 reconcile/delete；恢复原路径后可收敛", async () => {
+test("SSH root anchor 路径替换时逻辑删除成功但保留 errored intent；恢复原路径后可收敛", async () => {
   const fixture = await createFixture();
   const moved = `${fixture.ctx.dataDir}-moved`;
   try {
@@ -266,8 +338,10 @@ test("SSH root anchor 路径替换阻断 reconcile/delete；恢复原路径后�
     await reconcilePendingTerminals(fixture.ctx, createLogger(), operations({ cleanupAuthArtifacts: cleanupTerminalGitAuthArtifacts }));
     assert.equal(getTerminal(fixture.ctx.db, term.id)?.status, "errored");
     await assert.doesNotReject(() => fs.access(movedSecret));
-    await assert.rejects(() => deleteTerminal(fixture.ctx, createLogger(), term.id, operations({ cleanupAuthArtifacts: cleanupTerminalGitAuthArtifacts })), TerminalGitAuthCleanupPendingError);
+    await assert.doesNotReject(() => deleteTerminal(fixture.ctx, createLogger(), term.id, operations({ cleanupAuthArtifacts: cleanupTerminalGitAuthArtifacts })));
     assert.equal(getTerminal(fixture.ctx.db, term.id)?.status, "errored");
+    assert.equal(listTerminalAuthCleanupIntents(fixture.ctx.db, term.id).length, 1);
+    await assert.doesNotReject(() => fs.access(movedSecret));
     await fs.rm(fixture.ctx.dataDir, { recursive: true, force: true });
     await fs.rename(moved, fixture.ctx.dataDir);
     await deleteTerminal(fixture.ctx, createLogger(), term.id, operations({ cleanupAuthArtifacts: cleanupTerminalGitAuthArtifacts }));

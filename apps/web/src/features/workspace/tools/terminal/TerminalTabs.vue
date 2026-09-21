@@ -263,15 +263,25 @@ async function createOne() {
 }
 
 function confirmDelete(terminalId: string) {
+  let deleting = false;
   Modal.confirm({
     title: t("terminal.confirmClose.title"),
     content: t("terminal.confirmClose.content"),
     okText: t("terminal.confirmClose.ok"),
     okType: "danger",
     cancelText: t("terminal.confirmClose.cancel"),
-    onOk: async () => {
-      await deleteTerminal(terminalId);
-      emit("deleted");
+    onOk: (close) => {
+      if (deleting) return;
+      deleting = true;
+      void deleteTerminal(terminalId)
+        .then(() => {
+          emit("deleted");
+          close();
+        })
+        .catch((err) => {
+          deleting = false;
+          message.error(err instanceof Error ? err.message : String(err));
+        });
     }
   });
 }

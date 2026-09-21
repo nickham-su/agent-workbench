@@ -435,26 +435,55 @@ export async function getTerminalById(ctx: AppContext, terminalId: string): Prom
   return term;
 }
 
+/**
+ * 会话已经被明确证实不存在或已成功终止后，先将其移出 active，再进行凭证清理。
+ * 清理失败必须保留 intent 以供后续恢复，但不能让已停止的 terminal 继续被当作 active。
+ */
+export async function settleTerminalAfterSessionStopped(
+  ctx: AppContext,
+  logger: FastifyBaseLogger,
+  terminalId: string,
+  runtimeOperations: Pick<TerminalRuntimeOperations, "cleanupAuthArtifacts"> = defaultTerminalRuntimeOperations,
+): Promise<"closed" | "cleanup_pending"> {
+  ctx.db.transaction(() => {
+    updateTerminalStatus(ctx.db, terminalId, "errored", nowMs());
+  })();
+
+  try {
+    const intents = listTerminalAuthCleanupIntents(ctx.db, terminalId);
+    // armed/unresolved 均不得根据当前路径推断身份或删除文件。
+    if (intents.some((intent) => intent.phase !== "recoverable")) {
+      throw new TerminalGitAuthCleanupPendingError("terminal auth cleanup locator is not recoverable");
+    }
+    await assertTerminalGitAuthCleanupRootAnchors(ctx.dataDir, intents);
+    await runtimeOperations.cleanupAuthArtifacts(ctx.dataDir, terminalId, intents);
+    ctx.db.transaction(() => {
+      const current = listTerminalAuthCleanupIntents(ctx.db, terminalId);
+      if (current.some((intent) => intent.phase !== "recoverable")) {
+        throw new TerminalGitAuthCleanupPendingError("terminal auth cleanup locator is not recoverable");
+      }
+      for (const intent of current) clearTerminalAuthCleanupIntent(ctx.db, terminalId, intent.artifactKind);
+      updateTerminalStatus(ctx.db, terminalId, "closed", nowMs());
+    })();
+    return "closed";
+  } catch (err) {
+    logger.warn({ terminalId, err }, "terminal cleanup remains pending");
+    return "cleanup_pending";
+  }
+}
+
 export async function deleteTerminal(ctx: AppContext, logger: FastifyBaseLogger, terminalId: string, runtimeOperations: Pick<TerminalRuntimeOperations, "hasSession" | "killSession" | "cleanupAuthArtifacts"> = defaultTerminalRuntimeOperations) {
   const term = await getTerminalById(ctx, terminalId);
   return workspaceLifecycleCoordinator.withMutation(term.workspaceId, async () => {
-    try {
-      const presence = await runtimeOperations.hasSession({ sessionName: term.sessionName, cwd: ctx.dataDir });
-      if (presence === "exists") {
-        await runtimeOperations.killSession({ sessionName: term.sessionName, cwd: ctx.dataDir });
-      }
-    } finally {
-      const intents = listTerminalAuthCleanupIntents(ctx.db, term.id);
-      if (intents.some((intent) => intent.phase !== "recoverable")) {
-        throw new TerminalGitAuthCleanupPendingError("terminal auth cleanup locator is not recoverable");
-      }
-      await assertTerminalGitAuthCleanupRootAnchors(ctx.dataDir, intents);
-      await runtimeOperations.cleanupAuthArtifacts(ctx.dataDir, term.id, intents);
+    const presence = await runtimeOperations.hasSession({ sessionName: term.sessionName, cwd: ctx.dataDir });
+    if (presence === "exists") await runtimeOperations.killSession({ sessionName: term.sessionName, cwd: ctx.dataDir });
+
+    const settlement = await settleTerminalAfterSessionStopped(ctx, logger, term.id, runtimeOperations);
+    if (settlement === "cleanup_pending") {
+      logger.info({ terminalId: term.id }, "terminal logically deleted with cleanup pending");
+      return;
     }
     ctx.db.transaction(() => {
-      const intents = listTerminalAuthCleanupIntents(ctx.db, term.id);
-      if (intents.some((intent) => intent.phase !== "recoverable")) throw new TerminalGitAuthCleanupPendingError("terminal auth cleanup locator is not recoverable");
-      for (const intent of intents) clearTerminalAuthCleanupIntent(ctx.db, term.id, intent.artifactKind);
       deleteTerminalRecord(ctx.db, term.id);
     })();
     logger.info({ terminalId: term.id }, "terminal deleted");
@@ -467,22 +496,9 @@ export async function reconcilePendingTerminals(ctx: AppContext, logger: Fastify
     const terminals = listTerminalsByWorkspace(ctx.db, workspace.id).filter((term) => term.status === "creating" || term.status === "errored");
     for (const term of terminals) {
       try {
-        const intents = listTerminalAuthCleanupIntents(ctx.db, term.id);
-        // armed/unresolved 都不能跨进程根据当前路径猜测安全；只有 root locator 已证明
-        // recoverable 时，才允许调用 cleanup 并尝试同事务 clear + closed。
-        if (intents.some((intent) => intent.phase !== "recoverable")) {
-          throw new TerminalGitAuthCleanupPendingError("terminal auth cleanup locator is not recoverable");
-        }
-        await assertTerminalGitAuthCleanupRootAnchors(ctx.dataDir, intents);
         const presence = await runtimeOperations.hasSession({ sessionName: term.sessionName, cwd: ctx.dataDir });
         if (presence === "exists") await runtimeOperations.killSession({ sessionName: term.sessionName, cwd: ctx.dataDir });
-        await runtimeOperations.cleanupAuthArtifacts(ctx.dataDir, term.id, intents);
-        ctx.db.transaction(() => {
-          const current = listTerminalAuthCleanupIntents(ctx.db, term.id);
-          if (current.some((intent) => intent.phase !== "recoverable")) throw new TerminalGitAuthCleanupPendingError("terminal auth cleanup locator is not recoverable");
-          for (const intent of current) clearTerminalAuthCleanupIntent(ctx.db, term.id, intent.artifactKind);
-          updateTerminalStatus(ctx.db, term.id, "closed", nowMs());
-        })();
+        await settleTerminalAfterSessionStopped(ctx, logger, term.id, runtimeOperations);
       } catch (error) {
         logger.warn({ terminalId: term.id, workspaceId: term.workspaceId, err: error }, "terminal cleanup remains pending");
       }
@@ -490,23 +506,16 @@ export async function reconcilePendingTerminals(ctx: AppContext, logger: Fastify
   }
 }
 
-export async function reconcileWorkspaceActiveTerminals(ctx: AppContext, logger: FastifyBaseLogger, workspaceId: string) {
+export async function reconcileWorkspaceActiveTerminals(ctx: AppContext, logger: FastifyBaseLogger, workspaceId: string, runtimeOperations: Pick<TerminalRuntimeOperations, "hasSession" | "cleanupAuthArtifacts"> = defaultTerminalRuntimeOperations) {
   const active = listActiveTerminalsByWorkspace(ctx.db, workspaceId);
   if (active.length === 0) return;
 
   await Promise.all(
     active.map(async (t) => {
       try {
-        const presence = await tmuxHasSession({ sessionName: t.sessionName, cwd: ctx.dataDir });
+        const presence = await runtimeOperations.hasSession({ sessionName: t.sessionName, cwd: ctx.dataDir });
         if (presence === "exists") return;
-        const intents = listTerminalAuthCleanupIntents(ctx.db, t.id);
-        if (intents.some((intent) => intent.phase !== "recoverable")) throw new TerminalGitAuthCleanupPendingError("terminal auth cleanup locator is not recoverable");
-        await assertTerminalGitAuthCleanupRootAnchors(ctx.dataDir, intents);
-        await cleanupTerminalGitAuthArtifacts(ctx.dataDir, t.id, intents);
-        ctx.db.transaction(() => {
-          for (const intent of listTerminalAuthCleanupIntents(ctx.db, t.id)) clearTerminalAuthCleanupIntent(ctx.db, t.id, intent.artifactKind);
-          updateTerminalStatus(ctx.db, t.id, "closed", nowMs());
-        })();
+        await settleTerminalAfterSessionStopped(ctx, logger, t.id, runtimeOperations);
       } catch (err) {
         logger.warn({ terminalId: t.id, err }, "reconcile terminal failed");
       }
