@@ -187,6 +187,34 @@ test("timeline delta 在 head 或 contextRoot 前提失效时返回尾部 reset 
   assert.deepEqual(previous.messages.map((message) => message.inCurrentOperationRange), [false, true]);
 });
 
+test("context root 已变化的 delta reset 不检查旧 head 是否仍可见", () => {
+  const { db, query } = createFixture();
+  appendMessage(db, {
+    id: "user", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: null, expectedRevision: 0,
+    type: "user", status: "completed", parts: [], createdAt: 2,
+  });
+  commitCompactionMessageForTest(db, {
+    id: "compaction", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "user", expectedRevision: 1,
+    textPartId: "compaction-text", text: "summary", createdAt: 3,
+  });
+  const queryWithSpy = query as unknown as { isDisplayChainMessage: () => boolean };
+  const original = queryWithSpy.isDisplayChainMessage;
+  queryWithSpy.isDisplayChainMessage = () => {
+    throw new Error("root change should short-circuit old-head visibility lookup");
+  };
+  try {
+    const reset = query.getTimeline({
+      workspaceId: "ws", sessionId: "session", mode: "delta", sinceRevision: 1,
+      knownHeadMessageId: "user", knownContextRootMessageId: null,
+    });
+    assert.equal(reset.timelineReset, true);
+    assert.deepEqual(reset.messages.map((message) => message.id), ["user", "compaction"]);
+  } finally {
+    queryWithSpy.isDisplayChainMessage = original;
+    db.close();
+  }
+});
+
 test("delta 显式已知 null root 时，首次压缩写入 root 必须 reset", () => {
   const { db, query } = createFixture();
   appendMessage(db, {

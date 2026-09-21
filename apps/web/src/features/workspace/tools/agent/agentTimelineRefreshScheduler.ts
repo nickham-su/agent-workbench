@@ -17,6 +17,16 @@ type Runner = (
 ) => Promise<AgentTimelineRefreshRunResult | void>;
 
 const tailPriority: Record<TailMode, number> = { delta: 1, snapshot: 2 };
+const DEFAULT_RUNNER_WATCHDOG_MS = 15_000;
+
+class TimelineRunnerWatchdogError extends Error {
+  constructor() {
+    super("timeline refresh runner exceeded watchdog deadline");
+    this.name = "TimelineRunnerWatchdogError";
+  }
+}
+
+class TimelineRunnerAbortedError extends Error {}
 
 /**
  * 单 scope timeline 调度器。
@@ -29,10 +39,20 @@ export function createAgentTimelineRefreshScheduler(options?: {
   setTimeout?: typeof globalThis.setTimeout;
   clearTimeout?: typeof globalThis.clearTimeout;
   structuralRetryDelaysMs?: readonly number[];
+  /** Test seam only; production uses the internal 15-second safety limit. */
+  runnerWatchdogMs?: number;
 }) {
   const scheduleTimer = options?.setTimeout ?? globalThis.setTimeout;
   const cancelTimer = options?.clearTimeout ?? globalThis.clearTimeout;
   const structuralRetryDelaysMs = options?.structuralRetryDelaysMs ?? [250, 500, 1_000, 2_000, 4_000];
+  const configuredRunnerWatchdogMs = options?.runnerWatchdogMs;
+  const runnerWatchdogMs = Number.isFinite(configuredRunnerWatchdogMs) && (configuredRunnerWatchdogMs ?? 0) > 0
+    ? Math.floor(Number(configuredRunnerWatchdogMs))
+    : DEFAULT_RUNNER_WATCHDOG_MS;
+  // Existing timer seams control structural retry only. Supplying an explicit
+  // watchdog duration opts tests into controlling the watchdog timer as well.
+  const scheduleWatchdogTimer = options?.runnerWatchdogMs === undefined ? globalThis.setTimeout : scheduleTimer;
+  const cancelWatchdogTimer = options?.runnerWatchdogMs === undefined ? globalThis.clearTimeout : cancelTimer;
   let disposed = false;
   let epoch = 0;
   let active = false;
@@ -134,6 +154,53 @@ export function createAgentTimelineRefreshScheduler(options?: {
     settle(allWaiters, error);
   }
 
+  async function runWithWatchdog(
+    current: { mode: AgentTimelineRefreshMode; waiters: Deferred[]; structural: boolean },
+    runner: Runner,
+    controller: AbortController,
+  ) {
+    let watchdogFired = false;
+    let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
+    let rejectAbort!: (error: Error) => void;
+    const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });
+    const onAbort = () => rejectAbort(watchdogFired ? new TimelineRunnerWatchdogError() : new TimelineRunnerAbortedError());
+    controller.signal.addEventListener("abort", onAbort, { once: true });
+    watchdogTimer = scheduleWatchdogTimer(() => {
+      if (controller.signal.aborted) return;
+      watchdogFired = true;
+      epoch += 1;
+      controller.abort();
+    }, runnerWatchdogMs);
+    let run: Promise<AgentTimelineRefreshRunResult | void>;
+    try {
+      // Keep runner invocation synchronous with request scheduling: callers use
+      // the captured epoch to reject a structural mutation's late response.
+      run = Promise.resolve(runner(current.mode, epoch, controller.signal));
+    } catch (error) {
+      run = Promise.reject(error);
+    }
+    try {
+      return await Promise.race([
+        run,
+        aborted,
+      ]);
+    } finally {
+      if (watchdogTimer !== null) cancelWatchdogTimer(watchdogTimer);
+      controller.signal.removeEventListener("abort", onAbort);
+    }
+  }
+
+  function retryStructural(current: { waiters: Deferred[] }, runner: Runner, error: unknown) {
+    // 初始一次加上每个配置 delay 对应的一次重试；耗尽后必须释放 UI waiter。
+    if (structuralRetryIndex < structuralRetryDelaysMs.length) {
+      structuralWaiters.unshift(...current.waiters);
+      structuralPending = true;
+      scheduleStructuralRetry(runner);
+      return;
+    }
+    failExhaustedStructural(error, current.waiters);
+  }
+
   async function drain(runner: Runner) {
     if (active || disposed) return;
     active = true;
@@ -146,22 +213,30 @@ export function createAgentTimelineRefreshScheduler(options?: {
         activeWaiters = current.waiters;
         let result: AgentTimelineRefreshRunResult | void;
         try {
-          result = await runner(current.mode, epoch, controller.signal);
+          result = await runWithWatchdog(current, runner, controller);
         } catch (error) {
           activeWaiters = [];
+          if (error instanceof TimelineRunnerWatchdogError) {
+            // 一个普通 delta 超时后不要重试同一旧锚点；结构 snapshot 会重新建立
+            // head/root/revision，并使用既有的有限退避策略处理自身失败。
+            if (current.mode === "delta" && !current.structural) {
+              structuralWaiters.unshift(...current.waiters);
+              enqueueStructural(null);
+              continue;
+            }
+            if (current.structural || current.mode === "snapshot") {
+              retryStructural(current, runner, error);
+              return;
+            }
+            settle(current.waiters, error);
+            continue;
+          }
           if (disposed || controller.signal.aborted) {
             settle(current.waiters);
             continue;
           }
           if (current.structural) {
-            // 初始一次加上每个配置 delay 对应的一次重试；耗尽后必须释放 UI waiter。
-            if (structuralRetryIndex < structuralRetryDelaysMs.length) {
-              structuralWaiters.unshift(...current.waiters);
-              structuralPending = true;
-              scheduleStructuralRetry(runner);
-            } else {
-              failExhaustedStructural(error, current.waiters);
-            }
+            retryStructural(current, runner, error);
             return;
           }
           settle(current.waiters, error);
@@ -220,6 +295,11 @@ export function createAgentTimelineRefreshScheduler(options?: {
     /** 使所有已发 timeline 响应失效；调用方随后应请求结构 snapshot。 */
     invalidate() {
       epoch += 1;
+      activeController?.abort();
+      // 保留待重试的 structural waiter，让紧接着的结构 snapshot 合并完成；
+      // 但旧退避不得阻塞新结构变更，也不能消耗新一轮的重试预算。
+      clearStructuralRetryTimer();
+      structuralRetryIndex = 0;
       return epoch;
     },
     currentEpoch() {
@@ -232,6 +312,8 @@ export function createAgentTimelineRefreshScheduler(options?: {
       disposed = true;
       epoch += 1;
       activeController?.abort();
+      activeController = null;
+      active = false;
       clearStructuralRetryTimer();
       settle(activeWaiters);
       settle(structuralWaiters);

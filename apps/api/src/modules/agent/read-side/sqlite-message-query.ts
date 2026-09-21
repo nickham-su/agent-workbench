@@ -193,11 +193,14 @@ export class SqliteMessageQuery {
     const session = this.requireSession(input.workspaceId, input.sessionId);
     const mode = input.mode ?? (input.sinceRevision === undefined ? "snapshot" : "delta");
     const limit = Math.max(1, Math.min(500, input.limit ?? 100));
-    const knownHeadStillVisible = !input.knownHeadMessageId || this.isDisplayChainMessage(session, input.knownHeadMessageId);
     const rootUnchanged = input.knownContextRootMessageId === undefined || input.knownContextRootMessageId === session.contextRootMessageId;
+    // Compaction changes context root. A delta from the old root must reset, so
+    // avoid the otherwise-unbounded old-head ancestry check on this hot path.
+    const rootChanged = mode === "delta" && !rootUnchanged;
+    const knownHeadStillVisible = rootChanged || !input.knownHeadMessageId || this.isDisplayChainMessage(session, input.knownHeadMessageId);
     const lacksLegacySafeAnchor = input.knownHeadMessageId === undefined && session.contextRootMessageId !== null;
     const timelineReset = mode === "delta" && (
-      input.sinceRevision === undefined || input.sinceRevision > session.revision || lacksLegacySafeAnchor || !knownHeadStillVisible || !rootUnchanged
+      input.sinceRevision === undefined || input.sinceRevision > session.revision || lacksLegacySafeAnchor || !knownHeadStillVisible || rootChanged
     );
 
     let page: MessageRow[];
