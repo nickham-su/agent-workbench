@@ -310,7 +310,9 @@ export class SqliteMessageQuery {
       join agent_message_part part on part.id = execution.call_part_id
       join display_chain chain on chain.id = part.message_id
       where execution.id = @toolExecutionId
-        and part.type = 'tool_call' and part.tool_name = @toolName
+        and execution.status in ('completed', 'failed', 'cancelled')
+        and part.type = 'tool_call'
+        and part.tool_name = @toolName
     `).get({ ...this.displayChainParams(session), toolExecutionId: input.toolExecutionId, toolName: input.toolName }) as { id: string } | undefined;
     if (!execution) throw new HttpError(404, `${input.toolName} artifact not found`, "ARTIFACT_NOT_FOUND");
     return { workspaceId: input.workspaceId, toolExecutionId: execution.id };

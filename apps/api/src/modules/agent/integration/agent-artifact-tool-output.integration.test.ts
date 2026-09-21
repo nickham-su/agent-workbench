@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
+import { AgentApiEndpoints } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { applyPatchUiArtifactPath, writeUiArtifactPath } from "../../../infra/fs/paths.js";
 import { newSortableId } from "../../../utils/ids.js";
+import { createAgentService } from "../agent.composition.js";
 import { createP4Fixture } from "./p4-fixture.helpers.js";
 import { completeToolExecutionFixture, createAssistantFixture, createMessageRunFixture, createSession } from "./context-writeback.helpers.js";
+import { injectJson } from "../testkit/agent-testkit.js";
 
 type Fixture = Awaited<ReturnType<typeof createP4Fixture>>;
 
@@ -24,6 +27,15 @@ async function writeArtifact(fixture: Fixture, executionId: string, toolName: "a
   await fs.mkdir(path.dirname(file), { recursive: true });
   await fs.writeFile(file, JSON.stringify({ ...content, toolExecutionId: executionId }), "utf8");
   return file;
+}
+
+async function updateToolExecutionFromWorker(fixture: Fixture, payload: Record<string, unknown>) {
+  return injectJson(fixture.app, {
+    method: AgentApiEndpoints.updateToolExecution.method,
+    url: AgentApiEndpoints.updateToolExecution.path,
+    internalToken: fixture.internalToken,
+    payload,
+  });
 }
 
 test("artifact 以 ToolExecution 唯一寻址，同一 Message 的同名调用不会串读", async (t: TestContext) => {
@@ -61,6 +73,120 @@ test("apply_patch artifact 文件缺失时返回 404", async (t: TestContext) =>
   assert.equal((await artifact(fixture, session.id, tool.executionId, "apply-patch-artifact")).statusCode, 404);
 });
 
+test("Worker completed apply_patch 写回自动生成完整 artifact，并只保存 slim structured result", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const tool = createTool(fixture, session.id, "apply_patch", { patchText: "*** Update File: a.ts" });
+  const startedAt = Date.now();
+  const fullResult = {
+    text: "Applied 1 patch.",
+    summary: { fileCount: 1, additions: 1, deletions: 1 },
+    files: [{ type: "update", path: "a.ts", additions: 1, deletions: 1, before: "const a = 1;", after: "const a = 2;" }],
+  };
+
+  const running = await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "running", startedAt, updatedAt: startedAt,
+  });
+  assert.equal(running.statusCode, 200, running.body);
+  const completed = await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "completed", resultPreview: "Applied 1 patch.", structuredResult: fullResult,
+    completedAt: startedAt + 1, updatedAt: startedAt + 1,
+  });
+  assert.equal(completed.statusCode, 200, completed.body);
+  assert.equal(completed.json().result, "updated");
+
+  const expectedSlim = {
+    text: "Applied 1 patch.",
+    summary: { fileCount: 1, additions: 1, deletions: 1 },
+    files: [{ type: "update", path: "a.ts", additions: 1, deletions: 1 }],
+  };
+  const detail = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${session.id}/tool-executions/${tool.executionId}?workspaceId=${encodeURIComponent(fixture.workspaceId)}` });
+  assert.equal(detail.statusCode, 200, detail.body);
+  assert.deepEqual(detail.json().structuredResult, expectedSlim);
+  const stored = fixture.db.prepare("select structured_result_json as value from agent_tool_execution where id = ?").get(tool.executionId) as { value: string };
+  assert.deepEqual(JSON.parse(stored.value), expectedSlim);
+
+  const artifactRes = await artifact(fixture, session.id, tool.executionId, "apply-patch-artifact");
+  assert.equal(artifactRes.statusCode, 200, artifactRes.body);
+  assert.deepEqual(artifactRes.json().files, fullResult.files);
+});
+
+test("artifact 先于最终 fence 写入，最终 ignored 时仅留下不可见孤儿", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const tool = createTool(fixture, session.id, "apply_patch", { patchText: "*** Update File: a.ts" });
+  const startedAt = Date.now();
+  assert.equal((await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "running", startedAt, updatedAt: startedAt,
+  })).statusCode, 200);
+  const service = createAgentService(fixture.ctx, fixture.app.log, null, {
+    beforeFinalToolExecutionUpdate: () => {
+      fixture.db.prepare(
+        "update session_run_state set status = 'idle', active_run_id = null where workspace_id = ? and session_id = ?",
+      ).run(fixture.workspaceId, session.id);
+    },
+  });
+  const result = await service.updateToolExecutionFromWorker({
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "completed", structuredResult: { files: [{ path: "a.ts", before: "before", after: "after" }] },
+    completedAt: startedAt + 1, updatedAt: startedAt + 1,
+  });
+  assert.deepEqual(result, { result: "ignored" });
+  const file = applyPatchUiArtifactPath(fixture.dataDir, fixture.workspaceId, tool.executionId);
+  await fs.access(file);
+  assert.equal((await artifact(fixture, session.id, tool.executionId, "apply-patch-artifact")).statusCode, 404);
+});
+
+test("invalid apply_patch structuredResult 保持原样且不生成空 artifact", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const tool = createTool(fixture, session.id, "apply_patch", { patchText: "*** Update File: a.ts" });
+  const startedAt = Date.now();
+  assert.equal((await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "running", startedAt, updatedAt: startedAt,
+  })).statusCode, 200);
+  const invalidResult = { text: "result without files" };
+  const completed = await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "completed", structuredResult: invalidResult, completedAt: startedAt + 1, updatedAt: startedAt + 1,
+  });
+  assert.equal(completed.statusCode, 200, completed.body);
+  const detail = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${session.id}/tool-executions/${tool.executionId}?workspaceId=${encodeURIComponent(fixture.workspaceId)}` });
+  assert.equal(detail.statusCode, 200, detail.body);
+  assert.deepEqual(detail.json().structuredResult, invalidResult);
+  assert.equal((await artifact(fixture, session.id, tool.executionId, "apply-patch-artifact")).statusCode, 404);
+});
+
+test("terminal apply_patch replay 不覆盖已生成 artifact", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const tool = createTool(fixture, session.id, "apply_patch", { patchText: "*** Update File: a.ts" });
+  const startedAt = Date.now();
+  assert.equal((await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "running", startedAt, updatedAt: startedAt,
+  })).statusCode, 200);
+  const original = { files: [{ path: "a.ts", additions: 1, deletions: 0, before: "before", after: "after" }] };
+  const completed = {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "completed" as const, structuredResult: original, completedAt: startedAt + 1, updatedAt: startedAt + 1,
+  };
+  assert.equal((await updateToolExecutionFromWorker(fixture, completed)).statusCode, 200);
+  const replay = await updateToolExecutionFromWorker(fixture, {
+    ...completed,
+    structuredResult: { files: [{ path: "a.ts", additions: 1, deletions: 0, before: "replayed-before", after: "after" }] },
+  });
+  assert.equal(replay.statusCode, 200, replay.body);
+  assert.equal(replay.json().result, "updated");
+  const artifactRes = await artifact(fixture, session.id, tool.executionId, "apply-patch-artifact");
+  assert.equal(artifactRes.statusCode, 200, artifactRes.body);
+  assert.equal(artifactRes.json().files[0].before, "before");
+});
+
 test("artifact Query 在 workspace artifact 目录为越界 symlink 时保持当前 400", async (t: TestContext) => {
   const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 }); const session = await createSession(fixture.app, fixture.workspaceId);
   const tool = createTool(fixture, session.id, "apply_patch", { patchText: "x" }); completeToolExecutionFixture({ fixture, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId });
@@ -68,9 +194,81 @@ test("artifact Query 在 workspace artifact 目录为越界 symlink 时保持当
   assert.equal((await artifact(fixture, session.id, tool.executionId, "apply-patch-artifact")).statusCode, 400);
 });
 
-test("artifact 写入目录为越界 symlink 时仍以 slim result 完成 update", async (t: TestContext) => {
-  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 }); const session = await createSession(fixture.app, fixture.workspaceId);
-  const tool = createTool(fixture, session.id, "write", { filePath: "a.txt", content: "body" }); completeToolExecutionFixture({ fixture, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId, resultPreview: "written" });
+test("artifact 写入失败不影响 apply_patch 的 completed 写回", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const tool = createTool(fixture, session.id, "apply_patch", { patchText: "*** Update File: a.ts" });
+  const startedAt = Date.now();
+  assert.equal((await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "running", startedAt, updatedAt: startedAt,
+  })).statusCode, 200);
+  const file = applyPatchUiArtifactPath(fixture.dataDir, fixture.workspaceId, tool.executionId);
+  const dir = path.dirname(file);
+  const outside = path.join(fixture.dataDir, "outside");
+  await fs.mkdir(outside, { recursive: true });
+  await fs.mkdir(path.dirname(dir), { recursive: true });
+  await fs.symlink(outside, dir, "dir");
+  const completed = await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "completed", structuredResult: { files: [{ path: "a.ts", before: "before", after: "after" }] },
+    completedAt: startedAt + 1, updatedAt: startedAt + 1,
+  });
+  assert.equal(completed.statusCode, 200, completed.body);
+  assert.equal(completed.json().result, "updated");
+  const detail = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${session.id}/tool-executions/${tool.executionId}?workspaceId=${encodeURIComponent(fixture.workspaceId)}` });
+  assert.equal(detail.statusCode, 200, detail.body);
+  assert.deepEqual(detail.json().structuredResult, {
+    text: "", summary: { fileCount: 1, additions: 0, deletions: 0 }, files: [{ type: "update", path: "a.ts", additions: 0, deletions: 0 }],
+  });
+});
+
+test("Worker completed write 写回同样生成 artifact", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const tool = createTool(fixture, session.id, "write", { filePath: "a.txt", content: "after" });
+  const startedAt = Date.now();
+  assert.equal((await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "running", startedAt, updatedAt: startedAt,
+  })).statusCode, 200);
+  const completed = await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "completed", structuredResult: {
+      filePath: "a.txt", bytesWritten: 5, existedBefore: true,
+      before: { available: true, text: "before", truncated: false, bytes: 6 },
+      after: { available: true, text: "after", truncated: false, bytes: 5 },
+    }, completedAt: startedAt + 1, updatedAt: startedAt + 1,
+  });
+  assert.equal(completed.statusCode, 200, completed.body);
+  const detail = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${session.id}/tool-executions/${tool.executionId}?workspaceId=${encodeURIComponent(fixture.workspaceId)}` });
+  assert.equal(detail.statusCode, 200, detail.body);
+  assert.deepEqual(detail.json().structuredResult, {
+    summary: "Wrote file a.txt", filePath: "a.txt", bytesWritten: 5, existedBefore: true,
+  });
+  const artifactRes = await artifact(fixture, session.id, tool.executionId, "write-artifact");
+  assert.equal(artifactRes.statusCode, 200, artifactRes.body);
+  assert.equal(artifactRes.json().after.text, "after");
+});
+
+test("invalid write structuredResult 保持原样且不生成空 artifact", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const tool = createTool(fixture, session.id, "write", { filePath: "a.txt", content: "after" });
+  const startedAt = Date.now();
+  assert.equal((await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "running", startedAt, updatedAt: startedAt,
+  })).statusCode, 200);
+  const invalidResult = { summary: "missing path" };
+  const completed = await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "completed", structuredResult: invalidResult, completedAt: startedAt + 1, updatedAt: startedAt + 1,
+  });
+  assert.equal(completed.statusCode, 200, completed.body);
+  const detail = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${session.id}/tool-executions/${tool.executionId}?workspaceId=${encodeURIComponent(fixture.workspaceId)}` });
+  assert.equal(detail.statusCode, 200, detail.body);
+  assert.deepEqual(detail.json().structuredResult, invalidResult);
   assert.equal((await artifact(fixture, session.id, tool.executionId, "write-artifact")).statusCode, 404);
 });
 

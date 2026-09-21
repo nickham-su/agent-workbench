@@ -130,6 +130,7 @@ import { SqliteMessageQuery } from "./read-side/sqlite-message-query.js";
 import { ReadSideApplication } from "./read-side/read-side-application.js";
 import { getWorkspaceEnabledAgentIds } from "../workspaces/workspace.service.js";
 import { UiArtifactCapability } from "./artifact/ui-artifact-capability.js";
+import { splitApplyPatchResult, splitWriteResult } from "./writeback/ui-artifact-result-split.js";
 import { SubtaskApplication } from "./subtask/subtask-application.js";
 import { SqliteSubtaskLineagePersistence } from "./subtask/sqlite-subtask-lineage-persistence.js";
 import { SqliteSubtaskMaintenancePersistence } from "./subtask/sqlite-subtask-maintenance-persistence.js";
@@ -741,6 +742,21 @@ const STRUCTURED_RESULT_TOOL_NAMES = new Set([
   "write",
   "scratchpad",
 ]);
+
+function isValidApplyPatchResult(value: unknown): value is { files: unknown[] } {
+  return isRecord(value) && Array.isArray(value.files);
+}
+
+function isValidWriteResult(value: unknown): value is { filePath?: string; path?: string } {
+  if (!isRecord(value)) return false;
+  return (typeof value.filePath === "string" && value.filePath.trim().length > 0)
+    || (typeof value.path === "string" && value.path.trim().length > 0);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value != null && typeof value === "object" && !Array.isArray(value);
+}
+
 function buildSubtaskForkGuardSystemText(input: {
   uiLocale: AgentUiLocale | null;
 }) {
@@ -1887,6 +1903,7 @@ function createAgentApplications(
   dependencies?: AgentCompositionDependencies,
 ) {
   const sessionOpLocks = new Map<string, Promise<void>>();
+  const toolExecutionWritebackLocks = new Map<string, Promise<void>>();
   const runPromptStaticCache = new RunPromptStaticCache<
     Awaited<ReturnType<PromptStaticAssembler["assemble"]>>
   >();
@@ -2037,6 +2054,28 @@ function createAgentApplications(
       releaseCurrent();
       if (sessionOpLocks.get(sessionId) === queued) {
         sessionOpLocks.delete(sessionId);
+      }
+    }
+  }
+
+  async function runToolExecutionWritebackExclusive<T>(
+    toolExecutionId: string,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    const previous = toolExecutionWritebackLocks.get(toolExecutionId) ?? Promise.resolve();
+    let releaseCurrent!: () => void;
+    const current = new Promise<void>((resolve) => {
+      releaseCurrent = () => resolve();
+    });
+    const queued = previous.then(() => current);
+    toolExecutionWritebackLocks.set(toolExecutionId, queued);
+    await previous;
+    try {
+      return await action();
+    } finally {
+      releaseCurrent();
+      if (toolExecutionWritebackLocks.get(toolExecutionId) === queued) {
+        toolExecutionWritebackLocks.delete(toolExecutionId);
       }
     }
   }
@@ -2377,36 +2416,136 @@ function createAgentApplications(
     };
   }
 
-  function updateToolExecutionFromWorker(
+  async function updateToolExecutionFromWorker(
     params: AgentApiUpdateToolExecutionRequest,
   ) {
     workspaceDeletingFence.assertWritable(params.workspaceId);
-    const tool = environment.db
-      .prepare(`select part.tool_name as toolName from agent_tool_execution execution join agent_message_part part on part.id = execution.call_part_id where execution.id = ?`)
-      .get(params.toolExecutionId) as { toolName: string | null } | undefined;
-    const structuredResult = tool && STRUCTURED_RESULT_TOOL_NAMES.has(tool.toolName ?? "")
-      ? params.structuredResult
-      : undefined;
-    const result = updateToolExecution(environment.db, {
-      ...params,
-      structuredResult,
-      executionId: params.toolExecutionId,
+    return runToolExecutionWritebackExclusive(params.toolExecutionId, async () => {
+      workspaceDeletingFence.assertWritable(params.workspaceId);
+      const tool = environment.db
+        .prepare(`select part.tool_name as toolName from agent_tool_execution execution join agent_message_part part on part.id = execution.call_part_id where execution.id = ?`)
+        .get(params.toolExecutionId) as { toolName: string | null } | undefined;
+      const artifactTool = params.status === "completed"
+        ? environment.db.prepare(`
+          select part.tool_name as toolName
+          from agent_tool_execution execution
+          join agent_message_part part on part.id = execution.call_part_id
+          join agent_run run on run.run_id = execution.origin_run_id
+          join session_run_state state on state.workspace_id = run.workspace_id and state.session_id = run.session_id
+          where execution.id = @toolExecutionId
+            and execution.origin_session_id = @sessionId
+            and execution.origin_run_id = @runId
+            and execution.status = 'running'
+            and part.type = 'tool_call'
+            and run.workspace_id = @workspaceId
+            and run.session_id = @sessionId
+            and run.status = 'running'
+            and state.status = 'running'
+            and state.active_run_id = @runId
+        `).get(params) as { toolName: string | null } | undefined
+        : undefined;
+      let structuredResult = tool && STRUCTURED_RESULT_TOOL_NAMES.has(tool.toolName ?? "")
+        ? params.structuredResult
+        : undefined;
+
+      if (params.status === "completed" && tool?.toolName === "apply_patch") {
+        if (!isValidApplyPatchResult(params.structuredResult)) {
+          if (artifactTool) {
+            logger.warn(
+              { toolExecutionId: params.toolExecutionId, toolName: "apply_patch" },
+              "skip apply_patch UI artifact for invalid structured result",
+            );
+          }
+        } else {
+          const splitResult = splitApplyPatchResult(params.structuredResult);
+          structuredResult = splitResult.slim;
+          if (artifactTool?.toolName === "apply_patch") {
+            await writeApplyPatchArtifact({
+              workspaceId: params.workspaceId,
+              toolExecutionId: params.toolExecutionId,
+              createdAt: params.completedAt ?? params.updatedAt,
+              artifact: splitResult.artifact,
+            });
+          }
+        }
+      } else if (params.status === "completed" && tool?.toolName === "write") {
+        if (!isValidWriteResult(params.structuredResult)) {
+          if (artifactTool) {
+            logger.warn(
+              { toolExecutionId: params.toolExecutionId, toolName: "write" },
+              "skip write UI artifact for invalid structured result",
+            );
+          }
+        } else {
+          const splitResult = splitWriteResult(params.structuredResult);
+          structuredResult = splitResult.slim;
+          if (artifactTool?.toolName === "write") {
+            await writeWriteArtifact({
+              workspaceId: params.workspaceId,
+              toolExecutionId: params.toolExecutionId,
+              createdAt: params.completedAt ?? params.updatedAt,
+              artifact: splitResult.artifact,
+            });
+          }
+        }
+      }
+
+      await dependencies?.beforeFinalToolExecutionUpdate?.(params);
+      const result = updateToolExecution(environment.db, {
+        ...params,
+        structuredResult,
+        executionId: params.toolExecutionId,
+      });
+      if (result === "updated" && params.status === "completed") {
+        const goal =
+          structuredResult && typeof structuredResult === "object"
+            ? (structuredResult as { goal?: unknown }).goal
+            : undefined;
+        const title =
+          tool?.toolName === "todolist" ? normalizeTodolistGoal(goal) : "";
+        if (title)
+          updateAutoMessageSessionTitle(environment.db, {
+            sessionId: params.sessionId,
+            title,
+            updatedAt: params.updatedAt,
+          });
+      }
+      return { result };
     });
-    if (result === "updated" && params.status === "completed") {
-      const goal =
-        structuredResult && typeof structuredResult === "object"
-          ? (structuredResult as { goal?: unknown }).goal
-          : undefined;
-      const title =
-        tool?.toolName === "todolist" ? normalizeTodolistGoal(goal) : "";
-      if (title)
-        updateAutoMessageSessionTitle(environment.db, {
-          sessionId: params.sessionId,
-          title,
-          updatedAt: params.updatedAt,
-        });
+  }
+
+  async function writeApplyPatchArtifact(input: { workspaceId: string; toolExecutionId: string; createdAt: number; artifact: unknown }) {
+    try {
+      const result = await uiArtifactCapability.writeApplyPatch(input);
+      if (result.kind !== "written") {
+        logger.warn(
+          { toolExecutionId: input.toolExecutionId, toolName: "apply_patch" },
+          "apply_patch UI artifact was not written",
+        );
+      }
+    } catch (err) {
+      logger.warn(
+        { err, toolExecutionId: input.toolExecutionId, toolName: "apply_patch" },
+        "write apply_patch UI artifact failed",
+      );
     }
-    return { result };
+  }
+
+  async function writeWriteArtifact(input: { workspaceId: string; toolExecutionId: string; createdAt: number; artifact: unknown }) {
+    try {
+      const result = await uiArtifactCapability.writeWrite(input);
+      if (result.kind !== "written") {
+        logger.warn(
+          { toolExecutionId: input.toolExecutionId, toolName: "write" },
+          "write UI artifact was not written",
+        );
+      }
+    } catch (err) {
+      logger.warn(
+        { err, toolExecutionId: input.toolExecutionId, toolName: "write" },
+        "write write UI artifact failed",
+      );
+    }
   }
 
   function updateRunNoticeFromWorker(params: AgentApiUpdateRunNoticeRequest) {
@@ -3134,7 +3273,12 @@ function createStartupCoordinator(params: {
   });
 }
 
-export type AgentCompositionDependencies = {};
+export type AgentCompositionDependencies = {
+  /** Test-only barrier for freezing the artifact-before-final-fence ordering. */
+  beforeFinalToolExecutionUpdate?: (
+    params: AgentApiUpdateToolExecutionRequest,
+  ) => void | Promise<void>;
+};
 
 export function createAgentComposition(
   ctx: AppContext,

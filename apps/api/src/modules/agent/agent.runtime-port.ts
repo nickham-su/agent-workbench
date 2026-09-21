@@ -42,7 +42,7 @@ export type LocalAgentRuntimeExecutionPort = {
   discardStreamingAssistantFromWorker(params: AgentApiDiscardStreamingAssistantRequest): AgentApiFencedWriteResponse;
   completeAssistantFromWorker(params: AgentApiCompleteAssistantRequest): AgentApiFencedWriteResponse;
   completeTerminalAssistantFromWorker(params: AgentApiCompleteTerminalAssistantRequest): AgentApiFencedWriteResponse;
-  updateToolExecutionFromWorker(params: AgentApiUpdateToolExecutionRequest): AgentApiFencedWriteResponse;
+  updateToolExecutionFromWorker(params: AgentApiUpdateToolExecutionRequest): Promise<AgentApiFencedWriteResponse>;
   updateRunNoticeFromWorker(params: AgentApiUpdateRunNoticeRequest): AgentApiFencedWriteResponse;
   markRunWorkInProgressFromWorker(params: AgentApiMarkRunWorkInProgressRequest): unknown;
   persistRunTerminalIntentFromWorker(params: AgentApiPersistTerminalIntentRequest): unknown;

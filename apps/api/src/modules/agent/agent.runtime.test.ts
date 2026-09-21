@@ -47,7 +47,7 @@ test("本地 fallback 对 active runId 去重，并在终态后释放该标记",
       completeTerminalAssistantFromWorker() {
         return { result: "updated" };
       },
-      updateToolExecutionFromWorker() {
+      async updateToolExecutionFromWorker() {
         return { result: "updated" };
       },
       updateRunNoticeFromWorker() {
@@ -94,7 +94,7 @@ test("本地 fallback cancel-and-wait 对运行中的 Session 超时而不误报
       resumeStreamingAssistantFromWorker() { return { result: "updated" }; },
       replaceStreamingAssistantFromWorker() { return { result: "updated", message: {} as any }; },
       completeAssistantFromWorker() { return { result: "updated" }; },
-      updateToolExecutionFromWorker() { return { result: "updated" }; },
+      async updateToolExecutionFromWorker() { return { result: "updated" }; },
       updateRunNoticeFromWorker() { return { result: "updated" }; },
       convergeRunTerminalFromWorker() {},
       getSession() { return null; },
