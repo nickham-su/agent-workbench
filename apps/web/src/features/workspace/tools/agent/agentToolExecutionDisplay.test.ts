@@ -6,6 +6,7 @@ import {
   parseSubtaskDisplay,
   parseSubtaskSessionId,
   parseTodoDisplay,
+  toolExecutionStatusTextClass,
 } from "./agentToolExecutionDisplay.js";
 
 test("formatToolInputPreview 将参数压成单行并限制长度", () => {
@@ -43,6 +44,15 @@ test("formatToolExecutionText 展示完成、运行和失败耗时", () => {
     ),
     "failed · 1s",
   );
+});
+
+test("普通工具状态使用浅灰、深灰、蓝色、红色四级配色", () => {
+  assert.equal(toolExecutionStatusTextClass("completed"), "text-[color:var(--text-tertiary)]");
+  assert.equal(toolExecutionStatusTextClass("queued"), "text-[color:var(--text-secondary)]");
+  assert.equal(toolExecutionStatusTextClass("cancelled"), "text-[color:var(--text-secondary)]");
+  assert.equal(toolExecutionStatusTextClass("unknown"), "text-[color:var(--text-secondary)]");
+  assert.equal(toolExecutionStatusTextClass("running"), "text-blue-500");
+  assert.equal(toolExecutionStatusTextClass("failed"), "text-[color:var(--danger-color)]");
 });
 
 test("富卡只接受 detail structuredResult 的结构化字段", () => {

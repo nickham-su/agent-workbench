@@ -91,6 +91,25 @@ export function mergeStaleProtectedSessionList<T>(
   return { merged, protectedSessionIds };
 }
 
+/**
+ * 将 Timeline 响应中的权威标题合并到 Session 列表。
+ *
+ * Timeline 与手动标题保存可能并发；存在 mutation 保护记录时，必须继续使用
+ * 手动保存成功的标题，避免迟到的 Timeline 响应把它覆盖回旧值。
+ */
+export function mergeTimelineSessionTitle<T extends { id: string; title: string }>(
+  records: T[],
+  timelineSession: { id: string; title: string },
+  protectedRecord?: { title: string } | null,
+): T[] {
+  const title = protectedRecord?.title ?? timelineSession.title;
+  const index = records.findIndex((record) => record.id === timelineSession.id);
+  if (index < 0 || records[index]?.title === title) return records;
+  const next = [...records];
+  next[index] = { ...records[index]!, title };
+  return next;
+}
+
 /** 请求标识：generation 与 workspaceId 任一变化即视为过期。 */
 export type RequestValidity = {
   disposed: boolean;

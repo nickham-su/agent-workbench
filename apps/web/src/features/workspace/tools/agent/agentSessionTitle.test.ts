@@ -4,6 +4,7 @@ import {
   isRequestResponseWritable,
   MANUAL_TITLE_RAW_MAX_LENGTH,
   mergeStaleProtectedSessionList,
+  mergeTimelineSessionTitle,
   resolveTitleSaveResponseAction,
   resolveTitleSettingTrigger,
   shouldAllowTitleModalClose,
@@ -86,6 +87,32 @@ test("titleErrorCodeToFieldError 只映射三个固定 code", () => {
   assert.equal(titleErrorCodeToFieldError("AGENT_SESSION_TITLE_INVALID_CHARACTERS"), "invalid_characters");
   assert.equal(titleErrorCodeToFieldError("AGENT_REQUEST_UNKNOWN_FIELD"), null);
   assert.equal(titleErrorCodeToFieldError(undefined), null);
+});
+
+test("mergeTimelineSessionTitle 使用 Timeline 标题更新对应 Session", () => {
+  const records = [
+    { id: "s1", title: "旧标题", updatedAt: 1 },
+    { id: "s2", title: "其他", updatedAt: 2 },
+  ];
+  const merged = mergeTimelineSessionTitle(records, { id: "s1", title: "自动新标题" });
+  assert.deepEqual(merged, [
+    { id: "s1", title: "自动新标题", updatedAt: 1 },
+    { id: "s2", title: "其他", updatedAt: 2 },
+  ]);
+  assert.notStrictEqual(merged, records);
+});
+
+test("mergeTimelineSessionTitle 保留成功手动标题，且无变化时复用原数组", () => {
+  const records = [{ id: "s1", title: "手动标题", updatedAt: 1 }];
+  const protectedResult = mergeTimelineSessionTitle(
+    records,
+    { id: "s1", title: "迟到自动标题" },
+    { title: "手动标题" },
+  );
+  assert.strictEqual(protectedResult, records);
+
+  const missing = mergeTimelineSessionTitle(records, { id: "missing", title: "不存在" });
+  assert.strictEqual(missing, records);
 });
 
 type FakeSession = { id: string; title: string; headItemId: number; updatedAt: number };

@@ -30,11 +30,15 @@
           </a-tooltip>
           <template v-if="headerTokensText">
             <span class="leading-none whitespace-nowrap">·</span>
-            <span class="leading-none whitespace-nowrap tabular-nums">{{ headerTokensText }}</span>
+            <span data-testid="agent-header-tokens" class="leading-none whitespace-nowrap tabular-nums">
+              {{ headerTokensText }}
+            </span>
           </template>
           <template v-if="runElapsedText">
             <span class="leading-none whitespace-nowrap">·</span>
-            <span class="leading-none whitespace-nowrap tabular-nums">{{ runElapsedText }}</span>
+            <span data-testid="agent-header-elapsed" class="leading-none whitespace-nowrap tabular-nums">
+              {{ runElapsedText }}
+            </span>
           </template>
         </div>
         <div v-if="props.sessionReady" class="shrink-0 flex items-center gap-1">
@@ -419,7 +423,7 @@
 import type {
   AgentImagePart,
   AgentMessage,
-  AgentMessageSessionRunState,
+  AgentSessionMessageState,
   AgentTimelineToolExecution,
   AgentToolExecution,
 } from "@agent-workbench/shared";
@@ -592,6 +596,7 @@ const emit = defineEmits<{
   "open-parent": [sessionId: string];
   "choose-session": [];
   "session-title-sync-needed": [sessionId: string];
+  "session-metadata-updated": [session: AgentSessionMessageState];
   "agent-settings-updated": [];
   "request-session-model-open": [
     params: { sessionId: string; agentId: string },
@@ -606,9 +611,7 @@ const emit = defineEmits<{
 }>();
 const { t } = useI18n();
 const statusStore = useAgentSessionStatusStore();
-const runState = computed<AgentMessageSessionRunState>(() =>
-  statusStore.runStateOf(props.sessionId),
-);
+const runState = statusStore.getRunState(props.sessionId);
 const isSubtaskSession = computed(() => props.sessionKind === "subtask");
 const sessionTitleText = computed(
   () => String(props.sessionTitle || "").trim() || props.sessionId,
@@ -681,7 +684,7 @@ const pendingRunController = createAgentPendingRunController({
       else if (run.status === "cancelled") message.warning(text);
       else message.error(text);
     }
-    if (!disposed && props.active && props.sessionReady) void refreshStructuralTimeline().catch(() => undefined);
+    if (!disposed && props.active && props.sessionReady) void refreshTimeline(false).catch(() => undefined);
   },
   onStale: () => {
     if (!disposed && props.active && props.sessionReady) {
@@ -830,6 +833,7 @@ async function loadTimeline(
     );
     if (result.state === timelineState.value) return;
     timelineState.value = result.state;
+    emit("session-metadata-updated", response.session);
     const invalidatedDetailIds = detailCache.syncTimeline(
       result.state.toolExecutions,
     );
@@ -1010,7 +1014,7 @@ async function onCancel() {
     await cancelAgentSession(props.sessionId, {
       workspaceId: props.workspaceId,
     });
-    await refreshTimeline(true);
+    await refreshTimeline(false);
   } catch (error) {
     message.error(error instanceof Error ? error.message : String(error));
   } finally {
@@ -1274,7 +1278,11 @@ async function onSend() {
       });
       draft.value = "";
       pendingCompactAttempt.value = null;
-      registerPendingAgentRun(pendingRunController, { workspaceId: props.workspaceId, sessionId: ensuredId, runKind: "manual_compaction", runId: result.runId });
+      registerPendingAgentRun(
+        pendingRunController,
+        { workspaceId: props.workspaceId, sessionId: ensuredId, runKind: "manual_compaction", runId: result.runId },
+        statusStore,
+      );
       void pendingRunController.pollNow();
     } else {
       const sendText = action.text;
@@ -1310,14 +1318,18 @@ async function onSend() {
             text: string;
           },
         );
-      registerPendingAgentRun(pendingRunController, { workspaceId: props.workspaceId, sessionId: ensuredId, runKind: "user", runId: result.runId });
+      registerPendingAgentRun(
+        pendingRunController,
+        { workspaceId: props.workspaceId, sessionId: ensuredId, runKind: "user", runId: result.runId },
+        statusStore,
+      );
       void pendingRunController.pollNow();
       draft.value = "";
       pendingImages.value = [];
       pendingAttempt.value = null;
     }
     if (action.kind === "compact") invalidateTimelineForStructuralMutation();
-    await (action.kind === "compact" ? refreshStructuralTimeline() : refreshTimeline(true));
+    await (action.kind === "compact" ? refreshStructuralTimeline() : refreshTimeline(false));
     scrollToBottom(true);
   } catch (error) {
     if (action.kind === "compact" && shouldClearPendingAgentCompactAttempt(error)) pendingCompactAttempt.value = null;
@@ -1715,8 +1727,8 @@ watch(
     const becameIdle = previousRunStatus === "running" && nextStatus !== "running";
     previousRunStatus = nextStatus;
     if (becameIdle && props.active && props.sessionReady) {
-      // run 收敛后无条件再读一次，避免最后一次 delta 在执行结束前完成。
-      void refreshStructuralTimeline().catch(() => undefined);
+      // run 收敛后补一次最终 delta，避免最后一次轮询早于终态写入。
+      void refreshTimeline(false).catch(() => undefined);
     } else scheduleRefresh();
   },
 );

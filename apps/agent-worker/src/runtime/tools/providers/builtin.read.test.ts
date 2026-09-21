@@ -90,6 +90,7 @@ for (const mode of ["new", "existing", "fork"] as const) {
     const provider = new BuiltinToolProvider();
     const parentNames = ["repo-a", "repo-b"];
     let nestedRepoDirNames: string[] | null = null;
+    let nestedRunKind: string | null = null;
     const apiClient = {
       async startSubtaskRun() {
         return {
@@ -113,6 +114,7 @@ for (const mode of ["new", "existing", "fork"] as const) {
       apiClient,
       processNestedRun: async (run) => {
         nestedRepoDirNames = run.workspaceRepoDirNames;
+        nestedRunKind = run.runKind;
       },
     });
 
@@ -129,6 +131,7 @@ for (const mode of ["new", "existing", "fork"] as const) {
     );
 
     assert.deepEqual(nestedRepoDirNames, ["repo-a", "repo-b"]);
+    assert.equal(nestedRunKind, "subtask");
     assert.notEqual(nestedRepoDirNames, parentNames);
   });
 }

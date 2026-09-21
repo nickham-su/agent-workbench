@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { AgentToolExecutionStatus } from "@agent-workbench/shared";
 
-const [{ mount }, { createI18n }, conversationToolCall, subtaskCard] = await Promise.all([
+const [{ mount }, { createI18n }, conversationToolCall, subtaskCard, toolCallRow] = await Promise.all([
   import("@vue/test-utils"),
   import("vue-i18n"),
   import("./AgentConversationToolCall.vue"),
   import("./AgentSubtaskCard.vue"),
+  import("./AgentToolCallRow.vue"),
 ]);
 
-function timelineExecution(status: "queued" | "running" | "completed") {
+function timelineExecution(status: AgentToolExecutionStatus) {
   return {
     id: "execution-a",
     callPartId: "call-a",
@@ -161,4 +163,45 @@ test("subtask 完成态显示完成图标，运行态显示 loading 图标", () 
   assert.equal(loadingIcon.exists(), true);
   assert.equal(running.findComponent({ name: "CheckCircleOutlined" }).exists(), false);
   running.unmount();
+});
+
+test("普通工具完成态不显示图标，弱化为浅灰耗时文本", () => {
+  const wrapper = mount(toolCallRow.default, {
+    props: {
+      toolName: "bash",
+      input: { command: "pwd" },
+      execution: timelineExecution("completed"),
+      now: 4_000,
+    },
+  });
+  assert.equal(wrapper.findComponent({ name: "CheckCircleOutlined" }).exists(), false);
+  assert.match(wrapper.text(), /2s/);
+  wrapper.unmount();
+});
+
+test("普通工具非完成状态显示对应图标", () => {
+  const cases = [
+    ["running", "LoadingOutlined"],
+    ["failed", "ExclamationCircleOutlined"],
+    ["queued", "ClockCircleOutlined"],
+    ["cancelled", "CloseCircleOutlined"],
+    ["unknown", "QuestionCircleOutlined"],
+  ] as const;
+
+  for (const [status, iconName] of cases) {
+    const wrapper = mount(toolCallRow.default, {
+      props: {
+        toolName: "bash",
+        input: { command: "pwd" },
+        execution: timelineExecution(status),
+        now: 4_000,
+      },
+    });
+    const icon = wrapper.findComponent({ name: iconName });
+    assert.equal(icon.exists(), true, status);
+    if (status === "running") {
+      assert.equal(wrapper.find(".anticon-spin").exists(), true);
+    }
+    wrapper.unmount();
+  }
 });

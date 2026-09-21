@@ -11,9 +11,17 @@
     <span class="min-w-0 flex-1 truncate">{{ inputText }}</span>
     <span
       v-if="executionText"
-      class="shrink-0 whitespace-nowrap tabular-nums"
-      :class="execution?.status === 'failed' ? 'text-red-500' : 'text-[color:var(--text-tertiary)]'"
-    >{{ executionText }}</span>
+      class="shrink-0 inline-flex items-center gap-1 whitespace-nowrap tabular-nums"
+      :class="executionStatusClass"
+    >
+      <component
+        v-if="executionStatusIcon"
+        :is="executionStatusIcon"
+        class="shrink-0"
+        :spin="execution?.status === 'running'"
+      />
+      {{ executionText }}
+    </span>
   </button>
   <div
     v-else
@@ -24,18 +32,34 @@
     <span class="min-w-0 flex-1 truncate">{{ inputText }}</span>
     <span
       v-if="executionText"
-      class="shrink-0 whitespace-nowrap tabular-nums"
-      :class="execution?.status === 'failed' ? 'text-red-500' : 'text-[color:var(--text-tertiary)]'"
-    >{{ executionText }}</span>
+      class="shrink-0 inline-flex items-center gap-1 whitespace-nowrap tabular-nums"
+      :class="executionStatusClass"
+    >
+      <component
+        v-if="executionStatusIcon"
+        :is="executionStatusIcon"
+        class="shrink-0"
+        :spin="execution?.status === 'running'"
+      />
+      {{ executionText }}
+    </span>
   </div>
 </template>
 
 <script setup lang="ts">
+import {
+  ClockCircleOutlined,
+  CloseCircleOutlined,
+  ExclamationCircleOutlined,
+  LoadingOutlined,
+  QuestionCircleOutlined,
+} from "@ant-design/icons-vue";
 import type { AgentTimelineToolExecution } from "@agent-workbench/shared";
 import { computed } from "vue";
 import {
   formatToolExecutionText,
   formatToolInputPreview,
+  toolExecutionStatusTextClass,
 } from "./agentToolExecutionDisplay";
 
 const props = withDefaults(
@@ -55,6 +79,19 @@ const inputText = computed(() => formatToolInputPreview(props.input));
 const executionText = computed(() =>
   formatToolExecutionText(props.execution, props.now),
 );
+const executionStatusClass = computed(() =>
+  props.execution
+    ? toolExecutionStatusTextClass(props.execution.status)
+    : "text-[color:var(--text-tertiary)]",
+);
+const executionStatusIcon = computed(() => {
+  if (props.execution?.status === "completed") return null;
+  if (props.execution?.status === "running") return LoadingOutlined;
+  if (props.execution?.status === "failed") return ExclamationCircleOutlined;
+  if (props.execution?.status === "queued") return ClockCircleOutlined;
+  if (props.execution?.status === "cancelled") return CloseCircleOutlined;
+  return QuestionCircleOutlined;
+});
 const titleText = computed(() =>
   [props.toolName, inputText.value, props.execution?.error]
     .filter(Boolean)

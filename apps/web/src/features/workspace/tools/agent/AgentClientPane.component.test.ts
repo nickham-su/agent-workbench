@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentMessage, AgentMessageSessionRunState } from "@agent-workbench/shared";
-import { defineComponent, h } from "vue";
+import { computed, defineComponent, h, type ComputedRef } from "vue";
 
 const [{ mount }, component, { createI18n }, { nextTick, reactive }, { agentSessionStatusStoreKey }, { message, Modal }, { replaceAgentTimelineSnapshot }] = await Promise.all([
   import("@vue/test-utils"),
@@ -107,7 +107,7 @@ function timelineSnapshot(messages: AgentMessage[]) {
   };
 }
 
-function createMountGlobal(statusStore: { runStateOf: () => AgentMessageSessionRunState }) {
+function createMountGlobal(statusStore: { getRunState: () => ComputedRef<AgentMessageSessionRunState> }) {
   const i18n = createI18n({ legacy: false, locale: "zh-CN", messages: { "zh-CN": {} } });
   return {
     plugins: [i18n],
@@ -126,7 +126,7 @@ function mountPane(options?: {
   forkSession?: (request: { fromSessionId: string; fromMessageId: string }) => Promise<{ id: string }>;
 }) {
   const runState = options?.runState ?? baseRunState();
-  const statusStore = { runStateOf: () => runState };
+  const statusStore = { getRunState: () => computed(() => runState) };
   const wrapper = mount(AgentClientPane, {
     attachTo: document.body,
     props: {
@@ -282,7 +282,7 @@ function mountForkPane(forkSession: NonNullable<Parameters<typeof mountPane>[0]>
       sessionModelMutationPending: false, modelOpenIntent: null, forkSession,
     },
     global: {
-      ...createMountGlobal({ runStateOf: () => baseRunState() }),
+      ...createMountGlobal({ getRunState: () => computed(() => baseRunState()) }),
       stubs: { ...componentStubs, AgentMessageActions: ForkActionsStub },
     },
   });
@@ -463,6 +463,42 @@ test("真实 AgentClientPane：Clipboard API reject 后进入 execCommand fallba
     else delete (navigator as { clipboard?: unknown }).clipboard;
     document.execCommand = originalExecCommand;
     message.success = originalSuccess;
+  }
+});
+
+test("真实 AgentClientPane：run-state 响应字段更新后同步刷新头部 Token、上下文比例和完成耗时", async () => {
+  const runState = baseRunState();
+  const { wrapper, setRunState } = mountPane({ runState, sessionReady: false });
+  try {
+    assert.equal(wrapper.find('[data-testid="agent-header-tokens"]').exists(), false);
+    assert.equal(wrapper.find('[data-testid="agent-header-elapsed"]').exists(), false);
+
+    setRunState({
+      lastResponseTotalTokens: 9898,
+      contextTokenRatio: 0.04949,
+      lastRunDurationMs: 27_501,
+      updatedAt: 2,
+    });
+    await nextTick();
+
+    const tokensText = wrapper.get('[data-testid="agent-header-tokens"]').text();
+    assert.match(tokensText, /9[,.]?898 tokens/);
+    assert.match(tokensText, /4[,.]?9%/);
+    assert.equal(wrapper.get('[data-testid="agent-header-elapsed"]').text(), "27s");
+
+    setRunState({
+      lastResponseTotalTokens: 12_345,
+      contextTokenRatio: 0.1,
+      lastRunDurationMs: 61_000,
+      updatedAt: 3,
+    });
+    await nextTick();
+
+    assert.match(wrapper.get('[data-testid="agent-header-tokens"]').text(), /12[,.]?345 tokens/);
+    assert.match(wrapper.get('[data-testid="agent-header-tokens"]').text(), /10%/);
+    assert.equal(wrapper.get('[data-testid="agent-header-elapsed"]').text(), "1min 1s");
+  } finally {
+    wrapper.unmount();
   }
 });
 

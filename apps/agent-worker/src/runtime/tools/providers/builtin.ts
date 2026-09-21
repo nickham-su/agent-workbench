@@ -714,6 +714,7 @@ export class BuiltinToolProvider implements ToolProvider {
               workspaceId: ctx.run.workspaceId,
               sessionId: started.sessionId,
               runId: started.runId,
+              runKind: "subtask",
               inputText: parsed.prompt,
               workspacePath: started.workspacePath,
               workspaceRepoDirNames: [...ctx.run.workspaceRepoDirNames]

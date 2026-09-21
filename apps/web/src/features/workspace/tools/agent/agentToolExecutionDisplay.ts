@@ -1,4 +1,7 @@
-import type { AgentTimelineToolExecution } from "@agent-workbench/shared";
+import type {
+  AgentTimelineToolExecution,
+  AgentToolExecutionStatus,
+} from "@agent-workbench/shared";
 import { formatElapsedDuration } from "./subtaskRunDisplay";
 
 export type TodoDisplay = {
@@ -49,6 +52,15 @@ export function formatToolInputPreview(value: unknown, maxLength = 500) {
   return formatted.length > limit
     ? `${formatted.slice(0, Math.max(1, limit - 1))}…`
     : formatted;
+}
+
+/** 普通工具行的状态颜色；富卡（Subtask/Todolist）维护自己的视觉语义。 */
+export function toolExecutionStatusTextClass(status: AgentToolExecutionStatus) {
+  if (status === "completed")
+    return "text-[color:var(--text-tertiary)]";
+  if (status === "running") return "text-blue-500";
+  if (status === "failed") return "text-[color:var(--danger-color)]";
+  return "text-[color:var(--text-secondary)]";
 }
 
 export function formatToolExecutionText(

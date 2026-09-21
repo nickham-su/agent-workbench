@@ -45,6 +45,7 @@ export type NestedRunContext = {
   workspaceId: string;
   sessionId: string;
   runId: string;
+  runKind: "subtask";
   inputText?: string;
   workspacePath: string;
   workspaceRepoDirNames: string[];

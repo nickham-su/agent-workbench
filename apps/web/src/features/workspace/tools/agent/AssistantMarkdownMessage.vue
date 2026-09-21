@@ -308,7 +308,7 @@ onBeforeUnmount(() => {
 
 .assistant-markdown-message :deep(.assistant-code-block > pre) {
   margin: 0;
-  padding-top: 2rem;
+  padding-right: 2.5rem;
 }
 
 .assistant-markdown-message :deep(.assistant-code-copy-btn) {

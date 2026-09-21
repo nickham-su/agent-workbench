@@ -64,6 +64,7 @@
             @open-title-setting="openTitleModal(session)"
             @open-parent="(parentSessionId) => onOpenParent(session.id, parentSessionId)"
             @session-title-sync-needed="requestSessionTitleSync"
+            @session-metadata-updated="onSessionMetadataUpdated"
             @choose-session="openChooseSessionModal(session.id)"
             @agent-settings-updated="onAgentSettingsUpdated"
             @request-session-model-open="onRequestSessionModelOpen"
@@ -147,7 +148,7 @@ export default {
 </script>
 
 <script setup lang="ts">
-import type { AgentSessionAgentModelState, AgentSessionRecord } from "@agent-workbench/shared/internal-contracts/agent-api-session";
+import type { AgentSessionAgentModelState, AgentSessionMessageState, AgentSessionRecord } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { CloseOutlined, MinusOutlined, PlusOutlined } from "@ant-design/icons-vue";
 import { message } from "ant-design-vue";
 import { computed, onActivated, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from "vue";
@@ -178,6 +179,7 @@ import { agentSessionStatusStoreKey, createAgentSessionStatusStore } from "./use
 import {
   isRequestResponseWritable,
   mergeStaleProtectedSessionList,
+  mergeTimelineSessionTitle,
   resolveTitleSaveResponseAction,
   shouldAllowTitleModalClose,
   shouldReleaseTitleSavingByToken,
@@ -901,6 +903,16 @@ function setDraftInitialText(sessionId: string, text: string) {
   const next = String(text || "");
   if (draftInitialTextBySession[key] === next) return;
   draftInitialTextBySession[key] = next;
+}
+
+function onSessionMetadataUpdated(session: AgentSessionMessageState) {
+  if (session.workspaceId !== props.workspaceId) return;
+  const protectedRecord = titleMutationCache.recordBySession.get(session.id) as AgentSessionRecord | undefined;
+  serverSessions.value = mergeTimelineSessionTitle(
+    serverSessions.value,
+    session,
+    protectedRecord,
+  );
 }
 
 function requestSessionTitleSync(sessionId: string) {
