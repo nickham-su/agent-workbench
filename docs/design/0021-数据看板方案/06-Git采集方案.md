@@ -1,127 +1,116 @@
 # Git 采集方案
 
-## 统计边界
+## 范围与安全边界
 
-Git 看板表示：
+Git Dashboard 统计当前受管理 Repo 的当前可达提交历史，不以 Workspace、作者、分支、remote 或路径作为公开筛选或展示维度。
 
-> 当前由 Agent Workbench 管理的本地项目中，当前可达提交历史的提交数量与变更规模。
+- Git scan 只读取受管理 Repo；路径解析、防穿越和软链边界沿用现有 Workspace/数据目录安全规则。
+- Git 采集不得阻断 Commit、Push、Sync、工作区操作或 Agent 执行。
+- 工作树忙、锁冲突、scan 超时或命令失败时延后该 Repo；不得高频重试或输出 Git 原始错误。
+- API/UI/日志只暴露受控 Repo 安全 ID、状态、coverage 和聚合数值；不返回目录、remote、ref、真实 SHA、Commit Message、Diff 或文件清单。
 
-它不是 Agent 归因、个人贡献、仅 Workbench API 操作审计、远端全部 refs 或未提交变更统计。Workspace 仅是本地 refs 发现源，Git API 不支持 Workspace 筛选、分组或展示。
+## Commit 安全身份
 
-## 代码现状与候选来源
-
-- `ensureRepoMirror()` 在 `apps/api/src/infra/git/mirror.ts` fetch 远端 `refs/heads/*` 至 Mirror `refs/remotes/origin/*`。
-- `cloneFromMirror()` 在 `apps/api/src/infra/git/clone.ts` 从 Mirror 初始化工作树，之后将 origin 改回真实远端。
-- `commitWorkspace()` 在 `apps/api/src/modules/git/git.service.ts` 仅对 Workspace 工作树 `git -C <path> commit` 并读 HEAD；不会回写 Mirror。
-
-每个 Repo scan 的 source 快照：
-
-| source | eligible refs | 作用 |
-| --- | --- | --- |
-| 受控 Mirror | `refs/remotes/origin/*` | 已同步远端分支历史 |
-| scan 开始时关联的每个 Workspace 工作树 | `HEAD`、`refs/heads/*` | detached HEAD、本地分支、未 push Commit |
-
-- source 列表必须在 scan 开始时一次性快照；扫描过程中 Workspace 新增/删除不改变本代要求。
-- 只从现有 `workspace_repos` 解析受控工作树路径；不接受客户端路径。
-- 不扫描 Workspace remote refs、tags、stash 或内部 refs；Mirror 已覆盖远端 refs。
-- `analytics_git_scan_source` 只存安全 source ID、种类、ref 数、状态和安全 error code，不存绝对路径、remote URL、ref 名或 Git 输出。
-
-## 全 source 成功规则
-
-本期准确性优先：**开始快照中的所有 eligible source 都必须成功完成读取与解析，scan 才能切换 generation。**
-
-- 某 source 路径不存在、无法读取、不是预期 Git 工作树、refs 枚举失败、`rev-list` 失败或未知 Commit 解析失败，均使整个 Repo scan `failed`。
-- 任一 source 失败时，不写部分 membership、不改 `analytics_git_repo_state.current_*`、不标 Git Dirty。
-- 之前 current generation 继续用于 Dashboard，并在 Git domain freshness 中暴露 scan error/stale。
-- 没有 eligible source 的 Repo scan 也视为失败，除非 Repo 已被明确删除并停止调度；不能把空集合当作成功清空。
-
-## 单调 generation 与原子切换
+Analytics 持久 Commit 身份**只能**是：
 
 ```text
-短事务领取 repo_state.next_generation，创建 running scan 并将 next_generation + 1
-    ↓
-快照并成功扫描全部 eligible sources
-    ↓
-合并 SHA，按 (repo_id, sha) 去重，解析未知 Commit Fact
-    ↓
-同一 Analytics transaction：写 Fact、完整 membership、Scan coverage、scan completed、current pointer、Git Dirty
-    ↓
-新 generation 的 Scan 标 completed，且成为 current
+(repo_id, commit_identity)
 ```
 
-- scan 开始时的短 transaction 必须读取并领取 `analytics_git_repo_state.next_generation`，创建 `(repo_id,generation)` 唯一的 running scan，再将 `next_generation` 递增。新 Repo 初始化 `next_generation=1`；若并发领取冲突，后者重读重试。
-- generation 对同 Repo 单调递增；失败、崩溃恢复标 failed 的 generation **不回退且永不复用**。`analytics_git_repo_state.current_scan_id/current_generation` 是 current generation 唯一权威，禁止以最大 `completed_at` 选择。
-- `(repo_id, sha)` 去重跨 Mirror/多 Workspace 同一 Commit。
-- scan 失败仅写 `failed/error_code`；不触碰 pointer 或旧 membership。
-- 切换事务必须比较旧/新 membership，将两侧受影响 Committer Date 桶全部标 Dirty；同一 transaction 必须包含 Fact、membership、Scan coverage、`scan.status='completed'/completed_at`、pointer、Dirty，缺一不可。coverage 字段只写本次 `analytics_git_scan`，不冗余写入 Repo State。
-- 对切换 transaction 的任一 SQL 写入、约束或 fault injection 失败，必须整体 rollback；旧 current pointer、旧 membership、旧 completed Scan 不变。失败后以独立 transaction 将该 running Scan 标为 failed/error_code，不能让部分新 generation 被查询。
-- 同 Repo 至多一个 running scan：数据库 fence 加进程内锁。进程崩溃遗留 running scan 需可安全标 failed 后重启；不可阻塞未来 generation。
+其中：
 
-## Commit 元数据
-
-对每个 unknown `(repo_id, sha)` 从可到达该 SHA 的已成功 source 获取：
-
-- Committer Date，转 UTC Unix 毫秒。
-- 父提交数，父数大于一即 Merge。
-- 非 Merge Commit 的文件数、insertions、deletions。
-
-命令输出必须机器可解析，文件名必须 NUL 分隔或同等稳健解析；不得解析默认人类可读文本。
-
-| 情形 | Commit | 文件数 | 行数 |
-| --- | --- | --- | --- |
-| 普通 Commit | 计一 | 变更文件数 | `numstat` 数值相加 |
-| Merge Commit | 计一 | 不适用，不累计 | 不适用，不累计 |
-| 二进制文件 | 正常 | 计文件 | `-` 不累计 insertions/deletions |
-| rename/special path | 正常 | 正确计文件 | 安全解析，不因 tab/空格/换行失败 |
-| 空 Commit | 计一 | 0 | 0 |
-
-Merge 的 `files_changed/insertions/deletions` 推荐保存 `null`，聚合只累加非 Merge 值。
-
-## 当前可达与历史改写
-
-- Dashboard 仅 join `analytics_git_repo_state.current_scan_id` 的 membership。
-- amend/rebase/force update 后旧 SHA 若不在新 generation membership，则不参与当前统计；Commit Fact 可留存以减少重复解析。
-- scan 失败绝不以部分结果删除旧 SHA 或切换到空集合。
-- UI 必须标注“当前可达提交历史”，避免把 rebase 后数字变化理解为数据丢失。
-
-## 初次回填与 coverage
-
-- 首次启用扫描当前可达历史，默认限制最近 365 天且每 Repo 最多 50,000 Commit。
-- 达到任一限制仍可完成 generation，但必须在该 completed `analytics_git_scan` 写 `coverage_incomplete=1`、`covered_from`、`coverage_reason`。
-- API 只可经 `analytics_git_repo_state.current_scan_id -> analytics_git_scan` 读取当前 coverage；Repo State 只保存 current pointer、`next_generation` 与更新时间。
-- 未覆盖更早区间在 API 中是“覆盖不完整”，绝不能显示为零。
-- 对每个受管理 Repo 返回诊断 coverage：
-
-```ts
-type GitRepoCoverage =
-  | { repoId: string; status: 'ready'; currentGeneration: number;
-      coveredFrom: number | null; coverageIncomplete: boolean;
-      coverageReason: GitCoverageReason }
-  | { repoId: string; status: 'preparing' | 'error'; currentGeneration: null;
-      coveredFrom: null; coverageIncomplete: null; coverageReason: null }
+```text
+commit_identity = HMAC-SHA-256(installation_secret, repo_id + NUL + raw_SHA)
 ```
 
-- Shared TypeBox/OpenAPI 必须以 `Type.Union` 建模上述 `status` 判别联合，不能用一个带可选字段的伪结构。
-- current pointer 指向 completed Scan 时为 `ready`，`currentGeneration` 必须为实际 generation，其他字段取该 current Scan；尚无 completed current Scan 为 `preparing`，最近 scan 错误且没有可用 current Scan 为 `error`。后两种所有 current coverage 字段都固定 `null`，不得使用 generation `0`、`coverageIncomplete=false` 或最近 failed scan 冒充完整 coverage。
-- Git 指标数值继续从所有 current Repo 的 membership 全局汇总；Repo coverage 只用于诊断展示，不增加 Repo/Workspace 筛选或指标分组。
-- 普通后续 scan 不自动无限扩大历史范围；扩大范围只能通过显式回填/全量维护操作。
+也可使用安全等价的安装级稳定不可逆派生，但必须满足相同输入稳定、跨 Repo 不可混同、无 installation secret 时不可反推真实 SHA。
 
-## 调度、删除与留存
+- `raw_SHA` 仅在受控 Git scan 进程内瞬时读取和计算 `commit_identity`，随后立即丢弃。
+- 真实 SHA 不得写入 Analytics DB、业务表扩展、IPC、私有 Outbox、API 响应、UI、日志、错误或测试 fixture。
+- 首次启用 Git Analytics 时，仅在确认是没有既有 Git Analytics 数据的全新安装，才可原子创建 `installation_secret`。
+- 密钥位于受控本地数据目录，使用最小文件权限；永不写入配置示例、日志、API 或 UI，并稳定长期使用。
+- 已有 Git Analytics 数据时，密钥缺失、损坏或无法读取必须使 Git Domain unavailable/degraded，禁止静默重建后继续写入，否则会改变 commit_identity 并破坏去重。
+- 首版不支持在线轮换。未来轮换必须显式执行 identity reset，并隔离/清理旧 Git generation 后再采集；不得把新旧 identity 混合计数。
 
-- Git scan 独立于十分钟聚合，默认每 30 分钟；Repo sync 成功和 Workbench Commit 成功可触发该 Repo 去重 scan 请求。
-- scan 遵循既有 Workspace 删除 fence、Repo lock；扫描失败不阻断 Commit/Push/Sync/删除。
-- Workspace 删除后，未来 source 快照不再包括其工作树；历史 Fact 继续保留。
-- Repo 删除后停止调度，保留 current generation 和 Fact 供历史看板读取。
-- 每 Repo 保留 current 加前两个 completed generation；failed/running scan 诊断保留 7 天。清理永不删除 current generation、其 membership 或 Repo state 指针。
+## Source snapshot 与 generation
 
-## 审查清单
+每次 Repo scan 建立不可变 source snapshot：
 
-- 是否快照并成功扫描全部 eligible source，任一失败即不切换？
-- 是否同时覆盖 Mirror 与 Workspace `HEAD + refs/heads/*`，发现未 push Commit？
-- 是否按 `(repo_id, sha)` 去重，且 Workspace 不出现在 Git API 维度？
-- 是否在 scan 开始事务领取并递增 `next_generation`，且 failed generation 永不复用？
-- 是否使用单调 generation 和 current pointer，而不是 `completed_at max`？
-- 是否在切换 transaction 一起写 Fact、membership、Scan coverage、completed 状态/时间、pointer、Dirty，并只在 Scan 存 coverage？
-- 任意切换写入 fault injection 是否完整 rollback 并保留旧 current？无 current Scan 是否返回 preparing/error 而非零？
-- Merge、二进制、rename、空 Commit、rebase 和失败 scan 是否符合本文件？
-- 是否没有写入 Commit Message、路径、Diff、绝对路径、remote URL 或 Git 输出？
+```text
+analytics_git_scan
+- scan_id
+- repo_id
+- started_at / completed_at
+- source_state: running | ready | failed
+- covered_from / covered_to
+- current_generation boolean
+- safe_error_code nullable
+```
+
+成功 scan 在单事务内：
+
+- 写入本次安全 Commit Fact；
+- 写入 `analytics_git_membership(scan_id, repo_id, commit_identity)`；
+- 将该 Repo 的 `current_scan_id` 原子切换到本次 ready scan；
+- 更新 Repo coverage 与 Domain 状态。
+
+失败 scan 不替换原有 current generation。每个 Repo 同时最多一个 scan；无需通用 Lease 或 repair generation。
+
+## 采集内容与指标字段
+
+```text
+analytics_git_commit_fact
+- repo_id
+- commit_identity
+- committed_at
+- parent_count
+- files_changed nullable
+- insertions nullable
+- deletions nullable
+- collected_at
+- primary key(repo_id, commit_identity)
+```
+
+- Commit 按 Committer Date `[from,to)` 归属。
+- Merge（父数大于一）只计 Commit；不计 changed files、insertions、deletions。
+- 非 Merge 的文件数来自安全聚合后的 numstat；二进制 `-` 只计变更文件，不计行数。
+- rebase/amend/force-push 后不再 current generation 的 Commit 不参与当前统计。
+
+## Partial 与 coverage
+
+Git 统计必须保留已知部分值，而不是因一个 Repo 未 ready 将全域抹成零或整体请求失败。
+
+范围响应包含：
+
+```text
+completeness: complete | partial
+partialReason: repo_not_ready | range_before_coverage | scan_stale | mixed_repo_coverage
+readyRepoCount: number
+totalRepoCount: number
+```
+
+- 有 ready current generation 且其 `coveredFrom <= from` 的 Repo 贡献完整已知值。
+- 有 ready current generation、但请求范围早于其 `coveredFrom` 的 Repo 仍可贡献它已覆盖部分；总结果为 partial。
+- 无 current generation 的 Repo 不贡献值，并使总结果 partial。
+- 仅无 ready Repo 时不产生 partial 值，而是 unavailable；`partialReason` 不适用于 unavailable。
+- 单一原因优先返回对应枚举：无 ready current generation 为 `repo_not_ready`，范围早于 coverage 为 `range_before_coverage`，ready generation 超过 freshness 预算为 `scan_stale`；多个原因并存为 `mixed_repo_coverage`。
+- 没有任何 ready Repo 时，Git Metric/Panel 为 unavailable，`value/data=null`，绝不是 `0`。
+- 部分值必须在 UI 标为“已知部分值/下界”，并显示 ready/total Repo 数；不能展示为完整系统总量。
+- 后端不返回自由 partial 错误文本；前端仅将上述枚举映射为本地文案。
+- Repo coverage 是诊断信息，不能被用作用户可筛选维度。
+
+## 热力图
+
+贡献热力图固定最近 180 个**本地日**，独立于范围型 Dashboard `[from,to)`：
+
+- 使用请求 timezone 的 IANA 本地日边界分桶；DST 日由服务端正常换算。
+- 同一单一 Dashboard 响应以例外子块返回自身 `from/to/asOf` 和上述 partial 信息。
+- 仅当前 generation 的 Commit 参与；partial 时同样标为下界。
+- 该热力图不参与范围型比较，也不迫使其它面板改为 180 天。
+
+## 调度与留存
+
+- 启动后与后台低频调度触发 scan；在业务繁忙、Repo 忙或资源预算不足时让步。
+- 仅在 source snapshot 成功、membership 完整且 current 指针原子切换后推进 Git coverage。
+- 非 Git Fact 的 400 天物理留存策略不删除 Git current generation 的必要 Commit Fact、membership 或 current scan 元数据。
+- 移除 Repo 时按受控配置更新 Repo 集合与覆盖诊断，不执行无关业务 Git 操作。
