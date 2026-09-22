@@ -368,6 +368,8 @@ export default {
       backToParent: "返回",
       copySessionId: "复制 Session ID",
       sessionIdCopied: "已复制 Session ID",
+      copyMessageId: "复制消息 ID",
+      messageIdCopied: "已复制消息 ID",
       copyCode: "复制代码",
       codeCopied: "代码已复制",
       parentSessionMissing: "未找到父会话",

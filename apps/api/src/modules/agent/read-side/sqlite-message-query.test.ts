@@ -288,6 +288,45 @@ test("压缩后 Timeline 的 snapshot 与 before 分页可继续读取压缩前�
   db.close();
 });
 
+test("before 分页保留历史 compaction 的 retainedFromMessageId", () => {
+  const { db, query } = createFixture();
+  appendMessage(db, {
+    id: "user-1", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: null, expectedRevision: 0,
+    type: "user", status: "completed", parts: [], createdAt: 2,
+  });
+  commitCompactionMessageForTest(db, {
+    id: "compaction-1", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "user-1", expectedRevision: 1,
+    textPartId: "compaction-1-text", text: "first summary", createdAt: 3,
+  });
+  appendMessage(db, {
+    id: "user-2", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "compaction-1", expectedRevision: 2,
+    type: "user", status: "completed", parts: [], createdAt: 4,
+  });
+  commitCompactionMessageForTest(db, {
+    id: "compaction-2", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "user-2", expectedRevision: 3,
+    textPartId: "compaction-2-text", text: "second summary", retainedFromMessageId: "user-1", createdAt: 5,
+  });
+  appendMessage(db, {
+    id: "user-3", workspaceId: "ws", sessionId: "session", expectedHeadMessageId: "compaction-2", expectedRevision: 4,
+    type: "user", status: "completed", parts: [], createdAt: 6,
+  });
+
+  const tail = query.getTimeline({ workspaceId: "ws", sessionId: "session", mode: "snapshot", limit: 1 });
+  assert.deepEqual(tail.messages.map((message) => message.id), ["user-3"]);
+
+  let previous!: ReturnType<SqliteMessageQuery["getTimeline"]>;
+  assert.doesNotThrow(() => {
+    previous = query.getTimeline({
+      workspaceId: "ws", sessionId: "session", mode: "before", beforeMessageId: tail.nextBeforeMessageId!, limit: 2,
+    });
+  });
+  assert.deepEqual(previous.messages.map((message) => message.id), ["user-2", "compaction-2"]);
+  const compaction = previous.messages.at(-1);
+  assert.equal(compaction?.type, "compaction");
+  assert.equal(compaction?.type === "compaction" && compaction.retainedFromMessageId, "user-1");
+  db.close();
+});
+
 test("超长展示链的 Timeline 分页保持有界，并可跨越压缩边界", () => {
   const { db, query } = createFixture();
   let head: string | null = null;

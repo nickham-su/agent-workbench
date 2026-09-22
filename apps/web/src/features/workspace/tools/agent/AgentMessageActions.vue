@@ -1,14 +1,32 @@
 <template>
   <div
     v-if="showFork || showRevert"
-    class="pointer-events-none absolute right-1 z-10 flex items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100"
+    class="pointer-events-none absolute right-1 z-10 flex items-center gap-1 whitespace-nowrap text-[10px] text-[color:var(--text-tertiary)] opacity-0 transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100"
     :class="outside ? '-top-5' : 'top-0.5'"
     data-testid="agent-message-actions"
   >
     <button
+      v-if="messageId"
+      type="button"
+      class="h-5 cursor-pointer rounded border-0 bg-transparent px-1 font-mono text-inherit transition-colors hover:bg-[var(--hover-bg)] hover:text-[color:var(--text-primary)]"
+      :title="copyMessageIdLabel"
+      :aria-label="copyMessageIdLabel"
+      @click="emit('copyMessageId')"
+    >
+      {{ messageId }}
+    </button>
+    <template v-if="timeText">
+      <span aria-hidden="true">·</span>
+      <span data-testid="agent-message-time">{{ timeText }}</span>
+    </template>
+    <template v-if="toolsText">
+      <span aria-hidden="true">·</span>
+      <span class="cursor-pointer rounded px-1 transition-colors hover:bg-[var(--hover-bg)] hover:text-[color:var(--text-primary)]" data-testid="agent-message-tools" :title="toolsText">{{ toolsText }}</span>
+    </template>
+    <button
       v-if="showFork"
       type="button"
-      class="flex h-5 w-5 items-center justify-center border-0 bg-transparent p-0 text-[12px] text-[color:var(--text-tertiary)] hover:text-[color:var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+      class="flex h-5 w-5 cursor-pointer items-center justify-center rounded border-0 bg-transparent p-0 text-[12px] text-[color:var(--text-tertiary)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[color:var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
       :title="forkLabel"
       :aria-label="forkLabel"
       :disabled="disabled"
@@ -23,7 +41,7 @@
     <button
       v-if="showRevert"
       type="button"
-      class="flex h-5 w-5 items-center justify-center border-0 bg-transparent p-0 text-[12px] text-[color:var(--text-tertiary)] hover:text-[color:var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+      class="flex h-5 w-5 cursor-pointer items-center justify-center rounded border-0 bg-transparent p-0 text-[12px] text-[color:var(--text-tertiary)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[color:var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
       :title="revertLabel"
       :aria-label="revertLabel"
       :disabled="disabled"
@@ -44,13 +62,21 @@ withDefaults(
     disabled: boolean;
     forkLabel: string;
     revertLabel: string;
+    messageId?: string;
+    copyMessageIdLabel?: string;
+    timeText?: string;
+    toolsText?: string;
     outside?: boolean;
     showFork?: boolean;
     showRevert?: boolean;
   }>(),
-  { outside: false, showFork: true, showRevert: true },
+  {
+    messageId: "", copyMessageIdLabel: "", timeText: "", toolsText: "",
+    outside: false, showFork: true, showRevert: true,
+  },
 );
 const emit = defineEmits<{
+  copyMessageId: [];
   fork: [];
   revert: [];
 }>();

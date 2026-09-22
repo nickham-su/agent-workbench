@@ -325,26 +325,53 @@ test("真实 AgentClientPane：恢复窗口内的用户滚动意图会取消旧�
 test("真实 AgentClientPane：历史与当前消息分别渲染 Fork/Revert 操作", async () => {
   const { wrapper } = mountPane({ sessionReady: false });
   try {
+    const toolPart = (id: string, position: number, toolName: "bash" | "read") => ({
+      id, messageId: "current-assistant", position, type: "tool_call" as const, toolName,
+      input: {}, providerToolCallId: null, updatedRevision: 1, createdAt: 1_000, updatedAt: 1_000,
+    });
     const timelineMessages = [
       agentMessage({ id: "old-user", type: "user", inCurrentOperationRange: false }),
-      agentMessage({ id: "old-assistant", type: "assistant", inCurrentOperationRange: false }),
+      agentMessage({
+        id: "old-assistant", type: "assistant", inCurrentOperationRange: false,
+        createdAt: 1, updatedAt: 2_501,
+      }),
       agentMessage({ id: "current-user", type: "user", inCurrentOperationRange: true }),
-      agentMessage({ id: "current-assistant", type: "assistant", inCurrentOperationRange: true }),
+      agentMessage({
+        id: "current-assistant", type: "assistant", inCurrentOperationRange: true,
+        createdAt: 1, updatedAt: 3_201,
+        parts: [
+          toolPart("call-bash-a", 0, "bash"),
+          toolPart("call-bash-b", 1, "bash"),
+          toolPart("call-read", 2, "read"),
+        ],
+      }),
       agentMessage({ id: "summary", type: "compaction", inCurrentOperationRange: true }),
     ];
     await setTimeline(wrapper, timelineMessages);
     assert.deepEqual((wrapper.vm as unknown as { timelineState: { messages: AgentMessage[] } }).timelineState.messages.map((item) => [item.id, item.inCurrentOperationRange]), [...timelineMessages].sort((left, right) => left.id.localeCompare(right.id)).map((item) => [item.id, item.inCurrentOperationRange]));
+    const actionComponents = wrapper.findAllComponents({ name: "AgentMessageActions" });
     const actionByMessageId = new Map(
-      wrapper.findAllComponents({ name: "AgentMessageActions" }).map((action) => [
+      actionComponents.map((action) => [
         action.element.parentElement?.getAttribute("data-message-id"),
-        { showFork: action.props("showFork"), showRevert: action.props("showRevert") },
+        {
+          messageId: action.props("messageId"),
+          showFork: action.props("showFork"),
+          showRevert: action.props("showRevert"),
+        },
       ]),
     );
-    assert.deepEqual(actionByMessageId.get("old-user"), { showFork: true, showRevert: false });
-    assert.deepEqual(actionByMessageId.get("old-assistant"), { showFork: true, showRevert: false });
-    assert.deepEqual(actionByMessageId.get("current-user"), { showFork: true, showRevert: true });
-    assert.deepEqual(actionByMessageId.get("current-assistant"), { showFork: true, showRevert: false });
+    assert.deepEqual(actionByMessageId.get("old-user"), { messageId: "old-user", showFork: true, showRevert: false });
+    assert.deepEqual(actionByMessageId.get("old-assistant"), { messageId: "old-assistant", showFork: true, showRevert: false });
+    assert.deepEqual(actionByMessageId.get("current-user"), { messageId: "current-user", showFork: true, showRevert: true });
+    assert.deepEqual(actionByMessageId.get("current-assistant"), { messageId: "current-assistant", showFork: true, showRevert: false });
     assert.equal(actionByMessageId.has("summary"), false);
+
+    const actionFor = (messageId: string) => actionComponents.find(
+      (action) => action.element.parentElement?.getAttribute("data-message-id") === messageId,
+    )!;
+    assert.notEqual(actionFor("old-user").props("timeText"), "");
+    assert.equal(actionFor("old-user").props("toolsText"), "");
+    assert.equal(actionFor("current-assistant").props("toolsText"), "bash ×2, read");
   } finally {
     wrapper.unmount();
   }
@@ -695,18 +722,18 @@ test("真实 AgentClientPane：精确匹配 slash 指令时隐藏候选且 Enter
   }
 });
 
-test("真实 AgentClientPane：Clipboard API reject 后进入 execCommand fallback 并清理临时 textarea", async () => {
+test("真实 AgentClientPane：Session 与消息 ID 复制在 Clipboard API reject 后进入 fallback", async () => {
   const clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
   const originalExecCommand = document.execCommand;
   const originalSuccess = message.success;
-  let execCalls = 0;
+  const copiedContents: string[] = [];
   Object.defineProperty(navigator, "clipboard", {
     configurable: true,
     value: { writeText: async () => { throw new Error("denied"); } },
   });
   document.execCommand = ((command: string) => {
     assert.equal(command, "copy");
-    execCalls += 1;
+    copiedContents.push((document.activeElement as HTMLTextAreaElement).value);
     return true;
   }) as typeof document.execCommand;
   message.success = (() => undefined) as unknown as typeof message.success;
@@ -714,8 +741,11 @@ test("真实 AgentClientPane：Clipboard API reject 后进入 execCommand fallba
   try {
     const before = document.body.querySelectorAll("textarea").length;
     await wrapper.get('a-button[aria-label="agent.client.copySessionId"]').trigger("click");
+    await setTimeline(wrapper, [agentMessage({ id: "message-copy", type: "user" })]);
+    wrapper.getComponent({ name: "AgentMessageActions" }).vm.$emit("copy-message-id");
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(execCalls, 1);
+
+    assert.deepEqual(copiedContents, ["session-a", "message-copy"]);
     assert.equal(document.body.querySelectorAll("textarea").length, before);
   } finally {
     wrapper.unmount();

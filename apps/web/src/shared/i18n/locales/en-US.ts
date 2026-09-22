@@ -370,6 +370,8 @@ export default {
       backToParent: "Back",
       copySessionId: "Copy session ID",
       sessionIdCopied: "Session ID copied",
+      copyMessageId: "Copy message ID",
+      messageIdCopied: "Message ID copied",
       copyCode: "Copy code",
       codeCopied: "Code copied",
       parentSessionMissing: "Parent session not found",

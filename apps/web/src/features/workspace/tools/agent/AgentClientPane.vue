@@ -90,11 +90,16 @@
             <AgentMessageActions
               v-if="isMessageActionAnchor(row) && (showFork(row.message) || showRevert(row.message))"
               :disabled="isSessionMessageMutationPending"
+              :message-id="row.message.id"
+              :copy-message-id-label="t('agent.client.copyMessageId')"
+              :time-text="messageTimeText(row.message)"
+              :tools-text="messageToolsText(row.message)"
               :fork-label="t('agent.client.fork')"
               :revert-label="t('agent.client.revert')"
               :show-fork="showFork(row.message)"
               :show-revert="showRevert(row.message)"
               :outside="row.message.type === 'user'"
+              @copy-message-id="copyMessageId(row.message.id)"
               @fork="onFork(row.message.id)"
               @revert="onRevert(row.message)"
             />
@@ -493,6 +498,7 @@ import {
   shouldRunAgentElapsedTimer,
 } from "./agentClientHeader";
 import { runAgentSessionMessageMutation } from "./agentMessageMutationAction";
+import { formatAgentMessageTimestamp } from "./agentMessageMetadata";
 import { runAgentSessionForkAction } from "./agentForkSessionAction";
 import {
   createAgentCompactAttemptFingerprint,
@@ -734,6 +740,20 @@ const runElapsedText = computed(() => {
     ? formatElapsedDuration(Math.max(0, durationMs))
     : "";
 });
+function messageTimeText(targetMessage: AgentMessage) {
+  return formatAgentMessageTimestamp(targetMessage.createdAt, now.value);
+}
+function messageToolsText(targetMessage: AgentMessage) {
+  if (targetMessage.type !== "assistant") return "";
+  const counts = new Map<string, number>();
+  for (const part of [...targetMessage.parts].sort((left, right) => left.position - right.position)) {
+    if (part.type !== "tool_call") continue;
+    counts.set(part.toolName, (counts.get(part.toolName) ?? 0) + 1);
+  }
+  return [...counts]
+    .map(([toolName, count]) => count > 1 ? `${toolName} ×${count}` : toolName)
+    .join(", ");
+}
 const headerTokensText = computed(() => formatAgentHeaderTokens(
   runState.value.lastResponseTotalTokens,
   runState.value.contextTokenRatio,
@@ -1487,21 +1507,21 @@ function closeAttachmentPreview() {
   previewCache.clear();
 }
 
-async function copySessionId() {
-  const content = props.sessionId.trim();
-  if (!content) return;
+async function copyTextWithFeedback(content: string, copiedMessage: string) {
+  const normalizedContent = content.trim();
+  if (!normalizedContent) return;
   try {
     if (typeof navigator.clipboard?.writeText === "function") {
-      await navigator.clipboard.writeText(content);
-      message.success(t("agent.client.sessionIdCopied"));
+      await navigator.clipboard.writeText(normalizedContent);
+      message.success(copiedMessage);
       return;
     }
   } catch {
     // Clipboard API 不可用时继续使用兼容回退。
   }
   try {
-    if (!copyTextWithExecCommand(content)) throw new Error("copy command failed");
-    message.success(t("agent.client.sessionIdCopied"));
+    if (!copyTextWithExecCommand(normalizedContent)) throw new Error("copy command failed");
+    message.success(copiedMessage);
   } catch (error) {
     message.error(
       t("common.copyFailed", {
@@ -1509,6 +1529,14 @@ async function copySessionId() {
       }),
     );
   }
+}
+
+async function copySessionId() {
+  await copyTextWithFeedback(props.sessionId, t("agent.client.sessionIdCopied"));
+}
+
+async function copyMessageId(messageId: string) {
+  await copyTextWithFeedback(messageId, t("agent.client.messageIdCopied"));
 }
 
 const modelModalVisible = ref(false);

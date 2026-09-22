@@ -478,23 +478,23 @@ export class SqliteMessageQuery {
 
   private listDisplayPageBefore(session: AgentSessionMessageState, beforeMessageId: string, limit: number) {
     const rows = this.db.prepare(`
-      with recursive page_chain(id, workspace_id, previous_message_id, replaces_message_id, depth, type, status,
+      with recursive page_chain(id, workspace_id, previous_message_id, replaces_message_id, retained_from_message_id, depth, type, status,
                                 origin_session_id, origin_run_id, updated_revision, created_at, updated_at, steps) as (
-        select message.id, message.workspace_id, message.previous_message_id, message.replaces_message_id,
+        select message.id, message.workspace_id, message.previous_message_id, message.replaces_message_id, message.retained_from_message_id,
                message.depth, message.type, message.status, message.origin_session_id, message.origin_run_id,
                message.updated_revision, message.created_at, message.updated_at, 1
         from agent_message message
         join agent_message cursor on cursor.previous_message_id = message.id
         where cursor.id = @beforeMessageId and cursor.workspace_id = @workspaceId and message.workspace_id = @workspaceId
         union all
-        select message.id, message.workspace_id, message.previous_message_id, message.replaces_message_id,
+        select message.id, message.workspace_id, message.previous_message_id, message.replaces_message_id, message.retained_from_message_id,
                message.depth, message.type, message.status, message.origin_session_id, message.origin_run_id,
                message.updated_revision, message.created_at, message.updated_at, chain.steps + 1
         from agent_message message join page_chain chain on chain.previous_message_id = message.id
         where message.workspace_id = @workspaceId and chain.steps < @take
       )
       select id, workspace_id as workspaceId, previous_message_id as previousMessageId,
-             replaces_message_id as replacesMessageId, depth, type, status,
+             replaces_message_id as replacesMessageId, retained_from_message_id as retainedFromMessageId, depth, type, status,
              origin_session_id as originSessionId, origin_run_id as originRunId,
              updated_revision as updatedRevision, created_at as createdAt, updated_at as updatedAt
       from page_chain order by depth asc

@@ -85,3 +85,34 @@ test("真实 AgentMessageActions：独立控制 Fork 与 Revert 按钮组合", a
   assert.equal(wrapper.find('[data-testid="agent-message-actions"]').exists(), false);
   wrapper.unmount();
 });
+
+test("真实 AgentMessageActions：在操作按钮左侧展示消息元数据，ID 可点击", async () => {
+  const wrapper = mount(component.default, {
+    props: {
+      disabled: false,
+      messageId: "message-123",
+      copyMessageIdLabel: "复制消息 ID",
+      timeText: "14:32:08",
+      toolsText: "bash, read ×2",
+      forkLabel: "fork",
+      revertLabel: "revert",
+      showFork: true,
+      showRevert: true,
+    },
+  });
+
+  const buttons = wrapper.findAll("button");
+  assert.equal(buttons.length, 3);
+  assert.equal(buttons[0]!.text(), "message-123");
+  assert.equal(buttons[0]!.attributes("aria-label"), "复制消息 ID");
+  assert.equal(wrapper.get('[data-testid="agent-message-time"]').text(), "14:32:08");
+  const tools = wrapper.get('[data-testid="agent-message-tools"]');
+  assert.equal(tools.text(), "bash, read ×2");
+  assert.ok(buttons[0]!.classes().includes("cursor-pointer"));
+  assert.ok(tools.classes().includes("cursor-pointer"));
+  assert.equal(wrapper.findAll('span[aria-hidden="true"]').length, 2);
+  await buttons[0]!.trigger("click");
+  assert.equal(wrapper.emitted("copyMessageId")?.length, 1);
+  assert.deepEqual(buttons.slice(1).map((button) => button.attributes("aria-label")), ["fork", "revert"]);
+  wrapper.unmount();
+});
