@@ -56,13 +56,6 @@ import {
 } from "./debug/project-assistant-debug-record.js";
 import { CompactionExecutor } from "./compaction/executor.js";
 import type { CompactionCasState, CompactionMode } from "./compaction/types.js";
-import {
-  beginContextLimitRecovery,
-  completeContextLimitRecovery,
-  isStandardBusinessNoProgress,
-  nextContextLimitRecoveryMode,
-  type ContextLimitRecoveryState,
-} from "./compaction/recovery-state.js";
 
 function nowMs() {
   return Date.now();
@@ -77,22 +70,12 @@ function parseIntOrDefault(raw: string | undefined, fallback: number) {
 const DEBUG_DUMP_RELATIVE_DIR = path.join(".debug", "agent_message_logs");
 const LOOP_MAX_STEPS = parseIntOrDefault(process.env.AWB_AGENT_LOOP_MAX_STEPS, 128);
 const LOOP_REPEAT_TOOL_CALL_THRESHOLD = parseIntOrDefault(process.env.AWB_AGENT_LOOP_REPEAT_TOOL_CALL_THRESHOLD, 20);
-// 运行参数优先从后端 Settings 下发;这里的 env 仅作为全局覆盖开关,方便临时排障。
-// 0 表示关闭。
-const ENV_TIMEOUT_MS_MAX = 2_147_483_647;
-const ENV_MODEL_IDLE_TIMEOUT_MS = Math.min(
-  ENV_TIMEOUT_MS_MAX,
-  Math.max(0, parseIntOrDefault(process.env.AWB_AGENT_MODEL_IDLE_TIMEOUT_MS, 0))
-);
-const ENV_MODEL_TOTAL_TIMEOUT_MS = Math.min(
-  ENV_TIMEOUT_MS_MAX,
-  Math.max(0, parseIntOrDefault(process.env.AWB_AGENT_MODEL_TOTAL_TIMEOUT_MS, 0))
-);
 const MODEL_RETRY_BACKOFF_BASE_MS = 2_000;
 const CONTROL_WRITE_RETRY_DELAY_MS = 100;
 const MODEL_RETRY_BACKOFF_DEFAULT_MAX_MS = 60_000;
 const MODEL_RETRY_BACKOFF_MAX_ALLOWED_MS = 3_600_000;
-const CONTEXT_LIMIT_COMPACTION_MAX_ATTEMPTS = 2;
+const MODEL_REQUEST_MAX_RETRIES_DEFAULT = 5;
+const MODEL_REQUEST_MAX_RETRIES_MAX = 100;
 const EMPTY_RESPONSE_COMPLETE_THRESHOLD = 6;
 const TOOL_OUTPUT_TEXT_MAX_CHARS = Math.max(1_000, parseIntOrDefault(process.env.AWB_TOOL_OUTPUT_TEXT_MAX_CHARS, 8_000));
 const TOOL_OUTPUT_TEXT_PREVIEW_CHARS = Math.max(
@@ -124,6 +107,13 @@ export function normalizeRetryBackoffMaxMs(raw: unknown) {
     return MODEL_RETRY_BACKOFF_DEFAULT_MAX_MS;
   }
   return Math.min(MODEL_RETRY_BACKOFF_MAX_ALLOWED_MS, Math.max(MODEL_RETRY_BACKOFF_BASE_MS, raw));
+}
+
+function normalizeModelRequestMaxRetries(raw: unknown) {
+  if (typeof raw !== "number" || !Number.isFinite(raw) || !Number.isInteger(raw)) {
+    return MODEL_REQUEST_MAX_RETRIES_DEFAULT;
+  }
+  return Math.min(MODEL_REQUEST_MAX_RETRIES_MAX, Math.max(0, raw));
 }
 
 export function computeRetryBackoffMs(attemptIndex: number, rawMaxBackoffMs: unknown = MODEL_RETRY_BACKOFF_DEFAULT_MAX_MS) {
@@ -247,29 +237,6 @@ function safeErrorSummary(error: unknown) {
 function toolErrorMessage(error: unknown) {
   if (error instanceof Error) return error.message || error.name || "Error";
   return String(error || "Error");
-}
-
-export class ModelContextLengthExceededError extends Error {
-  constructor(readonly assistantMessageId: string, cause: unknown) {
-    super("model context length exceeded");
-    this.name = "ModelContextLengthExceededError";
-    (this as Error & { cause?: unknown }).cause = cause;
-  }
-}
-
-class ContextLimitCompactionError extends Error {
-  constructor(message: string, cause?: unknown) {
-    super(message);
-    this.name = "ContextLimitCompactionError";
-    if (cause !== undefined) (this as Error & { cause?: unknown }).cause = cause;
-  }
-}
-
-class ContextLimitMediaRequiresResendError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "ContextLimitMediaRequiresResendError";
-  }
 }
 
 class CompactionConflictError extends Error {
@@ -2295,14 +2262,9 @@ export class AgentRunner {
     const includeRawChunks = preparedInvocation.includeRawChunks === true;
     materializedMessages = await materializePromptAttachments({ messages: preparedInvocation.messages as PromptContext["messages"], attachmentStorage: this.attachmentStorage });
 
-    const modelIdleTimeoutMs =
-      ENV_MODEL_IDLE_TIMEOUT_MS > 0
-        ? ENV_MODEL_IDLE_TIMEOUT_MS
-        : Math.max(0, Math.floor(profile.runtime.modelIdleTimeoutMs));
-    const modelTotalTimeoutMs =
-      ENV_MODEL_TOTAL_TIMEOUT_MS > 0
-        ? ENV_MODEL_TOTAL_TIMEOUT_MS
-        : Math.max(0, Math.floor(profile.runtime.modelTotalTimeoutMs));
+    const modelIdleTimeoutMs = Math.max(0, Math.floor(profile.runtime.modelIdleTimeoutMs));
+    const modelTotalTimeoutMs = Math.max(0, Math.floor(profile.runtime.modelTotalTimeoutMs));
+    const modelRequestMaxRetries = normalizeModelRequestMaxRetries(profile.runtime.modelRequestMaxRetries);
     const modelRequestRetryBackoffMaxMs = normalizeRetryBackoffMaxMs(profile.runtime.modelRequestRetryBackoffMaxMs);
 
     const toolDefinitions = await this.toolRegistry.listTools({
@@ -2642,7 +2604,6 @@ export class AgentRunner {
       const attemptStartPartVersion = streamPartVersion;
       const attemptProducedOutput = () => streamPartVersion > attemptStartPartVersion;
       const conversationStateAttempt = conversationStateAdapter?.createAttempt();
-      let providerFailure: unknown = null;
       let attemptStream: RuntimeStreamResult | null = null;
       let attemptResponseTotalTokens: number | null = null;
       let attemptReachedTerminal = false;
@@ -2750,7 +2711,6 @@ export class AgentRunner {
             continue;
           }
           if (chunk.type === "error") {
-            providerFailure = chunk.error;
             throw chunk.error instanceof Error ? chunk.error : new Error(String(chunk.error || "stream error"));
           }
           if (chunk.type === "abort") {
@@ -2845,36 +2805,16 @@ export class AgentRunner {
           });
           throw err;
         }
-        const contextLimitError = providerFailure ?? (attemptStream == null ? err : null);
-        if (contextLimitError != null && isContextLengthExceededError(contextLimitError)) {
-          await writeAssistantDebugRecord({
-            logger: this.logger,
-            workspacePath: run.workspacePath,
-            recordId: assistantMessageId,
-            input: {
-              status: "failed",
-              startedAt,
-              meta: { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, turnId, step, messageId: assistantMessageId, failureKind: "context-limit" },
-              request: requestBase,
-              error: contextLimitError,
-            },
-          });
-          if (attemptProducedOutput()) await flushAssistant(true, false);
-          const discardRequest = {
-            workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
-            messageId: assistantMessageId, updatedAt: this.nowMsFn(),
-          };
-          await this.retryControlWrite("discard context-limit assistant", signal, async () =>
-            await this.apiClient.discardStreamingAssistant(discardRequest)
-          );
-          throw new ModelContextLengthExceededError(assistantMessageId, contextLimitError);
-        }
         if (totalTimedOut) {
           err = new Error(`model total timeout after ${modelTotalTimeoutMs}ms`);
         } else if (idleTimedOut) {
           err = new Error(`model idle timeout after ${modelIdleTimeoutMs}ms`);
         }
         const message = safeErrorSummary(err);
+
+        if (retryCount >= modelRequestMaxRetries) {
+          throw err;
+        }
 
         {
           const delayMs = computeRetryBackoffMs(retryCount, modelRequestRetryBackoffMaxMs);
@@ -3152,9 +3092,6 @@ export class AgentRunner {
       const repeatedToolCallCounter = new Map<string, number>();
       const recoveryContinuation = run.recoveryContinuation ?? { messageId: run.resumeAssistantMessageId ?? null };
       let emptyResponseCount = 0;
-      let contextLimitCompactionAttempts = 0;
-      let recoveryState: ContextLimitRecoveryState = "none";
-      const recoveryCasState: CompactionCasState = { remaining: 1 };
 
       // 手动压缩: 仅执行一次 compaction,不进入正常 step 循环.
       if (run.runKind === "manual_compaction") {
@@ -3246,78 +3183,15 @@ export class AgentRunner {
         }
 
         step += 1;
-        let result;
-        try {
-          result = await this.runModelStep({
-            profile,
-            run,
-            context,
-            step,
-            signal,
-            recoveryContinuation,
-            repeatedToolCallCounter
-          });
-        } catch (err) {
-          if (!(err instanceof ModelContextLengthExceededError)) throw err;
-          step -= 1;
-          const mode = nextContextLimitRecoveryMode(recoveryState);
-          if (mode == null) {
-            throw new ContextLimitCompactionError("model context limit persisted after full recovery", err);
-          }
-          if (contextLimitCompactionAttempts >= CONTEXT_LIMIT_COMPACTION_MAX_ATTEMPTS) {
-            throw new ContextLimitCompactionError("model context limit persisted after bounded compaction attempts", err);
-          }
-          await this.retryControlWrite("start context-limit compaction notice", signal, async () =>
-            await this.apiClient.updateRunNotice({
-              workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
-              runNoticeText: "上下文超限，正在压缩后重试...", updatedAt: this.nowMsFn(),
-            })
-          );
-          recoveryState = beginContextLimitRecovery(recoveryState, mode);
-          const compacted = await this.executeCompaction({ mode, profile, run, signal, casState: recoveryCasState });
-          if (signal.aborted) {
-            await finishOnce("cancelled");
-            return;
-          }
-          if (compacted.kind === "media_requires_resend") {
-            throw new ContextLimitMediaRequiresResendError("full context recovery cannot retain trigger media");
-          }
-          if (compacted.kind === "committed") {
-            recoveryState = completeContextLimitRecovery(mode);
-            contextLimitCompactionAttempts += 1;
-            if (signal.aborted) {
-              await finishOnce("cancelled");
-              return;
-            }
-            continue;
-          }
-          // Provider/control/data/input failures are already classified by Executor.
-          // They are not evidence that compaction made ordinary business no progress.
-          if (compacted.kind === "failed" || compacted.kind === "summary_input_limit" || compacted.kind === "blocked") {
-            const reason = compacted.kind === "failed" ? compacted.reason : compacted.kind;
-            throw new Error(`context-limit recovery compaction failed: ${reason}`);
-          }
-          if (compacted.kind === "skipped" && compacted.reason === "cas_conflict") throw new CompactionConflictError();
-          const businessNoProgress = isStandardBusinessNoProgress(compacted);
-          if (mode === "recovery-standard" && businessNoProgress) {
-            recoveryState = "full_attempted";
-            const full = await this.executeCompaction({ mode: "recovery-full", profile, run, signal, casState: recoveryCasState });
-            if (full.kind === "media_requires_resend") {
-              throw new ContextLimitMediaRequiresResendError("full context recovery cannot retain trigger media");
-            }
-            if (full.kind === "skipped" && full.reason === "cas_conflict") throw new CompactionConflictError();
-            if (full.kind === "committed") {
-              recoveryState = "full_committed";
-              contextLimitCompactionAttempts += 1;
-              continue;
-            }
-            if (full.kind === "failed" || full.kind === "summary_input_limit" || full.kind === "blocked") {
-              const reason = full.kind === "failed" ? full.reason : full.kind;
-              throw new Error(`context-limit recovery compaction failed: ${reason}`);
-            }
-          }
-          throw new ContextLimitCompactionError("context-limit recovery compaction made no progress");
-        }
+        const result = await this.runModelStep({
+          profile,
+          run,
+          context,
+          step,
+          signal,
+          recoveryContinuation,
+          repeatedToolCallCounter
+        });
         if (result.aborted || signal.aborted) {
           await finishOnce("cancelled");
           return;
@@ -3361,13 +3235,9 @@ export class AgentRunner {
       }
 
       const cause = err;
-      const failedTuple: TerminalTuple = err instanceof ContextLimitMediaRequiresResendError
-        ? { status: "failed", code: run.runKind === "user" ? "context_limit_media_requires_resend" : terminalCode("failed"), detail: null }
-        : err instanceof ContextLimitCompactionError
-        ? { status: "failed", code: run.runKind === "user" ? "context_limit_recovery_exhausted" : terminalCode("failed"), detail: null }
-        : err instanceof CompactionConflictError && (run.runKind === "user" || run.runKind === "manual_compaction")
-          ? { status: "failed", code: "compaction_conflict", detail: null }
-          : { status: "failed", code: terminalCode("failed"), detail: null };
+      const failedTuple: TerminalTuple = err instanceof CompactionConflictError && (run.runKind === "user" || run.runKind === "manual_compaction")
+        ? { status: "failed", code: "compaction_conflict", detail: null }
+        : { status: "failed", code: terminalCode("failed"), detail: null };
       try {
         await tryFinishOnce(failedTuple);
       } catch {

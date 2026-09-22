@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import type { streamText } from "ai";
 import { AI_SDK_REDACTED_HEADER_VALUE } from "@agent-workbench/shared/llm-ai-sdk-call-settings";
-import { AgentRunner, ControlWritePermanentError, ModelContextLengthExceededError } from "./runner.js";
+import { AgentRunner, ControlWritePermanentError } from "./runner.js";
 import { InternalRpcHttpError, InternalRpcInvalidResponseError, InternalRpcNetworkError } from "./apiClient.js";
 
 type StreamChunk =
@@ -705,104 +705,80 @@ test("runModelStep: streaming Assistant 创建 post-commit response-loss 使用�
   assert.equal(started.completions.length, 1);
 });
 
-test("runModelStep: context-limit 不在内部退避，metadata-only attempt 会 flush 后 discard", async () => {
-  const stream = createControlledStream();
-  const started = await startRunModelStep({
-    stream,
-    providerReplayPartFromChunk: providerReplayPartFromTestChunk,
-  });
-  await stream.push({ type: "provider-replay", partType: "reasoning", partId: "reasoning-context-limit", itemId: "rs-context-limit", encryptedContent: "cipher-context-limit" });
-  void stream.push({ type: "error", error: Object.assign(new Error("maximum context length exceeded"), { statusCode: 400, code: "context_length_exceeded" }) })
-    .catch(() => undefined);
+test("runModelStep: context-limit 流错误走普通退避重试，且耗尽后保持普通错误", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const first = createControlledStream();
+    const second = createControlledStream();
+    const profile = { ...baseProfile(), runtime: { ...baseProfile().runtime, modelRequestMaxRetries: 1 } };
+    const started = await startRunModelStep({ streams: [first, second], profile });
+    void first.push({ type: "error", error: Object.assign(new Error("maximum context length exceeded"), { statusCode: 400, code: "context_length_exceeded" }) }).catch(() => undefined);
+    void second.push({ type: "error", error: Object.assign(new Error("prompt too long"), { statusCode: 400, code: "context_length_exceeded" }) }).catch(() => undefined);
 
-  await assert.rejects(started.promise, (error) => error instanceof ModelContextLengthExceededError);
-  assert.equal(started.streamRequests.length, 1);
-  assert.equal(started.runNoticeUpdates.length, 0);
-  assert.equal(started.replacements.length, 0);
-  assert.equal(started.flushes.length, 1);
-  assert.equal(started.discardRequests.length, 1);
-  assert.equal(started.completions.length, 0);
-});
-
-test("runModelStep: discard 响应丢失时使用同一不可变请求重放", async () => {
-  const stream = createControlledStream();
-  let now = 100;
-  const started = await startRunModelStep({
-    stream,
-    nowMs: () => now++,
-    discardResults: [
-      new InternalRpcNetworkError({ method: "POST", endpoint: "/discard" }),
-      { result: "updated" },
-    ],
-    controlWriteSleep: async () => true,
-  });
-  void stream.push({ type: "error", error: Object.assign(new Error("prompt too long"), { statusCode: 400, code: "context_length_exceeded" }) }).catch(() => undefined);
-  await assert.rejects(started.promise, ModelContextLengthExceededError);
-  assert.equal(started.discardRequests.length, 2);
-  assert.deepEqual(started.discardRequests[1], started.discardRequests[0]);
-});
-
-test("processRun: discard 响应丢失重放成功后执行 recovery-standard 并完成", { timeout: 3_000 }, async () => {
-  const first = createControlledStream();
-  const second = createControlledStream();
-  let now = 200;
-  const harness = createRunnerHarness({
-    streams: [first, second],
-    nowMs: () => now++,
-    promptContexts: [
-      { ...baseContext(), headMessageId: "head-before" },
-      { ...baseContext(), headMessageId: "head-after-compact" },
-    ],
-    discardResults: [
-      new InternalRpcNetworkError({ method: "POST", endpoint: "/discard" }),
-      { result: "updated" },
-    ],
-    controlWriteSleep: async () => true,
-  });
-  const compactionModes: string[] = [];
-  (harness.runner as any).executeCompaction = async ({ mode }: { mode: string }) => {
-    compactionModes.push(mode);
-    return { kind: "committed", summaryMessageId: "summary-recovery", plan: {} };
-  };
-
-  const processing = (harness.runner as any).processRun(baseRun(), new AbortController().signal);
-  void first.push({
-    type: "error",
-    error: Object.assign(new Error("prompt too long"), { statusCode: 400, code: "context_length_exceeded" }),
-  }).catch(() => undefined);
-
-  const secondRequestDeadline = Date.now() + 1_000;
-  while (harness.streamRequests.length < 2 && Date.now() < secondRequestDeadline) {
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await assert.rejects(started.promise, /prompt too long/);
+    assert.equal(started.streamRequests.length, 2);
+    assert.equal(started.discardRequests.length, 0);
+    assert.equal(started.replacements.length, 0);
+    assert.equal(started.runNoticeUpdates.filter((update) => String(update.runNoticeText).includes("Request failed, retrying")).length, 1);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
   }
-  assert.equal(
-    harness.streamRequests.length,
-    2,
-    "recovery-standard committed 后应重新读取上下文并发起第二次模型请求",
-  );
-
-  await second.push({ type: "text-delta", text: "recovered after compaction" });
-  await second.finish();
-  await processing;
-
-  assert.equal(harness.discardRequests.length, 2);
-  assert.deepEqual(harness.discardRequests[1], harness.discardRequests[0]);
-  assert.deepEqual(compactionModes, ["recovery-standard"]);
-  assert.equal(harness.streamRequests.length, 2);
-  assert.equal(harness.completions.length, 1);
-  assert.equal(harness.completions[0]?.intent && (harness.completions[0]?.intent as { status: string }).status, "completed");
 });
 
-test("runModelStep: context-limit 空 attempt 直接 discard 且不退避", async () => {
-  const stream = createControlledStream();
-  const started = await startRunModelStep({ stream });
-  void stream.push({ type: "error", error: Object.assign(new Error("prompt too long"), { statusCode: 400, code: "context_length_exceeded" }) })
-    .catch(() => undefined);
+test("runModelStep: modelRequestMaxRetries 为 0 时首次 Provider 失败直接按普通错误结束", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const scheduledDelays: number[] = [];
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, ms?: number, ...args: any[]) => {
+    scheduledDelays.push(Number(ms));
+    return originalSetTimeout(handler, 0, ...args);
+  }) as typeof setTimeout;
+  try {
+    const stream = createControlledStream();
+    const profile = { ...baseProfile(), runtime: { ...baseProfile().runtime, modelRequestMaxRetries: 0 } };
+    const started = await startRunModelStep({ stream, profile });
+    const providerError = Object.assign(new Error("maximum context length exceeded"), {
+      statusCode: 400,
+      code: "context_length_exceeded",
+    });
+    void stream.push({ type: "error", error: providerError }).catch(() => undefined);
 
-  await assert.rejects(started.promise, ModelContextLengthExceededError);
-  assert.equal(started.streamRequests.length, 1);
-  assert.equal(started.flushes.length, 0);
-  assert.equal(started.discardRequests.length, 1);
+    await assert.rejects(started.promise, (error) => error === providerError);
+    assert.equal(started.streamRequests.length, 1);
+    assert.equal(started.runNoticeUpdates.length, 0);
+    assert.deepEqual(scheduledDelays, []);
+    assert.equal(started.discardRequests.length, 0);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("processRun: context-limit 流错误重试成功时不执行 compaction", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const first = createControlledStream();
+    const second = createControlledStream();
+    const profile = { ...baseProfile(), runtime: { ...baseProfile().runtime, modelRequestMaxRetries: 1 } };
+    const harness = createRunnerHarness({ streams: [first, second], profile });
+    const compactionModes: string[] = [];
+    (harness.runner as any).executeCompaction = async ({ mode }: { mode: string }) => {
+      compactionModes.push(mode);
+      return { kind: "committed" };
+    };
+
+    const processing = (harness.runner as any).processRun(baseRun(), new AbortController().signal);
+    void first.push({ type: "error", error: Object.assign(new Error("maximum context length exceeded"), { statusCode: 400, code: "context_length_exceeded" }) }).catch(() => undefined);
+    await second.push({ type: "text-delta", text: "retried normally" });
+    await second.finish();
+    await processing;
+
+    assert.deepEqual(compactionModes, []);
+    assert.equal(harness.streamRequests.length, 2);
+    assert.equal(harness.completions.length, 1);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
 });
 
 test("runModelStep: final flush 失败不会调用 completeAssistant", async () => {

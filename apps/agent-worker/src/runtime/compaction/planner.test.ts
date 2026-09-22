@@ -49,22 +49,6 @@ test("planner enforces exact 20k boundary and rejects 20,001 tail", () => {
   });
 });
 
-test("full recovery summarizes the complete effective Resolver source including preceding compaction", () => {
-  const source = testSource({
-    texts: ["previous compaction S", "old original", "trigger"],
-    types: ["compaction", "user", "user"],
-  });
-  const result = planCompaction({ source, profile: testProfile, mode: "recovery-full" });
-  assert.equal(result.kind, "planned");
-  if (result.kind !== "planned") return;
-  assert.deepEqual(result.plan.prefixSourceBlockIds, ["m1", "m2", "m3"]);
-  assert.deepEqual(result.plan.retainedSourceBlockIds, []);
-  assert.equal(result.plan.retainedFromMessageId, null);
-  assert.deepEqual(result.summaryBlocks.map((block) => block.sourceBlockId), ["m1", "m2", "m3"]);
-  assert.equal(result.summaryBlocks[0]?.messages[0]?.role, "system");
-  assert.equal(JSON.stringify(result.summaryBlocks[0]).includes("previous compaction S"), true);
-});
-
 test("planner blocks pending source before materialization", () => {
   const result = planCompaction({ source: testSource({ pending: true }), profile: testProfile, mode: "manual" });
   assert.deepEqual(result, {
@@ -123,22 +107,6 @@ test("assistant retained-start capability is derived from profile adapter semant
   const compatibleProfile = { ...testProfile, provider: { ...testProfile.provider, npm: "@ai-sdk/openai-compatible" as const } };
   const compatible = planCompaction({ source, profile: compatibleProfile, mode: "manual" });
   assert.equal(compatible.kind, "retained_tail_unavailable");
-});
-
-test("full recovery summarizes the entire resolved original sequence without a retained tail and rejects trigger media", () => {
-  const full = planCompaction({ source: testSource(), profile: testProfile, mode: "recovery-full" });
-  assert.equal(full.kind, "planned");
-  if (full.kind === "planned") {
-    assert.equal(full.plan.retainedFromMessageId, null);
-    assert.deepEqual(full.plan.retainedSourceBlockIds, []);
-    assert.equal(full.plan.containsTriggerMedia, false);
-    assert.deepEqual(full.plan.prefixSourceBlockIds, ["m1", "m2", "m3"]);
-    assert.equal(full.summaryBlocks.length, 3);
-  }
-  assert.deepEqual(planCompaction({ source: testSource({ mediaTrigger: true }), profile: testProfile, mode: "recovery-full" }), {
-    kind: "media_requires_resend",
-    triggerMessageId: "m3",
-  });
 });
 
 test("profile fingerprint changes only with normalized profile semantics", () => {

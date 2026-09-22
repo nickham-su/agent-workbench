@@ -27,20 +27,20 @@
 - Estimator生产接口固定为`estimatePrimaryMaterializedBlock(block)`；每Block以整个canonical消息数组为根，只做一次ceil/1.10，总成本逐Block求和。
 - compaction source 请求固定为 `{workspaceId,sessionId,runId}`；API 在单个 SQLite deferred 只读事务中返回同一快照；locale 本次固定为 null。
 - work deadline 在 source 调用前启动并覆盖 source、物化、规划、摘要、重试、CAS重规划、收益检查和 commit 尝试。
-- proactive 总计15秒；manual总计120秒；recovery standard/full各45秒，只有转入full时重置为新的45秒。
+- proactive 与 manual 的 work deadline 统一取 Web 设置下发的 `modelTotalTimeoutMs`；`0` 表示关闭该 deadline。
 - `agent_run.execution_phase` 与 intended terminal三元组是startup recovery的唯一终态意图权威。
 - 无产物结果的intent与convergence共享独立10秒terminal-control预算；每阶段最多3个真实HTTP请求，合计最多6个，两个API Client均零重试。
 - user/subtask终态Assistant必须无ToolCall/ToolExecution，并在同一事务完成Assistant、response tokens和intent；manual成功`commitCompaction`同一事务提交摘要、Session坐标和intent。原子成功后不写独立intent，首次convergence前新建10秒预算。
 - 空Assistant由Worker在提交前依本地计数选择：前N-1次普通完成，第N次阈值完成走原子terminal Assistant入口。
-- 分块上限固定为8最终叶、15 attempted partitions、30 logical Provider calls；网络上限为 proactive 30、manual 60、每级 recovery 60。
-- `summary_input_limit` 立即失败，不进入 full；只有 standard 业务无进展或 standard 提交后主步骤仍 context-limit 可进入 full。
-- 当前 trigger 媒体必须留在 B；无法在20k内保留时明确失败；full 检测到该媒体时直接结束恢复并要求重发。
+- 分块上限固定为8最终叶、15 attempted partitions、30 logical Provider calls；网络上限为 proactive 30、manual 60。
+- `summary_input_limit` 是压缩摘要请求的失败结果；不会触发额外的主模型恢复压缩。
+- 当前 trigger 媒体必须留在 B；无法在20k内保留时 proactive 跳过，manual 返回明确结果。
 - terminal result 属于 `agent_run`，不属于 `session_run_state`。全局 registry 冻结 runKind/status/code 合法组合；旧completeRun契约/端点/Client方法不保留。
 - `convergeRunTerminal`只读intended，在一个事务内按workspace/session/run origin收敛Message、ToolExecution、Session revision、Run终态和session_run_state；返回`transitioned`或`already_converged`及finalStatus。completed存在非终态产物即失败；failed/cancelled收敛streaming Assistant与queued/running ToolExecution，后两类转为终态时`completedAt=convergence.updatedAt`，保留startedAt且不伪造result/error。
 - 每次convergence成功或一致重放均清除runId的prompt static cache；仅`transitioned`发布既有`agent.run.completed.v1`。事件是best-effort内存SSE：发布失败不回滚数据库、记录错误，重放不补发且本次不引入outbox。
 - 新增公共 Run 状态接口；manual 与普通 user send 的 runId 共用当前标签页 pending-run registry，刷新恢复并按 code 每 tab 消费一次。
 - pending-run记录带schemaVersion；只轮询当前workspace/session，并定义损坏、stale、网络错误、删除清理和并发3条FIFO策略。
-- fingerprint 使用 `providerModelId ?? model.id` 和真实 adapter identity；CAS 后 fingerprint 变化时 proactive skip，manual/recovery 为 `compaction_conflict`。
+- fingerprint 使用 `providerModelId ?? model.id` 和真实 adapter identity；CAS 后 fingerprint 变化时 proactive skip，manual 为 `compaction_conflict`。
 - timeline 展示当前分支从最早可达祖先到 head 的完整物理历史并显示 compaction；context root 之前的消息只读。retained tail 只改变模型私有上下文，不放开 revert/fork 等结构操作边界。
 - Workspace清理固定为FTS行→FTS map→client request→session_run_state→session model override→ToolExecution→MessagePart→Run→Session→Message逆拓扑→Attachment；不得修改三类Message图边。
 - Workspace删除使用`convergeWorkspaceRunsForDeletion`编排，而非独立artifact写入：持久deletion intent并设fence后，按稳定Session锁和稳定Run顺序逐Run复用intent+完整convergence；全部数据库收敛后才drain runtime，drain成功后才执行物理清理。失败保留deletion intent以便重试。
@@ -51,7 +51,7 @@
 - [业务语义、术语与关键决策](./02-业务语义与关键决策.md)
 - [领域实体与数据模型](./03-领域实体与数据模型.md)
 - [ModelContext Resolver、物化层与尾部算法](./04-上下文解析与尾部算法.md)
-- [压缩流程、模式与恢复状态机](./05-压缩流程与状态机.md)
+- [压缩流程与模式状态机](./05-压缩流程与状态机.md)
 - [API、数据库与共享契约改造](./06-接口数据库与契约改造.md)
 - [边界情况、失败语义与可观测性](./07-边界失败与可观测性.md)
 - [测试矩阵与验收标准](./08-测试与验收标准.md)
@@ -66,13 +66,14 @@
 - candidate/primary 切换不得改变 A/B 和 SummaryInputBlock 语义。
 - CAS conflict 后旧 Plan 与摘要全部作废；重规划不重置当前 deadline。
 - profileFingerprint 变化不得复用旧 Plan。
-- CAS replan 不清零 partition、logical、network 计数；计数作用域为 proactive attempt、manual Run、recovery level。
+- CAS replan 不清零 partition、logical、network 计数；计数作用域为 proactive attempt 或 manual Run。
 - 所有 work RPC、Provider 请求和退避绑定 work deadline；intent/convergence只绑定独立10秒terminal-control budget。
+- 主模型的所有 Provider 错误均按 Web 设置的 `modelRequestMaxRetries` 进行普通指数退避重试；不因启发式 context-limit 分类触发恢复压缩。
 - `terminal_intent_persisted`时status仍为running，公共查询不返回intended code；startup只调用完整convergence，不重跑业务。
 - terminal Run 必须有 registry 内稳定 code；running result 必须为空；已终态 Run 不得被不同结果改写。
 - Workspace删除不得覆盖已有不同terminal intent；必须先收敛该原intent，已terminal则幂等跳过。任一Run的intent/convergence不变量失败时，不得drain runtime或删除数据。
 - ToolExecution由queued/running经convergence进入cancelled/unknown时，status、completedAt、updatedAt和updatedRevision必须同事务写入；一致重放不得改写completedAt。
-- 用户取消不提交未完成摘要，不降级到 full。
+- 用户取消不提交未完成摘要。
 - 安全错误、控制面永久错误和数据不变量错误不得被 proactive 吞掉。
 
 ## 非目标
@@ -83,7 +84,7 @@
 - 精确复现 Provider 计费 token；
 - 在原子块内部截断；
 - 放开 context root 之前历史消息的 revert、fork 或其他结构操作权限；
-- 修改普通主模型步骤的非 context-limit 重试策略；本次只定义压缩摘要调用重试；
+- 基于主模型错误是否疑似 context-limit 触发额外恢复压缩；
 - 移除当前 trigger 媒体后继续让模型推理；
 - 扩展实时事件协议传送 terminal result；
 - 旧 Message 数据兼容。

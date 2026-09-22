@@ -13,7 +13,7 @@ function createExecutor(input?: {
   profile?: ExecutionProfile;
   onGetExecutionProfile?: (options: Record<string, unknown>) => void;
   onGetCompactionSource?: (options: Record<string, unknown>) => void;
-  workDeadlineMsByMode?: { manual?: number; proactive?: number; "recovery-standard"?: number; "recovery-full"?: number };
+  workDeadlineMsByMode?: { manual?: number; proactive?: number };
   confirm?: () => Promise<{ outcome: "committed" | "not_committed" }>;
   commit?: (request: Record<string, unknown>) => Promise<{ result: "updated" | "ignored"; summaryMessageId: string | null }>;
 }) {
@@ -143,16 +143,13 @@ test("CAS replan 共享 allowance，且 profile fingerprint 变化按模式处�
   const source = testSource({ texts: ["x".repeat(100_000), "recent"] });
   const sharedCasState = { remaining: 1 };
   const first = createExecutor({ source, commit: async () => { throw new ApiConflictError("conflict"); } });
-  assert.deepEqual(await first.executor.execute({ ...args, mode: "recovery-standard", casState: sharedCasState }), { kind: "skipped", reason: "cas_conflict" });
+  assert.deepEqual(await first.executor.execute({ ...args, mode: "manual", casState: sharedCasState }), { kind: "skipped", reason: "cas_conflict" });
   assert.equal(sharedCasState.remaining, 0);
-  const second = createExecutor({ source, commit: async () => { throw new ApiConflictError("conflict"); } });
-  assert.deepEqual(await second.executor.execute({ ...args, mode: "recovery-full", casState: sharedCasState }), { kind: "skipped", reason: "cas_conflict" });
 
   const changedProfile = { ...testProfile, model: { ...testProfile.model, contextWindowTokens: testProfile.model.contextWindowTokens + 1 } };
   for (const [mode, expected] of [
     ["proactive", "profile_changed"],
     ["manual", "cas_conflict"],
-    ["recovery-standard", "cas_conflict"],
   ] as const) {
     let reads = 0;
     let commits = 0;
@@ -179,14 +176,10 @@ test("CAS replan 共享 allowance，且 profile fingerprint 变化按模式处�
   }
 });
 
-test("executor blocks pending tools and full recovery rejects trigger media before provider work", async () => {
+test("executor blocks pending tools before provider work", async () => {
   const pending = createExecutor({ source: testSource({ pending: true }) });
   assert.deepEqual(await pending.executor.execute({ ...args, mode: "manual" }), { kind: "blocked", reason: "pending_tool_execution" });
   assert.equal(pending.summaries.length, 0);
-
-  const media = createExecutor({ source: testSource({ mediaTrigger: true }) });
-  assert.deepEqual(await media.executor.execute({ ...args, mode: "recovery-full" }), { kind: "media_requires_resend" });
-  assert.equal(media.summaries.length, 0);
 });
 
 test("proactive 与 manual 的总 deadline 使用单次请求超时配置", async () => {

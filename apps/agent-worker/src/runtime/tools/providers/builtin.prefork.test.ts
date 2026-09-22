@@ -33,7 +33,7 @@ type SummaryParams = {
     messages: Array<{ role: string; content: unknown }>;
     system?: string;
     sessionId?: string;
-    timeoutMs: number;
+    timeoutMs: number | null;
     abortSignal: AbortSignal;
   };
 };
@@ -93,7 +93,7 @@ test("subtask prefork summary 透传 messages-context.system 到 one-shot 调用
         messages: Array<{ role: string; content: unknown }>;
         system?: string;
         sessionId?: string;
-        timeoutMs: number;
+        timeoutMs: number | null;
         abortSignal: AbortSignal;
       };
     }) {

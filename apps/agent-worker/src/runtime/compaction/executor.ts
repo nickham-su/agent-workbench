@@ -93,7 +93,7 @@ export class CompactionExecutor {
     casState?: CompactionCasState;
   }): Promise<CompactionExecutionResult> {
     const policy = COMPACTION_MODE_POLICIES[params.mode];
-    const workDeadlineMs = this.workDeadlineMs(params.mode, params.profile, policy.workDeadlineMs);
+    const workDeadlineMs = this.workDeadlineMs(params.mode, params.profile);
     const deadline = workDeadlineMs == null ? null : this.nowMs() + workDeadlineMs;
     const casState = params.casState ?? { remaining: policy.casReplanAllowance };
     const messageId = this.dependencies.newId("message");
@@ -235,15 +235,11 @@ export class CompactionExecutor {
     }
   }
 
-  private workDeadlineMs(mode: CompactionMode, profile: ExecutionProfile, policyDeadlineMs: number | undefined) {
+  private workDeadlineMs(mode: CompactionMode, profile: ExecutionProfile) {
     const testDeadlineMs = this.dependencies.workDeadlineMsByMode?.[mode];
     if (testDeadlineMs !== undefined) return testDeadlineMs;
-    if (mode === "proactive" || mode === "manual") {
-      const configured = Math.max(0, Math.floor(Number(profile.runtime.modelTotalTimeoutMs)));
-      return configured > 0 ? configured : null;
-    }
-    if (policyDeadlineMs == null) throw new Error(`missing compaction deadline policy for ${mode}`);
-    return policyDeadlineMs;
+    const configured = Math.max(0, Math.floor(Number(profile.runtime.modelTotalTimeoutMs)));
+    return configured > 0 ? configured : null;
   }
 
   private remaining(deadline: number | null, signal: AbortSignal, callerSignal?: AbortSignal) {

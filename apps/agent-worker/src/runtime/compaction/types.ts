@@ -98,14 +98,13 @@ export type EstimatorEstimate = {
   estimatedTokens: number;
 };
 
-export type CompactionMode = "proactive" | "manual" | "recovery-standard" | "recovery-full";
+export type CompactionMode = "proactive" | "manual";
 export type CompactionProfileFingerprint = string;
 
 export type CompactionModePolicy = {
   mode: CompactionMode;
-  workDeadlineMs?: number;
   casReplanAllowance: number;
-  casReplanScope: "attempt" | "run" | "recovery";
+  casReplanScope: "attempt" | "run";
   maxNetworkRequestsPerLogicalCall: 1 | 2;
   maxNetworkRequestCount: 30 | 60;
 };
@@ -113,8 +112,6 @@ export type CompactionModePolicy = {
 export const COMPACTION_MODE_POLICIES: Readonly<Record<CompactionMode, CompactionModePolicy>> = {
   proactive: { mode: "proactive", casReplanAllowance: 0, casReplanScope: "attempt", maxNetworkRequestsPerLogicalCall: 1, maxNetworkRequestCount: 30 },
   manual: { mode: "manual", casReplanAllowance: 1, casReplanScope: "run", maxNetworkRequestsPerLogicalCall: 2, maxNetworkRequestCount: 60 },
-  "recovery-standard": { mode: "recovery-standard", workDeadlineMs: 45_000, casReplanAllowance: 1, casReplanScope: "recovery", maxNetworkRequestsPerLogicalCall: 2, maxNetworkRequestCount: 60 },
-  "recovery-full": { mode: "recovery-full", workDeadlineMs: 45_000, casReplanAllowance: 1, casReplanScope: "recovery", maxNetworkRequestsPerLogicalCall: 2, maxNetworkRequestCount: 60 },
 };
 
 export type FrozenCompactionPlan = {

@@ -408,7 +408,7 @@ export class BuiltinToolProvider implements ToolProvider {
       messages: ModelMessage[];
       system?: string;
       sessionId?: string;
-      timeoutMs: number;
+      timeoutMs: number | null;
       abortSignal: AbortSignal;
     };
   }) {
@@ -821,7 +821,8 @@ export class BuiltinToolProvider implements ToolProvider {
           provider: ctx.profile.provider,
           model: ctx.profile.model
         };
-        const timeoutMs = Math.max(30_000, Math.floor(Number(ctx.profile.runtime.modelTotalTimeoutMs || 0)) || 120_000);
+        const configuredTimeoutMs = Math.max(0, Math.floor(Number(ctx.profile.runtime.modelTotalTimeoutMs)));
+        const timeoutMs = configuredTimeoutMs > 0 ? configuredTimeoutMs : null;
         const response = await this.generateSingleCallSummary({
           profile: { provider: chosen.provider, model: chosen.model },
           input: { sessionId: ctx.run.sessionId, messages: [{ role: "user", content: parts }], timeoutMs, abortSignal: ctx.signal }

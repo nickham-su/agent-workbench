@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { ExecutionProfile } from "../apiClient.js";
 import { ESTIMATOR_VERSION, estimatePrimaryMaterializedBlock } from "./estimator-v1.js";
 import { canProfileStartRetainedTailAtAssistant, materializePrimaryBlocks, primaryMaterializerAdapterIdentity } from "./primary-materializer.js";
-import { sourceBlockContainsTriggerMedia, validateCompactionSource } from "./source-block-invariants.js";
+import { validateCompactionSource } from "./source-block-invariants.js";
 import { materializeSummaryInputBlocks } from "./summary-input-materializer.js";
 import {
   COMPACTION_KEEP_RECENT_TOKENS,
@@ -186,40 +186,6 @@ export function planCompaction(input: { source: CompactionSource; profile: Execu
   const primary = materializePrimaryBlocks({ source, profile });
   const estimated = primary.map((block) => ({ primary: block, estimatedTokens: block.isProjectionEmpty ? 0 : estimatePrimaryMaterializedBlock(block).estimatedTokens }));
   const retainableOriginal = estimated.filter((block) => isOriginal(block.primary) && !block.primary.isProjectionEmpty);
-
-  if (input.mode === "recovery-full") {
-    const trigger = estimated.find((block) => block.primary.containsTriggerMedia);
-    if (trigger) return { kind: "media_requires_resend", triggerMessageId: trigger.primary.sourceBlockId };
-    // Full recovery summarizes the complete Resolver-effective snapshot,
-    // including preceding compaction messages. Omitting S loses meaning after
-    // consecutive compactions.
-    const prefix = estimated.filter((block) => !block.primary.isProjectionEmpty);
-    const prefixIds = source.blocks.map((block) => block.sourceMessageId);
-    const summaryBlocks = materializeSummaryInputBlocks(source.blocks);
-    const policy = COMPACTION_MODE_POLICIES[input.mode];
-    const estimatedBeforeCost = prefix.reduce((total, block) => total + block.estimatedTokens, 0);
-    return {
-      kind: "planned",
-      plan: {
-        version: 1, planId: createPlanId(), mode: input.mode, estimatorVersion: ESTIMATOR_VERSION,
-        primaryMaterializerVersion: PRIMARY_MATERIALIZER_VERSION,
-        summaryInputMaterializerVersion: SUMMARY_INPUT_MATERIALIZER_VERSION,
-        profileFingerprint: computeCompactionProfileFingerprint(profile), modePolicy: policy,
-        expectedHeadMessageId: source.headMessageId, expectedRevision: source.sessionRevision,
-        resolvedSourceBlockIds: source.blocks.map((block) => block.sourceMessageId),
-        prefixSourceBlockIds: prefixIds, retainedSourceBlockIds: [], retainedFromMessageId: null,
-        estimatedBeforeCost, estimatedPrefixCost: estimatedBeforeCost, estimatedRetainedCost: 0,
-        containsTriggerMedia: false,
-        source: {
-          workspaceId: source.workspaceId, sessionId: source.sessionId, runId: source.runId,
-          headMessageId: source.headMessageId, contextRootMessageId: source.contextRootMessageId,
-          sessionRevision: source.sessionRevision, triggerMessageId: source.triggerMessageId,
-        },
-      },
-      summaryBlocks,
-      retainedBlocks: [],
-    };
-  }
 
   if (retainableOriginal.length === 0) return { kind: "no_prefix", reason: "projection_empty" };
 

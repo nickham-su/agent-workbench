@@ -9,7 +9,7 @@ import {
   getRegisteredControllerForTest,
   executeToolForTest,
   processNestedRunWithControllerForTest,
-  processRunForTest, ModelContextLengthExceededError,
+  processRunForTest,
 } from "./runner.js";
 import { AgentApiClient, InternalRpcHttpError, InternalRpcTimeoutError } from "./apiClient.js";
 
@@ -239,30 +239,6 @@ test("proactive compaction commit outcome 无法确认时不会继续旧 context
   assert.deepEqual(terminalCodes, ["run_failed"]);
 });
 
-test("recovery full committed 后再次 context-limit 直接 exhausted，不再发起第三次 compaction", async () => {
-  const modes: string[] = [];
-  const terminalCodes: string[] = [];
-  const apiClient = {
-    async markRunWorkInProgress() { return { result: "updated" }; },
-    async getExecutionProfile() { return baseProfile(); },
-    async updateRunNotice() { return { result: "updated" }; },
-    async getPromptContext() { return baseContext(); },
-    async persistRunTerminalIntent(input: { code: string }) { terminalCodes.push(input.code); return { result: "updated" }; },
-    async convergeRunTerminal() { return { kind: "transitioned", finalStatus: "failed" }; },
-  };
-  const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
-  (runner as any).runModelStep = async () => { throw new ModelContextLengthExceededError("assistant", new Error("limit")); };
-  (runner as any).executeCompaction = async ({ mode }: { mode: string }) => {
-    modes.push(mode);
-    return { kind: "committed", summaryMessageId: `summary-${mode}`, plan: {} };
-  };
-
-  await processRunForTest(runner, { ...makeRun("sess_recovery", "run_recovery"), runKind: "user" }, new AbortController().signal);
-
-  assert.deepEqual(modes, ["recovery-standard", "recovery-full"]);
-  assert.deepEqual(terminalCodes, ["context_limit_recovery_exhausted"]);
-});
-
 test("proactive transient/deadline 可跳过并继续主模型", async () => {
   for (const compacted of [
     { kind: "unavailable", reason: "transient" },
@@ -333,90 +309,6 @@ test("manual 将 M6 CAS replan 后的 pre-send deadline 映射为 compaction_pro
   await processRunForTest(runner, { ...makeRun("sess_m6", "run_m6"), runKind: "manual_compaction" }, new AbortController().signal);
 
   assert.deepEqual(terminalCodes, ["compaction_provider_unavailable"]);
-});
-
-test("recovery standard 的 no_prefix 与 no_progress 都会进入 full", async () => {
-  for (const reason of ["no_prefix", "no_progress"] as const) {
-    const modes: string[] = [];
-    const terminalCodes: string[] = [];
-    const apiClient = {
-      async markRunWorkInProgress() { return { result: "updated" }; },
-      async getExecutionProfile() { return baseProfile(); },
-      async updateRunNotice() { return { result: "updated" }; },
-      async getPromptContext() { return baseContext(); },
-      async persistRunTerminalIntent(input: { code: string }) { terminalCodes.push(input.code); return { result: "updated" }; },
-      async convergeRunTerminal() { return { kind: "transitioned", finalStatus: "failed" }; },
-    };
-    const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
-    (runner as any).runModelStep = async () => { throw new ModelContextLengthExceededError("assistant", new Error("limit")); };
-    (runner as any).executeCompaction = async ({ mode }: { mode: string }) => {
-      modes.push(mode);
-      return mode === "recovery-standard"
-        ? { kind: "skipped", reason }
-        : { kind: "skipped", reason: "no_progress" };
-    };
-
-    await processRunForTest(runner, { ...makeRun("sess_no_progress", `run_${reason}`), runKind: "user" }, new AbortController().signal);
-    assert.deepEqual(modes, ["recovery-standard", "recovery-full"]);
-    assert.deepEqual(terminalCodes, ["context_limit_recovery_exhausted"]);
-  }
-});
-
-test("standard 无进展触发 immediate full 时 CAS conflict 映射为 compaction conflict", async () => {
-  const modes: string[] = [];
-  const terminalCodes: string[] = [];
-  const apiClient = {
-    async markRunWorkInProgress() { return { result: "updated" }; },
-    async getExecutionProfile() { return baseProfile(); },
-    async updateRunNotice() { return { result: "updated" }; },
-    async getPromptContext() { return baseContext(); },
-    async persistRunTerminalIntent(input: { code: string }) { terminalCodes.push(input.code); return { result: "updated" }; },
-    async convergeRunTerminal() { return { kind: "transitioned", finalStatus: "failed" }; },
-  };
-  const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
-  (runner as any).runModelStep = async () => { throw new ModelContextLengthExceededError("assistant", new Error("limit")); };
-  (runner as any).executeCompaction = async ({ mode }: { mode: string }) => {
-    modes.push(mode);
-    return mode === "recovery-standard"
-      ? { kind: "skipped", reason: "oversized_tail" }
-      : { kind: "skipped", reason: "cas_conflict" };
-  };
-
-  await processRunForTest(runner, { ...makeRun("sess_conflict", "run_conflict"), runKind: "user" }, new AbortController().signal);
-
-  assert.deepEqual(modes, ["recovery-standard", "recovery-full"]);
-  assert.deepEqual(terminalCodes, ["compaction_conflict"]);
-});
-
-test("recovery 的 provider/control/data/input 失败直接走通用 run_failed，且不进入 full", async () => {
-  for (const result of [
-    { kind: "failed", reason: "provider" },
-    { kind: "failed", reason: "control" },
-    { kind: "failed", reason: "data_invariant" },
-    { kind: "summary_input_limit" },
-  ] as const) {
-    const modes: string[] = [];
-    const terminalCodes: string[] = [];
-    const apiClient = {
-      async markRunWorkInProgress() { return { result: "updated" }; },
-      async getExecutionProfile() { return baseProfile(); },
-      async updateRunNotice() { return { result: "updated" }; },
-      async getPromptContext() { return baseContext(); },
-      async persistRunTerminalIntent(input: { code: string }) { terminalCodes.push(input.code); return { result: "updated" }; },
-      async convergeRunTerminal() { return { kind: "transitioned", finalStatus: "failed" }; },
-    };
-    const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
-    (runner as any).runModelStep = async () => { throw new ModelContextLengthExceededError("assistant", new Error("limit")); };
-    (runner as any).executeCompaction = async ({ mode }: { mode: string }) => {
-      modes.push(mode);
-      return result;
-    };
-
-    await processRunForTest(runner, { ...makeRun("sess_failure", `run_${result.kind}_${"reason" in result ? result.reason : "input"}`), runKind: "user" }, new AbortController().signal);
-
-    assert.deepEqual(modes, ["recovery-standard"]);
-    assert.deepEqual(terminalCodes, ["run_failed"]);
-  }
 });
 
 test("取消进入 terminal-control 后重入不会重置 intent 累计次数", async () => {
