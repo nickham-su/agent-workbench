@@ -325,6 +325,10 @@ export default {
       saveFailed: "Failed to save title"
     },
     client: {
+      tabStateLoading: "Loading sessions…",
+      tabStateLoadFailed: "Failed to load sessions. Please try again.",
+      retryTabStateLoad: "Retry",
+      tabStateUpdateFailed: "Failed to update session visibility",
       tabLabel: "Session {index}",
       newTitle: "new session",
       cancel: "Cancel run",

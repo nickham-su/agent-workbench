@@ -323,6 +323,10 @@ export default {
       saveFailed: "保存标题失败"
     },
     client: {
+      tabStateLoading: "正在加载会话…",
+      tabStateLoadFailed: "加载会话失败，请重试。",
+      retryTabStateLoad: "重试",
+      tabStateUpdateFailed: "更新会话可见性失败",
       tabLabel: "会话 {index}",
       newTitle: "new session",
       cancel: "取消运行",

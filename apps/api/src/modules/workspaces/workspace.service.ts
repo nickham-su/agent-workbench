@@ -16,7 +16,9 @@ import type {
   WorkspaceAgentEnablementSettingsResponse,
   UpdateWorkspaceAgentEnablementSettingsRequest,
   WorkspaceAgentEnablementDetectResponse,
-  WorkspaceTopLevelSkillsResponse
+  WorkspaceTopLevelSkillsResponse,
+  WorkspaceAgentSessionTabVisibilityMutation,
+  WorkspaceAgentTabState
 } from "@agent-workbench/shared";
 import type { WorkspaceRecord } from "@agent-workbench/shared";
 import { isValidSkillPathSegment } from "@agent-workbench/shared";
@@ -71,6 +73,13 @@ import { withWorkspaceRepoLock } from "../../infra/locks/workspaceRepoLock.js";
 import { parseSkillFrontmatter, scanReadableTopLevelSkills } from "../agent/top-level-skill.js";
 import { withWorkspaceLock } from "../../infra/locks/workspaceLock.js";
 import { workspaceLifecycleCoordinator } from "../../infra/locks/workspace-lifecycle-coordinator.js";
+import {
+  deleteWorkspaceSessionTabStateOverride,
+  findAgentSessionKindInWorkspace,
+  listEffectiveWorkspaceSessionTabStateOverrides,
+  upsertWorkspaceSessionTabStateOverride,
+  workspaceExistsForAgentTabState
+} from "./workspace-session-tab-state.store.js";
 
 const WORKSPACE_EXTERNAL_SKILL_ROOTS_SETTINGS_KEY = "workspace_external_skill_roots_v1";
 const WORKSPACE_AGENTS_INSTRUCTIONS_SETTINGS_KEY = "workspace_agents_instructions_v1";
@@ -402,6 +411,47 @@ export async function getWorkspaceById(ctx: AppContext, workspaceId: string): Pr
   const ws = getWorkspace(ctx.db, workspaceId);
   if (!ws) throw new HttpError(404, "Workspace not found");
   return ws;
+}
+
+function requireWorkspaceForAgentTabState(ctx: AppContext, workspaceId: string) {
+  if (!workspaceExistsForAgentTabState(ctx.db, workspaceId)) {
+    throw new HttpError(404, "Workspace not found", "WORKSPACE_NOT_FOUND");
+  }
+}
+
+export async function getWorkspaceAgentTabState(ctx: AppContext, workspaceId: string): Promise<WorkspaceAgentTabState> {
+  requireWorkspaceForAgentTabState(ctx, workspaceId);
+  const overrides = listEffectiveWorkspaceSessionTabStateOverrides(ctx.db, workspaceId);
+  return {
+    workspaceId,
+    closedSessionIds: overrides.filter((override) => override.kind === "primary" && !override.visible).map((override) => override.sessionId),
+    openedSubtaskSessionIds: overrides.filter((override) => override.kind === "subtask" && override.visible).map((override) => override.sessionId)
+  };
+}
+
+export async function setWorkspaceAgentSessionTabVisibility(
+  ctx: AppContext,
+  input: { workspaceId: string; sessionId: string; visible: boolean }
+): Promise<WorkspaceAgentSessionTabVisibilityMutation> {
+  return workspaceLifecycleCoordinator.withMutation(input.workspaceId, async () =>
+    ctx.db.transaction(() => {
+      requireWorkspaceForAgentTabState(ctx, input.workspaceId);
+      const kind = findAgentSessionKindInWorkspace(ctx.db, input.workspaceId, input.sessionId);
+      if (!kind) {
+        throw new HttpError(404, "Agent Session not found in Workspace", "AGENT_SESSION_NOT_FOUND_IN_WORKSPACE");
+      }
+
+      if (kind === "primary" && !input.visible) {
+        upsertWorkspaceSessionTabStateOverride(ctx.db, { ...input, updatedAt: nowMs() });
+      } else if (kind === "subtask" && input.visible) {
+        upsertWorkspaceSessionTabStateOverride(ctx.db, { ...input, updatedAt: nowMs() });
+      } else {
+        deleteWorkspaceSessionTabStateOverride(ctx.db, input.workspaceId, input.sessionId);
+      }
+
+      return { ...input };
+    })()
+  );
 }
 
 export async function createWorkspace(

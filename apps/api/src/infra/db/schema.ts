@@ -311,6 +311,15 @@ function createBaseSchema(db: Db) {
     );
     create index if not exists idx_terminals_workspace_id on terminals(workspace_id);
 
+    create table if not exists workspace_session_tab_state (
+      workspace_id text not null,
+      session_id text not null,
+      visible integer not null check (visible in (0, 1)),
+      updated_at integer not null,
+      primary key (workspace_id, session_id),
+      foreign key (workspace_id) references workspaces(id) on delete cascade
+    );
+
     create table if not exists settings (
       key text primary key,
       value_json text not null,

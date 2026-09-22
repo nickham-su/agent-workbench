@@ -1,6 +1,15 @@
 <template>
   <div class="h-full min-h-0 flex flex-col bg-[var(--panel-bg)]">
-    <div v-if="visibleSessions.length === 0" class="h-full min-h-0 flex flex-col items-center justify-center gap-3">
+    <div v-if="initializationState === 'loading'" data-testid="agent-tab-state-loading" class="h-full min-h-0 flex flex-col items-center justify-center gap-3">
+      <div class="text-[0.9em] text-[color:var(--text-tertiary)]">{{ t("agent.client.tabStateLoading") }}</div>
+    </div>
+
+    <div v-else-if="initializationState === 'error'" data-testid="agent-tab-state-error" class="h-full min-h-0 flex flex-col items-center justify-center gap-3">
+      <div class="text-[0.9em] text-[color:var(--text-tertiary)]">{{ t("agent.client.tabStateLoadFailed") }}</div>
+      <a-button size="small" type="primary" @click="retryInitialization">{{ t("agent.client.retryTabStateLoad") }}</a-button>
+    </div>
+
+    <div v-else-if="visibleSessions.length === 0" data-testid="agent-session-empty" class="h-full min-h-0 flex flex-col items-center justify-center gap-3">
       <div class="text-[0.9em] text-[color:var(--text-tertiary)]">{{ t("agent.empty") }}</div>
       <a-button size="small" type="primary" :loading="creating" @click="createOneSession">{{ t("agent.actions.newClient") }}</a-button>
     </div>
@@ -152,14 +161,16 @@ export default {
 import type { AgentSessionAgentModelState, AgentSessionMessageState, AgentSessionRecord } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { CloseOutlined, MinusOutlined, PlusOutlined } from "@ant-design/icons-vue";
 import { message } from "ant-design-vue";
-import { computed, onActivated, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from "vue";
+import { computed, onActivated, onBeforeUnmount, provide, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import {
   ApiError,
   createAgentSession,
+  getWorkspaceAgentTabState,
   listAgentSessionModelOverrides,
   listAgentSessions,
   listWorkspaceAvailableAgents,
+  setWorkspaceAgentSessionTabVisibility,
   updateAgentSessionTitle
 } from "@/shared/api";
 import { useWorkspaceHost } from "@/features/workspace/host";
@@ -195,6 +206,11 @@ import {
   type TitleSaveToken
 } from "./agentSessionTitle";
 import {
+  createAgentSessionTabVisibilityController,
+  type AgentSessionTabVisibilitySession,
+  type SessionWriteState
+} from "./agentSessionTabVisibilityState";
+import {
   canScheduleRetryRefresh,
   canStartRefresh,
   convergeMutationCache,
@@ -223,14 +239,13 @@ type ChooseSessionItem = {
 const ADD_TAB_KEY = "__agent_add__";
 const ACTIVE_KEY_STORAGE_PREFIX = "agent-workbench.workspace.agent.activeClient";
 const AGENT_PICK_STORAGE_PREFIX = "agent-workbench.workspace.agent.pickBySession";
-const CLOSED_SESSION_STORAGE_PREFIX = "agent-workbench.workspace.agent.closedSessions";
-const OPENED_SUBTASK_SESSION_STORAGE_PREFIX = "agent-workbench.workspace.agent.openedSubtaskSessions";
 
 const props = defineProps<{ workspaceId: string; toolId: string }>();
 const host = useWorkspaceHost(props.toolId);
 const { t } = useI18n();
 
 const loadingSessions = ref(false);
+const initializationState = ref<"loading" | "ready" | "error">("loading");
 const creating = ref(false);
 const serverSessions = ref<AgentSessionRecord[]>([]);
 const draftSessions = ref<DraftAgentSession[]>([]);
@@ -238,15 +253,14 @@ const activeKey = ref<string>("");
 const selectedAgentBySession = reactive<Record<string, string | null>>({});
 const agentOptions = ref<AgentSelectionOption[]>([]);
 const subtaskAgentLabels = ref<Record<string, string>>({});
-const closedSessionIds = reactive<Record<string, true>>({});
-const openedSubtaskSessionIds = reactive<Record<string, true>>({});
+const draftVisibilityBySession = reactive<Record<string, boolean>>({});
+const tabVisibilityWriteStates = reactive<Record<string, SessionWriteState>>({});
 const tabNoMap = ref<Record<string, number>>({});
 const chooseSessionModalOpen = ref(false);
 const draftInitialTextBySession = reactive<Record<string, string>>({});
 const chooseSessionLoading = ref(false);
 const chooseSessionItems = ref<ChooseSessionItem[]>([]);
 const chooseSessionSourceId = ref("");
-const sessionsInitialized = ref(false);
 const serverSessionsLoaded = ref(false);
 const pendingSessionTitleSyncUpdatedAt = reactive<Record<string, number>>({});
 const draftCreatePromises = new Map<string, Promise<string>>();
@@ -268,6 +282,7 @@ const titleServerError = ref<ManualTitleValidationError | null>(null);
 // - workspaceGeneration/disposed 使在途请求在 Workspace 切换或卸载后失效。
 const titleMutationCache: TitleMutationCacheState = createTitleMutationCache();
 let workspaceGeneration = 0;
+let initializationAttemptId = 0;
 let disposed = false;
 type SessionRefreshToken = { generation: number; workspaceId: string };
 let activeSessionRefresh: SessionRefreshToken | null = null;
@@ -286,6 +301,24 @@ function invalidateOpenParentIntent() {
 const statusStore = createAgentSessionStatusStore();
 provide(agentSessionStatusStoreKey, statusStore);
 
+function currentTabVisibilityContext() {
+  return { workspaceId: props.workspaceId, workspaceGeneration };
+}
+
+function isTabVisibilityContextCurrent(context: { workspaceId: string; workspaceGeneration: number }) {
+  return !disposed && context.workspaceId === props.workspaceId && context.workspaceGeneration === workspaceGeneration;
+}
+
+const tabVisibilityController = createAgentSessionTabVisibilityController({
+  request: setWorkspaceAgentSessionTabVisibility,
+  isContextCurrent: isTabVisibilityContextCurrent,
+  onMutationError: (_sessionId, error) => {
+    message.error(t("agent.client.tabStateUpdateFailed") + (error instanceof Error ? `: ${error.message}` : ""));
+  },
+  onStateChange: () => reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value }),
+  writeStates: tabVisibilityWriteStates
+});
+
 const allSessions = computed<AgentSessionTab[]>(() => [...serverSessions.value, ...draftSessions.value]);
 
 const effectiveActiveKey = computed(() => {
@@ -296,9 +329,8 @@ const effectiveActiveKey = computed(() => {
 const visibleSessions = computed(() => {
   // tabs 的展示顺序按编号从小到大,确保新建 client 出现在最右侧。
   const list = allSessions.value.filter((item) => {
-    if (closedSessionIds[item.id]) return false;
-    if (item.kind === "subtask") return !!openedSubtaskSessionIds[item.id];
-    return true;
+    if (isDraftSession(item)) return draftVisibilityBySession[item.id] ?? true;
+    return tabVisibilityController.getEffectiveVisibility(item as AgentSessionTabVisibilitySession);
   });
   return [...list].sort((a, b) => {
     const na = tabNoMap.value[a.id];
@@ -323,18 +355,6 @@ function agentPickStorageKey(workspaceId: string) {
   return `${AGENT_PICK_STORAGE_PREFIX}.v1.${id}`;
 }
 
-function closedSessionStorageKey(workspaceId: string) {
-  const id = String(workspaceId || "").trim();
-  if (!id) return `${CLOSED_SESSION_STORAGE_PREFIX}.v1`;
-  return `${CLOSED_SESSION_STORAGE_PREFIX}.v1.${id}`;
-}
-
-function openedSubtaskSessionStorageKey(workspaceId: string) {
-  const id = String(workspaceId || "").trim();
-  if (!id) return `${OPENED_SUBTASK_SESSION_STORAGE_PREFIX}.v1`;
-  return `${OPENED_SUBTASK_SESSION_STORAGE_PREFIX}.v1.${id}`;
-}
-
 function reconcileTabNoMap(params: { workspaceId: string; sessions: AgentSessionTab[] }) {
   const id = String(params.workspaceId || "").trim();
   if (!id) return;
@@ -345,8 +365,9 @@ function reconcileTabNoMap(params: { workspaceId: string; sessions: AgentSession
   // 只对当前 workspace 且当前可见的 session 分配编号,避免 workspace 切换时短暂拿到旧列表导致污染映射。
   const sessionsInWs = params.sessions
     .filter((s) => String(s.workspaceId || "").trim() === id)
-    .filter((s) => !closedSessionIds[s.id])
-    .filter((s) => s.kind !== "subtask" || !!openedSubtaskSessionIds[s.id]);
+    .filter((s) => isDraftSession(s)
+      ? (draftVisibilityBySession[s.id] ?? true)
+      : tabVisibilityController.getEffectiveVisibility(s as AgentSessionTabVisibilitySession));
   const present = new Set(sessionsInWs.map((s) => s.id));
   const nextMap: Record<string, number> = { ...tabNoMap.value };
 
@@ -399,34 +420,6 @@ function agentDisplayIndex(sessionId: string, index: number) {
   return max + Math.max(1, index + 1);
 }
 
-function persistClosedSessions() {
-  const key = closedSessionStorageKey(props.workspaceId);
-  const ids = Object.keys(closedSessionIds);
-  try {
-    if (ids.length === 0) {
-      localStorage.removeItem(key);
-      return;
-    }
-    localStorage.setItem(key, JSON.stringify(ids));
-  } catch {
-    // ignore
-  }
-}
-
-function persistOpenedSubtaskSessions() {
-  const key = openedSubtaskSessionStorageKey(props.workspaceId);
-  const ids = Object.keys(openedSubtaskSessionIds).sort((a, b) => a.localeCompare(b));
-  try {
-    if (ids.length === 0) {
-      localStorage.removeItem(key);
-      return;
-    }
-    localStorage.setItem(key, JSON.stringify(ids));
-  } catch {
-    // ignore
-  }
-}
-
 function restorePersistedState() {
   try {
     const savedActive = localStorage.getItem(activeKeyStorageKey(props.workspaceId));
@@ -436,41 +429,10 @@ function restorePersistedState() {
   }
   try {
     const raw = localStorage.getItem(agentPickStorageKey(props.workspaceId));
-    if (raw) {
-      const parsed = JSON.parse(raw) as Record<string, string | null>;
-      for (const [key, value] of Object.entries(parsed)) {
-        selectedAgentBySession[key] = typeof value === "string" && value.trim() ? value : null;
-      }
-    }
-  } catch {
-    // ignore
-  }
-
-  try {
-    const raw = localStorage.getItem(openedSubtaskSessionStorageKey(props.workspaceId));
-    if (raw) {
-      const parsed = JSON.parse(raw) as unknown;
-      if (Array.isArray(parsed)) {
-        for (const id of parsed) {
-          const sid = String(id || "").trim();
-          if (!sid) continue;
-          openedSubtaskSessionIds[sid] = true;
-        }
-      }
-    }
-  } catch {
-    // ignore
-  }
-
-  try {
-    const raw = localStorage.getItem(closedSessionStorageKey(props.workspaceId));
     if (!raw) return;
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return;
-    for (const id of parsed) {
-      const sid = String(id || "").trim();
-      if (!sid) continue;
-      closedSessionIds[sid] = true;
+    const parsed = JSON.parse(raw) as Record<string, string | null>;
+    for (const [key, value] of Object.entries(parsed)) {
+      selectedAgentBySession[key] = typeof value === "string" && value.trim() ? value : null;
     }
   } catch {
     // ignore
@@ -723,12 +685,24 @@ async function loadSessionModelStates(sessionId: string, force = false) {
   const pending = sessionModelStateLoadPromises.get(sessionId);
   if (pending) return pending;
 
+  const requestGeneration = workspaceGeneration;
+  const requestWorkspaceId = props.workspaceId;
   sessionModelStateLoads[sessionId] = true;
-  const job = listAgentSessionModelOverrides(sessionId, props.workspaceId)
+  const job = listAgentSessionModelOverrides(sessionId, requestWorkspaceId)
     .then((response) => {
+      if (!isRequestResponseWritable({
+        disposed,
+        currentGeneration: workspaceGeneration,
+        requestGeneration,
+        currentWorkspaceId: props.workspaceId,
+        requestWorkspaceId
+      })) {
+        return;
+      }
       replaceSessionModelStates(sessionModelStates, response);
     })
     .finally(() => {
+      if (sessionModelStateLoadPromises.get(sessionId) !== job) return;
       delete sessionModelStateLoads[sessionId];
       sessionModelStateLoadPromises.delete(sessionId);
     });
@@ -747,6 +721,8 @@ async function refreshVisibleSessionModelStates(force = false) {
 async function onRequestSessionModelOpen(params: { sessionId: string; agentId: string }) {
   const agentId = String(params.agentId || "").trim();
   if (!agentId || !agentOptions.value.some((agent) => agent.value === agentId)) return;
+  const requestGeneration = workspaceGeneration;
+  const requestWorkspaceId = props.workspaceId;
   const sourceSessionId = params.sessionId;
   const requestId = ++nextModelOpenIntentId;
   // A draft must retain the intent across its Pane replacement. A real Pane
@@ -763,6 +739,15 @@ async function onRequestSessionModelOpen(params: { sessionId: string; agentId: s
       loadSessionModelStates: (sessionId) => loadSessionModelStates(sessionId, true)
     });
   } catch (err) {
+    if (!isRequestResponseWritable({
+      disposed,
+      currentGeneration: workspaceGeneration,
+      requestGeneration,
+      currentWorkspaceId: props.workspaceId,
+      requestWorkspaceId
+    })) {
+      return;
+    }
     message.error(err instanceof Error ? err.message : String(err));
   }
 }
@@ -780,19 +765,8 @@ function onSessionModelMutationPending(params: { sessionId: string; pending: boo
   else delete sessionModelMutationPending[params.sessionId];
 }
 
-function pruneOpenedSubtaskSessions() {
-  const presentIds = new Set(
-    serverSessions.value
-      .filter((item) => item.kind === "subtask" && String(item.workspaceId || "").trim() === String(props.workspaceId || "").trim())
-      .map((item) => item.id)
-  );
-  let changed = false;
-  for (const id of Object.keys(openedSubtaskSessionIds)) {
-    if (presentIds.has(id)) continue;
-    delete openedSubtaskSessionIds[id];
-    changed = true;
-  }
-  if (changed) persistOpenedSubtaskSessions();
+function refreshTabVisibilitySessions() {
+  tabVisibilityController.pruneSettledStates(serverSessions.value as AgentSessionTabVisibilitySession[]);
 }
 
 async function refreshSessions() {
@@ -834,19 +808,10 @@ async function refreshSessions() {
     convergeMutationCache(titleMutationCache, requestRevision, new Set(merged.map((record) => record.id)));
     serverSessions.value = [...merged].sort((a, b) => b.updatedAt - a.updatedAt);
     void refreshVisibleSessionModelStates();
-    pruneOpenedSubtaskSessions();
-    // 先根据可见 tabs 做 prune/分配,避免隐藏 tab 让编号一路增长。
+    // 普通 Session 刷新只能更新元数据，不能覆盖 controller 的 pending/inFlight 可见性状态。
+    refreshTabVisibilitySessions();
     serverSessionsLoaded.value = true;
     reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
-    const presentIds = new Set(allSessions.value.map((item) => item.id));
-    let closedChanged = false;
-    for (const id of Object.keys(closedSessionIds)) {
-      if (!presentIds.has(id)) {
-        delete closedSessionIds[id];
-        closedChanged = true;
-      }
-    }
-    if (closedChanged) persistClosedSessions();
     if (effectiveActiveKey.value) {
       activeKey.value = effectiveActiveKey.value;
       persistActiveKey(effectiveActiveKey.value);
@@ -884,11 +849,6 @@ async function refreshSessions() {
   return ok;
 }
 
-async function refreshAll(): Promise<boolean> {
-  const results = await Promise.all([refreshAgents(), refreshSessions()]);
-  return results[1];
-}
-
 function setDraftInitialText(sessionId: string, text: string) {
   const key = String(sessionId || "").trim();
   if (!key) return;
@@ -917,6 +877,7 @@ function requestSessionTitleSync(sessionId: string) {
 
 
 async function createOneSession() {
+  if (initializationState.value !== "ready") return;
   if (creating.value) return;
   creating.value = true;
   try {
@@ -932,8 +893,7 @@ async function createOneSession() {
       isDraft: true
     };
     draftSessions.value = [...draftSessions.value, draft];
-    delete closedSessionIds[draft.id];
-    persistClosedSessions();
+    draftVisibilityBySession[draft.id] = true;
     setDraftInitialText(draft.id, "");
     reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
     activeKey.value = draft.id;
@@ -949,74 +909,110 @@ async function ensureSessionCreated(sessionId: string) {
   const draft = draftSessions.value.find((item) => item.id === sessionId);
   if (!draft) return sessionId;
 
+  const requestGeneration = workspaceGeneration;
+  const requestWorkspaceId = props.workspaceId;
   const pending = draftCreatePromises.get(sessionId);
   if (pending) return pending;
 
-  const job = (async () => {
-    const created = await createAgentSession({
-      workspaceId: props.workspaceId,
-      title: draft.title
-    });
+  const isResponseWritable = () => isRequestResponseWritable({
+    disposed,
+    currentGeneration: workspaceGeneration,
+    requestGeneration,
+    currentWorkspaceId: props.workspaceId,
+    requestWorkspaceId
+  });
 
-    draftSessions.value = draftSessions.value.filter((item) => item.id !== sessionId);
-    delete draftInitialTextBySession[sessionId];
-    serverSessions.value = [created, ...serverSessions.value.filter((item) => item.id !== created.id)].sort(
-      (a, b) => b.updatedAt - a.updatedAt
-    );
+  const job = (async (): Promise<string> => {
+    try {
+      const created = await createAgentSession({
+        workspaceId: requestWorkspaceId,
+        title: draft.title
+      });
+      // A late create response has no right to migrate a draft or register a
+      // Session in a different Workspace (or after component disposal).
+      if (!isResponseWritable()) return created.id;
 
-    // 草稿切换为真实 Session 后，立即开始加载权威模型状态。loadSessionModelStates
-    // 会同步标记 loading，避免新 Pane 在首次发送期间把“尚未加载”误显示为“不可用”。
-    void loadSessionModelStates(created.id).catch(() => undefined);
+      const draftVisible = draftVisibilityBySession[sessionId] ?? true;
+      draftSessions.value = draftSessions.value.filter((item) => item.id !== sessionId);
+      delete draftVisibilityBySession[sessionId];
+      delete draftInitialTextBySession[sessionId];
+      serverSessions.value = [created, ...serverSessions.value.filter((item) => item.id !== created.id)].sort(
+        (a, b) => b.updatedAt - a.updatedAt
+      );
 
-    const picked = selectedAgentBySession[sessionId] ?? null;
-    selectedAgentBySession[created.id] = picked;
-    delete selectedAgentBySession[sessionId];
-    persistAgentPick();
-    clearSessionModelStates(sessionModelStates, sessionId);
-    migrateSessionModelOpenIntent(pendingModelOpenIntentBySession, sessionId, created.id);
+      // 草稿切换为真实 Session 后，立即开始加载权威模型状态。loadSessionModelStates
+      // 会同步标记 loading，避免新 Pane 在首次发送期间把“尚未加载”误显示为“不可用”。
+      void loadSessionModelStates(created.id).catch(() => undefined);
 
-    if (closedSessionIds[sessionId]) {
-      closedSessionIds[created.id] = true;
-      delete closedSessionIds[sessionId];
-      persistClosedSessions();
+      const picked = selectedAgentBySession[sessionId] ?? null;
+      selectedAgentBySession[created.id] = picked;
+      delete selectedAgentBySession[sessionId];
+      persistAgentPick();
+      clearSessionModelStates(sessionModelStates, sessionId);
+      migrateSessionModelOpenIntent(pendingModelOpenIntentBySession, sessionId, created.id);
+
+      tabVisibilityController.transferDraftVisibility(created as AgentSessionTabVisibilitySession, draftVisible, currentTabVisibilityContext());
+
+      if (tabNoMap.value[sessionId]) {
+        const nextMap = { ...tabNoMap.value };
+        nextMap[created.id] = nextMap[sessionId]!;
+        delete nextMap[sessionId];
+        tabNoMap.value = nextMap;
+      }
+
+      if (activeKey.value === sessionId) {
+        activeKey.value = created.id;
+        persistActiveKey(created.id);
+      }
+
+      reconcileTabNoMap({ workspaceId: requestWorkspaceId, sessions: allSessions.value });
+
+      // 新会话首条消息: draft pane 可能在发送期间被卸载,导致其 emit 的 poll hint 丢失。
+      // 这里在创建成功后主动 bump 一次,确保新 pane 至少会做一次刷新+短轮询兜底。
+      requestSessionTitleSync(created.id);
+      statusStore.bumpPollHint(created.id, { immediate: true, warmup: true });
+      return created.id;
+    } catch (error) {
+      // The old Pane may still be awaiting this promise, but it must not
+      // surface an error into a newer Workspace or a disposed component.
+      if (!isResponseWritable()) return sessionId;
+      throw error;
     }
-
-    if (tabNoMap.value[sessionId]) {
-      const nextMap = { ...tabNoMap.value };
-      nextMap[created.id] = nextMap[sessionId]!;
-      delete nextMap[sessionId];
-      tabNoMap.value = nextMap;
-    }
-
-    if (activeKey.value === sessionId) {
-      activeKey.value = created.id;
-      persistActiveKey(created.id);
-    }
-
-    reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
-
-    // 新会话首条消息: draft pane 可能在发送期间被卸载,导致其 emit 的 poll hint 丢失。
-    // 这里在创建成功后主动 bump 一次,确保新 pane 至少会做一次刷新+短轮询兜底。
-    requestSessionTitleSync(created.id);
-    statusStore.bumpPollHint(created.id, { immediate: true, warmup: true });
-    return created.id;
-  })()
-    .finally(() => {
-      draftCreatePromises.delete(sessionId);
-    });
+  })();
 
   draftCreatePromises.set(sessionId, job);
+  void job.then(
+    () => {
+      if (draftCreatePromises.get(sessionId) === job) draftCreatePromises.delete(sessionId);
+    },
+    () => {
+      if (draftCreatePromises.get(sessionId) === job) draftCreatePromises.delete(sessionId);
+    }
+  );
   return job;
+}
+
+function requestSessionVisibility(sessionId: string, visible: boolean) {
+  const session = serverSessions.value.find((item) => item.id === sessionId);
+  if (!session) return false;
+  const accepted = tabVisibilityController.requestVisibility(
+    session as AgentSessionTabVisibilitySession,
+    visible,
+    currentTabVisibilityContext()
+  );
+  if (accepted) reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
+  return accepted;
 }
 
 function closeSessionTab(sessionId: string) {
   if (!sessionId) return;
-  closedSessionIds[sessionId] = true;
-  persistClosedSessions();
+  const draft = draftSessions.value.find((item) => item.id === sessionId);
+  if (draft) draftVisibilityBySession[sessionId] = false;
+  else requestSessionVisibility(sessionId, false);
   clearSessionModelStates(sessionModelStates, sessionId);
   delete pendingModelOpenIntentBySession[sessionId];
 
-  // close 语义是“关闭本地 tab”,因此编号映射也应随之移除,让编号可复用。
+  // close 只隐藏入口，不会取消、删除或终止服务端 Session。
   if (tabNoMap.value[sessionId]) {
     const nextMap = { ...tabNoMap.value };
     delete nextMap[sessionId];
@@ -1034,15 +1030,13 @@ function closeSessionTab(sessionId: string) {
     return;
   }
 
-  // 若关闭后无可见 tab,立即补一个新的草稿会话,避免出现“已全部关闭”空态。
-  void createOneSession();
+  if (initializationState.value === "ready") void createOneSession();
 }
 
 async function onSessionForked(sessionId: string) {
   await refreshSessions();
   if (!sessionId) return;
-  delete closedSessionIds[sessionId];
-  persistClosedSessions();
+  requestSessionVisibility(sessionId, true);
   invalidateOpenParentIntent();
   reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
   activeKey.value = sessionId;
@@ -1052,11 +1046,12 @@ async function onSessionForked(sessionId: string) {
 
 async function onOpenSubtask(sessionId: string) {
   if (!sessionId) return;
-  openedSubtaskSessionIds[sessionId] = true;
-  persistOpenedSubtaskSessions();
-  await refreshSessions();
-  delete closedSessionIds[sessionId];
-  persistClosedSessions();
+  // 若当前列表已经包含子任务，先乐观登记意图；否则刷新后再登记。
+  const opened = requestSessionVisibility(sessionId, true);
+  if (!opened) {
+    await refreshSessions();
+    requestSessionVisibility(sessionId, true);
+  }
   invalidateOpenParentIntent();
   reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
   activeKey.value = sessionId;
@@ -1066,8 +1061,7 @@ async function onOpenSubtask(sessionId: string) {
 
 function activateParentSessionTab(sessionId: string) {
   if (!sessionId) return;
-  delete closedSessionIds[sessionId];
-  persistClosedSessions();
+  requestSessionVisibility(sessionId, true);
   reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
   activeKey.value = sessionId;
   statusStore.markSessionSeen(sessionId);
@@ -1127,9 +1121,8 @@ function replaceDraftWithSession(params: { fromSessionId: string; targetSessionI
   }
 
   draftSessions.value = draftSessions.value.filter((item) => item.id !== fromSessionId);
-  delete closedSessionIds[fromSessionId];
-  delete closedSessionIds[target.id];
-  persistClosedSessions();
+  delete draftVisibilityBySession[fromSessionId];
+  requestSessionVisibility(target.id, true);
 
   const fromNo = tabNoMap.value[fromSessionId];
   const nextMap = { ...tabNoMap.value };
@@ -1210,20 +1203,75 @@ function minimizeSelf() {
   host.minimizeTool(props.toolId);
 }
 
+function isCurrentInitialization(attemptId: number, requestGeneration: number, requestWorkspaceId: string) {
+  return !disposed
+    && attemptId === initializationAttemptId
+    && requestGeneration === workspaceGeneration
+    && requestWorkspaceId === props.workspaceId;
+}
+
+async function initializeWorkspace() {
+  const attemptId = ++initializationAttemptId;
+  const requestGeneration = workspaceGeneration;
+  const requestWorkspaceId = props.workspaceId;
+  initializationState.value = "loading";
+  loadingSessions.value = true;
+  // Agent options are non-critical: keep their existing independent refresh and
+  // never let an options failure hide successfully loaded Session Tabs.
+  void refreshAgents();
+
+  try {
+    const [sessions, tabState] = await Promise.all([
+      listAgentSessions(requestWorkspaceId),
+      getWorkspaceAgentTabState(requestWorkspaceId)
+    ]);
+    if (!isCurrentInitialization(attemptId, requestGeneration, requestWorkspaceId)) return;
+
+    // The two critical reads are committed together. The controller preserves
+    // any pending write state should a future initialization race with a PUT.
+    serverSessions.value = [...sessions].sort((a, b) => b.updatedAt - a.updatedAt);
+    tabVisibilityController.applyInitializationSnapshot(
+      serverSessions.value as AgentSessionTabVisibilitySession[],
+      tabState
+    );
+    serverSessionsLoaded.value = true;
+    reconcileTabNoMap({ workspaceId: requestWorkspaceId, sessions: allSessions.value });
+    if (effectiveActiveKey.value) {
+      activeKey.value = effectiveActiveKey.value;
+      persistActiveKey(effectiveActiveKey.value);
+    }
+    statusStore.bindWorkspace(requestWorkspaceId);
+    initializationState.value = "ready";
+
+    if (visibleSessions.value.length === 0) {
+      await createOneSession();
+    }
+  } catch {
+    if (!isCurrentInitialization(attemptId, requestGeneration, requestWorkspaceId)) return;
+    initializationState.value = "error";
+  } finally {
+    if (isCurrentInitialization(attemptId, requestGeneration, requestWorkspaceId)) {
+      loadingSessions.value = false;
+    }
+  }
+}
+
+function retryInitialization() {
+  if (initializationState.value === "loading") return;
+  void initializeWorkspace();
+}
+
 watch(
   () => props.workspaceId,
-  async () => {
-    // 使旧 Workspace 的所有在途响应失效，并允许新 Workspace 立即发起刷新。
+  () => {
+    // Make old Workspace requests inert before resetting reactive state.
     workspaceGeneration += 1;
-    const requestGeneration = workspaceGeneration;
-    const requestWorkspaceId = props.workspaceId;
     activeSessionRefresh = null;
     sessionRefreshRetry = null;
     titleMutationCache.revisionBySession.clear();
     titleMutationCache.recordBySession.clear();
     titleMutationCache.revision = 0;
     forceResetTitleModal();
-    sessionsInitialized.value = false;
     invalidateOpenParentIntent();
     activeKey.value = "";
     serverSessions.value = [];
@@ -1232,70 +1280,30 @@ watch(
     const emptyAgentPresentation = createEmptyAgentPresentation();
     agentOptions.value = emptyAgentPresentation.agentOptions;
     subtaskAgentLabels.value = emptyAgentPresentation.subtaskAgentLabels;
-    for (const key of Object.keys(closedSessionIds)) {
-      delete closedSessionIds[key];
-    }
-    for (const key of Object.keys(openedSubtaskSessionIds)) {
-      delete openedSubtaskSessionIds[key];
-    }
+    for (const key of Object.keys(draftVisibilityBySession)) delete draftVisibilityBySession[key];
+    for (const key of Object.keys(tabVisibilityWriteStates)) delete tabVisibilityWriteStates[key];
     tabNoMap.value = {};
-    for (const key of Object.keys(selectedAgentBySession)) {
-      delete selectedAgentBySession[key];
-    }
-    for (const key of Object.keys(pendingSessionTitleSyncUpdatedAt)) {
-      delete pendingSessionTitleSyncUpdatedAt[key];
-    }
+    for (const key of Object.keys(selectedAgentBySession)) delete selectedAgentBySession[key];
+    for (const key of Object.keys(pendingSessionTitleSyncUpdatedAt)) delete pendingSessionTitleSyncUpdatedAt[key];
     for (const key of Object.keys(sessionModelStates)) clearSessionModelStates(sessionModelStates, key);
     for (const key of Object.keys(sessionModelStateLoads)) delete sessionModelStateLoads[key];
     sessionModelStateLoadPromises.clear();
     for (const key of Object.keys(sessionModelMutationPending)) delete sessionModelMutationPending[key];
+    draftCreatePromises.clear();
     for (const key of Object.keys(pendingModelOpenIntentBySession)) delete pendingModelOpenIntentBySession[key];
     restorePersistedState();
-    const sessionsLoadedOk = await refreshAll();
-    // 只有仍是当前 generation 的 watcher 才能继续写入初始化状态，避免旧 watcher 污染新 Workspace。
-    if (disposed || requestGeneration !== workspaceGeneration || requestWorkspaceId !== props.workspaceId) return;
-    statusStore.bindWorkspace(props.workspaceId);
-    // 只有当前 generation 的列表请求真正成功且为空时才创建 draft；
-    // 请求失败时保留 loading 释放与后续重试能力，不误建 draft、不标记完整初始化。
-    if (!sessionsLoadedOk) return;
-    if (visibleSessions.value.length === 0) {
-      await createOneSession();
-      if (disposed || requestGeneration !== workspaceGeneration || requestWorkspaceId !== props.workspaceId) return;
-    }
-    sessionsInitialized.value = true;
+    void initializeWorkspace();
   },
   { immediate: true }
 );
 
 onActivated(() => {
-  if (creating.value) return;
-  if (!sessionsInitialized.value) {
-    // 初始化未完成（例如首次列表请求失败）：重试当前 generation 的列表刷新，
-    // 只有权威列表成功且为空时才补建 draft；失败保持可重试，不误建。
-    if (loadingSessions.value) return;
-    // 捕获发起时的 generation/workspace：回调执行间隙切换 Workspace 时不得写新状态。
-    const requestGeneration = workspaceGeneration;
-    const requestWorkspaceId = props.workspaceId;
-    void refreshSessions().then((ok) => {
-      if (!ok) return;
-      if (!isRequestResponseWritable({
-        disposed,
-        currentGeneration: workspaceGeneration,
-        requestGeneration,
-        currentWorkspaceId: props.workspaceId,
-        requestWorkspaceId
-      })) {
-        return;
-      }
-      // 权威列表已成功：标记初始化；仅当列表为空时补建 draft。
-      sessionsInitialized.value = true;
-      if (visibleSessions.value.length > 0) return;
-      void createOneSession();
-    });
+  // KeepAlive reactivation must not implicitly re-read the backend Tab state.
+  if (initializationState.value === "error") {
+    void initializeWorkspace();
     return;
   }
-  if (loadingSessions.value) return;
-  if (visibleSessions.value.length > 0) return;
+  if (initializationState.value !== "ready" || creating.value || visibleSessions.value.length > 0) return;
   statusStore.syncSessions({
     activeSessionId: effectiveActiveKey.value || null,
     visibleSessionIds: visibleSessions.value.map((item) => item.id),
@@ -1303,10 +1311,6 @@ onActivated(() => {
     sessionKinds: Object.fromEntries(serverSessions.value.map((item) => [item.id, item.kind]))
   });
   void createOneSession();
-});
-
-onMounted(() => {
-  restorePersistedState();
 });
 
 watch(

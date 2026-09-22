@@ -37,6 +37,38 @@ export const WorkspaceDetailSchema = Type.Object(
 );
 export type WorkspaceDetail = Static<typeof WorkspaceDetailSchema>;
 
+export const WorkspaceAgentTabStateSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
+  closedSessionIds: Type.Array(Type.String({ minLength: 1 })),
+  openedSubtaskSessionIds: Type.Array(Type.String({ minLength: 1 }))
+});
+export type WorkspaceAgentTabState = Static<typeof WorkspaceAgentTabStateSchema>;
+
+export const UpdateWorkspaceAgentSessionTabVisibilityRequestSchema = Type.Object(
+  {
+    visible: Type.Boolean()
+  },
+  { additionalProperties: false }
+);
+export type UpdateWorkspaceAgentSessionTabVisibilityRequest = Static<
+  typeof UpdateWorkspaceAgentSessionTabVisibilityRequestSchema
+>;
+
+export const WorkspaceAgentSessionTabStateParamsSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
+  sessionId: Type.String({ minLength: 1 })
+});
+export type WorkspaceAgentSessionTabStateParams = Static<typeof WorkspaceAgentSessionTabStateParamsSchema>;
+
+export const WorkspaceAgentSessionTabVisibilityMutationSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
+  sessionId: Type.String({ minLength: 1 }),
+  visible: Type.Boolean()
+});
+export type WorkspaceAgentSessionTabVisibilityMutation = Static<
+  typeof WorkspaceAgentSessionTabVisibilityMutationSchema
+>;
+
 export const CreateWorkspaceRequestSchema = Type.Object(
   {
     // 允许创建“空工作区”(不绑定 repo)

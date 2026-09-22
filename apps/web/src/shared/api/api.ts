@@ -85,6 +85,9 @@ import type {
   UpdateRepoRequest,
   UpdateWorkspaceRequest,
   WorkspaceDetail,
+  WorkspaceAgentSessionTabVisibilityMutation,
+  WorkspaceAgentTabState,
+  UpdateWorkspaceAgentSessionTabVisibilityRequest,
   SearchSettings,
   FileSearchRequest,
   FileSearchResponse,
@@ -1111,6 +1114,33 @@ export async function listAgentSessions(workspaceId: string) {
     const res = await client.get<AgentSessionRecord[]>("/agent/sessions", {
       params: { workspaceId }
     });
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getWorkspaceAgentTabState(workspaceId: string): Promise<WorkspaceAgentTabState> {
+  try {
+    const res = await client.get<WorkspaceAgentTabState>(
+      `/workspaces/${encodeURIComponent(workspaceId)}/agent-tab-state`
+    );
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function setWorkspaceAgentSessionTabVisibility(
+  workspaceId: string,
+  sessionId: string,
+  body: UpdateWorkspaceAgentSessionTabVisibilityRequest
+): Promise<WorkspaceAgentSessionTabVisibilityMutation> {
+  try {
+    const res = await client.put<WorkspaceAgentSessionTabVisibilityMutation>(
+      `/workspaces/${encodeURIComponent(workspaceId)}/agent-tab-state/${encodeURIComponent(sessionId)}`,
+      body
+    );
     return res.data;
   } catch (err) {
     throw toApiError(err);

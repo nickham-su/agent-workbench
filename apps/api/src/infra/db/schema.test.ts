@@ -179,6 +179,61 @@ test("new Agent schema exposes Message/Part/Execution, Session state and FTS fou
   db.close();
 });
 
+test("workspace session tab state is a base-domain table with the intended constraints", () => {
+  const db = createDb();
+  insertWorkspace(db, "ws-a");
+
+  const columns = db.prepare("pragma table_info(workspace_session_tab_state)").all() as Array<{
+    name: string;
+    type: string;
+    notnull: number;
+    pk: number;
+  }>;
+  assert.deepEqual(columns.map(({ name, type, notnull, pk }) => ({ name, type, notnull, pk })), [
+    { name: "workspace_id", type: "TEXT", notnull: 1, pk: 1 },
+    { name: "session_id", type: "TEXT", notnull: 1, pk: 2 },
+    { name: "visible", type: "INTEGER", notnull: 1, pk: 0 },
+    { name: "updated_at", type: "INTEGER", notnull: 1, pk: 0 }
+  ]);
+
+  const foreignKeys = db.prepare("pragma foreign_key_list(workspace_session_tab_state)").all() as Array<{
+    table: string;
+    from: string;
+    to: string;
+    on_delete: string;
+  }>;
+  assert.deepEqual(foreignKeys.map(({ table, from, to, on_delete }) => ({ table, from, to, on_delete })), [{ table: "workspaces", from: "workspace_id", to: "id", on_delete: "CASCADE" }]);
+  const indexes = db.prepare("select origin from pragma_index_list('workspace_session_tab_state')").all() as Array<{ origin: string }>;
+  assert.deepEqual(indexes, [{ origin: "pk" }]);
+
+  assert.throws(
+    () => db.prepare("insert into workspace_session_tab_state (workspace_id, session_id, visible, updated_at) values (?, ?, ?, ?)").run("ws-a", "invalid", 2, 1),
+    /CHECK constraint failed/
+  );
+  assert.throws(
+    () => db.prepare("insert into workspace_session_tab_state (workspace_id, session_id, visible, updated_at) values (?, ?, ?, ?)").run("missing-workspace", "orphan-session", 0, 1),
+    /FOREIGN KEY constraint failed/
+  );
+  db.prepare("insert into workspace_session_tab_state (workspace_id, session_id, visible, updated_at) values (?, ?, ?, ?)").run("ws-a", "orphan-session", 0, 1);
+  db.prepare("delete from workspaces where id = ?").run("ws-a");
+  assert.equal((db.prepare("select count(*) as count from workspace_session_tab_state").get() as { count: number }).count, 0);
+  db.close();
+});
+
+test("workspace session tab state survives Agent-domain rebuild without affecting schema classification", () => {
+  const db = createDb();
+  insertWorkspace(db, "ws-a");
+  db.prepare("insert into workspace_session_tab_state (workspace_id, session_id, visible, updated_at) values (?, ?, ?, ?)").run("ws-a", "orphan-session", 0, 1);
+  db.prepare("update agent_schema_meta set version = ? where id = 1").run(AGENT_SCHEMA_VERSION - 1);
+
+  assert.doesNotThrow(() => initSchema(db));
+  assert.deepEqual(db.prepare("select workspace_id as workspaceId, session_id as sessionId, visible, updated_at as updatedAt from workspace_session_tab_state").all(), [
+    { workspaceId: "ws-a", sessionId: "orphan-session", visible: 0, updatedAt: 1 }
+  ]);
+  assert.equal((db.prepare("select version from agent_schema_meta where id = 1").get() as { version: number }).version, AGENT_SCHEMA_VERSION);
+  db.close();
+});
+
 test("本轮 per-artifact intent 表缺 root anchor 时事务性迁为 unresolved", () => {
   const db = createDb();
   db.exec("drop table terminal_auth_cleanup_intents; create table terminal_auth_cleanup_intents (terminal_id text not null, artifact_kind text not null check (artifact_kind in ('ssh-key', 'askpass', 'askpass-token', 'legacy')), phase text not null check (phase in ('armed', 'recoverable', 'unresolved')), artifact_name text not null, expected_dev integer, expected_ino integer, diagnostic text not null, updated_at integer not null, primary key (terminal_id, artifact_kind), foreign key (terminal_id) references terminals(id) on delete restrict); create index idx_terminal_auth_cleanup_intents_updated_at on terminal_auth_cleanup_intents(updated_at);");
