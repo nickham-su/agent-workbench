@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentMessage, AgentMessageSessionRunState } from "@agent-workbench/shared";
-import { computed, defineComponent, h, type ComputedRef } from "vue";
+import { computed, defineComponent, h, KeepAlive, ref, type ComputedRef } from "vue";
 
 const [{ mount }, component, { createI18n }, { nextTick, reactive }, { agentSessionStatusStoreKey }, { message, Modal }, { replaceAgentTimelineSnapshot }] = await Promise.all([
   import("@vue/test-utils"),
@@ -168,6 +168,159 @@ async function setTimeline(wrapper: ReturnType<typeof mount>, messages: AgentMes
   else (vm as { timelineState: unknown }).timelineState = state;
   await nextTick();
 }
+
+function mountCachedPane() {
+  const visible = ref(true);
+  const runState = baseRunState();
+  const statusStore = { getRunState: () => computed(() => runState) };
+  const host = mount(defineComponent({
+    setup() {
+      return () => h(KeepAlive, null, {
+        default: () => visible.value
+          ? h(AgentClientPane, {
+            workspaceId: "ws-a",
+            toolId: "agent-tool",
+            sessionId: "session-a",
+            sessionKind: "primary",
+            sessionTitle: "Session A",
+            sessionReady: false,
+            active: false,
+            modelValue: "agent-b",
+            agentOptions: [],
+            sessionModelStates: {},
+            sessionModelStateLoading: false,
+            sessionModelMutationPending: false,
+            modelOpenIntent: null,
+          })
+          : h("div"),
+      });
+    },
+  }), {
+    attachTo: document.body,
+    global: createMountGlobal(statusStore),
+  });
+  return { host, visible };
+}
+
+function setScrollMetrics(el: HTMLElement, scrollHeight: number, clientHeight: number) {
+  Object.defineProperties(el, {
+    scrollHeight: { configurable: true, value: scrollHeight },
+    clientHeight: { configurable: true, value: clientHeight },
+  });
+}
+
+async function waitForScrollRestore() {
+  await nextTick();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await nextTick();
+}
+
+function cachedPaneVm(host: ReturnType<typeof mount>) {
+  return host.getComponent(AgentClientPane).vm as unknown as {
+    loadingPreviousPageScope: unknown;
+  };
+}
+
+test("真实 AgentClientPane：KeepAlive 切换工具后恢复会话滚动位置，底部保持跟随新内容", async () => {
+  const { host, visible } = mountCachedPane();
+  try {
+    const scrollEl = host.get("main").element as HTMLElement;
+    setScrollMetrics(scrollEl, 1_000, 200);
+    scrollEl.scrollTop = 320;
+    scrollEl.dispatchEvent(new Event("scroll"));
+
+    visible.value = false;
+    await nextTick();
+    // 模拟浏览器在缓存 DOM 脱离可见树时丢失原生 scrollTop。
+    scrollEl.scrollTop = 0;
+    visible.value = true;
+    await waitForScrollRestore();
+    assert.equal(scrollEl.scrollTop, 320);
+
+    scrollEl.scrollTop = 800;
+    scrollEl.dispatchEvent(new Event("scroll"));
+    visible.value = false;
+    await nextTick();
+    scrollEl.scrollTop = 0;
+    // 缓存期间新增消息；回到会话时原先在底部的用户仍应留在新底部。
+    setScrollMetrics(scrollEl, 1_400, 200);
+    visible.value = true;
+    await waitForScrollRestore();
+    assert.equal(scrollEl.scrollTop, 1_200);
+  } finally {
+    host.unmount();
+  }
+});
+
+test("真实 AgentClientPane：距底部不足 120px 但未到底时，切回后仍恢复原位置", async () => {
+  const { host, visible } = mountCachedPane();
+  try {
+    const scrollEl = host.get("main").element as HTMLElement;
+    setScrollMetrics(scrollEl, 1_000, 200);
+    // 保持原有 120px 自动跟随语义，但这不是严格的滚动到底。
+    scrollEl.scrollTop = 750;
+    scrollEl.dispatchEvent(new Event("scroll"));
+
+    visible.value = false;
+    await nextTick();
+    scrollEl.scrollTop = 0;
+    setScrollMetrics(scrollEl, 1_400, 200);
+    visible.value = true;
+    await waitForScrollRestore();
+
+    assert.equal(scrollEl.scrollTop, 750);
+  } finally {
+    host.unmount();
+  }
+});
+
+test("真实 AgentClientPane：恢复窗口的临时顶部 scroll 不加载历史分页", async () => {
+  const { host, visible } = mountCachedPane();
+  try {
+    const scrollEl = host.get("main").element as HTMLElement;
+    setScrollMetrics(scrollEl, 1_000, 200);
+    scrollEl.scrollTop = 320;
+    scrollEl.dispatchEvent(new Event("scroll"));
+
+    visible.value = false;
+    await nextTick();
+    scrollEl.scrollTop = 0;
+    visible.value = true;
+    await nextTick();
+    // 在 rAF 恢复前模拟浏览器重挂载时发出的临时顶部 scroll 事件。
+    scrollEl.dispatchEvent(new Event("scroll"));
+    assert.equal(cachedPaneVm(host).loadingPreviousPageScope, null);
+    await waitForScrollRestore();
+    assert.equal(scrollEl.scrollTop, 320);
+  } finally {
+    host.unmount();
+  }
+});
+
+test("真实 AgentClientPane：恢复窗口内的用户滚动意图会取消旧位置恢复", async () => {
+  const { host, visible } = mountCachedPane();
+  try {
+    const scrollEl = host.get("main").element as HTMLElement;
+    setScrollMetrics(scrollEl, 1_000, 200);
+    scrollEl.scrollTop = 320;
+    scrollEl.dispatchEvent(new Event("scroll"));
+
+    visible.value = false;
+    await nextTick();
+    scrollEl.scrollTop = 0;
+    visible.value = true;
+    await nextTick();
+    // wheel 在 window capture 阶段取消 pending restore，随后实际 scroll 更新用户选定的位置。
+    scrollEl.dispatchEvent(new Event("wheel", { bubbles: true }));
+    scrollEl.scrollTop = 450;
+    scrollEl.dispatchEvent(new Event("scroll"));
+    await waitForScrollRestore();
+
+    assert.equal(scrollEl.scrollTop, 450);
+  } finally {
+    host.unmount();
+  }
+});
 
 test("真实 AgentClientPane：历史与当前消息分别渲染 Fork/Revert 操作", async () => {
   const { wrapper } = mountPane({ sessionReady: false });
@@ -431,6 +584,25 @@ test("真实 AgentClientPane：输入框字号跟随 AI Agent 字号变量", () 
   }
 });
 
+test("真实 AgentClientPane：输入内容为顿号时立即替换为 slash", async () => {
+  const { wrapper } = mountPane({ sessionReady: false });
+  try {
+    const vm = wrapper.vm as unknown as { draft: string };
+    const textarea = wrapper.get("a-textarea");
+    // a-textarea 会先通过 v-model 更新 draft，再触发当前 input 处理器。
+    vm.draft = "、";
+    (textarea.element as HTMLTextAreaElement).value = "、";
+
+    textarea.element.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+
+    assert.equal(vm.draft, "/");
+    assert.equal(wrapper.find('[role="listbox"]').exists(), true);
+  } finally {
+    wrapper.unmount();
+  }
+});
+
 test("真实 AgentClientPane：草稿 Session 无候选项时 Tab/Shift+Tab 循环切换 Agent", async () => {
   const { wrapper } = mountPane({ sessionReady: false, modelValue: "agent-b" });
   try {
@@ -454,9 +626,37 @@ test("真实 AgentClientPane：草稿 Session 无候选项时 Tab/Shift+Tab 循�
 test("真实 AgentClientPane：存在 slash 候选时 Tab 选择候选而不切换 Agent", async () => {
   const { wrapper } = mountPane({ sessionReady: false, modelValue: "agent-b", initialDraft: "/" });
   try {
+    (wrapper.vm as unknown as { promptItems: unknown[] }).promptItems = [{
+      id: "prompt-review",
+      title: "Review",
+      command: "review",
+    }];
     const textarea = wrapper.get("a-textarea");
     await nextTick();
     assert.equal(wrapper.find('[role="listbox"]').exists(), true);
+    const options = wrapper.findAll('[role="option"]');
+    assert.equal(options.length, 2);
+    assert.equal(options[0]?.attributes("type"), "button");
+    assert.equal(options[0]?.attributes("aria-selected"), "true");
+    assert.equal(options[1]?.attributes("aria-selected"), "false");
+    assert.match(options[0]?.attributes("class") || "", /appearance-none/);
+    assert.match(options[0]?.attributes("class") || "", /bg-blue-500\/25/);
+    assert.match(options[0]?.attributes("class") || "", /font-medium/);
+    assert.doesNotMatch(options[0]?.attributes("class") || "", /border-l-/);
+    assert.doesNotMatch(options[0]?.attributes("class") || "", /shadow-/);
+    assert.match(options[1]?.attributes("class") || "", /bg-transparent/);
+
+    const arrowDownEvent = createKeyboardEvent("ArrowDown");
+    textarea.element.dispatchEvent(arrowDownEvent);
+    await nextTick();
+    assert.equal(arrowDownEvent.defaultPrevented, true);
+    assert.equal(options[0]?.attributes("aria-selected"), "false");
+    assert.equal(options[1]?.attributes("aria-selected"), "true");
+
+    const arrowUpEvent = createKeyboardEvent("ArrowUp");
+    textarea.element.dispatchEvent(arrowUpEvent);
+    await nextTick();
+    assert.equal(options[0]?.attributes("aria-selected"), "true");
 
     const tabEvent = createKeyboardEvent("Tab");
     textarea.element.dispatchEvent(tabEvent);

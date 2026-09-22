@@ -224,10 +224,15 @@
       >
         <button
           v-for="(item, index) in inputCandidates"
+          type="button"
+          role="option"
           :id="createInputCandidateDomId(inputCandidateListId, index)"
           :key="item.id"
-          class="block w-full px-3 py-2 text-left hover:bg-[var(--hover-bg)]"
-          :class="{ 'bg-[var(--hover-bg)]': item.id === selectedCandidateId }"
+          class="m-0 block w-full appearance-none border-0 bg-transparent px-3 py-2 text-left text-[color:var(--text-color)] outline-none transition-colors"
+          :aria-selected="item.id === selectedCandidateId"
+          :class="item.id === selectedCandidateId
+            ? 'bg-blue-500/25 font-medium text-blue-100 hover:bg-blue-500/30'
+            : 'hover:bg-[var(--hover-bg)]'"
           @mousedown.prevent="pickCandidate(item)"
         >
           <span>{{ item.label }}</span
@@ -429,7 +434,7 @@ import {
   RobotOutlined,
 } from "@ant-design/icons-vue";
 import { Modal, message } from "ant-design-vue";
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import AgentAttachmentPreviewModal from "./AgentAttachmentPreviewModal.vue";
 import AgentConversationToolCall from "./AgentConversationToolCall.vue";
@@ -645,6 +650,11 @@ const pendingAttempt = ref<PendingAgentSendAttempt | null>(null);
 const pendingCompactAttempt = ref<PendingAgentCompactAttempt | null>(null);
 const scrollEl = ref<HTMLElement | null>(null);
 const inputEl = ref<any>(null);
+let savedScrollPosition: { top: number; wasAtBottom: boolean } | null = null;
+// 失活、会话切换和用户滚动都可以发生在等待下一帧恢复期间；代次用于让旧恢复任务失效。
+let scrollRestoreGeneration = 0;
+let scrollRestorePending = false;
+let scrollRestoreIntentHandler: EventListener | null = null;
 const stickToBottom = ref(true);
 const distanceToBottom = ref(0);
 const timelineState = ref(createAgentTimelineControllerState());
@@ -742,11 +752,13 @@ function messageClass(row: ConversationPart) {
           row.execution?.status === "completed"
           ? "px-2 py-0 transition-colors duration-100 hover:bg-[var(--hover-bg)]"
           : "px-2 py-0"
-      : row.message.type === "system" || row.message.type === "compaction"
+      : row.message.type === "system"
         ? "p-2 bg-[var(--panel-bg)]"
-        : assistantWithoutText
-          ? "px-2 py-0"
-        : "p-2";
+        : row.message.type === "compaction"
+          ? "py-2"
+          : assistantWithoutText
+            ? "px-2 py-0"
+            : "p-2";
 }
 function isMessageActionAnchor(row: ConversationPart) {
   return row.isFirstRowForMessage;
@@ -923,14 +935,48 @@ async function ensureToolDetail(executionId: string) {
     }
   }
 }
+function maxScrollTop(el: HTMLElement) {
+  return Math.max(0, el.scrollHeight - el.clientHeight);
+}
+function isScrolledToBottom(el: HTMLElement) {
+  // 浏览器布局可产生小数 scrollTop；仅允许极小误差，不能复用 120px 的自动跟随阈值。
+  return Math.abs(maxScrollTop(el) - el.scrollTop) <= 1;
+}
+function syncScrollState(el: HTMLElement) {
+  distanceToBottom.value = Math.max(
+    0,
+    maxScrollTop(el) - el.scrollTop,
+  );
+  stickToBottom.value = distanceToBottom.value <= 120;
+}
+function stopScrollRestoreIntentListener() {
+  const handler = scrollRestoreIntentHandler;
+  if (!handler) return;
+  for (const type of ["wheel", "touchstart", "pointerdown", "keydown"]) {
+    window.removeEventListener(type, handler, true);
+  }
+  scrollRestoreIntentHandler = null;
+}
+function cancelPendingScrollRestore() {
+  scrollRestoreGeneration += 1;
+  scrollRestorePending = false;
+  savedScrollPosition = null;
+  stopScrollRestoreIntentListener();
+}
+function listenForScrollRestoreIntent() {
+  stopScrollRestoreIntentListener();
+  const handler: EventListener = () => cancelPendingScrollRestore();
+  scrollRestoreIntentHandler = handler;
+  for (const type of ["wheel", "touchstart", "pointerdown", "keydown"]) {
+    window.addEventListener(type, handler, { capture: true, passive: true });
+  }
+}
 function onScroll() {
   const el = scrollEl.value;
   if (!el) return;
-  distanceToBottom.value = Math.max(
-    0,
-    el.scrollHeight - el.clientHeight - el.scrollTop,
-  );
-  stickToBottom.value = distanceToBottom.value <= 120;
+  syncScrollState(el);
+  // KeepAlive 重挂载期间浏览器可能短暂报告 scrollTop=0；这不是用户抵达顶部，不能加载历史分页。
+  if (scrollRestorePending) return;
   if (el.scrollTop < 100 && loadingPreviousPageScope !== requestScope) {
     const scope = requestScope;
     loadingPreviousPageScope = scope;
@@ -947,9 +993,58 @@ function onScroll() {
 function scrollToBottom(force = false) {
   const el = scrollEl.value;
   if (!el || (!force && !stickToBottom.value)) return;
-  el.scrollTop = el.scrollHeight;
+  el.scrollTop = maxScrollTop(el);
   distanceToBottom.value = 0;
   stickToBottom.value = true;
+}
+function saveScrollPosition() {
+  const el = scrollEl.value;
+  if (!el) return;
+  cancelPendingScrollRestore();
+  syncScrollState(el);
+  savedScrollPosition = {
+    top: el.scrollTop,
+    wasAtBottom: isScrolledToBottom(el),
+  };
+}
+async function restoreScrollPosition() {
+  const saved = savedScrollPosition;
+  if (!saved) return;
+  const generation = ++scrollRestoreGeneration;
+  scrollRestorePending = true;
+  listenForScrollRestoreIntent();
+
+  // KeepAlive 先把 DOM 移回可见树，再由 Tabs 和消息异步更新完成布局。
+  // 等到下一帧再写 scrollTop，避免被重新挂载/布局过程重置。
+  await nextTick();
+  await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+  if (
+    disposed ||
+    generation !== scrollRestoreGeneration ||
+    saved !== savedScrollPosition
+  ) {
+    if (generation === scrollRestoreGeneration) {
+      scrollRestorePending = false;
+      stopScrollRestoreIntentListener();
+    }
+    return;
+  }
+
+  const el = scrollEl.value;
+  if (!el) {
+    scrollRestorePending = false;
+    stopScrollRestoreIntentListener();
+    return;
+  }
+  if (saved.wasAtBottom) {
+    scrollToBottom(true);
+  } else {
+    el.scrollTop = saved.top;
+    syncScrollState(el);
+  }
+  savedScrollPosition = null;
+  scrollRestorePending = false;
+  stopScrollRestoreIntentListener();
 }
 async function onFork(messageId: string) {
   await runAgentSessionMessageMutation({
@@ -1047,6 +1142,18 @@ const inputCandidates = computed<Candidate[]>(() => {
   const target = findMentionTarget(text, caret.value);
   return target ? mentionCandidates.value : [];
 });
+watch(
+  inputCandidates,
+  (items) => {
+    if (!items.length) {
+      selectedCandidateId.value = "";
+      return;
+    }
+    if (!items.some((item) => item.id === selectedCandidateId.value))
+      selectedCandidateId.value = items[0]?.id || "";
+  },
+  { immediate: true },
+);
 function syncInputCaret() {
   const raw = inputEl.value?.resizableTextArea?.textArea as
     HTMLTextAreaElement | undefined;
@@ -1680,6 +1787,7 @@ watch(
       pendingRunController.stop();
       pendingCompactAttempt.value = null;
       messageMutationState.clear();
+      cancelPendingScrollRestore();
       distanceToBottom.value = 0;
       stickToBottom.value = true;
     }
@@ -1759,8 +1867,15 @@ watch(
   syncElapsedTimer,
   { immediate: true },
 );
+onDeactivated(() => {
+  saveScrollPosition();
+});
+onActivated(() => {
+  void restoreScrollPosition();
+});
 onBeforeUnmount(() => {
   disposed = true;
+  cancelPendingScrollRestore();
   clearRefreshTimer();
   pendingRunController.stop();
   if (elapsedTimer !== null) window.clearInterval(elapsedTimer);

@@ -1,6 +1,13 @@
 <template>
-  <div v-if="label" class="mb-1 font-medium text-[color:var(--text-tertiary)]">
-    {{ label }}
+  <div
+    v-if="label"
+    class="agent-compaction-divider flex items-center gap-3 py-2 text-xs font-medium text-blue-500"
+    role="separator"
+    :aria-label="label"
+  >
+    <span class="h-px flex-1 bg-current" />
+    <span class="whitespace-nowrap">{{ label }}</span>
+    <span class="h-px flex-1 bg-current" />
   </div>
   <AgentTextMessage
     class="agent-system-message"

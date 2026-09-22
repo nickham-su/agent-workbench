@@ -132,8 +132,8 @@ export function resolveSlashCommand(text: string, commandMap: Map<string, SlashC
   return command;
 }
 
-export function shouldConvertLeadingIdeographicCommaToSlash(previousText: string, nextText: string) {
-  return previousText.length === 0 && nextText.startsWith("、");
+export function shouldConvertLeadingIdeographicCommaToSlash(_previousText: string, nextText: string) {
+  return nextText === "、";
 }
 
 export function promptCommandInsertText(item: AgentGlobalPromptItem, command: string) {

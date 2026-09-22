@@ -16,11 +16,11 @@ const builtInCommands: SlashCommandDefinition[] = [
   { name: "compact", usage: "/compact", summaryKey: "compact", strictOnly: true, action: "compact" }
 ];
 
-test("shouldConvertLeadingIdeographicCommaToSlash 仅在空输入以顿号开始时转换", () => {
+test("shouldConvertLeadingIdeographicCommaToSlash 仅在输入内容等于顿号时转换", () => {
   assert.equal(shouldConvertLeadingIdeographicCommaToSlash("", "、"), true);
-  assert.equal(shouldConvertLeadingIdeographicCommaToSlash("", "、请总结"), true);
+  assert.equal(shouldConvertLeadingIdeographicCommaToSlash("、", "、"), true);
+  assert.equal(shouldConvertLeadingIdeographicCommaToSlash("", "、请总结"), false);
   assert.equal(shouldConvertLeadingIdeographicCommaToSlash("/summarize", "、请总结"), false);
-  assert.equal(shouldConvertLeadingIdeographicCommaToSlash("已有内容", "、请总结"), false);
   assert.equal(shouldConvertLeadingIdeographicCommaToSlash("", "请总结"), false);
 });
 
