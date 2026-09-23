@@ -19,6 +19,9 @@
           <a-tab-pane key="repos" :tab="t('workbench.tabs.repos')">
             <ReposTab v-if="activeKey === 'repos'" />
           </a-tab-pane>
+          <a-tab-pane key="dashboard" :tab="t('workbench.tabs.dashboard')">
+            <DashboardTab v-if="activeKey === 'dashboard'" />
+          </a-tab-pane>
           <a-tab-pane key="settings" :tab="t('workbench.tabs.settings')">
             <SettingsTab v-if="activeKey === 'settings'" />
           </a-tab-pane>
@@ -35,21 +38,24 @@ import { useI18n } from "vue-i18n";
 import ReposTab from "@/features/repos/views/ReposTab.vue";
 import WorkspacesTab from "@/features/workspaces/views/WorkspacesTab.vue";
 import SettingsTab from "@/features/settings/views/SettingsTab.vue";
+import DashboardTab from "@/features/dashboard/views/DashboardTab.vue";
 
 const { t } = useI18n();
 
 const route = useRoute();
 const router = useRouter();
 
-const activeKey = computed<"workspaces" | "repos" | "settings">(() => {
+const activeKey = computed<"workspaces" | "repos" | "dashboard" | "settings">(() => {
   const path = String(route.path || "");
   if (path === "/repos" || path.startsWith("/repos/")) return "repos";
+  if (path === "/dashboard") return "dashboard";
   if (path === "/settings" || path.startsWith("/settings/")) return "settings";
   return "workspaces";
 });
 
 function onTabChange(key: string) {
   if (key === "repos") void router.push("/repos");
+  else if (key === "dashboard") void router.push("/dashboard");
   else if (key === "settings") void router.push("/settings/basic/general");
   else void router.push("/workspaces");
 }

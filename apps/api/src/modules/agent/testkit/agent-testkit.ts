@@ -188,7 +188,8 @@ export async function createAgentTestFixture(options: CreateAgentTestFixtureOpti
       agentApiOrigin: "http://127.0.0.1:0",
       agentPluginHostEnabled: false,
       agentPluginHostSocketPath: path.join(dataDir, "agent-plugin-host.sock"),
-      agentPluginServicesEnabled: false
+      agentPluginServicesEnabled: false,
+      analytics: { enabled: false }
     };
 
     if (options.withApp === true) {

@@ -4,6 +4,30 @@ export function dbPath(dataDir: string) {
   return path.join(dataDir, "db.sqlite");
 }
 
+/** Isolated root owned exclusively by the Analytics child process. */
+export function analyticsDataRoot(dataDir: string) {
+  return path.join(dataDir, "analytics");
+}
+
+export function analyticsDbPath(dataDir: string) {
+  return path.join(analyticsDataRoot(dataDir), "analytics.sqlite");
+}
+
+/** API-owned ordering source for Analytics configuration control messages. */
+export function analyticsConfigSourcePath(dataDir: string) {
+  return path.join(analyticsDataRoot(dataDir), "config-source.json");
+}
+
+/** Reserved for the Git scanner. It must never be sent through Analytics IPC. */
+export function analyticsGitInstallationSecretPath(dataDir: string) {
+  return path.join(analyticsDataRoot(dataDir), "git-installation-secret");
+}
+
+/** Reserved for producer-private Model Analytics outboxes. */
+export function analyticsModelOutboxRoot(dataDir: string) {
+  return path.join(analyticsDataRoot(dataDir), "model-outbox");
+}
+
 export function reposRoot(dataDir: string) {
   return path.join(dataDir, "repos");
 }

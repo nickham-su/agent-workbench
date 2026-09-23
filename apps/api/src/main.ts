@@ -44,7 +44,8 @@ if (env.preview.enabled) {
       agentInternalToken: env.agentInternalToken, agentWorkerResponseValidation: env.agentWorkerResponseValidation,
       agentApiOrigin: env.agentApiOrigin,
       agentPluginHostEnabled: env.agentPluginHostEnabled, agentPluginHostSocketPath: env.agentPluginHostSocketPath,
-      agentPluginServicesEnabled: env.agentPluginServicesEnabled, preview: { enabled: true, runtime }
+      agentPluginServicesEnabled: env.agentPluginServicesEnabled, analytics: { enabled: true },
+      preview: { enabled: true, runtime }
     });
     listenerLifecycleAttempted = true;
     const lifecycle = await startPreviewListenerLifecycle({
@@ -94,6 +95,7 @@ if (env.preview.enabled) {
     agentPluginHostEnabled: env.agentPluginHostEnabled,
     agentPluginHostSocketPath: env.agentPluginHostSocketPath,
     agentPluginServicesEnabled: env.agentPluginServicesEnabled,
+    analytics: { enabled: true },
     preview: { enabled: false, runtime: null }
   });
 

@@ -275,6 +275,7 @@ async function configureAgentDefaults(
   llmBaseURL: string,
   providerNpm = "@ai-sdk/openai",
   modelOptions?: Record<string, unknown>,
+  modelRequestMaxRetries = 0,
 ) {
   const providers = await requestJson(baseUrl, {
     method: "PUT",
@@ -337,7 +338,7 @@ async function configureAgentDefaults(
     path: "/api/settings/agent/runtime",
     body: {
       // worker integration test should not depend on real LLM connectivity.
-      modelRequestMaxRetries: 0,
+      modelRequestMaxRetries,
       // keep a small timeout to avoid hanging on network/dns.
       modelIdleTimeoutMs: 1500,
       modelTotalTimeoutMs: 1500,
@@ -351,6 +352,7 @@ async function createFixture(params: {
   llmMode?: "failure" | "success" | "tool-cycle";
   providerNpm?: "@ai-sdk/openai" | "@ai-sdk/openai-compatible";
   modelOptions?: Record<string, unknown>;
+  modelRequestMaxRetries?: number;
 } = {}): Promise<Fixture> {
   const repoRoot = [
     process.cwd(),
@@ -441,7 +443,7 @@ async function createFixture(params: {
     });
     await app.listen({ host: "127.0.0.1", port: apiPort });
     const baseUrl = `http://127.0.0.1:${apiPort}`;
-    await configureAgentDefaults(baseUrl, llmStub.baseURL, params.providerNpm, params.modelOptions);
+    await configureAgentDefaults(baseUrl, llmStub.baseURL, params.providerNpm, params.modelOptions, params.modelRequestMaxRetries);
 
     const fixture: Fixture = {
       app,
@@ -756,7 +758,7 @@ test("startup recovery: queued ToolExecution 转 cancelled，不调用工具或�
 });
 
 test("worker 模式: 模型错误写入 retry notice，用户取消后通过新写回端点收敛 Run", async () => {
-  const fixture = await createFixture();
+  const fixture = await createFixture({ modelRequestMaxRetries: 1 });
   const session = await createSession(fixture.baseUrl, fixture.workspaceId);
 
   await sendMessage(fixture.baseUrl, {

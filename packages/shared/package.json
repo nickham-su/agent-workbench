@@ -41,6 +41,10 @@
     "./internal-contracts/agent-api-session": {
       "types": "./dist/internal-contracts/agent-api-session.d.ts",
       "default": "./dist/internal-contracts/agent-api-session.js"
+    },
+    "./node/analytics-root": {
+      "types": "./dist/node/analytics-root.d.ts",
+      "default": "./dist/node/analytics-root.js"
     }
   },
   "scripts": {

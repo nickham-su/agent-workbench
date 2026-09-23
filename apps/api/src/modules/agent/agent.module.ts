@@ -3,6 +3,7 @@ import type { AppContext } from "../../app/context.js";
 import { registerAgentRoutes } from "./agent.routes.js";
 import { AgentRuntime } from "./agent.runtime.js";
 import type { AgentRuntimePort } from "./agent.runtime-port.js";
+import { LocalAnalyticsProducer } from "./analytics-local-producer.js";
 import { createAgentComposition } from "./agent.composition.js";
 import { AgentWorkerClient } from "./agent.worker-client.js";
 import { AgentWorkerProcessManager } from "./agent.worker-manager.js";
@@ -44,6 +45,7 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
       responseValidation: ctx.agentWorkerResponseValidation,
       pidFilePath: agentWorkerPidPath(ctx.dataDir),
       logger: app.log,
+      diagnoseOutboxCorrupt: ctx.analyticsDiagnostics?.outboxCorrupt,
       onReady: async (generation) => {
         await recoverAfterAgentRuntimeReady({
           runtime,
@@ -55,9 +57,12 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
           logger: app.log,
         });
       },
-    });
+      });
   } else {
-    const localRuntime = new AgentRuntime(localRuntimeExecution, app.log, ctx.agentWorkerConcurrency);
+    const localAnalytics = new LocalAnalyticsProducer({ apiOrigin: ctx.agentApiOrigin, internalToken: ctx.agentInternalToken, dataDir: ctx.dataDir, abandonPriorGeneration: ctx.analyticsDiagnostics?.abandonLocalFallbackGeneration, diagnoseOutboxCorrupt: ctx.analyticsDiagnostics?.outboxCorrupt });
+    await localAnalytics.start();
+    const localRuntime = new AgentRuntime(localRuntimeExecution, app.log, ctx.agentWorkerConcurrency, localAnalytics);
+    app.addHook("onClose", async () => { await localAnalytics.close(); });
     localRuntime.bootstrap();
     runtime = localRuntime;
   }

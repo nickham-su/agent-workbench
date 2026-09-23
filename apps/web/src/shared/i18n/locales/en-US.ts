@@ -54,6 +54,7 @@ export default {
     tabs: {
       workspaces: "Workspaces",
       repos: "Repos",
+      dashboard: "Dashboard",
       settings: "Settings"
     }
   },
@@ -1322,6 +1323,29 @@ export default {
       },
       resetSuccess: "Reset completed"
     }
+  },
+  dashboard: {
+    title: "Analytics dashboard", subtitle: "Review Agent, model, tool, and Git activity. All analytics stay local.",
+    overview: "Overview", agent: "Agent", model: "Models", git: "Git", worker: "Worker", refresh: "Refresh",
+    range: "Range", timezone: "Timezone", custom: "Custom range", preset_24h: "24 hours", preset_7d: "7 days", preset_30d: "30 days", preset_90d: "90 days", apply: "Apply", from: "From", to: "To",
+    monitoringVolume: "Monitoring volume", agentDuration: "Agent duration", modelRequests: "Model requests", modelSuccessRate: "Model success rate", cacheHitRate: "Cache hit rate", gitCommits: "Git commits", commits: "Git commits",
+    unavailable: "Unavailable", partial: "Incomplete", available: "Complete", configurationChanged: "Configuration changed in this range", snapshotAt: "Snapshot", asOf: "As of",
+    runScope: "Run scope", all: "All", main: "Main", subtask: "Subtask", trend: "Trend", distributionTitle: "Distribution", details: "Details", noData: "No safe data available",
+    requests: "Requests", successRate: "Success rate", timeoutRate: "Timeout rate", inputTokens: "Input tokens", outputTokens: "Output tokens", totalTokens: "Total tokens",
+    nonMergeCommits: "Non-merge commits", filesChanged: "Files changed", linesAdded: "Lines added", linesDeleted: "Lines deleted", heatmap: "180-day contribution heatmap", readyRepos: "Ready repositories",
+    liveSnapshot: "Live snapshot", running: "Running", queued: "Queued", concurrency: "Concurrency", utilization: "Utilization", localFallback: "Local fallback", restarts: "Restarts", domainHealth: "Domain health", toolCallCount: "Tool calls", unexpectedExits: "Unexpected exits", restartAttempts: "Restart attempts", restartSucceeded: "Restarts recovered", restartFailed: "Restart failures",
+    tokens: "Tokens", count: "Count", duration: "Duration", ratio: "Ratio", timedOut: "Timed out", other: "Other", monitoringRun: "Run", monitoringSession: "Session", monitoringMessage: "Message", monitoringTool: "Tool", monitoringExecution: "Execution", monitoringModel: "Model", monitoringWorker: "Worker", monitoringGit: "Git", chartLegend: "Legend", chartBucketDetails: "Bucket details", chartBucket: "Time bucket", chartTotal: "Total", chartBuckets: "buckets",
+    agentRunMetrics: "Runs", agentActivityMetrics: "Messages and tools", agentCompactionMetrics: "Compaction", modelRequestMetrics: "Requests and latency", modelTokenMetrics: "Tokens", modelReportingMetrics: "Reporting coverage",
+    knownPartialLowerBound: "Known partial lower bound", lastReadyAt: "Last ready", domainStatusSummary: "Domain status summary",
+    sections: "Dashboard sections", rangeEnd: "Range end", monitoringComposition: "Latest monitoring composition", days: "days", heatmapRange: "Heatmap range", diagnosedAt: "Diagnosed", lastSucceededAt: "Last succeeded", generations: "Generations", coverageGaps: "Coverage gaps", runType: "Run type", messageType: "Message type", toolStatus: "Tool status", toolDetails: "Tool details", byModel: "By model", tokenCoverage: "Token coverage", restartRecords: "Restart records", occurredAt: "Occurred at", event: "Event", restartStatus: "Restart status", toolName: "Tool", calls: "Calls", completed: "Completed", failed: "Failed", provider: "Provider", modelName: "Model", unknown: "Unknown", requestCount: "Request count", primaryRunCount: "Primary runs", subtaskRunCount: "Subtask runs", userMessageCount: "User messages", assistantMessageCount: "Assistant messages", manualCompactionCount: "Manual compactions", autoCompactionCount: "Auto compactions", completedAverageDuration: "Average completed duration", cacheReadTokens: "Cache read tokens", inputReportedCount: "Input reported", outputReportedCount: "Output reported", totalReportedCount: "Total reported", totalDerivedCount: "Total derived", cacheComparableCount: "Cache comparable", timeoutKindBreakdown: "Timeout kinds",
+    totalDuration: "Total duration", runCount: "Run count", toolSuccessRate: "Tool success rate", inputTokenCoverage: "Input coverage", outputTokenCoverage: "Output coverage", totalTokenCoverage: "Total coverage", inputCacheCoverage: "Cache coverage", collectionStartedAt: "Collection started", reconciledThrough: "Reconciled through", rollupReadyThrough: "Rollup ready through", retentionFloor: "Retention floor",
+    distribution: { primary: "Primary", subtask: "Subtask", other: "Other", user: "User", assistant: "Assistant", runtime: "Runtime", system: "System", compaction: "Compaction", completed: "Completed", failed: "Failed", cancelled: "Cancelled", unknown: "Unknown" },
+    configurationDiagnostic: "Configuration diagnostic", configurationVersion: "Configuration version", configuredDomains: "Configured domains",
+    slot: { generation_active: "Generation active", missing_generation: "Missing generation" }, checkpoint: { fresh: "Fresh", stale: "Stale", missing: "Missing" }, lifecycle: { registered: "Registered", closing: "Closing", closed: "Closed", stale: "Stale", abandoned: "Abandoned" }, runStatus: { completed: "Completed", failed: "Failed", cancelled: "Cancelled", interrupted: "Interrupted", unknown: "Unknown" }, workerEvent: { unexpected_exit: "Unexpected exit", restart_attempted: "Restart attempted", restart_succeeded: "Restart succeeded", restart_failed: "Restart failed" }, restartStatusValue: { recovered: "Recovered", not_recovered: "Not recovered", pending: "Pending", not_applicable: "Not applicable" },
+    status: { available: "Complete", partial: "Incomplete", healthy: "Healthy", degraded: "Degraded", stale: "Stale", unavailable: "Unavailable", disabled: "Disabled" },
+    error: {CUSTOM_RANGE_REQUIRED: "Choose both custom dates.", CUSTOM_RANGE_INVALID: "The custom date is invalid.", CUSTOM_RANGE_DST_AMBIGUOUS: "This time occurs twice because of daylight saving time.", CUSTOM_RANGE_DST_NONEXISTENT: "This time does not exist because of daylight saving time.", CUSTOM_RANGE_ORDER: "The start must be before the end.", CUSTOM_RANGE_TOO_LARGE: "Custom range cannot exceed 366 days.",  ANALYTICS_UNAVAILABLE: "Analytics is temporarily unavailable.", ANALYTICS_RANGE_TOO_LARGE: "The selected range is too large.", ANALYTICS_RANGE_INVALID: "The selected range is invalid.", ANALYTICS_TIMEZONE_INVALID: "The selected timezone is invalid.", ANALYTICS_RANGE_NOT_READY: "This range is not ready yet.", NETWORK_ERROR: "Unable to load dashboard data." },
+    comparison: { range_too_large: "Comparison range too large", previous_not_covered: "Previous range not covered", previous_zero: "Previous value was zero", domain_unavailable: "Comparison domain unavailable", not_applicable: "Not applicable" },
+    reason: { coverage_gap: "Coverage gap", range_not_reconciled: "Range not reconciled", collector_degraded: "Collector degraded", signal_loss: "Signal loss", dirty_hour: "Hour is being refreshed", open_fact: "Open fact", configuration_changed: "Configuration changed", repo_not_ready: "Repository not ready", range_before_coverage: "Before coverage", scan_stale: "Scan stale", mixed_repo_coverage: "Mixed repository coverage", domain_disabled: "Domain disabled", domain_unavailable: "Domain unavailable", no_safe_data: "No safe data", no_ready_repo: "No ready repository", invalid_metric_state: "Invalid metric state" }
   },
   editor: {
     placeholder: {

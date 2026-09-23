@@ -2,6 +2,7 @@ import { loadWorkerEnv } from "./config/env.js";
 import { AgentApiClient } from "./runtime/apiClient.js";
 import { McpManager } from "./runtime/mcpManager.js";
 import { AgentRunner } from "./runtime/runner.js";
+import { AnalyticsSignalProducer } from "./runtime/analyticsSignals.js";
 import { createWorkerServer } from "./server.js";
 import { startBashToolProbe } from "./runtime/bashTools.js";
 import { createAgentAttachmentStorage } from "./runtime/agentAttachmentStorage.js";
@@ -20,12 +21,14 @@ const apiClient = new AgentApiClient({
 
 const mcpManager = new McpManager(apiClient, console);
 const attachmentStorage = createAgentAttachmentStorage(env.dataDir);
+const analyticsSignals = new AnalyticsSignalProducer({ apiOrigin: env.apiOrigin, internalToken: env.internalToken, dataDir: env.dataDir, namespace: "agent_worker", producerId: "agent_runner" });
+analyticsSignals.start();
 const runner = new AgentRunner(
   apiClient,
   mcpManager,
   console,
   env.concurrency,
-  { attachmentStorage },
+  { attachmentStorage, analyticsSignals },
 );
 startBashToolProbe(console);
 const server = createWorkerServer({
@@ -56,6 +59,7 @@ const shutdown = async () => {
       // ignore cleanup error
     }
   }
+  await analyticsSignals.close();
   await server.close();
   process.exit(0);
 };

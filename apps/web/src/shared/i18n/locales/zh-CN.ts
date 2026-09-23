@@ -54,6 +54,7 @@ export default {
     tabs: {
       workspaces: "工作区",
       repos: "仓库",
+      dashboard: "数据看板",
       settings: "设置"
     }
   },
@@ -1320,6 +1321,29 @@ export default {
       },
       resetSuccess: "已重置"
     }
+  },
+  dashboard: {
+    title: "数据看板", subtitle: "回看 Agent、模型、工具与 Git 使用情况 · 所有统计仅保存在本机",
+    overview: "概览", agent: "Agent", model: "模型", git: "Git", worker: "Worker", refresh: "刷新",
+    range: "时间范围", timezone: "时区", custom: "自定义范围", preset_24h: "近 24 小时", preset_7d: "近 7 天", preset_30d: "近 30 天", preset_90d: "近 90 天", apply: "应用", from: "开始", to: "结束",
+    monitoringVolume: "监控数据量", agentDuration: "Agent 总时长", modelRequests: "模型请求", modelSuccessRate: "模型成功率", cacheHitRate: "缓存命中率", gitCommits: "Git 提交", commits: "Git 提交",
+    unavailable: "不可用", partial: "数据不完整", available: "完整", configurationChanged: "范围内配置已变化", snapshotAt: "快照时间", asOf: "统计截至",
+    runScope: "Run 范围", all: "全部", main: "主任务", subtask: "子任务", trend: "趋势", distributionTitle: "分布", details: "明细", noData: "暂无可安全展示的数据",
+    requests: "请求数", successRate: "成功率", timeoutRate: "超时率", inputTokens: "输入 Token", outputTokens: "输出 Token", totalTokens: "总 Token",
+    nonMergeCommits: "非合并提交", filesChanged: "变更文件", linesAdded: "新增行", linesDeleted: "删除行", heatmap: "180 天提交热图", readyRepos: "就绪仓库",
+    liveSnapshot: "实时快照", running: "运行中", queued: "排队中", concurrency: "并发数", utilization: "利用率", localFallback: "本地降级", restarts: "重启", domainHealth: "域健康状态", toolCallCount: "工具调用", unexpectedExits: "异常退出", restartAttempts: "重启尝试", restartSucceeded: "重启成功", restartFailed: "重启失败",
+    tokens: "Token", count: "计数", duration: "时长", ratio: "比率", timedOut: "超时", other: "其他", monitoringRun: "Run", monitoringSession: "会话", monitoringMessage: "消息", monitoringTool: "工具", monitoringExecution: "执行", monitoringModel: "模型", monitoringWorker: "Worker", monitoringGit: "Git", chartLegend: "图例", chartBucketDetails: "按时间桶查看明细", chartBucket: "时间桶", chartTotal: "总计", chartBuckets: "个时间桶",
+    agentRunMetrics: "Run", agentActivityMetrics: "消息与工具", agentCompactionMetrics: "压缩", modelRequestMetrics: "请求与时延", modelTokenMetrics: "Token", modelReportingMetrics: "报告覆盖",
+    knownPartialLowerBound: "已知部分（下界）", lastReadyAt: "最近 Ready", domainStatusSummary: "域状态摘要",
+    sections: "数据看板分区", rangeEnd: "范围结束", monitoringComposition: "最新监控数据构成", days: "天", heatmapRange: "热图范围", diagnosedAt: "诊断时间", lastSucceededAt: "最后成功", generations: "Generation", coverageGaps: "覆盖缺口", runType: "Run 类型", messageType: "消息类型", toolStatus: "工具状态", toolDetails: "工具明细", byModel: "按模型", tokenCoverage: "Token 覆盖", restartRecords: "重启记录", occurredAt: "发生时间", event: "事件", restartStatus: "重启状态", toolName: "工具", calls: "调用", completed: "完成", failed: "失败", provider: "提供商", modelName: "模型", unknown: "未知", requestCount: "请求总数", primaryRunCount: "主任务数", subtaskRunCount: "子任务数", userMessageCount: "用户消息", assistantMessageCount: "助手消息", manualCompactionCount: "手动压缩", autoCompactionCount: "自动压缩", completedAverageDuration: "完成平均时长", cacheReadTokens: "缓存读取 Token", inputReportedCount: "输入已报告", outputReportedCount: "输出已报告", totalReportedCount: "总计已报告", totalDerivedCount: "总计推导", cacheComparableCount: "可比较缓存", timeoutKindBreakdown: "超时类型",
+    totalDuration: "总时长", runCount: "Run 数", toolSuccessRate: "工具成功率", inputTokenCoverage: "输入覆盖率", outputTokenCoverage: "输出覆盖率", totalTokenCoverage: "总计覆盖率", inputCacheCoverage: "缓存覆盖率", collectionStartedAt: "采集开始", reconciledThrough: "对账截至", rollupReadyThrough: "Rollup 就绪截至", retentionFloor: "保留下限",
+    distribution: { primary: "主任务", subtask: "子任务", other: "其他", user: "用户", assistant: "助手", runtime: "运行时", system: "系统", compaction: "压缩", completed: "完成", failed: "失败", cancelled: "取消", unknown: "未知" },
+    configurationDiagnostic: "配置诊断", configurationVersion: "配置版本", configuredDomains: "已配置域",
+    slot: { generation_active: "Generation 活跃", missing_generation: "缺少 Generation" }, checkpoint: { fresh: "新鲜", stale: "过期", missing: "缺失" }, lifecycle: { registered: "已注册", closing: "关闭中", closed: "已关闭", stale: "过期", abandoned: "已放弃" }, runStatus: { completed: "完成", failed: "失败", cancelled: "取消", interrupted: "中断", unknown: "未知" }, workerEvent: { unexpected_exit: "异常退出", restart_attempted: "尝试重启", restart_succeeded: "重启成功", restart_failed: "重启失败" }, restartStatusValue: { recovered: "已恢复", not_recovered: "未恢复", pending: "等待中", not_applicable: "不适用" },
+    status: { available: "完整", partial: "不完整", healthy: "健康", degraded: "降级", stale: "过期", unavailable: "不可用", disabled: "已禁用" },
+    error: {CUSTOM_RANGE_REQUIRED: "请选择完整的自定义时间范围。", CUSTOM_RANGE_INVALID: "自定义时间无效。", CUSTOM_RANGE_DST_AMBIGUOUS: "该时间在夏令时切换中出现两次。", CUSTOM_RANGE_DST_NONEXISTENT: "该时间在夏令时切换中不存在。", CUSTOM_RANGE_ORDER: "开始时间必须早于结束时间。", CUSTOM_RANGE_TOO_LARGE: "自定义范围不能超过 366 天。",  ANALYTICS_UNAVAILABLE: "Analytics 暂时不可用。", ANALYTICS_RANGE_TOO_LARGE: "所选时间范围过大。", ANALYTICS_RANGE_INVALID: "所选时间范围无效。", ANALYTICS_TIMEZONE_INVALID: "所选时区无效。", ANALYTICS_RANGE_NOT_READY: "该时间范围尚未就绪。", NETWORK_ERROR: "无法加载看板数据。" },
+    comparison: { range_too_large: "对比范围过大", previous_not_covered: "上一范围未覆盖", previous_zero: "上一值为零", domain_unavailable: "对比域不可用", not_applicable: "不适用" },
+    reason: { coverage_gap: "覆盖缺口", range_not_reconciled: "范围尚未对账", collector_degraded: "采集器降级", signal_loss: "信号丢失", dirty_hour: "小时数据刷新中", open_fact: "事实尚未关闭", configuration_changed: "配置已变化", repo_not_ready: "仓库未就绪", range_before_coverage: "早于覆盖范围", scan_stale: "扫描已过期", mixed_repo_coverage: "仓库覆盖范围不一致", domain_disabled: "域已禁用", domain_unavailable: "域不可用", no_safe_data: "没有安全数据", no_ready_repo: "没有就绪仓库", invalid_metric_state: "无效指标状态" }
   },
   editor: {
     placeholder: {

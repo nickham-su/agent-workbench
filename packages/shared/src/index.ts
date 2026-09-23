@@ -1,4 +1,6 @@
 export * from "./contracts/common.js";
+export * from "./contracts/analytics.js";
+export * from "./contracts/analytics-signals.js";
 export * from "./contracts/health.js";
 export * from "./contracts/repos.js";
 export * from "./contracts/workspaces.js";

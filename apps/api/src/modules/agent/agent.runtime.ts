@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from "fastify";
 import { nowMs } from "../../utils/time.js";
 import { newSortableId } from "../../utils/ids.js";
 import type { AgentRuntimePort, AgentRuntimeRun, LocalAgentRuntimeExecutionPort } from "./agent.runtime-port.js";
+import type { LocalAnalyticsProducer } from "./analytics-local-producer.js";
 
 const DEFAULT_RUNTIME_CONCURRENCY = 2;
 
@@ -17,7 +18,8 @@ export class AgentRuntime implements AgentRuntimePort {
   constructor(
     private readonly execution: LocalAgentRuntimeExecutionPort,
     private readonly logger: FastifyBaseLogger,
-    private readonly concurrency = DEFAULT_RUNTIME_CONCURRENCY
+    private readonly concurrency = DEFAULT_RUNTIME_CONCURRENCY,
+    private readonly analytics?: LocalAnalyticsProducer
   ) {}
 
   bootstrap() {
@@ -80,6 +82,8 @@ export class AgentRuntime implements AgentRuntimePort {
 
   private async processRun(run: RuntimeQueuedRun) {
     const ts = nowMs();
+    this.analytics?.emitExecution({ executionId: run.runId, runId: run.runId, runtimeKind: "api_local_fallback", runKind: run.runKind ?? "user", parentRunId: null, queuedAt: ts, startedAt: ts, endedAt: null, endTimeQuality: "unknown", endReason: null }, "execution_started");
+    let analyticsEndReason: "completed" | "failed" | "other" = "other";
     try {
       const ctx = await this.execution.getPromptContextForRun({
         workspaceId: run.workspaceId,
@@ -129,7 +133,9 @@ export class AgentRuntime implements AgentRuntimePort {
         updatedAt: nowMs()
       });
       this.execution.convergeRunTerminalFromWorker({ workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, updatedAt: nowMs() });
+      analyticsEndReason = "completed";
     } catch {
+      analyticsEndReason = "failed";
       const failedCode = run.runKind === "manual_compaction"
         ? "compaction_failed"
         : run.runKind === "subtask"
@@ -143,6 +149,10 @@ export class AgentRuntime implements AgentRuntimePort {
         updatedAt: nowMs()
       });
       this.execution.convergeRunTerminalFromWorker({ workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, updatedAt: nowMs() });
+    } finally {
+      // Even an early resume-claim return must close the Analytics execution
+      // interval; Analytics remains observational and never changes the Run.
+      this.analytics?.emitExecution({ executionId: run.runId, runId: run.runId, runtimeKind: "api_local_fallback", runKind: run.runKind ?? "user", parentRunId: null, queuedAt: ts, startedAt: ts, endedAt: nowMs(), endTimeQuality: "observed", endReason: analyticsEndReason }, "execution_finished");
     }
   }
 }

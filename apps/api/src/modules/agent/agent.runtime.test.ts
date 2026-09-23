@@ -108,6 +108,30 @@ test("本地 fallback cancel-and-wait 对运行中的 Session 超时而不误报
   contextGate.resolve(promptContext());
 });
 
+test("M5: resume claim 非 updated 时仍成对结束本地 Analytics execution", async () => {
+  const events: Array<{ eventType: string; payload: Record<string, unknown> }> = [];
+  const runtime = new AgentRuntime({
+    async getPromptContextForRun() { return promptContext(); },
+    resumeStreamingAssistantFromWorker() { return { result: "ignored" }; },
+    createStreamingAssistantFromWorker() { throw new Error("不应创建新 Assistant"); },
+    flushAssistantPartsFromWorker() { throw new Error("不应 flush"); },
+    replaceStreamingAssistantFromWorker() { return { result: "updated", message: {} as any }; },
+    completeAssistantFromWorker() { return { result: "updated" }; },
+    completeTerminalAssistantFromWorker() { return { result: "updated" }; },
+    async updateToolExecutionFromWorker() { return { result: "updated" }; },
+    updateRunNoticeFromWorker() { return { result: "updated" }; },
+    convergeRunTerminalFromWorker() { throw new Error("非 updated claim 不应改变业务 Run"); },
+    getSession() { return null; },
+  } as any, { error() {} } as any, 1, {
+    emitExecution(payload: Record<string, unknown>, eventType: string) { events.push({ eventType, payload }); }
+  } as any);
+  runtime.enqueueRun({ workspaceId: "ws", sessionId: "sess", runId: "run", workspacePath: "/workspace", workspaceRepoDirNames: [], resumeAssistantMessageId: "message" });
+  await waitUntil(() => events.length === 2);
+  assert.deepEqual(events.map((event) => event.eventType), ["execution_started", "execution_finished"]);
+  assert.equal(events[1]?.payload.endReason, "other");
+  assert.notEqual(events[1]?.payload.endedAt, null);
+});
+
 function promptContext() {
   return {
     headMessageId: null,

@@ -22,6 +22,7 @@ import { registerAgentModule } from "../modules/agent/agent.module.js";
 import { registerPluginsModule } from "../modules/plugins/plugin.module.js";
 import { registerGitEnvModule } from "../modules/git-env/git-env.module.js";
 import { registerWorkspacePreviewRoutes } from "../modules/preview/preview-open.routes.js";
+import { registerAnalyticsModule } from "../modules/analytics/analytics.module.js";
 
 export async function createApp(ctx: AppContext) {
   const app = Fastify({
@@ -75,6 +76,7 @@ export async function createApp(ctx: AppContext) {
 
   await registerHealthModule(app, ctx);
   await registerAuthModule(app, ctx);
+  await registerAnalyticsModule(app, ctx);
   await registerReposModule(app, ctx);
   await registerCredentialsModule(app, ctx);
   await registerSettingsModule(app, ctx);

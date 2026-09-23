@@ -58,6 +58,12 @@ export function createWorkerServer(params: {
         return;
       }
 
+      if (method === "GET" && pathname === "/_internal/analytics-snapshot") {
+        // Private manager-to-worker observation endpoint; it exposes no run data.
+        sendJson(res, 200, params.runner.analyticsLiveSnapshot());
+        return;
+      }
+
       if (method === AgentWorkerEndpoints.enqueueRun.method && pathname === AgentWorkerEndpoints.enqueueRun.path) {
         const body: unknown = await readJsonBody(req);
         if (!Value.Check(AgentWorkerEnqueueRequestSchema, body)) {

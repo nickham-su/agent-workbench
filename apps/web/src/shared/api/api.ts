@@ -139,6 +139,7 @@ import { serializeAgentTimelineQuery, type AgentTimelineQuery } from "./agentTim
 import { resetAuthStatus, setAuthed } from "@/features/auth/session";
 
 const client = axios.create({ baseURL: "/api" });
+export { client as apiClient };
 
 let lastUnauthorizedAt = 0;
 client.interceptors.response.use(

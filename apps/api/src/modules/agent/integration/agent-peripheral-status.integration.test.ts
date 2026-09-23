@@ -53,8 +53,9 @@ async function convergeCompletedRun(input: {
   sessionId: string;
   runId: string;
   persistIntent?: boolean;
+  updatedAt?: number;
 }) {
-  const updatedAt = Date.now();
+  const updatedAt = input.updatedAt ?? Date.now();
   const headers = { "x-awb-agent-internal-token": input.internalToken };
   if (input.persistIntent !== false) {
     const intent = await input.app.inject({
@@ -255,7 +256,7 @@ test("queued/running ToolExecution 阻止 Run completed；terminal 后允许完�
   });
   const headers = { "x-awb-agent-internal-token": fixture.internalToken };
   let intentPersisted = false;
-  const complete = async () => await convergeCompletedRun({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId, persistIntent: !intentPersisted });
+  const complete = async (updatedAt?: number) => await convergeCompletedRun({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId, persistIntent: !intentPersisted, updatedAt });
 
   let response = await complete();
   intentPersisted = true;
@@ -282,13 +283,17 @@ test("queued/running ToolExecution 阻止 Run completed；terminal 后允许完�
   assert.equal(response.statusCode, 500, response.body);
   assert.equal(getRunRecord(fixture.db, runId)?.status, "running");
 
-  completeToolExecutionFixture({ fixture, sessionId: session.id, runId, toolExecutionId });
-  response = await complete();
+  const toolCompletedAt = Date.now();
+  completeToolExecutionFixture({ fixture, sessionId: session.id, runId, toolExecutionId, createdAt: toolCompletedAt });
+  // The replay must use the exact terminal command watermark. A fresh Date.now()
+  // can be earlier than the fixture's completedAt (+1) in the same millisecond.
+  const terminalUpdatedAt = toolCompletedAt + 2;
+  response = await complete(terminalUpdatedAt);
   assert.equal(response.statusCode, 200, response.body);
   assert.equal(getRunRecord(fixture.db, runId)?.status, "completed");
   assert.equal((await getRunState(fixture.app, fixture.workspaceId, session.id)).status, "idle");
 
-  response = await complete();
+  response = await complete(terminalUpdatedAt);
   assert.equal(response.statusCode, 200, response.body);
   assert.equal(getRunRecord(fixture.db, runId)?.status, "completed");
 });

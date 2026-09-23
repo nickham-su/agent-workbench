@@ -1036,6 +1036,24 @@ function createAgentSchema(db: Db, fileCleanupPending: boolean) {
  * 初始化非 Agent 基础表，并在需要时以单事务清空旧 Agent 域后建立目标模型。
  * 文件系统清理由 openDb 在事务提交后完成；失败时 pending 标记保留并在下次启动重试。
  */
+function ensureAnalyticsCollectorIndexes(db: Db) {
+  // These are additive compatibility indexes for the Analytics child-only
+  // read collector. They deliberately do not change AGENT_SCHEMA_VERSION:
+  // increasing that version may rebuild the Agent domain and discard user
+  // history, which would be disproportionate to an index-only migration.
+  // Indexes only make the optional Analytics sidecar more useful. A disk/lock
+  // failure here must never turn into an Agent/API availability failure; the
+  // child independently checks every index before it starts a collector scan.
+  for (const statement of [
+    "create index if not exists idx_agent_session_updated_id on agent_session(updated_at, id)",
+    "create index if not exists idx_agent_run_updated_run_id on agent_run(updated_at, run_id)",
+    "create index if not exists idx_agent_message_updated_id on agent_message(updated_at, id)",
+    "create index if not exists idx_agent_tool_execution_updated_id on agent_tool_execution(updated_at, id)"
+  ]) {
+    try { db.exec(statement); } catch { /* Analytics Collector self-degrades. */ }
+  }
+}
+
 export function initSchema(db: Db): AgentSchemaInitResult {
   const classification = classifyAgentSchema(db);
   if (classification === "unsupported") throwUnsupportedAgentSchema();
@@ -1043,6 +1061,7 @@ export function initSchema(db: Db): AgentSchemaInitResult {
   createBaseSchema(db);
 
   if (classification === "current") {
+    ensureAnalyticsCollectorIndexes(db);
     const row = db.prepare("select file_cleanup_pending as fileCleanupPending from agent_schema_meta where id = 1").get() as {
       fileCleanupPending: number;
     };
@@ -1051,6 +1070,7 @@ export function initSchema(db: Db): AgentSchemaInitResult {
 
   const hadAgentDomain = classification === "legacy-unversioned" || classification === "rebuildable";
   rebuildAgentDomain(db, hadAgentDomain);
+  ensureAnalyticsCollectorIndexes(db);
   return { fileCleanupPending: hadAgentDomain };
 }
 

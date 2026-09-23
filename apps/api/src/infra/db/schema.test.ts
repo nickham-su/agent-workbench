@@ -36,6 +36,55 @@ function insertSession(db: Database.Database, id = "session-a", workspaceId = "w
   ).run(id, workspaceId, "Session", "primary", 1, 1);
 }
 
+test("current Agent schema receives Analytics cursor indexes without changing its version or data", () => {
+  const db = createDb();
+  insertWorkspace(db);
+  insertSession(db);
+  const before = db.prepare("SELECT version FROM agent_schema_meta WHERE id = 1").get() as { version: number };
+  db.exec(`
+    DROP INDEX idx_agent_session_updated_id;
+    DROP INDEX idx_agent_run_updated_run_id;
+    DROP INDEX idx_agent_message_updated_id;
+    DROP INDEX idx_agent_tool_execution_updated_id;
+  `);
+  initSchema(db);
+  for (const [name, table, columns] of [
+    ["idx_agent_session_updated_id", "agent_session", ["updated_at", "id"]],
+    ["idx_agent_run_updated_run_id", "agent_run", ["updated_at", "run_id"]],
+    ["idx_agent_message_updated_id", "agent_message", ["updated_at", "id"]],
+    ["idx_agent_tool_execution_updated_id", "agent_tool_execution", ["updated_at", "id"]]
+  ] as const) {
+    assert.deepEqual(
+      (db.prepare(`PRAGMA index_info(${name})`).all() as Array<{ name: string }>).map((column) => column.name),
+      columns,
+      `${table}.${name}`
+    );
+  }
+  assert.equal((db.prepare("SELECT version FROM agent_schema_meta WHERE id = 1").get() as { version: number }).version, before.version);
+  assert.equal((db.prepare("SELECT COUNT(*) AS count FROM agent_session").get() as { count: number }).count, 1);
+  db.close();
+});
+
+test("Analytics-only cursor index DDL failure does not block the Agent schema or business writes", () => {
+  const db = createDb();
+  const originalExec = db.exec;
+  let isolatedFailureSeen = false;
+  (db as unknown as { exec: (sql: string) => Database.Database }).exec = (sql) => {
+    if (sql.includes("idx_agent_run_updated_run_id")) {
+      isolatedFailureSeen = true;
+      throw new Error("simulated optional Analytics index failure");
+    }
+    return originalExec.call(db, sql);
+  };
+  assert.doesNotThrow(() => initSchema(db));
+  assert.equal(isolatedFailureSeen, true);
+  (db as unknown as { exec: typeof db.exec }).exec = originalExec;
+  insertWorkspace(db, "ws-optional-index");
+  insertSession(db, "session-optional-index", "ws-optional-index");
+  assert.equal((db.prepare("SELECT COUNT(*) AS count FROM agent_session WHERE id = 'session-optional-index'").get() as { count: number }).count, 1);
+  db.close();
+});
+
 function insertMessage(db: Database.Database, input: {
   id: string;
   workspaceId?: string;

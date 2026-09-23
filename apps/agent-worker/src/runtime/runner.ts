@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
+import { clearTimeout as clearNativeTimeout, setTimeout as setNativeTimeout } from "node:timers";
 import path from "node:path";
 import {
   APICallError,
@@ -21,6 +22,7 @@ import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call"
 import { parseAiSdkCallSettings } from "@agent-workbench/shared/llm-ai-sdk-call-settings";
 import { AgentApiClient, ApiConflictError, InternalRpcHttpError, InternalRpcNetworkError, InternalRpcTimeoutError, type ExecutionProfile, type PromptContext } from "./apiClient.js";
 import { McpManager } from "./mcpManager.js";
+import { AnalyticsSignalProducer } from "./analyticsSignals.js";
 import {
   AgentProviderReplayUpdateError,
   assertAgentProviderReplayUpdateCompatible,
@@ -1209,6 +1211,57 @@ function extractTotalTokens(raw: unknown): number | null {
   return null;
 }
 
+type AnalyticsUsage = { inputTokens: number | null; outputTokens: number | null; totalTokens: number | null; totalSource: "reported" | "derived" | "unavailable"; cacheReadTokens: number | null; cacheWriteTokens: number | null; cacheComparable: boolean; cacheWriteVerified: boolean };
+
+function normalizeAnalyticsUsage(raw: unknown): AnalyticsUsage {
+  const unavailable: AnalyticsUsage = { inputTokens: null, outputTokens: null, totalTokens: null, totalSource: "unavailable", cacheReadTokens: null, cacheWriteTokens: null, cacheComparable: false, cacheWriteVerified: false };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return unavailable;
+  const usage = raw as Record<string, unknown>;
+  const input = toNonNegativeInt(usage.inputTokens) ?? toNonNegativeInt(usage.promptTokens) ?? toNonNegativeInt(usage.input_tokens) ?? toNonNegativeInt(usage.prompt_tokens);
+  const output = toNonNegativeInt(usage.outputTokens) ?? toNonNegativeInt(usage.completionTokens) ?? toNonNegativeInt(usage.output_tokens) ?? toNonNegativeInt(usage.completion_tokens);
+  const reported = toNonNegativeInt(usage.totalTokens) ?? toNonNegativeInt(usage.total_tokens) ?? toNonNegativeInt(usage.total);
+  const details = (usage.inputTokenDetails ?? usage.prompt_tokens_details) as Record<string, unknown> | undefined;
+  const cacheRead = toNonNegativeInt(usage.cacheReadTokens) ?? toNonNegativeInt(usage.cache_read_tokens) ?? toNonNegativeInt(details?.cacheReadTokens) ?? toNonNegativeInt(details?.cached_tokens);
+  const cacheWrite = toNonNegativeInt(usage.cacheWriteTokens) ?? toNonNegativeInt(usage.cache_write_tokens) ?? toNonNegativeInt(details?.cacheWriteTokens);
+  const derived = reported === null && input !== null && output !== null;
+  return { inputTokens: input, outputTokens: output, totalTokens: reported ?? (derived ? input! + output! : null), totalSource: reported !== null ? "reported" : derived ? "derived" : "unavailable", cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite, cacheComparable: cacheRead !== null, cacheWriteVerified: cacheWrite !== null && Boolean(usage.cacheWriteVerified ?? usage.cache_write_verified) };
+}
+
+async function boundedUsageValue(value: unknown, timeoutMs = 100): Promise<unknown> {
+  if (!value || typeof (value as Promise<unknown>).then !== "function") return value;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([value as Promise<unknown>, new Promise<undefined>((resolve) => {
+      const handle = setNativeTimeout(resolve, timeoutMs) as unknown as NodeJS.Timeout;
+      timer = handle;
+      handle.unref();
+    })]);
+  } finally {
+    if (timer) clearNativeTimeout(timer);
+  }
+}
+
+async function readStreamAnalyticsUsage(stream: unknown): Promise<AnalyticsUsage> {
+  const streamObj = stream as Record<string, unknown>;
+  // Usage/totalUsage/response are provider aliases in many SDKs. Bound the
+  // whole observation round, rather than serially spending a timeout on each.
+  const candidates = await Promise.all(
+    [streamObj.usage, streamObj.totalUsage, streamObj.response].map(async (candidate) => await boundedUsageValue(candidate).catch(() => undefined))
+  );
+  for (const resolved of candidates) {
+    try {
+      const direct = normalizeAnalyticsUsage(resolved);
+      if (direct.totalTokens !== null || direct.inputTokens !== null || direct.outputTokens !== null) return direct;
+      if (resolved && typeof resolved === "object") {
+        const nested = resolved as Record<string, unknown>;
+        const usage = normalizeAnalyticsUsage(nested.usage ?? nested.totalUsage);
+        if (usage.totalTokens !== null || usage.inputTokens !== null || usage.outputTokens !== null) return usage;
+      }
+    } catch { /* Analytics must not delay or fail the business attempt. */ }
+  }
+  return normalizeAnalyticsUsage(null);
+}
+
 async function readStreamTotalTokens(stream: unknown): Promise<number | null> {
   const streamObj = stream as Record<string, unknown>;
   const candidates: unknown[] = [];
@@ -1216,11 +1269,11 @@ async function readStreamTotalTokens(stream: unknown): Promise<number | null> {
   if (streamObj.totalUsage !== undefined) candidates.push(streamObj.totalUsage);
   if (streamObj.response !== undefined) candidates.push(streamObj.response);
 
-  for (const candidate of candidates) {
+  const resolvedCandidates = await Promise.all(
+    candidates.map(async (candidate) => await boundedUsageValue(candidate).catch(() => undefined))
+  );
+  for (const resolved of resolvedCandidates) {
     try {
-      const resolved = candidate && typeof (candidate as Promise<unknown>).then === "function"
-        ? await (candidate as Promise<unknown>)
-        : candidate;
       const total = extractTotalTokens(resolved);
       if (total != null) return total;
 
@@ -1344,6 +1397,8 @@ type AgentRunnerDeps = {
   providerToolCallReplayFromChunk?: (chunk: unknown) => ProviderToolCallReplay | null;
   /** 仅负责 Provider 私有状态协议解释；不参与工具、重试或控制面写入。 */
   providerConversationStateAdapterRegistry?: ProviderConversationStateAdapterRegistry;
+  /** Optional, best-effort Analytics side channel. */
+  analyticsSignals?: AnalyticsSignalProducer;
 };
 
 export class AgentRunner {
@@ -1367,6 +1422,7 @@ export class AgentRunner {
   private readonly providerReplayPartFromChunkFn: ((chunk: unknown) => ProviderReplayPartUpdate | null) | undefined;
   private readonly providerToolCallReplayFromChunkFn: ((chunk: unknown) => ProviderToolCallReplay | null) | undefined;
   private readonly providerConversationStateAdapterRegistry: ProviderConversationStateAdapterRegistry;
+  private readonly analyticsSignals: AnalyticsSignalProducer | undefined;
 
   constructor(
     private readonly apiClient: AgentApiClient,
@@ -1382,6 +1438,7 @@ export class AgentRunner {
     this.controlWriteSleepFn = deps.controlWriteSleep ?? sleepMsWithAbort;
     this.providerReplayPartFromChunkFn = deps.providerReplayPartFromChunk;
     this.providerToolCallReplayFromChunkFn = deps.providerToolCallReplayFromChunk;
+    this.analyticsSignals = deps.analyticsSignals;
     this.providerConversationStateAdapterRegistry = deps.providerConversationStateAdapterRegistry
       ?? new DefaultProviderConversationStateAdapterRegistry();
     this.pluginRuntimeManager = new PluginRuntimeManager(this.logger);
@@ -1454,6 +1511,10 @@ export class AgentRunner {
         if (!retry) throw new FencedWriteIgnoredError(operation);
       }
     }
+  }
+
+  analyticsLiveSnapshot() {
+    return { snapshotAt: this.nowMsFn(), activeCount: this.activeCount, queueLength: this.queue.length, concurrency: this.concurrency, lastReadyAt: null, runnerMode: "agent_worker" as const, analyticsProducerGeneration: this.analyticsSignals?.producerGeneration ?? null };
   }
 
   enqueueRun(run: QueuedRun) {
@@ -2644,7 +2705,11 @@ export class AgentRunner {
         messages: materializedMessages
       } satisfies RuntimeStreamRequest;
 
+      const analyticsModelStartedAt = this.nowMsFn();
+      const analyticsModelCallId = newSortableId("model");
       try {
+        const analyticsModelPayload = { modelCallId: analyticsModelCallId, runId: run.runId, executionId: run.runId, attemptNo: retryCount + 1, providerId: profile.provider.id ?? "unknown", modelId: profile.model.id ?? "unknown", startedAt: analyticsModelStartedAt, endedAt: null, status: "running" as const, completionQuality: "unknown" as const, timeoutKind: null, inputTokens: null, outputTokens: null, totalTokens: null, totalSource: "unavailable" as const, cacheReadTokens: null, cacheWriteTokens: null, cacheComparable: false, cacheWriteVerified: false, failureKind: null };
+        this.analyticsSignals?.emitModel(analyticsModelPayload, "model_invoked", analyticsModelCallId);
         const stream = this.streamTextFn(request);
         attemptStream = stream;
         successfulStream = attemptStream;
@@ -2868,6 +2933,12 @@ export class AgentRunner {
           continue;
         }
       } finally {
+        // Failed/retried streams may expose a never-settling usage promise.
+        // Never let an optional Analytics observation delay the retry path.
+        const analyticsUsage = attemptReachedTerminal && attemptStream ? await readStreamAnalyticsUsage(attemptStream) : normalizeAnalyticsUsage(null);
+        const analyticsAttemptStatus = requestController.signal.aborted ? (idleTimedOut || totalTimedOut ? "timed_out" : "cancelled") : (attemptReachedTerminal ? "completed" : "failed");
+        this.analyticsSignals?.emitModel({ modelCallId: analyticsModelCallId, runId: run.runId, executionId: run.runId, attemptNo: retryCount + 1, providerId: profile.provider.id ?? "unknown", modelId: profile.model.id ?? "unknown", startedAt: analyticsModelStartedAt, endedAt: this.nowMsFn(), status: analyticsAttemptStatus, completionQuality: "observed", timeoutKind: idleTimedOut ? "idle" : totalTimedOut ? "total" : null, ...analyticsUsage, failureKind: analyticsAttemptStatus === "completed" ? null : analyticsAttemptStatus === "timed_out" ? "timeout" : analyticsAttemptStatus === "cancelled" ? "cancelled" : "provider" }, "model_finished", analyticsModelCallId);
+
         if (idleTimer) clearInterval(idleTimer);
         if (totalTimer) clearTimeout(totalTimer);
         try {
@@ -2999,6 +3070,8 @@ export class AgentRunner {
   }
 
   private async processRun(run: QueuedRun, signal: AbortSignal) {
+    const analyticsExecutionStartedAt = this.nowMsFn();
+    this.analyticsSignals?.emitExecution({ executionId: run.runId, runId: run.runId, runtimeKind: "agent_worker", runKind: run.runKind ?? "user", parentRunId: null, queuedAt: null, startedAt: analyticsExecutionStartedAt, endedAt: null, endTimeQuality: "unknown", endReason: null }, "execution_started");
     type TerminalStatus = "completed" | "failed" | "cancelled";
     type TerminalTuple = { status: TerminalStatus; code: import("@agent-workbench/shared").AgentTerminalResultCode; detail: null };
     let terminalTuple: TerminalTuple | null = null;
@@ -3063,6 +3136,7 @@ export class AgentRunner {
       }
       await retryPhase("convergence");
       terminalConverged = true;
+      this.analyticsSignals?.emitExecution({ executionId: run.runId, runId: run.runId, runtimeKind: "agent_worker", runKind: run.runKind ?? "user", parentRunId: null, queuedAt: null, startedAt: analyticsExecutionStartedAt, endedAt: this.nowMsFn(), endTimeQuality: "observed", endReason: terminalTuple!.status === "completed" ? "completed" : terminalTuple!.status === "cancelled" ? "cancelled" : "failed" }, "execution_finished");
     };
     const tryFinishOnce = async (status: TerminalStatus | TerminalTuple, options?: { intentAlreadyPersisted?: boolean }) => {
       try {
