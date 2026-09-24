@@ -4,13 +4,6 @@ export type CustomRangeValidation =
   | { valid: true; from: number; to: number }
   | { valid: false; code: "CUSTOM_RANGE_REQUIRED" | "CUSTOM_RANGE_INVALID" | "CUSTOM_RANGE_DST_AMBIGUOUS" | "CUSTOM_RANGE_DST_NONEXISTENT" | "CUSTOM_RANGE_ORDER" | "CUSTOM_RANGE_TOO_LARGE" };
 
-const FALLBACK_TIMEZONES = ["UTC", "Asia/Shanghai", "Asia/Tokyo", "Europe/London", "Europe/Berlin", "America/New_York", "America/Los_Angeles"];
-
-export function supportedTimezones(): string[] {
-  const supported = (Intl as typeof Intl & { supportedValuesOf?: (key: "timeZone") => string[] }).supportedValuesOf?.("timeZone");
-  return supported?.length ? [...new Set(["UTC", Intl.DateTimeFormat().resolvedOptions().timeZone, ...supported])] : FALLBACK_TIMEZONES;
-}
-
 function isValidTimezone(timezone: string) {
   try { new Intl.DateTimeFormat("en-CA", { timeZone: timezone }); return true; } catch { return false; }
 }

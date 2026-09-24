@@ -1,4 +1,4 @@
-export type DashboardChartKind = "count" | "duration" | "ratio" | "model_status" | "tokens" | "worker_events" | "monitoring";
+export type DashboardChartKind = "count" | "duration" | "ratio" | "model_status" | "tokens" | "worker_events" | "monitoring" | "monitoring_total";
 export type DashboardChartShape = "line" | "stacked-bars";
 
 export type DashboardChartSeries = {
@@ -48,6 +48,7 @@ const definitions: Record<DashboardChartKind, Definition[]> = {
     { key: "unexpectedExits", labelKey: "unexpectedExits", color: "#ef4444" },
     { key: "restartAttempts", labelKey: "restartAttempts", color: "#f59e0b" },
   ],
+  monitoring_total: [{ key: "total", labelKey: "monitoringVolume", color: "#4f8cff" }],
   monitoring: [
     { key: "run", labelKey: "monitoringRun", color: "#4f8cff" },
     { key: "session", labelKey: "monitoringSession", color: "#8b5cf6" },
@@ -95,7 +96,7 @@ export function createDashboardChartDisplay(kind: DashboardChartKind, rows: read
       from: numericField(row, "from"),
       to: numericField(row, "to"),
       values: series.map((item) => item.values[index] ?? null),
-      reportedTotal: kind === "monitoring" ? numericField(row, "total") : null,
+      reportedTotal: (kind === "monitoring" || kind === "monitoring_total") ? numericField(row, "total") : null,
     })),
   };
 }

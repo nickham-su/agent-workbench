@@ -4,7 +4,18 @@ import { DashboardApiError, queryDashboard, type DashboardClientErrorCode } from
 import { validateCustomRange, type CustomRangeValidation } from "./dashboard-timezone";
 
 export type DashboardQuery = (request: DashboardQueryRequest) => Promise<DashboardQuerySuccessResponse>;
-function browserTimezone() { return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; }
+function browserTimezone() {
+  try {
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (typeof timezone === "string" && timezone.trim()) {
+      Intl.DateTimeFormat("en-US", { timeZone: timezone });
+      return timezone;
+    }
+  } catch {
+    // A missing or invalid browser timezone must not prevent the Dashboard from loading.
+  }
+  return "UTC";
+}
 
 export function createDashboardState(requestDashboard: DashboardQuery = queryDashboard) {
   const rangeKind = ref<AnalyticsRangeKind>("preset_7d");
@@ -40,13 +51,6 @@ export function createDashboardState(requestDashboard: DashboardQuery = queryDas
     if (next !== "custom") void refresh();
   }
 
-  function setTimezone(next: string) {
-    if (timezone.value === next) return;
-    timezone.value = next;
-    invalidate();
-    if (rangeKind.value !== "custom") void refresh();
-  }
-
   function setCustomInput(field: "from" | "to", value: string) {
     if (field === "from") customFromLocal.value = value; else customToLocal.value = value;
     invalidate();
@@ -75,5 +79,5 @@ export function createDashboardState(requestDashboard: DashboardQuery = queryDas
     }
   }
 
-  return { rangeKind, timezone, customFromLocal, customToLocal, response, loading, stale, errorCode, customValidation, request, refresh, setRangeKind, setTimezone, setCustomInput, invalidate };
+  return { rangeKind, timezone, customFromLocal, customToLocal, response, loading, stale, errorCode, customValidation, request, refresh, setRangeKind, setCustomInput, invalidate };
 }

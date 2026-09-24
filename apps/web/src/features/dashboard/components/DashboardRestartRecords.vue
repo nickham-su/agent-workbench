@@ -1,2 +1,19 @@
-<template><section class="panel"><header><h3>{{ t("dashboard.restartRecords") }}</h3><DashboardStatusBadge :status="result.status" /></header><template v-if="result.status !== 'unavailable'"><p v-if="result.status === 'partial'">{{ t(`dashboard.reason.${result.partialReason}`) }} · {{ comparisonLabel }}</p><p v-else>{{ comparisonLabel }}</p><table><thead><tr><th>{{ t("dashboard.occurredAt") }}</th><th>{{ t("dashboard.event") }}</th><th>{{ t("dashboard.restartStatus") }}</th></tr></thead><tbody><tr v-for="record in result.data" :key="`${record.occurredAt}-${record.event}`"><td>{{ formatDateTime(record.occurredAt, timezone, locale) }}</td><td>{{ t(`dashboard.workerEvent.${record.event}`) }}</td><td>{{ t(`dashboard.restartStatusValue.${record.restartStatus}`) }}</td></tr></tbody></table></template><p v-else>{{ t(`dashboard.reason.${result.unavailableReason}`) }} · {{ comparisonLabel }}</p></section></template>
-<script setup lang="ts">import { computed } from "vue"; import { useI18n } from "vue-i18n"; import type { DashboardData } from "@agent-workbench/shared"; import { formatComparison, formatDateTime } from "../dashboard-formatters"; import DashboardStatusBadge from "./DashboardStatusBadge.vue"; const props=defineProps<{result:DashboardData["worker"]["restartRecords"];timezone:string}>();const {t,locale}=useI18n();const comparisonLabel=computed(()=>props.result.comparison.status==="available"?formatComparison(props.result.comparison,locale.value):t(`dashboard.comparison.${props.result.comparison.status}`));</script><style scoped>.panel{background:var(--panel-bg-elevated);border:1px solid var(--border-color);border-radius:8px;padding:14px}.panel header{display:flex;justify-content:space-between}.panel h3{margin:0;font-size:14px}.panel p,table{font-size:12px;color:var(--text-color-secondary)}table{width:100%;border-collapse:collapse}th,td{padding:8px;border-top:1px solid var(--border-color);text-align:left}</style>
+<template>
+  <DashboardPanelShell :title="t('dashboard.restartRecords')">
+    <p v-if="comparisonLabel">{{ comparisonLabel }}</p>
+    <div v-if="result.status !== 'unavailable' && result.data.length" class="table-wrap"><table><thead><tr><th scope="col">{{ t("dashboard.occurredAt") }}</th><th scope="col">{{ t("dashboard.event") }}</th><th scope="col">{{ t("dashboard.restartStatus") }}</th></tr></thead><tbody><tr v-for="record in result.data" :key="`${record.occurredAt}-${record.event}`"><td>{{ formatDateTime(record.occurredAt, timezone, locale) }}</td><td>{{ t(`dashboard.workerEvent.${record.event}`) }}</td><td>{{ t(`dashboard.restartStatusValue.${record.restartStatus}`) }}</td></tr></tbody></table></div>
+    <DashboardEmptyValue v-else />
+  </DashboardPanelShell>
+</template>
+<script setup lang="ts">
+import { computed } from "vue";
+import { useI18n } from "vue-i18n";
+import type { DashboardData } from "@agent-workbench/shared";
+import { formatComparison, formatDateTime } from "../dashboard-formatters";
+import DashboardPanelShell from "./DashboardPanelShell.vue";
+import DashboardEmptyValue from "./DashboardEmptyValue.vue";
+const props = defineProps<{ result: DashboardData["worker"]["restartRecords"]; timezone: string }>();
+const { t, locale } = useI18n();
+const comparisonLabel = computed(() => props.result.status === "available" && props.result.comparison.status === "available" ? formatComparison(props.result.comparison, locale.value) : "");
+</script>
+<style scoped>p,table{font-size:12px;color:var(--text-color-secondary)}.table-wrap{max-width:100%;overflow-x:auto}table{width:100%;min-width:400px;border-collapse:collapse}th,td{padding:8px;border-top:1px solid var(--border-color);text-align:left;white-space:nowrap}</style>

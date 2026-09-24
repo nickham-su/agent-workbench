@@ -22,6 +22,7 @@ import {
   analyticsGitInstallationSecretPath,
   dbPath,
 } from "../../infra/fs/paths.js";
+import { gitConfigGet } from "../../infra/git/gitIdentity.js";
 import type { AnalyticsDb } from "./analytics-db.js";
 import { DEFAULT_ANALYTICS_RETENTION_MS } from "./analytics-maintenance.js";
 import { readCurrentFactDomainConfig } from "./signal-store.js";
@@ -44,7 +45,7 @@ const GIT_CONFIG_MAX_BYTES = 1024 * 1024;
 const GIT_REF_SNAPSHOT_MAX_REVISIONS = 100_000;
 const GIT_CHILD_PATH = "/usr/local/bin:/usr/bin:/bin";
 
-type SafeRepo = { id: string; syncStatus: RepoSyncStatus };
+type SafeRepo = { id: string; syncStatus: RepoSyncStatus; credentialId: string };
 type ParsedCommit = {
   identity: string;
   committedAt: number;
@@ -718,6 +719,7 @@ async function readCommits(params: {
   dataDir: string;
   repoId: string;
   secret: Buffer;
+  authorEmail: string;
   coveredFrom: number;
   gitCommand: string;
   limits: ScanLimits;
@@ -733,6 +735,7 @@ async function readCommits(params: {
     dataDir,
     repoId,
     secret,
+    authorEmail,
     coveredFrom,
     gitCommand,
     limits,
@@ -773,7 +776,9 @@ async function readCommits(params: {
     `--since-as-filter=${new Date(coveredFrom).toISOString()}`,
     "--numstat",
     "--no-ext-diff",
-    "--format=%x1e%H%x1f%ct%x1f%P",
+    // NUL ends the header. Reject embedded line/field delimiters in untrusted
+    // author metadata before parsing numstat; never pass the target email in argv.
+    "--format=%x1e%H%x1f%ct%x1f%P%x1f%ae%x00",
   ];
   return new Promise((resolve) => {
     let settled = false;
@@ -783,10 +788,7 @@ async function readCommits(params: {
     let stdoutBytes = 0;
     let records = 0;
     let pending = "";
-    let current: Omit<
-      ParsedCommit,
-      "filesChanged" | "insertions" | "deletions"
-    > | null = null;
+    let current: { identity: string | null; committedAt: number; parentCount: number } | null = null;
     let needsInitialRecordSeparator = true;
     const commits: ParsedCommit[] = [];
     const settle = (
@@ -820,18 +822,24 @@ async function readCommits(params: {
         stop("GIT_SCAN_BUDGET");
         return false;
       }
-      const [rawSha, seconds, parents = ""] = header.trim().split("\x1f");
-      if (!/^[0-9a-f]{40,64}$/i.test(rawSha) || !/^\d+$/.test(seconds)) {
+      const fields = header.split("\x1f");
+      const [rawSha, seconds, parents, rawAuthor] = fields;
+      if (fields.length !== 4 || !/^[0-9a-f]{40,64}$/i.test(rawSha ?? "") ||
+          !/^\d+$/.test(seconds ?? "") || rawAuthor === undefined ||
+          /[\x00-\x1f\x7f]/.test(rawAuthor)) {
         stop("GIT_SCAN_OUTPUT_INVALID");
         return false;
       }
+      // Git permits an empty author address ("<>"). It is a valid record,
+      // but cannot match a configured email; never reject the whole Repo for it.
+      const candidate = normalizeAuthorEmail(rawAuthor);
       const parentCount = parents.trim()
         ? parents.trim().split(/\s+/).length
         : 0;
       // rawSha has no reference after this expression: it is neither returned,
       // persisted nor retained while numstat output is still being streamed.
       current = {
-        identity: gitCommitIdentity(secret, repoId, rawSha),
+        identity: candidate === authorEmail ? gitCommitIdentity(secret, repoId, rawSha!) : null,
         committedAt: Number(seconds) * 1000,
         parentCount,
       };
@@ -839,6 +847,17 @@ async function readCommits(params: {
     };
     const finishCurrent = (stats: string): boolean => {
       if (!current) return stats.trim() === "";
+      // The only NUL in the expected stream terminates each Git header. A
+      // second one here means malformed output (including an injected NUL in
+      // author metadata), even when this particular author does not match.
+      if (stats.includes("\0")) {
+        stop("GIT_SCAN_OUTPUT_INVALID");
+        return false;
+      }
+      if (current.identity === null) {
+        current = null;
+        return true;
+      }
       if (
         commits.length >= limits.maxCommits ||
         sharedBudget.commits >= limits.maxCommits
@@ -859,7 +878,9 @@ async function readCommits(params: {
         }
       }
       commits.push({
-        ...current,
+        identity: current.identity,
+        committedAt: current.committedAt,
+        parentCount: current.parentCount,
         filesChanged: current.parentCount > 1 ? null : filesChanged,
         insertions: current.parentCount > 1 ? null : insertions,
         deletions: current.parentCount > 1 ? null : deletions,
@@ -881,21 +902,25 @@ async function readCommits(params: {
             needsInitialRecordSeparator = false;
           }
           if (pending === "") return true;
-          const nextRecord = pending.indexOf("\x1e");
-          const newline = pending.indexOf("\n");
-          if (nextRecord !== -1 && (newline === -1 || nextRecord < newline)) {
+          const endHeader = pending.indexOf("\0");
+          // A malicious author address must not be able to inject a record
+          // separator, numstat line, or an extra header field.
+          if (endHeader !== -1 && /[\n\r\x1e]/.test(pending.slice(0, endHeader))) {
             stop("GIT_SCAN_OUTPUT_INVALID");
             return false;
           }
-          if (newline === -1) {
+          if (endHeader === -1 || pending.length === endHeader + 1) {
             if (closed) {
               stop("GIT_SCAN_OUTPUT_INVALID");
               return false;
             }
             return true;
           }
-          if (!parseHeader(pending.slice(0, newline))) return false;
-          pending = pending.slice(newline + 1);
+          if (pending[endHeader + 1] !== "\n" || !parseHeader(pending.slice(0, endHeader))) {
+            stop("GIT_SCAN_OUTPUT_INVALID");
+            return false;
+          }
+          pending = pending.slice(endHeader + 2);
           continue;
         }
         const nextRecord = pending.indexOf("\x1e");
@@ -989,17 +1014,30 @@ async function readCommits(params: {
 
 function controlledManagedRepo(row: unknown): SafeRepo | null {
   if (typeof row !== "object" || row === null) return null;
-  const value = row as { id?: unknown; syncStatus?: unknown };
-  if (typeof value.id !== "string") return null;
+  const value = row as { id?: unknown; syncStatus?: unknown; credentialId?: unknown };
+  if (typeof value.id !== "string" || typeof value.credentialId !== "string") return null;
   if (
     value.syncStatus === "idle" ||
     value.syncStatus === "syncing" ||
     value.syncStatus === "failed"
   ) {
-    return { id: value.id, syncStatus: value.syncStatus };
+    return { id: value.id, syncStatus: value.syncStatus, credentialId: value.credentialId };
   }
   // A malformed business status is never eligible for a path-based scan.
-  return { id: value.id, syncStatus: "failed" };
+  return { id: value.id, syncStatus: "failed", credentialId: value.credentialId };
+}
+
+// The Settings global Git identity is deliberately distinct from a Workspace's
+// effective (repo-local-first) identity and the isolated git-log child config.
+async function configuredAuthorEmail(dataDir: string): Promise<string | null> {
+  return normalizeAuthorEmail(await gitConfigGet({ cwd: dataDir, global: true, key: "user.email" }));
+}
+
+function normalizeAuthorEmail(value: string | null): string | null {
+  if (value === null) return null;
+  const email = value.trim();
+  if (!email || /[\x00-\x1f\x7f]/.test(email)) return null;
+  return email.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
 }
 
 function readManagedRepos(dataDir: string): SafeRepo[] | null {
@@ -1010,7 +1048,10 @@ function readManagedRepos(dataDir: string): SafeRepo[] | null {
     });
     try {
       return business
-        .prepare("SELECT id, sync_status AS syncStatus FROM repos")
+        // A host-default credential does not opt a Repo into personal stats.
+        // Never load credential secrets into the Analytics worker.
+        .prepare(`SELECT r.id, r.sync_status AS syncStatus, r.credential_id AS credentialId
+          FROM repos r JOIN credentials c ON c.id=r.credential_id WHERE r.credential_id IS NOT NULL`)
         .all()
         .flatMap((row) => {
           const repo = controlledManagedRepo(row);
@@ -1292,6 +1333,8 @@ export async function scanManagedGitRepos(params: {
   now?: number;
   gitCommand?: string;
   limits?: Partial<ScanLimits>;
+  /** Internal test seam; production reads the same global identity as Settings. */
+  readGlobalEmail?: () => Promise<string | null>;
   /** Internal deterministic test seam for bounded source-tree validation. */
   sourceLimitsForTest?: Partial<GitSourceLimits>;
   clock?: () => number;
@@ -1306,6 +1349,7 @@ export async function scanManagedGitRepos(params: {
 }) {
   const { db, dataDir, now, gitCommand = "git" } = params;
   const clock = params.clock ?? (() => now ?? Date.now());
+  const readGlobalEmail = params.readGlobalEmail ?? (() => configuredAuthorEmail(dataDir));
   const config = readCurrentFactDomainConfig(db);
   if (!config.enabled.has("git")) return { attempted: 0, succeeded: 0 };
   // The source anchor describes the intended Git range. It is deliberately
@@ -1318,15 +1362,19 @@ export async function scanManagedGitRepos(params: {
     ).run(clock());
     return { attempted: 0, succeeded: 0 };
   }
-  reconcileManagedRepos(db, repos);
-  if (repos.length === 0) {
+  // Keep the previous snapshot until this scheduled scan cycle. Missing global
+  // identity cannot certify an exact zero, even if managed repos still exist.
+  const authorEmail = normalizeAuthorEmail(await readGlobalEmail());
+  const eligibleRepos = authorEmail === null ? [] : repos;
+  reconcileManagedRepos(db, eligibleRepos);
+  if (authorEmail === null || eligibleRepos.length === 0) {
     db.prepare(
-      "UPDATE analytics_domain_state SET status='unavailable', reconciled_through=NULL, last_succeeded_at=NULL, last_error_code='GIT_NO_MANAGED_REPOS', updated_at=? WHERE domain='git'",
-    ).run(clock());
+      "UPDATE analytics_domain_state SET status='unavailable', reconciled_through=NULL, last_succeeded_at=NULL, last_error_code=?, updated_at=? WHERE domain='git'",
+    ).run(authorEmail === null ? "GIT_IDENTITY_UNAVAILABLE" : "GIT_NO_ELIGIBLE_REPOS", clock());
     return { attempted: 0, succeeded: 0 };
   }
   const secret = await readOrCreateGitInstallationSecret(dataDir, db);
-  ensureManagedRepoStates(db, repos);
+  ensureManagedRepoStates(db, eligibleRepos);
   if (!secret) {
     db.prepare(
       "UPDATE analytics_domain_state SET status='unavailable', reconciled_through=NULL, last_error_code='GIT_SECRET_UNAVAILABLE', updated_at=? WHERE domain='git'",
@@ -1338,7 +1386,7 @@ export async function scanManagedGitRepos(params: {
   const coveredFrom = Math.max(0, sourceAnchor - GIT_RETENTION_MS);
   let attempted = 0;
   let succeeded = 0;
-  for (const repo of repos) {
+  for (const repo of eligibleRepos) {
     if (repo.syncStatus !== "idle") continue;
     if (inFlightRepoIds.has(repo.id)) continue;
     attempted += 1;
@@ -1395,6 +1443,7 @@ export async function scanManagedGitRepos(params: {
         dataDir,
         repoId: repo.id,
         secret,
+        authorEmail,
         coveredFrom,
         gitCommand,
         limits,
@@ -1440,6 +1489,7 @@ export async function scanManagedGitRepos(params: {
           dataDir,
           repoId: repo.id,
           secret,
+          authorEmail,
           coveredFrom,
           gitCommand,
           limits,
@@ -1480,6 +1530,17 @@ export async function scanManagedGitRepos(params: {
         );
         continue;
       }
+      // Best-effort check immediately before publishing: observable changes
+      // supersede this scan and preserve the previous ready generation. Git
+      // config and the business DB cannot be atomically read with the Analytics
+      // publish transaction; a change after this check is fixed by a later scan.
+      const currentEmail = normalizeAuthorEmail(await readGlobalEmail());
+      const currentRepo = readManagedRepos(dataDir)?.find((item) => item.id === repo.id);
+      if (currentEmail !== authorEmail || currentRepo?.credentialId !== repo.credentialId ||
+          currentRepo?.syncStatus !== "idle") {
+        failScan(db, scanId, repo.id, Math.max(scanStartedAt, clock()), "GIT_SCAN_SUPERSEDED");
+        continue;
+      }
       const completedAt = Math.max(scanStartedAt, clock());
       if (
         commitReadyScan(db, {
@@ -1515,6 +1576,6 @@ export async function scanManagedGitRepos(params: {
     finalConfig.revision === config.revision &&
     finalConfig.enabled.has("git")
   )
-    updateGitDomainState(db, repos, clock());
+    updateGitDomainState(db, eligibleRepos, clock());
   return { attempted, succeeded };
 }

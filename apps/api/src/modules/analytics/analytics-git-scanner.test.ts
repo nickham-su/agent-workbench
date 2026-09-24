@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import Database from "better-sqlite3";
 import { analyticsGitInstallationSecretPath, dbPath, repoMirrorPath } from "../../infra/fs/paths.js";
 import { closeAnalyticsDb, openAnalyticsDb } from "./analytics-db.js";
-import { scanManagedGitRepos } from "./analytics-git.js";
+import { scanManagedGitRepos as scanGitRepos } from "./analytics-git.js";
 import { rebuildCollectedRollup } from "./analytics-rollups.js";
 import { queryDashboard } from "./analytics-dashboard-query.js";
 import { acceptAnalyticsSignal } from "./signal-store.js";
@@ -18,6 +18,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const execFileAsync = promisify(execFile);
 let activeGitStubControlPath: string | null = null;
 const STUB_OBJECT_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const TEST_EMAIL = "analytics-test@example.invalid";
+async function scanManagedGitRepos(params: Parameters<typeof scanGitRepos>[0]) {
+  return scanGitRepos({ ...params, readGlobalEmail: params.readGlobalEmail ?? (async () => TEST_EMAIL) });
+}
 
 async function setup(prefix: string, enableGit = true) {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), prefix));
@@ -35,7 +39,11 @@ async function setup(prefix: string, enableGit = true) {
   business.exec(`CREATE TABLE repos (
       id TEXT PRIMARY KEY, url TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL DEFAULT 0,
       updated_at INTEGER NOT NULL DEFAULT 0, default_branch TEXT, mirror_path TEXT NOT NULL DEFAULT '',
-      sync_status TEXT NOT NULL DEFAULT 'idle', sync_error TEXT, last_sync_at INTEGER
+      sync_status TEXT NOT NULL DEFAULT 'idle', sync_error TEXT, last_sync_at INTEGER,
+      credential_id TEXT
+    );
+    CREATE TABLE credentials (
+      id TEXT PRIMARY KEY, is_default INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE workspaces (
       id TEXT PRIMARY KEY, dir_name TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', path TEXT NOT NULL,
@@ -72,7 +80,7 @@ const head = fs.readFileSync(path.join(objectDir, "analytics-mode"), "utf8").tri
 if (head === "fail") process.exit(1);
 const sha = fs.readFileSync(0, "utf8").trim().split("\\n")[0];
 if (!/^[0-9a-f]{40,64}$/i.test(sha || "")) process.exit(6);
-const emit = () => process.stdout.write("\\x1e" + sha + "\\x1f" + seconds + "\\x1f\\n1\\t2\\t\\n");
+const emit = () => process.stdout.write("\\x1e" + sha + "\\x1f" + seconds + "\\x1f\\x1fanalytics-test@example.invalid\\x00\\n1\\t2\\t\\n");
 const seconds = head === "safe" ? "1" : "2";
 if (head === "slow") setTimeout(emit, 45);
 else emit();
@@ -100,12 +108,13 @@ async function makeStubWorkspaceGitDir(gitDir: string, mode = "safe") {
   await writeFile(path.join(gitDir, "objects", "analytics-mode"), mode);
 }
 
-function addRepo(business: Database.Database, id: string, status: "idle" | "syncing" | "failed" = "idle") {
-  business.prepare("INSERT INTO repos(id,sync_status) VALUES (?,?)").run(id, status);
+function addRepo(business: Database.Database, id: string, status: "idle" | "syncing" | "failed" = "idle", credentialId: string | null = `cred-${id}`) {
+  if (credentialId) business.prepare("INSERT OR IGNORE INTO credentials(id) VALUES (?)").run(credentialId);
+  business.prepare("INSERT INTO repos(id,sync_status,credential_id) VALUES (?,?,?)").run(id, status, credentialId);
 }
 
-function logRecord(commitToken: string, committedAt: number, parentTokens = "", stats = "1\t2\t\n") {
-  return `\x1e${commitToken}\x1f${Math.floor(committedAt / 1000)}\x1f${parentTokens}\n${stats}`;
+function logRecord(commitToken: string, committedAt: number, parentTokens = "", stats = "1\t2\t\n", author = TEST_EMAIL) {
+  return `\x1e${commitToken}\x1f${Math.floor(committedAt / 1000)}\x1f${parentTokens}\x1f${author}\0\n${stats}`;
 }
 
 async function withGitOutput<T>(mode: "ok" | "fail" | "timeout", originOutput: string, run: () => Promise<T>) {
@@ -195,6 +204,13 @@ function currentMembership(db: Database.Database, repoId: string) {
     .map((row) => row.commit_identity);
 }
 
+function gitCount(db: Database.Database, from: number, to: number, now: number) {
+  const dashboard = queryDashboard(db, { rangeKind: "custom", timezone: "UTC", from, to }, now);
+  assert.equal(dashboard.kind, "success");
+  if (dashboard.kind !== "success") throw new Error("Dashboard query failed");
+  return dashboard.data.git.metrics.commits;
+}
+
 test("empty baseline does not authorize Git scanning", async (t) => {
   const ctx = await setup("awb-git-empty-baseline-", false);
   t.after(async () => { ctx.business.close(); closeAnalyticsDb(ctx.analytics); await rm(ctx.dataDir, { recursive: true, force: true }); });
@@ -237,6 +253,199 @@ test("scanner reads only idle controlled mirrors, retains facts, and atomically 
   assert.equal((ctx.analytics.prepare("SELECT COUNT(*) AS value FROM analytics_git_commit_fact").get() as { value: number }).value, 3);
   assert.equal((ctx.analytics.prepare("SELECT COUNT(*) AS value FROM analytics_git_membership").get() as { value: number }).value, 1);
   assert.equal((ctx.analytics.prepare("SELECT COUNT(*) AS value FROM analytics_git_membership m JOIN analytics_git_scan s ON s.scan_id=m.scan_id WHERE s.source_state='ready'").get() as { value: number }).value, 1);
+});
+
+test("only explicitly bound, existing credentials enter Git coverage", async (t) => {
+  const ctx = await setup("awb-git-credential-rule-");
+  t.after(async () => { ctx.business.close(); closeAnalyticsDb(ctx.analytics); await rm(ctx.dataDir, { recursive: true, force: true }); });
+  const now = 500 * DAY_MS;
+  ctx.business.prepare("INSERT INTO credentials(id,is_default) VALUES ('host-default',1)").run();
+  addRepo(ctx.business, "unbound", "idle", null);
+  addRepo(ctx.business, "dangling");
+  ctx.business.prepare("DELETE FROM credentials WHERE id='cred-dangling'").run();
+  await makeBareMirror(ctx.dataDir, "unbound");
+  await makeBareMirror(ctx.dataDir, "dangling");
+  assert.deepEqual(await scanManagedGitRepos({ db: ctx.analytics, dataDir: ctx.dataDir, now, gitCommand: ctx.gitStub }), { attempted: 0, succeeded: 0 });
+  assert.equal((ctx.analytics.prepare("SELECT COUNT(*) AS n FROM analytics_git_repo_state").get() as { n: number }).n, 0);
+  const empty = gitCount(ctx.analytics, now - DAY_MS, now, now);
+  assert.equal(empty.status, "unavailable");
+  assert.equal(empty.value, null);
+
+  addRepo(ctx.business, "bound");
+  await makeBareMirror(ctx.dataDir, "bound");
+  await withGitOutput("ok", logRecord(randomBytes(20).toString("hex"), now - DAY_MS / 2), () =>
+    scanManagedGitRepos({ db: ctx.analytics, dataDir: ctx.dataDir, now: now + 1, gitCommand: ctx.gitStub }));
+  const bound = gitCount(ctx.analytics, now - DAY_MS, now, now + 1);
+  assert.equal(bound.status, "available");
+  assert.equal(bound.value, 1);
+  assert.equal(bound.totalRepoCount, 1);
+
+  ctx.business.prepare("UPDATE repos SET credential_id=NULL WHERE id='bound'").run();
+  await scanManagedGitRepos({ db: ctx.analytics, dataDir: ctx.dataDir, now: now + 2, gitCommand: ctx.gitStub });
+  assert.equal(currentMembership(ctx.analytics, "bound").length, 0);
+  assert.equal(gitCount(ctx.analytics, now - DAY_MS, now, now + 2).status, "unavailable");
+  assert.equal((ctx.analytics.prepare("SELECT COUNT(*) AS n FROM analytics_git_commit_fact").get() as { n: number }).n, 1);
+});
+
+test("author-only matching recomputes historical membership at the next scan, without storing emails", async (t) => {
+  const ctx = await setup("awb-git-author-rule-");
+  t.after(async () => { ctx.business.close(); closeAnalyticsDb(ctx.analytics); await rm(ctx.dataDir, { recursive: true, force: true }); });
+  const now = 500 * DAY_MS;
+  addRepo(ctx.business, "repo"); await makeBareMirror(ctx.dataDir, "repo");
+  const a = randomBytes(20).toString("hex"), b = randomBytes(20).toString("hex"), c = randomBytes(20).toString("hex");
+  const output = logRecord(a, now - DAY_MS, "", "1\t2\ta.txt\n", " ANALYTICS-TEST@EXAMPLE.INVALID ") +
+    logRecord(b, now - DAY_MS, "", "1\t2\tb.txt\n") +
+    logRecord(c, now - DAY_MS, "", "1\t2\tc.txt\n", "other@example.invalid");
+  let identity = TEST_EMAIL;
+  const options = { db: ctx.analytics, dataDir: ctx.dataDir, gitCommand: ctx.gitStub, readGlobalEmail: async () => identity };
+  await withGitOutput("ok", output, () => scanManagedGitRepos({ ...options, now }));
+  const previous = currentMembership(ctx.analytics, "repo");
+  assert.equal(previous.length, 2);
+  identity = "OTHER@EXAMPLE.INVALID";
+  // A config change does not clear the previous snapshot before the next scan.
+  assert.deepEqual(currentMembership(ctx.analytics, "repo"), previous);
+  await withGitOutput("ok", output, () => scanManagedGitRepos({ ...options, now: now + 1 }));
+  assert.equal(currentMembership(ctx.analytics, "repo").length, 1);
+  assert.notDeepEqual(currentMembership(ctx.analytics, "repo"), previous);
+  assert.equal((ctx.analytics.prepare("SELECT COUNT(*) AS n FROM analytics_git_commit_fact").get() as { n: number }).n, 3);
+  const historical = gitCount(ctx.analytics, now - 2 * DAY_MS, now, now + 1);
+  assert.equal(historical.status, "available");
+  assert.equal(historical.value, 1);
+  assert.equal((ctx.analytics.prepare("SELECT sql FROM sqlite_master WHERE name='analytics_git_commit_fact'").get() as { sql: string }).sql.includes("author_email"), false);
+
+  identity = "";
+  await scanManagedGitRepos({ ...options, now: now + 2 });
+  const unknown = gitCount(ctx.analytics, now - DAY_MS, now, now + 2);
+  assert.equal(unknown.status, "unavailable");
+  assert.equal(unknown.value, null);
+  identity = TEST_EMAIL;
+  await withGitOutput("ok", logRecord(c, now - DAY_MS, "", "", "other@example.invalid"), () => scanManagedGitRepos({ ...options, now: now + 3 }));
+  const zero = gitCount(ctx.analytics, now - DAY_MS, now, now + 3);
+  assert.equal(zero.status, "available");
+  assert.equal(zero.value, 0);
+});
+
+test("empty and unmatched author emails are skipped without consuming the matched commit budget", async (t) => {
+  const ctx = await setup("awb-git-empty-author-");
+  t.after(async () => { ctx.business.close(); closeAnalyticsDb(ctx.analytics); await rm(ctx.dataDir, { recursive: true, force: true }); });
+  const now = 500 * DAY_MS;
+  addRepo(ctx.business, "repo"); await makeBareMirror(ctx.dataDir, "repo");
+  const sha = () => randomBytes(20).toString("hex");
+  const empty = logRecord(sha(), now - DAY_MS, "", "1\t2\tempty.txt\n", "");
+  const other = logRecord(sha(), now - DAY_MS, "", "1\t2\tother.txt\n", "other@example.invalid");
+  const whitespace = logRecord(sha(), now - DAY_MS, "", "1\t2\tspaces.txt\n", "   ");
+  const matched = logRecord(sha(), now - DAY_MS, "", "1\t2\tfirst.txt\n") +
+    logRecord(sha(), now - DAY_MS, "", "1\t2\tsecond.txt\n", "ANALYTICS-TEST@EXAMPLE.INVALID");
+  const scan = (output: string, at: number) => withGitOutput("ok", output, () =>
+    scanManagedGitRepos({ db: ctx.analytics, dataDir: ctx.dataDir, now: at, gitCommand: ctx.gitStub, limits: { maxCommits: 2 } }));
+  assert.deepEqual(await scan(empty + other + matched + whitespace, now), { attempted: 1, succeeded: 1 });
+  assert.equal(currentMembership(ctx.analytics, "repo").length, 2);
+  assert.equal((ctx.analytics.prepare("SELECT COUNT(*) AS n FROM analytics_git_commit_fact").get() as { n: number }).n, 2);
+  assert.equal(gitCount(ctx.analytics, now - 2 * DAY_MS, now, now).value, 2);
+  assert.deepEqual(await scan(empty + other + whitespace, now + 1), { attempted: 1, succeeded: 1 });
+  const zero = gitCount(ctx.analytics, now - 2 * DAY_MS, now, now + 1);
+  assert.equal(zero.status, "available");
+  assert.equal(zero.value, 0);
+  assert.equal(currentMembership(ctx.analytics, "repo").length, 0);
+  assert.equal((ctx.analytics.prepare("SELECT COUNT(*) AS n FROM analytics_git_commit_fact").get() as { n: number }).n, 2);
+});
+
+test("unsafe author metadata fails the scan without replacing a ready generation", async (t) => {
+  const ctx = await setup("awb-git-author-injection-");
+  t.after(async () => { ctx.business.close(); closeAnalyticsDb(ctx.analytics); await rm(ctx.dataDir, { recursive: true, force: true }); });
+  const now = 500 * DAY_MS;
+  addRepo(ctx.business, "repo"); await makeBareMirror(ctx.dataDir, "repo");
+  const sha = () => randomBytes(20).toString("hex");
+  await withGitOutput("ok", logRecord(sha(), now - DAY_MS), () => scanManagedGitRepos({ db: ctx.analytics, dataDir: ctx.dataDir, now, gitCommand: ctx.gitStub }));
+  const previous = currentMembership(ctx.analytics, "repo");
+  const unsafe = [
+    ...["analytics-test@example.invalid\n1\t2\tspoofed", "analytics-test@example.invalid\x1fextra", "analytics-test@example.invalid\x1eextra",
+      "analytics-test@example.invalid\0\n1\t2\tspoofed", "other@example.invalid\0\n1\t2\tspoofed", "\t", "other@example.invalid\x7f"].map((author) => logRecord(sha(), now - DAY_MS, "", "", author)),
+    `\x1e${sha()}\x1f${Math.floor((now - DAY_MS) / 1000)}\x1f\0\n1\t2\tbroken.txt\n`, // missing author field
+    logRecord("invalid-sha", now - DAY_MS),
+  ];
+  for (const output of unsafe) {
+    await withGitOutput("ok", output, () => scanManagedGitRepos({ db: ctx.analytics, dataDir: ctx.dataDir, now: now + 1, gitCommand: ctx.gitStub }));
+    assert.deepEqual(currentMembership(ctx.analytics, "repo"), previous);
+    assert.equal((ctx.analytics.prepare("SELECT safe_error_code FROM analytics_git_scan ORDER BY started_at DESC, rowid DESC LIMIT 1").get() as { safe_error_code: string }).safe_error_code, "GIT_SCAN_OUTPUT_INVALID");
+  }
+});
+
+test("changing email or credential binding during a scan cannot publish the old filter", async (t) => {
+  const ctx = await setup("awb-git-filter-race-");
+  t.after(async () => { ctx.business.close(); closeAnalyticsDb(ctx.analytics); await rm(ctx.dataDir, { recursive: true, force: true }); });
+  const now = 500 * DAY_MS;
+  addRepo(ctx.business, "repo"); await makeBareMirror(ctx.dataDir, "repo");
+  const old = randomBytes(20).toString("hex");
+  let identity = TEST_EMAIL;
+  const input = { db: ctx.analytics, dataDir: ctx.dataDir, gitCommand: ctx.gitStub, readGlobalEmail: async () => identity };
+  await withGitOutput("ok", logRecord(old, now - DAY_MS), () => scanManagedGitRepos({ ...input, now }));
+  const initial = currentMembership(ctx.analytics, "repo");
+  assert.equal(initial.length, 1);
+  const replacement = randomBytes(20).toString("hex");
+  await withGitOutput("ok", logRecord(replacement, now - DAY_MS, "", "", "other@example.invalid"), () =>
+    scanManagedGitRepos({ ...input, now: now + 1, afterGitSpawnedForTest: () => { identity = "other@example.invalid"; } }));
+  assert.deepEqual(currentMembership(ctx.analytics, "repo"), initial);
+  assert.equal((ctx.analytics.prepare("SELECT safe_error_code FROM analytics_git_scan ORDER BY started_at DESC, rowid DESC LIMIT 1").get() as { safe_error_code: string }).safe_error_code, "GIT_SCAN_SUPERSEDED");
+  await withGitOutput("ok", logRecord(replacement, now - DAY_MS, "", "", "other@example.invalid"), () =>
+    scanManagedGitRepos({ ...input, now: now + 2 }));
+  const afterEmail = currentMembership(ctx.analytics, "repo");
+  assert.equal(afterEmail.length, 1);
+  assert.notDeepEqual(afterEmail, initial);
+
+  ctx.business.prepare("INSERT INTO credentials(id) VALUES ('replacement-credential')").run();
+  await withGitOutput("ok", logRecord(old, now - DAY_MS, "", "", "other@example.invalid"), () =>
+    scanManagedGitRepos({ ...input, now: now + 3, afterGitSpawnedForTest: () => {
+      ctx.business.prepare("UPDATE repos SET credential_id='replacement-credential' WHERE id='repo'").run();
+    } }));
+  assert.deepEqual(currentMembership(ctx.analytics, "repo"), afterEmail);
+  assert.equal((ctx.analytics.prepare("SELECT safe_error_code FROM analytics_git_scan ORDER BY started_at DESC, rowid DESC LIMIT 1").get() as { safe_error_code: string }).safe_error_code, "GIT_SCAN_SUPERSEDED");
+  await withGitOutput("ok", logRecord(old, now - DAY_MS, "", "", "other@example.invalid"), () =>
+    scanManagedGitRepos({ ...input, now: now + 4 }));
+  assert.notDeepEqual(currentMembership(ctx.analytics, "repo"), afterEmail);
+});
+
+test("real Git log uses author email rather than committer email", async (t) => {
+  const ctx = await setup("awb-git-real-author-");
+  t.after(async () => { ctx.business.close(); closeAnalyticsDb(ctx.analytics); await rm(ctx.dataDir, { recursive: true, force: true }); });
+  addRepo(ctx.business, "repo");
+  const { source, mirror } = await createRealGitSource(ctx.dataDir, "repo");
+  await writeFile(path.join(source, "authored-by-target.txt"), "one\n");
+  await git(["add", "authored-by-target.txt"], source);
+  await git(["-c", "user.email=other@example.invalid", "commit", "--no-gpg-sign", "--author", `Analytics Test <${TEST_EMAIL}>`, "-m", "author-matches"], source);
+  await writeFile(path.join(source, "committed-by-target.txt"), "two\n");
+  await git(["add", "committed-by-target.txt"], source);
+  await git(["commit", "--no-gpg-sign", "--author", "Other <other@example.invalid>", "-m", "committer-matches"], source);
+  await git([`--git-dir=${mirror}`, "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"]);
+  const now = Date.now();
+  assert.deepEqual(await scanManagedGitRepos({ db: ctx.analytics, dataDir: ctx.dataDir, now }), { attempted: 1, succeeded: 1 });
+  assert.equal(currentMembership(ctx.analytics, "repo").length, 2);
+  assert.equal(gitCount(ctx.analytics, now - DAY_MS, now + 1, now + 1).value, 2);
+});
+
+test("production scanner reads the same global Git email as Settings, not a repository-local email", async (t) => {
+  const ctx = await setup("awb-git-global-email-");
+  t.after(async () => { ctx.business.close(); closeAnalyticsDb(ctx.analytics); await rm(ctx.dataDir, { recursive: true, force: true }); });
+  const previousGlobalConfig = process.env.GIT_CONFIG_GLOBAL;
+  const configPath = path.join(ctx.dataDir, "global-identity-config");
+  process.env.GIT_CONFIG_GLOBAL = configPath;
+  t.after(() => {
+    if (previousGlobalConfig === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = previousGlobalConfig;
+  });
+  addRepo(ctx.business, "repo");
+  const { source } = await createRealGitSource(ctx.dataDir, "repo");
+  await writeFile(configPath, `[user]\n\temail = ${TEST_EMAIL}\n`);
+  const now = Date.now();
+  assert.deepEqual(await scanGitRepos({ db: ctx.analytics, dataDir: ctx.dataDir, now }), { attempted: 1, succeeded: 1 });
+  assert.equal(currentMembership(ctx.analytics, "repo").length, 1);
+  await writeFile(configPath, "[user]\n\temail = other@example.invalid\n");
+  // The source's local identity is still TEST_EMAIL; it cannot override the
+  // global Settings identity for personal Analytics.
+  assert.equal((await gitText(["config", "--local", "--get", "user.email"], source)), TEST_EMAIL);
+  assert.deepEqual(await scanGitRepos({ db: ctx.analytics, dataDir: ctx.dataDir, now: now + 1 }), { attempted: 1, succeeded: 1 });
+  assert.equal(currentMembership(ctx.analytics, "repo").length, 0);
+  assert.equal(gitCount(ctx.analytics, now - DAY_MS, now + 1, now + 1).value, 0);
 });
 
 test("scanner records safe failures, preserves prior readiness, and bounds source history", async (t) => {

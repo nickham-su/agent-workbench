@@ -2,9 +2,9 @@
 
 ## 范围与安全边界
 
-Git Dashboard 统计当前受管理 Repo 的当前可达提交历史，不以 Workspace、作者、分支、remote 或路径作为公开筛选或展示维度。
+Git Dashboard 统计显式绑定仍存在的凭证的受管理 Repo 中，作者邮箱与 Settings 全局 Git `user.email` 匹配的当前可达提交历史，不以 Workspace、分支、remote 或路径作为公开筛选或展示维度。邮箱只是统计匹配条件，不证明提交者身份。
 
-- Git scan 只读取受管理 Repo；路径解析、防穿越和软链边界沿用现有 Workspace/数据目录安全规则。
+- Git scan 只读取显式绑定凭证的受管理 Repo，host 默认凭证不算；路径解析、防穿越和软链边界沿用现有 Workspace/数据目录安全规则。扫描子进程仍隔离全局 Git 配置，由可信调度侧读取与 Settings 相同来源的全局邮箱，并在流内按作者邮箱筛选；不读取凭证秘密。
 - Git 采集不得阻断 Commit、Push、Sync、工作区操作或 Agent 执行。
 - 工作树忙、锁冲突、scan 超时或命令失败时延后该 Repo；不得高频重试或输出 Git 原始错误。
 - API/UI/日志只暴露受控 Repo 安全 ID、状态、coverage 和聚合数值；不返回目录、remote、ref、真实 SHA、Commit Message、Diff 或文件清单。
@@ -53,6 +53,10 @@ analytics_git_scan
 - 写入 `analytics_git_membership(scan_id, repo_id, commit_identity)`；
 - 将该 Repo 的 `current_scan_id` 原子切换到本次 ready scan；
 - 更新 Repo coverage 与 Domain 状态。
+
+凭证绑定或全局邮箱变更不会立即清空旧快照；下一次后台扫描重新计算合格 Repo 的当前 membership，已不合格的 Repo 退出当前统计，因此历史日期数值可能改变。发布前尽力复核仓库绑定与全局邮箱，复核可观察到变更则放弃该次扫描；两者与 Analytics 发布不在同一事务中，复核与发布间的外部变更可能短时展示旧结果，由后续扫描纠正。无全局邮箱或无合格 Repo 时，不可认证完整零值。
+
+Git 允许作者邮箱为空（如 `<>`）；结构完整的空邮箱记录按不匹配跳过，其余匹配提交仍可正常采集；邮箱中带控制字符、字段分隔符、零字节或损坏记录头则使扫描失败，不将原始邮箱写入事实或日志。
 
 失败 scan 不替换原有 current generation。每个 Repo 同时最多一个 scan；无需通用 Lease 或 repair generation。
 
