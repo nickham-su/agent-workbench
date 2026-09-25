@@ -12,6 +12,12 @@ export function isRequestAuthed(ctx: AppContext, req: { headers: { cookie?: stri
   return verifySessionCookieValue({ authToken: ctx.authToken, value: v, nowMs: nowMs() });
 }
 
+function isInternalTokenRoute(path: string) {
+  // Analytics producers use an internal endpoint outside the /api/internal/ prefix.
+  // Match only that route, not the Dashboard or other Analytics endpoints.
+  return path.startsWith("/api/internal/") || path === "/api/analytics/internal/signal";
+}
+
 export async function registerAuthGuards(app: FastifyInstance, ctx: AppContext) {
   // Guard ALL internal endpoints with internal token.
   // Must be enabled regardless of whether web auth (cookie) is enabled.
@@ -19,7 +25,7 @@ export async function registerAuthGuards(app: FastifyInstance, ctx: AppContext) 
     const url = String(req.raw.url || "");
     const path = url.split("?")[0] || "";
     if (!url.startsWith("/api/")) return;
-    if (!path.startsWith("/api/internal/")) return;
+    if (!isInternalTokenRoute(path)) return;
 
     const token = String(req.headers["x-awb-agent-internal-token"] || "");
     if (token !== ctx.agentInternalToken) {
@@ -36,7 +42,7 @@ export async function registerAuthGuards(app: FastifyInstance, ctx: AppContext) 
     if (!url.startsWith("/api/")) return;
     if (path === "/api/health") return;
     if (path === "/api/auth/login") return;
-    if (path.startsWith("/api/internal/")) return;
+    if (isInternalTokenRoute(path)) return;
 
     // WebSocket 鉴权放在 handler 内，确保能返回自定义 close code（4401），避免浏览器表现为“连接失败/1006”。
     if (path.startsWith("/api/terminals/") && path.endsWith("/ws")) return;

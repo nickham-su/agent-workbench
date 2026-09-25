@@ -7,11 +7,13 @@ import {
   DashboardQuerySuccessResponseSchema,
   AnalyticsProducerSignalSchema,
   AnalyticsSignalResultSchema,
+  ErrorResponseSchema,
   isCanonicalAnalyticsSignal,
   type AnalyticsSignal,
   type DashboardQueryErrorResponse
 } from "@agent-workbench/shared";
 import type { AppContext } from "../../app/context.js";
+import { HttpError } from "../../app/errors.js";
 import { validateDashboardQueryInput } from "./analytics.service.js";
 import type { AnalyticsSupervisor } from "./analytics-supervisor.js";
 
@@ -44,10 +46,10 @@ export async function registerAnalyticsRoutes(app: FastifyInstance, ctx: AppCont
     {
       attachValidation: true,
       validatorCompiler: canonicalTypeBoxValidator,
-      schema: { hide: true, body: AnalyticsProducerSignalSchema, response: { 200: AnalyticsSignalResultSchema, 401: AnalyticsSignalResultSchema } }
+      schema: { hide: true, body: AnalyticsProducerSignalSchema, response: { 200: AnalyticsSignalResultSchema, 401: ErrorResponseSchema } }
     },
-    async (request, reply) => {
-      if (request.headers["x-awb-agent-internal-token"] !== ctx.agentInternalToken) return reply.code(401).send({ accepted: false, receipt: null });
+    async (request) => {
+      if (request.headers["x-awb-agent-internal-token"] !== ctx.agentInternalToken) throw new HttpError(401, "Unauthorized");
       const signal = request.body as unknown;
       if ((request as ValidatedRequest).validationError || !isCanonicalAnalyticsSignal(signal) || !supervisor) return { accepted: false, receipt: null };
       return await supervisor.signal(signal as AnalyticsSignal);
