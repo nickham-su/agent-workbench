@@ -17,7 +17,7 @@ function parsedLocalParts(local: string): { year: number; month: number; day: nu
   return naive.getUTCFullYear() === year && naive.getUTCMonth() === month - 1 && naive.getUTCDate() === day ? { year, month, day, hour, minute } : null;
 }
 
-function formatWallTime(timestamp: number, timezone: string) {
+export function formatWallTime(timestamp: number, timezone: string) {
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(timestamp);
   const value = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value;
   // Some ICU implementations still render midnight as 24:00 despite h23.
