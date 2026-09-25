@@ -129,6 +129,52 @@ test("receipt replay is idempotent and conflict leaves facts unchanged", async (
   );
 });
 
+test("model cache tuple remains atomic across old, verified, and delayed signals", async (t) => {
+  const root = await dataDir();
+  t.after(async () => fs.rm(root, { recursive: true, force: true }));
+  const db = await openAnalyticsDb(root, 1);
+  t.after(() => closeAnalyticsDb(db));
+  enableWorkerFactDomains(db);
+  assert.equal(acceptAnalyticsSignal(db, checkpoint({ kind: "register", domain: "model", producerGeneration: "cache-generation", sentAt: 10, controlSequence: 1, committedSequence: 0 }), 10).accepted, true);
+
+  const payload = {
+    modelCallId: "cache-call", executionId: "cache-execution", runId: "cache-run", attemptNo: 1,
+    providerId: "anthropic", modelId: "cache-model", startedAt: 100, endedAt: 200,
+    status: "completed", completionQuality: "observed", timeoutKind: null,
+    inputTokens: 100, outputTokens: 10, totalTokens: 110, totalSource: "reported",
+    cacheReadTokens: 900, cacheWriteTokens: null, cacheComparable: true,
+    cacheWriteVerified: false, failureKind: null,
+  };
+  const signal = (sequence: number, patch: Record<string, unknown> = {}) => event({
+    domain: "model", eventType: "model_finished", producerGeneration: "cache-generation",
+    subjectIdentity: "model:cache-call", eventId: `cache-event-${sequence}`, sequence,
+    observedAt: 200 + sequence, payload: { ...payload, ...patch } as any,
+  });
+  const stored = () => db.prepare(`SELECT cache_read_tokens, cache_input_tokens, cache_comparable,
+    input_tokens, output_tokens, total_tokens FROM analytics_model_call_fact WHERE model_call_id='cache-call'`).get();
+  const expected = { cache_read_tokens: 900, cache_input_tokens: 1000, cache_comparable: 1, input_tokens: 100, output_tokens: 10, total_tokens: 110 };
+  const legacy = signal(1);
+  assert.equal(isCanonicalAnalyticsSignal(legacy), true);
+  assert.equal(acceptAnalyticsSignal(db, legacy, 201).accepted, true);
+  assert.deepEqual(stored(), { ...expected, cache_input_tokens: null, cache_comparable: 0 });
+  assert.equal(acceptAnalyticsSignal(db, signal(2, { cacheInputTokens: 1000 }), 202).accepted, true);
+  assert.deepEqual(stored(), expected);
+  // A later legacy payload cannot splice its read value onto an old denominator.
+  assert.equal(acceptAnalyticsSignal(db, signal(3, { cacheReadTokens: 10, cacheComparable: false }), 203).accepted, true);
+  assert.deepEqual(stored(), expected);
+  for (const [index, patch] of [
+    { cacheReadTokens: 1100, cacheInputTokens: 1000, cacheComparable: true },
+    { cacheReadTokens: 1100, cacheInputTokens: 1000, cacheComparable: false },
+    { cacheReadTokens: 0, cacheInputTokens: 1000, cacheComparable: false },
+    { cacheReadTokens: null, cacheInputTokens: 1000, cacheComparable: false },
+  ].entries()) {
+    const invalid = signal(4 + index, patch);
+    assert.equal(isCanonicalAnalyticsSignal(invalid), false, `invalid tuple canonical ${index}`);
+    assert.equal(acceptAnalyticsSignal(db, invalid, 204 + index).accepted, false, `invalid tuple ${index}`);
+    assert.deepEqual(stored(), expected);
+  }
+});
+
 test("source configuration rejects stale, conflicting, and retrospectively effective controls", async (t) => {
   const root = await dataDir();
   t.after(() => fs.rm(root, { recursive: true, force: true }));

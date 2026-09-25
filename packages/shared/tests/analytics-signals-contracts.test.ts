@@ -21,6 +21,30 @@ test("analytics signal contracts are closed and strictly discriminate event stag
   assert.equal(Value.Check(AnalyticsSignalEventSchema, { ...executionStarted, payload: { runId: "r1", runKind: "user", parentRunId: null, startedAt: 1, endedAt: null, state: "running" } }), false);
 });
 
+test("model cache denominator is optional for old signals but new comparable tuples must agree", () => {
+  const model = {
+    ...executionStarted, domain: "model", eventType: "model_finished", subjectIdentity: "model:r1",
+    payload: {
+      modelCallId: "model:r1", executionId: "execution:r1", runId: "r1", attemptNo: 1,
+      providerId: "openai", modelId: "model", startedAt: 1, endedAt: 2,
+      status: "completed", completionQuality: "observed", timeoutKind: null,
+      inputTokens: 100, outputTokens: 10, totalTokens: 110, totalSource: "reported",
+      cacheReadTokens: 50, cacheWriteTokens: null, cacheComparable: true,
+      cacheWriteVerified: false, failureKind: null,
+    },
+  };
+  const withCache = (read: unknown, input: unknown, comparable: boolean) => ({
+    ...model, payload: { ...model.payload, cacheReadTokens: read, cacheInputTokens: input, cacheComparable: comparable },
+  });
+  assert.equal(isCanonicalAnalyticsSignal(model), true, "old fingerprinted payload is still accepted");
+  assert.equal(isCanonicalAnalyticsSignal(withCache(50, 100, true)), true);
+  assert.equal(isCanonicalAnalyticsSignal(withCache(0, 100, true)), true, "a reported zero is comparable");
+  assert.equal(isCanonicalAnalyticsSignal(withCache(0, 0, true)), true, "zero input is reported but has no ratio");
+  assert.equal(isCanonicalAnalyticsSignal(withCache(50, null, false)), true, "known read without a denominator is not comparable");
+  for (const [read, input, comparable] of [[51, 50, true], [51, 50, false], [null, 50, false], [50, null, true], [0, 100, false], [true, 100, true], ["0", 100, true], [0.5, 100, true], [0, Number.MAX_SAFE_INTEGER + 1, true]] as const)
+    assert.equal(isCanonicalAnalyticsSignal(withCache(read, input, comparable)), false);
+});
+
 test("checkpoint/control signals retain only coherent bounded completeness fields", () => {
   const valid = { kind: "checkpoint", domain: "model", producerNamespace: "agent_worker", producerId: "agent_runner", producerGeneration: "g1", sentAt: 1, controlSequence: 1, finalSequence: null, committedSequence: 0, maxObservedAt: null, earliestOpenStartedAt: null, openExecutionCount: 0, openModelCount: 0, knownDrop: false, droppedSinceSequence: null, outboxPending: 0, oldestPendingAt: null, lossEpoch: 0 };
   assert.equal(Value.Check(AnalyticsControlSignalSchema, valid), true);

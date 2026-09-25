@@ -135,6 +135,8 @@ const modelBase = {
     Type.Literal("unavailable"),
   ]),
   cacheReadTokens: Nullable(Count),
+  /** Optional for durable signals produced before cache denominator support. */
+  cacheInputTokens: Type.Optional(Nullable(Count)),
   cacheWriteTokens: Nullable(Count),
   cacheComparable: Type.Boolean(),
   cacheWriteVerified: Type.Boolean(),
@@ -489,7 +491,16 @@ export function isCanonicalAnalyticsSignal(
 ): value is AnalyticsSignal {
   if (!Value.Check(AnalyticsSignalSchema, value)) return false;
   const signal = value as AnalyticsSignal;
-  if (signal.kind === "event") return true;
+  if (signal.kind === "event") {
+    if (signal.domain !== "model") return true;
+    const { cacheReadTokens: read, cacheInputTokens: input, cacheComparable: comparable } = signal.payload;
+    // Historic outbox signals have no denominator. They are accepted, but
+    // the store must never turn their old comparable bit into a new sample.
+    if (input === undefined) return true;
+    if (input !== null && (read === null || read > input)) return false;
+    const valid = input !== null && read !== null && read <= input;
+    return comparable === valid;
+  }
   if (signal.kind === "expected_slots_config") {
     const actual = signal.slots
       .map(

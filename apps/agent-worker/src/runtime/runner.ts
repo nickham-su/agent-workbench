@@ -1211,20 +1211,48 @@ function extractTotalTokens(raw: unknown): number | null {
   return null;
 }
 
-type AnalyticsUsage = { inputTokens: number | null; outputTokens: number | null; totalTokens: number | null; totalSource: "reported" | "derived" | "unavailable"; cacheReadTokens: number | null; cacheWriteTokens: number | null; cacheComparable: boolean; cacheWriteVerified: boolean };
+type AnalyticsUsage = { inputTokens: number | null; outputTokens: number | null; totalTokens: number | null; totalSource: "reported" | "derived" | "unavailable"; cacheReadTokens: number | null; cacheInputTokens: number | null; cacheWriteTokens: number | null; cacheComparable: boolean; cacheWriteVerified: boolean };
+
+type CacheStep = { usage: unknown; providerMetadata: unknown };
+
+function cacheCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+/** SDK inputTokens includes cached input for OpenAI, but not for Anthropic. */
+function cacheInputForStep(step: CacheStep, providerNpm: string, cacheRead: number | null): number | null {
+  const usage = asRecord(step.usage);
+  const input = cacheCount(usage?.inputTokens);
+  if (cacheRead === null || input === null || cacheCount(usage?.cachedInputTokens) !== cacheRead) return null;
+  if (providerNpm === "@ai-sdk/openai") return cacheRead <= input ? input : null;
+  if (providerNpm !== "@ai-sdk/anthropic") return null;
+  const anthropic = asRecord(asRecord(step.providerMetadata)?.anthropic);
+  const raw = asRecord(anthropic?.usage);
+  if (!raw || (raw.iterations != null && (!Array.isArray(raw.iterations) || raw.iterations.length > 0))) return null;
+  const uncached = cacheCount(raw.input_tokens);
+  const read = cacheCount(raw.cache_read_input_tokens);
+  const created = cacheCount(raw.cache_creation_input_tokens);
+  if (uncached !== input || read !== cacheRead || created === null) return null;
+  const total = uncached + read + created;
+  return Number.isSafeInteger(total) && cacheRead <= total ? total : null;
+}
 
 function normalizeAnalyticsUsage(raw: unknown): AnalyticsUsage {
-  const unavailable: AnalyticsUsage = { inputTokens: null, outputTokens: null, totalTokens: null, totalSource: "unavailable", cacheReadTokens: null, cacheWriteTokens: null, cacheComparable: false, cacheWriteVerified: false };
+  const unavailable: AnalyticsUsage = { inputTokens: null, outputTokens: null, totalTokens: null, totalSource: "unavailable", cacheReadTokens: null, cacheInputTokens: null, cacheWriteTokens: null, cacheComparable: false, cacheWriteVerified: false };
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return unavailable;
   const usage = raw as Record<string, unknown>;
   const input = toNonNegativeInt(usage.inputTokens) ?? toNonNegativeInt(usage.promptTokens) ?? toNonNegativeInt(usage.input_tokens) ?? toNonNegativeInt(usage.prompt_tokens);
   const output = toNonNegativeInt(usage.outputTokens) ?? toNonNegativeInt(usage.completionTokens) ?? toNonNegativeInt(usage.output_tokens) ?? toNonNegativeInt(usage.completion_tokens);
   const reported = toNonNegativeInt(usage.totalTokens) ?? toNonNegativeInt(usage.total_tokens) ?? toNonNegativeInt(usage.total);
   const details = (usage.inputTokenDetails ?? usage.prompt_tokens_details) as Record<string, unknown> | undefined;
-  const cacheRead = toNonNegativeInt(usage.cacheReadTokens) ?? toNonNegativeInt(usage.cache_read_tokens) ?? toNonNegativeInt(details?.cacheReadTokens) ?? toNonNegativeInt(details?.cached_tokens);
-  const cacheWrite = toNonNegativeInt(usage.cacheWriteTokens) ?? toNonNegativeInt(usage.cache_write_tokens) ?? toNonNegativeInt(details?.cacheWriteTokens);
+  const cacheRead = cacheCount(usage.cachedInputTokens) ?? cacheCount(usage.cacheReadTokens) ?? cacheCount(usage.cache_read_tokens) ?? cacheCount(details?.cacheReadTokens) ?? cacheCount(details?.cached_tokens);
+  const cacheWrite = cacheCount(usage.cacheWriteTokens) ?? cacheCount(usage.cache_write_tokens) ?? cacheCount(details?.cacheWriteTokens);
   const derived = reported === null && input !== null && output !== null;
-  return { inputTokens: input, outputTokens: output, totalTokens: reported ?? (derived ? input! + output! : null), totalSource: reported !== null ? "reported" : derived ? "derived" : "unavailable", cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite, cacheComparable: cacheRead !== null, cacheWriteVerified: cacheWrite !== null && Boolean(usage.cacheWriteVerified ?? usage.cache_write_verified) };
+  return { inputTokens: input, outputTokens: output, totalTokens: reported ?? (derived ? input! + output! : null), totalSource: reported !== null ? "reported" : derived ? "derived" : "unavailable", cacheReadTokens: cacheRead, cacheInputTokens: null, cacheWriteTokens: cacheWrite, cacheComparable: false, cacheWriteVerified: cacheWrite !== null && Boolean(usage.cacheWriteVerified ?? usage.cache_write_verified) };
 }
 
 async function boundedUsageValue(value: unknown, timeoutMs = 100): Promise<unknown> {
@@ -1241,21 +1269,30 @@ async function boundedUsageValue(value: unknown, timeoutMs = 100): Promise<unkno
   }
 }
 
-async function readStreamAnalyticsUsage(stream: unknown): Promise<AnalyticsUsage> {
+async function readStreamAnalyticsUsage(stream: unknown, step?: CacheStep, providerNpm?: string): Promise<AnalyticsUsage> {
   const streamObj = stream as Record<string, unknown>;
   // Usage/totalUsage/response are provider aliases in many SDKs. Bound the
   // whole observation round, rather than serially spending a timeout on each.
   const candidates = await Promise.all(
     [streamObj.usage, streamObj.totalUsage, streamObj.response].map(async (candidate) => await boundedUsageValue(candidate).catch(() => undefined))
   );
+  const withCache = (usage: AnalyticsUsage): AnalyticsUsage => {
+    const stepUsage = step && normalizeAnalyticsUsage(step.usage);
+    const cacheRead = stepUsage?.cacheReadTokens ?? null;
+    const cacheInput = step && providerNpm ? cacheInputForStep(step, providerNpm, cacheRead) : null;
+    return { ...usage, cacheReadTokens: stepUsage?.cacheReadTokens ?? usage.cacheReadTokens,
+      cacheInputTokens: cacheInput, cacheComparable: cacheInput !== null };
+  };
   for (const resolved of candidates) {
     try {
       const direct = normalizeAnalyticsUsage(resolved);
-      if (direct.totalTokens !== null || direct.inputTokens !== null || direct.outputTokens !== null) return direct;
+      if (direct.totalTokens !== null || direct.inputTokens !== null || direct.outputTokens !== null) {
+        return withCache(direct);
+      }
       if (resolved && typeof resolved === "object") {
         const nested = resolved as Record<string, unknown>;
         const usage = normalizeAnalyticsUsage(nested.usage ?? nested.totalUsage);
-        if (usage.totalTokens !== null || usage.inputTokens !== null || usage.outputTokens !== null) return usage;
+        if (usage.totalTokens !== null || usage.inputTokens !== null || usage.outputTokens !== null) return withCache(usage);
       }
     } catch { /* Analytics must not delay or fail the business attempt. */ }
   }
@@ -2707,8 +2744,10 @@ export class AgentRunner {
 
       const analyticsModelStartedAt = this.nowMsFn();
       const analyticsModelCallId = newSortableId("model");
+      let cacheStep: CacheStep | undefined;
+      let finishedSteps = 0;
       try {
-        const analyticsModelPayload = { modelCallId: analyticsModelCallId, runId: run.runId, executionId: run.runId, attemptNo: retryCount + 1, providerId: profile.provider.id ?? "unknown", modelId: profile.model.id ?? "unknown", startedAt: analyticsModelStartedAt, endedAt: null, status: "running" as const, completionQuality: "unknown" as const, timeoutKind: null, inputTokens: null, outputTokens: null, totalTokens: null, totalSource: "unavailable" as const, cacheReadTokens: null, cacheWriteTokens: null, cacheComparable: false, cacheWriteVerified: false, failureKind: null };
+        const analyticsModelPayload = { modelCallId: analyticsModelCallId, runId: run.runId, executionId: run.runId, attemptNo: retryCount + 1, providerId: profile.provider.id ?? "unknown", modelId: profile.model.id ?? "unknown", startedAt: analyticsModelStartedAt, endedAt: null, status: "running" as const, completionQuality: "unknown" as const, timeoutKind: null, inputTokens: null, cacheInputTokens: null, cacheWriteTokens: null, cacheComparable: false, cacheWriteVerified: false, failureKind: null };
         this.analyticsSignals?.emitModel(analyticsModelPayload, "model_invoked", analyticsModelCallId);
         const stream = this.streamTextFn(request);
         attemptStream = stream;
@@ -2717,6 +2756,10 @@ export class AgentRunner {
           if (requestController.signal.aborted) break;
           lastChunkAt = this.nowMsFn();
           if (!chunk || typeof chunk !== "object") continue;
+          if (chunk.type === "finish-step") {
+            finishedSteps++;
+            cacheStep = finishedSteps === 1 ? { usage: chunk.usage, providerMetadata: chunk.providerMetadata } : undefined;
+          }
           const observedProtocolChunk = conversationStateAttempt?.observeChunk(chunk);
           const providerReplayUpdate = this.providerReplayPartFromChunkFn?.(chunk)
             ?? observedProtocolChunk?.partUpdate;
@@ -2935,7 +2978,13 @@ export class AgentRunner {
       } finally {
         // Failed/retried streams may expose a never-settling usage promise.
         // Never let an optional Analytics observation delay the retry path.
-        const analyticsUsage = attemptReachedTerminal && attemptStream ? await readStreamAnalyticsUsage(attemptStream) : normalizeAnalyticsUsage(null);
+        // Only a single finish-step pairs SDK usage with its provider metadata.
+        // A multi-step totalUsage must never be mixed with last-step metadata.
+        const cacheProvider = (profile.provider.npm === "@ai-sdk/openai" || profile.provider.npm === "@ai-sdk/anthropic") && profile.provider.options.baseURL
+          ? undefined : profile.provider.npm;
+        const analyticsUsage = attemptReachedTerminal && attemptStream
+          ? await readStreamAnalyticsUsage(attemptStream, finishedSteps === 1 ? cacheStep : undefined, cacheProvider)
+          : normalizeAnalyticsUsage(null);
         const analyticsAttemptStatus = requestController.signal.aborted ? (idleTimedOut || totalTimedOut ? "timed_out" : "cancelled") : (attemptReachedTerminal ? "completed" : "failed");
         this.analyticsSignals?.emitModel({ modelCallId: analyticsModelCallId, runId: run.runId, executionId: run.runId, attemptNo: retryCount + 1, providerId: profile.provider.id ?? "unknown", modelId: profile.model.id ?? "unknown", startedAt: analyticsModelStartedAt, endedAt: this.nowMsFn(), status: analyticsAttemptStatus, completionQuality: "observed", timeoutKind: idleTimedOut ? "idle" : totalTimedOut ? "total" : null, ...analyticsUsage, failureKind: analyticsAttemptStatus === "completed" ? null : analyticsAttemptStatus === "timed_out" ? "timeout" : analyticsAttemptStatus === "cancelled" ? "cancelled" : "provider" }, "model_finished", analyticsModelCallId);
 

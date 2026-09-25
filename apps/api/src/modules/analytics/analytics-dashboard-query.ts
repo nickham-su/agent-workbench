@@ -47,7 +47,7 @@ type Mutable<T> = { -readonly [K in keyof T]: Mutable<T[K]> };
 type DashboardBuilder = Mutable<DashboardData>;
 type ComparisonAggregate =
   | { kind: "count" | "total"; value: number }
-  | { kind: "ratio"; numerator: number; denominator: number }
+  | { kind: "ratio"; numerator: number; denominator: number; cache?: true }
   | { kind: "average"; sum: number; samples: number };
 const comparisonAggregates = new WeakMap<object, ComparisonAggregate>();
 function aggregate<T extends object>(result: T, value: ComparisonAggregate): T {
@@ -391,6 +391,13 @@ function ratio(numerator: number, denominator: number) {
   return denominator === 0 ? null : numerator / denominator;
 }
 
+/** Unlike other rates, cached input must be part of the same complete input total. */
+function cacheRatio(read: number, input: number): number | null {
+  if (!Number.isSafeInteger(read) || !Number.isSafeInteger(input) ||
+      read < 0 || input < 0 || read > input || input === 0) return null;
+  return read / input;
+}
+
 function sumOrNull(value: number | null, sampleCount: number) {
   return sampleCount === 0 ? null : (value ?? 0);
 }
@@ -519,8 +526,8 @@ function modelRowsForRange(
     COALESCE(SUM(CASE WHEN status='completed' AND ended_at IS NOT NULL THEN ended_at-started_at ELSE 0 END),0) AS duration_sum, SUM(status='completed' AND ended_at IS NOT NULL) AS duration_samples,
     COALESCE(SUM(input_tokens),0) AS input_tokens, SUM(input_tokens IS NOT NULL) AS input_reported_count, COALESCE(SUM(output_tokens),0) AS output_tokens, SUM(output_tokens IS NOT NULL) AS output_reported_count,
     COALESCE(SUM(total_tokens),0) AS total_tokens, SUM(total_source='reported') AS total_reported_count, SUM(total_source='derived') AS total_derived_count,
-    COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens, SUM(cache_comparable=1) AS cache_comparable_count,
-    COALESCE(SUM(CASE WHEN cache_comparable=1 THEN input_tokens ELSE 0 END),0) AS comparable_input_tokens, COALESCE(SUM(CASE WHEN cache_comparable=1 THEN cache_read_tokens ELSE 0 END),0) AS comparable_cache_read_tokens
+    COALESCE(SUM(CASE WHEN cache_comparable=1 THEN cache_read_tokens ELSE 0 END),0) AS cache_read_tokens, SUM(cache_comparable=1) AS cache_comparable_count,
+    COALESCE(SUM(CASE WHEN cache_comparable=1 THEN cache_input_tokens ELSE 0 END),0) AS comparable_input_tokens, COALESCE(SUM(CASE WHEN cache_comparable=1 THEN cache_read_tokens ELSE 0 END),0) AS comparable_cache_read_tokens
     FROM analytics_model_call_fact WHERE started_at>=? AND started_at<? GROUP BY provider_id,model_id,status,timeout_kind`);
   const rollup =
     db.prepare(`SELECT provider_id, model_id, status, timeout_kind, request_count, completed_duration_sum_ms AS duration_sum, completed_duration_sample_count AS duration_samples,
@@ -1140,7 +1147,7 @@ function queryDashboardSnapshot(
       inputTokens: total.inputTokens + row.input_tokens,
       outputTokens: total.outputTokens + row.output_tokens,
       totalTokens: total.totalTokens + row.total_tokens,
-      cacheReadTokens: total.cacheReadTokens + row.cache_read_tokens,
+      cacheReadTokens: total.cacheReadTokens + row.comparable_cache_read_tokens,
       inputReportedCount: total.inputReportedCount + row.input_reported_count,
       outputReportedCount:
         total.outputReportedCount + row.output_reported_count,
@@ -1273,7 +1280,7 @@ function queryDashboardSnapshot(
   );
   data.overview.cacheHitRate = modelMetric(
     {
-      ratio: ratio(
+      ratio: cacheRatio(
         modelAggregate.comparableCacheReadTokens ?? 0,
         modelAggregate.comparableInputTokens ?? 0,
       ),
@@ -1282,6 +1289,7 @@ function queryDashboardSnapshot(
       kind: "ratio",
       numerator: modelAggregate.comparableCacheReadTokens ?? 0,
       denominator: modelAggregate.comparableInputTokens ?? 0,
+      cache: true,
     },
   );
 
@@ -1345,7 +1353,7 @@ function queryDashboardSnapshot(
       const row = modelBucketStats[index]!;
       return {
         ...bucket,
-        ratio: ratio(row.cacheReadTokens, row.comparableInput),
+        ratio: cacheRatio(row.cacheReadTokens, row.comparableInput),
       };
     }),
     modelKnown,
@@ -1426,10 +1434,10 @@ function queryDashboardSnapshot(
           row.total_reported_count + row.total_derived_count,
         ),
         cacheReadTokens: sumOrNull(
-          row.cache_read_tokens,
+          row.comparable_cache_read_tokens,
           row.cache_comparable_count,
         ),
-        cacheHitRate: ratio(
+        cacheHitRate: cacheRatio(
           row.comparable_cache_read_tokens,
           row.comparable_input_tokens,
         ),
@@ -2042,6 +2050,11 @@ function comparisonFromAggregates(
   previous: ComparisonAggregate,
 ): AnalyticsComparisonResult {
   if (current.kind === "ratio" && previous.kind === "ratio") {
+    // Other rates retain their existing semantics; only cache ratios require a bounded denominator.
+    if (current.cache && previous.cache &&
+        ((cacheRatio(current.numerator, current.denominator) === null && (current.numerator !== 0 || current.denominator !== 0)) ||
+         (cacheRatio(previous.numerator, previous.denominator) === null && (previous.numerator !== 0 || previous.denominator !== 0))))
+      return comparisonNotApplicable;
     if (previous.denominator === 0)
       return { status: "previous_zero", delta: null, kind: null };
     if (current.denominator === 0) return comparisonNotApplicable;

@@ -1339,6 +1339,13 @@ function applyFact(db: AnalyticsDb, event: AnalyticsSignalEvent, now: number) {
     const input = p.inputTokens as number | null;
     const output = p.outputTokens as number | null;
     const total = input !== null && output !== null ? input + output : null;
+    const cacheRead = p.cacheReadTokens as number | null;
+    const cacheInput = p.cacheInputTokens as number | null | undefined;
+    // Recheck at the store boundary: IPC and delayed historic outbox signals
+    // must not reinstate comparability from a legacy boolean without a denominator.
+    const cacheComparable = cacheInput != null && cacheRead != null &&
+      Number.isSafeInteger(cacheInput) && Number.isSafeInteger(cacheRead) &&
+      cacheRead >= 0 && cacheRead <= cacheInput && p.cacheComparable === true;
     const status = String(p.status);
     const failure =
       status === "completed" || status === "running"
@@ -1350,8 +1357,8 @@ function applyFact(db: AnalyticsDb, event: AnalyticsSignalEvent, now: number) {
             : "provider";
     db.prepare(
       `INSERT INTO analytics_model_call_fact
-      (model_call_id, execution_id, run_id, attempt_no, producer_namespace, producer_id, producer_generation, provider_id, model_id, started_at, ended_at, status, completion_quality, timeout_kind, input_tokens, output_tokens, total_tokens, total_source, cache_read_tokens, cache_write_tokens, cache_comparable, cache_write_verified, failure_kind, observed_at, updated_at, collected_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (model_call_id, execution_id, run_id, attempt_no, producer_namespace, producer_id, producer_generation, provider_id, model_id, started_at, ended_at, status, completion_quality, timeout_kind, input_tokens, output_tokens, total_tokens, total_source, cache_read_tokens, cache_write_tokens, cache_comparable, cache_write_verified, failure_kind, observed_at, updated_at, collected_at, cache_input_tokens)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(model_call_id) DO UPDATE SET
         producer_namespace=COALESCE(analytics_model_call_fact.producer_namespace, excluded.producer_namespace),
         producer_id=COALESCE(analytics_model_call_fact.producer_id, excluded.producer_id),
@@ -1360,7 +1367,13 @@ function applyFact(db: AnalyticsDb, event: AnalyticsSignalEvent, now: number) {
         completion_quality=CASE WHEN excluded.ended_at IS NOT NULL THEN excluded.completion_quality ELSE analytics_model_call_fact.completion_quality END,
         timeout_kind=COALESCE(excluded.timeout_kind, timeout_kind), input_tokens=COALESCE(excluded.input_tokens, input_tokens), output_tokens=COALESCE(excluded.output_tokens, output_tokens),
         total_tokens=COALESCE(excluded.total_tokens, total_tokens), total_source=CASE WHEN excluded.total_tokens IS NULL THEN total_source ELSE excluded.total_source END,
-        cache_read_tokens=COALESCE(excluded.cache_read_tokens, cache_read_tokens), cache_write_tokens=COALESCE(excluded.cache_write_tokens, cache_write_tokens), cache_comparable=MAX(cache_comparable, excluded.cache_comparable), cache_write_verified=MAX(cache_write_verified, excluded.cache_write_verified), failure_kind=COALESCE(excluded.failure_kind, failure_kind), observed_at=MAX(observed_at, excluded.observed_at), updated_at=MAX(updated_at, excluded.updated_at)`,
+        cache_read_tokens=CASE WHEN excluded.cache_comparable=1 THEN excluded.cache_read_tokens
+          WHEN analytics_model_call_fact.cache_comparable=1 THEN analytics_model_call_fact.cache_read_tokens
+          ELSE COALESCE(excluded.cache_read_tokens, analytics_model_call_fact.cache_read_tokens) END,
+        cache_input_tokens=CASE WHEN excluded.cache_comparable=1 THEN excluded.cache_input_tokens ELSE analytics_model_call_fact.cache_input_tokens END,
+        cache_comparable=CASE WHEN excluded.cache_comparable=1 THEN 1 ELSE analytics_model_call_fact.cache_comparable END,
+        cache_write_tokens=COALESCE(excluded.cache_write_tokens, cache_write_tokens),
+        cache_write_verified=MAX(cache_write_verified, excluded.cache_write_verified), failure_kind=COALESCE(excluded.failure_kind, failure_kind), observed_at=MAX(observed_at, excluded.observed_at), updated_at=MAX(updated_at, excluded.updated_at)`,
     ).run(
       p.modelCallId ?? event.subjectIdentity,
       p.executionId,
@@ -1380,14 +1393,15 @@ function applyFact(db: AnalyticsDb, event: AnalyticsSignalEvent, now: number) {
       output,
       p.totalTokens ?? total,
       p.totalSource ?? (total === null ? "unavailable" : "derived"),
-      p.cacheReadTokens,
+      cacheRead,
       p.cacheWriteTokens,
-      p.cacheComparable ? 1 : 0,
+      cacheComparable ? 1 : 0,
       p.cacheWriteVerified ? 1 : 0,
       p.failureKind ?? failure,
       event.observedAt,
       now,
       now,
+      cacheComparable ? cacheInput : null,
     );
     markDirtyHour(db, "model", p.startedAt as number, now);
     return;
@@ -1446,7 +1460,8 @@ export function acceptAnalyticsSignal(
 ): AnalyticsSignalResult {
   return db.transaction(() => {
     if (
-      signal.kind === "expected_slots_config" &&
+      (signal.kind === "expected_slots_config" ||
+        (signal.kind === "event" && signal.domain === "model")) &&
       !isCanonicalAnalyticsSignal(signal)
     )
       return { accepted: false, receipt: null };

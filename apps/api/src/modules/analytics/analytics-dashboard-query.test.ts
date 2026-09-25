@@ -38,6 +38,70 @@ test("dashboard query keeps unknown zero unavailable and returns a contract-vali
   }
 });
 
+test("cache coverage and hits use only verified provider-specific denominators in Fact and rollup paths", async () => {
+  const db = await database();
+  try {
+    const hour = HOUR_MS;
+    db.prepare("UPDATE analytics_domain_state SET status='healthy', collection_started_at=0, reconciled_through=?, rollup_ready_through=? WHERE domain='model'").run(4 * hour, 4 * hour);
+    db.prepare("UPDATE analytics_domain_config_version SET enabled_fact_domains_json='[\"model\"]' WHERE collection_config_version='0000000000000000'").run();
+    const insert = db.prepare(`INSERT INTO analytics_model_call_fact
+      (model_call_id,execution_id,run_id,attempt_no,provider_id,model_id,started_at,ended_at,status,completion_quality,timeout_kind,input_tokens,output_tokens,total_tokens,total_source,cache_read_tokens,cache_write_tokens,cache_comparable,cache_write_verified,failure_kind,observed_at,updated_at,collected_at,cache_input_tokens)
+      VALUES (?,'exec','run',1,?,?,?,?,'completed','observed',NULL,?,?,?,'reported',?,NULL,?,0,NULL,?,?,?,?)`);
+    const add = (id: string, provider: string, started: number, input: number, read: number | null, denominator: number | null) =>
+      insert.run(id, provider, id, started, started + 5, input, 10, input + 10, read, denominator === null ? 0 : 1, started + 5, started + 5, started + 5, denominator);
+    add("openai", "openai", hour + 100, 1_000, 900, 1_000);
+    add("anthropic", "anthropic", hour + 200, 100, 900, 1_050);
+    add("zero-hit", "openai", hour + 300, 100, 0, 100);
+    add("unknown", "compatible", hour + 400, 100, 200, null);
+    add("zero-input", "openai", 2 * hour + 100, 0, 0, 0);
+    const request = { rangeKind: "custom" as const, timezone: "UTC", from: hour, to: 2 * hour };
+    const values = () => {
+      const response = queryDashboard(db, request, 4 * hour + 1);
+      assert.equal(response.kind, "success");
+      assert.ok(Value.Check(DashboardQuerySuccessResponseSchema, response));
+      const byModel = response.data.model.byModel;
+      assert.equal(byModel.status, "available");
+      const unknown = byModel.data.find((row) => row.model === "unknown");
+      assert.equal(unknown?.cacheReadTokens, null, "observed reads without a denominator do not inflate the comparable total");
+      assert.equal(unknown?.cacheHitRate, null);
+      return {
+        coverage: response.data.model.metrics.inputCacheCoverage.value?.ratio,
+        count: response.data.model.metrics.cacheComparableCount.value,
+        reads: response.data.model.metrics.cacheReadTokens.value?.count,
+        hit: response.data.overview.cacheHitRate.value?.ratio,
+        trend: response.data.model.trends.cacheHitRate.data?.map((point) => point.ratio),
+      };
+    };
+    const before = values();
+    assert.equal(before.coverage, 3 / 4);
+    assert.equal(before.count, 3);
+    assert.equal(before.reads, 1_800);
+    assert.equal(before.hit, 1_800 / 2_150);
+    assert.ok(before.trend?.includes(1_800 / 2_150));
+    for (const started of [hour + 100, 2 * hour + 100]) markDirtyHour(db, "model", started, 4 * hour);
+    rebuildDirtyRollups(db, 4 * hour + 1);
+    assert.deepEqual(values(), before, "hourly cache and Fact agree");
+    const zero = queryDashboard(db, { rangeKind: "custom", timezone: "UTC", from: 2 * hour, to: 3 * hour }, 4 * hour + 1);
+    assert.equal(zero.kind, "success");
+    assert.equal(zero.data.model.metrics.inputCacheCoverage.value?.ratio, 1);
+    assert.equal(zero.data.overview.cacheHitRate.value?.ratio, null, "0/0 is unknown, not a miss");
+    db.prepare("UPDATE analytics_model_call_fact SET cache_read_tokens=5000 WHERE model_call_id='openai'").run();
+    markDirtyHour(db, "model", hour + 100, 4 * hour);
+    const invalidRate = () => {
+      const response = queryDashboard(db, request, 4 * hour + 1);
+      assert.equal(response.kind, "success");
+      assert.ok(Value.Check(DashboardQuerySuccessResponseSchema, response));
+      assert.equal(response.data.overview.cacheHitRate.value?.ratio, null, "invalid aggregate is not a >100% cache rate");
+      assert.equal(response.data.model.byModel.data?.find((row) => row.model === "openai")?.cacheHitRate, null);
+    };
+    invalidRate();
+    rebuildDirtyRollups(db, 4 * hour + 1);
+    invalidRate();
+  } finally {
+    closeAnalyticsDb(db);
+  }
+});
+
 test("monitoring volume retains an earlier enabled segment after disable and re-enable", async () => {
   const db = await database();
   try {
@@ -507,10 +571,10 @@ test("ratio and average comparisons use range aggregates without exposing them i
     db.prepare("UPDATE analytics_domain_state SET status='healthy', collection_started_at=0, reconciled_through=? WHERE domain='model'").run(3 * hour);
     db.prepare("UPDATE analytics_domain_config_version SET enabled_fact_domains_json='[\"model\"]' WHERE collection_config_version='0000000000000000'").run();
     const insert = db.prepare(`INSERT INTO analytics_model_call_fact
-      (model_call_id,execution_id,run_id,attempt_no,provider_id,model_id,started_at,ended_at,status,completion_quality,timeout_kind,input_tokens,output_tokens,total_tokens,total_source,cache_read_tokens,cache_write_tokens,cache_comparable,cache_write_verified,failure_kind,observed_at,updated_at,collected_at)
-      VALUES (?,?,?,1,'provider','model',?,?,?,'observed',NULL,?,0,?,'reported',?,NULL,1,0,NULL,?,?,?)`);
+      (model_call_id,execution_id,run_id,attempt_no,provider_id,model_id,started_at,ended_at,status,completion_quality,timeout_kind,input_tokens,output_tokens,total_tokens,total_source,cache_read_tokens,cache_write_tokens,cache_comparable,cache_write_verified,failure_kind,observed_at,updated_at,collected_at,cache_input_tokens)
+      VALUES (?,?,?,1,'provider','model',?,?,?,'observed',NULL,?,0,?,'reported',?,NULL,1,0,NULL,?,?,?,?)`);
     const add = (id: string, status: "completed" | "failed", startedAt: number, duration: number, input: number, cacheRead: number) =>
-      insert.run(id, `execution:${id}`, `run:${id}`, startedAt, startedAt + duration, status, input, input, cacheRead, startedAt + duration, startedAt + duration, startedAt + duration);
+      insert.run(id, `execution:${id}`, `run:${id}`, startedAt, startedAt + duration, status, input, input, cacheRead, startedAt + duration, startedAt + duration, startedAt + duration, input);
     // Previous range has a real zero timeout/cache ratio and a 50 ms duration baseline.
     add("previous-failed", "failed", 100, 1, 100, 0);
     add("previous-duration", "completed", 200, 50, 100, 0);
