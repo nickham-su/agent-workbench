@@ -52,7 +52,7 @@ function evidence(domain: HealthRow): string[] {
 const domainLabels: Record<AnalyticsDomain, string> = {
   model: "monitoringModel", run: "monitoringRun", execution: "monitoringExecution",
   agent_duration: "domainAgentDuration", tool: "monitoringTool", message: "monitoringMessage",
-  session: "monitoringSession", worker: "monitoringWorker", git: "monitoringGit",
+  session: "monitoringSession", worker: "monitoringWorker",
 };
 </script>
 <style scoped>

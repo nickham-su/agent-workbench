@@ -32,7 +32,7 @@ test("dashboard query keeps unknown zero unavailable and returns a contract-vali
     assert.equal(response.kind, "success");
     assert.ok(Value.Check(DashboardQuerySuccessResponseSchema, response));
     assert.equal(response.data.agent.metrics.runCount.status, "unavailable");
-    assert.equal(response.data.git.metrics.commits.status, "unavailable");
+    assert.equal(response.data.overview.totalTokens.status, "unavailable");
   } finally {
     closeAnalyticsDb(db);
   }
@@ -137,6 +137,105 @@ test("dashboard query exposes certified Model aggregates without changing unavai
       { durationMs: 200, reliableSampleCount: 1 },
     );
     assert.equal(response.data.agent.metrics.runCount.status, "unavailable");
+  } finally {
+    closeAnalyticsDb(db);
+  }
+});
+
+test("overview total Token uses the Model metric's reported/derived samples and local DST buckets", async () => {
+  const db = await database();
+  try {
+    const from = Date.parse("2025-03-09T06:00:00Z");
+    const to = from + 4 * HOUR_MS;
+    db.prepare("UPDATE analytics_domain_state SET status='healthy',collection_started_at=?,reconciled_through=? WHERE domain='model'").run(from, to);
+    const insert = db.prepare(`INSERT INTO analytics_model_call_fact
+      (model_call_id,execution_id,run_id,attempt_no,provider_id,model_id,started_at,ended_at,status,completion_quality,timeout_kind,input_tokens,output_tokens,total_tokens,total_source,cache_read_tokens,cache_write_tokens,cache_comparable,cache_write_verified,failure_kind,observed_at,updated_at,collected_at)
+      VALUES (?, 'execution','run',1,'provider','model',?,?,'completed','observed',NULL,?,?,?, ?,NULL,NULL,0,0,NULL,?,?,?)`);
+    const put = (id: string, at: number, input: number | null, output: number | null, total: number | null, source: string) =>
+      insert.run(id, at, at + 1, input, output, total, source, at + 1, at + 1, at + 1);
+    put("reported", from, null, null, 12, "reported");
+    put("derived", from + HOUR_MS, 2, 6, 8, "derived");
+    put("mixed-unknown", from + HOUR_MS + 1, null, null, null, "unavailable");
+    put("unknown", from + 2 * HOUR_MS, null, null, null, "unavailable");
+    put("outside", to, 10, 10, 20, "reported");
+    const result = queryDashboard(db, { rangeKind: "custom", timezone: "America/New_York", from, to }, to);
+    assert.equal(result.kind, "success");
+    assert.ok(Value.Check(DashboardQuerySuccessResponseSchema, result));
+    assert.deepEqual(result.data.overview.totalTokens, result.data.model.metrics.totalTokens);
+    assert.equal(result.data.overview.totalTokens.status, "available");
+    assert.deepEqual(result.data.overview.totalTokens.value, { count: null }, "known usage cannot masquerade as a complete total");
+    assert.equal(result.data.overview.totalTokens.comparison.status, "previous_not_covered");
+    const trend = result.data.overviewTrends.totalTokens;
+    assert.equal(trend.status, "available");
+    const bucketFor = (at: number) => trend.data?.find((point) => point.from <= at && point.to > at);
+    assert.equal(bucketFor(from)?.count, 12);
+    assert.equal(bucketFor(from + HOUR_MS)?.count, null, "a bucket with both known and unknown usage is unknown");
+    assert.equal(bucketFor(from + 2 * HOUR_MS)?.count, null, "a bucket with only unknown usage is unknown");
+    assert.equal(bucketFor(from + 3 * HOUR_MS)?.count, 0, "an empty covered bucket is an observed zero");
+    const springHours = trend.data?.map((point) => new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", hour12: false }).format(point.from)) ?? [];
+    assert.equal(springHours.includes("02"), false);
+
+    for (const at of [from, from + HOUR_MS, from + 2 * HOUR_MS]) markDirtyHour(db, "model", at, to);
+    rebuildDirtyRollups(db, to + HOUR_MS);
+    assert.deepEqual(db.prepare("SELECT request_count,total_reported_count,total_derived_count FROM dashboard_model_dimension_1h WHERE bucket_start=?").get(from + HOUR_MS),
+      { request_count: 2, total_reported_count: 0, total_derived_count: 1 });
+    const cached = queryDashboard(db, { rangeKind: "custom", timezone: "America/New_York", from, to }, to);
+    assert.equal(cached.kind, "success");
+    assert.deepEqual(cached.data.overview.totalTokens.value, { count: null });
+    assert.equal(cached.data.overviewTrends.totalTokens.data?.find((point) => point.from <= from + HOUR_MS && point.to > from + HOUR_MS)?.count, null);
+
+    db.prepare("UPDATE analytics_domain_state SET status='degraded' WHERE domain='model'").run();
+    const partial = queryDashboard(db, { rangeKind: "custom", timezone: "America/New_York", from, to }, to);
+    assert.equal(partial.kind, "success");
+    assert.equal(partial.data.overview.totalTokens.status, "partial");
+    assert.equal(partial.data.overviewTrends.totalTokens.status, "partial");
+    assert.deepEqual(partial.data.overview.totalTokens.value, { count: null });
+    assert.equal(partial.data.overviewTrends.totalTokens.data?.find((point) => point.from <= from + 3 * HOUR_MS && point.to > from + 3 * HOUR_MS)?.count, null,
+      "do not certify an empty bucket while the domain is degraded");
+    db.prepare("UPDATE analytics_domain_state SET status='healthy' WHERE domain='model'").run();
+
+    db.prepare("UPDATE analytics_model_call_fact SET total_tokens=0,total_source='reported' WHERE model_call_id IN ('mixed-unknown','unknown')").run();
+    markDirtyHour(db, "model", from + HOUR_MS, to);
+    markDirtyHour(db, "model", from + 2 * HOUR_MS, to);
+    const allKnown = queryDashboard(db, { rangeKind: "custom", timezone: "America/New_York", from, to }, to);
+    assert.equal(allKnown.kind, "success");
+    assert.deepEqual(allKnown.data.overview.totalTokens.value, { count: 20 });
+    assert.deepEqual(allKnown.data.model.metrics.totalTokens.value, { count: 20 });
+    assert.equal(allKnown.data.overviewTrends.totalTokens.data?.find((point) => point.from <= from + HOUR_MS && point.to > from + HOUR_MS)?.count, 8);
+    assert.equal(allKnown.data.overviewTrends.totalTokens.data?.find((point) => point.from <= from + 2 * HOUR_MS && point.to > from + 2 * HOUR_MS)?.count, 0);
+
+    db.prepare("UPDATE analytics_domain_state SET reconciled_through=? WHERE domain='model'").run(from + 2 * HOUR_MS);
+    const incompleteCoverage = queryDashboard(db, { rangeKind: "custom", timezone: "America/New_York", from, to }, to);
+    assert.equal(incompleteCoverage.kind, "success");
+    assert.equal(incompleteCoverage.data.overview.totalTokens.status, "partial");
+    assert.equal(incompleteCoverage.data.overviewTrends.totalTokens.status, "partial");
+    assert.equal(incompleteCoverage.data.overviewTrends.totalTokens.data?.find((point) => point.from <= from + 3 * HOUR_MS && point.to > from + 3 * HOUR_MS)?.count, null);
+    db.prepare("UPDATE analytics_domain_state SET reconciled_through=? WHERE domain='model'").run(to);
+
+    db.prepare("DELETE FROM analytics_model_call_fact WHERE model_call_id IN ('reported','derived')").run();
+    markDirtyHour(db, "model", from, to);
+    const zeroUsage = queryDashboard(db, { rangeKind: "custom", timezone: "America/New_York", from, to }, to);
+    assert.equal(zeroUsage.kind, "success");
+    assert.deepEqual(zeroUsage.data.overview.totalTokens.value, { count: 0 });
+
+    db.prepare("UPDATE analytics_model_call_fact SET total_tokens=NULL,total_source='unavailable' WHERE model_call_id IN ('mixed-unknown','unknown')").run();
+    const noUsage = queryDashboard(db, { rangeKind: "custom", timezone: "America/New_York", from, to }, to);
+    assert.equal(noUsage.kind, "success");
+    assert.deepEqual(noUsage.data.overview.totalTokens.value, { count: null });
+    assert.equal(noUsage.data.overviewTrends.totalTokens.data?.find((point) => point.from <= from + HOUR_MS && point.to > from + HOUR_MS)?.count, null);
+    assert.equal(noUsage.data.overviewTrends.totalTokens.data?.find((point) => point.from <= from + 3 * HOUR_MS && point.to > from + 3 * HOUR_MS)?.count, 0);
+
+    db.prepare("DELETE FROM analytics_model_call_fact WHERE model_call_id IN ('mixed-unknown','unknown')").run();
+    const noCalls = queryDashboard(db, { rangeKind: "custom", timezone: "America/New_York", from, to }, to);
+    assert.equal(noCalls.kind, "success");
+    assert.deepEqual(noCalls.data.overview.totalTokens.value, { count: 0 });
+    assert.equal(noCalls.data.overviewTrends.totalTokens.data?.every((point) => point.count === 0), true);
+    db.prepare("UPDATE analytics_domain_state SET status='degraded' WHERE domain='model'").run();
+    const unverifiedZero = queryDashboard(db, { rangeKind: "custom", timezone: "America/New_York", from, to }, to);
+    assert.equal(unverifiedZero.kind, "success");
+    assert.equal(unverifiedZero.data.overview.totalTokens.status, "unavailable");
+    assert.equal(unverifiedZero.data.overview.totalTokens.value, null);
+    assert.equal(unverifiedZero.data.overviewTrends.totalTokens.status, "unavailable");
   } finally {
     closeAnalyticsDb(db);
   }
@@ -318,7 +417,7 @@ test("collected replacement is exact for partial hours, zero Git, and stopped-ch
     assert.deepEqual(
       db
         .prepare(
-          "SELECT fact_count FROM dashboard_collected_1h WHERE bucket_start=? AND domain='git'",
+          "SELECT fact_count FROM dashboard_collected_1h WHERE bucket_start=? AND domain='model'",
         )
         .get(2 * HOUR_MS),
       { fact_count: 0 },

@@ -125,7 +125,6 @@ const props = withDefaults(defineProps<{
   kind: DashboardChartKind;
   panel: DashboardTrendPanel;
   timezone?: string;
-  gitMetadata?: { readyRepoCount: number; totalRepoCount: number };
   testId?: string;
 }>(), { timezone: "UTC" });
 
@@ -139,7 +138,6 @@ const plotTop = 4;
 const plotBottom = 56;
 
 const display = computed(() => createDashboardChartDisplay(props.kind, props.panel.status === "unavailable" ? [] : props.panel.data));
-const gitLowerBound = computed(() => props.gitMetadata !== undefined && props.panel.status === "partial");
 const allLineValues = computed(() => display.value.series.flatMap((series) => series.values).filter((value): value is number => value !== null));
 const stackTotals = computed(() => display.value.buckets.map((bucket) => knownStackTotal(bucket.values)));
 
@@ -180,8 +178,7 @@ function seriesLabel(labelKey: string) {
 }
 
 function countLabel(value: number | null) {
-  const label = formatCount(value, locale.value);
-  return gitLowerBound.value && value !== null ? `≥${label}` : label;
+  return formatCount(value, locale.value);
 }
 
 function valueLabel(value: number | null, labelKey?: string) {

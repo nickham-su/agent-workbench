@@ -10,7 +10,6 @@ import {
 } from "./analytics-rollups.js";
 import { applyAnalyticsRetention } from "./analytics-maintenance.js";
 import { BusinessCollector } from "./business-collector.js";
-import { scanManagedGitRepos } from "./analytics-git.js";
 import {
   closeAnalyticsDb,
   openAnalyticsDb,
@@ -53,8 +52,6 @@ let collectorTimer: NodeJS.Timeout | null = null;
 let staleTimer: NodeJS.Timeout | null = null;
 let collectorStarted = false;
 let lastMaintenanceAt = 0;
-let lastGitScanAt = 0;
-let gitScanInFlight = false;
 
 function boundedPositiveInteger(
   raw: string | undefined,
@@ -91,22 +88,6 @@ function startCollector() {
       for (const domain of ["execution", "model", "worker"] as const)
         if (config.enabled.has(domain)) authenticateSignalDomain(db, domain);
       rebuildDirtyRollups(db, Date.now(), 24);
-      if (
-        config.enabled.has("git") &&
-        !gitScanInFlight &&
-        Date.now() - lastGitScanAt >= 5 * 60_000 &&
-        analyticsDataDir
-      ) {
-        lastGitScanAt = Date.now();
-        gitScanInFlight = true;
-        // Scanner failures are deliberately isolated from worker maintenance;
-        // Git stderr and mirror paths must not be emitted by this boundary.
-        void scanManagedGitRepos({ db, dataDir: analyticsDataDir })
-          .catch(() => undefined)
-          .finally(() => {
-            gitScanInFlight = false;
-          });
-      }
       const closedTo =
         Math.floor(Date.now() / (60 * 60 * 1000)) * 60 * 60 * 1000;
       const cursor = db
@@ -118,7 +99,7 @@ function startCollector() {
         .prepare(
           `SELECT MIN(collected_at) AS value FROM (
         SELECT collected_at FROM analytics_run_fact UNION ALL SELECT collected_at FROM analytics_session_fact UNION ALL SELECT collected_at FROM analytics_message_fact UNION ALL SELECT collected_at FROM analytics_tool_fact
-        UNION ALL SELECT collected_at FROM analytics_execution_fact UNION ALL SELECT collected_at FROM analytics_model_call_fact UNION ALL SELECT collected_at FROM analytics_worker_event_fact UNION ALL SELECT collected_at FROM analytics_git_commit_fact
+        UNION ALL SELECT collected_at FROM analytics_execution_fact UNION ALL SELECT collected_at FROM analytics_model_call_fact UNION ALL SELECT collected_at FROM analytics_worker_event_fact
       )`,
         )
         .get() as { value: number | null };

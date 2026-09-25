@@ -9,14 +9,12 @@ import {
   DashboardQueryRequestSchema,
   DashboardQuerySuccessResponseSchema,
   DomainHealthSchema,
-  GitHeatmap180dSchema,
-  GitMetricResultSchema,
-  GitPanelResultSchema,
   MetricResultSchema,
   ModelCompletedDurationTrendPointSchema,
   ModelTableSchema,
   ModelRequestTrendPointSchema,
   ModelTokenTrendPointSchema,
+  NullableCountTrendPointSchema,
   MonitoringVolumeTrendPointSchema,
   PanelResultSchema,
   RunTerminalDistributionsByScopeSchema,
@@ -76,6 +74,8 @@ test("model request trends are explicit non-negative status stacks", () => {
 test("model usage stays nullable and model rows include render-ready quality details", () => {
   assert.equal(Value.Check(ModelTokenTrendPointSchema, { from: 1, to: 2, inputTokens: null, outputTokens: null }), true);
   assert.equal(Value.Check(ModelTokenTrendPointSchema, { from: 1, to: 2, inputTokens: -1, outputTokens: 0 }), false);
+  assert.equal(Value.Check(NullableCountTrendPointSchema, { from: 1, to: 2, count: null }), true);
+  assert.equal(Value.Check(NullableCountTrendPointSchema, { from: 1, to: 2, count: -1 }), false);
   assert.equal(Value.Check(ModelTableSchema, [{ provider: "provider", model: "model", requests: 1, successRate: null, timeoutRate: null, completedAverageDurationMs: null, reliableDurationSampleCount: 0, inputTokens: null, outputTokens: null, totalTokens: null, cacheReadTokens: null, cacheHitRate: null }]), true);
 });
 
@@ -85,25 +85,10 @@ test("model duration and monitoring volume trends retain nullable samples and to
   assert.equal(Value.Check(ModelCompletedDurationTrendPointSchema, { ...durationWithoutSamples, durationMs: -1 }), false);
   assert.equal(Value.Check(ModelCompletedDurationTrendPointSchema, { from: 1, to: 2, durationMs: null }), false);
 
-  const volume = { from: 1, to: 2, total: 8, run: 1, session: 1, message: 1, tool: 1, execution: 1, model: 1, worker: 1, git: 1 };
+  const volume = { from: 1, to: 2, total: 7, run: 1, session: 1, message: 1, tool: 1, execution: 1, model: 1, worker: 1 };
   assert.equal(Value.Check(MonitoringVolumeTrendPointSchema, volume), true);
-  assert.equal(Value.Check(MonitoringVolumeTrendPointSchema, { ...volume, git: undefined }), false);
+  assert.equal(Value.Check(MonitoringVolumeTrendPointSchema, { ...volume, git: 1 }), false);
   assert.equal(Value.Check(MonitoringVolumeTrendPointSchema, { ...volume, unknown: 1 }), false);
-});
-
-test("range-based Git results always use controlled Git coverage metadata", () => {
-  const metric = GitMetricResultSchema(Type.Number());
-  const panel = GitPanelResultSchema(Type.Array(Type.Number()));
-  const available = { status: "available", value: 3, completeness: "complete", dataIncomplete: false, requiredDomains: ["git"], comparison, readyRepoCount: 2, totalRepoCount: 2 } as const;
-  assert.equal(Value.Check(metric, available), true);
-  assert.equal(Value.Check(metric, { ...available, partialReason: "repo_not_ready" }), false);
-  assert.equal(Value.Check(metric, { ...available, readyRepoCount: undefined }), false);
-
-  const partial = { status: "partial", data: [1], completeness: "partial", dataIncomplete: true, partialReason: "scan_stale", requiredDomains: ["git"], comparison, readyRepoCount: 1, totalRepoCount: 2 } as const;
-  assert.equal(Value.Check(panel, partial), true);
-  assert.equal(Value.Check(panel, { ...partial, partialReason: "coverage_gap" }), false);
-  assert.equal(Value.Check(panel, { ...partial, totalRepoCount: undefined }), false);
-  assert.equal(Value.Check(panel, { status: "unavailable", data: [1], dataIncomplete: true, unavailableReason: "no_ready_repo", requiredDomains: ["git"], comparison, readyRepoCount: 0, totalRepoCount: 2 }), false);
 });
 
 test("tool details only permit unknown names in a controlled partial result", () => {
@@ -134,11 +119,7 @@ test("Run terminal distribution returns every prototype scope in the same panel"
   assert.equal(Value.Check(RunTerminalDistributionsByScopeSchema, { all: statuses, main: statuses }), false);
 });
 
-test("Git heatmap and domain health preserve controlled, non-sensitive diagnostics", () => {
-  const heatmap = { status: "partial", data: { days: [] }, completeness: "partial", dataIncomplete: true, partialReason: "repo_not_ready", requiredDomains: ["git"], comparison, from: 1, to: 2, asOf: 3, readyRepoCount: 1, totalRepoCount: 2 };
-  assert.equal(Value.Check(GitHeatmap180dSchema, heatmap), true);
-  assert.equal(Value.Check(GitHeatmap180dSchema, { ...heatmap, partialReason: "coverage_gap" }), false);
-
+test("domain health preserves controlled, non-sensitive diagnostics", () => {
   const health = {
     status: "available", data: [{
       domain: "model", status: "degraded", collectionStartedAt: 1, reconciledThrough: null, rollupReadyThrough: null,
@@ -155,8 +136,8 @@ test("Git heatmap and domain health preserve controlled, non-sensitive diagnosti
 
 test("Dashboard data exposes independent results for all cards, trends, distributions and tables", () => {
   const properties = (DashboardDataSchema as any).properties;
-  assert.deepEqual(Object.keys(properties.overview.properties).sort(), ["agentDuration", "cacheHitRate", "gitCommits", "modelRequests", "modelSuccessRate", "monitoringVolume"]);
-  assert.deepEqual(Object.keys(properties.overviewTrends.properties).sort(), ["agentDuration", "cacheHitRate", "gitCommits", "modelRequests", "modelSuccessRate", "monitoringVolume"]);
+  assert.deepEqual(Object.keys(properties.overview.properties).sort(), ["agentDuration", "cacheHitRate", "modelRequests", "modelSuccessRate", "monitoringVolume", "totalTokens"]);
+  assert.deepEqual(Object.keys(properties.overviewTrends.properties).sort(), ["agentDuration", "cacheHitRate", "modelRequests", "modelSuccessRate", "monitoringVolume", "totalTokens"]);
   assert.ok(properties.model.properties.metrics.properties.inputReportedCount);
   assert.ok(properties.model.properties.metrics.properties.totalDerivedCount);
   assert.ok(properties.model.properties.metrics.properties.inputCacheCoverage);
@@ -169,7 +150,7 @@ test("Dashboard data exposes independent results for all cards, trends, distribu
   assert.equal(Value.Check(properties.model.properties.metrics.properties.inputTokens, {
     status: "available", value: { count: null }, completeness: "complete", dataIncomplete: false, requiredDomains: ["model"], comparison
   }), true);
-  assert.deepEqual(Object.keys(properties.git.properties.trends.properties).sort(), ["commits", "filesChanged", "linesAdded", "linesDeleted", "nonMergeCommits"]);
-  assert.equal(properties.git.properties.commitTrend, undefined);
+  assert.equal(properties.git, undefined);
+  assert.equal(properties.exceptions.properties.gitHeatmap180d, undefined);
   assert.deepEqual(Object.keys(properties.worker.properties).sort(), ["eventTrend", "metrics", "restartRecords"]);
 });

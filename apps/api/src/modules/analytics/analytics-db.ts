@@ -5,8 +5,9 @@ import {
   type SecureAnalyticsDirectory,
 } from "@agent-workbench/shared/node/analytics-root";
 
-/** Version 11 makes Message rollups authoritative for compaction quality. */
-export const ANALYTICS_SCHEMA_VERSION = 18;
+/** Version 19 retires Git Analytics without resetting any other domain. */
+export const ANALYTICS_SCHEMA_VERSION = 19;
+const V18_SCHEMA_VERSION = 18;
 const PRE_GIT_SCHEMA_VERSION = 11;
 const V12_SCHEMA_VERSION = 12;
 const V13_SCHEMA_VERSION = 13;
@@ -15,9 +16,11 @@ const V15_SCHEMA_VERSION = 15;
 const V16_SCHEMA_VERSION = 16;
 const V17_SCHEMA_VERSION = 17;
 
-const ANALYTICS_DOMAINS = ["model", "run", "execution", "agent_duration", "tool", "message", "session", "worker", "git"] as const;
+const ANALYTICS_DOMAINS = ["model", "run", "execution", "agent_duration", "tool", "message", "session", "worker"] as const;
+const LEGACY_ANALYTICS_DOMAINS = [...ANALYTICS_DOMAINS, "git"] as const;
 const DOMAIN_STATUSES = ["healthy", "degraded", "stale", "unavailable", "disabled"] as const;
-const ANALYTICS_FACT_DOMAINS = ["run", "session", "message", "tool", "execution", "model", "worker", "git"] as const;
+const ANALYTICS_FACT_DOMAINS = ["run", "session", "message", "tool", "execution", "model", "worker"] as const;
+const LEGACY_FACT_DOMAINS = [...ANALYTICS_FACT_DOMAINS, "git"] as const;
 const BUSINESS_COLLECTOR_DOMAINS = ["run", "session", "message", "tool"] as const;
 const DOMAIN_STATUS_SQL = DOMAIN_STATUSES.map((status) => `'${status}'`).join(", ");
 const BASE_TABLES = ["analytics_schema_meta", "analytics_domain_state", "analytics_domain_config_version"] as const;
@@ -323,6 +326,12 @@ const DASHBOARD_TABLE_SQL = `
   CREATE INDEX dashboard_collected_1h_bucket ON dashboard_collected_1h(bucket_start);
 `;
 
+// Keep the released DDL above intact: older migrations and schema fingerprints
+// must still recognize their historical Git-aware collected cache.
+const CURRENT_DASHBOARD_TABLE_SQL = DASHBOARD_TABLE_SQL.replace(
+  "'worker', 'git'", "'worker'",
+);
+
 function rawExpectedDdl(name: string, kind: "table" | "index") {
   const source = SIGNAL_TABLE_SQL.toLowerCase().includes(`create ${kind} ${name}`)
     ? SIGNAL_TABLE_SQL
@@ -339,6 +348,9 @@ function rawExpectedDdl(name: string, kind: "table" | "index") {
   return match;
 }
 function expectedDdl(name: string, kind: "table" | "index") { return normalizedSql(rawExpectedDdl(name, kind)); }
+function currentCollectedDdl() {
+  return rawExpectedDdl("dashboard_collected_1h", "table").replace("'worker', 'git'", "'worker'");
+}
 
 /** The released v11/v12/v13 layouts predate Fact producer identity and the
  * controlled-stop worker evidence.  Constructing an intermediate migration
@@ -442,10 +454,11 @@ function isSafeSqliteInteger(value: unknown, storageType: unknown) {
   return storageType === "integer" && typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-function validEnabledFactDomains(raw: unknown) {
+function validEnabledFactDomains(raw: unknown, allowHistoricalGit = false) {
   if (!Array.isArray(raw) || raw.some((value) => typeof value !== "string")) return false;
   const values = new Set(raw);
-  return values.size === raw.length && raw.every((domain) => ANALYTICS_FACT_DOMAINS.includes(domain as typeof ANALYTICS_FACT_DOMAINS[number]));
+  const domains: readonly string[] = allowHistoricalGit ? LEGACY_FACT_DOMAINS : ANALYTICS_FACT_DOMAINS;
+  return values.size === raw.length && raw.every((domain) => domains.includes(domain));
 }
 
 function expectSql(db: AnalyticsDb, table: string, fragments: readonly string[]) {
@@ -467,7 +480,7 @@ function verifyBaseSchema(db: AnalyticsDb, expectedVersion: number, includeSourc
     { name: "collection_config_version", type: "TEXT", notnull: 1, pk: 1 }, { name: "effective_at", type: "INTEGER", notnull: 1, pk: 0 }, { name: "enabled_fact_domains_json", type: "TEXT", notnull: 1, pk: 0 }, { name: "changed_at", type: "INTEGER", notnull: 1, pk: 0 }
   ]);
   expectSql(db, "analytics_schema_meta", ["singleton integer primary key check (singleton = 1)", "schema_version integer not null"]);
-  expectSql(db, "analytics_domain_state", ["domain text primary key not null", `check (domain in (${expectedList(ANALYTICS_DOMAINS)}))`, `check (status in (${DOMAIN_STATUS_SQL.toLowerCase()}))`, "updated_at integer not null"]);
+  expectSql(db, "analytics_domain_state", ["domain text primary key not null", `check (domain in (${expectedList(expectedVersion >= ANALYTICS_SCHEMA_VERSION ? ANALYTICS_DOMAINS : LEGACY_ANALYTICS_DOMAINS)}))`, `check (status in (${DOMAIN_STATUS_SQL.toLowerCase()}))`, "updated_at integer not null"]);
   expectSql(db, "analytics_domain_config_version", ["collection_config_version text primary key not null", "effective_at integer not null", "enabled_fact_domains_json text not null", "changed_at integer not null"]);
   if (includeSourceControl) {
     expectColumns(db, SOURCE_CONTROL_TABLE, [
@@ -484,7 +497,8 @@ function verifyBaseSchema(db: AnalyticsDb, expectedVersion: number, includeSourc
   if (meta.length !== 1 || !isSafeSqliteInteger(meta[0]?.singleton, meta[0]?.singleton_type) || meta[0]?.singleton !== 1 || !isSafeSqliteInteger(meta[0]?.schema_version, meta[0]?.schema_version_type) || meta[0]?.schema_version !== expectedVersion) unavailableSchema();
   const domains = db.prepare(`SELECT domain, typeof(domain) AS domain_type, status, typeof(status) AS status_type, collection_started_at, typeof(collection_started_at) AS collection_started_at_type, reconciled_through, typeof(reconciled_through) AS reconciled_through_type, rollup_ready_through, typeof(rollup_ready_through) AS rollup_ready_through_type, retention_floor, typeof(retention_floor) AS retention_floor_type, last_succeeded_at, typeof(last_succeeded_at) AS last_succeeded_at_type, last_error_code, typeof(last_error_code) AS last_error_code_type, updated_at, typeof(updated_at) AS updated_at_type FROM analytics_domain_state`).all() as Array<Record<string, unknown>>;
   const domainSet = new Set(domains.map((row) => row.domain));
-  if (domains.length !== ANALYTICS_DOMAINS.length || domainSet.size !== ANALYTICS_DOMAINS.length || ANALYTICS_DOMAINS.some((domain) => !domainSet.has(domain))) unavailableSchema();
+  const expectedDomains: readonly string[] = expectedVersion >= ANALYTICS_SCHEMA_VERSION ? ANALYTICS_DOMAINS : LEGACY_ANALYTICS_DOMAINS;
+  if (domains.length !== expectedDomains.length || domainSet.size !== expectedDomains.length || expectedDomains.some((domain) => !domainSet.has(domain))) unavailableSchema();
   for (const row of domains) {
     if (row.domain_type !== "text" || typeof row.domain !== "string" || row.status_type !== "text" || typeof row.status !== "string" || !DOMAIN_STATUSES.includes(row.status as typeof DOMAIN_STATUSES[number])) unavailableSchema();
     for (const field of ["collection_started_at", "reconciled_through", "rollup_ready_through", "retention_floor", "last_succeeded_at"] as const) if (row[field] !== null && !isSafeSqliteInteger(row[field], row[`${field}_type`])) unavailableSchema();
@@ -494,9 +508,9 @@ function verifyBaseSchema(db: AnalyticsDb, expectedVersion: number, includeSourc
   const configs = db.prepare("SELECT collection_config_version, typeof(collection_config_version) AS version_type, effective_at, typeof(effective_at) AS effective_type, enabled_fact_domains_json, typeof(enabled_fact_domains_json) AS enabled_type, changed_at, typeof(changed_at) AS changed_type FROM analytics_domain_config_version").all() as Array<Record<string, unknown>>;
   if (configs.length === 0 || configs.some((row) => {
     if (row.version_type !== "text" || typeof row.collection_config_version !== "string" || row.collection_config_version.length === 0 || !isSafeSqliteInteger(row.effective_at, row.effective_type) || !isSafeSqliteInteger(row.changed_at, row.changed_type) || row.enabled_type !== "text" || typeof row.enabled_fact_domains_json !== "string") return true;
-    try { return !validEnabledFactDomains(JSON.parse(row.enabled_fact_domains_json)); } catch { return true; }
+    try { return !validEnabledFactDomains(JSON.parse(row.enabled_fact_domains_json), expectedVersion < ANALYTICS_SCHEMA_VERSION); } catch { return true; }
   })) unavailableSchema();
-  if (expectedVersion >= ANALYTICS_SCHEMA_VERSION) {
+  if (expectedVersion >= V17_SCHEMA_VERSION) {
     const baseline = configs.filter((row) =>
       row.collection_config_version === "0000000000000000" &&
       row.effective_at === 0 && row.changed_at === 0,
@@ -671,7 +685,52 @@ function migrateV17ToV18(db: AnalyticsDb, testFaultAt?: "after_execution_rebuild
       FROM v17_analytics_execution_fact;
       DROP TABLE v17_analytics_execution_fact;`);
     if (testFaultAt === "after_execution_rebuild") throw new Error("injected v18 migration failure");
-    db.prepare("UPDATE analytics_schema_meta SET schema_version = ? WHERE singleton = 1").run(ANALYTICS_SCHEMA_VERSION);
+    db.prepare("UPDATE analytics_schema_meta SET schema_version = ? WHERE singleton = 1").run(V18_SCHEMA_VERSION);
+  })();
+}
+
+/** Retain every non-Git Fact, waterline and historical configuration version. */
+function migrateV18ToV19(db: AnalyticsDb, testFaultAt?: "after_collected_rebuild") {
+  db.transaction(() => {
+    db.exec(`
+      ALTER TABLE dashboard_collected_1h RENAME TO v18_dashboard_collected_1h;
+      DROP INDEX dashboard_collected_1h_bucket;
+      ${currentCollectedDdl()}
+      INSERT INTO dashboard_collected_1h(bucket_start,domain,fact_count)
+        SELECT bucket_start,domain,fact_count FROM v18_dashboard_collected_1h WHERE domain <> 'git';
+      DROP TABLE v18_dashboard_collected_1h;
+      ${rawExpectedDdl("dashboard_collected_1h_bucket", "index")}
+    `);
+    if (testFaultAt === "after_collected_rebuild") throw new Error("injected v19 migration failure");
+
+    db.exec(`
+      ALTER TABLE analytics_domain_state RENAME TO v18_analytics_domain_state;
+      CREATE TABLE analytics_domain_state (
+        domain TEXT PRIMARY KEY NOT NULL CHECK (domain IN (${expectedList(ANALYTICS_DOMAINS)})), collection_started_at INTEGER,
+        reconciled_through INTEGER, rollup_ready_through INTEGER, retention_floor INTEGER,
+        status TEXT NOT NULL CHECK (status IN (${DOMAIN_STATUS_SQL})), last_succeeded_at INTEGER, last_error_code TEXT, updated_at INTEGER NOT NULL
+      );
+      INSERT INTO analytics_domain_state
+        SELECT * FROM v18_analytics_domain_state WHERE domain <> 'git';
+      DROP TABLE v18_analytics_domain_state;
+      DROP TABLE analytics_git_membership;
+      DROP TABLE analytics_git_commit_fact;
+      DROP TABLE analytics_git_repo_state;
+      DROP TABLE analytics_git_scan;
+      DELETE FROM analytics_dirty_hour WHERE domain='git';
+      DELETE FROM analytics_rollup_hour WHERE domain='git';
+      DELETE FROM analytics_signal_coverage_gap WHERE domain='git';
+    `);
+    // Historic versions retain their real effective times and identifiers;
+    // only the now-retired domain is removed from their composition. The
+    // source-control hash is a historical receipt and must not be rewritten.
+    const historical = db.prepare("SELECT collection_config_version,enabled_fact_domains_json FROM analytics_domain_config_version").all() as Array<{ collection_config_version: string; enabled_fact_domains_json: string }>;
+    const update = db.prepare("UPDATE analytics_domain_config_version SET enabled_fact_domains_json=? WHERE collection_config_version=?");
+    for (const row of historical) {
+      const domains = JSON.parse(row.enabled_fact_domains_json) as string[];
+      if (domains.includes("git")) update.run(JSON.stringify(domains.filter((domain) => domain !== "git")), row.collection_config_version);
+    }
+    db.prepare("UPDATE analytics_schema_meta SET schema_version=? WHERE singleton=1").run(ANALYTICS_SCHEMA_VERSION);
   })();
 }
 
@@ -726,8 +785,8 @@ function verifySignalRows(db: AnalyticsDb) {
 
 type GenerationValidationRow = { lifecycle: string; final_sequence: number | null; committed_sequence: number; known_drop: number; dropped_since_sequence: number | null; outbox_pending: number; oldest_pending_at: number | null };
 
-function verifyDashboardSchema(db: AnalyticsDb) {
-  verifyDashboardSchemaNames(db, ["analytics_dirty_hour", "dashboard_model_1h", "dashboard_model_dimension_1h", "dashboard_tool_1h", "dashboard_message_1h", "dashboard_collected_1h", "analytics_rollup_hour", "analytics_maintenance_state"], ["analytics_dirty_hour_domain_bucket", "analytics_rollup_hour_domain_bucket", "dashboard_model_dimension_1h_bucket", "dashboard_collected_1h_bucket"]);
+function verifyDashboardSchema(db: AnalyticsDb, includeGit = true) {
+  verifyDashboardSchemaNames(db, ["analytics_dirty_hour", "dashboard_model_1h", "dashboard_model_dimension_1h", "dashboard_tool_1h", "dashboard_message_1h", "dashboard_collected_1h", "analytics_rollup_hour", "analytics_maintenance_state"], ["analytics_dirty_hour_domain_bucket", "analytics_rollup_hour_domain_bucket", "dashboard_model_dimension_1h_bucket", "dashboard_collected_1h_bucket"], includeGit);
 }
 
 function verifyV9DashboardSchema(db: AnalyticsDb) {
@@ -743,10 +802,10 @@ function verifyOldMessageRollupSchema(db: AnalyticsDb) {
   if (!message?.sql || normalizedSql(message.sql) !== oldMessageDdl) unavailableSchema();
 }
 
-function verifyDashboardSchemaNames(db: AnalyticsDb, tables: readonly string[], indexes: readonly string[]) {
+function verifyDashboardSchemaNames(db: AnalyticsDb, tables: readonly string[], indexes: readonly string[], includeGit = true) {
   for (const table of tables) {
     const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table) as SchemaObject | undefined;
-    if (!row?.sql || normalizedSql(row.sql) !== expectedDdl(table, "table")) unavailableSchema();
+    if (!row?.sql || normalizedSql(row.sql) !== (!includeGit && table === "dashboard_collected_1h" ? normalizedSql(currentCollectedDdl()) : expectedDdl(table, "table"))) unavailableSchema();
   }
   for (const index of indexes) {
     const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name=?").get(index) as SchemaObject | undefined;
@@ -817,8 +876,9 @@ function verifyCurrentSchema(db: AnalyticsDb) {
   verifyBaseSchema(db, ANALYTICS_SCHEMA_VERSION, true);
   verifyFacts(db);
   verifySignalSchema(db);
-  verifyDashboardSchema(db);
-  verifyGitSchema(db);
+  verifyDashboardSchema(db, false);
+  const oldTables = db.prepare("SELECT name FROM sqlite_master WHERE name GLOB 'analytics_git_*' AND type IN ('table','index')").all();
+  if (oldTables.length !== 0) unavailableSchema();
 }
 
 function verifyV3Schema(db: AnalyticsDb) {
@@ -864,7 +924,7 @@ function verifyV6SignalSchema(db: AnalyticsDb) {
   }
 }
 
-function inspectSchema(db: AnalyticsDb): "new" | "v2" | "v3" | "legacy-v3" | "v4" | "v5" | "v6" | "v7" | "v8" | "v9" | "v10" | "v11" | "v12" | "v13" | "v14" | "v15" | "v16" | "v17" | "current" {
+function inspectSchema(db: AnalyticsDb): "new" | "v2" | "v3" | "legacy-v3" | "v4" | "v5" | "v6" | "v7" | "v8" | "v9" | "v10" | "v11" | "v12" | "v13" | "v14" | "v15" | "v16" | "v17" | "v18" | "current" {
   if (db.prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'index', 'trigger', 'view') LIMIT 1").all().length === 0) return "new";
   const meta = db.prepare("SELECT schema_version, typeof(schema_version) AS storage_type FROM analytics_schema_meta").all() as Array<{ schema_version: unknown; storage_type: unknown }>;
   if (meta.length !== 1 || !isSafeSqliteInteger(meta[0]?.schema_version, meta[0]?.storage_type)) unavailableSchema();
@@ -884,6 +944,7 @@ function inspectSchema(db: AnalyticsDb): "new" | "v2" | "v3" | "legacy-v3" | "v4
   if (meta[0]?.schema_version === V15_SCHEMA_VERSION) { verifyBaseSchema(db, V15_SCHEMA_VERSION, true); verifyFacts(db); verifySignalSchema(db); verifyDashboardSchema(db); verifyGitSchema(db); return "v15"; }
   if (meta[0]?.schema_version === V16_SCHEMA_VERSION) { verifyBaseSchema(db, V16_SCHEMA_VERSION, true); verifyFacts(db); verifySignalSchema(db); verifyDashboardSchema(db); verifyGitSchema(db); return "v16"; }
   if (meta[0]?.schema_version === V17_SCHEMA_VERSION) { verifyBaseSchema(db, V17_SCHEMA_VERSION, true); verifyFacts(db); verifySignalSchema(db, true, false, false, false, true); verifyDashboardSchema(db); verifyGitSchema(db); return "v17"; }
+  if (meta[0]?.schema_version === V18_SCHEMA_VERSION) { verifyBaseSchema(db, V18_SCHEMA_VERSION, true); verifyFacts(db); verifySignalSchema(db); verifyDashboardSchema(db); verifyGitSchema(db); return "v18"; }
   if (meta[0]?.schema_version === 4) {
     // Do not treat a relabelled current schema as a migratable legacy store.
     // The v4 execution fact had `state`; v5 has the formal `status` contract.
@@ -923,7 +984,7 @@ function initializeBaseSchema(db: AnalyticsDb, nowMs: number) {
 }
 
 function initializeNewSchema(db: AnalyticsDb, nowMs: number) {
-  db.transaction(() => { initializeBaseSchema(db, nowMs); db.exec(COLLECTOR_TABLE_SQL); db.exec(SIGNAL_TABLE_SQL); db.exec(DASHBOARD_TABLE_SQL); db.exec(GIT_TABLE_SQL); })();
+  db.transaction(() => { initializeBaseSchema(db, nowMs); db.exec(COLLECTOR_TABLE_SQL); db.exec(SIGNAL_TABLE_SQL); db.exec(CURRENT_DASHBOARD_TABLE_SQL); })();
 }
 
 function createCollectorSchemaFromV2(db: AnalyticsDb) {
@@ -1221,7 +1282,31 @@ function migrateV14ToV15(db: AnalyticsDb, testFaultAt?: "after_source_control_cr
  * real v11/v13 tables and indexes (not a current schema with a relabelled
  * metadata row).  Do not use in production startup paths.
  */
-export function createHistoricalSchemaForTest(db: AnalyticsDb, version: 11 | 12 | 13 | 14 | 15 | 16 | 17) {
+export function createHistoricalSchemaForTest(db: AnalyticsDb, version: 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18) {
+  // Tests start from a fresh current store; restore the last released domain
+  // and collected-cache layout before invoking earlier release migrations.
+  if (inspectSchema(db) === "current") db.transaction(() => {
+    db.exec(`
+      ALTER TABLE analytics_domain_state RENAME TO v19_domain_state;
+      CREATE TABLE analytics_domain_state (
+        domain TEXT PRIMARY KEY NOT NULL CHECK (domain IN (${expectedList(LEGACY_ANALYTICS_DOMAINS)})), collection_started_at INTEGER,
+        reconciled_through INTEGER, rollup_ready_through INTEGER, retention_floor INTEGER,
+        status TEXT NOT NULL CHECK (status IN (${DOMAIN_STATUS_SQL})), last_succeeded_at INTEGER, last_error_code TEXT, updated_at INTEGER NOT NULL
+      );
+      INSERT INTO analytics_domain_state SELECT * FROM v19_domain_state;
+      DROP TABLE v19_domain_state;
+      ALTER TABLE dashboard_collected_1h RENAME TO v19_collected;
+      DROP INDEX dashboard_collected_1h_bucket;
+      ${rawExpectedDdl("dashboard_collected_1h", "table")}
+      INSERT INTO dashboard_collected_1h SELECT * FROM v19_collected;
+      DROP TABLE v19_collected;
+      ${rawExpectedDdl("dashboard_collected_1h_bucket", "index")}
+      ${GIT_TABLE_SQL}
+    `);
+    db.prepare("INSERT INTO analytics_domain_state VALUES ('git',NULL,NULL,NULL,NULL,'unavailable',NULL,NULL,0)").run();
+    db.prepare("UPDATE analytics_schema_meta SET schema_version=18 WHERE singleton=1").run();
+  })();
+  if (version === 18) return;
   if (version === 11) {
     rebuildV11SignalHistoryTables(db);
     db.prepare("UPDATE analytics_schema_meta SET schema_version=11 WHERE singleton=1").run();
@@ -1243,7 +1328,7 @@ export function createHistoricalSchemaForTest(db: AnalyticsDb, version: 11 | 12 
 }
 
 /** Opens the isolated Analytics store. Production callers are restricted to the Analytics child process. */
-export async function openAnalyticsDb(dataDir: string, nowMs = Date.now(), options?: { testFaultAt?: "v8_after_dashboard_rebuild" | "v13_after_worker_event_rebuild" | "v14_after_fact_identity_rebuild" | "v15_after_source_control_create" | "v16_after_baseline_rewrite" | "v17_after_empty_baseline" | "v18_after_execution_rebuild"; afterFilePinnedForTest?: () => Promise<void> | void }): Promise<AnalyticsDb> {
+export async function openAnalyticsDb(dataDir: string, nowMs = Date.now(), options?: { testFaultAt?: "v8_after_dashboard_rebuild" | "v13_after_worker_event_rebuild" | "v14_after_fact_identity_rebuild" | "v15_after_source_control_create" | "v16_after_baseline_rewrite" | "v17_after_empty_baseline" | "v18_after_execution_rebuild" | "v19_after_collected_rebuild"; afterFilePinnedForTest?: () => Promise<void> | void }): Promise<AnalyticsDb> {
   const root = await openSecureAnalyticsRoot(dataDir);
   let db: AnalyticsDb | null = null;
   let pinned: FileHandle | null = null;
@@ -1282,10 +1367,12 @@ export async function openAnalyticsDb(dataDir: string, nowMs = Date.now(), optio
     if (inspectSchema(db) === "v15") migrateV15ToV16(db, options?.testFaultAt === "v16_after_baseline_rewrite" ? "after_baseline_rewrite" : undefined);
     if (inspectSchema(db) === "v16") migrateV16ToV17(db, options?.testFaultAt === "v17_after_empty_baseline" ? "after_empty_baseline" : undefined);
     if (inspectSchema(db) === "v17") migrateV17ToV18(db, options?.testFaultAt === "v18_after_execution_rebuild" ? "after_execution_rebuild" : undefined);
+    if (inspectSchema(db) === "v18") migrateV18ToV19(db, options?.testFaultAt === "v19_after_collected_rebuild" ? "after_collected_rebuild" : undefined);
     verifyCurrentSchema(db);
     db.pragma("busy_timeout = 1000");
     db.pragma("foreign_keys = ON");
     db.pragma("journal_mode = WAL");
+    await root.deleteFile("git-installation-secret");
     databaseRoots.set(db, { root, file: pinned });
     pinned = null;
     return db;

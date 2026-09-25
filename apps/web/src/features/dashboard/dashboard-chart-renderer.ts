@@ -1,4 +1,4 @@
-export type DashboardChartKind = "count" | "duration" | "ratio" | "model_status" | "tokens" | "worker_events" | "monitoring" | "monitoring_total";
+export type DashboardChartKind = "count" | "total_tokens" | "duration" | "ratio" | "model_status" | "tokens" | "worker_events" | "monitoring" | "monitoring_total";
 export type DashboardChartShape = "line" | "stacked-bars";
 
 export type DashboardChartSeries = {
@@ -32,6 +32,7 @@ type UnknownRecord = Record<string, unknown>;
 
 const definitions: Record<DashboardChartKind, Definition[]> = {
   count: [{ key: "count", labelKey: "count", color: "#4f8cff" }],
+  total_tokens: [{ key: "count", labelKey: "totalTokens", color: "#4f8cff" }],
   duration: [{ key: "durationMs", labelKey: "duration", color: "#8b5cf6" }],
   ratio: [{ key: "ratio", labelKey: "ratio", color: "#22c55e" }],
   model_status: [
@@ -57,7 +58,6 @@ const definitions: Record<DashboardChartKind, Definition[]> = {
     { key: "execution", labelKey: "monitoringExecution", color: "#ec4899" },
     { key: "model", labelKey: "monitoringModel", color: "#22c55e" },
     { key: "worker", labelKey: "monitoringWorker", color: "#f59e0b" },
-    { key: "git", labelKey: "monitoringGit", color: "#64748b" },
   ],
 };
 

@@ -33,12 +33,13 @@ test("checkpoint/control signals retain only coherent bounded completeness field
 
 test("expected slot configuration is an atomic closed replacement document", () => {
   const config = { kind: "expected_slots_config", sentAt: 1, effectiveAt: 1,
-    sourceConfigVersion: 1, enabledFactDomains: ["run", "session", "message", "tool", "execution", "model", "worker", "git"],
+    sourceConfigVersion: 1, enabledFactDomains: ["run", "session", "message", "tool", "execution", "model", "worker"],
     requestId: "slot-request-1", slots: [
     { domain: "worker", producerNamespace: "worker_observer", producerId: "process_manager" },
     { domain: "execution", producerNamespace: "agent_worker", producerId: "agent_runner" },
     { domain: "model", producerNamespace: "agent_worker", producerId: "agent_runner" }
   ] };
   assert.equal(Value.Check(AnalyticsControlSignalSchema, config), true);
+  assert.equal(Value.Check(AnalyticsControlSignalSchema, { ...config, enabledFactDomains: [...config.enabledFactDomains, "git"] }), false);
   assert.equal(Value.Check(AnalyticsControlSignalSchema, { ...config, slots: [...config.slots, { domain: "worker", producerNamespace: "worker_observer", producerId: "process_manager" }] }), false);
 });

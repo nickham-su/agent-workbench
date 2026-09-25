@@ -162,7 +162,7 @@ test("ProcessManager waits for startup recovery, diagnoses corrupt terminal outb
   const generation = "terminal-corrupt-generation";
   assert.equal(acceptAnalyticsSignal(db, {
     kind: "expected_slots_config", sentAt: 10, requestId: "enable-model-fixture", sourceConfigVersion: 1, effectiveAt: 10,
-    enabledFactDomains: ["run", "session", "message", "tool", "execution", "model", "worker", "git"],
+    enabledFactDomains: ["run", "session", "message", "tool", "execution", "model", "worker"],
     slots: [
       { domain: "worker", producerNamespace: "worker_observer", producerId: "process_manager" },
       { domain: "execution", producerNamespace: "agent_worker", producerId: "agent_runner" },

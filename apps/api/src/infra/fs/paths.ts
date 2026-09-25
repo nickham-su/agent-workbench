@@ -18,11 +18,6 @@ export function analyticsConfigSourcePath(dataDir: string) {
   return path.join(analyticsDataRoot(dataDir), "config-source.json");
 }
 
-/** Reserved for the Git scanner. It must never be sent through Analytics IPC. */
-export function analyticsGitInstallationSecretPath(dataDir: string) {
-  return path.join(analyticsDataRoot(dataDir), "git-installation-secret");
-}
-
 /** Reserved for producer-private Model Analytics outboxes. */
 export function analyticsModelOutboxRoot(dataDir: string) {
   return path.join(analyticsDataRoot(dataDir), "model-outbox");

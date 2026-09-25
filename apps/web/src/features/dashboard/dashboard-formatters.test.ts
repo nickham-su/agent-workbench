@@ -18,9 +18,9 @@ test("短时长卡片保留秒和毫秒，零不与未知混淆，分钟与小�
   assert.equal(formatDuration(60_000), "1m");
   assert.equal(formatDuration(3_600_000), "1h 0m");
 });
-test("不可用和 Git partial 原因可供受控 UI 映射", () => {
-  assert.equal(resultReason({ status: "partial", partialReason: "repo_not_ready" }), "repo_not_ready");
-  assert.equal(resultReason({ status: "unavailable", unavailableReason: "no_ready_repo" }), "no_ready_repo");
+test("可用性原因可供受控 UI 映射", () => {
+  assert.equal(resultReason({ status: "partial", partialReason: "coverage_gap" }), "coverage_gap");
+  assert.equal(resultReason({ status: "unavailable", unavailableReason: "domain_unavailable" }), "domain_unavailable");
   assert.equal(formatDuration(null), "—");
 });
 

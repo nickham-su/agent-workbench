@@ -17,10 +17,6 @@ export function applyAnalyticsRetention(db: AnalyticsDb, now = Date.now(), reten
     }
     db.prepare(`DELETE FROM analytics_execution_fact WHERE collected_at < ? AND status = 'ended' AND end_time_quality IN ('observed', 'inferred') AND effective_ended_at < ?`).run(physicalFloor, physicalFloor);
     db.prepare(`DELETE FROM analytics_model_call_fact WHERE collected_at < ? AND status <> 'running' AND completion_quality = 'observed' AND ended_at IS NOT NULL AND ended_at < ?`).run(physicalFloor, physicalFloor);
-    db.prepare(`DELETE FROM analytics_git_commit_fact WHERE collected_at < ?
-      AND NOT EXISTS (SELECT 1 FROM analytics_git_membership m JOIN analytics_git_repo_state r
-        ON r.repo_id=m.repo_id AND r.current_scan_id=m.scan_id
-        WHERE m.repo_id=analytics_git_commit_fact.repo_id AND m.commit_identity=analytics_git_commit_fact.commit_identity)`).run(physicalFloor);
     // A non-terminal producer still needs its entire receipt prefix for
     // checkpoint continuity. Pruning it would make a live generation appear
     // to have an unexplained sequence gap.

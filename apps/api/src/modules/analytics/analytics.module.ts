@@ -78,7 +78,6 @@ export async function registerAnalyticsModule(
       "tool" as const,
       "execution" as const,
       "model" as const,
-      "git" as const,
       ...(ctx.agentWorkerEnabled ? ["worker" as const] : []),
     ],
     slots,

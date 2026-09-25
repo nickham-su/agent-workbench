@@ -102,7 +102,7 @@ export function rebuildDirtyRollups(db: AnalyticsDb, now = Date.now(), maxBucket
 
 const COLLECTED_SOURCES: Array<[string, string]> = [
   ["run", "analytics_run_fact"], ["session", "analytics_session_fact"], ["message", "analytics_message_fact"], ["tool", "analytics_tool_fact"],
-  ["execution", "analytics_execution_fact"], ["model", "analytics_model_call_fact"], ["worker", "analytics_worker_event_fact"], ["git", "analytics_git_commit_fact"]
+  ["execution", "analytics_execution_fact"], ["model", "analytics_model_call_fact"], ["worker", "analytics_worker_event_fact"]
 ];
 const COLLECTED_DOMAINS = COLLECTED_SOURCES.map(([domain]) => domain);
 
@@ -118,7 +118,7 @@ export function rebuildCollectedRollup(db: AnalyticsDb, from: number, to: number
       const insert = db.prepare("INSERT INTO dashboard_collected_1h(bucket_start,domain,fact_count) VALUES(?,?,?)");
       for (const row of rows) insert.run(row.bucket_start, domain, row.fact_count);
     }
-    // A completed collected-at hour is represented by all eight domains,
+    // A completed collected-at hour is represented by all seven domains,
     // including zero-valued dimensions. This lets readers distinguish a
     // certified zero from a cache hole without guessing from missing rows.
     const zero = db.prepare(`INSERT INTO dashboard_collected_1h(bucket_start,domain,fact_count)

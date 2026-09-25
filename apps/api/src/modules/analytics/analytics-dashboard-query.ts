@@ -1,6 +1,7 @@
 import type {
   AnalyticsComparisonResult,
   AnalyticsDomain,
+  AnalyticsFactDomain,
   DashboardData,
   DashboardQueryErrorResponse,
   DashboardQueryRequest,
@@ -29,7 +30,6 @@ const FACT_DOMAINS = [
   "execution",
   "model",
   "worker",
-  "git",
 ] as const;
 const comparisonUnavailable = {
   status: "domain_unavailable",
@@ -84,6 +84,11 @@ type DomainConfig = {
   enabled_fact_domains_json: string;
 };
 
+function configuredFactDomains(config: DomainConfig): AnalyticsFactDomain[] {
+  return (JSON.parse(config.enabled_fact_domains_json) as string[])
+    .filter((domain): domain is AnalyticsFactDomain => (FACT_DOMAINS as readonly string[]).includes(domain));
+}
+
 /** Config toggles are prospective: only Domains enabled in each range segment need certification. */
 function monitoringCompleteness(
   db: AnalyticsDb,
@@ -110,9 +115,7 @@ function monitoringCompleteness(
     (config) => config.effective_at > from && config.effective_at < to,
   )) {
     if (active && cursor < config.effective_at) {
-      const domains = JSON.parse(
-        active.enabled_fact_domains_json,
-      ) as AnalyticsDomain[];
+      const domains = configuredFactDomains(active);
       domains.forEach((domain) => required.add(domain));
       const segment = completeness(
         db,
@@ -127,9 +130,7 @@ function monitoringCompleteness(
     cursor = config.effective_at;
   }
   if (active && cursor < to) {
-    const domains = JSON.parse(
-      active.enabled_fact_domains_json,
-    ) as AnalyticsDomain[];
+    const domains = configuredFactDomains(active);
     domains.forEach((domain) => required.add(domain));
     const segment = completeness(db, states, domains, cursor, to);
     if (!segment.complete) assessment = segment;
@@ -394,6 +395,17 @@ function sumOrNull(value: number | null, sampleCount: number) {
   return sampleCount === 0 ? null : (value ?? 0);
 }
 
+/** A token sum is not the total when even one recorded call lacks usage. */
+function completeModelTokenTotal(
+  tokens: number,
+  validSamples: number,
+  requests: number,
+  coverageComplete: boolean,
+): number | null {
+  if (requests === 0) return coverageComplete ? 0 : null;
+  return validSamples === requests ? tokens : null;
+}
+
 function hourlySourcePlan(
   db: AnalyticsDb,
   states: StateMap,
@@ -595,7 +607,6 @@ const collectedFactTables: ReadonlyArray<readonly [CollectedDomain, string]> = [
   ["execution", "analytics_execution_fact"],
   ["model", "analytics_model_call_fact"],
   ["worker", "analytics_worker_event_fact"],
-  ["git", "analytics_git_commit_fact"],
 ];
 
 function emptyCollectedCounts(): CollectedCounts {
@@ -607,7 +618,6 @@ function emptyCollectedCounts(): CollectedCounts {
     execution: 0,
     model: 0,
     worker: 0,
-    git: 0,
   };
 }
 
@@ -688,257 +698,6 @@ function collectedCountsForRange(
  * newly added card from accidentally turning unknown zero into a complete zero.
  */
 
-type GitPartialReason =
-  | "repo_not_ready"
-  | "range_before_coverage"
-  | "scan_stale"
-  | "mixed_repo_coverage";
-type GitCoverage = {
-  ready: number;
-  total: number;
-  partialReason: GitPartialReason | null;
-};
-type GitStateRow = {
-  repo_id: string;
-  current_scan_id: string | null;
-  covered_from: number | null;
-  last_ready_at: number | null;
-};
-type GitRow = {
-  committed_at: number;
-  parent_count: number;
-  files_changed: number | null;
-  insertions: number | null;
-  deletions: number | null;
-};
-type GitValues = {
-  commits: number;
-  nonMergeCommits: number;
-  filesChanged: number;
-  linesAdded: number;
-  linesDeleted: number;
-};
-
-function gitCoverage(db: AnalyticsDb, from: number, now: number): GitCoverage {
-  const rows = db
-    .prepare(
-      `SELECT repo_id,current_scan_id,covered_from,last_ready_at FROM analytics_git_repo_state`,
-    )
-    .all() as GitStateRow[];
-  const readyRows = rows.filter(
-    (row) => row.current_scan_id !== null && row.covered_from !== null,
-  );
-  if (readyRows.length === 0)
-    return { ready: 0, total: rows.length, partialReason: null };
-  const reasons = new Set<Exclude<GitPartialReason, "mixed_repo_coverage">>();
-  if (readyRows.length < rows.length) reasons.add("repo_not_ready");
-  if (readyRows.some((row) => row.covered_from! > from))
-    reasons.add("range_before_coverage");
-  if (
-    readyRows.some(
-      (row) =>
-        row.last_ready_at === null || now - row.last_ready_at > 2 * 60 * 60_000,
-    )
-  )
-    reasons.add("scan_stale");
-  return {
-    ready: readyRows.length,
-    total: rows.length,
-    partialReason:
-      reasons.size === 0
-        ? null
-        : reasons.size === 1
-          ? [...reasons][0]!
-          : "mixed_repo_coverage",
-  };
-}
-
-function currentGitRows(db: AnalyticsDb, from: number, to: number): GitRow[] {
-  return db
-    .prepare(
-      `SELECT f.committed_at,f.parent_count,f.files_changed,f.insertions,f.deletions
-    FROM analytics_git_repo_state r
-    JOIN analytics_git_membership m ON m.repo_id=r.repo_id AND m.scan_id=r.current_scan_id
-    JOIN analytics_git_commit_fact f ON f.repo_id=m.repo_id AND f.commit_identity=m.commit_identity
-    WHERE f.committed_at>=? AND f.committed_at<?`,
-    )
-    .all(from, to) as GitRow[];
-}
-
-function gitValues(rows: readonly GitRow[]): GitValues {
-  return {
-    commits: rows.length,
-    nonMergeCommits: rows.filter((row) => row.parent_count <= 1).length,
-    filesChanged: rows.reduce(
-      (total, row) => total + (row.files_changed ?? 0),
-      0,
-    ),
-    linesAdded: rows.reduce((total, row) => total + (row.insertions ?? 0), 0),
-    linesDeleted: rows.reduce((total, row) => total + (row.deletions ?? 0), 0),
-  };
-}
-
-function applyGitDashboard(
-  db: AnalyticsDb,
-  data: DashboardBuilder,
-  from: number,
-  to: number,
-  buckets: readonly DisplayBucket[],
-  now: number,
-  timezone = "UTC",
-) {
-  const coverage = gitCoverage(db, from, now);
-  const base = {
-    requiredDomains: ["git"] as AnalyticsDomain[],
-    comparison: comparisonUnavailable,
-    readyRepoCount: coverage.ready,
-    totalRepoCount: coverage.total,
-  };
-  const unavailable = coverage.ready === 0;
-  const rows = unavailable ? [] : currentGitRows(db, from, to);
-  const values = gitValues(rows);
-  const metric = (value: number) => {
-    if (unavailable)
-      return {
-        status: "unavailable",
-        value: null,
-        dataIncomplete: true,
-        unavailableReason: "no_ready_repo",
-        ...base,
-      };
-    if (coverage.partialReason)
-      return {
-        status: "partial",
-        value,
-        completeness: "partial",
-        dataIncomplete: true,
-        partialReason: coverage.partialReason,
-        ...base,
-      };
-    return {
-      status: "available",
-      value,
-      completeness: "complete",
-      dataIncomplete: false,
-      ...base,
-    };
-  };
-  const trend = (key: keyof GitValues) => {
-    const points = buckets.map((bucket) => ({
-      from: bucket.from,
-      to: bucket.to,
-      count: gitValues(
-        rows.filter(
-          (row) =>
-            row.committed_at >= bucket.from && row.committed_at < bucket.to,
-        ),
-      )[key],
-    }));
-    if (unavailable)
-      return {
-        status: "unavailable",
-        data: null,
-        dataIncomplete: true,
-        unavailableReason: "no_ready_repo",
-        ...base,
-      };
-    if (coverage.partialReason)
-      return {
-        status: "partial",
-        data: points,
-        completeness: "partial",
-        dataIncomplete: true,
-        partialReason: coverage.partialReason,
-        ...base,
-      };
-    return {
-      status: "available",
-      data: points,
-      completeness: "complete",
-      dataIncomplete: false,
-      ...base,
-    };
-  };
-
-  data.overview.gitCommits = metric(values.commits) as never;
-  data.overviewTrends.gitCommits = trend("commits") as never;
-  data.git.metrics = {
-    commits: metric(values.commits) as never,
-    nonMergeCommits: metric(values.nonMergeCommits) as never,
-    filesChanged: metric(values.filesChanged) as never,
-    linesAdded: metric(values.linesAdded) as never,
-    linesDeleted: metric(values.linesDeleted) as never,
-  };
-  data.git.trends = {
-    commits: trend("commits") as never,
-    nonMergeCommits: trend("nonMergeCommits") as never,
-    filesChanged: trend("filesChanged") as never,
-    linesAdded: trend("linesAdded") as never,
-    linesDeleted: trend("linesDeleted") as never,
-  };
-
-  // The heatmap has independent coverage. The early start guarantees that the
-  // trailing 180 buckets are local calendar days even across DST transitions.
-  const heatBuckets = planDisplayBuckets({
-    from: now - 183 * 24 * HOUR_MS,
-    to: now,
-    timezone,
-    rangeKind: "preset_90d",
-  }).slice(-180);
-  const heatFrom = heatBuckets[0]?.from ?? now;
-  const heatCoverage = gitCoverage(db, heatFrom, now);
-  const heatBase = {
-    requiredDomains: ["git"] as AnalyticsDomain[],
-    comparison: comparisonNotApplicable,
-    readyRepoCount: heatCoverage.ready,
-    totalRepoCount: heatCoverage.total,
-  };
-  const heatRows =
-    heatCoverage.ready === 0 ? [] : currentGitRows(db, heatFrom, now);
-  const days = heatBuckets.map((bucket) => ({
-    from: bucket.from,
-    to: bucket.to,
-    commits: heatRows.filter(
-      (row) => row.committed_at >= bucket.from && row.committed_at < bucket.to,
-    ).length,
-  }));
-  data.exceptions.gitHeatmap180d = (
-    heatCoverage.ready === 0
-      ? {
-          status: "unavailable",
-          data: null,
-          dataIncomplete: true,
-          unavailableReason: "no_ready_repo",
-          ...heatBase,
-          from: heatFrom,
-          to: now,
-          asOf: now,
-        }
-      : heatCoverage.partialReason
-        ? {
-            status: "partial",
-            data: { days },
-            completeness: "partial",
-            dataIncomplete: true,
-            partialReason: heatCoverage.partialReason,
-            ...heatBase,
-            from: heatFrom,
-            to: now,
-            asOf: now,
-          }
-        : {
-            status: "available",
-            data: { days },
-            completeness: "complete",
-            dataIncomplete: false,
-            ...heatBase,
-            from: heatFrom,
-            to: now,
-            asOf: now,
-          }
-  ) as never;
-}
-
 function queryDashboardSnapshot(
   db: AnalyticsDb,
   request: DashboardQueryRequest,
@@ -961,7 +720,6 @@ function queryDashboardSnapshot(
     timezone: initial.timezone,
     rangeKind: request.rangeKind,
   });
-  applyGitDashboard(db, data, from, to, buckets, now, initial.timezone);
   const run = completeness(db, states, ["run"], from, to);
   const message = completeness(db, states, ["message"], from, to);
   const tool = completeness(db, states, ["tool"], from, to);
@@ -1286,6 +1044,7 @@ function queryDashboardSnapshot(
     requests > 0,
   );
   type ModelBucketStats = {
+    requests: number;
     completed: number;
     failed: number;
     timedOut: number;
@@ -1294,6 +1053,8 @@ function queryDashboardSnapshot(
     durationSamples: number;
     inputTokens: number;
     outputTokens: number;
+    totalTokens: number;
+    totalCount: number;
     cacheReadTokens: number;
     comparable: number;
     inputCount: number;
@@ -1301,6 +1062,7 @@ function queryDashboardSnapshot(
     comparableInput: number;
   };
   const modelBucketStats: ModelBucketStats[] = buckets.map(() => ({
+    requests: 0,
     completed: 0,
     failed: 0,
     timedOut: 0,
@@ -1309,6 +1071,8 @@ function queryDashboardSnapshot(
     durationSamples: 0,
     inputTokens: 0,
     outputTokens: 0,
+    totalTokens: 0,
+    totalCount: 0,
     cacheReadTokens: 0,
     comparable: 0,
     inputCount: 0,
@@ -1324,6 +1088,7 @@ function queryDashboardSnapshot(
       states.get("model"),
     )) {
       const row = modelBucketStats[index]!;
+      row.requests += fact.request_count;
       if (fact.status === "completed") row.completed += fact.request_count;
       else if (fact.status === "failed") row.failed += fact.request_count;
       else if (fact.status === "timed_out") row.timedOut += fact.request_count;
@@ -1334,6 +1099,8 @@ function queryDashboardSnapshot(
       row.inputCount += fact.input_reported_count;
       row.outputTokens += fact.output_tokens;
       row.outputCount += fact.output_reported_count;
+      row.totalTokens += fact.total_tokens;
+      row.totalCount += fact.total_reported_count + fact.total_derived_count;
       row.comparable += fact.cache_comparable_count;
       row.comparableInput += fact.comparable_input_tokens;
       row.cacheReadTokens += fact.comparable_cache_read_tokens;
@@ -1461,8 +1228,21 @@ function queryDashboardSnapshot(
     count: sumOrNull(modelAggregate.outputTokens, outputCount),
   });
   data.model.metrics.totalTokens = modelMetric({
-    count: sumOrNull(modelAggregate.totalTokens, totalReported + totalDerived),
+    count: completeModelTokenTotal(modelAggregate.totalTokens, totalReported + totalDerived, requests, model.complete),
   });
+  data.overview.totalTokens = data.model.metrics.totalTokens;
+  data.overviewTrends.totalTokens = panel(
+    model,
+    ["model"],
+    buckets.map((bucket, index) => {
+      const row = modelBucketStats[index]!;
+      return {
+        ...bucket,
+        count: completeModelTokenTotal(row.totalTokens, row.totalCount, row.requests, model.complete),
+      };
+    }),
+    modelKnown,
+  );
   data.model.metrics.cacheReadTokens = modelMetric({
     count: sumOrNull(modelAggregate.cacheReadTokens, comparable),
   });
@@ -2152,10 +1932,10 @@ function queryDashboardSnapshot(
     factDomains,
     {
       count: collectedTotal,
-      metricDefinitionVersion: "dashboard_collected_fact_v1",
+      metricDefinitionVersion: "dashboard_collected_fact_v2",
       collectionConfigVersion: config?.collection_config_version ?? "0000000000000000",
       configuredDomainsAtAsOf: config
-        ? JSON.parse(config.enabled_fact_domains_json)
+        ? configuredFactDomains(config)
         : [],
       configurationChangedWithinRange: monitoring.changedWithinRange,
     },
@@ -2179,8 +1959,7 @@ function queryDashboardSnapshot(
           value.tool +
           value.execution +
           value.model +
-          value.worker +
-          value.git,
+          value.worker,
       };
     }),
     collectedTotal > 0,
@@ -2388,7 +2167,6 @@ export function queryDashboard(
     );
     markNotApplicable(current.data.exceptions.domainHealth);
     markNotApplicable(current.data.exceptions.workerLiveSnapshot);
-    markNotApplicable(current.data.exceptions.gitHeatmap180d);
     return current;
   })();
 }

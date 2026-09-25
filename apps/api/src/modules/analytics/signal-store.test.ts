@@ -89,7 +89,7 @@ function checkpoint(
 function enableWorkerFactDomains(db: AnalyticsDb) {
   assert.equal(acceptAnalyticsSignal(db, {
     kind: "expected_slots_config", sentAt: 0, requestId: "test-enable-worker", sourceConfigVersion: 1, effectiveAt: 0,
-    enabledFactDomains: ["run", "session", "message", "tool", "execution", "model", "worker", "git"],
+    enabledFactDomains: ["run", "session", "message", "tool", "execution", "model", "worker"],
     slots: [
       { domain: "worker", producerNamespace: "worker_observer", producerId: "process_manager" },
       { domain: "execution", producerNamespace: "agent_worker", producerId: "agent_runner" },
@@ -433,7 +433,7 @@ test("stale checkpoint recovers its own generation but terminal lifecycle cannot
       effectiveAt: 90,
       requestId: "slots-90",
       sourceConfigVersion: 90,
-      enabledFactDomains: ["run", "session", "message", "tool", "execution", "model", "worker", "git"],
+      enabledFactDomains: ["run", "session", "message", "tool", "execution", "model", "worker"],
 
       slots: [
         {
@@ -526,7 +526,7 @@ test("runtime slot configuration replaces disabled modes and a late checkpoint c
       effectiveAt: 10,
       requestId: "slots-10",
       sourceConfigVersion: 1,
-      enabledFactDomains: ["run", "session", "message", "tool", "execution", "model", "worker", "git"],
+      enabledFactDomains: ["run", "session", "message", "tool", "execution", "model", "worker"],
 
       slots: [
         {
@@ -556,7 +556,7 @@ test("runtime slot configuration replaces disabled modes and a late checkpoint c
       effectiveAt: 20,
       requestId: "slots-20",
       sourceConfigVersion: 2,
-      enabledFactDomains: ["run", "session", "message", "tool", "execution", "model", "worker", "git"],
+      enabledFactDomains: ["run", "session", "message", "tool", "execution", "model", "worker"],
 
       slots: [
         {
@@ -651,7 +651,7 @@ test("an older stale or closing generation blocks a newer healthy generation", a
       effectiveAt: 1,
       sourceConfigVersion: 1,
       requestId: "worker-slots",
-      enabledFactDomains: ["run", "session", "message", "tool", "execution", "model", "worker", "git"],
+      enabledFactDomains: ["run", "session", "message", "tool", "execution", "model", "worker"],
 
       slots: [
         {
@@ -1304,7 +1304,7 @@ test("an old-generation unknown open Fact blocks replacement gap closure", async
       effectiveAt: 1,
       sourceConfigVersion: 1,
       requestId: "generation-slots",
-      enabledFactDomains: ["run", "session", "message", "tool", "execution", "model", "worker", "git"],
+      enabledFactDomains: ["run", "session", "message", "tool", "execution", "model", "worker"],
 
       slots: [
         {
@@ -1565,7 +1565,7 @@ test("legacy NULL open execution and model Facts block certification until same-
         effectiveAt: 10,
         requestId: "slots",
         sourceConfigVersion: 10,
-        enabledFactDomains: ["run", "session", "message", "tool", "execution", "model", "worker", "git"],
+        enabledFactDomains: ["run", "session", "message", "tool", "execution", "model", "worker"],
 
         slots: [
           {

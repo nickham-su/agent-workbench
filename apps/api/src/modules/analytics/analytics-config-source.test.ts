@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { access, mkdir, readdir, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -16,12 +17,33 @@ const workerSlots = [
   { domain: "execution" as const, producerNamespace: "agent_worker" as const, producerId: "agent_runner" },
   { domain: "model" as const, producerNamespace: "agent_worker" as const, producerId: "agent_runner" },
 ];
-const domains = ["run", "session", "message", "tool", "execution", "model", "worker", "git"] as const;
+const domains = ["run", "session", "message", "tool", "execution", "model", "worker"] as const;
 
 async function fixture() {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "awb-analytics-config-source-"));
   return { dataDir };
 }
+
+test("an old Git-enabled source stays authentic while the new config gets a monotonic version", async (t) => {
+  const { dataDir } = await fixture();
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const source = analyticsConfigSourcePath(dataDir);
+  await mkdir(path.dirname(source), { recursive: true });
+  const canonicalContent = JSON.stringify({
+    enabledFactDomains: ["git", "model"],
+    slots: [...workerSlots].sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+  });
+  await writeFile(source, JSON.stringify({
+    sourceVersion: 7, effectiveAt: 100,
+    canonicalContent, canonicalHash: createHash("sha256").update(canonicalContent).digest("hex"),
+  }), { mode: 0o600 });
+  assert.equal(await readAnalyticsConfigSource(dataDir), null);
+  const next = await allocateAnalyticsConfigSource(dataDir, { enabledFactDomains: ["model"], slots: workerSlots }, 200);
+  assert.equal(next?.sourceConfigVersion, 8);
+  assert.equal(next?.effectiveAt, 200);
+  assert.deepEqual(next?.enabledFactDomains, ["model"]);
+  assert.deepEqual((await readAnalyticsConfigSource(dataDir))?.enabledFactDomains, ["model"]);
+});
 
 test("config source rejects an Analytics-root symlink without writing outside", async (t) => {
   const { dataDir } = await fixture();

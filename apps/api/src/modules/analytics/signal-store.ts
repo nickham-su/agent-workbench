@@ -28,7 +28,6 @@ const FACT_DOMAINS = [
   "execution",
   "model",
   "worker",
-  "git",
 ] as const;
 type FactDomain = (typeof FACT_DOMAINS)[number];
 type Domain = "execution" | "model" | "worker";

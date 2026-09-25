@@ -7,10 +7,8 @@ import { mount } from "@vue/test-utils";
 import { i18n } from "@/shared/i18n";
 import MetricCard from "./components/DashboardMetricCard.vue";
 import TrendChart from "./components/DashboardTrendChart.vue";
-import GitHeatmap from "./components/DashboardGitHeatmap.vue";
 import DomainSummary from "./components/DashboardDomainSummary.vue";
 import WorkerSnapshot from "./components/DashboardWorkerSnapshot.vue";
-import GitMetricCard from "./components/DashboardGitMetricCard.vue";
 import RestartRecords from "./components/DashboardRestartRecords.vue";
 import Tables from "./components/DashboardTables.vue";
 import AgentSection from "./components/DashboardAgentSection.vue";
@@ -199,34 +197,6 @@ test("连续已知 Input Token 与未知 Output Token 按 bucket 输出 fallback
   const details = wrapper.get(".chart-details").text();
   assert.match(details, /4/); assert.match(details, /8/); assert.match(details, /—/);
 });
-test("Git 热图局部统计以逐日下界呈现，不伪装仓库就绪数", () => {
-  const heatmap = { ...dashboardSuccessFixture.data.exceptions.gitHeatmap180d, status: "partial" as const, completeness: "partial" as const, dataIncomplete: true as const, partialReason: "repo_not_ready" as const };
-  const heatmapWrapper = mount(GitHeatmap, { ...options, props: { result: heatmap, timezone: "UTC" } });
-  assert.equal(heatmapWrapper.findAll(".heatmap span").length, 1);
-  assert.match(heatmapWrapper.get(".heatmap span").attributes("aria-label") ?? "", /≥\d/);
-  assert.doesNotMatch(heatmapWrapper.text(), /仓库未就绪|Repository not ready|1\/1|已知部分/);
-
-});
-test("Overview Git partial 卡和趋势只显示下界，不把它冒充精确值", () => {
-  const knownZero = { ...dashboardSuccessFixture.data.overview.gitCommits, value: 0 };
-  const zeroCard = mount(GitMetricCard, { ...options, props: { title: "commits", value: "0", result: knownZero, selected: false } });
-  assert.equal(zeroCard.get("strong").text(), "0");
-  assert.match(zeroCard.text(), /\+10%/);
-  const metric = { ...dashboardSuccessFixture.data.overview.gitCommits, status: "partial" as const, completeness: "partial" as const, dataIncomplete: true as const, partialReason: "repo_not_ready" as const };
-  const trend = { ...dashboardSuccessFixture.data.overviewTrends.gitCommits, status: "partial" as const, completeness: "partial" as const, dataIncomplete: true as const, partialReason: "repo_not_ready" as const };
-  const card = mount(GitMetricCard, { ...options, props: { title: "commits", value: "1", result: metric, selected: false } });
-  const chart = mount(TrendChart, { ...options, props: { title: "commits", kind: "count", panel: trend, gitMetadata: trend } });
-  assert.equal(card.get("strong").text(), "≥1");
-  assert.equal(card.get("strong").attributes("aria-label"), "≥1");
-  assert.match(chart.get(".chart-bucket").attributes("aria-label") ?? "", /≥3/);
-  assert.match(chart.get(".chart-details").text(), /≥3/);
-  assert.doesNotMatch(card.text(), /\+10%/);
-  assert.equal(chart.find(".comparison").exists(), false);
-  for (const wrapper of [card, chart]) {
-    assert.equal(wrapper.findAll(".status").length, 0);
-    assert.doesNotMatch(wrapper.text(), /已知部分|Known partial|仓库未就绪|Repository not ready/);
-  }
-});
 test("Domain summary 在 available 与 partial 展示已知域，仅 unavailable 隐藏域", () => {
   const available = dashboardSuccessFixture.data.exceptions.domainHealth;
   const partial = { ...available, status: "partial" as const, completeness: "partial" as const, dataIncomplete: true as const, partialReason: "coverage_gap" as const };
@@ -352,9 +322,15 @@ test("真实 DashboardTab：mounted 单请求、preset 自动刷新，custom 仅
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(calls.length, 3);
   assert.match(wrapper.get('[data-testid="dashboard-section-overview"]').text(), /域状态摘要|Domain status summary/);
-  await wrapper.get('[data-testid="overview-metric-gitCommits"] button').trigger("click");
-  assert.ok(wrapper.find('[data-testid="overview-trend-gitCommits"]').exists());
+  const tokenCard = wrapper.get('[data-testid="overview-metric-totalTokens"]');
+  assert.match(tokenCard.get(".metric-title").text(), /总 Token|Total tokens/);
+  assert.equal(tokenCard.get(".metric-value").text(), "9");
+  await tokenCard.get("button").trigger("click");
+  assert.ok(wrapper.get('[data-testid="overview-trend-totalTokens"] .chart-bucket').attributes("aria-label")?.includes("9"));
   const sectionButtons = wrapper.findAll("nav.dashboard-section-tabs button");
+  assert.equal(sectionButtons.length, 4);
+  assert.doesNotMatch(sectionButtons.map((button) => button.text()).join(" "), /Git/);
+  assert.equal(wrapper.find('[data-testid="dashboard-section-git"]').exists(), false);
   await sectionButtons[1].trigger("click");
   const agentSection = wrapper.get('[data-testid="dashboard-section-agent"]');
   for (const key of ["totalDuration", "runCount", "primaryRunCount", "subtaskRunCount", "userMessageCount", "assistantMessageCount", "toolCallCount", "toolSuccessRate", "manualCompactionCount", "autoCompactionCount"]) {
@@ -369,24 +345,48 @@ test("真实 DashboardTab：mounted 单请求、preset 自动刷新，custom 仅
   await modelSection.get('[data-testid="model-metric-cacheHitRate"] button').trigger("click");
   assert.ok(modelSection.find('[data-testid="model-trend-cacheHitRate"]').exists());
   await sectionButtons[3].trigger("click");
-  const gitSection = wrapper.get('[data-testid="dashboard-section-git"]');
-  assert.equal(gitSection.findAll('[data-testid="git-main"] > *').length, 2);
-  assert.equal(gitSection.findAll('.metric-tabs').length, 0);
-  for (const key of ["commits", "nonMergeCommits", "filesChanged", "linesAdded", "linesDeleted"]) {
-    const card = gitSection.get(`[data-testid="git-metric-${key}"] button`);
-    await card.trigger("click");
-    assert.equal(card.attributes("aria-pressed"), "true");
-    assert.ok(gitSection.find(`[data-testid="git-trend-${key}"]`).exists());
-  }
-  await gitSection.get('[data-testid="git-metric-filesChanged"] button').trigger("click");
-  assert.ok(gitSection.find('[data-testid="git-trend-filesChanged"]').exists());
+  assert.ok(wrapper.find('[data-testid="dashboard-section-worker"]').exists());
   wrapper.unmount();
 });
 
+test("概览总 Token 未知显示中性空值，可靠零显示 0；点击后趋势遵循同一语义", async () => {
+  for (const [count, label] of [[null, "—"], [0, "0"]] as const) {
+    const base = dashboardSuccessFixture;
+    const response = {
+      ...base,
+      data: {
+        ...base.data,
+        overview: { ...base.data.overview, totalTokens: { ...base.data.overview.totalTokens, value: { count } } },
+        overviewTrends: { ...base.data.overviewTrends, totalTokens: { ...base.data.overviewTrends.totalTokens, data: [{ from: 1, to: 2, count }] } },
+        model: { ...base.data.model, metrics: { ...base.data.model.metrics, totalTokens: { ...base.data.model.metrics.totalTokens, value: { count } } } },
+      },
+    };
+    assert.equal(Value.Check(DashboardQuerySuccessResponseSchema, response), true);
+    const wrapper = mount(DashboardTab, {
+      global: {
+        plugins: [i18n],
+        provide: { [dashboardQueryKey as symbol]: async () => response },
+        stubs: {
+          "a-select": { props: ["value"], template: '<select :value="value"><slot /></select>' },
+          "a-select-option": { props: ["value"], template: '<option :value="value"><slot /></option>' },
+          "a-button": { props: ["disabled"], emits: ["click"], template: '<button :disabled="disabled" @click="$emit(\'click\')"><slot /></button>' },
+          "a-alert": { template: '<div><slot /></div>' }, "a-spin": { template: '<div><slot /></div>' }, "a-empty": { template: '<div><slot /></div>' },
+        },
+      },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    const card = wrapper.get('[data-testid="overview-metric-totalTokens"]');
+    assert.equal(card.get(".metric-value").text(), label);
+    assert.equal(card.find(".metric-foot").exists(), false);
+    await card.get("button").trigger("click");
+    const chart = wrapper.get('[data-testid="overview-trend-totalTokens"]');
+    assert.match(chart.get(".chart-bucket").attributes("aria-label") ?? "", count === null ? /—/ : /(?:总 Token|Total tokens) 0/);
+    assert.equal(chart.findAll(".line-marker").length, count === null ? 0 : 1);
+    wrapper.unmount();
+  }
+});
+
 test("Worker 等部分结果保留业务数据，仅专用健康区展示采集原因", () => {
-  const gitPartial = { ...dashboardSuccessFixture.data.git.metrics.commits, status: "partial" as const, completeness: "partial" as const, dataIncomplete: true as const, partialReason: "repo_not_ready" as const };
-  const git = mount(GitMetricCard, { ...options, props: { title: "commits", value: "1", result: gitPartial, selected: false } });
-  assert.match(git.text(), /≥1/);
   const workerPartial = { ...dashboardSuccessFixture.data.exceptions.workerLiveSnapshot, status: "partial" as const, completeness: "partial" as const, dataIncomplete: true as const, partialReason: "coverage_gap" as const };
   const worker = mount(WorkerSnapshot, { ...options, props: { result: workerPartial, timezone: "UTC" } });
   assert.match(worker.text(), /本地降级|Local fallback/);
@@ -397,10 +397,10 @@ test("Worker 等部分结果保留业务数据，仅专用健康区展示采集�
   const coverage = { ...dashboardSuccessFixture.data.model.metrics.inputTokenCoverage, status: "partial" as const, completeness: "partial" as const, dataIncomplete: true as const, partialReason: "coverage_gap" as const };
   const metric = mount(MetricCard, { ...options, props: { title: "coverage", value: "100%", result: coverage } });
   assert.match(metric.text(), /100%/);
-  for (const wrapper of [git, worker, records, metric]) {
+  for (const wrapper of [worker, records, metric]) {
     assert.equal(wrapper.findAll(".status").length, 0);
     assert.doesNotMatch(wrapper.text(), /\+10%/, "partial with an available comparison is not a reliable change");
-    assert.doesNotMatch(wrapper.text(), /覆盖缺口|Coverage gap|仓库未就绪|Repository not ready/);
+    assert.doesNotMatch(wrapper.text(), /覆盖缺口|Coverage gap/);
   }
 });
 
@@ -483,7 +483,7 @@ test("模型请求状态按后端 bucket 状态值堆叠为柱，轴标签对齐
   assert.match(legend.text(), /完成|Completed/);
 });
 
-test("监控数据量使用合法 partial PanelResult 表达不完整，并保留八域组成", () => {
+test("监控数据量使用合法 partial PanelResult 表达不完整，并保留七域组成", () => {
   const panel = {
     ...dashboardSuccessFixture.data.overviewTrends.monitoringVolume,
     status: "partial" as const,
@@ -491,16 +491,16 @@ test("监控数据量使用合法 partial PanelResult 表达不完整，并保�
     dataIncomplete: true as const,
     partialReason: "coverage_gap" as const,
     data: [
-      { from: 1, to: 2, total: 36, run: 1, session: 2, message: 3, tool: 4, execution: 5, model: 6, worker: 7, git: 8 },
-      { from: 2, to: 3, total: 36, run: 1, session: 2, message: 3, tool: 4, execution: 5, model: 6, worker: 7, git: 8 },
+      { from: 1, to: 2, total: 28, run: 1, session: 2, message: 3, tool: 4, execution: 5, model: 6, worker: 7 },
+      { from: 2, to: 3, total: 28, run: 1, session: 2, message: 3, tool: 4, execution: 5, model: 6, worker: 7 },
     ],
   };
   const wrapper = mount(TrendChart, { ...options, props: { title: "monitoring", kind: "monitoring", panel } });
   const completeBucket = wrapper.get("[data-testid='stacked-bars-bucket-0']");
-  assert.equal(completeBucket.attributes("data-stack-total"), "36");
-  assert.equal(completeBucket.findAll(".bar-segment").length, 8);
-  assert.equal(completeBucket.findAll(".bar-segment").reduce((total, item) => total + Number(item.attributes("data-value")), 0), 36);
-  assert.equal(wrapper.findAll(".chart-legend li").length, 8);
+  assert.equal(completeBucket.attributes("data-stack-total"), "28");
+  assert.equal(completeBucket.findAll(".bar-segment").length, 7);
+  assert.equal(completeBucket.findAll(".bar-segment").reduce((total, item) => total + Number(item.attributes("data-value")), 0), 28);
+  assert.equal(wrapper.findAll(".chart-legend li").length, 7);
   assert.doesNotMatch(wrapper.text(), /覆盖缺口|Coverage gap/);
 });
 
@@ -552,7 +552,7 @@ test("概览用六卡 + 双栏主趋势/健康表，卡片切换保留真实 DTO
   assert.doesNotMatch(overview.text(), /配置诊断|Configuration diagnostic/);
   await overview.findAll(".metric-grid.six button")[1].trigger("click");
   assert.ok(overview.find('[data-testid="overview-trend-agentDuration"]').exists());
-  await wrapper.findAll("nav.dashboard-section-tabs button")[4]!.trigger("click");
+  await wrapper.findAll("nav.dashboard-section-tabs button")[3]!.trigger("click");
   assert.ok(wrapper.find('[data-testid="dashboard-section-worker"] .worker-main').exists());
   assert.equal(wrapper.findAll('[data-testid="dashboard-section-worker"] .domain-entry').length, 0);
   wrapper.unmount();
@@ -621,7 +621,7 @@ test("概览监控折线只采用服务端 total；密集桶轴最多五个标�
     from: Date.UTC(2025, 0, 1) + index * 3_600_000,
     to: Date.UTC(2025, 0, 1) + (index + 1) * 3_600_000,
     total: index + 1, run: index + 1, session: 0, message: 0, tool: 0,
-    execution: 0, model: 0, worker: 0, git: 0,
+    execution: 0, model: 0, worker: 0,
   }));
   const panel = { ...dashboardSuccessFixture.data.overviewTrends.monitoringVolume, data };
   const wrapper = mount(TrendChart, { ...options, props: { title: "monitoring", kind: "monitoring_total", panel } });
@@ -659,8 +659,6 @@ test("域状态摘要仅为异常域提供可操作的已知迹象，不猜测�
   const worker = { ...base, domain: "worker" as const, status: "degraded" as const,
     coverageGaps: { ...base.coverageGaps, openCount: 3, hasOpenGap: true },
     slots: [{ ...base.slots[0]!, producerId: "secret-producer-id" }] };
-  const git = { ...base, domain: "git" as const, status: "unavailable" as const,
-    expectedSlotCount: 0, activeGenerationCount: 0, slots: [] };
   const disabled = { ...base, domain: "model" as const, status: "disabled" as const,
     expectedSlotCount: 0, activeGenerationCount: 0, slots: [] };
   const stale = { ...base, domain: "session" as const, status: "stale" as const,
@@ -669,10 +667,10 @@ test("域状态摘要仅为异常域提供可操作的已知迹象，不猜测�
     expectedSlotCount: 2, activeGenerationCount: 1,
     slots: [{ ...base.slots[0]!, checkpoint: { freshness: "missing" as const, observedAt: null } }] };
   const wrapper = mount(DomainSummary, { ...options, attachTo: document.body,
-    props: { result: { ...source, data: [base, worker, git, disabled, stale, missing] } } });
+    props: { result: { ...source, data: [base, worker, disabled, stale, missing] } } });
   try {
     const rows = wrapper.findAll(".health-table tbody tr");
-    assert.equal(rows.length, 6);
+    assert.equal(rows.length, 5);
     assert.equal(rows[0]!.findAll(".health-evidence-trigger").length, 0);
     const triggers = rows.slice(1).map((row) => row.get("button.health-evidence-trigger"));
     for (const trigger of triggers) {
@@ -681,12 +679,10 @@ test("域状态摘要仅为异常域提供可操作的已知迹象，不猜测�
     }
     assert.match(triggers[0]!.attributes("aria-label")!, /3 个开放覆盖缺口|3 open coverage gaps/);
     assert.doesNotMatch(triggers[0]!.attributes("aria-label")!, /根因|root cause|secret-producer-id/);
-    assert.match(triggers[1]!.attributes("aria-label")!, /暂无更具体的诊断信息|no more specific diagnostic information/);
-    assert.doesNotMatch(triggers[1]!.attributes("aria-label")!, /缺少活跃|no active generation/);
-    assert.match(triggers[2]!.attributes("aria-label")!, /当前已禁用|currently disabled/);
-    assert.match(triggers[3]!.attributes("aria-label")!, /检查点已过期|stale checkpoints/);
-    assert.match(triggers[4]!.attributes("aria-label")!, /缺少活跃 Generation|no active generation/);
-    assert.match(triggers[4]!.attributes("aria-label")!, /检查点缺失|no checkpoint/);
+    assert.match(triggers[1]!.attributes("aria-label")!, /当前已禁用|currently disabled/);
+    assert.match(triggers[2]!.attributes("aria-label")!, /检查点已过期|stale checkpoints/);
+    assert.match(triggers[3]!.attributes("aria-label")!, /缺少活跃 Generation|no active generation/);
+    assert.match(triggers[3]!.attributes("aria-label")!, /检查点缺失|no checkpoint/);
     await triggers[0]!.trigger("click");
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.match(document.body.querySelector(".ant-popover-inner")?.textContent ?? "", /3 个开放覆盖缺口|3 open coverage gaps/);
@@ -706,8 +702,8 @@ test("大计数轴不显示会被截断的完整数字，bucket 仍提供完整�
   const panel = {
     ...dashboardSuccessFixture.data.overviewTrends.monitoringVolume,
     data: [
-      { from: 1, to: 2, total: 1_234_567, run: 1_234_567, session: 0, message: 0, tool: 0, execution: 0, model: 0, worker: 0, git: 0 },
-      { from: 2, to: 3, total: 500_000, run: 500_000, session: 0, message: 0, tool: 0, execution: 0, model: 0, worker: 0, git: 0 },
+      { from: 1, to: 2, total: 1_234_567, run: 1_234_567, session: 0, message: 0, tool: 0, execution: 0, model: 0, worker: 0 },
+      { from: 2, to: 3, total: 500_000, run: 500_000, session: 0, message: 0, tool: 0, execution: 0, model: 0, worker: 0 },
     ],
   };
   const wrapper = mount(TrendChart, { ...options, props: { title: "monitoring", kind: "monitoring_total", panel } });
@@ -759,12 +755,10 @@ test("所有数据面板将采集状态留给健康区，空态不是零也不�
   const missingToolTable = { ...unavailable, data: null };
   const missingRecords = { ...unavailable, data: null };
   const missingSnapshot = { ...unavailable, value: null, snapshotAt: null, asOf: 2 };
-  const missingHeatmap = { ...unavailable, data: null, from: 1, to: 2, asOf: 2, readyRepoCount: 0, totalRepoCount: 1 };
   const panels = [
     mount(Tables, { ...options, props: { title: "details", panel: missingToolTable, tableKind: "tools" } }),
     mount(RestartRecords, { ...options, props: { result: missingRecords, timezone: "UTC" } }),
     mount(WorkerSnapshot, { ...options, props: { result: missingSnapshot, timezone: "UTC" } }),
-    mount(GitHeatmap, { ...options, props: { result: missingHeatmap, timezone: "UTC" } }),
     mount(TrendChart, { ...options, props: { title: "count", kind: "count", panel: { ...unavailable, data: null } } }),
   ];
   for (const [index, wrapper] of panels.entries()) {
@@ -777,7 +771,7 @@ test("所有数据面板将采集状态留给健康区，空态不是零也不�
       assert.equal(wrapper.get("[role=note]").text(), "—");
       assert.ok(wrapper.get("[role=note]").attributes("aria-label"));
     }
-    assert.doesNotMatch(wrapper.text(), /覆盖缺口|Coverage gap|暂无可安全展示的数据|No safe data|仓库未就绪|Repository not ready|不适用|Not applicable/);
+    assert.doesNotMatch(wrapper.text(), /覆盖缺口|Coverage gap|暂无可安全展示的数据|No safe data|不适用|Not applicable/);
     assert.doesNotMatch(wrapper.text(), /\b0\b/);
   }
   assert.equal(panels[0].findAll("table").length, 0);
@@ -803,45 +797,4 @@ test("partial 的分布、明细、折线和业务状态保留已知值，不显
   const health = mount(DomainSummary, { ...options, props: { result: { ...dashboardSuccessFixture.data.exceptions.domainHealth, ...partial } } });
   assert.ok(health.findAll(".status").length > 0);
   assert.match(health.text(), /覆盖缺口|Coverage gap/);
-});
-test("Git 热图按请求时区的日历日定位，DST 缩短日不会合并或补零", () => {
-  const from = Date.parse("2025-03-08T05:00:00.000Z");
-  const days = [
-    { from, to: Date.parse("2025-03-09T05:00:00.000Z"), commits: 0 },
-    { from: Date.parse("2025-03-09T05:00:00.000Z"), to: Date.parse("2025-03-10T04:00:00.000Z"), commits: 2 },
-    { from: Date.parse("2025-03-10T04:00:00.000Z"), to: Date.parse("2025-03-11T04:00:00.000Z"), commits: 3 },
-  ];
-  const result = { ...dashboardSuccessFixture.data.exceptions.gitHeatmap180d, from, to: days[2]!.to, asOf: days[2]!.to, data: { days } };
-  const wrapper = mount(GitHeatmap, { ...options, props: { result, timezone: "America/New_York" } });
-  const cells = wrapper.findAll(".heatmap-day");
-  assert.equal(cells.length, 3);
-  assert.match(cells[0]!.attributes("style") ?? "", /grid-column: 1; grid-row: 6/);
-  assert.match(cells[1]!.attributes("style") ?? "", /grid-column: 1; grid-row: 7/);
-  assert.match(cells[2]!.attributes("style") ?? "", /grid-column: 2; grid-row: 1/);
-  assert.match(cells[0]!.attributes("aria-label") ?? "", /: 0$/);
-  assert.match(cells[2]!.attributes("aria-label") ?? "", /: 3$/);
-  assert.equal(cells[1]!.attributes("tabindex"), "0");
-  assert.match(wrapper.get(".calendar-scroll").attributes("class") ?? "", /calendar-scroll/);
-  wrapper.unmount();
-});
-
-test("Git 部分覆盖的零只显示下界，不可用热图使用中性空态", async () => {
-  const partial = {
-    ...dashboardSuccessFixture.data.exceptions.gitHeatmap180d,
-    status: "partial" as const,
-    completeness: "partial" as const,
-    dataIncomplete: true as const,
-    partialReason: "repo_not_ready" as const,
-    data: { days: [{ from: 1, to: 2, commits: 0 }] },
-  };
-  const wrapper = mount(GitHeatmap, { ...options, props: { result: partial, timezone: "UTC" } });
-  assert.equal(wrapper.findAll(".heatmap-day").length, 1);
-  assert.match(wrapper.get(".heatmap-day").attributes("aria-label") ?? "", /≥0$/);
-  assert.ok(wrapper.get(".heatmap-day").classes().includes("partial-zero"));
-  assert.doesNotMatch(wrapper.text(), /\+10%/);
-  const unavailable = { status: "unavailable" as const, data: null, dataIncomplete: true as const, unavailableReason: "no_safe_data" as const, requiredDomains: ["git" as const], comparison: { status: "not_applicable" as const, kind: null, delta: null }, from: 1, to: 2, asOf: 2, readyRepoCount: 0, totalRepoCount: 0 };
-  await wrapper.setProps({ result: unavailable });
-  assert.equal(wrapper.findAll(".heatmap-day").length, 0);
-  assert.equal(wrapper.get("[role=note]").text(), "—");
-  wrapper.unmount();
 });

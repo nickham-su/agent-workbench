@@ -398,7 +398,6 @@ const FactDomainSchema = Type.Union([
   Type.Literal("execution"),
   Type.Literal("model"),
   Type.Literal("worker"),
-  Type.Literal("git"),
 ]);
 const ExpectedSlotsConfigSchema = Strict({
   kind: Type.Literal("expected_slots_config"),
@@ -448,7 +447,6 @@ export type AnalyticsExpectedSlotsConfigSignal = {
     | "execution"
     | "model"
     | "worker"
-    | "git"
   >;
   slots: Array<{
     domain: AnalyticsSignalDomain;

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { AnalyticsDomainState } from "./analytics-db.js";
 import { resolveDashboardRange } from "./analytics.service.js";
 
-const ALL_FACT_DOMAINS = ["run", "session", "message", "tool", "execution", "model", "worker", "git"] as const;
+const ALL_FACT_DOMAINS = ["run", "session", "message", "tool", "execution", "model", "worker"] as const;
 const COMPARISON_UNAVAILABLE = { status: "domain_unavailable", delta: null, kind: null } as const;
 const COMPARISON_NOT_APPLICABLE = { status: "not_applicable", delta: null, kind: null } as const;
 
@@ -15,15 +15,7 @@ function unavailablePanel(requiredDomains: AnalyticsDomain[]) {
   return { status: "unavailable", data: null, dataIncomplete: true, unavailableReason: "domain_unavailable", requiredDomains, comparison: COMPARISON_UNAVAILABLE };
 }
 
-function unavailableGitMetric() {
-  return { ...unavailableMetric(["git"]), readyRepoCount: 0, totalRepoCount: 0 };
-}
-
-function unavailableGitPanel() {
-  return { ...unavailablePanel(["git"]), readyRepoCount: 0, totalRepoCount: 0 };
-}
-
-function buildEmptyDashboardData(params: { asOf: number; heatmapFrom: number; states: AnalyticsDomainState[] }): DashboardData {
+function buildEmptyDashboardData(params: { asOf: number; states: AnalyticsDomainState[] }): DashboardData {
   const modelMetric = () => unavailableMetric(["model"]);
   const modelPanel = () => unavailablePanel(["model"]);
   const workerMetric = () => unavailableMetric(["worker"]);
@@ -60,12 +52,12 @@ function buildEmptyDashboardData(params: { asOf: number; heatmapFrom: number; st
       modelRequests: modelMetric(),
       modelSuccessRate: modelMetric(),
       cacheHitRate: modelMetric(),
-      gitCommits: unavailableGitMetric()
+      totalTokens: modelMetric()
     },
     overviewTrends: {
       monitoringVolume: unavailablePanel([...ALL_FACT_DOMAINS]),
       agentDuration: unavailablePanel(["agent_duration", "execution"]),
-      modelRequests: modelPanel(), modelSuccessRate: modelPanel(), cacheHitRate: modelPanel(), gitCommits: unavailableGitPanel()
+      modelRequests: modelPanel(), modelSuccessRate: modelPanel(), cacheHitRate: modelPanel(), totalTokens: modelPanel()
     },
     agent: {
       metrics: {
@@ -92,19 +84,11 @@ function buildEmptyDashboardData(params: { asOf: number; heatmapFrom: number; st
       trends: { requests: modelPanel(), successRate: modelPanel(), timeoutRate: modelPanel(), completedAverageDuration: modelPanel(), tokens: modelPanel(), cacheHitRate: modelPanel() },
       byModel: modelPanel()
     },
-    git: {
-      metrics: { commits: unavailableGitMetric(), nonMergeCommits: unavailableGitMetric(), filesChanged: unavailableGitMetric(), linesAdded: unavailableGitMetric(), linesDeleted: unavailableGitMetric() },
-      trends: { commits: unavailableGitPanel(), nonMergeCommits: unavailableGitPanel(), filesChanged: unavailableGitPanel(), linesAdded: unavailableGitPanel(), linesDeleted: unavailableGitPanel() }
-    },
     worker: {
       metrics: { unexpectedExits: workerMetric(), restartAttempts: workerMetric(), restartSucceeded: workerMetric(), restartFailed: workerMetric() },
       eventTrend: workerPanel(), restartRecords: workerPanel()
     },
     exceptions: {
-      gitHeatmap180d: {
-        status: "unavailable", data: null, dataIncomplete: true, unavailableReason: "no_ready_repo", requiredDomains: ["git"], comparison: COMPARISON_UNAVAILABLE,
-        from: params.heatmapFrom, to: params.asOf, asOf: params.asOf, readyRepoCount: 0, totalRepoCount: 0
-      },
       workerLiveSnapshot: {
         ...unavailableMetric(["worker"]), snapshotAt: null, asOf: params.asOf
       },
@@ -137,7 +121,6 @@ export function buildEmptyDashboardResponse(params: {
     timezone: resolved.timezone,
     data: buildEmptyDashboardData({
       asOf: resolved.asOf,
-      heatmapFrom: resolved.asOf - 180 * 24 * 60 * 60 * 1000,
       states: params.states
     })
   };

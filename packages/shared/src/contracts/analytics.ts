@@ -21,7 +21,7 @@ export type AnalyticsRangeKind = Static<typeof AnalyticsRangeKindSchema>;
 
 export const AnalyticsDomainSchema = Type.Union([
   Type.Literal("model"), Type.Literal("run"), Type.Literal("execution"), Type.Literal("agent_duration"),
-  Type.Literal("tool"), Type.Literal("message"), Type.Literal("session"), Type.Literal("worker"), Type.Literal("git")
+  Type.Literal("tool"), Type.Literal("message"), Type.Literal("session"), Type.Literal("worker")
 ]);
 export type AnalyticsDomain = Static<typeof AnalyticsDomainSchema>;
 
@@ -29,27 +29,20 @@ const RequiredDomainsSchema = Type.Array(AnalyticsDomainSchema);
 
 export const AnalyticsFactDomainSchema = Type.Union([
   Type.Literal("run"), Type.Literal("session"), Type.Literal("message"), Type.Literal("tool"),
-  Type.Literal("execution"), Type.Literal("model"), Type.Literal("worker"), Type.Literal("git")
+  Type.Literal("execution"), Type.Literal("model"), Type.Literal("worker")
 ]);
 export type AnalyticsFactDomain = Static<typeof AnalyticsFactDomainSchema>;
 
 export const AnalyticsPartialReasonSchema = Type.Union([
   Type.Literal("coverage_gap"), Type.Literal("range_not_reconciled"), Type.Literal("collector_degraded"),
   Type.Literal("signal_loss"), Type.Literal("dirty_hour"), Type.Literal("open_fact"),
-  Type.Literal("configuration_changed"), Type.Literal("repo_not_ready"), Type.Literal("range_before_coverage"),
-  Type.Literal("scan_stale"), Type.Literal("mixed_repo_coverage")
+  Type.Literal("configuration_changed")
 ]);
 export type AnalyticsPartialReason = Static<typeof AnalyticsPartialReasonSchema>;
 
-export const AnalyticsGitPartialReasonSchema = Type.Union([
-  Type.Literal("repo_not_ready"), Type.Literal("range_before_coverage"),
-  Type.Literal("scan_stale"), Type.Literal("mixed_repo_coverage")
-]);
-export type AnalyticsGitPartialReason = Static<typeof AnalyticsGitPartialReasonSchema>;
-
 export const AnalyticsUnavailableReasonSchema = Type.Union([
   Type.Literal("domain_disabled"), Type.Literal("domain_unavailable"), Type.Literal("no_safe_data"),
-  Type.Literal("no_ready_repo"), Type.Literal("invalid_metric_state")
+  Type.Literal("invalid_metric_state")
 ]);
 export type AnalyticsUnavailableReason = Static<typeof AnalyticsUnavailableReasonSchema>;
 
@@ -86,28 +79,6 @@ export type PanelResult<T> =
   | { status: "partial"; data: T; completeness: "partial"; dataIncomplete: true; partialReason: AnalyticsPartialReason; requiredDomains: AnalyticsDomain[]; comparison: AnalyticsComparisonResult }
   | { status: "unavailable"; data: null; dataIncomplete: true; unavailableReason: AnalyticsUnavailableReason; requiredDomains: AnalyticsDomain[]; comparison: AnalyticsComparisonResult };
 
-/** Metadata required by every range-based Git result, distinct from heatmap timing. */
-const GitRangeMetadataSchema = {
-  readyRepoCount: NonNegativeIntegerSchema,
-  totalRepoCount: NonNegativeIntegerSchema
-};
-
-export function GitMetricResultSchema<T extends TSchema>(value: T) {
-  return Type.Union([
-    StrictObject({ status: Type.Literal("available"), value, completeness: Type.Literal("complete"), dataIncomplete: Type.Literal(false), requiredDomains: RequiredDomainsSchema, comparison: AnalyticsComparisonResultSchema, ...GitRangeMetadataSchema }),
-    StrictObject({ status: Type.Literal("partial"), value, completeness: Type.Literal("partial"), dataIncomplete: Type.Literal(true), partialReason: AnalyticsGitPartialReasonSchema, requiredDomains: RequiredDomainsSchema, comparison: AnalyticsComparisonResultSchema, ...GitRangeMetadataSchema }),
-    StrictObject({ status: Type.Literal("unavailable"), value: Type.Null(), dataIncomplete: Type.Literal(true), unavailableReason: AnalyticsUnavailableReasonSchema, requiredDomains: RequiredDomainsSchema, comparison: AnalyticsComparisonResultSchema, ...GitRangeMetadataSchema })
-  ]);
-}
-
-export function GitPanelResultSchema<T extends TSchema>(data: T) {
-  return Type.Union([
-    StrictObject({ status: Type.Literal("available"), data, completeness: Type.Literal("complete"), dataIncomplete: Type.Literal(false), requiredDomains: RequiredDomainsSchema, comparison: AnalyticsComparisonResultSchema, ...GitRangeMetadataSchema }),
-    StrictObject({ status: Type.Literal("partial"), data, completeness: Type.Literal("partial"), dataIncomplete: Type.Literal(true), partialReason: AnalyticsGitPartialReasonSchema, requiredDomains: RequiredDomainsSchema, comparison: AnalyticsComparisonResultSchema, ...GitRangeMetadataSchema }),
-    StrictObject({ status: Type.Literal("unavailable"), data: Type.Null(), dataIncomplete: Type.Literal(true), unavailableReason: AnalyticsUnavailableReasonSchema, requiredDomains: RequiredDomainsSchema, comparison: AnalyticsComparisonResultSchema, ...GitRangeMetadataSchema })
-  ]);
-}
-
 /** Strict canonical request contract, used by clients and by Analytics IPC. */
 export const DashboardQueryRequestSchema = Type.Union([
   StrictObject({ rangeKind: Type.Union([Type.Literal("preset_24h"), Type.Literal("preset_7d"), Type.Literal("preset_30d"), Type.Literal("preset_90d")]), timezone: Type.String({ minLength: 1 }) }),
@@ -128,6 +99,7 @@ export const DashboardQueryErrorResponseSchema = StrictObject({
 export type DashboardQueryErrorResponse = Static<typeof DashboardQueryErrorResponseSchema>;
 
 export const CountTrendPointSchema = StrictObject({ from: SafeIntegerSchema, to: SafeIntegerSchema, count: NonNegativeIntegerSchema });
+export const NullableCountTrendPointSchema = StrictObject({ from: SafeIntegerSchema, to: SafeIntegerSchema, count: Type.Union([NonNegativeIntegerSchema, Type.Null()]) });
 export const DurationTrendPointSchema = StrictObject({ from: SafeIntegerSchema, to: SafeIntegerSchema, durationMs: NonNegativeIntegerSchema });
 export const RatioTrendPointSchema = StrictObject({ from: SafeIntegerSchema, to: SafeIntegerSchema, ratio: RatioOrNullSchema });
 /** Each point is a complete status stack; clients must not derive it from a second request. */
@@ -145,11 +117,11 @@ export const ModelTokenTrendPointSchema = StrictObject({
   inputTokens: Type.Union([NonNegativeIntegerSchema, Type.Null()]),
   outputTokens: Type.Union([NonNegativeIntegerSchema, Type.Null()])
 });
-/** Fixed eight-Domain collected-Fact composition used by the overview tooltip. */
+/** Fixed seven-Domain collected-Fact composition used by the overview tooltip. */
 export const MonitoringVolumeTrendPointSchema = StrictObject({
   from: SafeIntegerSchema, to: SafeIntegerSchema, total: NonNegativeIntegerSchema,
   run: NonNegativeIntegerSchema, session: NonNegativeIntegerSchema, message: NonNegativeIntegerSchema, tool: NonNegativeIntegerSchema,
-  execution: NonNegativeIntegerSchema, model: NonNegativeIntegerSchema, worker: NonNegativeIntegerSchema, git: NonNegativeIntegerSchema
+  execution: NonNegativeIntegerSchema, model: NonNegativeIntegerSchema, worker: NonNegativeIntegerSchema
 });
 export const WorkerEventTrendPointSchema = StrictObject({ from: SafeIntegerSchema, to: SafeIntegerSchema, unexpectedExits: NonNegativeIntegerSchema, restartAttempts: NonNegativeIntegerSchema });
 
@@ -158,7 +130,7 @@ const NullableCountValueSchema = StrictObject({ count: Type.Union([NonNegativeIn
 const CompletedDurationValueSchema = StrictObject({ durationMs: Type.Union([NonNegativeIntegerSchema, Type.Null()]), reliableSampleCount: NonNegativeIntegerSchema });
 const MonitoringVolumeDataSchema = StrictObject({
   count: NonNegativeIntegerSchema,
-  metricDefinitionVersion: Type.Literal("dashboard_collected_fact_v1"),
+  metricDefinitionVersion: Type.Literal("dashboard_collected_fact_v2"),
   collectionConfigVersion: Type.String({ minLength: 1 }),
   configuredDomainsAtAsOf: Type.Array(AnalyticsFactDomainSchema),
   configurationChangedWithinRange: Type.Boolean()
@@ -191,7 +163,6 @@ export const ModelTableSchema = Type.Array(StrictObject({
   cacheReadTokens: Type.Union([NonNegativeIntegerSchema, Type.Null()]), cacheHitRate: RatioOrNullSchema
 }));
 
-const GitHeatmapDataSchema = StrictObject({ days: Type.Array(StrictObject({ from: SafeIntegerSchema, to: SafeIntegerSchema, commits: NonNegativeIntegerSchema })) });
 const WorkerRestartEventSchema = Type.Union([
   Type.Literal("unexpected_exit"), Type.Literal("restart_attempted"), Type.Literal("restart_succeeded"), Type.Literal("restart_failed")
 ]);
@@ -246,12 +217,6 @@ function ExtendedMetricResultSchema<T extends TSchema>(value: T, metadata: TProp
   ]);
 }
 
-export const GitHeatmap180dSchema = Type.Union([
-  StrictObject({ status: Type.Literal("available"), data: GitHeatmapDataSchema, completeness: Type.Literal("complete"), dataIncomplete: Type.Literal(false), requiredDomains: RequiredDomainsSchema, comparison: AnalyticsComparisonResultSchema, from: SafeIntegerSchema, to: SafeIntegerSchema, asOf: SafeIntegerSchema, readyRepoCount: NonNegativeIntegerSchema, totalRepoCount: NonNegativeIntegerSchema }),
-  StrictObject({ status: Type.Literal("partial"), data: GitHeatmapDataSchema, completeness: Type.Literal("partial"), dataIncomplete: Type.Literal(true), partialReason: AnalyticsGitPartialReasonSchema, requiredDomains: RequiredDomainsSchema, comparison: AnalyticsComparisonResultSchema, from: SafeIntegerSchema, to: SafeIntegerSchema, asOf: SafeIntegerSchema, readyRepoCount: NonNegativeIntegerSchema, totalRepoCount: NonNegativeIntegerSchema }),
-  StrictObject({ status: Type.Literal("unavailable"), data: Type.Null(), dataIncomplete: Type.Literal(true), unavailableReason: AnalyticsUnavailableReasonSchema, requiredDomains: RequiredDomainsSchema, comparison: AnalyticsComparisonResultSchema, from: SafeIntegerSchema, to: SafeIntegerSchema, asOf: SafeIntegerSchema, readyRepoCount: NonNegativeIntegerSchema, totalRepoCount: NonNegativeIntegerSchema })
-]);
-
 export const WorkerLiveSnapshotSchema = ExtendedMetricResultSchema(WorkerSnapshotDataSchema, { snapshotAt: Type.Union([SafeIntegerSchema, Type.Null()]), asOf: SafeIntegerSchema });
 export const DomainHealthSchema = Type.Union([
   StrictObject({ status: Type.Literal("available"), data: Type.Array(DomainHealthRowSchema), completeness: Type.Literal("complete"), dataIncomplete: Type.Literal(false), requiredDomains: RequiredDomainsSchema, comparison: AnalyticsComparisonResultSchema, diagnosedAt: SafeIntegerSchema, asOf: SafeIntegerSchema }),
@@ -267,12 +232,12 @@ export const DashboardDataSchema = StrictObject({
   overview: StrictObject({
     monitoringVolume: MetricResultSchema(MonitoringVolumeDataSchema), agentDuration: MetricResultSchema(NonNegativeIntegerSchema),
     modelRequests: MetricResultSchema(NonNegativeIntegerSchema), modelSuccessRate: MetricResultSchema(RatioValueSchema),
-    cacheHitRate: MetricResultSchema(RatioValueSchema), gitCommits: GitMetricResultSchema(NonNegativeIntegerSchema)
+    cacheHitRate: MetricResultSchema(RatioValueSchema), totalTokens: MetricResultSchema(NullableCountValueSchema)
   }),
   overviewTrends: StrictObject({
     monitoringVolume: PanelResultSchema(Type.Array(MonitoringVolumeTrendPointSchema)), agentDuration: PanelResultSchema(Type.Array(DurationTrendPointSchema)),
     modelRequests: PanelResultSchema(Type.Array(ModelRequestTrendPointSchema)), modelSuccessRate: PanelResultSchema(Type.Array(RatioTrendPointSchema)),
-    cacheHitRate: PanelResultSchema(Type.Array(RatioTrendPointSchema)), gitCommits: GitPanelResultSchema(Type.Array(CountTrendPointSchema))
+    cacheHitRate: PanelResultSchema(Type.Array(RatioTrendPointSchema)), totalTokens: PanelResultSchema(Type.Array(NullableCountTrendPointSchema))
   }),
   agent: StrictObject({
     metrics: StrictObject({
@@ -312,19 +277,11 @@ export const DashboardDataSchema = StrictObject({
     }),
     byModel: PanelResultSchema(ModelTableSchema)
   }),
-  git: StrictObject({
-    metrics: StrictObject({ commits: GitMetricResultSchema(NonNegativeIntegerSchema), nonMergeCommits: GitMetricResultSchema(NonNegativeIntegerSchema), filesChanged: GitMetricResultSchema(NonNegativeIntegerSchema), linesAdded: GitMetricResultSchema(NonNegativeIntegerSchema), linesDeleted: GitMetricResultSchema(NonNegativeIntegerSchema) }),
-    trends: StrictObject({
-      commits: GitPanelResultSchema(Type.Array(CountTrendPointSchema)), nonMergeCommits: GitPanelResultSchema(Type.Array(CountTrendPointSchema)),
-      filesChanged: GitPanelResultSchema(Type.Array(CountTrendPointSchema)), linesAdded: GitPanelResultSchema(Type.Array(CountTrendPointSchema)),
-      linesDeleted: GitPanelResultSchema(Type.Array(CountTrendPointSchema))
-    })
-  }),
   worker: StrictObject({
     metrics: StrictObject({ unexpectedExits: MetricResultSchema(NonNegativeIntegerSchema), restartAttempts: MetricResultSchema(NonNegativeIntegerSchema), restartSucceeded: MetricResultSchema(NonNegativeIntegerSchema), restartFailed: MetricResultSchema(NonNegativeIntegerSchema) }),
     eventTrend: PanelResultSchema(Type.Array(WorkerEventTrendPointSchema)), restartRecords: PanelResultSchema(WorkerRestartRecordTableSchema)
   }),
-  exceptions: StrictObject({ gitHeatmap180d: GitHeatmap180dSchema, workerLiveSnapshot: WorkerLiveSnapshotSchema, domainHealth: DomainHealthSchema })
+  exceptions: StrictObject({ workerLiveSnapshot: WorkerLiveSnapshotSchema, domainHealth: DomainHealthSchema })
 });
 type DashboardDataFromSchema = Static<typeof DashboardDataSchema>;
 /** Retain Worker snapshot metadata omitted by TypeBox's generic schema helper. */

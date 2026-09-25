@@ -46,10 +46,10 @@ test("Analytics child owns an empty store and serves a contract-valid 200 respon
   assert.equal(body.to > body.from, true);
   assert.equal(body.data.overview.monitoringVolume.status, "unavailable");
   assert.equal(body.data.overview.monitoringVolume.value, null);
-  assert.equal(body.data.exceptions.gitHeatmap180d.status, "unavailable");
+  assert.equal(body.data.overview.totalTokens.status, "unavailable");
   assert.equal(body.data.exceptions.workerLiveSnapshot.status, "unavailable");
   assert.equal(body.data.exceptions.domainHealth.status, "available");
-  assert.equal(body.data.exceptions.domainHealth.data.length, 9);
+  assert.equal(body.data.exceptions.domainHealth.data.length, 8);
   assert.equal(body.data.exceptions.domainHealth.data.every((state: any) => state.collectionStartedAt === null), true);
   assert.deepEqual(body.data.agent.metrics.runCount.requiredDomains, ["run"]);
   assert.deepEqual(body.data.agent.metrics.userMessageCount.requiredDomains, ["message"]);

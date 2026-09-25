@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import Database from "better-sqlite3";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { analyticsDbPath, analyticsGitInstallationSecretPath, analyticsModelOutboxRoot } from "../../infra/fs/paths.js";
+import { analyticsConfigSourcePath, analyticsDbPath, analyticsModelOutboxRoot } from "../../infra/fs/paths.js";
+import { allocateAnalyticsConfigSource, readAnalyticsConfigSource, readAnalyticsConfigSourceForTest } from "./analytics-config-source.js";
 import { ANALYTICS_SCHEMA_VERSION, closeAnalyticsDb, createHistoricalSchemaForTest, openAnalyticsDb, readAnalyticsDomainStates } from "./analytics-db.js";
 import { queryDashboard } from "./analytics-dashboard-query.js";
+import { acceptAnalyticsSignal } from "./signal-store.js";
 
 async function tempDataDir(prefix: string) {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -56,6 +59,7 @@ test("SQLite pinned-file verification rejects a post-pin symlink swap without cr
 
 async function createV6SignalFixture(dataDir: string) {
   const current = await openAnalyticsDb(dataDir, 10);
+  createHistoricalSchemaForTest(current, 18);
   current.prepare(`INSERT INTO analytics_producer_generation
     (domain, producer_namespace, producer_id, producer_generation, lifecycle, final_sequence, committed_sequence, max_observed_at, earliest_open_started_at, known_drop, dropped_since_sequence, outbox_pending, oldest_pending_at, loss_epoch, control_sequence, last_control_received_at, created_at)
     VALUES ('model', 'agent_worker', 'agent_runner', 'v6-generation', 'closed', 1, 1, 100, NULL, 0, NULL, 0, NULL, 0, 2, 100, 10)`).run();
@@ -102,10 +106,9 @@ test("analytics database initializes formal state/config and collector fact tabl
   t.after(() => closeAnalyticsDb(db));
 
   assert.equal(analyticsDbPath(dataDir).endsWith(path.join("analytics", "analytics.sqlite")), true);
-  assert.equal(analyticsGitInstallationSecretPath(dataDir).endsWith(path.join("analytics", "git-installation-secret")), true);
   assert.equal(analyticsModelOutboxRoot(dataDir).endsWith(path.join("analytics", "model-outbox")), true);
   assert.equal((db.prepare("SELECT schema_version FROM analytics_schema_meta").get() as { schema_version: number }).schema_version, ANALYTICS_SCHEMA_VERSION);
-  assert.deepEqual(readAnalyticsDomainStates(db).map((state) => state.domain), ["agent_duration", "execution", "git", "message", "model", "run", "session", "tool", "worker"]);
+  assert.deepEqual(readAnalyticsDomainStates(db).map((state) => state.domain), ["agent_duration", "execution", "message", "model", "run", "session", "tool", "worker"]);
   assert.equal(readAnalyticsDomainStates(db).every((state) => state.status === "unavailable" && state.collectionStartedAt === null && state.lastErrorCode === null), true);
   assert.deepEqual(
     JSON.parse((db.prepare("SELECT enabled_fact_domains_json FROM analytics_domain_config_version").get() as { enabled_fact_domains_json: string }).enabled_fact_domains_json),
@@ -114,7 +117,7 @@ test("analytics database initializes formal state/config and collector fact tabl
   assert.deepEqual(db.prepare("SELECT collection_config_version, effective_at, changed_at FROM analytics_domain_config_version").get(), { collection_config_version: "0000000000000000", effective_at: 0, changed_at: 0 });
   assert.deepEqual(
     db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all().map((row) => (row as { name: string }).name),
-    ["analytics_collector_watermark", "analytics_config_source_control", "analytics_dirty_hour", "analytics_domain_config_version", "analytics_domain_state", "analytics_event_receipt", "analytics_execution_fact", "analytics_git_commit_fact", "analytics_git_membership", "analytics_git_repo_state", "analytics_git_scan", "analytics_maintenance_state", "analytics_message_fact", "analytics_model_call_fact", "analytics_producer_checkpoint", "analytics_producer_generation", "analytics_producer_slot", "analytics_rollup_hour", "analytics_run_fact", "analytics_schema_meta", "analytics_session_fact", "analytics_signal_coverage_gap", "analytics_tool_fact", "analytics_worker_event_fact", "analytics_worker_live_snapshot", "dashboard_collected_1h", "dashboard_message_1h", "dashboard_model_1h", "dashboard_model_dimension_1h", "dashboard_tool_1h"]
+    ["analytics_collector_watermark", "analytics_config_source_control", "analytics_dirty_hour", "analytics_domain_config_version", "analytics_domain_state", "analytics_event_receipt", "analytics_execution_fact", "analytics_maintenance_state", "analytics_message_fact", "analytics_model_call_fact", "analytics_producer_checkpoint", "analytics_producer_generation", "analytics_producer_slot", "analytics_rollup_hour", "analytics_run_fact", "analytics_schema_meta", "analytics_session_fact", "analytics_signal_coverage_gap", "analytics_tool_fact", "analytics_worker_event_fact", "analytics_worker_live_snapshot", "dashboard_collected_1h", "dashboard_message_1h", "dashboard_model_1h", "dashboard_model_dimension_1h", "dashboard_tool_1h"]
   );
   assert.deepEqual((db.prepare("PRAGMA table_info(analytics_collector_watermark)").all() as Array<{ name: string }>).map((column) => column.name), [
     "domain", "initial_anchor", "initial_floor_updated_at", "initial_floor_stable_id", "durable_updated_at", "durable_stable_id",
@@ -129,7 +132,7 @@ test("analytics database initializes formal state/config and collector fact tabl
   ] as const) assert.deepEqual((db.prepare(`PRAGMA index_info(${index})`).all() as Array<{ name: string }>).map((column) => column.name), columns, index);
 });
 
-test("current v18 fails closed for a persisted running Execution with inferred quality", async (t) => {
+test("current v19 fails closed for a persisted running Execution with inferred quality", async (t) => {
   const dataDir = await tempDataDir("awb-analytics-v18-invalid-running-");
   t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
   const current = await openAnalyticsDb(dataDir, 1);
@@ -143,7 +146,7 @@ test("current v18 fails closed for a persisted running Execution with inferred q
   await assert.rejects(() => openAnalyticsDb(dataDir, 2), /analytics database unavailable/);
 });
 
-test("current v18 fails closed for persisted Execution rows with either single terminal timestamp", async (t) => {
+test("current v19 fails closed for persisted Execution rows with either single terminal timestamp", async (t) => {
   const cases = [
     { name: "ended_at only", status: "running", quality: "unknown", endedAt: 2, effectiveEndedAt: null, reason: null },
     { name: "effective_ended_at only", status: "ended", quality: "unknown", endedAt: null, effectiveEndedAt: 2, reason: "worker_exit" },
@@ -169,6 +172,7 @@ test("v14 source-control migration preserves configuration history", async (t) =
   const dataDir = await tempDataDir("awb-analytics-v14-source-");
   t.after(async () => fs.rm(dataDir, { recursive: true, force: true }));
   const legacy = await openAnalyticsDb(dataDir, 10);
+  createHistoricalSchemaForTest(legacy, 18);
   legacy.prepare("INSERT INTO analytics_domain_config_version (collection_config_version, effective_at, enabled_fact_domains_json, changed_at) VALUES ('0000000000000001', 11, '[\"execution\"]', 11)").run();
   legacy.exec("UPDATE analytics_domain_config_version SET collection_config_version='initial', effective_at=10, changed_at=10, enabled_fact_domains_json='[\"run\",\"session\",\"message\",\"tool\",\"execution\",\"model\",\"worker\",\"git\"]' WHERE collection_config_version='0000000000000000'; DROP TABLE analytics_config_source_control; UPDATE analytics_schema_meta SET schema_version=14 WHERE singleton=1;");
   closeAnalyticsDb(legacy);
@@ -213,6 +217,7 @@ test("complete stage-two Analytics schema migrates transactionally to collector 
   const dataDir = await tempDataDir("awb-analytics-v2-");
   t.after(async () => fs.rm(dataDir, { recursive: true, force: true }));
   const first = await openAnalyticsDb(dataDir, 123);
+  createHistoricalSchemaForTest(first, 18);
   first.exec(`
     DROP TABLE analytics_collector_watermark;
     DROP TABLE analytics_run_fact;
@@ -234,6 +239,7 @@ test("v7 store migrates dashboard aggregate metadata without rewriting facts", a
   const dataDir = await tempDataDir("awb-analytics-v7-dashboard-");
   t.after(async () => fs.rm(dataDir, { recursive: true, force: true }));
   const current = await openAnalyticsDb(dataDir, 123);
+  createHistoricalSchemaForTest(current, 18);
   current.prepare("INSERT INTO analytics_run_fact(run_id, run_kind, parent_run_id, display_status, status_quality, inferred_evidence_type, created_at, terminal_at, source_updated_at, collected_at) VALUES ('preserved','user',NULL,'completed','observed',NULL,1,1,1,1)").run();
   current.exec(`DROP TABLE analytics_dirty_hour; DROP TABLE dashboard_model_1h; DROP TABLE dashboard_tool_1h; DROP TABLE dashboard_message_1h; DROP TABLE dashboard_collected_1h; DROP TABLE analytics_rollup_hour; DROP TABLE analytics_maintenance_state;`);
   current.prepare("UPDATE analytics_schema_meta SET schema_version = 7").run();
@@ -250,6 +256,7 @@ test("v9 Model cache migration invalidates legacy markers and preserves Dashboar
   const dataDir = await tempDataDir("awb-analytics-v9-model-");
   t.after(async () => fs.rm(dataDir, { recursive: true, force: true }));
   const db = await openAnalyticsDb(dataDir, 10);
+  createHistoricalSchemaForTest(db, 18);
   db.prepare("UPDATE analytics_domain_state SET status='healthy', collection_started_at=0, reconciled_through=?, rollup_ready_through=? WHERE domain='model'").run(3_600_000, 3_600_000);
   db.prepare(`INSERT INTO analytics_model_call_fact(model_call_id,execution_id,run_id,attempt_no,provider_id,model_id,started_at,ended_at,status,completion_quality,timeout_kind,input_tokens,output_tokens,total_tokens,total_source,cache_read_tokens,cache_write_tokens,cache_comparable,cache_write_verified,failure_kind,observed_at,updated_at,collected_at)
     VALUES ('legacy-model','e','r',1,'p','m',0,10,'completed','observed',NULL,2,3,5,'reported',NULL,NULL,0,0,NULL,10,10,10)`).run();
@@ -284,6 +291,7 @@ test("v9 Model cache migration invalidates legacy markers and preserves Dashboar
 
 async function createHistoricalV8Fixture(dataDir: string, withMarkers: boolean) {
   const db = await openAnalyticsDb(dataDir, 10);
+  createHistoricalSchemaForTest(db, 18);
   db.prepare("UPDATE analytics_domain_state SET rollup_ready_through=? WHERE domain IN ('model','tool','message')").run(3_600_000);
   db.prepare(`INSERT INTO analytics_model_call_fact(model_call_id,execution_id,run_id,attempt_no,provider_id,model_id,started_at,ended_at,status,completion_quality,timeout_kind,input_tokens,output_tokens,total_tokens,total_source,cache_read_tokens,cache_write_tokens,cache_comparable,cache_write_verified,failure_kind,observed_at,updated_at,collected_at)
     VALUES ('v8-model','e','r',1,'p','m',0,10,'completed','observed',NULL,2,3,5,'reported',NULL,NULL,0,0,NULL,10,10,10)`).run();
@@ -312,6 +320,7 @@ test("v8 migrates atomically to v11, invalidates all certified rollups, and pres
   const dataDir = await tempDataDir("awb-analytics-v8-direct-");
   t.after(async () => fs.rm(dataDir, { recursive: true, force: true }));
   const db = await openAnalyticsDb(dataDir, 10);
+  createHistoricalSchemaForTest(db, 18);
   db.prepare("UPDATE analytics_domain_state SET rollup_ready_through=? WHERE domain IN ('model','tool','message')").run(3_600_000);
   db.prepare(`INSERT INTO analytics_model_call_fact(model_call_id,execution_id,run_id,attempt_no,provider_id,model_id,started_at,ended_at,status,completion_quality,timeout_kind,input_tokens,output_tokens,total_tokens,total_source,cache_read_tokens,cache_write_tokens,cache_comparable,cache_write_verified,failure_kind,observed_at,updated_at,collected_at)
     VALUES ('v8-model','e','r',1,'p','m',0,10,'completed','observed',NULL,2,3,5,'reported',NULL,NULL,0,0,NULL,10,10,10)`).run();
@@ -489,7 +498,7 @@ test("same-version structural or configuration damage fails closed without WAL/D
     { name: "missing config table", mutate: (db) => db.exec("DROP TABLE analytics_domain_config_version") },
     { name: "missing domain table", mutate: (db) => db.exec("DROP TABLE analytics_domain_state") },
     { name: "missing dashboard rollup table", mutate: (db) => db.exec("DROP TABLE dashboard_model_1h") },
-    { name: "missing fixed domain", mutate: (db) => db.prepare("DELETE FROM analytics_domain_state WHERE domain = 'git'").run() },
+    { name: "missing fixed domain", mutate: (db) => db.prepare("DELETE FROM analytics_domain_state WHERE domain = 'model'").run() },
     { name: "invalid config JSON", mutate: (db) => db.prepare("UPDATE analytics_domain_config_version SET enabled_fact_domains_json = 'not-json'").run() },
     { name: "agent duration in fact config", mutate: (db) => db.prepare("UPDATE analytics_domain_config_version SET enabled_fact_domains_json = ?").run(JSON.stringify(["run", "session", "message", "tool", "execution", "model", "worker", "agent_duration"])) },
     { name: "missing required column", mutate: (db) => db.exec("ALTER TABLE analytics_domain_state DROP COLUMN last_error_code") },
@@ -610,6 +619,7 @@ test("formal v4 signal cache migrates forward to v5 without touching collector f
   const dataDir = await tempDataDir("awb-analytics-v4-migration-");
   t.after(async () => fs.rm(dataDir, { recursive: true, force: true }));
   const current = await openAnalyticsDb(dataDir, 10);
+  createHistoricalSchemaForTest(current, 18);
   current.prepare("INSERT INTO analytics_session_fact (session_id, session_kind, created_at, source_updated_at, collected_at) VALUES ('kept', 'primary', 1, 1, 1)").run();
   closeAnalyticsDb(current);
   const legacy = new Database(analyticsDbPath(dataDir));
@@ -710,7 +720,7 @@ for (const version of [11, 12, 13] as const) test(`real v${version} historical f
   assert.deepEqual(migrated.prepare("SELECT producer_namespace,producer_id,producer_generation FROM analytics_model_call_fact WHERE model_call_id='historical-model'").get(), { producer_namespace: null, producer_id: null, producer_generation: null });
 });
 
-for (const version of [11, 12, 13, 14, 15, 16, 17] as const) test(`historical v${version} migrates through the complete chain to v18`, async (t) => {
+for (const version of [11, 12, 13, 14, 15, 16, 17] as const) test(`historical v${version} migrates through the complete chain to v19`, async (t) => {
   const dataDir = await tempDataDir(`awb-analytics-v${version}-to-v18-`);
   t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
   const seed = await openAnalyticsDb(dataDir, 1);
@@ -742,5 +752,164 @@ test("v17 to v18 execution rebuild rolls back atomically", async (t) => {
   rolledBack.close();
   const migrated = await openAnalyticsDb(dataDir, 3);
   t.after(() => closeAnalyticsDb(migrated));
-  assert.equal((migrated.prepare("SELECT schema_version FROM analytics_schema_meta").get() as { schema_version: number }).schema_version, 18);
+  assert.equal((migrated.prepare("SELECT schema_version FROM analytics_schema_meta").get() as { schema_version: number }).schema_version, ANALYTICS_SCHEMA_VERSION);
+});
+
+test("v18 Git Analytics retirement is atomic, preserves other facts and historic versions, and removes its secret after success", async (t) => {
+  const dataDir = await tempDataDir("awb-analytics-v19-retire-");
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  const seed = await openAnalyticsDb(dataDir, 1);
+  closeAnalyticsDb(seed);
+  const fixture = new Database(analyticsDbPath(dataDir));
+  createHistoricalSchemaForTest(fixture, 18);
+  fixture.prepare("UPDATE analytics_domain_state SET status='healthy',collection_started_at=0,reconciled_through=3600000 WHERE domain='model'").run();
+  // The completed v18 hour has one row per domain, including explicit zeros.
+  // Counts match the seeded Facts; Git is retired without changing the others.
+  const historicalCollected = [
+    ["run", 1], ["session", 0], ["message", 0], ["tool", 0],
+    ["execution", 0], ["model", 1], ["worker", 0], ["git", 1],
+  ] as const;
+  const insertCollected = fixture.prepare("INSERT INTO dashboard_collected_1h VALUES(0,?,?)");
+  for (const [domain, count] of historicalCollected) insertCollected.run(domain, count);
+  fixture.prepare("INSERT INTO analytics_git_commit_fact(repo_id,commit_identity,committed_at,parent_count,collected_at) VALUES('repo',?,1,0,1)").run("a".repeat(64));
+  fixture.prepare("INSERT INTO analytics_domain_config_version VALUES ('0000000000000001',10,?,10)").run('["model","git"]');
+  fixture.prepare("INSERT INTO analytics_run_fact(run_id,run_kind,parent_run_id,display_status,status_quality,inferred_evidence_type,created_at,terminal_at,source_updated_at,collected_at) VALUES('preserved-run','user',NULL,'completed','observed',NULL,100,150,150,150)").run();
+  fixture.prepare(`INSERT INTO analytics_model_call_fact(model_call_id,execution_id,run_id,attempt_no,provider_id,model_id,started_at,ended_at,status,completion_quality,timeout_kind,input_tokens,output_tokens,total_tokens,total_source,cache_read_tokens,cache_write_tokens,cache_comparable,cache_write_verified,failure_kind,observed_at,updated_at,collected_at)
+    VALUES('preserved-model','execution','preserved-run',1,'provider','model',100,150,'completed','observed',NULL,3,4,7,'reported',NULL,NULL,0,0,NULL,150,150,150)`).run();
+  fixture.prepare("INSERT INTO dashboard_model_1h VALUES(0,1,1,0,0,0,50,1,3,4,7)").run();
+  fixture.prepare("INSERT INTO dashboard_model_dimension_1h VALUES(0,'provider','model','completed',NULL,1,50,1,3,1,4,1,7,1,0,0,0,0,0)").run();
+  fixture.prepare("INSERT INTO analytics_rollup_hour VALUES('model',0,123)").run();
+  fixture.prepare("INSERT INTO analytics_dirty_hour VALUES('tool',0,124)").run();
+  fixture.prepare("UPDATE analytics_domain_state SET rollup_ready_through=3600000 WHERE domain='model'").run();
+  // A historical signal gap in another period must not be dropped with Git.
+  fixture.prepare("INSERT INTO analytics_signal_coverage_gap(gap_id,domain,producer_namespace,producer_id,producer_generation,gap_from,gap_to,cause,dropped_since_sequence,recorded_at,closed_at) VALUES('old-gap','model','agent_worker','agent_runner','generation',7200000,7200001,'known_drop',1,7200000,7200001)").run();
+
+  const slots = [
+    { domain: "worker" as const, producerNamespace: "worker_observer" as const, producerId: "process_manager" },
+    { domain: "execution" as const, producerNamespace: "agent_worker" as const, producerId: "agent_runner" },
+    { domain: "model" as const, producerNamespace: "agent_worker" as const, producerId: "agent_runner" },
+  ];
+  for (const slot of slots) fixture.prepare("INSERT INTO analytics_producer_slot(domain,producer_namespace,producer_id,expected_enabled,config_version,updated_at) VALUES(?,?,?,1,'0000000000000001',10)")
+    .run(slot.domain, slot.producerNamespace, slot.producerId);
+  const sourceContent = JSON.stringify({
+    enabledFactDomains: ["git", "model"],
+    slots: [...slots].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+  });
+  const sourceHash = createHash("sha256").update(sourceContent).digest("hex");
+  const childSlots = slots.map((slot) => ({ domain: slot.domain, producer_id: slot.producerId, producer_namespace: slot.producerNamespace }))
+    .sort((a, b) => `${a.domain}:${a.producer_namespace}:${a.producer_id}`.localeCompare(`${b.domain}:${b.producer_namespace}:${b.producer_id}`));
+  const childContent = JSON.stringify({ effectiveAt: 10, enabledFactDomains: ["git", "model"], slots: childSlots });
+  // The child hashes the canonical *string* again; migration must not rewrite
+  // that receipt to pretend the old Git-enabled revision never existed.
+  fixture.prepare("INSERT INTO analytics_config_source_control VALUES(1,7,10,?,?)")
+    .run(createHash("sha256").update(JSON.stringify(childContent)).digest("hex"), childContent);
+  const preserved = {
+    facts: fixture.prepare("SELECT * FROM analytics_run_fact WHERE run_id='preserved-run'").all(),
+    modelFacts: fixture.prepare("SELECT * FROM analytics_model_call_fact WHERE model_call_id='preserved-model'").all(),
+    rollups: fixture.prepare("SELECT * FROM dashboard_model_1h").all(),
+    dimensions: fixture.prepare("SELECT * FROM dashboard_model_dimension_1h").all(),
+    markers: fixture.prepare("SELECT * FROM analytics_rollup_hour WHERE domain='model'").all(),
+    dirty: fixture.prepare("SELECT * FROM analytics_dirty_hour WHERE domain='tool'").all(),
+    coverage: fixture.prepare("SELECT * FROM analytics_signal_coverage_gap WHERE gap_id='old-gap'").all(),
+    source: fixture.prepare("SELECT * FROM analytics_config_source_control").all(),
+    slots: fixture.prepare("SELECT * FROM analytics_producer_slot ORDER BY domain").all(),
+    collected: fixture.prepare("SELECT domain,fact_count FROM dashboard_collected_1h ORDER BY domain").all() as Array<{ domain: string; fact_count: number }>,
+  };
+  fixture.close();
+  await fs.writeFile(analyticsConfigSourcePath(dataDir), JSON.stringify({
+    sourceVersion: 7, effectiveAt: 10, canonicalContent: sourceContent, canonicalHash: sourceHash,
+  }), { mode: 0o600 });
+  const originalSourceBytes = await fs.readFile(analyticsConfigSourcePath(dataDir), "utf8");
+  const secret = path.join(dataDir, "analytics", "git-installation-secret");
+  await fs.writeFile(secret, "retired-secret", { mode: 0o600 });
+
+  await assert.rejects(() => openAnalyticsDb(dataDir, 2, { testFaultAt: "v19_after_collected_rebuild" }), /analytics database unavailable/);
+  const rolledBack = new Database(analyticsDbPath(dataDir));
+  assert.equal((rolledBack.prepare("SELECT schema_version FROM analytics_schema_meta").get() as { schema_version: number }).schema_version, 18);
+  assert.deepEqual(rolledBack.prepare("SELECT domain,fact_count FROM dashboard_collected_1h ORDER BY domain").all(), preserved.collected);
+  assert.equal((rolledBack.prepare("SELECT COUNT(*) AS count FROM analytics_git_commit_fact").get() as { count: number }).count, 1);
+  rolledBack.close();
+  assert.equal(await fs.readFile(secret, "utf8"), "retired-secret");
+
+  // A non-regular secret is never unlinked or followed. The DB migration has
+  // committed, but startup fails closed until the unsafe entry is corrected.
+  const untouched = path.join(dataDir, "analytics", "unrelated-file");
+  await fs.writeFile(untouched, "untouched", { mode: 0o600 });
+  await fs.unlink(secret);
+  await fs.symlink("unrelated-file", secret);
+  await assert.rejects(() => openAnalyticsDb(dataDir, 3), /analytics database unavailable/);
+  const committed = new Database(analyticsDbPath(dataDir), { readonly: true });
+  assert.equal((committed.prepare("SELECT schema_version FROM analytics_schema_meta").get() as { schema_version: number }).schema_version, ANALYTICS_SCHEMA_VERSION);
+  assert.deepEqual(committed.prepare("SELECT * FROM analytics_model_call_fact WHERE model_call_id='preserved-model'").all(), preserved.modelFacts);
+  committed.close();
+  assert.equal((await fs.lstat(secret)).isSymbolicLink(), true);
+  assert.equal(await fs.readFile(untouched, "utf8"), "untouched");
+  await fs.unlink(secret);
+  await fs.writeFile(secret, "retired-secret", { mode: 0o600 });
+
+  const migrated = await openAnalyticsDb(dataDir, 3);
+  t.after(() => closeAnalyticsDb(migrated));
+  assert.equal((migrated.prepare("SELECT schema_version FROM analytics_schema_meta").get() as { schema_version: number }).schema_version, ANALYTICS_SCHEMA_VERSION);
+  assert.equal(preserved.collected.length, 8);
+  assert.deepEqual(migrated.prepare("SELECT domain,fact_count FROM dashboard_collected_1h ORDER BY domain").all(),
+    preserved.collected.filter((row) => row.domain !== "git"));
+  assert.equal((migrated.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE name LIKE 'analytics_git_%'").get() as { count: number }).count, 0);
+  assert.equal(readAnalyticsDomainStates(migrated).some((row) => String(row.domain) === "git"), false);
+  assert.equal(readAnalyticsDomainStates(migrated).find((row) => row.domain === "model")?.status, "healthy");
+  assert.deepEqual(migrated.prepare("SELECT collection_config_version,effective_at,enabled_fact_domains_json FROM analytics_domain_config_version WHERE collection_config_version='0000000000000001'").get(), {
+    collection_config_version: "0000000000000001", effective_at: 10, enabled_fact_domains_json: '["model"]',
+  });
+  assert.deepEqual(migrated.prepare("SELECT * FROM analytics_run_fact WHERE run_id='preserved-run'").all(), preserved.facts);
+  assert.deepEqual(migrated.prepare("SELECT * FROM analytics_model_call_fact WHERE model_call_id='preserved-model'").all(), preserved.modelFacts);
+  assert.deepEqual(migrated.prepare("SELECT * FROM dashboard_model_1h").all(), preserved.rollups);
+  assert.deepEqual(migrated.prepare("SELECT * FROM dashboard_model_dimension_1h").all(), preserved.dimensions);
+  assert.deepEqual(migrated.prepare("SELECT * FROM analytics_rollup_hour WHERE domain='model'").all(), preserved.markers);
+  assert.deepEqual(migrated.prepare("SELECT * FROM analytics_dirty_hour WHERE domain='tool'").all(), preserved.dirty);
+  assert.deepEqual(migrated.prepare("SELECT * FROM analytics_signal_coverage_gap WHERE gap_id='old-gap'").all(), preserved.coverage);
+  assert.deepEqual(migrated.prepare("SELECT * FROM analytics_config_source_control").all(), preserved.source);
+  assert.deepEqual(migrated.prepare("SELECT * FROM analytics_producer_slot ORDER BY domain").all(), preserved.slots);
+  assert.equal(await fs.stat(secret).then(() => true, () => false), false);
+  assert.equal(await fs.readFile(untouched, "utf8"), "untouched");
+  const query = queryDashboard(migrated, { rangeKind: "custom", timezone: "UTC", from: 0, to: 3600000 }, 3600000);
+  assert.equal(query.kind, "success");
+  if (query.kind === "success") {
+    const volume = query.data.overview.monitoringVolume;
+    assert.equal(volume.status, "available");
+    assert.equal(volume.value?.metricDefinitionVersion, "dashboard_collected_fact_v2");
+    assert.equal(volume.value?.count, 2); // run + model, not the retired Git commit
+  }
+
+  // Initially the cache and Facts agree. Temporarily move one Fact out of the
+  // hour: the complete cache must still yield 2, while a single missing zero
+  // row forces the exact Fact fallback to yield 1. Restore the DB afterward.
+  migrated.exec("SAVEPOINT verify_v19_collected_cache");
+  try {
+    migrated.prepare("UPDATE analytics_run_fact SET collected_at=3600000 WHERE run_id='preserved-run'").run();
+    const cached = queryDashboard(migrated, { rangeKind: "custom", timezone: "UTC", from: 0, to: 3600000 }, 3600000);
+    assert.equal(cached.kind, "success");
+    if (cached.kind === "success") assert.equal(cached.data.overview.monitoringVolume.value?.count, 2);
+    migrated.prepare("DELETE FROM dashboard_collected_1h WHERE bucket_start=0 AND domain='worker'").run();
+    const fallback = queryDashboard(migrated, { rangeKind: "custom", timezone: "UTC", from: 0, to: 3600000 }, 3600000);
+    assert.equal(fallback.kind, "success");
+    if (fallback.kind === "success") assert.equal(fallback.data.overview.monitoringVolume.value?.count, 1);
+  } finally {
+    migrated.exec("ROLLBACK TO SAVEPOINT verify_v19_collected_cache; RELEASE SAVEPOINT verify_v19_collected_cache");
+  }
+
+  // The obsolete Git-enabled source remains authentic history on disk and in
+  // the DB, but must not be replayed as a current (Git-free) configuration.
+  assert.equal(await readAnalyticsConfigSource(dataDir), null);
+  assert.equal(await fs.readFile(analyticsConfigSourcePath(dataDir), "utf8"), originalSourceBytes);
+  assert.equal((await readAnalyticsConfigSourceForTest(dataDir))?.sourceVersion, 7);
+  const next = await allocateAnalyticsConfigSource(dataDir, { enabledFactDomains: ["model"], slots }, 20);
+  assert.equal(next?.sourceConfigVersion, 8);
+  assert.equal(next?.effectiveAt, 20);
+  assert.equal((await readAnalyticsConfigSource(dataDir))?.sourceConfigVersion, 8);
+  assert.deepEqual(migrated.prepare("SELECT * FROM analytics_config_source_control").all(), preserved.source);
+  assert.equal(acceptAnalyticsSignal(migrated, { kind: "expected_slots_config", sentAt: 20, requestId: "post_upgrade", ...next! }, 20).accepted, true);
+  assert.deepEqual(migrated.prepare("SELECT collection_config_version,effective_at,enabled_fact_domains_json FROM analytics_domain_config_version ORDER BY collection_config_version").all(), [
+    { collection_config_version: "0000000000000000", effective_at: 0, enabled_fact_domains_json: '[]' },
+    { collection_config_version: "0000000000000001", effective_at: 10, enabled_fact_domains_json: '["model"]' },
+  ]);
+  assert.equal((migrated.prepare("SELECT source_config_version FROM analytics_config_source_control").get() as { source_config_version: number }).source_config_version, 8);
 });
