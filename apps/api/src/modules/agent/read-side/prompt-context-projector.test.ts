@@ -7,7 +7,7 @@ test("PromptContextProjector composes cached static data with dynamic locale, me
   const cache = new RunPromptStaticCache<{
     systemStatic: string;
     tools: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>;
-    externalSkillRoots: Array<{ sourceType: "workspace" | "repo"; repoId?: string; rootDir: string; rootPath: string }>;
+    externalSkills: Array<{ skillId: string; skillDirectoryPath: string }>;
   }>();
   let assembled = 0;
   let resolvedProfiles = 0;
@@ -31,7 +31,7 @@ test("PromptContextProjector composes cached static data with dynamic locale, me
       return {
         systemStatic: "static",
         tools: [{ name: "read", description: "Read", inputSchema: {} }],
-        externalSkillRoots: [{ sourceType: "workspace", rootDir: "skills", rootPath: "/workspace/skills" }]
+        externalSkills: [{ skillId: "skills/review", skillDirectoryPath: "/workspace/skills/review" }]
       };
     },
     buildRuntimeInstruction: ({ uiLocale }) => `runtime:${uiLocale}`,
@@ -58,7 +58,7 @@ test("PromptContextProjector composes cached static data with dynamic locale, me
     pendingTools: [{ toolExecutionId: "execution-7", callPartId: "part-7", assistantMessageId: "message-7", status: "running", toolName: "bash", toolCallId: "call", args: { command: "pwd" } }],
     lastResponseTotalTokens: 42,
     uiLocale: "en-US",
-    externalSkillRoots: [{ sourceType: "workspace", rootDir: "skills", rootPath: "/workspace/skills" }]
+    externalSkills: [{ skillId: "skills/review", skillDirectoryPath: "/workspace/skills/review" }]
   });
   assert.deepEqual(second, first);
 });
@@ -104,7 +104,7 @@ test("PromptContextProjector passes every pending Assistant ID so transcript pro
     },
     resolveProfile: () => ({ agent: { name: "Agent", tools: [] } }),
     async assembleStatic() {
-      return { systemStatic: "static", tools: [], externalSkillRoots: [] };
+      return { systemStatic: "static", tools: [], externalSkills: [] };
     },
     buildRuntimeInstruction: () => "runtime",
     appendRuntimeConstraints: (system, runtime) => `${system}|${runtime}`,
@@ -122,7 +122,7 @@ test("PromptContextProjector passes every pending Assistant ID so transcript pro
 });
 
 test("PromptContextProjector refuses a response when terminal invalidation races static assembly", async () => {
-  const cache = new RunPromptStaticCache<{ systemStatic: string; tools: []; externalSkillRoots: [] }>();
+  const cache = new RunPromptStaticCache<{ systemStatic: string; tools: []; externalSkills: [] }>();
   let releaseAssembly!: () => void;
   const projector = new PromptContextProjector(cache, {
     async resolveDynamicContext() {
@@ -135,7 +135,7 @@ test("PromptContextProjector refuses a response when terminal invalidation races
     resolveProfile: () => ({ agent: { name: "Agent", tools: [] } }),
     async assembleStatic() {
       await new Promise<void>((done) => { releaseAssembly = done; });
-      return { systemStatic: "static", tools: [], externalSkillRoots: [] };
+      return { systemStatic: "static", tools: [], externalSkills: [] };
     },
     buildRuntimeInstruction: () => "runtime",
     appendRuntimeConstraints: (system, runtime) => `${system}|${runtime}`,

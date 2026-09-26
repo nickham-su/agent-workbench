@@ -1656,13 +1656,7 @@ const validPromptContextResponse = {
   ],
   lastResponseTotalTokens: null,
   uiLocale: "zh-CN",
-  externalSkillRoots: [
-    {
-      sourceType: "workspace",
-      rootDir: ".agents",
-      rootPath: "/workspace/.agents",
-    },
-  ],
+  externalSkills: [{ skillId: ".agents/review", skillDirectoryPath: "/workspace/.agents/review" }],
 };
 
 const validMessagesContextResponse = {

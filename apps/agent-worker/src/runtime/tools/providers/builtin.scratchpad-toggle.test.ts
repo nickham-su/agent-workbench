@@ -68,7 +68,7 @@ function createPromptContext(tools: PromptContext["tools"]): PromptContext {
     messages: [],
     lastResponseTotalTokens: null,
     uiLocale: null,
-    externalSkillRoots: [],
+    externalSkills: [],
   };
 }
 

@@ -18,7 +18,7 @@ function baseContext(): PromptContext {
     messages: [],
     lastResponseTotalTokens: null,
     uiLocale: null,
-    externalSkillRoots: [],
+    externalSkills: [],
   };
 }
 

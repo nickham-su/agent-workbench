@@ -4,17 +4,16 @@ export type PromptStaticSkillSummary = {
   description?: string;
 };
 
-export type PromptExternalSkillRoot = {
-  sourceType: "workspace" | "repo";
-  repoId?: string;
-  rootDir: string;
-  rootPath: string;
+export type PromptExternalSkill = { skillId: string; skillDirectoryPath: string };
+export type PromptWorkspaceContext = {
+  enabledAgentsInstructions: Array<{ filePath: string; displayPath: string; content: string }>;
+  availableExternalSkills: Array<PromptExternalSkill & { name: string; description: string }>;
 };
 
 export type RunPromptStatic = {
   systemStatic: string;
   tools: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>;
-  externalSkillRoots: PromptExternalSkillRoot[];
+  externalSkills: PromptExternalSkill[];
 };
 
 export type PromptStaticProfile = {
@@ -28,12 +27,8 @@ export type PromptStaticProfile = {
 
 type PromptStaticAssemblerDependencies = {
   getGlobalPrompts: () => { items: Array<{ id: string; title: string; prompt: string }> };
-  listAgentsInstructionSources: (workspaceId: string) => Promise<Array<{ filePath: string; displayPath: string }>>;
-  readAgentsInstruction: (source: { filePath: string; displayPath: string }) => Promise<{ filePath: string; displayPath: string; content: string } | null>;
+  resolveWorkspaceContext: (workspaceId: string) => Promise<PromptWorkspaceContext>;
   scanBuiltinSkills: () => Promise<PromptStaticSkillSummary[]>;
-  listExternalSkillRoots: (workspaceId: string) => Promise<PromptExternalSkillRoot[]>;
-  scanExternalSkills: (root: PromptExternalSkillRoot) => Promise<PromptStaticSkillSummary[]>;
-  warnExternalSkillScanFailure: (input: { err: unknown; workspaceId: string; root: PromptExternalSkillRoot }) => void;
   getMaxSubtaskDepth: () => number;
   listSubtaskAgents: () => Array<{ id: string; name: string; summary: string }>;
   buildSystem: (input: {
@@ -66,23 +61,15 @@ export class PromptStaticAssembler {
     uiLocale: "zh-CN" | "en-US" | null;
   }): Promise<RunPromptStatic> {
     const profile = input.profile;
-    const [globalPrompts, enabledAgentsSources, builtinSkills, enabledExternalRoots] = await Promise.all([
+    const [globalPrompts, workspaceContext, builtinSkills] = await Promise.all([
       Promise.resolve(this.dependencies.getGlobalPrompts()),
-      this.dependencies.listAgentsInstructionSources(input.workspaceId),
-      this.dependencies.scanBuiltinSkills(),
-      this.dependencies.listExternalSkillRoots(input.workspaceId)
+      this.dependencies.resolveWorkspaceContext(input.workspaceId),
+      this.dependencies.scanBuiltinSkills()
     ]);
-    const agentsInstructions = (await Promise.all(enabledAgentsSources.map((source) => this.dependencies.readAgentsInstruction(source))))
-      .filter((item): item is NonNullable<typeof item> => item !== null);
-    const externalSkills: PromptStaticSkillSummary[] = [];
-    for (const root of enabledExternalRoots) {
-      const scanned = await this.dependencies.scanExternalSkills(root).catch((err) => {
-        this.dependencies.warnExternalSkillScanFailure({ err, workspaceId: input.workspaceId, root });
-        return [] as PromptStaticSkillSummary[];
-      });
-      externalSkills.push(...scanned);
-    }
-    externalSkills.sort((a, b) => a.skill < b.skill ? -1 : a.skill > b.skill ? 1 : 0);
+    const agentsInstructions = workspaceContext.enabledAgentsInstructions;
+    const externalSkills: PromptStaticSkillSummary[] = workspaceContext.availableExternalSkills.map((item) => ({
+      skill: item.skillId, name: item.name, ...(item.description ? { description: item.description } : {})
+    }));
 
     const baselineToolNames = ["read", "skill"];
     const enabledToolNames: string[] = [];
@@ -117,7 +104,7 @@ export class PromptStaticAssembler {
         description: this.dependencies.describeTool(name, { subtaskDescription }),
         inputSchema: this.dependencies.getToolInputSchema(name)
       })),
-      externalSkillRoots: enabledExternalRoots
+      externalSkills: workspaceContext.availableExternalSkills.map(({ skillId, skillDirectoryPath }) => ({ skillId, skillDirectoryPath }))
     };
   }
 }

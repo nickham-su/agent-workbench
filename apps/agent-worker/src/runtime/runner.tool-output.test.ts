@@ -118,7 +118,7 @@ function testPromptContext() {
     messages: [],
     lastResponseTotalTokens: null,
     uiLocale: null,
-    externalSkillRoots: [],
+    externalSkills: [],
   };
 }
 
@@ -499,7 +499,7 @@ test("pending 预检禁用 writeback 期间取消时不发布 artifact", async (
         profile: { agent: { tools: ["bash"], pluginTools: [] } },
         run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] },
         context: { pendingTools: [{ toolExecutionId: "execution-15", callPartId: "part-15", assistantMessageId: "message-15", status: "queued", toolName: "bash", toolCallId: "call_policy_abort", args: {} }], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkillRoots: [] },
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] },
         availableToolNames: new Set(["bash"]), signal: controller.signal
       });
     `;
@@ -532,7 +532,7 @@ test("running recovery writeback 期间取消时不发布 artifact", async () =>
         profile: { agent: { tools: ["bash"], pluginTools: [] } },
         run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] },
         context: { pendingTools: [{ toolExecutionId: "execution-16", callPartId: "part-16", assistantMessageId: "message-16", status: "running", toolName: "bash", toolCallId: "call_recovery_abort", args: {} }], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkillRoots: [] },
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] },
         availableToolNames: new Set(["bash"]), signal: controller.signal
       });
     `;
@@ -565,7 +565,7 @@ test("pending 预检禁用 failed writeback 失败时额外发布 runtime artifa
           profile: { agent: { tools: ["bash"], pluginTools: [] } },
           run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] },
           context: { pendingTools: [{ toolExecutionId: "execution-17", callPartId: "part-17", assistantMessageId: "message-17", status: "queued", toolName: "bash", toolCallId: "call_policy_writeback", args: {} }], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkillRoots: [] },
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] },
           availableToolNames: new Set(["bash"]), signal: new AbortController().signal
         });
       } catch {}
@@ -633,7 +633,7 @@ test("running ToolExecution 不由 Worker 恢复执行、写回或发布 artifac
         profile: { agent: { tools: ["bash"], pluginTools: [] } },
         run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] },
         context: { pendingTools: [{ toolExecutionId: "execution-18", callPartId: "part-18", assistantMessageId: "message-18", status: "running", toolName: "bash", toolCallId: "call_recovery_writeback", args: {} }], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkillRoots: [] },
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] },
         availableToolNames: new Set(["bash"]), signal: new AbortController().signal
       });
       if (writes !== 0) throw new Error(\`unexpected writes: \${writes}\`);
@@ -1012,7 +1012,7 @@ test("启用既有 Debug Dump 时失败仍只写 .debug，不生成未实现的 
         parentSessionId: "sess_debug",
         signal: new AbortController().signal,
         promptContext: { pendingTools: [], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkillRoots: [] }
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] }
       });
     `;
     await execFileAsync(
@@ -3009,7 +3009,7 @@ test("启用错误落盘后 Provider reject 记录 tool artifact 的 args 和 er
       runner.toolRegistry.isToolEnabled = async () => true;
       runner.toolRegistry.execute = async () => { throw Object.assign(new Error("provider fixture failure"), { diagnostic: { raw: "preserved" } }); };
       await executeToolSafelyForTest(runner, { profile: { agent: { tools: ["bash"], pluginTools: [] } }, run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] }, tool: { toolExecutionId: "execution-7", callPartId: "part-7", assistantMessageId: "message-7", status: "queued", toolName: "bash", toolCallId: "call_provider", args: { command: "fixture command", sensitiveNamedButModelVisible: "preserved" } }, parentSessionId: "session", signal: new AbortController().signal, promptContext: { pendingTools: [], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkillRoots: [] } });
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] } });
       console.log(JSON.stringify(updates));
     `;
     const { stdout } = await execFileAsync(
@@ -3080,7 +3080,7 @@ test("启用错误落盘后 completed writeback 失败保留 provider result 和
       runner.toolRegistry.isToolEnabled = async () => true;
       runner.toolRegistry.execute = async () => ({ stdout: "complete provider result", nested: { value: 42 } });
       try { await executeToolSafelyForTest(runner, { profile: { agent: { tools: ["bash"], pluginTools: [] } }, run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] }, tool: { toolExecutionId: "execution-8", callPartId: "part-8", assistantMessageId: "message-8", status: "queued", toolName: "bash", toolCallId: "call_completed", args: { command: "complete fixture" } }, parentSessionId: "session", signal: new AbortController().signal, promptContext: { pendingTools: [], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkillRoots: [] } }); } catch (error) { if (!String(error?.message ?? error).includes("control write permanently failed")) throw error; }
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] } }); } catch (error) { if (!String(error?.message ?? error).includes("control write permanently failed")) throw error; }
       console.log(count);
     `;
     await execFileAsync(
@@ -3149,7 +3149,7 @@ test("启用错误落盘后 subtask 失败会记录 partial result", async () =>
       runner.toolRegistry.isToolEnabled = async () => true;
       runner.toolRegistry.execute = async () => { const error = new Error("subtask fixture failure"); error.subtaskSessionId = "child-1"; error.subtaskResultText = "partial child text"; throw error; };
       await executeToolSafelyForTest(runner, { profile: { agent: { tools: ["subtask"], pluginTools: [] } }, run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] }, tool: { toolExecutionId: "execution-9", callPartId: "part-9", assistantMessageId: "message-9", status: "queued", toolName: "subtask", toolCallId: "call_subtask", args: { prompt: "fixture" } }, parentSessionId: "session", signal: new AbortController().signal, promptContext: { pendingTools: [], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkillRoots: [] } });
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] } });
     `;
     await execFileAsync(
       process.execPath,
@@ -3220,7 +3220,7 @@ test("启用错误落盘时 store 失败只 warning，不改变失败状态机",
       runner.toolRegistry.isToolEnabled = async () => true;
       runner.toolRegistry.execute = async () => { throw new Error("provider failure with blocked store"); };
       await executeToolSafelyForTest(runner, { profile: { agent: { tools: ["bash"], pluginTools: [] } }, run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] }, tool: { toolExecutionId: "execution-10", callPartId: "part-10", assistantMessageId: "message-10", status: "queued", toolName: "bash", toolCallId: "call_store_fail", args: {} }, parentSessionId: "session", signal: new AbortController().signal, promptContext: { pendingTools: [], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkillRoots: [] } });
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] } });
       console.log(JSON.stringify(updates));
     `;
     const { stdout, stderr } = await execFileAsync(
@@ -3250,7 +3250,7 @@ test("启用错误落盘后 pending 快照预检禁用记录 policy artifact", a
         profile: { agent: { tools: ["bash"], pluginTools: [] } },
         run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] },
         context: { pendingTools: [{ toolExecutionId: "execution-11", callPartId: "part-11", assistantMessageId: "message-11", status: "queued", toolName: "bash", toolCallId: "call_pending_policy", args: { command: "policy fixture" } }], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkillRoots: [] },
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] },
         availableToolNames: new Set(["bash"]),
         signal: new AbortController().signal
       });
@@ -3307,7 +3307,7 @@ test("启用错误落盘后 executeTool 二次禁用检查记录独立 policy st
       runner.toolRegistry.isToolEnabled = async () => false;
       runner.toolRegistry.execute = async () => { throw new Error("must not execute"); };
       await executeToolSafelyForTest(runner, { profile: { agent: { tools: ["bash"], pluginTools: [] } }, run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] }, tool: { toolExecutionId: "execution-12", callPartId: "part-12", assistantMessageId: "message-12", status: "queued", toolName: "bash", toolCallId: "call_execute_policy", args: { command: "second policy fixture" } }, parentSessionId: "session", signal: new AbortController().signal, promptContext: { pendingTools: [], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkillRoots: [] } });
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] } });
     `;
     await execFileAsync(
       process.execPath,
@@ -3364,7 +3364,7 @@ test("启用错误落盘后遗留 running 工具保持静默且不重放", async
         profile: { agent: { tools: ["bash"], pluginTools: [] } },
         run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] },
         context: { pendingTools: [{ toolExecutionId: "execution-13", callPartId: "part-13", assistantMessageId: "message-13", status: "running", toolName: "bash", toolCallId: "call_recovery", args: { command: "recovery fixture" } }], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkillRoots: [] },
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] },
         availableToolNames: new Set(["bash"]),
         signal: new AbortController().signal
       });
@@ -3391,7 +3391,7 @@ test("启用错误落盘时 Abort 不会发布 artifact", async () => {
       runner.toolRegistry.isToolEnabled = async () => true;
       runner.toolRegistry.execute = async () => { throw new DOMException("cancelled", "AbortError"); };
       await executeToolSafelyForTest(runner, { profile: { agent: { tools: ["bash"], pluginTools: [] } }, run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] }, tool: { toolExecutionId: "execution-14", callPartId: "part-14", assistantMessageId: "message-14", status: "queued", toolName: "bash", toolCallId: "call_abort", args: { command: "abort fixture" } }, parentSessionId: "session", signal: new AbortController().signal, promptContext: { pendingTools: [], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkillRoots: [] } });
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] } });
     `;
     await execFileAsync(
       process.execPath,

@@ -1,4 +1,4 @@
-import fs from "node:fs/promises";
+import { resolvePromptWorkspaceContext, readSafeContextFile } from "../workspaces/workspace-context.service.js";
 import path from "node:path";
 import type { FastifyBaseLogger } from "fastify";
 import {
@@ -55,8 +55,6 @@ import type { LocalAgentRuntimeExecutionPort } from "./agent.runtime-port.js";
 import { AgentStartupCoordinator } from "./startup/agent-startup-coordinator.js";
 import { getWorkspace as getWorkspaceRecord } from "../workspaces/workspace.store.js";
 import {
-  listEnabledWorkspaceAgentsInstructions,
-  listEnabledWorkspaceExternalSkillRoots,
 } from "../workspaces/workspace.service.js";
 import {
   createMessageRunRecord,
@@ -322,7 +320,7 @@ function toolArgsSchema(toolName: AgentContextToolName) {
         skillId: {
           type: "string",
           description:
-            "Stable logical skill identifier shown in the available skills list, such as builtin/skill-authoring.",
+            "Skill identifier from the available skills list: builtin/<skillDir> or a workspace-relative Skill directory path, such as repo/.claude/skills/review.",
         },
         filePath: {
           type: "string",
@@ -520,8 +518,8 @@ function toolDescription(
   }
   if (toolName === "skill") {
     return [
-      "Load a top-level skill and its text files by stable logical identifier (no filesystem paths).",
-      "Input: skillId (string) is one of the identifiers in the available skills list, using builtin/... or workspace/... or repo/... prefixes.",
+      "Load a skill and its text files by its identifier from the available skills list (never an absolute filesystem path).",
+      "Input: skillId (string) is builtin/<skillDir> for an included skill or the workspace-relative Skill directory path for a workspace skill (for example repo/.claude/skills/review).",
       "filePath is optional and is relative to the selected skill root.",
       "Omit filePath, pass an empty string or a string containing only spaces/tabs, or pass exactly SKILL.md to read root instructions and a flat list of available file paths.",
       "Any other valid filePath reads that text file with the Worker text reader's normalized content.",
@@ -809,11 +807,9 @@ type SkillSummaryItem = {
   description?: string;
 };
 
-async function scanTopLevelSkillSummaries(params: {
+async function scanBuiltinSkillSummaries(params: {
   rootPath: string;
-  idPrefix: "builtin" | "workspace" | "repo";
   logger: FastifyBaseLogger;
-  idBasePath?: string;
 }) {
   const readableItems = await scanReadableTopLevelSkills({
     rootPath: params.rootPath,
@@ -824,22 +820,16 @@ async function scanTopLevelSkillSummaries(params: {
   const items: SkillSummaryItem[] = [];
   for (const item of readableItems) {
     const parsed = parseSkillFrontmatter(item.text);
-    const base = params.idBasePath ? `${params.idBasePath}/` : "";
-    const identifierSegments = [
-      params.idPrefix,
-      ...base.split("/").filter(Boolean),
-      item.entryName,
-    ];
-    if (!identifierSegments.every(isValidSkillPathSegment)) {
+    if (!isValidSkillPathSegment(item.entryName)) {
       params.logger.warn(
-        { skillNamespace: params.idPrefix },
+        { skillNamespace: "builtin" },
         "skip top-level skill with non-callable identifier",
       );
       continue;
     }
     const description = parsed.description.trim();
     items.push({
-      skill: `${params.idPrefix}/${base}${item.entryName}`,
+      skill: `builtin/${item.entryName}`,
       name: parsed.name.trim() || item.entryName,
       ...(description ? { description } : {}),
     });
@@ -885,59 +875,23 @@ function buildSkillsInstructionSection(input: {
 async function readAgentsInstructionFile(params: {
   filePath: string;
   displayPath: string;
+  workspacePath: string;
   logger: FastifyBaseLogger;
 }) {
-  const filePath = params.filePath;
-  const displayPath = params.displayPath;
-  let stat: Awaited<ReturnType<typeof fs.lstat>>;
-  try {
-    stat = await fs.lstat(filePath);
-  } catch (err: any) {
-    if (err && err.code === "ENOENT") return null;
-    params.logger.warn({ err, filePath }, "read AGENTS.md failed");
+  const { filePath, displayPath } = params;
+  const chunk = await readSafeContextFile(params.workspacePath, displayPath, WORKSPACE_AGENTS_MAX_BYTES);
+  if (!chunk) {
+    params.logger.warn({ displayPath }, "AGENTS.md is unavailable, ignored");
     return null;
   }
-
-  if (!stat.isFile() || stat.isSymbolicLink()) return null;
-
-  let fd: Awaited<ReturnType<typeof fs.open>> | null = null;
-  try {
-    fd = await fs.open(filePath, "r");
-    const buf = Buffer.alloc(WORKSPACE_AGENTS_MAX_BYTES + 1);
-    let totalRead = 0;
-    while (totalRead < buf.length) {
-      const { bytesRead } = await fd.read(
-        buf,
-        totalRead,
-        buf.length - totalRead,
-        totalRead,
-      );
-      if (!bytesRead) break;
-      totalRead += bytesRead;
-    }
-    const chunk = buf.subarray(0, totalRead);
-    if (chunk.includes(0x00)) {
-      params.logger.warn({ filePath }, "AGENTS.md appears binary, ignored");
-      return null;
-    }
-
-    const decoded = decodeUtf8Prefix(chunk, WORKSPACE_AGENTS_MAX_BYTES);
-    if (!decoded.text.trim()) return null;
-
-    const extra = decoded.truncated
-      ? "\n\n[AGENTS.md truncated: first 32KB]"
-      : "";
-    return {
-      filePath,
-      displayPath,
-      content: `${decoded.text}${extra}`,
-    };
-  } catch (err) {
-    params.logger.warn({ err, filePath }, "read AGENTS.md failed");
+  if (chunk.includes(0x00)) {
+    params.logger.warn({ displayPath }, "AGENTS.md appears binary, ignored");
     return null;
-  } finally {
-    await fd?.close().catch(() => undefined);
   }
+  const decoded = decodeUtf8Prefix(chunk, WORKSPACE_AGENTS_MAX_BYTES);
+  if (!decoded.text.trim()) return null;
+  const extra = decoded.truncated ? "\n\n[AGENTS.md truncated: first 32KB]" : "";
+  return { filePath, displayPath, content: `${decoded.text}${extra}` };
 }
 
 const GLOBAL_WORKFLOW_SYSTEM_PROMPT = getPromptText(
@@ -1367,12 +1321,7 @@ type AgentCompositionEnvironment = {
   getChannelSenderAllowlistSettings: () => ReturnType<
     typeof getAgentChannelSenderAllowlistSettings
   >;
-  listAgentsInstructionSources: (
-    workspaceId: string,
-  ) => ReturnType<typeof listEnabledWorkspaceAgentsInstructions>;
-  listExternalSkillRoots: (
-    workspaceId: string,
-  ) => ReturnType<typeof listEnabledWorkspaceExternalSkillRoots>;
+  resolveWorkspaceContext: (workspaceId: string, readInstruction: (source: { filePath: string; displayPath: string; workspacePath: string }) => ReturnType<typeof readAgentsInstructionFile>) => ReturnType<typeof resolvePromptWorkspaceContext>;
   listAvailableAgentsForSurface: (
     surface: Parameters<typeof listAvailableAgentsForSurface>[1],
     options?: Parameters<typeof listAvailableAgentsForSurface>[2],
@@ -1403,10 +1352,8 @@ function createAgentCompositionEnvironment(
     getAgentMcpSettings: () => getAgentMcpSettings(ctx),
     getChannelSenderAllowlistSettings: () =>
       getAgentChannelSenderAllowlistSettings(ctx),
-    listAgentsInstructionSources: (workspaceId) =>
-      listEnabledWorkspaceAgentsInstructions({ ctx, logger, workspaceId }),
-    listExternalSkillRoots: (workspaceId) =>
-      listEnabledWorkspaceExternalSkillRoots(ctx, logger, workspaceId),
+    resolveWorkspaceContext: (workspaceId, readInstruction) =>
+      resolvePromptWorkspaceContext(ctx, logger, workspaceId, readInstruction),
     listAvailableAgentsForSurface: (surface, options) =>
       listAvailableAgentsForSurface(ctx, surface, options),
     listPluginRuntimeSnapshots: () => listPluginRuntimeSnapshots(ctx),
@@ -1724,39 +1671,14 @@ function createReadQueryWritebackAssembly(assembly: {
   });
   const promptStaticAssembler = new PromptStaticAssembler({
     getGlobalPrompts: () => assembly.environment.getAgentGlobalPromptSettings(),
-    listAgentsInstructionSources: (workspaceId) =>
-      assembly.environment.listAgentsInstructionSources(workspaceId),
-    readAgentsInstruction: (source) =>
-      readAgentsInstructionFile({ ...source, logger: assembly.logger }),
+    resolveWorkspaceContext: (workspaceId) =>
+      assembly.environment.resolveWorkspaceContext(workspaceId, (source) =>
+        readAgentsInstructionFile({ ...source, logger: assembly.logger })),
     scanBuiltinSkills: () =>
-      scanTopLevelSkillSummaries({
+      scanBuiltinSkillSummaries({
         rootPath: path.join(assembly.environment.repoRoot, BUILTIN_SKILLS_ROOT),
-        idPrefix: "builtin",
         logger: assembly.logger,
       }),
-    listExternalSkillRoots: (workspaceId) =>
-      assembly.environment.listExternalSkillRoots(workspaceId),
-    scanExternalSkills: (root) =>
-      scanTopLevelSkillSummaries({
-        rootPath: root.rootPath,
-        idPrefix: root.sourceType === "workspace" ? "workspace" : "repo",
-        idBasePath:
-          root.sourceType === "workspace"
-            ? root.rootDir
-            : `${root.repoId}/${root.rootDir}`,
-        logger: assembly.logger,
-      }),
-    warnExternalSkillScanFailure: ({ err, workspaceId, root }) => {
-      assembly.logger.warn(
-        {
-          err,
-          workspaceId,
-          sourceType: root.sourceType,
-          repoId: root.sourceType === "repo" ? root.repoId : undefined,
-        },
-        "scan external skill roots failed",
-      );
-    },
     getMaxSubtaskDepth: () =>
       assembly.environment.getAgentRuntimeSettings().maxSubtaskDepth,
     listSubtaskAgents: () =>

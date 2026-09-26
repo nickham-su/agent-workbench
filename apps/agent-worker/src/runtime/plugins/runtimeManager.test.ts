@@ -130,7 +130,7 @@ function createExecutionContext(
       pendingTools: [],
       lastResponseTotalTokens: null,
       uiLocale: null,
-      externalSkillRoots: [],
+      externalSkills: [],
     },
     processNestedRun: async () => {},
     updateToolExecution: async () => {},

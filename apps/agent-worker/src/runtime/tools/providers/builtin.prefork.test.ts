@@ -66,7 +66,7 @@ function createPreforkContext(
     apiClient: apiClient as unknown as AgentApiClient,
     promptContext: {
       headMessageId: null, sessionRevision: 0, system: "", messages: [], tools: [],
-      pendingTools: [], lastResponseTotalTokens: null, uiLocale, externalSkillRoots: [],
+      pendingTools: [], lastResponseTotalTokens: null, uiLocale, externalSkills: [],
     },
     processNestedRun: async () => undefined,
     updateToolExecution: async () => undefined,
@@ -176,7 +176,7 @@ test("subtask prefork summary 透传 messages-context.system 到 one-shot 调用
     },
     promptContext: {
       headMessageId: null, sessionRevision: 0, system: "", messages: [], tools: [],
-      pendingTools: [], lastResponseTotalTokens: null, uiLocale: null, externalSkillRoots: [],
+      pendingTools: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [],
     },
     processNestedRun: async () => {},
     updateToolExecution: async (params: {

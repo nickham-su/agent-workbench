@@ -94,111 +94,44 @@ export const AttachWorkspaceRepoRequestSchema = Type.Object({
 });
 export type AttachWorkspaceRepoRequest = Static<typeof AttachWorkspaceRepoRequestSchema>;
 
-export const WorkspaceExternalSkillRootSourceSchema = Type.Union([
-  Type.Literal("workspace"),
-  Type.Literal("repo")
-]);
-export type WorkspaceExternalSkillRootSource = Static<typeof WorkspaceExternalSkillRootSourceSchema>;
-
-export const WorkspaceExternalSkillRootSchema = Type.Object({
-  sourceType: WorkspaceExternalSkillRootSourceSchema,
-  repoId: Type.Optional(Type.String({ minLength: 1 })),
-  repoDirName: Type.Optional(Type.String({ minLength: 1 })),
-  rootDir: Type.String({ minLength: 1 }),
-  displayName: Type.String({ minLength: 1 }),
-  topLevelSkillCount: Type.Number({ minimum: 0 }),
+export const WorkspaceContextSkillCandidateSchema = Type.Object({
+  skillId: Type.String({ minLength: 1 }),
+  skillFilePath: Type.String({ minLength: 1 }),
   enabled: Type.Boolean()
 });
-export type WorkspaceExternalSkillRoot = Static<typeof WorkspaceExternalSkillRootSchema>;
+export type WorkspaceContextSkillCandidate = Static<typeof WorkspaceContextSkillCandidateSchema>;
 
-export const WorkspaceExternalSkillRootsDetectResponseSchema = Type.Object({
-  workspaceId: Type.String({ minLength: 1 }),
-  items: Type.Array(WorkspaceExternalSkillRootSchema),
-  updatedAt: Type.Number()
-});
-export type WorkspaceExternalSkillRootsDetectResponse = Static<typeof WorkspaceExternalSkillRootsDetectResponseSchema>;
-
-export const WorkspaceExternalSkillRootInputSchema = Type.Object({
-  sourceType: WorkspaceExternalSkillRootSourceSchema,
-  repoId: Type.Optional(Type.String({ minLength: 1 })),
-  rootDir: Type.String({ minLength: 1 })
-});
-export type WorkspaceExternalSkillRootInput = Static<typeof WorkspaceExternalSkillRootInputSchema>;
-
-export const WorkspaceExternalSkillRootsSettingsItemSchema = Type.Object({
-  sourceType: WorkspaceExternalSkillRootSourceSchema,
-  repoId: Type.Optional(Type.String({ minLength: 1 })),
-  rootDir: Type.String({ minLength: 1 }),
-  displayName: Type.String({ minLength: 1 }),
-  enabledAt: Type.Number()
-});
-export type WorkspaceExternalSkillRootsSettingsItem = Static<typeof WorkspaceExternalSkillRootsSettingsItemSchema>;
-
-export const WorkspaceExternalSkillRootsSettingsResponseSchema = Type.Object({
-  workspaceId: Type.String({ minLength: 1 }),
-  enabledRoots: Type.Array(WorkspaceExternalSkillRootsSettingsItemSchema),
-  updatedAt: Type.Number()
-});
-export type WorkspaceExternalSkillRootsSettingsResponse = Static<typeof WorkspaceExternalSkillRootsSettingsResponseSchema>;
-
-export const UpdateWorkspaceExternalSkillRootsSettingsRequestSchema = Type.Object({
-  enabledRoots: Type.Array(WorkspaceExternalSkillRootInputSchema)
-});
-export type UpdateWorkspaceExternalSkillRootsSettingsRequest = Static<typeof UpdateWorkspaceExternalSkillRootsSettingsRequestSchema>;
-
-export const WorkspaceAgentsInstructionSourceSchema = Type.Union([Type.Literal("workspace"), Type.Literal("repo")]);
-export type WorkspaceAgentsInstructionSource = Static<typeof WorkspaceAgentsInstructionSourceSchema>;
-
-export const WorkspaceAgentsInstructionCandidateSchema = Type.Object({
-  sourceType: WorkspaceAgentsInstructionSourceSchema,
-  repoId: Type.Optional(Type.String({ minLength: 1 })),
-  displayPath: Type.String({ minLength: 1 }),
+export const WorkspaceContextAgentsInstructionCandidateSchema = Type.Object({
+  path: Type.String({ minLength: 1 }),
   enabled: Type.Boolean()
 });
-export type WorkspaceAgentsInstructionCandidate = Static<typeof WorkspaceAgentsInstructionCandidateSchema>;
+export type WorkspaceContextAgentsInstructionCandidate = Static<typeof WorkspaceContextAgentsInstructionCandidateSchema>;
 
-export const WorkspaceAgentsInstructionsDetectResponseSchema = Type.Object({
+export const WorkspaceContextFilesDetectResponseSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
-  items: Type.Array(WorkspaceAgentsInstructionCandidateSchema),
-  updatedAt: Type.Number()
+  updatedAt: Type.Integer({ minimum: 0 }),
+  skills: Type.Array(WorkspaceContextSkillCandidateSchema),
+  agentsInstructions: Type.Array(WorkspaceContextAgentsInstructionCandidateSchema)
 });
-export type WorkspaceAgentsInstructionsDetectResponse = Static<typeof WorkspaceAgentsInstructionsDetectResponseSchema>;
+export type WorkspaceContextFilesDetectResponse = Static<typeof WorkspaceContextFilesDetectResponseSchema>;
 
-export const WorkspaceAgentsInstructionSourceInputSchema = Type.Union([
-  Type.Object({
-    sourceType: Type.Literal("workspace")
-  }),
-  Type.Object({
-    sourceType: Type.Literal("repo"),
-    repoId: Type.String({ minLength: 1 })
-  })
-]);
-export type WorkspaceAgentsInstructionSourceInput = Static<typeof WorkspaceAgentsInstructionSourceInputSchema>;
-
-export const WorkspaceAgentsInstructionsSettingsItemSchema = Type.Object({
-  sourceType: WorkspaceAgentsInstructionSourceSchema,
-  repoId: Type.Optional(Type.String({ minLength: 1 })),
-  displayPath: Type.String({ minLength: 1 }),
-  enabledAt: Type.Number()
+export const UpdateWorkspaceContextFilesSettingsRequestSchema = Type.Object({
+  enabledSkillIds: Type.Array(Type.String({ minLength: 1 })),
+  enabledAgentsInstructionPaths: Type.Array(Type.String({ minLength: 1 }))
 });
-export type WorkspaceAgentsInstructionsSettingsItem = Static<typeof WorkspaceAgentsInstructionsSettingsItemSchema>;
+export type UpdateWorkspaceContextFilesSettingsRequest = Static<typeof UpdateWorkspaceContextFilesSettingsRequestSchema>;
 
-export const WorkspaceAgentsInstructionsSettingsResponseSchema = Type.Object({
+export const WorkspaceContextFilesSettingsResponseSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
-  enabledSources: Type.Array(WorkspaceAgentsInstructionsSettingsItemSchema),
-  updatedAt: Type.Number()
+  updatedAt: Type.Integer({ minimum: 0 }),
+  enabledSkillIds: Type.Array(Type.String({ minLength: 1 })),
+  enabledAgentsInstructionPaths: Type.Array(Type.String({ minLength: 1 }))
 });
-export type WorkspaceAgentsInstructionsSettingsResponse = Static<typeof WorkspaceAgentsInstructionsSettingsResponseSchema>;
-
-export const UpdateWorkspaceAgentsInstructionsSettingsRequestSchema = Type.Object({
-  enabledSources: Type.Array(WorkspaceAgentsInstructionSourceInputSchema)
-});
-export type UpdateWorkspaceAgentsInstructionsSettingsRequest = Static<typeof UpdateWorkspaceAgentsInstructionsSettingsRequestSchema>;
+export type WorkspaceContextFilesSettingsResponse = Static<typeof WorkspaceContextFilesSettingsResponseSchema>;
 
 export const WorkspaceTopLevelSkillSourceSchema = Type.Union([
   Type.Literal("builtin"),
-  Type.Literal("workspace"),
-  Type.Literal("repo")
+  Type.Literal("workspace")
 ]);
 export type WorkspaceTopLevelSkillSource = Static<typeof WorkspaceTopLevelSkillSourceSchema>;
 
@@ -206,9 +139,7 @@ export const WorkspaceTopLevelSkillItemSchema = Type.Object({
   id: Type.String({ minLength: 1 }),
   name: Type.String(),
   description: Type.String(),
-  sourceType: WorkspaceTopLevelSkillSourceSchema,
-  repoId: Type.Optional(Type.String({ minLength: 1 })),
-  rootDir: Type.Optional(Type.String({ minLength: 1 }))
+  sourceType: WorkspaceTopLevelSkillSourceSchema
 });
 export type WorkspaceTopLevelSkillItem = Static<typeof WorkspaceTopLevelSkillItemSchema>;
 
@@ -256,10 +187,8 @@ export const WorkspaceAvailableAgentsResponseSchema = Type.Object({
 });
 export type WorkspaceAvailableAgentsResponse = Static<typeof WorkspaceAvailableAgentsResponseSchema>;
 
-export const AgentPromptContextExternalSkillRootSchema = Type.Object({
-  sourceType: WorkspaceExternalSkillRootSourceSchema,
-  repoId: Type.Optional(Type.String({ minLength: 1 })),
-  rootDir: Type.String({ minLength: 1 }),
-  rootPath: Type.String({ minLength: 1 })
+export const AgentPromptContextExternalSkillSchema = Type.Object({
+  skillId: Type.String({ minLength: 1 }),
+  skillDirectoryPath: Type.String({ minLength: 1 })
 });
-export type AgentPromptContextExternalSkillRoot = Static<typeof AgentPromptContextExternalSkillRootSchema>;
+export type AgentPromptContextExternalSkill = Static<typeof AgentPromptContextExternalSkillSchema>;

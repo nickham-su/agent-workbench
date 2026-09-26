@@ -20,3 +20,4 @@ export * from "./contracts/agent.js";
 export * from "./contracts/agent-primitives.js";
 export * from "./agent-primary-projection.js";
 export * from "./skills-protocol.js";
+export * from "./workspace-context-paths.js";

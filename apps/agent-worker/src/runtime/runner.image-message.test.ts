@@ -39,7 +39,7 @@ function imageContext() {
     }],
     lastResponseTotalTokens: null,
     uiLocale: null,
-    externalSkillRoots: []
+    externalSkills: []
   };
 }
 

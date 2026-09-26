@@ -528,12 +528,10 @@ test("agent-api aggregate export exposes read-side schemas with stable shells an
     ],
     lastResponseTotalTokens: null,
     uiLocale: "zh-CN" as const,
-    externalSkillRoots: [
+    externalSkills: [
       {
-        sourceType: "repo" as const,
-        repoId: "repo-a",
-        rootDir: ".skills",
-        rootPath: "/workspace/.skills",
+        skillId: ".skills/review",
+        skillDirectoryPath: "/workspace/.skills/review",
       },
     ],
   };
@@ -716,7 +714,7 @@ test("agent-api read-side schemas reject invalid stable fields without constrain
       pendingTools: [],
       lastResponseTotalTokens: null,
       uiLocale: null,
-      externalSkillRoots: [],
+      externalSkills: [],
     }),
     false,
   );
@@ -740,7 +738,7 @@ test("agent-api prompt schemas permit only role-compatible content parts", () =>
     pendingTools: [],
     lastResponseTotalTokens: null,
     uiLocale: null,
-    externalSkillRoots: [],
+    externalSkills: [],
   };
   const attachmentRef = {
     type: "attachment_ref",

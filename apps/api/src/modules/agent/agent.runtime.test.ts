@@ -142,6 +142,6 @@ function promptContext() {
     pendingTools: [],
     lastResponseTotalTokens: null,
     uiLocale: null,
-    externalSkillRoots: [],
+    externalSkills: [],
   };
 }

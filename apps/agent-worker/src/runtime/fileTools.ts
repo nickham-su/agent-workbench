@@ -1363,30 +1363,25 @@ async function resolveSkillDirectory(params: {
   workspacePath: string;
   repoRoot: string;
   skillId: unknown;
-  externalSkillRoots?: Array<{ sourceType: "workspace" | "repo"; repoId?: string; rootDir: string; rootPath: string }>;
+  externalSkills?: Array<{ skillId: string; skillDirectoryPath: string }>;
 }) {
   if (params.skillId === undefined) skillError("skill is required");
   const parsed = parseStableSkillIdentifier(params.skillId);
   if (parsed.kind === "required") skillError("skill is required");
   if (parsed.kind === "invalid") skillError("invalid skill identifier");
   const value = parsed.value;
-  let skillsRoot: string;
   if (value.namespace === "builtin") {
-    skillsRoot = path.resolve(params.repoRoot, "skills");
-  } else if (value.namespace === "workspace") {
-    const mapping = (params.externalSkillRoots || []).find(
-      (item) => item.sourceType === "workspace" && item.rootDir === value.rootDir
-    );
-    if (!mapping) skillError("skill not found");
-    skillsRoot = path.resolve(mapping.rootPath);
-  } else {
-    const mapping = (params.externalSkillRoots || []).find(
-      (item) => item.sourceType === "repo" && item.repoId === value.repoId && item.rootDir === value.rootDir
-    );
-    if (!mapping) skillError("skill not found");
-    skillsRoot = path.resolve(mapping.rootPath);
+    const skillsRoot = path.resolve(params.repoRoot, "skills");
+    return { skill: value.skill, skillsRoot, skillDirectory: path.join(skillsRoot, value.skillDir) };
   }
-  return { skill: value.skill, skillsRoot, skillDirectory: path.join(skillsRoot, value.skillDir) };
+  const mapping = (params.externalSkills || []).find((item) => item.skillId === value.skill);
+  if (!mapping) skillError("skill not found");
+  const skillsRoot = path.resolve(params.workspacePath);
+  const skillDirectory = path.resolve(skillsRoot, ...value.skillDir.split("/"));
+  if (mapping.skillDirectoryPath !== skillDirectory || !isPathInside(skillsRoot, skillDirectory)) skillError("skill not found");
+  // An ancestor symlink is forbidden even if it resolves to another place within the workspace.
+  await assertSafeSkillDirectory(skillsRoot, value.skillDir);
+  return { skill: value.skill, skillsRoot, skillDirectory };
 }
 
 type RunSkillToolParams = {
@@ -1394,7 +1389,7 @@ type RunSkillToolParams = {
   repoRoot: string;
   skillId: unknown;
   filePath?: unknown;
-  externalSkillRoots?: Array<{ sourceType: "workspace" | "repo"; repoId?: string; rootDir: string; rootPath: string }>;
+  externalSkills?: Array<{ skillId: string; skillDirectoryPath: string }>;
   signal?: AbortSignal;
 };
 

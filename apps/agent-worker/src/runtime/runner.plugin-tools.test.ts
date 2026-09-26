@@ -128,7 +128,7 @@ test("processRun reuses runModelStep tool snapshot for next pending plugin tool 
       messages: [],
       lastResponseTotalTokens: null,
       uiLocale: null,
-      externalSkillRoots: []
+      externalSkills: []
     },
     {
       pendingTools: [queuedPluginTool()],
@@ -139,7 +139,7 @@ test("processRun reuses runModelStep tool snapshot for next pending plugin tool 
       messages: [],
       lastResponseTotalTokens: null,
       uiLocale: null,
-      externalSkillRoots: []
+      externalSkills: []
     }
   ];
   const completed: string[] = [];
@@ -171,7 +171,7 @@ test("processRun reuses runModelStep tool snapshot for next pending plugin tool 
         messages: [],
         lastResponseTotalTokens: null,
         uiLocale: null,
-        externalSkillRoots: []
+        externalSkills: []
       };
     },
     async persistRunTerminalIntent(input: { status: string }) {

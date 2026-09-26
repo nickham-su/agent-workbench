@@ -574,7 +574,7 @@ export class BuiltinToolProvider implements ToolProvider {
           ...(Object.prototype.hasOwnProperty.call(skillArgs, "filePath")
             ? { filePath: skillArgs.filePath }
             : {}),
-          externalSkillRoots: ctx.promptContext.externalSkillRoots,
+          externalSkills: ctx.promptContext.externalSkills,
           signal: ctx.signal
         });
       }

@@ -565,7 +565,7 @@ test("read-side internal routes preserve token, body validation, and missing-res
   assert.equal(Array.isArray(promptBody.pendingTools), true);
   assert.ok(promptBody.lastResponseTotalTokens === null || typeof promptBody.lastResponseTotalTokens === "number");
   assert.ok(promptBody.uiLocale === null || promptBody.uiLocale === "zh-CN" || promptBody.uiLocale === "en-US");
-  assert.equal(Array.isArray(promptBody.externalSkillRoots), true);
+  assert.equal(Array.isArray(promptBody.externalSkills), true);
   for (const tool of promptBody.tools) {
     assert.equal(typeof tool.name, "string");
     assert.equal(typeof tool.description, "string");
@@ -579,10 +579,9 @@ test("read-side internal routes preserve token, body validation, and missing-res
     assert.equal(typeof pending.toolName, "string");
     assert.equal(typeof pending.args, "object");
   }
-  for (const root of promptBody.externalSkillRoots) {
-    assert.ok(root.sourceType === "workspace" || root.sourceType === "repo");
-    assert.equal(typeof root.rootDir, "string");
-    assert.equal(typeof root.rootPath, "string");
+  for (const skill of promptBody.externalSkills) {
+    assert.equal(typeof skill.skillId, "string");
+    assert.equal(typeof skill.skillDirectoryPath, "string");
   }
 });
 

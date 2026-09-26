@@ -83,7 +83,7 @@ export class PromptContextProjector<Message> {
       pendingTools: dynamic.pendingTools,
       lastResponseTotalTokens: dynamic.lastResponseTotalTokens,
       uiLocale: dynamic.uiLocale,
-      externalSkillRoots: staticPrompt.externalSkillRoots
+      externalSkills: staticPrompt.externalSkills
     };
   }
 }

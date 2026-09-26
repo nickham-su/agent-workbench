@@ -360,8 +360,10 @@
       v-model:open="contextModalVisible"
       :title="t('agent.client.contextManagerTitle')"
       :confirm-loading="contextSaving"
+      :ok-button-props="{ disabled: !contextReady || contextLoading || contextSaving }"
       @ok="saveContextSettings"
     >
+      <p class="mb-3 text-sm text-[color:var(--text-secondary)]">{{ t("agent.client.contextManagerHint") }}</p>
       <div v-if="contextLoading" class="py-5 text-center">
         <LoadingOutlined spin />
       </div>
@@ -370,23 +372,24 @@
         <div class="mb-2">{{ t("agent.client.contextAgentsGroupTitle") }}</div>
         <a-checkbox-group
           v-model:value="instructionKeys"
+          :disabled="contextSaving"
           class="flex flex-col gap-1"
           ><a-checkbox
             v-for="item in instructionCandidates"
-            :key="instructionKey(item)"
-            :value="instructionKey(item)"
-            >{{ item.displayPath }}</a-checkbox
+            :key="item.path"
+            :value="item.path"
+            >{{ item.path }}</a-checkbox
           ></a-checkbox-group
         >
         <div class="mt-4 mb-2">
           {{ t("agent.client.contextSkillsGroupTitle") }}
         </div>
-        <a-checkbox-group v-model:value="skillKeys" class="flex flex-col gap-1"
+        <a-checkbox-group v-model:value="skillKeys" :disabled="contextSaving" class="flex flex-col gap-1"
           ><a-checkbox
             v-for="item in skillCandidates"
-            :key="skillKey(item)"
-            :value="skillKey(item)"
-            >{{ item.displayName }} · {{ item.topLevelSkillCount }}</a-checkbox
+            :key="item.skillId"
+            :value="item.skillId"
+            >{{ item.skillId }}</a-checkbox
           ></a-checkbox-group
         >
       </div>
@@ -525,8 +528,7 @@ import {
   cancelAgentSession,
   compactAgentSession,
   detectWorkspaceAgentEnablement,
-  detectWorkspaceAgentsInstructions,
-  detectWorkspaceExternalSkillRoots,
+  detectWorkspaceContextFiles,
   forkAgentSession,
   getAgentAttachmentContent,
   getAgentGlobalPromptSettings,
@@ -542,8 +544,7 @@ import {
   suggestWorkspaceFilePaths,
   updateAgentSessionModelOverride,
   updateWorkspaceAgentEnablementSettings,
-  updateWorkspaceAgentsInstructionsSettings,
-  updateWorkspaceExternalSkillRootsSettings,
+  updateWorkspaceContextFilesSettings,
 } from "@/shared/api";
 import { getInitialLocale } from "@/shared/i18n/locale";
 
@@ -565,7 +566,6 @@ type Candidate = {
   command?: any;
   insertText?: string;
 };
-type Source = { sourceType: "workspace" | "repo"; repoId?: string };
 const props = defineProps<{
   workspaceId: string;
   toolId: string;
@@ -1649,97 +1649,86 @@ const contextModalVisible = ref(false);
 const contextLoading = ref(false);
 const contextSaving = ref(false);
 const contextError = ref("");
-const instructionCandidates = ref<
-  Array<Source & { displayPath: string; enabled: boolean }>
->([]);
-const skillCandidates = ref<
-  Array<
-    Source & {
-      rootDir: string;
-      displayName: string;
-      topLevelSkillCount: number;
-      enabled: boolean;
-    }
-  >
->([]);
+const contextReady = ref(false);
+const instructionCandidates = ref<Array<{ path: string; enabled: boolean }>>([]);
+const skillCandidates = ref<Array<{ skillId: string; skillFilePath: string; enabled: boolean }>>([]);
 const instructionKeys = ref<string[]>([]);
 const skillKeys = ref<string[]>([]);
-const instructionKey = (item: Source) =>
-  item.sourceType === "workspace"
-    ? "workspace"
-    : `repo\u0000${item.repoId || ""}`;
-const skillKey = (item: Source & { rootDir: string }) =>
-  `${instructionKey(item)}\u0000${item.rootDir}`;
+let contextRequestSequence = 0;
+let contextSaveSequence = 0;
+let contextWorkspaceId: string | null = null;
+
+function invalidateContextView() {
+  contextRequestSequence++;
+  contextSaveSequence++;
+  contextWorkspaceId = null;
+  contextLoading.value = false;
+  contextSaving.value = false;
+  contextReady.value = false;
+  contextError.value = "";
+  instructionCandidates.value = [];
+  skillCandidates.value = [];
+  instructionKeys.value = [];
+  skillKeys.value = [];
+}
+
+// Cancel/reopen and workspace switches invalidate callbacks synchronously, including finally.
+watch(contextModalVisible, (visible) => {
+  if (!visible) invalidateContextView();
+}, { flush: "sync" });
+watch(() => props.workspaceId, () => {
+  if (contextModalVisible.value) void openContextManager();
+  else invalidateContextView();
+}, { flush: "sync" });
+
 async function openContextManager() {
   contextModalVisible.value = true;
+  const workspaceId = props.workspaceId;
+  const sequence = ++contextRequestSequence;
+  contextSaveSequence++; // An older PUT may finish, but may not close or overwrite this view.
+  contextWorkspaceId = null;
   contextLoading.value = true;
+  contextSaving.value = false;
+  contextReady.value = false;
   contextError.value = "";
+  instructionCandidates.value = [];
+  skillCandidates.value = [];
+  instructionKeys.value = [];
+  skillKeys.value = [];
+  const isCurrent = () => !disposed && contextModalVisible.value && props.workspaceId === workspaceId && contextRequestSequence === sequence;
   try {
-    const [instructions, skills] = await Promise.all([
-      detectWorkspaceAgentsInstructions(props.workspaceId),
-      detectWorkspaceExternalSkillRoots(props.workspaceId),
-    ]);
-    instructionCandidates.value = instructions.items.map((item) => ({
-      sourceType: item.sourceType,
-      ...(item.repoId ? { repoId: item.repoId } : {}),
-      displayPath: item.displayPath,
-      enabled: item.enabled,
-    }));
-    skillCandidates.value = skills.items.map((item) => ({
-      sourceType: item.sourceType,
-      ...(item.repoId ? { repoId: item.repoId } : {}),
-      rootDir: item.rootDir,
-      displayName: item.displayName,
-      topLevelSkillCount: item.topLevelSkillCount,
-      enabled: item.enabled,
-    }));
-    instructionKeys.value = instructionCandidates.value
-      .filter((item) => item.enabled)
-      .map(instructionKey);
-    skillKeys.value = skillCandidates.value
-      .filter((item) => item.enabled)
-      .map(skillKey);
+    const result = await detectWorkspaceContextFiles(workspaceId);
+    if (!isCurrent()) return;
+    instructionCandidates.value = result.agentsInstructions;
+    skillCandidates.value = result.skills;
+    instructionKeys.value = result.agentsInstructions.filter((item) => item.enabled).map((item) => item.path);
+    skillKeys.value = result.skills.filter((item) => item.enabled).map((item) => item.skillId);
+    contextWorkspaceId = workspaceId;
+    contextReady.value = true;
   } catch (error) {
-    contextError.value = error instanceof Error ? error.message : String(error);
+    if (isCurrent()) contextError.value = error instanceof Error ? error.message : String(error);
   } finally {
-    contextLoading.value = false;
+    if (isCurrent()) contextLoading.value = false;
   }
 }
 async function saveContextSettings() {
+  if (!contextModalVisible.value || !contextReady.value || contextLoading.value || contextSaving.value || contextWorkspaceId !== props.workspaceId) return;
+  const workspaceId = props.workspaceId;
+  const sequence = ++contextSaveSequence;
+  const isCurrent = () => !disposed && contextModalVisible.value && props.workspaceId === workspaceId && contextSaveSequence === sequence;
   contextSaving.value = true;
   try {
-    const selectedInstructions = new Set(instructionKeys.value);
-    const selectedSkills = new Set(skillKeys.value);
-    await Promise.all([
-      updateWorkspaceAgentsInstructionsSettings(props.workspaceId, {
-        enabledSources: instructionCandidates.value
-          .filter((item) => selectedInstructions.has(instructionKey(item)))
-          .map((item) =>
-            item.sourceType === "workspace"
-              ? { sourceType: "workspace" }
-              : { sourceType: "repo", repoId: item.repoId! },
-          ),
-      }),
-      updateWorkspaceExternalSkillRootsSettings(props.workspaceId, {
-        enabledRoots: skillCandidates.value
-          .filter((item) => selectedSkills.has(skillKey(item)))
-          .map((item) =>
-            item.sourceType === "workspace"
-              ? { sourceType: "workspace", rootDir: item.rootDir }
-              : {
-                  sourceType: "repo",
-                  repoId: item.repoId!,
-                  rootDir: item.rootDir,
-                },
-          ),
-      }),
-    ]);
+    await updateWorkspaceContextFilesSettings(workspaceId, {
+      enabledSkillIds: [...skillKeys.value],
+      enabledAgentsInstructionPaths: [...instructionKeys.value],
+    });
+    if (!isCurrent()) return;
     contextModalVisible.value = false;
     emit("agent-settings-updated");
   } catch (error) {
-    contextError.value = error instanceof Error ? error.message : String(error);
+    if (isCurrent()) contextError.value = error instanceof Error ? error.message : String(error);
   } finally {
-    contextSaving.value = false;
+    if (isCurrent()) contextSaving.value = false;
   }
 }
 const enablementModalVisible = ref(false);

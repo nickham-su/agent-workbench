@@ -5,11 +5,13 @@ description: 面向模型与开发者的实用指南：如何在 agent-workbench
 
 # Skill 编写手册
 
-本手册说明如何把 skill 写对、放对，并让模型以 V2 加载协议稳定读取。
+本手册说明如何把 Skill 写对、放对，并让模型按需读取。内置 Skill 由应用自带；工作区 Skill 在「上下文管理」中逐项启用，新发现项默认禁用。
 
 ## 目录与最小结构
 
-一个 Skills root 的一级子目录就是一个顶层 skill。每个顶层 skill 的直属 `SKILL.md` 是唯一具有元数据语义的根说明文件。
+从 workspace 根目录开始探测，父目录相对 workspace 根最多 4 级。任意符合深度要求的目录只要有直属、普通且非软链的 `SKILL.md`，就可成为候选 Skill；workspace 根的 `SKILL.md` 不算 Skill。扫描不跟随软链，跳过 `.git`、`node_modules`、`.agent-workbench`，但允许 `.claude` 等隐藏目录。目录下有直属 `SKILL.md` 时，其后代的 `SKILL.md` 不再形成独立 Skill；后代的 `AGENTS.md` 仍可被探测。
+
+发现只检查文件元数据；启用之后，根说明需可读且非二进制，才会进入模型的可用 Skill 列表。`SKILL.md` 是唯一具有元数据语义的根说明文件。
 
 小型 skill 优先采用平级多文件，减少路径转换：
 
@@ -47,7 +49,7 @@ large-skill/
     └── examples.md
 ```
 
-嵌套目录中的所有文件（包括嵌套的 `SKILL.md`）都是普通辅助文本文件，不会形成独立 skill，也不会解析或剥离其 frontmatter。
+嵌套目录中的文件（包括嵌套的 `SKILL.md`）在该 Skill 内只是普通辅助文本，不会形成独立 Skill，也不会解析或剥离其 frontmatter。
 
 ## 模型如何加载
 
@@ -59,13 +61,15 @@ large-skill/
 }
 ```
 
-稳定标识只使用下列形状，不使用物理绝对路径：
+内置 Skill 使用 `builtin/<skillDir>`；外部 Skill 的 ID 就是 Skill 目录相对 workspace 根的路径，不带 `workspace/` 或 repo ID：
 
 ```text
 builtin/<skillDir>
-workspace/<rootDir>/<skillDir>
-repo/<repoId>/<rootDir>/<skillDir>
+my-skill
+repo-a/.claude/skills/review
 ```
+
+例如 `workspace/repo-a/.claude/skills/review/SKILL.md` 的 ID 为 `repo-a/.claude/skills/review`。首段 `builtin` 为内置命名空间保留，workspace 中 `builtin/.../SKILL.md` 不注册为外部 Skill。移动或重命名目录会改变 ID，需要重新启用。启用只授权该 Skill 的精确 ID；禁用后不能靠猜 ID 读取。
 
 读取根说明和可用文件列表时，省略 `filePath`，传空字符串或仅由空格/tab 组成的字符串，或精确传入 `SKILL.md`：
 

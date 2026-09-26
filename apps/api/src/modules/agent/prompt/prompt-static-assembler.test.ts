@@ -6,15 +6,14 @@ test("PromptStaticAssembler preserves static prompt inputs, external skill order
   const systemInputs: Array<Record<string, unknown>> = [];
   const assembler = new PromptStaticAssembler({
     getGlobalPrompts: () => ({ items: [{ id: "global", title: "Global", prompt: "Global prompt" }] }),
-    listAgentsInstructionSources: async () => [{ filePath: "/workspace/AGENTS.md", displayPath: "AGENTS.md" }],
-    readAgentsInstruction: async (source) => ({ ...source, content: "Workspace instruction" }),
+    resolveWorkspaceContext: async () => ({
+      enabledAgentsInstructions: [{ filePath: "/workspace/AGENTS.md", displayPath: "AGENTS.md", content: "Workspace instruction" }],
+      availableExternalSkills: [
+        { skillId: "a/review", skillDirectoryPath: "/workspace/a/review", name: "Review", description: "" },
+        { skillId: "z/review", skillDirectoryPath: "/workspace/z/review", name: "Review Z", description: "" },
+      ]
+    }),
     scanBuiltinSkills: async () => [{ skill: "builtin/skill", name: "Builtin" }],
-    listExternalSkillRoots: async () => [
-      { sourceType: "repo", repoId: "repo", rootDir: "z", rootPath: "/repo/z" },
-      { sourceType: "workspace", rootDir: "a", rootPath: "/workspace/a" }
-    ],
-    scanExternalSkills: async (root) => [{ skill: root.sourceType === "repo" ? "repo/repo/z" : "workspace/a", name: root.rootDir }],
-    warnExternalSkillScanFailure: () => assert.fail("scan should not fail"),
     getMaxSubtaskDepth: () => 2,
     listSubtaskAgents: () => [{ id: "subtask-agent", name: "Subtask", summary: "summary" }],
     buildSystem(input) {
@@ -41,26 +40,22 @@ test("PromptStaticAssembler preserves static prompt inputs, external skill order
     globalPrompts: [{ id: "global", title: "Global", prompt: "Global prompt" }],
     outputFormatInstruction: "format:en-US",
     agentsInstructions: [{ filePath: "/workspace/AGENTS.md", displayPath: "AGENTS.md", content: "Workspace instruction" }],
-    skillsInstruction: "builtin/skill|repo/repo/z,workspace/a"
+    skillsInstruction: "builtin/skill|a/review,z/review"
   }]);
   assert.equal(result.systemStatic, "static system");
   assert.deepEqual(result.tools.map((tool) => tool.name), ["read", "skill", "bash", "subtask"]);
   assert.equal(result.tools.at(-1)?.description, "subtask:subtasks:subtask-agent");
-  assert.deepEqual(result.externalSkillRoots, [
-    { sourceType: "repo", repoId: "repo", rootDir: "z", rootPath: "/repo/z" },
-    { sourceType: "workspace", rootDir: "a", rootPath: "/workspace/a" }
+  assert.deepEqual(result.externalSkills, [
+    { skillId: "a/review", skillDirectoryPath: "/workspace/a/review" },
+    { skillId: "z/review", skillDirectoryPath: "/workspace/z/review" }
   ]);
 });
 
 test("PromptStaticAssembler removes subtask from static tools at the established depth limit", async () => {
   const assembler = new PromptStaticAssembler({
     getGlobalPrompts: () => ({ items: [] }),
-    listAgentsInstructionSources: async () => [],
-    readAgentsInstruction: async () => null,
+    resolveWorkspaceContext: async () => ({ enabledAgentsInstructions: [], availableExternalSkills: [] }),
     scanBuiltinSkills: async () => [],
-    listExternalSkillRoots: async () => [],
-    scanExternalSkills: async () => [],
-    warnExternalSkillScanFailure: () => undefined,
     getMaxSubtaskDepth: () => 1,
     listSubtaskAgents: () => [],
     buildSystem: () => "",
@@ -84,12 +79,8 @@ test("PromptStaticAssembler removes subtask from static tools at the established
 test("PromptStaticAssembler removes subtask when the run depth is unknown", async () => {
   const assembler = new PromptStaticAssembler({
     getGlobalPrompts: () => ({ items: [] }),
-    listAgentsInstructionSources: async () => [],
-    readAgentsInstruction: async () => null,
+    resolveWorkspaceContext: async () => ({ enabledAgentsInstructions: [], availableExternalSkills: [] }),
     scanBuiltinSkills: async () => [],
-    listExternalSkillRoots: async () => [],
-    scanExternalSkills: async () => [],
-    warnExternalSkillScanFailure: () => undefined,
     getMaxSubtaskDepth: () => 2,
     listSubtaskAgents: () => [],
     buildSystem: () => "",

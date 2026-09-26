@@ -17,37 +17,29 @@ import { AgentListAvailableAgentsResponseSchema } from "@agent-workbench/shared/
 import {
   attachRepoToWorkspace,
   createWorkspace,
-  detectWorkspaceExternalSkillRoots,
   deleteWorkspace,
-  detectWorkspaceAgentsInstructions,
   detachRepoFromWorkspace,
-  getWorkspaceAgentsInstructionsSettings,
   getWorkspaceAgentTabState,
   getWorkspaceDetailById,
   getWorkspaceAgentEnablementSettings,
-  getWorkspaceExternalSkillRootsSettings,
   listWorkspaceDetails,
   detectWorkspaceAgentEnablement,
   filterAgentsByWorkspaceEnablement,
-  listWorkspaceTopLevelSkills,
   setWorkspaceAgentSessionTabVisibility,
-  updateWorkspaceAgentsInstructionsSettings,
-  updateWorkspaceExternalSkillRootsSettings,
   updateWorkspaceAgentEnablementSettings,
   updateWorkspaceById
 } from "./workspace.service.js";
+import { detectWorkspaceContextFiles, getWorkspaceContextFilesSettings, updateWorkspaceContextFilesSettings, listWorkspaceContextTopLevelSkills } from "./workspace-context.service.js";
 import { listAvailableAgentsForListSurface, type AgentListSurface } from "../settings/settings.service.js";
 import {
   WorkspaceAgentEnablementDetectResponseSchema,
   WorkspaceAgentEnablementSettingsResponseSchema,
   UpdateWorkspaceAgentEnablementSettingsRequestSchema,
-  UpdateWorkspaceExternalSkillRootsSettingsRequestSchema,
-  WorkspaceExternalSkillRootsDetectResponseSchema,
-  WorkspaceExternalSkillRootsSettingsResponseSchema,
-  WorkspaceAgentsInstructionsDetectResponseSchema,
-  WorkspaceAgentsInstructionsSettingsResponseSchema,
-  UpdateWorkspaceAgentsInstructionsSettingsRequestSchema,
-  WorkspaceTopLevelSkillsResponseSchema
+  WorkspaceTopLevelSkillsResponseSchema,
+  WorkspaceContextFilesDetectResponseSchema,
+  WorkspaceContextFilesSettingsResponseSchema,
+  UpdateWorkspaceContextFilesSettingsRequestSchema,
+  type UpdateWorkspaceContextFilesSettingsRequest
 } from "@agent-workbench/shared";
 import { nowMs } from "../../utils/time.js";
 import { touchWorkspaceLastUsedAt } from "./workspace.store.js";
@@ -220,97 +212,20 @@ export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppCon
     }
   );
 
-  app.get(
-    "/api/workspaces/:workspaceId/agents-instructions/detect",
-    {
-      schema: {
-        tags: ["workspaces"],
-        params: WorkspaceIdParamsSchema,
-        response: { 200: WorkspaceAgentsInstructionsDetectResponseSchema, 404: ErrorResponseSchema }
-      }
-    },
-    async (req) => {
-      const params = req.params as { workspaceId: string };
-      return detectWorkspaceAgentsInstructions(ctx, app.log, params.workspaceId);
-    }
-  );
+  app.get("/api/workspaces/:workspaceId/context-files/detect", {
+    schema: { tags: ["workspaces"], params: WorkspaceIdParamsSchema,
+      response: { 200: WorkspaceContextFilesDetectResponseSchema, 404: ErrorResponseSchema, 409: ErrorResponseSchema } }
+  }, async (req) => detectWorkspaceContextFiles(ctx, (req.params as { workspaceId: string }).workspaceId));
 
-  app.get(
-    "/api/workspaces/:workspaceId/agents-instructions/settings",
-    {
-      schema: {
-        tags: ["workspaces"],
-        params: WorkspaceIdParamsSchema,
-        response: { 200: WorkspaceAgentsInstructionsSettingsResponseSchema, 404: ErrorResponseSchema }
-      }
-    },
-    async (req) => {
-      const params = req.params as { workspaceId: string };
-      return getWorkspaceAgentsInstructionsSettings(ctx, params.workspaceId);
-    }
-  );
+  app.get("/api/workspaces/:workspaceId/context-files/settings", {
+    schema: { tags: ["workspaces"], params: WorkspaceIdParamsSchema,
+      response: { 200: WorkspaceContextFilesSettingsResponseSchema, 404: ErrorResponseSchema } }
+  }, async (req) => getWorkspaceContextFilesSettings(ctx, (req.params as { workspaceId: string }).workspaceId));
 
-  app.put(
-    "/api/workspaces/:workspaceId/agents-instructions/settings",
-    {
-      schema: {
-        tags: ["workspaces"],
-        params: WorkspaceIdParamsSchema,
-        body: UpdateWorkspaceAgentsInstructionsSettingsRequestSchema,
-        response: { 200: WorkspaceAgentsInstructionsSettingsResponseSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema }
-      }
-    },
-    async (req) => {
-      const params = req.params as { workspaceId: string };
-      return updateWorkspaceAgentsInstructionsSettings(ctx, app.log, params.workspaceId, req.body as any);
-    }
-  );
-
-  app.get(
-    "/api/workspaces/:workspaceId/external-skill-roots/detect",
-    {
-      schema: {
-        tags: ["workspaces"],
-        params: WorkspaceIdParamsSchema,
-        response: { 200: WorkspaceExternalSkillRootsDetectResponseSchema, 404: ErrorResponseSchema }
-      }
-    },
-    async (req) => {
-      const params = req.params as { workspaceId: string };
-      return detectWorkspaceExternalSkillRoots(ctx, app.log, params.workspaceId);
-    }
-  );
-
-  app.get(
-    "/api/workspaces/:workspaceId/external-skill-roots/settings",
-    {
-      schema: {
-        tags: ["workspaces"],
-        params: WorkspaceIdParamsSchema,
-        response: { 200: WorkspaceExternalSkillRootsSettingsResponseSchema, 404: ErrorResponseSchema }
-      }
-    },
-    async (req) => {
-      const params = req.params as { workspaceId: string };
-      return getWorkspaceExternalSkillRootsSettings(ctx, params.workspaceId);
-    }
-  );
-
-  app.put(
-    "/api/workspaces/:workspaceId/external-skill-roots/settings",
-    {
-      schema: {
-        tags: ["workspaces"],
-        params: WorkspaceIdParamsSchema,
-        body: UpdateWorkspaceExternalSkillRootsSettingsRequestSchema,
-        response: { 200: WorkspaceExternalSkillRootsSettingsResponseSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema }
-      }
-    },
-    async (req) => {
-      const params = req.params as { workspaceId: string };
-      return updateWorkspaceExternalSkillRootsSettings(ctx, app.log, params.workspaceId, req.body as any);
-    }
-  );
+  app.put("/api/workspaces/:workspaceId/context-files/settings", {
+    schema: { tags: ["workspaces"], params: WorkspaceIdParamsSchema, body: UpdateWorkspaceContextFilesSettingsRequestSchema,
+      response: { 200: WorkspaceContextFilesSettingsResponseSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema, 409: ErrorResponseSchema } }
+  }, async (req) => updateWorkspaceContextFilesSettings(ctx, (req.params as { workspaceId: string }).workspaceId, req.body as UpdateWorkspaceContextFilesSettingsRequest));
 
   app.get(
     "/api/workspaces/:workspaceId/skills/top-level",
@@ -318,12 +233,12 @@ export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppCon
       schema: {
         tags: ["workspaces"],
         params: WorkspaceIdParamsSchema,
-        response: { 200: WorkspaceTopLevelSkillsResponseSchema, 404: ErrorResponseSchema }
+        response: { 200: WorkspaceTopLevelSkillsResponseSchema, 404: ErrorResponseSchema, 409: ErrorResponseSchema }
       }
     },
     async (req) => {
       const params = req.params as { workspaceId: string };
-      return listWorkspaceTopLevelSkills(ctx, app.log, params.workspaceId);
+      return listWorkspaceContextTopLevelSkills(ctx, app.log, params.workspaceId);
     }
   );
 

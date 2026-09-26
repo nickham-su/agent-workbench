@@ -35,13 +35,9 @@ import type {
   CreateWorkspaceRequest,
   AttachWorkspaceRepoRequest,
   ChangesResponse,
-  UpdateWorkspaceAgentsInstructionsSettingsRequest,
-  UpdateWorkspaceExternalSkillRootsSettingsRequest,
-  WorkspaceAgentsInstructionsDetectResponse,
-  WorkspaceAgentsInstructionsSettingsResponse,
-  WorkspaceExternalSkillRootsDetectResponse,
-  WorkspaceExternalSkillRootsSettingsResponse,
-  WorkspaceExternalSkillRootInput,
+  UpdateWorkspaceContextFilesSettingsRequest,
+  WorkspaceContextFilesDetectResponse,
+  WorkspaceContextFilesSettingsResponse,
   WorkspaceAgentEnablementDetectResponse,
   WorkspaceTopLevelSkillsResponse,
   WorkspaceAgentEnablementSettingsResponse,
@@ -446,69 +442,18 @@ export async function detachWorkspaceRepo(workspaceId: string, repoId: string) {
   }
 }
 
-export async function detectWorkspaceAgentsInstructions(workspaceId: string) {
+export async function detectWorkspaceContextFiles(workspaceId: string) {
   try {
-    const res = await client.get<WorkspaceAgentsInstructionsDetectResponse>(`/workspaces/${workspaceId}/agents-instructions/detect`);
+    const res = await client.get<WorkspaceContextFilesDetectResponse>(`/workspaces/${workspaceId}/context-files/detect`);
     return res.data;
-  } catch (err) {
-    throw toApiError(err);
-  }
+  } catch (err) { throw toApiError(err); }
 }
 
-export async function getWorkspaceAgentsInstructionsSettings(workspaceId: string) {
+export async function updateWorkspaceContextFilesSettings(workspaceId: string, body: UpdateWorkspaceContextFilesSettingsRequest) {
   try {
-    const res = await client.get<WorkspaceAgentsInstructionsSettingsResponse>(`/workspaces/${workspaceId}/agents-instructions/settings`);
+    const res = await client.put<WorkspaceContextFilesSettingsResponse>(`/workspaces/${workspaceId}/context-files/settings`, body);
     return res.data;
-  } catch (err) {
-    throw toApiError(err);
-  }
-}
-
-export async function updateWorkspaceAgentsInstructionsSettings(
-  workspaceId: string,
-  body: UpdateWorkspaceAgentsInstructionsSettingsRequest
-) {
-  try {
-    const enabledSources = (body.enabledSources || []).map((it) => (it.sourceType === "workspace" ? { sourceType: "workspace" as const } : { sourceType: "repo" as const, repoId: it.repoId }));
-    const res = await client.put<WorkspaceAgentsInstructionsSettingsResponse>(`/workspaces/${workspaceId}/agents-instructions/settings`, {
-      enabledSources
-    });
-    return res.data;
-  } catch (err) {
-    throw toApiError(err);
-  }
-}
-
-export async function detectWorkspaceExternalSkillRoots(workspaceId: string) {
-  try {
-    const res = await client.get<WorkspaceExternalSkillRootsDetectResponse>(`/workspaces/${workspaceId}/external-skill-roots/detect`);
-    return res.data;
-  } catch (err) {
-    throw toApiError(err);
-  }
-}
-
-export async function getWorkspaceExternalSkillRootsSettings(workspaceId: string) {
-  try {
-    const res = await client.get<WorkspaceExternalSkillRootsSettingsResponse>(`/workspaces/${workspaceId}/external-skill-roots/settings`);
-    return res.data;
-  } catch (err) {
-    throw toApiError(err);
-  }
-}
-
-export async function updateWorkspaceExternalSkillRootsSettings(
-  workspaceId: string,
-  body: UpdateWorkspaceExternalSkillRootsSettingsRequest
-) {
-  try {
-    const res = await client.put<WorkspaceExternalSkillRootsSettingsResponse>(`/workspaces/${workspaceId}/external-skill-roots/settings`, {
-      enabledRoots: (body.enabledRoots || []).map((it: WorkspaceExternalSkillRootInput) => ({ sourceType: it.sourceType, repoId: it.repoId, rootDir: it.rootDir }))
-    });
-    return res.data;
-  } catch (err) {
-    throw toApiError(err);
-  }
+  } catch (err) { throw toApiError(err); }
 }
 
 export async function listWorkspaceTopLevelSkills(workspaceId: string) {

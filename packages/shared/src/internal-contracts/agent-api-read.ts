@@ -297,11 +297,9 @@ export const AgentApiPromptContextResponseSchema = Type.Object({
   })),
   lastResponseTotalTokens: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
   uiLocale: Type.Union([AgentUiLocaleSchema, Type.Null()]),
-  externalSkillRoots: Type.Array(Type.Object({
-    sourceType: Type.Union([Type.Literal("workspace"), Type.Literal("repo")]),
-    repoId: Type.Optional(Type.String({ minLength: 1 })),
-    rootDir: Type.String({ minLength: 1 }),
-    rootPath: Type.String({ minLength: 1 })
+  externalSkills: Type.Array(Type.Object({
+    skillId: Type.String({ minLength: 1 }),
+    skillDirectoryPath: Type.String({ minLength: 1 })
   }))
 });
 export type AgentApiPromptContextResponse = Static<typeof AgentApiPromptContextResponseSchema>;

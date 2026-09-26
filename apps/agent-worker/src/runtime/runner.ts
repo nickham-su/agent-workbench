@@ -937,7 +937,7 @@ const EMPTY_PROMPT_CONTEXT: PromptContext = {
   pendingTools: [],
   lastResponseTotalTokens: null,
   uiLocale: null,
-  externalSkillRoots: []
+  externalSkills: []
 };
 
 function isSafeObjectKey(raw: string) {

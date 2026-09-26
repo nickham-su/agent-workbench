@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { AxiosResponse, InternalAxiosRequestConfig } from "axios";
 import type { AgentMessage, AgentMessageSessionRunState } from "@agent-workbench/shared";
 import { computed, defineComponent, h, KeepAlive, ref, type ComputedRef } from "vue";
+import zhCN from "@/shared/i18n/locales/zh-CN";
+import enUS from "@/shared/i18n/locales/en-US";
+import { apiClient } from "@/shared/api/api";
 
 const [{ mount }, component, { createI18n }, { nextTick, reactive }, { agentSessionStatusStoreKey }, { message, Modal }, { replaceAgentTimelineSnapshot }] = await Promise.all([
   import("@vue/test-utils"),
@@ -107,8 +111,13 @@ function timelineSnapshot(messages: AgentMessage[]) {
   };
 }
 
-function createMountGlobal(statusStore: { getRunState: () => ComputedRef<AgentMessageSessionRunState> }) {
-  const i18n = createI18n({ legacy: false, locale: "zh-CN", messages: { "zh-CN": { agent: { client: { imageCount: "{count} 张图片" } } } } });
+function createMountGlobal(
+  statusStore: { getRunState: () => ComputedRef<AgentMessageSessionRunState> },
+  contextLocale?: "zh-CN" | "en-US",
+) {
+  const i18n = contextLocale
+    ? createI18n({ legacy: false, locale: contextLocale, messages: { "zh-CN": zhCN, "en-US": enUS } })
+    : createI18n({ legacy: false, locale: "zh-CN", messages: { "zh-CN": { agent: { client: { imageCount: "{count} 张图片" } } } } });
   return {
     plugins: [i18n],
     provide: { [agentSessionStatusStoreKey as symbol]: statusStore },
@@ -124,6 +133,8 @@ function mountPane(options?: {
   initialDraft?: string;
   ensureSession?: (sessionId: string) => Promise<string>;
   forkSession?: (request: { fromSessionId: string; fromMessageId: string }) => Promise<{ id: string }>;
+  contextLocale?: "zh-CN" | "en-US";
+  renderModalSlots?: boolean;
 }) {
   const runState = options?.runState ?? baseRunState();
   const statusStore = { getRunState: () => computed(() => runState) };
@@ -151,12 +162,72 @@ function mountPane(options?: {
       ensureSession: options?.ensureSession,
       forkSession: options?.forkSession,
     },
-    global: createMountGlobal(statusStore),
+    global: options?.renderModalSlots ? {
+      ...createMountGlobal(statusStore, options.contextLocale),
+      stubs: {
+        ...componentStubs,
+        "a-modal": defineComponent({
+          props: { open: Boolean },
+          setup(props, { slots }) {
+            return () => props.open ? h("section", { "data-testid": "visible-modal" }, slots.default?.()) : null;
+          },
+        }),
+      },
+    } : createMountGlobal(statusStore),
   });
   return {
     wrapper,
     runState,
     setRunState: (next: Partial<AgentMessageSessionRunState>) => Object.assign(runState, next),
+  };
+}
+
+type ContextModalVm = {
+  contextModalVisible: boolean;
+  contextReady: boolean;
+  contextLoading: boolean;
+  contextSaving: boolean;
+  contextError: string;
+  skillCandidates: Array<{ skillId: string }>;
+  instructionCandidates: Array<{ path: string }>;
+  skillKeys: string[];
+  instructionKeys: string[];
+  saveContextSettings: () => Promise<void>;
+};
+
+function contextModalVm(wrapper: ReturnType<typeof mountPane>["wrapper"]): ContextModalVm {
+  return wrapper.vm as unknown as ContextModalVm;
+}
+
+function mockContextRequests() {
+  const previousAdapter = apiClient.defaults.adapter;
+  const requests: Array<{ config: InternalAxiosRequestConfig; reply: ReturnType<typeof deferred<AxiosResponse>> }> = [];
+  apiClient.defaults.adapter = (config) => {
+    const reply = deferred<AxiosResponse>();
+    requests.push({ config, reply });
+    return reply.promise;
+  };
+  return {
+    requests,
+    respond(index: number, data: unknown) {
+      const request = requests[index];
+      assert.ok(request);
+      request.reply.resolve({ config: request.config, data, status: 200, statusText: "OK", headers: {} });
+    },
+    async waitFor(index: number) {
+      for (let i = 0; i < 30 && !requests[index]; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.ok(requests[index], `context request ${index} should be dispatched`);
+      return requests[index].config;
+    },
+    restore() { apiClient.defaults.adapter = previousAdapter; },
+  };
+}
+
+function contextSnapshot(workspaceId: string, skillId: string, instructionPath: string) {
+  return {
+    workspaceId, updatedAt: 1,
+    skills: [{ skillId, skillFilePath: `${skillId}/SKILL.md`, enabled: true }],
+    agentsInstructions: [{ path: instructionPath, enabled: true }],
   };
 }
 
@@ -220,6 +291,131 @@ function cachedPaneVm(host: ReturnType<typeof mount>) {
     loadingPreviousPageScope: unknown;
   };
 }
+
+test("上下文管理弹窗在中英文均显示新 run 生效提示", async () => {
+  for (const [locale, expected] of [
+    ["zh-CN", zhCN.agent.client.contextManagerHint],
+    ["en-US", enUS.agent.client.contextManagerHint],
+  ] as const) {
+    assert.match(expected, locale === "zh-CN" ? /新 run.*重新判定.*不会自动刷新/ : /new run.*not automatically refreshed/);
+    const { wrapper } = mountPane({ contextLocale: locale, renderModalSlots: true });
+    try {
+      assert.equal(wrapper.text().includes(expected), false, `closed modal should not expose ${locale} hint`);
+      await wrapper.get(`[aria-label="${locale === "zh-CN" ? zhCN.agent.client.contextManagerTitle : enUS.agent.client.contextManagerTitle}"]`).trigger("click");
+      await nextTick();
+      assert.ok(wrapper.get('[data-testid="visible-modal"]').text().includes(expected), `${locale} hint should be visible in the open modal`);
+    } finally {
+      wrapper.unmount();
+    }
+  }
+});
+
+test("上下文管理忽略关闭重开及 workspace 切换后的乱序 detect 成功、失败和 finally", async () => {
+  const http = mockContextRequests();
+  const { wrapper } = mountPane({ contextLocale: "zh-CN", renderModalSlots: true });
+  const vm = contextModalVm(wrapper);
+  try {
+    const button = `[aria-label="${zhCN.agent.client.contextManagerTitle}"]`;
+    await wrapper.get(button).trigger("click");
+    assert.equal((await http.waitFor(0)).url, "/workspaces/ws-a/context-files/detect");
+    vm.contextModalVisible = false;
+    await nextTick();
+    await wrapper.get(button).trigger("click");
+    await http.waitFor(1);
+    http.respond(0, contextSnapshot("ws-a", "stale/skill", "stale/AGENTS.md"));
+    await nextTick();
+    assert.equal(vm.contextLoading, true, "stale finally must not clear the active spinner");
+    assert.equal(vm.contextReady, false);
+    assert.deepEqual(vm.skillCandidates, []);
+    http.respond(1, contextSnapshot("ws-a", "current/skill", "current/AGENTS.md"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(vm.contextReady, true);
+    assert.deepEqual(vm.skillKeys, ["current/skill"]);
+    assert.deepEqual(vm.instructionKeys, ["current/AGENTS.md"]);
+
+    await wrapper.get(button).trigger("click");
+    await http.waitFor(2);
+    await wrapper.setProps({ workspaceId: "ws-b" });
+    assert.equal((await http.waitFor(3)).url, "/workspaces/ws-b/context-files/detect");
+    http.requests[2].reply.reject(new Error("stale workspace failure"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(vm.contextError, "");
+    assert.equal(vm.contextLoading, true);
+    assert.equal(vm.contextReady, false);
+    http.respond(3, contextSnapshot("ws-b", "new/skill", "new/AGENTS.md"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(vm.contextError, "");
+    assert.equal(vm.contextReady, true);
+    assert.deepEqual(vm.skillKeys, ["new/skill"]);
+    assert.deepEqual(vm.instructionKeys, ["new/AGENTS.md"]);
+  } finally {
+    wrapper.unmount();
+    http.restore();
+  }
+});
+
+test("上下文探测失败不能保存；统一 PUT 失败保留选择，关闭重开后旧 PUT 不能关闭新弹窗", async () => {
+  const http = mockContextRequests();
+  const { wrapper } = mountPane({ contextLocale: "zh-CN", renderModalSlots: true });
+  const vm = contextModalVm(wrapper);
+  try {
+    const button = `[aria-label="${zhCN.agent.client.contextManagerTitle}"]`;
+    await wrapper.get(button).trigger("click");
+    await http.waitFor(0);
+    http.requests[0].reply.reject(new Error("detect failed"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(vm.contextReady, false);
+    assert.equal(vm.contextLoading, false);
+    assert.match(vm.contextError, /detect failed/);
+    await vm.saveContextSettings();
+    assert.equal(http.requests.length, 1, "a failed detect must not dispatch PUT");
+
+    await wrapper.get(button).trigger("click");
+    await http.waitFor(1);
+    http.respond(1, contextSnapshot("ws-a", "skill/old", "AGENTS.md"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    vm.skillKeys = ["skill/selected"];
+    vm.instructionKeys = ["AGENTS.md"];
+    void vm.saveContextSettings();
+    const put = await http.waitFor(2);
+    assert.equal(put.method, "put");
+    assert.equal(put.url, "/workspaces/ws-a/context-files/settings");
+    assert.deepEqual(JSON.parse(String(put.data)), { enabledSkillIds: ["skill/selected"], enabledAgentsInstructionPaths: ["AGENTS.md"] });
+    http.requests[2].reply.reject(new Error("save failed"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(vm.contextModalVisible, true);
+    assert.equal(vm.contextReady, true);
+    assert.equal(vm.contextSaving, false);
+    assert.match(vm.contextError, /save failed/);
+    assert.deepEqual(vm.skillKeys, ["skill/selected"]);
+    assert.deepEqual(vm.instructionKeys, ["AGENTS.md"]);
+
+    void vm.saveContextSettings();
+    await http.waitFor(3);
+    vm.contextModalVisible = false;
+    await nextTick();
+    await wrapper.get(button).trigger("click");
+    await http.waitFor(4);
+    http.respond(3, { workspaceId: "ws-a", updatedAt: 2, enabledSkillIds: ["skill/selected"], enabledAgentsInstructionPaths: ["AGENTS.md"] });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(vm.contextModalVisible, true, "stale PUT must not close a reopened modal");
+    assert.equal(vm.contextLoading, true, "stale finally must not change the new detect state");
+    assert.equal(wrapper.emitted("agent-settings-updated"), undefined);
+    http.respond(4, contextSnapshot("ws-a", "skill/fresh", "fresh/AGENTS.md"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(vm.skillKeys, ["skill/fresh"]);
+    assert.deepEqual(vm.instructionKeys, ["fresh/AGENTS.md"]);
+    void vm.saveContextSettings();
+    await http.waitFor(5);
+    http.respond(5, { workspaceId: "ws-a", updatedAt: 3, enabledSkillIds: ["skill/fresh"], enabledAgentsInstructionPaths: ["fresh/AGENTS.md"] });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(vm.contextModalVisible, false);
+    assert.equal(wrapper.emitted("agent-settings-updated")?.length, 1);
+  } finally {
+    wrapper.unmount();
+    http.restore();
+  }
+});
 
 test("真实 AgentClientPane：KeepAlive 切换工具后恢复会话滚动位置，底部保持跟随新内容", async () => {
   const { host, visible } = mountCachedPane();

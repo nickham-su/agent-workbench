@@ -112,7 +112,7 @@ async function getPromptContextInternal(params: {
     uiLocale: "zh-CN" | "en-US" | null;
     messages: Array<{ role: string; content: unknown }>;
     pendingTools: Array<{ itemId: number; status: string; toolName: string }>;
-    externalSkillRoots: Array<{ sourceType: "workspace" | "repo"; repoId?: string; rootDir: string; rootPath: string }>;
+    externalSkills: Array<{ skillId: string; skillDirectoryPath: string }>;
   };
 }
 
@@ -421,10 +421,10 @@ test("agent prompt-context 同时存在 global/workspace/agent 时按既定顺�
   const createdAt = Date.now();
 
   await fs.writeFile(path.join(fixture.workspacePath, "AGENTS.md"), "WORKSPACE_RULE", "utf-8");
-  setSettingJson(fixture.db, "workspace_agents_instructions_v1", {
+  setSettingJson(fixture.db, "workspace_context_files_v2", {
     workspaces: {
       [fixture.workspaceId]: {
-        enabledSources: [{ sourceType: "workspace", enabledAt: Date.now() }],
+        enabledSkillIds: [], enabledAgentsInstructionPaths: ["AGENTS.md"],
         updatedAt: Date.now()
       }
     }
@@ -700,10 +700,10 @@ test("agent prompt-context 对 workspace AGENTS.md 做 32KB 截断并追加标�
   const createdAt = Date.now();
   const agentsPath = path.join(fixture.workspacePath, "AGENTS.md");
   await fs.writeFile(agentsPath, `RULE\n${"A".repeat(40 * 1024)}`, "utf-8");
-  setSettingJson(fixture.db, "workspace_agents_instructions_v1", {
+  setSettingJson(fixture.db, "workspace_context_files_v2", {
     workspaces: {
       [fixture.workspaceId]: {
-        enabledSources: [{ sourceType: "workspace", enabledAt: Date.now() }],
+        enabledSkillIds: [], enabledAgentsInstructionPaths: ["AGENTS.md"],
         updatedAt: Date.now()
       }
     }
@@ -801,22 +801,11 @@ test("agent prompt-context 注入 skills 摘要并在同 run 缓存静态部分"
       "---\nname: Repo Skill V1\ndescription: repo-desc-v1\n---\n\nbody",
       "utf8"
     );
-    setSettingJson(fixture.db, "workspace_external_skill_roots_v1", {
+    setSettingJson(fixture.db, "workspace_context_files_v2", {
       workspaces: {
         [fixture.workspaceId]: {
-          enabledRoots: [
-            { sourceType: "workspace", rootDir: "deploy-skill", enabledAt: Date.now() },
-            { sourceType: "repo", repoId, rootDir: repoSkillsRootDir, enabledAt: Date.now() }
-          ],
-          updatedAt: Date.now()
-        }
-      }
-    }, Date.now());
-    setSettingJson(fixture.db, "workspace_agents_instructions_v1", {
-      workspaces: {
-        [fixture.workspaceId]: {
-          enabledSources: [{ sourceType: "workspace", enabledAt: Date.now() }],
-          updatedAt: Date.now()
+          enabledSkillIds: ["deploy-skill/deploy", `${repoDirName}/${repoSkillsRootDir}/${repoTopSkillDir}`, "deploy-skill/nontext"],
+          enabledAgentsInstructionPaths: ["AGENTS.md"], updatedAt: Date.now()
         }
       }
     }, Date.now());
@@ -846,15 +835,15 @@ test("agent prompt-context 注入 skills 摘要并在同 run 缓存静态部分"
     assert.ok(first.system.includes("name: Builtin Skill V1"));
     assert.ok(first.system.includes(`skillId: builtin/${path.basename(builtinSkillDir)}; name: Builtin Skill V1\n`), "empty description must not leave a trailing separator");
     assert.equal(first.system.includes(`skillId: builtin/${path.basename(builtinSkillDir)}; name: Builtin Skill V1; description:`), false, "empty description must be omitted");
-    assert.ok(first.system.includes("skillId: workspace/deploy-skill/deploy"), "workspace skill identifier should be injected");
+    assert.ok(first.system.includes("skillId: deploy-skill/deploy"), "workspace skill identifier should be injected");
     assert.ok(first.system.includes("description: ws-desc-v1"));
-    assert.ok(first.system.includes(`skillId: repo/${repoId}/${repoSkillsRootDir}/${repoTopSkillDir}`), "repo skill identifier should be injected");
+    assert.ok(first.system.includes(`skillId: ${repoDirName}/${repoSkillsRootDir}/${repoTopSkillDir}`), "repo skill identifier should be injected");
     assert.ok(first.system.includes("description: repo-desc-v1"));
     assert.equal(first.system.includes(fixture.workspacePath), false, "system prompt should not expose workspace real path");
     assert.equal(first.system.includes(repoPath), false, "system prompt should not expose repo real path");
     assert.equal(first.system.includes(`builtin/${path.basename(builtinSkillDir)}/child`), false, "only top-level skills should be injected");
-    assert.equal(first.system.includes("skillId: workspace/deploy-skill/nontext"), false, "non-text top-level skill should not be injected");
-    assert.equal(first.system.includes("skillId: workspace/deploy-skill/ invalid"), false, "non-callable physical skill must be omitted from prompt summaries");
+    assert.equal(first.system.includes("skillId: deploy-skill/nontext"), false, "non-text top-level skill should not be injected");
+    assert.equal(first.system.includes("skillId: deploy-skill/ invalid"), false, "non-callable physical skill must be omitted from prompt summaries");
     assert.equal(first.tools.some((tool) => tool.name === "skill"), true, "skill tool should be available");
     assert.ok(first.system.includes("First read the root:"), "skills prompt should require a root read first");
     assert.ok(first.system.includes("flat (not tree-shaped) Skill files list"), "skills prompt should describe the flat list");
@@ -902,44 +891,21 @@ test("agent prompt-context 注入 skills 摘要并在同 run 缓存静态部分"
   }
 });
 
-test("agent prompt-context 对 repo 根 symlink/路径失配安全跳过", async (t: TestContext) => {
+test("agent prompt-context 对 workspace 下的 symlink 子目录安全跳过", async (t: TestContext) => {
   const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
   const runId = newSortableId("run");
   const ts = Date.now();
 
-  const repoId = newSortableId("repo");
   const repoDirName = "repo-safe";
   const repoPath = path.join(fixture.workspacePath, repoDirName);
   await fs.mkdir(path.join(repoPath, "ai-skill", "ops"), { recursive: true });
   await fs.writeFile(path.join(repoPath, "ai-skill", "ops", "SKILL.md"), "---\nname: Safe\ndescription: safe-desc\n---\n", "utf8");
 
-  insertRepo(fixture.db, {
-    id: repoId,
-    url: `https://example.test/${repoId}.git`,
-    credentialId: null,
-    defaultBranch: "main",
-    mirrorPath: path.join(fixture.dataDir, "repos", repoId, "mirror.git"),
-    syncStatus: "idle",
-    syncError: null,
-    lastSyncAt: ts,
-    createdAt: ts,
-    updatedAt: ts
-  });
-  insertWorkspaceRepo(fixture.db, {
-    workspaceId: fixture.workspaceId,
-    repoId,
-    dirName: repoDirName,
-    path: repoPath,
-    createdAt: ts,
-    updatedAt: ts
-  });
-
-  setSettingJson(fixture.db, "workspace_external_skill_roots_v1", {
+  setSettingJson(fixture.db, "workspace_context_files_v2", {
     workspaces: {
       [fixture.workspaceId]: {
-        enabledRoots: [{ sourceType: "repo", repoId, rootDir: "ai-skill", enabledAt: ts }],
-        updatedAt: ts
+        enabledSkillIds: [`${repoDirName}/ai-skill/ops`], enabledAgentsInstructionPaths: [], updatedAt: ts
       }
     }
   }, ts);
@@ -963,12 +929,10 @@ test("agent prompt-context 对 repo 根 symlink/路径失配安全跳过", async
     sessionId: session.id,
     runId
   });
-  assert.ok(first.system.includes("safe-desc"), "valid repo root should be injected");
+  assert.ok(first.system.includes("safe-desc"), "ordinary workspace subdirectory should be injected");
 
-  const symlinkPath = path.join(fixture.workspacePath, "repo-symlink");
   await fs.rename(repoPath, path.join(fixture.workspacePath, "repo-safe-target"));
-  await fs.symlink(path.join(fixture.workspacePath, "repo-safe-target"), symlinkPath, "dir");
-  fixture.db.prepare("update workspace_repos set path = ? where workspace_id = ? and repo_id = ?").run(symlinkPath, fixture.workspaceId, repoId);
+  await fs.symlink(path.join(fixture.workspacePath, "repo-safe-target"), repoPath, "dir");
 
   const runId2 = newSortableId("run");
   createActiveMessageRunRecord(fixture, {
@@ -983,6 +947,6 @@ test("agent prompt-context 对 repo 根 symlink/路径失配安全跳过", async
     createdAt: Date.now()
   });
   const second = await getPromptContextInternal({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId: runId2 });
-  assert.equal(second.system.includes("safe-desc"), false, "repo symlink/mismatch should be skipped");
-  assert.equal(second.externalSkillRoots.length, 0, "external skill roots mapping should also skip invalid repo root");
+  assert.equal(second.system.includes("safe-desc"), false, "symlink candidate must be skipped");
+  assert.equal(second.externalSkills.length, 0, "exact mapping must not include the replaced skill path");
 });

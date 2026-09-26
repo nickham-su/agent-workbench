@@ -648,7 +648,7 @@ test("skill V2 stable identifier 只修剪 ASCII 空格和 tab", () => {
   });
   assert.deepEqual(parseStableSkillIdentifier("\nbuiltin/tooling"), { kind: "invalid" });
   assert.deepEqual(parseStableSkillIdentifier("\u00a0"), { kind: "invalid" });
-  assert.deepEqual(parseStableSkillIdentifier("  \t"), { kind: "required" });
+  assert.deepEqual(parseStableSkillIdentifier("  \t"), { kind: "invalid" });
 });
 
 test("skill V2 根读取返回正文和扁平可复制文件路径", async () => {
@@ -794,22 +794,28 @@ test("skill V2 根正文和文件列表均遵守容量与排序", async () => {
   assert.ok(result.content.indexOf("A.txt") < result.content.indexOf("z.txt"));
 });
 
-test("skill V2 支持 workspace 和 repo external roots", async () => {
+test("external Skill 仅能按当前精确 allowlist 访问", async () => {
   const workspacePath = await createWorkspace();
   const repoRoot = await createWorkspace();
-  const workspaceSkills = path.join(workspacePath, "workspace-skills");
-  const repoSkills = path.join(workspacePath, "repo-skills");
-  await fs.mkdir(path.join(workspaceSkills, "deploy"), { recursive: true });
-  await fs.mkdir(path.join(repoSkills, "review"), { recursive: true });
-  await fs.writeFile(path.join(workspaceSkills, "deploy", "SKILL.md"), "workspace root", "utf8");
-  await fs.writeFile(path.join(repoSkills, "review", "SKILL.md"), "repo root", "utf8");
-  const externalSkillRoots = [
-    { sourceType: "workspace" as const, rootDir: "workspace-skills", rootPath: workspaceSkills },
-    { sourceType: "repo" as const, repoId: "repo_a", rootDir: "repo-skills", rootPath: repoSkills }
-  ];
-
-  assert.equal((await runSkillTool({ workspacePath, repoRoot, skillId: "workspace/workspace-skills/deploy", externalSkillRoots })).content.startsWith("workspace root"), true);
-  assert.equal((await runSkillTool({ workspacePath, repoRoot, skillId: "repo/repo_a/repo-skills/review", externalSkillRoots })).content.startsWith("repo root"), true);
+  for (const name of ["deploy", "review"]) {
+    const directory = path.join(workspacePath, "workspace-skills", name);
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, "SKILL.md"), name, "utf8");
+  }
+  const externalSkills = [{ skillId: "workspace-skills/deploy", skillDirectoryPath: path.join(workspacePath, "workspace-skills", "deploy") }];
+  assert.equal((await runSkillTool({ workspacePath, repoRoot, skillId: "workspace-skills/deploy", externalSkills })).content.startsWith("deploy"), true);
+  await assert.rejects(runSkillTool({ workspacePath, repoRoot, skillId: "workspace-skills/review", externalSkills }), /skill not found/);
+  await assert.rejects(runSkillTool({ workspacePath, repoRoot, skillId: "workspace-skills/review", externalSkills: [{ skillId: "workspace-skills/review", skillDirectoryPath: path.join(workspacePath, "workspace-skills", "deploy") }] }), /skill not found/);
+  // A previously enabled child may still exist on disk after a newly added parent SKILL.md shadows it.
+  const parent = path.join(workspacePath, "parent");
+  await fs.mkdir(path.join(parent, "child"), { recursive: true });
+  await fs.writeFile(path.join(parent, "SKILL.md"), "parent", "utf8");
+  await fs.writeFile(path.join(parent, "child", "SKILL.md"), "child", "utf8");
+  await assert.rejects(
+    runSkillTool({ workspacePath, repoRoot, skillId: "parent/child", externalSkills }),
+    /skill not found/,
+    "Worker must not infer permission from a surviving on-disk child or the workspace root",
+  );
 });
 
 test("skill V2 排除 symlink 文件并拒绝其直接读取", async () => {
