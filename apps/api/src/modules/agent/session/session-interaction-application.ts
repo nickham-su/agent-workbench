@@ -2,7 +2,7 @@ import type { AgentForkSessionRequest, AgentSendMessageResponse, AgentSessionRec
 import type { AgentMessageControlResult } from "@agent-workbench/shared";
 import { AgentSubtaskErrorCode } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { HttpError } from "../../../app/errors.js";
-import { AgentMessageDomainError } from "../agent-message.store.js";
+import { AgentMessageDomainError, HistoricalForkSourceError, HistoricalForkSessionConflictError } from "../agent-message.store.js";
 import { normalizeManualSessionTitle } from "./session-title.js";
 import type { AgentRuntimePort } from "../agent.runtime-port.js";
 import type {
@@ -25,6 +25,79 @@ export class SessionInteractionApplication {
 
   createPrimarySession(params: { workspaceId: string; title?: string }): AgentSessionRecord {
     return this.createSession({ workspaceId: params.workspaceId, title: params.title, kind: "primary" });
+  }
+
+  /** Internal idempotent creation for an execution with a durable, preallocated Session ID. */
+  createPrimarySessionWithExpectedId(params: { workspaceId: string; sessionId: string; title: string }): AgentSessionRecord {
+    this.assertWorkspace(params.workspaceId);
+    const normalized = normalizeManualSessionTitle(params.title);
+    if (!normalized.ok || normalized.title !== params.title) {
+      throw new HttpError(400, "invalid expected session title", "SESSION_ID_CONFLICT");
+    }
+    const matching = () => {
+      const existing = this.dependencies.store.getSession(params.sessionId);
+      if (!existing) return null;
+      if (existing.workspaceId !== params.workspaceId || existing.kind !== "primary" ||
+          existing.title !== params.title || existing.forkedFromSessionId !== null ||
+          existing.forkedFromMessageId !== null || existing.headMessageId !== null ||
+          existing.contextRootMessageId !== null || existing.revision !== 0) {
+        throw new HttpError(409, "session ID is already in use", "SESSION_ID_CONFLICT");
+      }
+      return existing;
+    };
+    const existing = matching();
+    if (existing) return existing;
+    try {
+      this.dependencies.store.createSession({
+        id: params.sessionId, workspaceId: params.workspaceId, title: params.title,
+        kind: "primary", createdAt: this.dependencies.clock.nowMs(),
+        forkedFromSessionId: null, forkedFromMessageId: null, preserveTitle: true
+      });
+    } catch (error) {
+      const concurrent = matching();
+      if (concurrent) return concurrent;
+      throw error;
+    }
+    return matching()!;
+  }
+
+  /** Internal scheduled-task boundary: never borrow the public head/revision/idle check. */
+  validateHistoricalSource(params: { workspaceId: string; sourceSessionId: string; targetMessageId: string }) {
+    this.assertWorkspace(params.workspaceId);
+    try { return this.dependencies.store.validateHistoricalSource(params); }
+    catch (error) {
+      if (error instanceof HistoricalForkSourceError) {
+        throw new HttpError(400, "Historical source is invalid or unavailable", error.code);
+      }
+      // Source validation must not disclose database, graph or provider details.
+      throw new HttpError(400, "Historical source is unavailable", "SOURCE_UNAVAILABLE");
+    }
+  }
+
+  forkPrimarySessionFromHistoricalAnchorWithExpectedId(params: {
+    workspaceId: string; sessionId: string; sourceSessionId: string;
+    targetMessageId: string; title: string;
+  }): AgentSessionRecord {
+    this.assertWorkspace(params.workspaceId);
+    const normalized = normalizeManualSessionTitle(params.title);
+    if (!normalized.ok || normalized.title !== params.title) {
+      throw new HttpError(409, "Invalid expected session title", "SESSION_ID_CONFLICT");
+    }
+    try {
+      return this.dependencies.store.forkHistoricalSource({
+        id: params.sessionId, workspaceId: params.workspaceId,
+        sourceSessionId: params.sourceSessionId, targetMessageId: params.targetMessageId,
+        title: params.title, createdAt: this.dependencies.clock.nowMs(),
+      });
+    } catch (error) {
+      if (error instanceof HistoricalForkSessionConflictError) {
+        throw new HttpError(409, "Session ID is already in use", "SESSION_ID_CONFLICT");
+      }
+      if (error instanceof HistoricalForkSourceError) {
+        throw new HttpError(400, "Historical source is invalid or unavailable", error.code);
+      }
+      throw new HttpError(400, "Historical source is unavailable", "SOURCE_UNAVAILABLE");
+    }
   }
 
   updateSessionTitle(params: { sessionId: string; body: AgentUpdateSessionTitleRequest }): AgentSessionRecord {
@@ -91,7 +164,10 @@ export class SessionInteractionApplication {
     }
   }
 
-  async sendMessage(params: { sessionId: string; body: import("./session-interaction-ports.js").NormalizedAgentUserMessageInput; runtime: AgentRuntimePort }): Promise<AgentSendMessageResponse> {
+  async sendMessage(params: { sessionId: string; body: import("./session-interaction-ports.js").NormalizedAgentUserMessageInput;
+    runtime: AgentRuntimePort;
+    expectedHistoricalFork?: import("../lifecycle/run-lifecycle-ports.js").ExpectedHistoricalForkSession;
+    expectedSessionTitle?: string }): Promise<AgentSendMessageResponse> {
     const session = this.dependencies.store.getSession(params.sessionId);
     if (!session) throw new HttpError(404, "session not found");
     if (session.kind === "subtask") {
@@ -131,7 +207,9 @@ export class SessionInteractionApplication {
         providerId: profile.providerId,
         modelId: profile.modelId,
         uiLocale: this.dependencies.normalizeUiLocale(params.body.uiLocale),
-        runtime: params.runtime
+        runtime: params.runtime,
+        expectedHistoricalFork: params.expectedHistoricalFork,
+        expectedSessionTitle: params.expectedSessionTitle
       });
     } catch (error) {
       if (this.dependencies.isConflict(error)) throw this.dependencies.toConflictHttpError(error);

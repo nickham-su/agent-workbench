@@ -15,6 +15,9 @@ import { registerWorkspaceRuntime, unregisterWorkspaceRuntime } from "./lifecycl
 import { resumePendingWorkspaceDeletions } from "../workspaces/workspace.service.js";
 import { reconcilePendingTerminals } from "../terminals/terminal.service.js";
 import { recoverAfterAgentRuntimeReady } from "./agent-runtime-ready.js";
+import { ScheduledTaskService } from "../scheduled-tasks/scheduled-task.service.js";
+import { ScheduledTaskScheduler } from "../scheduled-tasks/scheduled-task.scheduler.js";
+import { registerScheduledTaskRoutes } from "../scheduled-tasks/scheduled-task.routes.js";
 
 export async function registerAgentModule(app: FastifyInstance, ctx: AppContext) {
   const runCompletedEventHub = new AgentRunCompletedEventHub();
@@ -22,6 +25,7 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
 
   let runtime: AgentRuntimePort;
   let workerManager: AgentWorkerProcessManager | null = null;
+  let scheduledScheduler: ScheduledTaskScheduler | null = null;
   let pluginHostManager: AgentPluginHostProcessManager | null = null;
   let pluginHostClient: AgentPluginHostClient | null = null;
 
@@ -56,6 +60,7 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
           reconcileTerminals: () => reconcilePendingTerminals(ctx, app.log),
           logger: app.log,
         });
+        scheduledScheduler?.start();
       },
       });
   } else {
@@ -92,6 +97,13 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
   }
 
   await registerAgentRoutes(app, { service, runtime, internalToken: ctx.agentInternalToken, dataDir: ctx.dataDir, pluginHost: pluginHostClient, runCompletedEventHub });
+  const scheduledTasks = new ScheduledTaskService(ctx, service, runtime, Date.now, ({ executionId, reason }) => {
+    // No raw Agent errors, Prompt or source content in this bounded diagnostic.
+    app.log.warn({ executionId, reason }, "scheduled execution retained active: Run reference unresolved");
+  });
+  scheduledScheduler = new ScheduledTaskScheduler(scheduledTasks, Date.now,
+    () => app.log.warn("scheduled task tick failed; will retry on the next scan"));
+  await registerScheduledTaskRoutes(app, scheduledTasks);
   const workspaceRuntimeRegistration = {
     runtime,
     handoffCoordinator: runtimeHandoffCoordinator,
@@ -105,6 +117,7 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
   app.addHook("onClose", async () => {
     // Stop reconciliation before Worker/SQLite shutdown can turn a stale
     // timer into a late runtime RPC or database access.
+    await scheduledScheduler?.stop();
     dispose();
     unregisterWorkspaceRuntime(workspaceRuntimeRegistration);
   });
@@ -112,7 +125,10 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
   await startupCoordinator.runPreListen();
   // A managed Worker performs recovery after its own ready barrier. The local
   // fallback has no independent generation, so API onListen remains its hook.
-  if (!workerManager) startupCoordinator.registerRecoverOnListen(app, runtime);
+  if (!workerManager) {
+    startupCoordinator.registerRecoverOnListen(app, runtime);
+    app.addHook("onListen", () => { scheduledScheduler?.start(); });
+  }
 
   if (!workerManager) return;
   await workerManager.start();

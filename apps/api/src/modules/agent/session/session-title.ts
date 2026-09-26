@@ -30,10 +30,27 @@ export type ManualSessionTitleResult =
   | { ok: true; title: string }
   | { ok: false; reason: "empty" | "too_long" | "invalid_characters" };
 
-export function normalizeManualSessionTitle(value: string): ManualSessionTitleResult {
+function normalizeNamedText(value: string, maxLength: number): ManualSessionTitleResult {
   const compact = compactTitleText(value);
   if (!compact) return { ok: false, reason: "empty" };
-  if (compact.length > MANUAL_TITLE_MAX_LENGTH) return { ok: false, reason: "too_long" };
+  if ([...compact].length > maxLength) return { ok: false, reason: "too_long" };
   if (/[\u0000-\u001f\u007f-\u009f]/.test(compact)) return { ok: false, reason: "invalid_characters" };
   return { ok: true, title: compact };
+}
+
+export function normalizeManualSessionTitle(value: string): ManualSessionTitleResult {
+  return normalizeNamedText(value, MANUAL_TITLE_MAX_LENGTH);
+}
+
+export function normalizeScheduledTaskName(value: string): ManualSessionTitleResult {
+  return normalizeNamedText(value, 100);
+}
+
+/** The snapshot keeps the full name; only the Session's human-readable title is shortened. */
+export function buildScheduledExecutionSessionTitle(taskName: string): string {
+  const suffix = " · 定时任务";
+  const title = [...taskName].slice(0, MANUAL_TITLE_MAX_LENGTH - [...suffix].length).join("") + suffix;
+  const normalized = normalizeManualSessionTitle(title);
+  if (!normalized.ok) throw new Error("Invalid scheduled execution session title");
+  return normalized.title;
 }

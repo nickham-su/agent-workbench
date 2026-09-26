@@ -228,6 +228,7 @@ export default {
       files: "文件",
       search: "搜索",
       agent: "AI Agent",
+      scheduledTasks: "定时任务",
       editor: "编辑器"
     },
     dock: {

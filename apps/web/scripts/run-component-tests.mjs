@@ -12,6 +12,8 @@ const tests = [
   "src/features/workspace/tools/agent/AgentClientPane.component.test.ts",
   "src/features/workspace/tools/agent/AgentMessageActions.component.test.ts",
   "src/features/workspace/tools/agent/AgentToolView.component.test.ts",
+  "src/features/workspace/tools/scheduled-tasks/ScheduledTaskDrawer.component.test.ts",
+  "src/features/workspace/tools/scheduled-tasks/ScheduledTasksToolView.component.test.ts",
 ];
 
 for (const test of tests) {

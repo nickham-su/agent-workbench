@@ -240,7 +240,7 @@ const ADD_TAB_KEY = "__agent_add__";
 const ACTIVE_KEY_STORAGE_PREFIX = "agent-workbench.workspace.agent.activeClient";
 const AGENT_PICK_STORAGE_PREFIX = "agent-workbench.workspace.agent.pickBySession";
 
-const props = defineProps<{ workspaceId: string; toolId: string }>();
+const props = defineProps<{ workspaceId: string; toolId: string; openSessionRequest?: { sessionId: string; sequence: number } | null }>();
 const host = useWorkspaceHost(props.toolId);
 const { t } = useI18n();
 
@@ -1060,6 +1060,7 @@ async function onOpenSubtask(sessionId: string) {
 }
 
 function activateParentSessionTab(sessionId: string) {
+  // Existing Agent tab visibility is also used for scheduled execution links.
   if (!sessionId) return;
   requestSessionVisibility(sessionId, true);
   reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
@@ -1293,6 +1294,34 @@ watch(
     for (const key of Object.keys(pendingModelOpenIntentBySession)) delete pendingModelOpenIntentBySession[key];
     restorePersistedState();
     void initializeWorkspace();
+  },
+  { immediate: true }
+);
+
+let lastQueuedOpenSessionSequence: number | null = null;
+let openSessionQueue = Promise.resolve();
+watch(
+  () => [props.openSessionRequest, initializationState.value] as const,
+  ([request, state]) => {
+    // 首次挂载时 request 已作为 prop 传入；等初始化快照完成后再打开，避免旧 Tab 状态覆盖目标。
+    if (!request || state !== "ready" || request.sequence === lastQueuedOpenSessionSequence) return;
+    lastQueuedOpenSessionSequence = request.sequence;
+    const generation = workspaceGeneration, workspaceId = props.workspaceId;
+    openSessionQueue = openSessionQueue.then(async () => {
+      if (disposed || generation !== workspaceGeneration || workspaceId !== props.workspaceId || props.openSessionRequest?.sequence !== request.sequence) return;
+      // 串行化刷新，连续点击不会因上一请求占用 refreshSessions 而丢失最新目标。
+      const ok = await refreshSessions();
+      if (disposed || generation !== workspaceGeneration || workspaceId !== props.workspaceId || props.openSessionRequest?.sequence !== request.sequence) return;
+      if (!ok || !serverSessions.value.some((session) => session.id === request.sessionId)) {
+        message.warning("关联会话已不可用");
+        return;
+      }
+      await onOpenSubtask(request.sessionId);
+    }).catch(() => {
+      if (!disposed && generation === workspaceGeneration && workspaceId === props.workspaceId && props.openSessionRequest?.sequence === request.sequence) {
+        message.warning("关联会话已不可用");
+      }
+    });
   },
   { immediate: true }
 );

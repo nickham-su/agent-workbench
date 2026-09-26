@@ -62,6 +62,10 @@ function createDependencies(params?: {
         if (params?.cloneError) throw params.cloneError;
         return { ...primary, id: input.id, kind: input.targetKind, headMessageId: input.fromMessageId, contextRootMessageId: input.fromMessageId, revision: 0 };
       },
+      validateHistoricalSource: (input) => ({ sessionId: input.sourceSessionId, messageId: input.targetMessageId,
+        title: primary.title, messageSummary: "", messageCreatedAt: 1 }),
+      forkHistoricalSource: (input) => ({ ...primary, id: input.id, title: input.title,
+        forkedFromSessionId: input.sourceSessionId, forkedFromMessageId: input.targetMessageId }),
       setManualTitle: (input) => {
         calls.push(["set-manual-title", input]);
         const existing = sessions.get(input.sessionId);
@@ -132,6 +136,28 @@ test("SessionInteractionApplication creates primary sessions and delegates publi
   assert.deepEqual(calls[1], ["clone", {
     id: "session-created", createdAt: 123, fromSession: primary, fromMessageId: "message-5", title: "fork", targetKind: "primary", boundaryPolicy: "public-user-assistant"
   }]);
+});
+
+test("expected-ID primary Session is idempotent only for matching workspace, title and ancestry", () => {
+  const { application, calls, sessions } = createDependencies();
+  const command = { workspaceId: "workspace", sessionId: "session-scheduled", title: "build · 定时任务" };
+  assert.equal(application.createPrimarySessionWithExpectedId(command).id, command.sessionId);
+  assert.equal(application.createPrimarySessionWithExpectedId(command).id, command.sessionId);
+  assert.equal(calls.filter(([kind]) => kind === "create").length, 1);
+  const pristine = sessions.get(command.sessionId)!;
+  for (const changed of [
+    { forkedFromMessageId: "foreign" }, { workspaceId: "other" },
+    { headMessageId: "other-message", revision: 1 },
+    { contextRootMessageId: "other-root" }, { revision: 1 },
+    { forkedFromSessionId: "source" },
+  ]) {
+    sessions.set(command.sessionId, { ...pristine, ...changed });
+    assert.throws(() => application.createPrimarySessionWithExpectedId(command),
+      (error: unknown) => error instanceof HttpError && error.code === "SESSION_ID_CONFLICT");
+  }
+  sessions.set(command.sessionId, pristine);
+  assert.throws(() => application.createPrimarySessionWithExpectedId({ ...command, title: " other " }),
+    (error: unknown) => error instanceof HttpError && error.code === "SESSION_ID_CONFLICT");
 });
 
 test("SessionInteractionApplication maps typed fork session disappearance to HTTP 404", async () => {
@@ -326,6 +352,8 @@ test("updateSessionTitle returns 404 when the store mutation misses", () => {
     listSessions: () => [],
     createSession: () => undefined,
     cloneSession: async () => { throw new Error("unused"); },
+    validateHistoricalSource: () => { throw new Error("unused"); },
+    forkHistoricalSource: () => { throw new Error("unused"); },
     setManualTitle: () => false,
     findClientRequestDedup: () => null,
     getRunState: () => ({ status: "idle" }),

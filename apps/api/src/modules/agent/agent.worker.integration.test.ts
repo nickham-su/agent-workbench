@@ -28,6 +28,7 @@ import {
   startMessageRun,
 } from "./agent-message.store.js";
 import { AgentApiEndpoints } from "@agent-workbench/shared/internal-contracts/agent-api";
+import { readScheduledExecution } from "../scheduled-tasks/scheduled-task.store.js";
 
 type InternalRpcCall = { method: string; url: string; body: unknown; responseBody?: unknown; statusCode?: number };
 type LlmStub = {
@@ -1369,6 +1370,51 @@ test("Worker Compaction internal route enforces persistent Run kind intent seman
   assert.equal(subtaskArtifact.json.result, "updated");
   assert.equal(getRunRecord(fixture.db, subtaskRunId)?.executionPhase, "work_pending");
   assert.equal(getRunRecord(fixture.db, subtaskRunId)?.intendedTerminalCode, null);
+});
+
+test("scheduled slot starts a real Agent Worker and history converges after its Run completes", async () => {
+  const fixture = await createFixture({ llmMode: "success", providerNpm: "@ai-sdk/openai-compatible" });
+  // Worker readiness starts the scheduler; only then make a slot due, so this
+  // tests the running phase rather than startup's intentional silent catch-up.
+  await waitUntil(async () => fs.stat(fixture.workerPidFilePath).then(() => true, () => false), 6_000);
+  const base = `/api/workspaces/${fixture.workspaceId}/scheduled-tasks`;
+  const created = await requestJson<{ task: { id: string } }>(fixture.baseUrl, {
+    method: "POST", path: base,
+    body: { name: "Worker end-to-end", prompt: "Answer briefly", agentId: "default", enabled: true,
+      triggerMode: "new_session", sourceSessionId: null, sourceMessageId: null,
+      schedule: { kind: "hourly", minutesUtc: [0] } }
+  });
+  assert.equal(created.response.status, 201, `create task failed: ${created.text}`);
+  const taskId = created.json.task.id;
+  const dueSlot = Date.now() - 1000;
+  fixture.db.prepare("update scheduled_agent_task set next_run_at=? where id=?").run(dueSlot, taskId);
+  let executionId: string | undefined;
+  await waitUntil(async () => {
+    const row = fixture.db.prepare(`select id from scheduled_agent_execution
+      where task_id=? and trigger_type='scheduled' and scheduled_for=?`).get(taskId, dueSlot) as {id: string} | undefined;
+    executionId = row?.id;
+    return !!row;
+  }, 8_000);
+  const claimed = readScheduledExecution(fixture.db, fixture.workspaceId, executionId!)!;
+  assert.ok(claimed.sessionId);
+  await waitUntil(async () => getRunRecord(fixture.db, readScheduledExecution(fixture.db,
+    fixture.workspaceId, executionId!)?.runId ?? "")?.status === "completed", 25_000);
+  let completed: {id: string; status: string; runId: string} | undefined;
+  await waitUntil(async () => {
+    const history = await requestJson<{items: Array<{id: string; status: string; runId: string}>}>(fixture.baseUrl, {
+      method: "GET", path: `${base}/${taskId}/executions?triggerType=scheduled`
+    });
+    assert.equal(history.response.status, 200, history.text);
+    completed = history.json.items[0];
+    return completed?.status === "completed";
+  }, 6_000);
+  assert.equal(completed?.id, executionId);
+  assert.equal(completed?.runId, readScheduledExecution(fixture.db, fixture.workspaceId, executionId!)?.runId);
+  assert.equal(getRunRecord(fixture.db, readScheduledExecution(fixture.db, fixture.workspaceId, executionId!)!.runId!)?.status, "completed");
+  assert.equal(fixture.llmStub?.requestPaths.includes("/v1/chat/completions"), true);
+  const runCount = fixture.db.prepare("select count(*) as n from agent_run where session_id=?")
+    .get(claimed.sessionId) as {n: number};
+  assert.equal(runCount.n, 1);
 });
 
 test("worker 模式: worker pid 文件会被写入", async () => {

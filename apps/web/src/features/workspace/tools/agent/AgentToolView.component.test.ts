@@ -117,11 +117,11 @@ function respondDefaults(request: FakeXMLHttpRequest, workspaceId = "ws-a") {
   return request.respond(200, {});
 }
 
-function mountView(workspaceId = "ws-a") {
+function mountView(workspaceId = "ws-a", openSessionRequest?: { sessionId: string; sequence: number }) {
   const i18n = createI18n({ legacy: false, locale: "en-US", messages: { "en-US": enUS.default, "zh-CN": zhCN.default } });
   return mount(AgentToolView, {
     attachTo: document.body,
-    props: { workspaceId, toolId: "agent-tool" },
+    props: { workspaceId, toolId: "agent-tool", openSessionRequest },
     global: {
       plugins: [i18n],
       provide: {
@@ -212,6 +212,45 @@ test("AgentToolView：两个关键读取完成前保持 loading，后端快照�
     await settle();
     assert.equal(wrapper.find("[data-testid='agent-tab-state-loading']").exists(), false);
     assert.equal((wrapper.vm as any).visibleSessions.map((item: Session) => item.id).join(","), "subtask-a");
+  } finally {
+    wrapper.unmount();
+  }
+});
+
+test("AgentToolView：首次挂载带目标 Session 时等待初始化，并在第一次打开隐藏 Tab", async () => {
+  let initialSessions: FakeXMLHttpRequest | undefined;
+  let initialTabState: FakeXMLHttpRequest | undefined;
+  let sessionReads = 0;
+  FakeXMLHttpRequest.requests = [];
+  FakeXMLHttpRequest.responder = (request) => {
+    if (request.url.includes("/agent/available")) return request.respond(200, { agents: [] });
+    if (request.url.split("?")[0]?.endsWith("/agent/sessions")) {
+      sessionReads += 1;
+      if (sessionReads === 1) { initialSessions = request; return; }
+      return request.respond(200, [session("primary-a", "ws-a"), session("subtask-a", "ws-a", "subtask")]);
+    }
+    if (request.method === "PUT" && request.url.includes("subtask-a")) return request.respond(200, { workspaceId: "ws-a", sessionId: "subtask-a", visible: true });
+    if (request.url.includes("/agent-tab-state")) { initialTabState = request; return; }
+    return request.respond(200, {});
+  };
+  const wrapper = mountView("ws-a", { sessionId: "subtask-a", sequence: 1 });
+  try {
+    assert.equal(wrapper.find("[data-testid='agent-tab-state-loading']").exists(), true);
+    initialSessions!.respond(200, [session("primary-a", "ws-a"), session("subtask-a", "ws-a", "subtask")]);
+    await settle();
+    assert.equal(sessionReads, 1, "目标请求不得抢在初始化快照前刷新");
+    initialTabState!.respond(200, tabState("ws-a"));
+    await settle();
+    const vm = wrapper.vm as any;
+    assert.equal(vm.effectiveActiveKey, "subtask-a");
+    assert.equal(vm.visibleSessions.some((item: Session) => item.id === "subtask-a"), true);
+    assert.equal(sessionReads, 2);
+    assert.equal(FakeXMLHttpRequest.requests.some((request) => request.method === "PUT" && request.url.includes("subtask-a")), true);
+
+    vm.onChangeTab("primary-a");
+    await wrapper.setProps({ openSessionRequest: { sessionId: "subtask-a", sequence: 2 } });
+    await settle();
+    assert.equal(vm.effectiveActiveKey, "subtask-a", "后续再次跳转仍可打开指定 Session");
   } finally {
     wrapper.unmount();
   }

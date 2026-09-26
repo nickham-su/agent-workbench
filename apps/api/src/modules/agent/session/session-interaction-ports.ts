@@ -11,6 +11,8 @@ import type {
 import type { AgentApiSubtaskStartRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { AgentMessageControlResult, AgentMessageSessionRunState } from "@agent-workbench/shared";
 import type { AgentRuntimePort } from "../agent.runtime-port.js";
+import type { HistoricalForkSource } from "../agent-message.store.js";
+import type { ExpectedHistoricalForkSession } from "../lifecycle/run-lifecycle-ports.js";
 
 export type SessionCreateInput = {
   id: string;
@@ -18,6 +20,8 @@ export type SessionCreateInput = {
   title: string;
   kind: "primary" | "subtask";
   createdAt: number;
+  /** An execution's deterministic title must survive first-message auto naming. */
+  preserveTitle?: boolean;
   forkedFromSessionId?: string | null;
   forkedFromMessageId?: string | null;
 };
@@ -40,6 +44,9 @@ export type SessionInteractionStore = {
   createSession(input: SessionCreateInput): void;
   setManualTitle(input: { sessionId: string; workspaceId: string; title: string }): boolean;
   cloneSession(input: SessionCloneInput): Promise<AgentSessionRecord>;
+  validateHistoricalSource(input: { workspaceId: string; sourceSessionId: string; targetMessageId: string }): HistoricalForkSource;
+  forkHistoricalSource(input: { id: string; workspaceId: string; sourceSessionId: string;
+    targetMessageId: string; title: string; createdAt: number }): AgentSessionRecord;
   findClientRequestDedup(input: { workspaceId: string; sessionId: string; clientRequestId: string }): { messageId: string; runId: string } | null;
   getRunState(workspaceId: string, sessionId: string): Pick<AgentMessageSessionRunState, "status">;
   getControlRunState(sessionId: string): AgentMessageSessionRunState;
@@ -64,6 +71,8 @@ export type SessionLifecycleStarter = {
     modelId: string;
     uiLocale: AgentUiLocale | null;
     runtime: AgentRuntimePort;
+    expectedHistoricalFork?: ExpectedHistoricalForkSession;
+    expectedSessionTitle?: string;
   }): Promise<AgentSendMessageResponse>;
 };
 
@@ -102,9 +111,13 @@ export type SubtaskSessionMaterializationCommand = {
 export type SessionInteractionApplication = {
   listSessions(workspaceId: string): AgentSessionRecord[];
   createPrimarySession(params: { workspaceId: string; title?: string }): AgentSessionRecord;
+  validateHistoricalSource(params: { workspaceId: string; sourceSessionId: string; targetMessageId: string }): HistoricalForkSource;
+  forkPrimarySessionFromHistoricalAnchorWithExpectedId(params: { workspaceId: string; sessionId: string;
+    sourceSessionId: string; targetMessageId: string; title: string }): AgentSessionRecord;
   forkPrimarySession(params: AgentForkSessionRequest): Promise<AgentSessionRecord>;
   updateSessionTitle(params: { sessionId: string; body: AgentUpdateSessionTitleRequest }): AgentSessionRecord;
-  sendMessage(params: { sessionId: string; body: NormalizedAgentUserMessageInput; runtime: AgentRuntimePort }): Promise<AgentSendMessageResponse>;
+  sendMessage(params: { sessionId: string; body: NormalizedAgentUserMessageInput; runtime: AgentRuntimePort;
+    expectedHistoricalFork?: ExpectedHistoricalForkSession; expectedSessionTitle?: string }): Promise<AgentSendMessageResponse>;
   revertSession(command: RevertSessionCommand): Promise<AgentMessageControlResult>;
   resolveSubtaskSessionForStart(command: SubtaskSessionMaterializationCommand): Promise<{ session: AgentSessionRecord; createdSessionId: string | null }>;
 };

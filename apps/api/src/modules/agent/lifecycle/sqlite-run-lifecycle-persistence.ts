@@ -1,4 +1,5 @@
 import type { Db } from "../../../infra/db/db.js";
+import { HttpError } from "../../../app/errors.js";
 import { assertAgentImageByteSize } from "../attachments/agent-attachment-storage.js";
 import { assertAgentAttachmentId, assertAgentAttachmentTempId } from "../attachments/agent-attachment-paths.js";
 import {
@@ -94,6 +95,30 @@ export class SqliteRunLifecyclePersistence
         input.sessionId,
       );
       if (!session) throw new Error("agent session not found");
+      const expected = input.expectedHistoricalFork;
+      // Title edits do not increment revision. Both expected-ID paths must
+      // compare the normalized authoritative title inside the activation txn.
+      if ((expected && session.title !== expected.title) ||
+          (input.expectedSessionTitle != null && session.title !== input.expectedSessionTitle)) {
+        throw new HttpError(409, "Scheduled session title changed before Run activation", "SESSION_ID_CONFLICT");
+      }
+      // expectedSessionTitle is supplied only for a preallocated new_session.
+      // A concurrent send/revert/compaction may leave the title unchanged;
+      // revision and ancestry must still match the pristine primary Session.
+      if (input.expectedSessionTitle != null && (session.kind !== "primary" ||
+          session.headMessageId !== null || session.contextRootMessageId !== null ||
+          session.revision !== 0 || session.forkedFromSessionId !== null ||
+          session.forkedFromMessageId !== null)) {
+        throw new HttpError(409, "Scheduled session changed before Run activation", "SESSION_ID_CONFLICT");
+      }
+      if (expected && (session.kind !== "primary" ||
+        session.forkedFromSessionId !== expected.sourceSessionId ||
+        session.forkedFromMessageId !== expected.sourceMessageId ||
+        session.headMessageId !== expected.headMessageId ||
+        session.contextRootMessageId !== expected.contextRootMessageId ||
+        session.revision !== expected.revision)) {
+        throw new HttpError(409, "Scheduled fork session changed before Run activation", "SESSION_ID_CONFLICT");
+      }
       validateUserRunImages(input);
       const insertAttachment = this.db.prepare(
         `insert into agent_attachment
@@ -310,7 +335,9 @@ export class SqliteRunLifecyclePersistence
       )
         return "missing-or-mismatch" as const;
       if (run.executionPhase === "terminal") return "already-terminal" as const;
-      if (run.executionPhase !== "work_pending" && run.executionPhase !== "work_in_progress") {
+      // `run_enqueue_failed` is a durable proof that work was never entered.
+      // Once work starts, a late enqueue rejection cannot replace its outcome.
+      if (run.executionPhase !== "work_pending") {
         // Cancellation or another terminal authority has already persisted its
         // immutable tuple. An enqueue failure must not replace that intent.
         return "run-failed-state-not-current" as const;

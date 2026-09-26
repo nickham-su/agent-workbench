@@ -39,6 +39,18 @@ export class AgentService {
     return this.capabilities.session.createPrimarySession(...args);
   }
 
+  createPrimarySessionWithExpectedId(...args: Parameters<AgentServiceCapabilities["session"]["createPrimarySessionWithExpectedId"]>): ReturnType<AgentServiceCapabilities["session"]["createPrimarySessionWithExpectedId"]> {
+    return this.capabilities.session.createPrimarySessionWithExpectedId(...args);
+  }
+
+  validateHistoricalSource(...args: Parameters<AgentServiceCapabilities["session"]["validateHistoricalSource"]>): ReturnType<AgentServiceCapabilities["session"]["validateHistoricalSource"]> {
+    return this.capabilities.session.validateHistoricalSource(...args);
+  }
+
+  forkPrimarySessionFromHistoricalAnchorWithExpectedId(...args: Parameters<AgentServiceCapabilities["session"]["forkPrimarySessionFromHistoricalAnchorWithExpectedId"]>): ReturnType<AgentServiceCapabilities["session"]["forkPrimarySessionFromHistoricalAnchorWithExpectedId"]> {
+    return this.capabilities.session.forkPrimarySessionFromHistoricalAnchorWithExpectedId(...args);
+  }
+
   forkPrimarySession(...args: Parameters<AgentServiceCapabilities["session"]["forkPrimarySession"]>): ReturnType<AgentServiceCapabilities["session"]["forkPrimarySession"]> {
     return this.capabilities.session.forkPrimarySession(...args);
   }

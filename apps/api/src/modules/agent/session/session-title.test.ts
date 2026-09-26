@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { normalizeManualSessionTitle, toAutomaticSessionTitle } from "./session-title.js";
+import { normalizeManualSessionTitle, normalizeScheduledTaskName, buildScheduledExecutionSessionTitle, toAutomaticSessionTitle } from "./session-title.js";
 
 // 首消息自动标题的既有行为回归：空白回退“新会话”、精确 50 字符截断。
 // 权威实现：lifecycle/sqlite-run-lifecycle-persistence.ts 的 toSessionTitleFromFirstMessage。
@@ -40,4 +40,21 @@ test("normalizeManualSessionTitle 空白拒绝、合法接受、超长与控制�
   assert.deepEqual(ok, { ok: true, title: "我的 标题" });
   assert.deepEqual(normalizeManualSessionTitle("a".repeat(51)), { ok: false, reason: "too_long" });
   assert.deepEqual(normalizeManualSessionTitle("ab\u0007cd"), { ok: false, reason: "invalid_characters" });
+});
+
+test("定时任务名称与手动标题保持相同的空白和控制字符规则，按 code point 限长", () => {
+  assert.deepEqual(normalizeManualSessionTitle("😀".repeat(50)), { ok: true, title: "😀".repeat(50) });
+  assert.deepEqual(normalizeManualSessionTitle("😀".repeat(51)), { ok: false, reason: "too_long" });
+  assert.deepEqual(normalizeScheduledTaskName("\t a\n\r b  "), { ok: true, title: "a b" });
+  assert.deepEqual(normalizeScheduledTaskName("😀".repeat(100)), { ok: true, title: "😀".repeat(100) });
+  assert.deepEqual(normalizeScheduledTaskName("😀".repeat(101)), { ok: false, reason: "too_long" });
+  for (const value of ["\t\n ", "\r"]) {
+    assert.deepEqual(normalizeScheduledTaskName(value), { ok: false, reason: "empty" });
+  }
+  for (const value of ["a\0b", "a\bb", "a\u0085b"]) {
+    assert.deepEqual(normalizeScheduledTaskName(value), { ok: false, reason: "invalid_characters" });
+  }
+  const title = buildScheduledExecutionSessionTitle("😀".repeat(100));
+  assert.equal(title, "😀".repeat(43) + " · 定时任务");
+  assert.equal([...title].length, 50);
 });

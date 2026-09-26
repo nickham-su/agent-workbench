@@ -124,6 +124,16 @@ export type CancelSessionCascadeResult = {
   runtimeCancelSessionIds: string[];
 };
 
+/** Checked inside the same transaction that appends a scheduled Fork's Prompt. */
+export type ExpectedHistoricalForkSession = {
+  title: string;
+  headMessageId: string;
+  contextRootMessageId: string | null;
+  revision: number;
+  sourceSessionId: string;
+  sourceMessageId: string;
+};
+
 export type UserRunActivationInput = {
   workspaceId: string;
   sessionId: string;
@@ -136,6 +146,8 @@ export type UserRunActivationInput = {
   modelId: string;
   uiLocale: "zh-CN" | "en-US" | null;
   createdAt: number;
+  expectedHistoricalFork?: ExpectedHistoricalForkSession;
+  expectedSessionTitle?: string;
 };
 
 export type UserRunImageInput = {
@@ -189,6 +201,8 @@ export type StartUserRunCommand = {
   modelId: string;
   uiLocale: "zh-CN" | "en-US" | null;
   runtime: RuntimeControlPort;
+  expectedHistoricalFork?: ExpectedHistoricalForkSession;
+  expectedSessionTitle?: string;
 };
 
 export type LifecycleClock = {

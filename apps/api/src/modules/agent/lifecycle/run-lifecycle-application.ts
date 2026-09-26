@@ -218,7 +218,9 @@ export class RunLifecycleApplication {
         providerId: command.providerId,
         modelId: command.modelId,
         uiLocale: command.uiLocale,
-        createdAt
+        createdAt,
+        expectedHistoricalFork: command.expectedHistoricalFork,
+        expectedSessionTitle: command.expectedSessionTitle,
       });
     } catch (error) {
       await cleanupUnactivatedFiles();

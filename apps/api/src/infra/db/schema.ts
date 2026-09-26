@@ -334,6 +334,77 @@ function createBaseSchema(db: Db) {
   ensureColumn(db, { table: "workspaces", column: "terminal_credential_id", ddl: "terminal_credential_id text" });
   ensureColumn(db, { table: "workspaces", column: "last_used_at", ddl: "last_used_at integer" });
   ensureTerminalAuthCleanupIntentSchema(db);
+  createScheduledTaskSchema(db);
+}
+
+/** Independent non-Agent tables: Agent rebuild must never drop task configuration or history. */
+function createScheduledTaskSchema(db: Db) {
+  db.transaction(() => db.exec(`
+    create table if not exists scheduled_agent_task (
+      id text primary key,
+      workspace_id text not null references workspaces(id) on delete restrict,
+      name text not null,
+      enabled integer not null check (enabled in (0, 1)),
+      trigger_mode text not null check (trigger_mode in ('new_session', 'fork_message')),
+      prompt text not null,
+      agent_id text not null,
+      schedule_json text not null,
+      next_run_at integer,
+      source_session_id text,
+      source_message_id text,
+      source_title text,
+      source_message_summary text,
+      source_message_created_at integer,
+      created_at integer not null,
+      updated_at integer not null,
+      check ((enabled = 1 and next_run_at is not null) or (enabled = 0 and next_run_at is null)),
+      check ((trigger_mode = 'new_session'
+        and source_session_id is null and source_message_id is null and source_title is null
+        and source_message_summary is null and source_message_created_at is null)
+        or (trigger_mode = 'fork_message'
+        and source_session_id is not null and source_message_id is not null and source_title is not null
+        and source_message_summary is not null and source_message_created_at is not null))
+    );
+    create index if not exists idx_scheduled_task_workspace_order
+      on scheduled_agent_task(workspace_id, enabled desc, updated_at desc, id desc);
+    create index if not exists idx_scheduled_task_due
+      on scheduled_agent_task(enabled, next_run_at) where enabled = 1 and next_run_at is not null;
+
+    create table if not exists scheduled_agent_execution (
+      id text primary key,
+      task_id text not null references scheduled_agent_task(id) on delete cascade,
+      trigger_type text not null check (trigger_type in ('scheduled', 'manual')),
+      scheduled_for integer,
+      status text not null check (status in ('starting', 'running', 'completed', 'failed', 'cancelled', 'failed_to_start', 'skipped')),
+      reason_code text,
+      reason_detail text check (reason_detail is null or length(reason_detail) <= 500),
+      task_snapshot_json text not null,
+      client_request_id text not null unique,
+      session_id text,
+      run_id text,
+      created_at integer not null,
+      updated_at integer not null,
+      started_at integer,
+      finished_at integer,
+      check ((trigger_type = 'scheduled' and scheduled_for is not null)
+        or (trigger_type = 'manual' and scheduled_for is null)),
+      check ((status = 'skipped' and session_id is null and run_id is null and started_at is null)
+        or (status <> 'skipped' and session_id is not null)),
+      check ((status in ('starting', 'running') and finished_at is null)
+        or (status in ('completed', 'failed', 'cancelled', 'failed_to_start', 'skipped') and finished_at is not null)),
+      check (status <> 'running' or started_at is not null)
+    );
+    create unique index if not exists uq_scheduled_execution_auto_slot
+      on scheduled_agent_execution(task_id, scheduled_for) where trigger_type = 'scheduled';
+    create unique index if not exists uq_scheduled_execution_one_active
+      on scheduled_agent_execution(task_id) where status in ('starting', 'running');
+    create unique index if not exists uq_scheduled_execution_session
+      on scheduled_agent_execution(session_id) where session_id is not null;
+    create index if not exists idx_scheduled_execution_task_created
+      on scheduled_agent_execution(task_id, created_at desc, id desc);
+    create index if not exists idx_scheduled_execution_run
+      on scheduled_agent_execution(run_id) where run_id is not null;
+  `))();
 }
 
 const AGENT_DOMAIN_TABLES = [

@@ -4,6 +4,8 @@ import { HttpError } from "../../../app/errors.js";
 import type { Db } from "../../../infra/db/db.js";
 import {
   createMessageSession,
+  forkHistoricalMessageSession,
+  validateHistoricalForkSource,
   forkMessageSession,
   getMessageRunState,
   getMessageSession,
@@ -28,7 +30,12 @@ export class SqliteSessionInteractionStore implements SessionInteractionStore {
   getSession(sessionId: string): AgentSessionRecord | null { return getMessageSessionById(this.dependencies.db, sessionId); }
   listSessions(workspaceId: string): AgentSessionRecord[] { return listMessageSessions(this.dependencies.db, workspaceId); }
   createSession(input: SessionCreateInput): void {
-    createMessageSession(this.dependencies.db, input);
+    this.dependencies.db.transaction(() => {
+      createMessageSession(this.dependencies.db, input);
+      if (input.preserveTitle && !setManualMessageSessionTitle(this.dependencies.db, {
+        sessionId: input.id, workspaceId: input.workspaceId, title: input.title
+      })) throw new Error("Unable to preserve scheduled session title");
+    })();
   }
   setManualTitle(input: { sessionId: string; workspaceId: string; title: string }): boolean {
     return setManualMessageSessionTitle(this.dependencies.db, input);
@@ -48,6 +55,14 @@ export class SqliteSessionInteractionStore implements SessionInteractionStore {
   }
   revertBeforeUser(input: { workspaceId: string; sessionId: string; expectedHeadMessageId: string | null; expectedRevision: number; targetMessageId: string; updatedAt: number }): void {
     revertBeforeUserMessage(this.dependencies.db, input);
+  }
+
+  validateHistoricalSource(input: { workspaceId: string; sourceSessionId: string; targetMessageId: string }) {
+    return validateHistoricalForkSource(this.dependencies.db, input);
+  }
+  forkHistoricalSource(input: { id: string; workspaceId: string; sourceSessionId: string;
+    targetMessageId: string; title: string; createdAt: number }): AgentSessionRecord {
+    return forkHistoricalMessageSession(this.dependencies.db, input);
   }
 
   async cloneSession(input: SessionCloneInput): Promise<AgentSessionRecord> {

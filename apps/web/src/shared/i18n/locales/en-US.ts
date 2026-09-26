@@ -230,6 +230,7 @@ export default {
       files: "Files",
       search: "Search",
       agent: "AI Agent",
+      scheduledTasks: "Scheduled tasks",
       editor: "Editor"
     },
     dock: {

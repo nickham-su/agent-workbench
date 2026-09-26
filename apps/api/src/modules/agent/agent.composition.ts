@@ -1041,6 +1041,9 @@ function createSessionFacadeCapabilities<
     getSession: (...args: any[]) => any;
     getWorkspace: (...args: any[]) => any;
     createPrimarySession: (...args: any[]) => any;
+    createPrimarySessionWithExpectedId: (...args: any[]) => any;
+    validateHistoricalSource: (...args: any[]) => any;
+    forkPrimarySessionFromHistoricalAnchorWithExpectedId: (...args: any[]) => any;
     forkPrimarySession: (...args: any[]) => any;
     updateSessionTitle: (...args: any[]) => any;
     sendMessage: (...args: any[]) => any;
@@ -1059,6 +1062,9 @@ function createSessionFacadeCapabilities<
   | "getSession"
   | "getWorkspace"
   | "createPrimarySession"
+  | "createPrimarySessionWithExpectedId"
+  | "validateHistoricalSource"
+  | "forkPrimarySessionFromHistoricalAnchorWithExpectedId"
   | "forkPrimarySession"
   | "updateSessionTitle"
   | "sendMessage"
@@ -1074,6 +1080,9 @@ function createSessionFacadeCapabilities<
     getSession,
     getWorkspace,
     createPrimarySession,
+    createPrimarySessionWithExpectedId,
+    validateHistoricalSource,
+    forkPrimarySessionFromHistoricalAnchorWithExpectedId,
     forkPrimarySession,
     updateSessionTitle,
     sendMessage,
@@ -1089,6 +1098,9 @@ function createSessionFacadeCapabilities<
     getSession,
     getWorkspace,
     createPrimarySession,
+    createPrimarySessionWithExpectedId,
+    validateHistoricalSource,
+    forkPrimarySessionFromHistoricalAnchorWithExpectedId,
     forkPrimarySession,
     updateSessionTitle,
     sendMessage,
@@ -2125,6 +2137,20 @@ function createAgentApplications(
     return sessionInteractionApplication.createPrimarySession(params);
   }
 
+  function createPrimarySessionWithExpectedId(params: { workspaceId: string; sessionId: string; title: string }) {
+    return sessionInteractionApplication.createPrimarySessionWithExpectedId(params);
+  }
+
+  function validateHistoricalSource(params: { workspaceId: string; sourceSessionId: string; targetMessageId: string }) {
+    return sessionInteractionApplication.validateHistoricalSource(params);
+  }
+
+  function forkPrimarySessionFromHistoricalAnchorWithExpectedId(params: {
+    workspaceId: string; sessionId: string; sourceSessionId: string; targetMessageId: string; title: string;
+  }) {
+    return sessionInteractionApplication.forkPrimarySessionFromHistoricalAnchorWithExpectedId(params);
+  }
+
   async function forkPrimarySession(params: AgentForkSessionRequest) {
     return await sessionInteractionApplication.forkPrimarySession(params);
   }
@@ -2142,6 +2168,8 @@ function createAgentApplications(
       | AgentSendMessageRequest
       | import("./session/session-interaction-ports.js").NormalizedAgentUserMessageInput;
     runtime: AgentRuntimePort;
+    expectedHistoricalFork?: import("./lifecycle/run-lifecycle-ports.js").ExpectedHistoricalForkSession;
+    expectedSessionTitle?: string;
   }): Promise<AgentSendMessageResponse> {
     return await sessionInteractionApplication.sendMessage(params);
   }
@@ -3109,6 +3137,9 @@ function createAgentApplications(
     getSession,
     getWorkspace,
     createPrimarySession,
+    createPrimarySessionWithExpectedId,
+    validateHistoricalSource,
+    forkPrimarySessionFromHistoricalAnchorWithExpectedId,
     forkPrimarySession,
     updateSessionTitle,
     sendMessage,

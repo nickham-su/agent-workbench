@@ -892,6 +892,9 @@ export async function deleteWorkspace(
         if (intents.some((intent) => intent.phase !== "recoverable")) throw new Error("auth cleanup locator is not recoverable");
         for (const intent of intents) clearTerminalAuthCleanupIntent(ctx.db, term.id, intent.artifactKind);
       }
+      // Task history is scoped to this Workspace and cascades with its Task.
+      // Remove it before the Agent graph and the Workspace FK are deleted.
+      ctx.db.prepare("delete from scheduled_agent_task where workspace_id=?").run(ws.id);
       deleteWorkspaceAgentData(ctx.db, ws.id);
       deleteWorkspaceReposByWorkspace(ctx.db, ws.id);
       deleteTerminalRecordsByWorkspace(ctx.db, ws.id);

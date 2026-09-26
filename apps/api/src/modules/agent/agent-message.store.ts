@@ -51,6 +51,10 @@ export class AgentMessageDomainError extends Error {
   }
 }
 
+export class HistoricalForkSessionConflictError extends Error {
+  readonly code = "SESSION_ID_CONFLICT";
+}
+
 export class AgentMessageConflictError extends Error {
   readonly code = "SESSION_HEAD_CONFLICT" as const;
 
@@ -968,6 +972,116 @@ export function forkMessageSession(db: Db, input: {
     }
     db.prepare(`insert into agent_session (id,workspace_id,title,kind,head_message_id,context_root_message_id,revision,forked_from_session_id,forked_from_message_id,created_at,updated_at) values (@id,@workspaceId,@title,@kind,@targetMessageId,@contextRootMessageId,0,@sourceSessionId,@targetMessageId,@createdAt,@createdAt)`).run({ ...input, contextRootMessageId: ancestry.contextRootMessageId });
     db.prepare(`insert into session_run_state (workspace_id,session_id,status,active_run_id,run_notice_text,retry_count,next_retry_at,active_assistant_message_id,non_terminal_message_ids_json,non_terminal_tool_execution_ids_json,updated_at) values (@workspaceId,@id,'idle',null,'',0,null,null,'[]','[]',@createdAt)`).run(input);
+    return getMessageSession(db, input.workspaceId, input.id)!;
+  })();
+}
+
+/** A deliberately narrow, internal source error; never expose graph/SQL diagnostics to clients. */
+export class HistoricalForkSourceError extends Error {
+  constructor(readonly code: "SOURCE_UNAVAILABLE" | "SOURCE_MESSAGE_INVALID") {
+    super(code);
+  }
+}
+
+export type HistoricalForkSource = {
+  sessionId: string; messageId: string; title: string;
+  messageSummary: string; messageCreatedAt: number;
+};
+
+function historicalForkAnchor(db: Db, input: { workspaceId: string; sourceSessionId: string; targetMessageId: string }) {
+  const source = sessionRow(db, input.workspaceId, input.sourceSessionId);
+  const message = messageRow(db, input.targetMessageId);
+  if (!source || source.kind !== "primary" || !message || message.workspaceId !== input.workspaceId) {
+    throw new HistoricalForkSourceError("SOURCE_UNAVAILABLE");
+  }
+  // The source's head is deliberately irrelevant. Reverted messages retain their origin.
+  // A Fork source additionally owns the immutable ancestry of its fork point, not
+  // arbitrary messages in the same workspace (or new messages in its parent).
+  const own = message.originSessionId === source.id;
+  if (!own && (!source.forkedFromSessionId || !source.forkedFromMessageId)) {
+    throw new HistoricalForkSourceError("SOURCE_UNAVAILABLE");
+  }
+  let ancestry: ReturnType<typeof resolveForkAncestryAtTarget>;
+  try {
+    ancestry = resolveForkAncestryAtTarget(db, {
+      workspaceId: input.workspaceId,
+      sourceHeadMessageId: own ? input.targetMessageId : source.forkedFromMessageId!,
+      targetMessageId: input.targetMessageId,
+    });
+    if (ancestry.contextRootMessageId) {
+      assertForkContextRoot(db, input.workspaceId, ancestry.contextRootMessageId);
+      // The internal scheduled source must be able to replay its historical
+      // summary. Structural root/retained-pointer checks alone cannot detect
+      // missing or invalid text Parts. Leave the public Fork contract untouched.
+      const root = messageRow(db, ancestry.contextRootMessageId);
+      if (!root || !Value.Check(AgentCompactionMessageSchema,
+        { ...root, parts: messageParts(db, ancestry.contextRootMessageId) })) {
+        throw new HistoricalForkSourceError("SOURCE_MESSAGE_INVALID");
+      }
+    }
+  } catch (error) {
+    if (error instanceof AgentMessageDomainError && error.code === "FORK_TARGET_INVALID") {
+      throw new HistoricalForkSourceError("SOURCE_UNAVAILABLE");
+    }
+    if (error instanceof AgentMessageGraphInvariantError) {
+      throw new HistoricalForkSourceError("SOURCE_MESSAGE_INVALID");
+    }
+    throw error;
+  }
+  const target = ancestry.target;
+  if ((target.type !== "user" && target.type !== "assistant") || !messageTerminal(target.status)) {
+    throw new HistoricalForkSourceError("SOURCE_MESSAGE_INVALID");
+  }
+  if (target.type === "assistant") {
+    const pending = db.prepare(`select 1 from agent_tool_execution execution
+      join agent_message_part part on part.id=execution.call_part_id
+      where part.message_id=? and execution.status in ('queued','running') limit 1`).get(target.id);
+    if (pending) throw new HistoricalForkSourceError("SOURCE_MESSAGE_INVALID");
+  }
+  return { source, message, ancestry };
+}
+
+/** Read-only validation; snapshot presentation only (never include tool or reasoning content). */
+export function validateHistoricalForkSource(db: Db, input: {
+  workspaceId: string; sourceSessionId: string; targetMessageId: string;
+}): HistoricalForkSource {
+  const { source, message } = historicalForkAnchor(db, input);
+  const text = (db.prepare(`select text from agent_message_part
+    where message_id=? and type='text' order by position limit 1`).get(message.id) as { text: string | null } | undefined)?.text ?? "";
+  const clean = text.replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, " ").replace(/\s+/g, " ").trim();
+  return {
+    sessionId: source.id, messageId: message.id,
+    title: [...source.title].slice(0, 200).join(""),
+    messageSummary: [...clean].slice(0, 500).join(""),
+    messageCreatedAt: message.createdAt,
+  };
+}
+
+/** Expected-ID Fork and anchor verification occur in one transaction. Public Fork is unchanged. */
+export function forkHistoricalMessageSession(db: Db, input: {
+  id: string; workspaceId: string; sourceSessionId: string; targetMessageId: string;
+  title: string; createdAt: number;
+}): AgentSessionMessageState {
+  return db.transaction(() => {
+    const { ancestry } = historicalForkAnchor(db, input);
+    const existing = getMessageSessionById(db, input.id);
+    if (existing) {
+      if (existing.workspaceId !== input.workspaceId || existing.kind !== "primary" ||
+          existing.title !== input.title || existing.forkedFromSessionId !== input.sourceSessionId ||
+          existing.forkedFromMessageId !== input.targetMessageId ||
+          existing.headMessageId !== input.targetMessageId ||
+          existing.contextRootMessageId !== ancestry.contextRootMessageId || existing.revision !== 0) {
+        throw new HistoricalForkSessionConflictError("session ID is already in use");
+      }
+      return existing;
+    }
+    createMessageSession(db, {
+      id: input.id, workspaceId: input.workspaceId, title: input.title, kind: "primary",
+      createdAt: input.createdAt, forkedFromSessionId: input.sourceSessionId,
+      forkedFromMessageId: input.targetMessageId, headMessageId: input.targetMessageId,
+      contextRootMessageId: ancestry.contextRootMessageId,
+    });
+    setManualMessageSessionTitle(db, { workspaceId: input.workspaceId, sessionId: input.id, title: input.title });
     return getMessageSession(db, input.workspaceId, input.id)!;
   })();
 }
