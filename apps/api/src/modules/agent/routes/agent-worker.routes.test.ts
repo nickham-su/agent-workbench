@@ -32,6 +32,28 @@ function sourceResponse() {
   };
 }
 
+test("run notice route forwards optional compaction revision without changing ordinary notice requests", async () => {
+  const app = Fastify();
+  apps.push(app);
+  const calls: unknown[] = [];
+  await registerAgentWorkerRoutes(app, {
+    internalToken: "internal-token",
+    service: { updateRunNoticeFromWorker(input: unknown) { calls.push(input); return { result: "updated" }; } },
+  } as unknown as AgentWorkerRouteDependencies);
+  await app.ready();
+  const ordinary = { workspaceId: "workspace", sessionId: "session", runId: "run", runNoticeText: "model retry", updatedAt: 1 };
+  const guarded = { ...ordinary, runNoticeText: "compaction retry", compactionExpectedRevision: 7 };
+  for (const payload of [ordinary, guarded]) {
+    const response = await app.inject({
+      method: AgentApiEndpoints.updateRunNotice.method,
+      url: AgentApiEndpoints.updateRunNotice.path,
+      headers: { "x-awb-agent-internal-token": "internal-token" }, payload,
+    });
+    assert.equal(response.statusCode, 200, response.body);
+  }
+  assert.deepEqual(calls, [ordinary, guarded]);
+});
+
 test("compaction source route requires its internal token and validates strict request/response DTOs", async () => {
   const app = Fastify();
   apps.push(app);

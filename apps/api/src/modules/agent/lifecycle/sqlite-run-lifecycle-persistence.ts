@@ -6,6 +6,7 @@ import {
   appendMessage,
   getMessageSessionHead,
   getMessageRunState,
+  getPersistedRunTerminalIntent,
   getMessageSession,
   getMessageSessionById,
   convergeRunTerminal,
@@ -401,21 +402,21 @@ export class SqliteRunLifecyclePersistence
         if (!session) continue;
         const messageState = getMessageRunState(this.db, session.workspaceId, session.id);
         if (!messageState?.activeRunId || messageState.status !== "running") continue;
-        persistRunTerminalIntent(this.db, {
+        const runKey = {
           workspaceId: session.workspaceId,
           sessionId: session.id,
           runId: messageState.activeRunId,
-          status: "cancelled",
-          code: "run_cancelled",
-          detail: null,
-          updatedAt: input.updatedAt,
-        });
-        cancelledRunIds.add(messageState.activeRunId);
-        terminalIntents.push({
-          workspaceId: session.workspaceId,
-          sessionId: session.id,
-          runId: messageState.activeRunId,
-        });
+        };
+        // A commit may already have atomically persisted a completed intent.
+        // Converge that fact rather than overwriting it with cancellation.
+        if (!getPersistedRunTerminalIntent(this.db, runKey)) {
+          persistRunTerminalIntent(this.db, {
+            ...runKey, status: "cancelled", code: "run_cancelled", detail: null,
+            updatedAt: input.updatedAt,
+          });
+          cancelledRunIds.add(runKey.runId);
+        }
+        terminalIntents.push(runKey);
       }
       const root = getMessageSessionById(this.db, input.rootSessionId);
       if (!root) throw new Error("cancel root session not found after cancel");

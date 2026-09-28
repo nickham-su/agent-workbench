@@ -1137,8 +1137,8 @@ export default {
           help: "Limits only a real subtask tool-call chain, not how many times primary-session context is forked. Every primary session starts ordinary runs at depth 0; at 1, a primary run can create only a first-level subtask. Range: 1-5. This does not limit sibling count, concurrency, or token usage."
         },
         modelTotalTimeoutMs: {
-          label: "Model total timeout (seconds)",
-          help: "Total timeout for a single model request. When reached, the request is aborted and the run fails. Integer seconds only; 0 disables."
+          label: "Model request / compaction timeout (seconds)",
+          help: "Total timeout for each main-model request; for manual or automatic compaction, the deadline for the entire compaction operation (including reads, summary retries, and commit). A deadline stops summary retries and fails the current conversation run during auto-compaction; an already-sent commit with an unknown outcome is not presumed absent. Integer seconds only; 0 disables."
         },
         modelIdleTimeoutMs: {
           label: "Model idle timeout (seconds)",
@@ -1146,11 +1146,11 @@ export default {
         },
         modelRequestMaxRetries: {
           label: "Model max retries",
-          help: "Automatically retries only when a request fails before receiving the first chunk. 0 disables retries."
+          help: "Maximum additional retries for failed primary model requests and manual/automatic context-compaction summary calls. All summary call errors use this limit. 0 disables retries; cancellation and the compaction work deadline stop retries immediately."
         },
         modelRequestRetryBackoffMaxMs: {
           label: "Model retry backoff maximum (seconds)",
-          help: "Maximum exponential backoff delay for model requests and context-compaction summary retries. The base delay is 2 seconds; range: 2-3600 seconds. Large values may keep failed runs active for a long time."
+          help: "Maximum exponential backoff delay for primary model requests and manual/automatic compaction summary retries. The base delay is 2 seconds; range: 2-3600 seconds. Summaries have no separate total request cap; retry count and the optional total timeout determine how long a run may wait."
         },
         visionModel: {
           label: "Vision model",
@@ -1160,7 +1160,7 @@ export default {
         compactionModel: {
           label: "Default compaction model",
           placeholder: "Select a default compaction model (optional)",
-          help: "Used to generate context-compaction summaries; when unset, the current agent model is used. If the candidate model lacks capacity or is not suitable, the current agent primary model is used instead."
+          help: "Used for manual and automatic context-compaction summaries; when unset, the current agent model is used. A selected model is not replaced on request failure, and summary input is not split."
         },
         sessionTerminalSoundEnabled: {
           label: "Run completion sound",

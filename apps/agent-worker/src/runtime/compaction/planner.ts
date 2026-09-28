@@ -8,19 +8,14 @@ import {
   COMPACTION_KEEP_RECENT_TOKENS,
   COMPACTION_MODE_POLICIES,
   CompactionPlanningError,
-  MAX_SUMMARY_ATTEMPTED_PARTITIONS,
-  MAX_SUMMARY_FINAL_LEAVES,
-  MAX_SUMMARY_LOGICAL_CALLS,
   PRIMARY_MATERIALIZER_VERSION,
   SUMMARY_INPUT_MATERIALIZER_VERSION,
   normalizedProviderModelId,
   type CompactionMode,
-  type CompactionModePolicy,
   type CompactionPlanResult,
   type CompactionProfileFingerprint,
   type CompactionSource,
   type PrimaryMaterializedBlock,
-  type SummaryBudgetState,
 } from "./types.js";
 
 export { COMPACTION_MODE_POLICIES } from "./types.js";
@@ -53,106 +48,6 @@ export function computeCompactionProfileFingerprint(profile: ExecutionProfile): 
     estimatorVersion: ESTIMATOR_VERSION,
   };
   return createHash("sha256").update(stableJson(payload), "utf8").digest("hex");
-}
-
-export type SummaryPartitionHandle = Readonly<{ readonly id: number }>;
-export type SummaryLogicalCallHandle = Readonly<{ readonly partitionId: number; readonly ordinal: 1 | 2 }>;
-
-/**
- * Phase-seven execution owns Provider I/O; this class only reserves bounded
- * partitions/calls/requests, so retries and candidate→primary fallback cannot
- * silently exceed the planning contract.
- */
-export class SummaryPlanningBudget {
-  private state: SummaryBudgetState;
-  private nextPartitionId = 1;
-  private readonly logicalCallsByPartition = new Map<number, number>();
-  private readonly partitionHandles = new WeakMap<SummaryPartitionHandle, { id: number }>();
-  private readonly logicalCallHandles = new WeakMap<SummaryLogicalCallHandle, { partition: SummaryPartitionHandle; ordinal: 1 | 2; networkRequestCount: number }>();
-
-  constructor(initial?: Partial<SummaryBudgetState>) {
-    this.state = {
-      finalLeafCount: initial?.finalLeafCount ?? 0,
-      attemptedPartitionCount: initial?.attemptedPartitionCount ?? 0,
-      logicalProviderCallCount: initial?.logicalProviderCallCount ?? 0,
-      networkRequestCount: initial?.networkRequestCount ?? 0,
-    };
-    for (const [name, value, maximum] of [
-      ["finalLeafCount", this.state.finalLeafCount, MAX_SUMMARY_FINAL_LEAVES],
-      ["attemptedPartitionCount", this.state.attemptedPartitionCount, MAX_SUMMARY_ATTEMPTED_PARTITIONS],
-      ["logicalProviderCallCount", this.state.logicalProviderCallCount, MAX_SUMMARY_LOGICAL_CALLS],
-      ["networkRequestCount", this.state.networkRequestCount, Number.MAX_SAFE_INTEGER],
-    ] as const) {
-      if (!Number.isSafeInteger(value) || value < 0 || value > maximum) {
-        throw new CompactionPlanningError("data_invariant", `summary initial ${name} is outside its allowed range`);
-      }
-    }
-  }
-
-  snapshot(): Readonly<SummaryBudgetState> { return Object.freeze({ ...this.state }); }
-
-  beginPartition(): SummaryPartitionHandle {
-    if (this.state.attemptedPartitionCount >= MAX_SUMMARY_ATTEMPTED_PARTITIONS) {
-      throw new CompactionPlanningError("summary_input_limit", "summary attempted partition limit reached");
-    }
-    this.state.attemptedPartitionCount += 1;
-    const partition = Object.freeze({ id: this.nextPartitionId++ });
-    this.logicalCallsByPartition.set(partition.id, 0);
-    this.partitionHandles.set(partition, { id: partition.id });
-    return partition;
-  }
-
-  finalizeLeaf() {
-    if (this.state.finalLeafCount >= MAX_SUMMARY_FINAL_LEAVES) {
-      throw new CompactionPlanningError("summary_input_limit", "summary final leaf limit reached");
-    }
-    this.state.finalLeafCount += 1;
-  }
-
-  beginLogicalCall(partition: SummaryPartitionHandle, previous?: SummaryLogicalCallHandle): SummaryLogicalCallHandle {
-    const partitionState = this.partitionHandles.get(partition);
-    const used = partitionState == null ? undefined : this.logicalCallsByPartition.get(partitionState.id);
-    if (used == null || partitionState == null) throw new CompactionPlanningError("data_invariant", "summary partition handle is unknown");
-    const previousState = previous == null ? undefined : this.logicalCallHandles.get(previous);
-    if (previous != null && previousState == null) {
-      throw new CompactionPlanningError("data_invariant", "summary logical call handle is unknown");
-    }
-    if (previousState && previousState.partition !== partition) {
-      throw new CompactionPlanningError("data_invariant", "summary primary fallback belongs to a different partition");
-    }
-    if ((previous == null && used !== 0) || (previousState != null && (used !== 1 || previousState.ordinal !== 1))) {
-      throw new CompactionPlanningError("summary_input_limit", "summary partition logical call limit reached");
-    }
-    if (this.state.logicalProviderCallCount >= MAX_SUMMARY_LOGICAL_CALLS) {
-      throw new CompactionPlanningError("summary_input_limit", "summary logical provider call limit reached");
-    }
-    this.state.logicalProviderCallCount += 1;
-    this.logicalCallsByPartition.set(partitionState.id, used + 1);
-    const ordinal = previous == null ? 1 : 2;
-    const call = Object.freeze({ partitionId: partitionState.id, ordinal });
-    this.logicalCallHandles.set(call, { partition, ordinal, networkRequestCount: 0 });
-    return call;
-  }
-
-  beginNetworkRequest(call: SummaryLogicalCallHandle, policy: Pick<CompactionModePolicy, "maxNetworkRequestCount" | "maxNetworkRequestsPerLogicalCall">) {
-    const callState = this.logicalCallHandles.get(call);
-    if (!callState) throw new CompactionPlanningError("data_invariant", "summary logical call handle is unknown");
-    if (callState.networkRequestCount >= policy.maxNetworkRequestsPerLogicalCall) {
-      throw new CompactionPlanningError("summary_input_limit", "summary logical call network request limit reached");
-    }
-    if (this.state.networkRequestCount >= policy.maxNetworkRequestCount) {
-      throw new CompactionPlanningError("summary_input_limit", "summary network request limit reached");
-    }
-    callState.networkRequestCount += 1;
-    this.state.networkRequestCount += 1;
-  }
-
-  /** Deterministic depth-first, left-first Message-block split. */
-  splitForContextLimit<T>(items: readonly T[]): [readonly T[], readonly T[]] {
-    if (items.length < 2) throw new CompactionPlanningError("summary_input_limit", "summary input cannot be split further");
-    const midpoint = Math.floor(items.length / 2);
-    return [items.slice(0, midpoint), items.slice(midpoint)];
-  }
 }
 
 type EstimatedBlock = { primary: PrimaryMaterializedBlock; estimatedTokens: number };

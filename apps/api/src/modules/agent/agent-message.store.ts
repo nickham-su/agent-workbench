@@ -485,8 +485,9 @@ export function getToolExecution(db: Db, executionId: string): AgentToolExecutio
 }
 
 /**
- * Confirms only a fully persisted compaction artifact owned by this Run. The
- * check intentionally does not reveal other messages or permit cross-run IDs.
+ * Confirms a persisted compaction artifact owned by this Run, even if the
+ * session head has subsequently advanced or the manual intent has converged.
+ * A negative observation is not proof that an in-flight commit cannot arrive.
  */
 export function hasCommittedCompactionArtifact(db: Db, input: {
   workspaceId: string; sessionId: string; runId: string; messageId: string;
@@ -495,13 +496,13 @@ export function hasCommittedCompactionArtifact(db: Db, input: {
   if (!message || message.workspaceId !== input.workspaceId || message.type !== "compaction"
     || message.status !== "completed" || message.originSessionId !== input.sessionId
     || message.originRunId !== input.runId) return false;
-  const session = getMessageSession(db, input.workspaceId, input.sessionId);
-  if (!session || session.headMessageId !== input.messageId || session.contextRootMessageId !== input.messageId) return false;
   const run = getRunRecord(db, input.runId);
   if (!run || run.workspaceId !== input.workspaceId || run.sessionId !== input.sessionId) return false;
   if (run.runKind !== "manual_compaction") return true;
   const intent = getPersistedRunTerminalIntent(db, input);
-  return intent?.status === "completed" && intent.code === "compaction_completed" && intent.detail === null;
+  return (intent?.status === "completed" && intent.code === "compaction_completed" && intent.detail === null)
+    || (run.status === "completed" && run.executionPhase === "terminal"
+      && run.terminalResultCode === "compaction_completed" && run.terminalResultDetail === null);
 }
 
 export function getMessageSessionHead(db: Db, input: { workspaceId: string; sessionId: string }): { headMessageId: string | null; revision: number } | null {
@@ -562,7 +563,10 @@ export function appendStreamingAssistant(db: Db, input: Omit<Parameters<typeof a
     writeRunState(db, {
       workspaceId: input.workspaceId, sessionId: input.sessionId, updatedAt: input.createdAt,
       activeAssistantMessageId: message.id,
-      nonTerminalMessageIds: [...new Set([...state.nonTerminalMessageIds, message.id])]
+      nonTerminalMessageIds: [...new Set([...state.nonTerminalMessageIds, message.id])],
+      // This is the first normal model step after compaction (or a skip).
+      // Clear only on the new-message path; a replay must not erase newer notices.
+      runNoticeText: "", retryCount: 0, nextRetryAt: null,
     });
     return asOrdinaryMessage(message);
   })();
@@ -709,9 +713,14 @@ export function updateToolExecution(db: Db, input: { workspaceId: string; sessio
   })();
 }
 
-export function updateMessageRunNotice(db: Db, input: { workspaceId: string; sessionId: string; runId: string; runNoticeText: string; retryCount?: number; nextRetryAt?: number | null; updatedAt: number }): FencedWriteResult {
+export function updateMessageRunNotice(db: Db, input: { workspaceId: string; sessionId: string; runId: string; runNoticeText: string; compactionExpectedRevision?: number; retryCount?: number; nextRetryAt?: number | null; updatedAt: number }): FencedWriteResult {
   return db.transaction(() => {
     if (!assertFence(db, input)) return "ignored";
+    // A delayed compaction progress RPC must not resurrect its notice after
+    // commit or after the next Assistant is created. Revision mismatch is an
+    // accepted no-op, distinct from losing the Run fence.
+    if (input.compactionExpectedRevision !== undefined
+      && sessionRow(db, input.workspaceId, input.sessionId)?.revision !== input.compactionExpectedRevision) return "updated";
     const notice = input.runNoticeText
       .replace(/\r\n/g, "\n")
       .replace(/\0/g, "")
@@ -866,8 +875,8 @@ function commitCompactionMessageCurrent(db: Db, input: { id: string; workspaceId
   insertParts(db, input.id, [{ id: input.textPartId, position: 0, type: "text", text: input.text }], revision, input.createdAt);
   indexEligibleCompletedTextParts(db, input.id, input.createdAt);
   updateSessionPointer(db, { workspaceId: input.workspaceId, sessionId: input.sessionId, headMessageId: input.id, contextRootMessageId: input.id, revision, now: input.createdAt });
-  db.prepare("update session_run_state set last_response_total_tokens=null where workspace_id=? and session_id=?")
-    .run(input.workspaceId, input.sessionId);
+  db.prepare("update session_run_state set last_response_total_tokens=null, run_notice_text='', retry_count=0, next_retry_at=null, updated_at=? where workspace_id=? and session_id=?")
+    .run(input.createdAt, input.workspaceId, input.sessionId);
   return asCompactionMessage(getMessage(db, input.id)!);
 }
 
@@ -924,6 +933,10 @@ export function commitCompactionMessageWithRunFence(db: Db, input: {
       return exactReplay ? asCompactionMessage(getMessage(db, input.id)!) : null;
     }
     if (!assertFence(db, input)) return null;
+    // Cancellation may have persisted a terminal intent before convergence
+    // releases the session fence. A late proactive commit must not append to
+    // a Run whose work phase has already ended.
+    if (!run || !["work_pending", "work_in_progress"].includes(run.executionPhase)) return null;
     if (input.retainedFromMessageId != null) {
       if (!input.primaryProfile) throw new Error("primary profile is required for a retained compaction anchor");
       assertPrimaryProfileMatchesRun(getRunRecord(db, input.runId), input.primaryProfile);

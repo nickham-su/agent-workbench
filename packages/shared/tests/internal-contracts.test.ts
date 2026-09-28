@@ -33,6 +33,15 @@ import {
   AgentSubtaskErrorCode,
 } from "../src/internal-contracts/agent-api-subtask.js";
 
+test("compaction notice revision guard is optional for ordinary notice requests", () => {
+  const request = { workspaceId: "ws-a", sessionId: "session-a", runId: "run-a", runNoticeText: "retry", updatedAt: 1 };
+  const schema = AgentApiExport.AgentApiUpdateRunNoticeRequestSchema;
+  assert.equal(Value.Check(schema, request), true);
+  assert.equal(Value.Check(schema, { ...request, compactionExpectedRevision: 0 }), true);
+  assert.equal(Value.Check(schema, { ...request, compactionExpectedRevision: -1 }), false);
+  assert.equal(Value.Check(schema, { ...request, compactionExpectedRevision: "1" }), false);
+});
+
 const validEnqueueRequest = {
   workspaceId: "ws-a",
   sessionId: "sess-a",

@@ -1,7 +1,8 @@
 import type { ModelMessage } from "ai";
 import { ApiConflictError, InternalRpcHttpError, InternalRpcInvalidResponseError, type AgentApiClient, type ExecutionProfile } from "../apiClient.js";
+import { computeRetryBackoffMs, normalizeModelRequestMaxRetries } from "../retry-backoff.js";
 import { estimateCompactionSummaryText } from "./estimator-v1.js";
-import { computeCompactionProfileFingerprint, planCompaction, SummaryPlanningBudget, type SummaryLogicalCallHandle } from "./planner.js";
+import { computeCompactionProfileFingerprint, planCompaction } from "./planner.js";
 import { summaryInputToModelMessages } from "./summary-input-to-model-messages.js";
 import {
   CompactionPlanningError,
@@ -13,10 +14,10 @@ import {
 } from "./types.js";
 
 const MIN_REMAINING_MS = 50;
-const PROVIDER_RETRY_DELAY_MS = 1_000;
+const COMMIT_REPLAY_DELAY_MS = 1_000;
+const COMMIT_CONFIRM_MAX_MS = 1_000;
 
 type SummaryProfile = Pick<ExecutionProfile, "provider" | "model">;
-type ProviderFailureKind = "context_limit" | "transient" | "permanent";
 
 class CompactionCommitOutcomeUncertainError extends Error {
   constructor(cause: unknown) {
@@ -33,11 +34,29 @@ export class CompactionWorkDeadlineExceededError extends Error {
   }
 }
 
+class CompactionRetryNoticeWriteError extends Error {
+  constructor() { super("compaction retry notice write failed"); }
+}
+/** A stale Run must stop, not turn a notice failure into a new terminal tuple. */
+export class CompactionNoticeFenceLostError extends Error {
+  constructor() { super("compaction notice run fence lost"); }
+}
+
 export type CompactionExecutorDependencies = {
   apiClient: Pick<AgentApiClient, "getExecutionProfile" | "getCompactionSource" | "commitCompactionWithTerminalIntent" | "confirmCompactionCommit">;
   nowMs?: () => number;
   /** Test seam only; overrides the mode-resolved compaction deadline. */
   workDeadlineMsByMode?: Partial<Record<CompactionMode, number>>;
+  /** Test seam only; production waits must remain abortable. */
+  summaryRetrySleep?: (ms: number, signal: AbortSignal) => Promise<boolean>;
+  /** Called before each summary retry wait; not part of the provider retry count. */
+  onSummaryRetry?: (input: {
+    expectedRevision: number;
+    retryAttempt: number;
+    maxRetries: number;
+    delayMs: number;
+    abortSignal: AbortSignal;
+  }) => Promise<void>;
   newId: (prefix: string) => string;
   generateSummary: (params: {
     profile: SummaryProfile;
@@ -46,29 +65,19 @@ export type CompactionExecutorDependencies = {
     timeoutMs: number | null;
     abortSignal: AbortSignal;
   }) => Promise<{ text: string }>;
-  isContextLimitError: (error: unknown) => boolean;
 };
 
 function compactionPrompt() {
   return "Summarize the preceding conversation faithfully. Preserve decisions, completed work, constraints, unresolved issues, and tool outcomes needed for the next turn.";
 }
 
-function combineSummaries(summaries: readonly string[]) {
-  return summaries.join("\n\n---\n\n");
-}
 
 function primarySummaryProfile(profile: ExecutionProfile): SummaryProfile {
   return { provider: profile.provider, model: profile.model };
 }
 
-function candidateSummaryProfile(profile: ExecutionProfile): SummaryProfile {
+function selectedSummaryProfile(profile: ExecutionProfile): SummaryProfile {
   return profile.compaction ?? primarySummaryProfile(profile);
-}
-
-function sameSummaryProfile(left: SummaryProfile, right: SummaryProfile) {
-  const leftModel = left.model.providerModelId?.trim() || left.model.id;
-  const rightModel = right.model.providerModelId?.trim() || right.model.id;
-  return left.provider.id === right.provider.id && left.provider.npm === right.provider.npm && leftModel === rightModel;
 }
 
 /**
@@ -98,11 +107,19 @@ export class CompactionExecutor {
     const casState = params.casState ?? { remaining: policy.casReplanAllowance };
     const messageId = this.dependencies.newId("message");
     const textPartId = this.dependencies.newId("part");
-    const summaryBudget = new SummaryPlanningBudget();
     const deadlineController = new AbortController();
     const abortForCallerCancellation = () => deadlineController.abort();
     params.abortSignal.addEventListener("abort", abortForCallerCancellation, { once: true });
     const deadlineTimer = workDeadlineMs == null ? null : setTimeout(() => deadlineController.abort(), workDeadlineMs);
+    // A definitive non-commit may return skipped or replan only while this work
+    // is still live. A confirmed commit must instead retain its success result.
+    const stopAfterNonCommit = (): Extract<CompactionExecutionResult, { kind: "failed" | "unavailable" }> | null => {
+      if (params.abortSignal.aborted) return { kind: "failed", reason: "cancelled" };
+      if (deadline != null && (deadlineController.signal.aborted || deadline - this.nowMs() < MIN_REMAINING_MS)) {
+        return { kind: "unavailable", reason: "deadline" };
+      }
+      return null;
+    };
     let initialFingerprint: string | null = null;
 
     try {
@@ -117,6 +134,8 @@ export class CompactionExecutor {
         const profile = await this.dependencies.apiClient.getExecutionProfile({
           workspaceId: params.workspaceId, sessionId: params.sessionId, runId: params.runId,
         }, { abortSignal: deadlineController.signal, ...this.remainingTimeoutOption(remaining) });
+        // Control reads can resolve normally after cancellation or the deadline.
+        const sourceRemaining = this.remaining(deadline, deadlineController.signal, params.abortSignal);
         const fingerprint = computeCompactionProfileFingerprint(profile);
         if (initialFingerprint == null) initialFingerprint = fingerprint;
         else if (fingerprint !== initialFingerprint) {
@@ -126,8 +145,10 @@ export class CompactionExecutor {
         }
         const source = await this.dependencies.apiClient.getCompactionSource({
           workspaceId: params.workspaceId, sessionId: params.sessionId, runId: params.runId,
-        }, { abortSignal: deadlineController.signal, ...this.remainingTimeoutOption(remaining) });
+        }, { abortSignal: deadlineController.signal, ...this.remainingTimeoutOption(sourceRemaining) });
+        this.remaining(deadline, deadlineController.signal, params.abortSignal);
         const planned = planCompaction({ source, profile, mode: params.mode });
+        this.remaining(deadline, deadlineController.signal, params.abortSignal);
         if (planned.kind === "blocked") return { kind: "blocked", reason: planned.reason };
         if (planned.kind === "media_requires_resend") return { kind: "media_requires_resend" };
         if (planned.kind === "no_prefix") return { kind: "skipped", reason: "no_prefix" };
@@ -146,31 +167,26 @@ export class CompactionExecutor {
         try {
           summaryText = await this.summarize({
             blocks: planned.summaryBlocks,
+            expectedRevision: plan.expectedRevision,
             profile,
             system: source.oneShotSystem,
             deadline,
             abortSignal: deadlineController.signal,
-            maxNetworkRequestsPerLogicalCall: policy.maxNetworkRequestsPerLogicalCall,
-            maxNetworkRequestCount: policy.maxNetworkRequestCount,
-            budget: summaryBudget,
           });
+          this.remaining(deadline, deadlineController.signal, params.abortSignal);
         } catch (error) {
-          if (error instanceof CompactionPlanningError) {
-            return error.code === "summary_input_limit"
-              ? { kind: "summary_input_limit" }
-              : { kind: "failed", reason: "data_invariant" };
-          }
           if (params.abortSignal.aborted) return { kind: "failed", reason: "cancelled" };
           if (error instanceof CompactionWorkDeadlineExceededError) return { kind: "unavailable", reason: "deadline" };
           if (deadlineController.signal.aborted || (deadline != null && this.nowMs() >= deadline)) return { kind: "unavailable", reason: "deadline" };
-          const failure = this.classifyProviderFailure(error, deadlineController.signal);
-          return failure === "transient"
-            ? { kind: "unavailable", reason: "transient" }
-            : { kind: "failed", reason: "provider" };
+          if (error instanceof CompactionNoticeFenceLostError) throw error;
+          if (error instanceof CompactionPlanningError) return { kind: "failed", reason: "data_invariant" };
+          if (error instanceof CompactionRetryNoticeWriteError) return { kind: "failed", reason: "control" };
+          return { kind: "failed", reason: "provider" };
         }
         if (!summaryText) return { kind: "skipped", reason: "no_progress" };
 
         const estimatedAfter = estimateCompactionSummaryText(summaryText) + plan.estimatedRetainedCost;
+        this.remaining(deadline, deadlineController.signal, params.abortSignal);
         if (estimatedAfter >= plan.estimatedBeforeCost) return { kind: "skipped", reason: "no_progress" };
 
         const request = {
@@ -195,37 +211,54 @@ export class CompactionExecutor {
             onAttempt: () => { commitAttempted = true; },
           });
           if (committed.result === "updated" && committed.summaryMessageId) return { kind: "committed", summaryMessageId: committed.summaryMessageId, plan };
-          return { kind: "skipped", reason: "cas_conflict" };
+          // `ignored` also covers an exact-replay mismatch, not just a lost
+          // Run fence. An `updated` response without an artifact ID is equally
+          // unsafe to treat as a CAS skip. Neither permits this Worker to
+          // continue the turn or select a new terminal intent.
+          return { kind: "failed", reason: "commit_outcome_uncertain" };
         } catch (error) {
           if (!(error instanceof ApiConflictError)) {
-            if (params.abortSignal.aborted) return { kind: "failed", reason: "cancelled" };
             if (commitAttempted && this.isCommitOutcomeUncertain(error)) {
+              // Once sent, cancellation/timeout stops work but cannot prove the
+              // write absent. A separate, bounded read may establish success.
+              const confirmMs = deadline == null ? COMMIT_CONFIRM_MAX_MS
+                : Math.min(COMMIT_CONFIRM_MAX_MS, deadline - this.nowMs());
+              if (confirmMs <= 0) return { kind: "failed", reason: "commit_outcome_uncertain" };
+              const confirmationController = new AbortController();
+              const confirmationTimer = setTimeout(() => confirmationController.abort(), confirmMs);
               try {
                 const confirmed = await this.dependencies.apiClient.confirmCompactionCommit({
                   workspaceId: params.workspaceId, sessionId: params.sessionId, runId: params.runId, messageId,
-                }, { abortSignal: deadlineController.signal, ...this.remainingTimeoutOption(this.remaining(deadline, deadlineController.signal, params.abortSignal)) });
+                }, { abortSignal: confirmationController.signal, timeoutMs: confirmMs });
                 if (confirmed.outcome === "committed") return { kind: "committed", summaryMessageId: messageId, plan };
-                return params.mode === "proactive"
-                  ? { kind: "skipped", reason: "commit_not_committed" }
-                  : { kind: "failed", reason: "control" };
-              } catch (confirmationError) {
-                if (params.abortSignal.aborted) return { kind: "failed", reason: "cancelled" };
+                // This is a read-only observation, not a barrier against a
+                // previously sent request that may still arrive later.
                 return { kind: "failed", reason: "commit_outcome_uncertain" };
+              } catch {
+                return { kind: "failed", reason: "commit_outcome_uncertain" };
+              } finally {
+                clearTimeout(confirmationTimer);
               }
             }
+            if (params.abortSignal.aborted) return { kind: "failed", reason: "cancelled" };
             // Before the first write request no remote state could have changed.
             if (!commitAttempted && error instanceof CompactionWorkDeadlineExceededError) {
               return { kind: "unavailable", reason: "deadline" };
             }
             return { kind: "failed", reason: this.isControlError(error) ? "control" : "data_invariant" };
           }
+          const stop = stopAfterNonCommit();
+          if (stop) return stop;
           if (casState.remaining <= 0) return { kind: "skipped", reason: "cas_conflict" };
           casState.remaining -= 1;
         }
       }
     } catch (error) {
       if (params.abortSignal.aborted) return { kind: "failed", reason: "cancelled" };
-      if (error instanceof CompactionWorkDeadlineExceededError || deadlineController.signal.aborted) return { kind: "unavailable", reason: "deadline" };
+      if (error instanceof CompactionWorkDeadlineExceededError || deadlineController.signal.aborted || (deadline != null && this.nowMs() >= deadline)) {
+        return { kind: "unavailable", reason: "deadline" };
+      }
+      if (error instanceof CompactionNoticeFenceLostError) throw error;
       if (error instanceof CompactionPlanningError) return { kind: "failed", reason: "data_invariant" };
       if (this.isTransientControlError(error)) return { kind: "unavailable", reason: "transient" };
       return { kind: "failed", reason: this.isControlError(error) ? "control" : "data_invariant" };
@@ -293,7 +326,7 @@ export class CompactionExecutor {
       if (!this.isRetryableControlWriteError(error)) throw error;
       // Once one response is lost, a later retry failure cannot prove that the
       // original write was absent. Preserve this fact for the confirmation path.
-      if (!await this.sleepWithAbort(PROVIDER_RETRY_DELAY_MS, params.abortSignal)) {
+      if (!await this.sleepWithAbort(COMMIT_REPLAY_DELAY_MS, params.abortSignal)) {
         throw new CompactionCommitOutcomeUncertainError(error);
       }
       try {
@@ -336,75 +369,54 @@ export class CompactionExecutor {
     return typeof raw.statusCode === "number" ? raw.statusCode : typeof raw.status === "number" ? raw.status : null;
   }
 
-  private classifyProviderFailure(error: unknown, deadlineSignal: AbortSignal): ProviderFailureKind {
-    if (this.dependencies.isContextLimitError(error)) return "context_limit";
-    if (deadlineSignal.aborted) return "transient";
-    const status = this.statusOf(error);
-    if (error instanceof Error && (error.name === "FetchError" || error.name === "TypeError" || error.name === "TimeoutError" || error.name === "AbortError")) return "transient";
-    if (status === 429 || (status != null && status >= 500)) return "transient";
-    return "permanent";
-  }
-
   private async summarize(params: {
     blocks: readonly SummaryInputBlock[];
+    expectedRevision: number;
     profile: ExecutionProfile;
     system: string;
     deadline: number | null;
     abortSignal: AbortSignal;
-    maxNetworkRequestsPerLogicalCall: 1 | 2;
-    maxNetworkRequestCount: 30 | 60;
-    budget: SummaryPlanningBudget;
   }) {
-    const summarizeBlocks = async (blocks: readonly SummaryInputBlock[]): Promise<string> => {
-      const partition = params.budget.beginPartition();
-      const candidateCall = params.budget.beginLogicalCall(partition);
-      const messages = [...summaryInputToModelMessages(blocks), { role: "user" as const, content: compactionPrompt() }];
-      const request = async (call: SummaryLogicalCallHandle, profile: SummaryProfile) => {
-        let lastError: unknown;
-        for (let attempt = 0; attempt < params.maxNetworkRequestsPerLogicalCall; attempt += 1) {
-          params.budget.beginNetworkRequest(call, {
-            maxNetworkRequestsPerLogicalCall: params.maxNetworkRequestsPerLogicalCall,
-            maxNetworkRequestCount: params.maxNetworkRequestCount,
-          });
-          try {
-            return await this.dependencies.generateSummary({ profile, system: params.system, messages, timeoutMs: this.remaining(params.deadline, params.abortSignal), abortSignal: params.abortSignal });
-          } catch (error) {
-            lastError = error;
-            if (this.classifyProviderFailure(error, params.abortSignal) !== "transient" || attempt + 1 >= params.maxNetworkRequestsPerLogicalCall) throw error;
-            if (!await this.sleepWithAbort(PROVIDER_RETRY_DELAY_MS, params.abortSignal)) throw new CompactionWorkDeadlineExceededError();
-          }
-        }
-        throw lastError;
-      };
-
+    const messages = [...summaryInputToModelMessages(params.blocks), { role: "user" as const, content: compactionPrompt() }];
+    const profile = selectedSummaryProfile(params.profile);
+    const maxRetries = normalizeModelRequestMaxRetries(params.profile.runtime.modelRequestMaxRetries);
+    for (let retryCount = 0; ; retryCount += 1) {
+      // Validate the shared work deadline before the provider call, not in its retry catch.
+      if (params.abortSignal.aborted) throw new CompactionWorkDeadlineExceededError();
+      const timeoutMs = this.remaining(params.deadline, params.abortSignal);
       let response: { text: string };
-      const candidate = candidateSummaryProfile(params.profile);
-      const primary = primarySummaryProfile(params.profile);
       try {
-        response = await request(candidateCall, candidate);
+        response = await this.dependencies.generateSummary({ profile, system: params.system, messages, timeoutMs, abortSignal: params.abortSignal });
       } catch (error) {
-        if (!this.dependencies.isContextLimitError(error)) throw error;
-        if (sameSummaryProfile(candidate, primary)) {
-          if (blocks.length < 2) throw new CompactionPlanningError("summary_input_limit", "summary input cannot be split further");
-          const [left, right] = params.budget.splitForContextLimit(blocks);
-          return combineSummaries([await summarizeBlocks(left), await summarizeBlocks(right)]);
+        if (params.abortSignal.aborted || (params.deadline != null && this.nowMs() >= params.deadline)) {
+          throw new CompactionWorkDeadlineExceededError();
         }
-        // Only capacity failure can use the primary as the second logical call.
-        const primaryCall = params.budget.beginLogicalCall(partition, candidateCall);
+        if (retryCount >= maxRetries) throw error;
+        const delayMs = computeRetryBackoffMs(retryCount, params.profile.runtime.modelRequestRetryBackoffMaxMs);
+        if (params.deadline != null && this.nowMs() + delayMs >= params.deadline) {
+          throw new CompactionWorkDeadlineExceededError();
+        }
         try {
-          response = await request(primaryCall, primary);
-        } catch (primaryError) {
-          if (!this.dependencies.isContextLimitError(primaryError)) throw primaryError;
-          if (blocks.length < 2) throw new CompactionPlanningError("summary_input_limit", "summary input cannot be split further");
-          const [left, right] = params.budget.splitForContextLimit(blocks);
-          return combineSummaries([await summarizeBlocks(left), await summarizeBlocks(right)]);
+          await this.dependencies.onSummaryRetry?.({
+            expectedRevision: params.expectedRevision,
+            retryAttempt: retryCount + 1,
+            maxRetries,
+            delayMs,
+            abortSignal: params.abortSignal,
+          });
+        } catch (noticeError) {
+          if (params.abortSignal.aborted || (params.deadline != null && this.nowMs() >= params.deadline)) {
+            throw new CompactionWorkDeadlineExceededError();
+          }
+          if (noticeError instanceof CompactionNoticeFenceLostError) throw noticeError;
+          throw new CompactionRetryNoticeWriteError();
         }
+        this.remaining(params.deadline, params.abortSignal);
+        const sleep = this.dependencies.summaryRetrySleep ?? ((ms: number, signal: AbortSignal) => this.sleepWithAbort(ms, signal));
+        if (!await sleep(delayMs, params.abortSignal)) throw new CompactionWorkDeadlineExceededError();
+        continue;
       }
-      const text = String(response.text || "").trim();
-      if (!text) return "";
-      params.budget.finalizeLeaf();
-      return text;
-    };
-    return await summarizeBlocks(params.blocks);
+      return String(response.text || "").trim();
+    }
   }
 }

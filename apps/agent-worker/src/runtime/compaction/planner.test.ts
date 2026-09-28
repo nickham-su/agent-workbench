@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { estimatePrimaryMaterializedBlock } from "./estimator-v1.js";
-import { COMPACTION_MODE_POLICIES, computeCompactionProfileFingerprint, planCompaction, SummaryPlanningBudget } from "./planner.js";
+import { COMPACTION_MODE_POLICIES, computeCompactionProfileFingerprint, planCompaction } from "./planner.js";
 import { materializePrimaryBlocks } from "./primary-materializer.js";
 import { testProfile, testSource } from "./test-fixtures.js";
 
@@ -120,50 +120,4 @@ test("profile fingerprint changes only with normalized profile semantics", () =>
   assert.equal(noSecretChange, baseline);
   assert.notEqual(modelChange, baseline);
   assert.notEqual(windowChange, baseline);
-});
-
-test("summary planning budget enforces partition, candidate-primary, retry and total request bounds", () => {
-  const policy = COMPACTION_MODE_POLICIES.manual;
-  const budget = new SummaryPlanningBudget({ attemptedPartitionCount: 14, finalLeafCount: 7, logicalProviderCallCount: 28, networkRequestCount: 58 });
-  const partition = budget.beginPartition();
-  budget.finalizeLeaf();
-  const candidate = budget.beginLogicalCall(partition);
-  budget.beginNetworkRequest(candidate, policy);
-  budget.beginNetworkRequest(candidate, policy);
-  assert.throws(() => budget.beginNetworkRequest(candidate, policy), /logical call network/);
-  const primary = budget.beginLogicalCall(partition, candidate);
-  assert.throws(() => budget.beginLogicalCall(partition, primary), /partition logical/);
-  assert.throws(() => budget.beginNetworkRequest(primary, policy), /network request limit/);
-  assert.throws(() => budget.beginPartition(), /partition/);
-  assert.throws(() => budget.finalizeLeaf(), /leaf/);
-  const globalLimit = new SummaryPlanningBudget({ logicalProviderCallCount: 30 });
-  const freshPartition = globalLimit.beginPartition();
-  assert.throws(() => globalLimit.beginLogicalCall(freshPartition), /logical provider/);
-  assert.equal(Object.isFrozen(partition), true);
-  assert.equal(Object.isFrozen(candidate), true);
-  assert.equal(Object.prototype.hasOwnProperty.call(candidate, "networkRequestCount"), false);
-  assert.deepEqual(budget.splitForContextLimit([1, 2, 3, 4, 5]), [[1, 2], [3, 4, 5]]);
-  assert.throws(() => budget.splitForContextLimit([1]), /split/);
-  assert.throws(() => budget.beginLogicalCall({ id: 999 }), /handle is unknown/);
-  const forged = { id: partition.id };
-  assert.throws(() => budget.beginLogicalCall(forged), /handle is unknown/);
-  const unregisteredCall = { partitionId: partition.id, ordinal: 1 as const };
-  assert.throws(() => budget.beginNetworkRequest(unregisteredCall, policy), /call handle is unknown/);
-});
-
-test("summary planning budget rejects invalid initial counters before reserving work", () => {
-  for (const initial of [
-    { finalLeafCount: -1 },
-    { attemptedPartitionCount: 15.5 },
-    { logicalProviderCallCount: Number.POSITIVE_INFINITY },
-    { finalLeafCount: 9 },
-    { attemptedPartitionCount: 16 },
-    { logicalProviderCallCount: 31 },
-    { networkRequestCount: -1 },
-  ]) {
-    assert.throws(() => new SummaryPlanningBudget(initial), /initial .+ outside/);
-  }
-  assert.deepEqual(new SummaryPlanningBudget({ networkRequestCount: 60 }).snapshot(), {
-    finalLeafCount: 0, attemptedPartitionCount: 0, logicalProviderCallCount: 0, networkRequestCount: 60,
-  });
 });

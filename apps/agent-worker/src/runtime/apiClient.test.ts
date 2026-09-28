@@ -1110,7 +1110,8 @@ test("run methods use shared endpoint method/path and validate literal success",
     internalRpcTimeoutMs: 15_000,
   });
 
-  await client.updateRunNotice(runStateInput);
+  await client.updateRunNotice({ ...runStateInput, compactionExpectedRevision: 7 });
+  assert.deepEqual(requests[0]?.body, { ...runStateInput, compactionExpectedRevision: 7 });
   await client.markRunWorkInProgress({ workspaceId: "WORKSPACE", sessionId: "SESSION", runId: "RUN", updatedAt: 100 });
   await client.persistRunTerminalIntent(terminalControlInput);
   await client.convergeRunTerminal({ workspaceId: "WORKSPACE", sessionId: "SESSION", runId: "RUN", updatedAt: 100 });

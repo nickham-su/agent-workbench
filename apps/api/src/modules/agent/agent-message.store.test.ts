@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import Database from "better-sqlite3";
 import { test } from "node:test";
 import { initSchema } from "../../infra/db/schema.js";
+import { SqliteRunLifecyclePersistence } from "./lifecycle/sqlite-run-lifecycle-persistence.js";
 import {
   AgentMessageDomainError,
   AgentMessageGraphInvariantError,
@@ -52,6 +53,55 @@ function activate(db: Database.Database, sessionId = "s-a", workspaceId = "ws-a"
   createMessageRunRecord(db, { runId, workspaceId, sessionId, triggerMessageId: null, agentId: "agent", providerId: "provider", modelId: "model", status: "running", createdAt: 1 });
   db.prepare("update session_run_state set status='running',active_run_id=? where workspace_id=? and session_id=?").run(runId, workspaceId, sessionId);
 }
+
+test("compaction notice uses the session revision, and atomic commit clears it before late RPCs", () => {
+  const db = createDb(); session(db); activate(db);
+  appendMessage(db, { id: "user", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", parts: [], createdAt: 2 });
+  const notice = { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", runNoticeText: "compaction retry", compactionExpectedRevision: 1, retryCount: 2, nextRetryAt: 30, updatedAt: 3 };
+  assert.equal(updateMessageRunNotice(db, notice), "updated");
+  assert.deepEqual({ text: getMessageRunState(db, "ws-a", "s-a")!.runNoticeText, count: getMessageRunState(db, "ws-a", "s-a")!.retryCount }, { text: "compaction retry", count: 2 });
+  assert.ok(commitCompactionMessageWithRunFence(db, {
+    id: "summary", workspaceId: "ws-a", sessionId: "s-a", runId: "run-a",
+    expectedHeadMessageId: "user", expectedRevision: 1, textPartId: "part", text: "summary", createdAt: 4,
+  }));
+  const state = getMessageRunState(db, "ws-a", "s-a")!;
+  assert.equal(state.runNoticeText, ""); assert.equal(state.retryCount, 0); assert.equal(state.nextRetryAt, null);
+  assert.equal(updateMessageRunNotice(db, { ...notice, updatedAt: 5 }), "updated", "stale revision is not a fence failure");
+  assert.equal(getMessageRunState(db, "ws-a", "s-a")!.runNoticeText, "");
+  db.prepare("update session_run_state set status='idle', active_run_id=null where workspace_id='ws-a' and session_id='s-a'").run();
+  assert.equal(updateMessageRunNotice(db, notice), "ignored", "lost Run fence remains distinguishable from stale revision");
+});
+
+test("a pending cancellation intent rejects a late proactive compaction commit", () => {
+  const db = createDb(); session(db); activate(db);
+  appendMessage(db, { id: "user", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", parts: [], createdAt: 2 });
+  persistRunTerminalIntent(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", status: "cancelled", code: "run_cancelled", detail: null, updatedAt: 3 });
+  assert.equal(commitCompactionMessageWithRunFence(db, {
+    id: "summary", workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", expectedHeadMessageId: "user", expectedRevision: 1,
+    textPartId: "part", text: "summary", createdAt: 4,
+  }), null);
+  assert.equal(getMessage(db, "summary"), null);
+  assert.deepEqual(getPersistedRunTerminalIntent(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a" }),
+    { status: "cancelled", code: "run_cancelled", detail: null });
+  db.close();
+});
+
+test("skipped compaction: first streaming assistant clears notice; its replay leaves newer normal notices intact", () => {
+  const db = createDb(); session(db); activate(db);
+  appendMessage(db, { id: "user", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", parts: [], createdAt: 2 });
+  const retry = { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", runNoticeText: "compaction retry", compactionExpectedRevision: 1, retryCount: 2, nextRetryAt: 30, updatedAt: 3 };
+  assert.equal(updateMessageRunNotice(db, retry), "updated");
+  const assistant = { id: "assistant", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: "user", expectedRevision: 1, runId: "run-a", createdAt: 4 };
+  appendStreamingAssistant(db, assistant);
+  const state = getMessageRunState(db, "ws-a", "s-a")!;
+  assert.equal(state.runNoticeText, ""); assert.equal(state.retryCount, 0); assert.equal(state.nextRetryAt, null);
+  assert.equal(updateMessageRunNotice(db, { ...retry, updatedAt: 5 }), "updated");
+  assert.equal(getMessageRunState(db, "ws-a", "s-a")!.runNoticeText, "");
+  const normal = { ...retry, compactionExpectedRevision: undefined, runNoticeText: "normal model retry", retryCount: 3, nextRetryAt: 60, updatedAt: 6 };
+  assert.equal(updateMessageRunNotice(db, normal), "updated", "ordinary notices are not revision gated");
+  appendStreamingAssistant(db, { ...assistant, expectedRevision: 0 });
+  assert.equal(getMessageRunState(db, "ws-a", "s-a")!.runNoticeText, "normal model retry", "replay must not erase a newer notice");
+});
 
 function withForeignKeysDisabled(db: Database.Database, mutate: () => void) {
   db.pragma("foreign_keys = OFF");
@@ -151,7 +201,7 @@ test("Provider failure terminal codes persist and converge without storing serve
   }
 });
 
-test("compaction confirmation accepts only the current owned artifact and manual atomic intent", () => {
+test("compaction confirmation retains owned artifact after head advances and intent converges", () => {
   const db = createDb();
   session(db);
   createMessageRunRecord(db, { runId: "manual-run", workspaceId: "ws-a", sessionId: "s-a", triggerMessageId: null, agentId: "agent", providerId: "provider", modelId: "model", runKind: "manual_compaction", status: "running", createdAt: 1 });
@@ -166,7 +216,26 @@ test("compaction confirmation accepts only the current owned artifact and manual
   assert.equal(hasCommittedCompactionArtifact(db, input), true);
   assert.equal(hasCommittedCompactionArtifact(db, { ...input, runId: "another-run" }), false);
   appendMessage(db, { id: "next", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: "summary", expectedRevision: 2, type: "system", status: "completed", parts: [], createdAt: 4 });
-  assert.equal(hasCommittedCompactionArtifact(db, input), false);
+  assert.equal(hasCommittedCompactionArtifact(db, input), true);
+  assert.deepEqual(convergeRunTerminal(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "manual-run", updatedAt: 5 }), { kind: "transitioned", finalStatus: "completed" });
+  assert.equal(hasCommittedCompactionArtifact(db, input), true);
+  db.close();
+});
+
+test("cancel adopts a manual compaction intent already atomically committed", () => {
+  const db = createDb(); session(db);
+  createMessageRunRecord(db, { runId: "manual-run", workspaceId: "ws-a", sessionId: "s-a", triggerMessageId: null, agentId: "agent", providerId: "provider", modelId: "model", runKind: "manual_compaction", status: "running", createdAt: 1 });
+  db.prepare("update session_run_state set status='running',active_run_id='manual-run' where workspace_id='ws-a' and session_id='s-a'").run();
+  appendMessage(db, { id: "start", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", parts: [], createdAt: 2 });
+  commitCompactionWithTerminalIntent(db, { id: "summary", workspaceId: "ws-a", sessionId: "s-a", runId: "manual-run", expectedHeadMessageId: "start", expectedRevision: 1, retainedFromMessageId: null, textPartId: "part", text: "brief", createdAt: 3 });
+  const persistence = new SqliteRunLifecyclePersistence(db);
+  const result = persistence.cancelSessions({ workspaceId: "ws-a", rootSessionId: "s-a", updatedAt: 4, listActiveChildSessionIds: () => [] });
+  assert.deepEqual(result.cancelledRunIds, []);
+  assert.deepEqual(result.terminalIntents, [{ workspaceId: "ws-a", sessionId: "s-a", runId: "manual-run" }]);
+  for (const intent of result.terminalIntents) persistence.convergeRunTerminal({ ...intent, updatedAt: 4 });
+  assert.equal(getRunRecord(db, "manual-run")?.status, "completed");
+  assert.equal(getRunRecord(db, "manual-run")?.terminalResultCode, "compaction_completed");
+  assert.equal(hasCommittedCompactionArtifact(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "manual-run", messageId: "summary" }), true);
   db.close();
 });
 
@@ -1060,6 +1129,8 @@ test("Compaction skeleton atomically writes strict compaction, Session pointers 
   createMessageRunRecord(db, { runId: "compaction-run", workspaceId: "ws-a", sessionId: "s-a", triggerMessageId: null, agentId: "agent", providerId: "provider", modelId: "model", runKind: "manual_compaction", status: "running", createdAt: 1 });
   db.prepare("update session_run_state set status='running',active_run_id='compaction-run' where workspace_id='ws-a' and session_id='s-a'").run();
   appendMessage(db, { id: "compaction-user", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", parts: [{ id: "compaction-user-text", position: 0, type: "text", text: "keep" }], createdAt: 2 });
+  const notice = { workspaceId: "ws-a", sessionId: "s-a", runId: "compaction-run", runNoticeText: "compaction retry", compactionExpectedRevision: 1, retryCount: 2, nextRetryAt: 30, updatedAt: 2 };
+  assert.equal(updateMessageRunNotice(db, notice), "updated");
   const message = commitCompactionWithTerminalIntent(db, {
     workspaceId: "ws-a", sessionId: "s-a", runId: "compaction-run", id: "compaction", textPartId: "compaction-text",
     expectedHeadMessageId: "compaction-user", expectedRevision: 1, text: "summary", retainedFromMessageId: "compaction-user", createdAt: 3, primaryProfile: primaryProfile(),
@@ -1069,6 +1140,9 @@ test("Compaction skeleton atomically writes strict compaction, Session pointers 
   });
   assert.deepEqual(getMessageSession(db, "ws-a", "s-a") && { head: getMessageSession(db, "ws-a", "s-a")!.headMessageId, root: getMessageSession(db, "ws-a", "s-a")!.contextRootMessageId }, { head: "compaction", root: "compaction" });
   assert.deepEqual(getPersistedRunTerminalIntent(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "compaction-run" }), { status: "completed", code: "compaction_completed", detail: null });
+  assert.deepEqual({ text: getMessageRunState(db, "ws-a", "s-a")!.runNoticeText, count: getMessageRunState(db, "ws-a", "s-a")!.retryCount, next: getMessageRunState(db, "ws-a", "s-a")!.nextRetryAt }, { text: "", count: 0, next: null });
+  assert.equal(updateMessageRunNotice(db, { ...notice, updatedAt: 5 }), "updated");
+  assert.equal(getMessageRunState(db, "ws-a", "s-a")!.runNoticeText, "");
   assert.equal(commitCompactionWithTerminalIntent(db, {
     workspaceId: "ws-a", sessionId: "s-a", runId: "compaction-run", id: "compaction", textPartId: "compaction-text",
     expectedHeadMessageId: "compaction-user", expectedRevision: 1, text: "summary", retainedFromMessageId: "compaction-user", createdAt: 3, primaryProfile: primaryProfile(),

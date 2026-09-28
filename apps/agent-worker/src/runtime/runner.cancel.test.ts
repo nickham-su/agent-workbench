@@ -90,6 +90,32 @@ test("processRun cancellation persists and converges one cancelled terminal tupl
   assert.equal(convergences.length, 1);
 });
 
+test("user and subtask terminal Assistant commits take precedence over a later cancel", async () => {
+  for (const runKind of ["user", "subtask"] as const) {
+    const controller = new AbortController();
+    const intents: string[] = [];
+    const convergences: string[] = [];
+    const apiClient = {
+      async markRunWorkInProgress() { return { result: "updated" }; },
+      async getExecutionProfile() { return baseProfile(); },
+      async getPromptContext() { return baseContext(); },
+      async persistRunTerminalIntent(input: { status: string }) { intents.push(input.status); },
+      async convergeRunTerminal() { convergences.push(runKind); return { kind: "transitioned", finalStatus: "completed" }; },
+    };
+    const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+    (runner as any).runModelStep = async () => {
+      // The terminal Assistant transaction has already atomically persisted
+      // completed when cancellation arrives before processRun sees its result.
+      controller.abort();
+      return { aborted: false, toolCallCount: 0, hasVisibleText: true, terminalIntentPersisted: true };
+    };
+
+    await processRunForTest(runner, { ...makeRun(`sess_${runKind}`, `run_${runKind}`), runKind }, controller.signal);
+    assert.deepEqual(intents, [], `${runKind} must not write a conflicting cancelled intent`);
+    assert.deepEqual(convergences, [runKind]);
+  }
+});
+
 test("terminal intent success only retries convergence and preserves completed tuple", async () => {
   const intents: string[] = [];
   let convergences = 0;
@@ -236,13 +262,162 @@ test("proactive compaction commit outcome 无法确认时不会继续旧 context
 
   await processRunForTest(runner, makeRun("sess_uncertain", "run_uncertain"), new AbortController().signal);
 
-  assert.deepEqual(terminalCodes, ["run_failed"]);
+  assert.deepEqual(terminalCodes, [], "an unconfirmed write may still persist a completed artifact");
 });
 
-test("proactive transient/deadline 可跳过并继续主模型", async () => {
+test("manual committed intent wins over a cancellation arriving with the commit response", async () => {
+  const caller = new AbortController();
+  const intents: string[] = [];
+  const convergences: string[] = [];
+  const apiClient = {
+    async markRunWorkInProgress() { return { result: "updated" }; },
+    async getExecutionProfile() { return baseProfile(); },
+    async persistRunTerminalIntent(input: { status: string }) { intents.push(input.status); return { result: "updated" }; },
+    async convergeRunTerminal() { convergences.push("completed"); return { kind: "transitioned", finalStatus: "completed" }; },
+  };
+  const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+  (runner as any).executeCompaction = async () => {
+    caller.abort();
+    return { kind: "committed", summaryMessageId: "summary", plan: {} };
+  };
+  await processRunForTest(runner, { ...makeRun("sess_manual", "run_manual"), runKind: "manual_compaction" }, caller.signal);
+  assert.deepEqual(intents, []);
+  assert.deepEqual(convergences, ["completed"]);
+});
+
+test("cancelled caller with uncertain manual commit does not select a conflicting terminal tuple", async () => {
+  const caller = new AbortController();
+  const intents: string[] = [];
+  let convergences = 0;
+  const apiClient = {
+    async markRunWorkInProgress() { return { result: "updated" }; },
+    async getExecutionProfile() { return baseProfile(); },
+    async persistRunTerminalIntent(input: { status: string }) { intents.push(input.status); return { result: "updated" }; },
+    async convergeRunTerminal() { convergences += 1; return { kind: "transitioned", finalStatus: "cancelled" }; },
+  };
+  const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+  (runner as any).executeCompaction = async () => { caller.abort(); return { kind: "failed", reason: "commit_outcome_uncertain" }; };
+  await processRunForTest(runner, { ...makeRun("sess_manual", "run_manual"), runKind: "manual_compaction" }, caller.signal);
+  assert.deepEqual(intents, []);
+  assert.equal(convergences, 0);
+});
+
+test("ignored proactive commit stops the old Run without entering a model step", async () => {
+  const intents: string[] = [];
+  const apiClient = {
+    async markRunWorkInProgress() { return { result: "updated" }; },
+    async getExecutionProfile() { return baseProfile(); },
+    async getPromptContext() { return { ...baseContext(), lastResponseTotalTokens: 1 }; },
+    async persistRunTerminalIntent(input: { status: string }) { intents.push(input.status); return { result: "updated" }; },
+  };
+  const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+  (runner as any).shouldAutoCompact = () => true;
+  (runner as any).executeCompaction = async () => ({ kind: "failed", reason: "commit_outcome_uncertain" });
+  (runner as any).runModelStep = async () => assert.fail("ignored commit must not issue a model request");
+  await processRunForTest(runner, makeRun("sess_ignore", "run_ignore"), new AbortController().signal);
+  assert.deepEqual(intents, []);
+});
+
+test("proactive CAS skip refreshes prompt and execution profile without auto-compacting again", async () => {
+  let contextReads = 0;
+  let profileReads = 0;
+  let compactions = 0;
+  const apiClient = {
+    async markRunWorkInProgress() { return { result: "updated" }; },
+    async getExecutionProfile() { profileReads += 1; return baseProfile(); },
+    async getPromptContext() {
+      contextReads += 1;
+      return { ...baseContext(), headMessageId: contextReads === 1 ? "old" : "new", sessionRevision: contextReads, lastResponseTotalTokens: 1 };
+    },
+    async persistRunTerminalIntent() { return { result: "updated" }; },
+    async convergeRunTerminal() { return { kind: "transitioned", finalStatus: "completed" }; },
+  };
+  const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+  (runner as any).shouldAutoCompact = () => true;
+  (runner as any).executeCompaction = async () => { compactions += 1; return { kind: "skipped", reason: "profile_changed" }; };
+  (runner as any).runModelStep = async ({ context }: { context: ReturnType<typeof baseContext> }) => {
+    assert.equal(context.headMessageId, "new");
+    assert.equal(context.sessionRevision, 2);
+    return { aborted: false, toolCallCount: 0, hasVisibleText: true };
+  };
+  await processRunForTest(runner, makeRun("sess_cas", "run_cas"), new AbortController().signal);
+  assert.equal(contextReads, 2);
+  assert.equal(profileReads, 2);
+  assert.equal(compactions, 1);
+});
+
+test("fresh pending tools after a proactive skip are processed before any model request", async () => {
+  let reads = 0;
+  let pendingCalls = 0;
+  const apiClient = {
+    async markRunWorkInProgress() { return { result: "updated" }; },
+    async getExecutionProfile() { return baseProfile(); },
+    async getPromptContext() {
+      reads += 1;
+      return { ...baseContext(), lastResponseTotalTokens: 1, pendingTools: reads === 1 ? [] : [{ id: "pending" }] };
+    },
+  };
+  const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+  (runner as any).shouldAutoCompact = () => true;
+  (runner as any).executeCompaction = async () => ({ kind: "skipped", reason: "cas_conflict" });
+  (runner as any).executePendingTools = async ({ context }: { context: ReturnType<typeof baseContext> }) => {
+    assert.equal(context.pendingTools.length, 1);
+    pendingCalls += 1;
+    return { paused: true };
+  };
+  (runner as any).runModelStep = async () => assert.fail("pending tools must run first");
+  await processRunForTest(runner, makeRun("sess_tools", "run_tools"), new AbortController().signal);
+  assert.equal(reads, 2);
+  assert.equal(pendingCalls, 1);
+});
+
+test("proactive skip followed by successfully executed pending tools does not compact again before the model", async () => {
+  let reads = 0;
+  let pending = true;
+  let compactions = 0;
+  let pendingCalls = 0;
+  let modelCalls = 0;
+  const intents: string[] = [];
+  const apiClient = {
+    async markRunWorkInProgress() { return { result: "updated" }; },
+    async getExecutionProfile() { return baseProfile(); },
+    async getPromptContext() {
+      reads += 1;
+      return { ...baseContext(), lastResponseTotalTokens: 1, pendingTools: reads > 1 && pending ? [{ id: "pending" }] : [] };
+    },
+    async persistRunTerminalIntent(input: { status: string }) { intents.push(input.status); },
+    async convergeRunTerminal() { return { kind: "transitioned", finalStatus: "completed" }; },
+  };
+  const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+  (runner as any).shouldAutoCompact = () => true;
+  (runner as any).executeCompaction = async () => {
+    compactions += 1;
+    return { kind: "skipped", reason: "cas_conflict" };
+  };
+  (runner as any).executePendingTools = async ({ context }: { context: ReturnType<typeof baseContext> }) => {
+    assert.equal(context.pendingTools.length, 1);
+    pendingCalls += 1;
+    pending = false;
+    return { paused: false };
+  };
+  (runner as any).runModelStep = async ({ context, step }: { context: ReturnType<typeof baseContext>; step: number }) => {
+    assert.equal(context.pendingTools.length, 0);
+    assert.equal(step, 1);
+    modelCalls += 1;
+    return { aborted: false, toolCallCount: 0, hasVisibleText: true };
+  };
+
+  await processRunForTest(runner, makeRun("sess_tools", "run_tools"), new AbortController().signal);
+  assert.equal(reads, 3);
+  assert.equal(pendingCalls, 1);
+  assert.equal(compactions, 1);
+  assert.equal(modelCalls, 1);
+  assert.deepEqual(intents, ["completed"]);
+});
+
+test("proactive 非摘要控制面暂不可用可跳过并继续主模型", async () => {
   for (const compacted of [
     { kind: "unavailable", reason: "transient" },
-    { kind: "unavailable", reason: "deadline" },
   ] as const) {
     let modelCalls = 0;
     const terminalCodes: string[] = [];
@@ -265,6 +440,30 @@ test("proactive transient/deadline 可跳过并继续主模型", async () => {
     await processRunForTest(runner, makeRun("sess_proactive", `run_${compacted.reason}`), new AbortController().signal);
     assert.equal(modelCalls, 1);
     assert.deepEqual(terminalCodes, ["run_completed"]);
+  }
+});
+
+test("proactive 摘要重试耗尽和整体 deadline 均使普通 Run 失败", async () => {
+  for (const compacted of [
+    { kind: "failed", reason: "provider" },
+    { kind: "unavailable", reason: "deadline" },
+  ] as const) {
+    const terminalCodes: string[] = [];
+    const apiClient = {
+      async markRunWorkInProgress() { return { result: "updated" }; },
+      async getExecutionProfile() { return baseProfile(); },
+      async updateRunNotice() { return { result: "updated" }; },
+      async getPromptContext() { return { ...baseContext(), lastResponseTotalTokens: 1 }; },
+      async persistRunTerminalIntent(input: { code: string }) { terminalCodes.push(input.code); return { result: "updated" }; },
+      async convergeRunTerminal() { return { kind: "transitioned", finalStatus: "failed" }; },
+    };
+    const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+    (runner as any).shouldAutoCompact = () => true;
+    (runner as any).executeCompaction = async () => compacted;
+    (runner as any).runModelStep = async () => assert.fail("摘要失败不得继续使用旧上下文请求主模型");
+
+    await processRunForTest(runner, makeRun("sess_failed", `run_${compacted.reason}`), new AbortController().signal);
+    assert.deepEqual(terminalCodes, ["run_failed"]);
   }
 });
 

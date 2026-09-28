@@ -199,6 +199,8 @@ export const AgentApiUpdateRunNoticeRequestSchema = Type.Object({
   sessionId: IdSchema,
   runId: IdSchema,
   runNoticeText: Type.String(),
+  /** Only compaction progress/cleanup uses this CAS guard; ordinary notices omit it. */
+  compactionExpectedRevision: Type.Optional(Type.Integer({ minimum: 0 })),
   retryCount: Type.Optional(Type.Integer({ minimum: 0 })),
   nextRetryAt: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
   updatedAt: Type.Number()

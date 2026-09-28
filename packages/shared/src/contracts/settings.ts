@@ -213,9 +213,9 @@ export const AgentRuntimeSettingsSchema = Type.Object({
   // 0 表示关闭;单位毫秒。
   modelIdleTimeoutMs: Type.Integer({ minimum: 0 }),
   modelTotalTimeoutMs: Type.Integer({ minimum: 0 }),
-  // 模型请求首包前失败时的最大重试次数(0 表示不重试)。
+  // 主模型请求和上下文压缩摘要请求失败后的额外重试次数(0 表示不重试)。
   modelRequestMaxRetries: Type.Integer({ minimum: 0, maximum: 100 }),
-  // 模型请求重试的指数退避最大等待时间,单位毫秒。
+  // 主模型请求和压缩摘要重试的指数退避最大等待时间,单位毫秒。
   modelRequestRetryBackoffMaxMs: Type.Integer({ minimum: 2_000, maximum: 3_600_000 }),
   // 自动压缩阈值百分比,达到 model.contextWindowTokens * pct/100 触发压缩。
   autoCompactThresholdPct: Type.Integer({ minimum: 50, maximum: 99 }),

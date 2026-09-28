@@ -7,6 +7,7 @@ import type { streamText } from "ai";
 import { AI_SDK_REDACTED_HEADER_VALUE } from "@agent-workbench/shared/llm-ai-sdk-call-settings";
 import { AgentRunner, ControlWritePermanentError } from "./runner.js";
 import { InternalRpcHttpError, InternalRpcInvalidResponseError, InternalRpcNetworkError } from "./apiClient.js";
+import { testProfile, testSource } from "./compaction/test-fixtures.js";
 
 type StreamChunk =
   | { type: "text-delta"; text: string }
@@ -282,12 +283,15 @@ function createControlledStream() {
 
 function createRunnerHarness(options?: {
   stream?: ReturnType<typeof createControlledStream>;
-  streams?: Array<ReturnType<typeof createControlledStream>>;
+  streams?: Array<{ stream: StreamResultLike }>;
+  onAssistantComplete?: (input: Record<string, unknown>, terminal: boolean) => void;
   nowMs?: () => number;
   promptContexts?: Array<Omit<ReturnType<typeof baseContext>, "headMessageId"> & { headMessageId: string | null }>;
   createResults?: Array<unknown>;
   listTools?: Array<{ name: string; description: string; inputSchema: Record<string, unknown>; source: string }>;
   onRunNotice?: (input: Record<string, unknown>) => void;
+  onNoticeRpc?: (options?: { abortSignal?: AbortSignal; timeoutMs?: number }) => void;
+  onWarning?: (text: string) => void;
   flushResults?: Array<{ result: "updated" | "ignored" | "missing" } | Error>;
   completeResults?: Array<{ result: "updated" | "ignored" | "missing" } | Error>;
   replaceResults?: Array<{ result: "updated" | "ignored" | "missing" }>;
@@ -309,7 +313,7 @@ function createRunnerHarness(options?: {
   const resumeRequests: Array<Record<string, unknown>> = [];
   const discardRequests: Array<Record<string, unknown>> = [];
   const terminalCompletions: Array<Record<string, unknown>> = [];
-  const logger = { info() {}, warn() {}, error() {} };
+  const logger = { info() {}, warn(text: string) { options?.onWarning?.(text); }, error() {} };
   const apiClient = {
     async getExecutionProfile() { return options?.profile ?? baseProfile(); },
     async getPromptContext() { return options?.promptContexts?.shift() ?? baseContext(); },
@@ -343,19 +347,22 @@ function createRunnerHarness(options?: {
     },
     async completeAssistant(input: Record<string, unknown>) {
       completions.push(input);
+      options?.onAssistantComplete?.(input, false);
       const result = options?.completeResults?.shift() ?? { result: "updated" as const };
       if (result instanceof Error) throw result;
       return result;
     },
     async completeTerminalAssistant(input: Record<string, unknown>) {
       completions.push(input);
+      options?.onAssistantComplete?.(input, true);
       const result = options?.completeResults?.shift() ?? { result: "updated" as const };
       if (result instanceof Error) throw result;
       return result;
     },
-    async updateRunNotice(input: Record<string, unknown>) {
+    async updateRunNotice(input: Record<string, unknown>, rpcOptions?: { abortSignal?: AbortSignal; timeoutMs?: number }) {
       runNoticeUpdates.push(input);
       options?.onRunNotice?.(input);
+      options?.onNoticeRpc?.(rpcOptions);
       const result = options?.noticeResults?.shift() ?? { result: "updated" };
       if (result instanceof Error) throw result;
       return result;
@@ -776,6 +783,182 @@ test("processRun: context-limit 流错误重试成功时不执行 compaction", a
     assert.deepEqual(compactionModes, []);
     assert.equal(harness.streamRequests.length, 2);
     assert.equal(harness.completions.length, 1);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("manual and proactive compaction retry notices contain only attempts and delay; proactive clears before the model step", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    for (const mode of ["manual", "proactive"] as const) {
+      const noticeRpcOptions: Array<{ abortSignal?: AbortSignal; timeoutMs?: number } | undefined> = [];
+      const harness = createRunnerHarness({ profile: {
+        ...testProfile,
+        runtime: { ...testProfile.runtime, modelRequestMaxRetries: 1 },
+      } as any, onNoticeRpc: (options) => { noticeRpcOptions.push(options); } });
+      const api = (harness.runner as any).apiClient;
+      api.getCompactionSource = async () => testSource({ texts: ["x".repeat(100_000), "recent"] });
+      api.commitCompactionWithTerminalIntent = async () => ({ result: "updated", summaryMessageId: "summary" });
+      let calls = 0;
+      (harness.runner as any).generateSingleCallSummary = async () => {
+        calls += 1;
+        if (calls === 1) throw new Error("private provider response and credential");
+        return { text: "brief summary" };
+      };
+      let modelSteps = 0;
+      if (mode === "proactive") {
+        let compactOnce = true;
+        (harness.runner as any).shouldAutoCompact = () => {
+          if (!compactOnce) return false;
+          compactOnce = false;
+          return true;
+        };
+        (harness.runner as any).runModelStep = async () => {
+          modelSteps += 1;
+          assert.equal(harness.runNoticeUpdates.at(-1)?.runNoticeText, "");
+          return { aborted: false, toolCallCount: 0, hasVisibleText: true, terminalIntentPersisted: false };
+        };
+      }
+      await (harness.runner as any).processRun({ ...baseRun(), ...(mode === "manual" ? { runKind: "manual_compaction" } : {}) }, new AbortController().signal);
+      assert.equal(calls, 2);
+      assert.equal(modelSteps, mode === "proactive" ? 1 : 0);
+      const retryNotices = harness.runNoticeUpdates.filter(({ runNoticeText }) => String(runNoticeText).includes("压缩上下文") && String(runNoticeText).includes("重试"));
+      assert.equal(retryNotices.length, 1);
+      assert.equal(retryNotices[0]?.compactionExpectedRevision, 7);
+      assert.ok(harness.runNoticeUpdates.every((notice) => notice.compactionExpectedRevision === 7));
+      assert.ok(noticeRpcOptions.every((options) => options?.abortSignal instanceof AbortSignal && options.timeoutMs === 1000));
+      assert.match(String(retryNotices[0]?.runNoticeText), /2 秒后重试（1\/1）/);
+      assert.equal(JSON.stringify(harness.runNoticeUpdates).includes("private provider response"), false);
+      assert.equal(JSON.stringify(harness.runNoticeUpdates).includes("credential"), false);
+    }
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("compaction notices are best-effort: permanent and transient notice errors do not consume summary retries", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    for (const mode of ["manual", "proactive"] as const) {
+      const failure = mode === "manual"
+        ? new InternalRpcHttpError({ method: "POST", endpoint: "/notice", status: 400 })
+        : new InternalRpcNetworkError({ method: "POST", endpoint: "/notice" });
+      const harness = createRunnerHarness({
+        profile: { ...testProfile, runtime: { ...testProfile.runtime, modelRequestMaxRetries: 2 } } as any,
+        noticeResults: [failure],
+      });
+      const api = (harness.runner as any).apiClient;
+      api.getCompactionSource = async () => testSource({ texts: ["x".repeat(100_000), "recent"] });
+      let attempts = 0;
+      (harness.runner as any).generateSingleCallSummary = async () => {
+        attempts += 1;
+        throw new Error("private provider response");
+      };
+      if (mode === "proactive") (harness.runner as any).shouldAutoCompact = () => true;
+      await (harness.runner as any).processRun({ ...baseRun(), ...(mode === "manual" ? { runKind: "manual_compaction" } : {}) }, new AbortController().signal);
+      assert.equal(attempts, 3, `${mode} must make the initial summary call and two configured retries`);
+      assert.equal(harness.runNoticeUpdates.length, 1, "notice RPC must not retry without bound");
+      assert.equal(harness.terminalCompletions.at(-1)?.status, "failed");
+      assert.equal(JSON.stringify(harness.runNoticeUpdates).includes("private provider response"), false);
+    }
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("committed proactive compaction survives a failed notice cleanup and continues to the model", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const harness = createRunnerHarness({
+      profile: { ...testProfile, runtime: { ...testProfile.runtime, modelRequestMaxRetries: 1 } } as any,
+      noticeResults: [
+        { result: "updated" },
+        new InternalRpcNetworkError({ method: "POST", endpoint: "/notice" }),
+      ],
+    });
+    const api = (harness.runner as any).apiClient;
+    api.getCompactionSource = async () => testSource({ texts: ["x".repeat(100_000), "recent"] });
+    api.commitCompactionWithTerminalIntent = async () => ({ result: "updated", summaryMessageId: "summary" });
+    let attempts = 0;
+    (harness.runner as any).generateSingleCallSummary = async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("private provider response");
+      return { text: "brief summary" };
+    };
+    let compactionTriggers = 0;
+    (harness.runner as any).shouldAutoCompact = () => ++compactionTriggers === 1;
+    let modelSteps = 0;
+    (harness.runner as any).runModelStep = async () => {
+      modelSteps += 1;
+      return { aborted: false, toolCallCount: 0, hasVisibleText: true, terminalIntentPersisted: false };
+    };
+    await (harness.runner as any).processRun(baseRun(), new AbortController().signal);
+    assert.equal(attempts, 2);
+    assert.equal(modelSteps, 1);
+    assert.equal(harness.runNoticeUpdates.length, 2, "cleanup should try once, never retry forever");
+    assert.equal(harness.runNoticeUpdates[1]?.runNoticeText, "");
+    assert.equal(harness.terminalCompletions.at(-1)?.status, "completed");
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("processRun: fenced cleanup after confirmed commit stops stale Run without a model request or failed terminal", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    for (const result of ["ignored", "missing"] as const) {
+      const warnings: string[] = [];
+      const harness = createRunnerHarness({
+        profile: { ...testProfile, runtime: { ...testProfile.runtime, modelRequestMaxRetries: 1 } } as any,
+        noticeResults: [{ result: "updated" }, { result }],
+        onWarning: (line) => { warnings.push(line); },
+      });
+      const api = (harness.runner as any).apiClient;
+      api.getCompactionSource = async () => testSource({ texts: ["x".repeat(100_000), "recent"] });
+      api.commitCompactionWithTerminalIntent = async () => ({ result: "updated", summaryMessageId: "summary" });
+      let calls = 0;
+      (harness.runner as any).generateSingleCallSummary = async () => {
+        if (++calls === 1) throw new Error("failed before retry notice");
+        return { text: "brief summary" };
+      };
+      (harness.runner as any).shouldAutoCompact = () => true;
+      let modelRequests = 0;
+      (harness.runner as any).runModelStep = async () => { modelRequests++; throw new Error("stale run requested model"); };
+      await (harness.runner as any).processRun(baseRun(), new AbortController().signal);
+      assert.equal(modelRequests, 0);
+      assert.equal(harness.terminalCompletions.length, 0);
+      assert.equal(harness.runNoticeUpdates.length, 2);
+      assert.equal(warnings.filter((line) => line.includes("cleanup fence lost")).length, 1);
+    }
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("compaction notice fence loss is not silently ignored", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const harness = createRunnerHarness({
+      profile: { ...testProfile, runtime: { ...testProfile.runtime, modelRequestMaxRetries: 1 } } as any,
+      noticeResults: [{ result: "ignored" }],
+    });
+    const api = (harness.runner as any).apiClient;
+    api.getCompactionSource = async () => testSource({ texts: ["x".repeat(100_000), "recent"] });
+    let attempts = 0;
+    (harness.runner as any).generateSingleCallSummary = async () => { attempts += 1; throw new Error("summary failed"); };
+    (harness.runner as any).shouldAutoCompact = () => true;
+    let modelRequests = 0;
+    (harness.runner as any).runModelStep = async () => { modelRequests++; throw new Error("stale run requested model"); };
+    await (harness.runner as any).processRun(baseRun(), new AbortController().signal);
+    assert.equal(modelRequests, 0);
+    assert.equal(harness.terminalCompletions.length, 0);
+    assert.equal(attempts, 1);
   } finally {
     globalThis.setTimeout = originalSetTimeout;
   }
@@ -1431,12 +1614,17 @@ for (const error of [
   new InternalRpcInvalidResponseError({ method: "POST", endpoint: "/complete", stage: "schema" }),
   new Error("programming bug")
 ]) {
-  test(`永久控制面错误 ${error.name} 不进入 Provider retry 或 replacement`, async () => {
+  test(`完成请求错误 ${error.name} 不进入 Provider retry 或 replacement`, async () => {
     const stream = createControlledStream();
     const started = startRunModelStep({ stream, completeResults: [error] });
     await stream.push({ type: "text-delta", text: "done" });
     await stream.finish();
-    await assert.rejects(started.promise, ControlWritePermanentError);
+    if (error instanceof InternalRpcInvalidResponseError) {
+      // The response could be malformed after an otherwise successful commit.
+      await assert.rejects(started.promise, /terminal Assistant completion outcome uncertain/);
+    } else {
+      await assert.rejects(started.promise, ControlWritePermanentError);
+    }
     assert.equal(started.streamRequests.length, 1);
     assert.equal(started.replacements.length, 0);
   });
@@ -1883,6 +2071,139 @@ test("runModelStep: OpenAI replay-only Assistant 在终态 metadata flush 后完
   assert.equal(((finalParts[0]?.providerReplay as Record<string, unknown>)?.item as Record<string, unknown>)?.encryptedContent, "cipher");
   assert.equal(started.completions.length, 1);
 });
+
+test("processRun: replay-only empty responses complete normally for five steps and atomically at the sixth", { timeout: 10_000 }, async () => {
+  const streams = Array.from({ length: 6 }, (_, index) => {
+    const itemId = `reasoning-${index}`;
+    return { stream: {
+      fullStream: (async function* (): AsyncGenerator<StreamChunk> {
+        yield { type: "reasoning-start", id: `${itemId}:0`, providerMetadata: { openai: { itemId, reasoningEncryptedContent: "cipher" } } };
+        yield { type: "raw", rawValue: { type: "response.completed", response: { output: [{ type: "reasoning", id: itemId, encrypted_content: "cipher" }] } } };
+        yield { type: "finish" };
+      })(),
+      reasoningText: Promise.resolve(""),
+      usage: Promise.resolve({ inputTokens: 1, outputTokens: 1 }),
+    } };
+  });
+  const snapshots: Array<{ terminal: boolean; intent: unknown }> = [];
+  const harness = createRunnerHarness({ streams, onAssistantComplete(input, terminal) {
+    snapshots.push({ terminal, intent: input.intent ?? null });
+  } });
+
+  await (harness.runner as any).processRun(baseRun(), new AbortController().signal);
+  assert.equal(harness.streamRequests.length, 6);
+  assert.equal(harness.completions.length, 6);
+  assert.deepEqual(snapshots, [
+    ...Array.from({ length: 5 }, () => ({ terminal: false, intent: null })),
+    { terminal: true, intent: { status: "completed", code: "run_completed", detail: null } },
+  ]);
+  assert.deepEqual(harness.terminalCompletions, []);
+});
+
+test("processRun: cancelling immediately after a user or subtask terminal Assistant commit only converges completed", async () => {
+  for (const runKind of ["user", "subtask"] as const) {
+    const controller = new AbortController();
+    const streams = [{ stream: {
+      fullStream: (async function* (): AsyncGenerator<StreamChunk> {
+        yield { type: "text-delta", text: "done" };
+        yield { type: "raw", rawValue: { type: "response.completed", response: { output: [] } } };
+        yield { type: "finish" };
+      })(),
+      reasoningText: Promise.resolve(""),
+      usage: Promise.resolve({ inputTokens: 1, outputTokens: 1 }),
+    } }];
+    const harness = createRunnerHarness({ streams, onAssistantComplete(_input, terminal) {
+      assert.equal(terminal, true);
+      controller.abort();
+    } });
+    let convergences = 0;
+    (harness.runner as any).apiClient.convergeRunTerminal = async () => {
+      convergences += 1;
+      return { kind: "transitioned", finalStatus: "completed" };
+    };
+    await (harness.runner as any).processRun({ ...baseRun(), runKind }, controller.signal);
+    assert.deepEqual(harness.completions[0]?.intent, {
+      status: "completed", code: runKind === "subtask" ? "subtask_completed" : "run_completed", detail: null,
+    });
+    assert.equal(convergences, 1);
+    assert.deepEqual(harness.terminalCompletions, []);
+  }
+});
+
+for (const runKind of ["user", "subtask"] as const) {
+  for (const scenario of [
+    "lost-response-cancel", "cancel-during-replay-wait", "replay-permanent-error",
+    "convergence-failure", "missing-intent", "cancel-won", "invalid-response", "idempotent-replay", "definitive-permanent-error",
+  ] as const) {
+    test(`processRun: ${runKind} terminal Assistant ${scenario} uses only durable terminal intent`, async () => {
+      const controller = new AbortController();
+      const streams = [{ stream: {
+        fullStream: (async function* (): AsyncGenerator<StreamChunk> {
+          yield { type: "text-delta", text: "done" };
+          yield { type: "raw", rawValue: { type: "response.completed", response: { output: [] } } };
+          yield { type: "finish" };
+        })(),
+        reasoningText: Promise.resolve(""),
+        usage: Promise.resolve({ inputTokens: 1, outputTokens: 1 }),
+      } }];
+      const harness = createRunnerHarness({ streams, controlWriteSleep: async () => {
+        if (scenario === "cancel-during-replay-wait") {
+          controller.abort();
+          return false;
+        }
+        return true;
+      } });
+      const api = (harness.runner as any).apiClient;
+      let durableIntent: Record<string, unknown> | null = null;
+      let firstRequest: Record<string, unknown> | null = null;
+      let completeCalls = 0;
+      let convergeCalls = 0;
+      const independentIntents: string[] = [];
+      api.completeTerminalAssistant = async (input: Record<string, unknown>) => {
+        completeCalls += 1;
+        if (scenario === "definitive-permanent-error") {
+          throw new InternalRpcHttpError({ method: "POST", endpoint: "/complete-terminal-assistant", status: 400 });
+        }
+        if (completeCalls === 1) {
+          firstRequest = input;
+          if (scenario !== "missing-intent") durableIntent = scenario === "cancel-won"
+            ? { status: "cancelled", code: "run_cancelled", detail: null }
+            : input.intent as Record<string, unknown>;
+          if (scenario === "invalid-response") {
+            throw new InternalRpcInvalidResponseError({ method: "POST", endpoint: "/complete-terminal-assistant", stage: "schema" });
+          }
+          if (scenario !== "cancel-during-replay-wait" && scenario !== "replay-permanent-error" && scenario !== "idempotent-replay") controller.abort();
+          throw new InternalRpcNetworkError({ method: "POST", endpoint: "/complete-terminal-assistant" });
+        }
+        assert.deepEqual(input, firstRequest, "idempotent replay must use the identical request");
+        if (scenario === "replay-permanent-error") {
+          throw new InternalRpcHttpError({ method: "POST", endpoint: "/complete-terminal-assistant", status: 409 });
+        }
+        controller.abort();
+        return { result: "updated" };
+      };
+      api.persistRunTerminalIntent = async (input: { status: string }) => {
+        independentIntents.push(input.status);
+        durableIntent = input as unknown as Record<string, unknown>;
+        return { result: "updated" };
+      };
+      api.convergeRunTerminal = async () => {
+        convergeCalls += 1;
+        if (scenario === "convergence-failure" || scenario === "missing-intent") {
+          throw new InternalRpcHttpError({ method: "POST", endpoint: "/converge-terminal", status: 409 });
+        }
+        assert.ok(durableIntent, "convergence requires an existing intent");
+        return { kind: scenario === "idempotent-replay" ? "already_converged" : "transitioned", finalStatus: durableIntent.status };
+      };
+
+      await (harness.runner as any).processRun({ ...baseRun(), runKind }, controller.signal);
+      assert.equal(completeCalls, scenario === "idempotent-replay" || scenario === "replay-permanent-error" ? 2 : 1);
+      assert.equal(convergeCalls, 1);
+      assert.deepEqual(independentIntents, scenario === "definitive-permanent-error" ? ["failed"] : []);
+      assert.equal((durableIntent as Record<string, unknown> | null)?.status ?? null, scenario === "definitive-permanent-error" ? "failed" : scenario === "missing-intent" ? null : scenario === "cancel-won" ? "cancelled" : "completed");
+    });
+  }
+}
 
 test("runModelStep: 非 OpenAI 空输出仍被拒绝", async () => {
   const stream = createControlledStream();

@@ -753,13 +753,15 @@ export class AgentApiClient {
     });
   }
 
-  async updateRunNotice(input: AgentApiUpdateRunNoticeRequest) {
+  async updateRunNotice(input: AgentApiUpdateRunNoticeRequest, options?: { abortSignal?: AbortSignal; timeoutMs?: number }) {
     return await this.request<AgentApiFencedWriteResponse>(AgentApiEndpoints.updateRunNotice.path, {
       method: AgentApiEndpoints.updateRunNotice.method,
       body: input,
       responseSchema: AgentApiFencedWriteResponseSchema,
       responseEndpoint: AgentApiEndpoints.updateRunNotice.path,
       policy: AgentApiClient.publicMethodPolicies.updateRunNotice,
+      abortSignal: options?.abortSignal,
+      timeoutMs: options?.timeoutMs,
     });
   }
 

@@ -354,3 +354,42 @@ test("openai-compatible provider 会走 shared single-call 分支并发起 chat/
     await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
   }
 });
+
+test("single-call disables SDK retries only when explicitly requested by compaction", async () => {
+  let requests = 0;
+  let failOnce = false;
+  const server = createServer((_req, res) => {
+    requests += 1;
+    if (!failOnce || requests === 1) {
+      res.writeHead(503, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "temporarily unavailable", type: "server_error" } }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write('data: {"type":"response.created","response":{"id":"resp_1","created_at":1,"model":"mock-model"}}\n\n');
+    res.write('data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","phase":"final_answer"}}\n\n');
+    res.write('data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"ok"}\n\n');
+    res.write('data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_1","phase":"final_answer"}}\n\n');
+    res.end('data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1},"service_tier":null}}\n\n');
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.listen(0, "127.0.0.1", resolve);
+    server.once("error", reject);
+  });
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server address unavailable");
+    const profile = createMockProfile();
+    profile.provider.options.baseURL = `http://127.0.0.1:${address.port}/v1`;
+    const input = { messages: [{ role: "user" as const, content: "hello" }], timeoutMs: 10_000 };
+    await assert.rejects(() => generateSingleCallText(profile, input, { disableSdkRetries: true }));
+    assert.equal(requests, 1);
+
+    requests = 0;
+    failOnce = true;
+    assert.equal((await generateSingleCallText(profile, input)).text, "ok");
+    assert.equal(requests, 2, "other single-call clients still inherit SDK retry defaults");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+  }
+});

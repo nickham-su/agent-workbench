@@ -5,9 +5,6 @@ import type { ExecutionProfile } from "../apiClient.js";
 export const PRIMARY_MATERIALIZER_VERSION = "primary-materializer-v1";
 export const SUMMARY_INPUT_MATERIALIZER_VERSION = "summary-input-materializer-v1";
 export const COMPACTION_KEEP_RECENT_TOKENS = 20_000;
-export const MAX_SUMMARY_FINAL_LEAVES = 8;
-export const MAX_SUMMARY_ATTEMPTED_PARTITIONS = 15;
-export const MAX_SUMMARY_LOGICAL_CALLS = 30;
 
 export type CompactionSource = AgentApiCompactionSourceResponse;
 export type CompactionSourceBlock = CompactionSource["blocks"][number];
@@ -105,13 +102,11 @@ export type CompactionModePolicy = {
   mode: CompactionMode;
   casReplanAllowance: number;
   casReplanScope: "attempt" | "run";
-  maxNetworkRequestsPerLogicalCall: 1 | 2;
-  maxNetworkRequestCount: 30 | 60;
 };
 
 export const COMPACTION_MODE_POLICIES: Readonly<Record<CompactionMode, CompactionModePolicy>> = {
-  proactive: { mode: "proactive", casReplanAllowance: 0, casReplanScope: "attempt", maxNetworkRequestsPerLogicalCall: 1, maxNetworkRequestCount: 30 },
-  manual: { mode: "manual", casReplanAllowance: 1, casReplanScope: "run", maxNetworkRequestsPerLogicalCall: 2, maxNetworkRequestCount: 60 },
+  proactive: { mode: "proactive", casReplanAllowance: 0, casReplanScope: "attempt" },
+  manual: { mode: "manual", casReplanAllowance: 1, casReplanScope: "run" },
 };
 
 export type FrozenCompactionPlan = {
@@ -144,13 +139,6 @@ export type FrozenCompactionPlan = {
   };
 };
 
-export type SummaryBudgetState = {
-  finalLeafCount: number;
-  attemptedPartitionCount: number;
-  logicalProviderCallCount: number;
-  networkRequestCount: number;
-};
-
 export type CompactionToolExecutionResult = {
   status: AgentToolExecutionStatus;
   resultPreview: string | null;
@@ -160,7 +148,7 @@ export type CompactionToolExecutionResult = {
 export type CompactionToolResultOutput = { type: "text"; value: string } | { type: "error-text"; value: string };
 
 export class CompactionPlanningError extends Error {
-  constructor(readonly code: "summary_input_limit" | "data_invariant" | "profile_invalid", message: string) {
+  constructor(readonly code: "data_invariant" | "profile_invalid", message: string) {
     super(message);
     this.name = "CompactionPlanningError";
   }
@@ -177,10 +165,9 @@ export type CompactionCasState = { remaining: number };
 
 export type CompactionExecutionResult =
   | { kind: "committed"; summaryMessageId: string; plan: FrozenCompactionPlan }
-  | { kind: "skipped"; reason: "no_prefix" | "no_progress" | "oversized_tail" | "cas_conflict" | "profile_changed" | "commit_not_committed" }
+  | { kind: "skipped"; reason: "no_prefix" | "no_progress" | "oversized_tail" | "cas_conflict" | "profile_changed" }
   | { kind: "blocked"; reason: "pending_tool_execution" }
   | { kind: "media_requires_resend" }
-  | { kind: "summary_input_limit" }
   | { kind: "unavailable"; reason: "transient" | "deadline" | "commit_response_loss" }
   | { kind: "failed"; reason: "provider" | "control" | "data_invariant" | "cancelled" | "commit_outcome_uncertain" };
 

@@ -23,7 +23,7 @@ import { createMoonshotAI } from "@ai-sdk/moonshotai";
 import { createDeepSeek } from "@ai-sdk/deepseek";
 import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call";
 import { parseAiSdkCallSettings } from "@agent-workbench/shared/llm-ai-sdk-call-settings";
-import { AgentApiClient, ApiConflictError, InternalRpcHttpError, InternalRpcNetworkError, InternalRpcTimeoutError, type ExecutionProfile, type PromptContext } from "./apiClient.js";
+import { AgentApiClient, ApiConflictError, InternalRpcHttpError, InternalRpcInvalidResponseError, InternalRpcNetworkError, InternalRpcTimeoutError, type ExecutionProfile, type PromptContext } from "./apiClient.js";
 import { McpManager } from "./mcpManager.js";
 import { AnalyticsSignalProducer } from "./analyticsSignals.js";
 import {
@@ -64,8 +64,10 @@ import {
   projectAssistantDebugRecord,
   serializeAssistantDebugRecord,
 } from "./debug/project-assistant-debug-record.js";
-import { CompactionExecutor } from "./compaction/executor.js";
+import { CompactionExecutor, CompactionNoticeFenceLostError } from "./compaction/executor.js";
+import { MODEL_RETRY_BACKOFF_BASE_MS, computeRetryBackoffMs, normalizeModelRequestMaxRetries, normalizeRetryBackoffMaxMs } from "./retry-backoff.js";
 import type { CompactionCasState, CompactionMode } from "./compaction/types.js";
+export { computeRetryBackoffMs, normalizeRetryBackoffMaxMs } from "./retry-backoff.js";
 
 function nowMs() {
   return Date.now();
@@ -80,12 +82,8 @@ function parseIntOrDefault(raw: string | undefined, fallback: number) {
 const DEBUG_DUMP_RELATIVE_DIR = path.join(".debug", "agent_message_logs");
 const LOOP_MAX_STEPS = parseIntOrDefault(process.env.AWB_AGENT_LOOP_MAX_STEPS, 128);
 const LOOP_REPEAT_TOOL_CALL_THRESHOLD = parseIntOrDefault(process.env.AWB_AGENT_LOOP_REPEAT_TOOL_CALL_THRESHOLD, 20);
-const MODEL_RETRY_BACKOFF_BASE_MS = 2_000;
 const CONTROL_WRITE_RETRY_DELAY_MS = 100;
-const MODEL_RETRY_BACKOFF_DEFAULT_MAX_MS = 60_000;
-const MODEL_RETRY_BACKOFF_MAX_ALLOWED_MS = 3_600_000;
-const MODEL_REQUEST_MAX_RETRIES_DEFAULT = 5;
-const MODEL_REQUEST_MAX_RETRIES_MAX = 100;
+const COMPACTION_NOTICE_TIMEOUT_MS = 1_000;
 const EMPTY_RESPONSE_COMPLETE_THRESHOLD = 6;
 const TOOL_OUTPUT_TEXT_MAX_CHARS = Math.max(1_000, parseIntOrDefault(process.env.AWB_TOOL_OUTPUT_TEXT_MAX_CHARS, 8_000));
 const TOOL_OUTPUT_TEXT_PREVIEW_CHARS = Math.max(
@@ -112,26 +110,6 @@ function shouldStopForMaxSteps(step: number, maxSteps: number) {
   return maxSteps > 0 && step >= Math.max(maxSteps, EMPTY_RESPONSE_COMPLETE_THRESHOLD);
 }
 
-export function normalizeRetryBackoffMaxMs(raw: unknown) {
-  if (typeof raw !== "number" || !Number.isFinite(raw) || !Number.isInteger(raw)) {
-    return MODEL_RETRY_BACKOFF_DEFAULT_MAX_MS;
-  }
-  return Math.min(MODEL_RETRY_BACKOFF_MAX_ALLOWED_MS, Math.max(MODEL_RETRY_BACKOFF_BASE_MS, raw));
-}
-
-function normalizeModelRequestMaxRetries(raw: unknown) {
-  if (typeof raw !== "number" || !Number.isFinite(raw) || !Number.isInteger(raw)) {
-    return MODEL_REQUEST_MAX_RETRIES_DEFAULT;
-  }
-  return Math.min(MODEL_REQUEST_MAX_RETRIES_MAX, Math.max(0, raw));
-}
-
-export function computeRetryBackoffMs(attemptIndex: number, rawMaxBackoffMs: unknown = MODEL_RETRY_BACKOFF_DEFAULT_MAX_MS) {
-  if (!Number.isFinite(attemptIndex) || attemptIndex < 0) return MODEL_RETRY_BACKOFF_BASE_MS;
-  const factor = 2 ** Math.floor(attemptIndex);
-  const delay = MODEL_RETRY_BACKOFF_BASE_MS * factor;
-  return Math.min(normalizeRetryBackoffMaxMs(rawMaxBackoffMs), Math.max(MODEL_RETRY_BACKOFF_BASE_MS, delay));
-}
 
 function toErrorRecord(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -169,22 +147,6 @@ function collectErrorCodes(value: unknown, depth = 0): string[] {
   return codes;
 }
 
-function collectErrorText(value: unknown, depth = 0): string[] {
-  if (depth > 3) return [];
-  if (typeof value === "string") return [value];
-  if (value instanceof Error) {
-    return [value.message, ...collectErrorText((value as Error & { cause?: unknown }).cause, depth + 1)];
-  }
-  const record = toErrorRecord(value);
-  if (!record) return [];
-
-  const values: string[] = [];
-  for (const key of ["message", "responseBody", "body", "error", "data", "details", "cause"] as const) {
-    values.push(...collectErrorText(record[key], depth + 1));
-  }
-  return values;
-}
-
 const CONTEXT_LIMIT_ERROR_CODES = new Set([
   "context_length_exceeded",
   "context_limit_exceeded",
@@ -193,38 +155,6 @@ const CONTEXT_LIMIT_ERROR_CODES = new Set([
   "prompt_too_long",
   "request_too_large"
 ]);
-
-function hasContextLimitText(text: string) {
-  const normalized = text.toLowerCase().replace(/[._-]+/g, " ");
-  return (
-    /\bcontext[\s_-]*(?:length|window|limit)\b/.test(normalized)
-    || /\b(?:prompt|input)\s+(?:is\s+)?too\s+(?:long|large)\b/.test(normalized)
-    || /\brequest\s+(?:is\s+)?too\s+large\b/.test(normalized)
-    || /\b(?:prompt|input)\b[\s\S]{0,80}\b(?:exceed(?:s|ed)?|maximum|max(?:imum)?|limit)\b/.test(normalized)
-    || /\b(?:exceed(?:s|ed)?|maximum|max(?:imum)?|limit)\b[\s\S]{0,80}\b(?:prompt|input)\b/.test(normalized)
-  );
-}
-
-function isContextLengthExceededError(err: unknown) {
-  const apiCallError = APICallError.isInstance(err) ? err : null;
-  const record = toErrorRecord(err);
-  const codes = [
-    ...collectErrorCodes(apiCallError?.data),
-    ...collectErrorCodes(record)
-  ];
-  if (codes.some((code) => CONTEXT_LIMIT_ERROR_CODES.has(code))) return true;
-
-  const statusCode = apiCallError?.statusCode
-    ?? (typeof record?.statusCode === "number" ? record.statusCode : null)
-    ?? (typeof record?.status === "number" ? record.status : null);
-  if (statusCode != null && ![400, 413, 422].includes(statusCode)) return false;
-
-  return [
-    ...collectErrorText(apiCallError?.responseBody),
-    ...collectErrorText(apiCallError?.data),
-    ...collectErrorText(err)
-  ].some(hasContextLimitText);
-}
 
 function safeErrorSummary(error: unknown) {
   const source = toErrorRecord(error);
@@ -918,6 +848,14 @@ export class ControlWritePermanentError extends Error {
     super(`control write permanently failed: ${operation}`);
     this.name = "ControlWritePermanentError";
     (this as Error & { cause?: unknown }).cause = cause;
+  }
+}
+
+// The terminal Assistant request may have committed its intent even if the
+// Worker never received the response. Do not infer a new terminal tuple.
+class TerminalAssistantOutcomeUncertainError extends Error {
+  constructor() {
+    super("terminal Assistant completion outcome uncertain");
   }
 }
 
@@ -2328,6 +2266,30 @@ export class AgentRunner {
     return lastTotalTokens >= threshold;
   }
 
+  /** Notices are advisory: one bounded RPC, never the retryControlWrite loop. */
+  private async tryUpdateCompactionNotice(
+    request: Parameters<AgentApiClient["updateRunNotice"]>[0],
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    if (signal.aborted) {
+      const error = new Error("compaction notice cancelled");
+      error.name = "AbortError";
+      throw error;
+    }
+    try {
+      const response = await this.apiClient.updateRunNotice(request, {
+        abortSignal: signal,
+        timeoutMs: COMPACTION_NOTICE_TIMEOUT_MS,
+      });
+      assertFencedWriteUpdated("compaction notice", response);
+      return true;
+    } catch (error) {
+      // Loss of the Run fence or cancellation is not an optional UI failure.
+      if (signal.aborted || error instanceof FencedWriteIgnoredError || error instanceof FencedWriteMissingError) throw error;
+      return false;
+    }
+  }
+
   private async executeCompaction(params: {
     mode: CompactionMode;
     profile: ExecutionProfile;
@@ -2335,11 +2297,37 @@ export class AgentRunner {
     signal: AbortSignal;
     casState?: CompactionCasState;
   }) {
+    // A timeout can lose the response after the notice was stored. Attempt a
+    // best-effort clear even if the preceding notice write was inconclusive.
+    let retryNoticeMayNeedClear = false;
+    let noticeExpectedRevision: number | undefined;
+    let noticeWritesDisabled = false;
     const executor = new CompactionExecutor({
       apiClient: this.apiClient,
       nowMs: this.nowMsFn,
       newId: newSortableId,
-      isContextLimitError: isContextLengthExceededError,
+      onSummaryRetry: async ({ expectedRevision, retryAttempt, maxRetries, delayMs, abortSignal }) => {
+        if (noticeWritesDisabled) return;
+        noticeExpectedRevision = expectedRevision;
+        const request = {
+          workspaceId: params.run.workspaceId,
+          sessionId: params.run.sessionId,
+          runId: params.run.runId,
+          runNoticeText: `正在压缩上下文，${Math.ceil(delayMs / 1_000)} 秒后重试（${retryAttempt}/${maxRetries}）`,
+          compactionExpectedRevision: expectedRevision,
+          updatedAt: this.nowMsFn(),
+        };
+        retryNoticeMayNeedClear = true;
+        try {
+          if (!await this.tryUpdateCompactionNotice(request, abortSignal)) {
+            noticeWritesDisabled = true;
+            this.logger.warn("[agent-worker] compaction retry notice unavailable; continuing summary retry");
+          }
+        } catch (error) {
+          if (error instanceof FencedWriteIgnoredError || error instanceof FencedWriteMissingError) throw new CompactionNoticeFenceLostError();
+          throw error;
+        }
+      },
       generateSummary: async (input) => await this.generateSingleCallSummary({
         profile: input.profile,
         input: {
@@ -2352,7 +2340,7 @@ export class AgentRunner {
         },
       }),
     });
-    return await executor.execute({
+    const result = await executor.execute({
       mode: params.mode,
       profile: params.profile,
       workspaceId: params.run.workspaceId,
@@ -2361,6 +2349,28 @@ export class AgentRunner {
       abortSignal: params.signal,
       casState: params.casState,
     });
+    // Manual runs become terminal; proactive runs may continue to the next
+    // model step. Normal model creation also clears the notice if this bounded
+    // best-effort cleanup cannot reach the control plane.
+    if (retryNoticeMayNeedClear && params.mode === "proactive" && !params.signal.aborted &&
+      (result.kind === "committed" || result.kind === "skipped" || result.kind === "blocked" || result.kind === "media_requires_resend" || result.kind === "unavailable")) {
+      const request = { workspaceId: params.run.workspaceId, sessionId: params.run.sessionId, runId: params.run.runId,
+        runNoticeText: "", compactionExpectedRevision: noticeExpectedRevision, updatedAt: this.nowMsFn() };
+      try {
+        if (!await this.tryUpdateCompactionNotice(request, params.signal)) {
+          this.logger.warn("[agent-worker] compaction retry notice cleanup unavailable");
+        }
+      } catch (error) {
+        if (params.signal.aborted) return result;
+        // Committing the summary is durable, but a stale Worker cannot proceed
+        // to a model request or select another terminal outcome for this Run.
+        // The processRun fence handler stops without attempting a failed terminal.
+        if (result.kind === "committed") this.logger.warn("[agent-worker] compaction committed; retry notice cleanup fence lost; stopping run");
+        if (error instanceof FencedWriteIgnoredError || error instanceof FencedWriteMissingError) throw new CompactionNoticeFenceLostError();
+        throw error;
+      }
+    }
+    return result;
   }
 
   protected async generateSingleCallSummary(params: {
@@ -2377,7 +2387,7 @@ export class AgentRunner {
     };
   }) {
     // one-shot summary 若提供 sessionId，则共享主模型请求的 OpenAI 默认 promptCacheKey 策略。
-    return generateSingleCallText(params.profile, params.input);
+    return generateSingleCallText(params.profile, params.input, { disableSdkRetries: true });
   }
 
   private async runModelStep(params: {
@@ -2385,11 +2395,12 @@ export class AgentRunner {
     run: QueuedRun;
     context: PromptContext;
     step: number;
+    emptyResponseCount?: number;
     signal: AbortSignal;
     recoveryContinuation?: { messageId: string | null };
     repeatedToolCallCounter: Map<string, number>;
   }) {
-    const { profile, run, context, step, signal, recoveryContinuation = { messageId: null }, repeatedToolCallCounter } = params;
+    const { profile, run, context, step, emptyResponseCount = 0, signal, recoveryContinuation = { messageId: null }, repeatedToolCallCounter } = params;
     if (context.pendingTools.length > 0) {
       throw new Error("cannot invoke model while ToolExecution remains queued or running");
     }
@@ -3197,6 +3208,7 @@ export class AgentRunner {
         },
       });
     };
+    let terminalAssistantCommitted = false;
     try {
       const executions: Array<{ id: string; callPartId: string; originSessionId: string; originRunId: string; status: "queued" }> = [];
       for (const call of recognizedCalls) {
@@ -3223,7 +3235,8 @@ export class AgentRunner {
         messageId: assistantMessageId, executions,
         responseTotalTokens, updatedAt: this.nowMsFn()
       };
-      const terminalAssistant = executions.length === 0;
+      const hasVisibleText = hasVisibleAssistantText(textFromParts()) || reasoningFromParts().length > 0;
+      const terminalAssistant = executions.length === 0 && (hasVisibleText || emptyResponseCount + 1 >= EMPTY_RESPONSE_COMPLETE_THRESHOLD);
       if (terminalAssistant) {
         const code: "run_completed" | "subtask_completed" = run.runKind === "subtask" ? "subtask_completed" : "run_completed";
         const terminalRequest = {
@@ -3235,9 +3248,23 @@ export class AgentRunner {
           intent: { status: "completed" as const, code, detail: null },
           updatedAt: completeRequest.updatedAt,
         };
-        await this.retryControlWrite("complete terminal assistant", signal, async () =>
-          await this.apiClient.completeTerminalAssistant(terminalRequest)
-        );
+        let outcomeMayHaveCommitted = false;
+        try {
+          await this.retryControlWrite("complete terminal assistant", signal, async () => {
+            try {
+              return await this.apiClient.completeTerminalAssistant(terminalRequest);
+            } catch (error) {
+              // Preserve uncertainty across retries. A later permanent error
+              // or cancellation cannot disprove an earlier lost response.
+              if (isRetryableControlWriteError(error) || error instanceof InternalRpcInvalidResponseError || signal.aborted) outcomeMayHaveCommitted = true;
+              throw error;
+            }
+          });
+        } catch (error) {
+          if (outcomeMayHaveCommitted) throw new TerminalAssistantOutcomeUncertainError();
+          throw error;
+        }
+        terminalAssistantCommitted = true;
       } else {
         await this.retryControlWrite("complete assistant", signal, async () =>
           await this.apiClient.completeAssistant(completeRequest)
@@ -3276,10 +3303,17 @@ export class AgentRunner {
         toolCallCount: recognizedCalls.length,
         assistantMessageId,
         terminalIntentPersisted: terminalAssistant,
-        hasVisibleText: hasVisibleAssistantText(textFromParts()) || reasoningFromParts().length > 0,
+        hasVisibleText,
         availableToolNames: recognizedCalls.length > 0 ? availableToolNames : undefined
       };
     } catch (err) {
+      if (terminalAssistantCommitted) {
+        // Debug/notice cleanup after the atomic commit must never replace the
+        // durable completed intent, even if cancellation interrupted cleanup.
+        this.logger.warn(`terminal Assistant post-commit cleanup failed: ${run.sessionId} ${run.runId}`);
+        return { aborted: false as const, toolCallCount: 0, assistantMessageId,
+          terminalIntentPersisted: true, hasVisibleText: hasVisibleAssistantText(textFromParts()) || reasoningFromParts().length > 0 };
+      }
       await writeTerminalFailure("assistant-finalization", err);
       throw err;
     }
@@ -3365,6 +3399,27 @@ export class AgentRunner {
         throw err;
       }
     };
+    const convergeExistingTerminalIntent = async () => {
+      // This endpoint never creates an intent: if the request was not committed
+      // and no cancellation won the race, it fails without selecting a tuple.
+      const deadline = this.nowMsFn() + 10_000;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const remaining = deadline - this.nowMsFn();
+        if (remaining <= 0) break;
+        try {
+          const result = await this.apiClient.convergeRunTerminal({
+            workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+            updatedAt: this.nowMsFn(),
+          }, { timeoutMs: remaining });
+          this.analyticsSignals?.emitExecution({ executionId: run.runId, runId: run.runId, runtimeKind: "agent_worker", runKind: run.runKind ?? "user", parentRunId: null, queuedAt: null, startedAt: analyticsExecutionStartedAt, endedAt: this.nowMsFn(), endTimeQuality: "observed", endReason: result.finalStatus }, "execution_finished");
+          return;
+        } catch (error) {
+          if (!isRetryableTerminalControlError(error) || attempt === 3 || deadline - this.nowMsFn() <= 250) throw error;
+          await new Promise<void>((resolve) => setTimeout(resolve, 250));
+        }
+      }
+      throw new Error("existing terminal intent convergence budget exhausted");
+    };
     let modelStepFailure: unknown = null;
     try {
       await this.apiClient.markRunWorkInProgress({
@@ -3373,7 +3428,7 @@ export class AgentRunner {
         runId: run.runId,
         updatedAt: nowMs(),
       });
-      const profile = await this.apiClient.getExecutionProfile({
+      let profile = await this.apiClient.getExecutionProfile({
         workspaceId: run.workspaceId,
         sessionId: run.sessionId,
         runId: run.runId
@@ -3386,22 +3441,17 @@ export class AgentRunner {
 
       // 手动压缩: 仅执行一次 compaction,不进入正常 step 循环.
       if (run.runKind === "manual_compaction") {
-        const notice = await this.apiClient.updateRunNotice({
-          workspaceId: run.workspaceId,
-          sessionId: run.sessionId,
-          runId: run.runId,
-          runNoticeText: "正在压缩上下文...",
-          updatedAt: nowMs()
-        });
-        assertFencedWriteUpdated("start compaction notice", notice);
-
         const compacted = await this.executeCompaction({ mode: "manual", profile, run, signal });
-        if (signal.aborted) {
-          await finishOnce("cancelled");
-          return;
-        }
         if (compacted.kind === "committed") {
           await finishOnce("completed", { intentAlreadyPersisted: true });
+          return;
+        }
+        if (compacted.kind === "failed" && compacted.reason === "commit_outcome_uncertain") {
+          this.logger.warn(`compaction commit outcome uncertain; stop run without selecting terminal tuple: ${run.sessionId} ${run.runId}`);
+          return;
+        }
+        if (signal.aborted) {
+          await finishOnce("cancelled");
           return;
         }
         if (compacted.kind === "skipped" && compacted.reason === "cas_conflict") throw new CompactionConflictError();
@@ -3432,8 +3482,11 @@ export class AgentRunner {
       }
 
       let pendingToolNamesSnapshot: ReadonlySet<string> | undefined;
+      // A skip is consumed only by the next model step, even when refreshed
+      // pending tools must finish before that step can start.
+      let autoCompactionAttemptedForNextModelStep = false;
       while (!signal.aborted) {
-        const context = await this.apiClient.getPromptContext({
+        let context = await this.apiClient.getPromptContext({
           workspaceId: run.workspaceId,
           sessionId: run.sessionId,
           runId: run.runId
@@ -3457,13 +3510,37 @@ export class AgentRunner {
           continue;
         }
 
-        if (recoveryContinuation.messageId == null && this.shouldAutoCompact({ context, model: profile.model, runtime: profile.runtime })) {
+        if (!autoCompactionAttemptedForNextModelStep && recoveryContinuation.messageId == null && this.shouldAutoCompact({ context, model: profile.model, runtime: profile.runtime })) {
           const compacted = await this.executeCompaction({ mode: "proactive", profile, run, signal });
-          if (compacted.kind === "failed" && compacted.reason !== "cancelled") {
+          if (compacted.kind === "failed" && compacted.reason === "commit_outcome_uncertain") {
+            this.logger.warn(`compaction commit outcome uncertain; stop run without selecting terminal tuple: ${run.sessionId} ${run.runId}`);
+            return;
+          }
+          if ((compacted.kind === "failed" && compacted.reason !== "cancelled") || (compacted.kind === "unavailable" && compacted.reason === "deadline")) {
             throw new Error(`proactive compaction failed: ${compacted.reason}`);
           }
           if (compacted.kind === "committed" || signal.aborted) {
             if (signal.aborted) await finishOnce("cancelled");
+            continue;
+          }
+          if (compacted.kind === "skipped" && compacted.reason === "profile_changed") {
+            profile = await this.apiClient.getExecutionProfile({
+              workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+            });
+          }
+          // Even a normal skip may have observed a newer session revision than
+          // the prompt snapshot above. Refresh once before the model step, but
+          // do not re-enter auto-compaction until after that step.
+          autoCompactionAttemptedForNextModelStep = true;
+          context = await this.apiClient.getPromptContext({
+            workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+          });
+          if (context.pendingTools.length > 0) {
+            const pendingResult = await this.executePendingTools({ profile, run, context, signal });
+            if (pendingResult.paused || signal.aborted) {
+              if (signal.aborted) await finishOnce("cancelled");
+              return;
+            }
             continue;
           }
         }
@@ -3479,6 +3556,7 @@ export class AgentRunner {
           run,
           context,
           step,
+          emptyResponseCount,
           signal,
           recoveryContinuation,
           repeatedToolCallCounter
@@ -3488,6 +3566,14 @@ export class AgentRunner {
           }
           throw err;
         });
+        autoCompactionAttemptedForNextModelStep = false;
+        // A terminal Assistant transaction already persisted the completed
+        // intent. A cancellation arriving after that commit cannot select a
+        // conflicting cancelled tuple, for either user or subtask runs.
+        if (result.terminalIntentPersisted === true) {
+          await finishOnce("completed", { intentAlreadyPersisted: true });
+          return;
+        }
         if (result.aborted || signal.aborted) {
           await finishOnce("cancelled");
           return;
@@ -3499,12 +3585,12 @@ export class AgentRunner {
         }
         if (result.hasVisibleText) {
           emptyResponseCount = 0;
-          await finishOnce("completed", { intentAlreadyPersisted: result.terminalIntentPersisted === true });
+          await finishOnce("completed");
           return;
         }
         emptyResponseCount += 1;
         if (emptyResponseCount >= EMPTY_RESPONSE_COMPLETE_THRESHOLD) {
-          await finishOnce("completed", { intentAlreadyPersisted: result.terminalIntentPersisted === true });
+          await finishOnce("completed");
           return;
         }
       }
@@ -3516,12 +3602,22 @@ export class AgentRunner {
         this.logger.error(`terminal control failed after tuple selection: ${run.sessionId} ${run.runId}`);
         return;
       }
+      if (err instanceof TerminalAssistantOutcomeUncertainError) {
+        // Neither an abort nor a failed replay proves the atomic completion
+        // did not commit. Resolve only a durable intent; never persist a guess.
+        try {
+          await convergeExistingTerminalIntent();
+        } catch {
+          this.logger.warn(`terminal Assistant outcome uncertain; stop without selecting terminal tuple: ${run.sessionId} ${run.runId}`);
+        }
+        return;
+      }
       if (isAbortLikeError(err, signal)) {
         this.logger.info(`run aborted: ${run.sessionId} ${run.runId}`);
         await tryFinishOnce("cancelled");
         return;
       }
-      if (err instanceof FencedWriteIgnoredError) {
+      if (err instanceof FencedWriteIgnoredError || err instanceof CompactionNoticeFenceLostError) {
         this.logger.info(`run fenced write ignored, stop run: ${run.sessionId} ${run.runId}`);
         return;
       }

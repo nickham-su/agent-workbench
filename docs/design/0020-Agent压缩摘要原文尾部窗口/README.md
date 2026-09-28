@@ -32,8 +32,8 @@
 - 无产物结果的intent与convergence共享独立10秒terminal-control预算；每阶段最多3个真实HTTP请求，合计最多6个，两个API Client均零重试。
 - user/subtask终态Assistant必须无ToolCall/ToolExecution，并在同一事务完成Assistant、response tokens和intent；manual成功`commitCompaction`同一事务提交摘要、Session坐标和intent。原子成功后不写独立intent，首次convergence前新建10秒预算。
 - 空Assistant由Worker在提交前依本地计数选择：前N-1次普通完成，第N次阈值完成走原子terminal Assistant入口。
-- 分块上限固定为8最终叶、15 attempted partitions、30 logical Provider calls；网络上限为 proactive 30、manual 60。
-- `summary_input_limit` 是压缩摘要请求的失败结果；不会触发额外的主模型恢复压缩。
+- 摘要始终使用选定模型处理完整旧前缀，不再分片或切换模型；额外重试次数由 `modelRequestMaxRetries` 决定，不另设 30/60 总请求预算。
+- 摘要调用的所有抛错都按模型重试次数退避；耗尽后自动压缩使所属对话 Run 失败，手动压缩也失败。
 - 当前 trigger 媒体必须留在 B；无法在20k内保留时 proactive 跳过，manual 返回明确结果。
 - terminal result 属于 `agent_run`，不属于 `session_run_state`。全局 registry 冻结 runKind/status/code 合法组合；旧completeRun契约/端点/Client方法不保留。
 - `convergeRunTerminal`只读intended，在一个事务内按workspace/session/run origin收敛Message、ToolExecution、Session revision、Run终态和session_run_state；返回`transitioned`或`already_converged`及finalStatus。completed存在非终态产物即失败；failed/cancelled收敛streaming Assistant与queued/running ToolExecution，后两类转为终态时`completedAt=convergence.updatedAt`，保留startedAt且不伪造result/error。
@@ -63,10 +63,10 @@
 - 有效动态上下文只有 S、B 和 S 后消息，不重复、不遗漏。
 - B 为沿同 Workspace `previousMessageId` 祖先链的闭区间；旧 compaction 跳过且不递归。
 - 主 profile 空投影块不计成本、不算进展、不能成为 retainedFrom。
-- candidate/primary 切换不得改变 A/B 和 SummaryInputBlock 语义。
+- 选定的摘要模型不得改变 A/B 和 SummaryInputBlock 语义；未配置摘要模型时使用主模型。
 - CAS conflict 后旧 Plan 与摘要全部作废；重规划不重置当前 deadline。
 - profileFingerprint 变化不得复用旧 Plan。
-- CAS replan 不清零 partition、logical、network 计数；计数作用域为 proactive attempt 或 manual Run。
+- proactive 不重规划，manual 最多一次 CAS 重规划且必须重新生成摘要；取消及整体截止时间可终止重试。
 - 所有 work RPC、Provider 请求和退避绑定 work deadline；intent/convergence只绑定独立10秒terminal-control budget。
 - 主模型的所有 Provider 错误均按 Web 设置的 `modelRequestMaxRetries` 进行普通指数退避重试；不因启发式 context-limit 分类触发恢复压缩。
 - `terminal_intent_persisted`时status仍为running，公共查询不返回intended code；startup只调用完整convergence，不重跑业务。

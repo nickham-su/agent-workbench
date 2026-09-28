@@ -56,6 +56,11 @@ type SingleCallModelParams = {
   allowTools?: boolean;
 };
 
+/** Internal call-site policy; not a user-configurable model option. */
+type SingleCallExecutionOptions = {
+  disableSdkRetries?: boolean;
+};
+
 export type SingleCallGenerateResult = {
   text: string;
   totalTokens: number | null;
@@ -330,7 +335,7 @@ type SingleCallStreamChunk = TextStreamPart<ToolSet>;
 type SingleCallStreamResult = Pick<StreamTextResult<ToolSet, never>, "fullStream" | "usage" | "totalUsage">;
 type SingleCallRequest = Parameters<typeof streamText<ToolSet>>[0];
 
-function buildSingleCallRequest(profile: SingleCallModelProfile, params: SingleCallModelParams, abortSignal: AbortSignal) {
+function buildSingleCallRequest(profile: SingleCallModelProfile, params: SingleCallModelParams, abortSignal: AbortSignal, options?: SingleCallExecutionOptions) {
   assertAllowedParamKeys(params);
   const runtimeOptions = buildModelRuntimeOptions(profile);
   if (isReasoningProviderNpm(profile.provider.npm)) {
@@ -343,6 +348,12 @@ function buildSingleCallRequest(profile: SingleCallModelProfile, params: SingleC
     abortSignal,
     ...runtimeOptions.aiSdk,
   };
+  if (options?.disableSdkRetries) {
+    request.maxRetries = 0;
+    // A summary error is propagated through fullStream; avoid the SDK default
+    // error logger printing provider-controlled responses (which may be private).
+    request.onError = () => {};
+  }
 
   if (typeof params.system === "string" && params.system.trim()) {
     request.system = params.system;
@@ -381,11 +392,11 @@ function buildSingleCallRequest(profile: SingleCallModelProfile, params: SingleC
   return request;
 }
 
-export async function generateSingleCallText(profile: SingleCallModelProfile, params: SingleCallModelParams): Promise<SingleCallGenerateResult> {
+export async function generateSingleCallText(profile: SingleCallModelProfile, params: SingleCallModelParams, options?: SingleCallExecutionOptions): Promise<SingleCallGenerateResult> {
   let text = "";
   let totalTokens: number | null = null;
 
-  for await (const event of streamSingleCallText(profile, params)) {
+  for await (const event of streamSingleCallText(profile, params, options)) {
     if (event.type === "text-delta") {
       text += event.text;
       continue;
@@ -401,7 +412,7 @@ export async function generateSingleCallText(profile: SingleCallModelProfile, pa
   };
 }
 
-export function streamSingleCallText(profile: SingleCallModelProfile, params: SingleCallModelParams): AsyncIterable<SingleCallStreamEvent> {
+export function streamSingleCallText(profile: SingleCallModelProfile, params: SingleCallModelParams, options?: SingleCallExecutionOptions): AsyncIterable<SingleCallStreamEvent> {
   const timeoutMs = normalizeTimeoutMs(params.timeoutMs);
   return {
     [Symbol.asyncIterator]: async function* () {
@@ -412,7 +423,7 @@ export function streamSingleCallText(profile: SingleCallModelProfile, params: Si
       let stream: SingleCallStreamResult | null = null;
       let finishEmitted = false;
       try {
-        const request = buildSingleCallRequest(profile, params, timed.signal);
+        const request = buildSingleCallRequest(profile, params, timed.signal, options);
         stream = streamText(request);
         for await (const chunk of stream.fullStream as AsyncIterable<SingleCallStreamChunk>) {
           if (chunk.type === "text-delta") {
