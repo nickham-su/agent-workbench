@@ -1081,6 +1081,7 @@ function createLanguageModel(profile: ExecutionProfile) {
     const sdk = createOpenAICompatible({
       name: profile.provider.id,
       apiKey: profile.provider.options.apiKey,
+      includeUsage: true,
       baseURL: profile.provider.options.baseURL
     });
     return sdk.chatModel(providerModelId);
@@ -1270,12 +1271,15 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
-/** SDK inputTokens includes cached input for OpenAI, but not for Anthropic. */
+/** OpenAI-style inputTokens includes cached input; Anthropic reports uncached input separately. */
 function cacheInputForStep(step: CacheStep, providerNpm: string, cacheRead: number | null): number | null {
   const usage = asRecord(step.usage);
   const input = cacheCount(usage?.inputTokens);
   if (cacheRead === null || input === null || cacheCount(usage?.cachedInputTokens) !== cacheRead) return null;
-  if (providerNpm === "@ai-sdk/openai") return cacheRead <= input ? input : null;
+  if (providerNpm === "@ai-sdk/openai" || providerNpm === "@ai-sdk/openai-compatible" ||
+      providerNpm === "@ai-sdk/deepseek" || providerNpm === "@ai-sdk/moonshotai") {
+    return cacheRead <= input ? input : null;
+  }
   if (providerNpm !== "@ai-sdk/anthropic") return null;
   const anthropic = asRecord(asRecord(step.providerMetadata)?.anthropic);
   const raw = asRecord(anthropic?.usage);
@@ -3146,10 +3150,8 @@ export class AgentRunner {
         // Never let an optional Analytics observation delay the retry path.
         // Only a single finish-step pairs SDK usage with its provider metadata.
         // A multi-step totalUsage must never be mixed with last-step metadata.
-        const cacheProvider = (profile.provider.npm === "@ai-sdk/openai" || profile.provider.npm === "@ai-sdk/anthropic") && profile.provider.options.baseURL
-          ? undefined : profile.provider.npm;
         const analyticsUsage = attemptReachedTerminal && attemptStream
-          ? await readStreamAnalyticsUsage(attemptStream, finishedSteps === 1 ? cacheStep : undefined, cacheProvider)
+          ? await readStreamAnalyticsUsage(attemptStream, finishedSteps === 1 ? cacheStep : undefined, profile.provider.npm)
           : normalizeAnalyticsUsage(null);
         const analyticsAttemptStatus = requestController.signal.aborted ? (idleTimedOut || totalTimedOut ? "timed_out" : "cancelled") : (attemptSucceeded ? "completed" : "failed");
         this.analyticsSignals?.emitModel({ modelCallId: analyticsModelCallId, runId: run.runId, executionId: run.runId, attemptNo: analyticsAttemptNo, providerId: profile.provider.id ?? "unknown", modelId: profile.model.id ?? "unknown", startedAt: analyticsModelStartedAt, endedAt: this.nowMsFn(), status: analyticsAttemptStatus, completionQuality: "observed", timeoutKind: idleTimedOut ? "idle" : totalTimedOut ? "total" : null, ...analyticsUsage, failureKind: analyticsAttemptStatus === "completed" ? null : analyticsAttemptStatus === "timed_out" ? "timeout" : analyticsAttemptStatus === "cancelled" ? "cancelled" : attemptLocalFailure ? "other" : "provider" }, "model_finished", analyticsModelCallId);

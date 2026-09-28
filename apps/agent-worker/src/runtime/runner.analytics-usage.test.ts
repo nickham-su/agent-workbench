@@ -6,7 +6,7 @@ import { AgentRunner } from "./runner.js";
 
 const neverSettlingUsage = new Promise<never>(() => undefined);
 
-for (const providerNpm of ["@ai-sdk/moonshotai", "@ai-sdk/deepseek"] as const) {
+for (const providerNpm of ["@ai-sdk/openai-compatible", "@ai-sdk/moonshotai", "@ai-sdk/deepseek"] as const) {
   test(`${providerNpm} custom model ID invokes production Runner and emits one paired Analytics Attempt`, async () => {
     const bodies: Array<Record<string, unknown>> = [];
     const server = createServer(async (req, res) => {
@@ -18,6 +18,10 @@ for (const providerNpm of ["@ai-sdk/moonshotai", "@ai-sdk/deepseek"] as const) {
         res.write(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1,
           model: "custom-provider-id", choices: [{ index: 0, delta, finish_reason: delta.content ? null : "stop" }] })}\n\n`);
       }
+      res.write(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1,
+        model: "custom-provider-id", choices: [], usage: { prompt_tokens: 1000, completion_tokens: 10,
+          total_tokens: 1010, prompt_cache_hit_tokens: 900, cached_tokens: 900,
+          prompt_tokens_details: { cached_tokens: 900 } } })}\n\n`);
       res.end("data: [DONE]\n\n");
     });
     await new Promise<void>((resolve, reject) => { server.listen(0, "127.0.0.1", resolve); server.once("error", reject); });
@@ -59,13 +63,17 @@ for (const providerNpm of ["@ai-sdk/moonshotai", "@ai-sdk/deepseek"] as const) {
       assert.equal(streamingAssistants, 1);
       assert.equal(bodies.length, 1);
       assert.equal(bodies[0]?.model, "custom-provider-id");
-      assert.deepEqual(bodies[0]?.thinking, { type: "enabled" });
+      if (providerNpm === "@ai-sdk/openai-compatible")
+        assert.deepEqual(bodies[0]?.stream_options, { include_usage: true });
+      else assert.deepEqual(bodies[0]?.thinking, { type: "enabled" });
       assert.deepEqual(signals.map(({ eventType }) => eventType), ["model_invoked", "model_finished"]);
       assert.equal(signals[0]?.payload.attemptNo, signals[1]?.payload.attemptNo);
       assert.equal(signals[1]?.payload.attemptNo, 1);
       assert.equal(signals[1]?.payload.status, "completed");
       assert.equal(signals[1]?.payload.modelId, "local-alias"); // Existing Analytics uses local ID, not providerModelId.
-      assert.equal(signals[1]?.payload.cacheComparable, false);
+      assert.equal(signals[1]?.payload.cacheReadTokens, 900);
+      assert.equal(signals[1]?.payload.cacheInputTokens, 1000);
+      assert.equal(signals[1]?.payload.cacheComparable, true);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
     }
@@ -191,7 +199,7 @@ async function finishedModelUsage(options: {
   return signals.find((signal) => signal.eventType === "model_finished")?.payload;
 }
 
-test("OpenAI cached input uses full input only for valid SDK counts and official endpoint", async () => {
+test("OpenAI cached input uses full input only for valid SDK counts", async () => {
   for (const [cached, denominator] of [[900, 1000], [0, 1000], [undefined, null], [null, null], [true, null], ["0", null], [0.5, null], [Number.MAX_SAFE_INTEGER + 1, null]] as const) {
     const payload = await finishedModelUsage({ npm: "@ai-sdk/openai", usage: { inputTokens: 1000, outputTokens: 10, totalTokens: 1010, cachedInputTokens: cached } });
     assert.equal(payload?.cacheReadTokens, denominator === null ? null : cached);
@@ -199,12 +207,34 @@ test("OpenAI cached input uses full input only for valid SDK counts and official
     assert.equal(payload?.cacheComparable, denominator !== null);
     assert.equal(payload?.totalTokens, 1010);
   }
+  for (const npm of ["@ai-sdk/openai", "@ai-sdk/openai-compatible", "@ai-sdk/deepseek", "@ai-sdk/moonshotai"]) {
+    for (const baseURL of [undefined, "https://example.invalid"]) {
+      const payload = await finishedModelUsage({ npm, baseURL, usage: { inputTokens: 1000, outputTokens: 10, totalTokens: 1010, cachedInputTokens: 900 } });
+      assert.equal(payload?.cacheReadTokens, 900, `${npm} ${baseURL}`);
+      assert.equal(payload?.cacheInputTokens, 1000, `${npm} ${baseURL}`);
+      assert.equal(payload?.cacheComparable, true, `${npm} ${baseURL}`);
+    }
+  }
+  const zero = await finishedModelUsage({ npm: "@ai-sdk/openai-compatible", usage: { inputTokens: 1000, cachedInputTokens: 0 } });
+  assert.equal(zero?.cacheInputTokens, 1000);
+  assert.equal(zero?.cacheComparable, true);
   for (const options of [
-    { npm: "@ai-sdk/openai-compatible" },
-    { npm: "@ai-sdk/openai", baseURL: "https://example.invalid" },
     { npm: "@ai-sdk/openai", steps: 2 },
+    { npm: "@ai-sdk/openai-compatible", steps: 2 },
+    { npm: "@ai-sdk/deepseek", steps: 2 },
+    { npm: "@ai-sdk/moonshotai", steps: 2 },
   ]) {
     const payload = await finishedModelUsage({ ...options, usage: { inputTokens: 1000, outputTokens: 10, totalTokens: 1010, cachedInputTokens: 900 } });
+    assert.equal(payload?.cacheComparable, false);
+    assert.equal(payload?.cacheInputTokens, null);
+  }
+  for (const usage of [
+    { inputTokens: 1000, cachedInputTokens: undefined },
+    { inputTokens: undefined, cachedInputTokens: 900 },
+    { inputTokens: 1000, cachedInputTokens: 1001 },
+    { inputTokens: 1000, cachedInputTokens: "900" },
+  ]) {
+    const payload = await finishedModelUsage({ npm: "@ai-sdk/openai-compatible", usage });
     assert.equal(payload?.cacheComparable, false);
     assert.equal(payload?.cacheInputTokens, null);
   }
@@ -219,6 +249,9 @@ test("Anthropic counts uncached, read and creation from the same normal step wit
   assert.equal(valid?.cacheComparable, true);
   assert.equal(valid?.inputTokens, 100);
   assert.equal(valid?.totalTokens, 110);
+  const proxied = await finishedModelUsage({ npm: "@ai-sdk/anthropic", usage, metadata, baseURL: "https://example.invalid" });
+  assert.equal(proxied?.cacheInputTokens, 1050);
+  assert.equal(proxied?.cacheComparable, true);
   for (const invalid of [
     { metadata: undefined },
     { metadata: { anthropic: { usage: { ...metadata.anthropic.usage, iterations: {} } } } },
@@ -226,7 +259,6 @@ test("Anthropic counts uncached, read and creation from the same normal step wit
     { metadata: { anthropic: { usage: { ...metadata.anthropic.usage, iterations: [{ input_tokens: 100 }] } } } },
     { metadata: { anthropic: { usage: { ...metadata.anthropic.usage, input_tokens: 101 } } } },
     { metadata, steps: 2 },
-    { metadata, baseURL: "https://example.invalid" },
   ]) {
     const payload = await finishedModelUsage({ npm: "@ai-sdk/anthropic", usage, ...invalid });
     assert.equal(payload?.cacheComparable, false);
