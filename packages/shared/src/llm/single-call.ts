@@ -1,8 +1,12 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { createMoonshotAI } from "@ai-sdk/moonshotai";
+import { createDeepSeek } from "@ai-sdk/deepseek";
 import { streamText, type JSONValue, type ModelMessage, type StreamTextResult, type TextStreamPart, type ToolSet } from "ai";
 import { parseAiSdkCallSettings } from "./ai-sdk-call-settings.js";
+import { isReasoningProviderNpm, mergeReasoningProviderOptions } from "./reasoning-provider-options.js";
+import { reasoningProviderFixedOptions } from "./reasoning-provider-policy.js";
 
 const MODEL_TIMEOUT_MS_DEFAULT = 60_000;
 const MODEL_TIMEOUT_MS_MAX = 2_147_483_647;
@@ -20,7 +24,8 @@ const SINGLE_CALL_ALLOWED_PARAM_KEYS = new Set([
   "allowTools"
 ]);
 
-export type SingleCallProviderNpm = "@ai-sdk/openai" | "@ai-sdk/openai-compatible" | "@ai-sdk/anthropic";
+export type SingleCallProviderNpm = "@ai-sdk/openai" | "@ai-sdk/openai-compatible" | "@ai-sdk/anthropic" | "@ai-sdk/moonshotai" | "@ai-sdk/deepseek";
+
 
 export type SingleCallModelProfile = {
   provider: {
@@ -178,6 +183,8 @@ function assertAllowedParamKeys(params: SingleCallModelParams) {
 
 function providerOptionsKeyByNpm(npm: SingleCallProviderNpm) {
   if (npm === "@ai-sdk/openai-compatible") return "openaiCompatible";
+  if (npm === "@ai-sdk/moonshotai") return "moonshotai";
+  if (npm === "@ai-sdk/deepseek") return "deepseek";
   return npm === "@ai-sdk/anthropic" ? "anthropic" : "openai";
 }
 
@@ -256,6 +263,26 @@ function createLanguageModel(profile: SingleCallModelProfile) {
     return sdk.chatModel(providerModelId);
   }
 
+  if (profile.provider.npm === "@ai-sdk/moonshotai") {
+    const sdk = createMoonshotAI({
+      apiKey: profile.provider.options.apiKey,
+      ...(profile.provider.options.baseURL?.trim() ? { baseURL: profile.provider.options.baseURL.trim() } : {})
+    });
+    return sdk.chatModel(providerModelId);
+  }
+
+  if (profile.provider.npm === "@ai-sdk/deepseek") {
+    const sdk = createDeepSeek({
+      apiKey: profile.provider.options.apiKey,
+      ...(profile.provider.options.baseURL?.trim() ? { baseURL: profile.provider.options.baseURL.trim() } : {})
+    });
+    return sdk.chat(providerModelId);
+  }
+
+  if (profile.provider.npm !== "@ai-sdk/anthropic") {
+    throw new Error("reasoning provider single-call factory is not yet available");
+  }
+
   const sdk = createAnthropic({
     apiKey: profile.provider.options.apiKey,
     baseURL: profile.provider.options.baseURL
@@ -306,6 +333,10 @@ type SingleCallRequest = Parameters<typeof streamText<ToolSet>>[0];
 function buildSingleCallRequest(profile: SingleCallModelProfile, params: SingleCallModelParams, abortSignal: AbortSignal) {
   assertAllowedParamKeys(params);
   const runtimeOptions = buildModelRuntimeOptions(profile);
+  if (isReasoningProviderNpm(profile.provider.npm)) {
+    runtimeOptions.providerOptions = mergeReasoningProviderOptions(
+      runtimeOptions.providerOptions, reasoningProviderFixedOptions(profile.provider.npm));
+  }
   const request: SingleCallRequest = {
     model: createLanguageModel(profile),
     messages: params.messages,

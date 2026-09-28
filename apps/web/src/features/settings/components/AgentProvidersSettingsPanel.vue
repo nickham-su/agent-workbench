@@ -257,6 +257,9 @@
           <a-textarea v-model:value="modelFormProviderOptionsJson" :auto-size="{ minRows: 5, maxRows: 12 }" class="font-mono text-xs" />
           <div class="pt-1 text-xs text-[color:var(--text-tertiary)]">
             <span>{{ t('settings.agentProviders.modelForm.providerOptionsHelp', { key: modelFormProviderOptionsKey }) }}</span>
+            <span v-if="isReasoningProviderNpm(getProvider(modelFormProviderId)?.npm ?? '')">
+              {{ t('settings.agentProviders.modelForm.reasoningOptionsHelp') }}
+            </span>
             <span> </span>
             <a
               :href="providerDocsUrlForNpm(getProvider(modelFormProviderId)?.npm ?? DEFAULT_PROVIDER_NPM)"
@@ -281,6 +284,7 @@ import type {
   AgentSettingsView,
   UpdateAgentProvidersSettingsRequest
 } from "@agent-workbench/shared";
+import { isReasoningProviderNpm, sanitizeReasoningProviderOptions } from "@agent-workbench/shared";
 import { Modal, message, type SelectProps } from "ant-design-vue";
 import { computed, onMounted, ref } from "vue";
 import { DeleteOutlined, EditOutlined } from "@ant-design/icons-vue";
@@ -326,7 +330,9 @@ const AI_SDK_SETTINGS_DOC_URL = "https://ai-sdk.dev/docs/ai-sdk-core/settings";
 const providerNpmOptions: Array<{ value: AgentProviderNpm; label: string }> = [
   { value: "@ai-sdk/openai", label: "OpenAI (@ai-sdk/openai)" },
   { value: "@ai-sdk/openai-compatible", label: "OpenAI Compatible / Third-Party (@ai-sdk/openai-compatible)" },
-  { value: "@ai-sdk/anthropic", label: "Anthropic (@ai-sdk/anthropic)" }
+  { value: "@ai-sdk/anthropic", label: "Anthropic (@ai-sdk/anthropic)" },
+  { value: "@ai-sdk/moonshotai", label: "Moonshot / Kimi (@ai-sdk/moonshotai)" },
+  { value: "@ai-sdk/deepseek", label: "DeepSeek (@ai-sdk/deepseek)" }
 ];
 
 const loading = ref(false);
@@ -362,6 +368,7 @@ const providerModelIdOptionsLoading = ref(false);
 const providerModelIdOptionsWarning = ref("");
 const providerModelIdOptions = ref<Array<{ value: string; label: string }>>([]);
 const providerModelIdRemoteItems = ref<AgentProviderModelsListItem[]>([]);
+const providerModelIdSuggestionsUnavailable = ref(false);
 const providerModelIdOptionsRequestSeq = ref(0);
 const agentsSnapshot = ref<AgentSettingsView["agents"]>([]);
 const renameReferenceError = ref("");
@@ -417,6 +424,10 @@ const filterProviderModelIdOption: SelectProps["filterOption"] = (input, option)
 };
 
 function rebuildProviderModelIdOptions() {
+  if (providerModelIdSuggestionsUnavailable.value) {
+    providerModelIdOptions.value = [];
+    return;
+  }
   const seen = new Set<string>();
   const candidates: string[] = [
     ...providerModelIdRemoteItems.value.map((item) => item.id),
@@ -473,10 +484,14 @@ function mapFromSettings(view: AgentProvidersSettingsView) {
 
 function providerOptionsKeyForNpm(npm: AgentProviderNpm) {
   if (npm === "@ai-sdk/openai-compatible") return "openaiCompatible";
+  if (npm === "@ai-sdk/moonshotai") return "moonshotai";
+  if (npm === "@ai-sdk/deepseek") return "deepseek";
   return npm === "@ai-sdk/anthropic" ? "anthropic" : "openai";
 }
 
 function providerDocsUrlForNpm(npm: AgentProviderNpm) {
+  if (npm === "@ai-sdk/moonshotai") return "https://ai-sdk.dev/providers/ai-sdk-providers/moonshotai";
+  if (npm === "@ai-sdk/deepseek") return "https://ai-sdk.dev/providers/ai-sdk-providers/deepseek";
   if (npm === "@ai-sdk/anthropic") return "https://ai-sdk.dev/providers/ai-sdk-providers/anthropic";
   if (npm === "@ai-sdk/openai-compatible") {
     return "https://ai-sdk.dev/providers/openai-compatible-providers/openai-compatible";
@@ -538,6 +553,8 @@ function maskApiKey(raw: string) {
 }
 
 function defaultBaseURLForNpm(npm: AgentProviderNpm) {
+  if (npm === "@ai-sdk/moonshotai") return "https://api.moonshot.cn/v1";
+  if (npm === "@ai-sdk/deepseek") return "https://api.deepseek.com";
   if (npm === "@ai-sdk/anthropic") return "https://api.anthropic.com/v1";
   if (npm === "@ai-sdk/openai-compatible") return "https://your-openai-compatible-host/v1";
   return "https://api.openai.com/v1";
@@ -690,6 +707,8 @@ function openAddModel(providerId: string) {
   renameReferenceError.value = "";
   providerModelIdInputSearch.value = "";
   providerModelIdRemoteItems.value = [];
+  providerModelIdOptionsWarning.value = "";
+  providerModelIdSuggestionsUnavailable.value = false;
   rebuildProviderModelIdOptions();
   modelModalOpen.value = true;
   void loadProviderModelOptions(provider.id);
@@ -712,12 +731,15 @@ async function openEditModel(providerId: string, modelId: string) {
   const aiSdk = toJsonRecord(options.aiSdk);
   const providerOptionsByKey = toJsonRecord(options.providerOptionsByKey);
   const providerKey = providerOptionsKeyForNpm(provider.npm);
-  const providerOptions = toJsonRecord(providerOptionsByKey[providerKey]);
+  const providerOptions = isReasoningProviderNpm(provider.npm)
+    ? sanitizeReasoningProviderOptions(providerOptionsByKey[providerKey]) : toJsonRecord(providerOptionsByKey[providerKey]);
   modelFormAiSdkJson.value = stringifyPretty(aiSdk);
   modelFormProviderOptionsJson.value = stringifyPretty(providerOptions);
   renameReferenceError.value = "";
   providerModelIdInputSearch.value = "";
   providerModelIdRemoteItems.value = [];
+  providerModelIdOptionsWarning.value = "";
+  providerModelIdSuggestionsUnavailable.value = false;
   rebuildProviderModelIdOptions();
   modelModalOpen.value = true;
   await refreshAgentsSnapshot();
@@ -734,6 +756,8 @@ async function loadProviderModelOptions(providerId: string) {
       providerId === modelFormProviderId.value
     );
   };
+  const npm = getProvider(providerId)?.npm;
+  const silentDiscovery = npm === "@ai-sdk/moonshotai" || npm === "@ai-sdk/deepseek";
 
   providerModelIdOptionsLoading.value = true;
   providerModelIdOptionsWarning.value = "";
@@ -742,14 +766,19 @@ async function loadProviderModelOptions(providerId: string) {
 
     if (!shouldApply()) return;
 
-    providerModelIdRemoteItems.value = Array.isArray(res.items) ? res.items : [];
-    providerModelIdOptionsWarning.value = res.warning ?? "";
+    // Cached fallbacks have source "cache" but still carry a warning.
+    providerModelIdSuggestionsUnavailable.value = silentDiscovery && (res.source === "fallback" || res.warning != null);
+    providerModelIdRemoteItems.value = providerModelIdSuggestionsUnavailable.value
+      ? []
+      : Array.isArray(res.items) ? res.items : [];
+    providerModelIdOptionsWarning.value = silentDiscovery ? "" : res.warning ?? "";
     rebuildProviderModelIdOptions();
-  } catch (err) {
+  } catch {
     if (!shouldApply()) return;
 
+    providerModelIdSuggestionsUnavailable.value = silentDiscovery;
     providerModelIdRemoteItems.value = [];
-    providerModelIdOptionsWarning.value = t("settings.agentProviders.errors.modelListLoadFailed");
+    providerModelIdOptionsWarning.value = silentDiscovery ? "" : t("settings.agentProviders.errors.modelListLoadFailed");
     rebuildProviderModelIdOptions();
   } finally {
     if (!shouldApply()) return;
@@ -840,6 +869,7 @@ function closeModelModal() {
 
   providerModelIdInputSearch.value = "";
   providerModelIdOptionsWarning.value = "";
+  providerModelIdSuggestionsUnavailable.value = false;
   providerModelIdRemoteItems.value = [];
   providerModelIdOptions.value = [];
   renameReferenceError.value = "";
@@ -873,6 +903,9 @@ function submitModel() {
   }
 
   const providerKey = providerOptionsKeyForNpm(provider.npm);
+  if (isReasoningProviderNpm(provider.npm)) {
+    providerOptions = sanitizeReasoningProviderOptions(providerOptions);
+  }
   const modelPayload = {
     id: nextId,
     providerModelId: nextProviderModelId,

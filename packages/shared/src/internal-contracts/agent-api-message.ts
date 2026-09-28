@@ -1,4 +1,5 @@
 import { Type, type Static } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import {
   AgentMessageSchema,
   AgentOrdinaryMessageSchema,
@@ -31,7 +32,7 @@ export const AgentApiCreateStreamingAssistantResponseSchema = Type.Object({
 }, { additionalProperties: false });
 export type AgentApiCreateStreamingAssistantResponse = Static<typeof AgentApiCreateStreamingAssistantResponseSchema>;
 
-const AgentApiStreamingPartInputSchema = Type.Union([
+const StrictAgentApiStreamingPartInputSchema = Type.Union([
   Type.Object({
     id: IdSchema, position: Type.Integer({ minimum: 0 }), type: Type.Literal("text"), text: Type.String(),
     providerReplay: Type.Optional(Type.Intersect([
@@ -52,20 +53,59 @@ const AgentApiStreamingPartInputSchema = Type.Union([
     providerToolCallId: Type.Union([IdSchema, Type.Null()]),
     providerReplay: Type.Optional(Type.Intersect([
       AgentProviderReplayEnvelopeSchema,
-      Type.Object({ item: Type.Object({ type: Type.Literal("function_call") }) }),
+      Type.Object({ item: Type.Object({ type: Type.Union([Type.Literal("function_call"), Type.Literal("tool_call")]) }) }),
     ])),
   }, { additionalProperties: false })
 ]);
+
+// Fastify's Ajv removes additional properties while trying each anyOf branch. The strict
+// discriminated replay union (OpenAI vs two Chat providers) would mutate Chat metadata
+// into an invalid shape before reaching the matching branch; the same is true for the
+// text/reasoning/tool-call part union. Use a non-mutating transport shape, then check
+// the original strict schema after authorization; the store also validates replay
+// before persisting anything.
+const ReplayTransportSchema = Type.Object({
+  version: Type.Literal(1),
+  provider: Type.Object({
+    npm: Type.Union([Type.Literal("@ai-sdk/openai"), Type.Literal("@ai-sdk/moonshotai"), Type.Literal("@ai-sdk/deepseek")]),
+    api: Type.Union([Type.Literal("responses"), Type.Literal("chat-completions")]),
+    providerId: IdSchema, model: IdSchema,
+  }),
+  item: Type.Object({ type: Type.Union([
+    Type.Literal("text"), Type.Literal("reasoning"), Type.Literal("function_call"), Type.Literal("tool_call"),
+  ]) }),
+});
+
+const AgentApiStreamingPartInputSchema = Type.Object({
+  id: IdSchema, position: Type.Integer({ minimum: 0 }),
+  type: Type.Union([Type.Literal("text"), Type.Literal("reasoning"), Type.Literal("tool_call")]),
+  text: Type.Optional(Type.String()),
+  toolName: Type.Optional(IdSchema), input: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+  providerToolCallId: Type.Optional(Type.Union([IdSchema, Type.Null()])),
+  providerReplay: Type.Optional(ReplayTransportSchema),
+}, { additionalProperties: false });
 
 export const AgentApiFlushAssistantPartsRequestSchema = Type.Object({
   workspaceId: IdSchema,
   sessionId: IdSchema,
   runId: IdSchema,
   messageId: IdSchema,
-  parts: Type.Array(AgentApiStreamingPartInputSchema),
+  parts: Type.Array(StrictAgentApiStreamingPartInputSchema),
   updatedAt: Type.Number()
 }, { additionalProperties: false });
 export type AgentApiFlushAssistantPartsRequest = Static<typeof AgentApiFlushAssistantPartsRequestSchema>;
+
+/** Ajv-facing shape only: retain the exported strict contract for Value.Check callers. */
+export const AgentApiFlushAssistantPartsTransportRequestSchema = Type.Object({
+  ...AgentApiFlushAssistantPartsRequestSchema.properties,
+  parts: Type.Array(AgentApiStreamingPartInputSchema),
+}, { additionalProperties: false });
+
+/** Fastify must not mutate a discriminated anyOf during Ajv validation; enforce
+ * its original strict contract before dispatching the authenticated write. */
+export function hasValidAgentApiStreamingParts(value: unknown): boolean {
+  return Array.isArray(value) && value.every((part) => Value.Check(StrictAgentApiStreamingPartInputSchema, part));
+}
 
 /** Worker 在恢复 Run 的首次模型调用前认领 API 已准备好的 streaming Assistant。 */
 export const AgentApiResumeStreamingAssistantRequestSchema = Type.Object({

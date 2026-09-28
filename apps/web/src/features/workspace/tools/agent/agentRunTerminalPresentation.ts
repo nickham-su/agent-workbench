@@ -21,6 +21,10 @@ const TERMINAL_MESSAGE_KEYS: Record<AgentTerminalResultCode, string> = {
   run_cancelled: "agent.runTerminal.run_cancelled",
   run_enqueue_failed: "agent.runTerminal.run_enqueue_failed",
   run_failed: "agent.runTerminal.run_failed",
+  run_provider_bad_request: "agent.runTerminal.run_provider_bad_request",
+  run_provider_unauthorized: "agent.runTerminal.run_provider_unauthorized",
+  run_provider_not_found: "agent.runTerminal.run_provider_not_found",
+  run_provider_unsupported: "agent.runTerminal.run_provider_unsupported",
   run_startup_recovery_failed: "agent.runTerminal.run_startup_recovery_failed",
   subtask_failed: "agent.runTerminal.subtask_failed",
 };

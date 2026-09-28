@@ -32,7 +32,8 @@ import {
   AgentApiEndpoints,
   AgentApiCreateStreamingAssistantRequestSchema,
   AgentApiCreateStreamingAssistantResponseSchema,
-  AgentApiFlushAssistantPartsRequestSchema,
+  AgentApiFlushAssistantPartsTransportRequestSchema,
+  hasValidAgentApiStreamingParts,
   AgentApiResumeStreamingAssistantRequestSchema,
   AgentApiReplaceStreamingAssistantRequestSchema,
   AgentApiReplaceStreamingAssistantResponseSchema,
@@ -382,7 +383,7 @@ export async function registerAgentWorkerRoutes(
     url: AgentApiEndpoints.flushAssistantParts.path,
     schema: {
       tags: ["agent"],
-      body: AgentApiFlushAssistantPartsRequestSchema,
+      body: AgentApiFlushAssistantPartsTransportRequestSchema,
       response: {
         200: AgentApiFencedWriteResponseSchema,
         400: ErrorResponseSchema,
@@ -391,8 +392,12 @@ export async function registerAgentWorkerRoutes(
     },
     handler: async (req) => {
       assertInternalToken(req, dependencies.internalToken);
+      const body = req.body as AgentApiFlushAssistantPartsRequest;
+      if (!hasValidAgentApiStreamingParts(body.parts)) {
+        throw new HttpError(400, "invalid assistant parts");
+      }
       return dependencies.service.flushAssistantPartsFromWorker(
-        req.body as AgentApiFlushAssistantPartsRequest,
+        body,
       );
     },
   });

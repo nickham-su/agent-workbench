@@ -54,6 +54,10 @@ export const AgentTerminalResultCodeSchema = Type.Union([
   Type.Literal("run_cancelled"),
   Type.Literal("run_enqueue_failed"),
   Type.Literal("run_failed"),
+  Type.Literal("run_provider_bad_request"),
+  Type.Literal("run_provider_unauthorized"),
+  Type.Literal("run_provider_not_found"),
+  Type.Literal("run_provider_unsupported"),
   Type.Literal("run_startup_recovery_failed"),
   Type.Literal("subtask_failed")
 ]);
@@ -63,7 +67,7 @@ export type AgentTerminalResultCode = Static<typeof AgentTerminalResultCodeSchem
 export const AGENT_TERMINAL_CODE_REGISTRY = {
   user: {
     completed: ["run_completed"],
-    failed: ["context_limit_recovery_exhausted", "context_limit_media_requires_resend", "compaction_conflict", "run_enqueue_failed", "run_failed", "run_startup_recovery_failed"],
+    failed: ["context_limit_recovery_exhausted", "context_limit_media_requires_resend", "compaction_conflict", "run_enqueue_failed", "run_failed", "run_provider_bad_request", "run_provider_unauthorized", "run_provider_not_found", "run_provider_unsupported", "run_startup_recovery_failed"],
     cancelled: ["run_cancelled"]
   },
   subtask: {

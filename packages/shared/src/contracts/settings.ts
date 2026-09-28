@@ -67,7 +67,9 @@ export type AgentProviderModel = Static<typeof AgentProviderModelSchema>;
 export const AgentProviderNpmSchema = Type.Union([
   Type.Literal("@ai-sdk/openai"),
   Type.Literal("@ai-sdk/openai-compatible"),
-  Type.Literal("@ai-sdk/anthropic")
+  Type.Literal("@ai-sdk/anthropic"),
+  Type.Literal("@ai-sdk/moonshotai"),
+  Type.Literal("@ai-sdk/deepseek")
 ]);
 export type AgentProviderNpm = Static<typeof AgentProviderNpmSchema>;
 

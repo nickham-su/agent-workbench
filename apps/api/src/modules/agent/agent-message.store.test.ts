@@ -135,6 +135,22 @@ test("workspace cancel converges every active run before runtime cancellation an
   db.close();
 });
 
+test("Provider failure terminal codes persist and converge without storing server error details", () => {
+  for (const code of ["run_provider_bad_request", "run_provider_unauthorized",
+    "run_provider_not_found", "run_provider_unsupported"] as const) {
+    const db = createDb(); session(db); activate(db);
+    assert.equal(persistRunTerminalIntent(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a",
+      status: "failed", code, detail: null, updatedAt: 3 }), "updated");
+    assert.deepEqual(getPersistedRunTerminalIntent(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a" }),
+      { status: "failed", code, detail: null });
+    assert.deepEqual(convergeRunTerminal(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", updatedAt: 4 }),
+      { kind: "transitioned", finalStatus: "failed" });
+    assert.equal(getRunRecord(db, "run-a")?.terminalResultCode, code);
+    assert.equal(getRunRecord(db, "run-a")?.terminalResultDetail, null);
+    db.close();
+  }
+});
+
 test("compaction confirmation accepts only the current owned artifact and manual atomic intent", () => {
   const db = createDb();
   session(db);

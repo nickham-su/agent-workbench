@@ -42,6 +42,10 @@ import {
   parseAiSdkCallSettings,
   redactUnsafeAiSdkHeadersForRead,
 } from "@agent-workbench/shared/llm-ai-sdk-call-settings";
+import {
+  isReasoningProviderNpm,
+  sanitizeReasoningProviderOptions,
+} from "@agent-workbench/shared";
 import type { AppContext } from "../../app/context.js";
 import { HttpError } from "../../app/errors.js";
 import { ensureDir, pathExists } from "../../infra/fs/fs.js";
@@ -202,8 +206,28 @@ function normalizeBaseURL(raw: unknown) {
   return value.endsWith("/") ? value.slice(0, -1) : value;
 }
 
-function normalizeProviderModelsUrl(baseURL: string) {
+function normalizeProviderModelsUrl(baseURL: string, npm: AgentProviderNpm) {
   const trimmed = normalizeBaseURL(baseURL);
+  if (npm === "@ai-sdk/moonshotai" || npm === "@ai-sdk/deepseek") {
+    // Model discovery uses the configured endpoint, not the SDK's default chat URL.
+    // A custom gateway may have a path prefix; never discard it or follow a redirect
+    // that might send the user's Bearer token to another host.
+    let endpoint: URL;
+    try {
+      endpoint = new URL(trimmed);
+    } catch {
+      throw new Error("invalid model discovery endpoint");
+    }
+    if (!(["http:", "https:"].includes(endpoint.protocol)) || !endpoint.hostname
+      || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
+      throw new Error("invalid model discovery endpoint");
+    }
+    // Moonshot's public API is /v1/models; DeepSeek's public API is /models.
+    // Explicit /v1 on DeepSeek (or a gateway) is respected as a path prefix.
+    const path = endpoint.pathname.replace(/\/+$/, "");
+    endpoint.pathname = `${path}${npm === "@ai-sdk/moonshotai" && !path.endsWith("/v1") ? "/v1" : ""}/models`;
+    return endpoint.toString();
+  }
   if (trimmed.endsWith("/v1")) return `${trimmed}/models`;
   return `${trimmed}/v1/models`;
 }
@@ -252,16 +276,21 @@ function toRecordObject(raw: unknown) {
 function normalizeProviderNpmStored(raw: unknown): AgentProviderNpm {
   if (raw === "@ai-sdk/openai-compatible") return raw;
   if (raw === "@ai-sdk/anthropic") return raw;
+  if (raw === "@ai-sdk/moonshotai") return raw;
+  if (raw === "@ai-sdk/deepseek") return raw;
   return DEFAULT_PROVIDER_NPM;
 }
 
 function normalizeProviderNpmInput(raw: unknown): AgentProviderNpm {
-  if (raw === "@ai-sdk/openai" || raw === "@ai-sdk/openai-compatible" || raw === "@ai-sdk/anthropic") return raw;
+  if (raw === "@ai-sdk/openai" || raw === "@ai-sdk/openai-compatible" || raw === "@ai-sdk/anthropic"
+    || raw === "@ai-sdk/moonshotai" || raw === "@ai-sdk/deepseek") return raw;
   throw new HttpError(400, `Unsupported provider npm: ${String(raw)}`, "AGENT_PROVIDER_NPM_UNSUPPORTED");
 }
 
 function providerOptionsKeyByNpm(npm: AgentProviderNpm) {
   if (npm === "@ai-sdk/openai-compatible") return "openaiCompatible";
+  if (npm === "@ai-sdk/moonshotai") return "moonshotai";
+  if (npm === "@ai-sdk/deepseek") return "deepseek";
   return npm === "@ai-sdk/anthropic" ? "anthropic" : "openai";
 }
 
@@ -336,6 +365,11 @@ function normalizeProviderModelOptions(raw: unknown, providerNpm: AgentProviderN
       ...legacyProviderOptions,
       ...(providerOptionsByKey[providerKey] ?? {})
     };
+  }
+
+  // Stored legacy keys remain readable, but the next save removes all reserved keys.
+  if (mode === "update" && isReasoningProviderNpm(providerNpm)) {
+    providerOptionsByKey[providerKey] = sanitizeReasoningProviderOptions(providerOptionsByKey[providerKey]);
   }
 
   const out: Record<string, unknown> = {};
@@ -611,7 +645,7 @@ function toAgentProvidersSettingsView(settings: AgentProvidersSettingsStored, up
 function listConfiguredProviderModels(provider: AgentProviderStored) {
   const seen = new Set<string>();
   return provider.models
-    .map((item) => item.id.trim())
+    .map((item) => item.providerModelId?.trim() || item.id.trim())
     .filter((id) => {
       if (!id || seen.has(id)) return false;
       seen.add(id);
@@ -620,8 +654,22 @@ function listConfiguredProviderModels(provider: AgentProviderStored) {
     .map((id) => ({ id, label: id }));
 }
 
-function parseRemoteModelsItems(raw: unknown) {
+function mergeProviderModels(
+  remote: Array<{ id: string; label: string }>,
+  configured: Array<{ id: string; label: string }>
+) {
+  const seen = new Set<string>();
+  return [...remote, ...configured].filter(({ id }) => {
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
+function parseRemoteModelsItems(raw: unknown, strict: boolean) {
   const payload = toRecordObject(raw);
+  // Keep legacy OpenAI/Anthropic parsing semantics; reject malformed new-provider directories.
+  if (strict && !Array.isArray(payload?.data)) throw new Error("invalid model list response");
   const data = Array.isArray(payload?.data) ? payload.data : [];
   const seen = new Set<string>();
   const items: Array<{ id: string; label: string }> = [];
@@ -631,6 +679,7 @@ function parseRemoteModelsItems(raw: unknown) {
     seen.add(id);
     items.push({ id, label: id });
   }
+  if (strict && data.length > 0 && items.length === 0) throw new Error("invalid model list response");
   return items;
 }
 
@@ -639,15 +688,16 @@ async function fetchRemoteProviderModels(provider: AgentProviderStored) {
   if (!apiKey) {
     throw new HttpError(400, `Provider '${provider.id}' apiKey is missing`, "AGENT_PROVIDER_API_KEY_MISSING");
   }
-  if (provider.npm !== "@ai-sdk/openai" && provider.npm !== "@ai-sdk/openai-compatible" && provider.npm !== "@ai-sdk/anthropic") {
+  if (provider.npm !== "@ai-sdk/openai" && provider.npm !== "@ai-sdk/openai-compatible"
+    && provider.npm !== "@ai-sdk/anthropic" && provider.npm !== "@ai-sdk/moonshotai" && provider.npm !== "@ai-sdk/deepseek") {
     throw new HttpError(400, `Unsupported provider npm: ${provider.npm}`, "AGENT_PROVIDER_MODELS_UNSUPPORTED_PROVIDER");
   }
 
-  const url = normalizeProviderModelsUrl(provider.options.baseURL);
+  const url = normalizeProviderModelsUrl(provider.options.baseURL, provider.npm);
   const headers: Record<string, string> = {
     Accept: "application/json"
   };
-  if (provider.npm === "@ai-sdk/openai" || provider.npm === "@ai-sdk/openai-compatible") {
+  if (provider.npm !== "@ai-sdk/anthropic") {
     headers.Authorization = `Bearer ${apiKey}`;
   } else {
     headers["x-api-key"] = apiKey;
@@ -657,13 +707,14 @@ async function fetchRemoteProviderModels(provider: AgentProviderStored) {
   const res = await fetch(url, {
     method: "GET",
     headers,
+    redirect: "error",
     signal: AbortSignal.timeout(PROVIDER_MODELS_REMOTE_TIMEOUT_MS)
   });
   if (!res.ok) {
     throw new Error(`models list request failed: ${res.status}`);
   }
   const payload = await res.json();
-  return parseRemoteModelsItems(payload);
+  return parseRemoteModelsItems(payload, provider.npm === "@ai-sdk/moonshotai" || provider.npm === "@ai-sdk/deepseek");
 }
 
 export async function getAgentProviderModels(
@@ -704,7 +755,7 @@ export async function getAgentProviderModels(
     const items = await fetchRemoteProviderModels(provider);
     const value: AgentProviderModelsListView = {
       providerId: provider.id,
-      items,
+      items: mergeProviderModels(items, listConfiguredProviderModels(provider)),
       source: "remote",
       cached: false,
       fetchedAt: now,
@@ -718,10 +769,10 @@ export async function getAgentProviderModels(
       {
         providerId: provider.id,
         providerNpm: provider.npm,
-        providerBaseURL: provider.options.baseURL,
+        // Neither the configured URL nor a fetch error message is safe to log:
+        // URL userinfo, query and fragment may carry credentials.
         errCode: err instanceof HttpError ? err.code : undefined,
-        errStatusCode: err instanceof HttpError ? err.statusCode : undefined,
-        errMessage: err instanceof Error ? err.message : String(err ?? "unknown")
+        errStatusCode: err instanceof HttpError ? err.statusCode : undefined
       },
       "agent provider models fetch failed, fallback to configured models"
     );

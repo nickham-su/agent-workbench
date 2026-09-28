@@ -300,6 +300,10 @@ export default {
       run_cancelled: "运行已取消",
       run_enqueue_failed: "运行未能启动",
       run_failed: "运行失败",
+      run_provider_bad_request: "模型服务拒绝了请求，请检查模型 ID 和参数配置（HTTP 400）",
+      run_provider_unauthorized: "模型服务鉴权失败，请检查 Provider 凭证配置（HTTP 401）",
+      run_provider_not_found: "模型或服务地址不存在，请检查模型 ID 和端点配置（HTTP 404）",
+      run_provider_unsupported: "当前 SDK 不支持该模型请求参数，请检查模型与 Provider 配置",
       run_startup_recovery_failed: "运行恢复失败",
       subtask_failed: "子任务失败",
     },
@@ -889,7 +893,7 @@ export default {
       saved: "已保存"
     },
     agentProviders: {
-      description: "管理 AI Provider 与模型。可新增/编辑 Provider，并在 Provider 下管理模型与默认模型。",
+      description: "管理 AI Provider 与模型。Moonshot/DeepSeek 可查询 API Key 可见的模型；查询不到时可直接输入完整的 Provider 模型ID。",
       saving: "正在保存...",
       empty: "暂无 Provider，请先新增",
       selectProviderHint: "请从左侧选择一个 Provider 查看模型",
@@ -955,6 +959,7 @@ export default {
         aiSdkDocsLink: "AI SDK 文档",
         providerOptionsLabel: "Provider 参数 JSON (自动包装为 {key})",
         providerOptionsHelp: "仅填写当前 Provider 的子对象, 系统会自动包装到 providerOptions.{key}。",
+        reasoningOptionsHelp: "思考与历史推理由系统管理；此处的 thinking、reasoningHistory、reasoningEffort 设置不会生效。",
         providerDocsLink: "Provider 文档"
       },
       deleteProvider: {

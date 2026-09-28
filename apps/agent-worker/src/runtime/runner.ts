@@ -5,6 +5,7 @@ import { clearTimeout as clearNativeTimeout, setTimeout as setNativeTimeout } fr
 import path from "node:path";
 import {
   APICallError,
+  UnsupportedFunctionalityError,
   jsonSchema,
   streamText,
   tool,
@@ -18,6 +19,8 @@ import {
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { createMoonshotAI } from "@ai-sdk/moonshotai";
+import { createDeepSeek } from "@ai-sdk/deepseek";
 import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call";
 import { parseAiSdkCallSettings } from "@agent-workbench/shared/llm-ai-sdk-call-settings";
 import { AgentApiClient, ApiConflictError, InternalRpcHttpError, InternalRpcNetworkError, InternalRpcTimeoutError, type ExecutionProfile, type PromptContext } from "./apiClient.js";
@@ -48,10 +51,15 @@ import {
 } from "./providers/conversation-state/registry.js";
 import { finalOpenAiModel } from "./providers/openai-responses-replay.js";
 import type {
+  ProviderConversationStateAttempt,
   ProviderConversationStateAdapterRegistry,
   ProviderConversationStatePartUpdate,
   ProviderConversationStateToolCallReplay,
 } from "./providers/conversation-state/types.js";
+import {
+  agentReplayProvenance,
+  sameAgentReplayProvenance,
+} from "@agent-workbench/shared/internal-contracts/agent-provider-provenance";
 import {
   projectAssistantDebugRecord,
   serializeAssistantDebugRecord,
@@ -221,19 +229,40 @@ function isContextLengthExceededError(err: unknown) {
 function safeErrorSummary(error: unknown) {
   const source = toErrorRecord(error);
   const apiCallError = APICallError.isInstance(error) ? error : null;
-  const name = error instanceof Error && error.name ? error.name : "Error";
+  // Provider-controlled error names/codes can contain response text or credentials.
+  const knownNames = new Set(["Error", "APICallError", "AI_APICallError", "AbortError", "TimeoutError"]);
+  const name = error instanceof Error && knownNames.has(error.name) ? error.name : "Error";
   const status = apiCallError?.statusCode
     ?? (typeof source?.statusCode === "number" ? source.statusCode : null)
     ?? (typeof source?.status === "number" ? source.status : null);
+  const safeStatus = typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599 ? status : null;
   const codes = [
     ...collectErrorCodes(apiCallError?.data),
     ...collectErrorCodes(source),
-  ].filter(Boolean);
+  ];
+  const safeCodes = new Set([
+    ...CONTEXT_LIMIT_ERROR_CODES,
+    "invalid_request_error", "authentication_error", "permission_error",
+    "rate_limit_exceeded", "model_not_found", "invalid_api_key",
+  ]);
+  const safeCode = codes.find((code) => safeCodes.has(code));
   const details = [
-    status == null ? null : `status=${status}`,
-    codes[0] ? `code=${codes[0]}` : null,
+    safeStatus == null ? null : `status=${safeStatus}`,
+    safeCode ? `code=${safeCode}` : null,
   ].filter((value): value is string => value != null);
   return details.length > 0 ? `${name} (${details.join(", ")})` : name;
+}
+
+/** Only trusted SDK error types and numeric HTTP statuses may become public terminal codes. */
+function providerFailureTerminalCode(error: unknown): import("@agent-workbench/shared").AgentTerminalResultCode | null {
+  if (UnsupportedFunctionalityError.isInstance(error)) return "run_provider_unsupported";
+  if (!APICallError.isInstance(error)) return null;
+  switch (error.statusCode) {
+    case 400: return "run_provider_bad_request";
+    case 401: return "run_provider_unauthorized";
+    case 404: return "run_provider_not_found";
+    default: return null;
+  }
 }
 
 function toolErrorMessage(error: unknown) {
@@ -836,7 +865,7 @@ type StreamingAssistantPart =
   | {
     id: string; position: number; type: "tool_call"; toolName: string;
     input: Record<string, unknown>; providerToolCallId: string | null; toolCall: ToolCall;
-    providerReplay?: ProviderReplayFor<"function_call">;
+    providerReplay?: ProviderReplayFor<"function_call" | "tool_call">;
   };
 
 type ProviderReplayPartUpdate = ProviderConversationStatePartUpdate;
@@ -974,6 +1003,8 @@ function toJsonValue(raw: unknown): JSONValue | undefined {
 
 function providerOptionsKeyByNpm(npm: ExecutionProfile["provider"]["npm"]) {
   if (npm === "@ai-sdk/openai-compatible") return "openaiCompatible";
+  if (npm === "@ai-sdk/moonshotai") return "moonshotai";
+  if (npm === "@ai-sdk/deepseek") return "deepseek";
   return npm === "@ai-sdk/anthropic" ? "anthropic" : "openai";
 }
 
@@ -1053,6 +1084,22 @@ function createLanguageModel(profile: ExecutionProfile) {
       baseURL: profile.provider.options.baseURL
     });
     return sdk.chatModel(providerModelId);
+  }
+
+  if (profile.provider.npm === "@ai-sdk/moonshotai") {
+    const sdk = createMoonshotAI({
+      apiKey: profile.provider.options.apiKey,
+      ...(profile.provider.options.baseURL?.trim() ? { baseURL: profile.provider.options.baseURL.trim() } : {})
+    });
+    return sdk.chatModel(providerModelId);
+  }
+
+  if (profile.provider.npm === "@ai-sdk/deepseek") {
+    const sdk = createDeepSeek({
+      apiKey: profile.provider.options.apiKey,
+      ...(profile.provider.options.baseURL?.trim() ? { baseURL: profile.provider.options.baseURL.trim() } : {})
+    });
+    return sdk.chat(providerModelId);
   }
 
   if (profile.provider.npm === "@ai-sdk/anthropic") {
@@ -2352,13 +2399,14 @@ export class AgentRunner {
       messages: context.messages as ModelMessage[],
       history: context.providerReplay,
       providerOptions: runtimeOptions.providerOptions,
-    }) ?? {
-      messages: context.messages as ModelMessage[],
-      providerOptions: runtimeOptions.providerOptions,
-    };
-    const preparedProviderOptions = preparedInvocation.providerOptions;
-    const includeRawChunks = preparedInvocation.includeRawChunks === true;
-    materializedMessages = await materializePromptAttachments({ messages: preparedInvocation.messages as PromptContext["messages"], attachmentStorage: this.attachmentStorage });
+    });
+    const preparedProviderOptions = preparedInvocation?.providerOptions ?? runtimeOptions.providerOptions;
+    const includeRawChunks = preparedInvocation?.includeRawChunks === true;
+    // API keeps empty Assistant placeholders only to preserve replay ordinals. The Adapter
+    // consumes those indexes first; after recovery, no Provider may receive an empty Assistant.
+    const providerMessages = (preparedInvocation?.messages ?? context.messages).filter((message) =>
+      message.role !== "assistant" || message.content.length > 0);
+    materializedMessages = await materializePromptAttachments({ messages: providerMessages as PromptContext["messages"], attachmentStorage: this.attachmentStorage });
 
     const modelIdleTimeoutMs = Math.max(0, Math.floor(profile.runtime.modelIdleTimeoutMs));
     const modelTotalTimeoutMs = Math.max(0, Math.floor(profile.runtime.modelTotalTimeoutMs));
@@ -2389,7 +2437,7 @@ export class AgentRunner {
       ...runtimeOptions.aiSdk,
       maxRetries: 0,
     };
-    if (Object.keys(runtimeOptions.providerOptions).length > 0 || profile.provider.npm === "@ai-sdk/openai") {
+    if (Object.keys(preparedProviderOptions).length > 0 || profile.provider.npm === "@ai-sdk/openai") {
       const providerOptions = buildProviderOptionsWithPromptCacheKey({
           providerNpm: profile.provider.npm,
           sessionId: run.sessionId,
@@ -2409,6 +2457,19 @@ export class AgentRunner {
 
     let assistantMessageId: string;
     if (recoveryContinuation.messageId) {
+      if (profile.provider.npm === "@ai-sdk/moonshotai" || profile.provider.npm === "@ai-sdk/deepseek") {
+        // Existing streaming Parts cannot currently be loaded and proved identical here.
+        // Atomically replace instead of mixing a new Attempt with an unknown partial output.
+        const newMessageId = newSortableId("message");
+        const replaced = await this.apiClient.replaceStreamingAssistant({
+          workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+          oldMessageId: recoveryContinuation.messageId, newMessageId,
+          runNoticeText: "", retryCount: 0, nextRetryAt: null, createdAt: this.nowMsFn(),
+        });
+        assertFencedWriteUpdated("replace recovery streaming assistant", replaced);
+        recoveryContinuation.messageId = null;
+        assistantMessageId = newMessageId;
+      } else {
       const resumedMessageId = recoveryContinuation.messageId;
       const claim = await this.apiClient.resumeStreamingAssistant({
         workspaceId: run.workspaceId,
@@ -2420,6 +2481,7 @@ export class AgentRunner {
       // 成功 claim 后该 continuation 已与本次模型 step 绑定，不能供后续 step 重复使用。
       recoveryContinuation.messageId = null;
       assistantMessageId = resumedMessageId;
+      }
     } else {
       assistantMessageId = newSortableId("message");
       const request = {
@@ -2439,6 +2501,28 @@ export class AgentRunner {
     let orderedParts: StreamingAssistantPart[] = [];
     let streamPartVersion = 0;
     let streamedCharsSinceLastFlush = 0;
+    let activeAttempt: ProviderConversationStateAttempt | undefined;
+    const attachPartReplay = (part: StreamingAssistantPart) => {
+      try {
+        const replay = activeAttempt?.createPartReplay?.({
+          id: part.id, type: part.type,
+          ...(part.type === "tool_call" && part.providerToolCallId ? { providerToolCallId: part.providerToolCallId } : {}),
+        });
+        if (!replay) return;
+        if (replay.item.type !== (part.type === "tool_call" && replay.provider.npm === "@ai-sdk/openai" ? "function_call" : part.type)) {
+          throw new AgentProviderReplayUpdateError("provider replay part type mismatch");
+        }
+        if (part.providerReplay && serializeAgentProviderReplay(part.providerReplay) !== serializeAgentProviderReplay(replay)) {
+          throw new AgentProviderReplayUpdateError("provider replay part identity mismatch");
+        }
+        if (part.providerReplay) return;
+        part.providerReplay = replay as StreamingAssistantPart["providerReplay"];
+        streamPartVersion += 1;
+      } catch {
+        // An Adapter or serializer may throw private metadata. Never leak its message or retry the model.
+        throw new AgentProviderReplayUpdateError("provider replay part materialization failed");
+      }
+    };
     const textFromParts = () => orderedParts
       .filter((part): part is Extract<StreamingAssistantPart, { type: "text" }> => part.type === "text")
       .map((part) => part.text)
@@ -2450,10 +2534,31 @@ export class AgentRunner {
     const toolCallsFromParts = () => orderedParts
       .filter((part): part is Extract<StreamingAssistantPart, { type: "tool_call" }> => part.type === "tool_call")
       .map((part) => part.toolCall);
+    // SDK IDs identify the current stream block, not a globally unique DB Part. Some
+    // SDKs reuse reasoning-0 after text (and across requests). OpenAI keeps its item IDs.
+    const activeStreamParts = new Map<string, string>();
+    let lastStreamType: "text" | "reasoning" | null = null;
+    const localStreamPartId = (type: "text" | "reasoning", id: string, start = false) => {
+      if (!conversationStateAdapter?.scopeStreamPartIds || id.startsWith(`${assistantMessageId}:part:`)) return id;
+      if (id.startsWith(`${assistantMessageId}:stream:`)) return id;
+      if (lastStreamType !== type) activeStreamParts.clear();
+      lastStreamType = type;
+      const key = `${type}:${id}`;
+      if (start && activeStreamParts.has(key)) {
+        throw new AgentProviderReplayUpdateError("provider stream block was started twice without ending");
+      }
+      let partId = activeStreamParts.get(key);
+      if (!partId) {
+        partId = `${assistantMessageId}:stream:${orderedParts.length}`;
+        activeStreamParts.set(key, partId);
+      }
+      return partId;
+    };
     const ensureStreamTextPart = (type: "text" | "reasoning", id: string) => {
       const existing = orderedParts.find((part) => part.id === id);
       if (existing) {
         if (existing.type !== type) throw new AgentProviderReplayUpdateError("provider stream part id changed type");
+        attachPartReplay(existing);
         return existing;
       }
       const part: Extract<StreamingAssistantPart, { type: typeof type }> = {
@@ -2463,12 +2568,15 @@ export class AgentRunner {
         text: "",
       } as Extract<StreamingAssistantPart, { type: typeof type }>;
       orderedParts.push(part);
+      attachPartReplay(part);
       streamPartVersion += 1;
       return part;
     };
     const appendStreamText = (type: "text" | "reasoning", delta: string, streamId?: string) => {
       const last = orderedParts.at(-1);
-      const id = streamId || (last?.type === type ? last.id : `${assistantMessageId}:part:${orderedParts.length}`);
+      const id = streamId
+        ? localStreamPartId(type, streamId)
+        : (last?.type === type ? last.id : `${assistantMessageId}:part:${orderedParts.length}`);
       const part = ensureStreamTextPart(type, id);
       if (orderedParts.at(-1)?.id !== part.id && delta) {
         throw new AgentProviderReplayUpdateError("provider stream attempted to append text to an earlier part");
@@ -2530,10 +2638,11 @@ export class AgentRunner {
       toolName: string,
       toolCallId: string,
       args: Record<string, unknown>,
-      providerReplay?: ProviderReplayFor<"function_call">,
+      providerReplay?: ProviderReplayFor<"function_call" | "tool_call">,
     ) => {
       const existing = orderedParts.find((part) => part.type === "tool_call" && part.providerToolCallId === toolCallId);
       if (existing?.type === "tool_call") {
+        attachPartReplay(existing);
         const sameCall = existing.toolName === toolName && JSON.stringify(existing.input) === JSON.stringify(args);
         if (!sameCall) {
           throw new AgentProviderReplayUpdateError("tool-call call_id was reused with different name or input");
@@ -2560,6 +2669,7 @@ export class AgentRunner {
         toolCall,
         ...(providerReplay == null ? {} : { providerReplay }),
       });
+      attachPartReplay(orderedParts.at(-1)!);
       streamPartVersion += 1;
     };
     const startedAt = this.nowMsFn();
@@ -2679,6 +2789,8 @@ export class AgentRunner {
       );
       assistantMessageId = newMessageId;
       orderedParts = [];
+      activeStreamParts.clear();
+      lastStreamType = null;
       streamPartVersion = 0;
       streamedCharsSinceLastFlush = 0;
       responseTotalTokens = null;
@@ -2701,10 +2813,14 @@ export class AgentRunner {
       let lastChunkAt = this.nowMsFn();
       const attemptStartPartVersion = streamPartVersion;
       const attemptProducedOutput = () => streamPartVersion > attemptStartPartVersion;
-      const conversationStateAttempt = conversationStateAdapter?.createAttempt();
+      const conversationStateAttempt = conversationStateAdapter && preparedInvocation
+        ? conversationStateAdapter.createAttempt(preparedInvocation.attemptContext) : undefined;
+      activeAttempt = conversationStateAttempt;
       let attemptStream: RuntimeStreamResult | null = null;
       let attemptResponseTotalTokens: number | null = null;
       let attemptReachedTerminal = false;
+      let attemptSucceeded = false;
+      let attemptLocalFailure = false;
 
       const onOuterAbort = () => {
         requestController.abort();
@@ -2743,11 +2859,12 @@ export class AgentRunner {
       } satisfies RuntimeStreamRequest;
 
       const analyticsModelStartedAt = this.nowMsFn();
+      const analyticsAttemptNo = retryCount + 1;
       const analyticsModelCallId = newSortableId("model");
       let cacheStep: CacheStep | undefined;
       let finishedSteps = 0;
       try {
-        const analyticsModelPayload = { modelCallId: analyticsModelCallId, runId: run.runId, executionId: run.runId, attemptNo: retryCount + 1, providerId: profile.provider.id ?? "unknown", modelId: profile.model.id ?? "unknown", startedAt: analyticsModelStartedAt, endedAt: null, status: "running" as const, completionQuality: "unknown" as const, timeoutKind: null, inputTokens: null, cacheInputTokens: null, cacheWriteTokens: null, cacheComparable: false, cacheWriteVerified: false, failureKind: null };
+        const analyticsModelPayload = { modelCallId: analyticsModelCallId, runId: run.runId, executionId: run.runId, attemptNo: analyticsAttemptNo, providerId: profile.provider.id ?? "unknown", modelId: profile.model.id ?? "unknown", startedAt: analyticsModelStartedAt, endedAt: null, status: "running" as const, completionQuality: "unknown" as const, timeoutKind: null, inputTokens: null, cacheInputTokens: null, cacheWriteTokens: null, cacheComparable: false, cacheWriteVerified: false, failureKind: null };
         this.analyticsSignals?.emitModel(analyticsModelPayload, "model_invoked", analyticsModelCallId);
         const stream = this.streamTextFn(request);
         attemptStream = stream;
@@ -2775,7 +2892,8 @@ export class AgentRunner {
             await maybeFlushAssistantStreaming();
           }
           if (chunk.type === "text-start" || chunk.type === "reasoning-start") {
-            ensureStreamTextPart(chunk.type === "text-start" ? "text" : "reasoning", chunk.id);
+            const type = chunk.type === "text-start" ? "text" : "reasoning";
+            ensureStreamTextPart(type, localStreamPartId(type, chunk.id, true));
             await maybeFlushAssistantStreaming();
             continue;
           }
@@ -2793,8 +2911,17 @@ export class AgentRunner {
             await maybeFlushAssistantStreaming();
             continue;
           }
-          if (chunk.type === "text-end" || chunk.type === "reasoning-end") continue;
+          if (chunk.type === "text-end" || chunk.type === "reasoning-end") {
+            if (conversationStateAdapter?.scopeStreamPartIds) {
+              activeStreamParts.delete(`${chunk.type === "text-end" ? "text" : "reasoning"}:${chunk.id}`);
+            }
+            continue;
+          }
           if (chunk.type === "tool-call") {
+            if (conversationStateAdapter?.scopeStreamPartIds) {
+              activeStreamParts.clear();
+              lastStreamType = null;
+            }
             const toolCallReplay = this.providerToolCallReplayFromChunkFn?.(chunk)
               ?? observedProtocolChunk?.toolCallReplay;
             const toolName = normalizeToolName(chunk.toolName, availableToolNames);
@@ -2826,9 +2953,6 @@ export class AgentRunner {
           }
         }
         attemptReachedTerminal = true;
-        if (pendingFlush) {
-          await flushAssistant(true);
-        }
 
         if (signal.aborted) {
           return { aborted: true as const, assistantMessageId };
@@ -2839,10 +2963,26 @@ export class AgentRunner {
         if (idleTimedOut) {
           throw new Error(`model idle timeout after ${modelIdleTimeoutMs}ms`);
         }
-        const protocolValidation = conversationStateAttempt?.finalizeAttempt();
-        if (protocolValidation && !protocolValidation.ok) {
-          throw new Error(protocolValidation.message);
+        let protocolValidation: ReturnType<NonNullable<typeof conversationStateAttempt>["finalizeAttempt"]> | undefined;
+        try {
+          protocolValidation = conversationStateAttempt?.finalizeAttempt();
+        } catch {
+          throw new AgentProviderReplayUpdateError("provider protocol finalization failed");
         }
+        if (protocolValidation && !protocolValidation.ok) {
+          // OpenAI Responses reports remote terminal failure/missing terminal through
+          // this hook. Preserve its established retry/replacement behavior; chat
+          // reasoning validation is a non-retryable local protocol invariant.
+          if (profile.provider.npm === "@ai-sdk/openai" && (
+            protocolValidation.code === "OPENAI_RESPONSES_TERMINAL_FAILURE"
+            || protocolValidation.code === "OPENAI_RESPONSES_UNKNOWN_FINISH_REASON"
+            || protocolValidation.code === "OPENAI_RESPONSES_COMPLETED_MISSING"
+          )) throw new Error(protocolValidation.message);
+          throw new AgentProviderReplayUpdateError(protocolValidation.message);
+        }
+        // Terminal metadata is already in orderedParts; do not persist the final batch
+        // until the provider protocol has accepted the completed stream.
+        if (pendingFlush) await flushAssistant(true);
         // replay-only 必须基于本次 Assistant 已实际落地的 reasoning Part，而非 Attempt 观察到的原始 chunk。
         // 严格 round-trip 校验避免 text/function identity 或未知工具 metadata 意外放开空 Assistant。
         const hasPersistedOpenAiReasoningReplay = orderedParts.some((part) => {
@@ -2873,13 +3013,38 @@ export class AgentRunner {
         } catch {
           // 保留流式阶段已经获取的 reasoning；收尾读取失败不应覆盖有效输出。
         }
+        const isNewReasoningProvider = profile.provider.npm === "@ai-sdk/moonshotai" || profile.provider.npm === "@ai-sdk/deepseek";
+        const identity = preparedInvocation?.attemptContext;
+        const hasTrustedReplayOnlyReasoning = protocolValidation?.ok === true
+          && protocolValidation.allowsReplayOnlyAssistant === true
+          && reasoningFromParts().trim().length > 0
+          && identity != null
+          && orderedParts.every((part) => {
+            if (!part.providerReplay) return false;
+            try {
+              const replay = parseAgentProviderReplay(serializeAgentProviderReplay(part.providerReplay));
+              if (!replay || !sameAgentReplayProvenance(agentReplayProvenance(replay), identity)) return false;
+              return replay.item.type === (part.type === "tool_call" ? "tool_call" : part.type);
+            } catch {
+              return false;
+            }
+          });
         if (!hasVisibleAssistantText(textFromParts()) && reasoningFromParts().length === 0 && toolCallsFromParts().length === 0 && !allowsReplayOnlyAssistant) {
           throw new Error("model stream completed without visible text or tool calls");
+        }
+        if (isNewReasoningProvider && !hasVisibleAssistantText(textFromParts()) && toolCallsFromParts().length === 0
+          && !hasTrustedReplayOnlyReasoning) {
+          throw new AgentProviderReplayUpdateError("reasoning-only assistant has no verified replay metadata");
         }
         if (attemptResponseTotalTokens == null && attemptStream) {
           attemptResponseTotalTokens = await readStreamTotalTokens(attemptStream);
         }
         responseTotalTokens = attemptResponseTotalTokens;
+
+        // Includes late reasoning and terminal replay metadata; failure belongs to this
+        // model Attempt, not to a subsequently completed Assistant write.
+        await flushAssistant(true);
+        attemptSucceeded = true;
 
         break;
       } catch (err) {
@@ -2899,6 +3064,7 @@ export class AgentRunner {
           return { aborted: true as const, assistantMessageId };
         }
         if (err instanceof FencedWriteIgnoredError || err instanceof FencedWriteMissingError || err instanceof ControlWritePermanentError || err instanceof AgentProviderReplayUpdateError) {
+          attemptLocalFailure = true;
           await writeAssistantDebugRecord({
             logger: this.logger,
             workspacePath: run.workspacePath,
@@ -2985,8 +3151,8 @@ export class AgentRunner {
         const analyticsUsage = attemptReachedTerminal && attemptStream
           ? await readStreamAnalyticsUsage(attemptStream, finishedSteps === 1 ? cacheStep : undefined, cacheProvider)
           : normalizeAnalyticsUsage(null);
-        const analyticsAttemptStatus = requestController.signal.aborted ? (idleTimedOut || totalTimedOut ? "timed_out" : "cancelled") : (attemptReachedTerminal ? "completed" : "failed");
-        this.analyticsSignals?.emitModel({ modelCallId: analyticsModelCallId, runId: run.runId, executionId: run.runId, attemptNo: retryCount + 1, providerId: profile.provider.id ?? "unknown", modelId: profile.model.id ?? "unknown", startedAt: analyticsModelStartedAt, endedAt: this.nowMsFn(), status: analyticsAttemptStatus, completionQuality: "observed", timeoutKind: idleTimedOut ? "idle" : totalTimedOut ? "total" : null, ...analyticsUsage, failureKind: analyticsAttemptStatus === "completed" ? null : analyticsAttemptStatus === "timed_out" ? "timeout" : analyticsAttemptStatus === "cancelled" ? "cancelled" : "provider" }, "model_finished", analyticsModelCallId);
+        const analyticsAttemptStatus = requestController.signal.aborted ? (idleTimedOut || totalTimedOut ? "timed_out" : "cancelled") : (attemptSucceeded ? "completed" : "failed");
+        this.analyticsSignals?.emitModel({ modelCallId: analyticsModelCallId, runId: run.runId, executionId: run.runId, attemptNo: analyticsAttemptNo, providerId: profile.provider.id ?? "unknown", modelId: profile.model.id ?? "unknown", startedAt: analyticsModelStartedAt, endedAt: this.nowMsFn(), status: analyticsAttemptStatus, completionQuality: "observed", timeoutKind: idleTimedOut ? "idle" : totalTimedOut ? "total" : null, ...analyticsUsage, failureKind: analyticsAttemptStatus === "completed" ? null : analyticsAttemptStatus === "timed_out" ? "timeout" : analyticsAttemptStatus === "cancelled" ? "cancelled" : attemptLocalFailure ? "other" : "provider" }, "model_finished", analyticsModelCallId);
 
         if (idleTimer) clearInterval(idleTimer);
         if (totalTimer) clearTimeout(totalTimer);
@@ -3049,7 +3215,6 @@ export class AgentRunner {
       }
 
       // 已在有效输出校验前读取收尾 reasoning，确保 reasoning-only 响应可正常完成。
-      await flushAssistant(true);
 
       const completeRequest = {
         workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
@@ -3198,6 +3363,7 @@ export class AgentRunner {
         throw err;
       }
     };
+    let modelStepFailure: unknown = null;
     try {
       await this.apiClient.markRunWorkInProgress({
         workspaceId: run.workspaceId,
@@ -3314,6 +3480,11 @@ export class AgentRunner {
           signal,
           recoveryContinuation,
           repeatedToolCallCounter
+        }).catch((err: unknown) => {
+          if (profile.provider.npm === "@ai-sdk/moonshotai" || profile.provider.npm === "@ai-sdk/deepseek") {
+            modelStepFailure = err;
+          }
+          throw err;
         });
         if (result.aborted || signal.aborted) {
           await finishOnce("cancelled");
@@ -3360,7 +3531,9 @@ export class AgentRunner {
       const cause = err;
       const failedTuple: TerminalTuple = err instanceof CompactionConflictError && (run.runKind === "user" || run.runKind === "manual_compaction")
         ? { status: "failed", code: "compaction_conflict", detail: null }
-        : { status: "failed", code: terminalCode("failed"), detail: null };
+        : { status: "failed", code: (run.runKind ?? "user") === "user" && modelStepFailure === err
+          ? providerFailureTerminalCode(err) ?? terminalCode("failed")
+          : terminalCode("failed"), detail: null };
       try {
         await tryFinishOnce(failedTuple);
       } catch {

@@ -24,7 +24,10 @@ function collectTests(dir) {
 const workerTest = join(apiRoot, "src/modules/agent/agent.worker.integration.test.ts");
 const tests = group === "worker"
   ? [workerTest]
-  : collectTests(join(apiRoot, "src")).filter((file) => {
+  : [
+      ...collectTests(join(apiRoot, "src")),
+      ...(group === "integration" ? collectTests(join(apiRoot, "tests")) : []),
+    ].filter((file) => {
     const isIntegration = file.endsWith(".integration.test.ts");
     return group === "unit"
       ? !isIntegration

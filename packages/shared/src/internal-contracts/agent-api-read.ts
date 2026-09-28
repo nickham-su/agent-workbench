@@ -11,6 +11,7 @@ import {
 import { AgentMessageSchema } from "../contracts/agent-message.js";
 import { PluginToolCanonicalNameSchema } from "../contracts/plugin.js";
 import { AgentProviderReplayEnvelopeSchema } from "./agent-provider-replay.js";
+import { AgentAssistantProvenanceSchema } from "./agent-provider-provenance.js";
 
 const AgentApiProviderSchema = Type.Object({
   id: Type.String({ minLength: 1 }),
@@ -272,6 +273,7 @@ const AgentApiPromptProviderReplayPartSchema = Type.Union([
 
 const AgentApiPromptProviderReplaySourceSchema = Type.Object({
   assistantOrdinal: Type.Integer({ minimum: 0 }),
+  assistantProvenance: Type.Optional(Type.Union([AgentAssistantProvenanceSchema, Type.Null()])),
   parts: Type.Array(AgentApiPromptProviderReplayPartSchema)
 }, { additionalProperties: false });
 

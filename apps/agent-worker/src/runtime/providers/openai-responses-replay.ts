@@ -11,8 +11,9 @@ export type OpenAiReplayProfile = {
   model: { id: string; providerModelId?: string };
 };
 
-type ReplayFor<T extends AgentProviderReplayEnvelope["item"]["type"]> = AgentProviderReplayEnvelope & {
-  item: Extract<AgentProviderReplayEnvelope["item"], { type: T }>;
+type OpenAiEnvelope = Extract<AgentProviderReplayEnvelope, { provider: { npm: "@ai-sdk/openai" } }>;
+type ReplayFor<T extends OpenAiEnvelope["item"]["type"]> = OpenAiEnvelope & {
+  item: Extract<OpenAiEnvelope["item"], { type: T }>;
 };
 
 export type OpenAiResponsesReplayPartUpdate =
@@ -72,6 +73,8 @@ function provider(profile: OpenAiReplayProfile) {
 function compatible(replay: AgentProviderReplayEnvelope, profile: OpenAiReplayProfile) {
   const expected = provider(profile);
   return expected != null
+    && replay.provider.npm === "@ai-sdk/openai"
+    && replay.provider.api === "responses"
     && replay.provider.providerId === expected.providerId
     && replay.provider.model === expected.model;
 }
@@ -139,7 +142,8 @@ export function applyOpenAiResponsesReplay(params: {
     const content: Exclude<AssistantContent, string> = [];
     const appendReasoning = (index: number) => {
       for (const part of before.get(index) ?? []) {
-        if (part.type !== "reasoning" || part.providerReplay.item.type !== "reasoning") continue;
+        if (part.type !== "reasoning" || part.providerReplay.item.type !== "reasoning"
+          || !("itemId" in part.providerReplay.item)) continue;
         content.push({
           type: "reasoning",
           text: part.text,
@@ -156,7 +160,8 @@ export function applyOpenAiResponsesReplay(params: {
       if (!original) continue;
       let next: Exclude<AssistantContent, string>[number] = original;
       for (const part of at.get(index) ?? []) {
-        if (part.type === "text" && part.providerReplay.item.type === "text" && original.type === "text") {
+        if (part.type === "text" && part.providerReplay.item.type === "text"
+          && "itemId" in part.providerReplay.item && original.type === "text") {
           next = {
             ...next,
             providerOptions: providerOptions({

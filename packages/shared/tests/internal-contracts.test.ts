@@ -167,7 +167,8 @@ test("Run terminal registry only accepts registered run-kind/status/code combina
   assert.deepEqual(AGENT_TERMINAL_CODE_REGISTRY, {
     user: {
       completed: ["run_completed"],
-      failed: ["context_limit_recovery_exhausted", "context_limit_media_requires_resend", "compaction_conflict", "run_enqueue_failed", "run_failed", "run_startup_recovery_failed"],
+      failed: ["context_limit_recovery_exhausted", "context_limit_media_requires_resend", "compaction_conflict", "run_enqueue_failed", "run_failed",
+        "run_provider_bad_request", "run_provider_unauthorized", "run_provider_not_found", "run_provider_unsupported", "run_startup_recovery_failed"],
       cancelled: ["run_cancelled"]
     },
     subtask: {
@@ -191,6 +192,8 @@ test("Run terminal registry only accepts registered run-kind/status/code combina
   assert.equal(isAgentTerminalCodeAllowed("user", "completed", "subtask_completed"), false);
   assert.equal(isAgentTerminalCodeAllowed("subtask", "completed", "run_failed"), false);
   assert.equal(isAgentTerminalCodeAllowed("subtask", "failed", "run_failed"), false);
+  assert.equal(isAgentTerminalCodeAllowed("subtask", "failed", "run_provider_bad_request"), false);
+  assert.equal(isAgentTerminalCodeAllowed("manual_compaction", "failed", "run_provider_unauthorized"), false);
   assert.equal(isAgentTerminalCodeAllowed("manual_compaction", "completed", "run_cancelled"), false);
   assert.equal(isAgentTerminalCodeAllowed("user", "completed", "unknown_code" as never), false);
 });

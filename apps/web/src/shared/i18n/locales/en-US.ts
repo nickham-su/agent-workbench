@@ -302,6 +302,10 @@ export default {
       run_cancelled: "Run cancelled",
       run_enqueue_failed: "The run could not be started",
       run_failed: "Run failed",
+      run_provider_bad_request: "The model service rejected this request. Check the model ID and settings (HTTP 400)",
+      run_provider_unauthorized: "Model service authentication failed. Check the Provider credentials (HTTP 401)",
+      run_provider_not_found: "Model or endpoint not found. Check the model ID and endpoint settings (HTTP 404)",
+      run_provider_unsupported: "This SDK does not support the model request parameters. Check the model and Provider settings",
       run_startup_recovery_failed: "Run recovery failed",
       subtask_failed: "Subtask failed",
     },
@@ -891,7 +895,7 @@ export default {
       saved: "Saved"
     },
     agentProviders: {
-      description: "Manage AI providers and models. Add or edit providers, then manage models under each provider.",
+      description: "Manage AI providers and models. Moonshot and DeepSeek can list models visible to the API key; if no models are shown, you can enter the full Provider model ID directly.",
       saving: "Saving...",
       empty: "No providers yet. Add one to start.",
       selectProviderHint: "Select a provider from the left to view its models.",
@@ -957,6 +961,7 @@ export default {
         aiSdkDocsLink: "AI SDK docs",
         providerOptionsLabel: "Provider Params JSON (auto wrapped as {key})",
         providerOptionsHelp: "Only provide the current provider sub-object. The system wraps it into providerOptions.{key} automatically.",
+        reasoningOptionsHelp: "Thinking and reasoning history are managed by the system. thinking, reasoningHistory, and reasoningEffort in this JSON are ignored.",
         providerDocsLink: "Provider docs"
       },
       deleteProvider: {

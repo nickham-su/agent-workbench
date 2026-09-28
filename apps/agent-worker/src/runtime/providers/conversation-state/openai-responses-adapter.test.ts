@@ -10,6 +10,11 @@ const profile = {
   runtime: { modelRequestRetryBackoffMaxMs: 0 },
 } as any;
 
+const attemptContext = {
+  providerNpm: "@ai-sdk/openai" as const, protocol: "openai-responses" as const,
+  protocolVersion: 1 as const, providerId: "provider-a", model: "gpt-5",
+};
+
 function completedRaw() {
   return {
     type: "response.completed",
@@ -42,7 +47,7 @@ test("OpenAI Responses Adapter 保持请求准备行为并只选择官方 Respon
 
 test("每个 OpenAI Attempt 独立采集终态与 reasoning metadata", () => {
   const adapter = new OpenAIResponsesConversationStateAdapter(profile);
-  const first = adapter.createAttempt();
+  const first = adapter.createAttempt(attemptContext);
   const initial = first.observeChunk({
     type: "reasoning-start",
     id: "rs-1:0",
@@ -51,9 +56,9 @@ test("每个 OpenAI Attempt 独立采集终态与 reasoning metadata", () => {
   assert.equal(initial.partUpdate?.type, "reasoning");
   const terminal = first.observeChunk({ type: "raw", rawValue: completedRaw() });
   assert.equal(terminal.terminalPartUpdates?.length, 1);
-  assert.deepEqual(first.finalizeAttempt(), { ok: true });
+  assert.deepEqual(first.finalizeAttempt(), { ok: true, allowsReplayOnlyAssistant: true });
 
-  const replacement = adapter.createAttempt();
+  const replacement = adapter.createAttempt(attemptContext);
   assert.deepEqual(replacement.finalizeAttempt(), {
     ok: false,
     code: "OPENAI_RESPONSES_COMPLETED_MISSING",
@@ -67,7 +72,7 @@ test("OpenAI Attempt 拒绝 failed、incomplete 与 unknown finish", () => {
     { type: "response.failed", response: {} },
     { type: "response.incomplete", response: {} },
   ]) {
-    const attempt = adapter.createAttempt();
+    const attempt = adapter.createAttempt(attemptContext);
     attempt.observeChunk({ type: "raw", rawValue: completedRaw() });
     attempt.observeChunk({ type: "raw", rawValue });
     assert.deepEqual(attempt.finalizeAttempt(), {
@@ -76,7 +81,7 @@ test("OpenAI Attempt 拒绝 failed、incomplete 与 unknown finish", () => {
       message: "OpenAI Responses stream contained a failed or incomplete terminal event",
     });
   }
-  const unknown = adapter.createAttempt();
+  const unknown = adapter.createAttempt(attemptContext);
   unknown.observeChunk({ type: "raw", rawValue: completedRaw() });
   unknown.observeChunk({ type: "finish", finishReason: "unknown" });
   assert.deepEqual(unknown.finalizeAttempt(), {
@@ -92,7 +97,7 @@ test("OpenAI Attempt 对 failed/incomplete 优先给出终态失败诊断", () =
     { type: "response.failed", response: {} },
     { type: "response.incomplete", response: {} },
   ]) {
-    const attempt = adapter.createAttempt();
+    const attempt = adapter.createAttempt(attemptContext);
     attempt.observeChunk({ type: "raw", rawValue });
     assert.deepEqual(attempt.finalizeAttempt(), {
       ok: false,
@@ -104,7 +109,7 @@ test("OpenAI Attempt 对 failed/incomplete 优先给出终态失败诊断", () =
 
 test("OpenAI Attempt 终态冲突保持失败诊断优先于 unknown 和 completed", () => {
   const adapter = new OpenAIResponsesConversationStateAdapter(profile);
-  const attempt = adapter.createAttempt();
+  const attempt = adapter.createAttempt(attemptContext);
   attempt.observeChunk({ type: "raw", rawValue: completedRaw() });
   attempt.observeChunk({ type: "finish", finishReason: "unknown" });
   attempt.observeChunk({ type: "raw", rawValue: { type: "response.failed", response: {} } });

@@ -6,6 +6,7 @@ const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const domBootstrap = resolve(webRoot, "scripts/component-test-dom.mjs");
 const tests = [
   "src/features/dashboard/Dashboard.component.test.ts",
+  "src/features/settings/components/AgentProvidersSettingsPanel.component.test.ts",
   "src/features/workspace/tools/agent/agentArtifactCards.component.test.ts",
   "src/features/workspace/tools/agent/agentRichToolCards.component.test.ts",
   "src/features/workspace/tools/agent/agentSystemMessage.component.test.ts",

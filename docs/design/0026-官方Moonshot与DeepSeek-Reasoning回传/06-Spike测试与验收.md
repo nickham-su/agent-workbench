@@ -1,8 +1,8 @@
 # Spike、测试与验收
 
-## Spike 是发布与实现前置门槛
+## Spike 是具体模型兼容性证据
 
-官方 SDK 的精确 factory/model selector、空 reasoning 表达、stream 事件、wire 转换、默认 URL、模型列表与官方端点行为尚未由当前仓库证实。Spike 必须使用安装后锁定的真实 SDK、无凭证 mock HTTP/SSE 与官方端点最小联调共同确认。网页文档只是输入，不替代测试证据。
+锁定版本的 SDK mock 用于验证 factory、stream、wire 转换和默认 URL；官方端点最小联调用于验证具体模型的服务端兼容性，当前尚无官方端点验收。两者均不构成用户模型 ID 的本地调用权限。模型列表已依据公开官方文档接入单独的服务端查询，并通过本地 mock 验证 URL/鉴权/shape；尚未使用真实账号验证可见目录。API 查询失败仍安全回退已配置模型供其它路径使用，Moonshot/DeepSeek 设置页静默隐藏失败候选与警告，不以在线模型发现作为调用前提。
 
 | Provider | 参考资料 |
 |---|---|
@@ -11,34 +11,14 @@
 
 官方端点联调使用人工配置的测试凭证；日志、fixture、提交、截图和验收记录不得含凭证、用户 reasoning、用户代码、完整 body 或 tool output。
 
-## Spike 输出与能力表准入
+## Spike 输出与兼容性记录
 
-每个 Provider/精确实际模型组合必须产出：
+对具体验证过的 Provider/模型组合，记录锁定 SDK 版本及 serializer 分支、默认与自定义 URL 行为、fixed options 的 mock request、stream→Part→PromptContext→下一请求闭环、工具多子轮/下一 User turn、官方端点联调日期和脱敏结论。没有官方证据的自定义 ID **仍允许调用**，但不得宣称具备相同的 reasoning/history 能力。官方端点拒绝时如实失败，不关闭思考重试。
 
-- 解析出的 package、`ai`、peer/transitive provider 版本及 lockfile 记录；
-- factory、chat model selector、options namespace、模型 ID serializer 分支的类型/源码证据；
-- 官方默认 Base URL、SDK 的 `/v1` 拼接规则、模型列表 endpoint/认证/返回 shape；
-- 模型列表不可用时的 configured-model fallback 行为和 Web 官方文档链接；
-- fixed internal payload 的 mock request 证据；
-- stream → Part/provenance → PromptContext → 下一请求的闭环证据；
-- 工具多子轮、下一 User turn、空/缺失/多 block reasoning、异构切换的结果；
-- 官方端点最小联调日期、无敏感摘要和失败条件。
-
-结论只有两种：
-
-- **准入**：将精确实际模型 ID、锁定 SDK 版本、payload 映射和联调证据写入 Worker 静态能力表及下面发布记录；
-- **不准入/阻塞**：该模型不得用于新 Provider Agent 或 Worker single-call。必要状态无法表达时停止常规实现，另起条件升级设计。
-
-不得存在“SDK 识别”“可配置”“普通调用但不 replay”的中间发布状态。
-
-### 发布记录
-
-此表在 Spike 前必须保持无伪造条目；Spike 后按能力表逐项填写。
-
-| Provider | 精确实际模型 ID | 锁定 SDK 版本 | 固定内部 payload | SDK mock | 官方端点 | 日期 |
-|---|---|---|---|---|---|---|
-| Moonshot | 待 Spike 填写 | 待 Spike 填写 | 待 Spike 填写 | 待 Spike 填写 | 待 Spike 填写 | 待 Spike 填写 |
-| DeepSeek | 待 Spike 填写 | 待 Spike 填写 | 待 Spike 填写 | 待 Spike 填写 | 待 Spike 填写 | 待 Spike 填写 |
+| Provider/实际模型 ID | SDK mock 与锁定版本 | 官方端点兼容性证据 | 已知限制 |
+|---|---|---|---|
+| Moonshot `kimi-k2.6` / `kimi-k2.7-code` / `moonshot-v1-*` / 自定义 ID | 参见 [08](./08-Spike验证记录.md) 的具体测试范围 | 未执行 | SDK 对 K2.6/K2.7/未知模型映射不同；旧 moonshot-v1 可省略 thinking/history |
+| DeepSeek V4/flash/pro / 自定义 ID | 参见 [08](./08-Spike验证记录.md) 的具体测试范围 | 未执行 | SDK 对旧 ID/别名跨 User turn reasoning 处理不同 |
 
 ## 必做 SDK Spike
 
@@ -47,18 +27,18 @@
 | 验证项 | 通过条件 | 不通过动作 |
 |---|---|---|
 | 官方工厂 | `createMoonshotAI`/`createDeepSeek` 与 chat model selector 类型正确并可发 mock 请求 | 修正 factory；禁止 `any` 或 Compatible 绕过 |
-| URL/model list | 默认 URL、`/v1`、模型列表与 configured-model fallback 有测试/记录 | 不设置未验证默认值；阻塞相关设置体验发布 |
+| URL/model list | Moonshot `.cn`/`.ai` 的 `/v1/models`、DeepSeek 默认 `/models` 与显式 `/v1/models`、自定义网关路径、Bearer 与旧 Anthropic 鉴权、`data[].id` 合并去重及刷新缓存均有 mock 测试 | 401/超时/畸形响应时 API 回退到实际 `providerModelId`；两家 Web 无下拉候选/警告、编辑值和手动输入不受限；真实账号可见目录仍需单独验收 |
 | 内部 payload | Adapter `prepareInvocation()` 完整保留 shared merge 的内部 prepared payload；Runner 仅原样包一次 namespace | 修复边界；禁止双重 namespace 或 Runner 修改/丢弃 option |
-| options 合并 | capability 生成 fixedOptions，shared merge fixed-last；合法 non-reserved option 保留，reserved/危险键移除；主调用与 single-call 相同 | 修复为唯一 shared sanitizer/merge；除此之外的合并实现均不合法 |
-| 固定思考 | reserved user 值无法改变 capability fixedOptions 生成的 wire payload；主调用与 Worker single-call 均固定开启 | 修复 capability 或 shared merge 应用路径 |
+| options 合并 | shared Provider 策略生成 fixedOptions，shared merge fixed-last；合法 non-reserved option 保留，reserved/危险键移除；主调用与 single-call 相同 | 修复为唯一 shared sanitizer/merge；除此之外的合并实现均不合法 |
+| 固定思考请求 | reserved user 值无法覆盖主调用/single-call 交给 SDK 的 fixedOptions；K2.6、K2.7 按 SDK 映射，`moonshot-v1-*` warning 并省略不支持字段但允许请求 | 修复 shared 策略/merge；不得据此按模型 ID 阻断或声称旧模型实际思考 |
 | reasoning 回放 | 标准 Assistant reasoning Part 被 SDK 序列化为目标字段 | 不手写 HTTP body；查明版本/能力限制 |
 | stream | reasoning/text/tool chunks、空 text、空/缺失 reasoning、多 block 可观察且顺序明确 | 需要额外状态时走条件升级 |
-| 工具 | tool call/result ID 与消息顺序在下一请求保持 | 该模型不准入 |
-| 模型 ID | 精确 ID 进入预期 SDK 分支；别名有独立证据 | 别名不准入 |
+| 工具 | tool call/result ID 与消息顺序在下一请求保持 | 记录该模型兼容性限制并修复可控错误 |
+| 模型 ID | 精确 ID 进入预期 SDK 分支；别名有独立证据 | 记录别名差异；不做本地准入 |
 
 ### Moonshot
 
-候选 `kimi-k2.6`、`kimi-k2.7-code` 仅是待验证对象，不是支持承诺。
+`kimi-k2.6`、`kimi-k2.7-code` 是已观察的 SDK mock 对象，不代表官方端点支持承诺；自定义 ID 仍可请求。
 
 对 K2.6，mock request 必须验证 fixed internal payload 经 Runner 一次包装与 SDK 变换后具备 preserved-history 语义，预期可观察到：
 
@@ -81,7 +61,7 @@
 }
 ```
 
-K2.7 Code 必须独立验证 explicit enabled/preserved 参数是否允许及其合法固定 payload；不能把 K2.6 映射推广到所有 Moonshot 模型。
+K2.7 Code 与未知模型的 SDK 映射及服务端接受性应分别记录；不能把 K2.6 的 `thinking.keep=all` 推广到所有 Moonshot 模型。锁定 SDK 的 `moonshot-v1-*` 旧非思考模型即使项目固定请求 enabled/preserved 也会 warning 并省略不支持的字段后发起请求，不因此人为失败或声称实际启用思考。SDK/API 真报错才沿受控失败路径处理，不关闭 thinking 重试。
 
 ### DeepSeek
 
@@ -96,7 +76,7 @@ DeepSeek mock 与官方端点必须验证：
 }
 ```
 
-断言语义字段、Assistant 顺序和 ID 关联，不要求 JSON 字段物理顺序。带 tools 的多子轮和下一 User turn 都是准入硬门槛。SDK 的 V4/flash/pro 前缀判断只能用作 Spike 线索，不能替代精确能力表条目。
+断言语义字段、Assistant 顺序和 ID 关联，不要求 JSON 字段物理顺序。带 tools 的多子轮和下一 User turn 是具体模型的兼容性检查；SDK 的 V4/flash/pro 前缀判断属于其序列化行为，不是本地准入限制，别名可能无法保留跨 User turn reasoning。
 
 ## 自动化测试分层
 
@@ -109,11 +89,11 @@ DeepSeek mock 与官方端点必须验证：
 - shared 唯一 pure sanitizer/merge 的精确规范化：顶层 `trim → 去 '_'/'-' → lowercase`，只命中三种 reserved key；嵌套普通 option 的同名键不删除；
 - 只接受 JSON plain object；`__proto__`、`prototype`、`constructor` 和嵌套危险对象键被清理/拒绝，非 plain object 不透传；
 - 合法非 reserved top-level option 保留；用户 nested `thinking` 顶层对象整体清除；fixed payload 最后浅覆盖且不被用户修改；
-- capability `buildProviderOptions()` 只生成 fixedOptions；Agent Adapter 的 `prepareInvocation()` 调用/使用 shared merge、完整保留 prepared payload，Runner 只原样包装一次；只有 fixed-last 实现合法；
+- shared `reasoningProviderFixedOptions(providerNpm)` 只生成 fixedOptions；Agent Adapter 的 `prepareInvocation()` 调用/使用 shared merge、完整保留 prepared payload，Runner 只原样包装一次；只有 fixed-last 实现合法；
 - API settings 保存、Worker 运行时、Web generic JSON/Options 都复用同一 shared 常量/函数；Web 是 UX，API/Worker 是行为权威；
 - Agent 主调用与 Worker single-call 对同一 raw payload/fixedOptions 得到相同最终内部 payload；
 - 官方默认 Base URL、`/v1`、model list、configured-model fallback、文档链接的 descriptor/行为测试；
-- shared single-call 只有获得 Worker 内部能力 policy 才能调用新 Provider，且其 payload 固定开启思考、无 history replay。
+- shared single-call 在 generate 与 stream 路径均按 Provider 获取固定参数，自定义实际模型 ID 能进入 SDK mock 请求；检查非空 `providerModelId` trim 优先、否则 fallback 至本地 ID。
 
 ### API read-side
 
@@ -142,11 +122,9 @@ mock SDK SSE
 
 必须覆盖：
 
-- 仅精确能力表项能进入新 Provider Agent/Worker single-call；未命中 preflight 无网络、无 streaming Assistant、无 ToolExecution；
-- capability 先生成 fixedOptions，Adapter `prepareInvocation()` 调用/使用 shared merge 并完整保留内部 prepared payload；最终请求只出现一层 `moonshotai`/`deepseek`；明确否定双重 namespace；
-- API/Web/Worker 用户 reserved 值均不能覆盖固定 payload；
-- 合法非 reserved option（例如 `parallelToolCalls`）保留在 prepared payload；reserved 整键不深合并、危险键清除、Agent/single-call payload 相同；Runner 不修改或丢弃内部 option；
-- 除 shared `{ ...sanitizedUserOptions, ...fixedOptions }` fixed-last 浅合并外，任何 Runner 合并、capability 直接返回最终 payload 或丢弃全部用户 options 的实现都必须被拒绝；
+- Moonshot/DeepSeek 的任意用户填写实际模型 ID 可以通过生产 Runner/Registry 与 shared single-call 发请求；不因缺少本地表项阻断。
+- shared Provider 策略生成 fixedOptions，Adapter `prepareInvocation()` 使用唯一 shared merge；最终请求只有一层 namespace；用户 reserved 键不能关闭思考或注入 reasoningEffort。
+- 合法非 reserved option（如 `parallelToolCalls`）保留；reserved 整键 fixed-last 浅覆盖、危险键清除；Agent/single-call 策略一致，Runner 不二次合并。
 - 所有 Adapter（含 OpenAI）返回 mandatory context，Runner 调用 `createAttempt(context)`；retry 是新 Attempt，工具子轮/下一请求重新 prepare；
 - text-start 无 delta 仍有空 text provenance，且最终 SDK 不含空 text；
 - Moonshot/DeepSeek reasoning-only 成功、空 reasoning、缺失 provenance、冲突 provenance、final metadata 未 flush；只在允许条件完成；
@@ -159,9 +137,9 @@ mock SDK SSE
 - Provider/config/model/legacy 边界、Moonshot → DeepSeek → Moonshot、Retry replacement、Fork/Revert、Compaction；
 - OpenAI replay parser/normalizer/Adapter/Runner 全量回归。
 
-## 发布前官方端点验收
+## 官方端点兼容性验收（不作为调用门禁）
 
-每个能力表精确项必须通过下表，才可写入发布记录：
+对计划公开承诺兼容的具体模型，用授权测试凭证逐项记录下表结果；未执行的项目不得标为已验证，但用户仍可调用：
 
 | 场景 | Moonshot | DeepSeek | 证据 |
 |---|---:|---:|---|
@@ -175,7 +153,7 @@ mock SDK SSE
 
 ## 合入验收与命令
 
-代码审查必须能据此确认：无 Compatible 路径、无未验证降级、无用户 thinking 覆盖、无双 namespace、无非法空 Assistant、无半提交工具状态、无 OpenAI 回归、无 reasoning/凭证日志泄露。
+代码审查必须能据此确认：无 Compatible 路径、无失败时静默关闭思考的降级、无用户 thinking 覆盖、无双 namespace、无非法空 Assistant、无半提交工具状态、无 OpenAI 回归、无 reasoning/凭证日志泄露。
 
 建议执行：
 

@@ -330,7 +330,7 @@ function serializePartProviderReplay(part: AgentMessagePartInput): string | null
   const replayType = part.providerReplay.item.type;
   const matchesPart = (part.type === "reasoning" && replayType === "reasoning")
     || (part.type === "text" && replayType === "text")
-    || (part.type === "tool_call" && replayType === "function_call");
+    || (part.type === "tool_call" && (replayType === "function_call" || replayType === "tool_call"));
   if (!matchesPart) throw new Error("provider replay item type does not match message part type");
   return serializeAgentProviderReplay(part.providerReplay);
 }

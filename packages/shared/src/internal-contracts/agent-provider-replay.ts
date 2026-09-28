@@ -13,12 +13,9 @@ export const AgentOpenAiResponsesReplayProviderSchema = Type.Object({
 export const AgentOpenAiResponsesReasoningReplayItemSchema = Type.Object({
   type: Type.Literal("reasoning"),
   itemId: NonEmptyStringSchema,
-  encryptedContent: NonEmptyStringSchema,
-  /**
-   * 同一原生 reasoning item 内，本地可见 summary segment 的零基序号。
-   * 该字段只标识 segment 身份与顺序，不保存或替代 summary 文本。
-   */
+  /** 同一原生 reasoning item 内，本地可见 summary segment 的零基序号。 */
   summaryIndex: Type.Optional(Type.Integer({ minimum: 0 })),
+  encryptedContent: NonEmptyStringSchema,
 }, { additionalProperties: false });
 
 export const AgentOpenAiResponsesTextReplayItemSchema = Type.Object({
@@ -35,7 +32,7 @@ export const AgentOpenAiResponsesFunctionCallReplayItemSchema = Type.Object({
   itemId: NonEmptyStringSchema,
 }, { additionalProperties: false });
 
-export const AgentProviderReplayEnvelopeSchema = Type.Object({
+export const AgentOpenAiResponsesReplayEnvelopeSchema = Type.Object({
   version: Type.Literal(1),
   provider: AgentOpenAiResponsesReplayProviderSchema,
   item: Type.Union([
@@ -45,7 +42,65 @@ export const AgentProviderReplayEnvelopeSchema = Type.Object({
   ]),
 }, { additionalProperties: false });
 
+const ChatReplayItemSchema = Type.Union([
+  Type.Object({ type: Type.Literal("text") }, { additionalProperties: false }),
+  Type.Object({ type: Type.Literal("reasoning") }, { additionalProperties: false }),
+  Type.Object({ type: Type.Literal("tool_call") }, { additionalProperties: false }),
+]);
+
+function chatEnvelope(npm: "@ai-sdk/moonshotai" | "@ai-sdk/deepseek") {
+  return Type.Object({
+    version: Type.Literal(1),
+    provider: Type.Object({
+      npm: Type.Literal(npm),
+      api: Type.Literal("chat-completions"),
+      protocolVersion: Type.Literal(1),
+      providerId: NonEmptyStringSchema,
+      model: NonEmptyStringSchema,
+      endpointDigest: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+    }, { additionalProperties: false }),
+    item: ChatReplayItemSchema,
+  }, { additionalProperties: false });
+}
+export const AgentMoonshotReplayEnvelopeSchema = chatEnvelope("@ai-sdk/moonshotai");
+export const AgentDeepSeekReplayEnvelopeSchema = chatEnvelope("@ai-sdk/deepseek");
+
+// Recognition only, never replay: early v1 Chat Parts predate endpoint identity.
+// Keep the old shape closed; unknown fields/versions and malformed JSON remain errors.
+const LegacyChatReplayEnvelopeSchema = Type.Object({
+  version: Type.Literal(1),
+  provider: Type.Object({
+    npm: Type.Union([Type.Literal("@ai-sdk/moonshotai"), Type.Literal("@ai-sdk/deepseek")]),
+    api: Type.Literal("chat-completions"),
+    protocolVersion: Type.Literal(1),
+    providerId: NonEmptyStringSchema,
+    model: NonEmptyStringSchema,
+  }, { additionalProperties: false }),
+  item: ChatReplayItemSchema,
+}, { additionalProperties: false });
+
+/** Accept only the identifiable pre-digest Chat shape as an unreadable replay boundary. */
+export function isLegacyChatReplayWithoutEndpointDigest(value: string): boolean {
+  try {
+    return Value.Check(LegacyChatReplayEnvelopeSchema, JSON.parse(value));
+  } catch {
+    return false;
+  }
+}
+
+/** Provider discrimination is strict: OpenAI item ids/encrypted data cannot enter chat replay. */
+export const AgentProviderReplayEnvelopeSchema = Type.Union([
+  AgentOpenAiResponsesReplayEnvelopeSchema,
+  AgentMoonshotReplayEnvelopeSchema,
+  AgentDeepSeekReplayEnvelopeSchema,
+]);
 export type AgentProviderReplayEnvelope = Static<typeof AgentProviderReplayEnvelopeSchema>;
+export type AgentChatReplayEnvelope = Static<typeof AgentMoonshotReplayEnvelopeSchema> | Static<typeof AgentDeepSeekReplayEnvelopeSchema>;
+type OpenAiReplayEnvelope = Static<typeof AgentOpenAiResponsesReplayEnvelopeSchema>;
+
+function isOpenAiReplay(value: AgentProviderReplayEnvelope): value is OpenAiReplayEnvelope {
+  return value.provider.npm === "@ai-sdk/openai";
+}
 
 export class AgentProviderReplayUpdateError extends Error {
   constructor(message: string) {
@@ -55,6 +110,21 @@ export class AgentProviderReplayUpdateError extends Error {
 }
 
 function normalizeProviderReplay(value: AgentProviderReplayEnvelope): AgentProviderReplayEnvelope {
+  if (!isOpenAiReplay(value)) {
+    return {
+      version: 1,
+      provider: {
+        npm: value.provider.npm,
+        api: "chat-completions",
+        protocolVersion: 1,
+        providerId: value.provider.providerId,
+        model: value.provider.model,
+        endpointDigest: value.provider.endpointDigest,
+      },
+      item: value.item.type === "reasoning" ? { type: "reasoning" }
+        : value.item.type === "tool_call" ? { type: "tool_call" } : { type: "text" },
+    };
+  }
   const provider = {
     npm: "@ai-sdk/openai" as const,
     api: "responses" as const,
@@ -84,17 +154,10 @@ function normalizeProviderReplay(value: AgentProviderReplayEnvelope): AgentProvi
       },
     };
   }
-  return {
-    version: 1,
-    provider,
-    item: { type: "function_call", itemId: value.item.itemId },
-  };
+  return { version: 1, provider, item: { type: "function_call", itemId: value.item.itemId } };
 }
 
-/**
- * 内部写入边界使用的严格序列化。仅接受版本化白名单字段，输出稳定 JSON，
- * 避免把 SDK providerMetadata 或未知字段原样落库。
- */
+/** Strict allowlist serialization; no untrusted SDK metadata or message content is retained. */
 export function serializeAgentProviderReplay(value: unknown): string {
   if (!Value.Check(AgentProviderReplayEnvelopeSchema, value)) {
     throw new Error("invalid agent provider replay envelope");
@@ -102,9 +165,7 @@ export function serializeAgentProviderReplay(value: unknown): string {
   return JSON.stringify(normalizeProviderReplay(value));
 }
 
-/**
- * 私有读侧的容错解析。损坏或未来版本数据会被安全跳过，且调用方无需记录原文。
- */
+/** Damaged or future-version historical metadata is a replay boundary, not an exception. */
 export function parseAgentProviderReplay(value: string | null): AgentProviderReplayEnvelope | null {
   if (value == null) return null;
   try {
@@ -116,40 +177,30 @@ export function parseAgentProviderReplay(value: string | null): AgentProviderRep
   }
 }
 
-function isSameAgentProviderReplayIdentity(
-  left: AgentProviderReplayEnvelope,
-  right: AgentProviderReplayEnvelope,
-): boolean {
-  return left.version === right.version
-    && left.provider.npm === right.provider.npm
-    && left.provider.api === right.provider.api
-    && left.provider.providerId === right.provider.providerId
-    && left.provider.model === right.provider.model
-    && left.item.type === right.item.type
-    && left.item.itemId === right.item.itemId;
+function isSameAgentProviderReplayIdentity(left: AgentProviderReplayEnvelope, right: AgentProviderReplayEnvelope): boolean {
+  if (left.provider.npm !== right.provider.npm) return false;
+  if (left.version !== right.version || left.provider.api !== right.provider.api
+    || left.provider.providerId !== right.provider.providerId || left.provider.model !== right.provider.model
+    || left.item.type !== right.item.type) return false;
+  if (!isOpenAiReplay(left) || !isOpenAiReplay(right)) {
+    return !isOpenAiReplay(left) && !isOpenAiReplay(right)
+      && left.provider.protocolVersion === right.provider.protocolVersion
+      && left.provider.endpointDigest === right.provider.endpointDigest;
+  }
+  return left.item.itemId === right.item.itemId;
 }
 
 function assertKnownFieldIsNotLostOrChanged<T>(label: string, existing: T | undefined, incoming: T | undefined): void {
-  if (existing === undefined) return;
-  if (incoming === existing) return;
+  if (existing === undefined || incoming === existing) return;
   throw new AgentProviderReplayUpdateError(`agent provider replay ${label} is immutable once known`);
 }
 
-/**
- * 校验同一持久化 Part 上的 replay metadata 增量更新。
- *
- * - Provider 与原生 item 身份始终不可变化；
- * - `summaryIndex` / `phase` 允许 unknown → known、known → same；
- * - 已知字段不得改值或退回 unknown；
- * - reasoning 密文允许由终态事件补齐或更新。
- */
-export function assertAgentProviderReplayUpdateCompatible(
-  existing: AgentProviderReplayEnvelope,
-  incoming: AgentProviderReplayEnvelope,
-): void {
+/** Same local Part: chat provenance is immutable; existing OpenAI metadata may gain terminal fields. */
+export function assertAgentProviderReplayUpdateCompatible(existing: AgentProviderReplayEnvelope, incoming: AgentProviderReplayEnvelope): void {
   if (!isSameAgentProviderReplayIdentity(existing, incoming)) {
     throw new AgentProviderReplayUpdateError("agent provider replay item identity is immutable");
   }
+  if (!isOpenAiReplay(existing) || !isOpenAiReplay(incoming)) return;
   if (existing.item.type === "reasoning" && incoming.item.type === "reasoning") {
     assertKnownFieldIsNotLostOrChanged("summaryIndex", existing.item.summaryIndex, incoming.item.summaryIndex);
     return;

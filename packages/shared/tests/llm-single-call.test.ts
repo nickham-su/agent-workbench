@@ -32,6 +32,63 @@ test("generateSingleCallText 默认禁止 tools", async () => {
   );
 });
 
+for (const provider of [
+  { npm: "@ai-sdk/moonshotai", model: "kimi-k2.6", namespace: "moonshotai", expectedThinking: { type: "enabled", keep: "all" } },
+  { npm: "@ai-sdk/moonshotai", model: "custom-kimi-alias", namespace: "moonshotai", expectedThinking: { type: "enabled" } },
+  { npm: "@ai-sdk/moonshotai", model: "moonshot-v1-8k", namespace: "moonshotai", expectedThinking: null },
+  { npm: "@ai-sdk/deepseek", model: "deepseek-custom-alias", namespace: "deepseek", expectedThinking: { type: "enabled" } },
+] as const) {
+  test(`${provider.npm} single-call accepts configured model ID and applies fixed policy through SDK`, async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const server = createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      requests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>);
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(`data: ${JSON.stringify({ id: "mock", object: "chat.completion.chunk", model: provider.model,
+        choices: [{ index: 0, delta: { content: "reply" }, finish_reason: null }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ id: "mock", object: "chat.completion.chunk", model: provider.model,
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\n`);
+      res.end("data: [DONE]\n\n");
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.listen(0, "127.0.0.1", resolve);
+      server.once("error", reject);
+    });
+    try {
+      const addr = server.address();
+      assert.ok(addr && typeof addr !== "string");
+      const profile: SingleCallModelProfile = {
+        provider: { id: `config-${provider.namespace}`, npm: provider.npm,
+          options: { apiKey: "fixture", baseURL: `http://127.0.0.1:${addr.port}/v1` } },
+        model: { id: "local-model", providerModelId: `  ${provider.model}  `, options: {
+          providerOptionsByKey: { [provider.namespace]: { thinking: { type: "disabled" },
+            reasoningHistory: "discarded", reasoningEffort: "low", parallelToolCalls: true } },
+        } },
+      };
+      const input = { messages: [{ role: "user" as const, content: "hello" }], timeoutMs: 5_000 };
+      const result = await generateSingleCallText(profile, input);
+      assert.equal(result.text, "reply");
+      assert.equal(requests[0]?.model, provider.model);
+      if (provider.expectedThinking === null) assert.equal(Object.hasOwn(requests[0]!, "thinking"), false);
+      else assert.deepEqual(requests[0]?.thinking, provider.expectedThinking);
+      const requestText = JSON.stringify(requests[0]);
+      assert.doesNotMatch(requestText, /reasoningEffort|reasoningHistory|discarded|disabled|"low"/);
+      // The streaming single-call path must use the same policy without replay state.
+      const events = [];
+      for await (const event of streamSingleCallText(profile, input)) events.push(event);
+      assert.deepEqual(events[0], { type: "text-delta", text: "reply" });
+      assert.equal(requests[1]?.model, provider.model);
+      assert.deepEqual(requests[1]?.thinking, requests[0]?.thinking);
+      if (provider.expectedThinking === null) assert.equal(Object.hasOwn(requests[1]!, "thinking"), false);
+      assert.doesNotMatch(JSON.stringify(requests[1]), /reasoningEffort|reasoningHistory|discarded|disabled|"low"/);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+    }
+  });
+}
+
 test("generateSingleCallText 会拒绝白名单外参数", async () => {
   const profile = createMockProfile();
   await assert.rejects(

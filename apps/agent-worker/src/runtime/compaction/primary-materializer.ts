@@ -21,12 +21,14 @@ export { PRIMARY_MATERIALIZER_VERSION } from "./types.js";
 
 function toPrimaryReplayProjectionDescriptor(
   envelope: CompactionSourceBlock["providerReplay"][number]["envelope"],
-): PrimaryReplayProjectionDescriptor {
+): PrimaryReplayProjectionDescriptor | undefined {
+  if (envelope.provider.npm !== "@ai-sdk/openai") return undefined;
+  const openai = envelope as Extract<typeof envelope, { provider: { npm: "@ai-sdk/openai" } }>;
   return {
     adapter: "openai_responses",
-    providerId: envelope.provider.providerId,
-    modelId: envelope.provider.model,
-    itemType: envelope.item.type,
+    providerId: openai.provider.providerId,
+    modelId: openai.provider.model,
+    itemType: openai.item.type,
   };
 }
 
@@ -41,24 +43,27 @@ function asCompatibleReplay(input: {
     profile,
     expected,
   })) return undefined;
-  if (envelope.item.type === "reasoning") {
+  // The only replay protocol supported by Primary materialization is OpenAI Responses.
+  if (envelope.provider.npm !== "@ai-sdk/openai") return undefined;
+  const openaiEnvelope = envelope as Extract<typeof envelope, { provider: { npm: "@ai-sdk/openai" } }>;
+  if (openaiEnvelope.item.type === "reasoning") {
     return {
-      provider: envelope.provider,
+      provider: openaiEnvelope.provider,
       item: {
         type: "reasoning",
-        itemId: envelope.item.itemId,
-        encryptedContent: envelope.item.encryptedContent,
-        ...(envelope.item.summaryIndex == null ? {} : { summaryIndex: envelope.item.summaryIndex }),
+        itemId: openaiEnvelope.item.itemId,
+        encryptedContent: openaiEnvelope.item.encryptedContent,
+        ...(openaiEnvelope.item.summaryIndex == null ? {} : { summaryIndex: openaiEnvelope.item.summaryIndex }),
       },
     };
   }
-  if (envelope.item.type === "text") {
+  if (openaiEnvelope.item.type === "text") {
     return {
-      provider: envelope.provider,
-      item: { type: "text", itemId: envelope.item.itemId, ...(envelope.item.phase == null ? {} : { phase: envelope.item.phase }) },
+      provider: openaiEnvelope.provider,
+      item: { type: "text", itemId: openaiEnvelope.item.itemId, ...(openaiEnvelope.item.phase == null ? {} : { phase: openaiEnvelope.item.phase }) },
     };
   }
-  return { provider: envelope.provider, item: { type: "function_call", itemId: envelope.item.itemId } };
+  return { provider: openaiEnvelope.provider, item: { type: "function_call", itemId: openaiEnvelope.item.itemId } };
 }
 
 function imageOnlyTriggerText(attachmentCount: number) {
@@ -142,12 +147,10 @@ function materializeBlock(input: { source: CompactionSource; block: CompactionSo
   const isProjectionEmpty = !hasPrimaryBlockVisibleProjection({
     message: block.message,
     profile,
-    replayProjectionByPartId: new Map(
-      [...validated.replayByPartId].map(([partId, envelope]) => [
-        partId,
-        toPrimaryReplayProjectionDescriptor(envelope),
-      ]),
-    ),
+    replayProjectionByPartId: new Map([...validated.replayByPartId].flatMap(([partId, envelope]) => {
+      const descriptor = toPrimaryReplayProjectionDescriptor(envelope);
+      return descriptor ? [[partId, descriptor] as const] : [];
+    })),
   });
   const hasAssistantMessage = messages.some((message) => message.role === "assistant");
   return {

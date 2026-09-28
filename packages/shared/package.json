@@ -42,6 +42,10 @@
       "types": "./dist/internal-contracts/agent-api-session.d.ts",
       "default": "./dist/internal-contracts/agent-api-session.js"
     },
+    "./internal-contracts/agent-provider-provenance": {
+      "types": "./dist/internal-contracts/agent-provider-provenance.d.ts",
+      "default": "./dist/internal-contracts/agent-provider-provenance.js"
+    },
     "./node/analytics-root": {
       "types": "./dist/node/analytics-root.d.ts",
       "default": "./dist/node/analytics-root.js"
@@ -55,6 +59,8 @@
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^2.0.102",
+    "@ai-sdk/deepseek": "1.0.57",
+    "@ai-sdk/moonshotai": "0.0.26",
     "@ai-sdk/openai": "^2.0.127",
     "@ai-sdk/openai-compatible": "^1.0.54",
     "@sinclair/typebox": "^0.34.47",

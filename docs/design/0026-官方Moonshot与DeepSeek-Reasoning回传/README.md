@@ -1,6 +1,6 @@
 # 官方 Moonshot/Kimi 与 DeepSeek Reasoning 多轮回传
 
-> 状态：待开发；本文是实现、代码审查、自动化测试、发布前联调与验收的共同契约。
+> 状态：本地实现完成；官方端点与任意自定义模型的兼容性以实际调用为准。本文为代码审查与验收契约。
 >
 > 范围：新增官方 `@ai-sdk/moonshotai` 与 `@ai-sdk/deepseek` Provider，并让其 reasoning 在下一次同一兼容对话调用中重新发送给模型。
 >
@@ -20,11 +20,12 @@
 以下规则不可突破：
 
 - Moonshot **必须**使用官方 `@ai-sdk/moonshotai`，不得通过 `@ai-sdk/openai-compatible` 实现或回退；DeepSeek **必须**使用官方 `@ai-sdk/deepseek`。
-- 新 Provider 的 Agent 主调用和 Worker single-call 固定开启思考；thinking、`reasoningHistory`、`reasoningEffort` 是 reserved keys，不向用户提供开关或覆盖路径。
-- capability 的 `buildProviderOptions()` 是 reserved fixedOptions 的唯一来源；shared `mergeReasoningProviderOptions(rawNamespacePayload, fixedOptions)` 是唯一的清理与 fixed-last 浅合并语义。Adapter 在 `prepareInvocation()` 中应用该逻辑、完整保留结果，并同时处理 replay 与 attemptContext。
+- 新 Provider 的 Agent 主调用和 Worker single-call 始终向官方 SDK 提交固定的“开启思考”请求策略；thinking、`reasoningHistory`、`reasoningEffort` 是 reserved keys，不向用户提供开关或覆盖路径。
+- shared `reasoningProviderFixedOptions(providerNpm)` 是 reserved fixedOptions 的唯一来源；shared `mergeReasoningProviderOptions(rawNamespacePayload, fixedOptions)` 是唯一的清理与 fixed-last 浅合并语义。Adapter 在 `prepareInvocation()` 中应用该逻辑、完整保留结果，并同时处理 replay 与 attemptContext。
 - `PreparedProviderInvocation.providerOptions` 始终是当前 Provider namespace 的**内部 prepared payload**，可同时有合法非 reserved options 和 fixed options，例如 `{ parallelToolCalls: true, thinking: ..., reasoningHistory: ... }`。Runner 不修改或丢弃其中任何内部 option，只按 `providerOptionsKeyByNpm()` 包装一次，禁止双重 namespace。
 - 非 reserved 的合法 namespace options 仍允许用户配置：共享 sanitizer 只接受 JSON plain object，并清理危险键和顶层 reserved keys。
-- 只有 Worker 单一静态精确模型能力表中、已经完成 Spike 与官方端点验收的模型可调用。未列入模型必须在网络请求前失败，不能降级普通调用。
+- 用户可填写任意 Provider 模型ID：非空 `providerModelId.trim()` 优先，否则使用本地模型 ID。主调用与 single-call 不做本地模型白名单准入。锁定 Moonshot SDK 对 `moonshot-v1-*` 已知旧非思考模型会发出 unsupported-setting warning 并省略 `thinking`/`reasoningHistory` 后继续请求；因此固定的是项目交给 SDK 的 policy，而不是所有模型实际处于思考状态或具备历史回传。若 SDK 或服务端真正返回错误，走受控失败路径，不自动关闭思考重试。
+- 设置页向 Moonshot/DeepSeek 的模型列表接口获取候选并合并已配置的实际 Provider 模型 ID；API 失败可回退已配置模型，但两家设置页静默隐藏失败候选与警告，始终允许手动输入。模型目录不构成调用准入或协议兼容保证。
 - 通用 `RuntimeTranscriptProjector` 不携带 reasoning；reasoning 只经内部 `providerReplay` side-channel 到目标 Adapter。
 - 不跨 Provider、Provider 配置实例、实际模型、协议版本或 provenance/legacy 缺口恢复 reasoning。
 - recovery continuation 只允许恢复相同 Run 与相同 immutable identity 的既有 streaming Assistant；无法证明已有 Part provenance 安全时，必须 replacement 或 fail closed。
@@ -34,19 +35,20 @@
 
 | 文档 | 用途 |
 |---|---|
-| [01-需求与产品契约.md](./01-需求与产品契约.md) | 背景、术语、严格支持范围、产品规则与非目标 |
+| [01-需求与产品契约.md](./01-需求与产品契约.md) | 背景、术语、用户模型 ID 与兼容边界、产品规则及非目标 |
 | [02-现状证据与架构.md](./02-现状证据与架构.md) | 当前代码事实、相关文档关系、目标调用链与职责边界 |
 | [03-契约数据与回放算法.md](./03-契约数据与回放算法.md) | replay union、provenance、PromptContext、连续兼容段、attempt/hook 设计 |
-| [04-Provider接入与调用生命周期.md](./04-Provider接入与调用生命周期.md) | 能力表、工厂、reserved keys、固定 payload、Adapter/Runner/Single-call 生命周期 |
+| [04-Provider接入与调用生命周期.md](./04-Provider接入与调用生命周期.md) | 固定 Provider 策略、工厂、reserved keys、固定 payload、Adapter/Runner/Single-call 生命周期 |
 | [05-边界失败安全与兼容.md](./05-边界失败安全与兼容.md) | reasoning-only、工具时序、Retry、Fork/Revert、Compaction、legacy、隐私边界 |
-| [06-Spike测试与验收.md](./06-Spike测试与验收.md) | Spike 门槛、测试分层、发布前联调、可执行验收标准 |
+| [06-Spike测试与验收.md](./06-Spike测试与验收.md) | SDK Spike 证据、测试分层、官方端点兼容性联调标准 |
 | [07-实施计划与审查清单.md](./07-实施计划与审查清单.md) | 阶段任务、实施步骤、完成定义、审查与回滚清单 |
+| [08-Spike验证记录.md](./08-Spike验证记录.md) | 锁定 SDK 的无凭证 mock 验证结果及尚未执行的官方端点兼容性联调 |
 
 ## 文档约定
 
 - **必须（MUST）**：实现、测试和审查均不可放宽；不满足即不可验收。
 - **应（SHOULD）**：默认要求。偏离时必须记录原因、影响、替代保护和新增证据。
-- **Spike 门槛**：尚未由锁定 SDK 与官方端点共同验证的事实。未通过前不得写入正式支持表或宣称可用。
+- **Spike 证据**：锁定 SDK mock 证明序列化行为；官方端点联调证明具体模型/网关兼容性。没有联调不得宣称所有模型协议都已验证，但不限制用户自行调用。
 - “实际模型”是 `providerModelId` 非空时的 trim 后值，否则为模型 `id`。
 - `assistantOrdinal` 是当前 provider-neutral `messages` 数组中 Assistant message 的索引；名称是现有契约，不在本期重命名，也不能解释为“第几个 Assistant”。
 
@@ -60,9 +62,9 @@
 
 交付不是“能创建 SDK 实例”，而是同时满足：
 
-- 精确模型能力表有真实 Spike/官方端点证据；
+- 两个 Provider 的用户配置实际 ID 能经 Agent 和 single-call 发往 SDK，无本地白名单门禁；
 - 同 Provider/config/model 多轮 replay、工具子轮、下一 User turn、Retry replacement、Fork/Revert、Compaction 和切换边界闭环通过；
 - reasoning-only Assistant 只在协议允许、非空 reasoning、identity 一致且 metadata final flush 成功时完成；
 - Agent/single-call 对相同输入产生相同清理与 fixed-last 合并 payload；recovery continuation 不会混入不同 identity 的既有 Part；
 - OpenAI Responses 回归通过；
-- 只对 Worker 能力表中精确 verified 模型发布支持说明。
+- 官方端点兼容性声明只覆盖有真实证据的具体 ID；未验证 ID 可调用，但不承诺相同的 reasoning 行为。

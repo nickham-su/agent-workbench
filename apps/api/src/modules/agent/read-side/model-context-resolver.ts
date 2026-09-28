@@ -15,9 +15,15 @@ import {
   type PrimaryReplayProjectionDescriptor,
 } from "@agent-workbench/shared";
 import {
+  isLegacyChatReplayWithoutEndpointDigest,
   parseAgentProviderReplay,
   type AgentProviderReplayEnvelope,
 } from "@agent-workbench/shared/internal-contracts/agent-api";
+import {
+  agentReplayProvenance,
+  sameAgentReplayProvenance,
+  type AgentAssistantProvenance,
+} from "@agent-workbench/shared/internal-contracts/agent-provider-provenance";
 import type { AgentUiLocale } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { Value } from "@sinclair/typebox/value";
 import type { Db } from "../../../infra/db/db.js";
@@ -286,12 +292,14 @@ export class RetainedAnchorValidationError extends ModelContextInvariantError {
 
 function toPrimaryReplayProjectionDescriptor(
   envelope: AgentProviderReplayEnvelope,
-): PrimaryReplayProjectionDescriptor {
+): PrimaryReplayProjectionDescriptor | undefined {
+  if (envelope.provider.npm !== "@ai-sdk/openai") return undefined;
+  const openai = envelope as Extract<AgentProviderReplayEnvelope, { provider: { npm: "@ai-sdk/openai" } }>;
   return {
     adapter: "openai_responses",
-    providerId: envelope.provider.providerId,
-    modelId: envelope.provider.model,
-    itemType: envelope.item.type,
+    providerId: openai.provider.providerId,
+    modelId: openai.provider.model,
+    itemType: openai.item.type,
   };
 }
 
@@ -317,9 +325,8 @@ export function projectModelContextToPrompt(input: {
     if (message.type !== "assistant" || message.status !== "completed") return [];
     const hasVisiblePart = message.parts.some((part) =>
       part.type === "tool_call" || (part.type === "text" && part.text.length > 0));
-    const hasReasoningReplay = message.parts.some((part) =>
-      part.type === "reasoning" && input.resolved.providerReplayByPartId.get(part.id)?.item.type === "reasoning");
-    return !hasVisiblePart && hasReasoningReplay ? [message.id] : [];
+    const hasReasoning = message.parts.some((part) => part.type === "reasoning");
+    return !hasVisiblePart && hasReasoning ? [message.id] : [];
   }));
   const projected = input.projector.projectDetailed({
     workspaceId: input.workspaceId,
@@ -340,8 +347,12 @@ export function projectModelContextToPrompt(input: {
       | { visibleIndex: number; type: "text"; providerReplay: AgentProviderReplayEnvelope }
       | { visibleIndex: number; type: "tool_call"; providerReplay: AgentProviderReplayEnvelope }
     > = [];
+    let assistantProvenance: AgentAssistantProvenance | null = null;
+    let untrusted = false;
+    let replayCapablePartCount = 0;
     for (const part of [...message.parts].sort((left, right) => left.position - right.position)) {
       if (part.type !== "text" && part.type !== "tool_call" && part.type !== "reasoning") continue;
+      replayCapablePartCount++;
       const replay = input.resolved.providerReplayByPartId.get(part.id);
       const currentVisibleIndex = visibleIndex;
       // Match RuntimeTranscriptProjector exactly: empty Text is omitted, non-empty Text and
@@ -349,18 +360,29 @@ export function projectModelContextToPrompt(input: {
       if (part.type === "tool_call" || (part.type === "text" && part.text.length > 0)) {
         visibleIndex += 1;
       }
-      if (!replay) continue;
+      if (!replay || (part.type === "tool_call" ? replay.item.type !== "function_call" && replay.item.type !== "tool_call" : replay.item.type !== part.type)) {
+        untrusted = true;
+        continue;
+      }
+      const identity = agentReplayProvenance(replay);
+      if (assistantProvenance && !sameAgentReplayProvenance(assistantProvenance, identity)) untrusted = true;
+      assistantProvenance ??= identity;
       if (part.type === "reasoning" && replay.item.type === "reasoning") {
         parts.push({ visibleIndex: currentVisibleIndex, type: "reasoning", text: part.text, providerReplay: replay });
       }
       if (part.type === "text" && part.text.length > 0 && replay.item.type === "text") {
         parts.push({ visibleIndex: currentVisibleIndex, type: "text", providerReplay: replay });
       }
-      if (part.type === "tool_call" && replay.item.type === "function_call") {
+      if (part.type === "tool_call" && (replay.item.type === "function_call" || replay.item.type === "tool_call")) {
         parts.push({ visibleIndex: currentVisibleIndex, type: "tool_call", providerReplay: replay });
       }
     }
-    return parts.length > 0 ? [{ assistantOrdinal, parts }] : [];
+    return [{
+      assistantOrdinal,
+      assistantProvenance: untrusted || replayCapablePartCount === 0 ? null : assistantProvenance,
+      // Existing OpenAI replay remains part-based; provenance must not tighten its historical contract.
+      parts: untrusted && assistantProvenance?.providerNpm !== "@ai-sdk/openai" ? [] : parts,
+    }];
   });
   return { ...projected, providerReplay };
 }
@@ -471,12 +493,10 @@ export class ModelContextResolver {
     if (!canStartPrimaryRetainedTail({
       message: anchor.message,
       profile: input.primaryProfile!,
-      replayProjectionByPartId: new Map(
-        [...hydrated.providerReplayByPartId].map(([partId, envelope]) => [
-          partId,
-          toPrimaryReplayProjectionDescriptor(envelope),
-        ]),
-      ),
+      replayProjectionByPartId: new Map([...hydrated.providerReplayByPartId].flatMap(([partId, envelope]) => {
+        const descriptor = toPrimaryReplayProjectionDescriptor(envelope);
+        return descriptor ? [[partId, descriptor] as const] : [];
+      })),
     })) {
       throw new RetainedAnchorValidationError("retained anchor has no visible primary projection for the current profile");
     }
@@ -719,7 +739,13 @@ export class ModelContextResolver {
       partsByMessage.set(row.messageId, list);
       if (row.providerReplayJson != null) {
         const replay = parseAgentProviderReplay(row.providerReplayJson);
-        if (!replay) throw new ModelContextInvariantError(`stored provider replay for part ${row.id} is invalid`);
+        if (!replay) {
+          // Early Chat v1 metadata is recognizable but has no endpoint identity.
+          // Keep the ordinary part in the transcript; do not claim replay provenance.
+          // Everything else (including malformed/unknown-version JSON) stays fatal.
+          if (isLegacyChatReplayWithoutEndpointDigest(row.providerReplayJson)) continue;
+          throw new ModelContextInvariantError(`stored provider replay for part ${row.id} is invalid`);
+        }
         replayByPartId.set(row.id, replay);
       }
     }

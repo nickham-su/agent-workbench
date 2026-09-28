@@ -31,6 +31,23 @@ test("replay 敏感字段在结构化对象和 JSON 字符串中均脱敏", () =
   assert.match(text, /\*\*\*/);
 });
 
+test("Provider HTTP 400/401/404 错误摘要只输出受控类型、状态和错误码", () => {
+  for (const statusCode of [400, 401, 404]) {
+    const error = Object.assign(new Error(SENTINEL), {
+      name: `Provider${SENTINEL}`,
+      statusCode,
+      code: SENTINEL,
+      data: { error: { code: SENTINEL, message: SENTINEL } },
+      responseBody: SENTINEL,
+    });
+    const summary = safeErrorSummaryForTest(error);
+    assert.equal(summary, `Error (status=${statusCode})`);
+  }
+  assert.equal(safeErrorSummaryForTest(Object.assign(new Error(SENTINEL), {
+    statusCode: 404, code: "model_not_found",
+  })), "Error (status=404, code=model_not_found)");
+});
+
 test("Error 安全摘要不包含 response body、raw 或密文", () => {
   const error = Object.assign(new Error(`provider failed ${SENTINEL}`), {
     statusCode: 400,

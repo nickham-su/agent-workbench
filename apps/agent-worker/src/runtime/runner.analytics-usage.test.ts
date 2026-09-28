@@ -1,8 +1,94 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createServer } from "node:http";
+import { streamText } from "ai";
 import { AgentRunner } from "./runner.js";
 
 const neverSettlingUsage = new Promise<never>(() => undefined);
+
+for (const providerNpm of ["@ai-sdk/moonshotai", "@ai-sdk/deepseek"] as const) {
+  test(`${providerNpm} custom model ID invokes production Runner and emits one paired Analytics Attempt`, async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const server = createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      bodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>);
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      for (const delta of [{ content: "reply" }, {}]) {
+        res.write(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1,
+          model: "custom-provider-id", choices: [{ index: 0, delta, finish_reason: delta.content ? null : "stop" }] })}\n\n`);
+      }
+      res.end("data: [DONE]\n\n");
+    });
+    await new Promise<void>((resolve, reject) => { server.listen(0, "127.0.0.1", resolve); server.once("error", reject); });
+    try {
+      const address = server.address();
+      assert.ok(address && typeof address !== "string");
+      const signals: Array<{ eventType: string; payload: Record<string, unknown> }> = [];
+      let streamingAssistants = 0;
+      const apiClient = {
+        async createStreamingAssistant() { streamingAssistants++; return { result: "created" }; },
+        async flushAssistantParts() { return { result: "updated" }; },
+        async completeTerminalAssistant() { return { result: "updated" }; },
+        async updateRunNotice() { return { result: "updated" }; },
+        async replaceStreamingAssistant() { return { result: "updated" }; },
+        async getPluginRuntimeSnapshots() { return { plugins: [] }; },
+      };
+      const runner = new AgentRunner(apiClient as any, { async listTools() { return []; } } as any,
+        { info() {}, warn() {}, error() {} }, 1, {
+          analyticsSignals: { emitModel(payload: Record<string, unknown>, eventType: string) {
+            signals.push({ eventType, payload });
+          } } as any,
+          streamText: ((request: any) => streamText(request)) as any,
+        });
+      const result = await (runner as any).runModelStep({
+        profile: {
+          model: { id: "local-alias", providerModelId: "  custom-provider-id  ", options: undefined },
+          provider: { id: "config", npm: providerNpm,
+            options: { apiKey: "fixture", baseURL: `http://127.0.0.1:${address.port}/v1` } },
+          agent: { tools: [], pluginTools: [], mcpServers: [] },
+          runtime: { modelIdleTimeoutMs: 0, modelTotalTimeoutMs: 0, modelRequestMaxRetries: 0, modelRequestRetryBackoffMaxMs: 1 },
+        },
+        run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: process.cwd(),
+          workspaceRepoDirNames: [], inputText: "hello" },
+        context: { pendingTools: [], tools: [], headMessageId: null, sessionRevision: 0, system: "",
+          messages: [{ role: "user", content: "hello" }], providerReplay: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] },
+        step: 1, signal: new AbortController().signal, recoveryContinuation: { messageId: null }, repeatedToolCallCounter: new Map(),
+      });
+      assert.equal(result.hasVisibleText, true);
+      assert.equal(streamingAssistants, 1);
+      assert.equal(bodies.length, 1);
+      assert.equal(bodies[0]?.model, "custom-provider-id");
+      assert.deepEqual(bodies[0]?.thinking, { type: "enabled" });
+      assert.deepEqual(signals.map(({ eventType }) => eventType), ["model_invoked", "model_finished"]);
+      assert.equal(signals[0]?.payload.attemptNo, signals[1]?.payload.attemptNo);
+      assert.equal(signals[1]?.payload.attemptNo, 1);
+      assert.equal(signals[1]?.payload.status, "completed");
+      assert.equal(signals[1]?.payload.modelId, "local-alias"); // Existing Analytics uses local ID, not providerModelId.
+      assert.equal(signals[1]?.payload.cacheComparable, false);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+    }
+  });
+}
+
+test("local pending ToolExecution fails before any network Attempt or model analytics", async () => {
+  let networkCalls = 0;
+  const modelEvents: string[] = [];
+  const runner = new AgentRunner({} as any, { async listTools() { return []; } } as any,
+    { info() {}, warn() {}, error() {} }, 1, {
+      analyticsSignals: { emitModel(_payload: unknown, event: string) { modelEvents.push(event); } } as any,
+      streamText: (() => { networkCalls++; throw new Error("must not send"); }) as any,
+    });
+  await assert.rejects((runner as any).runModelStep({
+    profile: {},
+    run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: process.cwd() },
+    context: { pendingTools: [{ status: "running" }], messages: [], system: "" },
+    step: 1, signal: new AbortController().signal, repeatedToolCallCounter: new Map(),
+  }), /cannot invoke model while ToolExecution remains queued or running/);
+  assert.equal(networkCalls, 0);
+  assert.deepEqual(modelEvents, []);
+});
 
 test("runner completes a terminal provider attempt when fullStream usage never settles", async () => {
   const modelSignals: Array<{ eventType: string; payload: Record<string, unknown> }> = [];

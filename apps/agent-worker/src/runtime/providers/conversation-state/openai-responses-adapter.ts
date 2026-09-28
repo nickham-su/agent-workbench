@@ -5,6 +5,7 @@ import {
   collectOpenAiResponsesTerminalReplay,
   collectOpenAiResponsesToolCallReplay,
   isOfficialOpenAiResponsesProfile,
+  finalOpenAiModel,
   openAiReasoningItemIdFromChunk,
   openAiResponsesTerminalStatus,
 } from "../openai-responses-replay.js";
@@ -86,7 +87,7 @@ class OpenAIResponsesConversationStateAttempt implements ProviderConversationSta
         message: "OpenAI Responses stream ended without response.completed",
       };
     }
-    return { ok: true };
+    return { ok: true, allowsReplayOnlyAssistant: true };
   }
 }
 
@@ -110,10 +111,22 @@ export class OpenAIResponsesConversationStateAdapter implements ProviderConversa
       messages,
       providerOptions: buildOpenAiResponsesProviderOptions(input.providerOptions),
       includeRawChunks: true,
+      attemptContext: {
+        providerNpm: "@ai-sdk/openai" as const,
+        protocol: this.protocol,
+        protocolVersion: 1 as const,
+        providerId: input.profile.provider.id,
+        model: finalOpenAiModel(input.profile),
+      },
     };
   }
 
-  createAttempt(): ProviderConversationStateAttempt {
+  createAttempt(context: Parameters<ProviderConversationStateAdapter["createAttempt"]>[0]): ProviderConversationStateAttempt {
+    if (context.protocol !== this.protocol || context.providerNpm !== "@ai-sdk/openai"
+      || context.providerId !== this.profile.provider.id || context.model !== finalOpenAiModel(this.profile)
+      || context.protocolVersion !== 1) {
+      throw new Error("OpenAI Responses attempt context identity mismatch");
+    }
     return new OpenAIResponsesConversationStateAttempt(this);
   }
 }

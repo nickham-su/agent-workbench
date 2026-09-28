@@ -360,6 +360,27 @@ test("Provider replay visibleIndex follows actual transcript visibility", () => 
   assert.deepEqual(projected.providerReplay[0]?.parts.map((part) => [part.type, part.visibleIndex]), [
     ["reasoning", 0], ["text", 0], ["tool_call", 1],
   ]);
+  assert.deepEqual(projected.providerReplay[0]?.assistantProvenance, {
+    providerNpm: "@ai-sdk/openai", protocol: "openai-responses", protocolVersion: 1, providerId: "openai", model: "test",
+  });
+  db.close();
+});
+
+test("protected PromptContext keeps legacy reasoning-only Assistant as a hard boundary", () => {
+  const { db, resolver } = createFixture();
+  append(db, { id: "user", text: "request" });
+  append(db, { id: "before", type: "assistant", text: "answer" });
+  append(db, { id: "legacy", type: "assistant", parts: [{ id: "old-reasoning", type: "reasoning", position: 0, text: "private" }] });
+  append(db, { id: "after", type: "assistant", text: "new answer" });
+  clearContextRoot(db);
+  const projected = projectModelContextToPrompt({ workspaceId: "ws", triggerMessageId: "user",
+    resolved: resolver.resolve({ workspaceId: "ws", sessionId: "session" }),
+    projector: new RuntimeTranscriptProjector(), includeReplayOnlyAssistants: true });
+  const legacyIndex = projected.messages.findIndex((message) => message.role === "assistant" && Array.isArray(message.content) && message.content.length === 0);
+  assert.ok(legacyIndex > 0);
+  assert.deepEqual(projected.providerReplay.find((source) => source.assistantOrdinal === legacyIndex), {
+    assistantOrdinal: legacyIndex, assistantProvenance: null, parts: [],
+  });
   db.close();
 });
 
