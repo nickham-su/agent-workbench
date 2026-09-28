@@ -104,7 +104,7 @@ export class AnalyticsSupervisor {
 
   constructor(private readonly options: AnalyticsSupervisorOptions) {
     this.workerFactory = options.workerFactory ?? (() => defaultWorkerFactory(options));
-    this.startupTimeoutMs = options.startupTimeoutMs ?? 3_000;
+    this.startupTimeoutMs = options.startupTimeoutMs ?? 5_000;
     this.queryTimeoutMs = options.queryTimeoutMs ?? 2_000;
     this.signalTimeoutMs = options.signalTimeoutMs ?? Math.min(this.queryTimeoutMs, 1_000);
     this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? 2_000;

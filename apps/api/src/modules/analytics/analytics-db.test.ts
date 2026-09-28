@@ -132,6 +132,34 @@ test("analytics database initializes formal state/config and collector fact tabl
   ] as const) assert.deepEqual((db.prepare(`PRAGMA index_info(${index})`).all() as Array<{ name: string }>).map((column) => column.name), columns, index);
 });
 
+test("reopening a current Analytics database inspects and fully validates its schema only once", async (t) => {
+  const dataDir = await tempDataDir("awb-analytics-current-reopen-");
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  closeAnalyticsDb(await openAnalyticsDb(dataDir, 1));
+
+  const originalPrepare = Database.prototype.prepare;
+  let schemaInspections = 0;
+  let fullValidations = 0;
+  Database.prototype.prepare = (function (this: InstanceType<typeof Database>, source: string) {
+    if (source.startsWith("SELECT schema_version, typeof(schema_version) AS storage_type FROM analytics_schema_meta")) schemaInspections++;
+    // verifyCurrentSchema checks for retired git tables through verifyV19Schema.
+    if (source.includes("name GLOB 'analytics_git_*'")) fullValidations++;
+    return originalPrepare.call(this, source);
+  }) as typeof Database.prototype.prepare;
+  try {
+    const reopened = await openAnalyticsDb(dataDir, 2);
+    try {
+      assert.equal(reopened.pragma("foreign_keys", { simple: true }), 1);
+    } finally {
+      closeAnalyticsDb(reopened);
+    }
+  } finally {
+    Database.prototype.prepare = originalPrepare;
+  }
+  assert.equal(schemaInspections, 1);
+  assert.equal(fullValidations, 1);
+});
+
 test("current v19 fails closed for a persisted running Execution with inferred quality", async (t) => {
   const dataDir = await tempDataDir("awb-analytics-v18-invalid-running-");
   t.after(() => fs.rm(dataDir, { recursive: true, force: true }));

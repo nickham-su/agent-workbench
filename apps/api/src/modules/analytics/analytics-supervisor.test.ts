@@ -57,6 +57,14 @@ async function starts(child: FakeAnalyticsChild, extra: Record<string, unknown> 
   return supervisor;
 }
 
+test("supervisor uses a 5s startup timeout unless explicitly configured", () => {
+  const options = { dataDir: "/not-used", workerFactory: () => new FakeAnalyticsChild() as any };
+  const defaultSupervisor = new AnalyticsSupervisor(options);
+  const configuredSupervisor = new AnalyticsSupervisor({ ...options, startupTimeoutMs: 100 });
+  assert.equal(defaultSupervisor["startupTimeoutMs"], 5_000);
+  assert.equal(configuredSupervisor["startupTimeoutMs"], 100);
+});
+
 test("bootstrap false or timeout keeps queries unavailable, retires the child, and only a replacement accepting the latest source serves", async (t) => {
   const rejected = new FakeAnalyticsChild(); rejected.signalAccepted = false; rejected.respondToSignals = true;
   const timedOut = new FakeAnalyticsChild(); timedOut.hangSignals = true;

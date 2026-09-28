@@ -1406,16 +1406,18 @@ export async function openAnalyticsDb(dataDir: string, nowMs = Date.now(), optio
     if (state === "v8") migrateV8ToV11(db, nowMs, options?.testFaultAt === "v8_after_dashboard_rebuild" ? "after_dashboard_rebuild" : undefined);
     if (state === "v9") { migrateV9ToV10(db); migrateV10ToV11(db); }
     if (state === "v10") migrateV10ToV11(db);
-    if (inspectSchema(db) === "v11") migrateV11ToV12(db);
-    if (inspectSchema(db) === "v12") migrateV12ToV13(db, options?.testFaultAt === "v13_after_worker_event_rebuild" ? "after_worker_event_rebuild" : undefined);
-    if (inspectSchema(db) === "v13") migrateV13ToV14(db, options?.testFaultAt === "v14_after_fact_identity_rebuild" ? "after_fact_identity_rebuild" : undefined);
-    if (inspectSchema(db) === "v14") migrateV14ToV15(db, options?.testFaultAt === "v15_after_source_control_create" ? "after_source_control_create" : undefined);
-    if (inspectSchema(db) === "v15") migrateV15ToV16(db, options?.testFaultAt === "v16_after_baseline_rewrite" ? "after_baseline_rewrite" : undefined);
-    if (inspectSchema(db) === "v16") migrateV16ToV17(db, options?.testFaultAt === "v17_after_empty_baseline" ? "after_empty_baseline" : undefined);
-    if (inspectSchema(db) === "v17") migrateV17ToV18(db, options?.testFaultAt === "v18_after_execution_rebuild" ? "after_execution_rebuild" : undefined);
-    if (inspectSchema(db) === "v18") migrateV18ToV19(db, options?.testFaultAt === "v19_after_collected_rebuild" ? "after_collected_rebuild" : undefined);
-    if (inspectSchema(db) === "v19") migrateV19ToV20(db, options?.testFaultAt === "v20_after_cache_fact_reset" ? "after_cache_fact_reset" : undefined);
-    verifyCurrentSchema(db);
+    if (state !== "current") {
+      if (inspectSchema(db) === "v11") migrateV11ToV12(db);
+      if (inspectSchema(db) === "v12") migrateV12ToV13(db, options?.testFaultAt === "v13_after_worker_event_rebuild" ? "after_worker_event_rebuild" : undefined);
+      if (inspectSchema(db) === "v13") migrateV13ToV14(db, options?.testFaultAt === "v14_after_fact_identity_rebuild" ? "after_fact_identity_rebuild" : undefined);
+      if (inspectSchema(db) === "v14") migrateV14ToV15(db, options?.testFaultAt === "v15_after_source_control_create" ? "after_source_control_create" : undefined);
+      if (inspectSchema(db) === "v15") migrateV15ToV16(db, options?.testFaultAt === "v16_after_baseline_rewrite" ? "after_baseline_rewrite" : undefined);
+      if (inspectSchema(db) === "v16") migrateV16ToV17(db, options?.testFaultAt === "v17_after_empty_baseline" ? "after_empty_baseline" : undefined);
+      if (inspectSchema(db) === "v17") migrateV17ToV18(db, options?.testFaultAt === "v18_after_execution_rebuild" ? "after_execution_rebuild" : undefined);
+      if (inspectSchema(db) === "v18") migrateV18ToV19(db, options?.testFaultAt === "v19_after_collected_rebuild" ? "after_collected_rebuild" : undefined);
+      if (inspectSchema(db) === "v19") migrateV19ToV20(db, options?.testFaultAt === "v20_after_cache_fact_reset" ? "after_cache_fact_reset" : undefined);
+      verifyCurrentSchema(db);
+    }
     db.pragma("busy_timeout = 1000");
     db.pragma("foreign_keys = ON");
     db.pragma("journal_mode = WAL");
