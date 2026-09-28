@@ -240,6 +240,15 @@ async function setTimeline(wrapper: ReturnType<typeof mount>, messages: AgentMes
   await nextTick();
 }
 
+async function waitForTimelineRequest(http: ReturnType<typeof mockContextRequests>, after = -1) {
+  for (let i = 0; i < 30; i++) {
+    const index = http.requests.findIndex((request, at) => at > after && request.config.url?.endsWith("/timeline"));
+    if (index >= 0) return index;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.fail("expected a timeline request");
+}
+
 function mountCachedPane() {
   const visible = ref(true);
   const runState = baseRunState();
@@ -255,7 +264,7 @@ function mountCachedPane() {
             sessionKind: "primary",
             sessionTitle: "Session A",
             sessionReady: false,
-            active: false,
+            active: true,
             modelValue: "agent-b",
             agentOptions: [],
             sessionModelStates: {},
@@ -515,6 +524,170 @@ test("真实 AgentClientPane：恢复窗口内的用户滚动意图会取消旧�
     assert.equal(scrollEl.scrollTop, 450);
   } finally {
     host.unmount();
+  }
+});
+
+test("真实 AgentClientPane：会话 tab 切回时恢复像素位置，迟到的 snapshot 不抢走阅读位置", async () => {
+  const http = mockContextRequests();
+  const { wrapper } = mountPane({ active: true, sessionReady: true });
+  try {
+    const initial = await waitForTimelineRequest(http);
+    http.respond(initial, timelineSnapshot([agentMessage({ id: "initial" })]));
+    await nextTick();
+    const scrollEl = wrapper.get("main").element as HTMLElement;
+    setScrollMetrics(scrollEl, 1_000, 200);
+    scrollEl.scrollTop = 750; // 在 120px 自动跟随范围内，但并未真正到底。
+    scrollEl.dispatchEvent(new Event("scroll"));
+
+    // 模拟真实 a-tabs 先把非活动 pane display:none，再更新子组件的 active prop。
+    // 隐藏后的 clientHeight/scrollHeight/scrollTop 都可能变为 0。
+    setScrollMetrics(scrollEl, 0, 0);
+    scrollEl.scrollTop = 0;
+    scrollEl.dispatchEvent(new Event("scroll"));
+    await wrapper.setProps({ active: false });
+    setScrollMetrics(scrollEl, 1_000, 200);
+    await wrapper.setProps({ active: true });
+    const refreshed = await waitForTimelineRequest(http, initial);
+    await waitForScrollRestore();
+    assert.equal(scrollEl.scrollTop, 750);
+
+    setScrollMetrics(scrollEl, 1_400, 200);
+    http.respond(refreshed, timelineSnapshot([agentMessage({ id: "updated" })]));
+    await waitForScrollRestore();
+    assert.equal(scrollEl.scrollTop, 750);
+  } finally {
+    wrapper.unmount();
+    http.restore();
+  }
+});
+
+test("真实 AgentClientPane：隐藏后的 scroll 既不分页也不污染已缓存的可见位置及跟随状态", async () => {
+  const { wrapper } = mountPane({ active: true, sessionReady: false });
+  try {
+    const scrollEl = wrapper.get("main").element as HTMLElement;
+    const vm = wrapper.vm as unknown as { loadingPreviousPageScope: unknown; stickToBottom: boolean };
+    setScrollMetrics(scrollEl, 1_000, 200);
+    scrollEl.scrollTop = 320;
+    scrollEl.dispatchEvent(new Event("scroll"));
+    assert.equal(vm.stickToBottom, false);
+
+    setScrollMetrics(scrollEl, 0, 0);
+    scrollEl.scrollTop = 0;
+    scrollEl.dispatchEvent(new Event("scroll")); // 仍是 active=true，但 DOM 已隐藏。
+    await wrapper.setProps({ active: false });
+    setScrollMetrics(scrollEl, 1_000, 200);
+    scrollEl.dispatchEvent(new Event("scroll")); // inactive 的意外 scroll 不能加载历史页。
+    assert.equal(vm.loadingPreviousPageScope, null);
+    assert.equal(vm.stickToBottom, false);
+
+    await wrapper.setProps({ active: true });
+    await waitForScrollRestore();
+    assert.equal(scrollEl.scrollTop, 320);
+  } finally {
+    wrapper.unmount();
+  }
+});
+
+test("真实 AgentClientPane：首次加载的程序化滚底无需 scroll 事件，也能在隐藏后正确保持底部", async () => {
+  const http = mockContextRequests();
+  const { wrapper } = mountPane({ active: true, sessionReady: true });
+  try {
+    const initial = await waitForTimelineRequest(http);
+    const scrollEl = wrapper.get("main").element as HTMLElement;
+    setScrollMetrics(scrollEl, 1_000, 200);
+    http.respond(initial, timelineSnapshot([agentMessage({ id: "initial" })]));
+    await waitForScrollRestore();
+    assert.equal(scrollEl.scrollTop, 800); // 没有手动派发 scroll 事件。
+
+    setScrollMetrics(scrollEl, 0, 0);
+    scrollEl.scrollTop = 0;
+    await wrapper.setProps({ active: false });
+    setScrollMetrics(scrollEl, 1_400, 200);
+    await wrapper.setProps({ active: true });
+    const refreshed = await waitForTimelineRequest(http, initial);
+    await waitForScrollRestore();
+    assert.equal(scrollEl.scrollTop, 1_200);
+    http.respond(refreshed, timelineSnapshot([agentMessage({ id: "updated" })]));
+  } finally {
+    wrapper.unmount();
+    http.restore();
+  }
+});
+
+test("真实 AgentClientPane：切换前未完成的 snapshot 与切回后排队的 snapshot 都不抢走位置", async () => {
+  const http = mockContextRequests();
+  const { wrapper } = mountPane({ active: true, sessionReady: true });
+  try {
+    const initial = await waitForTimelineRequest(http);
+    const scrollEl = wrapper.get("main").element as HTMLElement;
+    setScrollMetrics(scrollEl, 1_000, 200);
+    scrollEl.scrollTop = 750;
+    scrollEl.dispatchEvent(new Event("scroll"));
+    await wrapper.setProps({ active: false });
+    scrollEl.scrollTop = 0;
+    await wrapper.setProps({ active: true });
+    await waitForScrollRestore();
+    assert.equal(scrollEl.scrollTop, 750);
+
+    setScrollMetrics(scrollEl, 1_400, 200);
+    http.respond(initial, timelineSnapshot([agentMessage({ id: "first" })]));
+    const refreshed = await waitForTimelineRequest(http, initial);
+    http.respond(refreshed, timelineSnapshot([agentMessage({ id: "second" })]));
+    await waitForScrollRestore();
+    assert.equal(scrollEl.scrollTop, 750);
+  } finally {
+    wrapper.unmount();
+    http.restore();
+  }
+});
+
+test("真实 AgentClientPane：会话 tab 原先确实到底部则随新内容到底", async () => {
+  const http = mockContextRequests();
+  const { wrapper } = mountPane({ active: true, sessionReady: true });
+  try {
+    const initial = await waitForTimelineRequest(http);
+    http.respond(initial, timelineSnapshot([agentMessage({ id: "initial" })]));
+    await nextTick();
+    const scrollEl = wrapper.get("main").element as HTMLElement;
+    setScrollMetrics(scrollEl, 1_000, 200);
+    scrollEl.scrollTop = 800;
+    scrollEl.dispatchEvent(new Event("scroll"));
+
+    setScrollMetrics(scrollEl, 0, 0);
+    scrollEl.scrollTop = 0;
+    await wrapper.setProps({ active: false });
+    setScrollMetrics(scrollEl, 1_400, 200);
+    await wrapper.setProps({ active: true });
+    const refreshed = await waitForTimelineRequest(http, initial);
+    await waitForScrollRestore();
+    assert.equal(scrollEl.scrollTop, 1_200);
+    setScrollMetrics(scrollEl, 1_600, 200);
+    http.respond(refreshed, timelineSnapshot([agentMessage({ id: "updated" })]));
+    await waitForScrollRestore();
+    assert.equal(scrollEl.scrollTop, 1_400);
+  } finally {
+    wrapper.unmount();
+    http.restore();
+  }
+});
+
+test("真实 AgentClientPane：会话 tab 快速往返不以尚未恢复的临时顶部覆盖保存位置", async () => {
+  const { wrapper } = mountPane({ active: true, sessionReady: false });
+  try {
+    const scrollEl = wrapper.get("main").element as HTMLElement;
+    setScrollMetrics(scrollEl, 1_000, 200);
+    scrollEl.scrollTop = 320;
+    scrollEl.dispatchEvent(new Event("scroll"));
+    await wrapper.setProps({ active: false });
+    scrollEl.scrollTop = 0;
+    await wrapper.setProps({ active: true });
+    // 下一帧的旧恢复尚未运行，用户已经再次切走。
+    await wrapper.setProps({ active: false });
+    await wrapper.setProps({ active: true });
+    await waitForScrollRestore();
+    assert.equal(scrollEl.scrollTop, 320);
+  } finally {
+    wrapper.unmount();
   }
 });
 

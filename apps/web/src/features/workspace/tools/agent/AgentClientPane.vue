@@ -656,7 +656,12 @@ const pendingAttempt = ref<PendingAgentSendAttempt | null>(null);
 const pendingCompactAttempt = ref<PendingAgentCompactAttempt | null>(null);
 const scrollEl = ref<HTMLElement | null>(null);
 const inputEl = ref<any>(null);
-let savedScrollPosition: { top: number; wasAtBottom: boolean } | null = null;
+type ScrollPosition = { top: number; wasAtBottom: boolean };
+let lastVisibleScrollPosition: ScrollPosition | null = null;
+let savedScrollPosition: ScrollPosition | null = null;
+let preserveTabScrollOnReturn = false;
+let savedByTab = false;
+let tabReturnGeneration = 0;
 // 失活、会话切换和用户滚动都可以发生在等待下一帧恢复期间；代次用于让旧恢复任务失效。
 let scrollRestoreGeneration = 0;
 let scrollRestorePending = false;
@@ -870,12 +875,17 @@ async function loadTimeline(
     }
     await nextTick();
     if (mode === "before" && anchor !== null && anchorElement?.isConnected) {
-      scrollEl.value!.scrollTop +=
+      const el = scrollEl.value!;
+      el.scrollTop +=
         anchorElement.getBoundingClientRect().top - anchor;
+      if (props.active && el.clientHeight > 0) {
+        recordVisibleScrollPosition(el);
+      }
     } else if (
-      mode === "snapshot" ||
-      response.timelineReset ||
-      stickToBottom.value
+      props.active &&
+      !scrollRestorePending &&
+      !preserveTabScrollOnReturn &&
+      (mode === "snapshot" || response.timelineReset || stickToBottom.value)
     )
       scrollToBottom(true);
     return mode === "before"
@@ -969,6 +979,12 @@ function syncScrollState(el: HTMLElement) {
   );
   stickToBottom.value = distanceToBottom.value <= 120;
 }
+function recordVisibleScrollPosition(el: HTMLElement) {
+  lastVisibleScrollPosition = {
+    top: el.scrollTop,
+    wasAtBottom: isScrolledToBottom(el),
+  };
+}
 function stopScrollRestoreIntentListener() {
   const handler = scrollRestoreIntentHandler;
   if (!handler) return;
@@ -993,10 +1009,10 @@ function listenForScrollRestoreIntent() {
 }
 function onScroll() {
   const el = scrollEl.value;
-  if (!el) return;
+  // TabPane display:none 后可能先收到 scroll=0，再收到 active=false；两者都不能改写可见时的位置。
+  if (!el || !props.active || scrollRestorePending || el.clientHeight <= 0) return;
   syncScrollState(el);
-  // KeepAlive 重挂载期间浏览器可能短暂报告 scrollTop=0；这不是用户抵达顶部，不能加载历史分页。
-  if (scrollRestorePending) return;
+  recordVisibleScrollPosition(el);
   if (el.scrollTop < 100 && loadingPreviousPageScope !== requestScope) {
     const scope = requestScope;
     loadingPreviousPageScope = scope;
@@ -1016,16 +1032,20 @@ function scrollToBottom(force = false) {
   el.scrollTop = maxScrollTop(el);
   distanceToBottom.value = 0;
   stickToBottom.value = true;
+  if (props.active && el.clientHeight > 0) recordVisibleScrollPosition(el);
 }
 function saveScrollPosition() {
-  const el = scrollEl.value;
-  if (!el) return;
+  // 快速切走时前一次恢复尚未落到 DOM，保留原保存值而不是读暂时的 scrollTop=0。
+  if (scrollRestorePending && savedScrollPosition) {
+    scrollRestoreGeneration += 1;
+    scrollRestorePending = false;
+    stopScrollRestoreIntentListener();
+    return;
+  }
   cancelPendingScrollRestore();
-  syncScrollState(el);
-  savedScrollPosition = {
-    top: el.scrollTop,
-    wasAtBottom: isScrolledToBottom(el),
-  };
+  // 仅使用可见期间由滚动事件、程序化滚底或位置恢复记录的值；active=false watcher /
+  // KeepAlive onDeactivated 可能在 DOM 隐藏后运行，不能再测量隐藏面板的尺寸。
+  savedScrollPosition = lastVisibleScrollPosition ?? { top: 0, wasAtBottom: true };
 }
 async function restoreScrollPosition() {
   const saved = savedScrollPosition;
@@ -1061,6 +1081,7 @@ async function restoreScrollPosition() {
   } else {
     el.scrollTop = saved.top;
     syncScrollState(el);
+    if (props.active && el.clientHeight > 0) recordVisibleScrollPosition(el);
   }
   savedScrollPosition = null;
   scrollRestorePending = false;
@@ -1780,8 +1801,12 @@ watch(
       props.active,
       props.sessionReady,
     ] as const,
-  ([workspaceId, sessionId, active, ready]) => {
+  ([workspaceId, sessionId, active, ready], previous) => {
     if (disposed) return;
+    if (previous?.[2] && !active && previous[0] === workspaceId && previous[1] === sessionId) {
+      saveScrollPosition();
+      savedByTab = true;
+    }
     if (
       workspaceId !== requestScope.workspaceId ||
       sessionId !== requestScope.sessionId
@@ -1805,11 +1830,26 @@ watch(
       pendingCompactAttempt.value = null;
       messageMutationState.clear();
       cancelPendingScrollRestore();
+      lastVisibleScrollPosition = null;
+      preserveTabScrollOnReturn = false;
+      savedByTab = false;
+      tabReturnGeneration += 1;
       distanceToBottom.value = 0;
       stickToBottom.value = true;
     }
+    if (active && previous && !previous[2]) {
+      // Tab 内容在隐藏时可能被重置滚动值；只读离开时保存的像素位置。
+      preserveTabScrollOnReturn = savedScrollPosition?.wasAtBottom === false;
+      tabReturnGeneration += 1;
+      void restoreScrollPosition();
+      savedByTab = false;
+    }
     if (active && ready) {
-      void refreshTimeline(true).catch(() => undefined);
+      const generation = tabReturnGeneration;
+      void refreshTimeline(true).catch(() => undefined).finally(() => {
+        // 快照可能晚于 rAF 恢复，也可能由此前未完成的请求延后执行。
+        if (generation === tabReturnGeneration) preserveTabScrollOnReturn = false;
+      });
       void refreshPromptItems();
       pendingRunController.start({ workspaceId, sessionId });
     } else {
@@ -1885,10 +1925,10 @@ watch(
   { immediate: true },
 );
 onDeactivated(() => {
-  saveScrollPosition();
+  if (!savedByTab) saveScrollPosition();
 });
 onActivated(() => {
-  void restoreScrollPosition();
+  if (!savedByTab) void restoreScrollPosition();
 });
 onBeforeUnmount(() => {
   disposed = true;
