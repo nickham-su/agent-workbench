@@ -67,7 +67,8 @@
       >
         <div
           v-if="conversation.length === 0"
-          class="h-full flex flex-col items-center justify-center gap-3 text-[color:var(--text-tertiary)]"
+          class="flex flex-col items-center justify-center gap-3 text-[color:var(--text-tertiary)]"
+          :class="showRunLoading ? '' : 'h-full'"
         >
           <div>{{ t("agent.client.welcome") }}</div>
           <a-button
@@ -169,13 +170,10 @@
               @open-subtask="emit('open-subtask', $event)"
               @toggle-todo="toggleTodoCollapse(row.part.id)"
             />
-            <div
-              v-else-if="row.message.status === 'streaming'"
-              class="text-[color:var(--text-tertiary)]"
-            >
-              <LoadingOutlined spin />
-            </div>
           </article>
+        </div>
+        <div v-if="showRunLoading" data-testid="agent-run-loading" class="text-[color:var(--text-tertiary)]">
+          <LoadingOutlined spin />
         </div>
       </main>
       <a-button
@@ -614,7 +612,7 @@ const emit = defineEmits<{
 }>();
 const { t } = useI18n();
 const statusStore = useAgentSessionStatusStore();
-const runState = statusStore.getRunState(props.sessionId);
+const runState = computed(() => statusStore.getRunState(props.sessionId).value);
 const isSubtaskSession = computed(() => props.sessionKind === "subtask");
 const sessionTitleText = computed(
   () => String(props.sessionTitle || "").trim() || props.sessionId,
@@ -649,6 +647,22 @@ const inputPlaceholder = computed(() => {
 });
 const draft = ref("");
 const sending = ref(false);
+// 请求已返回 runId、但状态轮询尚未观察到 running 时，避免列表图标闪烁。
+const awaitingRunStateRunId = ref<string | null>(null);
+// 只保留当前状态 Run 与待同步 Run 的终态确认，不累积历史 Run。
+const terminalRunIds = ref(new Set<string>());
+function bridgeRunState(runId: string) {
+  awaitingRunStateRunId.value = runState.value.status === "running" && runState.value.activeRunId === runId
+    ? null
+    : runId;
+}
+const showRunLoading = computed(() =>
+  sending.value ||
+  (runState.value.workspaceId === props.workspaceId &&
+    runState.value.status === "running" &&
+    !terminalRunIds.value.has(runState.value.activeRunId ?? "")) ||
+  (awaitingRunStateRunId.value !== null && !terminalRunIds.value.has(awaitingRunStateRunId.value)),
+);
 const cancelling = ref(false);
 const pendingImages = ref<PendingAgentImage[]>([]);
 const processingPastedImages = ref(0);
@@ -691,6 +705,19 @@ const pendingRunController = createAgentPendingRunController({
   registry: pendingRunRegistry,
   fetchRun: ({ workspaceId, sessionId, runId }) => getAgentRunStatus({ workspaceId, sessionId, runId }),
   onTerminal: (run) => {
+    const wasAwaiting = awaitingRunStateRunId.value === run.runId;
+    if (
+      run.workspaceId === props.workspaceId && run.sessionId === props.sessionId &&
+      (wasAwaiting ||
+        (runState.value.status === "running" && runState.value.activeRunId === run.runId))
+    ) {
+      terminalRunIds.value = new Set(
+        [...terminalRunIds.value, run.runId].filter((id) =>
+          id === runState.value.activeRunId || id === awaitingRunStateRunId.value,
+        ),
+      );
+    }
+    if (wasAwaiting) awaitingRunStateRunId.value = null;
     if (!isSilentAgentRunTerminal(run)) {
       const text = t(agentRunTerminalMessageKey(run.code));
       if (run.status === "completed") message.success(text);
@@ -700,6 +727,16 @@ const pendingRunController = createAgentPendingRunController({
     if (!disposed && props.active && props.sessionReady) void refreshTimeline(false).catch(() => undefined);
   },
   onStale: () => {
+    const awaitingRunId = awaitingRunStateRunId.value;
+    if (awaitingRunId) {
+      // onStale 在 registry 移除记录前触发；下一微任务只清除确已丢失的这一笔 Run。
+      queueMicrotask(() => {
+        if (
+          awaitingRunStateRunId.value === awaitingRunId &&
+          !pendingRunRegistry.list(props.workspaceId, props.sessionId).some((run) => run.runId === awaitingRunId)
+        ) awaitingRunStateRunId.value = null;
+      });
+    }
     if (!disposed && props.active && props.sessionReady) {
       message.warning(t("agent.runTerminal.run_status_unavailable"));
     }
@@ -1034,6 +1071,12 @@ function scrollToBottom(force = false) {
   stickToBottom.value = true;
   if (props.active && el.clientHeight > 0) recordVisibleScrollPosition(el);
 }
+watch(showRunLoading, (visible, wasVisible) => {
+  if (visible && !wasVisible && props.active && !scrollRestorePending) {
+    // DOM 已插入图标；只跟随原本在底部附近的会话，不打断正在翻阅历史的用户。
+    scrollToBottom();
+  }
+}, { flush: "post" });
 function saveScrollPosition() {
   // 快速切走时前一次恢复尚未落到 DOM，保留原保存值而不是读暂时的 scrollTop=0。
   if (scrollRestorePending && savedScrollPosition) {
@@ -1379,10 +1422,12 @@ async function onSend() {
     })
   )
     return;
+  const sendScope = requestScope;
   const text = draft.value.trim();
   if (!text && pendingImages.value.length === 0) return;
   if (isSlashMode(text) && !promptSettingsLoaded.value)
     await refreshPromptItems();
+  if (!isCurrentAgentRequestScope(requestScope, sendScope)) return;
   const action = resolveAgentSlashSendAction({
     text,
     promptCommands: promptCommandMap.value,
@@ -1397,12 +1442,13 @@ async function onSend() {
   sending.value = true;
   try {
     const ensuredId = props.ensureSession
-      ? await props.ensureSession(props.sessionId)
-      : props.sessionId;
+      ? await props.ensureSession(sendScope.sessionId)
+      : sendScope.sessionId;
+    if (!isCurrentAgentRequestScope(requestScope, sendScope)) return;
     if (action.kind === "compact") {
       const fingerprint = createAgentCompactAttemptFingerprint({
         sessionId: ensuredId,
-        workspaceId: props.workspaceId,
+        workspaceId: sendScope.workspaceId,
         agentId: effectiveAgentId.value || undefined,
         locale: getInitialLocale(),
       });
@@ -1413,18 +1459,21 @@ async function onSend() {
       });
       pendingCompactAttempt.value = attempt;
       const result = await compactAgentSession(ensuredId, {
-        workspaceId: props.workspaceId,
+        workspaceId: sendScope.workspaceId,
         clientRequestId: attempt.clientRequestId,
         agentId: effectiveAgentId.value || undefined,
         uiLocale: getInitialLocale(),
       });
-      draft.value = "";
-      pendingCompactAttempt.value = null;
       registerPendingAgentRun(
-        pendingRunController,
-        { workspaceId: props.workspaceId, sessionId: ensuredId, runKind: "manual_compaction", runId: result.runId },
+        pendingRunRegistry,
+        { workspaceId: sendScope.workspaceId, sessionId: ensuredId, runKind: "manual_compaction", runId: result.runId },
         statusStore,
       );
+      if (!isCurrentAgentRequestScope(requestScope, sendScope)) return;
+      draft.value = "";
+      pendingCompactAttempt.value = null;
+      bridgeRunState(result.runId);
+      sending.value = false;
       void pendingRunController.pollNow();
     } else {
       const sendText = action.text;
@@ -1439,7 +1488,7 @@ async function onSend() {
       });
       pendingAttempt.value = attempt;
       const payload = {
-        workspaceId: props.workspaceId,
+        workspaceId: sendScope.workspaceId,
         clientRequestId: attempt.clientRequestId,
         agentId: effectiveAgentId.value || undefined,
         uiLocale: getInitialLocale(),
@@ -1461,10 +1510,13 @@ async function onSend() {
           },
         );
       registerPendingAgentRun(
-        pendingRunController,
-        { workspaceId: props.workspaceId, sessionId: ensuredId, runKind: "user", runId: result.runId },
+        pendingRunRegistry,
+        { workspaceId: sendScope.workspaceId, sessionId: ensuredId, runKind: "user", runId: result.runId },
         statusStore,
       );
+      if (!isCurrentAgentRequestScope(requestScope, sendScope)) return;
+      bridgeRunState(result.runId);
+      sending.value = false;
       void pendingRunController.pollNow();
       draft.value = "";
       pendingImages.value = [];
@@ -1472,12 +1524,14 @@ async function onSend() {
     }
     if (action.kind === "compact") invalidateTimelineForStructuralMutation();
     await (action.kind === "compact" ? refreshStructuralTimeline() : refreshTimeline(false));
-    scrollToBottom(true);
+    if (isCurrentAgentRequestScope(requestScope, sendScope)) scrollToBottom();
   } catch (error) {
-    if (action.kind === "compact" && shouldClearPendingAgentCompactAttempt(error)) pendingCompactAttempt.value = null;
-    message.error(error instanceof Error ? error.message : String(error));
+    if (isCurrentAgentRequestScope(requestScope, sendScope)) {
+      if (action.kind === "compact" && shouldClearPendingAgentCompactAttempt(error)) pendingCompactAttempt.value = null;
+      message.error(error instanceof Error ? error.message : String(error));
+    }
   } finally {
-    sending.value = false;
+    if (isCurrentAgentRequestScope(requestScope, sendScope)) sending.value = false;
   }
 }
 
@@ -1827,6 +1881,10 @@ watch(
       loadingPreviousPageScope = null;
       timelineRequestSequence = 0;
       pendingRunController.stop();
+      sending.value = false;
+      pendingAttempt.value = null;
+      awaitingRunStateRunId.value = null;
+      terminalRunIds.value = new Set();
       pendingCompactAttempt.value = null;
       messageMutationState.clear();
       cancelPendingScrollRestore();
@@ -1881,8 +1939,16 @@ watch(
   { immediate: true },
 );
 watch(
-  () => runState.value.status,
-  (nextStatus) => {
+  () => [runState.value.status, runState.value.activeRunId] as const,
+  ([nextStatus, activeRunId]) => {
+    if (nextStatus === "running" && activeRunId === awaitingRunStateRunId.value) {
+      awaitingRunStateRunId.value = null;
+    }
+    terminalRunIds.value = nextStatus === "running"
+      ? new Set([...terminalRunIds.value].filter((id) =>
+          id === activeRunId || id === awaitingRunStateRunId.value,
+        ))
+      : new Set();
     const becameIdle = previousRunStatus === "running" && nextStatus !== "running";
     previousRunStatus = nextStatus;
     if (becameIdle && props.active && props.sessionReady) {
@@ -1932,6 +1998,7 @@ onActivated(() => {
 });
 onBeforeUnmount(() => {
   disposed = true;
+  terminalRunIds.value = new Set();
   cancelPendingScrollRestore();
   clearRefreshTimer();
   pendingRunController.stop();

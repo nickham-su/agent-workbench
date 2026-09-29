@@ -112,7 +112,7 @@ function timelineSnapshot(messages: AgentMessage[]) {
 }
 
 function createMountGlobal(
-  statusStore: { getRunState: () => ComputedRef<AgentMessageSessionRunState> },
+  statusStore: { getRunState: (sessionId: string) => ComputedRef<AgentMessageSessionRunState> },
   contextLocale?: "zh-CN" | "en-US",
 ) {
   const i18n = contextLocale
@@ -137,7 +137,8 @@ function mountPane(options?: {
   renderModalSlots?: boolean;
 }) {
   const runState = options?.runState ?? baseRunState();
-  const statusStore = { getRunState: () => computed(() => runState) };
+  const otherRunState = baseRunState({ sessionId: "session-b" });
+  const statusStore = { getRunState: (sessionId: string) => computed(() => sessionId === "session-a" ? runState : otherRunState), bumpPollHint: () => undefined };
   const wrapper = mount(AgentClientPane, {
     attachTo: document.body,
     props: {
@@ -221,6 +222,12 @@ function mockContextRequests() {
     },
     restore() { apiClient.defaults.adapter = previousAdapter; },
   };
+}
+
+function panePendingRuns(wrapper: ReturnType<typeof mountPane>["wrapper"]) {
+  return (wrapper.vm as unknown as {
+    pendingRunRegistry: ReturnType<typeof import("./agentPendingRunRegistry.js").createAgentPendingRunRegistry>;
+  }).pendingRunRegistry;
 }
 
 function contextSnapshot(workspaceId: string, skillId: string, instructionPath: string) {
@@ -686,6 +693,289 @@ test("真实 AgentClientPane：会话 tab 快速往返不以尚未恢复的临�
     await wrapper.setProps({ active: true });
     await waitForScrollRestore();
     assert.equal(scrollEl.scrollTop, 320);
+  } finally {
+    wrapper.unmount();
+  }
+});
+
+test("真实 AgentClientPane：消息列表底部在空流、文本流和工具调用期间只显示一个 Run loading，idle 后隐藏", async () => {
+  const { wrapper, setRunState } = mountPane({ sessionReady: false, runState: baseRunState({ status: "running" }) });
+  const loadingCount = () => wrapper.get("main").findAllComponents({ name: "LoadingOutlined" }).length;
+  try {
+    assert.equal(loadingCount(), 1, "消息快照到达前也显示 loading");
+    await setTimeline(wrapper, [agentMessage({ id: "empty-stream", status: "streaming" })]);
+    assert.equal(loadingCount(), 1);
+    assert.equal(wrapper.find('main > [data-testid="agent-run-loading"]').exists(), true);
+
+    await setTimeline(wrapper, [agentMessage({
+      id: "text-stream", status: "streaming",
+      parts: [{ id: "text-part", messageId: "text-stream", position: 0, type: "text", text: "Hello", updatedRevision: 1, createdAt: 1, updatedAt: 1 }],
+    })]);
+    assert.equal(loadingCount(), 1);
+
+    await setTimeline(wrapper, [agentMessage({
+      id: "tool-assistant", status: "completed",
+      parts: [{ id: "call-part", messageId: "tool-assistant", position: 0, type: "tool_call", toolName: "read", input: {}, providerToolCallId: null, updatedRevision: 1, createdAt: 1, updatedAt: 1 }],
+    })]);
+    assert.equal(loadingCount(), 1);
+    assert.equal(wrapper.find('main > [data-testid="agent-run-loading"]').exists(), true);
+
+    setRunState({ status: "idle" });
+    await nextTick();
+    assert.equal(loadingCount(), 0);
+    await setTimeline(wrapper, [agentMessage({ id: "stale-stream", status: "streaming" })]);
+    assert.equal(loadingCount(), 0, "历史 streaming 消息不能在 Run 结束后重现 loading");
+    assert.equal(wrapper.get("main").find('[data-testid="agent-run-loading"]').exists(), false);
+  } finally {
+    wrapper.unmount();
+  }
+});
+
+test("真实 AgentClientPane：发送和状态轮询间隙保持 Run loading，Run 完成后消失", async () => {
+  const ensured = deferred<string>();
+  const http = mockContextRequests();
+  const { wrapper, setRunState } = mountPane({ sessionReady: false, initialDraft: "Hello", ensureSession: () => ensured.promise });
+  const loadingCount = () => wrapper.get("main").findAllComponents({ name: "LoadingOutlined" }).length;
+  try {
+    const send = (wrapper.vm as unknown as { onSend: () => Promise<void> }).onSend();
+    await nextTick();
+    assert.equal(loadingCount(), 1, "等待会话就绪时显示 loading");
+    ensured.resolve("session-a");
+    const request = await http.waitFor(0);
+    assert.match(request.url || "", /messages/);
+    http.respond(0, { runId: "new-run" });
+    await send;
+    await nextTick();
+    assert.equal(loadingCount(), 1, "发送完成但状态仍为 idle 时不能闪烁");
+
+    setRunState({ status: "running", activeRunId: "new-run" });
+    await nextTick();
+    assert.equal(loadingCount(), 1, "状态同步后仍只显示一个 loading");
+    setRunState({ status: "idle" });
+    await nextTick();
+    assert.equal(loadingCount(), 0);
+  } finally {
+    panePendingRuns(wrapper).remove({ workspaceId: "ws-a", sessionId: "session-a", runKind: "user", runId: "new-run" });
+    wrapper.unmount();
+    http.restore();
+  }
+});
+
+test("真实 AgentClientPane：ensureSession 未返回前切会话不发送旧请求", async () => {
+  const ensured = deferred<string>();
+  const http = mockContextRequests();
+  const { wrapper } = mountPane({ sessionReady: false, initialDraft: "old", ensureSession: () => ensured.promise });
+  try {
+    const send = (wrapper.vm as unknown as { onSend: () => Promise<void> }).onSend();
+    await nextTick();
+    await wrapper.setProps({ sessionId: "session-b" });
+    ensured.resolve("session-a");
+    await send;
+    assert.equal(http.requests.length, 0);
+    assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), false);
+  } finally {
+    wrapper.unmount();
+    http.restore();
+  }
+});
+
+test("真实 AgentClientPane：旧会话请求回执只登记原 Run，不污染新会话发送状态", async () => {
+  const newSessionReady = deferred<string>();
+  const http = mockContextRequests();
+  const { wrapper, setRunState } = mountPane({ sessionReady: false, initialDraft: "old", ensureSession: (id) => id === "session-b" ? newSessionReady.promise : Promise.resolve(id) });
+  const vm = wrapper.vm as unknown as { onSend: () => Promise<void>; draft: string; awaitingRunStateRunId: string | null };
+  try {
+    const oldSend = vm.onSend();
+    const oldRequest = await http.waitFor(0);
+    assert.match(oldRequest.url || "", /session-a\/messages/);
+    await wrapper.setProps({ sessionId: "session-b" });
+    setRunState({ status: "running", activeRunId: "old-run-after-switch" });
+    await nextTick();
+    assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), false, "旧会话运行状态不能在新会话显示");
+    vm.draft = "new";
+    const newSend = vm.onSend();
+    await nextTick();
+    assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), true);
+
+    http.respond(0, { runId: "old-run-after-switch" });
+    await oldSend;
+    await nextTick();
+    assert.deepEqual(panePendingRuns(wrapper).list("ws-a", "session-a").map((run) => run.runId), ["old-run-after-switch"]);
+    assert.equal(vm.awaitingRunStateRunId, null);
+    assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), true, "旧请求的 finally 不能关掉新会话 loading");
+
+    newSessionReady.resolve("session-b");
+    const newRequest = await http.waitFor(1);
+    assert.match(newRequest.url || "", /session-b\/messages/);
+    http.respond(1, { runId: "new-run-after-switch" });
+    await newSend;
+    assert.equal(vm.awaitingRunStateRunId, "new-run-after-switch");
+  } finally {
+    panePendingRuns(wrapper).remove({ workspaceId: "ws-a", sessionId: "session-a", runKind: "user", runId: "old-run-after-switch" });
+    panePendingRuns(wrapper).remove({ workspaceId: "ws-a", sessionId: "session-b", runKind: "user", runId: "new-run-after-switch" });
+    wrapper.unmount();
+    http.restore();
+  }
+});
+
+test("真实 AgentClientPane：上一 Run 的 running 状态不会提前清除本次 Run 桥接", async () => {
+  const http = mockContextRequests();
+  const { wrapper, setRunState } = mountPane({ sessionReady: false, initialDraft: "next", runState: baseRunState({ status: "running", activeRunId: "old-run" }) });
+  const vm = wrapper.vm as unknown as { onSend: () => Promise<void>; awaitingRunStateRunId: string | null };
+  try {
+    const send = vm.onSend();
+    await http.waitFor(0);
+    http.respond(0, { runId: "overlap-run" });
+    await send;
+    assert.equal(vm.awaitingRunStateRunId, "overlap-run");
+    setRunState({ status: "idle", activeRunId: null });
+    await nextTick();
+    assert.equal(wrapper.get("main").findAllComponents({ name: "LoadingOutlined" }).length, 1);
+    setRunState({ status: "running", activeRunId: "overlap-run" });
+    await nextTick();
+    assert.equal(vm.awaitingRunStateRunId, null);
+    setRunState({ status: "idle", activeRunId: null });
+    await nextTick();
+    assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), false);
+  } finally {
+    panePendingRuns(wrapper).remove({ workspaceId: "ws-a", sessionId: "session-a", runKind: "user", runId: "overlap-run" });
+    wrapper.unmount();
+    http.restore();
+  }
+});
+
+for (const terminal of [
+  { status: "completed", code: "run_completed" },
+  { status: "failed", code: "run_enqueue_failed" },
+  { status: "cancelled", code: "run_cancelled" },
+] as const) {
+  test(`真实 AgentClientPane：${terminal.status} 终态优先于滞后 running，后续新 Run 仍显示 loading`, async () => {
+    const http = mockContextRequests();
+    const runId = `fast-${terminal.status}`;
+    const { wrapper, setRunState } = mountPane({ sessionReady: true, active: false, initialDraft: "fast" });
+    const vm = wrapper.vm as unknown as {
+      onSend: () => Promise<void>;
+      terminalRunIds: Set<string>;
+      pendingRunController: { start: (scope: { workspaceId: string; sessionId: string }) => void };
+    };
+    try {
+      vm.pendingRunController.start({ workspaceId: "ws-a", sessionId: "session-a" });
+      const send = vm.onSend();
+      await http.waitFor(0);
+      http.respond(0, { runId });
+      const timelineIndex = await waitForTimelineRequest(http);
+      let statusIndex = -1;
+      for (let i = 0; i < 30 && statusIndex < 0; i++) {
+        statusIndex = http.requests.findIndex((request) => request.config.url?.endsWith(`/runs/${runId}`));
+        if (statusIndex < 0) await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      assert.ok(statusIndex >= 0, "应登记并轮询本次 Run");
+      setRunState({ status: "running", activeRunId: runId });
+      await nextTick();
+      assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), true);
+      http.respond(statusIndex, { workspaceId: "ws-a", sessionId: "session-a", runId, runKind: "user", ...terminal, detail: null, updatedAt: 1 });
+      for (let i = 0; i < 30 && wrapper.find('[data-testid="agent-run-loading"]').exists(); i++) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), false, "timeline 仍在等待时 Run 已终结");
+      assert.equal(vm.terminalRunIds.has(runId), true);
+      setRunState({ status: "running", activeRunId: runId, updatedAt: 2 });
+      await nextTick();
+      assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), false, "下一次轮询仍为已终结 Run 时不能重现");
+      if (terminal.status !== "completed") {
+        setRunState({ status: "idle", activeRunId: null });
+        await nextTick();
+        assert.equal(vm.terminalRunIds.size, 0, "状态收敛后释放终态标记");
+        assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), false);
+      }
+      setRunState({ status: "running", activeRunId: `next-${terminal.status}` });
+      await nextTick();
+      assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), true, "不同 ID 的 Run 不受终态标记影响");
+      assert.equal(vm.terminalRunIds.size, 0);
+      http.respond(timelineIndex, timelineSnapshot([]));
+      await send;
+      assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), true);
+      setRunState({ status: "idle", activeRunId: null });
+      await nextTick();
+      assert.equal(vm.terminalRunIds.size, 0, "切换 Run 或收敛后释放终态标记");
+      assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), false);
+      setRunState({ status: "running", activeRunId: `next-${terminal.status}` });
+      await nextTick();
+      assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), true, "不同 ID 的新 Run 继续显示");
+      await wrapper.setProps({ sessionId: "session-b" });
+      assert.equal(vm.terminalRunIds.size, 0);
+      assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), false, "切换会话不沿用旧 Run 状态");
+    } finally {
+      panePendingRuns(wrapper).remove({ workspaceId: "ws-a", sessionId: "session-a", runKind: "user", runId });
+      wrapper.unmount();
+      http.restore();
+    }
+  });
+}
+
+test("真实 AgentClientPane：连续 Run 均先终态、状态轮询滞后时只保留相关的终态确认", async () => {
+  const http = mockContextRequests();
+  const { wrapper, setRunState } = mountPane({ sessionReady: false, runState: baseRunState({ status: "running", activeRunId: "overlap-r" }) });
+  const vm = wrapper.vm as unknown as {
+    bridgeRunState: (runId: string) => void;
+    terminalRunIds: Set<string>;
+    pendingRunController: { start: (scope: { workspaceId: string; sessionId: string }) => void };
+  };
+  const registry = panePendingRuns(wrapper);
+  const register = (runId: string) => registry.register({ workspaceId: "ws-a", sessionId: "session-a", runKind: "user", runId });
+  const terminal = (runId: string) => ({ workspaceId: "ws-a", sessionId: "session-a", runKind: "user", runId, status: "completed", code: "run_completed", detail: null, updatedAt: 1 });
+  const hasLoading = () => wrapper.find('[data-testid="agent-run-loading"]').exists();
+  try {
+    vm.pendingRunController.start({ workspaceId: "ws-a", sessionId: "session-a" });
+    register("overlap-r");
+    await http.waitFor(0);
+    http.respond(0, terminal("overlap-r"));
+    for (let i = 0; i < 30 && hasLoading(); i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(hasLoading(), false);
+
+    vm.bridgeRunState("overlap-s");
+    register("overlap-s");
+    await nextTick();
+    assert.equal(hasLoading(), true, "新 Run 等待状态同步时仍有 loading");
+    await http.waitFor(1);
+    http.respond(1, terminal("overlap-s"));
+    for (let i = 0; i < 30 && hasLoading(); i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(hasLoading(), false, "第二次终态不能让滞后的 R running 重新显示");
+    assert.deepEqual([...vm.terminalRunIds].sort(), ["overlap-r", "overlap-s"]);
+    setRunState({ status: "running", activeRunId: "overlap-s" });
+    await nextTick();
+    assert.equal(hasLoading(), false);
+    assert.deepEqual([...vm.terminalRunIds], ["overlap-s"], "轮询进入 S 后丢弃 R");
+    setRunState({ status: "idle", activeRunId: null });
+    await nextTick();
+    assert.equal(vm.terminalRunIds.size, 0);
+  } finally {
+    for (const runId of ["overlap-r", "overlap-s"]) registry.remove({ workspaceId: "ws-a", sessionId: "session-a", runKind: "user", runId });
+    wrapper.unmount();
+    http.restore();
+  }
+});
+
+test("真实 AgentClientPane：新 loading 出现时仅底部附近自动跟随", async () => {
+  const { wrapper, setRunState } = mountPane({ active: true, sessionReady: false });
+  try {
+    const el = wrapper.get("main").element as HTMLElement;
+    setScrollMetrics(el, 1_000, 200);
+    el.scrollTop = 800;
+    el.dispatchEvent(new Event("scroll"));
+    setScrollMetrics(el, 1_040, 200);
+    setRunState({ status: "running", activeRunId: "scroll-run" });
+    await nextTick();
+    assert.equal(el.scrollTop, 840, "原先在底部时保持新图标可见");
+
+    setRunState({ status: "idle", activeRunId: null });
+    await nextTick();
+    el.scrollTop = 320;
+    el.dispatchEvent(new Event("scroll"));
+    setScrollMetrics(el, 1_080, 200);
+    setRunState({ status: "running", activeRunId: "scroll-run-2" });
+    await nextTick();
+    assert.equal(el.scrollTop, 320, "翻阅历史时不能强制滚到底部");
   } finally {
     wrapper.unmount();
   }
