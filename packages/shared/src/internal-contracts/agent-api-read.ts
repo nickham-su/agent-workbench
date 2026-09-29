@@ -8,10 +8,16 @@ import {
 import {
   AgentProviderNpmSchema
 } from "../contracts/settings.js";
+import { AgentCallableContextToolNameSchema } from "../contracts/agent-primitives.js";
 import { AgentMessageSchema } from "../contracts/agent-message.js";
 import { PluginToolCanonicalNameSchema } from "../contracts/plugin.js";
 import { AgentProviderReplayEnvelopeSchema } from "./agent-provider-replay.js";
 import { AgentAssistantProvenanceSchema } from "./agent-provider-provenance.js";
+import {
+  AgentImageRefSchema,
+  AgentToolResultOutputSchema,
+  AgentWorkspaceImagePathSchema
+} from "./agent-image.js";
 
 const AgentApiProviderSchema = Type.Object({
   id: Type.String({ minLength: 1 }),
@@ -36,7 +42,7 @@ const AgentApiExecutionAgentSchema = Type.Object({
   name: Type.String({ minLength: 1 }),
   summary: Type.String({ maxLength: 160 }),
   prompt: Type.String(),
-  tools: Type.Array(AgentContextToolNameSchema),
+  tools: Type.Array(AgentCallableContextToolNameSchema),
   pluginTools: Type.Array(PluginToolCanonicalNameSchema),
   mcpServers: Type.Array(Type.String({ minLength: 1 })),
   defaultModel: Type.Union([
@@ -68,12 +74,6 @@ const AgentApiProviderModelProfileSchema = Type.Object({
   model: AgentApiModelSchema
 });
 
-const AgentApiVisionProfileSchema = Type.Intersect([
-  Type.Object({
-    source: Type.Union([Type.Literal("runtime_vision"), Type.Literal("agent_default_fallback")])
-  }),
-  AgentApiProviderModelProfileSchema
-]);
 
 const AgentApiCompactionProfileSchema = Type.Intersect([
   Type.Object({ source: Type.Literal("runtime_compaction") }),
@@ -93,13 +93,6 @@ export const AgentApiExecutionProfileResponseSchema = Type.Object({
     autoCompactThresholdPct: Type.Integer({ minimum: 50, maximum: 99 }),
     maxSubtaskDepth: Type.Integer({ minimum: 1, maximum: 5 }),
     sessionTerminalSoundEnabled: Type.Boolean(),
-    visionModel: Type.Union([
-      Type.Object({
-        providerId: Type.String({ minLength: 1 }),
-        modelId: Type.String({ minLength: 1 })
-      }),
-      Type.Null()
-    ]),
     compactionModel: Type.Union([
       Type.Object({
         providerId: Type.String({ minLength: 1 }),
@@ -108,10 +101,9 @@ export const AgentApiExecutionProfileResponseSchema = Type.Object({
       Type.Null()
     ]),
     updatedAt: Type.Number()
-  }),
-  vision: Type.Union([AgentApiVisionProfileSchema, Type.Null()]),
+  }, { additionalProperties: false }),
   compaction: Type.Union([AgentApiCompactionProfileSchema, Type.Null()])
-});
+}, { additionalProperties: false });
 export type AgentApiExecutionProfileResponse = Static<typeof AgentApiExecutionProfileResponseSchema>;
 
 export const AgentApiPromptContextRequestSchema = Type.Object(AgentApiReadRunRequestFields);
@@ -123,17 +115,28 @@ export const AgentApiCompactionSourceRequestSchema = Type.Object(AgentApiReadRun
 export type AgentApiCompactionSourceRequest = Static<typeof AgentApiCompactionSourceRequestSchema>;
 
 /** Compaction source never exposes artifact paths or unbounded structured tool results. */
-const AgentApiContextToolExecutionSchema = Type.Object({
+const AgentApiContextToolExecutionFields = {
   id: Type.String({ minLength: 1 }),
   callPartId: Type.String({ minLength: 1 }),
-  status: Type.Union([
-    Type.Literal("completed"), Type.Literal("failed"), Type.Literal("cancelled"), Type.Literal("unknown"),
-  ]),
   resultPreview: Type.Union([Type.String(), Type.Null()]),
   error: Type.Union([Type.String(), Type.Null()]),
   startedAt: Type.Union([Type.Number(), Type.Null()]),
   completedAt: Type.Union([Type.Number(), Type.Null()]),
-}, { additionalProperties: false });
+};
+const AgentApiContextToolExecutionSchema = Type.Union([
+  Type.Object({
+    ...AgentApiContextToolExecutionFields,
+    status: Type.Union([Type.Literal("completed"), Type.Literal("failed"), Type.Literal("cancelled"), Type.Literal("unknown")]),
+    // Optional during migration: legacy executions do not carry this field.
+    originRunId: Type.Optional(Type.Union([Type.String({ minLength: 1 }), Type.Null()])),
+  }, { additionalProperties: false }),
+  Type.Object({
+    ...AgentApiContextToolExecutionFields,
+    status: Type.Literal("completed"),
+    originRunId: Type.String({ minLength: 1 }),
+    imageRef: AgentImageRefSchema,
+  }, { additionalProperties: false }),
+]);
 
 const AgentApiResolvedContextBlockSchema = Type.Object({
   sourceMessageId: Type.String({ minLength: 1 }),
@@ -151,6 +154,7 @@ const AgentApiResolvedContextBlockSchema = Type.Object({
     attachmentId: Type.String({ minLength: 1 }),
     mediaType: AgentImageMediaTypeSchema,
     filename: Type.String({ minLength: 1 }),
+    relativePath: Type.Union([AgentWorkspaceImagePathSchema, Type.Null()]),
   }, { additionalProperties: false })),
   providerReplay: Type.Array(Type.Object({
     partId: Type.String({ minLength: 1 }),
@@ -197,7 +201,8 @@ export const AgentApiPromptAttachmentRefPartSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
   attachmentId: Type.String({ minLength: 1 }),
   mediaType: AgentImageMediaTypeSchema,
-  filename: Type.String()
+  filename: Type.String(),
+  path: AgentWorkspaceImagePathSchema
 }, { additionalProperties: false });
 export type AgentApiPromptAttachmentRefPart = Static<typeof AgentApiPromptAttachmentRefPartSchema>;
 
@@ -208,10 +213,7 @@ const AgentApiPromptToolCallPartSchema = Type.Object({
   input: Type.Any()
 }, { additionalProperties: false });
 
-const AgentApiPromptToolResultOutputSchema = Type.Union([
-  Type.Object({ type: Type.Literal("text"), value: Type.String() }, { additionalProperties: false }),
-  Type.Object({ type: Type.Literal("error-text"), value: Type.String() }, { additionalProperties: false })
-]);
+const AgentApiPromptToolResultOutputSchema = AgentToolResultOutputSchema;
 
 const AgentApiPromptToolResultPartSchema = Type.Object({
   type: Type.Literal("tool-result"),

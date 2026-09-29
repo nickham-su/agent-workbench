@@ -480,14 +480,8 @@ test("agent-api aggregate export exposes read-side schemas with stable shells an
       autoCompactThresholdPct: 80,
       maxSubtaskDepth: 1,
       sessionTerminalSoundEnabled: true,
-      visionModel: null,
       compactionModel: null,
       updatedAt: 1,
-    },
-    vision: {
-      source: "agent_default_fallback" as const,
-      provider,
-      model,
     },
     compaction: null,
   };
@@ -517,6 +511,7 @@ test("agent-api aggregate export exposes read-side schemas with stable shells an
             attachmentId: "att_123",
             mediaType: "image/png",
             filename: "image.png",
+            path: ".awb/agent/attachments/att_123.png",
           },
         ],
       },
@@ -572,6 +567,18 @@ test("agent-api aggregate export exposes read-side schemas with stable shells an
     ),
     true,
   );
+  assert.equal(Value.Check(AgentApiExport.AgentApiExecutionProfileResponseSchema, {
+    ...executionResponse, agent: { ...agent, tools: ["view_image"] },
+  }), true);
+  assert.equal(Value.Check(AgentApiExport.AgentApiExecutionProfileResponseSchema, {
+    ...executionResponse, agent: { ...agent, tools: ["visual_analyze"] },
+  }), false, "retired tool may remain in history but not an executable profile");
+  assert.equal(Value.Check(AgentApiExport.AgentApiExecutionProfileResponseSchema, {
+    ...executionResponse, vision: { source: "runtime_vision", provider, model },
+  }), false, "retired vision profile must not cross the Worker contract");
+  assert.equal(Value.Check(AgentApiExport.AgentApiExecutionProfileResponseSchema, {
+    ...executionResponse, runtime: { ...executionResponse.runtime, visionModel: null },
+  }), false, "retired vision model must not cross the Worker contract");
   assert.equal(
     Value.Check(
       AgentApiExport.AgentApiPromptContextRequestSchema,
@@ -653,11 +660,9 @@ test("agent-api read-side schemas reject invalid stable fields without constrain
       autoCompactThresholdPct: 80,
       maxSubtaskDepth: 1,
       sessionTerminalSoundEnabled: true,
-      visionModel: null,
       compactionModel: null,
       updatedAt: 1,
     },
-    vision: null,
     compaction: null,
   };
   assert.equal(
@@ -758,6 +763,7 @@ test("agent-api prompt schemas permit only role-compatible content parts", () =>
     attachmentId: "att_123",
     mediaType: "image/webp",
     filename: "screenshot.webp",
+    path: ".awb/agent/attachments/att_123.webp",
   };
 
   assert.equal(

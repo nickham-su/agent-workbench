@@ -70,8 +70,11 @@ function imageOnlyTriggerText(attachmentCount: number) {
   return `[The user sent ${attachmentCount} image attachment(s) without accompanying text.]`;
 }
 
-function historicalImagePlaceholder(attachmentCount: number) {
-  return `[This user message included ${attachmentCount} image attachment(s). Their image contents are not included in this run.]`;
+function historicalImagePlaceholder(paths: Array<string | null>) {
+  return paths.map((path, index) => path
+    ? `[Image ${index + 1}: ${path}]`
+    : `[Historical image ${index + 1} has no available Workspace path.]`).join("\n")
+    + "\n[Image contents are not included in this run. Call view_image with a path above if needed.]";
 }
 
 /**
@@ -95,17 +98,20 @@ function materializeBlock(input: { source: CompactionSource; block: CompactionSo
       for (const image of images) {
         const attachment = validated.attachmentsByPartId.get(image.id);
         if (!attachment) throw new Error("validated image attachment unexpectedly missing");
+        if (!attachment.relativePath) throw new Error("trigger image has no trusted Workspace path");
         content.push({
           type: "attachment_ref",
           workspaceId: source.workspaceId,
           attachmentId: attachment.attachmentId,
           mediaType: attachment.mediaType,
           filename: attachment.filename,
+          path: attachment.relativePath,
         });
       }
       messages.push({ role: "user", content });
     } else {
-      const placeholder = historicalImagePlaceholder(images.length);
+      const placeholder = historicalImagePlaceholder(images.map((image) =>
+        validated.attachmentsByPartId.get(image.id)?.relativePath ?? null));
       messages.push({ role: "user", content: text ? `${text}\n\n${placeholder}` : placeholder });
     }
   } else if (block.message.type === "system" || block.message.type === "compaction") {
@@ -134,7 +140,10 @@ function materializeBlock(input: { source: CompactionSource; block: CompactionSo
       assistantParts.push({ type: "tool-call", toolCallId, toolName: part.toolName, input: part.input, ...(providerReplay == null ? {} : { providerReplay }) });
       const execution = validated.executionsByCallPartId.get(part.id);
       if (!execution) throw new Error("validated tool execution unexpectedly missing");
-      toolParts.push({ type: "tool-result", toolCallId, toolName: part.toolName, output: projectCompactionToolExecutionResult(execution) });
+      toolParts.push({ type: "tool-result", toolCallId, toolName: part.toolName, output: projectCompactionToolExecutionResult(execution, {
+        runId: source.runId,
+        callId: toolCallId,
+      }) });
     }
     if (assistantParts.length === 1 && assistantParts[0]!.type === "text" && assistantParts[0]!.providerReplay == null) {
       messages.push({ role: "assistant", content: assistantParts[0].text });

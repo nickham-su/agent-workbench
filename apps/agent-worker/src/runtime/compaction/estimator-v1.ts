@@ -100,7 +100,9 @@ function mapMessage(message: PrimaryProviderNeutralMessage): EstimatorCanonicalM
       type: "tool-result" as const,
       toolCallId: part.toolCallId,
       toolName: part.toolName,
-      output: { type: part.output.type, value: part.output.value },
+      output: part.output.type === "image_ref"
+        ? { type: "text" as const, value: `[Image attached: ${part.output.path}]` }
+        : { type: part.output.type, value: part.output.value },
     })),
   };
 }
@@ -119,6 +121,10 @@ function countCosts(messages: EstimatorCanonicalMessage[], sourceMessages: Prima
       if (part.type === "tool-result") toolResultCount += 1;
       if (part.type === "attachment_ref") attachmentCount += 1;
     }
+  }
+  for (const message of sourceMessages) {
+    if (message.role !== "tool") continue;
+    attachmentCount += message.content.filter((part) => part.output.type === "image_ref").length;
   }
   for (const message of sourceMessages) {
     if (typeof message.content === "string") continue;

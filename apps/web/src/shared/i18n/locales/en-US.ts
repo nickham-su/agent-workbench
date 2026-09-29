@@ -1071,7 +1071,7 @@ export default {
         todolist: "Todo List",
         subtask: "Subtask",
         archiveSearch: "Archive Search",
-        visualAnalyze: "Visual Analyze",
+        viewImage: "View Image",
         archiveRead: "Archive Read",
         archiveTail: "Archive Tail"
       },
@@ -1152,11 +1152,6 @@ export default {
           label: "Model retry backoff maximum (seconds)",
           help: "Maximum exponential backoff delay for primary model requests and manual/automatic compaction summary retries. The base delay is 2 seconds; range: 2-3600 seconds. Summaries have no separate total request cap; retry count and the optional total timeout determine how long a run may wait."
         },
-        visionModel: {
-          label: "Vision model",
-          placeholder: "Select a vision model (optional)",
-          help: "Global default vision model used by visual_analyze; falls back to the current agent primary model when unset."
-        },
         compactionModel: {
           label: "Default compaction model",
           placeholder: "Select a default compaction model (optional)",
@@ -1168,7 +1163,6 @@ export default {
         }
       },
       errors: {
-        visionModelInvalid: "Invalid vision model selection. Please reselect.",
         compactionModelInvalid: "Invalid default compaction model selection. Please reselect."
       }
     },

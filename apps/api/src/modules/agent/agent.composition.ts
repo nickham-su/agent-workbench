@@ -1,5 +1,6 @@
 import { resolvePromptWorkspaceContext, readSafeContextFile } from "../workspaces/workspace-context.service.js";
 import path from "node:path";
+import { Value } from "@sinclair/typebox/value";
 import type { FastifyBaseLogger } from "fastify";
 import {
   isAgentTerminalCodeAllowed,
@@ -20,6 +21,7 @@ import type {
   AgentRecentSessionsResponse,
   AgentRecentWorkspacesResponse,
 } from "@agent-workbench/shared/internal-contracts/agent-api-session";
+import { AgentViewImageResultSchema, viewImagePathPreview } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { AgentApiPromptContextResponse } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { isValidSkillPathSegment } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { getPromptText } from "@agent-workbench/shared/prompts";
@@ -94,18 +96,17 @@ import { RunLifecycleApplication } from "./lifecycle/run-lifecycle-application.j
 import { SqliteRunLifecyclePersistence } from "./lifecycle/sqlite-run-lifecycle-persistence.js";
 import { SessionRuntimeHandoffCoordinator } from "./lifecycle/session-runtime-handoff-coordinator.js";
 import { workspaceDeletingFence } from "./lifecycle/workspace-deleting-fence.js";
+import { workspaceRoot } from "../../infra/fs/paths.js";
 import {
   cleanupAgedAgentAttachmentTempFiles,
-  commitAgentAttachmentTempFile,
+  prepareAgentWorkspaceAttachmentPublication,
   removeAgentAttachmentTempFile,
-  removeAgentAttachmentFinalFile,
-  resolveSafeAgentAttachmentContentPath,
+  removeAgentWorkspaceAttachmentFinalFile,
+  resolveSafeWorkspaceAgentAttachment,
 } from "./attachments/agent-attachment-storage.js";
 import {
-  agentAttachmentFilePath,
-  agentAttachmentWorkspaceDir,
-  agentAttachmentsRoot,
   assertAgentAttachmentId,
+  assertAgentAttachmentStorageKey,
 } from "./attachments/agent-attachment-paths.js";
 import {
   RunPromptStaticCache,
@@ -123,6 +124,7 @@ import {
   ModelContextResolver,
   RetainedAnchorValidationError,
   projectModelContextToPrompt,
+  toRuntimeExecution,
 } from "./read-side/model-context-resolver.js";
 import { SqliteMessageQuery } from "./read-side/sqlite-message-query.js";
 import { ReadSideApplication } from "./read-side/read-side-application.js";
@@ -294,20 +296,13 @@ function toolArgsSchema(toolName: AgentContextToolName) {
       },
     };
   }
-  if (toolName === "visual_analyze") {
+  if (toolName === "view_image") {
     return {
       type: "object",
-      required: ["paths"],
+      required: ["path"],
       additionalProperties: false,
       properties: {
-        paths: {
-          type: "array",
-          minItems: 1,
-          items: { type: "string", minLength: 1 },
-        },
-        prompt: {
-          type: "string",
-        },
+        path: { type: "string", minLength: 1, description: "Workspace-relative path to a PNG, JPEG or WebP image." },
       },
     };
   }
@@ -525,13 +520,12 @@ function toolDescription(
       "Any other valid filePath reads that text file with the Worker text reader's normalized content.",
     ].join(" ");
   }
-  if (toolName === "visual_analyze") {
+  if (toolName === "view_image") {
     return [
-      "Analyze visual files inside the current workspace and return natural-language findings.",
-      "Supported file types: PNG, JPG/JPEG, WEBP, GIF, PDF.",
-      "Accepts multiple files and interprets them in input order.",
-      "Input paths must be relative paths inside the workspace.",
-      "If model/provider/SDK/service does not support the given files, the tool returns an error result.",
+      "Read one PNG, JPEG or WebP image inside the current Workspace for the current model to view.",
+      "Input path must be relative to the Workspace root; no URLs, absolute paths or symlinks.",
+      "To view more images, call view_image separately for each path.",
+      "A previous run's path is only a reference; call view_image again if its image contents are needed.",
     ].join(" ");
   }
 
@@ -739,6 +733,7 @@ const STRUCTURED_RESULT_TOOL_NAMES = new Set([
   "subtask",
   "write",
   "scratchpad",
+  "view_image",
 ]);
 
 function isValidApplyPatchResult(value: unknown): value is { files: unknown[] } {
@@ -1479,11 +1474,17 @@ function createLifecycleSessionSubtaskAssembly(assembly: {
     },
     persistence: sqliteLifecyclePersistence,
     attachmentCommitter: {
-      commit: async ({ workspaceId, image }) => {
-        await commitAgentAttachmentTempFile({
+      prepare: async ({ workspaceId, image }) => {
+        const workspace = getWorkspaceRecord(assembly.environment.db, workspaceId);
+        if (!workspace || path.resolve(workspace.path) !== path.resolve(workspaceRoot(assembly.environment.dataDir, workspace.dirName))) {
+          throw new Error("agent attachment workspace is invalid");
+        }
+        return prepareAgentWorkspaceAttachmentPublication({
           dataDir: assembly.environment.dataDir,
-          workspaceId,
+          workspaceDirName: workspace.dirName,
           attachmentId: image.attachmentId,
+          storageKey: image.storageKey,
+          mediaType: image.mediaType,
           tempId: image.tempId,
         });
       },
@@ -1493,11 +1494,18 @@ function createLifecycleSessionSubtaskAssembly(assembly: {
           tempId,
         });
       },
-      removeFinal: async ({ workspaceId, image }) => {
-        await removeAgentAttachmentFinalFile({
+      removeFinal: async ({ workspaceId, image, owned }) => {
+        const workspace = getWorkspaceRecord(assembly.environment.db, workspaceId);
+        if (!workspace || path.resolve(workspace.path) !== path.resolve(workspaceRoot(assembly.environment.dataDir, workspace.dirName))) {
+          throw new Error("agent attachment workspace is invalid");
+        }
+        await removeAgentWorkspaceAttachmentFinalFile({
           dataDir: assembly.environment.dataDir,
-          workspaceId,
+          workspaceDirName: workspace.dirName,
           attachmentId: image.attachmentId,
+          storageKey: image.storageKey,
+          mediaType: image.mediaType,
+          owned,
         });
       },
     },
@@ -2398,6 +2406,38 @@ function createAgentApplications(
         ? params.structuredResult
         : undefined;
 
+      if (tool?.toolName === "view_image") {
+        if (params.status === "completed") {
+          if (!Value.Check(AgentViewImageResultSchema, params.structuredResult)
+            || params.resultPreview !== viewImagePathPreview(params.structuredResult.path)
+            || params.resultTruncated === true || params.resultArtifactPath != null || params.error != null) {
+            throw Object.assign(new Error("invalid view_image completion result"), { statusCode: 400 });
+          }
+          // This narrow lookup binds the call part, assistant, execution and Run to the
+          // same authorized Session/Workspace. Terminal rows may replay idempotently.
+          const owner = environment.db.prepare(`
+            select execution.status as status
+            from agent_tool_execution execution
+            join agent_message_part part on part.id = execution.call_part_id
+            join agent_message message on message.id = part.message_id
+            join agent_run run on run.run_id = execution.origin_run_id
+            where execution.id = @toolExecutionId
+              and execution.origin_session_id = @sessionId and execution.origin_run_id = @runId
+              and execution.status in ('running', 'completed')
+              and part.type = 'tool_call' and part.tool_name = 'view_image'
+              and json_valid(part.tool_input_json) and json_extract(part.tool_input_json, '$.path') = @requestedPath
+              and message.workspace_id = @workspaceId
+              and message.origin_session_id = @sessionId and message.origin_run_id = @runId
+              and run.workspace_id = @workspaceId and run.session_id = @sessionId
+          `).get({ ...params, requestedPath: params.structuredResult.path }) as { status: "running" | "completed" } | undefined;
+          if (!owner || (owner.status === "running" && artifactTool?.toolName !== "view_image")) {
+            return { result: "ignored" as const };
+          }
+        } else if (params.structuredResult != null) {
+          throw Object.assign(new Error("view_image media reference requires a completed execution"), { statusCode: 400 });
+        }
+      }
+
       if (params.status === "completed" && tool?.toolName === "apply_patch") {
         if (!isValidApplyPatchResult(params.structuredResult)) {
           if (artifactTool) {
@@ -2860,9 +2900,15 @@ function createAgentApplications(
         ...block,
         toolExecutions: block.toolExecutions
           .filter((execution) => execution.status !== "queued" && execution.status !== "running")
-          .map(({ id, callPartId, status, resultPreview, error, startedAt, completedAt }) => ({
-            id, callPartId, status, resultPreview, error, startedAt, completedAt,
-          })),
+          .map((execution) => {
+            const projected = toRuntimeExecution(execution, block.message, resolved.workspaceId);
+            return {
+              id: execution.id, callPartId: execution.callPartId, status: execution.status,
+              resultPreview: execution.resultPreview, error: execution.error,
+              startedAt: execution.startedAt, completedAt: execution.completedAt,
+              ...(projected.imageRef ? { originRunId: projected.originRunId, imageRef: projected.imageRef } : {}),
+            };
+          }),
       })),
     };
   }
@@ -2977,9 +3023,12 @@ function createAgentApplications(
            )
           select attachment.id as attachmentId,
             attachment.workspace_id as workspaceId,
-            attachment.storage_key as storageKey,
-            attachment.media_type as mediaType,
-            attachment.byte_size as byteSize
+             attachment.storage_key as storageKey,
+             attachment.media_type as mediaType,
+             attachment.byte_size as byteSize,
+             attachment.filename as attachmentFilename,
+             part.filename as partFilename,
+             part.media_type as partMediaType
           from agent_attachment attachment
           join agent_message_part part
             on part.attachment_id = attachment.id and part.type = 'image'
@@ -2995,15 +3044,22 @@ function createAgentApplications(
         attachmentId: string;
         workspaceId: string;
         storageKey: string;
-        mediaType: "image/png" | "image/jpeg" | "image/webp";
-        byteSize: number;
-      } | undefined;
-      if (!attachment || attachment.storageKey !== attachment.attachmentId)
-        return null;
-      const resolved = await resolveSafeAgentAttachmentContentPath({
+         mediaType: "image/png" | "image/jpeg" | "image/webp";
+         byteSize: number;
+         attachmentFilename: string;
+         partFilename: string;
+         partMediaType: string;
+       } | undefined;
+      if (!attachment || attachment.partMediaType !== attachment.mediaType || attachment.partFilename !== attachment.attachmentFilename) return null;
+      assertAgentAttachmentStorageKey(attachment.attachmentId, attachment.storageKey, attachment.mediaType);
+      const workspace = getWorkspaceRecord(environment.db, params.workspaceId);
+      if (!workspace || path.resolve(workspace.path) !== path.resolve(workspaceRoot(environment.dataDir, workspace.dirName))) return null;
+      const resolved = await resolveSafeWorkspaceAgentAttachment({
         dataDir: environment.dataDir,
-        workspaceId: attachment.workspaceId,
+        workspaceDirName: workspace.dirName,
+        attachmentId: attachment.attachmentId,
         storageKey: attachment.storageKey,
+        mediaType: attachment.mediaType,
         expectedByteSize: attachment.byteSize,
       });
       if (!resolved) return null;

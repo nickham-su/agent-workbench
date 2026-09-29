@@ -96,7 +96,7 @@ test("compaction source route requires its internal token and validates strict r
   assert.deepEqual(calls, [{ workspaceId: "workspace", sessionId: "session", runId: "run" }]);
 });
 
-test("compaction source route serializes away generic ToolExecution fields", async () => {
+test("compaction source route rejects generic ToolExecution fields outside its narrow DTO", async () => {
   const app = Fastify();
   apps.push(app);
   const dependencies = {
@@ -132,10 +132,8 @@ test("compaction source route serializes away generic ToolExecution fields", asy
     headers: { "x-awb-agent-internal-token": "internal-token" },
     payload: { workspaceId: "workspace", sessionId: "session", runId: "run" },
   });
-  assert.equal(response.statusCode, 200, response.body);
-  const body = response.json() as { blocks: Array<{ toolExecutions: Array<Record<string, unknown>> }> };
-  assert.equal(body.blocks[0]?.toolExecutions[0]?.structuredResult, undefined);
-  assert.equal(body.blocks[0]?.toolExecutions[0]?.resultArtifactPath, undefined);
+  assert.equal(response.statusCode, 500);
+  assert.doesNotMatch(response.body, /forbidden|resultArtifactPath/);
 });
 
 test("atomic compaction route requires its token, validates its strict DTO, and forwards the manual terminal intent", async () => {

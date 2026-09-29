@@ -15,11 +15,9 @@ export const testProfile = {
     autoCompactThresholdPct: 80,
     maxSubtaskDepth: 3,
     sessionTerminalSoundEnabled: false,
-    visionModel: null,
     compactionModel: null,
     updatedAt: 0,
   },
-  vision: null,
   compaction: null,
 } satisfies ExecutionProfile;
 
@@ -83,7 +81,7 @@ export function testSource(input?: {
       physical: { previousMessageId: index === 0 ? null : `m${index}`, depth: index, originSessionId: "session", originRunId: "run", updatedRevision: index + 1 },
       message: message({ id: messageId, previousMessageId: index === 0 ? null : `m${index}`, index, type: types[index] ?? "user", text, media: hasMedia }),
       toolExecutions: [],
-      attachments: hasMedia ? [{ partId: "image", attachmentId: "attachment", mediaType: "image/png", filename: "screen.png" }] : [],
+      attachments: hasMedia ? [{ partId: "image", attachmentId: "attachment", mediaType: "image/png", filename: "screen.png", relativePath: "repo/screen.png" }] : [],
       providerReplay: [],
     };
   });

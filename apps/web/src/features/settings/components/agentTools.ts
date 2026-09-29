@@ -11,7 +11,7 @@ const CONFIGURABLE_AGENT_TOOLS: AgentToolName[] = [
   ...DEFAULT_AGENT_TOOLS,
   "scratchpad",
   "todolist",
-  "visual_analyze",
+  "view_image",
   "archive_read",
   "archive_search"
 ];
@@ -41,7 +41,7 @@ export function agentToolLabelKey(tool: AgentToolName) {
   if (tool === "apply_patch") return "settings.agentProfiles.tools.applyPatch";
   if (tool === "scratchpad") return "settings.agentProfiles.tools.scratchpad";
   if (tool === "todolist") return "settings.agentProfiles.tools.todolist";
-  if (tool === "visual_analyze") return "settings.agentProfiles.tools.visualAnalyze";
+  if (tool === "view_image") return "settings.agentProfiles.tools.viewImage";
   if (tool === "archive_read") return "settings.agentProfiles.tools.archiveRead";
   if (tool === "archive_search") return "settings.agentProfiles.tools.archiveSearch";
   return "settings.agentProfiles.tools.subtask";

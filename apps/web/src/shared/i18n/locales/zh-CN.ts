@@ -1069,7 +1069,7 @@ export default {
         todolist: "Todo List",
         subtask: "Subtask",
         archiveSearch: "Archive Search",
-        visualAnalyze: "Visual Analyze",
+        viewImage: "View Image",
         archiveRead: "Archive Read",
         archiveTail: "Archive Tail"
       },
@@ -1150,11 +1150,6 @@ export default {
           label: "模型重试退避上限（秒）",
           help: "主模型请求及手动、自动压缩摘要重试时，指数退避等待时间的最大值。基础等待时间为 2 秒，范围 2-3600 秒；压缩摘要没有独立的总请求上限，重试次数和可关闭的总超时共同决定等待时长。"
         },
-        visionModel: {
-          label: "视觉模型",
-          placeholder: "请选择视觉模型（可选）",
-          help: "全局默认视觉模型，供 visual_analyze 工具使用；未配置时回退到当前 agent 主模型。"
-        },
         compactionModel: {
           label: "压缩默认模型",
           placeholder: "请选择压缩默认模型（可选）",
@@ -1166,7 +1161,6 @@ export default {
         }
       },
       errors: {
-        visionModelInvalid: "视觉模型配置无效，请重新选择。",
         compactionModelInvalid: "压缩默认模型配置无效，请重新选择。"
       }
     },

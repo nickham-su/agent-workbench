@@ -2,20 +2,32 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
+import { AgentApiEndpoints } from "@agent-workbench/shared/internal-contracts/agent-api";
 import {
-  agentAttachmentFilePath,
+  agentAttachmentStorageKey,
   agentAttachmentTempDir,
-  agentAttachmentWorkspaceDir,
-  agentAttachmentsRoot,
 } from "../attachments/agent-attachment-paths.js";
+import { getWorkspace } from "../../workspaces/workspace.store.js";
+import { newSortableId } from "../../../utils/ids.js";
 import { commitCompactionMessageForTest, getMessageSessionHead } from "../agent-message.store.js";
-import { createIntegrationFixture, createSession } from "./context-writeback.helpers.js";
+import { createAssistantFixture, createIntegrationFixture, createSession } from "./context-writeback.helpers.js";
+import { injectJson } from "../testkit/agent-testkit.js";
 
 const PNG_BYTES = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
   0x00, 0x00, 0x00, 0x00,
 ]);
 const PNG_SIGNATURE = PNG_BYTES.subarray(0, 8);
+
+function workspaceAttachmentDirectory(fixture: Awaited<ReturnType<typeof createIntegrationFixture>>) {
+  const workspace = getWorkspace(fixture.db, fixture.workspaceId);
+  assert.ok(workspace);
+  return path.join(workspace.path, ".awb", "agent", "attachments");
+}
+
+function workspaceAttachmentFilePath(fixture: Awaited<ReturnType<typeof createIntegrationFixture>>, attachmentId: string) {
+  return path.join(workspaceAttachmentDirectory(fixture), agentAttachmentStorageKey(attachmentId, "image/png"));
+}
 
 function pngBytes(byteLength: number) {
   return Buffer.concat([PNG_SIGNATURE, Buffer.alloc(Math.max(0, byteLength - PNG_SIGNATURE.byteLength))]);
@@ -240,6 +252,97 @@ test("Message multipart 原子创建 attachment、ImagePart、Run、dedup 和 ru
   assert.deepEqual(content.rawPayload, PNG_BYTES);
 });
 
+test("新上传图在当前 Run 显式传可信路径，后续 Run 只留下逐图文字路径", async (t: TestContext) => {
+  const fixture = await createIntegrationFixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const uploaded = await fixture.app.inject({
+    method: "POST", url: `/api/agent/sessions/${session.id}/messages`,
+    ...multipartMessage({ workspaceId: fixture.workspaceId, clientRequestId: "image-path-first", text: "请看图片", images: [
+      { filename: "user-name.png", bytes: PNG_BYTES },
+      { filename: "second.png", bytes: PNG_BYTES },
+    ] }),
+  });
+  assert.equal(uploaded.statusCode, 201, uploaded.body);
+  const { messageId, runId } = uploaded.json() as { messageId: string; runId: string };
+  const rows = fixture.db.prepare(`
+    select attachment.id, attachment.storage_key as storageKey
+    from agent_message_part part join agent_attachment attachment on attachment.id = part.attachment_id
+    where part.message_id = ? and part.type = 'image' order by part.position
+  `).all(messageId) as Array<{ id: string; storageKey: string }>;
+  const paths = rows.map((row) => `.awb/agent/attachments/${row.storageKey}`);
+  assert.equal(paths.length, 2);
+  for (let index = 0; index < paths.length; index++) {
+    assert.equal(rows[index]!.storageKey, agentAttachmentStorageKey(rows[index]!.id, "image/png"));
+    assert.deepEqual(await fs.readFile(path.join(workspaceAttachmentDirectory(fixture), rows[index]!.storageKey)), PNG_BYTES);
+  }
+  const prompt = async (currentRunId: string) => {
+    const response = await fixture.app.inject({
+      method: "POST", url: "/api/internal/agent/prompt-context",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId: currentRunId },
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    return response.json() as { messages: Array<{ role: string; content: unknown }> };
+  };
+  const current = await prompt(runId);
+  const currentUser = current.messages.find((message) => message.role === "user")!;
+  assert.deepEqual((currentUser.content as Array<{ type: string; path?: string }>).filter((part) => part.type === "attachment_ref").map((part) => part.path), paths);
+  assert.ok(!JSON.stringify(current).includes(PNG_BYTES.toString("base64")));
+
+  // Integration-only imports: exercise the real Worker reader and model-request
+  // materialization without adding an API production dependency or calling a Provider.
+  const { AgentRunner } = await import(new URL("../../../../../agent-worker/src/runtime/runner.ts", import.meta.url).href);
+  const { createAgentAttachmentStorage } = await import(new URL("../../../../../agent-worker/src/runtime/agentAttachmentStorage.ts", import.meta.url).href);
+  const workspace = getWorkspace(fixture.db, fixture.workspaceId);
+  assert.ok(workspace);
+  const modelRequests: Array<{ messages: Array<{ content: Array<{ type: string; data?: Uint8Array }> }> }> = [];
+  const run = { workspaceId: fixture.workspaceId, sessionId: session.id, runId,
+    workspacePath: workspace.path, workspaceRepoDirNames: [], inputText: "请看图片" };
+  const profile = {
+    model: { id: "gpt-4o-mini" }, provider: { npm: "@ai-sdk/openai", options: { apiKey: "test-key" } },
+    agent: { tools: [], pluginTools: [], mcpServers: [] }, runtime: { modelRequestRetryBackoffMaxMs: 60_000 },
+  };
+  const logger = { info() {}, warn() {}, error() {} };
+  const requestModel = async (context: Awaited<ReturnType<typeof prompt>>) => {
+    // A fresh runner/storage is equivalent to rebuilding the Worker on recovery.
+    const runner = new AgentRunner({
+      async createStreamingAssistant() { return { result: "updated" }; },
+      async flushAssistantParts() { return { result: "updated" }; },
+      async completeAssistant() { return { result: "updated" }; },
+      async completeTerminalAssistant() { return { result: "updated" }; },
+    } as any, {} as any, logger, 1, {
+      attachmentStorage: createAgentAttachmentStorage(),
+      streamText: ((request: (typeof modelRequests)[number]) => {
+        modelRequests.push(request);
+        return { fullStream: (async function* () {
+          yield { type: "text-delta", text: "described" };
+          yield { type: "raw", rawValue: { type: "response.completed", response: { output: [] } } };
+          yield { type: "finish" };
+        })() };
+      }) as any,
+    });
+    (runner as any).toolRegistry.listTools = async () => [];
+    await (runner as any).runModelStep({ profile, run, context, step: 1,
+      signal: new AbortController().signal, repeatedToolCallCounter: new Map() });
+  };
+  await requestModel(current);
+  const firstFiles = modelRequests[0]!.messages.flatMap((message) => message.content.filter((part) => part.type === "file"));
+  assert.deepEqual(firstFiles.map((part) => Buffer.from(part.data!)), [PNG_BYTES, PNG_BYTES]);
+  // Replace the on-disk bytes before the recovered Worker obtains a fresh API context.
+  const updatedBytes = Buffer.concat([PNG_BYTES, Buffer.from("new version")]);
+  await fs.writeFile(path.join(workspaceAttachmentDirectory(fixture), rows[0]!.storageKey), updatedBytes);
+  await requestModel(await prompt(runId));
+  const recoveredFiles = modelRequests[1]!.messages.flatMap((message) => message.content.filter((part) => part.type === "file"));
+  assert.deepEqual(recoveredFiles.map((part) => Buffer.from(part.data!)), [updatedBytes, PNG_BYTES]);
+  await convergeCompletedRun({ ...fixture, sessionId: session.id, runId });
+  const next = await sendText({ app: fixture.app, workspaceId: fixture.workspaceId, sessionId: session.id, clientRequestId: "image-path-next", text: "还记得吗" });
+  const historical = await prompt(next.runId);
+  const old = historical.messages.find((message) => message.role === "user")!;
+  assert.equal(typeof old.content, "string");
+  for (const relativePath of paths) assert.ok((old.content as string).includes(relativePath));
+  assert.ok(!JSON.stringify(historical).includes('"attachment_ref"'));
+});
+
 test("Session 绑定附件读取拒绝 detached branch、错误关系和不安全文件", async (t: TestContext) => {
   const fixture = await createIntegrationFixture(t, { agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
@@ -323,7 +426,7 @@ test("Session 绑定附件读取拒绝 detached branch、错误关系和不安�
     url: `/api/agent/sessions/${session.id}/attachments/${attachment.attachmentId}/content?workspaceId=${encodeURIComponent(fixture.workspaceId)}`,
   });
   assert.equal(storageMismatch.statusCode, 404);
-  fixture.db.prepare("update agent_attachment set storage_key = ? where id = ?").run(attachment.attachmentId, attachment.attachmentId);
+  fixture.db.prepare("update agent_attachment set storage_key = ? where id = ?").run(agentAttachmentStorageKey(attachment.attachmentId, "image/png"), attachment.attachmentId);
 
   fixture.db.prepare("update agent_attachment set byte_size = byte_size + 1 where id = ?").run(attachment.attachmentId);
   const sizeMismatch = await fixture.app.inject({
@@ -333,7 +436,7 @@ test("Session 绑定附件读取拒绝 detached branch、错误关系和不安�
   assert.equal(sizeMismatch.statusCode, 404);
   fixture.db.prepare("update agent_attachment set byte_size = byte_size - 1 where id = ?").run(attachment.attachmentId);
 
-  const finalPath = agentAttachmentFilePath(fixture.dataDir, fixture.workspaceId, attachment.attachmentId);
+  const finalPath = workspaceAttachmentFilePath(fixture, attachment.attachmentId);
   await fs.unlink(finalPath);
   await fs.symlink(path.join(fixture.dataDir, "attachment-symlink-target"), finalPath);
   const unsafeRead = await fixture.app.inject({
@@ -418,14 +521,14 @@ test("M6 multipart dedup 保留首次 final 并清理重复请求的新暂存文
   const attachment = fixture.db.prepare(
     "select attachment_id as attachmentId from agent_message_part where message_id = ? and type = 'image'",
   ).get(firstBody.messageId) as { attachmentId: string };
-  const firstFinal = agentAttachmentFilePath(fixture.dataDir, fixture.workspaceId, attachment.attachmentId);
-  const before = await fs.readdir(agentAttachmentWorkspaceDir(fixture.dataDir, fixture.workspaceId));
+  const firstFinal = workspaceAttachmentFilePath(fixture, attachment.attachmentId);
+  const before = await fs.readdir(workspaceAttachmentDirectory(fixture));
 
   const duplicate = await fixture.app.inject({ method: "POST", url: `/api/agent/sessions/${session.id}/messages`, ...multipartMessage(request) });
   assert.equal(duplicate.statusCode, 201, duplicate.body);
   const duplicateBody = duplicate.json() as { messageId: string; runId: string; deduplicated: boolean };
   assert.deepEqual(duplicateBody, { ...firstBody, deduplicated: true });
-  assert.deepEqual(await fs.readdir(agentAttachmentWorkspaceDir(fixture.dataDir, fixture.workspaceId)), before);
+  assert.deepEqual(await fs.readdir(workspaceAttachmentDirectory(fixture)), before);
   assert.deepEqual(await fs.readFile(firstFinal), PNG_BYTES);
   assert.equal((fixture.db.prepare("select count(*) as count from agent_attachment").get() as { count: number }).count, 1);
   await assertNoAttachmentTemps(fixture.dataDir);
@@ -447,7 +550,7 @@ test("Session 附件读取允许 compaction contextRoot 之前的当前分支图
   assert.equal(response.statusCode, 200, response.body);
 });
 
-test("Session 附件读取拒绝 root、by_workspace、工作区与目标层 symlink、缺失和目录", async (t: TestContext) => {
+test("Session 附件读取拒绝 Workspace、.awb、附件父目录与目标层 symlink、缺失和目录", async (t: TestContext) => {
   const fixture = await createIntegrationFixture(t, { agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
   const uploaded = await fixture.app.inject({ method: "POST", url: `/api/agent/sessions/${session.id}/messages`, ...multipartMessage({ workspaceId: fixture.workspaceId, clientRequestId: "unsafe-path", images: [{ filename: "one.png", bytes: PNG_BYTES }] }) });
@@ -455,7 +558,7 @@ test("Session 附件读取拒绝 root、by_workspace、工作区与目标层 sym
   const body = uploaded.json() as { messageId: string; runId: string };
   await convergeCompletedRun({ ...fixture, sessionId: session.id, runId: body.runId });
   const attachment = fixture.db.prepare("select attachment_id as attachmentId from agent_message_part where message_id = ? and type = 'image'").get(body.messageId) as { attachmentId: string };
-  const finalPath = agentAttachmentFilePath(fixture.dataDir, fixture.workspaceId, attachment.attachmentId);
+  const finalPath = workspaceAttachmentFilePath(fixture, attachment.attachmentId);
   const url = `/api/agent/sessions/${session.id}/attachments/${attachment.attachmentId}/content?workspaceId=${encodeURIComponent(fixture.workspaceId)}`;
   const assert404 = async () => assert.equal((await fixture.app.inject({ method: "GET", url })).statusCode, 404);
   await fs.unlink(finalPath);
@@ -467,25 +570,20 @@ test("Session 附件读取拒绝 root、by_workspace、工作区与目标层 sym
   await assert404();
   await fs.unlink(finalPath);
   await fs.writeFile(finalPath, PNG_BYTES);
-  const workspaceDir = agentAttachmentWorkspaceDir(fixture.dataDir, fixture.workspaceId);
+  const workspaceDir = workspaceAttachmentDirectory(fixture);
   const parkedWorkspace = `${workspaceDir}.safe`;
   await fs.rename(workspaceDir, parkedWorkspace);
   await fs.symlink(parkedWorkspace, workspaceDir);
   await assert404();
   await fs.unlink(workspaceDir);
   await fs.rename(parkedWorkspace, workspaceDir);
-  const byWorkspace = path.dirname(workspaceDir);
-  const parkedByWorkspace = `${byWorkspace}.safe`;
-  await fs.rename(byWorkspace, parkedByWorkspace);
-  await fs.symlink(parkedByWorkspace, byWorkspace);
-  await assert404();
-  await fs.unlink(byWorkspace);
-  await fs.rename(parkedByWorkspace, byWorkspace);
-  const root = agentAttachmentsRoot(fixture.dataDir);
+  const root = path.dirname(path.dirname(workspaceDir));
   const parkedRoot = `${root}.safe`;
   await fs.rename(root, parkedRoot);
   await fs.symlink(parkedRoot, root);
   await assert404();
+  await fs.unlink(root);
+  await fs.rename(parkedRoot, root);
 });
 
 test("未认证附件请求优先返回 401，不探测可见性或不安全文件", async (t: TestContext) => {
@@ -503,11 +601,81 @@ test("未认证附件请求优先返回 401，不探测可见性或不安全文�
   const body = uploaded.json() as { messageId: string; runId: string };
   await convergeCompletedRun({ ...fixture, sessionId: session.id, runId: body.runId });
   const attachment = fixture.db.prepare("select attachment_id as attachmentId from agent_message_part where message_id = ? and type = 'image'").get(body.messageId) as { attachmentId: string };
-  const finalPath = agentAttachmentFilePath(fixture.dataDir, fixture.workspaceId, attachment.attachmentId);
+  const finalPath = workspaceAttachmentFilePath(fixture, attachment.attachmentId);
   await fs.unlink(finalPath);
   await fs.symlink(path.join(fixture.dataDir, "unsafe"), finalPath);
   for (const requestedSessionId of [session.id, "sess_missing"]) {
     const response = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${requestedSessionId}/attachments/${attachment.attachmentId}/content?workspaceId=${encodeURIComponent(fixture.workspaceId)}` });
     assert.equal(response.statusCode, 401);
   }
+});
+test("真实压缩提交后用户图与同 Run 工具图超过 20 MiB 在 SDK 请求前失败", async (t: TestContext) => {
+  const fixture = await createIntegrationFixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const uploaded = await fixture.app.inject({ method: "POST", url: `/api/agent/sessions/${session.id}/messages`,
+    ...multipartMessage({ workspaceId: fixture.workspaceId, clientRequestId: "mixed-compaction-budget",
+      text: "inspect", images: [{ filename: "user.png", bytes: pngBytes(9 * 1024 * 1024) }] }) });
+  assert.equal(uploaded.statusCode, 201, uploaded.body);
+  const { messageId, runId } = uploaded.json() as { messageId: string; runId: string };
+  const workspace = getWorkspace(fixture.db, fixture.workspaceId)!;
+  const { AgentRunner, executeToolForTest } = await import(new URL("../../../../../agent-worker/src/runtime/runner.ts", import.meta.url).href);
+  const { createAgentAttachmentStorage } = await import(new URL("../../../../../agent-worker/src/runtime/agentAttachmentStorage.ts", import.meta.url).href);
+  const profile = { model: { id: "gpt-4o-mini" }, provider: { npm: "@ai-sdk/openai", options: { apiKey: "fixture" } },
+    agent: { tools: ["view_image"], pluginTools: [], mcpServers: [] }, runtime: {} };
+  const run = { workspaceId: fixture.workspaceId, sessionId: session.id, runId,
+    workspacePath: workspace.path, workspaceRepoDirNames: [], inputText: "inspect" };
+  const paths = ["screens/first.png", "screens/second.png"];
+  const sizes = [7 * 1024 * 1024, 5 * 1024 * 1024];
+  const calls = paths.map((imagePath) => ({ id: newSortableId("part"), position: paths.indexOf(imagePath),
+    type: "tool_call" as const, toolName: "view_image", input: { path: imagePath }, providerToolCallId: newSortableId("call") }));
+  const executions = calls.map((call) => ({ id: newSortableId("exec"), callPartId: call.id,
+    originSessionId: session.id, originRunId: runId, status: "queued" as const }));
+  const assistant = createAssistantFixture({ fixture, sessionId: session.id, runId, parts: calls, executions });
+  for (const [index, imagePath] of paths.entries()) {
+    const fullPath = path.join(workspace.path, imagePath);
+    await fs.mkdir(path.dirname(fullPath), { recursive: true });
+    await fs.writeFile(fullPath, pngBytes(sizes[index]!));
+  }
+  let sdkRequests = 0;
+  const runner = new AgentRunner({
+    async updateToolExecution(payload: Record<string, unknown>) {
+      const response = await injectJson(fixture.app, { method: AgentApiEndpoints.updateToolExecution.method,
+        url: AgentApiEndpoints.updateToolExecution.path, internalToken: fixture.internalToken, payload });
+      assert.equal(response.statusCode, 200, response.body);
+      return response.json();
+    },
+    async createStreamingAssistant() { return { result: "updated" }; },
+    async flushAssistantParts() { return { result: "updated" }; },
+    async completeAssistant() { return { result: "updated" }; },
+    async completeTerminalAssistant() { return { result: "updated" }; },
+  } as any, {} as any, { info() {}, warn() {}, error() {} }, 1, {
+    attachmentStorage: createAgentAttachmentStorage(),
+    streamText: (() => { sdkRequests++; throw new Error("SDK must not be called"); }) as any,
+  });
+  for (const [index, call] of calls.entries()) {
+    await executeToolForTest(runner, { profile, run, tool: {
+      toolExecutionId: executions[index]!.id, callPartId: call.id,
+      assistantMessageId: assistant.assistantMessageId, status: "queued", toolName: "view_image",
+      toolCallId: call.providerToolCallId, args: call.input,
+    }, parentSessionId: session.id, signal: new AbortController().signal, promptContext: { messages: [], tools: [] } });
+  }
+  const head = getMessageSessionHead(fixture.db, { workspaceId: fixture.workspaceId, sessionId: session.id })!;
+  const commit = await injectJson(fixture.app, { method: AgentApiEndpoints.commitCompactionWithTerminalIntent.method,
+    url: AgentApiEndpoints.commitCompactionWithTerminalIntent.path, internalToken: fixture.internalToken,
+    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId,
+      messageId: newSortableId("msg"), textPartId: newSortableId("part"),
+      expectedHeadMessageId: head.headMessageId, expectedRevision: head.revision,
+      retainedFromMessageId: messageId, summaryText: "summary", createdAt: Date.now() } });
+  assert.equal(commit.statusCode, 200, commit.body);
+  assert.equal(commit.json().result, "updated");
+  const prompt = await injectJson(fixture.app, { method: AgentApiEndpoints.getPromptContext.method,
+    url: AgentApiEndpoints.getPromptContext.path, internalToken: fixture.internalToken,
+    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId } });
+  assert.equal(prompt.statusCode, 200, prompt.body);
+  assert.match(prompt.body, /"type":"attachment_ref"/);
+  assert.equal((prompt.body.match(/"type":"image_ref"/g) ?? []).length, 2);
+  (runner as any).toolRegistry.listTools = async () => [];
+  await assert.rejects((runner as any).runModelStep({ profile, run, context: prompt.json(), step: 1,
+    signal: new AbortController().signal, repeatedToolCallCounter: new Map() }), /20 MiB/);
+  assert.equal(sdkRequests, 0);
 });

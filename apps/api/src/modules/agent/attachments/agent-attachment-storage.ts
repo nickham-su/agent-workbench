@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { fstatSync, lstatSync, linkSync } from "node:fs";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -7,17 +8,19 @@ import type { AgentImageMediaType } from "@agent-workbench/shared/internal-contr
 import { AGENT_IMAGE_MAX_BYTES } from "./agent-attachment-limits.js";
 import {
   agentAttachmentsRoot,
-  agentAttachmentFilePath,
   agentAttachmentTempDir,
   agentAttachmentTempFilePath,
-  agentAttachmentWorkspaceDir,
-  assertAgentAttachmentWorkspaceId,
   assertAgentAttachmentId,
   assertAgentAttachmentTempId,
+  assertAgentAttachmentWorkspaceDirectory,
+  assertAgentAttachmentStorageKey,
+  agentAttachmentRelativePath,
+  agentAttachmentStorageKey,
 } from "./agent-attachment-paths.js";
 import { detectAgentImageMediaType } from "./agent-attachment-signature.js";
 import {
   assertSecureDirectoryCurrent,
+  assertSecureDirectoryCurrentSync,
   closeSecureDirectories,
   cleanupSecureRetiredFiles,
   openExistingSecureChildDirectory,
@@ -25,11 +28,8 @@ import {
   openSecureRootDirectory,
   removeRetiredSecureFile,
   retireSecureEntry,
-  retainSecureEntryReplacement,
   securePrivateDeleteName,
-  securePrivateSlotIdentity,
   isReplacementPendingName,
-  removeSecureDirectoryTree,
   type RetiredSecureEntry,
   type SecureEntryKind,
   type SecureDirectory,
@@ -69,18 +69,16 @@ type AttachmentDirectories = {
   agent: SecureDirectory;
   attachments: SecureDirectory;
   temp: SecureDirectory;
-  byWorkspace: SecureDirectory | null;
-  workspace: SecureDirectory | null;
 };
 
 async function ensurePrivateDeletionDirectory(directory: SecureDirectory) {
-  // attachment temp/by_workspace 均为应用私有目录；创建和删除槽均要求 0700。
+  // 临时目录为应用私有目录；创建和删除槽均要求 0700。
   await fs.chmod(directory.fdPath, 0o700);
   const stat = await directory.handle.stat();
   if ((stat.mode & 0o777) !== 0o700) throw new Error("attachment deletion directory must have mode 0700");
 }
 
-async function openAttachmentDirectories(input: { dataDir: string; workspaceId?: string; create: boolean }): Promise<AttachmentDirectories> {
+async function openAttachmentDirectories(input: { dataDir: string; create: boolean }): Promise<AttachmentDirectories> {
   const opened: SecureDirectory[] = [];
   try {
     const dataRoot = await openSecureRootDirectory(input.dataDir);
@@ -92,15 +90,7 @@ async function openAttachmentDirectories(input: { dataDir: string; workspaceId?:
     opened.push(attachments);
     const temp = await next(attachments, "temp");
     opened.push(temp);
-    let byWorkspace: SecureDirectory | null = null;
-    let workspace: SecureDirectory | null = null;
-    if (input.workspaceId) {
-      byWorkspace = await next(attachments, "by_workspace");
-      opened.push(byWorkspace);
-      workspace = await next(byWorkspace, assertAgentAttachmentWorkspaceId(input.workspaceId));
-      opened.push(workspace);
-    }
-    return { dataRoot, agent, attachments, temp, byWorkspace, workspace };
+    return { dataRoot, agent, attachments, temp };
   } catch (error) {
     await closeSecureDirectories(...opened.reverse());
     throw error;
@@ -108,16 +98,12 @@ async function openAttachmentDirectories(input: { dataDir: string; workspaceId?:
 }
 
 async function closeAttachmentDirectories(directories: AttachmentDirectories) {
-  await closeSecureDirectories(directories.workspace, directories.byWorkspace, directories.temp, directories.attachments, directories.agent, directories.dataRoot);
+  await closeSecureDirectories(directories.temp, directories.attachments, directories.agent, directories.dataRoot);
 }
 
-async function assertAttachmentDirectoriesCurrent(directories: AttachmentDirectories, workspace = false) {
+async function assertAttachmentDirectoriesCurrent(directories: AttachmentDirectories) {
   await assertSecureDirectoryCurrent(directories.attachments, directories.dataRoot.realPath);
   await assertSecureDirectoryCurrent(directories.temp, directories.attachments.realPath);
-  if (workspace && directories.byWorkspace && directories.workspace) {
-    await assertSecureDirectoryCurrent(directories.byWorkspace, directories.attachments.realPath);
-    await assertSecureDirectoryCurrent(directories.workspace, directories.byWorkspace.realPath);
-  }
 }
 
 function attachmentPrivateSlotScope(name: string) {
@@ -161,60 +147,6 @@ async function verifyOwnedFile(params: { directory: SecureDirectory; name: strin
   const current = await fs.lstat(path.join(params.directory.fdPath, params.name));
   if (current.isSymbolicLink() || !current.isFile() || current.dev !== params.expected.dev || current.ino !== params.expected.ino) {
     throw new Error("attachment file changed after creation");
-  }
-}
-
-/**
- * 在 final 已发布而 temp 的逻辑父目录已变化时，将仍可由原 temp dirfd 定位的
- * source 移至 attachments 下稳定的 cleanup 目录。对已 retire 的 source，迁移时
- * 重新发布为 cleanup-root 内的 v1 identity slot，避免跨目录沿用不可关联的槽名。
- */
-async function relocateAndCleanupAttachmentSource(params: {
-  directories: AttachmentDirectories;
-  sourceName: string;
-  retired?: RetiredSecureEntry | null;
-  expected: { dev: number; ino: number };
-  removeRetiredForTest?: (params: { directory: SecureDirectory; retired: RetiredSecureEntry }) => Promise<boolean> | boolean;
-}): Promise<boolean> {
-  const sourceName = params.retired?.privateName ?? params.sourceName;
-  const sourcePath = path.join(params.directories.temp.fdPath, sourceName);
-  const before = await fs.lstat(sourcePath).catch(() => null);
-  if (!before || before.isSymbolicLink() || !before.isFile() || before.dev !== params.expected.dev || before.ino !== params.expected.ino) return false;
-  let cleanup: SecureDirectory | null = null;
-  try {
-    cleanup = await openSecureChildDirectory(params.directories.attachments, ".attachment-cleanup");
-    await ensurePrivateDeletionDirectory(cleanup);
-    const sourceIdentity = params.retired ? securePrivateSlotIdentity(params.retired.privateName) : null;
-    if (params.retired && (!sourceIdentity || sourceIdentity.kind !== "file" || sourceIdentity.scope !== attachmentPrivateSlotScope(params.sourceName))) return false;
-    const name = securePrivateDeleteName({
-      dev: params.expected.dev,
-      ino: params.expected.ino,
-      kind: "file",
-      scope: attachmentPrivateSlotScope(params.sourceName),
-    });
-    const target = path.join(cleanup.fdPath, name);
-    await fs.rename(sourcePath, target);
-    const moved = await fs.lstat(target);
-    if (moved.isSymbolicLink() || !moved.isFile() || moved.dev !== params.expected.dev || moved.ino !== params.expected.ino) {
-      await retainSecureEntryReplacement(cleanup, name);
-      return false;
-    }
-    const retired = attachmentRetiredEntry(name, moved);
-    return params.removeRetiredForTest?.({ directory: cleanup, retired })
-      ?? removeRetiredSecureFile(cleanup, retired);
-  } catch {
-    return false;
-  } finally {
-    await cleanup?.handle.close().catch(() => undefined);
-  }
-}
-
-export async function ensureAgentAttachmentStorageDirectories(dataDir: string, workspaceId: string) {
-  const directories = await openAttachmentDirectories({ dataDir, workspaceId, create: true });
-  try {
-    await assertAttachmentDirectoriesCurrent(directories, true);
-  } finally {
-    await closeAttachmentDirectories(directories);
   }
 }
 
@@ -266,94 +198,6 @@ export class AgentAttachmentCommitError extends Error {
  * 以固定 temp/workspace 目录 fd 进行 hard-link 提交。所有 pathname 只在已验证
  * inode 的目录下解析；提交前后验证 inode，目录变化时 fail-closed。
  */
-export async function commitAgentAttachmentTempFile(input: {
-  dataDir: string;
-  workspaceId: string;
-  attachmentId: string;
-  tempId: string;
-  /** 仅用于对抗测试，在 hard-link 成功后、目录复验前调用。 */
-  afterLinkForTest?: () => Promise<void> | void;
-  /** 仅用于测试：source 已安全 retire 到 v1 槽、最终 unlink 前调用。 */
-  afterSourceRetireForTest?: () => Promise<void> | void;
-  /** 仅用于测试：局部模拟已 retire source 的 unlink 失败，避免污染全局 fs。 */
-  removeSourceRetiredForTest?: (params: { directory: SecureDirectory; retired: RetiredSecureEntry }) => Promise<boolean> | boolean;
-}) {
-  const attachmentId = assertAgentAttachmentId(input.attachmentId);
-  const tempId = assertAgentAttachmentTempId(input.tempId);
-  const directories = await openAttachmentDirectories({ dataDir: input.dataDir, workspaceId: input.workspaceId, create: true });
-  let sourceHandle: fs.FileHandle | null = null;
-  let sourceStat: import("node:fs").Stats | null = null;
-  let finalCreated = false;
-  let finalCleanupPending = false;
-  let sourceCleanupPending = false;
-  let sourceCleanupCompleted = false;
-  let sourceRetired: RetiredSecureEntry | null = null;
-  try {
-    await assertAttachmentDirectoriesCurrent(directories, true);
-    const sourcePath = path.join(directories.temp.fdPath, `${tempId}.part`);
-    const finalPath = path.join(directories.workspace!.fdPath, attachmentId);
-    sourceHandle = await fs.open(sourcePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-    sourceStat = await sourceHandle.stat();
-    const sourcePathStat = await fs.lstat(sourcePath);
-    if (!sourceStat.isFile() || sourcePathStat.isSymbolicLink() || !sourcePathStat.isFile() || sourcePathStat.dev !== sourceStat.dev || sourcePathStat.ino !== sourceStat.ino) {
-      throw new Error("attachment temp file changed before commit");
-    }
-    await assertAttachmentDirectoriesCurrent(directories, true);
-    await fs.link(sourcePath, finalPath);
-    finalCreated = true;
-    await input.afterLinkForTest?.();
-    const finalStat = await fs.lstat(finalPath);
-    if (finalStat.isSymbolicLink() || !finalStat.isFile() || finalStat.dev !== sourceStat.dev || finalStat.ino !== sourceStat.ino) {
-      throw new Error("attachment final file changed during commit");
-    }
-    await assertAttachmentDirectoriesCurrent(directories, true);
-    sourceRetired = await retireOwnedFile({ directory: directories.temp, name: `${tempId}.part`, expected: sourceStat });
-    await input.afterSourceRetireForTest?.();
-    const sourceRemoved = sourceRetired
-      ? await (input.removeSourceRetiredForTest?.({ directory: directories.temp, retired: sourceRetired }) ?? removeRetiredSecureFile(directories.temp, sourceRetired))
-      : false;
-    if (!sourceRemoved) {
-      sourceCleanupPending = true;
-      throw new Error("attachment source cleanup is pending");
-    }
-    sourceCleanupCompleted = true;
-    return agentAttachmentFilePath(input.dataDir, input.workspaceId, attachmentId);
-  } catch (error) {
-    // final 已发布后，目录拓扑复验失败可能发生在 source retire 之前。此时无法
-    // 将 source 的存在当作已清理；保留独立 pending 信号，禁止上层按逻辑路径猜测。
-    if (finalCreated && sourceStat && !sourceCleanupCompleted) sourceCleanupPending = true;
-    if (finalCreated && sourceStat && !sourceCleanupCompleted) {
-      const expectedSource = sourceStat;
-      const sourceName = `${tempId}.part`;
-      const topologyValid = await assertAttachmentDirectoriesCurrent(directories).then(() => true).catch(() => false);
-      // topology 失效后，优先把原 temp fd 中仍可验证的业务名或已 retire 私有槽
-      // 移入稳定 cleanup root，不能仅按业务 sourceName 猜测其是否已消失。
-      sourceCleanupCompleted = await relocateAndCleanupAttachmentSource({
-        directories,
-        sourceName,
-        retired: sourceRetired,
-        expected: expectedSource,
-        removeRetiredForTest: input.removeSourceRetiredForTest,
-      });
-      if (!sourceCleanupCompleted && topologyValid) sourceCleanupCompleted = await unlinkOwnedFile({ directory: directories.temp, name: sourceName, expected: expectedSource });
-      sourceCleanupPending = !sourceCleanupCompleted;
-    }
-    if (finalCreated && sourceStat) {
-      try {
-        const removed = await unlinkOwnedFile({ directory: directories.workspace!, name: attachmentId, expected: sourceStat });
-        if (removed) finalCreated = false;
-        else finalCleanupPending = true;
-      } catch {
-        finalCleanupPending = true;
-      }
-    }
-    throw new AgentAttachmentCommitError(finalCreated, finalCleanupPending, { cause: error }, sourceCleanupPending);
-  } finally {
-    await sourceHandle?.close().catch(() => undefined);
-    await closeAttachmentDirectories(directories);
-  }
-}
-
 export async function removeAgentAttachmentTempFile(input: { dataDir: string; tempId: string }) {
   const tempId = assertAgentAttachmentTempId(input.tempId);
   const directories = await openAttachmentDirectories({ dataDir: input.dataDir, create: false });
@@ -374,68 +218,214 @@ export async function removeAgentAttachmentTempFile(input: { dataDir: string; te
   }
 }
 
-export async function removeAgentAttachmentFinalFile(input: { dataDir: string; workspaceId: string; attachmentId: string }) {
-  const attachmentId = assertAgentAttachmentId(input.attachmentId);
-  const directories = await openAttachmentDirectories({ dataDir: input.dataDir, workspaceId: input.workspaceId, create: false });
-  try {
-    await assertAttachmentDirectoriesCurrent(directories, true);
-    const name = attachmentId;
-    const target = path.join(directories.workspace!.fdPath, name);
-    const stat = await fs.lstat(target).catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? null : Promise.reject(error));
-    if (!stat) {
-      const pending = await cleanupAttachmentPrivateSlots(directories.workspace!, name);
-      if (pending === "replacement_pending") throw new Error("attachment final cleanup is replacement pending");
-      return;
-    }
-    if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("attachment final path is unsafe");
-    if (!(await unlinkOwnedFile({ directory: directories.workspace!, name: attachmentId, expected: stat }))) throw new Error("attachment final cleanup is pending");
-  } finally {
-    await closeAttachmentDirectories(directories);
-  }
-}
-
-/** 授权后立即用 O_NOFOLLOW 打开并返回同一 inode，路由不得再通过 pathname 重开。 */
-export async function resolveSafeAgentAttachmentContentPath(
-  input: { dataDir: string; workspaceId: string; storageKey: string; expectedByteSize: number },
-): Promise<ResolvedAgentAttachmentContentPath | null> {
-  try {
-    const storageKey = assertAgentAttachmentId(input.storageKey);
-    const directories = await openAttachmentDirectories({ dataDir: input.dataDir, workspaceId: input.workspaceId, create: false });
-    try {
-      await assertAttachmentDirectoriesCurrent(directories, true);
-      const filePath = path.join(directories.workspace!.fdPath, storageKey);
-      const handle = await fs.open(filePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-      try {
-        const [stat, pathStat] = await Promise.all([handle.stat(), fs.lstat(filePath)]);
-        if (
-          !stat.isFile()
-          || stat.size !== input.expectedByteSize
-          || pathStat.isSymbolicLink()
-          || !pathStat.isFile()
-          || pathStat.dev !== stat.dev
-          || pathStat.ino !== stat.ino
-        ) {
-          await handle.close();
-          return null;
-        }
-        await assertAttachmentDirectoriesCurrent(directories, true);
-        return { handle, filePath: agentAttachmentFilePath(input.dataDir, input.workspaceId, storageKey) };
-      } catch (error) {
-        await handle.close().catch(() => undefined);
-        throw error;
-      }
-    } finally {
-      await closeAttachmentDirectories(directories);
-    }
-  } catch {
-    return null;
-  }
-}
-
 function extensionForAgentImageMediaType(mediaType: AgentImageMediaType): "png" | "jpg" | "webp" {
   if (mediaType === "image/png") return "png";
   if (mediaType === "image/jpeg") return "jpg";
   return "webp";
+}
+
+type WorkspaceAttachmentDirectories = {
+  data: SecureDirectory;
+  workspaces: SecureDirectory;
+  workspace: SecureDirectory;
+  awb: SecureDirectory;
+  agent: SecureDirectory;
+  attachments: SecureDirectory;
+};
+
+/** Pin every directory from the trusted data root down to the Workspace attachment directory. */
+async function openWorkspaceAttachmentDirectories(input: { dataDir: string; workspaceDirName: string; create: boolean }): Promise<WorkspaceAttachmentDirectories> {
+  const opened: SecureDirectory[] = [];
+  try {
+    const data = await openSecureRootDirectory(input.dataDir);
+    opened.push(data);
+    const workspaces = await openExistingSecureChildDirectory(data, "workspaces");
+    opened.push(workspaces);
+    const workspace = await openExistingSecureChildDirectory(workspaces, assertAgentAttachmentWorkspaceDirectory(input.workspaceDirName));
+    opened.push(workspace);
+    const next = input.create ? openSecureChildDirectory : openExistingSecureChildDirectory;
+    const awb = await next(workspace, ".awb");
+    opened.push(awb);
+    const agent = await next(awb, "agent");
+    opened.push(agent);
+    const attachments = await next(agent, "attachments");
+    opened.push(attachments);
+    return { data, workspaces, workspace, awb, agent, attachments };
+  } catch (error) {
+    await closeSecureDirectories(...opened.reverse());
+    throw error;
+  }
+}
+
+async function assertWorkspaceAttachmentDirectoriesCurrent(dirs: WorkspaceAttachmentDirectories) {
+  await assertSecureDirectoryCurrent(dirs.data, dirs.data.realPath);
+  await assertSecureDirectoryCurrent(dirs.workspaces, dirs.data.realPath);
+  await assertSecureDirectoryCurrent(dirs.workspace, dirs.workspaces.realPath);
+  await assertSecureDirectoryCurrent(dirs.awb, dirs.workspace.realPath);
+  await assertSecureDirectoryCurrent(dirs.agent, dirs.awb.realPath);
+  await assertSecureDirectoryCurrent(dirs.attachments, dirs.agent.realPath);
+}
+
+async function closeWorkspaceAttachmentDirectories(dirs: WorkspaceAttachmentDirectories) {
+  await closeSecureDirectories(dirs.attachments, dirs.agent, dirs.awb, dirs.workspace, dirs.workspaces, dirs.data);
+}
+
+export type OwnedAgentAttachmentFile = { dev: number; ino: number };
+
+/** Prepare outside SQLite; publish only after its authoritative conflict checks, without yielding. */
+export async function prepareAgentWorkspaceAttachmentPublication(input: {
+  dataDir: string;
+  workspaceDirName: string;
+  attachmentId: string;
+  storageKey: string;
+  mediaType: AgentImageMediaType;
+  tempId: string;
+  afterLinkForTest?: () => void;
+}): Promise<{ checkAvailable(): void; publish(): OwnedAgentAttachmentFile; close(): Promise<void> }> {
+  const storageKey = assertAgentAttachmentStorageKey(input.attachmentId, input.storageKey, input.mediaType);
+  const sourceName = `${assertAgentAttachmentTempId(input.tempId)}.part`;
+  const source = await openAttachmentDirectories({ dataDir: input.dataDir, create: false });
+  let target: WorkspaceAttachmentDirectories | null = null;
+  let handle: fs.FileHandle | null = null;
+  try {
+    await assertAttachmentDirectoriesCurrent(source);
+    target = await openWorkspaceAttachmentDirectories({ dataDir: input.dataDir, workspaceDirName: input.workspaceDirName, create: true });
+    await assertWorkspaceAttachmentDirectoriesCurrent(target);
+    if (((await target.attachments.handle.stat()).mode & 0o777) !== 0o700) {
+      throw new Error("Workspace attachment directory permissions changed");
+    }
+    const sourcePath = path.join(source.temp.fdPath, sourceName);
+    handle = await fs.open(sourcePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    const original = await handle.stat();
+    if (!original.isFile() || original.size < 1 || original.size > AGENT_IMAGE_MAX_BYTES) throw new Error("Invalid attachment source");
+    await verifyOwnedFile({ directory: source.temp, name: sourceName, expected: original });
+    const pinnedSource = handle;
+    const pinnedTarget = target;
+    let attempted = false;
+    let closed = false;
+    return {
+      checkAvailable() {
+        if (closed) throw new Error("attachment publication is closed");
+        const finalPath = path.join(pinnedTarget.attachments.fdPath, storageKey);
+        try {
+          lstatSync(finalPath);
+          throw new Error("attachment final name is occupied");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+      },
+      publish() {
+        if (closed || attempted) throw new Error("attachment publication is not reusable");
+        attempted = true;
+        let linked = false;
+        try {
+          const check = (directory: SecureDirectory, trustedRoot: string) => assertSecureDirectoryCurrentSync(directory, trustedRoot);
+          check(source.dataRoot, source.dataRoot.realPath);
+          check(source.agent, source.dataRoot.realPath);
+          check(source.attachments, source.agent.realPath);
+          check(source.temp, source.attachments.realPath);
+          check(pinnedTarget.data, pinnedTarget.data.realPath);
+          check(pinnedTarget.workspaces, pinnedTarget.data.realPath);
+          check(pinnedTarget.workspace, pinnedTarget.workspaces.realPath);
+          check(pinnedTarget.awb, pinnedTarget.workspace.realPath);
+          check(pinnedTarget.agent, pinnedTarget.awb.realPath);
+          check(pinnedTarget.attachments, pinnedTarget.agent.realPath);
+          if ((fstatSync(pinnedTarget.attachments.handle.fd).mode & 0o777) !== 0o700) throw new Error("Workspace attachment directory permissions changed");
+          const current = fstatSync(pinnedSource.fd);
+          const sourceEntry = lstatSync(sourcePath);
+          if (!current.isFile() || current.dev !== original.dev || current.ino !== original.ino || current.size !== original.size
+              || !sourceEntry.isFile() || sourceEntry.isSymbolicLink() || sourceEntry.dev !== original.dev || sourceEntry.ino !== original.ino) {
+            throw new Error("attachment source changed before publication");
+          }
+          const finalPath = path.join(pinnedTarget.attachments.fdPath, storageKey);
+          linkSync(sourcePath, finalPath); // EEXIST and EXDEV fail closed; never overwrite or copy.
+          linked = true;
+          input.afterLinkForTest?.();
+          const final = lstatSync(finalPath);
+          if (!final.isFile() || final.isSymbolicLink() || final.dev !== current.dev || final.ino !== current.ino) {
+            throw new Error("attachment final changed after publication");
+          }
+          return { dev: current.dev, ino: current.ino };
+        } catch (error) {
+          // Never rename or unlink in the mutable Workspace, even when our link succeeded.
+          throw new AgentAttachmentCommitError(linked, linked, { cause: error });
+        }
+      },
+      async close() {
+        if (closed) return;
+        closed = true;
+        await pinnedSource.close().catch(() => undefined);
+        await closeWorkspaceAttachmentDirectories(pinnedTarget);
+        await closeAttachmentDirectories(source);
+      },
+    };
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    if (target) await closeWorkspaceAttachmentDirectories(target);
+    await closeAttachmentDirectories(source);
+    throw error;
+  }
+}
+
+async function closeWorkspaceAttachmentDirectoriesIfOpen(dirs: WorkspaceAttachmentDirectories | null) {
+  if (dirs) await closeWorkspaceAttachmentDirectories(dirs);
+}
+
+/** A Workspace final cannot be removed safely while same-UID tools can change its directory entries. */
+export async function removeAgentWorkspaceAttachmentFinalFile(input: {
+  dataDir: string;
+  workspaceDirName: string;
+  attachmentId: string;
+  storageKey: string;
+  mediaType: AgentImageMediaType;
+  owned: OwnedAgentAttachmentFile;
+}) {
+  assertAgentAttachmentStorageKey(input.attachmentId, input.storageKey, input.mediaType);
+  // Even a matching inode in a private .delete-* slot can be replaced before unlink.
+  // Do not move or unlink any Workspace entry; surface a pending orphan to the caller.
+  throw new Error("Workspace attachment retained: atomic ownership-checked removal is unavailable");
+}
+
+/** Already authorized by the owning Session; return the pinned inode, not a pathname to reopen. */
+export async function resolveSafeWorkspaceAgentAttachment(input: {
+  dataDir: string;
+  workspaceDirName: string;
+  attachmentId: string;
+  storageKey: string;
+  mediaType: AgentImageMediaType;
+  expectedByteSize: number;
+}): Promise<ResolvedAgentAttachmentContentPath | null> {
+  let dirs: WorkspaceAttachmentDirectories | null = null;
+  try {
+    const storageKey = assertAgentAttachmentStorageKey(input.attachmentId, input.storageKey, input.mediaType);
+    dirs = await openWorkspaceAttachmentDirectories({ dataDir: input.dataDir, workspaceDirName: input.workspaceDirName, create: false });
+    await assertWorkspaceAttachmentDirectoriesCurrent(dirs);
+    const filePath = path.join(dirs.attachments.fdPath, storageKey);
+    const handle = await fs.open(filePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    try {
+      const [stat, pathStat] = await Promise.all([handle.stat(), fs.lstat(filePath)]);
+      if (!stat.isFile() || stat.size !== input.expectedByteSize || stat.size < 1 || stat.size > AGENT_IMAGE_MAX_BYTES
+        || pathStat.isSymbolicLink() || !pathStat.isFile() || stat.ino !== pathStat.ino || stat.dev !== pathStat.dev) throw new Error("attachment changed");
+      const prefix = Buffer.alloc(12);
+      let read = 0;
+      const headerLength = Math.min(prefix.length, stat.size);
+      while (read < headerLength) {
+        const { bytesRead } = await handle.read(prefix, read, headerLength - read, read);
+        if (bytesRead === 0) break;
+        read += bytesRead;
+      }
+      if (detectAgentImageMediaType(prefix.subarray(0, read)) !== input.mediaType) throw new Error("attachment media type changed");
+      await assertWorkspaceAttachmentDirectoriesCurrent(dirs);
+      return { handle, filePath: path.join(dirs.workspace.logicalPath, agentAttachmentRelativePath(input.attachmentId, storageKey, input.mediaType)) };
+    } catch (error) {
+      await handle.close().catch(() => undefined);
+      throw error;
+    }
+  } catch {
+    return null;
+  } finally {
+    await closeWorkspaceAttachmentDirectoriesIfOpen(dirs);
+  }
 }
 
 export async function stageAgentImageUpload(input: {
@@ -473,7 +463,7 @@ export async function stageAgentImageUpload(input: {
   }
   return {
     attachmentId: assertAgentAttachmentId(input.attachmentId),
-    storageKey: input.attachmentId,
+    storageKey: agentAttachmentStorageKey(input.attachmentId, mediaType),
     tempId: input.tempId,
     filename: sanitizeAgentImageFilename(input.filename, extensionForAgentImageMediaType(mediaType)),
     mediaType,
@@ -525,25 +515,5 @@ export async function cleanupAgedAgentAttachmentTempFiles(input: { dataDir: stri
     void tempPrivateCleanup;
   } finally {
     await closeAttachmentDirectories(directories);
-  }
-}
-
-/** 安全删除一个 Workspace 的附件目录；任何 symlink/目录变化均 fail-closed。 */
-export async function removeAgentAttachmentWorkspaceDirectory(input: { dataDir: string; workspaceId: string }): Promise<"removed" | "not_found" | "replacement_pending" | "skipped_unsafe"> {
-  try {
-    const root = await openSecureRootDirectory(input.dataDir);
-    try {
-      return await removeSecureDirectoryTree({
-        root,
-        relativeSegments: ["agent", "attachments", "by_workspace", assertAgentAttachmentWorkspaceId(input.workspaceId)],
-        quarantineDirectory: ".workspace-delete-quarantine",
-      });
-    } finally {
-      await closeSecureDirectories(root);
-    }
-  } catch (error) {
-    if (error instanceof Error && error.message.includes("replacement pending")) return "replacement_pending";
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "not_found";
-    return "skipped_unsafe";
   }
 }

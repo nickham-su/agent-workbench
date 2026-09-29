@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
+import { lstatSync, realpathSync, fstatSync } from "node:fs";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 
@@ -548,5 +549,15 @@ export async function removeSecureDirectoryTree(input: {
     return staleReplacementPending ? "replacement_pending" : "removed";
   } finally {
     await closeSecureDirectories(...opened.reverse());
+  }
+}
+/** Synchronous counterpart for a short SQLite transaction that must publish via a pinned dirfd. */
+export function assertSecureDirectoryCurrentSync(directory: SecureDirectory, trustedRootRealPath: string) {
+  const opened = fstatSync(directory.handle.fd);
+  const current = lstatSync(directory.logicalPath);
+  const currentRealPath = realpathSync(directory.logicalPath);
+  if (!opened.isDirectory() || !sameInode(opened, directory.stat) || current.isSymbolicLink()
+      || !sameInode(current, opened) || !isInsideOrSame(trustedRootRealPath, currentRealPath)) {
+    throw new Error("secure directory changed or escaped its trusted root");
   }
 }

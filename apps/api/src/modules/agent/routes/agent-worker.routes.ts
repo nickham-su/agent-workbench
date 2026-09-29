@@ -132,7 +132,7 @@ const AgentBuiltinToolNameSchema = Type.Union([
   Type.Literal("todolist"),
   Type.Literal("subtask"),
   Type.Literal("skill"),
-  Type.Literal("visual_analyze"),
+  Type.Literal("view_image"),
 ]);
 const AgentDynamicToolNameSchema = Type.Union([
   AgentBuiltinToolNameSchema,

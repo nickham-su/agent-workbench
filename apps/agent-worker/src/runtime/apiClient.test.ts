@@ -1623,11 +1623,9 @@ const validExecutionProfileResponse = {
     autoCompactThresholdPct: 80,
     maxSubtaskDepth: 1,
     sessionTerminalSoundEnabled: true,
-    visionModel: null,
     compactionModel: null,
     updatedAt: 1,
   },
-  vision: null,
   compaction: null,
 };
 

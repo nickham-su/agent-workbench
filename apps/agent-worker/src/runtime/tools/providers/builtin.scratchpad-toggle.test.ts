@@ -28,12 +28,10 @@ function createProfile(
       autoCompactThresholdPct: 80,
       maxSubtaskDepth: 1,
       sessionTerminalSoundEnabled: true,
-      visionModel: null,
-      compactionModel: null,
+        compactionModel: null,
       updatedAt: Date.now(),
     },
-    vision: null,
-    compaction: null,
+      compaction: null,
     agent: {
       id: "agent_1",
       name: "agent_1",
@@ -97,20 +95,20 @@ test("builtin provider 配置 scratchpad 时启用", () => {
   );
 });
 
-test("builtin provider 未配置 todolist 和 visual_analyze 时不启用", () => {
+test("builtin provider 未配置 todolist 和 view_image 时不启用", () => {
   const provider = new BuiltinToolProvider();
   const ctx = createCtx([]);
 
   assert.equal(provider.isToolEnabled("todolist", ctx), false);
-  assert.equal(provider.isToolEnabled("visual_analyze", ctx), false);
+  assert.equal(provider.isToolEnabled("view_image", ctx), false);
 });
 
-test("builtin provider 配置 todolist 和 visual_analyze 时启用", () => {
+test("builtin provider 配置 todolist 和 view_image 时启用", () => {
   const provider = new BuiltinToolProvider();
-  const ctx = createCtx(["todolist", "visual_analyze"]);
+  const ctx = createCtx(["todolist", "view_image"]);
 
   assert.equal(provider.isToolEnabled("todolist", ctx), true);
-  assert.equal(provider.isToolEnabled("visual_analyze", ctx), true);
+  assert.equal(provider.isToolEnabled("view_image", ctx), true);
 });
 
 test("builtin provider 保持隐藏默认工具始终启用", () => {

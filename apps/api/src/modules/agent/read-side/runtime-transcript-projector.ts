@@ -4,6 +4,7 @@ import type {
   AgentMessage,
   AgentToolExecutionStatus
 } from "@agent-workbench/shared";
+import type { AgentToolResultOutput, AgentImageRef } from "@agent-workbench/shared/internal-contracts/agent-api";
 
 export type RuntimePromptTextPart = { type: "text"; text: string };
 export type RuntimePromptAttachmentRefPart = {
@@ -12,6 +13,7 @@ export type RuntimePromptAttachmentRefPart = {
   attachmentId: string;
   mediaType: AgentImageMediaType;
   filename: string;
+  path: string;
 };
 export type RuntimePromptToolCallPart = {
   type: "tool-call";
@@ -23,7 +25,7 @@ export type RuntimePromptToolResultPart = {
   type: "tool-result";
   toolCallId: string;
   toolName: AgentContextToolName;
-  output: { type: "text"; value: string } | { type: "error-text"; value: string };
+  output: AgentToolResultOutput;
 };
 export type RuntimePromptMessage =
   | { role: "system"; content: string }
@@ -33,6 +35,9 @@ export type RuntimePromptMessage =
 
 export type RuntimeTranscriptExecution = {
   callPartId: string;
+  originRunId?: string | null;
+  originSessionId?: string | null;
+  imageRef?: AgentImageRef;
   status: AgentToolExecutionStatus;
   resultPreview: string | null;
   error: string | null;
@@ -47,16 +52,18 @@ export const CANCELLED_TOOL_EXECUTION_RESULT = "工具调用在执行前被取�
 export const FAILED_TOOL_EXECUTION_RESULT = "工具调用失败，未提供额外错误信息。";
 export const EMPTY_COMPLETED_TOOL_EXECUTION_RESULT = "工具调用已成功完成，但未返回文本结果。";
 
-function historicalImagePlaceholder(attachmentCount: number) {
-  return `[This user message included ${attachmentCount} image attachment(s). Their image contents are not included in this run.]`;
+function historicalImagePlaceholder(images: Array<{ path: string | null }>) {
+  return images.map((image) => image.path
+    ? `[Image attachment (not included in this run): ${image.path}. Call view_image(path) to inspect it.]`
+    : "[Historical image attachment (not included in this run; Workspace path unavailable).]").join("\n");
 }
 
 function imageOnlyTriggerText(attachmentCount: number) {
   return `[The user sent ${attachmentCount} image attachment(s) without accompanying text.]`;
 }
 
-function safeUserText(text: string, attachmentCount: number) {
-  const placeholder = historicalImagePlaceholder(attachmentCount);
+function safeUserText(text: string, images: Array<{ path: string | null }>) {
+  const placeholder = historicalImagePlaceholder(images);
   return text ? `${text}\n\n${placeholder}` : placeholder;
 }
 
@@ -73,8 +80,10 @@ export class RuntimeTranscriptProjector {
   projectDetailed(input: {
     workspaceId: string;
     triggerMessageId: string | null;
+    runId?: string | null;
     messages: AgentMessage[];
     executions: RuntimeTranscriptExecution[];
+    attachmentPaths?: ReadonlyMap<string, string | null>;
     /** Exclude the Assistant that owns any of these non-terminal calls. */
     stopBeforeAssistantMessageIds?: ReadonlySet<string>;
     /** Protected PromptContext only: preserve the ordinal of replay-only Assistants. */
@@ -92,12 +101,13 @@ export class RuntimeTranscriptProjector {
       if (message.type === "user") {
         const text = parts.filter((part) => part.type === "text").map((part) => part.text).join("");
         const images = parts.filter((part) => part.type === "image");
+        const located = images.map((image) => ({ path: input.attachmentPaths?.get(image.id) ?? null }));
         if (images.length === 0) {
           if (text) messages.push({ role: "user", content: text });
           continue;
         }
         if (message.id !== input.triggerMessageId) {
-          messages.push({ role: "user", content: safeUserText(text, images.length) });
+          messages.push({ role: "user", content: safeUserText(text, located) });
           continue;
         }
         const content: Array<RuntimePromptTextPart | RuntimePromptAttachmentRefPart> = [{
@@ -105,12 +115,15 @@ export class RuntimeTranscriptProjector {
           text: text || imageOnlyTriggerText(images.length)
         }];
         for (const image of images) {
+          const attachmentPath = input.attachmentPaths?.get(image.id);
+          if (!attachmentPath) throw new Error("current Run image has no trusted Workspace path");
           content.push({
             type: "attachment_ref",
             workspaceId: input.workspaceId,
             attachmentId: image.attachmentId,
             mediaType: image.mediaType,
-            filename: image.filename
+            filename: image.filename,
+            path: attachmentPath
           });
         }
         messages.push({ role: "user", content });
@@ -148,7 +161,7 @@ export class RuntimeTranscriptProjector {
           type: "tool-result",
           toolCallId,
           toolName: part.toolName,
-          output: projectToolExecutionResult(execution)
+          output: projectToolExecutionResult(execution, input.runId ?? null, message.originRunId, part.toolName, toolCallId)
         });
       }
       if (assistantParts.length === 1 && assistantParts[0]?.type === "text") {
@@ -170,17 +183,27 @@ export class RuntimeTranscriptProjector {
   project(input: {
     workspaceId: string;
     triggerMessageId: string | null;
+    runId?: string | null;
     messages: AgentMessage[];
     executions: RuntimeTranscriptExecution[];
+    attachmentPaths?: ReadonlyMap<string, string | null>;
     stopBeforeAssistantMessageIds?: ReadonlySet<string>;
   }): RuntimePromptMessage[] {
     return this.projectDetailed(input).messages;
   }
 }
 
-export function projectToolExecutionResult(execution: RuntimeTranscriptExecution): RuntimePromptToolResultPart["output"] {
+export function projectToolExecutionResult(execution: RuntimeTranscriptExecution, runId?: string | null, assistantRunId?: string | null, toolName?: string, toolCallId?: string): RuntimePromptToolResultPart["output"] {
   const error = reliableText(execution.error);
   const preview = reliableText(execution.resultPreview);
+  if (execution.imageRef && execution.status === "completed") {
+    if (toolName !== "view_image" || !execution.originRunId || execution.originRunId !== assistantRunId) {
+      throw new Error("image reference does not belong to its assistant call");
+    }
+    return runId && runId === execution.originRunId
+      ? execution.imageRef
+      : { type: "text", value: `[Image for toolCallId=${toolCallId ?? execution.callPartId} not included in this run: ${execution.imageRef.path}. Call view_image(path) to inspect it.]` };
+  }
   switch (execution.status) {
     case "unknown": {
       const value = preview ? `${UNKNOWN_TOOL_EXECUTION_RESULT}\n\nReliable result preview:\n${preview}` : UNKNOWN_TOOL_EXECUTION_RESULT;

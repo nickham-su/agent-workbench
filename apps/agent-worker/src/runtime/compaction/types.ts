@@ -19,7 +19,7 @@ export type PrimaryReplay = {
 
 export type PrimaryUserPart =
   | { type: "text"; text: string }
-  | { type: "attachment_ref"; workspaceId: string; attachmentId: string; mediaType: string; filename: string };
+  | { type: "attachment_ref"; workspaceId: string; attachmentId: string; mediaType: string; filename: string; path: string };
 
 export type PrimaryAssistantPart =
   | { type: "text"; text: string; providerReplay?: PrimaryReplay }
@@ -30,7 +30,7 @@ export type PrimaryToolResultPart = {
   type: "tool-result";
   toolCallId: string;
   toolName: string;
-  output: { type: "text"; value: string } | { type: "error-text"; value: string };
+  output: CompactionToolResultOutput;
 };
 
 export type PrimaryProviderNeutralMessage =
@@ -143,9 +143,11 @@ export type CompactionToolExecutionResult = {
   status: AgentToolExecutionStatus;
   resultPreview: string | null;
   error: string | null;
+  originRunId?: string | null;
+  imageRef?: { type: "image_ref"; path: string };
 };
 
-export type CompactionToolResultOutput = { type: "text"; value: string } | { type: "error-text"; value: string };
+export type CompactionToolResultOutput = { type: "text"; value: string } | { type: "error-text"; value: string } | { type: "image_ref"; path: string };
 
 export class CompactionPlanningError extends Error {
   constructor(readonly code: "data_invariant" | "profile_invalid", message: string) {

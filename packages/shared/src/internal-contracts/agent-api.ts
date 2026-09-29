@@ -101,4 +101,5 @@ export * from "./agent-api-run.js";
 export * from "./agent-api-message.js";
 export * from "./agent-api-subtask.js";
 export * from "./agent-api-read.js";
+export * from "./agent-image.js";
 export * from "./agent-provider-replay.js";

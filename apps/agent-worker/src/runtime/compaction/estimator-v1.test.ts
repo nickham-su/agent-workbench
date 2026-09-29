@@ -72,8 +72,8 @@ test("EstimatorV1 golden matrix maps simple roles, assistant forms, Unicode and 
     }],
     [[{ role: "user", content: [
       { type: "text", text: "请看截图" },
-      { type: "attachment_ref", workspaceId: "ws", attachmentId: "secret", mediaType: "image/png", filename: "private.png" },
-      { type: "attachment_ref", workspaceId: "ws", attachmentId: "another", mediaType: "image/jpeg", filename: "other.jpg" },
+      { type: "attachment_ref", workspaceId: "ws", attachmentId: "secret", mediaType: "image/png", filename: "private.png", path: "repo/private.png" },
+      { type: "attachment_ref", workspaceId: "ws", attachmentId: "another", mediaType: "image/jpeg", filename: "other.jpg", path: "repo/other.jpg" },
     ] }], {
       canonicalMessages: [{ role: "user", content: [
         { type: "text", text: "请看截图" },
@@ -146,7 +146,7 @@ test("EstimatorV1 counts attachments from metadata without reading bytes", () =>
     role: "user",
     content: [
       { type: "text", text: "look" },
-      { type: "attachment_ref", workspaceId: "ws", attachmentId: "secret-attachment", mediaType: "image/png", filename: "private.png" },
+      { type: "attachment_ref", workspaceId: "ws", attachmentId: "secret-attachment", mediaType: "image/png", filename: "private.png", path: "repo/private.png" },
     ],
   }]));
   assert.match(result.canonicalJson, /"filename":"<filename>"/);

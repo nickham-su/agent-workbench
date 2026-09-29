@@ -24,7 +24,7 @@ test("Summary input retains visible semantic content but strips private replay a
   const result = materializeSummaryInputBlock(source.blocks[0]!);
   assert.deepEqual(result.messages, [{ role: "user", content: [
     { type: "text", text: "look" },
-    { type: "attachment", mediaType: "image/png", filename: "screen.png" },
+    { type: "text", text: "[Image path: repo/screen.png; contents not included in summary]" },
   ] }]);
   const serialized = JSON.stringify(result);
   assert.equal(serialized.includes("attachmentId"), false);

@@ -78,6 +78,15 @@ export function validateCompactionSourceBlock(block: CompactionSourceBlock): Val
   if (calls.length !== executionsByCallPartId.size) fail(block, "has a tool-call and execution set mismatch");
   for (const call of calls) {
     if (!executionsByCallPartId.has(call.id)) fail(block, "contains a tool-call without its execution");
+    const execution = executionsByCallPartId.get(call.id)!;
+    if ("imageRef" in execution && execution.imageRef && (call.toolName !== "view_image"
+      || execution.status !== "completed"
+      || !execution.originRunId
+      || execution.originRunId !== block.message.originRunId
+      || execution.originRunId !== block.physical.originRunId
+      || execution.imageRef.path !== call.input.path)) {
+      fail(block, "contains image metadata that does not match its tool call");
+    }
   }
 
   const replayByPartId = new Map<string, ReplayEntry["envelope"]>();

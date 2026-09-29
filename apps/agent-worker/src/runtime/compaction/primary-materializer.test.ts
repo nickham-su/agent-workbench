@@ -20,12 +20,12 @@ test("Primary materializer preserves trigger attachment references without readi
   source.blocks[0]!.message = { ...source.blocks[0]!.message, parts: [...source.blocks[0]!.message.parts,
     { id: "old-image", messageId: "m1", position: 1, type: "image", attachmentId: "old-secret", mediaType: "image/jpeg", filename: "old.jpg", updatedRevision: 1, createdAt: 1, updatedAt: 1 }],
   } as typeof source.blocks[number]["message"];
-  source.blocks[0]!.attachments.push({ partId: "old-image", attachmentId: "old-secret", mediaType: "image/jpeg", filename: "old.jpg" });
+  source.blocks[0]!.attachments.push({ partId: "old-image", attachmentId: "old-secret", mediaType: "image/jpeg", filename: "old.jpg", relativePath: null });
   const [historical, trigger] = materializePrimaryBlocks({ source, profile: testProfile });
-  assert.deepEqual(historical!.messages, [{ role: "user", content: "older\n\n[This user message included 1 image attachment(s). Their image contents are not included in this run.]" }]);
+  assert.deepEqual(historical!.messages, [{ role: "user", content: "older\n\n[Historical image 1 has no available Workspace path.]\n[Image contents are not included in this run. Call view_image with a path above if needed.]" }]);
   assert.deepEqual(trigger!.messages, [{ role: "user", content: [
     { type: "text", text: "now" },
-    { type: "attachment_ref", workspaceId: "ws", attachmentId: "attachment", mediaType: "image/png", filename: "screen.png" },
+    { type: "attachment_ref", workspaceId: "ws", attachmentId: "attachment", mediaType: "image/png", filename: "screen.png", path: "repo/screen.png" },
   ] }]);
   assert.equal(trigger!.containsTriggerMedia, true);
   assert.equal(JSON.stringify(trigger).includes("bytes"), false);

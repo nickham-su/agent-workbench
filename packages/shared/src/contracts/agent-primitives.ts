@@ -6,7 +6,8 @@ export const AgentSessionKindSchema = Type.Union([Type.Literal("primary"), Type.
 export type AgentSessionKind = Static<typeof AgentSessionKindSchema>;
 
 export const AgentMcpToolNameSchema = Type.String({ pattern: "^mcp_[A-Za-z0-9_-]+_[A-Za-z0-9_-]+$" });
-export const AgentContextToolNameSchema = Type.Union([
+/** New callable context tools; the historical visual_analyze name is intentionally absent. */
+export const AgentCallableContextToolNameSchema = Type.Union([
   Type.Literal("bash"),
   Type.Literal("read"),
   Type.Literal("write"),
@@ -15,11 +16,18 @@ export const AgentContextToolNameSchema = Type.Union([
   Type.Literal("todolist"),
   Type.Literal("subtask"),
   Type.Literal("skill"),
-  Type.Literal("visual_analyze"),
+  Type.Literal("view_image"),
   Type.Literal("archive_read"),
   Type.Literal("archive_search"),
   AgentMcpToolNameSchema,
   PluginToolCanonicalNameSchema
+]);
+export type AgentCallableContextToolName = Static<typeof AgentCallableContextToolNameSchema>;
+
+/** Read-side union: persisted tool calls must remain readable after retiring the old tool. */
+export const AgentContextToolNameSchema = Type.Union([
+  AgentCallableContextToolNameSchema,
+  Type.Literal("visual_analyze")
 ]);
 export type AgentContextToolName = Static<typeof AgentContextToolNameSchema>;
 

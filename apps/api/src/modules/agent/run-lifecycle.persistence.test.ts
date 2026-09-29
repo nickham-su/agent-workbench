@@ -1,17 +1,22 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
+import path from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, test } from "node:test";
+import { dbPath } from "../../infra/fs/paths.js";
 import { newSortableId } from "../../utils/ids.js";
 import { createAgentService } from "./agent.composition.js";
-import { agentAttachmentFilePath, agentAttachmentTempFilePath } from "./attachments/agent-attachment-paths.js";
+import { agentAttachmentRelativePath, agentAttachmentStorageKey, agentAttachmentTempFilePath } from "./attachments/agent-attachment-paths.js";
 import {
-  AgentAttachmentCommitError,
-  commitAgentAttachmentTempFile,
+  prepareAgentWorkspaceAttachmentPublication,
   createAgentAttachmentTempFile,
+  resolveSafeWorkspaceAgentAttachment,
+  removeAgentWorkspaceAttachmentFinalFile,
   removeAgentAttachmentTempFile,
 } from "./attachments/agent-attachment-storage.js";
+import { getWorkspace } from "../workspaces/workspace.store.js";
 import { RunLifecycleApplication } from "./lifecycle/run-lifecycle-application.js";
-import type { RunLifecycleApplicationDependencies } from "./lifecycle/run-lifecycle-ports.js";
+import type { RunLifecycleApplicationDependencies, UserRunActivationInput } from "./lifecycle/run-lifecycle-ports.js";
 import {
   appendMessage,
   createMessageSession,
@@ -113,9 +118,31 @@ async function stageImage(fixture: AgentTestFixture, suffix: string) {
   const tempId = newSortableId("tmp");
   const attachmentId = newSortableId("att");
   const handle = await createAgentAttachmentTempFile({ dataDir: fixture.dataDir, tempId });
-  await handle.writeFile(Uint8Array.from([1, 2, 3]));
+  await handle.writeFile(Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
   await handle.close();
-  return { attachmentId, storageKey: attachmentId, tempId, filename: "image.png", mediaType: "image/png" as const, byteSize: 3, position: 0 };
+  return { attachmentId, storageKey: agentAttachmentStorageKey(attachmentId, "image/png"), tempId, filename: "image.png", mediaType: "image/png" as const, byteSize: 8, position: 0 };
+}
+
+function finalPath(fixture: AgentTestFixture, workspaceId: string, image: { attachmentId: string; storageKey: string; mediaType: "image/png" }) {
+  const workspace = getWorkspace(fixture.db, workspaceId);
+  assert.ok(workspace);
+  return path.join(workspace.path, agentAttachmentRelativePath(image.attachmentId, image.storageKey, image.mediaType));
+}
+
+function createStorageCommitter(fixture: AgentTestFixture): NonNullable<RunLifecycleApplicationDependencies["attachmentCommitter"]> {
+  return {
+    prepare: async ({ workspaceId, image }) => {
+      const workspace = getWorkspace(fixture.db, workspaceId);
+      assert.ok(workspace);
+      return prepareAgentWorkspaceAttachmentPublication({ dataDir: fixture.dataDir, workspaceDirName: workspace.dirName, attachmentId: image.attachmentId, storageKey: image.storageKey, mediaType: image.mediaType, tempId: image.tempId });
+    },
+    removeTemp: async ({ tempId }) => { await removeAgentAttachmentTempFile({ dataDir: fixture.dataDir, tempId }); },
+    removeFinal: async ({ workspaceId, image, owned }) => {
+      const workspace = getWorkspace(fixture.db, workspaceId);
+      assert.ok(workspace);
+      await removeAgentWorkspaceAttachmentFinalFile({ dataDir: fixture.dataDir, workspaceDirName: workspace.dirName, attachmentId: image.attachmentId, storageKey: image.storageKey, mediaType: image.mediaType, owned });
+    },
+  };
 }
 
 function createApplicationWithStorage(params: {
@@ -132,11 +159,7 @@ function createApplicationWithStorage(params: {
     promptStaticCacheInvalidator: { clear: () => undefined },
     runCompletedEventPublisher: { publishRunCompleted: () => undefined },
     persistence: params.persistence,
-    attachmentCommitter: params.attachmentCommitter ?? {
-      commit: async ({ workspaceId, image }) => { await commitAgentAttachmentTempFile({ dataDir: params.fixture.dataDir, workspaceId, attachmentId: image.attachmentId, tempId: image.tempId }); },
-      removeTemp: async ({ tempId }) => { await removeAgentAttachmentTempFile({ dataDir: params.fixture.dataDir, tempId }); },
-      removeFinal: async ({ workspaceId, image }) => { await fs.rm(agentAttachmentFilePath(params.fixture.dataDir, workspaceId, image.attachmentId), { force: true }); },
-    },
+    attachmentCommitter: params.attachmentCommitter ?? createStorageCommitter(params.fixture),
     triggerInputReader: { getUserText: () => null },
     isContextAppendConflict: () => false,
     runtimeHandoffCoordinator: params.coordinator ?? new SessionRuntimeHandoffCoordinator(),
@@ -147,33 +170,35 @@ function createApplicationWithStorage(params: {
   return new RunLifecycleApplication(dependencies);
 }
 
-test("H1 real SQLite/FS: DB activation failure deletes this request final without creating Message graph", async () => {
+test("H1 real SQLite/FS: pre-publication DB conflict creates no final or Message graph", async () => {
   const fixture = await createAgentTestFixture({ agentWorkerConcurrency: 0 });
   fixtures.push(fixture);
   const workspace = await createTestWorkspace(fixture, { title: "H1 database failure" });
   const image = await stageImage(fixture, "db_failure");
   const application = createApplicationWithStorage({ fixture, persistence: new SqliteRunLifecyclePersistence(fixture.db) });
   await assert.rejects(() => application.startUserRun({ workspaceId: workspace.id, sessionId: "sess_missing", clientRequestId: "h1-db-failure", text: "image", inputText: "image", images: [image], agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", uiLocale: null, runtime: createFakeAgentRuntime() }));
-  await assert.rejects(() => fs.access(agentAttachmentFilePath(fixture.dataDir, workspace.id, image.attachmentId)));
+  await assert.rejects(() => fs.access(finalPath(fixture, workspace.id, image)));
+  await assert.rejects(() => fs.access(agentAttachmentTempFilePath(fixture.dataDir, image.tempId)));
   assert.equal((fixture.db.prepare("select count(*) as count from agent_attachment").get() as { count: number }).count, 0);
   assert.equal((fixture.db.prepare("select count(*) as count from agent_message").get() as { count: number }).count, 0);
   assert.equal((fixture.db.prepare("select count(*) as count from agent_run").get() as { count: number }).count, 0);
 });
 
-test("M6 real SQLite/FS: second attachment EEXIST removes only the request-owned first final", async () => {
+test("M6 real SQLite/FS: second attachment EEXIST rejects before publishing the first", async () => {
   const { fixture, workspace, sessionId } = await createMessageLifecycleFixture("M6 EEXIST");
   const first = await stageImage(fixture, "first");
   const second = await stageImage(fixture, "second");
-  const existingFinal = agentAttachmentFilePath(fixture.dataDir, workspace.id, second.attachmentId);
+  const existingFinal = finalPath(fixture, workspace.id, second);
   await fs.mkdir((await import("node:path")).dirname(existingFinal), { recursive: true });
+  await fs.chmod(path.dirname(existingFinal), 0o700);
   await fs.writeFile(existingFinal, "existing");
   const application = createApplicationWithStorage({ fixture, persistence: new SqliteRunLifecyclePersistence(fixture.db) });
 
   await assert.rejects(
     () => application.startUserRun({ workspaceId: workspace.id, sessionId, clientRequestId: "m6-eexist", text: "two", inputText: "two", images: [first, { ...second, position: 1 }], agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", uiLocale: null, runtime: createFakeAgentRuntime() }),
-    (error: unknown) => error instanceof AgentAttachmentCommitError && !error.finalCreated && (error.cause as NodeJS.ErrnoException).code === "EEXIST",
+    /attachment final name is occupied/,
   );
-  await assert.rejects(() => fs.access(agentAttachmentFilePath(fixture.dataDir, workspace.id, first.attachmentId)));
+  await assert.rejects(() => fs.access(finalPath(fixture, workspace.id, first)));
   assert.equal(await fs.readFile(existingFinal, "utf8"), "existing");
   await assert.rejects(() => fs.access(agentAttachmentTempFilePath(fixture.dataDir, first.tempId)));
   await assert.rejects(() => fs.access(agentAttachmentTempFilePath(fixture.dataDir, second.tempId)));
@@ -186,28 +211,23 @@ test("M6 real SQLite/FS: unlink failure after link is cleaned through applicatio
   const { fixture, workspace, sessionId } = await createMessageLifecycleFixture("M6 unlink");
   const image = await stageImage(fixture, "unlink");
   const persistence = new SqliteRunLifecyclePersistence(fixture.db);
-  const attachmentCommitter: NonNullable<RunLifecycleApplicationDependencies["attachmentCommitter"]> = {
-    commit: async ({ workspaceId, image: current }) => { await commitAgentAttachmentTempFile({
-      dataDir: fixture.dataDir, workspaceId, attachmentId: current.attachmentId, tempId: current.tempId,
-    }); },
-    removeTemp: async ({ tempId }) => await removeAgentAttachmentTempFile({ dataDir: fixture.dataDir, tempId }),
-    removeFinal: async ({ workspaceId, image: current }) => await fs.rm(agentAttachmentFilePath(fixture.dataDir, workspaceId, current.attachmentId), { force: true }),
-  };
+  const attachmentCommitter: NonNullable<RunLifecycleApplicationDependencies["attachmentCommitter"]> = createStorageCommitter(fixture);
   const application = createApplicationWithStorage({ fixture, persistence, attachmentCommitter });
   await application.startUserRun({ workspaceId: workspace.id, sessionId, clientRequestId: "m6-unlink", text: "image", inputText: "image", images: [image], agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", uiLocale: null, runtime: createFakeAgentRuntime() });
-  await assert.doesNotReject(() => fs.access(agentAttachmentFilePath(fixture.dataDir, workspace.id, image.attachmentId)));
+  await assert.doesNotReject(() => fs.access(finalPath(fixture, workspace.id, image)));
   await assert.rejects(() => fs.access(agentAttachmentTempFilePath(fixture.dataDir, image.tempId)));
   assert.equal((fixture.db.prepare("select count(*) as count from agent_attachment").get() as { count: number }).count, 1);
 });
 
-test("M6 real SQLite/FS: SQLite trigger abort after attachment insert rolls back graph and removes final", async () => {
+test("M6 real SQLite/FS: SQLite trigger abort rolls back graph but retains final orphan", async () => {
   const { fixture, workspace, sessionId } = await createMessageLifecycleFixture("M6 trigger");
   const image = await stageImage(fixture, "trigger");
   fixture.db.exec(`create trigger test_m6_abort before insert on agent_message begin select raise(abort, 'm6'); end`);
   const application = createApplicationWithStorage({ fixture, persistence: new SqliteRunLifecyclePersistence(fixture.db) });
 
   await assert.rejects(() => application.startUserRun({ workspaceId: workspace.id, sessionId, clientRequestId: "m6-trigger", text: "image", inputText: "image", images: [image], agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", uiLocale: null, runtime: createFakeAgentRuntime() }));
-  await assert.rejects(() => fs.access(agentAttachmentFilePath(fixture.dataDir, workspace.id, image.attachmentId)));
+  await assert.doesNotReject(() => fs.access(finalPath(fixture, workspace.id, image)));
+  await assert.rejects(() => fs.access(agentAttachmentTempFilePath(fixture.dataDir, image.tempId)));
   for (const table of ["agent_attachment", "agent_message", "agent_message_part", "agent_run", "agent_client_request"]) {
     const count = (fixture.db.prepare(`select count(*) as count from ${table}`).get() as { count: number }).count;
     assert.equal(count, 0);
@@ -233,7 +253,7 @@ test("H1 real SQLite/FS: cancel before final fence keeps Message、attachment an
   assert.deepEqual(runtime.enqueueRunCalls, []);
   assert.equal((fixture.db.prepare("select count(*) as count from agent_attachment where id = ?").get(image.attachmentId) as { count: number }).count, 1);
   assert.equal((fixture.db.prepare("select status from agent_run order by created_at desc limit 1").get() as { status: string }).status, "cancelled");
-  await assert.doesNotReject(() => fs.access(agentAttachmentFilePath(fixture.dataDir, workspace.id, image.attachmentId)));
+  await assert.doesNotReject(() => fs.access(finalPath(fixture, workspace.id, image)));
 });
 
 test("M2 real SQLite: activation 后 state read 失败持久化失败 intent，随后可收敛为 failed/idle", async () => {
@@ -324,4 +344,121 @@ test("P4 real SQLite: completing an old Run does not idle a newer active Run", a
   assert.equal(getRunRecord(fixture.db, activeRunId)?.status, "running");
   assert.equal(getMessageRunState(fixture.db, workspace.id, sessionId)?.status, "running");
   assert.equal(getMessageRunState(fixture.db, workspace.id, sessionId)?.activeRunId, activeRunId);
+});
+test("real SQLite/FS: overlapping prepared requests publish only the transaction winner", async () => {
+  for (const sameRequestId of [true, false]) {
+    const { fixture, workspace, sessionId } = await createMessageLifecycleFixture("overlapping uploads");
+    const first = await stageImage(fixture, "concurrent-a");
+    const second = await stageImage(fixture, "concurrent-b");
+    const base = createStorageCommitter(fixture);
+    let preparations = 0;
+    let release!: () => void;
+    const bothPrepared = new Promise<void>((resolve) => { release = resolve; });
+    const storage = {
+      ...base,
+      prepare: async (input: Parameters<typeof base.prepare>[0]) => {
+        const publication = await base.prepare(input);
+        if (++preparations === 2) release();
+        await bothPrepared;
+        return publication;
+      },
+    };
+    const persistence = new SqliteRunLifecyclePersistence(fixture.db);
+    const start = (image: typeof first, id: string) => createApplicationWithStorage({ fixture, persistence, attachmentCommitter: storage })
+      .startUserRun({ workspaceId: workspace.id, sessionId, clientRequestId: id, text: "image", inputText: "image",
+        images: [image], agentId: "default", providerId: "ppchat", modelId: "gpt-5.2", uiLocale: null, runtime: createFakeAgentRuntime() });
+    const firstRun = start(first, "concurrent-request");
+    const secondRun = start(second, sameRequestId ? "concurrent-request" : "other-request");
+    const results = await Promise.allSettled([firstRun, secondRun]);
+    assert.equal(preparations, 2);
+    const winners = results.flatMap((result, index) => result.status === "fulfilled" && !result.value.deduplicated ? [index] : []);
+    assert.equal(winners.length, 1);
+    if (sameRequestId) {
+      assert.equal(results.filter((result) => result.status === "fulfilled").length, 2);
+      assert.equal((results.find((result) => result.status === "fulfilled" && result.value.deduplicated) as PromiseFulfilledResult<{ runId: string }>).value.runId,
+        (results[winners[0]!] as PromiseFulfilledResult<{ runId: string }>).value.runId);
+    } else {
+      assert.equal(results.filter((result) => result.status === "rejected").length, 1);
+    }
+    for (const [index, image] of [first, second].entries()) {
+      if (index === winners[0]) await assert.doesNotReject(() => fs.access(finalPath(fixture, workspace.id, image)));
+      else await assert.rejects(() => fs.access(finalPath(fixture, workspace.id, image)));
+      await assert.rejects(() => fs.access(agentAttachmentTempFilePath(fixture.dataDir, image.tempId)));
+    }
+    assert.equal((fixture.db.prepare("select count(*) as count from agent_attachment").get() as { count: number }).count, 1);
+  }
+});
+
+test("real SQLite/FS: stale session title rejects before publishing final", async () => {
+  const { fixture, workspace, sessionId } = await createMessageLifecycleFixture("stale title");
+  const image = await stageImage(fixture, "title");
+  const application = createApplicationWithStorage({ fixture, persistence: new SqliteRunLifecyclePersistence(fixture.db) });
+  await assert.rejects(() => application.startUserRun({ workspaceId: workspace.id, sessionId, clientRequestId: "stale-title",
+    text: "image", inputText: "image", images: [image], agentId: "default", providerId: "ppchat", modelId: "gpt-5.2",
+    uiLocale: null, expectedSessionTitle: "outdated", runtime: createFakeAgentRuntime() }));
+  await assert.rejects(() => fs.access(finalPath(fixture, workspace.id, image)));
+  await assert.rejects(() => fs.access(agentAttachmentTempFilePath(fixture.dataDir, image.tempId)));
+});
+
+test("two SQLite connections: a rival cannot publish before the winner commits, then observes dedup/state", async () => {
+  const { fixture, workspace, sessionId } = await createMessageLifecycleFixture("two connection publication");
+  const winnerImage = await stageImage(fixture, "writer");
+  const rivalImage = await stageImage(fixture, "rival");
+  const prepare = (image: typeof winnerImage) => prepareAgentWorkspaceAttachmentPublication({
+    dataDir: fixture.dataDir, workspaceDirName: workspace.dirName, attachmentId: image.attachmentId,
+    storageKey: image.storageKey, mediaType: image.mediaType, tempId: image.tempId,
+  });
+  const winnerPublication = await prepare(winnerImage);
+  const rivalPublication = await prepare(rivalImage);
+  const rivalDb = new Database(dbPath(fixture.dataDir));
+  // A real rival connection, not another persistence object sharing the API db handle.
+  // Do not sleep on the same event loop while the winning transaction holds the lock.
+  rivalDb.pragma("busy_timeout = 0");
+  rivalDb.pragma("foreign_keys = ON");
+  try {
+    const winnerPersistence = new SqliteRunLifecyclePersistence(fixture.db);
+    const rivalPersistence = new SqliteRunLifecyclePersistence(rivalDb);
+    const request = (image: typeof winnerImage, clientRequestId: string): UserRunActivationInput => ({
+      workspaceId: workspace.id, sessionId, clientRequestId, text: "describe", images: [image],
+      runId: newSortableId("run"), agentId: "default", providerId: "ppchat", modelId: "gpt-5.2",
+      uiLocale: null, createdAt: Date.now(),
+    });
+    const winnerInput = request(winnerImage, "same-request");
+    const rivalInput = request(rivalImage, "same-request");
+    const idleOnRival = rivalDb.prepare("select status from session_run_state where session_id = ?").get(sessionId) as { status: string };
+    assert.equal(idleOnRival.status, "idle");
+    let rivalPublishes = 0;
+    const rivalPublish = () => { rivalPublishes++; rivalPublication.checkAvailable(); rivalPublication.publish(); };
+
+    const winner = winnerPersistence.activateUserRun(winnerInput, () => {
+      // If BEGIN were deferred, the rival could pass its read checks and reach
+      // rivalPublish here before either transaction's first DB write.
+      assert.throws(() => rivalPersistence.activateUserRun(rivalInput, rivalPublish),
+        (error: unknown) => (error as { code?: string }).code === "SQLITE_BUSY");
+      assert.equal(rivalPublishes, 0);
+      winnerPublication.checkAvailable();
+      winnerPublication.publish();
+    });
+    assert.equal(winner.kind, "activated");
+    assert.equal(rivalPublishes, 0);
+    assert.equal(rivalPersistence.activateUserRun(rivalInput, rivalPublish).kind, "deduplicated");
+    assert.equal(rivalPersistence.activateUserRun(request(rivalImage, "different-request"), rivalPublish).kind, "session-running");
+    assert.equal(rivalPublishes, 0);
+
+    const pinned = await resolveSafeWorkspaceAgentAttachment({ dataDir: fixture.dataDir,
+      workspaceDirName: workspace.dirName, attachmentId: winnerImage.attachmentId,
+      storageKey: winnerImage.storageKey, mediaType: winnerImage.mediaType, expectedByteSize: winnerImage.byteSize });
+    assert.ok(pinned);
+    try {
+      assert.deepEqual(await pinned.handle.readFile(), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    } finally {
+      await pinned.handle.close();
+    }
+    await assert.rejects(() => fs.access(finalPath(fixture, workspace.id, rivalImage)));
+    assert.equal((fixture.db.prepare("select count(*) as count from agent_attachment").get() as { count: number }).count, 1);
+  } finally {
+    rivalDb.close();
+    await Promise.all([winnerPublication.close(), rivalPublication.close()]);
+    await Promise.all([winnerImage, rivalImage].map(({ tempId }) => removeAgentAttachmentTempFile({ dataDir: fixture.dataDir, tempId })));
+  }
 });

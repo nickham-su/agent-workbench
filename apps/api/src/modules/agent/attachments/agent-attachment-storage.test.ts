@@ -22,12 +22,8 @@ import {
   AgentAttachmentCommitError,
   assertAgentImageByteSize,
   cleanupAgedAgentAttachmentTempFiles,
-  commitAgentAttachmentTempFile,
   createAgentAttachmentTempFile,
-  removeAgentAttachmentWorkspaceDirectory,
   removeAgentAttachmentTempFile,
-  removeAgentAttachmentFinalFile,
-  resolveSafeAgentAttachmentContentPath,
   sanitizeAgentImageFilename
 } from "./agent-attachment-storage.js";
 import { openSecureRootDirectory, removeSecureDirectoryTree } from "../../../infra/fs/secure-directory.js";
@@ -88,77 +84,6 @@ test("attachment limits and filename normalization enforce V1 bounds", () => {
   const longName = sanitizeAgentImageFilename(`${"x".repeat(300)}.svg`, "jpg");
   assert.equal([...longName].length, 255);
   assert.equal(longName.endsWith(".jpg"), true);
-});
-
-test("attachment storage creates private temp files and commits final files without overwriting", async () => {
-  const dataDir = await createDataDir();
-  const workspaceId = "ws_a";
-  const tempId = "tmp_a";
-  const attachmentId = "att_a";
-  const handle = await createAgentAttachmentTempFile({ dataDir, tempId });
-  await handle.writeFile(Uint8Array.from([1, 2, 3]));
-  await handle.close();
-
-  const tempStat = await fs.stat(agentAttachmentTempFilePath(dataDir, tempId));
-  assert.equal(tempStat.mode & 0o077, 0);
-  const finalPath = await commitAgentAttachmentTempFile({ dataDir, workspaceId, attachmentId, tempId });
-  assert.equal(await fs.readFile(finalPath, "utf8"), "\u0001\u0002\u0003");
-  await assert.rejects(
-    () => commitAgentAttachmentTempFile({ dataDir, workspaceId, attachmentId, tempId: "tmp_b" }),
-    (error: unknown) => error instanceof AgentAttachmentCommitError
-      && !error.finalCreated
-      && (error.cause as NodeJS.ErrnoException).code === "ENOENT",
-  );
-
-  const duplicate = await createAgentAttachmentTempFile({ dataDir, tempId: "tmp_b" });
-  await duplicate.close();
-  await assert.rejects(
-    () => commitAgentAttachmentTempFile({ dataDir, workspaceId, attachmentId, tempId: "tmp_b" }),
-    (error: unknown) => error instanceof AgentAttachmentCommitError
-      && !error.finalCreated
-      && (error.cause as NodeJS.ErrnoException).code === "EEXIST",
-  );
-  await removeAgentAttachmentTempFile({ dataDir, tempId: "tmp_b" });
-});
-
-test("attachment content resolver rejects a symlink escape", async () => {
-  const dataDir = await createDataDir();
-  const workspaceId = "ws_a";
-  const attachmentId = "att_escape";
-  const finalPath = agentAttachmentFilePath(dataDir, workspaceId, attachmentId);
-  const outside = path.join(dataDir, "outside");
-  await fs.mkdir(path.dirname(finalPath), { recursive: true });
-  await fs.mkdir(outside);
-  await fs.writeFile(path.join(outside, attachmentId), "abc");
-  await fs.symlink(path.join(outside, attachmentId), finalPath);
-  const resolved = await resolveSafeAgentAttachmentContentPath({
-    dataDir,
-    workspaceId,
-    storageKey: attachmentId,
-    expectedByteSize: 3,
-  });
-
-  assert.equal(resolved, null);
-});
-
-test("attachment temp 与发布目录的预置 symlink 不会写入 dataDir 外", async () => {
-  const dataDir = await createDataDir();
-  const outside = path.join(dataDir, "outside");
-  await fs.mkdir(outside);
-  const attachments = agentAttachmentsRoot(dataDir);
-  await fs.mkdir(attachments, { recursive: true });
-  await fs.symlink(outside, path.join(attachments, "temp"));
-  await assert.rejects(() => createAgentAttachmentTempFile({ dataDir, tempId: "tmp_escape" }));
-  await assert.deepEqual(await fs.readdir(outside), []);
-
-  await fs.unlink(path.join(attachments, "temp"));
-  const temp = await createAgentAttachmentTempFile({ dataDir, tempId: "tmp_commit" });
-  await temp.writeFile("safe");
-  await temp.close();
-  await fs.symlink(outside, path.join(attachments, "by_workspace"));
-  await assert.rejects(() => commitAgentAttachmentTempFile({ dataDir, workspaceId: "ws_escape", attachmentId: "att_escape", tempId: "tmp_commit" }));
-  await assert.deepEqual(await fs.readdir(outside), []);
-  await assert.doesNotReject(() => fs.access(agentAttachmentTempFilePath(dataDir, "tmp_commit")));
 });
 
 test("固定目录 fd 在 inode 固定后拒绝删除替换到 quarantine 名称的 victim", async () => {
@@ -320,136 +245,6 @@ test("attachment temp 创建后父目录替换时仅清理固定 inode 中的本
   await assert.deepEqual(await fs.readdir(tempDir), []);
 });
 
-test("attachment final 目录晚替换时只从固定 workspace fd 撤回本请求 inode", async () => {
-  const dataDir = await createDataDir();
-  const workspaceId = "ws_race";
-  const attachmentId = "att_race";
-  const tempId = "tmp_race";
-  const temp = await createAgentAttachmentTempFile({ dataDir, tempId });
-  await temp.writeFile("secret");
-  await temp.close();
-  const workspaceDir = agentAttachmentWorkspaceDir(dataDir, workspaceId);
-  const movedWorkspaceDir = path.join(dataDir, "moved-workspace");
-  await assert.rejects(
-    () => commitAgentAttachmentTempFile({
-      dataDir,
-      workspaceId,
-      attachmentId,
-      tempId,
-      afterLinkForTest: async () => {
-        await fs.rename(workspaceDir, movedWorkspaceDir);
-        await fs.mkdir(workspaceDir, { recursive: true });
-        await fs.writeFile(path.join(workspaceDir, attachmentId), "victim");
-      }
-    }),
-    (error: unknown) => error instanceof AgentAttachmentCommitError && !error.finalCreated && error.sourceCleanupPending,
-  );
-  await assert.deepEqual(await fs.readdir(movedWorkspaceDir), []);
-  await assert.equal(await fs.readFile(path.join(workspaceDir, attachmentId), "utf8"), "victim");
-});
-
-test("attachment final link 后 temp 父目录移动时明确标记 source cleanup pending", async () => {
-  const dataDir = await createDataDir();
-  const workspaceId = "ws_source_pending";
-  const attachmentId = "att_source-pending";
-  const tempId = "tmp_source-pending";
-  const temp = await createAgentAttachmentTempFile({ dataDir, tempId });
-  await temp.writeFile("source");
-  await temp.close();
-  const tempDir = agentAttachmentTempDir(dataDir);
-  const movedTempDir = path.join(dataDir, "moved-temp-after-link");
-
-  await assert.rejects(
-    () => commitAgentAttachmentTempFile({
-      dataDir,
-      workspaceId,
-      attachmentId,
-      tempId,
-      afterLinkForTest: async () => {
-        await fs.rename(tempDir, movedTempDir);
-        await fs.mkdir(tempDir);
-      },
-    }),
-    (error: unknown) => error instanceof AgentAttachmentCommitError && !error.finalCreated && error.sourceCleanupPending,
-  );
-  // final link 后 topology 复验失败时，source 会从旧 temp fd 转移到稳定 cleanup root。
-  await assert.rejects(() => fs.access(path.join(movedTempDir, `${tempId}.part`)));
-  const cleanup = path.join(agentAttachmentsRoot(dataDir), ".attachment-cleanup");
-  assert.equal((await fs.readdir(cleanup)).filter((name) => name.startsWith(".delete-v1-")).length, 1);
-});
-
-test("attachment source 已 retire 后 unlink EIO 会迁入稳定 root，并由后续 janitor 收敛", async () => {
-  const dataDir = await createDataDir();
-  const workspaceId = "ws_retired_source";
-  const attachmentId = "att_retired-source";
-  const tempId = "tmp_retired-source";
-  const temp = await createAgentAttachmentTempFile({ dataDir, tempId });
-  await temp.writeFile("source");
-  await temp.close();
-  const tempDir = agentAttachmentTempDir(dataDir);
-  const movedTempDir = path.join(dataDir, "moved-temp-retired-source");
-  let unlinkAttempts = 0;
-  await assert.rejects(
-    () => commitAgentAttachmentTempFile({
-      dataDir,
-      workspaceId,
-      attachmentId,
-      tempId,
-      afterSourceRetireForTest: async () => {
-        await fs.rename(tempDir, movedTempDir);
-        await fs.mkdir(tempDir);
-      },
-      removeSourceRetiredForTest: () => ++unlinkAttempts > 2,
-    }),
-    (error: unknown) => error instanceof AgentAttachmentCommitError && !error.finalCreated && error.sourceCleanupPending,
-  );
-  assert.ok(unlinkAttempts >= 2);
-  await assert.rejects(() => fs.access(path.join(movedTempDir, `${tempId}.part`)));
-  const cleanup = path.join(agentAttachmentsRoot(dataDir), ".attachment-cleanup");
-  assert.equal((await fs.readdir(cleanup)).filter((name) => name.startsWith(".delete-v1-")).length, 1);
-  await cleanupAgedAgentAttachmentTempFiles({ dataDir, nowMs: Date.now(), maxAgeMs: 0 });
-  assert.deepEqual(await fs.readdir(cleanup), []);
-});
-
-test("attachment resolver returns an already-open inode after pathname replacement", async () => {
-  const dataDir = await createDataDir();
-  const workspaceId = "ws_a";
-  const attachmentId = "att_a";
-  const handle = await createAgentAttachmentTempFile({ dataDir, tempId: "tmp_a" });
-  await handle.writeFile("authorized");
-  await handle.close();
-  const finalPath = await commitAgentAttachmentTempFile({ dataDir, workspaceId, attachmentId, tempId: "tmp_a" });
-  const resolved = await resolveSafeAgentAttachmentContentPath({ dataDir, workspaceId, storageKey: attachmentId, expectedByteSize: 10 });
-  assert.ok(resolved);
-  const replacement = path.join(dataDir, "other-workspace-file");
-  await fs.writeFile(replacement, "forbidden");
-  await fs.unlink(finalPath);
-  await fs.symlink(replacement, finalPath);
-  const stream = createReadStream(resolved.filePath, { fd: resolved.handle.fd, autoClose: false });
-  const chunks: Buffer[] = [];
-  await new Promise<void>((resolve, reject) => {
-    stream.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
-    stream.once("end", resolve);
-    stream.once("error", reject);
-  });
-  await resolved.handle.close();
-  assert.equal(Buffer.concat(chunks).toString("utf8"), "authorized");
-});
-
-test("attachment commit reports a request-owned final when temp unlink fails", async () => {
-  const dataDir = await createDataDir();
-  const workspaceId = "ws_a";
-  const attachmentId = "att_linked";
-  const tempId = "tmp_linked";
-  const handle = await createAgentAttachmentTempFile({ dataDir, tempId });
-  await handle.writeFile(Uint8Array.from([1, 2, 3]));
-  await handle.close();
-
-  await commitAgentAttachmentTempFile({ dataDir, workspaceId, attachmentId, tempId });
-  await assert.doesNotReject(() => fs.access(agentAttachmentFilePath(dataDir, workspaceId, attachmentId)));
-  await assert.rejects(() => fs.access(agentAttachmentTempFilePath(dataDir, tempId)));
-});
-
 test("aged temp cleanup removes only old ordinary temp files", async () => {
   const dataDir = await createDataDir();
   const tempDir = agentAttachmentTempDir(dataDir);
@@ -518,7 +313,7 @@ test("aged temp janitor 仅处理业务 temp 名，并保留旧或 identity mism
   assert.equal(await fs.readFile(mismatch, "utf8"), "original");
 });
 
-test("附件业务名缺失时显式 remove 收敛关联普通私有槽，但 replacement 仍为 pending", async () => {
+test("临时文件业务名缺失时显式 remove 收敛关联普通私有槽", async () => {
   const dataDir = await createDataDir();
   const tempDir = agentAttachmentTempDir(dataDir);
   await fs.mkdir(tempDir, { recursive: true });
@@ -531,16 +326,6 @@ test("附件业务名缺失时显式 remove 收敛关联普通私有槽，但 re
   await fs.rename(source, stale);
   await removeAgentAttachmentTempFile({ dataDir, tempId: "tmp_retry" });
   await assert.rejects(() => fs.access(stale));
-
-  const finalDir = agentAttachmentWorkspaceDir(dataDir, "ws_retry");
-  await fs.mkdir(finalDir, { recursive: true });
-  const marker = path.join(finalDir, ".delete-replacement-pending-victim");
-  await fs.writeFile(marker, "victim");
-  await assert.rejects(
-    () => removeAgentAttachmentFinalFile({ dataDir, workspaceId: "ws_retry", attachmentId: "att_retry" }),
-    /replacement pending/,
-  );
-  assert.equal(await fs.readFile(marker, "utf8"), "victim");
 });
 
 test("aged temp cleanup does not follow a symlinked temp directory", async () => {
@@ -556,23 +341,4 @@ test("aged temp cleanup does not follow a symlinked temp directory", async () =>
   await fs.symlink(outside, tempDir);
   await cleanupAgedAgentAttachmentTempFiles({ dataDir, nowMs: now, maxAgeMs: 24 * 60 * 60 * 1000 });
   await assert.doesNotReject(() => fs.access(outsideFile));
-});
-
-test("workspace attachment cleanup never traverses symlinked ancestors", async () => {
-  const dataDir = await createDataDir();
-  const finalPath = agentAttachmentFilePath(dataDir, "ws_a", "att_a");
-  await fs.mkdir(path.dirname(finalPath), { recursive: true });
-  await fs.writeFile(finalPath, "image");
-  assert.equal(await removeAgentAttachmentWorkspaceDirectory({ dataDir, workspaceId: "ws_a" }), "removed");
-  await assert.rejects(() => fs.access(path.dirname(finalPath)));
-
-  const root = agentAttachmentsRoot(dataDir);
-  const byWorkspace = path.join(root, "by_workspace");
-  const outside = path.join(dataDir, "outside");
-  await fs.mkdir(outside);
-  await fs.rm(byWorkspace, { recursive: true, force: true });
-  await fs.writeFile(path.join(outside, "keep"), "keep");
-  await fs.symlink(outside, byWorkspace);
-  assert.equal(await removeAgentAttachmentWorkspaceDirectory({ dataDir, workspaceId: "ws_a" }), "skipped_unsafe");
-  await assert.doesNotReject(() => fs.access(path.join(outside, "keep")));
 });

@@ -26,7 +26,7 @@ export type ExecutionProfileResolverDependencies<Profile, Runtime> = {
  * runtime-enqueue dependency.
  */
 export class ExecutionProfileResolver<
-  Profile extends { agent: { id: string }; provider: { id: string }; model: { id: string }; vision: unknown; compaction: unknown },
+  Profile extends { agent: { id: string }; provider: { id: string }; model: { id: string }; compaction: unknown },
   Runtime
 > {
   constructor(private readonly dependencies: ExecutionProfileResolverDependencies<Profile, Runtime>) {}
@@ -56,7 +56,6 @@ export class ExecutionProfileResolver<
       agent: profile.agent,
       provider: profile.provider,
       model: profile.model,
-      vision: profile.vision,
       compaction: profile.compaction,
       runtime: this.dependencies.getRuntime()
     };

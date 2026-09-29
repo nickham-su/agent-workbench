@@ -6,9 +6,10 @@ import { afterEach, test } from "node:test";
 import type { FastifyBaseLogger } from "fastify";
 import type { AppContext } from "../../app/context.js";
 import { openDb } from "../../infra/db/db.js";
-import { getSettingJson } from "./settings.store.js";
+import { getSettingJson, setSettingJson } from "./settings.store.js";
 import {
   getAgentSettings,
+  getAgentRuntimeSettings,
   getAgentProviderModels,
   getAgentProvidersSettingsInternal,
   registerGlobalSystemPromptTextProvider,
@@ -281,7 +282,7 @@ test("agent settings persist archive tools while filtering hidden baseline tools
       tools: [
         "bash",
         "todolist",
-        "visual_analyze",
+        "view_image",
         "archive_read",
         "archive_search",
         "read",
@@ -296,13 +297,30 @@ test("agent settings persist archive tools while filtering hidden baseline tools
     }]
   });
 
-  assert.deepEqual(updated.agents[0]?.tools, ["bash", "todolist", "visual_analyze", "archive_read", "archive_search"]);
-  assert.deepEqual(getAgentSettings(ctx).agents[0]?.tools, ["bash", "todolist", "visual_analyze", "archive_read", "archive_search"]);
+  assert.deepEqual(updated.agents[0]?.tools, ["bash", "todolist", "view_image", "archive_read", "archive_search"]);
+  assert.deepEqual(getAgentSettings(ctx).agents[0]?.tools, ["bash", "todolist", "view_image", "archive_read", "archive_search"]);
   assert.deepEqual(
     (getSettingJson(db, AGENT_SETTINGS_KEY)?.value as { agents: Array<{ tools: string[] }> }).agents[0]?.tools,
-    ["bash", "todolist", "visual_analyze", "archive_read", "archive_search"]
+    ["bash", "todolist", "view_image", "archive_read", "archive_search"]
   );
 });
+test("old tool and vision settings remain readable without enabling the retired model or tool", async () => {
+  const { ctx, db } = await createFixture();
+  setSettingJson(db, AGENT_SETTINGS_KEY, { agents: [{
+    id: "agent_1", name: "Agent", summary: "", prompt: "", globalPromptIds: [],
+    tools: ["bash", "visual_analyze", "view_image"], mcpServers: [], pluginTools: [],
+    defaultModel: null, scope: "both", order: 0,
+  }] }, 1);
+  const settings = getAgentSettings(ctx);
+  assert.deepEqual(settings.agents[0]?.tools, ["bash", "view_image"]);
+  setSettingJson(db, "agent_runtime_v1", {
+    visionModel: { providerId: "old", modelId: "legacy" }, compactionModel: null,
+  }, 1);
+  const runtime = getAgentRuntimeSettings(ctx);
+  assert.equal("visionModel" in runtime, false);
+  assert.equal(JSON.stringify(runtime).includes("legacy"), false);
+});
+
 test("saving new Provider models strips reserved options without dropping legal settings", async () => {
   const { ctx } = await createFixture();
   updateAgentProvidersSettings(ctx, createLogger(), { default: null, providers: [{

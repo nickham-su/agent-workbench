@@ -16,8 +16,23 @@ function reliableText(value: string | null) {
   return normalized || null;
 }
 
+export function compactionToolImagePlaceholder(path: string, callId: string) {
+  return `[Image for toolCallId=${callId}: ${path}]\n[Image contents are not included. Call view_image with this path if needed.]`;
+}
+
 /** Exact semantic counterpart of API RuntimeTranscriptProjector.projectToolExecutionResult(). */
-export function projectCompactionToolExecutionResult(execution: CompactionToolExecutionResult): CompactionToolResultOutput {
+export function projectCompactionToolExecutionResult(execution: CompactionToolExecutionResult, options?: {
+  runId: string;
+  callId: string;
+  summary?: boolean;
+}): CompactionToolResultOutput {
+  if (execution.imageRef) {
+    if (execution.status !== "completed" || !execution.originRunId || !options) {
+      throw new Error("invalid compaction image execution");
+    }
+    if (!options.summary && execution.originRunId === options.runId) return execution.imageRef;
+    return { type: "text", value: compactionToolImagePlaceholder(execution.imageRef.path, options.callId) };
+  }
   const error = reliableText(execution.error);
   const preview = reliableText(execution.resultPreview);
   switch (execution.status) {

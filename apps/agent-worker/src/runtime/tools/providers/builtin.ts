@@ -1,6 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { ModelMessage } from "ai";
+import { Value } from "@sinclair/typebox/value";
+import { AgentWorkspaceImagePathSchema } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call";
 import { renderPromptTemplateFile } from "@agent-workbench/shared/prompts";
 import { runBashCommand } from "../../bash.js";
@@ -15,6 +17,7 @@ import { getBashToolAppendix } from "../../bashTools.js";
 import { runReadTool, runSkillTool, runWriteTool } from "../../fileTools.js";
 import { parseTodolistArgs, toTodolistResult } from "../../todolist.js";
 import { parseScratchpadArgs, toScratchpadResult } from "../../scratchpad.js";
+import { readWorkspaceImage } from "../../workspaceImageReader.js";
 import type { AvailableToolContext, ResolvedToolDefinition, ToolExecutionContext, ToolListContext, ToolProvider } from "../types.js";
 import { isBuiltinToolName, type BuiltinToolName } from "../types.js";
 
@@ -31,22 +34,6 @@ function subtaskReusedWaitTimeoutMs() {
   const value = Number(process.env.AWB_SUBTASK_REUSED_WAIT_TIMEOUT_MS || COMPACTION_TIMEOUT_MS);
   return Number.isFinite(value) && value >= 1 ? Math.floor(value) : COMPACTION_TIMEOUT_MS;
 }
-
-const VISUAL_MEDIA_TYPES = new Map<string, string>([
-  [".png", "image/png"],
-  [".jpg", "image/jpeg"],
-  [".jpeg", "image/jpeg"],
-  [".webp", "image/webp"],
-  [".gif", "image/gif"],
-  [".pdf", "application/pdf"]
-]);
-
-type VisualAnalyzeInputFile = {
-  relativePath: string;
-  absolutePath: string;
-  mediaType: string;
-  bytes: Uint8Array;
-};
 
 type ParsedSubtaskArgs = {
   description: string;
@@ -229,50 +216,6 @@ function shouldPrepareGitEnvForCommand(command: string) {
   return false;
 }
 
-function ensureSafeRelativePath(input: unknown, fieldName: string) {
-  if (typeof input !== "string") throw new Error(`${fieldName} must be a non-empty string`);
-  const value = input.trim();
-  if (!value) throw new Error(`${fieldName} must be a non-empty string`);
-  if (value.includes("\0") || value.includes("\n") || value.includes("\r")) {
-    throw new Error(`${fieldName} is invalid`);
-  }
-  if (path.isAbsolute(value)) {
-    throw new Error(`${fieldName} must be a relative path inside workspace`);
-  }
-  return value;
-}
-
-function isPathInside(rootPath: string, targetPath: string) {
-  const normalizedRoot = path.resolve(rootPath);
-  const normalizedTarget = path.resolve(targetPath);
-  const withSep = normalizedRoot.endsWith(path.sep) ? normalizedRoot : `${normalizedRoot}${path.sep}`;
-  return normalizedTarget === normalizedRoot || normalizedTarget.startsWith(withSep);
-}
-
-async function resolveVisualInputFile(params: {
-  workspacePath: string;
-  relativePath: string;
-}): Promise<VisualAnalyzeInputFile> {
-  const absolutePath = path.resolve(params.workspacePath, params.relativePath);
-  if (!isPathInside(params.workspacePath, absolutePath)) {
-    throw new Error(`path is outside workspace: ${params.relativePath}`);
-  }
-  const [workspaceRealPath, targetRealPath] = await Promise.all([fs.realpath(params.workspacePath), fs.realpath(absolutePath)]);
-  if (!isPathInside(workspaceRealPath, targetRealPath)) {
-    throw new Error(`path is outside workspace: ${params.relativePath}`);
-  }
-  const stat = await fs.stat(targetRealPath);
-  if (!stat.isFile()) {
-    throw new Error(`path is not a file: ${params.relativePath}`);
-  }
-  const mediaType = VISUAL_MEDIA_TYPES.get(path.extname(params.relativePath).toLowerCase());
-  if (!mediaType) {
-    throw new Error(`unsupported file type: ${params.relativePath}. Supported: PNG, JPG/JPEG, WEBP, GIF, PDF`);
-  }
-  const bytes = await fs.readFile(targetRealPath);
-  return { relativePath: params.relativePath, absolutePath: targetRealPath, mediaType, bytes };
-}
-
 function parseSubtaskArgs(raw: Record<string, unknown>): ParsedSubtaskArgs {
   const description = requireNonEmptyStringArg(raw.description, "subtask.description").slice(0, 50);
   const prompt = requireNonEmptyStringArg(raw.prompt, "subtask.prompt");
@@ -433,6 +376,19 @@ export class BuiltinToolProvider implements ToolProvider {
 
   async execute(toolName: string, args: Record<string, unknown>, ctx: ToolExecutionContext): Promise<unknown> {
     switch (toolName) {
+      case "view_image": {
+        if (Object.keys(args).length !== 1 || !Value.Check(AgentWorkspaceImagePathSchema, args.path)) {
+          throw new Error("view_image requires one Workspace-relative path");
+        }
+        try {
+          // Validate actual bytes; never return them to the runner or its debug log.
+          await readWorkspaceImage({ workspacePath: ctx.run.workspacePath, path: args.path as string });
+        } catch {
+          // Filesystem errors can expose private absolute paths.
+          throw new Error("view_image cannot read a valid Workspace image at this path");
+        }
+        return { type: "image_ref", path: args.path };
+      }
       case "bash": {
         const command = requireNonEmptyStringArg(args.command, "bash.command");
         const timeoutSeconds = parseOptionalPositiveIntegerArg(args.timeout, "bash.timeout");
@@ -783,55 +739,6 @@ export class BuiltinToolProvider implements ToolProvider {
           throw error;
         }
         return result;
-      }
-      case "visual_analyze": {
-        const pathsRaw = Array.isArray(args.paths) ? args.paths : [];
-        if (pathsRaw.length === 0) {
-          throw new Error("visual_analyze.paths must contain at least one file path");
-        }
-        const relativePaths = pathsRaw.map((item, index) => ensureSafeRelativePath(item, `visual_analyze.paths[${index}]`));
-        const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";
-        const files = await Promise.all(
-          relativePaths.map((relativePath) => resolveVisualInputFile({ workspacePath: ctx.run.workspacePath, relativePath }))
-        );
-
-        const userInstruction = prompt || "Analyze these visual files in order and provide concise, practical findings in natural language.";
-        const lines = [
-          `You are analyzing ${files.length} visual file(s) from a coding workspace.`,
-          "Use the input order as sequence and refer to them as 文件1, 文件2, ... in your response.",
-          "Return plain natural language only."
-        ];
-        const parts: Extract<ModelMessage, { role: "user" }>["content"] = [
-          {
-            type: "text",
-            text: `${lines.join("\n")}\n\nUser request:\n${userInstruction}`
-          }
-        ];
-        for (const file of files) {
-          parts.push({
-            type: "file",
-            data: file.bytes,
-            mediaType: file.mediaType,
-            filename: path.basename(file.relativePath)
-          });
-        }
-
-        const chosen = ctx.profile.vision ?? {
-          source: "agent_default_fallback" as const,
-          provider: ctx.profile.provider,
-          model: ctx.profile.model
-        };
-        const configuredTimeoutMs = Math.max(0, Math.floor(Number(ctx.profile.runtime.modelTotalTimeoutMs)));
-        const timeoutMs = configuredTimeoutMs > 0 ? configuredTimeoutMs : null;
-        const response = await this.generateSingleCallSummary({
-          profile: { provider: chosen.provider, model: chosen.model },
-          input: { sessionId: ctx.run.sessionId, messages: [{ role: "user", content: parts }], timeoutMs, abortSignal: ctx.signal }
-        });
-        return {
-          text: response.text,
-          files: files.map((item) => item.relativePath),
-          source: chosen.source
-        };
       }
       default:
         throw new Error(`unsupported tool: ${toolName}`);

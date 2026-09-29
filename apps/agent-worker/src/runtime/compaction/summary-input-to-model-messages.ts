@@ -30,7 +30,7 @@ function renderParts(parts: readonly SummaryInputPart[], context: "user" | "assi
  * Converts provider-neutral summary input into the portable textual subset of
  * AI SDK ModelMessage. It deliberately does not emit provider wire tool parts:
  * their shape differs between OpenAI Responses, OpenAI-compatible chat and
- * Anthropic. Attachments remain metadata-only descriptions and no bytes/IDs,
+ * Anthropic. Image paths appear only as verified textual facts, never bytes/IDs,
  * replay state or provider options can enter this boundary.
  */
 export function summaryInputToModelMessages(blocks: readonly SummaryInputBlock[]): ModelMessage[] {

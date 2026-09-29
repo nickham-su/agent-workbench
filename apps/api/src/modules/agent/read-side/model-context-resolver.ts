@@ -26,7 +26,9 @@ import {
 } from "@agent-workbench/shared/internal-contracts/agent-provider-provenance";
 import type { AgentUiLocale } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { Value } from "@sinclair/typebox/value";
+import { AgentViewImageResultSchema } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { Db } from "../../../infra/db/db.js";
+import { agentAttachmentRelativePath } from "../attachments/agent-attachment-paths.js";
 import type { RuntimeTranscriptExecution } from "./runtime-transcript-projector.js";
 
 /**
@@ -49,6 +51,7 @@ export type ResolvedContextBlock = {
     attachmentId: string;
     mediaType: AgentImageMediaType;
     filename: string;
+    relativePath: string | null;
   }>;
   providerReplay: Array<{ partId: string; envelope: AgentProviderReplayEnvelope }>;
 };
@@ -244,9 +247,23 @@ function toExecution(row: ExecutionRow): AgentToolExecution {
   };
 }
 
-function toRuntimeExecution(execution: AgentToolExecution): RuntimeTranscriptExecution {
+export function toRuntimeExecution(execution: AgentToolExecution, message: AgentMessage, workspaceId: string): RuntimeTranscriptExecution {
+  const call = message.parts.find((part) => part.type === "tool_call" && part.id === execution.callPartId);
+  let imageRef: RuntimeTranscriptExecution["imageRef"];
+  if (call?.type === "tool_call" && call.toolName === "view_image" && execution.status === "completed") {
+    if (!Value.Check(AgentViewImageResultSchema, execution.structuredResult)
+      || execution.structuredResult.path !== call.input.path
+      || !execution.originRunId || execution.originRunId !== message.originRunId
+      || execution.originSessionId !== message.originSessionId || message.workspaceId !== workspaceId) {
+      throw new ModelContextInvariantError("stored view_image result does not belong to its tool call");
+    }
+    imageRef = execution.structuredResult;
+  }
   return {
     callPartId: execution.callPartId,
+    originRunId: execution.originRunId,
+    originSessionId: execution.originSessionId,
+    ...(imageRef ? { imageRef } : {}),
     status: execution.status,
     resultPreview: execution.resultPreview,
     error: execution.error,
@@ -310,8 +327,10 @@ export function projectModelContextToPrompt(input: {
   projector: { projectDetailed(input: {
     workspaceId: string;
     triggerMessageId: string | null;
+    runId?: string | null;
     messages: AgentMessage[];
     executions: RuntimeTranscriptExecution[];
+    attachmentPaths?: ReadonlyMap<string, string | null>;
     stopBeforeAssistantMessageIds?: ReadonlySet<string>;
     includeEmptyAssistantMessageIds?: ReadonlySet<string>;
   }): { messages: Array<{ role: "system" | "user" | "assistant" | "tool"; content: unknown }>; assistantMessageIndexes: Map<string, number> } };
@@ -331,6 +350,8 @@ export function projectModelContextToPrompt(input: {
   const projected = input.projector.projectDetailed({
     workspaceId: input.workspaceId,
     triggerMessageId: input.triggerMessageId,
+    runId: input.resolved.run?.runId ?? null,
+    attachmentPaths: new Map(input.resolved.blocks.flatMap((block) => block.attachments.map((attachment) => [attachment.partId, attachment.relativePath] as const))),
     messages: input.resolved.messages,
     executions: input.resolved.executions,
     stopBeforeAssistantMessageIds: input.stopBeforeAssistantMessageIds,
@@ -765,6 +786,18 @@ export class ModelContextResolver {
       executionsByCall.set(row.callPartId, executions);
     }
 
+    const attachmentIds = [...new Set(parts.flatMap((part) =>
+      part.type === "image" && part.attachmentId ? [part.attachmentId] : []
+    ))];
+    const attachmentRows = inBatches(attachmentIds).flatMap((batch) => this.db.prepare(`
+      select id, workspace_id as workspaceId, storage_key as storageKey,
+             media_type as mediaType, filename
+      from agent_attachment where workspace_id = ? and id in (${batch.map(() => "?").join(",")})
+    `).all(workspaceId, ...batch) as Array<{
+      id: string; workspaceId: string; storageKey: string; mediaType: AgentImageMediaType; filename: string;
+    }>);
+    const attachmentById = new Map(attachmentRows.map((row) => [row.id, row]));
+
     const blocks = selected.map((row) => {
       const message = strictMessage(row, partsByMessage.get(row.id) ?? []);
       const toolExecutions = message.parts
@@ -780,9 +813,23 @@ export class ModelContextResolver {
           // single snapshot for pending-work handling and future compaction planning.
           return executions[0]!;
         });
-      const attachments = message.parts.flatMap((part) => part.type === "image" ? [{
-        partId: part.id, attachmentId: part.attachmentId, mediaType: part.mediaType, filename: part.filename,
-      }] : []);
+      const attachments = message.parts.flatMap((part) => {
+        if (part.type !== "image") return [];
+        const record = attachmentById.get(part.attachmentId);
+        let relativePath: string | null = null;
+        if (record && record.workspaceId === workspaceId && record.mediaType === part.mediaType && record.filename === part.filename) {
+          try {
+            relativePath = agentAttachmentRelativePath(record.id, record.storageKey, record.mediaType);
+          } catch {
+            // Legacy dataDir attachments have no Workspace-relative path. Never guess from filename.
+            relativePath = null;
+          }
+        }
+        return [{
+          partId: part.id, attachmentId: part.attachmentId,
+          mediaType: part.mediaType, filename: part.filename, relativePath,
+        }];
+      });
       const providerReplay = message.parts.flatMap((part) => {
         const envelope = replayByPartId.get(part.id);
         return envelope ? [{ partId: part.id, envelope }] : [];
@@ -803,7 +850,7 @@ export class ModelContextResolver {
       } satisfies ResolvedContextBlock;
     });
     const messages = blocks.map((block) => block.message);
-    const executions = blocks.flatMap((block) => block.toolExecutions.map(toRuntimeExecution));
+    const executions = blocks.flatMap((block) => block.toolExecutions.map((execution) => toRuntimeExecution(execution, block.message, workspaceId)));
     return {
       workspaceId,
       sessionId: session.sessionId,

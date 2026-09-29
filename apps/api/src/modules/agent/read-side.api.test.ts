@@ -546,7 +546,7 @@ test("read-side internal routes preserve token, body validation, and missing-res
   assert.equal(typeof profileBody.runtime?.modelRequestMaxRetries, "number");
   assert.equal(typeof profileBody.runtime?.modelRequestRetryBackoffMaxMs, "number");
   assert.equal(typeof profileBody.runtime?.autoCompactThresholdPct, "number");
-  assert.ok(profileBody.vision === null || typeof profileBody.vision === "object");
+  assert.equal("vision" in profileBody, false);
   assert.ok(profileBody.compaction === null || typeof profileBody.compaction === "object");
 
   const prompt = await injectJson(fixture.app, {

@@ -56,7 +56,7 @@ export type RunCompletedEventPublisher = {
  */
 export type AtomicLifecyclePersistence = {
   listActiveSessionIdsForCancel(input: CancelSessionsInput): string[];
-  activateUserRun(input: UserRunActivationInput): UserRunActivationResult;
+  activateUserRun(input: UserRunActivationInput, publishImages?: () => void): UserRunActivationResult;
   canEnqueueUserRunIfCurrent(input: { workspaceId: string; sessionId: string; runId: string }): boolean;
   failRunAfterEnqueueFailureIfCurrent(input: EnqueueFailureInput): EnqueueFailureSettlement;
   getCancelSessionSnapshot(sessionId: string): CancelSessionSnapshot | null;
@@ -236,9 +236,9 @@ export type RunLifecycleApplicationDependencies = {
   runCompletedEventPublisher: RunCompletedEventPublisher;
   persistence: AtomicLifecyclePersistence;
   attachmentCommitter?: {
-    commit(input: { workspaceId: string; image: UserRunImageInput }): Promise<void>;
+    prepare(input: { workspaceId: string; image: UserRunImageInput }): Promise<{ checkAvailable(): void; publish(): { dev: number; ino: number }; close(): Promise<void> }>;
     removeTemp(input: Pick<UserRunImageInput, "tempId">): Promise<void>;
-    removeFinal(input: { workspaceId: string; image: Pick<UserRunImageInput, "attachmentId"> }): Promise<void>;
+    removeFinal(input: { workspaceId: string; image: UserRunImageInput; owned: { dev: number; ino: number } }): Promise<void>;
   };
   triggerInputReader: TriggerInputReader;
   isContextAppendConflict(error: unknown): boolean;

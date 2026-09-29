@@ -1,7 +1,8 @@
 import type { Db } from "../../../infra/db/db.js";
+import type { AgentImageMediaType } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { HttpError } from "../../../app/errors.js";
 import { assertAgentImageByteSize } from "../attachments/agent-attachment-storage.js";
-import { assertAgentAttachmentId, assertAgentAttachmentTempId } from "../attachments/agent-attachment-paths.js";
+import { assertAgentAttachmentId, assertAgentAttachmentTempId, assertAgentAttachmentStorageKey } from "../attachments/agent-attachment-paths.js";
 import {
   appendMessage,
   getMessageSessionHead,
@@ -51,18 +52,16 @@ function validateUserRunImages(input: UserRunActivationInput) {
     if (image.position !== index) throw new Error("invalid agent image position");
     assertAgentAttachmentId(image.attachmentId);
     assertAgentAttachmentTempId(image.tempId);
-    if (image.storageKey !== image.attachmentId) {
-      throw new Error("invalid agent image storage key");
-    }
-    if (attachmentIds.has(image.attachmentId) || storageKeys.has(image.storageKey)) {
-      throw new Error("duplicate agent image attachment");
-    }
     if (
       image.filename.length < 1 ||
       [...image.filename].length > 255 ||
       !["image/png", "image/jpeg", "image/webp"].includes(image.mediaType)
     ) {
       throw new Error("invalid agent image metadata");
+    }
+    assertAgentAttachmentStorageKey(image.attachmentId, image.storageKey, image.mediaType as AgentImageMediaType);
+    if (attachmentIds.has(image.attachmentId) || storageKeys.has(image.storageKey)) {
+      throw new Error("duplicate agent image attachment");
     }
     assertAgentImageByteSize(image.byteSize);
     attachmentIds.add(image.attachmentId);
@@ -75,7 +74,7 @@ export class SqliteRunLifecyclePersistence
 {
   constructor(private readonly db: Db) {}
 
-  activateUserRun(input: UserRunActivationInput): UserRunActivationResult {
+  activateUserRun(input: UserRunActivationInput, publishImages?: () => void): UserRunActivationResult {
     const transaction = this.db.transaction(() => {
       const dedup = findMessageClientRequestDedup(this.db, {
         workspaceId: input.workspaceId,
@@ -121,6 +120,9 @@ export class SqliteRunLifecyclePersistence
         throw new HttpError(409, "Scheduled fork session changed before Run activation", "SESSION_ID_CONFLICT");
       }
       validateUserRunImages(input);
+      // All ordinary idempotency, state and fork conflicts have been decided in
+      // this synchronous SQLite transaction. Do not yield before publishing.
+      publishImages?.();
       const insertAttachment = this.db.prepare(
         `insert into agent_attachment
           (id, workspace_id, storage_key, filename, media_type, byte_size, created_at)
@@ -204,7 +206,10 @@ export class SqliteRunLifecyclePersistence
         runId: input.runId,
       };
     });
-    return transaction();
+    // Acquire SQLite's write reservation before the first dedup/state read.
+    // A DEFERRED transaction lets another connection pass those reads and
+    // reach filesystem publication before either can upgrade to a writer.
+    return transaction.immediate();
   }
 
   canEnqueueUserRunIfCurrent(input: { workspaceId: string; sessionId: string; runId: string }) {

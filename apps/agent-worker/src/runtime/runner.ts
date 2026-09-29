@@ -21,6 +21,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { createMoonshotAI } from "@ai-sdk/moonshotai";
 import { createDeepSeek } from "@ai-sdk/deepseek";
+import { Value } from "@sinclair/typebox/value";
 import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call";
 import { parseAiSdkCallSettings } from "@agent-workbench/shared/llm-ai-sdk-call-settings";
 import { AgentApiClient, ApiConflictError, InternalRpcHttpError, InternalRpcInvalidResponseError, InternalRpcNetworkError, InternalRpcTimeoutError, type ExecutionProfile, type PromptContext } from "./apiClient.js";
@@ -34,6 +35,9 @@ import {
   type AgentProviderReplayEnvelope,
   type AgentApiFlushAssistantPartsRequest,
   type AgentApiPromptAttachmentRefPart,
+  AgentViewImageResultSchema,
+  AgentToolResultOutputSchema,
+  viewImagePathPreview,
 } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { PluginRuntimeManager } from "./plugins/runtimeManager.js";
 import { ToolRegistry } from "./tools/registry.js";
@@ -305,6 +309,13 @@ function buildToolSuccessText(params: {
 }) {
   const resultObj = toRecordObject(params.result);
 
+  if (params.toolName === "view_image") {
+    if (!Value.Check(AgentViewImageResultSchema, params.result)) {
+      throw new Error("invalid view_image result");
+    }
+    return viewImagePathPreview(params.result.path);
+  }
+
   if (params.toolName === "apply_patch") {
     const summary = toRecordObject(resultObj?.summary);
     const body = typeof resultObj?.text === "string" ? resultObj.text : "apply_patch completed";
@@ -439,19 +450,6 @@ function buildToolSuccessText(params: {
       toolName: params.toolName,
       status: params.status,
       headers: [["target", target]],
-      body
-    });
-  }
-
-  if (params.toolName === "visual_analyze") {
-    const files = Array.isArray(resultObj?.files) ? resultObj.files.length : undefined;
-    const body = typeof resultObj?.text === "string"
-      ? resultObj.text
-      : stringifyResult(params.result);
-    return buildToolText({
-      toolName: params.toolName,
-      status: params.status,
-      headers: [["files", typeof files === "number" ? String(files) : undefined]],
       body
     });
   }
@@ -765,7 +763,7 @@ type QueuedRun = {
   workspaceRepoDirNames: string[];
 };
 
-const STRUCTURED_RESULT_TOOL_NAMES = new Set(["apply_patch", "todolist", "subtask", "write", "scratchpad"]);
+const STRUCTURED_RESULT_TOOL_NAMES = new Set(["apply_patch", "todolist", "subtask", "write", "scratchpad", "view_image"]);
 
 type PendingTool = {
   toolExecutionId: string;
@@ -1372,15 +1370,85 @@ function isAttachmentRefPart(value: unknown): value is AgentApiPromptAttachmentR
     && typeof part.workspaceId === "string"
     && typeof part.attachmentId === "string"
     && (part.mediaType === "image/png" || part.mediaType === "image/jpeg" || part.mediaType === "image/webp")
-    && typeof part.filename === "string";
+    && typeof part.filename === "string"
+    && typeof part.path === "string";
 }
 
-async function materializePromptAttachments(params: {
+export async function materializePromptAttachments(params: {
   messages: PromptContext["messages"];
   attachmentStorage: AgentAttachmentStorage | undefined;
+  run: Pick<QueuedRun, "workspaceId" | "workspacePath">;
+  providerNpm: string;
 }): Promise<ModelMessage[]> {
   const messages: ModelMessage[] = [];
+  let totalImageBytes = 0;
+  const countImage = (bytes: Uint8Array) => {
+    if (bytes.byteLength < 1 || bytes.byteLength > WORKSPACE_IMAGE_MAX_BYTES) throw new Error("model image exceeds 10 MiB per-image budget");
+    totalImageBytes += bytes.byteLength;
+    if (totalImageBytes > 2 * WORKSPACE_IMAGE_MAX_BYTES) throw new Error("model images exceed 20 MiB combined budget");
+  };
+  const nativeToolMedia = params.providerNpm === "@ai-sdk/openai" || params.providerNpm === "@ai-sdk/anthropic";
+  let precedingAssistantCalls: string[] = [];
   for (const message of params.messages) {
+    if (message.role === "assistant") {
+      precedingAssistantCalls = Array.isArray(message.content)
+        ? message.content.filter((part) => part.type === "tool-call").map((part) => part.toolCallId)
+        : [];
+      messages.push(message as ModelMessage);
+      continue;
+    }
+    if (message.role === "tool") {
+      const results = message.content;
+      const resultIds = results.map((result) => result.toolCallId);
+      if (resultIds.length !== precedingAssistantCalls.length
+        || resultIds.some((id, index) => id !== precedingAssistantCalls[index])) {
+        throw new Error("tool results do not match assistant call order");
+      }
+      precedingAssistantCalls = [];
+      const output: typeof results = [];
+      const deferredFiles: Array<{ type: "text"; text: string } | { type: "file"; data: Uint8Array; mediaType: "image/png" | "image/jpeg" | "image/webp"; filename: string }> = [];
+      for (const result of results) {
+        if (!Value.Check(AgentToolResultOutputSchema, result.output)) throw new Error("invalid tool result output");
+        const parts = Array.isArray(result.output) ? result.output : [result.output];
+        if (!parts.some((part) => part.type === "image_ref")) {
+          // The internal contract permits multiple text segments, but the AI SDK
+          // expects an output object rather than a bare array of segments.
+          output.push(Array.isArray(result.output)
+            ? { ...result, output: { type: "content", value: parts.map((part) => {
+              if (part.type !== "text") throw new Error("invalid text-only tool result");
+              return { type: "text" as const, text: part.value };
+            }) } } as unknown as typeof result
+            : result);
+          continue;
+        }
+        if (result.toolName !== "view_image") throw new Error("unexpected tool image reference");
+        const nativeParts: Array<{ type: "text"; text: string } | { type: "media"; data: string; mediaType: string }> = [];
+        const textParts: string[] = [];
+        for (const part of parts) {
+          if (part.type === "text") {
+            nativeParts.push({ type: "text", text: part.value });
+            textParts.push(part.value);
+          } else if (part.type === "image_ref") {
+            const image = await readWorkspaceImage({ workspacePath: params.run.workspacePath, path: part.path }).catch(() => {
+              throw new Error("cannot read a valid tool image in this Workspace");
+            });
+            countImage(image.bytes);
+            const label = `Image for toolCallId=${result.toolCallId}, path=${part.path}`;
+            if (nativeToolMedia) nativeParts.push({ type: "media", data: Buffer.from(image.bytes).toString("base64"), mediaType: image.mediaType });
+            else {
+              textParts.push(`${label} (image attached in the following user message)`);
+              deferredFiles.push({ type: "text", text: label }, { type: "file", data: image.bytes, mediaType: image.mediaType, filename: part.path.split("/").at(-1)! });
+            }
+          }
+        }
+        output.push({ ...result, output: nativeToolMedia
+          ? { type: "content", value: nativeParts }
+          : { type: "text", value: textParts.join("\n") } } as typeof result);
+      }
+      messages.push({ role: "tool", content: output } as ModelMessage);
+      if (deferredFiles.length > 0) messages.push({ role: "user", content: deferredFiles } as ModelMessage);
+      continue;
+    }
     if (message.role !== "user" || !Array.isArray(message.content)) {
       messages.push(message as ModelMessage);
       continue;
@@ -1389,15 +1457,24 @@ async function materializePromptAttachments(params: {
     const content: Extract<ModelMessage, { role: "user" }>["content"] = [];
     for (const part of message.content) {
       if (!isAttachmentRefPart(part)) {
+        if ((part as { type: string }).type === "attachment_ref") {
+          throw new Error("invalid user image reference");
+        }
         content.push(part);
         continue;
       }
       if (!params.attachmentStorage) throw new Error("attachment storage is unavailable");
       const attachment = await params.attachmentStorage.read({
         workspaceId: part.workspaceId,
+        runWorkspaceId: params.run.workspaceId,
+        workspacePath: params.run.workspacePath,
         attachmentId: part.attachmentId,
+        path: part.path,
         mediaType: part.mediaType
+      }).catch(() => {
+        throw new Error("cannot read a valid user image in this Workspace");
       });
+      countImage(attachment.bytes);
       content.push({
         type: "file",
         data: attachment.bytes,
@@ -1892,6 +1969,9 @@ export class AgentRunner {
       };
       capture?.recordProviderStarted();
       providerResult = await this.toolRegistry.execute(tool.toolName, tool.args, toolCtx);
+      if (tool.toolName === "view_image" && !Value.Check(AgentViewImageResultSchema, providerResult)) {
+        throw new Error("invalid view_image result");
+      }
       providerReturned = true;
       capture?.recordProviderResult(providerResult);
 
@@ -1910,7 +1990,11 @@ export class AgentRunner {
         textArtifactPath?: string;
       };
       try {
-        finalizedText = await finalizeToolText({
+        // A view_image preview is not an artifact or the authority for recovering
+        // media. Its path lives only in the validated structured result.
+        finalizedText = tool.toolName === "view_image"
+          ? { text: rawSuccessText, textTruncated: false }
+          : await finalizeToolText({
           workspacePath: run.workspacePath,
           toolExecutionId: tool.toolExecutionId,
           toolName: tool.toolName,
@@ -2408,7 +2492,6 @@ export class AgentRunner {
     const model = createLanguageModel(profile);
     const runtimeOptions = buildModelRuntimeOptions(profile);
     const turnId = newSortableId("turn");
-    let materializedMessages: ModelMessage[];
     const preparedInvocation = conversationStateAdapter?.prepareInvocation({
       profile,
       messages: context.messages as ModelMessage[],
@@ -2421,7 +2504,6 @@ export class AgentRunner {
     // consumes those indexes first; after recovery, no Provider may receive an empty Assistant.
     const providerMessages = (preparedInvocation?.messages ?? context.messages).filter((message) =>
       message.role !== "assistant" || message.content.length > 0);
-    materializedMessages = await materializePromptAttachments({ messages: providerMessages as PromptContext["messages"], attachmentStorage: this.attachmentStorage });
 
     const modelIdleTimeoutMs = Math.max(0, Math.floor(profile.runtime.modelIdleTimeoutMs));
     const modelTotalTimeoutMs = Math.max(0, Math.floor(profile.runtime.modelTotalTimeoutMs));
@@ -2447,7 +2529,7 @@ export class AgentRunner {
     const requestBase: RuntimeStreamRequest = {
       model,
       system: context.system || undefined,
-      messages: materializedMessages,
+      messages: [], // Media must be opened anew for each attempt, not stored in the shared request.
       tools: toolSet,
       ...runtimeOptions.aiSdk,
       maxRetries: 0,
@@ -2469,6 +2551,16 @@ export class AgentRunner {
     }
     // 自定义重试策略由本文件控制,禁用 AI SDK 内建重试避免双重重试。
     if (includeRawChunks) requestBase.includeRawChunks = true;
+
+    // Preflight the first attempt before creating the Assistant item. Subsequent attempts
+    // reconstruct their media from disk after the Provider failure and retry delay.
+    let firstAttemptMessages: ModelMessage[] | null = await materializePromptAttachments({
+      messages: providerMessages as PromptContext["messages"],
+      attachmentStorage: this.attachmentStorage,
+      run,
+      providerNpm: profile.provider.npm,
+    });
+    let attemptDebugRequest = projectAssistantDebugRecord({ status: "running", request: { ...requestBase, messages: firstAttemptMessages } }).request;
 
     let assistantMessageId: string;
     if (recoveryContinuation.messageId) {
@@ -2705,7 +2797,7 @@ export class AgentRunner {
           step,
           messageId: assistantMessageId
         },
-        request: requestBase,
+        request: attemptDebugRequest,
         retryPolicy: {
           firstBackoffMs: MODEL_RETRY_BACKOFF_BASE_MS,
           maxBackoffMs: modelRequestRetryBackoffMaxMs,
@@ -2819,6 +2911,16 @@ export class AgentRunner {
       if (signal.aborted) {
         return { aborted: true as const, assistantMessageId };
       }
+      // Preparation errors are local failures: never enter the Provider retry catch below.
+      // The conversation-state adapter ran exactly once on the original assistant ordinals.
+      const materializedMessages = firstAttemptMessages ?? await materializePromptAttachments({
+        messages: providerMessages as PromptContext["messages"],
+        attachmentStorage: this.attachmentStorage,
+        run,
+        providerNpm: profile.provider.npm,
+      });
+      firstAttemptMessages = null;
+      attemptDebugRequest = projectAssistantDebugRecord({ status: "running", request: { ...requestBase, messages: materializedMessages } }).request;
 
       // 用独立 controller 承载“用户取消”和“空闲/总超时”中止。
       // 仅将“用户取消”(signal.aborted)视为 run cancelled。
@@ -3072,7 +3174,7 @@ export class AgentRunner {
               status: "failed",
               startedAt,
               meta: { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, turnId, step, messageId: assistantMessageId, failureKind: "aborted" },
-              request: requestBase,
+              request: attemptDebugRequest,
               error: err,
             },
           });
@@ -3088,7 +3190,7 @@ export class AgentRunner {
               status: "failed",
               startedAt,
               meta: { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, turnId, step, messageId: assistantMessageId, failureKind: attemptReachedTerminal ? "assistant-finalization" : "invariant-or-control" },
-              request: requestBase,
+              request: attemptDebugRequest,
               error: err,
             },
           });
@@ -3145,7 +3247,7 @@ export class AgentRunner {
                 retryAttempt,
                 nextRetryInMs: delayMs
               },
-              request: requestBase,
+              request: attemptDebugRequest,
               error: err,
             }
           });
@@ -3198,7 +3300,7 @@ export class AgentRunner {
             messageId: assistantMessageId,
             failureKind,
           },
-          request: requestBase,
+          request: attemptDebugRequest,
           response: {
             text: textFromParts(),
             reasoningText: reasoningFromParts(),
@@ -3287,7 +3389,7 @@ export class AgentRunner {
             step,
             messageId: assistantMessageId
           },
-          request: requestBase,
+          request: attemptDebugRequest,
           response: {
             text: textFromParts(),
             reasoningText: reasoningFromParts(),
@@ -3764,3 +3866,4 @@ export async function finalizeToolTextForTest(params: {
 }) {
   return finalizeToolText(params);
 }
+import { readWorkspaceImage, WORKSPACE_IMAGE_MAX_BYTES } from "./workspaceImageReader.js";

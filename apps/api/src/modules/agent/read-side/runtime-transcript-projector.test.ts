@@ -21,6 +21,7 @@ const projector = new RuntimeTranscriptProjector();
 
 test("RuntimeTranscriptProjector filters reasoning and projects historical images as placeholders", () => {
   const result = projector.project({
+    attachmentPaths: new Map([["h-image", null], ["trigger-image", ".awb/agent/attachments/att_new.jpg"]]),
     workspaceId: "ws", triggerMessageId: "trigger", executions: [], messages: [
       message({ id: "history", type: "user", status: "completed", parts: [
         { id: "h-text", messageId: "history", position: 0, type: "text", text: "old", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
@@ -36,11 +37,11 @@ test("RuntimeTranscriptProjector filters reasoning and projects historical image
     ]
   });
   assert.deepEqual(result, [
-    { role: "user", content: "old\n\n[This user message included 1 image attachment(s). Their image contents are not included in this run.]" },
+    { role: "user", content: "old\n\n[Historical image attachment (not included in this run; Workspace path unavailable).]" },
     { role: "assistant", content: "answer" },
     { role: "user", content: [
       { type: "text", text: "[The user sent 1 image attachment(s) without accompanying text.]" },
-      { type: "attachment_ref", workspaceId: "ws", attachmentId: "a-new", mediaType: "image/jpeg", filename: "new.jpg" }
+      { type: "attachment_ref", workspaceId: "ws", attachmentId: "a-new", mediaType: "image/jpeg", filename: "new.jpg", path: ".awb/agent/attachments/att_new.jpg" }
     ] }
   ]);
 });
@@ -228,4 +229,28 @@ test("RuntimeTranscriptProjector keeps System text beginning with [run] and filt
     message({ id: "runtime", type: "runtime", status: "completed", parts: [{ id: "runtime-text", messageId: "runtime", position: 0, type: "text", text: "[run] hidden notice", updatedRevision: 1, createdAt: 1, updatedAt: 1 }] })
   ] });
   assert.deepEqual(result, [{ role: "system", content: "[run] user-authored system instruction" }]);
+});
+
+test("view_image result belongs only to its originating Run and call ID, independent of completion order", () => {
+  const assistant = message({ id: "assistant-images", type: "assistant", status: "completed", parts: [
+    { id: "call-a", messageId: "assistant-images", position: 0, type: "tool_call", toolName: "view_image", input: { path: "screens/a.png" }, providerToolCallId: "model-a", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+    { id: "call-b", messageId: "assistant-images", position: 1, type: "tool_call", toolName: "view_image", input: { path: "screens/b.png" }, providerToolCallId: "model-b", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
+  ] });
+  const executions = [
+    { callPartId: "call-b", status: "failed" as const, resultPreview: null, error: "cannot read" },
+    { callPartId: "call-a", status: "completed" as const, resultPreview: "truncated", error: null, originRunId: "run", imageRef: { type: "image_ref" as const, path: "screens/a.png" } },
+  ];
+  const current = projector.project({ workspaceId: "ws", runId: "run", triggerMessageId: null, messages: [assistant], executions });
+  assert.deepEqual(current[1], { role: "tool", content: [
+    { type: "tool-result", toolCallId: "model-a", toolName: "view_image", output: { type: "image_ref", path: "screens/a.png" } },
+    { type: "tool-result", toolCallId: "model-b", toolName: "view_image", output: { type: "error-text", value: "cannot read" } },
+  ] });
+  const history = projector.project({ workspaceId: "ws", runId: "another-run", triggerMessageId: null, messages: [assistant], executions });
+  assert.match(JSON.stringify(history[1]), /toolCallId=model-a.*screens\/a\.png/);
+  assert.doesNotMatch(JSON.stringify(history[1]), /image_ref/);
+  const sessionOnly = projector.project({ workspaceId: "ws", triggerMessageId: null, messages: [assistant], executions });
+  assert.doesNotMatch(JSON.stringify(sessionOnly), /image_ref/);
+  assert.throws(() => projector.project({ workspaceId: "ws", runId: "run", triggerMessageId: null, messages: [assistant], executions: [
+    executions[0]!, { ...executions[1]!, originRunId: "other" },
+  ] }), /does not belong/);
 });

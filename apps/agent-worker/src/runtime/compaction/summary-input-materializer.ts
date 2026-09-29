@@ -8,7 +8,7 @@ const REPLAY_ONLY_ASSISTANT_PLACEHOLDER = "[Prior assistant replay state omitted
 /**
  * Summary semantics deliberately retain visible tool input/output and user text
  * because these are the summarizer's business input. It never includes replay,
- * encrypted reasoning, provider options, attachment IDs, paths, or bytes.
+ * encrypted reasoning, provider options, attachment IDs or bytes. Trusted image paths are textual facts.
  */
 export function materializeSummaryInputBlock(block: CompactionSourceBlock): SummaryInputBlock {
   const validated = validateCompactionSourceBlock(block);
@@ -17,7 +17,13 @@ export function materializeSummaryInputBlock(block: CompactionSourceBlock): Summ
     const content: SummaryInputPart[] = [];
     for (const part of validated.parts) {
       if (part.type === "text" && part.text) content.push({ type: "text", text: part.text });
-      if (part.type === "image") content.push({ type: "attachment", mediaType: part.mediaType, filename: part.filename });
+      if (part.type === "image") {
+        const attachment = validated.attachmentsByPartId.get(part.id);
+        if (!attachment) throw new Error("validated image attachment unexpectedly missing");
+        content.push(attachment.relativePath
+          ? { type: "text", text: `[Image path: ${attachment.relativePath}; contents not included in summary]` }
+          : { type: "text", text: "[Historical image contents are not included; no Workspace path is available.]" });
+      }
     }
     if (content.length > 0) messages.push({ role: "user", content });
   } else if (block.message.type === "system" || block.message.type === "compaction") {
@@ -33,7 +39,13 @@ export function materializeSummaryInputBlock(block: CompactionSourceBlock): Summ
       content.push({ type: "tool-call", toolName: part.toolName, input: part.input });
       const execution = validated.executionsByCallPartId.get(part.id);
       if (!execution) throw new Error("validated tool execution unexpectedly missing");
-      toolContent.push({ type: "tool-result", toolName: part.toolName, output: projectCompactionToolExecutionResult(execution) });
+      const projected = projectCompactionToolExecutionResult(execution, {
+        runId: execution.originRunId ?? "",
+        callId: part.providerToolCallId ?? part.id,
+        summary: true,
+      });
+      if (projected.type === "image_ref") throw new Error("summary cannot contain image bytes");
+      toolContent.push({ type: "tool-result", toolName: part.toolName, output: projected });
     }
     const hasReasoningReplay = validated.parts.some((part) =>
       part.type === "reasoning"

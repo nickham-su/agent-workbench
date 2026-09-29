@@ -163,49 +163,47 @@ export class RunLifecycleApplication {
     const createdAt = this.dependencies.clock.nowMs();
     const committer = this.dependencies.attachmentCommitter;
     const images = command.images ?? [];
-    const committedImages: typeof images = [];
+    const prepared: Array<{ image: (typeof images)[number]; publication: Awaited<ReturnType<NonNullable<typeof committer>["prepare"]>> }> = [];
+    const committedImages: Array<{ image: (typeof images)[number]; owned: { dev: number; ino: number } }> = [];
+    let failedCommitImage: (typeof images)[number] | undefined;
     const removeFinals = async () => {
-      if (!committer) return;
-      await Promise.all(committedImages.map(async (image) => {
-        await committer.removeFinal({ workspaceId: command.workspaceId, image }).catch(() => undefined);
-      }));
+      if (!committer) return [];
+      const results = await Promise.allSettled(committedImages.map(({ image, owned }) =>
+        committer.removeFinal({ workspaceId: command.workspaceId, image, owned })));
+      return committedImages.filter((_, index) => results[index]?.status === "rejected").map(({ image }) => image.attachmentId);
     };
     const removeTemps = async () => {
-      if (!committer) return;
-      await Promise.all(images.map(async (image) => {
-        await committer.removeTemp({ tempId: image.tempId }).catch(() => undefined);
-      }));
-    };
-    const cleanupUnactivatedFiles = async () => {
-      await removeFinals();
-      await removeTemps();
+      if (!committer) return 0;
+      const results = await Promise.allSettled(images.map((image) => committer.removeTemp({ tempId: image.tempId })));
+      return results.filter((result) => result.status === "rejected").length;
     };
     const runId = this.dependencies.ids.newId("run");
+    const warnPending = (pendingFinalAttachmentIds: string[], pendingTemps: number) => {
+      if (!pendingFinalAttachmentIds.length && !pendingTemps) return;
+      // Never log the thrown error: filesystem errors may contain private absolute paths.
+      this.dependencies.logger.warn({ workspaceId: command.workspaceId, runId, pendingFinals: pendingFinalAttachmentIds.length,
+        pendingFinalAttachmentIds, pendingTemps,
+        attachmentDirectory: ".awb/agent/attachments" }, "agent run attachment cleanup pending; inspect retained files manually");
+    };
+    const cleanupUnactivatedFiles = async (failedCommit?: unknown) => {
+      const [pendingFinalAttachmentIds, failedTemps] = await Promise.all([removeFinals(), removeTemps()]);
+      if (failedCommit instanceof AgentAttachmentCommitError && failedCommit.finalCleanupPending && failedCommitImage) {
+        pendingFinalAttachmentIds.push(failedCommitImage.attachmentId);
+      }
+      // removeTemp retries the failed commit's source (including its private slot).
+      // Report only cleanup still pending after that retry, not its earlier failure.
+      const pendingTemps = failedTemps;
+      warnPending(pendingFinalAttachmentIds, pendingTemps);
+    };
 
     if (images.length > 0 && !committer) {
       throw new Error("agent attachment committer is not configured");
     }
-    try {
-      for (const image of images) {
-        try {
-          await committer!.commit({ workspaceId: command.workspaceId, image });
-          committedImages.push(image);
-        } catch (error) {
-          // final 目录已失去可信性时，storage 已报告 cleanup pending；此处绝不能
-          // 再通过逻辑 pathname 尝试清理，以免误删后来替换的文件。
-          if (error instanceof AgentAttachmentCommitError && error.finalCreated && !error.cleanupPending) {
-            committedImages.push(image);
-          }
-          throw error;
-        }
-      }
-    } catch (error) {
-      await cleanupUnactivatedFiles();
-      throw error;
-    }
-
     let activation;
     try {
+      for (const image of images) {
+        prepared.push({ image, publication: await committer!.prepare({ workspaceId: command.workspaceId, image }) });
+      }
       workspaceDeletingFence.assertWritable(command.workspaceId);
       activation = this.dependencies.persistence.activateUserRun({
         workspaceId: command.workspaceId,
@@ -221,11 +219,26 @@ export class RunLifecycleApplication {
         createdAt,
         expectedHistoricalFork: command.expectedHistoricalFork,
         expectedSessionTitle: command.expectedSessionTitle,
+      }, () => {
+        // No await: SQLite checks and all publication share the write transaction.
+        // Reject predictable destination conflicts before publishing any image.
+        for (const { publication } of prepared) publication.checkAvailable();
+        for (const { image, publication } of prepared) {
+          try {
+            const owned = publication.publish();
+            committedImages.push({ image, owned });
+          } catch (error) {
+            failedCommitImage = image;
+            throw error;
+          }
+        }
       });
     } catch (error) {
-      await cleanupUnactivatedFiles();
+      await Promise.all(prepared.map(({ publication }) => publication.close()));
+      await cleanupUnactivatedFiles(error);
       throw error;
     }
+    await Promise.all(prepared.map(({ publication }) => publication.close()));
 
     if (activation.kind === "session-running") {
       await cleanupUnactivatedFiles();
@@ -240,6 +253,10 @@ export class RunLifecycleApplication {
         deduplicated: true,
       };
     }
+
+    // Final is now committed in SQLite; source temp removal is best-effort and
+    // must never roll back a visible Run or touch the mutable Workspace final.
+    warnPending([], await removeTemps());
 
     const runContext = this.dependencies.workspaceRunContextReader.get(command.workspaceId);
     if (!runContext) throw new HttpError(404, "workspace not found");

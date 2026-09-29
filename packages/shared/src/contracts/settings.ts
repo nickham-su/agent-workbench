@@ -220,7 +220,6 @@ export const AgentRuntimeSettingsSchema = Type.Object({
   // 自动压缩阈值百分比,达到 model.contextWindowTokens * pct/100 触发压缩。
   autoCompactThresholdPct: Type.Integer({ minimum: 50, maximum: 99 }),
   maxSubtaskDepth: Type.Integer({ minimum: 1, maximum: 5 }),
-  visionModel: Type.Union([AgentProvidersDefaultSchema, Type.Null()]),
   // 上下文压缩摘要的默认模型;未配置时使用当前 Agent 模型。
   compactionModel: Type.Union([AgentProvidersDefaultSchema, Type.Null()]),
   sessionTerminalSoundEnabled: Type.Boolean(),
@@ -235,7 +234,6 @@ export const UpdateAgentRuntimeSettingsRequestSchema = Type.Object({
   modelRequestRetryBackoffMaxMs: Type.Optional(Type.Integer({ minimum: 2_000, maximum: 3_600_000 })),
   autoCompactThresholdPct: Type.Optional(Type.Integer({ minimum: 50, maximum: 99 })),
   maxSubtaskDepth: Type.Optional(Type.Integer({ minimum: 1, maximum: 5 })),
-  visionModel: Type.Optional(Type.Union([AgentProvidersDefaultSchema, Type.Null()])),
   compactionModel: Type.Optional(Type.Union([AgentProvidersDefaultSchema, Type.Null()])),
   sessionTerminalSoundEnabled: Type.Optional(Type.Boolean())
 });
@@ -270,7 +268,7 @@ export const AgentToolNameSchema = Type.Union([
   Type.Literal("todolist"),
   Type.Literal("subtask"),
   Type.Literal("skill"),
-  Type.Literal("visual_analyze"),
+  Type.Literal("view_image"),
   Type.Literal("archive_read"),
   Type.Literal("archive_search")
 ]);

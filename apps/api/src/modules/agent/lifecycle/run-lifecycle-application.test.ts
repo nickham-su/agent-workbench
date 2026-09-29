@@ -36,7 +36,7 @@ function createDependencies(params?: {
     promptStaticCacheInvalidator: { clear: (runId) => calls.push(["cache", runId]) },
     runCompletedEventPublisher: { publishRunCompleted: () => undefined },
     persistence: {
-      activateUserRun(input: UserRunActivationInput) { calls.push(["activate", input]); return params?.activation ?? { kind: "activated", messageId: "message-7", runId: input.runId }; },
+      activateUserRun(input: UserRunActivationInput, publish?: () => void) { calls.push(["activate", input]); if (!params?.activation || params.activation.kind === "activated") publish?.(); return params?.activation ?? { kind: "activated", messageId: "message-7", runId: input.runId }; },
       canEnqueueUserRunIfCurrent(input) { calls.push(["fence", input]); return params?.canEnqueue ?? true; },
       failRunAfterEnqueueFailureIfCurrent(input: EnqueueFailureInput) { calls.push(["settle", input]); return params?.settlement ?? "failed-and-idled"; },
       listActiveSessionIdsForCancel: () => [],
@@ -158,43 +158,49 @@ test("RunLifecycleApplication 不读取上下文或入队重复请求", async ()
   assert.deepEqual(calls.map(([kind]) => kind), ["activate"]);
 });
 
-test("RunLifecycleApplication 在全部附件提交后才激活 SQLite", async () => {
+test("RunLifecycleApplication 先准备附件，事务校验后才同步发布", async () => {
   const { calls, dependencies } = createDependencies();
   dependencies.attachmentCommitter = {
-    commit: async ({ image }) => { calls.push(["commit", image.attachmentId]); },
+    prepare: async ({ image: current }) => { calls.push(["prepare", current.attachmentId]); return { checkAvailable() {}, publish: () => { calls.push(["publish", current.attachmentId]); return { dev: 1, ino: 1 }; }, close: async () => {} }; },
     removeTemp: async ({ tempId }) => { calls.push(["remove-temp", tempId]); },
     removeFinal: async ({ image }) => { calls.push(["remove-final", image.attachmentId]); },
   };
   await new RunLifecycleApplication(dependencies).startUserRun({ ...command({ enqueueRun: () => undefined }), images: [image("first", 0), image("second", 1)] });
-  assert.deepEqual(calls.map(([kind]) => kind), ["commit", "commit", "activate", "context", "fence"]);
+  assert.deepEqual(calls.map(([kind]) => kind), ["prepare", "prepare", "activate", "publish", "publish", "remove-temp", "remove-temp", "context", "fence"]);
 });
 
 test("RunLifecycleApplication 第二张附件提交失败时不激活并尽力清理", async () => {
   const { calls, dependencies } = createDependencies();
+  const warnings: Array<{ bindings: Record<string, unknown>; message: string }> = [];
+  dependencies.logger.warn = (bindings, message) => { warnings.push({ bindings, message }); };
   dependencies.attachmentCommitter = {
-    commit: async ({ image: current }) => { calls.push(["commit", current.attachmentId]); if (current.position === 1) throw new Error("second commit failed"); },
+    prepare: async ({ image: current }) => { calls.push(["prepare", current.attachmentId]); if (current.position === 1) throw new Error("second commit failed"); return { checkAvailable() {}, publish: () => ({ dev: 1, ino: 1 }), close: async () => {} }; },
     removeTemp: async ({ tempId }) => { calls.push(["remove-temp", tempId]); if (tempId.includes("second")) throw new Error("cleanup failure"); },
     removeFinal: async ({ image: current }) => { calls.push(["remove-final", current.attachmentId]); },
   };
   await assert.rejects(() => new RunLifecycleApplication(dependencies).startUserRun({ ...command({ enqueueRun: () => undefined }), images: [image("first", 0), image("second", 1)] }), /second commit failed/);
-  assert.deepEqual(calls.map(([kind]) => kind), ["commit", "commit", "remove-final", "remove-temp", "remove-temp"]);
+  assert.deepEqual(calls.map(([kind]) => kind), ["prepare", "prepare", "remove-temp", "remove-temp"]);
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0]!.bindings.pendingTemps, 1);
 });
 
-test("RunLifecycleApplication 将 link 成功但 unlink temp 失败的 final 纳入清理", async () => {
+test("RunLifecycleApplication 对提交失败且无可信 inode 的 final 不进行路径清理", async () => {
   const { calls, dependencies } = createDependencies();
   dependencies.attachmentCommitter = {
-    commit: async () => { throw new AgentAttachmentCommitError(true, false, { cause: new Error("unlink failed") }); },
+    prepare: async () => { throw new Error("preparation failed"); },
     removeTemp: async ({ tempId }) => { calls.push(["remove-temp", tempId]); },
     removeFinal: async ({ image: current }) => { calls.push(["remove-final", current.attachmentId]); },
   };
-  await assert.rejects(() => new RunLifecycleApplication(dependencies).startUserRun({ ...command({ enqueueRun: () => undefined }), images: [image("linked", 0)] }), AgentAttachmentCommitError);
-  assert.deepEqual(calls.map(([kind]) => kind), ["remove-final", "remove-temp"]);
+  await assert.rejects(() => new RunLifecycleApplication(dependencies).startUserRun({ ...command({ enqueueRun: () => undefined }), images: [image("linked", 0)] }), /preparation failed/);
+  assert.deepEqual(calls.map(([kind]) => kind), ["remove-temp"]);
 });
 
 test("RunLifecycleApplication 对 attachment cleanup pending 不使用逻辑路径清理 final", async () => {
   const { calls, dependencies } = createDependencies();
+  const warnings: Array<{ bindings: Record<string, unknown>; message: string }> = [];
+  dependencies.logger.warn = (bindings, message) => { warnings.push({ bindings, message }); };
   dependencies.attachmentCommitter = {
-    commit: async () => { throw new AgentAttachmentCommitError(true, true, { cause: new Error("directory replaced") }); },
+    prepare: async () => ({ checkAvailable() {}, publish: () => { throw new AgentAttachmentCommitError(true, true, { cause: new Error("private path: /secret/image.png") }); }, close: async () => {} }),
     removeTemp: async ({ tempId }) => { calls.push(["remove-temp", tempId]); },
     removeFinal: async ({ image: current }) => { calls.push(["remove-final", current.attachmentId]); },
   };
@@ -202,30 +208,34 @@ test("RunLifecycleApplication 对 attachment cleanup pending 不使用逻辑路�
     () => new RunLifecycleApplication(dependencies).startUserRun({ ...command({ enqueueRun: () => undefined }), images: [image("linked", 0)] }),
     AgentAttachmentCommitError,
   );
-  assert.deepEqual(calls.map(([kind]) => kind), ["remove-temp"]);
+  assert.deepEqual(calls.map(([kind]) => kind), ["activate", "remove-temp"]);
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0]!.bindings.pendingFinals, 1);
+  assert.deepEqual(warnings[0]!.bindings.pendingFinalAttachmentIds, ["att_linked"]);
+  assert.ok(!JSON.stringify(warnings).includes("/secret/image.png"));
 });
 
 test("RunLifecycleApplication DB 激活失败时清理本请求已提交 final 和 temp", async () => {
   const { calls, dependencies } = createDependencies();
-  dependencies.persistence.activateUserRun = () => { calls.push(["activate"]); throw new Error("database failed"); };
+  dependencies.persistence.activateUserRun = (_input, publish) => { calls.push(["activate"]); publish?.(); throw new Error("database failed"); };
   dependencies.attachmentCommitter = {
-    commit: async ({ image: current }) => { calls.push(["commit", current.attachmentId]); },
+    prepare: async ({ image: current }) => { calls.push(["prepare", current.attachmentId]); return { checkAvailable() {}, publish: () => { calls.push(["publish", current.attachmentId]); return { dev: 1, ino: 1 }; }, close: async () => {} }; },
     removeTemp: async ({ tempId }) => { calls.push(["remove-temp", tempId]); },
     removeFinal: async ({ image: current }) => { calls.push(["remove-final", current.attachmentId]); },
   };
   await assert.rejects(() => new RunLifecycleApplication(dependencies).startUserRun({ ...command({ enqueueRun: () => undefined }), images: [image("only", 0)] }), /database failed/);
-  assert.deepEqual(calls.map(([kind]) => kind), ["commit", "activate", "remove-final", "remove-temp"]);
+  assert.deepEqual(calls.map(([kind]) => kind), ["prepare", "activate", "publish", "remove-final", "remove-temp"]);
 });
 
 test("RunLifecycleApplication cancel 在最终围栏获胜时保留已激活附件且不入队", async () => {
   const { calls, dependencies } = createDependencies({ canEnqueue: false });
   dependencies.attachmentCommitter = {
-    commit: async ({ image: current }) => { calls.push(["commit", current.attachmentId]); },
+    prepare: async ({ image: current }) => { calls.push(["prepare", current.attachmentId]); return { checkAvailable() {}, publish: () => { calls.push(["publish", current.attachmentId]); return { dev: 1, ino: 1 }; }, close: async () => {} }; },
     removeTemp: async ({ tempId }) => { calls.push(["remove-temp", tempId]); },
     removeFinal: async ({ image: current }) => { calls.push(["remove-final", current.attachmentId]); },
   };
   await assert.rejects(() => new RunLifecycleApplication(dependencies).startUserRun({ ...command({ enqueueRun: () => assert.fail("cancelled run must not enqueue") }), images: [image("only", 0)] }), (error: unknown) => error instanceof Error && "code" in error && error.code === "RUN_NOT_ACTIVE");
-  assert.deepEqual(calls.map(([kind]) => kind), ["commit", "activate", "context", "fence"]);
+  assert.deepEqual(calls.map(([kind]) => kind), ["prepare", "activate", "publish", "remove-temp", "context", "fence"]);
 });
 
 test("RunLifecycleApplication P3 conditionally settles an enqueue failure then preserves the error", async () => {
@@ -523,4 +533,21 @@ test("user activation 后 enqueue handoff 被 deletion fence 阻止时不建立 
     workspaceDeletingFence.end("workspace");
   }
   assert.equal(enqueueCalls, 0);
+});
+test("RunLifecycleApplication 成功重试清理 temp 不误报，失败只计一次", async () => {
+  for (const failRetry of [false, true]) {
+    const { dependencies } = createDependencies();
+    const warnings: Array<Record<string, unknown>> = [];
+    dependencies.logger.warn = (bindings) => { warnings.push(bindings); };
+    dependencies.attachmentCommitter = {
+      prepare: async () => { throw new AgentAttachmentCommitError(false, false, { cause: new Error("source failed") }, true); },
+      removeTemp: async () => { if (failRetry) throw new Error("retry failed"); },
+      removeFinal: async () => { assert.fail("no final published"); },
+    };
+    await assert.rejects(() => new RunLifecycleApplication(dependencies).startUserRun({
+      ...command({ enqueueRun: () => undefined }), images: [image("pending", 0)],
+    }), AgentAttachmentCommitError);
+    assert.equal(warnings.length, failRetry ? 1 : 0);
+    if (failRetry) assert.equal(warnings[0]!.pendingTemps, 1);
+  }
 });

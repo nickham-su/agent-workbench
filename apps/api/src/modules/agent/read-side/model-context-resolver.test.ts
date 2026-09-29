@@ -28,7 +28,7 @@ type MessagePart =
       id: string;
       position: number;
       type: "tool_call";
-      toolName: "bash";
+      toolName: "bash" | "view_image";
       input: Record<string, unknown>;
       providerToolCallId: string;
     }
@@ -62,6 +62,7 @@ function append(
   input: {
     id: string;
     type?: "user" | "assistant" | "runtime";
+    originRunId?: string;
     status?: "completed" | "failed";
     text?: string;
     parts?: MessagePart[];
@@ -76,6 +77,7 @@ function append(
     expectedRevision: current.revision,
     type: input.type ?? "user",
     status: input.status ?? "completed",
+    ...(input.originRunId ? { originRunId: input.originRunId } : {}),
     parts: input.parts ?? [{
       id: `${input.id}-text`,
       position: 0,
@@ -463,7 +465,7 @@ test("Resolver keeps attachment metadata without reading attachment bytes", () =
   });
   clearContextRoot(db);
   assert.deepEqual(resolver.resolve({ workspaceId: "ws", sessionId: "session" }).blocks[0]?.attachments, [{
-    partId: "image", attachmentId: "attachment", mediaType: "image/png", filename: "image.png",
+    partId: "image", attachmentId: "attachment", mediaType: "image/png", filename: "image.png", relativePath: null,
   }]);
   db.close();
 });
@@ -483,5 +485,44 @@ test("Resolver batches ToolExecution hydration when call parts cross the SQLite 
   insertAll();
   clearContextRoot(db);
   assert.equal(resolver.resolve({ workspaceId: "ws", sessionId: "session" }).blocks[0]?.toolExecutions.length, 401);
+  db.close();
+});
+test("Resolver only projects a structured view_image ref for the matching active Run", () => {
+  const { db, resolver } = createFixture();
+  append(db, { id: "user", text: "look" });
+  createMessageRunRecord(db, {
+    runId: "run", workspaceId: "ws", sessionId: "session", triggerMessageId: "user",
+    agentId: "agent", providerId: "provider", modelId: "model", status: "running", createdAt: 4,
+  });
+  startMessageRun(db, { workspaceId: "ws", sessionId: "session", runId: "run", updatedAt: 4 });
+  append(db, { id: "assistant-image", type: "assistant", originRunId: "run", parts: [{
+    id: "image-call", position: 0, type: "tool_call", toolName: "view_image",
+    providerToolCallId: "model-call", input: { path: "screens/page.png" },
+  }] });
+  db.prepare(`insert into agent_tool_execution (
+    id,call_part_id,origin_session_id,origin_run_id,status,result_preview,
+    structured_result_json,result_truncated,updated_revision,created_at,updated_at,completed_at
+  ) values ('execution','image-call','session','run','completed','truncated and untrusted',
+    '{"type":"image_ref","path":"screens/page.png"}',1,3,6,6,6)`).run();
+  clearContextRoot(db);
+  const project = (runId?: string) => projectModelContextToPrompt({
+    workspaceId: "ws", triggerMessageId: "user", resolved: resolver.resolve({ workspaceId: "ws", sessionId: "session", ...(runId ? { runId } : {}) }),
+    projector: new RuntimeTranscriptProjector(),
+  }).messages;
+  assert.match(JSON.stringify(project("run")), /"image_ref","path":"screens\/page\.png"/);
+  const historical = JSON.stringify(project());
+  assert.doesNotMatch(historical, /image_ref/);
+  assert.match(historical, /toolCallId=model-call.*screens\/page\.png/);
+  db.prepare("update agent_tool_execution set structured_result_json = ? where id = 'execution'")
+    .run('{"type":"image_ref","path":"screens/other.png"}');
+  assert.throws(() => project("run"), /does not belong/);
+  db.prepare("update agent_tool_execution set structured_result_json = ? where id = 'execution'")
+    .run('{"type":"image_ref","path":"screens/page.png"}');
+  createMessageRunRecord(db, {
+    runId: "other-run", workspaceId: "ws", sessionId: "session", triggerMessageId: "user",
+    agentId: "agent", providerId: "provider", modelId: "model", status: "running", createdAt: 8,
+  });
+  db.prepare("update agent_tool_execution set origin_run_id = 'other-run' where id = 'execution'").run();
+  assert.throws(() => project("run"), /does not belong/);
   db.close();
 });

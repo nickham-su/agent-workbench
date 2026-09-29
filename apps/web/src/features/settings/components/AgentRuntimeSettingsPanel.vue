@@ -40,7 +40,7 @@
       <a-form-item :label="t('settings.agentRuntime.fields.compactionModel.label')">
         <a-cascader
           v-model:value="compactionModelPath"
-          :options="visionModelCascaderOptions"
+          :options="modelCascaderOptions"
           :placeholder="t('settings.agentRuntime.fields.compactionModel.placeholder')"
           :show-search="true"
           :allow-clear="true"
@@ -89,20 +89,6 @@
       </a-form-item>
 
       <a-divider class="!my-2" />
-
-      <a-form-item :label="t('settings.agentRuntime.fields.visionModel.label')">
-        <a-cascader
-          v-model:value="visionModelPath"
-          :options="visionModelCascaderOptions"
-          :placeholder="t('settings.agentRuntime.fields.visionModel.placeholder')"
-          :show-search="true"
-          :allow-clear="true"
-          expand-trigger="hover"
-        />
-        <div class="pt-2 text-xs text-[color:var(--text-tertiary)]">
-          {{ t("settings.agentRuntime.fields.visionModel.help") }}
-        </div>
-      </a-form-item>
 
       <a-divider class="!my-2" />
 
@@ -161,7 +147,6 @@ const maxSubtaskDepth = ref<number>(1);
 const sessionTerminalSoundEnabled = ref(true);
 
 const providersSettings = ref<AgentProvidersSettings | null>(null);
-const visionModelPath = ref<string[]>([]);
 const compactionModelPath = ref<string[]>([]);
 
 function toSeconds(rawMs: number) {
@@ -176,7 +161,7 @@ function toMs(rawSeconds: number) {
   return Math.round(seconds) * 1000;
 }
 
-const visionModelCascaderOptions = computed(() => {
+const modelCascaderOptions = computed(() => {
   const providers = providersSettings.value?.providers ?? [];
   return providers
     .filter((provider) => provider.models.length > 0)
@@ -198,7 +183,7 @@ function findModel(providerId: string, modelId: string) {
   return { provider, model };
 }
 
-function toVisionModelFromPath(path: string[]) {
+function toSelectedModelFromPath(path: string[]) {
   return modelReferenceFromPath(path, (providerId, modelId) => findModel(providerId, modelId) !== null);
 }
 
@@ -212,7 +197,6 @@ function mapFromSettings(settings: AgentRuntimeSettings) {
   autoCompactThresholdPct.value = Math.min(99, Math.max(50, Math.floor(Number(settings.autoCompactThresholdPct || 80))));
   maxSubtaskDepth.value = normalizeMaxSubtaskDepth(settings.maxSubtaskDepth);
   sessionTerminalSoundEnabled.value = settings.sessionTerminalSoundEnabled !== false;
-  visionModelPath.value = modelPathFromReference(settings.visionModel);
   compactionModelPath.value = modelPathFromReference(settings.compactionModel);
 }
 
@@ -237,12 +221,7 @@ async function save() {
   if (saving.value) return;
   saving.value = true;
   try {
-    const visionModel = toVisionModelFromPath(visionModelPath.value);
-    if (visionModel === undefined) {
-      message.error(t("settings.agentRuntime.errors.visionModelInvalid"));
-      return;
-    }
-    const compactionModel = toVisionModelFromPath(compactionModelPath.value);
+    const compactionModel = toSelectedModelFromPath(compactionModelPath.value);
     if (compactionModel === undefined) {
       message.error(t("settings.agentRuntime.errors.compactionModelInvalid"));
       return;
@@ -257,7 +236,6 @@ async function save() {
       autoCompactThresholdPct: Math.min(99, Math.max(50, Math.floor(Number(autoCompactThresholdPct.value || 80)))),
       maxSubtaskDepth: toRuntimeSettingsMaxSubtaskDepthPayload(maxSubtaskDepth.value),
       sessionTerminalSoundEnabled: !!sessionTerminalSoundEnabled.value,
-      visionModel,
       compactionModel
     });
     mapFromSettings(res);

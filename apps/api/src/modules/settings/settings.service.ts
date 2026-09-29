@@ -112,11 +112,6 @@ type ExecutionProfileResolved = {
   agent: AgentItem;
   provider: AgentProviderStored;
   model: AgentProviderStored["models"][number];
-  vision: {
-    source: "runtime_vision" | "agent_default_fallback";
-    provider: AgentProviderStored;
-    model: AgentProviderStored["models"][number];
-  } | null;
   compaction: {
     source: "runtime_compaction";
     provider: AgentProviderStored;
@@ -807,7 +802,7 @@ function normalizeAgentTools(raw: unknown): AgentToolName[] {
       item !== "todolist" &&
       item !== "archive_read" &&
       item !== "archive_search" &&
-      item !== "visual_analyze" &&
+      item !== "view_image" &&
       // Legacy baseline-only tool names are intentionally ignored.
       item !== "read" &&
       item !== "skill"
@@ -1246,15 +1241,6 @@ function getAgentRuntimeSettingsStored(ctx: AppContext) {
   const autoCompactThresholdPct = normalizeAutoCompactThresholdPctFromStored(value?.autoCompactThresholdPct);
   const maxSubtaskDepth = normalizeMaxSubtaskDepthFromStored(value?.maxSubtaskDepth);
   const sessionTerminalSoundEnabled = normalizeSessionTerminalSoundEnabledFromStored(value?.sessionTerminalSoundEnabled);
-  const visionModelRaw = (value?.visionModel ?? null) as { providerId?: unknown; modelId?: unknown } | null;
-  const visionProviderId = typeof visionModelRaw?.providerId === "string" ? visionModelRaw.providerId.trim() : "";
-  const visionModelId = typeof visionModelRaw?.modelId === "string" ? visionModelRaw.modelId.trim() : "";
-  const visionModel = visionProviderId && visionModelId
-    ? {
-        providerId: visionProviderId,
-        modelId: visionModelId
-      }
-    : null;
   const compactionModelRaw = (value?.compactionModel ?? null) as { providerId?: unknown; modelId?: unknown } | null;
   const compactionProviderId = typeof compactionModelRaw?.providerId === "string" ? compactionModelRaw.providerId.trim() : "";
   const compactionModelId = typeof compactionModelRaw?.modelId === "string" ? compactionModelRaw.modelId.trim() : "";
@@ -1270,8 +1256,7 @@ function getAgentRuntimeSettingsStored(ctx: AppContext) {
       autoCompactThresholdPct,
       maxSubtaskDepth,
       sessionTerminalSoundEnabled,
-      visionModel,
-      compactionModel
+        compactionModel
     },
     updatedAt: row?.updatedAt ?? 0
   };
@@ -1416,7 +1401,6 @@ export function getAgentRuntimeSettings(ctx: AppContext): AgentRuntimeSettings {
     autoCompactThresholdPct: loaded.settings.autoCompactThresholdPct,
     maxSubtaskDepth: loaded.settings.maxSubtaskDepth,
     sessionTerminalSoundEnabled: loaded.settings.sessionTerminalSoundEnabled,
-    visionModel: loaded.settings.visionModel,
     compactionModel: loaded.settings.compactionModel,
     updatedAt: loaded.updatedAt
   };
@@ -1465,9 +1449,6 @@ function assertProviderModelRenameNotReferenced(
         }
       }
 
-      if (runtimeSettings.visionModel?.providerId === provider.id && runtimeSettings.visionModel.modelId === oldId) {
-        referencedDetails.push(`runtime visionModel: ${provider.id}/${oldId}`);
-      }
       if (runtimeSettings.compactionModel?.providerId === provider.id && runtimeSettings.compactionModel.modelId === oldId) {
         referencedDetails.push(`runtime compactionModel: ${provider.id}/${oldId}`);
       }
@@ -1548,21 +1529,6 @@ export function updateAgentRuntimeSettings(
     (body as any).sessionTerminalSoundEnabled !== undefined
       ? normalizeSessionTerminalSoundEnabledForUpdate((body as any).sessionTerminalSoundEnabled, "sessionTerminalSoundEnabled")
       : current.sessionTerminalSoundEnabled;
-  const visionModel =
-    (body as any).visionModel !== undefined
-      ? (() => {
-          const raw = (body as any).visionModel;
-          if (raw == null) return null;
-          const providerId = typeof raw?.providerId === "string" ? raw.providerId.trim() : "";
-          const modelId = typeof raw?.modelId === "string" ? raw.modelId.trim() : "";
-          if (!providerId || !modelId) {
-            throw new HttpError(400, "visionModel.providerId/modelId is required", "AGENT_MODEL_REQUIRED");
-          }
-          const providersSettings = getAgentProvidersSettingsInternal(ctx);
-          resolveProviderModelOrThrow(providersSettings, providerId, modelId);
-          return { providerId, modelId };
-        })()
-      : current.visionModel;
   const compactionModel =
     (body as any).compactionModel !== undefined
       ? (() => {
@@ -1591,14 +1557,13 @@ export function updateAgentRuntimeSettings(
       autoCompactThresholdPct,
       maxSubtaskDepth,
       sessionTerminalSoundEnabled,
-      visionModel,
-      compactionModel
+        compactionModel
     },
     updatedAt
   );
 
   logger.info(
-    { modelIdleTimeoutMs, modelTotalTimeoutMs, modelRequestMaxRetries, modelRequestRetryBackoffMaxMs, autoCompactThresholdPct, maxSubtaskDepth, sessionTerminalSoundEnabled, visionModel, compactionModel, updatedAt },
+    { modelIdleTimeoutMs, modelTotalTimeoutMs, modelRequestMaxRetries, modelRequestRetryBackoffMaxMs, autoCompactThresholdPct, maxSubtaskDepth, sessionTerminalSoundEnabled, compactionModel, updatedAt },
     "agent runtime settings updated"
   );
   return {
@@ -1609,7 +1574,6 @@ export function updateAgentRuntimeSettings(
     autoCompactThresholdPct,
     maxSubtaskDepth,
     sessionTerminalSoundEnabled,
-    visionModel,
     compactionModel,
     updatedAt
   };
@@ -2086,27 +2050,6 @@ export function resolveExecutionProfile(ctx: AppContext, input: {
   }
 
   const runtimeSettings = getAgentRuntimeSettings(ctx);
-  const runtimeVisionProviderId = typeof runtimeSettings.visionModel?.providerId === "string" ? runtimeSettings.visionModel.providerId.trim() : "";
-  const runtimeVisionModelId = typeof runtimeSettings.visionModel?.modelId === "string" ? runtimeSettings.visionModel.modelId.trim() : "";
-  let vision: ExecutionProfileResolved["vision"] = null;
-  if (runtimeVisionProviderId && runtimeVisionModelId) {
-    const resolvedVision = resolveProviderModelOrThrow(providersSettings, runtimeVisionProviderId, runtimeVisionModelId);
-    if (!resolvedVision.provider.options.apiKey) {
-      throw new HttpError(400, `Provider '${resolvedVision.provider.id}' apiKey is missing`, "AGENT_PROVIDER_API_KEY_MISSING");
-    }
-    vision = {
-      source: "runtime_vision",
-      provider: resolvedVision.provider,
-      model: resolvedVision.model
-    };
-  } else {
-    vision = {
-      source: "agent_default_fallback",
-      provider,
-      model
-    };
-  }
-
   const runtimeCompactionProviderId = typeof runtimeSettings.compactionModel?.providerId === "string" ? runtimeSettings.compactionModel.providerId.trim() : "";
   const runtimeCompactionModelId = typeof runtimeSettings.compactionModel?.modelId === "string" ? runtimeSettings.compactionModel.modelId.trim() : "";
   let compaction: ExecutionProfileResolved["compaction"] = null;
@@ -2126,7 +2069,6 @@ export function resolveExecutionProfile(ctx: AppContext, input: {
     agent,
     provider,
     model,
-    vision,
     compaction
   } satisfies ExecutionProfileResolved;
 }
