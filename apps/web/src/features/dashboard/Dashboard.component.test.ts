@@ -4,7 +4,10 @@ import { readFileSync } from "node:fs";
 import { DashboardQuerySuccessResponseSchema, type DashboardData } from "@agent-workbench/shared";
 import { Value } from "@sinclair/typebox/value";
 import { mount } from "@vue/test-utils";
+import { getInstanceByDom } from "echarts/core";
+import { createI18n } from "vue-i18n";
 import { i18n } from "@/shared/i18n";
+import enUS from "@/shared/i18n/locales/en-US";
 import MetricCard from "./components/DashboardMetricCard.vue";
 import TrendChart from "./components/DashboardTrendChart.vue";
 import DomainSummary from "./components/DashboardDomainSummary.vue";
@@ -15,11 +18,164 @@ import AgentSection from "./components/DashboardAgentSection.vue";
 import ModelSection from "./components/DashboardModelSection.vue";
 import WorkerSection from "./components/DashboardWorkerSection.vue";
 import AgentDistribution from "./components/DashboardAgentDistribution.vue";
+import DistributionEChart from "./components/DashboardDistributionEChart.vue";
 import { dashboardSuccessFixture } from "./dashboard-fixture";
+import type { DashboardTrendPanel } from "./dashboard-types";
 import DashboardTab from "./views/DashboardTab.vue";
 import { dashboardQueryKey } from "./dashboard-injection";
 
 const options = { global: { plugins: [i18n] } };
+test("概览 ECharts 的键盘读数与明细表保留真实零和未知桶", async () => {
+  const panel = {
+    ...dashboardSuccessFixture.data.overviewTrends.totalTokens,
+    data: [{ from: 1, to: 2, count: 0 }, { from: 2, to: 3, count: null }],
+  };
+  const wrapper = mount(TrendChart, { ...options, props: { title: "total tokens", kind: "total_tokens", panel, echarts: true } });
+  assert.equal(wrapper.findAll("svg.trend").length, 0);
+  assert.equal(wrapper.findAll("[data-testid^='chart-bucket-detail-']").length, 2);
+  const chart = wrapper.get(".echarts-chart");
+  await chart.trigger("focus");
+  assert.match(wrapper.get(".keyboard-bucket").text(), /0/);
+  await chart.trigger("keydown", { key: "ArrowRight" });
+  assert.match(wrapper.get(".keyboard-bucket").text(), /—/);
+  await chart.trigger("blur");
+  assert.equal(wrapper.find(".keyboard-bucket").exists(), false);
+  wrapper.unmount();
+});
+test("挂载至页面时概览实际初始化 ECharts SVG 并响应指标更新", async () => {
+  const wrapper = mount(TrendChart, { ...options, attachTo: document.body, props: {
+    title: "trend", kind: "total_tokens", panel: dashboardSuccessFixture.data.overviewTrends.totalTokens, echarts: true,
+  } });
+  assert.ok(wrapper.find(".echarts-chart svg").exists());
+  await wrapper.setProps({ kind: "ratio", panel: dashboardSuccessFixture.data.overviewTrends.cacheHitRate });
+  assert.ok(wrapper.find(".echarts-chart svg").exists());
+  wrapper.unmount();
+});
+test("概览状态折线摘要、明细与键盘读数呈现全部状态的安全合计", async () => {
+  const base = dashboardSuccessFixture.data.overviewTrends.modelRequests;
+  const complete = { from: 1, to: 2, completed: 3, failed: 1, timedOut: 0, other: 0 };
+  const partial = { ...base, status: "partial" as const, completeness: "partial" as const, dataIncomplete: true as const, partialReason: "coverage_gap" as const, data: [complete] };
+  const wrapper = mount(TrendChart, { ...options, attachTo: document.body, props: { title: "Requests", kind: "model_status", panel: partial, echarts: true } });
+  const chart = wrapper.get(".echarts-chart");
+  const instance = getInstanceByDom(chart.element as HTMLElement)!;
+  const tooltip = () => (instance.getOption().tooltip as Array<{ formatter: (params: unknown) => string }>)[0].formatter([{ dataIndex: 0 }]);
+  assert.match(tooltip(), /(?:全部状态合计|all statuses).*4/);
+  assert.match(chart.attributes("aria-label") ?? "", /平滑折线图|smooth line chart/);
+  assert.doesNotMatch(wrapper.get(".sr-only").text(), /stacked-bars/);
+  assert.match(wrapper.get(".chart-details thead").text(), /全部状态合计|all statuses/);
+  assert.equal(wrapper.get('[data-testid="chart-bucket-detail-0"] td:last-child').text(), "4");
+  await chart.trigger("focus");
+  await wrapper.get(".echarts-legend button").trigger("click");
+  assert.match(tooltip(), /(?:全部状态合计|all statuses).*4/);
+  assert.doesNotMatch(tooltip(), /(?:完成|Completed):/);
+  await chart.trigger("focus");
+  assert.match(wrapper.get(".keyboard-bucket").text(), /(?:全部状态合计|all statuses).*4/);
+  assert.doesNotMatch(wrapper.get(".keyboard-bucket").text(), /(?:完成|Completed)/);
+  assert.equal(wrapper.get('[data-testid="chart-bucket-detail-0"] td:last-child').text(), "4", "legend does not recalculate total from visible statuses");
+
+  // Contract currently requires all four statuses; this malformed bucket tests the defensive null path.
+  const incomplete = { ...partial, data: [{ ...complete, failed: null }] } as unknown as DashboardTrendPanel;
+  await wrapper.setProps({ panel: incomplete });
+  assert.match(tooltip(), /(?:全部状态合计|all statuses).*—/);
+  assert.equal(wrapper.get('[data-testid="chart-bucket-detail-0"] td:last-child').text(), "—");
+  assert.match(wrapper.get(".keyboard-bucket").text(), /(?:全部状态合计|all statuses).*—/);
+  await wrapper.setProps({ kind: "ratio", panel: dashboardSuccessFixture.data.overviewTrends.modelSuccessRate });
+  assert.doesNotMatch(tooltip(), /全部状态合计|all statuses/);
+  assert.doesNotMatch(wrapper.get(".chart-details thead").text(), /全部状态合计|all statuses/);
+  assert.doesNotMatch(wrapper.get(".keyboard-bucket").text(), /全部状态合计|all statuses/);
+  await wrapper.setProps({ kind: "model_status", panel: partial });
+  assert.equal(wrapper.findAll('.echarts-legend button[aria-pressed="true"]').length, 4, "switching back restores all series");
+  assert.equal(wrapper.get('[data-testid="chart-bucket-detail-0"] td:last-child').text(), "4");
+  wrapper.unmount();
+});
+test("英文概览摘要与全部状态合计使用英文文案，其他图仍为堆叠柱", () => {
+  const en = createI18n({ legacy: false, locale: "en-US", messages: { "en-US": enUS } });
+  const panel = dashboardSuccessFixture.data.overviewTrends.modelRequests;
+  const props = { title: "Requests", kind: "model_status" as const, panel };
+  const overview = mount(TrendChart, { global: { plugins: [en] }, props: { ...props, echarts: true } });
+  assert.match(overview.get(".echarts-chart").attributes("aria-label") ?? "", /smooth line chart/);
+  assert.match(overview.get(".chart-details thead").text(), /Total requests \(all statuses\)/);
+  overview.unmount();
+  const legacy = mount(TrendChart, { global: { plugins: [en] }, props });
+  assert.match(legacy.get(".sr-only").text(), /stacked bar chart/);
+  assert.equal(legacy.get(".echarts-chart").attributes("role"), "group");
+  assert.doesNotMatch(legacy.get(".chart-details thead").text(), /all statuses/);
+  legacy.unmount();
+});
+test("概览原生图例允许隐藏全部系列，并在重新选中后同步可见曲线与键盘读数", async () => {
+  const wrapper = mount(TrendChart, { ...options, attachTo: document.body, props: {
+    title: "requests", kind: "model_status", panel: dashboardSuccessFixture.data.overviewTrends.modelRequests, echarts: true,
+  } });
+  const buttons = wrapper.findAll(".echarts-legend button");
+  const chart = wrapper.get(".echarts-chart");
+  const instance = getInstanceByDom(chart.element as HTMLElement)!;
+  assert.equal(buttons.length, 4);
+  const series = instance.getOption().series as Array<{ type: string; smooth: number; smoothMonotone: string; data: unknown[] }>;
+  assert.equal(series.length, 4);
+  for (const item of series) {
+    assert.equal(item.type, "line"); assert.ok(item.smooth > 0); assert.equal(item.smoothMonotone, "x");
+  }
+  await chart.trigger("focus");
+  await buttons[0].trigger("click");
+  assert.equal(buttons[0].attributes("aria-pressed"), "false");
+  assert.equal((instance.getOption().series as unknown[]).length, 3);
+  assert.doesNotMatch(wrapper.get(".keyboard-bucket").text(), /(?:完成|Completed)/);
+  for (const button of buttons.slice(1)) await button.trigger("click");
+  assert.deepEqual(instance.getOption().series, []);
+  assert.ok(wrapper.get(".echarts-no-series").text());
+  assert.equal(wrapper.find(".keyboard-bucket").exists(), false);
+  await buttons[0].trigger("click");
+  assert.equal((instance.getOption().series as unknown[]).length, 1);
+  await chart.trigger("focus");
+  assert.match(wrapper.get(".keyboard-bucket").text(), /(?:完成|Completed)/);
+  wrapper.unmount();
+});
+test("概览刷新、桶数缩减与指标切换均重置同步键盘位置与 ECharts tooltip", async () => {
+  const base = dashboardSuccessFixture.data.overviewTrends.totalTokens;
+  const row = (from: number, count: number | null) => ({ from, to: from + 1000, count });
+  const wrapper = mount(TrendChart, { ...options, attachTo: document.body, props: {
+    title: "tokens", kind: "total_tokens", panel: { ...base, data: [row(1, 1), row(2, 2), row(3, 3)] }, echarts: true,
+  } });
+  const host = wrapper.get(".echarts-chart");
+  const instance = getInstanceByDom(host.element as HTMLElement)!;
+  const actions: Array<{ type: string; dataIndex?: number }> = [];
+  const original = instance.dispatchAction.bind(instance);
+  instance.dispatchAction = ((action: { type: string; dataIndex?: number }) => {
+    actions.push(action);
+    original(action);
+  }) as typeof instance.dispatchAction;
+  await host.trigger("focus");
+  await host.trigger("keydown", { key: "ArrowRight" });
+  await host.trigger("keydown", { key: "ArrowRight" });
+  assert.match(wrapper.get(".keyboard-bucket").text(), /3/);
+  await wrapper.setProps({ panel: { ...base, data: [row(10, 10), row(20, 20)] } });
+  assert.match(wrapper.get(".keyboard-bucket").text(), /20/);
+  assert.equal(actions.at(-1)?.type, "showTip");
+  assert.equal(actions.at(-1)?.dataIndex, 1, "after shrinking, tip points to the new last bucket");
+  await wrapper.setProps({ title: "count", kind: "count", panel: { ...base, data: [row(30, 90), row(40, 80)] } });
+  assert.match(wrapper.get(".keyboard-bucket").text(), /90/);
+  assert.equal(actions.at(-1)?.dataIndex, 0, "switching metric resets to first bucket");
+  assert.equal((instance.getOption().series as Array<{ data: number[] }>)[0].data[0], 90);
+  wrapper.unmount();
+});
+test("根主题颜色变化时概览坐标轴与提示同步使用实际次级文字色", async () => {
+  const root = document.documentElement;
+  const prior = root.style.getPropertyValue("--text-secondary");
+  const wrapper = mount(TrendChart, { ...options, attachTo: document.body, props: {
+    title: "tokens", kind: "total_tokens", panel: dashboardSuccessFixture.data.overviewTrends.totalTokens, echarts: true,
+  } });
+  const instance = getInstanceByDom(wrapper.get(".echarts-chart").element as HTMLElement)!;
+  try {
+    root.style.setProperty("--text-secondary", "#a1b2c3");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const axis = instance.getOption().yAxis as Array<{ axisLabel: { color: string } }>;
+    assert.equal(axis[0].axisLabel.color, "#a1b2c3");
+  } finally {
+    if (prior) root.style.setProperty("--text-secondary", prior);
+    else root.style.removeProperty("--text-secondary");
+    wrapper.unmount();
+  }
+});
 test("Dashboard shared fixture 符合公开 TypeBox 响应合同", () => { assert.equal(Value.Check(DashboardQuerySuccessResponseSchema, dashboardSuccessFixture), true); });
 test("模型六卡、趋势与覆盖双栏及模型对比表按原型组织", async () => {
   const wrapper = mount(ModelSection, { ...options, props: { model: dashboardSuccessFixture.data.model, cacheHitRate: dashboardSuccessFixture.data.overview.cacheHitRate, timezone: "UTC" } });
@@ -60,19 +216,25 @@ test("模型覆盖率未知不画零，安全零显示零；双 Token 值互不�
     totalTokenCoverage: { ...metrics.totalTokenCoverage, value: { ratio: null } },
     inputCacheCoverage: unavailable,
   } };
-  const wrapper = mount(ModelSection, { ...options, props: { model, cacheHitRate: dashboardSuccessFixture.data.overview.cacheHitRate, timezone: "UTC" } });
+  const wrapper = mount(ModelSection, { ...options, attachTo: document.body, props: { model, cacheHitRate: dashboardSuccessFixture.data.overview.cacheHitRate, timezone: "UTC" } });
   const tokenValues = wrapper.get(".token-values").text();
   assert.match(tokenValues, /0/);
   assert.match(tokenValues, /—/);
-  assert.equal(wrapper.get("[data-testid='model-coverage-inputTokenCoverage'] progress").attributes("value"), "0.25");
-  assert.equal(wrapper.get("[data-testid='model-coverage-outputTokenCoverage'] progress").attributes("value"), "0");
+  assert.equal(wrapper.get("[data-testid='model-coverage-inputTokenCoverage'] .mini-ratio-echart").attributes("data-ratio"), "0.25");
+  assert.equal(wrapper.get("[data-testid='model-coverage-outputTokenCoverage'] .mini-ratio-echart").attributes("data-ratio"), "0");
+  for (const [key, value] of [['inputTokenCoverage', 0.25], ['outputTokenCoverage', 0]] as const) {
+    const host = wrapper.get(`[data-testid='model-coverage-${key}'] .mini-ratio-echart`).element as HTMLElement;
+    const series = getInstanceByDom(host)!.getOption().series as Array<{ type: string; data: number[] }>;
+    assert.equal(series[0].type, 'bar');
+    assert.deepEqual(series[0].data, [value]);
+  }
   assert.match(wrapper.get("[data-testid='model-coverage-outputTokenCoverage']").text(), /0%/);
-  assert.equal(wrapper.find("[data-testid='model-coverage-totalTokenCoverage'] progress").exists(), false);
-  assert.equal(wrapper.find("[data-testid='model-coverage-inputCacheCoverage'] progress").exists(), false);
+  assert.equal(wrapper.find("[data-testid='model-coverage-totalTokenCoverage'] .mini-ratio-echart").exists(), false);
+  assert.equal(wrapper.find("[data-testid='model-coverage-inputCacheCoverage'] .mini-ratio-echart").exists(), false);
   assert.doesNotMatch(wrapper.get("[data-testid='model-coverage']").text(), /覆盖缺口|Coverage gap|不可用|Unavailable/);
   assert.equal(wrapper.get("[data-testid='model-metric-tokens']").findAll(".token-comparison").length, 0);
   assert.equal(wrapper.get("[data-testid='model-coverage-inputTokenCoverage']").findAll(".coverage-comparison").length, 0);
-  assert.doesNotMatch(wrapper.get("[data-testid='model-coverage-inputTokenCoverage'] progress").attributes("aria-label") ?? "", /\+10%/);
+  assert.doesNotMatch(wrapper.get("[data-testid='model-coverage-inputTokenCoverage'] .mini-ratio-echart").attributes("aria-label") ?? "", /\+10%/);
   assert.equal(wrapper.get("[data-testid='model-coverage']").findAll(".coverage-comparison").length, 1);
   wrapper.unmount();
 });
@@ -92,12 +254,12 @@ test("模型 Token 和覆盖率比较只跟随各自安全值及 available 比�
   assert.deepEqual(wrapper.findAll(".token-comparison").map((item) => item.text()), ["+0%"]);
   assert.equal(wrapper.get("[data-testid='model-coverage-inputTokenCoverage'] .coverage-comparison").text(), "-10.0pp");
   assert.equal(wrapper.get("[data-testid='model-coverage-outputTokenCoverage'] .coverage-comparison").text(), "+0.0pp");
-  assert.match(wrapper.get("[data-testid='model-coverage-outputTokenCoverage'] progress").attributes("aria-label") ?? "", /0%.*\+0.0pp/);
+  assert.match(wrapper.get("[data-testid='model-coverage-outputTokenCoverage'] .mini-ratio-echart").attributes("aria-label") ?? "", /0%.*\+0.0pp/);
   assert.equal(wrapper.find("[data-testid='model-coverage-totalTokenCoverage'] .coverage-comparison").exists(), false);
   wrapper.unmount();
 });
 test("Agent 6+4 指标与趋势、三块汇总和工具状态按照原型布局且保留交互", async () => {
-  const wrapper = mount(AgentSection, { ...options, props: { agent: dashboardSuccessFixture.data.agent, timezone: "UTC" } });
+  const wrapper = mount(AgentSection, { ...options, attachTo: document.body, props: { agent: dashboardSuccessFixture.data.agent, timezone: "UTC" } });
   assert.equal(wrapper.findAll(".agent-primary-metrics [data-testid^='agent-metric-']").length, 6);
   assert.equal(wrapper.findAll(".agent-secondary-metrics [data-testid^='agent-metric-']").length, 4);
   assert.equal(wrapper.findAll(".agent-distributions .dashboard-panel").length, 3);
@@ -110,12 +272,44 @@ test("Agent 6+4 指标与趋势、三块汇总和工具状态按照原型布局�
   }
   assert.equal(wrapper.get('[data-testid="agent-metric-manualCompactionCount"] .metric-value').text(), "0");
   assert.match(wrapper.get('[data-testid="agent-run-terminal"] .donut-center').text(), /3/);
+  const runHost = wrapper.get('[data-testid="agent-run-terminal"] .distribution-echart').element as HTMLElement;
+  const runChart = getInstanceByDom(runHost)!;
+  const getRunCounts = () => (runChart.getOption().series as Array<{ type: string; data: Array<{ value: number }> }>)[0].data.map((row) => row.value);
+  assert.equal((runChart.getOption().series as Array<{ type: string }>)[0].type, 'pie');
+  assert.equal(getRunCounts().reduce((sum, count) => sum + count, 0), 3);
   await wrapper.get('.scope-controls button:nth-child(2)').trigger('click');
   assert.equal(wrapper.get('.scope-controls button:nth-child(2)').attributes('aria-pressed'), 'true');
   assert.match(wrapper.get('[data-testid="agent-run-terminal"] .donut-center').text(), /2/);
+  assert.equal(getRunCounts().reduce((sum, count) => sum + count, 0), 2);
+  await wrapper.get('.scope-controls button:nth-child(3)').trigger('click');
+  assert.equal(getRunCounts().reduce((sum, count) => sum + count, 0), 1);
+  const chartHost = wrapper.get('[data-testid="agent-message-type"] .distribution-echart');
+  const messageOptions = getInstanceByDom(chartHost.element as HTMLElement)!.getOption();
+  assert.equal((messageOptions.series as Array<{ type: string }>)[0].type, 'bar');
+  assert.ok((messageOptions.yAxis as Array<{ axisLabel: { show?: boolean } }>)[0].axisLabel);
+  assert.equal(wrapper.findAll('[data-testid="agent-message-type"] .distribution-rows').length, 0);
+  await chartHost.trigger('focus');
+  await chartHost.trigger('keydown', { key: 'ArrowDown' });
+  assert.match(wrapper.get('[data-testid="agent-message-type"] [role="status"]').text(), /已知占比|占比|share/i);
   assert.match(wrapper.get('[data-testid="agent-tool-status"] .donut-center').text(), /2/);
   const styles = readFileSync(new URL("./components/DashboardAgentSection.vue", import.meta.url), "utf8");
   assert.match(styles, /@container\(max-width:780px\)[^{]*\{[^}]*\.agent-main,\.agent-tools,\.agent-distributions\{grid-template-columns:minmax\(0,1fr\)/);
+  wrapper.unmount();
+});
+test("Agent 趋势与消息图在容器宽度变化后重排为实际宽度", () => {
+  const wrapper = mount(AgentSection, { ...options, attachTo: document.body, props: { agent: dashboardSuccessFixture.data.agent, timezone: "UTC" } });
+  const trendHost = wrapper.get('.echarts-chart').element as HTMLElement;
+  const messageHost = wrapper.get('[data-testid="agent-message-type"] .distribution-echart').element as HTMLElement;
+  const trend = getInstanceByDom(trendHost)!;
+  const message = getInstanceByDom(messageHost)!;
+  Object.defineProperty(trendHost, "clientWidth", { configurable: true, value: 960 });
+  Object.defineProperty(trendHost, "clientHeight", { configurable: true, value: 236 });
+  Object.defineProperty(messageHost, "clientWidth", { configurable: true, value: 420 });
+  Object.defineProperty(messageHost, "clientHeight", { configurable: true, value: 114 });
+  window.dispatchEvent(new Event("resize"));
+  assert.equal(trend.getWidth(), 960);
+  assert.equal(message.getWidth(), 420);
+  assert.equal(message.getHeight(), 114);
   wrapper.unmount();
 });
 test("Agent 分类图只统计真实类别；部分结果只呈现已知份额，空值不伪装成零", () => {
@@ -132,6 +326,7 @@ test("Agent 分类图只统计真实类别；部分结果只呈现已知份额�
   const message = dashboardSuccessFixture.data.agent.messageTypeDistribution;
   const partialBars = mount(AgentDistribution, { ...options, props: { panel: { ...message, status: "partial" as const, completeness: "partial" as const, dataIncomplete: true as const, partialReason: "coverage_gap" as const }, title: "Messages", labelGroup: "distribution", variant: "bars" } });
   assert.match(partialBars.text(), /仅表示已知类别|relative shares of known categories/);
+  assert.equal(partialBars.findAll('.distribution-rows').length, 0);
   assert.doesNotMatch(partialBars.text(), /%/);
   const statuses = { ...dashboardSuccessFixture.data.agent.toolStatusDistribution, data: [{ status: "completed" as const, count: 0 }, { status: "cancelled" as const, count: 1 }, { status: "unknown" as const, count: 2 }] };
   const toolStatus = mount(AgentDistribution, { ...options, props: { panel: statuses, title: "Tools", labelGroup: "distribution", variant: "donut" } });
@@ -171,32 +366,73 @@ test("指标卡百分点评比只在结果与比较均可展示时出现", async
   assert.doesNotMatch(wrapper.text(), /pp/);
   wrapper.unmount();
 });
-test("连续已知 Input Token 与未知 Output Token 按 bucket 输出 fallback marker，不补零或连线", () => {
-  const panel = {
-    ...dashboardSuccessFixture.data.model.trends.tokens,
-    data: [
-      { from: 1, to: 2, inputTokens: 4, outputTokens: null },
-      { from: 2, to: 3, inputTokens: 8, outputTokens: null },
-    ],
-  };
-  const wrapper = mount(TrendChart, { ...options, props: { title: "tokens", kind: "tokens", panel } });
-  assert.doesNotMatch(wrapper.html(), /NaN/);
-  assert.equal(wrapper.findAll(".bar-segment").length, 0);
-  const inputMarkers = wrapper.findAll(".token-fallback-marker[data-series='inputTokens']");
-  const axisLabels = wrapper.findAll(".chart-axis-label");
-  const bucketHits = wrapper.findAll(".chart-bucket .chart-hit");
-  assert.equal(inputMarkers.length, 2);
-  assert.equal(wrapper.findAll(".token-fallback-marker[data-series='outputTokens']").length, 0);
-  assert.equal(wrapper.findAll("polyline").length, 0);
-  inputMarkers.forEach((marker, index) => {
-    const center = Number(marker.attributes("cx"));
-    const hit = bucketHits[index];
-    assert.equal(center, Number(axisLabels[index].attributes("data-x")), "fallback marker shares the bucket axis center");
-    assert.ok(center >= Number(hit.attributes("x")) && center <= Number(hit.attributes("x")) + Number(hit.attributes("width")), "fallback marker stays inside its bucket hit target");
-  });
-  const details = wrapper.get(".chart-details").text();
-  assert.match(details, /4/); assert.match(details, /8/); assert.match(details, /—/);
+test("缺失 Output Token 时散点可悬停且键盘选中真实散点，不绘制伪堆叠柱", async () => {
+  const panel = { ...dashboardSuccessFixture.data.model.trends.tokens, data: [
+    { from: 1, to: 2, inputTokens: 4, outputTokens: null },
+    { from: 2, to: 3, inputTokens: 8, outputTokens: null },
+    { from: 3, to: 4, inputTokens: null, outputTokens: 3 },
+  ] };
+  const wrapper = mount(TrendChart, { ...options, attachTo: document.body, props: { title: "tokens", kind: "tokens", panel } });
+  const chart = getInstanceByDom(wrapper.get('.echarts-chart').element as HTMLElement)!;
+  const series = chart.getOption().series as Array<{ type: string; data: Array<number | null>; silent?: boolean; tooltip?: { show?: boolean } }>;
+  assert.deepEqual(series.map((item) => item.type), ['bar', 'scatter', 'bar', 'scatter']);
+  assert.deepEqual(series.map((item) => item.data), [[null, null, null], [4, 8, null], [null, null, null], [null, null, 3]]);
+  assert.notEqual(series[1].silent, true);
+  assert.notEqual(series[1].tooltip?.show, false);
+  const tooltip = (chart.getOption().tooltip as Array<{ formatter: (params: unknown) => string }>)[0].formatter;
+  for (const [seriesIndex, dataIndex, known, unknown] of [[1, 0, /Input tokens: 4/i, /Output tokens: —/i], [3, 2, /Output tokens: 3/i, /Input tokens: —/i]] as const) {
+    const tip = tooltip([{ seriesIndex, dataIndex }]);
+    assert.match(tip, known);
+    assert.match(tip, unknown);
+    assert.match(tip, /总计.*—|Total.*—/);
+  }
+  // Drive the actual SVG renderer's hit test rather than merely inspecting options.
+  const point = chart.convertToPixel({ seriesIndex: 1 }, [0, 4]) as number[];
+  assert.ok(point.every(Number.isFinite));
+  const hovered = chart.getZr().handler.findHover(point[0], point[1]);
+  assert.ok(hovered.target, 'known Token scatter must be hit-testable');
+  chart.getZr().handler.dispatch('mousemove', { zrX: point[0], zrY: point[1] });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const hoveredTipText = (wrapper.get('.echarts-chart').element as HTMLElement).textContent ?? '';
+  assert.match(hoveredTipText, /Input tokens.*4/s);
+  assert.match(hoveredTipText, /Output tokens.*—/s);
+  assert.match(hoveredTipText, /Total.*—/s);
+  const actions: Array<{ seriesIndex: number; dataIndex: number }> = [];
+  const originalDispatch = chart.dispatchAction.bind(chart);
+  chart.dispatchAction = ((action: { type: string; seriesIndex?: number; dataIndex?: number }) => {
+    if (action.type === 'showTip') actions.push({ seriesIndex: action.seriesIndex!, dataIndex: action.dataIndex! });
+    originalDispatch(action);
+  }) as typeof chart.dispatchAction;
+  const host = wrapper.get('.echarts-chart');
+  await host.trigger('focus');
+  assert.deepEqual(actions.at(-1), { seriesIndex: 1, dataIndex: 0 });
+  await host.trigger('keydown', { key: 'ArrowRight' });
+  assert.deepEqual(actions.at(-1), { seriesIndex: 1, dataIndex: 1 });
+  await host.trigger('keydown', { key: 'ArrowRight' });
+  assert.deepEqual(actions.at(-1), { seriesIndex: 3, dataIndex: 2 });
+  assert.match(wrapper.get('.keyboard-bucket').text(), /3/);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const renderedTip = (host.element as HTMLElement).textContent ?? '';
+  assert.match(renderedTip, /Output tokens.*3/s);
+  assert.match(renderedTip, /Input tokens.*—/s);
+  assert.match(renderedTip, /Total.*—/s);
+  const inputLegend = wrapper.get('.echarts-legend button');
+  await inputLegend.trigger('click');
+  assert.deepEqual(actions.at(-1), { seriesIndex: 1, dataIndex: 2 });
+  const priorActions = actions.length;
+  await host.trigger('keydown', { key: 'ArrowLeft' });
+  assert.equal(actions.length, priorActions, 'no known visible component means no tooltip anchor');
+  assert.match(wrapper.get('.keyboard-bucket').text(), /Output tokens.*—/i);
+  await host.trigger('keydown', { key: 'ArrowRight' });
+  assert.deepEqual(actions.at(-1), { seriesIndex: 1, dataIndex: 2 });
+  await inputLegend.trigger('click');
+  assert.deepEqual(actions.at(-1), { seriesIndex: 3, dataIndex: 2 });
+  assert.equal(wrapper.findAll('svg.trend, .bar-track, progress').length, 0);
+  assert.match(wrapper.get('.chart-details').text(), /4/);
+  assert.match(wrapper.get('.chart-details').text(), /—/);
+  wrapper.unmount();
 });
+
 test("Domain summary 在 available 与 partial 展示已知域，仅 unavailable 隐藏域", () => {
   const available = dashboardSuccessFixture.data.exceptions.domainHealth;
   const partial = { ...available, status: "partial" as const, completeness: "partial" as const, dataIncomplete: true as const, partialReason: "coverage_gap" as const };
@@ -291,6 +527,7 @@ test("真实 DashboardTab：mounted 单请求、preset 自动刷新，custom 仅
     return { ...dashboardSuccessFixture, rangeId: `range-${calls.length}`, timezone: request.timezone, from: request.rangeKind === "custom" ? request.from : 1, to: request.rangeKind === "custom" ? request.to : 2 };
   };
   const wrapper = mount(DashboardTab, {
+    attachTo: document.body,
     global: {
       plugins: [i18n],
       provide: { [dashboardQueryKey as symbol]: query },
@@ -326,13 +563,18 @@ test("真实 DashboardTab：mounted 单请求、preset 自动刷新，custom 仅
   assert.match(tokenCard.get(".metric-title").text(), /总 Token|Total tokens/);
   assert.equal(tokenCard.get(".metric-value").text(), "9");
   await tokenCard.get("button").trigger("click");
-  assert.ok(wrapper.get('[data-testid="overview-trend-totalTokens"] .chart-bucket').attributes("aria-label")?.includes("9"));
+  assert.equal(wrapper.get('[data-testid="overview-trend-totalTokens"] .echarts-chart').attributes("tabindex"), "0");
+  assert.match(wrapper.get('[data-testid="overview-trend-totalTokens"] .chart-details').text(), /9/);
   const sectionButtons = wrapper.findAll("nav.dashboard-section-tabs button");
   assert.equal(sectionButtons.length, 4);
   assert.doesNotMatch(sectionButtons.map((button) => button.text()).join(" "), /Git/);
   assert.equal(wrapper.find('[data-testid="dashboard-section-git"]').exists(), false);
+  // Chart instances must not initialize under hidden tabs with a fallback width.
+  assert.equal(wrapper.find('[data-testid="dashboard-section-agent"]').exists(), false);
   await sectionButtons[1].trigger("click");
   const agentSection = wrapper.get('[data-testid="dashboard-section-agent"]');
+  assert.ok(getInstanceByDom(agentSection.get('.echarts-chart').element as HTMLElement));
+  assert.ok(getInstanceByDom(agentSection.get('[data-testid="agent-message-type"] .distribution-echart').element as HTMLElement));
   for (const key of ["totalDuration", "runCount", "primaryRunCount", "subtaskRunCount", "userMessageCount", "assistantMessageCount", "toolCallCount", "toolSuccessRate", "manualCompactionCount", "autoCompactionCount"]) {
     const card = agentSection.get(`[data-testid="agent-metric-${key}"]`);
     await card.get("button").trigger("click");
@@ -380,8 +622,9 @@ test("概览总 Token 未知显示中性空值，可靠零显示 0；点击后�
     assert.equal(card.find(".metric-foot").exists(), false);
     await card.get("button").trigger("click");
     const chart = wrapper.get('[data-testid="overview-trend-totalTokens"]');
-    assert.match(chart.get(".chart-bucket").attributes("aria-label") ?? "", count === null ? /—/ : /(?:总 Token|Total tokens) 0/);
-    assert.equal(chart.findAll(".line-marker").length, count === null ? 0 : 1);
+    assert.equal(chart.get(".echarts-chart").attributes("tabindex"), "0");
+    assert.match(chart.get(".chart-details").text(), count === null ? /—/ : /0/);
+    assert.equal(chart.findAll(".line-marker").length, 0, "overview no longer uses the SVG renderer");
     wrapper.unmount();
   }
 });
@@ -404,132 +647,85 @@ test("Worker 等部分结果保留业务数据，仅专用健康区展示采集�
   }
 });
 
-test("合法 Ratio、Token、Duration 的 null bucket 使用独立 marker，且绝不跨 gap 连线", () => {
-  const ratioPanel = {
-    ...dashboardSuccessFixture.data.model.trends.successRate,
-    data: [
-      { from: 1_700_000_000_000, to: 1_700_000_360_000, ratio: .25 },
-      { from: 1_700_000_360_000, to: 1_700_000_720_000, ratio: null },
-      { from: 1_700_000_720_000, to: 1_700_001_080_000, ratio: .75 },
-    ],
-  };
-  const durationPanel = {
-    ...dashboardSuccessFixture.data.model.trends.completedAverageDuration,
-    data: [
-      { from: 1_700_000_000_000, to: 1_700_000_360_000, durationMs: 2_000, reliableSampleCount: 1 },
-      { from: 1_700_000_360_000, to: 1_700_000_720_000, durationMs: null, reliableSampleCount: 0 },
-      { from: 1_700_000_720_000, to: 1_700_001_080_000, durationMs: 4_000, reliableSampleCount: 1 },
-    ],
-  };
-  const tokenPanel = {
-    ...dashboardSuccessFixture.data.model.trends.tokens,
-    data: [
-      { from: 1_700_000_000_000, to: 1_700_000_360_000, inputTokens: 4, outputTokens: null },
-      { from: 1_700_000_360_000, to: 1_700_000_720_000, inputTokens: null, outputTokens: null },
-      { from: 1_700_000_720_000, to: 1_700_001_080_000, inputTokens: 8, outputTokens: null },
-    ],
-  };
-  for (const { kind, panel } of [
-    { kind: "ratio" as const, panel: ratioPanel },
-    { kind: "duration" as const, panel: durationPanel },
-    { kind: "tokens" as const, panel: tokenPanel },
-  ]) {
-    const wrapper = mount(TrendChart, { ...options, props: { title: kind, kind, panel, timezone: "UTC" } });
-    assert.equal(wrapper.findAll(".line-marker").length, 2, `${kind} retains two isolated known values as markers`);
-    assert.equal(wrapper.findAll("polyline").length, 0, `${kind} never connects across its null bucket`);
+test("Ratio、Duration 的 null 值在 ECharts 折线上断开；Token 部分组成仅用散点", () => {
+  const panels = [
+    { kind: 'ratio' as const, panel: { ...dashboardSuccessFixture.data.model.trends.successRate, data: [
+      { from: 1, to: 2, ratio: .25 }, { from: 2, to: 3, ratio: null }, { from: 3, to: 4, ratio: .75 }] } },
+    { kind: 'duration' as const, panel: { ...dashboardSuccessFixture.data.model.trends.completedAverageDuration, data: [
+      { from: 1, to: 2, durationMs: 2_000, reliableSampleCount: 1 }, { from: 2, to: 3, durationMs: null, reliableSampleCount: 0 }, { from: 3, to: 4, durationMs: 4_000, reliableSampleCount: 1 }] } },
+  ];
+  for (const { kind, panel } of panels) {
+    const wrapper = mount(TrendChart, { ...options, attachTo: document.body, props: { title: kind, kind, panel } });
+    const series = getInstanceByDom(wrapper.get('.echarts-chart').element as HTMLElement)!.getOption().series as Array<{ type: string; data: Array<number | null>; connectNulls: boolean }>;
+    assert.deepEqual(series[0].data, kind === 'ratio' ? [.25, null, .75] : [2_000, null, 4_000]);
+    assert.equal(series[0].connectNulls, false);
+    wrapper.unmount();
   }
 });
 
-test("趋势 SVG 以 group 描述图表，时间桶保持独立键盘可达语义和明细", () => {
-  const panel = {
-    ...dashboardSuccessFixture.data.model.trends.successRate,
-    data: [
-      { from: 1_700_000_000_000, to: 1_700_000_360_000, ratio: .25 },
-      { from: 1_700_000_360_000, to: 1_700_000_720_000, ratio: null },
-      { from: 1_700_000_720_000, to: 1_700_001_080_000, ratio: .75 },
-    ],
-  };
-  const wrapper = mount(TrendChart, { ...options, props: { title: "rate", kind: "ratio", panel, timezone: "UTC" } });
-  const chart = wrapper.get("svg");
-  assert.equal(chart.attributes("role"), "group");
-  const labelledBy = chart.attributes("aria-labelledby")?.split(" ") ?? [];
-  assert.equal(labelledBy.length, 2);
-  for (const id of labelledBy) assert.ok(wrapper.find(`#${id}`).exists(), `${id} names or describes the chart`);
-  assert.equal(wrapper.findAll(".chart-bucket[role='group'][tabindex='0']").length, 3);
-  assert.equal(wrapper.findAll("[data-testid^='chart-bucket-detail-']").length, 3);
-  assert.match(wrapper.get(".chart-details").text(), /时间桶|Time bucket/);
+test("各分区 ECharts 图具备可键盘读数的分组语义与展开明细", async () => {
+  const panel = { ...dashboardSuccessFixture.data.model.trends.successRate, data: [
+    { from: 1, to: 2, ratio: .25 }, { from: 2, to: 3, ratio: null }, { from: 3, to: 4, ratio: .75 }] };
+  const wrapper = mount(TrendChart, { ...options, props: { title: 'rate', kind: 'ratio', panel } });
+  const chart = wrapper.get('.echarts-chart');
+  assert.equal(chart.attributes('role'), 'group');
+  assert.equal(chart.attributes('tabindex'), '0');
+  assert.match(chart.attributes('aria-label') ?? '', /平滑折线图|smooth line chart/);
+  await chart.trigger('focus');
+  await chart.trigger('keydown', { key: 'ArrowRight' });
+  assert.match(wrapper.get('.keyboard-bucket').text(), /—/);
+  assert.equal(wrapper.findAll('[data-testid^="chart-bucket-detail-"]').length, 3);
+  wrapper.unmount();
 });
 
-test("模型请求状态按后端 bucket 状态值堆叠为柱，轴标签对齐柱中心且图例可访问", () => {
-  const panel = {
-    ...dashboardSuccessFixture.data.model.trends.requests,
-    data: [
-      { from: 1, to: 2, completed: 6, failed: 2, timedOut: 1, other: 1 },
-      { from: 2, to: 3, completed: 4, failed: 0, timedOut: 2, other: 0 },
-    ],
-  };
-  const wrapper = mount(TrendChart, { ...options, props: { title: "model requests", kind: "model_status", panel } });
-  assert.equal(wrapper.findAll("polyline").length, 0);
-  assert.equal(wrapper.findAll(".bar-segment.stacked-bars").length, 8);
-  const firstBucket = wrapper.get("[data-testid='stacked-bars-bucket-0']");
-  assert.equal(firstBucket.attributes("data-stack-total"), "10");
-  assert.equal(firstBucket.findAll(".bar-segment").reduce((total, item) => total + Number(item.attributes("data-value")), 0), 10);
-  const firstSegment = firstBucket.get(".bar-segment");
-  const firstAxis = wrapper.get(".chart-axis-label");
-  assert.equal(Number(firstAxis.attributes("data-x")), Number(firstSegment.attributes("x")) + Number(firstSegment.attributes("width")) / 2);
-  const legend = wrapper.get(".chart-legend");
-  assert.match(legend.attributes("aria-label") ?? "", /图例|Legend/);
-  assert.equal(legend.findAll("li").length, 4);
-  assert.match(legend.text(), /完成|Completed/);
+test("模型请求状态 ECharts 四系列按原值堆叠；键盘图例保留隐藏状态总请求数", async () => {
+ const panel={...dashboardSuccessFixture.data.model.trends.requests,data:[
+  {from:1,to:2,completed:6,failed:2,timedOut:1,other:1},
+  {from:2,to:3,completed:4,failed:0,timedOut:2,other:0}]};
+ const wrapper=mount(TrendChart,{...options,attachTo:document.body,props:{title:'model requests',kind:'model_status',panel}});
+ const chart=getInstanceByDom(wrapper.get('.echarts-chart').element as HTMLElement)!;
+ const series=chart.getOption().series as Array<{type:string;stack:string;data:number[]}>;
+ assert.equal(series.length,4);
+ assert.ok(series.every((item)=>item.type==='bar' && item.stack==='total'));
+ assert.deepEqual(series.map((item)=>item.data[0]),[6,2,1,1]);
+ assert.equal(wrapper.get('[data-testid="chart-bucket-detail-0"] td:last-child').text(),'10');
+ assert.equal(wrapper.findAll('.echarts-legend button').length,4);
+ const tooltip=(chart.getOption().tooltip as Array<{formatter:(params:unknown)=>string}>)[0].formatter;
+ await wrapper.get('.echarts-legend button').trigger('click');
+ assert.match(tooltip([{dataIndex:0}]),/全部状态合计|all statuses/);
+ assert.equal(wrapper.findAll('svg.trend, .bar-segment').length,0);
+ wrapper.unmount();
 });
 
-test("监控数据量使用合法 partial PanelResult 表达不完整，并保留七域组成", () => {
-  const panel = {
-    ...dashboardSuccessFixture.data.overviewTrends.monitoringVolume,
-    status: "partial" as const,
-    completeness: "partial" as const,
-    dataIncomplete: true as const,
-    partialReason: "coverage_gap" as const,
-    data: [
-      { from: 1, to: 2, total: 28, run: 1, session: 2, message: 3, tool: 4, execution: 5, model: 6, worker: 7 },
-      { from: 2, to: 3, total: 28, run: 1, session: 2, message: 3, tool: 4, execution: 5, model: 6, worker: 7 },
-    ],
-  };
-  const wrapper = mount(TrendChart, { ...options, props: { title: "monitoring", kind: "monitoring", panel } });
-  const completeBucket = wrapper.get("[data-testid='stacked-bars-bucket-0']");
-  assert.equal(completeBucket.attributes("data-stack-total"), "28");
-  assert.equal(completeBucket.findAll(".bar-segment").length, 7);
-  assert.equal(completeBucket.findAll(".bar-segment").reduce((total, item) => total + Number(item.attributes("data-value")), 0), 28);
-  assert.equal(wrapper.findAll(".chart-legend li").length, 7);
-  assert.doesNotMatch(wrapper.text(), /覆盖缺口|Coverage gap/);
+test("监控七域 partial 由 ECharts 绘制真实堆叠，reportedTotal 不被重算", () => {
+ const panel={...dashboardSuccessFixture.data.overviewTrends.monitoringVolume,status:'partial' as const,completeness:'partial' as const,dataIncomplete:true as const,partialReason:'coverage_gap' as const,
+ data:[{from:1,to:2,total:29,run:1,session:2,message:3,tool:4,execution:5,model:6,worker:7}]};
+ const wrapper=mount(TrendChart,{...options,attachTo:document.body,props:{title:'monitoring',kind:'monitoring',panel}});
+ const chart=getInstanceByDom(wrapper.get('.echarts-chart').element as HTMLElement)!;
+ const bars=chart.getOption().series as Array<{type:string;stack:string;data:number[]}>;
+ assert.equal(bars.length,7);
+ assert.ok(bars.every((item)=>item.type==='bar' && item.stack==='total'));
+ assert.equal(bars.reduce((total,item)=>total+item.data[0],0),28);
+ assert.equal(wrapper.get('[data-testid="chart-bucket-detail-0"] td:last-child').text(),'29');
+ const tooltip=(chart.getOption().tooltip as Array<{formatter:(params:unknown)=>string}>)[0].formatter;
+ assert.match(tooltip([{dataIndex:0}]),/29/);
+ assert.doesNotMatch(wrapper.text(),/覆盖缺口|Coverage gap/);
+ wrapper.unmount();
 });
 
-test("Token 与 Worker 事件遵循原型使用堆叠柱状图而不是通用折线", () => {
-  const tokenPanel = {
-    ...dashboardSuccessFixture.data.model.trends.tokens,
-    data: [
-      { from: 1_700_000_000_000, to: 1_700_000_360_000, inputTokens: 8, outputTokens: 2 },
-      { from: 1_700_000_360_000, to: 1_700_000_720_000, inputTokens: 6, outputTokens: 3 },
-    ],
-  };
-  const workerPanel = {
-    ...dashboardSuccessFixture.data.worker.eventTrend,
-    data: [
-      { from: 1_700_000_000_000, to: 1_700_000_360_000, unexpectedExits: 2, restartAttempts: 3 },
-      { from: 1_700_000_360_000, to: 1_700_000_720_000, unexpectedExits: 1, restartAttempts: 4 },
-    ],
-  };
-  for (const { title, kind, panel } of [
-    { title: "tokens", kind: "tokens" as const, panel: tokenPanel },
-    { title: "worker", kind: "worker_events" as const, panel: workerPanel },
-  ]) {
-    const wrapper = mount(TrendChart, { ...options, props: { title, kind, panel, timezone: "UTC" } });
-    assert.equal(wrapper.findAll("polyline").length, 0);
-    assert.equal(wrapper.findAll(".bar-segment.stacked-bars").length, 4);
-    const firstBucket = wrapper.get("[data-testid='stacked-bars-bucket-0']");
-    assert.equal(firstBucket.findAll(".bar-segment").at(0)?.attributes("x"), firstBucket.findAll(".bar-segment").at(1)?.attributes("x"));
-    assert.equal(wrapper.findAll(".chart-axis-label").length, 2);
-  }
+test("Token 和 Worker 事件由 ECharts 保持堆叠柱而非平滑折线", () => {
+ const candidates=[
+  {kind:'tokens' as const,panel:{...dashboardSuccessFixture.data.model.trends.tokens,data:[{from:1,to:2,inputTokens:8,outputTokens:2},{from:2,to:3,inputTokens:6,outputTokens:3}]}},
+  {kind:'worker_events' as const,panel:{...dashboardSuccessFixture.data.worker.eventTrend,data:[{from:1,to:2,unexpectedExits:2,restartAttempts:3},{from:2,to:3,unexpectedExits:1,restartAttempts:4}]}}
+ ];
+ for(const {kind,panel} of candidates){
+  const wrapper=mount(TrendChart,{...options,attachTo:document.body,props:{title:kind,kind,panel}});
+  const bars=(getInstanceByDom(wrapper.get('.echarts-chart').element as HTMLElement)!.getOption().series as Array<{type:string;stack?:string;data:number[]}>).filter((item)=>item.type==='bar');
+  assert.equal(bars.length,2); assert.ok(bars.every((item)=>item.stack==='total'));
+  assert.deepEqual(bars.map((item)=>item.data[0]),kind==='tokens'?[8,2]:[2,3]);
+  assert.match(wrapper.get('.sr-only').text(),/堆叠柱状图|stacked bar chart/);
+  wrapper.unmount();
+ }
 });
 
 test("概览用六卡 + 双栏主趋势/健康表，卡片切换保留真实 DTO", async () => {
@@ -616,26 +812,16 @@ test("范围内配置变更保留响应数据，但概览不显示配置诊断",
   wrapper.unmount();
 });
 
-test("概览监控折线只采用服务端 total；密集桶轴最多五个标签，无 SVG 常显日期", () => {
-  const data = Array.from({ length: 40 }, (_, index) => ({
-    from: Date.UTC(2025, 0, 1) + index * 3_600_000,
-    to: Date.UTC(2025, 0, 1) + (index + 1) * 3_600_000,
-    total: index + 1, run: index + 1, session: 0, message: 0, tool: 0,
-    execution: 0, model: 0, worker: 0,
-  }));
-  const panel = { ...dashboardSuccessFixture.data.overviewTrends.monitoringVolume, data };
-  const wrapper = mount(TrendChart, { ...options, props: { title: "monitoring", kind: "monitoring_total", panel } });
-  assert.equal(wrapper.findAll(".chart-axis-label").length <= 5, true);
-  assert.equal(wrapper.findAll("svg text").length, 0);
-  assert.equal(wrapper.findAll(".bar-segment").length, 0);
-  assert.equal(wrapper.findAll(".chart-area").length, 1);
-  assert.equal(wrapper.findAll("[data-testid^='chart-bucket-detail-']").length, 40);
-  assert.equal(wrapper.findAll(".chart-bucket[tabindex='0']").length, 40);
-  assert.equal(wrapper.get(".chart-bucket").attributes("aria-label")?.includes("1"), true);
-  const unknown = { status: "unavailable" as const, data: null, dataIncomplete: true as const, unavailableReason: "no_safe_data" as const, requiredDomains: ["run" as const], comparison: { status: "not_applicable" as const, kind: null, delta: null } };
-  const unavailable = mount(TrendChart, { ...options, props: { title: "monitoring", kind: "monitoring_total", panel: unknown } });
-  assert.equal(unavailable.findAll(".line-segment").length, 0);
-  assert.equal(unavailable.get("[role=note]").text(), "—");
+test("概览监控趋势只使用服务端 total，密集桶分类轴不显示每个日期", () => {
+ const data=Array.from({length:40},(_,index)=>({from:Date.UTC(2025,0,1)+index*3_600_000,to:Date.UTC(2025,0,1)+(index+1)*3_600_000,total:index+1,run:index+1,session:0,message:0,tool:0,execution:0,model:0,worker:0}));
+ const wrapper=mount(TrendChart,{...options,attachTo:document.body,props:{title:'monitoring',kind:'monitoring_total',panel:{...dashboardSuccessFixture.data.overviewTrends.monitoringVolume,data},echarts:true}});
+ const chart=getInstanceByDom(wrapper.get('.echarts-chart').element as HTMLElement)!;
+ const lines=chart.getOption().series as Array<{type:string;data:number[]}>;
+ assert.equal(lines.length,1); assert.equal(lines[0].type,'line'); assert.deepEqual(lines[0].data,data.map((row)=>row.total));
+  const axis = chart.getOption().xAxis as Array<{ axisLabel: { formatter: (value: string) => string } }>;
+ assert.ok(Array.from({length:40},(_,i)=>axis[0].axisLabel.formatter(String(i))).filter(Boolean).length<=6);
+ assert.equal(wrapper.findAll('svg.trend, .bar-segment').length,0);
+ wrapper.unmount();
 });
 
 test("健康侧栏仅在表格逐行展示真实域状态和最后成功时间", () => {
@@ -698,56 +884,48 @@ test("概览窄屏布局有双栏堆叠与六卡重排断点", () => {
   assert.match(source, /@container\(max-width:700px\)\{\.metric-grid\.six\{grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
 });
 
-test("大计数轴不显示会被截断的完整数字，bucket 仍提供完整原始值", () => {
-  const panel = {
-    ...dashboardSuccessFixture.data.overviewTrends.monitoringVolume,
-    data: [
-      { from: 1, to: 2, total: 1_234_567, run: 1_234_567, session: 0, message: 0, tool: 0, execution: 0, model: 0, worker: 0 },
-      { from: 2, to: 3, total: 500_000, run: 500_000, session: 0, message: 0, tool: 0, execution: 0, model: 0, worker: 0 },
-    ],
-  };
-  const wrapper = mount(TrendChart, { ...options, props: { title: "monitoring", kind: "monitoring_total", panel } });
-  const axisLabels = wrapper.findAll(".chart-y-axis span").map((label) => label.text());
-  assert.deepEqual(axisLabels, ["1.5M", "1M", "500k", "0"]);
-  assert.equal(wrapper.findAll(".chart-grid-line").length, axisLabels.length);
-  assert.ok(wrapper.get(".chart-bucket").attributes("aria-label")?.includes("1,234,567"));
-  assert.ok(wrapper.get('[data-testid="chart-bucket-detail-0"]').text().includes("1,234,567"));
-  assert.equal(wrapper.findAll(".line-segment").length, 1);
+test("ECharts 大计数轴简写但 tooltip 与明细保持原始值", () => {
+ const panel={...dashboardSuccessFixture.data.overviewTrends.monitoringVolume,data:[
+  {from:1,to:2,total:1_234_567,run:1,session:1,message:1,tool:1,execution:1,model:1,worker:1},
+  {from:2,to:3,total:1_500_000,run:1,session:1,message:1,tool:1,execution:1,model:1,worker:1}]};
+ const wrapper=mount(TrendChart,{...options,attachTo:document.body,props:{title:'monitoring',kind:'monitoring_total',panel,echarts:true}});
+ const chart=getInstanceByDom(wrapper.get('.echarts-chart').element as HTMLElement)!;
+ const axis=(chart.getOption().yAxis as Array<{axisLabel:{formatter:(value:number)=>string}}>)[0];
+ assert.match(axis.axisLabel.formatter(1_500_000),/1.5M/);
+ assert.match(wrapper.get('[data-testid="chart-bucket-detail-0"]').text(),/1,234,567/);
+ assert.match((chart.getOption().tooltip as Array<{formatter:(params:unknown)=>string}>)[0].formatter([{dataIndex:0}]),/1,234,567/);
+ wrapper.unmount();
 });
 
-test("计数最大值为 1 时纵轴仅显示整数 1/0 并与网格及数据坐标一致", () => {
-  const panel = {
-    ...dashboardSuccessFixture.data.agent.trends.runCount,
-    data: [{ from: 1, to: 2, count: 1 }, { from: 2, to: 3, count: 0 }],
-  };
-  const wrapper = mount(TrendChart, { ...options, props: { title: "count", kind: "count", panel } });
-  assert.deepEqual(wrapper.findAll(".chart-y-axis span").map((label) => label.text()), ["1", "0"]);
-  assert.deepEqual(wrapper.findAll(".chart-grid-line").map((line) => Number(line.attributes("y1"))), [4, 56]);
-  assert.equal(wrapper.get(".line-segment").attributes("points"), "6,4 94,56");
+test("计数只有 1 时 ECharts 纵轴强制整数刻度且绘制零值", () => {
+ const panel={...dashboardSuccessFixture.data.agent.trends.runCount,data:[{from:1,to:2,count:1},{from:2,to:3,count:0}]};
+ const wrapper=mount(TrendChart,{...options,attachTo:document.body,props:{title:'count',kind:'count',panel}});
+ const chart=getInstanceByDom(wrapper.get('.echarts-chart').element as HTMLElement)!;
+ const axis=(chart.getOption().yAxis as Array<{minInterval:number;min:number}>)[0];
+ assert.equal(axis.minInterval,1); assert.equal(axis.min,0);
+ assert.deepEqual((chart.getOption().series as Array<{data:number[]}>)[0].data,[1,0]);
+ wrapper.unmount();
 });
 
-test("合法短时长趋势在纵轴与 bucket 明细中按秒/毫秒显示", () => {
-  const panel = {
-    ...dashboardSuccessFixture.data.overviewTrends.agentDuration,
-    data: [{ from: 1, to: 2, durationMs: 1_500 }, { from: 2, to: 3, durationMs: 500 }],
-  };
-  const wrapper = mount(TrendChart, { ...options, props: { title: "duration", kind: "duration", panel } });
-  assert.deepEqual(wrapper.findAll(".chart-y-axis span").map((label) => label.text()), ["1.5s", "1s", "500ms", "0ms"]);
-  assert.ok(wrapper.get(".chart-bucket").attributes("aria-label")?.includes("1.5s"));
-  assert.ok(wrapper.get('[data-testid="chart-bucket-detail-0"]').text().includes("1.5s"));
-  assert.equal(wrapper.findAll(".chart-grid-line").length, 4);
+test("短时长 ECharts 坐标轴、提示和明细均保留毫秒与秒", () => {
+ const panel={...dashboardSuccessFixture.data.overviewTrends.agentDuration,data:[{from:1,to:2,durationMs:1500},{from:2,to:3,durationMs:500}]};
+ const wrapper=mount(TrendChart,{...options,attachTo:document.body,props:{title:'duration',kind:'duration',panel}});
+ const chart=getInstanceByDom(wrapper.get('.echarts-chart').element as HTMLElement)!;
+ const axis=(chart.getOption().yAxis as Array<{axisLabel:{formatter:(value:number)=>string}}>)[0];
+ assert.equal(axis.axisLabel.formatter(1500),'1.5s'); assert.equal(axis.axisLabel.formatter(500),'500ms');
+ assert.match(wrapper.get('[data-testid="chart-bucket-detail-0"]').text(),/1.5s/);
+ wrapper.unmount();
 });
 
-test("Worker 堆叠计数为 1 时也只用整数轴，保留原有堆叠形态", () => {
-  const panel = {
-    ...dashboardSuccessFixture.data.worker.eventTrend,
-    data: [{ from: 1, to: 2, unexpectedExits: 1, restartAttempts: 0 }],
-  };
-  const wrapper = mount(TrendChart, { ...options, props: { title: "worker", kind: "worker_events", panel } });
-  assert.deepEqual(wrapper.findAll(".chart-y-axis span").map((label) => label.text()), ["1", "0"]);
-  assert.equal(wrapper.findAll(".bar-segment").length, 2);
-  assert.equal(wrapper.findAll(".line-segment").length, 0);
-  assert.equal(wrapper.get("[data-testid='stacked-bars-bucket-0']").attributes("data-stack-total"), "1");
+test("Worker 一次事件仍是 ECharts 整数轴的两系列堆叠柱", () => {
+ const panel={...dashboardSuccessFixture.data.worker.eventTrend,data:[{from:1,to:2,unexpectedExits:1,restartAttempts:0}]};
+ const wrapper=mount(TrendChart,{...options,attachTo:document.body,props:{title:'worker',kind:'worker_events',panel}});
+ const chart=getInstanceByDom(wrapper.get('.echarts-chart').element as HTMLElement)!;
+ const axis=(chart.getOption().yAxis as Array<{minInterval:number}>)[0];
+ assert.equal(axis.minInterval,1);
+ assert.deepEqual((chart.getOption().series as Array<{type:string;stack:string;data:number[]}>).map((series)=>[series.type,series.stack,series.data[0]]),[['bar','total',1],['bar','total',0]]);
+ assert.equal(wrapper.get('[data-testid="chart-bucket-detail-0"] td:last-child').text(),'1');
+ wrapper.unmount();
 });
 
 test("所有数据面板将采集状态留给健康区，空态不是零也不显示无效对比", () => {
@@ -793,8 +971,42 @@ test("partial 的分布、明细、折线和业务状态保留已知值，不显
   assert.match(table.text(), /read/);
   assert.match(records.text(), /重启成功|Restart succeeded/);
   assert.match(snapshot.text(), /运行中|Running/);
-  assert.match(chart.get(".chart-bucket").attributes("aria-label") ?? "", /0/);
+  assert.match(chart.get(".chart-details").text(), /0/);
   const health = mount(DomainSummary, { ...options, props: { result: { ...dashboardSuccessFixture.data.exceptions.domainHealth, ...partial } } });
   assert.ok(health.findAll(".status").length > 0);
   assert.match(health.text(), /覆盖缺口|Coverage gap/);
+});
+test("Worker 利用率用 ECharts 横条保持安全原始比率", () => {
+  const wrapper = mount(WorkerSnapshot, { ...options, attachTo: document.body, props: { result: dashboardSuccessFixture.data.exceptions.workerLiveSnapshot, timezone: "UTC" } });
+  const host = wrapper.get('.mini-ratio-echart');
+  assert.equal(wrapper.find('progress').exists(), false);
+  assert.equal(host.attributes('data-ratio'), '0.5');
+  const series = getInstanceByDom(host.element as HTMLElement)!.getOption().series as Array<{ type: string; data: number[] }>;
+  assert.equal(series[0].type, 'bar');
+  assert.deepEqual(series[0].data, [0.5]);
+  wrapper.unmount();
+});
+test("Agent 分布全零时环图及条图键盘读数不把未知占比说成零", async () => {
+  for (const variant of ['donut', 'bars'] as const) {
+    for (const partial of [false, true]) {
+      const wrapper = mount(DistributionEChart, { ...options, attachTo: document.body, props: {
+        title: 'Distribution', variant, partial, labelGroup: 'distribution', colors: ['#7388e9', '#57bfa7'],
+        rows: [{ label: 'primary', count: 0 }, { label: 'subtask', count: 0 }],
+      } });
+      const host = wrapper.get('.distribution-echart');
+      const chart = getInstanceByDom(host.element as HTMLElement)!;
+      const series = chart.getOption().series as Array<{ type: string; data: Array<{ value: number }> }>;
+      assert.equal(series[0].type, variant === 'donut' ? 'pie' : 'bar');
+      assert.deepEqual(series[0].data.map(({ value }) => value), [0, 0]);
+      const tooltip = (chart.getOption().tooltip as Array<{ formatter: (params: unknown) => string }>)[0].formatter;
+      assert.match(tooltip({ dataIndex: 0 }), /0.*—/s);
+      assert.doesNotMatch(tooltip({ dataIndex: 1 }), /0%/);
+      await host.trigger('focus');
+      assert.match(wrapper.get('.distribution-current').text(), /0.*—/s);
+      await host.trigger('keydown', { key: 'ArrowDown' });
+      assert.match(wrapper.get('.distribution-current').text(), /0.*—/s);
+      assert.doesNotMatch(host.attributes('aria-label') ?? '', /0%/);
+      wrapper.unmount();
+    }
+  }
 });

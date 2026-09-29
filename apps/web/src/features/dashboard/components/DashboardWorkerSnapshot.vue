@@ -12,7 +12,7 @@
         <strong>{{ formatCount(snapshot?.concurrency, locale) }}</strong>
         <div class="slot-usage">
           <span>{{ t("dashboard.utilization") }}: {{ formatRatio(snapshot?.utilization, locale) }}</span>
-          <progress v-if="snapshot?.utilization != null" :value="snapshot.utilization" max="1" :aria-label="t('dashboard.utilization')" />
+          <DashboardMiniRatioChart v-if="snapshot?.utilization != null" :ratio="snapshot.utilization" :label="`${t('dashboard.utilization')}: ${formatRatio(snapshot.utilization, locale)}`" />
         </div>
       </article>
       <article><span>{{ t("dashboard.lastReadyAt") }}</span><strong class="ready-time">{{ formatDateTime(snapshot?.lastReadyAt, timezone, locale) }}</strong></article>
@@ -28,6 +28,7 @@ import { computed } from "vue";
 import { useI18n } from "vue-i18n";
 import type { WorkerLiveSnapshotResult } from "@agent-workbench/shared";
 import { formatComparison, formatCount, formatDateTime, formatRatio } from "../dashboard-formatters";
+import DashboardMiniRatioChart from "./DashboardMiniRatioChart.vue";
 import DashboardPanelShell from "./DashboardPanelShell.vue";
 
 const props = defineProps<{ result: WorkerLiveSnapshotResult; timezone: string }>();
@@ -44,7 +45,6 @@ const comparisonLabel = computed(() => props.result.status === "available" && pr
 .snapshot-grid strong{font-size:25px;line-height:28px;font-weight:600;color:var(--text-color);font-variant-numeric:tabular-nums}
 .snapshot-grid strong.ready-time{font-size:15px;line-height:1.5;overflow-wrap:anywhere}
 .slot-usage{display:grid;gap:5px;margin-top:auto}
-.slot-usage progress{display:block;width:100%;height:6px;accent-color:#1677ff}
 @container (max-width: 850px){.snapshot-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @container (max-width: 450px){.snapshot-grid{grid-template-columns:minmax(0,1fr)}}
 </style>

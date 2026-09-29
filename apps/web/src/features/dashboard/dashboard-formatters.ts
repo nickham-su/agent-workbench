@@ -19,6 +19,17 @@ export function formatChartDuration(value: number, locale = "zh-CN") {
 }
 export function formatDateTime(value: number | null | undefined, timezone: string, locale = "zh-CN") { return value == null ? "—" : new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short", timeZone: timezone }).format(value); }
 
+/** Disambiguate repeated local clock hours when a range spans a DST fall-back. */
+export function formatChartBucketInterval(from: number | null, to: number | null, timezone: string, locale = "zh-CN") {
+  const endpoint = (value: number | null) => {
+    if (value === null) return "—";
+    const offset = new Intl.DateTimeFormat(locale, { timeZone: timezone, timeZoneName: "shortOffset" })
+      .formatToParts(value).find((part) => part.type === "timeZoneName")?.value;
+    return `${formatDateTime(value, timezone, locale)} (${offset ?? timezone})`;
+  };
+  return `${endpoint(from)} – ${endpoint(to)}`;
+}
+
 export function formatComparison(comparison: AnalyticsComparisonResult, locale = "zh-CN") {
   if (comparison.status !== "available" || comparison.kind === null || comparison.delta === null) return comparison.status;
   if (comparison.kind === "percentage_points") return `${comparison.delta >= 0 ? "+" : ""}${(comparison.delta * 100).toFixed(1)}pp`;

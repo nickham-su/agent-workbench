@@ -31,7 +31,7 @@
         <div class="coverage-list">
           <div v-for="item in coverage" :key="item.key" class="coverage-item" :data-testid="`model-coverage-${item.key}`">
             <div class="coverage-label"><span>{{ t(`dashboard.${item.key}`) }}</span><span class="coverage-value"><strong>{{ formatRatio(metricRatioValue(item.result), locale) }}</strong><span v-if="comparisonLabel(item.result, metricRatioValue(item.result) !== null)" class="coverage-comparison">{{ comparisonLabel(item.result, true) }}</span></span></div>
-            <progress v-if="metricRatioValue(item.result) !== null" :value="metricRatioValue(item.result)!" max="1" :aria-label="`${t(`dashboard.${item.key}`)}: ${formatRatio(metricRatioValue(item.result), locale)}${comparisonLabel(item.result, true) ? `, ${comparisonLabel(item.result, true)}` : ''}`" />
+            <DashboardMiniRatioChart v-if="metricRatioValue(item.result) !== null" :ratio="metricRatioValue(item.result)!" :label="`${t(`dashboard.${item.key}`)}: ${formatRatio(metricRatioValue(item.result), locale)}${comparisonLabel(item.result, true) ? `, ${comparisonLabel(item.result, true)}` : ''}`" />
             <div v-else class="coverage-unknown" aria-hidden="true" />
           </div>
         </div>
@@ -48,6 +48,7 @@ import type { DashboardData, MetricResult } from "@agent-workbench/shared";
 import { formatComparison, formatCount, formatDuration, formatRatio } from "../dashboard-formatters";
 import { metricNumberValue, metricNullableCountValue, metricRatioValue } from "../dashboard-types";
 import DashboardMetricCard from "./DashboardMetricCard.vue";
+import DashboardMiniRatioChart from "./DashboardMiniRatioChart.vue";
 import DashboardPanelShell from "./DashboardPanelShell.vue";
 import DashboardTables from "./DashboardTables.vue";
 import DashboardTrendChart from "./DashboardTrendChart.vue";
@@ -89,10 +90,7 @@ const coverage = computed(() => {
 .coverage-label{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--text-color-secondary)}
 .coverage-value{display:flex;align-items:baseline;gap:6px;flex-wrap:wrap;justify-content:flex-end;text-align:right}
 .coverage-label strong{color:var(--text-color);font-weight:600;font-variant-numeric:tabular-nums}
-.coverage-item progress,.coverage-unknown{width:100%;height:7px;display:block;overflow:hidden;border:0;border-radius:4px;background:var(--border-color-secondary)}
-.coverage-item progress::-webkit-progress-bar{background:var(--border-color-secondary)}
-.coverage-item progress::-webkit-progress-value{background:#1677ff;border-radius:4px}
-.coverage-item progress::-moz-progress-bar{background:#1677ff;border-radius:4px}
+.coverage-unknown{width:100%;height:7px;display:block;border-radius:4px;background:var(--border-color-secondary)}
 @container(max-width:1050px){.model-primary-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @container(max-width:850px){.model-main{grid-template-columns:minmax(0,1fr)}}
 @container(max-width:580px){.model-primary-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.token-values{gap:8px}.token-values strong{font-size:17px}}
