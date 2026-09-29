@@ -82,7 +82,10 @@ async function createReadSideFixture() {
   return { fixture, workspace };
 }
 
-function createRun(fixture: AgentTestFixture, workspaceId: string, options: { runKind?: "user" | "manual_compaction" } = {}) {
+function createRun(fixture: AgentTestFixture, workspaceId: string, options: {
+  runKind?: "user" | "manual_compaction";
+  uiLocale?: "zh-CN" | "en-US" | null;
+} = {}) {
   const sessionId = newSortableId("sess");
   const runId = newSortableId("run");
   const createdAt = Date.now();
@@ -117,12 +120,34 @@ function createRun(fixture: AgentTestFixture, workspaceId: string, options: { ru
     providerId: "ppchat",
     modelId: "gpt-5.2",
     runKind: options.runKind,
+    uiLocale: options.uiLocale,
     status: "running",
     createdAt
   });
   startMessageRun(fixture.db, { workspaceId, sessionId, runId, updatedAt: createdAt });
   return { sessionId, runId };
 }
+
+test("compaction source forwards the active Run locale without changing oneShotSystem", async () => {
+  const { fixture, workspace } = await createReadSideFixture();
+  assert.ok(fixture.app);
+  for (const uiLocale of ["zh-CN", "en-US", null] as const) {
+    const { sessionId, runId } = createRun(fixture, workspace.id, {
+      runKind: uiLocale === "zh-CN" ? "manual_compaction" : "user",
+      uiLocale,
+    });
+    const response = await injectJson(fixture.app, {
+      method: "POST",
+      url: AgentApiEndpoints.getCompactionSource.path,
+      internalToken: fixture.internalToken,
+      payload: { workspaceId: workspace.id, sessionId, runId },
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    const body = response.json();
+    assert.equal(body.uiLocale, uiLocale);
+    assert.equal(body.oneShotSystem, "");
+  }
+});
 
 test("compaction retained-anchor rejection is a stable conflict response without private context", async () => {
   const { fixture, workspace } = await createReadSideFixture();

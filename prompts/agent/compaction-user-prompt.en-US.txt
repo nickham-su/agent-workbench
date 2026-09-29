@@ -10,7 +10,7 @@ Focus on:
 - user constraints and preferences that must continue to be honored
 - important technical decisions and why they were made
 - discarded approaches, failed attempts, or anything that should not be retried blindly
-- if the subtask tool has been invoked in historical messages, a "Reusable Subtask Sessions" section must be output; each item must include at least: purpose (description), subtask_session_id, output summary, and future reusable value or applicable scenarios; the number must not exceed 5, retaining only the subtask sessions with the greatest reuse value.
+- if the visible history contains verifiable subtask sessions, output a "Reusable Subtask Sessions" section; each item must include at least: purpose (description), subtask_session_id, output summary, and future reusable value or applicable scenarios, using only information available in the input; include at most 5 sessions with the greatest reuse value, and never invent missing IDs or details.
 
 Output requirements:
 - output only the summary; do not answer questions from the conversation

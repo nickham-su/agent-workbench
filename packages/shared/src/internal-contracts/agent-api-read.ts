@@ -184,7 +184,7 @@ export const AgentApiCompactionSourceResponseSchema = Type.Object({
   headMessageId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
   contextRootMessageId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
   sessionRevision: Type.Integer({ minimum: 0 }),
-  uiLocale: Type.Null(),
+  uiLocale: Type.Union([AgentUiLocaleSchema, Type.Null()]),
   oneShotSystem: Type.String(),
   blocks: Type.Array(AgentApiResolvedContextBlockSchema),
   pendingBoundary: AgentApiCompactionPendingBoundarySchema,

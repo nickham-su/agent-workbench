@@ -33,6 +33,20 @@ import {
   AgentSubtaskErrorCode,
 } from "../src/internal-contracts/agent-api-subtask.js";
 
+test("compaction source accepts supported Run locales and legacy null", () => {
+  const source = {
+    workspaceId: "ws-a", sessionId: "session-a", runId: "run-a", runKind: "manual_compaction",
+    triggerMessageId: "message-a", agentId: "agent-a", providerId: "provider-a", modelId: "model-a",
+    subtaskDepth: null, headMessageId: "message-a", contextRootMessageId: null,
+    sessionRevision: 0, uiLocale: null, oneShotSystem: "", blocks: [], pendingBoundary: null,
+  };
+  const schema = AgentApiExport.AgentApiCompactionSourceResponseSchema;
+  for (const uiLocale of ["zh-CN", "en-US", null]) {
+    assert.equal(Value.Check(schema, { ...source, uiLocale }), true);
+  }
+  assert.equal(Value.Check(schema, { ...source, uiLocale: "fr-FR" }), false);
+});
+
 test("compaction notice revision guard is optional for ordinary notice requests", () => {
   const request = { workspaceId: "ws-a", sessionId: "session-a", runId: "run-a", runNoticeText: "retry", updatedAt: 1 };
   const schema = AgentApiExport.AgentApiUpdateRunNoticeRequestSchema;

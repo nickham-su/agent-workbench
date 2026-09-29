@@ -2893,7 +2893,7 @@ function createAgentApplications(
       headMessageId: resolved.headMessageId,
       contextRootMessageId: resolved.contextRootMessageId,
       sessionRevision: resolved.sessionRevision,
-      uiLocale: null,
+      uiLocale: resolved.run.uiLocale,
       oneShotSystem: buildOneShotSystemPrompt({ uiLocale: null }),
       pendingBoundary,
       blocks: blocksBeforePending.map((block) => ({

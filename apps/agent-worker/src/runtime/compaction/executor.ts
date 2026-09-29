@@ -1,4 +1,5 @@
 import type { ModelMessage } from "ai";
+import { getPromptText } from "@agent-workbench/shared/prompts";
 import { ApiConflictError, InternalRpcHttpError, InternalRpcInvalidResponseError, type AgentApiClient, type ExecutionProfile } from "../apiClient.js";
 import { computeRetryBackoffMs, normalizeModelRequestMaxRetries } from "../retry-backoff.js";
 import { estimateCompactionSummaryText } from "./estimator-v1.js";
@@ -67,8 +68,10 @@ export type CompactionExecutorDependencies = {
   }) => Promise<{ text: string }>;
 };
 
-function compactionPrompt() {
-  return "Summarize the preceding conversation faithfully. Preserve decisions, completed work, constraints, unresolved issues, and tool outcomes needed for the next turn.";
+function compactionPrompt(uiLocale: "zh-CN" | "en-US" | null) {
+  return getPromptText(uiLocale === "zh-CN"
+    ? "agent/compaction-user-prompt.zh-CN.txt"
+    : "agent/compaction-user-prompt.en-US.txt");
 }
 
 
@@ -167,6 +170,7 @@ export class CompactionExecutor {
         try {
           summaryText = await this.summarize({
             blocks: planned.summaryBlocks,
+            uiLocale: source.uiLocale,
             expectedRevision: plan.expectedRevision,
             profile,
             system: source.oneShotSystem,
@@ -371,13 +375,14 @@ export class CompactionExecutor {
 
   private async summarize(params: {
     blocks: readonly SummaryInputBlock[];
+    uiLocale: "zh-CN" | "en-US" | null;
     expectedRevision: number;
     profile: ExecutionProfile;
     system: string;
     deadline: number | null;
     abortSignal: AbortSignal;
   }) {
-    const messages = [...summaryInputToModelMessages(params.blocks), { role: "user" as const, content: compactionPrompt() }];
+    const messages = [...summaryInputToModelMessages(params.blocks), { role: "user" as const, content: compactionPrompt(params.uiLocale) }];
     const profile = selectedSummaryProfile(params.profile);
     const maxRetries = normalizeModelRequestMaxRetries(params.profile.runtime.modelRequestMaxRetries);
     for (let retryCount = 0; ; retryCount += 1) {

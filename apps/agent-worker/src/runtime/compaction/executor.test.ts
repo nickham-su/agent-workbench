@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { getPromptText } from "@agent-workbench/shared/prompts";
 import { ApiConflictError, InternalRpcHttpError, InternalRpcInvalidResponseError, InternalRpcNetworkError } from "../apiClient.js";
 import type { ExecutionProfile } from "../apiClient.js";
 import { CompactionExecutor, CompactionWorkDeadlineExceededError } from "./executor.js";
@@ -80,6 +81,29 @@ test("executor consumes only frozen compaction source, summaries sanitized Summa
   assert.equal(requests[0]?.retainedFromMessageId, "m2");
   assert.equal(requests[0]?.expectedHeadMessageId, source.headMessageId);
   assert.equal(requests[0]?.expectedRevision, source.sessionRevision);
+});
+
+test("both compaction modes append the Run locale prompt as the final user message", async () => {
+  for (const mode of ["manual", "proactive"] as const) {
+    for (const uiLocale of ["zh-CN", "en-US", null] as const) {
+      const source = { ...testSource({ texts: ["x".repeat(100_000), "recent"] }), uiLocale };
+      const { executor, summaries } = createExecutor({ source });
+      const result = await executor.execute({ ...args, mode });
+      assert.equal(result.kind, "committed");
+      assert.equal(summaries.length, 1);
+      const request = summaries[0]!;
+      const messages = request.messages as Array<{ role: string; content: string }>;
+      assert.equal(request.system, source.oneShotSystem, "locale does not change oneShotSystem");
+      assert.equal(messages[0]?.role, "user");
+      assert.equal(messages[0]?.content, "x".repeat(100_000));
+      assert.deepEqual(messages.at(-1), {
+        role: "user",
+        content: getPromptText(uiLocale === "zh-CN"
+          ? "agent/compaction-user-prompt.zh-CN.txt"
+          : "agent/compaction-user-prompt.en-US.txt"),
+      });
+    }
+  }
 });
 
 test("executor skips no-progress summary without a write", async () => {
