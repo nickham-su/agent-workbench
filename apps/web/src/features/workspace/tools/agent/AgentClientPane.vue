@@ -231,11 +231,11 @@
           role="option"
           :id="createInputCandidateDomId(inputCandidateListId, index)"
           :key="item.id"
-          class="m-0 block w-full appearance-none border-0 bg-transparent px-3 py-2 text-left text-[color:var(--text-color)] outline-none transition-colors"
+          class="m-0 block w-full appearance-none border-0 px-3 py-2 text-left text-[color:var(--text-color)] outline-none transition-colors"
           :aria-selected="item.id === selectedCandidateId"
           :class="item.id === selectedCandidateId
             ? 'bg-blue-500/25 font-medium text-blue-100 hover:bg-blue-500/30'
-            : 'hover:bg-[var(--hover-bg)]'"
+            : 'bg-transparent hover:bg-[var(--hover-bg)]'"
           @mousedown.prevent="pickCandidate(item)"
         >
           <span>{{ item.label }}</span

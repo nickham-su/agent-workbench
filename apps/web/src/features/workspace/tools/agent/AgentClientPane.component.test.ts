@@ -1327,6 +1327,7 @@ test("真实 AgentClientPane：存在 slash 候选时 Tab 选择候选而不切�
     assert.equal(options[1]?.attributes("aria-selected"), "false");
     assert.match(options[0]?.attributes("class") || "", /appearance-none/);
     assert.match(options[0]?.attributes("class") || "", /bg-blue-500\/25/);
+    assert.doesNotMatch(options[0]?.attributes("class") || "", /bg-transparent/, "选中背景不能被透明背景覆盖");
     assert.match(options[0]?.attributes("class") || "", /font-medium/);
     assert.doesNotMatch(options[0]?.attributes("class") || "", /border-l-/);
     assert.doesNotMatch(options[0]?.attributes("class") || "", /shadow-/);
@@ -1337,7 +1338,10 @@ test("真实 AgentClientPane：存在 slash 候选时 Tab 选择候选而不切�
     await nextTick();
     assert.equal(arrowDownEvent.defaultPrevented, true);
     assert.equal(options[0]?.attributes("aria-selected"), "false");
+    assert.match(options[0]?.attributes("class") || "", /bg-transparent/);
     assert.equal(options[1]?.attributes("aria-selected"), "true");
+    assert.match(options[1]?.attributes("class") || "", /bg-blue-500\/25/);
+    assert.doesNotMatch(options[1]?.attributes("class") || "", /bg-transparent/);
 
     const arrowUpEvent = createKeyboardEvent("ArrowUp");
     textarea.element.dispatchEvent(arrowUpEvent);
