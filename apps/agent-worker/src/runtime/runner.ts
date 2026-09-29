@@ -1160,36 +1160,31 @@ function isConcurrentExecutionTool(toolName: string) {
   return toolName === "bash" || toolName === "subtask";
 }
 
-function toNonNegativeInt(raw: unknown) {
-  const value = typeof raw === "number" ? raw : Number(raw);
-  if (!Number.isFinite(value) || value < 0) return null;
-  return Math.floor(value);
-}
-
 function extractTotalTokens(raw: unknown): number | null {
   if (raw == null) return null;
-  if (typeof raw === "number") return toNonNegativeInt(raw);
+  if (typeof raw === "number" || typeof raw === "string") return validTokenCount(raw);
   if (typeof raw !== "object" || Array.isArray(raw)) return null;
   const usage = raw as Record<string, unknown>;
 
   const direct =
-    toNonNegativeInt(usage.totalTokens) ??
-    toNonNegativeInt(usage.total_tokens) ??
-    toNonNegativeInt(usage.total);
+    validTokenCount(usage.totalTokens) ??
+    validTokenCount(usage.total_tokens) ??
+    validTokenCount(usage.total);
   if (direct != null) return direct;
 
   const input =
-    toNonNegativeInt(usage.inputTokens) ??
-    toNonNegativeInt(usage.promptTokens) ??
-    toNonNegativeInt(usage.input_tokens) ??
-    toNonNegativeInt(usage.prompt_tokens);
+    validTokenCount(usage.inputTokens) ??
+    validTokenCount(usage.promptTokens) ??
+    validTokenCount(usage.input_tokens) ??
+    validTokenCount(usage.prompt_tokens);
   const output =
-    toNonNegativeInt(usage.outputTokens) ??
-    toNonNegativeInt(usage.completionTokens) ??
-    toNonNegativeInt(usage.output_tokens) ??
-    toNonNegativeInt(usage.completion_tokens);
+    validTokenCount(usage.outputTokens) ??
+    validTokenCount(usage.completionTokens) ??
+    validTokenCount(usage.output_tokens) ??
+    validTokenCount(usage.completion_tokens);
   if (input != null && output != null) {
-    return input + output;
+    const total = input + output;
+    return Number.isSafeInteger(total) ? total : null;
   }
 
   return null;
@@ -1228,17 +1223,32 @@ function cacheInputForStep(step: CacheStep, providerNpm: string, cacheRead: numb
   return Number.isSafeInteger(total) && cacheRead <= total ? total : null;
 }
 
+/** Model usage requires actual nonnegative integers; do not coerce null to 0. */
+function validTokenCount(raw: unknown): number | null {
+  // Retain decimal integer strings for providers that serialize token counts.
+  // Other Number() coercions (booleans, blanks, exponents, objects) are unsafe.
+  if (typeof raw === "string") {
+    const decimal = raw.trim();
+    if (!/^\d+$/.test(decimal)) return null;
+    raw = Number(decimal);
+  }
+  return typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0 ? raw : null;
+}
+
 function normalizeAnalyticsUsage(raw: unknown): AnalyticsUsage {
   const unavailable: AnalyticsUsage = { inputTokens: null, outputTokens: null, totalTokens: null, totalSource: "unavailable", cacheReadTokens: null, cacheInputTokens: null, cacheWriteTokens: null, cacheComparable: false, cacheWriteVerified: false };
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return unavailable;
   const usage = raw as Record<string, unknown>;
-  const input = toNonNegativeInt(usage.inputTokens) ?? toNonNegativeInt(usage.promptTokens) ?? toNonNegativeInt(usage.input_tokens) ?? toNonNegativeInt(usage.prompt_tokens);
-  const output = toNonNegativeInt(usage.outputTokens) ?? toNonNegativeInt(usage.completionTokens) ?? toNonNegativeInt(usage.output_tokens) ?? toNonNegativeInt(usage.completion_tokens);
-  const reported = toNonNegativeInt(usage.totalTokens) ?? toNonNegativeInt(usage.total_tokens) ?? toNonNegativeInt(usage.total);
+  const input = validTokenCount(usage.inputTokens) ?? validTokenCount(usage.promptTokens) ?? validTokenCount(usage.input_tokens) ?? validTokenCount(usage.prompt_tokens);
+  const rawOutput = validTokenCount(usage.outputTokens) ?? validTokenCount(usage.completionTokens) ?? validTokenCount(usage.output_tokens) ?? validTokenCount(usage.completion_tokens);
+  const reported = validTokenCount(usage.totalTokens) ?? validTokenCount(usage.total_tokens) ?? validTokenCount(usage.total);
+  // The fact table rejects an inconsistent triple. Keep the reported total
+  // but omit the disputed component rather than fabricating a matching one.
+  const output = reported !== null && input !== null && rawOutput !== null && reported !== input + rawOutput ? null : rawOutput;
   const details = (usage.inputTokenDetails ?? usage.prompt_tokens_details) as Record<string, unknown> | undefined;
   const cacheRead = cacheCount(usage.cachedInputTokens) ?? cacheCount(usage.cacheReadTokens) ?? cacheCount(usage.cache_read_tokens) ?? cacheCount(details?.cacheReadTokens) ?? cacheCount(details?.cached_tokens);
   const cacheWrite = cacheCount(usage.cacheWriteTokens) ?? cacheCount(usage.cache_write_tokens) ?? cacheCount(details?.cacheWriteTokens);
-  const derived = reported === null && input !== null && output !== null;
+  const derived = reported === null && input !== null && output !== null && Number.isSafeInteger(input + output);
   return { inputTokens: input, outputTokens: output, totalTokens: reported ?? (derived ? input! + output! : null), totalSource: reported !== null ? "reported" : derived ? "derived" : "unavailable", cacheReadTokens: cacheRead, cacheInputTokens: null, cacheWriteTokens: cacheWrite, cacheComparable: false, cacheWriteVerified: cacheWrite !== null && Boolean(usage.cacheWriteVerified ?? usage.cache_write_verified) };
 }
 
@@ -1256,7 +1266,11 @@ async function boundedUsageValue(value: unknown, timeoutMs = 100): Promise<unkno
   }
 }
 
-async function readStreamAnalyticsUsage(stream: unknown, step?: CacheStep, providerNpm?: string): Promise<AnalyticsUsage> {
+async function readStreamAnalyticsUsage(stream: unknown, step?: CacheStep, providerNpm?: string,
+  finishUsage?: AnalyticsUsage | null, multiStep = false): Promise<AnalyticsUsage> {
+  // In multi-step streams the SDK aggregate can treat unknown usage as zero,
+  // while stream.usage describes only the last step. Neither is a safe total.
+  if (multiStep) return normalizeAnalyticsUsage(null);
   const streamObj = stream as Record<string, unknown>;
   // Usage/totalUsage/response are provider aliases in many SDKs. Bound the
   // whole observation round, rather than serially spending a timeout on each.
@@ -1265,25 +1279,68 @@ async function readStreamAnalyticsUsage(stream: unknown, step?: CacheStep, provi
   );
   const withCache = (usage: AnalyticsUsage): AnalyticsUsage => {
     const stepUsage = step && normalizeAnalyticsUsage(step.usage);
-    const cacheRead = stepUsage?.cacheReadTokens ?? null;
-    const cacheInput = step && providerNpm ? cacheInputForStep(step, providerNpm, cacheRead) : null;
-    return { ...usage, cacheReadTokens: stepUsage?.cacheReadTokens ?? usage.cacheReadTokens,
-      cacheInputTokens: cacheInput, cacheComparable: cacheInput !== null };
+    const sameInput = !stepUsage || stepUsage.inputTokens === null || usage.inputTokens === null || stepUsage.inputTokens === usage.inputTokens;
+    const cacheRead = usage.cacheReadTokens ?? (sameInput ? stepUsage?.cacheReadTokens : null) ?? null;
+    const cacheInput = sameInput && step && providerNpm && stepUsage?.cacheReadTokens === cacheRead
+      ? cacheInputForStep(step, providerNpm, cacheRead) : null;
+    return { ...usage, cacheReadTokens: cacheRead, cacheInputTokens: cacheInput, cacheComparable: cacheInput !== null };
+  };
+  const partials: AnalyticsUsage[] = [];
+  const observedTotals: number[] = [];
+  let complete: AnalyticsUsage | null = null;
+  const consider = (usage: AnalyticsUsage) => {
+    if (usage.totalTokens !== null) {
+      observedTotals.push(usage.totalTokens);
+      complete ??= usage;
+    }
+    else if (usage.inputTokens !== null || usage.outputTokens !== null || usage.cacheReadTokens !== null || usage.cacheWriteTokens !== null) partials.push(usage);
   };
   for (const resolved of candidates) {
     try {
-      const direct = normalizeAnalyticsUsage(resolved);
-      if (direct.totalTokens !== null || direct.inputTokens !== null || direct.outputTokens !== null) {
-        return withCache(direct);
-      }
+      consider(normalizeAnalyticsUsage(resolved));
       if (resolved && typeof resolved === "object") {
         const nested = resolved as Record<string, unknown>;
-        const usage = normalizeAnalyticsUsage(nested.usage ?? nested.totalUsage);
-        if (usage.totalTokens !== null || usage.inputTokens !== null || usage.outputTokens !== null) return withCache(usage);
+        for (const raw of [nested.usage, nested.totalUsage]) {
+          consider(normalizeAnalyticsUsage(raw));
+        }
       }
     } catch { /* Analytics must not delay or fail the business attempt. */ }
   }
-  return normalizeAnalyticsUsage(null);
+  if (finishUsage && finishUsage.totalTokens !== null) consider(finishUsage);
+  if (step) {
+    // The observed single finish-step is the same scope, but only use its
+    // total to check consistency; it is not an independent total fallback.
+    const stepTotal = normalizeAnalyticsUsage(step.usage).totalTokens;
+    if (stepTotal !== null) observedTotals.push(stepTotal);
+  }
+  // Never select an arbitrary complete source when same-scope totals disagree.
+  // Multi-step streams were already rejected above: their last-step usage
+  // cannot be compared with a whole-stream aggregate.
+  if (observedTotals.some((total) => total !== observedTotals[0])) return normalizeAnalyticsUsage(null);
+  if (complete && step) {
+    // With exactly one observed finish-step all aliases describe that step.
+    // Fill only absent fields from consistent candidates, never derive a
+    // missing total by combining partial sources or overwrite known fields.
+    partials.push(normalizeAnalyticsUsage(step.usage));
+    let selected: AnalyticsUsage = complete;
+    for (const part of partials) {
+      const fields = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"] as const;
+      if (fields.some((field) => selected[field] !== null && part[field] !== null && selected[field] !== part[field])) continue;
+      const next: AnalyticsUsage = {
+        ...selected,
+        inputTokens: selected.inputTokens ?? part.inputTokens,
+        outputTokens: selected.outputTokens ?? part.outputTokens,
+        cacheReadTokens: selected.cacheReadTokens ?? part.cacheReadTokens,
+        cacheWriteTokens: selected.cacheWriteTokens ?? part.cacheWriteTokens,
+      };
+      if (next.inputTokens !== null && next.outputTokens !== null && next.totalTokens !== next.inputTokens + next.outputTokens) continue;
+      if (next.cacheWriteTokens !== null && next.cacheWriteTokens === part.cacheWriteTokens) next.cacheWriteVerified ||= part.cacheWriteVerified;
+      selected = next;
+    }
+    complete = selected;
+  }
+  // Without a proven single step, do not join different usage aliases.
+  return complete ? withCache(complete) : partials.length ? withCache(partials[0]!) : normalizeAnalyticsUsage(null);
 }
 
 async function readStreamTotalTokens(stream: unknown): Promise<number | null> {
@@ -1303,9 +1360,10 @@ async function readStreamTotalTokens(stream: unknown): Promise<number | null> {
 
       if (resolved && typeof resolved === "object" && !Array.isArray(resolved)) {
         const nested = resolved as Record<string, unknown>;
-        const usage = nested.usage ?? nested.totalUsage;
-        const nestedTotal = extractTotalTokens(usage);
-        if (nestedTotal != null) return nestedTotal;
+        for (const usage of [nested.usage, nested.totalUsage]) {
+          const nestedTotal = extractTotalTokens(usage);
+          if (nestedTotal != null) return nestedTotal;
+        }
       }
     } catch {
       // ignore usage parse failures
@@ -2980,6 +3038,8 @@ export class AgentRunner {
       const analyticsModelCallId = newSortableId("model");
       let cacheStep: CacheStep | undefined;
       let finishedSteps = 0;
+      let finishEvents = 0;
+      let analyticsFinishUsage: AnalyticsUsage | null = null;
       try {
         const analyticsModelPayload = { modelCallId: analyticsModelCallId, runId: run.runId, executionId: run.runId, attemptNo: analyticsAttemptNo, providerId: profile.provider.id ?? "unknown", modelId: profile.model.id ?? "unknown", startedAt: analyticsModelStartedAt, endedAt: null, status: "running" as const, completionQuality: "unknown" as const, timeoutKind: null, inputTokens: null, cacheInputTokens: null, cacheWriteTokens: null, cacheComparable: false, cacheWriteVerified: false, failureKind: null };
         this.analyticsSignals?.emitModel(analyticsModelPayload, "model_invoked", analyticsModelCallId);
@@ -3059,6 +3119,8 @@ export class AgentRunner {
             continue;
           }
           if (chunk.type === "finish") {
+            finishEvents++;
+            analyticsFinishUsage = normalizeAnalyticsUsage(chunk.totalUsage);
             attemptResponseTotalTokens = extractTotalTokens(chunk.totalUsage) ?? attemptResponseTotalTokens;
             continue;
           }
@@ -3264,7 +3326,10 @@ export class AgentRunner {
         // Only a single finish-step pairs SDK usage with its provider metadata.
         // A multi-step totalUsage must never be mixed with last-step metadata.
         const analyticsUsage = attemptReachedTerminal && attemptStream
-          ? await readStreamAnalyticsUsage(attemptStream, finishedSteps === 1 ? cacheStep : undefined, profile.provider.npm)
+          ? await readStreamAnalyticsUsage(attemptStream, finishedSteps === 1 ? cacheStep : undefined,
+            profile.provider.npm,
+            attemptSucceeded && !requestController.signal.aborted && finishedSteps === 1 && finishEvents === 1 ? analyticsFinishUsage : null,
+            finishedSteps > 1)
           : normalizeAnalyticsUsage(null);
         const analyticsAttemptStatus = requestController.signal.aborted ? (idleTimedOut || totalTimedOut ? "timed_out" : "cancelled") : (attemptSucceeded ? "completed" : "failed");
         this.analyticsSignals?.emitModel({ modelCallId: analyticsModelCallId, runId: run.runId, executionId: run.runId, attemptNo: analyticsAttemptNo, providerId: profile.provider.id ?? "unknown", modelId: profile.model.id ?? "unknown", startedAt: analyticsModelStartedAt, endedAt: this.nowMsFn(), status: analyticsAttemptStatus, completionQuality: "observed", timeoutKind: idleTimedOut ? "idle" : totalTimedOut ? "total" : null, ...analyticsUsage, failureKind: analyticsAttemptStatus === "completed" ? null : analyticsAttemptStatus === "timed_out" ? "timeout" : analyticsAttemptStatus === "cancelled" ? "cancelled" : attemptLocalFailure ? "other" : "provider" }, "model_finished", analyticsModelCallId);

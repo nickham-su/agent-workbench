@@ -559,12 +559,13 @@ test("真实 DashboardTab：mounted 单请求、preset 自动刷新，custom 仅
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(calls.length, 3);
   assert.match(wrapper.get('[data-testid="dashboard-section-overview"]').text(), /域状态摘要|Domain status summary/);
-  const tokenCard = wrapper.get('[data-testid="overview-metric-totalTokens"]');
-  assert.match(tokenCard.get(".metric-title").text(), /总 Token|Total tokens/);
-  assert.equal(tokenCard.get(".metric-value").text(), "9");
-  await tokenCard.get("button").trigger("click");
-  assert.equal(wrapper.get('[data-testid="overview-trend-totalTokens"] .echarts-chart').attributes("tabindex"), "0");
-  assert.match(wrapper.get('[data-testid="overview-trend-totalTokens"] .chart-details').text(), /9/);
+  assert.equal(wrapper.find('[data-testid="overview-metric-totalTokens"]').exists(), false);
+  const toolCard = wrapper.get('[data-testid="overview-metric-toolCallCount"]');
+  assert.match(toolCard.get(".metric-title").text(), /工具调用|Tool calls/);
+  assert.equal(toolCard.get(".metric-value").text(), "2");
+  await toolCard.get("button").trigger("click");
+  assert.equal(wrapper.get('[data-testid="overview-trend-toolCallCount"] .echarts-chart').attributes("tabindex"), "0");
+  assert.match(wrapper.get('[data-testid="overview-trend-toolCallCount"] .chart-details').text(), /2/);
   const sectionButtons = wrapper.findAll("nav.dashboard-section-tabs button");
   assert.equal(sectionButtons.length, 4);
   assert.doesNotMatch(sectionButtons.map((button) => button.text()).join(" "), /Git/);
@@ -584,6 +585,8 @@ test("真实 DashboardTab：mounted 单请求、preset 自动刷新，custom 仅
   }
   await sectionButtons[2].trigger("click");
   const modelSection = wrapper.get('[data-testid="dashboard-section-model"]');
+  assert.ok(modelSection.find('[data-testid="model-metric-tokens"]').exists(), "模型详情仍保留输入/输出 Token");
+  assert.ok(modelSection.get('[data-testid="model-metric-tokens"]').text().includes("4"));
   await modelSection.get('[data-testid="model-metric-cacheHitRate"] button').trigger("click");
   assert.ok(modelSection.find('[data-testid="model-trend-cacheHitRate"]').exists());
   await sectionButtons[3].trigger("click");
@@ -591,42 +594,77 @@ test("真实 DashboardTab：mounted 单请求、preset 自动刷新，custom 仅
   wrapper.unmount();
 });
 
-test("概览总 Token 未知显示中性空值，可靠零显示 0；点击后趋势遵循同一语义", async () => {
-  for (const [count, label] of [[null, "—"], [0, "0"]] as const) {
-    const base = dashboardSuccessFixture;
-    const response = {
-      ...base,
-      data: {
-        ...base.data,
-        overview: { ...base.data.overview, totalTokens: { ...base.data.overview.totalTokens, value: { count } } },
-        overviewTrends: { ...base.data.overviewTrends, totalTokens: { ...base.data.overviewTrends.totalTokens, data: [{ from: 1, to: 2, count }] } },
-        model: { ...base.data.model, metrics: { ...base.data.model.metrics, totalTokens: { ...base.data.model.metrics.totalTokens, value: { count } } } },
+test("概览工具调用趋势从 Agent 数据读取，部分采集仍保留真实零", async () => {
+  const base = dashboardSuccessFixture;
+  const toolMetric = base.data.agent.metrics.toolCallCount;
+  const toolTrend = base.data.agent.trends.toolCallCount;
+  const response = {
+    ...base,
+    data: {
+      ...base.data,
+      overview: { ...base.data.overview, totalTokens: { ...base.data.overview.totalTokens, value: { count: null } } },
+      agent: { ...base.data.agent,
+        metrics: { ...base.data.agent.metrics, toolCallCount: { ...toolMetric, status: "partial" as const, completeness: "partial" as const, dataIncomplete: true as const, partialReason: "coverage_gap" as const, value: 7 } },
+        trends: { ...base.data.agent.trends, toolCallCount: { ...toolTrend, status: "partial" as const, completeness: "partial" as const, dataIncomplete: true as const, partialReason: "coverage_gap" as const, data: [{ from: 1, to: 2, count: 0 }, { from: 2, to: 3, count: 7 }] } },
       },
-    };
-    assert.equal(Value.Check(DashboardQuerySuccessResponseSchema, response), true);
-    const wrapper = mount(DashboardTab, {
-      global: {
-        plugins: [i18n],
-        provide: { [dashboardQueryKey as symbol]: async () => response },
-        stubs: {
-          "a-select": { props: ["value"], template: '<select :value="value"><slot /></select>' },
-          "a-select-option": { props: ["value"], template: '<option :value="value"><slot /></option>' },
-          "a-button": { props: ["disabled"], emits: ["click"], template: '<button :disabled="disabled" @click="$emit(\'click\')"><slot /></button>' },
-          "a-alert": { template: '<div><slot /></div>' }, "a-spin": { template: '<div><slot /></div>' }, "a-empty": { template: '<div><slot /></div>' },
-        },
+    },
+  };
+  assert.equal(Value.Check(DashboardQuerySuccessResponseSchema, response), true);
+  const wrapper = mount(DashboardTab, {
+    global: {
+      plugins: [i18n],
+      provide: { [dashboardQueryKey as symbol]: async () => response },
+      stubs: {
+        "a-select": { props: ["value"], template: '<select :value="value"><slot /></select>' },
+        "a-select-option": { props: ["value"], template: '<option :value="value"><slot /></option>' },
+        "a-button": { props: ["disabled"], template: '<button :disabled="disabled"><slot /></button>' },
+        "a-alert": { template: '<div><slot /></div>' }, "a-spin": { template: '<div><slot /></div>' }, "a-empty": { template: '<div><slot /></div>' },
       },
-    });
-    await new Promise((resolve) => setImmediate(resolve));
-    const card = wrapper.get('[data-testid="overview-metric-totalTokens"]');
-    assert.equal(card.get(".metric-value").text(), label);
-    assert.equal(card.find(".metric-foot").exists(), false);
-    await card.get("button").trigger("click");
-    const chart = wrapper.get('[data-testid="overview-trend-totalTokens"]');
-    assert.equal(chart.get(".echarts-chart").attributes("tabindex"), "0");
-    assert.match(chart.get(".chart-details").text(), count === null ? /—/ : /0/);
-    assert.equal(chart.findAll(".line-marker").length, 0, "overview no longer uses the SVG renderer");
-    wrapper.unmount();
-  }
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(wrapper.find('[data-testid="overview-metric-totalTokens"]').exists(), false);
+  const card = wrapper.get('[data-testid="overview-metric-toolCallCount"]');
+  assert.equal(card.get(".metric-value").text(), "7");
+  await card.get("button").trigger("click");
+  assert.equal(card.get("button").attributes("aria-pressed"), "true");
+  const chart = wrapper.get('[data-testid="overview-trend-toolCallCount"]');
+  assert.match(chart.get("h3").text(), /工具调用|Tool calls/);
+  assert.equal(chart.get(".echarts-chart").attributes("tabindex"), "0");
+  assert.equal(chart.findAll('[data-testid^="chart-bucket-detail-"]').length, 2);
+  assert.match(chart.get(".chart-details").text(), /0/);
+  assert.match(chart.get(".chart-details").text(), /7/);
+  assert.equal(chart.find(".metric-hint").exists(), false);
+  await wrapper.get('.metric-grid.six button').trigger("click");
+  assert.ok(wrapper.find('[data-testid="overview-trend-monitoringVolume"]').exists(), "切回其他卡片时趋势同步更新");
+  wrapper.unmount();
+});
+
+test("概览工具调用未采集时，卡片与趋势均显示未知而非零", async () => {
+  const base = dashboardSuccessFixture;
+  const unavailable = { status: "unavailable" as const, dataIncomplete: true as const, unavailableReason: "domain_unavailable" as const, requiredDomains: ["tool" as const], comparison: { status: "domain_unavailable" as const, kind: null, delta: null } };
+  const response = {
+    ...base,
+    data: { ...base.data, agent: { ...base.data.agent,
+      metrics: { ...base.data.agent.metrics, toolCallCount: { ...unavailable, value: null } },
+      trends: { ...base.data.agent.trends, toolCallCount: { ...unavailable, data: null } },
+    } },
+  };
+  assert.equal(Value.Check(DashboardQuerySuccessResponseSchema, response), true);
+  const wrapper = mount(DashboardTab, {
+    global: {
+      plugins: [i18n],
+      provide: { [dashboardQueryKey as symbol]: async () => response },
+      stubs: { "a-select": true, "a-select-option": true, "a-button": true, "a-alert": true, "a-spin": { template: '<div><slot /></div>' }, "a-empty": true },
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const card = wrapper.get('[data-testid="overview-metric-toolCallCount"]');
+  assert.equal(card.get(".metric-value").text(), "—");
+  await card.get("button").trigger("click");
+  assert.ok(wrapper.get('[data-testid="overview-trend-toolCallCount"]').find(".empty-value").exists());
+  assert.equal(wrapper.get('[data-testid="overview-trend-toolCallCount"]').find('.echarts-chart').exists(), false);
+  wrapper.unmount();
 });
 
 test("Worker 等部分结果保留业务数据，仅专用健康区展示采集原因", () => {
@@ -738,9 +776,20 @@ test("概览用六卡 + 双栏主趋势/健康表，卡片切换保留真实 DTO
   });
   await new Promise((resolve) => setImmediate(resolve));
   const overview = wrapper.get('[data-testid="dashboard-section-overview"]');
-  assert.equal(overview.findAll(".metric-grid.six .metric-card").length, 6);
-  assert.equal(overview.findAll(".overview-main > *").length, 2);
+  const cards = overview.findAll(".metric-grid.six .metric-card");
+  assert.equal(cards.length, 6);
+  const cardKeys = ["monitoringVolume", "agentDuration", "toolCallCount", "modelRequests", "modelSuccessRate", "cacheHitRate"];
+  assert.deepEqual(cards.map((card) => card.get(".metric-title").text()), cardKeys.map((key) => i18n.global.t(`dashboard.${key}`)));
+  assert.equal(overview.find('[data-testid="overview-metric-totalTokens"]').exists(), false);
   assert.ok(overview.find('[data-testid="overview-trend-monitoringVolume"]').exists());
+  for (const [index, trend] of [
+    "monitoringVolume", "agentDuration", "toolCallCount", "modelRequests", "modelSuccessRate", "cacheHitRate",
+  ].entries()) {
+    await cards[index]!.get("button").trigger("click");
+    const chart = overview.get(`[data-testid="overview-trend-${trend}"]`);
+    assert.match(chart.get("h3").text(), new RegExp(cards[index]!.get(".metric-title").text()));
+  }
+  assert.equal(overview.findAll(".overview-main > *").length, 2);
   assert.ok(overview.find('[data-testid="overview-domain-health"]').exists());
   assert.match(overview.find('[data-testid="overview-domain-health"] .dashboard-panel-head').text(), /数据域状态|Domain status summary/);
   assert.equal(overview.findAll('[data-testid="overview-domain-health"] .dashboard-panel-actions').length, 0);

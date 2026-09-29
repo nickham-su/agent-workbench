@@ -152,16 +152,24 @@ test("runner completes a terminal provider attempt when fullStream usage never s
 
 async function finishedModelUsage(options: {
   npm: string;
-  usage: Record<string, unknown>;
+  usage: Record<string, unknown> | Promise<never>;
+  totalUsage?: Record<string, unknown> | Promise<never>;
+  response?: unknown;
+  stepUsage?: Record<string, unknown>;
+  finishTotalUsage?: Record<string, unknown> | null;
   metadata?: unknown;
   steps?: number;
   baseURL?: string;
+  businessTotals?: Array<number | null>;
 }) {
   const signals: Array<{ eventType: string; payload: Record<string, unknown> }> = [];
   const apiClient = {
     async createStreamingAssistant() { return { result: "created" }; },
     async flushAssistantParts() { return { result: "updated" }; },
-    async completeTerminalAssistant() { return { result: "updated" }; },
+    async completeTerminalAssistant(request: { responseTotalTokens: number | null }) {
+      options.businessTotals?.push(request.responseTotalTokens);
+      return { result: "updated" };
+    },
     async updateRunNotice() { return { result: "updated" }; },
     async replaceStreamingAssistant() { return { result: "updated" }; },
     async getPluginRuntimeSnapshots() { return { plugins: [] }; },
@@ -170,13 +178,13 @@ async function finishedModelUsage(options: {
     analyticsSignals: { emitModel(payload: Record<string, unknown>, eventType: string) { signals.push({ eventType, payload }); } } as any,
     streamText: (() => ({
       usage: Promise.resolve(options.usage),
-      totalUsage: Promise.resolve(options.usage),
-      response: Promise.resolve(null),
+      totalUsage: Promise.resolve(options.totalUsage ?? options.usage),
+      response: Promise.resolve(options.response ?? null),
       fullStream: (async function* () {
         yield { type: "text-delta", id: "part-1", text: "completed" };
         for (let index = 0; index < (options.steps ?? 1); index++)
-          yield { type: "finish-step", usage: options.usage, providerMetadata: options.metadata };
-        yield { type: "finish", totalUsage: options.usage };
+          yield { type: "finish-step", usage: options.stepUsage ?? options.usage, providerMetadata: options.metadata };
+        yield { type: "finish", totalUsage: options.finishTotalUsage === undefined ? options.usage : options.finishTotalUsage };
         yield { type: "raw", rawValue: { type: "response.completed", response: { output: [] } } };
       })(),
     })) as any,
@@ -198,6 +206,243 @@ async function finishedModelUsage(options: {
   assert.equal(result.aborted, false);
   return signals.find((signal) => signal.eventType === "model_finished")?.payload;
 }
+
+test("Analytics prefers a complete total from another stream alias without combining partial candidates", async () => {
+  const reported = await finishedModelUsage({
+    npm: "@ai-sdk/openai", usage: { inputTokens: 7 },
+    totalUsage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+  });
+  assert.equal(reported?.totalSource, "reported");
+  assert.equal(reported?.totalTokens, 15);
+  assert.equal(reported?.inputTokens, 10);
+  assert.equal(reported?.outputTokens, 5);
+
+  const nested = await finishedModelUsage({
+    npm: "@ai-sdk/openai", usage: { inputTokens: 7 }, totalUsage: { outputTokens: 5 },
+    response: { usage: { inputTokens: 3 }, totalUsage: { inputTokens: 4, outputTokens: 5 } },
+  });
+  assert.equal(nested?.totalSource, "derived");
+  assert.equal(nested?.totalTokens, 9);
+
+  const partial = await finishedModelUsage({
+    npm: "@ai-sdk/openai", usage: { inputTokens: 7 }, totalUsage: { outputTokens: 5 },
+  });
+  assert.equal(partial?.totalSource, "unavailable");
+  assert.equal(partial?.totalTokens, null);
+  assert.equal(partial?.inputTokens, 7);
+  assert.equal(partial?.outputTokens, null);
+
+  const unavailable = await finishedModelUsage({ npm: "@ai-sdk/openai", usage: {}, totalUsage: {}, response: {} });
+  assert.equal(unavailable?.totalSource, "unavailable");
+  assert.equal(unavailable?.totalTokens, null);
+  assert.equal(unavailable?.inputTokens, null);
+  assert.equal(unavailable?.outputTokens, null);
+});
+
+test("Analytics only accepts safe token integers while preserving genuine zero and decimal strings", async () => {
+  for (const invalid of [null, undefined, true, false, "", "  ", 1.9, "1.9", "1e3", -1, -0.5,
+    Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, {}, []]) {
+    const payload = await finishedModelUsage({
+      npm: "@ai-sdk/openai",
+      usage: { inputTokens: invalid, outputTokens: invalid, totalTokens: invalid },
+    });
+    assert.equal(payload?.totalSource, "unavailable", `invalid value ${typeof invalid}: ${String(invalid)}`);
+    assert.equal(payload?.totalTokens, null);
+    assert.equal(payload?.inputTokens, null);
+    assert.equal(payload?.outputTokens, null);
+  }
+
+  const partial = await finishedModelUsage({
+    npm: "@ai-sdk/openai", usage: { inputTokens: 4, outputTokens: null, totalTokens: null },
+  });
+  assert.equal(partial?.totalSource, "unavailable");
+  assert.equal(partial?.totalTokens, null);
+  assert.equal(partial?.inputTokens, 4);
+  assert.equal(partial?.outputTokens, null);
+
+  const reportedZero = await finishedModelUsage({
+    npm: "@ai-sdk/openai", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+  });
+  assert.equal(reportedZero?.totalSource, "reported");
+  assert.equal(reportedZero?.totalTokens, 0);
+  assert.equal(reportedZero?.inputTokens, 0);
+  assert.equal(reportedZero?.outputTokens, 0);
+
+  const derivedZero = await finishedModelUsage({
+    npm: "@ai-sdk/openai", usage: { inputTokens: 0, outputTokens: 0, totalTokens: null },
+  });
+  assert.equal(derivedZero?.totalSource, "derived");
+  assert.equal(derivedZero?.totalTokens, 0);
+
+  const decimalString = await finishedModelUsage({
+    npm: "@ai-sdk/openai", usage: { inputTokens: " 2 ", outputTokens: "3", totalTokens: "5" },
+  });
+  assert.equal(decimalString?.totalSource, "reported");
+  assert.equal(decimalString?.totalTokens, 5);
+  assert.equal(decimalString?.inputTokens, 2);
+  assert.equal(decimalString?.outputTokens, 3);
+
+  const aliasAfterNull = await finishedModelUsage({
+    npm: "@ai-sdk/openai", usage: { totalTokens: null, total_tokens: "7" },
+  });
+  assert.equal(aliasAfterNull?.totalSource, "reported");
+  assert.equal(aliasAfterNull?.totalTokens, 7, "an explicit null must not shadow a valid alias with a fake zero");
+});
+
+test("business responseTotalTokens validates observed finish.totalUsage without coercing missing usage", async () => {
+  for (const invalid of [null, undefined, true, false, "", " ", 1.9, "1.9", -1,
+    Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, {}]) {
+    const businessTotals: Array<number | null> = [];
+    await finishedModelUsage({
+      npm: "@ai-sdk/openai", usage: {}, finishTotalUsage: { totalTokens: invalid }, businessTotals,
+    });
+    assert.deepEqual(businessTotals, [null], `finish must not coerce ${typeof invalid} into a total`);
+  }
+
+  for (const [finishTotalUsage, expected] of [
+    [{ totalTokens: null, total_tokens: "7" }, 7],
+    [{ totalTokens: 1.9, total_tokens: "7" }, 7],
+    [{ inputTokens: "2", outputTokens: "3", totalTokens: null }, 5],
+    [{ totalTokens: 0 }, 0],
+  ] as const) {
+    const businessTotals: Array<number | null> = [];
+    await finishedModelUsage({ npm: "@ai-sdk/openai", usage: {}, finishTotalUsage, businessTotals });
+    assert.deepEqual(businessTotals, [expected], "valid finish alias, derived sum or real zero must survive");
+  }
+});
+
+test("business responseTotalTokens validates stream usage and nested response aliases after invalid finish", async () => {
+  for (const invalid of [null, undefined, true, false, "", " ", 1.9, "1.9", -1,
+    Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, {}]) {
+    const businessTotals: Array<number | null> = [];
+    await finishedModelUsage({
+      npm: "@ai-sdk/openai", usage: { totalTokens: invalid }, finishTotalUsage: null, businessTotals,
+    });
+    assert.deepEqual(businessTotals, [null], `stream must not coerce ${typeof invalid} into a total`);
+  }
+
+  for (const [usage, expected] of [
+    [{ totalTokens: null, total_tokens: "8" }, 8],
+    [{ totalTokens: true, total_tokens: "8" }, 8],
+    [{ totalTokens: 1.9, total_tokens: "8" }, 8],
+    [{ inputTokens: 1.9, outputTokens: 3 }, null],
+    [{ inputTokens: "2", outputTokens: "3" }, 5],
+    [{ totalTokens: 0 }, 0],
+  ] as const) {
+    const businessTotals: Array<number | null> = [];
+    await finishedModelUsage({ npm: "@ai-sdk/openai", usage, finishTotalUsage: null, businessTotals });
+    assert.deepEqual(businessTotals, [expected], "select only a valid stream alias or complete component sum");
+  }
+
+  const businessTotals: Array<number | null> = [];
+  await finishedModelUsage({
+    npm: "@ai-sdk/openai", usage: {}, totalUsage: {}, finishTotalUsage: null,
+    response: { usage: { totalTokens: null }, totalUsage: { totalTokens: "8" } },
+    businessTotals,
+  });
+  assert.deepEqual(businessTotals, [8], "a null nested usage must not hide a valid totalUsage alias");
+});
+
+test("single-step total-only usage retains consistent earlier input and cache data", async () => {
+  const usage = { inputTokens: 1000, cachedInputTokens: 900 };
+  const payload = await finishedModelUsage({
+    npm: "@ai-sdk/openai", usage,
+    totalUsage: { outputTokens: 10, totalTokens: 1010 },
+  });
+  assert.equal(payload?.totalSource, "reported");
+  assert.equal(payload?.totalTokens, 1010);
+  assert.equal(payload?.inputTokens, 1000);
+  assert.equal(payload?.outputTokens, 10);
+  assert.equal(payload?.cacheReadTokens, 900);
+  assert.equal(payload?.cacheInputTokens, 1000);
+  assert.equal(payload?.cacheComparable, true);
+});
+
+test("conflicting components are not merged or used for a comparable cache denominator", async () => {
+  const payload = await finishedModelUsage({
+    npm: "@ai-sdk/openai", usage: { inputTokens: 7, cachedInputTokens: 2 },
+    totalUsage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+  });
+  assert.equal(payload?.totalTokens, 15);
+  assert.equal(payload?.inputTokens, 10);
+  assert.equal(payload?.outputTokens, 5);
+  assert.equal(payload?.cacheReadTokens, null);
+  assert.equal(payload?.cacheComparable, false);
+
+  const impossibleTriple = await finishedModelUsage({
+    npm: "@ai-sdk/openai", usage: { inputTokens: 7 },
+    totalUsage: { inputTokens: 10, outputTokens: 4, totalTokens: 15 },
+    stepUsage: { inputTokens: 7 },
+  });
+  assert.equal(impossibleTriple?.totalTokens, 15);
+  assert.equal(impossibleTriple?.inputTokens, 10);
+  assert.equal(impossibleTriple?.outputTokens, null, "never emit a triple rejected by the fact-table constraint");
+});
+
+test("contradictory same-scope stream, finish, and step totals stay unavailable", async () => {
+  const cases = [
+    {
+      name: "stream usage disagrees with totalUsage and the observed step",
+      usage: { inputTokens: 4, outputTokens: 5, totalTokens: 9 },
+      totalUsage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+      stepUsage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+      finishTotalUsage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    },
+    {
+      name: "finish disagrees with the stream aliases",
+      usage: { inputTokens: 4, outputTokens: 5, totalTokens: 9 },
+      totalUsage: { totalTokens: 9 },
+      stepUsage: { totalTokens: 9 },
+      finishTotalUsage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    },
+    {
+      name: "finish-step disagrees with a stream alias",
+      usage: { totalTokens: 0 },
+      totalUsage: { totalTokens: 0 },
+      stepUsage: { totalTokens: 15 },
+      finishTotalUsage: null,
+    },
+  ];
+  for (const candidate of cases) {
+    const payload = await finishedModelUsage({ npm: "@ai-sdk/openai", ...candidate });
+    assert.equal(payload?.totalSource, "unavailable", candidate.name);
+    assert.equal(payload?.totalTokens, null, candidate.name);
+    assert.equal(payload?.inputTokens, null, candidate.name);
+    assert.equal(payload?.outputTokens, null, candidate.name);
+    assert.equal(payload?.cacheComparable, false, candidate.name);
+  }
+});
+
+test("only a completed single-step attempt falls back to observed finish.totalUsage", async () => {
+  const finishTotalUsage = { inputTokens: 10, outputTokens: 5, totalTokens: 15 };
+  const single = await finishedModelUsage({
+    npm: "@ai-sdk/openai", usage: neverSettlingUsage, totalUsage: neverSettlingUsage,
+    response: neverSettlingUsage, stepUsage: { inputTokens: 10 }, finishTotalUsage,
+  });
+  assert.equal(single?.totalSource, "reported");
+  assert.equal(single?.totalTokens, 15);
+  assert.equal(single?.inputTokens, 10);
+  assert.equal(single?.outputTokens, 5);
+
+  const multiple = await finishedModelUsage({
+    npm: "@ai-sdk/openai", steps: 2, usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    totalUsage: finishTotalUsage, finishTotalUsage,
+  });
+  assert.equal(multiple?.totalSource, "unavailable", "aggregate usage is not proof every step reported usage");
+  assert.equal(multiple?.totalTokens, null);
+
+  const noStep = await finishedModelUsage({
+    npm: "@ai-sdk/openai", steps: 0, usage: neverSettlingUsage,
+    totalUsage: neverSettlingUsage, response: neverSettlingUsage, finishTotalUsage,
+  });
+  assert.equal(noStep?.totalTokens, null);
+
+  const invalidFinish = await finishedModelUsage({
+    npm: "@ai-sdk/openai", usage: neverSettlingUsage, totalUsage: neverSettlingUsage,
+    response: neverSettlingUsage, finishTotalUsage: { inputTokens: 10 },
+  });
+  assert.equal(invalidFinish?.totalTokens, null);
+});
 
 test("OpenAI cached input uses full input only for valid SDK counts", async () => {
   for (const [cached, denominator] of [[900, 1000], [0, 1000], [undefined, null], [null, null], [true, null], ["0", null], [0.5, null], [Number.MAX_SAFE_INTEGER + 1, null]] as const) {
