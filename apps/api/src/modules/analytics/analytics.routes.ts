@@ -14,7 +14,9 @@ import {
 } from "@agent-workbench/shared";
 import type { AppContext } from "../../app/context.js";
 import { HttpError } from "../../app/errors.js";
+import { getAgentProvidersSettings } from "../settings/settings.service.js";
 import { validateDashboardQueryInput } from "./analytics.service.js";
+import { withConfiguredModelNames } from "./analytics-model-names.js";
 import type { AnalyticsSupervisor } from "./analytics-supervisor.js";
 
 type ValidatedRequest = FastifyRequest & {
@@ -88,10 +90,22 @@ export async function registerAnalyticsRoutes(app: FastifyInstance, ctx: AppCont
         const status = response.error.code === "ANALYTICS_RANGE_NOT_READY" ? 400 : 503;
         return reply.code(status).send(response);
       }
+      let result = response;
+      // Configuration labels are best-effort; never let settings failures hide
+      // valid Analytics results or expose provider configuration in the reply.
+      if (response.data.model.byModel.status !== "unavailable" && response.data.model.byModel.data.length > 0) {
+        try {
+          const providers = getAgentProvidersSettings(ctx).providers;
+          const named = withConfiguredModelNames(response, providers);
+          if (Value.Check(DashboardQuerySuccessResponseSchema, named)) result = named;
+        } catch {
+          // Historical IDs remain usable when the current configuration cannot be read.
+        }
+      }
       // The child validates the Shared response contract. Avoid compiling
       // Fastify's very large success schema on the first user Dashboard hit.
       reply.serializer((value) => JSON.stringify(value));
-      return reply.code(200).send(response);
+      return reply.code(200).send(result);
     }
   );
 }

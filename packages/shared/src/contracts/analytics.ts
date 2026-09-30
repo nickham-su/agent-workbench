@@ -158,6 +158,8 @@ export const ToolDetailPanelResultSchema = Type.Union([
 ]);
 export const ModelTableSchema = Type.Array(StrictObject({
   provider: Type.String({ minLength: 1 }), model: Type.String({ minLength: 1 }), requests: NonNegativeIntegerSchema,
+  providerName: Type.Optional(Type.String({ minLength: 1 })),
+  modelName: Type.Optional(Type.String({ minLength: 1 })),
   successRate: RatioOrNullSchema, timeoutRate: RatioOrNullSchema, completedAverageDurationMs: Type.Union([NonNegativeIntegerSchema, Type.Null()]), reliableDurationSampleCount: NonNegativeIntegerSchema,
   inputTokens: Type.Union([NonNegativeIntegerSchema, Type.Null()]), outputTokens: Type.Union([NonNegativeIntegerSchema, Type.Null()]), totalTokens: Type.Union([NonNegativeIntegerSchema, Type.Null()]),
   cacheReadTokens: Type.Union([NonNegativeIntegerSchema, Type.Null()]), cacheHitRate: RatioOrNullSchema

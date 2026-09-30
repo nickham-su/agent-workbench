@@ -353,6 +353,26 @@ test("Agent 工具表保留取消、未知和仅已完成均时，未知工具�
   assert.match(complete.get('tbody').text(), /read/);
   assert.doesNotMatch(complete.get('tbody').text(), /NaN/);
 });
+test("按模型表优先显示当前名称，缺失时回退 ID，标签不改变行身份", async () => {
+  const base = dashboardSuccessFixture.data.model.byModel;
+  const row = base.data[0]!;
+  const panel = { ...base, data: [
+    { ...row, provider: "p-1", model: "m", providerName: "显示提供方", modelName: "<b>模型</b>" },
+    { ...row, provider: "p-2", model: "m", providerName: "显示提供方", modelName: "另一个模型" },
+    { ...row, provider: "p-1", model: "deleted" },
+  ] };
+  const wrapper = mount(Tables, { ...options, props: { title: "Models", panel, tableKind: "models" } });
+  assert.equal(wrapper.findAll("tbody tr").length, 3, "同名显示值不合并模型 ID");
+  const rows = wrapper.findAll("tbody tr");
+  assert.deepEqual(rows.map((item) => item.findAll("td").slice(0, 2).map((cell) => cell.text())), [
+    ["显示提供方", "<b>模型</b>"], ["显示提供方", "另一个模型"], ["p-1", "deleted"],
+  ]);
+  assert.equal(rows[0]?.find("b").exists(), false, "显示名称必须作为纯文本渲染");
+  const partial = { ...panel, status: "partial" as const, completeness: "partial" as const, dataIncomplete: true as const, partialReason: "coverage_gap" as const };
+  await wrapper.setProps({ panel: partial });
+  assert.equal(wrapper.findAll("tbody tr").length, 3);
+  wrapper.unmount();
+});
 test("真实 shared 成功夹具：指标卡保留服务端 comparison，不把 unavailable 变为零", async () => { const result = dashboardSuccessFixture.data.overview.modelRequests; const wrapper = mount(MetricCard, { ...options, props: { title: "requests", value: "3", result } }); assert.match(wrapper.text(), /\+10%|\+10\.0%/); const unavailable = { status: "unavailable" as const, value: null, dataIncomplete: true as const, unavailableReason: "no_safe_data" as const, requiredDomains: ["run" as const], comparison: { status: "not_applicable" as const, kind: null, delta: null } }; await wrapper.setProps({ value: "—", result: unavailable }); assert.equal(wrapper.get(".metric-value").text(), "—"); assert.equal(wrapper.findAll(".status").length, 0); assert.doesNotMatch(wrapper.text(), /暂无可安全展示的数据|No safe data|不适用|Not applicable/); });
 test("指标卡百分点评比只在结果与比较均可展示时出现", async () => {
   const result = dashboardSuccessFixture.data.model.metrics.successRate;
