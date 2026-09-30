@@ -942,14 +942,15 @@ function queryDashboardSnapshot(
     },
   );
 
-  const toolDistributionRows = toolRows
-    .filter((row) =>
-      ["completed", "failed", "cancelled", "unknown"].includes(row.status),
-    )
-    .map((row) => ({
-      status: row.status as "completed" | "failed" | "cancelled" | "unknown",
-      count: row.call_count,
-    }));
+  // The source rows are grouped by hour, tool name and status. The status
+  // distribution must merge those groups before dropping the other dimensions.
+  const toolStatuses = ["completed", "failed", "cancelled", "unknown"] as const;
+  const toolDistributionRows = toolStatuses.flatMap((status) => {
+    const matches = toolRows.filter((row) => row.status === status);
+    return matches.length > 0
+      ? [{ status, count: matches.reduce((total, row) => total + row.call_count, 0) }]
+      : [];
+  });
   data.agent.toolStatusDistribution = panel(
     tool,
     ["tool"],

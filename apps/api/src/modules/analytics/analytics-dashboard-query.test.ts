@@ -434,6 +434,52 @@ test("Message cards, trends, distribution and compaction use one hourly Fact/Rol
   }
 });
 
+test("tool status distribution merges tools and hours without double-counting certified rollups", async () => {
+  const db = await database();
+  try {
+    db.prepare(
+      "UPDATE analytics_domain_state SET status='healthy', collection_started_at=0, reconciled_through=?, rollup_ready_through=0 WHERE domain='tool'",
+    ).run(2 * HOUR_MS);
+    const insert = db.prepare(
+      "INSERT INTO analytics_tool_fact VALUES (?, ?, 'known', ?, ?, NULL, NULL, NULL, ?, ?)",
+    );
+    const add = (id: string, name: string, status: string, at: number) =>
+      insert.run(id, name, status, at, at, at);
+
+    add("shell-0", "shell", "completed", 100);
+    add("search-0", "search", "completed", 200);
+    add("failed-0", "shell", "failed", 300);
+    add("queued-0", "shell", "queued", 400);
+    markDirtyHour(db, "tool", 0, 500);
+    rebuildDirtyRollups(db, HOUR_MS + 1);
+
+    // Certified hour zero must come from the rollup, not its remaining Facts.
+    add("late-fact-0", "search", "completed", 500);
+    add("shell-1", "shell", "completed", HOUR_MS + 100);
+    add("search-1", "search", "completed", HOUR_MS + 200);
+    add("cancelled-1", "search", "cancelled", HOUR_MS + 300);
+    add("unknown-1", "shell", "unknown", HOUR_MS + 400);
+    add("running-1", "shell", "running", HOUR_MS + 500);
+
+    const response = queryDashboard(
+      db,
+      { rangeKind: "custom", timezone: "UTC", from: 0, to: 2 * HOUR_MS },
+      2 * HOUR_MS,
+    );
+    assert.equal(response.kind, "success");
+    assert.ok(Value.Check(DashboardQuerySuccessResponseSchema, response));
+    assert.equal(response.data.agent.metrics.toolCallCount.value, 9);
+    assert.deepEqual(response.data.agent.toolStatusDistribution.data, [
+      { status: "completed", count: 4 },
+      { status: "failed", count: 1 },
+      { status: "cancelled", count: 1 },
+      { status: "unknown", count: 1 },
+    ]);
+  } finally {
+    closeAnalyticsDb(db);
+  }
+});
+
 test("hour source planner never crosses dirty or missing-rollup holes", () => {
   const plan = planUtcHourSources({
     domain: "tool",
