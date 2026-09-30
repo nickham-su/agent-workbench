@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { fork, type ChildProcess, type ForkOptions } from "node:child_process";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import {
   DashboardQueryErrorResponseSchema,
@@ -27,6 +28,7 @@ export type AnalyticsSupervisorOptions = {
   signalTimeoutMs?: number;
   shutdownTimeoutMs?: number;
   restartLimit?: number;
+  restartWindowMs?: number;
   restartDelayMs?: number;
   collectorEnabled?: boolean;
   collectorIntervalMs?: number;
@@ -84,13 +86,14 @@ export class AnalyticsSupervisor {
   private readonly signalTimeoutMs: number;
   private readonly shutdownTimeoutMs: number;
   private readonly restartLimit: number;
+  private readonly restartWindowMs: number;
   private readonly restartDelayMs: number;
   private activeChild: AnalyticsChildProcess | null = null;
   private retiringChild: AnalyticsChildProcess | null = null;
   private ready = false;
   private serving = false;
   private closing = false;
-  private restartCount = 0;
+  private readonly restartAttempts: number[] = [];
   private restartTimer: NodeJS.Timeout | null = null;
   private startupTimer: NodeJS.Timeout | null = null;
   private retirementTimer: NodeJS.Timeout | null = null;
@@ -109,6 +112,7 @@ export class AnalyticsSupervisor {
     this.signalTimeoutMs = options.signalTimeoutMs ?? Math.min(this.queryTimeoutMs, 1_000);
     this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? 2_000;
     this.restartLimit = options.restartLimit ?? 3;
+    this.restartWindowMs = options.restartWindowMs ?? 60_000;
     this.restartDelayMs = options.restartDelayMs ?? 250;
   }
 
@@ -137,20 +141,26 @@ export class AnalyticsSupervisor {
     try {
       child = this.workerFactory();
     } catch {
-      // No child was created, so there is no exit to confirm. Do not retry
-      // automatically: automatic replacement is strictly exit-driven.
+      // No child was created, so there is no exit to confirm. An automatic
+      // replacement can retry; a failed initial start still needs its caller.
       this.finishStart(false);
       return promise;
     }
 
     this.activeChild = child;
     child.on("message", (message: unknown) => this.onChildMessage(child, message));
-    child.on("error", () => this.beginRetirement(child));
+    child.on("error", () => {
+      console.warn("[Analytics] worker process error; retiring worker");
+      this.beginRetirement(child);
+    });
     child.once("exit", () => this.onChildExit(child));
 
     const requestId = randomUUID();
     this.startRequestId = requestId;
-    this.startupTimer = setTimeout(() => this.beginRetirement(child), this.startupTimeoutMs);
+    this.startupTimer = setTimeout(() => {
+      console.warn("[Analytics] worker startup timed out; retiring worker");
+      this.beginRetirement(child);
+    }, this.startupTimeoutMs);
     this.send(child, { type: "initialize", requestId }, () => this.beginRetirement(child));
     return promise;
   }
@@ -165,7 +175,8 @@ export class AnalyticsSupervisor {
         if (!pending) return;
         this.pending.delete(requestId);
         if (pending.kind === "dashboard") pending.resolve(UNAVAILABLE);
-      else pending.resolve({ accepted: false, receipt: null });
+        else pending.resolve({ accepted: false, receipt: null });
+        console.warn("[Analytics] dashboard query timed out; retiring worker");
         this.beginRetirement(child);
       }, this.queryTimeoutMs);
       this.pending.set(requestId, { kind: "dashboard", resolve, timer });
@@ -184,6 +195,7 @@ export class AnalyticsSupervisor {
         if (!pending) return;
         this.pending.delete(requestId);
         if (pending.kind === "signal") pending.resolve({ accepted: false, receipt: null });
+        console.warn("[Analytics] signal timed out; retiring worker");
         this.beginRetirement(child);
       }, this.signalTimeoutMs);
       this.pending.set(requestId, { kind: "signal", resolve, timer });
@@ -404,12 +416,30 @@ export class AnalyticsSupervisor {
   }
 
   private scheduleRestart() {
-    if (this.closing || this.retiringChild || this.activeChild || this.restartTimer || this.restartCount >= this.restartLimit) return;
-    this.restartCount += 1;
+    if (this.closing || this.retiringChild || this.activeChild || this.restartTimer || this.restartLimit <= 0) return;
+    const now = performance.now();
+    // Use monotonic time so wall-clock corrections cannot extend the cooldown.
+    // Once the budget is full, keep a cooldown probe scheduled rather than
+    // leaving Analytics unavailable until the API is restarted.
+    while (this.restartAttempts.length && now - this.restartAttempts[0]! >= this.restartWindowMs)
+      this.restartAttempts.shift();
+    const cooldownMs = this.restartAttempts.length >= this.restartLimit
+      ? this.restartAttempts[0]! + this.restartWindowMs - now
+      : 0;
     this.restartTimer = setTimeout(() => {
       this.restartTimer = null;
-      void this.start();
-    }, this.restartDelayMs);
+      if (this.closing || this.retiringChild || this.activeChild) return;
+      const startedAt = performance.now();
+      while (this.restartAttempts.length && startedAt - this.restartAttempts[0]! >= this.restartWindowMs)
+        this.restartAttempts.shift();
+      if (this.restartAttempts.length >= this.restartLimit) return this.scheduleRestart();
+      this.restartAttempts.push(startedAt);
+      void this.start().then((started) => {
+        // Factory failures have no exit event to drive the next probe.
+        // Never retry while an old child still exists or after close().
+        if (!started && !this.activeChild && !this.retiringChild) this.scheduleRestart();
+      });
+    }, Math.max(this.restartDelayMs, cooldownMs));
   }
 
   private notifyCloseWaiters() {

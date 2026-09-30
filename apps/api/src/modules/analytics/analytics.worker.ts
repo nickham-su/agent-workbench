@@ -52,6 +52,7 @@ let collectorTimer: NodeJS.Timeout | null = null;
 let staleTimer: NodeJS.Timeout | null = null;
 let collectorStarted = false;
 let lastMaintenanceAt = 0;
+let lastQueryFailureLogAt = 0;
 
 function boundedPositiveInteger(
   raw: string | undefined,
@@ -211,14 +212,22 @@ async function handleMessage(message: AnalyticsParentMessage) {
       if (
         response.kind === "success" &&
         !Value.Check(DashboardQuerySuccessResponseSchema, response)
-      )
+      ) {
+        console.warn("[Analytics] dashboard response failed validation; retiring worker");
         return retire();
+      }
       send({
         type: "dashboard_result",
         requestId: message.requestId,
         response,
       });
     } catch {
+      // The error text may contain SQL parameters or other private data.
+      // Emit a fixed diagnostic, at most once a minute for repeated requests.
+      if (Date.now() - lastQueryFailureLogAt >= 60_000) {
+        lastQueryFailureLogAt = Date.now();
+        console.warn("[Analytics] dashboard query failed in worker");
+      }
       send({
         type: "dashboard_result",
         requestId: message.requestId,

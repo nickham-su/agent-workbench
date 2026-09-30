@@ -51,6 +51,12 @@ class FakeAnalyticsChild extends EventEmitter {
 const request = { rangeKind: "preset_7d", timezone: "UTC" } as const;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+async function waitFor(predicate: () => boolean) {
+  const deadline = Date.now() + 1_000;
+  while (!predicate() && Date.now() < deadline) await sleep(5);
+  assert.equal(predicate(), true, "timed out waiting for Analytics replacement");
+}
+
 async function starts(child: FakeAnalyticsChild, extra: Record<string, unknown> = {}) {
   const supervisor = new AnalyticsSupervisor({ dataDir: "/not-used", workerFactory: () => child as any, startupTimeoutMs: 100, queryTimeoutMs: 100, shutdownTimeoutMs: 10, restartLimit: 0, ...extra });
   assert.equal(await supervisor.start(), true);
@@ -294,4 +300,186 @@ test("shutdown has no restart and returns boundedly when exit cannot be confirme
   assert.deepEqual(child.killSignals, ["SIGTERM", "SIGKILL"]);
   await sleep(20);
   assert.equal(creations, 1);
+});
+
+test("more than four failures recover after the rolling restart window, without a restart storm", async (t) => {
+  const children: FakeAnalyticsChild[] = [];
+  const supervisor = new AnalyticsSupervisor({
+    dataDir: "/not-used",
+    workerFactory: () => {
+      const child = new FakeAnalyticsChild();
+      children.push(child);
+      return child as any;
+    },
+    startupTimeoutMs: 100,
+    restartLimit: 3,
+    restartWindowMs: 250,
+    restartDelayMs: 1,
+  });
+  t.after(() => supervisor.close());
+  assert.equal(await supervisor.start(), true);
+
+  for (let failure = 0; failure < 5; failure += 1) {
+    const previous = children.length;
+    children[previous - 1]!.exit();
+    if (failure === 3) {
+      assert.deepEqual(await supervisor.query(request), { kind: "error", error: { code: "ANALYTICS_UNAVAILABLE" } });
+      await sleep(30);
+      assert.equal(children.length, previous, "the fourth replacement must be rate-limited");
+    }
+    await waitFor(() => children.length === previous + 1 && supervisor.isReady);
+  }
+  assert.equal(children.length, 6);
+  assert.deepEqual(await supervisor.query(request), { kind: "error", error: { code: "ANALYTICS_RANGE_NOT_READY" } });
+});
+
+test("closing during restart cooldown cancels the delayed probe", async () => {
+  const children: FakeAnalyticsChild[] = [];
+  const supervisor = new AnalyticsSupervisor({
+    dataDir: "/not-used",
+    workerFactory: () => {
+      const child = new FakeAnalyticsChild();
+      children.push(child);
+      return child as any;
+    },
+    restartLimit: 1,
+    restartWindowMs: 100,
+    restartDelayMs: 1,
+  });
+  assert.equal(await supervisor.start(), true);
+  children[0]!.exit();
+  await waitFor(() => children.length === 2 && supervisor.isReady);
+  children[1]!.exit();
+  assert.notEqual(supervisor["restartTimer"], null);
+  await supervisor.close();
+  await sleep(140);
+  assert.equal(children.length, 2);
+});
+
+test("cooldown never replaces a child until its exit is confirmed", async (t) => {
+  const children: FakeAnalyticsChild[] = [];
+  const supervisor = new AnalyticsSupervisor({
+    dataDir: "/not-used",
+    workerFactory: () => {
+      const child = new FakeAnalyticsChild();
+      children.push(child);
+      return child as any;
+    },
+    shutdownTimeoutMs: 5,
+    restartLimit: 1,
+    restartWindowMs: 80,
+    restartDelayMs: 1,
+  });
+  t.after(() => supervisor.close());
+  assert.equal(await supervisor.start(), true);
+  children[0]!.exit();
+  await waitFor(() => children.length === 2 && supervisor.isReady);
+  children[1]!.respondToShutdown = false;
+  children[1]!.killEmitsExit = false;
+  children[1]!.emit("error", new Error("child failed"));
+  await sleep(110);
+  assert.equal(children.length, 2);
+  assert.equal(supervisor.isReady, false);
+  children[1]!.exit();
+  await waitFor(() => children.length === 3 && supervisor.isReady);
+});
+
+test("automatic replacement retries a transient factory failure without an exit event", async (t) => {
+  const first = new FakeAnalyticsChild();
+  const replacement = new FakeAnalyticsChild();
+  let attempts = 0;
+  const supervisor = new AnalyticsSupervisor({
+    dataDir: "/not-used",
+    workerFactory: () => {
+      attempts += 1;
+      if (attempts === 2) throw new Error("temporary factory failure");
+      return (attempts === 1 ? first : replacement) as any;
+    },
+    restartLimit: 2,
+    restartDelayMs: 1,
+    restartWindowMs: 200,
+  });
+  t.after(() => supervisor.close());
+  assert.equal(await supervisor.start(), true);
+  first.exit();
+  await waitFor(() => attempts === 3 && supervisor.isReady);
+  assert.deepEqual(await supervisor.query(request), { kind: "error", error: { code: "ANALYTICS_RANGE_NOT_READY" } });
+});
+
+test("persistent automatic factory failures remain rate-limited across cooldowns", async (t) => {
+  const first = new FakeAnalyticsChild();
+  const attemptTimes: number[] = [];
+  const supervisor = new AnalyticsSupervisor({
+    dataDir: "/not-used",
+    workerFactory: () => {
+      attemptTimes.push(Date.now());
+      if (attemptTimes.length > 1) throw new Error("factory unavailable");
+      return first as any;
+    },
+    restartLimit: 1,
+    restartDelayMs: 1,
+    restartWindowMs: 200,
+  });
+  t.after(() => supervisor.close());
+  assert.equal(await supervisor.start(), true);
+  first.exit();
+  await waitFor(() => attemptTimes.length >= 2);
+  await sleep(30);
+  assert.equal(attemptTimes.length, 2, "failed probe must not immediately retry past its budget");
+  await waitFor(() => attemptTimes.length >= 3);
+  assert.equal(attemptTimes[2]! - attemptTimes[1]! >= 180, true);
+  assert.deepEqual(await supervisor.query(request), { kind: "error", error: { code: "ANALYTICS_UNAVAILABLE" } });
+});
+
+test("close cancels the probe scheduled after an automatic factory failure", async () => {
+  const first = new FakeAnalyticsChild();
+  let attempts = 0;
+  const supervisor = new AnalyticsSupervisor({
+    dataDir: "/not-used",
+    workerFactory: () => {
+      attempts += 1;
+      if (attempts > 1) throw new Error("factory unavailable");
+      return first as any;
+    },
+    restartLimit: 1,
+    restartDelayMs: 1,
+    restartWindowMs: 120,
+  });
+  assert.equal(await supervisor.start(), true);
+  first.exit();
+  await waitFor(() => attempts === 2 && supervisor["restartTimer"] !== null);
+  await supervisor.close();
+  await sleep(160);
+  assert.equal(attempts, 2);
+});
+
+test("wall-clock rollback does not extend an already scheduled restart cooldown", async () => {
+  const children: FakeAnalyticsChild[] = [];
+  const supervisor = new AnalyticsSupervisor({
+    dataDir: "/not-used",
+    workerFactory: () => {
+      const child = new FakeAnalyticsChild();
+      children.push(child);
+      return child as any;
+    },
+    restartLimit: 1,
+    restartWindowMs: 90,
+    restartDelayMs: 1,
+  });
+  const originalDateNow = Date.now;
+  try {
+    assert.equal(await supervisor.start(), true);
+    children[0]!.exit();
+    await waitFor(() => children.length === 2 && supervisor.isReady);
+    children[1]!.exit();
+    assert.notEqual(supervisor["restartTimer"], null);
+    Date.now = () => originalDateNow() - 3_600_000;
+    await sleep(160);
+    assert.equal(children.length, 3, "wall-clock rollback must not delay the probe for an hour");
+    assert.equal(supervisor.isReady, true);
+    assert.deepEqual(await supervisor.query(request), { kind: "error", error: { code: "ANALYTICS_RANGE_NOT_READY" } });
+  } finally {
+    Date.now = originalDateNow;
+    await supervisor.close();
+  }
 });
