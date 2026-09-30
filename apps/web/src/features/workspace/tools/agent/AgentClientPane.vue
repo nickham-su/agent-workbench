@@ -746,7 +746,6 @@ let previousRunStatus = runState.value.status;
 const isSessionMessageMutationPending = computed(() => messageMutationState.isPending(props.sessionId));
 const conversation = computed(() =>
   buildConversationParts({
-    revision: revision.value,
     messages: messages.value,
     toolExecutions: toolExecutions.value,
   }).map((row) => ({
@@ -1904,7 +1903,9 @@ watch(
     }
     if (active && ready) {
       const generation = tabReturnGeneration;
-      void refreshTimeline(true).catch(() => undefined).finally(() => {
+      // 首次加载仍由 refreshTimeline 选择 snapshot；已有时间线只拉取增量。
+      // 服务端若返回 timelineReset，applyTimelineResponse 会自动替换快照。
+      void refreshTimeline(false).catch(() => undefined).finally(() => {
         // 快照可能晚于 rAF 恢复，也可能由此前未完成的请求延后执行。
         if (generation === tabReturnGeneration) preserveTabScrollOnReturn = false;
       });

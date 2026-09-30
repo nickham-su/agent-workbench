@@ -2,14 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { AxiosResponse, InternalAxiosRequestConfig } from "axios";
 import type { AgentMessage, AgentMessageSessionRunState } from "@agent-workbench/shared";
+import DOMPurify from "dompurify";
 import { computed, defineComponent, h, KeepAlive, ref, type ComputedRef } from "vue";
 import zhCN from "@/shared/i18n/locales/zh-CN";
 import enUS from "@/shared/i18n/locales/en-US";
 import { apiClient } from "@/shared/api/api";
 
-const [{ mount }, component, { createI18n }, { nextTick, reactive }, { agentSessionStatusStoreKey }, { message, Modal }, { replaceAgentTimelineSnapshot }] = await Promise.all([
+const [{ mount }, component, markdownComponent, { createI18n }, { nextTick, reactive }, { agentSessionStatusStoreKey }, { message, Modal }, { replaceAgentTimelineSnapshot }] = await Promise.all([
   import("@vue/test-utils"),
   import("./AgentClientPane.vue"),
+  import("./AssistantMarkdownMessage.vue"),
   import("vue-i18n"),
   import("vue"),
   import("./useAgentSessionStatusStore"),
@@ -534,13 +536,49 @@ test("真实 AgentClientPane：恢复窗口内的用户滚动意图会取消旧�
   }
 });
 
-test("真实 AgentClientPane：会话 tab 切回时恢复像素位置，迟到的 snapshot 不抢走阅读位置", async () => {
+test("多个 Markdown 消息挂载及卸载后，共享 DOMPurify 只注册一次 hook 且保持安全清洗", async () => {
+  const originalAddHook = DOMPurify.addHook;
+  let installations = 0;
+  DOMPurify.addHook = (entryPoint, hook) => {
+    if (entryPoint === "afterSanitizeAttributes") installations += 1;
+    return Reflect.apply(originalAddHook, DOMPurify, [entryPoint, hook]);
+  };
+  const i18n = createI18n({ legacy: false, locale: "zh-CN", messages: { "zh-CN": zhCN } });
+  const wrappers: Array<ReturnType<typeof mount>> = [];
+  try {
+    for (let index = 0; index < 3; index++) {
+      const wrapper = mount(markdownComponent.default, {
+        props: { messageId: `markdown-${index}`, text: "[安全链接](https://example.com)" },
+        global: { plugins: [i18n] },
+      });
+      wrappers.push(wrapper);
+      const link = wrapper.get("a");
+      assert.equal(link.attributes("target"), "_blank");
+      assert.equal(link.attributes("rel"), "noopener noreferrer");
+      wrapper.unmount();
+      wrappers.pop();
+    }
+    assert.equal(installations, 1);
+    const { sanitizeAgentMarkdown } = await import("./assistantMarkdownSanitizer");
+    const cleaned = sanitizeAgentMarkdown('<a href="javascript:alert(1)" onclick="bad()">bad</a><img src="x">');
+    assert.doesNotMatch(cleaned, /javascript:|onclick|<img/i);
+    assert.equal(installations, 1);
+  } finally {
+    for (const wrapper of wrappers) wrapper.unmount();
+    DOMPurify.addHook = originalAddHook;
+  }
+});
+
+test("真实 AgentClientPane：会话 tab 切回时恢复像素位置，迟到的 delta 不抢走阅读位置", async () => {
   const http = mockContextRequests();
   const { wrapper } = mountPane({ active: true, sessionReady: true });
   try {
     const initial = await waitForTimelineRequest(http);
+    assert.equal(http.requests[initial].config.params?.mode, "snapshot");
     http.respond(initial, timelineSnapshot([agentMessage({ id: "initial" })]));
-    await nextTick();
+    await waitForScrollRestore();
+    const paneVm = wrapper.vm as unknown as { conversation: Array<{ message: { id: string } }>; timelineState: { revision: number } };
+    const initialRows = paneVm.conversation;
     const scrollEl = wrapper.get("main").element as HTMLElement;
     setScrollMetrics(scrollEl, 1_000, 200);
     scrollEl.scrollTop = 750; // 在 120px 自动跟随范围内，但并未真正到底。
@@ -555,13 +593,76 @@ test("真实 AgentClientPane：会话 tab 切回时恢复像素位置，迟到�
     setScrollMetrics(scrollEl, 1_000, 200);
     await wrapper.setProps({ active: true });
     const refreshed = await waitForTimelineRequest(http, initial);
+    assert.equal(http.requests[refreshed].config.params?.mode, "delta");
+    assert.equal(http.requests[refreshed].config.params?.sinceRevision, 1);
     await waitForScrollRestore();
     assert.equal(scrollEl.scrollTop, 750);
 
     setScrollMetrics(scrollEl, 1_400, 200);
-    http.respond(refreshed, timelineSnapshot([agentMessage({ id: "updated" })]));
+    const delta = timelineSnapshot([agentMessage({ id: "updated", previousMessageId: "initial" })]);
+    http.respond(refreshed, {
+      ...delta,
+      session: { ...delta.session, revision: 2 },
+    });
     await waitForScrollRestore();
     assert.equal(scrollEl.scrollTop, 750);
+    assert.notEqual(paneVm.conversation, initialRows);
+    assert.deepEqual(paneVm.conversation.map((row) => row.message.id), ["initial", "updated"]);
+
+    const conversationBefore = paneVm.conversation;
+    await wrapper.setProps({ active: false });
+    await wrapper.setProps({ active: true });
+    const unchanged = await waitForTimelineRequest(http, refreshed);
+    assert.equal(http.requests[unchanged].config.params?.mode, "delta");
+    assert.equal(http.requests[unchanged].config.params?.sinceRevision, 2);
+    http.respond(unchanged, { ...delta, session: { ...delta.session, revision: 3 }, messages: [] });
+    await waitForScrollRestore();
+    assert.equal(paneVm.timelineState.revision, 3);
+    assert.equal(paneVm.conversation, conversationBefore, "revision 变化但行数据不变时不重建列表");
+    assert.equal(scrollEl.scrollTop, 750);
+  } finally {
+    wrapper.unmount();
+    http.restore();
+  }
+});
+
+test("真实 AgentClientPane：仅工具执行变化时重建列表行并关联最新 execution", async () => {
+  const http = mockContextRequests();
+  const { wrapper } = mountPane({ active: true, sessionReady: true });
+  try {
+    const initial = await waitForTimelineRequest(http);
+    const assistant = agentMessage({
+      id: "assistant-with-tool",
+      parts: [{
+        id: "call", messageId: "assistant-with-tool", position: 0, type: "tool_call",
+        toolName: "read", input: {}, providerToolCallId: null,
+        updatedRevision: 1, createdAt: 1, updatedAt: 1,
+      }],
+    });
+    http.respond(initial, timelineSnapshot([assistant]));
+    await waitForScrollRestore();
+    const paneVm = wrapper.vm as unknown as {
+      conversation: Array<{ execution: { id: string } | null }>;
+    };
+    const before = paneVm.conversation;
+    assert.equal(before[0]?.execution, null);
+
+    await wrapper.setProps({ active: false });
+    await wrapper.setProps({ active: true });
+    const refreshed = await waitForTimelineRequest(http, initial);
+    assert.equal(http.requests[refreshed].config.params?.mode, "delta");
+    const response = timelineSnapshot([]);
+    http.respond(refreshed, {
+      ...response,
+      session: { ...response.session, revision: 2, headMessageId: assistant.id },
+      toolExecutions: [{
+        id: "execution", callPartId: "call", status: "completed", resultPreview: "ok",
+        resultTruncated: false, error: null, updatedRevision: 2, startedAt: 1, completedAt: 2,
+      }],
+    });
+    await waitForScrollRestore();
+    assert.notEqual(paneVm.conversation, before);
+    assert.equal(paneVm.conversation[0]?.execution?.id, "execution");
   } finally {
     wrapper.unmount();
     http.restore();

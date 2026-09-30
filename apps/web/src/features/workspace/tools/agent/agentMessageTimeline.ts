@@ -65,6 +65,12 @@ export function applyAgentTimelineDelta(
   delta: AgentTimelineDeltaResponse,
 ): AgentMessageTimelineState {
   if (delta.timelineReset) return replaceAgentTimelineSnapshot(state, delta);
+  // 空增量无需复制、排序整条消息链；即使 session revision 前进，也复用列表。
+  if (!delta.messages.length && !delta.toolExecutions.length) {
+    return delta.session.revision > state.revision
+      ? { ...state, revision: delta.session.revision }
+      : state;
+  }
 
   return {
     revision: Math.max(state.revision, delta.session.revision),
@@ -110,7 +116,7 @@ export function canRevertAgentTimelineMessage(message: AgentMessage) {
 }
 
 /** 以 Message 的 Part.position 为唯一显示顺序；ToolCall 通过 callPartId 显式关联 execution。 */
-export function buildConversationParts(state: AgentMessageTimelineState): ConversationPart[] {
+export function buildConversationParts(state: Pick<AgentMessageTimelineState, "messages" | "toolExecutions">): ConversationPart[] {
   const executionByCallPartId = new Map(state.toolExecutions.map((execution) => [execution.callPartId, execution]));
   return state.messages.flatMap<ConversationPart>((message) => {
     const parts = [...message.parts].sort((left, right) => left.position - right.position);

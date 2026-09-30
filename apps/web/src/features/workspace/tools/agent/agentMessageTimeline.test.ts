@@ -66,6 +66,36 @@ function delta(params: Partial<AgentTimelineDeltaResponse>): AgentTimelineDeltaR
   };
 }
 
+test("未变化的 delta 复用已有消息和执行列表，避免切换 tab 时全量重建", () => {
+  const state = {
+    revision: 2,
+    messages: [message({ id: "m", updatedRevision: 2 })],
+    toolExecutions: [execution({ id: "e", callPartId: "p", updatedRevision: 2 })],
+  };
+  assert.equal(applyAgentTimelineDelta(state, delta({ session: { ...delta({}).session, revision: 2 } })), state);
+  const advanced = applyAgentTimelineDelta(state, delta({ session: { ...delta({}).session, revision: 3 } }));
+  assert.equal(advanced.revision, 3);
+  assert.notEqual(advanced, state);
+  assert.equal(advanced.messages, state.messages);
+  assert.equal(advanced.toolExecutions, state.toolExecutions);
+  assert.equal(applyAgentTimelineDelta(state, delta({ session: { ...delta({}).session, revision: 1 } })), state);
+
+  const updated = applyAgentTimelineDelta(state, delta({
+    session: { ...delta({}).session, revision: 3 },
+    messages: [message({ id: "new", updatedRevision: 3 })],
+  }));
+  assert.deepEqual(updated.messages.map((item) => item.id), ["m", "new"]);
+  assert.equal(updated.revision, 3);
+
+  const reset = applyAgentTimelineDelta(state, delta({
+    timelineReset: true,
+    session: { ...delta({}).session, revision: 3 },
+  }));
+  assert.equal(reset.revision, 3);
+  assert.deepEqual(reset.messages, []);
+  assert.deepEqual(reset.toolExecutions, []);
+});
+
 test("普通 timeline delta 按 updatedRevision upsert Message 与 ToolExecution", () => {
   const initial = { revision: 1, messages: [message({ id: "m", status: "streaming", updatedRevision: 1 })], toolExecutions: [execution({ id: "e", callPartId: "p", status: "queued", updatedRevision: 1 })] };
   const next = applyAgentTimelineDelta(initial, delta({
@@ -193,7 +223,7 @@ test("Conversation 保持 Part.position、标记唯一操作锚点，并关联 T
       { id: "reason", messageId: "assistant", position: 4, type: "reasoning", text: "think", updatedRevision: 1, createdAt: 1, updatedAt: 1 },
     ],
   });
-  const rows = buildConversationParts({ revision: 1, messages: [assistant], toolExecutions: [execution({ id: "execution", callPartId: "call", resultPreview: "ok" })] });
+  const rows = buildConversationParts({ messages: [assistant], toolExecutions: [execution({ id: "execution", callPartId: "call", resultPreview: "ok" })] });
   assert.deepEqual(rows.map((row) => row.part?.id), ["call", "text", "reason"]);
   assert.deepEqual(rows.map((row) => row.isFirstRowForMessage), [true, false, false]);
   assert.equal(rows[0]?.execution?.id, "execution");
@@ -214,7 +244,7 @@ test("Conversation 合并连续 ReasoningPart，并在其他 Part 处断开", ()
     ],
   });
 
-  const rows = buildConversationParts({ revision: 1, messages: [assistant], toolExecutions: [] });
+  const rows = buildConversationParts({ messages: [assistant], toolExecutions: [] });
 
   assert.deepEqual(rows.map((row) => row.part?.id), ["reason-1", "call", "reason-3", "text", "reason-5"]);
   assert.deepEqual(rows.map((row) => row.reasoningText), [
@@ -238,7 +268,7 @@ test("Conversation 将同一消息的多个 ImagePart 汇总为一个展示行",
     ],
   });
 
-  const rows = buildConversationParts({ revision: 1, messages: [user], toolExecutions: [] });
+  const rows = buildConversationParts({ messages: [user], toolExecutions: [] });
 
   assert.deepEqual(rows.map((row) => row.part?.id), ["text", "image-a"]);
   assert.deepEqual(rows.map((row) => row.isFirstRowForMessage), [true, false]);
@@ -253,7 +283,7 @@ test("Conversation 为无 Part 和非 Text Assistant 提供唯一操作锚点", 
     message({ id: "reasoning", parts: [{ id: "reasoning-part", messageId: "reasoning", position: 3, type: "reasoning", text: "think", updatedRevision: 1, createdAt: 1, updatedAt: 1 }] }),
     message({ id: "image", parts: [{ id: "image-part", messageId: "image", position: 3, type: "image", attachmentId: "attachment", mediaType: "image/png", filename: "image.png", updatedRevision: 1, createdAt: 1, updatedAt: 1 }] }),
   ];
-  const rows = buildConversationParts({ revision: 1, messages: assistants, toolExecutions: [] });
+  const rows = buildConversationParts({ messages: assistants, toolExecutions: [] });
   assert.deepEqual(rows.map((row) => row.isFirstRowForMessage), [true, true, true, true]);
   assert.equal(rows[0]?.part, null);
   assert.equal(rows.filter((row) => row.isFirstRowForMessage).length, assistants.length);
