@@ -1,4 +1,4 @@
-import { AgentSubtaskErrorCode } from "@agent-workbench/shared/internal-contracts/agent-api";
+import { AgentSubtaskErrorCode, normalizeAgentSubtaskSource } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type {
   AgentApiSubtaskPreforkPlanRequest,
   AgentApiSubtaskPreforkPlanResponse,
@@ -97,6 +97,12 @@ export class SubtaskApplication implements SubtaskApplicationPort {
   async startSubtask(
     request: AgentApiSubtaskStartRequest,
   ): Promise<AgentApiSubtaskStartResponse> {
+    const source = normalizeAgentSubtaskSource(request);
+    if (!source.ok) throw new HttpError(400, source.message, source.code);
+    // A direct application call has no route hook to normalize the transport ID.
+    if (source.sourceSessionId !== undefined && request.session.mode === "fork") {
+      request = { ...request, session: { ...request.session, sourceSessionId: source.sourceSessionId } };
+    }
     workspaceDeletingFence.assertWritable(request.workspaceId);
     const { parentRun, parentUiLocale, anchor } =
       this.dependencies.parentAnchorReader.resolve({
@@ -105,6 +111,7 @@ export class SubtaskApplication implements SubtaskApplicationPort {
         parentRunId: request.parentRunId,
         parentToolExecutionId: request.parentToolExecutionId,
       });
+    const boundSourceSessionId = this.bindSource(source.sourceSessionId, anchor.toolInputJson);
 
     const description = request.description.trim().slice(0, 50);
     if (!description) {
@@ -197,12 +204,12 @@ export class SubtaskApplication implements SubtaskApplicationPort {
       },
     );
     if (existing) {
-      this.ensureExistingSessionMatches(request, existing);
+      const reusedSourceSessionId = this.ensureExistingSessionMatches(request, existing, boundSourceSessionId);
       const workspace = this.dependencies.workspaceReader.get(
         request.workspaceId,
       );
       if (!workspace) throw new HttpError(404, "workspace not found");
-      return this.toReusedResponse(existing, workspace.path);
+      return this.toReusedResponse(existing, workspace.path, reusedSourceSessionId);
     }
 
     if (parentRun.subtaskDepth == null) {
@@ -222,7 +229,7 @@ export class SubtaskApplication implements SubtaskApplicationPort {
     }
 
     const forkBoundaryMessageId =
-      request.session.mode === "fork"
+      request.session.mode === "fork" && boundSourceSessionId === undefined
         ? this.dependencies.sessionMaterializer.resolveForkBoundary({
             workspaceId: request.workspaceId,
             sessionId: request.parentSessionId,
@@ -230,7 +237,7 @@ export class SubtaskApplication implements SubtaskApplicationPort {
           })
         : null;
     const shouldUsePreforkSummary =
-      request.session.mode === "fork" && preforkSummaryText.length > 0;
+      request.session.mode === "fork" && boundSourceSessionId === undefined && preforkSummaryText.length > 0;
     if (
       request.session.mode !== "new" &&
       request.session.mode !== "fork" &&
@@ -256,6 +263,7 @@ export class SubtaskApplication implements SubtaskApplicationPort {
 
     let workspacePath = "";
     try {
+      const createdSourceSessionId = this.sourceFromChildSession(session, request.workspaceId, boundSourceSessionId);
       const state = this.dependencies.parentRunStateReader.get(
         session.workspaceId,
         session.id,
@@ -327,6 +335,7 @@ export class SubtaskApplication implements SubtaskApplicationPort {
         workspacePath,
         agentName: profile.agentName,
         reused: false,
+        ...(createdSourceSessionId !== undefined ? { sourceSessionId: createdSourceSessionId } : {}),
       };
     } catch (error) {
       this.compensateNewSession(session, createdSessionId, request.parentSessionId);
@@ -335,7 +344,21 @@ export class SubtaskApplication implements SubtaskApplicationPort {
         parentRunId: parentRun.runId,
         parentToolExecutionId: anchor.toolExecutionId,
       });
-      if (winner) return this.toReusedResponse(winner, workspacePath);
+      if (winner) {
+        // A loser must re-check the durable call and winner, not just trust the
+        // first query or its independently captured source snapshot.
+        const latestAnchor = this.dependencies.parentAnchorReader.resolve({
+          workspaceId: request.workspaceId,
+          parentSessionId: request.parentSessionId,
+          parentRunId: request.parentRunId,
+          parentToolExecutionId: request.parentToolExecutionId,
+        });
+        const winnerSource = this.bindSource(source.sourceSessionId, latestAnchor.anchor.toolInputJson);
+        const reusedSource = this.ensureExistingSessionMatches(request, winner, winnerSource);
+        const workspace = this.dependencies.workspaceReader.get(request.workspaceId);
+        if (!workspace) throw new HttpError(404, "workspace not found");
+        return this.toReusedResponse(winner, workspace.path, reusedSource);
+      }
       throw error;
     }
   }
@@ -420,9 +443,50 @@ export class SubtaskApplication implements SubtaskApplicationPort {
     return run;
   }
 
+  /** Bind validated transport semantics to fresh durable input, not a full call fingerprint. */
+  private bindSource(transportSourceSessionId: string | undefined, toolInputJson: string | null): string | undefined {
+    let input: unknown;
+    try {
+      if (typeof toolInputJson !== "string") throw new Error("missing tool input");
+      input = JSON.parse(toolInputJson);
+    } catch {
+      throw new HttpError(400, "invalid subtask anchor input", AgentSubtaskErrorCode.AnchorInvalid);
+    }
+    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+      throw new HttpError(400, "invalid subtask anchor input", AgentSubtaskErrorCode.AnchorInvalid);
+    }
+    const persisted = normalizeAgentSubtaskSource(input);
+    if (!persisted.ok) {
+      throw new HttpError(400, "invalid subtask anchor input", AgentSubtaskErrorCode.AnchorInvalid);
+    }
+    if (persisted.sourceSessionId !== transportSourceSessionId) {
+      throw new HttpError(409, "subtask fork source does not match the original call", AgentSubtaskErrorCode.ForkSourceMismatch);
+    }
+    return persisted.sourceSessionId;
+  }
+
+  private sourceFromChildSession(
+    session: SubtaskSession,
+    workspaceId: string,
+    boundSourceSessionId: string | undefined,
+  ): string | undefined {
+    if (session.workspaceId !== workspaceId) {
+      throw new HttpError(400, "subtask session workspace mismatch", AgentSubtaskErrorCode.WorkspaceMismatch);
+    }
+    if (session.kind !== "subtask") {
+      throw new HttpError(400, "existing session must be subtask", AgentSubtaskErrorCode.KindMismatch);
+    }
+    if (boundSourceSessionId === undefined) return undefined;
+    if (session.forkedFromSessionId !== boundSourceSessionId) {
+      throw new HttpError(409, "subtask fork source does not match the original call", AgentSubtaskErrorCode.ForkSourceMismatch);
+    }
+    return session.forkedFromSessionId;
+  }
+
   private ensureExistingSessionMatches(
     request: AgentApiSubtaskStartRequest,
     existing: SubtaskRunRecord,
+    boundSourceSessionId: string | undefined,
   ) {
     if (
       request.session.mode === "existing" &&
@@ -434,11 +498,15 @@ export class SubtaskApplication implements SubtaskApplicationPort {
         AgentSubtaskErrorCode.ExistingSessionMismatch,
       );
     }
+    const session = this.dependencies.runQuery.findSession(existing.sessionId);
+    if (!session) throw new HttpError(404, "subtask session not found", AgentSubtaskErrorCode.SessionNotFound);
+    return this.sourceFromChildSession(session, request.workspaceId, boundSourceSessionId);
   }
 
   private toReusedResponse(
     existing: SubtaskRunRecord,
     workspacePath: string,
+    sourceSessionId?: string,
   ): AgentApiSubtaskStartResponse {
     return {
       sessionId: existing.sessionId,
@@ -449,6 +517,7 @@ export class SubtaskApplication implements SubtaskApplicationPort {
           existing.agentId,
         ) || existing.agentId,
       reused: true,
+      ...(sourceSessionId !== undefined ? { sourceSessionId } : {}),
     };
   }
 
@@ -465,6 +534,8 @@ export class SubtaskApplication implements SubtaskApplicationPort {
         expectedParentSessionId,
         expectedForkedFromSessionId: session.forkedFromSessionId,
         expectedForkedFromMessageId: session.forkedFromMessageId,
+        expectedHeadMessageId: session.headMessageId,
+        expectedContextRootMessageId: session.contextRootMessageId,
       });
     } catch (error) {
       this.dependencies.logger.warn(

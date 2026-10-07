@@ -44,6 +44,8 @@ export type SessionInteractionStore = {
   createSession(input: SessionCreateInput): void;
   setManualTitle(input: { sessionId: string; workspaceId: string; title: string }): boolean;
   cloneSession(input: SessionCloneInput): Promise<AgentSessionRecord>;
+  forkStableSourceSession(input: { id: string; workspaceId: string; sourceSessionId: string;
+    title: string; createdAt: number }): AgentSessionRecord;
   validateHistoricalSource(input: { workspaceId: string; sourceSessionId: string; targetMessageId: string }): HistoricalForkSource;
   forkHistoricalSource(input: { id: string; workspaceId: string; sourceSessionId: string;
     targetMessageId: string; title: string; createdAt: number }): AgentSessionRecord;

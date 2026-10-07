@@ -25,6 +25,8 @@ export class SqliteSubtaskMaintenancePersistence
     expectedParentSessionId: string;
     expectedForkedFromSessionId: string | null;
     expectedForkedFromMessageId: string | null;
+    expectedHeadMessageId: string | null;
+    expectedContextRootMessageId: string | null;
   }) {
     const transaction = this.db.transaction(() =>
       this.db.prepare(`
@@ -34,9 +36,14 @@ export class SqliteSubtaskMaintenancePersistence
           and kind = 'subtask'
           and forked_from_session_id is @expectedForkedFromSessionId
           and forked_from_message_id is @expectedForkedFromMessageId
-          and (
-            @expectedForkedFromSessionId is null
-            or forked_from_session_id = @expectedParentSessionId
+          and head_message_id is @expectedHeadMessageId
+          and context_root_message_id is @expectedContextRootMessageId
+          and revision = 0
+          and id <> @expectedParentSessionId
+          and exists (
+            select 1 from agent_session parent
+            where parent.id = @expectedParentSessionId
+              and parent.workspace_id = @workspaceId
           )
           and exists (
             select 1 from session_run_state state
@@ -44,6 +51,9 @@ export class SqliteSubtaskMaintenancePersistence
               and state.session_id = @createdSessionId
               and state.status = 'idle'
               and state.active_run_id is null
+              and state.active_assistant_message_id is null
+              and state.non_terminal_message_ids_json = '[]'
+              and state.non_terminal_tool_execution_ids_json = '[]'
           )
           and not exists (
             select 1 from agent_run run

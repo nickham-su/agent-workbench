@@ -31,15 +31,34 @@
         {{ t("agent.client.subtaskDuration") }}: {{ durationText }}
       </span>
     </div>
+    <div
+      v-if="display.sourceSessionId"
+      class="pt-0.5 text-[color:var(--text-secondary)] flex items-center gap-1 min-w-0"
+    >
+      <span class="min-w-0 [overflow-wrap:anywhere]">
+        {{ t("agent.client.subtaskSourceSessionId") }}: {{ display.sourceSessionId }}
+      </span>
+      <a-button
+        size="small"
+        type="text"
+        class="!px-1 !text-[color:var(--text-tertiary)] hover:!text-[color:var(--text-tertiary)] shrink-0"
+        :aria-label="t('agent.client.copySourceSessionId')"
+        @click="copySessionId($event, display.sourceSessionId)"
+      >
+        <template #icon><CopyOutlined class="text-[12px]" /></template>
+      </a-button>
+    </div>
     <div class="pt-0.5 text-[color:var(--text-secondary)] flex items-center gap-1 min-w-0">
-      {{ t("agent.client.subtaskSessionId") }}: {{ display.subtaskSessionId || "-" }}
+      <span class="min-w-0 [overflow-wrap:anywhere]">
+        {{ t("agent.client.subtaskSessionId") }}: {{ display.subtaskSessionId || "-" }}
+      </span>
       <a-button
         v-if="display.subtaskSessionId"
         size="small"
         type="text"
         class="!px-1 !text-[color:var(--text-tertiary)] hover:!text-[color:var(--text-tertiary)] shrink-0"
         :aria-label="t('agent.client.copySessionId')"
-        @click="copySessionId"
+        @click="copySessionId($event, display.subtaskSessionId)"
       >
         <template #icon><CopyOutlined class="text-[12px]" /></template>
       </a-button>
@@ -134,9 +153,9 @@ function formatStartedAt(startedAt: number | null, now: number) {
 function openSubtask() {
   if (display.value.subtaskSessionId) emit("open-subtask", display.value.subtaskSessionId);
 }
-async function copySessionId(event: MouseEvent) {
+async function copySessionId(event: MouseEvent, sessionId: string | null) {
   event.stopPropagation();
-  const content = display.value.subtaskSessionId?.trim();
+  const content = sessionId?.trim();
   if (!content) return;
   try {
     if (typeof navigator.clipboard?.writeText === "function") {

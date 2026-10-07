@@ -2,7 +2,7 @@ import type { AgentForkSessionRequest, AgentSendMessageResponse, AgentSessionRec
 import type { AgentMessageControlResult } from "@agent-workbench/shared";
 import { AgentSubtaskErrorCode } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { HttpError } from "../../../app/errors.js";
-import { AgentMessageDomainError, HistoricalForkSourceError, HistoricalForkSessionConflictError } from "../agent-message.store.js";
+import { AgentMessageDomainError, HistoricalForkSourceError, HistoricalForkSessionConflictError, StableForkSourceError } from "../agent-message.store.js";
 import { normalizeManualSessionTitle } from "./session-title.js";
 import type { AgentRuntimePort } from "../agent.runtime-port.js";
 import type {
@@ -293,6 +293,27 @@ export class SessionInteractionApplication {
         forkedFromMessageId: null
       });
       return { session, createdSessionId: session.id };
+    }
+    if (command.session.mode === "fork" && command.session.sourceSessionId !== undefined) {
+      try {
+        const session = this.dependencies.store.forkStableSourceSession({
+          id: this.dependencies.ids.newSessionId(),
+          workspaceId: command.workspaceId,
+          sourceSessionId: command.session.sourceSessionId,
+          title: `${command.subtaskTitleBase} (fork)`,
+          createdAt: this.dependencies.clock.nowMs()
+        });
+        return { session, createdSessionId: session.id };
+      } catch (error) {
+        if (!(error instanceof StableForkSourceError)) throw error;
+        if (error.code === "SOURCE_UNAVAILABLE") {
+          throw new HttpError(404, "fork source is unavailable", AgentSubtaskErrorCode.ForkSourceUnavailable);
+        }
+        if (error.code === "NO_STABLE_CONTEXT") {
+          throw new HttpError(409, "fork source has no stable context", AgentSubtaskErrorCode.ForkSourceNoStableContext);
+        }
+        throw new HttpError(409, "fork source context is invalid", AgentSubtaskErrorCode.ForkSourceContextInvalid);
+      }
     }
     if (command.shouldUsePreforkSummary || command.forkBoundaryMessageId == null) {
       const session = this.createSession({

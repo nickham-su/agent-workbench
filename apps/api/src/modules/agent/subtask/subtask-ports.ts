@@ -33,6 +33,7 @@ export type SubtaskSession = {
   title: string;
   kind: "primary" | "subtask";
   headMessageId: string | null;
+  contextRootMessageId: string | null;
   forkedFromSessionId: string | null;
   forkedFromMessageId: string | null;
   revision: number;
@@ -50,6 +51,8 @@ export type SubtaskParentAnchor = {
   anchor: {
     toolExecutionId: string;
     assistantMessageId: string;
+    /** Immutable tool-call Part, not a mutable execution/result projection. */
+    toolInputJson: string | null;
   };
 };
 
@@ -145,6 +148,8 @@ export type SubtaskLocalCompensationPersistence = {
     expectedParentSessionId: string;
     expectedForkedFromSessionId: string | null;
     expectedForkedFromMessageId: string | null;
+    expectedHeadMessageId: string | null;
+    expectedContextRootMessageId: string | null;
   }): boolean;
 };
 export type SubtaskOrphanCandidate = {

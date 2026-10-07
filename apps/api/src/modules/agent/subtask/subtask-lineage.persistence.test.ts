@@ -204,6 +204,8 @@ test("P5 real SQLite: maintenance adapter keeps Message-populated and orphan fen
     expectedParentSessionId: compensationParentSessionId,
     expectedForkedFromSessionId: null,
     expectedForkedFromMessageId: null,
+    expectedHeadMessageId: null,
+    expectedContextRootMessageId: null,
   }), true);
 
   const populatedSessionId = createSession({ fixture, workspaceId: workspace.id, kind: "subtask" });
@@ -214,6 +216,8 @@ test("P5 real SQLite: maintenance adapter keeps Message-populated and orphan fen
     expectedParentSessionId: compensationParentSessionId,
     expectedForkedFromSessionId: null,
     expectedForkedFromMessageId: null,
+    expectedHeadMessageId: null,
+    expectedContextRootMessageId: null,
   }), false);
 
   const parentSessionId = createSession({ fixture, workspaceId: workspace.id, kind: "primary" });
@@ -288,6 +292,8 @@ test("M9 real SQLite: compensation deletes a request-owned fork with a shared he
     expectedParentSessionId: "wrong-parent",
     expectedForkedFromSessionId: parentSessionId,
     expectedForkedFromMessageId: sharedMessage.id,
+    expectedHeadMessageId: sharedMessage.id,
+    expectedContextRootMessageId: sharedMessage.id,
   }), false);
   assert.ok(getMessageSession(fixture.db, workspace.id, childSessionId));
   assert.equal(maintenance.deleteCreatedSessionIfStillSafe({
@@ -296,6 +302,8 @@ test("M9 real SQLite: compensation deletes a request-owned fork with a shared he
     expectedParentSessionId: parentSessionId,
     expectedForkedFromSessionId: parentSessionId,
     expectedForkedFromMessageId: sharedMessage.id,
+    expectedHeadMessageId: sharedMessage.id,
+    expectedContextRootMessageId: sharedMessage.id,
   }), true);
   assert.equal(getMessageSession(fixture.db, workspace.id, childSessionId), null);
   assert.equal(getMessageRunState(fixture.db, workspace.id, childSessionId), null);

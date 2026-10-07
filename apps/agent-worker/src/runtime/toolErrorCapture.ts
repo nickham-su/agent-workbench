@@ -1,4 +1,5 @@
 import { captureLosslessSnapshot, type LosslessSnapshot } from "./losslessValueGraph.js";
+import { readSubtaskSourceSessionId } from "./subtaskSource.js";
 import {
   storeToolErrorArtifact,
   type FailureKind,
@@ -110,8 +111,16 @@ export function extractPartialToolResults(error: unknown, toolName: string) {
   if (toolName === "subtask") {
     const sessionId = ownDataProperty(error, "subtaskSessionId");
     const resultText = ownDataProperty(error, "subtaskResultText");
-    if (sessionId !== undefined || resultText !== undefined) {
-      results.push({ source: "subtask", value: { ...(sessionId !== undefined ? { subtaskSessionId: sessionId } : {}), ...(resultText !== undefined ? { resultText } : {}) } });
+    const sourceSessionId = readSubtaskSourceSessionId(error);
+    if (sessionId !== undefined || resultText !== undefined || sourceSessionId !== undefined) {
+      results.push({
+        source: "subtask",
+        value: {
+          ...(sessionId !== undefined ? { subtaskSessionId: sessionId } : {}),
+          ...(resultText !== undefined ? { resultText } : {}),
+          ...(sourceSessionId !== undefined ? { sourceSessionId } : {})
+        }
+      });
     }
   }
   return results;

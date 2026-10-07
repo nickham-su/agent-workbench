@@ -24,6 +24,7 @@ import { createDeepSeek } from "@ai-sdk/deepseek";
 import { Value } from "@sinclair/typebox/value";
 import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call";
 import { parseAiSdkCallSettings } from "@agent-workbench/shared/llm-ai-sdk-call-settings";
+import { readSubtaskSourceSessionId } from "./subtaskSource.js";
 import { AgentApiClient, ApiConflictError, InternalRpcHttpError, InternalRpcInvalidResponseError, InternalRpcNetworkError, InternalRpcTimeoutError, type ExecutionProfile, type PromptContext } from "./apiClient.js";
 import { McpManager } from "./mcpManager.js";
 import { AnalyticsSignalProducer } from "./analyticsSignals.js";
@@ -233,12 +234,16 @@ function buildSubtaskErrorText(params: {
   status: "failed" | "cancelled";
   error: string;
   subtaskSessionId?: string;
+  sourceSessionId?: string;
   subtaskResultText?: string;
 }) {
   return buildToolText({
     toolName: "subtask",
     status: params.status,
-    headers: [["subtask_session_id", params.subtaskSessionId]],
+    headers: [
+      ["subtask_session_id", params.subtaskSessionId],
+      ["source_session_id", params.sourceSessionId !== undefined ? JSON.stringify(params.sourceSessionId) : undefined]
+    ],
     body: typeof params.subtaskResultText === "string" ? `${params.error}\n\n${params.subtaskResultText}` : params.error
   });
 }
@@ -350,10 +355,14 @@ function buildToolSuccessText(params: {
   if (params.toolName === "subtask") {
     const subtaskSessionId = typeof resultObj?.subtaskSessionId === "string" ? resultObj.subtaskSessionId.trim() : "";
     const resultText = typeof resultObj?.resultText === "string" ? resultObj.resultText : "Subtask finished successfully.";
+    const sourceSessionId = readSubtaskSourceSessionId(resultObj);
     return buildToolText({
       toolName: params.toolName,
       status: params.status,
-      headers: [["subtask_session_id", subtaskSessionId || undefined]],
+      headers: [
+        ["subtask_session_id", subtaskSessionId || undefined],
+        ["source_session_id", sourceSessionId !== undefined ? JSON.stringify(sourceSessionId) : undefined]
+      ],
       body: resultText
     });
   }
@@ -2116,14 +2125,17 @@ export class AgentRunner {
       const subtaskResultText = typeof errorRecord?.subtaskResultText === "string"
         ? errorRecord.subtaskResultText
         : undefined;
-      const isSubtaskWithResult = tool.toolName === "subtask" && (subtaskSessionId || typeof subtaskResultText === "string");
+      const sourceSessionId = tool.toolName === "subtask"
+        ? readSubtaskSourceSessionId(errorRecord)
+        : undefined;
+      const isSubtaskWithResult = tool.toolName === "subtask" && (subtaskSessionId || sourceSessionId !== undefined || typeof subtaskResultText === "string");
       const errorText = isSubtaskWithResult
-        ? buildSubtaskErrorText({ status: "failed", error, subtaskSessionId: subtaskSessionId || undefined, subtaskResultText })
+        ? buildSubtaskErrorText({ status: "failed", error, subtaskSessionId: subtaskSessionId || undefined, sourceSessionId, subtaskResultText })
         : buildToolErrorText({ toolName: tool.toolName, status: "failed", error });
       const failedOutput = {
         ...outputBase,
         text: errorText,
-        ...(isSubtaskWithResult ? { result: { ...(subtaskSessionId ? { subtaskSessionId } : {}), ...(typeof subtaskResultText === "string" ? { resultText: subtaskResultText } : {}) } } : {}),
+        ...(isSubtaskWithResult ? { result: { ...(subtaskSessionId ? { subtaskSessionId } : {}), ...(sourceSessionId !== undefined ? { sourceSessionId } : {}), ...(typeof subtaskResultText === "string" ? { resultText: subtaskResultText } : {}) } } : {}),
         error
       };
       try {

@@ -401,6 +401,8 @@ export default {
       subtaskModeExisting: "Reuse session",
       subtaskAgent: "Agent",
       subtaskSessionId: "Session ID",
+      subtaskSourceSessionId: "Source Session ID",
+      copySourceSessionId: "Copy source Session ID",
       subtaskStartedAt: "Started",
       subtaskDuration: "Duration",
       todoListCardTitle: "Todo list",

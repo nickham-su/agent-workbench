@@ -24,7 +24,10 @@ export class SqliteSubtaskRunQuery implements SubtaskRunQuery {
 
   findSession(sessionId: string): SubtaskSession | null {
     const row = this.db.prepare(`
-      select id, workspace_id as workspaceId, title, kind, head_message_id as headMessageId, revision
+      select id, workspace_id as workspaceId, title, kind, head_message_id as headMessageId,
+             context_root_message_id as contextRootMessageId, revision,
+             forked_from_session_id as forkedFromSessionId,
+             forked_from_message_id as forkedFromMessageId
       from agent_session where id = ?
     `).get(sessionId) as SubtaskSession | undefined;
     return row ?? null;

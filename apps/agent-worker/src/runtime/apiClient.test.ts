@@ -2193,3 +2193,30 @@ test("Message writeback response validation observes strict/warn boundaries", as
   assert.equal(warnings[0]?.includes("PROMPT"), false);
   assert.equal(warnings[0]?.includes("TOOL_RESULT"), false);
 });
+
+for (const reused of [false, true]) {
+  test(`startSubtaskRun preserves explicit source in its request and decoded response (reused=${reused})`, async () => {
+    const response = { sessionId: "CHILD_SESSION", runId: "CHILD_RUN", workspacePath: "/workspace/child", agentName: "child-agent", reused, sourceSessionId: "SOURCE_SESSION" };
+    const fixture = await startTestServer(() => ({ status: 200, body: response }));
+    const client = createShortTimeoutClient(fixture.origin);
+    const request = { ...subtaskStartInput, session: { mode: "fork" as const, sourceSessionId: "SOURCE_SESSION" } };
+    assert.deepEqual(await client.startSubtaskRun(request), response);
+    assert.deepEqual(fixture.attempts[0]?.body, request);
+    assert.equal(fixture.attempts.length, 1);
+  });
+}
+
+test("startSubtaskRun retains legacy response shape without inventing source metadata", async () => {
+  const response = { sessionId: "CHILD_SESSION", runId: "CHILD_RUN", workspacePath: "/workspace/child", agentName: "child-agent", reused: false };
+  const fixture = await startTestServer(() => ({ status: 200, body: response }));
+  const decoded = await createShortTimeoutClient(fixture.origin).startSubtaskRun(subtaskStartInput);
+  assert.deepEqual(decoded, response);
+  assert.equal(Object.hasOwn(decoded, "sourceSessionId"), false);
+});
+
+for (const sourceSessionId of [null, 8, {}]) {
+  test(`startSubtaskRun rejects malformed protocol source ${JSON.stringify(sourceSessionId)} using the existing decoder`, async () => {
+    const fixture = await startTestServer(() => ({ status: 200, body: { sessionId: "CHILD_SESSION", runId: "CHILD_RUN", workspacePath: "/workspace/child", agentName: "child-agent", reused: false, sourceSessionId } }));
+    await assert.rejects(createShortTimeoutClient(fixture.origin).startSubtaskRun(subtaskStartInput), InternalRpcInvalidResponseError);
+  });
+}

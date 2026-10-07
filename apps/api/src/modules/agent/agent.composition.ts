@@ -387,9 +387,15 @@ function toolArgsSchema(toolName: AgentContextToolName) {
               additionalProperties: false,
               properties: {
                 mode: { const: "fork" },
+                sourceSessionId: {
+                  type: "string",
+                  minLength: 1,
+                  description:
+                    "Optional source Session ID in the same Workspace (primary or subtask, including the caller). Inherit only its latest stable effective context; in-progress messages and unfinished tools are excluded. Omit to keep the existing parent-context fork behavior.",
+                },
               },
               description:
-                "fork: provide the subtask with the full current parent-session history as background context. Use this when the user's intent must be passed through without loss.",
+                "fork: inherit parent-session context by default, or the latest stable effective context of sourceSessionId when supplied. The new subtask executes independently; it does not resume the source Run.",
             },
           ],
         },
@@ -432,17 +438,19 @@ function buildSubtaskToolDescription(
     "In a single response, invoking multiple subtask tools indicates that the subtasks are executed in parallel. If the execution order of the subtasks needs to be guaranteed, you can only invoke one subtask tool at a time, making multiple separate calls.",
     "Using parallel subtasks for multiple independent tasks is often a good way to improve efficiency. However, tasks that have dependencies must be delegated one by one in sequence. For example, implementation and code review cannot be delegated in parallel.",
     "For coding or documentation work driven by the user's request, prefer fork so the user's intent can be passed to the subtask without loss.",
-    "When using fork, the subtask receives the full parent-session context, which may include overall planning information such as todolists. Therefore the prompt must explicitly state the subtask's concrete goal, deliverable boundary, and responsibilities it should not take on.",
+    "Without sourceSessionId, fork preserves the existing parent-context behavior, which may include overall planning information such as todolists. With sourceSessionId, it inherits only the chosen Session's latest stable effective context, excluding in-progress messages and unfinished tool turns. The source may still be running and is not modified.",
+    "For either fork form, the prompt must explicitly state the subtask's concrete goal, deliverable boundary, and responsibilities it should not take on. Inherited history is background, not an instruction to continue the source task.",
+    "An explicit source must be a primary or subtask Session in the same Workspace and may equal the caller. It does not inherit the source Agent/profile/model overrides or isolate external files. Choose a subtask Agent with enough context-window capacity; the first inherited request has no automatic-compaction guarantee.",
     "Concurrent subtasks may reuse the same agentId, but do not assign the same existing sessionId to multiple concurrent tasks.",
     "If a subtask call fails after a session ID has already been created, prefer reusing that session with existing instead of starting over, because useful partial progress may already exist.",
     "If a subtask call succeeds but returns no summary, you must reuse that session to check progress and continue the work if it is not actually finished.",
     "",
     "Guidance for choosing session.mode:",
     "- new: start a fresh task with no inherited context; use only the prompt as instructions.",
-    "- fork: send the full parent-session context to the subtask when the prompt alone cannot capture the user's intent or constraints.",
+    "- fork: preserve parent context when omitted, or set session.sourceSessionId to summarize or work from another Session's latest stable effective context. sourceSessionId is only allowed in fork mode; do not supply prefork fields with an explicit source.",
     "- existing: resume an earlier subtask session to reuse memory, continue unfinished work, or avoid repeating research and review setup.",
     "",
-    "Result: on success, returns subtaskSessionId and the subtask result text.",
+    "Result: on success, returns subtaskSessionId and the subtask result text; an explicit-source start may also include sourceSessionId. No message boundary is exposed.",
   ];
 
   const normalizedAgents = agentItems
@@ -2586,7 +2594,9 @@ function createAgentApplications(
       .prepare(
         `
       select id, workspace_id as workspaceId, title, kind,
-             head_message_id as headMessageId, revision
+             head_message_id as headMessageId, context_root_message_id as contextRootMessageId,
+             forked_from_session_id as forkedFromSessionId,
+             forked_from_message_id as forkedFromMessageId, revision
       from agent_session where id = ?
     `,
       )
@@ -2597,6 +2607,9 @@ function createAgentApplications(
           title: string;
           kind: "primary" | "subtask";
           headMessageId: string | null;
+          contextRootMessageId: string | null;
+          forkedFromSessionId: string | null;
+          forkedFromMessageId: string | null;
           revision: number;
         }
       | undefined;
@@ -2629,7 +2642,7 @@ function createAgentApplications(
         `
       select execution.id as toolExecutionId, execution.origin_session_id as originSessionId,
              execution.origin_run_id as originRunId, part.message_id as assistantMessageId,
-             part.tool_name as toolName
+             part.tool_name as toolName, part.tool_input_json as toolInputJson
       from agent_tool_execution execution
       join agent_message_part part on part.id = execution.call_part_id
       where execution.id = ?
@@ -2642,6 +2655,7 @@ function createAgentApplications(
           originRunId: string | null;
           assistantMessageId: string;
           toolName: string | null;
+          toolInputJson: string | null;
         }
       | undefined;
     if (
@@ -2670,6 +2684,7 @@ function createAgentApplications(
       anchor: {
         toolExecutionId: anchor.toolExecutionId,
         assistantMessageId: anchor.assistantMessageId,
+        toolInputJson: anchor.toolInputJson,
       },
     };
   }

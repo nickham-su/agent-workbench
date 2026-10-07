@@ -10,6 +10,7 @@ import type {
 } from "@agent-workbench/shared";
 import {
   AgentMessageSchema,
+  AgentToolExecutionSchema,
   canStartPrimaryRetainedTail,
   type PrimaryProjectionProfile,
   type PrimaryReplayProjectionDescriptor,
@@ -224,6 +225,8 @@ function toPart(row: PartRow): AgentMessagePart {
         input: parseObject(row.toolInputJson),
         providerToolCallId: row.providerToolCallId,
       };
+    default:
+      throw new ModelContextInvariantError("stored message part type is invalid");
   }
 }
 
@@ -296,6 +299,13 @@ export class ModelContextInvariantError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "ModelContextInvariantError";
+  }
+}
+
+/** A valid source can have no complete model turn yet; this is not graph corruption. */
+export class NoStableContextError extends Error {
+  constructor() {
+    super("source has no stable model context");
   }
 }
 
@@ -471,6 +481,153 @@ export function assertRetainedAnchorOnPreviousChain(db: Db, input: {
  */
 export class ModelContextResolver {
   constructor(private readonly db: Db) {}
+
+  /**
+   * Internal Fork only. The caller owns the immediate transaction and reads the
+   * source coordinates inside it. Unlike ordinary projection, this selection must
+   * see streaming messages before normalization can erase the stop boundary.
+   */
+  resolveStableForkBoundary(session: SessionRow): { headMessageId: string; contextRootMessageId: string | null } {
+    if (!this.db.inTransaction) throw new ModelContextInvariantError("stable selection requires a transaction");
+    const chain = this.loadStableForkPhysicalChain(session);
+    const rootIndex = session.contextRootMessageId == null
+      ? -1 : chain.findIndex((row) => row.id === session.contextRootMessageId);
+    if (session.contextRootMessageId != null && rootIndex < 0) {
+      throw new ModelContextInvariantError("context root is not on the current branch");
+    }
+    const root = rootIndex < 0 ? undefined : chain[rootIndex];
+    if (root && root.type !== "compaction"
+      && (root.type === "runtime" || (root.status !== "completed" && root.status !== "streaming"))) {
+      throw new ModelContextInvariantError("ordinary context root is not replayable");
+    }
+    if (root?.type === "compaction" && root.status !== "completed") {
+      throw new ModelContextInvariantError("compaction root is not completed");
+    }
+    const retained = root?.type === "compaction" ? this.retainedRange(chain, rootIndex, root) : [];
+    if (retained.length && !isLegalRetainedOriginalAnchor(retained[0], session.workspaceId)) {
+      throw new ModelContextInvariantError("retained anchor is not a completed original message");
+    }
+    const candidates = root?.type === "compaction" ? chain.slice(rootIndex + 1)
+      : chain.slice(Math.max(0, rootIndex));
+    const required = [...(root?.type === "compaction" ? [root] : []), ...retained, ...candidates];
+    const pendingByMessage = this.loadStableForkToolState(required);
+
+    // A retained interval is mandatory history, not an optional tail: even an
+    // excluded failed/runtime message cannot hide an unfinished tool execution.
+    for (const row of retained) {
+      if (row.status === "streaming" || pendingByMessage(row)) {
+        throw new ModelContextInvariantError("retained history is not closed");
+      }
+    }
+    if (retained.length) this.validateStableForkMessages(session, retained);
+    const selected: MessageRow[] = root?.type === "compaction" ? [root, ...this.normalized(retained)] : [];
+    let boundary = root?.type === "compaction" ? root.id : null;
+    for (const row of candidates) {
+      // Inspect original candidates in physical order; never pass through an
+      // in-progress turn to reach later completed content.
+      if (row.type === "runtime" || row.type === "compaction") continue;
+      if (row.status === "streaming") {
+        pendingByMessage(row);
+        this.validateStableForkMessages(session, [row]);
+        break;
+      }
+      if (!isLegalRetainedOriginalAnchor(row, session.workspaceId)) continue;
+      if (pendingByMessage(row)) {
+        this.validateStableForkMessages(session, [row]);
+        break;
+      }
+      selected.push(row);
+      boundary = row.id;
+    }
+    // Validation/hydration is shared with ordinary model context, retaining Parts,
+    // trusted image references and recognizable legacy Provider replay behavior.
+    this.validateStableForkMessages(session, selected);
+    if (boundary == null) throw new NoStableContextError();
+    return { headMessageId: boundary, contextRootMessageId: session.contextRootMessageId };
+  }
+
+  private validateStableForkMessages(session: SessionRow, messages: MessageRow[]): void {
+    const resolved = this.hydrate(session.workspaceId, session, messages);
+    for (const block of resolved.blocks) {
+      const positions = block.message.parts.map((part) => part.position);
+      if (new Set(positions).size !== positions.length) {
+        throw new ModelContextInvariantError("source Parts have duplicate positions");
+      }
+      if (block.toolExecutions.some((execution) => !Value.Check(AgentToolExecutionSchema, execution))) {
+        throw new ModelContextInvariantError("source tool execution violates the shared contract");
+      }
+    }
+  }
+
+  private loadStableForkPhysicalChain(session: SessionRow): MessageRow[] {
+    if (!session.headMessageId) return [];
+    const rows = this.db.prepare(`
+      with recursive chain(id, previous_message_id, workspace_id, traversal_depth, path, missing, cross_workspace, cycle) as (
+        select id, previous_message_id, workspace_id, 0, '|' || id || '|', 0, 0, 0
+        from agent_message where id = @headMessageId and workspace_id = @workspaceId
+        union all
+        select message.id, message.previous_message_id, message.workspace_id, chain.traversal_depth + 1,
+          chain.path || coalesce(message.id, '<missing>') || '|',
+          case when message.id is null then 1 else 0 end,
+          case when message.id is not null and message.workspace_id <> @workspaceId then 1 else 0 end,
+          case when message.id is not null and instr(chain.path, '|' || message.id || '|') > 0 then 1 else 0 end
+        from chain left join agent_message message on message.id = chain.previous_message_id
+        where chain.previous_message_id is not null and chain.missing = 0 and chain.cross_workspace = 0 and chain.cycle = 0
+          and chain.traversal_depth < @maxDepth
+      )
+      select message.id, message.workspace_id as workspaceId, message.previous_message_id as previousMessageId,
+        message.replaces_message_id as replacesMessageId, message.retained_from_message_id as retainedFromMessageId,
+        message.depth, message.type, message.status, message.origin_session_id as originSessionId,
+        message.origin_run_id as originRunId, message.updated_revision as updatedRevision,
+        message.created_at as createdAt, message.updated_at as updatedAt,
+        chain.missing, chain.cross_workspace as crossWorkspace, chain.cycle, chain.traversal_depth as traversalDepth
+      from chain left join agent_message message on message.id = chain.id order by chain.traversal_depth desc
+    `).all({ ...session, maxDepth: MAX_RETAINED_ANCHOR_ANCESTRY_DEPTH }) as Array<MessageRow & {
+      missing: number; crossWorkspace: number; cycle: number; traversalDepth: number;
+    }>;
+    if (!rows.length || rows.some((row) => row.missing || row.crossWorkspace || row.cycle)
+      || (rows[0]!.traversalDepth === MAX_RETAINED_ANCHOR_ANCESTRY_DEPTH && rows[0]!.previousMessageId != null)) {
+      throw new ModelContextInvariantError("source physical ancestry is invalid");
+    }
+    return rows.map(({ missing: _missing, crossWorkspace: _crossWorkspace, cycle: _cycle,
+      traversalDepth: _traversalDepth, ...row }) => row);
+  }
+
+  /** Load bindings in batches, then validate only the required interval/prefix. */
+  private loadStableForkToolState(messages: MessageRow[]): (message: MessageRow) => boolean {
+    type Binding = {
+      messageId: string; callPartId: string; executionId: string | null;
+      originSessionId: string | null; originRunId: string | null; status: AgentToolExecutionStatus | null;
+    };
+    const bindings = inBatches([...new Set(messages.map((row) => row.id))]).flatMap((batch) => this.db.prepare(`
+      select part.message_id as messageId, part.id as callPartId, execution.id as executionId,
+        execution.origin_session_id as originSessionId, execution.origin_run_id as originRunId, execution.status
+      from agent_message_part part left join agent_tool_execution execution on execution.call_part_id = part.id
+      where part.type = 'tool_call' and part.message_id in (${batch.map(() => "?").join(",")})
+      order by part.message_id, part.position
+    `).all(...batch) as Binding[]);
+    const byMessage = new Map<string, Binding[]>();
+    for (const binding of bindings) {
+      const list = byMessage.get(binding.messageId) ?? [];
+      list.push(binding);
+      byMessage.set(binding.messageId, list);
+    }
+    return (message) => {
+      let pending = false;
+      const seen = new Set<string>();
+      for (const binding of byMessage.get(message.id) ?? []) {
+        if (message.type !== "assistant" || !binding.executionId || seen.has(binding.callPartId)
+          || binding.originSessionId !== message.originSessionId || binding.originRunId !== message.originRunId
+          || binding.status == null
+          || (!TERMINAL_TOOL_EXECUTION_STATUSES.has(binding.status) && binding.status !== "queued" && binding.status !== "running")) {
+          throw new ModelContextInvariantError("source tool execution binding is invalid");
+        }
+        seen.add(binding.callPartId);
+        pending ||= binding.status === "queued" || binding.status === "running";
+      }
+      return pending;
+    };
+  }
 
   /**
    * Transaction-aware shared core for retained-tail writes. Callers already owning a write

@@ -29,6 +29,7 @@ import {
   assertRetainedAnchorOnPreviousChain,
   ModelContextInvariantError,
   ModelContextResolver,
+  NoStableContextError,
 } from "./read-side/model-context-resolver.js";
 import { indexEligibleCompletedTextParts } from "./archive/agent-archive-store.js";
 
@@ -987,6 +988,43 @@ export function forkMessageSession(db: Db, input: {
     db.prepare(`insert into session_run_state (workspace_id,session_id,status,active_run_id,run_notice_text,retry_count,next_retry_at,active_assistant_message_id,non_terminal_message_ids_json,non_terminal_tool_execution_ids_json,updated_at) values (@workspaceId,@id,'idle',null,'',0,null,null,'[]','[]',@createdAt)`).run(input);
     return getMessageSession(db, input.workspaceId, input.id)!;
   })();
+}
+
+/** Internal stable-source failures have fixed diagnostics, never source content. */
+export class StableForkSourceError extends Error {
+  constructor(readonly code: "SOURCE_UNAVAILABLE" | "NO_STABLE_CONTEXT" | "CONTEXT_INVALID") {
+    super(code);
+    this.name = "StableForkSourceError";
+  }
+}
+
+/** Read, select and materialize against one write-reserved SQLite snapshot. */
+export function forkStableSourceSession(db: Db, input: {
+  id: string; workspaceId: string; sourceSessionId: string; title: string; createdAt: number;
+}): AgentSessionMessageState {
+  return db.transaction(() => {
+    const source = getMessageSession(db, input.workspaceId, input.sourceSessionId);
+    if (!source || (source.kind !== "primary" && source.kind !== "subtask")) {
+      throw new StableForkSourceError("SOURCE_UNAVAILABLE");
+    }
+    let boundary: { headMessageId: string; contextRootMessageId: string | null };
+    try {
+      boundary = new ModelContextResolver(db).resolveStableForkBoundary({
+        workspaceId: source.workspaceId, sessionId: source.id, headMessageId: source.headMessageId,
+        contextRootMessageId: source.contextRootMessageId, revision: source.revision,
+      });
+    } catch (error) {
+      if (error instanceof NoStableContextError) throw new StableForkSourceError("NO_STABLE_CONTEXT");
+      if (error instanceof ModelContextInvariantError) throw new StableForkSourceError("CONTEXT_INVALID");
+      throw error; // SQLITE_BUSY and other infrastructure failures retain their original semantics.
+    }
+    createMessageSession(db, {
+      ...input, kind: "subtask", forkedFromSessionId: source.id,
+      forkedFromMessageId: boundary.headMessageId, headMessageId: boundary.headMessageId,
+      contextRootMessageId: boundary.contextRootMessageId,
+    });
+    return getMessageSession(db, input.workspaceId, input.id)!;
+  }).immediate();
 }
 
 /** A deliberately narrow, internal source error; never expose graph/SQL diagnostics to clients. */

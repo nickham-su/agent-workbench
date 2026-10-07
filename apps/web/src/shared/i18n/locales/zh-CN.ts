@@ -399,6 +399,8 @@ export default {
       subtaskModeExisting: "续用会话",
       subtaskAgent: "Agent",
       subtaskSessionId: "Session ID",
+      subtaskSourceSessionId: "来源 Session ID",
+      copySourceSessionId: "复制来源 Session ID",
       subtaskStartedAt: "开始时间",
       subtaskDuration: "持续时间",
       todoListCardTitle: "任务清单",

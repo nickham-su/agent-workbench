@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { Value } from "@sinclair/typebox/value";
+import { getPromptText } from "@agent-workbench/shared/prompts";
 import { AgentApiEndpoints, AgentApiPromptContextResponseSchema } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { createMessageRunRecord } from "./agent-message.store.js";
 import {
@@ -36,7 +37,7 @@ afterEach(async () => {
   if (failures.length > 1) throw new AggregateError(failures, "Read-side API fixture cleanup failed");
 });
 
-async function configureReadSideDefaults(fixture: AgentTestFixture) {
+async function configureReadSideDefaults(fixture: AgentTestFixture, tools = ["bash", "read", "write"]) {
   assert.ok(fixture.app);
   const providers = await fixture.app.inject({
     method: "PUT",
@@ -62,7 +63,7 @@ async function configureReadSideDefaults(fixture: AgentTestFixture) {
         name: "default",
         summary: "",
         prompt: "You are a helpful coding assistant.",
-        tools: ["bash", "read", "write"],
+        tools,
         pluginTools: [],
         mcpServers: [],
         defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
@@ -74,17 +75,18 @@ async function configureReadSideDefaults(fixture: AgentTestFixture) {
   assert.equal(agents.statusCode, 200, agents.body);
 }
 
-async function createReadSideFixture() {
+async function createReadSideFixture(tools?: string[]) {
   const fixture = await createAgentTestFixture({ withApp: true, agentWorkerConcurrency: 0 });
   fixtures.push(fixture);
   const workspace = await createTestWorkspace(fixture, { title: "read-side API test workspace" });
-  await configureReadSideDefaults(fixture);
+  await configureReadSideDefaults(fixture, tools);
   return { fixture, workspace };
 }
 
 function createRun(fixture: AgentTestFixture, workspaceId: string, options: {
   runKind?: "user" | "manual_compaction";
   uiLocale?: "zh-CN" | "en-US" | null;
+  subtaskDepth?: number;
 } = {}) {
   const sessionId = newSortableId("sess");
   const runId = newSortableId("run");
@@ -120,6 +122,7 @@ function createRun(fixture: AgentTestFixture, workspaceId: string, options: {
     providerId: "ppchat",
     modelId: "gpt-5.2",
     runKind: options.runKind,
+    subtaskDepth: options.subtaskDepth,
     uiLocale: options.uiLocale,
     status: "running",
     createdAt
@@ -872,4 +875,51 @@ test("compaction 替换旧上下文后不额外回放被摘要替换的 reasonin
   const prompt = response.json() as { messages: Array<{ role: string; content: unknown }>; providerReplay?: unknown[] };
   assert.deepEqual(prompt.messages, [{ role: "system", content: "summary replaces older messages" }]);
   assert.deepEqual(prompt.providerReplay, []);
+});
+
+test("subtask model schema exposes source only on fork and describes stable independent execution", async () => {
+  const { fixture, workspace } = await createReadSideFixture(["subtask"]);
+  assert.ok(fixture.app);
+  const { sessionId, runId } = createRun(fixture, workspace.id, { subtaskDepth: 0 });
+  const prompt = await injectJson(fixture.app, {
+    method: "POST", url: AgentApiEndpoints.getPromptContext.path,
+    internalToken: fixture.internalToken, payload: { workspaceId: workspace.id, sessionId, runId },
+  });
+  assert.equal(prompt.statusCode, 200, prompt.body);
+  const tool = prompt.json().tools.find((item: { name: string }) => item.name === "subtask");
+  assert.ok(tool);
+  const branches = tool.inputSchema.properties.session.oneOf;
+  assert.deepEqual(branches.map((branch: any) => branch.properties.mode.const), ["new", "existing", "fork"]);
+  for (const branch of branches) {
+    assert.equal(branch.additionalProperties, false);
+    const mode = branch.properties.mode.const;
+    assert.deepEqual(Object.keys(branch.properties).sort(), mode === "fork" ? ["mode", "sourceSessionId"] : mode === "existing" ? ["mode", "sessionId"] : ["mode"]);
+    assert.deepEqual(branch.required, mode === "existing" ? ["mode", "sessionId"] : ["mode"]);
+  }
+  const source = branches[2].properties.sourceSessionId;
+  assert.equal(source.type, "string");
+  assert.equal(source.minLength, 1);
+  assert.match(source.description, /same Workspace.*primary or subtask.*caller/);
+  assert.match(source.description, /latest stable effective context/);
+  assert.match(source.description, /unfinished tools are excluded/);
+  assert.match(tool.description, /only allowed in fork mode/);
+  assert.match(tool.description, /does not inherit the source Agent\/profile\/model overrides/);
+  assert.match(tool.description, /no automatic-compaction guarantee/);
+  assert.equal(JSON.stringify(tool.inputSchema).includes("sourceMessageId"), false);
+  assert.equal(JSON.stringify(tool.inputSchema).includes("excludedInProgress"), false);
+});
+
+test("Fork guards describe parent or explicit stable source in both locales without promising filesystem isolation", () => {
+  const zh = getPromptText("agent/subtask-fork-guard-system-text.zh-CN.txt");
+  const en = getPromptText("agent/subtask-fork-guard-system-text.en-US.txt");
+  assert.match(zh, /父会话或显式指定的来源 Session/);
+  assert.match(zh, /最新稳定有效上下文/);
+  assert.match(zh, /不要继续执行来源任务/);
+  assert.match(zh, /不隔离共享文件或外部资源/);
+  assert.match(en, /parent session or an explicitly specified source Session/);
+  assert.match(en, /latest stable effective context/);
+  assert.match(en, /Do not continue the source task/);
+  assert.match(en, /does not isolate shared files or external resources/);
+  assert.match(zh, /历史消息仅作为背景信息/);
+  assert.match(en, /background information.*do not constitute direct execution instructions/);
 });

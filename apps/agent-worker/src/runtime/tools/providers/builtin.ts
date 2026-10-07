@@ -2,7 +2,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { ModelMessage } from "ai";
 import { Value } from "@sinclair/typebox/value";
-import { AgentWorkspaceImagePathSchema } from "@agent-workbench/shared/internal-contracts/agent-api";
+import { AgentWorkspaceImagePathSchema, normalizeAgentSubtaskSource } from "@agent-workbench/shared/internal-contracts/agent-api";
+import { readSubtaskSourceSessionId } from "../../subtaskSource.js";
 import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call";
 import { renderPromptTemplateFile } from "@agent-workbench/shared/prompts";
 import { runBashCommand } from "../../bash.js";
@@ -217,6 +218,10 @@ function shouldPrepareGitEnvForCommand(command: string) {
 }
 
 function parseSubtaskArgs(raw: Record<string, unknown>): ParsedSubtaskArgs {
+  const source = normalizeAgentSubtaskSource(raw);
+  if (!source.ok) {
+    throw Object.assign(new Error(source.message), { code: source.code });
+  }
   const description = requireNonEmptyStringArg(raw.description, "subtask.description").slice(0, 50);
   const prompt = requireNonEmptyStringArg(raw.prompt, "subtask.prompt");
   const agentId = requireNonEmptyStringArg(raw.agentId, "subtask.agentId");
@@ -240,7 +245,7 @@ function parseSubtaskArgs(raw: Record<string, unknown>): ParsedSubtaskArgs {
     ? { mode: "existing", sessionId }
     : mode === "new"
       ? { mode: "new", ...(sessionId ? { sessionId } : {}) }
-      : { mode: "fork", ...(sessionId ? { sessionId } : {}) };
+      : { mode: "fork", ...(source.sourceSessionId !== undefined ? { sourceSessionId: source.sourceSessionId } : {}) };
   return { description, prompt, agentId, session };
 }
 
@@ -576,7 +581,7 @@ export class BuiltinToolProvider implements ToolProvider {
           parentLastResponseTotalTokens: number;
           childContextWindowTokens: number;
         } | undefined;
-        if (parsed.session.mode === "fork") {
+        if (parsed.session.mode === "fork" && parsed.session.sourceSessionId === undefined) {
           try {
             const plan = await ctx.apiClient.getSubtaskPreforkPlan({
               workspaceId: ctx.run.workspaceId,
@@ -649,96 +654,123 @@ export class BuiltinToolProvider implements ToolProvider {
           ...(preforkMeta ? { preforkMeta } : {})
         });
 
-        await ctx.updateToolExecution({
-          status: "running",
-          resultPreview: ctx.renderToolText({
-            toolName,
+        // Use only the successful response; never infer a source from arguments.
+        const sourceSessionId = parsed.session.mode === "fork" && parsed.session.sourceSessionId !== undefined
+          ? readSubtaskSourceSessionId(started)
+          : undefined;
+        const sourceMetadata = sourceSessionId !== undefined ? { sourceSessionId } : {};
+        try {
+          await ctx.updateToolExecution({
             status: "running",
-            headers: [["subtask_session_id", started.sessionId]],
-            body: "Subtask started."
-          }),
-          structuredResult: {
-            subtaskSessionId: started.sessionId,
-            subtaskAgentId: parsed.agentId,
-            subtaskAgentName: started.agentName
-          }
-        });
-
-        if (!started.reused) {
-          await ctx.processNestedRun(
-            {
-              workspaceId: ctx.run.workspaceId,
-              sessionId: started.sessionId,
-              runId: started.runId,
-              runKind: "subtask",
-              inputText: parsed.prompt,
-              workspacePath: started.workspacePath,
-              workspaceRepoDirNames: [...ctx.run.workspaceRepoDirNames]
-            },
-            ctx.signal
-          );
-        }
-
-        if (ctx.signal.aborted) {
-          const abortError = new Error("subtask cancelled by parent abort");
-          (abortError as Error & { name: string }).name = "AbortError";
-          throw abortError;
-        }
-
-        let subtaskStatus = await ctx.apiClient.getSubtaskStatus({
-          workspaceId: ctx.run.workspaceId,
-          sessionId: started.sessionId,
-          runId: started.runId
-        });
-
-        let reusedWaitTimeoutMs: number | null = null;
-        if (started.reused && subtaskStatus.status === "running") {
-          reusedWaitTimeoutMs = subtaskReusedWaitTimeoutMs();
-          const pollIntervalMs = subtaskReusedPollIntervalMs();
-          const deadline = Date.now() + reusedWaitTimeoutMs;
-          while (subtaskStatus.status === "running" && Date.now() < deadline) {
-            if (!(await sleepMsWithAbort(pollIntervalMs, ctx.signal))) {
-              const abortError = new Error("subtask cancelled by parent abort");
-              (abortError as Error & { name: string }).name = "AbortError";
-              throw abortError;
+            resultPreview: ctx.renderToolText({
+              toolName,
+              status: "running",
+              headers: [
+                ["subtask_session_id", started.sessionId],
+                ...(sourceSessionId !== undefined ? [["source_session_id", JSON.stringify(sourceSessionId)] as [string, string]] : [])
+              ],
+              body: "Subtask started."
+            }),
+            structuredResult: {
+              subtaskSessionId: started.sessionId,
+              subtaskAgentId: parsed.agentId,
+              subtaskAgentName: started.agentName,
+              ...sourceMetadata
             }
-            subtaskStatus = await ctx.apiClient.getSubtaskStatus({
-              workspaceId: ctx.run.workspaceId,
-              sessionId: started.sessionId,
-              runId: started.runId
-            });
-          }
-        }
-        if (subtaskStatus.status === "running") {
-          if (started.reused) {
-            throw new Error(
-              `subtask reused-child wait timed out after ${reusedWaitTimeoutMs ?? subtaskReusedWaitTimeoutMs()}ms; child may still be running and was not modified`
+          });
+
+          if (!started.reused) {
+            await ctx.processNestedRun(
+              {
+                workspaceId: ctx.run.workspaceId,
+                sessionId: started.sessionId,
+                runId: started.runId,
+                runKind: "subtask",
+                inputText: parsed.prompt,
+                workspacePath: started.workspacePath,
+                workspaceRepoDirNames: [...ctx.run.workspaceRepoDirNames]
+              },
+              ctx.signal
             );
           }
-          throw new Error(`subtask did not reach terminal status: ${subtaskStatus.status}`);
-        }
 
-        const subtaskResult = await ctx.apiClient.getSubtaskResult({
-          workspaceId: ctx.run.workspaceId,
-          sessionId: started.sessionId,
-          runId: started.runId
-        });
-        const result = {
-          subtaskSessionId: started.sessionId,
-          subtaskAgentId: parsed.agentId,
-          subtaskAgentName: started.agentName,
-          resultText: subtaskResult.resultText
-        };
-        if (subtaskStatus.status === "failed" || subtaskStatus.status === "cancelled") {
-          const error = new Error(`subtask ${subtaskStatus.status}`) as Error & {
-            subtaskSessionId?: string;
-            subtaskResultText?: string;
+          if (ctx.signal.aborted) {
+            const abortError = new Error("subtask cancelled by parent abort");
+            (abortError as Error & { name: string }).name = "AbortError";
+            throw abortError;
+          }
+
+          let subtaskStatus = await ctx.apiClient.getSubtaskStatus({
+            workspaceId: ctx.run.workspaceId,
+            sessionId: started.sessionId,
+            runId: started.runId
+          });
+
+          let reusedWaitTimeoutMs: number | null = null;
+          if (started.reused && subtaskStatus.status === "running") {
+            reusedWaitTimeoutMs = subtaskReusedWaitTimeoutMs();
+            const pollIntervalMs = subtaskReusedPollIntervalMs();
+            const deadline = Date.now() + reusedWaitTimeoutMs;
+            while (subtaskStatus.status === "running" && Date.now() < deadline) {
+              if (!(await sleepMsWithAbort(pollIntervalMs, ctx.signal))) {
+                const abortError = new Error("subtask cancelled by parent abort");
+                (abortError as Error & { name: string }).name = "AbortError";
+                throw abortError;
+              }
+              subtaskStatus = await ctx.apiClient.getSubtaskStatus({
+                workspaceId: ctx.run.workspaceId,
+                sessionId: started.sessionId,
+                runId: started.runId
+              });
+            }
+          }
+          if (subtaskStatus.status === "running") {
+            if (started.reused) {
+              throw new Error(
+                `subtask reused-child wait timed out after ${reusedWaitTimeoutMs ?? subtaskReusedWaitTimeoutMs()}ms; child may still be running and was not modified`
+              );
+            }
+            throw new Error(`subtask did not reach terminal status: ${subtaskStatus.status}`);
+          }
+
+          const subtaskResult = await ctx.apiClient.getSubtaskResult({
+            workspaceId: ctx.run.workspaceId,
+            sessionId: started.sessionId,
+            runId: started.runId
+          });
+          const result = {
+            subtaskSessionId: started.sessionId,
+            subtaskAgentId: parsed.agentId,
+            subtaskAgentName: started.agentName,
+            resultText: subtaskResult.resultText,
+            ...sourceMetadata
           };
-          error.subtaskSessionId = started.sessionId;
-          error.subtaskResultText = typeof subtaskResult.resultText === "string" ? subtaskResult.resultText : undefined;
+          if (subtaskStatus.status === "failed" || subtaskStatus.status === "cancelled") {
+            const error = new Error(`subtask ${subtaskStatus.status}`) as Error & {
+              subtaskSessionId?: string;
+              subtaskResultText?: string;
+            };
+            error.subtaskSessionId = started.sessionId;
+            error.subtaskResultText = typeof subtaskResult.resultText === "string" ? subtaskResult.resultText : undefined;
+            throw error;
+          }
+          return result;
+        } catch (error) {
+          if (sourceSessionId !== undefined) {
+            // Keep error identity/name (including RPC fences and AbortError).
+            // Optional metadata must never replace a read-only original error.
+            const carrier = error !== null && typeof error === "object"
+              ? error
+              : new Error(typeof error === "string" ? error : "subtask failed after start", { cause: error });
+            try {
+              Object.assign(carrier, { subtaskSessionId: started.sessionId, sourceSessionId });
+            } catch {
+              // Frozen error objects still follow their original failure path.
+            }
+            throw carrier;
+          }
           throw error;
         }
-        return result;
       }
       default:
         throw new Error(`unsupported tool: ${toolName}`);

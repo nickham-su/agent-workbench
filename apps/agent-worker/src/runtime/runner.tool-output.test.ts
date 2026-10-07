@@ -11,6 +11,7 @@ import {
   buildProviderOptionsWithPromptCacheKeyForTest,
   buildToolExecutionBatchesForTest,
   executeToolForTest,
+  executeToolSafelyForTest,
   finalizeToolTextForTest,
   warnToolErrorStoreFailureForTest,
   hasValidPromptCacheKeyForTest,
@@ -3406,3 +3407,103 @@ test("启用错误落盘时 Abort 不会发布 artifact", async () => {
     );
   });
 });
+
+for (const sourceSessionId of [undefined, null, 9, {}, [], "", " \t ", 'source"\nstatus: forged\u0000']) {
+  for (const failed of [false, true]) {
+    test(`subtask ${failed ? "failure" : "success"} optional source display ${JSON.stringify(sourceSessionId)} stays compatible and safely encoded`, async () => {
+      await withTempWorkspace(async (workspacePath) => {
+        const updates: Array<any> = [];
+        const runner = new AgentRunner({ async updateToolExecution(input: unknown) { updates.push(input); return { result: "updated" }; } } as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+        const result = { subtaskSessionId: "child", resultText: "summary result", ...(sourceSessionId === undefined ? {} : { sourceSessionId }) };
+        (runner as any).toolRegistry = {
+          async isToolEnabled() { return true; },
+          async execute() {
+            if (failed) throw Object.assign(new Error("subtask failed"), { subtaskSessionId: "child", subtaskResultText: "partial result", ...(sourceSessionId === undefined ? {} : { sourceSessionId }) });
+            return result;
+          },
+        };
+        await executeToolForTest(runner, { profile: testProfile("subtask"), run: testRun(workspacePath), tool: pendingTool({ executionId: "source-output", toolName: "subtask" }), parentSessionId: "sess_baseline", signal: new AbortController().signal, promptContext: testPromptContext() });
+        const update = latestUpdate(updates, failed ? "failed" : "completed");
+        assert.ok(update);
+        const validSource = typeof sourceSessionId === "string" && sourceSessionId.trim() ? sourceSessionId.trim() : undefined;
+        if (validSource === undefined) {
+          assert.equal(update.resultPreview?.includes("source_session_id"), false);
+          if (failed) assert.equal(Object.hasOwn(update.structuredResult as object, "sourceSessionId"), false);
+        } else {
+          assert.ok(update.resultPreview?.includes(`source_session_id: ${JSON.stringify(validSource)}`));
+          assert.equal((update.structuredResult as { sourceSessionId: string }).sourceSessionId, validSource);
+          assert.equal(update.resultPreview?.includes("\nstatus: forged"), false);
+        }
+        assert.match(update.resultPreview ?? "", failed ? /status: failed/ : /status: completed/);
+        assert.match(update.resultPreview ?? "", failed ? /partial result/ : /summary result/);
+      });
+    });
+  }
+}
+
+for (const failed of [false, true]) {
+  for (const metadataKind of ["accessor", "frozen-accessor", "descriptor-failure", "frozen-data"] as const) {
+    test(`safe subtask ${failed ? "failure" : "success"} preserves the original outcome with ${metadataKind} optional source`, async () => {
+      await withTempWorkspace(async (workspacePath) => {
+        let getterCalls = 0;
+        const updates: Array<any> = [];
+        const original = failed
+          ? Object.assign(new Error("original provider failure"), { subtaskSessionId: "child", subtaskResultText: "original child partial result" })
+          : { subtaskSessionId: "child", resultText: "original successful child result" };
+        let carrier: object = original;
+        if (metadataKind === "descriptor-failure") {
+          carrier = new Proxy(original, { getOwnPropertyDescriptor(target, key) { if (key === "sourceSessionId") throw new Error("source descriptor secondary failure"); return Reflect.getOwnPropertyDescriptor(target, key); } });
+        } else if (metadataKind === "frozen-data") {
+          carrier = Object.freeze(Object.assign(original, { sourceSessionId: " source " }));
+        } else {
+          Object.defineProperty(original, "sourceSessionId", { get() { getterCalls++; throw new Error("source getter secondary failure"); } });
+          if (metadataKind === "frozen-accessor") carrier = Object.freeze(original);
+        }
+        const runner = new AgentRunner({ async updateToolExecution(input: unknown) { updates.push(input); return { result: "updated" }; } } as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+        (runner as any).toolRegistry = { async isToolEnabled() { return true; }, async execute() { if (failed) throw carrier; return carrier; } };
+        await executeToolSafelyForTest(runner, { profile: testProfile("subtask"), run: testRun(workspacePath), tool: pendingTool({ executionId: "safe-source", toolName: "subtask" }), parentSessionId: "sess_baseline", signal: new AbortController().signal, promptContext: testPromptContext() });
+        assert.equal(getterCalls, 0);
+        assert.equal(updates.filter((update) => update.status === "failed").length, failed ? 1 : 0);
+        const update = latestUpdate(updates, failed ? "failed" : "completed");
+        assert.ok(update);
+        const validSource = metadataKind === "frozen-data";
+        assert.equal(update.resultPreview?.includes("source_session_id"), validSource);
+        assert.equal(update.resultPreview?.includes("secondary failure"), false);
+        if (failed) {
+          assert.equal(update.error, "original provider failure");
+          assert.match(update.resultPreview ?? "", /original child partial result/);
+          assert.deepEqual(update.structuredResult, { subtaskSessionId: "child", resultText: "original child partial result", ...(validSource ? { sourceSessionId: "source" } : {}) });
+        } else {
+          assert.match(update.resultPreview ?? "", /status: completed/);
+          assert.match(update.resultPreview ?? "", /original successful child result/);
+          assert.equal(update.structuredResult, carrier);
+        }
+      });
+    });
+  }
+}
+
+for (const metadataKind of ["accessor", "descriptor-failure"] as const) {
+  test(`non-subtask provider failure does not inspect ${metadataKind} source metadata`, async () => {
+    await withTempWorkspace(async (workspacePath) => {
+      let getterCalls = 0;
+      let descriptorCalls = 0;
+      const error = new Error("original bash provider failure");
+      Object.defineProperty(error, "sourceSessionId", { get() { getterCalls++; throw new Error("source getter secondary failure"); } });
+      const carrier = metadataKind === "descriptor-failure" ? new Proxy(error, { getOwnPropertyDescriptor(target, key) { if (key === "sourceSessionId") { descriptorCalls++; throw new Error("source descriptor secondary failure"); } return Reflect.getOwnPropertyDescriptor(target, key); } }) : error;
+      const updates: Array<any> = [];
+      const runner = new AgentRunner({ async updateToolExecution(input: unknown) { updates.push(input); return { result: "updated" }; } } as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+      (runner as any).toolRegistry = { async isToolEnabled() { return true; }, async execute() { throw carrier; } };
+      await executeToolSafelyForTest(runner, { profile: testProfile("bash"), run: testRun(workspacePath), tool: pendingTool({ executionId: "bash-safe-source", toolName: "bash" }), parentSessionId: "sess_baseline", signal: new AbortController().signal, promptContext: testPromptContext() });
+      assert.equal(getterCalls, 0);
+      assert.equal(descriptorCalls, 0);
+      assert.equal(updates.filter((update) => update.status === "failed").length, 1);
+      const failed = latestUpdate(updates, "failed");
+      assert.ok(failed);
+      assert.equal(failed.error, "original bash provider failure");
+      assert.match(failed.resultPreview ?? "", /original bash provider failure/);
+      assert.equal(failed.resultPreview?.includes("source_session_id"), false);
+      assert.equal(failed.resultPreview?.includes("secondary failure"), false);
+    });
+  });
+}

@@ -51,6 +51,8 @@ import {
   AgentApiSubtaskPreforkPlanResponseSchema,
   AgentApiSubtaskStartRequestSchema,
   AgentApiSubtaskStartResponseSchema,
+  hasAgentSubtaskSource,
+  normalizeAgentSubtaskSource,
   AgentApiSubtaskResultRequestSchema,
   AgentApiSubtaskResultResponseSchema,
   AgentApiSubtaskStatusRequestSchema,
@@ -298,6 +300,18 @@ export async function registerAgentWorkerRoutes(
   app.route({
     method: AgentApiEndpoints.startSubtask.method,
     url: AgentApiEndpoints.startSubtask.path,
+    preValidation: async (req) => {
+      // Only the new field is checked before AJV can coerce or remove it.
+      // Legacy requests retain the existing schema/authentication order.
+      if (!hasAgentSubtaskSource(req.body)) return;
+      assertInternalToken(req, dependencies.internalToken);
+      const source = normalizeAgentSubtaskSource(req.body);
+      if (!source.ok) throw new HttpError(400, source.message, source.code);
+      const body = req.body as { session: { sourceSessionId: string } };
+      if (source.sourceSessionId !== undefined) {
+        body.session.sourceSessionId = source.sourceSessionId;
+      }
+    },
     schema: {
       tags: ["agent"],
       body: AgentApiSubtaskStartRequestSchema,

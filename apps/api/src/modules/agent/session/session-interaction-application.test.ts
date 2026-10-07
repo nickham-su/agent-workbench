@@ -64,6 +64,7 @@ function createDependencies(params?: {
       },
       validateHistoricalSource: (input) => ({ sessionId: input.sourceSessionId, messageId: input.targetMessageId,
         title: primary.title, messageSummary: "", messageCreatedAt: 1 }),
+      forkStableSourceSession: () => { throw new Error("unused stable-source capability"); },
       forkHistoricalSource: (input) => ({ ...primary, id: input.id, title: input.title,
         forkedFromSessionId: input.sourceSessionId, forkedFromMessageId: input.targetMessageId }),
       setManualTitle: (input) => {
@@ -353,6 +354,7 @@ test("updateSessionTitle returns 404 when the store mutation misses", () => {
     createSession: () => undefined,
     cloneSession: async () => { throw new Error("unused"); },
     validateHistoricalSource: () => { throw new Error("unused"); },
+    forkStableSourceSession: () => { throw new Error("unused stable-source capability"); },
     forkHistoricalSource: () => { throw new Error("unused"); },
     setManualTitle: () => false,
     findClientRequestDedup: () => null,

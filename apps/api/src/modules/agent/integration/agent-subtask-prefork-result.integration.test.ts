@@ -203,7 +203,7 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
   assert.equal(messages[0]?.type, "user");
   assert.equal(messages[0]?.parts[0]?.type, "text");
   assert.equal(messages[0]?.parts[0]?.text, "请调用 subtask 把任务交给另一个 agent。");
-  const guardIndex = messages.findIndex((message) => message.type === "system" && message.parts.some((part) => part.type === "text" && part.text.includes("All historical content before this system message")));
+  const guardIndex = messages.findIndex((message) => message.type === "system" && message.parts.some((part) => part.type === "text" && part.text.includes("Historical content before this system message")));
   const promptIndex = messages.findIndex((message) => message.type === "user" && message.parts.some((part) => part.type === "text" && part.text === "请直接完成这个子任务"));
   assert.ok(guardIndex >= 0);
   assert.equal(promptIndex, guardIndex + 1);
@@ -216,7 +216,7 @@ test("agent subtask fork 在复制历史与子任务 prompt 之间插入 system 
     runId: started.runId
   });
   assert.equal(promptContext.uiLocale, null);
-  assert.equal(promptContext.messages.some((message) => message.role === "system" && typeof message.content === "string" && message.content.includes("All historical content before this system message")), true);
+  assert.equal(promptContext.messages.some((message) => message.role === "system" && typeof message.content === "string" && message.content.includes("Historical content before this system message")), true);
   assert.equal(promptContext.tools.some((tool) => tool.name === "subtask"), false);
 });
 
@@ -295,7 +295,7 @@ test("agent subtask fork 继承父 Run locale 并插入中文防护消息", asyn
     messages.some((message) =>
       message.type === "system" &&
       message.parts.some((part) =>
-        part.type === "text" && part.text.includes("在本条系统消息之前的全部历史内容"),
+        part.type === "text" && part.text.includes("在本条系统消息之前的历史内容"),
       ),
     ),
     true,
@@ -333,7 +333,7 @@ test("subtask start with preforkSummaryText should inject summary->guard->prompt
   assert.equal(messages[0]?.parts[0]?.type, "text");
   assert.equal(messages[0]?.parts[0]?.text, "prefork summary");
   assert.equal(messages[1]?.parts[0]?.type, "text");
-  assert.ok(messages[1]?.parts[0]?.type === "text" && messages[1].parts[0].text.includes("All historical content before this system message"));
+  assert.ok(messages[1]?.parts[0]?.type === "text" && messages[1].parts[0].text.includes("Historical content before this system message"));
   assert.equal(messages[2]?.parts[0]?.type, "text");
   assert.equal(messages[2]?.parts[0]?.text, "please do prefork task");
   assert.equal(messages.some((message) => message.parts.some((part) => part.type === "text" && part.text.includes("this is parent history"))), false);
@@ -494,7 +494,7 @@ test("agent subtask fork 对父 run 非法 locale 做归一化回退，避免继
   const started = response.json() as { sessionId: string; runId: string };
   const promptContext = await getPromptContextInternal({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: started.sessionId, runId: started.runId });
   assert.equal(promptContext.uiLocale, null);
-  assert.equal(promptContext.messages.some((message) => message.role === "system" && typeof message.content === "string" && message.content.includes("You are working in a subtask session derived from a main session.")), true);
+  assert.equal(promptContext.messages.some((message) => message.role === "system" && typeof message.content === "string" && message.content.includes("You are working in an independent Fork subtask session created by the caller.")), true);
 });
 
 test("subtask 失败时 getSubtaskRunResultFromWorker 仍返回 partial text", async (t: TestContext) => {

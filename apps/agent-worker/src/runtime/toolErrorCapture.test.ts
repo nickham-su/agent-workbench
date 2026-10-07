@@ -78,3 +78,21 @@ test("未启用时不创建 capture", () => {
     null,
   );
 });
+
+test("subtask partial result carries valid optional source while ignoring invalid source and accessors", () => {
+  for (const sourceSessionId of [undefined, null, 7, {}, "", " \t ", " source "]) {
+    const error = Object.assign(new Error("subtask failed"), { subtaskSessionId: "child", sourceSessionId });
+    assert.deepEqual(extractPartialToolResults(error, "subtask"), [{ source: "subtask", value: { subtaskSessionId: "child", ...(sourceSessionId === " source " ? { sourceSessionId: "source" } : {}) } }]);
+  }
+  let accessed = false;
+  const error = Object.assign(new Error("subtask failed"), { subtaskSessionId: "child" });
+  Object.defineProperty(error, "sourceSessionId", { get() { accessed = true; throw new Error("not display data"); } });
+  assert.deepEqual(extractPartialToolResults(error, "subtask"), [{ source: "subtask", value: { subtaskSessionId: "child" } }]);
+  assert.equal(accessed, false);
+});
+
+test("subtask partial capture retains child data when optional source descriptor lookup fails", () => {
+  const original = Object.freeze(Object.assign(new Error("original failure"), { subtaskSessionId: "child", subtaskResultText: "original partial output" }));
+  const proxy = new Proxy(original, { getOwnPropertyDescriptor(target, key) { if (key === "sourceSessionId") throw new Error("source descriptor unavailable"); return Reflect.getOwnPropertyDescriptor(target, key); } });
+  assert.deepEqual(extractPartialToolResults(proxy, "subtask"), [{ source: "subtask", value: { subtaskSessionId: "child", resultText: "original partial output" } }]);
+});

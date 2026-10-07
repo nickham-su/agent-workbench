@@ -61,6 +61,7 @@ function dependencies(overrides: Partial<SubtaskApplicationDependencies> = {}) {
             title: "parent",
             kind: "primary",
             headMessageId: null,
+            contextRootMessageId: null,
             forkedFromSessionId: null,
             forkedFromMessageId: null,
             revision: 0,
@@ -80,6 +81,7 @@ function dependencies(overrides: Partial<SubtaskApplicationDependencies> = {}) {
           anchor: {
             toolExecutionId: parentToolExecutionId,
             assistantMessageId: "message-assistant",
+            toolInputJson: JSON.stringify({ session: { mode: "fork" } }),
           },
         };
       },
@@ -100,6 +102,7 @@ function dependencies(overrides: Partial<SubtaskApplicationDependencies> = {}) {
             title: "child",
             kind: "subtask",
             headMessageId: null,
+            contextRootMessageId: null,
             forkedFromSessionId: parentSessionId,
             forkedFromMessageId: "message-boundary",
             revision: 0,
@@ -140,7 +143,9 @@ function dependencies(overrides: Partial<SubtaskApplicationDependencies> = {}) {
       },
     },
     runQuery: {
-      findSession: () => null,
+      findSession: (id) => ({ id, workspaceId, title: "child", kind: "subtask",
+        headMessageId: null, contextRootMessageId: null, revision: 0,
+        forkedFromSessionId: parentSessionId, forkedFromMessageId: "message-boundary" }),
       findRunInSession: () => null,
       listMessageTextsByRun: () => [],
     },
@@ -301,6 +306,8 @@ test("M9/H4 application: parent fence conflict binds compensation to the newly m
     expectedParentSessionId: parentSessionId,
     expectedForkedFromSessionId: parentSessionId,
     expectedForkedFromMessageId: "message-boundary",
+    expectedHeadMessageId: null,
+    expectedContextRootMessageId: null,
   });
 });
 
@@ -326,7 +333,7 @@ test("P3 application: activation race compensates loser then exact re-query retu
     request({ session: { mode: "new" } }),
   );
   assert.equal(reused.reused, true);
-  assert.deepEqual(base.calls.slice(-2), ["compensate", "lineage"]);
+  assert.deepEqual(base.calls.slice(-3), ["compensate", "lineage", "anchor"]);
 });
 
 test("P3 application: original failure wins when no race winner; existing sessions are never compensated", async () => {
@@ -430,6 +437,7 @@ test("P4 application: result/status fence ownership and preserve assistant-first
             title: "child",
             kind: "subtask",
             headMessageId: null,
+            contextRootMessageId: null,
             forkedFromSessionId: null,
             forkedFromMessageId: null,
             revision: 0,
@@ -464,7 +472,7 @@ test("P4 application: result falls back to system text, then empty text", () => 
   const { result } = dependencies({
     runQuery: {
       findSession: () => ({
-        id: sessionId, workspaceId, title: "child", kind: "subtask", headMessageId: null, forkedFromSessionId: null, forkedFromMessageId: null, revision: 0,
+        id: sessionId, workspaceId, title: "child", kind: "subtask", headMessageId: null, contextRootMessageId: null, forkedFromSessionId: null, forkedFromMessageId: null, revision: 0,
       }),
       findRunInSession: () => childRun({ runId, sessionId, status: "cancelled" }),
       listMessageTextsByRun: () => [],
@@ -536,3 +544,96 @@ test("P5 application: orphan list failure reaches the startup caller", () => {
     /injected list failure/,
   );
 });
+
+function explicitDependencies(sourceSessionId = "source") {
+  const base = dependencies();
+  const resolve = base.result.parentAnchorReader.resolve;
+  base.result.parentAnchorReader = {
+    resolve: (input) => {
+      const original = resolve(input);
+      return { ...original, anchor: { ...original.anchor,
+        toolInputJson: JSON.stringify({ session: { mode: "fork", sourceSessionId } }) } };
+    },
+  };
+  const materialize = base.result.sessionMaterializer.resolveForStart;
+  base.result.sessionMaterializer.resolveForStart = async (input) => {
+    assert.equal(input.forkBoundaryMessageId, null);
+    assert.equal(input.shouldUsePreforkSummary, false);
+    const original = await materialize(input);
+    return { ...original, session: { ...original.session, forkedFromSessionId: sourceSessionId } };
+  };
+  const findSession = base.result.runQuery.findSession;
+  base.result.runQuery.findSession = (id) => {
+    const original = findSession(id);
+    return original ? { ...original, forkedFromSessionId: sourceSessionId } : null;
+  };
+  return base;
+}
+
+test("explicit application dispatch bypasses caller boundary and returns only the bound Child source", async () => {
+  const base = explicitDependencies();
+  const result = await new SubtaskApplication(base.result).startSubtask(request({ session: { mode: "fork", sourceSessionId: " source " } }));
+  assert.equal(result.sourceSessionId, "source");
+  assert.equal(result.reused, false);
+  assert.equal(base.calls.includes("boundary"), false);
+  assert.deepEqual(Object.keys(result).sort(), ["agentName", "reused", "runId", "sessionId", "sourceSessionId", "workspacePath"]);
+});
+
+test("explicit reused Child performs no source materialization or caller boundary read", async () => {
+  const base = explicitDependencies();
+  base.setExisting(childRun());
+  const result = await new SubtaskApplication(base.result).startSubtask(request({ session: { mode: "fork", sourceSessionId: " source " } }));
+  assert.equal(result.reused, true);
+  assert.equal(result.sourceSessionId, "source");
+  assert.deepEqual(base.calls, ["anchor", "lineage"]);
+});
+
+for (const scenario of ["input-changed", "input-invalid", "winner-source", "winner-workspace", "winner-kind"] as const) {
+  test(`explicit concurrent loser must rebind input and winner (${scenario})`, async () => {
+    const base = explicitDependencies();
+    let queries = 0;
+    base.result.lineagePersistence.findChildByParentToolExecution = () => (++queries === 1 ? null : childRun());
+    base.result.childRunActivator.activate = () => { throw Object.assign(new Error("unique"), { code: "SQLITE_CONSTRAINT_UNIQUE" }); };
+    const resolve = base.result.parentAnchorReader.resolve;
+    let reads = 0;
+    base.result.parentAnchorReader.resolve = (input) => {
+      const original = resolve(input);
+      reads += 1;
+      if (reads === 2 && (scenario === "input-changed" || scenario === "input-invalid")) {
+        return { ...original, anchor: { ...original.anchor, toolInputJson: scenario === "input-invalid" ? "{"
+          : JSON.stringify({ session: { mode: "fork", sourceSessionId: "different" } }) } };
+      }
+      return original;
+    };
+    const findSession = base.result.runQuery.findSession;
+    base.result.runQuery.findSession = (id) => {
+      const original = findSession(id)!;
+      return { ...original,
+        ...(scenario === "winner-source" ? { forkedFromSessionId: "different" } : {}),
+        ...(scenario === "winner-workspace" ? { workspaceId: "different" } : {}),
+        ...(scenario === "winner-kind" ? { kind: "primary" as const } : {}),
+      };
+    };
+    const expected = scenario === "input-invalid" ? "AGENT_SUBTASK_ANCHOR_INVALID"
+      : scenario === "winner-workspace" ? "AGENT_SUBTASK_WORKSPACE_MISMATCH"
+        : scenario === "winner-kind" ? "AGENT_SUBTASK_KIND_MISMATCH" : "AGENT_SUBTASK_FORK_SOURCE_MISMATCH";
+    await assert.rejects(() => new SubtaskApplication(base.result).startSubtask(request({ session: { mode: "fork", sourceSessionId: " source " } })),
+      (error) => { assertHttpError(error, expected); return true; });
+    assert.equal(reads, 2);
+    assert.equal(base.calls.includes("compensate"), true);
+  });
+}
+
+for (const session of [
+  { mode: "new", sourceSessionId: "source" }, { mode: "existing", sessionId: "child", sourceSessionId: null },
+  { mode: "fork", sourceSessionId: 1 }, { mode: "fork", sourceSessionId: null },
+  { mode: "fork", sourceSessionId: " " },
+]) {
+  test(`direct application preserves raw source validation before side effects (${JSON.stringify(session)})`, async () => {
+    const base = dependencies();
+    const expected = session.mode === "fork" ? "AGENT_SUBTASK_SOURCE_SESSION_INVALID" : "AGENT_SUBTASK_SOURCE_SESSION_NOT_ALLOWED";
+    await assert.rejects(() => new SubtaskApplication(base.result).startSubtask(request({ session })),
+      (error) => { assertHttpError(error, expected); return true; });
+    assert.deepEqual(base.calls, []);
+  });
+}

@@ -23,6 +23,7 @@ export type SubtaskDisplay = {
   description: string | null;
   agent: string | null;
   mode: string | null;
+  sourceSessionId: string | null;
   resultText: string | null;
   subtaskSessionId: string | null;
 };
@@ -137,7 +138,7 @@ export function parseTodoDisplay(value: unknown): TodoDisplay | null {
   };
 }
 
-/** input 只提供请求描述；详情 structuredResult 才能提供 result/session 等执行结果。 */
+/** input 提供请求描述与显式 Fork 来源；详情 structuredResult 提供执行目标与结果。 */
 export function parseSubtaskDisplay(
   input: unknown,
   structuredResult: unknown,
@@ -154,6 +155,8 @@ export function parseSubtaskDisplay(
     agent: value(request, "agent") ?? value(request, "agentId"),
     // 当前 subtask 请求把模式放在 session；顶层字段只服务于早期兼容数据。
     mode: value(session, "mode") ?? value(request, "mode"),
+    // 来源是指定请求参数，不代表创建成功，也不从兼容 mode 或结果反推。
+    sourceSessionId: session?.mode === "fork" ? value(session, "sourceSessionId") : null,
     resultText: value(result, "resultText"),
     // 绝不从 preview 或其他文本猜测会话 ID。
     subtaskSessionId: value(result, "subtaskSessionId"),

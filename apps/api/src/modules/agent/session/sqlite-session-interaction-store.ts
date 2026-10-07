@@ -7,6 +7,7 @@ import {
   forkHistoricalMessageSession,
   validateHistoricalForkSource,
   forkMessageSession,
+  forkStableSourceSession,
   getMessageRunState,
   getMessageSession,
   getMessageSessionById,
@@ -59,6 +60,10 @@ export class SqliteSessionInteractionStore implements SessionInteractionStore {
 
   validateHistoricalSource(input: { workspaceId: string; sourceSessionId: string; targetMessageId: string }) {
     return validateHistoricalForkSource(this.dependencies.db, input);
+  }
+  forkStableSourceSession(input: { id: string; workspaceId: string; sourceSessionId: string;
+    title: string; createdAt: number }): AgentSessionRecord {
+    return forkStableSourceSession(this.dependencies.db, input);
   }
   forkHistoricalSource(input: { id: string; workspaceId: string; sourceSessionId: string;
     targetMessageId: string; title: string; createdAt: number }): AgentSessionRecord {
