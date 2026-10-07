@@ -109,8 +109,8 @@ test("PUT /api/agent/sessions/:sessionId/title 设置标题并永久接管，upd
   const fixture = await createAgentIntegrationFixture();
   t.after(async () => { await fixture.dispose(); });
   const session = await createSession(fixture.app, fixture.workspaceId);
-  const before = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions?workspaceId=${fixture.workspaceId}` });
-  const beforeRecord = (before.json() as Array<{ id: string; updatedAt: number }>).find((s) => s.id === session.id);
+  const before = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${session.id}?workspaceId=${fixture.workspaceId}` });
+  const beforeRecord = before.json() as { id: string; updatedAt: number };
   assert.ok(beforeRecord);
 
   const res = await putTitle(fixture, session.id, { workspaceId: fixture.workspaceId, title: "  我的   标题  " });
@@ -137,8 +137,8 @@ test("PUT title 后首条用户消息不再覆盖标题", async (t: TestContext)
   });
   assert.equal(send.statusCode, 201, send.body);
 
-  const list = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions?workspaceId=${fixture.workspaceId}` });
-  const record = (list.json() as Array<{ id: string; title: string }>).find((s) => s.id === session.id);
+  const list = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${session.id}?workspaceId=${fixture.workspaceId}` });
+  const record = list.json() as { id: string; title: string };
   assert.equal(record?.title, "手动标题");
 
   // 首条消息会启动后台 Run；显式取消并等待回到 idle 后再 dispose，避免连接关闭后的错误噪声
@@ -159,8 +159,11 @@ test("manual 状态下 todolist update-to-completed 不覆盖标题，auto 对�
   const control = await createSession(fixture.app, fixture.workspaceId);
   await completeTodolistForTitle(fixture, control.id, "update 自动目标");
 
-  const list = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions?workspaceId=${fixture.workspaceId}` });
-  const records = list.json() as Array<{ id: string; title: string }>;
+  const records = await Promise.all([manual.id, control.id].map(async (id) => {
+    const result = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${id}?workspaceId=${fixture.workspaceId}` });
+    assert.equal(result.statusCode, 200, result.body);
+    return result.json() as { id: string; title: string };
+  }));
   assert.equal(records.find((s) => s.id === manual.id)?.title, "update 锁定", "manual 下 update-to-completed 不得覆盖标题");
   assert.equal(records.find((s) => s.id === control.id)?.title, "update 自动目标");
 });
@@ -211,8 +214,8 @@ test("PUT title 对无 body/null/数组/缺 title 返回 400 而非 500", async 
   assert.equal(missingWs.statusCode, 400);
 
   // 均未发生写入
-  const list = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions?workspaceId=${fixture.workspaceId}` });
-  const record = (list.json() as Array<{ id: string; title: string }>).find((s) => s.id === session.id);
+  const list = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${session.id}?workspaceId=${fixture.workspaceId}` });
+  const record = list.json() as { id: string; title: string };
   assert.equal(record?.title, "it-session");
 });
 
@@ -239,8 +242,8 @@ test("PUT title 按 JavaScript string.length 执行原始 1000 上限", async (t
   assert.match(thousand.body, /AGENT_SESSION_TITLE_TOO_LONG/);
 
   // 未发生任何写入
-  const list = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions?workspaceId=${fixture.workspaceId}` });
-  const record = (list.json() as Array<{ id: string; title: string }>).find((s) => s.id === session.id);
+  const list = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${session.id}?workspaceId=${fixture.workspaceId}` });
+  const record = list.json() as { id: string; title: string };
   assert.equal(record?.title, "it-session");
 });
 
@@ -286,8 +289,8 @@ test("PUT title 返回 404/400/固定错误码", async (t: TestContext) => {
   assert.match(control.body, /AGENT_SESSION_TITLE_INVALID_CHARACTERS/);
 
   // 验证未发生任何写入
-  const list = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions?workspaceId=${fixture.workspaceId}` });
-  const record = (list.json() as Array<{ id: string; title: string }>).find((s) => s.id === session.id);
+  const list = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${session.id}?workspaceId=${fixture.workspaceId}` });
+  const record = list.json() as { id: string; title: string };
   assert.equal(record?.title, "it-session");
 });
 
@@ -303,8 +306,8 @@ test("未手动接管的 Session 仍由首条消息自动命名，manual 后 tod
     url: `/api/agent/sessions/${auto.id}/messages`,
     payload: { workspaceId: fixture.workspaceId, text: longText, clientRequestId: "req-auto" }
   });
-  const autoList = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions?workspaceId=${fixture.workspaceId}` });
-  const autoRecord = (autoList.json() as Array<{ id: string; title: string }>).find((s) => s.id === auto.id);
+  const autoList = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${auto.id}?workspaceId=${fixture.workspaceId}` });
+  const autoRecord = autoList.json() as { id: string; title: string };
   assert.ok(autoRecord);
   assert.ok(autoRecord.title.length <= 50);
   assert.match(autoRecord.title, /…$/);
@@ -315,15 +318,15 @@ test("未手动接管的 Session 仍由首条消息自动命名，manual 后 tod
 
   await completeTodolistForTitle(fixture, manual.id, "新的任务目标标题");
 
-  const list = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions?workspaceId=${fixture.workspaceId}` });
-  const manualRecord = (list.json() as Array<{ id: string; title: string }>).find((s) => s.id === manual.id);
+  const list = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${manual.id}?workspaceId=${fixture.workspaceId}` });
+  const manualRecord = list.json() as { id: string; title: string };
   assert.equal(manualRecord?.title, "锁定标题", "manual 状态下 todolist 不得覆盖标题");
 
   // 对照：未接管的 Session 上同样的 todolist 会更新标题
   const control = await createSession(fixture.app, fixture.workspaceId);
   await completeTodolistForTitle(fixture, control.id, "自动任务目标");
-  const controlList = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions?workspaceId=${fixture.workspaceId}` });
-  const controlRecord = (controlList.json() as Array<{ id: string; title: string }>).find((s) => s.id === control.id);
+  const controlList = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${control.id}?workspaceId=${fixture.workspaceId}` });
+  const controlRecord = controlList.json() as { id: string; title: string };
   assert.equal(controlRecord?.title, "自动任务目标");
 
   // auto Session 的首条消息启动了后台 Run；显式取消并等待回到 idle 后再 dispose
@@ -383,8 +386,8 @@ test("Fork 不继承手动接管标记：manual 源 Session Fork 后新 Session 
   assert.equal(send.statusCode, 201, send.body);
   await cancelSessionAndWaitIdle(fixture, source.id, fixture.workspaceId);
 
-  const list = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions?workspaceId=${fixture.workspaceId}` });
-  const sourceRecord = (list.json() as Array<{ id: string; title: string }>).find((s) => s.id === source.id);
+  const list = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${source.id}?workspaceId=${fixture.workspaceId}` });
+  const sourceRecord = list.json() as { id: string; title: string };
   assert.equal(sourceRecord?.title, "源手动标题");
 
   // Fork：从边界消息创建新 Session
@@ -403,8 +406,11 @@ test("Fork 不继承手动接管标记：manual 源 Session Fork 后新 Session 
   // 从该 head 继续追加，并通过新的写回端点更新自动标题。
   await completeTodolistForTitle(fixture, forked.id, "Fork 后的自动标题");
 
-  const after = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions?workspaceId=${fixture.workspaceId}` });
-  const records = after.json() as Array<{ id: string; title: string }>;
+  const records = await Promise.all([source.id, forked.id].map(async (id) => {
+    const result = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${id}?workspaceId=${fixture.workspaceId}` });
+    assert.equal(result.statusCode, 200, result.body);
+    return result.json() as { id: string; title: string };
+  }));
   assert.equal(records.find((s) => s.id === source.id)?.title, "源手动标题", "源 Session 仍保持手动接管");
   assert.equal(
     records.find((s) => s.id === forked.id)?.title,

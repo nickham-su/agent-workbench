@@ -30,7 +30,10 @@ test("Compaction source RPC only accepts its fixed request and strict provider-n
   };
   assert.equal(Value.Check(AgentApiCompactionSourceResponseSchema, response), true);
   assert.equal(Value.Check(AgentApiCompactionSourceResponseSchema, { ...response, wireMessages: [] }), false);
-  assert.equal(Value.Check(AgentApiCompactionSourceResponseSchema, { ...response, uiLocale: "zh-CN" }), false);
+  for (const uiLocale of [null, "zh-CN", "en-US"] as const) {
+    assert.equal(Value.Check(AgentApiCompactionSourceResponseSchema, { ...response, uiLocale }), true);
+  }
+  assert.equal(Value.Check(AgentApiCompactionSourceResponseSchema, { ...response, uiLocale: "fr-FR" }), false);
   assert.equal(Value.Check(AgentApiCompactionSourceResponseSchema, { ...response, sessionRevision: -1 }), false);
   assert.equal(Value.Check(AgentApiCompactionSourceResponseSchema, {
     ...response,

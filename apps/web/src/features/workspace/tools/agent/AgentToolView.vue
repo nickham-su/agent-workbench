@@ -17,6 +17,7 @@
     <a-tabs v-else class="agent-tabs h-full" size="small" :animated="false" :activeKey="effectiveActiveKey" @update:activeKey="onChangeTab">
       <template #rightExtra>
         <div class="flex items-center gap-1 pr-1">
+          <a-button size="small" data-testid="agent-tabs-reload" :loading="reloadingTabs" @click="reloadTabsSnapshot">{{ t("agent.client.reloadTabs") }}</a-button>
           <a-tooltip :title="t('agent.actions.minimize')">
             <a-button size="small" type="text" @click="minimizeSelf">
               <template #icon><MinusOutlined /></template>
@@ -94,6 +95,9 @@
       </a-tab-pane>
     </a-tabs>
 
+    <div v-if="targetOpeningSessionId" data-testid="agent-target-loading" class="text-[color:var(--text-tertiary)]">{{ t("common.loading") }}</div>
+    <a-button v-if="failedSessionTitleSync[effectiveActiveKey]" size="small" @click="syncSessionTitle(effectiveActiveKey)">{{ t("agent.client.retryTitleSync") }}</a-button>
+
     <a-modal
       v-model:open="chooseSessionModalOpen"
       :title="t('agent.client.chooseSessionTitle')"
@@ -102,13 +106,18 @@
       @cancel="closeChooseSessionModal"
     >
       <div class="agent-choose-session-modal" :style="{ fontSize: 'var(--agent-font-size, 13px)' }">
-        <div v-if="chooseSessionLoading" class="text-[0.9em] text-[color:var(--text-tertiary)]">
-          {{ t("common.loading") }}
+        <div class="flex gap-2 mb-2">
+          <a-button data-testid="agent-picker-refresh" @click="loadChooseSessionPage(true)">{{ t("agent.client.refreshSessionList") }}</a-button>
         </div>
-        <div v-else-if="chooseSessionItems.length === 0" class="text-[0.9em] text-[color:var(--text-tertiary)]">
-          {{ t("agent.client.noSessionToChoose") }}
+        <div v-if="chooseSessionLoading && !chooseSessionHasPage" data-testid="agent-picker-loading">{{ t("common.loading") }}</div>
+        <div v-if="chooseSessionPageError" data-testid="agent-picker-page-error">
+          {{ t(chooseSessionPageError === "cursor" ? "agent.client.sessionListExpired" : "agent.client.sessionListFailed") }}
+          <a-button data-testid="agent-picker-page-retry" @click="loadChooseSessionPage(!chooseSessionHasPage || chooseSessionPageError === 'cursor')">{{ t("agent.client.retryTabStateLoad") }}</a-button>
         </div>
-        <a-list v-else size="small" bordered :data-source="chooseSessionItems" class="choose-session-list max-h-[360px] overflow-auto">
+        <div v-else-if="chooseSessionHasPage && chooseSessionItems.length === 0" data-testid="agent-picker-empty">{{ t("agent.client.noSessionToChoose") }}</div>
+        <div v-if="chooseSessionSelecting" class="text-[color:var(--text-tertiary)]">{{ t("common.loading") }}</div>
+        <a-button v-if="failedPickerSelection" data-testid="agent-picker-retry" @click="chooseSession(failedPickerSelection.targetId, true)">{{ t("agent.client.retrySessionSelection") }}</a-button>
+        <a-list v-if="chooseSessionItems.length" size="small" bordered :data-source="chooseSessionItems" class="choose-session-list max-h-[360px] overflow-auto">
           <template #renderItem="{ item }">
             <a-list-item class="choose-session-item !px-3 !py-2 cursor-pointer transition-colors" @click="chooseSession(item.id)">
               <div class="w-full min-w-0">
@@ -118,6 +127,7 @@
             </a-list-item>
           </template>
         </a-list>
+        <a-button v-if="chooseSessionNextCursor" data-testid="agent-picker-more" :disabled="chooseSessionLoading || chooseSessionPageError === 'cursor'" :loading="chooseSessionLoading" @click="loadChooseSessionPage()">{{ t("agent.client.loadMoreSessions") }}</a-button>
       </div>
     </a-modal>
 
@@ -161,14 +171,16 @@ export default {
 import type { AgentSessionAgentModelState, AgentSessionMessageState, AgentSessionRecord } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { CloseOutlined, MinusOutlined, PlusOutlined } from "@ant-design/icons-vue";
 import { message } from "ant-design-vue";
-import { computed, onActivated, onBeforeUnmount, provide, reactive, ref, watch } from "vue";
+import { computed, onActivated, onBeforeUnmount, onDeactivated, provide, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import {
   ApiError,
   createAgentSession,
-  getWorkspaceAgentTabState,
+  getAgentTabsSnapshot,
+  getAgentContinuableSessions,
   listAgentSessionModelOverrides,
-  listAgentSessions,
+
+  getAgentSessionRecord,
   listWorkspaceAvailableAgents,
   setWorkspaceAgentSessionTabVisibility,
   updateAgentSessionTitle
@@ -195,7 +207,6 @@ import { requestSessionModelOpen } from "./agentSessionModelOpenFlow";
 import { agentSessionStatusStoreKey, createAgentSessionStatusStore } from "./useAgentSessionStatusStore";
 import {
   isRequestResponseWritable,
-  mergeStaleProtectedSessionList,
   mergeTimelineSessionTitle,
   resolveTitleSaveResponseAction,
   shouldAllowTitleModalClose,
@@ -210,13 +221,15 @@ import {
   type AgentSessionTabVisibilitySession,
   type SessionWriteState
 } from "./agentSessionTabVisibilityState";
+
+
 import {
-  canScheduleRetryRefresh,
-  canStartRefresh,
-  convergeMutationCache,
-  createTitleMutationCache,
-  type TitleMutationCacheState
-} from "./agentSessionRefreshCoordination";
+  agentSessionMetadataReadContextKey, createAgentSessionMetadataReads,
+  isContinuableSession, sameContinuationQualification,
+  type TimelineMetadataEvent
+} from "./agentSessionMetadataReadContext";
+import { createAgentSessionTargetLoader, isCompleteSessionRecord, type TargetReadOutcome } from "./agentSessionTargetLoader";
+import type { VisibilityIntentReceipt } from "./agentSessionTabVisibilityState";
 
 type DraftAgentSession = {
   id: string;
@@ -247,7 +260,11 @@ const { t } = useI18n();
 const loadingSessions = ref(false);
 const initializationState = ref<"loading" | "ready" | "error">("loading");
 const creating = ref(false);
+// Loaded metadata is a cache, not the full workspace inventory.
 const serverSessions = ref<AgentSessionRecord[]>([]);
+const visibleServerSessionIds = ref(new Set<string>());
+const reloadingTabs = ref(false);
+let activeSnapshotAbort: AbortController | null = null;
 const draftSessions = ref<DraftAgentSession[]>([]);
 const activeKey = ref<string>("");
 const selectedAgentBySession = reactive<Record<string, string | null>>({});
@@ -259,6 +276,11 @@ const tabNoMap = ref<Record<string, number>>({});
 const chooseSessionModalOpen = ref(false);
 const draftInitialTextBySession = reactive<Record<string, string>>({});
 const chooseSessionLoading = ref(false);
+const chooseSessionPageError = ref<"load" | "cursor" | null>(null);
+const chooseSessionNextCursor = ref<string | null>(null);
+const chooseSessionHasPage = ref(false);
+let pickerPageRequestSeq = 0;
+let pickerPageAbort: AbortController | null = null;
 const chooseSessionItems = ref<ChooseSessionItem[]>([]);
 const chooseSessionSourceId = ref("");
 const serverSessionsLoaded = ref(false);
@@ -276,27 +298,62 @@ const titleInput = ref("");
 const titleSaving = ref(false);
 const titleServerError = ref<ManualTitleValidationError | null>(null);
 
-// 标题手动接管并发防护：
-// - 每次成功手动保存提升全局 revision 并缓存完整 API record；
-// - 旧列表响应不得用旧字段覆盖 mutation 后的完整 record；
-// - workspaceGeneration/disposed 使在途请求在 Workspace 切换或卸载后失效。
-const titleMutationCache: TitleMutationCacheState = createTitleMutationCache();
+// Metadata read watermarks outlive each converged record until this Workspace ends.
 let workspaceGeneration = 0;
 let initializationAttemptId = 0;
 let disposed = false;
-type SessionRefreshToken = { generation: number; workspaceId: string };
-let activeSessionRefresh: SessionRefreshToken | null = null;
-let sessionRefreshRetry: SessionRefreshToken | null = null;
 let activeTitleSave: TitleSaveToken | null = null;
 let nextTitleSaveRequestId = 0;
 // 当前编辑上下文版本：每次打开弹窗递增，forceReset 再次递增。
 // 在途保存响应只能作用于它自己捕获的 token，不能关闭后续重新打开的编辑上下文。
 let titleEditingEpoch = 0;
 let openParentIntentId = 0;
+let lastQueuedOpenSessionSequence: number | null = null;
 
+const targetOpeningSessionId = ref("");
+let activeOpenAbort: AbortController | null = null;
+let activeOpenReceipt: VisibilityIntentReceipt | null = null;
 function invalidateOpenParentIntent() {
+  if (pickerSelection || failedPickerSelection.value) closeChooseSessionModal();
   openParentIntentId += 1;
+  targetOpeningSessionId.value = "";
+  activeOpenAbort?.abort();
+  activeOpenAbort = null;
+  activeOpenReceipt?.cancel();
+  activeOpenReceipt = null;
 }
+
+const unavailableSessionIds = reactive(new Set<string>());
+const metadataReads = createAgentSessionMetadataReads(() => disposed ? null : currentTabVisibilityContext());
+provide(agentSessionMetadataReadContextKey, {
+  captureReadToken: metadataReads.captureReadToken,
+  captureActivationGuard: () => {
+    const context = currentTabVisibilityContext();
+    const intent = openParentIntentId;
+    return () => isTabVisibilityContextCurrent(context) && openParentIntentId === intent;
+  }
+});
+
+function upsertSession(record: AgentSessionRecord) {
+  unavailableSessionIds.delete(record.id);
+  serverSessions.value = [record, ...serverSessions.value.filter((item) => item.id !== record.id)].sort((a, b) => b.updatedAt - a.updatedAt);
+}
+function applyLocalSession(record: AgentSessionRecord) {
+  upsertSession(record);
+  metadataReads.mutation(record.id);
+}
+
+const targetLoader = createAgentSessionTargetLoader({
+  context: () => disposed ? null : currentTabVisibilityContext(),
+  capture: (sessionId) => metadataReads.captureReadToken(props.workspaceId, sessionId),
+  request: (token, signal) => getAgentSessionRecord(token.workspaceId, token.sessionId, signal),
+  accept: (token) => metadataReads.accept(token),
+  epoch: (sessionId) => metadataReads.epoch(sessionId),
+  confirmationEpoch: (sessionId) => tabVisibilityController.getState(sessionId)?.confirmationEpoch ?? 0,
+  commit: (record) => {
+    upsertSession(record);
+  }
+});
 
 const statusStore = createAgentSessionStatusStore();
 provide(agentSessionStatusStoreKey, statusStore);
@@ -309,13 +366,60 @@ function isTabVisibilityContextCurrent(context: { workspaceId: string; workspace
   return !disposed && context.workspaceId === props.workspaceId && context.workspaceGeneration === workspaceGeneration;
 }
 
+const pickerToolActive = ref(true);
+let pickerToolGeneration = 0;
+type VisibilityOperationOrigin = {
+  intentSeq: number;
+  prompted: boolean;
+  kind: "opening" | "picker" | "compensation";
+  isCurrent(): boolean;
+};
+const visibilityOperationOrigins = new Map<string, VisibilityOperationOrigin>();
+const pickerCompensations = new Set<VisibilityIntentReceipt>();
+function registerVisibilityReceipt(
+  record: AgentSessionRecord,
+  context: ReturnType<typeof currentTabVisibilityContext>,
+  kind: VisibilityOperationOrigin["kind"] = "opening",
+  isCurrent = () => isTabVisibilityContextCurrent(context)
+) {
+  visibleServerSessionIds.value.add(record.id);
+  const receipt = tabVisibilityController.requestVisibilityWithResult(record, true, context);
+  visibilityOperationOrigins.set(record.id, { intentSeq: receipt.intentSeq, prompted: false, kind, isCurrent });
+  return receipt;
+}
+function notifyVisibilityTimeout(sessionId: string, receipt: VisibilityIntentReceipt) {
+  const origin = visibilityOperationOrigins.get(sessionId);
+  if (origin?.intentSeq === receipt.intentSeq) {
+    if (origin.prompted || !origin.isCurrent()) return;
+    origin.prompted = true;
+  }
+  message.warning(t("agent.client.sessionLoadFailed"));
+}
+function notifyPickerVisibilityUncertain(origin: VisibilityOperationOrigin) {
+  if (origin.prompted || !origin.isCurrent()) return;
+  origin.prompted = true;
+  message.warning(t("agent.client.sessionRestoreUnconfirmed"));
+}
+
 const tabVisibilityController = createAgentSessionTabVisibilityController({
   request: setWorkspaceAgentSessionTabVisibility,
   isContextCurrent: isTabVisibilityContextCurrent,
-  onMutationError: (_sessionId, error) => {
+  onMutationError: (sessionId, error) => {
+    const origin = visibilityOperationOrigins.get(sessionId);
+    // Picker receipts own their uncertainty feedback, including a late PUT failure.
+    if (origin && (origin.kind !== "opening" || !origin.isCurrent() || origin.prompted)) return;
+    if (origin) origin.prompted = true;
     message.error(t("agent.client.tabStateUpdateFailed") + (error instanceof Error ? `: ${error.message}` : ""));
   },
-  onStateChange: () => reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value }),
+  onStateChange: () => {
+    reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
+    queueMicrotask(() => {
+      for (const [id, origin] of visibilityOperationOrigins) {
+        const state = tabVisibilityController.getState(id);
+        if (!state || state.nextIntentSeq !== origin.intentSeq || (!state.desired && !state.inFlight)) visibilityOperationOrigins.delete(id);
+      }
+    });
+  },
   writeStates: tabVisibilityWriteStates
 });
 
@@ -326,12 +430,15 @@ const effectiveActiveKey = computed(() => {
   return visibleSessions.value[0]?.id ?? "";
 });
 
+function isSessionTabVisible(item: AgentSessionTab) {
+  if (isDraftSession(item)) return draftVisibilityBySession[item.id] ?? true;
+  return visibleServerSessionIds.value.has(item.id) && !unavailableSessionIds.has(item.id)
+    && tabVisibilityController.getEffectiveVisibility(item as AgentSessionTabVisibilitySession);
+}
+
 const visibleSessions = computed(() => {
-  // tabs 的展示顺序按编号从小到大,确保新建 client 出现在最右侧。
-  const list = allSessions.value.filter((item) => {
-    if (isDraftSession(item)) return draftVisibilityBySession[item.id] ?? true;
-    return tabVisibilityController.getEffectiveVisibility(item as AgentSessionTabVisibilitySession);
-  });
+  // Display and numbering share exactly the same partial-cache membership rule.
+  const list = allSessions.value.filter(isSessionTabVisible);
   return [...list].sort((a, b) => {
     const na = tabNoMap.value[a.id];
     const nb = tabNoMap.value[b.id];
@@ -342,6 +449,11 @@ const visibleSessions = computed(() => {
     return a.createdAt - b.createdAt;
   });
 });
+
+watch(
+  () => [props.workspaceId, allSessions.value.filter(isSessionTabVisible).map((item) => item.id).join("|")] as const,
+  () => reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value })
+);
 
 function activeKeyStorageKey(workspaceId: string) {
   const id = String(workspaceId || "").trim();
@@ -365,9 +477,7 @@ function reconcileTabNoMap(params: { workspaceId: string; sessions: AgentSession
   // 只对当前 workspace 且当前可见的 session 分配编号,避免 workspace 切换时短暂拿到旧列表导致污染映射。
   const sessionsInWs = params.sessions
     .filter((s) => String(s.workspaceId || "").trim() === id)
-    .filter((s) => isDraftSession(s)
-      ? (draftVisibilityBySession[s.id] ?? true)
-      : tabVisibilityController.getEffectiveVisibility(s as AgentSessionTabVisibilitySession));
+    .filter(isSessionTabVisible);
   const present = new Set(sessionsInWs.map((s) => s.id));
   const nextMap: Record<string, number> = { ...tabNoMap.value };
 
@@ -471,10 +581,19 @@ function newDraftSessionId() {
 function canChooseSessionFrom(sessionId: string) {
   const fromDraft = draftSessions.value.some((item) => item.id === sessionId);
   if (!fromDraft) return false;
-  return serverSessions.value.some((item) => item.kind === "primary" && item.id !== sessionId);
+  return (draftVisibilityBySession[sessionId] ?? true) && !draftCreatePromises.has(sessionId);
 }
 
 function closeChooseSessionModal() {
+  pickerGeneration += 1;
+  pickerPageRequestSeq += 1;
+  pickerPageAbort?.abort();
+  pickerPageAbort = null;
+  chooseSessionLoading.value = false;
+  chooseSessionPageError.value = null;
+  chooseSessionNextCursor.value = null;
+  chooseSessionHasPage.value = false;
+  cancelPickerSelection();
   chooseSessionModalOpen.value = false;
   chooseSessionSourceId.value = "";
   chooseSessionItems.value = [];
@@ -590,10 +709,7 @@ async function saveTitle() {
     });
     if (action === "ignore") return;
     // 这里 action === "apply-close"：当前编辑上下文就是本请求的目标。
-    titleMutationCache.revision += 1;
-    titleMutationCache.revisionBySession.set(sessionId, titleMutationCache.revision);
-    titleMutationCache.recordBySession.set(sessionId, record);
-    serverSessions.value = serverSessions.value.map((item) => (item.id === sessionId ? record : item));
+    applyLocalSession(record);
     // 成功关闭后结束当前编辑上下文：若仍有迟到的在途响应（理论上极小窗口），
     // 不得作用于之后重新打开的弹窗。
     titleEditingEpoch += 1;
@@ -765,90 +881,6 @@ function onSessionModelMutationPending(params: { sessionId: string; pending: boo
   else delete sessionModelMutationPending[params.sessionId];
 }
 
-function refreshTabVisibilitySessions() {
-  tabVisibilityController.pruneSettledStates(serverSessions.value as AgentSessionTabVisibilitySession[]);
-}
-
-async function refreshSessions() {
-  // 按 generation/workspace 隔离并发占用：旧 Workspace 的在途请求不得阻止新 Workspace 发起刷新。
-  const requestGeneration = workspaceGeneration;
-  const requestWorkspaceId = props.workspaceId;
-  const token: SessionRefreshToken = { generation: requestGeneration, workspaceId: requestWorkspaceId };
-  if (!canStartRefresh(activeSessionRefresh, requestGeneration, requestWorkspaceId)) {
-    return false;
-  }
-  activeSessionRefresh = token;
-  loadingSessions.value = true;
-  const requestRevision = titleMutationCache.revision;
-  let ok = false;
-  let usedRecordProtection = false;
-  try {
-    const list = await listAgentSessions(requestWorkspaceId);
-    if (!isRequestResponseWritable({
-      disposed,
-      currentGeneration: workspaceGeneration,
-      requestGeneration,
-      currentWorkspaceId: props.workspaceId,
-      requestWorkspaceId
-    })) {
-      return false;
-    }
-    let merged = list;
-    if (titleMutationCache.revision > requestRevision) {
-      // 本次请求开始后有成功的手动标题 mutation：对命中的 Session 完整保留 API record，不拼接字段。
-      const result = mergeStaleProtectedSessionList(list, {
-        requestRevision,
-        mutationRevisionBySession: titleMutationCache.revisionBySession,
-        mutationRecordBySession: titleMutationCache.recordBySession
-      }, (record) => record.id);
-      merged = result.merged;
-      usedRecordProtection = result.protectedSessionIds.length > 0;
-    }
-    // 本次请求不晚于任何成功 mutation 时，服务端 record 为权威：清理已收敛缓存。
-    convergeMutationCache(titleMutationCache, requestRevision, new Set(merged.map((record) => record.id)));
-    serverSessions.value = [...merged].sort((a, b) => b.updatedAt - a.updatedAt);
-    void refreshVisibleSessionModelStates();
-    // 普通 Session 刷新只能更新元数据，不能覆盖 controller 的 pending/inFlight 可见性状态。
-    refreshTabVisibilitySessions();
-    serverSessionsLoaded.value = true;
-    reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
-    if (effectiveActiveKey.value) {
-      activeKey.value = effectiveActiveKey.value;
-      persistActiveKey(effectiveActiveKey.value);
-    }
-    ok = true;
-  } catch (err) {
-    if (isRequestResponseWritable({
-      disposed,
-      currentGeneration: workspaceGeneration,
-      requestGeneration,
-      currentWorkspaceId: props.workspaceId,
-      requestWorkspaceId
-    })) {
-      message.error(err instanceof Error ? err.message : String(err));
-    }
-  } finally {
-    if (activeSessionRefresh === token) {
-      activeSessionRefresh = null;
-      loadingSessions.value = false;
-    }
-  }
-  if (usedRecordProtection && ok) {
-    // 旧响应使用过完整 record 保护：mutation 后去重调度一次 R2，收敛到服务端权威记录。
-    // token 按 generation/workspace 隔离：旧 Workspace 的 R2 不得阻塞新 Workspace 的收敛调度。
-    if (canScheduleRetryRefresh(sessionRefreshRetry, requestGeneration, requestWorkspaceId) && !disposed) {
-      const retryToken: SessionRefreshToken = { generation: requestGeneration, workspaceId: requestWorkspaceId };
-      sessionRefreshRetry = retryToken;
-      void refreshSessions()
-        .catch(() => undefined)
-        .finally(() => {
-          if (sessionRefreshRetry === retryToken) sessionRefreshRetry = null;
-        });
-    }
-  }
-  return ok;
-}
-
 function setDraftInitialText(sessionId: string, text: string) {
   const key = String(sessionId || "").trim();
   if (!key) return;
@@ -857,14 +889,13 @@ function setDraftInitialText(sessionId: string, text: string) {
   draftInitialTextBySession[key] = next;
 }
 
-function onSessionMetadataUpdated(session: AgentSessionMessageState) {
-  if (session.workspaceId !== props.workspaceId) return;
-  const protectedRecord = titleMutationCache.recordBySession.get(session.id) as AgentSessionRecord | undefined;
-  serverSessions.value = mergeTimelineSessionTitle(
-    serverSessions.value,
-    session,
-    protectedRecord,
-  );
+function onSessionMetadataUpdated(event: TimelineMetadataEvent) {
+  if (event.session.workspaceId !== props.workspaceId || event.session.id !== event.readToken.sessionId) return;
+  if (metadataReads.accept(event.readToken) !== "accepted") return;
+  const current = serverSessions.value.find((item) => item.id === event.session.id);
+  if (!current || current.title === event.session.title) return;
+  serverSessions.value = mergeTimelineSessionTitle(serverSessions.value, event.session);
+  metadataReads.mutation(event.session.id);
 }
 
 function requestSessionTitleSync(sessionId: string) {
@@ -875,6 +906,47 @@ function requestSessionTitleSync(sessionId: string) {
   pendingSessionTitleSyncUpdatedAt[targetSessionId] = updatedAt;
 }
 
+
+const failedSessionTitleSync = reactive<Record<string, true>>({});
+const titleSyncJobs = new Map<string, { dirty: boolean }>();
+async function syncSessionTitle(sessionId: string) {
+  const existing = titleSyncJobs.get(sessionId);
+  if (existing) { existing.dirty = true; return; }
+  const context = currentTabVisibilityContext();
+  const job = { dirty: false };
+  titleSyncJobs.set(sessionId, job);
+  delete failedSessionTitleSync[sessionId];
+  const valid = () => isTabVisibilityContextCurrent(context) && titleSyncJobs.get(sessionId) === job;
+  try {
+    do {
+      job.dirty = false;
+      const result = await readFreshTarget(sessionId, valid, new AbortController().signal);
+      if (!valid()) return;
+      if (result.status !== "accepted") {
+        failedSessionTitleSync[sessionId] = true;
+        if (effectiveActiveKey.value === sessionId && result.status !== "contextInvalidated" && result.status !== "cancelled") {
+          showTargetFailure(result, sessionId);
+        }
+        break; // Never replay a failed event from an idle watcher.
+      }
+    } while (job.dirty && valid()); // Only a distinct business event can queue another pass.
+  } finally {
+    if (titleSyncJobs.get(sessionId) === job) titleSyncJobs.delete(sessionId);
+  }
+}
+
+/** One zero-visible policy for snapshots, activation and open terminal states. */
+function ensureVisibleSessionFallback(
+  context = currentTabVisibilityContext(),
+  intent = openParentIntentId
+) {
+  const request = props.openSessionRequest;
+  const hasQueuedExternalOpen = !!request?.sessionId && request.sequence !== lastQueuedOpenSessionSequence;
+  if (!isTabVisibilityContextCurrent(context) || intent !== openParentIntentId
+    || initializationState.value !== "ready" || creating.value
+    || hasQueuedExternalOpen || targetOpeningSessionId.value || visibleSessions.value.length > 0) return;
+  return createOneSession();
+}
 
 async function createOneSession() {
   if (initializationState.value !== "ready") return;
@@ -922,6 +994,8 @@ async function ensureSessionCreated(sessionId: string) {
     requestWorkspaceId
   });
 
+  if (chooseSessionSourceId.value === sessionId) closeChooseSessionModal();
+
   const job = (async (): Promise<string> => {
     try {
       const created = await createAgentSession({
@@ -936,9 +1010,7 @@ async function ensureSessionCreated(sessionId: string) {
       draftSessions.value = draftSessions.value.filter((item) => item.id !== sessionId);
       delete draftVisibilityBySession[sessionId];
       delete draftInitialTextBySession[sessionId];
-      serverSessions.value = [created, ...serverSessions.value.filter((item) => item.id !== created.id)].sort(
-        (a, b) => b.updatedAt - a.updatedAt
-      );
+      applyLocalSession(created);
 
       // 草稿切换为真实 Session 后，立即开始加载权威模型状态。loadSessionModelStates
       // 会同步标记 loading，避免新 Pane 在首次发送期间把“尚未加载”误显示为“不可用”。
@@ -951,6 +1023,7 @@ async function ensureSessionCreated(sessionId: string) {
       clearSessionModelStates(sessionModelStates, sessionId);
       migrateSessionModelOpenIntent(pendingModelOpenIntentBySession, sessionId, created.id);
 
+      if (draftVisible) visibleServerSessionIds.value.add(created.id);
       tabVisibilityController.transferDraftVisibility(created as AgentSessionTabVisibilitySession, draftVisible, currentTabVisibilityContext());
 
       if (tabNoMap.value[sessionId]) {
@@ -995,6 +1068,8 @@ async function ensureSessionCreated(sessionId: string) {
 function requestSessionVisibility(sessionId: string, visible: boolean) {
   const session = serverSessions.value.find((item) => item.id === sessionId);
   if (!session) return false;
+  if (visible) visibleServerSessionIds.value.add(sessionId);
+  visibilityOperationOrigins.delete(sessionId); // Independent user intent, not old-operation compensation.
   const accepted = tabVisibilityController.requestVisibility(
     session as AgentSessionTabVisibilitySession,
     visible,
@@ -1004,7 +1079,9 @@ function requestSessionVisibility(sessionId: string, visible: boolean) {
   return accepted;
 }
 
-function closeSessionTab(sessionId: string) {
+function closeSessionTab(sessionId: string, userIntent = true) {
+  if (userIntent) invalidateOpenParentIntent();
+  if (chooseSessionSourceId.value === sessionId) closeChooseSessionModal();
   if (!sessionId) return;
   const draft = draftSessions.value.find((item) => item.id === sessionId);
   if (draft) draftVisibilityBySession[sessionId] = false;
@@ -1030,85 +1107,95 @@ function closeSessionTab(sessionId: string) {
     return;
   }
 
-  if (initializationState.value === "ready") void createOneSession();
+  void ensureVisibleSessionFallback();
 }
 
-async function onSessionForked(sessionId: string) {
-  await refreshSessions();
-  if (!sessionId) return;
-  requestSessionVisibility(sessionId, true);
+function onSessionForked(record: AgentSessionRecord, mayActivate = true) {
+  if (record.workspaceId !== props.workspaceId || disposed) return;
+  applyLocalSession(record);
+  if (!mayActivate) return;
   invalidateOpenParentIntent();
+  requestSessionVisibility(record.id, true);
+  activateSession(record.id);
+}
+
+function activateSession(sessionId: string) {
   reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
   activeKey.value = sessionId;
   statusStore.markSessionSeen(sessionId);
   persistActiveKey(sessionId);
 }
 
-async function onOpenSubtask(sessionId: string) {
-  if (!sessionId) return;
-  // 若当前列表已经包含子任务，先乐观登记意图；否则刷新后再登记。
-  const opened = requestSessionVisibility(sessionId, true);
-  if (!opened) {
-    await refreshSessions();
-    requestSessionVisibility(sessionId, true);
+async function readFreshTarget(sessionId: string, valid: () => boolean, signal: AbortSignal): Promise<TargetReadOutcome> {
+  // One fresh follow-up after a protected read; no recursive or full-list retry.
+  let outcome = await targetLoader.read(sessionId, { valid, signal });
+  if (valid() && !signal.aborted && (outcome.status === "protected" || outcome.status === "supersededRead")) {
+    outcome = await targetLoader.read(sessionId, { valid, signal });
   }
-  invalidateOpenParentIntent();
-  reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
-  activeKey.value = sessionId;
-  statusStore.markSessionSeen(sessionId);
-  persistActiveKey(sessionId);
+  return outcome;
 }
 
-function activateParentSessionTab(sessionId: string) {
-  // Existing Agent tab visibility is also used for scheduled execution links.
-  if (!sessionId) return;
-  requestSessionVisibility(sessionId, true);
-  reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
-  activeKey.value = sessionId;
-  statusStore.markSessionSeen(sessionId);
-  persistActiveKey(sessionId);
-}
-
-async function onOpenParent(sourceSessionId: string, sessionId: string) {
-  if (!sessionId) return;
-  const localTarget = serverSessions.value.find((item) => item.id === sessionId && item.kind === "primary");
-  if (localTarget) {
-    const intentId = ++openParentIntentId;
-    activateParentSessionTab(sessionId);
-    if (sourceSessionId && sourceSessionId !== sessionId) {
-      closeSessionTab(sourceSessionId);
+function showTargetFailure(outcome: TargetReadOutcome, sessionId: string) {
+  if (outcome.status === "cancelled" || outcome.status === "contextInvalidated") return;
+  if (outcome.status === "failed" && outcome.classification === "unauthorized") return; // auth interceptor owns the prompt
+  if (outcome.status === "failed" && outcome.classification === "sessionNotFound") {
+    unavailableSessionIds.add(sessionId);
+    if (pickerSelection?.targetId === sessionId) cancelPickerSelection();
+    chooseSessionItems.value = chooseSessionItems.value.filter((item) => item.id !== sessionId);
+    if (failedPickerSelection.value?.targetId === sessionId) failedPickerSelection.value = null;
+    if (activeKey.value === sessionId) {
+      const fallback = visibleSessions.value[0]?.id;
+      if (fallback) activateSession(fallback);
+      else activeKey.value = "";
     }
-    void refreshSessions().then((ok) => {
-      if (!ok) return;
-      if (intentId !== openParentIntentId) return;
-      const refreshedTarget = serverSessions.value.find((item) => item.id === sessionId);
-      if (refreshedTarget) return;
-      const fallback = effectiveActiveKey.value || visibleSessions.value[0]?.id || "";
-      if (fallback) {
-        activeKey.value = fallback;
-        statusStore.markSessionSeen(fallback);
-        persistActiveKey(fallback);
-      } else {
-        void createOneSession();
+    message.warning(t("agent.client.sessionUnavailable"));
+  } else if (outcome.status === "failed" && outcome.classification === "workspaceNotFound") {
+    message.warning(t("agent.client.workspaceUnavailable"));
+  } else message.error(t("agent.client.sessionLoadFailed"));
+}
+
+async function openTargetSession(sessionId: string, sourceSessionId?: string) {
+  if (!sessionId || initializationState.value !== "ready") return;
+  invalidateOpenParentIntent();
+  const intent = openParentIntentId;
+  const previousActiveKey = effectiveActiveKey.value;
+  const context = currentTabVisibilityContext();
+  const abort = new AbortController();
+  activeOpenAbort = abort;
+  const valid = () => isTabVisibilityContextCurrent(context) && intent === openParentIntentId;
+  targetOpeningSessionId.value = sessionId;
+  try {
+    const outcome = await readFreshTarget(sessionId, valid, abort.signal);
+    if (!valid()) return;
+    if (outcome.status !== "accepted") { showTargetFailure(outcome, sessionId); return; }
+    if (sourceSessionId && outcome.record.kind !== "primary") { message.warning(t("agent.client.parentSessionMissing")); return; }
+    const receipt = registerVisibilityReceipt(outcome.record, context);
+    activeOpenReceipt = receipt;
+    activateSession(sessionId);
+    const confirmation = await receipt.result;
+    if (!valid() || receipt.intentSeq !== tabVisibilityController.getState(sessionId)?.nextIntentSeq) return;
+    if (confirmation.status !== "confirmed") {
+      if (activeKey.value === sessionId) {
+        const fallback = [sourceSessionId, previousActiveKey].find((id) => id && visibleSessions.value.some((item) => item.id === id))
+          ?? visibleSessions.value[0]?.id;
+        if (fallback) activateSession(fallback);
+        else activeKey.value = "";
       }
-      if (activeKey.value !== fallback && activeKey.value !== sessionId) return;
-      message.warning(t("agent.client.parentSessionMissing"));
-    });
-    return;
-  }
-  const intentId = ++openParentIntentId;
-  await refreshSessions();
-  if (intentId !== openParentIntentId) return;
-  const target = serverSessions.value.find((item) => item.id === sessionId);
-  if (!target) {
-    message.warning(t("agent.client.parentSessionMissing"));
-    return;
-  }
-  activateParentSessionTab(sessionId);
-  if (sourceSessionId && sourceSessionId !== sessionId) {
-    closeSessionTab(sourceSessionId);
+      if (confirmation.status === "uiTimeout") notifyVisibilityTimeout(sessionId, receipt);
+      return;
+    }
+    if (sourceSessionId && sourceSessionId !== sessionId) closeSessionTab(sourceSessionId, false);
+  } finally {
+    if (valid()) {
+      // Opening spans the accepted GET and its visibility receipt, not just HTTP.
+      targetOpeningSessionId.value = "";
+      await ensureVisibleSessionFallback(context, intent);
+    }
   }
 }
+
+async function onOpenSubtask(sessionId: string) { await openTargetSession(sessionId); }
+async function onOpenParent(sourceSessionId: string, sessionId: string) { await openTargetSession(sessionId, sourceSessionId); }
 
 function replaceDraftWithSession(params: { fromSessionId: string; targetSessionId: string }) {
   const fromSessionId = params.fromSessionId;
@@ -1123,7 +1210,7 @@ function replaceDraftWithSession(params: { fromSessionId: string; targetSessionI
 
   draftSessions.value = draftSessions.value.filter((item) => item.id !== fromSessionId);
   delete draftVisibilityBySession[fromSessionId];
-  requestSessionVisibility(target.id, true);
+  // Visibility was already confirmed by this selection before replacing the source.
 
   const fromNo = tabNoMap.value[fromSessionId];
   const nextMap = { ...tabNoMap.value };
@@ -1145,49 +1232,198 @@ function replaceDraftWithSession(params: { fromSessionId: string; targetSessionI
 }
 
 async function openChooseSessionModal(fromSessionId: string) {
-  const fromDraft = draftSessions.value.find((item) => item.id === fromSessionId);
-  if (!fromDraft) return;
-
+  if (!pickerToolActive.value || !canChooseSessionFrom(fromSessionId)) return;
+  closeChooseSessionModal();
   chooseSessionSourceId.value = fromSessionId;
   chooseSessionModalOpen.value = true;
-  chooseSessionLoading.value = true;
-
-  const candidates = [...serverSessions.value]
-    .filter(
-      (item) =>
-        item.kind === "primary" &&
-        item.id !== fromSessionId &&
-        item.headMessageId !== null &&
-        String(item.title || "").trim().length > 0 &&
-        String(item.title || "").trim() !== "新会话"
-    )
-    .sort((a, b) => b.updatedAt - a.updatedAt);
-
-  if (candidates.length === 0) {
-    chooseSessionItems.value = [];
-    chooseSessionLoading.value = false;
-    return;
-  }
-
-  chooseSessionItems.value = candidates.map((session) => ({
-    id: session.id,
-    preview: truncatePreview(session.title, 50) || t("agent.client.sessionEmptyPreview"),
-    updatedAt: session.updatedAt
-  }));
-  chooseSessionLoading.value = false;
+  await loadChooseSessionPage(true);
 }
 
-function chooseSession(targetSessionId: string) {
+async function loadChooseSessionPage(reset = false) {
+  if (!chooseSessionModalOpen.value || !canChooseSessionFrom(chooseSessionSourceId.value)) return;
+  if (!reset && (chooseSessionLoading.value || chooseSessionNextCursor.value === null || chooseSessionPageError.value === "cursor")) return;
+  if (reset) {
+    cancelPickerSelection();
+    pickerGeneration += 1;
+    pickerPageAbort?.abort();
+    chooseSessionItems.value = [];
+    chooseSessionNextCursor.value = null;
+    chooseSessionHasPage.value = false;
+  }
+  const requestSeq = ++pickerPageRequestSeq;
+  const generation = pickerGeneration;
+  const sourceId = chooseSessionSourceId.value;
+  const context = currentTabVisibilityContext();
+  const abort = new AbortController();
+  pickerPageAbort = abort;
+  const valid = () => requestSeq === pickerPageRequestSeq && generation === pickerGeneration
+    && chooseSessionModalOpen.value && chooseSessionSourceId.value === sourceId
+    && isTabVisibilityContextCurrent(context) && canChooseSessionFrom(sourceId)
+    && effectiveActiveKey.value === sourceId;
+  chooseSessionLoading.value = true;
+  chooseSessionPageError.value = null;
+  try {
+    const page = await getAgentContinuableSessions(context.workspaceId, {
+      ...(reset ? {} : { cursor: chooseSessionNextCursor.value ?? undefined }), signal: abort.signal
+    });
+    if (!valid()) return;
+    if (page.scope !== "continuable" || !Array.isArray(page.items) || page.items.length > 50
+      || !(page.nextCursor === null || (typeof page.nextCursor === "string" && page.nextCursor.length > 0))
+      || page.items.some((record) => !isCompleteSessionRecord(record) || record.workspaceId !== context.workspaceId || !isContinuableSession(record))) {
+      throw new Error("invalid candidate page response");
+    }
+    const items = new Map(chooseSessionItems.value.map((item) => [item.id, item]));
+    for (const record of page.items) {
+      if (unavailableSessionIds.has(record.id)) continue;
+      items.set(record.id, { id: record.id, preview: truncatePreview(record.title, 50), updatedAt: record.updatedAt });
+    }
+    chooseSessionItems.value = [...items.values()];
+    chooseSessionNextCursor.value = page.nextCursor;
+    chooseSessionHasPage.value = true;
+  } catch (error) {
+    if (valid()) chooseSessionPageError.value = error instanceof ApiError && error.code === "AGENT_SESSION_CURSOR_INVALID" ? "cursor" : "load";
+  } finally {
+    if (valid()) {
+      chooseSessionLoading.value = false;
+      if (pickerPageAbort === abort) pickerPageAbort = null;
+    }
+  }
+}
+
+type PickerIdentity = {
+  sourceId: string; targetId: string; context: ReturnType<typeof currentTabVisibilityContext>; generation: number; toolGeneration: number;
+};
+type PickerSelection = PickerIdentity & {
+  abort: AbortController; receipt?: VisibilityIntentReceipt; visibilityOrigin?: VisibilityOperationOrigin; openingIntent: number; committed: boolean;
+};
+let pickerGeneration = 0;
+let pickerSelection: PickerSelection | null = null;
+// Retry identity owns no transport or receipt and survives cancellation/compensation.
+const failedPickerSelection = ref<PickerIdentity | null>(null);
+const chooseSessionSelecting = ref(false);
+const chooseSessionSelectionFailed = computed(() => failedPickerSelection.value !== null);
+
+function isPickerIdentityCurrent(identity: PickerIdentity) {
+  return pickerToolActive.value && identity.toolGeneration === pickerToolGeneration
+    && identity.generation === pickerGeneration && chooseSessionModalOpen.value
+    && isTabVisibilityContextCurrent(identity.context) && chooseSessionSourceId.value === identity.sourceId
+    && effectiveActiveKey.value === identity.sourceId && !draftCreatePromises.has(identity.sourceId)
+    && draftSessions.value.some((item) => item.id === identity.sourceId && (draftVisibilityBySession[item.id] ?? true));
+}
+
+function recordPickerFailure(selection: PickerSelection) {
+  failedPickerSelection.value = {
+    sourceId: selection.sourceId, targetId: selection.targetId, context: selection.context, generation: selection.generation, toolGeneration: selection.toolGeneration
+  };
+  chooseSessionSelecting.value = false;
+}
+
+function cancelPickerSelection(options: { notifyUncertainty?: boolean } = {}) {
+  const selection = pickerSelection;
+  pickerSelection = null;
+  chooseSessionSelecting.value = false;
+  failedPickerSelection.value = null;
+  if (!selection) return;
+  selection.abort.abort();
+  selection.receipt?.cancel();
+  if (!selection.committed && selection.receipt && isTabVisibilityContextCurrent(selection.context)
+    && !selection.receipt.previousEffectiveVisibility
+    && selection.receipt.intentSeq === tabVisibilityController.getState(selection.targetId)?.nextIntentSeq) {
+    const record = serverSessions.value.find((item) => item.id === selection.targetId);
+    if (record) {
+      // Restoring visibility uses the same write queue, but owns a separate bounded UI receipt.
+      const receipt = tabVisibilityController.requestVisibilityWithResult(record, false, selection.context);
+      const origin = selection.visibilityOrigin ?? {
+        intentSeq: receipt.intentSeq, prompted: false, kind: "compensation" as const, isCurrent: () => false
+      };
+      origin.intentSeq = receipt.intentSeq;
+      origin.kind = "compensation";
+      origin.isCurrent = () => pickerToolActive.value && pickerToolGeneration === selection.toolGeneration
+        && isTabVisibilityContextCurrent(selection.context) && openParentIntentId === selection.openingIntent
+        && tabVisibilityController.getState(record.id)?.nextIntentSeq === receipt.intentSeq;
+      visibilityOperationOrigins.set(record.id, origin);
+      pickerCompensations.add(receipt);
+      if (options.notifyUncertainty) notifyPickerVisibilityUncertain(origin);
+      void receipt.result.then((outcome) => {
+        if (outcome.status === "failed" || outcome.status === "uiTimeout") notifyPickerVisibilityUncertain(origin);
+      }).finally(() => {
+        pickerCompensations.delete(receipt);
+        const state = tabVisibilityController.getState(record.id);
+        if (visibilityOperationOrigins.get(record.id) === origin && (!state?.desired && !state?.inFlight)) {
+          visibilityOperationOrigins.delete(record.id);
+        }
+      });
+      if (!pickerToolActive.value) receipt.cancel();
+      return;
+    }
+  }
+  if (options.notifyUncertainty && selection.receipt) notifyVisibilityTimeout(selection.targetId, selection.receipt);
+}
+
+async function chooseSession(targetSessionId: string, retry = false) {
+  if (chooseSessionSelecting.value || unavailableSessionIds.has(targetSessionId)) return;
   const fromSessionId = chooseSessionSourceId.value;
-  if (!fromSessionId) {
-    closeChooseSessionModal();
+  const identity: PickerIdentity = { sourceId: fromSessionId, targetId: targetSessionId, context: currentTabVisibilityContext(), generation: pickerGeneration, toolGeneration: pickerToolGeneration };
+  if (!fromSessionId || !isPickerIdentityCurrent(identity)) return;
+  const failure = failedPickerSelection.value;
+  const sameFailure = failure?.targetId === targetSessionId && isPickerIdentityCurrent(failure);
+  if ((sameFailure && !retry) || (retry && !sameFailure)) return;
+  cancelPickerSelection();
+  invalidateOpenParentIntent();
+  const intent = openParentIntentId;
+  const selection: PickerSelection = { ...identity, abort: new AbortController(), openingIntent: intent, committed: false };
+  pickerSelection = selection;
+  chooseSessionSelecting.value = true;
+  const valid = () => pickerSelection === selection && openParentIntentId === intent && isPickerIdentityCurrent(selection);
+  const deadline = performance.now() + 30000;
+  const timer = setTimeout(() => selection.abort.abort(), 30000);
+  const outcome = await readFreshTarget(targetSessionId, valid, selection.abort.signal);
+  clearTimeout(timer);
+  if (!valid()) return;
+  const timedOut = performance.now() >= deadline || outcome.status === "cancelled";
+  if (timedOut || outcome.status !== "accepted") {
+    cancelPickerSelection();
+    const failure: TargetReadOutcome = timedOut
+      ? { status: "failed", classification: "transportTimeout", error: new Error("verification timed out") }
+      : outcome;
+    if (!(failure.status === "failed" && failure.classification === "sessionNotFound")) recordPickerFailure(selection);
+    showTargetFailure(failure, targetSessionId);
     return;
   }
+  if (!isContinuableSession(outcome.record)) {
+    chooseSessionItems.value = chooseSessionItems.value.filter((item) => item.id !== targetSessionId);
+    cancelPickerSelection();
+    message.warning(t("agent.client.noSessionToChoose"));
+    return;
+  }
+  const receipt = registerVisibilityReceipt(outcome.record, selection.context, "picker", valid);
+  selection.receipt = receipt;
+  selection.visibilityOrigin = visibilityOperationOrigins.get(targetSessionId);
+  const confirmation = await receipt.result;
+  const current = serverSessions.value.find((item) => item.id === targetSessionId);
+  if (!valid()) return;
+  if (confirmation.status !== "confirmed" || receipt.intentSeq !== tabVisibilityController.getState(targetSessionId)?.nextIntentSeq
+    || !current || metadataReads.epoch(targetSessionId) !== outcome.acceptedMutationEpoch || !sameContinuationQualification(current, outcome.record)) {
+    // Finish source submission, but compensate a now-invalid selection only if still its last intent.
+    if (confirmation.status === "confirmed" || confirmation.status === "uiTimeout") {
+      cancelPickerSelection({ notifyUncertainty: confirmation.status === "uiTimeout" });
+    } else if (confirmation.status === "failed" && selection.visibilityOrigin) {
+      notifyPickerVisibilityUncertain(selection.visibilityOrigin);
+    }
+    recordPickerFailure(selection);
+    return;
+  }
+  selection.committed = true;
   replaceDraftWithSession({ fromSessionId, targetSessionId });
   closeChooseSessionModal();
 }
 
+watch(() => [effectiveActiveKey.value, chooseSessionSourceId.value, chooseSessionModalOpen.value] as const, ([active, source, open]) => {
+  if (open && active !== source) closeChooseSessionModal();
+});
+
 function onChangeTab(key: string | number) {
+  if (chooseSessionModalOpen.value) closeChooseSessionModal();
   const next = String(key || "");
   if (next === ADD_TAB_KEY) {
     invalidateOpenParentIntent();
@@ -1211,30 +1447,71 @@ function isCurrentInitialization(attemptId: number, requestGeneration: number, r
     && requestWorkspaceId === props.workspaceId;
 }
 
+function commitTabsSnapshot(
+  snapshot: Awaited<ReturnType<typeof getAgentTabsSnapshot>>,
+  readSnapshot: ReturnType<typeof metadataReads.captureSnapshot>,
+  visibilitySnapshot: ReturnType<typeof tabVisibilityController.captureSnapshot>,
+  workspaceId: string
+) {
+  if (snapshot.scope !== "tabs" || !Array.isArray(snapshot.items) || !snapshot.tabState
+    || snapshot.tabState.workspaceId !== workspaceId
+    || !Array.isArray(snapshot.tabState.closedSessionIds) || !Array.isArray(snapshot.tabState.openedSubtaskSessionIds)
+    || [...snapshot.tabState.closedSessionIds, ...snapshot.tabState.openedSubtaskSessionIds].some((id) => typeof id !== "string" || !id)
+    || snapshot.items.some((record) => !isCompleteSessionRecord(record) || record.workspaceId !== workspaceId)) {
+    throw new Error("invalid tabs snapshot response");
+  }
+  for (const record of snapshot.items) {
+    if (readSnapshot && metadataReads.accept(readSnapshot(record.id)) === "accepted") upsertSession(record);
+  }
+  const members = new Set(snapshot.items.map((record) => record.id));
+  for (const record of serverSessions.value) {
+    if (tabVisibilityController.isSnapshotProtected(record.id, visibilitySnapshot)) members.add(record.id);
+  }
+  // Only actual snapshot members can install default visibility. The cache is
+  // partial: omission cannot reset an absent Session's settled confirmation.
+  tabVisibilityController.applyInitializationSnapshot(snapshot.items, snapshot.tabState, visibilitySnapshot);
+  visibleServerSessionIds.value = members;
+}
+
+async function reloadTabsSnapshot() {
+  if (initializationState.value !== "ready" || reloadingTabs.value) return;
+  const context = currentTabVisibilityContext();
+  const readSnapshot = metadataReads.captureSnapshot();
+  const visibilitySnapshot = tabVisibilityController.captureSnapshot();
+  const abort = new AbortController();
+  activeSnapshotAbort = abort;
+  reloadingTabs.value = true;
+  try {
+    const snapshot = await getAgentTabsSnapshot(context.workspaceId, abort.signal);
+    if (!isTabVisibilityContextCurrent(context) || activeSnapshotAbort !== abort) return;
+    commitTabsSnapshot(snapshot, readSnapshot, visibilitySnapshot, context.workspaceId);
+    reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
+    await ensureVisibleSessionFallback(context);
+  } catch {
+    if (isTabVisibilityContextCurrent(context) && activeSnapshotAbort === abort) message.warning(t("agent.client.tabStateLoadFailed"));
+  } finally {
+    if (isTabVisibilityContextCurrent(context) && activeSnapshotAbort === abort) { reloadingTabs.value = false; activeSnapshotAbort = null; }
+  }
+}
+
 async function initializeWorkspace() {
   const attemptId = ++initializationAttemptId;
   const requestGeneration = workspaceGeneration;
   const requestWorkspaceId = props.workspaceId;
   initializationState.value = "loading";
   loadingSessions.value = true;
+  activeSnapshotAbort?.abort();
+  activeSnapshotAbort = new AbortController();
+  const readSnapshot = metadataReads.captureSnapshot();
+  const visibilitySnapshot = tabVisibilityController.captureSnapshot();
   // Agent options are non-critical: keep their existing independent refresh and
   // never let an options failure hide successfully loaded Session Tabs.
   void refreshAgents();
 
   try {
-    const [sessions, tabState] = await Promise.all([
-      listAgentSessions(requestWorkspaceId),
-      getWorkspaceAgentTabState(requestWorkspaceId)
-    ]);
+    const snapshot = await getAgentTabsSnapshot(requestWorkspaceId, activeSnapshotAbort?.signal);
     if (!isCurrentInitialization(attemptId, requestGeneration, requestWorkspaceId)) return;
-
-    // The two critical reads are committed together. The controller preserves
-    // any pending write state should a future initialization race with a PUT.
-    serverSessions.value = [...sessions].sort((a, b) => b.updatedAt - a.updatedAt);
-    tabVisibilityController.applyInitializationSnapshot(
-      serverSessions.value as AgentSessionTabVisibilitySession[],
-      tabState
-    );
+    commitTabsSnapshot(snapshot, readSnapshot, visibilitySnapshot, requestWorkspaceId);
     serverSessionsLoaded.value = true;
     reconcileTabNoMap({ workspaceId: requestWorkspaceId, sessions: allSessions.value });
     if (effectiveActiveKey.value) {
@@ -1244,9 +1521,7 @@ async function initializeWorkspace() {
     statusStore.bindWorkspace(requestWorkspaceId);
     initializationState.value = "ready";
 
-    if (visibleSessions.value.length === 0) {
-      await createOneSession();
-    }
+    await ensureVisibleSessionFallback({ workspaceId: requestWorkspaceId, workspaceGeneration: requestGeneration });
   } catch {
     if (!isCurrentInitialization(attemptId, requestGeneration, requestWorkspaceId)) return;
     initializationState.value = "error";
@@ -1267,22 +1542,29 @@ watch(
   () => {
     // Make old Workspace requests inert before resetting reactive state.
     workspaceGeneration += 1;
-    activeSessionRefresh = null;
-    sessionRefreshRetry = null;
-    titleMutationCache.revisionBySession.clear();
-    titleMutationCache.recordBySession.clear();
-    titleMutationCache.revision = 0;
+    lastQueuedOpenSessionSequence = null;
+    targetLoader.reset();
+    titleSyncJobs.clear();
+    for (const id of Object.keys(failedSessionTitleSync)) delete failedSessionTitleSync[id];
+    metadataReads.reset();
+    unavailableSessionIds.clear();
+    tabVisibilityController.invalidateContext();
+    visibilityOperationOrigins.clear();
+    closeChooseSessionModal();
     forceResetTitleModal();
     invalidateOpenParentIntent();
     activeKey.value = "";
     serverSessions.value = [];
+    visibleServerSessionIds.value.clear();
+    activeSnapshotAbort?.abort();
+    activeSnapshotAbort = null;
+    reloadingTabs.value = false;
     serverSessionsLoaded.value = false;
     draftSessions.value = [];
     const emptyAgentPresentation = createEmptyAgentPresentation();
     agentOptions.value = emptyAgentPresentation.agentOptions;
     subtaskAgentLabels.value = emptyAgentPresentation.subtaskAgentLabels;
     for (const key of Object.keys(draftVisibilityBySession)) delete draftVisibilityBySession[key];
-    for (const key of Object.keys(tabVisibilityWriteStates)) delete tabVisibilityWriteStates[key];
     tabNoMap.value = {};
     for (const key of Object.keys(selectedAgentBySession)) delete selectedAgentBySession[key];
     for (const key of Object.keys(pendingSessionTitleSyncUpdatedAt)) delete pendingSessionTitleSyncUpdatedAt[key];
@@ -1298,35 +1580,19 @@ watch(
   { immediate: true }
 );
 
-let lastQueuedOpenSessionSequence: number | null = null;
-let openSessionQueue = Promise.resolve();
 watch(
   () => [props.openSessionRequest, initializationState.value] as const,
   ([request, state]) => {
-    // 首次挂载时 request 已作为 prop 传入；等初始化快照完成后再打开，避免旧 Tab 状态覆盖目标。
     if (!request || state !== "ready" || request.sequence === lastQueuedOpenSessionSequence) return;
     lastQueuedOpenSessionSequence = request.sequence;
-    const generation = workspaceGeneration, workspaceId = props.workspaceId;
-    openSessionQueue = openSessionQueue.then(async () => {
-      if (disposed || generation !== workspaceGeneration || workspaceId !== props.workspaceId || props.openSessionRequest?.sequence !== request.sequence) return;
-      // 串行化刷新，连续点击不会因上一请求占用 refreshSessions 而丢失最新目标。
-      const ok = await refreshSessions();
-      if (disposed || generation !== workspaceGeneration || workspaceId !== props.workspaceId || props.openSessionRequest?.sequence !== request.sequence) return;
-      if (!ok || !serverSessions.value.some((session) => session.id === request.sessionId)) {
-        message.warning("关联会话已不可用");
-        return;
-      }
-      await onOpenSubtask(request.sessionId);
-    }).catch(() => {
-      if (!disposed && generation === workspaceGeneration && workspaceId === props.workspaceId && props.openSessionRequest?.sequence === request.sequence) {
-        message.warning("关联会话已不可用");
-      }
-    });
+    if (chooseSessionModalOpen.value) closeChooseSessionModal();
+    void openTargetSession(request.sessionId);
   },
   { immediate: true }
 );
 
 onActivated(() => {
+  pickerToolActive.value = true;
   // KeepAlive reactivation must not implicitly re-read the backend Tab state.
   if (initializationState.value === "error") {
     void initializeWorkspace();
@@ -1339,8 +1605,25 @@ onActivated(() => {
     registeredSessionIds: serverSessions.value.map((item) => item.id),
     sessionKinds: Object.fromEntries(serverSessions.value.map((item) => [item.id, item.kind]))
   });
-  void createOneSession();
+  void ensureVisibleSessionFallback();
 });
+
+onDeactivated(() => {
+  pickerToolActive.value = false;
+  pickerToolGeneration += 1;
+  closeChooseSessionModal();
+  // Ending an interaction does not terminate its already-sent write queue.
+  for (const receipt of pickerCompensations) receipt.cancel();
+});
+
+// Derive convergence from existing intent/visibility state. In particular, a
+// late PUT failure after its UI receipt timed out can make the Workspace empty.
+// No detached "skip draft" flag is left behind when an opening is terminated.
+watch(
+  () => [props.workspaceId, initializationState.value, props.openSessionRequest,
+    targetOpeningSessionId.value, visibleSessions.value.map((item) => item.id).join("|")] as const,
+  () => { void ensureVisibleSessionFallback(); }
+);
 
 watch(
   () => [props.workspaceId, effectiveActiveKey.value, visibleSessions.value.map((item) => item.id).join("|"), serverSessions.value.map((item) => item.id).join("|")] as const,
@@ -1368,37 +1651,25 @@ watch(
     if (status !== "idle") return;
     const nextUpdatedAt = typeof updatedAt === "number" && Number.isFinite(updatedAt) ? updatedAt : 0;
     if (nextUpdatedAt <= baselineUpdatedAt) return;
-    const retryBaseline = pendingSessionTitleSyncUpdatedAt[sessionId];
-    const requestGeneration = workspaceGeneration;
-    const requestWorkspaceId = props.workspaceId;
     delete pendingSessionTitleSyncUpdatedAt[sessionId];
-    void refreshSessions().then((ok) => {
-      if (ok) return;
-      // 失败恢复前校验 generation：Workspace 已切换或组件卸载时不得恢复旧 baseline。
-      if (!isRequestResponseWritable({
-        disposed,
-        currentGeneration: workspaceGeneration,
-        requestGeneration,
-        currentWorkspaceId: props.workspaceId,
-        requestWorkspaceId
-      })) {
-        return;
-      }
-      pendingSessionTitleSyncUpdatedAt[sessionId] = retryBaseline ?? baselineUpdatedAt;
-    });
+    // Failure stops this sync event; a later business event or explicit action may retry.
+    void syncSessionTitle(sessionId);
+
   },
   { immediate: true }
 );
 
 onBeforeUnmount(() => {
   disposed = true;
+  activeSnapshotAbort?.abort();
   workspaceGeneration += 1;
-  activeSessionRefresh = null;
-  sessionRefreshRetry = null;
+  targetLoader.reset();
+  titleSyncJobs.clear();
+  metadataReads.reset();
+  tabVisibilityController.invalidateContext();
+  visibilityOperationOrigins.clear();
+  closeChooseSessionModal();
   forceResetTitleModal();
-  titleMutationCache.revisionBySession.clear();
-  titleMutationCache.recordBySession.clear();
-  titleMutationCache.revision = 0;
   for (const key of Object.keys(pendingSessionTitleSyncUpdatedAt)) {
     delete pendingSessionTitleSyncUpdatedAt[key];
   }

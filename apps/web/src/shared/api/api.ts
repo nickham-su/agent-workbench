@@ -82,7 +82,6 @@ import type {
   UpdateWorkspaceRequest,
   WorkspaceDetail,
   WorkspaceAgentSessionTabVisibilityMutation,
-  WorkspaceAgentTabState,
   UpdateWorkspaceAgentSessionTabVisibilityRequest,
   SearchSettings,
   FileSearchRequest,
@@ -106,6 +105,8 @@ import type {
   AgentSendMessageRequest,
   AgentSendMessageResponse,
   AgentSessionRecord,
+  AgentTabsSnapshotResponse,
+  AgentContinuablePageResponse,
   AgentSessionAgentModelState,
   AgentSessionModelOverridesResponse,
   UpdateAgentSessionModelOverrideRequest,
@@ -1055,26 +1056,42 @@ export async function updateAgentSettings(body: UpdateAgentSettingsRequest) {
   }
 }
 
-export async function listAgentSessions(workspaceId: string) {
+/** Metadata and visibility requests are bounded without affecting long-running APIs. */
+function toAgentReadError(err: unknown, code = "AGENT_METADATA_GET_TIMEOUT") {
+  if (axios.isAxiosError(err) && (err.code === "ECONNABORTED" || err.code === "ETIMEDOUT")) {
+    return new ApiError({ message: "Agent request timed out", code });
+  }
+  return toApiError(err);
+}
+
+export async function getAgentSessionRecord(workspaceId: string, sessionId: string, signal?: AbortSignal): Promise<AgentSessionRecord> {
   try {
-    const res = await client.get<AgentSessionRecord[]>("/agent/sessions", {
-      params: { workspaceId }
+    const res = await client.get<AgentSessionRecord>(`/agent/sessions/${encodeURIComponent(sessionId)}`, {
+      params: { workspaceId }, timeout: 15000, signal
     });
     return res.data;
   } catch (err) {
-    throw toApiError(err);
+    throw toAgentReadError(err);
   }
 }
 
-export async function getWorkspaceAgentTabState(workspaceId: string): Promise<WorkspaceAgentTabState> {
+export async function getAgentTabsSnapshot(workspaceId: string, signal?: AbortSignal): Promise<AgentTabsSnapshotResponse> {
   try {
-    const res = await client.get<WorkspaceAgentTabState>(
-      `/workspaces/${encodeURIComponent(workspaceId)}/agent-tab-state`
-    );
+    const res = await client.get<AgentTabsSnapshotResponse>("/agent/sessions", {
+      params: { workspaceId, scope: "tabs" }, timeout: 15000, signal
+    });
     return res.data;
-  } catch (err) {
-    throw toApiError(err);
-  }
+  } catch (err) { throw toAgentReadError(err); }
+}
+
+export async function getAgentContinuableSessions(workspaceId: string, options: { cursor?: string; limit?: number; signal?: AbortSignal } = {}): Promise<AgentContinuablePageResponse> {
+  try {
+    const res = await client.get<AgentContinuablePageResponse>("/agent/sessions", {
+      params: { workspaceId, scope: "continuable", limit: options.limit ?? 50, ...(options.cursor ? { cursor: options.cursor } : {}) },
+      timeout: 15000, signal: options.signal
+    });
+    return res.data;
+  } catch (err) { throw toAgentReadError(err); }
 }
 
 export async function setWorkspaceAgentSessionTabVisibility(
@@ -1085,11 +1102,11 @@ export async function setWorkspaceAgentSessionTabVisibility(
   try {
     const res = await client.put<WorkspaceAgentSessionTabVisibilityMutation>(
       `/workspaces/${encodeURIComponent(workspaceId)}/agent-tab-state/${encodeURIComponent(sessionId)}`,
-      body
+      body, { timeout: 15000 }
     );
     return res.data;
   } catch (err) {
-    throw toApiError(err);
+    throw toAgentReadError(err, "AGENT_TAB_VISIBILITY_TIMEOUT");
   }
 }
 

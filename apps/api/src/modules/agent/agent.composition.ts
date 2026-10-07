@@ -126,6 +126,7 @@ import {
   projectModelContextToPrompt,
   toRuntimeExecution,
 } from "./read-side/model-context-resolver.js";
+import { SqliteSessionQuery } from "./read-side/sqlite-session-query.js";
 import { SqliteMessageQuery } from "./read-side/sqlite-message-query.js";
 import { ReadSideApplication } from "./read-side/read-side-application.js";
 import { getWorkspaceEnabledAgentIds } from "../workspaces/workspace.service.js";
@@ -1063,6 +1064,8 @@ function createSessionFacadeCapabilities<
 
 function createQueryFacadeCapabilities<
   T extends Record<
+    | "getSessionRecord"
+    | "listSessionRecords"
     | "listRecentSessions"
     | "listAvailableAgents"
     | "listRecentWorkspaces"
@@ -1084,7 +1087,9 @@ function createQueryFacadeCapabilities<
   dependencies: T,
 ): Pick<
   T,
-  | "listRecentSessions"
+  | "getSessionRecord"
+    | "listSessionRecords"
+    | "listRecentSessions"
   | "listAvailableAgents"
   | "listRecentWorkspaces"
   | "getMessageTimeline"
@@ -1101,6 +1106,8 @@ function createQueryFacadeCapabilities<
   | "getAttachmentContent"
 > {
   const {
+    getSessionRecord,
+    listSessionRecords,
     listRecentSessions,
     listAvailableAgents,
     listRecentWorkspaces,
@@ -1118,6 +1125,8 @@ function createQueryFacadeCapabilities<
     getAttachmentContent,
   } = dependencies;
   return {
+    getSessionRecord,
+    listSessionRecords,
     listRecentSessions,
     listAvailableAgents,
     listRecentWorkspaces,
@@ -2102,6 +2111,15 @@ function createAgentApplications(
     expectedSessionTitle?: string;
   }): Promise<AgentSendMessageResponse> {
     return await sessionInteractionApplication.sendMessage(params);
+  }
+
+  const sessionQuery = new SqliteSessionQuery(environment.db);
+  function listSessionRecords(params: Parameters<SqliteSessionQuery["listSessions"]>[0]) {
+    return sessionQuery.listSessions(params);
+  }
+
+  function getSessionRecord(params: { workspaceId: string; sessionId: string }) {
+    return sessionQuery.getSession(params);
   }
 
   function getMessageTimeline(params: Parameters<typeof messageQuery.getTimeline>[0]) {
@@ -3131,6 +3149,8 @@ function createAgentApplications(
       sessionAgentModelApplication.delete(params),
   });
   const query = createQueryFacadeCapabilities({
+    getSessionRecord,
+    listSessionRecords,
     listRecentSessions,
     listAvailableAgents,
     listRecentWorkspaces,

@@ -1,6 +1,7 @@
 import { Type } from "@sinclair/typebox";
 import type { Static } from "@sinclair/typebox";
 import { AgentItemViewSchema } from "./settings.js";
+import { WorkspaceAgentTabStateSchema } from "./workspaces.js";
 import { AgentContextToolNameSchema, AgentImageMediaTypeSchema, AgentMcpToolNameSchema, AgentSessionKindSchema } from "./agent-primitives.js";
 export { AgentContextToolNameSchema, AgentImageMediaTypeSchema, AgentMcpToolNameSchema, AgentSessionKindSchema } from "./agent-primitives.js";
 export type { AgentContextToolName, AgentImageMediaType, AgentSessionKind } from "./agent-primitives.js";
@@ -134,6 +135,21 @@ export const AgentSessionRecordSchema = Type.Object({
   updatedAt: Type.Number()
 });
 export type AgentSessionRecord = Static<typeof AgentSessionRecordSchema>;
+
+export const AgentTabsSnapshotResponseSchema = Type.Object({
+  scope: Type.Literal("tabs"),
+  items: Type.Array(AgentSessionRecordSchema),
+  tabState: WorkspaceAgentTabStateSchema
+}, { additionalProperties: false });
+export type AgentTabsSnapshotResponse = Static<typeof AgentTabsSnapshotResponseSchema>;
+export const AgentContinuablePageResponseSchema = Type.Object({
+  scope: Type.Literal("continuable"),
+  items: Type.Array(AgentSessionRecordSchema),
+  nextCursor: Type.Union([Type.String({ minLength: 1 }), Type.Null()])
+}, { additionalProperties: false });
+export type AgentContinuablePageResponse = Static<typeof AgentContinuablePageResponseSchema>;
+export const AgentSessionListResponseSchema = Type.Union([AgentTabsSnapshotResponseSchema, AgentContinuablePageResponseSchema]);
+export type AgentSessionListResponse = Static<typeof AgentSessionListResponseSchema>;
 
 /** Configuration source for a session's effective Agent primary model. */
 export const AgentSessionModelSourceSchema = Type.Union([

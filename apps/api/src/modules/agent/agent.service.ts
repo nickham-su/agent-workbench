@@ -15,6 +15,14 @@ export class AgentService {
     return this.capabilities.session.listSessions(...args);
   }
 
+  listSessionRecords(...args: Parameters<AgentServiceCapabilities["query"]["listSessionRecords"]>): ReturnType<AgentServiceCapabilities["query"]["listSessionRecords"]> {
+    return this.capabilities.query.listSessionRecords(...args);
+  }
+
+  getSessionRecord(...args: Parameters<AgentServiceCapabilities["query"]["getSessionRecord"]>): ReturnType<AgentServiceCapabilities["query"]["getSessionRecord"]> {
+    return this.capabilities.query.getSessionRecord(...args);
+  }
+
   listRecentSessions(...args: Parameters<AgentServiceCapabilities["query"]["listRecentSessions"]>): ReturnType<AgentServiceCapabilities["query"]["listRecentSessions"]> {
     return this.capabilities.query.listRecentSessions(...args);
   }

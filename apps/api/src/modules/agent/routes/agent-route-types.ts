@@ -8,7 +8,7 @@ type InternalRouteDependencies = { internalToken: string };
 export type AgentPublicRouteDependencies = InternalRouteDependencies & {
   dataDir: string;
   service: Pick<AgentService,
-    "listSessions" | "createPrimarySession" | "forkPrimarySession" | "updateSessionTitle" | "getMessageTimeline" | "getMessageDetail" |
+    "getSessionRecord" | "listSessionRecords" | "createPrimarySession" | "forkPrimarySession" | "updateSessionTitle" | "getMessageTimeline" | "getMessageDetail" |
     "getToolExecutionDetail" | "getApplyPatchUiArtifact" | "getWriteUiArtifact" | "getMessageRunState" | "getRunStatus" | "listSessionModelOverrides" |
     "setSessionModelOverride" | "resetSessionModelOverride" | "sendMessage" | "compactSession" | "revertSession" |
     "cancelSessionWithRuntime" | "getAttachmentContent">;

@@ -7,7 +7,7 @@ import { workspaceHostKey } from "@/features/workspace/host";
 import ScheduledTasksToolView from "./ScheduledTasksToolView.vue";
 
 const stubs={
-  "a-button":{template:"<button :disabled='disabled' @click=\"$emit('click')\"><slot /></button>",props:["disabled"]},
+  "a-button":{emits:["click"],template:"<button :disabled='disabled' @click=\"$emit('click')\"><slot /></button>",props:["disabled"]},
   "a-input":{template:"<input :value='value' @input=\"$emit('update:value', $event.target.value)\" />",props:["value"]},
   "a-select":{template:"<div><slot /></div>",props:["value","options"]},
   "a-tooltip":{template:"<span><slot /></span>"},"a-tag":{template:"<span><slot /></span>"},
@@ -181,4 +181,37 @@ test("clock timer failure during mount does not freeze task loading, search or c
     for(const id of timers)clear(id);
     assert.equal(timers.size,0,"unmount clears timers after failed clock start");
   }
+});
+
+test("scheduled session links retain availability gate and send host intent without any session-list precheck", async () => {
+  const adapter = apiClient.defaults.adapter;
+  const calls: unknown[][] = [];
+  const requested: string[] = [];
+  const value = task("workspace-a", "First");
+  value.source = { sessionId: "source-session", messageId: "source-message", title: "Source", messageSummary: "Summary", messageCreatedAt: 1 };
+  value.latestExecution = { id: "execution", taskId: value.id, triggerType: "manual", scheduledFor: null, status: "completed", reasonCode: null, reasonMessage: null, sessionId: "linked-session", sessionAvailable: true, runId: "run", createdAt: 1, startedAt: 1, finishedAt: 2 };
+  apiClient.defaults.adapter = async (config) => {
+    const url = String(config.url);
+    requested.push(url);
+    const ok = (data: unknown) => ({ data, status: 200, statusText: "OK", headers: {}, config });
+    if (url.endsWith("/scheduled-tasks")) return ok({ items: [value], nextCursor: null });
+    if (url.endsWith("/executions")) return ok({ items: [{ ...value.latestExecution, sessionAvailable: false, id: "unavailable" }], nextCursor: null });
+    if (url.endsWith("/ready-agents")) return ok({ agentIds: ["agent"] });
+    if (url.includes("agents/available")) return ok({ agents: [] });
+    return ok({ task: value });
+  };
+  const wrapper = mount(ScheduledTasksToolView, { props: { workspaceId: "workspace-a", toolId: "scheduledTasks" }, global: { stubs, provide: { [workspaceHostKey as symbol]: { ...fakeHost(), callFrom: (...args: unknown[]) => calls.push(args) } } } });
+  try {
+    await tick(); await tick();
+    const buttons = wrapper.findAll("button");
+    const sessionLinks = buttons.filter((button) => button.text() === "查看 Session ↗");
+    assert.equal(sessionLinks.length, 1, "sessionAvailable=false的历史项不显示跳转按钮");
+    await sessionLinks[0]!.trigger("click");
+    await buttons.find((button) => button.text() === "查看上下文 ↗")!.trigger("click");
+    assert.deepEqual(calls, [
+      ["scheduledTasks", "agent", { type: "openSession", payload: { sessionId: "linked-session" } }],
+      ["scheduledTasks", "agent", { type: "openSession", payload: { sessionId: "source-session" } }],
+    ]);
+    assert.equal(requested.some((url) => url.includes("/agent/sessions")), false);
+  } finally { wrapper.unmount(); apiClient.defaults.adapter = adapter; }
 });

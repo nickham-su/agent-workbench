@@ -858,18 +858,39 @@ test("subtaskStart retries once while terminalControl leaves retries to Runner",
   );
 });
 
-test("terminal-control 单次 timeout 不得超过内部 RPC 配置", async () => {
-  const fixture = await startTestServer(() => ({ status: 503, body: { message: "SERVER_MESSAGE" } }));
+test("terminal-control 单次 timeout 不得超过内部 RPC 配置", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const signals: AbortSignal[] = [];
+  const transport = t.mock.method(globalThis, "fetch", (
+    _input: Parameters<typeof fetch>[0],
+    init?: Parameters<typeof fetch>[1],
+  ): Promise<Response> => {
+    const signal = init?.signal;
+    assert.ok(signal);
+    signals.push(signal);
+    return new Promise<Response>((_resolve, reject) => {
+      signal.addEventListener("abort", () => {
+        reject(new DOMException("test transport aborted", "AbortError"));
+      }, { once: true });
+    });
+  });
   const recorder = createWarningRecorder();
-  const client = createShortTimeoutClient(fixture.origin, {
+  const client = createShortTimeoutClient("http://127.0.0.1:1", {
     logger: recorder.logger,
     timing: { internalRpcTimeoutMs: 11 },
   });
-  await assert.rejects(
+  const rejection = assert.rejects(
     () => client.persistRunTerminalIntent(terminalControlInput, { timeoutMs: 99 }),
-    InternalRpcHttpError,
+    (error: unknown) => error instanceof InternalRpcTimeoutError && error.message.includes("timeoutMs=11"),
   );
-  assert.equal(fixture.attempts.length, 1);
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0]!.aborted, false);
+  t.mock.timers.tick(10);
+  assert.equal(signals[0]!.aborted, false);
+  t.mock.timers.tick(1);
+  assert.equal(signals[0]!.aborted, true);
+  await rejection;
+  assert.equal(transport.mock.callCount(), 1);
   assert.equal(
     recorder.warnings.some((warning) =>
       warning.includes("policy=terminalControl") && warning.includes("timeoutMs=11"),
@@ -1232,25 +1253,30 @@ test("Message compaction uses shared endpoint/method/body and validates the succ
 
 test("Compaction source uses its fixed read endpoint and rejects non-schema responses", async () => {
   const requests: Array<{ method?: string; url?: string; body: unknown }> = [];
+  let sourceResponse = compactionSourceResponse;
   const origin = await startServer((request) => {
     requests.push(request);
-    return { status: 200, body: compactionSourceResponse };
+    return { status: 200, body: sourceResponse };
   });
   const client = new AgentApiClient({
     apiOrigin: origin,
     internalToken: "TOKEN",
     internalRpcTimeoutMs: 15_000,
   });
-  assert.deepEqual(await client.getCompactionSource(compactionSourceInput), compactionSourceResponse);
-  assert.deepEqual(requests, [{
+  const locales = [null, "zh-CN", "en-US"] as const;
+  for (const uiLocale of locales) {
+    sourceResponse = { ...compactionSourceResponse, uiLocale };
+    assert.deepEqual(await client.getCompactionSource(compactionSourceInput), sourceResponse);
+  }
+  assert.deepEqual(requests, locales.map(() => ({
     method: AgentApiEndpoints.getCompactionSource.method,
     url: AgentApiEndpoints.getCompactionSource.path,
     body: compactionSourceInput,
-  }]);
+  })));
 
   const invalidOrigin = await startServer(() => ({
     status: 200,
-    body: { ...compactionSourceResponse, uiLocale: "en-US" },
+    body: { ...compactionSourceResponse, uiLocale: "fr-FR" },
   }));
   const invalidClient = new AgentApiClient({
     apiOrigin: invalidOrigin,

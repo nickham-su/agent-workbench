@@ -155,7 +155,7 @@ import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, 
 import { Modal } from "ant-design-vue";
 import { CheckOutlined, ClockCircleOutlined, CloseOutlined, DeleteOutlined, EditOutlined, MessageOutlined, PauseOutlined, PlayCircleOutlined, PlusOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons-vue";
 import type { AgentItemView, ScheduledExecution, ScheduledTask } from "@agent-workbench/shared";
-import { listWorkspaceAvailableAgents, listAgentSessions } from "@/shared/api";
+import { listWorkspaceAvailableAgents } from "@/shared/api";
 import { useWorkspaceHost } from "@/features/workspace/host";
 import { scheduledApi, ScheduledApiError } from "./scheduledApi";
 import { normalizeTaskSearch, scheduledErrorPresentation, type ScheduledErrorAction } from "./scheduledUi";
@@ -314,10 +314,10 @@ function confirmDelete(){const id=selected.value?.id;if(!id || writesDisabled.va
     catch(e){if(scope===scopeEpoch)handleError(e,"删除失败");}
   }});
 }
-async function openSession(sessionId:string|null){if(!sessionId)return;const scope=scopeEpoch,workspaceId=props.workspaceId;
-  try{const sessions=await listAgentSessions(workspaceId);if(scope!==scopeEpoch || workspaceId!==props.workspaceId)return;
-    if(!sessions.some((s)=>s.id===sessionId)){setNotice("关联会话已不可用","error");return;}host.call("agent",{type:"openSession",payload:{sessionId}});
-  }catch{if(scope===scopeEpoch)setNotice("关联会话已不可用","error");}}
+function openSession(sessionId:string|null){
+  if(sessionId)host.call("agent",{type:"openSession",payload:{sessionId}});
+}
+
 let active=true;
 function visibilityChanged(){clockPoller.setVisible(active && !document.hidden);}
 onMounted(()=>{active=true;clockPoller.setVisible(!document.hidden);document.addEventListener("visibilitychange",visibilityChanged);

@@ -4,6 +4,7 @@ import type { AxiosResponse, InternalAxiosRequestConfig } from "axios";
 import type { AgentMessage, AgentMessageSessionRunState } from "@agent-workbench/shared";
 import DOMPurify from "dompurify";
 import { computed, defineComponent, h, KeepAlive, ref, type ComputedRef } from "vue";
+import { agentSessionMetadataReadContextKey, createAgentSessionMetadataReads, type MetadataReadContext, type TimelineMetadataEvent } from "./agentSessionMetadataReadContext";
 import zhCN from "@/shared/i18n/locales/zh-CN";
 import enUS from "@/shared/i18n/locales/en-US";
 import { apiClient } from "@/shared/api/api";
@@ -134,9 +135,10 @@ function mountPane(options?: {
   modelValue?: string;
   initialDraft?: string;
   ensureSession?: (sessionId: string) => Promise<string>;
-  forkSession?: (request: { fromSessionId: string; fromMessageId: string }) => Promise<{ id: string }>;
+  forkSession?: (request: { fromSessionId: string; fromMessageId: string }) => Promise<import("@agent-workbench/shared").AgentSessionRecord>;
   contextLocale?: "zh-CN" | "en-US";
   renderModalSlots?: boolean;
+  metadataReadContext?: MetadataReadContext;
 }) {
   const runState = options?.runState ?? baseRunState();
   const otherRunState = baseRunState({ sessionId: "session-b" });
@@ -176,7 +178,7 @@ function mountPane(options?: {
           },
         }),
       },
-    } : createMountGlobal(statusStore),
+    } : { ...createMountGlobal(statusStore), provide: { ...createMountGlobal(statusStore).provide, ...(options?.metadataReadContext ? { [agentSessionMetadataReadContextKey as symbol]: options.metadataReadContext } : {}) } },
   });
   return {
     wrapper,
@@ -1273,7 +1275,8 @@ const ForkActionsStub = defineComponent({
   },
 });
 
-function mountForkPane(forkSession: NonNullable<Parameters<typeof mountPane>[0]>["forkSession"]) {
+function mountForkPane(forkSession: NonNullable<Parameters<typeof mountPane>[0]>["forkSession"], metadataReadContext?: MetadataReadContext) {
+  const global = createMountGlobal({ getRunState: () => computed(() => baseRunState()) });
   return mount(AgentClientPane, {
     attachTo: document.body,
     props: {
@@ -1282,14 +1285,16 @@ function mountForkPane(forkSession: NonNullable<Parameters<typeof mountPane>[0]>
       sessionModelMutationPending: false, modelOpenIntent: null, forkSession,
     },
     global: {
-      ...createMountGlobal({ getRunState: () => computed(() => baseRunState()) }),
+      ...global,
+      provide: { ...global.provide, [agentSessionMetadataReadContextKey as symbol]: metadataReadContext },
       stubs: { ...componentStubs, AgentMessageActions: ForkActionsStub },
     },
   });
 }
 
 test("真实 AgentClientPane：点击历史 Fork 构造请求、pending 禁用并 emit 新 Session，且不调用确认", async () => {
-  const completion = deferred<{ id: string }>();
+  const forkRecord = { ...timelineSnapshot([]).session, id: "forked-session", headMessageId: "historical-user", forkedFromSessionId: "session-a", forkedFromMessageId: "historical-user" };
+  const completion = deferred<typeof forkRecord>();
   const requests: unknown[] = [];
   const originalConfirm = Modal.confirm;
   let confirmCalls = 0;
@@ -1304,11 +1309,11 @@ test("真实 AgentClientPane：点击历史 Fork 构造请求、pending 禁用�
     assert.deepEqual(requests, [{ fromSessionId: "session-a", fromMessageId: "historical-user" }]);
     assert.equal((action.element as HTMLButtonElement).disabled, true);
     assert.equal(confirmCalls, 0);
-    completion.resolve({ id: "forked-session" });
+    completion.resolve(forkRecord);
     await new Promise((resolve) => setImmediate(resolve));
     await nextTick();
     assert.equal((action.element as HTMLButtonElement).disabled, false);
-    assert.deepEqual(wrapper.emitted("forked"), [["forked-session"]]);
+    assert.deepEqual(wrapper.emitted("forked"), [[forkRecord, true]]);
   } finally {
     modal.confirm = originalConfirm;
     wrapper.unmount();
@@ -1316,7 +1321,7 @@ test("真实 AgentClientPane：点击历史 Fork 构造请求、pending 禁用�
 });
 
 test("真实 AgentClientPane：Fork 失败不 emit、恢复 pending 且不改写来源 timeline", async () => {
-  const completion = deferred<{ id: string }>();
+  const completion = deferred<import("@agent-workbench/shared").AgentSessionRecord>();
   const wrapper = mountForkPane(async () => await completion.promise);
   try {
     await setTimeline(wrapper, [agentMessage({ id: "historical-assistant", type: "assistant", inCurrentOperationRange: false })]);
@@ -1343,7 +1348,7 @@ test("真实 AgentClientPane：点击 Revert 仍打开确认框", async () => {
     confirmCalls += 1;
     return { destroy() {}, update() {} };
   }) as unknown as typeof Modal.confirm;
-  const wrapper = mountForkPane(async () => ({ id: "unused" }));
+  const wrapper = mountForkPane(async () => ({ ...timelineSnapshot([]).session, id: "unused" }));
   try {
     await setTimeline(wrapper, [agentMessage({
       id: "current-user",
@@ -1624,4 +1629,48 @@ test("真实 AgentClientPane：运行耗时 interval 随 active/status 状态转
     if (clearIntervalDescriptor) Object.defineProperty(window, "clearInterval", clearIntervalDescriptor);
     else delete (window as { clearInterval?: unknown }).clearInterval;
   }
+});
+
+test("真实pane timeline在实际GET发起捕获token，手动标题后新GET收敛不能让旧timeline标题复活，正文仍接受", async () => {
+  const http = mockContextRequests();
+  const reads = createAgentSessionMetadataReads(() => ({ workspaceId: "ws-a", workspaceGeneration: 1 }));
+  const { wrapper } = mountPane({ active: true, sessionReady: true, metadataReadContext: reads });
+  try {
+    const initial = await waitForTimelineRequest(http);
+    // T is already in flight; manual success advances the local mutation watermark.
+    reads.mutation("session-a");
+    const current = reads.captureReadToken("ws-a", "session-a")!;
+    assert.equal(reads.accept(current), "accepted");
+    // Clearing an optional protected record does not clear the watermark.
+    http.respond(initial, timelineSnapshot([agentMessage({ id: "late-body" })]));
+    await new Promise((resolve) => setImmediate(resolve));
+    await nextTick();
+    const emitted = wrapper.emitted("session-metadata-updated") as Array<[TimelineMetadataEvent]>;
+    assert.ok(emitted?.length);
+    assert.ok(emitted[0]![0].readToken.readOrder < current.readOrder, "token来自请求发起，而不是响应到达");
+    assert.equal(reads.accept(emitted[0]![0].readToken), "protected");
+    const vm = wrapper.vm as any;
+    assert.equal(vm.conversation.some((item: any) => item.message.id === "late-body"), true);
+    assert.equal(http.requests.filter((r) => /\/sessions\/session-a$/.test(r.config.url ?? "")).length, 0, "旧标题拒绝不产生元数据dirty补查");
+  } finally { wrapper.unmount(); http.restore(); }
+});
+
+
+test("真实pane Fork在请求发起时捕获激活意图，较新用户意图不抢回Tab", async () => {
+  let current = true;
+  const forkRecord = { ...timelineSnapshot([]).session, id: "late-fork", headMessageId: "historical-user" };
+  const completion = deferred<typeof forkRecord>();
+  const wrapper = mountForkPane(async () => completion.promise, {
+    captureReadToken: () => null,
+    captureActivationGuard: () => () => current,
+  });
+  try {
+    await setTimeline(wrapper, [agentMessage({ id: "historical-user", type: "user", inCurrentOperationRange: false })]);
+    await wrapper.get('[data-testid="fork-action"]').trigger("click");
+    current = false;
+    completion.resolve(forkRecord);
+    await new Promise((resolve) => setImmediate(resolve));
+    await nextTick();
+    assert.deepEqual(wrapper.emitted("forked"), [[forkRecord, false]]);
+  } finally { wrapper.unmount(); }
 });

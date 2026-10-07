@@ -280,3 +280,12 @@ test("AgentService writeback facades preserve application errors", async () => {
     (error: unknown) => error === updateError
   );
 });
+
+test("AgentService public metadata facade forwards workspace-qualified query without altering internal getSession", () => {
+  const input = { workspaceId: "workspace", sessionId: "session" };
+  const result = { id: "session" };
+  const calls: unknown[] = [];
+  const service = new AgentService({ query: { getSessionRecord: (params: unknown) => { calls.push(params); return result; } } } as unknown as AgentServiceCapabilities);
+  assert.equal(service.getSessionRecord(input), result);
+  assert.deepEqual(calls, [input]);
+});

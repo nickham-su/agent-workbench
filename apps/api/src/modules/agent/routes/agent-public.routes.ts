@@ -1,3 +1,4 @@
+import { parseSessionListQuery } from "../read-side/session-list-query.js";
 import { createReadStream } from "node:fs";
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -17,6 +18,7 @@ import {
   type AgentSendMessageRequest,
   type AgentUpdateSessionTitleRequest,
   AgentSessionRecordSchema,
+  AgentSessionListResponseSchema,
   AgentUiLocaleSchema,
   AgentProviderNpmSchema,
   AgentRecentSessionsRequestSchema,
@@ -344,16 +346,35 @@ export async function registerAgentPublicRoutes(
         tags: ["agent"],
         querystring: Type.Object({
           workspaceId: Type.String({ minLength: 1 }),
+          scope: Type.Union([Type.Literal("tabs"), Type.Literal("continuable")]),
+          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+          cursor: Type.Optional(Type.String({ minLength: 1, maxLength: 8192 }))
         }),
-        response: {
-          200: Type.Array(AgentSessionRecordSchema),
-          404: ErrorResponseSchema,
-        },
+        response: { 200: AgentSessionListResponseSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => dependencies.service.listSessionRecords(parseSessionListQuery(req.raw.url ?? ""))
+  );
+
+  app.get(
+    "/api/agent/sessions/:sessionId",
+    {
+      schema: {
+        tags: ["agent"],
+        params: Type.Object({ sessionId: Type.String({ minLength: 1 }) }),
+        querystring: Type.Object({ workspaceId: Type.String({ minLength: 1 }) }),
+        response: { 200: AgentSessionRecordSchema, 404: ErrorResponseSchema },
       },
     },
     async (req) => {
-      const query = req.query as { workspaceId: string };
-      return dependencies.service.listSessions(query.workspaceId);
+      const rawUrl = req.raw.url ?? "";
+      const queryStart = rawUrl.indexOf("?");
+      const query = new URLSearchParams(queryStart < 0 ? "" : rawUrl.slice(queryStart + 1));
+      if ([...query.keys()].some((key) => key !== "workspaceId") || query.getAll("workspaceId").length !== 1 || !query.get("workspaceId")) {
+        throw new HttpError(400, "invalid session metadata query", "AGENT_SESSION_QUERY_INVALID");
+      }
+      const { sessionId } = req.params as { sessionId: string };
+      return dependencies.service.getSessionRecord({ workspaceId: query.get("workspaceId")!, sessionId });
     },
   );
 

@@ -43,54 +43,6 @@ export function titleErrorCodeToFieldError(code: unknown): ManualTitleValidation
   return null;
 }
 
-export type StaleMergeContext = {
-  requestRevision: number;
-  mutationRevisionBySession: ReadonlyMap<string, number>;
-  mutationRecordBySession: ReadonlyMap<string, unknown>;
-};
-
-export type StaleMergeResult<T> = {
-  /** 合并后的列表（顺序与远端一致）。 */
-  merged: T[];
-  /** 触发完整 record 保护并存在于远端的 Session ID。 */
-  protectedSessionIds: string[];
-};
-
-/**
- * 陈旧列表响应合并。
- *
- * 规则：
- * - 若某 Session 的成功 mutation revision 大于本次请求开始时的 revision：
- *   - 远端列表仍包含该 Session -> 完整保留 mutation 缓存 record，不采用旧列表中的任何字段；
- *   - 远端不包含 -> 不复活；
- * - 其余 Session 完整采用远端 record。
- *
- * idOf 用于从 record 读取 Session ID；mutation record 缓存按调用方维护。
- */
-export function mergeStaleProtectedSessionList<T>(
-  remoteList: T[],
-  context: StaleMergeContext,
-  idOf: (record: T) => string
-): StaleMergeResult<T> {
-  const merged: T[] = [];
-  const protectedSessionIds: string[] = [];
-  for (const remote of remoteList) {
-    const id = idOf(remote);
-    const mutationRevision = context.mutationRevisionBySession.get(id);
-    if (
-      typeof mutationRevision === "number" &&
-      mutationRevision > context.requestRevision &&
-      context.mutationRecordBySession.has(id)
-    ) {
-      merged.push(context.mutationRecordBySession.get(id) as T);
-      protectedSessionIds.push(id);
-      continue;
-    }
-    merged.push(remote);
-  }
-  return { merged, protectedSessionIds };
-}
-
 /**
  * 将 Timeline 响应中的权威标题合并到 Session 列表。
  *

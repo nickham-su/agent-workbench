@@ -3,7 +3,6 @@ import test from "node:test";
 import {
   isRequestResponseWritable,
   MANUAL_TITLE_RAW_MAX_LENGTH,
-  mergeStaleProtectedSessionList,
   mergeTimelineSessionTitle,
   resolveTitleSaveResponseAction,
   resolveTitleSettingTrigger,
@@ -120,60 +119,6 @@ type FakeSession = { id: string; title: string; headItemId: number; updatedAt: n
 function session(id: string, title: string, headItemId: number, updatedAt: number): FakeSession {
   return { id, title, headItemId, updatedAt };
 }
-
-test("mergeStaleProtectedSessionList 命中 mutation 时完整保留本地 record", () => {
-  const remote = [
-    session("s1", "旧标题", 10, 100),
-    session("s2", "其他", 1, 50)
-  ];
-  const apiRecord = session("s1", "手动标题", 12, 120);
-  const context = {
-    requestRevision: 5,
-    mutationRevisionBySession: new Map([["s1", 6]]),
-    mutationRecordBySession: new Map([["s1", apiRecord]])
-  };
-  const result = mergeStaleProtectedSessionList(remote, context, (item) => item.id);
-  assert.deepEqual(result.protectedSessionIds, ["s1"]);
-  // 完整保留 mutation record，不回退任何字段
-  assert.deepEqual(result.merged[0], { id: "s1", title: "手动标题", headItemId: 12, updatedAt: 120 });
-  assert.deepEqual(result.merged[1], { id: "s2", title: "其他", headItemId: 1, updatedAt: 50 });
-});
-
-test("mergeStaleProtectedSessionList 远端缺失时不复活", () => {
-  const remote = [session("s2", "其他", 1, 50)];
-  const context = {
-    requestRevision: 5,
-    mutationRevisionBySession: new Map([["s1", 6]]),
-    mutationRecordBySession: new Map([["s1", session("s1", "手动", 12, 120)]])
-  };
-  const result = mergeStaleProtectedSessionList(remote, context, (item) => item.id);
-  assert.deepEqual(result.protectedSessionIds, []);
-  assert.equal(result.merged.length, 1);
-  assert.equal(result.merged[0].id, "s2");
-});
-
-test("mergeStaleProtectedSessionList 无命中时完整采用远端", () => {
-  const remote = [session("s1", "服务端", 11, 110)];
-  const context = {
-    requestRevision: 5,
-    mutationRevisionBySession: new Map([["s1", 5]]),
-    mutationRecordBySession: new Map([["s1", session("s1", "本地", 12, 120)]])
-  };
-  const result = mergeStaleProtectedSessionList(remote, context, (item) => item.id);
-  assert.deepEqual(result.protectedSessionIds, []);
-  assert.equal(result.merged[0].title, "服务端");
-});
-
-test("mergeStaleProtectedSessionList 无缓存 record 时不保护", () => {
-  const remote = [session("s1", "服务端", 11, 110)];
-  const context = {
-    requestRevision: 5,
-    mutationRevisionBySession: new Map([["s1", 6]]),
-    mutationRecordBySession: new Map<string, unknown>()
-  };
-  const result = mergeStaleProtectedSessionList(remote, context, (item) => item.id);
-  assert.equal(result.merged[0].title, "服务端");
-});
 
 test("isRequestResponseWritable 校验 disposed/generation/workspace", () => {
   const base = {

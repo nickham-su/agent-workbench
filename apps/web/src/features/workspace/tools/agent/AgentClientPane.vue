@@ -426,6 +426,7 @@ import type {
   AgentImagePart,
   AgentMessage,
   AgentSessionMessageState,
+  AgentSessionRecord,
   AgentTimelineToolExecution,
   AgentToolExecution,
 } from "@agent-workbench/shared";
@@ -440,7 +441,7 @@ import {
   RobotOutlined,
 } from "@ant-design/icons-vue";
 import { Modal, message } from "ant-design-vue";
-import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, ref, watch } from "vue";
+import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import AgentAttachmentPreviewModal from "./AgentAttachmentPreviewModal.vue";
 import AgentConversationToolCall from "./AgentConversationToolCall.vue";
@@ -491,6 +492,7 @@ import {
   type PendingAgentImage,
   type PendingAgentSendAttempt,
 } from "./agentImageAttachments";
+import { agentSessionMetadataReadContextKey, type TimelineMetadataEvent } from "./agentSessionMetadataReadContext";
 import { createAgentClientRequestId } from "./agentClientRequestId";
 import {
   copyTextWithExecCommand,
@@ -589,15 +591,16 @@ const props = defineProps<{
     ready: boolean;
   } | null;
 }>();
+const metadataReadContext = inject(agentSessionMetadataReadContextKey, null);
 const emit = defineEmits<{
   "update:modelValue": [value: string | null];
-  forked: [sessionId: string];
+  forked: [session: AgentSessionRecord, mayActivate: boolean];
   "open-subtask": [sessionId: string];
   "open-title-setting": [];
   "open-parent": [sessionId: string];
   "choose-session": [];
   "session-title-sync-needed": [sessionId: string];
-  "session-metadata-updated": [session: AgentSessionMessageState];
+  "session-metadata-updated": [event: TimelineMetadataEvent];
   "agent-settings-updated": [];
   "request-session-model-open": [
     params: { sessionId: string; agentId: string },
@@ -881,6 +884,7 @@ async function loadTimeline(
       : null;
   const anchor = anchorElement?.getBoundingClientRect().top ?? null;
   try {
+    const readToken = metadataReadContext?.captureReadToken(scope.workspaceId, scope.sessionId);
     const response = await getAgentTimeline(
       scope.sessionId,
       buildTimelineRequest(timelineState.value, scope.workspaceId, mode),
@@ -900,7 +904,7 @@ async function loadTimeline(
     );
     if (result.state === timelineState.value) return;
     timelineState.value = result.state;
-    emit("session-metadata-updated", response.session);
+    if (readToken) emit("session-metadata-updated", { session: response.session, readToken });
     const invalidatedDetailIds = detailCache.syncTimeline(
       result.state.toolExecutions,
     );
@@ -1130,6 +1134,8 @@ async function restoreScrollPosition() {
   stopScrollRestoreIntentListener();
 }
 async function onFork(messageId: string) {
+  const scope = requestScope;
+  const mayActivate = metadataReadContext?.captureActivationGuard?.() ?? (() => true);
   await runAgentSessionMessageMutation({
     state: messageMutationState,
     sessionId: props.sessionId,
@@ -1138,10 +1144,14 @@ async function onFork(messageId: string) {
         sourceSessionId: props.sessionId,
         sourceMessageId: messageId,
         fork: props.forkSession ?? forkAgentSession,
-        onForked: (sessionId) => emit("forked", sessionId),
+        onForked: (session) => {
+          if (!disposed && isCurrentAgentRequestScope(requestScope, scope)) emit("forked", session, mayActivate());
+        },
       });
     },
-    onError: (error) => message.error(error instanceof Error ? error.message : String(error)),
+    onError: (error) => {
+      if (!disposed && isCurrentAgentRequestScope(requestScope, scope) && mayActivate()) message.error(error instanceof Error ? error.message : String(error));
+    },
   });
 }
 function onRevert(targetMessage: AgentMessage) {

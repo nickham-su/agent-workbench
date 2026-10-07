@@ -3,6 +3,7 @@ import { ensureDir } from "../fs/fs.js";
 import { dbPath } from "../fs/paths.js";
 import { cleanupDestructiveAgentUpgradeFiles } from "./agent-destructive-upgrade-files.js";
 import { assertAgentSchemaSupported, initSchema, markAgentFileCleanupComplete } from "./schema.js";
+import { registerAgentQueryFunctions } from "./agent-query-functions.js";
 
 export type Db = Database.Database;
 
@@ -18,6 +19,7 @@ export async function openDb(dataDir: string): Promise<Db> {
     assertAgentSchemaSupported(db);
     const init = initSchema(db);
     db.pragma("journal_mode = WAL");
+    registerAgentQueryFunctions(db);
     if (init.fileCleanupPending) {
       const cleanup = await cleanupDestructiveAgentUpgradeFiles(db, dataDir);
       for (const diagnostic of cleanup.diagnostics) {

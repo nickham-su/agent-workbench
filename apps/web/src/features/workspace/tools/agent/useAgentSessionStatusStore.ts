@@ -148,6 +148,7 @@ export function createAgentSessionStatusStore() {
 
   let timer: number | null = null;
   let disposed = false;
+  let workspaceGeneration = 0;
   let settingsTimer: number | null = null;
   let persisted: PersistedIndicators = {};
   let audioEl: HTMLAudioElement | null = null;
@@ -176,9 +177,9 @@ export function createAgentSessionStatusStore() {
 
   function persistIndicators() {
     const workspaceId = String(state.workspaceId || "").trim();
-    if (!registeredSessionsReady) return;
+    if (disposed || !registeredSessionsReady) return;
     if (!workspaceId) return;
-    const payload: PersistedIndicators = {};
+    const payload: PersistedIndicators = { ...persisted };
     for (const sessionId of Object.keys(state.entries)) {
       if (!state.registeredSessionIds.has(sessionId)) continue;
       const entry = state.entries[sessionId];
@@ -203,9 +204,17 @@ export function createAgentSessionStatusStore() {
     try {
       const raw = localStorage.getItem(storageKey(workspaceId));
       if (!raw) return;
-      const parsed = JSON.parse(raw) as PersistedIndicators;
-      if (!parsed || typeof parsed !== "object") return;
-      persisted = parsed;
+      const parsed: unknown = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+      const validTime = (value: unknown) => value === null
+        || (typeof value === "number" && Number.isSafeInteger(value) && value >= 0);
+      persisted = Object.fromEntries(Object.entries(parsed).flatMap(([id, value]) => {
+        if (!id || !value || typeof value !== "object" || Array.isArray(value)) return [];
+        const entry = value as Record<string, unknown>;
+        if (!validTime(entry.lastTerminalAt) || !validTime(entry.lastSeenTerminalAt)) return [];
+        return [[id, { lastTerminalAt: entry.lastTerminalAt as number | null,
+          lastSeenTerminalAt: entry.lastSeenTerminalAt as number | null }]];
+      }));
     } catch {
       persisted = {};
     }
@@ -263,22 +272,14 @@ export function createAgentSessionStatusStore() {
     const keep = new Set<string>([...state.visibleSessionIds, ...state.registeredSessionIds]);
     for (const sessionId of Object.keys(state.entries)) {
       if (keep.has(sessionId)) continue;
+      const entry = state.entries[sessionId];
+      persisted[sessionId] = { lastTerminalAt: entry.lastTerminalAt, lastSeenTerminalAt: entry.lastSeenTerminalAt };
       indicatorCache.delete(sessionId);
       delete state.entries[sessionId];
     }
-    const nextPersisted: PersistedIndicators = {};
-    for (const sessionId of state.registeredSessionIds) {
-      const entry = state.entries[sessionId];
-      if (!entry) continue;
-      nextPersisted[sessionId] = {
-        lastTerminalAt: entry.lastTerminalAt,
-        lastSeenTerminalAt: entry.lastSeenTerminalAt
-      };
-    }
-    if (registeredSessionsReady) {
-      persisted = nextPersisted;
-      persistIndicators();
-    }
+    // Registered IDs are only loaded metadata, never an authoritative inventory.
+    // Preserve unloaded historical timestamps instead of treating absence as deletion.
+    if (registeredSessionsReady) persistIndicators();
   }
 
   function updateEntryIndicator(entry: SessionStatusEntry) {
@@ -299,13 +300,15 @@ export function createAgentSessionStatusStore() {
     if (entry.lastSoundPlayedAt != null && terminalAt <= entry.lastSoundPlayedAt) return;
     const audio = ensureAudio();
     if (!audio) return;
+    const generation = workspaceGeneration;
+    const isCurrent = () => !disposed && generation === workspaceGeneration && state.entries[entry.sessionId] === entry;
     entry.lastSoundPlayedAt = terminalAt;
     try {
       audio.currentTime = 0;
       const p = audio.play();
       if (p && typeof p.catch === "function") {
         p.catch(() => {
-          entry.lastSoundPlayFailedAt = nowMs();
+          if (isCurrent()) entry.lastSoundPlayFailedAt = nowMs();
         });
       }
     } catch {
@@ -344,16 +347,22 @@ export function createAgentSessionStatusStore() {
     if (state.runtimeSettings.loading) return;
     const age = nowMs() - state.runtimeSettings.loadedAt;
     if (!force && state.runtimeSettings.loadedAt > 0 && age < SETTINGS_RELOAD_MS) return;
+    const generation = workspaceGeneration;
+    const workspaceId = state.workspaceId;
+    const isCurrent = () => !disposed && generation === workspaceGeneration && workspaceId === state.workspaceId;
     state.runtimeSettings.loading = true;
     try {
       const settings = await getAgentRuntimeSettings();
+      if (!isCurrent()) return;
       state.runtimeSettings.sessionTerminalSoundEnabled = settings.sessionTerminalSoundEnabled !== false;
       state.runtimeSettings.loadedAt = nowMs();
     } catch {
+      if (!isCurrent()) return;
       if (state.runtimeSettings.loadedAt === 0) {
         state.runtimeSettings.sessionTerminalSoundEnabled = true;
       }
     } finally {
+      if (!isCurrent()) return;
       state.runtimeSettings.loading = false;
       scheduleSettingsRefresh();
     }
@@ -369,12 +378,18 @@ export function createAgentSessionStatusStore() {
   }
 
   async function refreshSessionNow(sessionId: string) {
+    if (disposed) return;
     const entry = ensureEntry(sessionId);
     if (!entry || entry.inFlight) return;
     if (!state.registeredSessionIds.has(sessionId)) return;
+    const workspaceId = state.workspaceId;
+    const generation = workspaceGeneration;
+    const isCurrent = () => !disposed && generation === workspaceGeneration && workspaceId === state.workspaceId
+      && state.entries[sessionId] === entry;
     entry.inFlight = true;
     try {
-      const next = await getAgentRunState(sessionId, state.workspaceId);
+      const next = await getAgentRunState(sessionId, workspaceId);
+      if (!isCurrent()) return;
       entry.errorRetryAt = null;
       entry.fetchedAt = nowMs();
       entry.runState = next;
@@ -391,9 +406,11 @@ export function createAgentSessionStatusStore() {
       });
       entry.nextPollAt = Number.isFinite(delay) ? nowMs() + delay : Number.POSITIVE_INFINITY;
     } catch {
+      if (!isCurrent()) return;
       entry.errorRetryAt = nowMs();
       entry.nextPollAt = nowMs() + ERROR_RETRY_MS;
     } finally {
+      if (!isCurrent()) return;
       entry.inFlight = false;
       schedule();
     }
@@ -453,8 +470,10 @@ export function createAgentSessionStatusStore() {
   }
 
   function bindWorkspace(workspaceId: string) {
+    if (disposed) return;
     const next = String(workspaceId || "").trim();
     if (state.workspaceId === next) return;
+    workspaceGeneration += 1;
     clearTimer();
     clearSettingsTimer();
     resetAudio();
@@ -466,6 +485,7 @@ export function createAgentSessionStatusStore() {
     indicatorCache.clear();
     state.runtimeSettings.sessionTerminalSoundEnabled = true;
     state.runtimeSettings.loadedAt = 0;
+    state.runtimeSettings.loading = false;
     restoreIndicators();
     if (next) {
       void refreshRuntimeSettings(true);
@@ -570,6 +590,7 @@ export function createAgentSessionStatusStore() {
 
   function dispose() {
     disposed = true;
+    workspaceGeneration += 1;
     clearTimer();
     clearSettingsTimer();
     resetAudio();
