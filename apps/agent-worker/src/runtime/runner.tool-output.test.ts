@@ -17,6 +17,7 @@ import {
   hasValidPromptCacheKeyForTest,
 } from "./runner.js";
 import { getBashToolAppendix, startBashToolProbe } from "./bashTools.js";
+import { runBashCommand } from "./bash.js";
 import { runReadTool } from "./fileTools.js";
 import { InternalRpcHttpError } from "./apiClient.js";
 
@@ -1069,6 +1070,96 @@ test("非 subtask 长输出仍截断并写入 artifact", async () => {
       ),
       longText,
     );
+  });
+});
+
+test("multiline query output survives preview truncation and can be reconstructed by paged artifact reads", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const text = Array.from({ length: 165 }, (_, i) => [
+      `Session ID：session-${i}`, "标题：通用会话", "类型：primary", "状态：idle",
+      "最近更新时间：2026-01-01T00:00:00.000Z", "用户消息累计数：0", "已完成助手消息累计数：0", ""
+    ].join("\n")).join("\n") + "\n查询结束：已输出 165 个 Session。\n";
+    assert.equal(text.length > 8_000 && text.length < 200_000, true);
+    assert.equal(Buffer.byteLength(text, "utf8") < 512 * 1024, true);
+    const preview = await finalizeToolTextForTest({ workspacePath, toolExecutionId: "query-readable", toolName: "bash", text });
+    assert.equal(preview.textTruncated, true);
+    assert.equal(preview.text.includes("查询结束："), false);
+    assert.ok(preview.textArtifactPath);
+    // Existing tool normalization strips only trailing whitespace, not records.
+    assert.equal(await fs.readFile(path.join(workspacePath, preview.textArtifactPath), "utf8"), text.trimEnd());
+    const lines: string[] = [];
+    let offset = 1;
+    let pages = 0;
+    while (true) {
+      const page = await runReadTool({ workspacePath, workspaceRepoDirNames: [], filePath: preview.textArtifactPath, offset, limit: 400 });
+      pages += 1;
+      for (const match of page.content.matchAll(/^\d+: (.*)$/gm)) lines.push(match[1]);
+      if (!page.nextOffset) break;
+      assert.equal(page.nextOffset > offset, true);
+      offset = page.nextOffset;
+      assert.equal(pages < 10, true);
+    }
+    assert.equal(pages > 1, true);
+    assert.equal(lines.join("\n"), text.trimEnd());
+  });
+});
+
+test("query-shaped output above 200k retains a truncation marker but loses the end-of-query marker", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const text = "Session ID: full-id\n".repeat(14_000) + "QUERY-END\n";
+    assert.equal(text.length > 200_000 && Buffer.byteLength(text) < 512 * 1024, true);
+    const preview = await finalizeToolTextForTest({ workspacePath, toolExecutionId: "query-archive-capped", toolName: "bash", text });
+    assert.ok(preview.textArtifactPath);
+    const artifact = await fs.readFile(path.join(workspacePath, preview.textArtifactPath), "utf8");
+    assert.equal(artifact.slice(0, 200_000) === text.slice(0, 200_000), true);
+    assert.equal(artifact.endsWith("\n\n[truncated]"), true);
+    assert.equal(artifact.includes("QUERY-END"), false);
+  });
+});
+
+test("real bash default 512KiB collection loss still produces a completed tool, not a complete result", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const quote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+    const command = `${quote(process.execPath)} -e ${quote('process.stdout.write("x".repeat(1024 * 1024) + "QUERY-END\\n")')}`;
+    const captured = await runBashCommand({ command, cwd: workspacePath, timeoutMs: 10_000 });
+    assert.equal(captured.outputLimitExceeded, true);
+    assert.equal(captured.ok, false);
+    assert.equal(captured.timedOut, false);
+    assert.equal(Buffer.byteLength(captured.stdout) + Buffer.byteLength(captured.stderr) <= 512 * 1024, true);
+    assert.equal(captured.stdout.includes("QUERY-END"), false);
+    const combined = await runBashCommand({
+      command: `${quote(process.execPath)} -e ${quote('process.stdout.write("o".repeat(300 * 1024)); process.stderr.write("e".repeat(300 * 1024))')}`,
+      cwd: workspacePath, timeoutMs: 10_000
+    });
+    assert.equal(combined.outputLimitExceeded, true);
+    assert.equal(combined.stdout.length > 0 && combined.stderr.length > 0, true);
+    assert.equal(Buffer.byteLength(combined.stdout) + Buffer.byteLength(combined.stderr) <= 512 * 1024, true);
+    assert.equal(combined.stdout.length < 300 * 1024 || combined.stderr.length < 300 * 1024, true);
+    const updates: Array<{ status?: string; resultPreview?: string; resultArtifactPath?: string; resultTruncated?: boolean }> = [];
+    const runner = new AgentRunner({
+      async updateToolExecution(input: typeof updates[number]) { updates.push(input); return { id: 1 }; }
+    } as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+    // Dispatch reuses an actual bash result; runner formatting and writeback are
+    // real. We are testing collection/completion semantics, not RPC transport.
+    (runner as any).toolRegistry = {
+      async isToolEnabled() { return true; },
+      async execute() { return { command, exitCode: captured.code, timedOut: captured.timedOut,
+        outputLimitExceeded: captured.outputLimitExceeded, stdout: captured.stdout, stderr: captured.stderr }; }
+    };
+    await executeToolForTest(runner, {
+      profile: testProfile("bash"), run: testRun(workspacePath),
+      tool: pendingTool({ executionId: "query-collection-capped", toolName: "bash", args: { command } }),
+      parentSessionId: "sess_baseline", signal: new AbortController().signal, promptContext: testPromptContext()
+    });
+    const completed = latestUpdate(updates, "completed");
+    assert.ok(completed);
+    assert.match(completed.resultPreview ?? "", /status: completed/);
+    assert.match(completed.resultPreview ?? "", /output_limit_exceeded: true/);
+    assert.equal(completed.resultTruncated, true);
+    assert.ok(completed.resultArtifactPath);
+    const artifact = await fs.readFile(path.join(workspacePath, completed.resultArtifactPath), "utf8");
+    // The command header contains the literal marker; its output line was lost.
+    assert.equal(artifact.includes("QUERY-END\n"), false);
   });
 });
 

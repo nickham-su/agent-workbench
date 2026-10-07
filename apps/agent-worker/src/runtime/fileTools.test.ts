@@ -179,6 +179,74 @@ test("read 支持对大文件使用 offset 继续读取", async () => {
   assert.match(result.content, /To continue reading this same file, use exactly offset=5503\. Do not guess the next offset\./);
 });
 
+test("read keeps the 2000-line, 50KiB and 2000-character limits when reading query artifacts", async () => {
+  const workspacePath = await createWorkspace();
+  await fs.writeFile(path.join(workspacePath, "many-lines.txt"), `${Array.from({ length: 2100 }, (_, i) => `row-${i + 1}`).join("\n")}\n`);
+  const page = await runReadTool({ workspacePath, workspaceRepoDirNames: [], filePath: "many-lines.txt", limit: 2000 });
+  assert.match(page.content, /2000: row-2000/);
+  assert.doesNotMatch(page.content, /2001: row-2001/);
+  assert.match(page.content, /use exactly offset=2001/);
+  const tail = await runReadTool({ workspacePath, workspaceRepoDirNames: [], filePath: "many-lines.txt", offset: 2001, limit: 2000 });
+  assert.match(tail.content, /2100: row-2100/);
+  assert.match(tail.content, /End of file - total 2100 lines/);
+
+  const byteLimit = 50 * 1024;
+  const fixtures = [
+    { filePath: "byte-page.txt", bom: false, lines: Array.from({ length: 200 }, (_, i) => `row-${i + 1} ${"x".repeat(1000)}`) },
+    { filePath: "short-byte-page.txt", bom: false, lines: Array.from({ length: 2000 }, () => "x".repeat(80)) },
+    // Make the encoding explicit so this tests UTF-8 byte budgeting, not sniffing.
+    { filePath: "chinese-byte-page.txt", bom: true, lines: Array.from({ length: 1000 }, () => "汉".repeat(30)) }
+  ];
+  for (const { filePath, lines, bom } of fixtures) {
+    await fs.writeFile(path.join(workspacePath, filePath), `${bom ? "\uFEFF" : ""}${lines.join("\n")}\n`);
+    // Budget selected UTF-8 line content and inter-line newlines, not line
+    // numbers or the continuation hint. These fixtures need no line clipping.
+    let expectedEnd = 0;
+    let rawBytes = 0;
+    for (const line of lines) {
+      const size = Buffer.byteLength(line, "utf8") + (expectedEnd > 0 ? 1 : 0);
+      if (rawBytes + size > byteLimit) break;
+      rawBytes += size;
+      expectedEnd += 1;
+    }
+    assert.ok(expectedEnd > 0 && expectedEnd < lines.length);
+    const bytes = await runReadTool({ workspacePath, workspaceRepoDirNames: [], filePath, limit: 2000 });
+    const selected = Array.from(bytes.content.matchAll(/^\d+: (.*)$/gm), (match) => match[1]);
+    assert.deepEqual(selected, lines.slice(0, expectedEnd));
+    assert.equal(Buffer.byteLength(selected.join("\n"), "utf8"), rawBytes);
+    assert.ok(rawBytes <= byteLimit);
+    assert.ok(Buffer.byteLength(lines.slice(0, expectedEnd + 1).join("\n"), "utf8") > byteLimit);
+    // runReadTool reports byte truncation in its text, not a truncated field.
+    assert.match(bytes.content, /Output capped at 50KB/);
+    assert.equal(bytes.eof, false);
+    assert.equal(bytes.actualStart, 1);
+    assert.equal(bytes.actualEnd, expectedEnd);
+    assert.equal(bytes.nextOffset, expectedEnd + 1);
+    assert.match(bytes.content, new RegExp(`use exactly offset=${expectedEnd + 1}\\.`));
+    const continued = await runReadTool({ workspacePath, workspaceRepoDirNames: [], filePath, offset: bytes.nextOffset, limit: 1 });
+    assert.ok(continued.content.startsWith(`${expectedEnd + 1}: ${lines[expectedEnd]}\n\n`));
+    assert.equal(continued.actualStart, expectedEnd + 1);
+    assert.equal(continued.actualEnd, expectedEnd + 1);
+    assert.equal(continued.nextOffset, expectedEnd + 2);
+    assert.doesNotMatch(continued.content, /Output capped/);
+  }
+
+  const shortLines = Array.from({ length: 1000 }, () => "x".repeat(50));
+  assert.ok(Buffer.byteLength(shortLines.join("\n"), "utf8") < byteLimit);
+  await fs.writeFile(path.join(workspacePath, "short-uncapped.txt"), `${shortLines.join("\n")}\n`);
+  const short = await runReadTool({ workspacePath, workspaceRepoDirNames: [], filePath: "short-uncapped.txt", limit: 2000 });
+  assert.ok(Buffer.byteLength(short.content, "utf8") > byteLimit, "formatting can legitimately exceed the raw-line budget");
+  assert.doesNotMatch(short.content, /Output capped/);
+  assert.equal(short.actualEnd, 1000);
+  assert.equal(short.nextOffset, undefined);
+  assert.equal(short.eof, true);
+
+  await fs.writeFile(path.join(workspacePath, "long-line.txt"), `${"x".repeat(2100)}\nend\n`);
+  const longLine = await runReadTool({ workspacePath, workspaceRepoDirNames: [], filePath: "long-line.txt" });
+  assert.match(longLine.content, /line truncated to 2000 chars/);
+  assert.match(longLine.content, /2: end/);
+});
+
 test("read 在 offset 超过文件总行数时返回 EOF 说明而不是失败", async () => {
   const workspacePath = await createWorkspace();
   const filePath = path.join(workspacePath, "small.txt");

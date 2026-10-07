@@ -1,4 +1,10 @@
 import { parseSessionListQuery } from "../read-side/session-list-query.js";
+import { parseSessionActivityQuery } from "../read-side/session-activity-query.js";
+import {
+  AGENT_SESSION_QUERY_ERROR_CODES,
+  AgentSessionQueryRequestSchema,
+  AgentSessionQueryResponseSchema
+} from "@agent-workbench/shared/contracts/agent-session-query";
 import { createReadStream } from "node:fs";
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -354,6 +360,30 @@ export async function registerAgentPublicRoutes(
       }
     },
     async (req) => dependencies.service.listSessionRecords(parseSessionListQuery(req.raw.url ?? ""))
+  );
+
+  app.get(
+    "/api/agent/sessions/query",
+    {
+      attachValidation: true,
+      schema: {
+        tags: ["agent"],
+        querystring: AgentSessionQueryRequestSchema,
+        response: {
+          200: AgentSessionQueryResponseSchema,
+          400: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          500: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      const input = parseSessionActivityQuery(req.raw.url ?? "");
+      if (req.validationError) {
+        throw new HttpError(400, "invalid session activity query", AGENT_SESSION_QUERY_ERROR_CODES.invalid);
+      }
+      return dependencies.service.querySessionRecords(input);
+    }
   );
 
   app.get(

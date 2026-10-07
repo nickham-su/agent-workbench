@@ -289,3 +289,19 @@ test("AgentService public metadata facade forwards workspace-qualified query wit
   assert.equal(service.getSessionRecord(input), result);
   assert.deepEqual(calls, [input]);
 });
+
+test("AgentService activity facade delegates the normalized query and preserves query errors", () => {
+  const input = { workspaceId: "workspace", updatedWithinSeconds: 3600, kind: "all" as const, status: "all" as const };
+  const result = { ...input, updatedFrom: 0, updatedTo: 3600_000, total: 0, items: [] };
+  const calls: unknown[] = [];
+  const service = new AgentService({ query: {
+    querySessionRecords(params: unknown) { calls.push(params); return result; }
+  } } as unknown as AgentServiceCapabilities);
+  assert.strictEqual(service.querySessionRecords(input), result);
+  assert.deepEqual(calls, [input]);
+  const error = new Error("query failed");
+  const failing = new AgentService({ query: {
+    querySessionRecords() { throw error; }
+  } } as unknown as AgentServiceCapabilities);
+  assert.throws(() => failing.querySessionRecords(input), (actual: unknown) => actual === error);
+});

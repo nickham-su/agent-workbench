@@ -8,6 +8,7 @@ packages/*/node_modules
 apps/web/dist
 apps/api/dist
 packages/shared/dist
+packages/cli/dist
 npm-debug.log*
 yarn.lock
 pnpm-lock.yaml

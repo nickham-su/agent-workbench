@@ -10,6 +10,10 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./contracts/agent-session-query": {
+      "types": "./dist/contracts/agent-session-query.d.ts",
+      "default": "./dist/contracts/agent-session-query.js"
+    },
     "./llm-single-call": {
       "types": "./dist/llm/single-call.d.ts",
       "default": "./dist/llm/single-call.js"

@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { spawn as spawnPty } from "node-pty";
 import { createServer } from "node:net";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { afterEach, test } from "node:test";
@@ -10,6 +14,7 @@ import { createApp } from "../../app/createApp.js";
 import type { AppContext } from "../../app/context.js";
 import { openDb } from "../../infra/db/db.js";
 import type { Db } from "../../infra/db/db.js";
+import { AUTH_COOKIE_NAME, AUTH_REMEMBER_TTL_MS, createSessionCookieValue } from "../../infra/auth/sessionCookie.js";
 import { ensureDir, rmrf } from "../../infra/fs/fs.js";
 import { agentWorkerPidPath, workspaceRoot } from "../../infra/fs/paths.js";
 import { newSortableId } from "../../utils/ids.js";
@@ -103,7 +108,7 @@ async function requestJson<T>(baseUrl: string, input: { method: string; path: st
   return { response, json, text };
 }
 
-async function startLlmStubServer(mode: "failure" | "success" | "tool-cycle" = "failure") {
+async function startLlmStubServer(mode: "failure" | "success" | "tool-cycle" = "failure", toolCommand = "printf tool-cycle-output") {
   const requests: Array<Record<string, unknown>> = [];
   const requestHeaders: Array<Record<string, string | string[] | undefined>> = [];
   const requestPaths: string[] = [];
@@ -177,7 +182,7 @@ async function startLlmStubServer(mode: "failure" | "success" | "tool-cycle" = "
                   type: "response.function_call_arguments.delta",
                   item_id: "stub-function-item-1",
                   output_index: 1,
-                  delta: JSON.stringify({ command: "printf tool-cycle-output" })
+                  delta: JSON.stringify({ command: toolCommand })
                 },
                 {
                   type: "response.output_item.done",
@@ -187,7 +192,7 @@ async function startLlmStubServer(mode: "failure" | "success" | "tool-cycle" = "
                     id: "stub-function-item-1",
                     call_id: "stub-tool-call-1",
                     name: "bash",
-                    arguments: JSON.stringify({ command: "printf tool-cycle-output" }),
+                    arguments: JSON.stringify({ command: toolCommand }),
                     status: "completed"
                   }
                 },
@@ -277,10 +282,12 @@ async function configureAgentDefaults(
   providerNpm = "@ai-sdk/openai",
   modelOptions?: Record<string, unknown>,
   modelRequestMaxRetries = 0,
+  headers?: Record<string, string>,
 ) {
   const providers = await requestJson(baseUrl, {
     method: "PUT",
     path: "/api/settings/agent/providers",
+    headers,
     body: {
       default: {
         providerId: "ppchat",
@@ -312,6 +319,7 @@ async function configureAgentDefaults(
   const agents = await requestJson(baseUrl, {
     method: "PUT",
     path: "/api/settings/agent/agents",
+    headers,
     body: {
       default: {
         agentId: "default"
@@ -337,6 +345,7 @@ async function configureAgentDefaults(
   const runtime = await requestJson(baseUrl, {
     method: "PUT",
     path: "/api/settings/agent/runtime",
+    headers,
     body: {
       // worker integration test should not depend on real LLM connectivity.
       modelRequestMaxRetries,
@@ -354,6 +363,9 @@ async function createFixture(params: {
   providerNpm?: "@ai-sdk/openai" | "@ai-sdk/openai-compatible";
   modelOptions?: Record<string, unknown>;
   modelRequestMaxRetries?: number;
+  toolCommand?: string;
+  workspaceId?: string;
+  authToken?: string | null;
 } = {}): Promise<Fixture> {
   const repoRoot = [
     process.cwd(),
@@ -369,7 +381,7 @@ async function createFixture(params: {
   let app: FastifyInstance | null = null;
   let db: Db | null = null;
   try {
-    llmStub = await startLlmStubServer(params.llmMode);
+    llmStub = await startLlmStubServer(params.llmMode, params.toolCommand);
     const apiPort = await getFreePort();
     const workerPort = await getFreePort();
 
@@ -388,7 +400,7 @@ async function createFixture(params: {
       credentialMasterKeySource: "generated",
       credentialMasterKeyId: "testkey",
       credentialMasterKeyCreatedAt: Date.now(),
-      authToken: null,
+      authToken: params.authToken ?? null,
       authCookieSecure: false,
       agentWorkerEnabled: true,
       agentWorkerHost: "127.0.0.1",
@@ -403,7 +415,7 @@ async function createFixture(params: {
     };
     app = await createApp(ctx);
 
-    const workspaceId = newSortableId("ws");
+    const workspaceId = params.workspaceId ?? newSortableId("ws");
     const workspaceDirName = newSortableId("workspace");
     const workspacePath = workspaceRoot(dataDir, workspaceDirName);
     await ensureDir(workspacePath);
@@ -444,7 +456,15 @@ async function createFixture(params: {
     });
     await app.listen({ host: "127.0.0.1", port: apiPort });
     const baseUrl = `http://127.0.0.1:${apiPort}`;
-    await configureAgentDefaults(baseUrl, llmStub.baseURL, params.providerNpm, params.modelOptions, params.modelRequestMaxRetries);
+    // Public authentication is selected before createApp registers its hooks.
+    // Bootstrap with an independent controller Cookie, never the CLI cache or
+    // the Worker's internal token; unauthenticated fixtures keep their defaults.
+    const headers = ctx.authToken ? {
+      cookie: `${AUTH_COOKIE_NAME}=${createSessionCookieValue({
+        authToken: ctx.authToken, nowMs: Date.now(), ttlMs: AUTH_REMEMBER_TTL_MS
+      })}`
+    } : undefined;
+    await configureAgentDefaults(baseUrl, llmStub.baseURL, params.providerNpm, params.modelOptions, params.modelRequestMaxRetries, headers);
 
     const fixture: Fixture = {
       app,
@@ -510,10 +530,11 @@ afterEach(async () => {
   }
 });
 
-async function createSession(baseUrl: string, workspaceId: string) {
+async function createSession(baseUrl: string, workspaceId: string, headers?: Record<string, string>) {
   const res = await requestJson<{ id: string }>(baseUrl, {
     method: "POST",
     path: "/api/agent/sessions",
+    headers,
     body: { workspaceId, title: "worker-it-session" }
   });
   assert.equal(res.response.status, 201, `create session failed: ${res.text}`);
@@ -1425,4 +1446,120 @@ test("worker 模式: worker pid 文件会被写入", async () => {
       .then(() => true)
       .catch(() => false);
   }, 6_000);
+});
+
+test("worker 模式: PTY登录缓存由真实Worker builtin bash中的独立awb共享", async (t) => {
+  const repoRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
+  const testsRoot = path.join(repoRoot, ".tmp-tests");
+  await fs.mkdir(testsRoot, { recursive: true });
+  const root = await fs.mkdtemp(path.join(testsRoot, "cli-worker-it-"));
+  const home = path.join(root, "home");
+  const prefix = path.join(root, "npm-prefix");
+  const temporary = path.join(root, "tmp");
+  const npmCache = path.join(root, "npm-cache");
+  await Promise.all([home, prefix, temporary, npmCache].map((directory) => fs.mkdir(directory)));
+  const priorHome = process.env.HOME;
+  const priorPath = process.env.PATH;
+  const isolatedPath = `${path.join(prefix, "bin")}${path.delimiter}${priorPath ?? path.dirname(process.execPath)}`;
+  let fixture: Fixture | undefined;
+  t.after(async () => {
+    try {
+      // Stop the API-managed Worker before deleting its HOME or installation.
+      if (fixture) await closeFixture(fixture);
+      await fs.rm(root, { recursive: true, force: true });
+    } finally {
+      if (priorHome === undefined) delete process.env.HOME;
+      else process.env.HOME = priorHome;
+      if (priorPath === undefined) delete process.env.PATH;
+      else process.env.PATH = priorPath;
+    }
+  });
+  const env: NodeJS.ProcessEnv = {
+    ...process.env, HOME: home, USERPROFILE: home, PATH: isolatedPath,
+    TMPDIR: temporary, NODE_PATH: "", NODE_OPTIONS: "",
+    npm_config_cache: npmCache, npm_config_prefix: prefix,
+    NPM_CONFIG_CACHE: npmCache, NPM_CONFIG_PREFIX: prefix,
+    NPM_CONFIG_USERCONFIG: path.join(home, ".npmrc"),
+    NPM_CONFIG_GLOBALCONFIG: path.join(home, "global.npmrc")
+  };
+  assert.ok(existsSync(path.join(repoRoot, "packages/cli/dist/cli.cjs")), "build packages/cli before the Worker gate");
+  // npm link only touches this fixture's prefix/cache; never the user's prefix.
+  execFileSync("npm", ["--cache", npmCache, "--userconfig", env.NPM_CONFIG_USERCONFIG!, "--globalconfig", env.NPM_CONFIG_GLOBALCONFIG!,
+    "link", "-w", "packages/cli", "--ignore-scripts", "--offline", "--no-audit", "--no-fund", "--package-lock=false"], {
+    cwd: repoRoot, env, stdio: "pipe", timeout: 30_000
+  });
+  assert.equal(await fs.realpath(path.join(prefix, "bin/awb")), await fs.realpath(path.join(repoRoot, "packages/cli/dist/cli.cjs")));
+  process.env.HOME = home;
+  process.env.PATH = isolatedPath;
+  const quote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
+  const workspaceId = newSortableId("ws");
+  // Host login profiles may reset PATH/HOME. Restore only this test's isolated
+  // process environment inside the real bash -lc, never inject authentication.
+  const toolCommand = `export HOME=${quote(home)} PATH=${quote(isolatedPath)}; command -v awb && awb --help && awb session list --workspace ${quote(workspaceId)} --updated-within 1h`;
+  const authToken = randomUUID();
+  const controllerCookie = createSessionCookieValue({ authToken, nowMs: Date.now(), ttlMs: AUTH_REMEMBER_TTL_MS });
+  fixture = await createFixture({ llmMode: "tool-cycle", workspaceId, toolCommand, authToken });
+  const session = await createSession(fixture.baseUrl, fixture.workspaceId, { cookie: `${AUTH_COOKIE_NAME}=${controllerCookie}` });
+  const queryPath = `/api/agent/sessions/query?${new URLSearchParams({
+    workspaceId, updatedWithinSeconds: "3600", kind: "all", status: "all"
+  })}`;
+  const unauthenticated = await requestJson(fixture.baseUrl, { method: "GET", path: queryPath });
+  assert.equal(unauthenticated.response.status, 401, "the same public query must reject a request without a Cookie");
+  const internalOnly = await requestJson(fixture.baseUrl, {
+    method: "GET", path: queryPath,
+    headers: { "x-awb-agent-internal-token": fixture.ctx.agentInternalToken }
+  });
+  assert.equal(internalOnly.response.status, 401, "an internal credential must not authorize the public query");
+
+  const terminal = spawnPty("bash", ["--noprofile", "--norc", "-c", `awb --help && awb login --url ${quote(fixture.baseUrl)}`], {
+    cwd: fixture.workspacePath,
+    env: Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
+    name: "xterm-256color", cols: 100, rows: 30
+  });
+  let terminalOutput = "";
+  let tokenSent = false;
+  const terminalCode = await new Promise<number>((resolve, reject) => {
+    const timer = setTimeout(() => { terminal.kill(); reject(new Error("isolated PTY login timed out")); }, 10_000);
+    terminal.onData((chunk) => {
+      terminalOutput += chunk;
+      if (!tokenSent && terminalOutput.includes("输入隐藏")) {
+        tokenSent = true;
+        terminal.write(`${authToken}\r`);
+      }
+    });
+    terminal.onExit(({ exitCode }) => { clearTimeout(timer); resolve(exitCode); });
+  });
+  assert.equal(terminalCode, 0);
+  assert.ok(tokenSent);
+  assert.match(terminalOutput, /Usage: awb/);
+  assert.match(terminalOutput, /登录成功/);
+  assert.ok(!terminalOutput.includes(authToken), "PTY must not echo the generated credential");
+  const cachePath = path.join(home, ".config/awb/config.json");
+  const before = await fs.stat(cachePath);
+  // A separate controller Cookie avoids reading or printing the CLI's cache.
+  const sent = await requestJson<{ runId: string }>(fixture.baseUrl, {
+    method: "POST", path: `/api/agent/sessions/${session.id}/messages`,
+    headers: { cookie: `${AUTH_COOKIE_NAME}=${controllerCookie}` },
+    body: { workspaceId, text: "query sessions with the independent CLI", clientRequestId: newSortableId("req") }
+  });
+  assert.equal(sent.response.status, 201);
+  const activeFixture = fixture;
+  await waitUntil(async () => getMessageRunState(activeFixture.db, workspaceId, session.id)?.status === "idle", 20_000);
+  assert.equal(getRunRecord(fixture.db, sent.json.runId)?.status, "completed");
+  assert.ok(fixture.llmStub && fixture.llmStub.requests.length >= 2, "real Worker must complete the tool/model cycle");
+  const completed = fixture.internalRpcCalls.find((call) => {
+    const update = call.body as { runId?: string; status?: string };
+    return call.url === "/api/internal/agent/tool-executions/update" && update.runId === sent.json.runId && update.status === "completed";
+  });
+  assert.ok(completed, "real builtin execution must write its result through internal RPC");
+  const update = completed.body as { resultPreview: string };
+  assert.match(update.resultPreview, /Usage: awb/);
+  assert.match(update.resultPreview, new RegExp(`Workspace：${workspaceId}`));
+  assert.match(update.resultPreview, /查询结束：已输出 1 个 Session。/);
+  assert.ok(!update.resultPreview.includes(authToken));
+  assert.ok(!update.resultPreview.includes(controllerCookie));
+  assert.equal((await fs.stat(cachePath)).mtimeMs, before.mtimeMs, "fresh Cookie needs no renewal cache rewrite");
+  const afterWorker = await requestJson(fixture.baseUrl, { method: "GET", path: queryPath });
+  assert.equal(afterWorker.response.status, 401, "public authentication must still be active after the successful Worker query");
+  t.diagnostic(`公开查询负对照：无Cookie=${unauthenticated.response.status}，仅内部凭证=${internalOnly.response.status}，Worker查询后无Cookie=${afterWorker.response.status}；PTY登录与真实Worker共享缓存链路成功。`);
 });

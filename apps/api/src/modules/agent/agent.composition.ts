@@ -127,6 +127,7 @@ import {
   toRuntimeExecution,
 } from "./read-side/model-context-resolver.js";
 import { SqliteSessionQuery } from "./read-side/sqlite-session-query.js";
+import { SqliteSessionActivityQuery } from "./read-side/sqlite-session-activity-query.js";
 import { SqliteMessageQuery } from "./read-side/sqlite-message-query.js";
 import { ReadSideApplication } from "./read-side/read-side-application.js";
 import { getWorkspaceEnabledAgentIds } from "../workspaces/workspace.service.js";
@@ -1074,6 +1075,7 @@ function createQueryFacadeCapabilities<
   T extends Record<
     | "getSessionRecord"
     | "listSessionRecords"
+    | "querySessionRecords"
     | "listRecentSessions"
     | "listAvailableAgents"
     | "listRecentWorkspaces"
@@ -1097,6 +1099,7 @@ function createQueryFacadeCapabilities<
   T,
   | "getSessionRecord"
     | "listSessionRecords"
+    | "querySessionRecords"
     | "listRecentSessions"
   | "listAvailableAgents"
   | "listRecentWorkspaces"
@@ -1116,6 +1119,7 @@ function createQueryFacadeCapabilities<
   const {
     getSessionRecord,
     listSessionRecords,
+    querySessionRecords,
     listRecentSessions,
     listAvailableAgents,
     listRecentWorkspaces,
@@ -1135,6 +1139,7 @@ function createQueryFacadeCapabilities<
   return {
     getSessionRecord,
     listSessionRecords,
+    querySessionRecords,
     listRecentSessions,
     listAvailableAgents,
     listRecentWorkspaces,
@@ -2122,6 +2127,11 @@ function createAgentApplications(
   }
 
   const sessionQuery = new SqliteSessionQuery(environment.db);
+  const sessionActivityQuery = new SqliteSessionActivityQuery(environment.db);
+  function querySessionRecords(params: Parameters<SqliteSessionActivityQuery["querySessions"]>[0]) {
+    return sessionActivityQuery.querySessions(params);
+  }
+
   function listSessionRecords(params: Parameters<SqliteSessionQuery["listSessions"]>[0]) {
     return sessionQuery.listSessions(params);
   }
@@ -3166,6 +3176,7 @@ function createAgentApplications(
   const query = createQueryFacadeCapabilities({
     getSessionRecord,
     listSessionRecords,
+    querySessionRecords,
     listRecentSessions,
     listAvailableAgents,
     listRecentWorkspaces,

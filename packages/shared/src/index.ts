@@ -18,6 +18,7 @@ export * from "./llm/reasoning-provider-options.js";
 export * from "./contracts/auth.js";
 export * from "./contracts/agent-message.js";
 export * from "./contracts/agent.js";
+export * from "./contracts/agent-session-query.js";
 export * from "./contracts/agent-primitives.js";
 export * from "./agent-primary-projection.js";
 export * from "./skills-protocol.js";
