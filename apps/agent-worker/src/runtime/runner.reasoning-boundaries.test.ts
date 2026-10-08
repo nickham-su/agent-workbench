@@ -64,9 +64,16 @@ test("switching Providers never sends an unrecoverable legacy placeholder, with 
 
 test("retry records each network Attempt using its immutable attempt number", async () => {
   const events: Array<{ type: string; modelCallId: string; attemptNo: number; status: string }> = [];
+  const retryDelays: number[] = [];
   let calls = 0;
   const runner = new AgentRunner(api() as any, { async listTools() { return []; } } as any,
     { info() {}, warn() {}, error() {} }, 1, {
+      modelRetrySleep: async (ms, signal) => {
+        assert.ok(signal instanceof AbortSignal);
+        assert.equal(signal.aborted, false);
+        retryDelays.push(ms);
+        return !signal.aborted;
+      },
       streamText: (() => {
         calls++;
         if (calls === 1) return { fullStream: (async function* () { throw new Error("temporary failure"); })(),
@@ -78,6 +85,7 @@ test("retry records each network Attempt using its immutable attempt number", as
       } } as any,
     });
   const result = await step(runner, "@ai-sdk/anthropic", 1);
+  assert.deepEqual(retryDelays, [2_000]);
   assert.equal(result.hasVisibleText, true);
   assert.equal(calls, 2);
   assert.deepEqual(events.map((event) => [event.type, event.attemptNo, event.status]), [

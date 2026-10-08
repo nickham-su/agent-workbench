@@ -278,6 +278,7 @@ for (const provider of [
           { role: "assistant", content: [{ type: "text", text: "completed both inspections" }] },
         ] as Input["messages"];
         const originalJson = JSON.stringify(originalMessages);
+        const retryDelays: number[] = [];
         const wireBodies: Array<Record<string, unknown>> = [];
         const runnerRequests: ModelMessage[][] = [];
         const imagePath = path.join(workspacePath, "screens/a.png");
@@ -302,6 +303,12 @@ for (const provider of [
           async updateRunNotice() { return { result: "updated" }; },
           async replaceStreamingAssistant() { return { result: "updated" }; },
         } as any, {} as any, { info() {}, warn() {}, error() {} }, 1, {
+          modelRetrySleep: async (ms, signal) => {
+            assert.ok(signal instanceof AbortSignal);
+            assert.equal(signal.aborted, false);
+            retryDelays.push(ms);
+            return !signal.aborted;
+          },
           streamText: ((request: { messages: ModelMessage[]; providerOptions?: unknown }) => {
             runnerRequests.push(request.messages);
             return { fullStream: (async function* () {
@@ -324,6 +331,7 @@ for (const provider of [
         });
         if (nextImage === "remove") await assert.rejects(execute, /cannot read a valid tool image/);
         else await execute;
+        assert.deepEqual(retryDelays, [2_000]);
         assert.equal(JSON.stringify(originalMessages), originalJson, "the retry must not mutate original context");
         assert.equal(wireBodies.length, nextImage === "remove" ? 1 : 2,
           "missing image fails in preparation before a second SDK call");

@@ -1561,6 +1561,8 @@ type AgentRunnerDeps = {
   attachmentStorage?: AgentAttachmentStorage;
   /** 仅用于测试控制面固定短间隔重试，不影响 Provider 退避。 */
   controlWriteSleep?: (ms: number, signal: AbortSignal) => Promise<boolean>;
+  /** Provider 退避等待；取消返回 false。默认使用真实等待，不影响控制面重试。 */
+  modelRetrySleep?: (ms: number, signal: AbortSignal) => Promise<boolean>;
   /** Provider 专属适配器扩展点：reasoning/text metadata-only 更新。 */
   providerReplayPartFromChunk?: (chunk: unknown) => ProviderReplayPartUpdate | null;
   /** Provider 专属适配器扩展点：从真实 tool-call chunk 提取 function item metadata。 */
@@ -1589,6 +1591,7 @@ export class AgentRunner {
   private readonly warningNowMsFn: () => number;
   private readonly attachmentStorage: AgentAttachmentStorage | undefined;
   private readonly controlWriteSleepFn: (ms: number, signal: AbortSignal) => Promise<boolean>;
+  private readonly modelRetrySleepFn: (ms: number, signal: AbortSignal) => Promise<boolean>;
   private readonly providerReplayPartFromChunkFn: ((chunk: unknown) => ProviderReplayPartUpdate | null) | undefined;
   private readonly providerToolCallReplayFromChunkFn: ((chunk: unknown) => ProviderToolCallReplay | null) | undefined;
   private readonly providerConversationStateAdapterRegistry: ProviderConversationStateAdapterRegistry;
@@ -1606,6 +1609,7 @@ export class AgentRunner {
     this.warningNowMsFn = deps.warningNowMs ?? nowMs;
     this.attachmentStorage = deps.attachmentStorage;
     this.controlWriteSleepFn = deps.controlWriteSleep ?? sleepMsWithAbort;
+    this.modelRetrySleepFn = deps.modelRetrySleep ?? sleepMsWithAbort;
     this.providerReplayPartFromChunkFn = deps.providerReplayPartFromChunk;
     this.providerToolCallReplayFromChunkFn = deps.providerToolCallReplayFromChunk;
     this.analyticsSignals = deps.analyticsSignals;
@@ -3326,7 +3330,7 @@ export class AgentRunner {
             }
           });
 
-          const continueRunning = await sleepMsWithAbort(delayMs, signal);
+          const continueRunning = await this.modelRetrySleepFn(delayMs, signal);
           if (!continueRunning) {
             return { aborted: true as const, assistantMessageId };
           }
