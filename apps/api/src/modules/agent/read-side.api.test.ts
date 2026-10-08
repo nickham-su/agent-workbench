@@ -877,7 +877,7 @@ test("compaction 替换旧上下文后不额外回放被摘要替换的 reasonin
   assert.deepEqual(prompt.providerReplay, []);
 });
 
-test("subtask model schema exposes source only on fork and describes stable independent execution", async () => {
+test("subtask model schema exposes source only on fork and publishes simplified usage guidance", async () => {
   const { fixture, workspace } = await createReadSideFixture(["subtask"]);
   assert.ok(fixture.app);
   const { sessionId, runId } = createRun(fixture, workspace.id, { subtaskDepth: 0 });
@@ -899,12 +899,21 @@ test("subtask model schema exposes source only on fork and describes stable inde
   const source = branches[2].properties.sourceSessionId;
   assert.equal(source.type, "string");
   assert.equal(source.minLength, 1);
-  assert.match(source.description, /same Workspace.*primary or subtask.*caller/);
-  assert.match(source.description, /latest stable effective context/);
-  assert.match(source.description, /unfinished tools are excluded/);
-  assert.match(tool.description, /only allowed in fork mode/);
-  assert.match(tool.description, /does not inherit the source Agent\/profile\/model overrides/);
-  assert.match(tool.description, /no automatic-compaction guarantee/);
+  assert.match(source.description, /inherit the source session/);
+  assert.match(source.description, /If left blank.*context of the current session/);
+  assert.match(branches[2].description, /full parent-session history as background context/);
+  assert.match(tool.description, /Run a task in a subtask session and bring the result back to the parent session\./);
+  assert.match(tool.description, /implementation and code review cannot be delegated in parallel/);
+  assert.match(tool.description, /prefer fork so the user's intent can be passed to the subtask without loss/);
+  assert.match(tool.description, /the prompt alone cannot capture the user's intent or constraints/);
+  assert.match(tool.description, /If sourceSessionId is not specified.*current session's context/);
+  assert.match(tool.description, /If sourceSessionId is specified.*specified session's context/);
+  assert.match(tool.description, /prefer reusing that session with existing instead of starting over/);
+  assert.match(tool.description, /you must reuse that session to check progress/);
+  assert.match(tool.description, /build on previous results/);
+  assert.match(tool.description, /Result: on success, returns subtaskSessionId and the subtask result text\.\n\nAvailable agents:/);
+  assert.doesNotMatch(tool.description, /prefork|Agent\/profile\/model overrides|automatic-compaction|No message boundary/);
+  assert.doesNotMatch(tool.description, /Concurrent subtasks may reuse the same agentId|Inherited history is background/);
   assert.equal(JSON.stringify(tool.inputSchema).includes("sourceMessageId"), false);
   assert.equal(JSON.stringify(tool.inputSchema).includes("excludedInProgress"), false);
 });
