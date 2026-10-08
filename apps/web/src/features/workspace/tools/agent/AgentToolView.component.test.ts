@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 
 class FakeXMLHttpRequest {
   static requests: FakeXMLHttpRequest[] = [];
@@ -59,7 +59,7 @@ class FakeXMLHttpRequest {
 
 Object.defineProperty(globalThis, "XMLHttpRequest", { value: FakeXMLHttpRequest, configurable: true, writable: true });
 
-const [{ mount }, component, { createI18n }, { KeepAlive, h, nextTick, ref }, { workspaceHostKey }, { message }, enUS, zhCN] = await Promise.all([
+const [{ mount }, component, { createI18n }, { KeepAlive, h, nextTick, ref }, { workspaceHostKey }, { message, notification }, enUS, zhCN] = await Promise.all([
   import("@vue/test-utils"),
   import("./AgentToolView.vue"),
   import("vue-i18n"),
@@ -71,6 +71,17 @@ const [{ mount }, component, { createI18n }, { KeepAlive, h, nextTick, ref }, { 
 ]);
 
 const AgentToolView = component.default.__vccOpts ?? component.default;
+
+afterEach(async () => {
+  // Let queued notices initialize before destroying this module's singletons.
+  await nextTick();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  message.destroy();
+  notification.destroy();
+  // Use this vite-node module instance; the notification unmount is asynchronous.
+  await nextTick();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+});
 
 type Session = {
   id: string;
