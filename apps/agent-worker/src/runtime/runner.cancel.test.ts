@@ -8,6 +8,7 @@ import {
   getNestedParentForTest,
   getRegisteredControllerForTest,
   executeToolForTest,
+  executeToolSafelyForTest,
   processNestedRunWithControllerForTest,
   processRunForTest,
 } from "./runner.js";
@@ -602,7 +603,16 @@ test("同一 runId 在运行期间重复 enqueue 不创建第二个 Worker 实�
   assert.equal((runner as any).activeRunIds.has("run_dedup"), false);
 });
 
-test("processRun 遇到 abort-like error 时只提交一次 cancelled", async () => {
+const cancellationLikeErrors = [
+  { label: "正文含 Abort", create: () => new Error("Nearby actual lines: Abort controller"), runCancelled: false },
+  { label: "正文含 aborted", create: () => new Error("document says request aborted"), runCancelled: false },
+  { label: "名称含 Abort 子串", create: () => Object.assign(new Error("provider failed"), { name: "Provider Abort failure" }), runCancelled: false },
+  { label: "明确 AbortError", create: () => Object.assign(new Error("provider stopped"), { name: "AbortError" }), runCancelled: true },
+  { label: "明确 ABORT_ERR", create: () => Object.assign(new Error("provider stopped"), { code: "ABORT_ERR" }), runCancelled: true },
+  { label: "DOMException AbortError", create: () => new DOMException("provider stopped", "AbortError"), runCancelled: true },
+];
+
+for (const fixture of cancellationLikeErrors) test(`processRun ${fixture.label} 仅使用明确类型或信号判断取消`, async () => {
   const completed: string[] = [];
   const apiClient = {
     async markRunWorkInProgress() { return { result: "updated" }; },
@@ -619,26 +629,26 @@ test("processRun 遇到 abort-like error 时只提交一次 cancelled", async ()
       completed.push(input.status);
       return { result: "updated" };
     },
-    async convergeRunTerminal() { return { kind: "transitioned", finalStatus: "cancelled" }; },
+    async convergeRunTerminal() { return { kind: "transitioned", finalStatus: fixture.runCancelled ? "cancelled" : "failed" }; },
   };
   const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
   (runner as any).runModelStep = async () => {
-    const err = new Error("request aborted");
-    (err as Error & { name: string }).name = "AbortError";
-    throw err;
+    throw fixture.create();
   };
 
-  await processRunForTest(runner, makeRun("sess_test", "run_test"), new AbortController().signal);
+  const signal = new AbortController().signal;
+  await processRunForTest(runner, makeRun("sess_test", "run_test"), signal);
 
-  assert.deepEqual(completed, ["cancelled"]);
+  assert.equal(signal.aborted, false);
+  assert.deepEqual(completed, [fixture.runCancelled ? "cancelled" : "failed"]);
 });
 
-test("executeTool 遇到 AbortError 不会把工具项更新为 failed", async () => {
-  const statuses: string[] = [];
+for (const outer of [false, true]) for (const fixture of cancellationLikeErrors) test(`${outer ? "executeToolSafely 外层" : "executeTool 内层"} ${fixture.label} 在信号未取消时回写 failed`, async () => {
+  const updates: Array<{ status: string; error?: string }> = [];
   const apiClient = {
-    async updateToolExecution(input: { status: string }) {
-      statuses.push(input.status);
-      return;
+    async updateToolExecution(input: { status: string; error?: string }) {
+      updates.push(input);
+      return { result: "updated" };
     }
   };
   const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
@@ -647,13 +657,16 @@ test("executeTool 遇到 AbortError 不会把工具项更新为 failed", async (
       return true;
     },
     async execute() {
-      const err = new Error("request aborted");
-      (err as Error & { name: string }).name = "AbortError";
-      throw err;
+      throw fixture.create();
     }
   };
+  if (outer) {
+    (runner as any).executeTool = async () => { throw fixture.create(); };
+  }
+  const signal = new AbortController().signal;
 
-  const result = await executeToolForTest(runner, {
+  const execute = outer ? executeToolSafelyForTest : executeToolForTest;
+  const result = await execute(runner, {
     profile: baseProfile(),
     run: makeRun("sess_parent", "run_parent"),
     tool: {
@@ -666,12 +679,44 @@ test("executeTool 遇到 AbortError 不会把工具项更新为 failed", async (
       args: { command: "sleep 1" }
     },
     parentSessionId: "sess_parent",
-    signal: new AbortController().signal,
+    signal,
     promptContext: baseContext()
   });
 
+  assert.equal(signal.aborted, false);
   assert.deepEqual(result, { paused: false });
-  assert.deepEqual(statuses, ["running"]);
+  assert.deepEqual(updates.map((update) => update.status), outer ? ["failed"] : ["running", "failed"]);
+  assert.equal(updates.at(-1)?.error, fixture.create().message);
+});
+
+test("executeToolSafely 外层真实 signal 取消时不回写 failed", async () => {
+  const statuses: string[] = [];
+  const controller = new AbortController();
+  const runner = new AgentRunner({
+    async updateToolExecution(input: { status: string }) {
+      statuses.push(input.status);
+      return { result: "updated" };
+    }
+  } as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+  (runner as any).executeTool = async () => {
+    controller.abort();
+    throw new Error("provider failed during cancellation");
+  };
+
+  const result = await executeToolSafelyForTest(runner, {
+    profile: baseProfile(),
+    run: makeRun("sess_parent", "run_parent"),
+    tool: {
+      toolExecutionId: "execution-outer-cancel", callPartId: "part-outer-cancel",
+      assistantMessageId: "message-outer-cancel", status: "queued", toolName: "bash",
+      toolCallId: "call_outer_cancel", args: { command: "fixture" }
+    },
+    parentSessionId: "sess_parent", signal: controller.signal, promptContext: baseContext()
+  });
+
+  assert.equal(controller.signal.aborted, true);
+  assert.deepEqual(result, { paused: false });
+  assert.deepEqual(statuses, []);
 });
 
 test("read probe 期间 signal abort 时不会把根路径错误写成 failed", async () => {

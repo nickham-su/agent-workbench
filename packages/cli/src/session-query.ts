@@ -63,7 +63,7 @@ function isCount(value: unknown): value is number {
 }
 
 const responseKeys = ["workspaceId", "updatedWithinSeconds", "updatedFrom", "updatedTo", "kind", "status", "total", "items"];
-const itemKeys = ["id", "title", "kind", "status", "updatedAt", "userMessageCount", "completedAssistantMessageCount"];
+const itemKeys = ["id", "title", "kind", "status", "createdAt", "updatedAt", "userMessageCount", "completedAssistantMessageCount"];
 
 /** Validate both the closed DTO structure and its relationship to this request. */
 export function validateSessionQueryResponse(value: unknown, query: SessionListQuery): AgentSessionQueryResponse {
@@ -86,13 +86,14 @@ export function validateSessionQueryResponse(value: unknown, query: SessionListQ
       || (item.status !== "idle" && item.status !== "running")
       || (query.kind !== "all" && item.kind !== query.kind)
       || (query.status !== "all" && item.status !== query.status)
-      || !isTimestamp(item.updatedAt) || item.updatedAt < from || item.updatedAt > to
+      || !isTimestamp(item.createdAt) || !isTimestamp(item.updatedAt) || item.updatedAt < from || item.updatedAt > to
       || !isCount(item.userMessageCount) || !isCount(item.completedAssistantMessageCount)) {
       throw responseError("Session 查询条目字段、筛选、时间或累计计数无效，未输出部分列表。");
     }
     ids.add(item.id);
     return {
-      id: item.id, title: item.title, kind: item.kind, status: item.status, updatedAt: item.updatedAt,
+      id: item.id, title: item.title, kind: item.kind, status: item.status,
+      createdAt: item.createdAt, updatedAt: item.updatedAt,
       userMessageCount: item.userMessageCount, completedAssistantMessageCount: item.completedAssistantMessageCount
     };
   });

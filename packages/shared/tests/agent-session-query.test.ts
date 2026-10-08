@@ -12,7 +12,7 @@ import {
 
 const request = { workspaceId: "a", updatedWithinSeconds: 86400 };
 const item = {
-  id: "session-a", title: "", kind: "primary", status: "idle", updatedAt: 1000,
+  id: "session-a", title: "", kind: "primary", status: "idle", createdAt: -1, updatedAt: 1000,
   userMessageCount: 0, completedAssistantMessageCount: 0
 } as const;
 const response: AgentSessionQueryResponse = {
@@ -90,13 +90,17 @@ test("session query counts are nonnegative safe integers and timestamps fit Date
     assert.equal(Value.Check(AgentSessionQueryResponseSchema, { ...response, total: count }), false);
   }
   for (const timestamp of [-8_640_000_000_000_000, -1, 0, 8_640_000_000_000_000]) {
-    assert.equal(Value.Check(AgentSessionQueryItemSchema, { ...item, updatedAt: timestamp }), true);
+    for (const key of ["createdAt", "updatedAt"]) {
+      assert.equal(Value.Check(AgentSessionQueryItemSchema, { ...item, [key]: timestamp }), true);
+    }
     for (const key of ["updatedFrom", "updatedTo"]) {
       assert.equal(Value.Check(AgentSessionQueryResponseSchema, { ...response, [key]: timestamp }), true);
     }
   }
-  for (const timestamp of [1.5, null, "0", 8_640_000_000_000_001, -8_640_000_000_000_001, Infinity, NaN]) {
-    assert.equal(Value.Check(AgentSessionQueryItemSchema, { ...item, updatedAt: timestamp }), false);
+  for (const timestamp of [1.5, null, "0", true, 8_640_000_000_000_001, -8_640_000_000_000_001, Infinity, NaN]) {
+    for (const key of ["createdAt", "updatedAt"]) {
+      assert.equal(Value.Check(AgentSessionQueryItemSchema, { ...item, [key]: timestamp }), false);
+    }
     for (const key of ["updatedFrom", "updatedTo"]) {
       assert.equal(Value.Check(AgentSessionQueryResponseSchema, { ...response, [key]: timestamp }), false);
     }

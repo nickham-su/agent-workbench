@@ -168,8 +168,15 @@ test("DeepSeek Runner + actual SDK mock: flushed provenance feeds next request; 
 test("DeepSeek Runner retry replaces failed Parts and pairs analytics per network Attempt", async () => {
   const api = backend();
   const signals: Array<{ eventType: string; payload: Record<string, unknown> }> = [];
+  const retryDelays: number[] = [];
   let calls = 0;
   const { runner, profile: activeProfile } = fixtureRunner(api, "https://fixture.invalid/v1", {
+    modelRetrySleep: async (ms: number, signal: AbortSignal) => {
+      assert.ok(signal instanceof AbortSignal);
+      assert.equal(signal.aborted, false);
+      retryDelays.push(ms);
+      return !signal.aborted;
+    },
     streamText: () => {
       calls++;
       if (calls === 1) return {
@@ -196,6 +203,7 @@ test("DeepSeek Runner retry replaces failed Parts and pairs analytics per networ
   activeProfile.runtime.modelRequestMaxRetries = 1;
   const output = await invoke(runner, activeProfile, [{ role: "user", content: "hello" }]);
   const saved = api.parts.get(output.assistantMessageId) ?? [];
+  assert.deepEqual(retryDelays, [2_000]);
   assert.equal(calls, 2);
   assert.equal(api.completed.length, 1);
   assert.deepEqual(saved.map((part) => part.text), ["retained reasoning", "answer"]);

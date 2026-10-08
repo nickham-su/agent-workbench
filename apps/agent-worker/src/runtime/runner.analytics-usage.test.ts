@@ -6,6 +6,57 @@ import { AgentRunner } from "./runner.js";
 
 const neverSettlingUsage = new Promise<never>(() => undefined);
 
+async function withTestDeadline<T>(operation: Promise<T>, description: string): Promise<T> {
+  // Production usage probes intentionally unref their timers; this wait owns
+  // a referenced, bounded deadline rather than borrowing another test's handle.
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${description} exceeded the 750ms test deadline`)), 750);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+test("analytics test deadline is referenced and clears after success or rejection", async (t) => {
+  const timeouts = t.mock.method(globalThis, "setTimeout");
+  const clears = t.mock.method(globalThis, "clearTimeout");
+
+  const completed = withTestDeadline(Promise.resolve("completed"), "successful fixture");
+  const successTimer = timeouts.mock.calls[0]!.result as NodeJS.Timeout;
+  assert.equal(successTimer.hasRef(), true);
+  assert.equal(await completed, "completed");
+  assert.ok(clears.mock.calls.some((call) => call.arguments[0] === successTimer));
+
+  const failure = new Error("fixture rejected");
+  const rejected = withTestDeadline(Promise.reject(failure), "rejected fixture");
+  const rejectionTimer = timeouts.mock.calls[1]!.result as NodeJS.Timeout;
+  assert.equal(rejectionTimer.hasRef(), true);
+  await assert.rejects(rejected, (error) => error === failure);
+  assert.ok(clears.mock.calls.some((call) => call.arguments[0] === rejectionTimer));
+  assert.equal(timeouts.mock.callCount(), 2);
+  assert.deepEqual(timeouts.mock.calls.map((call) => call.arguments[1]), [750, 750]);
+});
+
+test("analytics test deadline rejects a pending operation with diagnostics and clears its timer", async (t) => {
+  const timeouts = t.mock.method(globalThis, "setTimeout");
+  const clears = t.mock.method(globalThis, "clearTimeout");
+  const pending = withTestDeadline(neverSettlingUsage, "pending usage fixture");
+  const timer = timeouts.mock.calls[0]!.result as NodeJS.Timeout;
+  assert.equal(timer.hasRef(), true);
+  await assert.rejects(pending, {
+    name: "Error",
+    message: "pending usage fixture exceeded the 750ms test deadline",
+  });
+  assert.equal(timeouts.mock.callCount(), 1);
+  assert.equal(timeouts.mock.calls[0]!.arguments[1], 750);
+  assert.ok(clears.mock.calls.some((call) => call.arguments[0] === timer));
+});
+
 for (const providerNpm of ["@ai-sdk/openai-compatible", "@ai-sdk/moonshotai", "@ai-sdk/deepseek"] as const) {
   test(`${providerNpm} custom model ID invokes production Runner and emits one paired Analytics Attempt`, async () => {
     const bodies: Array<Record<string, unknown>> = [];
@@ -122,7 +173,7 @@ test("runner completes a terminal provider attempt when fullStream usage never s
     })) as any,
   });
 
-  const result = await Promise.race([
+  const result = await withTestDeadline<any>(
     (runner as any).runModelStep({
       profile: {
         model: { id: "gpt-4o-mini", options: undefined },
@@ -137,8 +188,8 @@ test("runner completes a terminal provider attempt when fullStream usage never s
       recoveryContinuation: { messageId: null },
       repeatedToolCallCounter: new Map(),
     }),
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("runModelStep was blocked by optional usage")), 750)),
-  ]);
+    "runModelStep with never-settling optional usage",
+  );
 
   assert.equal(result.aborted, false);
   assert.equal(result.hasVisibleText, true);
@@ -189,7 +240,7 @@ async function finishedModelUsage(options: {
       })(),
     })) as any,
   });
-  const result = await (runner as any).runModelStep({
+  const result = await withTestDeadline<any>((runner as any).runModelStep({
     profile: {
       model: { id: "model", options: undefined },
       provider: { id: "provider", npm: options.npm, options: { baseURL: options.baseURL } },
@@ -202,7 +253,7 @@ async function finishedModelUsage(options: {
     signal: new AbortController().signal,
     recoveryContinuation: { messageId: null },
     repeatedToolCallCounter: new Map(),
-  });
+  }), `runModelStep (${options.npm}, steps=${options.steps ?? 1})`);
   assert.equal(result.aborted, false);
   return signals.find((signal) => signal.eventType === "model_finished")?.payload;
 }

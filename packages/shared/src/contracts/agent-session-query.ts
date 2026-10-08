@@ -35,6 +35,8 @@ export const AgentSessionQueryItemSchema = Type.Object({
   title: Type.String(),
   kind: SessionKindSchema,
   status: SessionStatusSchema,
+  /** This Session's own creation time, independent of the update window and fork source. */
+  createdAt: TimestampSchema,
   updatedAt: TimestampSchema,
   /** All retained native completed user rows, not restricted to the update window. */
   userMessageCount: CountSchema,

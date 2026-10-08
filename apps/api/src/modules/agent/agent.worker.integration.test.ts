@@ -1555,6 +1555,9 @@ test("worker 模式: PTY登录缓存由真实Worker builtin bash中的独立awb�
   const update = completed.body as { resultPreview: string };
   assert.match(update.resultPreview, /Usage: awb/);
   assert.match(update.resultPreview, new RegExp(`Workspace：${workspaceId}`));
+  const metadata = fixture.db.prepare("select created_at as createdAt from agent_session where workspace_id = ? and id = ?")
+    .get(workspaceId, session.id) as { createdAt: number };
+  assert.ok(update.resultPreview.includes(`创建时间：${new Date(metadata.createdAt).toISOString()}\n最近更新时间：`));
   assert.match(update.resultPreview, /查询结束：已输出 1 个 Session。/);
   assert.ok(!update.resultPreview.includes(authToken));
   assert.ok(!update.resultPreview.includes(controllerCookie));

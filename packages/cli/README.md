@@ -33,10 +33,13 @@ awb session list --workspace workspace-id --updated-within 7d --kind subtask --s
 - URL 只接受 HTTP(S) origin，不支持代理子路径、用户口令、query 或 fragment。
 - Workspace 和最近更新时间窗口必须显式提供；窗口为正整数 `s/m/h/d`，最多90天。
 - kind 为 `primary/subtask/all`，status 为 `idle/running/all`，缺省均为 `all`。
+- 每条展示本 Session 的创建时间和最近更新时间（UTC ISO）；Fork 展示自身创建时间。窗口仍仅按更新时间筛选，创建时间不参与筛选、排序或计数。
 - 计数是本 Session 原生累计 completed user／assistant，不是窗口内增量，不包含 Fork 继承历史，不读取正文。
 - 查询只展示数量，不自动排除名称或低计数会话。
 
 连接配置位于 `~/.config/awb/config.json`，仅保存一个服务器地址及 Cookie，不保存登录 token；POSIX目录0700、文件0600。同一系统用户、HOME和文件系统的终端及Worker可以共用配置。有效续签会在业务输出前原子保存；401仅提示重新登录，不自动交互或重试。
+
+API 与 CLI 应同步升级，默认 Docker 镜像会一起构建发布。创建时间是响应必填字段；包含条目的新旧版本响应可能因严格字段校验退出6，未提供兼容模式。本地仅更新源码后需重新构建 API、shared 与CLI产物。
 
 ## Docker 安装
 

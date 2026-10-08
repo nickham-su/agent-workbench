@@ -1775,11 +1775,8 @@ function abortAwareTimeoutStream(signal: AbortSignal, busy: boolean): StreamResu
 
 for (const mode of ["idle", "total"] as const) {
   test(`真实 ${mode} timeout 触发请求中断、Provider 重试并在第二次成功`, async () => {
-    const originalSetTimeout = globalThis.setTimeout;
-    (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, ms?: number, ...args: any[]) =>
-      originalSetTimeout(handler, typeof ms === "number" && ms >= 1_000 ? 0 : ms, ...args)) as typeof setTimeout;
-    try {
     const second = createControlledStream();
+    const retryDelays: number[] = [];
     let calls = 0;
     const aborted: boolean[] = [];
     const runner = new AgentRunner({
@@ -1795,6 +1792,12 @@ for (const mode of ["idle", "total"] as const) {
         request.abortSignal.addEventListener("abort", () => aborted.push(true), { once: true });
         return calls === 1 ? abortAwareTimeoutStream(request.abortSignal, mode === "total") : second.stream;
       }) as unknown as typeof streamText,
+      modelRetrySleep: async (ms, signal) => {
+        assert.ok(signal instanceof AbortSignal);
+        assert.equal(signal.aborted, false);
+        retryDelays.push(ms);
+        return !signal.aborted;
+      },
       controlWriteSleep: async () => true
     });
     (runner as any).toolRegistry.listTools = async () => [];
@@ -1809,12 +1812,10 @@ for (const mode of ["idle", "total"] as const) {
     await second.push({ type: "text-delta", text: "recovered" });
     await second.finish();
     const result = await promise;
+    assert.deepEqual(retryDelays, [2_000]);
     assert.equal(result.aborted, false);
     assert.equal(calls, 2);
     assert.deepEqual(aborted, [true]);
-    } finally {
-      globalThis.setTimeout = originalSetTimeout;
-    }
   });
 }
 

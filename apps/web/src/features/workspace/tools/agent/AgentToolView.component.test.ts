@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 
 class FakeXMLHttpRequest {
   static requests: FakeXMLHttpRequest[] = [];
@@ -59,7 +59,7 @@ class FakeXMLHttpRequest {
 
 Object.defineProperty(globalThis, "XMLHttpRequest", { value: FakeXMLHttpRequest, configurable: true, writable: true });
 
-const [{ mount }, component, { createI18n }, { KeepAlive, h, nextTick, ref }, { workspaceHostKey }, { message }, enUS, zhCN] = await Promise.all([
+const [{ mount }, component, { createI18n }, { KeepAlive, h, nextTick, ref }, { workspaceHostKey }, { message, notification }, enUS, zhCN] = await Promise.all([
   import("@vue/test-utils"),
   import("./AgentToolView.vue"),
   import("vue-i18n"),
@@ -71,6 +71,17 @@ const [{ mount }, component, { createI18n }, { KeepAlive, h, nextTick, ref }, { 
 ]);
 
 const AgentToolView = component.default.__vccOpts ?? component.default;
+
+afterEach(async () => {
+  // Let queued notices initialize before destroying this module's singletons.
+  await nextTick();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  message.destroy();
+  notification.destroy();
+  // Use this vite-node module instance; the notification unmount is asynchronous.
+  await nextTick();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+});
 
 type Session = {
   id: string;
@@ -694,26 +705,91 @@ test("单目标父会话打开：GET 与目标 PUT 成功前保留来源，只�
   } finally { wrapper.unmount(); }
 });
 
-test("目标 PUT 失败不关闭父会话来源、不发全量兜底", async () => {
+test("嵌套子任务逐级返回 c→b→a：父子会话不在 Tab 中也按 ID 打开，确认后才关闭来源", async () => {
+  const records = [metadataRecord("a"), { ...metadataRecord("b", "subtask"), forkedFromSessionId: "a" }, { ...metadataRecord("c", "subtask"), forkedFromSessionId: "b" }];
+  const puts: FakeXMLHttpRequest[] = [];
+  const gets: FakeXMLHttpRequest[] = [];
+  const warnings: unknown[] = [];
+  const originalWarning = message.warning;
+  message.warning = ((value: unknown) => { warnings.push(value); }) as typeof message.warning;
   FakeXMLHttpRequest.requests = [];
   FakeXMLHttpRequest.responder = (request) => {
-    if (request.url.includes("/agent/sessions/parent?")) return request.respond(200, metadataRecord("parent"));
-    if (request.method === "PUT") return request.respond(500, { message: "write failed" });
-    if (isListRead(request)) return respondSessions(request, [metadataRecord("parent"), metadataRecord("child", "subtask")], { closedSessionIds: ["parent"], openedSubtaskSessionIds: ["child"] });
+    if (request.method === "PUT") { puts.push(request); return; }
+    if (/\/agent\/sessions\/(a|b)\?/.test(request.url)) { gets.push(request); return; }
+    if (isListRead(request)) return respondSessions(request, records, { closedSessionIds: ["a"], openedSubtaskSessionIds: ["c"] });
     respondDefaults(request);
   };
   const wrapper = mountView();
   try {
     await settle();
     const vm = wrapper.vm as any;
-    vm.onChangeTab("child");
-    await vm.onOpenParent("child", "parent");
-    assert.equal(vm.effectiveActiveKey, "child");
-    assert.equal(vm.visibleSessions.some((item: Session) => item.id === "child"), true);
-    assert.equal(FakeXMLHttpRequest.requests.filter((r) => r.method === "PUT" && r.url.endsWith("/child")).length, 0);
+    vm.onChangeTab("c");
+    for (const [sourceId, targetId] of [["c", "b"], ["b", "a"]] as const) {
+      const putCount = puts.length;
+      const getCount = gets.length;
+      const opening = vm.onOpenParent(sourceId, targetId);
+      await settle();
+      assert.equal(gets.length, getCount + 1);
+      assert.ok(gets[getCount]!.url.includes(`/sessions/${targetId}?`));
+      assert.equal(puts.length, putCount);
+      assert.equal(vm.visibleSessions.some((item: Session) => item.id === sourceId), true);
+      gets[getCount]!.respond(200, records.find((record) => record.id === targetId)!);
+      await settle();
+      assert.equal(puts.length, putCount + 1);
+      assert.ok(puts[putCount]!.url.endsWith(`/${targetId}`));
+      assert.deepEqual(JSON.parse(String(puts[putCount]!.requestBody)), { visible: true });
+      assert.equal(vm.visibleSessions.some((item: Session) => item.id === sourceId), true);
+      puts[putCount]!.respond(200, { workspaceId: "ws-a", sessionId: targetId, visible: true });
+      await opening;
+      assert.equal(puts.length, putCount + 2);
+      assert.ok(puts[putCount + 1]!.url.endsWith(`/${sourceId}`));
+      assert.deepEqual(JSON.parse(String(puts[putCount + 1]!.requestBody)), { visible: false });
+      puts[putCount + 1]!.respond(200, { workspaceId: "ws-a", sessionId: sourceId, visible: false });
+      await settle();
+      assert.equal(vm.effectiveActiveKey, targetId);
+      assert.equal(vm.visibleSessions.some((item: Session) => item.id === sourceId), false);
+      assert.equal(vm.visibleSessions.some((item: Session) => item.id === targetId), true);
+    }
     assert.equal(FakeXMLHttpRequest.requests.filter(isListRead).length, 1);
-  } finally { wrapper.unmount(); }
+    assert.deepEqual(warnings, []);
+  } finally {
+    wrapper.unmount();
+    message.warning = originalWarning;
+  }
 });
+
+for (const parentKind of ["primary", "subtask"] as const) {
+  test(`目标 PUT 失败不关闭父会话来源、不发全量兜底（父会话类型：${parentKind}）`, async () => {
+    const parent = metadataRecord("parent", parentKind);
+    const child = { ...metadataRecord("child", "subtask"), forkedFromSessionId: "parent" };
+    const warnings: unknown[] = [];
+    const originalWarning = message.warning;
+    message.warning = ((value: unknown) => { warnings.push(value); }) as typeof message.warning;
+    FakeXMLHttpRequest.requests = [];
+    FakeXMLHttpRequest.responder = (request) => {
+      if (request.url.includes("/agent/sessions/parent?")) return request.respond(200, parent);
+      if (request.method === "PUT") return request.respond(500, { message: "write failed" });
+      if (isListRead(request)) return respondSessions(request, [parent, child], { closedSessionIds: ["parent"], openedSubtaskSessionIds: ["child"] });
+      respondDefaults(request);
+    };
+    const wrapper = mountView();
+    try {
+      await settle();
+      const vm = wrapper.vm as any;
+      vm.onChangeTab("child");
+      await vm.onOpenParent("child", "parent");
+      assert.equal(vm.effectiveActiveKey, "child");
+      assert.equal(vm.visibleSessions.some((item: Session) => item.id === "child"), true);
+      assert.equal(FakeXMLHttpRequest.requests.filter((r) => r.method === "PUT" && r.url.endsWith("/parent")).length, 1);
+      assert.equal(FakeXMLHttpRequest.requests.filter((r) => r.method === "PUT" && r.url.endsWith("/child")).length, 0);
+      assert.equal(FakeXMLHttpRequest.requests.filter(isListRead).length, 1);
+      assert.deepEqual(warnings, []);
+    } finally {
+      wrapper.unmount();
+      message.warning = originalWarning;
+    }
+  });
+}
 
 test("连续外部打开 A/B：B 不等待 A 的 GET，A 迟到不提交或告警", async () => {
   const targets = new Map<string, FakeXMLHttpRequest>();

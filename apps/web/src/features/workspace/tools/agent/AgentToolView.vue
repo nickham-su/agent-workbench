@@ -1168,7 +1168,6 @@ async function openTargetSession(sessionId: string, sourceSessionId?: string) {
     const outcome = await readFreshTarget(sessionId, valid, abort.signal);
     if (!valid()) return;
     if (outcome.status !== "accepted") { showTargetFailure(outcome, sessionId); return; }
-    if (sourceSessionId && outcome.record.kind !== "primary") { message.warning(t("agent.client.parentSessionMissing")); return; }
     const receipt = registerVisibilityReceipt(outcome.record, context);
     activeOpenReceipt = receipt;
     activateSession(sessionId);

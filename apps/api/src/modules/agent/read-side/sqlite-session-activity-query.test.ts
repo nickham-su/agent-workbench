@@ -41,7 +41,35 @@ test("activity query includes both window ends and preserves empty titles/headle
     assert.equal(item.title, "");
     assert.equal(item.userMessageCount, 0);
     assert.equal(item.completedAssistantMessageCount, 0);
-    assert.deepEqual(Object.keys(item), ["id", "title", "kind", "status", "updatedAt", "userMessageCount", "completedAssistantMessageCount"]);
+    assert.deepEqual(Object.keys(item), ["id", "title", "kind", "status", "createdAt", "updatedAt", "userMessageCount", "completedAssistantMessageCount"]);
+  }
+});
+
+test("activity returns each Session's own creation time without applying the update window to it", (t) => {
+  const f = fixture(t);
+  f.insertSession({ id: "source", createdAt: 1, updatedAt: NOW });
+  f.insertSession({ id: "fork", kind: "subtask", createdAt: 80_000, updatedAt: NOW - 1, forkedFromSessionId: "source" });
+  const result = f.query.querySessions(input);
+  assert.deepEqual(result.items.map((item) => [item.id, item.createdAt, item.updatedAt]), [
+    ["source", 1, NOW], ["fork", 80_000, NOW - 1]
+  ]);
+  assert.ok(result.items.every((item) => item.createdAt < result.updatedFrom));
+});
+
+test("activity validates creation timestamps independently, including Date limits and corruption before status filtering", (t) => {
+  const f = fixture(t);
+  f.insertSession({ id: "one", updatedAt: NOW });
+  const update = f.db.prepare("update agent_session set created_at = ? where id = 'one'");
+  for (const createdAt of [-8_640_000_000_000_000, -1, 0, NOW + 1, 8_640_000_000_000_000]) {
+    update.run(createdAt);
+    assert.equal(f.query.querySessions(input).items[0].createdAt, createdAt);
+  }
+  for (const createdAt of [null, "invalid", 1.5, 8_640_000_000_000_001, -8_640_000_000_000_001]) {
+    update.run(createdAt);
+    for (const status of ["all", "idle", "running"] as const) {
+      assert.throws(() => f.query.querySessions({ ...input, status }), stateError);
+      assert.equal(f.db.inTransaction, false);
+    }
   }
 });
 
@@ -164,6 +192,7 @@ test("activity accepts a safe-integer SQLite connection without serializing bigi
   f.db.defaultSafeIntegers(true);
   const result = f.query.querySessions(input);
   assert.equal(result.items[0].updatedAt, NOW);
+  assert.equal(result.items[0].createdAt, 1);
   assert.equal(result.items[0].completedAssistantMessageCount, 1);
   assert.doesNotThrow(() => JSON.stringify(result));
 });

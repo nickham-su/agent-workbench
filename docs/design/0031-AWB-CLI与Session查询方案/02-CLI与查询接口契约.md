@@ -104,6 +104,7 @@ GET /api/agent/sessions/query
     title: string;
     kind: "primary" | "subtask";
     status: "idle" | "running";
+    createdAt: number; // 本 Session 自身创建时间，UTC epoch milliseconds
     updatedAt: number; // UTC epoch milliseconds
     userMessageCount: number;
     completedAssistantMessageCount: number;
@@ -115,8 +116,11 @@ GET /api/agent/sessions/query
 - `total === items.length`，不增加独立 COUNT SQL。
 - 数量必须为非负安全整数，不接受 null、浮点或负数；零数据明确返回 0。
 - title 允许空字符串，空标题不能导致会话遗漏。id 非空；不截断 ID。
+- `createdAt` 必填，来自本 Session 的 `created_at`；Fork 返回自身创建时间，不继承来源时间。与 `updatedAt` 一样须为 Date 可表达的整数毫秒。
+- 创建时间仅展示，不施加更新时间窗口，也不新增 `createdAt <= updatedAt` 等跨字段比较。筛选与排序仍仅使用原有更新时间规则。
 - API 不输出正文、工具参数、结果内容或 Cookie。
 - Response schema 应显式限定字段；API 错误使用现有 `{message, code?}` 形状。
+- API 与 CLI 须同步升级；包含条目的新旧版本响应因字段缺失或多余可能被严格校验拒绝（CLI退出6），不提供兼容模式。
 
 ### 状态和计数语义
 
@@ -143,6 +147,7 @@ Session ID：session-example
 标题：示例会话
 类型：primary
 状态：idle
+创建时间：2025-12-31T10:00:00.000Z
 最近更新时间：2026-01-01T12:00:00.000Z
 用户消息累计数：2
 已完成助手消息累计数：8
@@ -155,7 +160,7 @@ Session ID：session-example
 - 标题中的换行、制表和控制字符转为可见转义序列，不让标题破坏模板；空标题显示 `（空标题）`，但 API 原值不变。
 - 零匹配仍输出筛选信息、实际时间范围、`匹配总数：0`，退出 0。
 - 正常完整输出以 `查询结束：已输出 N 个 Session。` 结束，N与total一致；零匹配也有结束标记。标记只便于识别前缀截断，不提高外层工具硬上限。
-- CLI校验响应筛选回显与本次请求一致、窗口宽度等于请求秒数、total等于items长度、ID不重复、item满足回显筛选及时间边界；异常返回6，不部分输出。
+- CLI校验响应筛选回显与本次请求一致、窗口宽度等于请求秒数、total等于items长度、ID不重复、item满足回显筛选及更新时间边界，并校验创建时间数值合法；创建时间不需落入窗口。异常返回6，不部分输出。
 - 成功结果写 stdout。所有参数、认证、缓存、网络、API/格式错误写 stderr，stdout 不输出伪成功结果。
 - API 结果、续签处理全部成功后才开始渲染 stdout；校验错误不输出部分列表。
 - 现有 bash/artifact 对最终工具结果的限制仍有效，详见技术文档；CLI 不因此截断服务端查询。

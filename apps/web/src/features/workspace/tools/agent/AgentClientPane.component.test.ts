@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import type { AxiosResponse, InternalAxiosRequestConfig } from "axios";
 import type { AgentMessage, AgentMessageSessionRunState } from "@agent-workbench/shared";
 import DOMPurify from "dompurify";
@@ -9,7 +9,7 @@ import zhCN from "@/shared/i18n/locales/zh-CN";
 import enUS from "@/shared/i18n/locales/en-US";
 import { apiClient } from "@/shared/api/api";
 
-const [{ mount }, component, markdownComponent, { createI18n }, { nextTick, reactive }, { agentSessionStatusStoreKey }, { message, Modal }, { replaceAgentTimelineSnapshot }] = await Promise.all([
+const [{ mount }, component, markdownComponent, { createI18n }, { nextTick, reactive }, { agentSessionStatusStoreKey }, { message, notification, Modal }, { replaceAgentTimelineSnapshot }] = await Promise.all([
   import("@vue/test-utils"),
   import("./AgentClientPane.vue"),
   import("./AssistantMarkdownMessage.vue"),
@@ -21,6 +21,19 @@ const [{ mount }, component, markdownComponent, { createI18n }, { nextTick, reac
 ]);
 
 const AgentClientPane = component.default.__vccOpts ?? component.default;
+
+async function clearComponentNotifications() {
+  // Let a queued notice initialize before destroying the singleton instance.
+  await nextTick();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  message.destroy();
+  notification.destroy();
+  // notification.destroy() schedules unmounts but does not return a Promise.
+  await nextTick();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+afterEach(clearComponentNotifications);
 
 const baseRunState = (overrides: Partial<AgentMessageSessionRunState> = {}): AgentMessageSessionRunState => reactive({
   workspaceId: "ws-a",
@@ -303,6 +316,8 @@ function setScrollMetrics(el: HTMLElement, scrollHeight: number, clientHeight: n
 async function waitForScrollRestore() {
   await nextTick();
   await new Promise((resolve) => setTimeout(resolve, 0));
+  // Restoration uses the window RAF queue, not the Node timer queue.
+  await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
   await nextTick();
 }
 
@@ -1674,3 +1689,85 @@ test("真实pane Fork在请求发起时捕获激活意图，较新用户意图�
     assert.deepEqual(wrapper.emitted("forked"), [[forkRecord, false]]);
   } finally { wrapper.unmount(); }
 });
+
+for (const pending of [false, true]) {
+  test(`通知资源清理：${pending ? "微任务内尚未初始化" : "已显示"}的真实 message/notification 销毁 DOM 和长计时器`, async (t) => {
+    const messageText = "cleanup-regression-message";
+    const notificationText = "cleanup-regression-notification";
+    const insertedText: string[] = [];
+    const observe = (records: MutationRecord[]) => {
+      for (const record of records) {
+        for (const node of Array.from(record.addedNodes)) insertedText.push(node.textContent ?? "");
+      }
+    };
+    const observer = new window.MutationObserver(observe);
+    observer.observe(document.body, { childList: true, subtree: true });
+    // Spies call the real timers: these 30s notices must be explicitly destroyed.
+    const clearNoticeTimer = globalThis.clearTimeout.bind(globalThis);
+    const timers = t.mock.method(globalThis, "setTimeout");
+    const cleared = t.mock.method(globalThis, "clearTimeout");
+    const openNotices = () => {
+      message.open({ content: messageText, duration: 30 });
+      notification.open({ message: notificationText, description: "real notice", duration: 30 });
+    };
+    let testFailure: unknown;
+    let hasTestFailure = false;
+    try {
+      if (pending) {
+        queueMicrotask(openNotices);
+      } else {
+        openNotices();
+        await nextTick();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.ok(document.querySelector(".ant-message-notice"));
+        assert.ok(document.querySelector(".ant-notification-notice"));
+      }
+
+      await clearComponentNotifications();
+      observe(observer.takeRecords());
+      assert.ok(insertedText.some((text) => text.includes(messageText)), "real message content was inserted");
+      assert.ok(insertedText.some((text) => text.includes(notificationText)), "real notification content was inserted");
+      const longTimers = timers.mock.calls.filter((call) => call.arguments[1] === 30_000);
+      assert.equal(longTimers.length, 2, "both notices initialized their real long-duration close timers");
+      for (const call of longTimers) {
+        assert.ok(cleared.mock.calls.some((cancel) => cancel.arguments[0] === call.result), "destroy cancelled the notice timer");
+      }
+      assert.equal(document.querySelector(".ant-message"), null);
+      assert.equal(document.querySelector(".ant-notification"), null);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(timers.mock.calls.filter((call) => call.arguments[1] === 30_000).length, 2, "no late notice recreated a timer");
+    } catch (error) {
+      testFailure = error;
+      hasTestFailure = true;
+      throw error;
+    } finally {
+      try {
+        await nextTick();
+        await clearComponentNotifications();
+      } catch (cleanupError) {
+        if (hasTestFailure) {
+          throw new AggregateError([testFailure, cleanupError], "Notice assertion and cleanup both failed", { cause: testFailure });
+        }
+        throw cleanupError;
+      } finally {
+        try {
+          // Independent safety net only after the cancellation assertions above.
+          // Never leave this test's 30s handles alive if the helper regresses.
+          for (const call of timers.mock.calls) {
+            if (call.arguments[1] === 30_000) clearNoticeTimer(call.result);
+          }
+        } finally {
+          try {
+            observer.disconnect();
+          } finally {
+            try {
+              timers.mock.restore();
+            } finally {
+              cleared.mock.restore();
+            }
+          }
+        }
+      }
+    }
+  });
+}
