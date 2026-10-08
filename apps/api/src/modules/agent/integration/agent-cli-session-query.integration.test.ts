@@ -58,10 +58,13 @@ function privateOutput(result: { stdout: string; stderr: string }, secrets: stri
 
 test("production CLI initializes auth-off API and returns all records and native counts in UTC", async (t) => {
   const f = await fixture(t, null);
+  const createdAt = Date.now() - 2 * 3600_000;
+  const createdIso = new Date(createdAt).toISOString();
   for (let i = 0; i < 165; i++) {
     createMessageSession(f.db, { id: `cli-session-${String(i).padStart(3, "0")}`, workspaceId: f.workspaceId,
-      title: i === 0 ? "" : "通用会话", kind: i % 2 === 0 ? "primary" : "subtask", createdAt: Date.now() - 1000 });
+      title: i === 0 ? "" : "通用会话", kind: i % 2 === 0 ? "primary" : "subtask", createdAt });
   }
+  f.db.prepare("update agent_session set updated_at = ? where workspace_id = ?").run(Date.now() - 1000, f.workspaceId);
   for (const [id, type] of [["native-user", "user"], ["native-assistant", "assistant"], ["summary", "compaction"]]) {
     f.db.prepare(`insert into agent_message
       (id, workspace_id, depth, type, status, origin_session_id, updated_revision, created_at, updated_at)
@@ -79,6 +82,8 @@ test("production CLI initializes auth-off API and returns all records and native
   assert.match(result.stdout, /匹配总数：165/);
   assert.match(result.stdout, /标题：（空标题）/);
   assert.match(result.stdout, /用户消息累计数：1\n已完成助手消息累计数：1/);
+  assert.equal(result.stdout.split(`创建时间：${createdIso}\n`).length - 1, 165);
+  assert.ok(result.stdout.includes(`创建时间：${createdIso}\n最近更新时间：`));
   assert.match(result.stdout, /最近更新时间：[^\n]+Z\n/);
   assert.match(result.stdout, /查询结束：已输出 165 个 Session。\n$/);
   assert.equal(result.stdout.length > 8_000 && result.stdout.length < 200_000, true);

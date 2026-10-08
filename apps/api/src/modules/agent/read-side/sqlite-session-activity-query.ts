@@ -13,7 +13,7 @@ const CANDIDATE_CONDITION = `s.workspace_id = @workspaceId
   and (@kind = 'all' or s.kind = @kind)`;
 const invalidState = () => new HttpError(500, "invalid session query state", AGENT_SESSION_QUERY_ERROR_CODES.stateInvalid);
 
-type CandidateRow = { id: unknown; title: unknown; kind: unknown; status: unknown; updatedAt: unknown };
+type CandidateRow = { id: unknown; title: unknown; kind: unknown; status: unknown; createdAt: unknown; updatedAt: unknown };
 type CountRow = { sessionId: string; userMessageCount: unknown; completedAssistantMessageCount: unknown };
 
 function safeInteger(value: unknown): number {
@@ -47,7 +47,8 @@ export class SqliteSessionActivityQuery {
       const updatedTo = timestamp(this.now());
       const updatedFrom = timestamp(updatedTo - input.updatedWithinSeconds * 1000);
       const params = { ...input, updatedFrom, updatedTo };
-      const rows = this.db.prepare(`select s.id, s.title, s.kind, s.updated_at as updatedAt, r.status
+      const rows = this.db.prepare(`select s.id, s.title, s.kind,
+          s.created_at as createdAt, s.updated_at as updatedAt, r.status
         from agent_session s left join session_run_state r
           on r.workspace_id = s.workspace_id and r.session_id = s.id
         where ${CANDIDATE_CONDITION}
@@ -60,7 +61,8 @@ export class SqliteSessionActivityQuery {
           || (row.status !== "idle" && row.status !== "running")) throw invalidState();
         return {
           id: row.id, title: row.title, kind: row.kind, status: row.status,
-          updatedAt: timestamp(row.updatedAt), userMessageCount: 0, completedAssistantMessageCount: 0
+          createdAt: timestamp(row.createdAt), updatedAt: timestamp(row.updatedAt),
+          userMessageCount: 0, completedAssistantMessageCount: 0
         };
       });
       const items = candidates.filter((item) => input.status === "all" || item.status === input.status);

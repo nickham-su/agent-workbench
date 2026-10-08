@@ -21,6 +21,7 @@ export function renderSessionList(response: AgentSessionQueryResponse, duration:
       `标题：${item.title.length === 0 ? "（空标题）" : escapeDisplayText(item.title)}`,
       `类型：${item.kind}`,
       `状态：${item.status}`,
+      `创建时间：${new Date(item.createdAt).toISOString()}`,
       `最近更新时间：${new Date(item.updatedAt).toISOString()}`,
       `用户消息累计数：${item.userMessageCount}`,
       `已完成助手消息累计数：${item.completedAssistantMessageCount}`,

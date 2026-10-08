@@ -122,6 +122,29 @@ test("activity HTTP returns all 165 records, current state and counts independen
   assert.ok(oldItems.every((item) => !["Z", "a", "é", "中", "😀", "session-001"].includes(item.id)));
 });
 
+test("activity HTTP returns native creation times outside the update window, including a fork's own time", async (t) => {
+  const f = await createFixture(t);
+  f.seedSession("creation-source");
+  f.seedSession("creation-fork", "subtask");
+  const sourceCreatedAt = Date.now() - 2 * 3600_000;
+  const forkCreatedAt = sourceCreatedAt + 1000;
+  const updatedAt = Date.now() - 1000;
+  const update = f.db.prepare("update agent_session set created_at = ?, updated_at = ? where id = ?");
+  update.run(sourceCreatedAt, updatedAt, "creation-source");
+  update.run(forkCreatedAt, updatedAt, "creation-fork");
+  f.db.prepare("update agent_session set forked_from_session_id = 'creation-source' where id = 'creation-fork'").run();
+  const result = await body(await fetch(f.queryUrl));
+  assert.equal(result.total, 2);
+  const source = result.items.find((item) => item.id === "creation-source")!;
+  const fork = result.items.find((item) => item.id === "creation-fork")!;
+  assert.equal(source.createdAt, sourceCreatedAt);
+  assert.equal(fork.createdAt, forkCreatedAt);
+  assert.equal(source.updatedAt, updatedAt);
+  assert.equal(fork.updatedAt, updatedAt);
+  assert.ok(result.items.every((item) => item.createdAt < result.updatedFrom));
+  assert.ok(result.items.every((item) => item.userMessageCount === 0 && item.completedAssistantMessageCount === 0));
+});
+
 test("activity HTTP reports Workspace/state/numeric errors without hiding corrupt candidates", async (t) => {
   const f = await createFixture(t);
   const missingWorkspace = await fetch(f.queryUrl.replace(f.workspaceId, "unknown-workspace"));
@@ -150,6 +173,15 @@ test("activity HTTP reports Workspace/state/numeric errors without hiding corrup
   const fractional = await fetch(f.queryUrl);
   assert.equal(fractional.status, 500);
   assert.equal((await fractional.json()).code, "AGENT_SESSION_QUERY_STATE_INVALID");
+  f.db.prepare("update agent_session set updated_at = ? where id = 'missing-state'").run(Date.now() - 1000);
+  for (const createdAt of [1.5, "invalid", 8_640_000_000_000_001]) {
+    f.db.prepare("update agent_session set created_at = ? where id = 'missing-state'").run(createdAt);
+    for (const status of ["all", "idle", "running"]) {
+      const response = await fetch(`${f.queryUrl}&status=${status}`);
+      assert.equal(response.status, 500);
+      assert.equal((await response.json()).code, "AGENT_SESSION_QUERY_STATE_INVALID");
+    }
+  }
 });
 
 test("activity HTTP uses only the existing public Cookie auth, not internal token headers", async (t) => {

@@ -51,6 +51,8 @@ test("built CLI initializes auth-off connection then returns every 165 Session a
   assert.match(result.stdout, /标题：任意名称\\n不能形成新字段\\t\\u001b\[31m/);
   assert.match(result.stdout, /用户消息累计数：0\n已完成助手消息累计数：0/);
   assert.match(result.stdout, /类型：subtask\n状态：running/);
+  assert.equal((result.stdout.match(/^创建时间：2025-12-31T00:00:00.000Z$/gm) ?? []).length, 165);
+  assert.match(result.stdout, /创建时间：2025-12-31T00:00:00.000Z\n最近更新时间：2026-01-02T00:00:00.000Z/);
   assert.match(result.stdout, /查询结束：已输出 165 个 Session。\n$/);
   assert.ok(result.stdout.length > 8000);
   assert.equal(await fs.readFile(store.filePath, "utf8"), original);
@@ -104,9 +106,12 @@ test("built CLI response failure matrix preserves renewal precedence and empty s
   t.after(server.close);
   const store = new FileConfigStore(home);
   const original = { version: 1 as const, apiOrigin: server.origin, cookie: { name: "awb_session" as const, value: cookieValue, secure: false } };
+  const missingCreationTime = queryResponse();
+  delete (missingCreationTime.items[0] as unknown as Record<string, unknown>).createdAt;
   const cases = [
     { status: 200, body: "private-response-body", cookies: [renewedHeader], expected: 6, renewed: true, category: "JSON" },
     { status: 200, body: JSON.stringify({ invalid: true }), cookies: [renewedHeader], expected: 6, renewed: true, category: "响应结构" },
+    { status: 200, body: JSON.stringify(missingCreationTime), cookies: [renewedHeader], expected: 6, renewed: true, category: "条目字段" },
     { status: 200, body: "private-response-body", cookies: [`${renewedHeader}; Domain=localhost`], expected: 6, renewed: false, category: "Cookie" },
     { status: 200, body: "private-response-body", cookies: [renewedHeader, renewedHeader], expected: 6, renewed: false, category: "Cookie" },
     { status: 200, body: JSON.stringify(queryResponse()), cookies: [`${renewedHeader}; Secure`], expected: 6, renewed: false, category: "HTTPS" },

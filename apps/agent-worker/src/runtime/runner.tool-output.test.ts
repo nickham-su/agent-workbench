@@ -1077,7 +1077,8 @@ test("multiline query output survives preview truncation and can be reconstructe
   await withTempWorkspace(async (workspacePath) => {
     const text = Array.from({ length: 165 }, (_, i) => [
       `Session ID：session-${i}`, "标题：通用会话", "类型：primary", "状态：idle",
-      "最近更新时间：2026-01-01T00:00:00.000Z", "用户消息累计数：0", "已完成助手消息累计数：0", ""
+      "创建时间：2025-12-31T00:00:00.000Z", "最近更新时间：2026-01-01T00:00:00.000Z",
+      "用户消息累计数：0", "已完成助手消息累计数：0", ""
     ].join("\n")).join("\n") + "\n查询结束：已输出 165 个 Session。\n";
     assert.equal(text.length > 8_000 && text.length < 200_000, true);
     assert.equal(Buffer.byteLength(text, "utf8") < 512 * 1024, true);

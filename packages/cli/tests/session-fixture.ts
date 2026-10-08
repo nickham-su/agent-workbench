@@ -14,7 +14,8 @@ export function queryResponse(query: SessionListQuery = defaultQuery, total = 1)
     items: Array.from({ length: total }, (_, index) => ({
       id: `session-${String(total - index).padStart(4, "0")}`,
       title: "示例会话", kind: query.kind === "subtask" ? "subtask" : "primary",
-      status: query.status === "running" ? "running" : "idle", updatedAt: updatedTo,
+      status: query.status === "running" ? "running" : "idle",
+      createdAt: Date.UTC(2025, 11, 31), updatedAt: updatedTo,
       userMessageCount: 2, completedAssistantMessageCount: 8
     }))
   };
