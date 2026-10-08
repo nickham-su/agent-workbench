@@ -77,15 +77,39 @@ test("API config source persists stable versions across restart, same-ms updates
 test("concurrent API allocations serialize distinct source content without lock files", async (t) => {
   const { dataDir } = await fixture();
   t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const firstInput: Parameters<typeof allocateAnalyticsConfigSource>[1] = { enabledFactDomains: [...domains], slots: workerSlots };
+  const secondInput: Parameters<typeof allocateAnalyticsConfigSource>[1] = { enabledFactDomains: ["execution", "model"], slots: workerSlots.slice(1) };
   const [first, second] = await Promise.all([
-    allocateAnalyticsConfigSource(dataDir, { enabledFactDomains: [...domains], slots: workerSlots }, 100),
-    allocateAnalyticsConfigSource(dataDir, { enabledFactDomains: ["execution", "model"], slots: workerSlots.slice(1) }, 100),
+    allocateAnalyticsConfigSource(dataDir, firstInput, 100),
+    allocateAnalyticsConfigSource(dataDir, secondInput, 100),
   ]);
-  assert.deepEqual(first && { version: first.sourceConfigVersion, effectiveAt: first.effectiveAt }, { version: 1, effectiveAt: 100 });
-  assert.deepEqual(second && { version: second.sourceConfigVersion, effectiveAt: second.effectiveAt }, { version: 2, effectiveAt: 100 });
+  assert.ok(first);
+  assert.ok(second);
+  // Promise.all preserves result mapping, not the order of entering the allocation lock.
+  assert.deepEqual([first.sourceConfigVersion, second.sourceConfigVersion].sort((left, right) => left - right), [1, 2]);
+  assert.equal(first.effectiveAt, 100);
+  assert.equal(second.effectiveAt, 100);
+  assert.deepEqual(first.enabledFactDomains, firstInput.enabledFactDomains);
+  assert.deepEqual(first.slots, firstInput.slots);
+  assert.deepEqual(second.enabledFactDomains, secondInput.enabledFactDomains);
+  assert.deepEqual(second.slots, secondInput.slots);
   const persisted = await readAnalyticsConfigSourceForTest(dataDir);
-  assert.deepEqual(persisted && { sourceVersion: persisted.sourceVersion, effectiveAt: persisted.effectiveAt }, { sourceVersion: 2, effectiveAt: 100 });
-  assert.match(persisted?.canonicalHash ?? "", /^[0-9a-f]{64}$/);
+  assert.ok(persisted);
+  assert.deepEqual({ sourceVersion: persisted.sourceVersion, effectiveAt: persisted.effectiveAt }, { sourceVersion: 2, effectiveAt: 100 });
+  const finalInput = first.sourceConfigVersion === 2 ? firstInput : secondInput;
+  const expectedContent = JSON.stringify({
+    enabledFactDomains: [...finalInput.enabledFactDomains].sort(),
+    slots: [...finalInput.slots]
+      .map((slot) => ({
+        domain: slot.domain,
+        producerNamespace: slot.producerNamespace,
+        producerId: slot.producerId,
+      }))
+      .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+  });
+  assert.equal(persisted.canonicalContent, expectedContent);
+  assert.match(persisted.canonicalHash, /^[0-9a-f]{64}$/);
+  assert.equal(persisted.canonicalHash, createHash("sha256").update(expectedContent).digest("hex"));
   await assert.rejects(() => access(`${analyticsConfigSourcePath(dataDir)}.lock`));
 });
 
